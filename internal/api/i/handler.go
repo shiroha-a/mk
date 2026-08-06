@@ -980,22 +980,25 @@ func (h *Handler) me(c echo.Context, allowSecrets bool) error {
 // 各フィールドはポインタで「未指定なら変更しない」セマンティクスを持つ。
 // 文字列のnullable化はrawMessageでなくJSONで対応するため省略している。
 type UpdateRequest struct {
-	Name              *string `json:"name"`
-	Description       *string `json:"description"`
-	Location          *string `json:"location"`
-	Birthday          *string `json:"birthday"`
-	Lang              *string `json:"lang"`
-	FollowedMessage   *string `json:"followedMessage"`
-	PublicReactions   *bool   `json:"publicReactions"`
-	IsLocked          *bool   `json:"isLocked"`
-	IsBot             *bool   `json:"isBot"`
-	IsCat             *bool   `json:"isCat"`
-	IsExplorable      *bool   `json:"isExplorable"`
-	HideOnlineStatus  *bool   `json:"hideOnlineStatus"`
-	AlwaysMarkNsfw    *bool   `json:"alwaysMarkNsfw"`
-	AutoSensitive     *bool   `json:"autoSensitive"`
-	NoCrawle          *bool   `json:"noCrawle"`
-	PreventAiLearning *bool   `json:"preventAiLearning"`
+	// Name / Birthday は「キー省略 = 不変」「null = クリア」「文字列 = 設定」を
+	// 区別する必要があるので RawMessage で受ける (*string だと省略と null が
+	// どちらも nil になる)。
+	Name              json.RawMessage `json:"name"`
+	Description       *string         `json:"description"`
+	Location          *string         `json:"location"`
+	Birthday          json.RawMessage `json:"birthday"`
+	Lang              *string         `json:"lang"`
+	FollowedMessage   *string         `json:"followedMessage"`
+	PublicReactions   *bool           `json:"publicReactions"`
+	IsLocked          *bool           `json:"isLocked"`
+	IsBot             *bool           `json:"isBot"`
+	IsCat             *bool           `json:"isCat"`
+	IsExplorable      *bool           `json:"isExplorable"`
+	HideOnlineStatus  *bool           `json:"hideOnlineStatus"`
+	AlwaysMarkNsfw    *bool           `json:"alwaysMarkNsfw"`
+	AutoSensitive     *bool           `json:"autoSensitive"`
+	NoCrawle          *bool           `json:"noCrawle"`
+	PreventAiLearning *bool           `json:"preventAiLearning"`
 	// 以下 4 field は upstream Misskey TS i/update.ts:178-188 の paramDef に
 	// あり、profile の bool 設定として persist される。response 側は
 	// MeDetailed packer (#969) 経由で含まれていたが、UpdateRequest struct
@@ -1328,6 +1331,37 @@ func profileTextWithinLimit(s *string, max int) bool {
 	return utf8.RuneCountInString(*s) <= max
 }
 
+// jsWhitespace mirrors the code points JavaScript's String.prototype.trim
+// removes (WhiteSpace + LineTerminator + BOM)。Go の strings.TrimSpace は
+// Unicode White_Space しか見ないので \ufeff が落ちず、本家と結果がずれる。
+const jsWhitespace = "\u0009\u000a\u000b\u000c\u000d\u0020\u0085\u00a0\u1680" +
+	"\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a" +
+	"\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+// trimJSWhitespace trims the same set of characters as JavaScript's trim().
+func trimJSWhitespace(s string) string {
+	return strings.Trim(s, jsWhitespace)
+}
+
+// decodeNullableString maps the 3 JSON states of a nullable string field onto
+// the core layer's `**string`. ok=false は「キー省略 = 不変」、返り値 nil は
+// 「null = クリア」、非 nil は「設定」。
+//
+// *string で受けると省略と null がどちらも nil になり、null クリアが効かない。
+func decodeNullableString(raw json.RawMessage) (*string, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	if string(raw) == "null" {
+		return nil, true
+	}
+	var v string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, false
+	}
+	return &v, true
+}
+
 // driveIDUpdate decodes an avatarId / bannerId field into the core layer's
 // convention. ok=false は「キー省略 = 不変」、value="" は「null = CLEAR」、
 // それ以外は SET したい drive file ID。文字列以外の値は不変として扱う。
@@ -1357,13 +1391,15 @@ func (h *Handler) Update(c echo.Context) error {
 	// name≤50 / description≤1500 / location≤50 / followedMessage≤256、
 	// birthday は ^YYYY-MM-DD$、lang は langmap enum。空文字 ("") は mk-go の
 	// クリア要求として通すため検証は非空値のみに適用し、違反は INVALID_PARAM(400)。
-	if !profileTextWithinLimit(req.Name, 50) ||
+	nameValue, _ := decodeNullableString(req.Name)
+	birthdayValue, _ := decodeNullableString(req.Birthday)
+	if !profileTextWithinLimit(nameValue, 50) ||
 		!profileTextWithinLimit(req.Description, 1500) ||
 		!profileTextWithinLimit(req.Location, 50) ||
 		!profileTextWithinLimit(req.FollowedMessage, 256) {
 		return apierr.JSONInvalidParam(c)
 	}
-	if req.Birthday != nil && *req.Birthday != "" && !birthdayPattern.MatchString(*req.Birthday) {
+	if birthdayValue != nil && *birthdayValue != "" && !birthdayPattern.MatchString(*birthdayValue) {
 		return apierr.JSONInvalidParam(c)
 	}
 	if req.Lang != nil && *req.Lang != "" && !langmap.IsValid(*req.Lang) {
@@ -1404,18 +1440,28 @@ func (h *Handler) Update(c echo.Context) error {
 		InjectFeaturedNote:       req.InjectFeaturedNote,
 		ReceiveAnnouncementEmail: req.ReceiveAnnouncementEmail,
 	}
-	if req.Name != nil {
+	if name, ok := decodeNullableString(req.Name); ok {
+		// upstream update.ts:280-287 と同じ: null はそのまま null、文字列は
+		// trim して空になったら null にする。
+		if name != nil {
+			trimmed := trimJSWhitespace(*name)
+			if trimmed == "" {
+				name = nil
+			} else {
+				name = &trimmed
+			}
+		}
 		// 表示名の禁止ワードチェック。meta 未注入 / 未設定時は素通りする。
-		// 本家 Misskey と同様に部分一致 case-insensitive で、空文字 ("") の
-		// クリアリクエストは検査対象外 (ユーザー体験上必要)。
-		if h.metaRepo != nil && *req.Name != "" {
-			if m, err := h.metaRepo.Fetch(); err == nil && containsProhibitedWord(*req.Name, m.ProhibitedWordsForNameOfUser) {
+		// 本家 Misskey と同様に部分一致 case-insensitive で、クリア
+		// (null) は検査対象外 (ユーザー体験上必要)。
+		if h.metaRepo != nil && name != nil {
+			if m, err := h.metaRepo.Fetch(); err == nil && containsProhibitedWord(*name, m.ProhibitedWordsForNameOfUser) {
 				// upstream update.ts: code=YOUR_NAME_CONTAINS_PROHIBITED_WORDS /
 				// id=0b3f9f6a-2f4d-4b1f-9fb4-49d3a2fd7191 / httpStatusCode=422 (#1546)。
 				return c.JSON(http.StatusUnprocessableEntity, apierr.Error("YOUR_NAME_CONTAINS_PROHIBITED_WORDS", "Your new name contains prohibited words.", "0b3f9f6a-2f4d-4b1f-9fb4-49d3a2fd7191"))
 			}
 		}
-		in.Name = &req.Name
+		in.Name = &name
 	}
 	if req.Description != nil {
 		in.Description = &req.Description
@@ -1423,8 +1469,8 @@ func (h *Handler) Update(c echo.Context) error {
 	if req.Location != nil {
 		in.Location = &req.Location
 	}
-	if req.Birthday != nil {
-		in.Birthday = &req.Birthday
+	if birthday, ok := decodeNullableString(req.Birthday); ok {
+		in.Birthday = &birthday
 	}
 	if req.Lang != nil {
 		in.Lang = &req.Lang
