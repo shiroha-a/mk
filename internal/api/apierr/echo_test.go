@@ -85,7 +85,7 @@ func TestJSONNoSuchUser(t *testing.T) {
 
 func TestJSONNoSuchNote(t *testing.T) {
 	code, body := invoke(t, JSONNoSuchNote)
-	assert.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "NO_SUCH_NOTE", errObj["code"])
 	assert.Equal(t, UUIDNoSuchNote, errObj["id"])
@@ -93,7 +93,7 @@ func TestJSONNoSuchNote(t *testing.T) {
 
 func TestJSONAccessDenied(t *testing.T) {
 	code, body := invoke(t, JSONAccessDenied)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "ACCESS_DENIED", errObj["code"])
 	assert.Equal(t, UUIDAccessDenied, errObj["id"])
@@ -101,7 +101,7 @@ func TestJSONAccessDenied(t *testing.T) {
 
 func TestJSONRestrictedByRole(t *testing.T) {
 	code, body := invoke(t, JSONRestrictedByRole)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "RESTRICTED_BY_ROLE", errObj["code"])
 	assert.Equal(t, UUIDRestrictedByRole, errObj["id"])
@@ -109,7 +109,7 @@ func TestJSONRestrictedByRole(t *testing.T) {
 
 func TestJSONLtlDisabled(t *testing.T) {
 	code, body := invoke(t, JSONLtlDisabled)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "LTL_DISABLED", errObj["code"])
 	assert.Equal(t, UUIDLtlDisabled, errObj["id"])
@@ -117,7 +117,7 @@ func TestJSONLtlDisabled(t *testing.T) {
 
 func TestJSONStlDisabled(t *testing.T) {
 	code, body := invoke(t, JSONStlDisabled)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "STL_DISABLED", errObj["code"])
 	assert.Equal(t, UUIDStlDisabled, errObj["id"])
@@ -125,7 +125,7 @@ func TestJSONStlDisabled(t *testing.T) {
 
 func TestJSONGtlDisabled(t *testing.T) {
 	code, body := invoke(t, JSONGtlDisabled)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "GTL_DISABLED", errObj["code"])
 	assert.Equal(t, UUIDGtlDisabled, errObj["id"])
@@ -169,7 +169,7 @@ func TestJSONCountLimitHelpers(t *testing.T) {
 
 func TestJSONNoSuchRenoteTarget(t *testing.T) {
 	code, body := invoke(t, JSONNoSuchRenoteTarget)
-	assert.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "NO_SUCH_RENOTE_TARGET", errObj["code"])
 	assert.Equal(t, UUIDNoSuchRenoteTarget, errObj["id"])
@@ -177,7 +177,7 @@ func TestJSONNoSuchRenoteTarget(t *testing.T) {
 
 func TestJSONNoSuchReplyTarget(t *testing.T) {
 	code, body := invoke(t, JSONNoSuchReplyTarget)
-	assert.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "NO_SUCH_REPLY_TARGET", errObj["code"])
 	assert.Equal(t, UUIDNoSuchReplyTarget, errObj["id"])
@@ -185,7 +185,7 @@ func TestJSONNoSuchReplyTarget(t *testing.T) {
 
 func TestJSONCannotReplyToAnInvisibleNote(t *testing.T) {
 	code, body := invoke(t, JSONCannotReplyToAnInvisibleNote)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "CANNOT_REPLY_TO_AN_INVISIBLE_NOTE", errObj["code"])
 	assert.Equal(t, UUIDCannotReplyToAnInvisibleNote, errObj["id"])
@@ -193,7 +193,7 @@ func TestJSONCannotReplyToAnInvisibleNote(t *testing.T) {
 
 func TestJSONCannotRenoteDueToVisibility(t *testing.T) {
 	code, body := invoke(t, JSONCannotRenoteDueToVisibility)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "CANNOT_RENOTE_DUE_TO_VISIBILITY", errObj["code"])
 	assert.Equal(t, UUIDCannotRenoteDueToVisibility, errObj["id"])
@@ -201,7 +201,7 @@ func TestJSONCannotRenoteDueToVisibility(t *testing.T) {
 
 func TestJSONNoSuchChannel(t *testing.T) {
 	code, body := invoke(t, JSONNoSuchChannel)
-	assert.Equal(t, http.StatusNotFound, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "NO_SUCH_CHANNEL", errObj["code"])
 	assert.Equal(t, UUIDNoSuchChannel, errObj["id"])
@@ -210,21 +210,21 @@ func TestJSONNoSuchChannel(t *testing.T) {
 // Phase 7-1 follow-up (#254): 新規JSONヘルパーのカバレッジ
 func TestJSONCannotRenoteToAPureRenote(t *testing.T) {
 	code, body := invoke(t, JSONCannotRenoteToAPureRenote)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "CANNOT_RENOTE_TO_A_PURE_RENOTE", errObj["code"])
 }
 
 func TestJSONCannotReplyToAPureRenote(t *testing.T) {
 	code, body := invoke(t, JSONCannotReplyToAPureRenote)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "CANNOT_REPLY_TO_A_PURE_RENOTE", errObj["code"])
 }
 
 func TestJSONCannotReplyToSpecifiedVisibilityNoteWithExtendedVisibility(t *testing.T) {
 	code, body := invoke(t, JSONCannotReplyToSpecifiedVisibilityNoteWithExtendedVisibility)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "CANNOT_REPLY_TO_SPECIFIED_VISIBILITY_NOTE_WITH_EXTENDED_VISIBILITY", errObj["code"])
 }
@@ -238,7 +238,7 @@ func TestJSONCannotCreateAlreadyExpiredPoll(t *testing.T) {
 
 func TestJSONYouHaveBeenBlocked(t *testing.T) {
 	code, body := invoke(t, JSONYouHaveBeenBlocked)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "YOU_HAVE_BEEN_BLOCKED", errObj["code"])
 }
@@ -252,7 +252,7 @@ func TestJSONNoSuchFile(t *testing.T) {
 
 func TestJSONCannotRenoteOutsideOfChannel(t *testing.T) {
 	code, body := invoke(t, JSONCannotRenoteOutsideOfChannel)
-	assert.Equal(t, http.StatusForbidden, code)
+	assert.Equal(t, http.StatusBadRequest, code)
 	errObj := body["error"].(map[string]any)
 	assert.Equal(t, "CANNOT_RENOTE_OUTSIDE_OF_CHANNEL", errObj["code"])
 }

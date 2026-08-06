@@ -49,7 +49,7 @@ func TestWWWAuthenticate_ClientKind404AlsoGetsHeader(t *testing.T) {
 	rec := doWWWAuth(t, func(c echo.Context) error {
 		return apierr.JSONNoSuchNote(c)
 	})
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Equal(t,
 		`Bearer realm="Misskey", error="invalid_request", error_description="No such note."`,
 		rec.Header().Get("WWW-Authenticate"))

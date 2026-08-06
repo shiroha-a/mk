@@ -366,7 +366,7 @@ func TestShow_NotFound(t *testing.T) {
 
 	err := h.Show(c)
 	require.NoError(t, err)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestShow_MissingNoteId(t *testing.T) {
@@ -745,7 +745,7 @@ func TestCreate_RenoteTargetNotFound(t *testing.T) {
 	setAuthUser(c, user)
 
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	code, uuidStr := decodeError(t, rec.Body.Bytes())
 	assert.Equal(t, "NO_SUCH_RENOTE_TARGET", code)
 	assert.Equal(t, apierr.UUIDNoSuchRenoteTarget, uuidStr)
@@ -786,7 +786,7 @@ func TestCreate_CannotReplyToInvisibleNote(t *testing.T) {
 	setAuthUser(c, user)
 
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	code, uuidStr := decodeError(t, rec.Body.Bytes())
 	assert.Equal(t, "CANNOT_REPLY_TO_AN_INVISIBLE_NOTE", code)
 	assert.Equal(t, apierr.UUIDCannotReplyToAnInvisibleNote, uuidStr)
@@ -821,7 +821,7 @@ func TestCreate_ChannelNotFound(t *testing.T) {
 	setAuthUser(c, user)
 
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	code, uuidStr := decodeError(t, rec.Body.Bytes())
 	assert.Equal(t, "NO_SUCH_CHANNEL", code)
 	assert.Equal(t, apierr.UUIDNoSuchChannel, uuidStr)

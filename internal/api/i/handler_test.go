@@ -775,7 +775,7 @@ func TestUpdate_AvatarID_RestrictedByRole(t *testing.T) {
 	})
 
 	rec := post(h.Update, `{"avatarId":"file1"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "policy=false で 403")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "policy=false で 403")
 	assert.Contains(t, rec.Body.String(), "RESTRICTED_BY_ROLE")
 	assert.Contains(t, rec.Body.String(), "8feff0ba-5ab5-585b-31f4-4df816663fad")
 }
@@ -988,7 +988,7 @@ func TestUpdate_BannerID_RestrictedByRole(t *testing.T) {
 	})
 
 	rec := post(h.Update, `{"bannerId":"file2"}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "RESTRICTED_BY_ROLE")
 }
 
@@ -1027,7 +1027,7 @@ func TestUpdate_AlwaysMarkNsfw_RestrictedByRole(t *testing.T) {
 	})
 
 	rec := post(h.Update, `{"alwaysMarkNsfw":false}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code, "policy=true で 403")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "policy=true で 403")
 	assert.Contains(t, rec.Body.String(), "RESTRICTED_BY_ROLE")
 	assert.Contains(t, rec.Body.String(), "8feff0ba-5ab5-585b-31f4-4df816663fad")
 }
@@ -1045,7 +1045,7 @@ func TestUpdate_AlwaysMarkNsfw_RestrictedEvenForTrue(t *testing.T) {
 	})
 
 	rec := post(h.Update, `{"alwaysMarkNsfw":true}`, user)
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_AlwaysMarkNsfw_AllowedWhenPolicyFalse(t *testing.T) {

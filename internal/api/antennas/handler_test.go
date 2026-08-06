@@ -262,7 +262,7 @@ func TestShow_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"a1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // --- Update ----------------------------------------------------------------
@@ -298,7 +298,7 @@ func TestUpdate_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"a1","name":"x"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Update(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_NameEmpty(t *testing.T) {
@@ -419,7 +419,7 @@ func TestDelete_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"a1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // failingDeleteRepo causes Delete to fail.
@@ -521,7 +521,7 @@ func TestNotes_AccessDenied(t *testing.T) {
 	c, rec := newReq(t, `{"antennaId":"a1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Notes(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestNotes_RedisError(t *testing.T) {

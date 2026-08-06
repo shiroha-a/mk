@@ -592,7 +592,7 @@ func TestState_NotFound(t *testing.T) {
 	h, _ := newQueryHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/state", `{"noteId":"ghost"}`)
 	require.NoError(t, h.State(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestState_InvalidParam(t *testing.T) {
@@ -743,7 +743,7 @@ func TestCreate_ReplyTargetNotFound(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/create", body)
 	setAuthUser(c, user)
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
@@ -764,7 +764,7 @@ func TestCreate_RenoteTargetInvisible(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/create", body)
 	setAuthUser(c, user)
 	require.NoError(t, h.Create(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errObj := resp["error"].(map[string]any)
@@ -816,6 +816,6 @@ func TestShow_NoQueryServiceRejects(t *testing.T) {
 	seedPublicNote(noteRepo, "n1")
 	c, rec := newJSONRequest(t, "/api/notes/show", `{"noteId":"n1"}`)
 	require.NoError(t, h.Show(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
 }

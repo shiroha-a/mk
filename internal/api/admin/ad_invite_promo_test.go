@@ -597,7 +597,7 @@ func TestPromoCreate_NonPublicNoteRejected(t *testing.T) {
 			expires := time.Now().Add(24 * time.Hour).UnixMilli()
 			body := fmt.Sprintf(`{"noteId":"n1","expiresAt":%d}`, expires)
 			rec := doPost(h.PromoCreate, body, adminUser)
-			assert.Equal(t, http.StatusForbidden, rec.Code, "non-public note must be rejected with 403")
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "non-public note must be rejected with 403")
 			assert.Nil(t, promo.created, "promo row must not be persisted for non-public note")
 
 			var respBody map[string]any

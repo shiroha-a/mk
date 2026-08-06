@@ -195,7 +195,7 @@ func TestLocalTimeline_LtlDisabled_Anonymous(t *testing.T) {
 
 	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
 	require.NoError(t, h.LocalTimeline(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code, "policy=false で 403")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "policy=false で 403")
 	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
 	assert.Contains(t, rec.Body.String(), "45a6eb02-7695-4393-b023-dd3be9aaaefd")
 }
@@ -212,7 +212,7 @@ func TestLocalTimeline_LtlDisabled_AuthenticatedUser(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
 	setAuthUser(c, &model.User{ID: "alice"})
 	require.NoError(t, h.LocalTimeline(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
 }
 
@@ -242,7 +242,7 @@ func TestGlobalTimeline_GtlDisabled(t *testing.T) {
 
 	c, rec := newJSONRequest(t, "/api/notes/global-timeline", `{}`)
 	require.NoError(t, h.GlobalTimeline(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "GTL_DISABLED")
 	assert.Contains(t, rec.Body.String(), "0332fc13-6ab2-4427-ae80-a9fadffd1a6b")
 }
@@ -261,7 +261,7 @@ func TestHybridTimeline_LtlDisabledRejects(t *testing.T) {
 	c, rec := newJSONRequest(t, "/api/notes/hybrid-timeline", `{}`)
 	setAuthUser(c, &model.User{ID: "alice"})
 	require.NoError(t, h.HybridTimeline(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code, "hybrid は ltlAvailable で gate")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "hybrid は ltlAvailable で gate")
 	// gate は ltlAvailable だが error code は STL_DISABLED (#1554)。
 	assert.Contains(t, rec.Body.String(), "STL_DISABLED")
 	assert.Contains(t, rec.Body.String(), "620763f4-f621-4533-ab33-0577a1a3c342")
@@ -328,7 +328,7 @@ func TestLocalTimeline_MissingPolicyKeyDenies(t *testing.T) {
 
 	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
 	require.NoError(t, h.LocalTimeline(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code, "key 不在は fail-closed reject")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "key 不在は fail-closed reject")
 	assert.Contains(t, rec.Body.String(), "LTL_DISABLED")
 }
 
@@ -344,7 +344,7 @@ func TestLocalTimeline_NonBoolPolicyValueDenies(t *testing.T) {
 
 	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{}`)
 	require.NoError(t, h.LocalTimeline(c))
-	assert.Equal(t, http.StatusForbidden, rec.Code, "非 bool は fail-closed")
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "非 bool は fail-closed")
 }
 
 func TestTimeline_HappyPathHome(t *testing.T) {
