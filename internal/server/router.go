@@ -2107,7 +2107,18 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/users/:id/followers", apHandler.Followers)           // #1877
 	s.echo.GET("/users/:id/following", apHandler.Following)           // #1877
 	s.echo.GET("/users/:id/outbox", apHandler.Outbox)                 // #1878
-	s.echo.GET("/notes/:id", apHandler.Note)
+	// permalink の SSR meta (#2345 の続き)。AP クライアントは Accept で
+	// 振り分けて従来どおり apHandler に渡す。
+	ssrMeta := newSSRMetaHandler(
+		s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability,
+		userRepo, noteRepo, pageRepo, clipRepo, flashRepo, repository.NewGalleryRepository(s.db),
+	)
+	s.echo.GET("/notes/:id", func(c echo.Context) error {
+		if prefersHTML(c) {
+			return ssrMeta.NotePage(c)
+		}
+		return apHandler.Note(c)
+	})
 	// ユーザーフィード (#2345)。upstream ClientServerService と同じく
 	// /@:user.rss / .atom / .json を返す。
 	feedHost := s.config.URL
@@ -2145,8 +2156,18 @@ func (s *Server) setupRoutes() {
 		if handled, err := feedH.TryServe(c, c.Param("acct")); handled {
 			return err
 		}
+		if prefersHTML(c) {
+			return ssrMeta.UserPage(c)
+		}
 		return apHandler.UserByAcct(c)
 	})
+	// プロフィールのサブページ。frontend が描画するので中身は SPA shell だが、
+	// クローラ / リンク展開のために user の meta は載せる (upstream も同じ)。
+	s.echo.GET("/@:acct/pages/:page", ssrMeta.UserPagePage)
+	s.echo.GET("/@:acct/:sub", ssrMeta.UserPage)
+	s.echo.GET("/clips/:clip", ssrMeta.ClipPage)
+	s.echo.GET("/play/:id", ssrMeta.FlashPage)
+	s.echo.GET("/gallery/:post", ssrMeta.GalleryPage)
 
 	// Discovery endpoints
 	wellknownHandler := wellknown.NewHandler(apURLs, userService, s.config.Host, s.config.URL)
@@ -3375,12 +3396,24 @@ func (s *Server) setupRoutes() {
 		return c.JSON(http.StatusOK, out)
 	})
 
-	// API catchall — 意図的に 200 + 空オブジェクトを返す。未登録エンドポイントへの
+	// API catchall。
+	//
+	// GET は upstream ApiServerService の `fastify.get('/*')` と同じく 404
+	// UNKNOWN_API_ENDPOINT を返す。200 を返すと SPA catchall と区別が付かず、
+	// 「/api 配下なのに HTML が返る」状態をクライアントが検出できない。
+	//
+	// GET 以外は意図的に 200 + 空オブジェクトのまま。未登録エンドポイントへの
 	// 404 は Misskey 公式フロントの一部ページで例外を投げてしまうため、
-	// 互換性優先で pass-through にしている (本家 TS Misskey と同じ運用)。
-	// 実装漏れは warn ログで検知する。
+	// 実装が出揃うまで pass-through にしている。実装漏れは warn ログで検知する。
 	api.Any("/*", func(c echo.Context) error {
 		slog.Warn("unimplemented API endpoint", "method", c.Request().Method, "path", c.Request().URL.Path)
+		if c.Request().Method == http.MethodGet {
+			return c.JSON(http.StatusNotFound, apierr.Error(
+				"UNKNOWN_API_ENDPOINT",
+				"Unknown API endpoint.",
+				"2ca3b769-540a-4f08-9dd5-b5a825b6d0f1",
+			))
+		}
 		return c.JSON(http.StatusOK, map[string]any{})
 	})
 
