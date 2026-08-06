@@ -259,6 +259,9 @@ type SignupResult struct {
 	// InvitationTicketConsumed は Service が tx 内で MarkUsed 済かどうか。
 	// 非 tx 経路 (mock) で false なら handler 側で best-effort consume する。
 	InvitationTicketConsumed bool
+	// Profile は作成した user_profile。/api/signup のレスポンスは upstream と
+	// 同じく MeDetailed そのものなので、packer に渡す profile が要る。
+	Profile *model.UserProfile
 }
 
 // Signup creates a new local user with the given username and password.
@@ -353,6 +356,10 @@ func (s *Service) SignupWithHost(username, password string, isInitialSetup bool,
 		AutoAcceptFollowed: true,
 		PreventAiLearning:  true,
 		PublicReactions:    true,
+		// DB 側の default と同値。in-memory の profile をそのまま packer へ
+		// 渡すので、明示しないとレスポンスだけ false になる。
+		InjectFeaturedNote:       true,
+		ReceiveAnnouncementEmail: true,
 	}
 	if err := s.userRepo.CreateProfile(profile); err != nil {
 		return nil, err
@@ -392,7 +399,7 @@ func (s *Service) SignupWithHost(username, password string, isInitialSetup bool,
 		s.webhookHook.OnUserCreated(user)
 	}
 
-	return &SignupResult{User: user, Token: token}, nil
+	return &SignupResult{User: user, Token: token, Profile: profile}, nil
 }
 
 // generateToken creates a random 16-character token.
@@ -577,6 +584,9 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 			AutoAcceptFollowed: true,
 			PreventAiLearning:  true,
 			PublicReactions:    true,
+			// DB 側の default と同値 (上の非 tx 経路と揃える)。
+			InjectFeaturedNote:       true,
+			ReceiveAnnouncementEmail: true,
 		}
 		if err := tx.Create(profile).Error; err != nil {
 			return err
@@ -679,6 +689,10 @@ func (s *Service) promotePendingNoTx(pending *model.UserPending) (*SignupResult,
 		AutoAcceptFollowed: true,
 		PreventAiLearning:  true,
 		PublicReactions:    true,
+		// DB 側の default と同値。in-memory の profile をそのまま packer へ
+		// 渡すので、明示しないとレスポンスだけ false になる。
+		InjectFeaturedNote:       true,
+		ReceiveAnnouncementEmail: true,
 	}
 	if err := s.userRepo.CreateProfile(profile); err != nil {
 		return nil, err

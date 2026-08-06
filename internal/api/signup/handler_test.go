@@ -417,8 +417,10 @@ func TestSignupPending_FiresSigninSideEffects(t *testing.T) {
 	assert.Equal(t, resp["id"], called[0], "新規ユーザー ID で発火する")
 }
 
-// #1804: 通常 signup 完了でも signin 副作用を発火する。
-func TestSignup_FiresSigninSideEffects(t *testing.T) {
+// upstream SignupApiService は通常 signup では signinService.signin を呼ばない
+// (呼ぶのは signup-pending 経路だけ)。通すと login 通知が 1 件生まれ、作りたての
+// アカウントの未読通知数が upstream と食い違う。
+func TestSignup_DoesNotFireSigninSideEffects(t *testing.T) {
 	userRepo := testutil.NewMockUserRepository()
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
@@ -431,9 +433,7 @@ func TestSignup_FiresSigninSideEffects(t *testing.T) {
 
 	resp := parseResp(t, doPost(h.Signup, `{"username":"alice","password":"password123"}`))
 	require.NotEmpty(t, resp["id"])
-	called := rec.called()
-	require.Len(t, called, 1)
-	assert.Equal(t, resp["id"], called[0])
+	assert.Empty(t, rec.called(), "通常 signup は signin 副作用を発火しない")
 }
 
 func TestSignupPending_InvalidParam(t *testing.T) {

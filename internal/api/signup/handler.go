@@ -2,6 +2,7 @@ package signup
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -314,9 +315,12 @@ func (h *Handler) Signup(c echo.Context) error {
 		_ = h.ticketStore.MarkUsed(ticket.ID, result.User.ID)
 	}
 
-	// アカウント作成も signin 経路を通す (履歴 / login 通知 / main publish、#1804)。
-	h.fireSigninSideEffects(c, result.User.ID)
-	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Token, h.idGen))
+	// upstream SignupApiService が signinService.signin を呼ぶのは signup-pending
+	// (メール確認) 経路だけで、通常の signup は pack した MeDetailed に token を
+	// 足して返すだけ。ここで signin を通すと login 通知が 1 件生まれ、作りたての
+	// アカウントの hasUnreadNotification / unreadNotificationsCount が upstream と
+	// 食い違う (#1804 の適用範囲を signup-pending に限定)。
+	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Profile, result.Token, h.idGen))
 }
 
 // SignupPending handles POST /api/signup-pending. Misskey TS 互換: code を
@@ -420,79 +424,33 @@ func (h *Handler) validateInvitationCode(code string, emailRequired bool) (*mode
 }
 
 // packSignupResponse builds a MeDetailed + token response for a newly created user.
-func packSignupResponse(u *model.User, token string, idGen id.Generator) map[string]any {
-	detailed := entity.PackUserDetailed(u, nil, idGen)
-	return map[string]any{
-		// UserLite
-		"id":                detailed.ID,
-		"name":              detailed.Name,
-		"username":          detailed.Username,
-		"host":              detailed.Host,
-		"avatarUrl":         detailed.AvatarURL,
-		"avatarBlurhash":    detailed.AvatarBlurhash,
-		"avatarDecorations": detailed.AvatarDecorations,
-		"isBot":             detailed.IsBot,
-		"isCat":             detailed.IsCat,
-		"emojis":            detailed.Emojis,
-		"onlineStatus":      detailed.OnlineStatus,
-		"badgeRoles":        detailed.BadgeRoles,
-		// UserDetailed
-		"bannerUrl":      detailed.BannerURL,
-		"bannerBlurhash": detailed.BannerBlurhash,
-		"isLocked":       detailed.IsLocked,
-		"isSilenced":     false,
-		"isSuspended":    detailed.IsSuspended,
-		"description":    detailed.Description,
-		"location":       detailed.Location,
-		"birthday":       detailed.Birthday,
-		"lang":           detailed.Lang,
-		"fields":         detailed.Fields,
-		"verifiedLinks":  []string{},
-		"followersCount": detailed.FollowersCount,
-		"followingCount": detailed.FollowingCount,
-		"notesCount":     detailed.NotesCount,
-		"pinnedNoteIds":  detailed.PinnedNoteIDs,
-		"pinnedNotes":    detailed.PinnedNotes,
-		"roles":          detailed.Roles,
-		"uri":            detailed.URI,
-		"url":            detailed.URL,
-		"movedTo":        nil,
-		"alsoKnownAs":    nil,
-		"createdAt":      detailed.CreatedAt,
-		"updatedAt":      detailed.UpdatedAt,
-		"lastFetchedAt":  nil,
-		// MeDetailed (新規ユーザーのデフォルト値)
-		"avatarId":                 nil,
-		"bannerId":                 nil,
-		"followersVisibility":      "public",
-		"followingVisibility":      "public",
-		"chatScope":                "mutual",
-		"canChat":                  true,
-		"followedMessage":          nil,
-		"memo":                     nil,
-		"moderationNote":           nil,
-		"isAdmin":                  false,
-		"isModerator":              false,
-		"hideOnlineStatus":         u.HideOnlineStatus,
-		"email":                    nil,
-		"emailVerified":            false,
-		"autoAcceptFollowed":       true,
-		"noCrawle":                 false,
-		"preventAiLearning":        true,
-		"alwaysMarkNsfw":           false,
-		"autoSensitive":            false,
-		"carefulBot":               false,
-		"injectFeaturedNote":       true,
-		"receiveAnnouncementEmail": true,
-		"twoFactorEnabled":         false,
-		"usePasswordLessLogin":     false,
-		"publicReactions":          true,
-		"mutedWords":               []any{},
-		"hardMutedWords":           []any{},
-		"mutedInstances":           []any{},
-		"policies":                 role.DefaultPolicies(),
-		"token":                    token,
+//
+// upstream SignupApiService は `pack(account, account, {schema: 'MeDetailed',
+// includeSecrets: true})` の結果に token を足して返す。つまり /api/i と同じ形。
+// mk-go も同じ packer を通し、MeDetailed struct に無い /api/i 固有 field
+// (pinnedPage / clientData / room / securityKeysList 等) だけを新規ユーザーの
+// 既定値で補う。個別に map を組み立てていた頃は 24 個の field が欠けていた。
+func packSignupResponse(u *model.User, profile *model.UserProfile, token string, idGen id.Generator) map[string]any {
+	me := entity.PackMeDetailed(u, profile, idGen)
+	me.Policies = role.DefaultPolicies()
+	b, _ := json.Marshal(me)
+	resp := map[string]any{}
+	_ = json.Unmarshal(b, &resp)
+
+	// includeSecrets 相当。signup は native session なので secret を出す。
+	resp["email"] = nil
+	resp["emailVerified"] = false
+	if profile != nil {
+		resp["email"] = profile.Email
+		resp["emailVerified"] = profile.EmailVerified
 	}
+	resp["securityKeysList"] = []any{}
+	// MeDetailed struct に無い /api/i 固有 field。新規ユーザーは常に未設定。
+	resp["pinnedPageId"] = nil
+	resp["pinnedPage"] = nil
+
+	resp["token"] = token
+	return resp
 }
 
 // defaultPolicies returns the Misskey default policies for a new user.
