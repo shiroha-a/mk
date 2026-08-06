@@ -344,20 +344,21 @@ func (h *Handler) AddNote(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ClipID == "" || req.NoteID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	// Visibility gate (#1456): clip は read 側 #1418 で push-down 済みでも、
-	// 非可視 note を追加できる/不可で 204 vs 404 が分岐すると存在 enumeration
-	// が成立する (favorite-class IDOR の弱変種)。RequireVisible で存在不可と
-	// 同じ NO_SUCH_NOTE 404 に集約して oracle を塞ぐ。queryService 未配線時は
-	// fail-closed で同じ 404 を返し、unchecked note を絶対に永続化しない。
-	if h.queryService == nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
-	}
-	_, verr := h.queryService.RequireVisible(user, req.NoteID)
-	if h.materializeIfMissing(req.NoteID, verr) {
-		_, verr = h.queryService.RequireVisible(user, req.NoteID)
-	}
-	if err := verr; err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "fc8c0b49-c7a3-4664-a0a6-b418d386bb8b"))
+	// upstream ClipService.addNote は clip の所有者と件数上限だけを見て、note の
+	// 可視性は検証しない。クリップは「あとで見る」リストで、可視性は読み取り時に
+	// 評価される (mk-go も ListByClipVisible で push-down 済み #1418)。追加時に
+	// 弾くと「今は見えないノートをクリップしておいて、フォロー後に読む」という
+	// upstream で成立する使い方が壊れる。
+	//
+	// #1456 は「追加の可否で note の存在を探れる」ことを塞ぐ硬化だったが、
+	// upstream 自身が「存在する ID → 204 / 存在しない ID → NO_SUCH_NOTE」で
+	// 同じ oracle を持つので、ここだけ塞いでも実効が薄い。
+	// リモート note が DB に無ければ取り込んでおく。取り込めなければ下の
+	// AddNote が FK 相当のエラーで NO_SUCH_NOTE を返す。
+	if h.queryService != nil {
+		if _, verr := h.queryService.RequireVisible(user, req.NoteID); verr != nil {
+			h.materializeIfMissing(req.NoteID, verr)
+		}
 	}
 	if err := h.svc.AddNote(user.ID, req.ClipID, req.NoteID); err != nil {
 		switch {

@@ -502,23 +502,21 @@ func TestAddNote_RepoError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-// --- AddNote visibility gate (#1456) --------------------------------------
+// --- AddNote --------------------------------------------------------------
 
-// 非フォロワーが followers visibility note を clip に追加しようとしても
-// 不存在 note と同じ NO_SUCH_NOTE 404 で隠蔽され、永続化されないこと。
-// content leak 自体は #1418 (ListByClipVisible) で塞がれているが、
-// 204 vs 404 の差で存在 enumeration が成立する favorite-class IDOR の
-// 弱変種を、可視性チェックで存在 oracle ごと潰す。
-func TestAddNote_FollowersNote_NonFollower_Hidden(t *testing.T) {
+// upstream ClipService.addNote は note の可視性を検証しない。クリップは
+// 「あとで見る」リストで、可視性は読み取り側 (ListByClipVisible, #1418) が
+// 評価する。今は見えないノートをクリップしておいて、フォロー後に読む使い方が
+// upstream では成立するので、追加時には弾かない。
+func TestAddNote_FollowersNote_NonFollower_IsAccepted(t *testing.T) {
 	h, repo, clipNoteRepo, notes, _ := newHandlerWithFollowing(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
 	notes.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityFollowers}
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
-	assert.Empty(t, clipNoteRepo.Entries, "visibility 違反 note は永続化されない")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotEmpty(t, clipNoteRepo.Entries)
 }
 
 // フォロワーは followers visibility note を自分の clip に追加できる。
@@ -547,9 +545,9 @@ func TestAddNote_FollowersNote_Author_OK(t *testing.T) {
 	assert.Len(t, clipNoteRepo.Entries, 1)
 }
 
-// specified visibility で VisibleUserIDs に入っていない viewer は
-// 不存在と同じ 404 で隠蔽され、永続化されない。
-func TestAddNote_SpecifiedNote_NotInList_Hidden(t *testing.T) {
+// specified visibility で宛先に入っていない viewer でもクリップには追加できる
+// (upstream 同様。読み取り側で弾かれる)。
+func TestAddNote_SpecifiedNote_NotInList_IsAccepted(t *testing.T) {
 	h, repo, clipNoteRepo, notes, _ := newHandlerWithFollowing(t)
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
 	notes.Notes["n1"] = &model.Note{
@@ -561,9 +559,8 @@ func TestAddNote_SpecifiedNote_NotInList_Hidden(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
-	assert.Empty(t, clipNoteRepo.Entries)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotEmpty(t, clipNoteRepo.Entries)
 }
 
 // specified visibility で VisibleUserIDs に入っている viewer は追加可。
@@ -583,10 +580,9 @@ func TestAddNote_SpecifiedNote_InList_OK(t *testing.T) {
 	assert.Len(t, clipNoteRepo.Entries, 1)
 }
 
-// queryService が未配線の Handler は fail-closed で 404 NO_SUCH_NOTE を
-// 返し、unchecked note を絶対に永続化しない (router 配線漏れ等の
-// 設定ミスでも visibility filter を bypass させない安全弁)。
-func TestAddNote_NoQueryServiceRejects(t *testing.T) {
+// queryService が未配線でも追加できる (可視性を見ないので依存しない)。
+// 存在しない note は AddNote 側が NO_SUCH_NOTE を返す。
+func TestAddNote_WorksWithoutQueryService(t *testing.T) {
 	repo := testutil.NewMockClipRepository()
 	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "alice"}
 	clipNoteRepo := testutil.NewMockClipNoteRepository()
@@ -598,10 +594,8 @@ func TestAddNote_NoQueryServiceRejects(t *testing.T) {
 	c, rec := newReq(t, `{"clipId":"c1","noteId":"n1"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.AddNote(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "NO_SUCH_NOTE")
-	assert.Empty(t, clipNoteRepo.Entries,
-		"queryService 未配線時に visibility 未検証 note を永続化してはならない")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotEmpty(t, clipNoteRepo.Entries)
 }
 
 // --- RemoveNote ------------------------------------------------------------
