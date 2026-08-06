@@ -1088,7 +1088,6 @@ func (s *Server) setupRoutes() {
 	// 仲介できる位置 (= group 最初の Use) に置く。後続 middleware / handler
 	// が書く error 応答 (rate limit 429 / FST_ERR_CTP_* を含む) も全て
 	// この writer を通る。
-	api.Use(middleware.WWWAuthenticate())
 
 	// #2106 L56: upstream ApiServerService は /api scope の全応答に既定の
 	// Cache-Control: private, max-age=0, must-revalidate を付与する。cacheSec endpoint は

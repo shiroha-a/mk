@@ -220,6 +220,12 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	// bypass される (#1958 / #2075)。/api → 1MiB / inbox → 64KiB / multipart 除外。
 	e.Use(middleware.BodyLimitByPath())
 
+	// WWW-Authenticate は auth.Authenticate より外側に置く。auth は無効 token に
+	// 対して自分で 401 を書くので、内側 (api グループ) に置くと middleware まで
+	// 到達せずヘッダが付かない。/streaming の 401 も同じ経路なので、ここに
+	// 置けば両方カバーできる。JSON の error body が無い応答では何もしない。
+	e.Use(middleware.WWWAuthenticate())
+
 	auth := middleware.NewAuthMiddleware(userRepo, accessTokenRepo)
 	e.Use(auth.Authenticate())
 
