@@ -43,6 +43,12 @@ func NewHandler(acceptor ConnectionAcceptor) *Handler {
 // acceptor に渡し、失敗したら 400 / 426 のまま終了する (gorilla/websocket が
 // 自動で適切な status を返す)。
 func (h *Handler) Stream(c echo.Context) error {
+	// WebSocket でない GET には 503 を返す。本家 (@fastify/websocket) が
+	// upgrade 以外を受け付けずに 503 で落とすのに揃える。gorilla に任せると
+	// 400 になり、「まだ実装されていない」のか「WS 専用」なのか区別が付かない。
+	if !websocket.IsWebSocketUpgrade(c.Request()) {
+		return c.NoContent(http.StatusServiceUnavailable)
+	}
 	conn, err := h.upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
 		// gorilla/websocket は Upgrade 失敗時にレスポンスヘッダを既に書き込んで

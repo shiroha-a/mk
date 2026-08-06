@@ -95,14 +95,14 @@ func TestStream_NilAcceptorClosesImmediately(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestStream_UpgradeFailureFallsThrough(t *testing.T) {
-	// 通常の HTTP GET (Upgrade ヘッダ無し) は Upgrade に失敗するはず
+// 通常の HTTP GET (Upgrade ヘッダ無し) は 503。本家 (@fastify/websocket) が
+// upgrade 以外を 503 で落とすのに揃えている。
+func TestStream_NonWebSocketGetIsUnavailable(t *testing.T) {
 	h := NewHandler(&stubAcceptor{})
 	e := echo.New()
 	e.GET("/streaming", h.Stream)
 	req := httptest.NewRequest(http.MethodGet, "/streaming", nil)
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, req)
-	// gorilla/websocket は 400 を書き込むはず
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
