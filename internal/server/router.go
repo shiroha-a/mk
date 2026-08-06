@@ -1704,6 +1704,8 @@ func (s *Server) setupRoutes() {
 	iHandler.SetUserRepo(userRepo)
 	iHandler.SetRoleProvider(roleService)
 	iHandler.SetTOTPReplayGuard(totpReplayGuard)
+	// upstream UserAuthService と同じテスト用バイパス。testMode 以外では無効。
+	coretwofactor.SetTestMode(s.config.TestMode)
 	iHandler.SetRegistryRepo(registryRepo)
 	iHandler.SetMetaRepo(metaRepo)
 	iHandler.SetServerURL(s.config.URL)

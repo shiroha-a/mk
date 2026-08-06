@@ -4,10 +4,34 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
 )
+
+// testMode mirrors config.testMode. Router が起動時に一度だけ設定する。
+var testMode atomic.Bool
+
+// SetTestMode enables the upstream-compatible TOTP bypass for test runs.
+// 本番 (testMode=false) では何の効果も無い。
+func SetTestMode(v bool) {
+	testMode.Store(v)
+}
+
+// bypassForTest reports whether TOTP validation should be skipped entirely.
+//
+// upstream UserAuthService.validateOtp は
+// `NODE_ENV === 'test' && MISSKEY_TEST_CHECK_DUPLICATED_TOTP !== '1'` のとき
+// 検証ごと素通しにする。本家 e2e は 2FA 登録に使ったコードを直後の signin でも
+// 使い回すので、素通しにしないと replay 保護に引っかかって成立しない。
+// replay 保護そのものを検証するテストだけが同 env に '1' を立てる。
+//
+// 環境変数は毎回読む。e2e ハーネスがテストの途中で値を差し替えるため。
+func bypassForTest() bool {
+	return testMode.Load() && os.Getenv("MISSKEY_TEST_CHECK_DUPLICATED_TOTP") != "1"
+}
 
 // ReplayGuard records previously accepted TOTP codes so the same code
 // cannot be replayed within its acceptance window.
@@ -100,6 +124,9 @@ func (g *RedisReplayGuard) MarkUsed(ctx context.Context, userID, code string) (b
 // "invalid token" response shape it already returns for ordinary TOTP
 // failures, so the frontend / client behaviour is unchanged.
 func ValidateWithReplay(ctx context.Context, guard ReplayGuard, userID, code, secret string) bool {
+	if bypassForTest() {
+		return true
+	}
 	if !Validate(code, secret) {
 		return false
 	}

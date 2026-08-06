@@ -180,3 +180,62 @@ func TestValidateWithReplay_GuardError_FailsOpen(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, ValidateWithReplay(context.Background(), failingGuard{}, "u1", code, secret))
 }
+
+// --- test bypass (upstream UserAuthService.validateOtp 互換) ---
+
+// testMode かつ MISSKEY_TEST_CHECK_DUPLICATED_TOTP != "1" のとき、TOTP 検証と
+// replay 保護をまとめて素通しにする。本家 e2e は 2FA 登録に使ったコードを直後の
+// signin でも使い回すので、これが無いと replay 保護に阻まれて成立しない。
+func TestValidateWithReplay_TestModeBypass(t *testing.T) {
+	_, client := newMiniRedis(t)
+	g := NewRedisReplayGuard(client)
+	secret, _, err := GenerateSecret("Misskey", "user")
+	require.NoError(t, err)
+	code, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	SetTestMode(true)
+	t.Cleanup(func() { SetTestMode(false) })
+	t.Setenv("MISSKEY_TEST_CHECK_DUPLICATED_TOTP", "")
+
+	assert.True(t, ValidateWithReplay(ctx, g, "u1", code, secret))
+	assert.True(t, ValidateWithReplay(ctx, g, "u1", code, secret), "bypass 中は同じコードを何度でも受け付ける")
+	assert.True(t, ValidateWithReplay(ctx, g, "u1", "000000", secret), "bypass 中は不正コードも通る (upstream と同じ)")
+}
+
+// 同 env に "1" が立っているときは bypass せず、replay 保護が効く。
+func TestValidateWithReplay_TestModeRespectsCheckDuplicatedEnv(t *testing.T) {
+	_, client := newMiniRedis(t)
+	g := NewRedisReplayGuard(client)
+	secret, _, err := GenerateSecret("Misskey", "user")
+	require.NoError(t, err)
+	code, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	SetTestMode(true)
+	t.Cleanup(func() { SetTestMode(false) })
+	t.Setenv("MISSKEY_TEST_CHECK_DUPLICATED_TOTP", "1")
+
+	assert.True(t, ValidateWithReplay(ctx, g, "u1", code, secret))
+	assert.False(t, ValidateWithReplay(ctx, g, "u1", code, secret), "env=1 なら replay を拒否する")
+}
+
+// 本番 (testMode=false) では env の値に関係なく bypass しない。
+func TestValidateWithReplay_ProductionIgnoresEnv(t *testing.T) {
+	_, client := newMiniRedis(t)
+	g := NewRedisReplayGuard(client)
+	secret, _, err := GenerateSecret("Misskey", "user")
+	require.NoError(t, err)
+	code, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	SetTestMode(false)
+	t.Setenv("MISSKEY_TEST_CHECK_DUPLICATED_TOTP", "")
+
+	assert.True(t, ValidateWithReplay(ctx, g, "u1", code, secret))
+	assert.False(t, ValidateWithReplay(ctx, g, "u1", code, secret), "本番は常に replay 保護が効く")
+	assert.False(t, ValidateWithReplay(ctx, g, "u1", "000000", secret), "本番は不正コードを拒否する")
+}
