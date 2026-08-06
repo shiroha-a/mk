@@ -898,7 +898,7 @@ func aggregatePolicyValues(key string, baseVal any, values []any) any {
 		}
 		return false
 	case int:
-		return maxNumberAsInt(values, baseVal)
+		return maxNumber(values, baseVal)
 	case string:
 		if key == "chatAvailability" {
 			return aggregateChatAvailability(values)
@@ -991,29 +991,38 @@ func normalizeStringSlice(raw any) []string {
 // admin UI 由来の override) も拾えるよう、float64 を int に丸めて比較する。
 // NaN / +-Inf / overflow した float64 entry は coerceToBaseType と同じく
 // silently skip する (= 不正値が aggregator を汚染しない fail-soft)。
-func maxNumberAsInt(values []any, base any) any {
-	var best int
+func maxNumber(values []any, base any) any {
+	var best float64
 	found := false
 	for _, v := range values {
+		var f float64
 		switch x := v.(type) {
 		case int:
-			if !found || x > best {
-				best = x
-				found = true
-			}
+			f = float64(x)
+		case int64:
+			f = float64(x)
 		case float64:
 			if !isFiniteAndInRange(x, math.MinInt, math.MaxInt) {
 				continue
 			}
-			xi := int(x)
-			if !found || xi > best {
-				best = xi
-				found = true
-			}
+			f = x
+		default:
+			continue
+		}
+		if !found || f > best {
+			best = f
+			found = true
 		}
 	}
 	if !found {
 		return base
+	}
+	// 整数値なら int で返して既存 consumer の type assertion を維持する。
+	// 小数はそのまま float64 で返す: role で 1MB 未満の maxFileSizeMb を
+	// 設定できるようにするため (int に丸めると 0 になり、gate が事実上
+	// 無効化される)。小数を取りうる policy の consumer は float も受けること。
+	if best == math.Trunc(best) {
+		return int(best)
 	}
 	return best
 }

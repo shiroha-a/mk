@@ -68,6 +68,25 @@ var (
 	ErrRecursiveNesting = errors.New("recursive folder nesting")
 )
 
+// policyMegabytes normalizes a size policy (maxFileSizeMb / driveCapacityMb)
+// into megabytes as a float.
+//
+// int だけを受けていると、role で 1MB 未満を設定したとき (upstream の e2e は
+// 10 バイト = 10/1024/1024 MB を使う) 型アサーションに失敗して gate ごと
+// スキップされ、上限が事実上無効になっていた。JSON 由来の値は float64 で
+// 入るので、整数系と両方受けて MB のまま float で返す。
+func policyMegabytes(v any) (float64, bool) {
+	switch x := v.(type) {
+	case int:
+		return float64(x), true
+	case int64:
+		return float64(x), true
+	case float64:
+		return x, true
+	}
+	return 0, false
+}
+
 // ValidateFileName mirrors upstream DriveFileEntityService.validateFileName:
 // the trimmed name must be non-empty, at most 200 characters, and must not
 // contain a backslash, a slash, or "..". 長さは JS の String.length (UTF-16)
@@ -430,14 +449,14 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		// expireOldFile 相当の LRU 退去がまだ無いので remote は skip する
 		// (= 受け入れて drive_file 行は作成、cleanup は future work)。
 		if in.User.IsLocal() && policies != nil {
-			if mb, ok := policies["maxFileSizeMb"].(int); ok && mb > 0 {
-				maxBytes := int64(mb) * 1024 * 1024
+			if mb, ok := policyMegabytes(policies["maxFileSizeMb"]); ok && mb > 0 {
+				maxBytes := int64(mb * 1024 * 1024)
 				if int64(len(info.Body)) > maxBytes {
 					return nil, ErrMaxFileSizeExceeded
 				}
 			}
-			if mb, ok := policies["driveCapacityMb"].(int); ok && mb > 0 {
-				capBytes := int64(mb) * 1024 * 1024
+			if mb, ok := policyMegabytes(policies["driveCapacityMb"]); ok && mb > 0 {
+				capBytes := int64(mb * 1024 * 1024)
 				// UsageByUser の DB error を握り潰すと usage=0 として gate を
 				// pass してしまい driveCapacityMb 制限が事実上効かなくなる。
 				// production の transient DB error 時に黙って upload を許可する

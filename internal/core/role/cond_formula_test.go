@@ -187,7 +187,7 @@ func TestEvalCond_UnknownType(t *testing.T) {
 	assert.False(t, EvalCond(&model.User{}, nil, CondFormula{Type: "definitelyNotAType"}, nil))
 }
 
-// coerceToBaseType / maxNumberAsInt / aggregateChatAvailability は internal
+// coerceToBaseType / maxNumber / aggregateChatAvailability は internal
 // helper だが、JSON 値 (float64) → base 型 (int / int64 / float64) の
 // 変換ロジックが consumer 側 type assert の安全性を担保するので、direct
 // unit test で 100% に近い coverage を狙う。
@@ -268,7 +268,7 @@ func TestCoerceToBaseType_Rejects2Pow63Boundary(t *testing.T) {
 }
 
 // isFiniteAndInRange の境界条件を直接 cover する。caller の coerceToBaseType
-// / maxNumberAsInt 経由 test だけでなく helper 単体としての挙動も保証する。
+// / maxNumber 経由 test だけでなく helper 単体としての挙動も保証する。
 func TestIsFiniteAndInRange(t *testing.T) {
 	// finite + 範囲内 → true (下限は等号許容、上限は厳密 less-than)。
 	assert.True(t, isFiniteAndInRange(0, -100, 100))
@@ -284,16 +284,16 @@ func TestIsFiniteAndInRange(t *testing.T) {
 
 func TestMaxNumberAsInt_NoUsableValues(t *testing.T) {
 	// 全 entry が int / float64 以外 → base を返す (found=false path)。
-	got := maxNumberAsInt([]any{"not a number", true, nil}, 99)
+	got := maxNumber([]any{"not a number", true, nil}, 99)
 	assert.Equal(t, 99, got)
 }
 
 func TestMaxNumberAsInt_SkipsInvalidFloat(t *testing.T) {
 	// NaN / Inf は silently skip。usable entry が無ければ base に倒す。
-	got := maxNumberAsInt([]any{math.NaN(), math.Inf(1), math.Inf(-1)}, 99)
+	got := maxNumber([]any{math.NaN(), math.Inf(1), math.Inf(-1)}, 99)
 	assert.Equal(t, 99, got)
 	// NaN/Inf 混在でも valid な float entry があれば、それを int に丸めて返す。
-	got = maxNumberAsInt([]any{math.NaN(), float64(42), math.Inf(1)}, 99)
+	got = maxNumber([]any{math.NaN(), float64(42), math.Inf(1)}, 99)
 	assert.Equal(t, 42, got)
 }
 

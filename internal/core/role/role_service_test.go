@@ -282,6 +282,36 @@ func TestGetUserPolicies_MalformedEntryDoesNotDropOthers(t *testing.T) {
 	assert.True(t, svc.IsSilenced("user1"))
 }
 
+// 1MB 未満の maxFileSizeMb を設定できること。int に丸めると 0 になり、
+// drive 側の gate が「上限なし」として素通ししてしまう。
+func TestGetUserPolicies_KeepsFractionalOverride(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{
+		ID:   "r1",
+		Name: "Tiny",
+		Policies: datatypes.JSON([]byte(`{
+			"maxFileSizeMb": {"useDefault": false, "priority": 1, "value": 9.5367431640625e-06}
+		}`)),
+	}
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "r1"}
+
+	got := svc.GetUserPolicies("user1")["maxFileSizeMb"]
+	assert.InDelta(t, 9.5367431640625e-06, got, 1e-12)
+}
+
+// 整数値の override は int のまま返す (既存 consumer の type assertion 維持)。
+func TestGetUserPolicies_IntegerOverrideStaysInt(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{
+		ID:       "r1",
+		Name:     "Pro",
+		Policies: datatypes.JSON([]byte(`{"maxFileSizeMb": {"useDefault": false, "priority": 1, "value": 500}}`)),
+	}
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "r1"}
+
+	assert.Equal(t, 500, svc.GetUserPolicies("user1")["maxFileSizeMb"])
+}
+
 func TestGetUserPolicies_UseDefaultTrue_NotOverridden(t *testing.T) {
 	svc, roleRepo, assignRepo, _ := newTestService(t)
 	roleRepo.Roles["r1"] = &model.Role{
