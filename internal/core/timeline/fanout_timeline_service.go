@@ -40,6 +40,15 @@ const (
 	recentInsertGracePeriod = 3 * time.Minute
 )
 
+// UserTimelineWithRepliesName returns the user timeline key that holds the
+// user's replies to others.
+//
+// upstream は userTimeline に「非返信 + 自己スレッド」だけを積み、他人宛ての
+// 返信は userTimelineWithReplies に分ける。withReplies=true の取得時に合流。
+func UserTimelineWithRepliesName(userID string) Name {
+	return Name("userTimelineWithReplies:" + userID)
+}
+
 // LocalTimelineWithReplyToName returns the LTL key holding replies addressed to
 // the given user.
 //

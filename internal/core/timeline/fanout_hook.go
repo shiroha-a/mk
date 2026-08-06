@@ -142,7 +142,14 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 	if author.Host != nil && *author.Host != "" {
 		userTimelineKind = UserTimelineKindRemote
 	}
-	h.pushWithLimit(ctx, UserTimelineName(author.ID), n.ID, resolveCap(limits, userTimelineKind))
+	// upstream は他人宛ての返信を userTimelineWithReplies に分け、userTimeline
+	// には「非返信 + 自己スレッド」だけを積む。withReplies=false でも自己
+	// スレッドが出るのはこのため。
+	if isReplyToOther(n) {
+		h.pushWithLimit(ctx, UserTimelineWithRepliesName(author.ID), n.ID, resolveCap(limits, userTimelineKind))
+	} else {
+		h.pushWithLimit(ctx, UserTimelineName(author.ID), n.ID, resolveCap(limits, userTimelineKind))
+	}
 
 	// 2-5. channel note か否かで home/local/global/userList の配信先を分ける
 	//      (#1686, upstream NoteCreateService.pushToTl の channelId 分岐)。

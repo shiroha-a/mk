@@ -447,7 +447,14 @@ func (r *noteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sinceID
 		q = q.Where(`"fileIds" != '{}'`)
 	}
 	if !withReplies {
-		q = q.Where(`"replyId" IS NULL`)
+		// 自己スレッド (自分の投稿への自分の返信) は返信扱いしない。
+		//
+		// upstream の userTimeline は fanout 側で振り分けており、
+		// `isReply(note) = replyId && replyUserId !== userId` が false のもの
+		// (= 非返信 + 自己スレッド) を userTimeline に、それ以外を
+		// userTimelineWithReplies に積む。つまり withReplies=false でも
+		// 自己スレッドは出る。DB fallback もそれに揃える。
+		q = q.Where(`("replyId" IS NULL OR "replyUserId" = "note"."userId")`)
 	}
 	if !withRenotes {
 		// pure renote (= text/cw/files/poll/reply 全て空 + renoteId あり) を除外する。
