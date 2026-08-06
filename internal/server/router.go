@@ -2436,6 +2436,9 @@ func (s *Server) setupRoutes() {
 	// 漏れる (HTTP 側 #1444 i/notifications IDOR の WS 版)。noteQueryService
 	// の RequireVisible が NoteVisibilityChecker interface を自動 satisfy する。
 	streamManager.SetNoteVisibilityChecker(noteQueryService)
+	// onlineStatus の source。upstream と同じく WebSocket 接続中だけ
+	// lastActiveDate を更新する (REST では更新しない、#2350)。
+	streamManager.SetLastActiveRecorder(&lastActiveRecorderAdapter{userRepo: userRepo})
 	// timeline channel (LTL/GTL/HTL) の ltlAvailable / gtlAvailable gate 用に role
 	// policy provider を配線する (#1942)。REST timeline と同じく WS でも policy で
 	// 無効化された timeline を subscribe させない (policy bypass 解消)。
@@ -3476,6 +3479,24 @@ func (a *notifReaderAdapter) ReadAll(userID string) error {
 // so the streaming Manager can attach the persisted hardMutedWords (#787) at
 // connection setup. Returns nil on lookup failure / empty rule set so the
 // streaming filter degrades to no-op rather than dropping the connection.
+// lastActiveRecorderAdapter bumps user.lastActiveDate for a live WebSocket
+// connection (upstream StreamingApiServerService の updateLastActiveDate 相当)。
+// 書き込みは goroutine に逃がして接続処理を待たせない。
+type lastActiveRecorderAdapter struct {
+	userRepo repository.UserRepository
+}
+
+func (a *lastActiveRecorderAdapter) RecordActive(userID string) {
+	if a.userRepo == nil || userID == "" {
+		return
+	}
+	go func() {
+		if err := a.userRepo.UpdateUser(userID, map[string]any{"lastActiveDate": time.Now()}); err != nil {
+			slog.Debug("streaming: lastActiveDate update failed", "userId", userID, "err", err)
+		}
+	}()
+}
+
 type hardMuteLookupAdapter struct {
 	userRepo repository.UserRepository
 }

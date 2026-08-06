@@ -219,3 +219,49 @@ func TestManager_AcceptDispatchesConnectMessages(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 	require.NotNil(t, holder.Value)
 }
+
+// --- lastActiveDate tracking (onlineStatus の source) ---
+
+type recordingLastActive struct {
+	mu  sync.Mutex
+	ids []string
+}
+
+func (r *recordingLastActive) RecordActive(userID string) {
+	r.mu.Lock()
+	r.ids = append(r.ids, userID)
+	r.mu.Unlock()
+}
+
+func (r *recordingLastActive) calls() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.ids...)
+}
+
+// 接続時に 1 回記録し、stop 後は ticker が止まること。
+func TestManager_TrackLastActiveRecordsOnConnect(t *testing.T) {
+	m := NewManager(nil, nil)
+	rec := &recordingLastActive{}
+	m.SetLastActiveRecorder(rec)
+
+	stop := m.trackLastActive(&model.User{ID: "u1"})
+	assert.Equal(t, []string{"u1"}, rec.calls(), "接続時に 1 回記録する")
+	stop()
+	// stop 後に ticker goroutine が終了していること (二重 close で panic しない)。
+	assert.NotPanics(t, func() { _ = m.trackLastActive(&model.User{ID: "u2"}) })
+}
+
+// 匿名接続 / recorder 未配線では何もしない。返る stop は安全に呼べる。
+func TestManager_TrackLastActiveNoopCases(t *testing.T) {
+	rec := &recordingLastActive{}
+
+	unwired := NewManager(nil, nil)
+	unwired.trackLastActive(&model.User{ID: "u1"})()
+	assert.Empty(t, rec.calls())
+
+	anon := NewManager(nil, nil)
+	anon.SetLastActiveRecorder(rec)
+	anon.trackLastActive(nil)()
+	assert.Empty(t, rec.calls(), "匿名接続は記録しない")
+}

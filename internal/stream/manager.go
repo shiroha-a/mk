@@ -3,6 +3,7 @@ package stream
 import (
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/shiroha-a/mk/internal/model"
@@ -43,6 +44,48 @@ type Manager struct {
 	muteBlockLookup MuteBlockSnapshotLookup
 	noteVisibility  NoteVisibilityChecker
 	policyProvider  RolePolicyProvider
+	lastActive      LastActiveRecorder
+}
+
+// LastActiveRecorder bumps a user's `lastActiveDate`. upstream の
+// StreamingApiServerService は WebSocket 接続時と 5 分ごとにこれを呼ぶ。
+// 「オンライン」の定義が WebSocket 接続なので、REST リクエストでは更新しない。
+type LastActiveRecorder interface {
+	RecordActive(userID string)
+}
+
+// lastActiveInterval mirrors upstream の setInterval(1000 * 60 * 5)。
+const lastActiveInterval = 5 * time.Minute
+
+// SetLastActiveRecorder wires the recorder used to bump lastActiveDate while a
+// WebSocket connection is alive. nil keeps the column untouched.
+func (m *Manager) SetLastActiveRecorder(r LastActiveRecorder) {
+	m.lastActive = r
+}
+
+// trackLastActive bumps lastActiveDate on connect and every 5 minutes until the
+// returned stop func is called. 匿名接続 / 未配線では no-op。
+func (m *Manager) trackLastActive(user *model.User) (stop func()) {
+	if m.lastActive == nil || user == nil {
+		return func() {}
+	}
+	m.lastActive.RecordActive(user.ID)
+	ticker := time.NewTicker(lastActiveInterval)
+	done := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				m.lastActive.RecordActive(user.ID)
+			case <-done:
+				return
+			}
+		}
+	}()
+	return func() {
+		ticker.Stop()
+		close(done)
+	}
 }
 
 // RolePolicyProvider returns a user's effective role policies. Timeline channels
@@ -147,8 +190,12 @@ func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
 	if m.noteVisibility != nil {
 		dispatcher.SetNoteVisibilityChecker(m.noteVisibility)
 	}
+	// upstream StreamingApiServerService と同じく、接続中は lastActiveDate を
+	// 5 分ごとに更新する (= onlineStatus の source)。
+	stopLastActive := m.trackLastActive(user)
 	c.SetMessageHandler(dispatcher.HandleClientMessage)
 	c.SetCloseHandler(func() {
+		stopLastActive()
 		dispatcher.CloseAll()
 		m.unregister(id)
 	})

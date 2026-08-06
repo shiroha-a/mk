@@ -7,11 +7,8 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
-	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -60,11 +57,6 @@ type AuthScope struct {
 	TokenID string
 }
 
-// lastActiveUpdateInterval は同一ユーザーの lastActiveDate 書き込みを抑制
-// する間隔。本家 TS は WebSocket 接続中 5 分おきに更新する (#421)。HTTP
-// 経路でも 5 分おきの memory-throttle で十分 online 判定できる。
-const lastActiveUpdateInterval = 5 * time.Minute
-
 // AuthMiddleware provides token-based authentication.
 type AuthMiddleware struct {
 	userRepo        repository.UserRepository
@@ -74,12 +66,6 @@ type AuthMiddleware struct {
 	// 認証要リクエストの DB hit を 30 秒 TTL で消す。logout/token revoke の
 	// 反映遅延は許容範囲内 (TTL 以内)。
 	tokenCache *tokenCache
-
-	// lastActiveSeen はユーザー ID → 直近で lastActiveDate を更新した時刻。
-	// 認証済みリクエストごとに DB に書き込むと負荷が高くなるので、
-	// lastActiveUpdateInterval で gating する (#421)。
-	lastActiveMu   sync.Mutex
-	lastActiveSeen map[string]time.Time
 }
 
 // NewAuthMiddleware creates a new AuthMiddleware.
@@ -88,7 +74,6 @@ func NewAuthMiddleware(userRepo repository.UserRepository, accessTokenRepo repos
 		userRepo:        userRepo,
 		accessTokenRepo: accessTokenRepo,
 		tokenCache:      newTokenCache(),
-		lastActiveSeen:  make(map[string]time.Time),
 	}
 }
 
@@ -176,50 +161,9 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 			// app token の permission で強制する (#1552)。native token は
 			// IsApp=false で full access 扱い。
 			c.Set(string(AuthScopeContextKey), &AuthScope{IsApp: isApp, Scopes: scopes, TokenID: tokenID})
-			a.touchLastActive(user.ID)
 			return next(c)
 		}
 	}
-}
-
-// touchLastActive bumps the user's `lastActiveDate` column to now() if the
-// last update was more than `lastActiveUpdateInterval` ago. The DB write
-// runs in a goroutine to keep the request hot path lean (#421)。
-//
-// 同じ map で eviction も行う。古いエントリ (= last update から
-// `lastActiveUpdateInterval * 2` 以上経過) は次回 lookup の機会に削除する
-// ことで、長期稼働しても map サイズが「直近アクティブな user 数」程度に
-// 収束する (#421 Devin review: unbounded growth 対策)。
-//
-// 通過頻度が高くないので、専用 ticker goroutine ではなく lazy 削除で十分。
-func (a *AuthMiddleware) touchLastActive(userID string) {
-	if userID == "" || a.userRepo == nil {
-		return
-	}
-	now := time.Now()
-	a.lastActiveMu.Lock()
-	last, ok := a.lastActiveSeen[userID]
-	if ok && now.Sub(last) < lastActiveUpdateInterval {
-		a.lastActiveMu.Unlock()
-		return
-	}
-	a.lastActiveSeen[userID] = now
-	// 古い entry の lazy eviction。同じ lock 取得中に O(n) 走査するが、
-	// touch は既に DB 書き込み rate-limited されている (5 分間隔) ので
-	// hot path への影響は限定的。
-	staleBefore := now.Add(-2 * lastActiveUpdateInterval)
-	for uid, t := range a.lastActiveSeen {
-		if t.Before(staleBefore) {
-			delete(a.lastActiveSeen, uid)
-		}
-	}
-	a.lastActiveMu.Unlock()
-
-	go func(uid string, t time.Time) {
-		if err := a.userRepo.UpdateUser(uid, map[string]any{"lastActiveDate": t}); err != nil {
-			slog.Debug("auth: lastActiveDate update failed", "userId", uid, "err", err)
-		}
-	}(userID, now)
 }
 
 // credentialRequiredResponse writes the error for a credential-required gate
