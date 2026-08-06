@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -646,9 +645,9 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 func (s *Service) matchSource(a *model.Antenna, author *model.User, ownerFollowsAuthor bool) bool {
 	switch a.Src {
 	case model.AntennaSourceUsers:
-		return slices.Contains(a.Users, author.Username)
+		return matchesAntennaAcct(a.Users, author)
 	case model.AntennaSourceUsersBlacklist:
-		return !slices.Contains(a.Users, author.Username)
+		return !matchesAntennaAcct(a.Users, author)
 	case model.AntennaSourceHome:
 		if ownerFollowsAuthor {
 			return true
@@ -676,6 +675,29 @@ func (s *Service) matchSource(a *model.Antenna, author *model.User, ownerFollows
 		// all
 		return true
 	}
+}
+
+// matchesAntennaAcct reports whether the note author is listed in the antenna's
+// `users` set.
+//
+// upstream は保存値を Acct.parse して `username@host` (local は host 無し) に
+// 正規化してから比較する。frontend が送るのは `@bob` / `@bob@remote.example`
+// の acct 形式なので、username と素で比較すると 1 件も一致しない。
+// 大文字小文字は upstream 同様無視する。
+func matchesAntennaAcct(users []string, author *model.User) bool {
+	if author == nil {
+		return false
+	}
+	want := strings.ToLower(author.Username)
+	if author.Host != nil && *author.Host != "" {
+		want += "@" + strings.ToLower(*author.Host)
+	}
+	for _, u := range users {
+		if strings.ToLower(strings.TrimPrefix(strings.TrimSpace(u), "@")) == want {
+			return true
+		}
+	}
+	return false
 }
 
 // matchKeywords evaluates a DNF (Disjunctive Normal Form) keyword set:
