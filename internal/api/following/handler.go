@@ -229,7 +229,7 @@ type ListRequest struct {
 	UntilID      string `json:"untilId"`
 	SinceDate    *int64 `json:"sinceDate"`
 	UntilDate    *int64 `json:"untilDate"`
-	Limit        int    `json:"limit"`
+	Limit        *int   `json:"limit"`
 }
 
 // List handles POST /api/following/list (upstream 2026.5.2 #17385 + #17416)。
@@ -241,13 +241,16 @@ func (h *Handler) List(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate (Unix ms) を aidx prefix に正規化して sinceID /
 	// untilID と同 SQL cursor で扱う (#1166)。sinceID が指定されている場合
 	// upstream 同様 sinceDate は無視される。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
-	rows, err := h.followingService.ListFollowingForList(me.ID, sinceID, untilID, req.Notification, req.Limit)
+	rows, err := h.followingService.ListFollowingForList(me.ID, sinceID, untilID, req.Notification, limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -291,7 +294,7 @@ func (h *Handler) List(c echo.Context) error {
 func (h *Handler) ListRequests(c echo.Context) error {
 	me := middleware.GetUser(c)
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -301,8 +304,11 @@ func (h *Handler) ListRequests(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	requests, err := h.followingService.ListReceivedRequests(me.ID, req.Limit, sinceID, untilID)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	requests, err := h.followingService.ListReceivedRequests(me.ID, limit, sinceID, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

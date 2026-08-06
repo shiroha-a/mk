@@ -223,7 +223,7 @@ func (h *Handler) usernameOf(userID string) string {
 
 // PaginationRequest is the shared body for list-style endpoints.
 type PaginationRequest struct {
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
@@ -234,7 +234,7 @@ type PaginationRequest struct {
 // SearchRequest is the request body for flash/search.
 type SearchRequest struct {
 	Query     string `json:"query"`
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
@@ -253,8 +253,11 @@ func (h *Handler) My(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	rows, err := h.svc.My(user.ID, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.svc.My(user.ID, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -273,8 +276,11 @@ func (h *Handler) Featured(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	rows, err := h.svc.Featured(sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.svc.Featured(sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -289,8 +295,11 @@ func (h *Handler) Search(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 5, 100)
-	rows, err := h.svc.Search(req.Query, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 5, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.svc.Search(req.Query, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -359,8 +368,11 @@ func (h *Handler) MyLikes(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	pairs, err := h.svc.MyLikes(user.ID, req.Search, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	pairs, err := h.svc.MyLikes(user.ID, req.Search, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

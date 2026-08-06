@@ -897,12 +897,12 @@ func TestTimeline_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestTimeline_LimitClamping(t *testing.T) {
+func TestTimeline_LimitOutOfRangeRejected(t *testing.T) {
 	h, repo, _, _ := newHandler(t)
 	repo.Channels["c1"] = &model.Channel{ID: "c1"}
 	c, rec := newReq(t, `{"channelId":"c1","limit":9999}`)
 	require.NoError(t, h.Timeline(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // TestTimeline_HidesNonPublicFromOutsiders は public channel に投稿された

@@ -371,12 +371,12 @@ func TestList_OK(t *testing.T) {
 	shapetest.Assert(t, "Blocking", resp[0]) // L3 (#1286)
 }
 
-func TestList_LimitClamping(t *testing.T) {
+func TestList_LimitOutOfRangeRejected(t *testing.T) {
 	h, _ := newHandler(t)
 	c, rec := newReq(t, `{"limit":1000}`)
 	setUser(c, "alice")
 	require.NoError(t, h.List(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestList_InvalidJSON(t *testing.T) {

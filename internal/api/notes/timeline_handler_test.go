@@ -371,13 +371,17 @@ func TestTimeline_HappyPathLocal(t *testing.T) {
 	require.NoError(t, fanout.Push(context.Background(), coretimeline.LocalTimeline, noteID, 100))
 
 	h := newTimelineHandler(t, noteRepo, tl)
-	// limit clamping もここで踏んでおく
-	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{"limit":1000}`)
+	c, rec := newJSONRequest(t, "/api/notes/local-timeline", `{"limit":100}`)
 	require.NoError(t, h.LocalTimeline(c))
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Len(t, resp, 1)
+
+	// 範囲外 limit は 400 (upstream の ajv maximum)。
+	c, rec = newJSONRequest(t, "/api/notes/local-timeline", `{"limit":1000}`)
+	require.NoError(t, h.LocalTimeline(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestTimeline_HappyPathGlobal(t *testing.T) {

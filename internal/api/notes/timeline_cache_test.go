@@ -35,23 +35,23 @@ func TestTimelineJSONCache_GetSetTTL(t *testing.T) {
 // timelineCacheKey は出力に影響する全 param で別 key になること (= 別 viewer /
 // 別条件の応答を取り違えない)。同一 param なら同一 key。
 func TestTimelineCacheKey_Distinguishes(t *testing.T) {
-	baseReq := TimelineRequest{Limit: 10}
+	baseReq := TimelineRequest{Limit: intPtr(10)}
 	base := timelineCacheKey("home", "u1", baseReq)
 
 	// 同一条件 → 同一 key
-	assert.Equal(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: 10}))
+	assert.Equal(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: intPtr(10)}))
 
 	// 差分はすべて別 key
 	assert.NotEqual(t, base, timelineCacheKey("local", "u1", baseReq), "kind")
 	assert.NotEqual(t, base, timelineCacheKey("home", "u2", baseReq), "viewer")
-	assert.NotEqual(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: 20}), "limit")
-	assert.NotEqual(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: 10, WithFiles: true}), "withFiles")
-	assert.NotEqual(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: 10, AllowPartial: true}), "allowPartial")
+	assert.NotEqual(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: intPtr(20)}), "limit")
+	assert.NotEqual(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: intPtr(10), WithFiles: true}), "withFiles")
+	assert.NotEqual(t, base, timelineCacheKey("home", "u1", TimelineRequest{Limit: intPtr(10), AllowPartial: true}), "allowPartial")
 
 	// pointer bool は nil / true / false で 3 通り別 key
-	kNil := timelineCacheKey("home", "u1", TimelineRequest{Limit: 10, WithRenotes: nil})
-	kTrue := timelineCacheKey("home", "u1", TimelineRequest{Limit: 10, WithRenotes: boolPtr(true)})
-	kFalse := timelineCacheKey("home", "u1", TimelineRequest{Limit: 10, WithRenotes: boolPtr(false)})
+	kNil := timelineCacheKey("home", "u1", TimelineRequest{Limit: intPtr(10), WithRenotes: nil})
+	kTrue := timelineCacheKey("home", "u1", TimelineRequest{Limit: intPtr(10), WithRenotes: boolPtr(true)})
+	kFalse := timelineCacheKey("home", "u1", TimelineRequest{Limit: intPtr(10), WithRenotes: boolPtr(false)})
 	assert.NotEqual(t, kNil, kTrue)
 	assert.NotEqual(t, kNil, kFalse)
 	assert.NotEqual(t, kTrue, kFalse)
@@ -76,3 +76,5 @@ func TestTimelineJSONCache_Bounded(t *testing.T) {
 	assert.True(t, okD, "期限切れ sweep 後は空きに入る")
 	assert.Equal(t, "4", string(body))
 }
+
+func intPtr(v int) *int { return &v }

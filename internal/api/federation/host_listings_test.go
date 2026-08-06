@@ -452,10 +452,10 @@ func TestUsers_ReturnsUserDetailedShape(t *testing.T) {
 
 func strPtr(s string) *string { return &s }
 
-// bindHostPage の limit clamp 分岐 (>100) カバー
-func TestFollowers_LimitClampedAt100(t *testing.T) {
+// 範囲外 limit は 400 (upstream の ajv maximum)。
+func TestFollowers_LimitOutOfRangeRejected(t *testing.T) {
 	h, _ := newHandler(t)
 	h.SetFollowingRepo(testutil.NewMockFollowingRepository())
 	rec := postBody(h.Followers, `{"host":"remote.example","limit":500}`)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }

@@ -704,7 +704,7 @@ func TestList_NotificationFilter(t *testing.T) {
 	assert.Equal(t, "bob", out[0]["followeeId"])
 }
 
-func TestList_LimitClamp(t *testing.T) {
+func TestList_LimitOutOfRangeRejected(t *testing.T) {
 	h, repo, fRepo := newTestHandlerWithFollowings(t)
 	alice := addUser(repo, "alice", false)
 	// 200 件積んで limit=100 にクランプされること
@@ -720,11 +720,16 @@ func TestList_LimitClamp(t *testing.T) {
 		}
 	}
 
+	// upstream は ajv で maximum を強制するので範囲外は 400。
 	rec := postJSON(h.List, `{"limit": 9999}`, alice)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 上限ちょうどは通り、最大 100 件まで返る。
+	rec = postJSON(h.List, `{"limit": 100}`, alice)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var out []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	assert.LessOrEqual(t, len(out), 100, "上限 100 にクランプされる")
+	assert.LessOrEqual(t, len(out), 100)
 }
 
 func TestList_DefaultLimit(t *testing.T) {

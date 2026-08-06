@@ -118,7 +118,7 @@ type InstancesRequest struct {
 	Subscribing   *bool  `json:"subscribing" query:"subscribing"`
 	Publishing    *bool  `json:"publishing" query:"publishing"`
 	Sort          string `json:"sort" query:"sort"`
-	Limit         int    `json:"limit" query:"limit"`
+	Limit         *int   `json:"limit" query:"limit"`
 	Offset        int    `json:"offset" query:"offset"`
 	SinceID       string `json:"sinceId" query:"sinceId"`
 	UntilID       string `json:"untilId" query:"untilId"`
@@ -143,7 +143,10 @@ func (h *Handler) Instances(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 30, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 30, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	filter := model.InstanceListFilter{
 		Host:          req.Host,
 		Suspended:     req.Suspended,
@@ -156,7 +159,7 @@ func (h *Handler) Instances(c echo.Context) error {
 		Subscribing:   req.Subscribing,
 		Publishing:    req.Publishing,
 		SortBy:        req.Sort,
-		Limit:         req.Limit,
+		Limit:         limit,
 		Offset:        req.Offset,
 		SinceID:       sinceID,
 		UntilID:       untilID,

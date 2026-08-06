@@ -1064,13 +1064,17 @@ func TestEmojiListV2_SensitiveFilter(t *testing.T) {
 	assert.Equal(t, "e2", emojis[0].(map[string]any)["id"])
 }
 
-func TestEmojiListV2_LimitClamped(t *testing.T) {
+func TestEmojiListV2_LimitOutOfRangeRejected(t *testing.T) {
 	h, _ := setupEmojiHandler(t,
 		&model.Emoji{ID: "e1", Name: "a"},
 	)
 
-	// limit > 100 は100にクランプされる
+	// upstream は ajv で maximum を強制するので範囲外は 400。
 	rec := doPost(h.EmojiListV2, `{"limit":999}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	// 範囲内なら従来どおり結果を返す。
+	rec = doPost(h.EmojiListV2, `{"limit":100}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))

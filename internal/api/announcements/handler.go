@@ -114,7 +114,7 @@ func (h *Handler) logAnnouncementAction(c echo.Context, globalType, userType mod
 // List handles POST /api/announcements.
 func (h *Handler) List(c echo.Context) error {
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
@@ -137,12 +137,15 @@ func (h *Handler) List(c echo.Context) error {
 	// 漏らさない。
 	user := middleware.GetUser(c)
 	var items []*model.Announcement
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	var err error
 	if user != nil {
-		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-		items, err = h.repo.ListForUser(user.ID, activeOnly, req.Limit, req.Offset, sinceID, untilID)
+		items, err = h.repo.ListForUser(user.ID, activeOnly, limit, req.Offset, sinceID, untilID)
 	} else {
-		items, err = h.repo.ListGlobal(activeOnly, req.Limit, req.Offset, sinceID, untilID)
+		items, err = h.repo.ListGlobal(activeOnly, limit, req.Offset, sinceID, untilID)
 	}
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -455,7 +458,7 @@ func (h *Handler) AdminDelete(c echo.Context) error {
 //   - Each row carries a reads count (announcement_read row count).
 func (h *Handler) AdminList(c echo.Context) error {
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
@@ -469,8 +472,11 @@ func (h *Handler) AdminList(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	items, err := h.repo.ListForAdmin(req.UserID, req.Status, req.Limit, req.Offset, sinceID, untilID)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	items, err := h.repo.ListForAdmin(req.UserID, req.Status, limit, req.Offset, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

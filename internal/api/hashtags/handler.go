@@ -71,7 +71,7 @@ var listSortOrders = map[string]string{
 // List handles POST /api/hashtags/list.
 func (h *Handler) List(c echo.Context) error {
 	var req struct {
-		Limit                    int    `json:"limit"`
+		Limit                    *int   `json:"limit"`
 		Sort                     string `json:"sort"`
 		Offset                   int    `json:"offset"`
 		AttachedToUserOnly       bool   `json:"attachedToUserOnly"`
@@ -87,7 +87,10 @@ func (h *Handler) List(c echo.Context) error {
 	if !ok {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "sort must be one of upstream-defined enum.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// upstream list.ts: attachedTo* で attachedUsersCount 系が != 0 の tag のみに絞る。
 	q := h.db.Model(&model.Hashtag{})
 	if req.AttachedToUserOnly {
@@ -99,7 +102,7 @@ func (h *Handler) List(c echo.Context) error {
 	if req.AttachedToRemoteUserOnly {
 		q = q.Where(`"attachedRemoteUsersCount" != 0`)
 	}
-	q = q.Order(order).Limit(req.Limit)
+	q = q.Order(order).Limit(limit)
 	if req.Offset > 0 {
 		q = q.Offset(req.Offset)
 	}
@@ -118,20 +121,23 @@ func (h *Handler) List(c echo.Context) error {
 func (h *Handler) Search(c echo.Context) error {
 	var req struct {
 		Query  string `json:"query"`
-		Limit  int    `json:"limit"`
+		Limit  *int   `json:"limit"`
 		Offset int    `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil || req.Query == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "query is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// upstream search.ts: name LIKE sqlLikeEscape(query.toLowerCase())+'%' (前方一致)
 	// を mentionedLocalUsersCount DESC で並べ offset を適用する。hashtag.name は
 	// normalizeForSearch 済 (lowercase) で格納されるため小文字化で一致する。
 	q := h.db.Model(&model.Hashtag{}).
 		Where(`"name" LIKE ? ESCAPE '\'`, escapeLike(strings.ToLower(req.Query))+"%").
 		Order(`"mentionedLocalUsersCount" DESC`).
-		Limit(req.Limit)
+		Limit(limit)
 	if req.Offset > 0 {
 		q = q.Offset(req.Offset)
 	}
@@ -346,7 +352,7 @@ func (h *Handler) Users(c echo.Context) error {
 		Sort   string `json:"sort"`
 		State  string `json:"state"`
 		Origin string `json:"origin"`
-		Limit  int    `json:"limit"`
+		Limit  *int   `json:"limit"`
 		Offset int    `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil || req.Tag == "" || req.Sort == "" {
@@ -368,7 +374,10 @@ func (h *Handler) Users(c echo.Context) error {
 	if _, ok := validUsersOrigins[req.Origin]; !ok {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "origin must be one of upstream-defined enum.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	if req.Offset < 0 {
 		req.Offset = 0
 	}
@@ -404,7 +413,7 @@ func (h *Handler) Users(c echo.Context) error {
 	}
 
 	var users []*model.User
-	if err := q.Limit(req.Limit).Offset(req.Offset).Find(&users).Error; err != nil {
+	if err := q.Limit(limit).Offset(req.Offset).Find(&users).Error; err != nil {
 		return apierr.JSONInternalError(c)
 	}
 

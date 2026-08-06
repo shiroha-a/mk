@@ -17,10 +17,13 @@ func (h *Handler) Stats(c echo.Context) error {
 	// admin/overview は GET で叩いてくるので `query` タグも必要
 	// (#421 Devin review: charts.Request と同じ pattern)。
 	var req struct {
-		Limit int `json:"limit" query:"limit"`
+		Limit *int `json:"limit" query:"limit"`
 	}
 	_ = c.Bind(&req)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 
 	empty := map[string]any{
 		"topSubInstances":     []any{},
@@ -38,11 +41,11 @@ func (h *Handler) Stats(c echo.Context) error {
 	// followersCount>0 / followingCount>0 で絞るので Subscribing / Publishing を
 	// 立てる (= instance.go の followersCount>0 / followingCount>0 フィルタ、#1544)。
 	yes := true
-	subs, err := h.svc.List(model.InstanceListFilter{Subscribing: &yes, SortBy: "+followers", Limit: req.Limit})
+	subs, err := h.svc.List(model.InstanceListFilter{Subscribing: &yes, SortBy: "+followers", Limit: limit})
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	pubs, err := h.svc.List(model.InstanceListFilter{Publishing: &yes, SortBy: "+following", Limit: req.Limit})
+	pubs, err := h.svc.List(model.InstanceListFilter{Publishing: &yes, SortBy: "+following", Limit: limit})
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

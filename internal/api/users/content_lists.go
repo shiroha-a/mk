@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -23,7 +24,7 @@ import (
 func (h *Handler) Clips(c echo.Context) error {
 	var req struct {
 		UserID    string `json:"userId"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
@@ -36,7 +37,11 @@ func (h *Handler) Clips(c echo.Context) error {
 	if h.clipRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	clampListLimit(&req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.Limit = &limit
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
@@ -44,7 +49,7 @@ func (h *Handler) Clips(c echo.Context) error {
 	// upstream clips.ts:54 は viewer に関係なく公開 clip のみ返す (clip.isPublic=true)。
 	// owner の非公開 clip は i/clips 等で取得する設計 (#1784)。notesCount は owner
 	// 閲覧時のみ出すため isSelf は下の ClipExtras で引き続き使う。
-	rows, err := h.clipRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	rows, err := h.clipRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -93,7 +98,7 @@ func (h *Handler) Clips(c echo.Context) error {
 func (h *Handler) Flashs(c echo.Context) error {
 	var req struct {
 		UserID    string `json:"userId"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
@@ -106,12 +111,16 @@ func (h *Handler) Flashs(c echo.Context) error {
 	if h.flashRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	clampListLimit(&req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.Limit = &limit
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// upstream flashs.ts:54 は viewer に関係なく公開 flash のみ返す
 	// (visibility='public')。owner の非公開 flash は i/* 系で取得する設計 (#1784)。
-	rows, err := h.flashRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	rows, err := h.flashRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -154,7 +163,7 @@ func (h *Handler) Flashs(c echo.Context) error {
 func (h *Handler) GalleryPosts(c echo.Context) error {
 	var req struct {
 		UserID    string `json:"userId"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
@@ -167,10 +176,14 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 	if h.galleryRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	clampListLimit(&req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.Limit = &limit
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	rows, err := h.galleryRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	rows, err := h.galleryRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -255,7 +268,7 @@ func (h *Handler) resolveGalleryFiles(fileIDs []string) []any {
 func (h *Handler) Pages(c echo.Context) error {
 	var req struct {
 		UserID    string `json:"userId"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
@@ -268,12 +281,16 @@ func (h *Handler) Pages(c echo.Context) error {
 	if h.pageRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	clampListLimit(&req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.Limit = &limit
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// upstream pages.ts:54 は viewer に関係なく公開 page のみ返す
 	// (visibility='public')。owner の非公開 page は i/pages 等で取得する設計 (#1784)。
-	rows, err := h.pageRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, req.Limit, req.Offset)
+	rows, err := h.pageRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -298,14 +315,4 @@ func (h *Handler) Pages(c echo.Context) error {
 		}))
 	}
 	return c.JSON(http.StatusOK, out)
-}
-
-// clampListLimit normalises a user-supplied limit to 1..100 with a default of 10.
-func clampListLimit(limit *int) {
-	if *limit <= 0 {
-		*limit = 10
-	}
-	if *limit > 100 {
-		*limit = 100
-	}
 }

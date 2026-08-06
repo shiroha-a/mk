@@ -1824,7 +1824,7 @@ func TestRolesUsers_Success_Empty(t *testing.T) {
 	assert.Equal(t, "[]\n", rec.Body.String())
 }
 
-func TestRolesUsers_LimitClamping(t *testing.T) {
+func TestRolesUsers_LimitValidation(t *testing.T) {
 	h, userRepo, roleRepo, assignRepo := rolesUsersFixture(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
 	// limit=0 → default 10、limit>100 → 100 にクランプされていることを 3 件 seed で確認
@@ -1842,12 +1842,10 @@ func TestRolesUsers_LimitClamping(t *testing.T) {
 	assert.Len(t, resp, 2)
 	assert.Equal(t, 2, assignRepo.LastListByRoleLimit, "limit=2 がそのまま repo に伝わる")
 
-	// limit=999 → 100 にクランプ。Mock の LastListByRoleLimit を見て
-	// repo 側が 100 で受け取ったことを直接 assert (件数だけだと seed=3 で見えない)。
+	// limit=999 は範囲外なので 400 (upstream の ajv maximum)。repo は呼ばれない。
 	rec = doPost(h.RolesUsers, `{"roleId":"r1","limit":999}`, nil)
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Len(t, resp, 3)
-	assert.Equal(t, 100, assignRepo.LastListByRoleLimit, "limit>100 は 100 にクランプされる")
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, 2, assignRepo.LastListByRoleLimit, "拒否された request は repo に届かない")
 
 	// limit=0 (未指定) → default 10
 	rec = doPost(h.RolesUsers, `{"roleId":"r1"}`, nil)

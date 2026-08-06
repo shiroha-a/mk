@@ -18,7 +18,7 @@ import (
 
 // TimelineRequest is the common request body for the four timeline endpoints.
 type TimelineRequest struct {
-	Limit                 int    `json:"limit"`
+	Limit                 *int   `json:"limit"`
 	SinceID               string `json:"sinceId"`
 	UntilID               string `json:"untilId"`
 	SinceDate             *int64 `json:"sinceDate"`
@@ -32,13 +32,15 @@ type TimelineRequest struct {
 	AllowPartial          bool   `json:"allowPartial"`
 }
 
-func (r *TimelineRequest) normalize() {
-	if r.Limit <= 0 {
-		r.Limit = 10
+// normalize validates limit against upstream の paramDef。ok=false は範囲外で、
+// 呼び出し側は 400 INVALID_PARAM を返す。
+func (r *TimelineRequest) normalize() bool {
+	limit, ok := pagination.ResolveLimit(r.Limit, 10, 100)
+	if !ok {
+		return false
 	}
-	if r.Limit > 100 {
-		r.Limit = 100
-	}
+	r.Limit = &limit
+	return true
 }
 
 // Policy keys consumed by timeline gates. notes package 内 private const に
@@ -97,8 +99,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 			FollowedChannelIDs:    h.loadFollowedChannelIDs(viewer),
 			FollowingIDs:          h.loadFollowingIDs(viewer),
 		}
-		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-		return h.timelineService.HomeTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
+		return h.timelineService.HomeTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, *req.Limit, f)
 	}, true)
 }
 
@@ -119,8 +120,7 @@ func (h *Handler) LocalTimeline(c echo.Context) error {
 			BlockerIDs:         h.loadBlockerIDs(viewer),
 			MutedInstances:     h.loadMutedInstances(viewer),
 		}
-		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-		return h.timelineService.LocalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
+		return h.timelineService.LocalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, *req.Limit, f)
 	}, false)
 }
 
@@ -140,8 +140,7 @@ func (h *Handler) GlobalTimeline(c echo.Context) error {
 			BlockerIDs:         h.loadBlockerIDs(viewer),
 			MutedInstances:     h.loadMutedInstances(viewer),
 		}
-		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-		return h.timelineService.GlobalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
+		return h.timelineService.GlobalTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, *req.Limit, f)
 	}, false)
 }
 
@@ -175,8 +174,7 @@ func (h *Handler) HybridTimeline(c echo.Context) error {
 			FollowedChannelIDs: h.loadFollowedChannelIDs(viewer),
 			FollowingIDs:       h.loadFollowingIDs(viewer),
 		}
-		req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-		return h.timelineService.HybridTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, req.Limit, f)
+		return h.timelineService.HybridTimeline(c.Request().Context(), viewer, req.UntilID, req.SinceID, *req.Limit, f)
 	}, true)
 }
 
@@ -358,7 +356,9 @@ func (h *Handler) serveTimeline(
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.normalize()
+	if !req.normalize() {
+		return apierr.JSONInvalidParam(c)
+	}
 
 	// upstream local/hybrid-timeline は withReplies && withFiles 同時指定を
 	// BOTH_WITH_REPLIES_AND_WITH_FILES で弾く (endpoint 固有 UUID、#1554)。

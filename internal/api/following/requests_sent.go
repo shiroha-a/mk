@@ -18,7 +18,7 @@ import (
 func (h *Handler) RequestsSent(c echo.Context) error {
 	me := middleware.GetUser(c)
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -27,8 +27,11 @@ func (h *Handler) RequestsSent(c echo.Context) error {
 	_ = c.Bind(&req)
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	rows, err := h.followingService.ListSentRequests(me.ID, req.Limit, sinceID, untilID)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.followingService.ListSentRequests(me.ID, limit, sinceID, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

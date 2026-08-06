@@ -373,7 +373,7 @@ func (h *Handler) List(c echo.Context) error {
 // 「同じノートが何度も表示される」現象になる。
 type NotesRequest struct {
 	AntennaID string `json:"antennaId"`
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
 	SinceDate *int64 `json:"sinceDate"`
@@ -389,13 +389,16 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// over-fetch: stream に滞留した followers/specified entry や hardMute hit が
-	// handler 側 filter で削られると、返却件数が req.Limit を下回り得る。安全側に
+	// handler 側 filter で削られると、返却件数が limit を下回り得る。安全側に
 	// limit の 2 倍 (上限 MaxNotesPerAntenna) で stream から拾い、filter 後に
-	// req.Limit へトリミングする (#1467 review)。FE は最後の note id を untilId
+	// limit へトリミングする (#1467 review)。FE は最後の note id を untilId
 	// に渡してくるため、トリミングしてもページング境界は保たれる。
-	overFetch := req.Limit * 2
+	overFetch := limit * 2
 	if overFetch > coreantenna.MaxNotesPerAntenna {
 		overFetch = coreantenna.MaxNotesPerAntenna
 	}
@@ -447,9 +450,9 @@ func (h *Handler) Notes(c echo.Context) error {
 	notes = notesfilter.ApplyBlockedHosts(notes, blockedHosts)
 	notes = notesfilter.ApplySuspended(notes)
 	// over-fetch 分を要求 limit に揃える。FindManyByIDsWithUser が ids の順序を
-	// 保つので newest-first の先頭 req.Limit 件を返せばよい (#1467 review)。
-	if len(notes) > req.Limit {
-		notes = notes[:req.Limit]
+	// 保つので newest-first の先頭 limit 件を返せばよい (#1467 review)。
+	if len(notes) > limit {
+		notes = notes[:limit]
 	}
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, user)

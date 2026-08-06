@@ -143,7 +143,7 @@ func (h *Handler) SetFollowRequestRepo(r repository.FollowRequestRepository) {
 
 // ListRequest is the request body for notifications.
 type ListRequest struct {
-	Limit        int      `json:"limit"`
+	Limit        *int     `json:"limit"`
 	IncludeTypes []string `json:"includeTypes"`
 	ExcludeTypes []string `json:"excludeTypes"`
 	SinceID      string   `json:"sinceId"`
@@ -237,7 +237,11 @@ func (h *Handler) bindListRequest(c echo.Context) (ListRequest, bool) {
 	// native ID と aidx ID は別物だが、本 endpoint の cursor は notification.ID
 	// (= aidx) で判定する設計なので adapter pattern で完結する。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return req, false
+	}
+	req.Limit = &limit
 	return req, true
 }
 
@@ -260,7 +264,7 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	// (sinceId/untilId)・向き (sinceId-only は昇順)・type filter・limit を適用して
 	// 返す (#1953)。ここではその後段で upstream packMany 側の drop (解決済み follow
 	// request / invalid notifier / 不可視 note) を適用する。
-	rows, err := h.svc.List(c.Request().Context(), user.ID, req.SinceID, req.UntilID, req.Limit, req.IncludeTypes, req.ExcludeTypes)
+	rows, err := h.svc.List(c.Request().Context(), user.ID, req.SinceID, req.UntilID, (*req.Limit), req.IncludeTypes, req.ExcludeTypes)
 	if err != nil {
 		return nil, nil, nil, err
 	}

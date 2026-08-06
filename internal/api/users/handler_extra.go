@@ -336,7 +336,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
 		UserID    string `json:"userId"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -347,7 +347,10 @@ func (h *Handler) Reactions(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 
 	// upstream: moderator / admin は全ユーザー (remote / 非 public reactions
 	// 含む) の reaction を閲覧できる ("Moderators can see reactions of all
@@ -404,7 +407,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if viewer != nil {
 		viewerID = viewer.ID
 	}
-	rows, err := h.noteReactionRepo.ListByUserID(req.UserID, viewerID, req.UntilID, req.SinceID, req.Limit)
+	rows, err := h.noteReactionRepo.ListByUserID(req.UserID, viewerID, req.UntilID, req.SinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -503,13 +506,16 @@ func (h *Handler) Reactions(c echo.Context) error {
 func (h *Handler) FeaturedNotes(c echo.Context) error {
 	var req struct {
 		UserID  string `json:"userId"`
-		Limit   int    `json:"limit"`
+		Limit   *int   `json:"limit"`
 		UntilID string `json:"untilId"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	viewer := middleware.GetUser(c)
 	var viewerID string
 	if viewer != nil {
@@ -519,7 +525,7 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	if h.isBlockedByTarget(viewer, req.UserID) {
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
 	}
-	notes, err := h.featuredNotesByUser(c.Request().Context(), req.UserID, viewerID, req.UntilID, req.Limit)
+	notes, err := h.featuredNotesByUser(c.Request().Context(), req.UserID, viewerID, req.UntilID, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -592,7 +598,7 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 		// 絞らずに host だけで検索する。両方欠けたときだけ 400。
 		Username *string `json:"username"`
 		Host     *string `json:"host"`
-		Limit    int     `json:"limit"`
+		Limit    *int    `json:"limit"`
 		// Detail は upstream search-by-username-and-host.ts:52 と同じく default
 		// true。false のとき UserLite を返す (#1547)。
 		Detail *bool `json:"detail"`
@@ -614,10 +620,13 @@ func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 	if req.Username != nil {
 		username = *req.Username
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// host=nil → local user、host=*string → 当該 host のみで絞り込む
 	// (#766 fix、upstream Misskey TS の同 endpoint と同じ semantics)。
-	users, err := h.userService.SearchByUsernameAndHost(username, req.Host, req.Limit)
+	users, err := h.userService.SearchByUsernameAndHost(username, req.Host, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

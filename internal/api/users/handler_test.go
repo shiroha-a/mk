@@ -789,12 +789,13 @@ func TestSearch_BatchFetchesProfiles(t *testing.T) {
 		"all 5 user IDs should be coalesced into a single batch")
 }
 
-func TestSearch_DefaultLimit(t *testing.T) {
+func TestSearch_LimitZeroRejected(t *testing.T) {
 	h, repo := newTestHandler(t)
 	addTestUser(repo)
 
+	// upstream は ajv で minimum:1 を強制するので limit:0 は 400。
 	rec := post(h.Search, `{"query": "test", "limit": 0}`)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSearch_InvalidJSON(t *testing.T) {
@@ -1089,11 +1090,12 @@ func TestNotes_FollowerSeesFollowersVisibility(t *testing.T) {
 	assert.Equal(t, "nv_fol2", out[0]["id"])
 }
 
-func TestNotes_LimitClamp(t *testing.T) {
+func TestNotes_LimitOutOfRangeRejected(t *testing.T) {
 	h, repo := newTestHandler(t)
 	addTestUser(repo)
+	// upstream は ajv で maximum を強制するので範囲外は 400。
 	rec := post(h.Notes, `{"userId": "user1", "limit": 9999}`)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // #2106 L9: 存在しない userId は upstream notes.ts 同様 200 [] を返す (404 でない)。
@@ -1497,11 +1499,12 @@ func TestFollowers_BatchFetchesUsers(t *testing.T) {
 		"FindProfilesByUserIDs should be called exactly once per request")
 }
 
-func TestFollowers_LimitClamp(t *testing.T) {
+func TestFollowers_LimitOutOfRangeRejected(t *testing.T) {
 	h, repo := newTestHandler(t)
 	addTestUser(repo)
+	// upstream は ajv で maximum を強制するので範囲外は 400。
 	rec := post(h.Followers, `{"userId": "user1", "limit": 9999}`)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestFollowers_UserNotFound(t *testing.T) {

@@ -2,21 +2,26 @@
 // pagination params (limit / sinceId / untilId).
 package pagination
 
-// ClampLimit normalizes a requested page-size limit to an endpoint's bounds.
+// ResolveLimit validates a requested page-size limit against an endpoint's
+// bounds and returns the effective value.
 //
-// def is the value applied when the caller omits limit (limit <= 0); max is the
-// upper bound. Both must match the upstream Misskey paramDef for the endpoint
-// (`default` / `maximum`), which the limit-spec drift gate
-// (entitycompat.TestLimitSpecDrift) verifies by reading the literals at each
-// ClampLimit call site. Unlike Misskey — which rejects out-of-range limits via
-// ajv — mk-go clamps, which is strictly more lenient; only the default/max
-// VALUES are contractually gated.
-func ClampLimit(limit, def, max int) int {
-	if limit <= 0 {
-		return def
+// limit == nil はキー省略で、def (upstream paramDef の `default`) を返す。
+// 値がある場合は 1..max の範囲を要求し、外れていれば ok=false を返す。
+// 呼び出し側はその場合 INVALID_PARAM (400) を返すこと。
+//
+// def / max は upstream の paramDef (`default` / `maximum`) と一致させる。
+// 各呼び出し箇所のリテラルは limit-spec drift gate
+// (entitycompat.TestLimitSpecDrift) が golden と突き合わせて検証する。
+//
+// 以前は範囲外を黙って丸めていた (ClampLimit) が、upstream は ajv で 400 に
+// するため、`limit: 0` や `limit: 101` を送ったクライアントが「丸められた件数」
+// を正しい応答と誤認できた。
+func ResolveLimit(limit *int, def, max int) (int, bool) {
+	if limit == nil {
+		return def, true
 	}
-	if limit > max {
-		return max
+	if *limit < 1 || *limit > max {
+		return 0, false
 	}
-	return limit
+	return *limit, true
 }

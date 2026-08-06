@@ -93,7 +93,7 @@ func TestList_WithOffset(t *testing.T) {
 }
 
 func TestList_LimitCap(t *testing.T) {
-	assert.Equal(t, http.StatusOK, doPost(newHandler().List, `{"limit":999,"sort":"+mentionedUsers"}`).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(newHandler().List, `{"limit":999,"sort":"+mentionedUsers"}`).Code)
 }
 
 func TestList_InvalidJSON(t *testing.T) {

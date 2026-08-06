@@ -759,7 +759,7 @@ func emptyFolderIDToNil(s *string) *string {
 func (h *Handler) FilesList(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit     int     `json:"limit"`
+		Limit     *int    `json:"limit"`
 		SinceID   string  `json:"sinceId"`
 		UntilID   string  `json:"untilId"`
 		SinceDate *int64  `json:"sinceDate"`
@@ -779,13 +779,16 @@ func (h *Handler) FilesList(c echo.Context) error {
 	if req.Type != "" && !driveTypePatternRe.MatchString(req.Type) {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	files, err := h.fileRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), false, req.Type, req.Sort, untilID, sinceID, req.Limit)
+	files, err := h.fileRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), false, req.Type, req.Sort, untilID, sinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -873,7 +876,7 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
 		FileID    string `json:"fileId"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -904,8 +907,11 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	notes, err := h.noteRepo.ListByFileID(req.FileID, sinceID, untilID, req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	notes, err := h.noteRepo.ListByFileID(req.FileID, sinceID, untilID, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -1020,7 +1026,7 @@ func (h *Handler) FilesMoveBulk(c echo.Context) error {
 func (h *Handler) Stream(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -1034,14 +1040,17 @@ func (h *Handler) Stream(c echo.Context) error {
 	if req.Type != "" && !driveTypePatternRe.MatchString(req.Type) {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	if h.fileRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// upstream stream.ts は folder 条件を付けず全 folder 横断 (#1564)。
-	files, err := h.fileRepo.ListByUser(user.ID, nil, true, req.Type, "", untilID, sinceID, req.Limit)
+	files, err := h.fileRepo.ListByUser(user.ID, nil, true, req.Type, "", untilID, sinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
@@ -1057,7 +1066,7 @@ func (h *Handler) Stream(c echo.Context) error {
 func (h *Handler) FoldersList(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit     int     `json:"limit"`
+		Limit     *int    `json:"limit"`
 		SinceID   string  `json:"sinceId"`
 		UntilID   string  `json:"untilId"`
 		SinceDate *int64  `json:"sinceDate"`
@@ -1067,13 +1076,16 @@ func (h *Handler) FoldersList(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	if h.folderRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	folders, err := h.folderRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), untilID, sinceID, req.Limit)
+	folders, err := h.folderRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), untilID, sinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
 	}

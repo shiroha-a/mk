@@ -212,7 +212,7 @@ func isProtectedSelfDelete(u *model.User) bool {
 func (h *Handler) Favorites(c echo.Context) error {
 	u := middleware.GetUser(c)
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -226,8 +226,11 @@ func (h *Handler) Favorites(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	favs, err := h.favoriteRepo.ListByUser(u.ID, untilID, sinceID, req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	favs, err := h.favoriteRepo.ListByUser(u.ID, untilID, sinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

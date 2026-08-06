@@ -25,12 +25,12 @@ type limitSpec struct {
 	Max     int `json:"max"`
 }
 
-// clampLimitRe matches pagination.ClampLimit(<limit>, <def>, <max>) and captures
-// the def / max integer literals.
-var clampLimitRe = regexp.MustCompile(`pagination\.ClampLimit\([^,]+,\s*(\d+)\s*,\s*(\d+)\s*\)`)
+// resolveLimitRe matches pagination.ResolveLimit(<limit>, <def>, <max>) and
+// captures the def / max integer literals.
+var resolveLimitRe = regexp.MustCompile(`pagination\.ResolveLimit\([^,]+,\s*(\d+)\s*,\s*(\d+)\s*\)`)
 
 // TestLimitSpecDrift is the pagination limit gate. Handlers normalize their
-// page-size limit via pagination.ClampLimit(limit, def, max); this test reads
+// page-size limit via pagination.ResolveLimit(limit, def, max); this test reads
 // the def / max literals at each call site, resolves the enclosing method to
 // its route, and checks them against Misskey's paramDef (default / maximum).
 //
@@ -79,7 +79,7 @@ func TestLimitSpecDrift(t *testing.T) {
 			if i+1 < len(locs) {
 				end = locs[i+1][0]
 			}
-			for _, m := range clampLimitRe.FindAllStringSubmatch(s[loc[0]:end], -1) {
+			for _, m := range resolveLimitRe.FindAllStringSubmatch(s[loc[0]:end], -1) {
 				def, _ := strconv.Atoi(m[1])
 				max, _ := strconv.Atoi(m[2])
 				for _, route := range routes[pkg+"\x00"+fn] {

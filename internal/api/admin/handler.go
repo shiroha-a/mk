@@ -874,21 +874,24 @@ func (h *Handler) ShowUsers(c echo.Context) error {
 		Hostname string `json:"hostname"`
 		Username string `json:"username"`
 		Sort     string `json:"sort"`
-		Limit    int    `json:"limit"`
+		Limit    *int   `json:"limit"`
 		Offset   int    `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	users, err := h.userRepo.ListUsers(model.UserListFilter{
 		State:    req.State,
 		Origin:   req.Origin,
 		Hostname: req.Hostname,
 		Username: req.Username,
 		Sort:     req.Sort,
-		Limit:    req.Limit,
+		Limit:    limit,
 		Offset:   req.Offset,
 	})
 	if err != nil {
@@ -2332,7 +2335,7 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 func (h *Handler) RolesUsers(c echo.Context) error {
 	var req struct {
 		RoleID    string `json:"roleId"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -2341,12 +2344,9 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.RoleID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roleId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 100 {
-		limit = 100
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
@@ -2847,7 +2847,7 @@ func (h *Handler) EmojiList(c echo.Context) error {
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
 		UntilDate *int64 `json:"untilDate"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil {
@@ -2858,8 +2858,11 @@ func (h *Handler) EmojiList(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	emojis, err := h.emojiRepo.ListWithFilter(req.Query, req.Category, true, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	emojis, err := h.emojiRepo.ListWithFilter(req.Query, req.Category, true, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -2875,7 +2878,7 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 		UntilID   string           `json:"untilId"`
 		SinceDate *int64           `json:"sinceDate"`
 		UntilDate *int64           `json:"untilDate"`
-		Limit     int              `json:"limit"`
+		Limit     *int             `json:"limit"`
 		Page      int              `json:"page"`
 		SortKeys  []string         `json:"sortKeys"`
 	}
@@ -2891,12 +2894,9 @@ func (h *Handler) EmojiListV2(c echo.Context) error {
 		})
 	}
 
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 100 {
-		limit = 100
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
 	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
@@ -3087,7 +3087,7 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 		UntilID          string `json:"untilId"`
 		SinceDate        *int64 `json:"sinceDate"`
 		UntilDate        *int64 `json:"untilDate"`
-		Limit            int    `json:"limit"`
+		Limit            *int   `json:"limit"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -3121,8 +3121,11 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	reports, err := h.abuseRepo.List(resolved, req.ReporterOrigin, req.TargetUserOrigin, sinceID, untilID, req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	reports, err := h.abuseRepo.List(resolved, req.ReporterOrigin, req.TargetUserOrigin, sinceID, untilID, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -3363,7 +3366,7 @@ func (h *Handler) inactiveAbuseWebhookIDs() []string {
 // と同じく "2006-01-02T15:04:05.000Z" 形式 (Misskey の標準)。
 func (h *Handler) ShowModerationLogs(c echo.Context) error {
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -3375,11 +3378,15 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate/untilDate を aidx prefix に正規化し、type/userId/search で絞る
 	// (upstream show-moderation-logs.ts, #1539)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	logs, err := h.modLogService.List(model.ModerationLogFilter{
-		Limit:   pagination.ClampLimit(req.Limit, 10, 100),
+		Limit:   limit,
 		SinceID: sinceID,
 		UntilID: untilID,
 		Type:    req.Type,

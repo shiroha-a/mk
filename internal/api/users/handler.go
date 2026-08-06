@@ -680,7 +680,7 @@ func (h *Handler) Show(c echo.Context) error {
 // SearchRequest is the request body for users/search.
 type SearchRequest struct {
 	Query string `json:"query"`
-	Limit int    `json:"limit"`
+	Limit *int   `json:"limit"`
 	// Origin は upstream Misskey TS と同じ enum: "local" / "remote" /
 	// "combined" (default)。空 / 不明値は "combined" 扱い (#763)。
 	Origin string `json:"origin"`
@@ -696,7 +696,10 @@ func (h *Handler) Search(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// origin の enum 検証 (#763)。upstream Misskey TS は paramDef の
 	// JSON schema で 不正値を 400 reject する。mk-go も同等にする。
 	// 空文字列は default (combined) として許容。
@@ -715,7 +718,7 @@ func (h *Handler) Search(c echo.Context) error {
 	if viewer != nil {
 		meID = viewer.ID
 	}
-	users, err := h.userService.Search(req.Query, meID, req.Limit, req.Offset, req.Origin)
+	users, err := h.userService.Search(req.Query, meID, limit, req.Offset, req.Origin)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -777,7 +780,7 @@ func (h *Handler) Search(c echo.Context) error {
 // (#1021)。
 type NotesRequest struct {
 	UserID           string `json:"userId"`
-	Limit            int    `json:"limit"`
+	Limit            *int   `json:"limit"`
 	SinceID          string `json:"sinceId"`
 	UntilID          string `json:"untilId"`
 	SinceDate        *int64 `json:"sinceDate"`
@@ -798,7 +801,10 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 
 	// #2106 L9: upstream notes.ts は user 存在確認をせず単に note を query するため、存在しない
 	// userId では [] を返す (noSuchUser は meta の vestigial error)。404 でなく空配列に揃える。
@@ -847,7 +853,7 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 	// visibility は repository 側で LIMIT 前に push down する (#1418 review)。
 	// post-fetch filter だとページ過少充填 + followers 判定の N+1 になるため。
-	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, viewerID, untilID, sinceID, req.Limit, withFiles, withReplies, withRenotes, withChannelNotes)
+	notes, err := h.noteRepo.ListByUserIDFiltered(req.UserID, viewerID, untilID, sinceID, limit, withFiles, withReplies, withRenotes, withChannelNotes)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -887,7 +893,7 @@ type FollowersRequest struct {
 	UserID    string  `json:"userId"`
 	Username  string  `json:"username"`
 	Host      *string `json:"host"`
-	Limit     int     `json:"limit"`
+	Limit     *int    `json:"limit"`
 	Offset    int     `json:"offset"`
 	SinceID   string  `json:"sinceId"`
 	UntilID   string  `json:"untilId"`
@@ -927,12 +933,12 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 		}
 		req.UserID = bundle.User.ID
 	}
-	if req.Limit <= 0 {
-		req.Limit = 10
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
 	}
-	if req.Limit > 100 {
-		req.Limit = 100
-	}
+	// collectFollowers / collectFollowing が req 経由で参照するので書き戻す。
+	req.Limit = &limit
 
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
 		// upstream は users/followers と users/following で NO_SUCH_USER に別 id を割り当てる
@@ -1043,7 +1049,7 @@ type relationItem struct {
 }
 
 func (h *Handler) collectFollowers(ctx context.Context, req FollowersRequest, viewer *model.User) ([]relationItem, error) {
-	rows, err := h.followingService.ListReceivedFollowing(req.UserID, req.Limit, req.Offset)
+	rows, err := h.followingService.ListReceivedFollowing(req.UserID, *req.Limit, req.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1051,7 +1057,7 @@ func (h *Handler) collectFollowers(ctx context.Context, req FollowersRequest, vi
 }
 
 func (h *Handler) collectFollowing(ctx context.Context, req FollowersRequest, viewer *model.User) ([]relationItem, error) {
-	rows, err := h.followingService.ListSentFollowing(req.UserID, req.Limit, req.Offset)
+	rows, err := h.followingService.ListSentFollowing(req.UserID, *req.Limit, req.Offset)
 	if err != nil {
 		return nil, err
 	}

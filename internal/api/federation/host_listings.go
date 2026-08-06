@@ -16,7 +16,7 @@ import (
 // endpoints (federation/followers, federation/following, federation/users).
 type hostPageRequest struct {
 	Host      string `json:"host"`
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
@@ -40,7 +40,7 @@ func (h *Handler) Followers(c echo.Context) error {
 	if h.followingRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	rows, err := h.followingRepo.ListFollowersByHostCursor(req.Host, req.sinceID, req.untilID, req.Limit)
+	rows, err := h.followingRepo.ListFollowersByHostCursor(req.Host, req.sinceID, req.untilID, (*req.Limit))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -59,7 +59,7 @@ func (h *Handler) Following(c echo.Context) error {
 	if h.followingRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	rows, err := h.followingRepo.ListFollowingByHostCursor(req.Host, req.sinceID, req.untilID, req.Limit)
+	rows, err := h.followingRepo.ListFollowingByHostCursor(req.Host, req.sinceID, req.untilID, (*req.Limit))
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -80,7 +80,7 @@ func (h *Handler) Users(c echo.Context) error {
 	users, err := h.userRepo.ListUsers(model.UserListFilter{
 		Origin:   "remote",
 		Hostname: req.Host,
-		Limit:    req.Limit,
+		Limit:    (*req.Limit),
 		Offset:   req.Offset,
 		SinceID:  req.sinceID,
 		UntilID:  req.untilID,
@@ -149,7 +149,11 @@ func parseHostPage(c echo.Context) (hostPageRequest, bool) {
 	if err := c.Bind(&req); err != nil || req.Host == "" {
 		return req, false
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return req, false
+	}
+	req.Limit = &limit
 	// sinceDate / untilDate を aidx prefix に正規化して cursor 値に落とす
 	// (#1732、upstream makePaginationQuery 互換)。
 	req.sinceID, req.untilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)

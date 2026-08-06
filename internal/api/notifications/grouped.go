@@ -55,8 +55,8 @@ func (h *Handler) Grouped(c echo.Context) error {
 
 	grouped := groupNotifications(filtered, packed, noteByID)
 	// 本家 update.ts と同じく grouping 後に limit で slice する。
-	if len(grouped) > req.Limit {
-		grouped = grouped[:req.Limit]
+	if len(grouped) > (*req.Limit) {
+		grouped = grouped[:(*req.Limit)]
 	}
 
 	h.maybeMarkAsRead(c, user, req)

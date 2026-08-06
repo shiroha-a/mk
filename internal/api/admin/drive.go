@@ -167,7 +167,7 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -179,14 +179,17 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 		Type      string `json:"type"`
 	}
 	_ = c.Bind(&req)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// userId に @system が指定されたら system file 専用 listing を返す。
 	// origin / host filter は意味を持たない (system file はユーザーに紐付か
 	// ないので) ので、type と pagination のみを取り回す。
 	if req.UserID == SystemUserIDToken {
-		files, err := h.driveFileRepo.ListSystemFiles(req.Type, untilID, sinceID, req.Limit)
+		files, err := h.driveFileRepo.ListSystemFiles(req.Type, untilID, sinceID, limit)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 		}
@@ -211,7 +214,7 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 	if host == "" {
 		host = req.Hostname
 	}
-	files, err := h.driveFileRepo.ListForAdmin(req.UserID, req.Origin, host, req.Type, untilID, sinceID, req.Limit)
+	files, err := h.driveFileRepo.ListForAdmin(req.UserID, req.Origin, host, req.Type, untilID, sinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}

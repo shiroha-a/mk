@@ -6,6 +6,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -20,12 +21,16 @@ import (
 func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 	var req struct {
 		UserID string `json:"userId"`
-		Limit  int    `json:"limit"`
+		Limit  *int   `json:"limit"`
 	}
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	clampListLimit(&req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.Limit = &limit
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "e6965129-7b2a-40a4-bae2-cd84cd434822"))
 	}
@@ -35,7 +40,7 @@ func (h *Handler) GetFrequentlyRepliedUsers(c echo.Context) error {
 		viewerID = viewer.ID
 	}
 	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
-	rows, err := h.noteRepo.CountReplyTargets(req.UserID, viewerID, req.Limit)
+	rows, err := h.noteRepo.CountReplyTargets(req.UserID, viewerID, limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -99,14 +104,18 @@ func isValidMMDD(m, d int) bool {
 func (h *Handler) GetFollowingUsersByBirthday(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
-		Limit    int            `json:"limit"`
+		Limit    *int           `json:"limit"`
 		Offset   int            `json:"offset"`
 		Birthday *birthdayRange `json:"birthday"`
 	}
 	if err := c.Bind(&req); err != nil || req.Birthday == nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	clampListLimit(&req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.Limit = &limit
 	var begin, end int
 	switch {
 	case req.Birthday.Begin != nil && req.Birthday.End != nil:
@@ -128,7 +137,7 @@ func (h *Handler) GetFollowingUsersByBirthday(c echo.Context) error {
 	if h.followingRepo == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	rows, err := h.followingRepo.ListFollowingByBirthday(viewer.ID, begin, end, req.Limit, req.Offset)
+	rows, err := h.followingRepo.ListFollowingByBirthday(viewer.ID, begin, end, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -175,15 +184,19 @@ func nextBirthdayDate(bday string, now time.Time) string {
 func (h *Handler) UserRecommendation(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	var req struct {
-		Limit  int `json:"limit"`
-		Offset int `json:"offset"`
+		Limit  *int `json:"limit"`
+		Offset int  `json:"offset"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	clampListLimit(&req.Limit)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.Limit = &limit
 	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
-	users, err := h.userService.ListRecommendations(viewer.ID, time.Now().AddDate(0, 0, -7), req.Limit, req.Offset)
+	users, err := h.userService.ListRecommendations(viewer.ID, time.Now().AddDate(0, 0, -7), limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

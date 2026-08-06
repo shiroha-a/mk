@@ -246,11 +246,14 @@ func (h *Handler) EmojiListRemote(c echo.Context) error {
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
 		UntilDate *int64 `json:"untilDate"`
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 	}
 	_ = c.Bind(&req)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// upstream list-remote.ts:69 は host を toPuny (lowercase + IDN punycode) して
@@ -260,7 +263,7 @@ func (h *Handler) EmojiListRemote(c echo.Context) error {
 	if host != "" {
 		host = toPunyHost(host)
 	}
-	emojis, err := h.emojiRepo.ListRemoteWithFilter(req.Query, host, sinceID, untilID, req.Limit, req.Offset)
+	emojis, err := h.emojiRepo.ListRemoteWithFilter(req.Query, host, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}

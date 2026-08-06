@@ -376,7 +376,7 @@ func TestReactions_SelfViewBypassesPublicReactions(t *testing.T) {
 			User:       &model.User{ID: "u_other", Username: "other"},
 		},
 	}
-	rec := postExtra(h.Reactions, `{"userId":"u_self","limit":150}`, &model.User{ID: "u_self"})
+	rec := postExtra(h.Reactions, `{"userId":"u_self","limit":100}`, &model.User{ID: "u_self"})
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var list []map[string]any
@@ -854,7 +854,7 @@ func TestReactions_FiltersInvisibleNotes(t *testing.T) {
 	userRepo.Profiles["u_target"] = &model.UserProfile{UserID: "u_target", PublicReactions: true}
 	publicRxID, followersRxID := seedVisibilityReactions(t, rxRepo, "u_target")
 
-	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":150}`, &model.User{ID: "u_viewer"})
+	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":100}`, &model.User{ID: "u_viewer"})
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var list []map[string]any
@@ -874,7 +874,7 @@ func TestReactions_FollowerSeesFollowersOnlyNote(t *testing.T) {
 	// u_follower が note author (u_author) を follow している。
 	rxRepo.Following = map[string][]string{"u_follower": {"u_author"}}
 
-	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":150}`, &model.User{ID: "u_follower"})
+	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":100}`, &model.User{ID: "u_follower"})
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var list []map[string]any
@@ -906,7 +906,7 @@ func TestReactions_SpecifiedNoteVisibility(t *testing.T) {
 	userRepo.Users["u_target"] = &model.User{ID: "u_target"}
 	userRepo.Profiles["u_target"] = &model.UserProfile{UserID: "u_target", PublicReactions: true}
 	seed(rxRepo)
-	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":150}`, &model.User{ID: "u_allowed"})
+	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":100}`, &model.User{ID: "u_allowed"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var allowed []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &allowed))
@@ -917,7 +917,7 @@ func TestReactions_SpecifiedNoteVisibility(t *testing.T) {
 	userRepo2.Users["u_target"] = &model.User{ID: "u_target"}
 	userRepo2.Profiles["u_target"] = &model.UserProfile{UserID: "u_target", PublicReactions: true}
 	seed(rxRepo2)
-	rec2 := postExtra(h2.Reactions, `{"userId":"u_target","limit":150}`, &model.User{ID: "u_other"})
+	rec2 := postExtra(h2.Reactions, `{"userId":"u_target","limit":100}`, &model.User{ID: "u_other"})
 	require.Equal(t, http.StatusOK, rec2.Code)
 	var other []map[string]any
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &other))
@@ -935,7 +935,7 @@ func TestReactions_ModeratorStillFiltersInvisibleNotes(t *testing.T) {
 	userRepo.Profiles["u_target"] = &model.UserProfile{UserID: "u_target", PublicReactions: false}
 	publicRxID, _ := seedVisibilityReactions(t, rxRepo, "u_target")
 
-	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":150}`, &model.User{ID: "u_mod"})
+	rec := postExtra(h.Reactions, `{"userId":"u_target","limit":100}`, &model.User{ID: "u_mod"})
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	var list []map[string]any

@@ -407,7 +407,7 @@ func (h *Handler) Unfollow(c echo.Context) error {
 // timeline endpoints. frontend Paginator は cursor mode で sinceId / untilId
 // を投げてくる (#493)。
 type PaginatedListRequest struct {
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
@@ -429,8 +429,11 @@ func (h *Handler) Followed(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 5, 100)
-	rows, err := h.svc.ListFollowed(user.ID, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 5, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.svc.ListFollowed(user.ID, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -446,8 +449,11 @@ func (h *Handler) Owned(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 5, 100)
-	rows, err := h.svc.ListOwned(user.ID, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 5, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.svc.ListOwned(user.ID, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -476,7 +482,7 @@ func (h *Handler) Featured(c echo.Context) error {
 type SearchRequest struct {
 	Query     string `json:"query"`
 	Type      string `json:"type"`
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
@@ -497,8 +503,11 @@ func (h *Handler) Search(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 5, 100)
-	rows, err := h.svc.Search(req.Query, req.Type, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 5, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.svc.Search(req.Query, req.Type, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -527,7 +536,7 @@ type TimelineRequest struct {
 	SinceID   string `json:"sinceId"`
 	SinceDate *int64 `json:"sinceDate"`
 	UntilDate *int64 `json:"untilDate"`
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 }
 
 // Timeline handles POST /api/channels/timeline.
@@ -536,12 +545,9 @@ func (h *Handler) Timeline(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ChannelID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	limit := req.Limit
-	if limit <= 0 {
-		limit = 10
-	}
-	if limit > 100 {
-		limit = 100
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)

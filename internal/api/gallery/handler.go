@@ -77,13 +77,16 @@ func (h *Handler) SetModLog(m ModLogger) { h.modLog = m }
 // 未配線時は空配列に degrade する。
 func (h *Handler) Featured(c echo.Context) error {
 	var req struct {
-		Limit   int    `json:"limit"`
+		Limit   *int   `json:"limit"`
 		UntilID string `json:"untilId"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	limit := pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	if h.ranking == nil {
 		return c.JSON(http.StatusOK, []map[string]any{})
 	}
@@ -133,7 +136,7 @@ func (h *Handler) Popular(c echo.Context) error {
 // id 範囲フィルタ + paginationOrder 同等の ASC/DESC を直接組み立てる。
 func (h *Handler) Posts(c echo.Context) error {
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
@@ -143,7 +146,10 @@ func (h *Handler) Posts(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	q := h.db.Preload("User")
@@ -158,7 +164,7 @@ func (h *Handler) Posts(c echo.Context) error {
 	} else {
 		q = q.Order("id DESC")
 	}
-	q = q.Limit(req.Limit)
+	q = q.Limit(limit)
 	if sinceID == "" && untilID == "" && req.Offset > 0 {
 		q = q.Offset(req.Offset)
 	}

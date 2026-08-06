@@ -163,13 +163,16 @@ func (h *Handler) InviteList(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	var req struct {
-		Limit  int    `json:"limit"`
+		Limit  *int   `json:"limit"`
 		Offset int    `json:"offset"`
 		Type   string `json:"type"`
 		Sort   string `json:"sort"`
 	}
 	_ = c.Bind(&req)
-	req.Limit = pagination.ClampLimit(req.Limit, 30, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 30, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	filter := req.Type
 	switch filter {
 	case "unused", "used", "expired", "all":
@@ -183,7 +186,7 @@ func (h *Handler) InviteList(c echo.Context) error {
 	default:
 		sort = ""
 	}
-	rows, err := h.inviteRepo.ListSorted(filter, sort, req.Limit, req.Offset, time.Now())
+	rows, err := h.inviteRepo.ListSorted(filter, sort, limit, req.Offset, time.Now())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}

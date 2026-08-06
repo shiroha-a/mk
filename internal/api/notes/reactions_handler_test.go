@@ -328,12 +328,12 @@ func timeNow() time.Time {
 	return time.Now()
 }
 
-func TestReactions_List_LimitClamping(t *testing.T) {
+func TestReactions_List_LimitOutOfRangeRejected(t *testing.T) {
 	h, repo, _ := newReactionHandler(t)
 	seedReactionNote(repo, "n1", "public")
 	c, rec := newJSONRequest(t, "/api/notes/reactions", `{"noteId":"n1","limit":1000}`)
 	require.NoError(t, h.Reactions(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestReactions_List_InvalidParam(t *testing.T) {

@@ -126,7 +126,7 @@ func (h *Handler) AdList(c echo.Context) error {
 	// upstream admin/ad/list: {limit, sinceId, untilId, sinceDate, untilDate,
 	// publishing(boolean,nullable)} の cursor pagination + 配信中フィルタ (#1545)。
 	var req struct {
-		Limit      int    `json:"limit"`
+		Limit      *int   `json:"limit"`
 		Offset     int    `json:"offset"` // 後方互換 (cursor / publishing 未指定時のみ)
 		SinceID    string `json:"sinceId"`
 		UntilID    string `json:"untilId"`
@@ -135,11 +135,14 @@ func (h *Handler) AdList(c echo.Context) error {
 		Publishing *bool  `json:"publishing"`
 	}
 	_ = c.Bind(&req)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// cursor も publishing も無く offset 指定がある旧クライアント向けに offset 経路を維持。
 	if sinceID == "" && untilID == "" && req.Publishing == nil && req.Offset > 0 {
-		rows, err := h.adRepo.List(req.Limit, req.Offset)
+		rows, err := h.adRepo.List(limit, req.Offset)
 		if err != nil {
 			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 		}
@@ -148,7 +151,7 @@ func (h *Handler) AdList(c echo.Context) error {
 		}
 		return c.JSON(http.StatusOK, packAds(rows))
 	}
-	rows, err := h.adRepo.ListFiltered(req.Publishing, sinceID, untilID, req.Limit, time.Now())
+	rows, err := h.adRepo.ListFiltered(req.Publishing, sinceID, untilID, limit, time.Now())
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}

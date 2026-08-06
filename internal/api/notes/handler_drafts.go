@@ -35,7 +35,7 @@ func (h *Handler) DraftsList(c echo.Context) error {
 	// aidx で時刻を内包するので、sinceDate/untilDate は id cursor に正規化して
 	// keyset pagination に乗せる (#1948-19)。
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		SinceID   string `json:"sinceId"`
 		UntilID   string `json:"untilId"`
 		SinceDate *int64 `json:"sinceDate"`
@@ -43,7 +43,10 @@ func (h *Handler) DraftsList(c echo.Context) error {
 		Scheduled *bool  `json:"scheduled"`
 	}
 	_ = c.Bind(&req)
-	limit := pagination.ClampLimit(req.Limit, 30, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 30, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	drafts, err := h.draftRepo.ListByUser(user.ID, sinceID, untilID, req.Scheduled, limit)
 	if err != nil {
@@ -657,8 +660,8 @@ func (h *Handler) ThreadMutingDelete(c echo.Context) error {
 func (h *Handler) PollsRecommendation(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit  int `json:"limit"`
-		Offset int `json:"offset"`
+		Limit  *int `json:"limit"`
+		Offset int  `json:"offset"`
 		// upstream recommendation.ts:35 は excludeChannels を boolean で受け、
 		// true のとき全 channel poll を除外する (#1765。以前は []string だった)。
 		ExcludeChannels bool `json:"excludeChannels"`
@@ -667,7 +670,10 @@ func (h *Handler) PollsRecommendation(c echo.Context) error {
 	if h.pollRepo == nil || h.noteRepo == nil {
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
 	}
-	limit := pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	var muted []string
 	if h.mutingRepo != nil {
 		muted, _ = h.mutingRepo.ListMuteeIDs(user.ID)

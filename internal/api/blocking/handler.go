@@ -142,7 +142,7 @@ func (h *Handler) respondPackedUser(c echo.Context, viewer *model.User, userID s
 
 // ListRequest is the request body for blocking/list.
 type ListRequest struct {
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
@@ -160,10 +160,13 @@ func (h *Handler) List(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 30, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 30, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	rows, err := h.svc.List(user.ID, sinceID, untilID, req.Limit, req.Offset)
+	rows, err := h.svc.List(user.ID, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

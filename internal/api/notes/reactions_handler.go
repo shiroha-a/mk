@@ -90,7 +90,7 @@ func (h *Handler) ReactionsDelete(c echo.Context) error {
 type ReactionsListRequest struct {
 	NoteID    string `json:"noteId" query:"noteId"`
 	Type      string `json:"type" query:"type"`
-	Limit     int    `json:"limit" query:"limit"`
+	Limit     *int   `json:"limit" query:"limit"`
 	SinceID   string `json:"sinceId" query:"sinceId"`
 	UntilID   string `json:"untilId" query:"untilId"`
 	SinceDate *int64 `json:"sinceDate" query:"sinceDate"`
@@ -103,12 +103,15 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.NoteID == "" {
 		return apierr.JSONInvalidParam(c)
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	viewer := middleware.GetUser(c)
-	rows, err := h.reactionService.List(viewer, req.NoteID, untilID, sinceID, req.Limit, req.Type)
+	rows, err := h.reactionService.List(viewer, req.NoteID, untilID, sinceID, limit, req.Type)
 	if err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound), errors.Is(err, reaction.ErrNoteNotVisible):

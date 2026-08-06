@@ -299,7 +299,7 @@ func (h *Handler) Delete(c echo.Context) error {
 
 // ListRequest is the request body for clips/list.
 type ListRequest struct {
-	Limit     int    `json:"limit"`
+	Limit     *int   `json:"limit"`
 	Offset    int    `json:"offset"`
 	SinceID   string `json:"sinceId"`
 	UntilID   string `json:"untilId"`
@@ -319,8 +319,11 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	rows, err := h.svc.ListByUser(user.ID, sinceID, untilID, req.Limit, req.Offset)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.svc.ListByUser(user.ID, sinceID, untilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -410,7 +413,7 @@ type NotesRequest struct {
 	SinceID   string  `json:"sinceId"`
 	SinceDate *int64  `json:"sinceDate"`
 	UntilDate *int64  `json:"untilDate"`
-	Limit     int     `json:"limit"`
+	Limit     *int    `json:"limit"`
 	Search    *string `json:"search"`
 }
 
@@ -440,8 +443,11 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
-	notes, err := h.svc.Notes(requesterID, req.ClipID, untilID, sinceID, req.Limit, search)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	notes, err := h.svc.Notes(requesterID, req.ClipID, untilID, sinceID, limit, search)
 	if err != nil {
 		// 非公開 clip の他人/匿名閲覧は missing と同じ ErrClipNotFound →
 		// NO_SUCH_CLIP 404 (存在秘匿、#1562)。

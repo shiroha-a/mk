@@ -115,7 +115,7 @@ func (h *Handler) FavoritesDelete(c echo.Context) error {
 // グローバルノートが混ざっていた (#489)。untilId は cursor pagination 用。
 func (h *Handler) Featured(c echo.Context) error {
 	var req struct {
-		Limit     int    `json:"limit"`
+		Limit     *int   `json:"limit"`
 		Offset    int    `json:"offset"`
 		ChannelID string `json:"channelId"`
 		UntilID   string `json:"untilId"`
@@ -124,10 +124,13 @@ func (h *Handler) Featured(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// untilDate を aidx prefix に正規化 (#1166)。
 	_, untilID := id.NormalizeCursor("", req.UntilID, nil, req.UntilDate)
-	notes, err := h.featuredNotes(c.Request().Context(), req.ChannelID, untilID, req.Limit, req.Offset)
+	notes, err := h.featuredNotes(c.Request().Context(), req.ChannelID, untilID, limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -238,7 +241,7 @@ func (h *Handler) Unrenote(c echo.Context) error {
 func (h *Handler) Mentions(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
-		Limit      int    `json:"limit"`
+		Limit      *int   `json:"limit"`
 		SinceID    string `json:"sinceId"`
 		UntilID    string `json:"untilId"`
 		SinceDate  *int64 `json:"sinceDate"`
@@ -249,7 +252,10 @@ func (h *Handler) Mentions(c echo.Context) error {
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// visibility kind の絞り込みは ListMentions の SQL push-down に委譲する
@@ -259,7 +265,7 @@ func (h *Handler) Mentions(c echo.Context) error {
 	// 種別で埋まると limit 未満になる under-fill が起きていた。
 	// following=true のとき followee + 自分の note のみに絞る (upstream
 	// mentions.ts following param、#1554)。
-	notes, err := h.noteRepo.ListMentions(user.ID, req.Visibility, req.Following, req.Limit, sinceID, untilID)
+	notes, err := h.noteRepo.ListMentions(user.ID, req.Visibility, req.Following, limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -281,7 +287,7 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	me := middleware.GetUser(c)
 	var req struct {
 		ListID                string `json:"listId"`
-		Limit                 int    `json:"limit"`
+		Limit                 *int   `json:"limit"`
 		SinceID               string `json:"sinceId"`
 		UntilID               string `json:"untilId"`
 		SinceDate             *int64 `json:"sinceDate"`
@@ -295,7 +301,10 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.ListID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "listId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// リスト所有権チェック (TS互換: 自分のリストのみ閲覧可)
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
@@ -336,7 +345,7 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 		BlockerIDs:              h.loadBlockerIDs(me),
 		MutedInstances:          h.loadMutedInstances(me),
 	}
-	notes, err := h.noteRepo.ListByUserList(req.ListID, req.Limit, sinceID, untilID, filter)
+	notes, err := h.noteRepo.ListByUserList(req.ListID, limit, sinceID, untilID, filter)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
@@ -351,7 +360,7 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	var req struct {
 		Tag       string     `json:"tag"`
 		Query     [][]string `json:"query"`
-		Limit     int        `json:"limit"`
+		Limit     *int       `json:"limit"`
 		SinceID   string     `json:"sinceId"`
 		UntilID   string     `json:"untilId"`
 		SinceDate *int64     `json:"sinceDate"`
@@ -385,7 +394,10 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	if len(tagGroups) == 0 {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "tag is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
+	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
+	if !limitOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// tagsカラムにtagを含むノートを検索。visibility は repository 側で
@@ -399,7 +411,7 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 	}
 	// reply/renote/poll/withFiles で絞る (upstream search-by-tag.ts、#1554)。
 	filter := model.NoteSearchTagFilter{Reply: req.Reply, Renote: req.Renote, Poll: req.Poll, WithFiles: req.WithFiles}
-	notes, err := h.noteRepo.SearchByTag(tagGroups, viewerID, req.Limit, sinceID, untilID, filter)
+	notes, err := h.noteRepo.SearchByTag(tagGroups, viewerID, limit, sinceID, untilID, filter)
 	if err != nil {
 		// tag 検索失敗は従来どおり空配列で返す (TS 互換) が、visibility
 		// push-down 追加で SQL エラーも黙殺されうるため診断用に 1 行残す。

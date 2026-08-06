@@ -252,12 +252,12 @@ func TestChildren_PureRenoteExcluded(t *testing.T) {
 	assert.False(t, idsSet["pure"], "pure renote は child に出さない")
 }
 
-func TestChildren_LimitClamping(t *testing.T) {
+func TestChildren_LimitOutOfRangeRejected(t *testing.T) {
 	h, repo := newQueryHandler(t)
 	seedPublicNote(repo, "p")
 	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":1000}`)
 	require.NoError(t, h.Children(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 // #1500 audit follow-up: notes/renotes・replies・children の visibility は repo
@@ -489,11 +489,11 @@ func TestSearch_CanSearchNotesAllowed(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestSearch_LimitClamping(t *testing.T) {
+func TestSearch_LimitOutOfRangeRejected(t *testing.T) {
 	h, _ := newQueryHandler(t)
 	c, rec := newJSONRequest(t, "/api/notes/search", `{"query":"x","limit":1000}`)
 	require.NoError(t, h.Search(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestSearch_EmptyQuery(t *testing.T) {
@@ -651,12 +651,12 @@ func TestConversation_HiddenAncestorStubbed(t *testing.T) {
 	assert.NotEqual(t, true, resp[1]["isHidden"])
 }
 
-func TestConversation_LimitClamping(t *testing.T) {
+func TestConversation_LimitOutOfRangeRejected(t *testing.T) {
 	h, repo := newQueryHandler(t)
 	seedPublicNote(repo, "n1")
 	c, rec := newJSONRequest(t, "/api/notes/conversation", `{"noteId":"n1","limit":1000}`)
 	require.NoError(t, h.Conversation(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestConversation_NotFound(t *testing.T) {
