@@ -17,10 +17,10 @@ func (s *stubCanChatLookup) LookupCanChat(userID string) (bool, bool) {
 	return v, ok
 }
 
-// TestPackUserLite_CanChatDefault: lookup が unwired のとき canChat=true
+// TestPackUserDetailed_CanChatDefault: lookup が unwired のとき canChat=true
 // (= upstream DefaultPolicies の `chatAvailability: "available"`) で fallback
 // すること。既存 unit test が SetCanChatLookup を呼ばずに通るための path。
-func TestPackUserLite_CanChatDefault(t *testing.T) {
+func TestPackUserDetailed_CanChatDefault(t *testing.T) {
 	t.Cleanup(func() { SetCanChatLookup(nil) })
 	SetCanChatLookup(nil)
 
@@ -30,13 +30,13 @@ func TestPackUserLite_CanChatDefault(t *testing.T) {
 		ChatScope:         "none", // 旧実装ではこの値で canChat=false だった
 		AvatarDecorations: datatypes.JSON([]byte("[]")),
 	}
-	lite := PackUserLite(u)
-	assert.True(t, lite.CanChat, "lookup unwired → default true (upstream available)")
+	d := PackUserDetailed(u, nil)
+	assert.True(t, d.CanChat, "lookup unwired → default true (upstream available)")
 }
 
-// TestPackUserLite_CanChatFromLookup: lookup が wired のとき lookup の結果が
+// TestPackUserDetailed_CanChatFromLookup: lookup が wired のとき lookup の結果が
 // canChat に反映されること。role policy で chat 制限された user は false。
-func TestPackUserLite_CanChatFromLookup(t *testing.T) {
+func TestPackUserDetailed_CanChatFromLookup(t *testing.T) {
 	t.Cleanup(func() { SetCanChatLookup(nil) })
 	SetCanChatLookup(&stubCanChatLookup{results: map[string]bool{
 		"u1": true,
@@ -46,39 +46,39 @@ func TestPackUserLite_CanChatFromLookup(t *testing.T) {
 	u1 := &model.User{ID: "u1", Username: "ok", AvatarDecorations: datatypes.JSON([]byte("[]"))}
 	u2 := &model.User{ID: "u2", Username: "blocked", AvatarDecorations: datatypes.JSON([]byte("[]"))}
 
-	assert.True(t, PackUserLite(u1).CanChat)
-	assert.False(t, PackUserLite(u2).CanChat)
+	assert.True(t, PackUserDetailed(u1, nil).CanChat)
+	assert.False(t, PackUserDetailed(u2, nil).CanChat)
 }
 
-// TestPackUserLite_CanChatLookupNotFound: lookup is wired but the user is not
+// TestPackUserDetailed_CanChatLookupNotFound: lookup is wired but the user is not
 // in the result map (= legacy data without role assignment). Should fall back
 // to default true.
-func TestPackUserLite_CanChatLookupNotFound(t *testing.T) {
+func TestPackUserDetailed_CanChatLookupNotFound(t *testing.T) {
 	t.Cleanup(func() { SetCanChatLookup(nil) })
 	SetCanChatLookup(&stubCanChatLookup{results: map[string]bool{}})
 
 	u := &model.User{ID: "unknown", Username: "unknown", AvatarDecorations: datatypes.JSON([]byte("[]"))}
-	assert.True(t, PackUserLite(u).CanChat, "lookup ok=false → default true")
+	assert.True(t, PackUserDetailed(u, nil).CanChat, "lookup ok=false → default true")
 }
 
-// TestPackUserLite_CanChatIgnoresChatScope: chatScope の値に関係なく lookup
+// TestPackUserDetailed_CanChatIgnoresChatScope: chatScope の値に関係なく lookup
 // が支配的になること (= upstream の semantics、chatScope は受信側設定で
 // canChat とは別軸)。
-func TestPackUserLite_CanChatIgnoresChatScope(t *testing.T) {
+func TestPackUserDetailed_CanChatIgnoresChatScope(t *testing.T) {
 	t.Cleanup(func() { SetCanChatLookup(nil) })
 	SetCanChatLookup(&stubCanChatLookup{results: map[string]bool{"u1": false}})
 
 	for _, scope := range []string{"all", "followers", "mutuals", "none"} {
 		u := &model.User{ID: "u1", Username: "x", ChatScope: scope, AvatarDecorations: datatypes.JSON([]byte("[]"))}
-		assert.False(t, PackUserLite(u).CanChat, "scope=%s should not affect canChat", scope)
+		assert.False(t, PackUserDetailed(u, nil).CanChat, "scope=%s should not affect canChat", scope)
 	}
 }
 
-// BenchmarkPackUserLite_CanChatLookup measures the per-pack overhead of the
+// BenchmarkPackUserDetailed_CanChatLookup measures the per-pack overhead of the
 // canChat lookup. 100 user bulk pack (= users/show userIds path 最大値) で
 // 数 µs / pack を期待する。lookup が hot path 化したときの regression を
 // 検出する baseline (#988)。
-func BenchmarkPackUserLite_CanChatLookup(b *testing.B) {
+func BenchmarkPackUserDetailed_CanChatLookup(b *testing.B) {
 	b.Cleanup(func() { SetCanChatLookup(nil) })
 	SetCanChatLookup(&stubCanChatLookup{results: map[string]bool{"u1": true}})
 	u := &model.User{ID: "u1", Username: "bench", AvatarDecorations: datatypes.JSON([]byte("[]"))}
@@ -86,6 +86,6 @@ func BenchmarkPackUserLite_CanChatLookup(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		_ = PackUserLite(u)
+		_ = PackUserDetailed(u, nil)
 	}
 }

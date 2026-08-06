@@ -681,12 +681,15 @@ func TestMe_NoProfile(t *testing.T) {
 	assert.Equal(t, false, resp["hasUnreadNotification"])
 }
 
-func TestMe_ClientDataAndRoomExposed(t *testing.T) {
+// upstream の MeDetailed schema には clientData / room が無い (clientData は
+// user_profile の列としてだけ残っていて pack されず、room は機能ごと削除済)。
+// mk-go も列は保持するが応答には出さない。
+func TestMe_DoesNotExposeClientDataOrRoom(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 
 	userRepo.Profiles["user1"] = &model.UserProfile{
 		UserID:     "user1",
-		ClientData: datatypes.JSON([]byte(`{"theme":"dark","sidebar":{"collapsed":true}}`)),
+		ClientData: datatypes.JSON([]byte(`{"theme":"dark"}`)),
 		Room:       datatypes.JSON([]byte(`{"furnitures":[{"id":"chair1"}]}`)),
 		Fields:     datatypes.JSON([]byte("[]")),
 	}
@@ -708,61 +711,10 @@ func TestMe_ClientDataAndRoomExposed(t *testing.T) {
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 
-	cd, ok := resp["clientData"].(map[string]any)
-	require.True(t, ok, "clientData should be an object, got %T", resp["clientData"])
-	assert.Equal(t, "dark", cd["theme"])
-	sidebar, ok := cd["sidebar"].(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, true, sidebar["collapsed"])
-
-	room, ok := resp["room"].(map[string]any)
-	require.True(t, ok, "room should be an object")
-	furnitures, ok := room["furnitures"].([]any)
-	require.True(t, ok)
-	require.Len(t, furnitures, 1)
+	assert.NotContains(t, resp, "clientData")
+	assert.NotContains(t, resp, "room")
 }
 
-func TestMe_ClientDataAndRoomEmptyNormalized(t *testing.T) {
-	h, userRepo, _, _ := newTestHandler(t)
-
-	// profile が存在するが jsonb が空/不正なケース。
-	// frontend に安定した空 object を返すことを保証する。
-	userRepo.Profiles["user1"] = &model.UserProfile{
-		UserID:     "user1",
-		ClientData: nil,
-		Room:       datatypes.JSON([]byte("null")),
-		Fields:     datatypes.JSON([]byte("[]")),
-	}
-
-	user := &model.User{
-		ID:                "user1",
-		Username:          "empty",
-		AvatarDecorations: datatypes.JSON([]byte("[]")),
-	}
-
-	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/api/i", nil)
-	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
-	c.Set(string(middleware.UserContextKey), user)
-
-	require.NoError(t, h.Me(c))
-
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-
-	cd, ok := resp["clientData"].(map[string]any)
-	require.True(t, ok, "clientData should normalize to {} when nil")
-	assert.Empty(t, cd)
-
-	room, ok := resp["room"].(map[string]any)
-	require.True(t, ok, "room should normalize to {} when payload is JSON null")
-	assert.Empty(t, room)
-}
-
-// --- Update ---
-
-// #1024: avatarId / bannerId 指定時の canUpdateBioMedia gate。
 func TestUpdate_AvatarID_RestrictedByRole(t *testing.T) {
 	h, repo, _, _ := newTestHandler(t)
 	user := &model.User{ID: "u1", Username: "alice", AvatarDecorations: datatypes.JSON([]byte("[]"))}

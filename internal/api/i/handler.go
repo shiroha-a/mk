@@ -825,6 +825,14 @@ func (h *Handler) recordLoginDay(userID string, profile *model.UserProfile) {
 }
 
 func (h *Handler) Me(c echo.Context) error {
+	return h.me(c, true)
+}
+
+// me packs the MeDetailed response. allowSecrets=false forces the
+// includeSecrets ブロック (email / emailVerified / securityKeysList) を落とす。
+// upstream の i/pin / i/unpin は `pack(me, me, {schema: 'MeDetailed'})` を
+// includeSecrets 無しで呼ぶので、同じ応答を使い回す mk-go 側もここで落とす。
+func (h *Handler) me(c echo.Context, allowSecrets bool) error {
 	u := middleware.GetUser(c)
 
 	// middleware が渡す user は tokenCache (token → user、30 秒 TTL) 由来で、
@@ -894,7 +902,7 @@ func (h *Handler) Me(c echo.Context) error {
 	// i.ts の `isSecure = token == null` 相当で、email / emailVerified /
 	// securityKeysList を includeSecrets ブロックとして gate する (#1824)。これが
 	// 無いと read:account scope の app token だけで email・WebAuthn キー一覧が読めた。
-	isSecure := u.Token != nil && *u.Token == middleware.GetToken(c)
+	isSecure := allowSecrets && u.Token != nil && *u.Token == middleware.GetToken(c)
 
 	// Private fields from profile (MeDetailed scope 外)
 	if profile != nil {
@@ -918,11 +926,6 @@ func (h *Handler) Me(c echo.Context) error {
 		resp["securityKeys"] = profile.TwoFactorEnabled && profile.SecurityKeysAvailable
 		// hardMutedWords / twoFactorBackupCodesStock は PackMeDetailed (AsMeDetailed)
 		// が profile から正しい shape で乗せるので override 不要 (#1258 follow-up)。
-		// clientData / room は jsonb を生のまま返すと frontend (本家) が
-		// オブジェクトとして parse するため、空/不正時は空オブジェクトに
-		// 正規化する。user が手動でキーを書き換えるだけなので scheme は持たない。
-		resp["clientData"] = jsonbObject(profile.ClientData)
-		resp["room"] = jsonbObject(profile.Room)
 	}
 
 	// フロントエンド互換性フィールド (Phase 4.5c / Phase 5)
@@ -1015,10 +1018,12 @@ type UpdateRequest struct {
 	// Room は frontend の「部屋」機能用の任意スキーマ jsonb。
 	// 本家も object をそのまま受け取って上書き保存する (部分マージはしない)。
 	Room json.RawMessage `json:"room"`
-	// AvatarID / BannerID — drive_file の ID。`null` / 省略は不変、空文字列
-	// は CLEAR、文字列値は SET。詳細は user.UpdateInput の docコメント参照。
-	AvatarID *string `json:"avatarId"`
-	BannerID *string `json:"bannerId"`
+	// AvatarID / BannerID — drive_file の ID。upstream は「キー省略は不変、
+	// null は CLEAR、文字列値は SET」なので json.RawMessage で 3 状態を
+	// 区別する (*string では省略と null が同じ nil になってしまう)。
+	// core の UpdateInput へは mk-go の規約 (空文字列 = CLEAR) に変換して渡す。
+	AvatarID json.RawMessage `json:"avatarId"`
+	BannerID json.RawMessage `json:"bannerId"`
 	// AvatarDecorations は装着するデコレーション配列。nil (省略) なら不変、
 	// `[]` (空配列) なら全外し、`[{id,...}, ...]` で上書き。各要素は
 	// avatar_decoration テーブルに登録された id を参照する。
@@ -1082,20 +1087,6 @@ type AvatarDecorationInput struct {
 	FlipH   *bool    `json:"flipH,omitempty"`
 	OffsetX *float64 `json:"offsetX,omitempty"`
 	OffsetY *float64 `json:"offsetY,omitempty"`
-}
-
-// jsonbObject normalizes a raw jsonb byte slice into map[string]any for the
-// Me response. Empty or malformed payloads become an empty object so the
-// frontend always sees a stable shape.
-func jsonbObject(raw []byte) any {
-	if len(raw) == 0 {
-		return map[string]any{}
-	}
-	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
-		return map[string]any{}
-	}
-	return out
 }
 
 // jsonbArray normalizes a raw jsonb byte slice into []any for the Me response.
@@ -1337,6 +1328,23 @@ func profileTextWithinLimit(s *string, max int) bool {
 	return utf8.RuneCountInString(*s) <= max
 }
 
+// driveIDUpdate decodes an avatarId / bannerId field into the core layer's
+// convention. ok=false は「キー省略 = 不変」、value="" は「null = CLEAR」、
+// それ以外は SET したい drive file ID。文字列以外の値は不変として扱う。
+func driveIDUpdate(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	if string(raw) == "null" {
+		return "", true
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}
+
 func (h *Handler) Update(c echo.Context) error {
 	me := middleware.GetUser(c)
 
@@ -1494,17 +1502,17 @@ func (h *Handler) Update(c echo.Context) error {
 		}
 		return bioMediaAllowed
 	}
-	if req.AvatarID != nil {
-		if v := req.AvatarID; v != nil && *v != "" && !canUpdateBioMedia() {
+	if v, ok := driveIDUpdate(req.AvatarID); ok {
+		if v != "" && !canUpdateBioMedia() {
 			return apierr.JSONRestrictedByRole(c)
 		}
-		in.AvatarID = req.AvatarID
+		in.AvatarID = &v
 	}
-	if req.BannerID != nil {
-		if v := req.BannerID; v != nil && *v != "" && !canUpdateBioMedia() {
+	if v, ok := driveIDUpdate(req.BannerID); ok {
+		if v != "" && !canUpdateBioMedia() {
 			return apierr.JSONRestrictedByRole(c)
 		}
-		in.BannerID = req.BannerID
+		in.BannerID = &v
 	}
 	if req.AvatarDecorations != nil {
 		normalized, apiErr := h.normalizeAvatarDecorations(me.ID, *req.AvatarDecorations)
@@ -1878,7 +1886,7 @@ func (h *Handler) Pin(c echo.Context) error {
 		h.pinDeliveryHook.OnLocalPinChanged(me.ID, req.NoteID, true)
 	}
 
-	return h.Me(c)
+	return h.me(c, false)
 }
 
 // Unpin handles POST /api/i/unpin.
@@ -1902,7 +1910,7 @@ func (h *Handler) Unpin(c echo.Context) error {
 		h.pinDeliveryHook.OnLocalPinChanged(me.ID, req.NoteID, false)
 	}
 
-	return h.Me(c)
+	return h.me(c, false)
 }
 
 // fillUnreadFields writes the unread-related flags/counts onto resp.

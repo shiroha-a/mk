@@ -58,14 +58,6 @@ type UserLite struct {
 	// 「空配列 present」と「absent」を区別するため *[]any + omitempty を使う
 	// (#1653)。
 	BadgeRoles *[]any `json:"badgeRoles,omitempty"`
-	// CanChat は upstream Misskey TS の boolean field (#692)。FE の
-	// /chat/room.vue が `!user.canChat` で「DM 受け付け不可」warning を
-	// 出すので、出さないと local user 同士で DM できないと誤表示される。
-	// upstream 互換で role policy の `chatAvailability === "available"`
-	// 由来で計算する (#988)。PackUserLite が resolveCanChat() 経由で
-	// CanChatLookup を呼び、router で wired される。lookup が unwired
-	// の path (= 単体テスト等) は default `true` で fallback。
-	CanChat bool `json:"canChat"`
 	// Optional TS-compat fields (Phase 7-5a)。
 	// TS側は `requireSigninToViewContents: user.x === false ? undefined : true`
 	// なので、値が true のときのみ expose する (*bool を &true に設定、
@@ -85,6 +77,12 @@ type UserLite struct {
 // (#1251)。よって base UserDetailed には含めない。
 type UserDetailed struct {
 	UserLite
+	// CanChat は upstream の packedUserDetailedNotMeOnlySchema に属する field で、
+	// UserLite には無い (users/search 等の UserLite 応答に出すと shape が壊れる)。
+	// FE の /chat/room.vue と get-user-menu.ts はどちらも UserDetailed を見る。
+	// role policy の `chatAvailability === "available"` 由来 (#988)。lookup が
+	// unwired の path (= 単体テスト等) は default `true` で fallback。
+	CanChat        bool    `json:"canChat"`
 	BannerURL      *string `json:"bannerUrl"`
 	BannerBlurhash *string `json:"bannerBlurhash"`
 	IsLocked       bool    `json:"isLocked"`
@@ -510,12 +508,6 @@ func PackUserLite(u *model.User) UserLite {
 		Emojis:            make(map[string]string),
 		OnlineStatus:      computeOnlineStatus(u),
 		BadgeRoles:        packBadgeRoles(u),
-		// upstream `chatAvailability === 'available'` 互換 (#988)。
-		// 旧実装は `u.ChatScope != "none"` で user 自身の受信設定を返して
-		// いたが、upstream は role policy の chatAvailability を見る
-		// (admin が role に設定する権限)。lookup が wire されていない
-		// path (= 既存 unit test 等) は default true で fallback する。
-		CanChat: resolveCanChat(u.ID),
 	}
 	// requireSigninToViewContents: true のときだけ出す (TS は false→undefined)
 	if u.RequireSigninToViewContents {
@@ -536,6 +528,12 @@ func PackUserLite(u *model.User) UserLite {
 func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Generator) UserDetailed {
 	d := UserDetailed{
 		UserLite: PackUserLite(u),
+		// upstream `chatAvailability === 'available'` 互換 (#988)。
+		// 旧実装は `u.ChatScope != "none"` で user 自身の受信設定を返して
+		// いたが、upstream は role policy の chatAvailability を見る
+		// (admin が role に設定する権限)。lookup が wire されていない
+		// path (= 既存 unit test 等) は default true で fallback する。
+		CanChat: resolveCanChat(u.ID),
 		// bannerId が null のとき bannerUrl / bannerBlurhash も null にする
 		// (upstream `user.bannerId == null ? null : ...`、#1558)。remote user の
 		// bannerUrl は remote origin を指すため proxy 経由に書き換える (#1529)。
