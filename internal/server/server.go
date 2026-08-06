@@ -523,9 +523,16 @@ func lowercaseCharset(next echo.HandlerFunc) echo.HandlerFunc {
 // lowered, reporting whether a rewrite happened.
 func rewriteCharset(ct string) (string, bool) {
 	const upper = "charset=UTF-8"
-	idx := strings.Index(ct, upper)
-	if idx < 0 {
-		return ct, false
+	if idx := strings.Index(ct, upper); idx >= 0 {
+		return ct[:idx] + "charset=utf-8" + ct[idx+len(upper):], true
 	}
-	return ct[:idx] + "charset=utf-8" + ct[idx+len(upper):], true
+	// charset の無い application/json には付ける。本家 (Fastify) は JSON を
+	// 常に `application/json; charset=utf-8` で返すので、Content-Type の完全
+	// 一致で分岐するクライアントのために揃える。完全一致に限定して、他の
+	// JSON 系 MIME (application/activity+json 等) には手を出さない。
+	if ct == echo.MIMEApplicationJSON {
+		// echo.MIMEApplicationJSONCharsetUTF8 は大文字 UTF-8 なので使わない。
+		return echo.MIMEApplicationJSON + "; charset=utf-8", true
+	}
+	return ct, false
 }
