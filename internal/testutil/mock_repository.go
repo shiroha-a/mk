@@ -5432,6 +5432,17 @@ func (m *MockFollowingRepository) ListFollowers(userID string, limit, offset int
 	return paginate(rows, limit, offset), nil
 }
 
+// ListFolloweeIDs returns every followee id without pagination.
+func (m *MockFollowingRepository) ListFolloweeIDs(followerID string) ([]string, error) {
+	var ids []string
+	for _, f := range m.Followings {
+		if f.FollowerID == followerID {
+			ids = append(ids, f.FolloweeID)
+		}
+	}
+	return ids, nil
+}
+
 func (m *MockFollowingRepository) ListFollowing(userID string, limit, offset int) ([]*model.Following, error) {
 	var rows []*model.Following
 	for _, f := range m.Followings {

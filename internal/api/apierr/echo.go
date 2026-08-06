@@ -31,14 +31,15 @@ func JSONNoSuchUser(c echo.Context) error {
 	return c.JSON(http.StatusNotFound, NoSuchUser())
 }
 
-// JSONNoSuchNote writes a 404 NO_SUCH_NOTE response to the client.
+// JSONNoSuchNote writes a 400 NO_SUCH_NOTE response to the client.
+// upstream は kind 既定 'client' なので 400 (NO_SUCH_USER だけ httpStatusCode:404)。
 func JSONNoSuchNote(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, NoSuchNote())
+	return c.JSON(http.StatusBadRequest, NoSuchNote())
 }
 
-// JSONAccessDenied writes a 403 ACCESS_DENIED response to the client.
+// JSONAccessDenied writes a 400 ACCESS_DENIED response to the client.
 func JSONAccessDenied(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, AccessDenied())
+	return c.JSON(http.StatusBadRequest, AccessDenied())
 }
 
 // JSONRolePermissionDenied writes a 403 ROLE_PERMISSION_DENIED response.
@@ -50,22 +51,22 @@ func JSONRolePermissionDenied(c echo.Context) error {
 // JSONRestrictedByRole writes a 403 RESTRICTED_BY_ROLE response.
 // 詳細は RestrictedByRole 関数の doc を参照。
 func JSONRestrictedByRole(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, RestrictedByRole())
+	return c.JSON(http.StatusBadRequest, RestrictedByRole())
 }
 
 // JSONLtlDisabled writes a 403 LTL_DISABLED response. 詳細は LtlDisabled の doc。
 func JSONLtlDisabled(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, LtlDisabled())
+	return c.JSON(http.StatusBadRequest, LtlDisabled())
 }
 
 // JSONStlDisabled writes a 403 STL_DISABLED response (notes/hybrid-timeline)。
 func JSONStlDisabled(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, StlDisabled())
+	return c.JSON(http.StatusBadRequest, StlDisabled())
 }
 
 // JSONGtlDisabled writes a 403 GTL_DISABLED response. 詳細は GtlDisabled の doc。
 func JSONGtlDisabled(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, GtlDisabled())
+	return c.JSON(http.StatusBadRequest, GtlDisabled())
 }
 
 // #1029 PR-1: count limit 系 helpers。すべて 400 Bad Request (upstream
@@ -149,42 +150,42 @@ func JSONScheduledAtMustBeInFuture(c echo.Context) error {
 
 // JSONNoSuchRenoteTarget writes a 404 NO_SUCH_RENOTE_TARGET response to the client.
 func JSONNoSuchRenoteTarget(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, NoSuchRenoteTarget())
+	return c.JSON(http.StatusBadRequest, NoSuchRenoteTarget())
 }
 
 // JSONNoSuchReplyTarget writes a 404 NO_SUCH_REPLY_TARGET response to the client.
 func JSONNoSuchReplyTarget(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, NoSuchReplyTarget())
+	return c.JSON(http.StatusBadRequest, NoSuchReplyTarget())
 }
 
 // JSONCannotReplyToAnInvisibleNote writes a 403 CANNOT_REPLY_TO_AN_INVISIBLE_NOTE response.
 func JSONCannotReplyToAnInvisibleNote(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, CannotReplyToAnInvisibleNote())
+	return c.JSON(http.StatusBadRequest, CannotReplyToAnInvisibleNote())
 }
 
 // JSONCannotRenoteDueToVisibility writes a 403 CANNOT_RENOTE_DUE_TO_VISIBILITY response.
 func JSONCannotRenoteDueToVisibility(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, CannotRenoteDueToVisibility())
+	return c.JSON(http.StatusBadRequest, CannotRenoteDueToVisibility())
 }
 
 // JSONNoSuchChannel writes a 404 NO_SUCH_CHANNEL response to the client.
 func JSONNoSuchChannel(c echo.Context) error {
-	return c.JSON(http.StatusNotFound, NoSuchChannel())
+	return c.JSON(http.StatusBadRequest, NoSuchChannel())
 }
 
 // JSONCannotRenoteToAPureRenote writes a 403 response.
 func JSONCannotRenoteToAPureRenote(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, CannotRenoteToAPureRenote())
+	return c.JSON(http.StatusBadRequest, CannotRenoteToAPureRenote())
 }
 
 // JSONCannotReplyToAPureRenote writes a 403 response.
 func JSONCannotReplyToAPureRenote(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, CannotReplyToAPureRenote())
+	return c.JSON(http.StatusBadRequest, CannotReplyToAPureRenote())
 }
 
 // JSONCannotReplyToSpecifiedVisibilityNoteWithExtendedVisibility writes a 403.
 func JSONCannotReplyToSpecifiedVisibilityNoteWithExtendedVisibility(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, CannotReplyToSpecifiedVisibilityNoteWithExtendedVisibility())
+	return c.JSON(http.StatusBadRequest, CannotReplyToSpecifiedVisibilityNoteWithExtendedVisibility())
 }
 
 // JSONCannotCreateAlreadyExpiredPoll writes a 400 response.
@@ -194,7 +195,7 @@ func JSONCannotCreateAlreadyExpiredPoll(c echo.Context) error {
 
 // JSONYouHaveBeenBlocked writes a 403 response.
 func JSONYouHaveBeenBlocked(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, YouHaveBeenBlocked())
+	return c.JSON(http.StatusBadRequest, YouHaveBeenBlocked())
 }
 
 // JSONNoSuchFile writes a 400 response.
@@ -204,7 +205,7 @@ func JSONNoSuchFile(c echo.Context) error {
 
 // JSONCannotRenoteOutsideOfChannel writes a 403 response.
 func JSONCannotRenoteOutsideOfChannel(c echo.Context) error {
-	return c.JSON(http.StatusForbidden, CannotRenoteOutsideOfChannel())
+	return c.JSON(http.StatusBadRequest, CannotRenoteOutsideOfChannel())
 }
 
 // JSONContainsProhibitedWords writes a 400 response.

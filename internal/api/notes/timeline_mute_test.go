@@ -130,3 +130,45 @@ func TestLoadFollowedChannelIDs_EmptyResultReturnsNil(t *testing.T) {
 	h.SetChannelFollowingRepo(testutil.NewMockChannelFollowingRepository())
 	assert.Nil(t, h.loadFollowedChannelIDs(&model.User{ID: "viewer"}))
 }
+
+// loadFollowingIDs は viewer のフォロイー集合を返す。HTL / STL の
+// 「返信先が followers 限定の投稿」ガードで使う (upstream timeline.ts の
+// noteFilter が followings を引くのと同じ)。
+func TestLoadFollowingIDs(t *testing.T) {
+	h, _ := newTestHandler(t)
+	repo := testutil.NewMockFollowingRepository()
+	require.NoError(t, repo.Create(&model.Following{ID: "f1", FollowerID: "viewer", FolloweeID: "bob"}))
+	require.NoError(t, repo.Create(&model.Following{ID: "f2", FollowerID: "viewer", FolloweeID: "carol"}))
+	require.NoError(t, repo.Create(&model.Following{ID: "f3", FollowerID: "other", FolloweeID: "dave"}))
+	h.SetUserFollowingRepo(repo)
+
+	got := h.loadFollowingIDs(&model.User{ID: "viewer"})
+	require.NotNil(t, got)
+	_, hasBob := got["bob"]
+	_, hasCarol := got["carol"]
+	_, hasDave := got["dave"]
+	assert.True(t, hasBob)
+	assert.True(t, hasCarol)
+	assert.False(t, hasDave, "他人のフォローは含めない")
+}
+
+func TestLoadFollowingIDs_AnonymousReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetUserFollowingRepo(testutil.NewMockFollowingRepository())
+	assert.Nil(t, h.loadFollowingIDs(nil))
+}
+
+func TestLoadFollowingIDs_RepoUnsetReturnsNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	assert.Nil(t, h.loadFollowingIDs(&model.User{ID: "viewer"}))
+}
+
+// フォローが 0 件でも非 nil を返す。nil にすると「未配線」と区別が付かず、
+// ガードが丸ごと無効になってしまう。
+func TestLoadFollowingIDs_EmptyIsNotNil(t *testing.T) {
+	h, _ := newTestHandler(t)
+	h.SetUserFollowingRepo(testutil.NewMockFollowingRepository())
+	got := h.loadFollowingIDs(&model.User{ID: "viewer"})
+	require.NotNil(t, got)
+	assert.Empty(t, got)
+}

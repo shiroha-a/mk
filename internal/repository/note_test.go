@@ -1835,8 +1835,8 @@ func TestNoteRepository_ListFeaturedByUser_Error(t *testing.T) {
 
 // #1452: notes/user-list-timeline の visibility SQL push-down を覆う。
 // public/home は常時、followers は viewer が author 本人か follow 済みのときだけ、
-// specified は list timeline では除外 (DM 非表示)、channel 投稿は除外、匿名は
-// public/home のみ、を実 SQL に対して検証する。
+// 自分宛て (visibleUserIds / mentions) は visibility を問わず可視、channel 投稿は
+// 除外、匿名は public/home のみ、を実 SQL に対して検証する。
 func TestNoteRepository_ListByUserList_VisibilityPushdown(t *testing.T) {
 	repo := NewNoteRepository(testDB)
 	viewer := insertTestUser(t, "ult_v", "ultV")
@@ -1892,7 +1892,7 @@ func TestNoteRepository_ListByUserList_VisibilityPushdown(t *testing.T) {
 	assert.True(t, ids["ult_n_a_pub"], "public は見える")
 	assert.True(t, ids["ult_n_b_home"], "home は見える")
 	assert.False(t, ids["ult_n_c_fol"], "未フォローの followers は見えない")
-	assert.False(t, ids["ult_n_d_spec"], "specified は list timeline では出ない (visibleUserIds 対象でも)")
+	assert.True(t, ids["ult_n_d_spec"], "自分宛ての specified は list timeline にも出る (upstream generateVisibilityQuery)")
 	assert.True(t, ids["ult_n_e_pub2"], "別メンバーの public も見える")
 	assert.True(t, ids["ult_n_f_self_fol"], "自分の followers note は見える")
 	assert.False(t, ids["ult_n_g_ch"], "channel 投稿は除外")
@@ -1902,7 +1902,7 @@ func TestNoteRepository_ListByUserList_VisibilityPushdown(t *testing.T) {
 	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "ult_f1")
 	ids = collect(viewer.ID)
 	assert.True(t, ids["ult_n_c_fol"], "follow 済みなら followers が見える")
-	assert.False(t, ids["ult_n_d_spec"], "specified は follow + visibleUserIds 対象でも list timeline では出ない")
+	assert.True(t, ids["ult_n_d_spec"], "follow 済みでも自分宛ての specified は出る")
 
 	// 匿名 (viewerID="") は public/home のみ。
 	ids = collect("")
@@ -3488,6 +3488,44 @@ func TestNoteRepository_ListPublicNotesForFeed(t *testing.T) {
 	limited, err := repo.ListPublicNotesForFeed(u.ID, 1)
 	require.NoError(t, err)
 	assert.Len(t, limited, 1)
+}
+
+// 自分宛てではない specified (DM) はリスト TL に漏らさない。
+// 自分宛てを出す変更 (upstream generateVisibilityQuery 準拠) で、他人宛ての DM
+// まで見えるようになっていないことを確かめる。
+func TestNoteRepository_ListByUserList_OtherSpecifiedHidden(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	viewer := insertTestUser(t, "u_osp_v", "ospV")
+	defer cleanupUser(t, viewer.ID)
+	member := insertTestUser(t, "u_osp_m", "ospM")
+	defer cleanupUser(t, member.ID)
+	third := insertTestUser(t, "u_osp_t", "ospT")
+	defer cleanupUser(t, third.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" IN (?, ?, ?)`, viewer.ID, member.ID, third.ID)
+
+	listID := "osp_list"
+	require.NoError(t, testDB.Create(&model.UserList{ID: listID, UserID: viewer.ID, Name: "l"}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listID)
+	require.NoError(t, testDB.Create(&model.UserListMembership{ID: "osp_mem", UserListID: listID, UserID: member.ID}).Error)
+	defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, "osp_mem")
+
+	require.NoError(t, repo.Create(&model.Note{
+		ID: "osp_mine", UserID: member.ID, Visibility: "specified",
+		VisibleUserIDs: pq.StringArray{viewer.ID},
+	}))
+	require.NoError(t, repo.Create(&model.Note{
+		ID: "osp_other", UserID: member.ID, Visibility: "specified",
+		VisibleUserIDs: pq.StringArray{third.ID},
+	}))
+
+	got, err := repo.ListByUserList(listID, 50, "", "", model.TimelineDBFilter{ViewerID: viewer.ID})
+	require.NoError(t, err)
+	ids := map[string]bool{}
+	for _, n := range got {
+		ids[n.ID] = true
+	}
+	assert.True(t, ids["osp_mine"], "自分宛ての DM は出る")
+	assert.False(t, ids["osp_other"], "他人宛ての DM は出さない")
 }
 
 // ListByUserIDFiltered / ListPublicNotesForFeed のカーソル分岐を覆う。

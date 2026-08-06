@@ -292,14 +292,14 @@ func (h *Handler) loadFollowingIDs(viewer *model.User) map[string]struct{} {
 	if viewer == nil || h.userFollowingRepo == nil {
 		return nil
 	}
-	rows, err := h.userFollowingRepo.ListFollowing(viewer.ID, 0, 0)
+	ids, err := h.userFollowingRepo.ListFolloweeIDs(viewer.ID)
 	if err != nil {
 		slog.Warn("timeline: failed to load followings", "userId", viewer.ID, "err", err)
 		return nil
 	}
-	out := make(map[string]struct{}, len(rows))
-	for _, f := range rows {
-		out[f.FolloweeID] = struct{}{}
+	out := make(map[string]struct{}, len(ids))
+	for _, id := range ids {
+		out[id] = struct{}{}
 	}
 	return out
 }

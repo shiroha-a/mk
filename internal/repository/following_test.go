@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -39,6 +40,40 @@ func TestFollowingRepository_Create_FindByPair(t *testing.T) {
 	found, err := repo.FindByPair(follower.ID, followee.ID)
 	require.NoError(t, err)
 	assert.Equal(t, f.ID, found.ID)
+}
+
+// ListFolloweeIDs はページングせず全件返す。HTL の「返信先が followers 限定の
+// 投稿」ガードで集合として使うため、limit で切れると判定が壊れる。
+func TestFollowingRepository_ListFolloweeIDs(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	follower := insertTestUser(t, "u_lfi_1", "lfiFollower")
+	defer cleanupUser(t, follower.ID)
+	a := insertTestUser(t, "u_lfi_a", "lfiA")
+	defer cleanupUser(t, a.ID)
+	b := insertTestUser(t, "u_lfi_b", "lfiB")
+	defer cleanupUser(t, b.ID)
+	other := insertTestUser(t, "u_lfi_o", "lfiO")
+	defer cleanupUser(t, other.ID)
+
+	for i, pair := range [][2]string{{follower.ID, a.ID}, {follower.ID, b.ID}, {other.ID, a.ID}} {
+		id := fmt.Sprintf("lfi_%d", i)
+		require.NoError(t, repo.Create(&model.Following{ID: id, FollowerID: pair[0], FolloweeID: pair[1]}))
+		defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, id)
+	}
+
+	ids, err := repo.ListFolloweeIDs(follower.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{a.ID, b.ID}, ids, "他人のフォローは含めない")
+
+	// フォロー 0 件なら空。
+	ids, err = repo.ListFolloweeIDs(a.ID)
+	require.NoError(t, err)
+	assert.Empty(t, ids)
+
+	// 空 ID は早期 return。
+	ids, err = repo.ListFolloweeIDs("")
+	require.NoError(t, err)
+	assert.Nil(t, ids)
 }
 
 func TestFollowingRepository_FindByPair_NotFound(t *testing.T) {

@@ -209,8 +209,10 @@ func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 			h.publishNote("globalTimeline", n, author)
 		}
 
-		// 5. ユーザーリストタイムライン: 投稿者が属するリストへ配信
-		if h.userListRepo != nil && shouldFanoutToFollowers(n) {
+		// 5. ユーザーリストタイムライン: 投稿者が属するリストへ配信。
+		// specified (DM) も upstream は push 対象にし、リスト所有者が宛先か
+		// どうかで per-list に判定する (fanoutToUserLists 側)。
+		if h.userListRepo != nil && (shouldFanoutToFollowers(n) || n.Visibility == model.NoteVisibilitySpecified) {
 			listCap := resolveCap(limits, UserListTimelineKind)
 			h.fanoutToUserLists(ctx, n, author, listCap)
 		}
@@ -449,6 +451,22 @@ func (h *FanoutHook) fanoutToUserLists(ctx context.Context, n *model.Note, autho
 	// followers 以外 (public / home) は per-list owner の follow check 不要なので
 	// 旧経路 (ListIDsByMember + 全 list へ push) のままで済ます。これにより
 	// 通常 note の hot path に lookup を増やさない。
+	if n.Visibility == model.NoteVisibilitySpecified {
+		// upstream: リスト所有者が author 本人か visibleUserIds に含まれる場合だけ
+		// そのリストへ push する。他人宛ての DM を他人のリストに流さない。
+		owners, err := h.userListRepo.ListIDsAndOwnersByMember(author.ID)
+		if err != nil {
+			slog.Warn("fanoutToUserLists: list+owner lookup failed", "err", err, "author", author.ID)
+			return
+		}
+		for listID, ownerID := range owners {
+			if ownerID != author.ID && !slices.Contains([]string(n.VisibleUserIDs), ownerID) {
+				continue
+			}
+			h.pushWithLimit(ctx, UserListTimelineName(listID), n.ID, listCap)
+		}
+		return
+	}
 	if n.Visibility != model.NoteVisibilityFollowers {
 		listIDs, err := h.userListRepo.ListIDsByMember(author.ID)
 		if err != nil {

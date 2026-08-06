@@ -29,6 +29,10 @@ type FollowingRepository interface {
 	// NoteCreateService の findBy({followeeId, notify:'normal'}))。
 	ListFollowersToNotify(userID string) ([]*model.Following, error)
 	ListFollowing(userID string, limit, offset int) ([]*model.Following, error)
+	// ListFolloweeIDs returns every user id the given user follows.
+	// HTL の「返信先が followers 限定の投稿」ガードで集合として使うため、
+	// ページングせず全件返す。
+	ListFolloweeIDs(followerID string) ([]string, error)
 	// ListFollowingForList returns Following rows where followerID matches,
 	// optionally filtered by `notify IS NOT NULL` (= notification=true) and
 	// cursor-paginated by sinceID / untilID. Used by /api/following/list
@@ -149,6 +153,19 @@ func (r *followingRepository) FilterFollowingsToAnchor(anchorID string, candidat
 	if err := r.db.Model(&model.Following{}).
 		Where(`"followerId" IN ? AND "followeeId" = ?`, candidateIDs, anchorID).
 		Pluck(`"followerId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
+}
+
+func (r *followingRepository) ListFolloweeIDs(followerID string) ([]string, error) {
+	if followerID == "" {
+		return nil, nil
+	}
+	var ids []string
+	if err := r.db.Model(&model.Following{}).
+		Where(`"followerId" = ?`, followerID).
+		Pluck(`"followeeId"`, &ids).Error; err != nil {
 		return nil, err
 	}
 	return ids, nil

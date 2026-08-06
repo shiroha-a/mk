@@ -1544,3 +1544,58 @@ func TestFanoutHook_SkipsRemoteAndHibernatedFollowers(t *testing.T) {
 		assert.Empty(t, out, "follower %q (remote/hibernated) should not receive home push", fid)
 	}
 }
+
+// specified (DM) もリスト TL に push する。ただしリスト所有者が author 本人か
+// 宛先に含まれる場合だけ。upstream NoteCreateService の userListMemberships
+// ループと同じ判定で、他人宛ての DM を他人のリストに流さない。
+func TestFanoutHook_SpecifiedToUserLists(t *testing.T) {
+	h, fanout, _ := newTestHook(t)
+	ctx := context.Background()
+
+	lists := &stubUserLists{owners: map[string]string{
+		"list_mine":  "alice",  // 宛先に入っている所有者
+		"list_other": "dave",   // 宛先外
+		"list_self":  "author", // author 本人のリスト
+	}}
+	h.SetUserListRepo(lists)
+
+	noteID := idGen.Generate(time.Now())
+	n := &model.Note{
+		ID: noteID, UserID: "author",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: []string{"alice"},
+	}
+	h.OnNoteCreated(n, &model.User{ID: "author"})
+
+	for _, tc := range []struct {
+		list string
+		want bool
+	}{
+		{"list_mine", true},
+		{"list_self", true},
+		{"list_other", false},
+	} {
+		out, err := fanout.Get(ctx, UserListTimelineName(tc.list), "", "", 10)
+		require.NoError(t, err)
+		if tc.want {
+			assert.Equal(t, []string{noteID}, out, tc.list)
+		} else {
+			assert.Empty(t, out, tc.list)
+		}
+	}
+}
+
+// stubUserLists implements UserListMemberLookup for the tests above.
+type stubUserLists struct{ owners map[string]string }
+
+func (s *stubUserLists) ListIDsByMember(string) ([]string, error) {
+	ids := make([]string, 0, len(s.owners))
+	for id := range s.owners {
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (s *stubUserLists) ListIDsAndOwnersByMember(string) (map[string]string, error) {
+	return s.owners, nil
+}
