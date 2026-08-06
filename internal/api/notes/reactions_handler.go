@@ -16,8 +16,11 @@ import (
 
 // ReactionCreateRequest is the request body for notes/reactions/create.
 type ReactionCreateRequest struct {
-	NoteID   string `json:"noteId"`
-	Reaction string `json:"reaction"`
+	NoteID string `json:"noteId"`
+	// 欠落 (キー無し) と空文字を区別する。upstream の paramDef は
+	// `reaction: {type:'string'}` を required にするだけで minLength が無く、
+	// 空文字は valid な入力として ReactionService.normalize が ❤ に倒す。
+	Reaction *string `json:"reaction"`
 }
 
 // ReactionsCreate handles POST /api/notes/reactions/create.
@@ -25,13 +28,13 @@ func (h *Handler) ReactionsCreate(c echo.Context) error {
 	user := middleware.GetUser(c)
 
 	var req ReactionCreateRequest
-	// #2106 L36: upstream create.ts の paramDef は required:['noteId','reaction']。reaction
-	// 欠落を endpoint 層で 400 にする (欠落時に FallbackReaction(❤) で reaction しない)。
-	if err := c.Bind(&req); err != nil || req.NoteID == "" || req.Reaction == "" {
+	// #2106 L36: upstream create.ts の paramDef は required:['noteId','reaction']。
+	// キーごと欠落しているときだけ endpoint 層で 400 にする。
+	if err := c.Bind(&req); err != nil || req.NoteID == "" || req.Reaction == nil {
 		return apierr.JSONInvalidParam(c)
 	}
 
-	_, err := h.reactionService.Create(user, req.NoteID, req.Reaction)
+	_, err := h.reactionService.Create(user, req.NoteID, *req.Reaction)
 	if err != nil {
 		switch {
 		case errors.Is(err, reaction.ErrNoteNotFound):
