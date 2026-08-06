@@ -3,6 +3,7 @@ package clips
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -236,10 +237,13 @@ func (h *Handler) Show(c echo.Context) error {
 
 // UpdateRequest is the request body for clips/update.
 type UpdateRequest struct {
-	ClipID      string  `json:"clipId"`
-	Name        *string `json:"name"`
-	Description *string `json:"description"`
-	IsPublic    *bool   `json:"isPublic"`
+	ClipID string `json:"clipId"`
+	// upstream paramDef の name は `{type:'string', minLength:1}` で nullable
+	// ではない。`name: null` は型違反なので 400 にする必要があり、省略 (不変)
+	// と区別するため RawMessage で受ける。
+	Name        json.RawMessage `json:"name"`
+	Description *string         `json:"description"`
+	IsPublic    *bool           `json:"isPublic"`
 }
 
 // Update handles POST /api/clips/update.
@@ -252,14 +256,26 @@ func (h *Handler) Update(c echo.Context) error {
 	// upstream update.ts は `ps.description || null` を常に ClipService に渡す
 	// ため、description 未指定 (undefined) でも NULL にクリアされる。mk-go も
 	// 常に Description を更新対象にする (#1562)。
+	// name: キー省略なら不変、null は型違反で 400、文字列なら更新。
+	var name *string
+	if len(req.Name) > 0 {
+		if string(req.Name) == "null" {
+			return apierr.JSONInvalidParam(c)
+		}
+		var v string
+		if err := json.Unmarshal(req.Name, &v); err != nil {
+			return apierr.JSONInvalidParam(c)
+		}
+		name = &v
+	}
 	desc := req.Description
 	in := coreclip.UpdateInput{
-		Name:        req.Name,
+		Name:        name,
 		Description: &desc,
 		IsPublic:    req.IsPublic,
 	}
 	// name 長 / description 長の検証と空 description の null 正規化 (#1562)
-	if !validateClipParams(req.Name, in.Description) {
+	if !validateClipParams(name, in.Description) {
 		return apierr.JSONInvalidParam(c)
 	}
 	cl, err := h.svc.Update(user.ID, req.ClipID, in)
