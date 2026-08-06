@@ -100,6 +100,21 @@ type Service struct {
 	// publisher は match した note を pubsub topic へ publish する (#1573)。
 	// nil 時は Redis Stream への XAdd のみ行い realtime 配信は skip (旧挙動)。
 	publisher StreamingPublisher
+	// sensitiveChannels は excludeNotesInSensitiveChannel の判定に使う。
+	// nil なら判定を skip する (= 除外しない)。
+	sensitiveChannels SensitiveChannelLookup
+}
+
+// SensitiveChannelLookup reports whether a channel is flagged sensitive.
+// note は channel を埋めて持たないので、判定のたびに channelId から引く。
+type SensitiveChannelLookup interface {
+	IsSensitiveChannel(channelID string) bool
+}
+
+// SetSensitiveChannelLookup wires the lookup used by
+// excludeNotesInSensitiveChannel. 未配線なら除外は行われない。
+func (s *Service) SetSensitiveChannelLookup(l SensitiveChannelLookup) {
+	s.sensitiveChannels = l
 }
 
 // RolePolicyProvider abstracts role-policy lookup for antenna count limits (#1029).
@@ -607,6 +622,12 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 		return false
 	}
 	if a.ExcludeBots && author.IsBot {
+		return false
+	}
+	// upstream AntennaService:117 と同じ gate。channel が sensitive なら
+	// excludeNotesInSensitiveChannel のアンテナからは落とす。
+	if a.ExcludeNotesInSensitiveChannel && n.ChannelID != nil && *n.ChannelID != "" &&
+		s.sensitiveChannels != nil && s.sensitiveChannels.IsSensitiveChannel(*n.ChannelID) {
 		return false
 	}
 	if a.WithFile && len(n.FileIDs) == 0 {

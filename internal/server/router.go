@@ -323,6 +323,8 @@ func (s *Server) setupRoutes() {
 	antennaService.SetFollowingRepo(followingRepo)
 	antennaService.SetUserListRepo(userListRepo)
 	antennaService.SetRolePolicyProvider(roleService) // #1029: antennaLimit
+	// excludeNotesInSensitiveChannel の判定 (upstream AntennaService:117)。
+	antennaService.SetSensitiveChannelLookup(&sensitiveChannelLookup{repo: channelRepo})
 	// Phase 7-2 follow-up (#271): antenna 着信時に所有者の unread row を
 	// 作成して /api/i の hasUnreadAntenna に反映する。
 	antennaNoteUnreadRepo := repository.NewAntennaNoteUnreadRepository(s.db)
@@ -3545,6 +3547,23 @@ func (a *lastActiveRecorderAdapter) RecordActive(userID string) {
 			slog.Debug("streaming: lastActiveDate update failed", "userId", userID, "err", err)
 		}
 	}()
+}
+
+// sensitiveChannelLookup answers "is this channel sensitive?" for antenna
+// filtering. note は channel を埋めて持たないので channelId から都度引く。
+type sensitiveChannelLookup struct {
+	repo repository.ChannelRepository
+}
+
+func (l *sensitiveChannelLookup) IsSensitiveChannel(channelID string) bool {
+	if l.repo == nil || channelID == "" {
+		return false
+	}
+	ch, err := l.repo.FindByID(channelID)
+	if err != nil || ch == nil {
+		return false
+	}
+	return ch.IsSensitive
 }
 
 type hardMuteLookupAdapter struct {
