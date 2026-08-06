@@ -346,10 +346,9 @@ func (s *Service) Search(query, meID string, limit, offset int, origin string) (
 // local 限定への remap を Service 側で行う (= self-hostname は Service 設定
 // から引く)。
 func (s *Service) SearchByUsernameAndHost(username string, host *string, limit int) ([]*model.User, error) {
+	// username 省略 (= host だけの検索) も upstream は許すので、空文字は
+	// 「username で絞らない」を意味する。repository 側で条件を落とす。
 	q := strings.TrimSpace(strings.TrimPrefix(username, "@"))
-	if q == "" {
-		return nil, nil
-	}
 	if limit <= 0 {
 		limit = 10
 	}

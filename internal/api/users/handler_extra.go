@@ -1,9 +1,11 @@
 package users
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -584,20 +586,37 @@ func sortAndPageFeaturedIDs(ids []string, untilID string, limit int) []string {
 // SearchByUsernameAndHost handles POST /api/users/search-by-username-and-host.
 func (h *Handler) SearchByUsernameAndHost(c echo.Context) error {
 	var req struct {
-		Username string  `json:"username"`
+		// upstream の paramDef は username / host の anyOf で、どちらか一方の
+		// キーがあればよい (値は null 可)。username 省略時は username で
+		// 絞らずに host だけで検索する。両方欠けたときだけ 400。
+		Username *string `json:"username"`
 		Host     *string `json:"host"`
 		Limit    int     `json:"limit"`
 		// Detail は upstream search-by-username-and-host.ts:52 と同じく default
 		// true。false のとき UserLite を返す (#1547)。
 		Detail *bool `json:"detail"`
 	}
-	if err := c.Bind(&req); err != nil || req.Username == "" {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "username is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	// キーの有無を見るため raw body も読む (null 指定と省略は upstream では
+	// 区別されないが、「どちらのキーも無い」だけは弾く必要がある)。
+	raw := map[string]json.RawMessage{}
+	body, readErr := io.ReadAll(c.Request().Body)
+	if readErr == nil {
+		_ = json.Unmarshal(body, &raw)
+		c.Request().Body = io.NopCloser(bytes.NewReader(body))
+	}
+	_, hasUsername := raw["username"]
+	_, hasHost := raw["host"]
+	if err := c.Bind(&req); err != nil || (!hasUsername && !hasHost) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "username or host is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	username := ""
+	if req.Username != nil {
+		username = *req.Username
 	}
 	req.Limit = pagination.ClampLimit(req.Limit, 10, 100)
 	// host=nil → local user、host=*string → 当該 host のみで絞り込む
 	// (#766 fix、upstream Misskey TS の同 endpoint と同じ semantics)。
-	users, err := h.userService.SearchByUsernameAndHost(req.Username, req.Host, req.Limit)
+	users, err := h.userService.SearchByUsernameAndHost(username, req.Host, req.Limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

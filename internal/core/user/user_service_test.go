@@ -1034,10 +1034,12 @@ func TestService_SearchByUsernameAndHost(t *testing.T) {
 	userRepo.Users["u_remote"] = &model.User{ID: "u_remote", Username: "alice", UsernameLower: "alice", Host: &remoteHost}
 	userRepo.Users["u_other"] = &model.User{ID: "u_other", Username: "alice", UsernameLower: "alice", Host: &otherHost}
 
-	t.Run("empty query returns nil", func(t *testing.T) {
+	// upstream の paramDef は username / host の anyOf なので、username 省略
+	// (= host だけの検索) も有効。username 空文字は「username で絞らない」。
+	t.Run("empty query searches without a username filter", func(t *testing.T) {
 		out, err := svc.SearchByUsernameAndHost("", nil, 10)
 		require.NoError(t, err)
-		assert.Nil(t, out)
+		assert.Len(t, out, 3)
 	})
 
 	t.Run("@ prefix is stripped and host=nil returns local+remote", func(t *testing.T) {

@@ -392,9 +392,13 @@ func applyUserSearchOrigin(q *gorm.DB, origin string) *gorm.DB {
 // 優先度付けを入れる場合も、NULL 除外は持ち込まないこと。
 func (r *userRepository) SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error) {
 	var users []*model.User
-	q := r.db.
-		Where(`"usernameLower" LIKE ? ESCAPE '\'`, escapeSQLLikePattern(query)+"%").
-		Where("\"isSuspended\" = false")
+	q := r.db.Where("\"isSuspended\" = false")
+	// upstream generateUserQueryBuilder は `if (params.username)` で falsy を
+	// 素通りさせる。username 無し (= host だけ指定) の検索を許すため、空文字は
+	// 前方一致条件を付けない。
+	if query != "" {
+		q = q.Where(`"usernameLower" LIKE ? ESCAPE '\'`, escapeSQLLikePattern(query)+"%")
+	}
 	switch {
 	case localOnly:
 		q = q.Where("\"host\" IS NULL")
