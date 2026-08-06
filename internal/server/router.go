@@ -42,6 +42,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/i"
 	"github.com/shiroha-a/mk/internal/api/inbox"
 	apiinvite "github.com/shiroha-a/mk/internal/api/invite"
+	"github.com/shiroha-a/mk/internal/api/meself"
 	"github.com/shiroha-a/mk/internal/api/meta"
 	"github.com/shiroha-a/mk/internal/api/mute"
 	"github.com/shiroha-a/mk/internal/api/nodeinfo"
@@ -1294,9 +1295,10 @@ func (s *Server) setupRoutes() {
 		if req.Origin == "" {
 			req.Origin = "local"
 		}
+		viewer := middleware.GetUser(c)
 		viewerID := ""
-		if v := middleware.GetUser(c); v != nil {
-			viewerID = v.ID
+		if viewer != nil {
+			viewerID = viewer.ID
 		}
 		// upstream users.ts: base filter isExplorable=TRUE AND isSuspended=FALSE、
 		// hostname 絞り込み、認証時は mute/block 除外 (#1957-b)。
@@ -1311,7 +1313,8 @@ func (s *Server) setupRoutes() {
 		if err != nil {
 			return c.JSON(http.StatusOK, []any{})
 		}
-		result := make([]entity.UserDetailed, 0, len(users))
+		ctx := c.Request().Context()
+		result := make([]any, 0, len(users))
 		for _, u := range users {
 			profile, _ := userRepo.FindProfileByUserID(u.ID)
 			// idGen を渡して createdAt を有効にする。未配線だと createdAt="" で
@@ -1319,7 +1322,8 @@ func (s *Server) setupRoutes() {
 			d := entity.PackUserDetailed(u, profile, idGen)
 			// 認証 caller には viewer->user の relation block を付与 (#1957-a)。
 			listRelationRepos.Apply(&d, viewerID, u, profile)
-			result = append(result, d)
+			// upstream の pack は isDetailed && isMe で MeDetailed を返す。
+			result = append(result, meself.Pack(ctx, d, u, profile, viewer))
 		}
 		return c.JSON(http.StatusOK, result)
 	})
@@ -2716,6 +2720,11 @@ func (s *Server) setupRoutes() {
 
 	// Phase 7-2 (#244): /api/i の hasUnreadAnnouncement / unreadAnnouncements 配線
 	iHandler.SetAnnouncementRepo(announcementRepo)
+	// self を MeDetailed へ昇格させる他 handler (users / hashtags 等) が、未読 /
+	// policies / pinned を /api/i と同じ source で埋められるようにする。iHandler は
+	// これらの依存を全て持っているので、Enricher として 1 度だけ登録する。
+	// SetAnnouncementRepo などの依存配線が済んだ後に呼ぶこと。
+	meself.SetEnricher(iHandler)
 	announcementHandler := apiannouncements.NewHandler(announcementRepo, idGen)
 	announcementHandler.SetMainStreamPublisher(mainStreamPublisher)
 	announcementHandler.SetBroadcastPublisher(broadcastPublisher) // global announcementCreated (#2056)

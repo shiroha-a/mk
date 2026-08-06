@@ -10,12 +10,12 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/meself"
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
-	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -521,11 +521,12 @@ func (h *Handler) Show(c echo.Context) error {
 		// upstream show.ts:151-153 は userIds バルクモードでも schema 'UserDetailed'
 		// で pack する。旧実装は UserLite を返していた (#1547)。move 解決と remote
 		// stats fetch は list path 同様 N+1 回避のため bulk では行わない。
-		out := make([]entity.UserDetailed, 0, len(visible))
+		out := make([]any, 0, len(visible))
 		viewerID := ""
 		if viewer != nil {
 			viewerID = viewer.ID
 		}
+		ctx := c.Request().Context()
 		for _, b := range visible {
 			detailed := entity.PackUserDetailed(b.User, b.Profile, h.idGen)
 			resolver.FillUserLite(&detailed.UserLite)
@@ -540,7 +541,8 @@ func (h *Handler) Show(c echo.Context) error {
 			viewerIsFollowing := h.viewerRelationRepos().Apply(&detailed, viewerID, b.User, b.Profile)
 			isMe := viewer != nil && viewer.ID == b.User.ID
 			entity.GateCountVisibility(&detailed, isMe, iAmModerator, viewerIsFollowing)
-			out = append(out, detailed)
+			// upstream の pack は isDetailed && isMe で MeDetailed を返す。
+			out = append(out, meself.Pack(ctx, detailed, b.User, b.Profile, viewer))
 		}
 		return c.JSON(http.StatusOK, out)
 	}
@@ -662,21 +664,11 @@ func (h *Handler) Show(c echo.Context) error {
 	// frontend が `/api/users/show?username=me` 経由で自分のプロフィールを
 	// 開いたとき、`/api/i` 経由の $i と field set を一致させられる。
 	if viewer != nil && viewer.ID == bundle.User.ID {
-		me := entity.AsMeDetailed(detailed, bundle.User, bundle.Profile)
-		// policies は role 依存で entity 層では計算できないため handler で埋める。
-		// users/show では権威ソースでないので default policies を best-effort で
-		// 入れる (misskey_dart の MeDetailed.fromJson は policies を非null Map と
-		// して要求する、#1240)。権威値は /api/i 経由で取得される。
-		me.Policies = corerole.DefaultPolicies()
-		// isAdmin / isModerator も role 依存で entity 層では出せない。upstream は
-		// MeDetailedOnly でこれらを埋める (RoleService.isAdministrator/isModerator、
-		// root fallback 込み) ので、self-view では /api/i と同値になるよう
-		// moderatorChecker (= roleService) から populate する (#2091)。
-		if h.moderatorChecker != nil {
-			me.IsAdmin = h.moderatorChecker.IsAdministrator(bundle.User.ID)
-			me.IsModerator = h.moderatorChecker.IsModerator(bundle.User.ID)
-		}
-		return c.JSON(http.StatusOK, me)
+		// 未読 / policies / roles / pinned は entity 層では計算できない。
+		// meself が /api/i の handler (= 全依存を持つ) に委譲して埋めるので、
+		// self-view の field set と値が /api/i と一致する。Enricher 未配線の
+		// unit test 経路では MeDetailed の既定値のままになる。
+		return c.JSON(http.StatusOK, meself.PackMe(c.Request().Context(), detailed, bundle.User, bundle.Profile))
 	}
 	// followers/following count を visibility で gate する (#1558)。ここに来るのは
 	// non-self (anonymous 含む)。isMe=false、isFollowing は relation ブロックで
@@ -757,7 +749,8 @@ func (h *Handler) Search(c echo.Context) error {
 	if viewer != nil {
 		viewerID = viewer.ID
 	}
-	out := make([]entity.UserDetailed, 0, len(users))
+	ctx := c.Request().Context()
+	out := make([]any, 0, len(users))
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profiles[u.ID], h.idGen)
 		resolver.FillUserLite(&d.UserLite)
@@ -771,7 +764,8 @@ func (h *Handler) Search(c echo.Context) error {
 		viewerIsFollowing := h.viewerRelationRepos().Apply(&d, viewerID, u, profiles[u.ID])
 		isMe := viewer != nil && viewer.ID == u.ID
 		entity.GateCountVisibility(&d, isMe, iAmModerator, viewerIsFollowing)
-		out = append(out, d)
+		// upstream の pack は isDetailed && isMe で MeDetailed を返す。
+		out = append(out, meself.Pack(ctx, d, u, profiles[u.ID], viewer))
 	}
 	return c.JSON(http.StatusOK, out)
 }

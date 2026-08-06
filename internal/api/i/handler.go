@@ -1913,6 +1913,26 @@ func (h *Handler) Unpin(c echo.Context) error {
 	return h.me(c, false)
 }
 
+// EnrichSelf implements meself.Enricher. 他 handler が self を MeDetailed へ
+// 昇格させたとき、entity 層では出せない field (未読 / role policies / roles /
+// pinned) をここで埋める。/api/i と同じ source を使うので値も一致する。
+//
+// includeSecrets 相当 (email / emailVerified / securityKeysList) は入れない。
+// upstream も users/show や hashtags/users では includeSecrets を渡さない。
+func (h *Handler) EnrichSelf(ctx context.Context, u *model.User, profile *model.UserProfile, resp map[string]any) {
+	if u == nil || resp == nil {
+		return
+	}
+	h.fillUnreadFields(ctx, u, resp)
+	h.fillPinnedFields(ctx, u, profile, resp)
+	isAdmin, isMod, policies, roles := h.rolePayload(u.ID)
+	resp["isAdmin"] = isAdmin
+	resp["isModerator"] = isMod
+	resp["policies"] = policies
+	resp["roles"] = roles
+	resp["isSilenced"] = h.isSilenced(u.ID)
+}
+
 // fillUnreadFields writes the unread-related flags/counts onto resp.
 // 依存が未wireのフィールドはdefault (false/0/[]) にフォールバックする。
 func (h *Handler) fillUnreadFields(ctx context.Context, u *model.User, resp map[string]any) {

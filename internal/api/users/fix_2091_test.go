@@ -1,11 +1,24 @@
 package users
 
 import (
+	"context"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/api/meself"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 )
+
+// stubSelfEnricher stands in for the /api/i handler that fills the
+// handler-owned MeDetailed fields in production (router が配線する)。
+type stubSelfEnricher struct {
+	adminID string
+}
+
+func (s stubSelfEnricher) EnrichSelf(_ context.Context, u *model.User, _ *model.UserProfile, resp map[string]any) {
+	resp["isAdmin"] = u.ID == s.adminID
+	resp["isModerator"] = u.ID == s.adminID
+}
 
 // #2091: users/show の self-view (MeDetailed) は isAdmin / isModerator を
 // roleService (moderatorChecker、root fallback 込み) から populate しなければ
@@ -16,6 +29,8 @@ func TestShow_SelfView_PopulatesIsAdminIsModerator(t *testing.T) {
 	alice := newTargetWithProfile(repo, "alice", &model.UserProfile{})
 	// alice を admin/moderator (= root 相当) として扱う stub。
 	h.SetModeratorChecker(modByID{id: "alice"})
+	meself.SetEnricher(stubSelfEnricher{adminID: "alice"})
+	t.Cleanup(func() { meself.SetEnricher(nil) })
 
 	resp := showWithViewer(t, h, "alice", alice)
 	assert.Equal(t, true, resp["isAdmin"], "self-view は root/admin を isAdmin=true で返す")
@@ -28,6 +43,8 @@ func TestShow_SelfView_NonAdminIsFalse(t *testing.T) {
 	bob := newTargetWithProfile(repo, "bob", &model.UserProfile{})
 	// bob 以外を admin にする = bob は非 admin。
 	h.SetModeratorChecker(modByID{id: "someone-else"})
+	meself.SetEnricher(stubSelfEnricher{adminID: "someone-else"})
+	t.Cleanup(func() { meself.SetEnricher(nil) })
 
 	resp := showWithViewer(t, h, "bob", bob)
 	assert.Equal(t, false, resp["isAdmin"])

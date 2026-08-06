@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/api/meself"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -428,16 +429,20 @@ func (h *Handler) Users(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	viewer := middleware.GetUser(c)
 	viewerID := ""
-	if v := middleware.GetUser(c); v != nil {
-		viewerID = v.ID
+	if viewer != nil {
+		viewerID = viewer.ID
 	}
-	out := make([]entity.UserDetailed, 0, len(users))
+	ctx := c.Request().Context()
+	out := make([]any, 0, len(users))
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profByID[u.ID], gen)
 		// 認証 caller には viewer->user の relation block を付与 (匿名/self は no-op、#1957-a)。
 		h.relation.Apply(&d, viewerID, u, profByID[u.ID])
-		out = append(out, d)
+		// upstream の pack は isDetailed && isMe で MeDetailed を返すので、
+		// 結果に自分が混ざるときは自分だけ MeDetailed になる。
+		out = append(out, meself.Pack(ctx, d, u, profByID[u.ID], viewer))
 	}
 	return c.JSON(http.StatusOK, out)
 }
