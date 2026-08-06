@@ -346,11 +346,29 @@ type FilesUpdateRequest struct {
 	Name   *string `json:"name"`
 	// upstream update.ts paramDef は comment が nullable。JSON の `comment:null`
 	// (= 明示クリア) と省略を区別するため json.RawMessage で受ける (#1769)。
-	Comment     json.RawMessage `json:"comment"`
-	FolderID    *string         `json:"folderId"`
+	Comment json.RawMessage `json:"comment"`
+	// folderId は upstream paramDef が nullable。`folderId: null` (= ルートへ
+	// 移動) と省略を区別するため RawMessage で受ける。旧実装は *string で
+	// 区別できず、mk-go 独自の unsetFolder フラグを足していた。
+	FolderID    json.RawMessage `json:"folderId"`
 	IsSensitive *bool           `json:"isSensitive"`
-	// folderIdをnullに設定したい場合用 (JSON nullの判定不可なので明示フラグ)
-	UnsetFolder bool `json:"unsetFolder"`
+}
+
+// decodeNullableID maps the 3 JSON states of a nullable id field onto the core
+// layer's `**string`. ok=false は「キー省略 = 不変」、返り値 nil は
+// 「null = 親を外す」、非 nil は「その id へ移動」。
+func decodeNullableID(raw json.RawMessage) (*string, bool) {
+	if len(raw) == 0 {
+		return nil, false
+	}
+	if string(raw) == "null" {
+		return nil, true
+	}
+	var v string
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return nil, false
+	}
+	return &v, true
 }
 
 // FilesUpdate handles POST /api/drive/files/update.
@@ -382,11 +400,7 @@ func (h *Handler) FilesUpdate(c echo.Context) error {
 			in.Comment = &cp
 		}
 	}
-	if req.UnsetFolder {
-		var nilPtr *string
-		in.FolderID = &nilPtr
-	} else if req.FolderID != nil {
-		fid := req.FolderID
+	if fid, ok := decodeNullableID(req.FolderID); ok {
 		in.FolderID = &fid
 	}
 
@@ -556,10 +570,10 @@ func (h *Handler) packDriveFolderDetailGuarded(f *model.DriveFolder, visited map
 
 // FoldersUpdateRequest is the body for drive/folders/update.
 type FoldersUpdateRequest struct {
-	FolderID    string  `json:"folderId"`
-	Name        *string `json:"name"`
-	ParentID    *string `json:"parentId"`
-	UnsetParent bool    `json:"unsetParent"`
+	FolderID string  `json:"folderId"`
+	Name     *string `json:"name"`
+	// parentId も files/update の folderId と同じく nullable。
+	ParentID json.RawMessage `json:"parentId"`
 }
 
 // FoldersUpdate handles POST /api/drive/folders/update.
@@ -574,11 +588,7 @@ func (h *Handler) FoldersUpdate(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	in := coredrive.UpdateFolderInput{Name: req.Name}
-	if req.UnsetParent {
-		var nilPtr *string
-		in.ParentID = &nilPtr
-	} else if req.ParentID != nil {
-		pid := req.ParentID
+	if pid, ok := decodeNullableID(req.ParentID); ok {
 		in.ParentID = &pid
 	}
 	f, err := h.svc.UpdateFolder(user, req.FolderID, in)

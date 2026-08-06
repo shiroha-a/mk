@@ -397,12 +397,13 @@ func TestFilesUpdate_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestFilesUpdate_UnsetFolder(t *testing.T) {
+// folderId: null でルートへ移動できる (upstream paramDef は nullable)。
+func TestFilesUpdate_NullFolderMovesToRoot(t *testing.T) {
 	h, fileRepo, _ := newHandler(t)
 	uid := "u1"
 	folderID := "fid"
 	fileRepo.Files["f1"] = &model.DriveFile{ID: "f1", UserID: &uid, FolderID: &folderID}
-	c, rec := newJSONReq(t, `{"fileId":"f1","unsetFolder":true}`)
+	c, rec := newJSONReq(t, `{"fileId":"f1","folderId":null}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesUpdate(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -775,12 +776,13 @@ func TestFoldersUpdate_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestFoldersUpdate_UnsetParent(t *testing.T) {
+// parentId: null で親を外せる。
+func TestFoldersUpdate_NullParentDetaches(t *testing.T) {
 	h, _, folderRepo := newHandler(t)
 	uid := "u1"
 	pid := "p"
 	folderRepo.Folders["c"] = &model.DriveFolder{ID: "c", UserID: &uid, ParentID: &pid}
-	c, rec := newJSONReq(t, `{"folderId":"c","unsetParent":true}`)
+	c, rec := newJSONReq(t, `{"folderId":"c","parentId":null}`)
 	setUser(c, "u1")
 	require.NoError(t, h.FoldersUpdate(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
