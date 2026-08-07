@@ -20,14 +20,25 @@ Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](ht
 
 フロントエンドアセットを同梱した `bundled` イメージを使う。ビルドが一切要らない。
 
+動かすだけなら [`docker` ブランチ](https://github.com/shiroha-a/mk/tree/docker)を使う。
+compose と設定のひな形だけが入った orphan ブランチで、Go のソースも Misskey の
+submodule も含まないため数十 KB で済む (`develop` は `.git` だけで 672MB ある)。
+
 ```bash
-git clone https://github.com/shiroha-a/mk.git
+git clone --depth 1 -b docker https://github.com/shiroha-a/mk.git mk
 cd mk
 
 mkdir -p files && sudo chown -R 991:991 files
-make image-up
+docker compose up -d
 
 # ブラウザで http://localhost:3000 を開く
+```
+
+ソースを持っている場合は同じことを Makefile から実行できる。
+
+```bash
+mkdir -p files && sudo chown -R 991:991 files
+make image-up
 ```
 
 設定を変える場合は `.config/docker.yml` を用意し、`docker-compose.image.yml` の `app` と `migrate` 両方の volumes コメントを外す。詳細は[デプロイ](docs/deployment.md)を参照。

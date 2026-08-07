@@ -1,0 +1,85 @@
+name: Docker branch
+
+# 「pull して動かすだけ」の orphan ブランチ `docker` を生成する。
+#
+# ルート README のクイックスタートは `git clone` から始まるが、動かすだけの人に
+# 672MB の .git を落とさせている (submodule 込みならさらに 1.4GB)。実際に必要な
+# のは compose 1 つと設定のひな形だけなので、それだけを置いたブランチを配る。
+#
+#   git clone --depth 1 -b docker https://github.com/shiroha-a/mk.git mk
+#   cd mk && docker compose up -d
+#
+# 生成物は毎回 1 コミットだけの orphan ブランチで、履歴ごと作り直す (force-push)。
+# **`docker` ブランチを保護対象にしないこと** — force-push できなくなる。
+# **手で commit しないこと** — 次の生成で消える。
+#
+# 内容は生成時に一切書き換えない (sed 等を挟まない)。書き換えを入れると、
+# develop 上で `make image-up` として動作確認した compose と、配布される compose が
+# 静かに食い違う余地ができる。`docker-compose.image.yml` を単一の正に保つ。
+
+on:
+  push:
+    branches: [develop]
+    # 生成元が変わったときだけ発火する。
+    paths:
+      - "docker-compose.image.yml"
+      - ".config/docker.yml.example"
+      - "deploy/README.md"
+      - ".github/workflows/docker-branch.yml"
+  workflow_dispatch:
+
+# orphan ブランチへ force-push するため write が要る。
+permissions:
+  contents: write
+
+# 同時に複数走ると force-push が競合して、後勝ちで中途半端な内容が残りうる。
+concurrency:
+  group: docker-branch
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+        # submodule は不要。配布物は compose と設定のひな形だけ。
+
+      # 生成元をそのままコピーする。ここで内容を書き換えないのが要点。
+      - name: Assemble branch content
+        run: |
+          set -euo pipefail
+          out="$RUNNER_TEMP/docker-branch"
+          mkdir -p "$out/.config"
+          cp docker-compose.image.yml "$out/docker-compose.yml"
+          cp .config/docker.yml.example "$out/.config/docker.yml.example"
+          cp deploy/README.md "$out/README.md"
+          echo "DOCKER_BRANCH_DIR=$out" >> "$GITHUB_ENV"
+          echo "--- 生成した内容"
+          find "$out" -type f | sort
+
+      # compose として妥当か確認してから配る。壊れた compose を配ると、
+      # 利用者は「clone した直後に動かない」という最悪の第一印象を受ける。
+      - name: Validate compose
+        working-directory: ${{ env.DOCKER_BRANCH_DIR }}
+        run: docker compose config --quiet
+
+      - name: Force-push orphan branch
+        working-directory: ${{ env.DOCKER_BRANCH_DIR }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init -q -b docker
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -q -m "docker: develop@${GITHUB_SHA:0:7} から生成
+
+          このブランチは GitHub Actions が自動生成しており、push のたびに
+          履歴ごと作り直される。手で編集しないこと。生成元は develop の
+          docker-compose.image.yml / .config/docker.yml.example / deploy/README.md。"
+          git push -q --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" docker
+          echo "docker ブランチを更新した: develop@${GITHUB_SHA:0:7}"
