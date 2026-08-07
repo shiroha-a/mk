@@ -49,10 +49,12 @@ make upstream-e2e
 make upstream-e2e-down
 ```
 
-`make upstream-e2e-deps` がやることは 3 つ。いずれも毎回は要らないので
+`make upstream-e2e-deps` がやることは 4 つ。いずれも毎回は要らないので
 `upstream-e2e-test` からは切り離してある。
 
 - `pnpm install --frozen-lockfile`
+- `pnpm build-pre` — `loadConfig()` が `built/meta.json` を `readFileSync` する
+  (frontend の manifest は `existsSync` 判定なので無くてよい)
 - `pnpm --filter misskey-js build` — `misskey-js` は exports が `built/` を指すので、
   ビルドしないと `test/e2e/**` の `import ... from 'misskey-js/entities.js'` が解決できない。
   frontend まで含む `pnpm build` (5-10 分) は e2e には不要なので呼ばない

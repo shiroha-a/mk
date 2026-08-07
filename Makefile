@@ -575,9 +575,12 @@ UPSTREAM_E2E_BACKEND=$(UPSTREAM_E2E_MISSKEY)/packages/backend
 #  - .config/test.yml: 本家の utils.ts / setup が loadConfig() 経由で読む (port 等)。
 #  - compile-config: loadConfig() は YAML ではなく built/.config.json を読むので、
 #    NODE_ENV=test で .config/test.yml から生成しておく必要がある。
+#  - build-pre: loadConfig() は built/meta.json も readFileSync する (無いと ENOENT)。
+#    frontend の manifest は existsSync 判定なので無くてよい。
 upstream-e2e-deps: ## 本家 backend e2e に必要な submodule 側の依存を用意 (初回のみ)
 	cd $(UPSTREAM_E2E_MISSKEY) && \
 		pnpm install --frozen-lockfile && \
+		pnpm build-pre && \
 		pnpm --filter misskey-js build && \
 		cp .github/misskey/test.yml .config/ && \
 		NODE_ENV=test pnpm --filter backend compile-config
