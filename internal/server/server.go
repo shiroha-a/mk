@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	echomw "github.com/labstack/echo/v4/middleware"
@@ -19,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/cache"
 	"github.com/shiroha-a/mk/internal/core/chart"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
+	"github.com/shiroha-a/mk/internal/misc/redact"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	queuemetrics "github.com/shiroha-a/mk/internal/queue/metrics"
@@ -168,6 +171,47 @@ func gzipConfig() echomw.GzipConfig {
 	}
 }
 
+// Server timeouts. Go の http.Server はゼロ値が「無制限」なので、明示的に
+// 設定しないと slow header / slow body / idle connection を送り続けるだけで
+// file descriptor と goroutine を占有できてしまう。
+//
+// 値は upstream (Node) の既定に合わせてある。upstream も fastify 側で明示
+// 設定はしておらず Node の既定に依拠しているので、そこに揃えるのが drop-in
+// として自然で、かつ実運用で通っている値でもある。
+//
+//	headersTimeout 60s  -> ReadHeaderTimeout
+//	requestTimeout 300s -> ReadTimeout
+const (
+	serverReadHeaderTimeout = 60 * time.Second
+	serverReadTimeout       = 300 * time.Second
+	// keep-alive の idle 上限。Node の既定 (keepAliveTimeout 5s) より長く
+	// とってある。前段 nginx が upstream connection を keepalive で使い回す
+	// 構成では 5s だと張り直しが頻発して割に合わない。
+	serverIdleTimeout = 120 * time.Second
+	// Go の既定 (DefaultMaxHeaderBytes) と同じ 1MiB。既定でも無制限では
+	// ないが、明示しておかないと「header に上限があるか」をコードから
+	// 読み取れない。
+	serverMaxHeaderBytes = 1 << 20
+)
+
+// applyServerTimeouts sets read/idle timeouts and the header size cap on srv.
+//
+// WriteTimeout is deliberately left unset:
+//   - streaming (WebSocket) と drive のファイル配信・media proxy は応答が
+//     長時間に及ぶ。固定値を置くと正常な応答が途中で切れる
+//   - WebSocket 側は gorilla が Upgrade 時に deadline を解除し、その後は
+//     internal/stream が pong ベースで自前の deadline を張るので、server の
+//     ReadTimeout は WebSocket を殺さない
+func applyServerTimeouts(srv *http.Server) {
+	if srv == nil {
+		return
+	}
+	srv.ReadHeaderTimeout = serverReadHeaderTimeout
+	srv.ReadTimeout = serverReadTimeout
+	srv.IdleTimeout = serverIdleTimeout
+	srv.MaxHeaderBytes = serverMaxHeaderBytes
+}
+
 // New creates a new Server. Returns an error when the queue driver
 // fails to initialise (e.g. mkq driver failing to PING Redis at
 // startup).
@@ -175,6 +219,10 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
+	applyServerTimeouts(e.Server)
+	// TLSServer は使っていない (TLS 終端は前段の reverse proxy) が、将来
+	// e.StartTLS を使ったときに timeout 無しの server が生えるのを防ぐ。
+	applyServerTimeouts(e.TLSServer)
 	// 全 endpoint の c.JSON / c.Bind を共通 serializer に通す。実体は stdlib
 	// encoding/json (fastJSONSerializer の doc 参照: goccy は #542 の panic で
 	// revert、高速 encoder 化は #1142 で見送り)。
@@ -198,7 +246,13 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	e.Use(mksentry.Middleware(cfg))
 	e.Use(echomw.RequestID())
 	e.Use(echomw.LoggerWithConfig(echomw.LoggerConfig{
-		Format: "${time_rfc3339} ${method} ${uri} ${status} ${latency_human}\n",
+		// `${uri}` は query を含むため、そのまま出すと `?i=<token>` の形で
+		// 有効な credential がアクセスログに残る (redact package の doc 参照)。
+		// `${custom}` に差し替えて秘密パラメータの値だけを伏せる。
+		Format: "${time_rfc3339} ${method} ${custom} ${status} ${latency_human}\n",
+		CustomTagFunc: func(c echo.Context, buf *bytes.Buffer) (int, error) {
+			return buf.WriteString(redact.URI(c.Request().RequestURI))
+		},
 	}))
 	e.Use(echomw.CORSWithConfig(echomw.CORSConfig{
 		// discovery endpoint は upstream が専用の hook で
