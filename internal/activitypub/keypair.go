@@ -35,13 +35,26 @@ const (
 // GenerateRSAKeypair returns a fresh 2048-bit RSA keypair encoded as PEM
 // strings (private + public). 失敗時はエラーを返す。MarshalPKIXPublicKey は
 // RSAキーに対しては常に成功するため、その後のエラーチェックは省略している。
+//
+// 秘密鍵は **PKCS#8 (`BEGIN PRIVATE KEY`)** で出す。upstream の genRsaKeyPair が
+// `privateKeyEncoding: { type: 'pkcs8' }` を使っており、署名時に読むのは Rust 製の
+// `slacc` の `RsaKeyPair.fromPem()` で、**これは PKCS#8 しか受け付けない**。
+// PKCS#1 (`BEGIN RSA PRIVATE KEY`) を渡すと `no items found` で落ちる。
+//
+// mk-go 自身は ParseRSAPrivateKey が両形式を読めるので PKCS#1 でも動いてしまい、
+// **mk-go で作ったユーザーを TS に引き渡したときだけ送信側の連合が全滅する**という
+// 形で表面化する。TS→mk-go→TS の swap test は鍵を作るのが TS なので踏まない
+// (#2379 の mk-go→TS 経路で発見)。
 func GenerateRSAKeypair() (privatePEM string, publicPEM string, err error) {
 	priv, err := rsa.GenerateKey(randReader, 2048)
 	if err != nil {
 		return "", "", err
 	}
-	privBytes := x509.MarshalPKCS1PrivateKey(priv)
-	privBlock := &pem.Block{Type: "RSA PRIVATE KEY", Bytes: privBytes}
+	privBytes, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		return "", "", err
+	}
+	privBlock := &pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}
 
 	pubBytes, _ := x509.MarshalPKIXPublicKey(&priv.PublicKey)
 	pubBlock := &pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}
@@ -172,4 +185,32 @@ func ParsePublicKey(pemStr string) (crypto.PublicKey, KeyType, error) {
 	default:
 		return nil, 0, fmt.Errorf("unsupported public key type: %T", pub)
 	}
+}
+
+// ConvertRSAPrivateKeyToPKCS8 re-encodes a PEM-encoded RSA private key as
+// PKCS#8 (`BEGIN PRIVATE KEY`). 既に PKCS#8 ならそのまま返す (冪等)。
+//
+// 鍵そのものは変わらず、**PEM のエンコーディングだけ**が変わる。公開鍵も鍵 ID も
+// 不変なので、連合相手から見て何も変わらない。
+//
+// mk-go は 000072 以前 PKCS#1 で発行しており、Misskey TS はそれを読めない
+// (#2378)。既存インスタンスを救うための変換に使う。
+func ConvertRSAPrivateKeyToPKCS8(privatePEM string) (string, error) {
+	block, _ := pem.Decode([]byte(privatePEM))
+	if block == nil {
+		return "", errors.New("activitypub: PEM をデコードできない")
+	}
+	if block.Type == "PRIVATE KEY" {
+		// 既に PKCS#8。冪等に扱う。
+		return privatePEM, nil
+	}
+	key, err := ParseRSAPrivateKey(privatePEM)
+	if err != nil {
+		return "", err
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return "", err
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})), nil
 }

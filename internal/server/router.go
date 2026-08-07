@@ -170,6 +170,19 @@ func (s *Server) setupRoutes() {
 	driveFileRepo := repository.NewDriveFileRepository(s.db)
 	driveFolderRepo := repository.NewDriveFolderRepository(s.db)
 	keypairRepo := repository.NewUserKeypairRepository(s.db)
+	// mk-go は #2378 以前、ローカルユーザーの RSA 秘密鍵を PKCS#1 で発行していた。
+	// mk-go 自身は両形式を読めるが **Misskey TS は PKCS#8 しか読めない** ので、
+	// そのまま TS へ引き渡すとそのユーザーの送信側の連合が全滅する (受信は動くので
+	// 片方向だけ静かに壊れる)。既存インスタンスを救うため起動時に変換する。
+	//
+	// 変換するのは PEM のエンコーディングだけで鍵そのものは変わらない。公開鍵も
+	// 鍵 ID も不変なので連合相手から見て何も変わらない。冪等なので毎回走ってよく、
+	// 対象が無ければ 1 クエリで終わる。失敗は警告だけで起動継続。
+	if converted, err := keypairRepo.NormalizePrivateKeysToPKCS8(); err != nil {
+		slog.Warn("user_keypair PKCS#8 正規化に失敗", "err", err)
+	} else if converted > 0 {
+		slog.Info("user_keypair を PKCS#8 に正規化した", "converted", converted)
+	}
 	keypairExtraRepo := repository.NewUserKeypairExtraRepository(s.db)
 	instanceRepo := repository.NewInstanceRepository(s.db)
 	// instance.{followersCount,followingCount} は following service の

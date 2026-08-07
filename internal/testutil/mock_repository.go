@@ -5244,6 +5244,11 @@ func (m *MockUserKeypairRepository) FindByUserID(userID string) (*model.UserKeyp
 	return k, nil
 }
 
+// NormalizePrivateKeysToPKCS8 は mock では no-op (#2378)。
+func (m *MockUserKeypairRepository) NormalizePrivateKeysToPKCS8() (int, error) {
+	return 0, nil
+}
+
 // MockUserKeypairExtraRepository is a test double for
 // repository.UserKeypairExtraRepository.
 //

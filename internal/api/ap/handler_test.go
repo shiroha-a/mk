@@ -30,6 +30,8 @@ type memoryKeypairRepo struct {
 	err   error
 }
 
+func (m *memoryKeypairRepo) NormalizePrivateKeysToPKCS8() (int, error) { return 0, nil }
+
 func (m *memoryKeypairRepo) Create(k *model.UserKeypair) error {
 	if m.err != nil {
 		return m.err

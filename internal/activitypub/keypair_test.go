@@ -15,7 +15,12 @@ import (
 func TestGenerateAndParseKeypair(t *testing.T) {
 	priv, pub, err := GenerateRSAKeypair()
 	require.NoError(t, err)
-	assert.Contains(t, priv, "RSA PRIVATE KEY")
+	// 秘密鍵は PKCS#8 (`BEGIN PRIVATE KEY`) でなければならない。upstream の署名は
+	// Rust 製 slacc の RsaKeyPair.fromPem() で読み、**PKCS#1 を受け付けない**。
+	// PKCS#1 で出すと、mk-go が作ったユーザーを TS に引き渡したとき送信側の連合が
+	// 全滅する (#2379 の経路検証で発見、#2378 で修正)。
+	assert.Contains(t, priv, "BEGIN PRIVATE KEY")
+	assert.NotContains(t, priv, "RSA PRIVATE KEY", "PKCS#1 は TS が読めない")
 	assert.Contains(t, pub, "PUBLIC KEY")
 
 	rsaPriv, err := ParseRSAPrivateKey(priv)
@@ -113,3 +118,37 @@ type sentinelErr struct{ msg string }
 func (e *sentinelErr) Error() string { return e.msg }
 
 func newSentinelErr(s string) error { return &sentinelErr{msg: s} }
+
+// PKCS#1 で保存された既存の鍵を PKCS#8 に変換できる (#2378)。鍵そのものは
+// 変わらず PEM のエンコーディングだけが変わることを、公開鍵の一致で確かめる。
+func TestConvertRSAPrivateKeyToPKCS8(t *testing.T) {
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pkcs1 := string(pem.EncodeToMemory(&pem.Block{
+		Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv),
+	}))
+
+	got, err := ConvertRSAPrivateKeyToPKCS8(pkcs1)
+	require.NoError(t, err)
+	assert.Contains(t, got, "BEGIN PRIVATE KEY")
+	assert.NotContains(t, got, "RSA PRIVATE KEY")
+
+	// 鍵が同一であること (= 公開鍵が一致する)。
+	reparsed, err := ParseRSAPrivateKey(got)
+	require.NoError(t, err)
+	assert.Equal(t, priv.PublicKey, reparsed.PublicKey, "変換で鍵が変わってはいけない")
+}
+
+// 冪等: 既に PKCS#8 ならそのまま返す。起動時に毎回走るので必須。
+func TestConvertRSAPrivateKeyToPKCS8_Idempotent(t *testing.T) {
+	priv, _, err := GenerateRSAKeypair()
+	require.NoError(t, err)
+	got, err := ConvertRSAPrivateKeyToPKCS8(priv)
+	require.NoError(t, err)
+	assert.Equal(t, priv, got)
+}
+
+func TestConvertRSAPrivateKeyToPKCS8_Invalid(t *testing.T) {
+	_, err := ConvertRSAPrivateKeyToPKCS8("not a pem")
+	assert.Error(t, err)
+}

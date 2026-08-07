@@ -248,7 +248,8 @@ func TestSignup_WithKeypairRepo(t *testing.T) {
 
 type failingCreateKeypairRepo struct{}
 
-func (f *failingCreateKeypairRepo) Create(_ *model.UserKeypair) error { return assert.AnError }
+func (f *failingCreateKeypairRepo) Create(_ *model.UserKeypair) error         { return assert.AnError }
+func (f *failingCreateKeypairRepo) NormalizePrivateKeysToPKCS8() (int, error) { return 0, nil }
 func (f *failingCreateKeypairRepo) FindByUserID(_ string) (*model.UserKeypair, error) {
 	return nil, assert.AnError
 }
