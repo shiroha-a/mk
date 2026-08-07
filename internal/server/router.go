@@ -2217,16 +2217,26 @@ func (s *Server) setupRoutes() {
 	// upstream は token server にだけ fastifyCors を登録している
 	// (createTokenServer)。ブラウザ上の SPA が PKCE でトークン交換できるように
 	// するためで、authorize / decision は CORS 対象外。
-	s.echo.POST("/oauth/token", oauthHandler.Token, echomw.CORSWithConfig(echomw.CORSConfig{
-		AllowOrigins: []string{"*"},
-		AllowMethods: []string{http.MethodPost, http.MethodOptions},
-	}))
+	// Echo の CORS middleware は Origin ヘッダが無いと何も付けないが、
+	// @fastify/cors は origin: '*' なら Origin の有無に関わらず
+	// Access-Control-Allow-Origin: * を返す。token endpoint はその挙動が
+	// upstream の e2e で検証されているので、wrapper で無条件に付与する。
+	oauthCORS := func(next echo.HandlerFunc) echo.HandlerFunc {
+		inner := echomw.CORSWithConfig(echomw.CORSConfig{
+			AllowOrigins: []string{"*"},
+			AllowMethods: []string{http.MethodPost, http.MethodOptions},
+		})(next)
+		return func(c echo.Context) error {
+			if c.Response().Header().Get(echo.HeaderAccessControlAllowOrigin) == "" {
+				c.Response().Header().Set(echo.HeaderAccessControlAllowOrigin, "*")
+			}
+			return inner(c)
+		}
+	}
+	s.echo.POST("/oauth/token", oauthHandler.Token, oauthCORS)
 	s.echo.OPTIONS("/oauth/token", func(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
-	}, echomw.CORSWithConfig(echomw.CORSConfig{
-		AllowOrigins: []string{"*"},
-		AllowMethods: []string{http.MethodPost, http.MethodOptions},
-	}))
+	}, oauthCORS)
 	// unknown /oauth/* は 404 (client が endpoint 対応有無を判別できるよう、
 	// upstream の catch-all 同様)。明示ルートが優先されるので authorize/decision/
 	// token はここに落ちない。
