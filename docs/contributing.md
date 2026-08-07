@@ -39,7 +39,11 @@ make lint   # go vet ./...
 make test   # go test ./... -v
 ```
 
-CIで`gofmt`差分チェック、`go vet`、カバレッジ閾値チェックが走る。詳細は[開発ガイド](development.md)のCI/CDセクションを参照。
+CIで`gofmt`差分チェック、`go vet`、カバレッジ閾値チェックが走る。
+
+PR を出すと十数個の check が走る。**required なのは `build` / `test` / `lint` の 3 つだけ**で、
+残りは非ブロッキング。どれが何を見ていて落ちたとき何を疑うかは [CI で回る項目](ci.md) に
+まとめてある。
 
 ## コーディング規約
 

@@ -392,4 +392,5 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 - [`migration-from-ts.md`](migration-from-ts.md) — TS からの移行手順
 - [`upstream-catch-up.md`](upstream-catch-up.md) — upstream 追従の手順とチェックリスト
 - [`upstream-backend-e2e.md`](upstream-backend-e2e.md) — 本家 backend e2e を mk-go に向けて回す基盤と、既知乖離の運用
+- [`ci.md`](ci.md) — CI で回る項目と、落ちたときの切り分け
 - [`update/`](update/) — upstream release ごとの差分 doc
