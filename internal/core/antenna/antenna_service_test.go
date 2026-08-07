@@ -587,7 +587,7 @@ func TestMatchNote_LocalOnlyRejectsRemote(t *testing.T) {
 		a.LocalOnly = true
 	})
 	host := "remote.example"
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Host: &host}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Host: &host}, nil))
 }
 
 func TestMatchNote_ExcludeBotsRejectsBot(t *testing.T) {
@@ -595,7 +595,7 @@ func TestMatchNote_ExcludeBotsRejectsBot(t *testing.T) {
 	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", nil, func(a *model.Antenna) {
 		a.ExcludeBots = true
 	})
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{IsBot: true}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{IsBot: true}, nil))
 }
 
 func TestMatchNote_WithFileRequiresAttachment(t *testing.T) {
@@ -603,15 +603,15 @@ func TestMatchNote_WithFileRequiresAttachment(t *testing.T) {
 	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", nil, func(a *model.Antenna) {
 		a.WithFile = true
 	})
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{}))
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{FileIDs: []string{"f1"}, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{FileIDs: []string{"f1"}, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_WithRepliesFalseRejectsReplies(t *testing.T) {
 	svc, repo := newSvc(t)
 	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", nil)
 	parent := "p1"
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{ReplyID: &parent, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{ReplyID: &parent, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_WithRepliesTrueAllowsReplies(t *testing.T) {
@@ -620,7 +620,7 @@ func TestMatchNote_WithRepliesTrueAllowsReplies(t *testing.T) {
 		a.WithReplies = true
 	})
 	parent := "p1"
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{ReplyID: &parent, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{ReplyID: &parent, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_UsersSourceWhitelist(t *testing.T) {
@@ -629,8 +629,8 @@ func TestMatchNote_UsersSourceWhitelist(t *testing.T) {
 		a.Src = model.AntennaSourceUsers
 		a.Users = []string{"alice"}
 	})
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "alice"}))
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "bob"}))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "alice"}, nil))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "bob"}, nil))
 }
 
 func TestMatchNote_UsersBlacklist(t *testing.T) {
@@ -639,8 +639,8 @@ func TestMatchNote_UsersBlacklist(t *testing.T) {
 		a.Src = model.AntennaSourceUsersBlacklist
 		a.Users = []string{"alice"}
 	})
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "alice"}))
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "bob"}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "alice"}, nil))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{Username: "bob"}, nil))
 }
 
 func TestMatchNote_KeywordsCaseSensitiveMiss(t *testing.T) {
@@ -649,7 +649,7 @@ func TestMatchNote_KeywordsCaseSensitiveMiss(t *testing.T) {
 		a.CaseSensitive = true
 	})
 	text := "this is misskey"
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_KeywordsCaseSensitiveHit(t *testing.T) {
@@ -658,7 +658,7 @@ func TestMatchNote_KeywordsCaseSensitiveHit(t *testing.T) {
 		a.CaseSensitive = true
 	})
 	text := "this is Misskey"
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_KeywordsAndOr(t *testing.T) {
@@ -668,9 +668,9 @@ func TestMatchNote_KeywordsAndOr(t *testing.T) {
 	hit1 := "foo bar"
 	hit2 := "baz only"
 	miss := "foo only"
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &hit1, Visibility: model.NoteVisibilityPublic}, &model.User{}))
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &hit2, Visibility: model.NoteVisibilityPublic}, &model.User{}))
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &miss, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &hit1, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &hit2, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &miss, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_ExcludeKeywords(t *testing.T) {
@@ -681,8 +681,8 @@ func TestMatchNote_ExcludeKeywords(t *testing.T) {
 	})
 	dirty := "this is spam"
 	clean := "this is fine"
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &dirty, Visibility: model.NoteVisibilityPublic}, &model.User{}))
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &clean, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &dirty, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &clean, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_BadKeywordsJSONTreatedAsEmpty(t *testing.T) {
@@ -692,7 +692,7 @@ func TestMatchNote_BadKeywordsJSONTreatedAsEmpty(t *testing.T) {
 	})
 	// 不正 JSON は emptyMatches=true として扱うので keyword フィルタは pass
 	// (matchKeywords が true を返す)
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_NilKeywordsTreatedAsEmpty(t *testing.T) {
@@ -700,7 +700,7 @@ func TestMatchNote_NilKeywordsTreatedAsEmpty(t *testing.T) {
 	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", nil, func(a *model.Antenna) {
 		a.Keywords = nil // empty raw → emptyMatches=true
 	})
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestMatchNote_EmptyInnerGroupSkipped(t *testing.T) {
@@ -711,9 +711,9 @@ func TestMatchNote_EmptyInnerGroupSkipped(t *testing.T) {
 		a.Keywords = datatypes.JSON([]byte(`[[],["foo"]]`))
 	})
 	miss := "no match here"
-	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &miss, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &miss, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 	hit := "foo here"
-	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &hit, Visibility: model.NoteVisibilityPublic}, &model.User{}))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], &model.Note{Text: &hit, Visibility: model.NoteVisibilityPublic}, &model.User{}, nil))
 }
 
 func TestNoteText_CWAndText(t *testing.T) {
@@ -748,7 +748,7 @@ func TestMatchNote_HomeSource_Follows(t *testing.T) {
 	require.NoError(t, err)
 	text := "hi"
 	n := &model.Note{ID: "n1", UserID: "alice", Text: &text, Visibility: model.NoteVisibilityPublic}
-	assert.True(t, svc.matchNote(a, n, &model.User{ID: "alice", Username: "alice"}))
+	assert.True(t, svc.matchNote(a, n, &model.User{ID: "alice", Username: "alice"}, nil))
 }
 
 func TestMatchNote_HomeSource_NotFollowing(t *testing.T) {
@@ -758,7 +758,7 @@ func TestMatchNote_HomeSource_NotFollowing(t *testing.T) {
 	require.NoError(t, err)
 	text := "hi"
 	n := &model.Note{ID: "n1", UserID: "bob", Text: &text, Visibility: model.NoteVisibilityPublic}
-	assert.False(t, svc.matchNote(a, n, &model.User{ID: "bob", Username: "bob"}))
+	assert.False(t, svc.matchNote(a, n, &model.User{ID: "bob", Username: "bob"}, nil))
 }
 
 func TestMatchNote_HomeSource_NilRepoMisses(t *testing.T) {
@@ -768,7 +768,7 @@ func TestMatchNote_HomeSource_NilRepoMisses(t *testing.T) {
 	require.NoError(t, err)
 	text := "hi"
 	n := &model.Note{ID: "n1", UserID: "alice", Text: &text, Visibility: model.NoteVisibilityPublic}
-	assert.False(t, svc.matchNote(a, n, &model.User{ID: "alice", Username: "alice"}))
+	assert.False(t, svc.matchNote(a, n, &model.User{ID: "alice", Username: "alice"}, nil))
 }
 
 // List source: author が UserList に含まれていれば match。
@@ -783,7 +783,7 @@ func TestMatchNote_ListSource_MemberMatches(t *testing.T) {
 	require.NoError(t, err)
 	text := "hi"
 	n := &model.Note{ID: "n1", UserID: "alice", Text: &text, Visibility: model.NoteVisibilityPublic}
-	assert.True(t, svc.matchNote(a, n, &model.User{ID: "alice", Username: "alice"}))
+	assert.True(t, svc.matchNote(a, n, &model.User{ID: "alice", Username: "alice"}, nil))
 }
 
 func TestMatchNote_ListSource_NonMember(t *testing.T) {
@@ -796,7 +796,7 @@ func TestMatchNote_ListSource_NonMember(t *testing.T) {
 	require.NoError(t, err)
 	text := "hi"
 	n := &model.Note{ID: "n1", UserID: "bob", Text: &text, Visibility: model.NoteVisibilityPublic}
-	assert.False(t, svc.matchNote(a, n, &model.User{ID: "bob", Username: "bob"}))
+	assert.False(t, svc.matchNote(a, n, &model.User{ID: "bob", Username: "bob"}, nil))
 }
 
 // --- List source: end-to-end through OnNoteCreated → Notes -----------------
@@ -915,7 +915,7 @@ func TestMatchNote_ListSource_NilRepoMisses(t *testing.T) {
 	a, err := svc.Create(CreateInput{OwnerID: "u1", Name: "noRepo", Src: model.AntennaSourceList, UserListID: &listID})
 	require.NoError(t, err)
 	text := "hi"
-	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}))
+	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}, nil))
 }
 
 // UserListID が nil のとき list ソースは不一致になる。
@@ -929,7 +929,7 @@ func TestMatchNote_ListSource_NilUserListID(t *testing.T) {
 	})
 	repo.Antennas["ant-nil"] = a
 	text := "hi"
-	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}))
+	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}, nil))
 }
 
 // UserListID が空文字列のとき list ソースは不一致になる。
@@ -944,7 +944,7 @@ func TestMatchNote_ListSource_EmptyUserListID(t *testing.T) {
 	})
 	repo.Antennas["ant-empty"] = a
 	text := "hi"
-	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}))
+	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}, nil))
 }
 
 // ListMembers がエラーを返す場合 list ソースは不一致になる。
@@ -958,7 +958,7 @@ func TestMatchNote_ListSource_ListMembersError(t *testing.T) {
 	})
 	repo.Antennas["ant-err"] = a
 	text := "hi"
-	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}))
+	assert.False(t, svc.matchNote(a, &model.Note{Text: &text, Visibility: model.NoteVisibilityPublic}, &model.User{ID: "alice", Username: "alice"}, nil))
 }
 
 // failingUserListRepo causes ListMembers and FindByID to fail.
@@ -1047,7 +1047,7 @@ func TestMatchNote_FollowersVisibility_NonFollowerOwnerRejected(t *testing.T) {
 	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityFollowers}
 	author := &model.User{ID: "author", Username: "alice"}
 
-	require.False(t, svc.matchNote(repo.Antennas["a1"], n, author))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], n, author, nil))
 }
 
 // followers note: antenna owner が follower なら matchNote が true。
@@ -1063,7 +1063,7 @@ func TestMatchNote_FollowersVisibility_FollowerOwnerAccepted(t *testing.T) {
 	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityFollowers}
 	author := &model.User{ID: "author", Username: "alice"}
 
-	require.True(t, svc.matchNote(repo.Antennas["a1"], n, author))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], n, author, nil))
 }
 
 // followers note: antenna owner == author なら follow チェック無しで通る。
@@ -1076,7 +1076,7 @@ func TestMatchNote_FollowersVisibility_SelfAuthored(t *testing.T) {
 	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityFollowers}
 	author := &model.User{ID: "author", Username: "alice"}
 
-	require.True(t, svc.matchNote(repo.Antennas["a1"], n, author))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], n, author, nil))
 }
 
 // specified note: antenna owner が visibleUserIds に含まれていなければ false。
@@ -1092,7 +1092,7 @@ func TestMatchNote_SpecifiedVisibility_NonRecipientRejected(t *testing.T) {
 	}
 	author := &model.User{ID: "author", Username: "alice"}
 
-	require.False(t, svc.matchNote(repo.Antennas["a1"], n, author))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], n, author, nil))
 }
 
 // specified note: antenna owner が visibleUserIds に含まれていれば true。
@@ -1108,7 +1108,7 @@ func TestMatchNote_SpecifiedVisibility_RecipientAccepted(t *testing.T) {
 	}
 	author := &model.User{ID: "author", Username: "alice"}
 
-	require.True(t, svc.matchNote(repo.Antennas["a1"], n, author))
+	require.True(t, svc.matchNote(repo.Antennas["a1"], n, author, nil))
 }
 
 // followingRepo 未配線 + followers note → CanSeeNote の fail-closed semantics
@@ -1122,7 +1122,7 @@ func TestMatchNote_FollowersVisibility_NilFollowingRepoFailClosed(t *testing.T) 
 	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityFollowers}
 	author := &model.User{ID: "author", Username: "alice"}
 
-	require.False(t, svc.matchNote(repo.Antennas["a1"], n, author))
+	require.False(t, svc.matchNote(repo.Antennas["a1"], n, author, nil))
 }
 
 // OnNoteCreated 経由でも push されないことを確認 (REST/WS 両 surface への gate)。
@@ -1193,7 +1193,7 @@ func TestMatchNote_HomeSource_FollowersNote_NoDuplicateExists(t *testing.T) {
 	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityFollowers}
 	author := &model.User{ID: "author", Username: "author"}
 
-	require.True(t, svc.matchNote(a, n, author))
+	require.True(t, svc.matchNote(a, n, author, nil))
 	assert.Equal(t, 1, counting.existsCalls,
 		"Exists should be called exactly once for home source + followers visibility (no duplicate after #1467 review)")
 }
@@ -1213,7 +1213,7 @@ func TestMatchNote_HomeSource_PublicNote_SingleExists(t *testing.T) {
 	n := &model.Note{ID: "n1", UserID: "author", Text: &text, Visibility: model.NoteVisibilityPublic}
 	author := &model.User{ID: "author", Username: "author"}
 
-	require.True(t, svc.matchNote(a, n, author))
+	require.True(t, svc.matchNote(a, n, author, nil))
 	assert.Equal(t, 1, counting.existsCalls,
 		"public visibility skips CanSeeNote Exists; matchSource home performs the single call")
 }

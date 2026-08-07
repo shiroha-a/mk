@@ -529,8 +529,13 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 		return
 	}
 	now := s.clock()
+	// 同じ note を全アンテナで評価するので、owner ごとの follow 判定と
+	// list メンバーシップは 1 回引いて使い回す。アンテナ数に比例して DB を
+	// 叩くと push が note 作成に対して大きく遅れ、直後に antennas/notes を
+	// 読むと取りこぼす。
+	memo := newMatchMemo()
 	for _, a := range rows {
-		if !s.matchNote(a, n, author) {
+		if !s.matchNote(a, n, author, memo) {
 			continue
 		}
 		_ = s.pushNote(context.Background(), a.ID, n.ID, now)
@@ -605,7 +610,7 @@ func (s *Service) pushNote(ctx context.Context, antennaID, noteID string, now ti
 // content leak する IDOR があった (#1464)。CanSeeNote 相当を push 段で
 // 1 回 gate することで REST `antennas/notes` と WS `antenna` channel の両方で
 // 漏洩を断つ。
-func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User) bool {
+func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User, memo *matchMemo) bool {
 	// visibility gate: antenna owner を viewer とみなして CanSeeNote 判定する。
 	// followingRepo 未配線時は CanSeeNote の semantics 通り `followers` を
 	// 投稿者本人以外には見せない fail-closed (= matchSource `home` と同じ方針)。
@@ -636,7 +641,7 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 	if !a.WithReplies && n.ReplyID != nil {
 		return false
 	}
-	if !s.matchSource(a, author, ownerFollowsAuthor) {
+	if !s.matchSource(a, author, ownerFollowsAuthor, memo) {
 		return false
 	}
 	text := noteText(n)
@@ -647,6 +652,65 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 		return false
 	}
 	return true
+}
+
+// matchMemo caches the per-note lookups shared across antennas.
+type matchMemo struct {
+	follows map[string]bool
+	lists   map[string]map[string]struct{}
+}
+
+func newMatchMemo() *matchMemo {
+	return &matchMemo{follows: map[string]bool{}, lists: map[string]map[string]struct{}{}}
+}
+
+// ownerFollows reports whether ownerID follows authorID, caching the answer for
+// the lifetime of one note fan-out.
+func (m *matchMemo) ownerFollows(s *Service, ownerID, authorID string) bool {
+	if s.followingRepo == nil {
+		return false
+	}
+	if m == nil {
+		ok, err := s.followingRepo.Exists(ownerID, authorID)
+		return err == nil && ok
+	}
+	if v, hit := m.follows[ownerID]; hit {
+		return v
+	}
+	ok, err := s.followingRepo.Exists(ownerID, authorID)
+	v := err == nil && ok
+	m.follows[ownerID] = v
+	return v
+}
+
+// listContains reports whether authorID belongs to listID, caching the member
+// set for the lifetime of one note fan-out.
+func (m *matchMemo) listContains(s *Service, listID, authorID string) bool {
+	if s.userListRepo == nil || listID == "" {
+		return false
+	}
+	fetch := func() map[string]struct{} {
+		members, err := s.userListRepo.ListMembers(listID)
+		if err != nil {
+			return nil
+		}
+		set := make(map[string]struct{}, len(members))
+		for _, mem := range members {
+			set[mem.UserID] = struct{}{}
+		}
+		return set
+	}
+	if m == nil {
+		_, ok := fetch()[authorID]
+		return ok
+	}
+	set, hit := m.lists[listID]
+	if !hit {
+		set = fetch()
+		m.lists[listID] = set
+	}
+	_, ok := set[authorID]
+	return ok
 }
 
 // matchSource applies the antenna's source filter.
@@ -663,7 +727,7 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User)
 // ownerFollowsAuthor は matchNote 内 visibility gate (CanSeeNote) で既に
 // `Exists(owner, author) == true` が確定している場合 true。`home` source の
 // 重複 Exists 呼び出しをスキップするヒント (#1467 review nit)。
-func (s *Service) matchSource(a *model.Antenna, author *model.User, ownerFollowsAuthor bool) bool {
+func (s *Service) matchSource(a *model.Antenna, author *model.User, ownerFollowsAuthor bool, memo *matchMemo) bool {
 	switch a.Src {
 	case model.AntennaSourceUsers:
 		return matchesAntennaAcct(a.Users, author)
@@ -676,22 +740,12 @@ func (s *Service) matchSource(a *model.Antenna, author *model.User, ownerFollows
 		if s.followingRepo == nil {
 			return false
 		}
-		ok, err := s.followingRepo.Exists(a.UserID, author.ID)
-		return err == nil && ok
+		return memo.ownerFollows(s, a.UserID, author.ID)
 	case model.AntennaSourceList:
 		if s.userListRepo == nil || a.UserListID == nil || *a.UserListID == "" {
 			return false
 		}
-		members, err := s.userListRepo.ListMembers(*a.UserListID)
-		if err != nil {
-			return false
-		}
-		for _, m := range members {
-			if m.UserID == author.ID {
-				return true
-			}
-		}
-		return false
+		return memo.listContains(s, *a.UserListID, author.ID)
 	default:
 		// all
 		return true
