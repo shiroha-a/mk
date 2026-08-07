@@ -126,17 +126,66 @@ compose 内で pull を再試行するか `docker pull misskey/misskey:2026.7.0`
 `make dropin-down` が volume まで削除する (`down -v`)。named volume `certs` も
 同時に削除されるため、次回 `dropin-up` で再生成される。
 
-## CI nightly 実行 (Phase 13-4)
+## CI 実行
 
-`.github/workflows/dropin-e2e.yml` で `make dropin-swap-test` を以下のタイミングで実行する:
+`.github/workflows/dropin-e2e.yml` が 4 シナリオを **matrix で並列**に実行する。
 
-- **schedule**: 毎日 18:00 UTC (= JST 03:00) に develop ブランチに対して
-- **workflow_dispatch**: GitHub Actions UI から手動実行 (任意の ref を指定可)
+| check 名 | make target | 見ているもの |
+|---|---|---|
+| `swap-test` | `dropin-swap-test` | TS→mk-go 切替で state が保たれるか |
+| `mkgo-born` | `dropin-mkgo-born-test` | mk-go 生まれの DB を TS に引き渡せるか |
+| `ed25519-verify` | `dropin-fedibird-test` | Fedibird-like mock との Ed25519 双方向 verify |
+| `federation` | `federation-misskey-e2e` | 本物の Misskey TS との実連合 |
+
+発火条件:
+
+- **pull_request**: `internal/**` / `migration/**` / `tests/dropin/**` 等の paths に
+  該当する変更のみ。ドキュメントだけの PR では回らない
+- **workflow_dispatch**: 任意の ref を指定して手動実行
+
+当初は nightly (schedule) だったが PR トリガーへ移行した (#2291)。nightly は失敗に
+気付くのが翌日になるうえ、1 日分のマージがまとまってどの変更が壊したか特定しづらい。
+
+`fail-fast: false` なので 1 つが落ちても他は完走する。これは重要で、この 4 つは実際に
+**別々の壊れ方をする**。`ed25519-verify` は導入時から 2 箇所壊れていたが、`swap-test` が
+緑だったため約 3 か月それに気付けなかった (#2360)。
 
 PR の required check には**入れない**。理由:
 
-- 1 回 8-10 min かかり、PR 単位の check として重い
-- federation delivery の poll を含み若干 flaky
-- drop-in 互換は本質的にバージョン横断の確認なので nightly で十分
+- federation delivery の poll を含み若干 flaky で、merge ブロッカーには適さない
+- 非ブロッキングを `continue-on-error` で実現しないこと。あれは job を成功扱いにする
+  ので失敗が完全に不可視になる。job は正しく失敗させ、required に入れないことで
+  非ブロッキングにする
 
-失敗時は docker compose のログを `dropin-logs` artifact として 14 日保持する。Actions 上で download して原因調査する。
+失敗時は docker compose のログを `dropin-logs-<scenario>` artifact として 14 日保持する。
+`swap-test` / `mkgo-born` は orchestrator 自身が `down -v` の前に `compose.log` /
+`ps.log` を残しており、workflow が後から集めたものは `-post` 付きの別名で入る。
+前者があればそちらが本命。
+
+### `swap-test` と `mkgo-born` の違い
+
+似て見えるが **DB を作った側が違う**。
+
+|  | DB を作ったのは | 経路 |
+|---|---|---|
+| `swap-test` | TypeORM | TS → mk-go → TS |
+| `mkgo-born` | **mk-go の migration** | mk-go → TS |
+
+後者の方が厳しい。TS は一度も触っていない schema を受け取るので、カラム型・制約・
+enum・index 名・default のどれかが TypeORM の期待とずれていれば起動しない。
+`TestMigrationSeed_CoversUpstream` は seed 一覧と upstream migration file の
+**静的な突き合わせ**に過ぎず、実際に TS を起動して確かめてはいない。
+
+運用上これは**ロックインの有無そのもの**にあたる。「mk-go で始めた人が Misskey に
+移れるか」に答えられるのはこの経路だけで、実際この経路の初回実行で、RSA 秘密鍵が
+PKCS#1 のため TS 側の送信連合が全滅する不具合が見つかっている (#2380)。mk-go の
+`ParseRSAPrivateKey` は PKCS#1 / PKCS#8 の両方を読めるため、**コードを読む限りでは
+何も問題が無いように見える**類のバグだった。
+
+`mkgo-born` が落ちた場合、段階から原因がほぼ特定できる。
+
+| 落ちた段階 | 意味 |
+|---|---|
+| stage 4b (TS-A healthy 待ちで timeout) | mk-go の migration が作った schema を TypeORM が受け付けなかった |
+| stage 4d (migrations digest 不一致) | migration seed (`000029`) に漏れがあり TS が再実行した |
+| stage 5 (pytest) | schema は通ったがデータを読めない / 連合が続かない |

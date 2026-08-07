@@ -47,6 +47,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | `e2e` | Upstream backend e2e | **本家の backend e2e 1245 テスト**が mk-go に対して通るか | 17 min | `make upstream-e2e` |
 | `diff` | Diff e2e | mk-go と TS の**レスポンスの値**が一致するか (43 比較) | 4 min | `make diff-check` |
 | `swap-test` | Drop-in e2e | TS→mk 切替で state が保たれるか | 5 min | `make dropin-swap-test` |
+| `mkgo-born` | Drop-in e2e | **mk-go 生まれの DB を TS に引き渡せるか** (= ロックインの有無) | 5 min | `make dropin-mkgo-born-test` |
 | `ed25519-verify` | Drop-in e2e | Fedibird-like mock との Ed25519 双方向 verify | 5 min | `make dropin-fedibird-test` |
 | `federation` | Drop-in e2e | 本物の Misskey TS との実連合 (follow/note/reaction/renote/reply/mention/delete) | 4 min | `make federation-misskey-e2e` |
 | `spec (mk-go)` | Playwright | ブラウザからの統合互換 (370 spec) | 15 min | `make playwright-check` |
@@ -62,11 +63,28 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | `diff` | **同じ入力に対する値そのもの** |
 | shape drift (`test` に含まれる) | フィールドの有無・型 |
 | `swap-test` | DB を引き継いだときに壊れないか |
+| `mkgo-born` | **mk-go が作った DB を TS が受け取れるか** |
 | `federation` / `ed25519-verify` | 他実装と実際に喋れるか |
 
 shape が合っていても値が違う類のバグは `diff` でしか捕まらない。ユニットテストは
 「自分で署名して自分で検証する」ことしか保証しないので、相互運用は `federation` /
 `ed25519-verify` でしか担保できない。
+
+`swap-test` と `mkgo-born` は似て見えるが、**DB を作った側が違う**。
+
+|  | DB を作ったのは | 経路 |
+|---|---|---|
+| `swap-test` | TypeORM | TS → mk-go → TS |
+| `mkgo-born` | **mk-go の migration** | mk-go → TS |
+
+後者の方が厳しい。TS が一度も触っていない schema を受け取るので、カラム型・制約・
+enum・index 名・default のどれかが TypeORM の期待とずれていれば起動しない。
+`TestMigrationSeed_CoversUpstream` は seed 一覧と upstream の migration file を
+**静的に突き合わせる**だけで、実際に TS を起動して確かめてはいない。
+
+運用上これは**ロックインの有無そのもの**にあたる。「mk-go で始めた人が Misskey に
+移れるか」に答えられるのはこの経路だけで、実際この経路の初回実行で、RSA 秘密鍵が
+PKCS#1 のため TS 側の送信連合が全滅する不具合が見つかっている (#2380)。
 
 ### `e2e` (本家 backend e2e) が落ちたとき
 
@@ -96,6 +114,19 @@ mk-go 独自の additive field が原因なら `tests/diff/test_endpoints.py` �
 federation delivery に flaky 要素があるので、まず再実行を試す価値はある。ただし
 **繰り返し落ちるなら本物**。失敗時は `docker compose logs` が
 `dropin-logs-<scenario>` artifact として 14 日残るので、それを見る。
+
+artifact には 2 種類のログが入る。`compose.log` / `ps.log` は orchestrator が
+`down -v` する**前**に自分で残したもの、`compose-post.log` / `ps-post.log` は
+workflow が後から集めたもの。前者がある場合はそちらが本命で、後者は stack が
+既に撤去されていて空のことがある。
+
+`mkgo-born` だけは落ち方が他と違い、原因が段階からほぼ特定できる。
+
+| 落ちた段階 | 意味 |
+|---|---|
+| stage 4b (TS-A healthy 待ちで timeout) | mk-go の migration が作った schema を TypeORM が受け付けなかった |
+| stage 4d (migrations digest 不一致) | migration seed (`000029`) に漏れがあり TS が再実行した |
+| stage 5 (pytest) | schema は通ったがデータを読めない / 連合が続かない |
 
 手元で再現するときは各 make target を直接叩く。いずれも専用の compose project
 (`mk-dropin` / `mk-federation` / `mkdiff`) で隔離されており、**本番 UDS の project `mk` には

@@ -381,24 +381,34 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 
 ### `dropin-e2e` workflow (PR トリガー)
 
-- `.github/workflows/dropin-e2e.yml` が drop-in 互換の e2e を **2 シナリオ並列**で実行する。
+- `.github/workflows/dropin-e2e.yml` が drop-in 互換の e2e を **4 シナリオ並列**で実行する。
   `strategy.matrix.include` で make target と check 表示名を対にしている。
 
   | check 名 | 実行内容 |
   |---|---|
   | `swap-test` | `make dropin-swap-test` — TS→mk 切替の state preservation (#374) |
+  | `mkgo-born` | `make dropin-mkgo-born-test` — mk-go 生まれの DB を TS に引き渡せるか (#2379 / #2383) |
   | `ed25519-verify` | `make dropin-fedibird-test` — Fedibird-like AP mock との Ed25519 双方向 verify (#1083 / #2360) |
   | `federation` | `make federation-misskey-e2e` — 本物の Misskey TS を相手にした実連合 (#2362) |
+
+- `mkgo-born` は `swap-test` と似て見えるが **DB を作った側が違う** (前者は mk-go の
+  migration、後者は TypeORM)。TS が一度も触っていない schema を受け取るのは前者だけで、
+  運用上は**ロックインの有無そのもの**にあたる。`TestMigrationSeed_CoversUpstream` は
+  seed 一覧と upstream migration file の静的な突き合わせに過ぎず、実際に TS を起動して
+  確かめてはいない。
 
 - 発火は `pull_request` (paths フィルタ) と `workflow_dispatch`。nightly から PR
   トリガーへ移行済み (#2291)。nightly は失敗に気付くのが翌日になるうえ、1 日分の
   マージがまとまってどの変更が壊したか特定しづらいため。
 - PR の required check には**含めない** (federation delivery に flaky 要素があるため)。
   非ブロッキングを `continue-on-error` で実現しないこと (job が成功扱いになる)。
-- `fail-fast: false` で片方が落ちても他方は完走する。この 2 つは実際に別々の壊れ方を
+- `fail-fast: false` で 1 つが落ちても他は完走する。これらは実際に別々の壊れ方を
   する (ed25519 側は導入時から 2 箇所壊れていたのに、swap が緑だったため 3 か月
   気付けなかった、#2360)。
 - 失敗時は docker compose logs を `dropin-logs-<scenario>` artifact として 14 日保持。
+  `swap-test` / `mkgo-born` の orchestrator は `down -v` の**前**に自分で
+  `compose.log` / `ps.log` を残すので、workflow 側の収集は `-post` 付きの別名で書く。
+  同名にすると撤去済み stack の空ログで上書きしてしまう (#2383)。
 
 ### `playwright` workflow (nightly)
 
@@ -543,6 +553,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 
 - **2026-08-07**: Section 3 に本家 backend e2e の Makefile target (`make upstream-e2e` 系 5 つ) を、Section 8 に `upstream-backend-e2e` workflow を追記 (#2347)。Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて回す PR トリガーの workflow で、required check には含めない。既知乖離は skip でなく expected-failure (`task.fails`) で扱う運用も明記。
 - **2026-08-07**: Section 8 に `diff-e2e` workflow と `frontend-check` job を追記 (#2368)。CI 非対象だった検証資産の棚卸しで、値レベル diff と fork frontend の型チェックを載せた。
+- **2026-08-08**: Section 8 の `dropin-e2e` workflow に `mkgo-born` シナリオを追加 (#2383)。`make dropin-mkgo-born-test` (mk-go 生まれの DB を TS に引き渡す経路 = ロックインの有無) を CI に載せる。あわせて 2 つの既存不具合を解消: (1) orchestrator が自分で残した診断ログを workflow 側の収集が空ログで上書きしていたので `-post` 付きの別名に分けた、(2) paths フィルタに `docker-compose.dropin*.yml` が無く、drop-in stack の定義を壊す変更で workflow が発火せず緑に見えていた。
 - **2026-08-07**: Section 8 の `dropin-e2e` workflow に `federation` シナリオを追加 (#2362)。あわせて Section 3 に `make federation-misskey-e2e` (起動から撤去まで通しで実行) を追記。
 - **2026-08-07**: Section 8 の `dropin-e2e` workflow を 2 シナリオ matrix として書き換え (#2360)。`ed25519-verify` (`make dropin-fedibird-test`) を追加し、あわせて nightly → PR トリガーへの移行 (#2291) が未反映だった記述を実態に合わせた。
 - **2026-08-04**: Section 7 (Git Workflow) に「マージ方法」を追記。フィーチャーブランチ → `develop` の PR は **rebase and merge** に統一する (それ以前は squash-merge)。各コミットがそのまま develop に載るため、1 コミットずつ build / test が通る順序で並べること、確認は使い捨て `git worktree` で行うこと (作業ツリー上の `git stash` は保留中の別作業を巻き込むので使わない) を併記。`main` は従来どおり PR をマージせず FF push のみで、対象が異なる旨も明記した。

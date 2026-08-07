@@ -1,8 +1,10 @@
 name: Drop-in e2e
 
-# drop-in 互換の regression を検知する e2e を 2 シナリオ並列で実行する。
+# drop-in 互換の regression を検知する e2e を 4 シナリオ並列で実行する。
 #
 # - swap-test      (`make dropin-swap-test`)       TS→mk 切替の state preservation (#374)
+# - mkgo-born      (`make dropin-mkgo-born-test`)  mk-go 生まれの DB を TS に
+#                                                  引き渡せるか (#2379)
 # - ed25519-verify (`make dropin-fedibird-test`)   Fedibird-like AP mock との
 #                                                  Ed25519 双方向 verify (#1083)
 # - federation     (`make federation-misskey-e2e`) 本物の Misskey TS を相手にした
@@ -12,6 +14,12 @@ name: Drop-in e2e
 # ed25519-verify は #2360 で追加した。Ed25519 署名は mk-go 独自の先行実装で、
 # 他実装と本当に相互運用できるかは実際に喋らせないと分からない。ユニットテスト
 # (48 件) は「自分で署名して自分で検証する」ことしか保証しない。
+#
+# mk-go 生まれの DB を TS が受け取れるかは **ロックインの有無そのもの**なので、
+# swap-test とは別に載せる。swap-test の DB を作ったのは TypeORM なので、
+# 「TS が一度も触っていない schema」は swap-test では一切踏まない。実際この経路の
+# 初回実行で、RSA 秘密鍵が PKCS#1 のため TS 側の送信連合が全滅する不具合を
+# 検出している (#2380)。
 #
 # なおこの target は導入時 (#1086) から 2 箇所壊れており、CI で回っていなかった
 # ため約 3 か月間それに気付けなかった。載せる理由がまさにそれ。
@@ -45,6 +53,12 @@ on:
       - "go.mod"
       - "go.sum"
       - "docker-compose.federation.misskey.yml"
+      # drop-in stack の定義そのもの。ここが抜けていると compose を壊す変更で
+      # workflow が**発火せず緑に見える**。frontend 用の
+      # `docker-compose.dropin-frontend*.yml` は別 workflow の管轄なので含めない。
+      - "docker-compose.dropin.yml"
+      - "docker-compose.dropin.mk.yml"
+      - "docker-compose.dropin.fedibird.yml"
       - ".github/workflows/dropin-e2e.yml"
   workflow_dispatch:
     inputs:
@@ -61,12 +75,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
 
-    # 同じ stack (base + mk overlay) の上で走る 2 シナリオを並列に回す。
+    # 同じ stack (base + mk overlay) の上で走るシナリオを並列に回す。
     #
     # 既存 job にステップとして足すのではなく別 job にしているのは、swap が
-    # 落ちた時点で ed25519 が回らなくなるのを避けるため。この 2 つは実際に
+    # 落ちた時点で ed25519 が回らなくなるのを避けるため。これらは実際に
     # 別々の壊れ方をする (fedibird 側は導入時から 2 箇所壊れていたのに、
     # swap が緑だったので 3 か月気付けなかった、#2360)。
+    #
+    # なお同じ compose project 名を共有する scenario 同士は**同一 runner 上では
+    # 直列にしか回せない**が、matrix job はそれぞれ別 runner なので衝突しない。
     #
     # name    = check 一覧に出る表示名。何を検証しているかが分かるものにする
     # make    = 実行する make target。失敗時に手元で再現するコマンドそのもの
@@ -80,6 +97,10 @@ jobs:
             make: dropin-swap-test
             image: misskey/misskey:2026.7.0
             compose: -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml -f docker-compose.dropin.fedibird.yml
+          - name: mkgo-born
+            make: dropin-mkgo-born-test
+            image: misskey/misskey:2026.7.0
+            compose: -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml
           - name: ed25519-verify
             make: dropin-fedibird-test
             image: misskey/misskey:2026.7.0
@@ -164,8 +185,15 @@ jobs:
           mkdir -p /tmp/dropin-logs
           # drop-in 系は fedibird overlay も一緒に渡す。swap では使われないが、
           # 余分な -f は定義が増えるだけで害が無く、取りこぼさない方を優先する。
-          docker compose ${{ matrix.compose }} logs > /tmp/dropin-logs/compose.log 2>&1 || true
-          docker compose ${{ matrix.compose }} ps   > /tmp/dropin-logs/ps.log 2>&1 || true
+          #
+          # ファイル名を `-post` で分けるのは、swap / mkgo-born の orchestrator が
+          # trap 内で **同じ /tmp/dropin-logs へ ps.log / compose.log を書いてから
+          # `down -v` する**ため。同名で書くとこの step が空ファイルで上書きして
+          # しまい (stack はもう存在しない)、artifact から実ログが消える。
+          # fedibird / federation は自前で診断を残さないので、この step だけが
+          # 唯一の情報源になる。
+          docker compose ${{ matrix.compose }} logs > /tmp/dropin-logs/compose-post.log 2>&1 || true
+          docker compose ${{ matrix.compose }} ps   > /tmp/dropin-logs/ps-post.log 2>&1 || true
 
       - name: Upload logs artifact on failure
         if: failure()
