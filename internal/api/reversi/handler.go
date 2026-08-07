@@ -405,7 +405,11 @@ func (h *Handler) Match(c echo.Context) error {
 	// multiple=true は upstream 同様このスキップで毎回新規作成する (#1774)。
 	if !req.Multiple {
 		if existing := h.findPendingInvitationFrom(req.UserID, user.ID); existing != nil && h.withinMatchDedupWindow(existing) {
-			return c.JSON(http.StatusOK, packGame(existing, h.idGen))
+			// まだ相手が accept していない自分発の招待。upstream は招待を
+			// Redis にしか置かず、対局成立まで null (= 204) を返す
+			// (match.ts:68 `if (game == null) return;`)。200 で game を返すと
+			// フロントが即ゲーム画面に遷移してしまう (#1553 と同じ罠)。
+			return c.NoContent(http.StatusNoContent)
 		}
 	}
 
@@ -474,7 +478,10 @@ func (h *Handler) Match(c echo.Context) error {
 		}
 	}
 
-	return c.JSON(http.StatusOK, packGame(game, h.idGen))
+	// 新規招待は対局未成立。upstream matchSpecificUser が null を返す経路なので
+	// 204 + 空ボディで揃える。mk-go は招待を reversi_game 行として持つ設計だが、
+	// それは連合 (AP Invite の target) の都合であって API 契約ではない。
+	return c.NoContent(http.StatusNoContent)
 }
 
 // findPendingInvitationFrom scans viewer's recent reversi_game rows and

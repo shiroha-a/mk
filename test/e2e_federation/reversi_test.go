@@ -141,8 +141,8 @@ func TestReversi_LocalInviteRoundTrip(t *testing.T) {
 		"userId": bobAcct,
 	})
 	defer resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode,
-		"reversi/match should accept @bob@host acct and return 200 with game shape")
+	require.Equal(t, http.StatusNoContent, resp.StatusCode,
+		"reversi/match should accept @bob@host acct and return 204 (対局未成立)")
 
 	// federation queue が AP Invite を deliver → B 側 inbox が処理 → reversi_game
 	// 行が B に作られる、まで poll で待つ。
@@ -175,7 +175,7 @@ func TestReversi_CancelMatchUndoesPreStart(t *testing.T) {
 		"userId": bobAcct,
 	})
 	resp.Body.Close()
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	pollInvitationContains(t, serverB, bob, "alice", 10*time.Second)
 
 	// 招待キャンセル → Leave activity が B に飛ぶ
@@ -218,7 +218,7 @@ func inviteAndAccept(t *testing.T) (alice, bob *userToken, gameAID, gameBID stri
 		"userId": bobAcct,
 	})
 	require.NoError(t, resp.Body.Close())
-	require.Equal(t, http.StatusOK, resp.StatusCode)
+	require.Equal(t, http.StatusNoContent, resp.StatusCode)
 	// 招待が B 側に着弾するまで待つ
 	pollInvitationContains(t, serverB, bob, "alice", 10*time.Second)
 

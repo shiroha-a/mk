@@ -307,10 +307,13 @@ func TestShowGame_InvalidParam(t *testing.T) {
 
 // --- Match ---
 
+// 新規招待は対局未成立なので upstream 同様 204 空ボディ。招待自体は
+// reversi_game 行として残る (連合の AP Invite target に要る)。
 func TestMatch_Success(t *testing.T) {
 	h, repo := newTestHandler()
 	rec := post(h.Match, `{"userId":"u2"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, rec.Body.String())
 	assert.Len(t, repo.games, 1)
 }
 
@@ -351,6 +354,24 @@ func TestMatch_CreateError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// 相手から届いている招待に対する match は「対局成立」なので 200 + game を返す
+// (upstream matchSpecificUser の invitations.includes 分岐)。自分発の招待だけが
+// 204 になる点と対になるガード。
+func TestMatch_AcceptsInboundInvitationWith200(t *testing.T) {
+	h, repo := newTestHandler()
+	idGen, _ := id.NewGenerator("aidx")
+	// u2 -> u1 の未開始 pending game = u1 が受け取っている招待。
+	gid := idGen.Generate(time.Now())
+	repo.games[gid] = &model.ReversiGame{ID: gid, User1ID: "u2", User2ID: "u1"}
+
+	rec := post(h.Match, `{"userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, repo.games, 1, "招待を再利用し新規作成しない")
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	assert.Equal(t, gid, out["id"])
+}
+
 // TestMatch_MultipleDedup guards #1774: multiple=false reuses a recent (<3 min)
 // outbound pending game instead of creating a duplicate, while multiple=true and
 // stale games fall through to a fresh game (upstream matchSpecificUser の
@@ -363,22 +384,23 @@ func TestMatch_MultipleDedup(t *testing.T) {
 		return gid
 	}
 
+	// いずれも「相手が accept していない自分発の招待」なので応答は 204。
+	// 差が出るのは行を作り直すかどうか。
 	t.Run("multiple=false reuses recent pending outbound game", func(t *testing.T) {
 		h, repo := newTestHandler()
 		gid := seedPending(repo, time.Now())
 		rec := post(h.Match, `{"userId":"u2"}`, u1)
-		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
 		assert.Len(t, repo.games, 1, "既存 pending game を再利用し新規作成しない")
-		var out map[string]any
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-		assert.Equal(t, gid, out["id"])
+		_, kept := repo.games[gid]
+		assert.True(t, kept, "再利用した行がそのまま残る")
 	})
 
 	t.Run("multiple=true skips dedup and creates a new game", func(t *testing.T) {
 		h, repo := newTestHandler()
 		seedPending(repo, time.Now())
 		rec := post(h.Match, `{"userId":"u2","multiple":true}`, u1)
-		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
 		assert.Len(t, repo.games, 2, "multiple=true は dedup を skip して新規作成する")
 	})
 
@@ -386,7 +408,7 @@ func TestMatch_MultipleDedup(t *testing.T) {
 		h, repo := newTestHandler()
 		seedPending(repo, time.Now().Add(-5*time.Minute))
 		rec := post(h.Match, `{"userId":"u2"}`, u1)
-		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
 		assert.Len(t, repo.games, 2, "3 分超の古い pending game は再利用せず新規作成する")
 	})
 }
@@ -400,7 +422,7 @@ func TestMatch_AcctLocal(t *testing.T) {
 	h.SetFederation("https://example.com", nil, nil, userRepo)
 
 	rec := post(h.Match, `{"userId":"@bob"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 	require.Len(t, repo.games, 1)
 	for _, g := range repo.games {
 		assert.Equal(t, "u2", g.User2ID)
@@ -417,7 +439,7 @@ func TestMatch_AcctRemoteKnown(t *testing.T) {
 	h.SetFederation("https://example.com", nil, nil, userRepo)
 
 	rec := post(h.Match, `{"userId":"@carol@remote.example"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 	require.Len(t, repo.games, 1)
 	for _, g := range repo.games {
 		assert.Equal(t, "u3", g.User2ID)
@@ -637,7 +659,7 @@ func TestMatch_SendsInviteWhenFederationAvailable(t *testing.T) {
 	h.SetFederationChecker(stubFedChecker{available: true})
 
 	rec := post(h.Match, `{"userId":"remoteAlice"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, 1, d.calls)
 }
 
@@ -661,7 +683,7 @@ func TestMatch_AcctRemoteResolvesViaWebfinger(t *testing.T) {
 	userRepo.Users["discovered"] = discovered
 
 	rec := post(h.Match, `{"userId":"@ghost@remote.example"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, 1, d.calls)
 }
 
@@ -693,7 +715,7 @@ func TestMatch_LocalTargetPublishesInvited(t *testing.T) {
 	h.SetStreamPublisher(pub)
 
 	rec := post(h.Match, `{"userId":"u2"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	require.Len(t, pub.calls, 1)
 	assert.Equal(t, "u2", pub.calls[0].targetUserID)
@@ -718,7 +740,7 @@ func TestMatch_RemoteTargetSkipsStream(t *testing.T) {
 	h.SetStreamPublisher(pub)
 
 	rec := post(h.Match, `{"userId":"remoteAlice"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 
 	assert.Equal(t, 1, d.calls, "remote target には Invite AP activity が配信される")
 	assert.Len(t, pub.calls, 0, "remote target では local stream push は無い")
@@ -797,7 +819,7 @@ func TestMatch_WithRemoteUser(t *testing.T) {
 	h.SetFederation("https://example.com", d, fedCache, userRepo)
 
 	rec := post(h.Match, `{"userId":"u2"}`, u1)
-	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Len(t, repo.games, 1)
 	assert.Equal(t, 1, d.calls) // Invite 送信
 }
