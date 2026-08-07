@@ -866,7 +866,14 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		safeGo(func() { s.channelHook.OnNotePosted(chID, noteID, authorID) })
 	}
 	if s.antennaHook != nil {
-		safeGo(func() { s.antennaHook.OnNoteCreated(finalNote, in.User) })
+		// アンテナへの fan-out は同期で行う。upstream は
+		// `antennaService.addNoteToAntennas(...)` を await しないが、Node の
+		// シングルスレッドでは同一ティック内で Redis pipeline の発行まで
+		// 進むため、投稿直後に antennas/notes を読んでも取りこぼさない。
+		// goroutine に逃がすと Go ではその保証が無く、アンテナ数が多いほど
+		// 遅れて実際に取りこぼす。判定は 1 note につき follow / list を
+		// 1 回だけ引くようメモ化済み。
+		s.antennaHook.OnNoteCreated(finalNote, in.User)
 	}
 	if s.indexHook != nil {
 		safeGo(func() { s.indexHook.OnNoteCreated(finalNote) })
