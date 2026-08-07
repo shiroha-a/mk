@@ -2189,6 +2189,8 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/.well-known/host-meta.json", wellknownHandler.HostMetaJSON)
 	s.echo.GET("/.well-known/nodeinfo", wellknownHandler.NodeInfoDiscovery)
 	s.echo.GET("/.well-known/oauth-authorization-server", wellknownHandler.OAuthAuthorizationServer)
+	// upstream `fastify.options('/.well-known/*')` 相当。
+	s.echo.OPTIONS("/.well-known/*", wellknownHandler.Preflight)
 
 	// OAuth2 / IndieAuth provider (#1899)。RFC8414 discovery が広告する
 	// /oauth/authorize /decision /token を実装する。client discovery fetch は

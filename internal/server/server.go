@@ -201,6 +201,14 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 		Format: "${time_rfc3339} ${method} ${uri} ${status} ${latency_human}\n",
 	}))
 	e.Use(echomw.CORSWithConfig(echomw.CORSConfig{
+		// discovery endpoint は upstream が専用の hook で
+		// `Access-Control-Allow-Headers: Accept` だけを広告する。ここで
+		// グローバル CORS を通すと preflight に Origin/Content-Type/
+		// Authorization まで載って乖離するので除外する (handler 側が
+		// setDiscoveryCORS で必要なヘッダを全て付ける)。
+		Skipper: func(c echo.Context) bool {
+			return strings.HasPrefix(c.Request().URL.Path, "/.well-known/")
+		},
 		AllowOrigins: []string{"*"},
 		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
 		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},

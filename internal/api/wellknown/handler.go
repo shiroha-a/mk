@@ -64,6 +64,17 @@ func setDiscoveryCORS(c echo.Context) {
 	h.Set("Access-Control-Expose-Headers", "Vary")
 }
 
+// Preflight handles OPTIONS /.well-known/* — upstream WellKnownServerService の
+// `fastify.options(allPath)` 相当。204 + discovery 用 CORS ヘッダだけを返す。
+//
+// Echo のグローバル CORS middleware は Allow-Headers に Origin/Content-Type/
+// Authorization まで載せてしまうので、discovery だけ Skipper で除外して
+// upstream と同じ `Accept` のみを広告する。
+func (h *Handler) Preflight(c echo.Context) error {
+	setDiscoveryCORS(c)
+	return c.NoContent(http.StatusNoContent)
+}
+
 // Webfinger handles GET /.well-known/webfinger.
 //
 // クエリパラメータ resource は acct:username@host / acct:username /

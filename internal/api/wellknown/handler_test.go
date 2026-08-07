@@ -412,3 +412,18 @@ func TestParseQ(t *testing.T) {
 		assert.InDeltaf(t, tc.want, parseQ(tc.s), 0.0001, "q=%q", tc.s)
 	}
 }
+
+// upstream WellKnownServerService は preflight に `Accept` だけを広告する。
+func TestPreflight(t *testing.T) {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodOptions, "/.well-known/webfinger", nil)
+	rec := httptest.NewRecorder()
+	h := NewHandler(nil, nil, "https://example.com", "example.com")
+	require.NoError(t, h.Preflight(e.NewContext(req, rec)))
+
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "Accept", rec.Header().Get("Access-Control-Allow-Headers"))
+	assert.Equal(t, "GET, OPTIONS", rec.Header().Get("Access-Control-Allow-Methods"))
+	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "Vary", rec.Header().Get("Access-Control-Expose-Headers"))
+}
