@@ -320,10 +320,11 @@ func TestHideTopLevelAt_RequireSignin(t *testing.T) {
 	})
 }
 
-// TestHideTopLevelAt_IntrinsicNotBlanked locks in #799/#1488: the top-level
-// prefs gate must NOT blank a followers/specified note merely for its intrinsic
-// visibility — those are served deliberately by CanSeeNote / push-down and the
-// notes-show ID-known doctrine.
+// TestHideTopLevelAt_IntrinsicNotBlanked locks in #799/#1488 for followers: the
+// top-level prefs gate must NOT blank a followers note merely for its intrinsic
+// visibility — it is served deliberately by CanSeeNote / push-down and the
+// notes-show ID-known doctrine. specified は逆に、upstream shouldHideNote と
+// 同じく visibleUserIds 外の viewer には blank する。
 func TestHideTopLevelAt_IntrinsicNotBlanked(t *testing.T) {
 	viewer := &model.User{ID: "viewer"}
 	repo := followsRepo() // viewer follows nobody
@@ -331,12 +332,26 @@ func TestHideTopLevelAt_IntrinsicNotBlanked(t *testing.T) {
 		tlNote("f", "a1", "followers", "2026-01-02T03:04:05.000Z", entity.UserLite{}),
 		tlNote("s", "a2", "specified", "2026-01-02T03:04:05.000Z", entity.UserLite{}),
 	}
+	packed[2-1].VisibleUserIDs = []string{"someone-else"}
 	hideEmbedsAt(viewer, packed, repo, heNowMs)
 	if packed[0].IsHidden {
 		t.Error("intrinsic followers top-level must NOT be blanked by the prefs gate (#799)")
 	}
-	if packed[1].IsHidden {
-		t.Error("intrinsic specified top-level must NOT be blanked by the prefs gate (#799)")
+	if !packed[1].IsHidden {
+		t.Error("specified top-level must be blanked for a non-recipient (upstream shouldHideNote)")
+	}
+}
+
+// specified でも visibleUserIds に入っている viewer には blank しない。
+func TestHideTopLevelAt_SpecifiedRecipientKept(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	packed := []entity.NoteEntity{
+		tlNote("s", "a2", "specified", "2026-01-02T03:04:05.000Z", entity.UserLite{}),
+	}
+	packed[0].VisibleUserIDs = []string{"viewer"}
+	hideEmbedsAt(viewer, packed, followsRepo(), heNowMs)
+	if packed[0].IsHidden {
+		t.Error("specified top-level must survive for a recipient")
 	}
 }
 

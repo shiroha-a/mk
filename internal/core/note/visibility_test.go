@@ -115,9 +115,16 @@ func TestCanSeeNote_FollowersReplyToViewer(t *testing.T) {
 	assert.True(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, repo))
 }
 
-// #2106 N27: specified note で mention されていれば visibleUserIds 外でも read 可 (cross-visibility)。
-func TestCanSeeNote_SpecifiedMentioned(t *testing.T) {
+// upstream isVisibleForMe / shouldHideNote は specified で visibleUserIds だけを見る。
+// 本文で @ されただけの相手には direct note を見せない。
+func TestCanSeeNote_SpecifiedMentionedButNotAddressed(t *testing.T) {
 	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{"other"}, Mentions: pq.StringArray{"viewer"}}
+	assert.False(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, nil))
+}
+
+// specified で visibleUserIds に含まれていれば read 可。
+func TestCanSeeNote_SpecifiedAddressed(t *testing.T) {
+	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{"viewer"}}
 	assert.True(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, nil))
 }
 

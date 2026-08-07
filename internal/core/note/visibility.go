@@ -28,19 +28,16 @@ func CanSeeNote(viewer *model.User, n *model.Note, followingChecker repository.F
 	if viewer.ID == n.UserID {
 		return true
 	}
-	// #2106 N27: upstream generateVisibilityQuery / isVisibleForMe と同じく、visibility 横断で
-	// mentions / visibleUserIds に含まれる viewer は閲覧可 (followers note の mention/visibleUser
-	// 宛を read 経路で過剰に隠さない)。SQL push-down (repository.applyViewerVisibility) と整合。
-	// 注意: main-stream realtime push の #1472 anti-leak gate はこの緩和を含めない
-	// canSeeNoteForStream を使う (mentioned 非フォロワーへの本文 realtime push を防ぐ)。
-	if slices.Contains(n.Mentions, viewer.ID) || slices.Contains(n.VisibleUserIDs, viewer.ID) {
-		return true
-	}
 	switch n.Visibility {
 	case model.NoteVisibilityFollowers:
 		// #2106 N27: reply 先が viewer の followers note は閲覧可 (upstream followers 分岐の
-		// replyUserId=meId)。
+		// replyUserId=meId)。mentions 宛も同様に閲覧可。
+		// 注意: main-stream realtime push の #1472 anti-leak gate はこの緩和を含めない
+		// canSeeNoteForStream を使う (mentioned 非フォロワーへの本文 realtime push を防ぐ)。
 		if n.ReplyUserID != nil && *n.ReplyUserID == viewer.ID {
+			return true
+		}
+		if slices.Contains(n.Mentions, viewer.ID) {
 			return true
 		}
 		if followingChecker == nil {
@@ -52,8 +49,10 @@ func CanSeeNote(viewer *model.User, n *model.Note, followingChecker repository.F
 		}
 		return ok
 	case model.NoteVisibilitySpecified:
-		// visibleUserIds は上で判定済。それ以外の specified は不可視。
-		return false
+		// upstream shouldHideNote / isVisibleForMe は specified で visibleUserIds
+		// だけを見る。mentions は判定材料にしない (本文で @ された だけの相手に
+		// direct note を見せない)。
+		return slices.Contains(n.VisibleUserIDs, viewer.ID)
 	}
 	return false
 }

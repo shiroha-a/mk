@@ -61,8 +61,9 @@ func TestMockVisibilityBranch_MatchesCanSeeNote(t *testing.T) {
 		name string
 		id   string
 	}
-	// specified-target viewer は VisibleUserIDs に含まれるが follower ではない。
-	// visibility=specified 以外の cell では非フォロワー第三者扱いになる前提。
+	// specified-target viewer は specified note の VisibleUserIDs に含まれるが
+	// follower ではない。visibility=specified 以外の cell では visibleUserIds 自体が
+	// 載らないので、非フォロワー第三者と同じ扱いになる。
 	viewers := []viewerSpec{
 		{"anonymous", anonymousID},
 		{"author", authorID},
@@ -87,11 +88,16 @@ func TestMockVisibilityBranch_MatchesCanSeeNote(t *testing.T) {
 				}
 				m.Following[followerID] = []string{authorID}
 
+				// visibleUserIds は specified note にしか載らない (upstream insertNote:667
+				// / mk-go CreateService も同じ)。他 visibility に載せると本番で起き得ない
+				// 状態を比較することになるので、specified の cell だけ seed する。
 				n := &model.Note{
-					ID:             "n1",
-					UserID:         authorID,
-					Visibility:     vis,
-					VisibleUserIDs: []string{targetedID},
+					ID:         "n1",
+					UserID:     authorID,
+					Visibility: vis,
+				}
+				if vis == model.NoteVisibilitySpecified {
+					n.VisibleUserIDs = []string{targetedID}
 				}
 				m.Notes[n.ID] = n
 

@@ -93,10 +93,14 @@ func HideEmbedDecision(viewer *model.User, f EmbedFacts, follows func(authorID s
 // short-circuit.
 //
 // Unlike HideEmbedDecision it deliberately does NOT hide a note merely because
-// its intrinsic visibility is followers or specified. At the top level that gate
-// is owned by CanSeeNote / FilterVisible / the SQL push-down / the notes-show
-// ID-known doctrine (#799 / #1488); re-applying it here would silently re-blank
-// notes those gates deliberately served. The downgrade branch DOES end in a
+// its intrinsic visibility is followers. At the top level that gate is owned by
+// CanSeeNote / FilterVisible / the SQL push-down / the notes-show ID-known
+// doctrine (#799 / #1488); re-applying it here would silently re-blank notes
+// those gates deliberately served. `specified` IS evaluated here, because the
+// SQL push-down (upstream generateVisibilityQuery) lets a note through on a
+// `mentions` match regardless of visibility while upstream shouldHideNote still
+// blanks a direct note whose viewer is not in visibleUserIds — 本文で @ された
+// だけの相手に direct note の中身を見せないための gate。 The downgrade branch DOES end in a
 // followers-style recipient check, but it only fires when the author opted into
 // makeNotesFollowersOnlyBefore on a public/home note (= new author-pref
 // coverage, not the intrinsic followers gate) (#1568).
@@ -113,8 +117,16 @@ func HideNoteByPrefsDecision(viewer *model.User, f EmbedFacts, follows func(auth
 	if viewer != nil && viewerID == f.AuthorID {
 		return false
 	}
+	// specified (direct) は visibleUserIds に入っていない viewer には隠す
+	// (upstream shouldHideNote の specified 分岐)。著者 prefs の有無に依らない
+	// intrinsic gate なので AuthorPrefsKnown より前に評価する。
+	if f.Visibility == string(model.NoteVisibilitySpecified) {
+		if viewer == nil || !slices.Contains(f.VisibleUserIDs, viewerID) {
+			return true
+		}
+	}
 	// 著者 prefs が不明なら著者設定ゲートは評価しない。top-level の intrinsic
-	// followers/specified は別ゲート (CanSeeNote 等) が担うのでここでは隠さない。
+	// followers は別ゲート (CanSeeNote 等) が担うのでここでは隠さない。
 	if !f.AuthorPrefsKnown {
 		return false
 	}

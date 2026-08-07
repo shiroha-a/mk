@@ -222,16 +222,39 @@ func TestHideTopLevelForViewer_PublicVerbatim(t *testing.T) {
 	}
 }
 
-// TestHideTopLevelForViewer_IntrinsicNotBlanked: intrinsic followers/specified
-// top-level are owned by the channel fan-out, NOT this prefs gate (#1568/#799).
+// TestHideTopLevelForViewer_IntrinsicNotBlanked: intrinsic followers top-level is
+// owned by the channel fan-out, NOT this prefs gate (#1568/#799). specified は
+// upstream shouldHideNote と同じく宛先以外に blank する。
 func TestHideTopLevelForViewer_IntrinsicNotBlanked(t *testing.T) {
 	viewer := &model.User{ID: "viewer"}
-	for _, vis := range []string{"followers", "specified"} {
-		payload := mustJSON(t, tlStream("n", "author", vis, "2026-01-02T03:04:05.000Z", entity.UserLite{}))
-		out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
-		if !bytes.Equal(out, payload) {
-			t.Errorf("intrinsic %s top-level must NOT be blanked by the prefs gate", vis)
-		}
+	payload := mustJSON(t, tlStream("n", "author", "followers", "2026-01-02T03:04:05.000Z", entity.UserLite{}))
+	out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+	if !bytes.Equal(out, payload) {
+		t.Error("intrinsic followers top-level must NOT be blanked by the prefs gate")
+	}
+}
+
+// specified top-level: 宛先には verbatim、宛先外には blank。
+func TestHideTopLevelForViewer_Specified(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+
+	addressed := tlStream("n", "author", "specified", "2026-01-02T03:04:05.000Z", entity.UserLite{})
+	addressed.VisibleUserIDs = []string{"viewer"}
+	payload := mustJSON(t, addressed)
+	if out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs); !bytes.Equal(out, payload) {
+		t.Error("specified top-level must survive verbatim for a recipient")
+	}
+
+	other := tlStream("n", "author", "specified", "2026-01-02T03:04:05.000Z", entity.UserLite{})
+	other.VisibleUserIDs = []string{"someone-else"}
+	payload = mustJSON(t, other)
+	out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+	var got entity.NoteEntity
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsHidden || got.Text != nil {
+		t.Error("specified top-level must be blanked for a non-recipient")
 	}
 }
 

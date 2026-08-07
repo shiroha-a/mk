@@ -214,11 +214,24 @@ func TestHideNoteByPrefsDecision(t *testing.T) {
 			want:    false,
 		},
 		{
-			// #799: top-level specified note served to ID-known viewer must survive.
-			name:   "intrinsic specified NOT blanked by prefs gate",
+			// upstream shouldHideNote: specified note は visibleUserIds 外の viewer に blank する。
+			name:   "intrinsic specified blanked for a non-recipient",
 			viewer: viewer,
 			facts:  EmbedFacts{AuthorID: "author", Visibility: "specified", VisibleUserIDs: []string{"x"}, AuthorPrefsKnown: true},
+			want:   true,
+		},
+		{
+			name:   "intrinsic specified survives for a recipient",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "specified", VisibleUserIDs: []string{"viewer"}, AuthorPrefsKnown: true},
 			want:   false,
+		},
+		{
+			// prefs 未取得でも specified の intrinsic gate は効く。
+			name:   "intrinsic specified blanked even when prefs unknown",
+			viewer: viewer,
+			facts:  EmbedFacts{AuthorID: "author", Visibility: "specified", VisibleUserIDs: []string{"x"}, AuthorPrefsKnown: false},
+			want:   true,
 		},
 		{
 			name:   "own note always visible",
