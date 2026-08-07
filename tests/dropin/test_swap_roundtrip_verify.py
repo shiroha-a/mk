@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import time
 
+import requests  # type: ignore[import-not-found]
+
 from conftest import A_DOMAIN  # type: ignore[import-not-found]
 from conftest_base import MisskeyLikeClient, poll_until  # type: ignore[import-not-found]
 from test_swap_setup import BASELINE_NOTE_TEXT  # type: ignore[import-not-found]
@@ -217,4 +219,88 @@ def test_roundtrip_ts_can_still_pack_alice_timeline(
     )
     _tolerate(resp, "notes/local-timeline")
     assert resp.status_code == 200, "timeline は 200 で返るべき"
+
+
+# ── Ed25519 で連合していた相手との RSA 継続 (#2376) ──────────────────
+#
+# mk-go は remote actor 解決時に RSA (user_publickey、upstream テーブル) と
+# Ed25519 (user_publickey_extra、mk-go テーブル) を**排他ではなく並列に**保存する。
+# したがって TS に戻しても RSA が残っており、連合は継続できる **はず**。
+#
+# 「はず」を実測する。stage 6b で mock は Ed25519 署名で follow を成立させた。
+# ここでは同じ mock が **RSA 署名**で送って TS-A が受理するかを見る。
+#
+# Ed25519 が使えなくなること自体は機能喪失であって破壊ではない。破壊かどうかは
+# 「RSA にフォールバックして連合が続くか」で決まる。
+
+MOCK_HOST = "fedibird-mock.test"
+MOCK_ACTOR = f"https://{MOCK_HOST}/users/mock-alice"
+
+
+def test_roundtrip_mock_can_still_deliver_with_rsa(
+    instance_a: MisskeyLikeClient, alice: dict
+) -> None:
+    """TS-A に戻したあと、mock が RSA 署名で送った activity を TS が受理する。
+
+    mk-go が Ed25519 と一緒に RSA も保存していなければ、ここで検証に失敗する。
+    """
+    res = requests.post(
+        f"https://{MOCK_HOST}/_test/deliver",
+        json={
+            "target": f"https://a/users/{alice['id']}/inbox",
+            "algorithm": "rsa-sha256",
+            "activity": {
+                "@context": "https://www.w3.org/ns/activitystreams",
+                "id": f"{MOCK_ACTOR}/likes/{int(time.time())}",
+                "type": "Undo",
+                "actor": MOCK_ACTOR,
+                "object": {
+                    "type": "Follow",
+                    "actor": MOCK_ACTOR,
+                    "object": f"https://a/users/{alice['id']}",
+                },
+            },
+        },
+        verify=False,
+        timeout=10,
+    )
+    assert res.status_code == 200, f"mock deliver helper failed: {res.text[:300]}"
+    body = res.json()
+    assert body.get("status") in (200, 202, 204), (
+        "TS-A が RSA 署名の activity を受理しなかった。mk-go が Ed25519 と一緒に "
+        f"RSA を保存できていない可能性がある: {body!r}"
+    )
+
+
+def test_roundtrip_ts_can_pack_ed25519_peer(
+    instance_a: MisskeyLikeClient, alice: dict
+) -> None:
+    """Ed25519 で解決したリモートユーザーを TS が pack できる。
+
+    `user_publickey_extra` は TS が知らないテーブルなので無視されるだけだが、
+    `user` 行そのものは mk-go が作ったもの。TS がそれを読んで落ちないこと。
+    """
+    resp = instance_a.http.post(
+        "/api/users/show",
+        json={"i": instance_a.token, "username": "mock-alice", "host": MOCK_HOST},
+    )
+    _tolerate(resp, "users/show (Ed25519 で解決した相手)")
+
+
+# ── 分割アップロードで作った drive file (#2376) ──────────────────────
+#
+# drive_file は upstream テーブルで TS が読む。分割アップロードは mk-go 独自
+# 機能だが、**完成した行が upstream と同じ形になっているか**は別問題。
+# storedInternal / accessKey の状態を TS が解釈できないと、戻した瞬間に
+# ドライブが壊れる。
+
+def test_roundtrip_ts_can_list_drive_files(
+    instance_a: MisskeyLikeClient, alice: dict
+) -> None:
+    """mk-go が作った drive file を TS が一覧できる。"""
+    resp = instance_a.http.post(
+        "/api/drive/files", json={"i": instance_a.token, "limit": 30}
+    )
+    _tolerate(resp, "drive/files")
+    assert resp.status_code == 200, "drive/files は 200 で返るべき"
 

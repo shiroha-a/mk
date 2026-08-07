@@ -24,6 +24,10 @@ cd "$REPO_ROOT"
 
 BASE=docker-compose.dropin.yml
 OVERLAY=docker-compose.dropin.mk.yml
+# fedibird mock を同居させる (#2376)。mock は RSA と Ed25519 の両方の鍵を持つ
+# ので、「mk-go が Ed25519 で連合していた相手と、TS に戻したあと RSA で継続
+# できるか」を実測できる。TS-A / TS-B の挙動には影響しない (別サービス)。
+FEDIBIRD=docker-compose.dropin.fedibird.yml
 
 # 失敗時の診断情報を残してから stack を落とす。
 #
@@ -37,18 +41,19 @@ cleanup() {
   if [ "$rc" -ne 0 ]; then
     echo "===> capturing diagnostics (exit=$rc) -> $DIAG_DIR"
     mkdir -p "$DIAG_DIR" || true
-    docker compose -f "$BASE" -f "$OVERLAY" ps > "$DIAG_DIR/ps.log" 2>&1 || true
-    docker compose -f "$BASE" -f "$OVERLAY" logs --no-color --tail=2000 \
+    docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" ps > "$DIAG_DIR/ps.log" 2>&1 || true
+    docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" logs --no-color --tail=2000 \
       > "$DIAG_DIR/compose.log" 2>&1 || true
   fi
   echo "===> cleanup"
-  docker compose -f "$BASE" -f "$OVERLAY" down -v >/dev/null 2>&1 || true
+  docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" down -v >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
 echo "===> stage 1: bring up TS-A + TS-B stack"
-docker compose -f "$BASE" up -d --build
+docker compose -f "$BASE" -f "$FEDIBIRD" up -d --build
 
+# fedibird mock も healthy を待つ (#2376)。Ed25519 で連合する相手役。
 echo "===> stage 1b: wait for both TS instances healthy"
 deadline=$(($(date +%s) + 240))
 while :; do
@@ -70,21 +75,21 @@ print(len(healthy))
 done
 
 echo "===> stage 2: setup alice / bob / follow / baseline note"
-docker compose -f "$BASE" --profile test run --rm test-runner pytest test_swap_setup.py -v
+docker compose -f "$BASE" -f "$FEDIBIRD" --profile test run --rm test-runner pytest test_swap_setup.py -v
 
 echo "===> stage 3: stop TS-A backend (DB-A / Redis-A keep state)"
-docker compose -f "$BASE" stop app-a
+docker compose -f "$BASE" -f "$FEDIBIRD" stop app-a
 
 echo "===> stage 4: bring up mk-go overlay on instance A"
 # --force-recreate で旧 TS-A image の停止 container を確実に破棄し、新規
 # mk-A container として起動する。image label 一致時に compose が container
 # を reuse して image が更新されない曖昧さを回避 (#1085 review #1)。
-docker compose -f "$BASE" -f "$OVERLAY" up -d --build --force-recreate app-a
+docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" up -d --build --force-recreate app-a
 
 echo "===> stage 5: wait for mk-A healthy"
 deadline=$(($(date +%s) + 180))
 while :; do
-  state=$(docker compose -f "$BASE" -f "$OVERLAY" ps --format json | python3 -c "
+  state=$(docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" ps --format json | python3 -c "
 import sys, json
 ls=[json.loads(l) for l in sys.stdin if l.strip()]
 ms=[s for s in ls if s.get('Service')=='app-a']
@@ -95,7 +100,7 @@ print(ms[0].get('Health') if ms else 'missing')
   fi
   if [ "$(date +%s)" -ge "$deadline" ]; then
     echo "FAIL: mk-A did not become healthy within 180s"
-    docker compose -f "$BASE" -f "$OVERLAY" logs app-a | tail -50
+    docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" logs app-a | tail -50
     exit 1
   fi
   sleep 3
@@ -104,10 +109,10 @@ done
 echo "===> stage 5b: restart nginx-a so the upstream re-resolves to mk-A"
 # stop app-a 中に nginx-a が backend を unreachable と覚え込む可能性があるので
 # 念のため restart する。
-docker compose -f "$BASE" -f "$OVERLAY" restart nginx-a
+docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" restart nginx-a
 
 echo "===> stage 6: verify state preserved on mk-A"
-docker compose -f "$BASE" -f "$OVERLAY" --profile test run --rm test-runner pytest test_swap_verify.py -v
+docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" --profile test run --rm test-runner pytest test_swap_verify.py -v
 
 # mk-go 独自機能が upstream 共有テーブルに残すデータを、mk-A 上で作っておく
 # (#2372)。ここで作った行は TS-A に戻したあとも DB に残るので、stage 9 が
@@ -118,10 +123,10 @@ docker compose -f "$BASE" -f "$OVERLAY" --profile test run --rm test-runner pyte
 # ある機能で、テーブルも upstream のもの。連合部分だけが mk-go の追加なので、
 # TS には upstream が想定していないリモート参照を含む行が残る。
 echo "===> stage 6b: seed mk-go-only feature data (残留データを作る)"
-docker compose -f "$BASE" -f "$OVERLAY" --profile test run --rm test-runner pytest test_swap_seed_mkgo_only.py -v
+docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" --profile test run --rm test-runner pytest test_swap_seed_mkgo_only.py test_swap_seed_ed25519_peer.py -v
 
 echo "===> stage 7: stop mk-A backend (roundtrip 戻し前準備)"
-docker compose -f "$BASE" -f "$OVERLAY" stop app-a
+docker compose -f "$BASE" -f "$OVERLAY" -f "$FEDIBIRD" stop app-a
 
 # TypeORM の bookkeeping テーブルを控える (#2244)。TS に戻したとき、seed した
 # migration が「未実行」と判定されて再実行されると、適用済み DDL への
@@ -149,7 +154,7 @@ echo "===> stage 8: bring up TS-A backend (overlay 解除で TS に戻す)"
 # overlay を指定せず base のみで up することで、app-a が TS-A の image に戻る。
 # --force-recreate で停止中の mk-A container を確実に破棄し、新規 TS-A
 # container を起動する (#1085 review #1)。
-docker compose -f "$BASE" up -d --force-recreate app-a
+docker compose -f "$BASE" -f "$FEDIBIRD" up -d --force-recreate app-a
 
 echo "===> stage 8b: wait for TS-A healthy"
 deadline=$(($(date +%s) + 180))
@@ -172,7 +177,7 @@ print(ms[0].get('Health') if ms else 'missing')
 done
 
 echo "===> stage 8c: restart nginx-a so the upstream re-resolves to TS-A"
-docker compose -f "$BASE" restart nginx-a
+docker compose -f "$BASE" -f "$FEDIBIRD" restart nginx-a
 
 echo "===> stage 8d: assert TS did not re-run migrations (#2244)"
 MIGRATIONS_AFTER=$(migrations_digest)
@@ -190,6 +195,6 @@ if [ "$MIGRATIONS_BEFORE" != "$MIGRATIONS_AFTER" ]; then
 fi
 
 echo "===> stage 9: verify federation continuity after TS roundtrip (#1082)"
-docker compose -f "$BASE" --profile test run --rm test-runner pytest test_swap_roundtrip_verify.py -v
+docker compose -f "$BASE" -f "$FEDIBIRD" --profile test run --rm test-runner pytest test_swap_roundtrip_verify.py -v
 
 echo "===> all stages PASS"
