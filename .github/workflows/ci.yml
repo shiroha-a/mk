@@ -254,3 +254,41 @@ jobs:
 
       - name: Type check (vue-tsc)
         run: make frontend-check
+
+  vulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # Dockerfile の builder は go.mod の `go` directive と同じ patch version を
+      # 指していないといけない。govulncheck が見るのは go.mod 側なので、ここが
+      # ずれていると **CI は緑のまま、実際に配る image だけが脆弱**になる。
+      # floating tag (`golang:1.26-alpine`) に戻すと再現性も失われる。
+      - name: Go version pin is consistent between go.mod and Dockerfile
+        run: |
+          gomod=$(awk '/^go [0-9]/ {print $2; exit}' go.mod)
+          docker=$(sed -n 's/^FROM golang:\([0-9.]*\)-alpine AS builder$/\1/p' Dockerfile)
+          echo "go.mod=$gomod Dockerfile=$docker"
+          if [ -z "$docker" ]; then
+            echo "Dockerfile の builder が patch version 固定になっていない" >&2
+            exit 1
+          fi
+          if [ "$gomod" != "$docker" ]; then
+            echo "go.mod ($gomod) と Dockerfile ($docker) の Go version が一致しない" >&2
+            exit 1
+          fi
+
+      # 実際にデプロイするのは Linux なので GOOS=linux で解析する。既定のまま
+      # だと host 依存の package load エラーで解析が空振りしうる。
+      #
+      # 検出は「呼び出しが到達可能なもの」に限られる (import しているだけの
+      # 脆弱性は落とさない)。到達可能なものだけを落とすので、無視リストを
+      # 育てずに運用できる。
+      - name: govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          GOOS=linux "$(go env GOPATH)/bin/govulncheck" ./...

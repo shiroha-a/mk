@@ -1,6 +1,6 @@
 module github.com/shiroha-a/mk
 
-go 1.26.2
+go 1.26.5
 
 require (
 	github.com/SherClockHolmes/webpush-go v1.4.0
@@ -49,10 +49,10 @@ require (
 	github.com/testcontainers/testcontainers-go/modules/postgres v0.42.0
 	github.com/testcontainers/testcontainers-go/modules/redis v0.42.0
 	golang.org/x/crypto v0.52.0
-	golang.org/x/image v0.41.0
+	golang.org/x/image v0.43.0
 	golang.org/x/net v0.55.0
-	golang.org/x/sync v0.20.0
-	golang.org/x/text v0.37.0
+	golang.org/x/sync v0.21.0
+	golang.org/x/text v0.39.0
 	golang.org/x/time v0.14.0
 	gorm.io/datatypes v1.2.7
 	gorm.io/driver/postgres v1.6.0
