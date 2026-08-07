@@ -125,7 +125,7 @@ GOFLAGS=-trimpath
 # 名乗っていた)。定数を唯一の source of truth にして二重管理をやめる。
 #
 # リリースビルドで上書きしたい場合のみ変数を渡す:
-#   make build MKGO_VERSION=1.1.0
+#   make build MKGO_VERSION=1.1.1
 MKGO_VERSION ?=
 MISSKEY_VERSION ?=
 LDFLAGS=-s -w
