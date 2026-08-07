@@ -13,7 +13,8 @@
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
 	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check \
-	diff-up diff-test diff-down diff-logs
+	diff-up diff-test diff-down diff-logs \
+	upstream-e2e upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
 
 .DEFAULT_GOAL := help
 
@@ -550,6 +551,40 @@ diff-down: ## 差分比較ハーネスのスタックを撤去
 
 diff-logs: ## 差分比較ハーネスのログを表示
 	docker compose -f $(DIFF_COMPOSE) logs -f
+
+# Misskey 本家の backend e2e (test/e2e/**) を mk-go に向けて実行する。
+# テスト本体には手を入れず、submodule 側の vitest 設定 2 ファイル
+# (globalSetup / setupFiles) だけを差し替えている。上流でテストが増えれば
+# 自動的にこちらの検証対象も増える。詳細は docs/upstream-backend-e2e.md。
+#
+# 『通らないことが正しい』テストは tests/upstream-e2e/known-divergences.json に
+# 根拠付きで登録し、vitest の expected-failure として扱う。乖離が解消して通る
+# ようになったテストは逆に落ちるので、一覧が陳腐化しない。
+#
+# ポートは本家 .github/misskey/test.yml に合わせてある (54312 / 56312 / 61812)。
+UPSTREAM_E2E_COMPOSE=tests/upstream-e2e/compose.yml
+UPSTREAM_E2E_CONFIG=tests/upstream-e2e/mkgo.yml
+UPSTREAM_E2E_BACKEND=third_party/misskey/packages/backend
+
+##@ e2e: 本家 backend e2e
+upstream-e2e-up: ## 本家 backend e2e 用の PostgreSQL / Redis を起動
+	docker compose -f $(UPSTREAM_E2E_COMPOSE) up -d --wait
+
+upstream-e2e-migrate: ## e2e 用 DB にマイグレーションを適用
+	go run ./cmd/migrate -config $(UPSTREAM_E2E_CONFIG) -direction up
+
+# FILE で 1 ファイルだけ流せる: make upstream-e2e-test FILE=test/e2e/note.ts
+upstream-e2e-test: build ## 本家 backend e2e を mk-go に対して実行
+	cd $(UPSTREAM_E2E_BACKEND) && \
+		MKGO_BIN=$(CURDIR)/built/misskey \
+		MKGO_CONFIG=$(CURDIR)/$(UPSTREAM_E2E_CONFIG) \
+		MKGO_CWD=$(CURDIR) \
+		npx --no vitest run --config vitest.config.e2e.mkgo.ts $(FILE)
+
+upstream-e2e: upstream-e2e-up upstream-e2e-migrate upstream-e2e-test ## 起動からテストまで一括で実行
+
+upstream-e2e-down: ## 本家 backend e2e 用のスタックを撤去 (volume ごと)
+	docker compose -f $(UPSTREAM_E2E_COMPOSE) down -v
 
 # API compatibility matrix ― mk-go と Misskey TS の API endpoint 実装状況を
 # 突き合わせて docs/api-compat.md を生成する。

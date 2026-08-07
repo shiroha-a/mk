@@ -141,6 +141,14 @@ make dropin-swap-test       # TS-then-mk 切替シナリオ (bash orchestrator)
 # 双方向 Ed25519 verify を検証する e2e。
 make dropin-fedibird-test    # mock ↔ mk-A の Ed25519 inbound/outbound 検証
 
+# 本家 backend e2e (#2347) — Misskey 本家の test/e2e/** をそのまま mk-go に
+# 向けて実行する。テスト本体は無改変。詳細は docs/upstream-backend-e2e.md。
+make upstream-e2e-up         # e2e 用 PostgreSQL / Redis を起動
+make upstream-e2e-migrate    # e2e 用 DB にマイグレーションを適用
+make upstream-e2e-test       # mk-go をビルドして vitest を実行 (FILE= で 1 ファイル指定可)
+make upstream-e2e            # 上記 3 つを一括実行
+make upstream-e2e-down       # volume ごと撤去
+
 # Drop-in frontend e2e (#380 / Phase 14) — 3 Misskey TS インスタンス + cypress
 # 実ブラウザでフロントエンド視点の drop-in 互換を検証する基盤。
 make dropin-frontend-baseline    # TS-A/B/C + cypress baseline spec 実行
@@ -394,6 +402,23 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
   docker compose logs を `playwright-results-<backend>` /
   `playwright-logs-<backend>` artifact として 14 日保持。
 
+### `upstream-backend-e2e` workflow (PR トリガー)
+
+- `.github/workflows/upstream-backend-e2e.yml` で Misskey 本家の backend e2e
+  (`third_party/misskey/packages/backend/test/e2e/**`) を mk-go に向けて実行する。
+  テスト本体は無改変で、vitest の `globalSetup` / `setupFiles` だけを差し替える。
+- `pull_request` で paths (`internal/**` / `cmd/**` / `migration/**` /
+  `tests/upstream-e2e/**` / `third_party/misskey` / `Makefile` / `go.mod` /
+  `go.sum` / 当 workflow) に該当する変更のみ発火。`workflow_dispatch` で任意の
+  ref に対して手動実行も可。
+- PR の required check には**含めない** (18-20 min かかり、1200 件超のテストに
+  flaky 要素があるため merge ブロッカーには適さない)。非ブロッキングを
+  `continue-on-error` で実現しないこと (job が成功扱いになり失敗が不可視になる)。
+- 『通らないことが正しい』テストは `tests/upstream-e2e/known-divergences.json` に
+  根拠付きで登録し、expected-failure (`task.fails`) として扱う。skip ではないので
+  乖離が解消したテストは逆に落ち、一覧の陳腐化に気付ける。
+- 失敗時は mk-go のログを `upstream-e2e-mkgo-log` artifact として 14 日保持。
+
 ### CI失敗時の対応
 
 - カバレッジ不足 → テストケースを追加してから再push。
@@ -483,6 +508,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-08-07**: Section 3 に本家 backend e2e の Makefile target (`make upstream-e2e` 系 5 つ) を、Section 8 に `upstream-backend-e2e` workflow を追記 (#2347)。Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて回す PR トリガーの workflow で、required check には含めない。既知乖離は skip でなく expected-failure (`task.fails`) で扱う運用も明記。
 - **2026-08-04**: Section 7 (Git Workflow) に「マージ方法」を追記。フィーチャーブランチ → `develop` の PR は **rebase and merge** に統一する (それ以前は squash-merge)。各コミットがそのまま develop に載るため、1 コミットずつ build / test が通る順序で並べること、確認は使い捨て `git worktree` で行うこと (作業ツリー上の `git stash` は保留中の別作業を巻き込むので使わない) を併記。`main` は従来どおり PR をマージせず FF push のみで、対象が異なる旨も明記した。
 - **2026-06-09**: Section 7 (Git Workflow) に 2 つのルールを追記。(1)「Issue・PR のタイトル・本文は日本語記述を厳守する」(技術用語は原文のまま残してよいが、説明文・見出し・箇条書きの地の文に英語を混在させない)。(2)「`CHANGELOG.md` はリリース時にまとめて記述する」(個別 PR・fix ごとに `## Unreleased` へ追記せず、リリースのタイミングで一括記載する)。
 - **2026-05-16**: `Makefile` に `make dropin-fedibird-test` を追加 (#1086)。Section 3 (Development Commands) の Drop-in 系コマンド一覧に Fedibird-like mock との Ed25519 e2e を載せる。

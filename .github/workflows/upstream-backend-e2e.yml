@@ -1,0 +1,141 @@
+name: Upstream backend e2e
+
+# Misskey 本家の backend e2e (third_party/misskey の test/e2e/**) を mk-go に
+# 向けて実行し、API 互換性の regression を検知する。
+#
+# テスト本体には一切手を入れず、submodule 側の vitest 設定 2 ファイル
+# (globalSetup = mk-go バイナリの起動、setupFiles = /api/reset-db) だけを
+# 差し替えている。上流でテストが増えれば自動的に検証対象も増える。
+#
+# 『通らないことが正しい』テストは tests/upstream-e2e/known-divergences.json に
+# 根拠付きで登録し、vitest の expected-failure (task.fails) として扱う。skip では
+# ないので、乖離が解消して通るようになったテストは逆に落ちて一覧の陳腐化に
+# 気付ける。
+#
+# - pull_request: paths に該当する変更のみ。**branch protection の required
+#   checks には入れない**ので、落ちても merge はブロックされない。実行に
+#   18-20 分かかるうえ、外部 image pull と 1200 件超のテストで flaky 要素が
+#   あるため merge ブロッカーには適さない
+# - workflow_dispatch: upstream 追従で submodule を bump したときに手動で発火できる
+#
+# 非ブロッキングを `continue-on-error: true` で実現しないこと。あれは job を
+# 成功扱いにするので失敗が完全に不可視になる。job は正しく失敗させ、required
+# に入れないことで非ブロッキングにする (dropin-e2e.yml と同じ判断)。
+
+on:
+  pull_request:
+    branches: [develop, main]
+    # backend の挙動・DB schema・e2e ハーネスを触る変更だけを対象にする。
+    # frontend / ドキュメントのみの PR で 20 分待たされないようにする。
+    paths:
+      - "internal/**"
+      - "cmd/**"
+      - "migration/**"
+      - "tests/upstream-e2e/**"
+      - "third_party/misskey"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/upstream-backend-e2e.yml"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch / tag / SHA to test"
+        required: false
+        default: "develop"
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # 実測でテスト本体が 14 分、これに Go / pnpm のビルドが乗る。上流で
+    # テストが増えることを見込んで余裕を持たせる。
+    timeout-minutes: 45
+
+    # ポートは本家 .github/misskey/test.yml に合わせる。tests/upstream-e2e/mkgo.yml
+    # がこの番号を向いているので、compose 版 (make upstream-e2e-up) と CI で
+    # 同じ設定ファイルを使い回せる。
+    services:
+      postgres:
+        image: postgres:18
+        ports:
+          - 54312:5432
+        env:
+          POSTGRES_DB: test-misskey
+          POSTGRES_HOST_AUTH_METHOD: trust
+        options: >-
+          --health-cmd "pg_isready -U postgres -d test-misskey"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+      redis:
+        image: redis:8
+        ports:
+          - 56312:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # pull_request では github.ref が refs/pull/<n>/merge になるので PR の
+          # 内容が checkout される。workflow_dispatch のときだけ inputs.ref。
+          ref: ${{ inputs.ref || github.ref }}
+          # test/e2e/** と vitest 設定は submodule 側にある。
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: third_party/misskey/.node-version
+          cache: pnpm
+          cache-dependency-path: third_party/misskey/pnpm-lock.yaml
+
+      - name: Install misskey workspace dependencies
+        working-directory: third_party/misskey
+        run: pnpm install --frozen-lockfile
+
+      # test/e2e/** は `misskey-js/entities.js` を import する。misskey-js の
+      # exports は built/ を指すので、ビルドしないと解決できない。frontend まで
+      # 含む `pnpm build` は 5-10 分かかるうえ e2e には不要なので、必要な
+      # 2 package だけをビルドする。
+      - name: Build misskey-js
+        working-directory: third_party/misskey
+        run: pnpm --filter misskey-js build
+
+      # 本家 e2e の utils.ts / setup が `loadConfig()` 経由で .config/test.yml を
+      # 読む (port などをここから取る)。upstream の test-backend.yml と同じ手順。
+      - name: Copy upstream test config
+        working-directory: third_party/misskey
+        run: cp .github/misskey/test.yml .config/
+
+      - name: Apply migrations
+        run: make upstream-e2e-migrate
+
+      - name: Run upstream backend e2e
+        run: make upstream-e2e-test
+
+      # 失敗時は mk-go 側のログを artifact 化する。vitest の出力だけでは
+      # 「サーバーが何を返したか」が分からないことが多い。
+      - name: Upload mk-go log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upstream-e2e-mkgo-log
+          path: /tmp/mkgo-upstream-e2e.log
+          if-no-files-found: ignore
+          retention-days: 14
