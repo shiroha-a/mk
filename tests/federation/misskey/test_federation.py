@@ -122,10 +122,19 @@ class TestNotes:
         assert note["createdNote"]["text"] == "Hello from Misskey!"
 
     def test_mkgo_local_timeline(self, mkgo: MisskeyLikeClient, alice: dict) -> None:
+        # mk-go はファンアウトタイムライン (Redis) を経由するので、投稿直後に
+        # 同期で読むと稀に間に合わない。本 file の他 14 箇所と同じく poll する。
+        #
+        # limit も上げてある。5 のままだと他テストの投稿が先に積まれたときに
+        # probe が押し出されて、遅延と区別のつかない失敗になる。
         mkgo.create_note("timeline probe")
-        tl = mkgo.local_timeline(limit=5)
-        assert isinstance(tl, list)
-        assert any(n.get("text") == "timeline probe" for n in tl)
+        poll_until(
+            lambda: any(
+                n.get("text") == "timeline probe"
+                for n in mkgo.local_timeline(limit=30)
+            ),
+            desc="timeline probe が LTL に載る",
+        )
 
 
 # ── 5. NodeInfo ────────────────────────────────────────────
