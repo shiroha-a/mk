@@ -61,6 +61,16 @@ function freshSetupTrio(): Cypress.Chainable<Trio> {
     .then((r) => {
       trio.charlie = { ...r, username: 'charlie', instance: 'c' };
     })
+    // meta.federation の既定値は 2026.7.0 で none。素の instance は連合しないので
+    // 明示的に有効化する (upstream が 2025-08 の TweakDefaultFederationSettings で
+    // all → none に変えた)。root token が要るので 3 人作った後に流す。
+    .then(() => {
+      [INSTANCES.a, INSTANCES.b, INSTANCES.c].forEach((inst) => {
+        const principal =
+          inst === INSTANCES.a ? trio.alice : inst === INSTANCES.b ? trio.bob : trio.charlie;
+        api(inst, 'admin/update-meta', { i: principal.token, federation: 'all' });
+      });
+    })
     .then(() => cy.task('tokenCache:set', { key: CACHE_KEY, value: trio }))
     .then(() => cy.wrap(trio));
 }

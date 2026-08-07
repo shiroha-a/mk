@@ -109,10 +109,10 @@ state 引き継ぎは検証されない。state 検証は `dropin-swap-test` 専
 
 ## トラブルシューティング
 
-### `misskey/misskey:2025.2.1` が pull できない
+### `misskey/misskey:2026.7.0` が pull できない
 
 `docker login` 等の認証不要。pull が失敗する場合は network / rate limit。
-compose 内で pull を再試行するか `docker pull misskey/misskey:2025.2.1` で
+compose 内で pull を再試行するか `docker pull misskey/misskey:2026.7.0` で
 先読みしておく。
 
 ### 連合 follow が timeout する
