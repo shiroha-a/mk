@@ -62,12 +62,31 @@ def test_ts_can_read_mkgo_created_notes(
     """mk-go が作った note を TS が pack できる。
 
     home timeline (`notes/timeline`) で見る。local-timeline は使わない。
-    upstream の local-timeline は `enableFanoutTimelineDbFallback` が無効だと
-    Redis のタイムラインだけを読むので、**mk-go が書いた Redis エントリを TS が
-    読めるか**という別の論点が混ざる。ここで見たいのは「DB のデータを TS が
-    pack できるか」なので、論点を分ける。
+    この setup では note を 4 件とも **bob が instance B から**投稿しており、
+    instance A から見ると全て remote note なので、そもそも local timeline には
+    1 件も入らない (`a:list:localTimeline` は作られない)。空が正しい。
 
-    Redis タイムラインの引き継ぎは別途 issue 化する。
+    ## Redis fanout timeline の引き継ぎについて
+
+    Misskey は timeline を DB だけでなく Redis にも持つ (FTT)。バックエンドを
+    差し替えると、この Redis のデータも引き継げる必要がある。
+
+    以前ここには「Redis の引き継ぎは未検証なので別途 issue 化する」と書いて
+    あったが、実測の結果 **問題なく引き継げている**ことが分かったので取り下げた。
+    根拠:
+
+      - キーの名前空間が一致する。mk-go は `config.Redis.KeyPrefix()`、TS は
+        ioredis の `keyPrefix: <host>:` で、どちらも `url` のホスト名に落ちる。
+        実際に mk-go が書いたキーは `a:list:homeTimeline:<id>` で、TS が読む
+        キーと同一
+      - TS 起動後もキーは残る (purge も書き換えもされない)
+      - `enableFanoutTimelineDbFallback` を **false** にして DB への逃げ場を
+        消した状態で TS を起動しても、mk-go が Redis に積んだ 4 件が
+        `notes/timeline` から返る。= TS は Redis 側を読んでいる
+
+    最後の 1 つが決定的で、fallback を有効なままにすると Redis が読めなくても
+    DB から同じ結果が返るため区別がつかない。この検証を常設テストにしていない
+    のは、meta の書き換えが他のテストに影響するため。
     """
     tl = instance_a._api("notes/timeline", {"limit": 40})
     texts = [n.get("text") for n in tl]
