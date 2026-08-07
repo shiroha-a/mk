@@ -143,10 +143,11 @@ make dropin-fedibird-test    # mock ↔ mk-A の Ed25519 inbound/outbound 検証
 
 # 本家 backend e2e (#2347) — Misskey 本家の test/e2e/** をそのまま mk-go に
 # 向けて実行する。テスト本体は無改変。詳細は docs/upstream-backend-e2e.md。
+make upstream-e2e-deps       # submodule 側の依存を用意 (初回 / submodule bump 後)
 make upstream-e2e-up         # e2e 用 PostgreSQL / Redis を起動
 make upstream-e2e-migrate    # e2e 用 DB にマイグレーションを適用
 make upstream-e2e-test       # mk-go をビルドして vitest を実行 (FILE= で 1 ファイル指定可)
-make upstream-e2e            # 上記 3 つを一括実行
+make upstream-e2e            # 上記 4 つを一括実行
 make upstream-e2e-down       # volume ごと撤去
 
 # Drop-in frontend e2e (#380 / Phase 14) — 3 Misskey TS インスタンス + cypress

@@ -110,23 +110,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: third_party/misskey/pnpm-lock.yaml
 
-      - name: Install misskey workspace dependencies
-        working-directory: third_party/misskey
-        run: pnpm install --frozen-lockfile
-
-      # test/e2e/** は `misskey-js/entities.js` を import する。misskey-js の
-      # exports は built/ を指すので、ビルドしないと解決できない。frontend まで
-      # 含む `pnpm build` は 5-10 分かかるうえ e2e には不要なので、必要な
-      # 2 package だけをビルドする。
-      - name: Build misskey-js
-        working-directory: third_party/misskey
-        run: pnpm --filter misskey-js build
-
-      # 本家 e2e の utils.ts / setup が `loadConfig()` 経由で .config/test.yml を
-      # 読む (port などをここから取る)。upstream の test-backend.yml と同じ手順。
-      - name: Copy upstream test config
-        working-directory: third_party/misskey
-        run: cp .github/misskey/test.yml .config/
+      # pnpm install / misskey-js build / test config の生成をまとめて行う。
+      # ローカルの `make upstream-e2e` と同じ経路を通すため、個別 step に
+      # 展開せず Makefile 側に集約する。
+      - name: Prepare misskey workspace
+        run: make upstream-e2e-deps
 
       - name: Apply migrations
         run: make upstream-e2e-migrate

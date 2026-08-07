@@ -14,7 +14,7 @@
 	apicompat apicompat-routes apicompat-render \
 	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check \
 	diff-up diff-test diff-down diff-logs \
-	upstream-e2e upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
+	upstream-e2e upstream-e2e-deps upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
 
 .DEFAULT_GOAL := help
 
@@ -564,9 +564,24 @@ diff-logs: ## 差分比較ハーネスのログを表示
 # ポートは本家 .github/misskey/test.yml に合わせてある (54312 / 56312 / 61812)。
 UPSTREAM_E2E_COMPOSE=tests/upstream-e2e/compose.yml
 UPSTREAM_E2E_CONFIG=tests/upstream-e2e/mkgo.yml
-UPSTREAM_E2E_BACKEND=third_party/misskey/packages/backend
+UPSTREAM_E2E_MISSKEY=third_party/misskey
+UPSTREAM_E2E_BACKEND=$(UPSTREAM_E2E_MISSKEY)/packages/backend
 
 ##@ e2e: 本家 backend e2e
+# submodule 側の依存を用意する。初回と submodule bump 後にだけ必要。
+#
+#  - misskey-js: exports が built/ を指すのでビルドしないと test/e2e が import できない。
+#    frontend まで含む `pnpm build` (5-10 分) は e2e には不要なので呼ばない。
+#  - .config/test.yml: 本家の utils.ts / setup が loadConfig() 経由で読む (port 等)。
+#  - compile-config: loadConfig() は YAML ではなく built/.config.json を読むので、
+#    NODE_ENV=test で .config/test.yml から生成しておく必要がある。
+upstream-e2e-deps: ## 本家 backend e2e に必要な submodule 側の依存を用意 (初回のみ)
+	cd $(UPSTREAM_E2E_MISSKEY) && \
+		pnpm install --frozen-lockfile && \
+		pnpm --filter misskey-js build && \
+		cp .github/misskey/test.yml .config/ && \
+		NODE_ENV=test pnpm --filter backend compile-config
+
 upstream-e2e-up: ## 本家 backend e2e 用の PostgreSQL / Redis を起動
 	docker compose -f $(UPSTREAM_E2E_COMPOSE) up -d --wait
 
@@ -581,7 +596,7 @@ upstream-e2e-test: build ## 本家 backend e2e を mk-go に対して実行
 		MKGO_CWD=$(CURDIR) \
 		npx --no vitest run --config vitest.config.e2e.mkgo.ts $(FILE)
 
-upstream-e2e: upstream-e2e-up upstream-e2e-migrate upstream-e2e-test ## 起動からテストまで一括で実行
+upstream-e2e: upstream-e2e-deps upstream-e2e-up upstream-e2e-migrate upstream-e2e-test ## 依存の用意からテストまで一括で実行
 
 upstream-e2e-down: ## 本家 backend e2e 用のスタックを撤去 (volume ごと)
 	docker compose -f $(UPSTREAM_E2E_COMPOSE) down -v

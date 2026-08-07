@@ -29,7 +29,10 @@ Redis 56312 / mk-go 61812)。おかげでローカルの compose と CI の serv
 ## 実行
 
 ```bash
-# 初回: DB/Redis を起動してマイグレーションを適用
+# 初回: submodule 側の依存を用意する (submodule を bump したときも再実行)
+make upstream-e2e-deps
+
+# DB/Redis を起動してマイグレーションを適用
 make upstream-e2e-up
 make upstream-e2e-migrate
 
@@ -39,12 +42,24 @@ make upstream-e2e-test
 # 1 ファイルだけ
 make upstream-e2e-test FILE=test/e2e/note.ts
 
-# 起動からテストまで一括
+# 依存の用意からテストまで一括
 make upstream-e2e
 
 # 撤去 (volume ごと)
 make upstream-e2e-down
 ```
+
+`make upstream-e2e-deps` がやることは 3 つ。いずれも毎回は要らないので
+`upstream-e2e-test` からは切り離してある。
+
+- `pnpm install --frozen-lockfile`
+- `pnpm --filter misskey-js build` — `misskey-js` は exports が `built/` を指すので、
+  ビルドしないと `test/e2e/**` の `import ... from 'misskey-js/entities.js'` が解決できない。
+  frontend まで含む `pnpm build` (5-10 分) は e2e には不要なので呼ばない
+- `.config/test.yml` の設置と `NODE_ENV=test pnpm --filter backend compile-config` —
+  本家の `loadConfig()` は YAML ではなく `built/.config.json` を読む (ランタイムに
+  js-yaml を含めないため)。生成しておかないと globalSetup が
+  「Compiled configuration file not found」で落ちる
 
 `make upstream-e2e-test` は `built/misskey` を先にビルドする。テスト側の
 ハーネスがそのバイナリを子プロセスとして起動するので、mk-go を手で立ち上げて
