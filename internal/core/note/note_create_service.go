@@ -735,9 +735,12 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		note.RenoteChannelID = renoteTarget.ChannelID
 	}
 
-	// channel note は visibleUserIds を空にする (upstream:464、#1855)。public 強制
-	// 済なので visibleUserIds は無意味だが、stray な指定を残さない。
-	if in.VisibleUserIDs != nil && !isChannelNote {
+	// visibleUserIds は visibility=specified のときだけ保存する
+	// (upstream insertNote:667 `visibility === 'specified' ? ... : []`)。
+	// channel note は public 強制済なので同様に空 (upstream:464、#1855)。
+	// 他 visibility に stray な指定が残ると、可視判定や list timeline の
+	// push-down が「宛先」として拾ってしまう。
+	if in.VisibleUserIDs != nil && !isChannelNote && note.Visibility == model.NoteVisibilitySpecified {
 		note.VisibleUserIDs = in.VisibleUserIDs
 	}
 
