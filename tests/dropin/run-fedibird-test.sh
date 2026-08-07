@@ -50,10 +50,12 @@ print(len(healthy))
   sleep 3
 done
 
+# --build を付けないと runner image がキャッシュのままになり、
+# requirements.txt を変えても古い image で走ってしまう。
 echo "===> stage 2: alice / bob / follow setup on mk-A + TS-B"
-docker compose -f "$BASE" -f "$MK_OVERLAY" -f "$FEDIBIRD_OVERLAY" --profile test run --rm test-runner pytest test_swap_setup.py -v
+docker compose -f "$BASE" -f "$MK_OVERLAY" -f "$FEDIBIRD_OVERLAY" --profile test run --rm --build test-runner pytest test_swap_setup.py -v
 
 echo "===> stage 3: fedibird ↔ mk-A bidirectional Ed25519 verify"
-docker compose -f "$BASE" -f "$MK_OVERLAY" -f "$FEDIBIRD_OVERLAY" --profile test run --rm test-runner pytest test_fedibird_ed25519.py -v
+docker compose -f "$BASE" -f "$MK_OVERLAY" -f "$FEDIBIRD_OVERLAY" --profile test run --rm --build test-runner pytest test_fedibird_ed25519.py -v
 
 echo "===> all stages PASS"

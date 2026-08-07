@@ -1,3 +1,5 @@
 pytest>=8.0.0
 pytest-asyncio>=0.24.0
 httpx>=0.28.0
+# tests/dropin/test_fedibird_ed25519.py が使う (#1083)。
+requests>=2.32.0

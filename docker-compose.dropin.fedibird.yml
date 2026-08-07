@@ -19,6 +19,11 @@ services:
       context: ./tests/dropin/fedibird_mock
     environment:
       FEDIBIRD_DOMAIN: fedibird-mock.test
+      # gen-certs.sh はドメイン名でファイルを作る (fedibird-mock.test.crt)。
+      # Dockerfile の既定値は /certs/server.crt なので、指定しないと mock が
+      # 起動直後に FileNotFoundError で落ちる。
+      FEDIBIRD_TLS_CERT: /certs/fedibird-mock.test.crt
+      FEDIBIRD_TLS_KEY: /certs/fedibird-mock.test.key
     volumes:
       - certs:/certs:ro
     depends_on:
