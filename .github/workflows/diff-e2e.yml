@@ -1,0 +1,113 @@
+name: Diff e2e
+
+# mk-go と Misskey TS に同一リクエストを投げて、レスポンスを **値レベル** で
+# diff する (#2078 / #2368)。他のゲートとは守備範囲が違う。
+#
+#   本家 backend e2e … 本家のテストが通るか
+#   shape drift      … フィールドの有無・型
+#   diff-e2e         … 同じ入力に対する値そのもの
+#
+# shape が合っていても値が違う類のバグはこれでしか捕まらない。実際
+# #2091 / #2094 / #2097 / #2101 を検出している。
+#
+# 意図的な差分は `tests/diff/test_endpoints.py` の ignore-list に**理由付きで**
+# 登録する。ここを空振りさせると本物の乖離が埋もれるので、追加するときは
+# docs/divergence.md にも対応する記述があるかを確認すること。
+#
+# - pull_request: paths に該当する変更のみ。**required checks には入れない**
+# - workflow_dispatch: 任意の ref で手動実行できる
+#
+# 非ブロッキングを `continue-on-error: true` で実現しないこと。あれは job を
+# 成功扱いにするので失敗が完全に不可視になる。
+
+on:
+  pull_request:
+    branches: [develop, main]
+    # レスポンスの値に影響しうる変更だけを対象にする。
+    paths:
+      - "internal/**"
+      - "cmd/**"
+      - "migration/**"
+      - "tests/diff/**"
+      - "third_party/misskey"
+      - "docker-compose.diff.yml"
+      - "Makefile"
+      - "go.mod"
+      - "go.sum"
+      - ".github/workflows/diff-e2e.yml"
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch / tag / SHA to test"
+        required: false
+        default: "develop"
+
+permissions:
+  contents: read
+
+jobs:
+  diff:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
+          # mkgo image が third_party/misskey のアセットを COPY する。
+          submodules: recursive
+
+      # Dockerfile.mkgo が third_party/misskey/built を COPY するので、
+      # docker build より前に host で pnpm build しておく。dropin-e2e.yml と
+      # 同じ戦略で actions/cache に pin する。
+      - name: Cache misskey workspace (built + node_modules)
+        id: cache-misskey
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/misskey/node_modules
+            third_party/misskey/packages/*/node_modules
+            third_party/misskey/built
+          key: misskey-workspace-${{ runner.os }}-${{ hashFiles('third_party/misskey/pnpm-lock.yaml') }}
+
+      - name: Set up Node.js
+        if: steps.cache-misskey.outputs.cache-hit != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build third_party/misskey frontend bundle
+        if: steps.cache-misskey.outputs.cache-hit != 'true'
+        working-directory: third_party/misskey
+        run: |
+          corepack enable
+          corepack prepare pnpm@latest --activate
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Pre-pull Misskey TS image
+        run: docker pull misskey/misskey:2026.7.0
+
+      # down → up → healthy 待ち → pytest を通しで実行する。
+      - name: Run make diff-check
+        run: make diff-check
+
+      - name: Capture docker compose logs on failure
+        if: failure()
+        run: |
+          mkdir -p /tmp/diff-logs
+          docker compose -f docker-compose.diff.yml logs > /tmp/diff-logs/compose.log 2>&1 || true
+          docker compose -f docker-compose.diff.yml ps   > /tmp/diff-logs/ps.log 2>&1 || true
+
+      - name: Upload logs artifact on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diff-logs
+          path: /tmp/diff-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Final teardown
+        if: always()
+        run: docker compose -f docker-compose.diff.yml down -v >/dev/null 2>&1 || true

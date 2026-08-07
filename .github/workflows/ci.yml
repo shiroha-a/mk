@@ -207,3 +207,45 @@ jobs:
             exit 1
           fi
           echo "No duplicate test fixture IDs."
+
+  # fork frontend (third_party/misskey) の型チェック。
+  #
+  # 1.0 以降 fork frontend は mk-go 独自に進化させる方針なので、型崩れを
+  # 検出する手段が要る。`make uds-frontend-build` / `e2e-frontend-build` は
+  # 本番が bind-mount している third_party/misskey/built を書き換えるため
+  # 検証には使えない。vue-tsc --noEmit なら出力物を作らず型だけ見られる。
+  #
+  # required check には入れない (build / test / lint の 3 つが required)。
+  frontend-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # pnpm のバージョンは submodule 側 package.json の packageManager から
+          # 取る。mk リポジトリ直下には package.json が無い。
+          package_json_file: third_party/misskey/package.json
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: third_party/misskey/.node-version
+          cache: pnpm
+          cache-dependency-path: third_party/misskey/pnpm-lock.yaml
+
+      - name: Install misskey workspace dependencies
+        working-directory: third_party/misskey
+        run: pnpm install --frozen-lockfile
+
+      # frontend は misskey-js / frontend-shared を型解決に使うのでビルドが要る。
+      - name: Build workspace dependencies
+        working-directory: third_party/misskey
+        run: pnpm build-pre && pnpm --filter misskey-js --filter frontend-shared build
+
+      - name: Type check (vue-tsc)
+        run: make frontend-check

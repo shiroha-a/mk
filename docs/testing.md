@@ -217,6 +217,34 @@ Playwright で発見した drift は LCD 化 → strict 化 のサイクルで�
 
 **実績**: Phase 1-4 で 40+ 件の drift を fix。詳細は [api-compatibility.md](api-compatibility.md) の「対応済 drift fix」section、または #744 / #947 tracker 参照。
 
+## 差分比較 e2e (値レベル)
+
+mk-go と Misskey TS に**同一リクエストを投げてレスポンスを値レベルで diff** する
+(#2078、43 比較)。守備範囲が他のゲートと違う。
+
+| ゲート | 見ているもの |
+|---|---|
+| 本家 backend e2e | 本家のテストが通るか |
+| shape drift | フィールドの有無・型 |
+| **diff-test** | **同じ入力に対する値そのもの** |
+
+shape が合っていても値が違う類のバグはこれでしか捕まらない。
+
+```bash
+make diff-check    # down → up → healthy 待ち → pytest を通しで
+make diff-test     # スタックが既に上がっている場合
+```
+
+意図的な差分は `tests/diff/test_endpoints.py` の ignore-list に**理由付きで**登録する。
+`META_IGNORE` と `USER_IGNORE` は別定義で後者は前者を継承していないので、`policies` の
+ような両方に現れるキーは両方へ足す必要がある。
+
+**ignore-list を安易に広げないこと。** 空振りさせると本物の乖離が埋もれる。追加時は
+`docs/divergence.md` に対応する記述があるかを確認する。
+
+PR ごとに `.github/workflows/diff-e2e.yml` が実行する (required check ではない)。
+詳細は [diff-e2e.md](diff-e2e.md)。
+
 ## 本家 backend e2e
 
 Misskey 本家の backend e2e (`third_party/misskey/packages/backend/test/e2e/**`) を、

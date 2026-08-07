@@ -432,6 +432,26 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
   乖離が解消したテストは逆に落ち、一覧の陳腐化に気付ける。
 - 失敗時は mk-go のログを `upstream-e2e-mkgo-log` artifact として 14 日保持。
 
+### `diff-e2e` workflow (PR トリガー)
+
+- `.github/workflows/diff-e2e.yml` が `make diff-check` を実行し、mk-go と Misskey TS に
+  同一リクエストを投げて**レスポンスを値レベルで diff** する (#2078 / #2368、43 比較)。
+- 守備範囲が他のゲートと違う。本家 backend e2e は「本家のテストが通るか」、shape drift は
+  「フィールドの有無・型」、diff-e2e は「**同じ入力に対する値そのもの**」を見る。shape が
+  合っていても値が違う類のバグはこれでしか捕まらない。
+- 意図的な差分は `tests/diff/test_endpoints.py` の ignore-list に**理由付きで**登録する。
+  空振りさせると本物の乖離が埋もれるので、追加時は `docs/divergence.md` にも対応する記述が
+  あるかを確認すること。
+- PR の required check には**含めない**。
+
+### `frontend-check` job (ci.yml)
+
+- fork frontend (`third_party/misskey`) を `vue-tsc --noEmit` で型チェックする。1.0 以降
+  fork frontend は mk-go 独自に進化させる方針なので、型崩れの検出手段が要る。
+- `make uds-frontend-build` / `e2e-frontend-build` は本番が bind-mount している
+  `third_party/misskey/built` を書き換えるため**検証には使えない**。
+- required check (build / test / lint) には**含めない**。
+
 ### CI失敗時の対応
 
 - カバレッジ不足 → テストケースを追加してから再push。
@@ -522,6 +542,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 タイミングのみ記録する。
 
 - **2026-08-07**: Section 3 に本家 backend e2e の Makefile target (`make upstream-e2e` 系 5 つ) を、Section 8 に `upstream-backend-e2e` workflow を追記 (#2347)。Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて回す PR トリガーの workflow で、required check には含めない。既知乖離は skip でなく expected-failure (`task.fails`) で扱う運用も明記。
+- **2026-08-07**: Section 8 に `diff-e2e` workflow と `frontend-check` job を追記 (#2368)。CI 非対象だった検証資産の棚卸しで、値レベル diff と fork frontend の型チェックを載せた。
 - **2026-08-07**: Section 8 の `dropin-e2e` workflow に `federation` シナリオを追加 (#2362)。あわせて Section 3 に `make federation-misskey-e2e` (起動から撤去まで通しで実行) を追記。
 - **2026-08-07**: Section 8 の `dropin-e2e` workflow を 2 シナリオ matrix として書き換え (#2360)。`ed25519-verify` (`make dropin-fedibird-test`) を追加し、あわせて nightly → PR トリガーへの移行 (#2291) が未反映だった記述を実態に合わせた。
 - **2026-08-04**: Section 7 (Git Workflow) に「マージ方法」を追記。フィーチャーブランチ → `develop` の PR は **rebase and merge** に統一する (それ以前は squash-merge)。各コミットがそのまま develop に載るため、1 コミットずつ build / test が通る順序で並べること、確認は使い捨て `git worktree` で行うこと (作業ツリー上の `git stash` は保留中の別作業を巻き込むので使わない) を併記。`main` は従来どおり PR をマージせず FF push のみで、対象が異なる旨も明記した。
