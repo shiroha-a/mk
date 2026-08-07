@@ -1,7 +1,17 @@
 name: Drop-in e2e
 
-# Phase 13-4 (#374): drop-in 切替 e2e (`make dropin-swap-test`) を実行して
-# TS↔mk 互換性の regression を検知する。
+# drop-in 互換の regression を検知する e2e を 2 シナリオ並列で実行する。
+#
+# - swap-test     (`make dropin-swap-test`)     TS→mk 切替の state preservation (#374)
+# - ed25519-verify (`make dropin-fedibird-test`) Fedibird-like AP mock との
+#                                                Ed25519 双方向 verify (#1083)
+#
+# ed25519-verify は #2360 で追加した。Ed25519 署名は mk-go 独自の先行実装で、
+# 他実装と本当に相互運用できるかは実際に喋らせないと分からない。ユニットテスト
+# (48 件) は「自分で署名して自分で検証する」ことしか保証しない。
+#
+# なおこの target は導入時 (#1086) から 2 箇所壊れており、CI で回っていなかった
+# ため約 3 か月間それに気付けなかった。載せる理由がまさにそれ。
 #
 # nightly (schedule) から PR トリガーへ移行した (#2291)。nightly は失敗に
 # 気づくのが翌日になるうえ、1 日分のマージがまとまってどの変更が壊したか
@@ -43,9 +53,28 @@ permissions:
   contents: read
 
 jobs:
-  swap-test:
+  dropin:
     runs-on: ubuntu-latest
     timeout-minutes: 25
+
+    # 同じ stack (base + mk overlay) の上で走る 2 シナリオを並列に回す。
+    #
+    # 既存 job にステップとして足すのではなく別 job にしているのは、swap が
+    # 落ちた時点で ed25519 が回らなくなるのを避けるため。この 2 つは実際に
+    # 別々の壊れ方をする (fedibird 側は導入時から 2 箇所壊れていたのに、
+    # swap が緑だったので 3 か月気付けなかった、#2360)。
+    #
+    # scenario は make target 名に対応する (make dropin-<scenario>-test)。
+    # name は check 一覧に出る表示名で、何を検証しているかが分かるものにする。
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - scenario: swap
+            name: swap-test
+          - scenario: fedibird
+            name: ed25519-verify
+    name: ${{ matrix.name }}
 
     steps:
       - uses: actions/checkout@v4
@@ -109,8 +138,9 @@ jobs:
         run: docker pull misskey/misskey:2025.2.1
 
       # bash orchestrator + pytest を実行する。stage ログは標準出力に流れる。
-      - name: Run dropin swap test
-        run: make dropin-swap-test
+      # 手元で再現するときも同じコマンドで良い。
+      - name: Run make dropin-${{ matrix.scenario }}-test
+        run: make dropin-${{ matrix.scenario }}-test
 
       # 失敗時のみ docker compose logs を artifact 化して原因調査できるようにする。
       # `if: failure()` で正常時はアップロードしない。
@@ -118,16 +148,20 @@ jobs:
         if: failure()
         run: |
           mkdir -p /tmp/dropin-logs
-          docker compose -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml logs \
-            > /tmp/dropin-logs/compose.log 2>&1 || true
-          docker compose -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml ps \
-            > /tmp/dropin-logs/ps.log 2>&1 || true
+          # fedibird overlay は swap シナリオでは使われないが、down / logs に
+          # 余分な -f を渡しても定義が増えるだけで害は無い。両シナリオで同じ
+          # コマンドにしておく方が取りこぼさない。
+          COMPOSE="-f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml -f docker-compose.dropin.fedibird.yml"
+          docker compose $COMPOSE logs > /tmp/dropin-logs/compose.log 2>&1 || true
+          docker compose $COMPOSE ps    > /tmp/dropin-logs/ps.log 2>&1 || true
 
       - name: Upload logs artifact on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: dropin-logs
+          # scenario ごとに分けないと、片方が失敗したときに artifact 名が
+          # 衝突してアップロードが落ちる。
+          name: dropin-logs-${{ matrix.scenario }}
           path: /tmp/dropin-logs/
           if-no-files-found: ignore
           retention-days: 14
@@ -138,5 +172,5 @@ jobs:
       - name: Final teardown
         if: always()
         run: |
-          docker compose -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml down -v \
-            >/dev/null 2>&1 || true
+          docker compose -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml \
+            -f docker-compose.dropin.fedibird.yml down -v >/dev/null 2>&1 || true

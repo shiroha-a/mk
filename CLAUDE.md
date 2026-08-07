@@ -379,14 +379,25 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 - `go vet ./...`
 - `gofmt -s -d .` で差分がないことを確認。差分があれば失敗。
 
-### `dropin-e2e` workflow (nightly)
+### `dropin-e2e` workflow (PR トリガー)
 
-- `.github/workflows/dropin-e2e.yml` で `make dropin-swap-test` を毎日 18:00 UTC
-  (= JST 03:00) に develop に対して実行する。
-- `workflow_dispatch` で任意の ref に対して手動実行も可。
-- PR の required check には**含めない** (8-10 min かかり flaky 要素もあるため)。
-  drop-in 互換 regression は nightly で検出する運用。
-- 失敗時は docker compose logs を `dropin-logs` artifact として 14 日保持。
+- `.github/workflows/dropin-e2e.yml` が drop-in 互換の e2e を **2 シナリオ並列**で実行する。
+  `strategy.matrix.include` で make target と check 表示名を対にしている。
+
+  | check 名 | 実行内容 |
+  |---|---|
+  | `swap-test` | `make dropin-swap-test` — TS→mk 切替の state preservation (#374) |
+  | `ed25519-verify` | `make dropin-fedibird-test` — Fedibird-like AP mock との Ed25519 双方向 verify (#1083 / #2360) |
+
+- 発火は `pull_request` (paths フィルタ) と `workflow_dispatch`。nightly から PR
+  トリガーへ移行済み (#2291)。nightly は失敗に気付くのが翌日になるうえ、1 日分の
+  マージがまとまってどの変更が壊したか特定しづらいため。
+- PR の required check には**含めない** (federation delivery に flaky 要素があるため)。
+  非ブロッキングを `continue-on-error` で実現しないこと (job が成功扱いになる)。
+- `fail-fast: false` で片方が落ちても他方は完走する。この 2 つは実際に別々の壊れ方を
+  する (ed25519 側は導入時から 2 箇所壊れていたのに、swap が緑だったため 3 か月
+  気付けなかった、#2360)。
+- 失敗時は docker compose logs を `dropin-logs-<scenario>` artifact として 14 日保持。
 
 ### `playwright` workflow (nightly)
 
@@ -510,6 +521,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 タイミングのみ記録する。
 
 - **2026-08-07**: Section 3 に本家 backend e2e の Makefile target (`make upstream-e2e` 系 5 つ) を、Section 8 に `upstream-backend-e2e` workflow を追記 (#2347)。Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて回す PR トリガーの workflow で、required check には含めない。既知乖離は skip でなく expected-failure (`task.fails`) で扱う運用も明記。
+- **2026-08-07**: Section 8 の `dropin-e2e` workflow を 2 シナリオ matrix として書き換え (#2360)。`ed25519-verify` (`make dropin-fedibird-test`) を追加し、あわせて nightly → PR トリガーへの移行 (#2291) が未反映だった記述を実態に合わせた。
 - **2026-08-04**: Section 7 (Git Workflow) に「マージ方法」を追記。フィーチャーブランチ → `develop` の PR は **rebase and merge** に統一する (それ以前は squash-merge)。各コミットがそのまま develop に載るため、1 コミットずつ build / test が通る順序で並べること、確認は使い捨て `git worktree` で行うこと (作業ツリー上の `git stash` は保留中の別作業を巻き込むので使わない) を併記。`main` は従来どおり PR をマージせず FF push のみで、対象が異なる旨も明記した。
 - **2026-06-09**: Section 7 (Git Workflow) に 2 つのルールを追記。(1)「Issue・PR のタイトル・本文は日本語記述を厳守する」(技術用語は原文のまま残してよいが、説明文・見出し・箇条書きの地の文に英語を混在させない)。(2)「`CHANGELOG.md` はリリース時にまとめて記述する」(個別 PR・fix ごとに `## Unreleased` へ追記せず、リリースのタイミングで一括記載する)。
 - **2026-05-16**: `Makefile` に `make dropin-fedibird-test` を追加 (#1086)。Section 3 (Development Commands) の Drop-in 系コマンド一覧に Fedibird-like mock との Ed25519 e2e を載せる。

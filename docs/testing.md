@@ -252,7 +252,14 @@ make dropin-mk-up              # 上から mk-A overlay (= clean DB の mk-A)
 make dropin-swap-test          # TS-then-mk 切替シナリオ (bash orchestrator)
 ```
 
-nightly 18:00 UTC で `dropin-swap-test` を develop に対して実行 (`.github/workflows/dropin-e2e.yml`)。
+PR ごとに `.github/workflows/dropin-e2e.yml` が 2 シナリオを並列実行する
+(`swap-test` = `make dropin-swap-test`、`ed25519-verify` = `make dropin-fedibird-test`)。
+required check には入れない。
+
+`make dropin-fedibird-test` は Fedibird-like な AP mock を立てて **Ed25519 署名の
+双方向 verify** を検証する (#1083)。Ed25519 は mk-go 独自の先行実装なので、他実装と
+相互運用できるかは実際に喋らせないと分からない。ユニットテストは「自分で署名して
+自分で検証する」ことしか保証しない。
 
 ### Drop-in frontend e2e (cypress, `tests/dropin_frontend/`)
 
