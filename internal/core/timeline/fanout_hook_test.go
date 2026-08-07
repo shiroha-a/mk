@@ -1470,7 +1470,9 @@ func TestFanoutHook_OnNoteDeleted_RemoveErrorIsLogged(t *testing.T) {
 	)
 }
 
-func TestFanoutHook_OnNoteDeleted_SpecifiedSkipsFollowers(t *testing.T) {
+// specified も宛先の follower の home に push されるので、削除でも同じ範囲を
+// 掃除する (push と remove の対称性)。
+func TestFanoutHook_OnNoteDeleted_SpecifiedCleansFollowerHome(t *testing.T) {
 	h, fanout, following := newTestHook(t)
 	ctx := context.Background()
 	following.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "follower1", FolloweeID: "author"}
@@ -1479,14 +1481,13 @@ func TestFanoutHook_OnNoteDeleted_SpecifiedSkipsFollowers(t *testing.T) {
 	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilitySpecified}
 	author := &model.User{ID: "author"}
 
-	// follower の home に直接入れておいて、specified delete では消されないことを確認
 	require.NoError(t, fanout.client.LPush(ctx, fanout.key(HomeTimelineName("follower1")), noteID).Err())
 
 	h.OnNoteDeleted(n, author)
 
 	out, err := fanout.Get(ctx, HomeTimelineName("follower1"), "", "", 10)
 	require.NoError(t, err)
-	assert.Equal(t, []string{noteID}, out, "specified delete は follower home を触らない")
+	assert.Empty(t, out, "push した範囲は delete でも消す")
 }
 
 func TestFanoutHook_OnNoteDeleted_UserListPurge(t *testing.T) {

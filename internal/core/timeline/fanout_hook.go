@@ -359,10 +359,16 @@ func (h *FanoutHook) publishNote(topic string, n *model.Note, author *model.User
 }
 
 // shouldFanoutToFollowers reports whether followers' home timelines should
-// receive this note. specifiedノートは対象ユーザーにのみ届くため除外。
+// receive this note.
+//
+// specified も対象に含める。upstream の pushToTl は follower ループの中で
+// `note.visibility === 'specified' && !note.visibleUserIds.includes(followerId)`
+// を見て個別に skip するので、宛先になっている follower の home には届く。
+// ループごと外すと「フォローしている相手からの DM が home に出ない」になる。
 func shouldFanoutToFollowers(n *model.Note) bool {
 	switch n.Visibility {
-	case model.NoteVisibilityPublic, model.NoteVisibilityHome, model.NoteVisibilityFollowers:
+	case model.NoteVisibilityPublic, model.NoteVisibilityHome,
+		model.NoteVisibilityFollowers, model.NoteVisibilitySpecified:
 		return true
 	}
 	return false
@@ -438,6 +444,11 @@ func (h *FanoutHook) fanoutToFollowersAndStream(ctx context.Context, authorID st
 			// push する。remote follower はこのインスタンスの home TL を読まず、hibernated user は
 			// inactive なので、不要な Redis 書き込み・stream publish を避ける。
 			if f.FollowerHost != nil || f.IsFollowerHibernated {
+				continue
+			}
+			// specified は宛先の follower にだけ届ける (upstream pushToTl と同じ)。
+			if n.Visibility == model.NoteVisibilitySpecified &&
+				!slices.Contains([]string(n.VisibleUserIDs), f.FollowerID) {
 				continue
 			}
 			isReplyToFollower := isReply && n.ReplyUserID != nil && *n.ReplyUserID == f.FollowerID
