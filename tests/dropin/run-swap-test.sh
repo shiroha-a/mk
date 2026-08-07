@@ -109,6 +109,17 @@ docker compose -f "$BASE" -f "$OVERLAY" restart nginx-a
 echo "===> stage 6: verify state preserved on mk-A"
 docker compose -f "$BASE" -f "$OVERLAY" --profile test run --rm test-runner pytest test_swap_verify.py -v
 
+# mk-go 独自機能が upstream 共有テーブルに残すデータを、mk-A 上で作っておく
+# (#2372)。ここで作った行は TS-A に戻したあとも DB に残るので、stage 9 が
+# 「TS がそれで壊れないこと」を検証する。
+#
+# 「独自機能は戻したら失われる、それでよい」は半分しか正しくない。機能は
+# 失われるが**機能が書いたデータは残る**。chat / reversi は upstream にも
+# ある機能で、テーブルも upstream のもの。連合部分だけが mk-go の追加なので、
+# TS には upstream が想定していないリモート参照を含む行が残る。
+echo "===> stage 6b: seed mk-go-only feature data (残留データを作る)"
+docker compose -f "$BASE" -f "$OVERLAY" --profile test run --rm test-runner pytest test_swap_seed_mkgo_only.py -v
+
 echo "===> stage 7: stop mk-A backend (roundtrip 戻し前準備)"
 docker compose -f "$BASE" -f "$OVERLAY" stop app-a
 

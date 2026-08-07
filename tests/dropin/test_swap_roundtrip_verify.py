@@ -153,3 +153,68 @@ def test_roundtrip_bob_can_react_to_alice_note(
     assert poll_until(
         _alice_sees_reaction, timeout=120, desc="alice (TS-A) receives bob reaction after roundtrip"
     )
+
+
+# ── mk-go 独自機能の残留データに対する耐性 (#2372) ────────────────────
+#
+# stage 6b (test_swap_seed_mkgo_only.py) が mk-A 上で作った、リモートユーザーを
+# 参照する chat / reversi 行が DB に残っている状態で TS-A が動いている。
+#
+# 「独自機能は戻したら失われる」は半分しか正しくない。機能は失われるが**機能が
+# 書いたデータは残る**。chat / reversi は upstream にも存在する機能で、テーブルも
+# upstream のもの。連合部分だけが mk-go の追加なので、TS には upstream が想定
+# していないリモート参照を含む行が残る。
+#
+# ここで見るのは「機能が使えるか」ではなく「**残留データが TS をクラッシュさせ
+# ないか**」。4xx は仕様上あり得るので許容し、**5xx だけを失格**とする。
+
+def _tolerate(resp, label: str) -> None:
+    assert resp.status_code < 500, (
+        f"{label}: TS が 5xx を返した ({resp.status_code})。mk-go が残した"
+        f"リモート参照行を TS が処理できていない可能性がある。"
+        f"\n{resp.text[:400]}"
+    )
+
+
+def test_roundtrip_ts_survives_remote_chat_rows(
+    instance_a: MisskeyLikeClient, alice: dict
+) -> None:
+    """リモート宛て chat 行が残った状態で TS の chat endpoint が 5xx にならない。"""
+    for endpoint, body in [
+        ("chat/history", {"limit": 10}),
+        ("chat/rooms/joining", {"limit": 10}),
+    ]:
+        resp = instance_a.http.post(
+            f"/api/{endpoint}", json={"i": instance_a.token, **body}
+        )
+        _tolerate(resp, endpoint)
+
+
+def test_roundtrip_ts_survives_remote_reversi_rows(
+    instance_a: MisskeyLikeClient, alice: dict
+) -> None:
+    """リモート相手の reversi 行が残った状態で TS の reversi endpoint が 5xx にならない。"""
+    for endpoint, body in [
+        ("reversi/games", {"limit": 10}),
+        ("reversi/invitations", {}),
+    ]:
+        resp = instance_a.http.post(
+            f"/api/{endpoint}", json={"i": instance_a.token, **body}
+        )
+        _tolerate(resp, endpoint)
+
+
+def test_roundtrip_ts_can_still_pack_alice_timeline(
+    instance_a: MisskeyLikeClient, alice: dict
+) -> None:
+    """mk-go が書いた note を含む timeline を TS が pack できる。
+
+    独自機能の残留データより広い網。mk-go が共有カラムに書いた値を TS が
+    解釈できないと、ここで落ちる。
+    """
+    resp = instance_a.http.post(
+        "/api/notes/local-timeline", json={"i": instance_a.token, "limit": 30}
+    )
+    _tolerate(resp, "notes/local-timeline")
+    assert resp.status_code == 200, "timeline は 200 で返るべき"
+
