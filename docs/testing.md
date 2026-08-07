@@ -7,7 +7,7 @@
 | ユニットテスト | APIハンドラ、サービスロジック | モック | `go test ./internal/api/...` |
 | 統合テスト | リポジトリ、Redis連携 | 実DB (testcontainers) | `go test ./internal/core/...` |
 | E2Eテスト (Cypress) | フロントエンド操作 | 実DB + フロントエンド | `make e2e-run` (詳細は[E2Eテスト](e2e.md)) |
-| 連合テスト | mk-go ↔ Misskey AP通信 | Docker Compose多段 | `make federation-misskey-test` |
+| 連合テスト | mk-go ↔ 本物の Misskey TS の AP 通信 | Docker Compose多段 | `make federation-misskey-e2e` (起動から撤去まで通し。個別に叩くなら `-up` → `-test` → `-down`) |
 | Drop-in e2e (pytest) | TS-A backend を mk-A に差し替えて state preservation 検証 | TS 2 instance + mk overlay | `make dropin-swap-test` (#365 / #367 / #372 / #374、詳細は[dropin-e2e.md](dropin-e2e.md)) |
 | Drop-in frontend e2e (cypress) | 3 TS instance + mk overlay swap で frontend 視点の互換 | cypress + 3 TS + mk-A | `make dropin-frontend-swap-test` (#380 / #381 / #387 / #394、詳細は[dropin-frontend-e2e.md](dropin-frontend-e2e.md)) |
 | Playwright e2e | mk-go と Misskey TS の両 backend で API/frontend 統合互換を検証 | Docker Compose 全部 | `tests/playwright/` 配下 (#744、370 spec。PR ごとに mk-go、upstream 追従時に TS backend) |

@@ -2,9 +2,12 @@ name: Drop-in e2e
 
 # drop-in 互換の regression を検知する e2e を 2 シナリオ並列で実行する。
 #
-# - swap-test     (`make dropin-swap-test`)     TS→mk 切替の state preservation (#374)
-# - ed25519-verify (`make dropin-fedibird-test`) Fedibird-like AP mock との
-#                                                Ed25519 双方向 verify (#1083)
+# - swap-test      (`make dropin-swap-test`)       TS→mk 切替の state preservation (#374)
+# - ed25519-verify (`make dropin-fedibird-test`)   Fedibird-like AP mock との
+#                                                  Ed25519 双方向 verify (#1083)
+# - federation     (`make federation-misskey-e2e`) 本物の Misskey TS を相手にした
+#                                                  実連合 (follow / note / reaction /
+#                                                  renote / reply / mention / delete)
 #
 # ed25519-verify は #2360 で追加した。Ed25519 署名は mk-go 独自の先行実装で、
 # 他実装と本当に相互運用できるかは実際に喋らせないと分からない。ユニットテスト
@@ -41,6 +44,7 @@ on:
       - "Makefile"
       - "go.mod"
       - "go.sum"
+      - "docker-compose.federation.misskey.yml"
       - ".github/workflows/dropin-e2e.yml"
   workflow_dispatch:
     inputs:
@@ -64,16 +68,26 @@ jobs:
     # 別々の壊れ方をする (fedibird 側は導入時から 2 箇所壊れていたのに、
     # swap が緑だったので 3 か月気付けなかった、#2360)。
     #
-    # scenario は make target 名に対応する (make dropin-<scenario>-test)。
-    # name は check 一覧に出る表示名で、何を検証しているかが分かるものにする。
+    # name    = check 一覧に出る表示名。何を検証しているかが分かるものにする
+    # make    = 実行する make target。失敗時に手元で再現するコマンドそのもの
+    # image   = 事前 pull する Misskey TS image (シナリオごとに版が違う)
+    # compose = 失敗時の log 収集 / 撤去に渡す compose ファイル群
     strategy:
       fail-fast: false
       matrix:
         include:
-          - scenario: swap
-            name: swap-test
-          - scenario: fedibird
-            name: ed25519-verify
+          - name: swap-test
+            make: dropin-swap-test
+            image: misskey/misskey:2025.2.1
+            compose: -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml -f docker-compose.dropin.fedibird.yml
+          - name: ed25519-verify
+            make: dropin-fedibird-test
+            image: misskey/misskey:2025.2.1
+            compose: -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml -f docker-compose.dropin.fedibird.yml
+          - name: federation
+            make: federation-misskey-e2e
+            image: misskey/misskey:2026.7.0
+            compose: -f docker-compose.federation.misskey.yml
     name: ${{ matrix.name }}
 
     steps:
@@ -135,12 +149,12 @@ jobs:
         # 不確実)。foreground で完了を待ち、続く `make dropin-swap-test`
         # 内の同 image pull は docker daemon の cache hit で 0s で済む方が
         # 確実。playwright.yml (#816) と同じ判断。
-        run: docker pull misskey/misskey:2025.2.1
+        run: docker pull ${{ matrix.image }}
 
       # bash orchestrator + pytest を実行する。stage ログは標準出力に流れる。
       # 手元で再現するときも同じコマンドで良い。
-      - name: Run make dropin-${{ matrix.scenario }}-test
-        run: make dropin-${{ matrix.scenario }}-test
+      - name: Run make ${{ matrix.make }}
+        run: make ${{ matrix.make }}
 
       # 失敗時のみ docker compose logs を artifact 化して原因調査できるようにする。
       # `if: failure()` で正常時はアップロードしない。
@@ -148,12 +162,10 @@ jobs:
         if: failure()
         run: |
           mkdir -p /tmp/dropin-logs
-          # fedibird overlay は swap シナリオでは使われないが、down / logs に
-          # 余分な -f を渡しても定義が増えるだけで害は無い。両シナリオで同じ
-          # コマンドにしておく方が取りこぼさない。
-          COMPOSE="-f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml -f docker-compose.dropin.fedibird.yml"
-          docker compose $COMPOSE logs > /tmp/dropin-logs/compose.log 2>&1 || true
-          docker compose $COMPOSE ps    > /tmp/dropin-logs/ps.log 2>&1 || true
+          # drop-in 系は fedibird overlay も一緒に渡す。swap では使われないが、
+          # 余分な -f は定義が増えるだけで害が無く、取りこぼさない方を優先する。
+          docker compose ${{ matrix.compose }} logs > /tmp/dropin-logs/compose.log 2>&1 || true
+          docker compose ${{ matrix.compose }} ps   > /tmp/dropin-logs/ps.log 2>&1 || true
 
       - name: Upload logs artifact on failure
         if: failure()
@@ -161,7 +173,7 @@ jobs:
         with:
           # scenario ごとに分けないと、片方が失敗したときに artifact 名が
           # 衝突してアップロードが落ちる。
-          name: dropin-logs-${{ matrix.scenario }}
+          name: dropin-logs-${{ matrix.name }}
           path: /tmp/dropin-logs/
           if-no-files-found: ignore
           retention-days: 14
@@ -172,5 +184,4 @@ jobs:
       - name: Final teardown
         if: always()
         run: |
-          docker compose -f docker-compose.dropin.yml -f docker-compose.dropin.mk.yml \
-            -f docker-compose.dropin.fedibird.yml down -v >/dev/null 2>&1 || true
+          docker compose ${{ matrix.compose }} down -v >/dev/null 2>&1 || true

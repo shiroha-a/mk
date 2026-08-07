@@ -3,6 +3,7 @@
 	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
+	federation-misskey-e2e \
 	federation-misskey-down federation-misskey-logs \
 	dropin-up dropin-down dropin-test dropin-logs \
 	dropin-mk-up dropin-mk-test dropin-mk-down dropin-mk-logs dropin-swap-test dropin-fedibird-test \
@@ -221,6 +222,11 @@ federation-misskey-up: ## 連合テスト用 Misskey インスタンスを起動
 
 federation-misskey-test: ## 連合テストを実行
 	docker compose -f $(FEDERATION_MISSKEY_COMPOSE) --profile test run --rm test-runner
+
+# 起動 → healthy 待ち → pytest → 撤去 を 1 コマンドで通す。CI から呼ぶのはこれ。
+# 個別の up / test を手で叩くのと違い、失敗しても trap で必ず後始末する。
+federation-misskey-e2e: ## 連合テストを起動から撤去まで通しで実行
+	./tests/federation/run-misskey-test.sh
 
 federation-misskey-down: ## 連合テストスタックを撤去
 	docker compose -f $(FEDERATION_MISSKEY_COMPOSE) down -v
