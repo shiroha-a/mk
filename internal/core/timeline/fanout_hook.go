@@ -511,6 +511,9 @@ func (h *FanoutHook) fanoutToUserLists(ctx context.Context, n *model.Note, autho
 				continue
 			}
 			h.pushWithLimit(ctx, UserListTimelineName(listID), n.ID, listCap)
+			// 他の分岐と同じく WS へも流す。push だけだと userList channel に
+			// live note が届かず、再読込するまで DM が出てこない。
+			h.publishNote("userListTimeline:"+listID, n, author)
 		}
 		return
 	}
