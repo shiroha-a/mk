@@ -2209,6 +2209,9 @@ func (s *Server) setupRoutes() {
 		s.config.TestMode,
 		frontendConsentHTML(s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability),
 	)
+	// code 再利用で token を revoke したとき、auth cache に残った entry で
+	// 通り続けないよう即時失効させる (RFC6749 §4.1.2)。
+	oauthHandler.SetAuthInvalidator(s.auth)
 	s.echo.GET("/oauth/authorize", oauthHandler.Authorize)
 	s.echo.POST("/oauth/decision", oauthHandler.Decision)
 	// upstream は token server にだけ fastifyCors を登録している

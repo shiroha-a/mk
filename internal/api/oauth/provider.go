@@ -31,7 +31,14 @@ type UserResolver interface {
 // TokenStore mints and revokes OAuth access tokens.
 type TokenStore interface {
 	Create(token *model.AccessToken) error
+	FindByID(id string) (*model.AccessToken, error)
 	DeleteByID(id string) error
+}
+
+// TokenInvalidator drops a raw token from the auth middleware cache. Without
+// it, a revoked token keeps working until the 30s TTL expires.
+type TokenInvalidator interface {
+	InvalidateToken(token string)
 }
 
 // IDGenerator generates access-token row IDs (aidx).
@@ -62,6 +69,15 @@ type Handler struct {
 	issuer        string
 	allowHTTP     bool
 	renderConsent ConsentRenderer
+	// authInvalidator は optional。未設定でも revoke 自体は DB から消えるが、
+	// auth cache の TTL (30s) の間だけ古い token が通ってしまう。
+	authInvalidator TokenInvalidator
+}
+
+// SetAuthInvalidator wires the auth middleware so code-replay revocation takes
+// effect immediately instead of after the auth cache TTL.
+func (h *Handler) SetAuthInvalidator(inv TokenInvalidator) {
+	h.authInvalidator = inv
 }
 
 // NewHandler constructs the OAuth provider handler. httpClient must be
@@ -277,8 +293,16 @@ func (h *Handler) Token(c echo.Context) error {
 	if !firstUse {
 		// replay: 以前発行した token を revoke する (RFC6749 §4.1.2)。
 		if tid, _ := h.store.GetGrantToken(ctx, code); tid != "" {
+			// DB から消すだけでは auth cache (30s TTL) に残った entry で
+			// 通り続けるため、raw token を引いてから cache も落とす。
+			var raw string
+			if row, ferr := h.tokenRepo.FindByID(tid); ferr == nil && row != nil {
+				raw = row.Token
+			}
 			if derr := h.tokenRepo.DeleteByID(tid); derr != nil {
 				slog.Warn("oauth: failed to revoke token on code replay", "tokenId", tid, "err", derr)
+			} else if raw != "" && h.authInvalidator != nil {
+				h.authInvalidator.InvalidateToken(raw)
 			}
 		}
 		slog.Info("oauth: authorization code replay detected", "clientId", g.ClientID, "userId", g.UserID)

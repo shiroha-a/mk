@@ -91,10 +91,23 @@ func (s *fakeTokenStore) Create(t *model.AccessToken) error {
 	s.created = append(s.created, t)
 	return nil
 }
+func (s *fakeTokenStore) FindByID(id string) (*model.AccessToken, error) {
+	for _, t := range s.created {
+		if t.ID == id {
+			return t, nil
+		}
+	}
+	return nil, nil
+}
 func (s *fakeTokenStore) DeleteByID(id string) error {
 	s.deleted = append(s.deleted, id)
 	return nil
 }
+
+// fakeInvalidator records raw tokens dropped from the auth cache.
+type fakeInvalidator struct{ tokens []string }
+
+func (f *fakeInvalidator) InvalidateToken(t string) { f.tokens = append(f.tokens, t) }
 
 type fakeIDGen struct{ n int }
 
@@ -379,12 +392,15 @@ func TestToken_JSONBody(t *testing.T) {
 
 func TestToken_ReplayRevokesAndRejects(t *testing.T) {
 	hn := newHarness(t)
+	inv := &fakeInvalidator{}
+	hn.h.SetAuthInvalidator(inv)
 	seedGrant(hn, "code1")
 	// 1 回目: 成功。
 	rec1 := hn.post(t, hn.h.Token, validTokenForm(hn, "code1"))
 	require.Equal(t, http.StatusOK, rec1.Code)
 	require.Len(t, hn.tokens.created, 1)
 	issuedID := hn.tokens.created[0].ID
+	issuedToken := hn.tokens.created[0].Token
 
 	// 2 回目 (replay): invalid_grant + 既発行 token を revoke。
 	rec2 := hn.post(t, hn.h.Token, validTokenForm(hn, "code1"))
@@ -393,6 +409,8 @@ func TestToken_ReplayRevokesAndRejects(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp))
 	assert.Equal(t, "invalid_grant", resp["error"])
 	assert.Contains(t, hn.tokens.deleted, issuedID, "replay は発行済み token を revoke する")
+	// DB から消すだけでは auth cache (30s TTL) が残るので、raw token も落とす。
+	assert.Contains(t, inv.tokens, issuedToken, "replay は auth cache も無効化する")
 }
 
 func TestToken_WrongVerifier(t *testing.T) {
