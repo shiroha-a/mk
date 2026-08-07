@@ -106,3 +106,46 @@ func TestStream_NonWebSocketGetIsUnavailable(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
 }
+
+// app access_token は read:account が無いと WebSocket を使えない
+// (upstream StreamingApiServerService:64)。
+func TestStream_AppTokenWithoutReadAccountIsRejected(t *testing.T) {
+	h := NewHandler(&stubAcceptor{})
+	e := echo.New()
+	e.GET("/streaming", func(c echo.Context) error {
+		c.Set(string(middleware.AuthScopeContextKey), &middleware.AuthScope{IsApp: true, Scopes: []string{"write:notes"}})
+		return h.Stream(c)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/streaming", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// read:account があれば通る (ここでは upgrade しないので 503 まで進む)。
+func TestStream_AppTokenWithReadAccountPasses(t *testing.T) {
+	h := NewHandler(&stubAcceptor{})
+	e := echo.New()
+	e.GET("/streaming", func(c echo.Context) error {
+		c.Set(string(middleware.AuthScopeContextKey), &middleware.AuthScope{IsApp: true, Scopes: []string{"read:account"}})
+		return h.Stream(c)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/streaming", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, "scope は通り、非 WS として 503")
+}
+
+// native login token (IsApp=false) は scope 検査しない。
+func TestStream_NativeTokenSkipsScopeCheck(t *testing.T) {
+	h := NewHandler(&stubAcceptor{})
+	e := echo.New()
+	e.GET("/streaming", func(c echo.Context) error {
+		c.Set(string(middleware.AuthScopeContextKey), &middleware.AuthScope{IsApp: false})
+		return h.Stream(c)
+	})
+	req := httptest.NewRequest(http.MethodGet, "/streaming", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+}

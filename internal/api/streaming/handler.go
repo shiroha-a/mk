@@ -4,9 +4,11 @@ package streaming
 
 import (
 	"net/http"
+	"slices"
 
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -43,6 +45,13 @@ func NewHandler(acceptor ConnectionAcceptor) *Handler {
 // acceptor に渡し、失敗したら 400 / 426 のまま終了する (gorilla/websocket が
 // 自動で適切な status を返す)。
 func (h *Handler) Stream(c echo.Context) error {
+	// app access_token は read:account を持っていないと WebSocket を使えない
+	// (upstream StreamingApiServerService:64)。upgrade する前に弾かないと、
+	// 権限の無いトークンでも接続だけは張れてしまう。native login token
+	// (IsApp=false) と匿名接続は従来どおり通す。
+	if scope := middleware.GetAuthScope(c); scope != nil && scope.IsApp && !slices.Contains(scope.Scopes, "read:account") {
+		return c.JSON(http.StatusForbidden, apierr.PermissionDenied())
+	}
 	// WebSocket でない GET には 503 を返す。本家 (@fastify/websocket) が
 	// upgrade 以外を受け付けずに 503 で落とすのに揃える。gorilla に任せると
 	// 400 になり、「まだ実装されていない」のか「WS 専用」なのか区別が付かない。
