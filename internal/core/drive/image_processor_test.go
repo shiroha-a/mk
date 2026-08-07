@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"testing"
 
+	"github.com/gen2brain/avif"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -95,7 +96,7 @@ func TestIsMimeImage(t *testing.T) {
 		{"image/vnd.microsoft.icon", true},
 		{"image/vnd.mozilla.apng", true},
 		{"image/svg+xml", false},
-		{"image/avif", false},
+		{"image/avif", true},
 		{"video/mp4", false},
 		{"application/octet-stream", false},
 		{"text/plain", false},
@@ -450,4 +451,36 @@ func TestCalculateBlurhash_EncodeError(t *testing.T) {
 	hash, err := proc.CalculateBlurhash(makeTestJPEG(100, 100), "image/jpeg")
 	require.NoError(t, err)
 	assert.NotEmpty(t, hash)
+}
+
+// makeTestAVIF creates a small AVIF image.
+func makeTestAVIF(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			img.Set(x, y, color.RGBA{uint8(x * 30), uint8(y * 30), 200, 255})
+		}
+	}
+	var buf bytes.Buffer
+	require.NoError(t, avif.Encode(&buf, img, avif.Options{Quality: 60}))
+	return buf.Bytes()
+}
+
+// AVIF は Mastodon / MS Edge が表示できないため、小さくても EXIF が無くても
+// 必ず WebP の webpublic を作る (upstream satisfyWebpublic の avif 除外)。
+func TestGenerateWebpublic_SmallAVIF_AlwaysNeeded(t *testing.T) {
+	proc := NewDefaultImageProcessor()
+	result, err := proc.GenerateWebpublic(makeTestAVIF(t, 200, 150), "image/avif")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "image/webp", result.MimeType)
+}
+
+func TestGenerateThumbnail_AVIF(t *testing.T) {
+	proc := NewDefaultImageProcessor()
+	result, err := proc.GenerateThumbnail(makeTestAVIF(t, 200, 150), "image/avif")
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, "image/webp", result.MimeType)
 }

@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bbrks/go-blurhash"
+	_ "github.com/gen2brain/avif" // AVIF input decode (mediaproxy と同じ wazero ベース)
 	"github.com/gen2brain/webp"
 	"github.com/kovidgoyal/imaging"
 	_ "golang.org/x/image/bmp"
@@ -74,7 +75,10 @@ func isMimeImage(mime string) bool {
 		// APNG は 2 綴りある。判定器が改善されて `image/apng` を返すように
 		// なった (#2319) ので両方受ける。片方だけだとサムネイルが生成されなく
 		// なる (APNG の 1 フレーム目は valid な PNG なので stdlib で decode できる)。
-		"image/vnd.mozilla.apng", "image/apng":
+		"image/vnd.mozilla.apng", "image/apng",
+		// AVIF は gen2brain/avif (wazero) で decode できる。upstream は
+		// sharp-convertible-image に含めており、webpublic を必ず WebP で作る。
+		"image/avif":
 		return true
 	default:
 		return false
@@ -197,9 +201,11 @@ func (p *DefaultImageProcessor) GenerateWebpublic(body []byte, mimeType string) 
 	w, h := bounds.Dx(), bounds.Dy()
 	hasExif := hasExifMarker(body)
 
-	// SVG / AVIF は現在未対応なのでここには来ない (isMimeImage で弾かれる)
-	// webpublic 不要の条件: メタデータなし & 2048以下 & SVG/AVIFでない
-	if !hasExif && w <= webpublicMax && h <= webpublicMax {
+	// AVIF は Mastodon / MS Edge が表示できないため、寸法やメタデータに
+	// 関わらず必ず WebP の webpublic を作る (upstream DriveService の
+	// satisfyWebpublic は `type !== 'image/avif'` を条件に含めている)。
+	// SVG は現在未対応なのでここには来ない (isMimeImage で弾かれる)。
+	if mimeType != "image/avif" && !hasExif && w <= webpublicMax && h <= webpublicMax {
 		return nil, nil
 	}
 
