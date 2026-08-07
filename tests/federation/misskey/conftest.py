@@ -49,3 +49,24 @@ def alice(mkgo: MisskeyLikeClient) -> dict:
 def bob(misskey: MisskeyLikeClient) -> dict:
     """First user on Misskey (= root)."""
     return misskey.create_admin("bob", "password1234")
+
+
+@pytest.fixture(scope="session", autouse=True)
+def enable_federation(
+    mkgo: MisskeyLikeClient,
+    misskey: MisskeyLikeClient,
+    alice: dict,
+    bob: dict,
+) -> None:
+    """Turn federation on for both instances.
+
+    `meta.federation` の既定値は **両実装とも `none`** で、その状態では
+    webfinger / host-meta / nodeinfo の discovery が 403 になる。upstream は
+    2025-08 の `TweakDefaultFederationSettings` migration で既定を `all` から
+    `none` に変えており、mk-go もそれに追随している。
+
+    つまり素の instance は連合しないのが正しい挙動なので、連合を検証する側が
+    明示的に有効化する。root token が要るので alice / bob の作成後に走らせる。
+    """
+    for client in (mkgo, misskey):
+        client._api("admin/update-meta", {"federation": "all"})
