@@ -12,6 +12,7 @@ import (
 	sentrygo "github.com/getsentry/sentry-go"
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/misc/redact"
 )
 
 // flushTimeout is the maximum duration to block draining queued events when
@@ -47,11 +48,56 @@ func Init(cfg *config.Config) (func(), error) {
 		TracesSampleRate: opts.TracesSampleRate,
 		Debug:            opts.Debug,
 		ServerName:       opts.ServerName,
+		// SendDefaultPII は既定 (false) のままにする。true にすると
+		// sentry-go が Cookie ヘッダと全 request header を event に載せる
+		// (interfaces.go NewRequest)。
+		SendDefaultPII: false,
+		BeforeSend:     scrubEvent,
 	}); err != nil {
 		return nil, fmt.Errorf("sentry init: %w", err)
 	}
 	slog.Info("sentry: initialized", "environment", opts.Environment, "release", opts.Release)
 	return func() { sentrygo.Flush(flushTimeout) }, nil
+}
+
+// scrubEvent removes credentials from an event before it leaves the process.
+//
+// middleware は `hub.Scope().SetRequest(c.Request())` を呼ぶので、sentry-go は
+// `Request.QueryString` に `r.URL.RawQuery` をそのまま載せる。この API は
+// `?i=<token>` を有効な credential として受け付けるため、panic / error が
+// 起きた瞬間に有効な token が Sentry organization へ送られる。送信先の
+// 権限境界と retention はこちらの管理外なので、出る前に落とす。
+//
+// sentry-go v0.45.1 の実測として:
+//
+//   - `Request.URL` は scheme + host + **path のみ**で query を含まない
+//   - `Request.Data` (body) は capture されない (NewRequest の doc に
+//     「does not read r.Body」と明記)
+//   - `Cookies` と全 header は SendDefaultPII が true のときだけ載る
+//
+// つまり現状の実害経路は QueryString だけだが、Data / Cookies も防御的に
+// 落としておく。SDK の更新や SendDefaultPII の設定変更で経路が増えたときに、
+// ここを直し忘れても漏れない側に倒すため。
+func scrubEvent(event *sentrygo.Event, _ *sentrygo.EventHint) *sentrygo.Event {
+	if event == nil || event.Request == nil {
+		return event
+	}
+	req := event.Request
+	// 解析できないクエリは丸ごと捨てる。そのまま残すのは漏らす方向の失敗。
+	if redacted, ok := redact.Query(req.QueryString); ok {
+		req.QueryString = redacted
+	} else {
+		req.QueryString = ""
+	}
+	req.Data = ""
+	req.Cookies = ""
+	req.URL = redact.URI(req.URL)
+	for key := range req.Headers {
+		if sentrygo.IsSensitiveHeader(key) {
+			delete(req.Headers, key)
+		}
+	}
+	return event
 }
 
 // sampleRateOrDefault treats a zero rate as "use sentry-go default" because
