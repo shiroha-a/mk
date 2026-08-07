@@ -395,3 +395,24 @@ func TestInjectRenoteMyReaction_SumAndNormalize(t *testing.T) {
 	require.NoError(t, json.Unmarshal(out, &m))
 	assert.Equal(t, ":smile@.:", m["renote"].(map[string]any)["myReaction"], "custom emoji を正規化 (#2058 HIGH-2)")
 }
+
+func TestRenotedReplyVisibleTo(t *testing.T) {
+	pureRenoteWithReply := func(replyUser, vis string) []byte {
+		return []byte(`{"userId":"author","renoteId":"r1","renote":{"reply":{"userId":"` +
+			replyUser + `","visibility":"` + vis + `"}}}`)
+	}
+	snap := map[string]bool{"author": false, "followee": false}
+
+	// followers 限定の返信をリノートされた場合、返信先の投稿者を follow して
+	// いなければ home に流さない (upstream home-timeline.ts)。
+	assert.False(t, replyShouldEmit(pureRenoteWithReply("stranger", "followers"), "viewer", snap, false, replyGateHome))
+	// follow していれば流す
+	assert.True(t, replyShouldEmit(pureRenoteWithReply("followee", "followers"), "viewer", snap, false, replyGateHome))
+	// 自分の投稿への返信なら流す
+	assert.True(t, replyShouldEmit(pureRenoteWithReply("viewer", "followers"), "viewer", snap, false, replyGateHome))
+	// public な返信のリノートは無条件で流す
+	assert.True(t, replyShouldEmit(pureRenoteWithReply("stranger", "public"), "viewer", snap, false, replyGateHome))
+	// 引用リノート (text あり = 純粋リノートでない) は対象外
+	quote := []byte(`{"userId":"author","renoteId":"r1","text":"hi","renote":{"reply":{"userId":"stranger","visibility":"followers"}}}`)
+	assert.True(t, replyShouldEmit(quote, "viewer", snap, false, replyGateHome))
+}

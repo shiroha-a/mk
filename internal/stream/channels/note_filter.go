@@ -501,6 +501,14 @@ type notePayload struct {
 	Mentions []string        `json:"mentions"`
 	Poll     json.RawMessage `json:"poll"`
 	Reply    *replyMeta      `json:"reply,omitempty"`
+	// Renote は純粋リノートの中身。renote.reply の可視性を見るためだけに
+	// 持つ (upstream home-timeline.ts:74-81)。
+	Renote *renoteMeta `json:"renote,omitempty"`
+}
+
+// renoteMeta carries just enough of the renote target to gate a pure renote.
+type renoteMeta struct {
+	Reply *replyMeta `json:"reply,omitempty"`
 }
 
 // isPureRenote reports whether the payload is a pure renote (renote with no
@@ -556,6 +564,24 @@ func (f *noteFilter) shouldEmit(payload []byte, hardMuteRules []byte, viewerID s
 	}
 
 	return true
+}
+
+// renotedReplyVisibleTo reports whether a pure renote's target reply is visible
+// to the viewer. followers 限定投稿への返信をリノートされたとき、返信先の
+// 投稿者をフォローしていない viewer には流さない (upstream home-timeline.ts)。
+func renotedReplyVisibleTo(note *notePayload, viewerID string, snap map[string]bool) bool {
+	if note.Renote == nil || note.Renote.Reply == nil || !note.isPureRenote() {
+		return true
+	}
+	reply := note.Renote.Reply
+	if reply.Visibility != "followers" {
+		return true
+	}
+	if reply.UserID == viewerID {
+		return true
+	}
+	_, follows := snap[reply.UserID]
+	return follows
 }
 
 // replyGateMode controls how replyShouldEmit decides emission per timeline
@@ -614,6 +640,12 @@ func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, para
 	var note notePayload
 	if err := json.Unmarshal(payload, &note); err != nil {
 		return true
+	}
+	// 純粋リノートは、リノート先が「フォローしていない人の followers 限定投稿
+	// への返信」なら弾く (upstream home-timeline.ts:76-80)。リノートそのものは
+	// reply ではないので、下の reply gate では拾えない。
+	if !renotedReplyVisibleTo(&note, viewerID, snap) {
+		return false
 	}
 	if note.ReplyID == nil {
 		return true
