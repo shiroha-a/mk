@@ -29,6 +29,10 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # バージョンを返す契約なので、mk-go の実装版は別 field にしている (#2274)。
     # TS 側に存在しないのが仕様。
     "mkGoVersion",
+    # 分割アップロード (#2313) は mk-go 独自機能なので policies に TS 側の
+    # 対応キーが無い。docs/divergence.md に additive field として記載済み。
+    "canUseChunkedUpload", "chunkedUploadMaxConcurrentSessions",
+    "chunkedUploadMaxPendingMb",
     "globalTimeline", "localTimeline",
 }
 
@@ -67,6 +71,10 @@ USER_IGNORE = DEFAULT_IGNORE_KEYS | {
     "onlineStatus", "lastActiveDate",
     # (#2091 修正済: isAdmin/isModerator は self-view で populate されるように
     # なったため回帰 gate に戻した。ここで ignore しない。)
+    # 分割アップロード (#2313) は mk-go 独自機能で TS 側に対応キーが無い。
+    # users/show は policies を含むので META_IGNORE と同じ除外が要る。
+    "canUseChunkedUpload", "chunkedUploadMaxConcurrentSessions",
+    "chunkedUploadMaxPendingMb",
 }
 
 
