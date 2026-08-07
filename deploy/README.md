@@ -72,7 +72,7 @@ docker compose up -d
 `MK_IMAGE` で明示する。
 
 ```bash
-MK_IMAGE=ghcr.io/shiroha-a/mk:1.0.0-bundled docker compose up -d
+MK_IMAGE=ghcr.io/shiroha-a/mk:1.1.1-bundled docker compose up -d
 ```
 
 利用できるタグは [GHCR のページ](https://github.com/shiroha-a/mk/pkgs/container/mk)
