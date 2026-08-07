@@ -97,6 +97,11 @@ jobs:
 
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
+        with:
+          # pnpm のバージョンは submodule 側 package.json の packageManager から
+          # 取る。mk リポジトリ直下には package.json が無いので、既定のまま
+          # だと "No pnpm version is specified" で落ちる。
+          package_json_file: third_party/misskey/package.json
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
