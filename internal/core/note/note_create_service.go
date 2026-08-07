@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"math/rand"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -779,6 +780,22 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		}
 	}
 
+	// upstream NoteCreateService.ts:610-621 と同じく、reply 先の投稿者と
+	// (specified のとき) visibleUserIds を mentions に含める。notes/mentions や
+	// followers note の可視判定 (shouldHideNote の mentions 分岐) がこの列を
+	// 見ているため、欠けると「返信された相手」が自分宛ての返信を辿れない。
+	// userRepo 未設定時は note.Mentions が username 文字列なので触らない。
+	if s.userRepo != nil {
+		if replyTarget != nil && replyTarget.UserID != note.UserID {
+			note.Mentions = appendUniqueID(note.Mentions, replyTarget.UserID)
+		}
+		if note.Visibility == model.NoteVisibilitySpecified {
+			for _, id := range note.VisibleUserIDs {
+				note.Mentions = appendUniqueID(note.Mentions, id)
+			}
+		}
+	}
+
 	// Custom emoji 名抽出: text + cw を MFM parse して :code: トークンを集める
 	// (#629)。連合配信時に renderer.addEmojiTags が note.Emojis を walk して
 	// AP Note.tag に Emoji エントリを足すので、ここで埋めないと連合先で
@@ -1053,6 +1070,14 @@ var mentionRegex = regexp.MustCompile(`@([A-Za-z0-9_-]+)(?:@([A-Za-z0-9.\-]+))?`
 type Mention struct {
 	Username string
 	Host     string // ホスト指定がない場合は空文字
+}
+
+// appendUniqueID appends id to ids unless it is already present.
+func appendUniqueID(ids []string, id string) []string {
+	if id == "" || slices.Contains(ids, id) {
+		return ids
+	}
+	return append(ids, id)
 }
 
 // ExtractMentions extracts mention usernames from a note text.

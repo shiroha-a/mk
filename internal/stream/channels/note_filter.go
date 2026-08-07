@@ -492,15 +492,16 @@ type replyMeta struct {
 // 判定するのに使う。NoteEntityService.pack は packed note に `mentions:
 // string[]` を出力するので JSON tag で拾える。
 type notePayload struct {
-	UserID   string          `json:"userId"`
-	Text     *string         `json:"text"`
-	CW       *string         `json:"cw"`
-	RenoteID *string         `json:"renoteId"`
-	ReplyID  *string         `json:"replyId"`
-	FileIDs  []string        `json:"fileIds"`
-	Mentions []string        `json:"mentions"`
-	Poll     json.RawMessage `json:"poll"`
-	Reply    *replyMeta      `json:"reply,omitempty"`
+	UserID         string          `json:"userId"`
+	Text           *string         `json:"text"`
+	CW             *string         `json:"cw"`
+	RenoteID       *string         `json:"renoteId"`
+	ReplyID        *string         `json:"replyId"`
+	FileIDs        []string        `json:"fileIds"`
+	Mentions       []string        `json:"mentions"`
+	Poll           json.RawMessage `json:"poll"`
+	VisibleUserIDs []string        `json:"visibleUserIds"`
+	Reply          *replyMeta      `json:"reply,omitempty"`
 	// Renote は純粋リノートの中身。renote.reply の可視性を見るためだけに
 	// 持つ (upstream home-timeline.ts:74-81)。
 	Renote *renoteMeta `json:"renote,omitempty"`
@@ -686,7 +687,12 @@ func replyShouldEmit(payload []byte, viewerID string, snap map[string]bool, para
 	// いれば、withReplies / followee.withReplies の設定に関係なく reply gate を
 	// pass する。upstream Misskey TS は home/hybrid/local channel いずれもこの
 	// escape を持たないので意図的 deviation。
-	isMentioned := viewerID != "" && slices.Contains(note.Mentions, viewerID)
+	// ただし specified note の宛先 (visibleUserIds) は、upstream NoteCreateService が
+	// mentions 列にも合流させる都合で「本文で @ された」わけではなく載っている。
+	// 宛先というだけでこの hatch を発火させると、upstream が HTL に流さない direct
+	// reply が流れてしまうので除外する。
+	isMentioned := viewerID != "" && slices.Contains(note.Mentions, viewerID) &&
+		!slices.Contains(note.VisibleUserIDs, viewerID)
 
 	var followeeWithReplies bool
 	if snap != nil {
