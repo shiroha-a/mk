@@ -19,9 +19,21 @@ on:
   pull_request:
     branches: [main, develop]
   # push 済みのタグから image を publish し直すための入口。
-  # `gh workflow run docker.yml --ref 1.1.1` のようにタグを指定して実行する。
+  #
+  # `--ref <tag>` では実行できない。workflow_dispatch は **dispatch 対象の ref に
+  # あるファイル** に定義されている必要があり、過去のタグが指すコミットには
+  # このトリガーが無いため。したがって develop に対して実行し、ビルドしたい
+  # タグは tag input で渡す。
+  #
+  #   gh workflow run docker.yml -f tag=1.1.1
+  #
   # タグを打ち直すのは破壊的なので、取りこぼしはこちらで拾う。
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build and publish (e.g. 1.1.1). Empty = build the branch."
+        required: false
+        default: ""
 
 # ghcr.io に push するには packages: write が必要。
 # contents: read は checkout 用。
@@ -39,6 +51,9 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
+          # tag input が指定されていればそのタグを、無ければ通常どおり
+          # イベントの ref を build する。
+          ref: ${{ inputs.tag || github.ref }}
           # third_party/misskey (packages/backend/assets など) がDockerfileの
           # COPY対象になるため、submoduleを取得しないとbuildが失敗する。
           submodules: recursive
@@ -91,6 +106,8 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=sha,prefix=sha-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
+            # tag input 指定時のみ。push イベントでは空なので enable=false。
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           labels: |
             org.opencontainers.image.title=${{ github.event.repository.name }}
             org.opencontainers.image.description=Misskey rewritten in Go
@@ -127,6 +144,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
         # submodule は不要。Dockerfile.bundled は third_party/misskey を参照せず、
         # アセットを assets image から取る。
 
@@ -152,6 +171,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}},suffix=-bundled
             type=sha,prefix=sha-,suffix=-bundled,format=short
             type=raw,value=bundled,enable={{is_default_branch}}
+            type=raw,value=${{ inputs.tag }},suffix=-bundled,enable=${{ inputs.tag != '' }}
           labels: |
             org.opencontainers.image.title=${{ github.event.repository.name }}
             org.opencontainers.image.description=Misskey rewritten in Go (frontend assets bundled)
