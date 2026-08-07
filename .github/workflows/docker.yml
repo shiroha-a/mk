@@ -99,14 +99,18 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # tag input 指定時は「過去のタグを後追いで publish する」用途なので、
+          # 可変タグ (latest / ブランチ名 / sha) を一切動かさない。dispatch は
+          # default branch 上で走るため、gate しないと latest と develop が
+          # 古いビルドで上書きされる。sha- は github.sha (= dispatch 時点の
+          # develop HEAD) から作られるので、中身と食い違う偽ラベルにもなる。
           tags: |
-            type=ref,event=branch
+            type=ref,event=branch,enable=${{ inputs.tag == '' }}
             type=ref,event=pr
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
-            type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
-            # tag input 指定時のみ。push イベントでは空なので enable=false。
+            type=sha,prefix=sha-,format=short,enable=${{ inputs.tag == '' }}
+            type=raw,value=latest,enable=${{ inputs.tag == '' && github.ref_name == github.event.repository.default_branch }}
             type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
           labels: |
             org.opencontainers.image.title=${{ github.event.repository.name }}
@@ -169,8 +173,8 @@ jobs:
           tags: |
             type=semver,pattern={{version}},suffix=-bundled
             type=semver,pattern={{major}}.{{minor}},suffix=-bundled
-            type=sha,prefix=sha-,suffix=-bundled,format=short
-            type=raw,value=bundled,enable={{is_default_branch}}
+            type=sha,prefix=sha-,suffix=-bundled,format=short,enable=${{ inputs.tag == '' }}
+            type=raw,value=bundled,enable=${{ inputs.tag == '' && github.ref_name == github.event.repository.default_branch }}
             type=raw,value=${{ inputs.tag }},suffix=-bundled,enable=${{ inputs.tag != '' }}
           labels: |
             org.opencontainers.image.title=${{ github.event.repository.name }}
