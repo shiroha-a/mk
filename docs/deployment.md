@@ -42,10 +42,20 @@ docker compose up -d
 
 フロントエンドアセットを同梱した `bundled` イメージを pull するだけで起動できる。**フロントエンドのビルドもイメージのビルドも要らない。**
 
+動かすだけならソースを clone する必要は無い。compose と設定のひな形だけを置いた
+[`docker` ブランチ](https://github.com/shiroha-a/mk/tree/docker)を使う (数十 KB)。
+
 ```bash
-git clone https://github.com/shiroha-a/mk.git
+git clone --depth 1 -b docker https://github.com/shiroha-a/mk.git mk
 cd mk
 
+mkdir -p files && sudo chown -R 991:991 files
+docker compose up -d
+```
+
+ソースを持っている場合は Makefile から同じことができる。
+
+```bash
 mkdir -p files && sudo chown -R 991:991 files
 
 make image-up          # 起動 (docker-compose.image.yml)
@@ -72,6 +82,23 @@ make image-build       # ghcr.io/shiroha-a/mk:bundled をローカルにビル�
 | `ghcr.io/shiroha-a/mk:bundled` | Goバイナリ + マイグレーション + **フロントエンドアセット同梱** | pull して即起動 |
 | `ghcr.io/shiroha-a/mk:latest` | Goバイナリ + マイグレーションのみ | アセットを別途用意する構成 |
 
+`bundled` / `latest` は develop の最新を指す **可変タグ**。本番ではバージョンを固定する。
+
+```bash
+MK_IMAGE=ghcr.io/shiroha-a/mk:1.1.1-bundled docker compose up -d
+```
+
+リリースタグを push すると `<version>` と `<version>-bundled` が publish される
+(`.github/workflows/docker.yml`)。過去のリリースを後追いで publish したい場合は
+develop に対して dispatch し、タグを input で渡す。
+
+```bash
+gh workflow run docker.yml -f tag=1.1.0
+```
+
+> `1.0.0` に `-bundled` は存在しない。アセット同梱イメージは 1.1.0 で追加された機能で、
+> 1.0.0 のツリーには `Dockerfile.bundled` が無いため。
+
 同梱アセットは fork (`shiroha-a/misskey-ts`) が publish する `ghcr.io/shiroha-a/misskey-ts-assets:<tag>` 由来で、**mk-go 独自のフロントエンド変更を含む**。
 
 > **注意**: 下記のように upstream の `misskey/misskey` イメージからアセットをコピーする方法もあるが、その場合 **mk-go 独自のフロントエンド変更が失われる** (チャット・リバーシの連合が UI 上で「非対応」表示に戻る等)。drop-in 互換の検証目的でなければ `bundled` イメージを使うこと。
@@ -88,7 +115,7 @@ make image-build       # ghcr.io/shiroha-a/mk:bundled をローカルにビル�
 TS版Misskeyのイメージからアセットをコピーすることも可能:
 
 ```dockerfile
-FROM misskey/misskey:2026.3.2 AS misskey-assets
+FROM misskey/misskey:2026.7.0 AS misskey-assets
 FROM ghcr.io/shiroha-a/mk:latest
 COPY --from=misskey-assets /misskey/built /frontend
 COPY --from=misskey-assets /misskey/packages/frontend/assets /client-assets

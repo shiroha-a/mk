@@ -12,7 +12,7 @@ Phase 12-1 で入った UNIX domain socket (UDS) 対応を使って、mk-go の�
 ## 前提条件
 
 - Docker と docker compose v2
-- `third_party/misskey` サブモジュールの初期化 (tag `2026.3.2` が pin されています)
+- `third_party/misskey` サブモジュールの初期化 (tag `2026.7.0-mk.10` が pin されています)
 - host 側のインストールは不要です。フロントエンドのビルドも docker 経由で行います。
 
 ```sh
@@ -125,7 +125,7 @@ git submodule update --init --recursive third_party/misskey
 make uds-frontend-build
 ```
 
-submodule のチェックアウト先 (tag `2026.3.2`) は本リポジトリで pin 済みです。
+submodule のチェックアウト先 (tag `2026.7.0-mk.10`) は本リポジトリで pin 済みです。
 
 ### `third_party/misskey/built` が無い
 

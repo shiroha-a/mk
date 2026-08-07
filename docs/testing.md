@@ -10,7 +10,8 @@
 | 連合テスト | mk-go ↔ Misskey AP通信 | Docker Compose多段 | `make federation-misskey-test` |
 | Drop-in e2e (pytest) | TS-A backend を mk-A に差し替えて state preservation 検証 | TS 2 instance + mk overlay | `make dropin-swap-test` (#365 / #367 / #372 / #374、詳細は[dropin-e2e.md](dropin-e2e.md)) |
 | Drop-in frontend e2e (cypress) | 3 TS instance + mk overlay swap で frontend 視点の互換 | cypress + 3 TS + mk-A | `make dropin-frontend-swap-test` (#380 / #381 / #387 / #394、詳細は[dropin-frontend-e2e.md](dropin-frontend-e2e.md)) |
-| Playwright e2e | mk-go と Misskey TS の両 backend で API/frontend 統合互換を nightly 監視 | Docker Compose 全部 | `tests/playwright/` 配下 (#744、Phase 1-4 完了で 96 spec / 35 directory / 242 endpoint cover = 54.3%) |
+| Playwright e2e | mk-go と Misskey TS の両 backend で API/frontend 統合互換を検証 | Docker Compose 全部 | `tests/playwright/` 配下 (#744、370 spec。PR ごとに mk-go、upstream 追従時に TS backend) |
+| 本家 backend e2e | Misskey 本家の `test/e2e/**` をテスト本体無改変で mk-go に向けて実行 | PostgreSQL / Redis + mk-go バイナリ | `make upstream-e2e` (#2347、25 ファイル 1245 テスト。詳細は[upstream-backend-e2e.md](upstream-backend-e2e.md)) |
 
 ## 実行方法
 
@@ -215,6 +216,27 @@ Playwright で発見した drift は LCD 化 → strict 化 のサイクルで�
 5. 同 PR で spec の LCD を strict (`expect(...).toBe(204)` 等) に格上げ
 
 **実績**: Phase 1-4 で 40+ 件の drift を fix。詳細は [api-compatibility.md](api-compatibility.md) の「対応済 drift fix」section、または #744 / #947 tracker 参照。
+
+## 本家 backend e2e
+
+Misskey 本家の backend e2e (`third_party/misskey/packages/backend/test/e2e/**`) を、
+**テスト本体に一切手を入れずに** mk-go へ向けて実行する。差し替えるのは vitest 設定の
+2 点 (globalSetup = mk-go バイナリの起動、setupFiles = `/api/reset-db`) だけなので、
+上流でテストが増えれば自動的に検証対象も増える。
+
+```bash
+make upstream-e2e-deps         # 初回 / submodule bump 後
+make upstream-e2e-up           # PostgreSQL / Redis
+make upstream-e2e-migrate
+make upstream-e2e-test         # FILE=test/e2e/note.ts で 1 ファイルだけも可
+```
+
+『通らないことが正しい』テストは `tests/upstream-e2e/known-divergences.json` に**根拠付きで**
+登録し、vitest の expected-failure (`task.fails`) として扱う。skip ではないので、乖離が
+解消して通るようになったテストは逆に落ちて一覧の陳腐化に気付ける。
+
+PR ごとに CI で実行する (`.github/workflows/upstream-backend-e2e.yml`、required check には
+入れない)。詳細は [upstream-backend-e2e.md](upstream-backend-e2e.md)。
 
 ## Drop-in テスト
 

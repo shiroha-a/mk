@@ -21,7 +21,7 @@ Misskey 本家は AGPL-3.0。AGPL コードを mk-go リポジトリにコピー
 代わりに git submodule で参照する:
 
 ```
-third_party/misskey/   -> misskey-dev/misskey (tag 2026.3.2)
+third_party/misskey/   -> shiroha-a/misskey-ts (fork, tag 2026.7.0-mk.10)
 e2e/cypress/           -> mk-go 側のラッパー (cypress.config.ts など。
                            specPattern が submodule を指す)
 ```
@@ -168,7 +168,7 @@ Cypress カスタムコマンド (`third_party/misskey/cypress/support/commands.
 - `/api/reset-db` は **DB を全消去する**。`TestMode` の誤設定に最大限注意する。
   config loader は WARN ログを吐き、router は TestMode を再確認してから route
   を登録する二重ガードを入れている
-- submodule の tag は mk-go 本体の `Version` 定数と揃える (`2026.3.2`)。
+- submodule の tag は mk-go の `MisskeyVersion` 定数と揃える (`2026.7.0`)。fork 独自の変更を積んだぶんは `-mk.N` suffix で区別する (現在 `2026.7.0-mk.10`)。
   ズレるとフロントと API スキーマが噛み合わない可能性がある
 
 ## 関連ファイル

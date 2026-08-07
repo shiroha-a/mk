@@ -2,10 +2,12 @@
 
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
-- 基準: **mk-go 1.0.0** (= Misskey TS `2026.7.0` 追従完了時点) ⇔ Misskey TS `2026.7.0`
-- 最終更新: 2026-08-03
+- 基準: **mk-go 1.1.1** ⇔ Misskey TS `2026.7.0`
+- 最終更新: 2026-08-07
 
-> 注: `MisskeyVersion = 2026.7.0` と `third_party/misskey` submodule (`2026.7.0-mk.4`) は bump 済み。`MkGoVersion` 定数の `1.0.0` 化はリリース作業 (別 issue) で行うため、この時点のコードでは `0.9.2` のままになっている。本ドキュメントの内容は 1.0.0 として固定するベースラインそのもの。
+> ベースラインを固定したのは 1.0.0 (= Misskey TS `2026.7.0` 追従完了時点)。以降の 1.1.x は
+> upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもの。したがって
+> 比較対象の Misskey TS は 1.0.0 時点と同じ `2026.7.0` のまま。
 
 ## このドキュメントの位置づけ
 
@@ -26,23 +28,23 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 | chat 15 | **0** |
 | API レスポンスの additive field | 3 (`runtime` / `mkGoVersion` / `chunkedUpload`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 6 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 10 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 7 tag (`-mk.1` ～ `-mk.7`) | — | — |
+| fork frontend の独自変更 | 10 tag (`-mk.1` ～ `-mk.10`) | — | — |
 
-**upstream endpoint の未実装はゼロ** (coverage 99.8%、残 1 件は TestMode 限定登録の偽陽性)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
+**upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
 ---
 
 ## 1. API endpoint
 
-upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **443 件を実装済み (coverage 99.8%)**。
+upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (41)
+### 1-1. mk-go にしかない (45)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
@@ -350,6 +352,8 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | `renoteCount` の減算 | 減算しない (`incRenoteCount` しか無く、renote 削除時も据え置き) | Undo(Announce) で減算する。unrenote 後もカウントが残り続ける方が不自然なため (増分条件は upstream と一致させてあるので対称、#2283) |
 | `users/search-by-username-and-host` | `UserSearchService` が 4 query の UNION。`updatedAt IS NULL` を拾うのは**フォロー済み分岐だけ**なので、未フォローかつ未投稿の user は検索に一切出ない | `usernameLower` 前方一致 + `followersCount DESC` の単純検索。新規 user もフォロー前に見つかる (#2286) |
 | reversi surrender | pending game も終局させられる | NOT_STARTED で弾く (勝ち逃げ防止) |
+| アンテナの `src: 'home'` | e4144a1 以降 `all` と同じ結果になる (upstream の e2e にも「BUG e4144a1 以降 home 指定は壊れている」と明記されている) | フォロー中ユーザーのみに絞る正しい実装を維持 |
+| home / hybrid / local channel の reply gate | `withReplies` 系の条件を満たさない返信は流さない | 加えて **viewer が mentions に含まれる返信は流す** escape hatch を持つ (#1195)。ただし specified note の宛先 (`visibleUserIds`) は本文で mention されたわけではないので除外する |
 | webhook の note embed gate | note/reply/renote で skipHide | 全イベントで gate、viewer/repo nil は fail-closed |
 | streaming / 通知の未知 visibility | — | fail-closed (誤配信しない) |
 | URL preview の scheme 判定 | 生文字列の case-sensitive `startsWith` | case-insensitive (RFC 3986 準拠)。非 http(s) の thumbnail / icon は値を落とす |
@@ -374,6 +378,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
   - `TestMigrationIdempotency_RequiresIfExists` — DDL の `IF [NOT] EXISTS` 漏れ (drop-in で migration が dirty 停止)
   - `TestIndexNaming_NoNewUpstreamDuplicates` — upstream と同内容の index を別名で追加 (TS 製 DB で二重化)
 - **値レベルの差分**: `make diff-test` (mk-go ↔ TS の応答を値単位で diff)
+- **本家 e2e に対する適合**: `make upstream-e2e` (Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて実行)。**意図的な差分は `tests/upstream-e2e/known-divergences.json` に根拠付きで登録し、expected-failure として扱う。** skip ではないので、乖離が解消して通るようになったら逆に落ちて気付ける。本ドキュメントに載せた divergence のうち API 挙動に現れるものは、原則この一覧にも entry がある ([upstream-backend-e2e.md](upstream-backend-e2e.md))
 - **コード内の divergence 注記**: `grep -rn "#2106 L" internal/` で全件を辿れる
 - **upstream 追従時**: `docs/update/` に release ごとの diff doc を追加し、そこで確定した divergence を本ドキュメントへ反映する。golden の再生成 (`make shapecheck-gen`) と TypeORM seed の追加も必要 ([upstream-catch-up.md](upstream-catch-up.md))
 - **fork frontend の変更**: `third_party/misskey` に custom commit を積んで `X.Y.Z-mk.N` tag を打ち、mk 側の submodule pin を bump する。純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針
@@ -386,4 +391,5 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 - [`configuration.md`](configuration.md) — 設定キー一覧
 - [`migration-from-ts.md`](migration-from-ts.md) — TS からの移行手順
 - [`upstream-catch-up.md`](upstream-catch-up.md) — upstream 追従の手順とチェックリスト
+- [`upstream-backend-e2e.md`](upstream-backend-e2e.md) — 本家 backend e2e を mk-go に向けて回す基盤と、既知乖離の運用
 - [`update/`](update/) — upstream release ごとの差分 doc

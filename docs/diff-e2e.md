@@ -24,7 +24,7 @@ upstream と一致するか」(計算結果・正規化・順序・条件分岐�
 docker-compose.diff.yml  (隔離 stack、production UDS には触れない)
 ├─ mkgo  (build: tests/federation/common/Dockerfile.mkgo, config: tests/diff/mkgo.yml)
 │   ├─ postgres-mk / redis-mk
-├─ ts    (image: misskey/misskey:2026.5.4, config: tests/diff/ts.yml)
+├─ ts    (image: misskey/misskey:2026.7.0, config: tests/diff/ts.yml)
 │   ├─ postgres-ts / redis-ts
 └─ diff-runner (profiles:[test], pytest + requests)
      MKGO_URL=http://mkgo:3000  TS_URL=http://ts:3000
@@ -32,9 +32,9 @@ docker-compose.diff.yml  (隔離 stack、production UDS には触れない)
 
 - **API-only (HTTP, no TLS/federation)**: runner は両 backend を `:3000` で直接
   叩く。WebAuthn/secure-context は不要なので nginx TLS 層は省く。
-- **version**: mk-go は現行 2026.6.0、TS は入手可能な最寄りの公式 image
-  2026.5.4。1 minor 差 (= 直近の 2026.6.0 追従分) のノイズは ignore-list と
-  endpoint 選定で吸収する。
+- **version**: mk-go・TS ともに **2026.7.0** で一致している。かつては公式 image が
+  1 minor 遅れており version-gap のノイズを ignore-list で吸収していたが、その必要は
+  無くなった。追従直後で公式 image が未公開の期間だけ、再び gap が生じうる。
 - **隔離 (重要)**: compose 先頭で `name: mkdiff` を指定し専用 project に固定する。
   これが無いと default project は directory 名 `mk` になり、**本番 UDS stack
   (compose.uds.yaml, 同じ project `mk`) の `mkgo` サービスと衝突して本番コンテナを
@@ -102,14 +102,15 @@ image pull で重く、external image の flaky 要素もある)。nightly か�
   = **15 passed**。
 - `test_note_packing_parity`: mk-go と TS の packed note が (instance noise を除き)
   **値レベルで一致** することを確認。
-- `test_meta_value_parity`: meta は version-gap (2026.6.0 で増えた field) と instance
-  state (mediaProxy host / proxyAccountName) のノイズを `META_IGNORE` で吸収した上で
-  pass。これらは harness が初回に検出した差分で、version-matched TS に切替えたら見直す。
+- `test_meta_value_parity`: meta は instance state (mediaProxy host / proxyAccountName)
+  のノイズを `META_IGNORE` で吸収した上で pass。version-gap 由来の除外は TS image を
+  2026.7.0 に揃えた時点で不要になったため、`META_IGNORE` に残っているものは
+  instance state 起因だけかを追従のたびに見直すこと。
 
 ## 既知の制約・今後
 
-- TS image が 2026.5.4 のため 1 minor 分のノイズが出る。完全 version 一致が必要に
-  なれば third_party/misskey (2026.6.0) からの source build に切り替える。
+- 公式 image の公開は upstream release から遅れる。追従直後に version を厳密に
+  合わせたい場合は third_party/misskey からの source build に切り替える。
 - 初回 `make diff-test` は ignore-path の調整 (endpoint 固有ノイズの洗い出し) を
   伴う。PoC endpoint で当たりを付けてから coverage を広げる。
 - auth が要る endpoint は `Client.ensure_admin` の token を使う。複雑な seed

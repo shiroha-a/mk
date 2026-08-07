@@ -171,7 +171,7 @@ Playwright Phase 1-4 完了 (#744) で **96 spec / 35 directory / 242 endpoint c
 - **chat/* の API 設計** — TS版とパス名・パラメータが異なる (mk-go 独自設計)
 - **Identicon** — 生成される自動アバターの見た目が若干異なる
 - **search backend** — `notes/search` の provider は `fulltextSearch.provider` で切替。既定 `sqlLike` で **Meilisearch 不要のまま動く** (PostgreSQL `ILIKE` fallback)。upstream TS strict-mode (400 UNAVAILABLE) で揃えたい operator は `provider: "none"` を opt-in で選べる (#877)。Meilisearch / pgroonga は optional
-- **upstream 2026.5.4 まで追従済** — #947 (2026.3.2 → 2026.5.1) + #1164 (2026.5.1 → 2026.5.4、LD-Signature 初期実装含む) で完了。各 release の差分は [docs/update/](update/) (`yyyymmdd*` 命名) を参照
+- **upstream 2026.7.0 まで追従済** — 2026.3.2 → 2026.5.1 → 2026.5.4 → 2026.6.0 → 2026.7.0 と段階的に追従した。各 release の差分は [docs/update/](update/) (`yyyymmdd*` 命名) を参照
 
 ### mk-go 独自挙動 (TS にない拡張)
 

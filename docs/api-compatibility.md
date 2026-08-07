@@ -1,19 +1,38 @@
 # API互換性状況
 
-対象バージョン: **Misskey 2026.3.2** base + drift backlog 適用済 (実質 2026.5.x 相当の挙動)
-最終更新: 2026-05-09
+対象バージョン: **Misskey 2026.7.0** (mk-go 1.1.1)
+最終更新: 2026-08-07
 
-本ドキュメントは互換性調査 (#107, #124) と、Playwright Phase 1-4 で発見・修正した drift backlog の結果を集約したもの。
+本ドキュメントは互換性調査 (#107, #124) と、Playwright Phase 1-4 で発見・修正した drift backlog の**履歴**を集約したもの。
+
+> **現在の一次情報はここではない。** 互換性の現況は次を参照すること。本ドキュメントは
+> 「どの調査でどこを直したか」を辿るための記録として残している。
+>
+> | 知りたいこと | 参照先 |
+> |---|---|
+> | endpoint の実装状況 | [`api-compat.md`](api-compat.md) (`make apicompat` で自動生成) |
+> | 意図的な差分の一覧 | [`divergence.md`](divergence.md) |
+> | 本家 e2e に対する適合状況 | [`upstream-backend-e2e.md`](upstream-backend-e2e.md) |
+> | entity shape の drift | [`shape-drift.md`](shape-drift.md) |
 
 ## 概要
 
-- **Phase 1-4 完了**: Playwright e2e で **96 spec / 35 directory / 242 endpoint cover (54.3%)** を両 backend (mk-go / Misskey TS) で daily nightly に検証
-- **drift backlog**: spec 整備中に発見した 40+ 件の drop-in 互換 drift を fix 済 (= mk-go 単体で TS frontend / TS API client が壊れずに動く水準)
-- **upstream catch-up**: **2026.5.4 まで追従完了**。#947 (2026.3.2 → 2026.5.1) と #1164 (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) で 1 PR / 複数 commit 集約方式に移行。各 release 差分は [`docs/update/`](update/) (`yyyymmdd*` 命名) を参照
+- **upstream catch-up**: **2026.7.0 まで追従完了**。2026.3.2 → 2026.5.1 → 2026.5.4 → 2026.6.0 → 2026.7.0 と段階的に追従した。各 release 差分は [`docs/update/`](update/) (`yyyymmdd*` 命名) を参照
+- **本家 backend e2e**: Misskey 本家の `test/e2e/**` をテスト本体無改変で mk-go に向けて実行する基盤を整備し、**25 ファイル 1245 テストが全通過**。PR ごとに CI で回る。『通らないことが正しい』23 件は根拠付きで expected-failure として登録している ([`upstream-backend-e2e.md`](upstream-backend-e2e.md))
+- **Playwright e2e**: 370 spec を PR ごとに実行。Misskey TS backend に対しては upstream 追従時に実行し、spec が mk-go の挙動に引きずられていないかを検証する
+- **drift backlog**: Phase 1-4 の spec 整備中に発見した 40+ 件の drop-in 互換 drift は fix 済
 
-## エンドポイントカバー率
+## エンドポイントカバー率 (Playwright Phase 1-4 時点)
 
-router.go 登録の **448 endpoint** のうち、Playwright spec で round-trip 検証されているのは **242 endpoint (54.3%)**。残りは smoke 範囲外 (= WebSocket / 複雑 mutation / federation delivery / cron / push server) または smoke 化困難な mutation。
+以下は Playwright spec による round-trip 検証の到達範囲を、Phase 1-4 完了時点で
+まとめたもの。**endpoint の実装状況そのものは [`api-compat.md`](api-compat.md) が
+一次情報**で、そちらは `make apicompat` が upstream の endpoint 一覧と突き合わせて
+自動生成する。
+
+当時の数値は router.go 登録の 448 endpoint のうち 242 endpoint (54.3%)。残りは
+smoke 範囲外 (WebSocket / 複雑 mutation / federation delivery / cron / push server)
+または smoke 化困難な mutation。現在は本家 backend e2e が別軸で 1245 テストを
+回しているため、Playwright だけで cover 率を語る意味は薄れている。
 
 | カテゴリ | 主要 endpoint 群 | 状態 |
 |---|---|---|
@@ -36,7 +55,7 @@ router.go 登録の **448 endpoint** のうち、Playwright spec で round-trip 
 | antennas/* / search/* | shape | ✅ Phase 3 verified |
 | その他 (charts, miauth, app, sw, utility, …) | shape | ✅ Phase 3-4 verified |
 
-未実装エンドポイントへのリクエストはキャッチオールハンドラが`200 {}`で応答するため、クライアントがクラッシュすることはない。
+未実装エンドポイントへのリクエストはキャッチオールハンドラが `200 {}` で応答するため、クライアントがクラッシュすることはない。なお **upstream endpoint の未実装は現在ゼロ (coverage 100.0%、444/444)**。
 
 ## 対応済みの互換性修正
 

@@ -65,6 +65,19 @@ make dev
 
 既存の `docker-compose.yml` / `make docker-*` (ソースからビルド) はそのまま使える。置き換えではなく並立する選択肢。
 
+動かすだけならソースを clone する必要すら無い。compose と設定のひな形だけを置いた
+[`docker` ブランチ](https://github.com/shiroha-a/mk/tree/docker) が GitHub Actions で
+自動生成されている (`.github/workflows/docker-branch.yml`、生成元は
+`docker-compose.image.yml` / `.config/docker.yml.example` / `deploy/README.md`)。
+
+```bash
+git clone --depth 1 -b docker https://github.com/shiroha-a/mk.git mk
+cd mk && docker compose up -d
+```
+
+**`docker` ブランチは手で編集しない。** push のたびに履歴ごと作り直されるので、
+変更したい場合は生成元を編集する。
+
 ### 更新 (運用)
 
 | ターゲット | 内容 |
@@ -154,6 +167,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | `make dropin-frontend-mk-up` `dropin-frontend-mk-down` `dropin-frontend-swap-test` | 上記の mk-go overlay と切替シナリオ | 同上 |
 | `make federation-misskey-build` `federation-misskey-up` `federation-misskey-test` `federation-misskey-down` `federation-misskey-logs` | Misskey 本家インスタンスを立てて実際に連合させる | [ActivityPub連合](federation.md) |
 | `make e2e-submodule-init` `e2e-deps` `e2e-run` `e2e-open` | Cypress によるフロントエンドテスト | [E2Eテスト](e2e.md) |
+| `make upstream-e2e-deps` `upstream-e2e-up` `upstream-e2e-migrate` `upstream-e2e-test` `upstream-e2e-down` | Misskey 本家の backend e2e をテスト本体無改変で mk-go に向けて実行 | [本家 backend e2e](upstream-backend-e2e.md) |
 
 ### ベンチマーク
 
