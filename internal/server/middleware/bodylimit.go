@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -12,6 +13,8 @@ import (
 //
 //   - /api/*  → 1MiB (upstream ApiServerService の bodyLimit: 1024*1024)
 //   - /inbox, /users/:id/inbox → 64KiB (upstream ActivityPubServerService の bodyLimit: 1024*64)
+//   - /api/drive/files/create → maxFileSize + multipart framing の余白
+//   - /api/drive/files/create-chunked/append → 33MiB
 //   - その他 → 制限なし
 //
 // これは **auth.Authenticate より前** (global pre-auth) に登録する必要がある。
@@ -25,15 +28,33 @@ import (
 // chunked は limitedReader が 413 error を返す。後者は JSONBodyParse / inbox handler が
 // echo.HTTPError を伝播する)。
 //
-// upload endpoint (drive/files/create) **のみ** 1MiB 制限から除外する。これは唯一の
-// multipart upload route で RequireAuth + write:drive 保護され、file サイズは drive handler の
-// maxFileSize が別途 bound する。content-type が multipart というだけで /api 全体を除外すると、
-// 非 upload endpoint (例: 未認証到達可能な /api/meta) に multipart を投げて 1MiB を bypass し
-// ParseMultipartForm に disk spill させる DoS 穴になる。upstream も requireFile endpoint だけ
-// multipart parser を起動し、他の endpoint は bodyLimit:1024*1024 が raw body に効く。
-func BodyLimitByPath() echo.MiddlewareFunc {
+// upload endpoint (drive/files/create) は 1MiB ではなく maxFileSize ベースの上限に
+// する。content-type が multipart というだけで /api 全体を除外すると、非 upload
+// endpoint (例: 未認証到達可能な /api/meta) に multipart を投げて 1MiB を bypass し
+// ParseMultipartForm に disk spill させる DoS 穴になるので、path で絞る。
+//
+// **無制限 (`next(c)`) にしてはいけない。** かつて「RequireAuth + write:drive で
+// 保護されているので file サイズは drive handler の maxFileSize が bound する」を
+// 根拠に無制限にしていたが、これは成立しない。route の RequireAuth より前に
+// global な auth.Authenticate が動き、multipart のとき token を探して
+// `c.FormValue("i")` を呼ぶ。Go の ParseMultipartForm はメモリ 32MiB を超えた分を
+// **上限なくディスクへ書き出す**ので、未認証のまま巨大な multipart を並列に
+// 送り付けるだけでディスクと file descriptor を食い潰せる。つまり「auth が守る」
+// と言いながら、その auth 自身がパーサの引き金になっていた。
+//
+// upstream も同じ形で守っている。requireFile endpoint に raw body の bodyLimit は
+// 無いが、@fastify/multipart を `limits: { fileSize: config.maxFileSize, files: 1 }`
+// で登録しており、パーサ自身が maxFileSize で打ち切る (ApiServerService.ts)。
+// mk-go 側は body 全体に掛けるので、framing の余白を足した値にする。
+func BodyLimitByPath(maxFileSize int64) echo.MiddlewareFunc {
 	apiBL := emiddleware.BodyLimit("1MiB")    // = 1024*1024 = 1048576
 	inboxBL := emiddleware.BodyLimit("64KiB") // = 1024*64   = 65536
+	// upstream の limits.fileSize は **ファイル本体**に掛かるが、こちらは body
+	// 全体に掛かる。boundary / part header / 同送される他フィールド (i など) の
+	// 分だけ余白を足さないと、maxFileSize ちょうどのファイルが弾かれる。
+	uploadBL := emiddleware.BodyLimit(
+		strconv.FormatInt(uploadBodyLimit(maxFileSize), 10),
+	)
 	// chunked upload の append (#2313)。1 リクエスト = 1 チャンクなので、
 	// create のように無制限にはせず固定上限を掛ける。値は
 	// drive.MaxChunkSizeMb (32MiB) + multipart framing の余白。実際に受理する
@@ -51,11 +72,14 @@ func BodyLimitByPath() echo.MiddlewareFunc {
 		apiNext := apiBL(next)
 		inboxNext := inboxBL(next)
 		chunkNext := chunkBL(next)
+		uploadNext := uploadBL(next)
 		return func(c echo.Context) error {
 			p := c.Request().URL.Path
 			switch {
 			case p == driveUploadPath:
-				return next(c) // 唯一の無制限 multipart upload endpoint (auth + maxFileSize 保護)
+				// 唯一の multipart upload endpoint。auth より前に上限を掛ける
+				// (関数 doc 参照)。
+				return uploadNext(c)
 			case p == chunkAppendPath:
 				// create と同じく RequireAuth + RequireNotMoved +
 				// write:drive で保護された route。未認証で到達できる経路は
@@ -69,6 +93,30 @@ func BodyLimitByPath() echo.MiddlewareFunc {
 			return next(c)
 		}
 	}
+}
+
+// multipartFramingMargin is the slack added on top of maxFileSize so a file of
+// exactly the allowed size still fits once multipart framing is included.
+//
+// boundary 行・part ごとの header・同送される他フィールド (i / folderId /
+// name など) を足しても 1MiB には遠く及ばない。broad にとってあるのは、ここを
+// 切り詰めても攻撃者の得られる余地 (1MiB) が誤差でしかない一方、足りないと
+// 正当なアップロードが 413 で落ちるため。
+const multipartFramingMargin int64 = 1 << 20
+
+// defaultUploadBodyLimit mirrors config.defaultMaxFileSize (250MB) and is used
+// when the caller passes a non-positive size.
+//
+// 設定漏れや将来の wiring ミスで 0 が渡ったときに「上限なし」へ倒れると、
+// 直したはずの穴がそのまま戻る。既定値に落として必ず上限が掛かるようにする。
+const defaultUploadBodyLimit int64 = 262144000
+
+// uploadBodyLimit returns the byte cap applied to the multipart upload route.
+func uploadBodyLimit(maxFileSize int64) int64 {
+	if maxFileSize <= 0 {
+		maxFileSize = defaultUploadBodyLimit
+	}
+	return maxFileSize + multipartFramingMargin
 }
 
 // isInboxPath reports whether p is an ActivityPub inbox route (/inbox or

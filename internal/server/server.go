@@ -280,7 +280,7 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	// body size 制限は auth.Authenticate より前に置く: auth は token 抽出のため
 	// body を io.ReadAll するので、後に置くと巨大 body が auth で先に読まれて
 	// bypass される (#1958 / #2075)。/api → 1MiB / inbox → 64KiB / multipart 除外。
-	e.Use(middleware.BodyLimitByPath())
+	e.Use(middleware.BodyLimitByPath(cfg.MaxFileSize))
 
 	// WWW-Authenticate は auth.Authenticate より外側に置く。auth は無効 token に
 	// 対して自分で 401 を書くので、内側 (api グループ) に置くと middleware まで
