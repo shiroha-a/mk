@@ -43,6 +43,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 
 | check | workflow | 見ているもの | 実測 | 手元での再現 |
 |---|---|---|---|---|
+| `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 | 1 min | `GOOS=linux govulncheck ./...` |
 | `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) | 1.5 min | `make frontend-check` |
 | `e2e` | Upstream backend e2e | **本家の backend e2e 1245 テスト**が mk-go に対して通るか | 17 min | `make upstream-e2e` |
 | `diff` | Diff e2e | mk-go と TS の**レスポンスの値**が一致するか (43 比較) | 4 min | `make diff-check` |
@@ -65,10 +66,15 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | `swap-test` | DB を引き継いだときに壊れないか |
 | `mkgo-born` | **mk-go が作った DB を TS が受け取れるか** |
 | `federation` / `ed25519-verify` | 他実装と実際に喋れるか |
+| `vulncheck` | **自分のコードではなく依存**に既知の穴が無いか |
 
 shape が合っていても値が違う類のバグは `diff` でしか捕まらない。ユニットテストは
 「自分で署名して自分で検証する」ことしか保証しないので、相互運用は `federation` /
 `ed25519-verify` でしか担保できない。
+
+`vulncheck` だけは毛色が違い、**自分が書いたコードを一切見ない**。テストが全部通っていても
+依存の既知脆弱性は素通りするので、別の signal として要る (導入時、通常テストが緑のまま
+到達可能な脆弱性が 11 件見つかっている)。
 
 `swap-test` と `mkgo-born` は似て見えるが、**DB を作った側が違う**。
 
@@ -131,6 +137,40 @@ workflow が後から集めたもの。前者がある場合はそちらが本�
 手元で再現するときは各 make target を直接叩く。いずれも専用の compose project
 (`mk-dropin` / `mk-federation` / `mkdiff`) で隔離されており、**本番 UDS の project `mk` には
 触れない**。
+
+### `vulncheck` が落ちたとき
+
+2 つの step があり、落ちた step で意味が違う。
+
+**Go version pin の不一致** — `go.mod` の `go` directive と Dockerfile の builder tag が
+ずれている。両方を同じ patch version に揃える。分けて検査しているのは、`govulncheck` が
+見るのは `go.mod` 側だけで、**Dockerfile だけ古いと CI は緑のまま配る image が脆弱**に
+なるため。builder を `golang:1.26-alpine` のような floating tag に戻すのも不可
+(pull 時期で stdlib の patch が変わり、再現可能な形で「既知脆弱性を含まない」と言えない)。
+
+**govulncheck の検出** — 手元で同じコマンドを回す。
+
+```
+go install golang.org/x/vuln/cmd/govulncheck@latest
+GOOS=linux "$(go env GOPATH)/bin/govulncheck" ./...
+```
+
+`GOOS=linux` を付けるのは、実際にデプロイするのが Linux だから。付けないと host 依存の
+package load エラーで解析が空振りしうる。**ローカルの `go` が古いと govulncheck 自身が
+古い toolchain でビルドされ、`package requires newer Go version` で解析できない。**
+その場合は `GOTOOLCHAIN=go1.26.5 go install ...` のように明示してビルドし直す。
+
+検出されるのは**呼び出しが到達可能なもの**だけで、import しているだけの脆弱性は落ちない。
+無視リストを育てずに運用できる設計なので、**抑制するより直すこと**。対応は原則 2 つ。
+
+- 依存モジュール → `go get <module>@<fixed>` で修正版へ。**修正版の指定は govulncheck の
+  `Fixed in:` をそのまま使う。** 同じモジュールに複数の脆弱性があると必要な版が別々で、
+  一番低い版に上げても残ることがある
+- Go stdlib → `go mod edit -go=<patch>` と Dockerfile の builder tag を両方上げる
+
+新しい CVE が公開されると、**コードを変えていない PR でも落ちる**。これは required check に
+していない理由でもある。落ちたときは自分の変更が原因とは限らないので、まず `Found in:` の
+モジュールが PR で触ったものかを見ること。
 
 ### `frontend-check` が落ちたとき
 
