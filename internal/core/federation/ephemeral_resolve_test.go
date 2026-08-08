@@ -64,6 +64,10 @@ func (f *fakeSink) NoteIDByURI(_ context.Context, uri string) (string, error) {
 	return "", nil
 }
 
+func (f *fakeSink) GetNote(_ context.Context, id string) (*model.Note, error) {
+	return f.notes[id], nil
+}
+
 func (f *fakeSink) DropNote(_ context.Context, id, _ string) error {
 	delete(f.notes, id)
 	f.dropped = append(f.dropped, id)

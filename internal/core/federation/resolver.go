@@ -122,6 +122,9 @@ type EphemeralSink interface {
 	// DB に入ったとき、ephemeral 側を落とさないとタイムラインに 2 回出る。
 	NoteIDByURI(ctx context.Context, uri string) (string, error)
 	DropNote(ctx context.Context, id, uri string) error
+	// GetNote は取り込み時の dedup で既存の ephemeral ノートを返すために使う
+	// (#2397)。ID だけでは呼び出し側が note を返せない。
+	GetNote(ctx context.Context, id string) (*model.Note, error)
 }
 
 // EphemeralTimelineRemover drops a superseded ephemeral note ID from the
@@ -156,6 +159,28 @@ func (r *Resolver) SetEphemeralSink(s EphemeralSink) { r.ephemeralSink = s }
 // SetEphemeralTimelineRemover wires the timeline list cleaner used when a
 // database row supersedes an ephemeral entry. Optional.
 func (r *Resolver) SetEphemeralTimelineRemover(t EphemeralTimelineRemover) { r.ephemeralTimeline = t }
+
+// ephemeralNoteByURI returns the ephemeral note already stored for uri, or nil.
+//
+// ephemeral 経路は DB に行を作らないので、`noteRepo.FindByURI` の miss は
+// 「まだ取り込んでいない」を意味しない。URI 逆引きを併せて引かないと、2 つ目の
+// リレーから同じ投稿が届くたびに別 ID を採番してタイムラインに重複する (#2397)。
+// 著者側は resolveNoteAuthor が同じ逆引きを既に行っている。
+func (r *Resolver) ephemeralNoteByURI(uri string) *model.Note {
+	if r.ephemeralSink == nil || uri == "" {
+		return nil
+	}
+	ctx := context.Background()
+	id, err := r.ephemeralSink.NoteIDByURI(ctx, uri)
+	if err != nil || id == "" {
+		return nil
+	}
+	n, err := r.ephemeralSink.GetNote(ctx, id)
+	if err != nil || n == nil {
+		return nil
+	}
+	return n
+}
 
 // dropSupersededEphemeral removes an ephemeral entry that the freshly created
 // database row supersedes, along with its now-stale ID in the timeline lists.
@@ -1288,6 +1313,13 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	if existing, err := r.noteRepo.FindByURI(uri); err == nil {
 		return existing, nil
 	}
+	// ephemeral 経路の URI 逆引き (#2397)。ingestNoteWithCreated と同じ理由で、
+	// これが無いと Announce 等の解決経路から同じ投稿が別 ID で再取り込みされる。
+	if ephemeral {
+		if existing := r.ephemeralNoteByURI(uri); existing != nil {
+			return existing, nil
+		}
+	}
 	// federation policy gate: ホワイトリスト外 / blocked な host の note は
 	// HTTP fetch も DB 永続化もしない。Announce 経由で第三者 host の note を
 	// 渡されるケースを塞ぐ (handleAnnounce → ResolveNote)。既存行 (上の
@@ -1380,6 +1412,13 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool) *model
 	if n, err := r.noteRepo.FindByURI(uri); err == nil {
 		return n
 	}
+	// 2.5. ephemeral 側に既にあれば再 fetch しない (#2397)。これが無いと引用先を
+	// 取り込み直して別 ID で保存し、renoteId が指す先が投稿ごとにずれる。
+	if ephemeral {
+		if n := r.ephemeralNoteByURI(uri); n != nil {
+			return n
+		}
+	}
 	// 3. 未知 URI: cycle でなければ fetch して取り込む (本家同様)。in-flight URI
 	// (ancestor chain) は already-resolved として skip し quote cycle を防ぐ
 	// (#1527、本家 0dc86cf6 guard 相当)。depth+1 で再帰上限も効かせる。
@@ -1449,6 +1488,14 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	}
 	if existing, err := r.noteRepo.FindByURI(apNote.ID); err == nil {
 		return existing, false, nil
+	}
+	// ephemeral 経路では DB の miss が「未取り込み」を意味しないので URI 逆引きも
+	// 引く (#2397)。非 ephemeral では引かない: 直接配送で DB 行を作る側は
+	// dropSupersededEphemeral で ephemeral 側を落として上書きするのが正しい。
+	if ephemeral {
+		if existing := r.ephemeralNoteByURI(apNote.ID); existing != nil {
+			return existing, false, nil
+		}
 	}
 	// upstream ApNoteService.validateNote 相当の attribution 検証 (#1839):
 	//   1. note の id host と著者 (attributedTo) host が一致すること
