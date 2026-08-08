@@ -306,6 +306,7 @@ worker 数だけは upstream の 16 に対し mk-go は 4。実体削除は S3 �
 | mkq queue driver | BullMQ wire 互換の Go 実装。queue-bench で BullMQ / asynq / mkq を 3-way 比較 (送信 rps は mkq 優位、drain time は asynq 優位。詳細は [queue-bench.md](queue-bench.md)) |
 | AIMD auto-scale worker | per-queue の動的 Resize + Prometheus metrics。worker 現在数 / 範囲 / scale 履歴は admin UI にも出す (#2277) |
 | Prometheus `/metrics` | `mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` ほか。**無認証公開なので LB/nginx ACL 必須**。admin から読めない分は `admin/queue/*` の `runtime` block が補う (#2277) |
+| `admin/server-metrics` | mk-go プロセス自身の統計 (goroutine / heap / GC / uptime / version) を返す mk-go 独自 endpoint (#2395)。upstream に対応物は無い。`admin/server-info` はホストマシンの静的スペックを返すもので別物。control panel のダッシュボードから 10s ポーリングで表示する (`ReadMemStats` が stop-the-world を伴うため間隔を詰めない)。DB / Redis の接続プールは当初含めていたが、常時ほぼ一定で画面のノイズになるため UI ごと落とした |
 | timeline JSON cache | first-page per-viewer cache (opt-in) |
 | mediaproxy のアニメ pass-through | `?emoji` / `?avatar` / `?preview` で gif/apng を decode せず raw 返し (Go std の `image.Decode` は 1 frame しか返さず静止画化するため) |
 | URL preview の charset 自動正規化 | Content-Type + `<meta charset>` から UTF-8 化。Shift_JIS / EUC-JP / ISO-2022-JP で文字化けしない (upstream は外部 `summaly` package に委譲しているため同等機能の有無は未確認) |

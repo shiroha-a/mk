@@ -59,8 +59,10 @@ type Server struct {
 	// auto-scale 履歴)。/metrics は無認証公開で LB ACL 必須のため admin から
 	// 読めない。その穴を埋めるプロセスローカルな snapshot (#2277)。
 	queueRuntimeStats *runtimestats.Recorder
-	autoscale         *autoscaleRunner
-	chartMgmt         *chart.ManagementService
+	// startedAt は admin/server-metrics が返す uptime の起点 (#2395)。
+	startedAt time.Time
+	autoscale *autoscaleRunner
+	chartMgmt *chart.ManagementService
 	// mediaProxySecret は internal media proxy URL の HMAC 鍵。config に
 	// 明示設定が無ければ DB (instance_secret) の生成値を使うため、New() で
 	// 一度だけ解決して保持する。
@@ -367,6 +369,10 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 		// admin UI 向けの短期ランタイム統計 (#2277)。config に関係なく常に
 		// 有効。ring buffer 固定長なのでメモリは queue 数 × 数 KB。
 		queueRuntimeStats: runtimestats.New(),
+
+		// admin/server-metrics の uptime 起点 (#2395)。プロセス生成時刻なので
+		// Server 生成時に確定させる。
+		startedAt: time.Now(),
 	}
 
 	// driver の dispatch hook を Prometheus と runtimestats の両方へ配る。

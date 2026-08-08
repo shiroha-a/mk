@@ -22,6 +22,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/core/procstats"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/signup"
 	corewebhook "github.com/shiroha-a/mk/internal/core/webhook"
@@ -120,8 +121,11 @@ type Handler struct {
 	queueInspector   QueueInspector
 	// queueRuntime は mk-go 独自の worker 実行時情報 (#2277)。
 	// 未配線なら admin/queue 応答から runtime block を省く。
-	queueRuntime          QueueRuntimeProvider
-	queueRedis            QueueRedisInfoProvider
+	queueRuntime QueueRuntimeProvider
+	queueRedis   QueueRedisInfoProvider
+	// procStats は admin/server-metrics が返すプロセス統計の provider 束 (#2395)。
+	// zero value でも Collect は成功する (取れない section が省かれる)。
+	procStats             procstats.Deps
 	emojiEnqueuer         EmojiImportEnqueuer
 	emojiImageFetcher     EmojiImageFetcher
 	relayService          RelayService

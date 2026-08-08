@@ -99,6 +99,7 @@ import (
 	corenotification "github.com/shiroha-a/mk/internal/core/notification"
 	corepage "github.com/shiroha-a/mk/internal/core/page"
 	corepoll "github.com/shiroha-a/mk/internal/core/poll"
+	"github.com/shiroha-a/mk/internal/core/procstats"
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
 	corerelay "github.com/shiroha-a/mk/internal/core/relay"
 	coreretention "github.com/shiroha-a/mk/internal/core/retention"
@@ -2901,6 +2902,8 @@ func (s *Server) setupRoutes() {
 	if s.redis != nil && s.redis.JobQueue != nil {
 		adminHandler.SetQueueRedis(jobQueueRedisInfo{rdb: s.redis.JobQueue})
 	}
+	// admin/server-metrics の uptime 起点 (#2395)。
+	adminHandler.SetProcStatsDeps(procstats.Deps{StartedAt: s.startedAt})
 	adminHandler.SetInstanceMetadataFetcher(metadataFetcher)
 	adminHandler.SetSystemAccountFetcher(sysAcctSvc)
 	// admin/federation/remove-all-following が host 単位で全 follower を
@@ -2964,6 +2967,9 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/get-index-stats", adminHandler.GetIndexStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:index-stats"))
 	api.POST("/admin/get-table-stats", adminHandler.GetTableStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:table-stats"))
 	api.POST("/admin/server-info", adminHandler.ServerInfo, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
+	// mk-go 独自 (#2395)。upstream に対応する endpoint は無いので scope も
+	// server-info のものを流用する (admin UI 以外の consumer を想定しない)。
+	api.POST("/admin/server-metrics", adminHandler.ServerMetrics, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
 	api.POST("/admin/captcha/current", adminHandler.CaptchaCurrent, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:meta"))
 	api.POST("/admin/captcha/save", adminHandler.CaptchaSave, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:meta"))
 	api.POST("/admin/ad/create", adminHandler.AdCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:ad"))
