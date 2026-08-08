@@ -191,13 +191,26 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, themeColor, metaJSON, e
 		head.WriteString(fmt.Sprintf(`<link rel="stylesheet" href="/embed_vite/%s">`, html.EscapeString(css)) + "\n")
 	}
 
+	// CLIENT_ENTRY は **manifest の値をそのまま** 渡す。embed の loader は
+	//
+	//     `/embed_vite/${CLIENT_ENTRY.replace('scripts', lang)}`
+	//
+	// と組み立てるので (built/_frontend_embed_vite_/loader/boot.js)、ここで
+	// `/embed_vite/` を前置すると `/embed_vite//embed_vite/<lang>/...` になって
+	// 404 する。`scripts` を言語コードに差し替える前提なので、path の形も
+	// manifest のまま保つ必要がある。
 	clientEntry := "null"
 	if h.entry.Script != "" {
-		if b, err := json.Marshal("/embed_vite/" + h.entry.Script); err == nil {
+		if b, err := json.Marshal(h.entry.Script); err == nil {
 			clientEntry = string(b)
 		}
 	}
 
+	// LANGS は embed の boot loader が参照する。定義しないと
+	// `LANGS is not defined` で初期化が落ち、iframe に
+	// "Failed to initialize Misskey" だけが出る (HTML 自体は 200 なので
+	// status を見る検査では捕まらない)。通常シェルと同じ値にしてある。
+	//
 	// JSON は <script type="application/json"> にそのまま入れる。閉じタグの
 	// 早期終了だけを潰せばよく、HTML エスケープすると JSON.parse が壊れる。
 	metaBlock := ""
@@ -234,6 +247,7 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, themeColor, metaJSON, e
 <script>
 const VERSION = "%s";
 const CLIENT_ENTRY = %s;
+const LANGS = ["ja-JP","en-US"];
 </script>
 %s
 %s
