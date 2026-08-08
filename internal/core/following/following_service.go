@@ -119,6 +119,34 @@ type Service struct {
 	chartHook           ChartHook
 	webhookHook         WebhookHook
 	mainStreamPublisher MainStreamPublisher
+	// relationReload は follow 変更を streaming connection へ通知する (#2400)。
+	relationReload RelationReloadPublisher
+}
+
+// RelationReloadPublisher notifies streaming connections that a viewer's
+// following snapshot changed (#2400)。実装は stream 側の adapter。
+//
+// followingSnapshot は接続確立時にしか取らないため、これが無いと follow /
+// unfollow の直後は timeline の reply gate が古いままになる。
+type RelationReloadPublisher interface {
+	PublishFollowingReload(userID string)
+}
+
+// SetRelationReloadPublisher wires the streaming reload publisher. 未配線なら
+// 通知しない (= 従来どおり再接続まで stale)。
+func (s *Service) SetRelationReloadPublisher(p RelationReloadPublisher) {
+	s.relationReload = p
+}
+
+// publishFollowingReload notifies the follower's streaming connections.
+//
+// 変わるのは **follower 側**の snapshot (自分が誰を follow しているか)。followee
+// 側の followingSnapshot は変わらない。
+func (s *Service) publishFollowingReload(followerID string) {
+	if s.relationReload == nil || followerID == "" {
+		return
+	}
+	s.relationReload.PublishFollowingReload(followerID)
 }
 
 // NewService creates a new following Service.
@@ -377,6 +405,7 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 		s.mainStreamPublisher.PublishMainEvent(followeeID, "followed", entity.PackUserLite(follower))
 	}
 
+	s.publishFollowingReload(followerID)
 	return &FollowResult{Following: f}, nil
 }
 
@@ -442,6 +471,7 @@ func (s *Service) unfollow(followerID, followeeID string, deliver bool) error {
 			}
 		}
 	}
+	s.publishFollowingReload(followerID)
 	return nil
 }
 
@@ -507,6 +537,9 @@ func (s *Service) AcceptRequest(followeeID, followerID string) error {
 			}
 		}
 	}
+	// Accept で Following が成立するので follower の snapshot が変わる (#2400)。
+	// Follow() だけに通知を置くと、承認制アカウントへの follow が反映されない。
+	s.publishFollowingReload(req.FollowerID)
 	return nil
 }
 

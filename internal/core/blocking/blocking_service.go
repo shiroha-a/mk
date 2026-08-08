@@ -37,6 +37,8 @@ type Service struct {
 	// userMaterializer はリレーでしか観測していない相手を DB へ昇格させる
 	// (#2332)。muting.muteeId / blocking.blockeeId が user への外部キー。
 	userMaterializer UserMaterializer
+	// relationReload は block 変更を streaming connection へ通知する (#2400)。
+	relationReload RelationReloadPublisher
 }
 
 // FederationHook delivers Block / Undo(Block) AP activities to a remote
@@ -75,6 +77,21 @@ func (s *Service) SetInstanceRepo(r repository.InstanceRepository) {
 	s.instanceRepo = r
 }
 
+// RelationReloadPublisher notifies streaming connections that a viewer's
+// relation snapshot changed (#2400)。実装は stream 側の adapter。
+type RelationReloadPublisher interface {
+	// PublishMuteBlockReload は mute/block snapshot だけを取り直させる。
+	PublishMuteBlockReload(userID string)
+	// PublishFollowingReload は following snapshot だけを取り直させる。
+	PublishFollowingReload(userID string)
+}
+
+// SetRelationReloadPublisher wires the streaming reload publisher. 未配線なら
+// 通知しない (= 従来どおり再接続まで stale)。
+func (s *Service) SetRelationReloadPublisher(p RelationReloadPublisher) {
+	s.relationReload = p
+}
+
 // Block creates a blocking relationship from blocker to blockee.
 // 既存のフォロー関係 (双方向) があれば自動的に解除する。
 func (s *Service) Block(blockerID, blockeeID string) (*model.Blocking, error) {
@@ -105,9 +122,10 @@ func (s *Service) Block(blockerID, blockeeID string) (*model.Blocking, error) {
 	}
 
 	// 既存のフォロー関係を双方向で解除する。fold-in counterも調整する。
+	var blockerUnfollowed, blockeeUnfollowed bool
 	if s.followingRepo != nil {
-		s.removeFollowing(blockerID, blockeeID)
-		s.removeFollowing(blockeeID, blockerID)
+		blockerUnfollowed = s.removeFollowing(blockerID, blockeeID)
+		blockeeUnfollowed = s.removeFollowing(blockeeID, blockerID)
 	}
 
 	// remote blockee へ Block activity を配信する (#1560)。
@@ -115,7 +133,34 @@ func (s *Service) Block(blockerID, blockeeID string) (*model.Blocking, error) {
 		s.federationHook.OnBlocked(blockerID, blockeeID)
 	}
 
+	s.publishBlockReload(blockerID, blockeeID, blockerUnfollowed, blockeeUnfollowed)
 	return b, nil
+}
+
+// publishBlockReload notifies both sides of a block/unblock (#2400).
+//
+// **向きに注意。** MuteBlockSnapshot が持つのは `BlockingMe` (= 自分を block して
+// いる人) なので、block/unblock で mute-block snapshot が変わるのは **blockee 側**。
+// ここを blocker 側にすると「block したのに相手の画面に流れ続ける」形で残る。
+//
+// あわせて Block は既存 follow を双方向で解除しうる。**実際に解除された側だけ**
+// following の通知を出す。無条件に出すと、follow 関係の無い相手を block した
+// ときにも reload が 2 回飛び、接続中の全 connection で無駄な DB 往復が起きる。
+//
+// Unblock は follow を復元しないので本関数を使わず、mute-block だけを直接
+// 通知している。
+func (s *Service) publishBlockReload(blockerID, blockeeID string, blockerUnfollowed, blockeeUnfollowed bool) {
+	if s.relationReload == nil {
+		return
+	}
+	// blockee: BlockingMe が増える。
+	s.relationReload.PublishMuteBlockReload(blockeeID)
+	if blockerUnfollowed {
+		s.relationReload.PublishFollowingReload(blockerID)
+	}
+	if blockeeUnfollowed {
+		s.relationReload.PublishFollowingReload(blockeeID)
+	}
 }
 
 // Unblock removes a blocking relationship.
@@ -133,6 +178,10 @@ func (s *Service) Unblock(blockerID, blockeeID string) error {
 	// remote blockee へ Undo(Block) を配信する (#1560)。
 	if s.federationHook != nil {
 		s.federationHook.OnUnblocked(blockerID, blockeeID)
+	}
+	// unblock は follow を復元しないので mute-block 側だけ通知する。
+	if s.relationReload != nil {
+		s.relationReload.PublishMuteBlockReload(blockeeID)
 	}
 	return nil
 }
@@ -158,13 +207,16 @@ func (s *Service) List(blockerID, sinceID, untilID string, limit, offset int) ([
 // adjustInstanceCountsForFollowing と **mirror で維持** すること。循環依存
 // 回避のため共通 helper にせず inline しているので、片方変更時には他方も
 // 揃える (#596 / PR #626 review)。
-func (s *Service) removeFollowing(followerID, followeeID string) {
+// 戻り値は「実際に follow row を消したか」。streaming の following snapshot は
+// 解除が起きたときだけ取り直せばよく、無条件に通知すると block のたびに無駄な
+// reload と DB 往復が 2 回増える (#2400)。
+func (s *Service) removeFollowing(followerID, followeeID string) bool {
 	f, err := s.followingRepo.FindByPair(followerID, followeeID)
 	if err != nil {
-		return
+		return false
 	}
 	if err := s.followingRepo.Delete(f); err != nil {
-		return
+		return false
 	}
 	_ = s.userRepo.IncrementFollowingCount(followerID, -1)
 	_ = s.userRepo.IncrementFollowersCount(followeeID, -1)
@@ -185,6 +237,7 @@ func (s *Service) removeFollowing(followerID, followeeID string) {
 			}
 		}
 	}
+	return true
 }
 
 // UserMaterializer promotes a relay-only author out of the ephemeral store

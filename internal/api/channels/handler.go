@@ -48,6 +48,8 @@ type Handler struct {
 	userMutingRepo repository.MutingRepository
 	blockingRepo   repository.BlockingRepository
 	noteRepo       notesfilter.RenoteLookup
+	// relationReload は channel mute 変更を streaming connection へ通知する (#2400)。
+	relationReload RelationReloadPublisher
 }
 
 // SetMuteBlockRepos wires the repositories used by the channels/timeline

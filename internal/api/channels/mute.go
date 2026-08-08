@@ -15,6 +15,26 @@ func (h *Handler) SetMutingRepo(r ChannelMutingRepository) {
 	h.mutingRepo = r
 }
 
+// RelationReloadPublisher notifies streaming connections that the viewer's
+// mute/block snapshot changed (#2400)。channel mute は MuteBlockSnapshot の
+// MutingChannels に載るので、変更したら接続中の snapshot を取り直させる。
+type RelationReloadPublisher interface {
+	PublishMuteBlockReload(userID string)
+}
+
+// SetRelationReloadPublisher wires the streaming reload publisher (#2400)。
+// 未配線なら通知しない (= 従来どおり再接続まで stale)。
+func (h *Handler) SetRelationReloadPublisher(p RelationReloadPublisher) {
+	h.relationReload = p
+}
+
+func (h *Handler) publishMuteReload(userID string) {
+	if h.relationReload == nil || userID == "" {
+		return
+	}
+	h.relationReload.PublishMuteBlockReload(userID)
+}
+
 // MuteCreate handles POST /api/channels/mute/create.
 func (h *Handler) MuteCreate(c echo.Context) error {
 	user := middleware.GetUser(c)
@@ -61,6 +81,7 @@ func (h *Handler) MuteCreate(c echo.Context) error {
 	if err := h.mutingRepo.Create(mut); err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	h.publishMuteReload(user.ID)
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -87,6 +108,7 @@ func (h *Handler) MuteDelete(c echo.Context) error {
 	if err := h.mutingRepo.Delete(user.ID, req.ChannelID); err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	h.publishMuteReload(user.ID)
 	return c.NoContent(http.StatusNoContent)
 }
 

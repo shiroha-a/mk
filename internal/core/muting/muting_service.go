@@ -31,6 +31,8 @@ type Service struct {
 	// userMaterializer はリレーでしか観測していない相手を DB へ昇格させる
 	// (#2332)。muting.muteeId / blocking.blockeeId が user への外部キー。
 	userMaterializer UserMaterializer
+	// relationReload は mute 変更を streaming connection へ通知する (#2400)。
+	relationReload RelationReloadPublisher
 }
 
 // NewService constructs a UserMutingService.
@@ -40,6 +42,29 @@ func NewService(
 	idGen id.Generator,
 ) *Service {
 	return &Service{userRepo: userRepo, mutingRepo: mutingRepo, idGen: idGen}
+}
+
+// RelationReloadPublisher notifies streaming connections that a viewer's
+// relation snapshot changed (#2400). 実装は stream 側の adapter。
+//
+// mute は接続確立時の snapshot にしか反映されないため、これが無いと mute した
+// 直後も既存の WebSocket に対象 user の event が届き続ける (再接続するまで)。
+type RelationReloadPublisher interface {
+	PublishMuteBlockReload(userID string)
+}
+
+// SetRelationReloadPublisher wires the streaming reload publisher. 未配線なら
+// 通知しない (= 従来どおり再接続まで stale)。
+func (s *Service) SetRelationReloadPublisher(p RelationReloadPublisher) {
+	s.relationReload = p
+}
+
+// publishReload notifies the muter's streaming connections. best-effort。
+func (s *Service) publishReload(muterID string) {
+	if s.relationReload == nil || muterID == "" {
+		return
+	}
+	s.relationReload.PublishMuteBlockReload(muterID)
 }
 
 // Mute creates a muting relationship. expiresAt may be nil for indefinite mutes.
@@ -78,6 +103,8 @@ func (s *Service) Mute(muterID, muteeID string, expiresAt *time.Time) (*model.Mu
 	if err := s.mutingRepo.Create(rec); err != nil {
 		return nil, err
 	}
+	// mute した本人 (muter) の snapshot が変わる。mutee 側は変わらない。
+	s.publishReload(muterID)
 	return rec, nil
 }
 
@@ -90,7 +117,11 @@ func (s *Service) Unmute(muterID, muteeID string) error {
 	if err != nil {
 		return ErrNotMuting
 	}
-	return s.mutingRepo.Delete(rec)
+	if err := s.mutingRepo.Delete(rec); err != nil {
+		return err
+	}
+	s.publishReload(muterID)
+	return nil
 }
 
 // IsMuted reports whether muter currently mutes mutee.
@@ -113,6 +144,8 @@ type RenoteService struct {
 	userRepo         repository.UserRepository
 	renoteMutingRepo repository.RenoteMutingRepository
 	idGen            id.Generator
+	// relationReload は renote-mute 変更を streaming connection へ通知する (#2400)。
+	relationReload RelationReloadPublisher
 }
 
 // NewRenoteService constructs a RenoteMutingService.
@@ -125,6 +158,19 @@ func NewRenoteService(
 }
 
 // Mute creates a renote-mute relationship.
+// SetRelationReloadPublisher wires the streaming reload publisher for renote
+// mutes (#2400). 未配線なら通知しない。
+func (s *RenoteService) SetRelationReloadPublisher(p RelationReloadPublisher) {
+	s.relationReload = p
+}
+
+func (s *RenoteService) publishReload(muterID string) {
+	if s.relationReload == nil || muterID == "" {
+		return
+	}
+	s.relationReload.PublishMuteBlockReload(muterID)
+}
+
 func (s *RenoteService) Mute(muterID, muteeID string) (*model.RenoteMuting, error) {
 	if muterID == muteeID {
 		return nil, ErrSelfMute
@@ -146,6 +192,7 @@ func (s *RenoteService) Mute(muterID, muteeID string) (*model.RenoteMuting, erro
 	if err := s.renoteMutingRepo.Create(rec); err != nil {
 		return nil, err
 	}
+	s.publishReload(muterID)
 	return rec, nil
 }
 
@@ -158,7 +205,11 @@ func (s *RenoteService) Unmute(muterID, muteeID string) error {
 	if err != nil {
 		return ErrNotMuting
 	}
-	return s.renoteMutingRepo.Delete(rec)
+	if err := s.renoteMutingRepo.Delete(rec); err != nil {
+		return err
+	}
+	s.publishReload(muterID)
+	return nil
 }
 
 // IsRenoteMuted reports whether muter has renote-muted mutee.

@@ -103,6 +103,9 @@ type Handler struct {
 	// streaming connection に reload signal を流す (#791)。未配線時は
 	// publish skip = 旧挙動 (= reconnect で反映)。
 	hardMutePublisher HardMutePublisher
+	// relationReload は mutedInstances 変更を streaming connection へ通知する
+	// (#2400)。未配線なら通知しない。
+	relationReload RelationReloadPublisher
 	// pinDeliveryHook は note pin/unpin 時に Add/Remove(featured) を followers へ
 	// 配信する (#2024)。未配線なら連合配信 skip。
 	pinDeliveryHook PinDeliveryHook
@@ -159,6 +162,13 @@ type HardMutePublisher interface {
 	PublishHardMuteReload(userID string)
 }
 
+// RelationReloadPublisher publishes a relation reload event so streaming
+// connections rebuild their mute/block snapshot (#2400). mutedInstances は
+// MuteBlockSnapshot の MutedInstances に載るため、変更時に通知が要る。
+type RelationReloadPublisher interface {
+	PublishMuteBlockReload(userID string)
+}
+
 // ProfileUpdateHook delivers Update(Person) to remote followers on local
 // profile edit (#1560)。実装は core/federation。
 type ProfileUpdateHook interface {
@@ -180,6 +190,11 @@ func (h *Handler) SetPinDeliveryHook(hook PinDeliveryHook) {
 // when i/update changes hardMutedWords (#791). Optional; nil disables the
 // realtime reload path (the streaming connection still picks up the new
 // rules at the next reconnect).
+// SetRelationReloadPublisher wires the relation reload publisher (#2400)。
+func (h *Handler) SetRelationReloadPublisher(p RelationReloadPublisher) {
+	h.relationReload = p
+}
+
 func (h *Handler) SetHardMutePublisher(p HardMutePublisher) {
 	h.hardMutePublisher = p
 }
@@ -1726,6 +1741,12 @@ func (h *Handler) Update(c echo.Context) error {
 	// 取り直して client-side で filter するので publish 不要。
 	if in.HardMutedWords != nil && h.hardMutePublisher != nil {
 		h.hardMutePublisher.PublishHardMuteReload(me.ID)
+	}
+	// mutedInstances は MuteBlockSnapshot に載るので、変更時は接続中の snapshot も
+	// 取り直させる (#2400)。これが無いとインスタンスミュート直後も既存の
+	// WebSocket に対象 host の event が届き続ける。
+	if in.MutedInstances != nil && h.relationReload != nil {
+		h.relationReload.PublishMuteBlockReload(me.ID)
 	}
 
 	// profile 変更を remote followers に Update(Person) で配信する (#1560)。
