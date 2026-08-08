@@ -50,11 +50,33 @@ type Settings struct {
 	TTL time.Duration
 }
 
+// NoteLookup resolves notes that live in the database.
+//
+// ephemeral ノートの引用先は Redis と DB のどちらにもありうる。リレー由来の
+// 投稿を引用していれば Redis、既に取り込み済みの投稿を引用していれば DB。
+// 埋められなかった参照は frontend が「削除された投稿」として描画するので
+// (entity/note.go の Renote preload の項)、両方を引く必要がある (#2397)。
+type NoteLookup interface {
+	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
+}
+
 // Store persists ephemeral notes and authors in Redis.
 type Store struct {
 	client    *redis.Client
 	keyPrefix string
 	settings  func() Settings
+	// notes は引用先を DB へ引きに行くための optional な参照。未配線なら
+	// Redis 側にある引用先だけが埋まる。
+	notes NoteLookup
+}
+
+// SetNoteLookup wires the database fallback used to resolve quote targets that
+// are not (or no longer) in Redis.
+func (s *Store) SetNoteLookup(l NoteLookup) {
+	if s == nil {
+		return
+	}
+	s.notes = l
 }
 
 // NewStore constructs a Store bound to the given Redis database.
@@ -147,6 +169,20 @@ func (s *Store) GetNote(ctx context.Context, id string) (*model.Note, error) {
 // GetNotes returns the ephemeral notes for ids, skipping any that are absent.
 // 戻り値の順序は ids の順序を保つ (欠損は詰める)。
 func (s *Store) GetNotes(ctx context.Context, ids []string) ([]*model.Note, error) {
+	out, err := s.getNotesShallow(ctx, ids)
+	if err != nil || len(out) == 0 {
+		return out, err
+	}
+	// 引用先を埋める。PutNote が関連を落として保存するので、ここで埋め直さないと
+	// renoteId だけが残り frontend が「削除された投稿」を描く (#2397)。
+	s.attachQuoteTargets(ctx, out)
+	return out, nil
+}
+
+// getNotesShallow reads notes and attaches their authors, without resolving
+// quote targets. attachQuoteTargets から呼ぶため分けてある (GetNotes を再帰
+// させると引用チェーンぶん無限に降りる)。
+func (s *Store) getNotesShallow(ctx context.Context, ids []string) ([]*model.Note, error) {
 	if s == nil || s.client == nil || len(ids) == 0 {
 		return nil, nil
 	}
@@ -184,6 +220,69 @@ func (s *Store) GetNotes(ctx context.Context, ids []string) ([]*model.Note, erro
 		return nil, err
 	}
 	return out, nil
+}
+
+// attachQuoteTargets fills note.Renote for notes that carry a RenoteID.
+//
+// Redis を先に引き、無いぶんだけ DB へ落とす。best-effort で、引けなかった参照は
+// nil のまま残す (= 本当に消えている引用先は従来どおり削除ノート表示になる)。
+//
+// 埋めるのは 1 段だけ。ネストした引用 (renote.renote) は DB 経路では
+// FindManyByIDsWithUser が 2 段目まで埋めるが、ephemeral 側で同じ深さを追うと
+// Redis 往復が段数ぶん増える。報告された症状 (引用先が削除ノート) は 1 段で解ける。
+//
+// **返信先 (ReplyID) は埋めない。** リレー由来の投稿は未知 URI の返信先を fetch
+// しない設計 (resolver.go の InReplyTo 解決) なので ReplyID がそもそも付かず、
+// 宙ぶらりんの参照が生まれない。埋める対象が無い。
+func (s *Store) attachQuoteTargets(ctx context.Context, notes []*model.Note) {
+	want := make([]string, 0, len(notes))
+	seen := make(map[string]struct{}, len(notes))
+	for _, n := range notes {
+		if n.RenoteID == nil || *n.RenoteID == "" || n.Renote != nil {
+			continue
+		}
+		if _, dup := seen[*n.RenoteID]; dup {
+			continue
+		}
+		seen[*n.RenoteID] = struct{}{}
+		want = append(want, *n.RenoteID)
+	}
+	if len(want) == 0 {
+		return
+	}
+
+	resolved := make(map[string]*model.Note, len(want))
+	// 1. Redis 側。引用先もリレー由来ならこちらにある。
+	//    GetNotes を再帰させると attachQuoteTargets が無限に降りるので、
+	//    生読み + 著者付けだけを行う内部関数を使う。
+	if eph, err := s.getNotesShallow(ctx, want); err == nil {
+		for _, n := range eph {
+			resolved[n.ID] = n
+		}
+	}
+	// 2. Redis に無かったぶんを DB から。
+	if s.notes != nil {
+		missing := make([]string, 0, len(want))
+		for _, id := range want {
+			if _, ok := resolved[id]; !ok {
+				missing = append(missing, id)
+			}
+		}
+		if len(missing) > 0 {
+			if rows, err := s.notes.FindManyByIDsWithUser(missing); err == nil {
+				for _, n := range rows {
+					resolved[n.ID] = n
+				}
+			}
+		}
+	}
+
+	for _, n := range notes {
+		if n.RenoteID == nil || n.Renote != nil {
+			continue
+		}
+		n.Renote = resolved[*n.RenoteID]
+	}
 }
 
 // attachAuthors fills note.User for every note in notes.

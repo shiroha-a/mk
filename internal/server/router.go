@@ -298,6 +298,10 @@ func (s *Server) setupRoutes() {
 				TTL:     time.Duration(m.EphemeralRelayNoteTTLMinutes) * time.Minute,
 			}
 		})
+	// 引用先が DB 側にある (= リレー由来でない投稿を引用している) ケースを
+	// 埋められるようにする (#2397)。未配線だと Redis 側の引用先しか復元できず、
+	// 残りが「削除された投稿」として描画される。
+	ephemeralStore.SetNoteLookup(noteRepo)
 	// timeline の hydrate が DB に無い ID を Redis から補えるようにする。
 	// store 自体は常に配線し、機能の有効・無効は取り込み側で判定する
 	// (無効化しても既に置かれているぶんは TTL 切れまで読めた方がよい)。
