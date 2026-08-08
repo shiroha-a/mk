@@ -123,6 +123,14 @@ type LDSignatureVerifier interface {
 	VerifyAndCreator(rawBody []byte) (creator string, present bool, err error)
 }
 
+// SignatureCapabilityRecorder records which signature scheme a remote host
+// actually uses (#2393). パッケージ間の循環依存を避けるため interface で受け取る
+// (実装は core/instance.CapabilityBuffer)。
+type SignatureCapabilityRecorder interface {
+	ObserveInboundAlg(host, alg string)
+	ObserveLDSignature(host string)
+}
+
 type InboxProcessor struct {
 	processor  FederationProcessor
 	verifier   SignatureVerifier
@@ -133,6 +141,7 @@ type InboxProcessor struct {
 	hostBlocker     HostBlockChecker
 	instanceTracker InstanceTracker
 	chartHook       InboxChartHook
+	capabilities    SignatureCapabilityRecorder
 	// keyCache は受信 HTTP Signature verify の公開鍵パースをメモ化する (#1426)。
 	// InboxProcessor は worker 間共有の単一インスタンス (router.go:616) なので、
 	// 同一 remote actor からの連続 activity で x509 パースを 1 回に集約できる
@@ -180,6 +189,12 @@ func (p *InboxProcessor) SetChartHook(h InboxChartHook) {
 	p.chartHook = h
 }
 
+// SetSignatureCapabilityRecorder wires the recorder that tracks which
+// signature scheme each remote host uses (#2393).
+func (p *InboxProcessor) SetSignatureCapabilityRecorder(r SignatureCapabilityRecorder) {
+	p.capabilities = r
+}
+
 // Handle dispatches a single inbox task. driver runtime invokes this for
 // every dequeued task.
 //
@@ -203,7 +218,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 	// 署名者は Process へ渡してリレー転送の判定に使う (#2338)。
 	var signer *model.User
 	if len(payload.Headers) > 0 && p.verifier != nil {
-		actor, err := p.verifyPayload(payload)
+		actor, keyType, err := p.verifyPayload(payload)
 		if err != nil {
 			slog.Warn("inbox: signature verification failed in worker",
 				"host", payload.Host, "err", err)
@@ -231,6 +246,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 			host = *actor.Host
 		}
 		p.touchInstance(actor)
+		p.recordSignatureCapability(actor, keyType, payload.Body)
 		p.commitChart(actor)
 		signer = actor
 	} else if p.ldVerifier != nil {
@@ -262,31 +278,34 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 // addr 等は含まれない。HTTP Signature の signing string は Method (大文字
 // 小文字混在不可なので handler 側で normalize 済前提)、Path、`(request-
 // target)` を含む header 集合だけが必要なので、これで足りる。
-func (p *InboxProcessor) verifyPayload(payload queue.InboxPayload) (*model.User, error) {
+// 戻り値の KeyType は検証に成功した鍵の種別で、署名方式の観測記録に使う
+// (#2393、err != nil のとき無意味)。
+func (p *InboxProcessor) verifyPayload(payload queue.InboxPayload) (*model.User, activitypub.KeyType, error) {
 	parsed, err := activitypub.ParseSignatureHeader(payload.Headers["Signature"])
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	actorURI := activitypub.ResolveKeyURL(parsed.KeyID)
 	actor, err := p.verifier.ResolveActor(actorURI)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// keyId fragment ベースで Ed25519 / RSA を dispatch する (#1067 / #1070)。
 	pem, err := p.verifier.PublicKeyForKeyID(actor.ID, parsed.KeyID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req, err := buildSignedRequest(payload)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// keyCache 経由で verify することで、同一 (keyId, PEM) の x509 パースを
 	// worker 横断で 1 回に集約する (#1426)。挙動は VerifyRequest と等価。
-	if err := p.keyCache.VerifyRequestCached(req, parsed.KeyID, pem); err != nil {
-		return nil, err
+	kt, err := p.keyCache.VerifyRequestCached(req, parsed.KeyID, pem)
+	if err != nil {
+		return nil, 0, err
 	}
-	return actor, nil
+	return actor, kt, nil
 }
 
 // authorizeActor enforces that the HTTP-signature signer is authorized to
@@ -386,6 +405,29 @@ func uriHost(uri string) string {
 	return strings.ToLower(u.Hostname())
 }
 
+// hasLDSignature reports whether the raw activity body carries a non-null
+// `signature` field (= an LD-Signature). 観測記録用の軽量判定で検証はしない
+// (#2393)。判定条件は LDSignatureVerifier 側の presence 判定
+// (`!hasSig || sigRaw == nil`) と揃えてあるので、「verifier が LD-Sig 有りと
+// みなす body」と一致する。
+func hasLDSignature(body []byte) bool {
+	// LD-Signature 付き activity は少数派なので、まず substring で足切りする。
+	// json.Unmarshal は RawMessage 1 field でも document 全体を走査するため、
+	// Note の Create のような大きい body では無視できないコストになる。
+	// 本文に "signature" を含む活動は false positive になるが、その場合は下の
+	// 厳密判定に落ちるだけで結果は変わらない。
+	if !bytes.Contains(body, []byte(`"signature"`)) {
+		return false
+	}
+	var probe struct {
+		Signature json.RawMessage `json:"signature"`
+	}
+	if err := json.Unmarshal(body, &probe); err != nil {
+		return false
+	}
+	return len(probe.Signature) > 0 && string(probe.Signature) != "null"
+}
+
 // extractLDCreator reads `signature.creator` (the LD-Signature key URI) from a
 // raw activity body. Returns "" when there is no LD-Signature or no creator.
 func extractLDCreator(body []byte) string {
@@ -446,6 +488,24 @@ func (p *InboxProcessor) touchInstance(actor *model.User) {
 		return
 	}
 	_ = p.instanceTracker.MarkRequestReceived(*actor.Host)
+}
+
+// recordSignatureCapability is a best-effort hook that records which signature
+// scheme the remote host used (#2393). recorder 未設定 / actor がローカル /
+// Host nil の場合は no-op。
+//
+// 署名検証と host block と actor 認可をすべて通った後にだけ呼ぶ。未検証の経路
+// (Headers 無しの direct-enqueue) から記録すると、送信元を確かめずに任意 host の
+// 観測を書けてしまう。
+func (p *InboxProcessor) recordSignatureCapability(actor *model.User, kt activitypub.KeyType, body []byte) {
+	if p.capabilities == nil || actor == nil || actor.Host == nil {
+		return
+	}
+	host := *actor.Host
+	p.capabilities.ObserveInboundAlg(host, activitypub.KeyTypeName(kt))
+	if hasLDSignature(body) {
+		p.capabilities.ObserveLDSignature(host)
+	}
 }
 
 func (p *InboxProcessor) commitChart(actor *model.User) {

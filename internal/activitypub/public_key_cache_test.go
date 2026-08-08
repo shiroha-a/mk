@@ -169,9 +169,13 @@ func TestPublicKeyCache_VerifyRequestCached_Success(t *testing.T) {
 	var parses int
 	c.parse = countingParse(&parses)
 
-	require.NoError(t, c.VerifyRequestCached(req, key.KeyID, pub))
+	kt, err := c.VerifyRequestCached(req, key.KeyID, pub)
+	require.NoError(t, err)
+	assert.Equal(t, KeyTypeRSA, kt)
 	// 2 回目の verify (同一 keyId/PEM) でも x509 パースは増えない。
-	require.NoError(t, c.VerifyRequestCached(req, key.KeyID, pub))
+	kt, err = c.VerifyRequestCached(req, key.KeyID, pub)
+	require.NoError(t, err)
+	assert.Equal(t, KeyTypeRSA, kt)
 	assert.Equal(t, 1, parses, "VerifyRequestCached must reuse the memoized key")
 }
 
@@ -185,7 +189,7 @@ func TestPublicKeyCache_VerifyRequestCached_AlgCheckedBeforeParse(t *testing.T) 
 	var parses int
 	c.parse = countingParse(&parses)
 
-	err := c.VerifyRequestCached(req, "x", "not a pem")
+	_, err := c.VerifyRequestCached(req, "x", "not a pem")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported")
 	assert.Equal(t, 0, parses, "unsupported algorithm must short-circuit before parsing the key")
@@ -199,7 +203,7 @@ func TestPublicKeyCache_VerifyRequestCached_ParseError(t *testing.T) {
 
 	c := NewPublicKeyCache(8)
 	// PEM が壊れていれば parse error がそのまま返る。
-	err := c.VerifyRequestCached(req, key.KeyID, "not a pem")
+	_, err := c.VerifyRequestCached(req, key.KeyID, "not a pem")
 	assert.Error(t, err)
 }
 
@@ -213,6 +217,6 @@ func TestPublicKeyCache_VerifyRequestCached_VerifyFails(t *testing.T) {
 	req.Header.Set("Host", "remote.example")
 
 	c := NewPublicKeyCache(8)
-	err = c.VerifyRequestCached(req, key.KeyID, otherPub)
+	_, err = c.VerifyRequestCached(req, key.KeyID, otherPub)
 	assert.Error(t, err)
 }

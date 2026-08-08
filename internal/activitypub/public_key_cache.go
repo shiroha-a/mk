@@ -104,14 +104,22 @@ func (c *PublicKeyCache) parsedKey(keyID, pemStr string) (crypto.PublicKey, KeyT
 // VerifyRequest と同じく signature header parse + algorithm guard を公開鍵パース
 // (ここでは cache 参照) より前に行うため、未対応 algorithm のリクエストでは鍵を
 // パース / cache 参照せず短絡し、エラー優先順位も一致する (#1426 review)。
-func (c *PublicKeyCache) VerifyRequestCached(req *http.Request, keyID, pemStr string) error {
+//
+// 戻り値の KeyType は検証に成功した鍵の種別で、err == nil のときのみ意味を持つ
+// (#2393)。err != nil の戻り値は KeyTypeRSA と同じゼロ値なので、鍵種別を読む側は
+// 必ず先に err を判定すること。cache が既に種別を保持しているため、この値を返す
+// ために追加のパースは発生しない。
+func (c *PublicKeyCache) VerifyRequestCached(req *http.Request, keyID, pemStr string) (KeyType, error) {
 	parsed, err := parseSignatureForVerify(req)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	pub, kt, err := c.parsedKey(keyID, pemStr)
 	if err != nil {
-		return err
+		return 0, err
 	}
-	return verifyParsed(req, parsed, pub, kt)
+	if err := verifyParsed(req, parsed, pub, kt); err != nil {
+		return 0, err
+	}
+	return kt, nil
 }

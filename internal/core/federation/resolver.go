@@ -295,6 +295,7 @@ type Resolver struct {
 	hashtagHook        HashtagHook                    // optional: per-tag mentionedUsersCount 集計 (#680)
 	publickeyRepo      PublickeyStore                 // optional: 公開鍵の永続化 (RSA)
 	publickeyExtraRepo PublickeyExtraStore            // optional: 追加公開鍵 (Ed25519 / Multikey) の永続化
+	capabilities       SignatureCapabilityDeclarer    // optional: Ed25519 対応宣言の記録 (#2393)
 	pollRepo           repository.PollRepository      // optional: Question(投票)のPoll作成
 	pollVoter          PollVoter                      // optional: AP vote (Note.name) の投票記録
 	emojiRepo          repository.EmojiRepository     // optional: リモート絵文字の永続化
@@ -398,6 +399,19 @@ func (r *Resolver) SetHashtagHook(h HashtagHook) {
 // storage. nil 渡しは無効化と同義 (in-memory only に戻る)。
 func (r *Resolver) SetPublickeyRepo(repo PublickeyStore) {
 	r.publickeyRepo = repo
+}
+
+// SignatureCapabilityDeclarer records that a remote host declared Ed25519
+// support by publishing an assertionMethod Multikey (#2393). 実装は
+// repository.InstanceSignatureCapabilityRepository。
+type SignatureCapabilityDeclarer interface {
+	RecordEd25519Declared(host string, at time.Time) error
+}
+
+// SetSignatureCapabilityDeclarer attaches the store that records per-host
+// Ed25519 capability declarations (#2393). 未配線なら宣言は記録されない。
+func (r *Resolver) SetSignatureCapabilityDeclarer(d SignatureCapabilityDeclarer) {
+	r.capabilities = d
 }
 
 // SetPublickeyExtraRepo attaches a PublickeyExtraStore for persistent
@@ -1014,6 +1028,26 @@ func (r *Resolver) cachePublicKey(userID, keyID, pem string) {
 	}
 }
 
+// declareEd25519Capability records that actorURI's host publishes an Ed25519
+// key. purge (key rotation で assertionMethod が消えた場合) では対になるクリアを
+// 行わない: 値は host 単位で、同一 host の別 actor がまだ鍵を持っている可能性が
+// あるため。「最後に確認した時刻」として保持し、古さの表現は UI 側に委ねる。
+func (r *Resolver) declareEd25519Capability(actorURI string) {
+	if r.capabilities == nil {
+		return
+	}
+	// host は user.Host / instance.host と同じ導出 (hostFromURI) を使う。ここが
+	// ずれると instance 一覧との突合が空振りしてラベルが出ない。
+	host, err := hostFromURI(actorURI)
+	if err != nil || host == "" {
+		return
+	}
+	if err := r.capabilities.RecordEd25519Declared(host, time.Now()); err != nil {
+		slog.Warn("ed25519 capability declaration persist failed",
+			"host", host, "actorURI", actorURI, "error", err)
+	}
+}
+
 // cacheAssertionMethods reconciles a remote actor's FEP-521a `assertionMethod[]`
 // with our user_publickey_extra rows (#1067 / #1070):
 //
@@ -1071,6 +1105,13 @@ func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams []activity
 			continue
 		}
 		receivedKeyIDs[am.ID] = true
+	}
+	// この host が Ed25519 を expose していることを instance 単位で記録する
+	// (#2393)。鍵が複数あっても host 単位の事実は 1 つなので、ループ内ではなく
+	// ここで 1 回だけ書く。actor resolve は inbound ほど高頻度ではないので buffer は
+	// 挟まない。best-effort なので失敗しても actor の取り込みは続ける。
+	if len(receivedKeyIDs) > 0 {
+		r.declareEd25519Capability(actorURI)
 	}
 	// 2. actor JSON に無い既存 keyId を purge (key rotation 対応)
 	existing, err := r.publickeyExtraRepo.ListByUserID(userID)

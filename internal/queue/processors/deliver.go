@@ -72,6 +72,12 @@ type DeliveryGate interface {
 	ShouldSkipDelivery(host string) bool
 }
 
+// Ed25519AcceptanceRecorder records that a remote host accepted an
+// Ed25519-signed delivery (#2393). 実装は core/instance.CapabilityBuffer。
+type Ed25519AcceptanceRecorder interface {
+	ObserveEd25519Accepted(host string)
+}
+
 // DeliverProcessor handles ap:deliver tasks by posting the activity body to
 // the recipient inbox with an HTTP signature.
 type DeliverProcessor struct {
@@ -80,6 +86,7 @@ type DeliverProcessor struct {
 	chartHook        ChartHook
 	suspendedChecker SuspendedChecker
 	deliveryGate     DeliveryGate
+	capabilities     Ed25519AcceptanceRecorder
 	// redis is used for the per-host Ed25519 degrade flag (#1067 / #1071).
 	// 未配線時は capability gate なしの楽観動作 (= payload に Ed25519 鍵が
 	// あれば必ず Ed25519 sign を試す) になるが、production では必須。
@@ -135,6 +142,21 @@ func (p *DeliverProcessor) signingKey(kind, keyID, pem string, parse func(string
 // に対する safety net #1067 / #1071)。
 func (p *DeliverProcessor) SetRedis(c *redis.Client) {
 	p.redis = c
+}
+
+// SetSignatureCapabilityRecorder wires the recorder that tracks which remote
+// hosts successfully accept Ed25519-signed deliveries (#2393).
+func (p *DeliverProcessor) SetSignatureCapabilityRecorder(r Ed25519AcceptanceRecorder) {
+	p.capabilities = r
+}
+
+// recordEd25519Accepted is a best-effort hook fired when an Ed25519-signed
+// delivery returned 2xx. recorder 未配線 / host 不明なら no-op。
+func (p *DeliverProcessor) recordEd25519Accepted(host string) {
+	if p.capabilities == nil || host == "" {
+		return
+	}
+	p.capabilities.ObserveEd25519Accepted(host)
 }
 
 // ed25519DegradeTTL is how long a host stays degraded after the failure
@@ -312,7 +334,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 	// (= 過去 5min 以内に Ed25519 4xx 失敗がない) ときに試す (#1067 / #1071)。
 	useEd25519 := payload.Ed25519PrivPEM != "" && !p.isEd25519Degraded(host)
 
-	resp, err := p.sendOnce(payload, useEd25519)
+	resp, signedWithEd25519, err := p.sendOnce(payload, useEd25519)
 	if err != nil {
 		// network error / parse error は再投函。詳細は sendOnce 内で log 済。
 		p.recordError(payload.Inbox)
@@ -342,17 +364,25 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
 		resp = nil // defer の double Close を避ける
-		retryResp, retryErr := p.sendOnce(payload, false)
+		retryResp, retrySignedWithEd25519, retryErr := p.sendOnce(payload, false)
 		if retryErr != nil {
 			p.recordError(payload.Inbox)
 			return retryErr
 		}
 		resp = retryResp // defer は新 resp を Close する
+		// RSA で送り直したので、この後の 2xx を Ed25519 の成功として数えない。
+		signedWithEd25519 = retrySignedWithEd25519
 	}
 
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		p.recordSuccess(payload.Inbox)
+		if signedWithEd25519 {
+			// Ed25519 で送って同期的に拒否されなかったことを記録する (#2393)。
+			// 「相手が検証できた」までは言えない (verify-in-worker な実装は検証前に
+			// 202 を返す)。同期拒否は上の 4xx degrade 経路が拾う。
+			p.recordEd25519Accepted(host)
+		}
 		return nil
 	case resp.StatusCode == http.StatusGone,
 		resp.StatusCode == http.StatusNotFound:
@@ -398,7 +428,12 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 // payload.Ed25519KeyID + Ed25519PrivPEM で sign、それ以外は RSA。鍵 parse 失敗
 // 時は (useEd25519=true ならば) RSA に fallback する。RSA 鍵自体が壊れている
 // 場合は driver.SkipRetry で投函を中止。
-func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 bool) (*http.Response, error) {
+//
+// 2 つ目の戻り値は「実際に Ed25519 で署名したか」。呼び出し元の useEd25519 とは
+// 一致しないことがある (鍵 parse 失敗で RSA に落ちた場合)。相手が Ed25519 を
+// 観測として記録してよいのは実際に署名した方式だけなので、引数ではなくこの
+// 戻り値を見ること (#2393)。
+func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 bool) (*http.Response, bool, error) {
 	if useEd25519 {
 		key, err := p.signingKey(keyKindEd25519, payload.Ed25519KeyID, payload.Ed25519PrivPEM, activitypub.NewEd25519PrivateKey)
 		if err == nil {
@@ -406,9 +441,9 @@ func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 boo
 			if perr != nil {
 				slog.Warn("ap deliver: ed25519 post failed",
 					"inbox", payload.Inbox, "err", perr)
-				return nil, perr
+				return nil, true, perr
 			}
-			return resp, nil
+			return resp, true, nil
 		}
 		slog.Warn("ap deliver: ed25519 key parse failed, falling back to RSA",
 			"inbox", payload.Inbox, "err", err)
@@ -416,13 +451,13 @@ func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 boo
 	}
 	key, err := p.signingKey(keyKindRSA, payload.KeyID, payload.KeyPEM, activitypub.NewPrivateKey)
 	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w: %w", err, driver.SkipRetry)
+		return nil, false, fmt.Errorf("parse private key: %w: %w", err, driver.SkipRetry)
 	}
 	resp, perr := p.signer.PostSigned(payload.Inbox, payload.Body, key)
 	if perr != nil {
 		slog.Warn("ap deliver: post failed",
 			"inbox", payload.Inbox, "err", perr)
-		return nil, perr
+		return nil, false, perr
 	}
-	return resp, nil
+	return resp, false, nil
 }

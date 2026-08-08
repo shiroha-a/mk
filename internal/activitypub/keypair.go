@@ -32,6 +32,24 @@ const (
 	KeyTypeEd25519
 )
 
+// KeyTypeName returns the canonical short name of a key type ("rsa" /
+// "ed25519").
+//
+// algorithmForKeyType が返すのは Signature header に載せる algorithm 文字列
+// (rsa-sha256 等) で、こちらは鍵種別そのものの語彙。受信した署名がどの方式だった
+// かを記録する用途で使う (#2393)。header の algorithm は "" や hs2019 がありうる
+// ため、観測値としては鍵種別の方が実態に忠実。
+//
+// 値は model.SignatureAlg{RSA,Ed25519} と一致していなければならない (model は
+// 最下層なので activitypub を import できず、定数を共有できない)。一致は
+// core/instance の test で担保する。
+func KeyTypeName(kt KeyType) string {
+	if kt == KeyTypeEd25519 {
+		return "ed25519"
+	}
+	return "rsa"
+}
+
 // GenerateRSAKeypair returns a fresh 2048-bit RSA keypair encoded as PEM
 // strings (private + public). 失敗時はエラーを返す。MarshalPKIXPublicKey は
 // RSAキーに対しては常に成功するため、その後のエラーチェックは省略している。

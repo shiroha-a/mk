@@ -39,6 +39,14 @@ type InstanceTracker interface {
 	MarkRequestReceived(host string) error
 }
 
+// SignatureCapabilityRecorder is invoked after a successfully verified inbound
+// request so the remote host's signature capability can be recorded (#2393).
+// パッケージ間の循環依存を避けるため interface で受け取る (実装は
+// core/instance.CapabilityBuffer)。
+type SignatureCapabilityRecorder interface {
+	ObserveInboundAlg(host, alg string)
+}
+
 // ChartHook is invoked after a successfully verified inbound request
 // so the chart subsystem can record ApRequest.Inbox / FederationChart.
 // Inbox / InstanceChart.RequestReceived. パッケージ間の循環依存を
@@ -64,6 +72,7 @@ type Handler struct {
 	hostBlocker     HostBlockChecker
 	instanceTracker InstanceTracker
 	chartHook       ChartHook
+	capabilities    SignatureCapabilityRecorder
 	enqueuer        InboxEnqueuer
 	// keyCache は同期 fallback 経路 (SetEnqueuer 未配線時) の HTTP Signature
 	// verify で公開鍵パースをメモ化する (#1426)。worker 側 InboxProcessor と
@@ -112,6 +121,12 @@ func (h *Handler) SetExpectedHost(host string) {
 // verified inbound request.
 func (h *Handler) SetChartHook(c ChartHook) {
 	h.chartHook = c
+}
+
+// SetSignatureCapabilityRecorder attaches the recorder that tracks which
+// signature scheme each remote host actually uses (#2393).
+func (h *Handler) SetSignatureCapabilityRecorder(r SignatureCapabilityRecorder) {
+	h.capabilities = r
 }
 
 // signatureRelevantHeaders is the small set of HTTP headers worker-side
@@ -231,7 +246,7 @@ func (h *Handler) Inbox(c echo.Context) error {
 	// #parity review AUTH-1/AUTH-4) を通らない。production が async 一択である
 	// 前提のため許容しているが、将来この fallback を残すなら同 gate の適用
 	// (または fallback 自体の撤去) が必要。
-	actor, err := h.verifySignature(c.Request())
+	actor, keyType, err := h.verifySignature(c.Request())
 	if err != nil {
 		slog.Warn("inbox signature verification failed", "err", err)
 		return c.NoContent(http.StatusUnauthorized)
@@ -242,6 +257,7 @@ func (h *Handler) Inbox(c echo.Context) error {
 	}
 
 	h.touchInstance(actor)
+	h.recordSignatureCapability(actor, keyType)
 	h.commitChart(actor)
 
 	return h.processSynchronously(c, body)
@@ -277,28 +293,30 @@ func (h *Handler) admitInbox(req *http.Request, body []byte) error {
 
 // verifySignature parses the Signature header, resolves the actor, and
 // validates the request signature against the actor's stored public key.
-// 戻り値の actor は後続の host block チェックに再利用される。
-func (h *Handler) verifySignature(req *http.Request) (*model.User, error) {
+// 戻り値の actor は後続の host block チェックに再利用される。KeyType は検証に
+// 成功した鍵の種別で、署名方式の観測記録に使う (#2393、err != nil のとき無意味)。
+func (h *Handler) verifySignature(req *http.Request) (*model.User, activitypub.KeyType, error) {
 	parsed, err := activitypub.ParseSignatureHeader(req.Header.Get("Signature"))
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	actorURI := activitypub.ResolveKeyURL(parsed.KeyID)
 	actor, err := h.resolver.ResolveActor(actorURI)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// keyId fragment ベースで Ed25519 / RSA を dispatch する (#1067 / #1070)。
 	pem, err := h.resolver.PublicKeyForKeyID(actor.ID, parsed.KeyID)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	// keyCache 経由で verify し、同一 (keyId, PEM) の x509 パースをメモ化する
 	// (#1426)。挙動は VerifyRequest と等価。
-	if err := h.keyCache.VerifyRequestCached(req, parsed.KeyID, pem); err != nil {
-		return nil, err
+	kt, err := h.keyCache.VerifyRequestCached(req, parsed.KeyID, pem)
+	if err != nil {
+		return nil, 0, err
 	}
-	return actor, nil
+	return actor, kt, nil
 }
 
 // isHostBlocked reports whether the actor's host is rejected by the local
@@ -323,6 +341,19 @@ func (h *Handler) touchInstance(actor *model.User) {
 		return
 	}
 	_ = h.instanceTracker.MarkRequestReceived(*actor.Host)
+}
+
+// recordSignatureCapability is a best-effort hook that records which signature
+// scheme the remote host used (#2393). recorder 未設定 / actor がローカル /
+// Host nil の場合は no-op。
+//
+// host block チェックの後に呼ぶ: 署名自体は valid でも、連合しない相手の行を
+// 作っても表示先が無い (touchInstance と同じ位置づけ)。
+func (h *Handler) recordSignatureCapability(actor *model.User, kt activitypub.KeyType) {
+	if h.capabilities == nil || actor == nil || actor.Host == nil {
+		return
+	}
+	h.capabilities.ObserveInboundAlg(*actor.Host, activitypub.KeyTypeName(kt))
 }
 
 // commitChart fires the chart hook for one inbound request. Chart hook
