@@ -69,17 +69,21 @@ func (h *Handler) Stats(c echo.Context) error {
 	// upstream は me を packMany に渡し moderator には見せるが、frontend の stats
 	// consumer は host/count しか使わないため、mk-go は安全側に倒して常に隠す
 	// (緩い→厳しい方向の意図的な divergence、#parity review F1-fed)。
+	//
+	// signatureCapability (#2393) は nil 固定で渡す (= 常に null)。本エンドポイントは
+	// 無認証の公開 API で、consumer は host/count しか読まない。表示されない情報の
+	// ために追加クエリを撃たない。必要になったら instances 側と同じ bulk lookup を足す。
 	topSubFollowers := 0
 	topSub := make([]map[string]any, 0, len(subs))
 	for _, inst := range subs {
 		topSubFollowers += inst.FollowersCount
-		topSub = append(topSub, instanceToMap(inst, hosts, false))
+		topSub = append(topSub, instanceToMap(inst, hosts, false, nil))
 	}
 	topPubFollowing := 0
 	topPub := make([]map[string]any, 0, len(pubs))
 	for _, inst := range pubs {
 		topPubFollowing += inst.FollowingCount
-		topPub = append(topPub, instanceToMap(inst, hosts, false))
+		topPub = append(topPub, instanceToMap(inst, hosts, false, nil))
 	}
 
 	return c.JSON(http.StatusOK, map[string]any{

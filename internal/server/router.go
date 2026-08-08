@@ -745,6 +745,21 @@ func (s *Server) setupRoutes() {
 	instanceTouchBuffer.Start(context.Background())
 	s.registerShutdownHook(func(_ context.Context) { instanceTouchBuffer.Close() })
 
+	// 署名方式の観測 (#2393)。inbound は同一 host から高頻度に来るので、
+	// TouchBuffer と同じ縮退方式で per-host per系統 1 UPDATE にまとめる。
+	//
+	// flush 間隔を TouchBuffer の 1s より長い 60s にしているのは、こちらが表示用の
+	// メタデータで秒単位の鮮度を要求しないため。1s のままだと連合先の数だけ毎秒
+	// UPDATE が増え、instance touch の書き込み負荷を実質倍にしてしまう。相手の
+	// 署名方式はそう頻繁に変わらないので、60s 窓で十分に追随できる。
+	sigCapRepo := repository.NewInstanceSignatureCapabilityRepository(s.db)
+	sigCapBuffer := coreinstance.NewCapabilityBuffer(sigCapRepo, time.Minute)
+	sigCapBuffer.Start(context.Background())
+	s.registerShutdownHook(func(_ context.Context) { sigCapBuffer.Close() })
+	// 宣言 (assertionMethod の Ed25519) は actor resolve 経路で同期に書く。
+	// inbound ほど高頻度ではないので buffer を挟まない。
+	federationResolver.SetSignatureCapabilityDeclarer(sigCapRepo)
+
 	// AP delivery: DeliverService + フック登録 + asynq processor 登録
 	deliverService := corefederation.NewDeliverService(s.queueClient, userRepo, followingRepo, keypairRepo, apURLs)
 	deliverService.SetHostBlockChecker(instanceService)
@@ -809,6 +824,9 @@ func (s *Server) setupRoutes() {
 	// 持つ (#1067 / #1071)。Ed25519 sign 失敗時 5min 同 host を RSA only に
 	// 縮退する safety net。
 	deliverProcessor.SetRedis(s.redis.Default)
+	// Ed25519 署名の配送が 2xx を返した (= 同期的には拒否されなかった) ことを
+	// 記録する (#2393)。
+	deliverProcessor.SetSignatureCapabilityRecorder(sigCapBuffer)
 	// deliverSuspendedSoftware: 対象インスタンスへの配送をスキップする
 	if suspMeta, err := metaRepo.Fetch(); err == nil && len(suspMeta.DeliverSuspendedSoftware) > 0 {
 		deliverProcessor.SetSuspendedChecker(
@@ -829,6 +847,7 @@ func (s *Server) setupRoutes() {
 	inboxProcessor.SetSignatureVerifier(federationResolver)
 	inboxProcessor.SetHostBlockChecker(instanceService)
 	inboxProcessor.SetInstanceTracker(instanceTouchBuffer)
+	inboxProcessor.SetSignatureCapabilityRecorder(sigCapBuffer)
 	// LD-Signature verifier (#1164 Phase D)。inbound activity body に signature
 	// field があれば RsaSignature2017 + 2026.5.4 hardening を実行する。signature
 	// 無し / verify pass の activity は素通し、verify fail は drop。
@@ -2271,6 +2290,7 @@ func (s *Server) setupRoutes() {
 	inboxHandler := inbox.NewHandler(federationResolver, federationProcessor)
 	inboxHandler.SetHostBlockChecker(instanceService)
 	inboxHandler.SetInstanceTracker(instanceService)
+	inboxHandler.SetSignatureCapabilityRecorder(sigCapBuffer)
 	inboxHandler.SetChartHook(chartHooks)
 	// inbox admission の host 署名+一致チェックに自ホストを配線する (#1949)。
 	inboxHandler.SetExpectedHost(s.config.Host)
@@ -2292,6 +2312,8 @@ func (s *Server) setupRoutes() {
 	federationHandler.SetRelationRepos(listRelationRepos) // #1957-a: followers/following/users の embed user に relation
 	// moderationNote は公開エンドポイントで moderator にのみ返す (情報漏洩対策)。
 	federationHandler.SetModeratorChecker(roleService)
+	// instance 一覧 / show-instance の signatureCapability field (#2393)。
+	federationHandler.SetSignatureCapabilityLookup(sigCapRepo)
 	api.POST("/federation/instances", federationHandler.Instances)
 	api.GET("/federation/instances", federationHandler.Instances)
 	api.POST("/federation/show-instance", federationHandler.ShowInstance)

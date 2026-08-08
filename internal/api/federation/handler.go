@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"gorm.io/gorm"
 )
 
 // ActorResolver is the narrow subset of core/federation.Resolver that
@@ -34,6 +35,15 @@ type ModeratorChecker interface {
 	IsModerator(userID string) bool
 }
 
+// SignatureCapabilityLookup is the read-only subset of
+// repository.InstanceSignatureCapabilityRepository needed to decorate instance
+// responses with the observed signature scheme (#2393). 未配線なら
+// signatureCapability は常に null になる。
+type SignatureCapabilityLookup interface {
+	FindByHost(host string) (*model.InstanceSignatureCapability, error)
+	FindManyByHosts(hosts []string) ([]*model.InstanceSignatureCapability, error)
+}
+
 // Handler handles federation-related API endpoints.
 type Handler struct {
 	svc           *coreinstance.Service
@@ -48,6 +58,9 @@ type Handler struct {
 	// relation は embed する user/followee に viewer 視点の relation block を
 	// 付与する (upstream packMany(users, me))。未配線 / 匿名では no-op (#1957-a)。
 	relation userrelation.Repos
+	// capabilities は instance ごとの署名方式観測 (#2393)。未配線なら
+	// signatureCapability は null。
+	capabilities SignatureCapabilityLookup
 }
 
 // NewHandler creates a new federation Handler.
@@ -80,6 +93,12 @@ func (h *Handler) SetResolver(r ActorResolver) {
 // relation fields on embedded users/followees (#1957-a). Unset = relations omitted.
 func (h *Handler) SetRelationRepos(r userrelation.Repos) {
 	h.relation = r
+}
+
+// SetSignatureCapabilityLookup wires the store that reports which signature
+// scheme each remote host uses (#2393).
+func (h *Handler) SetSignatureCapabilityLookup(l SignatureCapabilityLookup) {
+	h.capabilities = l
 }
 
 // SetModeratorChecker attaches a ModeratorChecker so moderationNote is only
@@ -169,9 +188,12 @@ func (h *Handler) Instances(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	showModNote := h.requesterIsModerator(c)
+	// 1 ページぶんの host をまとめて 1 クエリで引く。行ごとに引くと 1 ページで
+	// limit 回のクエリが飛ぶ (N+1)。
+	caps := h.lookupCapabilities(rows)
 	out := make([]map[string]any, 0, len(rows))
 	for _, inst := range rows {
-		out = append(out, instanceToMap(inst, hosts, showModNote))
+		out = append(out, instanceToMap(inst, hosts, showModNote, caps[inst.Host]))
 	}
 	return c.JSON(http.StatusOK, out)
 }
@@ -204,7 +226,7 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 		slog.Error("federation/show-instance: FederationHostLists failed", "host", req.Host, "err", err)
 		return apierr.JSONInternalError(c)
 	}
-	return c.JSON(http.StatusOK, instanceToMap(inst, hosts, h.requesterIsModerator(c)))
+	return c.JSON(http.StatusOK, instanceToMap(inst, hosts, h.requesterIsModerator(c), h.lookupCapability(inst.Host)))
 }
 
 // instanceToMap shapes an Instance row into the JSON response object expected
@@ -217,7 +239,7 @@ func (h *Handler) ShowInstance(c echo.Context) error {
 // meta.blockedHosts / silencedHosts / mediaSilencedHosts との suffix-match で
 // 判定する (本家 InstanceEntityService と同じ)。突合対象の host 一覧は呼び出し
 // 元が meta から 1 度だけ取得して渡す。
-func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, showModerationNote bool) map[string]any {
+func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, showModerationNote bool, sigCap *model.InstanceSignatureCapability) map[string]any {
 	// moderationNote はモデレーター専用フィールド。公開エンドポイントなので
 	// 非モデレーターには null を返す (upstream InstanceEntityService の
 	// `moderationNote: iAmModerator ? note : null` 互換)。
@@ -268,5 +290,72 @@ func instanceToMap(inst *model.Instance, hosts coreinstance.FederationHostSets, 
 		"themeColor":              inst.ThemeColor,
 		"infoUpdatedAt":           entity.ISOMillisPtr(inst.InfoUpdatedAt),
 		"moderationNote":          moderationNote,
+		// mk-go 独自の additive field (#2393)。upstream の InstanceEntityService には
+		// 無いので misskey-js の型にも載らない。fork frontend はローカル型で受ける。
+		"signatureCapability": signatureCapabilityToMap(sigCap),
+	}
+}
+
+// lookupCapabilities batch-resolves the signature capability of every host in
+// rows. 未配線 / DB error では空 map を返し、レスポンスは signatureCapability:
+// null になる (表示用のメタデータなので、取得できないことで一覧全体を失敗させない)。
+func (h *Handler) lookupCapabilities(rows []*model.Instance) map[string]*model.InstanceSignatureCapability {
+	if h.capabilities == nil || len(rows) == 0 {
+		return nil
+	}
+	hosts := make([]string, 0, len(rows))
+	for _, inst := range rows {
+		hosts = append(hosts, inst.Host)
+	}
+	found, err := h.capabilities.FindManyByHosts(hosts)
+	if err != nil {
+		slog.Warn("federation/instances: signature capability lookup failed", "err", err)
+		return nil
+	}
+	out := make(map[string]*model.InstanceSignatureCapability, len(found))
+	for _, row := range found {
+		out[row.Host] = row
+	}
+	return out
+}
+
+// lookupCapability resolves a single host's signature capability. 行が無い場合
+// (= 未観測) と未配線 / error はどちらも nil を返す。
+func (h *Handler) lookupCapability(host string) *model.InstanceSignatureCapability {
+	if h.capabilities == nil || host == "" {
+		return nil
+	}
+	row, err := h.capabilities.FindByHost(host)
+	if err != nil {
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("federation/show-instance: signature capability lookup failed", "host", host, "err", err)
+		}
+		return nil
+	}
+	return row
+}
+
+// signatureCapabilityToMap shapes the observed signature capability into the
+// additive `signatureCapability` response block (#2393).
+//
+// ed25519 / ldSignature は導出値。生の観測時刻も併せて返すのは、「いつの情報か」が
+// 連合トラブルの切り分けで効くため (宣言だけ古い / 配送成功が最近ある、等が
+// 区別できる)。観測が 1 つも無い host は null を返し、frontend 側はラベルを出さない。
+func signatureCapabilityToMap(sigCap *model.InstanceSignatureCapability) any {
+	if sigCap == nil {
+		return nil
+	}
+	var inboundAlg any
+	if sigCap.InboundAlg != nil {
+		inboundAlg = *sigCap.InboundAlg
+	}
+	return map[string]any{
+		"ed25519":           sigCap.SupportsEd25519(),
+		"ldSignature":       sigCap.SupportsLDSignature(),
+		"inboundAlgorithm":  inboundAlg,
+		"ed25519DeclaredAt": entity.ISOMillisPtr(sigCap.Ed25519DeclaredAt),
+		"ed25519AcceptedAt": entity.ISOMillisPtr(sigCap.Ed25519AcceptedAt),
+		"inboundObservedAt": entity.ISOMillisPtr(sigCap.InboundObservedAt),
+		"ldSignatureSeenAt": entity.ISOMillisPtr(sigCap.LDSignatureSeenAt),
 	}
 }
