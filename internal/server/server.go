@@ -61,6 +61,11 @@ type Server struct {
 	queueRuntimeStats *runtimestats.Recorder
 	autoscale         *autoscaleRunner
 	chartMgmt         *chart.ManagementService
+	// mediaProxySecret は internal media proxy URL の HMAC 鍵。config に
+	// 明示設定が無ければ DB (instance_secret) の生成値を使うため、New() で
+	// 一度だけ解決して保持する。
+	mediaProxySecret []byte
+
 	// deliverSvc は federation deliver service への参照。本番では asynq
 	// 経由で deliver を enqueue するが、test (#780) で queue を bypass する
 	// ための SetSyncDeliverHookForTest を呼べるよう参照を保持する。
@@ -193,6 +198,39 @@ const (
 	// 読み取れない。
 	serverMaxHeaderBytes = 1 << 20
 )
+
+// resolveMediaProxySecret returns the HMAC key used to sign internal media
+// proxy URLs.
+//
+// 設定に `mediaProxySecret` があればそれを使う。無ければ DB (instance_secret)
+// に永続化した乱数を使い、初回起動時に生成する。
+//
+// 以前は未設定時にインスタンス URL から導出していたが、URL は公開情報なので
+// 誰でも同じ鍵を計算できた。mediaproxy の Authorize は署名を allowlist より
+// **先に**見るため、署名を偽造できると allowlist ごと迂回でき、mk-go の
+// media proxy が upstream と同じ「任意の公開 URL を取得する開いたプロキシ」に
+// 退化していた。
+//
+// 起動ごとのメモリ生成では足りない。署名した URL を別プロセスが検証する構成が
+// 成り立たなくなるし、role icon や announcement image のように allowlist に
+// 載らない URL は再起動をまたいだ時点で 401 になる (allowlist にある
+// avatar / drive / emoji / instance icon は fallback で救われるので、
+// 壊れ方が経路ごとに変わって切り分けづらい)。
+//
+// DB から取れない場合は起動を止める。ここで弱い鍵に fallback すると、直した
+// はずの迂回経路が黙って戻る。
+func resolveMediaProxySecret(cfg *config.Config, db *gorm.DB) ([]byte, error) {
+	if len(cfg.MediaProxySecret) > 0 {
+		return cfg.MediaProxySecret, nil
+	}
+	secret, err := repository.NewInstanceSecretRepository(db).
+		GetOrCreate(repository.MediaProxySecretKey)
+	if err != nil {
+		return nil, fmt.Errorf("resolve media proxy secret: %w", err)
+	}
+	slog.Info("media proxy secret: using the generated instance secret; set mediaProxySecret in config to manage it yourself")
+	return secret, nil
+}
 
 // applyServerTimeouts sets read/idle timeouts and the header size cap on srv.
 //
@@ -336,6 +374,13 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	if setter, ok := queueDriver.Server().(interface{ SetObserver(driver.Observer) }); ok {
 		s.queueRuntimeStatsObserver(setter)
 	}
+
+	mediaProxySecret, err := resolveMediaProxySecret(cfg, db)
+	if err != nil {
+		// 弱い鍵に fallback すると、直したはずの allowlist 迂回が黙って戻る。
+		return nil, err
+	}
+	s.mediaProxySecret = mediaProxySecret
 
 	s.setupRoutes()
 

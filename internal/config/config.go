@@ -1,7 +1,6 @@
 package config
 
 import (
-	"crypto/sha256"
 	"fmt"
 	"log/slog"
 	"net"
@@ -739,16 +738,24 @@ func ParseTrustProxy(cidrs []string) []*net.IPNet {
 	return nets
 }
 
-// deriveMediaProxySecret returns a secret for HMAC-signed media proxy URLs.
-// 設定にsecretがあればそれを使用、なければインスタンスURL固有のキーを自動生成する。
+// deriveMediaProxySecret returns the configured secret for HMAC-signed media
+// proxy URLs, or nil when the operator did not set one.
+//
+// **URL から導出してはいけない。** 以前は未設定時に
+// `sha256(url + "|mediaproxy")` を使っていたが、インスタンス URL は公開情報
+// なので誰でも同じ鍵を計算でき、任意の URL に有効な署名を付けられた。
+// mediaproxy の Authorize は署名を allowlist より先に見るので、署名を偽造
+// できると allowlist ごと迂回でき、mk-go の media proxy が upstream と同じ
+// 「任意の公開 URL を取得する開いたプロキシ」に退化していた。
+//
+// nil を返した場合は、DB に永続化した instance_secret から鍵を解決する
+// (router 側で resolveMediaProxySecret が行う)。鍵はプロセス間・再起動を
+// またいで安定している必要があるため、起動時のメモリ生成では足りない。
 func deriveMediaProxySecret(src *Source) []byte {
 	if src.MediaProxySecret != "" {
 		return []byte(src.MediaProxySecret)
 	}
-	// URLは公開情報なのでsecretとしては弱い。運用者に設定を促す。
-	slog.Warn("config: mediaProxySecret is not set; using a URL-derived fallback. Set mediaProxySecret in config for stronger HMAC security.")
-	h := sha256.Sum256([]byte(src.URL + "|mediaproxy"))
-	return h[:]
+	return nil
 }
 
 func resolveRedisOrDefault(opts *RedisOptions, fallback RedisOptions, host string) RedisOptions {

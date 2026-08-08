@@ -1825,10 +1825,11 @@ func (s *Server) setupRoutes() {
 	if m, err := metaRepo.Fetch(); err == nil {
 		proxyRemoteFiles = m.ProxyRemoteFiles
 	}
+
 	mediaURLCtx := entity.NewMediaURLContext(
 		s.config.URL,
 		s.config.MediaProxy,
-		s.config.MediaProxySecret,
+		s.mediaProxySecret,
 		s.config.ExternalMediaProxyEnabled,
 		proxyRemoteFiles,
 	)
@@ -2066,7 +2067,7 @@ func (s *Server) setupRoutes() {
 	proxyAllowlist := coremediaproxy.NewDBAllowlistChecker(s.db)
 	proxyService := coremediaproxy.NewService(
 		s.config.URL, s.config.UserAgent, driveStorage,
-		proxyAllowlist, s.config.MediaProxySecret,
+		proxyAllowlist, s.mediaProxySecret,
 		s.config.AllowedPrivateNetworks,
 		s.outboundOpts()...,
 	)
