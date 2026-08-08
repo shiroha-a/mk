@@ -2527,9 +2527,26 @@ func (s *Server) setupRoutes() {
 	// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
 	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
 	streamManager.SubscribeWordMuteReload()
+	// follow / mute / block 変更を受け取って接続中の snapshot を取り直す (#2400)。
+	streamManager.SubscribeRelationReload()
 	// broadcast stream (emojiAdded/Updated/Deleted 等) を全 connection へ forward (#2046)。
 	streamManager.SubscribeBroadcast()
 	iHandler.SetHardMutePublisher(&hardMutePublisherAdapter{pubsub: streamPubSub})
+	// relation 変更 (#2400) の publisher を各 mutation 側へ配線する。7 系統すべてを
+	// 繋がないと「一部の操作だけ反映されない」形の抜けになるので、まとめて置く。
+	//   Muting          -> core/muting
+	//   BlockingMe      -> core/blocking (通知先は blockee、向きに注意)
+	//   RenoteMuting    -> core/muting の RenoteService
+	//   MutedInstances  -> api/i の update
+	//   MutingChannels  -> api/channels の mute
+	//   following       -> core/following (Follow / Unfollow / AcceptRequest)
+	relationReloadPublisher := &relationReloadPublisherAdapter{pubsub: streamPubSub}
+	mutingService.SetRelationReloadPublisher(relationReloadPublisher)
+	blockingService.SetRelationReloadPublisher(relationReloadPublisher)
+	renoteMutingService.SetRelationReloadPublisher(relationReloadPublisher)
+	followingService.SetRelationReloadPublisher(relationReloadPublisher)
+	channelsHandler.SetRelationReloadPublisher(relationReloadPublisher)
+	iHandler.SetRelationReloadPublisher(relationReloadPublisher)
 	// profile 編集を remote followers に Update(Person) で配信する (#1560)。
 	// actor endpoint と同じ shape にするため ed25519 keypair を、follower 以外の
 	// relay subscriber にも届けるため relay broadcaster を配線する。
@@ -3808,6 +3825,39 @@ func (a *muteBlockSnapshotAdapter) MuteBlockSnapshotForUser(userID string) *stre
 		}
 	}
 	return snap
+}
+
+// relationReloadPublisherAdapter bridges PubSubService to the various
+// RelationReloadPublisher interfaces (core/muting, core/blocking,
+// core/following, api/channels, api/i) so relation changes reach every active
+// streaming connection of the user (#2400).
+//
+// mutation 側は「誰の」「どちらの snapshot が」変わったかだけを知り、pubsub の
+// 存在を知らない。hardMutePublisherAdapter (#791) と同じ形。
+//
+// 失敗は log のみで握る。realtime nudge が届かなくても API 応答は成功させる
+// (client は次の再接続で新しい snapshot を取る)。
+type relationReloadPublisherAdapter struct {
+	pubsub *event.PubSubService
+}
+
+func (a *relationReloadPublisherAdapter) publish(userID string, scope stream.RelationScope) {
+	if a.pubsub == nil || userID == "" {
+		return
+	}
+	payload := stream.RelationReloadPayload{UserID: userID, Scope: scope}
+	if err := a.pubsub.Publish(context.Background(), stream.RelationReloadTopic, payload); err != nil {
+		slog.Warn("router: relation reload publish failed",
+			"userID", userID, "scope", scope, "err", err)
+	}
+}
+
+func (a *relationReloadPublisherAdapter) PublishMuteBlockReload(userID string) {
+	a.publish(userID, stream.RelationScopeMuteBlock)
+}
+
+func (a *relationReloadPublisherAdapter) PublishFollowingReload(userID string) {
+	a.publish(userID, stream.RelationScopeFollowing)
 }
 
 // hardMutePublisherAdapter bridges PubSubService to i.HardMutePublisher so
