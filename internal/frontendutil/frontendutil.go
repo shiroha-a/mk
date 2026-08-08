@@ -19,6 +19,18 @@ func FrontendDir() string {
 	return filepath.Join(frontendBase, "built", "_frontend_vite_")
 }
 
+// FrontendEmbedDir returns the path to built embed frontend assets.
+// 環境変数 MISSKEY_FRONTEND_EMBED_DIR で上書き可能。
+//
+// embed は通常の SPA とは別の vite build で、bundle も entry も別物
+// (`/embed_vite/` 配下で配信し、entry は src/boot.ts)。
+func FrontendEmbedDir() string {
+	if v := os.Getenv("MISSKEY_FRONTEND_EMBED_DIR"); v != "" {
+		return v
+	}
+	return filepath.Join(frontendBase, "built", "_frontend_embed_vite_")
+}
+
 // FrontendDistDir returns the path to _frontend_dist_ assets (locales, fonts).
 // 環境変数 MISSKEY_FRONTEND_DIST_DIR で上書き可能。
 func FrontendDistDir() string {
@@ -123,7 +135,22 @@ type ClientEntryInfo struct {
 // MkCustomEmoji / MkMention) のスタイルが当たらない。ビルド済みアセットが存在し
 // ない場合は空値を返す (dev mode)。
 func DetectClientEntry() ClientEntryInfo {
-	manifestPath := filepath.Join(FrontendDir(), "manifest.json")
+	return detectEntry(FrontendDir(), "src/_boot_.ts")
+}
+
+// DetectEmbedEntry is the embed-bundle counterpart of DetectClientEntry.
+//
+// embed は別の vite build なので manifest も entry key も別 (`src/boot.ts`)。
+// CSS の再帰収集は通常版と同じ理由で必要 — vite は SFC の `<style scoped>` を
+// chunk 単位の CSS に切り出すため、entry が同期 import する chunk の CSS も
+// link しないとスタイルが当たらない。
+func DetectEmbedEntry() ClientEntryInfo {
+	return detectEntry(FrontendEmbedDir(), "src/boot.ts")
+}
+
+// detectEntry reads a Vite manifest under dir and resolves entryKey.
+func detectEntry(dir, entryKey string) ClientEntryInfo {
+	manifestPath := filepath.Join(dir, "manifest.json")
 	data, err := os.ReadFile(manifestPath)
 	if err != nil {
 		return ClientEntryInfo{}
@@ -138,7 +165,7 @@ func DetectClientEntry() ClientEntryInfo {
 	if err := json.Unmarshal(data, &manifest); err != nil {
 		return ClientEntryInfo{}
 	}
-	entry, ok := manifest["src/_boot_.ts"]
+	entry, ok := manifest[entryKey]
 	if !ok {
 		return ClientEntryInfo{}
 	}

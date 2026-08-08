@@ -3472,6 +3472,15 @@ func (s *Server) setupRoutes() {
 		s.echo.Any("/vite/*", newViteProxy("http://localhost:5173"))
 	}
 
+	// embed 専用バンドル配信 (#2389)。通常の SPA とは別 build なので別ディレクトリ・
+	// 別 prefix になる (upstream ClientServerService の `/embed_vite/` と同じ)。
+	frontendEmbedDir := frontendutil.FrontendEmbedDir()
+	if _, err := os.Stat(frontendEmbedDir); err == nil {
+		s.echo.Static("/embed_vite", frontendEmbedDir)
+	} else {
+		s.echo.Any("/embed_vite/*", newViteProxy("http://localhost:5174"))
+	}
+
 	// フロントエンド配布アセット (locales, fonts等) + リポジトリアセット (ai.png等)
 	// Echo は同一パスに Static を 2 回登録すると上書きされるため、
 	// frontendDistDir → repoAssetsDir の順にフォールバックするハンドラを使う
@@ -3503,6 +3512,9 @@ func (s *Server) setupRoutes() {
 	staticDir := frontendutil.StaticDir()
 	if _, err := os.Stat(staticDir); err == nil {
 		s.echo.Static("/static-assets", staticDir)
+		// 埋め込み先サイトが読み込むローダー。upstream も staticAssets から
+		// 配っている (#2389)。
+		s.echo.File("/embed.js", filepath.Join(staticDir, "embed.js"))
 		s.echo.File("/favicon.ico", filepath.Join(staticDir, "favicon.ico"))
 		s.echo.File("/apple-touch-icon.png", filepath.Join(staticDir, "apple-touch-icon.png"))
 		// /robots.txt はここでは配らない。upstream は meta を見て動的生成する
@@ -3541,6 +3553,33 @@ func (s *Server) setupRoutes() {
 	if _, err := os.Stat(filepath.Join(swDistDir, "sw.js")); err == nil {
 		s.echo.File("/sw.js", filepath.Join(swDistDir, "sw.js"))
 	}
+
+	// 埋め込みページ (#2389)。SPA catchall より**前**に登録する。後だと
+	// /embed/* が通常の SPA シェルに落ちて、iframe の中にフルアプリが出る
+	// (エラーにならないので気付きにくい壊れ方になる)。
+	//
+	// pack は viewer なしで行う。埋め込みは認証を伴わないので、閲覧者依存の
+	// フィールドを解決してはいけない。可視性の判断は各 handler の
+	// PackForEmbed 経由で既存の CanSee / HideEmbeds に委ねる。
+	embed := newEmbedHandlers(s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability, EmbedDeps{
+		NoteRepo: noteRepo,
+		UserRepo: userRepo,
+		ClipRepo: clipRepo,
+		PackNote: func(c echo.Context, n *model.Note) (any, error) {
+			return notesHandler.PackForEmbed(c.Request().Context(), n), nil
+		},
+		PackUser: func(_ echo.Context, u *model.User) (any, error) {
+			// upstream の userEntityService.pack(user) 相当 (= UserLite)。
+			return entity.PackUserLite(u), nil
+		},
+		PackClip: func(_ echo.Context, cl *model.Clip) (any, error) {
+			return clipsHandler.PackForEmbed(cl), nil
+		},
+	})
+	s.echo.GET("/embed/notes/:note", embed.Note)
+	s.echo.GET("/embed/user-timeline/:user", embed.User)
+	s.echo.GET("/embed/clips/:clip", embed.Clip)
+	s.echo.GET("/embed/*", embed.Fallback)
 
 	// Frontend HTML shell — SPA catchall (最後に登録)
 	s.echo.GET("/*", frontend)

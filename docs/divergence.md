@@ -346,6 +346,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
 | `admin/promo/create` | visibility check なし | public 以外を reject (将来の IDOR 先回り) |
+| `/embed/clips/:clip` | clip の存在だけを見る (非公開 clip も埋め込める) | `isPublic` も見る。埋め込みは無認証で誰でも読める経路なので、本人だけが見えるはずの clip を配らない (#2389) |
 | `federation/stats` の moderationNote | moderator には見せる | 公開 endpoint なので常に隠す |
 | moderator inactive 判定 | 空集合で登録を無効化しうる | lastActiveDate 保持者 0 人なら何もしない |
 | SSRF の IPv4-mapped IPv6 | `::ffff:0:0/96` を一律遮断 | 埋め込み v4 を IPv4 レンジで評価し private 埋め込みのみ遮断 (over-block より精密)。NAT64 / RFC6145 は別途遮断 |

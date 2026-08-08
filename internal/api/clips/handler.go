@@ -570,3 +570,11 @@ func (h *Handler) materializeIfMissing(noteID string, lookupErr error) bool {
 	_, err := h.materializer.EnsureNote(context.Background(), noteID)
 	return err == nil
 }
+
+// PackForEmbed packs a clip for the anonymous embed page (#2389).
+//
+// viewer は nil 固定。isFavorited のような閲覧者依存フィールドは埋め込みでは
+// 解決しない。
+func (h *Handler) PackForEmbed(cl *model.Clip) map[string]any {
+	return h.clipToMap(cl, nil)
+}

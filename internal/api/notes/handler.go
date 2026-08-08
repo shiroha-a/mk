@@ -1120,3 +1120,16 @@ func nilOrChannel(r repository.ChannelRepository) entity.ChannelLookup {
 	}
 	return r
 }
+
+// PackForEmbed packs a note for the anonymous embed page (#2389).
+//
+// viewer は nil 固定。埋め込みは認証を伴わないので、閲覧者依存のフィールドを
+// 解決してはいけない。packReferencedNote を経由するのは、可視性の判断を
+// **既存の 1 箇所に寄せる**ため。ここで独自に判定を書くと、CanSee /
+// HideEmbeds に後から入る修正が embed だけ取り残される。
+//
+// viewer=nil のとき queryService.CanSee は public / home 以外を false にし、
+// HideEmbeds は renote / reply の埋め込みを同じ深さで gate する。
+func (h *Handler) PackForEmbed(ctx context.Context, n *model.Note) entity.NoteEntity {
+	return h.packReferencedNote(ctx, n, nil, true)
+}
