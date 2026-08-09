@@ -27,6 +27,8 @@ var errMock = assert.AnError
 type mockReversiRepo struct {
 	games     map[string]*model.ReversiGame
 	createErr error
+	// listErr forces ListByUser to fail (#2407 の探索経路のエラー分岐用)。
+	listErr error
 }
 
 func newMock() *mockReversiRepo {
@@ -79,6 +81,9 @@ func (m *mockReversiRepo) MarkStarted(g *model.ReversiGame) (bool, error) {
 }
 
 func (m *mockReversiRepo) ListByUser(userID string, limit int) ([]*model.ReversiGame, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
 	var result []*model.ReversiGame
 	for _, g := range m.games {
 		if g.User1ID == userID || g.User2ID == userID {

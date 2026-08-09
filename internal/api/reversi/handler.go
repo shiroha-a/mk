@@ -380,10 +380,9 @@ func (h *Handler) Match(c echo.Context) error {
 	// 「user1=user2 の仮置き game 行を作って 200 で返す」実装は frontend を
 	// 即ゲーム画面 (自分 vs 自分) に遷移させてしまう上、仮置き行が invitations
 	// に自分自身として出るため、行を作らず本家と同じ空レスポンスを返す (#1553)。
-	// any-match の実ペアリング (本家は Redis queue) は未実装で、frontend の
-	// matchHeatbeat が定期的に再呼び出しする前提。
+	// any-match の実ペアリングは待機列 (Redis ZSET) で行う (#2407)。
 	if req.UserID == "" {
-		return c.NoContent(http.StatusNoContent)
+		return h.matchAny(c, user, req.NoIrregularRules, req.Multiple)
 	}
 
 	// 既に相手から招待を受けている pending game があれば、それを accept 扱いで
@@ -550,6 +549,15 @@ func (h *Handler) CancelMatch(c echo.Context) error {
 	}
 	_ = c.Bind(&req)
 	ctx := c.Request().Context()
+	// userId 未指定 = ランダムマッチの取り消し。待機列から自分を外す (#2407)。
+	// upstream matchAnyUserCancel に対応する。ここで外さないと、取り消した
+	// つもりの利用者が他人にマッチされ続ける。
+	if req.UserID == "" && h.svc != nil {
+		if err := h.svc.CancelMatchAny(ctx, user.ID); err != nil {
+			slog.Warn("reversi cancel-match: dequeue from match-any failed",
+				"userId", user.ID, "err", err)
+		}
+	}
 	games, _ := h.repo.ListByUser(user.ID, 10)
 	for _, g := range games {
 		if g.IsStarted || g.IsEnded {
@@ -557,8 +565,8 @@ func (h *Handler) CancelMatch(c echo.Context) error {
 		}
 		// userId 指定時は upstream matchSpecificUserCancel 互換 (cancel-match.ts:
 		// 33-38): 自分がその相手に送った招待 (User1=自分, User2=相手) だけを
-		// 取り消す。未指定時は従来通り自分の pending を全部片付ける (mk-go は
-		// any-match queue を持たないため、これが matchAnyUserCancel の近似)。
+		// 取り消す。未指定時は自分の pending を全部片付ける (待機列からの離脱は
+		// 上で済ませてある)。
 		if req.UserID != "" && (g.User1ID != user.ID || g.User2ID != req.UserID) {
 			continue
 		}
@@ -692,4 +700,127 @@ func (h *Handler) Verify(c echo.Context) error {
 		resp["game"] = packGame(game, h.idGen)
 	}
 	return c.JSON(http.StatusOK, resp)
+}
+
+// matchAny implements the random-opponent path of /api/reversi/match (#2407).
+//
+// upstream `ReversiService.matchAnyUser` と同じ順序で 3 段階に分かれる。
+//
+//  1. 既に成立している未開始の対局があればそれを返す (multiple=false のとき)
+//  2. 自分宛ての招待があれば、それを受ける
+//  3. 待機列で相手を探す。居なければ自分が待機列に入って 204
+//
+// 順序が意味を持つ。2 を 3 より先に見ないと、自分を名指しで誘っている相手が
+// 居るのに無関係な相手とマッチしてしまう。
+//
+// # 連合はしない
+//
+// 待機列 (3) に載るのは **このインスタンスで認証を通した local user だけ**なので、
+// ランダムマッチの相手がリモートになることはない。upstream Misskey も
+// yojo-art/cherrypick も連合ランダムマッチは持っていないので、意図的に揃えている。
+//
+// ただし (2) の招待は inbound AP Invite 由来 = リモートからのものがありうる。
+// そちらは specific-match と同じ accept 経路 (`sendJoinForAcceptedInvite`) を
+// 通るので、連合対局として正しく成立する。
+func (h *Handler) matchAny(c echo.Context, user *model.User, noIrregularRules, multiple bool) error {
+	ctx := c.Request().Context()
+
+	// 1. 直近の未開始対局の再利用。upstream は multiple=true でこれを飛ばして
+	//    毎回新しく探す (ReversiService.ts:146)。
+	if !multiple {
+		if g := h.findPendingGameFor(user.ID); g != nil {
+			return c.JSON(http.StatusOK, packGame(g, h.idGen))
+		}
+	}
+
+	// 2. 自分宛ての招待を消費する。mk-go では招待が reversi_game 行なので、
+	//    「自分が User2 の未開始 game」がそれにあたる。specific-match の
+	//    accept 経路と同じ扱いにして、相手に Join を返す。
+	if g := h.findPendingInvitationTo(user.ID); g != nil {
+		h.sendJoinForAcceptedInvite(c, user, g)
+		return c.JSON(http.StatusOK, packGame(g, h.idGen))
+	}
+
+	// 3. 待機列。
+	if h.svc == nil {
+		return c.NoContent(http.StatusNoContent)
+	}
+	res, err := h.svc.EnqueueMatchAny(ctx, user.ID, noIrregularRules)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	if !res.Matched() {
+		// 待機列に入った。frontend の matchHeatbeat が再呼び出しする。
+		return c.NoContent(http.StatusNoContent)
+	}
+
+	// 相手を確保できたので対局を作る。**待機列から取れた時点で相手は確定して
+	// いる** (ZRem の戻り値で排他済み) ので、ここで作った game が二重になる
+	// ことはない。
+	now := time.Now()
+	game := &model.ReversiGame{
+		ID:                   h.idGen.Generate(now),
+		User1ID:              res.OpponentID,
+		User2ID:              user.ID,
+		Map:                  defaultMap,
+		BW:                   "random",
+		TimeLimitForEachTurn: 90,
+		Logs:                 datatypes.JSON("[]"),
+	}
+	if err := h.repo.Create(game); err != nil {
+		// 対局を作れなかったら相手を待機列に戻す。ここで戻さないと、確保だけ
+		// して対局が無い「消えた待機者」になる。
+		if h.svc != nil {
+			_, _ = h.svc.EnqueueMatchAny(ctx, res.OpponentID, res.NoIrregularRules)
+		}
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+
+	// 相手側は heartbeat を待たずに対局へ入れるよう stream で知らせる。
+	// specific-match の invited と同じ経路。
+	if h.streamPub != nil {
+		h.streamPub.PublishInvited(res.OpponentID, user)
+	}
+	return c.JSON(http.StatusOK, packGame(game, h.idGen))
+}
+
+// findPendingGameFor returns the caller's most recent unstarted game within the
+// dedup window, regardless of who invited whom. upstream matchAnyUser の
+// 「既にマッチしている対局が無いか探す(3分以内)」に対応する。
+func (h *Handler) findPendingGameFor(userID string) *model.ReversiGame {
+	games, err := h.repo.ListByUser(userID, 20)
+	if err != nil {
+		return nil
+	}
+	for _, g := range games {
+		if g.IsStarted || g.IsEnded {
+			continue
+		}
+		if !h.withinMatchDedupWindow(g) {
+			continue
+		}
+		return g
+	}
+	return nil
+}
+
+// findPendingInvitationTo returns any pending invitation addressed to userID
+// (= unstarted game where the caller is User2), regardless of the inviter.
+//
+// specific-match は相手が分かっているので FindPendingInvitation を使うが、
+// any-match は「誰でもいいから自分宛ての招待」を探す。
+func (h *Handler) findPendingInvitationTo(userID string) *model.ReversiGame {
+	games, err := h.repo.ListByUser(userID, 20)
+	if err != nil {
+		return nil
+	}
+	for _, g := range games {
+		if g.IsStarted || g.IsEnded {
+			continue
+		}
+		if g.User2ID == userID && g.User1ID != userID {
+			return g
+		}
+	}
+	return nil
 }

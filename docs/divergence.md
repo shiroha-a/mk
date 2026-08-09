@@ -52,6 +52,10 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | cherrypick chat 拡張 | 15 | `chat/messages` / `chat/messages/create` / `read` / `update` / `reactions/create` / `reactions/delete`、`chat/rooms/joined` / `unmute` / `transfer-ownership` / `members/ban` / `members/update-membership` / `invitations/accept` / `delete` / `reject`、`chat/unread-count` |
 | その他 / alias | 3 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim) |
 
+ランダムマッチ (`reversi/match` の `userId` 無し) は **local user 同士のみ**。待機列 (`reversi:matchAny`) に載るのはこのインスタンスで認証を通した local user だけなので、相手がリモートになることはない。upstream Misskey も yojo-art/cherrypick も**連合ランダムマッチは持っていない**ので意図的に揃えている。名指しの招待 (`userId` 指定) は従来どおり連合する。
+
+なお待機者の確保だけは upstream より厳密にしてある。upstream は `ZRANGE` → `ZREM` の順で **`ZREM` の戻り値を見ない**ため、同じ待機者を 2 人が同時に見つけると両方が対局を作る。mk-go は `ZREM` が 1 を返した呼び出しだけが対局を作る (#2407)。
+
 **reversi は endpoint レベルの差分ゼロ。** mk-go の 7 本 (`games` / `invitations` / `show-game` / `match` / `cancel-match` / `surrender` / `verify`) は upstream 2026.7.0 と完全一致。`crc32` カラムと `reversi/verify` も upstream 標準 (`models/ReversiGame.ts` / `endpoints/reversi/verify.ts`)。**cherrypick 由来の拡張は ActivityPub 層と、packed game レスポンスに `crc32` 等を additive に載せる点に現れる** (§3-1 参照)。
 
 ### 1-1b. レスポンスの additive field
