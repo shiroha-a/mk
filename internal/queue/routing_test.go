@@ -17,7 +17,7 @@ import (
 //
 // ここは「あるべき姿」ではなく **現在の実態** を固定する表。意図して配置を
 // 変えるときは期待値も更新すること。deliver に載っている
-// `note:postScheduled` / `maintenance:deleteAccount` / `relationship:*` は
+// `note:postScheduled` / `maintenance:deleteAccount` は
 // いずれも実行結果が連合配送につながるジョブで、maintenance (worker 2) より
 // deliver (worker 16) の方が捌けるという判断による現状維持。
 func TestClient_EnqueueRouting(t *testing.T) {
@@ -83,19 +83,19 @@ func TestClient_EnqueueRouting(t *testing.T) {
 
 		{"follow", func(c *queue.Client) error {
 			return c.EnqueueFollow(queue.FollowPayload{FollowerID: "a", FolloweeID: "b"})
-		}, queue.TaskTypeFollow, queue.QueueName},
+		}, queue.TaskTypeFollow, queue.RelationshipQueueName},
 
 		{"unfollow", func(c *queue.Client) error {
 			return c.EnqueueUnfollow(queue.UnfollowPayload{FollowerID: "a", FolloweeID: "b"})
-		}, queue.TaskTypeUnfollow, queue.QueueName},
+		}, queue.TaskTypeUnfollow, queue.RelationshipQueueName},
 
 		{"block", func(c *queue.Client) error {
 			return c.EnqueueBlock(queue.BlockPayload{BlockerID: "a", BlockeeID: "b"})
-		}, queue.TaskTypeBlock, queue.QueueName},
+		}, queue.TaskTypeBlock, queue.RelationshipQueueName},
 
 		{"unblock", func(c *queue.Client) error {
 			return c.EnqueueUnblock(queue.UnblockPayload{BlockerID: "a", BlockeeID: "b"})
-		}, queue.TaskTypeUnblock, queue.QueueName},
+		}, queue.TaskTypeUnblock, queue.RelationshipQueueName},
 	}
 
 	for _, tc := range cases {

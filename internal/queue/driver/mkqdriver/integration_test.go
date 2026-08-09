@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/queue/driver/mkqdriver"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -1311,4 +1312,108 @@ func TestPauseResume_EndToEnd(t *testing.T) {
 		t.Fatal("resume 後に parked job が処理されなかった (orphan)")
 	}
 	assert.Equal(t, int32(1), atomic.LoadInt32(&received))
+}
+
+// TestServer_RelationshipFloodDoesNotStarveDeliver is the regression test for
+// #2403: relationship jobs used to be enqueued onto the deliver queue, so a
+// burst of them (account migration / follow import) occupied the delivery
+// worker pool and stalled ActivityPub delivery itself.
+//
+// 分離できていることを「大量の relationship job で worker を塞いだ状態でも
+// deliver が処理される」という形で直接観測する。
+//
+// **queue.Client 経由で enqueue するのが要点。** driver に直接 queue 名を
+// 渡すと routing を迂回してしまい、enqueueRelationship を deliver に戻す
+// 回帰を捕まえられない。ここでは EnqueueFollow / EnqueueDeliver という
+// 実際の呼び出し口を使うので、routing と worker 分離の両方を同時に固定する。
+//
+// relationship の worker 数 (4) より十分多い job を投げてプールを飽和させ、
+// 解放しないまま deliver が完了することを確認する。
+func TestServer_RelationshipFloodDoesNotStarveDeliver(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	// flood は **deliver の worker 数 (16) を上回る**必要がある。下回ると、
+	// 相乗りしていても deliver 側に空き worker が残ってしまい、回帰を
+	// 検出できない (実際 flood=12 では revert しても通ってしまった)。
+	const relWorkers = 4      // = defaultQueueConcurrency["relationship"]
+	const deliverWorkers = 16 // = defaultQueueConcurrency["deliver"]
+	const flood = deliverWorkers + 8
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	client := queue.NewClient(d)
+	srv := d.Server()
+
+	var (
+		relInFlight atomic.Int32
+		release     = make(chan struct{})
+		delivered   = make(chan struct{}, 1)
+	)
+	// relationship 側は release されるまで worker を握り続ける。
+	srv.Handle(queue.TaskTypeFollow, func(ctx context.Context, _ driver.Task) error {
+		relInFlight.Add(1)
+		defer relInFlight.Add(-1)
+		select {
+		case <-release:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	srv.Handle(queue.TaskTypeDeliver, func(_ context.Context, _ driver.Task) error {
+		select {
+		case delivered <- struct{}{}:
+		default:
+		}
+		return nil
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	for i := range flood {
+		require.NoError(t, client.EnqueueFollow(queue.FollowPayload{
+			FollowerID: fmt.Sprintf("follower%d", i),
+			FolloweeID: "followee",
+		}))
+	}
+
+	// relationship の worker プールが飽和するまで待つ。ここまで来れば
+	// 「relationship で塞がっている」状態を確実に作れている。飽和しない
+	// (= relationship queue に worker が居ない) 場合もここで落ちる。
+	deadline := time.After(10 * time.Second)
+	for relInFlight.Load() < int32(relWorkers) {
+		select {
+		case <-deadline:
+			t.Fatalf("relationship pool never saturated (in-flight=%d, want %d)",
+				relInFlight.Load(), relWorkers)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// 塞がったまま deliver を投入し、relationship を解放せずに完了させる。
+	require.NoError(t, client.EnqueueDeliver(queue.DeliverPayload{
+		Inbox: "https://example.com/inbox",
+		Body:  []byte(`{}`),
+	}))
+
+	select {
+	case <-delivered:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("deliver job was starved by %d in-flight relationship jobs "+
+			"(is enqueueRelationship back on the deliver queue?)", relInFlight.Load())
+	}
+
+	close(release)
 }

@@ -33,6 +33,7 @@ var QueueNames = []string{
 	"webhook",
 	"maintenance",
 	"objectStorage",
+	"relationship",
 }
 
 // Config is the per-driver configuration the constructor consumes.
@@ -233,6 +234,15 @@ var defaultQueueConcurrency = map[string]int{
 	// 効率が良く、bulk cleanup は job 1 本が内部でバッチ削除を回すため
 	// (= job 数で並列度を稼ぐ設計ではない)、deliver と同じ理由で抑える。
 	"objectStorage": 4,
+	// upstream は relationshipJobConcurrency ?? 16。relationship job は DB
+	// bound (following 行 + カウンタ + stream publish) で、外向き HTTP は
+	// deliver へ再 enqueue されるだけ。db.MaxOpenConns の既定 25 を HTTP 経路と
+	// 共有するため、16 を DB bound な queue に割くと Web 側のテールレイテンシに
+	// 響く。deliver からの隔離 (#2403 の目的) は 4 で達成できる。足りなければ
+	// operator が relationshipJobConcurrency で上げられる。
+	// deliver を 128→16 に抑えているのは Go の per-worker 効率が理由で、
+	// こちらとは根拠が違う。
+	"relationship": 4,
 }
 
 // unknownQueueConcurrency is applied to any queue absent from

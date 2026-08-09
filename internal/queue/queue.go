@@ -55,6 +55,15 @@ const ObjectStorageQueueName = "objectStorage"
 // drop-in compat.
 const InboxQueueName = "inbox"
 
+// RelationshipQueueName is the queue for per-pair relationship jobs
+// (follow / unfollow / block / unblock). Misskey TS uses the same name.
+//
+// #2403 まではこれらが deliver queue に相乗りしていた。大量 follow
+// (アカウント移行 / import / follow 爆撃) が発生すると relationship job が
+// deliver の worker を占有して AP 配信そのものを詰まらせるため、独立して
+// back-pressure できるよう分離した。
+const RelationshipQueueName = "relationship"
+
 // Enqueuer abstracts task enqueueing for callers (DeliverService,
 // admin handlers, etc.). The interface is driver-neutral so callers
 // can be unit-tested with mocks.
@@ -523,10 +532,10 @@ func (c *Client) EnqueueUnblock(payload UnblockPayload) error {
 // relationship jobs (follow / unfollow / block / unblock)。
 func (c *Client) enqueueRelationship(taskType string, body []byte) error {
 	base := []driver.EnqueueOption{
-		driver.WithQueue(QueueName),
+		driver.WithQueue(RelationshipQueueName),
 		driver.WithMaxRetry(3),
 	}
-	base = append(base, c.retentionOpts(QueueName)...)
+	base = append(base, c.retentionOpts(RelationshipQueueName)...)
 	return c.inner.Enqueue(context.Background(), taskType, body, base...)
 }
 
