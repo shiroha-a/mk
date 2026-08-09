@@ -560,6 +560,16 @@ func applyUserFields(u *model.User, fields map[string]any) {
 			if s, ok := v.(*string); ok {
 				u.Name = s
 			}
+		// アカウント移行の adjustFollowingCounts (#2418) が map 経由で 0 に
+		// 落とす。int リテラルで渡ってくるので *int は見ない。
+		case "followersCount":
+			if n, ok := v.(int); ok {
+				u.FollowersCount = n
+			}
+		case "followingCount":
+			if n, ok := v.(int); ok {
+				u.FollowingCount = n
+			}
 		case "inbox":
 			if s, ok := v.(*string); ok {
 				u.Inbox = s
@@ -5468,6 +5478,20 @@ func (m *MockFollowingRepository) ListFollowersToNotify(userID string) ([]*model
 		}
 	}
 	return rows, nil
+}
+
+// ListLocalFollowerIDs mirrors repository.followingRepository.ListLocalFollowerIDs
+// (followeeId 一致かつ followerHost IS NULL の followerId を全件)。
+// 実装同様 followerId 昇順で返し、caller が順序に依存できるようにする。
+func (m *MockFollowingRepository) ListLocalFollowerIDs(followeeID string) ([]string, error) {
+	var ids []string
+	for _, f := range m.Followings {
+		if f.FolloweeID == followeeID && f.FollowerHost == nil {
+			ids = append(ids, f.FollowerID)
+		}
+	}
+	sort.Strings(ids)
+	return ids, nil
 }
 
 // ListFollowingForList mirrors repository.followingRepository.ListFollowingForList

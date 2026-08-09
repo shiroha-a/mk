@@ -28,6 +28,16 @@ type FollowingRepository interface {
 	// notifications to followers who opted into post notifications (upstream
 	// NoteCreateService の findBy({followeeId, notify:'normal'}))。
 	ListFollowersToNotify(userID string) ([]*model.Following, error)
+	// ListLocalFollowerIDs returns the followerIds of every local follower of
+	// followeeID (= rows where followeeId matches and followerHost IS NULL).
+	//
+	// アカウント移行のフォロワー引き継ぎ (#2418) 用。upstream は
+	// `findBy({followeeId, followerHost: IsNull(), followerId: Not(proxy.id)})`
+	// で全件取る。ListFollowers は limit/offset 必須でページングが要るが、
+	// 移行は 1 回きりの一括処理で件数上限も無いため、全件を 1 クエリで引く
+	// 専用メソッドを分けている (ページング漏れが取りこぼしに直結するため)。
+	// proxy account の除外は caller 側で行う。
+	ListLocalFollowerIDs(followeeID string) ([]string, error)
 	ListFollowing(userID string, limit, offset int) ([]*model.Following, error)
 	// ListFolloweeIDs returns every user id the given user follows.
 	// HTL の「返信先が followers 限定の投稿」ガードで集合として使うため、
@@ -194,6 +204,17 @@ func (r *followingRepository) ListFollowersToNotify(userID string) ([]*model.Fol
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (r *followingRepository) ListLocalFollowerIDs(followeeID string) ([]string, error) {
+	var ids []string
+	if err := r.db.Model(&model.Following{}).
+		Where(`"followeeId" = ? AND "followerHost" IS NULL`, followeeID).
+		Order(`"followerId"`).
+		Pluck(`"followerId"`, &ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (r *followingRepository) ListFollowing(userID string, limit, offset int) ([]*model.Following, error) {

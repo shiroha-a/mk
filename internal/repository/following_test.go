@@ -392,6 +392,47 @@ func TestFollowingRepository_ListFollowersToNotify(t *testing.T) {
 	assert.Equal(t, notifyFollower.ID, rows[0].FollowerID)
 }
 
+// ListLocalFollowerIDs は followerHost IS NULL のフォロワーだけを全件返す
+// (#2418 アカウント移行のフォロワー引き継ぎ用)。リモートフォロワーと、別ユーザーの
+// フォロワーを取り込まないことを固定する。
+func TestFollowingRepository_ListLocalFollowerIDs(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	followee := insertTestUser(t, "u_llf_fe", "llffe")
+	defer cleanupUser(t, followee.ID)
+	other := insertTestUser(t, "u_llf_other", "llfother")
+	defer cleanupUser(t, other.ID)
+	localA := insertTestUser(t, "u_llf_a", "llfa")
+	defer cleanupUser(t, localA.ID)
+	localB := insertTestUser(t, "u_llf_b", "llfb")
+	defer cleanupUser(t, localB.ID)
+	remote := insertTestUser(t, "u_llf_r", "llfr")
+	defer cleanupUser(t, remote.ID)
+
+	insertFollowing(t, "llf_a", localA.ID, followee.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "llf_a")
+	insertFollowing(t, "llf_b", localB.ID, followee.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "llf_b")
+	// followerHost 有り = リモートフォロワーは対象外。
+	host := "remote.example"
+	remoteRow := &model.Following{
+		ID: "llf_r", FollowerID: remote.ID, FolloweeID: followee.ID, FollowerHost: &host,
+	}
+	require.NoError(t, testDB.Create(remoteRow).Error)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, remoteRow.ID)
+	// 別ユーザーのフォロワーも対象外。
+	insertFollowing(t, "llf_other", localA.ID, other.ID)
+	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, "llf_other")
+
+	ids, err := repo.ListLocalFollowerIDs(followee.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{localA.ID, localB.ID}, ids)
+
+	// フォロワーが居なければ空。
+	empty, err := repo.ListLocalFollowerIDs(other.ID + "-nobody")
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
 func TestFollowingRepository_QueryErrors(t *testing.T) {
 	// cancelledなcontextを使ってgorm経由でerrorを発生させる
 	ctx, cancel := context.WithCancel(context.Background())
