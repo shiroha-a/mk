@@ -3,7 +3,7 @@
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
 - 基準: **mk-go 1.1.1** ⇔ Misskey TS `2026.7.0`
-- 最終更新: 2026-08-07
+- 最終更新: 2026-08-09
 
 > ベースラインを固定したのは 1.0.0 (= Misskey TS `2026.7.0` 追従完了時点)。以降の 1.1.x は
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもの。したがって
@@ -288,7 +288,7 @@ upstream は用途ごとに **10 queue** に分けるが、mk-go は **7 queue**
 | `objectStorage` | `objectStorage` |
 | — | `push` (Web Push 配信、upstream は system queue 内で処理) |
 
-`objectStorage` は `deleteFile` / `cleanRemoteFiles` とも upstream と同じ job 構成 (#2325)。振り分けも upstream に揃えてあり、ローカル FS 保存 (`storedInternal=true`) の実体は同期削除、object storage 上の実体だけを queue に逃がす。`clean-remote-files` は「job 1 本が内部でバッチ削除を回す」形も upstream と同じで、リモートキャッシュの件数ぶん job を積んで Redis を圧迫することはない。
+`objectStorage` は `deleteFile` / `cleanRemoteFiles` とも upstream と同じ job 構成 (#2325)。振り分けも upstream に揃えてあり、ローカル FS 保存 (`storedInternal=true`) の実体は同期削除、object storage 上の実体だけを queue に逃がす。`clean-remote-files` は「job 1 本が内部でバッチ削除を回す」形も upstream と同じで、リモートキャッシュの件数ぶん job を積んで Redis を圧迫することはない。ただし mk-go はそもそもリモートメディアをキャッシュしないので、この job の対象は構造的に 0 件になる (§5.5)。job 構成を upstream に揃えてあるのは drop-in 復路のため。
 
 `note:postScheduled` / `maintenance:deleteAccount` / `relationship:*` が task type の接頭辞と違う `deliver` に載っているのは意図的なもの。いずれも実行結果が連合配送につながるジョブで、worker 2 本の `maintenance` より 16 本の `deliver` の方が捌ける。task type と queue の対応は `internal/queue/routing_test.go` が表として固定しており、変えると落ちる (#2327)。
 
@@ -321,6 +321,53 @@ worker 数だけは upstream の 16 に対し mk-go は 4。実体削除は S3 �
 
 ---
 
+## 5.5. リモートメディアをローカルにキャッシュしない (意図的)
+
+upstream は `cacheRemoteFiles` が真のとき、連合で流れてきたメディアの実体を自サーバーの
+Drive へ保存する。**mk-go はこれを実装しない。** 未実装ではなく意図的な設計判断。
+
+### 挙動
+
+| 対象 | upstream | mk-go |
+|---|---|---|
+| ノート添付 | `cacheRemoteFiles` が真なら実体を Drive へ保存 | **link 行のみ** (`isLink=true` / `size=0` / `md5=""`)。実 fetch しない |
+| リモートの avatar / banner | Drive へ保存しうる | **URL 文字列を `user.avatarUrl` に持つだけ**。drive_file 行を作らない |
+| 表示 | ローカルのキャッシュを配信 | メディアプロキシが都度取得して中継 (保存しない) |
+
+`meta.cacheRemoteFiles` / `cacheRemoteSensitiveFiles` の**列と API field は残す**
+(drop-in 互換のため)。値は保存・返却されるがダウンロード判定には使わない。
+関連する admin UI は無効表示にして理由を出している (fork frontend)。
+
+`admin/drive/clean-remote-files` も実装は残るが、対象 (`isLink=false` の remote file) が
+構造的に存在しないため常に 0 件。
+
+### 理由
+
+1. **相手の削除の権利**。キャッシュを持つとそのコピーのライフサイクルを自分が所有する。
+   相手が消しても、Delete 配送が届かない・連合が切れている・ノートは残してファイルだけ
+   差し替えた等のケースでコピーが残り続ける
+2. **リスク**。連合を流れてくる違法コンテンツが自ストレージに保存される。都度取得して
+   中継するのとは実務上の立場が違う
+3. ストレージ増加の抑制 (上の 2 つに比べれば副次的)
+
+### キャッシュしないことの弱点と、その埋まり方
+
+| 一般的な弱点 | mk-go の状況 |
+|---|---|
+| クライアントの IP が相手サーバーに漏れる | メディアプロキシが吸収する (drive / avatar / banner 等は server-proxy 経由) |
+| 閲覧のたびに再取得して帯域を食う | プロキシ応答に `Cache-Control` (最長 3 日) が付き、CDN / ブラウザがキャッシュする |
+| 相手サーバーが消えると表示が壊れる | **埋まらない。** キャッシュしない設計の本質的なトレードオフとして受け入れる |
+
+なおエッジキャッシュにも複製は載るが、性質が違う。TTL で自動失効する一時的なインフラ層で
+あって、バックアップにも入る永続レコードではない。「削除の権利」の観点ではこの差が効く。
+
+### 影響する upstream 機能
+
+  - `DriveService.expireOldFile` (容量超過時の LRU 退去) — **不要**。退去すべき実体が
+    存在しない。実装しかけたが、キャッシュしない以上 dead code になるため破棄した
+  - remote user への `driveCapacityMb` gate — 同様に意味を持たない。`size=0` の link 行は
+    使用量に乗らない
+
 ## 6. セキュリティ関連の差分
 
 | 項目 | upstream | mk-go |
@@ -345,6 +392,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 
 | 項目 | upstream | mk-go |
 |---|---|---|
+| リモートメディアのキャッシュ | `cacheRemoteFiles` が真なら実体を自 Drive へ保存 | **保存しない** (相手の削除の権利 / 違法コンテンツ保持のリスク回避)。詳細と弱点は §5.5 |
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
 | `admin/promo/create` | visibility check なし | public 以外を reject (将来の IDOR 先回り) |
