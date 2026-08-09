@@ -1775,7 +1775,22 @@ func (s *Server) setupRoutes() {
 	iHandler.SetPageLikeRepo(pageLikeRepo)
 	// P4-6 followup (#174): i/move は federation resolver + deliverService を使って
 	// 宛先 actor 解決 → alsoKnownAs 検証 → MovedTo 書き込み → Move activity 配送。
-	iHandler.SetAccountMover(coremove.NewService(userRepo, followingRepo, apURLs, apRenderer, federationResolver, deliverService))
+	accountMover := coremove.NewService(userRepo, followingRepo, apURLs, apRenderer, federationResolver, deliverService)
+	// #2418: 移行時に旧アカウントのローカルフォロワーを移行先へ follow させる。
+	// relationship queue (#2403) に載るので AP 配送を詰まらせない。
+	accountMover.SetFollowQueue(s.queueClient)
+	// proxy account はリスト購読のため機械的に follow しているだけなので
+	// 引き継ぎ対象から外す。newProxyAccountResolver は username を返す別用途の
+	// resolver なので、ここでは user id を引く専用のものを渡す。
+	moveSystemAccountRepo := repository.NewSystemAccountRepository(s.db)
+	accountMover.SetProxyAccountResolver(func() (string, bool) {
+		sa, err := moveSystemAccountRepo.FindByType("proxy")
+		if err != nil || sa == nil {
+			return "", false
+		}
+		return sa.UserID, true
+	})
+	iHandler.SetAccountMover(accountMover)
 	api.POST("/i", iHandler.Me, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/i/update", iHandler.Update, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 	api.POST("/i/pin", iHandler.Pin, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))

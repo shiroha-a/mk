@@ -8,11 +8,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 )
 
@@ -47,6 +49,19 @@ type Deliverer interface {
 	DeliverToFollowers(signerUserID string, body []byte) error
 }
 
+// FollowEnqueuer schedules follow jobs. Implemented by queue.Client.
+//
+// アカウント移行のフォロワー引き継ぎは 1 回で大量の follow を生むため、
+// 必ず queue 経由にする。#2403 で relationship queue に分離済みなので、
+// ここが AP 配送 (deliver queue) の worker を奪うことはない。
+type FollowEnqueuer interface {
+	EnqueueFollowBulk(payloads []queue.FollowPayload) error
+}
+
+// ProxyAccountIDResolver returns the local proxy account's user id.
+// The second return value is false when no proxy account is configured.
+type ProxyAccountIDResolver func() (string, bool)
+
 // Service owns the account-move workflow.
 type Service struct {
 	userRepo      repository.UserRepository
@@ -55,7 +70,20 @@ type Service struct {
 	renderer      *activitypub.Renderer
 	resolver      Resolver
 	deliverer     Deliverer
+
+	// followQueue / proxyAccount は post-move 処理 (#2418) 用。既存の
+	// NewService 呼び出しを壊さないよう setter で後付けする。未設定なら
+	// フォロワー引き継ぎは skip する (移行そのものは成立させる)。
+	followQueue  FollowEnqueuer
+	proxyAccount ProxyAccountIDResolver
 }
+
+// SetFollowQueue wires the queue used to schedule follower migration jobs.
+func (s *Service) SetFollowQueue(q FollowEnqueuer) { s.followQueue = q }
+
+// SetProxyAccountResolver wires the lookup used to exclude the proxy account
+// from follower migration.
+func (s *Service) SetProxyAccountResolver(f ProxyAccountIDResolver) { s.proxyAccount = f }
 
 // NewService constructs a Service. resolver / deliverer may be nil in tests;
 // Move returns ErrNoSuchUser early if resolver is missing, and skips delivery
@@ -144,6 +172,11 @@ func (s *Service) Move(src *model.User, dstURI string) error {
 	src.MovedAt = &now
 	src.AlsoKnownAs = strPtr(newAlsoKnownAs)
 
+	// フォロワーの引き継ぎ。DB は既にコミット済みなので best-effort
+	// (エラーを返して再試行されると次回 ErrAlreadyMoved で詰む)。
+	// deliverer 未配線でも引き継ぎは行いたいので、下の early return より前で呼ぶ。
+	s.PostMoveProcess(src, dst)
+
 	if s.deliverer == nil {
 		return nil
 	}
@@ -194,3 +227,102 @@ func appendIfMissing(csvPtr *string, uri string) string {
 }
 
 func strPtr(s string) *string { return &s }
+
+// PostMoveProcess migrates local followers of src onto dst.
+//
+// upstream AccountMoveService.postMoveProcess の後半に対応する。前半
+// (ブロック / ミュート / ロール / リスト / アンテナの引き継ぎ) は #2419。
+//
+// move-out (Move) と move-in (#2414 の processRemoteMove) の両方から呼ばれる
+// 想定なので exported にしてある。
+//
+// **best-effort。** 呼び出し時点で DB の movedToUri は既にコミット済みで、
+// ここでエラーを返して呼び出し側が再試行すると ErrAlreadyMoved で詰む。
+// 失敗は log に落として握り潰す (Move の配送失敗と同じ扱い)。
+func (s *Service) PostMoveProcess(src, dst *model.User) {
+	if src == nil || dst == nil || s.followingRepo == nil {
+		return
+	}
+	followerIDs, err := s.followingRepo.ListLocalFollowerIDs(src.ID)
+	if err != nil {
+		slog.Warn("move: list local followers failed",
+			"srcID", src.ID, "dstID", dst.ID, "err", err)
+		return
+	}
+	// proxy account はリストの購読用に機械的にフォローしているだけなので、
+	// 移行先へ follow させない (upstream も followerId: Not(proxy.id) で除外)。
+	if s.proxyAccount != nil {
+		if proxyID, ok := s.proxyAccount(); ok {
+			followerIDs = slices.DeleteFunc(followerIDs, func(id string) bool {
+				return id == proxyID
+			})
+		}
+	}
+	if len(followerIDs) == 0 {
+		return
+	}
+
+	// カウント調整を先に行う。follow job は非同期なので、先に enqueue すると
+	// worker が新しい follow を作った後で古いカウントを引くことになり、
+	// 二重に減る余地がある。
+	s.adjustFollowingCounts(followerIDs, src)
+
+	if s.followQueue == nil {
+		slog.Warn("move: follow queue not wired; followers were not migrated",
+			"srcID", src.ID, "dstID", dst.ID, "followers", len(followerIDs))
+		return
+	}
+	payloads := make([]queue.FollowPayload, 0, len(followerIDs))
+	for _, followerID := range followerIDs {
+		payloads = append(payloads, queue.FollowPayload{
+			FollowerID: followerID,
+			FolloweeID: dst.ID,
+		})
+	}
+	if err := s.followQueue.EnqueueFollowBulk(payloads); err != nil {
+		slog.Warn("move: enqueue follower migration failed",
+			"srcID", src.ID, "dstID", dst.ID, "followers", len(payloads), "err", err)
+	}
+}
+
+// adjustFollowingCounts zeroes the old account's counters and decrements the
+// counters of everyone who was in a follow relationship with it.
+//
+// **旧アカウントを unfollow しない**のが要点。upstream のコメントどおり
+// "Decrease following count instead of unfollowing" で、フォロー行は残したまま
+// カウントだけ落とす。旧アカウントが移行後もまだ機能しうるため関係を切らない、
+// という設計。素直に unfollow に置き換えると挙動が変わる。
+//
+// 結果として DB は「フォロー行はあるがカウントに出ない」状態になる。これは
+// upstream と同じ状態で、意図的なもの。
+func (s *Service) adjustFollowingCounts(localFollowerIDs []string, src *model.User) {
+	if len(localFollowerIDs) == 0 || s.userRepo == nil {
+		return
+	}
+	// 旧アカウント自身のカウントを 0 にする。
+	if err := s.userRepo.UpdateUser(src.ID, map[string]any{
+		"followersCount": 0,
+		"followingCount": 0,
+	}); err != nil {
+		slog.Warn("move: reset old account counters failed", "srcID", src.ID, "err", err)
+	}
+	// ローカルフォロワーの followingCount を 1 ずつ減らす。
+	for _, followerID := range localFollowerIDs {
+		if err := s.userRepo.IncrementFollowingCount(followerID, -1); err != nil {
+			slog.Warn("move: decrement follower's followingCount failed",
+				"followerID", followerID, "err", err)
+		}
+	}
+	// 旧アカウントがフォローしていた相手の followersCount を 1 ずつ減らす。
+	followeeIDs, err := s.followingRepo.ListFolloweeIDs(src.ID)
+	if err != nil {
+		slog.Warn("move: list followees of old account failed", "srcID", src.ID, "err", err)
+		return
+	}
+	for _, followeeID := range followeeIDs {
+		if err := s.userRepo.IncrementFollowersCount(followeeID, -1); err != nil {
+			slog.Warn("move: decrement followee's followersCount failed",
+				"followeeID", followeeID, "err", err)
+		}
+	}
+}
