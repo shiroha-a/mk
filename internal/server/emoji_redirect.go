@@ -97,6 +97,13 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		if target == "" {
 			return c.NoContent(http.StatusNotFound)
 		}
+		// upstream (`ServerService.ts` の `/emoji/:path`) はここで
+		// `default-src 'none'; style-src 'unsafe-inline'` を付けるので header を
+		// 揃える。ただし **この応答は redirect なので CSP は実際には効かない**
+		// (ブラウザは最終的な応答の header を適用する)。upstream も redirect の
+		// 前に付けており同じ状態。security 上の効果を期待して置くものではなく、
+		// header 集合を一致させるためのもの。
+		c.Response().Header().Set("Content-Security-Policy", assetCSP)
 		// upstream は 301 redirect だが、emoji の publicUrl が変動しうる
 		// (リモート instance の URL 更新等) ので 302 で永続キャッシュを
 		// 避ける。Cache-Control: max-age=86400 でブラウザ側 1 日キャッシュ

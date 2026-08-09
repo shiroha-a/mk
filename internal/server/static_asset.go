@@ -18,6 +18,18 @@ import (
 // filenames).
 const staticAssetCacheControl = "public, max-age=2592000, immutable"
 
+// assetCSP is the Content-Security-Policy upstream Misskey TS attaches to its
+// asset routes (`ClientServerService.ts` / `ServerService.ts`)。
+//
+// `default-src 'none'` で script / frame / connect 等を全面禁止し、SVG や PNG が
+// 単体で開かれたときに何も実行できないようにする。`style-src 'unsafe-inline'` は
+// SVG が持つ inline style を壊さないための upstream 由来の緩和。
+//
+// 値は upstream の文字列そのまま。**独自に強めない。** これらの route は
+// drop-in で TS backend にも切り替わりうるので、mk-go でだけ厳しくすると
+// 「mk-go に載せると表示が壊れる」形の差になる。
+const assetCSP = "default-src 'none'; style-src 'unsafe-inline'"
+
 // serveStaticAssetDir mirrors echo.Echo.Static(prefix, root) but attaches
 // the long-lived `Cache-Control` header. Used for /twemoji and
 // /fluent-emoji to align with upstream Misskey TS browser cache policy.
@@ -36,6 +48,7 @@ func serveStaticAssetDir(e *echo.Echo, prefix, root string) {
 			return echo.NewHTTPError(http.StatusBadRequest, "invalid path escape")
 		}
 		c.Response().Header().Set("Cache-Control", staticAssetCacheControl)
+		c.Response().Header().Set("Content-Security-Policy", assetCSP)
 		return c.File(filepath.Join(root, filepath.Clean("/"+p)))
 	})
 }

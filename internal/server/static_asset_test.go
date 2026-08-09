@@ -119,3 +119,22 @@ func TestServeStaticAssetDir_PathTraversalBlocked(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, rec.Code, "path traversal must not succeed")
 	assert.NotContains(t, rec.Body.String(), "secret")
 }
+
+// upstream (`ClientServerService.ts` の /twemoji /fluent-emoji) が付けている CSP を
+// 揃える (#2404)。SVG が単体で開かれても何も実行できない状態にする。
+func TestServeStaticAssetDir_SetsAssetCSP(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "1f600.svg"), []byte("<svg/>"), 0o644))
+
+	e := echo.New()
+	serveStaticAssetDir(e, "/twemoji", dir)
+
+	req := httptest.NewRequest(http.MethodGet, "/twemoji/1f600.svg", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "default-src 'none'; style-src 'unsafe-inline'",
+		rec.Header().Get("Content-Security-Policy"),
+		"値は upstream の文字列と完全一致させる (独自に強めない)")
+}

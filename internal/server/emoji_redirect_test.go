@@ -178,3 +178,21 @@ func TestEmojiRedirectHandler_EmptyURLs_404(t *testing.T) {
 	require.NoError(t, h(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+// upstream (`ServerService.ts` の /emoji/:path) が付けている CSP を揃える (#2404)。
+//
+// **この応答は redirect なので CSP は実際には効かない** (ブラウザは最終的な応答の
+// header を適用する)。upstream も redirect の前に付けており同じ状態で、header 集合を
+// 一致させるためのもの。効果を期待して置いているわけではない。
+func TestEmojiRedirectHandler_SetsAssetCSP(t *testing.T) {
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		"smile|": {Name: "smile", PublicURL: "https://cdn.example/local-smile.png"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "")
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "default-src 'none'; style-src 'unsafe-inline'",
+		rec.Header().Get("Content-Security-Policy"))
+}
