@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -871,4 +872,55 @@ func validSource(s model.AntennaSource) bool {
 		return true
 	}
 	return false
+}
+
+// OnMoveAccount appends dst's acct to every antenna whose `users` set lists src.
+//
+// upstream AntennaService.onMoveAccount 相当 (#2419)。アカウント移行時に
+// 「src をアンテナに登録していた人」のアンテナへ dst を**追記**する。
+//
+// **src は消さない。** 移行の引き継ぎは一貫して「旧側を消さずに新側を足す」
+// 方向で、旧アカウントがまだ投稿しうる以上そちらの購読も残す。
+//
+// best-effort。呼び出し時点で移行そのものは確定しているので、失敗しても
+// エラーを返さず log に落とす。
+func (s *Service) OnMoveAccount(src, dst *model.User) {
+	if src == nil || dst == nil || s.repo == nil {
+		return
+	}
+	antennas, err := s.repo.ListAllActive()
+	if err != nil {
+		slog.Warn("antenna: list for move failed", "srcID", src.ID, "dstID", dst.ID, "err", err)
+		return
+	}
+	dstAcct := "@" + acctOf(dst)
+	for _, a := range antennas {
+		// users / usersBlacklist のどちらも `users` 配列を使うので、src を
+		// 挙げているものは source の種別を問わず追随させる (upstream も
+		// antenna.users だけを見て src を含むか判定している)。
+		if !matchesAntennaAcct(a.Users, src) {
+			continue
+		}
+		// 既に dst が入っているアンテナは触らない (再実行しても増えない)。
+		if matchesAntennaAcct(a.Users, dst) {
+			continue
+		}
+		next := append(append(pq.StringArray{}, a.Users...), dstAcct)
+		if err := s.repo.UpdateFields(a.ID, map[string]any{"users": next}); err != nil {
+			slog.Warn("antenna: append moved account failed",
+				"antennaID", a.ID, "dstID", dst.ID, "err", err)
+			continue
+		}
+		a.Users = next
+	}
+}
+
+// acctOf renders `username` (local) or `username@host` (remote), lower-cased to
+// match matchesAntennaAcct's comparison.
+func acctOf(u *model.User) string {
+	acct := strings.ToLower(u.Username)
+	if u.Host != nil && *u.Host != "" {
+		acct += "@" + strings.ToLower(*u.Host)
+	}
+	return acct
 }

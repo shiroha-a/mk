@@ -1349,3 +1349,64 @@ func TestRemoveNote(t *testing.T) {
 	assert.ErrorIs(t, svc.RemoveNote("other", "a1", "n1"), ErrAccessDenied)
 	assert.ErrorIs(t, svc.RemoveNote("u1", "nope", "n1"), ErrAntennaNotFound)
 }
+
+// OnMoveAccount は src を users に挙げているアンテナへ dst の acct を**追記**する。
+// src は消さない (#2419)。移行の引き継ぎは一貫して「旧側を消さず新側を足す」方向。
+func TestOnMoveAccount(t *testing.T) {
+	remoteHost := "remote.example"
+	src := &model.User{ID: "src", Username: "Alice"}
+	dst := &model.User{ID: "dst", Username: "Alice2", Host: &remoteHost}
+
+	cases := []struct {
+		name      string
+		users     pq.StringArray
+		isActive  bool
+		wantUsers pq.StringArray
+	}{
+		{
+			name:      "src を挙げているアンテナに dst を追記する",
+			users:     pq.StringArray{"@alice", "@bob"},
+			isActive:  true,
+			wantUsers: pq.StringArray{"@alice", "@bob", "@alice2@remote.example"},
+		},
+		{
+			// upstream 同様 acct 比較は大文字小文字を無視する。
+			name:      "大文字小文字が違っても一致させる",
+			users:     pq.StringArray{"@ALICE"},
+			isActive:  true,
+			wantUsers: pq.StringArray{"@ALICE", "@alice2@remote.example"},
+		},
+		{
+			name:      "src が居ないアンテナは触らない",
+			users:     pq.StringArray{"@bob"},
+			isActive:  true,
+			wantUsers: pq.StringArray{"@bob"},
+		},
+		{
+			name:      "既に dst が居れば重複させない",
+			users:     pq.StringArray{"@alice", "@alice2@remote.example"},
+			isActive:  true,
+			wantUsers: pq.StringArray{"@alice", "@alice2@remote.example"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, repo := newSvc(t)
+			repo.Antennas["a1"] = &model.Antenna{
+				ID: "a1", UserID: "owner", Src: model.AntennaSourceUsers,
+				Users: tc.users, IsActive: tc.isActive,
+			}
+
+			svc.OnMoveAccount(src, dst)
+
+			assert.Equal(t, tc.wantUsers, repo.Antennas["a1"].Users)
+		})
+	}
+}
+
+// nil 引数やリポジトリ未設定で panic しない。
+func TestOnMoveAccount_NilArgs(t *testing.T) {
+	svc, _ := newSvc(t)
+	assert.NotPanics(t, func() { svc.OnMoveAccount(nil, &model.User{ID: "dst"}) })
+	assert.NotPanics(t, func() { svc.OnMoveAccount(&model.User{ID: "src"}, nil) })
+}
