@@ -300,12 +300,25 @@ type fakeFollowQueue struct {
 	calls     int
 	payloads  []queue.FollowPayload
 	returnErr error
+
+	// 遅延 unfollow (#2420) の記録。
+	unfollowCalls    int
+	unfollowPayloads []queue.UnfollowPayload
+	unfollowDelay    time.Duration
+	unfollowErr      error
 }
 
 func (f *fakeFollowQueue) EnqueueFollowBulk(payloads []queue.FollowPayload) error {
 	f.calls++
 	f.payloads = append(f.payloads, payloads...)
 	return f.returnErr
+}
+
+func (f *fakeFollowQueue) EnqueueUnfollowBulkDelayed(payloads []queue.UnfollowPayload, delay time.Duration) error {
+	f.unfollowCalls++
+	f.unfollowPayloads = append(f.unfollowPayloads, payloads...)
+	f.unfollowDelay = delay
+	return f.unfollowErr
 }
 
 // putLocalFollowing registers a Following row whose follower is local
@@ -1138,4 +1151,91 @@ func TestHasRecentConfirmedMoveIn_NilSafe(t *testing.T) {
 	svc := move.NewService(testutil.NewMockUserRepository(), testutil.NewMockFollowingRepository(),
 		urls, activitypub.NewRenderer(urls), &fakeResolver{}, &fakeDeliverer{})
 	assert.False(t, svc.HasRecentConfirmedMoveIn(nil))
+}
+
+// 移行すると旧アカウント自身のフォローが 24 時間後の unfollow として積まれる (#2420)。
+//
+// `adjustFollowingCounts` はフォロー先の followersCount を先に減らす一方でフォロー行を
+// 残すため、最終的に行も消さないと行数とカウンタが恒久的にずれる。
+func TestMove_SchedulesDelayedUnfollowOfOwnFollows(t *testing.T) {
+	resolver := &fakeResolver{}
+	svc, userRepo, followingRepo := newService(resolver, &fakeDeliverer{})
+	fq := &fakeFollowQueue{}
+	svc.SetFollowQueue(fq)
+
+	src := &model.User{ID: "src", Username: "src", URI: strPtr("https://local.example/users/src")}
+	userRepo.Users["src"] = src
+	dstURI := "https://remote.example/users/dst"
+	resolver.byURI = map[string]*model.User{dstURI: {
+		ID: "dst", URI: strPtr(dstURI), AlsoKnownAs: strPtr("https://local.example/users/src"),
+	}}
+	// src がフォローしている相手 2 人 + src をフォローしている人 1 人。
+	putLocalFollowing(followingRepo, "src", "followee1")
+	putLocalFollowing(followingRepo, "src", "followee2")
+	putLocalFollowing(followingRepo, "localA", "src")
+
+	require.NoError(t, svc.Move(src, dstURI))
+
+	require.Equal(t, 1, fq.unfollowCalls, "遅延 unfollow は 1 回の bulk で積む")
+	assert.Equal(t, 24*time.Hour, fq.unfollowDelay,
+		"upstream と同じ 24 時間。即座に消すと移行直後に Undo(Follow) が殺到する")
+
+	got := make([]string, 0, len(fq.unfollowPayloads))
+	for _, p := range fq.unfollowPayloads {
+		assert.Equal(t, "src", p.FollowerID, "解除するのは旧アカウント自身のフォローだけ")
+		got = append(got, p.FolloweeID)
+	}
+	assert.ElementsMatch(t, []string{"followee1", "followee2"}, got,
+		"src をフォローしている人 (localA) は対象外")
+}
+
+// 旧アカウントが誰もフォローしていなければ何も積まない。
+func TestMove_NoOutgoingFollowsSchedulesNothing(t *testing.T) {
+	resolver := &fakeResolver{}
+	svc, userRepo, followingRepo := newService(resolver, &fakeDeliverer{})
+	fq := &fakeFollowQueue{}
+	svc.SetFollowQueue(fq)
+
+	src := &model.User{ID: "src", Username: "src", URI: strPtr("https://local.example/users/src")}
+	userRepo.Users["src"] = src
+	dstURI := "https://remote.example/users/dst"
+	resolver.byURI = map[string]*model.User{dstURI: {
+		ID: "dst", URI: strPtr(dstURI), AlsoKnownAs: strPtr("https://local.example/users/src"),
+	}}
+	// src はフォローされているだけ。
+	putLocalFollowing(followingRepo, "localA", "src")
+
+	require.NoError(t, svc.Move(src, dstURI))
+	assert.Zero(t, fq.unfollowCalls)
+}
+
+// 遅延 unfollow の enqueue に失敗しても移行は成功させる (best-effort)。
+func TestMove_DelayedUnfollowFailureDoesNotFailMove(t *testing.T) {
+	resolver := &fakeResolver{}
+	svc, userRepo, followingRepo := newService(resolver, &fakeDeliverer{})
+	svc.SetFollowQueue(&fakeFollowQueue{unfollowErr: errors.New("enqueue boom")})
+
+	src := &model.User{ID: "src", Username: "src", URI: strPtr("https://local.example/users/src")}
+	userRepo.Users["src"] = src
+	dstURI := "https://remote.example/users/dst"
+	resolver.byURI = map[string]*model.User{dstURI: {
+		ID: "dst", URI: strPtr(dstURI), AlsoKnownAs: strPtr("https://local.example/users/src"),
+	}}
+	putLocalFollowing(followingRepo, "src", "followee1")
+
+	assert.NoError(t, svc.Move(src, dstURI))
+	require.NotNil(t, src.MovedToURI, "移行そのものは成立する")
+}
+
+// フォロー一覧の取得に失敗しても移行は成功させる。
+func TestMove_DelayedUnfollowListFailureIsBestEffort(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["src"] = &model.User{ID: "src"}
+	followingRepo := &listFailFollowingRepo{
+		MockFollowingRepository: testutil.NewMockFollowingRepository(),
+	}
+	fq := &fakeFollowQueue{}
+
+	require.NoError(t, moveWithRepos(t, userRepo, followingRepo, fq))
+	assert.Zero(t, fq.unfollowCalls)
 }

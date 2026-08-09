@@ -57,7 +57,18 @@ type Deliverer interface {
 // ここが AP 配送 (deliver queue) の worker を奪うことはない。
 type FollowEnqueuer interface {
 	EnqueueFollowBulk(payloads []queue.FollowPayload) error
+	// EnqueueUnfollowBulkDelayed schedules unfollow jobs after a delay.
+	// 移行元が残したフォローを後片付けするのに使う (#2420)。
+	EnqueueUnfollowBulkDelayed(payloads []queue.UnfollowPayload, delay time.Duration) error
 }
+
+// unfollowAfterMove is how long the old account keeps its outgoing follows
+// before they are removed.
+//
+// upstream `moveFromLocal` の `1000 * 60 * 60 * 24`。すぐ解除しないのは、移行
+// 直後に相手側へ Undo(Follow) が殺到するのを避けるためと、移行を取り消した
+// 場合に関係を復元する余地を残すため。
+const unfollowAfterMove = 24 * time.Hour
 
 // ProxyAccountIDResolver returns the local proxy account's user id.
 // The second return value is false when no proxy account is configured.
@@ -254,6 +265,53 @@ func (s *Service) PostMoveProcess(src, dst *model.User) {
 	}
 	s.carryOver(src, dst)
 	s.migrateFollowers(src, dst)
+	s.scheduleOutgoingUnfollow(src)
+}
+
+// scheduleOutgoingUnfollow removes the old account's own follows after a delay.
+//
+// upstream `moveFromLocal` の "Unfollow after 24 hours" に対応する (#2420)。
+//
+// # なぜ遅延させるか
+//
+// `adjustFollowingCounts` は移行時に**フォロー先の followersCount を先に 1 減らす**
+// 一方、フォロー行は残す。行が残ったままだと行数とカウンタが恒久的にずれるので、
+// 最終的には行も消す必要がある。
+//
+// ただし即座に消すと、移行直後に相手側へ Undo(Follow) が殺到する。24 時間置くのは
+// それを均すためと、移行を取り消した場合に関係を復元する余地を残すため。
+//
+// # カウントの二重減算は起きない
+//
+// 実行時、`following.Service.unfollow` の movedToUri ガード (#2418) がカウント調整を
+// 飛ばす。`adjustFollowingCounts` が既に引いているので、ここで引くと二重になる。
+// **このガードが外れると本処理がカウントを壊す**ので、両者はセットで扱うこと。
+//
+// best-effort。移行そのものは確定済みなのでエラーは log に落とす。
+func (s *Service) scheduleOutgoingUnfollow(src *model.User) {
+	if s.followQueue == nil || s.followingRepo == nil || src == nil {
+		return
+	}
+	followeeIDs, err := s.followingRepo.ListFolloweeIDs(src.ID)
+	if err != nil {
+		slog.Warn("move: list followees for delayed unfollow failed",
+			"srcID", src.ID, "err", err)
+		return
+	}
+	if len(followeeIDs) == 0 {
+		return
+	}
+	payloads := make([]queue.UnfollowPayload, 0, len(followeeIDs))
+	for _, followeeID := range followeeIDs {
+		payloads = append(payloads, queue.UnfollowPayload{
+			FollowerID: src.ID,
+			FolloweeID: followeeID,
+		})
+	}
+	if err := s.followQueue.EnqueueUnfollowBulkDelayed(payloads, unfollowAfterMove); err != nil {
+		slog.Warn("move: enqueue delayed unfollow failed",
+			"srcID", src.ID, "follows", len(payloads), "err", err)
+	}
 }
 
 // migrateFollowers schedules follow jobs so local followers of src end up
