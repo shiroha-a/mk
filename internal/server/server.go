@@ -324,6 +324,9 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	// クリックジャッキング防止。upstream が ClientServerService の
 	// onRequest hook で付けている X-Frame-Options: DENY に相当する。
 	e.Use(middleware.FrameGuard())
+	// 外部リンク遷移で閲覧中の URL が path ごと漏れるのを防ぐ (#2404)。
+	// upstream には無い mk-go 独自の hardening。
+	e.Use(middleware.ReferrerPolicy())
 
 	// WWW-Authenticate は auth.Authenticate より外側に置く。auth は無効 token に
 	// 対して自分で 401 を書くので、内側 (api グループ) に置くと middleware まで
