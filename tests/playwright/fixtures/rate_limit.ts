@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // #744 Phase 1: rate limit reset helper.
 //
 // mk-go の signup endpoint は IP base 1h 5 回 hardcoded

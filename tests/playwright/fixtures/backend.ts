@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // Backend-dependent expectations.
 //
 // spec は mk-go / Misskey TS の両 backend で走らせて drop-in 互換を検証する

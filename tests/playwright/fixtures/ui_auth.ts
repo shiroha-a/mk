@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // UI 操作 spec で root 認証を行う共通 helper。
 //
 // signin form (data-testid="signin" / "signin-username" / "signin-password")

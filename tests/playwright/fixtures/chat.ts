@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // chat spec 共通の型 (#822, #823)。messages_dm / room /
 // messaging_notification の各 spec で chat/messages/* / chat/rooms/*
 // response の最小 shape を共有する。

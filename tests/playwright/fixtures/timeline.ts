@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // Phase 2 #819 timeline spec helper.
 //
 // timeline 系 endpoint (notes/timeline / local-timeline / global-timeline /

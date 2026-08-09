@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // notification spec 共通の helper / 型 (#823)。reaction / mention / follow
 // 等の notification round-trip spec は WS push 受信後に
 // /api/i/notifications で永続化を確認する pattern を共有する。

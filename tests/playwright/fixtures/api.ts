@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // #744 Phase 1: REST helper used across spec files.
 // Misskey API は POST /api/<endpoint> に JSON body を送る規約 (cy.request
 // で dropin cypress 側もそうしている)。Playwright の APIRequestContext を

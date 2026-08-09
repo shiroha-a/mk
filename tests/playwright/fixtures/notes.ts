@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // #744 Phase 1 PR-3: notes endpoint helper.
 // upstream Misskey TS と互換な /api/notes/{create,show,delete} を叩く。
 // spec から共通的に使う薄いラッパで、特殊な field (poll / files) は直接

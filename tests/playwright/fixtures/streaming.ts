@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // Misskey の streaming WebSocket helper。streaming spec (#815) と
 // notifications spec (#823, #847) で共有する。
 //

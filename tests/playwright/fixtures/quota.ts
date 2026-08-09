@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // per-user quota を使い切らないための spec 側 cleanup helper (#2264)。
 //
 // antenna / webhook / clip / user list は role policy に上限がある

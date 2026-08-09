@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // #744 Phase 1: signup / signin helper.
 // upstream Misskey TS と互換な /api/signup と /api/signin-flow を叩き、
 // 取得した access token を spec から再利用できる形にする。

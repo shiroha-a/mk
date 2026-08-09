@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // #829 PR-C: drive 系 spec で共有する fixture file。
 //
 // drive/files/create / find / find-by-hash / 等の spec で同じ test image を
