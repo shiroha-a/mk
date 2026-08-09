@@ -220,5 +220,5 @@ Playwright Phase 1-4 完了 (#744) で **96 spec / 35 directory / 242 endpoint c
 
 ## 関連ドキュメント
 
-- [docs/e2e.md](./e2e.md) — `third_party/misskey` submodule 経由で Misskey 本家の Cypress e2e スイートを mk-go に向けて実行する手順
+- [docs/playwright.md](./playwright.md) — Playwright による frontend / API の e2e (mk-go backend と Misskey TS backend の両方に対して実行する)
 - [docs/upstream-catch-up.md](./upstream-catch-up.md) — Misskey TS upstream の新 release を mk-go に取り込む際の triage / submodule bump / Wave 単位 PR 運用と、submodule bump PR マージ後の `git pull --recurse-submodules` 等の追従手順

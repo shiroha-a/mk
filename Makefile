@@ -10,7 +10,7 @@
 	dropin-mkgo-born-test \
 	dropin-frontend-up dropin-frontend-down dropin-frontend-baseline dropin-frontend-logs \
 	dropin-frontend-mk-up dropin-frontend-mk-down dropin-frontend-swap-test \
-	e2e-submodule-init e2e-frontend-build e2e-deps e2e-run e2e-open \
+	e2e-submodule-init e2e-frontend-build \
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
@@ -328,20 +328,22 @@ dropin-frontend-mk-down: ## drop-in frontend e2e の mk overlay を撤去
 dropin-frontend-swap-test: ## TS-A → mk-A 切替まで含む frontend e2e
 	./tests/dropin_frontend/run-frontend-swap-test.sh
 
-# Cypress e2e ― Misskey 本家の cypress spec を mk-go に向けて実行する。
+# 本家フロントエンドの取得とビルド。
 #
 # ライセンス境界のため、本家コードはすべて third_party/misskey/ の git submodule
 # 参照で扱う。mk-go のリポジトリには 1 行もコピーしない。
 #
 # CLAUDE.md の規約で「パッケージはホストに直接入れずコンテナ経由で動かす」と
-# 決まっているため、pnpm / cypress はすべて docker run で実行する。
+# 決まっているため、pnpm はすべて docker run で実行する。
+#
+# frontend e2e は Playwright に一本化した (#2437)。Cypress ラッパーは本家が
+# Cypress を廃止して参照先が消滅したため削除済み。spec は tests/playwright/。
 E2E_NODE_IMAGE=node:22-bookworm
-E2E_CYPRESS_IMAGE=cypress/included:15.11.0
 E2E_WORKDIR=/work
 
-# submodule を初期化し、Misskey 本家の cypress 資産とフロントエンドソースを取得する。
-##@ e2e: Cypress
-e2e-submodule-init: ## cypress 用に submodule を初期化
+# submodule を初期化し、Misskey 本家のフロントエンドソースを取得する。
+##@ frontend build
+e2e-submodule-init: ## submodule を初期化 (本家フロントエンドの取得)
 	git submodule update --init --recursive third_party/misskey
 
 # 本家フロントエンドを Docker 内でビルドする。数分〜10 分程度かかる。
@@ -356,28 +358,6 @@ e2e-frontend-build: ## フロントエンドをビルド (本番の bind-mount �
 	docker run --rm -e CI=true -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/third_party/misskey \
 		$(E2E_NODE_IMAGE) \
 		bash -lc "corepack enable && corepack prepare pnpm@latest --activate && pnpm install --frozen-lockfile && pnpm build"
-
-# Cypress ラッパーの依存を Docker 内で解決する。
-e2e-deps: ## cypress の依存をインストール
-	docker run --rm -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/e2e/cypress \
-		$(E2E_NODE_IMAGE) \
-		bash -lc "corepack enable && corepack prepare pnpm@latest --activate && pnpm install"
-
-# ヘッドレスで cypress run を実行する。
-# host network で動かして mk-go (localhost:3000) に直接届かせる。
-e2e-run: ## Cypress E2E テストを実行
-	docker run --rm --network=host -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/e2e/cypress \
-		-e E2E_BASE_URL=$${E2E_BASE_URL:-http://localhost:3000} \
-		$(E2E_CYPRESS_IMAGE) \
-		cypress run --e2e --browser electron --config-file cypress.config.ts
-
-# 開発者向けに cypress open を起動する (X11 forward が必要なので CI では使わない)。
-e2e-open: ## Cypress を対話モードで開く
-	docker run --rm --network=host -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/e2e/cypress \
-		-e DISPLAY=$$DISPLAY -v /tmp/.X11-unix:/tmp/.X11-unix \
-		-e E2E_BASE_URL=$${E2E_BASE_URL:-http://localhost:3000} \
-		$(E2E_CYPRESS_IMAGE) \
-		cypress open --e2e --browser electron --config-file cypress.config.ts
 
 # UDS-only compose stack (Phase 12-2)。Phase 12-1 で入った UNIX domain socket
 # 対応を使って nginx → mk-go → postgres / valkey をすべて UDS で繋ぐ。

@@ -170,7 +170,7 @@ go test -race -count=1 -timeout 10m \
 | [デプロイ](docs/deployment.md) | Docker/Compose/systemd、逆プロキシ |
 | [コントリビューション](docs/contributing.md) | Issue/PR運用、レビュー基準 |
 | [TS版からの移行](docs/migration-from-ts.md) | 既存Misskeyからの移行手順 |
-| [E2Eテスト](docs/e2e.md) | Cypressによるフロントエンドテスト |
+| [Playwright](docs/playwright.md) | Playwrightによるフロントエンド / API テスト |
 | [Drop-in e2e (pytest)](docs/dropin-e2e.md) | TS-A backend を mk-A に差し替えた state preservation 検証 |
 | [Drop-in frontend e2e (cypress)](docs/dropin-frontend-e2e.md) | 3 TS instance + cypress で frontend 視点の互換 |
 | [差分比較ハーネス](docs/diff-e2e.md) | mk-go と TS の実APIレスポンスを値レベルでdiff |
