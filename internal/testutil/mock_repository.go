@@ -5957,6 +5957,22 @@ func (m *MockUserListRepository) ListMembers(listID string) ([]*model.UserListMe
 	return result, nil
 }
 
+// ListMembershipsByUser returns every membership row for the given member user
+// across all lists (= which lists contain this user)。id 昇順で返す。
+func (m *MockUserListRepository) ListMembershipsByUser(userID string) ([]*model.UserListMembership, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	var rows []*model.UserListMembership
+	for _, mem := range m.Members {
+		if mem.UserID == userID {
+			rows = append(rows, mem)
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	return rows, nil
+}
+
 // ListMembershipsPage mirrors the production cursor pagination (id ASC when
 // sinceID-only, else DESC) over the in-memory Members slice.
 func (m *MockUserListRepository) ListMembershipsPage(listID, sinceID, untilID string, limit int) ([]*model.UserListMembership, error) {

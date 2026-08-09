@@ -20,6 +20,14 @@ type MutingRepository interface {
 	// for muterID. timeline endpoint で muted user の note を除外する
 	// filter 用 (#874)。
 	ListMuteeIDs(muterID string) ([]string, error)
+	// ListByMutee returns the active (non-expired) mute rows whose muteeId
+	// equals the given user (= who mutes this user).
+	//
+	// アカウント移行のミュート引き継ぎ (#2419) 用。upstream copyMutings は
+	// `findBy([{muteeId, expiresAt: IsNull()}, {muteeId, expiresAt: MoreThan(now)}])`
+	// で期限切れを除外する。expiresAt をそのまま移行先へ引き継ぐため、ID だけ
+	// でなく行そのものを返す。
+	ListByMutee(muteeID string) ([]*model.Muting, error)
 	// ListAllMuteeIDs returns the muteeIDs of ALL mute rows for muterID,
 	// including temporarily-expired ones. export-following の excludeMuting は
 	// upstream が expiry filter なしの mutingsRepository.findBy({muterId}) を使う
@@ -104,6 +112,22 @@ func (r *mutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
 		return nil, err
 	}
 	return ids, nil
+}
+
+func (r *mutingRepository) ListByMutee(muteeID string) ([]*model.Muting, error) {
+	if muteeID == "" {
+		return nil, nil
+	}
+	var rows []*model.Muting
+	now := time.Now()
+	if err := r.db.
+		Where(`"muteeId" = ?`, muteeID).
+		Where(`"expiresAt" IS NULL OR "expiresAt" > ?`, now).
+		Order("id").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 // ListAllMuteeIDs returns every muteeId for muterID with no expiry filter

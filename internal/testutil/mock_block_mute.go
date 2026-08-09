@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"sort"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -176,6 +177,27 @@ func (m *MockMutingRepository) ListMuteeIDs(muterID string) ([]string, error) {
 		ids = append(ids, r.MuteeID)
 	}
 	return ids, nil
+}
+
+// ListByMutee returns the active (non-expired) mute rows whose muteeId matches
+// (= who mutes this user)。id 昇順で返し、caller が順序に依存できるようにする。
+func (m *MockMutingRepository) ListByMutee(muteeID string) ([]*model.Muting, error) {
+	if muteeID == "" {
+		return nil, nil
+	}
+	var rows []*model.Muting
+	now := time.Now()
+	for _, r := range m.Mutings {
+		if r.MuteeID != muteeID {
+			continue
+		}
+		if r.ExpiresAt != nil && !r.ExpiresAt.After(now) {
+			continue
+		}
+		rows = append(rows, r)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	return rows, nil
 }
 
 // ListAllMuteeIDs returns every muteeId for muterID (expiry filter なし)。

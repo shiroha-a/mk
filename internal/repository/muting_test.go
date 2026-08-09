@@ -234,3 +234,59 @@ func TestRenoteMutingRepository_ListMuteeIDs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, ids)
 }
+
+// ListByMutee は muteeId 起点で有効なミュート行を返す (#2419 アカウント移行の
+// ミュート引き継ぎ用)。期限切れを除外し、expiresAt をそのまま返すことを固定する。
+func TestMutingRepository_ListByMutee(t *testing.T) {
+	repo := NewMutingRepository(testDB)
+	target := insertTestUser(t, "u_mlbm_t", "mlbmt")
+	defer cleanupUser(t, target.ID)
+	other := insertTestUser(t, "u_mlbm_o", "mlbmo")
+	defer cleanupUser(t, other.ID)
+	muterA := insertTestUser(t, "u_mlbm_a", "mlbma")
+	defer cleanupUser(t, muterA.ID)
+	muterB := insertTestUser(t, "u_mlbm_b", "mlbmb")
+	defer cleanupUser(t, muterB.ID)
+	muterC := insertTestUser(t, "u_mlbm_c", "mlbmc")
+	defer cleanupUser(t, muterC.ID)
+
+	indefinite := &model.Muting{ID: "mlbm_indef", MuterID: muterA.ID, MuteeID: target.ID}
+	require.NoError(t, repo.Create(indefinite))
+	defer cleanupMuting(t, indefinite.ID)
+
+	future := time.Now().Add(1 * time.Hour)
+	timed := &model.Muting{ID: "mlbm_timed", MuterID: muterB.ID, MuteeID: target.ID, ExpiresAt: &future}
+	require.NoError(t, repo.Create(timed))
+	defer cleanupMuting(t, timed.ID)
+
+	// 期限切れは対象外。
+	past := time.Now().Add(-1 * time.Hour)
+	expired := &model.Muting{ID: "mlbm_expired", MuterID: muterC.ID, MuteeID: target.ID, ExpiresAt: &past}
+	require.NoError(t, repo.Create(expired))
+	defer cleanupMuting(t, expired.ID)
+
+	// 別ユーザーへのミュートも対象外。
+	unrelated := &model.Muting{ID: "mlbm_other", MuterID: muterA.ID, MuteeID: other.ID}
+	require.NoError(t, repo.Create(unrelated))
+	defer cleanupMuting(t, unrelated.ID)
+
+	rows, err := repo.ListByMutee(target.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+
+	byMuter := map[string]*model.Muting{}
+	for _, r := range rows {
+		byMuter[r.MuterID] = r
+	}
+	require.Contains(t, byMuter, muterA.ID)
+	assert.Nil(t, byMuter[muterA.ID].ExpiresAt, "indefinite mute keeps a nil expiry")
+	require.Contains(t, byMuter, muterB.ID)
+	require.NotNil(t, byMuter[muterB.ID].ExpiresAt)
+	assert.WithinDuration(t, future, *byMuter[muterB.ID].ExpiresAt, time.Second,
+		"expiresAt is returned as-is so the carry-over can preserve it")
+
+	// muteeID 空は nil 返却。
+	rows, err = repo.ListByMutee("")
+	require.NoError(t, err)
+	assert.Nil(t, rows)
+}

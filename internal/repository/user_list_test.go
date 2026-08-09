@@ -278,3 +278,47 @@ func TestUserListRepository_ListIDsAndOwnersByMember_Error(t *testing.T) {
 	_, err := repo.ListIDsAndOwnersByMember("anyone")
 	assert.Error(t, err)
 }
+
+// ListMembershipsByUser は userId 起点で membership を全件返す (#2419 アカウント
+// 移行のリスト張り替え用)。既存の membership 系は listID 起点しか無かった。
+func TestUserListRepository_ListMembershipsByUser(t *testing.T) {
+	repo := NewUserListRepository(testDB)
+	owner := insertTestUser(t, "u_ulmbu_o", "ulmbuo")
+	defer cleanupUser(t, owner.ID)
+	member := insertTestUser(t, "u_ulmbu_m", "ulmbum")
+	defer cleanupUser(t, member.ID)
+	stranger := insertTestUser(t, "u_ulmbu_x", "ulmbux")
+	defer cleanupUser(t, stranger.ID)
+
+	listA := &model.UserList{ID: "ulmbu_a", UserID: owner.ID, Name: "A"}
+	require.NoError(t, repo.Create(listA))
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listA.ID)
+	listB := &model.UserList{ID: "ulmbu_b", UserID: owner.ID, Name: "B"}
+	require.NoError(t, repo.Create(listB))
+	defer testDB.Exec(`DELETE FROM "user_list" WHERE id = ?`, listB.ID)
+
+	for _, m := range []*model.UserListMembership{
+		{ID: "ulmbu_m1", UserID: member.ID, UserListID: listA.ID, UserListUserID: &owner.ID},
+		{ID: "ulmbu_m2", UserID: member.ID, UserListID: listB.ID, UserListUserID: &owner.ID},
+		// 別ユーザーの membership は対象外。
+		{ID: "ulmbu_m3", UserID: stranger.ID, UserListID: listA.ID, UserListUserID: &owner.ID},
+	} {
+		require.NoError(t, repo.AddMember(m))
+		defer testDB.Exec(`DELETE FROM "user_list_membership" WHERE id = ?`, m.ID)
+	}
+
+	rows, err := repo.ListMembershipsByUser(member.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	var listIDs []string
+	for _, r := range rows {
+		listIDs = append(listIDs, r.UserListID)
+		assert.Equal(t, member.ID, r.UserID)
+	}
+	assert.ElementsMatch(t, []string{listA.ID, listB.ID}, listIDs)
+
+	// userID 空は nil 返却。
+	rows, err = repo.ListMembershipsByUser("")
+	require.NoError(t, err)
+	assert.Nil(t, rows)
+}

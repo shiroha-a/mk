@@ -25,6 +25,14 @@ type UserListRepository interface {
 	AddMember(m *model.UserListMembership) error
 	RemoveMember(listID, userID string) error
 	ListMembers(listID string) ([]*model.UserListMembership, error)
+	// ListMembershipsByUser returns every membership row for the given member
+	// user, across all lists (= which lists contain this user).
+	//
+	// アカウント移行のリスト張り替え (#2419) 用。既存の membership 系は listID
+	// 起点しか無く、「このユーザーが入っているリスト」を引けない。upstream
+	// updateLists の `find({ where: { userId: src.id } })` に対応する。
+	// User は preload しない (移行処理は userListId しか使わない)。
+	ListMembershipsByUser(userID string) ([]*model.UserListMembership, error)
 	// ListMembershipsPage returns a list's memberships (User preloaded) with
 	// cursor pagination by membership id. Used by users/lists/get-memberships
 	// (#1550)。
@@ -128,6 +136,17 @@ func (r *userListRepository) ListMembers(listID string) ([]*model.UserListMember
 		return nil, err
 	}
 	return members, nil
+}
+
+func (r *userListRepository) ListMembershipsByUser(userID string) ([]*model.UserListMembership, error) {
+	if userID == "" {
+		return nil, nil
+	}
+	var rows []*model.UserListMembership
+	if err := r.db.Where(`"userId" = ?`, userID).Order("id").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (r *userListRepository) ListMembershipsPage(listID, sinceID, untilID string, limit int) ([]*model.UserListMembership, error) {
