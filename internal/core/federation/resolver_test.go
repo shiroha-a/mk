@@ -5387,3 +5387,111 @@ func TestIngestNote_DedupRaceOnQuoteNoDoubleRenoteCount(t *testing.T) {
 	assert.Equal(t, "winner", got.ID)
 	assert.Equal(t, int16(0), base.Notes["q1"].RenoteCount, "dedup race must NOT increment the quote target's renoteCount")
 }
+
+// movedAt は移行が起きた瞬間だけ打刻する (#2412)。upstream
+// ApPersonService.updatePerson の `moving` フラグと同じ判定で、無→有 と
+// 有→別の値 のときだけ更新する。
+//
+// 同じ移行先を宣言し続けている actor を再取得するたびに打ち直していると、
+// movedAt を基準にする時間窓 (移行直後 2h の import 上限緩和 / 14 日の移行
+// クールダウン) が永久に開いたままになる。
+func TestRefreshActor_StampsMovedAtOnlyOnTransition(t *testing.T) {
+	const uri = "https://remote.example/users/x"
+	old := "https://old.example/users/x"
+	older := time.Now().Add(-72 * time.Hour)
+
+	cases := []struct {
+		name string
+		// 既存行が宣言している移行先 (nil = 未移行)
+		existingMovedTo *string
+		// actor JSON が宣言する移行先 ("" = movedTo 無し)
+		actorMovedTo string
+		wantStamped  bool
+		wantMovedTo  string
+	}{
+		{
+			name:            "無→有 で打刻する",
+			existingMovedTo: nil,
+			actorMovedTo:    "https://new.example/users/x",
+			wantStamped:     true,
+			wantMovedTo:     "https://new.example/users/x",
+		},
+		{
+			name:            "有→別の値 で打ち直す",
+			existingMovedTo: &old,
+			actorMovedTo:    "https://new.example/users/x",
+			wantStamped:     true,
+			wantMovedTo:     "https://new.example/users/x",
+		},
+		{
+			name:            "同じ移行先の再取得では触らない",
+			existingMovedTo: &old,
+			actorMovedTo:    old,
+			wantStamped:     false,
+			wantMovedTo:     old,
+		},
+		{
+			// upstream は movedToUri を null に戻すが mk-go は温存する。
+			// 一時的な欠落でクリアすると、次の取得が「無→有」に見えて
+			// movedAt が打ち直され、この修正が骨抜きになるため。
+			name:            "移行先が消えても温存し打刻しない",
+			existingMovedTo: &old,
+			actorMovedTo:    "",
+			wantStamped:     false,
+			wantMovedTo:     old,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			stale := time.Now().Add(-48 * time.Hour) // TTL 超過で refreshActor を発火
+			repo.Users["existing"] = &model.User{
+				ID:            "existing",
+				Username:      "x",
+				URI:           strPtr(uri),
+				LastFetchedAt: &stale,
+				MovedToURI:    tc.existingMovedTo,
+				MovedAt:       &older,
+			}
+			movedToField := ""
+			if tc.actorMovedTo != "" {
+				movedToField = `, "movedTo": "` + tc.actorMovedTo + `"`
+			}
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "` + uri + `",
+				"type": "Person",
+				"preferredUsername": "x",
+				"inbox": "` + uri + `/inbox",
+				"publicKey": {"publicKeyPem": "FAKE"}` + movedToField + `
+			}`
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+
+			user, err := r.ResolveActor(uri)
+			require.NoError(t, err)
+			require.NotNil(t, user.MovedToURI)
+			assert.Equal(t, tc.wantMovedTo, *user.MovedToURI)
+			require.NotNil(t, user.MovedAt)
+
+			if tc.wantStamped {
+				assert.True(t, user.MovedAt.After(older),
+					"movedAt must be re-stamped when the move target changes")
+			} else {
+				assert.True(t, user.MovedAt.Equal(older),
+					"movedAt must not move when the actor keeps declaring the same target")
+			}
+
+			// DB 側にも同じ判定が反映されていること (fields map を経由するので
+			// メモリ上の struct だけ正しくても意味がない)。
+			persisted := repo.Users["existing"]
+			require.NotNil(t, persisted.MovedAt)
+			if tc.wantStamped {
+				assert.True(t, persisted.MovedAt.After(older), "persisted movedAt must be re-stamped")
+			} else {
+				assert.True(t, persisted.MovedAt.Equal(older), "persisted movedAt must be untouched")
+			}
+		})
+	}
+}

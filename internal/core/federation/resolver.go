@@ -875,13 +875,34 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 		fields["featured"] = &featured
 		existing.Featured = &featured
 	}
+	// movedAt は移行が「起きた」瞬間だけ打刻する。upstream
+	// (ApPersonService.updatePerson の `moving` フラグ) と同じ判定で、
+	// 無→有 と 有→別の値 のときだけ更新し、同じ移行先を宣言し続けている
+	// actor の再取得では触らない。
+	//
+	// 以前は actor が movedTo を持っていれば毎回 now で打ち直していた。
+	// movedAt はまだどこからも読まれていないので実害は出ていなかったが、
+	// upstream が movedAt を時間窓の基準に使う以上 (移行直後 2h の import
+	// 上限緩和 / 14 日の移行クールダウン)、打ち直すと窓が開き続けて機能
+	// しなくなる。時間窓を実装する前にここを直しておく (#2412)。
 	if actor.MovedTo != "" {
 		movedTo := actor.MovedTo
+		moving := existing.MovedToURI == nil || *existing.MovedToURI != movedTo
 		fields["movedToUri"] = &movedTo
-		fields["movedAt"] = &now
 		existing.MovedToURI = &movedTo
-		existing.MovedAt = &now
+		if moving {
+			fields["movedAt"] = &now
+			existing.MovedAt = &now
+		}
 	}
+	// 移行先が消えた (actor.MovedTo == "") ケースは追わない。他フィールドと
+	// 同じ「空値・欠落では既存値を温存する」規約に従う。
+	//
+	// upstream は `movedToUri: person.movedTo ?? null` で null に戻すが、
+	// mk-go はここで意図的に divergence する。リモートが一時的に movedTo を
+	// 欠いた actor JSON を返しただけでクリアすると、次の取得が「無→有」の
+	// 遷移に見えて movedAt が打ち直され、上の修正が骨抜きになるため。
+	// 移行の取り消しに追従できない代わりに、時間窓の基準を安定させる。
 	if len(actor.AlsoKnownAs) > 0 {
 		akaStr := strings.Join(actor.AlsoKnownAs, ",")
 		fields["alsoKnownAs"] = &akaStr

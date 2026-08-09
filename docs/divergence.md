@@ -394,6 +394,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 
 | 項目 | upstream | mk-go |
 |---|---|---|
+| リモート actor の `movedTo` 消滅 | `movedToUri: person.movedTo ?? null` で null に戻す | **既存値を温存する** (削除は追わない)。一時的な欠落でクリアすると、次の取得が「無→有」の遷移に見えて `movedAt` が打ち直され、移行の時間窓 (2h / 14 日) の基準が壊れるため。移行の取り消しに追従できない代わりに基準が安定する (#2412) |
 | リモートメディアのキャッシュ | `cacheRemoteFiles` が真なら実体を自 Drive へ保存 | **保存しない** (相手の削除の権利 / 違法コンテンツ保持のリスク回避)。詳細と弱点は §5.5 |
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
