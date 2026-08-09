@@ -50,6 +50,10 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#993)。
 	splashIconURL := "/static-assets/splash.png"
 	metaJSON := "{}"
+	// CSP の img-src / media-src に足す origin (#2425)。drive のファイルは
+	// object storage から直接配信されるので、`'self'` だけだと enforce 時に
+	// 画像・動画・音声が丸ごと表示できなくなる。
+	var cspMediaOrigins []string
 	if m, err := metaRepo.Fetch(); err == nil {
 		if m.Name != nil && *m.Name != "" {
 			instanceName = *m.Name
@@ -65,6 +69,14 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 			themeColor = *m.ThemeColor
 		}
 		metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver, chunkedUpload)
+		// useObjectStorage が false でも baseUrl が残っていることがあるので、
+		// **両方が揃っているときだけ**許可する。使っていない host を CSP に
+		// 載せる必要は無い。
+		if m.UseObjectStorage && m.ObjectStorageBaseURL != nil {
+			if origin := objectStorageOrigin(*m.ObjectStorageBaseURL); origin != "" {
+				cspMediaOrigins = append(cspMediaOrigins, origin)
+			}
+		}
 	}
 
 	// CLIENT_ENTRYの設定
@@ -123,7 +135,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// SPA shell にだけ CSP を付ける (#2425)。shell を返す経路は catch-all と
 	// AP の non-AP fallback の 2 つで、どちらもこの関数を通るので path 判定が
 	// 要らない。API / アセットに誤って付くこともない。
-	applyFrontendCSP(c, cfg.FrontendContentSecurityPolicy)
+	applyFrontendCSP(c, cfg.FrontendContentSecurityPolicy, cspMediaOrigins...)
 
 	return c.HTML(http.StatusOK, html)
 }

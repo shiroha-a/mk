@@ -151,3 +151,79 @@ func TestCSPReportHandler_EffectiveDirectiveFallback(t *testing.T) {
 	rec := postCSPReport(t, `{"csp-report":{"effective-directive":"img-src","blocked-uri":"data:"}}`)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
+
+// object storage の origin は img-src / media-src にだけ足す (#2425)。
+//
+// drive のファイルは object storage から直接配信されるので、`'self'` だけだと
+// enforce 時に画像・動画・音声が丸ごと表示できなくなる。本番の report-only で
+// 実際に img-src / media-src の違反が出て判明した。
+func TestBuildFrontendCSP_ExtraMediaOrigins(t *testing.T) {
+	const origin = "https://objects.example"
+	policy := buildFrontendCSP(false, origin)
+
+	byName := map[string]string{}
+	for _, d := range strings.Split(policy, "; ") {
+		name, _, _ := strings.Cut(d, " ")
+		byName[name] = d
+	}
+
+	t.Run("img-src と media-src に足す", func(t *testing.T) {
+		assert.Contains(t, byName["img-src"], origin)
+		assert.Contains(t, byName["media-src"], origin)
+	})
+
+	t.Run("他の directive には足さない", func(t *testing.T) {
+		// **script-src に足すと外部 origin からのスクリプト実行を許すことになる。**
+		// 画像を配るだけの host にその権限を与える理由は無い。
+		for _, name := range []string{
+			"default-src", "script-src", "style-src", "connect-src",
+			"font-src", "worker-src", "frame-src", "object-src",
+			"base-uri", "form-action",
+		} {
+			assert.NotContainsf(t, byName[name], origin, "%s に足してはいけない", name)
+		}
+	})
+
+	t.Run("origin が無ければ元のまま", func(t *testing.T) {
+		assert.Equal(t, buildFrontendCSP(false), buildFrontendCSP(false, []string{}...))
+	})
+}
+
+// baseUrl から origin だけを取り出す。path を残すと prefix 一致になり、
+// 実際の配信 URL がわずかに違う形で外れる。
+func TestObjectStorageOrigin(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+	}{
+		{"https://objects.example/bucket", "https://objects.example"},
+		{"https://objects.example/bucket/prefix/", "https://objects.example"},
+		{"https://objects.example", "https://objects.example"},
+		{"http://localhost:9000/bucket", "http://localhost:9000"},
+		{"  https://objects.example/b  ", "https://objects.example"},
+		// 解釈できない値は捨てる。**不正な source expression が 1 つでもあると
+		// その directive ごと落とす実装があるので、ゴミを混ぜない。**
+		{"", ""},
+		{"not a url", ""},
+		{"/relative/path", ""},
+		{"ftp://objects.example/b", ""},
+		{"javascript:alert(1)", ""},
+		{"data:text/html,x", ""},
+	}
+	for _, tc := range cases {
+		assert.Equalf(t, tc.want, objectStorageOrigin(tc.in), "objectStorageOrigin(%q)", tc.in)
+	}
+}
+
+// applyFrontendCSP まで origin が届く。
+func TestApplyFrontendCSP_PassesMediaOrigins(t *testing.T) {
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+
+	applyFrontendCSP(c, CSPModeReportOnly, "https://objects.example")
+
+	v := rec.Header().Get("Content-Security-Policy-Report-Only")
+	require.NotEmpty(t, v)
+	assert.Contains(t, v, "img-src 'self' data: blob: https://objects.example")
+}

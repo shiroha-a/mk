@@ -1,6 +1,8 @@
 package server
 
 import (
+	"net/url"
+	"slices"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -56,31 +58,84 @@ var frontendCSPDirectives = []string{
 	"frame-src 'self'",
 }
 
-// buildFrontendCSP renders the policy string, appending the report directive
-// when reporting is wanted.
+// mediaDirectives are the directives that must also allow the object storage
+// origin. drive のファイルはそこから直接配信されるため。
+var mediaDirectives = []string{"img-src", "media-src"}
+
+// buildFrontendCSP renders the policy string.
+//
+// extraMediaOrigins には object storage の origin 等、`'self'` 以外に画像 /
+// メディアの取得を許す必要がある host を渡す。**空でない限りポリシーは
+// operator の設定に依存する**ので、静的な定数にはできない。
 //
 // `report-uri` は deprecated だが、`report-to` だけにすると Reporting-Endpoints
 // header を解さない環境で 1 件も届かない。観測が目的なので両方は出さず、対応
 // 範囲の広い `report-uri` に寄せる。
-func buildFrontendCSP(withReport bool) string {
-	d := frontendCSPDirectives
+func buildFrontendCSP(withReport bool, extraMediaOrigins ...string) string {
+	d := make([]string, 0, len(frontendCSPDirectives)+1)
+	for _, dir := range frontendCSPDirectives {
+		d = append(d, appendMediaOrigins(dir, extraMediaOrigins))
+	}
 	if withReport {
-		d = append(append([]string{}, d...), "report-uri "+CSPReportPath)
+		d = append(d, "report-uri "+CSPReportPath)
 	}
 	return strings.Join(d, "; ")
+}
+
+// appendMediaOrigins adds the extra origins to img-src / media-src.
+func appendMediaOrigins(directive string, origins []string) string {
+	if len(origins) == 0 {
+		return directive
+	}
+	name, _, ok := strings.Cut(directive, " ")
+	if !ok {
+		return directive
+	}
+	if !slices.Contains(mediaDirectives, name) {
+		return directive
+	}
+	return directive + " " + strings.Join(origins, " ")
+}
+
+// objectStorageOrigin extracts the scheme+host to allow from a configured
+// object storage base URL.
+//
+// **path は落として origin だけにする。** CSP の source expression は path を
+// 書けるが、`https://host/bucket` のように書くと「その prefix 配下だけ」を意味し、
+// 実際の配信 URL がわずかに違う形 (末尾スラッシュの有無など) で外れる。origin
+// 単位で許す方が確実で、object storage は専用ホストなので粒度としても妥当。
+//
+// 解釈できない値では "" を返す。**ゴミを CSP に混ぜない**のが要点で、不正な
+// source expression が 1 つでもあるとブラウザがその directive ごと落とす実装が
+// ある。
+func objectStorageOrigin(baseURL string) string {
+	baseURL = strings.TrimSpace(baseURL)
+	if baseURL == "" {
+		return ""
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Host == "" {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	return u.Scheme + "://" + u.Host
 }
 
 // applyFrontendCSP sets the CSP header on an SPA shell response.
 //
 // mode が未知 / off なら何もしない。**判定できない値で enforce に倒さない**の
 // が要点で、設定ミスでフロントが動かなくなるより無効の方が安全。
-func applyFrontendCSP(c echo.Context, mode string) {
+func applyFrontendCSP(c echo.Context, mode string, extraMediaOrigins ...string) {
 	switch mode {
 	case CSPModeReportOnly:
-		c.Response().Header().Set("Content-Security-Policy-Report-Only", buildFrontendCSP(true))
+		c.Response().Header().Set("Content-Security-Policy-Report-Only",
+			buildFrontendCSP(true, extraMediaOrigins...))
 	case CSPModeEnforce:
 		// enforce でも報告は受け取る。ブロックが起きていることに気付けないと
 		// 「一部の機能だけ動かない」という報告しか上がってこない。
-		c.Response().Header().Set("Content-Security-Policy", buildFrontendCSP(true))
+		c.Response().Header().Set("Content-Security-Policy",
+			buildFrontendCSP(true, extraMediaOrigins...))
 	}
 }
