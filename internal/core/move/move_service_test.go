@@ -1001,3 +1001,141 @@ func TestMove_CarryOverWithNothingToCopy(t *testing.T) {
 	assert.Empty(t, fx.blockQueue.payloads)
 	assert.Empty(t, fx.roleAssigner.assigned)
 }
+
+// 移行直後の import 上限緩和の判定 (#2415)。
+//
+// **相互確認が security boundary。** alsoKnownAs は自己申告なので、移行元側が
+// 自分を指し返していることまで確かめないと、任意の actor を並べるだけで緩和された
+// 上限を得られる。
+func TestHasRecentConfirmedMoveIn(t *testing.T) {
+	const dstURI = "https://local.example/users/dstUser"
+	const srcURI = "https://remote.example/users/oldMe"
+	recent := time.Now().Add(-30 * time.Minute)
+	old := time.Now().Add(-3 * time.Hour)
+
+	cases := []struct {
+		name string
+		// 移行元の行 (nil なら DB に居ない)
+		src  *model.User
+		aka  string // dst.alsoKnownAs
+		want bool
+	}{
+		{
+			name: "相互確認が取れて2時間以内なら緩和する",
+			src:  &model.User{ID: "oldMe", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI), MovedAt: &recent},
+			aka:  srcURI,
+			want: true,
+		},
+		{
+			name: "移行元が自分を指し返していなければ緩和しない",
+			src:  &model.User{ID: "oldMe", URI: strPtr(srcURI), MovedToURI: strPtr("https://elsewhere.example/users/x"), MovedAt: &recent},
+			aka:  srcURI,
+			want: false,
+		},
+		{
+			name: "移行元が移行していなければ緩和しない",
+			src:  &model.User{ID: "oldMe", URI: strPtr(srcURI), MovedAt: &recent},
+			aka:  srcURI,
+			want: false,
+		},
+		{
+			name: "2時間を過ぎていれば緩和しない",
+			src:  &model.User{ID: "oldMe", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI), MovedAt: &old},
+			aka:  srcURI,
+			want: false,
+		},
+		{
+			name: "movedAt が無ければ緩和しない",
+			src:  &model.User{ID: "oldMe", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI)},
+			aka:  srcURI,
+			want: false,
+		},
+		{
+			name: "このサーバーが知らない移行元は無視する",
+			src:  nil,
+			aka:  srcURI,
+			want: false,
+		},
+		{
+			name: "alsoKnownAs が空なら緩和しない",
+			src:  &model.User{ID: "oldMe", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI), MovedAt: &recent},
+			aka:  "",
+			want: false,
+		},
+		{
+			name: "自分自身を alsoKnownAs に入れても緩和しない",
+			src:  nil,
+			aka:  dstURI,
+			want: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			userRepo := testutil.NewMockUserRepository()
+			if tc.src != nil {
+				userRepo.Users["oldMe"] = tc.src
+			}
+			urls := activitypub.NewURLBuilder("https://local.example")
+			svc := move.NewService(userRepo, testutil.NewMockFollowingRepository(), urls,
+				activitypub.NewRenderer(urls), &fakeResolver{}, &fakeDeliverer{})
+
+			dst := &model.User{ID: "dstUser", Username: "me"}
+			if tc.aka != "" {
+				dst.AlsoKnownAs = strPtr(tc.aka)
+			}
+			assert.Equal(t, tc.want, svc.HasRecentConfirmedMoveIn(dst))
+		})
+	}
+}
+
+// alsoKnownAs は csv。複数並んでいても、条件を満たすものが 1 件あれば緩和する。
+func TestHasRecentConfirmedMoveIn_MultipleAlsoKnownAs(t *testing.T) {
+	const dstURI = "https://local.example/users/dstUser"
+	recent := time.Now().Add(-10 * time.Minute)
+
+	userRepo := testutil.NewMockUserRepository()
+	// 1 件目は無関係、2 件目が相互確認の取れる移行元。
+	userRepo.Users["stranger"] = &model.User{
+		ID: "stranger", URI: strPtr("https://a.example/users/stranger"),
+	}
+	userRepo.Users["oldMe"] = &model.User{
+		ID: "oldMe", URI: strPtr("https://b.example/users/oldMe"),
+		MovedToURI: strPtr(dstURI), MovedAt: &recent,
+	}
+	urls := activitypub.NewURLBuilder("https://local.example")
+	svc := move.NewService(userRepo, testutil.NewMockFollowingRepository(), urls,
+		activitypub.NewRenderer(urls), &fakeResolver{}, &fakeDeliverer{})
+
+	dst := &model.User{
+		ID: "dstUser", Username: "me",
+		AlsoKnownAs: strPtr("https://a.example/users/stranger, https://b.example/users/oldMe"),
+	}
+	assert.True(t, svc.HasRecentConfirmedMoveIn(dst))
+}
+
+// ローカル同士の移行でも、移行元を id で引いて相互確認できる。
+func TestHasRecentConfirmedMoveIn_LocalSource(t *testing.T) {
+	urls := activitypub.NewURLBuilder("https://local.example")
+	dstURI := urls.UserURI("dstUser")
+	srcURI := urls.UserURI("oldLocal")
+	recent := time.Now().Add(-5 * time.Minute)
+
+	userRepo := testutil.NewMockUserRepository()
+	// ローカルユーザーは uri 列を持たない。
+	userRepo.Users["oldLocal"] = &model.User{
+		ID: "oldLocal", Username: "old", MovedToURI: strPtr(dstURI), MovedAt: &recent,
+	}
+	svc := move.NewService(userRepo, testutil.NewMockFollowingRepository(), urls,
+		activitypub.NewRenderer(urls), &fakeResolver{}, &fakeDeliverer{})
+
+	dst := &model.User{ID: "dstUser", Username: "me", AlsoKnownAs: strPtr(srcURI)}
+	assert.True(t, svc.HasRecentConfirmedMoveIn(dst))
+}
+
+// nil / 未配線で panic しない。
+func TestHasRecentConfirmedMoveIn_NilSafe(t *testing.T) {
+	urls := activitypub.NewURLBuilder("https://local.example")
+	svc := move.NewService(testutil.NewMockUserRepository(), testutil.NewMockFollowingRepository(),
+		urls, activitypub.NewRenderer(urls), &fakeResolver{}, &fakeDeliverer{})
+	assert.False(t, svc.HasRecentConfirmedMoveIn(nil))
+}

@@ -568,3 +568,80 @@ func (s *Service) updateLists(src, dst *model.User) {
 		}
 	}
 }
+
+// moveImportGrace is how long after a confirmed move the destination account
+// may upload oversized import files. upstream import-* は `movedAt` から 2 時間。
+const moveImportGrace = 2 * time.Hour
+
+// HasRecentConfirmedMoveIn reports whether dst is the destination of a move that
+// completed within the grace period, i.e. whether the bulk-import size limit
+// should be relaxed for them.
+//
+// upstream `AccountMoveService.validateAlsoKnownAs(me, check, instant=true)` の
+// import-* 用の呼び出しに対応する (#2415)。dst の `alsoKnownAs` を辿り、各移行元を
+// 引いて次の両方を満たすものが 1 件でもあれば true。
+//
+//  1. 移行元の movedToUri が dst の正規 URI を指している (相互確認)
+//  2. 移行元の movedAt が grace 以内
+//
+// **1 は security boundary。** 省くと、任意の actor を alsoKnownAs に並べるだけで
+// 緩和された上限を得られる。alsoKnownAs は自己申告なので、移行元側が dst を
+// 指し返していることまで確かめないと意味がない。
+//
+// 2 は #2412 で `movedAt` を遷移時だけ打刻するようにしたのが前提。再取得のたびに
+// 打ち直していた頃はこの窓が永久に閉じない。
+//
+// upstream は dst が remote の場合だけ actor を再取得するが、ここで扱う dst は
+// 常に呼び出し元のローカルユーザーなので DB 参照だけで完結する (ネットワークに
+// 出ない = import のたびに外部 fetch を誘発しない)。
+func (s *Service) HasRecentConfirmedMoveIn(dst *model.User) bool {
+	if dst == nil || s.userRepo == nil || s.urls == nil {
+		return false
+	}
+	if dst.AlsoKnownAs == nil || *dst.AlsoKnownAs == "" {
+		return false
+	}
+	dstURI := dst.URI
+	dstCanonical := ""
+	if dstURI != nil {
+		dstCanonical = *dstURI
+	}
+	if dstCanonical == "" {
+		dstCanonical = s.urls.UserURI(dst.ID)
+	}
+	now := time.Now()
+	for _, raw := range strings.Split(*dst.AlsoKnownAs, ",") {
+		srcURI := strings.TrimSpace(raw)
+		if srcURI == "" || srcURI == dstCanonical {
+			continue
+		}
+		src := s.lookupByURI(srcURI)
+		if src == nil {
+			// このサーバーが知らない移行元はフォロー関係も無いので無視する
+			// (upstream も fetchPerson が null なら continue)。
+			continue
+		}
+		if src.MovedToURI == nil || *src.MovedToURI != dstCanonical {
+			continue
+		}
+		if src.MovedAt == nil || now.Sub(*src.MovedAt) > moveImportGrace {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// lookupByURI resolves a user already known to this instance from its actor
+// URI, handling local users (whose `uri` column is NULL) by id.
+func (s *Service) lookupByURI(uri string) *model.User {
+	if u, err := s.userRepo.FindByURI(uri); err == nil && u != nil {
+		return u
+	}
+	if localID := s.urls.LocalUserIDFromURI(uri); localID != "" {
+		if u, err := s.userRepo.FindByID(localID); err == nil && u != nil {
+			return u
+		}
+	}
+	return nil
+}
