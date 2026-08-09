@@ -465,6 +465,22 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 	// から即座に反映され、本家の antennaUpdated 内部イベントに相当する cache 無効化
 	// は不要。
 	_ = s.repo.UpdateFields(antennaID, map[string]any{"isActive": true, "lastUsedAt": s.clock()})
+	// この antenna を読んだので未読行を消す (#2406)。
+	//
+	// **これが無いと `hasUnreadAntenna` が一度 true になると永久に true のまま**
+	// になり、`antenna_note_unread` も単調増加する。matchNote 側が行を作る一方で
+	// 消す経路がどこにも無かった。
+	//
+	// upstream は `getHasUnreadAntenna` が `return false; // TODO` で未読機能ごと
+	// 止まっているのでこの問題が起きない。mk-go は未読を実際に計算する分、
+	// 既読化も自前で持つ必要がある (docs/divergence.md)。
+	//
+	// 既存の best-effort write と同じ扱いで、失敗しても timeline 取得は続行する。
+	// 消し漏れても次回の閲覧で再試行されるだけで、未読が過剰に出る方向にしか
+	// ずれない (既読の note を未読と誤表示することはあっても、その逆は無い)。
+	if s.unreadRepo != nil {
+		_ = s.unreadRepo.DeleteByAntennaUser(ownerID, antennaID)
+	}
 	if limit <= 0 {
 		limit = 10
 	}

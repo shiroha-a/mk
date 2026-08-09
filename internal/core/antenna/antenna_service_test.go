@@ -1410,3 +1410,60 @@ func TestOnMoveAccount_NilArgs(t *testing.T) {
 	assert.NotPanics(t, func() { svc.OnMoveAccount(nil, &model.User{ID: "dst"}) })
 	assert.NotPanics(t, func() { svc.OnMoveAccount(&model.User{ID: "src"}, nil) })
 }
+
+// antenna の timeline を読んだらその antenna の未読行を消す (#2406)。
+//
+// **これが無いと `/api/i` の `hasUnreadAntenna` が一度 true になると永久に true**
+// のままになり、`antenna_note_unread` も単調増加する。matchNote 側が行を作る一方で
+// 消す経路がどこにも無かった。
+func TestNotes_ClearsUnreadRows(t *testing.T) {
+	svc, repo := newSvc(t)
+	unread := testutil.NewMockAntennaNoteUnreadRepository()
+	svc.SetUnreadRepo(unread)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	repo.Antennas["a2"] = &model.Antenna{ID: "a2", UserID: "u1"}
+
+	unread.Rows = []*model.AntennaNoteUnread{
+		{UserID: "u1", AntennaID: "a1", NoteID: "n1"},
+		{UserID: "u1", AntennaID: "a1", NoteID: "n2"},
+		// 別 antenna の未読は残す。
+		{UserID: "u1", AntennaID: "a2", NoteID: "n3"},
+		// 別ユーザーの未読も残す。
+		{UserID: "u2", AntennaID: "a1", NoteID: "n4"},
+	}
+
+	_, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+
+	require.Len(t, unread.Rows, 2, "読んだ (user, antenna) の行だけ消える")
+	for _, r := range unread.Rows {
+		assert.False(t, r.UserID == "u1" && r.AntennaID == "a1",
+			"u1/a1 の未読は消えている (残: %+v)", r)
+	}
+}
+
+// unreadRepo 未配線でも timeline 取得は動く (既存の best-effort と同じ扱い)。
+func TestNotes_WithoutUnreadRepo(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
+	require.NoError(t, svc.pushNote(context.Background(), "a1", "n1", time.Now()))
+
+	rows, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+	assert.Len(t, rows, 1)
+}
+
+// 他人の antenna を読もうとした場合は所有者チェックで弾かれ、未読行にも触らない。
+func TestNotes_ForeignAntennaDoesNotClearUnread(t *testing.T) {
+	svc, repo := newSvc(t)
+	unread := testutil.NewMockAntennaNoteUnreadRepository()
+	svc.SetUnreadRepo(unread)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "owner"}
+	unread.Rows = []*model.AntennaNoteUnread{
+		{UserID: "owner", AntennaID: "a1", NoteID: "n1"},
+	}
+
+	_, err := svc.Notes(context.Background(), "intruder", "a1", 10, "", "")
+	require.Error(t, err)
+	assert.Len(t, unread.Rows, 1, "所有者チェックで弾かれた場合は未読行を消さない")
+}
