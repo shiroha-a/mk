@@ -227,3 +227,46 @@ func TestApplyFrontendCSP_PassesMediaOrigins(t *testing.T) {
 	require.NotEmpty(t, v)
 	assert.Contains(t, v, "img-src 'self' data: blob: https://objects.example")
 }
+
+// esm.sh の許可は**意図的な妥協**なので、増えていないことを固定する (#2425)。
+//
+// Misskey frontend は shiki (コードブロックの syntax highlight) を CDN から
+// 動的 import する。バンドルに切り替えると 30 ロケール分が複製されてビルド
+// 成果物が 242MB → 508MB に倍増するため、CDN を 1 つ許す方を選んだ。
+//
+// **外部 origin がこれ以上増えるのは別の判断**なので、ここが落ちたら意図した
+// 追加かどうかを確認すること。
+func TestFrontendCSP_ExternalOriginsAreLimited(t *testing.T) {
+	policy := buildFrontendCSP(false)
+
+	t.Run("script-src で許す外部は esm.sh だけ", func(t *testing.T) {
+		var scriptSrc string
+		for _, d := range strings.Split(policy, "; ") {
+			if strings.HasPrefix(d, "script-src") {
+				scriptSrc = d
+			}
+		}
+		require.NotEmpty(t, scriptSrc)
+
+		var external []string
+		for _, tok := range strings.Fields(scriptSrc) {
+			if strings.HasPrefix(tok, "http://") || strings.HasPrefix(tok, "https://") {
+				external = append(external, tok)
+			}
+		}
+		assert.Equal(t, []string{"https://esm.sh"}, external,
+			"script-src の外部 origin を増やすときは理由を確認すること")
+	})
+
+	t.Run("他の directive に外部 origin を入れない", func(t *testing.T) {
+		for _, d := range strings.Split(policy, "; ") {
+			if strings.HasPrefix(d, "script-src") {
+				continue
+			}
+			for _, tok := range strings.Fields(d) {
+				assert.Falsef(t, strings.HasPrefix(tok, "https://"),
+					"%s に外部 origin %s が入っている", d, tok)
+			}
+		}
+	})
+}

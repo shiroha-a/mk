@@ -44,7 +44,23 @@ var frontendCSPDirectives = []string{
 	"base-uri 'self'",
 	"object-src 'none'",
 	"form-action 'self'",
-	"script-src 'self' 'unsafe-inline'",
+	// esm.sh は Misskey frontend が shiki (コードブロックの syntax highlight) を
+	// 動的 import する先。**upstream の vite 設定がそう作っている**
+	// (`externalPackages` で `shiki/langs` `shiki/themes` を CDN に逃がす)。
+	//
+	// バンドルに切り替えれば外部依存を消せるが、**実測でビルド成果物が
+	// 242MB → 508MB に倍増した** (2026-08-09)。Misskey frontend は 30 ロケール
+	// 分を個別にビルドするため、shiki の言語 347 + テーマ 66 ファイルが
+	// ロケールごとに複製され、JS が 13,576 → 23,610 ファイルに増える。
+	// 利用者 1 人あたりの転送量は変わらない (自分のロケール分しか取らない) が、
+	// 配布物とディスクが倍になる。
+	//
+	// 軽量さは mk-go の主要な利点なので、それを損なうより CDN を 1 つ許す方を
+	// 選んだ。代償として、コードブロックを表示する閲覧者の IP とリファラが
+	// esm.sh に渡り、CDN 側の可用性と完全性に依存する。
+	//
+	// 言語を絞ってバンドルすれば両立できる可能性はある (未検証)。
+	"script-src 'self' 'unsafe-inline' https://esm.sh",
 	"style-src 'self' 'unsafe-inline'",
 	// media は media proxy 経由で同一オリジンに来る。data: / blob: は
 	// クライアント側でのプレビュー生成 (画像編集・録音等) が使う。
