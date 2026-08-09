@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -76,6 +77,15 @@ type Service struct {
 	// フォロワー引き継ぎは skip する (移行そのものは成立させる)。
 	followQueue  FollowEnqueuer
 	proxyAccount ProxyAccountIDResolver
+
+	// carry-over (#2419) 用。未設定の系統は skip する。
+	blockingRepo repository.BlockingRepository
+	mutingRepo   repository.MutingRepository
+	userListRepo repository.UserListRepository
+	idGen        id.Generator
+	blockQueue   BlockEnqueuer
+	roleAssigner RoleAssigner
+	antennaMover AntennaMover
 }
 
 // SetFollowQueue wires the queue used to schedule follower migration jobs.
@@ -176,6 +186,7 @@ func (s *Service) Move(src *model.User, dstURI string) error {
 	// (エラーを返して再試行されると次回 ErrAlreadyMoved で詰む)。
 	// deliverer 未配線でも引き継ぎは行いたいので、下の early return より前で呼ぶ。
 	s.PostMoveProcess(src, dst)
+	s.carryOver(src, dst)
 
 	if s.deliverer == nil {
 		return nil
@@ -323,6 +334,229 @@ func (s *Service) adjustFollowingCounts(localFollowerIDs []string, src *model.Us
 		if err := s.userRepo.IncrementFollowersCount(followeeID, -1); err != nil {
 			slog.Warn("move: decrement followee's followersCount failed",
 				"followeeID", followeeID, "err", err)
+		}
+	}
+}
+
+// BlockEnqueuer schedules block jobs. Implemented by queue.Client.
+type BlockEnqueuer interface {
+	EnqueueBlockBulk(payloads []queue.BlockPayload) error
+}
+
+// RoleAssigner exposes the subset of role.Service needed to carry role
+// assignments over to the destination account.
+type RoleAssigner interface {
+	GetUserAssigns(userID string) ([]*model.RoleAssignment, error)
+	FindRole(roleID string) (*model.Role, error)
+	Assign(userID, roleID string, expiresAt *time.Time) error
+	IsAlreadyAssigned(err error) bool
+}
+
+// AntennaMover appends the destination account to antennas that list the
+// source. Implemented by antenna.Service.
+type AntennaMover interface {
+	OnMoveAccount(src, dst *model.User)
+}
+
+// SetCarryOverRepos wires the repositories used by the post-move carry-over
+// (#2419). 未設定の系統は skip する (移行そのものは成立させる)。
+func (s *Service) SetCarryOverRepos(
+	blockingRepo repository.BlockingRepository,
+	mutingRepo repository.MutingRepository,
+	userListRepo repository.UserListRepository,
+	idGen id.Generator,
+) {
+	s.blockingRepo = blockingRepo
+	s.mutingRepo = mutingRepo
+	s.userListRepo = userListRepo
+	s.idGen = idGen
+}
+
+// SetBlockQueue wires the queue used to schedule block carry-over jobs.
+func (s *Service) SetBlockQueue(q BlockEnqueuer) { s.blockQueue = q }
+
+// SetRoleAssigner wires the role service used to carry role assignments over.
+func (s *Service) SetRoleAssigner(r RoleAssigner) { s.roleAssigner = r }
+
+// SetAntennaMover wires the antenna service used to carry antennas over.
+func (s *Service) SetAntennaMover(a AntennaMover) { s.antennaMover = a }
+
+// carryOver copies the relationships that should follow the user to their new
+// account: blocks, mutes, roles, list memberships and antennas.
+//
+// upstream AccountMoveService.postMoveProcess の前半に対応する。**すべて
+// 「旧側を消さずに新側を足す」方向**で、片方向であることを崩さない。旧アカウント
+// が移行後もまだ機能しうるため、旧側の関係は残す。
+//
+// best-effort。個々の失敗は log に落として次へ進む (upstream も Promise.all を
+// try/catch で丸ごと握り潰している)。
+func (s *Service) carryOver(src, dst *model.User) {
+	s.copyBlocking(src, dst)
+	s.copyMutings(src, dst)
+	s.copyRoles(src, dst)
+	s.updateLists(src, dst)
+	if s.antennaMover != nil {
+		s.antennaMover.OnMoveAccount(src, dst)
+	}
+}
+
+// copyBlocking makes everyone who blocks src block dst as well.
+//
+// 移行先は移行前にローカルユーザーをフォローしていた可能性があり、ブロックを
+// 引き継がないと「ブロックしたはずの相手のフォロワー」が復活する。旧アカウント
+// の unblock はしない (upstream の "no need to unblock the old account because
+// it may be still functional")。
+func (s *Service) copyBlocking(src, dst *model.User) {
+	if s.blockingRepo == nil || s.blockQueue == nil {
+		return
+	}
+	srcBlockers, err := s.blockingRepo.ListBlockerIDs(src.ID)
+	if err != nil {
+		slog.Warn("move: list blockers of old account failed", "srcID", src.ID, "err", err)
+		return
+	}
+	if len(srcBlockers) == 0 {
+		return
+	}
+	dstBlockers, err := s.blockingRepo.ListBlockerIDs(dst.ID)
+	if err != nil {
+		slog.Warn("move: list blockers of new account failed", "dstID", dst.ID, "err", err)
+		return
+	}
+	already := make(map[string]struct{}, len(dstBlockers))
+	for _, id := range dstBlockers {
+		already[id] = struct{}{}
+	}
+	payloads := make([]queue.BlockPayload, 0, len(srcBlockers))
+	for _, blockerID := range srcBlockers {
+		if _, dup := already[blockerID]; dup {
+			continue
+		}
+		payloads = append(payloads, queue.BlockPayload{BlockerID: blockerID, BlockeeID: dst.ID})
+	}
+	if len(payloads) == 0 {
+		return
+	}
+	if err := s.blockQueue.EnqueueBlockBulk(payloads); err != nil {
+		slog.Warn("move: enqueue block carry-over failed",
+			"srcID", src.ID, "dstID", dst.ID, "blocks", len(payloads), "err", err)
+	}
+}
+
+// copyMutings re-creates active mutes of src against dst, preserving expiresAt.
+//
+// dst を**無期限**ミュート済みの muter はスキップする (upstream と同じ条件)。
+// 期限付きミュートしか無い muter には、src と同じ期限で dst のミュートを足す。
+func (s *Service) copyMutings(src, dst *model.User) {
+	if s.mutingRepo == nil || s.idGen == nil {
+		return
+	}
+	oldMutings, err := s.mutingRepo.ListByMutee(src.ID)
+	if err != nil {
+		slog.Warn("move: list mutings of old account failed", "srcID", src.ID, "err", err)
+		return
+	}
+	if len(oldMutings) == 0 {
+		return
+	}
+	existing, err := s.mutingRepo.ListByMutee(dst.ID)
+	if err != nil {
+		slog.Warn("move: list mutings of new account failed", "dstID", dst.ID, "err", err)
+		return
+	}
+	indefinite := make(map[string]struct{}, len(existing))
+	for _, m := range existing {
+		if m.ExpiresAt == nil {
+			indefinite[m.MuterID] = struct{}{}
+		}
+	}
+	now := time.Now()
+	for _, m := range oldMutings {
+		if _, dup := indefinite[m.MuterID]; dup {
+			continue
+		}
+		if err := s.mutingRepo.Create(&model.Muting{
+			ID:        s.idGen.Generate(now),
+			MuterID:   m.MuterID,
+			MuteeID:   dst.ID,
+			ExpiresAt: m.ExpiresAt,
+		}); err != nil {
+			slog.Warn("move: create muting for new account failed",
+				"muterID", m.MuterID, "dstID", dst.ID, "err", err)
+		}
+	}
+}
+
+// copyRoles assigns dst the roles of src that opted into surviving a move.
+//
+// `preserveAssignmentOnMoveAccount` が false のロールは引き継がない。
+// 既に割り当て済みなら skip する。
+func (s *Service) copyRoles(src, dst *model.User) {
+	if s.roleAssigner == nil {
+		return
+	}
+	assigns, err := s.roleAssigner.GetUserAssigns(src.ID)
+	if err != nil {
+		slog.Warn("move: list role assignments failed", "srcID", src.ID, "err", err)
+		return
+	}
+	for _, a := range assigns {
+		role, err := s.roleAssigner.FindRole(a.RoleID)
+		if err != nil || role == nil {
+			// ロールが消えている場合など。upstream も見つからなければ skip。
+			continue
+		}
+		if !role.PreserveAssignmentOnMoveAccount {
+			continue
+		}
+		if err := s.roleAssigner.Assign(dst.ID, a.RoleID, a.ExpiresAt); err != nil {
+			if s.roleAssigner.IsAlreadyAssigned(err) {
+				continue
+			}
+			slog.Warn("move: assign role to new account failed",
+				"roleID", a.RoleID, "dstID", dst.ID, "err", err)
+		}
+	}
+}
+
+// updateLists adds dst to every user list that contains src.
+//
+// **旧アカウントはリストから外さない**。人数上限もチェックしない (upstream の
+// doc コメントに明記されている挙動)。
+func (s *Service) updateLists(src, dst *model.User) {
+	if s.userListRepo == nil || s.idGen == nil {
+		return
+	}
+	oldMemberships, err := s.userListRepo.ListMembershipsByUser(src.ID)
+	if err != nil {
+		slog.Warn("move: list memberships of old account failed", "srcID", src.ID, "err", err)
+		return
+	}
+	if len(oldMemberships) == 0 {
+		return
+	}
+	existing, err := s.userListRepo.ListMembershipsByUser(dst.ID)
+	if err != nil {
+		slog.Warn("move: list memberships of new account failed", "dstID", dst.ID, "err", err)
+		return
+	}
+	already := make(map[string]struct{}, len(existing))
+	for _, m := range existing {
+		already[m.UserListID] = struct{}{}
+	}
+	now := time.Now()
+	for _, m := range oldMemberships {
+		if _, dup := already[m.UserListID]; dup {
+			continue
+		}
+		if err := s.userListRepo.AddMember(&model.UserListMembership{
+			ID:             s.idGen.Generate(now),
+			UserID:         dst.ID,
+			UserListID:     m.UserListID,
+			UserListUserID: m.UserListUserID,
+		}); err != nil {
+			slog.Warn("move: add new account to list failed",
+				"listID", m.UserListID, "dstID", dst.ID, "err", err)
 		}
 	}
 }

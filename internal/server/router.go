@@ -1790,6 +1790,12 @@ func (s *Server) setupRoutes() {
 		}
 		return sa.UserID, true
 	})
+	// #2419: フォロワー以外の関連データも移行先へ引き継ぐ。いずれも
+	// 「旧側を消さずに新側を足す」片方向で、旧アカウントの関係は残す。
+	accountMover.SetCarryOverRepos(blockingRepo, mutingRepo, userListRepo, idGen)
+	accountMover.SetBlockQueue(s.queueClient)
+	accountMover.SetRoleAssigner(roleService)
+	accountMover.SetAntennaMover(antennaService)
 	iHandler.SetAccountMover(accountMover)
 	api.POST("/i", iHandler.Me, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/i/update", iHandler.Update, middleware.RequireAuth(), middleware.RequireScope("write:account"))

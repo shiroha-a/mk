@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/move"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -576,4 +578,426 @@ func TestPostMoveProcess_NilArgs(t *testing.T) {
 
 	assert.NotPanics(t, func() { svc.PostMoveProcess(nil, &model.User{ID: "dst"}) })
 	assert.NotPanics(t, func() { svc.PostMoveProcess(&model.User{ID: "src"}, nil) })
+}
+
+// fakeBlockQueue captures block payloads scheduled for carry-over.
+type fakeBlockQueue struct {
+	payloads []queue.BlockPayload
+}
+
+func (f *fakeBlockQueue) EnqueueBlockBulk(payloads []queue.BlockPayload) error {
+	f.payloads = append(f.payloads, payloads...)
+	return nil
+}
+
+// fakeRoleAssigner records Assign calls and serves preset roles.
+type fakeRoleAssigner struct {
+	assigns   []*model.RoleAssignment
+	roles     map[string]*model.Role
+	assigned  []string // "userID:roleID"
+	alreadyOn map[string]bool
+}
+
+func (f *fakeRoleAssigner) GetUserAssigns(string) ([]*model.RoleAssignment, error) {
+	return f.assigns, nil
+}
+
+func (f *fakeRoleAssigner) FindRole(roleID string) (*model.Role, error) {
+	r, ok := f.roles[roleID]
+	if !ok {
+		return nil, errors.New("not found")
+	}
+	return r, nil
+}
+
+func (f *fakeRoleAssigner) Assign(userID, roleID string, _ *time.Time) error {
+	if f.alreadyOn[roleID] {
+		return errAlreadyAssignedForTest
+	}
+	f.assigned = append(f.assigned, userID+":"+roleID)
+	return nil
+}
+
+func (f *fakeRoleAssigner) IsAlreadyAssigned(err error) bool {
+	return errors.Is(err, errAlreadyAssignedForTest)
+}
+
+var errAlreadyAssignedForTest = errors.New("already assigned")
+
+// fakeAntennaMover records the OnMoveAccount call.
+type fakeAntennaMover struct {
+	src, dst *model.User
+}
+
+func (f *fakeAntennaMover) OnMoveAccount(src, dst *model.User) { f.src, f.dst = src, dst }
+
+// carryOverFixture wires a Service with every carry-over dependency and runs a
+// successful move, returning the fakes for assertions.
+type carryOverFixture struct {
+	blockingRepo *testutil.MockBlockingRepository
+	mutingRepo   *testutil.MockMutingRepository
+	userListRepo *testutil.MockUserListRepository
+	blockQueue   *fakeBlockQueue
+	roleAssigner *fakeRoleAssigner
+	antennaMover *fakeAntennaMover
+}
+
+func runMoveWithCarryOver(t *testing.T, setup func(*carryOverFixture)) *carryOverFixture {
+	t.Helper()
+	fx := &carryOverFixture{
+		blockingRepo: testutil.NewMockBlockingRepository(),
+		mutingRepo:   testutil.NewMockMutingRepository(),
+		userListRepo: testutil.NewMockUserListRepository(),
+		blockQueue:   &fakeBlockQueue{},
+		roleAssigner: &fakeRoleAssigner{roles: map[string]*model.Role{}, alreadyOn: map[string]bool{}},
+		antennaMover: &fakeAntennaMover{},
+	}
+	if setup != nil {
+		setup(fx)
+	}
+	dstURI := "https://remote.example/users/dst"
+	resolver := &fakeResolver{byURI: map[string]*model.User{dstURI: {
+		ID: "dst", URI: strPtr(dstURI), AlsoKnownAs: strPtr("https://local.example/users/src"),
+	}}}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["src"] = &model.User{ID: "src", Username: "src"}
+	urls := activitypub.NewURLBuilder("https://local.example")
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	svc := move.NewService(userRepo, testutil.NewMockFollowingRepository(), urls,
+		activitypub.NewRenderer(urls), resolver, &fakeDeliverer{})
+	svc.SetCarryOverRepos(fx.blockingRepo, fx.mutingRepo, fx.userListRepo, idGen)
+	svc.SetBlockQueue(fx.blockQueue)
+	svc.SetRoleAssigner(fx.roleAssigner)
+	svc.SetAntennaMover(fx.antennaMover)
+
+	src := &model.User{ID: "src", Username: "src", URI: strPtr("https://local.example/users/src")}
+	require.NoError(t, svc.Move(src, dstURI))
+	return fx
+}
+
+// src をブロックしている人に dst もブロックさせる。既に dst をブロック済みの
+// blocker はスキップし、旧アカウントの unblock はしない (#2419)。
+func TestMove_CopiesBlocking(t *testing.T) {
+	fx := runMoveWithCarryOver(t, func(fx *carryOverFixture) {
+		fx.blockingRepo.Blockings["b1"] = &model.Blocking{ID: "b1", BlockerID: "alice", BlockeeID: "src"}
+		fx.blockingRepo.Blockings["b2"] = &model.Blocking{ID: "b2", BlockerID: "bob", BlockeeID: "src"}
+		// bob は既に dst をブロック済み → 重複させない
+		fx.blockingRepo.Blockings["b3"] = &model.Blocking{ID: "b3", BlockerID: "bob", BlockeeID: "dst"}
+	})
+
+	require.Len(t, fx.blockQueue.payloads, 1)
+	assert.Equal(t, "alice", fx.blockQueue.payloads[0].BlockerID)
+	assert.Equal(t, "dst", fx.blockQueue.payloads[0].BlockeeID)
+	// 旧アカウントへのブロックは残る。
+	assert.Len(t, fx.blockingRepo.Blockings, 3, "blocks against the old account are kept")
+}
+
+// 有効なミュートを dst にも張る。expiresAt はそのまま引き継ぐ。dst を無期限
+// ミュート済みの muter はスキップする。
+func TestMove_CopiesMutings(t *testing.T) {
+	future := time.Now().Add(24 * time.Hour)
+	past := time.Now().Add(-1 * time.Hour)
+	fx := runMoveWithCarryOver(t, func(fx *carryOverFixture) {
+		fx.mutingRepo.Mutings["m1"] = &model.Muting{ID: "m1", MuterID: "alice", MuteeID: "src"}
+		fx.mutingRepo.Mutings["m2"] = &model.Muting{ID: "m2", MuterID: "bob", MuteeID: "src", ExpiresAt: &future}
+		// 期限切れは対象外
+		fx.mutingRepo.Mutings["m3"] = &model.Muting{ID: "m3", MuterID: "carol", MuteeID: "src", ExpiresAt: &past}
+		// dave は既に dst を無期限ミュート済み → 重複させない
+		fx.mutingRepo.Mutings["m4"] = &model.Muting{ID: "m4", MuterID: "dave", MuteeID: "src"}
+		fx.mutingRepo.Mutings["m5"] = &model.Muting{ID: "m5", MuterID: "dave", MuteeID: "dst"}
+	})
+
+	got := map[string]*time.Time{}
+	for _, m := range fx.mutingRepo.Mutings {
+		if m.MuteeID == "dst" && m.MuterID != "dave" {
+			got[m.MuterID] = m.ExpiresAt
+		}
+	}
+	require.Len(t, got, 2, "only alice and bob get a new mute (carol expired, dave already muted)")
+	assert.Nil(t, got["alice"], "indefinite mute stays indefinite")
+	require.NotNil(t, got["bob"])
+	assert.WithinDuration(t, future, *got["bob"], time.Second, "expiresAt is carried over as-is")
+}
+
+// preserveAssignmentOnMoveAccount が true のロールだけ引き継ぐ。
+func TestMove_CopiesOnlyPreservedRoles(t *testing.T) {
+	fx := runMoveWithCarryOver(t, func(fx *carryOverFixture) {
+		fx.roleAssigner.assigns = []*model.RoleAssignment{
+			{RoleID: "keep"}, {RoleID: "drop"}, {RoleID: "gone"}, {RoleID: "dup"},
+		}
+		fx.roleAssigner.roles["keep"] = &model.Role{ID: "keep", PreserveAssignmentOnMoveAccount: true}
+		fx.roleAssigner.roles["drop"] = &model.Role{ID: "drop"}
+		fx.roleAssigner.roles["dup"] = &model.Role{ID: "dup", PreserveAssignmentOnMoveAccount: true}
+		// 既に割り当て済みならエラーを握り潰して継続する
+		fx.roleAssigner.alreadyOn["dup"] = true
+		// "gone" は roles に無い = 削除済みロール → skip
+	})
+
+	assert.Equal(t, []string{"dst:keep"}, fx.roleAssigner.assigned)
+}
+
+// dst を「src が入っていたリスト」に追加する。旧アカウントはリストから外さない。
+func TestMove_UpdatesLists(t *testing.T) {
+	owner := "owner1"
+	fx := runMoveWithCarryOver(t, func(fx *carryOverFixture) {
+		fx.userListRepo.Members = []*model.UserListMembership{
+			{ID: "mem1", UserID: "src", UserListID: "listA", UserListUserID: &owner},
+			{ID: "mem2", UserID: "src", UserListID: "listB", UserListUserID: &owner},
+			// dst は既に listB に入っている → 重複させない
+			{ID: "mem3", UserID: "dst", UserListID: "listB", UserListUserID: &owner},
+		}
+	})
+
+	var addedLists []string
+	srcStill := 0
+	for _, m := range fx.userListRepo.Members {
+		if m.UserID == "dst" && m.ID != "mem3" {
+			addedLists = append(addedLists, m.UserListID)
+		}
+		if m.UserID == "src" {
+			srcStill++
+		}
+	}
+	assert.Equal(t, []string{"listA"}, addedLists, "only listA is new for dst")
+	assert.Equal(t, 2, srcStill, "the old account is NOT removed from lists")
+}
+
+// antenna 側へ移行を通知する。
+func TestMove_NotifiesAntennaMover(t *testing.T) {
+	fx := runMoveWithCarryOver(t, nil)
+	require.NotNil(t, fx.antennaMover.src)
+	require.NotNil(t, fx.antennaMover.dst)
+	assert.Equal(t, "src", fx.antennaMover.src.ID)
+	assert.Equal(t, "dst", fx.antennaMover.dst.ID)
+}
+
+// carry-over の依存が 1 つも配線されていなくても移行は成立する。
+func TestMove_CarryOverIsOptional(t *testing.T) {
+	dstURI := "https://remote.example/users/dst"
+	resolver := &fakeResolver{byURI: map[string]*model.User{dstURI: {
+		ID: "dst", URI: strPtr(dstURI), AlsoKnownAs: strPtr("https://local.example/users/src"),
+	}}}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["src"] = &model.User{ID: "src"}
+	urls := activitypub.NewURLBuilder("https://local.example")
+	svc := move.NewService(userRepo, testutil.NewMockFollowingRepository(), urls,
+		activitypub.NewRenderer(urls), resolver, &fakeDeliverer{})
+
+	src := &model.User{ID: "src", Username: "src", URI: strPtr("https://local.example/users/src")}
+	assert.NotPanics(t, func() { require.NoError(t, svc.Move(src, dstURI)) })
+}
+
+// --- carry-over のエラーパス -------------------------------------------------
+//
+// carry-over は best-effort で、個々の失敗は log に落として次へ進む。どれが
+// 落ちても Move 自体は成功し、他系統の引き継ぎは継続する。
+
+type failingBlockingRepo struct {
+	*testutil.MockBlockingRepository
+	failOn string // "src" なら 1 回目、"dst" なら 2 回目で失敗
+	calls  int
+}
+
+func (f *failingBlockingRepo) ListBlockerIDs(blockeeID string) ([]string, error) {
+	f.calls++
+	if (f.failOn == "src" && f.calls == 1) || (f.failOn == "dst" && f.calls == 2) {
+		return nil, errors.New("list blockers boom")
+	}
+	return f.MockBlockingRepository.ListBlockerIDs(blockeeID)
+}
+
+type failingMutingRepo struct {
+	*testutil.MockMutingRepository
+	failOn     string // "src" / "dst"
+	failCreate bool
+	calls      int
+}
+
+func (f *failingMutingRepo) ListByMutee(muteeID string) ([]*model.Muting, error) {
+	f.calls++
+	if (f.failOn == "src" && f.calls == 1) || (f.failOn == "dst" && f.calls == 2) {
+		return nil, errors.New("list mutings boom")
+	}
+	return f.MockMutingRepository.ListByMutee(muteeID)
+}
+
+func (f *failingMutingRepo) Create(m *model.Muting) error {
+	if f.failCreate {
+		return errors.New("create muting boom")
+	}
+	return f.MockMutingRepository.Create(m)
+}
+
+type failingUserListRepoMove struct {
+	*testutil.MockUserListRepository
+	failOn  string // "src" / "dst"
+	failAdd bool
+	calls   int
+}
+
+func (f *failingUserListRepoMove) ListMembershipsByUser(userID string) ([]*model.UserListMembership, error) {
+	f.calls++
+	if (f.failOn == "src" && f.calls == 1) || (f.failOn == "dst" && f.calls == 2) {
+		return nil, errors.New("list memberships boom")
+	}
+	return f.MockUserListRepository.ListMembershipsByUser(userID)
+}
+
+func (f *failingUserListRepoMove) AddMember(m *model.UserListMembership) error {
+	if f.failAdd {
+		return errors.New("add member boom")
+	}
+	return f.MockUserListRepository.AddMember(m)
+}
+
+type failingRoleAssigner struct {
+	listErr   bool
+	assignErr bool
+}
+
+func (f *failingRoleAssigner) GetUserAssigns(string) ([]*model.RoleAssignment, error) {
+	if f.listErr {
+		return nil, errors.New("list assigns boom")
+	}
+	return []*model.RoleAssignment{{RoleID: "keep"}}, nil
+}
+
+func (f *failingRoleAssigner) FindRole(string) (*model.Role, error) {
+	return &model.Role{ID: "keep", PreserveAssignmentOnMoveAccount: true}, nil
+}
+
+func (f *failingRoleAssigner) Assign(string, string, *time.Time) error {
+	if f.assignErr {
+		return errors.New("assign boom")
+	}
+	return nil
+}
+
+func (f *failingRoleAssigner) IsAlreadyAssigned(error) bool { return false }
+
+type failingBlockQueue struct{}
+
+func (failingBlockQueue) EnqueueBlockBulk([]queue.BlockPayload) error {
+	return errors.New("enqueue block boom")
+}
+
+// moveWithCarryOverDeps runs a successful move with the supplied carry-over deps.
+func moveWithCarryOverDeps(
+	t *testing.T,
+	blockingRepo repository.BlockingRepository,
+	mutingRepo repository.MutingRepository,
+	userListRepo repository.UserListRepository,
+	blockQueue move.BlockEnqueuer,
+	roleAssigner move.RoleAssigner,
+) {
+	t.Helper()
+	dstURI := "https://remote.example/users/dst"
+	resolver := &fakeResolver{byURI: map[string]*model.User{dstURI: {
+		ID: "dst", URI: strPtr(dstURI), AlsoKnownAs: strPtr("https://local.example/users/src"),
+	}}}
+	userRepo := testutil.NewMockUserRepository()
+	userRepo.Users["src"] = &model.User{ID: "src"}
+	urls := activitypub.NewURLBuilder("https://local.example")
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	svc := move.NewService(userRepo, testutil.NewMockFollowingRepository(), urls,
+		activitypub.NewRenderer(urls), resolver, &fakeDeliverer{})
+	svc.SetCarryOverRepos(blockingRepo, mutingRepo, userListRepo, idGen)
+	if blockQueue != nil {
+		svc.SetBlockQueue(blockQueue)
+	}
+	if roleAssigner != nil {
+		svc.SetRoleAssigner(roleAssigner)
+	}
+	src := &model.User{ID: "src", Username: "src", URI: strPtr("https://local.example/users/src")}
+	require.NoError(t, svc.Move(src, dstURI))
+}
+
+func TestMove_CarryOverFailuresAreBestEffort(t *testing.T) {
+	seedBlocking := func() *testutil.MockBlockingRepository {
+		r := testutil.NewMockBlockingRepository()
+		r.Blockings["b1"] = &model.Blocking{ID: "b1", BlockerID: "alice", BlockeeID: "src"}
+		return r
+	}
+	seedMuting := func() *testutil.MockMutingRepository {
+		r := testutil.NewMockMutingRepository()
+		r.Mutings["m1"] = &model.Muting{ID: "m1", MuterID: "alice", MuteeID: "src"}
+		return r
+	}
+	seedList := func() *testutil.MockUserListRepository {
+		r := testutil.NewMockUserListRepository()
+		r.Members = []*model.UserListMembership{{ID: "mem1", UserID: "src", UserListID: "listA"}}
+		return r
+	}
+
+	cases := []struct {
+		name string
+		run  func(t *testing.T)
+	}{
+		{"blocker一覧(src)の取得失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t,
+				&failingBlockingRepo{MockBlockingRepository: seedBlocking(), failOn: "src"},
+				seedMuting(), seedList(), &fakeBlockQueue{}, nil)
+		}},
+		{"blocker一覧(dst)の取得失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t,
+				&failingBlockingRepo{MockBlockingRepository: seedBlocking(), failOn: "dst"},
+				seedMuting(), seedList(), &fakeBlockQueue{}, nil)
+		}},
+		{"blockのenqueue失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(), seedMuting(), seedList(), failingBlockQueue{}, nil)
+		}},
+		{"mute一覧(src)の取得失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(),
+				&failingMutingRepo{MockMutingRepository: seedMuting(), failOn: "src"},
+				seedList(), &fakeBlockQueue{}, nil)
+		}},
+		{"mute一覧(dst)の取得失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(),
+				&failingMutingRepo{MockMutingRepository: seedMuting(), failOn: "dst"},
+				seedList(), &fakeBlockQueue{}, nil)
+		}},
+		{"muteの作成失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(),
+				&failingMutingRepo{MockMutingRepository: seedMuting(), failCreate: true},
+				seedList(), &fakeBlockQueue{}, nil)
+		}},
+		{"list一覧(src)の取得失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(), seedMuting(),
+				&failingUserListRepoMove{MockUserListRepository: seedList(), failOn: "src"},
+				&fakeBlockQueue{}, nil)
+		}},
+		{"list一覧(dst)の取得失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(), seedMuting(),
+				&failingUserListRepoMove{MockUserListRepository: seedList(), failOn: "dst"},
+				&fakeBlockQueue{}, nil)
+		}},
+		{"listへの追加失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(), seedMuting(),
+				&failingUserListRepoMove{MockUserListRepository: seedList(), failAdd: true},
+				&fakeBlockQueue{}, nil)
+		}},
+		{"role割り当て一覧の取得失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(), seedMuting(), seedList(),
+				&fakeBlockQueue{}, &failingRoleAssigner{listErr: true})
+		}},
+		{"roleの割り当て失敗", func(t *testing.T) {
+			moveWithCarryOverDeps(t, seedBlocking(), seedMuting(), seedList(),
+				&fakeBlockQueue{}, &failingRoleAssigner{assignErr: true})
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// Move が error を返さないことが本体。require.NoError は helper 側。
+			assert.NotPanics(t, func() { tc.run(t) })
+		})
+	}
+}
+
+// 引き継ぐものが無い場合は早期 return する (空ケースの分岐)。
+func TestMove_CarryOverWithNothingToCopy(t *testing.T) {
+	fx := runMoveWithCarryOver(t, nil)
+	assert.Empty(t, fx.blockQueue.payloads)
+	assert.Empty(t, fx.roleAssigner.assigned)
 }
