@@ -186,7 +186,6 @@ func (s *Service) Move(src *model.User, dstURI string) error {
 	// (エラーを返して再試行されると次回 ErrAlreadyMoved で詰む)。
 	// deliverer 未配線でも引き継ぎは行いたいので、下の early return より前で呼ぶ。
 	s.PostMoveProcess(src, dst)
-	s.carryOver(src, dst)
 
 	if s.deliverer == nil {
 		return nil
@@ -239,18 +238,27 @@ func appendIfMissing(csvPtr *string, uri string) string {
 
 func strPtr(s string) *string { return &s }
 
-// PostMoveProcess migrates local followers of src onto dst.
+// PostMoveProcess carries everything that should follow the user over to their
+// new account: blocks, mutes, roles, list memberships, antennas, and finally
+// the local followers.
 //
-// upstream AccountMoveService.postMoveProcess の後半に対応する。前半
-// (ブロック / ミュート / ロール / リスト / アンテナの引き継ぎ) は #2419。
-//
-// move-out (Move) と move-in (#2414 の processRemoteMove) の両方から呼ばれる
-// 想定なので exported にしてある。
+// upstream AccountMoveService.postMoveProcess と同じ単位。move-out (Move) と
+// move-in (federation の remote move 検知) の両方から呼ばれるので exported。
 //
 // **best-effort。** 呼び出し時点で DB の movedToUri は既にコミット済みで、
 // ここでエラーを返して呼び出し側が再試行すると ErrAlreadyMoved で詰む。
 // 失敗は log に落として握り潰す (Move の配送失敗と同じ扱い)。
 func (s *Service) PostMoveProcess(src, dst *model.User) {
+	if src == nil || dst == nil {
+		return
+	}
+	s.carryOver(src, dst)
+	s.migrateFollowers(src, dst)
+}
+
+// migrateFollowers schedules follow jobs so local followers of src end up
+// following dst. 旧アカウントは unfollow しない (adjustFollowingCounts 参照)。
+func (s *Service) migrateFollowers(src, dst *model.User) {
 	if src == nil || dst == nil || s.followingRepo == nil {
 		return
 	}
