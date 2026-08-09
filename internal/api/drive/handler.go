@@ -212,9 +212,13 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 	}
 	// upstream create.ts:98-108 の name 決定: ps.name ?? file.name を trim し、
 	// 空 / 'blob' は null 化、それ以外は validateFileName 失敗で
-	// INVALID_FILE_NAME (#1564)。null 時 upstream は DriveService.addFile が
-	// `file.name || 'untitled'` + 拡張子補正で保存するが、mk-go は拡張子補正
-	// (correctFilename) 未実装のため 'untitled' 固定で fallback する。
+	// INVALID_FILE_NAME (#1564)。
+	//
+	// ここで決まるのは**補正前**の名前。upstream `DriveService.addFile` と同じく、
+	// 検出した MIME に基づく拡張子補正は保存側 (`core/drive` の
+	// `CorrectFilename`) が行う。したがって 'untitled' に落ちた場合も、拡張子の
+	// 付いた名前 (`untitled.jpg` 等) で保存される。
+	//
 	// multipart form の name 欄は「明示的な空文字」と「未指定」を区別する
 	// (upstream `ps.name ?? file.name` は '' を nullish 扱いしないため、
 	// 明示 '' は trim 後 null → 'untitled' になる) (#1564 review)。

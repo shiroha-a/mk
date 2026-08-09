@@ -374,6 +374,12 @@ func TestProcess_ChatRoomMessage_PersistedToRoom(t *testing.T) {
 	recv := &fakeChatRoomReceiver{}
 	p.SetChatRoomReceiver(recv)
 	// note の @context が room URI の group chat message。
+	//
+	// **`to` に複数の recipient が並んでいても room 経路で 1 回だけ取り込む。**
+	// 1-on-1 経路 (`handleChatCreate`) が「`to` の先頭しか見ない」ことを group
+	// chat の欠落と誤読した issue (#2408) があったので明記しておく。room の
+	// メンバー全員へ配るのは受け側 (`CreateRoomMessageViaAP`) の責務で、
+	// recipient 配列は参照しない。
 	body := []byte(`{
 		"type": "Create",
 		"actor": "https://remote.example/users/alice",

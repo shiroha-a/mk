@@ -2270,8 +2270,12 @@ func readActorString(act genericActivity) (string, error) {
 //
 // `to` は CherryPick の renderChatMessage が string[] で出すが、互換性のため
 // 単一文字列 / 配列の両方を受け付ける。配列の場合は先頭エントリを recipient
-// として扱う (1-on-1 DM 前提なので残りは無視)。複数 recipient (group chat)
-// は別 issue で対応。
+// として扱う。**1-on-1 経路なのでそれで正しい。**
+//
+// group chat は別プロトコルで、note の `@context` に room URI が入る形で届く。
+// Create の入口 (`chatRoomIDFromContext`) が先に振り分け、
+// `handleChatRoomMessageCreate` → `CreateRoomMessageViaAP` が room のメンバー
+// 全員に配る。ここに複数 recipient が来ることはない。
 func (p *Processor) handleChatCreate(sender *model.User, noteURI, content string, toRaw json.RawMessage) error {
 	if p.chatService == nil {
 		return ErrUnsupportedActivity
