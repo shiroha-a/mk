@@ -1441,3 +1441,55 @@ func TestRenderer_RenderPerson_MisskeyFieldsAlwaysPresent(t *testing.T) {
 	assert.Contains(t, s, `"_misskey_summary":null`)
 	assert.Contains(t, s, `"_misskey_followedMessage":null`)
 }
+
+// IsLocalURI / LocalUserIDFromURI はリモートアカウント移行 (#2414) の移行先
+// 判定に使う。ローカルユーザーは user.uri を持たないので、URI から id を取り
+// 出して DB を引く経路が要る。
+func TestURLBuilder_LocalURIHelpers(t *testing.T) {
+	b := NewURLBuilder("https://example.com")
+
+	t.Run("IsLocalURI", func(t *testing.T) {
+		cases := []struct {
+			uri  string
+			want bool
+		}{
+			{"https://example.com", true},
+			{"https://example.com/users/abc", true},
+			{"https://example.com/notes/xyz", true},
+			{"https://other.example/users/abc", false},
+			// 接頭辞一致だけで判定すると誤って local 扱いになる形。区切りまで
+			// 見ているので弾ける。
+			{"https://example.com.evil.test/users/abc", false},
+			{"https://example.community/users/abc", false},
+			{"", false},
+		}
+		for _, tc := range cases {
+			assert.Equalf(t, tc.want, b.IsLocalURI(tc.uri), "IsLocalURI(%q)", tc.uri)
+		}
+	})
+
+	t.Run("LocalUserIDFromURI", func(t *testing.T) {
+		cases := []struct {
+			uri  string
+			want string
+		}{
+			{"https://example.com/users/abc123", "abc123"},
+			// actor URI ちょうどの形以外は受けない。
+			{"https://example.com/users/abc123/inbox", ""},
+			{"https://example.com/users/", ""},
+			{"https://example.com/notes/abc123", ""},
+			{"https://other.example/users/abc123", ""},
+			{"https://example.com.evil.test/users/abc123", ""},
+			{"", ""},
+		}
+		for _, tc := range cases {
+			assert.Equalf(t, tc.want, b.LocalUserIDFromURI(tc.uri), "LocalUserIDFromURI(%q)", tc.uri)
+		}
+	})
+
+	t.Run("baseURL が空なら常に非ローカル", func(t *testing.T) {
+		empty := NewURLBuilder("")
+		assert.False(t, empty.IsLocalURI("https://example.com/users/a"))
+		assert.Empty(t, empty.LocalUserIDFromURI("https://example.com/users/a"))
+	})
+}

@@ -40,6 +40,37 @@ func (b *URLBuilder) UserURI(userID string) string {
 	return b.baseURL + "/users/" + userID
 }
 
+// IsLocalURI reports whether uri is served by this instance.
+//
+// 判定は baseURL の接頭辞一致。直後が区切り (`/`) か終端であることまで見るのは、
+// `https://example.com.evil.test/...` を local と誤判定しないため。
+func (b *URLBuilder) IsLocalURI(uri string) bool {
+	if b.baseURL == "" || !strings.HasPrefix(uri, b.baseURL) {
+		return false
+	}
+	rest := uri[len(b.baseURL):]
+	return rest == "" || strings.HasPrefix(rest, "/")
+}
+
+// LocalUserIDFromURI extracts the user id from a canonical local actor URI
+// (`<baseURL>/users/<id>`), returning "" when uri is not one.
+//
+// ローカルユーザーは `user.uri` 列を持たない (NULL) ので URI では引けない。
+// upstream ApPersonService.fetchPerson が `uri.split('/').pop()` で id を取り
+// 出して DB を引くのと同じ経路。
+func (b *URLBuilder) LocalUserIDFromURI(uri string) string {
+	prefix := b.baseURL + "/users/"
+	if b.baseURL == "" || !strings.HasPrefix(uri, prefix) {
+		return ""
+	}
+	rest := uri[len(prefix):]
+	// `/users/<id>` ちょうどの形だけを受ける (配下のサブパスは actor ではない)。
+	if rest == "" || strings.Contains(rest, "/") {
+		return ""
+	}
+	return rest
+}
+
 // UserProfileURL returns the human-facing profile page URL (/@username),
 // used as the actor's `url` field distinct from its `id` (/users/<id>)。
 // upstream renderPerson の url: `${config.url}/@${user.username}` に揃える (#1869)。
