@@ -397,3 +397,60 @@ func TestImport_Following_JobWithReplies(t *testing.T) {
 	require.Len(t, enq.importCalls, 1)
 	assert.True(t, enq.importCalls[0].WithReplies)
 }
+
+// stubMoveInValidator は移行直後判定を固定する。
+type stubMoveInValidator struct{ confirmed bool }
+
+func (s stubMoveInValidator) HasRecentConfirmedMoveIn(*model.User) bool { return s.confirmed }
+
+// 相互確認の取れた移行直後は 32MB まで許可する (#2415)。
+func TestImport_MovedInRelaxesSizeLimit(t *testing.T) {
+	makers := map[string]func(*Handler) func(c echo.Context) error{
+		"following":  func(h *Handler) func(c echo.Context) error { return h.ImportFollowing },
+		"blocking":   func(h *Handler) func(c echo.Context) error { return h.ImportBlocking },
+		"muting":     func(h *Handler) func(c echo.Context) error { return h.ImportMuting },
+		"user-lists": func(h *Handler) func(c echo.Context) error { return h.ImportUserLists },
+	}
+	for name, makeFn := range makers {
+		t.Run(name+"/移行直後は64KB超を通す", func(t *testing.T) {
+			h, enq, driveRepo := newTransferHandlerWithDrive()
+			h.SetMoveInValidator(stubMoveInValidator{confirmed: true})
+			uid := ownerID
+			driveRepo.Files["big"] = &model.DriveFile{ID: "big", UserID: &uid, Size: 64*1024 + 1}
+			rec := post(makeFn(h), `{"fileId":"big"}`, &model.User{ID: ownerID})
+			assert.Equal(t, http.StatusNoContent, rec.Code)
+			assert.Len(t, enq.importCalls, 1)
+		})
+		t.Run(name+"/移行直後でも32MB超は弾く", func(t *testing.T) {
+			h, enq, driveRepo := newTransferHandlerWithDrive()
+			h.SetMoveInValidator(stubMoveInValidator{confirmed: true})
+			uid := ownerID
+			driveRepo.Files["huge"] = &model.DriveFile{ID: "huge", UserID: &uid, Size: 32*1024*1024 + 1}
+			rec := post(makeFn(h), `{"fileId":"huge"}`, &model.User{ID: ownerID})
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "TOO_BIG_FILE")
+			assert.Empty(t, enq.importCalls)
+		})
+		t.Run(name+"/移行が確認できなければ64KBのまま", func(t *testing.T) {
+			h, enq, driveRepo := newTransferHandlerWithDrive()
+			h.SetMoveInValidator(stubMoveInValidator{confirmed: false})
+			uid := ownerID
+			driveRepo.Files["big"] = &model.DriveFile{ID: "big", UserID: &uid, Size: 64*1024 + 1}
+			rec := post(makeFn(h), `{"fileId":"big"}`, &model.User{ID: ownerID})
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "TOO_BIG_FILE")
+			assert.Empty(t, enq.importCalls)
+		})
+	}
+}
+
+// validator 未配線なら通常上限に倒す。判定できないときは絞る側が安全。
+func TestImport_WithoutMoveInValidatorKeepsDefaultLimit(t *testing.T) {
+	h, enq, driveRepo := newTransferHandlerWithDrive()
+	uid := ownerID
+	driveRepo.Files["big"] = &model.DriveFile{ID: "big", UserID: &uid, Size: 64*1024 + 1}
+	rec := post(h.ImportFollowing, `{"fileId":"big"}`, &model.User{ID: ownerID})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_BIG_FILE")
+	assert.Empty(t, enq.importCalls)
+}

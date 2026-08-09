@@ -56,6 +56,13 @@ type AccountMover interface {
 	Move(src *model.User, dstURI string) error
 }
 
+// MoveInValidator reports whether a user is the destination of a recently
+// confirmed account move, used to relax the bulk-import size limit (#2415)。
+// 実体は core/move.Service。
+type MoveInValidator interface {
+	HasRecentConfirmedMoveIn(dst *model.User) bool
+}
+
 // Handler handles account-related API endpoints.
 type Handler struct {
 	userService      *user.Service
@@ -78,6 +85,7 @@ type Handler struct {
 	pageLikeRepo          repository.PageLikeRepository
 	mover                 AccountMover
 	notificationSvc       UnreadNotificationSource
+	moveInValidator       MoveInValidator
 	achievementNotifier   AchievementNotifier
 	followRequestRepo     repository.FollowRequestRepository
 	announcementRepo      AnnouncementUnreadSource
@@ -581,6 +589,12 @@ func (h *Handler) SetFavoriteRepo(r repository.NoteFavoriteRepository) {
 // returns 501 so the endpoint fails loudly instead of silently no-oping.
 func (h *Handler) SetAccountMover(m AccountMover) {
 	h.mover = m
+}
+
+// SetMoveInValidator wires the check used to relax the import size limit right
+// after an account move. 未設定なら常に通常上限。
+func (h *Handler) SetMoveInValidator(v MoveInValidator) {
+	h.moveInValidator = v
 }
 
 // SetNotificationService wires the notification service used to compute

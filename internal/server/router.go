@@ -1800,6 +1800,8 @@ func (s *Server) setupRoutes() {
 	// #2414: リモートアカウントの移行を検知したら、同じ引き継ぎ処理を走らせる。
 	// federation → core/move の一方向依存で循環しない。
 	federationResolver.SetMoveProcessor(accountMover)
+	// #2415: 移行直後 (相互確認済み + 2h 以内) だけ import の上限を緩和する。
+	iHandler.SetMoveInValidator(accountMover)
 	api.POST("/i", iHandler.Me, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/i/update", iHandler.Update, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 	api.POST("/i/pin", iHandler.Pin, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))

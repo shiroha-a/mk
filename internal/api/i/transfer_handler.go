@@ -102,12 +102,15 @@ func importNoSuchFileID(importType string) string {
 	}
 }
 
-// importMaxFileSize is upstream の通常 import file 上限 (64KB)。account-move 中
-// (movedAt が直近 2h 以内) は 32MB まで緩和されるが、mk-go は import-* に
-// prohibitMoved gate を効かせる方針 (#1555) かつ move-in 経路は未実装のため、
-// 共通の 64KB で扱う。これより大きい file は上流が move 中だけ許可する稀な
-// ケースなので、保守的に弾く (= 上流が許可するものを誤って通すことはない)。
+// importMaxFileSize is upstream の通常 import file 上限 (64KB)。
 const importMaxFileSize = 64 * 1024
+
+// importMovedMaxFileSize is the relaxed limit granted right after a confirmed
+// account move (upstream import-* の 32MB)。移行直後は旧アカウントから出力した
+// 一覧をまとめて取り込むため、通常の 64KB では足りない。
+//
+// 緩和には移行元との相互確認が要る (MoveInValidator 参照)。
+const importMovedMaxFileSize = 32 * 1024 * 1024
 
 // importEmptyFileID maps an import type to upstream's per-endpoint emptyFile
 // error UUID (#1555)。
@@ -177,7 +180,7 @@ func (h *Handler) validateImportRequest(c echo.Context, importType string) (*mod
 		_ = c.JSON(http.StatusBadRequest, apierr.Error("EMPTY_FILE", "That file is empty.", importEmptyFileID(importType)))
 		return nil, nil, false, false
 	}
-	if tooBigID := importTooBigFileID(importType); tooBigID != "" && file.Size > importMaxFileSize {
+	if tooBigID := importTooBigFileID(importType); tooBigID != "" && file.Size > h.importSizeLimit(u) {
 		_ = c.JSON(http.StatusBadRequest, apierr.Error("TOO_BIG_FILE", "That file is too big.", tooBigID))
 		return nil, nil, false, false
 	}
@@ -311,4 +314,16 @@ func (h *Handler) ImportAntennas(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Failed to enqueue import.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// importSizeLimit returns the bulk-import size limit for u, relaxed when they
+// are the destination of a recently confirmed account move (#2415)。
+//
+// validator 未配線なら通常上限に倒す。緩和は「相互確認が取れた移行の直後」
+// だけに与えるものなので、判定できないときは絞る側が安全。
+func (h *Handler) importSizeLimit(u *model.User) int {
+	if h.moveInValidator != nil && h.moveInValidator.HasRecentConfirmedMoveIn(u) {
+		return importMovedMaxFileSize
+	}
+	return importMaxFileSize
 }
