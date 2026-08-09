@@ -1391,3 +1391,21 @@ func buildDefaultPolicies() map[string]any {
 		PolicyChunkedUploadMaxPendingMb:          1024,
 	}
 }
+
+// FindRole returns the role by id. アカウント移行のロール引き継ぎ (#2419) が
+// `preserveAssignmentOnMoveAccount` を見るために使う。upstream は getRoles() で
+// 全件取ってから find するが、移行 1 回あたりの assignment 数は少ないので
+// id 引きで足りる。
+func (s *Service) FindRole(roleID string) (*model.Role, error) {
+	if roleID == "" {
+		return nil, ErrRoleNotFound
+	}
+	return s.roleRepo.FindByID(roleID)
+}
+
+// IsAlreadyAssigned reports whether err means the user already has the role.
+// 呼び出し側 (core/move) が role パッケージの sentinel error に直接依存せずに
+// 済むよう、判定をここで公開する。
+func (s *Service) IsAlreadyAssigned(err error) bool {
+	return errors.Is(err, ErrAlreadyAssigned)
+}
