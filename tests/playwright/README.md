@@ -31,19 +31,19 @@ Phase 1 PR-1 では frontend は bundle せず API 中心 spec のみ。後続 P
 ```
 specs/
 ├── upstream/       # upstream Misskey にも存在する機能の検証
-│   ├── ui/         # ブラウザでページを開く (174 spec)
-│   └── api/        # API の shape / 挙動 (97 spec)
+│   ├── ui/         # ブラウザを駆動する (176 spec)
+│   └── api/        # API の shape / 挙動 (95 spec)
 └── mkgo/           # mk-go 独自機能の検証 (現時点で空)
 ```
 
 ### ui と api の境界
 
-**判定は `page.goto` の有無で行う。** ブラウザでページを開くなら `ui/`、開かないなら
-`api/`。
+**判定は `page` fixture を使うかどうかで行う。** ブラウザを駆動するなら `ui/`、
+使わないなら `api/`。
 
-**`ui/` はブラウザでページを開く。** クリックや入力を伴うものだけでなく、開いて
-HTTP status やリダイレクト先を見るだけの spec も含む。画面が出せなければ落ちる以上、
-それは UI の検証にあたる。
+**`ui/` はブラウザを駆動する。** クリックや入力を伴うものだけでなく、`page.goto` して
+HTTP status やリダイレクト先を見るだけの spec、`page.setContent` で iframe を張って
+描画を確かめる spec も含む。画面が出せなければ落ちる以上、それは UI の検証にあたる。
 
 **`api/` はブラウザを一切使わない。** `request` fixture で API を叩き、レスポンスの
 shape や挙動を検証する spec。
@@ -52,10 +52,17 @@ shape や挙動を検証する spec。
 一致していなかった**。「UI が壊れていないか」を知りたいときにどれを見ればよいか
 分からない状態だったので、実態で分けた。
 
-その分割時は「クリック等の操作があるか / 要素の表示を検証しているか」で振り分けたが、
-**`page.goto` してレスポンスの status だけを見る spec がどちらの条件にも当たらず、
-api 側に落ちていた** (70 件)。結果として `upstream/api/ui/` という自己矛盾したパスが
-生まれ、`ui/` のカバー範囲も実際より少なく見えていた。判定条件を上記に改めた。
+この判定条件は 2 度直している。いずれも「何をもって UI 検証と呼ぶか」を狭く取り
+すぎたのが原因。
+
+  - 分割時は「クリック等の操作があるか / 要素の表示を検証しているか」で振り分けた。
+    **`page.goto` してレスポンスの status だけを見る spec がどちらにも当たらず**
+    api 側へ落ち (70 件)、`upstream/api/ui/` という自己矛盾したパスが生まれた
+  - 次に `page.goto` の有無へ改めたが、今度は **`uiSigninAsRoot()` のような helper
+    経由で遷移する spec と、`page.setContent()` で iframe を張る spec** が漏れた
+    (`post_note` / `embed` の 2 件)。どちらも実ブラウザでの操作そのものを見ている
+
+`page` fixture を使うかどうかなら、遷移の書き方に依存しない。
 
 この境界は「どちらが上等か」ではない。API の shape 検証は drop-in 互換の regression
 検出に不可欠で、UI 操作より速く安定する。両方を別々に育てる。
@@ -102,8 +109,8 @@ tests/playwright/
 ├── Dockerfile.runner           # Playwright runner image
 ├── instance.yml                # mk-go config
 ├── specs/
-│   ├── upstream/ui/            # ブラウザでページを開く (174 spec)
-│   ├── upstream/api/           # API の shape / 挙動 (97 spec)
+│   ├── upstream/ui/            # ブラウザを駆動する (176 spec)
+│   ├── upstream/api/           # API の shape / 挙動 (95 spec)
 │   └── mkgo/                   # mk-go 独自 (現時点で空)
 ├── fixtures/
 │   ├── api.ts                  # POST /api/<endpoint> ラッパ
