@@ -3,7 +3,6 @@ package mkqdriver
 import (
 	"context"
 	"fmt"
-	"log/slog"
 
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
@@ -24,12 +23,24 @@ import (
 //
 //   - mkq's ScheduleOption set (Limit / StartDate / EndDate / TZ /
 //     Immediately) does NOT cover per-fire job options like
-//     attempts / unique. driver.WithMaxRetry / driver.WithUnique /
-//     driver.WithProcessIn passed to Register are therefore silently
-//     unsupported. The asynq driver honours all three. Callers that
-//     rely on those options for cron jobs should keep them on the
-//     ad-hoc Enqueue path or stay on the asynq driver until upstream
-//     mkq adds an equivalent.
+//     attempts / unique, so driver.WithMaxRetry / driver.WithUnique /
+//     driver.WithProcessIn passed to Register are dropped. **これは
+//     現状の呼び出し方では実害が無い** (#2405):
+//
+//     WithUnique が防ぎたい「同じ cron tick の二重実行」は、mkq が
+//     発火 job に決定的な ID (`repeat:<scheduleID>:<nextMillis>`) を
+//     振ることで構造的に防がれている。updateJobScheduler-12.lua が
+//     `EXISTS` で弾き、重複時は `duplicated` イベントを記録する。
+//     さらに `producerId == currentDelayedJobId` の判定により、直前の
+//     発火を処理した worker だけが次を積める。
+//
+//     WithMaxRetry は mk-go の cron が全て 0 (リトライ無し) を渡して
+//     おり、mkq の既定 MaxAttempts も 0 なので結果が同じ。
+//     WithProcessIn は現在どの cron も渡していない。
+//
+//     したがって「この driver では cron が壊れる」ことは無い。将来
+//     リトライさせたい cron や、mkq の dedup が効かない粒度で dedup
+//     したい cron が出てきたら、その時点で bridge を検討する。
 type Scheduler struct {
 	driver *Driver
 }
@@ -40,9 +51,11 @@ type Scheduler struct {
 //
 // driver.WithMaxRetry, driver.WithUnique, and driver.WithProcessIn
 // are accepted (so the mkqdriver and asynqdriver share a call site)
-// but are NOT honoured — see the Scheduler doc-comment for the
-// upstream limitation. A startup warning is emitted when the caller
-// passes any of these so the gap is visible in operator logs.
+// but are NOT honoured — see the Scheduler doc-comment for why that is
+// currently harmless.
+//
+// 以前はこれらが渡されるたびに起動時 warning を出していたが、実害が無い
+// のに毎起動 11 件出て本物の警告を埋めるため落とした (#2405)。
 func (s *Scheduler) Register(cronspec, taskType string, payload []byte, opts ...driver.EnqueueOption) error {
 	o := driver.ApplyEnqueueOptions(opts)
 	if o.Queue == "" {
@@ -51,15 +64,6 @@ func (s *Scheduler) Register(cronspec, taskType string, payload []byte, opts ...
 	q := s.driver.queueFor(o.Queue)
 	if q == nil {
 		return fmt.Errorf("mkqdriver: unknown queue %q (taskType=%q)", o.Queue, taskType)
-	}
-	if o.MaxRetrySet || o.UniqueTTL > 0 || o.ProcessIn > 0 {
-		slog.Warn("mkqdriver: Scheduler.Register dropped per-fire options (mkq scheduler does not propagate them)",
-			"taskType", taskType,
-			"queue", o.Queue,
-			"maxRetrySet", o.MaxRetrySet,
-			"uniqueTTL", o.UniqueTTL,
-			"processIn", o.ProcessIn,
-		)
 	}
 	framed := framedPayload{Type: taskType, Body: payload}
 	return q.UpsertSchedulePattern(context.Background(), taskType, cronspec, framed)

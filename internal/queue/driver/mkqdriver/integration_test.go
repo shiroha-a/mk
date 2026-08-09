@@ -1417,3 +1417,62 @@ func TestServer_RelationshipFloodDoesNotStarveDeliver(t *testing.T) {
 
 	close(release)
 }
+
+// TestScheduler_RepeatedRegisterDoesNotDuplicate pins the property that makes
+// `driver.WithUnique` unnecessary on the mkq scheduler (#2405).
+//
+// mkq は発火 job に決定的な ID (`repeat:<scheduleID>:<nextMillis>`) を振り、
+// `updateJobScheduler-12.lua` が `EXISTS` で重複を弾く。したがって同じ
+// scheduleID を何度 Register しても、同じ発火時刻の job が二重に積まれること
+// はない。**cron の多重実行防止は option ではなくこの ID 設計で担保されている。**
+//
+// mkq がこの前提を崩す (job ID をランダム化する等) と cron が多重実行しうる
+// ようになるので、ここで固定する。
+func TestScheduler_RepeatedRegisterDoesNotDuplicate(t *testing.T) {
+	d := newDriver(t)
+	sched := d.Scheduler()
+
+	const taskType = "task:dedup"
+	register := func() {
+		require.NoError(t, sched.Register("*/5 * * * *", taskType, nil,
+			driver.WithQueue("maintenance"),
+			// これらは drop されるが、渡しても壊れないことも同時に確認する。
+			driver.WithMaxRetry(0),
+			driver.WithUnique(5*time.Minute),
+		))
+	}
+
+	register()
+	infoOnce, err := d.Inspector().GetQueueInfo("maintenance")
+	require.NoError(t, err)
+
+	// 同じ scheduleID で 4 回追加登録する。
+	for range 4 {
+		register()
+	}
+	infoRepeat, err := d.Inspector().GetQueueInfo("maintenance")
+	require.NoError(t, err)
+
+	assert.Equal(t, infoOnce.Scheduled, infoRepeat.Scheduled,
+		"re-registering the same scheduleID must not add more scheduled entries")
+
+	// repeat ZSET も 1 エントリのまま (scheduleID がキー)。
+	card, err := testRedis.Client.ZCard(context.Background(), "bull:maintenance:repeat").Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, card, "the repeat ZSET keys on scheduleID, so it stays at one entry")
+}
+
+// TestScheduler_DropsPerFireOptionsSilently documents that the dropped options
+// no longer produce a startup warning (#2405)。実害が無いのに毎起動 11 件出て
+// 本物の警告を埋めていたため落とした。Register 自体は成功する。
+func TestScheduler_DropsPerFireOptionsSilently(t *testing.T) {
+	d := newDriver(t)
+	sched := d.Scheduler()
+
+	require.NoError(t, sched.Register("0 3 * * *", "task:opts", nil,
+		driver.WithQueue("maintenance"),
+		driver.WithMaxRetry(3),
+		driver.WithUnique(time.Hour),
+		driver.WithProcessIn(time.Minute),
+	))
+}
