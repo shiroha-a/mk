@@ -436,14 +436,24 @@ func (s *Service) unfollow(followerID, followeeID string, deliver bool) error {
 	if err := s.followingRepo.Delete(f); err != nil {
 		return err
 	}
-	if err := s.userRepo.IncrementFollowingCount(followerID, -1); err != nil {
-		return err
+	// どちらかが移行済みならカウントを触らない。upstream
+	// UserFollowingService.decrementFollowing の
+	// `if (!follower.movedToUri && !followee.movedToUri)` と同じガード。
+	//
+	// アカウント移行時に PostMoveProcess が「unfollow せずカウントだけ落とす」
+	// 調整を先に済ませている (#2418)。ここで無条件に減らすと、後から同じ関係を
+	// unfollow したときに二重に減る。
+	moved := hasMoved(s.userRepo, followerID) || hasMoved(s.userRepo, followeeID)
+	if !moved {
+		if err := s.userRepo.IncrementFollowingCount(followerID, -1); err != nil {
+			return err
+		}
+		if err := s.userRepo.IncrementFollowersCount(followeeID, -1); err != nil {
+			return err
+		}
+		// remote instance counter -1 (#596)
+		s.adjustInstanceCountsForFollowing(f, -1)
 	}
-	if err := s.userRepo.IncrementFollowersCount(followeeID, -1); err != nil {
-		return err
-	}
-	// remote instance counter -1 (#596)
-	s.adjustInstanceCountsForFollowing(f, -1)
 	// hook 呼び出しに必要なユーザー情報を一度だけロードして使い回す。
 	// 失敗してもベストエフォートで continue する。
 	if s.federationHook != nil || s.chartHook != nil || s.webhookHook != nil || s.mainStreamPublisher != nil {
@@ -682,4 +692,18 @@ func (s *Service) IsFollowing(followerID, followeeID string) (bool, error) {
 // followerId matches. Used by following/update-all.
 func (s *Service) UpdateAllByFollower(followerID string, fields map[string]any) error {
 	return s.followingRepo.UpdateAllByFollower(followerID, fields)
+}
+
+// hasMoved reports whether the user has a non-empty movedToUri. 参照に失敗した
+// 場合は false を返し、カウント調整を通常どおり行う (取得できないことを理由に
+// カウントを放置すると、移行していない普通の unfollow でカウントがずれる)。
+func hasMoved(userRepo repository.UserRepository, userID string) bool {
+	if userRepo == nil {
+		return false
+	}
+	u, err := userRepo.FindByID(userID)
+	if err != nil || u == nil {
+		return false
+	}
+	return u.MovedToURI != nil && *u.MovedToURI != ""
 }

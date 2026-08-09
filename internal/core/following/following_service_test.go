@@ -1348,3 +1348,45 @@ func TestFollow_CarefulBot_NonBotFollowerFollowsDirectly(t *testing.T) {
 	ex, _ := fRepo.Exists("carol", "alice")
 	assert.True(t, ex)
 }
+
+// 移行済みアカウントが絡む unfollow ではカウントを触らない (#2418)。upstream
+// UserFollowingService.decrementFollowing の
+// `if (!follower.movedToUri && !followee.movedToUri)` と同じガード。
+//
+// アカウント移行時に PostMoveProcess が「unfollow せずカウントだけ落とす」調整を
+// 先に済ませているので、ここで無条件に減らすと二重に減る。
+func TestUnfollow_SkipsCountAdjustmentWhenMoved(t *testing.T) {
+	cases := []struct {
+		name         string
+		movedUser    string // movedToUri を立てるユーザー ("" ならどちらも未移行)
+		wantFollow   int    // unfollow 後の alice.FollowingCount
+		wantFollower int    // unfollow 後の bob.FollowersCount
+	}{
+		{"未移行なら通常どおり減らす", "", 0, 0},
+		{"follower が移行済みなら触らない", "alice", 1, 1},
+		{"followee が移行済みなら触らない", "bob", 1, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, userRepo, fRepo, _ := newSvc(t)
+			addUser(t, userRepo, "alice", false)
+			addUser(t, userRepo, "bob", false)
+			_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+			require.NoError(t, err)
+			require.Equal(t, 1, userRepo.Users["alice"].FollowingCount)
+			require.Equal(t, 1, userRepo.Users["bob"].FollowersCount)
+
+			if tc.movedUser != "" {
+				moved := "https://elsewhere.example/users/x"
+				userRepo.Users[tc.movedUser].MovedToURI = &moved
+			}
+
+			require.NoError(t, svc.Unfollow("alice", "bob"))
+
+			// 行の削除自体はガードに関係なく必ず起きる。
+			assert.Empty(t, fRepo.Followings, "the following row is always removed")
+			assert.Equal(t, tc.wantFollow, userRepo.Users["alice"].FollowingCount)
+			assert.Equal(t, tc.wantFollower, userRepo.Users["bob"].FollowersCount)
+		})
+	}
+}
