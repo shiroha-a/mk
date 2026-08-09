@@ -311,10 +311,13 @@ type Resolver struct {
 	// access を保護する。queue worker や inbox handler は別 actor を並行
 	// 処理するため、ロック無しの map read/write は runtime panic を起こす
 	// (Devin review #555 FLAG-1)。
-	keysMu             sync.RWMutex
-	keys               map[string]publicKeyEntry      // userID → publicKey + fetchedAt
-	clock              func() time.Time               // テストで差し替える時計
-	actorTTL           time.Duration                  // アクター情報の最大寿命
+	keysMu   sync.RWMutex
+	keys     map[string]publicKeyEntry // userID → publicKey + fetchedAt
+	clock    func() time.Time          // テストで差し替える時計
+	actorTTL time.Duration             // アクター情報の最大寿命
+	// moveProcessor はリモートアカウント移行の検知時に呼ぶ引き継ぎ処理
+	// (#2414)。実体は core/move.Service。nil なら移行を検知しても何もしない。
+	moveProcessor      RemoteMoveProcessor
 	instanceTracker    InstanceTracker                // optional: ホスト発見を通知
 	chartHook          ChartHook                      // optional: 新規 remote user の集計
 	hashtagHook        HashtagHook                    // optional: per-tag mentionedUsersCount 集計 (#680)
@@ -885,6 +888,10 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 	// upstream が movedAt を時間窓の基準に使う以上 (移行直後 2h の import
 	// 上限緩和 / 14 日の移行クールダウン)、打ち直すと窓が開き続けて機能
 	// しなくなる。時間窓を実装する前にここを直しておく (#2412)。
+	// 移行の検知に使う「更新前」の状態。existing はこの後 in-place で
+	// 書き換わるので、判定に必要な値をここで退避する。
+	prevMovedAt := existing.MovedAt
+	movedThisRefresh := false
 	if actor.MovedTo != "" {
 		movedTo := actor.MovedTo
 		moving := existing.MovedToURI == nil || *existing.MovedToURI != movedTo
@@ -893,6 +900,7 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 		if moving {
 			fields["movedAt"] = &now
 			existing.MovedAt = &now
+			movedThisRefresh = true
 		}
 	}
 	// 移行先が消えた (actor.MovedTo == "") ケースは追わない。他フィールドと
@@ -977,6 +985,161 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 	if existing.Host != nil {
 		r.notifyInstance(*existing.Host)
 	}
+	// 移行を検知したらフォロワー等の引き継ぎを起動する。DB 更新の後に置くのは、
+	// 引き継ぎ処理が movedToUri の永続化済みを前提にするため。
+	if movedThisRefresh {
+		r.processRemoteMove(existing, prevMovedAt, nil)
+	}
+}
+
+// remoteMoveCooldown is how long a remote account must wait between moves
+// before mk-go will process another one. upstream ApPersonService は 14 日
+// (「Mastodon のクールダウン期間は 30 日だが若干緩めに設定しておく」)。
+const remoteMoveCooldown = 14 * 24 * time.Hour
+
+// maxRemoteMoveChain bounds how many hops a move chain may traverse before we
+// give up. upstream の `movePreventUris.length > 10` と同じ上限。
+const maxRemoteMoveChain = 10
+
+// processRemoteMove carries local followers (and blocks / mutes / roles / lists
+// / antennas) of a moved remote account over to its destination.
+//
+// upstream ApPersonService.processRemoteMove 相当 (#2414)。src は movedToUri を
+// 書き終えた直後の行で、prevMovedAt は今回の更新より前の movedAt。
+//
+// visited は移行チェーンを辿った URI の集合で、A→B→A のような循環と、無限に
+// 続く連鎖を止める。最初の呼び出しでは nil を渡す。
+//
+// **best-effort。** 移行の検知は actor 更新の副作用なので、ここでの失敗が
+// プロフィール更新そのものを巻き戻すことは無い。
+func (r *Resolver) processRemoteMove(src *model.User, prevMovedAt *time.Time, visited map[string]bool) {
+	if r.moveProcessor == nil || src == nil {
+		return
+	}
+	if src.MovedToURI == nil || *src.MovedToURI == "" {
+		return
+	}
+	dstURI := *src.MovedToURI
+	srcURI := ""
+	if src.URI != nil {
+		srcURI = *src.URI
+	}
+	// 自分自身への移行は無意味。upstream も同じ位置で弾く。
+	if srcURI != "" && srcURI == dstURI {
+		return
+	}
+	// クールダウン。前回の移行から 14 日経っていなければ処理しない。
+	// **#2412 で movedAt を遷移時だけ打刻するようにしたのが前提。** 再取得の
+	// たびに打ち直していた頃はこの判定が常に成立してしまう。
+	if prevMovedAt != nil && src.MovedAt != nil &&
+		src.MovedAt.Sub(*prevMovedAt) < remoteMoveCooldown {
+		slog.Info("federation: skip remote move (cooldown)",
+			"srcURI", srcURI, "dstURI", dstURI)
+		return
+	}
+	if visited == nil {
+		visited = map[string]bool{}
+	}
+	if len(visited) > maxRemoteMoveChain {
+		slog.Warn("federation: skip remote move (chain too long)",
+			"srcURI", srcURI, "dstURI", dstURI, "hops", len(visited))
+		return
+	}
+	if visited[dstURI] {
+		slog.Warn("federation: skip remote move (circular)",
+			"srcURI", srcURI, "dstURI", dstURI)
+		return
+	}
+	visited[srcURI] = true
+
+	dst, err := r.userRepo.FindByURI(dstURI)
+	if err != nil || dst == nil {
+		// ローカルユーザーは user.uri を持たない (NULL) ので URI では引けない。
+		// upstream fetchPerson と同じく、自インスタンスを指す URI は id に
+		// 分解して DB を引く。**移行先が自インスタンス (= move-in 本来の形)
+		// はこの経路でしか解決できない。**
+		if r.urls != nil {
+			if localID := r.urls.LocalUserIDFromURI(dstURI); localID != "" {
+				if u, ferr := r.userRepo.FindByID(localID); ferr == nil && u != nil {
+					dst = u
+				}
+			}
+		}
+	}
+	if dst == nil {
+		// 未知の移行先は取りに行く。ローカルを名乗る URI が DB に無い場合は
+		// movedToUri が間違っているので、取りに行かず打ち切る (upstream の
+		// 'failed: movedTo is local but not found')。
+		if r.urls != nil && r.urls.IsLocalURI(dstURI) {
+			slog.Warn("federation: remote move points at an unknown local URI",
+				"srcURI", srcURI, "dstURI", dstURI)
+			return
+		}
+		dst, err = r.ResolveActor(dstURI)
+		if err != nil || dst == nil {
+			slog.Warn("federation: resolve remote move destination failed",
+				"srcURI", srcURI, "dstURI", dstURI, "err", err)
+			return
+		}
+	}
+
+	if !r.moveDestinationAccepts(src, dst, srcURI, dstURI) {
+		return
+	}
+	r.moveProcessor.PostMoveProcess(src, dst)
+}
+
+// moveDestinationAccepts reports whether dst really claims src as a previous
+// identity, i.e. whether the migration is bidirectionally confirmed.
+//
+// **ここは security boundary。** `alsoKnownAs` の相互確認を省くと、任意の actor
+// が movedTo で他人を指すだけでそのフォロワーを奪える。確認が取れない限り
+// 引き継ぎに入らない。
+func (r *Resolver) moveDestinationAccepts(src, dst *model.User, srcURI, dstURI string) bool {
+	dstCanonical := ""
+	if dst.URI != nil {
+		dstCanonical = *dst.URI
+	}
+	// ローカルユーザーが移行先の場合、user.uri は空なので正規 URI を組み立てる。
+	if dstCanonical == "" && dst.IsLocal() && r.urls != nil {
+		dstCanonical = r.urls.UserURI(dst.ID)
+	}
+	if dstCanonical == "" || dstCanonical != dstURI {
+		slog.Warn("federation: remote move destination URI mismatch",
+			"srcURI", srcURI, "declared", dstURI, "resolved", dstCanonical)
+		return false
+	}
+	// 移行先がさらに移行済みで、それが自分自身や移行元を指す場合は打ち切る。
+	if dst.MovedToURI != nil && *dst.MovedToURI != "" {
+		if *dst.MovedToURI == dstCanonical || (srcURI != "" && *dst.MovedToURI == srcURI) {
+			slog.Warn("federation: remote move destination points back",
+				"srcURI", srcURI, "dstURI", dstURI, "dstMovedTo", *dst.MovedToURI)
+			return false
+		}
+	}
+	if srcURI == "" {
+		return false
+	}
+	if !alsoKnownAsContains(dst.AlsoKnownAs, srcURI) {
+		slog.Warn("federation: remote move rejected (alsoKnownAs does not claim the source)",
+			"srcURI", srcURI, "dstURI", dstURI)
+		return false
+	}
+	return true
+}
+
+// alsoKnownAsContains reports whether the csv alsoKnownAs column lists uri.
+// mk-go は upstream の配列を text csv として保持している (core/move と同じ表現)。
+func alsoKnownAsContains(csvPtr *string, uri string) bool {
+	if csvPtr == nil || *csvPtr == "" || uri == "" {
+		return false
+	}
+	for _, part := range strings.Split(*csvPtr, ",") {
+		if strings.TrimSpace(part) == uri {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchActor fetches and decodes a remote actor document. Reject any
@@ -2891,3 +3054,16 @@ func (r *Resolver) collectAttachedFileTypes(fileIDs []string) pq.StringArray {
 	}
 	return out
 }
+
+// RemoteMoveProcessor carries a moved account's followers and relationships
+// over to its destination. Implemented by core/move.Service.
+//
+// federation → core/move の一方向依存なので循環しない。interface で受けるのは
+// テストで差し替えるため。
+type RemoteMoveProcessor interface {
+	PostMoveProcess(src, dst *model.User)
+}
+
+// SetMoveProcessor wires the handler invoked when a remote account is observed
+// to have moved.
+func (r *Resolver) SetMoveProcessor(p RemoteMoveProcessor) { r.moveProcessor = p }

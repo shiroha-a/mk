@@ -5495,3 +5495,334 @@ func TestRefreshActor_StampsMovedAtOnlyOnTransition(t *testing.T) {
 		})
 	}
 }
+
+// fakeMoveProcessor records PostMoveProcess invocations.
+type fakeMoveProcessor struct {
+	calls    int
+	src, dst *model.User
+}
+
+func (f *fakeMoveProcessor) PostMoveProcess(src, dst *model.User) {
+	f.calls++
+	f.src, f.dst = src, dst
+}
+
+// リモートアカウントの移行を検知したら引き継ぎを起動する (#2414)。
+//
+// **alsoKnownAs の相互確認が security boundary。** 移行先が移行元を
+// alsoKnownAs で名乗っていない限り引き継ぎに入らない。これを省くと、任意の
+// actor が movedTo で他人を指すだけでそのフォロワーを奪える。
+func TestRefreshActor_ProcessesRemoteMove(t *testing.T) {
+	const srcURI = "https://remote.example/users/src"
+	const dstURI = "https://elsewhere.example/users/dst"
+
+	cases := []struct {
+		name string
+		// 移行先ユーザーの既存行 (nil なら DB に居ない)
+		dst      *model.User
+		wantCall bool
+	}{
+		{
+			name: "alsoKnownAs が移行元を含めば引き継ぐ",
+			dst: &model.User{
+				ID: "dstUser", URI: strPtr(dstURI), AlsoKnownAs: strPtr(srcURI),
+			},
+			wantCall: true,
+		},
+		{
+			name: "alsoKnownAs に他の URI しか無ければ弾く",
+			dst: &model.User{
+				ID: "dstUser", URI: strPtr(dstURI),
+				AlsoKnownAs: strPtr("https://other.example/users/someone"),
+			},
+			wantCall: false,
+		},
+		{
+			name: "alsoKnownAs が空なら弾く",
+			dst:  &model.User{ID: "dstUser", URI: strPtr(dstURI)},
+		},
+		{
+			name: "移行先がさらに移行元を指していたら弾く (循環)",
+			dst: &model.User{
+				ID: "dstUser", URI: strPtr(dstURI), AlsoKnownAs: strPtr(srcURI),
+				MovedToURI: strPtr(srcURI),
+			},
+			wantCall: false,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			stale := time.Now().Add(-48 * time.Hour)
+			repo.Users["existing"] = &model.User{
+				ID: "existing", Username: "src", URI: strPtr(srcURI), LastFetchedAt: &stale,
+			}
+			if tc.dst != nil {
+				repo.Users["dstUser"] = tc.dst
+			}
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "` + srcURI + `",
+				"type": "Person",
+				"preferredUsername": "src",
+				"inbox": "` + srcURI + `/inbox",
+				"movedTo": "` + dstURI + `",
+				"publicKey": {"publicKeyPem": "FAKE"}
+			}`
+			urls := activitypub.NewURLBuilder("https://local.example")
+			idGen, _ := id.NewGenerator("aidx")
+			r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls,
+				&stubFetcher{body: []byte(body)}, idGen)
+			mp := &fakeMoveProcessor{}
+			r.SetMoveProcessor(mp)
+
+			_, err := r.ResolveActor(srcURI)
+			require.NoError(t, err)
+
+			if tc.wantCall {
+				require.Equal(t, 1, mp.calls, "the move must be carried over")
+				assert.Equal(t, "existing", mp.src.ID)
+				assert.Equal(t, "dstUser", mp.dst.ID)
+			} else {
+				assert.Zero(t, mp.calls, "the move must NOT be carried over")
+			}
+		})
+	}
+}
+
+// 同じ移行先を宣言し続けている actor の再取得では起動しない。#2412 で movedAt を
+// 遷移時だけ打刻するようにしたので、2 回目以降は movedThisRefresh が false になる。
+func TestRefreshActor_RemoteMoveNotRetriggeredOnSameTarget(t *testing.T) {
+	const srcURI = "https://remote.example/users/src2"
+	const dstURI = "https://elsewhere.example/users/dst2"
+
+	repo := testutil.NewMockUserRepository()
+	stale := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing"] = &model.User{
+		ID: "existing", Username: "src", URI: strPtr(srcURI), LastFetchedAt: &stale,
+		// 既に同じ移行先を記録済み
+		MovedToURI: strPtr(dstURI),
+	}
+	repo.Users["dstUser"] = &model.User{
+		ID: "dstUser", URI: strPtr(dstURI), AlsoKnownAs: strPtr(srcURI),
+	}
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + srcURI + `",
+		"type": "Person",
+		"preferredUsername": "src",
+		"inbox": "` + srcURI + `/inbox",
+		"movedTo": "` + dstURI + `",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	urls := activitypub.NewURLBuilder("https://local.example")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls,
+		&stubFetcher{body: []byte(body)}, idGen)
+	mp := &fakeMoveProcessor{}
+	r.SetMoveProcessor(mp)
+
+	_, err := r.ResolveActor(srcURI)
+	require.NoError(t, err)
+	assert.Zero(t, mp.calls, "re-declaring the same destination is not a new move")
+}
+
+// 自分自身への移行は無視する。
+func TestRefreshActor_RemoteMoveToSelfIsIgnored(t *testing.T) {
+	const srcURI = "https://remote.example/users/self"
+	repo := testutil.NewMockUserRepository()
+	stale := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing"] = &model.User{
+		ID: "existing", Username: "self", URI: strPtr(srcURI), LastFetchedAt: &stale,
+	}
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + srcURI + `",
+		"type": "Person",
+		"preferredUsername": "self",
+		"inbox": "` + srcURI + `/inbox",
+		"movedTo": "` + srcURI + `",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	urls := activitypub.NewURLBuilder("https://local.example")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls,
+		&stubFetcher{body: []byte(body)}, idGen)
+	mp := &fakeMoveProcessor{}
+	r.SetMoveProcessor(mp)
+
+	_, err := r.ResolveActor(srcURI)
+	require.NoError(t, err)
+	assert.Zero(t, mp.calls)
+}
+
+// ローカルを名乗る移行先が DB に居ない場合は取りに行かず打ち切る。
+// upstream の 'failed: movedTo is local but not found' 相当。
+func TestRefreshActor_RemoteMoveToUnknownLocalURIIsRejected(t *testing.T) {
+	const srcURI = "https://remote.example/users/src3"
+	const dstURI = "https://local.example/users/nobody"
+
+	repo := testutil.NewMockUserRepository()
+	stale := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing"] = &model.User{
+		ID: "existing", Username: "src", URI: strPtr(srcURI), LastFetchedAt: &stale,
+	}
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + srcURI + `",
+		"type": "Person",
+		"preferredUsername": "src",
+		"inbox": "` + srcURI + `/inbox",
+		"movedTo": "` + dstURI + `",
+		"publicKey": {"publicKeyPem": "FAKE"}
+	}`
+	urls := activitypub.NewURLBuilder("https://local.example")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls,
+		&stubFetcher{body: []byte(body)}, idGen)
+	mp := &fakeMoveProcessor{}
+	r.SetMoveProcessor(mp)
+
+	_, err := r.ResolveActor(srcURI)
+	require.NoError(t, err)
+	assert.Zero(t, mp.calls, "a local-looking destination that does not exist is rejected")
+}
+
+// refreshActor 経由では届かないゲートを直接突く (#2414)。
+func TestProcessRemoteMove_Gates(t *testing.T) {
+	const srcURI = "https://remote.example/users/g"
+	const dstURI = "https://elsewhere.example/users/g2"
+
+	newResolver := func(repo *testutil.MockUserRepository) (*federation.Resolver, *fakeMoveProcessor) {
+		urls := activitypub.NewURLBuilder("https://local.example")
+		idGen, _ := id.NewGenerator("aidx")
+		r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls,
+			&stubFetcher{body: []byte(`{}`)}, idGen)
+		mp := &fakeMoveProcessor{}
+		r.SetMoveProcessor(mp)
+		return r, mp
+	}
+	// 相互確認が取れる移行先を持つ標準構成。
+	seed := func() *testutil.MockUserRepository {
+		repo := testutil.NewMockUserRepository()
+		repo.Users["dstUser"] = &model.User{
+			ID: "dstUser", URI: strPtr(dstURI), AlsoKnownAs: strPtr(srcURI),
+		}
+		return repo
+	}
+	now := time.Now()
+
+	t.Run("移行先が未設定なら何もしない", func(t *testing.T) {
+		r, mp := newResolver(seed())
+		r.ProcessRemoteMove(&model.User{ID: "s", URI: strPtr(srcURI)}, nil, nil)
+		assert.Zero(t, mp.calls)
+	})
+
+	t.Run("クールダウン中は処理しない", func(t *testing.T) {
+		r, mp := newResolver(seed())
+		prev := now.Add(-24 * time.Hour) // 14 日未満
+		src := &model.User{
+			ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI), MovedAt: &now,
+		}
+		r.ProcessRemoteMove(src, &prev, nil)
+		assert.Zero(t, mp.calls, "a second move within 14 days is ignored")
+	})
+
+	t.Run("クールダウンを過ぎていれば処理する", func(t *testing.T) {
+		r, mp := newResolver(seed())
+		prev := now.Add(-30 * 24 * time.Hour)
+		src := &model.User{
+			ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI), MovedAt: &now,
+		}
+		r.ProcessRemoteMove(src, &prev, nil)
+		assert.Equal(t, 1, mp.calls)
+	})
+
+	t.Run("既に辿った移行先なら循環として打ち切る", func(t *testing.T) {
+		r, mp := newResolver(seed())
+		src := &model.User{ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI)}
+		r.ProcessRemoteMove(src, nil, map[string]bool{dstURI: true})
+		assert.Zero(t, mp.calls)
+	})
+
+	t.Run("連鎖が長すぎれば打ち切る", func(t *testing.T) {
+		r, mp := newResolver(seed())
+		visited := map[string]bool{}
+		for i := range 11 {
+			visited["https://hop.example/users/"+string(rune('a'+i))] = true
+		}
+		src := &model.User{ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI)}
+		r.ProcessRemoteMove(src, nil, visited)
+		assert.Zero(t, mp.calls)
+	})
+
+	t.Run("解決した移行先の URI が宣言と食い違えば弾く", func(t *testing.T) {
+		repo := testutil.NewMockUserRepository()
+		// FindByURI は dstURI で引けるが、行の URI が別物になっている。
+		repo.Users["dstUser"] = &model.User{
+			ID: "dstUser", URI: strPtr("https://elsewhere.example/users/OTHER"),
+			AlsoKnownAs: strPtr(srcURI),
+		}
+		r, mp := newResolver(repo)
+		src := &model.User{ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI)}
+		r.ProcessRemoteMove(src, nil, nil)
+		assert.Zero(t, mp.calls, "declared destination must match the resolved actor URI")
+	})
+
+	t.Run("移行元の URI が無ければ弾く", func(t *testing.T) {
+		r, mp := newResolver(seed())
+		src := &model.User{ID: "s", MovedToURI: strPtr(dstURI)}
+		r.ProcessRemoteMove(src, nil, nil)
+		assert.Zero(t, mp.calls)
+	})
+
+	t.Run("移行先が自分自身を指していれば弾く", func(t *testing.T) {
+		repo := testutil.NewMockUserRepository()
+		repo.Users["dstUser"] = &model.User{
+			ID: "dstUser", URI: strPtr(dstURI), AlsoKnownAs: strPtr(srcURI),
+			MovedToURI: strPtr(dstURI),
+		}
+		r, mp := newResolver(repo)
+		src := &model.User{ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI)}
+		r.ProcessRemoteMove(src, nil, nil)
+		assert.Zero(t, mp.calls)
+	})
+
+	t.Run("processor 未配線なら何もしない", func(t *testing.T) {
+		urls := activitypub.NewURLBuilder("https://local.example")
+		idGen, _ := id.NewGenerator("aidx")
+		r := federation.NewResolver(seed(), testutil.NewMockNoteRepository(), urls,
+			&stubFetcher{body: []byte(`{}`)}, idGen)
+		src := &model.User{ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI)}
+		assert.NotPanics(t, func() { r.ProcessRemoteMove(src, nil, nil) })
+	})
+
+	t.Run("移行先の取得に失敗したら打ち切る", func(t *testing.T) {
+		// DB に居らず、fetch も失敗する remote URI。
+		r, mp := newResolver(testutil.NewMockUserRepository())
+		src := &model.User{ID: "s", URI: strPtr(srcURI), MovedToURI: strPtr(dstURI)}
+		r.ProcessRemoteMove(src, nil, nil)
+		assert.Zero(t, mp.calls)
+	})
+}
+
+// ローカルユーザーが移行先の場合、user.uri が空でも正規 URI を組み立てて照合する。
+func TestProcessRemoteMove_LocalDestination(t *testing.T) {
+	const srcURI = "https://remote.example/users/incoming"
+	repo := testutil.NewMockUserRepository()
+	// ローカルユーザーは URI 列を持たない。
+	repo.Users["localDst"] = &model.User{
+		ID: "localDst", Username: "me", AlsoKnownAs: strPtr(srcURI),
+	}
+	urls := activitypub.NewURLBuilder("https://local.example")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls,
+		&stubFetcher{body: []byte(`{}`)}, idGen)
+	mp := &fakeMoveProcessor{}
+	r.SetMoveProcessor(mp)
+
+	src := &model.User{
+		ID: "s", URI: strPtr(srcURI),
+		MovedToURI: strPtr(urls.UserURI("localDst")),
+	}
+	r.ProcessRemoteMove(src, nil, nil)
+
+	require.Equal(t, 1, mp.calls, "moving into a local account is carried over")
+	assert.Equal(t, "localDst", mp.dst.ID)
+}

@@ -1797,6 +1797,9 @@ func (s *Server) setupRoutes() {
 	accountMover.SetRoleAssigner(roleService)
 	accountMover.SetAntennaMover(antennaService)
 	iHandler.SetAccountMover(accountMover)
+	// #2414: リモートアカウントの移行を検知したら、同じ引き継ぎ処理を走らせる。
+	// federation → core/move の一方向依存で循環しない。
+	federationResolver.SetMoveProcessor(accountMover)
 	api.POST("/i", iHandler.Me, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/i/update", iHandler.Update, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 	api.POST("/i/pin", iHandler.Pin, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireScope("write:account"))
