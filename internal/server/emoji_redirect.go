@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -108,6 +109,13 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		// (リモート instance の URL 更新等) ので 302 で永続キャッシュを
 		// 避ける。Cache-Control: max-age=86400 でブラウザ側 1 日キャッシュ
 		// と組み合わせる。
-		return c.Redirect(http.StatusFound, target)
+		// リモート emoji はメディアプロキシ経由に書き換える (#2425)。upstream も
+		// この endpoint では `${mediaProxy}/emoji.webp` へ飛ばしており、生の URL を
+		// 返していた mk-go の方が乖離していた。包まないとリアクション 1 つ表示する
+		// だけで閲覧者の IP が相手インスタンスへ渡る。
+		//
+		// API 応答の `emojis` field を server-proxy してはいけない (frontend が
+		// client 側で包むので二重になる) のとは別経路。こちらは frontend が包まない。
+		return c.Redirect(http.StatusFound, entity.ProxyEmojiURLString(target))
 	}
 }

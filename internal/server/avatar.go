@@ -1,6 +1,7 @@
 package server
 
 import (
+	"github.com/shiroha-a/mk/internal/entity"
 	"net/http"
 	"strings"
 
@@ -68,7 +69,17 @@ func avatarHandler(userRepo avatarUserLookup, localHost string) echo.HandlerFunc
 			// identicon fallback。`user.id` をシード化文字列として使う。
 			target = strPtr("/identicon/" + user.ID)
 		}
-		return c.Redirect(http.StatusFound, *target)
+		// リモートの avatar はメディアプロキシ経由に書き換える (#2425)。
+		//
+		// **ここだけ生の URL を Location に入れていた。** API 応答側は
+		// `entity.ProxyAvatarURL` で既に leak-safe にしてあり (UserLite /
+		// chat packUser / stream)、その doc comment も「every avatar-bearing
+		// response」と言っているのに、この endpoint は素通しだった。結果、
+		// mention chip を 1 つ表示するだけで閲覧者の IP とリファラが相手
+		// インスタンスへ渡っていた。
+		//
+		// 同一オリジン・相対 URL (identicon fallback を含む) は wrap されない。
+		return c.Redirect(http.StatusFound, entity.ProxyAvatarURLString(*target))
 	}
 }
 

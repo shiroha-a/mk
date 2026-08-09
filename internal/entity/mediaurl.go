@@ -334,6 +334,37 @@ func ProxyMediaURL(rawURL string) string {
 	return rawURL
 }
 
+// ProxyAvatarURLString is the package-level form of ProxyAvatarURL for callers
+// outside this package.
+//
+// `/avatar/@acct` の redirect 先を leak-safe にするのに使う (#2425)。API 応答は
+// entity 側で既に wrap 済みだが、**あの endpoint だけ生の URL を Location に
+// 入れていた**ので、mention chip を表示するだけで閲覧者の IP が相手インスタンス
+// へ渡っていた。
+func ProxyAvatarURLString(rawURL string) string {
+	return currentMediaURLContext().ProxyAvatarURL(rawURL)
+}
+
+// ProxyEmojiURLString wraps a custom emoji URL through the proxy in emoji mode.
+//
+// `/emoji/:path` の redirect 先に使う (#2425)。upstream `ServerService.ts` も
+// この endpoint では `${mediaProxy}/emoji.webp?url=...&emoji=1` へ飛ばしており、
+// **生の URL を返していた mk-go の方が乖離していた。**
+//
+// API 応答の `emojis` field を server-proxy してはいけない (frontend が
+// `meta.mediaProxy` で client 側プロキシするので二重になる) のとは**別の経路**。
+// こちらは frontend が URL を包まないので、包まないと生で外へ出る。
+func ProxyEmojiURLString(rawURL string) string {
+	c := currentMediaURLContext()
+	if c == nil {
+		return rawURL
+	}
+	if c.shouldProxyRemote() && c.isRemoteOrigin(rawURL) {
+		return c.ProxiedURL(rawURL, modeEmoji)
+	}
+	return rawURL
+}
+
 // ProxyMediaURLPtr is the nil-safe pointer form of ProxyMediaURL. It wraps a
 // remote-origin URL pointer through the proxy, passing nil/empty and local
 // URLs through unchanged. Used for optional admin-set image fields that the
