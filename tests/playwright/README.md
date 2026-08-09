@@ -31,27 +31,36 @@ Phase 1 PR-1 では frontend は bundle せず API 中心 spec のみ。後続 P
 ```
 specs/
 ├── upstream/       # upstream Misskey にも存在する機能の検証
-│   ├── ui/         # 実ブラウザ操作 (100 spec)
-│   └── api/        # API の shape / 挙動 (169 spec)
+│   ├── ui/         # ブラウザでページを開く (174 spec)
+│   └── api/        # API の shape / 挙動 (97 spec)
 └── mkgo/           # mk-go 独自機能の検証 (現時点で空)
 ```
 
 ### ui と api の境界
 
-**`ui/` は実際に画面を操作する。** クリック / 入力 / 選択のいずれかを行うか、
-要素の表示を検証する spec。
+**判定は `page.goto` の有無で行う。** ブラウザでページを開くなら `ui/`、開かないなら
+`api/`。
 
-**`api/` はブラウザを操作しない。** `page` を受け取っていても `expect` の対象が
-API レスポンスだけなら api 側。
+**`ui/` はブラウザでページを開く。** クリックや入力を伴うものだけでなく、開いて
+HTTP status やリダイレクト先を見るだけの spec も含む。画面が出せなければ落ちる以上、
+それは UI の検証にあたる。
+
+**`api/` はブラウザを一切使わない。** `request` fixture で API を叩き、レスポンスの
+shape や挙動を検証する spec。
 
 分割前は `ui/` という名前のディレクトリに API 検証が混ざっており、**名前と中身が
 一致していなかった**。「UI が壊れていないか」を知りたいときにどれを見ればよいか
 分からない状態だったので、実態で分けた。
 
+その分割時は「クリック等の操作があるか / 要素の表示を検証しているか」で振り分けたが、
+**`page.goto` してレスポンスの status だけを見る spec がどちらの条件にも当たらず、
+api 側に落ちていた** (70 件)。結果として `upstream/api/ui/` という自己矛盾したパスが
+生まれ、`ui/` のカバー範囲も実際より少なく見えていた。判定条件を上記に改めた。
+
 この境界は「どちらが上等か」ではない。API の shape 検証は drop-in 互換の regression
 検出に不可欠で、UI 操作より速く安定する。両方を別々に育てる。
 
-**現在の 269 spec はすべて `upstream/`。** 分割時に全 spec を確認したが、mk-go 独自
+**現在の 271 spec はすべて `upstream/`。** 分割時に全 spec を確認したが、mk-go 独自
 機能 (cherrypick 由来の chat 拡張、`mkGoVersion` 等の additive field) を検証するものは
 1 件も無かった。むしろ `i/profile_extra.spec.ts` のように **mk-go 拡張を明示的に scope
 外としている** spec もある。
@@ -93,8 +102,8 @@ tests/playwright/
 ├── Dockerfile.runner           # Playwright runner image
 ├── instance.yml                # mk-go config
 ├── specs/
-│   ├── upstream/ui/            # 実ブラウザ操作 (100 spec)
-│   ├── upstream/api/           # API の shape / 挙動 (169 spec)
+│   ├── upstream/ui/            # ブラウザでページを開く (174 spec)
+│   ├── upstream/api/           # API の shape / 挙動 (97 spec)
 │   └── mkgo/                   # mk-go 独自 (現時点で空)
 ├── fixtures/
 │   ├── api.ts                  # POST /api/<endpoint> ラッパ

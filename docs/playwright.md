@@ -1,7 +1,7 @@
 # Playwright e2e
 
 mk-go のフロントエンド / API を実ブラウザから検証する e2e。spec は
-`tests/playwright/specs/` にあり、現在 269 ファイル / 351 テスト。
+`tests/playwright/specs/` にあり、現在 271 ファイル / 383 テスト。
 
 Cypress からの移行完了に伴い、frontend e2e はこちらに一本化した (#2437)。本家も
 Cypress を廃止して Playwright へ移行しており、参照先が消滅したため mk-go 側の
