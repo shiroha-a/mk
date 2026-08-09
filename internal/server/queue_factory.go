@@ -3,6 +3,8 @@ package server
 import (
 	"context"
 	"fmt"
+	"log/slog"
+	"sort"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/config"
@@ -22,9 +24,8 @@ import (
 //
 // `<queue>JobConcurrency` / `<queue>JobPerSec` / `<queue>JobMaxAttempts`
 // 系の config は queue_factory が driver Config に流して runtime に反映
-// する。deliver / inbox の両 queue に対して有効 (#495 / #534)。
-// relationshipJob* は mk-go に該当 queue が無いため TS-compat 用に
-// 受け付けのみで no-op (docs/configuration.md 参照)。
+// する。deliver / inbox / relationship の 3 queue に対して有効
+// (#495 / #534 / #2403)。
 func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, error) {
 	totalConcurrency := 16
 	if cfg.DeliverJobConcurrency != nil && *cfg.DeliverJobConcurrency > 0 {
@@ -49,6 +50,15 @@ func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, e
 			QueueRateLimits:  queueRateLimits,
 		})
 	case "asynq":
+		// asynq は per-queue concurrency を持たず、Concurrency (総 worker pool)
+		// に fallback する。jobQueueAutoScale (autoscale_wiring.go) は「有効化
+		// しても全く機能しない」ので startup error にしているが、こちらは
+		// 総 worker 数として動きはするため起動は止めない。ただし設定した値が
+		// queue 単位には効かないので、黙って捨てずに warning で知らせる。
+		if ignored := asynqIgnoredConcurrencyKnobs(queueConcurrency); len(ignored) > 0 {
+			slog.Warn("queue: asynq driver does not support per-queue concurrency; these knobs fall back to the shared worker pool",
+				"queues", ignored, "sharedConcurrency", totalConcurrency)
+		}
 		return asynqdriver.New(
 			asynqdriver.BuildRedisOpt(cfg.RedisForJobQueue),
 			asynqdriver.ServerConfig{
@@ -62,19 +72,45 @@ func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, e
 }
 
 // perQueueConcurrencyFromConfig flattens the deliver/inbox/relationship
-// concurrency knobs into a queue-name → worker-count map. relationship は
-// 該当 queue が無いため forward されない (docs 参照)。
+// concurrency knobs into a queue-name → worker-count map.
 func perQueueConcurrencyFromConfig(cfg *config.Config) map[string]int {
 	out := map[string]int{}
 	if cfg.DeliverJobConcurrency != nil && *cfg.DeliverJobConcurrency > 0 {
-		out["deliver"] = *cfg.DeliverJobConcurrency
+		out[queue.QueueName] = *cfg.DeliverJobConcurrency
 	}
 	if cfg.InboxJobConcurrency != nil && *cfg.InboxJobConcurrency > 0 {
-		out["inbox"] = *cfg.InboxJobConcurrency
+		out[queue.InboxQueueName] = *cfg.InboxJobConcurrency
+	}
+	if cfg.RelationshipJobConcurrency != nil && *cfg.RelationshipJobConcurrency > 0 {
+		out[queue.RelationshipQueueName] = *cfg.RelationshipJobConcurrency
 	}
 	if len(out) == 0 {
 		return nil
 	}
+	return out
+}
+
+// asynqIgnoredConcurrencyKnobs returns the queue names whose per-queue
+// concurrency setting the asynq driver cannot honour, sorted for stable
+// log output.
+func asynqIgnoredConcurrencyKnobs(queueConcurrency map[string]int) []string {
+	if len(queueConcurrency) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(queueConcurrency))
+	for name := range queueConcurrency {
+		// deliver だけは asynqdriver に Concurrency (総 worker pool) として
+		// 渡っており、値が完全に捨てられるわけではないので warning から外す
+		// (docs/configuration.md の記述と揃える)。
+		if name == queue.QueueName {
+			continue
+		}
+		out = append(out, name)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -84,10 +120,13 @@ func perQueueConcurrencyFromConfig(cfg *config.Config) map[string]int {
 func perQueueRatesFromConfig(cfg *config.Config) map[string]int {
 	out := map[string]int{}
 	if cfg.DeliverJobPerSec != nil && *cfg.DeliverJobPerSec > 0 {
-		out["deliver"] = *cfg.DeliverJobPerSec
+		out[queue.QueueName] = *cfg.DeliverJobPerSec
 	}
 	if cfg.InboxJobPerSec != nil && *cfg.InboxJobPerSec > 0 {
-		out["inbox"] = *cfg.InboxJobPerSec
+		out[queue.InboxQueueName] = *cfg.InboxJobPerSec
+	}
+	if cfg.RelationshipJobPerSec != nil && *cfg.RelationshipJobPerSec > 0 {
+		out[queue.RelationshipQueueName] = *cfg.RelationshipJobPerSec
 	}
 	if len(out) == 0 {
 		return nil
@@ -157,6 +196,9 @@ func applyClientPolicies(c *queue.Client, cfg *config.Config) {
 	// objectStorage も retention を効かせる。一括削除で completed が一気に
 	// 積み上がるので、上限が無いと Redis を圧迫する (#2325)。
 	c.SetPolicy(queue.ObjectStorageQueueName, defaultPolicy())
+	// relationship も同様。移行時の一括 follow で completed が一気に積み上がる
+	// ので retention が要る (#2403)。
+	c.SetPolicy(queue.RelationshipQueueName, defaultPolicy())
 }
 
 // defaultPolicy returns the queue.Policy applied when no operator config

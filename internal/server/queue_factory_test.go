@@ -15,9 +15,9 @@ import (
 
 func intp(v int) *int { return &v }
 
-// #495: cfg.DeliverJobConcurrency がそのまま deliver queue の concurrency
-// として map に積まれる。inbox/relationship は mk-go に該当 queue が無い
-// ため出力されない (config だけ受けて driver は no-op で扱う)。
+// #495 / #534 / #2403: cfg の per-queue concurrency がそのまま queue 名 →
+// worker 数の map に積まれる。relationship は #2403 で専用 queue を持つように
+// なったので、それ以前の「config だけ受けて no-op」ではなく forward される。
 func TestPerQueueConcurrencyFromConfig(t *testing.T) {
 	cases := []struct {
 		name string
@@ -28,6 +28,14 @@ func TestPerQueueConcurrencyFromConfig(t *testing.T) {
 		{"deliverOnly", &config.Config{DeliverJobConcurrency: intp(8)}, map[string]int{"deliver": 8}},
 		{"zeroIgnored", &config.Config{DeliverJobConcurrency: intp(0)}, nil},
 		{"negativeIgnored", &config.Config{DeliverJobConcurrency: intp(-1)}, nil},
+		{"relationshipOnly", &config.Config{RelationshipJobConcurrency: intp(6)}, map[string]int{"relationship": 6}},
+		{"relationshipZeroIgnored", &config.Config{RelationshipJobConcurrency: intp(0)}, nil},
+		{"relationshipNegativeIgnored", &config.Config{RelationshipJobConcurrency: intp(-1)}, nil},
+		{"allThree", &config.Config{
+			DeliverJobConcurrency:      intp(8),
+			InboxJobConcurrency:        intp(12),
+			RelationshipJobConcurrency: intp(6),
+		}, map[string]int{"deliver": 8, "inbox": 12, "relationship": 6}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,6 +53,13 @@ func TestPerQueueRatesFromConfig(t *testing.T) {
 		{"empty", &config.Config{}, nil},
 		{"deliverOnly", &config.Config{DeliverJobPerSec: intp(50)}, map[string]int{"deliver": 50}},
 		{"zeroIgnored", &config.Config{DeliverJobPerSec: intp(0)}, nil},
+		{"relationshipOnly", &config.Config{RelationshipJobPerSec: intp(20)}, map[string]int{"relationship": 20}},
+		{"relationshipZeroIgnored", &config.Config{RelationshipJobPerSec: intp(0)}, nil},
+		{"allThree", &config.Config{
+			DeliverJobPerSec:      intp(50),
+			InboxJobPerSec:        intp(30),
+			RelationshipJobPerSec: intp(20),
+		}, map[string]int{"deliver": 50, "inbox": 30, "relationship": 20}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -361,4 +376,88 @@ func TestBuildPolicy(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+// asynq は per-queue concurrency を持たないので、設定された knob が queue
+// 単位には効かないことを起動時 warning で知らせる。deliver だけは
+// asynqdriver に総 worker pool として渡るため対象外 (docs/configuration.md
+// の記述と揃える)。#2403。
+func TestAsynqIgnoredConcurrencyKnobs(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]int
+		want []string
+	}{
+		{"nil", nil, nil},
+		{"empty", map[string]int{}, nil},
+		{"deliverOnlyIsNotIgnored", map[string]int{"deliver": 8}, nil},
+		{"inbox", map[string]int{"inbox": 12}, []string{"inbox"}},
+		{"relationship", map[string]int{"relationship": 6}, []string{"relationship"}},
+		{
+			"sortedForStableLogOutput",
+			map[string]int{"relationship": 6, "inbox": 12, "deliver": 8},
+			[]string{"inbox", "relationship"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, asynqIgnoredConcurrencyKnobs(tc.in))
+		})
+	}
+}
+
+// relationship queue は #2403 で追加した。retention policy が付いていないと
+// 移行時の一括 follow で completed が積み上がり Redis を圧迫する。
+// 4 task type すべてが relationship queue に載ることも同時に pin する
+// (routing_test.go と重複するが、こちらは policy 適用後の driver opts を見る)。
+func TestApplyClientPolicies_RelationshipHasRetention(t *testing.T) {
+	cases := []struct {
+		name string
+		enq  func(c *queue.Client) error
+	}{
+		{"follow", func(c *queue.Client) error {
+			return c.EnqueueFollow(queue.FollowPayload{FollowerID: "a", FolloweeID: "b"})
+		}},
+		{"unfollow", func(c *queue.Client) error {
+			return c.EnqueueUnfollow(queue.UnfollowPayload{FollowerID: "a", FolloweeID: "b"})
+		}},
+		{"block", func(c *queue.Client) error {
+			return c.EnqueueBlock(queue.BlockPayload{BlockerID: "a", BlockeeID: "b"})
+		}},
+		{"unblock", func(c *queue.Client) error {
+			return c.EnqueueUnblock(queue.UnblockPayload{BlockerID: "a", BlockeeID: "b"})
+		}},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := &recordingDriverClient{}
+			c := queue.NewClient(&stubDriver{client: rec})
+			defer func() { _ = c.Close() }()
+
+			applyClientPolicies(c, &config.Config{})
+			require.NoError(t, tt.enq(c))
+
+			assert.Equal(t, queue.RelationshipQueueName, rec.lastOpts.Queue)
+			assert.Equal(t, defaultKeepCompleted, rec.lastOpts.KeepCompleted)
+			assert.True(t, rec.lastOpts.KeepCompletedSet, "retention must actually be set")
+			assert.Equal(t, defaultKeepFailed, rec.lastOpts.KeepFailed)
+			assert.True(t, rec.lastOpts.KeepFailedSet)
+		})
+	}
+}
+
+// autoScaledQueues は個別 knob が無い queue を管理対象にする。relationship も
+// 同じ扱いで、relationshipJobConcurrency を明示した場合だけ除外される。#2403。
+func TestAutoScaledQueues_Relationship(t *testing.T) {
+	managed, skipped := autoScaledQueues(&config.Config{})
+	assert.Contains(t, managed, queue.RelationshipQueueName)
+	assert.NotContains(t, skipped, queue.RelationshipQueueName)
+
+	managed, skipped = autoScaledQueues(&config.Config{RelationshipJobConcurrency: intp(6)})
+	assert.NotContains(t, managed, queue.RelationshipQueueName)
+	assert.Contains(t, skipped, queue.RelationshipQueueName)
+
+	// 0 は「未設定」と同じ扱い (他 queue の分岐と揃える)。
+	managed, _ = autoScaledQueues(&config.Config{RelationshipJobConcurrency: intp(0)})
+	assert.Contains(t, managed, queue.RelationshipQueueName)
 }

@@ -87,10 +87,10 @@ cp .config/docker.yml.example .config/docker.yml
 |---|---|---|---|
 | `deliverJobConcurrency` | int | `16` | AP配信worker数。mkq driver では deliver queue 専用、asynq driver では**総 worker pool 上限**として扱う (asynq は per-queue concurrency を持たないため、この値は queue 共通の上限) |
 | `inboxJobConcurrency` | int | `16` | Inbox処理 worker 数 (#534 で非同期化済)。mkq driver では inbox queue 専用 worker (未指定時の default は 16)。asynq driver では**現状 no-op** (asynq の queue priority weight も静的 1 固定で wire していないため、共有 worker pool 内の inbox tasks は他 queue と equal-weight で競合する) |
-| `relationshipJobConcurrency` | int | - | フォロー処理 worker 数 (mk-go は relationship queue を持たないため**現状 no-op**) |
+| `relationshipJobConcurrency` | int | `4` | follow / unfollow / block / unblock の worker 数。mkq driver では relationship queue 専用 worker (#2403)。asynq driver では **no-op** (per-queue concurrency 非対応。起動時に warning を出す)。既定を upstream の 16 でなく 4 にしているのは、relationship job が DB bound で `db.maxOpenConns` (既定 25) を HTTP 経路と共有するため |
 | `deliverJobPerSec` | int | - | AP配信レート上限 (tasks/sec)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
 | `inboxJobPerSec` | int | - | Inbox処理レート上限 (tasks/sec) (#534)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
-| `relationshipJobPerSec` | int | - | mk-go では**現状 no-op** (上記同様) |
+| `relationshipJobPerSec` | int | - | relationship 処理のレート上限 (tasks/sec)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される (#2403) |
 | `deliverJobMaxAttempts` | int | driver 既定 | AP配信の**総試行回数** (初回 + retry) のdefault。BullMQ `attempts` と同じ意味で、TS Misskey YAML 互換。EnqueueDeliver で `WithMaxRetry` 未指定時にだけ適用される (#495)。例: `deliverJobMaxAttempts: 8` で 1 回失敗するごとに retry されて最大 8 回試行 |
 | `inboxJobMaxAttempts` | int | driver 既定 | Inbox処理の**総試行回数** (#534)。BullMQ `attempts` と同じ意味で、TS Misskey YAML 互換。EnqueueInbox で `WithMaxRetry` 未指定時にだけ適用される |
 | `jobQueueAutoScale` | bool | `false` | AIMD auto-scale controller (#1120) を opt-in 有効化。`true` で個別 `<queue>JobConcurrency` 未設定の queue が `[minWorkers, maxWorkers]` 範囲で動的に伸縮する。詳細は `docs/design/auto-scale-job-workers.md`。`mkq` driver のみ対応 (asynq では startup error)。 |
