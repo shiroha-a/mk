@@ -530,12 +530,14 @@ func (c *Client) EnqueueUnblock(payload UnblockPayload) error {
 
 // enqueueRelationship is the shared enqueue path for the per-pair
 // relationship jobs (follow / unfollow / block / unblock)。
-func (c *Client) enqueueRelationship(taskType string, body []byte) error {
+func (c *Client) enqueueRelationship(taskType string, body []byte, opts ...driver.EnqueueOption) error {
 	base := []driver.EnqueueOption{
 		driver.WithQueue(RelationshipQueueName),
 		driver.WithMaxRetry(3),
 	}
 	base = append(base, c.retentionOpts(RelationshipQueueName)...)
+	// caller 指定は後ろに置いて上書きを効かせる (現状は WithProcessIn のみ)。
+	base = append(base, opts...)
 	return c.inner.Enqueue(context.Background(), taskType, body, base...)
 }
 
@@ -557,9 +559,23 @@ func (c *Client) EnqueueFollowBulk(payloads []FollowPayload) error {
 // EnqueueUnfollowBulk schedules one Unfollow job per payload. 本家
 // QueueService.createUnfollowJob の addBulk 相当 (#1605)。
 func (c *Client) EnqueueUnfollowBulk(payloads []UnfollowPayload) error {
+	return c.EnqueueUnfollowBulkDelayed(payloads, 0)
+}
+
+// EnqueueUnfollowBulkDelayed is EnqueueUnfollowBulk with a processing delay.
+//
+// 本家 `QueueService.createDelayedUnfollowJob` 相当 (#2420)。アカウント移行の
+// 「24 時間後に旧アカウントの following を解除する」に使う。delay <= 0 なら
+// 即時 enqueue で EnqueueUnfollowBulk と同じ。
+func (c *Client) EnqueueUnfollowBulkDelayed(payloads []UnfollowPayload, delay time.Duration) error {
+	var opts []driver.EnqueueOption
+	if delay > 0 {
+		opts = append(opts, driver.WithProcessIn(delay))
+	}
 	var errs []error
 	for _, p := range payloads {
-		if err := c.EnqueueUnfollow(p); err != nil {
+		body := mustMarshal(p)
+		if err := c.enqueueRelationship(TaskTypeUnfollow, body, opts...); err != nil {
 			errs = append(errs, fmt.Errorf("unfollow %s->%s: %w", p.FollowerID, p.FolloweeID, err))
 		}
 	}
