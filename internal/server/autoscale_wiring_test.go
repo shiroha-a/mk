@@ -261,16 +261,21 @@ func TestStartAutoScale_TickerScalesUpOnBacklog(t *testing.T) {
 func TestStartAutoScale_GlobalCapBlocksScaleUp(t *testing.T) {
 	min := 2
 	maxW := 64
-	// 5 queue × min=2 = 10、cap = 12 → 残 headroom = 2 だけ。
-	cap := 12
 	cooldown := 1
 	cfg := &config.Config{
 		JobQueueAutoScale:        true,
 		MinWorkers:               &min,
 		MaxWorkers:               &maxW,
-		MaxWorkersGlobal:         &cap,
 		AutoScaleCooldownSeconds: &cooldown,
 	}
+	// cap は auto-scale 対象 queue 数から導出する。min × queue 数が floor に
+	// なるので、そこに headroom 2 を足した値を cap にすると「起動はできるが
+	// ほぼ伸ばせない」状態を作れる。queue を増減しても追随するよう、数を
+	// ハードコードしない (#2403 で 6→7 になった際に固定値が破綻した)。
+	managed, _ := autoScaledQueues(cfg)
+	require.NotEmpty(t, managed)
+	capacity := min*len(managed) + 2
+	cfg.MaxWorkersGlobal = &capacity
 	d := newScriptableDriver(nil)
 	m := queuemetrics.New()
 
@@ -280,17 +285,19 @@ func TestStartAutoScale_GlobalCapBlocksScaleUp(t *testing.T) {
 	t.Cleanup(func() { runner.Stop(context.Background()) })
 
 	// すべての queue を高 depth に → ticker が全 queue でスケールしたがる
-	for _, q := range []string{"deliver", "inbox", "export", "push", "webhook"} {
+	for _, q := range managed {
 		d.setPending(q, 100)
 	}
 
-	// しばらく走らせて、合計 worker が cap=12 を超えないことを assert。
+	// しばらく走らせて、合計 worker が cap を超えないことを assert。
+	// 集計対象も managed から引く。旧実装は 5 queue 固定で objectStorage を
+	// 数え落としており、合計を過小評価していた。
 	time.Sleep(3 * time.Second)
 	total := 0
-	for _, q := range []string{"deliver", "inbox", "export", "push", "webhook"} {
+	for _, q := range managed {
 		total += d.WorkerCount(q)
 	}
-	assert.LessOrEqual(t, total, cap, "total workers must stay within maxWorkersGlobal=%d (got %d)", cap, total)
+	assert.LessOrEqual(t, total, capacity, "total workers must stay within maxWorkersGlobal=%d (got %d)", capacity, total)
 }
 
 // TestAutoscaleRunner_Stop verifies that Stop blocks until every
@@ -375,9 +382,11 @@ func TestStartAutoScale_TickRecoversFromPanic(t *testing.T) {
 	inner.setPending("deliver", 1000) // 高 depth で scale-up trigger
 	d := &panickingDriver{scriptableDriver: inner}
 	// 初回 + 1 tick で発火する Resize までは success、その次の Resize で panic。
-	// 初期 Resize × 6 queue + 1 tick の Resize で 7 = panic 発火タイミング。
-	// queue を増減したらこの値も合わせること (autoScaledQueues 参照)。
-	d.panicAfter.Store(7)
+	// 初期 Resize × queue 数 + 1 tick の Resize が panic 発火タイミング。
+	// queue を増減しても追随するよう autoScaledQueues から導出する。
+	managed, _ := autoScaledQueues(cfg)
+	require.NotEmpty(t, managed)
+	d.panicAfter.Store(int32(len(managed) + 1))
 
 	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
 	require.NoError(t, err)
