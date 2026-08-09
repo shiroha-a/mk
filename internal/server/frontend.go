@@ -120,6 +120,11 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		cfg.Version, clientEntryJS,
 		time.Now().UnixMilli(), metaJSON, splashIconURL)
 
+	// SPA shell にだけ CSP を付ける (#2425)。shell を返す経路は catch-all と
+	// AP の non-AP fallback の 2 つで、どちらもこの関数を通るので path 判定が
+	// 要らない。API / アセットに誤って付くこともない。
+	applyFrontendCSP(c, cfg.FrontendContentSecurityPolicy)
+
 	return c.HTML(http.StatusOK, html)
 }
 

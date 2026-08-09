@@ -3657,6 +3657,12 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/embed/*", embed.Fallback)
 
 	// Frontend HTML shell — SPA catchall (最後に登録)
+	// CSP violation の受け口 (#2425)。**CSP が off のときは生やさない。**
+	// 認証不要の POST なので、使わない構成で晒す理由が無い。
+	if mode := s.config.FrontendContentSecurityPolicy; mode == CSPModeReportOnly || mode == CSPModeEnforce {
+		s.echo.POST(CSPReportPath, cspReportHandler())
+	}
+
 	s.echo.GET("/*", frontend)
 }
 

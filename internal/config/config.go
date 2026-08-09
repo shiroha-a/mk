@@ -177,6 +177,15 @@ type Source struct {
 	// [MinWorkers, MaxWorkers]. See docs/design/auto-scale-job-workers.md.
 	JobQueueAutoScale bool `mapstructure:"jobQueueAutoScale"`
 
+	// FrontendContentSecurityPolicy controls the CSP applied to the SPA
+	// shell: "off" (default) / "report-only" / "enforce" (#2425)。
+	//
+	// **upstream Misskey には frontend HTML への CSP が無い。** mk-go 独自の
+	// hardening なので opt-in にしてある。report-only は何もブロックしないが、
+	// 違反があると全利用者のブラウザ console に出るため、頼んでいない operator
+	// に配らないよう既定は off。
+	FrontendContentSecurityPolicy string `mapstructure:"frontendContentSecurityPolicy"`
+
 	// MaxWorkers is the per-queue worker upper bound used by the
 	// auto-scale controller. Default: runtime.NumCPU() * 16.
 	MaxWorkers *int `mapstructure:"maxWorkers"`
@@ -346,11 +355,13 @@ type Config struct {
 	InboxJobKeepCompleted      *int
 
 	// Auto-scale knobs (#1120 tracker). See docs/design/auto-scale-job-workers.md.
-	JobQueueAutoScale        bool
-	MaxWorkers               *int
-	MinWorkers               *int
-	MaxWorkersGlobal         *int
-	AutoScaleCooldownSeconds *int
+	JobQueueAutoScale bool
+	// FrontendContentSecurityPolicy: "off" / "report-only" / "enforce" (#2425)。
+	FrontendContentSecurityPolicy string
+	MaxWorkers                    *int
+	MinWorkers                    *int
+	MaxWorkersGlobal              *int
+	AutoScaleCooldownSeconds      *int
 
 	// JobQueueDriver is one of "asynq" (default) or "mkq".
 	JobQueueDriver string
@@ -438,6 +449,7 @@ func Load(configPath string) (*Config, error) {
 func bindEnvKeys(v *viper.Viper) {
 	keys := []string{
 		"url", "port", "socket",
+		"frontendContentSecurityPolicy",
 		"db.host", "db.port", "db.db", "db.user", "db.pass",
 		"redis.host", "redis.path", "redis.port", "redis.pass", "redis.db", "redis.username",
 		"redis.family", "redis.prefix",
@@ -587,24 +599,25 @@ func resolve(src *Source) (*Config, error) {
 		OutgoingAddress:       src.OutgoingAddress,
 		OutgoingAddressFamily: src.OutgoingAddressFamily,
 
-		DeliverJobConcurrency:      src.DeliverJobConcurrency,
-		InboxJobConcurrency:        src.InboxJobConcurrency,
-		RelationshipJobConcurrency: src.RelationshipJobConcurrency,
-		DeliverJobPerSec:           src.DeliverJobPerSec,
-		InboxJobPerSec:             src.InboxJobPerSec,
-		RelationshipJobPerSec:      src.RelationshipJobPerSec,
-		DeliverJobMaxAttempts:      src.DeliverJobMaxAttempts,
-		InboxJobMaxAttempts:        src.InboxJobMaxAttempts,
-		DeliverJobKeepFailed:       src.DeliverJobKeepFailed,
-		InboxJobKeepFailed:         src.InboxJobKeepFailed,
-		DeliverJobKeepCompleted:    src.DeliverJobKeepCompleted,
-		InboxJobKeepCompleted:      src.InboxJobKeepCompleted,
-		JobQueueAutoScale:          src.JobQueueAutoScale,
-		MaxWorkers:                 src.MaxWorkers,
-		MinWorkers:                 src.MinWorkers,
-		MaxWorkersGlobal:           src.MaxWorkersGlobal,
-		AutoScaleCooldownSeconds:   src.AutoScaleCooldownSeconds,
-		JobQueueDriver:             jobQueueDriver,
+		DeliverJobConcurrency:         src.DeliverJobConcurrency,
+		InboxJobConcurrency:           src.InboxJobConcurrency,
+		RelationshipJobConcurrency:    src.RelationshipJobConcurrency,
+		DeliverJobPerSec:              src.DeliverJobPerSec,
+		InboxJobPerSec:                src.InboxJobPerSec,
+		RelationshipJobPerSec:         src.RelationshipJobPerSec,
+		DeliverJobMaxAttempts:         src.DeliverJobMaxAttempts,
+		InboxJobMaxAttempts:           src.InboxJobMaxAttempts,
+		DeliverJobKeepFailed:          src.DeliverJobKeepFailed,
+		InboxJobKeepFailed:            src.InboxJobKeepFailed,
+		DeliverJobKeepCompleted:       src.DeliverJobKeepCompleted,
+		InboxJobKeepCompleted:         src.InboxJobKeepCompleted,
+		JobQueueAutoScale:             src.JobQueueAutoScale,
+		FrontendContentSecurityPolicy: src.FrontendContentSecurityPolicy,
+		MaxWorkers:                    src.MaxWorkers,
+		MinWorkers:                    src.MinWorkers,
+		MaxWorkersGlobal:              src.MaxWorkersGlobal,
+		AutoScaleCooldownSeconds:      src.AutoScaleCooldownSeconds,
+		JobQueueDriver:                jobQueueDriver,
 
 		MediaProxy:                   mediaProxy,
 		ExternalMediaProxyEnabled:    externalMediaProxyEnabled,

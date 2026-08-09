@@ -383,6 +383,7 @@ Drive へ保存する。**mk-go はこれを実装しない。** 未実装では
 | 項目 | upstream | mk-go |
 |---|---|---|
 | antenna の未読 (`hasUnreadAntenna`) | **機能ごと止まっている。** `UserEntityService.getHasUnreadAntenna` は実装がコメントアウトされ `return false; // TODO` | 実際に `antenna_note_unread` を引いて算出する。**mk-go の方が実装している側** (#2406)。あわせて antenna timeline の閲覧で未読行を消す。upstream は行を作らないので既読化も要らないが、mk-go は自前で持つ必要がある |
+| frontend HTML の CSP | **無し** | `frontendContentSecurityPolicy` で opt-in (既定 `off`)。**mk-go 独自の硬化** (#2425)。段階導入のため `report-only` から始め、違反を潰してから `enforce` へ切り替える運用。現段階では SSR shell の inline script / SVG の inline style 属性が残っているので `'unsafe-inline'` を許している (nonce / hash 化は別段階)。`frame-ancestors` は含めない — `X-Frame-Options` 側が `/embed/` の除外を持っており、二重管理を避けるため |
 | `Referrer-Policy` | **設定しない** (`packages/backend/src/server/` に 1 件も無い) | 全応答に `strict-origin-when-cross-origin` を付ける。**mk-go 独自の硬化** (#2404)。無いとノート本文の外部リンクを踏んだ際に閲覧中の URL が path ごと Referer として送られる。Misskey の URL は `/notes/<id>` / `/@user` のように**何を見ていたかがそのまま分かる**形なので、遷移先に閲覧内容が漏れる。`no-referrer` まで強めないのは、cross-origin へ origin だけは送る方が連合先からの流入把握や hotlink 判定を壊さないため |
 | identicon の CSP | 付けない | `default-src 'none'; style-src 'unsafe-inline'` を付ける。**mk-go 独自の硬化** (#2404)。upstream が他のアセット route (`/emoji` / `/twemoji` / `/fluent-emoji` / `/files`) に付けているものと同じ値で揃えた。identicon は mk-go が実際に PNG バイトを返す route なので、他と扱いを分ける理由が無い |
 | drive requestHeaders の credential 除去 | 全 header を生保存 (`drive/files/create.ts`) | `authorization` / `cookie` / `set-cookie` / `x-api-key` / `api-key` / `proxy-authorization` を保存しない deny-list。**mk-go 独自の硬化** |
