@@ -88,6 +88,12 @@ func identiconHandler(metaRepo repository.MetaRepository) echo.HandlerFunc {
 
 		c.Response().Header().Set("Content-Type", "image/png")
 		c.Response().Header().Set("Cache-Control", "public, max-age=86400")
+		// identicon は mk-go が実際に PNG バイトを返す数少ない画像 route。
+		// upstream の identicon には CSP が無いが、他のアセット route と同じ
+		// 扱いに揃える。`default-src 'none'` は画像配信に何の制約も課さない
+		// 一方、万一 PNG 以外が返る経路が生まれても実行を防ぐ。upstream より
+		// 厳しい側の divergence (docs/divergence.md)。
+		c.Response().Header().Set("Content-Security-Policy", assetCSP)
 		c.Response().WriteHeader(http.StatusOK)
 		return png.Encode(c.Response(), img)
 	}
@@ -106,6 +112,7 @@ var transparentPixel = func() []byte {
 func serveTransparentPixel(c echo.Context) error {
 	c.Response().Header().Set("Content-Type", "image/png")
 	c.Response().Header().Set("Cache-Control", "public, max-age=86400")
+	c.Response().Header().Set("Content-Security-Policy", assetCSP)
 	return c.Blob(http.StatusOK, "image/png", transparentPixel)
 }
 
