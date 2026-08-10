@@ -49,42 +49,34 @@ test.describe('UI: /admin/relays remove button flow', () => {
       { timeout: 20_000 },
     );
 
-    // 3. Remove button (= ti-trash + "Remove" text) hydrate を待つ。複数 relay
-    // が登録済の可能性があるが、本 spec は 1 つだけ click すれば API が走る
-    // ことを verify するので最初の Remove で十分。ただし他 relay を間違って
-    // 消さないため、追加した relay の inbox が含まれる panel 内の button を
-    // 探すべき。relays.vue では各 relay panel が `_panel` class を持ち、URL
-    // text が含まれる。
-    await page.waitForFunction(
-      (i) => {
-        const panels = Array.from(document.querySelectorAll('div')) as HTMLDivElement[];
-        return panels.some((p) => {
-          if (!(p.textContent ?? '').includes(i)) return false;
-          const btns = Array.from(p.querySelectorAll('button')) as HTMLButtonElement[];
-          return btns.some((b) => b.querySelector('i.ti-trash') !== null);
-        });
-      },
-      inbox,
-      { timeout: 15_000 },
-    );
+    // 3. 追加した relay 自身の Remove button (= ti-trash) を待つ。
+    //
+    // **panel を「inbox を含む最初の div」で探してはいけない。** div は入れ子
+    // なので、その条件では relay 一覧をまとめて包む**外側の div** が先に
+    // 当たり、そこから最初の trash button を取ると**別の relay** を消す。
+    // それでも `admin/relays/remove` は 2xx を返すので response 待ちは通り、
+    // 最後の一覧確認だけが落ちる。
+    //
+    // 実際 admin_relay_add_form spec が relay を残すため一覧は常に複数件で、
+    // mk-go では対象がたまたま先頭に来て通っていた。TS backend で一覧の順序が
+    // 違い、初めて表面化した (#2289)。
+    //
+    // `.last()` が要点。入れ子の div は外側が先に列挙されるので、最後に来るのが
+    // 「inbox と trash button の両方を含む最も内側の div」= その relay の panel。
+    const panel = page
+      .locator('div')
+      .filter({ hasText: inbox })
+      .filter({ has: page.locator('button i.ti-trash') })
+      .last();
+    const removeButton = panel.locator('button:has(i.ti-trash)').last();
+    await expect(removeButton).toBeVisible({ timeout: 15_000 });
 
     // 4. 該当 relay の Remove button click → admin/relays/remove
     const removeResp = page.waitForResponse(
       (r) => r.url().includes('/api/admin/relays/remove') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate((i) => {
-      const panels = Array.from(document.querySelectorAll('div')) as HTMLDivElement[];
-      const target = panels.find((p) => {
-        if (!(p.textContent ?? '').includes(i)) return false;
-        return p.querySelector('button i.ti-trash') !== null;
-      });
-      if (!target) return;
-      const btn = Array.from(target.querySelectorAll('button')).find(
-        (b) => b.querySelector('i.ti-trash') !== null,
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    }, inbox);
+    await removeButton.click();
     await removeResp;
 
     // 5. API 経由で削除確認

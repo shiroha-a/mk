@@ -21,6 +21,7 @@
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../../fixtures/api';
 import { randomUsername, signupUser } from '../../../../fixtures/auth';
+import { isTsBackend } from '../../../../fixtures/backend';
 import { createNote } from '../../../../fixtures/notes';
 import { resetRateLimit } from '../../../../fixtures/rate_limit';
 
@@ -43,6 +44,18 @@ test.describe('embed: 埋め込みページ', () => {
     expect(resp.status()).toBe(200);
     const html = await resp.text();
 
+    if (isTsBackend) {
+      // upstream の `/embed/notes/:note` は対象が無い / 埋め込み不可のとき
+      // **何も返さず** fastify の既定 (空 body) に落ちる
+      // (`ClientServerService.ts` の `if (note == null) return;`)。
+      expect(html).toBe('');
+      return;
+    }
+
+    // mk-go は同じ条件でも**文脈なしのシェル**を返す。「ノートが無い」と
+    // 「非公開」を応答の形で区別させないための意図的な差分で、可視性ゲート
+    // 自体は upstream と同一 (`internal/server/embed.go`)。
+    //
     // embed シェルであることの指標。通常シェルは /vite/ を読み #splash を
     // 持つので、取り違えるとここで落ちる。
     expect(html).toContain('/embed_vite/');
@@ -136,9 +149,15 @@ test.describe('embed: 埋め込みページ', () => {
     const pubHtml = await (await request.get(`${baseURL}/embed/clips/${pub.id}`)).text();
     expect(pubHtml).toContain('misskey_embedCtx');
 
-    // upstream は clip の存在だけを見るため非公開 clip も埋め込めるが、
-    // mk-go は isPublic も見る (意図的な divergence、docs/divergence.md)。
+    // upstream は clip の存在だけを見るため**非公開 clip も埋め込めてしまう**。
+    // mk-go は isPublic も見て弾く (意図的な divergence、docs/divergence.md)。
+    // 両者の実挙動をそれぞれ固定する。ゆるい assert に寄せると mk-go 側の
+    // 防御が外れても気付けない。
     const privHtml = await (await request.get(`${baseURL}/embed/clips/${priv.id}`)).text();
+    if (isTsBackend) {
+      expect(privHtml).toContain('misskey_embedCtx');
+      return;
+    }
     expect(privHtml).not.toContain('misskey_embedCtx');
     expect(privHtml).not.toContain(priv.name);
   });

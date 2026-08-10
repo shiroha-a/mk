@@ -14,8 +14,15 @@
 /**
  * True when the spec runs against the upstream Misskey TS backend.
  *
- * 現時点で backend ごとに期待値を変えている箇所は無い (NO_SUCH_* の status を
- * upstream に揃えたため)。新たな意図的差分が出たときの分岐点として残す。
+ * 現在の利用箇所は embed の 2 件 (#2289)。
+ *
+ *   - `/embed/notes/:note` が埋め込み不可のとき upstream は**空 body**、mk-go は
+ *     文脈なしのシェルを返す (存在の有無を応答の形で区別させないため)
+ *   - `/embed/clips/:clip` は upstream が**非公開 clip も埋め込める**のに対し、
+ *     mk-go は `isPublic` も見て弾く
+ *
+ * どちらも「どちらでも通る」ゆるい assert にはしない。差分を消すと mk-go 側の
+ * 防御が外れても気付けなくなる。
  */
 export const isTsBackend = process.env.MK_BACKEND_TYPE === 'ts';
 

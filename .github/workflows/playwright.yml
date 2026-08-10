@@ -122,14 +122,19 @@ jobs:
     name: spec (${{ matrix.backend }})
     needs: plan
     runs-on: ubuntu-latest
-    # backend ごとに枠を変える。mk-go は 370 spec を 11 min で完走するので
-    # 45 min のままにして hang を早く検出する。TS は #2288 で初めて spec が
-    # 走った際 45 min で 360/370 までしか進まず timeout したため 90 min。
+    # backend ごとに枠を変える。mk-go は 45 min のままにして hang を早く検出
+    # する。TS は #2288 で初めて spec が走った際 45 min で 360/370 までしか
+    # 進まず timeout したため 90 min。
     #
     # 念のため: この差は backend の速度差ではない。同一 CI 環境で両方が成功した
     # 同一 spec 263 件を突き合わせると所要時間はほぼ同じ (TS/mk-go の中央値
     # 0.94)。TS 側が伸びたのは 77 件の失敗が retry され、成功時 1 秒台の spec が
     # 10-20 秒の timeout 待ちに化けたため。
+    #
+    # その 77 件は環境要因だったと確定した (#2289)。ローカルで健全な TS backend
+    # に対して全 438 spec を完走させたところ 434 pass / 3 fail / 1 skip・12.1 min
+    # で、落ちた 3 件はいずれも別種の spec 側の問題だった (修正済み)。CI 側の
+    # 77 件は追わない。
     timeout-minutes: ${{ matrix.timeout_minutes }}
 
     strategy:
