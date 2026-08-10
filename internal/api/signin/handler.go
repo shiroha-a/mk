@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,13 +14,16 @@ import (
 	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/captcha"
+	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 // IPLogger records user IPs on successful authentication.
@@ -48,6 +52,10 @@ type Handler struct {
 	mainStreamPublisher MainStreamPublisher
 	totpReplayGuard     twofactor.ReplayGuard
 	loginNotifier       LoginNotifier
+	// emailSender は new-login 通知メールの送信 callback (#2454)。未配線なら送らない。
+	emailSender func(to string, msg miscsmtp.Message)
+	// serverURL はメール footer の link 先。emailSender とセットで設定。
+	serverURL string
 }
 
 // LoginNotifier records a 'login' notification on signin success (#1559)。
@@ -60,6 +68,13 @@ type LoginNotifier interface {
 // 'login' notification (upstream SigninService)。
 func (h *Handler) SetLoginNotifier(n LoginNotifier) {
 	h.loginNotifier = n
+}
+
+// SetEmailSender wires the callback used to send the new-login notification
+// email (#2454)。未配線なら送らないので、SMTP を使わない構成はそのまま動く。
+func (h *Handler) SetEmailSender(serverURL string, send func(to string, msg miscsmtp.Message)) {
+	h.serverURL = serverURL
+	h.emailSender = send
 }
 
 // SetIPLogger attaches an IPLogger and enables IP logging.
@@ -381,9 +396,9 @@ func (h *Handler) ok(c echo.Context, user *model.User) error {
 // 乗せない。headers は呼び出し元が Clone 済みのものを渡す前提
 // (Echo が request を再利用する前にコピーする)。
 //
-// NOTE: upstream はここで new-login email も送る (`server/api/SigninService.ts`、
-// 条件は `profile.email && profile.emailVerified`)。mk-go は**この email だけ**
-// 未実装で、他の副作用は揃っている。signin 本体が無いわけではない。
+// upstream `server/api/SigninService.ts` に合わせて new-login 通知メールも送る
+// (#2454)。`login` 通知はアプリ内にしか出ないので、乗っ取られた側がクライアントを
+// 開かない限り気付けない。メールはその唯一の外向き経路にあたる。
 func (h *Handler) RecordSuccessfulSignin(userID, ip string, headers http.Header) {
 	if h.ipLoggingOn && h.ipLogger != nil {
 		go h.ipLogger.Upsert(userID, ip)
@@ -394,6 +409,53 @@ func (h *Handler) RecordSuccessfulSignin(userID, ip string, headers http.Header)
 	if h.loginNotifier != nil {
 		go h.loginNotifier.OnLogin(userID)
 	}
+	if h.emailSender != nil {
+		go h.sendNewLoginEmail(userID)
+	}
+}
+
+// newLoginEmailSubject / newLoginEmailBody are upstream's wording, verbatim.
+//
+// 文面を変えない。TS から切り替えた instance の利用者が、同じ通知を別の文面で
+// 受け取ると「別のサービスから届いた」と読めてしまう。
+const (
+	newLoginEmailSubject = "New login / ログインがありました"
+	newLoginEmailBody    = "There is a new login. If you do not recognize this login, update the security status of your account, including changing your password. / 新しいログインがありました。このログインに心当たりがない場合は、パスワードを変更するなど、アカウントのセキュリティ状態を更新してください。"
+)
+
+// sendNewLoginEmail notifies the user by email that their account was signed
+// into. Mirrors upstream SigninService: only when the address is present *and*
+// verified.
+//
+// 未確認アドレスへ送らないのは upstream と同じ。確認前のアドレスは他人のものを
+// 登録できてしまうため、送ると「他人のログイン通知が自分に届く」経路になる。
+func (h *Handler) sendNewLoginEmail(userID string) {
+	profile, err := h.userRepo.FindProfileByUserID(userID)
+	if err != nil {
+		// 行が無いのは「メール未設定」と同じ扱いで黙って抜ける。それ以外は
+		// signin 自体は成功しているので握り潰すが、通知が飛ばない = 検知手段が
+		// 減るということなので原因を追えるようログには残す。
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("signin: new-login email skipped; profile lookup failed", "userId", userID, "err", err)
+		}
+		return
+	}
+	if profile == nil || profile.Email == nil || *profile.Email == "" || !profile.EmailVerified {
+		return
+	}
+	text, bodyHTML := coreemail.PlainText(newLoginEmailBody)
+	html := coreemail.WrapHTML(coreemail.HTMLWrapInput{
+		SiteURL: h.serverURL,
+		Subject: newLoginEmailSubject,
+		// 認証済 user 向けなので二段 footer (reset-password / email 変更と同じ)。
+		EmailSettingsURL: h.serverURL + "/settings/email",
+		BodyHTML:         bodyHTML,
+	})
+	h.emailSender(*profile.Email, miscsmtp.Message{
+		Subject: newLoginEmailSubject,
+		Text:    text,
+		HTML:    html,
+	})
 }
 
 // sanitizeHeaders removes sensitive headers in-place before persisting.

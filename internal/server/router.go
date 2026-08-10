@@ -1481,6 +1481,9 @@ func (s *Server) setupRoutes() {
 	signinRepo := repository.NewSigninRepository(s.db)
 	signinHandler.SetSigninRepo(signinRepo, idGen)
 	signinHandler.SetLoginNotifier(notificationHook)
+	// new-login 通知メール (#2454)。SenderFromMeta が per-call で meta を読み直すので
+	// admin UI の SMTP 設定変更が再起動なしで効く。SMTP 未設定なら no-op。
+	signinHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
 	// アカウント作成時も signin 副作用 (履歴 / login 通知 / main publish) を通す (#1804)。
 	signupHandler.SetSigninRecorder(signinHandler)
 	api.POST("/signin", signinHandler.Signin)

@@ -67,6 +67,17 @@ func TestLinkText(t *testing.T) {
 	assert.Contains(t, html, "<p>Welcome!</p>")
 }
 
+// PlainText は CTA link を持たない本文用 (new-login 通知等、#2454)。
+func TestPlainText(t *testing.T) {
+	text, html := coreemail.PlainText("There is a new login. <b>check</b> & verify")
+	// 平文はそのまま。escape すると受信箱で &amp; がそのまま見えてしまう。
+	assert.Equal(t, "There is a new login. <b>check</b> & verify", text)
+	// HTML 側は escape して段落に包む。
+	assert.Equal(t, "<p>There is a new login. &lt;b&gt;check&lt;/b&gt; &amp; verify</p>", html)
+	// LinkText と違い <a> を出さない (link 無しで流用すると空の <a> が残る)。
+	assert.NotContains(t, html, "<a")
+}
+
 // EmailSettingsURL を渡すと <main> 内 <footer> が出る (#600 item 4 review)。
 func TestWrapHTML_EmailSettingsFooter(t *testing.T) {
 	got := coreemail.WrapHTML(coreemail.HTMLWrapInput{

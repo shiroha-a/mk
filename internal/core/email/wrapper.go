@@ -84,6 +84,15 @@ func WrapHTML(in HTMLWrapInput) string {
 		subject, header.String(), subject, in.BodyHTML, innerFooter, nav.String())
 }
 
+// PlainText is the no-CTA counterpart of LinkText, for emails whose body is
+// just a sentence (例: new-login notification)。plain-text 版はそのまま、HTML 版は
+// escape して段落に包んだものを返す。
+//
+// LinkText を link 無しで流用すると空の <a> が残るので分けている。
+func PlainText(body string) (text, htmlBody string) {
+	return body, fmt.Sprintf(`<p>%s</p>`, html.EscapeString(body))
+}
+
 // LinkText is a convenience for callers who want a single-CTA email body. It
 // returns both a plain-text version and a basic HTML body that can be passed
 // to WrapHTML as `BodyHTML`. lead 文と link を渡せば自動的に最低限の HTML

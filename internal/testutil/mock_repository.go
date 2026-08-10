@@ -31,6 +31,10 @@ type MockUserRepository struct {
 	// UpdateProfileErr, when non-nil, is returned by UpdateProfile so tests
 	// can exercise persistence-failure branches.
 	UpdateProfileErr error
+	// FindProfileErr, when non-nil, is returned by FindProfileByUserID so tests
+	// can exercise lookup-failure branches. **行が無いケースとは別物** で、
+	// 呼び出し側は ErrRecordNotFound と実エラーを区別することがある。
+	FindProfileErr error
 }
 
 func NewMockUserRepository() *MockUserRepository {
@@ -114,6 +118,9 @@ func (m *MockUserRepository) FindManyByUsernamesAndHost(usernames []string, host
 }
 
 func (m *MockUserRepository) FindProfileByUserID(userID string) (*model.UserProfile, error) {
+	if m.FindProfileErr != nil {
+		return nil, m.FindProfileErr
+	}
 	p, ok := m.Profiles[userID]
 	if !ok {
 		return nil, ErrNotFound
