@@ -15,12 +15,27 @@ import (
 
 type fakeMutePruner struct {
 	called bool
+	owners []string
 	err    error
 }
 
-func (f *fakeMutePruner) DeleteExpired(_ time.Time) (int64, error) {
+func (f *fakeMutePruner) DeleteExpired(_ time.Time) ([]string, error) {
 	f.called = true
-	return 3, f.err
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.owners != nil {
+		return f.owners, nil
+	}
+	return []string{"u1", "u2", "u3"}, nil
+}
+
+type fakeRelationReloadPublisher struct {
+	published []string
+}
+
+func (f *fakeRelationReloadPublisher) PublishMuteBlockReload(userID string) {
+	f.published = append(f.published, userID)
 }
 
 func TestCheckExpiredMutings_Prunes(t *testing.T) {
@@ -39,6 +54,68 @@ func TestCheckExpiredMutings_NilReposNoOp(t *testing.T) {
 func TestCheckExpiredMutings_ErrorSwallowed(t *testing.T) {
 	proc := NewCheckExpiredMutingsProcessor(&fakeMutePruner{err: errors.New("boom")}, &fakeMutePruner{err: errors.New("boom2")})
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}), "失敗しても success 扱い")
+}
+
+func TestCheckExpiredMutings_PublishesReloadPerOwner(t *testing.T) {
+	// user mute で u1 が 2 行、channel mute でも u1 が 1 行失効する状況。u1 は
+	// 3 行ぶん返るが reload は 1 回でなければならない (reload は snapshot 全体を
+	// 取り直すので、人数分飛ばすのは無駄な DB 往復になる)。
+	user := &fakeMutePruner{owners: []string{"u1", "u1", "u2"}}
+	channel := &fakeMutePruner{owners: []string{"u1"}}
+	pub := &fakeRelationReloadPublisher{}
+	proc := NewCheckExpiredMutingsProcessor(user, channel)
+	proc.SetRelationReloadPublisher(pub)
+
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+
+	assert.ElementsMatch(t, []string{"u1", "u2"}, pub.published)
+}
+
+func TestCheckExpiredMutings_NoExpiryNoPublish(t *testing.T) {
+	// 失効が 1 件も無い回で reload を飛ばすと、5 分ごとに全 connection が
+	// 無駄に snapshot を取り直すことになる。
+	pub := &fakeRelationReloadPublisher{}
+	proc := NewCheckExpiredMutingsProcessor(&fakeMutePruner{owners: []string{}}, &fakeMutePruner{owners: []string{}})
+	proc.SetRelationReloadPublisher(pub)
+
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+
+	assert.Empty(t, pub.published)
+}
+
+func TestCheckExpiredMutings_PruneErrorStillPublishesOtherHalf(t *testing.T) {
+	// 片方が落ちても、もう片方で実際に消えた行の通知は出す。落ちた側だけ次回の
+	// cron に持ち越せばよく、成功した側まで stale にする理由が無い。
+	pub := &fakeRelationReloadPublisher{}
+	proc := NewCheckExpiredMutingsProcessor(
+		&fakeMutePruner{err: errors.New("boom")},
+		&fakeMutePruner{owners: []string{"u9"}},
+	)
+	proc.SetRelationReloadPublisher(pub)
+
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+
+	assert.Equal(t, []string{"u9"}, pub.published)
+}
+
+func TestCheckExpiredMutings_NoPublisherStillPrunes(t *testing.T) {
+	// publisher 未配線でも prune 自体は従来どおり動く (= 既存構成を壊さない)。
+	user := &fakeMutePruner{}
+	proc := NewCheckExpiredMutingsProcessor(user, nil)
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+	assert.True(t, user.called)
+}
+
+func TestCheckExpiredMutings_SkipsEmptyOwnerID(t *testing.T) {
+	// 空文字を publish すると RefreshRelations が userId 欠落として warn を出す。
+	// prune 側の想定外データで無意味なログを増やさない。
+	pub := &fakeRelationReloadPublisher{}
+	proc := NewCheckExpiredMutingsProcessor(&fakeMutePruner{owners: []string{"", "u1"}}, nil)
+	proc.SetRelationReloadPublisher(pub)
+
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+
+	assert.Equal(t, []string{"u1"}, pub.published)
 }
 
 // --- Clean -------------------------------------------------------------------

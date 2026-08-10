@@ -216,16 +216,20 @@ func (m *MockMutingRepository) ListAllMuteeIDs(muterID string) ([]string, error)
 }
 
 // DeleteExpired removes muting rows whose ExpiresAt has passed. Returns the
-// number of rows removed.
-func (m *MockMutingRepository) DeleteExpired(now time.Time) (int64, error) {
-	var deleted int64
+// muterId of every removed row (one entry per row, so duplicates are possible),
+// matching repository.MutingRepository.
+//
+// map の走査順は不定なので、返る順序は保証しない。呼び出し側は集合として扱うこと
+// (実装も重複排除してから publish する)。
+func (m *MockMutingRepository) DeleteExpired(now time.Time) ([]string, error) {
+	muterIDs := []string{}
 	for k, r := range m.Mutings {
 		if r.ExpiresAt != nil && r.ExpiresAt.Before(now) {
 			delete(m.Mutings, k)
-			deleted++
+			muterIDs = append(muterIDs, r.MuterID)
 		}
 	}
-	return deleted, nil
+	return muterIDs, nil
 }
 
 // MockRenoteMutingRepository is a test double for repository.RenoteMutingRepository.

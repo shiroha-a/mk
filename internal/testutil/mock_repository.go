@@ -7320,16 +7320,18 @@ func (m *MockChannelMutingRepository) Exists(userID, channelID string) (bool, er
 	return mut.ExpiresAt == nil || mut.ExpiresAt.After(time.Now()), nil
 }
 
-// DeleteExpired removes channel mutes whose ExpiresAt has passed.
-func (m *MockChannelMutingRepository) DeleteExpired(now time.Time) (int64, error) {
-	var deleted int64
+// DeleteExpired removes channel mutes whose ExpiresAt has passed. Returns the
+// userId of every removed row (one entry per row, so duplicates are possible),
+// matching repository.ChannelMutingRepository. 返る順序は保証しない。
+func (m *MockChannelMutingRepository) DeleteExpired(now time.Time) ([]string, error) {
+	userIDs := []string{}
 	for k, mut := range m.Mutings {
 		if mut.ExpiresAt != nil && mut.ExpiresAt.Before(now) {
 			delete(m.Mutings, k)
-			deleted++
+			userIDs = append(userIDs, mut.UserID)
 		}
 	}
-	return deleted, nil
+	return userIDs, nil
 }
 
 // MockClipFavoriteRepository is a test double for repository.ClipFavoriteRepository.

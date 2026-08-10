@@ -83,14 +83,48 @@ func TestMutingRepository_DeleteExpired(t *testing.T) {
 	require.NoError(t, repo.Create(expired))
 	defer cleanupMuting(t, expired.ID)
 
-	n, err := repo.DeleteExpired(time.Now())
+	muterIDs, err := repo.DeleteExpired(time.Now())
 	require.NoError(t, err)
-	assert.EqualValues(t, 1, n, "期限切れ 1 件だけ削除される")
+	// 削除した行の muterId が返る。streaming の snapshot を取り直す宛先になるので、
+	// 件数だけでなく「誰の」mute が消えたかが要る (#2453)。
+	assert.Equal(t, []string{u2.ID}, muterIDs, "期限切れ 1 件だけ削除され、その muterId が返る")
 	// active / future は残る、expired は消える。
 	_, err = repo.FindByPair(u1.ID, u2.ID)
 	assert.NoError(t, err)
 	_, err = repo.FindByPair(u2.ID, u3.ID)
 	assert.Error(t, err)
+}
+
+// 同一 muter の mute が複数同時に失効したとき、行数ぶんの muterId が返ること。
+// distinct にすると呼び出し側の prune 件数ログが実際の行数とずれる。
+func TestMutingRepository_DeleteExpired_ReturnsOneEntryPerRow(t *testing.T) {
+	repo := NewMutingRepository(testDB)
+	u1 := insertTestUser(t, "u_mdr_1", "mdr1")
+	u2 := insertTestUser(t, "u_mdr_2", "mdr2")
+	u3 := insertTestUser(t, "u_mdr_3", "mdr3")
+	defer cleanupUser(t, u1.ID)
+	defer cleanupUser(t, u2.ID)
+	defer cleanupUser(t, u3.ID)
+
+	past := time.Now().Add(-time.Hour)
+	a := &model.Muting{ID: "mdr_a", MuterID: u1.ID, MuteeID: u2.ID, ExpiresAt: &past}
+	require.NoError(t, repo.Create(a))
+	defer cleanupMuting(t, a.ID)
+	b := &model.Muting{ID: "mdr_b", MuterID: u1.ID, MuteeID: u3.ID, ExpiresAt: &past}
+	require.NoError(t, repo.Create(b))
+	defer cleanupMuting(t, b.ID)
+
+	muterIDs, err := repo.DeleteExpired(time.Now())
+	require.NoError(t, err)
+	assert.Equal(t, []string{u1.ID, u1.ID}, muterIDs)
+}
+
+// 期限切れが 1 件も無ければ空を返す (nil でも空でもよいが len 0 であること)。
+func TestMutingRepository_DeleteExpired_NoRows(t *testing.T) {
+	repo := NewMutingRepository(testDB)
+	muterIDs, err := repo.DeleteExpired(time.Now().Add(-100 * 365 * 24 * time.Hour))
+	require.NoError(t, err)
+	assert.Empty(t, muterIDs)
 }
 
 func TestMutingRepository_QueryErrors(t *testing.T) {
@@ -110,6 +144,11 @@ func TestMutingRepository_QueryErrors(t *testing.T) {
 	assert.Error(t, err)
 	_, err = repo.ListAllMuteeIDs("a")
 	assert.Error(t, err)
+	// DeleteExpired の失敗は nil slice + error で返す。ここで空 slice を返すと
+	// 呼び出し側が「失効 0 件」と区別できず、reload の取りこぼしに気付けない。
+	muterIDs, err := repo.DeleteExpired(time.Now())
+	assert.Error(t, err)
+	assert.Nil(t, muterIDs)
 }
 
 // ListMuteeIDs は active (非 expired) な mute だけを返すこと、空 muterID は

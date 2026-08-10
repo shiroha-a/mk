@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -34,10 +35,11 @@ func TestChannelMutingRepository_ExpiryFilterAndDelete(t *testing.T) {
 	ok, _ = repo.Exists("chexp_u1", "chexp_future")
 	assert.True(t, ok, "未期限切れは Exists=true")
 
-	// DeleteExpired は expired 行のみ削除。
-	n, err := repo.DeleteExpired(time.Now())
+	// DeleteExpired は expired 行のみ削除し、その userId を返す (#2453)。
+	// streaming の snapshot を取り直す宛先になる。
+	userIDs, err := repo.DeleteExpired(time.Now())
 	require.NoError(t, err)
-	assert.EqualValues(t, 1, n)
+	assert.Equal(t, []string{"chexp_u1"}, userIDs)
 	list, _ = repo.ListByUser("chexp_u1")
 	assert.Len(t, list, 2, "active / future は残る")
 }
@@ -97,4 +99,16 @@ func TestChannelMutingRepository_ListEmpty(t *testing.T) {
 	list, err := repo.ListByUser("chmute_nonexistent")
 	require.NoError(t, err)
 	assert.Empty(t, list)
+}
+
+// DeleteExpired の失敗は nil slice + error で返す。空 slice だと呼び出し側が
+// 「失効 0 件」と区別できず、reload の取りこぼしに気付けない (#2453)。
+func TestChannelMutingRepository_DeleteExpired_QueryError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	repo := NewChannelMutingRepository(testDB.WithContext(ctx))
+
+	userIDs, err := repo.DeleteExpired(time.Now())
+	assert.Error(t, err)
+	assert.Nil(t, userIDs)
 }

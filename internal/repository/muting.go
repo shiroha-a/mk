@@ -5,6 +5,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // MutingRepository provides data access for the `muting` table.
@@ -36,8 +37,16 @@ type MutingRepository interface {
 	// DeleteExpired physically removes muting rows whose expiresAt has
 	// passed. Read filters (ListMuteeIDs/Exists) already exclude them; this
 	// is the active prune run by the checkExpiredMutings cron (#1563).
-	// Returns the number of rows deleted.
-	DeleteExpired(now time.Time) (int64, error)
+	//
+	// Returns the muterId of every deleted row — **one entry per row**, so
+	// duplicates appear when a single user had several mutes expire at once
+	// and len() equals the old RowsAffected return.
+	//
+	// 行を数えるだけでなく所有者を返すのは、streaming の snapshot を取り直させる
+	// ため (#2453)。接続中の connection は mute 集合を接続時に 1 回だけ読むので、
+	// 失効を通知しないと再接続まで mute されたままになる。distinct にしないのは
+	// 呼び出し側の prune 件数ログの意味を保つため。
+	DeleteExpired(now time.Time) ([]string, error)
 }
 
 type mutingRepository struct {
@@ -145,9 +154,22 @@ func (r *mutingRepository) ListAllMuteeIDs(muterID string) ([]string, error) {
 	return ids, nil
 }
 
-func (r *mutingRepository) DeleteExpired(now time.Time) (int64, error) {
-	res := r.db.Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now).Delete(&model.Muting{})
-	return res.RowsAffected, res.Error
+func (r *mutingRepository) DeleteExpired(now time.Time) ([]string, error) {
+	// DELETE ... RETURNING で 1 文にする。SELECT してから DELETE すると、その間に
+	// 別の prune (cron の重複起動や手動 unmute) が走った分を取りこぼす。
+	var deleted []model.Muting
+	res := r.db.
+		Clauses(clause.Returning{Columns: []clause.Column{{Name: "muterId"}}}).
+		Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now).
+		Delete(&deleted)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	muterIDs := make([]string, 0, len(deleted))
+	for _, m := range deleted {
+		muterIDs = append(muterIDs, m.MuterID)
+	}
+	return muterIDs, nil
 }
 
 // RenoteMutingRepository provides data access for the `renote_muting` table.

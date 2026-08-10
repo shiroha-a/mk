@@ -21,8 +21,13 @@ type ChannelMutingRepository interface {
 	Exists(userID, channelID string) (bool, error)
 	// DeleteExpired physically removes channel mutes whose expiresAt has
 	// passed. Read paths already exclude them; this is the active prune run
-	// by the checkExpiredMutings cron (#1603). Returns rows deleted.
-	DeleteExpired(now time.Time) (int64, error)
+	// by the checkExpiredMutings cron (#1603).
+	//
+	// Returns the userId of every deleted row — **one entry per row**, so
+	// duplicates appear when a single user had several mutes expire at once
+	// and len() equals the old RowsAffected return. 所有者を返す理由は
+	// MutingRepository.DeleteExpired と同じ (#2453)。
+	DeleteExpired(now time.Time) ([]string, error)
 }
 
 type channelMutingRepository struct {
@@ -71,7 +76,19 @@ func (r *channelMutingRepository) Exists(userID, channelID string) (bool, error)
 	return count > 0, err
 }
 
-func (r *channelMutingRepository) DeleteExpired(now time.Time) (int64, error) {
-	res := r.db.Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now).Delete(&model.ChannelMuting{})
-	return res.RowsAffected, res.Error
+func (r *channelMutingRepository) DeleteExpired(now time.Time) ([]string, error) {
+	// mutingRepository.DeleteExpired と同じく DELETE ... RETURNING で 1 文にする。
+	var deleted []model.ChannelMuting
+	res := r.db.
+		Clauses(clause.Returning{Columns: []clause.Column{{Name: "userId"}}}).
+		Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now).
+		Delete(&deleted)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	userIDs := make([]string, 0, len(deleted))
+	for _, m := range deleted {
+		userIDs = append(userIDs, m.UserID)
+	}
+	return userIDs, nil
 }

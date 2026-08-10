@@ -2573,6 +2573,10 @@ func (s *Server) setupRoutes() {
 	followingService.SetRelationReloadPublisher(relationReloadPublisher)
 	channelsHandler.SetRelationReloadPublisher(relationReloadPublisher)
 	iHandler.SetRelationReloadPublisher(relationReloadPublisher)
+	// 期限付き mute の**自然失効**も snapshot に反映させる (#2453)。上の 7 系統は
+	// すべて利用者の操作が起点だが、期限切れは誰も操作しないので cron が唯一の
+	// 通知点になる。ここを繋がないと「1 時間だけミュート」が接続中は解除されない。
+	checkExpiredMutingsProcessor.SetRelationReloadPublisher(relationReloadPublisher)
 	// profile 編集を remote followers に Update(Person) で配信する (#1560)。
 	// actor endpoint と同じ shape にするため ed25519 keypair を、follower 以外の
 	// relay subscriber にも届けるため relay broadcaster を配線する。
