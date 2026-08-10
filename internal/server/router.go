@@ -3794,7 +3794,8 @@ func (a *followingSnapshotAdapter) FollowingSnapshotForUser(userID string) map[s
 // 各 set fetch は best-effort: 個別の repo error は空 set に degrade させ、
 // snapshot 全体は常に non-nil で返す (= 取得できた範囲だけ filter する)。
 // followingSnapshotAdapter と同じく接続ごとに 1 回読みだす connection-time
-// snapshot で、live refresh は未実装 (= 再接続まで stale)。
+// snapshot だが、変更時は SubscribeRelationReload (上の配線を参照) が
+// 同じ lookup を呼び直して接続中の snapshot を差し替える (#2400)。
 type muteBlockSnapshotAdapter struct {
 	muting        repository.MutingRepository
 	blocking      repository.BlockingRepository

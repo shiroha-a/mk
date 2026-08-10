@@ -473,7 +473,12 @@ func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 	// いたが createdAt は作成時刻であるべき + misskey_dart の Antenna.fromJson が
 	// 非null String として cast するため ISO ms 形式で出す (#1244)。
 	// hasUnreadNote は misskey_dart が非null bool として cast する (#1244)。
-	// mk-go は antenna 未読 note を追跡しないため false 固定。
+	//
+	// 未読そのものは追跡している (#2406。matchNote が `antenna_note_unread` に
+	// 行を作り、antenna timeline の閲覧で消す)。false 固定なのは **antenna 個別**
+	// の未読を算出していないためで、user 全体の `hasUnreadAntenna` (`/api/i`) は
+	// 実際に DB を引いている。upstream も `AntennaEntityService` が
+	// `false, // TODO` なのでここは一致している (docs/divergence.md)。
 	createdAt := ""
 	if h.idGen != nil {
 		if t, err := h.idGen.ParseTime(a.ID); err == nil {
@@ -506,8 +511,11 @@ func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 		"isActive":        a.IsActive,
 		"hasUnreadNote":   false,
 		// excludeNotesInSensitiveChannel は model にあるので反映。notify は
-		// golden で必須 (boolean) だが mk-go は antenna notify を未実装なので
-		// false 固定で shape だけ満たす (#1270 L3 検出)。
+		// golden で必須 (boolean) だが false 固定で shape だけ満たす
+		// (#1270 L3 検出)。**未実装ではなく、持たないのが upstream と同じ**:
+		// upstream は `RemoveAntennaNotify` migration (1716450883149) で列ごと
+		// DROP しており、JSON schema に残っているのは既存クライアントの型を
+		// 壊さないためだけ。実装すると逆に乖離する (#2406)。
 		"excludeNotesInSensitiveChannel": a.ExcludeNotesInSensitiveChannel,
 		"notify":                         false,
 	}

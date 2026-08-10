@@ -21,10 +21,9 @@ type HardMuteRulesLookup interface {
 // given user. Used by the streaming Manager to snapshot the viewer's followee
 // list at connection setup so timeline channels can gate reply notes per
 // upstream Misskey の `this.following[note.userId]?.withReplies` semantics
-// (#1063)。lookup 失敗 / anonymous は nil を返す。snapshot は 1 回 fetch
-// するだけで、現状 follow 変更時の refresh subscriber は未実装 (= 接続を
-// 張り直すまで stale)。これは "自分の reply 等の 3 escape hatch" には影響
-// しない degrade なので drop-in 互換性回復は完了する。
+// (#1063)。lookup 失敗 / anonymous は nil を返す。snapshot は接続確立時に
+// 1 回 fetch し、以降は follow / unfollow / フォロー承認、および block が
+// follow を解除したときに `RelationReloadTopic` から取り直す (#2400)。
 type FollowingSnapshotLookup interface {
 	FollowingSnapshotForUser(userID string) map[string]bool
 }

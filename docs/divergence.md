@@ -70,7 +70,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 
 **upstream endpoint の未実装はゼロ。** 最後まで残っていた `GET /api/v1/instance/peers` (Mastodon 互換の連合ピア一覧) は #2245 で実装した。upstream は `ApiServerService.ts` で fastify 直登録しており `endpoints/` 配下に無いため、matrix 生成ツールの file-walk から漏れて長らく不可視になっていた (現在は `ApiServerService.ts` を正規表現で直接読むので追随漏れが起きない)。
 
-`docs/api-compat.md` に残る「TS only (mk-go 未実装) 1」= `/api/reset-db` は**偽陽性**。mk-go では `config.TestMode` 時のみ登録されるが、matrix 生成は default config で route dump するため未実装に見える。
+かつて `docs/api-compat.md` に残っていた「TS only (mk-go 未実装) 1」= `/api/reset-db` の偽陽性 (mk-go では `config.TestMode` 時のみ登録されるのに、matrix 生成が default config で route dump するため未実装に見えていた) は解消済み。現行 matrix は `TS only (mk-go 未実装): 0` で、`/api/reset-db` は「両方に存在する endpoint」に入っている。
 
 ---
 

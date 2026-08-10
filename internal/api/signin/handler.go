@@ -381,8 +381,9 @@ func (h *Handler) ok(c echo.Context, user *model.User) error {
 // 乗せない。headers は呼び出し元が Clone 済みのものを渡す前提
 // (Echo が request を再利用する前にコピーする)。
 //
-// NOTE: upstream の new-login email は mk-go の signin 自体が未実装のため本 helper
-// にも含めない (signin/signup 双方の今後の課題)。
+// NOTE: upstream はここで new-login email も送る (`server/api/SigninService.ts`、
+// 条件は `profile.email && profile.emailVerified`)。mk-go は**この email だけ**
+// 未実装で、他の副作用は揃っている。signin 本体が無いわけではない。
 func (h *Handler) RecordSuccessfulSignin(userID, ip string, headers http.Header) {
 	if h.ipLoggingOn && h.ipLogger != nil {
 		go h.ipLogger.Upsert(userID, ip)

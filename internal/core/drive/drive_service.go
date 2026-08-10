@@ -55,8 +55,12 @@ var (
 	// new file size exceeds `driveCapacityMb` (#1029 PR-2). Handler maps this
 	// to upstream's `NO_FREE_SPACE` 400 response. remote user の場合 upstream
 	// は `expireOldFile` で古い file を退去させて capacity を確保するが、
-	// mk-go では LRU 退去ロジックが未実装のため remote user は本 gate を
-	// skip して従来どおり受け入れる (cleanup logic は future work)。
+	// mk-go は remote user に本 gate を掛けずそのまま受け入れる。
+	//
+	// **これは未実装ではなく意図的**。mk-go はリモートメディアの実体を持たず
+	// link 行 (`isLink=true` / `size=0`) しか作らないため、退去すべき実体が
+	// 存在せず使用量にも乗らない。gate も LRU 退去も対象が無い
+	// (docs/divergence.md §5.5、#2411)。
 	ErrNoFreeSpace = errors.New("no free space")
 	// ErrInvalidFileName is returned when a file rename fails
 	// ValidateFileName. Handler maps this to upstream's INVALID_FILE_NAME
@@ -445,9 +449,10 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		}
 		// maxFileSizeMb / driveCapacityMb gate (#1029 PR-2)。upstream Misskey TS
 		// `DriveService.addFile` は **local user のみ** local capacity / size を
-		// 強制し、remote user は expireOldFile で逃げ道を作る。mk-go には
-		// expireOldFile 相当の LRU 退去がまだ無いので remote は skip する
-		// (= 受け入れて drive_file 行は作成、cleanup は future work)。
+		// 強制し、remote user は expireOldFile で逃げ道を作る。mk-go も remote は
+		// skip するが、理由が違う: リモートメディアの実体を持たない設計なので
+		// gate すべき容量そのものが発生しない (link 行は `size=0`)。expireOldFile
+		// 相当を足さないのも同じ理由で、意図的な差分 (docs/divergence.md §5.5)。
 		if in.User.IsLocal() && policies != nil {
 			if mb, ok := policyMegabytes(policies["maxFileSizeMb"]); ok && mb > 0 {
 				maxBytes := int64(mb * 1024 * 1024)

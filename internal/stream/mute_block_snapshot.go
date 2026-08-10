@@ -9,10 +9,17 @@ package stream
 // fetches in `Connection#fetch` (userIdsWhoMeMuting / userIdsWhoBlockingMe /
 // userIdsWhoMeMutingRenotes / userMutedInstances / mutingChannels).
 //
-// 全 set は接続確立時に 1 回 fetch する snapshot で、followingSnapshot と同じく
-// mute/block 変更時の live refresh は現状未実装 (= 接続を張り直すまで stale)。
-// upstream は 10 秒間隔で再 fetch するが、mk-go では接続単位の精度で parity を
-// 回復する。nil snapshot (anonymous / lookup 未配線 / fetch 失敗) は fail-open
+// 全 set は接続確立時に 1 回 fetch する snapshot だが、mute / block / renote-mute /
+// instance-mute / channel-mute を**操作した**ときは `RelationReloadTopic` 経由で
+// 接続中も取り直す (#2400。SubscribeRelationReload / RefreshRelations)。upstream は
+// 10 秒間隔の再 fetch で追随するのに対し、mk-go は変更した側の publish で反映する。
+//
+// **期限付き mute の自然失効だけはこの経路に乗らない。** `checkExpiredMutings`
+// cron が行を prune するだけで reload を publish しないため、失効後も接続を
+// 張り直すまで snapshot 側では mute されたままになる (upstream は次の再 fetch で
+// 拾う)。過剰に filter する方向の degrade なので誤配信にはならない。
+//
+// nil snapshot (anonymous / lookup 未配線 / fetch 失敗) は fail-open
 // 扱い — gate は何も drop せず upstream の「空 Set = 全通過」default に degrade
 // する。
 type MuteBlockSnapshot struct {
