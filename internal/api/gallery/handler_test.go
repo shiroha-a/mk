@@ -105,6 +105,18 @@ func cleanup() {
 	testDB.Exec(`DELETE FROM "drive_file" WHERE id LIKE 'galf_%'`)
 }
 
+// seedPost inserts a gallery post and fails the test if the insert did not
+// succeed.
+//
+// **戻り値を捨てないこと。** 以前はここが `testDB.Create(...)` の呼び捨てで、
+// 所有者 user が消えていると FK 違反で挿入が失敗しても黙って進み、行が無いまま
+// `PostsUpdate` が走って「200 のはずが 400」という**原因から遠い症状**に化けて
+// いた。実際 #2450 の調査はここで時間を取られた。
+func seedPost(t *testing.T, p *model.GalleryPost) {
+	t.Helper()
+	require.NoError(t, testDB.Create(p).Error)
+}
+
 // seedDriveFile inserts a minimal drive file owned by ownerID for gallery tests.
 func seedDriveFile(id, ownerID string) {
 	uid := ownerID
@@ -148,7 +160,7 @@ func TestFeatured_EmptyRanking(t *testing.T) {
 // ranking の ID で post を引いて返す (#1548)。
 func TestFeatured_WithRanking(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_f1", UpdatedAt: time.Now(), Title: "Art", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_f1", UpdatedAt: time.Now(), Title: "Art", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	rec := doPost(newHandlerWithRanking(&stubRanking{ids: []string{"gp_f1"}}).Featured, `{}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -158,8 +170,8 @@ func TestFeatured_WithRanking(t *testing.T) {
 // untilId フィルタで ID 範囲を絞る (#1548)。
 func TestFeatured_UntilIDFilter(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_aaa", UpdatedAt: time.Now(), Title: "Low", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
-	testDB.Create(&model.GalleryPost{ID: "gp_zzz", UpdatedAt: time.Now(), Title: "High", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_aaa", UpdatedAt: time.Now(), Title: "Low", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_zzz", UpdatedAt: time.Now(), Title: "High", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	rec := doPost(newHandlerWithRanking(&stubRanking{ids: []string{"gp_aaa", "gp_zzz"}}).Featured, `{"untilId":"gp_bbb"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -170,8 +182,8 @@ func TestFeatured_UntilIDFilter(t *testing.T) {
 // popular は likedCount>0 の post のみを likedCount DESC で返す (#1548)。
 func TestPopular_FiltersZeroLikes(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_p0", UpdatedAt: time.Now(), Title: "Zero", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 0})
-	testDB.Create(&model.GalleryPost{ID: "gp_p1", UpdatedAt: time.Now(), Title: "Liked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 3})
+	seedPost(t, &model.GalleryPost{ID: "gp_p0", UpdatedAt: time.Now(), Title: "Zero", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 0})
+	seedPost(t, &model.GalleryPost{ID: "gp_p1", UpdatedAt: time.Now(), Title: "Liked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 3})
 	defer cleanup()
 	rec := doPost(newHandler().Popular, `{}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -193,8 +205,8 @@ func TestPosts_BatchFilesAndPerPostIsLiked(t *testing.T) {
 	seedDriveFile("galf_a2", "gal_u1")
 	seedDriveFile("galf_b1", "gal_u1")
 	// postA: files [a1,a2]、liked。postB: [b1]、not-liked。
-	testDB.Create(&model.GalleryPost{ID: "gp_a", UpdatedAt: time.Now(), Title: "A", UserID: "gal_u1", FileIDs: []string{"galf_a1", "galf_a2"}, Tags: []string{}})
-	testDB.Create(&model.GalleryPost{ID: "gp_b", UpdatedAt: time.Now(), Title: "B", UserID: "gal_u1", FileIDs: []string{"galf_b1"}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_a", UpdatedAt: time.Now(), Title: "A", UserID: "gal_u1", FileIDs: []string{"galf_a1", "galf_a2"}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_b", UpdatedAt: time.Now(), Title: "B", UserID: "gal_u1", FileIDs: []string{"galf_b1"}, Tags: []string{}})
 	testDB.Create(&model.GalleryLike{ID: "gl_a", UserID: "gal_u1", PostID: "gp_a"})
 
 	rec := doPost(newHandler().Posts, `{}`, &model.User{ID: "gal_u1"})
@@ -222,8 +234,8 @@ func TestPosts_BatchFilesAndPerPostIsLiked(t *testing.T) {
 func TestPosts_TagsOmittedWhenEmpty(t *testing.T) {
 	cleanup()
 	defer cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_tagged", UpdatedAt: time.Now(), Title: "Tagged", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{"art", "wip"}})
-	testDB.Create(&model.GalleryPost{ID: "gp_notags", UpdatedAt: time.Now(), Title: "NoTags", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_tagged", UpdatedAt: time.Now(), Title: "Tagged", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{"art", "wip"}})
+	seedPost(t, &model.GalleryPost{ID: "gp_notags", UpdatedAt: time.Now(), Title: "NoTags", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 
 	rec := doPost(newHandler().Posts, `{}`, nil)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -253,7 +265,7 @@ func TestPostsUpdate_DBError(t *testing.T) {
 func TestPostsUpdate_IsSensitiveResetOnOmit(t *testing.T) {
 	cleanup()
 	defer cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_ir", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, IsSensitive: true})
+	seedPost(t, &model.GalleryPost{ID: "gp_ir", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, IsSensitive: true})
 	rec := doPost(newHandler().PostsUpdate, `{"postId":"gp_ir","title":"New"}`, &model.User{ID: "gal_u1"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]any
@@ -367,7 +379,7 @@ func TestPostsCreate_DBError(t *testing.T) {
 
 func TestPostsShow_Found(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_s1", UpdatedAt: time.Now(), Title: "Show", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_s1", UpdatedAt: time.Now(), Title: "Show", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	rec := doPost(newHandler().PostsShow, `{"postId":"gp_s1"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -381,7 +393,7 @@ func TestPostsShow_IsLikedAndFiles(t *testing.T) {
 	cleanup()
 	defer cleanup()
 	seedDriveFile("galf_s2", "gal_u1")
-	testDB.Create(&model.GalleryPost{ID: "gp_s2", UpdatedAt: time.Now(), Title: "S", UserID: "gal_u1", FileIDs: []string{"galf_s2"}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_s2", UpdatedAt: time.Now(), Title: "S", UserID: "gal_u1", FileIDs: []string{"galf_s2"}, Tags: []string{}})
 	testDB.Create(&model.GalleryLike{ID: "gl_s2", UserID: "gal_u1", PostID: "gp_s2"})
 
 	// 認証 viewer (like 済み): isLiked=true、files 解決。
@@ -414,7 +426,7 @@ func TestPostsShow_InvalidParam(t *testing.T) {
 
 func TestPostsDelete_Success(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_d1", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_d1", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	assert.Equal(t, http.StatusNoContent, doPost(newHandler().PostsDelete, `{"postId":"gp_d1"}`, &model.User{ID: "gal_u1"}).Code)
 }
 
@@ -429,7 +441,7 @@ func TestPostsDelete_InvalidParam(t *testing.T) {
 // 非所有者かつ非モデレータの削除は ACCESS_DENIED (#1548)。
 func TestPostsDelete_AccessDenied(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_ad", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_ad", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	h := newHandler()
 	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{}})
@@ -445,7 +457,7 @@ func TestPostsDelete_AccessDenied(t *testing.T) {
 // モデレータは他人の post を削除でき、moderationLog を残す (#1548)。
 func TestPostsDelete_ModeratorWithModLog(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_mod", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_mod", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	h := newHandler()
 	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{"gal_u2": true}})
@@ -467,7 +479,7 @@ func TestPostsDelete_ModeratorWithModLog(t *testing.T) {
 // 所有者自身の削除では moderationLog を残さない (#1548)。
 func TestPostsDelete_OwnerNoModLog(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_own", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_own", UpdatedAt: time.Now(), Title: "Del", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	h := newHandler()
 	h.SetRoleChecker(&stubRoles{moderators: map[string]bool{"gal_u1": true}})
@@ -482,7 +494,7 @@ func TestPostsDelete_OwnerNoModLog(t *testing.T) {
 
 func TestPostsUpdate_Success(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_u1", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_u1", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	// upstream は更新後の GalleryPost を返す (204 ではない)。
 	rec := doPost(newHandler().PostsUpdate, `{"postId":"gp_u1","title":"New"}`, &model.User{ID: "gal_u1"})
@@ -494,7 +506,7 @@ func TestPostsUpdate_Success(t *testing.T) {
 
 func TestPostsUpdate_WithDescription(t *testing.T) {
 	cleanup()
-	testDB.Create(&model.GalleryPost{ID: "gp_ud1", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_ud1", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	assert.Equal(t, http.StatusOK, doPost(newHandler().PostsUpdate, `{"postId":"gp_ud1","title":"New","description":"desc"}`, &model.User{ID: "gal_u1"}).Code)
 }
@@ -504,7 +516,7 @@ func TestPostsUpdate_ForeignFilesRejected(t *testing.T) {
 	cleanup()
 	defer cleanup()
 	seedDriveFile("galf_foreign", "someone_else")
-	testDB.Create(&model.GalleryPost{ID: "gp_uf", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_uf", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	rec := doPost(newHandler().PostsUpdate, `{"postId":"gp_uf","fileIds":["galf_foreign"]}`, &model.User{ID: "gal_u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
@@ -514,7 +526,7 @@ func TestPostsUpdate_FileIdsAndSensitive(t *testing.T) {
 	cleanup()
 	defer cleanup()
 	seedDriveFile("galf_u2a", "gal_u1")
-	testDB.Create(&model.GalleryPost{ID: "gp_u2", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: "gp_u2", UpdatedAt: time.Now(), Title: "Old", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	rec := doPost(newHandler().PostsUpdate, `{"postId":"gp_u2","fileIds":["galf_u2a"],"isSensitive":true}`, &model.User{ID: "gal_u1"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]any
@@ -538,7 +550,7 @@ func TestPostsUpdate_InvalidParam(t *testing.T) {
 func TestPostsLike_Success(t *testing.T) {
 	cleanup()
 	pid := testIDGen.Generate(time.Now())
-	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Likeable", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Likeable", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	rank := &stubRanking{}
 	// gal_u2 が gal_u1 の post を like する (他人の post)。
@@ -552,7 +564,7 @@ func TestPostsLike_Success(t *testing.T) {
 func TestPostsLike_YourPost(t *testing.T) {
 	cleanup()
 	pid := testIDGen.Generate(time.Now())
-	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Mine", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Mine", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	rec := doPost(newHandler().PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
@@ -570,7 +582,7 @@ func TestPostsLike_NoSuchPost(t *testing.T) {
 func TestPostsLike_AlreadyLiked(t *testing.T) {
 	cleanup()
 	pid := testIDGen.Generate(time.Now())
-	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Liked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Liked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	h := newHandler()
 	doPost(h.PostsLike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"})
@@ -587,7 +599,7 @@ func TestPostsLike_InvalidParam(t *testing.T) {
 func TestPostsUnlike_Success(t *testing.T) {
 	cleanup()
 	pid := testIDGen.Generate(time.Now())
-	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Unlikeable", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 1})
+	seedPost(t, &model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Unlikeable", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}, LikedCount: 1})
 	testDB.Create(&model.GalleryLike{ID: testIDGen.Generate(time.Now()), UserID: "gal_u2", PostID: pid})
 	defer cleanup()
 	rank := &stubRanking{}
@@ -609,7 +621,7 @@ func TestPostsUnlike_NoSuchPost(t *testing.T) {
 func TestPostsUnlike_NotLiked(t *testing.T) {
 	cleanup()
 	pid := testIDGen.Generate(time.Now())
-	testDB.Create(&model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Unliked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
+	seedPost(t, &model.GalleryPost{ID: pid, UpdatedAt: time.Now(), Title: "Unliked", UserID: "gal_u1", FileIDs: []string{}, Tags: []string{}})
 	defer cleanup()
 	rec := doPost(newHandler().PostsUnlike, `{"postId":"`+pid+`"}`, &model.User{ID: "gal_u2"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)

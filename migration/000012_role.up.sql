@@ -1,8 +1,12 @@
 -- role: ロールベースの権限管理 (Misskey 互換)
+-- 重複判定は他の enum (000001 / 000007 / 000009) と同じく duplicate_object 例外で
+-- 行う。`pg_type WHERE typname = ...` は **schema を見ない** ので、別 schema に
+-- 同名の型があるだけで作成を飛ばし、直後の CREATE TABLE が
+-- 「type does not exist」で落ちる。public しか使わない本番では差が出ないが、
+-- schema を分ける test 環境で顕在化した (#2450)。
 DO $$ BEGIN
-    IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'role_target_enum') THEN
-        CREATE TYPE role_target_enum AS ENUM ('manual', 'conditional');
-    END IF;
+    CREATE TYPE role_target_enum AS ENUM ('manual', 'conditional');
+EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
 
 CREATE TABLE IF NOT EXISTS "role" (

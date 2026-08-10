@@ -32,7 +32,10 @@ func testCfgFromEnv(t *testing.T) *config.Config {
 // a postgres container should not spuriously fail this package.
 func skipIfNoTestDB(t *testing.T) {
 	t.Helper()
-	if _, err := testutil.OpenTestDB(); err != nil {
+	// このパッケージは `db.New` の接続処理そのものを試すので、testCfgFromEnv と
+	// 同じ共有 schema に対して到達性を見る。OpenTestDB を使うとパッケージ専用の
+	// schema を作りに行き、試したい対象と別の場所を確認することになる (#2450)。
+	if _, err := testutil.OpenSharedTestDB(); err != nil {
 		t.Skipf("test DB not available: %v", err)
 	}
 }

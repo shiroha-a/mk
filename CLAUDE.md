@@ -204,6 +204,36 @@ go tool cover -html=coverage.out
   - `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, `TEST_DB_USER`, `TEST_DB_PASS`, `TEST_DB_SSLMODE`
   - `TEST_REDIS_HOST`, `TEST_REDIS_PORT`
 
+### DB を使うテストの分離 (#2450)
+
+`testutil.OpenTestDB` / `MustOpenTestDB` は**呼び出し元のパッケージ専用の PostgreSQL
+schema** に接続する (`internal/api/gallery` → `internal_api_gallery`)。schema 名は
+呼び出し元から自動で決まるので、新しいパッケージも何もしなくても隔離される。
+
+`go test` は**パッケージのテストバイナリを並行実行する**。CI は shard ごとに
+PostgreSQL を 1 つしか立てないため、共有すると一方の後片付けが他方の前提を壊す。
+実際に `internal/charttick` の `DELETE FROM "user"` が `internal/api/gallery` の
+所有者 user を消し、**Go を一切触っていない PR で CI が落ちた**。
+
+削除範囲を絞るだけでは解けない。charttick は**テーブル全体の絶対件数**を
+アサートするので、絞ると今度は他パッケージの行が混ざって charttick 自身が落ちる。
+干渉は双方向。shard 分配は `go list` 順の `NR % 4` なので、テストパッケージを 1 つ
+足すだけで同居の組み合わせが変わる。個別の衝突を潰す対処では再発する。
+
+守ること：
+
+- **DB を読み書きするテストで `OpenSharedTestDB` を使わない。** これは
+  `internal/db` のように接続処理そのものを試すテスト専用
+- schema が分かれているので `DELETE FROM "user"` のような無条件の削除は書いてよい。
+  ただし**それは自分の schema に閉じている前提**に依存するので、
+  `search_path` を跨ぐ生 SQL (`public.` 明示など) を書かない
+- 行の投入は**戻り値を検査する** (`require.NoError(t, db.Create(x).Error)`)。
+  捨てると FK 違反が黙って流れ、「200 のはずが 400」のような原因から遠い症状に化ける
+
+migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL` を使う。
+`pg_type WHERE typname = ...` は **schema を見ない**ため、別 schema に同名の型が
+あるだけで作成を飛ばし、直後の `CREATE TABLE` が落ちる。
+
 ### モック
 
 - `internal/testutil/`配下にRepository、Drive、Block/Muteなどのモック実装がある。
@@ -559,6 +589,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-08-10**: Section 4 に「DB を使うテストの分離」を追記 (#2450)。`testutil.OpenTestDB` が呼び出し元パッケージ専用の PostgreSQL schema に接続するようになった。`go test` はパッケージを並行実行し CI の shard は DB を 1 つしか持たないため、共有すると一方の後片付けが他方を壊す (実際に Go を触っていない PR で CI が落ちた)。削除範囲を絞るだけでは解けない (干渉が双方向) 点と、migration の enum guard に `pg_type WHERE typname` を使わない旨も明記。
 - **2026-08-07**: Section 3 に本家 backend e2e の Makefile target (`make upstream-e2e` 系 5 つ) を、Section 8 に `upstream-backend-e2e` workflow を追記 (#2347)。Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて回す PR トリガーの workflow で、required check には含めない。既知乖離は skip でなく expected-failure (`task.fails`) で扱う運用も明記。
 - **2026-08-07**: Section 8 に `diff-e2e` workflow と `frontend-check` job を追記 (#2368)。CI 非対象だった検証資産の棚卸しで、値レベル diff と fork frontend の型チェックを載せた。
 - **2026-08-08**: Section 8 に `vulncheck` ジョブを追記 (#2387)。`GOOS=linux govulncheck ./...` による到達可能な既知脆弱性の検出と、`go.mod` / `Dockerfile` の Go patch version 整合チェック。required check には含めない (新規 CVE 公開でコード無変更の PR でも落ちるため)。
