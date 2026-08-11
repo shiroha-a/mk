@@ -259,6 +259,12 @@ type Source struct {
 	// 配信したいだけの用途で有効化させるわけにはいかない。
 	Dev bool `mapstructure:"dev"`
 
+	// Plugins holds per-plugin settings, keyed by plugin name (#2482).
+	//
+	// 中身の形はプラグインごとに違うので map のまま持つ。`enabled` だけは
+	// mk-go が解釈し (未設定は有効)、残りはプラグインへそのまま渡す。
+	Plugins map[string]map[string]any `mapstructure:"plugins"`
+
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	// For local profiling only; must not be enabled in production.
 	EnablePprof bool `mapstructure:"enablePprof"`
@@ -400,6 +406,9 @@ type Config struct {
 	// assets. Must never be enabled in production. Overridable via MK_DEV=1.
 	// See the source struct doc for why this is separate from TestMode.
 	Dev bool
+
+	// Plugins holds per-plugin settings, keyed by plugin name (#2482).
+	Plugins map[string]map[string]any
 
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	EnablePprof bool
@@ -652,6 +661,7 @@ func resolve(src *Source) (*Config, error) {
 
 		TestMode:                src.TestMode,
 		Dev:                     src.Dev,
+		Plugins:                 src.Plugins,
 		EnablePprof:             src.EnablePprof,
 		EnableTimelineCache:     src.EnableTimelineCache,
 		TimelineCacheTTLSeconds: src.TimelineCacheTTLSeconds,

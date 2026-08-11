@@ -533,6 +533,43 @@ func TestLoad_Dev_FromYAML(t *testing.T) {
 	assert.True(t, cfg.Dev)
 }
 
+// plugins セクションが map のまま読めること。中身の形はプラグインごとに違うので
+// mk-go 側では解釈しない (#2482)。
+func TestLoad_Plugins(t *testing.T) {
+	path := writeTestConfig(t, testYAML+`
+plugins:
+  gameinfo:
+    enabled: true
+    apiKey: secret
+    retries: 3
+  other:
+    enabled: false
+`)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Plugins, 2)
+	assert.Equal(t, true, cfg.Plugins["gameinfo"]["enabled"])
+	assert.Equal(t, 3, cfg.Plugins["gameinfo"]["retries"])
+	assert.Equal(t, false, cfg.Plugins["other"]["enabled"])
+
+	// **Viper はキーを小文字化する。** YAML に apiKey と書いても map の
+	// キーは apikey になる。プラグイン側は encoding/json 経由で受け取り、
+	// json のフィールド照合が大文字小文字を無視するため camelCase の
+	// タグでも一致する (internal/server の
+	// TestPluginConfig_MatchesCamelCaseDespiteViperLowercasing が固定)。
+	assert.Equal(t, "secret", cfg.Plugins["gameinfo"]["apikey"])
+	assert.Nil(t, cfg.Plugins["gameinfo"]["apiKey"], "元の大文字小文字では引けない")
+}
+
+// 未設定でも壊れない (プラグインを使わないインスタンスが大半)。
+func TestLoad_Plugins_AbsentIsEmpty(t *testing.T) {
+	cfg, err := Load(writeTestConfig(t, testYAML))
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Plugins)
+}
+
 func TestLoad_MediaProxy(t *testing.T) {
 	yaml := `
 url: https://example.com

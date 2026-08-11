@@ -169,12 +169,57 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 		fmt.Sprintf("%d", mkqdriver.WorkerPoolSize(queues, override)),
 		"poolSize 未指定時の自動サイジング結果")
 
+	addPluginSettings(&d.Effective, cfg)
+
 	add(&d.Effective, "maxFileSize", fmt.Sprintf("%d bytes", cfg.MaxFileSize), "")
 	if cfg.ClusterLimit != nil {
 		add(&d.Effective, "clusterLimit", fmt.Sprintf("%d", *cfg.ClusterLimit),
 			"mk-go では **no-op**。goroutine で処理するので Node の cluster に相当する概念が無い")
 	}
 	return d
+}
+
+// addPluginSettings renders the `plugins:` section (#2482).
+//
+// **`enabled` 以外の値は既定でマスクする。** プラグインの設定キーは mk-go から
+// 見て未知なので、どれが秘密かを判別できない。既定を「出す」にすると、
+// プラグインが増えるたびに漏洩の機会が生まれる。
+//
+// キー名と「設定されているか」は診断に要るので残す (値だけを隠す)。
+func addPluginSettings(dst *[]ConfigEntry, cfg *config.Config) {
+	if len(cfg.Plugins) == 0 {
+		return
+	}
+	names := make([]string, 0, len(cfg.Plugins))
+	for name := range cfg.Plugins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		settings := cfg.Plugins[name]
+
+		state := "有効"
+		if !pluginEnabled(settings) {
+			state = "無効 (enabled: false)"
+		}
+		*dst = append(*dst, ConfigEntry{Key: "plugin: " + name, Value: state})
+
+		keys := make([]string, 0, len(settings))
+		for k := range settings {
+			if k != enabledKey {
+				keys = append(keys, k)
+			}
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			*dst = append(*dst, ConfigEntry{
+				Key:   "  " + name + "." + k,
+				Value: redactedPlaceholder,
+				Note:  "プラグインの設定は既定でマスクする",
+			})
+		}
+	}
 }
 
 // driverName normalises the empty job queue driver to its default.

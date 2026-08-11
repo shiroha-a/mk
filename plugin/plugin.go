@@ -151,6 +151,9 @@ type Context interface {
 	// Storage returns this plugin's own PostgreSQL schema.
 	Storage() Storage
 
+	// Config returns this plugin's settings from the instance configuration.
+	Config() Config
+
 	// Go runs fn in a new goroutine, recovering panics.
 	//
 	// **プラグインが自分で `go` を書くとプロセスごと落ちる。** Go は他の

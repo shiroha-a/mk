@@ -15,7 +15,9 @@
   method API.Anonymous() Caller
   method API.AsUser(string) Caller
   method Caller.Call(context.Context, string, any) (json.RawMessage, error)
+  method Config.Unmarshal(any) error
   method Context.API() API
+  method Context.Config() Config
   method Context.Go(func())
   method Context.Logger() *slog.Logger
   method Context.Name() string
@@ -42,6 +44,7 @@ func Registered() []Definition
 type API interface
 type APIError struct
 type Caller interface
+type Config interface
 type Context interface
 type Definition struct
 type Handler func

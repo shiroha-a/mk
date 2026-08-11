@@ -43,13 +43,24 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		return nil
 	}
 	for _, def := range plugins {
+		settings := s.config.Plugins[def.Name]
+
+		// **無効なプラグインは登録しない。** ビルドには含まれたままなので、
+		// 問題が起きたプラグインを再ビルドせず再起動だけで止められる (#2482)。
+		// 障害対応中に再ビルドと再デプロイを要求する形では使い物にならない。
+		if !pluginEnabled(settings) {
+			slog.Info("plugin disabled", "name", def.Name, "version", def.Version)
+			continue
+		}
+
 		pctx := &pluginContext{
 			name: def.Name,
 			logger: slog.With(
 				slog.String("plugin", def.Name),
 				slog.String("pluginVersion", def.Version),
 			),
-			api: &pluginAPI{echo: s.echo, userRepo: s.userRepo, host: requestHostFor(s.config.URL)},
+			api:    &pluginAPI{echo: s.echo, userRepo: s.userRepo, host: requestHostFor(s.config.URL)},
+			config: pluginConfig(settings),
 		}
 
 		// ストレージはロールに関係なく渡す。Routes からも Jobs からも使うため。
@@ -103,12 +114,77 @@ type pluginContext struct {
 	logger  *slog.Logger
 	api     plugin.API
 	storage plugin.Storage
+	config  plugin.Config
 }
 
 func (c *pluginContext) Name() string            { return c.name }
 func (c *pluginContext) Logger() *slog.Logger    { return c.logger }
 func (c *pluginContext) API() plugin.API         { return c.api }
 func (c *pluginContext) Storage() plugin.Storage { return c.storage }
+func (c *pluginContext) Config() plugin.Config   { return c.config }
+
+// --- Config ---
+
+// enabledKey is the one setting mk-go interprets itself.
+const enabledKey = "enabled"
+
+// pluginEnabled reports whether the plugin should be registered.
+//
+// **既定は有効。** ビルドに含めた時点で運営者は意図してそのプラグインを選んで
+// いるので、動かすのに追加の設定を要求しない。`enabled: false` を書いたときだけ
+// 止める。
+//
+// bool 以外が書かれていた場合も有効として扱う。設定の書き間違いで機能が黙って
+// 消える方が、無効化が効かないより厄介なため。
+func pluginEnabled(settings map[string]any) bool {
+	v, ok := settings[enabledKey]
+	if !ok {
+		return true
+	}
+	b, ok := v.(bool)
+	if !ok {
+		return true
+	}
+	return b
+}
+
+// pluginConfig wraps the plugin's settings, minus the reserved key.
+func pluginConfig(settings map[string]any) plugin.Config {
+	rest := make(map[string]any, len(settings))
+	for k, v := range settings {
+		if k == enabledKey {
+			continue
+		}
+		rest[k] = v
+	}
+	return &pluginConfigValue{settings: rest}
+}
+
+type pluginConfigValue struct {
+	settings map[string]any
+}
+
+// Unmarshal decodes the settings into v.
+//
+// **JSON を経由する。** YAML から読んだ値は map[string]any になっており、
+// 構造体へ入れるには変換が要る。encoding/json を使えば `json` タグという
+// Go では馴染みのある方法で書けて、mapstructure のような追加の作法を
+// プラグイン作者に要求しない。
+func (c *pluginConfigValue) Unmarshal(v any) error {
+	if len(c.settings) == 0 {
+		// 何も書かれていなければ v を変更しない。呼び出し側が入れた既定値が
+		// 残るようにする。
+		return nil
+	}
+	raw, err := json.Marshal(c.settings)
+	if err != nil {
+		return fmt.Errorf("plugin: 設定を変換できません: %w", err)
+	}
+	if err := json.Unmarshal(raw, v); err != nil {
+		return fmt.Errorf("plugin: 設定を読み込めません: %w", err)
+	}
+	return nil
+}
 
 // --- Storage ---
 

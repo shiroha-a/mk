@@ -386,3 +386,30 @@ proxyBypassHosts:
 # Unauthenticated; restrict access via nginx / LB ACL if exposed outside
 # the cluster. See docs/design/auto-scale-job-workers.md §6.1.
 #enableMetrics: false
+
+#   ┌────────────────────────┐
+#───┘ Plugins (mk-go specific) └────────────────────────────────
+
+# Per-plugin settings, keyed by plugin name (#2482). Only plugins
+# compiled into the binary (see plugins/ and `make plugins`) are
+# affected; listing a name here does not install anything.
+#
+# `enabled` is the only key mk-go interprets. It defaults to true, so
+# a plugin that is built in runs without any configuration. Setting it
+# to false skips registration, which lets you stop a misbehaving plugin
+# with a restart instead of a rebuild.
+#
+# Every other key is passed through to the plugin untouched.
+#
+# **These values are masked in -config-dump.** mk-go cannot tell which
+# plugin keys are secret, so it hides all of them by default.
+#
+# Note: there is no MK_* environment override for these. Viper can only
+# apply env vars to known keys, and plugin keys cannot be enumerated in
+# advance. A plugin that needs env-provided secrets should read them
+# itself.
+#plugins:
+#  gameinfo:
+#    enabled: true
+#    apiKey: "..."
+#    endpoint: https://api.example-game.com
