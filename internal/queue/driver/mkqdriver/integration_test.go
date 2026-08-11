@@ -1476,3 +1476,23 @@ func TestScheduler_DropsPerFireOptionsSilently(t *testing.T) {
 		driver.WithProcessIn(time.Minute),
 	))
 }
+
+// TestInspector_ListCompletedTasks: completed bucket の list 経路を pin する。
+//
+// admin UI の Completed タブが読む唯一の経路なのに test が無く、
+// カバレッジ 0% のまま残っていた (#2469 で公開ラッパーを足した際に
+// パッケージが閾値ちょうどに張り付き、CI の微差で落ちて発覚した)。
+func TestInspector_ListCompletedTasks(t *testing.T) {
+	d := newDriver(t)
+	ins := d.Inspector()
+
+	// 完了 job が無い状態でも空で返る (エラーにしない)。
+	got, err := ins.ListCompletedTasks("deliver", 1, 30)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	// 未知 queue は他の list と同じく error。
+	_, err = ins.ListCompletedTasks("does-not-exist", 1, 30)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown queue")
+}
