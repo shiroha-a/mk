@@ -7,7 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"strings"
 	"time"
@@ -71,9 +70,32 @@ func (s *Service) validateUserList(ownerID string, userListID *string) error {
 // stream. 古いものから XADD MAXLEN ~ で削除される。
 const MaxNotesPerAntenna = 200
 
-// streamKey returns the Redis Stream key for an antenna's note timeline.
+// streamKey returns the Redis key for an antenna's note timeline.
+//
+// # 構造 (#2465 で Stream から ZSET へ変更)
+//
+// 以前は Redis Stream で、entry id に **push 時刻**を使っていた。一方カーソルの
+// 境界は `idGen.ParseTime(untilID)` = **ノートの作成時刻**から作っていたため、
+// この 2 つがずれるとページ送りでノートが落ちた。ノート作成と antenna への
+// push は別の瞬間なので、近い値にはなっても順序が入れ替わりうる。
+//
+// 現在は **score を揃えた ZSET に noteID を入れ、辞書順 (= 時刻順) で引く**。
+// カーソルの境界がノート ID そのものになるので、push のタイミングは順序に
+// 影響しない。ID が辞書順で時刻順になる前提は aid / aidx / meid / objectid /
+// ulid の全方式で成り立ち、SQL 側のページングも同じ前提で `id < ?` を使っている。
+//
+// キー名は据え置く。型が変わるので旧 Stream が残っている環境では WRONGTYPE に
+// なるが、読み書きの両方で検出して張り替える (キー名を変えると旧キーが孤児に
+// なって残り続ける)。
 func streamKey(antennaID string) string {
 	return "antennaTimeline:" + antennaID
+}
+
+// isWrongType reports whether err is Redis' WRONGTYPE error.
+//
+// 旧 Stream から ZSET へ張り替える一度きりの移行で使う。
+func isWrongType(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "WRONGTYPE")
 }
 
 // StreamingPublisher publishes a matched antenna note to the WebSocket
@@ -403,10 +425,12 @@ func (s *Service) Delete(ownerID, antennaID string) error {
 }
 
 // RemoveNote removes a specific note from an antenna's timeline (upstream
-// antennas/remove-note、#2069 #17463)。owner 検証後、Redis Stream を走査して
-// noteId 一致 entry を XDel する。upstream は List-based の LREM だが mk-go の
-// antenna TL は Stream (entry id = push 時刻ベース) なので noteId で照合して
-// 削除する。該当ノートが無い場合は no-op で成功 (upstream も同様)。
+// antennas/remove-note、#2069 #17463)。該当ノートが無い場合は no-op で成功
+// (upstream も同様)。
+//
+// ZSET の member が noteID そのものなので ZREM 一発で消せる (#2465)。Stream
+// だった頃は entry id が push 時刻ベースで noteID と対応しないため、全件走査
+// して照合する必要があった。
 func (s *Service) RemoveNote(ownerID, antennaID, noteID string) error {
 	a, err := s.repo.FindByID(antennaID)
 	if err != nil {
@@ -415,25 +439,12 @@ func (s *Service) RemoveNote(ownerID, antennaID, noteID string) error {
 	if a.UserID != ownerID {
 		return ErrAccessDenied
 	}
-	ctx := context.Background()
-	key := streamKey(antennaID)
-	// MaxNotesPerAntenna で stream 長は bounded なので全件走査は許容範囲。
-	msgs, err := s.client.XRange(ctx, key, "-", "+").Result()
-	if err != nil {
-		return err
+	err = s.client.ZRem(context.Background(), streamKey(antennaID), noteID).Err()
+	if isWrongType(err) {
+		// 旧 Stream。次の push で張り替わるので消す対象が無いのと同じ扱い。
+		return nil
 	}
-	entryIDs := make([]string, 0, 1)
-	for _, m := range msgs {
-		if v, _ := m.Values["noteId"].(string); v == noteID {
-			entryIDs = append(entryIDs, m.ID)
-		}
-	}
-	if len(entryIDs) > 0 {
-		if err := s.client.XDel(ctx, key, entryIDs...).Err(); err != nil {
-			return err
-		}
-	}
-	return nil
+	return err
 }
 
 // ListByUser returns the antennas owned by userID.
@@ -487,48 +498,45 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 	if limit > 100 {
 		limit = 100
 	}
-	end := "+"
-	start := "-"
-	// `(<ms>-0` exclusive bound は entry id >= "<ms>-0" を全て除外する。
-	// pushNote が `<ms>-*` で seq を自動採番するので同 ms に複数 entry が
-	// 並びうるが、それらは boundary note と「タイ」とみなしてまとめて除外
-	// する (untilID の場合: 厳密に "古い" のみ返す; sinceID の場合は逆)。
-	// FE は最後に表示した note の id を渡してくるので、その note 自身を
-	// 含めると無限ループするのを避ける重要な不変条件。
+	// 境界は **ノート ID そのもの** (#2465)。以前は ID から時刻を取り出して
+	// stream の entry id (= push 時刻) と突き合わせていたため、作成時刻と push
+	// 時刻がずれるとページ送りでノートが落ちた。ID を直接使えばこのずれは
+	// 原理的に発生しない。
+	//
+	// `(` は排他境界。FE は最後に表示した note の id を渡してくるので、その
+	// note 自身を含めると無限ループする。これは重要な不変条件。
+	min := "-"
+	max := "+"
 	if untilID != "" {
-		if t, err := s.idGen.ParseTime(untilID); err == nil {
-			end = fmt.Sprintf("(%d-0", t.UnixMilli())
-		}
+		max = "(" + untilID
 	}
 	if sinceID != "" {
-		if t, err := s.idGen.ParseTime(sinceID); err == nil {
-			start = fmt.Sprintf("(%d-0", t.UnixMilli())
-		}
+		min = "(" + sinceID
 	}
+
 	// upstream notes.ts: sinceId 単独 (fetch-newer / scroll-up) は昇順
 	// (oldest-first) で sinceId 直後の最古 limit 件を返す。それ以外 (untilId /
-	// 無指定) は降順 (newest-first)。mk-go は常に XRevRange で newest-first だった
-	// ため sinceId 単独ページの並びと集合が逆になっていた (#1778)。
+	// 無指定) は降順 (newest-first)。常に newest-first だと sinceId 単独ページの
+	// 並びと集合が逆になる (#1778)。
+	key := streamKey(antennaID)
+	by := &redis.ZRangeBy{Min: min, Max: max, Count: int64(limit)}
 	var (
-		res []redis.XMessage
+		out []string
 		err error
 	)
 	if sinceID != "" && untilID == "" {
-		// XRANGE は start<=stop の昇順。range は (sinceID, +]。
-		res, err = s.client.XRangeN(ctx, streamKey(antennaID), start, end, int64(limit)).Result()
+		out, err = s.client.ZRangeByLex(ctx, key, by).Result()
 	} else {
-		res, err = s.client.XRevRangeN(ctx, streamKey(antennaID), end, start, int64(limit)).Result()
+		out, err = s.client.ZRevRangeByLex(ctx, key, by).Result()
 	}
 	if err != nil {
-		return nil, err
-	}
-	out := make([]string, 0, len(res))
-	for _, msg := range res {
-		raw, ok := msg.Values["noteId"].(string)
-		if !ok {
-			continue
+		if isWrongType(err) {
+			// 旧 Stream が残っている環境。次の push で張り替わるので、
+			// ここでは空を返す (読み取りで消すと、書き込みの無い
+			// antenna が読むたびに DEL を撃つことになる)。
+			return nil, nil
 		}
-		out = append(out, raw)
+		return nil, err
 	}
 	return out, nil
 }
@@ -599,15 +607,33 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 // した際に Redis Stream の monotonic 制約に違反して XADD が失敗していた
 // (#693 PR review #1)。`*` を使うと同 ms 内で seq=0,1,2,... と自動採番されて
 // 衝突しない。
-func (s *Service) pushNote(ctx context.Context, antennaID, noteID string, now time.Time) error {
-	streamID := fmt.Sprintf("%d-*", now.UnixMilli())
-	return s.client.XAdd(ctx, &redis.XAddArgs{
-		Stream: streamKey(antennaID),
-		MaxLen: MaxNotesPerAntenna,
-		Approx: true,
-		ID:     streamID,
-		Values: map[string]any{"noteId": noteID},
-	}).Err()
+func (s *Service) pushNote(ctx context.Context, antennaID, noteID string, _ time.Time) error {
+	key := streamKey(antennaID)
+	if err := s.zaddNote(ctx, key, noteID); err != nil {
+		if !isWrongType(err) {
+			return err
+		}
+		// 旧 Stream が残っている。一度だけ捨てて張り替える (#2465)。ここで
+		// 消えるのは高々 MaxNotesPerAntenna 件の timeline entry で、ノート
+		// 本体ではない。次の push から正しい構造で積み上がる。
+		if delErr := s.client.Del(ctx, key).Err(); delErr != nil {
+			return delErr
+		}
+		if err := s.zaddNote(ctx, key, noteID); err != nil {
+			return err
+		}
+	}
+	// 上限を維持する。score が全て同じなので rank は辞書順 = 時刻順。
+	// 新しい方 (末尾) を残すので、古い側の余剰を落とす。
+	return s.client.ZRemRangeByRank(ctx, key, 0, -int64(MaxNotesPerAntenna)-1).Err()
+}
+
+// zaddNote inserts the note ID with a constant score so ZRANGEBYLEX orders by
+// the ID itself.
+//
+// **score は必ず 0 で揃える。** バラつくと ZRANGEBYLEX の結果が未定義になる。
+func (s *Service) zaddNote(ctx context.Context, key, noteID string) error {
+	return s.client.ZAdd(ctx, key, redis.Z{Score: 0, Member: noteID}).Err()
 }
 
 // matchNote evaluates whether the note satisfies the antenna's filter set.

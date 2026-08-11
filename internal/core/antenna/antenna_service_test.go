@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"os"
 	"testing"
@@ -1331,9 +1332,7 @@ func TestRemoveNote(t *testing.T) {
 	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
 	ctx := context.Background()
 	for _, n := range []string{"n1", "n2", "n3"} {
-		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
-			Stream: streamKey("a1"), Values: map[string]any{"noteId": n},
-		}).Err())
+		seedNote(t, streamKey("a1"), n)
 	}
 
 	// n2 を削除 → n1, n3 が残る。
@@ -1466,4 +1465,145 @@ func TestNotes_ForeignAntennaDoesNotClearUnread(t *testing.T) {
 	_, err := svc.Notes(context.Background(), "intruder", "a1", 10, "", "")
 	require.Error(t, err)
 	assert.Len(t, unread.Rows, 1, "所有者チェックで弾かれた場合は未読行を消さない")
+}
+
+// seedNote pushes a note id the way pushNote does (#2465 で Stream から ZSET へ)。
+// テストが Redis の構造を直接組み立てているので、実装と同じ形に揃えておかないと
+// 「テストは通るが本番は動かない」になる。
+func seedNote(t *testing.T, key, noteID string) {
+	t.Helper()
+	require.NoError(t, testRedis.Client.ZAdd(context.Background(), key, redis.Z{Score: 0, Member: noteID}).Err())
+}
+
+// #2465 の回帰テスト。
+//
+// 以前は Redis Stream の entry id に **push 時刻**を使い、カーソルの境界は
+// **ノートの作成時刻** (aidx) から作っていた。この 2 つは別の瞬間なので順序が
+// 入れ替わりえて、ページ送りでノートが落ちた。
+//
+// ここでは「作成順と push 順が食い違う」状況を作り、それでもページ送りが
+// 全件を返すことを固定する。ZSET + 辞書順なら push の順序は結果に影響しない。
+func TestNotes_PaginationIgnoresPushOrder(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a-ord"] = &model.Antenna{ID: "a-ord", UserID: "u1"}
+	ctx := context.Background()
+
+	// **実 ID 生成器で作る。** 本番と同じ形式でないと、境界の扱いが production と
+	// ずれたまま緑になる。作成時刻は昇順、push は**わざと逆順**にする。
+	base := time.Now().Add(-time.Minute)
+	ids := make([]string, 6)
+	for i := range ids {
+		ids[i] = idGen.Generate(base.Add(time.Duration(i) * 3 * time.Millisecond))
+	}
+	// push 時刻も作成時刻と食い違わせる (旧実装はこのずれで取りこぼした)。
+	for i := len(ids) - 1; i >= 0; i-- {
+		require.NoError(t, svc.pushNote(ctx, "a-ord", ids[i], time.Now()))
+	}
+
+	// limit 2 でページ送りして全件を集める。
+	var got []string
+	until := ""
+	for {
+		page, err := svc.Notes(ctx, "u1", "a-ord", 2, "", until)
+		require.NoError(t, err)
+		if len(page) == 0 {
+			break
+		}
+		got = append(got, page...)
+		until = page[len(page)-1]
+	}
+
+	// newest-first で全件、重複なし。
+	want := make([]string, len(ids))
+	for i, id := range ids {
+		want[len(ids)-1-i] = id
+	}
+	assert.Equal(t, want, got)
+}
+
+// 同じ瞬間に push された複数ノートを取りこぼさないこと。
+//
+// 旧実装は境界を ms 単位で切っており、「同 ms の entry は boundary note と
+// タイとみなしてまとめて除外する」設計だった。タイになるのは push 時刻であって
+// ノートの同一性ではないので、無関係なノートを巻き込んで落としていた。
+func TestNotes_PaginationKeepsNotesPushedInSameInstant(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a-tie"] = &model.Antenna{ID: "a-tie", UserID: "u1"}
+	ctx := context.Background()
+
+	now := time.Now()
+	base := now.Add(-time.Minute)
+	ids := make([]string, 4)
+	for i := range ids {
+		ids[i] = idGen.Generate(base.Add(time.Duration(i) * time.Millisecond))
+	}
+	for _, id := range ids {
+		require.NoError(t, svc.pushNote(ctx, "a-tie", id, now)) // 全て同一 push 時刻
+	}
+
+	first, err := svc.Notes(ctx, "u1", "a-tie", 2, "", "")
+	require.NoError(t, err)
+	require.Equal(t, []string{ids[3], ids[2]}, first)
+
+	second, err := svc.Notes(ctx, "u1", "a-tie", 2, "", first[len(first)-1])
+	require.NoError(t, err)
+	assert.Equal(t, []string{ids[1], ids[0]}, second, "同一 push 時刻でも取りこぼさない")
+}
+
+// 上限を超えたら古い側から落ちること。
+func TestPushNote_TrimsToMaxNotes(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a-cap"] = &model.Antenna{ID: "a-cap", UserID: "u1"}
+	ctx := context.Background()
+
+	total := MaxNotesPerAntenna + 5
+	for i := 0; i < total; i++ {
+		require.NoError(t, svc.pushNote(ctx, "a-cap", fmt.Sprintf("nd%05d", i), time.Now()))
+	}
+
+	n, err := testRedis.Client.ZCard(ctx, streamKey("a-cap")).Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, MaxNotesPerAntenna, n)
+
+	// 残っているのは新しい側。
+	page, err := svc.Notes(ctx, "u1", "a-cap", 1, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{fmt.Sprintf("nd%05d", total-1)}, page)
+}
+
+// 旧 Stream が残っている環境で WRONGTYPE を検出して張り替えること (#2465)。
+// キー名を据え置いたので、この移行が効かないと antenna timeline が壊れる。
+func TestPushNote_MigratesLegacyStream(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a-mig"] = &model.Antenna{ID: "a-mig", UserID: "u1"}
+	ctx := context.Background()
+	key := streamKey("a-mig")
+
+	// 旧構造 (Stream) を作る。
+	require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+		Stream: key, Values: map[string]any{"noteId": "old1"},
+	}).Err())
+
+	// 読み取りは空を返す (壊れない)。
+	page, err := svc.Notes(ctx, "u1", "a-mig", 10, "", "")
+	require.NoError(t, err)
+	assert.Empty(t, page)
+
+	// push で張り替わる。
+	require.NoError(t, svc.pushNote(ctx, "a-mig", "new1", time.Now()))
+	page, err = svc.Notes(ctx, "u1", "a-mig", 10, "", "")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new1"}, page)
+}
+
+// 旧 Stream に対する RemoveNote が落ちないこと。
+func TestRemoveNote_LegacyStreamIsNoOp(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a-rml"] = &model.Antenna{ID: "a-rml", UserID: "u1"}
+	ctx := context.Background()
+	require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
+		Stream: streamKey("a-rml"), Values: map[string]any{"noteId": "x"},
+	}).Err())
+
+	assert.NoError(t, svc.RemoveNote("u1", "a-rml", "x"))
 }

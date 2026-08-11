@@ -484,13 +484,8 @@ func TestNotes_Success(t *testing.T) {
 	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "alice"}
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice"}
 
-	// Push a note id directly into the antenna's stream so Notes returns it.
-	ctx := context.Background()
-	require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
-		Stream: "antennaTimeline:a1",
-		ID:     "1-0",
-		Values: map[string]any{"noteId": "n1"},
-	}).Err())
+	// Push a note id directly into the antenna timeline so Notes returns it.
+	seedAntennaNote(t, "antennaTimeline:a1", "n1")
 
 	c, rec := newReq(t, `{"antennaId":"a1"}`)
 	setUser(c, "alice")
@@ -567,11 +562,7 @@ func TestNotes_PagingUntilId(t *testing.T) {
 		{idC, t1.Add(2 * time.Millisecond).UnixMilli()},
 	}
 	for _, e := range entries {
-		require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
-			Stream: "antennaTimeline:a693u",
-			ID:     fmt.Sprintf("%d-0", e.ms),
-			Values: map[string]any{"noteId": e.noteID},
-		}).Err())
+		seedAntennaNote(t, "antennaTimeline:a693u", e.noteID)
 		noteRepo.Notes[e.noteID] = &model.Note{ID: e.noteID, UserID: "alice"}
 	}
 
@@ -613,11 +604,7 @@ func TestNotes_FollowersNote_FilteredByQueryService(t *testing.T) {
 	noteRepo.Notes["n-leak"] = &model.Note{
 		ID: "n-leak", UserID: "author", Visibility: model.NoteVisibilityFollowers,
 	}
-	require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
-		Stream: "antennaTimeline:a-vis",
-		ID:     "1-0",
-		Values: map[string]any{"noteId": "n-leak"},
-	}).Err())
+	seedAntennaNote(t, "antennaTimeline:a-vis", "n-leak")
 
 	c, rec := newReq(t, `{"antennaId":"a-vis"}`)
 	setUser(c, "alice")
@@ -643,8 +630,7 @@ func TestNotes_OverFetchTrim_PreservesLimitAfterFilterVisible(t *testing.T) {
 	followingRepo := testutil.NewMockFollowingRepository()
 	h.SetQueryService(corenote.NewQueryService(noteRepo, followingRepo))
 
-	ctx := context.Background()
-	// 古い側: public note 10 件 (ms = 100..109)
+	// 古い側: public note 10 件
 	publicIDs := make([]string, 10)
 	for i := 0; i < 10; i++ {
 		nid := fmt.Sprintf("n-pub-%02d", i)
@@ -652,11 +638,7 @@ func TestNotes_OverFetchTrim_PreservesLimitAfterFilterVisible(t *testing.T) {
 		noteRepo.Notes[nid] = &model.Note{
 			ID: nid, UserID: "author", Visibility: model.NoteVisibilityPublic,
 		}
-		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
-			Stream: "antennaTimeline:a-trim",
-			ID:     fmt.Sprintf("%d-0", 100+i),
-			Values: map[string]any{"noteId": nid},
-		}).Err())
+		seedAntennaNote(t, "antennaTimeline:a-trim", nid)
 	}
 	// 新しい側: followers note 5 件 (ms = 200..204) — filter で全て落ちる
 	for i := 0; i < 5; i++ {
@@ -664,11 +646,7 @@ func TestNotes_OverFetchTrim_PreservesLimitAfterFilterVisible(t *testing.T) {
 		noteRepo.Notes[nid] = &model.Note{
 			ID: nid, UserID: "author", Visibility: model.NoteVisibilityFollowers,
 		}
-		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
-			Stream: "antennaTimeline:a-trim",
-			ID:     fmt.Sprintf("%d-0", 200+i),
-			Values: map[string]any{"noteId": nid},
-		}).Err())
+		seedAntennaNote(t, "antennaTimeline:a-trim", nid)
 	}
 
 	c, rec := newReq(t, `{"antennaId":"a-trim","limit":10}`)
@@ -694,18 +672,13 @@ func TestNotes_OverFetchTrim_QueryServiceUnwired_DefaultLimit(t *testing.T) {
 	h, repo, noteRepo := newHandler(t)
 	repo.Antennas["a-default"] = &model.Antenna{ID: "a-default", UserID: "alice"}
 
-	ctx := context.Background()
 	// 30 件 push して default limit (10) で叩く → trim 後 10 件
 	for i := 0; i < 30; i++ {
 		nid := fmt.Sprintf("n-%02d", i)
 		noteRepo.Notes[nid] = &model.Note{
 			ID: nid, UserID: "alice", Visibility: model.NoteVisibilityPublic,
 		}
-		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
-			Stream: "antennaTimeline:a-default",
-			ID:     fmt.Sprintf("%d-0", 100+i),
-			Values: map[string]any{"noteId": nid},
-		}).Err())
+		seedAntennaNote(t, "antennaTimeline:a-default", nid)
 	}
 
 	c, rec := newReq(t, `{"antennaId":"a-default"}`)
@@ -739,15 +712,10 @@ func TestNotes_MuteBlockChannelFiltered(t *testing.T) {
 		"by-blocker":    {ID: "by-blocker", UserID: "blocker", Visibility: model.NoteVisibilityPublic},
 		"muted-channel": {ID: "muted-channel", UserID: "author", Visibility: model.NoteVisibilityPublic, ChannelID: &mutedCh},
 	}
-	ctx := context.Background()
 	order := []string{"keep", "by-muted", "by-blocker", "muted-channel"}
-	for i, nid := range order {
+	for _, nid := range order {
 		noteRepo.Notes[nid] = notes[nid]
-		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
-			Stream: "antennaTimeline:a-mb",
-			ID:     fmt.Sprintf("%d-0", 100+i),
-			Values: map[string]any{"noteId": nid},
-		}).Err())
+		seedAntennaNote(t, "antennaTimeline:a-mb", nid)
 	}
 
 	c, rec := newReq(t, `{"antennaId":"a-mb"}`)
@@ -767,11 +735,7 @@ func TestNotes_MuteBlockLoadError(t *testing.T) {
 	h, repo, noteRepo := newHandler(t)
 	repo.Antennas["a-err"] = &model.Antenna{ID: "a-err", UserID: "alice"}
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author", Visibility: model.NoteVisibilityPublic}
-	require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
-		Stream: "antennaTimeline:a-err",
-		ID:     "1-0",
-		Values: map[string]any{"noteId": "n1"},
-	}).Err())
+	seedAntennaNote(t, "antennaTimeline:a-err", "n1")
 
 	blocking := testutil.NewMockBlockingRepository()
 	blocking.ExistsErr = errors.New("block boom") // ListBlockerIDs もこのエラーで失敗する
@@ -798,11 +762,7 @@ func TestNotes_FollowersNote_VisibleToFollower(t *testing.T) {
 	noteRepo.Notes["n-ok"] = &model.Note{
 		ID: "n-ok", UserID: "author", Visibility: model.NoteVisibilityFollowers,
 	}
-	require.NoError(t, testRedis.Client.XAdd(context.Background(), &redis.XAddArgs{
-		Stream: "antennaTimeline:a-ok",
-		ID:     "1-0",
-		Values: map[string]any{"noteId": "n-ok"},
-	}).Err())
+	seedAntennaNote(t, "antennaTimeline:a-ok", "n-ok")
 
 	c, rec := newReq(t, `{"antennaId":"a-ok"}`)
 	setUser(c, "alice")
@@ -861,11 +821,8 @@ func TestNotes_FiltersBlockedHostAndSuspended(t *testing.T) {
 	noteRepo.Notes["n-suspended"] = &model.Note{ID: "n-suspended", UserID: "susp", User: &model.User{ID: "susp", IsSuspended: true}}
 	noteRepo.Notes["n-ok"] = &model.Note{ID: "n-ok", UserID: "alice"}
 
-	ctx := context.Background()
-	for _, e := range []struct{ id, sid string }{{"n-blocked", "1-0"}, {"n-suspended", "2-0"}, {"n-ok", "3-0"}} {
-		require.NoError(t, testRedis.Client.XAdd(ctx, &redis.XAddArgs{
-			Stream: "antennaTimeline:a-n5", ID: e.sid, Values: map[string]any{"noteId": e.id},
-		}).Err())
+	for _, id := range []string{"n-blocked", "n-suspended", "n-ok"} {
+		seedAntennaNote(t, "antennaTimeline:a-n5", id)
 	}
 
 	c, rec := newReq(t, `{"antennaId":"a-n5"}`)
@@ -920,4 +877,15 @@ func TestCreate_MissingRequiredParams(t *testing.T) {
 			assert.Equal(t, http.StatusBadRequest, rec.Code, "%s を欠くと 400", k)
 		})
 	}
+}
+
+// seedAntennaNote pushes a note id into the antenna timeline the way the
+// service does (#2465 で Stream から ZSET へ変更)。
+//
+// テストが Redis の構造を直接組み立てているので、実装と同じ形にしておかないと
+// 「テストは通るが本番は動かない」になる。score は実装と同じく 0 で揃える
+// (ZRANGEBYLEX は score が揃っている前提)。
+func seedAntennaNote(t *testing.T, key, noteID string) {
+	t.Helper()
+	require.NoError(t, testRedis.Client.ZAdd(context.Background(), key, redis.Z{Score: 0, Member: noteID}).Err())
 }
