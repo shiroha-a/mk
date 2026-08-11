@@ -79,6 +79,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/chart/charthook"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
+	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
@@ -1014,6 +1015,19 @@ func (s *Server) setupRoutes() {
 	federationResolver.SetChartHook(chartHooks)
 	deliverProcessor.SetChartHook(chartHooks)
 	inboxProcessor.SetChartHook(chartHooks)
+	// 配送先ホストごとの健全性テレメトリ (#2461)。upstream は結果を
+	// `isNotResponding` の真偽値にしか残さないので、mk-go 独自の観測。
+	//
+	// **queue role でだけ回す** (#2459)。記録するのは配送を実行するノードだけで、
+	// Web ノードは admin endpoint から Redis を読むだけ。集計 goroutine を
+	// Web ノードで回しても drain するものが無い。
+	deliveryHealth := deliveryhealth.NewService(
+		deliveryhealth.NewStore(s.redis.Default), deliveryhealth.DefaultMaxHosts, 0)
+	if s.role.RunsQueue() {
+		deliverProcessor.SetDeliveryTelemetry(deliveryHealth)
+		deliveryHealth.Start(context.Background())
+		s.registerShutdownHook(func(ctx context.Context) { deliveryHealth.Stop(ctx) })
+	}
 	// federation 経由のリモートノート (Create / Announce) も PerUserNotesChart
 	// 等の note 系 chart に +1 を記録するために配線する (#1156)。これが無いと
 	// リモートユーザーのプロフィール「アクティビティ」タブの heatmap が空に
@@ -2911,6 +2925,7 @@ func (s *Server) setupRoutes() {
 	// 満たしている。
 	adminHandler.SetUserTokenInvalidator(s.auth)
 	adminHandler.SetInstanceRepo(instanceRepo)
+	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	// admin/federation/update-instance の suspend / unsuspend を deliver hot path
 	// の suspend 判定 cache へ TTL を待たず即時反映する (#1407 review)。
 	adminHandler.SetInstanceSuspendCacheInvalidator(instanceService)
@@ -3078,6 +3093,13 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/federation/refresh-remote-instance-metadata", adminHandler.FederationRefreshRemoteInstanceMetadata, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:federation"))
 	api.POST("/admin/federation/remove-all-following", adminHandler.FederationRemoveAllFollowing, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:federation"))
 	api.POST("/admin/federation/update-instance", adminHandler.FederationUpdateInstance, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:federation"))
+	// mk-go 独自 (#2461)。scope は **既存のものを再利用する**。
+	// `internal/misc/permissions` は upstream misskey-js の一覧と完全一致させる
+	// 契約で、RFC8414 の scopes_supported にもそのまま出るので、mk-go 固有の
+	// scope を足せない。`admin/federation/*` に read 系の scope が無いため、
+	// 同じく mk-go 独自の read endpoint である admin/server-metrics に倣って
+	// read:admin:server-info を要求する。
+	api.POST("/admin/federation/delivery-health", adminHandler.FederationDeliveryHealth, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
 	api.POST("/admin/invite/create", adminHandler.InviteCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:invite-codes"))
 	api.POST("/admin/invite/list", adminHandler.InviteList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:invite-codes"))
 	api.POST("/admin/promo/create", adminHandler.PromoCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:promo"))

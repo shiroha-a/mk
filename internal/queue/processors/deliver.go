@@ -18,6 +18,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
@@ -57,6 +58,17 @@ type ChartHook interface {
 	OnDelivered(host string, succeeded bool)
 }
 
+// DeliveryTelemetry receives the detailed outcome of each attempt (#2461).
+//
+// ResponseHook が `isNotResponding` の真偽値に潰してしまう情報 (status /
+// レイテンシ / 失敗の種別) をそのまま渡す先。**分類は本 file の応答 switch を
+// そのまま反映する**ので、実装側で「成功とみなす範囲」を再判定しないこと。
+//
+// 循環依存を避けるため interface で受け取る。実装は core/deliveryhealth。
+type DeliveryTelemetry interface {
+	RecordDelivery(host string, o deliveryhealth.Outcome)
+}
+
 // SuspendedChecker reports whether delivery to a host should be skipped
 // based on meta.deliverSuspendedSoftware.
 type SuspendedChecker interface {
@@ -84,6 +96,7 @@ type DeliverProcessor struct {
 	signer           HTTPSigner
 	responseHook     ResponseHook
 	chartHook        ChartHook
+	telemetry        DeliveryTelemetry
 	suspendedChecker SuspendedChecker
 	deliveryGate     DeliveryGate
 	capabilities     Ed25519AcceptanceRecorder
@@ -263,6 +276,12 @@ func (p *DeliverProcessor) SetChartHook(h ChartHook) {
 	p.chartHook = h
 }
 
+// SetDeliveryTelemetry wires the per-host outcome recorder (#2461)。
+// 未配線なら記録しないだけで、配送そのものには影響しない。
+func (p *DeliverProcessor) SetDeliveryTelemetry(t DeliveryTelemetry) {
+	p.telemetry = t
+}
+
 // hostFromInbox returns the host portion of an inbox URL, or "" if the URL is
 // not parseable. ResponseHook 通知用に共通化する。
 func hostFromInbox(inbox string) string {
@@ -306,6 +325,22 @@ func (p *DeliverProcessor) recordError(inbox string) {
 	}
 }
 
+// recordTelemetry forwards one attempt's detail to the health recorder.
+//
+// **判定はしない。** class は呼び出し元 (応答 switch) が決める。ここで
+// status から再分類すると「成功とみなす範囲」が二重管理になる。
+func (p *DeliverProcessor) recordTelemetry(host string, class deliveryhealth.OutcomeClass, status int, started time.Time, errMsg string) {
+	if p.telemetry == nil || host == "" {
+		return
+	}
+	p.telemetry.RecordDelivery(host, deliveryhealth.Outcome{
+		Class:   class,
+		Status:  status,
+		Latency: time.Since(started),
+		Err:     errMsg,
+	})
+}
+
 // Handle dispatches a single deliver task. The driver runtime invokes
 // this for every dequeued task.
 func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
@@ -334,10 +369,15 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 	// (= 過去 5min 以内に Ed25519 4xx 失敗がない) ときに試す (#1067 / #1071)。
 	useEd25519 := payload.Ed25519PrivPEM != "" && !p.isEd25519Degraded(host)
 
+	// 配送レイテンシの起点 (#2461)。sendOnce の中で Ed25519->RSA の再送が起きた
+	// 場合も含めて「この job が相手にかけた時間」を測る。
+	started := time.Now()
+
 	resp, signedWithEd25519, err := p.sendOnce(payload, useEd25519)
 	if err != nil {
 		// network error / parse error は再投函。詳細は sendOnce 内で log 済。
 		p.recordError(payload.Inbox)
+		p.recordTelemetry(host, deliveryhealth.ClassTransport, 0, started, err.Error())
 		return err
 	}
 	// closure 内の resp は defer 実行時の現在値を見る (= retry 後の resp も
@@ -367,6 +407,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		retryResp, retrySignedWithEd25519, retryErr := p.sendOnce(payload, false)
 		if retryErr != nil {
 			p.recordError(payload.Inbox)
+			p.recordTelemetry(host, deliveryhealth.ClassTransport, 0, started, retryErr.Error())
 			return retryErr
 		}
 		resp = retryResp // defer は新 resp を Close する
@@ -377,6 +418,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 	switch {
 	case resp.StatusCode >= 200 && resp.StatusCode < 300:
 		p.recordSuccess(payload.Inbox)
+		p.recordTelemetry(host, deliveryhealth.ClassSuccess, resp.StatusCode, started, "")
 		if signedWithEd25519 {
 			// Ed25519 で送って同期的に拒否されなかったことを記録する (#2393)。
 			// 「相手が検証できた」までは言えない (verify-in-worker な実装は検証前に
@@ -391,6 +433,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		slog.Info("ap deliver: target gone",
 			"inbox", payload.Inbox, "status", resp.StatusCode)
 		p.recordSuccess(payload.Inbox)
+		p.recordTelemetry(host, deliveryhealth.ClassGone, resp.StatusCode, started, "")
 		// shared inbox が 410 Gone を返したらインスタンス全体が消滅したとみなし
 		// goneSuspended に切り替えて以後の配送を止める (upstream
 		// DeliverProcessorService の isSharedInbox && 410、#1811)。404 は個別 actor
@@ -407,6 +450,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		slog.Warn("ap deliver: rate limited (429), will retry",
 			"inbox", payload.Inbox)
 		p.recordSuccess(payload.Inbox)
+		p.recordTelemetry(host, deliveryhealth.ClassRateLimited, resp.StatusCode, started, "")
 		return fmt.Errorf("rate limited (429): %s", resp.Status)
 	case resp.StatusCode >= 400 && resp.StatusCode < 500:
 		// その他の4xxは受信側の不正リクエスト扱い。HTTP として応答が返って
@@ -414,12 +458,14 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		slog.Warn("ap deliver: client error",
 			"inbox", payload.Inbox, "status", resp.StatusCode)
 		p.recordSuccess(payload.Inbox)
+		p.recordTelemetry(host, deliveryhealth.ClassClientError, resp.StatusCode, started, resp.Status)
 		return fmt.Errorf("client error (%d): %w", resp.StatusCode, driver.SkipRetry)
 	default:
 		// 5xx は受信側の一時的な障害。リトライさせる + 不調状態としてマーク。
 		slog.Warn("ap deliver: server error",
 			"inbox", payload.Inbox, "status", resp.StatusCode)
 		p.recordError(payload.Inbox)
+		p.recordTelemetry(host, deliveryhealth.ClassServerError, resp.StatusCode, started, resp.Status)
 		return errors.New("server error: " + resp.Status)
 	}
 }

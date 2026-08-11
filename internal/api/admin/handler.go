@@ -172,6 +172,9 @@ type Handler struct {
 	// log type 分岐をテストするため、`adminDB` 直叩きから repository 経由
 	// に剥がしている。未配線時は `adminDB` フォールバックは持たず no-op。
 	instanceRepo repository.InstanceRepository
+	// deliveryHealth は admin/federation/delivery-health の集計元 (#2461)。
+	// 未配線なら空の結果を返す (機能が無効なだけで、エラーではない)。
+	deliveryHealth DeliveryHealthProvider
 	// userTokenInvalidator は admin が他 user を suspend / unsuspend /
 	// 論理削除した直後に target user の全 tokenCache entry を即時失効する
 	// ために使う (#965)。i/regenerate-token (#884) や i/update (#960) と
