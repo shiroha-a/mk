@@ -61,8 +61,15 @@ type Server struct {
 	queueRuntimeStats *runtimestats.Recorder
 	// startedAt は admin/server-metrics が返す uptime の起点 (#2395)。
 	startedAt time.Time
-	autoscale *autoscaleRunner
-	chartMgmt *chart.ManagementService
+	// role は「このプロセスが Web を担うか、ジョブキューを担うか」(#2459)。
+	// 既定 (RoleBoth) は env 未設定時の従来どおりの挙動。setupRoutes は
+	// role を見て背景処理を出し分けるので、New より前に決まっている必要がある。
+	role config.ProcessRole
+	// queueOnlyServer は RoleQueue のときだけ立てる /healthz 用の最小 server。
+	// Shutdown で閉じるために保持する。
+	queueOnlyServer *http.Server
+	autoscale       *autoscaleRunner
+	chartMgmt       *chart.ManagementService
 	// mediaProxySecret は internal media proxy URL の HMAC 鍵。config に
 	// 明示設定が無ければ DB (instance_secret) の生成値を使うため、New() で
 	// 一度だけ解決して保持する。
@@ -256,6 +263,17 @@ func applyServerTimeouts(srv *http.Server) {
 // fails to initialise (e.g. mkq driver failing to PING Redis at
 // startup).
 func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, error) {
+	// 役割は環境変数で決まる (#2459)。矛盾した指定はここで落として、
+	// 「起動はしたがジョブが処理されない」形の失敗にしない。
+	role, err := config.ResolveProcessRole()
+	if err != nil {
+		return nil, err
+	}
+	if role != config.RoleBoth {
+		slog.Info("process role selected", "role", string(role),
+			"runsServer", role.RunsServer(), "runsQueue", role.RunsQueue())
+	}
+
 	e := echo.New()
 	e.HideBanner = true
 	e.HidePort = true
@@ -376,6 +394,10 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 		// admin/server-metrics の uptime 起点 (#2395)。プロセス生成時刻なので
 		// Server 生成時に確定させる。
 		startedAt: time.Now(),
+
+		// role は New の入口で解決済み (#2459)。setupRoutes がこれを見て
+		// 背景処理を出し分ける。
+		role: role,
 	}
 
 	// driver の dispatch hook を Prometheus と runtimestats の両方へ配る。
@@ -523,22 +545,34 @@ func (s *Server) SetSyncDeliverHookForTest(fn func(payload queue.DeliverPayload)
 // of a TCP port. This matches Misskey 本家 YAML の `socket` / `chmodSocket`
 // 設定と同じ運用感覚で使える。
 func (s *Server) Start() error {
-	if err := s.queueServer.Start(); err != nil {
-		return fmt.Errorf("start queue worker: %w", err)
+	// queue 側 (worker / autoscale / scheduler) は RoleServer では起動しない。
+	// Web ノードもジョブを **enqueue** はするので queueClient は生かしたまま、
+	// 消費側だけ止める (#2459)。
+	if s.role.RunsQueue() {
+		if err := s.queueServer.Start(); err != nil {
+			return fmt.Errorf("start queue worker: %w", err)
+		}
+		// queueServer.Start 後にのみ controller を起動する (Start 前は driver.Resize
+		// が ErrResizeNotSupported を返す = no pool yet)。startAutoScale は
+		// jobQueueAutoScale=false なら nil runner を返す cheap no-op。
+		runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics, s.queueRuntimeStats)
+		if err != nil {
+			return fmt.Errorf("start autoscale: %w", err)
+		}
+		s.autoscale = runner
+		s.registerSchedulerJobs()
 	}
-	// queueServer.Start 後にのみ controller を起動する (Start 前は driver.Resize
-	// が ErrResizeNotSupported を返す = no pool yet)。startAutoScale は
-	// jobQueueAutoScale=false なら nil runner を返す cheap no-op。
-	runner, err := startAutoScale(context.Background(), s.config, s.queueDriver, s.queueMetrics, s.queueRuntimeStats)
-	if err != nil {
-		return fmt.Errorf("start autoscale: %w", err)
-	}
-	s.autoscale = runner
-	s.registerSchedulerJobs()
+	// chart は **両方の role で回す**。メモリ上の集計バッファはプロセスごとに
+	// 溜まり (API 経由の投稿は server、連合 inbox 由来は queue)、自分の分は
+	// 自分で flush しないと失われる。
 	if s.chartMgmt != nil {
 		if err := s.chartMgmt.Start(context.Background()); err != nil {
 			slog.Warn("chart management service start failed", "err", err)
 		}
+	}
+
+	if !s.role.RunsServer() {
+		return s.serveQueueOnly()
 	}
 
 	if s.config.Socket != "" {
@@ -578,10 +612,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	// 余計な変更が走らない状態で queueServer の pool を畳める)。Shutdown ctx を
 	// 伝播することで autoscale の goroutine drain にも graceful deadline が効く。
 	s.autoscale.Stop(ctx)
-	if s.queueScheduler != nil {
-		s.queueScheduler.Shutdown()
+	// RoleServer では scheduler も worker も起動していない。mkq driver は
+	// どちらの Shutdown も未起動で安全だが、asynq driver は inner にそのまま
+	// 委譲するので、起動していない前提を持ち込まない (#2459)。
+	if s.role.RunsQueue() {
+		if s.queueScheduler != nil {
+			s.queueScheduler.Shutdown()
+		}
+		s.queueServer.Shutdown()
 	}
-	s.queueServer.Shutdown()
 	// queueClient.Close を直接呼ばないこと。queueDriver.Close が
 	// Client / Inspector を含むサブコンポーネントの Close を一括処理
 	// するため、ここで呼ぶと asynq driver では同じ *asynq.Client を
@@ -593,7 +632,15 @@ func (s *Server) Shutdown(ctx context.Context) error {
 			slog.Warn("queue driver close failed", "err", err)
 		}
 	}
-	err := s.echo.Shutdown(ctx)
+	// RoleQueue では echo を listen していないので、代わりに最小 server を閉じる。
+	// echo.Shutdown 自体は listener 無しでも無害だが、閉じる対象を取り違えると
+	// in-flight な /healthz が切られないまま抜ける。
+	var err error
+	if s.queueOnlyServer != nil {
+		err = s.queueOnlyServer.Shutdown(ctx)
+	} else {
+		err = s.echo.Shutdown(ctx)
+	}
 	// UDS listen していた場合、Shutdown で net.Listener.Close() は呼ばれる
 	// が、ソケットファイル自体は残るので明示的に unlink しておく。
 	if rmErr := config.RemoveUnixSocket(s.config.Socket); rmErr != nil {

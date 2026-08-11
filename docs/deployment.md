@@ -173,6 +173,55 @@ make migrate-up
 
 設定ファイルの詳細は[設定リファレンス](configuration.md)を参照。
 
+## Web と配送を別ノードに分ける
+
+既定では 1 プロセスが HTTP とジョブキューの両方を担う。連合配送のバースト負荷を
+ユーザー向けレイテンシから切り離したい場合や、配送だけ独立にスケールさせたい場合は、
+**環境変数で役割を分けられる** (upstream Misskey と同じ `MK_ONLY_SERVER` /
+`MK_ONLY_QUEUE`)。
+
+```bash
+# Web ノード: HTTP を提供し、ジョブは積むだけで処理しない
+MK_ONLY_SERVER=1 ./built/misskey -config .config/default.yml
+
+# 配送ノード: ジョブを処理する。API は生えない
+MK_ONLY_QUEUE=1 ./built/misskey -config .config/default.yml
+```
+
+**設定ファイルは両ノードで同じものを使う。** 同じ DB・同じ Redis を向けていることが
+前提で、特に `redisForJobQueue` がずれていると Web が積んだジョブを配送ノードが永久に
+拾わない。
+
+`redisForPubsub` などの `redisFor*` は**役割の指定ではない**。あれは用途ごとの Redis
+接続先で、Web ノードも `redisForJobQueue` を読んで enqueue する。
+
+### 各ノードが担うもの
+
+| 処理 | Web (`MK_ONLY_SERVER`) | 配送 (`MK_ONLY_QUEUE`) |
+|---|---|---|
+| HTTP API / フロントエンド / WebSocket | ○ | — |
+| ジョブの enqueue | ○ | ○ |
+| ジョブの処理 (deliver / inbox 等) | — | ○ |
+| cron (chart 集計 / 期限切れ prune 等) | — | ○ |
+| worker の auto-scale | — | ○ |
+| `serverStats` / `queueStats` の配信 | ○ | — |
+| chart のメモリバッファ flush | ○ | ○ |
+
+配送ノードは `/healthz` だけ応答する (`enableMetrics` が真なら `/metrics` も)。
+これにより `./built/misskey -healthcheck` と Dockerfile の healthcheck が
+**どちらのノードでもそのまま使える**。
+
+なお `-healthcheck` は `127.0.0.1:<port>` を叩くので、`socket` で UDS 運用している
+場合は role に関係なく使えない (従来からの制限)。
+
+### 注意
+
+- **両方を同時に指定するとエラーで起動しない。** 矛盾した設定を黙って片方優先で
+  流すと「配送が動かない」形で後から気付くことになるため
+- 管理画面の `serverStats` は **Web ノードのホスト**の値しか出ない。配送ノードの
+  CPU / メモリは別途 Prometheus (`enableMetrics`) 等で見る
+- 配送ノードを 0 台にすると**ジョブが処理されない**。最低 1 台は必要
+
 ## systemdユニット例
 
 ```ini

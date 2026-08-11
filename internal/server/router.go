@@ -949,14 +949,20 @@ func (s *Server) setupRoutes() {
 	// する。30s ticker は upstream の日次 cron より高頻度で反映遅延を抑える
 	// mk-go の運用。writer 型は起動時固定なので、実行時 OFF にしても ticker が
 	// buffered writer を drain し続け滞留しない (#1780)。
-	if bufMeta, err := metaRepo.Fetch(); err == nil && bufMeta.EnableReactionsBuffering {
-		go func() {
-			ticker := time.NewTicker(30 * time.Second)
-			defer ticker.Stop()
-			for range ticker.C {
-				_ = s.queueClient.EnqueueReactionFlush()
-			}
-		}()
+	//
+	// **queue role でだけ回す** (#2459)。`EnqueueReactionFlush` の
+	// `WithUnique` TTL は 25s で ticker 間隔 30s より短いため、複数ノードが
+	// 別タイミングで打つと重複排除をすり抜けて二重に積まれる。
+	if s.role.RunsQueue() {
+		if bufMeta, err := metaRepo.Fetch(); err == nil && bufMeta.EnableReactionsBuffering {
+			go func() {
+				ticker := time.NewTicker(30 * time.Second)
+				defer ticker.Stop()
+				for range ticker.C {
+					_ = s.queueClient.EnqueueReactionFlush()
+				}
+			}()
+		}
 	}
 
 	// Charts (Phase 4 Step Q / 4.7) — 12 chart engines + management
@@ -1081,11 +1087,17 @@ func (s *Server) setupRoutes() {
 	// dateKey で 2 回目を Insert しても repository.ErrDuplicateKey で
 	// silently 吸収されるので idempotent。DB 書き込みを startup hot path に
 	// 乗せないよう goroutine で実行する。
-	go func() {
-		if err := retentionSvc.Aggregate(context.Background()); err != nil {
-			slog.Warn("retention aggregate at startup failed", "err", err)
-		}
-	}()
+	//
+	// cron の担当と揃えて **queue role でだけ**発火する (#2459)。idempotent
+	// なので複数ノードで走っても壊れないが、Web ノードを増やすたびに起動時の
+	// DB 書き込みが増えるのは無駄。
+	if s.role.RunsQueue() {
+		go func() {
+			if err := retentionSvc.Aggregate(context.Background()); err != nil {
+				slog.Warn("retention aggregate at startup failed", "err", err)
+			}
+		}()
+	}
 
 	// Health check
 	s.echo.GET("/healthz", func(c echo.Context) error {
@@ -2552,14 +2564,19 @@ func (s *Server) setupRoutes() {
 	// policy provider を配線する (#1942)。REST timeline と同じく WS でも policy で
 	// 無効化された timeline を subscribe させない (policy bypass 解消)。
 	streamManager.SetPolicyProvider(roleService)
-	// hardMutedWords 変更時に reload event を受け取って該当 connection の
-	// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
-	// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
-	streamManager.SubscribeWordMuteReload()
-	// follow / mute / block 変更を受け取って接続中の snapshot を取り直す (#2400)。
-	streamManager.SubscribeRelationReload()
-	// broadcast stream (emojiAdded/Updated/Deleted 等) を全 connection へ forward (#2046)。
-	streamManager.SubscribeBroadcast()
+	// 以下 3 つの subscriber は **WebSocket 接続を持つ role でだけ**起動する
+	// (#2459)。queue role には connection が無いので、購読しても受け取った
+	// event を捨てるだけで Redis pubsub の帯域を食う。
+	if s.role.RunsServer() {
+		// hardMutedWords 変更時に reload event を受け取って該当 connection の
+		// rules を refresh する subscriber を起動 (#791)。i/update 側 publisher
+		// と同じ topic 名を共有 (= stream.WordMuteReloadTopic)。
+		streamManager.SubscribeWordMuteReload()
+		// follow / mute / block 変更を受け取って接続中の snapshot を取り直す (#2400)。
+		streamManager.SubscribeRelationReload()
+		// broadcast stream (emojiAdded/Updated/Deleted 等) を全 connection へ forward (#2046)。
+		streamManager.SubscribeBroadcast()
+	}
 	iHandler.SetHardMutePublisher(&hardMutePublisherAdapter{pubsub: streamPubSub})
 	// relation 変更 (#2400) の publisher を各 mutation 側へ配線する。7 系統すべてを
 	// 繋がないと「一部の操作だけ反映されない」形の抜けになるので、まとめて置く。
@@ -2620,14 +2637,24 @@ func (s *Server) setupRoutes() {
 	// ShutdownでStop()を呼ぶ (server.go 側でdefer)。
 	// publisher が ring buffer を持つので、channel factory に StatsLogProvider
 	// として渡して requestLog 応答に historical 値を返せるようにする (#571 item 2)。
+	//
+	// **publish は server role でだけ回す** (#2459)。どちらも同じ pubsub
+	// トピックへ投げるので、2 ノードが並行して publish すると購読側は
+	// **別マシンの値を交互に受け取り**、管理画面のグラフが振動する。
+	// factory の登録は role に関係なく行う (WebSocket が生えるのは server
+	// role だけなので、queue role では誰も subscribe しない)。
 	serverStatsPub := stream.NewServerStatsPublisher(streamPubSub, 0)
-	serverStatsPub.Start()
-	s.registerShutdownHook(func(_ context.Context) { serverStatsPub.Stop() })
+	if s.role.RunsServer() {
+		serverStatsPub.Start()
+		s.registerShutdownHook(func(_ context.Context) { serverStatsPub.Stop() })
+	}
 	streamRegistry.Register("serverStats", channels.NewServerStatsFactory(serverStatsPub))
 	if s.queueInspector != nil {
 		queueStatsPub := stream.NewQueueStatsPublisher(&queueStatsInspectorAdapter{inner: s.queueInspector}, streamPubSub, 0)
-		queueStatsPub.Start()
-		s.registerShutdownHook(func(_ context.Context) { queueStatsPub.Stop() })
+		if s.role.RunsServer() {
+			queueStatsPub.Start()
+			s.registerShutdownHook(func(_ context.Context) { queueStatsPub.Stop() })
+		}
 		streamRegistry.Register("queueStats", channels.NewQueueStatsFactory(queueStatsPub))
 	} else {
 		// queueInspector が無い起動 (テスト等) では fallback factory で空配列のみ返す
