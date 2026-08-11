@@ -313,6 +313,20 @@ func resolveQueueConcurrency(queues []string, override map[string]int) map[strin
 	return out
 }
 
+// ResolveQueueConcurrency exposes the effective per-queue worker counts for
+// diagnostics (#2469).
+//
+// **算出は resolveQueueConcurrency をそのまま使う。** 実効値を出すために別実装を
+// 起こすと、表示と実際が食い違ったときにどちらが正しいか分からなくなる。
+func ResolveQueueConcurrency(queues []string, override map[string]int) map[string]int {
+	return resolveQueueConcurrency(queues, override)
+}
+
+// WorkerPoolSize exposes the auto-sized Redis pool for diagnostics (#2469).
+func WorkerPoolSize(queues []string, override map[string]int) int {
+	return workerPoolSize(queues, override)
+}
+
 // Server returns the lazily-constructed driver.Server.
 //
 // Per-queue worker pool sizes come from defaultQueueConcurrency (hot-tuned

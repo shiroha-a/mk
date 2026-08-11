@@ -29,10 +29,17 @@ func main() {
 	dumpRoutes := flag.Bool("dump-routes", false, "construct the server, dump registered HTTP routes as JSON, and exit (no listener started)")
 	dumpRoutesOut := flag.String("dump-routes-out", "", "path to write -dump-routes JSON to; defaults to stdout. recommended to use a file so gorm/slog noise on stdout/stderr doesn't pollute the JSON consumer")
 	doctorMode := flag.Bool("doctor", false, "run configuration / dependency / federation self-checks and exit 0 (ok) or 1 (failures found)")
+	configDump := flag.Bool("config-dump", false, "print the resolved configuration and the values that actually take effect, then exit (secrets are masked)")
 	flag.Parse()
 
 	if *healthcheckMode {
 		os.Exit(runHealthcheck(*configPath))
+	}
+
+	// config-dump もサーバーを起動しない。設定を読むだけなので DB / Redis が
+	// 無くても動く (#2469)。
+	if *configDump {
+		os.Exit(runConfigDump(*configPath))
 	}
 
 	// doctor はサーバーを起動しない。新規構築時に「まだ動かない状態」で

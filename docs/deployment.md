@@ -173,6 +173,37 @@ make migrate-up
 
 設定ファイルの詳細は[設定リファレンス](configuration.md)を参照。
 
+## 設定の実効値を確認する
+
+```bash
+./built/misskey -config .config/default.yml -config-dump
+```
+
+**サーバーを起動しない**ので、DB / Redis に繋がらない状態でも使える。
+
+出力は「設定値」(YAML + 環境変数 + 既定値を畳んだ結果) と「実効値」(設定値そのもの
+ではないが実際に効く値) の 2 部構成。**後者が要点**で、設定ファイルを読んだだけでは
+分からないものを出す。
+
+```
+実効値
+  process role            both   (1 プロセスで HTTP とジョブの両方を担う)
+  worker: deliver         4   (明示指定)
+  worker: inbox           16   (既定値)
+  rate: deliver           400 jobs/sec   (設定値 100 × worker 4。rate limit は worker ごとに効く)
+  redis pool (job queue)  80   (poolSize 未指定時の自動サイジング結果)
+
+注意
+  - deliverJobPerSec は設定値 100 だが、worker が 4 なので実際の上限は 400 jobs/sec になる
+```
+
+`*JobPerSec` が worker 数で倍化する件は
+[設定リファレンス](configuration.md)にも記載しているが、**自分のインスタンスで実際に
+いくつになっているか**はここでしか分からない。
+
+パスワード・鍵・proxy の認証情報はマスクされる。設定の有無だけは分かるようにしてある
+(未設定と設定済みの区別は診断に要るため)。
+
 ## セルフ診断 (doctor)
 
 構成の詰まりを一括で検査する。**サーバーが起動していなくても回せる**ので、新規構築時に
