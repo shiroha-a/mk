@@ -1,0 +1,73 @@
+package plugin
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+)
+
+// Router registers a plugin's HTTP endpoints.
+//
+// パスは `/api/plugin/<プラグイン名>/` の下に配置される。Misskey 本体の
+// エンドポイント空間とは**必ず分離する**: 将来 upstream が同名のエンドポイントを
+// 追加したときに衝突すると、API 互換 (本プロジェクトの最優先方針) が壊れる。
+type Router interface {
+	// GET registers a handler. path is relative to the plugin's namespace and
+	// must start with "/".
+	GET(path string, h Handler)
+
+	// POST registers a handler. Misskey 本体の API は POST が基本なので、
+	// プラグインもそれに倣うと利用側 (misskey-js 等) から扱いやすい。
+	POST(path string, h Handler)
+}
+
+// Handler serves one plugin request. A nil result with a nil error yields
+// 204 No Content; otherwise the result is JSON-encoded with 200.
+type Handler func(Request) (any, error)
+
+// Request is the plugin-facing view of an HTTP request.
+//
+// **echo.Context をそのまま渡さない。** Echo は mk-go 内部の選択であり、
+// 差し替えたときにプラグインが全滅する。ここで必要最小限だけを写す。
+type Request interface {
+	// Context returns the request context, already carrying cancellation.
+	Context() context.Context
+
+	// Bind decodes the JSON request body into v.
+	Bind(v any) error
+
+	// Param returns a path parameter (e.g. ":id").
+	Param(name string) string
+
+	// Query returns a query-string value.
+	Query(name string) string
+
+	// UserID returns the authenticated user's ID, or "" when the request was
+	// not authenticated.
+	//
+	// ID だけを渡す。model.User を公開すると内部のモデルが契約になってしまう
+	// ので、それ以上が要るなら [API] で取得する (可視性判定も自動で効く)。
+	UserID() string
+}
+
+// StatusError lets a handler choose the HTTP status of an error response.
+// Plain errors become 500 with a generic message.
+type StatusError struct {
+	Status  int
+	Message string
+}
+
+// Error implements error.
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%d: %s", e.Status, e.Message)
+}
+
+// Errorf builds a StatusError.
+func Errorf(status int, format string, args ...any) *StatusError {
+	return &StatusError{Status: status, Message: fmt.Sprintf(format, args...)}
+}
+
+// ErrNotFound is a convenience for the most common plugin error.
+func ErrNotFound(format string, args ...any) *StatusError {
+	return Errorf(http.StatusNotFound, format, args...)
+}

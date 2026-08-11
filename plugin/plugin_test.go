@@ -1,0 +1,169 @@
+package plugin
+
+import (
+	"errors"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// resetRegistry clears the global registry between tests.
+func resetRegistry(t *testing.T) {
+	t.Helper()
+	registryMu.Lock()
+	registry = map[string]Definition{}
+	registryMu.Unlock()
+	t.Cleanup(func() {
+		registryMu.Lock()
+		registry = map[string]Definition{}
+		registryMu.Unlock()
+	})
+}
+
+// validDef builds a definition that passes Validate.
+func validDef(name string) Definition {
+	return Definition{
+		Name:       name,
+		Version:    "1.0.0",
+		APIVersion: APIVersion,
+		Routes:     func(Context, Router) error { return nil },
+	}
+}
+
+func TestDefinition_Validate_Accepts(t *testing.T) {
+	require.NoError(t, validDef("gameinfo").Validate())
+
+	// Jobs だけでもよい (queue 専用のプラグイン)。
+	jobsOnly := Definition{Name: "x", APIVersion: APIVersion, Jobs: func(Context, Jobs) error { return nil }}
+	require.NoError(t, jobsOnly.Validate())
+}
+
+func TestDefinition_Validate_Rejects(t *testing.T) {
+	tests := []struct {
+		name string
+		def  Definition
+		want string
+	}{
+		{
+			name: "empty name",
+			def:  Definition{APIVersion: APIVersion, Routes: func(Context, Router) error { return nil }},
+			want: "Name が空",
+		},
+		{
+			name: "no callbacks",
+			def:  Definition{Name: "x", APIVersion: APIVersion},
+			want: "Routes も Jobs も",
+		},
+		{
+			name: "api version mismatch",
+			def: Definition{
+				Name: "x", APIVersion: APIVersion + 1,
+				Routes: func(Context, Router) error { return nil },
+			},
+			want: "互換がありません",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.def.Validate()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+// **APIVersion が 0 のものを通さない。** 未設定の構造体をそのまま登録すると
+// 互換性の宣言が無いまま動いてしまう。
+func TestDefinition_Validate_RejectsZeroAPIVersion(t *testing.T) {
+	def := Definition{Name: "x", Routes: func(Context, Router) error { return nil }}
+	require.Error(t, def.Validate())
+}
+
+// 名前は URL path / queue task type / PostgreSQL schema の 3 箇所で使う。
+// どれか 1 つでも通らない文字を最初から弾く。
+func TestValidName(t *testing.T) {
+	ok := []string{"a", "ab", "game-info", "x1", "a-b-c", strings.Repeat("a", 32)}
+	for _, s := range ok {
+		assert.Truef(t, validName(s), "%q は許可される", s)
+	}
+
+	ng := map[string]string{
+		"":                      "空",
+		"A":                     "大文字",
+		"game_info":             "アンダースコア",
+		"-lead":                 "先頭ハイフン",
+		"trail-":                "末尾ハイフン",
+		"ドライブ":                  "非 ASCII",
+		"a/b":                   "スラッシュ (path を割る)",
+		"a.b":                   "ドット (schema 修飾に見える)",
+		strings.Repeat("a", 33): "長すぎる",
+	}
+	for s, why := range ng {
+		assert.Falsef(t, validName(s), "%q は拒否される (%s)", s, why)
+	}
+}
+
+func TestRegister_And_Registered(t *testing.T) {
+	resetRegistry(t)
+
+	Register(validDef("beta"))
+	Register(validDef("alpha"))
+
+	got := Registered()
+	require.Len(t, got, 2)
+	// 順序が固定されること (ルート登録順やログの並びをビルドごとに変えない)。
+	assert.Equal(t, "alpha", got[0].Name)
+	assert.Equal(t, "beta", got[1].Name)
+}
+
+func TestRegistered_EmptyByDefault(t *testing.T) {
+	resetRegistry(t)
+	assert.Empty(t, Registered())
+}
+
+// 生成コードの不具合なので、起動を許さず panic する。どちらが有効か分からない
+// まま動く方が危険。
+func TestRegister_PanicsOnDuplicate(t *testing.T) {
+	resetRegistry(t)
+
+	Register(validDef("dup"))
+	assert.PanicsWithError(t, `plugin: "dup" が二重に登録されました`, func() {
+		Register(validDef("dup"))
+	})
+}
+
+func TestRegister_PanicsOnInvalid(t *testing.T) {
+	resetRegistry(t)
+	assert.Panics(t, func() { Register(Definition{}) })
+}
+
+func TestStatusError(t *testing.T) {
+	err := Errorf(http.StatusBadRequest, "%s が不正です", "id")
+	assert.Equal(t, http.StatusBadRequest, err.Status)
+	assert.Equal(t, "id が不正です", err.Message)
+	assert.Equal(t, "400: id が不正です", err.Error())
+
+	// error として扱えること (errors.As で status を取り出す用途)。
+	var se *StatusError
+	require.True(t, errors.As(error(err), &se))
+	assert.Equal(t, http.StatusBadRequest, se.Status)
+}
+
+func TestErrNotFound(t *testing.T) {
+	err := ErrNotFound("note %s", "abc")
+	assert.Equal(t, http.StatusNotFound, err.Status)
+	assert.Equal(t, "note abc", err.Message)
+}
+
+func TestAPIError(t *testing.T) {
+	err := &APIError{Endpoint: "notes/show", Status: 404, Body: []byte(`{"error":{"code":"NO_SUCH_NOTE"}}`)}
+	msg := err.Error()
+	assert.Contains(t, msg, "notes/show")
+	assert.Contains(t, msg, "404")
+	// **本文をそのまま含める。** Misskey のエラーコードが読めないと、
+	// プラグイン側で原因の切り分けができない。
+	assert.Contains(t, msg, "NO_SUCH_NOTE")
+}
