@@ -30,10 +30,17 @@ func main() {
 	dumpRoutesOut := flag.String("dump-routes-out", "", "path to write -dump-routes JSON to; defaults to stdout. recommended to use a file so gorm/slog noise on stdout/stderr doesn't pollute the JSON consumer")
 	doctorMode := flag.Bool("doctor", false, "run configuration / dependency / federation self-checks and exit 0 (ok) or 1 (failures found)")
 	configDump := flag.Bool("config-dump", false, "print the resolved configuration and the values that actually take effect, then exit (secrets are masked)")
+	fsckMode := flag.Bool("fsck", false, "check denormalized counters against the rows they summarise and exit 0 (clean) or 1 (drift found); read-only unless -fix")
+	fsckFix := flag.Bool("fix", false, "with -fsck: write the recomputed counters back. Orphan rows are never deleted")
 	flag.Parse()
 
 	if *healthcheckMode {
 		os.Exit(runHealthcheck(*configPath))
+	}
+
+	// fsck もサーバーを起動しない。DB だけを見る (#2473)。
+	if *fsckMode {
+		os.Exit(runFsck(*configPath, *fsckFix))
 	}
 
 	// config-dump もサーバーを起動しない。設定を読むだけなので DB / Redis が

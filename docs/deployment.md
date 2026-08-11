@@ -173,6 +173,52 @@ make migrate-up
 
 設定ファイルの詳細は[設定リファレンス](configuration.md)を参照。
 
+## データ整合性チェック (fsck)
+
+非正規化カウンタが実データとずれていないかを検査する。
+
+```bash
+./built/misskey -config .config/default.yml -fsck        # 検査のみ (既定)
+./built/misskey -config .config/default.yml -fsck -fix   # カウンタを直す
+```
+
+```
+  カウンタのずれ: 2 件
+    user.followersCount      1 件
+    user.notesCount          1 件
+
+    user.followersCount  id=u1  記録 7 → 実際 0
+    user.notesCount  id=u1  記録 99 → 実際 2
+
+  修正するには -fix を付けて再実行してください。
+```
+
+**既定は読み取り専用**で、`-fix` を付けたときだけ書き戻す。ずれがあれば exit 1 を返す
+(`-fix` で直せば 0)。
+
+### 検査するもの
+
+| 対象 | 突き合わせ先 |
+|---|---|
+| `user.followersCount` / `followingCount` | `following` の実件数 |
+| `user.notesCount` | `note` の実件数 |
+| `note.repliesCount` / `renoteCount` | `note.replyId` / `renoteId` の実件数 |
+| 孤児行 | 存在しない user を参照する `note` / `drive_file` / `following` |
+
+これらのカウンタは増減で維持されており、増減はベストエフォート (戻り値を捨てる呼び出しが
+ある) なので失敗すればそのままずれる。
+
+### 孤児行は自動削除しない
+
+**報告に留める。** カウンタは元データから導けるので `-fix` で直せるが、**削除した行は
+復元できない**。影響を確認した上で手動で対応する。
+
+### 検査しないもの
+
+`clippedCount` / `pageCount` は**意図的に対象外**。mk-go はクリップ件数の非正規化カウンタを
+維持せず `clip_note` を直接数える設計なので、常に 0 が正しい値になる
+([divergence.md](divergence.md) 参照)。実件数と突き合わせると全件がずれとして報告される。
+
 ## 設定の実効値を確認する
 
 ```bash
