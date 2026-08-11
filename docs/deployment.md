@@ -173,6 +173,47 @@ make migrate-up
 
 設定ファイルの詳細は[設定リファレンス](configuration.md)を参照。
 
+## セルフ診断 (doctor)
+
+構成の詰まりを一括で検査する。**サーバーが起動していなくても回せる**ので、新規構築時に
+まず走らせると早い。
+
+```bash
+./built/misskey -config .config/default.yml -doctor
+```
+
+```
+  ok    config.url   https://example.com
+  ok    database     接続 ok / migration version 74
+  ok    redis        接続 ok
+  FAIL  webfinger    status 403 (連合が無効)
+        インスタンス設定の `federation` が `none` になっている。連合するなら管理画面で有効にする
+  ok    nodeinfo     mk-go 1.1.2
+  warn  actor        assertionMethod (Ed25519) が無い
+        RSA だけでも連合できる。Ed25519 を公開すると対応実装との署名検証が軽くなる
+  ok    tls          証明書の残り 68 日
+```
+
+FAIL があれば exit 1 を返すので、デプロイスクリプトの検証段に組み込める。
+warn は「見ておくべき」であって「壊れている」ではないため exit code には影響しない。
+
+### 何を見ているか
+
+| 検査 | 内容 |
+|---|---|
+| `config.url` | 絶対 URL か、https か |
+| `database` | 接続と、`schema_migrations` が同梱マイグレーションに追いついているか |
+| `redis` | 接続 |
+| `webfinger` | **公開 URL 経由**で `acct:instance.actor@<host>` が引けるか |
+| `nodeinfo` | discovery から本体まで辿れるか |
+| `actor` | `application/activity+json` で返るか、`publicKey` / `assertionMethod` が載っているか、`id` の host が `url` と一致するか |
+| `tls` | 証明書の残り日数 |
+
+**要点は「内部から叩かない」こと。** リバースプロキシの転送漏れは内部からは正常に
+見えるので、必ず `url` の外形 URL 経由で確かめる。
+
+管理画面からは `admin/self-check` で同じ検査を実行できる (moderator 以上)。
+
 ## Web と配送を別ノードに分ける
 
 既定では 1 プロセスが HTTP とジョブキューの両方を担う。連合配送のバースト負荷を

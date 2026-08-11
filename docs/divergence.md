@@ -62,6 +62,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 
 | endpoint | field | 内容 |
 |---|---|---|
+| `admin/self-check` | endpoint 全体 | 公開 URL 経由で WebFinger / nodeinfo / actor を引き、DB / Redis / migration / TLS 期限とあわせて検査する mk-go 独自 endpoint (#2463)。upstream に対応物は無い。`misskey -doctor` と同じ検査を実行する。**検査の宛先は config の `url` に固定**され、リクエストから指定できない (自ホストは loopback / private IP に解決されうるため検査用 client は SSRF ガードを通さない。宛先を外から与えられる口を作らないことがその安全性の前提)。scope は `admin/server-metrics` と同じ理由で `read:admin:server-info` を再利用する |
 | `admin/federation/delivery-health` | endpoint 全体 | 配送先ホストごとの成功/失敗の内訳・レイテンシ分布 (p50 / p95 の近似)・直近エラーを返す mk-go 独自 endpoint (#2461)。upstream は配送結果を `instance.isNotResponding` の真偽値にしか残さないため対応物が無い。deliver processor が既に撃ち分けている 6 分類 (success / gone / rateLimited / clientError / serverError / transport) をそのまま集計する。**観測のみで配送を止める判断は含まない**。scope は `read:admin:server-info` を再利用する (`internal/misc/permissions` は upstream misskey-js と完全一致させる契約で mk-go 固有 scope を足せないため、同じく独自 endpoint の `admin/server-metrics` に倣う) |
 | `admin/queue/queues` / `admin/queue/queue-stats` | `runtime` | worker 現在数 / auto-scale 範囲・有効性 / dispatch wait・processing の分位数 / 直近失敗数 / scale 履歴。upstream は worker 数を静的 config でしか持たず該当情報が無い。provider 未配線・未知 queue では block ごと省く (#2277) |
 | `/api/meta` (+ SSR 埋め込み meta) | `mkGoVersion` | mk-go の実装バージョン。`version` は drop-in 互換のため**互換 Misskey バージョン**を返す契約 (第三者クライアントの feature detection / frontend `_error_.vue` の版ずれ検出が依存) なので別 field にした (#2274) |

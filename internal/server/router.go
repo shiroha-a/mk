@@ -107,6 +107,7 @@ import (
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	corerole "github.com/shiroha-a/mk/internal/core/role"
 	coresearch "github.com/shiroha-a/mk/internal/core/search"
+	"github.com/shiroha-a/mk/internal/core/selfcheck"
 	"github.com/shiroha-a/mk/internal/core/serverstats"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	coresystemaccount "github.com/shiroha-a/mk/internal/core/systemaccount"
@@ -2926,6 +2927,13 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetUserTokenInvalidator(s.auth)
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
+	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
+	// (server 側は既に migrate 済みで動いている前提。適用漏れの検出は
+	// `misskey -doctor` の担当で、あちらは同梱ファイルを数えられる)。
+	adminHandler.SetSelfCheckRunner(&selfCheckAdapter{
+		checker: selfcheck.NewChecker(s.config.URL),
+		deps:    selfcheck.LocalDeps{DB: s.db, Redis: s.redis.Default},
+	})
 	// admin/federation/update-instance の suspend / unsuspend を deliver hot path
 	// の suspend 判定 cache へ TTL を待たず即時反映する (#1407 review)。
 	adminHandler.SetInstanceSuspendCacheInvalidator(instanceService)
@@ -3099,6 +3107,8 @@ func (s *Server) setupRoutes() {
 	// scope を足せない。`admin/federation/*` に read 系の scope が無いため、
 	// 同じく mk-go 独自の read endpoint である admin/server-metrics に倣って
 	// read:admin:server-info を要求する。
+	// mk-go 独自 (#2463)。scope は delivery-health と同じ理由で既存を再利用する。
+	api.POST("/admin/self-check", adminHandler.SelfCheck, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
 	api.POST("/admin/federation/delivery-health", adminHandler.FederationDeliveryHealth, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
 	api.POST("/admin/invite/create", adminHandler.InviteCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:invite-codes"))
 	api.POST("/admin/invite/list", adminHandler.InviteList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:invite-codes"))
@@ -3720,6 +3730,21 @@ func (s *Server) setupRoutes() {
 	}
 
 	s.echo.GET("/*", frontend)
+}
+
+// selfCheckAdapter runs the federation / dependency self-checks for the
+// admin endpoint (#2463).
+//
+// **検査の宛先は config の `url` に固定する。** 自ホストは loopback / private IP
+// に解決されうるので検査用 client は SSRF ガードを通さない。宛先を外から
+// 与えられる口を作らないことが、その安全性の前提になっている。
+type selfCheckAdapter struct {
+	checker *selfcheck.Checker
+	deps    selfcheck.LocalDeps
+}
+
+func (a *selfCheckAdapter) RunSelfCheck(ctx context.Context) selfcheck.Report {
+	return selfcheck.Run(ctx, a.checker, a.deps)
 }
 
 // notifReaderAdapter bridges stream.NotificationReader to

@@ -28,10 +28,17 @@ func main() {
 	healthcheckMode := flag.Bool("healthcheck", false, "perform a healthcheck (GET /healthz against the configured port) and exit 0/1")
 	dumpRoutes := flag.Bool("dump-routes", false, "construct the server, dump registered HTTP routes as JSON, and exit (no listener started)")
 	dumpRoutesOut := flag.String("dump-routes-out", "", "path to write -dump-routes JSON to; defaults to stdout. recommended to use a file so gorm/slog noise on stdout/stderr doesn't pollute the JSON consumer")
+	doctorMode := flag.Bool("doctor", false, "run configuration / dependency / federation self-checks and exit 0 (ok) or 1 (failures found)")
 	flag.Parse()
 
 	if *healthcheckMode {
 		os.Exit(runHealthcheck(*configPath))
+	}
+
+	// doctor はサーバーを起動しない。新規構築時に「まだ動かない状態」で
+	// 詰まりを潰せることが要点なので、DB / Redis / 連合の検査だけを回す (#2463)。
+	if *doctorMode {
+		os.Exit(runDoctor(*configPath))
 	}
 
 	// ロガーの初期化
