@@ -10,8 +10,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	"github.com/shiroha-a/mk/internal/core/federation"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -142,6 +144,9 @@ type InboxProcessor struct {
 	instanceTracker InstanceTracker
 	chartHook       InboxChartHook
 	capabilities    SignatureCapabilityRecorder
+	// telemetry は受信結果をホストごとに記録する (#2471)。未配線なら記録
+	// しないだけで、inbox 処理そのものには影響しない。
+	telemetry DeliveryTelemetry
 	// keyCache は受信 HTTP Signature verify の公開鍵パースをメモ化する (#1426)。
 	// InboxProcessor は worker 間共有の単一インスタンス (router.go:616) なので、
 	// 同一 remote actor からの連続 activity で x509 パースを 1 回に集約できる
@@ -189,6 +194,12 @@ func (p *InboxProcessor) SetChartHook(h InboxChartHook) {
 	p.chartHook = h
 }
 
+// SetDeliveryTelemetry wires the per-host inbox outcome recorder (#2471)。
+// 未配線なら記録しないだけで、受信処理には影響しない。
+func (p *InboxProcessor) SetDeliveryTelemetry(t DeliveryTelemetry) {
+	p.telemetry = t
+}
+
 // SetSignatureCapabilityRecorder wires the recorder that tracks which
 // signature scheme each remote host uses (#2393).
 func (p *InboxProcessor) SetSignatureCapabilityRecorder(r SignatureCapabilityRecorder) {
@@ -204,6 +215,43 @@ func (p *InboxProcessor) SetSignatureCapabilityRecorder(r SignatureCapabilityRec
 // federation.ErrUnsupportedActivity は handler 不在 (= 受け付けたが何も
 // しない) 扱いで成功扱い。それ以外の処理エラーは driver の retry policy
 // (inboxJobMaxAttempts) に任せる。
+// hostFromSignatureKeyID extracts the sender host from a Signature header's
+// keyId, for telemetry attribution only.
+//
+// **認可に使ってはいけない。** 署名検証を通る前の値なので、送信者が自由に
+// 名乗れる。ここで使うのは「どの host からの受信を数えるか」の宛先だけで、
+// 誤っていても集計が汚れるに留まる (#2471)。
+func hostFromSignatureKeyID(sig string) string {
+	if sig == "" {
+		return ""
+	}
+	parsed, err := activitypub.ParseSignatureHeader(sig)
+	if err != nil {
+		return ""
+	}
+	u, err := url.Parse(parsed.KeyID)
+	if err != nil {
+		return ""
+	}
+	return u.Host
+}
+
+// recordInboxTelemetry forwards one inbox outcome to the health recorder
+// (#2471).
+//
+// **判定はしない。** class は呼び出し元 (Handle の各分岐) が決める。ここで
+// 再分類すると「受理とみなす範囲」が二重管理になる。
+func (p *InboxProcessor) recordInboxTelemetry(host string, class deliveryhealth.OutcomeClass, started time.Time, errMsg string) {
+	if p.telemetry == nil || host == "" {
+		return
+	}
+	p.telemetry.RecordDelivery(host, deliveryhealth.Outcome{
+		Class:   class,
+		Latency: time.Since(started),
+		Err:     errMsg,
+	})
+}
+
 func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 	payload, err := queue.DecodeInboxPayload(t.Payload())
 	if err != nil {
@@ -215,6 +263,20 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 	// (= legacy / direct enqueue) 経路では verify をスキップする (handler
 	// 側で既に検証済みという旧 contract)。
 	host := payload.Host
+	if host == "" {
+		// **本番の inbox handler は payload.Host を設定していない。**
+		// リクエストの Host header は「こちらのホスト名」なので送信元を表さず、
+		// 埋めようが無いため空のまま流れてくる (既存の
+		// `slog.Warn(..., "host", payload.Host)` も空文字を出している)。
+		//
+		// テレメトリは送信元ごとに集計するので、署名の keyId から導く (#2471)。
+		// **認可には使わない** — 署名検証を通る前の値なので信用できない。
+		// 集計の宛先を決めるためだけに使う。
+		host = hostFromSignatureKeyID(payload.Headers["Signature"])
+	}
+	// 受信結果の記録起点 (#2471)。host は署名者が解決できたら実 host に
+	// 差し替わるので、記録は各分岐で行う。
+	started := time.Now()
 	// 署名者は Process へ渡してリレー転送の判定に使う (#2338)。
 	var signer *model.User
 	if len(payload.Headers) > 0 && p.verifier != nil {
@@ -222,6 +284,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		if err != nil {
 			slog.Warn("inbox: signature verification failed in worker",
 				"host", payload.Host, "err", err)
+			p.recordInboxTelemetry(host, deliveryhealth.ClassSignatureFailed, started, err.Error())
 			return nil
 		}
 		if p.isBlocked(actor) {
@@ -231,6 +294,13 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 			// signature verify 直後に block check を入れているため、blocked host の
 			// activity は body parse / NoteCreate の段にすら届かず、retry にも乗らない。
 			// よって upstream の追加 case 分岐は mk-go では不要 (= triage #1003 close)。
+			//
+			// **ここは元々ログすら出ない。** 記録しないと「ブロックしたホストから
+			// どれだけ来ているか」が一切見えない (#2471)。
+			if actor != nil && actor.Host != nil {
+				host = *actor.Host
+			}
+			p.recordInboxTelemetry(host, deliveryhealth.ClassBlocked, started, "")
 			return nil
 		}
 		// HTTP 署名者 (actor) が activity body の actor と一致することを保証する
@@ -240,6 +310,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		if err := p.authorizeActor(payload.Body, actor); err != nil {
 			slog.Warn("inbox: actor authorization failed, dropping activity",
 				"host", payload.Host, "err", err)
+			p.recordInboxTelemetry(host, deliveryhealth.ClassActorUnauthorized, started, err.Error())
 			return nil
 		}
 		if actor != nil && actor.Host != nil {
@@ -256,18 +327,22 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		if err := p.ldVerifier.VerifyIfPresent(payload.Body); err != nil {
 			slog.Warn("inbox: LD-Signature verification failed, dropping activity",
 				"host", payload.Host, "err", err)
+			p.recordInboxTelemetry(host, deliveryhealth.ClassLDSignatureFailed, started, err.Error())
 			return nil
 		}
 	}
-	_ = host // reserved for future per-host stats; currently unused
-
 	if err := p.dispatch(payload.Body, signer); err != nil {
 		if errors.Is(err, federation.ErrUnsupportedActivity) {
 			slog.Debug("inbox: unsupported activity, dropped", "host", payload.Host)
+			// 異常ではない (相手は正しく送っており、こちらが対応していない
+			// だけ)。受理側に数える。
+			p.recordInboxTelemetry(host, deliveryhealth.ClassUnsupported, started, "")
 			return nil
 		}
+		p.recordInboxTelemetry(host, deliveryhealth.ClassProcessingError, started, err.Error())
 		return fmt.Errorf("process inbox activity: %w", err)
 	}
+	p.recordInboxTelemetry(host, deliveryhealth.ClassAccepted, started, "")
 	return nil
 }
 

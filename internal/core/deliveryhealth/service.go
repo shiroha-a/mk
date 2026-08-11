@@ -28,11 +28,18 @@ type Service struct {
 }
 
 // NewService constructs a Service. interval <= 0 uses DefaultFlushInterval.
+//
+// 成功判定は store の方向に合わせる。Aggregator と Store で判定がずれると、
+// 記録と表示で数字が食い違う。
 func NewService(store *Store, maxHosts int, interval time.Duration) *Service {
 	if interval <= 0 {
 		interval = DefaultFlushInterval
 	}
-	return &Service{agg: NewAggregator(maxHosts), store: store, interval: interval}
+	agg := NewAggregator(maxHosts)
+	if store != nil && store.succeeded != nil {
+		agg.SetSucceeded(store.succeeded)
+	}
+	return &Service{agg: agg, store: store, interval: interval}
 }
 
 // RecordDelivery implements the deliver processor's telemetry hook.

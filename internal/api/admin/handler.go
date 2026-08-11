@@ -175,6 +175,8 @@ type Handler struct {
 	// deliveryHealth は admin/federation/delivery-health の集計元 (#2461)。
 	// 未配線なら空の結果を返す (機能が無効なだけで、エラーではない)。
 	deliveryHealth DeliveryHealthProvider
+	// inboxHealth は admin/federation/inbox-health の集計元 (#2471)。
+	inboxHealth DeliveryHealthProvider
 	// selfCheck は admin/self-check の実行元 (#2463)。未配線なら空の結果を返す。
 	selfCheck SelfCheckRunner
 	// userTokenInvalidator は admin が他 user を suspend / unsuspend /

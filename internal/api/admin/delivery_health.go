@@ -17,6 +17,11 @@ type DeliveryHealthProvider interface {
 	EvictedHosts() int64
 }
 
+// SetInboxHealthProvider wires the inbox health source (#2471)。
+func (h *Handler) SetInboxHealthProvider(p DeliveryHealthProvider) {
+	h.inboxHealth = p
+}
+
 // SetDeliveryHealthProvider wires the delivery health source (#2461)。
 func (h *Handler) SetDeliveryHealthProvider(p DeliveryHealthProvider) {
 	h.deliveryHealth = p
@@ -32,7 +37,13 @@ const defaultDeliveryHealthWindow = time.Hour
 //
 // 返すのは観測値だけで、配送を止める判断は含まない。
 func (h *Handler) FederationDeliveryHealth(c echo.Context) error {
-	if h.deliveryHealth == nil {
+	return h.federationHealth(c, h.deliveryHealth)
+}
+
+// federationHealth is shared by the outbound / inbound endpoints. 応答の形も
+// 窓の扱いも同じなので、方向ごとに複製しない (#2471)。
+func (h *Handler) federationHealth(c echo.Context, provider DeliveryHealthProvider) error {
+	if provider == nil {
 		// telemetry 未配線の構成では「データが無い」を返す。エラーにすると
 		// 管理画面が壊れて見えるが、実際には機能が無効なだけ。
 		return c.JSON(http.StatusOK, deliveryHealthResponse{
@@ -55,7 +66,7 @@ func (h *Handler) FederationDeliveryHealth(c echo.Context) error {
 		window = deliveryhealth.MaxWindow
 	}
 
-	hosts, err := h.deliveryHealth.Query(c.Request().Context(), window)
+	hosts, err := provider.Query(c.Request().Context(), window)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -65,7 +76,7 @@ func (h *Handler) FederationDeliveryHealth(c echo.Context) error {
 	return c.JSON(http.StatusOK, deliveryHealthResponse{
 		WindowSeconds: int(window.Seconds()),
 		Hosts:         hosts,
-		EvictedHosts:  h.deliveryHealth.EvictedHosts(),
+		EvictedHosts:  provider.EvictedHosts(),
 	})
 }
 
@@ -76,4 +87,15 @@ type deliveryHealthResponse struct {
 	// EvictedHosts はメモリ上限で捨てたホスト数の累計。0 でなければ
 	// 上限が足りていないので、運用者が判断できるよう出す。
 	EvictedHosts int64 `json:"evictedHosts"`
+}
+
+// FederationInboxHealth handles POST /api/admin/federation/inbox-health.
+//
+// **mk-go 独自 endpoint** (#2471)。送信側 (delivery-health) の対。upstream は
+// 受信結果を一切残さないため対応物が無い。
+//
+// inbox processor は活動を捨てる分岐を 5 つ持ち、うち「ブロック済みホスト」は
+// ログすら出さない。ここが唯一の観測点になる。
+func (h *Handler) FederationInboxHealth(c echo.Context) error {
+	return h.federationHealth(c, h.inboxHealth)
 }

@@ -56,6 +56,9 @@ type Aggregator struct {
 	mu    sync.Mutex
 	hosts *lru.Cache[string, *hostCounters]
 	clock func() time.Time
+	// succeeded は「成功として数える分類か」の判定。送信と受信で違うので
+	// 注入する (方向ごとに別実装を起こすと集計ロジックが二重になる)。
+	succeeded func(OutcomeClass) bool
 	// evicted は上限超過で捨てたホスト数の累計。運用者が上限の妥当性を
 	// 判断できるよう外へ出す。
 	evicted int64
@@ -69,7 +72,7 @@ func NewAggregator(maxHosts int) *Aggregator {
 	if maxHosts <= 0 {
 		maxHosts = DefaultMaxHosts
 	}
-	a := &Aggregator{clock: time.Now}
+	a := &Aggregator{clock: time.Now, succeeded: func(c OutcomeClass) bool { return c.Succeeded() }}
 	// lru.New はサイズが正なら error を返さない。上で正に正規化済み。
 	cache, _ := lru.NewWithEvict[string, *hostCounters](maxHosts, func(string, *hostCounters) {
 		a.evicted++
@@ -100,7 +103,7 @@ func (a *Aggregator) Record(host string, o Outcome) {
 	}
 	c.byClass[o.Class]++
 	c.latency[latencyBucketIndex(o.Latency)]++
-	if !o.Class.Succeeded() {
+	if !a.succeeded(o.Class) {
 		c.last = &LastError{
 			At:      a.clock().UTC(),
 			Class:   o.Class,
@@ -142,6 +145,15 @@ func (a *Aggregator) Drain() []Delta {
 	}
 	a.hosts.Purge()
 	return out
+}
+
+// SetSucceeded overrides the success predicate (受信側で使う、#2471)。
+func (a *Aggregator) SetSucceeded(fn func(OutcomeClass) bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if fn != nil {
+		a.succeeded = fn
+	}
 }
 
 // EvictedHosts returns how many hosts were dropped for exceeding the cap.

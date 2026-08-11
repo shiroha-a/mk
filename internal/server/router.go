@@ -1024,10 +1024,19 @@ func (s *Server) setupRoutes() {
 	// Web ノードで回しても drain するものが無い。
 	deliveryHealth := deliveryhealth.NewService(
 		deliveryhealth.NewStore(s.redis.Default), deliveryhealth.DefaultMaxHosts, 0)
+	// 受信側 (#2471)。送信側と同じ基盤で、Redis のキー空間だけを分ける。
+	// 混ざると「配送できない host」と「受信を拒否した host」が同じ行に
+	// 足し込まれ、どちらの話か分からなくなる。
+	inboxHealth := deliveryhealth.NewService(
+		deliveryhealth.NewStoreForDirection(s.redis.Default, deliveryhealth.DirectionInbound),
+		deliveryhealth.DefaultMaxHosts, 0)
 	if s.role.RunsQueue() {
 		deliverProcessor.SetDeliveryTelemetry(deliveryHealth)
 		deliveryHealth.Start(context.Background())
 		s.registerShutdownHook(func(ctx context.Context) { deliveryHealth.Stop(ctx) })
+		inboxProcessor.SetDeliveryTelemetry(inboxHealth)
+		inboxHealth.Start(context.Background())
+		s.registerShutdownHook(func(ctx context.Context) { inboxHealth.Stop(ctx) })
 	}
 	// federation 経由のリモートノート (Create / Announce) も PerUserNotesChart
 	// 等の note 系 chart に +1 を記録するために配線する (#1156)。これが無いと
@@ -2927,6 +2936,7 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetUserTokenInvalidator(s.auth)
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
+	adminHandler.SetInboxHealthProvider(inboxHealth)
 	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
 	// (server 側は既に migrate 済みで動いている前提。適用漏れの検出は
 	// `misskey -doctor` の担当で、あちらは同梱ファイルを数えられる)。
@@ -3109,6 +3119,8 @@ func (s *Server) setupRoutes() {
 	// read:admin:server-info を要求する。
 	// mk-go 独自 (#2463)。scope は delivery-health と同じ理由で既存を再利用する。
 	api.POST("/admin/self-check", adminHandler.SelfCheck, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
+	// mk-go 独自 (#2471)。送信側と同じ scope を再利用する。
+	api.POST("/admin/federation/inbox-health", adminHandler.FederationInboxHealth, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
 	api.POST("/admin/federation/delivery-health", adminHandler.FederationDeliveryHealth, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
 	api.POST("/admin/invite/create", adminHandler.InviteCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:invite-codes"))
 	api.POST("/admin/invite/list", adminHandler.InviteList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:invite-codes"))

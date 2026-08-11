@@ -122,7 +122,7 @@ func TestStore_QueryWithoutLastError(t *testing.T) {
 	s, mr := newTestStore(t)
 	ctx := context.Background()
 	require.NoError(t, s.Flush(ctx, []Delta{{Host: "h", ByClass: map[OutcomeClass]int64{ClassSuccess: 1}}}))
-	mr.Del(lastErrorKey)
+	mr.Del(s.lastErrorKey())
 
 	got, err := s.Query(ctx, time.Hour)
 	require.NoError(t, err)
@@ -202,4 +202,50 @@ func TestApproxQuantileMs(t *testing.T) {
 	b = [latencyBucketCount]int64{}
 	assert.Equal(t, int64(0), approxQuantileMs(&b, 0.50))
 	assert.Equal(t, int64(0), approxQuantileMs(nil, 0.50))
+}
+
+// 送信と受信でキー空間が混ざらないこと (#2471)。混ざると「配送できない host」と
+// 「受信を拒否した host」が同じ行に足し込まれ、どちらの話か分からなくなる。
+func TestStore_DirectionsUseSeparateKeyspaces(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	ctx := context.Background()
+
+	outbound := NewStoreForDirection(rdb, DirectionOutbound)
+	inbound := NewStoreForDirection(rdb, DirectionInbound)
+
+	require.NoError(t, outbound.Flush(ctx, []Delta{{Host: "a.example", ByClass: map[OutcomeClass]int64{ClassSuccess: 3}}}))
+	require.NoError(t, inbound.Flush(ctx, []Delta{{Host: "b.example", ByClass: map[OutcomeClass]int64{ClassAccepted: 7}}}))
+
+	got, err := outbound.Query(ctx, time.Hour)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "a.example", got[0].Host)
+
+	got, err = inbound.Query(ctx, time.Hour)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "b.example", got[0].Host)
+	assert.Equal(t, int64(7), got[0].Success, "受信側は accepted を成功に数える")
+}
+
+// 受信側の成功判定が Store 側にも効くこと。Aggregator とずれると記録と表示で
+// 数字が食い違う。
+func TestStore_InboundSuccessClassification(t *testing.T) {
+	mr := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	ctx := context.Background()
+
+	s := NewStoreForDirection(rdb, DirectionInbound)
+	require.NoError(t, s.Flush(ctx, []Delta{{Host: "h", ByClass: map[OutcomeClass]int64{
+		ClassAccepted: 10, ClassUnsupported: 2, ClassBlocked: 5,
+	}}}))
+
+	got, err := s.Query(ctx, time.Hour)
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, int64(12), got[0].Success, "accepted + unsupported")
+	assert.Equal(t, int64(5), got[0].Failure, "blocked は失敗側")
 }

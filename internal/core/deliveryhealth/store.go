@@ -20,8 +20,13 @@ import (
 // **Redis に置くのは queue ノードが複数ありうるため** (#2459 で role 分離を
 // 入れた)。プロセスローカルに持つと、ノードごとに別々の部分的な数字が見える。
 const (
-	bucketKeyPrefix = "apDeliveryHealth:bucket:"
-	lastErrorKey    = "apDeliveryHealth:lastError"
+	// DirectionOutbound / DirectionInbound are the Redis key namespaces.
+	//
+	// **送受でキー空間を分ける。** 混ざると「配送できない host」と「受信を
+	// 拒否した host」が同じ行に足し込まれ、どちらの話か分からなくなる。
+	DirectionOutbound = "apDeliveryHealth"
+	DirectionInbound  = "apInboxHealth"
+
 	// fieldSep separates the parts of a hash field. host には現れない文字を
 	// 使う (host は DNS 名なので `|` を含まない)。
 	fieldSep = "|"
@@ -42,23 +47,47 @@ const MaxWindow = time.Hour
 
 // Store persists deltas to Redis and reads them back.
 type Store struct {
-	rdb   redis.UniversalClient
-	clock func() time.Time
+	rdb    redis.UniversalClient
+	clock  func() time.Time
+	prefix string
+	// succeeded は集計時に success / failure を振り分ける判定。Aggregator と
+	// **同じものを使うこと** (ずれると記録と表示で数字が食い違う)。
+	succeeded func(OutcomeClass) bool
 }
 
-// NewStore constructs a Store. rdb が nil なら呼び出し側が Store を使わない
-// 前提 (telemetry 無効)。
+// NewStore constructs an outbound-delivery Store. rdb が nil なら呼び出し側が
+// Store を使わない前提 (telemetry 無効)。
 func NewStore(rdb redis.UniversalClient) *Store {
-	return &Store{rdb: rdb, clock: time.Now}
+	return NewStoreForDirection(rdb, DirectionOutbound)
 }
+
+// NewStoreForDirection constructs a Store writing under the given namespace.
+//
+// 送信 (#2461) と受信 (#2471) で集計の構造は同じなので、キー空間だけを変えて
+// 同じ実装を使う。複製すると片方だけ直る形の乖離が生まれる。
+func NewStoreForDirection(rdb redis.UniversalClient, direction string) *Store {
+	if direction == "" {
+		direction = DirectionOutbound
+	}
+	st := &Store{rdb: rdb, clock: time.Now, prefix: direction}
+	if direction == DirectionInbound {
+		st.succeeded = func(c OutcomeClass) bool { return c.SucceededInbound() }
+	} else {
+		st.succeeded = func(c OutcomeClass) bool { return c.Succeeded() }
+	}
+	return st
+}
+
+// bucketKey returns the key for the minute containing t.
+func (s *Store) bucketKey(t time.Time) string {
+	return s.prefix + ":bucket:" + strconv.FormatInt(t.UTC().Unix()/60, 10)
+}
+
+// lastErrorKey returns the hash holding each host's most recent failure.
+func (s *Store) lastErrorKey() string { return s.prefix + ":lastError" }
 
 // SetClockForTest overrides the time source.
 func (s *Store) SetClockForTest(fn func() time.Time) { s.clock = fn }
-
-// bucketKey returns the key for the minute containing t.
-func bucketKey(t time.Time) string {
-	return bucketKeyPrefix + strconv.FormatInt(t.UTC().Unix()/60, 10)
-}
 
 // Flush writes deltas into the current minute bucket.
 //
@@ -68,7 +97,7 @@ func (s *Store) Flush(ctx context.Context, deltas []Delta) error {
 	if s.rdb == nil || len(deltas) == 0 {
 		return nil
 	}
-	key := bucketKey(s.clock())
+	key := s.bucketKey(s.clock())
 	pipe := s.rdb.Pipeline()
 	for _, d := range deltas {
 		for class, n := range d.ByClass {
@@ -85,14 +114,14 @@ func (s *Store) Flush(ctx context.Context, deltas []Delta) error {
 		}
 		if d.LastError != nil {
 			if encoded, err := json.Marshal(d.LastError); err == nil {
-				pipe.HSet(ctx, lastErrorKey, d.Host, encoded)
+				pipe.HSet(ctx, s.lastErrorKey(), d.Host, encoded)
 			}
 		}
 	}
 	// TTL は毎回付け直す。バケットは 1 分ごとに新しくなるので、期限が伸び続ける
 	// ことはない。
 	pipe.Expire(ctx, key, bucketTTL)
-	pipe.Expire(ctx, lastErrorKey, lastErrorTTL)
+	pipe.Expire(ctx, s.lastErrorKey(), lastErrorTTL)
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("deliveryhealth: flush: %w", err)
 	}
@@ -130,7 +159,7 @@ func (s *Store) Query(ctx context.Context, window time.Duration) ([]HostHealth, 
 	latency := map[string]*[latencyBucketCount]int64{}
 
 	for i := 0; i < minutes; i++ {
-		key := bucketKey(now.Add(-time.Duration(i) * time.Minute))
+		key := s.bucketKey(now.Add(-time.Duration(i) * time.Minute))
 		fields, err := s.rdb.HGetAll(ctx, key).Result()
 		if err != nil {
 			return nil, fmt.Errorf("deliveryhealth: query bucket: %w", err)
@@ -155,7 +184,7 @@ func (s *Store) Query(ctx context.Context, window time.Duration) ([]HostHealth, 
 				continue
 			}
 			h.ByClass[class] += n
-			if class.Succeeded() {
+			if s.succeeded(class) {
 				h.Success += n
 			} else {
 				h.Failure += n
@@ -166,7 +195,7 @@ func (s *Store) Query(ctx context.Context, window time.Duration) ([]HostHealth, 
 		return nil, nil
 	}
 
-	lastErrors, err := s.rdb.HGetAll(ctx, lastErrorKey).Result()
+	lastErrors, err := s.rdb.HGetAll(ctx, s.lastErrorKey()).Result()
 	if err != nil {
 		// 直近エラーが読めなくても件数は返せる。観測を全部落とさない。
 		lastErrors = nil

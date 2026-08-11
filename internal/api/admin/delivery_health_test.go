@@ -132,3 +132,49 @@ func TestFederationDeliveryHealth_QueryErrorReturns500(t *testing.T) {
 	rec := doPost(h.FederationDeliveryHealth, `{}`, adminUser)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// 受信側 (#2471) も同じ応答の形を返すこと。方向ごとに handler を複製して
+// いないので、片方だけ壊れる形の乖離は起きない。
+func TestFederationInboxHealth_ReturnsHosts(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetInboxHealthProvider(&stubDeliveryHealth{
+		hosts: []deliveryhealth.HostHealth{{
+			Host: "spam.example", Success: 0, Failure: 500,
+			ByClass: map[deliveryhealth.OutcomeClass]int64{deliveryhealth.ClassBlocked: 500},
+		}},
+	})
+
+	rec := doPost(h.FederationInboxHealth, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	got := decodeHealth(t, rec.Body.Bytes())
+	require.Len(t, got.Hosts, 1)
+	assert.Equal(t, int64(500), got.Hosts[0].ByClass[deliveryhealth.ClassBlocked])
+}
+
+// 送信側と受信側は別の provider を見る。取り違えると「配送できない host」と
+// 「受信を拒否した host」が入れ替わって表示される。
+func TestFederationHealth_DirectionsAreIndependent(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetDeliveryHealthProvider(&stubDeliveryHealth{
+		hosts: []deliveryhealth.HostHealth{{Host: "out.example"}},
+	})
+	h.SetInboxHealthProvider(&stubDeliveryHealth{
+		hosts: []deliveryhealth.HostHealth{{Host: "in.example"}},
+	})
+
+	out := decodeHealth(t, doPost(h.FederationDeliveryHealth, `{}`, adminUser).Body.Bytes())
+	in := decodeHealth(t, doPost(h.FederationInboxHealth, `{}`, adminUser).Body.Bytes())
+	require.Len(t, out.Hosts, 1)
+	require.Len(t, in.Hosts, 1)
+	assert.Equal(t, "out.example", out.Hosts[0].Host)
+	assert.Equal(t, "in.example", in.Hosts[0].Host)
+}
+
+// 未配線なら空 (送信側と同じ)。
+func TestFederationInboxHealth_NoProviderReturnsEmpty(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	rec := doPost(h.FederationInboxHealth, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"hosts":[]`)
+}
