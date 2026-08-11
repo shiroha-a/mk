@@ -131,6 +131,7 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/stream"
 	"github.com/shiroha-a/mk/internal/stream/channels"
+	"github.com/shiroha-a/mk/plugin"
 	"log/slog"
 )
 
@@ -3594,6 +3595,14 @@ func (s *Server) setupRoutes() {
 		}
 		return c.JSON(http.StatusOK, out)
 	})
+
+	// プラグインのルート (#2478)。catchall より前に登録する。
+	// Echo の radix tree は静的パスを wildcard より優先するので順序に依存
+	// しないが、「catchall の後ろに実ルートがある」形は読み手を惑わせる。
+	if err := s.setupPlugins(api, plugin.Registered()); err != nil {
+		s.pluginSetupErr = err
+		return
+	}
 
 	// API catchall。
 	//

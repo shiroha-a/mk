@@ -68,8 +68,14 @@ type Server struct {
 	// queueOnlyServer は RoleQueue のときだけ立てる /healthz 用の最小 server。
 	// Shutdown で閉じるために保持する。
 	queueOnlyServer *http.Server
-	autoscale       *autoscaleRunner
-	chartMgmt       *chart.ManagementService
+
+	// pluginSetupErr はプラグイン登録の失敗を New まで運ぶ (#2478)。
+	// setupRoutes は巨大で戻り値を持たないため、signature を変えずに
+	// 伝播させる。**起動は必ず失敗させる**: 登録できなかったプラグインを
+	// 黙って無効のまま動かすと、機能が消えた原因が分からない。
+	pluginSetupErr error
+	autoscale      *autoscaleRunner
+	chartMgmt      *chart.ManagementService
 	// mediaProxySecret は internal media proxy URL の HMAC 鍵。config に
 	// 明示設定が無ければ DB (instance_secret) の生成値を使うため、New() で
 	// 一度だけ解決して保持する。
@@ -415,6 +421,9 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	s.mediaProxySecret = mediaProxySecret
 
 	s.setupRoutes()
+	if s.pluginSetupErr != nil {
+		return nil, s.pluginSetupErr
+	}
 
 	return s, nil
 }

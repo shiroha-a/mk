@@ -112,6 +112,22 @@ func (s *Scheduler) RegisterChunkedUploadGCJob() error {
 	)
 }
 
+// RegisterPluginJob registers a plugin's cron entry (#2478).
+//
+// maintenance キューに載せるのは、プラグインの定期処理が配送 (deliver) の
+// レイテンシに影響しないようにするため。プラグインの処理時間は mk-go 側から
+// 見積もれないので、遅い処理が来ても連合が詰まらない側に置く。
+//
+// Unique TTL を設けないのは cron 周期が任意だから。周期より長い TTL を勝手に
+// 決めると発火を落とすことになる。重複が困る処理はプラグイン側で冪等に書く
+// (トランザクションを跨げない制約と同じ理由で、いずれにせよ冪等性は要る)。
+func (s *Scheduler) RegisterPluginJob(cron string, taskType string, payload []byte) error {
+	return s.inner.Register(cron, taskType, payload,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+	)
+}
+
 // RegisterOrphanUserCleanupJob registers the daily cleanup of relay-derived
 // orphan remote users (#2340) at 05:00 UTC.
 //
