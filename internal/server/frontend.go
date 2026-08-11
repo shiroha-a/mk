@@ -28,8 +28,8 @@ import (
 // proxyAccountName field; passing nil leaves the value as null (appropriate
 // for pre-setup instances).
 func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability) echo.HandlerFunc {
-	// ビルド済みアセットからCLIENT_ENTRYを取得
-	clientEntry := frontendutil.DetectClientEntry()
+	// ビルド済みアセットからCLIENT_ENTRYを取得 (dev モードでは常に dev server を見る)
+	clientEntry := clientEntryFor(cfg)
 
 	return func(c echo.Context) error {
 		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, "")
@@ -145,7 +145,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 // OAuth component can render the authorization prompt (#1899). Values are
 // HTML-escaped (client name/logo are attacker-suppliable via discovery).
 func frontendConsentHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability) oauth.ConsentRenderer {
-	clientEntry := frontendutil.DetectClientEntry()
+	clientEntry := clientEntryFor(cfg)
 	return func(c echo.Context, m oauth.ConsentMeta) error {
 		var sb strings.Builder
 		sb.WriteString(`<meta name="misskey:oauth:transaction-id" content="` + stdhtml.EscapeString(m.TransactionID) + `">` + "\n")

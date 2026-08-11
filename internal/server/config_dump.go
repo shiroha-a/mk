@@ -114,10 +114,23 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 	add(&d.Settings, "frontendContentSecurityPolicy", orUnset(cfg.FrontendContentSecurityPolicy), "")
 	add(&d.Settings, "enableMetrics", fmt.Sprintf("%t", cfg.EnableMetrics), "")
 	add(&d.Settings, "testMode", fmt.Sprintf("%t", cfg.TestMode), "")
+	add(&d.Settings, "dev", fmt.Sprintf("%t", cfg.Dev), "")
 
 	// --- 実効値 ---
 
 	add(&d.Effective, "process role", string(role), roleNote(role))
+
+	// **設定名からは読めない実効値 (#2477)。** dev では frontend が
+	// ビルド成果物ではなく Vite dev server から配信される。本番で有効になって
+	// いると frontend が丸ごと落ちるので、診断で必ず見えるようにする。
+	if cfg.Dev {
+		add(&d.Effective, "frontend 配信元", "Vite dev server ("+viteDevServerURL+")",
+			"dev モード。ビルド成果物があっても使わない")
+		d.Warnings = append(d.Warnings,
+			"dev が有効です。frontend は Vite dev server から配信されるため、dev server を起動していないと frontend が表示されません (本番では無効にしてください)")
+	} else {
+		add(&d.Effective, "frontend 配信元", "ビルド成果物", "")
+	}
 
 	queues := append([]string(nil), mkqdriver.QueueNames...)
 	sort.Strings(queues)

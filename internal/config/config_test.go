@@ -494,6 +494,45 @@ func TestLoad_TestMode_EnvOverride(t *testing.T) {
 	assert.True(t, cfg.TestMode)
 }
 
+// dev は既定で false。**TestMode とは独立していること** も確認する (#2477)。
+// 相乗りさせると、frontend を dev server から配信したいだけで
+// /api/reset-db のような破壊的エンドポイントが開いてしまう。
+func TestLoad_Dev_DefaultsFalseAndIsIndependentOfTestMode(t *testing.T) {
+	path := writeTestConfig(t, testYAML)
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	assert.False(t, cfg.Dev)
+
+	t.Setenv("MK_TESTMODE", "true")
+	cfg, err = Load(path)
+	require.NoError(t, err)
+	assert.True(t, cfg.TestMode)
+	assert.False(t, cfg.Dev, "testMode を有効にしても dev は連動しない")
+}
+
+func TestLoad_Dev_EnvOverride(t *testing.T) {
+	path := writeTestConfig(t, testYAML)
+
+	t.Setenv("MK_DEV", "true")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Dev)
+	assert.False(t, cfg.TestMode, "dev を有効にしても testMode は連動しない")
+}
+
+func TestLoad_Dev_FromYAML(t *testing.T) {
+	path := writeTestConfig(t, testYAML+"\ndev: true\n")
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+
+	assert.True(t, cfg.Dev)
+}
+
 func TestLoad_MediaProxy(t *testing.T) {
 	yaml := `
 url: https://example.com

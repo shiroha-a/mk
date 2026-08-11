@@ -55,7 +55,7 @@ func newSSRMetaHandler(
 		metaRepo:      metaRepo,
 		proxyResolver: proxyResolver,
 		chunkedUpload: chunkedUpload,
-		clientEntry:   frontendutil.DetectClientEntry(),
+		clientEntry:   clientEntryFor(cfg),
 		userRepo:      userRepo,
 		noteRepo:      noteRepo,
 		pageRepo:      pageRepo,

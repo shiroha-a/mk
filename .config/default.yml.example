@@ -361,6 +361,15 @@ proxyBypassHosts:
 # **DO NOT enable in production** — used by e2e tests only.
 #testMode: false
 
+# Serve the frontend from the Vite dev server (localhost:5173, embed on
+# 5174) instead of built assets, even when built assets are present.
+# **DO NOT enable in production** — without a running dev server the
+# frontend will not load at all.
+#
+# This is deliberately separate from testMode: enabling the dev frontend
+# must not also open the destructive endpoints above.
+#dev: false
+
 # Mount net/http/pprof handlers at /debug/pprof/* for local
 # profiling. **DO NOT enable in production**.
 #enablePprof: false

@@ -67,7 +67,7 @@ func newEmbedHandlers(
 		metaRepo:             metaRepo,
 		proxyAccountResolver: proxyAccountResolver,
 		chunkedUpload:        chunkedUpload,
-		entry:                frontendutil.DetectEmbedEntry(),
+		entry:                embedEntryFor(cfg),
 		deps:                 deps,
 	}
 }

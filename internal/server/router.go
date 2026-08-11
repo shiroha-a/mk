@@ -3618,20 +3618,23 @@ func (s *Server) setupRoutes() {
 
 	// フロントエンドアセット配信
 	// ビルド済みアセットがあれば静的配信、なければVite dev serverプロキシ
+	//
+	// dev モードではビルド成果物の有無を**見ない** (#2477)。見てしまうと、
+	// 以前のビルドが残っているだけで dev server に繋がらず HMR に入れない。
 	frontendDir := frontendutil.FrontendDir()
-	if _, err := os.Stat(frontendDir); err == nil {
+	if _, err := os.Stat(frontendDir); err == nil && !isDev(s.config) {
 		s.echo.Static("/vite", frontendDir)
 	} else {
-		s.echo.Any("/vite/*", newViteProxy("http://localhost:5173"))
+		s.echo.Any("/vite/*", newViteProxy(viteDevServerURL))
 	}
 
 	// embed 専用バンドル配信 (#2389)。通常の SPA とは別 build なので別ディレクトリ・
 	// 別 prefix になる (upstream ClientServerService の `/embed_vite/` と同じ)。
 	frontendEmbedDir := frontendutil.FrontendEmbedDir()
-	if _, err := os.Stat(frontendEmbedDir); err == nil {
+	if _, err := os.Stat(frontendEmbedDir); err == nil && !isDev(s.config) {
 		s.echo.Static("/embed_vite", frontendEmbedDir)
 	} else {
-		s.echo.Any("/embed_vite/*", newViteProxy("http://localhost:5174"))
+		s.echo.Any("/embed_vite/*", newViteProxy(viteEmbedDevServerURL))
 	}
 
 	// フロントエンド配布アセット (locales, fonts等) + リポジトリアセット (ai.png等)

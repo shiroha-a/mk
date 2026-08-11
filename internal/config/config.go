@@ -251,6 +251,14 @@ type Source struct {
 	// Must never be enabled in production. Can be overridden via MK_TESTMODE=1.
 	TestMode bool `mapstructure:"testMode"`
 
+	// Dev serves the frontend from the Vite dev server instead of built
+	// assets. Must never be enabled in production. Overridable via MK_DEV=1.
+	//
+	// **TestMode とは独立させる (#2477)。** TestMode は /api/reset-db のような
+	// 破壊的エンドポイントを開けるフラグなので、フロントエンドを dev server から
+	// 配信したいだけの用途で有効化させるわけにはいかない。
+	Dev bool `mapstructure:"dev"`
+
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	// For local profiling only; must not be enabled in production.
 	EnablePprof bool `mapstructure:"enablePprof"`
@@ -388,6 +396,11 @@ type Config struct {
 	// Must never be enabled in production. Can be overridden via MK_TESTMODE=1.
 	TestMode bool
 
+	// Dev serves the frontend from the Vite dev server instead of built
+	// assets. Must never be enabled in production. Overridable via MK_DEV=1.
+	// See the source struct doc for why this is separate from TestMode.
+	Dev bool
+
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	EnablePprof bool
 
@@ -470,6 +483,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"id", "maxFileSize",
 		"mediaProxySecret",
 		"testMode",
+		"dev",
 		// 運用/セキュリティ系: 既存ymlから環境変数オーバーライドできるようにする
 		"trustProxy",
 		"disableHsts",
@@ -637,6 +651,7 @@ func resolve(src *Source) (*Config, error) {
 		TrustProxy: resolveTrustProxy(src.TrustProxy),
 
 		TestMode:                src.TestMode,
+		Dev:                     src.Dev,
 		EnablePprof:             src.EnablePprof,
 		EnableTimelineCache:     src.EnableTimelineCache,
 		TimelineCacheTTLSeconds: src.TimelineCacheTTLSeconds,

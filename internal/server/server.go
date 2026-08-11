@@ -273,6 +273,7 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 		slog.Info("process role selected", "role", string(role),
 			"runsServer", role.RunsServer(), "runsQueue", role.RunsQueue())
 	}
+	logDevModeBanner(cfg)
 
 	e := echo.New()
 	e.HideBanner = true
