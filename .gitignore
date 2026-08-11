@@ -77,3 +77,11 @@ tests/dropin_frontend/cypress/cypress/
 
 # drop-in test orchestrator が失敗時に吐くログ (local fallback)
 .dropin-logs/
+
+# プラグイン (#2480)。運営者が plugins/ に置いたものと、そこから生成される
+# ファイル。mk-go 本体のリポジトリには持たない。
+plugins/*
+!plugins/.gitkeep
+go.work
+go.work.sum
+cmd/misskey/plugins_generated.go

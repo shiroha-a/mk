@@ -2,6 +2,7 @@
 	update docker-update uds-update \
 	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
+	plugins \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-e2e \
 	federation-misskey-down federation-misskey-logs \
@@ -139,7 +140,10 @@ LDFLAGS += -X github.com/shiroha-a/mk/internal/config.MisskeyVersion=$(MISSKEY_V
 endif
 
 ##@ 開発
-build: ## バイナリを ./built/misskey に生成
+plugins: ## plugins/ を走査して組み込み用ファイルを生成 (#2480)
+	GOWORK=off go run ./tools/pluginbuild
+
+build: plugins ## バイナリを ./built/misskey に生成
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/misskey
 
 run: build ## build して起動
