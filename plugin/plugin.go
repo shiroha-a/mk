@@ -148,6 +148,9 @@ type Context interface {
 	// API calls mk-go's own REST endpoints in-process.
 	API() API
 
+	// Storage returns this plugin's own PostgreSQL schema.
+	Storage() Storage
+
 	// Go runs fn in a new goroutine, recovering panics.
 	//
 	// **プラグインが自分で `go` を書くとプロセスごと落ちる。** Go は他の

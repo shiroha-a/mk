@@ -8,6 +8,8 @@
   field Definition.Name string
   field Definition.Routes func(Context, Router) error
   field Definition.Version string
+  field Migration.SQL string
+  field Migration.Version int
   field StatusError.Message string
   field StatusError.Status int
   method API.Anonymous() Caller
@@ -17,6 +19,7 @@
   method Context.Go(func())
   method Context.Logger() *slog.Logger
   method Context.Name() string
+  method Context.Storage() Storage
   method Jobs.Handle(string, JobHandler)
   method Jobs.Schedule(string, string, any)
   method Request.Bind(any) error
@@ -26,6 +29,8 @@
   method Request.UserID() string
   method Router.GET(string, Handler)
   method Router.POST(string, Handler)
+  method Storage.DB() *sql.DB
+  method Storage.Migrate(context.Context, []Migration) error
 const APIVersion
 func (*APIError) Error() string
 func (*StatusError) Error() string
@@ -42,6 +47,8 @@ type Definition struct
 type Handler func
 type JobHandler func
 type Jobs interface
+type Migration struct
 type Request interface
 type Router interface
 type StatusError struct
+type Storage interface

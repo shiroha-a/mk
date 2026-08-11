@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	"github.com/shiroha-a/mk/internal/pluginstore"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -33,9 +35,10 @@ const pluginRoutePrefix = "/plugin/"
 // ロールに応じて登録先を出し分ける (#2459)。HTTP を担わないプロセスがルートを
 // 登録したり、キューを担わないプロセスがジョブを登録したりしないようにする。
 //
-// 一覧を引数で受けるのは、グローバルレジストリを直接読むとテストから差し
-// 替えられないため。plugin.Registered() を呼ぶのは呼び出し側の責務。
-func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition) error {
+// 一覧と storage の生成を引数で受けるのは、グローバルレジストリや実 DB を直接
+// 触るとテストから差し替えられないため。plugin.Registered() を呼ぶのも、実
+// 接続を開くのも呼び出し側の責務。
+func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, openStorage pluginStorageOpener) error {
 	if len(plugins) == 0 {
 		return nil
 	}
@@ -48,6 +51,16 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition) erro
 			),
 			api: &pluginAPI{echo: s.echo, userRepo: s.userRepo, host: requestHostFor(s.config.URL)},
 		}
+
+		// ストレージはロールに関係なく渡す。Routes からも Jobs からも使うため。
+		//
+		// **起動時に開く。** 遅延させると、接続できない設定でも起動してしまい、
+		// 最初のリクエストまで問題が表面化しない。
+		storage, err := openStorage(def.Name)
+		if err != nil {
+			return fmt.Errorf("plugin %q: %w", def.Name, err)
+		}
+		pctx.storage = storage
 
 		if def.Routes != nil && s.role.RunsServer() {
 			r := &pluginRouter{group: api.Group(pluginRoutePrefix + def.Name)}
@@ -86,14 +99,53 @@ func requestHostFor(rawURL string) string {
 // --- Context ---
 
 type pluginContext struct {
-	name   string
-	logger *slog.Logger
-	api    plugin.API
+	name    string
+	logger  *slog.Logger
+	api     plugin.API
+	storage plugin.Storage
 }
 
-func (c *pluginContext) Name() string         { return c.name }
-func (c *pluginContext) Logger() *slog.Logger { return c.logger }
-func (c *pluginContext) API() plugin.API      { return c.api }
+func (c *pluginContext) Name() string            { return c.name }
+func (c *pluginContext) Logger() *slog.Logger    { return c.logger }
+func (c *pluginContext) API() plugin.API         { return c.api }
+func (c *pluginContext) Storage() plugin.Storage { return c.storage }
+
+// --- Storage ---
+
+// pluginStorageOpener creates the storage handle for one plugin.
+type pluginStorageOpener func(name string) (plugin.Storage, error)
+
+// dbBackedStorage returns the production opener. 開いた pool は Shutdown で
+// 閉じられるよう hook に登録する。
+func (s *Server) dbBackedStorage() pluginStorageOpener {
+	return func(name string) (plugin.Storage, error) {
+		store, err := pluginstore.Open(s.config.DSN(), name, 0)
+		if err != nil {
+			return nil, err
+		}
+		s.registerShutdownHook(func(context.Context) { _ = store.Close() })
+		return &pluginStorage{store: store}, nil
+	}
+}
+
+// pluginStorage adapts pluginstore.Store to the public interface.
+//
+// 公開面は `plugin.Migration` を受けるが内部は `pluginstore.Migration` を使う。
+// 同じ形でも型を分けるのは、内部側に項目を足したくなったときに公開面を巻き込ま
+// ないため。
+type pluginStorage struct {
+	store *pluginstore.Store
+}
+
+func (s *pluginStorage) DB() *sql.DB { return s.store.DB() }
+
+func (s *pluginStorage) Migrate(ctx context.Context, migrations []plugin.Migration) error {
+	conv := make([]pluginstore.Migration, len(migrations))
+	for i, m := range migrations {
+		conv[i] = pluginstore.Migration{Version: m.Version, SQL: m.SQL}
+	}
+	return s.store.Migrate(ctx, conv)
+}
 
 // Go runs fn with panic recovery.
 //

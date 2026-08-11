@@ -24,6 +24,10 @@ import (
 	"github.com/shiroha-a/mk/plugin"
 )
 
+// noopStorage is the storage opener used by wiring tests. ルーティングの検証に
+// 実 DB は要らない (ストレージ自体は internal/pluginstore のテストが見る)。
+func noopStorage(string) (plugin.Storage, error) { return nil, nil }
+
 // pluginDef builds a definition for wiring tests without touching the global
 // registry. setupPlugins が一覧を引数で受けるので、レジストリを汚さずに済む。
 func pluginDef(name string, routes func(plugin.Context, plugin.Router) error, jobs func(plugin.Context, plugin.Jobs) error) plugin.Definition {
@@ -163,10 +167,45 @@ func TestPluginContext_Go_RecoversPanic(t *testing.T) {
 
 func TestPluginContext_Accessors(t *testing.T) {
 	api := &pluginAPI{}
-	c := &pluginContext{name: "gameinfo", logger: slog.Default(), api: api}
+	st := &pluginStorage{}
+	c := &pluginContext{name: "gameinfo", logger: slog.Default(), api: api, storage: st}
 	assert.Equal(t, "gameinfo", c.Name())
 	assert.NotNil(t, c.Logger())
 	assert.Same(t, api, c.API())
+	assert.Same(t, st, c.Storage())
+}
+
+// **ストレージを開けなかったら起動を失敗させる。** 遅延させると接続できない
+// 設定でも起動し、最初のリクエストまで問題が表面化しない。
+func TestSetupPlugins_PropagatesStorageError(t *testing.T) {
+	def := pluginDef("p", func(plugin.Context, plugin.Router) error { return nil }, nil)
+
+	s, api := newPluginTestServer(config.RoleServer)
+	err := s.setupPlugins(api, []plugin.Definition{def},
+		func(string) (plugin.Storage, error) { return nil, errors.New("DB に繋がらない") })
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "DB に繋がらない")
+}
+
+// ストレージはロールに関係なく渡す (Routes からも Jobs からも使うため)。
+func TestSetupPlugins_StorageIsGivenToBothRoles(t *testing.T) {
+	for _, role := range []config.ProcessRole{config.RoleServer, config.RoleQueue} {
+		t.Run(string(role), func(t *testing.T) {
+			var seen plugin.Storage
+			def := pluginDef("p",
+				func(c plugin.Context, _ plugin.Router) error { seen = c.Storage(); return nil },
+				func(c plugin.Context, _ plugin.Jobs) error { seen = c.Storage(); return nil },
+			)
+
+			want := &pluginStorage{}
+			s, api := newPluginTestServer(role)
+			_ = s.setupPlugins(api, []plugin.Definition{def},
+				func(string) (plugin.Storage, error) { return want, nil })
+
+			assert.Same(t, want, seen)
+		})
+	}
 }
 
 // --- API caller ---
@@ -353,7 +392,7 @@ func newPluginTestServer(role config.ProcessRole) (*Server, *echo.Group) {
 
 func TestSetupPlugins_NoPluginsIsNoop(t *testing.T) {
 	s, api := newPluginTestServer(config.RoleBoth)
-	require.NoError(t, s.setupPlugins(api, nil))
+	require.NoError(t, s.setupPlugins(api, nil, noopStorage))
 }
 
 // ロールに応じて Routes / Jobs の呼び出しを出し分けること (#2459)。
@@ -378,7 +417,7 @@ func TestSetupPlugins_RoleGating(t *testing.T) {
 			s, api := newPluginTestServer(tt.role)
 			// queue server は未配線なので、ジョブを登録するロールでは失敗する。
 			// ここで見たいのは「呼ばれたかどうか」。
-			_ = s.setupPlugins(api, []plugin.Definition{def})
+			_ = s.setupPlugins(api, []plugin.Definition{def}, noopStorage)
 
 			assert.Equal(t, tt.wantRoutes, routesCalled, "Routes")
 			assert.Equal(t, tt.wantJobs, jobsCalled, "Jobs")
@@ -392,7 +431,7 @@ func TestSetupPlugins_PropagatesRouteError(t *testing.T) {
 	def := pluginDef("p", func(plugin.Context, plugin.Router) error { return errors.New("だめ") }, nil)
 
 	s, api := newPluginTestServer(config.RoleServer)
-	err := s.setupPlugins(api, []plugin.Definition{def})
+	err := s.setupPlugins(api, []plugin.Definition{def}, noopStorage)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "ルート登録に失敗")
 }
@@ -406,7 +445,7 @@ func TestSetupPlugins_PropagatesJobError(t *testing.T) {
 	})
 
 	s, api := newPluginTestServer(config.RoleQueue)
-	err := s.setupPlugins(api, []plugin.Definition{def})
+	err := s.setupPlugins(api, []plugin.Definition{def}, noopStorage)
 	require.Error(t, err, "queue server 未配線を取りこぼさない")
 	assert.Contains(t, err.Error(), "ジョブ登録に失敗")
 }
@@ -423,7 +462,7 @@ func TestSetupPlugins_RoutesAreNamespaced(t *testing.T) {
 	}, nil)
 
 	s, api := newPluginTestServer(config.RoleServer)
-	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}))
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
 
 	rec := httptest.NewRecorder()
 	s.echo.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/plugin/gameinfo/status", nil))
