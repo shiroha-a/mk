@@ -70,7 +70,7 @@
 		},
 		{
 			"file": "test/e2e/antennas.ts",
-			"reason": "ハーネスの構造差。mk-go はジョブワーカーを同一プロセスで動かすので、i/delete-account の直後 (実測 200ms) にカスケードが走って user 行が物理削除され、以降 404 になる。upstream も最終的には行を消す (DeleteAccountProcessorService の usersRepository.delete) が、upstream の e2e はワーカーを起動しないので行が isDeleted: true のまま残り、テストはそれを見ている。mk-go 側にワーカーを止める起動モードが無いため、この構成では通らない。",
+			"reason": "削除済みアカウントの扱いの差。テストは beforeAll で `i/delete-account` した user で**その後も投稿する** (antennas.ts:533)。upstream は論理削除済み user の投稿を通すのでノートができるが、mk-go は `middleware/auth.go` で `isDeleted` な user を anonymous 扱いに落とすため投稿が 401 になり、テストの前提 (ノートが作られている) が崩れる。削除したアカウントが投稿できない方が妥当なので、mk-go 側は変えない。\n\n注: 以前ここには「mk-go はジョブワーカーを同一プロセスで動かすのでカスケードが走ってuser 行が物理削除され 404 になる。ワーカーを止める起動モードが無いため通らない」と書かれていたが**誤り**だった。#2459 で `MK_ONLY_SERVER` を入れて実際にワーカーを止めて検証したところ、結果は変わらなかった (#2466)。カスケードはジョブなので確かに走らないが、失敗の原因はそこではない。",
 			"names": [
 				"アンテナ > のノート > が取得できること（'削除ユーザーのノートも含まれる'）"
 			]
