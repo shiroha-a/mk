@@ -238,6 +238,8 @@ func (s *Server) setupRoutes() {
 	// meta.rootUserId=nil となり admin paths で 403 が返る regression を防ぐ
 	// ため、role.Service に userRepo を渡して user.isRoot fallback を有効化する。
 	roleService.SetUserRepo(userRepo)
+	// プラグインのルートで管理者判定に使う (#2477)。setupPlugins より前に入れる。
+	s.pluginRoles = roleService
 	signupService := coresignup.NewService(userRepo, metaRepo, idGen)
 	// ActivityPub 配信のためにローカルユーザーは RSA 鍵対を必要とする。
 	signupService.SetKeypairRepo(keypairRepo)

@@ -2,8 +2,10 @@
 # plugin/ の公開面。差分はレビューで意図を確認すること (#2478)。
 plugin/plugintest:   field JobSet.Handlers map[string]plugin.JobHandler
 plugin/plugintest:   field JobSet.Schedules []Schedule
+plugin/plugintest:   field Request.Administrator bool
 plugin/plugintest:   field Request.Body string
 plugin/plugintest:   field Request.Ctx context.Context
+plugin/plugintest:   field Request.Moderator bool
 plugin/plugintest:   field Request.Params map[string]string
 plugin/plugintest:   field Request.Query map[string]string
 plugin/plugintest:   field Request.UserID string
@@ -55,6 +57,8 @@ plugin:   method Jobs.Handle(string, JobHandler)
 plugin:   method Jobs.Schedule(string, string, any)
 plugin:   method Request.Bind(any) error
 plugin:   method Request.Context() context.Context
+plugin:   method Request.IsAdministrator() bool
+plugin:   method Request.IsModerator() bool
 plugin:   method Request.Param(string) string
 plugin:   method Request.Query(string) string
 plugin:   method Request.UserID() string

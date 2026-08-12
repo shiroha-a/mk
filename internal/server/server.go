@@ -69,6 +69,10 @@ type Server struct {
 	// Shutdown で閉じるために保持する。
 	queueOnlyServer *http.Server
 
+	// pluginRoles はプラグインのルートで権限を判定するための参照 (#2477)。
+	// setupRoutes で roleService を作った後に入る。
+	pluginRoles middleware.RoleChecker
+
 	// pluginSetupErr はプラグイン登録の失敗を New まで運ぶ (#2478)。
 	// setupRoutes は巨大で戻り値を持たないため、signature を変えずに
 	// 伝播させる。**起動は必ず失敗させる**: 登録できなかったプラグインを

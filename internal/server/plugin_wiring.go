@@ -83,7 +83,7 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		}
 
 		if def.Routes != nil && s.role.RunsServer() {
-			r := &pluginRouter{group: api.Group(pluginRoutePrefix + def.Name)}
+			r := &pluginRouter{group: api.Group(pluginRoutePrefix + def.Name), roles: s.pluginRoles}
 			if err := def.Routes(pctx, r); err != nil {
 				return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
 			}
@@ -281,19 +281,25 @@ func (c *pluginContext) Go(fn func()) {
 
 type pluginRouter struct {
 	group *echo.Group
+	roles middleware.RoleChecker
 }
 
-func (r *pluginRouter) GET(path string, h plugin.Handler)  { r.group.GET(path, wrapPluginHandler(h)) }
-func (r *pluginRouter) POST(path string, h plugin.Handler) { r.group.POST(path, wrapPluginHandler(h)) }
+func (r *pluginRouter) GET(path string, h plugin.Handler) {
+	r.group.GET(path, wrapPluginHandler(h, r.roles))
+}
+
+func (r *pluginRouter) POST(path string, h plugin.Handler) {
+	r.group.POST(path, wrapPluginHandler(h, r.roles))
+}
 
 // wrapPluginHandler adapts a plugin handler to echo.
 //
 // エラーは **StatusError のときだけ** メッセージを返す。素の error を返すと
 // プラグインの内部事情 (DB のエラー文字列など) がそのまま外に出るため、
 // ログにだけ残して汎用メッセージを返す。
-func wrapPluginHandler(h plugin.Handler) echo.HandlerFunc {
+func wrapPluginHandler(h plugin.Handler, roles middleware.RoleChecker) echo.HandlerFunc {
 	return func(c echo.Context) error {
-		res, err := h(&pluginRequest{c: c})
+		res, err := h(&pluginRequest{c: c, roles: roles})
 		if err != nil {
 			var se *plugin.StatusError
 			if errors.As(err, &se) {
@@ -336,6 +342,9 @@ func writePluginBlob(c echo.Context, b plugin.Blob) error {
 
 type pluginRequest struct {
 	c echo.Context
+	// roles は権限判定に使う。未配線なら常に false を返す (画面は出ても
+	// API は通らない、という安全側に倒す)。
+	roles middleware.RoleChecker
 }
 
 func (r *pluginRequest) Context() context.Context { return r.c.Request().Context() }
@@ -351,6 +360,27 @@ func (r *pluginRequest) UserID() string {
 		return u.ID
 	}
 	return ""
+}
+
+// IsModerator reports whether the caller is a moderator.
+//
+// **未配線なら false。** 判定できないときに true を返すと、権限の穴が
+// 「動いているように見える」形で残る。
+func (r *pluginRequest) IsModerator() bool {
+	id := r.UserID()
+	if id == "" || r.roles == nil {
+		return false
+	}
+	return r.roles.IsModerator(id)
+}
+
+// IsAdministrator reports whether the caller is an administrator.
+func (r *pluginRequest) IsAdministrator() bool {
+	id := r.UserID()
+	if id == "" || r.roles == nil {
+		return false
+	}
+	return r.roles.IsAdministrator(id)
 }
 
 // --- API ---

@@ -58,7 +58,7 @@ func TestValidateEndpoint(t *testing.T) {
 func serveWrapped(t *testing.T, h plugin.Handler, body string) *httptest.ResponseRecorder {
 	t.Helper()
 	e := echo.New()
-	e.POST("/x", wrapPluginHandler(h))
+	e.POST("/x", wrapPluginHandler(h, nil))
 	req := httptest.NewRequest(http.MethodPost, "/x", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
@@ -112,6 +112,44 @@ func TestWrapPluginHandler_WrappedStatusError(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "だめ")
 }
 
+// --- 権限 ---
+
+// stubRoles answers role checks without a real role service.
+type stubRoles struct{ mod, admin bool }
+
+func (r *stubRoles) IsModerator(string) bool     { return r.mod }
+func (r *stubRoles) IsAdministrator(string) bool { return r.admin }
+
+// **未認証・未配線では false。** 判定できないときに true を返すと、権限の穴が
+// 「動いているように見える」形で残る。
+func TestPluginRequest_RolesDefaultToFalse(t *testing.T) {
+	e := echo.New()
+	var gotMod, gotAdmin bool
+	e.POST("/x", wrapPluginHandler(func(r plugin.Request) (any, error) {
+		gotMod, gotAdmin = r.IsModerator(), r.IsAdministrator()
+		return nil, nil
+	}, nil))
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/x", nil))
+	assert.False(t, gotMod)
+	assert.False(t, gotAdmin)
+}
+
+// roles が配線されていても、未認証なら false (ID が無いので問い合わせない)。
+func TestPluginRequest_UnauthenticatedIsNotModerator(t *testing.T) {
+	e := echo.New()
+	var got bool
+	e.POST("/x", wrapPluginHandler(func(r plugin.Request) (any, error) {
+		got = r.IsModerator()
+		return nil, nil
+	}, &stubRoles{mod: true, admin: true}))
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/x", nil))
+	assert.False(t, got, "未認証を moderator 扱いしない")
+}
+
 // --- Blob ---
 
 // バイナリ応答は JSON エンコードせずそのまま書く。画像プロキシの用途。
@@ -155,7 +193,7 @@ func TestWrapPluginHandler_BlobWithoutCacheControl(t *testing.T) {
 	})
 	api.GET("/b", wrapPluginHandler(func(plugin.Request) (any, error) {
 		return plugin.Blob{ContentType: "image/png", Body: []byte("x")}, nil
-	}))
+	}, nil))
 
 	rec := httptest.NewRecorder()
 	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/b", nil))
@@ -179,7 +217,7 @@ func TestPluginRequest_Accessors(t *testing.T) {
 		got.user = r.UserID()
 		require.NotNil(t, r.Context())
 		return nil, nil
-	}))
+	}, nil))
 
 	req := httptest.NewRequest(http.MethodPost, "/u/abc?q=zzz", strings.NewReader(`{"k":"v"}`))
 	req.Header.Set("Content-Type", "application/json")

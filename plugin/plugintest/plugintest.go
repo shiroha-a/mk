@@ -214,6 +214,10 @@ type Request struct {
 	Params map[string]string
 	// Query are query-string values.
 	Query map[string]string
+	// Moderator makes IsModerator report true. 管理用ルートのテストに使う。
+	Moderator bool
+	// Administrator makes IsAdministrator (and IsModerator) report true.
+	Administrator bool
 	// Ctx overrides the request context.
 	Ctx context.Context
 }
@@ -227,7 +231,10 @@ func (r Request) build() plugin.Request {
 	if body == "" {
 		body = "{}"
 	}
-	return &fakeRequest{ctx: ctx, userID: r.UserID, body: body, params: r.Params, query: r.Query}
+	return &fakeRequest{
+		ctx: ctx, userID: r.UserID, body: body, params: r.Params, query: r.Query,
+		moderator: r.Moderator || r.Administrator, administrator: r.Administrator,
+	}
 }
 
 // --- 実装 ---
@@ -293,16 +300,20 @@ func (j *fakeJobs) Schedule(cron string, name string, payload any) {
 }
 
 type fakeRequest struct {
-	ctx    context.Context
-	userID string
-	body   string
-	params map[string]string
-	query  map[string]string
+	ctx           context.Context
+	userID        string
+	body          string
+	params        map[string]string
+	query         map[string]string
+	moderator     bool
+	administrator bool
 }
 
 func (r *fakeRequest) Context() context.Context { return r.ctx }
 func (r *fakeRequest) UserID() string           { return r.userID }
 func (r *fakeRequest) Param(k string) string    { return r.params[k] }
+func (r *fakeRequest) IsModerator() bool        { return r.moderator }
+func (r *fakeRequest) IsAdministrator() bool    { return r.administrator }
 func (r *fakeRequest) Query(k string) string    { return r.query[k] }
 
 func (r *fakeRequest) Bind(v any) error {

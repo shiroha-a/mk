@@ -79,6 +79,17 @@ type Request interface {
 	// ID だけを渡す。model.User を公開すると内部のモデルが契約になってしまう
 	// ので、それ以上が要るなら [API] で取得する (可視性判定も自動で効く)。
 	UserID() string
+
+	// IsModerator reports whether the caller is a moderator (administrators
+	// included).
+	//
+	// **管理用のルートは必ずこれで守ること。** [Router] は認証の有無しか見ない
+	// ので、管理画面を出しただけでは API は誰でも叩ける。画面を隠すのは UI の
+	// 都合であって、権限の強制ではない。
+	IsModerator() bool
+
+	// IsAdministrator reports whether the caller is an administrator.
+	IsAdministrator() bool
 }
 
 // StatusError lets a handler choose the HTTP status of an error response.
