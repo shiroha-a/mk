@@ -196,16 +196,45 @@ func (s *Store) Migrate(ctx context.Context, migrations []Migration) error {
 		_, _ = conn.ExecContext(ctx, `SELECT pg_advisory_unlock($1)`, lockKey)
 	}()
 
-	if _, err := conn.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
+	if err := applyOrdered(ctx, conn, ordered); err != nil {
+		return fmt.Errorf("plugin %s: %w", s.name, err)
+	}
+	return nil
+}
+
+// Executor is the subset of *sql.DB / *sql.Conn that applying migrations needs.
+type Executor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error)
+}
+
+// Apply runs the migrations that have not been applied yet against db.
+//
+// [Store.Migrate] はロックを取ってからこれを呼ぶ。**plugin/plugintest も同じ
+// 関数を使う** — フェイクが本番と違う挙動をすると、テストが通ったのに本番で
+// 落ちる (実際 plugintest が素朴に実行していて、2 回目で
+// 「already exists」になった)。
+func Apply(ctx context.Context, db Executor, migrations []Migration) error {
+	ordered, err := validateMigrations(migrations)
+	if err != nil {
+		return err
+	}
+	return applyOrdered(ctx, db, ordered)
+}
+
+// applyOrdered assumes migrations are already validated and sorted.
+func applyOrdered(ctx context.Context, db Executor, ordered []Migration) error {
+	if _, err := db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS schema_migrations (
 		version bigint PRIMARY KEY,
 		applied_at timestamptz NOT NULL DEFAULT now()
 	)`); err != nil {
-		return fmt.Errorf("plugin %s: migration 管理表を作成できません: %w", s.name, err)
+		return fmt.Errorf("migration 管理表を作成できません: %w", err)
 	}
 
-	applied, err := appliedVersions(ctx, conn)
+	applied, err := appliedVersions(ctx, db)
 	if err != nil {
-		return fmt.Errorf("plugin %s: %w", s.name, err)
+		return err
 	}
 
 	for _, m := range ordered {
@@ -214,15 +243,15 @@ func (s *Store) Migrate(ctx context.Context, migrations []Migration) error {
 		}
 		// 1 migration = 1 transaction。途中で失敗したものが半分だけ適用された
 		// 状態で記録されると、次回の起動で復旧できない。
-		if err := applyOne(ctx, conn, m); err != nil {
-			return fmt.Errorf("plugin %s: migration %d に失敗しました: %w", s.name, m.Version, err)
+		if err := applyOne(ctx, db, m); err != nil {
+			return fmt.Errorf("migration %d に失敗しました: %w", m.Version, err)
 		}
 	}
 	return nil
 }
 
 // applyOne runs one migration and records it atomically.
-func applyOne(ctx context.Context, conn *sql.Conn, m Migration) error {
+func applyOne(ctx context.Context, conn Executor, m Migration) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -239,7 +268,7 @@ func applyOne(ctx context.Context, conn *sql.Conn, m Migration) error {
 }
 
 // appliedVersions reads the versions already recorded.
-func appliedVersions(ctx context.Context, conn *sql.Conn) (map[int]struct{}, error) {
+func appliedVersions(ctx context.Context, conn Executor) (map[int]struct{}, error) {
 	rows, err := conn.QueryContext(ctx, `SELECT version FROM schema_migrations`)
 	if err != nil {
 		return nil, fmt.Errorf("適用済み migration を読めません: %w", err)

@@ -96,3 +96,28 @@ func TestSurface_RealPluginPackage(t *testing.T) {
 	assert.Contains(t, got, "const APIVersion")
 	assert.Contains(t, got, "func Register(Definition)")
 }
+
+// **plugintest も追跡対象に入っていること。** 公開パッケージなので export が
+// 増えれば semver の対象になる。テスト用だからと外すと、そこだけ黙って育つ。
+func TestTrackedDirs_IncludesPluginTest(t *testing.T) {
+	assert.Contains(t, TrackedDirs, "plugin")
+	assert.Contains(t, TrackedDirs, "plugin/plugintest")
+}
+
+func TestSurfaceAll_PrefixesByPackage(t *testing.T) {
+	got, err := SurfaceAll("../..", TrackedDirs)
+	require.NoError(t, err)
+
+	assert.Contains(t, got, "plugin: const APIVersion")
+	assert.Contains(t, got, "plugin/plugintest: func New(*testing.T) *Harness")
+
+	// 並びが決定的であること。
+	for i := 1; i < len(got); i++ {
+		assert.LessOrEqual(t, got[i-1], got[i])
+	}
+}
+
+func TestSurfaceAll_PropagatesError(t *testing.T) {
+	_, err := SurfaceAll("../..", []string{"absent-package"})
+	require.Error(t, err)
+}

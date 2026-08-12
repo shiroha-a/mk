@@ -20,12 +20,12 @@ import (
 )
 
 func main() {
-	dir := flag.String("dir", pluginspec.DefaultDir, "対象パッケージのディレクトリ")
+	root := flag.String("root", ".", "リポジトリのルート")
 	out := flag.String("out", pluginspec.DefaultGolden, "golden の出力先")
 	write := flag.Bool("write", false, "golden を更新する")
 	flag.Parse()
 
-	surface, err := pluginspec.Surface(*dir)
+	surface, err := pluginspec.SurfaceAll(*root, pluginspec.TrackedDirs)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "pluginspec:", err)
 		os.Exit(1)

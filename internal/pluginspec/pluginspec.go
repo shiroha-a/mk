@@ -13,6 +13,7 @@ import (
 	"go/token"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 )
@@ -20,8 +21,32 @@ import (
 // DefaultDir is the package whose surface is tracked.
 const DefaultDir = "plugin"
 
+// TrackedDirs are every public package a plugin may import, relative to the
+// repository root.
+//
+// **plugintest も対象にする。** 公開パッケージである以上、export が増えれば
+// semver の対象になる。テスト用だからと外すと、そこだけ黙って育つ。
+var TrackedDirs = []string{"plugin", "plugin/plugintest"}
+
 // DefaultGolden is where the snapshot lives.
 const DefaultGolden = "internal/entitycompat/testdata/golden_plugin_surface.txt"
+
+// SurfaceAll returns the combined surface of dirs, each entry prefixed with
+// its package path so the golden stays readable.
+func SurfaceAll(root string, dirs []string) ([]string, error) {
+	var out []string
+	for _, d := range dirs {
+		entries, err := Surface(filepath.Join(root, d))
+		if err != nil {
+			return nil, err
+		}
+		for _, e := range entries {
+			out = append(out, d+": "+e)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
 
 // Surface returns the sorted list of exported identifiers in the package.
 //

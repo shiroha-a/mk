@@ -26,7 +26,7 @@ import (
 func TestPluginSurfaceDrift(t *testing.T) {
 	root := repoRoot(t)
 
-	got, err := pluginspec.Surface(filepath.Join(root, pluginspec.DefaultDir))
+	got, err := pluginspec.SurfaceAll(root, pluginspec.TrackedDirs)
 	require.NoError(t, err)
 	require.NotEmpty(t, got, "公開面が空になっている (解析に失敗した可能性)")
 
