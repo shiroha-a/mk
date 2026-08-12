@@ -261,8 +261,13 @@ func TestWriteFrontend_GeneratesAliasesRelativeToViteConfig(t *testing.T) {
 	require.NoError(t, json.Unmarshal(raw, &m))
 
 	// **絶対パスにしないこと。** 生成した環境でしかビルドできない成果物になる
-	// (docker build は別の場所に展開される)。
-	assert.Equal(t, "../../../../plugins/ui/frontend", m.Aliases["@mkplugin/ui"])
+	// (docker build は別の場所に展開される)。vite.config 側が __dirname で
+	// 絶対パスへ解決する。
+	//
+	// **エントリファイルまで指すこと。** ディレクトリだと rolldown が index を
+	// 自動解決せず "Is a directory" で落ちる (tsconfig の paths は解決するので
+	// 型チェックでは気付けない、実際に本番ビルドで踏んだ)。
+	assert.Equal(t, "../../../../plugins/ui/frontend/index.ts", m.Aliases["@mkplugin/ui"])
 	assert.Equal(t, []string{"../../../../plugins"}, m.Allow)
 	for _, v := range m.Aliases {
 		assert.False(t, filepath.IsAbs(v), "絶対パスを書かない")

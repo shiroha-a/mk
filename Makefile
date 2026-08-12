@@ -358,7 +358,9 @@ e2e-submodule-init: ## submodule を初期化 (本家フロントエンドの取
 # 系)、pnpm 11 は previous install (node_modules) を消す前に prompt を出す挙動が
 # default。docker run は TTY 無し起動なので prompt が出せず ERR_PNPM_ABORTED_
 # REMOVE_MODULES_DIR_NO_TTY で abort する。CI=true で skip させる。
-e2e-frontend-build: ## フロントエンドをビルド (本番の bind-mount 先を上書きするので注意)
+# plugins を先に走らせる。生成物が無いとプラグインの frontend が取り込まれず、
+# backend にだけ入った片肺の状態になる (#2479)。
+e2e-frontend-build: plugins ## フロントエンドをビルド (本番の bind-mount 先を上書きするので注意)
 	docker run --rm -e CI=true -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/third_party/misskey \
 		$(E2E_NODE_IMAGE) \
 		bash -lc "corepack enable && corepack prepare pnpm@latest --activate && pnpm install --frozen-lockfile && pnpm build"

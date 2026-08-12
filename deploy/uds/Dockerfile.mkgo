@@ -49,9 +49,15 @@ RUN test -f third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji
      echo "Run: make uds-frontend-build (installs third_party/misskey node_modules)" && exit 1)
 
 # Go の build cache + module cache を BuildKit cache mount として永続化 (#432)。
+#
+# plugins/ に置かれたプラグインをビルドに取り込む (#2480)。生成物は gitignore
+# されているので、ここで生成しないと **本番の image だけプラグイン無しになる**。
+# frontend 側にはプラグインが入っているのに backend に無い、という片肺の状態は
+# 症状から原因に辿り着きにくい。
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags="-s -w" -o /app/built/misskey ./cmd/misskey \
+    GOWORK=off go run ./tools/pluginbuild \
+ && go build -trimpath -ldflags="-s -w" -o /app/built/misskey ./cmd/misskey \
  && go build -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate
 
 FROM alpine:3.21

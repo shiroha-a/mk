@@ -176,10 +176,15 @@ func writeFrontend(root string, found []discovered) error {
 		Allow   []string          `json:"allow"`
 	}{Aliases: map[string]string{}, Allow: []string{}}
 
-	// vite.config からの相対パスにする。絶対パスを書くと、生成した環境でしか
+	// vite.config からの**相対**パスで書く。絶対パスを書くと、生成した環境でしか
 	// ビルドできない成果物になる (docker build は別の場所に展開される)。
+	// vite.config 側が __dirname で絶対パスへ解決する。
+	//
+	// **エントリファイルまで指す。** ディレクトリを指すと rolldown が index を
+	// 自動解決せず "Is a directory" で落ちる (tsconfig の paths は解決するので、
+	// 型チェックだけでは気付けない)。
 	for _, p := range withFrontend {
-		rel, err := filepath.Rel(frontendSrcRelToFront, filepath.Join(p.dir, "frontend"))
+		rel, err := filepath.Rel(frontendSrcRelToFront, filepath.Join(p.dir, frontendEntry))
 		if err != nil {
 			return fmt.Errorf("plugin %s の frontend パスを解決できません: %w", p.name, err)
 		}
