@@ -309,6 +309,27 @@ func TestListUserTables_ReturnsExpected(t *testing.T) {
 	assert.True(t, found["user"], "user table should be present")
 }
 
+// **プラグインの schema にあるテーブルを拾わないこと。**
+//
+// 拾うと、本体のテーブルとして TRUNCATE しようとして search_path の外で解決
+// できずに失敗する。実際に本家 backend e2e が reset-db 500 で落ちた (#2477)。
+//
+// プラグインのデータを消さないのは意図どおり。reset-db は mk-go 本体の状態を
+// 初期化するもので、プラグインの後片付けはプラグイン自身のテストの責務。
+func TestListUserTables_IgnoresPluginSchema(t *testing.T) {
+	requireContainers(t)
+
+	require.NoError(t, testPg.DB.Exec(`CREATE SCHEMA IF NOT EXISTS plugin_resetprobe`).Error)
+	require.NoError(t, testPg.DB.Exec(`CREATE TABLE IF NOT EXISTS plugin_resetprobe.statuses (id int)`).Error)
+	t.Cleanup(func() {
+		_ = testPg.DB.Exec(`DROP SCHEMA IF EXISTS plugin_resetprobe CASCADE`).Error
+	})
+
+	tables, err := listUserTables(context.Background(), testPg.DB)
+	require.NoError(t, err)
+	assert.NotContains(t, tables, "statuses")
+}
+
 func TestListUserTables_ContextCanceled(t *testing.T) {
 	requireContainers(t)
 

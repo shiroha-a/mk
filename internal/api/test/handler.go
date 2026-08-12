@@ -134,13 +134,21 @@ func resetTables(ctx context.Context, db *gorm.DB) error {
 // current PostgreSQL database. The query mirrors Misskey 本家の
 // packages/backend/src/misc/reset-db.ts.
 func listUserTables(ctx context.Context, db *gorm.DB) ([]string, error) {
+	// **public schema だけを対象にする。**
+	//
+	// プラグインは自分の schema (plugin_<name>) を持つ (#2481)。schema を問わず
+	// 集めると、そこにあるテーブルを本体のものとして TRUNCATE しようとし、
+	// search_path の外なので解決できずに失敗する (#2477 で e2e が落ちた)。
+	//
+	// プラグインのデータを消さないのは意図どおり。reset-db は mk-go 本体の
+	// 状態を初期化するためのもので、プラグインの後片付けはプラグイン自身の
+	// テストの責務。
 	const query = `
 		SELECT relname AS table_name
 		FROM pg_class C
 		LEFT JOIN pg_namespace N ON (N.oid = C.relnamespace)
-		WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+		WHERE nspname = 'public'
 			AND C.relkind = 'r'
-			AND nspname !~ '^pg_toast'
 	`
 	var names []string
 	if err := db.WithContext(ctx).Raw(query).Scan(&names).Error; err != nil {
