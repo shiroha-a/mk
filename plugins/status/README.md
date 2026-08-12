@@ -42,6 +42,8 @@ plugins:
 | `API` | **凍結された利用者の分を出さない**。判断を mk-go に任せる |
 | `StatusError` | 文字数超過を利用者に伝える（利用者が直せるエラー） |
 | スロット 2 種 | 設定画面とプロフィール |
+| `host.adminPage` | 管理画面に統計を出す |
+| `Request.IsModerator` | **管理用 API を自分で守る**。画面を隠すだけでは守れない |
 | `plugintest` | ルートとジョブのテスト |
 
 `plugin.Blob`（バイナリ応答）だけは使っていない。画像を返す例は [docs/plugins/authoring.md](../../docs/plugins/authoring.md) を参照。

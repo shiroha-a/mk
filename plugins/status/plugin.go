@@ -201,6 +201,22 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 		}, nil
 	})
 
+	// 管理用。**画面を出すだけでは守れない** — Router は認証の有無しか見ないので、
+	// ハンドラ側で必ず権限を確認する。
+	r.POST("/admin/stats", func(req plugin.Request) (any, error) {
+		if !req.IsModerator() {
+			return nil, plugin.Errorf(http.StatusForbidden, "権限がありません")
+		}
+		var total, expiring int
+		if err := db.QueryRowContext(req.Context(), `
+			SELECT count(*), count(*) FILTER (WHERE expires_at IS NOT NULL)
+			FROM statuses
+		`).Scan(&total, &expiring); err != nil {
+			return nil, err
+		}
+		return map[string]any{"total": total, "expiring": expiring}, nil
+	})
+
 	return nil
 }
 

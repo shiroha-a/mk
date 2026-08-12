@@ -213,6 +213,42 @@ export default definePlugin({
 
 **位置は意味で定義されている。** upstream がコンポーネント名を変えても壊れない。
 
+### 独自ページ
+
+```ts
+host.page({
+	path: '/',
+	component: TopPage,
+	navTitle: 'マイプラグイン',              // 省くとナビには出さない
+	navIcon: 'ti ti-device-gamepad',
+});
+```
+
+`/plugin/<name><path>` に生える。**名前空間を切るのは意図的**で、本体のパスと混ざると upstream が同名のページを足したときに衝突する。
+
+`navTitle` を指定するとサイドバーに項目が出る。ページはあるがナビには出したくない（別の画面から遷移させる）場合は省く。
+
+### 管理画面
+
+```ts
+host.adminPage({ path: '/', component: AdminPage });
+```
+
+`/admin/plugin/<name><path>` に生える。**モデレーター以上にしか表示されない**（`/admin` の配下に入るため）。
+
+> **画面を隠すのは UI の都合でしかない。** バックエンドは別途守ること。
+
+```go
+r.POST("/admin/stats", func(req plugin.Request) (any, error) {
+	if !req.IsModerator() {
+		return nil, plugin.Errorf(http.StatusForbidden, "権限がありません")
+	}
+	...
+})
+```
+
+`Request.IsModerator()` / `IsAdministrator()` が使える。**未認証・判定不能なときは false** を返す（判定できないときに通すと、権限の穴が「動いているように見える」形で残る）。
+
 ### 2 つの形式
 
 ```ts
@@ -294,6 +330,8 @@ type Request interface
   Param(string) string
   Query(string) string
   UserID() string
+  IsModerator() bool
+  IsAdministrator() bool
 
 type Storage interface
   DB() *sql.DB
@@ -332,9 +370,12 @@ func Registered() []Definition
 definePlugin(def)
 host.name / host.me
 host.slot(name, renderer)
+host.page({ path, component, navTitle?, navIcon? })
+host.adminPage({ path, component })
 host.api<T>(endpoint, params)
 
 型: SlotName / SlotUser / SlotContext / SlotMount / SlotComponent / SlotRenderer
+    PluginPage / PageRegistration
 再公開: MkInput / MkButton / MkFolder / MkLoading
 ```
 
@@ -347,6 +388,7 @@ host.api<T>(endpoint, params)
 | `plugin-api.ts` に無いコンポーネントを import する | upstream のリファクタで黙って壊れる |
 | 取得元の `Content-Type` をそのまま `Blob` に流す | ブラウザの MIME 推測で意図しない解釈をされる |
 | 素の `go` で goroutine を起動する | panic でプロセスごと落ちる。`ctx.Go()` を使う |
+| 管理用の API を `IsModerator()` で守らない | 画面を隠しても API は誰でも叩ける |
 
 ## 公開と互換性
 

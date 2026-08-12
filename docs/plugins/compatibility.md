@@ -9,6 +9,8 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 | Go | `plugin/` と `plugin/plugintest/` |
 | TypeScript | `third_party/misskey/packages/frontend/src/plugin-api.ts` |
 | HTTP | `/api/plugin/<name>/` の名前空間 |
+| ページ | `/plugin/<name>/` と `/admin/plugin/<name>/` の名前空間 |
+| ナビ | `navbarItemDef` の `plugin:<name>` キー |
 | DB | `plugin_<name>` schema と、そこへ渡す `*sql.DB` |
 | 設定 | `.config/default.yml` の `plugins:` セクション |
 
@@ -62,6 +64,7 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 | `model.*` | DB モデルが契約になり、migration が打てなくなる |
 | ActivityPub 関連 | 不具合の症状が他人のサーバー側に出る。**後から塞げない** |
 | repository / service | 可視性判定などのアプリケーション側のガードを迂回できる |
+| ルーターの定義そのもの | プラグインが本体のパスを奪える。名前空間を切った登録だけを許す |
 
 ## drift gate
 

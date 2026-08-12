@@ -7,6 +7,7 @@ import { definePlugin } from '@/plugin-api.js';
 import { initApi } from './api.js';
 import StatusCard from './StatusCard.vue';
 import StatusSettings from './StatusSettings.vue';
+import AdminStats from './AdminStats.vue';
 
 export default definePlugin({
 	name: 'status',
@@ -22,5 +23,11 @@ export default definePlugin({
 		if (host.me != null) {
 			host.slot('settings:profile', { component: StatusSettings });
 		}
+
+		// 管理画面。/admin/plugin/status で開く。
+		//
+		// **画面が出るのはモデレーター以上だが、それは UI の都合でしかない。**
+		// バックエンド側は Request.IsModerator() で自分で守っている。
+		host.adminPage({ path: '/', component: AdminStats });
 	},
 });

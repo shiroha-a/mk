@@ -11,6 +11,14 @@
 | プラグインを**開発する** | [開発環境](development.md) — `make plugin-dev` と HMR |
 | mk-go 本体を**変える** | [互換性ポリシー](compatibility.md) — 公開面を広げてよい条件 |
 
+プラグインができるのは、
+
+- 独自の API エンドポイント (`/api/plugin/<name>/...`)
+- 自分の PostgreSQL schema と定期ジョブ
+- プロフィール / 設定画面への描画
+- **独自ページ** (`/plugin/<name>/...`) とナビゲーション項目
+- **管理画面** (`/admin/plugin/<name>/...`)
+
 動く実例は [`plugins/status/`](../../plugins/status/)。外部サービスに依存しないので、組み込んで動かしながら読める。
 
 ## 仕組みの要点
