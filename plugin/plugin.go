@@ -48,6 +48,15 @@ type Definition struct {
 	// Must equal [APIVersion].
 	APIVersion int
 
+	// Migrations are applied to the plugin's schema before Routes and Jobs
+	// run. May be nil.
+	//
+	// **ここで宣言する。** Routes / Jobs の中で [Storage.Migrate] を呼ぶと、
+	// ロール分割 (#2459) したときに片方でしか走らない。Routes 側だけに書くと
+	// queue 専用プロセスがテーブルの無い schema でジョブを回すことになる。
+	// 宣言にしておけば mk-go がどちらのロールでも必ず適用する。
+	Migrations []Migration
+
 	// Routes registers HTTP endpoints. Called only in processes that serve
 	// HTTP. May be nil.
 	//

@@ -73,6 +73,15 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		}
 		pctx.storage = storage
 
+		// **ロールに関係なく、callback より先に適用する。** Routes / Jobs の
+		// 中で呼ばせると、ロール分割したときに片方でしか走らず、queue 専用
+		// プロセスがテーブルの無い schema でジョブを回すことになる。
+		if len(def.Migrations) > 0 && storage != nil {
+			if err := storage.Migrate(context.Background(), def.Migrations); err != nil {
+				return fmt.Errorf("plugin %q: migration に失敗しました: %w", def.Name, err)
+			}
+		}
+
 		if def.Routes != nil && s.role.RunsServer() {
 			r := &pluginRouter{group: api.Group(pluginRoutePrefix + def.Name)}
 			if err := def.Routes(pctx, r); err != nil {
