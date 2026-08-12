@@ -8,6 +8,7 @@
 |---|---|
 | プラグインを**入れる** | [運営者向け](operating.md) — 導入・無効化・**権限の話** |
 | プラグインを**書く** | [作者向け](authoring.md) — 手順とリファレンス |
+| プラグインを**開発する** | [開発環境](development.md) — `make plugin-dev` と HMR |
 | mk-go 本体を**変える** | [互換性ポリシー](compatibility.md) — 公開面を広げてよい条件 |
 
 動く実例は [`plugins/status/`](../../plugins/status/)。外部サービスに依存しないので、組み込んで動かしながら読める。

@@ -2,7 +2,7 @@
 	update docker-update uds-update \
 	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
-	plugins \
+	plugins plugin-dev \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-e2e \
 	federation-misskey-down federation-misskey-logs \
@@ -142,6 +142,12 @@ endif
 ##@ 開発
 plugins: ## plugins/ を走査して組み込み用ファイルを生成 (#2480)
 	GOWORK=off go run ./tools/pluginbuild
+
+# プラグイン開発用。ソースを監視して 生成 → ビルド → 再起動 を繰り返す (#2477)。
+# frontend の HMR は別端末の Vite dev server が担う:
+#   cd third_party/misskey/packages/frontend && pnpm watch
+plugin-dev: ## プラグインを編集しながら動かす (PLUGIN=plugins/status)
+	GOWORK=off go run ./tools/plugindev $(if $(PLUGIN),-plugin $(PLUGIN),)
 
 build: plugins ## バイナリを ./built/misskey に生成
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/misskey

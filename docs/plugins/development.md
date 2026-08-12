@@ -1,0 +1,96 @@
+# プラグイン — 開発環境
+
+プラグインを編集しながら動かす手順 (#2477)。
+
+## backend だけを触る場合
+
+```bash
+make plugin-dev PLUGIN=plugins/status
+```
+
+プラグインのソースを監視し、変わったら**生成 → ビルド → 再起動**する。
+
+```
+==> 変更を検出: plugin.go
+plugin loaded name=status version=1.0.1 routes=true jobs=true migrations=1 schema=plugin_status
+```
+
+- `PLUGIN=` を省くと `plugins/` 全体を監視する
+- `-config` で設定ファイルを変えられる（既定は `.config/default.yml`）
+- 監視対象は**指定したディレクトリだけ**。mk-go 本体を触っている間に再起動し続けることはない
+- `MK_DEV=1` が自動で立つので、ビルド済みのフロントが残っていても Vite dev server を見に行く
+
+**開発用の設定ファイルを別に用意することを勧める。** 本番と同じ設定を使うと、本番の DB に接続してしまう。
+
+```bash
+cp .config/default.yml .config/dev.yml   # url / port / db を書き換える
+make plugin-dev PLUGIN=plugins/status -- -config .config/dev.yml
+```
+
+## frontend も触る場合
+
+別の端末で Vite dev server を立てる。
+
+```bash
+cd third_party/misskey/packages/frontend && pnpm watch
+```
+
+`make plugin-dev` 側が `MK_DEV=1` を立てているので、mk-go は `/vite/*` をここへ流す。プラグインの `.vue` / `.ts` を編集すると HMR が効く。
+
+プラグインのソースは `packages/frontend` の外にあるが、`mk-plugins.generated.json` の `allow` に `plugins/` が入るので dev server が配信できる（生成は `make plugins` か `make plugin-dev` が行う）。
+
+### node_modules の所有者に注意
+
+`make uds-frontend-build` / `make e2e-frontend-build` は **Docker の中で root として** `pnpm install` するため、`third_party/misskey/node_modules` が root 所有になる。この状態でローカルの `pnpm watch` を起動すると失敗する。
+
+```
+Error: EACCES: permission denied, open '.../node_modules/.vite-temp/vite.config.ts.timestamp-....mjs'
+```
+
+どちらかで回避する。
+
+```bash
+# A. 所有者を自分に移す (以後 Docker ビルドを使わないなら)
+sudo chown -R "$(id -un):$(id -gn)" third_party/misskey/node_modules
+
+# B. dev server も Docker で動かす
+docker run --rm -it -v "$(pwd)":/work -w /work/third_party/misskey/packages/frontend \
+  -p 5173:5173 node:22-bookworm npx vite --host
+```
+
+## 確認できること
+
+| | 見え方 |
+|---|---|
+| プラグインが読み込まれたか | 起動ログの `plugin loaded`（名前・版・ルート/ジョブの有無・migration 数・schema） |
+| 無効化されているか | `plugin disabled` |
+| 消したプラグインのデータ | `使われていないプラグインのデータが残っています` |
+| dev モードか | 起動時の警告と `-config-dump` の「frontend 配信元」 |
+
+## よくある詰まり
+
+**プラグインを置いたのに読み込まれない**
+
+`mk-plugin.yml` と `go.mod` の両方が要る。片方だけだと検出されない（`go.mod` が無い場合は明示的なエラーになる）。
+
+**フロントを再ビルドしたのに変わらない**
+
+mk-go は起動時に一度だけ manifest を読む。**ビルド後は必ず再起動する。** ブラウザ側の Service Worker も掴んでいることがあるのでハードリロードする。
+
+**プラグインを消したらビルドが落ちる**
+
+生成物が残っている。`make plugins` を実行すれば片付く（`GOWORK=off` が付いているので、壊れた `go.work` があっても動く）。
+
+**`toolchain not available` でビルドが止まる**
+
+`go.work` の Go の版が手元のものと違う。`make plugins` で作り直す（本体の `go.mod` から写す）。
+
+## テスト
+
+```bash
+cd plugins/status && go test ./...
+```
+
+PostgreSQL が要る（`TEST_DB_*` 環境変数、既定は `localhost:5432` の `misskey_test`）。
+
+`plugin/plugintest` の使い方は[作者向け](authoring.md#テスト)を参照。

@@ -59,6 +59,15 @@ var Plugin = plugin.Definition{
 
 名前は URL path / queue の task type / PostgreSQL schema の 3 箇所で使われるので、**小文字英数字とハイフン**のみ。
 
+## 開発しながら動かす
+
+```bash
+make plugin-dev PLUGIN=plugins/myplugin
+```
+
+ソースを監視して 生成 → ビルド → 再起動 を繰り返す。frontend の HMR を使うには
+Vite dev server も立てる。詳細は[開発環境](development.md)。
+
 ## 動く実例
 
 [`plugins/status/`](../../plugins/status/) が公開面のほとんどを使う。外部サービスに依存しないので、組み込んで動かしながら読める。

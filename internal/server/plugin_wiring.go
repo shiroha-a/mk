@@ -98,10 +98,15 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 			}
 		}
 
+		// schema も出す。プラグインのデータがどこにあるかを、運営者が
+		// ログだけで辿れるようにする (消したあとの残存データの説明に要る)。
+		schema, _ := pluginstore.SchemaName(def.Name)
 		slog.Info("plugin loaded",
 			"name", def.Name, "version", def.Version,
 			"routes", def.Routes != nil && s.role.RunsServer(),
-			"jobs", def.Jobs != nil && s.role.RunsQueue())
+			"jobs", def.Jobs != nil && s.role.RunsQueue(),
+			"migrations", len(def.Migrations),
+			"schema", schema)
 	}
 	return nil
 }
