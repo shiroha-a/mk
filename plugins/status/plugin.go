@@ -201,6 +201,78 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 		}, nil
 	})
 
+	// 一覧。プラグインの独自ページ (/plugin/status) が使う。
+	//
+	// 表示名は mk-go の API から引く。**プラグインは本体のテーブルを読まない**
+	// ので、user の情報はここでしか取れない (可視性やモデレーション状態の
+	// 判断も API 側が持っている)。
+	r.POST("/recent", func(req plugin.Request) (any, error) {
+		rows, err := db.QueryContext(req.Context(), `
+			SELECT user_id, text, updated_at FROM statuses
+			WHERE expires_at IS NULL OR expires_at > now()
+			ORDER BY updated_at DESC LIMIT 20
+		`)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close() //nolint:errcheck // 読み取りのみ
+
+		type entry struct {
+			UserID    string    `json:"userId"`
+			Text      string    `json:"text"`
+			UpdatedAt time.Time `json:"updatedAt"`
+			Username  string    `json:"username"`
+		}
+		var out []entry
+		var ids []string
+		for rows.Next() {
+			var e entry
+			if err := rows.Scan(&e.UserID, &e.Text, &e.UpdatedAt); err != nil {
+				return nil, err
+			}
+			out = append(out, e)
+			ids = append(ids, e.UserID)
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+		if len(out) == 0 {
+			return map[string]any{"items": []entry{}}, nil
+		}
+
+		// **1 回でまとめて引く。** 1 件ずつ呼ぶと利用者数だけリクエストが増え、
+		// レート制限にも掛かる。
+		raw, err := ctx.API().Anonymous().Call(req.Context(), "users/show",
+			map[string]any{"userIds": ids})
+		if err != nil {
+			// 表示名が引けなくても一覧自体は返す。
+			ctx.Logger().Warn("利用者の取得に失敗しました", "err", err)
+			return map[string]any{"items": out}, nil
+		}
+		var users []struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+		}
+		if err := json.Unmarshal(raw, &users); err == nil {
+			byID := map[string]string{}
+			for _, u := range users {
+				byID[u.ID] = u.Username
+			}
+			for i := range out {
+				out[i].Username = byID[out[i].UserID]
+			}
+			// API が返さなかった利用者 (凍結・削除済み) は伏せる。
+			filtered := out[:0]
+			for _, e := range out {
+				if e.Username != "" {
+					filtered = append(filtered, e)
+				}
+			}
+			out = filtered
+		}
+		return map[string]any{"items": out}, nil
+	})
+
 	// 管理用。**画面を出すだけでは守れない** — Router は認証の有無しか見ないので、
 	// ハンドラ側で必ず権限を確認する。
 	r.POST("/admin/stats", func(req plugin.Request) (any, error) {

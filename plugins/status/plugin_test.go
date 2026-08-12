@@ -66,14 +66,33 @@ func testDB(t *testing.T) *sql.DB {
 }
 
 // stubAPI answers users/show without a running mk-go.
-type stubAPI struct{ suspended bool }
+//
+// users/show は userId 単体だと object、userIds だと配列を返す。プラグインは
+// 両方を使い分けているので、stub も形を合わせる (合わせないと、実際には
+// 通らない経路を「通った」ことにしてしまう)。
+type stubAPI struct {
+	suspended bool
+	// known はまとめ引き (userIds) で返す利用者。空なら誰も返さない。
+	known map[string]string
+}
 
 func (a *stubAPI) Anonymous() plugin.Caller    { return &stubCaller{api: a} }
 func (a *stubAPI) AsUser(string) plugin.Caller { return &stubCaller{api: a} }
 
 type stubCaller struct{ api *stubAPI }
 
-func (c *stubCaller) Call(context.Context, string, any) (json.RawMessage, error) {
+func (c *stubCaller) Call(_ context.Context, _ string, params any) (json.RawMessage, error) {
+	if m, ok := params.(map[string]any); ok {
+		if ids, ok := m["userIds"].([]string); ok {
+			out := []map[string]any{}
+			for _, id := range ids {
+				if name, ok := c.api.known[id]; ok {
+					out = append(out, map[string]any{"id": id, "username": name})
+				}
+			}
+			return json.Marshal(out)
+		}
+	}
 	return json.Marshal(map[string]any{"isSuspended": c.api.suspended})
 }
 
@@ -219,6 +238,61 @@ func TestExpired_IsHiddenBeforePrune(t *testing.T) {
 	res, _ := h.Call(t, "POST /show", plugintest.Request{Body: `{"userId":"u1"}`})
 	if res.(map[string]any)["set"] != false {
 		t.Fatalf("期限切れは出さない: %+v", res)
+	}
+}
+
+// recentItems calls /recent and decodes the result via JSON.
+//
+// ハンドラの戻り値はパッケージ内の型なので、テストから直接 assert すると
+// 型に張り付く。実際にクライアントが見る形 (JSON) で確かめる。
+func recentItems(t *testing.T, h plugintest.Handlers) []map[string]any {
+	t.Helper()
+	res, err := h.Call(t, "POST /recent", plugintest.Request{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := json.Marshal(res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded struct {
+		Items []map[string]any `json:"items"`
+	}
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	return decoded.Items
+}
+
+func TestRecent_ReturnsUsernames(t *testing.T) {
+	h, _ := setup(t, &stubAPI{known: map[string]string{"u1": "alice"}})
+
+	if _, err := h.Call(t, "POST /me/set",
+		plugintest.Request{UserID: "u1", Body: `{"text":"作業中","duration":""}`}); err != nil {
+		t.Fatal(err)
+	}
+
+	items := recentItems(t, h)
+	if len(items) != 1 || items[0]["username"] != "alice" || items[0]["text"] != "作業中" {
+		t.Fatalf("想定と違う: %+v", items)
+	}
+}
+
+// **API が返さなかった利用者は伏せる。** 凍結・削除済みの分が残ると、
+// 消えたはずの文言が一覧に出続ける。
+func TestRecent_HidesUsersTheAPIDoesNotReturn(t *testing.T) {
+	h, _ := setup(t, &stubAPI{known: map[string]string{"u1": "alice"}})
+
+	for _, u := range []string{"u1", "gone"} {
+		if _, err := h.Call(t, "POST /me/set",
+			plugintest.Request{UserID: u, Body: `{"text":"x","duration":""}`}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	items := recentItems(t, h)
+	if len(items) != 1 || items[0]["userId"] != "u1" {
+		t.Fatalf("API が返さなかった利用者を伏せていない: %+v", items)
 	}
 }
 

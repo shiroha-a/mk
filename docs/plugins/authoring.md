@@ -213,28 +213,42 @@ export default definePlugin({
 
 **位置は意味で定義されている。** upstream がコンポーネント名を変えても壊れない。
 
-### 独自ページ
+### 独自ページ・管理画面
+
+**`setup` ではなく `definePlugin` で宣言する。**
 
 ```ts
-host.page({
-	path: '/',
-	component: TopPage,
-	navTitle: 'マイプラグイン',              // 省くとナビには出さない
-	navIcon: 'ti ti-device-gamepad',
+export default definePlugin({
+	name: 'myplugin',
+	pages: [
+		{ path: '/', component: TopPage, navTitle: 'マイプラグイン', navIcon: 'ti ti-puzzle' },
+		{ path: '/', component: AdminPage, admin: true },
+	],
+	setup(host) { ... },
 });
 ```
 
-`/plugin/<name><path>` に生える。**名前空間を切るのは意図的**で、本体のパスと混ざると upstream が同名のページを足したときに衝突する。
+| | パス |
+|---|---|
+| 通常 | `/plugin/<name><path>` |
+| `admin: true` | `/admin/plugin/<name><path>` |
 
-`navTitle` を指定するとサイドバーに項目が出る。ページはあるがナビには出したくない（別の画面から遷移させる）場合は省く。
+**名前空間を切るのは意図的**で、本体のパスと混ざると upstream が同名のページを足したときに衝突する。
 
-### 管理画面
+`navTitle` を指定すると**メニューに項目が出る**。
 
-```ts
-host.adminPage({ path: '/', component: AdminPage });
-```
+| | 出る場所 |
+|---|---|
+| 通常のページ | **「もっと」（ランチパッド）**。利用者が設定でサイドバーに常設できる |
+| `admin: true` | コントロールパネルの左メニュー（「プラグイン」の節） |
 
-`/admin/plugin/<name><path>` に生える。**モデレーター以上にしか表示されない**（`/admin` の配下に入るため）。
+**省くとルートは生えるがメニューには出ない。** 別の画面から遷移させる場合はそれでよいが、管理画面で省くと URL を直打ちするしかなくなる。
+
+> **既定のサイドバーには入らない。** サイドバーの並びは利用者ごとの設定 (`prefer.r.menu`) で決まり、そこに列挙された項目だけが描画される。プラグインが勝手に常設されると、利用者の持ち物を運営者が占領することになるので、そうしていない。欲しい利用者は「ナビゲーションバーを編集」から追加できる。
+
+> **なぜ宣言なのか。** ルーターは**モジュール読み込み時**に現在の URL を解決する。`setup` で登録すると、その時点では未登録なので**直接 URL を開いたときだけ 404 になる**（画面遷移では動くので気付きにくい）。宣言なら読み込み順に依存しない。
+
+管理画面は `/admin` の配下に入るので**モデレーター以上にしか表示されない**。
 
 > **画面を隠すのは UI の都合でしかない。** バックエンドは別途守ること。
 
@@ -369,10 +383,11 @@ func Registered() []Definition
 ```
 definePlugin(def)
 host.name / host.me
+definePlugin({ name, pages?, setup })
 host.slot(name, renderer)
-host.page({ path, component, navTitle?, navIcon? })
-host.adminPage({ path, component })
 host.api<T>(endpoint, params)
+
+PluginPage: { path, component, navTitle?, navIcon?, admin? }
 
 型: SlotName / SlotUser / SlotContext / SlotMount / SlotComponent / SlotRenderer
     PluginPage / PageRegistration
