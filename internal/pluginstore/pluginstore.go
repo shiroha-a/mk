@@ -101,6 +101,66 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// ListSchemas returns the plugin schemas that exist in the database.
+func ListSchemas(ctx context.Context, baseDSN string) ([]string, error) {
+	db, err := sql.Open("pgx", baseDSN)
+	if err != nil {
+		return nil, fmt.Errorf("pluginstore: 接続を開けません: %w", err)
+	}
+	defer db.Close() //nolint:errcheck // 使い捨て
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT schema_name FROM information_schema.schemata WHERE schema_name LIKE $1 ORDER BY schema_name`,
+		SchemaPrefix+"%")
+	if err != nil {
+		return nil, fmt.Errorf("pluginstore: schema 一覧を取得できません: %w", err)
+	}
+	defer rows.Close() //nolint:errcheck // 読み取りのみ
+
+	var out []string
+	for rows.Next() {
+		var s string
+		if err := rows.Scan(&s); err != nil {
+			return nil, fmt.Errorf("pluginstore: schema 一覧を読めません: %w", err)
+		}
+		out = append(out, s)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("pluginstore: schema 一覧を読めません: %w", err)
+	}
+	return out, nil
+}
+
+// OrphanSchemas returns the schemas that belong to no currently built-in plugin.
+//
+// **プラグインを消してもデータは自動では消さない。** カウンタと違って削除した
+// 行は復元できないので、一時的に外しただけの運用 (更新・切り分け) でデータが
+// 飛ぶ方が損害が大きい (fsck が孤児行を報告に留めているのと同じ理由、#2473)。
+//
+// 代わりに「残っていること」を見えるようにする。黙って残ると、運営者は自分の
+// DB に何があるか把握できなくなる。
+//
+// 突き合わせは**プラグイン名から schema 名を作る向き**で行う。schema 名から
+// プラグイン名へ戻すと、`plugin_game_info` が `game-info` と `game_info` の
+// どちらだったか判別できない (SchemaName が `-` を `_` に倒すため)。
+func OrphanSchemas(present []string, known []string) []string {
+	expected := make(map[string]struct{}, len(known))
+	for _, name := range known {
+		if schema, err := SchemaName(name); err == nil {
+			expected[schema] = struct{}{}
+		}
+	}
+
+	var out []string
+	for _, s := range present {
+		if _, ok := expected[s]; !ok {
+			out = append(out, s)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
 // Migration is one versioned schema change.
 type Migration struct {
 	Version int

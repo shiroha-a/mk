@@ -97,6 +97,31 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 	return nil
 }
 
+// warnOrphanPluginData reports plugin schemas with no matching built-in plugin.
+//
+// **プラグインを消してもデータは自動で消さない** (削除した行は復元できないので、
+// 一時的に外しただけの運用でデータが飛ぶ方が損害が大きい)。代わりに残っている
+// ことを起動時に知らせる。黙って残ると、運営者は自分の DB に何があるか把握
+// できなくなる。
+//
+// 検査に失敗しても起動は止めない。これは診断であって、動作の前提ではない。
+func (s *Server) warnOrphanPluginData(ctx context.Context, plugins []plugin.Definition) {
+	present, err := pluginstore.ListSchemas(ctx, s.config.DSN())
+	if err != nil {
+		slog.Warn("プラグインの残存データを確認できませんでした", "err", err)
+		return
+	}
+	known := make([]string, 0, len(plugins))
+	for _, d := range plugins {
+		known = append(known, d.Name)
+	}
+	for _, schema := range pluginstore.OrphanSchemas(present, known) {
+		slog.Warn("使われていないプラグインのデータが残っています",
+			"schema", schema,
+			"対処", "不要なら DROP SCHEMA \""+schema+"\" CASCADE で削除してください (自動では消しません)")
+	}
+}
+
 // requestHostFor extracts the Host header value to use for in-process API
 // calls. 絶対 URL を組み立てる handler があるので、空のままにしない。
 func requestHostFor(rawURL string) string {

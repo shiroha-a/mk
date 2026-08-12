@@ -3599,10 +3599,14 @@ func (s *Server) setupRoutes() {
 	// プラグインのルート (#2478)。catchall より前に登録する。
 	// Echo の radix tree は静的パスを wildcard より優先するので順序に依存
 	// しないが、「catchall の後ろに実ルートがある」形は読み手を惑わせる。
-	if err := s.setupPlugins(api, plugin.Registered(), s.dbBackedStorage()); err != nil {
+	registeredPlugins := plugin.Registered()
+	if err := s.setupPlugins(api, registeredPlugins, s.dbBackedStorage()); err != nil {
 		s.pluginSetupErr = err
 		return
 	}
+	// 消したプラグインのデータが残っていないかを知らせる (#2479)。
+	// 自動では消さないので、残っていること自体を見えるようにする。
+	s.warnOrphanPluginData(context.Background(), registeredPlugins)
 
 	// API catchall。
 	//

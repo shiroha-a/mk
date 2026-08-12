@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 
@@ -317,10 +318,57 @@ func TestClose_NilIsSafe(t *testing.T) {
 }
 
 func TestMigrate_ReportsClosedPool(t *testing.T) {
-	s, err := Open(baseDSN(), "storeclosed", 1)
-	require.NoError(t, err)
+	// openStore を使って後片付けを効かせる (schema を残すと DB に溜まる)。
+	s := openStore(t, "storeclosed")
 	require.NoError(t, s.Close())
 
-	err = s.Migrate(context.Background(), []Migration{{Version: 1, SQL: "SELECT 1"}})
+	err := s.Migrate(context.Background(), []Migration{{Version: 1, SQL: "SELECT 1"}})
+	require.Error(t, err)
+}
+
+// --- 残存データの検出 ---
+
+// **プラグインを消してもデータは自動で消さない。** 削除した行は復元できないので、
+// 一時的に外しただけの運用でデータが飛ぶ方が損害が大きい。代わりに残っている
+// ことを検出できるようにする。
+func TestOrphanSchemas(t *testing.T) {
+	present := []string{"plugin_gone", "plugin_game_info", "plugin_kept"}
+
+	got := OrphanSchemas(present, []string{"kept", "game-info"})
+	assert.Equal(t, []string{"plugin_gone"}, got)
+}
+
+// 突き合わせはプラグイン名から schema 名を作る向きで行う。逆向きだと
+// plugin_game_info が game-info だったか game_info だったか判別できない。
+func TestOrphanSchemas_HandlesHyphenatedNames(t *testing.T) {
+	assert.Empty(t, OrphanSchemas([]string{"plugin_game_info"}, []string{"game-info"}))
+}
+
+func TestOrphanSchemas_AllOrphanWhenNoPlugins(t *testing.T) {
+	assert.Equal(t, []string{"plugin_a", "plugin_b"},
+		OrphanSchemas([]string{"plugin_b", "plugin_a"}, nil))
+}
+
+// 不正な名前は突き合わせ対象にしない (SchemaName が拒否する)。
+func TestOrphanSchemas_IgnoresInvalidNames(t *testing.T) {
+	assert.Equal(t, []string{"plugin_x"}, OrphanSchemas([]string{"plugin_x"}, []string{"BAD"}))
+}
+
+func TestListSchemas(t *testing.T) {
+	s := openStore(t, "storelist")
+
+	got, err := ListSchemas(context.Background(), baseDSN())
+	require.NoError(t, err)
+	assert.Contains(t, got, s.Schema())
+
+	// public など本体の schema は拾わない。
+	for _, name := range got {
+		assert.True(t, strings.HasPrefix(name, SchemaPrefix), name)
+	}
+}
+
+func TestListSchemas_ReportsConnectionFailure(t *testing.T) {
+	_, err := ListSchemas(context.Background(),
+		"host=127.0.0.1 port=1 user=x password=x dbname=x sslmode=disable")
 	require.Error(t, err)
 }
