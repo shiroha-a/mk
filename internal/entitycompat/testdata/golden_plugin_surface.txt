@@ -28,6 +28,9 @@ plugin/plugintest: type Schedule struct
 plugin:   field APIError.Body json.RawMessage
 plugin:   field APIError.Endpoint string
 plugin:   field APIError.Status int
+plugin:   field Blob.Body []byte
+plugin:   field Blob.CacheControl string
+plugin:   field Blob.ContentType string
 plugin:   field Definition.APIVersion int
 plugin:   field Definition.Jobs func(Context, Jobs) error
 plugin:   field Definition.Migrations []Migration
@@ -69,6 +72,7 @@ plugin: func Register(Definition)
 plugin: func Registered() []Definition
 plugin: type API interface
 plugin: type APIError struct
+plugin: type Blob struct
 plugin: type Caller interface
 plugin: type Config interface
 plugin: type Context interface

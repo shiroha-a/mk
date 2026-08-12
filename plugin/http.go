@@ -22,8 +22,39 @@ type Router interface {
 }
 
 // Handler serves one plugin request. A nil result with a nil error yields
-// 204 No Content; otherwise the result is JSON-encoded with 200.
+// 204 No Content; a [Blob] result is written as-is; anything else is
+// JSON-encoded with 200.
 type Handler func(Request) (any, error)
+
+// Blob is a raw response body, for endpoints that do not return JSON.
+//
+// 主な用途は画像のプロキシ。本体の CSP は `img-src 'self' data: blob:` なので、
+// **外部の画像を <img> で直接読めない**。プラグインが同一オリジンで配信すれば
+// CSP を緩めずに済み、取得元にも優しい (キャッシュできる)。
+//
+//	return plugin.Blob{
+//	    ContentType:  "image/png",
+//	    Body:         data,
+//	    CacheControl: "public, max-age=86400",
+//	}, nil
+//
+// mk-go は `X-Content-Type-Options: nosniff` を必ず付ける。外部から取得した
+// ものをそのまま流す場合、ブラウザの MIME 推測で意図しない解釈をされるのを
+// 防ぐため。**ContentType は取得元の値をそのまま使わず、扱う型を決めて
+// 検証すること。**
+//
+// 応答の大きさは mk-go では制限しない。取得元からの読み込みは
+// `io.LimitReader` などでプラグイン側が必ず上限を設けること。
+type Blob struct {
+	// ContentType is sent as-is. 空なら application/octet-stream。
+	ContentType string
+
+	// Body is the response body.
+	Body []byte
+
+	// CacheControl sets the header when non-empty.
+	CacheControl string
+}
 
 // Request is the plugin-facing view of an HTTP request.
 //

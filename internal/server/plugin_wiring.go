@@ -302,8 +302,29 @@ func wrapPluginHandler(h plugin.Handler) echo.HandlerFunc {
 		if res == nil {
 			return c.NoContent(http.StatusNoContent)
 		}
+		if b, ok := res.(plugin.Blob); ok {
+			return writePluginBlob(c, b)
+		}
 		return c.JSON(http.StatusOK, res)
 	}
+}
+
+// writePluginBlob writes a raw plugin response.
+//
+// **nosniff を必ず付ける。** プラグインが外部から取得したものをそのまま流す
+// 用途 (画像プロキシ) を想定しているので、ブラウザの MIME 推測で意図しない
+// 解釈をされる余地を残さない。
+func writePluginBlob(c echo.Context, b plugin.Blob) error {
+	ct := b.ContentType
+	if ct == "" {
+		ct = echo.MIMEOctetStream
+	}
+	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
+	if b.CacheControl != "" {
+		// /api 配下には既定の Cache-Control が付くので上書きする。
+		c.Response().Header().Set("Cache-Control", b.CacheControl)
+	}
+	return c.Blob(http.StatusOK, ct, b.Body)
 }
 
 // --- Request ---

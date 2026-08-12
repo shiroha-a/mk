@@ -112,6 +112,56 @@ func TestWrapPluginHandler_WrappedStatusError(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "だめ")
 }
 
+// --- Blob ---
+
+// バイナリ応答は JSON エンコードせずそのまま書く。画像プロキシの用途。
+func TestWrapPluginHandler_Blob(t *testing.T) {
+	png := []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return plugin.Blob{
+			ContentType:  "image/png",
+			Body:         png,
+			CacheControl: "public, max-age=86400",
+		}, nil
+	}, "{}")
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, png, rec.Body.Bytes(), "JSON にせずそのまま返す")
+	assert.Equal(t, "image/png", rec.Header().Get("Content-Type"))
+	assert.Equal(t, "public, max-age=86400", rec.Header().Get("Cache-Control"))
+}
+
+// **nosniff を必ず付ける。** 外部から取得したものをそのまま流す用途なので、
+// ブラウザの MIME 推測で意図しない解釈をされる余地を残さない。
+func TestWrapPluginHandler_BlobAlwaysSetsNosniff(t *testing.T) {
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return plugin.Blob{Body: []byte("x")}, nil
+	}, "{}")
+
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	// ContentType 未指定なら octet-stream (推測させない)。
+	assert.Contains(t, rec.Header().Get("Content-Type"), echo.MIMEOctetStream)
+}
+
+// CacheControl 未指定なら /api 既定の Cache-Control を壊さない。
+func TestWrapPluginHandler_BlobWithoutCacheControl(t *testing.T) {
+	e := echo.New()
+	api := e.Group("/api")
+	api.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			c.Response().Header().Set("Cache-Control", "private, max-age=0")
+			return next(c)
+		}
+	})
+	api.GET("/b", wrapPluginHandler(func(plugin.Request) (any, error) {
+		return plugin.Blob{ContentType: "image/png", Body: []byte("x")}, nil
+	}))
+
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/b", nil))
+	assert.Equal(t, "private, max-age=0", rec.Header().Get("Cache-Control"))
+}
+
 // --- Request ---
 
 func TestPluginRequest_Accessors(t *testing.T) {
