@@ -226,6 +226,44 @@ func TestMigrate_ConcurrentIsSerialized(t *testing.T) {
 	assert.Equal(t, 1, applied, "重複して適用されない")
 }
 
+// Apply は Store を経由せず *sql.DB に直接適用する経路。plugin/plugintest が
+// これを使う — **フェイクが本番と違う挙動をしないように、実装を共有している**。
+func TestApply(t *testing.T) {
+	s := openStore(t, "storeapply")
+	ctx := context.Background()
+	ms := []Migration{{Version: 1, SQL: `CREATE TABLE t (id int)`}}
+
+	require.NoError(t, Apply(ctx, s.DB(), ms))
+	// 2 回目は飛ばす (Store.Migrate と同じ適用管理)。
+	require.NoError(t, Apply(ctx, s.DB(), ms))
+
+	var n int
+	require.NoError(t, s.DB().QueryRow(
+		`SELECT count(*) FROM information_schema.tables WHERE table_schema = $1 AND table_name = 't'`,
+		s.Schema()).Scan(&n))
+	assert.Equal(t, 1, n)
+
+	var applied int
+	require.NoError(t, s.DB().QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&applied))
+	assert.Equal(t, 1, applied, "重複して記録しない")
+}
+
+func TestApply_RejectsInvalidSet(t *testing.T) {
+	s := openStore(t, "storeapplybad")
+
+	err := Apply(context.Background(), s.DB(), []Migration{{Version: 0, SQL: "x"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "1 以上")
+}
+
+func TestApply_ReportsSQLFailure(t *testing.T) {
+	s := openStore(t, "storeapplyfail")
+
+	err := Apply(context.Background(), s.DB(), []Migration{{Version: 1, SQL: `SELECT bad_function()`}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "migration 1")
+}
+
 func TestValidateMigrations(t *testing.T) {
 	_, err := validateMigrations([]Migration{{Version: 0, SQL: "x"}})
 	assert.ErrorContains(t, err, "1 以上")
