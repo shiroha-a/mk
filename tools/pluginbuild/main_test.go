@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -187,6 +188,163 @@ func TestRenderRegistration(t *testing.T) {
 	assert.Contains(t, out, "plugin.Register(p0.Plugin)")
 	assert.Contains(t, out, "plugin.Register(p1.Plugin)")
 	assert.NotContains(t, out, "game-info.Plugin", "ハイフン入りの識別子を作らない")
+}
+
+// --- frontend ---
+
+// frontend/index.ts の有無で backend 専用かどうかを判定すること。
+func TestDiscover_DetectsFrontend(t *testing.T) {
+	root := t.TempDir()
+
+	dir := writePlugin(t, root, "withui", "example.com/withui", "name: withui\napiVersion: 1\n")
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, frontendEntry), []byte("export default {}"), 0o644))
+
+	writePlugin(t, root, "backonly", "example.com/backonly", "name: backonly\napiVersion: 1\n")
+
+	found, err := discover(root, "")
+	require.NoError(t, err)
+	require.Len(t, found, 2)
+
+	byName := map[string]discovered{}
+	for _, f := range found {
+		byName[f.name] = f
+	}
+	assert.True(t, byName["withui"].hasFrontend)
+	assert.False(t, byName["backonly"].hasFrontend)
+}
+
+func TestRenderFrontendList_Empty(t *testing.T) {
+	out := renderFrontendList(nil)
+	assert.Contains(t, out, "export const serverPlugins: PluginDefinition[] = [];")
+	assert.NotContains(t, out, "@mkplugin/")
+	assert.Contains(t, out, "DO NOT EDIT")
+}
+
+func TestRenderFrontendList_WithPlugins(t *testing.T) {
+	out := renderFrontendList([]discovered{{name: "a"}, {name: "game-info"}})
+
+	assert.Contains(t, out, `import p0 from '@mkplugin/a';`)
+	assert.Contains(t, out, `import p1 from '@mkplugin/game-info';`)
+	assert.Contains(t, out, "serverPlugins: PluginDefinition[] = [p0, p1];")
+}
+
+// **frontend を持たないプラグインだけの場合も生成物は空の形で書く。** 消すと
+// フォークにコミットしてある既定ファイルとの差分になり submodule が汚れる。
+func TestWriteFrontend_BackendOnlyStillWritesEmptyList(t *testing.T) {
+	root := fakeRepoWithFrontend(t)
+
+	require.NoError(t, writeFrontend(root, []discovered{{name: "x", hasFrontend: false}}))
+
+	ts, err := os.ReadFile(filepath.Join(root, frontendGeneratedTS))
+	require.NoError(t, err)
+	assert.Contains(t, string(ts), "= [];")
+
+	// alias も fs.allow も要らないので manifest は置かない。
+	assert.NoFileExists(t, filepath.Join(root, frontendManifestJSON))
+}
+
+func TestWriteFrontend_GeneratesAliasesRelativeToViteConfig(t *testing.T) {
+	root := fakeRepoWithFrontend(t)
+
+	require.NoError(t, writeFrontend(root, []discovered{
+		{name: "ui", dir: "plugins/ui", hasFrontend: true},
+	}))
+
+	raw, err := os.ReadFile(filepath.Join(root, frontendManifestJSON))
+	require.NoError(t, err)
+
+	var m struct {
+		Aliases map[string]string `json:"aliases"`
+		Allow   []string          `json:"allow"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &m))
+
+	// **絶対パスにしないこと。** 生成した環境でしかビルドできない成果物になる
+	// (docker build は別の場所に展開される)。
+	assert.Equal(t, "../../../../plugins/ui/frontend", m.Aliases["@mkplugin/ui"])
+	assert.Equal(t, []string{"../../../../plugins"}, m.Allow)
+	for _, v := range m.Aliases {
+		assert.False(t, filepath.IsAbs(v), "絶対パスを書かない")
+	}
+}
+
+// **プラグインを全部消したら生成物も戻す。** 残すと、消したはずのプラグインを
+// import したままの TS でビルドが落ちる。
+func TestRun_RemovingAllPluginsResetsFrontend(t *testing.T) {
+	root := fakeRepoWithFrontend(t)
+
+	// まず frontend 付きで生成する。
+	dir := writePlugin(t, filepath.Join(root, "plugins"), "ui", "example.com/ui", validMarker())
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, frontendEntry), []byte("export default {}"), 0o644))
+	require.NoError(t, run(root, "plugins"))
+	require.FileExists(t, filepath.Join(root, frontendManifestJSON))
+
+	// 消して再生成。
+	require.NoError(t, os.RemoveAll(filepath.Join(root, "plugins", "ui")))
+	require.NoError(t, run(root, "plugins"))
+
+	ts, err := os.ReadFile(filepath.Join(root, frontendGeneratedTS))
+	require.NoError(t, err)
+	assert.Contains(t, string(ts), "= [];")
+	assert.NotContains(t, string(ts), "@mkplugin/ui")
+	assert.NoFileExists(t, filepath.Join(root, frontendManifestJSON))
+}
+
+// manifest が書けないときはエラーにする (黙って alias 無しで進めない)。
+func TestWriteFrontend_UnwritableManifestIsError(t *testing.T) {
+	root := fakeRepoWithFrontend(t)
+	// manifest の書き込み先をディレクトリにして失敗させる。
+	require.NoError(t, os.MkdirAll(filepath.Join(root, frontendManifestJSON), 0o755))
+
+	err := writeFrontend(root, []discovered{{name: "ui", dir: "plugins/ui", hasFrontend: true}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), frontendManifestJSON)
+}
+
+// 生成 TS が書けないときもエラーにする。
+func TestWriteFrontend_UnwritableTSIsError(t *testing.T) {
+	root := fakeRepoWithFrontend(t)
+	require.NoError(t, os.RemoveAll(filepath.Join(root, frontendGeneratedTS)))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, frontendGeneratedTS), 0o755))
+
+	err := writeFrontend(root, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), frontendGeneratedTS)
+}
+
+// mustRel は固定値同士なので失敗しないが、失敗しても呼び出し元を壊さない。
+func TestMustRel(t *testing.T) {
+	assert.Equal(t, filepath.Join("..", "..", "..", "..", "plugins"),
+		mustRel(frontendSrcRelToFront, "plugins"))
+	// 相対化できない組み合わせでは target をそのまま返す。
+	assert.Equal(t, "/abs", mustRel("rel", "/abs"))
+}
+
+// fakeRepoWithFrontend adds the fork's frontend directories to a fake repo.
+func fakeRepoWithFrontend(t *testing.T) string {
+	t.Helper()
+	root := fakeRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(root, filepath.Dir(frontendGeneratedTS)), 0o755))
+	return root
+}
+
+// submodule 未取得でも Go だけのビルドは通す。frontend を持たないプラグインしか
+// 無ければ、書けなくても問題は無い。
+func TestWriteFrontend_MissingForkIsSkippedWhenNoFrontend(t *testing.T) {
+	root := fakeRepo(t) // frontend ディレクトリを作らない
+	require.NoError(t, writeFrontend(root, []discovered{{name: "x", hasFrontend: false}}))
+}
+
+// 一方 frontend を持つプラグインがあるのに書けないなら**黙って通さない**。
+// 機能が片肺で組み込まれ、動かない理由が分からなくなる。
+func TestWriteFrontend_MissingForkIsErrorWhenFrontendNeeded(t *testing.T) {
+	root := fakeRepo(t)
+
+	err := writeFrontend(root, []discovered{{name: "ui", dir: "plugins/ui", hasFrontend: true}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "submodule")
 }
 
 // --- run ---
