@@ -19,6 +19,16 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # 同梱サンプルは別 module なので `./...` に含まれない。plugin/ の公開面を
+      # 壊したときにここで落ちる — **同梱している理由がこれ** (別リポジトリだと
+      # 壊れても気付けない)。
+      #
+      # frontend の生成は submodule が要るので、ここでは backend だけを見る
+      # (TS 側は frontend-check が見る)。
+      - name: Build bundled sample plugin
+        working-directory: plugins/status
+        run: go build ./...
+
   # 各shardは並列に走るが、checkは `test-shards (N)` という名前で個別に登録される。
   # ブランチ保護が `test` という名前のcheckを要求するため、後段の `test` job が
   # 全shardを束ねて単一の `test` checkを公開する (needs: test-shards)。
@@ -251,6 +261,15 @@ jobs:
       - name: Build workspace packages
         working-directory: third_party/misskey
         run: pnpm build-pre && pnpm -r build
+
+      # 同梱サンプルの frontend を取り込んでから型を見る。これが無いと
+      # plugin-api.ts を壊してもサンプル側では検出されない。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Generate plugin artifacts
+        run: make plugins
 
       - name: Type check (vue-tsc)
         run: make frontend-check
