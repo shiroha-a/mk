@@ -2,7 +2,7 @@
 	update docker-update uds-update \
 	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
-	plugins plugin-dev \
+	plugins plugins-all plugin-dev \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-e2e \
 	federation-misskey-down federation-misskey-logs \
@@ -142,6 +142,11 @@ endif
 ##@ 開発
 plugins: ## plugins/ を走査して組み込み用ファイルを生成 (#2480)
 	GOWORK=off go run ./tools/pluginbuild
+
+# CI の frontend-check が使う。同梱サンプルは mk-plugin.yml で既定無効なので、
+# 既定の走査では frontend の検証対象から外れてしまう (#2495)。
+plugins-all: ## disabled のプラグインも含めて生成 (CI 検証用)
+	GOWORK=off go run ./tools/pluginbuild -include-disabled
 
 # プラグイン開発用。ソースを監視して 生成 → ビルド → 再起動 を繰り返す (#2477)。
 # frontend の HMR は別端末の Vite dev server が担う:

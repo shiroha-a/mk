@@ -46,7 +46,25 @@ func main() {
 	configPath := flag.String("config", ".config/default.yml", "mk-go の設定ファイル")
 	flag.Parse()
 
-	watchDir := *pluginDir
+	watch := *pluginDir
+	if watch != "" && filepath.IsAbs(watch) {
+		// pluginbuild の -include-disabled-dir はリポジトリ相対の完全一致で
+		// 照合する。絶対パスのまま渡すと監視は動くのに disabled の包含だけが
+		// 黙って外れ、「置いたのに読み込まれない」型の故障になるので直す。
+		wd, err := os.Getwd()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "plugindev:", err)
+			os.Exit(1)
+		}
+		rel, err := filepath.Rel(wd, watch)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			fmt.Fprintf(os.Stderr, "plugindev: -plugin はリポジトリ内のディレクトリをリポジトリ相対で指定してください: %s\n", watch)
+			os.Exit(1)
+		}
+		watch = rel
+	}
+
+	watchDir := watch
 	if watchDir == "" {
 		watchDir = "plugins"
 	}
@@ -55,7 +73,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	d := &dev{watchDir: watchDir, configPath: *configPath}
+	d := &dev{watchDir: watchDir, pluginDir: watch, configPath: *configPath}
 	if err := d.run(); err != nil && !errors.Is(err, context.Canceled) {
 		fmt.Fprintln(os.Stderr, "plugindev:", err)
 		os.Exit(1)
@@ -63,7 +81,10 @@ func main() {
 }
 
 type dev struct {
-	watchDir   string
+	watchDir string
+	// pluginDir is the explicitly named plugin (-plugin), or "" when watching
+	// all of plugins/.
+	pluginDir  string
 	configPath string
 
 	mu      sync.Mutex
@@ -149,7 +170,18 @@ func (d *dev) rebuildAndRestart(ctx context.Context) error {
 	//
 	// GOWORK=off にするのは、消したプラグインを参照する go.work が残っていると
 	// 生成ツール自体が起動できなくなるため。
-	if err := d.exec(ctx, "go", []string{"run", "./tools/pluginbuild"}, "GOWORK=off"); err != nil {
+	args := []string{"run", "./tools/pluginbuild"}
+	if d.pluginDir != "" {
+		// -plugin で名指しした監視対象は mk-plugin.yml で disabled でも含める。
+		// 既定無効の同梱サンプルを、tracked ファイルの編集 (= dirty tree) を
+		// 強いずに開発できるようにするため。
+		//
+		// **名指しした 1 つに限る** (-include-disabled にしない)。disabled で
+		// 退避中の壊れたプラグインまで巻き込むと、無関係な開発の生成・ビルドが
+		// 止まる。
+		args = append(args, "-include-disabled-dir", d.pluginDir)
+	}
+	if err := d.exec(ctx, "go", args, "GOWORK=off"); err != nil {
 		return fmt.Errorf("生成に失敗しました: %w", err)
 	}
 

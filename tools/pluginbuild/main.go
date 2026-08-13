@@ -63,6 +63,12 @@ type manifest struct {
 	// is wrong. これが無いと Go のコンパイルエラーか起動時 panic になり、
 	// 「プラグインが古い」ことが読み取れない。
 	APIVersion int `yaml:"apiVersion"`
+	// Disabled excludes the plugin from the build entirely.
+	//
+	// 設定ファイルの `enabled: false` (実行時スキップ) と違い、バイナリにも
+	// フロントのバンドルにも入らない。同梱サンプルの既定値や、今はビルド
+	// できないプラグインの一時退避に使う。
+	Disabled bool `yaml:"disabled"`
 }
 
 // discovered is one plugin found under plugins/.
@@ -72,21 +78,43 @@ type discovered struct {
 	name       string
 	// hasFrontend reports whether frontend/index.ts exists.
 	hasFrontend bool
+	// disabled records the marker's disabled flag (only reachable when an
+	// include option covers the plugin; otherwise it never gets this far).
+	disabled bool
+}
+
+// include controls which disabled plugins are still built.
+type include struct {
+	// all includes every disabled plugin. CI がサンプルを検証し続けるための
+	// 経路 (make plugins-all)。
+	all bool
+	// dir includes only the plugin at this repo-relative directory.
+	// plugin-dev が**監視対象だけ**を含めるための経路。all にしてしまうと、
+	// disabled で退避中の壊れたプラグインまで巻き込んで、無関係な開発の
+	// 生成・ビルドが止まる。
+	dir string
+}
+
+// covers reports whether a disabled plugin at rel should be included anyway.
+func (in include) covers(rel string) bool {
+	return in.all || (in.dir != "" && filepath.Clean(in.dir) == filepath.Clean(rel))
 }
 
 func main() {
 	root := flag.String("root", ".", "リポジトリのルート")
 	dir := flag.String("dir", "plugins", "プラグインを探すディレクトリ")
+	includeDisabled := flag.Bool("include-disabled", false, "disabled: true のプラグインも含める (CI がサンプルを検証するための経路)")
+	includeDisabledDir := flag.String("include-disabled-dir", "", "このディレクトリのプラグインだけは disabled でも含める (plugin-dev が監視対象を動かすための経路)")
 	flag.Parse()
 
-	if err := run(*root, *dir); err != nil {
+	if err := run(*root, *dir, include{all: *includeDisabled, dir: *includeDisabledDir}); err != nil {
 		fmt.Fprintln(os.Stderr, "pluginbuild:", err)
 		os.Exit(1)
 	}
 }
 
-func run(root, pluginDir string) error {
-	found, err := discover(root, pluginDir)
+func run(root, pluginDir string, inc include) error {
+	found, err := discover(root, pluginDir, inc)
 	if err != nil {
 		return err
 	}
@@ -128,7 +156,11 @@ func run(root, pluginDir string) error {
 	}
 
 	for _, p := range found {
-		fmt.Printf("pluginbuild: %s (%s, frontend=%t)\n", p.name, p.modulePath, p.hasFrontend)
+		note := ""
+		if p.disabled {
+			note = ", disabled だが明示指定で含めた"
+		}
+		fmt.Printf("pluginbuild: %s (%s, frontend=%t%s)\n", p.name, p.modulePath, p.hasFrontend, note)
 	}
 	return nil
 }
@@ -241,7 +273,7 @@ func renderFrontendList(found []discovered) string {
 // **dir はリポジトリルートからの相対パスで返す。** go.work の `use` は go.work
 // の位置からの相対で解決されるので、ルート込みの絶対パスを書くと別の場所で
 // ビルドできない成果物になる。
-func discover(root, pluginDir string) ([]discovered, error) {
+func discover(root, pluginDir string, inc include) ([]discovered, error) {
 	entries, err := os.ReadDir(filepath.Join(root, pluginDir))
 	if os.IsNotExist(err) {
 		return nil, nil
@@ -273,6 +305,15 @@ func discover(root, pluginDir string) ([]discovered, error) {
 		if err := yaml.Unmarshal(raw, &m); err != nil {
 			return nil, fmt.Errorf("%s を解釈できません: %w", markerPath, err)
 		}
+
+		// disabled は**検証より先に**見る。apiVersion が合わなくなった等の
+		// 「今はビルドできない」プラグインを、ディレクトリを消さずに外せる
+		// ようにするため。後ろに置くと、無効化したのにビルドが止まる。
+		if m.Disabled && !inc.covers(rel) {
+			fmt.Printf("pluginbuild: %s は無効化されています (mk-plugin.yml の disabled: true)\n", e.Name())
+			continue
+		}
+
 		if m.APIVersion != plugin.APIVersion {
 			return nil, fmt.Errorf(
 				"%s: apiVersion %d はこの mk-go (apiVersion %d) と互換がありません",
@@ -295,6 +336,7 @@ func discover(root, pluginDir string) ([]discovered, error) {
 		found = append(found, discovered{
 			dir: rel, modulePath: modPath, name: name,
 			hasFrontend: ferr == nil,
+			disabled:    m.Disabled,
 		})
 	}
 

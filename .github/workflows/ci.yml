@@ -263,13 +263,24 @@ jobs:
         run: pnpm build-pre && pnpm -r build
 
       # 同梱サンプルの frontend を取り込んでから型を見る。これが無いと
-      # plugin-api.ts を壊してもサンプル側では検出されない。
+      # plugin-api.ts を壊してもサンプル側では検出されない。サンプルは
+      # mk-plugin.yml で既定無効 (#2495) なので、disabled も含める
+      # plugins-all を使う。
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
 
       - name: Generate plugin artifacts
-        run: make plugins
+        run: make plugins-all
+
+      # 生成した glue (plugins_generated.go) を含む統合バイナリのコンパイルも
+      # 見る。build job の standalone build (plugins/status 単体) では、Register
+      # の配線や workspace の依存解決の崩れは検出できない。サンプルが既定無効に
+      # なったことで `make build` を経由する他の workflow からもこの経路が
+      # 消えたため、ここで担保する (#2495)。生成された go.work を使うので
+      # GOWORK は無効化しない。
+      - name: Build integrated binary with sample plugin
+        run: go build -o /dev/null ./cmd/misskey
 
       - name: Type check (vue-tsc)
         run: make frontend-check

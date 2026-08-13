@@ -73,6 +73,14 @@ docker run --rm -it -v "$(pwd)":/work -w /work/third_party/misskey/packages/fron
 
 `mk-plugin.yml` と `go.mod` の両方が要る。片方だけだと検出されない（`go.mod` が無い場合は明示的なエラーになる）。
 
+**`make plugin-dev` では動くのに `make build` に入らない**
+
+`mk-plugin.yml` に `disabled: true` が残っていないかを見る。`PLUGIN=` で名指しした監視対象は disabled でも含めて動かす（既定無効の同梱サンプルを tracked ファイルの編集なしで開発するため）が、本番ビルドは含めない。
+
+**既定無効のプラグインを開発したいのに読み込まれない**
+
+`PLUGIN=` で名指しする（`make plugin-dev PLUGIN=plugins/status`）。disabled を含めるのは名指しした 1 つだけで、`PLUGIN=` 無しの全体監視は本番ビルドと同じく disabled を含めない。壊れた状態で `disabled: true` にして退避してあるプラグインを、無関係な開発が巻き込んで止まらないようにするため。
+
 **フロントを再ビルドしたのに変わらない**
 
 mk-go は起動時に一度だけ manifest を読む。**ビルド後は必ず再起動する。** ブラウザ側の Service Worker も掴んでいることがあるのでハードリロードする。

@@ -1,2 +1,6 @@
 name: status
 apiVersion: 1
+# 同梱サンプルなので既定ではビルドに含めない。使う場合はこの行を消して
+# 再ビルドする。CI は -include-disabled で検証を続けるので、この既定値で
+# サンプルが壊れても検出される。
+disabled: true

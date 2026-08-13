@@ -36,7 +36,7 @@ func TestDiscover_FindsPlugins(t *testing.T) {
 	root := t.TempDir()
 	writePlugin(t, root, "hello", "example.com/hello", validMarker())
 
-	found, err := discover(root, "")
+	found, err := discover(root, "", include{})
 	require.NoError(t, err)
 	require.Len(t, found, 1)
 	assert.Equal(t, "example.com/hello", found[0].modulePath)
@@ -44,7 +44,7 @@ func TestDiscover_FindsPlugins(t *testing.T) {
 }
 
 func TestDiscover_MissingDirIsEmpty(t *testing.T) {
-	found, err := discover(t.TempDir(), "absent")
+	found, err := discover(t.TempDir(), "absent", include{})
 	require.NoError(t, err)
 	assert.Empty(t, found)
 }
@@ -56,7 +56,7 @@ func TestDiscover_SkipsUnmarkedDirectories(t *testing.T) {
 	writePlugin(t, root, "scratch", "example.com/scratch", "")
 	require.NoError(t, os.WriteFile(filepath.Join(root, "README.md"), []byte("x"), 0o644))
 
-	found, err := discover(root, "")
+	found, err := discover(root, "", include{})
 	require.NoError(t, err)
 	assert.Empty(t, found)
 }
@@ -67,7 +67,7 @@ func TestDiscover_MissingGoModIsError(t *testing.T) {
 	root := t.TempDir()
 	writePlugin(t, root, "bad", "", validMarker())
 
-	_, err := discover(root, "")
+	_, err := discover(root, "", include{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "go.mod がありません")
 	assert.Contains(t, err.Error(), "独立した Go module")
@@ -79,7 +79,7 @@ func TestDiscover_APIVersionMismatch(t *testing.T) {
 	root := t.TempDir()
 	writePlugin(t, root, "old", "example.com/old", "name: old\napiVersion: 999\n")
 
-	_, err := discover(root, "")
+	_, err := discover(root, "", include{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "apiVersion 999")
 	assert.Contains(t, err.Error(), "互換がありません")
@@ -90,7 +90,7 @@ func TestDiscover_MissingAPIVersionIsRejected(t *testing.T) {
 	root := t.TempDir()
 	writePlugin(t, root, "x", "example.com/x", "name: x\n")
 
-	_, err := discover(root, "")
+	_, err := discover(root, "", include{})
 	require.Error(t, err)
 }
 
@@ -98,7 +98,7 @@ func TestDiscover_BrokenMarkerIsError(t *testing.T) {
 	root := t.TempDir()
 	writePlugin(t, root, "x", "example.com/x", "\tname: [unclosed\n")
 
-	_, err := discover(root, "")
+	_, err := discover(root, "", include{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "解釈できません")
 }
@@ -108,7 +108,7 @@ func TestDiscover_FallsBackToDirName(t *testing.T) {
 	root := t.TempDir()
 	writePlugin(t, root, "dirname", "example.com/x", "apiVersion: 1\n")
 
-	found, err := discover(root, "")
+	found, err := discover(root, "", include{})
 	require.NoError(t, err)
 	require.Len(t, found, 1)
 	assert.Equal(t, "dirname", found[0].name)
@@ -121,7 +121,7 @@ func TestDiscover_IsDeterministicallyOrdered(t *testing.T) {
 		writePlugin(t, root, n, "example.com/"+n, validMarker())
 	}
 
-	found, err := discover(root, "")
+	found, err := discover(root, "", include{})
 	require.NoError(t, err)
 	require.Len(t, found, 3)
 
@@ -202,7 +202,7 @@ func TestDiscover_DetectsFrontend(t *testing.T) {
 
 	writePlugin(t, root, "backonly", "example.com/backonly", "name: backonly\napiVersion: 1\n")
 
-	found, err := discover(root, "")
+	found, err := discover(root, "", include{})
 	require.NoError(t, err)
 	require.Len(t, found, 2)
 
@@ -283,12 +283,12 @@ func TestRun_RemovingAllPluginsResetsFrontend(t *testing.T) {
 	dir := writePlugin(t, filepath.Join(root, "plugins"), "ui", "example.com/ui", validMarker())
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, frontendEntry), []byte("export default {}"), 0o644))
-	require.NoError(t, run(root, "plugins"))
+	require.NoError(t, run(root, "plugins", include{}))
 	require.FileExists(t, filepath.Join(root, frontendManifestJSON))
 
 	// 消して再生成。
 	require.NoError(t, os.RemoveAll(filepath.Join(root, "plugins", "ui")))
-	require.NoError(t, run(root, "plugins"))
+	require.NoError(t, run(root, "plugins", include{}))
 
 	ts, err := os.ReadFile(filepath.Join(root, frontendGeneratedTS))
 	require.NoError(t, err)
@@ -368,7 +368,7 @@ func TestRun_GeneratesFiles(t *testing.T) {
 	root := fakeRepo(t)
 	writePlugin(t, filepath.Join(root, "plugins"), "hello", "example.com/hello", validMarker())
 
-	require.NoError(t, run(root, "plugins"))
+	require.NoError(t, run(root, "plugins", include{}))
 
 	work, err := os.ReadFile(filepath.Join(root, "go.work"))
 	require.NoError(t, err)
@@ -388,7 +388,7 @@ func TestRun_RemovesStaleArtifacts(t *testing.T) {
 	require.NoError(t, os.WriteFile(genPath, []byte("stale"), 0o644))
 	require.NoError(t, os.WriteFile(workPath, []byte("stale"), 0o644))
 
-	require.NoError(t, run(root, "plugins"))
+	require.NoError(t, run(root, "plugins", include{}))
 
 	assert.NoFileExists(t, genPath)
 	assert.NoFileExists(t, workPath)
@@ -397,15 +397,15 @@ func TestRun_RemovesStaleArtifacts(t *testing.T) {
 // プラグインが無い状態で 2 回走らせても失敗しない (消すものが無い)。
 func TestRun_NoPluginsIsIdempotent(t *testing.T) {
 	root := fakeRepo(t)
-	require.NoError(t, run(root, "plugins"))
-	require.NoError(t, run(root, "plugins"))
+	require.NoError(t, run(root, "plugins", include{}))
+	require.NoError(t, run(root, "plugins", include{}))
 }
 
 func TestRun_PropagatesDiscoverError(t *testing.T) {
 	root := fakeRepo(t)
 	writePlugin(t, filepath.Join(root, "plugins"), "bad", "", validMarker())
 
-	err := run(root, "plugins")
+	err := run(root, "plugins", include{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "go.mod")
 }
@@ -429,7 +429,7 @@ func TestDiscover_UnreadableMarkerIsError(t *testing.T) {
 	dir := filepath.Join(root, "x")
 	require.NoError(t, os.MkdirAll(filepath.Join(dir, markerFile), 0o755))
 
-	_, err := discover(root, "")
+	_, err := discover(root, "", include{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "読めません")
 }
@@ -440,7 +440,7 @@ func TestDiscover_UnreadableDirIsError(t *testing.T) {
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "plugins"), []byte("x"), 0o644))
 
-	_, err := discover(root, "plugins")
+	_, err := discover(root, "plugins", include{})
 	require.Error(t, err)
 }
 
@@ -450,7 +450,7 @@ func TestRun_MissingRootGoModIsError(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "cmd", "misskey"), 0o755))
 	writePlugin(t, filepath.Join(root, "plugins"), "hello", "example.com/hello", validMarker())
 
-	err := run(root, "plugins")
+	err := run(root, "plugins", include{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "go.mod")
 }
@@ -463,7 +463,7 @@ func TestRun_UnwritableTargetIsError(t *testing.T) {
 	// cmd/misskey/ を作らないので generated file が書けない。
 	writePlugin(t, filepath.Join(root, "plugins"), "hello", "example.com/hello", validMarker())
 
-	err := run(root, "plugins")
+	err := run(root, "plugins", include{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), generatedFile)
 }
@@ -483,7 +483,152 @@ func TestMarkerAPIVersionMatchesPackage(t *testing.T) {
 	root := t.TempDir()
 	writePlugin(t, root, "x", "example.com/x", "apiVersion: "+strconv.Itoa(plugin.APIVersion)+"\n")
 
-	found, err := discover(root, "")
+	found, err := discover(root, "", include{})
 	require.NoError(t, err)
 	assert.Len(t, found, 1)
+}
+
+// --- disabled ---
+
+func TestDiscover_SkipsDisabled(t *testing.T) {
+	root := t.TempDir()
+	writePlugin(t, root, "off", "example.com/off", validMarker()+"disabled: true\n")
+	writePlugin(t, root, "on", "example.com/on", validMarker())
+
+	found, err := discover(root, "", include{})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, "example.com/on", found[0].modulePath)
+}
+
+// **disabled は検証より先に判定する。** apiVersion が合わない・go.mod が無い等の
+// 「今はビルドできない」プラグインを、ディレクトリを消さずに外せること。
+// 後ろで判定すると、無効化したのにビルドが止まる。
+func TestDiscover_DisabledSkipsValidation(t *testing.T) {
+	root := t.TempDir()
+	// apiVersion 不一致かつ go.mod 無し。有効ならどちらもエラーになる。
+	writePlugin(t, root, "broken", "", "name: broken\napiVersion: 999\ndisabled: true\n")
+
+	found, err := discover(root, "", include{})
+	require.NoError(t, err)
+	assert.Empty(t, found)
+}
+
+// -include-disabled は CI がサンプルを検証し続けるための経路。
+func TestDiscover_IncludeDisabled(t *testing.T) {
+	root := t.TempDir()
+	writePlugin(t, root, "off", "example.com/off", validMarker()+"disabled: true\n")
+
+	found, err := discover(root, "", include{all: true})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, "example.com/off", found[0].modulePath)
+	assert.True(t, found[0].disabled)
+}
+
+// -include-disabled で含める場合は検証も通常どおり適用される。CI で検証する
+// ための経路なので、ここが緩いと意味が無い。
+func TestDiscover_IncludeDisabledStillValidates(t *testing.T) {
+	root := t.TempDir()
+	writePlugin(t, root, "old", "example.com/old", "name: old\napiVersion: 999\ndisabled: true\n")
+
+	_, err := discover(root, "", include{all: true})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "互換がありません")
+}
+
+func TestRun_IncludeDisabledGeneratesFiles(t *testing.T) {
+	root := fakeRepo(t)
+	writePlugin(t, filepath.Join(root, "plugins"), "off", "example.com/off", validMarker()+"disabled: true\n")
+
+	require.NoError(t, run(root, "plugins", include{all: true}))
+
+	work, err := os.ReadFile(filepath.Join(root, "go.work"))
+	require.NoError(t, err)
+	assert.Contains(t, string(work), "./plugins/off")
+}
+
+// -include-disabled-dir は plugin-dev の経路。**名指しした 1 つだけ**を含める。
+// 全包含にすると、disabled で退避中の壊れたプラグインまで巻き込んで、無関係な
+// 開発の生成・ビルドが止まる。
+func TestDiscover_IncludeDisabledDir(t *testing.T) {
+	root := t.TempDir()
+	writePlugin(t, root, "target", "example.com/target", validMarker()+"disabled: true\n")
+	// apiVersion 不一致 + go.mod 無しの「退避中」プラグイン。名指ししていない
+	// ので検証されず、エラーにもならないこと。
+	writePlugin(t, root, "parked", "", "name: parked\napiVersion: 999\ndisabled: true\n")
+
+	found, err := discover(root, "", include{dir: "target"})
+	require.NoError(t, err)
+	require.Len(t, found, 1)
+	assert.Equal(t, "example.com/target", found[0].modulePath)
+	assert.True(t, found[0].disabled)
+}
+
+func TestInclude_Covers(t *testing.T) {
+	assert.True(t, include{all: true}.covers("plugins/x"))
+	// 末尾スラッシュ (シェル補完由来) を正規化して照合する。
+	assert.True(t, include{dir: "plugins/x/"}.covers("plugins/x"))
+	assert.False(t, include{dir: "plugins/y"}.covers("plugins/x"))
+	assert.False(t, include{}.covers("plugins/x"))
+}
+
+// **frontend 付きプラグインを disabled にしたら frontend 生成物も戻す。**
+// 残すと、無効化したはずのプラグインを import したままの TS で Vite ビルドが
+// 落ちる (operating.md の「バンドルにも入らない」の担保)。
+func TestRun_DisablingFrontendPluginResetsFrontend(t *testing.T) {
+	root := fakeRepoWithFrontend(t)
+	dir := writePlugin(t, filepath.Join(root, "plugins"), "ui", "example.com/ui", validMarker())
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "frontend"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, frontendEntry), []byte("export default {}"), 0o644))
+	require.NoError(t, run(root, "plugins", include{}))
+	require.FileExists(t, filepath.Join(root, frontendManifestJSON))
+
+	// disabled にして再生成。
+	require.NoError(t, os.WriteFile(filepath.Join(dir, markerFile),
+		[]byte(validMarker()+"disabled: true\n"), 0o644))
+	require.NoError(t, run(root, "plugins", include{}))
+
+	ts, err := os.ReadFile(filepath.Join(root, frontendGeneratedTS))
+	require.NoError(t, err)
+	assert.Contains(t, string(ts), "= [];")
+	assert.NotContains(t, string(ts), "@mkplugin/ui")
+	assert.NoFileExists(t, filepath.Join(root, frontendManifestJSON))
+	assert.NoFileExists(t, filepath.Join(root, "go.work"))
+}
+
+// enabled と disabled の混在で、生成物に disabled が載らないことを run レベルで
+// 固定する (discover レベルの検証だけだと生成の配線が漏れても気付けない)。
+func TestRun_MixedDisabledExcludedFromWorkspace(t *testing.T) {
+	root := fakeRepo(t)
+	writePlugin(t, filepath.Join(root, "plugins"), "on", "example.com/on", validMarker())
+	writePlugin(t, filepath.Join(root, "plugins"), "off", "example.com/off", validMarker()+"disabled: true\n")
+
+	require.NoError(t, run(root, "plugins", include{}))
+
+	work, err := os.ReadFile(filepath.Join(root, "go.work"))
+	require.NoError(t, err)
+	assert.Contains(t, string(work), "./plugins/on")
+	assert.NotContains(t, string(work), "./plugins/off")
+
+	gen, err := os.ReadFile(filepath.Join(root, generatedFile))
+	require.NoError(t, err)
+	assert.NotContains(t, string(gen), "example.com/off")
+}
+
+// 残っているプラグインが disabled だけなら「プラグイン無し」と同じ扱いで、
+// 前回の生成物を片付ける。残すと無効化したはずのプラグインが組み込まれた
+// ままになる。
+func TestRun_OnlyDisabledPluginsResetsArtifacts(t *testing.T) {
+	root := fakeRepo(t)
+	writePlugin(t, filepath.Join(root, "plugins"), "off", "example.com/off", validMarker()+"disabled: true\n")
+	genPath := filepath.Join(root, generatedFile)
+	workPath := filepath.Join(root, "go.work")
+	require.NoError(t, os.WriteFile(genPath, []byte("stale"), 0o644))
+	require.NoError(t, os.WriteFile(workPath, []byte("stale"), 0o644))
+
+	require.NoError(t, run(root, "plugins", include{}))
+
+	assert.NoFileExists(t, genPath)
+	assert.NoFileExists(t, workPath)
 }
