@@ -1000,6 +1000,42 @@ func (h *Handler) Outbox(c echo.Context) error {
 	return writeActivityJSON(c, page)
 }
 
+// NoteActivity handles GET /notes/:id/activity (upstream
+// ActivityPubServerService の /notes/:note/activity、#2507)。
+//
+// renderer は Create / Announce の activity id として `<note URI>/activity` を
+// **外向きに広告している** (RenderCreate / RenderAnnounce)。この route が無いと、
+// 広告した id を dereference しに来た他サーバーが 404 を受け取る。
+func (h *Handler) NoteActivity(c echo.Context) error {
+	// upstream も vary(Accept) を立てる。この route は AP 専用で HTML 変種は
+	// 無く、Accept で分岐しない点も upstream と同じ。
+	c.Response().Header().Set("Vary", "Accept")
+	if h.federationDisabled() {
+		return c.NoContent(http.StatusForbidden)
+	}
+	n, err := h.queryService.Show(nil, c.Param("id"))
+	if err != nil {
+		return c.NoContent(http.StatusNotFound)
+	}
+	// upstream は userHost: IsNull で**ローカル専用** (リモートノートの activity
+	// はこのサーバーの発行物ではないので、redirect でなく 404)。visibility ∈
+	// {public, home} は CanSeeNote(nil) が担保し、localOnly はここで弾く
+	// (Note と同じ)。
+	if n.UserHost != nil || n.LocalOnly {
+		return c.NoContent(http.StatusNotFound)
+	}
+	author := n.User
+	if author == nil {
+		// preload が無い経路でも activity は author の ID しか使わない。
+		author = &model.User{ID: n.UserID}
+	}
+	activity := h.packOutboxActivity(author, n)
+	// 単体で返すので @context を付け直す (outbox 埋め込みでは外している)。
+	activitypub.AddContext(activity)
+	c.Response().Header().Set("Cache-Control", "public, max-age=180")
+	return writeActivityJSON(c, activity)
+}
+
 // packOutboxActivity renders an outbox item: a pure renote becomes an Announce,
 // everything else a Create (upstream packActivity, #1878)。embed するので
 // per-activity @context は外す (collection 側が持つ)。
@@ -1020,6 +1056,11 @@ func (h *Handler) packOutboxActivity(author *model.User, n *model.Note) any {
 // renoteTargetURI resolves a renote target note id to its AP URI
 // (local → /notes/<id>, remote → stored uri)。
 func (h *Handler) renoteTargetURI(targetID string) string {
+	// 未配線なら解決不能として扱う (呼び出し側が Create にフォールバックする)。
+	// panic で 500 になるより shape の valid な Create を返す方が良い。
+	if h.noteRepo == nil {
+		return ""
+	}
 	t, err := h.noteRepo.FindByID(targetID)
 	if err != nil || t == nil {
 		return ""

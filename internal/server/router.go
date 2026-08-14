@@ -2229,6 +2229,9 @@ func (s *Server) setupRoutes() {
 		}
 		return apHandler.Note(c)
 	})
+	// Create / Announce の activity id (renderer が広告する <note URI>/activity)
+	// の dereference 先 (#2507)。upstream と同じくローカルノート専用。
+	s.echo.GET("/notes/:id/activity", apHandler.NoteActivity)
 	// ユーザーフィード (#2345)。upstream ClientServerService と同じく
 	// /@:user.rss / .atom / .json を返す。
 	feedHost := s.config.URL

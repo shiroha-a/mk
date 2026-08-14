@@ -1768,3 +1768,84 @@ func TestUser_FederationDisabled_BrowserStillRedirects(t *testing.T) {
 	require.NoError(t, h.User(c))
 	assert.Equal(t, http.StatusFound, rec.Code, "browser path must redirect even when federation disabled")
 }
+
+// --- NoteActivity (#2507) ---
+
+// renderer が広告する <note URI>/activity の dereference 先。通常ノートは
+// Create、@context・Cache-Control・Vary 付きで返る。
+func TestNoteActivity_LocalNoteIsCreate(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	text := "hello"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &text,
+	}
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.NoteActivity(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"Create"`)
+	assert.Contains(t, rec.Body.String(), "/notes/n1/activity")
+	assert.Contains(t, rec.Body.String(), "@context")
+	assert.Equal(t, "public, max-age=180", rec.Header().Get("Cache-Control"))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+}
+
+// pure renote は Announce になる (upstream packActivity)。
+func TestNoteActivity_PureRenoteIsAnnounce(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	// renote target の解決 (renoteTargetURI) は outbox と共有の noteRepo を使う。
+	h.SetNoteRepo(noteRepo)
+	target := "t1"
+	noteRepo.Notes["t1"] = &model.Note{
+		ID: "t1", UserID: "u2", Visibility: model.NoteVisibilityPublic,
+	}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, RenoteID: &target,
+	}
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.NoteActivity(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"Announce"`)
+	assert.Contains(t, rec.Body.String(), "/notes/t1")
+}
+
+// upstream は userHost: IsNull のローカル専用。リモートノートの activity は
+// このサーバーの発行物ではないので、redirect でなく 404。
+func TestNoteActivity_RemoteIs404(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	host := "remote.example"
+	uri := "https://remote.example/notes/abc"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		UserHost: &host, URI: &uri,
+	}
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.NoteActivity(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// localOnly / followers-only / 不在は 404 (upstream の query filter 相当)。
+func TestNoteActivity_HiddenNotesAre404(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	noteRepo.Notes["lo"] = &model.Note{
+		ID: "lo", UserID: "u1", Visibility: model.NoteVisibilityPublic, LocalOnly: true,
+	}
+	noteRepo.Notes["fo"] = &model.Note{
+		ID: "fo", UserID: "u1", Visibility: model.NoteVisibilityFollowers,
+	}
+	for _, id := range []string{"lo", "fo", "ghost"} {
+		c, rec := newReq(t, "id", id)
+		require.NoError(t, h.NoteActivity(c))
+		assert.Equalf(t, http.StatusNotFound, rec.Code, "id=%s", id)
+	}
+}
+
+func TestNoteActivity_FederationDisabledIs403(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic,
+	}
+	h.SetFederationGate(apShowHostBlocker{fedDisabled: true}, "local.example")
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.NoteActivity(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+}

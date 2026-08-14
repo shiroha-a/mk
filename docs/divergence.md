@@ -3,7 +3,7 @@
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
 - 基準: **mk-go 1.1.1** ⇔ Misskey TS `2026.7.0`
-- 最終更新: 2026-08-09
+- 最終更新: 2026-08-14
 
 > ベースラインを固定したのは 1.0.0 (= Misskey TS `2026.7.0` 追従完了時点)。以降の 1.1.x は
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもの。したがって
@@ -189,6 +189,8 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | Collection unroll 制限 | `core/federation/processor.go` | 安全側。深さ 1、item の host 一致を要求 (spoofing 防止)、URI 文字列 item は fetch 増幅回避で skip |
 | `published` の異常値 fallback | `core/federation/published_time.go` | mk-go 独自 hardening。clock skew 5min / 過去 10 年 floor |
 | outbound User-Agent | `config/config.go` | `mk-go/<ver> (<url>)` |
+| AP object id の https スキーム非強制 | `core/federation/resolver.go` | **意図的な未実装** (#2507)。upstream の `checkHttps` は非 https の object id を reject する (テスト環境除く)。mk-go は id/attributedTo の host 一致 + SSRF guard で検証するがスキームは見ない。http ベースの e2e stack (dropin / federation) が前提のため、強制するなら upstream 同様の環境ゲートが要る。ブラウザ / AP クライアントは非 https の Location を追わないため実害は限定的 |
+| AP dereference route の一部欠落 | `server/router.go` | **保留** (#2507)。`/follows/<follower>/<id>` (Follow activity id)・`/users/<id>/likes/<id>` (Like id)・`/emojis/<name>` (emoji tag id) は外向きに広告するが dereference route が無く 404。Follow / Like の id は Accept / Undo の相関にしか使われず他実装が dereference する事例は稀、emoji は tag に inline embed 済みで dereference 不要のため。`<note URI>/activity` は #2507 で実装済み。signature の keyId (`/users/<id>#main-key`) は actor 本体の fragment なので actor route で解決され、upstream の `/users/:user/publickey` 相当は不要 |
 
 ---
 
