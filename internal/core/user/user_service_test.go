@@ -1283,3 +1283,30 @@ func TestService_UpdateProfile_SkipsUsertagHookWhenDescriptionOmitted(t *testing
 	require.NoError(t, err)
 	assert.False(t, hook.called)
 }
+
+// ShowByUsernameDB は resolver が注入されていても**絶対に呼ばない** (#2506)。
+// 公開 AP route (/@:acct) から使うため、DB miss が未認証 GET 起点の
+// WebFinger + actor fetch に化けてはならない。
+func TestService_ShowByUsernameDB_NeverResolves(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	svc := user.NewService(repo, nil, nil, nil)
+	resolver := &stubRemoteResolver{}
+	svc.SetRemoteUserResolver(resolver)
+
+	host := "remote.example"
+	_, err := svc.ShowByUsernameDB("ghost", &host)
+	require.ErrorIs(t, err, user.ErrUserNotFound)
+	assert.Empty(t, resolver.calls, "DB miss で resolver を呼ばない")
+}
+
+// DB にあるものは host 付きでもそのまま返す。
+func TestService_ShowByUsernameDB_FindsCachedRemote(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	host := "remote.example"
+	repo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice", Host: &host}
+	svc := user.NewService(repo, nil, nil, nil)
+
+	got, err := svc.ShowByUsernameDB("alice", &host)
+	require.NoError(t, err)
+	assert.Equal(t, "u1", got.User.ID)
+}

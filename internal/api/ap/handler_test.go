@@ -91,6 +91,8 @@ func TestUser_Success(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), "Person")
 	assert.Contains(t, rec.Body.String(), "alice")
+	// upstream userInfo と同じキャッシュ指示 (#2506)。
+	assert.Equal(t, "public, max-age=180", rec.Header().Get("Cache-Control"))
 }
 
 func TestUser_NotFound(t *testing.T) {
@@ -100,13 +102,48 @@ func TestUser_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestUser_Remote(t *testing.T) {
+// リモート actor は原本 URI へ 301 リダイレクトする (upstream userInfo と同じ。
+// note の 302 とは status が違う点に注意、#2506)。
+func TestUser_RemoteRedirectsToOrigin(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	host := "remote.example"
+	uri := "https://remote.example/users/abc"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host, URI: &uri}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusMovedPermanently, rec.Code)
+	assert.Equal(t, uri, rec.Header().Get("Location"))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+}
+
+// uri の無いリモート actor はデータ異常。upstream と同じく 500。
+func TestUser_RemoteWithoutURIIs500(t *testing.T) {
 	h, userRepo, _, _ := newHandler(t)
 	host := "remote.example"
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host}
 	c, rec := newReq(t, "id", "u1")
 	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// suspended は upstream の isSuspended: false フィルタ相当で、AP には Person も
+// redirect も返さない (ローカル・リモートとも 404)。
+func TestUser_SuspendedIsNotServedAP(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", IsSuspended: true}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUB"}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+
+	host := "remote.example"
+	uri := "https://remote.example/users/abc"
+	userRepo.Users["u2"] = &model.User{
+		ID: "u2", Username: "bob", Host: &host, URI: &uri, IsSuspended: true,
+	}
+	c, rec = newReq(t, "id", "u2")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code, "suspended なリモートは redirect もしない")
 }
 
 func TestUser_KeypairFetchError(t *testing.T) {
@@ -1046,15 +1083,95 @@ func TestUserByAcct_LDJSON(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-func TestUserByAcct_WithHostSuffix(t *testing.T) {
+// /@alice@<自ホスト> はローカル扱いに正規化する (upstream の isSelfHost 相当)。
+// 逆に**未知の host は捨てずにリモート照合する** — 捨てるとリモート acct で
+// ローカルの Person を返す取り違えになる (#2506)。
+func TestUserByAcct_SelfHostSuffixIsLocal(t *testing.T) {
 	h, userRepo, _, keypairRepo := newHandler(t)
+	h.SetFederationGate(nil, "self.example")
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"}
 	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUB"}
 
-	// /@alice@example.com — local lookup should still work (host suffix is ignored).
-	c, rec := newAcctReq(t, "application/activity+json", "alice@example.com")
+	c, rec := newAcctReq(t, "application/activity+json", "alice@SELF.example")
 	require.NoError(t, h.UserByAcct(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), "Person")
+}
+
+// リモート acct はそのホストで照合し、原本 URI へ 301 する (#2506)。
+func TestUserByAcct_RemoteAcctRedirects(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	host := "remote.example"
+	uri := "https://remote.example/users/abc"
+	userRepo.Users["u1"] = &model.User{
+		ID: "u1", Username: "alice", UsernameLower: "alice", Host: &host, URI: &uri,
+	}
+
+	c, rec := newAcctReq(t, "application/activity+json", "alice@remote.example")
+	require.NoError(t, h.UserByAcct(c))
+	assert.Equal(t, http.StatusMovedPermanently, rec.Code)
+	assert.Equal(t, uri, rec.Header().Get("Location"))
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+}
+
+// 未知のリモート acct (キャッシュしていない) は 404。**resolve までは行わない**
+// (ShowByUsernameDB を使う。upstream も DB 照合のみで、未認証 GET が
+// WebFinger + actor fetch の outbound を発火できてはならない、#2506)。
+func TestUserByAcct_UnknownRemoteAcctIs404(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"}
+
+	// ローカルに alice はいるが、acct は別ホストを指しているので取り違えない。
+	c, rec := newAcctReq(t, "application/activity+json", "alice@unknown.example")
+	require.NoError(t, h.UserByAcct(c))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// acct 解析は upstream の Acct.parse に合わせる: 先頭の @ を 1 枚剥がし、
+// 2 分割で 2 個目以降の @ は捨てる。
+func TestUserByAcct_ParsesLikeUpstreamAcct(t *testing.T) {
+	h, userRepo, _, keypairRepo := newHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", UsernameLower: "alice"}
+	keypairRepo.items["u1"] = &model.UserKeypair{UserID: "u1", PublicKey: "PUB"}
+	host := "remote.example"
+	uri := "https://remote.example/users/abc"
+	userRepo.Users["u2"] = &model.User{
+		ID: "u2", Username: "bob", UsernameLower: "bob", Host: &host, URI: &uri,
+	}
+
+	// /@@alice → 先頭の @ を剥がしてローカル alice。
+	c, rec := newAcctReq(t, "application/activity+json", "@alice")
+	require.NoError(t, h.UserByAcct(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+
+	// /@bob@remote.example@evil → host は最初の区切りまで (remote.example)。
+	c, rec = newAcctReq(t, "application/activity+json", "bob@remote.example@evil")
+	require.NoError(t, h.UserByAcct(c))
+	assert.Equal(t, http.StatusMovedPermanently, rec.Code)
+	assert.Equal(t, uri, rec.Header().Get("Location"))
+}
+
+// 自ホスト指しのリモート user はデータ異常として 500 (Note と同じ)。
+func TestUser_RemoteSelfHostIs500(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	h.SetFederationGate(nil, "self.example")
+	host := "SELF.example"
+	uri := "https://self.example/users/u1"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host, URI: &uri}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// 空文字列の uri も nil と同じくデータ異常として 500 (Note と同じ)。
+func TestUser_RemoteWithEmptyURIIs500(t *testing.T) {
+	h, userRepo, _, _ := newHandler(t)
+	host := "remote.example"
+	empty := ""
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host, URI: &empty}
+	c, rec := newReq(t, "id", "u1")
+	require.NoError(t, h.User(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestUserByAcct_UserNotFound(t *testing.T) {
@@ -1064,19 +1181,18 @@ func TestUserByAcct_UserNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestUserByAcct_RemoteUser(t *testing.T) {
+// uri を持たないリモート user が返るのはデータ異常。upstream と同じく 500 に
+// する (以前はここで一律 404 にしていたが、リダイレクト対応 (#2506) に伴い
+// 「異常」(500) と「無い」(404) を区別する)。
+func TestUserByAcct_RemoteWithoutURIIs500(t *testing.T) {
 	h, userRepo, _, _ := newHandler(t)
 	host := "remote.example"
-	// The local FindByUsernameLower filter treats host=nil as "local only" so a
-	// remote user would normally be unreachable. We override the lookup here
-	// to force-return a user with Host != nil and exercise the defensive
-	// Host != nil guard in UserByAcct.
 	userRepo.FindByUsernameLowerFn = func(_ string, _ *string) (*model.User, error) {
 		return &model.User{ID: "u1", Username: "alice", UsernameLower: "alice", Host: &host}, nil
 	}
 	c, rec := newAcctReq(t, "application/activity+json", "alice")
 	require.NoError(t, h.UserByAcct(c))
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestUserByAcct_KeypairError(t *testing.T) {

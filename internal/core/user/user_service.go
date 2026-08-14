@@ -275,6 +275,22 @@ func (s *Service) ShowByUsername(username string, host *string) (*UserWithProfil
 	return &UserWithProfile{User: resolved, Profile: profile}, nil
 }
 
+// ShowByUsernameDB looks up a user by username/host from the local DB only,
+// never falling back to the remote resolver.
+//
+// **公開 AP route (/@:acct) 用 (#2506)。** upstream の /@:acct は DB 照合のみで、
+// 未知の acct は 404 を返す。ShowByUsername の remote fallback をここで使うと、
+// 認証不要の GET 1 回ごとに WebFinger + actor fetch の outbound HTTP とリモート
+// user 行の作成を外部から強制できてしまう (upstream に無い増幅面)。
+func (s *Service) ShowByUsernameDB(username string, host *string) (*UserWithProfile, error) {
+	u, err := s.userRepo.FindByUsernameLower(username, host)
+	if err != nil {
+		return nil, ErrUserNotFound
+	}
+	profile, _ := s.userRepo.FindProfileByUserID(u.ID)
+	return &UserWithProfile{User: u, Profile: profile}, nil
+}
+
 // GetProfile returns the profile for the given user ID, or nil if not found.
 func (s *Service) GetProfile(userID string) *model.UserProfile {
 	profile, err := s.userRepo.FindProfileByUserID(userID)

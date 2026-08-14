@@ -319,14 +319,36 @@ func (h *Handler) User(c echo.Context) error {
 		return c.NoContent(http.StatusForbidden)
 	}
 
-	// リモートユーザーへのリダイレクト相当は将来対応
-	if bundle.User.Host != nil {
+	return h.apUserInfo(c, bundle)
+}
+
+// apUserInfo serves the AP branch shared by User (/users/:id) and UserByAcct
+// (/@:acct)。upstream ActivityPubServerService.userInfo に相当する。
+func (h *Handler) apUserInfo(c echo.Context, bundle *coreuser.UserWithProfile) error {
+	// suspended は upstream の route query (isSuspended: false) 相当で、
+	// ローカル・リモートを問わず 404 (Person も redirect も返さない)。
+	if bundle.User.IsSuspended {
 		return c.NoContent(http.StatusNotFound)
+	}
+	// リモート actor は原本 URI へリダイレクトする。無いと他サーバーがこの
+	// インスタンスの URL 経由で第三サーバーの actor を解決できない (#2506、
+	// note の #2505 と同じ故障モード)。**note は 302 だが user は 301**
+	// (upstream の使い分けに合わせる)。
+	if bundle.User.Host != nil {
+		// uri が無い・host が自ホストを指すのはデータ異常。upstream と同じく
+		// 500 にする (自ホスト照合の割り切りは Note と同じ)。
+		if bundle.User.URI == nil || *bundle.User.URI == "" ||
+			(h.localHost != "" && strings.EqualFold(*bundle.User.Host, h.localHost)) {
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		return c.Redirect(http.StatusMovedPermanently, *bundle.User.URI)
 	}
 	keypair, err := h.keypairRepo.FindByUserID(bundle.User.ID)
 	if err != nil {
 		return c.NoContent(http.StatusInternalServerError)
 	}
+	// upstream と同じキャッシュ指示 (public, max-age=180)。
+	c.Response().Header().Set("Cache-Control", "public, max-age=180")
 	person := h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey, h.lookupEd25519PublicKey(bundle.User.ID))
 	return writeActivityJSON(c, person)
 }
@@ -338,6 +360,9 @@ func (h *Handler) User(c echo.Context) error {
 // delegate to the non-AP fallback so browser reloads render the SPA
 // frontend instead of a bare 404.
 func (h *Handler) UserByAcct(c echo.Context) error {
+	// Vary: Accept は AP / browser の両分岐を持つすべての response に必要
+	// (User と同じ規約。upstream も /@:acct の先頭で立てる)。
+	c.Response().Header().Set("Vary", "Accept")
 	if !wantsActivityJSON(c.Request().Header.Get("Accept")) {
 		return h.serveNonAP(c)
 	}
@@ -347,25 +372,35 @@ func (h *Handler) UserByAcct(c echo.Context) error {
 	if h.federationDisabled() {
 		return c.NoContent(http.StatusForbidden)
 	}
-	acct := c.Param("acct")
-	// /@alice or /@alice@host 形式。ローカルのみ扱う。
+	// /@alice or /@alice@host 形式。**host 部を捨てない** (#2506) — upstream は
+	// acct の host でリモート actor を照合し、userInfo が原本へ 301 する。
+	// 捨てると /@alice@remote.example がローカルの alice の Person を返す
+	// 取り違えになる (要求した URL と id の一致しない document を配る)。
+	//
+	// 解析は upstream の Acct.parse に合わせる: 先頭の @ を 1 枚剥がし、
+	// 2 分割 (2 個目以降の @ は捨てる)。
+	acct := strings.TrimPrefix(c.Param("acct"), "@")
 	username := acct
+	var host *string
 	if idx := strings.Index(acct, "@"); idx >= 0 {
 		username = acct[:idx]
+		rest := acct[idx+1:]
+		if j := strings.Index(rest, "@"); j >= 0 {
+			rest = rest[:j]
+		}
+		// 自ホストはローカル扱いに正規化する (upstream の isSelfHost 相当)。
+		if rest != "" && !(h.localHost != "" && strings.EqualFold(rest, h.localHost)) {
+			host = &rest
+		}
 	}
-	bundle, err := h.userService.ShowByUsername(username, nil)
+	// **DB 照合のみ** (upstream と同じ)。ShowByUsername の remote fallback を
+	// 使うと、認証不要の GET が WebFinger + actor fetch の outbound を外部から
+	// 強制できる増幅面になる。
+	bundle, err := h.userService.ShowByUsernameDB(username, host)
 	if err != nil {
 		return c.NoContent(http.StatusNotFound)
 	}
-	if bundle.User.Host != nil {
-		return c.NoContent(http.StatusNotFound)
-	}
-	keypair, err := h.keypairRepo.FindByUserID(bundle.User.ID)
-	if err != nil {
-		return c.NoContent(http.StatusInternalServerError)
-	}
-	person := h.renderer.RenderPerson(bundle.User, bundle.Profile, keypair.PublicKey, h.lookupEd25519PublicKey(bundle.User.ID))
-	return writeActivityJSON(c, person)
+	return h.apUserInfo(c, bundle)
 }
 
 // writeActivityJSON serializes v and writes it with the ActivityPub
