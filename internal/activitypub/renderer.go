@@ -874,6 +874,9 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 // drop されて count が古いまま固定される (#690 review)。
 func (r *Renderer) RenderQuestionUpdate(n *model.Note, idGen id.Generator) *Update {
 	question := r.RenderNote(n, idGen)
+	// inner Question の @context は outer Update に集約する (RenderCreate /
+	// RenderUpdate と同じパターン、#2510)。
+	question.Context = nil
 	// Activity ID は同一秒内の連続投票でも衝突しないよう nano 精度を保つが、
 	// published は upstream toISOString() の .000Z 形式に揃える (#1948-11)。
 	t := time.Now().UTC()
@@ -945,6 +948,10 @@ type voteNote struct {
 // RenderCreate wraps a Note into a Create activity addressed to the same audience.
 func (r *Renderer) RenderCreate(n *model.Note, idGen id.Generator) *Create {
 	note := r.RenderNote(n, idGen)
+	// inner Note の @context は outer Create に集約するため除去する (upstream
+	// renderNote は bare object を返し、@context は top-level のみ。
+	// RenderUpdate と同じパターン、#2510)。
+	note.Context = nil
 	c := &Create{
 		Activity: Activity{
 			Object: Object{
@@ -1332,7 +1339,7 @@ func (r *Renderer) RenderUndoLike(reactor *model.User, like *Like) *Undo {
 // それ以外 (specified 等) は public 扱いにフォールバックする。なお specified な
 // pure renote を federate しない upstream の throw 相当の suppression は別スコープ
 // (#1886 参照)。
-func (r *Renderer) RenderAnnounce(renoter *model.User, renoteID, targetURI string, visibility model.NoteVisibility) *Announce {
+func (r *Renderer) RenderAnnounce(renoter *model.User, renoteID, targetURI string, visibility model.NoteVisibility, idGen id.Generator) *Announce {
 	followers := r.urls.UserFollowers(renoter.ID)
 	to, cc := []string{Public}, []string{followers}
 	switch visibility {
@@ -1341,15 +1348,26 @@ func (r *Renderer) RenderAnnounce(renoter *model.User, renoteID, targetURI strin
 	case model.NoteVisibilityFollowers:
 		to, cc = []string{followers}, nil
 	}
+	// published は upstream renderAnnounce と同じく renote 自身の id から導出
+	// する (idService.parse(note.id).date.toISOString() 相当、#2510)。id を
+	// 解析できない場合は omitempty で省く (upstream は throw だが、配送全体を
+	// 落とすより published 無しの valid な shape の方がよい)。
+	published := ""
+	if idGen != nil {
+		if t, err := idGen.ParseTime(renoteID); err == nil {
+			published = t.UTC().Format(publishedLayout)
+		}
+	}
 	a := &Announce{
 		Activity: Activity{
 			Object: Object{
 				ID:   r.urls.NoteURI(renoteID) + "/activity",
 				Type: "Announce",
 			},
-			Actor: r.urls.UserURI(renoter.ID),
-			To:    to,
-			CC:    cc,
+			Actor:     r.urls.UserURI(renoter.ID),
+			Published: published,
+			To:        to,
+			CC:        cc,
 		},
 		Object: targetURI,
 	}

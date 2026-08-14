@@ -619,6 +619,16 @@ func TestRenderer_RenderCreate(t *testing.T) {
 	assert.Equal(t, "Create", c.Type)
 	assert.Equal(t, "https://example.com/users/author", c.Actor)
 	assert.NotNil(t, c.Object)
+
+	// @context は top-level のみ (upstream renderNote は bare object、#2510)。
+	// inner Note に nested @context が残ると upstream と shape がずれる。
+	assert.NotNil(t, c.Context, "outer Create に @context")
+	inner, ok := c.Object.(*Note)
+	require.True(t, ok)
+	assert.Nil(t, inner.Context, "inner Note に nested @context を残さない")
+	raw, err := json.Marshal(c)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(raw), `"@context"`), "@context は 1 箇所だけ")
 }
 
 func TestRenderer_RenderFollow(t *testing.T) {
@@ -786,13 +796,33 @@ func TestRenderer_RenderUndoLike(t *testing.T) {
 func TestRenderer_RenderAnnounce(t *testing.T) {
 	r := newRenderer()
 	renoter := &model.User{ID: "alice"}
-	a := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig", model.NoteVisibilityPublic)
+	idGen := newIDGen(t)
+	renoteID := idGen.Generate(time.Now())
+	a := r.RenderAnnounce(renoter, renoteID, "https://remote.example/notes/orig", model.NoteVisibilityPublic, idGen)
 	assert.Equal(t, "Announce", a.Type)
 	assert.Equal(t, "https://example.com/users/alice", a.Actor)
 	assert.Equal(t, "https://remote.example/notes/orig", a.Object)
-	assert.Equal(t, "https://example.com/notes/renote1/activity", a.ID)
+	assert.Equal(t, "https://example.com/notes/"+renoteID+"/activity", a.ID)
 	assert.Contains(t, a.To, Public)
 	assert.Contains(t, a.CC, "https://example.com/users/alice/followers")
+
+	// published は upstream renderAnnounce と同じく renote の id から導出し、
+	// toISOString() の .000Z 形式 (#2510)。
+	want, err := idGen.ParseTime(renoteID)
+	require.NoError(t, err)
+	assert.Equal(t, want.UTC().Format("2006-01-02T15:04:05.000Z"), a.Published)
+}
+
+// id を解析できない場合は published を省く (omitempty)。upstream は throw だが
+// 配送全体を落とすより published 無しの valid な shape の方がよい。
+func TestRenderer_RenderAnnounce_UnparseableIDOmitsPublished(t *testing.T) {
+	r := newRenderer()
+	renoter := &model.User{ID: "alice"}
+	a := r.RenderAnnounce(renoter, "not-a-valid-id", "https://x/orig", model.NoteVisibilityPublic, newIDGen(t))
+	assert.Empty(t, a.Published)
+	raw, err := json.Marshal(a)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), `"published"`)
 }
 
 // renote 自身の visibility で to/cc を入れ替える (#1882、upstream renderAnnounce)。
@@ -801,11 +831,11 @@ func TestRenderer_RenderAnnounce_Visibility(t *testing.T) {
 	renoter := &model.User{ID: "alice"}
 	followers := "https://example.com/users/alice/followers"
 
-	home := r.RenderAnnounce(renoter, "r", "https://x/orig", model.NoteVisibilityHome)
+	home := r.RenderAnnounce(renoter, "r", "https://x/orig", model.NoteVisibilityHome, nil)
 	assert.Equal(t, []string{followers}, home.To, "home: to=[followers]")
 	assert.Equal(t, []string{Public}, home.CC, "home: cc=[Public]")
 
-	fol := r.RenderAnnounce(renoter, "r", "https://x/orig", model.NoteVisibilityFollowers)
+	fol := r.RenderAnnounce(renoter, "r", "https://x/orig", model.NoteVisibilityFollowers, nil)
 	assert.Equal(t, []string{followers}, fol.To, "followers: to=[followers]")
 	assert.Empty(t, fol.CC, "followers: cc empty")
 }
@@ -813,7 +843,7 @@ func TestRenderer_RenderAnnounce_Visibility(t *testing.T) {
 func TestRenderer_RenderUndoAnnounce(t *testing.T) {
 	r := newRenderer()
 	renoter := &model.User{ID: "alice"}
-	announce := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig", model.NoteVisibilityPublic)
+	announce := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig", model.NoteVisibilityPublic, nil)
 	u := r.RenderUndoAnnounce(renoter, announce)
 	assert.Equal(t, "Undo", u.Type)
 	assert.Equal(t, "https://example.com/users/alice", u.Actor)
