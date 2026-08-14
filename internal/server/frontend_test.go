@@ -267,3 +267,60 @@ func TestFrontendHTML_ExternalMediaProxyOriginInCSP(t *testing.T) {
 		assert.NotContains(t, csp, "proxy.example")
 	})
 }
+
+// 有効な captcha 業者の origin が CSP に載る (#2502)。無いと enforce で
+// captcha の script が読めずサインアップが壊れる。無効の業者は載せない。
+func TestFrontendHTML_CaptchaOriginsInCSP(t *testing.T) {
+	cfg := &config.Config{
+		URL: "https://example.test", Version: "0.0.1-test",
+		FrontendContentSecurityPolicy: CSPModeEnforce,
+	}
+	serve := func(meta *model.Meta) string {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		if meta != nil {
+			repo.Meta = meta
+		}
+		handler := frontendHTML(cfg, repo, nil, nil)
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+		return rec.Header().Get("Content-Security-Policy")
+	}
+
+	t.Run("turnstile 有効で origin が載る", func(t *testing.T) {
+		csp := serve(&model.Meta{ID: "x", EnableTurnstile: true})
+		require.NotEmpty(t, csp)
+		for _, d := range strings.Split(csp, "; ") {
+			name, _, _ := strings.Cut(d, " ")
+			switch name {
+			case "script-src":
+				assert.Contains(t, d, "https://challenges.cloudflare.com")
+			case "connect-src":
+				// 公式の要求は script / frame のみ。
+				assert.NotContains(t, d, "cloudflare")
+			}
+		}
+		assert.NotContains(t, csp, "hcaptcha", "無効の業者は載せない")
+	})
+
+	// hcaptcha 単独のケースも見る。captchaCSPExtras の引数は positional な
+	// bool 3 連なので、取り違えると「有効にした業者と違う origin が載る」。
+	// turnstile だけの検証では第 1・第 2 引数の入れ替えを検出できない。
+	t.Run("hcaptcha 有効でその origin だけが載る", func(t *testing.T) {
+		csp := serve(&model.Meta{ID: "x", EnableHcaptcha: true})
+		require.NotEmpty(t, csp)
+		assert.Contains(t, csp, "https://*.hcaptcha.com")
+		assert.NotContains(t, csp, "recaptcha")
+		assert.NotContains(t, csp, "cloudflare")
+	})
+
+	t.Run("全て無効なら載らない", func(t *testing.T) {
+		csp := serve(&model.Meta{ID: "x"})
+		require.NotEmpty(t, csp)
+		assert.NotContains(t, csp, "cloudflare")
+		assert.NotContains(t, csp, "hcaptcha")
+		assert.NotContains(t, csp, "recaptcha")
+	})
+}

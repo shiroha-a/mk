@@ -17,7 +17,7 @@ func cspHeadersFor(t *testing.T, mode string) http.Header {
 	e := echo.New()
 	rec := httptest.NewRecorder()
 	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
-	applyFrontendCSP(c, mode)
+	applyFrontendCSP(c, mode, cspExtras{})
 	return rec.Header()
 }
 
@@ -68,7 +68,7 @@ func TestApplyFrontendCSP_AlwaysReports(t *testing.T) {
 // ポリシーの中身を固定する。**緩める変更は意図的にしか起こしてはいけない**ので、
 // 主要 directive の存在と危険な緩和が無いことを assert する。
 func TestFrontendCSP_Policy(t *testing.T) {
-	policy := buildFrontendCSP(false)
+	policy := buildFrontendCSP(false, cspExtras{})
 
 	t.Run("必要な directive が揃っている", func(t *testing.T) {
 		for _, d := range []string{
@@ -107,7 +107,7 @@ func TestFrontendCSP_Policy(t *testing.T) {
 // ため 'unsafe-inline' が要る。**nonce / hash 化は別段階**で、先にそれ以外の
 // 違反を観測したい。ここを外すのは shell を書き換えてからにする。
 func TestFrontendCSP_InlineStillAllowed(t *testing.T) {
-	policy := buildFrontendCSP(false)
+	policy := buildFrontendCSP(false, cspExtras{})
 	for _, d := range strings.Split(policy, "; ") {
 		switch {
 		case strings.HasPrefix(d, "script-src"), strings.HasPrefix(d, "style-src"):
@@ -162,7 +162,7 @@ func TestCSPReportHandler_EffectiveDirectiveFallback(t *testing.T) {
 // fetch (sound.ts の decodeAudioData 経路) が使う。
 func TestBuildFrontendCSP_ExtraMediaOrigins(t *testing.T) {
 	const origin = "https://objects.example"
-	policy := buildFrontendCSP(false, origin)
+	policy := buildFrontendCSP(false, cspExtras{Media: []string{origin}})
 
 	byName := map[string]string{}
 	for _, d := range strings.Split(policy, "; ") {
@@ -189,7 +189,64 @@ func TestBuildFrontendCSP_ExtraMediaOrigins(t *testing.T) {
 	})
 
 	t.Run("origin が無ければ元のまま", func(t *testing.T) {
-		assert.Equal(t, buildFrontendCSP(false), buildFrontendCSP(false, []string{}...))
+		assert.Equal(t, buildFrontendCSP(false, cspExtras{}),
+			buildFrontendCSP(false, cspExtras{Media: []string{}}))
+	})
+}
+
+// captcha 業者の origin は**有効な業者の分だけ**足す (#2502)。無いと enforce で
+// captcha の script が読めずサインアップが壊れ、常時許可すると使っていない
+// 業者の origin にスクリプト実行の権限を与えることになる。
+func TestBuildFrontendCSP_CaptchaOrigins(t *testing.T) {
+	directives := func(policy string) map[string]string {
+		byName := map[string]string{}
+		for _, d := range strings.Split(policy, "; ") {
+			name, _, _ := strings.Cut(d, " ")
+			byName[name] = d
+		}
+		return byName
+	}
+
+	t.Run("turnstile", func(t *testing.T) {
+		byName := directives(buildFrontendCSP(false, captchaCSPExtras(false, false, true)))
+		assert.Contains(t, byName["script-src"], "https://challenges.cloudflare.com")
+		// 公式の要求は script / frame のみ。connect-src には足さない。
+		assert.NotContains(t, byName["connect-src"], "cloudflare")
+		// 他の業者の origin は載らない。
+		assert.NotContains(t, byName["script-src"], "hcaptcha")
+		assert.NotContains(t, byName["script-src"], "recaptcha")
+	})
+
+	t.Run("hcaptcha", func(t *testing.T) {
+		byName := directives(buildFrontendCSP(false, captchaCSPExtras(true, false, false)))
+		// 公式ガイダンスは script / style / connect (+frame) に wildcard 込みの
+		// 両 origin を要求する。
+		assert.Contains(t, byName["script-src"], "https://hcaptcha.com https://*.hcaptcha.com")
+		assert.Contains(t, byName["connect-src"], "https://*.hcaptcha.com")
+		assert.Contains(t, byName["style-src"], "https://*.hcaptcha.com")
+	})
+
+	t.Run("recaptcha", func(t *testing.T) {
+		byName := directives(buildFrontendCSP(false, captchaCSPExtras(false, true, false)))
+		// api.js が本体を www.gstatic.com/recaptcha/ から読む。
+		assert.Contains(t, byName["script-src"], "https://www.recaptcha.net https://www.gstatic.com")
+		assert.NotContains(t, byName["connect-src"], "recaptcha")
+		assert.NotContains(t, byName["style-src"], "recaptcha")
+	})
+
+	t.Run("全て無効なら何も足さない", func(t *testing.T) {
+		assert.Equal(t, cspExtras{}, captchaCSPExtras(false, false, false))
+	})
+
+	t.Run("captcha origin は script/connect/style 以外に足さない", func(t *testing.T) {
+		byName := directives(buildFrontendCSP(false, captchaCSPExtras(true, true, true)))
+		for name, d := range byName {
+			if name == "script-src" || name == "connect-src" || name == "style-src" {
+				continue
+			}
+			assert.NotContainsf(t, d, "cloudflare", "%s に captcha origin を足さない", name)
+			assert.NotContainsf(t, d, "hcaptcha", "%s に captcha origin を足さない", name)
+		}
 	})
 }
 
@@ -225,7 +282,7 @@ func TestApplyFrontendCSP_PassesMediaOrigins(t *testing.T) {
 	rec := httptest.NewRecorder()
 	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
 
-	applyFrontendCSP(c, CSPModeReportOnly, "https://objects.example")
+	applyFrontendCSP(c, CSPModeReportOnly, cspExtras{Media: []string{"https://objects.example"}})
 
 	v := rec.Header().Get("Content-Security-Policy-Report-Only")
 	require.NotEmpty(t, v)
@@ -241,7 +298,7 @@ func TestApplyFrontendCSP_PassesMediaOrigins(t *testing.T) {
 // **外部 origin がこれ以上増えるのは別の判断**なので、ここが落ちたら意図した
 // 追加かどうかを確認すること。
 func TestFrontendCSP_ExternalOriginsAreLimited(t *testing.T) {
-	policy := buildFrontendCSP(false)
+	policy := buildFrontendCSP(false, cspExtras{})
 
 	t.Run("script-src で許す外部は esm.sh だけ", func(t *testing.T) {
 		var scriptSrc string

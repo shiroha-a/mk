@@ -50,10 +50,10 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#993)。
 	splashIconURL := "/static-assets/splash.png"
 	metaJSON := "{}"
-	// CSP の img-src / media-src に足す origin (#2425)。drive のファイルは
+	// CSP に足す設定依存の origin (#2425 / #2501 / #2502)。drive のファイルは
 	// object storage から直接配信されるので、`'self'` だけだと enforce 時に
 	// 画像・動画・音声が丸ごと表示できなくなる。
-	var cspMediaOrigins []string
+	var cspExtra cspExtras
 	if m, err := metaRepo.Fetch(); err == nil {
 		if m.Name != nil && *m.Name != "" {
 			instanceName = *m.Name
@@ -74,16 +74,22 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		// 載せる必要は無い。
 		if m.UseObjectStorage && m.ObjectStorageBaseURL != nil {
 			if origin := objectStorageOrigin(*m.ObjectStorageBaseURL); origin != "" {
-				cspMediaOrigins = append(cspMediaOrigins, origin)
+				cspExtra.Media = append(cspExtra.Media, origin)
 			}
 		}
+		// 有効な captcha 業者の origin (#2502)。無いと enforce で captcha の
+		// script が読めずサインアップが壊れる。
+		captchaEx := captchaCSPExtras(m.EnableHcaptcha, m.EnableRecaptcha, m.EnableTurnstile)
+		cspExtra.Script = captchaEx.Script
+		cspExtra.Connect = captchaEx.Connect
+		cspExtra.Style = captchaEx.Style
 	}
 	// 外部 media proxy 構成では、リモート画像もカスタム絵文字も proxy の origin
 	// から配信される (server-side pack とクライアント側の meta.mediaProxy の両方)。
 	// internal proxy ('self') なら何も足さない (#2501)。
 	if cfg.ExternalMediaProxyEnabled {
 		if origin := objectStorageOrigin(cfg.MediaProxy); origin != "" {
-			cspMediaOrigins = append(cspMediaOrigins, origin)
+			cspExtra.Media = append(cspExtra.Media, origin)
 		}
 	}
 
@@ -143,7 +149,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// SPA shell にだけ CSP を付ける (#2425)。shell を返す経路は catch-all と
 	// AP の non-AP fallback の 2 つで、どちらもこの関数を通るので path 判定が
 	// 要らない。API / アセットに誤って付くこともない。
-	applyFrontendCSP(c, cfg.FrontendContentSecurityPolicy, cspMediaOrigins...)
+	applyFrontendCSP(c, cfg.FrontendContentSecurityPolicy, cspExtra)
 
 	return c.HTML(http.StatusOK, html)
 }

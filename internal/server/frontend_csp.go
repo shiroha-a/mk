@@ -44,11 +44,9 @@ var frontendCSPDirectives = []string{
 	"base-uri 'self'",
 	"object-src 'none'",
 	"form-action 'self'",
-	// **既知の非対応 (#2502): captcha を有効にした構成では enforce にできない。**
-	// MkCaptcha は hCaptcha / reCAPTCHA / Turnstile の script を各社の origin から
-	// 動的に挿入するため、script-src (Turnstile は connect-src も) で先に落ちて
-	// サインアップが壊れる。対応するときは meta の enable フラグに連動した
-	// 条件付き追加にする (使っていない captcha 業者を常時許可しない)。
+	// captcha (hCaptcha / reCAPTCHA / Turnstile) の script origin は、meta の
+	// enable フラグに連動して cspExtras.Script で**有効な業者の分だけ**足す
+	// (#2502、captchaCSPExtras)。ここに常時書かない。
 	//
 	// esm.sh は Misskey frontend が shiki (コードブロックの syntax highlight) を
 	// 動的 import する先。**upstream の vite 設定がそう作っている**
@@ -93,7 +91,7 @@ var frontendCSPDirectives = []string{
 	"frame-src 'self' https:",
 }
 
-// mediaDirectives are the directives that must also allow the extra origins
+// mediaDirectives are the directives that must also allow the media origins
 // (object storage / 外部 media proxy)。drive のファイルはそこから直接配信される。
 //
 // **connect-src にも足す** (#2501)。通知音にドライブのファイルを設定すると、
@@ -102,19 +100,38 @@ var frontendCSPDirectives = []string{
 // storage 構成で「通知音だけ鳴らない」という気付きにくい壊れ方をする。
 var mediaDirectives = []string{"img-src", "media-src", "connect-src"}
 
+// cspExtras carries operator-configuration-dependent origins, grouped by the
+// directives they extend.
+//
+// **設定に応じた分だけ足す**のが方針。使っていない機能の origin を常時許可
+// すると、ポリシーが「実際に必要な範囲」から乖離していく。
+type cspExtras struct {
+	// Media is appended to img-src / media-src / connect-src (object storage
+	// と外部 media proxy、#2425 / #2501)。
+	Media []string
+	// Script is appended to script-src (有効な captcha provider、#2502)。
+	Script []string
+	// Connect is appended to connect-src only (hCaptcha の API 呼び出し。
+	// 公式 CSP ガイダンスの要求、#2502)。
+	Connect []string
+	// Style is appended to style-src (hCaptcha。公式 CSP ガイダンスが style-src
+	// まで要求しており、資材の変わり方によっては欠けると黙って壊れる、#2502)。
+	Style []string
+}
+
 // buildFrontendCSP renders the policy string.
 //
-// extraMediaOrigins には object storage の origin 等、`'self'` 以外に画像 /
-// メディアの取得を許す必要がある host を渡す。**空でない限りポリシーは
-// operator の設定に依存する**ので、静的な定数にはできない。
+// extras には object storage の origin 等、`'self'` 以外に取得を許す必要がある
+// host を渡す。**空でない限りポリシーは operator の設定に依存する**ので、
+// 静的な定数にはできない。
 //
 // `report-uri` は deprecated だが、`report-to` だけにすると Reporting-Endpoints
 // header を解さない環境で 1 件も届かない。観測が目的なので両方は出さず、対応
 // 範囲の広い `report-uri` に寄せる。
-func buildFrontendCSP(withReport bool, extraMediaOrigins ...string) string {
+func buildFrontendCSP(withReport bool, extras cspExtras) string {
 	d := make([]string, 0, len(frontendCSPDirectives)+1)
 	for _, dir := range frontendCSPDirectives {
-		d = append(d, appendMediaOrigins(dir, extraMediaOrigins))
+		d = append(d, appendExtras(dir, extras))
 	}
 	if withReport {
 		d = append(d, "report-uri "+CSPReportPath)
@@ -122,19 +139,63 @@ func buildFrontendCSP(withReport bool, extraMediaOrigins ...string) string {
 	return strings.Join(d, "; ")
 }
 
-// appendMediaOrigins adds the extra origins to img-src / media-src.
-func appendMediaOrigins(directive string, origins []string) string {
-	if len(origins) == 0 {
-		return directive
-	}
+// appendExtras adds the configuration-dependent origins to a directive.
+func appendExtras(directive string, ex cspExtras) string {
 	name, _, ok := strings.Cut(directive, " ")
 	if !ok {
 		return directive
 	}
-	if !slices.Contains(mediaDirectives, name) {
+	var add []string
+	if slices.Contains(mediaDirectives, name) {
+		add = append(add, ex.Media...)
+	}
+	if name == "script-src" {
+		add = append(add, ex.Script...)
+	}
+	if name == "connect-src" {
+		add = append(add, ex.Connect...)
+	}
+	if name == "style-src" {
+		add = append(add, ex.Style...)
+	}
+	if len(add) == 0 {
 		return directive
 	}
-	return directive + " " + strings.Join(origins, " ")
+	return directive + " " + strings.Join(add, " ")
+}
+
+// captchaCSPExtras returns the origins the enabled captcha providers need
+// (#2502)。
+//
+// **有効な業者の分だけ、各社の公式 CSP ガイダンスにある要求だけ**を足す。
+// frame 側は frame-src https: (#2501) で既に通る。mcaptcha は iframe +
+// バンドル済みの glue (postMessage) で外部 script を読まないため何も要らず、
+// testcaptcha はローカル完結。
+func captchaCSPExtras(hcaptcha, recaptcha, turnstile bool) cspExtras {
+	var ex cspExtras
+	if hcaptcha {
+		// 公式ガイダンスは script / frame / style / connect の 4 directive に
+		// hcaptcha.com + *.hcaptcha.com を要求する (asset の subdomain は時期・
+		// 地域で変わるため wildcard を使えという指定)。frame は https: で充足。
+		origins := []string{"https://hcaptcha.com", "https://*.hcaptcha.com"}
+		ex.Script = append(ex.Script, origins...)
+		ex.Connect = append(ex.Connect, origins...)
+		ex.Style = append(ex.Style, origins...)
+	}
+	if recaptcha {
+		// Misskey は recaptcha.net 経由で読み、api.js が本体を
+		// www.gstatic.com/recaptcha/ から読む。公式推奨は path 付きだが、CSP の
+		// path source は redirect 後に無視される仕様で保証にならないため、
+		// objectStorageOrigin と同じく origin 単位で書く。gstatic 全体に script
+		// 実行を許す広さは 'unsafe-inline' が残る現状では実質差が無い。
+		ex.Script = append(ex.Script, "https://www.recaptcha.net", "https://www.gstatic.com")
+	}
+	if turnstile {
+		// 公式の要求は script-src と frame-src のみ。connect-src は要求に
+		// 無いので足さない (pre-clearance が使う /cdn-cgi/ は 'self' で通る)。
+		ex.Script = append(ex.Script, "https://challenges.cloudflare.com")
+	}
+	return ex
 }
 
 // objectStorageOrigin extracts the scheme+host to allow from a configured
@@ -167,15 +228,15 @@ func objectStorageOrigin(baseURL string) string {
 //
 // mode が未知 / off なら何もしない。**判定できない値で enforce に倒さない**の
 // が要点で、設定ミスでフロントが動かなくなるより無効の方が安全。
-func applyFrontendCSP(c echo.Context, mode string, extraMediaOrigins ...string) {
+func applyFrontendCSP(c echo.Context, mode string, extras cspExtras) {
 	switch mode {
 	case CSPModeReportOnly:
 		c.Response().Header().Set("Content-Security-Policy-Report-Only",
-			buildFrontendCSP(true, extraMediaOrigins...))
+			buildFrontendCSP(true, extras))
 	case CSPModeEnforce:
 		// enforce でも報告は受け取る。ブロックが起きていることに気付けないと
 		// 「一部の機能だけ動かない」という報告しか上がってこない。
 		c.Response().Header().Set("Content-Security-Policy",
-			buildFrontendCSP(true, extraMediaOrigins...))
+			buildFrontendCSP(true, extras))
 	}
 }
