@@ -200,7 +200,7 @@ go tool cover -html=coverage.out
 
 - `internal/testutil/containers.go`がtestcontainers-goでPostgreSQL/Redisを起動する。
 - ローカル実行にはDocker環境が必要。
-- CIではGitHub Actionsの`services`でPostgreSQL 16 / Redis 7を起動し、以下の環境変数でDBへ接続：
+- CIではGitHub Actionsの`services`でPostgreSQL 18 / Redis 7を起動し、以下の環境変数でDBへ接続：
   - `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, `TEST_DB_USER`, `TEST_DB_PASS`, `TEST_DB_SSLMODE`
   - `TEST_REDIS_HOST`, `TEST_REDIS_PORT`
 
@@ -387,7 +387,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 ### `test-shards`ジョブ + `test` aggregator
 
 - **4-way matrix shard** で並列実行する `test-shards` (`shard: [1,2,3,4]`)。各shardは
-  独立したPostgreSQL 16 Alpine / Redis 7 Alpine サービスコンテナを持つ。
+  独立したPostgreSQL 18 Alpine / Redis 7 Alpine サービスコンテナを持つ。
 - テスト対象は`go list`で絞り込み（テストファイルがあるパッケージのみ）した上で
   `awk 'NF'`で空行除外→ImportPath順にソート→`NR % 4`で各shardに均等割り当て。
   新規パッケージ追加でshard内の構成が変わっても、決定的な分配により再現性は保たれる。
@@ -589,6 +589,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-08-15**: PostgreSQL を 16 → 18 に統一 (#2513)。compose 全構成・CI service container・testcontainers を `postgres:18-alpine` へ。upstream Misskey の compose 例 (18-alpine) に整合。**postgres:18 image は data layout が変わった** (default PGDATA が `/var/lib/postgresql/18/docker`、VOLUME 宣言が親 `/var/lib/postgresql`) ため、永続 volume を持つ compose のマウント先を `/var/lib/postgresql` へ変更 (旧パスのままだと新規デプロイが匿名 volume に initdb して down で消える。UDS example は明示 PGDATA で回避)。既存の 16 volume は dump→restore が必要 (手順は docs/deployment.md 冒頭)。Section 4 / 8 の版数記述を更新。
 - **2026-08-10**: Section 4 に「DB を使うテストの分離」を追記 (#2450)。`testutil.OpenTestDB` が呼び出し元パッケージ専用の PostgreSQL schema に接続するようになった。`go test` はパッケージを並行実行し CI の shard は DB を 1 つしか持たないため、共有すると一方の後片付けが他方を壊す (実際に Go を触っていない PR で CI が落ちた)。削除範囲を絞るだけでは解けない (干渉が双方向) 点と、migration の enum guard に `pg_type WHERE typname` を使わない旨も明記。
 - **2026-08-07**: Section 3 に本家 backend e2e の Makefile target (`make upstream-e2e` 系 5 つ) を、Section 8 に `upstream-backend-e2e` workflow を追記 (#2347)。Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて回す PR トリガーの workflow で、required check には含めない。既知乖離は skip でなく expected-failure (`task.fails`) で扱う運用も明記。
 - **2026-08-07**: Section 8 に `diff-e2e` workflow と `frontend-check` job を追記 (#2368)。CI 非対象だった検証資産の棚卸しで、値レベル diff と fork frontend の型チェックを載せた。

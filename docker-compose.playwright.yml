@@ -19,7 +19,7 @@ name: mk-playwright
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: misskey
       POSTGRES_USER: misskey

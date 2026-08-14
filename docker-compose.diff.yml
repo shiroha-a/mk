@@ -19,7 +19,7 @@ name: mkdiff
 services:
   # --- mk-go side ---
   postgres-mk:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment: {POSTGRES_DB: misskey, POSTGRES_USER: misskey, POSTGRES_PASSWORD: testpass}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U misskey"]
@@ -53,7 +53,7 @@ services:
   # 注: TS image の pin は意図的に据え置き。上げると応答差分の triage が
   # 必要になるため、diff harness の版数追随は別タスクとして扱う。
   postgres-ts:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment: {POSTGRES_DB: misskey, POSTGRES_USER: misskey, POSTGRES_PASSWORD: testpass}
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U misskey"]

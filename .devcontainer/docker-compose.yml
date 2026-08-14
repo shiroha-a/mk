@@ -37,7 +37,7 @@ services:
       POSTGRES_USER: misskey
       POSTGRES_PASSWORD: misskey
     volumes:
-      - pgdata:/var/lib/postgresql/data
+      - pgdata:/var/lib/postgresql
 
   redis:
     image: redis:7-alpine

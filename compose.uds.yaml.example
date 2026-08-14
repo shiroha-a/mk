@@ -17,13 +17,19 @@
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: mkgo
       POSTGRES_USER: mkgo
       POSTGRES_PASSWORD: mkgo_dev_pass
-      # postgres 16 の alpine image はデフォルトで /var/run/postgresql/.s.PGSQL.5432
+      # postgres の alpine image はデフォルトで /var/run/postgresql/.s.PGSQL.5432
       # に socket を作るので、そのまま共有ボリュームに流し込むだけで良い。
+      #
+      # PGDATA は明示する。postgres:18 image は default PGDATA と VOLUME 宣言の
+      # 位置が変わった (/var/lib/postgresql/18/docker) ため、明示しないと mount と
+      # 実データの位置がずれて「down/up でデータが消える」事故になり得る。
+      # 既存の 16 データをこのまま 18 で開くことはできない (dump→restore が必要、
+      # docs/deployment.md 参照)。
       PGDATA: /var/lib/postgresql/data/pgdata
     volumes:
       - pg_data:/var/lib/postgresql/data

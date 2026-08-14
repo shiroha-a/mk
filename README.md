@@ -119,7 +119,7 @@ docker compose up -d
 
 ## ローカルビルド
 
-前提: Go 1.26+、PostgreSQL 16+、Redis 7+、Docker (テスト用)
+前提: Go 1.26+、PostgreSQL 18推奨 (16以降で動作、CI検証は18)、Redis 7+、Docker (テスト用)
 
 ```bash
 git clone --recursive https://github.com/shiroha-a/mk.git

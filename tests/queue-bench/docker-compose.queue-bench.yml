@@ -45,7 +45,7 @@ services:
         aliases: [faker]
 
   postgres-asynq:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: misskey
       POSTGRES_USER: misskey
@@ -102,7 +102,7 @@ services:
         aliases: [mk-asynq]
 
   postgres-mkq:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: misskey
       POSTGRES_USER: misskey
@@ -159,7 +159,7 @@ services:
         aliases: [mk-mkq]
 
   postgres-ts:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: misskey
       POSTGRES_USER: misskey

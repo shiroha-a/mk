@@ -50,7 +50,7 @@ CIではパッケージごとにカバレッジを計測し、閾値未達のパ
 
 ## testcontainers
 
-`internal/testutil/containers.go`がtestcontainers-goでPostgreSQL 16とRedis 7のコンテナを自動起動する。ローカルにDocker環境があれば特別な準備なしでテストを実行できる。
+`internal/testutil/containers.go`がtestcontainers-goでPostgreSQL 18とRedis 7のコンテナを自動起動する。ローカルにDocker環境があれば特別な準備なしでテストを実行できる。
 
 ```go
 // PostgreSQLコンテナ起動 + マイグレーション自動適用

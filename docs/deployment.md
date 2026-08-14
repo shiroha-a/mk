@@ -1,5 +1,35 @@
 # デプロイ
 
+## PostgreSQL 16 → 18 への移行 (既存環境)
+
+compose 群と CI は PostgreSQL 18 に統一した (#2513)。**既存の 16 の data volume はイメージを上げるだけでは開けない** — メジャーアップグレードには dump→restore (または pg_upgrade) が必要で、そのまま起動すると `database files are incompatible` で crash loop になる。
+
+さらに `postgres:18` イメージは **data layout が変わった** (default PGDATA が `/var/lib/postgresql/18/docker`、`VOLUME` 宣言が `/var/lib/postgresql` 親ディレクトリへ)。compose 群のマウント先はこれに合わせて `/var/lib/postgresql` に変更済み。旧パス (`/var/lib/postgresql/data`) のままイメージだけ上げると、**新規デプロイでは匿名 volume 側に initdb され、`down` で全データが静かに消える**。自前 compose を使っている場合はマウント先を確認すること。
+
+既存環境の移行手順 (ダウンタイム = dump + restore の時間):
+
+```bash
+# 1. アプリを止めて書き込みを停止 (postgres は起動したまま)
+docker compose stop mkgo
+
+# 2. バックアップ (dump + volume の両方を取る)
+docker compose exec -T db pg_dumpall -U <user> > pg16-dump.sql
+docker run --rm -v <pg-volume>:/from -v "$PWD":/to alpine tar czf /to/pg16-data.tar.gz -C /from .
+
+# 3. postgres を止め、volume を作り直して 18 で新規 init
+docker compose down
+docker volume rm <pg-volume>
+docker compose up -d db          # ここで postgres:18 が新規 initdb する
+
+# 4. restore (init が作った空 DB を落としてから dump を流す)
+docker compose exec -T db psql -U <user> -d postgres -c 'DROP DATABASE <db>;'
+docker compose exec -T db psql -U <user> -d postgres < pg16-dump.sql
+docker compose exec -T db vacuumdb -U <user> --all --analyze-in-stages
+
+# 5. アプリ再開・確認
+docker compose up -d
+```
+
 ## Docker Compose (TCP)
 
 最も簡単な起動方法。PostgreSQL、Redis、mk-goの3サービスをTCPで接続する。
@@ -31,7 +61,7 @@ docker compose up -d
 
 `docker-compose.yml`の構成:
 - **app**: mk-goコンテナ (ポート3000)
-- **db**: PostgreSQL 16 Alpine
+- **db**: PostgreSQL 18 Alpine
 - **redis**: Redis 7 Alpine
 
 ファイルストレージは`./files`にマウントされる。
@@ -169,7 +199,7 @@ make migrate-up
 ./built/misskey -config .config/default.yml
 ```
 
-前提条件: Go 1.26+ (ビルド時)、PostgreSQL 16+、Redis 7+。
+前提条件: Go 1.26+ (ビルド時)、PostgreSQL 18推奨 (16以降で動作、CI検証は18)、Redis 7+。
 
 設定ファイルの詳細は[設定リファレンス](configuration.md)を参照。
 

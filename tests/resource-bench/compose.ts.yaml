@@ -4,7 +4,7 @@
 # `docker stats` can compare memory / CPU / storage between mk-go and TS
 # under "just started" conditions.
 #
-# - postgres: 16-alpine (matches mk-go's pg version)
+# - postgres: 18-alpine (matches mk-go's pg version)
 # - redis:    7-alpine (upstream-default)
 # - web:      built from third_party/misskey (submodule, 2026.5.1-mk.x)
 #
@@ -17,13 +17,13 @@ name: mk-bench-ts
 
 services:
   db:
-    image: postgres:16-alpine
+    image: postgres:18-alpine
     environment:
       POSTGRES_DB: misskey
       POSTGRES_USER: misskey
       POSTGRES_PASSWORD: testpass
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U misskey -d misskey"]
       interval: 5s

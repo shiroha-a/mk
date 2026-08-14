@@ -29,7 +29,7 @@ type TestDB struct {
 // The migration SQL is automatically applied.
 func SetupPostgres(ctx context.Context) (*TestDB, error) {
 	container, err := tcpostgres.Run(ctx,
-		"postgres:16-alpine",
+		"postgres:18-alpine",
 		tcpostgres.WithDatabase("misskey_test"),
 		tcpostgres.WithUsername("test"),
 		tcpostgres.WithPassword("test"),

@@ -20,7 +20,7 @@ make dev
 
 前提条件:
 - Go 1.26+
-- PostgreSQL 16+
+- PostgreSQL 18推奨 (16以降で動作、CI検証は18)
 - Redis 7+
 - Docker (testcontainers用、テスト実行に必要)
 
@@ -234,7 +234,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 `go build ./...`で全パッケージのビルド確認。
 
 #### test-shardsジョブ + testジョブ
-- `shard: [1,2,3,4]`の4-way matrixで並列実行。各shardが独立したPostgreSQL 16 / Redis 7のサービスコンテナを持つ
+- `shard: [1,2,3,4]`の4-way matrixで並列実行。各shardが独立したPostgreSQL 18 / Redis 7のサービスコンテナを持つ
 - 対象パッケージは`go list`でテストファイルを持つものだけに絞り、ImportPath順にソートしてから`NR % 4`で分配する。分配が決定的なので、パッケージが増えても各shardの担当は再現する
 - `-race -count=1 -timeout 10m -coverprofile=... -covermode=atomic`
 - パッケージ別カバレッジ閾値を各shard内で検証し、1つでも未達ならそのshardが失敗する
