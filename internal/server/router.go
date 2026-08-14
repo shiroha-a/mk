@@ -3038,6 +3038,9 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/suspend-user", adminHandler.SuspendUser, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:suspend-user"))
 	api.POST("/admin/unsuspend-user", adminHandler.UnsuspendUser, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:unsuspend-user"))
 	api.POST("/admin/meta", adminHandler.AdminMeta, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:meta"))
+	// mk-go 独自 (additive): 組み込み済みサーバープラグインの一覧 (#2497)。
+	// プラグインの管理画面 (/admin/plugin/*) と権限を揃えてモデレーター以上。
+	api.POST("/admin/server-plugins", adminHandler.ServerPlugins, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:meta"))
 	api.POST("/admin/update-meta", adminHandler.UpdateMeta, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:meta"))
 	api.POST("/admin/roles/create", adminHandler.RolesCreate, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:roles"))
 	api.POST("/admin/roles/show", adminHandler.RolesShow, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:roles"))
@@ -3609,6 +3612,9 @@ func (s *Server) setupRoutes() {
 	// 消したプラグインのデータが残っていないかを知らせる (#2479)。
 	// 自動では消さないので、残っていること自体を見えるようにする。
 	s.warnOrphanPluginData(context.Background(), registeredPlugins)
+	// admin/server-plugins (#2497) が返すスナップショットと残存データ検査。
+	adminHandler.SetServerPlugins(serverPluginInfos(registeredPlugins, s.config.Plugins))
+	adminHandler.SetPluginOrphanSchemas(s.pluginOrphanSchemaLister(registeredPlugins))
 
 	// API catchall。
 	//

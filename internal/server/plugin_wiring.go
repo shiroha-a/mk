@@ -11,10 +11,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 
+	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/pluginstore"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -109,6 +111,64 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 			"schema", schema)
 	}
 	return nil
+}
+
+// serverPluginInfos builds the admin-facing snapshot of compiled-in plugins
+// (admin/server-plugins, #2497).
+//
+// Routes / Jobs は**宣言**を写す (このプロセスで配線されたかではない)。ロール
+// 分割 (#2459) でどのプロセスの管理画面から見ても、プラグインの構成としては
+// 同じものが出るようにする。
+func serverPluginInfos(plugins []plugin.Definition, settings map[string]map[string]any) []apiadmin.ServerPluginInfo {
+	infos := make([]apiadmin.ServerPluginInfo, 0, len(plugins))
+	for _, def := range plugins {
+		s := settings[def.Name]
+
+		// **設定はキー名だけを出す。** どのキーが秘密かは判別できないので、
+		// -config-dump と同じく値は既定で全部マスクする方針に合わせる。
+		keys := make([]string, 0, len(s))
+		for k := range s {
+			if k == enabledKey {
+				continue
+			}
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		schema, _ := pluginstore.SchemaName(def.Name)
+		infos = append(infos, apiadmin.ServerPluginInfo{
+			Name:       def.Name,
+			Version:    def.Version,
+			APIVersion: def.APIVersion,
+			Enabled:    pluginEnabled(s),
+			Routes:     def.Routes != nil,
+			Jobs:       def.Jobs != nil,
+			Migrations: len(def.Migrations),
+			Schema:     schema,
+			ConfigKeys: keys,
+		})
+	}
+	return infos
+}
+
+// pluginOrphanSchemaLister returns the request-time orphan schema check for
+// admin/server-plugins. 起動時 WARN (warnOrphanPluginData) と同じ判定だが、
+// リクエスト時に問い合わせる — 起動後に DROP SCHEMA した結果も反映される。
+func (s *Server) pluginOrphanSchemaLister(plugins []plugin.Definition) apiadmin.PluginOrphanSchemaLister {
+	known := make([]string, 0, len(plugins))
+	for _, d := range plugins {
+		known = append(known, d.Name)
+	}
+	return func(ctx context.Context) ([]string, error) {
+		// ListSchemas は呼び出しごとに接続を張って捨てる。モデレーター以上の
+		// 管理画面からしか呼ばれない低頻度の診断なので、既存プールへの相乗りで
+		// pluginstore の口を増やすより使い捨てで十分と判断している。
+		present, err := pluginstore.ListSchemas(ctx, s.config.DSN())
+		if err != nil {
+			return nil, err
+		}
+		return pluginstore.OrphanSchemas(present, known), nil
+	}
 }
 
 // warnOrphanPluginData reports plugin schemas with no matching built-in plugin.

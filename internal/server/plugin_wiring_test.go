@@ -561,3 +561,50 @@ func TestSetupPlugins_RoutesAreNamespaced(t *testing.T) {
 	s.echo.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/plugin/gameinfo/refresh", nil))
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
+
+// --- serverPluginInfos (#2497) ---
+
+func TestServerPluginInfos_ReflectsDefinitionsAndConfig(t *testing.T) {
+	routes := func(plugin.Context, plugin.Router) error { return nil }
+	jobs := func(plugin.Context, plugin.Jobs) error { return nil }
+	defs := []plugin.Definition{
+		{
+			Name: "status", Version: "1.2.0", APIVersion: plugin.APIVersion,
+			Routes: routes, Jobs: jobs,
+			Migrations: []plugin.Migration{{Version: 1, SQL: "SELECT 1"}, {Version: 2, SQL: "SELECT 2"}},
+		},
+		{Name: "gameinfo", APIVersion: plugin.APIVersion, Routes: routes},
+	}
+	// **キーは小文字で渡す。** Viper は YAML のキーを全て小文字化するので、
+	// 実運用の config.Plugins に camelCase のキーは現れない (-config-dump の
+	// `status.maxlength` 表示と同じ)。テストが camelCase を「仕様」として
+	// 見せないようにする。
+	settings := map[string]map[string]any{
+		"status": {"enabled": false, "maxlength": 30, "apikey": "secret"},
+	}
+
+	infos := serverPluginInfos(defs, settings)
+	require.Len(t, infos, 2)
+
+	assert.Equal(t, "status", infos[0].Name)
+	assert.Equal(t, "1.2.0", infos[0].Version)
+	assert.Equal(t, plugin.APIVersion, infos[0].APIVersion)
+	assert.False(t, infos[0].Enabled, "enabled: false を反映する")
+	assert.True(t, infos[0].Routes)
+	assert.True(t, infos[0].Jobs)
+	assert.Equal(t, 2, infos[0].Migrations)
+	assert.Equal(t, "plugin_status", infos[0].Schema)
+	// enabled は予約キーなので除外、残りはソート済みのキー名のみ (値は出さない)。
+	assert.Equal(t, []string{"apikey", "maxlength"}, infos[0].ConfigKeys)
+
+	assert.Equal(t, "gameinfo", infos[1].Name)
+	assert.True(t, infos[1].Enabled, "設定が無ければ既定で有効")
+	assert.True(t, infos[1].Routes)
+	assert.False(t, infos[1].Jobs)
+	assert.Equal(t, 0, infos[1].Migrations)
+	assert.Empty(t, infos[1].ConfigKeys)
+}
+
+func TestServerPluginInfos_EmptyIsEmpty(t *testing.T) {
+	assert.Empty(t, serverPluginInfos(nil, nil))
+}

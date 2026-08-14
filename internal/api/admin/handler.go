@@ -167,6 +167,11 @@ type Handler struct {
 	// admin/captcha/save verification. nil uses the real providers; tests
 	// inject a stub to avoid external HTTP calls.
 	captchaVerifierFactory CaptchaVerifierFactory
+	// serverPlugins は組み込み済みプラグインのスナップショット (#2497)。
+	// 起動時の配線で確定する情報なので、リクエストごとに再計算しない。
+	serverPlugins []ServerPluginInfo
+	// pluginOrphanSchemas は残存データの検査。未配線なら応答で null になる。
+	pluginOrphanSchemas PluginOrphanSchemaLister
 	// instanceRepo は admin/federation/* の instance lookup / update を
 	// inject 可能にするための DI 口 (#676)。FederationUpdateInstance の
 	// log type 分岐をテストするため、`adminDB` 直叩きから repository 経由
