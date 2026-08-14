@@ -4,6 +4,55 @@
 本家の新バージョンを取り込んだ分は「Misskey 202X.Y.Z に追従」の 1 行にまとめ、以降は mk-go 独自の変更のみを記載する。
 `Client` は mk-go が同梱するフロントエンド (`third_party/misskey` fork) の変更を指す。
 
+## 1.2.0
+
+### Note
+
+- **プラグイン機構を追加した。** 運営者が自分のインスタンスにバックエンド・フロントエンドの両方へ独自機能をビルド時に組み込める。公開パッケージ `plugin/` と `plugin-api.ts` が「壊さないと約束する範囲」で、サンドボックスではない (信頼できる作者のものだけを組み込む前提)。ドキュメントは `docs/plugins/`
+- **アカウント移行の引き継ぎを本家同等にした。** 移行の検知、ローカルフォロワー・ブロック・ミュート・ロール・リストの引き継ぎ、アンテナへの移行先追記、24時間後の旧アカウントフォロー解除まで
+- **PostgreSQL を 18 に統一し、pg_bigm による日本語部分一致検索の高速化に対応した。** あわせて検索クエリの LIKE メタ文字が素通しになっていた不具合も修正した
+- 運用ツールを拡充した: データ整合性チェック (`-fsck`)、連合セルフ診断 (`-doctor`)、実効設定のダンプ (`-config-dump`)、配送・受信の健全性テレメトリ、プロセス統計のダッシュボード表示
+
+### General
+
+- Feat: プラグイン機構。`plugins/` に置いた独立 Go module をビルド時に組み込む。プラグインごとの PostgreSQL schema・独自 API (`/api/plugin/<name>/`)・定期ジョブ・設定と有効/無効トグル・独自ページとナビ項目・管理画面・プロフィール/設定画面への描画・バイナリ応答 (画像プロキシ) に対応。テスト補助 (`plugin/plugintest`)・開発ループ (`make plugin-dev`)・同梱サンプル (`plugins/status/`、既定無効) 付き。公開面は golden で drift gate する
+- Feat: Web とジョブ処理のプロセス分離。upstream と同じ `MK_ONLY_SERVER` / `MK_ONLY_QUEUE` で役割を分けられる
+- Enhance: PostgreSQL を 18 に統一 (compose 全構成 / CI / testcontainers)。`postgres:18` イメージの data layout 変更 (旧マウント先のままだと新規デプロイのデータが消える) に対応済み。既存 16 環境の移行手順は `docs/deployment.md`
+- Enhance: pg_bigm 対応。検索クエリを upstream と同じ `lower(text) LIKE` 形にし、拡張入りイメージ (`deploy/postgres-bigm/`) を同梱。拡張と GIN インデックスを作るだけで検索がインデックスを使う (provider は `sqlLike` のまま)
+- Enhance: DB を使うテストをパッケージ専用の PostgreSQL schema に隔離し、CI shard 間の干渉を解消
+- Enhance: Playwright の UI 検証 spec を大幅拡充 (管理画面・設定画面・チャット・MiAuth・ギャラリー等 30 ページ超)
+- Enhance: 依存と Go 本体の既知脆弱性を解消 (Go 1.26.6 / `golang.org/x/image` v0.45.0)
+
+### Client
+
+- Feat: ダッシュボードに mk-go のプロセス統計 (CPU・メモリ・GC・goroutine 等) を表示
+- Feat: コントロールパネルにサーバープラグインの一覧ページを追加。構成・有効/無効・設定キー・残存データが確認できる
+- Feat: 連合サーバー一覧に相手の署名方式 (Ed25519 対応状況) のラベルを表示
+- Feat: プラグインの frontend (独自ページ・管理画面・スロット描画・Misskey コンポーネント再公開) を受け入れる
+
+### Server
+
+- Feat: データ整合性チェッカー `-fsck`。非正規化カウンタのずれと孤児行を検査し、`-fix` でカウンタを修正できる
+- Feat: 連合セルフ診断 `-doctor` / `admin/self-check`。公開 URL 経由で WebFinger・nodeinfo・actor・DB・Redis・TLS 期限を一括検査する
+- Feat: 実効設定のダンプ `-config-dump`。worker 数やレート上限など「設定ファイルを読むだけでは分からない実効値」を出す
+- Feat: 配送先ホストの健全性テレメトリ (`admin/federation/delivery-health`) と受信側の集計 (`admin/federation/inbox-health`)
+- Feat: プロセス統計 API `admin/server-metrics`
+- Feat: 相手サーバーの署名方式 (RSA / Ed25519) を観測して記録し、`federation/instances` 応答に `signatureCapability` を追加
+- Feat: relationship (follow / unfollow / block / unblock) を専用キューに分離 (`relationshipJob*` 設定)。あわせてフォロー関係の変更をストリーミング接続へ live で反映するように
+- Feat: リバーシのランダムマッチが成立するように (ローカルユーザー同士)
+- Feat: 新しい端末からのログインを upstream と同じ通知メールで知らせるように
+- Feat: frontend HTML の Content-Security-Policy (既定 off、`report-only` / `enforce` を設定で選択)。object storage・外部メディアプロキシ・captcha 業者の origin は構成に応じて自動許可する。`Referrer-Policy` とアセット系の CSP も upstream に揃えた
+- Fix: **検索クエリの `%` / `_` がワイルドカードとして解釈されていた問題を修正** (ノート検索・チャンネル検索。upstream はエスケープ済み)
+- Fix: リモートの投稿・ユーザーを他サーバーが mk-go の URL 経由で照会すると 404 になり解決が失敗する問題を修正 (原本 URI へリダイレクト)。あわせて広告済みの activity id (`/notes/:id/activity`) を解決可能にした
+- Fix: localOnly (連合しない) ノートが ActivityPub で取得できてしまう問題を修正
+- Fix: Announce activity に `published` が無い・Create 内に余分な `@context` が残る shape を upstream に揃えた
+- Fix: CSP の enforce 運用でリモート添付動画・URL プレビューの埋め込みプレイヤー・通知音が遮断されていた問題を修正
+- Fix: アンテナのページ送りでノートが欠ける問題と、タイムライン閲覧後もアンテナの未読が消えない問題を修正
+- Fix: リレー経由の投稿で、引用先が「削除されたノート」になる問題と、複数リレー購読時に同じ投稿が重複する問題を修正
+- Fix: 期限付きミュートの自然失効が、接続中のストリーミングに反映されない問題を修正
+- Fix: 移行済みアカウントのフォロー解除でフォローカウントが二重に減る問題を修正
+- Fix: アバター・絵文字のリダイレクトでリモート URL をそのまま返していた経路を修正
+
 ## 1.1.2
 
 ### Note
