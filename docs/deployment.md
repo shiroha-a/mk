@@ -6,18 +6,25 @@ compose 群と CI は PostgreSQL 18 に統一した (#2513)。**既存の 16 の
 
 さらに `postgres:18` イメージは **data layout が変わった** (default PGDATA が `/var/lib/postgresql/18/docker`、`VOLUME` 宣言が `/var/lib/postgresql` 親ディレクトリへ)。compose 群のマウント先はこれに合わせて `/var/lib/postgresql` に変更済み。旧パス (`/var/lib/postgresql/data`) のままイメージだけ上げると、**新規デプロイでは匿名 volume 側に initdb され、`down` で全データが静かに消える**。自前 compose を使っている場合はマウント先を確認すること。
 
-既存環境の移行手順 (ダウンタイム = dump + restore の時間):
+既存環境の移行手順 (ダウンタイム = dump + restore の時間)。サービス名は
+`docker-compose.yml` (TCP 構成) のもの (`app` / `db`)。UDS 構成は `mkgo` /
+`postgres` に読み替える (UDS は明示 `PGDATA` なのでマウント先は旧パスのまま
+変えなくてよい):
 
 ```bash
+# 0. 先に compose を 18 版 (イメージ + マウント先) へ更新しておく
+#    (git pull。ここを忘れて古い compose のまま進めると 16 で init し直すだけになる)
+
 # 1. アプリを止めて書き込みを停止 (postgres は起動したまま)
-docker compose stop mkgo
+docker compose stop app
 
-# 2. バックアップ (dump + volume の両方を取る)
+# 2. dump を取る
 docker compose exec -T db pg_dumpall -U <user> > pg16-dump.sql
-docker run --rm -v <pg-volume>:/from -v "$PWD":/to alpine tar czf /to/pg16-data.tar.gz -C /from .
 
-# 3. postgres を止め、volume を作り直して 18 で新規 init
+# 3. 全体を止め、volume 自体もバックアップしてから作り直す
+#    (tar は postgres 停止後に取る。稼働中に取ると crash-consistent ですらない)
 docker compose down
+docker run --rm -v <pg-volume>:/from -v "$PWD":/to alpine tar czf /to/pg16-data.tar.gz -C /from .
 docker volume rm <pg-volume>
 docker compose up -d db          # ここで postgres:18 が新規 initdb する
 

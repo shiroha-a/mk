@@ -115,7 +115,7 @@ rw=$(get_rw_size "$TS_APP" || true)
 vol=$(du_inside "$TS_APP" /misskey/files)
 echo "| TS | \`$TS_APP\` | ${rw:-N/A} | $(human_bytes "$vol") |" >> "$OUT"
 rw=$(get_rw_size "$TS_DB" || true)
-vol=$(du_inside "$TS_DB" /var/lib/postgresql/data)
+vol=$(du_inside "$TS_DB" /var/lib/postgresql)
 echo "| TS | \`$TS_DB\` | ${rw:-N/A} | $(human_bytes "$vol") |" >> "$OUT"
 rw=$(get_rw_size "$TS_REDIS" || true)
 vol=$(du_inside "$TS_REDIS" /data)
@@ -127,7 +127,7 @@ echo >> "$OUT"
 echo '```' >> "$OUT"
 {
 	echo "REPO:TAG  SIZE"
-	for ref in mk-mkgo:latest mk-bench-ts-web:latest postgres:16-alpine redis:7-alpine valkey/valkey:8-alpine; do
+	for ref in mk-mkgo:latest mk-bench-ts-web:latest postgres:18-alpine redis:7-alpine valkey/valkey:8-alpine; do
 		size=$(docker image inspect "$ref" --format '{{.Size}}' 2>/dev/null || echo 0)
 		printf '%s  %s\n' "$ref" "$(human_bytes "$size")"
 	done
