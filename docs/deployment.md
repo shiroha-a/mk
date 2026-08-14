@@ -37,6 +37,37 @@ docker compose exec -T db vacuumdb -U <user> --all --analyze-in-stages
 docker compose up -d
 ```
 
+## pg_bigm (日本語の部分一致検索を高速化)
+
+pg_bigm は 2-gram の GIN インデックスで `LIKE` 部分一致を加速する PostgreSQL 拡張。mk-go の `sqlLike` 検索 (デフォルト) は upstream と同じ `lower(text) LIKE ...` 形なので、**拡張とインデックスを作るだけで provider の変更なしに** インデックスが効く (#2514)。
+
+1. pg_bigm 入りイメージを使う。UDS 構成 (`compose.uds.yaml.example`) は既定でこれをビルドする。他の構成では postgres サービスを差し替える:
+
+```yaml
+  db:
+    build:
+      context: deploy/postgres-bigm   # postgres:18-alpine + pg_bigm
+```
+
+既存の稼働環境で postgres サービスをこのイメージへ差し替えると、コンテナが recreate される (data volume は残るが短い停止を伴う)。
+
+2. 拡張とインデックスを作る (**インデックス作成は opt-in。migration には入れない** — 拡張の無い環境で落ちるため、pgroonga と同じく operator 責務)。`CREATE INDEX CONCURRENTLY` はトランザクション内で実行できないので、**2 文を別々に実行する** (`psql -c "A;B"` や `-1` でまとめると単一トランザクション扱いになりエラー):
+
+```sql
+CREATE EXTENSION IF NOT EXISTS pg_bigm;
+CREATE INDEX CONCURRENTLY idx_note_text_bigm ON note USING gin (lower(text) gin_bigm_ops);
+```
+
+3. 効いていることを確認:
+
+```sql
+EXPLAIN SELECT id FROM note WHERE lower(text) LIKE '%検索語%';
+-- → Bitmap Index Scan on idx_note_text_bigm が出れば OK
+--   (小さいテーブルでは planner が seq scan を選ぶこともある)
+```
+
+`fulltextSearch.provider` は `sqlLike` のままでよい。拡張を外す場合はインデックスを落とすだけで検索自体は動き続ける (seq scan に戻る)。
+
 ## Docker Compose (TCP)
 
 最も簡単な起動方法。PostgreSQL、Redis、mk-goの3サービスをTCPで接続する。

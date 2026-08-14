@@ -1093,7 +1093,7 @@ func (m *MockNoteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID s
 	}, untilID, sinceID, limit), nil
 }
 
-// SearchByFilter returns public/home notes matching the filter (text ILIKE +
+// SearchByFilter returns public/home notes matching the filter (lower() + LIKE +
 // optional userId / channelId / host)。`Host == "."` はローカル限定。
 func (m *MockNoteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note, error) {
 	q := strings.ToLower(f.Query)

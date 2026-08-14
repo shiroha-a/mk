@@ -17,7 +17,12 @@
 
 services:
   postgres:
-    image: postgres:18-alpine
+    # pg_bigm (LIKE 部分一致を加速する GIN index 拡張) 入りの PostgreSQL 18
+    # (#2514)。CREATE EXTENSION するまでは素の postgres:18-alpine と同じ挙動
+    # なので、使わない場合もこのままでよい。有効化手順は docs/deployment.md。
+    # 素の image に戻す場合は build: を消して `image: postgres:18-alpine` に。
+    build:
+      context: deploy/postgres-bigm
     environment:
       POSTGRES_DB: mkgo
       POSTGRES_USER: mkgo

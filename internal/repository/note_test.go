@@ -3839,3 +3839,51 @@ func TestNoteRepository_ListPublicNotes(t *testing.T) {
 	_, err = repo.ListPublicNotes(model.PublicNotesFilter{}, 50, "", "nonexistent")
 	require.NoError(t, err)
 }
+
+// LIKE パターンのメタ文字はリテラル照合になる (#2514、upstream の
+// sql-like-escape.ts 相当)。素通しだと利用者の入力した % / _ がワイルド
+// カードとして解釈され、無関係な note が誤ヒットする。
+func TestNoteRepository_SearchByFilter_EscapesLikePattern(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	u := insertTestUser(t, "u_selike_1", "selikeuser")
+	defer cleanupUser(t, u.ID)
+
+	pct := "progress is 100% done"
+	plain := "progress is 100 percent done"
+	usc := "snake_case word here"
+	uscTrap := "snakeycase word here"
+	bsl := `path c:\temp noted`
+	notes := []*model.Note{
+		{ID: "n_sel_1", UserID: u.ID, Text: &pct, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sel_2", UserID: u.ID, Text: &plain, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sel_3", UserID: u.ID, Text: &usc, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sel_4", UserID: u.ID, Text: &uscTrap, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sel_5", UserID: u.ID, Text: &bsl, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+	}
+	for _, n := range notes {
+		require.NoError(t, repo.Create(n))
+		defer cleanupNote(t, n.ID)
+	}
+
+	// "%" はリテラル。無エスケープだと '%100% done%' が「100 の後に任意列 +
+	// " done"」になり n_sel_2 も誤ヒットする。
+	out, err := repo.SearchByFilter(model.NoteSearchFilter{Query: "100% done", Limit: 10})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n_sel_1"}, idsOf(out))
+
+	// "_" もリテラル。無エスケープだと任意 1 文字に化けて snakeycase (n_sel_4)
+	// も誤ヒットする。
+	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "snake_case", Limit: 10})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n_sel_3"}, idsOf(out))
+
+	// backslash を含むクエリもリテラル照合できる。
+	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: `c:\temp`, Limit: 10})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n_sel_5"}, idsOf(out))
+
+	// lower() + LIKE 化後も case-insensitive を維持する (大文字クエリで当たる)。
+	out, err = repo.SearchByFilter(model.NoteSearchFilter{Query: "SNAKE_CASE", Limit: 10})
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"n_sel_3"}, idsOf(out))
+}

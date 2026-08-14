@@ -575,7 +575,7 @@ func (r *noteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID strin
 // SearchByFilter returns notes matching the filter criteria.
 // 検索バックエンド (core/search.SQLLikeProvider) から呼ばれる。
 // When f.Pgroonga is true the predicate uses the PGroonga `&@~` full-text
-// operator; otherwise it falls back to ILIKE substring match. Visibility は
+// operator; otherwise it uses a lower() + LIKE substring match (escaped, upstream sqlLike 相当). Visibility は
 // f.ViewerID 視点で push-down する (空は public/home のみ、非空なら viewer 自身の
 // followers/specified/visibleUserIds note も含む、#1554)。
 func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note, error) {
@@ -586,7 +586,21 @@ func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note
 		// "クエリ文字列モード" マッチで、空白区切りの AND/OR 等が解釈される。
 		q = q.Where("text &@~ ?", f.Query)
 	} else {
-		q = q.Where("text ILIKE ?", "%"+f.Query+"%")
+		// upstream SearchService と同じ形にする (#2514):
+		// `LOWER(note.text) LIKE %<sqlLikeEscape(lower(q))>%`。
+		//
+		// - **ILIKE ではなく lower() + LIKE**。pg_bigm の GIN index
+		//   (`gin (lower(text) gin_bigm_ops)`) は LIKE しか加速しないため、
+		//   ILIKE だと拡張を入れても index が効かない
+		// - **エスケープ必須**。upstream は sqlLikeEscape で `\` `%` `_` を
+		//   エスケープする。素通しだと利用者の入力した % / _ がワイルド
+		//   カードとして解釈される
+		// - クエリ側の小文字化は Go の strings.ToLower (Unicode simple
+		//   mapping)。upstream の JS toLowerCase (full mapping) とは
+		//   Final_Sigma 等の極端なケースで畳み方が違うが、PG の lower() も
+		//   simple mapping なので両側が一致する mk-go の方が取りこぼしが
+		//   少ない (mk-go 優位の divergence として維持)
+		q = q.Where("lower(text) LIKE ?", "%"+escapeSQLLikePattern(strings.ToLower(f.Query))+"%")
 	}
 	// visibility push-down: viewer 視点の可視性で絞る (upstream SearchService の
 	// generateVisibilityQuery、#1554)。ViewerID 空は匿名 (public/home のみ)、

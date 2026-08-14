@@ -32,7 +32,7 @@ func rangeEndID(at *int64) string {
 // Meilisearch backend (userId / channelId / host).
 //
 // When pgroonga is true the underlying query uses PGroonga's `&@~` operator
-// instead of ILIKE — upstream Misskey TS keeps both providers in the same
+// instead of lower() + LIKE — upstream Misskey TS keeps both providers in the same
 // code path and only swaps the WHERE clause.
 //
 // Index / Unindex are no-ops because the canonical store is the database
@@ -51,7 +51,7 @@ func NewSQLLikeProvider(noteRepo repository.NoteRepository, followingRepo reposi
 }
 
 // NewSQLPgroongaProvider returns a Provider that uses the PGroonga `&@~`
-// match operator instead of ILIKE. The PGroonga extension must be installed
+// match operator instead of lower() + LIKE. The PGroonga extension must be installed
 // on the target database and a pgroonga index must exist on note.text;
 // extension installation is the operator's responsibility.
 func NewSQLPgroongaProvider(noteRepo repository.NoteRepository, followingRepo repository.FollowingRepository) *SQLLikeProvider {
@@ -64,7 +64,7 @@ func (p *SQLLikeProvider) IndexNote(_ *model.Note) error { return nil }
 // UnindexNote is a no-op for the SQL backend.
 func (p *SQLLikeProvider) UnindexNote(_ *model.Note) error { return nil }
 
-// SearchNote runs the configured SQL backend search (ILIKE substring match
+// SearchNote runs the configured SQL backend search (lower() + LIKE substring match
 // by default, or PGroonga `&@~` when the provider was constructed via
 // NewSQLPgroongaProvider) and post-filters the result for viewer visibility.
 func (p *SQLLikeProvider) SearchNote(viewer *model.User, query string, opts SearchOpts, page Pagination) ([]*model.Note, error) {

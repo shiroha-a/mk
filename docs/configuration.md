@@ -147,7 +147,7 @@ cp .config/docker.yml.example .config/docker.yml
 
 | キー | 型 | 説明 |
 |---|---|---|
-| `fulltextSearch.provider` | string | 検索プロバイダ名。`sqlLike` (デフォルト) / `sqlPgroonga` / `meilisearch` |
+| `fulltextSearch.provider` | string | 検索プロバイダ名。`sqlLike` (デフォルト) / `sqlPgroonga` / `meilisearch`。**pg_bigm を使う場合も `sqlLike` のまま** — クエリ形が `lower(text) LIKE` (upstream と同じ) なので、拡張と GIN インデックスを作るだけで index が効く (#2514、手順は [deployment.md](deployment.md)) |
 | `meilisearch.host` | string | Meilisearchホスト |
 | `meilisearch.port` | int | Meilisearchポート |
 | `meilisearch.apiKey` | string | APIキー |
