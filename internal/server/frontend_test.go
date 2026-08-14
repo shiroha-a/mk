@@ -222,3 +222,48 @@ func TestFrontendHTML_EmbedsChunkedUploadCapability(t *testing.T) {
 	require.NotNil(t, got["chunkedUpload"])
 	assert.Equal(t, float64(10*1024*1024), got["chunkedUpload"].(map[string]any)["chunkSize"])
 }
+
+// 外部 media proxy 構成では、その origin を CSP に足す (#2501)。リモート画像も
+// カスタム絵文字も proxy の origin から配信されるため、無いと enforce で全滅する。
+// internal proxy ('self') 構成では何も足さない。
+func TestFrontendHTML_ExternalMediaProxyOriginInCSP(t *testing.T) {
+	serve := func(cfg *config.Config) string {
+		t.Helper()
+		handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+		return rec.Header().Get("Content-Security-Policy")
+	}
+
+	t.Run("external proxy origin appears in media directives", func(t *testing.T) {
+		csp := serve(&config.Config{
+			URL: "https://example.test", Version: "0.0.1-test",
+			FrontendContentSecurityPolicy: CSPModeEnforce,
+			ExternalMediaProxyEnabled:     true,
+			MediaProxy:                    "https://proxy.example/proxy",
+		})
+		require.NotEmpty(t, csp)
+		for _, d := range strings.Split(csp, "; ") {
+			name, _, _ := strings.Cut(d, " ")
+			switch name {
+			case "img-src", "media-src", "connect-src":
+				assert.Containsf(t, d, "https://proxy.example", "%s に proxy origin が要る", name)
+			case "script-src":
+				// 画像を配るだけの host にスクリプト実行の権限を与えない。
+				assert.NotContains(t, d, "https://proxy.example")
+			}
+		}
+	})
+
+	t.Run("internal proxy adds nothing", func(t *testing.T) {
+		csp := serve(&config.Config{
+			URL: "https://example.test", Version: "0.0.1-test",
+			FrontendContentSecurityPolicy: CSPModeEnforce,
+			MediaProxy:                    "https://example.test/proxy",
+		})
+		require.NotEmpty(t, csp)
+		assert.NotContains(t, csp, "proxy.example")
+	})
+}

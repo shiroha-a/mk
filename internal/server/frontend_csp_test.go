@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 
@@ -152,11 +153,13 @@ func TestCSPReportHandler_EffectiveDirectiveFallback(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
-// object storage の origin は img-src / media-src にだけ足す (#2425)。
+// object storage / 外部 media proxy の origin は img-src / media-src /
+// connect-src にだけ足す (#2425 / #2501)。
 //
 // drive のファイルは object storage から直接配信されるので、`'self'` だけだと
 // enforce 時に画像・動画・音声が丸ごと表示できなくなる。本番の report-only で
-// 実際に img-src / media-src の違反が出て判明した。
+// 実際に img-src / media-src の違反が出て判明した。connect-src は通知音の
+// fetch (sound.ts の decodeAudioData 経路) が使う。
 func TestBuildFrontendCSP_ExtraMediaOrigins(t *testing.T) {
 	const origin = "https://objects.example"
 	policy := buildFrontendCSP(false, origin)
@@ -167,16 +170,17 @@ func TestBuildFrontendCSP_ExtraMediaOrigins(t *testing.T) {
 		byName[name] = d
 	}
 
-	t.Run("img-src と media-src に足す", func(t *testing.T) {
+	t.Run("img-src と media-src と connect-src に足す", func(t *testing.T) {
 		assert.Contains(t, byName["img-src"], origin)
 		assert.Contains(t, byName["media-src"], origin)
+		assert.Contains(t, byName["connect-src"], origin)
 	})
 
 	t.Run("他の directive には足さない", func(t *testing.T) {
 		// **script-src に足すと外部 origin からのスクリプト実行を許すことになる。**
 		// 画像を配るだけの host にその権限を与える理由は無い。
 		for _, name := range []string{
-			"default-src", "script-src", "style-src", "connect-src",
+			"default-src", "script-src", "style-src",
 			"font-src", "worker-src", "frame-src", "object-src",
 			"base-uri", "form-action",
 		} {
@@ -258,13 +262,58 @@ func TestFrontendCSP_ExternalOriginsAreLimited(t *testing.T) {
 			"script-src の外部 origin を増やすときは理由を確認すること")
 	})
 
+	t.Run("connect-src で許す外部は esm.sh だけ", func(t *testing.T) {
+		// script-src で既に信頼している CDN の source map 取得が report を
+		// 汚すため (#2501)。新しい信頼先を増やすものではない。
+		var connectSrc string
+		for _, d := range strings.Split(policy, "; ") {
+			if strings.HasPrefix(d, "connect-src") {
+				connectSrc = d
+			}
+		}
+		require.NotEmpty(t, connectSrc)
+
+		var external []string
+		for _, tok := range strings.Fields(connectSrc) {
+			if strings.HasPrefix(tok, "http://") || strings.HasPrefix(tok, "https://") {
+				external = append(external, tok)
+			}
+		}
+		assert.Equal(t, []string{"https://esm.sh"}, external)
+	})
+
+	// リモート添付動画 (MkMediaVideo が file.url を直接読む) と埋め込み
+	// プレイヤー (MkUrlPreview の player.url iframe) は任意の origin を指す
+	// ので、この 2 つだけは https: スキームを許す (#2501)。'self' に絞ると
+	// 該当機能が全滅する (実際に本番で全滅していた)。
+	t.Run("https: スキームを許すのは media-src と frame-src だけ", func(t *testing.T) {
+		for _, d := range strings.Split(policy, "; ") {
+			name, _, _ := strings.Cut(d, " ")
+			hasScheme := slices.Contains(strings.Fields(d), "https:")
+			if name == "media-src" || name == "frame-src" {
+				assert.Truef(t, hasScheme, "%s は https: を許す必要がある", name)
+			} else {
+				assert.Falsef(t, hasScheme, "%s に https: スキームが入っている", d)
+			}
+		}
+	})
+
+	// http: は mixed content でどのみちブロックされるうえ、http 配信の
+	// ページでは平文取得を広く許すことになる。どの directive にも入れない。
+	t.Run("http: スキームはどこにも入れない", func(t *testing.T) {
+		for _, d := range strings.Split(policy, "; ") {
+			assert.Falsef(t, slices.Contains(strings.Fields(d), "http:"),
+				"%s に http: スキームが入っている", d)
+		}
+	})
+
 	t.Run("他の directive に外部 origin を入れない", func(t *testing.T) {
 		for _, d := range strings.Split(policy, "; ") {
-			if strings.HasPrefix(d, "script-src") {
+			if strings.HasPrefix(d, "script-src") || strings.HasPrefix(d, "connect-src") {
 				continue
 			}
 			for _, tok := range strings.Fields(d) {
-				assert.Falsef(t, strings.HasPrefix(tok, "https://"),
+				assert.Falsef(t, strings.HasPrefix(tok, "https://") || strings.HasPrefix(tok, "http://"),
 					"%s に外部 origin %s が入っている", d, tok)
 			}
 		}

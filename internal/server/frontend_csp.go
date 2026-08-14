@@ -44,6 +44,12 @@ var frontendCSPDirectives = []string{
 	"base-uri 'self'",
 	"object-src 'none'",
 	"form-action 'self'",
+	// **既知の非対応 (#2502): captcha を有効にした構成では enforce にできない。**
+	// MkCaptcha は hCaptcha / reCAPTCHA / Turnstile の script を各社の origin から
+	// 動的に挿入するため、script-src (Turnstile は connect-src も) で先に落ちて
+	// サインアップが壊れる。対応するときは meta の enable フラグに連動した
+	// 条件付き追加にする (使っていない captcha 業者を常時許可しない)。
+	//
 	// esm.sh は Misskey frontend が shiki (コードブロックの syntax highlight) を
 	// 動的 import する先。**upstream の vite 設定がそう作っている**
 	// (`externalPackages` で `shiki/langs` `shiki/themes` を CDN に逃がす)。
@@ -62,21 +68,39 @@ var frontendCSPDirectives = []string{
 	// 言語を絞ってバンドルすれば両立できる可能性はある (未検証)。
 	"script-src 'self' 'unsafe-inline' https://esm.sh",
 	"style-src 'self' 'unsafe-inline'",
-	// media は media proxy 経由で同一オリジンに来る。data: / blob: は
-	// クライアント側でのプレビュー生成 (画像編集・録音等) が使う。
+	// 画像は media proxy 経由で来る。**internal proxy なら同一オリジン**で、
+	// 外部 media proxy 構成ではその origin を extraMediaOrigins で足す (#2501)。
+	// data: / blob: はクライアント側でのプレビュー生成 (画像編集・録音等) が使う。
 	"img-src 'self' data: blob:",
-	"media-src 'self' data: blob:",
+	// **動画・音声は img と違いリモート origin を直接読む** (#2501)。media proxy
+	// が扱うのは画像だけで、リンク参照のリモート添付は MkMediaVideo が
+	// `<source :src="file.url">` で相手サーバーから直接取得する。'self' に絞ると
+	// リモートの動画・音声が全滅する (実際に本番で全滅していた)。upstream は
+	// CSP 自体を設定せず全 origin を許すので、https: を許すのが parity。
+	// http: は mixed content でどのみちブロックされるため足さない。
+	"media-src 'self' https: data: blob:",
 	"font-src 'self' data:",
 	// streaming は同一オリジンの WebSocket。ws: も許すのは http 配信の
-	// 開発環境で wss: にならないため。
-	"connect-src 'self' ws: wss:",
+	// 開発環境で wss: にならないため。esm.sh は script-src で既に信頼している
+	// CDN で、実測で .map (source map) 取得の connect-src 違反 report が届いて
+	// 観測を汚すため明示する (#2501。取得元はブラウザや拡張に依存し、信頼先は
+	// 増えない)。
+	"connect-src 'self' ws: wss: https://esm.sh",
 	"worker-src 'self' blob:",
-	"frame-src 'self'",
+	// URL プレビューの埋め込みプレイヤー (MkUrlPreview の player.url iframe) は
+	// YouTube 等の任意 origin を指す (#2501)。iframe 側の sandbox 属性で制約
+	// されており (upstream 設計)、'self' に絞るとプレイヤーが全滅する。
+	"frame-src 'self' https:",
 }
 
-// mediaDirectives are the directives that must also allow the object storage
-// origin. drive のファイルはそこから直接配信されるため。
-var mediaDirectives = []string{"img-src", "media-src"}
+// mediaDirectives are the directives that must also allow the extra origins
+// (object storage / 外部 media proxy)。drive のファイルはそこから直接配信される。
+//
+// **connect-src にも足す** (#2501)。通知音にドライブのファイルを設定すると、
+// クライアントは `<audio>` ではなく fetch + decodeAudioData で読む (sound.ts)。
+// fetch は media-src でなく connect-src の支配下なので、ここに無いと object
+// storage 構成で「通知音だけ鳴らない」という気付きにくい壊れ方をする。
+var mediaDirectives = []string{"img-src", "media-src", "connect-src"}
 
 // buildFrontendCSP renders the policy string.
 //

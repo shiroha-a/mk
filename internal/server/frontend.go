@@ -78,6 +78,14 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 			}
 		}
 	}
+	// 外部 media proxy 構成では、リモート画像もカスタム絵文字も proxy の origin
+	// から配信される (server-side pack とクライアント側の meta.mediaProxy の両方)。
+	// internal proxy ('self') なら何も足さない (#2501)。
+	if cfg.ExternalMediaProxyEnabled {
+		if origin := objectStorageOrigin(cfg.MediaProxy); origin != "" {
+			cspMediaOrigins = append(cspMediaOrigins, origin)
+		}
+	}
 
 	// CLIENT_ENTRYの設定
 	clientEntryJS := "null"
