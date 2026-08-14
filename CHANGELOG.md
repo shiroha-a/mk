@@ -4,6 +4,16 @@
 本家の新バージョンを取り込んだ分は「Misskey 202X.Y.Z に追従」の 1 行にまとめ、以降は mk-go 独自の変更のみを記載する。
 `Client` は mk-go が同梱するフロントエンド (`third_party/misskey` fork) の変更を指す。
 
+## 1.2.1
+
+### Note
+
+- 1.2.0 の pg_bigm 入り PostgreSQL イメージが、最新の `postgres:18-alpine` を pull する環境 (新規構築など) でビルドできない問題の修正のみを含むパッチリリース。
+
+### General
+
+- Fix: `deploy/postgres-bigm/` イメージが最新の `postgres:18-alpine` ベースでビルドできない問題を修正。base の Alpine 更新で `clang19` パッケージが消えたため、JIT 用 bitcode の生成 (`with_llvm=no`) をやめて clang/llvm への依存自体を無くした。pg_bigm の検索性能には影響しない
+
 ## 1.2.0
 
 ### Note
