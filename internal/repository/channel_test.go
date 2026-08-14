@@ -245,3 +245,40 @@ func TestChannelRepository_List_QueryError(t *testing.T) {
 	_, err := repo.List(model.ChannelListFilter{})
 	assert.Error(t, err)
 }
+
+// LIKE パターンのメタ文字はリテラル照合になる (#2518、upstream channels/search
+// の sqlLikeEscape 相当)。素通しだと _ が任意 1 文字に化けて誤ヒットする。
+func TestChannelRepository_List_EscapesLikePattern(t *testing.T) {
+	repo := NewChannelRepository(testDB)
+	user := insertTestUser(t, "u_chr_esc", "channeluseresc")
+	defer cleanupUser(t, user.ID)
+	uid := user.ID
+
+	lit := newTestChannel("ch_esc_1", "dev_talk room", &uid)
+	require.NoError(t, repo.Create(lit))
+	defer cleanupChannel(t, lit.ID)
+	// 無エスケープなら "dev_talk" の _ が任意 1 文字になり、こちらも誤ヒットする。
+	trap := newTestChannel("ch_esc_2", "devXtalk room", &uid)
+	require.NoError(t, repo.Create(trap))
+	defer cleanupChannel(t, trap.ID)
+	pct := newTestChannel("ch_esc_3", "sale 100% off", &uid)
+	require.NoError(t, repo.Create(pct))
+	defer cleanupChannel(t, pct.ID)
+
+	rows, err := repo.List(model.ChannelListFilter{Query: "dev_talk"})
+	require.NoError(t, err)
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	assert.Contains(t, ids, "ch_esc_1")
+	assert.NotContains(t, ids, "ch_esc_2", "_ をワイルドカード解釈しない")
+
+	rows, err = repo.List(model.ChannelListFilter{Query: "100% off"})
+	require.NoError(t, err)
+	ids = ids[:0]
+	for _, r := range rows {
+		ids = append(ids, r.ID)
+	}
+	assert.Contains(t, ids, "ch_esc_3", "% をリテラル照合できる")
+}

@@ -73,7 +73,10 @@ func (r *channelRepository) List(filter model.ChannelListFilter) ([]*model.Chann
 		q = q.Where("\"userId\" = ?", filter.OwnerID)
 	}
 	if filter.Query != "" {
-		like := "%" + filter.Query + "%"
+		// upstream channels/search と同じくエスケープする (#2518)。素通しだと
+		// 利用者の入力した % / _ がワイルドカードとして解釈される。ILIKE の
+		// ままなのも upstream と同じ (pg_bigm の対象は note 検索のみ)。
+		like := "%" + escapeSQLLikePattern(filter.Query) + "%"
 		if filter.SearchDescription {
 			// upstream type=nameAndDescription: name OR description。
 			q = q.Where("name ILIKE ? OR description ILIKE ?", like, like)
