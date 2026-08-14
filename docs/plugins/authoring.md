@@ -33,7 +33,7 @@ apiVersion: 1
 ```
 module github.com/you/mk-plugin-myplugin
 
-go 1.26.5
+go 1.26.6
 
 require github.com/shiroha-a/mk v0.0.0
 ```

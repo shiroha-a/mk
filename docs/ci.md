@@ -158,7 +158,7 @@ GOOS=linux "$(go env GOPATH)/bin/govulncheck" ./...
 `GOOS=linux` を付けるのは、実際にデプロイするのが Linux だから。付けないと host 依存の
 package load エラーで解析が空振りしうる。**ローカルの `go` が古いと govulncheck 自身が
 古い toolchain でビルドされ、`package requires newer Go version` で解析できない。**
-その場合は `GOTOOLCHAIN=go1.26.5 go install ...` のように明示してビルドし直す。
+その場合は `GOTOOLCHAIN=go1.26.6 go install ...` のように明示してビルドし直す。
 
 検出されるのは**呼び出しが到達可能なもの**だけで、import しているだけの脆弱性は落ちない。
 無視リストを育てずに運用できる設計なので、**抑制するより直すこと**。対応は原則 2 つ。

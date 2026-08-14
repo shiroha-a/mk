@@ -9,7 +9,12 @@
 #
 # Build context must be the repository root.
 # `# syntax=` directive は BuildKit の cache mount を有効化するため必要 (#432)。
-FROM golang:1.26-alpine AS builder
+#
+# builder は patch version まで固定する (#2499)。floating tag (golang:1.26-alpine)
+# だと pull 時期で stdlib の patch が変わり、「既知脆弱性を含まない」と再現可能な
+# 形で言えない。vulncheck の整合チェックはルートの Dockerfile しか見ないので、
+# ここが floating に戻っても CI は検出しない — 戻さないこと。
+FROM golang:1.26.6-alpine AS builder
 
 RUN apk add --no-cache git build-base
 
