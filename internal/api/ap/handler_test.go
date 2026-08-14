@@ -405,11 +405,77 @@ func TestNote_NotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
 
-func TestNote_Remote(t *testing.T) {
+// リモートノートは原本 URI へ 302 リダイレクトする (upstream の /notes/:note と
+// 同じ)。404 にすると、他サーバーがこのインスタンスの URL 経由で第三サーバーの
+// 投稿を照会したときに解決が途切れる (#2505、実際に本番で発生)。
+func TestNote_RemoteRedirectsToOrigin(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	host := "remote.example"
+	uri := "https://remote.example/notes/abc"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		UserHost: &host, URI: &uri,
+	}
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.Note(c))
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, uri, rec.Header().Get("Location"))
+	// 302 にも Vary が要る。無いと中間キャッシュが AP 向け 302 をブラウザに
+	// 配ってしまい、permalink が原本サーバーへ飛ぶ。
+	assert.Equal(t, "Accept", rec.Header().Get("Vary"))
+}
+
+// 空文字列の uri も nil と同じくデータ異常として 500。upstream は null しか
+// 見ないため Location が空の自己相対リダイレクトになるが、そちらに合わせる
+// 意味は無い。
+func TestNote_RemoteWithEmptyURIIs500(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	host := "remote.example"
+	empty := ""
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		UserHost: &host, URI: &empty,
+	}
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.Note(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// uri の無いリモートノートはデータ異常。upstream と同じく 500 にして
+// 「無い」(404) と区別する。
+func TestNote_RemoteWithoutURIIs500(t *testing.T) {
 	h, _, noteRepo, _ := newHandler(t)
 	host := "remote.example"
 	noteRepo.Notes["n1"] = &model.Note{
 		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, UserHost: &host,
+	}
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.Note(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// userHost が自ホストを指すのもデータ異常 (ローカルノートなら UserHost は nil
+// のはず)。リダイレクトするとループになり得るので upstream と同じく 500。
+func TestNote_RemoteSelfHostIs500(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	h.SetFederationGate(nil, "self.example")
+	host := "SELF.example" // 大文字小文字は無視して照合する
+	uri := "https://self.example/notes/n1"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		UserHost: &host, URI: &uri,
+	}
+	c, rec := newReq(t, "id", "n1")
+	require.NoError(t, h.Note(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// **localOnly は AP で serve しない** (upstream は localOnly: false を query で
+// 強制)。連合しない指定のノートが AP で取得できると leak になる。
+func TestNote_LocalOnlyIsNotServed(t *testing.T) {
+	h, _, noteRepo, _ := newHandler(t)
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, LocalOnly: true,
 	}
 	c, rec := newReq(t, "id", "n1")
 	require.NoError(t, h.Note(c))

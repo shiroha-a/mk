@@ -648,6 +648,10 @@ func (h *Handler) packUserForAPI(viewer *model.User, u *model.User, profile *mod
 // AP clients receive the AS Note object; browser reloads are handed
 // off to the frontend fallback so the SPA renders the note permalink.
 func (h *Handler) Note(c echo.Context) error {
+	// Vary: Accept は AP / browser の両分岐を持つすべての response に必要
+	// (upstream も /notes/:note の先頭で立てる)。302 が加わったことで、これが
+	// 無いと中間キャッシュが AP 向け 302 をブラウザに配る混線が現実になる。
+	c.Response().Header().Set("Vary", "Accept")
 	if !wantsActivityJSON(c.Request().Header.Get("Accept")) {
 		return h.serveNonAP(c)
 	}
@@ -657,15 +661,43 @@ func (h *Handler) Note(c echo.Context) error {
 		return c.NoContent(http.StatusForbidden)
 	}
 	noteID := c.Param("id")
-	// 公開ノートのみAPでフェッチ可能 (非ログインから取得されるため viewer=nil)
+	// 公開ノートのみAPでフェッチ可能 (非ログインから取得されるため viewer=nil)。
+	// CanSeeNote(nil) は public / home を通すので、upstream の
+	// visibility ∈ {public, home} フィルタと一致する。
 	n, err := h.queryService.Show(nil, noteID)
 	if err != nil {
 		return c.NoContent(http.StatusNotFound)
 	}
-	// リモートノートはホスト元へリダイレクトすべきだが現状は404
-	if n.UserHost != nil {
+	// **localOnly は AP で serve しない** (upstream は query で localOnly: false
+	// を強制)。CanSeeNote は可視性しか見ず、連合可否である localOnly を
+	// 通してしまうため、ここで明示的に弾く。
+	if n.LocalOnly {
 		return c.NoContent(http.StatusNotFound)
 	}
+	// リモートノートは原本 URI へリダイレクトする (upstream
+	// ActivityPubServerService の /notes/:note と同じ)。これが無いと、他サーバー
+	// がこのインスタンスの URL 経由で第三サーバーの投稿を照会したとき、
+	// リダイレクトを辿って権威サーバーから取得する経路が 404 で途切れる (#2505)。
+	if n.UserHost != nil {
+		// uri が無い・userHost が自ホストを指す、はデータ異常。upstream と
+		// 同じく 500 にする (404 だと「無い」と区別できず調査の足掛かりを失う)。
+		// 空文字列も弾くのは upstream との意図的な差 (upstream は null しか見ず
+		// Location が空になる)。
+		//
+		// 自ホスト照合は素の比較 (EqualFold)。upstream の isSelfHost は puny
+		// 正規化 + port 込みだが、この分岐はデータ異常の検出であって可視性の
+		// 境界ではないので、既存の federation gate (h.localHost の比較) と
+		// 同じ割り切りに揃える。
+		if n.URI == nil || *n.URI == "" ||
+			(h.localHost != "" && strings.EqualFold(*n.UserHost, h.localHost)) {
+			return c.NoContent(http.StatusInternalServerError)
+		}
+		// fastify の reply.redirect 既定と同じ 302。
+		return c.Redirect(http.StatusFound, *n.URI)
+	}
+	// upstream と同じキャッシュ指示 (public, max-age=180)。Vary: Accept を
+	// 立てているので AP 変種としてキャッシュされる。
+	c.Response().Header().Set("Cache-Control", "public, max-age=180")
 	note := h.renderer.RenderNote(n, h.idGen)
 	return writeActivityJSON(c, note)
 }
