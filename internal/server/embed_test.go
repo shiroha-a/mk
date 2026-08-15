@@ -1,10 +1,17 @@
 package server
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func strptr(s string) *string { return &s }
@@ -115,4 +122,41 @@ func TestEscapeJSONForScriptNeverLeavesClosingTag(t *testing.T) {
 			t.Errorf("escapeJSONForScript(%q) left raw angle brackets: %q", p, got)
 		}
 	}
+}
+
+// embed shell の `<head>` が upstream `views/base-embed.tsx` と同じ icon link を
+// 出すこと。SPA shell と同じ fallback (#2527)。
+func TestEmbedShell_IconLinks(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	render := func(t *testing.T, m *model.Meta) string {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		if m != nil {
+			repo.Meta = m
+		}
+		h := &embedHandlers{cfg: cfg, metaRepo: repo}
+
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/embed/notes/x", nil), rec)
+		require.NoError(t, h.render(c, nil))
+		return rec.Body.String()
+	}
+
+	t.Run("defaults match upstream base-embed.tsx", func(t *testing.T) {
+		body := render(t, nil)
+
+		assert.Contains(t, body, `<link rel="icon" href="/favicon.ico">`)
+		assert.Contains(t, body, `<link rel="apple-touch-icon" href="/apple-touch-icon.png">`)
+	})
+
+	t.Run("reflects meta icon urls", func(t *testing.T) {
+		icon := "https://example.test/files/server-icon.png"
+		appIcon := "https://example.test/files/app-512.png"
+		body := render(t, &model.Meta{ID: "x", IconURL: &icon, App512IconURL: &appIcon})
+
+		assert.Contains(t, body, `<link rel="icon" href="`+icon+`">`)
+		assert.Contains(t, body, `<link rel="apple-touch-icon" href="`+appIcon+`">`)
+	})
 }

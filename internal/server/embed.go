@@ -151,7 +151,9 @@ func (h *embedHandlers) Fallback(c echo.Context) error {
 // render writes the embed HTML shell with the optional context payload.
 func (h *embedHandlers) render(c echo.Context, ctx *embedContext) error {
 	instanceName := "Misskey"
-	iconURL := "/static-assets/icons/192.png"
+	// upstream base-embed.tsx:46-47 と同じ fallback (SPA shell と共通)。
+	iconURL := "/favicon.ico"
+	appleTouchIconURL := "/apple-touch-icon.png"
 	themeColor := "#86b300"
 	metaJSON := "{}"
 
@@ -161,6 +163,9 @@ func (h *embedHandlers) render(c echo.Context, ctx *embedContext) error {
 		}
 		if m.IconURL != nil && *m.IconURL != "" {
 			iconURL = *m.IconURL
+		}
+		if m.App512IconURL != nil && *m.App512IconURL != "" {
+			appleTouchIconURL = *m.App512IconURL
 		}
 		if m.ThemeColor != nil && *m.ThemeColor != "" {
 			themeColor = *m.ThemeColor
@@ -176,11 +181,11 @@ func (h *embedHandlers) render(c echo.Context, ctx *embedContext) error {
 	}
 
 	c.Response().Header().Set(echo.HeaderCacheControl, embedCacheControl)
-	return c.HTML(http.StatusOK, h.buildHTML(instanceName, iconURL, themeColor, metaJSON, embedCtxJSON))
+	return c.HTML(http.StatusOK, h.buildHTML(instanceName, iconURL, appleTouchIconURL, themeColor, metaJSON, embedCtxJSON))
 }
 
 // buildHTML assembles the embed shell, mirroring upstream views/base-embed.tsx.
-func (h *embedHandlers) buildHTML(instanceName, iconURL, themeColor, metaJSON, embedCtxJSON string) string {
+func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, themeColor, metaJSON, embedCtxJSON string) string {
 	var head strings.Builder
 	// ビルド済み bundle が無い場合 (dev) は vite client を読ませる。upstream の
 	// `frontendEmbedViteFiles == null` 分岐と同じ。
@@ -242,6 +247,7 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, themeColor, metaJSON, e
 <meta name="format-detection" content="telephone=no,date=no,address=no,email=no,url=no">
 <meta name="robots" content="noindex">
 <link rel="icon" href="%s">
+<link rel="apple-touch-icon" href="%s">
 <title>%s</title>
 %s<link rel="stylesheet" href="/embed_vite/loader/style.css">
 <script>
@@ -261,6 +267,7 @@ const LANGS = ["ja-JP","en-US"];
 		html.EscapeString(instanceName),
 		html.EscapeString(h.cfg.URL),
 		html.EscapeString(iconURL),
+		html.EscapeString(appleTouchIconURL),
 		html.EscapeString(instanceName),
 		head.String(),
 		html.EscapeString(h.cfg.Version),
