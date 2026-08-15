@@ -213,6 +213,7 @@ export default definePlugin({
 | `profile:info` | ユーザーのプロフィール（`ctx.user` が渡る） |
 | `settings:profile` | 設定 > プロフィール |
 | `admin:federation` | コントロールパネル > 連合（一覧の手前） |
+| `admin:instance-info` | インスタンス情報の概要タブ（`ctx.host` が渡る） |
 
 **位置は意味で定義されている。** upstream がコンポーネント名を変えても壊れない。
 
