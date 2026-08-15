@@ -192,6 +192,52 @@ func TestFetch_RemoteImage_Avatar(t *testing.T) {
 	assert.Equal(t, "image/webp", result.ContentType)
 }
 
+// 型を名乗らない Content-Type は、標準の綴りでなくても中身から判定し直す。
+//
+// **`binary/octet-stream` は非標準だが実在する。** S3 互換ストレージの一部が
+// 返しており、これを素通りさせていたせいで、該当するインスタンスのアイコン・
+// バナー・カスタム絵文字が resize 経路でまとめて 404 になっていた (#2541)。
+func TestFetch_RemoteImage_SniffsUnknownBinary(t *testing.T) {
+	for _, contentType := range []string{
+		"application/octet-stream",
+		"binary/octet-stream",
+		"",
+	} {
+		t.Run(contentType, func(t *testing.T) {
+			imgData := makePNG()
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if contentType != "" {
+					w.Header().Set("Content-Type", contentType)
+				} else {
+					// Go は書き込み時に自動で sniff するので、明示的に消す。
+					w.Header()["Content-Type"] = nil
+				}
+				w.Write(imgData)
+			}))
+			defer ts.Close()
+
+			s := testService(map[string]bool{ts.URL + "/avatar.png": true})
+
+			result, err := s.Fetch(context.Background(), ts.URL+"/avatar.png", ModeAvatar, FormatWebP)
+			require.NoError(t, err)
+			defer result.Body.Close()
+
+			assert.Equal(t, "image/webp", result.ContentType)
+		})
+	}
+}
+
+func TestIsUnknownBinary(t *testing.T) {
+	for _, ct := range []string{"", "application/octet-stream", "binary/octet-stream"} {
+		assert.True(t, isUnknownBinary(ct), "型を名乗っていないものを見落としている: %q", ct)
+	}
+	// 型を名乗っているものは尊重する。stored MIME を上書きすると、
+	// DetectContentType が認識しない HEIC/AVIF/JXL が壊れる。
+	for _, ct := range []string{"image/png", "image/heic", "image/jxl", "application/pdf"} {
+		assert.False(t, isUnknownBinary(ct), "名乗っている型を捨てている: %q", ct)
+	}
+}
+
 func TestFetch_RemoteImage_Static(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -384,7 +384,7 @@ func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, 
 	// http.DetectContentType が認識せず octet-stream を返す)。fetchRemote
 	// と同じ挙動に揃える。
 	contentType := storedMIME
-	if contentType == "" || contentType == "application/octet-stream" {
+	if isUnknownBinary(contentType) {
 		contentType = http.DetectContentType(data)
 	}
 	return s.processAndReturn(ctx, data, contentType, mode, out, rawURL)
@@ -475,7 +475,7 @@ func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode
 	if mt, _, err := mime.ParseMediaType(rawCT); err == nil {
 		contentType = mt
 	}
-	if contentType == "" || contentType == "application/octet-stream" {
+	if isUnknownBinary(contentType) {
 		contentType = http.DetectContentType(data)
 	}
 
@@ -690,6 +690,24 @@ func makeResult(data []byte, contentType string) *ProxyResult {
 		Body:        io.NopCloser(bytes.NewReader(data)),
 		ContentType: contentType,
 	}
+}
+
+// isUnknownBinary reports whether a Content-Type carries no type information,
+// so the bytes themselves must be sniffed instead.
+//
+// **`application/octet-stream` だけを見てはいけない。** 標準はそちらだが、
+// S3 互換ストレージの一部は `binary/octet-stream` を返す。どちらも「型が
+// 分からない」以上の意味を持たないので、中身から判定し直す対象は同じ。
+//
+// 実際に、この 2 つを区別していたせいで `binary/octet-stream` を返す
+// インスタンスの画像が resize 経路で `isConvertibleImage` に弾かれ、
+// アイコン・バナー・カスタム絵文字がまとめて 404 になっていた (#2541)。
+func isUnknownBinary(contentType string) bool {
+	switch contentType {
+	case "", "application/octet-stream", "binary/octet-stream":
+		return true
+	}
+	return false
 }
 
 // isAnimatedFormat returns true for image MIME types that natively encode
