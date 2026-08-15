@@ -323,3 +323,30 @@ func TestVersion2_1_UsageStatsZeroWhenReposMissing(t *testing.T) {
 	assert.Equal(t, float64(0), usage["localPosts"])
 	assert.Equal(t, float64(0), usage["localComments"])
 }
+
+// 連合を宣言したプラグインだけが出ること (#2537)。
+//
+// **入れているプラグインを全部並べない。** 運営者がどんな拡張を使っているかは
+// 攻撃面の情報になるので、宣言したものに限る。宣言が無ければキーごと出さない。
+func TestVersion2_1_PeeredPlugins(t *testing.T) {
+	h := NewHandler(&config.Config{Host: "example.test", URL: "https://example.test"})
+
+	rec := httptest.NewRecorder()
+	c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil), rec)
+	require.NoError(t, h.Version2_1(c))
+
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	meta, _ := out["metadata"].(map[string]any)
+	_, present := meta["mkGoPlugins"]
+	assert.False(t, present, "宣言が無ければキーごと出さない")
+
+	h.SetPeeredPlugins([]string{"demo"})
+	rec = httptest.NewRecorder()
+	c = echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil), rec)
+	require.NoError(t, h.Version2_1(c))
+
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	meta, _ = out["metadata"].(map[string]any)
+	assert.Equal(t, []any{"demo"}, meta["mkGoPlugins"])
+}

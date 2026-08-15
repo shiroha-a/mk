@@ -61,6 +61,10 @@ type Server struct {
 	queueRuntimeStats *runtimestats.Recorder
 	// startedAt は admin/server-metrics が返す uptime の起点 (#2395)。
 	startedAt time.Time
+	// peerDeps はプラグイン同士の通信 (#2537) に要る一式。setupRoutes が
+	// 署名・解決・ブロック判定を組み立ててから setupPlugins に渡す。
+	// 未配線 (nil) のときは peer を宣言したプラグインも受け口を張らない。
+	peerDeps *pluginPeerDeps
 	// role は「このプロセスが Web を担うか、ジョブキューを担うか」(#2459)。
 	// 既定 (RoleBoth) は env 未設定時の従来どおりの挙動。setupRoutes は
 	// role を見て背景処理を出し分けるので、New より前に決まっている必要がある。

@@ -3636,6 +3636,27 @@ func (s *Server) setupRoutes() {
 	// Echo の radix tree は静的パスを wildcard より優先するので順序に依存
 	// しないが、「catchall の後ろに実ルートがある」形は読み手を惑わせる。
 	registeredPlugins := plugin.Registered()
+	// プラグイン同士の通信 (#2537)。**署名・解決・ブロック判定は本体のものを
+	// そのまま使う** — inbox と同じ厳しさにするため、専用の実装を作らない。
+	s.peerDeps = &pluginPeerDeps{
+		selfHost: s.config.Host,
+		client:   s.outboundClient(peerTimeout),
+		resolver: federationResolver,
+		keyCache: activitypub.NewPublicKeyCache(256),
+		blocker:  instanceService,
+		signer:   newInstanceActorSigner(sysAcctSvc, keypairRepo, apURLs),
+		remote:   newNodeInfoPeerLister(s.outboundClient(peerLookupTimeout)),
+		idGen:    idGen,
+	}
+	// nodeinfo に載せるのは **宣言したものだけ**。
+	var peered []string
+	for _, def := range registeredPlugins {
+		if def.Peered && pluginEnabled(s.config.Plugins[def.Name]) {
+			peered = append(peered, def.Name)
+		}
+	}
+	nodeinfoHandler.SetPeeredPlugins(peered)
+
 	if err := s.setupPlugins(api, registeredPlugins, s.dbBackedStorage()); err != nil {
 		s.pluginSetupErr = err
 		return

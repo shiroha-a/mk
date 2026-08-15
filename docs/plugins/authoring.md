@@ -290,6 +290,99 @@ const res = await host.api<T>('plugin/myplugin/me', { ... });
 
 **POST 固定。** 利用者のセッションがそのまま使われる。
 
+## 他のインスタンスとやりとりする
+
+同じプラグインを入れている **mk-go 同士**でだけ通信できる (#2537)。
+
+```go
+plugin.Register(plugin.Definition{
+    Name:       "demo",
+    APIVersion: plugin.APIVersion,
+    Peered:     true,   // ← 宣言したものだけが使える
+    Routes: func(ctx plugin.Context, r plugin.Router) error {
+        peer := ctx.Peer()
+
+        // 相手から届いたとき。from は署名で確定したホスト。
+        peer.Handle(func(c context.Context, from string, payload json.RawMessage) (any, error) {
+            var req struct{ User string `json:"user"` }
+            if err := json.Unmarshal(payload, &req); err != nil {
+                return nil, err
+            }
+            return map[string]any{"score": lookup(req.User)}, nil
+        })
+
+        // Send の応答が返ってきたとき。
+        peer.OnReply(func(c context.Context, from, id string, reply json.RawMessage) error {
+            return save(from, reply)
+        })
+
+        r.POST("/ask", func(req plugin.Request) (any, error) {
+            id, err := peer.Send(req.Context(), "other.example", map[string]any{"user": "alice"})
+            if err != nil {
+                return nil, err
+            }
+            return map[string]any{"id": id}, nil
+        })
+        return nil
+    },
+})
+```
+
+**ActivityPub には出ない。** AP に載せると不具合の症状が他人のサーバー側に出るうえ、
+一度公開した形は後から塞げないため、mk-go 専用の経路に閉じてある。相手が Misskey や
+Mastodon でも影響しない代わりに、**相手も同じプラグインを持っていることが前提**になる。
+
+mk-go が面倒を見るもの:
+
+| | |
+|---|---|
+| 宛先 | ブロック / 連合の許可設定 / SSRF / 自分自身への送信を弾く |
+| 送信元 | HTTP Signature で確定する。`from` は名乗りではない |
+| 大きさ | 要求も応答も 1MB まで |
+| 再送 | 数回まで自動で試す |
+| 相手の確認 | nodeinfo に同じプラグインの宣言が無ければ送らない |
+
+プラグインが面倒を見るもの:
+
+- **payload の中身と値域**。相手は同じプラグインを持っているだけで、善良とは限らない
+- **payload の版**。mk-go は中身を解釈しないので、形を変えたときの互換は自分で保つ
+- **取り直し**。`OnReply` は**届かないことがある** (相手が落ちている / 再送の上限)。
+  「いつか必ず届く」ことは保証しない。期限を持って要求し直すこと
+
+`Send` は**即座に返る**。実際の送信は裏で走るので、リクエストの中で呼んでも詰まらない。
+戻り値の id が `OnReply` に渡るので、要求と応答を対応づけられる。
+
+`Peered` を立てると nodeinfo の `metadata.mkGoPlugins` にプラグイン名が出る。宣言して
+いないプラグインは名前も出ない (入れている拡張を全部晒さないため)。
+
+`_` で始まるパスは mk-go の予約なので、プラグインからは登録できない (受け口を奪えない
+ようにするため)。
+
+### テストする
+
+`plugintest` から両方向を叩ける。**実際には送らない**ので、テストが外に出ない。
+
+```go
+h := plugintest.New(t).WithPeers("other.example")
+routes := h.Routes(def)
+
+// 送信側: Send した内容を検査する
+_, err := routes["POST /ask"].Call(plugintest.Request{UserID: "u1", Body: `{}`})
+require.NoError(t, err)
+sends := h.PeerSends()
+require.Len(t, sends, 1)
+assert.Equal(t, "other.example", sends[0].Host)
+
+// 受信側: 相手から届いたことにする
+res, err := h.DeliverPeer("other.example", map[string]any{"user": "alice"})
+
+// 応答が返ってきたことにする
+err = h.DeliverPeerReply("other.example", sends[0].ID, map[string]any{"score": 1})
+```
+
+`WithPeers` に無いホストへの `Send` は本番と同じくエラーになる。宣言を忘れたテストが、
+本番では通らない経路を試していることに気付ける。
+
 ## テスト
 
 `plugin/plugintest` でルートとジョブを直接叩ける。

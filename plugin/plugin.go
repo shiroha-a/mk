@@ -68,6 +68,14 @@ type Definition struct {
 	// Jobs registers background work. Called only in processes that run the
 	// job queue. May be nil.
 	Jobs func(Context, Jobs) error
+
+	// Peered opts this plugin into [Peer] — the private channel to the same
+	// plugin on other mk-go instances.
+	//
+	// **宣言したものだけが nodeinfo に出る。** 入れているプラグインを全部
+	// 晒すと、運営者がどんな拡張を使っているかが攻撃面の情報になる。
+	// 連合しないプラグインは名前も出さない。
+	Peered bool
 }
 
 // Validate reports whether the definition is usable.
@@ -162,6 +170,12 @@ type Context interface {
 
 	// Config returns this plugin's settings from the instance configuration.
 	Config() Config
+
+	// Peer returns the channel to the same plugin on other mk-go instances.
+	//
+	// [Definition.Peered] を立てていない場合、呼び出しはエラーを返す
+	// (nil は返さないので、nil チェックは要らない)。
+	Peer() Peer
 
 	// Go runs fn in a new goroutine, recovering panics.
 	//

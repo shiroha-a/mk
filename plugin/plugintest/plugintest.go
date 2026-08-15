@@ -34,6 +34,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/pluginstore"
@@ -48,6 +49,14 @@ type Harness struct {
 	db      *sql.DB
 	api     plugin.API
 	migrate bool
+
+	// peer 経路 (#2537) の記録。Handle / OnReply はプラグインが登録し、
+	// テストは DeliverPeer / DeliverPeerReply から叩く。
+	mu          sync.Mutex
+	peers       []string
+	peerSends   []PeerSend
+	peerHandler plugin.PeerHandler
+	peerReply   plugin.PeerReplyHandler
 }
 
 // New starts a harness. The plugin name defaults to "test".
@@ -85,6 +94,113 @@ func (h *Harness) WithDB(db *sql.DB) *Harness {
 func (h *Harness) WithAPI(api plugin.API) *Harness {
 	h.api = api
 	return h
+}
+
+// WithPeers declares the hosts that [plugin.Peer.Has] reports as running this
+// plugin. ここに無いホストへの Send は本番と同じくエラーになる。
+func (h *Harness) WithPeers(hosts ...string) *Harness {
+	h.peers = append(h.peers, hosts...)
+	return h
+}
+
+// PeerSend is one recorded [plugin.Peer.Send].
+type PeerSend struct {
+	Host string
+	ID   string
+	// Payload is what the plugin passed, as JSON.
+	Payload json.RawMessage
+}
+
+// PeerSends returns the sends recorded so far, in order.
+//
+// **実際には送らない。** 宛先と中身だけを記録するので、テストが外に出ない。
+func (h *Harness) PeerSends() []PeerSend {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]PeerSend, len(h.peerSends))
+	copy(out, h.peerSends)
+	return out
+}
+
+// DeliverPeer invokes the plugin's [plugin.Peer.Handle] as if from arrived
+// over the wire. from は本番では署名で確定したホストなので、テストでも
+// 「検証済みの送信元」として渡す。
+func (h *Harness) DeliverPeer(from string, payload any) (any, error) {
+	h.t.Helper()
+	h.mu.Lock()
+	fn := h.peerHandler
+	h.mu.Unlock()
+	if fn == nil {
+		h.t.Fatalf("plugintest: Peer.Handle が登録されていません")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		h.t.Fatalf("plugintest: payload を JSON 化できません: %v", err)
+	}
+	return fn(context.Background(), from, body)
+}
+
+// DeliverPeerReply invokes the plugin's [plugin.Peer.OnReply].
+func (h *Harness) DeliverPeerReply(from, id string, reply any) error {
+	h.t.Helper()
+	h.mu.Lock()
+	fn := h.peerReply
+	h.mu.Unlock()
+	if fn == nil {
+		h.t.Fatalf("plugintest: Peer.OnReply が登録されていません")
+	}
+	body, err := json.Marshal(reply)
+	if err != nil {
+		h.t.Fatalf("plugintest: reply を JSON 化できません: %v", err)
+	}
+	return fn(context.Background(), from, id, body)
+}
+
+// fakePeer records what the plugin sends and hands incoming payloads to it.
+type fakePeer struct{ h *Harness }
+
+func (p *fakePeer) Handle(fn plugin.PeerHandler) {
+	p.h.mu.Lock()
+	defer p.h.mu.Unlock()
+	p.h.peerHandler = fn
+}
+
+func (p *fakePeer) OnReply(fn plugin.PeerReplyHandler) {
+	p.h.mu.Lock()
+	defer p.h.mu.Unlock()
+	p.h.peerReply = fn
+}
+
+func (p *fakePeer) Has(_ context.Context, host string) (bool, error) {
+	p.h.mu.Lock()
+	defer p.h.mu.Unlock()
+	for _, v := range p.h.peers {
+		if v == host {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (p *fakePeer) Send(ctx context.Context, host string, payload any) (string, error) {
+	ok, err := p.Has(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		// 本番と同じ理由で落とす。WithPeers に足していないホストへ送ろうと
+		// したテストが、本番では通らない経路を試していることに気付ける。
+		return "", fmt.Errorf("plugintest: %s は %s を持っていません (WithPeers で宣言してください)", host, p.h.name)
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+	p.h.mu.Lock()
+	defer p.h.mu.Unlock()
+	id := fmt.Sprintf("peer-%d", len(p.h.peerSends)+1)
+	p.h.peerSends = append(p.h.peerSends, PeerSend{Host: host, ID: id, Payload: body})
+	return id, nil
 }
 
 // Context returns the fake plugin.Context.
@@ -248,6 +364,8 @@ func (c *fakeContext) Config() plugin.Config { return &fakeConfig{values: c.h.co
 func (c *fakeContext) Storage() plugin.Storage {
 	return &fakeStorage{db: c.h.db}
 }
+
+func (c *fakeContext) Peer() plugin.Peer { return &fakePeer{h: c.h} }
 
 // Go runs fn synchronously. テストで非同期にすると、検証の前に終わっていない
 // 競合が入る。

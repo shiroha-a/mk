@@ -30,17 +30,29 @@ const softwareRepository = "https://github.com/shiroha-a/mk"
 
 // Handler handles nodeinfo endpoints.
 type Handler struct {
-	cfg          *config.Config
-	metaRepo     repository.MetaRepository
-	userRepo     repository.UserRepository
-	noteRepo     repository.NoteRepository
-	proxyAccount func() (string, bool)
-	clock        func() time.Time
+	cfg *config.Config
+	// peeredPlugins は mk-go 専用のプラグイン通信 (#2537) を宣言した
+	// プラグイン名。空なら metadata にキーごと出さない。
+	peeredPlugins []string
+	metaRepo      repository.MetaRepository
+	userRepo      repository.UserRepository
+	noteRepo      repository.NoteRepository
+	proxyAccount  func() (string, bool)
+	clock         func() time.Time
 }
 
 // NewHandler constructs a Handler.
 func NewHandler(cfg *config.Config) *Handler {
 	return &Handler{cfg: cfg, clock: time.Now}
+}
+
+// SetPeeredPlugins declares the plugins that accept the mk-go-only plugin
+// channel (#2537), so other instances can tell whether sending is worthwhile.
+//
+// **宣言したものだけを渡すこと。** 入れているプラグインを全部並べると、
+// 運営者がどんな拡張を使っているかが攻撃面の情報になる。
+func (h *Handler) SetPeeredPlugins(names []string) {
+	h.peeredPlugins = names
 }
 
 // SetMetaRepo injects a MetaRepository so that the nodeName / nodeDescription
@@ -238,6 +250,13 @@ func (h *Handler) buildDocument(version string) map[string]any {
 	// schema 2.0 には software.repository が無い (upstream は 2.0 で delete する)。
 	if version == "2.1" {
 		software["repository"] = softwareRepository
+	}
+
+	// mk-go 独自。相手が「同じプラグインを持っているか」を判断するのに使う
+	// (#2537)。宣言が無ければキーごと出さない — 使っていないインスタンスが
+	// 余計な情報を晒さないようにする。
+	if len(h.peeredPlugins) > 0 {
+		metadata["mkGoPlugins"] = h.peeredPlugins
 	}
 
 	return map[string]any{

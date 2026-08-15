@@ -84,10 +84,24 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 			}
 		}
 
+		// peer 経路。**宣言していないプラグインにも非 nil を渡す** (呼ぶと
+		// エラーになる実装)。nil を返すと nil チェック漏れが panic になる。
+		peer := &pluginPeer{name: def.Name, peered: def.Peered, deps: s.peerDeps, logger: pctx.logger}
+		pctx.peer = peer
+
 		if def.Routes != nil && s.role.RunsServer() {
-			r := &pluginRouter{group: api.Group(pluginRoutePrefix + def.Name), roles: s.pluginRoles}
+			group := api.Group(pluginRoutePrefix + def.Name)
+			r := &pluginRouter{group: group, roles: s.pluginRoles}
 			if err := def.Routes(pctx, r); err != nil {
 				return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
+			}
+			if err := r.err; err != nil {
+				return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
+			}
+			// 予約パスは **プラグインの登録より後**に張る。先に張ると
+			// プラグインが同じパスを登録できてしまい、受け口を奪える。
+			if def.Peered && s.peerDeps != nil {
+				group.POST(peerPath, peer.echoHandler())
 			}
 		}
 		if def.Jobs != nil && s.role.RunsQueue() {
@@ -214,6 +228,7 @@ type pluginContext struct {
 	api     plugin.API
 	storage plugin.Storage
 	config  plugin.Config
+	peer    plugin.Peer
 }
 
 func (c *pluginContext) Name() string            { return c.name }
@@ -221,6 +236,11 @@ func (c *pluginContext) Logger() *slog.Logger    { return c.logger }
 func (c *pluginContext) API() plugin.API         { return c.api }
 func (c *pluginContext) Storage() plugin.Storage { return c.storage }
 func (c *pluginContext) Config() plugin.Config   { return c.config }
+
+// Peer は **常に非 nil** を返す。Peered を立てていないプラグインには、
+// 呼ぶとエラーになる実装を渡す — nil を返すと、プラグイン側の nil チェック
+// 漏れがそのまま panic になる。
+func (c *pluginContext) Peer() plugin.Peer { return c.peer }
 
 // --- Config ---
 
@@ -342,14 +362,33 @@ func (c *pluginContext) Go(fn func()) {
 type pluginRouter struct {
 	group *echo.Group
 	roles middleware.RoleChecker
+	// err holds the first registration failure (pluginJobs と同じ方針)。
+	err error
 }
 
 func (r *pluginRouter) GET(path string, h plugin.Handler) {
+	if reservedPluginPath(path) {
+		r.err = fmt.Errorf("パス %q は mk-go の予約です (_ で始まるパスは使えません)", path)
+		return
+	}
 	r.group.GET(path, wrapPluginHandler(h, r.roles))
 }
 
 func (r *pluginRouter) POST(path string, h plugin.Handler) {
+	if reservedPluginPath(path) {
+		r.err = fmt.Errorf("パス %q は mk-go の予約です (_ で始まるパスは使えません)", path)
+		return
+	}
 	r.group.POST(path, wrapPluginHandler(h, r.roles))
+}
+
+// reservedPluginPath reports whether mk-go owns this path.
+//
+// **プラグインに受け口を奪わせない。** peer の受信 (#2537) のように本体が
+// 張るエンドポイントと同名を登録できると、署名検証を通らない経路で同じ URL を
+// 提供できてしまう。`_` 始まりをまとめて予約する。
+func reservedPluginPath(path string) bool {
+	return strings.HasPrefix(path, "/_")
 }
 
 // wrapPluginHandler adapts a plugin handler to echo.
