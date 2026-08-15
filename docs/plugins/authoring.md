@@ -212,8 +212,31 @@ export default definePlugin({
 |---|---|
 | `profile:info` | ユーザーのプロフィール（`ctx.user` が渡る） |
 | `settings:profile` | 設定 > プロフィール |
+| `admin:federation` | コントロールパネル > 連合（一覧の手前） |
 
 **位置は意味で定義されている。** upstream がコンポーネント名を変えても壊れない。
+
+**描画されることは権限の保証ではない。** `admin:` で始まるスロットはモデレーター
+向けのページにしか無いが、それは UI の都合でしかない。バックエンドは
+[`Request.IsModerator()`](#リクエスト) で必ず自分で守ること。
+
+管理向けのスロットでは、**権限が無いときに何も描かないこと**も考える。空の枠が
+挟まると、本体の UI の邪魔になる。
+
+```ts
+// 403 は「モデレーターでない」なので黙って消える。それ以外は理由を出す
+// (読み込み失敗と権限不足で対応が変わる)。
+try {
+    data.value = await api('overview', {});
+    hidden.value = false;
+} catch (err) {
+    if ((err as { message?: string })?.message?.includes('権限')) {
+        hidden.value = true;
+        return;
+    }
+    error.value = '読み込めませんでした';
+}
+```
 
 ### 独自ページ・管理画面
 
