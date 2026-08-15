@@ -2218,8 +2218,16 @@ func (s *Server) setupRoutes() {
 	// 振り分けて従来どおり apHandler に渡す。
 	ssrMeta := newSSRMetaHandler(
 		s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability,
-		userRepo, noteRepo, pageRepo, clipRepo, flashRepo, repository.NewGalleryRepository(s.db),
-		driveFileRepo, idGen,
+		ssrMetaDeps{
+			User:    userRepo,
+			Note:    noteRepo,
+			Page:    pageRepo,
+			Clip:    clipRepo,
+			Flash:   flashRepo,
+			Gallery: repository.NewGalleryRepository(s.db),
+			Drive:   driveFileRepo,
+			IDGen:   idGen,
+		},
 	)
 	s.echo.GET("/notes/:id", func(c echo.Context) error {
 		// 同一 URL が Accept 次第で HTML / AP JSON / 302 を返すので、HTML 変種

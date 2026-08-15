@@ -46,19 +46,26 @@ type ssrMetaHandler struct {
 	idGen id.Generator
 }
 
+// ssrMetaDeps carries the repositories the permalink pages read from.
+// 引数で並べると 10 個を超えて取り違えても型が通ってしまうので、名前で渡す。
+type ssrMetaDeps struct {
+	User    repository.UserRepository
+	Note    repository.NoteRepository
+	Page    repository.PageRepository
+	Clip    repository.ClipRepository
+	Flash   repository.FlashRepository
+	Gallery repository.GalleryRepository
+	Drive   repository.DriveFileRepository
+	// IDGen は drive file の pack (createdAt の復元) に要る。
+	IDGen id.Generator
+}
+
 func newSSRMetaHandler(
 	cfg *config.Config,
 	metaRepo repository.MetaRepository,
 	proxyResolver meta.ProxyAccountResolver,
 	chunkedUpload meta.ChunkedUploadCapability,
-	userRepo repository.UserRepository,
-	noteRepo repository.NoteRepository,
-	pageRepo repository.PageRepository,
-	clipRepo repository.ClipRepository,
-	flashRepo repository.FlashRepository,
-	galleryRepo repository.GalleryRepository,
-	driveFileRepo repository.DriveFileRepository,
-	idGen id.Generator,
+	deps ssrMetaDeps,
 ) *ssrMetaHandler {
 	return &ssrMetaHandler{
 		cfg:           cfg,
@@ -66,14 +73,14 @@ func newSSRMetaHandler(
 		proxyResolver: proxyResolver,
 		chunkedUpload: chunkedUpload,
 		clientEntry:   clientEntryFor(cfg),
-		userRepo:      userRepo,
-		noteRepo:      noteRepo,
-		pageRepo:      pageRepo,
-		clipRepo:      clipRepo,
-		flashRepo:     flashRepo,
-		galleryRepo:   galleryRepo,
-		driveFileRepo: driveFileRepo,
-		idGen:         idGen,
+		userRepo:      deps.User,
+		noteRepo:      deps.Note,
+		pageRepo:      deps.Page,
+		clipRepo:      deps.Clip,
+		flashRepo:     deps.Flash,
+		galleryRepo:   deps.Gallery,
+		driveFileRepo: deps.Drive,
+		idGen:         deps.IDGen,
 	}
 }
 
