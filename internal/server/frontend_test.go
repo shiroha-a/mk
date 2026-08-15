@@ -496,3 +496,172 @@ func TestManifestJSON(t *testing.T) {
 		assert.Len(t, iconsOf(t, manifest), 3)
 	})
 }
+
+// SPA shell の OGP が upstream `views/base.tsx` の ogSlot と一致すること。
+//
+// og:image は upstream (ClientServerService.ts:441) では `meta.bannerUrl` で、
+// 未設定ならタグ自体を出さない。mk-go は以前 icon を入れていたが、既定値の
+// `/static-assets/icons/192.png` は相対 URL で OGP としては解決できなかった
+// (#2527)。
+func TestFrontendHTML_OpenGraph(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	render := func(t *testing.T, m *model.Meta) string {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		if m != nil {
+			repo.Meta = m
+		}
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, frontendHTML(cfg, repo, nil, nil)(c))
+		return rec.Body.String()
+	}
+
+	t.Run("og:image comes from bannerUrl", func(t *testing.T) {
+		banner := "https://example.test/files/banner.png"
+		body := render(t, &model.Meta{ID: "x", BannerURL: &banner})
+
+		assert.Contains(t, body, `<meta property="og:image" content="`+banner+`">`)
+	})
+
+	t.Run("og:image is omitted without a banner", func(t *testing.T) {
+		body := render(t, &model.Meta{ID: "x"})
+
+		assert.NotContains(t, body, `property="og:image"`,
+			"upstream は img が null ならタグごと出さない")
+		// icon が og:image に紛れ込む旧挙動の regression guard。
+		assert.NotContains(t, body, `content="/static-assets/icons/192.png"`)
+	})
+
+	t.Run("description falls back to upstream default", func(t *testing.T) {
+		body := render(t, nil)
+
+		assert.Contains(t, body, `<meta property="og:description" content="`+defaultInstanceDescription+`">`)
+		// meta.description が null なら name="description" は出さない。
+		assert.NotContains(t, body, `name="description"`)
+	})
+
+	t.Run("description tag is emitted when meta has one", func(t *testing.T) {
+		desc := "テストサーバーです"
+		body := render(t, &model.Meta{ID: "x", Description: &desc})
+
+		assert.Contains(t, body, `<meta name="description" content="`+desc+`">`)
+		assert.Contains(t, body, `<meta property="og:description" content="`+desc+`">`)
+	})
+
+	t.Run("empty description keeps the tag but uses the default text", func(t *testing.T) {
+		empty := ""
+		body := render(t, &model.Meta{ID: "x", Description: &empty})
+
+		// upstream は `props.desc != null` でタグの有無、
+		// `props.desc || defaultDescription` で中身を決める。
+		assert.Contains(t, body, `<meta name="description" content="`+defaultInstanceDescription+`">`)
+	})
+
+	t.Run("name と description は HTML エスケープされる", func(t *testing.T) {
+		// 管理者が `"` を入れると属性が閉じて head が壊れる。upstream は
+		// kitajs/html が属性値を自動エスケープするので同じ挙動に揃える。
+		name := `Evil" onload="alert(1)`
+		desc := "<script>alert(1)</script>"
+		body := render(t, &model.Meta{ID: "x", Name: &name, Description: &desc})
+
+		assert.NotContains(t, body, `onload="alert(1)`)
+		assert.NotContains(t, body, "<script>alert(1)</script>")
+		assert.Contains(t, body, `&lt;script&gt;alert(1)&lt;/script&gt;`)
+	})
+}
+
+// upstream `views/base.tsx` にあって mk-go に無かった head タグ群 (#2527)。
+func TestFrontendHTML_UpstreamHeadTags(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	render := func(t *testing.T, m *model.Meta) string {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		if m != nil {
+			repo.Meta = m
+		}
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, frontendHTML(cfg, repo, nil, nil)(c))
+		return rec.Body.String()
+	}
+
+	t.Run("theme-color-orig / format-detection / opensearch", func(t *testing.T) {
+		color := "#00eb91"
+		body := render(t, &model.Meta{ID: "x", ThemeColor: &color})
+
+		// frontend はテーマ色を戻すときに theme-color-orig を読む。
+		assert.Contains(t, body, `<meta name="theme-color" content="`+color+`">`)
+		assert.Contains(t, body, `<meta name="theme-color-orig" content="`+color+`">`)
+		assert.Contains(t, body, `<meta name="format-detection" content="telephone=no,date=no,address=no,email=no,url=no">`)
+		assert.Contains(t, body,
+			`<link rel="search" type="application/opensearchdescription+xml" title="Misskey" href="https://example.test/opensearch.xml">`)
+	})
+
+	t.Run("opensearch href は URL の末尾スラッシュを重複させない", func(t *testing.T) {
+		trailing := &config.Config{URL: "https://example.test/", Version: "0.0.1-test"}
+		repo := testutil.NewMockMetaRepository()
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, frontendHTML(trailing, repo, nil, nil)(c))
+
+		assert.Contains(t, rec.Body.String(), `href="https://example.test/opensearch.xml"`)
+		assert.NotContains(t, rec.Body.String(), "//opensearch.xml")
+	})
+
+	t.Run("branding 画像の prefetch は自 origin だけ", func(t *testing.T) {
+		local := "https://example.test/files/error.png"
+		relative := "/files/info.png"
+		external := "https://cdn.example.com/not-found.png"
+		body := render(t, &model.Meta{
+			ID:                  "x",
+			ServerErrorImageURL: &local,
+			InfoImageURL:        &relative,
+			NotFoundImageURL:    &external,
+		})
+
+		assert.Contains(t, body, `<link rel="prefetch" as="image" href="`+local+`">`)
+		assert.Contains(t, body, `<link rel="prefetch" as="image" href="`+relative+`">`)
+		// CSP (default-src 'self') で弾かれるだけなので外部 origin は prefetch
+		// しない (埋め込み meta JSON には値として載るので link だけを見る)。
+		assert.NotContains(t, body, `<link rel="prefetch" as="image" href="`+external+`">`)
+	})
+
+	t.Run("未設定なら prefetch を出さない", func(t *testing.T) {
+		body := render(t, &model.Meta{ID: "x"})
+
+		assert.NotContains(t, body, `rel="prefetch"`)
+	})
+}
+
+func TestSameOriginURL(t *testing.T) {
+	const base = "https://example.test"
+
+	tests := []struct {
+		name string
+		url  string
+		want bool
+	}{
+		{name: "absolute path", url: "/files/x.png", want: true},
+		{name: "same origin absolute url", url: "https://example.test/files/x.png", want: true},
+		{name: "origin itself", url: "https://example.test", want: true},
+		{name: "other origin", url: "https://cdn.example.com/x.png", want: false},
+		// `//host/x` は scheme-relative で別 origin。`/` 始まりの判定より先に
+		// 弾かないと外部 URL を自 origin と誤判定する。
+		{name: "scheme relative url", url: "//cdn.example.com/x.png", want: false},
+		// prefix 一致だけで判定すると別ホストを取り込む。
+		{name: "prefix lookalike host", url: "https://example.test.evil.com/x.png", want: false},
+		{name: "empty", url: "", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, sameOriginURL(base, tt.url))
+		})
+	}
+}

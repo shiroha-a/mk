@@ -21,6 +21,25 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 )
 
+// defaultInstanceDescription mirrors upstream `views/_.ts` の defaultDescription.
+// meta.description が空のときの og:description / description に使う。
+const defaultInstanceDescription = "✨🌎✨ A interplanetary communication platform ✨🚀✨"
+
+// sameOriginURL reports whether u is served from the instance's own origin.
+//
+// 相対パスと自 origin の絶対 URL だけを true にする。`//other.example/x` は
+// scheme-relative で別 origin なので、`/` 始まりの判定より先に弾く。
+func sameOriginURL(base, u string) bool {
+	if strings.HasPrefix(u, "//") {
+		return false
+	}
+	if strings.HasPrefix(u, "/") {
+		return true
+	}
+	base = strings.TrimSuffix(base, "/")
+	return u == base || strings.HasPrefix(u, base+"/")
+}
+
 // frontendHTML generates the HTML shell for the Misskey frontend. When a
 // built asset bundle is present the HTML wires CLIENT_ENTRY for production
 // mode; otherwise it falls back to the Vite dev-server path.
@@ -41,9 +60,16 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 // misskey:oauth:* meta tags, #1899); pass "" for the normal shell.
 func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability, clientEntry frontendutil.ClientEntryInfo, extraHead string) error {
 	instanceName := "Misskey"
-	instanceDesc := ""
-	// og:image 用。icon link とは fallback が違うので別変数のまま扱う。
-	iconURL := "/static-assets/icons/192.png"
+	// og:description の既定値は upstream views/_.ts の defaultDescription。
+	// `<meta name="description">` の方は upstream と同じく meta.description が
+	// null のときは**タグごと出さない**ので、有無を別に持つ。
+	instanceDesc := defaultInstanceDescription
+	hasInstanceDesc := false
+	// og:image は upstream (ClientServerService.ts:441) と同じく banner を使う。
+	// 未設定ならタグごと省略する。以前は icon を入れていたが、既定値が
+	// `/static-assets/icons/192.png` という相対 URL で OGP としては解決できず、
+	// そもそも upstream と別の画像になっていた。
+	bannerURL := ""
 	// `<link rel="icon">` と `<link rel="apple-touch-icon">` は upstream
 	// base.tsx と同じ fallback を持つ (前者は /favicon.ico、後者は
 	// /apple-touch-icon.png)。og:image とは別 field なので変数を分ける。
@@ -60,6 +86,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// mascotImageUrl (Ai キャラ) は別 field で splash には使わない (#993)。
 	splashIconURL := "/static-assets/splash.png"
 	metaJSON := "{}"
+	prefetchTags := ""
 	// CSP に足す設定依存の origin (#2425 / #2501 / #2502)。drive のファイルは
 	// object storage から直接配信されるので、`'self'` だけだと enforce 時に
 	// 画像・動画・音声が丸ごと表示できなくなる。
@@ -68,11 +95,19 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		if m.Name != nil && *m.Name != "" {
 			instanceName = *m.Name
 		}
+		// upstream base.tsx は `props.desc != null` でタグの有無を、
+		// `props.desc || defaultDescription` で中身を決める。空文字は
+		// 「タグは出すが既定文言」という扱いになる。
 		if m.Description != nil {
-			instanceDesc = *m.Description
+			hasInstanceDesc = true
+			if *m.Description != "" {
+				instanceDesc = *m.Description
+			}
+		}
+		if m.BannerURL != nil && *m.BannerURL != "" {
+			bannerURL = *m.BannerURL
 		}
 		if m.IconURL != nil && *m.IconURL != "" {
-			iconURL = *m.IconURL
 			splashIconURL = *m.IconURL
 			faviconURL = *m.IconURL
 		}
@@ -82,6 +117,17 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		}
 		if m.ThemeColor != nil && *m.ThemeColor != "" {
 			themeColor = *m.ThemeColor
+		}
+		// upstream base.tsx:52-54 の branding 画像 prefetch。upstream は meta 未設定時に
+		// 外部の既定画像 (xn--931a.moe) を入れるが、mk-go は CSP を出すので外部 origin の
+		// prefetch は default-src で弾かれ report を汚すだけになる。frontend 側も
+		// `v-if="instance.serverErrorImageUrl"` で未設定なら描画しないため、
+		// **自 origin に解決できる設定値だけ** prefetch する。
+		for _, u := range []*string{m.ServerErrorImageURL, m.InfoImageURL, m.NotFoundImageURL} {
+			if u == nil || *u == "" || !sameOriginURL(cfg.URL, *u) {
+				continue
+			}
+			prefetchTags += fmt.Sprintf(`<link rel="prefetch" as="image" href="%s">`, stdhtml.EscapeString(*u)) + "\n"
 		}
 		metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver, chunkedUpload)
 		// useObjectStorage が false でも baseUrl が残っていることがあるので、
@@ -122,26 +168,63 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		}
 	}
 
+	// note / user などの permalink は自前の OGP を extraHead で持ち込む
+	// (ssr_meta.go)。その場合 shell 側の「インスタンスの」description と OGP は
+	// 出さない。upstream も base.tsx の `desc` / `ogSlot` をページ側の値で
+	// 差し替えるので、両方並ぶことはない。
+	suppressDefaultOG := strings.Contains(extraHead, `property="og:`)
+
+	// 条件付きで消えるタグは先に組み立てる。upstream は img / desc が null なら
+	// タグ自体を出さないので、空値で属性だけ残すのは互換にならない。
+	ogImageTag := ""
+	if bannerURL != "" {
+		ogImageTag = fmt.Sprintf(`<meta property="og:image" content="%s">`, stdhtml.EscapeString(bannerURL)) + "\n"
+	}
+	descriptionTag := ""
+	if hasInstanceDesc && !suppressDefaultOG {
+		descriptionTag = fmt.Sprintf(`<meta name="description" content="%s">`, stdhtml.EscapeString(instanceDesc)) + "\n"
+	}
+	// instance 名・description は管理者が自由に入れられる。属性値に生で埋めると
+	// `"` や改行で head が壊れる (upstream は kitajs/html が属性を自動 escape する)。
+	instanceNameEsc := stdhtml.EscapeString(instanceName)
+	instanceDescEsc := stdhtml.EscapeString(instanceDesc)
+	themeColorEsc := stdhtml.EscapeString(themeColor)
+	baseURL := strings.TrimSuffix(cfg.URL, "/")
+	baseURLEsc := stdhtml.EscapeString(baseURL)
+
+	// upstream base.tsx の `ogSlot` に相当するブロック。両方出すと 1 ページに
+	// og:title が 2 つ並び、**クローラは先頭を採用する**ため、ノートを共有しても
+	// 著者名でなくインスタンス名が出ていた。og:site_name / instance_url は upstream
+	// でも ogSlot の外なので常に出す。
+	ogGroup := ""
+	if !suppressDefaultOG {
+		ogGroup = `<meta property="og:type" content="website">` + "\n" +
+			fmt.Sprintf(`<meta property="og:title" content="%s">`, instanceNameEsc) + "\n" +
+			fmt.Sprintf(`<meta property="og:description" content="%s">`, instanceDescEsc) + "\n" +
+			ogImageTag +
+			fmt.Sprintf(`<meta property="og:url" content="%s">`, baseURLEsc) + "\n" +
+			// twitter:card は upstream が `property=` で出しているが、Twitter の
+			// 仕様は `name=`。ここは仕様側に合わせたまま維持する。
+			`<meta name="twitter:card" content="summary">` + "\n"
+	}
+
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
 <meta name="application-name" content="Misskey">
 <meta name="referer" content="origin">
-<meta property="og:type" content="website">
 <meta property="og:site_name" content="%s">
-<meta property="og:title" content="%s">
-<meta property="og:description" content="%s">
-<meta property="og:image" content="%s">
-<meta property="og:url" content="%s">
-<meta name="twitter:card" content="summary">
-<meta name="theme-color" content="%s">
+%s%s<meta name="theme-color" content="%s">
+<meta name="theme-color-orig" content="%s">
 <meta property="instance_url" content="%s">
 <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="format-detection" content="telephone=no,date=no,address=no,email=no,url=no">
 <title>%s</title>
 <link rel="icon" href="%s">
 <link rel="apple-touch-icon" href="%s">
 <link rel="manifest" href="/manifest.json">
-%s
+<link rel="search" type="application/opensearchdescription+xml" title="%s" href="%s/opensearch.xml">
+%s%s
 %s
 %s
 <link rel="stylesheet" href="/vite/loader/style.css">
@@ -157,10 +240,14 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 <svg class="spinner fg" viewBox="0 0 152 152" xmlns="http://www.w3.org/2000/svg"><g transform="matrix(1,0,0,1,12,12)"><path d="M128,64C128,28.654 99.346,0 64,0C99.346,0 128,28.654 128,64Z" style="fill:none;stroke:currentColor;stroke-width:24px;"/></g></svg>
 </div>
 </div>
-</body></html>`, instanceName, instanceName, instanceDesc, iconURL, cfg.URL,
-		themeColor, cfg.URL, instanceName, faviconURL, appleTouchIconURL, extraHead, viteClientTag, cssLinkTags,
+</body></html>`,
+		instanceNameEsc, ogGroup,
+		descriptionTag, themeColorEsc, themeColorEsc, baseURLEsc,
+		instanceNameEsc, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
+		instanceNameEsc, baseURLEsc,
+		prefetchTags, extraHead, viteClientTag, cssLinkTags,
 		cfg.Version, clientEntryJS,
-		time.Now().UnixMilli(), metaJSON, splashIconURL)
+		time.Now().UnixMilli(), metaJSON, stdhtml.EscapeString(splashIconURL))
 
 	// SPA shell にだけ CSP を付ける (#2425)。shell を返す経路は catch-all と
 	// AP の non-AP fallback の 2 つで、どちらもこの関数を通るので path 判定が

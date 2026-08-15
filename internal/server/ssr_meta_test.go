@@ -3,6 +3,7 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -187,4 +188,74 @@ func TestSSRHandlers_NilReposServeShell(t *testing.T) {
 		rec := ssrGet(t, handler, "/", map[string]string{"acct": "alice", "id": "x", "clip": "x", "post": "x", "page": "p"})
 		assert.Equal(t, http.StatusOK, rec.Code, name)
 	}
+}
+
+// permalink が自前の OGP を出すとき、shell 側の既定 OGP は出さないこと (#2527)。
+//
+// 両方出すと 1 ページに og:title / og:url / og:type が 2 つ並ぶ。OGP のパーサは
+// 先頭を採用するのが一般的なので、ノートを共有しても著者名でなくインスタンス名が
+// 出てしまう (本番で実際にそうなっていた)。upstream は base.tsx の `ogSlot` ごと
+// 差し替えるので重複しない。
+func TestSSRNotePage_DoesNotDuplicateShellOG(t *testing.T) {
+	h, userRepo, noteRepo := newSSRTestHandler(t)
+	alice := ssrTestUser("u1", "alice")
+	userRepo.Users["u1"] = alice
+	text := "hello"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", User: alice, Text: &text,
+		Visibility: model.NoteVisibilityPublic,
+	}
+
+	body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+	assert.Equal(t, 1, strings.Count(body, `property="og:title"`))
+	assert.Equal(t, 1, strings.Count(body, `property="og:url"`))
+	assert.Equal(t, 1, strings.Count(body, `property="og:type"`))
+	assert.Equal(t, 1, strings.Count(body, `property="og:description"`))
+	// note 側の値が残っていること (shell 側を消した結果 note の分まで消えていない)
+	assert.Contains(t, body, `<meta property="og:type" content="article">`)
+	assert.Contains(t, body, `<meta property="og:url" content="https://example.test/notes/n1">`)
+	// site_name / instance_url は upstream でも ogSlot の外なので残る
+	assert.Contains(t, body, `<meta property="og:site_name"`)
+	assert.Contains(t, body, `<meta property="instance_url"`)
+}
+
+// 対象が見つからないページは素の shell を返すので、shell 側の既定 OGP は残る。
+func TestSSRNotePage_UnknownNoteKeepsShellOG(t *testing.T) {
+	h, _, _ := newSSRTestHandler(t)
+
+	body := ssrGet(t, h.NotePage, "/notes/ghost", map[string]string{"id": "ghost"}).Body.String()
+
+	assert.Contains(t, body, `<meta property="og:type" content="website">`)
+	assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
+}
+
+// permalink では shell 側の「インスタンスの」description も出さない (#2527)。
+//
+// upstream は note ページの `desc` をノート要約に差し替えるので、インスタンス
+// 説明が note の description として出ることはない。mk-go はページ固有の
+// description をまだ持たないため、誤った値を出すよりは出さない方に倒す。
+func TestSSRNotePage_DoesNotEmitInstanceDescription(t *testing.T) {
+	h, userRepo, noteRepo := newSSRTestHandler(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	instanceDesc := "インスタンスの説明"
+	metaRepo.Meta = &model.Meta{ID: "x", Description: &instanceDesc}
+	h.metaRepo = metaRepo
+
+	alice := ssrTestUser("u1", "alice")
+	userRepo.Users["u1"] = alice
+	text := "hello"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", User: alice, Text: &text,
+		Visibility: model.NoteVisibilityPublic,
+	}
+
+	body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+	assert.NotContains(t, body, `<meta name="description" content="`+instanceDesc+`">`)
+	assert.Contains(t, body, `<meta property="og:description" content="hello">`)
+
+	// 素の shell (対象なし) では従来どおり出る。
+	shell := ssrGet(t, h.NotePage, "/notes/ghost", map[string]string{"id": "ghost"}).Body.String()
+	assert.Contains(t, shell, `<meta name="description" content="`+instanceDesc+`">`)
 }
