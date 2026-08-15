@@ -162,6 +162,31 @@ func userHead(u *model.User, p *model.UserProfile, forceNoindex bool) string {
 	return sb.String()
 }
 
+// visibleToVisitor reports whether an anonymous visitor may be shown metadata
+// for content owned by a user on `host` (nil / "" = local).
+//
+// upstream ClientServerService は user / note の SSR で
+// `ugcVisibilityForVisitor === 'all' || (=== 'local' && host == null)` を条件に
+// している。permalink はログイン不要で誰でも叩けるので、ここを見ないと
+// 「未ログインには見せない」設定にしてもリンク展開やクローラには本文の要約や
+// プロフィール文が渡ってしまう。
+//
+// DB の既定値は 'local' なので、未設定・未知の値は 'local' として扱う。
+func (h *ssrMetaHandler) visibleToVisitor(host *string) bool {
+	m, err := h.metaRepo.Fetch()
+	if err != nil || m == nil {
+		return false
+	}
+	switch m.UgcVisibilityForVisitor {
+	case "all":
+		return true
+	case "none":
+		return false
+	default:
+		return host == nil || *host == ""
+	}
+}
+
 // federationEnabled mirrors upstream の `props.federationEnabled`.
 // 連合していないインスタンスで AP の URI を広告しても意味が無いので、
 // rel="alternate" の出し分けに使う。
@@ -486,7 +511,9 @@ func (h *ssrMetaHandler) lookupUserByAcct(acct string) *model.User {
 // UserPage serves `/@:acct` and its sub paths (`/@:acct/notes` 等)。
 func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 	u := h.lookupUserByAcct(c.Param("acct"))
-	if u == nil {
+	// 凍結ユーザーは upstream の検索条件 (isSuspended: false) で対象外。
+	// 未ログイン訪問者への UGC 露出も meta の生成前に判定する (#2533)。
+	if u == nil || u.IsSuspended || !h.visibleToVisitor(u.Host) {
 		return h.renderPlain(c)
 	}
 	p := h.profileOf(u.ID)
@@ -523,7 +550,7 @@ func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 // UserPagePage serves `/@:acct/pages/:page`.
 func (h *ssrMetaHandler) UserPagePage(c echo.Context) error {
 	u := h.lookupUserByAcct(c.Param("acct"))
-	if u == nil || h.pageRepo == nil {
+	if u == nil || u.IsSuspended || !h.visibleToVisitor(u.Host) || h.pageRepo == nil {
 		return h.renderPlain(c)
 	}
 	p := h.profileOf(u.ID)
@@ -566,6 +593,14 @@ func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 	// リンク展開に非公開投稿の本文・著者を渡さないため (upstream も
 	// public 以外は SSR しない)。
 	if note.Visibility != model.NoteVisibilityPublic {
+		return h.renderPlain(c)
+	}
+	// 投稿者が「ログインしないと見せない」設定なら meta も出さない。
+	// upstream note ハンドラの `!note.user.requireSigninToViewContents` (#2533)。
+	if note.User != nil && note.User.RequireSigninToViewContents {
+		return h.renderPlain(c)
+	}
+	if !h.visibleToVisitor(note.UserHost) {
 		return h.renderPlain(c)
 	}
 	title := ""

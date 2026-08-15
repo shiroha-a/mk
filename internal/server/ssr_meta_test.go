@@ -333,6 +333,11 @@ func TestSSRUserPage_SubPathHasNoAlternate(t *testing.T) {
 // remote user は自分の URI を、local user は自インスタンスの AP URL を出す。
 func TestSSRUserPage_RemoteUserAlternateUsesURI(t *testing.T) {
 	h, userRepo, _ := newSSRTestHandler(t)
+	// 既定の `local` ではリモートユーザーの meta を出さないので、
+	// ここでは全公開のインスタンスを想定する (#2533)。
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x", UgcVisibilityForVisitor: "all"}
+	h.metaRepo = metaRepo
 	host := "remote.example"
 	uri := "https://remote.example/users/9"
 	profileURL := "https://remote.example/@bob"
@@ -780,4 +785,134 @@ func TestSSRNoIndexPage(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `<meta name="robots" content="noindex">`)
 	// 中身は SPA が描くので shell の既定 OGP はそのまま
 	assert.Contains(t, rec.Body.String(), `<meta property="og:type" content="website">`)
+}
+
+// permalink は誰でも叩けるので、meta を出す前に「未ログイン訪問者に見せて
+// よいか」を判定する (#2533)。ここが素通しだと、未ログインに見せない設定でも
+// リンク展開やクローラに本文の要約やプロフィール文が渡る。
+func TestSSRVisibilityGate(t *testing.T) {
+	setup := func(t *testing.T, ugc string) (*ssrMetaHandler, *testutil.MockUserRepository, *testutil.MockNoteRepository) {
+		t.Helper()
+		h, userRepo, noteRepo := newSSRTestHandler(t)
+		metaRepo := testutil.NewMockMetaRepository()
+		metaRepo.Meta = &model.Meta{ID: "x", UgcVisibilityForVisitor: ugc}
+		h.metaRepo = metaRepo
+
+		alice := ssrTestUser("u1", "alice")
+		userRepo.Users["u1"] = alice
+		host := "remote.example"
+		bob := ssrTestUser("u2", "bob")
+		bob.Host = &host
+		userRepo.Users["u2"] = bob
+
+		local := "local note"
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: alice, Text: &local,
+			Visibility: model.NoteVisibilityPublic,
+		}
+		remote := "remote note"
+		noteRepo.Notes["n2"] = &model.Note{
+			ID: "n2", UserID: "u2", User: bob, Text: &remote, UserHost: &host,
+			Visibility: model.NoteVisibilityPublic,
+		}
+		return h, userRepo, noteRepo
+	}
+
+	t.Run("none は local も remote も出さない", func(t *testing.T) {
+		h, _, _ := setup(t, "none")
+
+		user := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+		assert.NotContains(t, user, "misskey:user-id")
+
+		note := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+		assert.NotContains(t, note, "misskey:note-id")
+		assert.NotContains(t, note, "local note")
+	})
+
+	t.Run("local は remote だけ出さない", func(t *testing.T) {
+		h, _, _ := setup(t, "local")
+
+		localUser := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+		assert.Contains(t, localUser, `<meta name="misskey:user-id" content="u1">`)
+
+		remoteUser := ssrGet(t, h.UserPage, "/@bob@remote.example",
+			map[string]string{"acct": "bob@remote.example"}).Body.String()
+		assert.NotContains(t, remoteUser, "misskey:user-id")
+
+		localNote := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+		assert.Contains(t, localNote, `<meta name="misskey:note-id" content="n1">`)
+
+		remoteNote := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+		assert.NotContains(t, remoteNote, "misskey:note-id")
+		assert.NotContains(t, remoteNote, "remote note")
+	})
+
+	t.Run("all は両方出す", func(t *testing.T) {
+		h, _, _ := setup(t, "all")
+
+		remoteUser := ssrGet(t, h.UserPage, "/@bob@remote.example",
+			map[string]string{"acct": "bob@remote.example"}).Body.String()
+		assert.Contains(t, remoteUser, `<meta name="misskey:user-id" content="u2">`)
+
+		remoteNote := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+		assert.Contains(t, remoteNote, `<meta name="misskey:note-id" content="n2">`)
+	})
+
+	// DB の既定値は 'local'。未設定の meta で全部消えると新規インスタンスの
+	// OGP が丸ごと死ぬので、未知の値は 'local' として扱う。
+	t.Run("未設定は local 扱い", func(t *testing.T) {
+		h, _, _ := setup(t, "")
+
+		localUser := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+		assert.Contains(t, localUser, `<meta name="misskey:user-id" content="u1">`)
+
+		remoteUser := ssrGet(t, h.UserPage, "/@bob@remote.example",
+			map[string]string{"acct": "bob@remote.example"}).Body.String()
+		assert.NotContains(t, remoteUser, "misskey:user-id")
+	})
+
+	t.Run("sub パスと page も同じゲートを通る", func(t *testing.T) {
+		h, _, _ := setup(t, "none")
+
+		sub := ssrGet(t, h.UserPage, "/@alice/following",
+			map[string]string{"acct": "alice", "sub": "following"}).Body.String()
+		assert.NotContains(t, sub, "misskey:user-id")
+
+		page := ssrGet(t, h.UserPagePage, "/@alice/pages/x",
+			map[string]string{"acct": "alice", "page": "x"}).Body.String()
+		assert.NotContains(t, page, "misskey:user-id")
+	})
+}
+
+// 凍結ユーザーのプロフィールは meta を出さない (upstream の検索条件
+// `isSuspended: false` 相当)。
+func TestSSRUserPage_SuspendedUserHasNoMeta(t *testing.T) {
+	h, userRepo, _ := newSSRTestHandler(t)
+	alice := ssrTestUser("u1", "alice")
+	alice.IsSuspended = true
+	userRepo.Users["u1"] = alice
+
+	body := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+
+	assert.NotContains(t, body, "misskey:user-id")
+	assert.Contains(t, body, `<meta property="og:type" content="website">`)
+}
+
+// 投稿者が「ログインしないと見せない」設定なら、ノートの meta も出さない
+// (upstream note ハンドラの `!note.user.requireSigninToViewContents`)。
+func TestSSRNotePage_RequireSigninUserHasNoMeta(t *testing.T) {
+	h, userRepo, noteRepo := newSSRTestHandler(t)
+	alice := ssrTestUser("u1", "alice")
+	alice.RequireSigninToViewContents = true
+	userRepo.Users["u1"] = alice
+	text := "signin required"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", User: alice, Text: &text,
+		Visibility: model.NoteVisibilityPublic,
+	}
+
+	body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+	assert.NotContains(t, body, "misskey:note-id")
+	assert.NotContains(t, body, text)
 }
