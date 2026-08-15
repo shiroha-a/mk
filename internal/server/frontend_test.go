@@ -376,3 +376,123 @@ func TestFrontendHTML_CaptchaOriginsInCSP(t *testing.T) {
 		assert.NotContains(t, csp, "recaptcha")
 	})
 }
+
+// PWA manifest が upstream `ClientServerService.manifestHandler` と同じ形を
+// 返すこと。icons は PWA のホーム画面アイコンそのものなので、192/512 の
+// maskable と splash の any の組み合わせが崩れると純正と見た目が変わる。
+func TestManifestJSON(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	serve := func(t *testing.T, m *model.Meta) map[string]any {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		if m != nil {
+			repo.Meta = m
+		}
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/manifest.json", nil), rec)
+		require.NoError(t, manifestJSON(cfg, repo)(c))
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
+
+		var out map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+		return out
+	}
+
+	iconsOf := func(t *testing.T, manifest map[string]any) []map[string]any {
+		t.Helper()
+		raw, ok := manifest["icons"].([]any)
+		require.True(t, ok, "icons should be an array")
+		out := make([]map[string]any, 0, len(raw))
+		for _, i := range raw {
+			icon, ok := i.(map[string]any)
+			require.True(t, ok)
+			out = append(out, icon)
+		}
+		return out
+	}
+
+	t.Run("defaults match upstream", func(t *testing.T) {
+		manifest := serve(t, nil)
+
+		assert.Equal(t, "/", manifest["start_url"])
+		assert.Equal(t, "standalone", manifest["display"])
+		assert.Equal(t, "#313a42", manifest["background_color"])
+		assert.Equal(t, "#86b300", manifest["theme_color"])
+
+		icons := iconsOf(t, manifest)
+		require.Len(t, icons, 3)
+		assert.Equal(t, "/static-assets/icons/192.png", icons[0]["src"])
+		assert.Equal(t, "192x192", icons[0]["sizes"])
+		assert.Equal(t, "maskable", icons[0]["purpose"])
+		assert.Equal(t, "/static-assets/icons/512.png", icons[1]["src"])
+		assert.Equal(t, "512x512", icons[1]["sizes"])
+		assert.Equal(t, "maskable", icons[1]["purpose"])
+		assert.Equal(t, "/static-assets/splash.png", icons[2]["src"])
+		assert.Equal(t, "300x300", icons[2]["sizes"])
+		// maskable しか無いと iOS が候補を見つけられないので any が要る。
+		assert.Equal(t, "any", icons[2]["purpose"])
+
+		shortcuts, ok := manifest["shortcuts"].([]any)
+		require.True(t, ok, "upstream は safemode ショートカットを持つ")
+		require.Len(t, shortcuts, 1)
+		assert.Equal(t, map[string]any{"name": "Safemode", "url": "/?safemode=true"}, shortcuts[0])
+
+		shareTarget, ok := manifest["share_target"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "/share/", shareTarget["action"])
+		assert.Equal(t, "GET", shareTarget["method"])
+	})
+
+	t.Run("reflects meta app icon urls", func(t *testing.T) {
+		icon192 := "https://example.test/files/app-192.png"
+		icon512 := "https://example.test/files/app-512.png"
+		manifest := serve(t, &model.Meta{ID: "x", App192IconURL: &icon192, App512IconURL: &icon512})
+
+		icons := iconsOf(t, manifest)
+		require.Len(t, icons, 3)
+		assert.Equal(t, icon192, icons[0]["src"])
+		assert.Equal(t, icon512, icons[1]["src"])
+		// splash は meta で差し替えられない (upstream も固定)。
+		assert.Equal(t, "/static-assets/splash.png", icons[2]["src"])
+	})
+
+	t.Run("reflects name / shortName / themeColor", func(t *testing.T) {
+		name := "テストサーバー"
+		short := "テスト"
+		color := "#00eb91"
+		manifest := serve(t, &model.Meta{ID: "x", Name: &name, ShortName: &short, ThemeColor: &color})
+
+		assert.Equal(t, name, manifest["name"])
+		assert.Equal(t, short, manifest["short_name"])
+		assert.Equal(t, color, manifest["theme_color"])
+	})
+
+	t.Run("shortName 未設定なら name にフォールバック", func(t *testing.T) {
+		name := "テストサーバー"
+		manifest := serve(t, &model.Meta{ID: "x", Name: &name})
+
+		assert.Equal(t, name, manifest["short_name"])
+	})
+
+	t.Run("manifestJsonOverride が最後に重なる", func(t *testing.T) {
+		manifest := serve(t, &model.Meta{
+			ID:                   "x",
+			ManifestJSONOverride: `{"name":"上書き","icons":[{"src":"/custom.png","sizes":"192x192"}]}`,
+		})
+
+		assert.Equal(t, "上書き", manifest["name"])
+		icons := iconsOf(t, manifest)
+		require.Len(t, icons, 1, "配列は merge ではなく置換")
+		assert.Equal(t, "/custom.png", icons[0]["src"])
+	})
+
+	t.Run("不正な override は無視する", func(t *testing.T) {
+		manifest := serve(t, &model.Meta{ID: "x", ManifestJSONOverride: `{ not json`})
+
+		// default が保たれる (override を落としても manifest 自体は壊さない)
+		assert.Len(t, iconsOf(t, manifest), 3)
+	})
+}

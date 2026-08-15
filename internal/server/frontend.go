@@ -405,7 +405,9 @@ func manifestJSON(cfg *config.Config, metaRepo repository.MetaRepository) echo.H
 			"icons": []map[string]any{
 				{"src": icon192, "sizes": "192x192", "type": "image/png", "purpose": "maskable"},
 				{"src": icon512, "sizes": "512x512", "type": "image/png", "purpose": "maskable"},
-				{"src": "/static-assets/splash.png", "sizes": "300x300", "type": "image/png"},
+				// purpose 省略時のデフォルトも "any" だが、upstream と値レベルで
+				// 揃えるため明示する (差分比較ハーネスで拾われるため)。
+				{"src": "/static-assets/splash.png", "sizes": "300x300", "type": "image/png", "purpose": "any"},
 			},
 			"share_target": map[string]any{
 				"action":  "/share/",
@@ -416,6 +418,11 @@ func manifestJSON(cfg *config.Config, metaRepo repository.MetaRepository) echo.H
 					"text":  "text",
 					"url":   "url",
 				},
+			},
+			// Android のランチャー長押しショートカット。upstream と同じく
+			// safemode 起動だけを持つ。
+			"shortcuts": []map[string]any{
+				{"name": "Safemode", "url": "/?safemode=true"},
 			},
 		}
 		// manifestJsonOverride: meta テーブルに保存された JSON を最後に重ね書き。
