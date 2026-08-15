@@ -2219,6 +2219,7 @@ func (s *Server) setupRoutes() {
 	ssrMeta := newSSRMetaHandler(
 		s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability,
 		userRepo, noteRepo, pageRepo, clipRepo, flashRepo, repository.NewGalleryRepository(s.db),
+		driveFileRepo, idGen,
 	)
 	s.echo.GET("/notes/:id", func(c echo.Context) error {
 		// 同一 URL が Accept 次第で HTML / AP JSON / 302 を返すので、HTML 変種

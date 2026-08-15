@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"gorm.io/datatypes"
@@ -25,7 +26,7 @@ func newSSRTestHandler(t *testing.T) (*ssrMetaHandler, *testutil.MockUserReposit
 	h := newSSRMetaHandler(
 		&config.Config{URL: "https://example.test", Host: "example.test"},
 		metaRepo, nil, nil,
-		userRepo, noteRepo, nil, nil, nil, nil,
+		userRepo, noteRepo, nil, nil, nil, nil, nil, testIDGen(t),
 	)
 	return h, userRepo, noteRepo
 }
@@ -45,6 +46,15 @@ func ssrGet(t *testing.T, handler echo.HandlerFunc, path string, params map[stri
 	c.SetParamValues(values...)
 	require.NoError(t, handler(c))
 	return rec
+}
+
+// testIDGen returns the default (aidx) generator. drive file の pack が
+// createdAt の復元に使う。
+func testIDGen(t *testing.T) id.Generator {
+	t.Helper()
+	g, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	return g
 }
 
 func ssrTestUser(id, username string) *model.User {
@@ -202,7 +212,7 @@ func TestPrefersHTML(t *testing.T) {
 func TestSSRHandlers_NilReposServeShell(t *testing.T) {
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
-	h := newSSRMetaHandler(&config.Config{URL: "https://example.test"}, metaRepo, nil, nil, nil, nil, nil, nil, nil, nil)
+	h := newSSRMetaHandler(&config.Config{URL: "https://example.test"}, metaRepo, nil, nil, nil, nil, nil, nil, nil, nil, nil, testIDGen(t))
 
 	for name, handler := range map[string]echo.HandlerFunc{
 		"user":    h.UserPage,
@@ -375,4 +385,138 @@ func TestSSRPages_NoAlternateWhenFederationDisabled(t *testing.T) {
 	body := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
 
 	assert.NotContains(t, body, `rel="alternate"`)
+}
+
+// note ページの OGP が upstream views/note.tsx の ogBlock と揃うこと (#2528)。
+func TestSSRNotePage_MediaOpenGraph(t *testing.T) {
+	newHandler := func(t *testing.T) (*ssrMetaHandler, *testutil.MockNoteRepository, *testutil.MockDriveFileRepository) {
+		t.Helper()
+		h, userRepo, noteRepo := newSSRTestHandler(t)
+		driveRepo := testutil.NewMockDriveFileRepository()
+		h.driveFileRepo = driveRepo
+		userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+		return h, noteRepo, driveRepo
+	}
+	author := func(t *testing.T, h *ssrMetaHandler) *model.User {
+		t.Helper()
+		u, err := h.userRepo.FindByID("u1")
+		require.NoError(t, err)
+		return u
+	}
+
+	t.Run("画像添付は summary_large_image と og:image", func(t *testing.T) {
+		h, noteRepo, driveRepo := newHandler(t)
+		driveRepo.Files["f1"] = &model.DriveFile{
+			ID: "f1", Type: "image/png", URL: "https://example.test/files/f1.png",
+			Properties: datatypes.JSON([]byte(`{"width":800,"height":600}`)),
+		}
+		text := "写真"
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: author(t, h), Text: &text,
+			FileIDs: []string{"f1"}, Visibility: model.NoteVisibilityPublic,
+		}
+
+		body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary_large_image">`)
+		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/files/f1.png">`)
+		assert.Contains(t, body, `<meta property="og:image:width" content="800">`)
+		assert.Contains(t, body, `<meta property="og:image:height" content="600">`)
+		// 添付があると summary に (📎1) が付く
+		assert.Contains(t, body, `<meta property="og:description" content="写真 (📎1)">`)
+	})
+
+	t.Run("画像が無ければ avatar と summary", func(t *testing.T) {
+		h, noteRepo, _ := newHandler(t)
+		text := "文字だけ"
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: author(t, h), Text: &text,
+			Visibility: model.NoteVisibilityPublic,
+		}
+
+		body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
+		assert.NotContains(t, body, "summary_large_image")
+		// avatar 未設定なら identicon。**絶対 URL** でないとクローラが解決できない
+		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/identicon/alice">`)
+	})
+
+	t.Run("動画は og:video 一式を出す", func(t *testing.T) {
+		h, noteRepo, driveRepo := newHandler(t)
+		thumb := "https://example.test/files/thumb.webp"
+		driveRepo.Files["v1"] = &model.DriveFile{
+			ID: "v1", Type: "video/mp4", URL: "https://example.test/files/v1.mp4",
+			ThumbnailURL: &thumb,
+			Properties:   datatypes.JSON([]byte(`{"width":1920,"height":1080}`)),
+		}
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: author(t, h),
+			FileIDs: []string{"v1"}, Visibility: model.NoteVisibilityPublic,
+		}
+
+		body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+		assert.Contains(t, body, `<meta property="og:video:url" content="https://example.test/files/v1.mp4">`)
+		assert.Contains(t, body, `<meta property="og:video:secure_url" content="https://example.test/files/v1.mp4">`)
+		assert.Contains(t, body, `<meta property="og:video:type" content="video/mp4">`)
+		assert.Contains(t, body, `<meta property="og:video:image" content="`+thumb+`">`)
+		assert.Contains(t, body, `<meta property="og:video:width" content="1920">`)
+		assert.Contains(t, body, `<meta property="og:video:height" content="1080">`)
+		// 画像が無いので card は summary + avatar
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
+	})
+
+	t.Run("title は <著者> | <インスタンス>", func(t *testing.T) {
+		h, noteRepo, _ := newHandler(t)
+		metaRepo := testutil.NewMockMetaRepository()
+		name := "実験室"
+		metaRepo.Meta = &model.Meta{ID: "x", Name: &name}
+		h.metaRepo = metaRepo
+		text := "hello"
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: author(t, h), Text: &text,
+			Visibility: model.NoteVisibilityPublic,
+		}
+
+		body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+		assert.Contains(t, body, `<title>@alice | 実験室</title>`)
+		// description もノートの要約になる (インスタンス説明ではない)
+		assert.Contains(t, body, `<meta name="description" content="hello">`)
+	})
+}
+
+// summary に含める reply / renote は、viewer なしで読めるものだけ。
+// upstream は pack 済み note を渡すので非公開は (⛔) に落ちる。ここが緩むと
+// permalink から非公開投稿の本文が読めてしまう。
+func TestSSRNotePage_SummaryHidesNonPublicAncestors(t *testing.T) {
+	h, userRepo, noteRepo := newSSRTestHandler(t)
+	alice := ssrTestUser("u1", "alice")
+	userRepo.Users["u1"] = alice
+
+	secret := "secret followers only"
+	noteRepo.Notes["hidden"] = &model.Note{
+		ID: "hidden", UserID: "u1", User: alice, Text: &secret,
+		Visibility: model.NoteVisibilityFollowers,
+	}
+	open := "public parent"
+	noteRepo.Notes["open"] = &model.Note{
+		ID: "open", UserID: "u1", User: alice, Text: &open,
+		Visibility: model.NoteVisibilityPublic,
+	}
+	replyID := "hidden"
+	renoteID := "open"
+	text := "child"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", User: alice, Text: &text,
+		ReplyID: &replyID, RenoteID: &renoteID,
+		Visibility: model.NoteVisibilityPublic,
+	}
+
+	body := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+
+	assert.NotContains(t, body, secret)
+	assert.Contains(t, body, "RE: (⛔)")
+	assert.Contains(t, body, "RN: public parent")
 }

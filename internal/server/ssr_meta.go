@@ -3,13 +3,17 @@ package server
 import (
 	"encoding/json"
 	stdhtml "html"
+	"strconv"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 
 	"github.com/shiroha-a/mk/internal/api/meta"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/frontendutil"
+	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/notesummary"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -31,12 +35,15 @@ type ssrMetaHandler struct {
 	chunkedUpload meta.ChunkedUploadCapability
 	clientEntry   frontendutil.ClientEntryInfo
 
-	userRepo    repository.UserRepository
-	noteRepo    repository.NoteRepository
-	pageRepo    repository.PageRepository
-	clipRepo    repository.ClipRepository
-	flashRepo   repository.FlashRepository
-	galleryRepo repository.GalleryRepository
+	userRepo      repository.UserRepository
+	noteRepo      repository.NoteRepository
+	pageRepo      repository.PageRepository
+	clipRepo      repository.ClipRepository
+	flashRepo     repository.FlashRepository
+	galleryRepo   repository.GalleryRepository
+	driveFileRepo repository.DriveFileRepository
+	// idGen は drive file の pack (createdAt の復元) に要る。
+	idGen id.Generator
 }
 
 func newSSRMetaHandler(
@@ -50,6 +57,8 @@ func newSSRMetaHandler(
 	clipRepo repository.ClipRepository,
 	flashRepo repository.FlashRepository,
 	galleryRepo repository.GalleryRepository,
+	driveFileRepo repository.DriveFileRepository,
+	idGen id.Generator,
 ) *ssrMetaHandler {
 	return &ssrMetaHandler{
 		cfg:           cfg,
@@ -63,6 +72,8 @@ func newSSRMetaHandler(
 		clipRepo:      clipRepo,
 		flashRepo:     flashRepo,
 		galleryRepo:   galleryRepo,
+		driveFileRepo: driveFileRepo,
+		idGen:         idGen,
 	}
 }
 
@@ -204,6 +215,176 @@ func meLinks(p *model.UserProfile) string {
 	return sb.String()
 }
 
+// instanceName returns the name used in the `<title>` suffix.
+func (h *ssrMetaHandler) instanceName() string {
+	m, err := h.metaRepo.Fetch()
+	if err == nil && m != nil && m.Name != nil && *m.Name != "" {
+		return *m.Name
+	}
+	return "Misskey"
+}
+
+// pageTitle mirrors upstream の `title={`${x} | ${instanceName}`}`.
+func (h *ssrMetaHandler) pageTitle(head string) string {
+	return head + " | " + h.instanceName()
+}
+
+// absoluteURL makes a site-relative URL absolute.
+//
+// OGP を読むのは別 origin のクローラなので、相対 URL では解決できない
+// (identicon fallback や local drive の URL が相対になる、#2527 と同じ罠)。
+func (h *ssrMetaHandler) absoluteURL(u string) string {
+	if u == "" || strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return strings.TrimSuffix(h.cfg.URL, "/") + "/" + strings.TrimPrefix(u, "/")
+}
+
+// avatarURL resolves the OGP image for a user. entity.IdenticonURL が
+// proxy 化と identicon fallback をまとめて面倒を見る (#1529 / #710)。
+func (h *ssrMetaHandler) avatarURL(u *model.User) string {
+	if u == nil {
+		return ""
+	}
+	return h.absoluteURL(entity.IdenticonURL(u))
+}
+
+// filesOf packs the drive files attached to a note / gallery post.
+// 見つからない ID は黙って落とす (削除済みファイルで OGP 全体を落とさない)。
+func (h *ssrMetaHandler) filesOf(ids []string) []entity.DriveFileEntity {
+	if h.driveFileRepo == nil || len(ids) == 0 {
+		return nil
+	}
+	rows, err := h.driveFileRepo.FindByIDs(ids)
+	if err != nil {
+		return nil
+	}
+	byID := make(map[string]*model.DriveFile, len(rows))
+	for _, f := range rows {
+		byID[f.ID] = f
+	}
+	// fileIds の順序が添付順なので、その順で並べ直す (og:image の 1 枚目が
+	// リンク展開のサムネイルになる)。
+	out := make([]entity.DriveFileEntity, 0, len(ids))
+	for _, fid := range ids {
+		if f, ok := byID[fid]; ok {
+			out = append(out, entity.PackDriveFile(f, h.idGen))
+		}
+	}
+	return out
+}
+
+// noteSummary reproduces upstream の getNoteSummary(packed note)。
+//
+// reply / renote は upstream では pack 済み (viewer=null) なので、公開でない
+// ものは `isHidden` として `(⛔)` に落ちる。ここでも同じ扱いにして、本文が
+// permalink 経由で漏れないようにする ([[note_embed_depth_visibility_gate_invariant]])。
+func (h *ssrMetaHandler) noteSummary(note *model.Note) string {
+	return notesummary.Get(h.summaryMap(note, true))
+}
+
+func (h *ssrMetaHandler) summaryMap(note *model.Note, hydrate bool) map[string]any {
+	if note == nil {
+		return nil
+	}
+	m := map[string]any{}
+	if note.Visibility != model.NoteVisibilityPublic {
+		// viewer なしでは読めない note。upstream の packed note と同じく
+		// isHidden として扱い、本文を出さない。
+		m["isHidden"] = true
+		return m
+	}
+	if note.CW != nil {
+		m["cw"] = *note.CW
+	}
+	if note.Text != nil {
+		m["text"] = *note.Text
+	}
+	if n := len(note.FileIDs); n > 0 {
+		files := make([]any, n)
+		m["files"] = files
+	}
+	if note.HasPoll {
+		m["poll"] = map[string]any{}
+	}
+	if note.ReplyID != nil {
+		m["replyId"] = *note.ReplyID
+		if hydrate {
+			if reply := h.noteByID(*note.ReplyID); reply != nil {
+				m["reply"] = h.summaryMap(reply, false)
+			}
+		}
+	}
+	if note.RenoteID != nil {
+		m["renoteId"] = *note.RenoteID
+		if hydrate {
+			if renote := h.noteByID(*note.RenoteID); renote != nil {
+				m["renote"] = h.summaryMap(renote, false)
+			}
+		}
+	}
+	return m
+}
+
+func (h *ssrMetaHandler) noteByID(id string) *model.Note {
+	if h.noteRepo == nil || id == "" {
+		return nil
+	}
+	n, err := h.noteRepo.FindByID(id)
+	if err != nil {
+		return nil
+	}
+	return n
+}
+
+// noteMediaOG builds the media half of upstream note.tsx's ogBlock: video meta
+// for every attached video, then either the images (summary_large_image) or the
+// author's avatar (summary).
+//
+// sensitive なファイルを除外しないのは upstream と同じ (note.tsx は
+// isSensitive を見ない。gallery-post.tsx だけが見る)。
+func noteMediaOG(files []entity.DriveFileEntity, avatarURL string) string {
+	var sb strings.Builder
+	var images []entity.DriveFileEntity
+	for _, f := range files {
+		switch {
+		case strings.HasPrefix(f.Type, "video/"):
+			sb.WriteString(propertyTag("og:video:url", f.URL))
+			sb.WriteString(propertyTag("og:video:secure_url", f.URL))
+			sb.WriteString(propertyTag("og:video:type", f.Type))
+			if f.ThumbnailURL != nil && *f.ThumbnailURL != "" {
+				sb.WriteString(propertyTag("og:video:image", *f.ThumbnailURL))
+			}
+			if f.Properties.Width != nil {
+				sb.WriteString(propertyTag("og:video:width", strconv.Itoa(*f.Properties.Width)))
+			}
+			if f.Properties.Height != nil {
+				sb.WriteString(propertyTag("og:video:height", strconv.Itoa(*f.Properties.Height)))
+			}
+		case strings.HasPrefix(f.Type, "image/"):
+			images = append(images, f)
+		}
+	}
+	if len(images) > 0 {
+		sb.WriteString(metaTag("twitter:card", "summary_large_image"))
+		for _, f := range images {
+			sb.WriteString(propertyTag("og:image", f.URL))
+			if f.Properties.Width != nil {
+				sb.WriteString(propertyTag("og:image:width", strconv.Itoa(*f.Properties.Width)))
+			}
+			if f.Properties.Height != nil {
+				sb.WriteString(propertyTag("og:image:height", strconv.Itoa(*f.Properties.Height)))
+			}
+		}
+		return sb.String()
+	}
+	sb.WriteString(metaTag("twitter:card", "summary"))
+	if avatarURL != "" {
+		sb.WriteString(propertyTag("og:image", avatarURL))
+	}
+	return sb.String()
+}
+
 // displayName returns the OGP title fragment for a user (`Name (@handle)`).
 func displayName(u *model.User) string {
 	handle := "@" + u.Username
@@ -289,14 +470,20 @@ func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 	if note.Visibility != model.NoteVisibilityPublic {
 		return h.renderPlain(c)
 	}
-	og := propertyTag("og:type", "article")
+	title := ""
 	if note.User != nil {
-		og += propertyTag("og:title", displayName(note.User))
+		title = displayName(note.User)
 	}
-	if note.Text != nil && *note.Text != "" {
-		og += propertyTag("og:description", *note.Text)
+	summary := h.noteSummary(note)
+	og := propertyTag("og:type", "article")
+	if title != "" {
+		og += propertyTag("og:title", title)
 	}
+	// upstream は本文そのままではなく getNoteSummary を使う。添付数・投票・
+	// 返信元が要約に含まれるので、リンク展開だけ見ても中身が分かる。
+	og += propertyTag("og:description", summary)
 	og += propertyTag("og:url", h.cfg.URL+"/notes/"+note.ID)
+	og += noteMediaOG(h.filesOf(note.FileIDs), h.avatarURL(note.User))
 	var profile *model.UserProfile
 	if note.User != nil {
 		profile = h.profileOf(note.User.ID)
@@ -306,7 +493,12 @@ func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 	head := userHead(note.User, profile, note.RenoteID != nil) +
 		metaTag("misskey:note-id", note.ID) +
 		h.noteAlternateLinks(note)
-	return h.render(c, shellOverrides{Head: head, OG: og})
+	return h.render(c, shellOverrides{
+		Head:        head,
+		OG:          og,
+		Title:       h.pageTitle(title),
+		Description: &summary,
+	})
 }
 
 // ClipPage serves `/clips/:clip`.
