@@ -42,7 +42,17 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability, clientEntry frontendutil.ClientEntryInfo, extraHead string) error {
 	instanceName := "Misskey"
 	instanceDesc := ""
+	// og:image 用。icon link とは fallback が違うので別変数のまま扱う。
 	iconURL := "/static-assets/icons/192.png"
+	// `<link rel="icon">` と `<link rel="apple-touch-icon">` は upstream
+	// base.tsx と同じ fallback を持つ (前者は /favicon.ico、後者は
+	// /apple-touch-icon.png)。og:image とは別 field なので変数を分ける。
+	faviconURL := "/favicon.ico"
+	// iOS Safari は明示された apple-touch-icon を manifest の icons より
+	// 優先する。この link が無いと manifest 側にフォールバックし、
+	// purpose:maskable の 192/512 が候補から外れて splash.png (透明背景) が
+	// ホーム画面アイコンに選ばれてしまう (#2527)。
+	appleTouchIconURL := "/apple-touch-icon.png"
 	themeColor := "#86b300"
 	// splash 中央のアイコンは upstream `_splash.tsx` 互換で server
 	// iconUrl を使う (= 管理者が設定したインスタンス画像)。未設定なら
@@ -64,6 +74,11 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		if m.IconURL != nil && *m.IconURL != "" {
 			iconURL = *m.IconURL
 			splashIconURL = *m.IconURL
+			faviconURL = *m.IconURL
+		}
+		// upstream HtmlTemplateService は appleTouchIcon に app512IconUrl を渡す。
+		if m.App512IconURL != nil && *m.App512IconURL != "" {
+			appleTouchIconURL = *m.App512IconURL
 		}
 		if m.ThemeColor != nil && *m.ThemeColor != "" {
 			themeColor = *m.ThemeColor
@@ -124,6 +139,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>%s</title>
 <link rel="icon" href="%s">
+<link rel="apple-touch-icon" href="%s">
 <link rel="manifest" href="/manifest.json">
 %s
 %s
@@ -142,7 +158,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 </div>
 </div>
 </body></html>`, instanceName, instanceName, instanceDesc, iconURL, cfg.URL,
-		themeColor, cfg.URL, instanceName, iconURL, extraHead, viteClientTag, cssLinkTags,
+		themeColor, cfg.URL, instanceName, faviconURL, appleTouchIconURL, extraHead, viteClientTag, cssLinkTags,
 		cfg.Version, clientEntryJS,
 		time.Now().UnixMilli(), metaJSON, splashIconURL)
 

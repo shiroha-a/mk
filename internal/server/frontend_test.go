@@ -98,6 +98,58 @@ func TestFrontendHTML_SplashStructure(t *testing.T) {
 	})
 }
 
+// `<head>` の icon link 群が upstream `views/base.tsx` と同じ値を返すこと。
+//
+// 特に `<link rel="apple-touch-icon">` が無いと、iOS Safari は manifest の
+// icons にフォールバックする。192/512 は `purpose: "maskable"` なので候補から
+// 外れ、透明背景の splash.png がホーム画面アイコンに選ばれてしまい、純正
+// Misskey と見た目が変わる (#2527)。
+func TestFrontendHTML_IconLinks(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	render := func(t *testing.T, m *model.Meta) string {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		if m != nil {
+			repo.Meta = m
+		}
+		handler := frontendHTML(cfg, repo, nil, nil)
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+		return rec.Body.String()
+	}
+
+	t.Run("defaults match upstream base.tsx", func(t *testing.T) {
+		body := render(t, nil)
+
+		assert.Contains(t, body, `<link rel="icon" href="/favicon.ico">`,
+			"upstream の fallback は /favicon.ico")
+		assert.Contains(t, body, `<link rel="apple-touch-icon" href="/apple-touch-icon.png">`,
+			"apple-touch-icon が無いと iOS が manifest 側の splash.png を拾う")
+	})
+
+	t.Run("uses meta.iconUrl for favicon", func(t *testing.T) {
+		icon := "https://example.test/files/server-icon.png"
+		body := render(t, &model.Meta{ID: "x", IconURL: &icon})
+
+		assert.Contains(t, body, `<link rel="icon" href="`+icon+`">`)
+		// app512IconUrl 未設定なら apple-touch-icon は default のまま
+		// (upstream も iconUrl は apple-touch-icon に流用しない)。
+		assert.Contains(t, body, `<link rel="apple-touch-icon" href="/apple-touch-icon.png">`)
+	})
+
+	t.Run("uses meta.app512IconUrl for apple-touch-icon", func(t *testing.T) {
+		appIcon := "https://example.test/files/app-512.png"
+		body := render(t, &model.Meta{ID: "x", App512IconURL: &appIcon})
+
+		assert.Contains(t, body, `<link rel="apple-touch-icon" href="`+appIcon+`">`)
+		// favicon 側は iconUrl 由来なので巻き込まれない
+		assert.Contains(t, body, `<link rel="icon" href="/favicon.ico">`)
+	})
+}
+
 // SSR 埋め込み meta (`#misskey_meta`) の policies が
 // `{...DEFAULT_POLICIES, ...meta.policies}` になること。
 //
