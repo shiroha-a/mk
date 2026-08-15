@@ -520,3 +520,106 @@ func TestSSRNotePage_SummaryHidesNonPublicAncestors(t *testing.T) {
 	assert.Contains(t, body, "RE: (⛔)")
 	assert.Contains(t, body, "RN: public parent")
 }
+
+// user / clip / flash / gallery / page の OGP が upstream の各 view と揃うこと (#2528)。
+func TestSSRPages_OpenGraph(t *testing.T) {
+	t.Run("user", func(t *testing.T) {
+		h, userRepo, _ := newSSRTestHandler(t)
+		name := "アリス"
+		bio := "紹介文"
+		alice := ssrTestUser("u1", "alice")
+		alice.Name = &name
+		userRepo.Users["u1"] = alice
+		userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Description: &bio}
+
+		body := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+
+		assert.Contains(t, body, `<meta property="og:type" content="blog">`)
+		assert.Contains(t, body, `<meta property="og:title" content="アリス (@alice)">`)
+		assert.Contains(t, body, `<meta property="og:description" content="紹介文">`)
+		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/identicon/alice">`)
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
+		// Layout の title は og:title と違って host を付けない
+		assert.Contains(t, body, `<title>アリス (@alice) | Misskey</title>`)
+		assert.Contains(t, body, `<meta name="description" content="紹介文">`)
+	})
+
+	t.Run("user は description が無ければ og:description を出さない", func(t *testing.T) {
+		h, userRepo, _ := newSSRTestHandler(t)
+		userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+
+		body := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+
+		assert.NotContains(t, body, `property="og:description"`)
+		// desc は `?? ''` で渡るので description タグ自体は出る (既定文言)
+		assert.Contains(t, body, `<meta name="description" content="`+defaultInstanceDescription+`">`)
+	})
+
+	t.Run("clip", func(t *testing.T) {
+		h, userRepo, _ := newSSRTestHandler(t)
+		userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+		clipRepo := testutil.NewMockClipRepository()
+		desc := "クリップの説明"
+		clipRepo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1", Name: "まとめ", IsPublic: true, Description: &desc}
+		h.clipRepo = clipRepo
+
+		body := ssrGet(t, h.ClipPage, "/clips/c1", map[string]string{"clip": "c1"}).Body.String()
+
+		assert.Contains(t, body, `<meta property="og:title" content="まとめ">`)
+		assert.Contains(t, body, `<meta property="og:description" content="クリップの説明">`)
+		assert.Contains(t, body, `<meta property="og:url" content="https://example.test/clips/c1">`)
+		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/identicon/alice">`)
+		assert.Contains(t, body, `<title>まとめ | Misskey</title>`)
+	})
+
+	t.Run("flash", func(t *testing.T) {
+		h, userRepo, _ := newSSRTestHandler(t)
+		userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+		flashRepo := testutil.NewMockFlashRepository()
+		flashRepo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "u1", Title: "ゲーム", Summary: "遊べます"}
+		h.flashRepo = flashRepo
+
+		body := ssrGet(t, h.FlashPage, "/play/f1", map[string]string{"id": "f1"}).Body.String()
+
+		assert.Contains(t, body, `<meta property="og:title" content="ゲーム">`)
+		assert.Contains(t, body, `<meta property="og:description" content="遊べます">`)
+		assert.Contains(t, body, `<meta property="og:url" content="https://example.test/play/f1">`)
+		assert.Contains(t, body, `<title>ゲーム | Misskey</title>`)
+	})
+}
+
+// gallery は sensitive かどうかで展開先に出す画像を変える (upstream
+// gallery-post.tsx)。作品そのものを不用意に展開しない。
+func TestSSRGalleryPage_SensitiveFallsBackToAvatar(t *testing.T) {
+	newHandler := func(t *testing.T, sensitive bool) string {
+		t.Helper()
+		h, userRepo, _ := newSSRTestHandler(t)
+		userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+		driveRepo := testutil.NewMockDriveFileRepository()
+		thumb := "https://example.test/files/thumb.webp"
+		driveRepo.Files["g1"] = &model.DriveFile{
+			ID: "g1", Type: "image/png", URL: "https://example.test/files/g1.png", ThumbnailURL: &thumb,
+		}
+		h.driveFileRepo = driveRepo
+		galleryRepo := testutil.NewMockGalleryRepository()
+		galleryRepo.Posts["p1"] = &model.GalleryPost{
+			ID: "p1", UserID: "u1", Title: "作品", FileIDs: []string{"g1"}, IsSensitive: sensitive,
+		}
+		h.galleryRepo = galleryRepo
+		return ssrGet(t, h.GalleryPage, "/gallery/p1", map[string]string{"post": "p1"}).Body.String()
+	}
+
+	t.Run("通常は作品のサムネイルと summary_large_image", func(t *testing.T) {
+		body := newHandler(t, false)
+		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/files/thumb.webp">`)
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary_large_image">`)
+		assert.Contains(t, body, `<title>作品 | Misskey</title>`)
+	})
+
+	t.Run("sensitive なら avatar と summary", func(t *testing.T) {
+		body := newHandler(t, true)
+		assert.NotContains(t, body, "thumb.webp")
+		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/identicon/alice">`)
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
+	})
+}

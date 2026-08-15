@@ -8314,3 +8314,61 @@ func (m *MockRegistrationTicketRepository) MarkPending(ticketID, pendingID strin
 func (m *MockUserRepository) DeleteOrphanRemoteUsers(_, _ int) (int64, error) {
 	return 0, nil
 }
+
+// MockGalleryRepository is a test double for repository.GalleryRepository.
+type MockGalleryRepository struct {
+	Posts map[string]*model.GalleryPost
+	Likes map[string][]*model.GalleryLike // keyed by userID
+	// LikedBy holds "<userID>:<postID>" pairs reported by ExistsLike.
+	LikedBy map[string]bool
+	Err     error
+}
+
+// NewMockGalleryRepository creates an empty MockGalleryRepository.
+func NewMockGalleryRepository() *MockGalleryRepository {
+	return &MockGalleryRepository{
+		Posts:   make(map[string]*model.GalleryPost),
+		Likes:   make(map[string][]*model.GalleryLike),
+		LikedBy: make(map[string]bool),
+	}
+}
+
+func (m *MockGalleryRepository) ListByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.GalleryPost, error) {
+	if m.Err != nil {
+		return nil, m.Err
+	}
+	var out []*model.GalleryPost
+	for _, p := range m.Posts {
+		if p.UserID == userID {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (m *MockGalleryRepository) ListLikesByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.GalleryLike, error) {
+	if m.Err != nil {
+		return nil, m.Err
+	}
+	return m.Likes[userID], nil
+}
+
+func (m *MockGalleryRepository) FindPostsByIDs(ids []string) ([]*model.GalleryPost, error) {
+	if m.Err != nil {
+		return nil, m.Err
+	}
+	var out []*model.GalleryPost
+	for _, id := range ids {
+		if p, ok := m.Posts[id]; ok {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
+func (m *MockGalleryRepository) ExistsLike(userID, postID string) (bool, error) {
+	if m.Err != nil {
+		return false, m.Err
+	}
+	return m.LikedBy[userID+":"+postID], nil
+}

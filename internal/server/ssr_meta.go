@@ -385,6 +385,55 @@ func noteMediaOG(files []entity.DriveFileEntity, avatarURL string) string {
 	return sb.String()
 }
 
+// authorImageOG is the avatar-backed og:image + twitter:card pair that upstream
+// clip / flash / page / gallery emit when they have no better image.
+// avatarUrl が無いときは card ごと出さない (upstream の三項分岐と同じ)。
+func authorImageOG(avatarURL string) string {
+	if avatarURL == "" {
+		return ""
+	}
+	return propertyTag("og:image", avatarURL) + metaTag("twitter:card", "summary")
+}
+
+// largeImageOG is the summary_large_image variant used when the page has a
+// representative image of its own (gallery の 1 枚目、page の eyeCatchingImage)。
+func largeImageOG(f *entity.DriveFileEntity) string {
+	if f == nil {
+		return ""
+	}
+	url := f.URL
+	if f.ThumbnailURL != nil && *f.ThumbnailURL != "" {
+		url = *f.ThumbnailURL
+	}
+	if url == "" {
+		return ""
+	}
+	return propertyTag("og:image", url) + metaTag("twitter:card", "summary_large_image")
+}
+
+// strOrEmpty dereferences an optional string into the non-nil form upstream
+// passes as `desc` (`?? ”`). description タグ自体は必ず出る。
+func strOrEmpty(p *string) *string {
+	if p == nil {
+		empty := ""
+		return &empty
+	}
+	v := *p
+	return &v
+}
+
+// fileByID packs a single drive file (page の eyeCatchingImage 用)。
+func (h *ssrMetaHandler) fileByID(id *string) *entity.DriveFileEntity {
+	if id == nil || *id == "" {
+		return nil
+	}
+	files := h.filesOf([]string{*id})
+	if len(files) == 0 {
+		return nil
+	}
+	return &files[0]
+}
+
 // displayName returns the OGP title fragment for a user (`Name (@handle)`).
 func displayName(u *model.User) string {
 	handle := "@" + u.Username
@@ -426,12 +475,33 @@ func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 	}
 	p := h.profileOf(u.ID)
 	og := propertyTag("og:type", "blog") +
-		propertyTag("og:title", displayName(u)) +
-		propertyTag("og:url", h.cfg.URL+"/@"+u.Username)
+		propertyTag("og:title", displayName(u))
+	// upstream は description が null ならタグごと出さない (空文字は出す)。
+	if p != nil && p.Description != nil {
+		og += propertyTag("og:description", *p.Description)
+	}
+	og += propertyTag("og:url", h.cfg.URL+"/@"+u.Username)
+	og += authorImageOG(h.avatarURL(u))
 	head := userHead(u, p, false) +
 		h.userAlternateLinks(u, p, c.Param("sub") != "") +
 		meLinks(p)
-	return h.render(c, shellOverrides{Head: head, OG: og})
+	// upstream の Layout title は og:title と違って host を付けない。
+	name := u.Username
+	if u.Name != nil && *u.Name != "" {
+		name = *u.Name
+	}
+	var desc *string
+	if p != nil {
+		desc = strOrEmpty(p.Description)
+	} else {
+		desc = strOrEmpty(nil)
+	}
+	return h.render(c, shellOverrides{
+		Head:        head,
+		OG:          og,
+		Title:       h.pageTitle(name + " (@" + u.Username + ")"),
+		Description: desc,
+	})
 }
 
 // UserPagePage serves `/@:acct/pages/:page`.
@@ -447,9 +517,21 @@ func (h *ssrMetaHandler) UserPagePage(c echo.Context) error {
 	}
 	og := propertyTag("og:type", "article") +
 		propertyTag("og:title", page.Title)
+	if page.Summary != nil {
+		og += propertyTag("og:description", *page.Summary)
+	}
+	// upstream page.tsx は permalink を /pages/<id> で広告する (SPA が解決する)。
+	og += propertyTag("og:url", h.cfg.URL+"/pages/"+page.ID)
+	if img := largeImageOG(h.fileByID(page.EyeCatchingImageID)); img != "" {
+		og += img
+	} else {
+		og += authorImageOG(h.avatarURL(u))
+	}
 	return h.render(c, shellOverrides{
-		Head: userHead(u, p, false) + metaTag("misskey:page-id", page.ID),
-		OG:   og,
+		Head:        userHead(u, p, false) + metaTag("misskey:page-id", page.ID),
+		OG:          og,
+		Title:       h.pageTitle(page.Title),
+		Description: strOrEmpty(page.Summary),
 	})
 }
 
@@ -510,12 +592,19 @@ func (h *ssrMetaHandler) ClipPage(c echo.Context) error {
 	if err != nil || clip == nil || !clip.IsPublic {
 		return h.renderPlain(c)
 	}
+	author := h.userByID(clip.UserID)
 	og := propertyTag("og:type", "article") +
 		propertyTag("og:title", clip.Name)
-	author := h.userByID(clip.UserID)
+	if clip.Description != nil {
+		og += propertyTag("og:description", *clip.Description)
+	}
+	og += propertyTag("og:url", h.cfg.URL+"/clips/"+clip.ID)
+	og += authorImageOG(h.avatarURL(author))
 	return h.render(c, shellOverrides{
-		Head: userHead(author, h.profileOf(clip.UserID), false) + metaTag("misskey:clip-id", clip.ID),
-		OG:   og,
+		Head:        userHead(author, h.profileOf(clip.UserID), false) + metaTag("misskey:clip-id", clip.ID),
+		OG:          og,
+		Title:       h.pageTitle(clip.Name),
+		Description: strOrEmpty(clip.Description),
 	})
 }
 
@@ -528,12 +617,17 @@ func (h *ssrMetaHandler) FlashPage(c echo.Context) error {
 	if err != nil || flash == nil {
 		return h.renderPlain(c)
 	}
-	og := propertyTag("og:type", "article") +
-		propertyTag("og:title", flash.Title)
 	author := h.userByID(flash.UserID)
+	og := propertyTag("og:type", "article") +
+		propertyTag("og:title", flash.Title) +
+		propertyTag("og:description", flash.Summary) +
+		propertyTag("og:url", h.cfg.URL+"/play/"+flash.ID) +
+		authorImageOG(h.avatarURL(author))
 	return h.render(c, shellOverrides{
-		Head: userHead(author, h.profileOf(flash.UserID), false) + metaTag("misskey:flash-id", flash.ID),
-		OG:   og,
+		Head:        userHead(author, h.profileOf(flash.UserID), false) + metaTag("misskey:flash-id", flash.ID),
+		OG:          og,
+		Title:       h.pageTitle(flash.Title),
+		Description: &flash.Summary,
 	})
 }
 
@@ -553,9 +647,28 @@ func (h *ssrMetaHandler) GalleryPage(c echo.Context) error {
 	}
 	og := propertyTag("og:type", "article") +
 		propertyTag("og:title", post.Title)
+	if post.Description != nil {
+		og += propertyTag("og:description", *post.Description)
+	}
+	og += propertyTag("og:url", h.cfg.URL+"/gallery/"+post.ID)
+	// sensitive な投稿は作品そのものを展開先に出さず、著者の avatar に落とす
+	// (upstream gallery-post.tsx の分岐)。
+	if post.IsSensitive {
+		og += authorImageOG(h.avatarURL(author))
+	} else {
+		files := h.filesOf(post.FileIDs)
+		if len(files) > 0 {
+			og += largeImageOG(&files[0])
+		}
+	}
 	head := userHead(author, h.profileOf(post.UserID), false) +
 		metaTag("misskey:gallery-post-id", post.ID)
-	return h.render(c, shellOverrides{Head: head, OG: og})
+	return h.render(c, shellOverrides{
+		Head:        head,
+		OG:          og,
+		Title:       h.pageTitle(post.Title),
+		Description: strOrEmpty(post.Description),
+	})
 }
 
 func (h *ssrMetaHandler) userByID(id string) *model.User {
