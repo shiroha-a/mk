@@ -296,3 +296,181 @@ func TestWithDB_HandsThroughTheConnection(t *testing.T) {
 	db := testDB(t)
 	assert.Same(t, db, plugintest.New(t).WithDB(db).Context().Storage().DB())
 }
+
+// peerPlugin exercises the mk-go-only plugin channel (#2537).
+var peerPlugin = plugin.Definition{
+	Name:       "peered",
+	APIVersion: plugin.APIVersion,
+	Peered:     true,
+	Routes: func(ctx plugin.Context, r plugin.Router) error {
+		peer := ctx.Peer()
+
+		peer.Handle(func(_ context.Context, from string, payload json.RawMessage) (any, error) {
+			var req struct {
+				User string `json:"user"`
+			}
+			if err := json.Unmarshal(payload, &req); err != nil {
+				return nil, err
+			}
+			if req.User == "" {
+				return nil, errors.New("user が空です")
+			}
+			return map[string]any{"from": from, "user": req.User}, nil
+		})
+
+		peer.OnReply(func(_ context.Context, from, id string, reply json.RawMessage) error {
+			var body struct {
+				Score int `json:"score"`
+			}
+			if err := json.Unmarshal(reply, &body); err != nil {
+				return err
+			}
+			if body.Score < 0 {
+				return fmt.Errorf("score が負です (%s / %s)", from, id)
+			}
+			return nil
+		})
+
+		r.POST("/ask", func(req plugin.Request) (any, error) {
+			id, err := peer.Send(req.Context(), req.Query("host"), map[string]any{"user": "alice"})
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"id": id}, nil
+		})
+		r.POST("/has", func(req plugin.Request) (any, error) {
+			ok, err := peer.Has(req.Context(), req.Query("host"))
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"has": ok}, nil
+		})
+		return nil
+	},
+}
+
+// Send は宛先と中身を記録するだけで、**実際には送らない**。
+func TestPeer_SendIsRecorded(t *testing.T) {
+	h := plugintest.New(t).WithName("peered").WithPeers("other.example")
+	routes := h.Routes(peerPlugin)
+
+	res, err := routes.Call(t, "POST /ask", plugintest.Request{Query: map[string]string{"host": "other.example"}})
+	require.NoError(t, err)
+
+	sends := h.PeerSends()
+	require.Len(t, sends, 1)
+	assert.Equal(t, "other.example", sends[0].Host)
+	assert.JSONEq(t, `{"user":"alice"}`, string(sends[0].Payload))
+
+	body, ok := res.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, sends[0].ID, body["id"], "Send の戻り値が OnReply の相関に使える")
+}
+
+// WithPeers に無い相手への Send は、本番と同じく落とす。
+func TestPeer_SendRequiresDeclaredHost(t *testing.T) {
+	h := plugintest.New(t).WithName("peered")
+	routes := h.Routes(peerPlugin)
+
+	_, err := routes.Call(t, "POST /ask", plugintest.Request{Query: map[string]string{"host": "unknown.example"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "持っていません")
+	assert.Empty(t, h.PeerSends())
+}
+
+func TestPeer_Has(t *testing.T) {
+	h := plugintest.New(t).WithName("peered").WithPeers("a.example", "b.example")
+	routes := h.Routes(peerPlugin)
+
+	res, err := routes.Call(t, "POST /has", plugintest.Request{Query: map[string]string{"host": "a.example"}})
+	require.NoError(t, err)
+	assert.Equal(t, true, res.(map[string]any)["has"])
+
+	res, err = routes.Call(t, "POST /has", plugintest.Request{Query: map[string]string{"host": "c.example"}})
+	require.NoError(t, err)
+	assert.Equal(t, false, res.(map[string]any)["has"])
+}
+
+// 相手から届いたことにしてハンドラを叩く。from は「検証済みの送信元」。
+func TestPeer_DeliverPeer(t *testing.T) {
+	h := plugintest.New(t).WithName("peered")
+	h.Routes(peerPlugin)
+
+	res, err := h.DeliverPeer("sender.example", map[string]any{"user": "bob"})
+	require.NoError(t, err)
+	body, ok := res.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "sender.example", body["from"])
+	assert.Equal(t, "bob", body["user"])
+
+	// ハンドラのエラーはそのまま返る (テストから中身を検査できる)。
+	_, err = h.DeliverPeer("sender.example", map[string]any{})
+	assert.Error(t, err)
+}
+
+// 応答が返ってきたことにして OnReply を叩く。
+func TestPeer_DeliverPeerReply(t *testing.T) {
+	h := plugintest.New(t).WithName("peered").WithPeers("other.example")
+	routes := h.Routes(peerPlugin)
+
+	_, err := routes.Call(t, "POST /ask", plugintest.Request{Query: map[string]string{"host": "other.example"}})
+	require.NoError(t, err)
+	id := h.PeerSends()[0].ID
+
+	require.NoError(t, h.DeliverPeerReply("other.example", id, map[string]any{"score": 3}))
+	assert.Error(t, h.DeliverPeerReply("other.example", id, map[string]any{"score": -1}))
+}
+
+// 管理用ルートの守りをテストできること。**画面を隠すだけでは守れない**ので、
+// プラグインは自分で IsModerator を見る必要がある (sample はそれを例示する)。
+func TestRequest_PrivilegeFlags(t *testing.T) {
+	def := plugin.Definition{
+		Name:       "priv",
+		APIVersion: plugin.APIVersion,
+		Routes: func(_ plugin.Context, r plugin.Router) error {
+			r.POST("/who", func(req plugin.Request) (any, error) {
+				return map[string]any{
+					"mod":   req.IsModerator(),
+					"admin": req.IsAdministrator(),
+				}, nil
+			})
+			return nil
+		},
+	}
+	routes := plugintest.New(t).WithName("priv").Routes(def)
+
+	res, err := routes.Call(t, "POST /who", plugintest.Request{})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"mod": false, "admin": false}, res)
+
+	res, err = routes.Call(t, "POST /who", plugintest.Request{Moderator: true})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"mod": true, "admin": false}, res)
+
+	// Administrator は IsModerator も真にする (管理者は上位の権限を持つ)。
+	res, err = routes.Call(t, "POST /who", plugintest.Request{Administrator: true})
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"mod": true, "admin": true}, res)
+}
+
+// JSON にできない payload は Send の時点で落とす (送ってから気付かない)。
+func TestPeer_SendRejectsUnmarshalablePayload(t *testing.T) {
+	def := plugin.Definition{
+		Name:       "badsend",
+		APIVersion: plugin.APIVersion,
+		Peered:     true,
+		Routes: func(ctx plugin.Context, r plugin.Router) error {
+			r.POST("/send", func(req plugin.Request) (any, error) {
+				// chan は JSON にできない。
+				return ctx.Peer().Send(req.Context(), "other.example", make(chan int))
+			})
+			return nil
+		},
+	}
+	h := plugintest.New(t).WithName("badsend").WithPeers("other.example")
+	routes := h.Routes(def)
+
+	_, err := routes.Call(t, "POST /send", plugintest.Request{})
+	assert.Error(t, err)
+	assert.Empty(t, h.PeerSends(), "失敗した Send は記録しない")
+}
