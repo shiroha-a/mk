@@ -122,6 +122,24 @@ func linkTag(rel, typ, href string) string {
 	return s + ` href="` + stdhtml.EscapeString(href) + `">` + "\n"
 }
 
+// permalink ごとの Cache-Control。upstream ClientServerService が
+// ハンドラ単位で出している値をそのまま持つ。
+const (
+	ssrPermalinkCacheControl = "public, max-age=15"
+	ssrArchiveCacheControl   = "public, max-age=3600"
+	ssrPrivateCacheControl   = "private, max-age=0, must-revalidate"
+)
+
+// robotsTagsFor returns the X-Robots-Tag values upstream emits for a profile.
+// meta 版 (userHead) と両方出すのが upstream の挙動で、ヘッダー版は HTML を
+// 解析しないクローラにも効く。
+func robotsTagsFor(p *model.UserProfile) []string {
+	if p == nil || !p.PreventAiLearning {
+		return nil
+	}
+	return []string{"noimageai", "noai"}
+}
+
 // profileOf loads the profile row that carries the crawler preferences.
 // 見つからなければ nil (upstream は profile 必須だが、mk-go では
 // user だけ存在する経路があり得るので落とさない)。
@@ -540,10 +558,12 @@ func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 		desc = strOrEmpty(nil)
 	}
 	return h.render(c, shellOverrides{
-		Head:        head,
-		OG:          og,
-		Title:       h.pageTitle(name + " (@" + u.Username + ")"),
-		Description: desc,
+		Head:         head,
+		OG:           og,
+		Title:        h.pageTitle(name + " (@" + u.Username + ")"),
+		Description:  desc,
+		CacheControl: ssrPermalinkCacheControl,
+		RobotsTag:    robotsTagsFor(p),
 	})
 }
 
@@ -570,11 +590,19 @@ func (h *ssrMetaHandler) UserPagePage(c echo.Context) error {
 	} else {
 		og += authorImageOG(h.avatarURL(u))
 	}
+	// upstream は公開ページだけ共有キャッシュに載せ、それ以外は revalidate を
+	// 強制する (limited / specified なページが CDN に残らないようにする)。
+	cache := ssrPermalinkCacheControl
+	if page.Visibility != model.PageVisibilityPublic {
+		cache = ssrPrivateCacheControl
+	}
 	return h.render(c, shellOverrides{
-		Head:        userHead(u, p, false) + metaTag("misskey:page-id", page.ID),
-		OG:          og,
-		Title:       h.pageTitle(page.Title),
-		Description: strOrEmpty(page.Summary),
+		Head:         userHead(u, p, false) + metaTag("misskey:page-id", page.ID),
+		OG:           og,
+		Title:        h.pageTitle(page.Title),
+		Description:  strOrEmpty(page.Summary),
+		CacheControl: cache,
+		RobotsTag:    robotsTagsFor(p),
 	})
 }
 
@@ -627,10 +655,12 @@ func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 		metaTag("misskey:note-id", note.ID) +
 		h.noteAlternateLinks(note)
 	return h.render(c, shellOverrides{
-		Head:        head,
-		OG:          og,
-		Title:       h.pageTitle(title),
-		Description: &summary,
+		Head:         head,
+		OG:           og,
+		Title:        h.pageTitle(title),
+		Description:  &summary,
+		CacheControl: ssrPermalinkCacheControl,
+		RobotsTag:    robotsTagsFor(profile),
 	})
 }
 
@@ -651,11 +681,14 @@ func (h *ssrMetaHandler) ClipPage(c echo.Context) error {
 	}
 	og += propertyTag("og:url", h.cfg.URL+"/clips/"+clip.ID)
 	og += authorImageOG(h.avatarURL(author))
+	profile := h.profileOf(clip.UserID)
 	return h.render(c, shellOverrides{
-		Head:        userHead(author, h.profileOf(clip.UserID), false) + metaTag("misskey:clip-id", clip.ID),
-		OG:          og,
-		Title:       h.pageTitle(clip.Name),
-		Description: strOrEmpty(clip.Description),
+		Head:         userHead(author, profile, false) + metaTag("misskey:clip-id", clip.ID),
+		OG:           og,
+		Title:        h.pageTitle(clip.Name),
+		Description:  strOrEmpty(clip.Description),
+		CacheControl: ssrPermalinkCacheControl,
+		RobotsTag:    robotsTagsFor(profile),
 	})
 }
 
@@ -674,11 +707,14 @@ func (h *ssrMetaHandler) FlashPage(c echo.Context) error {
 		propertyTag("og:description", flash.Summary) +
 		propertyTag("og:url", h.cfg.URL+"/play/"+flash.ID) +
 		authorImageOG(h.avatarURL(author))
+	profile := h.profileOf(flash.UserID)
 	return h.render(c, shellOverrides{
-		Head:        userHead(author, h.profileOf(flash.UserID), false) + metaTag("misskey:flash-id", flash.ID),
-		OG:          og,
-		Title:       h.pageTitle(flash.Title),
-		Description: &flash.Summary,
+		Head:         userHead(author, profile, false) + metaTag("misskey:flash-id", flash.ID),
+		OG:           og,
+		Title:        h.pageTitle(flash.Title),
+		Description:  &flash.Summary,
+		CacheControl: ssrPermalinkCacheControl,
+		RobotsTag:    robotsTagsFor(profile),
 	})
 }
 
@@ -712,13 +748,16 @@ func (h *ssrMetaHandler) GalleryPage(c echo.Context) error {
 			og += largeImageOG(&files[0])
 		}
 	}
-	head := userHead(author, h.profileOf(post.UserID), false) +
+	profile := h.profileOf(post.UserID)
+	head := userHead(author, profile, false) +
 		metaTag("misskey:gallery-post-id", post.ID)
 	return h.render(c, shellOverrides{
-		Head:        head,
-		OG:          og,
-		Title:       h.pageTitle(post.Title),
-		Description: strOrEmpty(post.Description),
+		Head:         head,
+		OG:           og,
+		Title:        h.pageTitle(post.Title),
+		Description:  strOrEmpty(post.Description),
+		CacheControl: ssrPermalinkCacheControl,
+		RobotsTag:    robotsTagsFor(profile),
 	})
 }
 
@@ -749,9 +788,10 @@ func (h *ssrMetaHandler) ChannelPage(c echo.Context) error {
 		og += propertyTag("og:image", banner.URL) + metaTag("twitter:card", "summary")
 	}
 	return h.render(c, shellOverrides{
-		OG:          og,
-		Title:       h.pageTitle(ch.Name),
-		Description: strOrEmpty(ch.Description),
+		OG:           og,
+		Title:        h.pageTitle(ch.Name),
+		Description:  strOrEmpty(ch.Description),
+		CacheControl: ssrPermalinkCacheControl,
 	})
 }
 
@@ -774,9 +814,10 @@ func (h *ssrMetaHandler) ReversiGamePage(c echo.Context) error {
 		metaTag("twitter:card", "summary")
 	desc := description
 	return h.render(c, shellOverrides{
-		OG:          og,
-		Title:       h.pageTitle(title),
-		Description: &desc,
+		OG:           og,
+		Title:        h.pageTitle(title),
+		Description:  &desc,
+		CacheControl: ssrArchiveCacheControl,
 	})
 }
 
@@ -820,9 +861,10 @@ func (h *ssrMetaHandler) AnnouncementPage(c echo.Context) error {
 			metaTag("twitter:card", "summary_large_image")
 	}
 	return h.render(c, shellOverrides{
-		OG:          og,
-		Title:       h.pageTitle(a.Title),
-		Description: &description,
+		OG:           og,
+		Title:        h.pageTitle(a.Title),
+		Description:  &description,
+		CacheControl: ssrArchiveCacheControl,
 	})
 }
 

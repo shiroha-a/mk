@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/oauth"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/frontendutil"
 	"github.com/shiroha-a/mk/internal/model"
@@ -731,4 +732,62 @@ func TestRenderFrontendShell_Overrides(t *testing.T) {
 		// OG が空なので既定 OGP は残る
 		assert.Contains(t, body, `<meta property="og:type" content="website">`)
 	})
+}
+
+// upstream ClientServerService は shell とページ種別ごとに Cache-Control を
+// 出している (#2534)。付いていないと共有キャッシュや CDN のヒューリスティック
+// 判断に委ねられる。
+func TestRenderFrontendShell_CacheControl(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	render := func(t *testing.T, ov shellOverrides) *httptest.ResponseRecorder {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		repo.Meta = &model.Meta{ID: "x"}
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, renderFrontendShell(c, cfg, repo, nil, nil, frontendutil.ClientEntryInfo{}, ov))
+		return rec
+	}
+
+	t.Run("既定は upstream renderBase と同じ", func(t *testing.T) {
+		rec := render(t, shellOverrides{})
+		assert.Equal(t, "public, max-age=30", rec.Header().Get("Cache-Control"))
+	})
+
+	t.Run("ページ側の指定が優先される", func(t *testing.T) {
+		rec := render(t, shellOverrides{CacheControl: "public, max-age=15"})
+		assert.Equal(t, "public, max-age=15", rec.Header().Get("Cache-Control"))
+	})
+
+	t.Run("X-Robots-Tag は値ごとに 1 行ずつ", func(t *testing.T) {
+		rec := render(t, shellOverrides{RobotsTag: []string{"noimageai", "noai"}})
+		assert.Equal(t, []string{"noimageai", "noai"}, rec.Header().Values("X-Robots-Tag"))
+	})
+
+	t.Run("指定が無ければ X-Robots-Tag は出ない", func(t *testing.T) {
+		rec := render(t, shellOverrides{})
+		assert.Empty(t, rec.Header().Values("X-Robots-Tag"))
+	})
+}
+
+// OAuth 同意画面は共有キャッシュに載せない。transaction id を含む HTML が
+// CDN に載ると別の利用者に配られる (upstream も OAuth 側で no-store)。
+func TestFrontendConsentHTML_IsNotCacheable(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	repo := testutil.NewMockMetaRepository()
+	repo.Meta = &model.Meta{ID: "x"}
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/oauth/authorize", nil), rec)
+	require.NoError(t, frontendConsentHTML(cfg, repo, nil, nil)(c, oauth.ConsentMeta{
+		TransactionID: "tx-secret",
+		ClientName:    "Test App",
+		Scope:         "read:account",
+	}))
+
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+	assert.Contains(t, rec.Body.String(), `content="tx-secret"`)
 }

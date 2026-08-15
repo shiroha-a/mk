@@ -77,7 +77,18 @@ type shellOverrides struct {
 	// の `props.noindex`)。検索結果に出す意味が無いページ (タグ一覧など) 用で、
 	// ユーザーの noCrawle 由来のものは Head 側に入る。
 	NoIndex bool
+	// CacheControl overrides the shell の既定値 (`public, max-age=30`)。
+	// upstream はページ種別ごとに違う値を出す (permalink 15s、reversi や
+	// announcement は 3600s)。
+	CacheControl string
+	// RobotsTag emits `X-Robots-Tag` ヘッダー。upstream は preventAiLearning の
+	// ユーザーのページで noimageai / noai を出す。HTML を解析しないクローラにも
+	// 効くのが meta 版との違い。
+	RobotsTag []string
 }
+
+// defaultShellCacheControl mirrors upstream の renderBase (`public, max-age=30`)。
+const defaultShellCacheControl = "public, max-age=30"
 
 // renderFrontendShell renders the Misskey frontend SPA shell.
 func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability, clientEntry frontendutil.ClientEntryInfo, ov shellOverrides) error {
@@ -300,6 +311,15 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// 要らない。API / アセットに誤って付くこともない。
 	applyFrontendCSP(c, cfg.FrontendContentSecurityPolicy, cspExtra)
 
+	cacheControl := ov.CacheControl
+	if cacheControl == "" {
+		cacheControl = defaultShellCacheControl
+	}
+	c.Response().Header().Set(echo.HeaderCacheControl, cacheControl)
+	for _, v := range ov.RobotsTag {
+		c.Response().Header().Add("X-Robots-Tag", v)
+	}
+
 	return c.HTML(http.StatusOK, html)
 }
 
@@ -317,7 +337,13 @@ func frontendConsentHTML(cfg *config.Config, metaRepo repository.MetaRepository,
 			sb.WriteString(`<meta name="misskey:oauth:client-logo" content="` + stdhtml.EscapeString(m.ClientLogo) + `">` + "\n")
 		}
 		sb.WriteString(`<meta name="misskey:oauth:scope" content="` + stdhtml.EscapeString(m.Scope) + `">`)
-		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, shellOverrides{Head: sb.String()})
+		// **同意画面は共有キャッシュに載せない。** transaction id を含む HTML が
+		// CDN に載ると別の利用者に配られる。upstream も OAuth 側で no-store を
+		// 出している (OAuth2ProviderService.ts:322)。
+		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, shellOverrides{
+			Head:         sb.String(),
+			CacheControl: "no-store",
+		})
 	}
 }
 

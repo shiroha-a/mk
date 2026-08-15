@@ -916,3 +916,98 @@ func TestSSRNotePage_RequireSigninUserHasNoMeta(t *testing.T) {
 	assert.NotContains(t, body, "misskey:note-id")
 	assert.NotContains(t, body, text)
 }
+
+// permalink ごとの Cache-Control と X-Robots-Tag が upstream と揃うこと (#2534)。
+func TestSSRPages_HTTPHeaders(t *testing.T) {
+	t.Run("note は 15 秒", func(t *testing.T) {
+		h, userRepo, noteRepo := newSSRTestHandler(t)
+		alice := ssrTestUser("u1", "alice")
+		userRepo.Users["u1"] = alice
+		text := "hello"
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: alice, Text: &text,
+			Visibility: model.NoteVisibilityPublic,
+		}
+
+		rec := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"})
+
+		assert.Equal(t, "public, max-age=15", rec.Header().Get("Cache-Control"))
+	})
+
+	t.Run("preventAiLearning で X-Robots-Tag が出る", func(t *testing.T) {
+		h, userRepo, noteRepo := newSSRTestHandler(t)
+		alice := ssrTestUser("u1", "alice")
+		userRepo.Users["u1"] = alice
+		userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", PreventAiLearning: true}
+		text := "hello"
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: alice, Text: &text,
+			Visibility: model.NoteVisibilityPublic,
+		}
+
+		rec := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"})
+
+		assert.Equal(t, []string{"noimageai", "noai"}, rec.Header().Values("X-Robots-Tag"))
+		// meta 版も残る (HTML を解析するクローラ向け)
+		assert.Contains(t, rec.Body.String(), `<meta name="robots" content="noai">`)
+	})
+
+	t.Run("設定していなければ X-Robots-Tag は出ない", func(t *testing.T) {
+		h, userRepo, _ := newSSRTestHandler(t)
+		userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+		userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1"}
+
+		rec := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"})
+
+		assert.Empty(t, rec.Header().Values("X-Robots-Tag"))
+		assert.Equal(t, "public, max-age=15", rec.Header().Get("Cache-Control"))
+	})
+
+	t.Run("reversi と announcement は 1 時間", func(t *testing.T) {
+		h, userRepo, _ := newSSRTestHandler(t)
+		userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+		userRepo.Users["u2"] = ssrTestUser("u2", "bob")
+		h.reversiRepo = &reversiSSRRepo{games: map[string]*model.ReversiGame{
+			"g1": {ID: "g1", User1ID: "u1", User2ID: "u2"},
+		}}
+		annRepo := testutil.NewMockAnnouncementRepository()
+		annRepo.Items["a1"] = &model.Announcement{ID: "a1", Title: "お知らせ", Text: "本文"}
+		h.announceRepo = annRepo
+
+		game := ssrGet(t, h.ReversiGamePage, "/reversi/g/g1", map[string]string{"game": "g1"})
+		assert.Equal(t, "public, max-age=3600", game.Header().Get("Cache-Control"))
+
+		ann := ssrGet(t, h.AnnouncementPage, "/announcements/a1", map[string]string{"id": "a1"})
+		assert.Equal(t, "public, max-age=3600", ann.Header().Get("Cache-Control"))
+	})
+
+	// 公開ページ以外は共有キャッシュに載せない (upstream の分岐)。
+	t.Run("page は visibility で出し分ける", func(t *testing.T) {
+		newHandler := func(t *testing.T, visibility model.PageVisibility) *httptest.ResponseRecorder {
+			t.Helper()
+			h, userRepo, _ := newSSRTestHandler(t)
+			userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+			pageRepo := testutil.NewMockPageRepository()
+			pageRepo.Pages["p1"] = &model.Page{
+				ID: "p1", UserID: "u1", Name: "about", Title: "About", Visibility: visibility,
+			}
+			h.pageRepo = pageRepo
+			return ssrGet(t, h.UserPagePage, "/@alice/pages/about",
+				map[string]string{"acct": "alice", "page": "about"})
+		}
+
+		assert.Equal(t, "public, max-age=15",
+			newHandler(t, model.PageVisibilityPublic).Header().Get("Cache-Control"))
+		assert.Equal(t, "private, max-age=0, must-revalidate",
+			newHandler(t, model.PageVisibilitySpecified).Header().Get("Cache-Control"))
+	})
+
+	// 対象が見つからないページは shell の既定値。
+	t.Run("素の shell は 30 秒", func(t *testing.T) {
+		h, _, _ := newSSRTestHandler(t)
+
+		rec := ssrGet(t, h.NotePage, "/notes/ghost", map[string]string{"id": "ghost"})
+
+		assert.Equal(t, "public, max-age=30", rec.Header().Get("Cache-Control"))
+	})
+}
