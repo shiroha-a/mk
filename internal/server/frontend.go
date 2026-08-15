@@ -51,14 +51,32 @@ func frontendHTML(cfg *config.Config, metaRepo repository.MetaRepository, proxyA
 	clientEntry := clientEntryFor(cfg)
 
 	return func(c echo.Context) error {
-		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, "")
+		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, shellOverrides{})
 	}
 }
 
-// renderFrontendShell renders the Misskey frontend SPA shell. extraHead is
-// injected verbatim into <head> (used by the OAuth consent page to add the
-// misskey:oauth:* meta tags, #1899); pass "" for the normal shell.
-func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability, clientEntry frontendutil.ClientEntryInfo, extraHead string) error {
+// shellOverrides carries the per-page values that upstream passes to base.tsx
+// as props. permalink (note / user 等) はこれでインスタンス既定を差し替える。
+//
+// ゼロ値は「差し替え無し」= 従来の shell。
+type shellOverrides struct {
+	// Head is injected verbatim into <head> (upstream の metaSlot 相当)。
+	// OAuth 同意画面の misskey:oauth:* もここを使う (#1899)。
+	Head string
+	// Title replaces the <title> text. 空ならインスタンス名。
+	Title string
+	// Description replaces <meta name="description"> / og:description.
+	// nil は「差し替え無し」でインスタンスの description を使う。空文字は
+	// upstream と同じく defaultDescription に落ちる (タグ自体は出る)。
+	Description *string
+	// OG is the OGP block (upstream の ogSlot 相当)。非空なら shell 側の
+	// 既定 OGP を出さない。両方出すと og:title が 2 つ並び、パーサは先頭を
+	// 採用するのでページ固有の値が無視される (#2527)。
+	OG string
+}
+
+// renderFrontendShell renders the Misskey frontend SPA shell.
+func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability, clientEntry frontendutil.ClientEntryInfo, ov shellOverrides) error {
 	instanceName := "Misskey"
 	// og:description の既定値は upstream views/_.ts の defaultDescription。
 	// `<meta name="description">` の方は upstream と同じく meta.description が
@@ -168,11 +186,30 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		}
 	}
 
-	// note / user などの permalink は自前の OGP を extraHead で持ち込む
-	// (ssr_meta.go)。その場合 shell 側の「インスタンスの」description と OGP は
-	// 出さない。upstream も base.tsx の `desc` / `ogSlot` をページ側の値で
-	// 差し替えるので、両方並ぶことはない。
-	suppressDefaultOG := strings.Contains(extraHead, `property="og:`)
+	// permalink (note / user 等) は自前の OGP を持ち込む (ssr_meta.go)。
+	// upstream も base.tsx の `ogSlot` をページ側の値ごと差し替える。
+	suppressDefaultOG := ov.OG != ""
+
+	// ページ側の description が渡されていればそれを使う。空文字は upstream と
+	// 同じく defaultDescription に落ちる (タグ自体は出る)。
+	if ov.Description != nil {
+		hasInstanceDesc = true
+		if *ov.Description != "" {
+			instanceDesc = *ov.Description
+		} else {
+			instanceDesc = defaultInstanceDescription
+		}
+	} else if suppressDefaultOG {
+		// ページ固有の description を持たない permalink では、インスタンスの
+		// 説明を出すと「ノートの説明」として誤った内容が読まれる (#2527)。
+		hasInstanceDesc = false
+	}
+	// <title> と opensearch の title だけがページ固有になる。og:site_name /
+	// instance_url は upstream でもインスタンスの値のまま。
+	pageTitle := instanceName
+	if ov.Title != "" {
+		pageTitle = ov.Title
+	}
 
 	// 条件付きで消えるタグは先に組み立てる。upstream は img / desc が null なら
 	// タグ自体を出さないので、空値で属性だけ残すのは互換にならない。
@@ -181,12 +218,13 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		ogImageTag = fmt.Sprintf(`<meta property="og:image" content="%s">`, stdhtml.EscapeString(bannerURL)) + "\n"
 	}
 	descriptionTag := ""
-	if hasInstanceDesc && !suppressDefaultOG {
+	if hasInstanceDesc {
 		descriptionTag = fmt.Sprintf(`<meta name="description" content="%s">`, stdhtml.EscapeString(instanceDesc)) + "\n"
 	}
 	// instance 名・description は管理者が自由に入れられる。属性値に生で埋めると
 	// `"` や改行で head が壊れる (upstream は kitajs/html が属性を自動 escape する)。
 	instanceNameEsc := stdhtml.EscapeString(instanceName)
+	pageTitleEsc := stdhtml.EscapeString(pageTitle)
 	instanceDescEsc := stdhtml.EscapeString(instanceDesc)
 	themeColorEsc := stdhtml.EscapeString(themeColor)
 	baseURL := strings.TrimSuffix(cfg.URL, "/")
@@ -243,9 +281,9 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 </body></html>`,
 		instanceNameEsc, ogGroup,
 		descriptionTag, themeColorEsc, themeColorEsc, baseURLEsc,
-		instanceNameEsc, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
-		instanceNameEsc, baseURLEsc,
-		prefetchTags, extraHead, viteClientTag, cssLinkTags,
+		pageTitleEsc, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
+		pageTitleEsc, baseURLEsc,
+		prefetchTags, ov.OG+ov.Head, viteClientTag, cssLinkTags,
 		cfg.Version, clientEntryJS,
 		time.Now().UnixMilli(), metaJSON, stdhtml.EscapeString(splashIconURL))
 
@@ -271,7 +309,7 @@ func frontendConsentHTML(cfg *config.Config, metaRepo repository.MetaRepository,
 			sb.WriteString(`<meta name="misskey:oauth:client-logo" content="` + stdhtml.EscapeString(m.ClientLogo) + `">` + "\n")
 		}
 		sb.WriteString(`<meta name="misskey:oauth:scope" content="` + stdhtml.EscapeString(m.Scope) + `">`)
-		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, sb.String())
+		return renderFrontendShell(c, cfg, metaRepo, proxyAccountResolver, chunkedUpload, clientEntry, shellOverrides{Head: sb.String()})
 	}
 }
 

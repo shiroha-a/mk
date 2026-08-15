@@ -65,9 +65,15 @@ func newSSRMetaHandler(
 	}
 }
 
-// render serves the shell with the given head fragment.
-func (h *ssrMetaHandler) render(c echo.Context, head string) error {
-	return renderFrontendShell(c, h.cfg, h.metaRepo, h.proxyResolver, h.chunkedUpload, h.clientEntry, head)
+// render serves the shell with the given per-page overrides.
+func (h *ssrMetaHandler) render(c echo.Context, ov shellOverrides) error {
+	return renderFrontendShell(c, h.cfg, h.metaRepo, h.proxyResolver, h.chunkedUpload, h.clientEntry, ov)
+}
+
+// renderPlain serves the shell without any page-specific override. 対象が
+// 見つからないときに使う (upstream も 404 にせず素の shell を返す)。
+func (h *ssrMetaHandler) renderPlain(c echo.Context) error {
+	return h.render(c, shellOverrides{})
 }
 
 // metaTag builds a `<meta name=... content=...>` line. content は必ず escape する
@@ -134,30 +140,30 @@ func (h *ssrMetaHandler) lookupUserByAcct(acct string) *model.User {
 func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 	u := h.lookupUserByAcct(c.Param("acct"))
 	if u == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
-	head := h.userHead(u)
-	head += propertyTag("og:type", "blog")
-	head += propertyTag("og:title", displayName(u))
-	head += propertyTag("og:url", h.cfg.URL+"/@"+u.Username)
-	return h.render(c, head)
+	og := propertyTag("og:type", "blog") +
+		propertyTag("og:title", displayName(u)) +
+		propertyTag("og:url", h.cfg.URL+"/@"+u.Username)
+	return h.render(c, shellOverrides{Head: h.userHead(u), OG: og})
 }
 
 // UserPagePage serves `/@:acct/pages/:page`.
 func (h *ssrMetaHandler) UserPagePage(c echo.Context) error {
 	u := h.lookupUserByAcct(c.Param("acct"))
 	if u == nil || h.pageRepo == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
-	head := h.userHead(u)
 	page, err := h.pageRepo.FindByUserAndName(u.ID, c.Param("page"))
 	if err != nil || page == nil {
-		return h.render(c, head)
+		return h.render(c, shellOverrides{Head: h.userHead(u)})
 	}
-	head += metaTag("misskey:page-id", page.ID)
-	head += propertyTag("og:type", "article")
-	head += propertyTag("og:title", page.Title)
-	return h.render(c, head)
+	og := propertyTag("og:type", "article") +
+		propertyTag("og:title", page.Title)
+	return h.render(c, shellOverrides{
+		Head: h.userHead(u) + metaTag("misskey:page-id", page.ID),
+		OG:   og,
+	})
 }
 
 // NotePage serves `/notes/:id` for HTML clients. AP クライアント (Accept:
@@ -165,81 +171,83 @@ func (h *ssrMetaHandler) UserPagePage(c echo.Context) error {
 // 来ない。
 func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 	if h.noteRepo == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
 	note, err := h.noteRepo.FindByIDWithUser(c.Param("id"))
 	if err != nil || note == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
 	// visibility が public 以外の note は meta を出さない。クローラや
 	// リンク展開に非公開投稿の本文・著者を渡さないため (upstream も
 	// public 以外は SSR しない)。
 	if note.Visibility != model.NoteVisibilityPublic {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
-	head := h.userHead(note.User)
-	head += metaTag("misskey:note-id", note.ID)
-	head += propertyTag("og:type", "article")
+	og := propertyTag("og:type", "article")
 	if note.User != nil {
-		head += propertyTag("og:title", displayName(note.User))
+		og += propertyTag("og:title", displayName(note.User))
 	}
 	if note.Text != nil && *note.Text != "" {
-		head += propertyTag("og:description", *note.Text)
+		og += propertyTag("og:description", *note.Text)
 	}
-	head += propertyTag("og:url", h.cfg.URL+"/notes/"+note.ID)
-	return h.render(c, head)
+	og += propertyTag("og:url", h.cfg.URL+"/notes/"+note.ID)
+	return h.render(c, shellOverrides{
+		Head: h.userHead(note.User) + metaTag("misskey:note-id", note.ID),
+		OG:   og,
+	})
 }
 
 // ClipPage serves `/clips/:clip`.
 func (h *ssrMetaHandler) ClipPage(c echo.Context) error {
 	if h.clipRepo == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
 	clip, err := h.clipRepo.FindByID(c.Param("clip"))
 	if err != nil || clip == nil || !clip.IsPublic {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
-	head := h.userHead(h.userByID(clip.UserID))
-	head += metaTag("misskey:clip-id", clip.ID)
-	head += propertyTag("og:type", "article")
-	head += propertyTag("og:title", clip.Name)
-	return h.render(c, head)
+	og := propertyTag("og:type", "article") +
+		propertyTag("og:title", clip.Name)
+	return h.render(c, shellOverrides{
+		Head: h.userHead(h.userByID(clip.UserID)) + metaTag("misskey:clip-id", clip.ID),
+		OG:   og,
+	})
 }
 
 // FlashPage serves `/play/:id`.
 func (h *ssrMetaHandler) FlashPage(c echo.Context) error {
 	if h.flashRepo == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
 	flash, err := h.flashRepo.FindByID(c.Param("id"))
 	if err != nil || flash == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
-	head := h.userHead(h.userByID(flash.UserID))
-	head += metaTag("misskey:flash-id", flash.ID)
-	head += propertyTag("og:type", "article")
-	head += propertyTag("og:title", flash.Title)
-	return h.render(c, head)
+	og := propertyTag("og:type", "article") +
+		propertyTag("og:title", flash.Title)
+	return h.render(c, shellOverrides{
+		Head: h.userHead(h.userByID(flash.UserID)) + metaTag("misskey:flash-id", flash.ID),
+		OG:   og,
+	})
 }
 
 // GalleryPage serves `/gallery/:post`.
 func (h *ssrMetaHandler) GalleryPage(c echo.Context) error {
 	if h.galleryRepo == nil {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
 	posts, err := h.galleryRepo.FindPostsByIDs([]string{c.Param("post")})
 	if err != nil || len(posts) == 0 {
-		return h.render(c, "")
+		return h.renderPlain(c)
 	}
 	post := posts[0]
 	author := post.User
 	if author == nil {
 		author = h.userByID(post.UserID)
 	}
-	head := h.userHead(author)
-	head += propertyTag("og:type", "article")
-	head += propertyTag("og:title", post.Title)
-	return h.render(c, head)
+	og := propertyTag("og:type", "article") +
+		propertyTag("og:title", post.Title)
+	return h.render(c, shellOverrides{Head: h.userHead(author), OG: og})
 }
 
 func (h *ssrMetaHandler) userByID(id string) *model.User {

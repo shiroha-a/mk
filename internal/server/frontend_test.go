@@ -11,6 +11,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/frontendutil"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -664,4 +665,70 @@ func TestSameOriginURL(t *testing.T) {
 			assert.Equal(t, tt.want, sameOriginURL(base, tt.url))
 		})
 	}
+}
+
+// shellOverrides が upstream base.tsx の props (title / desc / ogSlot) と同じ
+// 差し替えをすること (#2528)。permalink はこれでインスタンス既定を上書きする。
+func TestRenderFrontendShell_Overrides(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	name := "実験室"
+	instanceDesc := "インスタンスの説明"
+
+	render := func(t *testing.T, ov shellOverrides) string {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		repo.Meta = &model.Meta{ID: "x", Name: &name, Description: &instanceDesc}
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, renderFrontendShell(c, cfg, repo, nil, nil, frontendutil.ClientEntryInfo{}, ov))
+		return rec.Body.String()
+	}
+
+	t.Run("Title は <title> と opensearch にだけ効く", func(t *testing.T) {
+		body := render(t, shellOverrides{Title: "@alice | 実験室"})
+
+		assert.Contains(t, body, `<title>@alice | 実験室</title>`)
+		assert.Contains(t, body, `<link rel="search" type="application/opensearchdescription+xml" title="@alice | 実験室"`)
+		// og:site_name / instance_url は upstream でもインスタンスの値のまま
+		assert.Contains(t, body, `<meta property="og:site_name" content="実験室">`)
+	})
+
+	t.Run("Description は description と og:description を差し替える", func(t *testing.T) {
+		desc := "ノートの本文"
+		body := render(t, shellOverrides{Description: &desc})
+
+		assert.Contains(t, body, `<meta name="description" content="ノートの本文">`)
+		assert.Contains(t, body, `<meta property="og:description" content="ノートの本文">`)
+		// 埋め込み meta JSON には値として載るので、タグ単位で見る。
+		assert.NotContains(t, body, `<meta name="description" content="`+instanceDesc+`">`)
+		assert.NotContains(t, body, `<meta property="og:description" content="`+instanceDesc+`">`)
+	})
+
+	t.Run("空の Description は upstream 既定文言に落ちる", func(t *testing.T) {
+		// upstream base.tsx は `props.desc != null` でタグの有無、
+		// `props.desc || defaultDescription` で中身を決める。
+		empty := ""
+		body := render(t, shellOverrides{Description: &empty})
+
+		assert.Contains(t, body, `<meta name="description" content="`+defaultInstanceDescription+`">`)
+	})
+
+	t.Run("OG があれば shell の既定 OGP を出さない", func(t *testing.T) {
+		body := render(t, shellOverrides{OG: `<meta property="og:type" content="article">` + "\n"})
+
+		assert.Equal(t, 1, strings.Count(body, `property="og:type"`))
+		assert.Contains(t, body, `<meta property="og:type" content="article">`)
+		assert.NotContains(t, body, `content="website"`)
+		// ページ固有 description が無い permalink ではインスタンス説明も出さない
+		assert.NotContains(t, body, `<meta name="description"`)
+	})
+
+	t.Run("Head は verbatim で入る", func(t *testing.T) {
+		body := render(t, shellOverrides{Head: `<meta name="misskey:note-id" content="n1">` + "\n"})
+
+		assert.Contains(t, body, `<meta name="misskey:note-id" content="n1">`)
+		// OG が空なので既定 OGP は残る
+		assert.Contains(t, body, `<meta property="og:type" content="website">`)
+	})
 }
