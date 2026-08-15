@@ -687,6 +687,13 @@ func (h *ssrMetaHandler) GalleryPage(c echo.Context) error {
 	})
 }
 
+// NoIndexPage serves the pages upstream renders with `{ noindex: true }`
+// (`/tags/:tag` と `/user-tags/:tag`)。中身は SPA が描くので shell のままだが、
+// 無限に増えるタグの組み合わせを検索対象にしない。
+func (h *ssrMetaHandler) NoIndexPage(c echo.Context) error {
+	return h.render(c, shellOverrides{NoIndex: true})
+}
+
 // ChannelPage serves `/channels/:channel` (upstream views/channel.tsx)。
 func (h *ssrMetaHandler) ChannelPage(c echo.Context) error {
 	if h.channelRepo == nil {

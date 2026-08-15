@@ -2300,6 +2300,10 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/channels/:channel", ssrMeta.ChannelPage)
 	s.echo.GET("/reversi/g/:game", ssrMeta.ReversiGamePage)
 	s.echo.GET("/announcements/:id", ssrMeta.AnnouncementPage)
+	// upstream の noindex ページ (#2531)。タグの組み合わせは無限に増えるので
+	// 検索対象にしない。
+	s.echo.GET("/tags/:tag", ssrMeta.NoIndexPage)
+	s.echo.GET("/user-tags/:tag", ssrMeta.NoIndexPage)
 	s.echo.GET("/play/:id", ssrMeta.FlashPage)
 	s.echo.GET("/gallery/:post", ssrMeta.GalleryPage)
 

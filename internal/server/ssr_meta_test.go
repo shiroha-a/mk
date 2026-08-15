@@ -769,3 +769,15 @@ func TestAnnouncementSummary(t *testing.T) {
 	assert.Equal(t, strings.Repeat("あ", 100)+"…", got)
 	assert.True(t, utf8.ValidString(got))
 }
+
+// upstream が `{ noindex: true }` で描いているページ (#2531)。
+func TestSSRNoIndexPage(t *testing.T) {
+	h, _, _ := newSSRTestHandler(t)
+
+	rec := ssrGet(t, h.NoIndexPage, "/tags/misskey", map[string]string{"tag": "misskey"})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `<meta name="robots" content="noindex">`)
+	// 中身は SPA が描くので shell の既定 OGP はそのまま
+	assert.Contains(t, rec.Body.String(), `<meta property="og:type" content="website">`)
+}

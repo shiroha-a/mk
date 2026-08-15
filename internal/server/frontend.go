@@ -73,6 +73,10 @@ type shellOverrides struct {
 	// 既定 OGP を出さない。両方出すと og:title が 2 つ並び、パーサは先頭を
 	// 採用するのでページ固有の値が無視される (#2527)。
 	OG string
+	// NoIndex emits `<meta name="robots" content="noindex">` (upstream base.tsx
+	// の `props.noindex`)。検索結果に出す意味が無いページ (タグ一覧など) 用で、
+	// ユーザーの noCrawle 由来のものは Head 側に入る。
+	NoIndex bool
 }
 
 // renderFrontendShell renders the Misskey frontend SPA shell.
@@ -217,6 +221,10 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	if bannerURL != "" {
 		ogImageTag = fmt.Sprintf(`<meta property="og:image" content="%s">`, stdhtml.EscapeString(bannerURL)) + "\n"
 	}
+	noindexTag := ""
+	if ov.NoIndex {
+		noindexTag = `<meta name="robots" content="noindex">` + "\n"
+	}
 	descriptionTag := ""
 	if hasInstanceDesc {
 		descriptionTag = fmt.Sprintf(`<meta name="description" content="%s">`, stdhtml.EscapeString(instanceDesc)) + "\n"
@@ -258,7 +266,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 <meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <meta name="format-detection" content="telephone=no,date=no,address=no,email=no,url=no">
 <title>%s</title>
-<link rel="icon" href="%s">
+%s<link rel="icon" href="%s">
 <link rel="apple-touch-icon" href="%s">
 <link rel="manifest" href="/manifest.json">
 <link rel="search" type="application/opensearchdescription+xml" title="%s" href="%s/opensearch.xml">
@@ -281,7 +289,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 </body></html>`,
 		instanceNameEsc, ogGroup,
 		descriptionTag, themeColorEsc, themeColorEsc, baseURLEsc,
-		pageTitleEsc, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
+		pageTitleEsc, noindexTag, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
 		pageTitleEsc, baseURLEsc,
 		prefetchTags, ov.OG+ov.Head, viteClientTag, cssLinkTags,
 		cfg.Version, clientEntryJS,
