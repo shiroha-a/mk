@@ -42,6 +42,9 @@ type ssrMetaHandler struct {
 	flashRepo     repository.FlashRepository
 	galleryRepo   repository.GalleryRepository
 	driveFileRepo repository.DriveFileRepository
+	channelRepo   repository.ChannelRepository
+	reversiRepo   repository.ReversiRepository
+	announceRepo  repository.AnnouncementRepository
 	// idGen は drive file の pack (createdAt の復元) に要る。
 	idGen id.Generator
 }
@@ -49,13 +52,16 @@ type ssrMetaHandler struct {
 // ssrMetaDeps carries the repositories the permalink pages read from.
 // 引数で並べると 10 個を超えて取り違えても型が通ってしまうので、名前で渡す。
 type ssrMetaDeps struct {
-	User    repository.UserRepository
-	Note    repository.NoteRepository
-	Page    repository.PageRepository
-	Clip    repository.ClipRepository
-	Flash   repository.FlashRepository
-	Gallery repository.GalleryRepository
-	Drive   repository.DriveFileRepository
+	User         repository.UserRepository
+	Note         repository.NoteRepository
+	Page         repository.PageRepository
+	Clip         repository.ClipRepository
+	Flash        repository.FlashRepository
+	Gallery      repository.GalleryRepository
+	Drive        repository.DriveFileRepository
+	Channel      repository.ChannelRepository
+	Reversi      repository.ReversiRepository
+	Announcement repository.AnnouncementRepository
 	// IDGen は drive file の pack (createdAt の復元) に要る。
 	IDGen id.Generator
 }
@@ -80,6 +86,9 @@ func newSSRMetaHandler(
 		flashRepo:     deps.Flash,
 		galleryRepo:   deps.Gallery,
 		driveFileRepo: deps.Drive,
+		channelRepo:   deps.Channel,
+		reversiRepo:   deps.Reversi,
+		announceRepo:  deps.Announcement,
 		idGen:         deps.IDGen,
 	}
 }
@@ -676,6 +685,115 @@ func (h *ssrMetaHandler) GalleryPage(c echo.Context) error {
 		Title:       h.pageTitle(post.Title),
 		Description: strOrEmpty(post.Description),
 	})
+}
+
+// ChannelPage serves `/channels/:channel` (upstream views/channel.tsx)。
+func (h *ssrMetaHandler) ChannelPage(c echo.Context) error {
+	if h.channelRepo == nil {
+		return h.renderPlain(c)
+	}
+	ch, err := h.channelRepo.FindByID(c.Param("channel"))
+	if err != nil || ch == nil {
+		return h.renderPlain(c)
+	}
+	og := propertyTag("og:type", "website") +
+		propertyTag("og:title", ch.Name)
+	if ch.Description != nil {
+		og += propertyTag("og:description", *ch.Description)
+	}
+	og += propertyTag("og:url", h.cfg.URL+"/channels/"+ch.ID)
+	// banner はチャンネルの顔なので、あればそれを展開先に出す。
+	if banner := h.fileByID(ch.BannerID); banner != nil && banner.URL != "" {
+		og += propertyTag("og:image", banner.URL) + metaTag("twitter:card", "summary")
+	}
+	return h.render(c, shellOverrides{
+		OG:          og,
+		Title:       h.pageTitle(ch.Name),
+		Description: strOrEmpty(ch.Description),
+	})
+}
+
+// ReversiGamePage serves `/reversi/g/:game` (upstream views/reversi-game.tsx)。
+func (h *ssrMetaHandler) ReversiGamePage(c echo.Context) error {
+	if h.reversiRepo == nil {
+		return h.renderPlain(c)
+	}
+	game, err := h.reversiRepo.FindByID(c.Param("game"))
+	if err != nil || game == nil {
+		return h.renderPlain(c)
+	}
+	title := h.reversiTitle(game)
+	// upstream は固定文言。対局内容は出さない。
+	const description = "⚫⚪Misskey Reversi⚪⚫"
+	og := propertyTag("og:type", "article") +
+		propertyTag("og:title", title) +
+		propertyTag("og:description", description) +
+		propertyTag("og:url", h.cfg.URL+"/reversi/g/"+game.ID) +
+		metaTag("twitter:card", "summary")
+	desc := description
+	return h.render(c, shellOverrides{
+		OG:          og,
+		Title:       h.pageTitle(title),
+		Description: &desc,
+	})
+}
+
+// reversiTitle mirrors upstream の `${user1.username} vs ${user2.username}`.
+// 対局者が引けなくても落とさず、空の側は空文字のままにする。
+func (h *ssrMetaHandler) reversiTitle(game *model.ReversiGame) string {
+	name := func(embedded *model.User, id string) string {
+		if embedded != nil {
+			return embedded.Username
+		}
+		if u := h.userByID(id); u != nil {
+			return u.Username
+		}
+		return ""
+	}
+	return name(game.User1, game.User1ID) + " vs " + name(game.User2, game.User2ID)
+}
+
+// AnnouncementPage serves `/announcements/:id` (upstream views/announcement.tsx)。
+func (h *ssrMetaHandler) AnnouncementPage(c echo.Context) error {
+	if h.announceRepo == nil {
+		return h.renderPlain(c)
+	}
+	a, err := h.announceRepo.FindByID(c.Param("id"))
+	if err != nil || a == nil {
+		return h.renderPlain(c)
+	}
+	// 個人宛てのお知らせ (userId が入っているもの) は permalink で配らない。
+	// upstream も `userId: IsNull()` で絞っている。ここが緩むと、URL を
+	// 知っているだけで他人宛ての通知内容が読める。
+	if a.UserID != nil && *a.UserID != "" {
+		return h.renderPlain(c)
+	}
+	description := announcementSummary(a.Text)
+	og := propertyTag("og:type", "article") +
+		propertyTag("og:title", a.Title) +
+		propertyTag("og:description", description) +
+		propertyTag("og:url", h.cfg.URL+"/announcements/"+a.ID)
+	if a.ImageURL != nil && *a.ImageURL != "" {
+		og += propertyTag("og:image", h.absoluteURL(*a.ImageURL)) +
+			metaTag("twitter:card", "summary_large_image")
+	}
+	return h.render(c, shellOverrides{
+		OG:          og,
+		Title:       h.pageTitle(a.Title),
+		Description: &description,
+	})
+}
+
+// announcementSummary truncates the body like upstream announcement.tsx
+// (100 文字を超えたら "…" を付ける)。**rune 単位で数える**: byte で切ると
+// 日本語の途中で切れて壊れた UTF-8 が meta に載る。
+func announcementSummary(text string) string {
+	const limit = 100
+	runes := []rune(text)
+	if len(runes) <= limit {
+		return text
+	}
+	return string(runes[:limit]) + "…"
 }
 
 func (h *ssrMetaHandler) userByID(id string) *model.User {

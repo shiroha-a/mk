@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
@@ -13,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"gorm.io/datatypes"
 )
@@ -622,4 +624,148 @@ func TestSSRGalleryPage_SensitiveFallsBackToAvatar(t *testing.T) {
 		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/identicon/alice">`)
 		assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
 	})
+}
+
+// reversiSSRRepo は FindByID だけを差し替える test double。ReversiRepository は
+// 11 メソッドあるが SSR が使うのは 1 つだけなので、埋め込みで型を満たす
+// (未実装メソッドを呼ぶと nil panic するので、使われていないことも担保される)。
+type reversiSSRRepo struct {
+	repository.ReversiRepository
+	games map[string]*model.ReversiGame
+}
+
+func (r *reversiSSRRepo) FindByID(id string) (*model.ReversiGame, error) {
+	g, ok := r.games[id]
+	if !ok {
+		return nil, nil
+	}
+	return g, nil
+}
+
+// upstream views/channel.tsx の OGP (#2531)。
+func TestSSRChannelPage(t *testing.T) {
+	newHandler := func(t *testing.T, ch *model.Channel) *ssrMetaHandler {
+		t.Helper()
+		h, _, _ := newSSRTestHandler(t)
+		chRepo := testutil.NewMockChannelRepository()
+		if ch != nil {
+			chRepo.Channels[ch.ID] = ch
+		}
+		h.channelRepo = chRepo
+		return h
+	}
+
+	t.Run("banner があれば og:image に使う", func(t *testing.T) {
+		desc := "チャンネルの説明"
+		bannerID := "b1"
+		h := newHandler(t, &model.Channel{ID: "ch1", Name: "雑談", Description: &desc, BannerID: &bannerID})
+		driveRepo := testutil.NewMockDriveFileRepository()
+		driveRepo.Files["b1"] = &model.DriveFile{ID: "b1", Type: "image/png", URL: "https://example.test/files/b1.png"}
+		h.driveFileRepo = driveRepo
+
+		body := ssrGet(t, h.ChannelPage, "/channels/ch1", map[string]string{"channel": "ch1"}).Body.String()
+
+		assert.Contains(t, body, `<meta property="og:type" content="website">`)
+		assert.Contains(t, body, `<meta property="og:title" content="雑談">`)
+		assert.Contains(t, body, `<meta property="og:description" content="チャンネルの説明">`)
+		assert.Contains(t, body, `<meta property="og:url" content="https://example.test/channels/ch1">`)
+		assert.Contains(t, body, `<meta property="og:image" content="https://example.test/files/b1.png">`)
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
+		assert.Contains(t, body, `<title>雑談 | Misskey</title>`)
+	})
+
+	t.Run("banner も description も無ければ出さない", func(t *testing.T) {
+		h := newHandler(t, &model.Channel{ID: "ch1", Name: "雑談"})
+
+		body := ssrGet(t, h.ChannelPage, "/channels/ch1", map[string]string{"channel": "ch1"}).Body.String()
+
+		assert.NotContains(t, body, `property="og:description"`)
+		assert.NotContains(t, body, `property="og:image"`)
+		assert.NotContains(t, body, `name="twitter:card"`)
+	})
+
+	t.Run("存在しないチャンネルは素の shell", func(t *testing.T) {
+		h := newHandler(t, nil)
+
+		rec := ssrGet(t, h.ChannelPage, "/channels/ghost", map[string]string{"channel": "ghost"})
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Contains(t, rec.Body.String(), `<meta property="og:type" content="website">`)
+		assert.NotContains(t, rec.Body.String(), "/channels/ghost")
+	})
+}
+
+// upstream views/reversi-game.tsx の OGP (#2531)。
+func TestSSRReversiGamePage(t *testing.T) {
+	h, userRepo, _ := newSSRTestHandler(t)
+	userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+	userRepo.Users["u2"] = ssrTestUser("u2", "bob")
+	h.reversiRepo = &reversiSSRRepo{games: map[string]*model.ReversiGame{
+		"g1": {ID: "g1", User1ID: "u1", User2ID: "u2"},
+	}}
+
+	body := ssrGet(t, h.ReversiGamePage, "/reversi/g/g1", map[string]string{"game": "g1"}).Body.String()
+
+	assert.Contains(t, body, `<meta property="og:type" content="article">`)
+	assert.Contains(t, body, `<meta property="og:title" content="alice vs bob">`)
+	assert.Contains(t, body, `<meta property="og:description" content="⚫⚪Misskey Reversi⚪⚫">`)
+	assert.Contains(t, body, `<meta property="og:url" content="https://example.test/reversi/g/g1">`)
+	assert.Contains(t, body, `<meta name="twitter:card" content="summary">`)
+	assert.Contains(t, body, `<title>alice vs bob | Misskey</title>`)
+}
+
+// upstream views/announcement.tsx の OGP (#2531)。
+func TestSSRAnnouncementPage(t *testing.T) {
+	newHandler := func(t *testing.T, a *model.Announcement) *ssrMetaHandler {
+		t.Helper()
+		h, _, _ := newSSRTestHandler(t)
+		repo := testutil.NewMockAnnouncementRepository()
+		if a != nil {
+			repo.Items[a.ID] = a
+		}
+		h.announceRepo = repo
+		return h
+	}
+
+	t.Run("画像があれば summary_large_image", func(t *testing.T) {
+		img := "https://example.test/files/a1.png"
+		h := newHandler(t, &model.Announcement{ID: "a1", Title: "メンテナンス", Text: "明日実施します", ImageURL: &img})
+
+		body := ssrGet(t, h.AnnouncementPage, "/announcements/a1", map[string]string{"id": "a1"}).Body.String()
+
+		assert.Contains(t, body, `<meta property="og:title" content="メンテナンス">`)
+		assert.Contains(t, body, `<meta property="og:description" content="明日実施します">`)
+		assert.Contains(t, body, `<meta property="og:url" content="https://example.test/announcements/a1">`)
+		assert.Contains(t, body, `<meta property="og:image" content="`+img+`">`)
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary_large_image">`)
+		assert.Contains(t, body, `<title>メンテナンス | Misskey</title>`)
+	})
+
+	// 個人宛てのお知らせは permalink で配らない。URL を知っているだけで
+	// 他人宛ての内容が読めてはいけない (upstream も userId IS NULL で絞る)。
+	t.Run("個人宛ては meta を出さない", func(t *testing.T) {
+		uid := "u1"
+		secret := "あなた宛ての警告です"
+		h := newHandler(t, &model.Announcement{ID: "a1", Title: "個人宛て", Text: secret, UserID: &uid})
+
+		rec := ssrGet(t, h.AnnouncementPage, "/announcements/a1", map[string]string{"id": "a1"})
+
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.NotContains(t, rec.Body.String(), secret)
+		assert.NotContains(t, rec.Body.String(), "個人宛て")
+	})
+}
+
+// 本文の切り詰めは rune 単位。byte で切ると日本語の途中で壊れた UTF-8 が
+// meta に載る。
+func TestAnnouncementSummary(t *testing.T) {
+	assert.Equal(t, "短い本文", announcementSummary("短い本文"))
+
+	exact := strings.Repeat("あ", 100)
+	assert.Equal(t, exact, announcementSummary(exact))
+
+	long := strings.Repeat("あ", 101)
+	got := announcementSummary(long)
+	assert.Equal(t, strings.Repeat("あ", 100)+"…", got)
+	assert.True(t, utf8.ValidString(got))
 }

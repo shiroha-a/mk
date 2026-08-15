@@ -2219,14 +2219,17 @@ func (s *Server) setupRoutes() {
 	ssrMeta := newSSRMetaHandler(
 		s.config, metaRepo, proxyAccountResolver, chunkedUploadCapability,
 		ssrMetaDeps{
-			User:    userRepo,
-			Note:    noteRepo,
-			Page:    pageRepo,
-			Clip:    clipRepo,
-			Flash:   flashRepo,
-			Gallery: repository.NewGalleryRepository(s.db),
-			Drive:   driveFileRepo,
-			IDGen:   idGen,
+			User:         userRepo,
+			Note:         noteRepo,
+			Page:         pageRepo,
+			Clip:         clipRepo,
+			Flash:        flashRepo,
+			Gallery:      repository.NewGalleryRepository(s.db),
+			Drive:        driveFileRepo,
+			Channel:      channelRepo,
+			Reversi:      reversiRepo,
+			Announcement: repository.NewAnnouncementRepository(s.db),
+			IDGen:        idGen,
 		},
 	)
 	s.echo.GET("/notes/:id", func(c echo.Context) error {
@@ -2292,6 +2295,11 @@ func (s *Server) setupRoutes() {
 	s.echo.GET("/@:acct/pages/:page", ssrMeta.UserPagePage)
 	s.echo.GET("/@:acct/:sub", ssrMeta.UserPage)
 	s.echo.GET("/clips/:clip", ssrMeta.ClipPage)
+	// upstream ClientServerService が SSR している残りの permalink (#2531)。
+	// SPA catchall より前に置かないと shell が先に返る。
+	s.echo.GET("/channels/:channel", ssrMeta.ChannelPage)
+	s.echo.GET("/reversi/g/:game", ssrMeta.ReversiGamePage)
+	s.echo.GET("/announcements/:id", ssrMeta.AnnouncementPage)
 	s.echo.GET("/play/:id", ssrMeta.FlashPage)
 	s.echo.GET("/gallery/:post", ssrMeta.GalleryPage)
 
