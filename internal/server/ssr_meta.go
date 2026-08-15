@@ -1,6 +1,7 @@
 package server
 
 import (
+	"encoding/json"
 	stdhtml "html"
 	"strings"
 
@@ -86,9 +87,33 @@ func propertyTag(property, content string) string {
 	return `<meta property="` + property + `" content="` + stdhtml.EscapeString(content) + `">` + "\n"
 }
 
+func linkTag(rel, typ, href string) string {
+	s := `<link rel="` + rel + `"`
+	if typ != "" {
+		s += ` type="` + typ + `"`
+	}
+	return s + ` href="` + stdhtml.EscapeString(href) + `">` + "\n"
+}
+
+// profileOf loads the profile row that carries the crawler preferences.
+// 見つからなければ nil (upstream は profile 必須だが、mk-go では
+// user だけ存在する経路があり得るので落とさない)。
+func (h *ssrMetaHandler) profileOf(userID string) *model.UserProfile {
+	if h.userRepo == nil || userID == "" {
+		return nil
+	}
+	p, err := h.userRepo.FindProfileByUserID(userID)
+	if err != nil {
+		return nil
+	}
+	return p
+}
+
 // userHead builds the meta block shared by every page that belongs to a user.
 // upstream の各 view (user.tsx / note.tsx / page.tsx ...) が共通で出すもの。
-func (h *ssrMetaHandler) userHead(u *model.User) string {
+//
+// forceNoindex はページ側の追加条件 (note.tsx の isRenote) を渡す。
+func userHead(u *model.User, p *model.UserProfile, forceNoindex bool) string {
 	if u == nil {
 		return ""
 	}
@@ -97,8 +122,84 @@ func (h *ssrMetaHandler) userHead(u *model.User) string {
 	sb.WriteString(metaTag("misskey:user-id", u.ID))
 	// remote user は自インスタンスの URL を正規とみなされないよう noindex。
 	// upstream user.tsx の `props.user.host != null` 分岐と同じ。
-	if u.Host != nil && *u.Host != "" {
+	remote := u.Host != nil && *u.Host != ""
+	if forceNoindex || remote || (p != nil && p.NoCrawle) {
 		sb.WriteString(metaTag("robots", "noindex"))
+	}
+	// 学習利用の拒否。upstream と同じく noimageai と noai を並べる。
+	// **モデルの既定は true** なので、明示的に許可した利用者以外は出る。
+	if p != nil && p.PreventAiLearning {
+		sb.WriteString(metaTag("robots", "noimageai"))
+		sb.WriteString(metaTag("robots", "noai"))
+	}
+	return sb.String()
+}
+
+// federationEnabled mirrors upstream の `props.federationEnabled`.
+// 連合していないインスタンスで AP の URI を広告しても意味が無いので、
+// rel="alternate" の出し分けに使う。
+func (h *ssrMetaHandler) federationEnabled() bool {
+	m, err := h.metaRepo.Fetch()
+	if err != nil || m == nil {
+		return false
+	}
+	return m.Federation != "none"
+}
+
+// userAlternateLinks emits the AP / canonical links upstream user.tsx puts in
+// its metaSlot. sub パス (`/@alice/following` 等) では出さない。
+func (h *ssrMetaHandler) userAlternateLinks(u *model.User, p *model.UserProfile, isSub bool) string {
+	if u == nil || isSub || !h.federationEnabled() {
+		return ""
+	}
+	var sb strings.Builder
+	if u.Host == nil || *u.Host == "" {
+		sb.WriteString(linkTag("alternate", "application/activity+json", h.cfg.URL+"/users/"+u.ID))
+	}
+	if u.URI != nil && *u.URI != "" {
+		sb.WriteString(linkTag("alternate", "application/activity+json", *u.URI))
+	}
+	if p != nil && p.URL != nil && *p.URL != "" {
+		sb.WriteString(linkTag("alternate", "text/html", *p.URL))
+	}
+	return sb.String()
+}
+
+// noteAlternateLinks emits the AP links upstream note.tsx puts in its metaSlot.
+// ローカルノートは自分の AP URI を、リモートノートは originating server の URI を
+// 指す (どちらも「この HTML の AP 版はこれ」を示す)。
+func (h *ssrMetaHandler) noteAlternateLinks(note *model.Note) string {
+	if note == nil || !h.federationEnabled() {
+		return ""
+	}
+	var sb strings.Builder
+	if note.UserHost == nil || *note.UserHost == "" {
+		sb.WriteString(linkTag("alternate", "application/activity+json", h.cfg.URL+"/notes/"+note.ID))
+	}
+	if note.URI != nil && *note.URI != "" {
+		sb.WriteString(linkTag("alternate", "application/activity+json", *note.URI))
+	}
+	return sb.String()
+}
+
+// meLinks emits `<link rel="me">` for the profile fields that hold a URL.
+// upstream user.tsx と同じく http(s) で始まる値だけを対象にする
+// (rel=me は所有証明に使われるので、任意文字列を混ぜない)。
+func meLinks(p *model.UserProfile) string {
+	if p == nil || len(p.Fields) == 0 {
+		return ""
+	}
+	var fields []struct {
+		Value string `json:"value"`
+	}
+	if err := json.Unmarshal(p.Fields, &fields); err != nil {
+		return ""
+	}
+	var sb strings.Builder
+	for _, f := range fields {
+		if strings.HasPrefix(f.Value, "http://") || strings.HasPrefix(f.Value, "https://") {
+			sb.WriteString(linkTag("me", "", f.Value))
+		}
 	}
 	return sb.String()
 }
@@ -142,10 +243,14 @@ func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 	if u == nil {
 		return h.renderPlain(c)
 	}
+	p := h.profileOf(u.ID)
 	og := propertyTag("og:type", "blog") +
 		propertyTag("og:title", displayName(u)) +
 		propertyTag("og:url", h.cfg.URL+"/@"+u.Username)
-	return h.render(c, shellOverrides{Head: h.userHead(u), OG: og})
+	head := userHead(u, p, false) +
+		h.userAlternateLinks(u, p, c.Param("sub") != "") +
+		meLinks(p)
+	return h.render(c, shellOverrides{Head: head, OG: og})
 }
 
 // UserPagePage serves `/@:acct/pages/:page`.
@@ -154,14 +259,15 @@ func (h *ssrMetaHandler) UserPagePage(c echo.Context) error {
 	if u == nil || h.pageRepo == nil {
 		return h.renderPlain(c)
 	}
+	p := h.profileOf(u.ID)
 	page, err := h.pageRepo.FindByUserAndName(u.ID, c.Param("page"))
 	if err != nil || page == nil {
-		return h.render(c, shellOverrides{Head: h.userHead(u)})
+		return h.render(c, shellOverrides{Head: userHead(u, p, false)})
 	}
 	og := propertyTag("og:type", "article") +
 		propertyTag("og:title", page.Title)
 	return h.render(c, shellOverrides{
-		Head: h.userHead(u) + metaTag("misskey:page-id", page.ID),
+		Head: userHead(u, p, false) + metaTag("misskey:page-id", page.ID),
 		OG:   og,
 	})
 }
@@ -191,10 +297,16 @@ func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 		og += propertyTag("og:description", *note.Text)
 	}
 	og += propertyTag("og:url", h.cfg.URL+"/notes/"+note.ID)
-	return h.render(c, shellOverrides{
-		Head: h.userHead(note.User) + metaTag("misskey:note-id", note.ID),
-		OG:   og,
-	})
+	var profile *model.UserProfile
+	if note.User != nil {
+		profile = h.profileOf(note.User.ID)
+	}
+	// upstream note.tsx は isRenotePacked (= renoteId != null) で noindex。
+	// 引用リノートも対象で、他人の投稿を写した URL を検索対象にしない。
+	head := userHead(note.User, profile, note.RenoteID != nil) +
+		metaTag("misskey:note-id", note.ID) +
+		h.noteAlternateLinks(note)
+	return h.render(c, shellOverrides{Head: head, OG: og})
 }
 
 // ClipPage serves `/clips/:clip`.
@@ -208,8 +320,9 @@ func (h *ssrMetaHandler) ClipPage(c echo.Context) error {
 	}
 	og := propertyTag("og:type", "article") +
 		propertyTag("og:title", clip.Name)
+	author := h.userByID(clip.UserID)
 	return h.render(c, shellOverrides{
-		Head: h.userHead(h.userByID(clip.UserID)) + metaTag("misskey:clip-id", clip.ID),
+		Head: userHead(author, h.profileOf(clip.UserID), false) + metaTag("misskey:clip-id", clip.ID),
 		OG:   og,
 	})
 }
@@ -225,8 +338,9 @@ func (h *ssrMetaHandler) FlashPage(c echo.Context) error {
 	}
 	og := propertyTag("og:type", "article") +
 		propertyTag("og:title", flash.Title)
+	author := h.userByID(flash.UserID)
 	return h.render(c, shellOverrides{
-		Head: h.userHead(h.userByID(flash.UserID)) + metaTag("misskey:flash-id", flash.ID),
+		Head: userHead(author, h.profileOf(flash.UserID), false) + metaTag("misskey:flash-id", flash.ID),
 		OG:   og,
 	})
 }
@@ -247,7 +361,9 @@ func (h *ssrMetaHandler) GalleryPage(c echo.Context) error {
 	}
 	og := propertyTag("og:type", "article") +
 		propertyTag("og:title", post.Title)
-	return h.render(c, shellOverrides{Head: h.userHead(author), OG: og})
+	head := userHead(author, h.profileOf(post.UserID), false) +
+		metaTag("misskey:gallery-post-id", post.ID)
+	return h.render(c, shellOverrides{Head: head, OG: og})
 }
 
 func (h *ssrMetaHandler) userByID(id string) *model.User {

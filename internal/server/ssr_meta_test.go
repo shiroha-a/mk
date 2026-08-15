@@ -145,14 +145,41 @@ func TestSSRDisplayName(t *testing.T) {
 // remote user のページは noindex を出す (自インスタンスの URL を正規と
 // みなされないようにする)。
 func TestSSRUserHead_RemoteUserIsNoindex(t *testing.T) {
-	h, _, _ := newSSRTestHandler(t)
 	host := "remote.example"
-	head := h.userHead(&model.User{ID: "u2", Username: "bob", Host: &host})
+	head := userHead(&model.User{ID: "u2", Username: "bob", Host: &host}, nil, false)
 	assert.Contains(t, head, `<meta name="robots" content="noindex">`)
 
-	local := h.userHead(&model.User{ID: "u1", Username: "alice"})
+	local := userHead(&model.User{ID: "u1", Username: "alice"}, nil, false)
 	assert.NotContains(t, local, "noindex")
-	assert.Empty(t, h.userHead(nil))
+	assert.Empty(t, userHead(nil, nil, false))
+}
+
+// upstream の各 view が profile を見て出す crawler 向けディレクティブ (#2528)。
+func TestSSRUserHead_ProfileCrawlerDirectives(t *testing.T) {
+	local := &model.User{ID: "u1", Username: "alice"}
+
+	t.Run("noCrawle で noindex", func(t *testing.T) {
+		head := userHead(local, &model.UserProfile{UserID: "u1", NoCrawle: true}, false)
+		assert.Contains(t, head, `<meta name="robots" content="noindex">`)
+	})
+
+	t.Run("preventAiLearning で noimageai / noai", func(t *testing.T) {
+		head := userHead(local, &model.UserProfile{UserID: "u1", PreventAiLearning: true}, false)
+		assert.Contains(t, head, `<meta name="robots" content="noimageai">`)
+		assert.Contains(t, head, `<meta name="robots" content="noai">`)
+		// 学習拒否そのものは index を妨げない
+		assert.NotContains(t, head, `content="noindex"`)
+	})
+
+	t.Run("どちらも false なら robots を出さない", func(t *testing.T) {
+		head := userHead(local, &model.UserProfile{UserID: "u1"}, false)
+		assert.NotContains(t, head, `name="robots"`)
+	})
+
+	t.Run("forceNoindex はページ側の条件 (renote) 用", func(t *testing.T) {
+		head := userHead(local, &model.UserProfile{UserID: "u1"}, true)
+		assert.Contains(t, head, `<meta name="robots" content="noindex">`)
+	})
 }
 
 func TestPrefersHTML(t *testing.T) {
@@ -258,4 +285,94 @@ func TestSSRNotePage_DoesNotEmitInstanceDescription(t *testing.T) {
 	// 素の shell (対象なし) では従来どおり出る。
 	shell := ssrGet(t, h.NotePage, "/notes/ghost", map[string]string{"id": "ghost"}).Body.String()
 	assert.Contains(t, shell, `<meta name="description" content="`+instanceDesc+`">`)
+}
+
+// upstream user.tsx / note.tsx の metaSlot が出す rel=alternate / rel=me (#2528)。
+func TestSSRUserPage_AlternateAndMeLinks(t *testing.T) {
+	h, userRepo, _ := newSSRTestHandler(t)
+	alice := ssrTestUser("u1", "alice")
+	userRepo.Users["u1"] = alice
+	userRepo.Profiles["u1"] = &model.UserProfile{
+		UserID: "u1",
+		Fields: datatypes.JSON([]byte(`[{"name":"web","value":"https://alice.example"},{"name":"pronoun","value":"they/them"}]`)),
+	}
+
+	body := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+
+	assert.Contains(t, body, `<link rel="alternate" type="application/activity+json" href="https://example.test/users/u1">`)
+	// URL でない field は rel=me にしない (所有証明に使われるので混ぜない)
+	assert.Contains(t, body, `<link rel="me" href="https://alice.example">`)
+	assert.NotContains(t, body, "they/them")
+}
+
+// sub パス (`/@alice/following` 等) では alternate を出さない。AP actor の
+// 正規 URL は `/@alice` の方なので、サブページに同じ alternate を並べない。
+func TestSSRUserPage_SubPathHasNoAlternate(t *testing.T) {
+	h, userRepo, _ := newSSRTestHandler(t)
+	userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+
+	body := ssrGet(t, h.UserPage, "/@alice/following",
+		map[string]string{"acct": "alice", "sub": "following"}).Body.String()
+
+	assert.NotContains(t, body, `rel="alternate"`)
+	assert.Contains(t, body, `<meta name="misskey:user-id" content="u1">`)
+}
+
+// remote user は自分の URI を、local user は自インスタンスの AP URL を出す。
+func TestSSRUserPage_RemoteUserAlternateUsesURI(t *testing.T) {
+	h, userRepo, _ := newSSRTestHandler(t)
+	host := "remote.example"
+	uri := "https://remote.example/users/9"
+	profileURL := "https://remote.example/@bob"
+	bob := ssrTestUser("u2", "bob")
+	bob.Host = &host
+	bob.URI = &uri
+	userRepo.Users["u2"] = bob
+	userRepo.Profiles["u2"] = &model.UserProfile{UserID: "u2", URL: &profileURL}
+
+	body := ssrGet(t, h.UserPage, "/@bob@remote.example",
+		map[string]string{"acct": "bob@remote.example"}).Body.String()
+
+	assert.Contains(t, body, `<link rel="alternate" type="application/activity+json" href="`+uri+`">`)
+	assert.Contains(t, body, `<link rel="alternate" type="text/html" href="`+profileURL+`">`)
+	// remote user に自インスタンスの AP URL を主張させない
+	assert.NotContains(t, body, `href="https://example.test/users/u2"`)
+}
+
+func TestSSRNotePage_AlternateAndRenoteNoindex(t *testing.T) {
+	h, userRepo, noteRepo := newSSRTestHandler(t)
+	alice := ssrTestUser("u1", "alice")
+	userRepo.Users["u1"] = alice
+	text := "hello"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "u1", User: alice, Text: &text,
+		Visibility: model.NoteVisibilityPublic,
+	}
+	renoteID := "n1"
+	noteRepo.Notes["n2"] = &model.Note{
+		ID: "n2", UserID: "u1", User: alice, RenoteID: &renoteID,
+		Visibility: model.NoteVisibilityPublic,
+	}
+
+	plain := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+	assert.Contains(t, plain, `<link rel="alternate" type="application/activity+json" href="https://example.test/notes/n1">`)
+	assert.NotContains(t, plain, `content="noindex"`)
+
+	// upstream note.tsx は isRenotePacked (renoteId != null) で noindex。
+	// 引用も対象で、他人の投稿を写した URL を検索対象にしない。
+	renote := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+	assert.Contains(t, renote, `<meta name="robots" content="noindex">`)
+}
+
+// federation を切っているインスタンスでは AP の URI を広告しない。
+func TestSSRPages_NoAlternateWhenFederationDisabled(t *testing.T) {
+	h, userRepo, _ := newSSRTestHandler(t)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x", Federation: "none"}
+	h.metaRepo = metaRepo
+	userRepo.Users["u1"] = ssrTestUser("u1", "alice")
+
+	body := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+
+	assert.NotContains(t, body, `rel="alternate"`)
 }
