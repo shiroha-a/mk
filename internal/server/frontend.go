@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -89,6 +90,47 @@ type shellOverrides struct {
 
 // defaultShellCacheControl mirrors upstream の renderBase (`public, max-age=30`)。
 const defaultShellCacheControl = "public, max-age=30"
+
+// splashSpinnerSVG is the startup spinner shown while the client boots (#2549).
+//
+// 6 つの点が 1 つずつ外から集まってきて、揃ってから 1 回転し、また散る。
+// Misskey から受け継いだ 1/4 円弧はどのサービスにもある形だったので、
+// 起動時に何かを待っている状況に合う形に替えた。
+//
+// **回転する層 (.rig) と半径方向に動く点 (.pkt) を分けてある。** 1 つの要素で
+// 両方やらせると transform が衝突して、集まる動きが回転に巻き取られる。
+// 動きの定義は `packages/frontend/public/loader/style.css` 側にある。
+//
+// **包みの `translate` を使わず、円を viewBox 座標に直接置いている。**
+// CSS の `transform-box` は既定が `view-box` なので、`transform-origin` は
+// viewBox の原点から測られる。包みで平行移動すると要素のローカル座標と
+// ずれ、回転軸が中心から外れて首を振る。
+// 拡大率は upstream の splash と同じ viewBox 152 のままにしてある。
+const splashSpinnerSVG = `<svg viewBox="0 0 152 152" xmlns="http://www.w3.org/2000/svg"><g class="rig">` +
+	`<g transform="rotate(0 76 76)"><circle class="pkt p1" cx="76" cy="76" r="10"/></g>` +
+	`<g transform="rotate(60 76 76)"><circle class="pkt p2" cx="76" cy="76" r="10"/></g>` +
+	`<g transform="rotate(120 76 76)"><circle class="pkt p3" cx="76" cy="76" r="10"/></g>` +
+	`<g transform="rotate(180 76 76)"><circle class="pkt p4" cx="76" cy="76" r="10"/></g>` +
+	`<g transform="rotate(240 76 76)"><circle class="pkt p5" cx="76" cy="76" r="10"/></g>` +
+	`<g transform="rotate(300 76 76)"><circle class="pkt p6" cx="76" cy="76" r="10"/></g>` +
+	`</g></svg>`
+
+// splashColorPattern matches the colors we are willing to inline into the
+// splash `<style>` block.
+var splashColorPattern = regexp.MustCompile(`^#[0-9a-fA-F]{3,8}$`)
+
+// splashColor returns the color to paint the startup spinner with, falling back
+// to the default theme color when the configured one is not a plain hex color.
+//
+// **HTML escape は `<style>` の中身を守らない。** style 要素の内容はマークアップ
+// として解釈されないので実体参照はそのまま残り、`}` ひとつで後続の規則に化ける。
+// テーマカラーは管理者が自由に入れられる値なので、素性の分かる形だけを通す。
+func splashColor(themeColor string) string {
+	if splashColorPattern.MatchString(themeColor) {
+		return themeColor
+	}
+	return "#86b300"
+}
 
 // renderFrontendShell renders the Misskey frontend SPA shell.
 func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository.MetaRepository, proxyAccountResolver meta.ProxyAccountResolver, chunkedUpload meta.ChunkedUploadCapability, clientEntry frontendutil.ClientEntryInfo, ov shellOverrides) error {
@@ -285,6 +327,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 %s
 %s
 <link rel="stylesheet" href="/vite/loader/style.css">
+<style>:root{--splash-color:%s}</style>
 <script>const VERSION = '%s'; const CLIENT_ENTRY = %s; const LANGS = ["ja-JP","en-US"];</script>
 <script type="application/json" id="misskey_meta" data-generated-at="%d">%s</script>
 <script src="/vite/loader/boot.js"></script>
@@ -292,10 +335,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 <noscript><p>Please turn on your JavaScript</p></noscript>
 <div id="splash">
 <img id="splashIcon" src="%s" />
-<div id="splashSpinner">
-<svg class="spinner bg" viewBox="0 0 152 152" xmlns="http://www.w3.org/2000/svg"><g transform="matrix(1,0,0,1,12,12)"><circle cx="64" cy="64" r="64" style="fill:none;stroke:currentColor;stroke-width:24px;"/></g></svg>
-<svg class="spinner fg" viewBox="0 0 152 152" xmlns="http://www.w3.org/2000/svg"><g transform="matrix(1,0,0,1,12,12)"><path d="M128,64C128,28.654 99.346,0 64,0C99.346,0 128,28.654 128,64Z" style="fill:none;stroke:currentColor;stroke-width:24px;"/></g></svg>
-</div>
+<div id="splashSpinner">%s</div>
 </div>
 </body></html>`,
 		instanceNameEsc, ogGroup,
@@ -303,8 +343,8 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		pageTitleEsc, noindexTag, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
 		pageTitleEsc, baseURLEsc,
 		prefetchTags, ov.OG+ov.Head, viteClientTag, cssLinkTags,
-		cfg.Version, clientEntryJS,
-		time.Now().UnixMilli(), metaJSON, stdhtml.EscapeString(splashIconURL))
+		splashColor(themeColor), cfg.Version, clientEntryJS,
+		time.Now().UnixMilli(), metaJSON, stdhtml.EscapeString(splashIconURL), splashSpinnerSVG)
 
 	// SPA shell にだけ CSP を付ける (#2425)。shell を返す経路は catch-all と
 	// AP の non-AP fallback の 2 つで、どちらもこの関数を通るので path 判定が

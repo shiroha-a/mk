@@ -23,7 +23,7 @@ import (
 // upstream 互換要素 (#xxx):
 //   - id="splash" wrapper
 //   - id="splashIcon" な img 要素
-//   - id="splashSpinner" + 2 spinner SVG (bg / fg)
+//   - id="splashSpinner" (中身は mk-go 独自のスピナー、#2549)
 //   - default img src は /static-assets/splash.png (meta.iconUrl 未設定時)
 //   - meta.iconUrl が設定されていればそちらを使う
 //   - ai.png mascot は splash には使わない
@@ -45,8 +45,12 @@ func TestFrontendHTML_SplashStructure(t *testing.T) {
 		assert.Contains(t, body, `src="/static-assets/splash.png"`,
 			"default splash icon should be /static-assets/splash.png (Misskey logo)")
 		assert.Contains(t, body, `<div id="splashSpinner">`)
-		assert.Contains(t, body, `class="spinner bg"`)
-		assert.Contains(t, body, `class="spinner fg"`)
+		// 起動時のスピナー (#2549)。**回転する層と点を分けてある** — 1 つの
+		// 要素で両方やらせると transform が衝突して、集まる動きが回転に
+		// 巻き取られる。
+		assert.Contains(t, body, `class="rig"`)
+		assert.Contains(t, body, `class="pkt p1"`)
+		assert.Contains(t, body, `class="pkt p6"`, "点は 6 つ")
 		// ai.png は mascot 用、splash には出ない
 		assert.NotContains(t, body, `src="/assets/ai.png"`,
 			"splash should not use ai.png (mascot)")
@@ -790,4 +794,62 @@ func TestFrontendConsentHTML_IsNotCacheable(t *testing.T) {
 
 	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
 	assert.Contains(t, rec.Body.String(), `content="tx-secret"`)
+}
+
+// スピナーの色はサーバー設定のテーマカラーを使う (#2549)。
+//
+// **`--MI_THEME-accent` は利用者が選んだテーマの色**なので人によって変わる。
+// スプラッシュはテーマが適用される前に出るものなので、サーバーが決めた色を
+// shell から渡す。
+func TestFrontendHTML_SplashColor(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+
+	t.Run("uses the instance theme color", func(t *testing.T) {
+		repo := testutil.NewMockMetaRepository()
+		color := "#00eb91"
+		repo.Meta = &model.Meta{ID: "x", ThemeColor: &color}
+
+		handler := frontendHTML(cfg, repo, nil, nil)
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+
+		assert.Contains(t, rec.Body.String(), `<style>:root{--splash-color:#00eb91}</style>`)
+	})
+
+	t.Run("falls back to the default color", func(t *testing.T) {
+		repo := testutil.NewMockMetaRepository()
+		handler := frontendHTML(cfg, repo, nil, nil)
+
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+
+		// テーマカラーが未設定でも変数は出す。**空で出すと CSS 側の
+		// フォールバックが効かず、色が無いまま描かれる。**
+		assert.Contains(t, rec.Body.String(), `--splash-color:#86b300`)
+	})
+
+	// `<style>` の中身はマークアップとして解釈されないので、HTML escape では
+	// 守れない。**`}` ひとつで後続の規則に化ける**ため、素性の分かる形以外は
+	// 既定色に落とす。
+	t.Run("rejects a color that is not a plain hex value", func(t *testing.T) {
+		repo := testutil.NewMockMetaRepository()
+		evil := "red}body{display:none"
+		repo.Meta = &model.Meta{ID: "x", ThemeColor: &evil}
+
+		handler := frontendHTML(cfg, repo, nil, nil)
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+
+		// `<meta name="theme-color">` 側には属性 escape された値がそのまま
+		// 出る (そちらは属性値なので正しい)。見るのは style ブロックだけ。
+		style := regexp.MustCompile(`<style>[^<]*</style>`).FindString(rec.Body.String())
+		require.NotEmpty(t, style, "splash color style block not found")
+		assert.Equal(t, `<style>:root{--splash-color:#86b300}</style>`, style)
+	})
 }
