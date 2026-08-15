@@ -34,6 +34,13 @@ import (
 // peerPath is the reserved endpoint every peered plugin exposes.
 const peerPath = "/_peer"
 
+// peerAPIPrefix is where plugin routes actually live.
+//
+// **`pluginRoutePrefix` だけでは足りない。** ルートは `/api` グループの下に
+// 張られるので、送信先の URL を組むときは `/api` から始める。ここを間違えると
+// SPA catchall に落ちて 405 が返り、「相手が受け取らない」という形で出る。
+const peerAPIPrefix = "/api" + pluginRoutePrefix
+
 // peerMaxBody bounds one request and one reply.
 //
 // 相手は同じプラグインを持っているだけで善良とは限らない。**受信側にも
@@ -82,6 +89,17 @@ type pluginPeerDeps struct {
 	signer   peerSigner
 	remote   peerPluginLister
 	idGen    id.Generator
+	// urlFor builds the peer endpoint URL. テストから http の httptest
+	// サーバーへ向けられるように関数にしてある。nil なら既定 (https)。
+	urlFor func(host, plugin string) string
+}
+
+// peerURL builds the endpoint URL for a host.
+func (d *pluginPeerDeps) peerURL(host, plugin string) string {
+	if d.urlFor != nil {
+		return d.urlFor(host, plugin)
+	}
+	return "https://" + host + peerAPIPrefix + plugin + peerPath
 }
 
 // pluginPeer implements plugin.Peer for one plugin.
@@ -230,7 +248,7 @@ type peerEnvelope struct {
 // deliver posts the envelope, retrying a few times, then hands the reply to
 // the plugin.
 func (p *pluginPeer) deliver(host, sendID string, envelope []byte) {
-	url := "https://" + host + pluginRoutePrefix + p.name + peerPath
+	url := p.deps.peerURL(host, p.name)
 
 	var lastErr error
 	for attempt := 0; ; attempt++ {

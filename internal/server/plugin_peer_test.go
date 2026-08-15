@@ -345,3 +345,60 @@ func signPeerRequest(t *testing.T, req *http.Request, key *activitypub.PrivateKe
 	require.NoError(t, activitypub.SignRequest(req, key, digest,
 		[]string{"(request-target)", "date", "host", "digest"}))
 }
+
+// 送信先の URL を実際に確かめる。
+//
+// **`/api` を落とすと SPA catchall に落ちて 405 が返る。** 「相手が受け取らない」
+// という形で出るので、送信側のログだけ見ても原因が分かりにくい。実際にこれで
+// 相互に入れても何も出ない不具合を踏んだ。
+func TestPluginPeer_DeliverURLAndRoundTrip(t *testing.T) {
+	var gotPath, gotSig, gotDigest string
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotSig = r.Header.Get("Signature")
+		gotDigest = r.Header.Get("Digest")
+		gotBody, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"score":7}`))
+	}))
+	defer srv.Close()
+
+	key, _ := testPeerKeypair(t)
+	p := testPeer(t, &pluginPeerDeps{
+		client: srv.Client(),
+		signer: &fakePeerSigner{key: key},
+		// httptest は http なので、既定の https 決め打ちでは繋がらない。
+		// **パスは実装のものをそのまま使う** — ここを差し替えると URL の
+		// 検証にならない。
+		urlFor: func(_, plugin string) string {
+			return srv.URL + peerAPIPrefix + plugin + peerPath
+		},
+	})
+
+	replies := make(chan json.RawMessage, 1)
+	p.OnReply(func(_ context.Context, _, _ string, reply json.RawMessage) error {
+		replies <- reply
+		return nil
+	})
+
+	// deliver は Send のガードを通さず直接叩く (宛先の検査は別テスト)。
+	envelope, err := json.Marshal(peerEnvelope{ID: "id1", Payload: json.RawMessage(`{"user":"alice"}`)})
+	require.NoError(t, err)
+	p.deliver("other.example", "id1", envelope)
+
+	assert.Equal(t, "/api/plugin/demo/_peer", gotPath, "/api を含む正しいパスへ送る")
+	assert.NotEmpty(t, gotSig, "署名を付ける")
+	assert.NotEmpty(t, gotDigest, "Digest を付ける")
+	assert.JSONEq(t, `{"id":"id1","payload":{"user":"alice"}}`, string(gotBody))
+
+	select {
+	case reply := <-replies:
+		assert.JSONEq(t, `{"score":7}`, string(reply))
+	default:
+		t.Fatal("OnReply が呼ばれていない")
+	}
+}
+
+type fakePeerSigner struct{ key *activitypub.PrivateKey }
+
+func (s *fakePeerSigner) Signer() (*activitypub.PrivateKey, error) { return s.key, nil }
