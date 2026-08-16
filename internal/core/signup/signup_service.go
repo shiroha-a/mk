@@ -557,6 +557,7 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 	userID := s.idGen.Generate(now)
 
 	var resultUser *model.User
+	var resultProfile *model.UserProfile
 	appSettled := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		// invitation ticket がある場合は最初に SELECT FOR UPDATE で lock し、
@@ -596,73 +597,20 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 			appSettled = true
 		}
 
-		// username collision チェック (tx の visibility で in-flight 行も見える)
-		var existing model.User
-		switch err := tx.Where(`"usernameLower" = ? AND "host" IS NULL`, lower).First(&existing).Error; {
-		case err == nil:
-			return ErrUsernameAlreadyExists
-		case errors.Is(err, gorm.ErrRecordNotFound):
-			// 続行
-		default:
+		verified := true
+		user, profile, err := s.createUserTx(tx, createUserInput{
+			userID:        userID,
+			username:      pending.Username,
+			lower:         lower,
+			token:         token,
+			passwordHash:  pending.Password,
+			email:         &pending.Email,
+			emailVerified: verified,
+		})
+		if err != nil {
 			return err
 		}
-
-		// user 行作成
-		user := &model.User{
-			ID:                userID,
-			Username:          pending.Username,
-			UsernameLower:     lower,
-			Token:             &token,
-			IsExplorable:      true,
-			AvatarDecorations: []byte("[]"),
-		}
-		if err := tx.Create(user).Error; err != nil {
-			return err
-		}
-
-		// profile 作成 (failure 時は user 含めて tx rollback で消える)
-		storedHash := pending.Password
-		profile := &model.UserProfile{
-			UserID:             userID,
-			Email:              &pending.Email,
-			EmailVerified:      true,
-			Password:           &storedHash,
-			AutoAcceptFollowed: true,
-			PreventAiLearning:  true,
-			PublicReactions:    true,
-			// DB 側の default と同値 (上の非 tx 経路と揃える)。
-			InjectFeaturedNote:       true,
-			ReceiveAnnouncementEmail: true,
-		}
-		if err := tx.Create(profile).Error; err != nil {
-			return err
-		}
-
-		// #2106 N23: used_username に同 tx 内で記録する (upstream SignupService:151-154、
-		// 削除後の username 再取得を恒久的に防ぐ)。fresh username のみ到達するため
-		// (Exists guard が既使用を事前に弾く) conflict は起きない想定。
-		if err := tx.Create(&model.UsedUsername{Username: lower}).Error; err != nil {
-			return err
-		}
-
-		// keypair (federation 用) — keypairRepo が wire されているときのみ
-		if s.keypairRepo != nil {
-			privPEM, pubPEM, err := activitypub.GenerateRSAKeypair()
-			if err != nil {
-				return err
-			}
-			if err := tx.Create(&model.UserKeypair{
-				UserID:     userID,
-				PublicKey:  pubPEM,
-				PrivateKey: privPEM,
-			}).Error; err != nil {
-				return err
-			}
-		}
-		// Ed25519 keypair も同 tx 内で発行 (#1067 / #1068)
-		if err := s.maybeCreateEd25519Keypair(tx, userID); err != nil {
-			return err
-		}
+		resultProfile = profile
 
 		// pending row 削除
 		if err := tx.Where("id = ?", pending.ID).Delete(&model.UserPending{}).Error; err != nil {
@@ -697,6 +645,7 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 		InvitationTicketConsumed:   pending.InvitationTicketID != nil,
 		SignupApplicationID:        pending.SignupApplicationID,
 		SignupApplicationCompleted: appSettled,
+		Profile:                    resultProfile,
 	}, nil
 }
 
@@ -774,6 +723,182 @@ func (s *Service) promotePendingNoTx(pending *model.UserPending) (*SignupResult,
 		InvitationTicketID:  pending.InvitationTicketID,
 		SignupApplicationID: pending.SignupApplicationID,
 	}, nil
+}
+
+// SignupForApplication creates an account for an approved application, settling
+// the application in the same transaction (#2580).
+//
+// **状態確認とアカウント作成を分けると 1 つの承認から複数アカウント作れる。**
+// 承認済みの申請者が別々の username で同時に登録すると、両方が「承認済み」を
+// 読んでから両方がアカウントを作ってしまう。申請行を掴んだまま作れば、負けた側は
+// ユーザー作成ごと巻き戻る。
+//
+// db / 申請 repo が未配線なら通常の Signup にフォールバックし、
+// SignupApplicationCompleted=false を返す (呼び出し側が従来どおり完了記録する)。
+func (s *Service) SignupForApplication(username, password, applicationID, ticketID string) (*SignupResult, error) {
+	if s.db == nil || s.appRepo == nil {
+		return s.Signup(username, password, false)
+	}
+
+	username, err := normalizeAndValidateUsername(username)
+	if err != nil {
+		return nil, err
+	}
+	lower := strings.ToLower(username)
+	// tx 内でも collision は見るが、**メールも鍵も作る前に弾ける分はここで弾く**
+	// (Signup と同じ順序: existing → used → preserved)。
+	if _, err := s.userRepo.FindByUsernameLower(lower, nil); err == nil {
+		return nil, ErrUsernameAlreadyExists
+	}
+	if s.isUsedUsername(lower) {
+		return nil, ErrUsernameUsed
+	}
+	if meta, err := s.metaRepo.Fetch(); err == nil {
+		if isReservedUsername(lower, meta.PreservedUsernames) {
+			return nil, ErrUsernameReserved
+		}
+		if keyword.IsKeyWordIncluded(lower, meta.ProhibitedWordsForNameOfUser) {
+			return nil, ErrUsernameUsed
+		}
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	if err != nil {
+		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
+			return nil, ErrPasswordTooLong
+		}
+		return nil, fmt.Errorf("signup: bcrypt hash password: %w", err)
+	}
+
+	token := generateToken()
+	now := time.Now()
+	userID := s.idGen.Generate(now)
+
+	var resultUser *model.User
+	var resultProfile *model.UserProfile
+	txErr := s.db.Transaction(func(tx *gorm.DB) error {
+		// 申請行を先に掴む。**ここで弾いた場合はユーザー作成ごと巻き戻る。**
+		if err := s.settleApplicationTx(tx, applicationID, userID, ticketID, now); err != nil {
+			return err
+		}
+		user, profile, err := s.createUserTx(tx, createUserInput{
+			userID:       userID,
+			username:     username,
+			lower:        lower,
+			token:        token,
+			passwordHash: string(hash),
+			// メール確認を通っていないので、プロフィールにメールは持たせない
+			// (Signup と同じ)。
+		})
+		if err != nil {
+			return err
+		}
+		resultUser, resultProfile = user, profile
+		return nil
+	})
+	if txErr != nil {
+		return nil, txErr
+	}
+
+	if s.webhookHook != nil {
+		s.webhookHook.OnUserCreated(resultUser)
+	}
+	appID := applicationID
+	return &SignupResult{
+		User:                       resultUser,
+		Token:                      token,
+		Profile:                    resultProfile,
+		SignupApplicationID:        &appID,
+		SignupApplicationCompleted: true,
+	}, nil
+}
+
+// createUserInput carries everything createUserTx needs to build one account.
+type createUserInput struct {
+	userID        string
+	username      string
+	lower         string
+	token         string
+	passwordHash  string
+	email         *string
+	emailVerified bool
+}
+
+// createUserTx creates the user, profile, used_username entry and keypairs
+// inside the caller's transaction.
+//
+// **promotePendingTx と承認済み登録 (#2580) が共有する。** 生成の中身を経路ごとに
+// 書き写すと、片方だけ直したときに「この経路で作った account だけ鍵が無い」類の
+// ずれが生まれる。非 tx 経路 (Signup / promotePendingNoTx) は repo 越しなので
+// 別実装のままだが、**tx 経路はここ 1 本に集約する**。
+func (s *Service) createUserTx(tx *gorm.DB, in createUserInput) (*model.User, *model.UserProfile, error) {
+	// username collision チェック (tx の visibility で in-flight 行も見える)
+	var existing model.User
+	switch err := tx.Where(`"usernameLower" = ? AND "host" IS NULL`, in.lower).First(&existing).Error; {
+	case err == nil:
+		return nil, nil, ErrUsernameAlreadyExists
+	case errors.Is(err, gorm.ErrRecordNotFound):
+		// 続行
+	default:
+		return nil, nil, err
+	}
+
+	user := &model.User{
+		ID:                in.userID,
+		Username:          in.username,
+		UsernameLower:     in.lower,
+		Token:             &in.token,
+		IsExplorable:      true,
+		AvatarDecorations: []byte("[]"),
+	}
+	if err := tx.Create(user).Error; err != nil {
+		return nil, nil, err
+	}
+
+	// profile 作成 (failure 時は user 含めて tx rollback で消える)
+	storedHash := in.passwordHash
+	profile := &model.UserProfile{
+		UserID:             in.userID,
+		Email:              in.email,
+		EmailVerified:      in.emailVerified,
+		Password:           &storedHash,
+		AutoAcceptFollowed: true,
+		PreventAiLearning:  true,
+		PublicReactions:    true,
+		// DB 側の default と同値 (非 tx 経路と揃える)。
+		InjectFeaturedNote:       true,
+		ReceiveAnnouncementEmail: true,
+	}
+	if err := tx.Create(profile).Error; err != nil {
+		return nil, nil, err
+	}
+
+	// #2106 N23: used_username に同 tx 内で記録する (upstream SignupService:151-154、
+	// 削除後の username 再取得を恒久的に防ぐ)。fresh username のみ到達するため
+	// (Exists guard が既使用を事前に弾く) conflict は起きない想定。
+	if err := tx.Create(&model.UsedUsername{Username: in.lower}).Error; err != nil {
+		return nil, nil, err
+	}
+
+	// keypair (federation 用) — keypairRepo が wire されているときのみ
+	if s.keypairRepo != nil {
+		privPEM, pubPEM, err := activitypub.GenerateRSAKeypair()
+		if err != nil {
+			return nil, nil, err
+		}
+		if err := tx.Create(&model.UserKeypair{
+			UserID:     in.userID,
+			PublicKey:  pubPEM,
+			PrivateKey: privPEM,
+		}).Error; err != nil {
+			return nil, nil, err
+		}
+	}
+	// Ed25519 keypair も同 tx 内で発行 (#1067 / #1068)
+	if err := s.maybeCreateEd25519Keypair(tx, in.userID); err != nil {
+		return nil, nil, err
+	}
+	return user, profile, nil
 }
 
 // settleApplicationTx locks the approval application and marks it completed

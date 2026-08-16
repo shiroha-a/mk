@@ -228,29 +228,42 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 		return h.registerViaEmailConfirmation(c, meta, app, ticket, req.Username, req.EmailAddress, req.Password)
 	}
 
-	result, err := h.signupService.Signup(req.Username, req.Password, false)
+	ticketID := ""
+	if ticket != nil {
+		ticketID = ticket.ID
+	}
+	// **申請の確定とアカウント作成を同じ tx に入れる (#2580)。** 分けると、承認済みの
+	// 申請者が別々の username で同時に登録したときに両方が「承認済み」を読んで
+	// 両方アカウントを作れる。負けた側はユーザー作成ごと巻き戻る。
+	result, err := h.signupService.SignupForApplication(req.Username, req.Password, app.ID, ticketID)
 	if err != nil {
 		// 失敗したチケットは残さない。**残すと、次の試行で「使用済み」に
 		// 見えないまま浮いた招待が積み上がる。**
 		h.discardApprovalTicket(ticket)
+		if errors.Is(err, coresignup.ErrApplicationNotApproved) {
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
+		}
 		return h.signupServiceError(c, err)
 	}
 
-	ticketID := ""
-	if ticket != nil {
-		ticketID = ticket.ID
-		if h.ticketStore != nil {
-			if merr := h.ticketStore.MarkUsed(ticket.ID, result.User.ID); merr != nil {
-				// 消費の記録に失敗してもアカウントは作られている。ここで 500 を
-				// 返すと、利用者には「失敗したのに登録されている」状態になる。
-				c.Logger().Warnf("signup application: mark ticket used failed: %v", merr)
-			}
+	if ticket != nil && h.ticketStore != nil {
+		if merr := h.ticketStore.MarkUsed(ticket.ID, result.User.ID); merr != nil {
+			// 消費の記録に失敗してもアカウントは作られている。ここで 500 を
+			// 返すと、利用者には「失敗したのに登録されている」状態になる。
+			c.Logger().Warnf("signup application: mark ticket used failed: %v", merr)
 		}
 	}
-	if cerr := h.applications.MarkCompleted(app.ID, result.User.ID, ticketID); cerr != nil {
-		// 同上。申請の完了記録は監査用で、アカウントの成立とは独立。
-		c.Logger().Warnf("signup application: mark completed failed: %v", cerr)
-	} else if app.TicketID != nil && *app.TicketID != "" && *app.TicketID != ticketID {
+	completed := result.SignupApplicationCompleted
+	if !completed {
+		// db / 申請 repo が未配線の構成 (テスト等)。従来どおり後追いで記録する。
+		if cerr := h.applications.MarkCompleted(app.ID, result.User.ID, ticketID); cerr != nil {
+			c.Logger().Warnf("signup application: mark completed failed: %v", cerr)
+		} else {
+			completed = true
+		}
+	}
+	if completed && app.TicketID != nil && *app.TicketID != "" && *app.TicketID != ticketID {
 		// メール必須を切る前に始まっていた確認待ちの残骸。**完了が通ってから
 		// 破棄する** — 通ったということは、確認が先に走って ticket を消費した
 		// わけではない (その場合 MarkCompleted が ErrNotApproved で落ちる)。

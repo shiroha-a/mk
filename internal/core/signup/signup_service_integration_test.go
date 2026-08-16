@@ -2,6 +2,8 @@ package signup_test
 
 import (
 	"errors"
+	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -541,4 +543,211 @@ func TestPromotePending_ApplicationRecordsConsumedTicket(t *testing.T) {
 	require.NoError(t, db.Where("id = ?", appID).First(&stored).Error)
 	require.NotNil(t, stored.TicketID)
 	assert.Equal(t, ticketID, *stored.TicketID, "消費した ticket を申請に残す")
+}
+
+// **1 つの承認から作れるアカウントは 1 つ。** 承認済みの申請者が別々の username で
+// 同時に登録すると、状態確認とアカウント作成が別々なら両方が「承認済み」を読んで
+// 両方作れてしまう。申請行を掴んだまま作れば負けた側は巻き戻る (#2580)。
+func TestSignupForApplication_SecondCallCannotCreateAnotherAccount(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itimm_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+
+	res, err := svc.SignupForApplication(prefix+"first", "hunter22", app.ID, "")
+	require.NoError(t, err)
+	assert.True(t, res.SignupApplicationCompleted, "同じ tx で確定させること")
+	require.NotNil(t, res.Profile, "レスポンスの packer に profile が要る")
+	assert.Nil(t, res.Profile.Email, "メール確認を通っていないのでメールは持たせない")
+
+	var stored model.SignupApplication
+	require.NoError(t, db.Where("id = ?", app.ID).First(&stored).Error)
+	assert.Equal(t, model.SignupApplicationCompleted, stored.Status)
+	require.NotNil(t, stored.UsedByID)
+	assert.Equal(t, res.User.ID, *stored.UsedByID)
+
+	// 2 回目は別 username でも通らない。
+	_, err = svc.SignupForApplication(prefix+"second", "hunter22", app.ID, "")
+	require.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" = ?`, prefix+"second").Count(&count).Error)
+	assert.Equal(t, int64(0), count, "2 つ目のアカウントは作られない")
+}
+
+// 同時に走らせても 1 つしか通らない。**行ロックが効いていることを直接見る。**
+func TestSignupForApplication_ConcurrentCallsCreateOneAccount(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itconc_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+
+	const n = 4
+	start := make(chan struct{})
+	results := make(chan error, n)
+	for i := range n {
+		go func(i int) {
+			<-start
+			_, err := svc.SignupForApplication(
+				fmt.Sprintf("%su%d", prefix, i), "hunter22", app.ID, "")
+			results <- err
+		}(i)
+	}
+	close(start)
+
+	succeeded := 0
+	for range n {
+		if err := <-results; err == nil {
+			succeeded++
+		}
+	}
+	assert.Equal(t, 1, succeeded, "通るのは 1 つだけ")
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" LIKE ?`, prefix+"u%").Count(&count).Error)
+	assert.Equal(t, int64(1), count, "作られたアカウントも 1 つだけ")
+}
+
+// 期限切れ / 却下済みは通らず、アカウントも残らない。
+func TestSignupForApplication_RejectsUnusableApplication(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itimmbad_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+
+	t.Run("expired", func(t *testing.T) {
+		app := insertApprovedApplication(t, db, prefix+"exp")
+		require.NoError(t, db.Model(app).Update("expiresAt", time.Now().Add(-time.Hour)).Error)
+		_, err := svc.SignupForApplication(prefix+"a", "hunter22", app.ID, "")
+		assert.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+	})
+
+	t.Run("rejected", func(t *testing.T) {
+		app := insertApprovedApplication(t, db, prefix+"rej")
+		require.NoError(t, db.Model(app).Update("status", model.SignupApplicationRejected).Error)
+		_, err := svc.SignupForApplication(prefix+"b", "hunter22", app.ID, "")
+		assert.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+	})
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" LIKE ?`, prefix+"%").Count(&count).Error)
+	assert.Equal(t, int64(0), count)
+}
+
+// ticket を渡すと申請に記録される (即時作成でも監査が追える)。
+func TestSignupForApplication_RecordsTicket(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itimmtkt_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+
+	_, err := svc.SignupForApplication(prefix+"u", "hunter22", app.ID, prefix+"tkt")
+	require.NoError(t, err)
+
+	var stored model.SignupApplication
+	require.NoError(t, db.Where("id = ?", app.ID).First(&stored).Error)
+	require.NotNil(t, stored.TicketID)
+	assert.Equal(t, prefix+"tkt", *stored.TicketID)
+}
+
+// db / 申請 repo が未配線なら通常の Signup に落ちる (完了記録は呼び出し側に委ねる)。
+func TestSignupForApplication_FallsBackWithoutTxWiring(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itimmfb_"
+	defer cleanupSignupRows(t, db, prefix)
+
+	userRepo := repository.NewUserRepository(db)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := signup.NewService(userRepo, metaRepo, idGen)
+
+	res, err := svc.SignupForApplication(prefix+"u", "hunter22", "no-such-app", "")
+	require.NoError(t, err)
+	assert.False(t, res.SignupApplicationCompleted)
+	assert.Nil(t, res.SignupApplicationID)
+	require.NotNil(t, res.Profile)
+}
+
+// 事前検査は tx に入る前に弾く。**メールも鍵も作る前に落とす。**
+func TestSignupForApplication_PreChecks(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itimmpre_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+
+	t.Run("invalid username", func(t *testing.T) {
+		app := insertApprovedApplication(t, db, prefix+"a1")
+		_, err := svc.SignupForApplication("!!!bad!!!", "hunter22", app.ID, "")
+		assert.ErrorIs(t, err, signup.ErrInvalidUsername)
+	})
+
+	t.Run("username already exists", func(t *testing.T) {
+		app := insertApprovedApplication(t, db, prefix+"a2")
+		_, err := svc.SignupForApplication(prefix+"dup", "hunter22", app.ID, "")
+		require.NoError(t, err)
+
+		other := insertApprovedApplication(t, db, prefix+"a3")
+		_, err = svc.SignupForApplication(prefix+"dup", "hunter22", other.ID, "")
+		assert.ErrorIs(t, err, signup.ErrUsernameAlreadyExists)
+
+		// **弾いた側の申請は消費されない。**
+		var stored model.SignupApplication
+		require.NoError(t, db.Where("id = ?", other.ID).First(&stored).Error)
+		assert.Equal(t, model.SignupApplicationApproved, stored.Status)
+	})
+
+	t.Run("password too long", func(t *testing.T) {
+		app := insertApprovedApplication(t, db, prefix+"a4")
+		_, err := svc.SignupForApplication(prefix+"long", strings.Repeat("a", 80), app.ID, "")
+		assert.ErrorIs(t, err, signup.ErrPasswordTooLong)
+	})
+
+	t.Run("reserved username", func(t *testing.T) {
+		app := insertApprovedApplication(t, db, prefix+"a5")
+		svc2 := newTxServiceWithMeta(t, db, &model.Meta{
+			ID: "x", PreservedUsernames: []string{prefix + "res"},
+		})
+		_, err := svc2.SignupForApplication(prefix+"res", "hunter22", app.ID, "")
+		assert.ErrorIs(t, err, signup.ErrUsernameReserved)
+	})
+
+	t.Run("prohibited word", func(t *testing.T) {
+		app := insertApprovedApplication(t, db, prefix+"a6")
+		svc2 := newTxServiceWithMeta(t, db, &model.Meta{
+			ID: "x", ProhibitedWordsForNameOfUser: []string{prefix + "ban"},
+		})
+		_, err := svc2.SignupForApplication(prefix+"ban", "hunter22", app.ID, "")
+		assert.ErrorIs(t, err, signup.ErrUsernameUsed)
+	})
+}
+
+// newTxServiceWithMeta is newTxService with a caller-supplied meta.
+func newTxServiceWithMeta(t *testing.T, db *gorm.DB, meta *model.Meta) *signup.Service {
+	t.Helper()
+	idGen, _ := id.NewGenerator("aidx")
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = meta
+	svc := signup.NewService(repository.NewUserRepository(db), metaRepo, idGen)
+	svc.SetUserPendingRepo(repository.NewUserPendingRepository(db))
+	svc.SetTicketRepo(repository.NewRegistrationTicketRepository(db))
+	svc.SetSignupApplicationRepo(repository.NewSignupApplicationRepository(db))
+	svc.SetDB(db)
+	return svc
 }
