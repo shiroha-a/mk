@@ -6,6 +6,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/core/registrationbot"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -52,6 +53,12 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 			if h.roleService.IsAdministrator(user.ID) && (me == nil || me.ID != user.ID) {
 				return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
 			}
+		}
+		// 承認制の登録の通知 bot (#2557) にはパスワードを設定しない。
+		// **パスワードを持たせないだけでは足りない** — ここを塞がないと管理者が
+		// 設定でき、通常の認証経路が生えてしまう。
+		if registrationbot.IsBotAccount(user) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
 		}
 		target = user
 	}

@@ -393,3 +393,106 @@ func TestSetTTL(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(time.Hour), app.ExpiresAt)
 }
+
+// recordingNotifier captures the calls made after a review.
+type recordingNotifier struct {
+	approved []*model.SignupApplication
+	rejected []*model.SignupApplication
+}
+
+func (r *recordingNotifier) NotifyApproved(app *model.SignupApplication) {
+	r.approved = append(r.approved, app)
+}
+
+func (r *recordingNotifier) NotifyRejected(app *model.SignupApplication) {
+	r.rejected = append(r.rejected, app)
+}
+
+func TestReview_NotifiesTheApplicant(t *testing.T) {
+	t.Run("approve", func(t *testing.T) {
+		svc, _ := newService(t)
+		n := &recordingNotifier{}
+		svc.SetNotifier(n)
+
+		app, err := svc.Apply(testContact, "")
+		require.NoError(t, err)
+		require.NoError(t, svc.Approve(app.ID, "mod1"))
+
+		require.Len(t, n.approved, 1)
+		assert.Empty(t, n.rejected)
+		// 通知側が連絡先を引けるだけの情報が渡っていること。
+		assert.Equal(t, "remote.example", n.approved[0].ContactHost)
+		assert.Equal(t, "r1", n.approved[0].ContactRemoteID)
+		assert.Equal(t, model.SignupApplicationApproved, n.approved[0].Status)
+	})
+
+	t.Run("reject", func(t *testing.T) {
+		svc, _ := newService(t)
+		n := &recordingNotifier{}
+		svc.SetNotifier(n)
+
+		app, err := svc.Apply(testContact, "")
+		require.NoError(t, err)
+		require.NoError(t, svc.Reject(app.ID, "mod1"))
+
+		require.Len(t, n.rejected, 1)
+		assert.Empty(t, n.approved)
+	})
+}
+
+// **保存できなかった審査を伝えない。** 先に送ると、失敗した承認を申請者に
+// 知らせてしまう。
+func TestReview_DoesNotNotifyOnFailure(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		act  func(svc *Service, id string) error
+	}{
+		{name: "approve", act: func(svc *Service, id string) error { return svc.Approve(id, "mod1") }},
+		{name: "reject", act: func(svc *Service, id string) error { return svc.Reject(id, "mod1") }},
+	} {
+		t.Run(tt.name+"/not found", func(t *testing.T) {
+			svc, _ := newService(t)
+			n := &recordingNotifier{}
+			svc.SetNotifier(n)
+
+			assert.Error(t, tt.act(svc, "no-such-id"))
+			assert.Empty(t, n.approved)
+			assert.Empty(t, n.rejected)
+		})
+
+		t.Run(tt.name+"/expired", func(t *testing.T) {
+			svc, now := newService(t)
+			n := &recordingNotifier{}
+			svc.SetNotifier(n)
+
+			app, err := svc.Apply(testContact, "")
+			require.NoError(t, err)
+			*now = now.Add(DefaultTTL)
+
+			assert.ErrorIs(t, tt.act(svc, app.ID), ErrExpired)
+			assert.Empty(t, n.approved)
+			assert.Empty(t, n.rejected)
+		})
+
+		t.Run(tt.name+"/already processed", func(t *testing.T) {
+			svc, _ := newService(t)
+			app, err := svc.Apply(testContact, "")
+			require.NoError(t, err)
+			require.NoError(t, svc.Approve(app.ID, "mod1"))
+
+			n := &recordingNotifier{}
+			svc.SetNotifier(n)
+			assert.ErrorIs(t, tt.act(svc, app.ID), ErrNotPending)
+			assert.Empty(t, n.approved)
+			assert.Empty(t, n.rejected)
+		})
+	}
+}
+
+// 未配線でも審査そのものは動くこと。
+func TestReview_WithoutNotifier(t *testing.T) {
+	svc, _ := newService(t)
+	app, err := svc.Apply(testContact, "")
+	require.NoError(t, err)
+	assert.NoError(t, svc.Approve(app.ID, "mod1"))
+}

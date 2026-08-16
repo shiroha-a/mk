@@ -103,6 +103,7 @@ import (
 	corepoll "github.com/shiroha-a/mk/internal/core/poll"
 	"github.com/shiroha-a/mk/internal/core/procstats"
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
+	"github.com/shiroha-a/mk/internal/core/registrationbot"
 	corerelay "github.com/shiroha-a/mk/internal/core/relay"
 	coreretention "github.com/shiroha-a/mk/internal/core/retention"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
@@ -112,6 +113,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/serverstats"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
+	"github.com/shiroha-a/mk/internal/core/signupnotify"
 	coresystemaccount "github.com/shiroha-a/mk/internal/core/systemaccount"
 	coretimeline "github.com/shiroha-a/mk/internal/core/timeline"
 	coretransfer "github.com/shiroha-a/mk/internal/core/transfer"
@@ -2998,6 +3000,16 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
 	adminHandler.SetSignupApplicationReviewer(signupApplicationService)
+	// 承認結果を申請者へ DM で知らせる (#2557)。**通知でしかない** — 申請者は
+	// 登録ページに戻れば自分で状態を確認できるので、ここが動かなくても登録は
+	// 完了できる。送信元は専用 bot (@registration_service) で、システムアカウント
+	// は使わない (AP 上 Application になり、用途も混ざるため)。
+	signupApplicationService.SetNotifier(signupnotify.NewNotifier(
+		registrationbot.NewService(userRepo, keypairRepo, usedUsernameRepo, idGen),
+		federationResolver,
+		noteCreateService,
+		s.config.URL,
+	))
 	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
 	// (server 側は既に migrate 済みで動いている前提。適用漏れの検出は
 	// `misskey -doctor` の担当で、あちらは同梱ファイルを数えられる)。

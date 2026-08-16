@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/core/registrationbot"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -346,4 +347,33 @@ func TestDeleteAccount_WritesModerationLog(t *testing.T) {
 
 	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 }, 500*time.Millisecond, 5*time.Millisecond)
 	assert.Equal(t, "deleteAccount", repo.Snapshot()[0].Type)
+}
+
+// 承認制の登録の通知 bot (#2557) は削除拒否される。
+//
+// **ドットを含まないので system account のガードには当たらない。** 消して作り
+// 直すと actor URI が変わり、それまでのフォロワーが失われて通知が相手の受信
+// 設定を通らなくなる (しかも静かに)。
+func TestDeleteAccount_RejectsRegistrationBot(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["bot"] = &model.User{
+		ID: "bot", Username: registrationbot.Username, UsernameLower: registrationbot.Username,
+		Host: nil, IsBot: true,
+	}
+	rec := doPost(h.DeleteAccount, `{"userId":"bot"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.False(t, userRepo.Users["bot"].IsDeleted)
+}
+
+func TestAccountsDelete_RejectsRegistrationBot(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["bot"] = &model.User{
+		ID: "bot", Username: registrationbot.Username, UsernameLower: registrationbot.Username,
+		Host: nil, IsBot: true,
+	}
+	stub := &stubDeleteAccountEnqueuer{}
+	h.SetDeleteAccountEnqueuer(stub)
+	rec := doPost(h.AccountsDelete, `{"userId":"bot"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, 0, stub.called)
 }

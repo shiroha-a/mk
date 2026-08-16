@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/core/registrationbot"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -181,4 +182,22 @@ func TestResetPasswordAdmin_NoLogWhenActorMissing(t *testing.T) {
 	require.Never(t, func() bool {
 		return len(repo.Snapshot()) > 0
 	}, 100*time.Millisecond, 10*time.Millisecond, "actor missing → log must not be written")
+}
+
+// 承認制の登録の通知 bot (#2557) にはパスワードを設定させない。
+//
+// **パスワードを持たせないだけでは足りない。** ここを塞がないと管理者が設定でき、
+// 通常の認証経路が生えてしまう。
+func TestResetPasswordAdmin_RejectsRegistrationBot(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["bot"] = &model.User{
+		ID: "bot", Username: registrationbot.Username, UsernameLower: registrationbot.Username,
+		Host: nil, IsBot: true,
+	}
+	userRepo.Profiles["bot"] = &model.UserProfile{UserID: "bot"}
+
+	rec := doPost(h.ResetPassword, `{"userId":"bot"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+	assert.Empty(t, userRepo.Profiles["bot"].Password, "パスワードが設定されないこと")
 }

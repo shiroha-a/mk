@@ -71,12 +71,23 @@ type Contact struct {
 	Username string
 }
 
+// ResultNotifier is told about review outcomes so the applicant can be
+// informed (#2557).
+//
+// **通知でしかない。** 申請者は登録ページに戻れば自分で状態を確認できるので、
+// ここが動かなくても登録は完了できる。
+type ResultNotifier interface {
+	NotifyApproved(app *model.SignupApplication)
+	NotifyRejected(app *model.SignupApplication)
+}
+
 // Service manages signup applications.
 type Service struct {
-	repo  repository.SignupApplicationRepository
-	idGen id.Generator
-	clock func() time.Time
-	ttl   time.Duration
+	repo     repository.SignupApplicationRepository
+	idGen    id.Generator
+	clock    func() time.Time
+	ttl      time.Duration
+	notifier ResultNotifier
 }
 
 // NewService constructs a Service.
@@ -87,6 +98,12 @@ func NewService(repo repository.SignupApplicationRepository, idGen id.Generator)
 		clock: time.Now,
 		ttl:   DefaultTTL,
 	}
+}
+
+// SetNotifier wires the applicant-facing notification (#2557). 未配線なら
+// 通知を行わないだけで、審査そのものは変わらない。
+func (s *Service) SetNotifier(n ResultNotifier) {
+	s.notifier = n
 }
 
 // SetClock replaces the clock, primarily for tests.
@@ -206,42 +223,53 @@ func (s *Service) expireIfStale(contact Contact, now time.Time) (*model.SignupAp
 // までの数日間、利用者に渡していない bearer 相当の credential が DB に置き
 // っぱなしになる。チケットは登録経路 (#2556) で発行して即消費する。
 func (s *Service) Approve(applicationID, moderatorID string) error {
-	now := s.clock()
-	return s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
-		if cur.Status != model.SignupApplicationPending {
-			return decision{err: ErrNotPending}
-		}
-		// 期限切れを承認できてしまうと、掃除の前後で結果が変わる。ついでに
-		// 実態へ寄せておく (掃除は遅延反映なので pending のまま残っている)。
-		if !now.Before(cur.ExpiresAt) {
-			return expireDecision()
-		}
-		return decision{fields: map[string]any{
-			"status":        model.SignupApplicationApproved,
-			"processedById": moderatorID,
-			"processedAt":   now,
-		}}
-	})
+	return s.review(applicationID, moderatorID, true)
 }
 
 // Reject marks the application as rejected.
 func (s *Service) Reject(applicationID, moderatorID string) error {
+	return s.review(applicationID, moderatorID, false)
+}
+
+// review is shared by Approve / Reject: the guards and the notification are the
+// same shape, only the resulting status differs.
+func (s *Service) review(applicationID, moderatorID string, approve bool) error {
 	now := s.clock()
-	return s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
+	status := model.SignupApplicationRejected
+	if approve {
+		status = model.SignupApplicationApproved
+	}
+	var reviewed *model.SignupApplication
+	err := s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
 		if cur.Status != model.SignupApplicationPending {
 			return decision{err: ErrNotPending}
 		}
-		// 期限切れは却下として記録しない。**審査していないものを「審査して
-		// 落とした」と残すと、監査の意味が壊れる。**
+		// 期限切れを審査できてしまうと、掃除の前後で結果が変わる。ついでに
+		// 実態へ寄せておく (掃除は遅延反映なので pending のまま残っている)。
+		// 期限切れは審査の結果ではないので processedBy / processedAt は立てない。
 		if !now.Before(cur.ExpiresAt) {
 			return expireDecision()
 		}
+		reviewed = cur
 		return decision{fields: map[string]any{
-			"status":        model.SignupApplicationRejected,
+			"status":        status,
 			"processedById": moderatorID,
 			"processedAt":   now,
 		}}
 	})
+	if err != nil || reviewed == nil || s.notifier == nil {
+		return err
+	}
+	// 申請者に知らせるのは**保存できてから**。先に送ると、書き込みに失敗した
+	// 承認を伝えてしまう。
+	reviewed.Status = status
+	reviewed.ProcessedByID = &moderatorID
+	if approve {
+		s.notifier.NotifyApproved(reviewed)
+	} else {
+		s.notifier.NotifyRejected(reviewed)
+	}
+	return nil
 }
 
 // MarkCompleted records that the approved application produced a local account.

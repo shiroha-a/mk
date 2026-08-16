@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/core/registrationbot"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/queue"
 )
@@ -127,6 +128,12 @@ func (h *Handler) isProtectedAccount(userID string) bool {
 	// ローカル system account: host=null かつ username に '.' を含む
 	// (systemaccount は `<kind>.actor` 形式で作られる)。
 	if u.Host == nil && strings.Contains(u.Username, ".") {
+		return true
+	}
+	// 承認制の登録の通知 bot (#2557)。**ドットを含まないので上の判定に当たらない。**
+	// 消して作り直すと actor URI が変わり、それまでのフォロワーが失われて通知が
+	// 相手の受信設定を通らなくなる (しかも静かに)。
+	if registrationbot.IsBotAccount(u) {
 		return true
 	}
 	return false
