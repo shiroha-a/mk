@@ -38,6 +38,9 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # detection に使うため片方だけだと検出できない)。docs/divergence.md に
     # additive field として記載済み。
     "approvalRequiredForSignup",
+    # 申請フォームの定義 (#2570)。承認制と同じく mk-go 独自で、申請ページが
+    # 描画に使うので公開 meta に出す必要がある。
+    "signupApplicationForm",
     "globalTimeline", "localTimeline",
 }
 
