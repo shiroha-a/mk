@@ -306,10 +306,10 @@ func TestReactionHook_Added_LocalOnlySkipped(t *testing.T) {
 	assert.Empty(t, enq.calls)
 }
 
-// direct と follower fanout で同じ inbox が重複した場合は別 batch なので
-// 2 通 enqueue される (Like ID 同一なので receiver 側で idempotent)。
-// PR #640 docstring の挙動を回帰検出する目的の test (#644 #3)。
-func TestReactionHook_Added_DuplicateInbox_EmitsTwice(t *testing.T) {
+// direct と follower fanout で同じ inbox が重複した場合でも、同一 Like を
+// 同一 inbox に 2 通 POST しないよう送信側で排除する (#2567)。受信側の
+// idempotent 処理に依存しない。
+func TestReactionHook_Added_DuplicateInbox_Deduped(t *testing.T) {
 	// bob = remote 作者 / inbox A、follower inbox にも同じ A を仕込む。
 	hook, enq, userRepo, keypairRepo, _ := newReactionHookWithFollowers(t, "alice", []string{
 		"https://remote.example/users/bob/inbox", // 作者と完全一致
@@ -319,10 +319,30 @@ func TestReactionHook_Added_DuplicateInbox_EmitsTwice(t *testing.T) {
 	target.Visibility = model.NoteVisibilityPublic
 
 	hook.OnReactionAdded(reactor, target, "🎉")
-	require.Len(t, enq.calls, 2, "direct と follower で別 batch なので 2 通 enqueue される")
+	require.Len(t, enq.calls, 1, "direct と follower の重複 inbox は送信側で 1 通にまとめられる")
 	for _, c := range enq.calls {
 		assert.Equal(t, "https://remote.example/users/bob/inbox", c.Inbox)
 	}
+}
+
+// Undo Like も同一 fanout 経路なので、重複 inbox は 1 通にまとめられる (#2567)。
+func TestReactionHook_Removed_DuplicateInbox_Deduped(t *testing.T) {
+	hook, enq, userRepo, keypairRepo, _ := newReactionHookWithFollowers(t, "alice", []string{
+		"https://remote.example/users/bob/inbox", // 作者と完全一致
+	})
+	reactor := setupReactor(t, userRepo, keypairRepo)
+	_, target := remoteAuthor(userRepo)
+	target.Visibility = model.NoteVisibilityPublic
+
+	hook.OnReactionRemoved(reactor, target, "🎉")
+	require.Len(t, enq.calls, 1, "Undo Like も重複 inbox は 1 通にまとめられる")
+	for _, c := range enq.calls {
+		assert.Equal(t, "https://remote.example/users/bob/inbox", c.Inbox)
+	}
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(enq.calls[0].Body, &got))
+	assert.Equal(t, "Undo", got["type"])
 }
 
 // VisibleUserIDs に存在しない user ID が混ざっていても残りの remote user

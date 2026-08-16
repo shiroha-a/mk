@@ -107,14 +107,15 @@ func (h *ReactionDeliveryHook) fanout(reactor *model.User, target *model.Note, b
 		}
 	}
 	if h.shouldFanoutToFollowers(target) {
-		// DeliverToFollowers が内部で followingRepo から remote follower
-		// inbox を fetch して DeliverActivity に渡す。directInboxes と
-		// 重複する inbox があった場合は別 batch なので enqueue が 2 回
-		// 走るが、Like ID 同一なので相手側で idempotent (already-reacted
-		// 扱い)。TS DeliverManager のように完全 dedup したい場合は
-		// followingRepo を hook 側に持つ必要があり、今回はコストに見合
-		// わないので分離 batch のまま許容する。
-		if err := h.deliver.DeliverToFollowers(reactor.ID, body); err != nil {
+		// direct バッチで送った inbox は followers バッチから除外する。
+		// 同一 Like ID を同一 inbox に 2 回 POST しないため、送信側で
+		// 重複を排除する (#2567)。受信側の idempotent 処理 (重複排除) に
+		// 依存しない設計で、除外は inbox URL 完全一致。
+		exclude := make(map[string]bool, len(directInboxes))
+		for _, inbox := range directInboxes {
+			exclude[inbox] = true
+		}
+		if err := h.deliver.DeliverToFollowersExcluding(reactor.ID, body, exclude); err != nil {
 			slog.Warn("reaction delivery: followers fanout failed",
 				"kind", kind, "reactor", reactor.ID, "noteId", target.ID, "err", err)
 		}

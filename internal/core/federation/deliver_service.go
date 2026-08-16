@@ -308,6 +308,15 @@ func (s *DeliverService) isBlockedInbox(inbox string) bool {
 // DeliverToFollowers enqueues delivery to all remote followers of signerUserID.
 // sharedInbox は repository 側で集約済み。
 func (s *DeliverService) DeliverToFollowers(signerUserID string, body []byte) error {
+	return s.DeliverToFollowersExcluding(signerUserID, body, nil)
+}
+
+// DeliverToFollowersExcluding enqueues delivery to the remote followers of
+// signerUserID, skipping any inbox URL present in exclude. 除外は inbox URL の
+// 完全一致で行い、exclude が nil / 空なら DeliverToFollowers と等価
+// (#2567)。同一アクティビティを同一 inbox に重複 POST しないため、先に
+// 別バッチ (DirectRecipe 等) で送った inbox をここで省く用途で使う。
+func (s *DeliverService) DeliverToFollowersExcluding(signerUserID string, body []byte, exclude map[string]bool) error {
 	rows, err := s.followingRepo.ListRemoteFollowerInboxes(signerUserID)
 	if err != nil {
 		return err
@@ -315,6 +324,9 @@ func (s *DeliverService) DeliverToFollowers(signerUserID string, body []byte) er
 	inboxes := make([]string, 0, len(rows))
 	var sharedInboxes map[string]bool
 	for _, row := range rows {
+		if exclude[row.Inbox] {
+			continue
+		}
 		inboxes = append(inboxes, row.Inbox)
 		if row.Shared {
 			if sharedInboxes == nil {

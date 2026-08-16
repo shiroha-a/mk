@@ -39,6 +39,7 @@ Thumbs.db
 
 # Temporary files
 .tmp/
+tmp/
 
 # Config (user-specific). Track example templates only; operator
 # copies them locally (default.yml / docker.yml).

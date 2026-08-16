@@ -510,6 +510,78 @@ func (f *failingListInboxesRepo) ListRemoteFollowerInboxes(_ string) ([]model.Re
 	return nil, errors.New("db down")
 }
 
+// DeliverToFollowersExcluding は exclude に含まれる inbox を followers 一覧
+// から省き、残りだけ enqueue する (#2567)。exclude は inbox URL 完全一致。
+func TestDeliverToFollowersExcluding_SkipsExcludedInbox(t *testing.T) {
+	svc, enq, userRepo, followingRepo, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	followingRepo.RemoteInboxes["alice"] = []string{
+		"https://remote.example/inbox",
+		"https://other.example/users/x/inbox",
+	}
+
+	require.NoError(t, svc.DeliverToFollowersExcluding("alice", []byte(`{}`), map[string]bool{
+		"https://remote.example/inbox": true,
+	}))
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, "https://other.example/users/x/inbox", enq.calls[0].Inbox)
+}
+
+// exclude に無い inbox は従来どおり enqueue される。空の exclude map は
+// DeliverToFollowers と等価動作になる。
+func TestDeliverToFollowersExcluding_EmptyExclude_EnqueuesAll(t *testing.T) {
+	svc, enq, userRepo, followingRepo, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	followingRepo.RemoteInboxes["alice"] = []string{
+		"https://remote.example/inbox",
+		"https://other.example/users/x/inbox",
+	}
+
+	require.NoError(t, svc.DeliverToFollowersExcluding("alice", []byte(`{}`), map[string]bool{}))
+	require.Len(t, enq.calls, 2)
+}
+
+// exclude 側で全 inbox を省いた場合、enqueue されない。
+func TestDeliverToFollowersExcluding_ExcludesAll_NoEnqueue(t *testing.T) {
+	svc, enq, userRepo, followingRepo, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	followingRepo.RemoteInboxes["alice"] = []string{
+		"https://remote.example/inbox",
+	}
+
+	require.NoError(t, svc.DeliverToFollowersExcluding("alice", []byte(`{}`), map[string]bool{
+		"https://remote.example/inbox": true,
+	}))
+	assert.Empty(t, enq.calls)
+}
+
+// exclude で省いた残りに対しても shared inbox フラグは伝播する (#1811 / #2567)。
+func TestDeliverToFollowersExcluding_ThreadsSharedInboxFlag(t *testing.T) {
+	svc, enq, userRepo, followingRepo, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	sharedInbox := "https://remote.example/inbox"
+	personalInbox := "https://other.example/users/x/inbox"
+	followingRepo.RemoteInboxes["alice"] = []string{sharedInbox, personalInbox}
+	followingRepo.RemoteSharedInboxes[sharedInbox] = true
+
+	require.NoError(t, svc.DeliverToFollowersExcluding("alice", []byte(`{}`), map[string]bool{
+		"https://remote.example/inbox": true, // sharedInbox 側を除外
+	}))
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, personalInbox, enq.calls[0].Inbox)
+	assert.False(t, enq.calls[0].IsSharedInbox)
+}
+
+func TestDeliverToFollowersExcluding_RepoError(t *testing.T) {
+	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	failing := &failingListInboxesRepo{MockFollowingRepository: testutil.NewMockFollowingRepository()}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	svc = federation.NewDeliverService(&stubEnqueuer{}, userRepo, failing, keypairRepo, urls)
+	err := svc.DeliverToFollowersExcluding("alice", []byte(`{}`), map[string]bool{"https://x/inbox": true})
+	assert.Error(t, err)
+}
+
 func TestDeliverToUser_LocalRecipientSkipped(t *testing.T) {
 	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)
