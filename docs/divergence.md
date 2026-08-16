@@ -28,10 +28,10 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 3 | chat 15 | **0** |
 | API レスポンスの additive field | 3 (`runtime` / `mkGoVersion` / `chunkedUpload`) | reversi packed game の `crc32` 等 | — |
-| DB テーブル | 6 (+ bookkeeping 2) | 0 | 0 |
-| DB カラム | 10 (+ 未使用の残存列 3) | 3 | 0 |
+| DB テーブル | 7 (+ bookkeeping 2) | 0 | 0 |
+| DB カラム | 11 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
 | fork frontend の独自変更 | 10 tag (`-mk.1` ～ `-mk.10`) | — | — |
@@ -44,12 +44,13 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (45)
+### 1-1. mk-go にしかない (48)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
 | GET variant 追加 | 23 | `charts/*` 12 件、`emoji` / `emojis` / `federation/instances` / `federation/stats` / `fetch-rss` / `get-online-users-count` / `hashtags/trend` / `notes/featured` / `notes/reactions` / `server-info` / `bubble-game/ranking`。**対応する POST は両側にある**。ブラウザから直接叩く利便目的 |
 | cherrypick chat 拡張 | 15 | `chat/messages` / `chat/messages/create` / `read` / `update` / `reactions/create` / `reactions/delete`、`chat/rooms/joined` / `unmute` / `transfer-ownership` / `members/ban` / `members/update-membership` / `invitations/accept` / `delete` / `reject`、`chat/unread-count` |
+| 承認制の登録の審査 | 3 | `admin/signup-application/list` / `approve` / `reject` (#2555)。upstream に承認制が無いため対応物なし。scope は `read:admin:invite-codes` / `write:admin:invite-codes` を再利用する (承認は最終的に `registration_ticket` の発行につながり管轄が同じ。`internal/misc/permissions` は upstream misskey-js と完全一致させる契約があり mk-go 固有 scope を足せない) |
 | その他 / alias | 3 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim) |
 
 ランダムマッチ (`reversi/match` の `userId` 無し) は **local user 同士のみ**。待機列 (`reversi:matchAny`) に載るのはこのインスタンスで認証を通した local user だけなので、相手がリモートになることはない。upstream Misskey も yojo-art/cherrypick も**連合ランダムマッチは持っていない**ので意図的に揃えている。名指しの招待 (`userId` 指定) は従来どおり連合する。
@@ -81,7 +82,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 
 **逆方向の欠落はゼロ** — upstream の `@Entity` 76 テーブルと全共有カラムを mk-go が superset で保持している。
 
-### 2-1. mk-go 独自テーブル (8)
+### 2-1. mk-go 独自テーブル (9)
 
 | テーブル | 由来 | 理由 |
 |---|---|---|
@@ -90,19 +91,21 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `antenna_note_unread` | mk-go 独自 | per-user per-note の antenna 未読 |
 | `channel_note_unread` | mk-go 独自 | channel follower の未読追跡 |
 | `chunked_upload_session` | mk-go 独自 | 分割アップロード (#2313) の進行中セッション。S3 の `UploadId` はここでだけ保持しクライアントには露出しない。`user` への FK は張らない — CASCADE で行だけ消えると `AbortMultipartUpload` されない未完了マルチパートアップロードが孤児として課金され続けるため、期限切れ GC に回収させる |
+| `signup_application` | mk-go 独自 | 承認制の登録 (#2554 / #2555) の申請。**承認待ちを `user` 行として持たないための箱**で、`user` に承認列を足す設計だと TS へ切り替えた瞬間に承認待ち全員が有効なアカウントになる (TS はその列を知らないので素通りする)。連絡先は `(host, リモート user.id)` を鍵にする — username は相手サーバーでの改名で壊れる。同一連絡先で申請が二重に生きることは部分一意インデックス (`status IN ('pending','approved')`) で防ぐ。TS は未知のテーブルを無視するだけ |
 | `note_unread` | 準・独自 | upstream DB にも legacy 遺物として残るが 2026.7.0 の `models/` に entity は無く参照 0 件。mk-go はこれを実用し `/api/i` の `hasUnreadSpecifiedNotes` / `hasUnreadMentions` を Redis stream を舐めずに解決する。upstream legacy 版にある `noteChannelId` は mk-go の定義に無い (TS 製 DB では `CREATE TABLE IF NOT EXISTS` が no-op なので実害なし) |
 | `migrations` | drop-in 互換 | TypeORM の bookkeeping。mk-go 由来 DB に TS を後から繋いだ時に migration を再実行させないための seed。name は本家と同じ `ClassName+timestamp` 形式で 346 件を保持する (#2244 で短縮形から是正)。漏れは `TestMigrationSeed_CoversUpstream` が CI で検出する |
 | `schema_migrations` | tooling | golang-migrate 用 |
 
 `__chart__*` / `__chart_day__*` 24 テーブルは独自ではない (upstream では `models/` ではなく `core/chart/charts/entities/` で定義されるため、`models/` だけを見ると誤検出する)。
 
-### 2-2. 独自カラム (16 = 実使用 13 + 未使用の残存 3)
+### 2-2. 独自カラム (17 = 実使用 14 + 未使用の残存 3)
 
-うち **mk-go が実際に読み書きするのは 13 件** (cherrypick 由来 3 + mk-go 独自 10)。残り 3 件は fresh な mk-go DB に列だけ残る未使用列で、#2243 で依存を外した。
+うち **mk-go が実際に読み書きするのは 14 件** (cherrypick 由来 3 + mk-go 独自 11)。残り 3 件は fresh な mk-go DB に列だけ残る未使用列で、#2243 で依存を外した。
 
 | テーブル | カラム | 由来 | 理由 |
 |---|---|---|---|
 | `chat_message` | `emojis` / `isDelivering` / `isDeliverFailed` | cherrypick | 連合配送の状態追跡 |
+| `meta` | `approvalRequiredForSignup` | mk-go 独自 | 承認制の登録 (#2554) の有効化。**単体では登録を止めない** — 実際のゲートは `disableRegistration` + 招待コードで、承認は内部で `registration_ticket` を発行して通す。TS はこの列を認識しないので、TS へ戻すと承認制が単に無効になる (既存の挙動に戻るだけで壊れない) |
 | `user` | `isRoot` | mk-go 独自 | upstream は system_account 移行で DROP 済み。`role.Service.isRootUser` の fallback に必要 |
 | `meta` | `proxyAccountId` | mk-go 独自 | 同じく upstream は DROP 済み。`admin/update-proxy-account` が書き込む |
 | `note_favorite` | `createdAt` | mk-go 独自 | upstream は `deleteCreatedAt` で DROP 済み。`/api/i/favorites` の response 要件で復活 |
