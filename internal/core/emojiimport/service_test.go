@@ -4,6 +4,8 @@ import (
 	"archive/zip"
 	"bytes"
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"image"
@@ -300,4 +302,345 @@ func TestSetNow(t *testing.T) {
 	imp := emojiimport.NewImporter(deps)
 	imp.SetNow(func() time.Time { return time.Unix(42, 0) })
 	imp.SetNow(nil) // nil must be ignored
+}
+
+// --- 対象 2/3/4/5 用ヘルパー (既存 newDeps は変えずに追加) ---
+
+// newDepsWithFileRepo は newDeps に drive file repository を足したもの。
+// import で Drive に保存された実体を検査する新テストだけが使う。
+func newDepsWithFileRepo(t *testing.T, body []byte) (emojiimport.Deps, *testutil.MockUserRepository, *testutil.MockEmojiRepository, *testutil.MockDriveFileRepository, *drive.Service) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	_ = userRepo.Create(&model.User{ID: "admin"})
+	emojiRepo := testutil.NewMockEmojiRepository()
+	fileRepo := testutil.NewMockDriveFileRepository()
+	folderRepo := testutil.NewMockDriveFolderRepository()
+	folderRepo.FilesRef = fileRepo
+	storage := drive.NewLocalStorage(t.TempDir(), "https://example.com/files")
+	idGen, _ := id.NewGenerator("aidx")
+	uploader := drive.NewService(fileRepo, folderRepo, storage, idGen)
+	reader := &fakeDriveReader{body: body}
+	return emojiimport.Deps{
+		UserRepo:  userRepo,
+		EmojiRepo: emojiRepo,
+		Drive:     reader,
+		Uploader:  uploader,
+		IDGen:     idGen,
+	}, userRepo, emojiRepo, fileRepo, uploader
+}
+
+// pngBytesSize encodes a w×h RGBA image as PNG. 同名エントリを内容で区別する
+// ためにサイズ違いの PNG を作れる。
+func pngBytesSize(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	img.Set(0, 0, color.RGBA{R: 255, A: 255})
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// md5Hex returns the hex-encoded MD5 of b, matching drive.AnalyseFile's digest.
+func md5Hex(b []byte) string {
+	sum := md5.Sum(b)
+	return hex.EncodeToString(sum[:])
+}
+
+// --- 対象 2: zip ディレクトリ構造 / パストラバーサル ---
+//
+// エントリ索引は path.Base で正規化される (service.go L143) ため、ディレクトリを
+// 含むエントリ名でも basename として解決される。実装はファイル書出しを一切
+// 行わず (メモリ上で zip を読み Drive へ Upload するだけ)、外部パスへ
+// 読み書きする経路が無いことを固定する。
+
+func TestRun_NestedDirectoryEntry(t *testing.T) {
+	img := pngBytes(t)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"dir/smile.png", img},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+	_, err = repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+}
+
+func TestRun_MetaInSubdirectory(t *testing.T) {
+	img := pngBytes(t)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"nested/meta.json", meta},
+		{"dir/smile.png", img},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+	_, err = repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+}
+
+func TestRun_PathTraversalEntry(t *testing.T) {
+	// `../../evil.png` 相当のエントリ名も path.Base で `evil.png` に正規化される。
+	// 実体が画像でなくても import され、ディスク上の外部パスには一切触れない
+	// (in-memory で zip を読み、内容をそのまま Drive へ Upload するだけ)。
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "evil.png", "downloaded": true, "emoji": map[string]any{"name": "evil"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"../../evil.png", []byte("not an image but still stored")},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+	_, err = repo.FindByNameAndHost("evil", nil)
+	require.NoError(t, err)
+}
+
+func TestRun_DirectoryEntry(t *testing.T) {
+	img := pngBytes(t)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	// 末尾スラッシュの directory entry を含んでもエラーにならず、実ファイルだけ
+	// import される。
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"dir/", nil},
+		{"smile.png", img},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+	_, err = repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+}
+
+// --- 対象 3: 同名エントリの重複 (index は後勝ち) ---
+
+func TestRun_DuplicateImageEntry_LastWins(t *testing.T) {
+	first := pngBytesSize(t, 2, 2)
+	second := pngBytesSize(t, 3, 3)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"smile.png", first},
+		{"smile.png", second}, // 同名エントリは index で後勝ち
+	})
+	deps, _, repo, fileRepo, _ := newDepsWithFileRepo(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+
+	// drive file は 1 つだけ作られ、その内容 (= MD5) は 2 つ目の PNG と一致する。
+	require.Len(t, fileRepo.Files, 1)
+	var df *model.DriveFile
+	for _, f := range fileRepo.Files {
+		df = f
+	}
+	require.NotNil(t, df)
+	assert.Equal(t, md5Hex(second), df.MD5, "後勝ちの 2 つ目が保存される")
+
+	// emoji の originalUrl もその drive file を指す。
+	smile, err := repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+	assert.Equal(t, df.URL, smile.OriginalURL)
+}
+
+func TestRun_DuplicateMetaJSON_LastWins(t *testing.T) {
+	img := pngBytes(t)
+	// 先頭は不正な emoji 名を持つ meta、末尾が正しい meta。後勝ちで末尾が使われる。
+	badMeta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "bad!name"}},
+	})
+	goodMeta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"meta.json", badMeta},
+		{"meta.json", goodMeta},
+		{"smile.png", img},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+	_, err = repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+}
+
+func TestRun_DuplicateMetaJSON_LastBrokenFails(t *testing.T) {
+	img := pngBytes(t)
+	goodMeta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	// 末尾の meta.json が壊れていると job 全体が ErrMalformedMeta で失敗する
+	// (= 先頭の正しい meta に巻き戻さない)。
+	body := buildZip(t, []zipEntry{
+		{"meta.json", goodMeta},
+		{"meta.json", []byte("not json")},
+		{"smile.png", img},
+	})
+	deps, _, _, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	_, err := imp.Run(context.Background(), "admin", "f1")
+	assert.ErrorIs(t, err, emojiimport.ErrMalformedMeta)
+}
+
+func TestRun_SameBasenameDifferentDir(t *testing.T) {
+	first := pngBytesSize(t, 2, 2)
+	second := pngBytesSize(t, 3, 3)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	// a/smile.png と b/smile.png は index で後勝ちに 1 エントリへ畳まれ、
+	// import は 1 件になる。
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"a/smile.png", first},
+		{"b/smile.png", second},
+	})
+	deps, _, repo, fileRepo, _ := newDepsWithFileRepo(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+	require.Len(t, fileRepo.Files, 1)
+	_, err = repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+}
+
+// --- 対象 4: ファイルタイプ制限 ---
+//
+// replaceEmoji は内容を MIME 検知して drive.Service.Upload に渡す。system 所有
+// (User=nil) なので uploadableFileTypes ゲートは素通りし、upstream TS もファイル
+// タイプを制限しないため、「非画像でも拒否しない」のが現行の互換挙動。
+
+func TestRun_NonImageContent_StillImported(t *testing.T) {
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.txt", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"smile.txt", []byte("hello world")},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+
+	// drive.Upload が内容ベースで type を決める (text/plain)。
+	smile, err := repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+	require.NotNil(t, smile.Type)
+	assert.Equal(t, "text/plain", *smile.Type)
+}
+
+func TestRun_DisguisedExtension(t *testing.T) {
+	img := pngBytes(t)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png.txt", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"smile.png.txt", img},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+
+	// 拡張子ではなく内容で MIME が決まる (image/png)。
+	smile, err := repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+	require.NotNil(t, smile.Type)
+	assert.Equal(t, "image/png", *smile.Type)
+}
+
+// --- 対象 5: system 所有 / originalUrl 不変条件の直接アサート ---
+
+func TestRun_UploadedDriveFileIsSystemOwned(t *testing.T) {
+	img := pngBytes(t)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{{"meta.json", meta}, {"smile.png", img}})
+	deps, _, _, fileRepo, _ := newDepsWithFileRepo(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	_, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+
+	require.Len(t, fileRepo.Files, 1)
+	for _, f := range fileRepo.Files {
+		assert.Nil(t, f.UserID, "import された emoji 画像は system 所有 (User: nil) で保存される (#670)")
+	}
+}
+
+func TestRun_EmojiOriginalURL_MatchesDriveFileURL(t *testing.T) {
+	img := pngBytes(t)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	body := buildZip(t, []zipEntry{{"meta.json", meta}, {"smile.png", img}})
+	deps, _, repo, fileRepo, _ := newDepsWithFileRepo(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	_, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+
+	smile, err := repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+	require.Len(t, fileRepo.Files, 1)
+	var df *model.DriveFile
+	for _, f := range fileRepo.Files {
+		df = f
+	}
+	require.NotNil(t, df)
+
+	// 不変条件 (#722): emoji.originalUrl == drive_file.url。
+	assert.Equal(t, df.URL, smile.OriginalURL)
+	// imageProcessor 未配線なので webpublic は無く、publicUrl / type は本体に一致する。
+	assert.Equal(t, df.URL, smile.PublicURL)
+	require.NotNil(t, smile.Type)
+	assert.Equal(t, df.Type, *smile.Type)
 }
