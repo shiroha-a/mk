@@ -75,8 +75,9 @@ type stubTicketStore struct {
 	createErr error
 	markErr   error
 
-	pendingTkt string
-	pendingRow string
+	pendingTkt     string
+	pendingRow     string
+	markPendingErr error
 }
 
 func (s *stubTicketStore) FindByCode(string) (*model.RegistrationTicket, error) {
@@ -90,7 +91,7 @@ func (s *stubTicketStore) MarkUsed(ticketID, userID string) error {
 
 func (s *stubTicketStore) MarkPending(ticketID, pendingID string) error {
 	s.pendingTkt, s.pendingRow = ticketID, pendingID
-	return nil
+	return s.markPendingErr
 }
 
 func (s *stubTicketStore) Create(t *model.RegistrationTicket) error {
@@ -585,10 +586,29 @@ func TestApplicationRegister_EmailRequired_DiscardsTicketOnPendingFailure(t *tes
 	assert.Empty(t, env.apps.completedApp)
 }
 
-// 記録の失敗はアカウント作成を妨げない (pending は成立している)。
-func TestApplicationRegister_EmailRequired_BookkeepingFailureStillSucceeds(t *testing.T) {
-	env, pendingRepo, _, sent := newApprovalEnvWithEmail(t)
-	env.apps.markTicketErr = errors.New("boom")
+// **pending を作る前に、行ロック付きで申請の状態を見直す。** ここまでの状態確認は
+// ロック無しの読みなので、その後に期限切れになったり別の確認が完了したりしうる。
+// 素通しすると、期限切れの申請から確認メールが飛び、リンクを踏んだ時点で承認の
+// 記録に残らないアカウントが出来上がる。
+func TestApplicationRegister_EmailRequired_AbortsWhenApplicationSlippedAway(t *testing.T) {
+	env, pendingRepo, tickets, _ := newApprovalEnvWithEmail(t)
+	// 状態を見た後、ロックを取った時点では承認済みでなくなっていた状況。
+	env.apps.markTicketErr = signupapplication.ErrExpired
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"x@example.com"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "NOT_APPROVED")
+
+	assert.Empty(t, pendingRepo.Rows, "確認メールの経路に乗せない")
+	require.Len(t, tickets.created, 1)
+	assert.Equal(t, []string{tickets.created[0].ID}, tickets.deleted, "浮いた招待を残さない")
+}
+
+// MarkPending の失敗は再送防止窓が効かなくなるだけで、pending は成立している。
+func TestApplicationRegister_EmailRequired_MarkPendingFailureStillSucceeds(t *testing.T) {
+	env, pendingRepo, tickets, sent := newApprovalEnvWithEmail(t)
+	tickets.markPendingErr = errors.New("boom")
 
 	rec := doPost(env.handler.ApplicationRegister,
 		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"x@example.com"}`)

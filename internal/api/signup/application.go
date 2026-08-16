@@ -279,6 +279,16 @@ func (h *Handler) registerViaEmailConfirmation(
 	var ticketID *string
 	if ticket != nil {
 		ticketID = &ticket.ID
+		// **pending を作る前に、行ロック付きで申請の状態を見直す。** ここまでの
+		// 状態確認はロック無しの読みで、その後に申請が期限切れになったり別の
+		// 確認が完了したりしうる。素通しすると、期限切れの申請から確認メールが
+		// 飛び、リンクを踏んだ時点でアカウントが出来上がる (完了記録だけが
+		// 失敗して、承認の記録に残らないアカウントになる)。
+		if merr := h.applications.MarkTicket(app.ID, ticket.ID); merr != nil {
+			h.discardApprovalTicket(ticket)
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
+		}
 	}
 	appID := app.ID
 	pending, err := h.signupService.CreatePendingForApplication(username, email, password, ticketID, &appID)
@@ -292,17 +302,10 @@ func (h *Handler) registerViaEmailConfirmation(
 		// 分けると同じ画面の同じ操作で code が変わってしまう。
 		return h.signupServiceError(c, err)
 	}
-	if ticket != nil {
-		if h.ticketStore != nil {
-			if merr := h.ticketStore.MarkPending(ticket.ID, pending.ID); merr != nil {
-				// 再送防止窓が効かなくなるだけで pending は成立している。
-				c.Logger().Warnf("signup application: mark ticket pending failed: %v", merr)
-			}
-		}
-		if merr := h.applications.MarkTicket(app.ID, ticket.ID); merr != nil {
-			// **ここが落ちると、次の試行で前回の ticket を破棄できない。**
-			// pending は成立しているので 500 にはしないが、痕跡は残す。
-			c.Logger().Warnf("signup application: mark ticket failed: %v", merr)
+	if ticket != nil && h.ticketStore != nil {
+		if merr := h.ticketStore.MarkPending(ticket.ID, pending.ID); merr != nil {
+			// 再送防止窓が効かなくなるだけで pending は成立している。
+			c.Logger().Warnf("signup application: mark ticket pending failed: %v", merr)
 		}
 	}
 	h.sendSignupConfirmation(meta, email, pending.Code)
