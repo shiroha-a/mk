@@ -34,6 +34,7 @@ type stubApplications struct {
 	lastCode       string
 	markedTktApp   string
 	markedTkt      string
+	previousTkt    string
 	markTicketErr  error
 }
 
@@ -61,9 +62,14 @@ func (s *stubApplications) MarkCompleted(applicationID, userID, ticketID string)
 	return s.markErr
 }
 
-func (s *stubApplications) MarkTicket(applicationID, ticketID string) error {
+func (s *stubApplications) MarkTicket(applicationID, ticketID string) (string, error) {
 	s.markedTktApp, s.markedTkt = applicationID, ticketID
-	return s.markTicketErr
+	if s.markTicketErr != nil {
+		return "", s.markTicketErr
+	}
+	previous := s.previousTkt
+	s.previousTkt = ticketID
+	return previous, nil
 }
 
 // stubTicketStore satisfies TicketStore plus the optional issue / discard halves.

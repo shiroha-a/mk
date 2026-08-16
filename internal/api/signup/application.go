@@ -27,8 +27,9 @@ type SignupApplications interface {
 	ByClaimCode(code string) (*model.SignupApplication, error)
 	MarkCompleted(applicationID, userID, ticketID string) error
 	// MarkTicket records the ticket minted for an in-flight email-confirmation
-	// signup, leaving the application approved (#2571).
-	MarkTicket(applicationID, ticketID string) error
+	// signup, leaving the application approved (#2571). 置き換えた前の ticket ID
+	// を返す (#2576)。
+	MarkTicket(applicationID, ticketID string) (string, error)
 }
 
 // SetSignupApplications wires the approval-based signup flow (#2569).
@@ -217,13 +218,6 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 			apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
 	}
 
-	// **前回の試行で発行した ticket を破棄してから新しく発行する。** メール確認を
-	// 挟むと、届かなかった / アドレスを打ち間違えたときに登録をやり直すことになる。
-	// 積み上げると、届いた分をすべて確認して 1 つの承認から複数アカウントを作れる。
-	// 破棄すると古いメールのリンクは INVITATION_REVOKED になり、最新の試行だけが
-	// 通る。
-	h.discardStaleApprovalTicket(app)
-
 	ticket, err := h.mintApprovalTicket(app)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError,
@@ -256,6 +250,11 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 	if cerr := h.applications.MarkCompleted(app.ID, result.User.ID, ticketID); cerr != nil {
 		// 同上。申請の完了記録は監査用で、アカウントの成立とは独立。
 		c.Logger().Warnf("signup application: mark completed failed: %v", cerr)
+	} else if app.TicketID != nil && *app.TicketID != "" && *app.TicketID != ticketID {
+		// メール必須を切る前に始まっていた確認待ちの残骸。**完了が通ってから
+		// 破棄する** — 通ったということは、確認が先に走って ticket を消費した
+		// わけではない (その場合 MarkCompleted が ErrNotApproved で落ちる)。
+		h.discardApprovalTicket(&model.RegistrationTicket{ID: *app.TicketID})
 	}
 
 	h.fireSigninSideEffects(c, result.User.ID)
@@ -284,10 +283,22 @@ func (h *Handler) registerViaEmailConfirmation(
 		// 確認が完了したりしうる。素通しすると、期限切れの申請から確認メールが
 		// 飛び、リンクを踏んだ時点でアカウントが出来上がる (完了記録だけが
 		// 失敗して、承認の記録に残らないアカウントになる)。
-		if merr := h.applications.MarkTicket(app.ID, ticket.ID); merr != nil {
+		previous, merr := h.applications.MarkTicket(app.ID, ticket.ID)
+		if merr != nil {
 			h.discardApprovalTicket(ticket)
 			return c.JSON(http.StatusBadRequest,
 				apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
+		}
+		// **前回の試行で発行した ticket は、置き換えが通ってから破棄する。**
+		// 届かなかった / 打ち間違えたときのやり直しで積み上げると、届いた分を
+		// すべて確認できてしまう。破棄すれば古いリンクは INVITATION_REVOKED に
+		// なり、最新の試行だけが通る。
+		//
+		// 破棄を先にすると、確認が一足先に通っていた場合に**消費済みの ticket を
+		// 消して usedById の記録を失う**。行ロックの中で読んだ値をここで消すので、
+		// その場合は上の MarkTicket が ErrNotApproved で落ちて到達しない。
+		if previous != "" && previous != ticket.ID {
+			h.discardApprovalTicket(&model.RegistrationTicket{ID: previous})
 		}
 	}
 	appID := app.ID
@@ -311,15 +322,6 @@ func (h *Handler) registerViaEmailConfirmation(
 	h.sendSignupConfirmation(meta, email, pending.Code)
 	// TS の signup と同じく本体は返さない (frontend は確認メールを待つ)。
 	return c.NoContent(http.StatusNoContent)
-}
-
-// discardStaleApprovalTicket removes the ticket left over by a previous
-// in-flight attempt on the same application (#2571).
-func (h *Handler) discardStaleApprovalTicket(app *model.SignupApplication) {
-	if app == nil || app.TicketID == nil || *app.TicketID == "" {
-		return
-	}
-	h.discardApprovalTicket(&model.RegistrationTicket{ID: *app.TicketID})
 }
 
 // applicationForClaimCode resolves the caller's claim code, writing the error

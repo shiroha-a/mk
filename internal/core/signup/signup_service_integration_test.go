@@ -62,6 +62,7 @@ func newTxService(t *testing.T, db *gorm.DB) *signup.Service {
 	svc := signup.NewService(userRepo, metaRepo, idGen)
 	svc.SetUserPendingRepo(pendingRepo)
 	svc.SetTicketRepo(ticketRepo)
+	svc.SetSignupApplicationRepo(repository.NewSignupApplicationRepository(db))
 	svc.SetDB(db)
 	return svc
 }
@@ -359,4 +360,185 @@ type errorTicketRepo struct {
 
 func (r *errorTicketRepo) FindByIDForUpdateTx(_ *gorm.DB, _ string) (*model.RegistrationTicket, error) {
 	return nil, r.err
+}
+
+// insertApprovedApplication seeds an approved application for the tx tests.
+func insertApprovedApplication(t *testing.T, db *gorm.DB, id string) *model.SignupApplication {
+	t.Helper()
+	now := time.Now()
+	app := &model.SignupApplication{
+		ID:            id,
+		ClaimCodeHash: id + "-hash",
+		Status:        model.SignupApplicationApproved,
+		Answers:       []byte(`[]`),
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		ExpiresAt:     now.Add(24 * time.Hour),
+	}
+	require.NoError(t, db.Create(app).Error)
+	return app
+}
+
+// **1 つの承認から作れるアカウントは 1 つ。** 申請者が確認リンクを踏むのと登録
+// フォームの再送が重なると、2 つの pending が別々の ticket を持って両方生き残る。
+// ticket ロック (#604) は ticket が違うので直列化できず、申請行を掴んで初めて
+// 閉じる (#2576)。
+func TestPromotePending_SecondPendingCannotCreateAnotherAccount(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itapp_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+
+	// 同じ申請から 2 つの pending を作る (やり直しの残骸)。
+	appID := app.ID
+	p1, err := svc.CreatePendingForApplication(prefix+"one", "one@example.com", "hunter22", nil, &appID)
+	require.NoError(t, err)
+	p2, err := svc.CreatePendingForApplication(prefix+"two", "two@example.com", "hunter22", nil, &appID)
+	require.NoError(t, err)
+
+	// 1 つ目は通り、申請が同じ tx で completed になる。
+	res, err := svc.PromotePending(p1.Code)
+	require.NoError(t, err)
+	require.NotNil(t, res.SignupApplicationID)
+	assert.Equal(t, appID, *res.SignupApplicationID)
+	assert.True(t, res.SignupApplicationCompleted, "tx 内で確定させること")
+
+	var stored model.SignupApplication
+	require.NoError(t, db.Where("id = ?", appID).First(&stored).Error)
+	assert.Equal(t, model.SignupApplicationCompleted, stored.Status)
+	require.NotNil(t, stored.UsedByID)
+	assert.Equal(t, res.User.ID, *stored.UsedByID)
+
+	// 2 つ目は弾かれ、**ユーザーごと巻き戻る**。
+	_, err = svc.PromotePending(p2.Code)
+	require.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" = ?`, prefix+"two").Count(&count).Error)
+	assert.Equal(t, int64(0), count, "2 つ目のアカウントは作られない")
+
+	// pending も消えていない (巻き戻っている) ので、状況が追える。
+	var pendingCount int64
+	require.NoError(t, db.Model(&model.UserPending{}).
+		Where("id = ?", p2.ID).Count(&pendingCount).Error)
+	assert.Equal(t, int64(1), pendingCount)
+}
+
+// 期限切れの申請は承認済みでも通さない。
+func TestPromotePending_ExpiredApplicationIsRejected(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itexp_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+	require.NoError(t, db.Model(app).Update("expiresAt", time.Now().Add(-time.Hour)).Error)
+
+	appID := app.ID
+	pending, err := svc.CreatePendingForApplication(prefix+"late", "late@example.com", "hunter22", nil, &appID)
+	require.NoError(t, err)
+
+	_, err = svc.PromotePending(pending.Code)
+	require.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" = ?`, prefix+"late").Count(&count).Error)
+	assert.Equal(t, int64(0), count, "期限切れの申請からアカウントを作らない")
+}
+
+// 申請と無関係の pending は従来どおり通る。
+func TestPromotePending_WithoutApplicationUnaffected(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itnoapp_"
+	defer cleanupSignupRows(t, db, prefix)
+
+	svc := newTxService(t, db)
+	pending, err := svc.CreatePending(prefix+"plain", "plain@example.com", "hunter22", nil)
+	require.NoError(t, err)
+
+	res, err := svc.PromotePending(pending.Code)
+	require.NoError(t, err)
+	assert.Nil(t, res.SignupApplicationID)
+	assert.False(t, res.SignupApplicationCompleted)
+}
+
+// 申請行が消えていたら通さない。**「見つからない = 承認されていない」に倒す** —
+// 承認の裏付けが無いままアカウントを作らない。
+func TestPromotePending_MissingApplicationIsRejected(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itgone_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+	appID := app.ID
+	pending, err := svc.CreatePendingForApplication(prefix+"gone", "gone@example.com", "hunter22", nil, &appID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.Where("id = ?", appID).Delete(&model.SignupApplication{}).Error)
+
+	_, err = svc.PromotePending(pending.Code)
+	require.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" = ?`, prefix+"gone").Count(&count).Error)
+	assert.Equal(t, int64(0), count)
+}
+
+// 却下済みの申請も通さない。
+func TestPromotePending_RejectedApplicationIsRejected(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itrej_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+	appID := app.ID
+	pending, err := svc.CreatePendingForApplication(prefix+"rej", "rej@example.com", "hunter22", nil, &appID)
+	require.NoError(t, err)
+
+	require.NoError(t, db.Model(app).Update("status", model.SignupApplicationRejected).Error)
+
+	_, err = svc.PromotePending(pending.Code)
+	require.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+}
+
+// 招待 ticket 経由でも申請が確定し、ticket ID が申請に記録される。
+func TestPromotePending_ApplicationRecordsConsumedTicket(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "ittkt_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxService(t, db)
+	app := insertApprovedApplication(t, db, prefix+"app1")
+	appID := app.ID
+
+	expires := time.Now().Add(time.Hour)
+	ticket := &model.RegistrationTicket{
+		ID: prefix + "tkt1", Code: prefix + "code1", ExpiresAt: &expires,
+	}
+	require.NoError(t, db.Create(ticket).Error)
+
+	ticketID := ticket.ID
+	pending, err := svc.CreatePendingForApplication(prefix+"tk", "tk@example.com", "hunter22", &ticketID, &appID)
+	require.NoError(t, err)
+
+	res, err := svc.PromotePending(pending.Code)
+	require.NoError(t, err)
+	assert.True(t, res.SignupApplicationCompleted)
+
+	var stored model.SignupApplication
+	require.NoError(t, db.Where("id = ?", appID).First(&stored).Error)
+	require.NotNil(t, stored.TicketID)
+	assert.Equal(t, ticketID, *stored.TicketID, "消費した ticket を申請に残す")
 }

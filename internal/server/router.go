@@ -1454,6 +1454,9 @@ func (s *Server) setupRoutes() {
 	// Signup (public)
 	userPendingRepo := repository.NewUserPendingRepository(s.db)
 	signupService.SetUserPendingRepo(userPendingRepo)
+	// 承認制の登録を確認メールに乗せた経路 (#2571) で、申請の確定をアカウント
+	// 作成と同じ tx に入れる (#2576)。
+	signupService.SetSignupApplicationRepo(repository.NewSignupApplicationRepository(s.db))
 	// PromotePending を transaction 化して partial failure rollback と
 	// invitation ticket の SELECT FOR UPDATE ロックを有効化する (#600 item 2 + #604)。
 	signupService.SetDB(s.db)

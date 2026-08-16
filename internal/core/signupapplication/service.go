@@ -250,17 +250,28 @@ type decision struct {
 // 登録をやり直すたびに ticket と pending が積み上がり、届いたメールを両方確認
 // すれば 1 つの承認から複数アカウントを作れてしまう。次の試行はここに記録された
 // ticket を破棄してから新しく発行する。
-func (s *Service) MarkTicket(applicationID, ticketID string) error {
+// 置き換えた前の ticket ID を返す。**行ロックの中で読んだ値**なので、これを
+// 破棄すれば「確認が先に通って消費された ticket を消してしまう」ことが無い
+// (その場合はこの呼び出し自体が ErrNotApproved で落ちる)。
+func (s *Service) MarkTicket(applicationID, ticketID string) (string, error) {
 	now := s.clock()
-	return s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
+	previous := ""
+	err := s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
 		if cur.Status != model.SignupApplicationApproved {
 			return decision{err: ErrNotApproved}
 		}
 		if !now.Before(cur.ExpiresAt) {
 			return expireDecision()
 		}
+		if cur.TicketID != nil {
+			previous = *cur.TicketID
+		}
 		return decision{fields: map[string]any{"ticketId": ticketID}}
 	})
+	if err != nil {
+		return "", err
+	}
+	return previous, nil
 }
 
 func (s *Service) transition(

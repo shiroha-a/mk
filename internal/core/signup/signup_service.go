@@ -70,6 +70,12 @@ var (
 	// ErrPendingExpired is returned when the pending signup is past its TTL.
 	// TTL は ID (ULID) 由来 timestamp から算出する (createdAt カラム不在のため)。
 	ErrPendingExpired = errors.New("pending signup expired")
+	// ErrApplicationNotApproved is returned when the approval application a
+	// pending signup belongs to is no longer usable (#2576).
+	//
+	// **アカウント作成と同じトランザクションで判定する。** 別々にすると、確認と
+	// 再送が重なったときに 1 つの承認から 2 アカウント作れる。
+	ErrApplicationNotApproved = errors.New("signup application is not approved")
 	// ErrInvitationAlreadyUsed is returned when the invitation ticket linked to
 	// a pending signup has already been consumed by another user. transaction
 	// 経路で SELECT FOR UPDATE 後に usedById を確認することで concurrent burst
@@ -108,6 +114,7 @@ type Service struct {
 	keypairExtraRepo repository.UserKeypairExtraRepository
 	pendingRepo      repository.UserPendingRepository
 	ticketRepo       repository.RegistrationTicketRepository
+	appRepo          repository.SignupApplicationRepository
 	// usedUsernameRepo は削除済 account の username 再利用を弾く (#2080)。
 	// optional (nil なら used_usernames チェックを skip、後方互換)。
 	usedUsernameRepo repository.UsedUsernameRepository
@@ -168,6 +175,13 @@ func (s *Service) isUsedUsername(lower string) bool {
 // 併用時の race fix (#604) に必須。
 func (s *Service) SetTicketRepo(r repository.RegistrationTicketRepository) {
 	s.ticketRepo = r
+}
+
+// SetSignupApplicationRepo wires the approval application repository so
+// PromotePending can settle the application inside the same transaction
+// (#2576)。未配線なら handler 側の best-effort な MarkCompleted に委ねる。
+func (s *Service) SetSignupApplicationRepo(r repository.SignupApplicationRepository) {
+	s.appRepo = r
 }
 
 // SetUserPendingRepo wires the user_pending repository so CreatePending /
@@ -263,9 +277,13 @@ type SignupResult struct {
 	// 同じく MeDetailed そのものなので、packer に渡す profile が要る。
 	Profile *model.UserProfile
 	// SignupApplicationID は承認制 (#2571) の確認メール経路で pending row から
-	// 復元した申請 ID。handler がこれを見て申請を completed にする。**返さないと
-	// 申請が approved のまま残り、1 つの承認から複数アカウントを作れる。**
+	// 復元した申請 ID。**返さないと申請が approved のまま残り、1 つの承認から
+	// 複数アカウントを作れる。**
 	SignupApplicationID *string
+	// SignupApplicationCompleted は Service が tx 内で申請を completed にしたか
+	// (#2576)。false なら handler 側で best-effort に MarkCompleted する
+	// (非 tx 経路 / repo 未配線)。InvitationTicketConsumed と同じ形。
+	SignupApplicationCompleted bool
 }
 
 // Signup creates a new local user with the given username and password.
@@ -539,6 +557,7 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 	userID := s.idGen.Generate(now)
 
 	var resultUser *model.User
+	appSettled := false
 	txErr := s.db.Transaction(func(tx *gorm.DB) error {
 		// invitation ticket がある場合は最初に SELECT FOR UPDATE で lock し、
 		// 既に usedById がセットされていれば早期 return。これで concurrent
@@ -562,6 +581,19 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 				return ErrInvitationAlreadyUsed
 			}
 			lockedTicketID = ticket.ID
+		}
+
+		// 承認制 (#2571) の申請も同じ tx 内で行ロックして確定させる (#2576)。
+		//
+		// **アカウント作成と別々にすると 1 つの承認から 2 アカウント作れる。**
+		// 申請者が確認リンクを踏むのと登録フォームの再送が重なると、2 つの
+		// pending が別々の ticket を持って両方生き残る。ticket ロック (#604) は
+		// ticket が違うので直列化できない。申請行を掴んで初めて閉じる。
+		if pending.SignupApplicationID != nil && s.appRepo != nil {
+			if err := s.settleApplicationTx(tx, *pending.SignupApplicationID, userID, lockedTicketID, now); err != nil {
+				return err
+			}
+			appSettled = true
 		}
 
 		// username collision チェック (tx の visibility で in-flight 行も見える)
@@ -662,8 +694,9 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 		// 招待 ticket がある場合のみ tx 内で MarkUsedTx 済 → consumed = true。
 		// 非招待 pending では nil なので consumed = false で返し、handler 側でも
 		// 何もしない (InvitationTicketID nil で早期 return)。
-		InvitationTicketConsumed: pending.InvitationTicketID != nil,
-		SignupApplicationID:      pending.SignupApplicationID,
+		InvitationTicketConsumed:   pending.InvitationTicketID != nil,
+		SignupApplicationID:        pending.SignupApplicationID,
+		SignupApplicationCompleted: appSettled,
 	}, nil
 }
 
@@ -741,6 +774,41 @@ func (s *Service) promotePendingNoTx(pending *model.UserPending) (*SignupResult,
 		InvitationTicketID:  pending.InvitationTicketID,
 		SignupApplicationID: pending.SignupApplicationID,
 	}, nil
+}
+
+// settleApplicationTx locks the approval application and marks it completed
+// inside the caller's transaction (#2576).
+//
+// core/signupapplication.Service.MarkCompleted と同じ判定を、アカウント作成と
+// 同じ tx で行う。**ここで弾いた場合はユーザー作成ごと巻き戻る**のが要点で、
+// 「作ってから完了記録に失敗する」形にすると承認の記録に残らないアカウントが
+// 残る。
+func (s *Service) settleApplicationTx(tx *gorm.DB, applicationID, userID, ticketID string, now time.Time) error {
+	app, err := s.appRepo.FindByIDForUpdateTx(tx, applicationID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			slog.Warn("promote pending: signup application missing",
+				"applicationId", applicationID)
+			return ErrApplicationNotApproved
+		}
+		return err
+	}
+	if app.Status != model.SignupApplicationApproved {
+		return ErrApplicationNotApproved
+	}
+	// 期限切れは承認済みでも通さない。MarkCompleted と同じ判定。
+	if !now.Before(app.ExpiresAt) {
+		return ErrApplicationNotApproved
+	}
+	fields := map[string]any{
+		"status":    model.SignupApplicationCompleted,
+		"usedById":  userID,
+		"updatedAt": now,
+	}
+	if ticketID != "" {
+		fields["ticketId"] = ticketID
+	}
+	return s.appRepo.UpdateFieldsTx(tx, applicationID, fields)
 }
 
 // isReservedUsername reports whether lower (already lowercased) matches any

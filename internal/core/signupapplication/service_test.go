@@ -246,11 +246,14 @@ func TestMarkTicket(t *testing.T) {
 	require.NoError(t, err)
 
 	t.Run("pending cannot record a ticket", func(t *testing.T) {
-		assert.ErrorIs(t, svc.MarkTicket(app.ID, "t1"), ErrNotApproved)
+		_, err := svc.MarkTicket(app.ID, "t1")
+		assert.ErrorIs(t, err, ErrNotApproved)
 	})
 
 	require.NoError(t, svc.Approve(app.ID, "mod1"))
-	require.NoError(t, svc.MarkTicket(app.ID, "t1"))
+	previous, err := svc.MarkTicket(app.ID, "t1")
+	require.NoError(t, err)
+	assert.Empty(t, previous, "初回は置き換える前の ticket が無い")
 
 	stored, err := svc.Get(app.ID)
 	require.NoError(t, err)
@@ -259,18 +262,24 @@ func TestMarkTicket(t *testing.T) {
 	assert.Equal(t, "t1", *stored.TicketID)
 	assert.Nil(t, stored.UsedByID, "まだ誰も登録していない")
 
-	// やり直しで別の ticket に差し替わる。
-	require.NoError(t, svc.MarkTicket(app.ID, "t2"))
+	// やり直しで別の ticket に差し替わる。**置き換えた前の ticket を返す** —
+	// 行ロックの中で読んだ値なので、これを破棄すれば消費済みの ticket を消して
+	// usedById の記録を失うことが無い (#2576)。
+	previous, err = svc.MarkTicket(app.ID, "t2")
+	require.NoError(t, err)
+	assert.Equal(t, "t1", previous)
 	stored, err = svc.Get(app.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "t2", *stored.TicketID)
 
 	// 記録した後でも完了できる (確認メールの経路の終点)。
 	require.NoError(t, svc.MarkCompleted(app.ID, "u1", "t2"))
-	assert.ErrorIs(t, svc.MarkTicket(app.ID, "t3"), ErrNotApproved)
+	_, err = svc.MarkTicket(app.ID, "t3")
+	assert.ErrorIs(t, err, ErrNotApproved)
 
 	t.Run("not found", func(t *testing.T) {
-		assert.ErrorIs(t, svc.MarkTicket("no-such-id", "t1"), ErrNotFound)
+		_, err := svc.MarkTicket("no-such-id", "t1")
+		assert.ErrorIs(t, err, ErrNotFound)
 	})
 
 	t.Run("expired", func(t *testing.T) {
@@ -278,7 +287,8 @@ func TestMarkTicket(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, svc.Approve(other.ID, "mod1"))
 		*now = now.Add(DefaultTTL)
-		assert.ErrorIs(t, svc.MarkTicket(other.ID, "t9"), ErrExpired)
+		_, err = svc.MarkTicket(other.ID, "t9")
+		assert.ErrorIs(t, err, ErrExpired)
 
 		expired, err := svc.Get(other.ID)
 		require.NoError(t, err)

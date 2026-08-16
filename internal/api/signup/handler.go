@@ -347,6 +347,10 @@ func (h *Handler) SignupPending(c echo.Context) error {
 			return duplicatedUsernameError(c)
 		case coresignup.ErrInvitationAlreadyUsed:
 			return apierr.FastifyReply(c, http.StatusBadRequest, "INVITATION_ALREADY_USED")
+		case coresignup.ErrApplicationNotApproved:
+			// 承認が既に使われている / 期限切れ。**アカウントは作られていない**
+			// (同じ tx で巻き戻る、#2576)。
+			return apierr.FastifyReply(c, http.StatusBadRequest, "NOT_APPROVED")
 		case coresignup.ErrInvitationRevoked:
 			// admin が ticket を削除した状態 (#610 item 2)。AlreadyUsed と区別。
 			return apierr.FastifyReply(c, http.StatusBadRequest, "INVITATION_REVOKED")
@@ -363,7 +367,9 @@ func (h *Handler) SignupPending(c echo.Context) error {
 	// 承認制 + メール必須の登録はここで初めてアカウントになる (#2571)。
 	// **申請を completed にしないと approved のまま残り、同じクレームコードで
 	// 何度でも登録を始められる。**
-	if result.SignupApplicationID != nil && h.applications != nil {
+	// tx 経路では Service が同じ tx 内で確定済み (#2576)。ここで重ねて呼ぶと
+	// ErrNotApproved が warn として出るだけなので、済んでいるなら触らない。
+	if result.SignupApplicationID != nil && !result.SignupApplicationCompleted && h.applications != nil {
 		ticketID := ""
 		if result.InvitationTicketID != nil {
 			ticketID = *result.InvitationTicketID
