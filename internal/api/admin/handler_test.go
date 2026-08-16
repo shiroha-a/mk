@@ -3689,3 +3689,14 @@ func TestAdminMeta_ChunkedUploadFields(t *testing.T) {
 	assert.EqualValues(t, 8, resp["chunkedUploadMaxSessionsPerUser"])
 	assert.EqualValues(t, 2048, resp["chunkedUploadMaxPendingMbPerUser"])
 }
+
+// 承認制のフラグは管理画面のトグルが読むので admin/meta に出す (#2554)。
+// update-meta は generic passthrough なので書き込み側の配線は不要。
+func TestAdminMeta_ApprovalRequiredForSignup(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x", ApprovalRequiredForSignup: true}
+
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"approvalRequiredForSignup":true`)
+}

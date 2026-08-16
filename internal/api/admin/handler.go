@@ -1213,8 +1213,9 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"iconUrl":       m.IconURL,
 		"app192IconUrl": m.App192IconURL, "app512IconUrl": m.App512IconURL,
 		"defaultLightTheme": m.DefaultLightTheme, "defaultDarkTheme": m.DefaultDarkTheme,
-		"disableRegistration":    m.DisableRegistration,
-		"emailRequiredForSignup": m.EmailRequiredForSignup,
+		"disableRegistration":       m.DisableRegistration,
+		"emailRequiredForSignup":    m.EmailRequiredForSignup,
+		"approvalRequiredForSignup": m.ApprovalRequiredForSignup,
 		// Cache
 		"cacheRemoteFiles":          m.CacheRemoteFiles,
 		"cacheRemoteSensitiveFiles": m.CacheRemoteSensitiveFiles,

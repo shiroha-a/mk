@@ -1,0 +1,13 @@
+-- approvalRequiredForSignup: 承認制の登録を有効にするフラグ (#2554 / #2555)。
+--
+-- 有効時、登録は「他の Misskey サーバーのアカウントを連絡先として申請し、管理者の
+-- 審査を経てから登録画面に進む」流れになる (申請の実体は signup_application)。
+--
+-- **単体では登録を止めない。** 実際のゲートは既存の disableRegistration + 招待
+-- コードで、承認は内部で registration_ticket を発行することで通す。つまり
+-- disableRegistration を false にしたまま承認制を有効にしても、直接登録の口が
+-- 開いたままになり承認の意味が無い。両方を設定する運用が前提。
+--
+-- TS はこの列を認識しないので、TS へ戻すと承認制は単に無効になる (既存の
+-- disableRegistration + 招待コードの挙動に戻るだけで、壊れはしない)。
+ALTER TABLE "meta" ADD COLUMN IF NOT EXISTS "approvalRequiredForSignup" boolean NOT NULL DEFAULT false;

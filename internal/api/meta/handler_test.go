@@ -820,3 +820,30 @@ func TestMeta_ChunkedUploadCapabilityInLiteResponse(t *testing.T) {
 	require.NotNil(t, resp["chunkedUpload"])
 	assert.Equal(t, float64(5*1024*1024), resp["chunkedUpload"].(map[string]any)["chunkSize"])
 }
+
+// 承認制かどうかは登録ページが分岐に使うので、公開 meta に出す (#2554)。
+// **features 側にも出す** — frontend は features を feature detection に使う。
+func TestMeta_ApprovalRequiredForSignup(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		t.Run(map[bool]string{true: "enabled", false: "disabled"}[enabled], func(t *testing.T) {
+			h, metaRepo := newTestHandler()
+			metaRepo.Meta = &model.Meta{ID: "x", ApprovalRequiredForSignup: enabled}
+
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPost, "/api/meta", nil)
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			require.NoError(t, h.Meta(c))
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+			assert.Equal(t, enabled, body["approvalRequiredForSignup"])
+
+			features, ok := body["features"].(map[string]any)
+			require.True(t, ok, "features should be an object")
+			assert.Equal(t, enabled, features["approvalRequiredForSignup"])
+		})
+	}
+}

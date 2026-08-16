@@ -35,6 +35,11 @@ type Meta struct {
 	CacheRemoteFiles          bool `gorm:"column:cacheRemoteFiles;default:false" json:"cacheRemoteFiles"`
 	CacheRemoteSensitiveFiles bool `gorm:"column:cacheRemoteSensitiveFiles;default:true" json:"cacheRemoteSensitiveFiles"`
 	EmailRequiredForSignup    bool `gorm:"column:emailRequiredForSignup;default:false" json:"emailRequiredForSignup"`
+	// ApprovalRequiredForSignup turns on approval-based registration (#2554)。
+	// mk-go 独自。**単体では登録を止めない** — 実際のゲートは
+	// disableRegistration + 招待コードで、承認は内部で registration_ticket を
+	// 発行して通す。両方を設定する運用が前提。
+	ApprovalRequiredForSignup bool `gorm:"column:approvalRequiredForSignup;default:false" json:"approvalRequiredForSignup"`
 
 	// CAPTCHA
 	EnableHcaptcha     bool    `gorm:"column:enableHcaptcha;default:false" json:"enableHcaptcha"`
