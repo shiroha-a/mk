@@ -2562,11 +2562,14 @@ func mockILIKE(value, substr string) bool {
 //
 // FetchCalls tracks how many times Fetch has been invoked. Tests asserting
 // perf invariants (例: "Create が meta を 1 度しか fetch しない") can read
-// this counter directly. zero-value initialised, so existing tests that
-// don't touch FetchCalls are unaffected. Not goroutine-safe (= no atomic);
-// callers that run Fetch concurrently and inspect the counter must guard
-// access externally — handler tests are sequential per-test so this is OK.
+// this counter directly.
+//
+// **Fetch と Update は mutex で守る。** 競合を再現する test (承認制の同時登録、
+// #2580) は同じ handler を複数 goroutine から叩くので、素の counter だと
+// -race が本題と無関係な場所で落ちる。counter の直接読み出しは呼び出し元の
+// goroutine 内で完結する前提のまま (逐次 test で使う)。
 type MockMetaRepository struct {
+	mu         sync.Mutex
 	Meta       *model.Meta
 	FetchCalls int
 }
@@ -2576,6 +2579,8 @@ func NewMockMetaRepository() *MockMetaRepository {
 }
 
 func (m *MockMetaRepository) Fetch() (*model.Meta, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	m.FetchCalls++
 	if m.Meta == nil {
 		return nil, ErrNotFound
@@ -2584,6 +2589,8 @@ func (m *MockMetaRepository) Fetch() (*model.Meta, error) {
 }
 
 func (m *MockMetaRepository) Update(fields map[string]any) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.Meta == nil {
 		m.Meta = &model.Meta{ID: "x"}
 	}
