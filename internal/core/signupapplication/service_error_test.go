@@ -95,7 +95,7 @@ func TestApply_RetriesOnCodeCollision(t *testing.T) {
 	repo := &stubRepo{createErrs: []error{repository.ErrSignupApplicationCodeCollision}}
 	svc := newStubService(t, repo)
 
-	app, code, err := svc.Apply("")
+	app, code, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	assert.NotEmpty(t, code)
 	assert.NotNil(t, app)
@@ -110,14 +110,14 @@ func TestApply_GivesUpAfterRepeatedCollisions(t *testing.T) {
 	}
 	svc := newStubService(t, &stubRepo{createErrs: errs})
 
-	_, _, err := svc.Apply("")
+	_, _, err := svc.Apply(testAnswers())
 	assert.Error(t, err)
 }
 
 func TestErrorPaths(t *testing.T) {
 	t.Run("Apply wraps a create failure", func(t *testing.T) {
 		svc := newStubService(t, &stubRepo{createErrs: []error{errBoom}})
-		_, _, err := svc.Apply("")
+		_, _, err := svc.Apply(testAnswers())
 		assert.ErrorIs(t, err, errBoom)
 	})
 

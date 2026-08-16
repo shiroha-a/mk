@@ -3786,3 +3786,74 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// 申請フォームの定義を検証する (#2570)。
+//
+// **上限を置かないと管理者が自分で壊せる。** 保存してから壊れているのに気づく形に
+// しないよう、update-meta で弾く。
+func TestUpdateMeta_SignupApplicationForm(t *testing.T) {
+	tests := []struct {
+		name         string
+		body         string
+		wantRejected bool
+	}{
+		{
+			name: "valid definition",
+			body: `{"signupApplicationForm":[{"label":"動機","type":"textarea","required":true,"maxLength":500}]}`,
+		},
+		{name: "empty definition", body: `{"signupApplicationForm":[]}`},
+		{
+			name:         "unknown type",
+			body:         `{"signupApplicationForm":[{"label":"x","type":"password"}]}`,
+			wantRejected: true,
+		},
+		{
+			name:         "empty label",
+			body:         `{"signupApplicationForm":[{"label":"  ","type":"text"}]}`,
+			wantRejected: true,
+		},
+		{
+			name:         "max length over the ceiling",
+			body:         `{"signupApplicationForm":[{"label":"x","type":"text","maxLength":999999}]}`,
+			wantRejected: true,
+		},
+		{
+			name:         "not an array",
+			body:         `{"signupApplicationForm":{"label":"x"}}`,
+			wantRejected: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, metaRepo, _ := newTestHandler(t)
+			metaRepo.Meta = &model.Meta{ID: "x"}
+
+			rec := doPost(h.UpdateMeta, tt.body, adminUser)
+			if tt.wantRejected {
+				assert.Equal(t, http.StatusBadRequest, rec.Code)
+				return
+			}
+			assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		})
+	}
+}
+
+// 送られてこなければ触らない (部分更新)。
+func TestUpdateMeta_SignupApplicationForm_Absent(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
+
+	rec := doPost(h.UpdateMeta, `{"name":"x"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+// **未知のキーを jsonb に残さない。** 残すと後で読み手を混乱させる。
+func TestUpdateMeta_SignupApplicationForm_Normalizes(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
+
+	rec := doPost(h.UpdateMeta,
+		`{"signupApplicationForm":[{"label":"動機","type":"text","bogus":"nope"}]}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.NotContains(t, string(metaRepo.Meta.SignupApplicationForm), "bogus")
+}

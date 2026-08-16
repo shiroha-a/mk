@@ -21,14 +21,15 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -37,10 +38,6 @@ import (
 // **短くしないこと。** 承認から登録までの間に相手インスタンスが一時的に落ちる
 // ことは珍しくない。1 日にすると、復旧すれば通ったはずの人が期限切れで落ちる。
 const DefaultTTL = 7 * 24 * time.Hour
-
-// MaxReasonLength bounds the free-text application reason. `reason` 列の
-// varchar(2048) に合わせる (超過は DB エラーではなく検証エラーで返す)。
-const MaxReasonLength = 2048
 
 var (
 	// ErrNotFound is returned when the application does not exist.
@@ -57,8 +54,6 @@ var (
 	// まま残りうる (掃除は遅延反映) ので、まとめて「審査待ちではない」と返すと
 	// 管理者には「審査待ちに見えるのに審査待ちではない」という説明になる。
 	ErrExpired = errors.New("signupapplication: application has expired")
-	// ErrReasonTooLong is returned when the free-text reason exceeds the limit.
-	ErrReasonTooLong = errors.New("signupapplication: reason is too long")
 )
 
 // Service manages signup applications.
@@ -98,32 +93,28 @@ func (s *Service) SetTTL(d time.Duration) {
 //
 // **コードの平文を返すのはここだけ。** 保存するのは hash で、呼び出し側が申請者へ
 // 1 度だけ見せる。失くしたら再申請してもらうしかない (伝える経路が無い)。
-func (s *Service) Apply(reason string) (*model.SignupApplication, string, error) {
-	reason = strings.TrimSpace(reason)
-	// rune 単位で数える。varchar(2048) は文字数なので、byte で見ると日本語が
-	// 通らなくなる。
-	if len([]rune(reason)) > MaxReasonLength {
-		return nil, "", ErrReasonTooLong
+func (s *Service) Apply(answers []Answer) (*model.SignupApplication, string, error) {
+	encoded, err := json.Marshal(answers)
+	if err != nil {
+		return nil, "", fmt.Errorf("signupapplication: marshal answers: %w", err)
 	}
 
 	now := s.clock()
 	// 衝突は crypto/rand なので実質起きないが、**黙って別の申請を上書きしない**
 	// ように採り直す。
 	for attempt := range claimCodeAttempts {
-		code, err := NewClaimCode()
-		if err != nil {
-			return nil, "", err
+		code, cerr := NewClaimCode()
+		if cerr != nil {
+			return nil, "", cerr
 		}
 		app := &model.SignupApplication{
 			ID:            s.idGen.Generate(now),
 			ClaimCodeHash: HashClaimCode(code),
 			Status:        model.SignupApplicationPending,
+			Answers:       datatypes.JSON(encoded),
 			CreatedAt:     now,
 			UpdatedAt:     now,
 			ExpiresAt:     now.Add(s.ttl),
-		}
-		if reason != "" {
-			app.Reason = &reason
 		}
 		err = s.repo.Create(app)
 		switch {

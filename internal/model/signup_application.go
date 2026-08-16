@@ -1,6 +1,10 @@
 package model
 
-import "time"
+import (
+	"time"
+
+	"gorm.io/datatypes"
+)
 
 // SignupApplication status values.
 //
@@ -37,8 +41,12 @@ type SignupApplication struct {
 	// 保存すると DB が漏れた時点で全申請が乗っ取れる。
 	ClaimCodeHash string `gorm:"column:claimCodeHash;type:varchar(64);not null;uniqueIndex" json:"-"`
 
-	Status string  `gorm:"column:status;type:varchar(16);not null;default:'pending'" json:"status"`
-	Reason *string `gorm:"column:reason;type:varchar(2048)" json:"reason"`
+	Status string `gorm:"column:status;type:varchar(16);not null;default:'pending'" json:"status"`
+
+	// Answers holds the submitted answers with the label each was asked under
+	// (#2570). **ラベルを同梱するのが要点** — 定義を後から変えても、既存申請が
+	// どの設問への答えだったか分かる。
+	Answers datatypes.JSON `gorm:"column:answers;type:jsonb;not null;default:'[]'" json:"answers"`
 
 	// TicketID is the registration_ticket minted on registration. コードは
 	// 利用者に渡さず、登録時にサーバー内部で消費する。

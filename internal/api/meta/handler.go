@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/datatypes"
 )
 
 // ProxyAccountResolver returns the username of the "proxy" system account.
@@ -115,22 +116,24 @@ func (h *Handler) Meta(c echo.Context) error {
 		// 承認制かどうかは登録ページが分岐に使うので公開する
 		// (emailRequiredForSignup と同じ扱い、#2554)。
 		"approvalRequiredForSignup": m.ApprovalRequiredForSignup,
-		"enableHcaptcha":            m.EnableHcaptcha,
-		"hcaptchaSiteKey":           m.HcaptchaSiteKey,
-		"enableRecaptcha":           m.EnableRecaptcha,
-		"recaptchaSiteKey":          m.RecaptchaSiteKey,
-		"enableTurnstile":           m.EnableTurnstile,
-		"turnstileSiteKey":          m.TurnstileSiteKey,
-		"themeColor":                m.ThemeColor,
-		"bannerUrl":                 m.BannerURL,
-		"backgroundImageUrl":        m.BackgroundImageURL,
-		"logoImageUrl":              m.LogoImageURL,
-		"iconUrl":                   m.IconURL,
-		"cacheRemoteFiles":          m.CacheRemoteFiles,
-		"enableServiceWorker":       m.EnableServiceWorker,
-		"swPublickey":               m.SwPublicKey,
-		"serverRules":               strArrayOrEmpty(m.ServerRules),
-		"maxNoteTextLength":         3000,
+		// 申請フォームの定義。申請ページが描画に使う (#2570)。
+		"signupApplicationForm": jsonArrayOrEmpty(m.SignupApplicationForm),
+		"enableHcaptcha":        m.EnableHcaptcha,
+		"hcaptchaSiteKey":       m.HcaptchaSiteKey,
+		"enableRecaptcha":       m.EnableRecaptcha,
+		"recaptchaSiteKey":      m.RecaptchaSiteKey,
+		"enableTurnstile":       m.EnableTurnstile,
+		"turnstileSiteKey":      m.TurnstileSiteKey,
+		"themeColor":            m.ThemeColor,
+		"bannerUrl":             m.BannerURL,
+		"backgroundImageUrl":    m.BackgroundImageURL,
+		"logoImageUrl":          m.LogoImageURL,
+		"iconUrl":               m.IconURL,
+		"cacheRemoteFiles":      m.CacheRemoteFiles,
+		"enableServiceWorker":   m.EnableServiceWorker,
+		"swPublickey":           m.SwPublicKey,
+		"serverRules":           strArrayOrEmpty(m.ServerRules),
+		"maxNoteTextLength":     3000,
 
 		// フロントエンド互換性フィールド (Phase 4.5c)
 		"tosUrl":              m.TermsOfServiceURL,
@@ -369,6 +372,20 @@ func (h *Handler) serializeActiveAds() []map[string]any {
 			entry["isSensitive"] = true
 		}
 		out = append(out, entry)
+	}
+	return out
+}
+
+// jsonArrayOrEmpty renders a JSONB column as an array, falling back to an empty
+// one. **null を返さない** — frontend が配列前提で回すので、null だと描画側で
+// 分岐が増える。
+func jsonArrayOrEmpty(raw datatypes.JSON) any {
+	if len(raw) == 0 {
+		return []any{}
+	}
+	var out []any
+	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
+		return []any{}
 	}
 	return out
 }

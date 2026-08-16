@@ -12,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // stubReviewer records calls and returns canned results.
@@ -64,13 +65,12 @@ func newReviewerHandler(t *testing.T, rev apiadmin.SignupApplicationReviewer) *a
 var testModerator = &model.User{ID: "mod-1", Username: "mod"}
 
 func sampleApplication() *model.SignupApplication {
-	reason := "よろしくお願いします"
 	now := time.Now().UTC()
 	return &model.SignupApplication{
 		ID:            "app-1",
 		ClaimCodeHash: "hash-1",
 		Status:        model.SignupApplicationPending,
-		Reason:        &reason,
+		Answers:       datatypes.JSON(`[{"label":"参加の動機","value":"よろしくお願いします"}]`),
 		CreatedAt:     now,
 		UpdatedAt:     now,
 		ExpiresAt:     now.Add(7 * 24 * time.Hour),
@@ -95,7 +95,11 @@ func TestSignupApplicationList(t *testing.T) {
 	app := body.Applications[0]
 	assert.Equal(t, "app-1", app["id"])
 	assert.Equal(t, "pending", app["status"])
-	assert.Equal(t, "よろしくお願いします", app["reason"])
+	// 回答はラベル付きで審査画面へ渡る (#2570)。
+	answers, err := json.Marshal(app["answers"])
+	require.NoError(t, err)
+	assert.Contains(t, string(answers), "参加の動機")
+	assert.Contains(t, string(answers), "よろしくお願いします")
 	// **クレームコードは出さない。** hash しか持っていないうえ、出せてしまうと
 	// 管理者が申請者になりすまして登録できる。
 	assert.NotContains(t, app, "claimCode")

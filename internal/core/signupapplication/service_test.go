@@ -2,7 +2,6 @@ package signupapplication
 
 import (
 	"os"
-	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +15,11 @@ import (
 )
 
 var testDB *gorm.DB
+
+// testAnswers is the standard set of submitted answers used across the tests.
+func testAnswers() []Answer {
+	return []Answer{{Label: "参加の動機", Value: "よろしくお願いします"}}
+}
 
 func TestMain(m *testing.M) {
 	db, err := testutil.OpenTestDB()
@@ -44,12 +48,12 @@ func newService(t *testing.T) (*Service, *time.Time) {
 func TestApply_CreatesPendingWithClaimCode(t *testing.T) {
 	svc, now := newService(t)
 
-	app, code, err := svc.Apply("  よろしくお願いします  ")
+	app, code, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	assert.Equal(t, model.SignupApplicationPending, app.Status)
-	require.NotNil(t, app.Reason)
-	assert.Equal(t, "よろしくお願いします", *app.Reason, "前後の空白は落とす")
 	assert.Equal(t, now.Add(DefaultTTL), app.ExpiresAt)
+	// 回答はラベル付きで保存される (#2570)。
+	assert.Contains(t, string(app.Answers), "参加の動機")
 
 	// 256bit を hex にした長さ。
 	assert.Len(t, code, 64)
@@ -58,33 +62,14 @@ func TestApply_CreatesPendingWithClaimCode(t *testing.T) {
 	assert.NotEqual(t, code, app.ClaimCodeHash)
 }
 
-func TestApply_EmptyReasonIsNil(t *testing.T) {
-	svc, _ := newService(t)
-
-	app, _, err := svc.Apply("   ")
-	require.NoError(t, err)
-	assert.Nil(t, app.Reason)
-}
-
-// 理由は rune 単位で数える。**byte で見ると日本語が通らなくなる。**
-func TestApply_ReasonLength(t *testing.T) {
-	svc, _ := newService(t)
-
-	_, _, err := svc.Apply(strings.Repeat("あ", MaxReasonLength))
-	assert.NoError(t, err)
-
-	_, _, err = svc.Apply(strings.Repeat("a", MaxReasonLength+1))
-	assert.ErrorIs(t, err, ErrReasonTooLong)
-}
-
 // 連絡先という自然キーが無くなったので、DB は重複申請を妨げない。
 // **抑止は captcha とレート制限が担う** (#2569)。
 func TestApply_AllowsRepeatedApplications(t *testing.T) {
 	svc, _ := newService(t)
 
-	first, code1, err := svc.Apply("")
+	first, code1, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
-	second, code2, err := svc.Apply("")
+	second, code2, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 
 	assert.NotEqual(t, first.ID, second.ID)
@@ -94,7 +79,7 @@ func TestApply_AllowsRepeatedApplications(t *testing.T) {
 func TestByClaimCode(t *testing.T) {
 	svc, now := newService(t)
 
-	app, code, err := svc.Apply("")
+	app, code, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 
 	t.Run("returns the application", func(t *testing.T) {
@@ -134,7 +119,7 @@ func TestByClaimCode(t *testing.T) {
 func TestApprove(t *testing.T) {
 	svc, now := newService(t)
 
-	app, _, err := svc.Apply("")
+	app, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	require.NoError(t, svc.Approve(app.ID, "mod1"))
 
@@ -157,7 +142,7 @@ func TestApprove(t *testing.T) {
 	// **ErrNotPending ではなく ErrExpired。** 掃除は遅延反映なので行は pending の
 	// まま残っており、まとめると「審査待ちに見えるのに審査待ちではない」になる。
 	t.Run("expired cannot be approved", func(t *testing.T) {
-		other, _, err := svc.Apply("")
+		other, _, err := svc.Apply(testAnswers())
 		require.NoError(t, err)
 		*now = now.Add(DefaultTTL)
 		assert.ErrorIs(t, svc.Approve(other.ID, "mod1"), ErrExpired)
@@ -172,7 +157,7 @@ func TestApprove(t *testing.T) {
 func TestReject(t *testing.T) {
 	svc, now := newService(t)
 
-	app, _, err := svc.Apply("")
+	app, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	require.NoError(t, svc.Reject(app.ID, "mod2"))
 
@@ -191,7 +176,7 @@ func TestReject(t *testing.T) {
 	// 期限切れは却下として記録しない。**審査していないものを「審査して落とした」と
 	// 残すと、監査の意味が壊れる。**
 	t.Run("expired cannot be rejected", func(t *testing.T) {
-		other, _, err := svc.Apply("")
+		other, _, err := svc.Apply(testAnswers())
 		require.NoError(t, err)
 		*now = now.Add(DefaultTTL)
 		assert.ErrorIs(t, svc.Reject(other.ID, "mod2"), ErrExpired)
@@ -205,7 +190,7 @@ func TestReject(t *testing.T) {
 func TestMarkCompleted(t *testing.T) {
 	svc, now := newService(t)
 
-	app, _, err := svc.Apply("")
+	app, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 
 	t.Run("pending cannot be completed", func(t *testing.T) {
@@ -232,7 +217,7 @@ func TestMarkCompleted(t *testing.T) {
 	})
 
 	t.Run("expired cannot be completed", func(t *testing.T) {
-		other, _, err := svc.Apply("")
+		other, _, err := svc.Apply(testAnswers())
 		require.NoError(t, err)
 		require.NoError(t, svc.Approve(other.ID, "mod1"))
 		*now = now.Add(DefaultTTL)
@@ -241,7 +226,7 @@ func TestMarkCompleted(t *testing.T) {
 
 	t.Run("empty ticket id is not recorded", func(t *testing.T) {
 		svc2, _ := newService(t)
-		a, _, err := svc2.Apply("")
+		a, _, err := svc2.Apply(testAnswers())
 		require.NoError(t, err)
 		require.NoError(t, svc2.Approve(a.ID, "mod1"))
 		require.NoError(t, svc2.MarkCompleted(a.ID, "u3", ""))
@@ -261,12 +246,12 @@ func TestGet_NotFound(t *testing.T) {
 func TestListAndCount(t *testing.T) {
 	svc, _ := newService(t)
 
-	pending, _, err := svc.Apply("")
+	pending, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
-	approved, _, err := svc.Apply("")
+	approved, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	require.NoError(t, svc.Approve(approved.ID, "mod1"))
-	rejected, _, err := svc.Apply("")
+	rejected, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	require.NoError(t, svc.Reject(rejected.ID, "mod1"))
 
@@ -283,7 +268,7 @@ func TestListAndCount(t *testing.T) {
 func TestExpireStale(t *testing.T) {
 	svc, now := newService(t)
 
-	app, _, err := svc.Apply("")
+	app, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 
 	changed, err := svc.ExpireStale()
@@ -307,7 +292,7 @@ func TestSetters_IgnoreInvalidValues(t *testing.T) {
 
 	svc.SetTTL(0)
 	svc.SetTTL(-time.Hour)
-	app, code, err := svc.Apply("")
+	app, code, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(DefaultTTL), app.ExpiresAt)
 
@@ -321,7 +306,7 @@ func TestSetTTL(t *testing.T) {
 	svc, now := newService(t)
 	svc.SetTTL(time.Hour)
 
-	app, _, err := svc.Apply("")
+	app, _, err := svc.Apply(testAnswers())
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(time.Hour), app.ExpiresAt)
 }

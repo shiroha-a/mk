@@ -40,6 +40,9 @@ type Meta struct {
 	// disableRegistration + 招待コードで、承認は内部で registration_ticket を
 	// 発行して通す。両方を設定する運用が前提。
 	ApprovalRequiredForSignup bool `gorm:"column:approvalRequiredForSignup;default:false" json:"approvalRequiredForSignup"`
+	// SignupApplicationForm is the admin-defined application form (#2570)。
+	// 要素の配列で、各要素は {label, type, required, maxLength}。
+	SignupApplicationForm datatypes.JSON `gorm:"column:signupApplicationForm;type:jsonb;default:'[]'" json:"signupApplicationForm"`
 
 	// CAPTCHA
 	EnableHcaptcha     bool    `gorm:"column:enableHcaptcha;default:false" json:"enableHcaptcha"`

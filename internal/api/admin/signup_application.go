@@ -42,7 +42,7 @@ func packSignupApplication(a *model.SignupApplication) map[string]any {
 	return map[string]any{
 		"id":            a.ID,
 		"status":        a.Status,
-		"reason":        a.Reason,
+		"answers":       a.Answers,
 		"createdAt":     a.CreatedAt,
 		"updatedAt":     a.UpdatedAt,
 		"expiresAt":     a.ExpiresAt,

@@ -23,7 +23,7 @@ const approvalTicketTTL = 5 * time.Minute
 // 循環依存を避けるため interface で受け取る。実装は
 // core/signupapplication.Service。
 type SignupApplications interface {
-	Apply(reason string) (*model.SignupApplication, string, error)
+	Apply(answers []signupapplication.Answer) (*model.SignupApplication, string, error)
 	ByClaimCode(code string) (*model.SignupApplication, error)
 	MarkCompleted(applicationID, userID, ticketID string) error
 }
@@ -45,7 +45,6 @@ func applicationView(a *model.SignupApplication) map[string]any {
 	}
 	return map[string]any{
 		"status":    a.Status,
-		"reason":    a.Reason,
 		"createdAt": a.CreatedAt,
 		"expiresAt": a.ExpiresAt,
 	}
@@ -83,7 +82,10 @@ func (h *Handler) ApplicationApply(c echo.Context) error {
 		return err
 	}
 	var req struct {
-		Reason string `json:"reason"`
+		// Answers は現在のフォーム定義と**同じ順序**の値の配列。ラベルは
+		// サーバーが定義から埋める — クライアントに送らせると、申請者が審査
+		// 画面に偽のラベルを流し込める (#2570)。
+		Answers []string `json:"answers"`
 		// captcha の応答。**申請フォームは誰でも叩けるので、ここが唯一の
 		// 防波堤になる** — 連絡先という自然キーが無くなり、重複申請を DB で
 		// 抑止できなくなったため (#2569)。
@@ -108,12 +110,31 @@ func (h *Handler) ApplicationApply(c echo.Context) error {
 		}
 	}
 
-	app, code, err := h.applications.Apply(req.Reason)
+	meta, err := h.metaRepo.Fetch()
 	if err != nil {
-		if errors.Is(err, signupapplication.ErrReasonTooLong) {
+		return c.JSON(http.StatusInternalServerError,
+			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	answers, err := signupapplication.BuildAnswers(
+		signupapplication.ParseForm(meta.SignupApplicationForm), req.Answers)
+	if err != nil {
+		switch {
+		case errors.Is(err, signupapplication.ErrAnswerRequired):
 			return c.JSON(http.StatusBadRequest,
-				apierr.Error("REASON_TOO_LONG", "The reason is too long.", "2f3a4b5c-6d7e-4f8a-9b0c-1d2e3f4a5b6c"))
+				apierr.Error("ANSWER_REQUIRED", err.Error(), "4b5c6d7e-8f9a-4b0c-9d1e-2f3a4b5c6d7e"))
+		case errors.Is(err, signupapplication.ErrAnswerTooLong):
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("ANSWER_TOO_LONG", err.Error(), "2f3a4b5c-6d7e-4f8a-9b0c-1d2e3f4a5b6c"))
+		default:
+			// フォーム定義が申請の途中で変わった。**黙って詰め合わせると答えと
+			// 設問がずれる**ので、やり直してもらう。
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("FORM_CHANGED", "The application form has changed. Reload and try again.", "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"))
 		}
+	}
+
+	app, code, err := h.applications.Apply(answers)
+	if err != nil {
 		return c.JSON(http.StatusInternalServerError,
 			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

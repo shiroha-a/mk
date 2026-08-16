@@ -12,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // stubApplications is an in-memory stand-in for the state machine.
@@ -22,15 +23,15 @@ type stubApplications struct {
 	lookupErr error
 	markErr   error
 
-	appliedReason string
-	completedApp  string
-	completedUsr  string
-	completedTkt  string
-	lastCode      string
+	appliedAnswers []signupapplication.Answer
+	completedApp   string
+	completedUsr   string
+	completedTkt   string
+	lastCode       string
 }
 
-func (s *stubApplications) Apply(reason string) (*model.SignupApplication, string, error) {
-	s.appliedReason = reason
+func (s *stubApplications) Apply(answers []signupapplication.Answer) (*model.SignupApplication, string, error) {
+	s.appliedAnswers = answers
 	if s.applyErr != nil {
 		return nil, "", s.applyErr
 	}
@@ -96,7 +97,10 @@ type approvalEnv struct {
 func newApprovalEnv(t *testing.T, enabled bool) *approvalEnv {
 	t.Helper()
 	h, _, metaRepo := newTestHandler(t)
-	metaRepo.Meta = &model.Meta{ID: "x", ApprovalRequiredForSignup: enabled}
+	metaRepo.Meta = &model.Meta{
+		ID: "x", ApprovalRequiredForSignup: enabled,
+		SignupApplicationForm: datatypes.JSON(`[{"label":"参加の動機","type":"textarea","required":true}]`),
+	}
 	apps := &stubApplications{}
 	h.SetSignupApplications(apps)
 	return &approvalEnv{handler: h, apps: apps, meta: metaRepo.Meta}
@@ -131,12 +135,16 @@ func TestApplication_NotWiredReturns503(t *testing.T) {
 func TestApplicationApply(t *testing.T) {
 	env := newApprovalEnv(t, true)
 
-	rec := doPost(env.handler.ApplicationApply, `{"reason":"よろしく"}`)
+	rec := doPost(env.handler.ApplicationApply, `{"answers":["よろしく"]}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	resp := parseResp(t, rec)
 
 	assert.Equal(t, "claim-code-1", resp["claimCode"])
-	assert.Equal(t, "よろしく", env.apps.appliedReason)
+	// **ラベルはサーバーが定義から埋める。** クライアントに送らせると、申請者が
+	// 審査画面に偽のラベルを流し込める (#2570)。
+	require.Len(t, env.apps.appliedAnswers, 1)
+	assert.Equal(t, "参加の動機", env.apps.appliedAnswers[0].Label)
+	assert.Equal(t, "よろしく", env.apps.appliedAnswers[0].Value)
 
 	app := resp["application"].(map[string]any)
 	assert.Equal(t, "pending", app["status"])
@@ -146,18 +154,34 @@ func TestApplicationApply(t *testing.T) {
 }
 
 func TestApplicationApply_Errors(t *testing.T) {
-	t.Run("reason too long", func(t *testing.T) {
+	t.Run("required answer missing", func(t *testing.T) {
 		env := newApprovalEnv(t, true)
-		env.apps.applyErr = signupapplication.ErrReasonTooLong
-		rec := doPost(env.handler.ApplicationApply, `{"reason":"x"}`)
+		rec := doPost(env.handler.ApplicationApply, `{"answers":["  "]}`)
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.Contains(t, rec.Body.String(), "REASON_TOO_LONG")
+		assert.Contains(t, rec.Body.String(), "ANSWER_REQUIRED")
+	})
+
+	t.Run("answer too long", func(t *testing.T) {
+		env := newApprovalEnv(t, true)
+		env.meta.SignupApplicationForm = datatypes.JSON(`[{"label":"x","type":"text","maxLength":3}]`)
+		rec := doPost(env.handler.ApplicationApply, `{"answers":["toolong"]}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "ANSWER_TOO_LONG")
+	})
+
+	// フォーム定義が申請の途中で変わった。**黙って詰め合わせると答えと設問が
+	// ずれる**ので、やり直してもらう。
+	t.Run("form changed under the applicant", func(t *testing.T) {
+		env := newApprovalEnv(t, true)
+		rec := doPost(env.handler.ApplicationApply, `{"answers":["a","b"]}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "FORM_CHANGED")
 	})
 
 	t.Run("unexpected", func(t *testing.T) {
 		env := newApprovalEnv(t, true)
 		env.apps.applyErr = errors.New("boom")
-		rec := doPost(env.handler.ApplicationApply, `{}`)
+		rec := doPost(env.handler.ApplicationApply, `{"answers":["x"]}`)
 		assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	})
 }

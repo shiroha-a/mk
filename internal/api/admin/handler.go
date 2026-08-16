@@ -25,6 +25,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/procstats"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/signup"
+	"github.com/shiroha-a/mk/internal/core/signupapplication"
 	corewebhook "github.com/shiroha-a/mk/internal/core/webhook"
 	"github.com/shiroha-a/mk/internal/core/webpush"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -1219,6 +1220,7 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"disableRegistration":       m.DisableRegistration,
 		"emailRequiredForSignup":    m.EmailRequiredForSignup,
 		"approvalRequiredForSignup": m.ApprovalRequiredForSignup,
+		"signupApplicationForm":     m.SignupApplicationForm,
 		// Cache
 		"cacheRemoteFiles":          m.CacheRemoteFiles,
 		"cacheRemoteSensitiveFiles": m.CacheRemoteSensitiveFiles,
@@ -1386,6 +1388,11 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_SIGNUP_CONDITIONS", err.Error(), "8f3c1d2e-4a5b-4c6d-9e7f-0a1b2c3d4e5f"))
 	}
 	normalizeSignupConditions(fields, currentMeta)
+	// 申請フォームの定義を検証する (#2570)。**上限を置かないと管理者が自分で
+	// 壊せる** — 項目を無制限に足せば申請ページが使い物にならなくなる。
+	if err := validateSignupApplicationForm(fields); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
 	// frontend が送る API 名 → DB カラム名の差異を吸収する (#348)。API は
 	// 本家互換の camelCase alias (tosUrl 等) を使うが、DB 側は
 	// packages/backend/src/models/Meta.ts と同じ正規名で保持している。
@@ -1743,6 +1750,7 @@ var metaJSONBColumns = map[string]struct{}{
 	"deliverSuspendedSoftware": {},
 	"policies":                 {},
 	"clientOptions":            {},
+	"signupApplicationForm":    {},
 }
 
 // metaJSONBObjectColumns は metaJSONBColumns のうち object ({}) 形のもの。nil の
@@ -3510,4 +3518,34 @@ func normalizeSignupConditions(fields map[string]any, current *model.Meta) {
 	if disabled := metaBoolAfterUpdate(fields, "disableRegistration", current != nil && current.DisableRegistration); disabled {
 		fields["disableRegistration"] = false
 	}
+}
+
+// validateSignupApplicationForm checks an incoming application form definition.
+//
+// 送られてこなければ何もしない (部分更新)。**保存してから壊れているのに気づく**
+// 形にしないよう、ここで弾く。
+func validateSignupApplicationForm(fields map[string]any) error {
+	v, ok := fields["signupApplicationForm"]
+	if !ok {
+		return nil
+	}
+	raw, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("%w: signupApplicationForm is not encodable", signupapplication.ErrInvalidForm)
+	}
+	var parsed []signupapplication.FormField
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return fmt.Errorf("%w: signupApplicationForm must be an array of fields", signupapplication.ErrInvalidForm)
+	}
+	if err := signupapplication.ValidateForm(parsed); err != nil {
+		return err
+	}
+	// 検証済みの形に正規化して渡す。**生の any をそのまま入れると、未知のキーが
+	// jsonb に残って後で読み手を混乱させる。**
+	normalized, err := json.Marshal(parsed)
+	if err != nil {
+		return fmt.Errorf("%w: signupApplicationForm is not encodable", signupapplication.ErrInvalidForm)
+	}
+	fields["signupApplicationForm"] = datatypes.JSON(normalized)
+	return nil
 }
