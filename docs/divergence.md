@@ -107,7 +107,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | テーブル | カラム | 由来 | 理由 |
 |---|---|---|---|
 | `chat_message` | `emojis` / `isDelivering` / `isDeliverFailed` | cherrypick | 連合配送の状態追跡 |
-| `meta` | `approvalRequiredForSignup` | mk-go 独自 | 承認制の登録 (#2554) の有効化。**これ自体がゲート**で、有効時は `/api/signup` を 403 で閉じる (#2557)。`disableRegistration` と組み合わせる運用にすると、訪問者には「招待制」と表示されて実態と食い違う。承認フローは signup service を直接呼ぶのでこの分岐を通らない。TS はこの列を認識しないので、TS へ戻すと承認制が単に無効になる (登録が開くので、切り替え前に `disableRegistration` を検討すること) |
+| `meta` | `approvalRequiredForSignup` | mk-go 独自 | 承認制の登録 (#2554) の有効化。**これ自体がゲート**で、有効時は `/api/signup` を 403 で閉じる (#2557)。**登録開放が前提で、メール必須とは排他** (#2565) — 招待制と重ねると承認が内部で招待を発行するため二重のゲートに意味が無く、メール必須と重ねると承認フローがメール確認を通らないため設定と実態が食い違う。`admin/update-meta` が更新後の状態で検証して拒否する。`disableRegistration` と組み合わせる運用にすると、訪問者には「招待制」と表示されて実態と食い違う。承認フローは signup service を直接呼ぶのでこの分岐を通らない。TS はこの列を認識しないので、TS へ戻すと承認制が単に無効になる (登録が開くので、切り替え前に `disableRegistration` を検討すること) |
 | `user` | `isRoot` | mk-go 独自 | upstream は system_account 移行で DROP 済み。`role.Service.isRootUser` の fallback に必要 |
 | `meta` | `proxyAccountId` | mk-go 独自 | 同じく upstream は DROP 済み。`admin/update-proxy-account` が書き込む |
 | `note_favorite` | `createdAt` | mk-go 独自 | upstream は `deleteCreatedAt` で DROP 済み。`/api/i/favorites` の response 要件で復活 |

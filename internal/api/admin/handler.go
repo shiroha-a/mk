@@ -1377,6 +1377,14 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	if err := validateUpdateMetaNumericRanges(fields); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// 登録可否の組み合わせ検証 (#2565)。**更新後の状態**で判定するので、
+	// 既存 meta とマージしてから見る。meta が引けないときは検証を諦めて
+	// 素通しする (ここで 500 にすると、meta が壊れているときに設定を直す
+	// 手段まで塞いでしまう)。
+	currentMeta, _ := h.metaRepo.Fetch()
+	if err := validateSignupConditions(fields, currentMeta); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_SIGNUP_CONDITIONS", err.Error(), "8f3c1d2e-4a5b-4c6d-9e7f-0a1b2c3d4e5f"))
+	}
 	// frontend が送る API 名 → DB カラム名の差異を吸収する (#348)。API は
 	// 本家互換の camelCase alias (tosUrl 等) を使うが、DB 側は
 	// packages/backend/src/models/Meta.ts と同じ正規名で保持している。
@@ -3451,4 +3459,39 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 		out = append(out, m)
 	}
 	return c.JSON(http.StatusOK, out)
+}
+
+// Signup condition constraints (#2565).
+//
+// 承認制は「登録を開放したうえで申請と承認を挟む」もの。招待制と重ねると、
+// 招待コードを持つ人がさらに承認を待つことになるが、**承認は内部で招待を
+// 発行するので二重のゲートに意味が無い**。メール必須と重ねると、承認フローは
+// signupService を直接呼んでメール確認の経路を通らないため、**設定していても
+// 実際には要求されない**という食い違いになる。
+//
+// どちらも管理画面で普通に作れてしまい、作った側は矛盾に気づけない。
+var (
+	errApprovalNeedsOpenRegistration = errors.New("approvalRequiredForSignup requires registration to be open (disableRegistration must be false)")
+	errApprovalExcludesEmail         = errors.New("approvalRequiredForSignup and emailRequiredForSignup are mutually exclusive")
+)
+
+// validateSignupConditions checks the *resulting* meta state.
+//
+// **部分更新があるので、リクエストに無いキーは既存値で埋める。** 片方だけ送られた
+// ときに既存値を見ないと、矛盾する組み合わせを素通しさせてしまう。判定は双方向で
+// 同じ式に落ちるので、「承認制を切らないと登録を閉じられない」ような詰みは無い。
+func validateSignupConditions(fields map[string]any, current *model.Meta) error {
+	approval := metaBoolAfterUpdate(fields, "approvalRequiredForSignup", current != nil && current.ApprovalRequiredForSignup)
+	if !approval {
+		return nil
+	}
+	disabled := metaBoolAfterUpdate(fields, "disableRegistration", current != nil && current.DisableRegistration)
+	if disabled {
+		return errApprovalNeedsOpenRegistration
+	}
+	emailRequired := metaBoolAfterUpdate(fields, "emailRequiredForSignup", current != nil && current.EmailRequiredForSignup)
+	if emailRequired {
+		return errApprovalExcludesEmail
+	}
+	return nil
 }
