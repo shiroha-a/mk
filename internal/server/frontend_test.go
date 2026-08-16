@@ -927,3 +927,63 @@ func TestFrontendHTML_DevModeKeepsReferences(t *testing.T) {
 	assert.NotContains(t, body, "--marker:stale", "古い built を埋め込まない")
 	assert.Contains(t, body, `href="/vite/loader/style.css"`)
 }
+
+// **SSR 埋め込み meta にも同じ変換が要る (#2583)。** frontend は埋め込みを
+// localStorage cache より優先し、以後 1 時間 /api/meta を再取得しないので、
+// ここが JSON5 のままだと片方だけ直しても直らない。
+func TestFrontendHTML_PacksThemeAsJSON(t *testing.T) {
+	repo := testutil.NewMockMetaRepository()
+	theme := `{id:'6c445bcb',base:'dark',name:'夜の世界',props:{bg:'rgb(32, 34, 37)'}}`
+	repo.Meta = &model.Meta{ID: "x", DefaultDarkTheme: &theme}
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	handler := frontendHTML(cfg, repo, nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	require.NoError(t, handler(e.NewContext(
+		httptest.NewRequest(http.MethodGet, "/", nil), rec)))
+
+	embedded := extractEmbeddedMeta(t, rec.Body.String())
+	dark, ok := embedded["defaultDarkTheme"].(string)
+	require.True(t, ok, "文字列で埋め込まれること")
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(dark), &parsed),
+		"JSON として読めること (client は JSON.parse する)")
+	assert.Equal(t, "夜の世界", parsed["name"])
+}
+
+func TestFrontendHTML_BrokenThemeBecomesNull(t *testing.T) {
+	repo := testutil.NewMockMetaRepository()
+	broken := "not a theme"
+	repo.Meta = &model.Meta{ID: "x", DefaultDarkTheme: &broken}
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	handler := frontendHTML(cfg, repo, nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	require.NoError(t, handler(e.NewContext(
+		httptest.NewRequest(http.MethodGet, "/", nil), rec)))
+
+	embedded := extractEmbeddedMeta(t, rec.Body.String())
+	assert.Nil(t, embedded["defaultDarkTheme"])
+}
+
+// extractEmbeddedMeta pulls the `#misskey_meta` payload out of the shell.
+func extractEmbeddedMeta(t *testing.T, body string) map[string]any {
+	t.Helper()
+	const openTag = `id="misskey_meta"`
+	idx := strings.Index(body, openTag)
+	require.NotEqual(t, -1, idx, "misskey_meta script should be embedded")
+	start := strings.Index(body[idx:], ">")
+	require.NotEqual(t, -1, start)
+	start += idx + 1
+	end := strings.Index(body[start:], "</script>")
+	require.NotEqual(t, -1, end)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(body[start:start+end]), &parsed))
+	return parsed
+}

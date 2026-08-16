@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/misc/json5"
 	"github.com/shiroha-a/mk/internal/repository"
 	"gorm.io/datatypes"
 )
@@ -143,8 +144,8 @@ func (h *Handler) Meta(c echo.Context) error {
 		"privacyPolicyUrl":    m.PrivacyPolicyURL,
 		"inquiryUrl":          m.InquiryURL,
 		"federation":          m.Federation,
-		"defaultLightTheme":   m.DefaultLightTheme,
-		"defaultDarkTheme":    m.DefaultDarkTheme,
+		"defaultLightTheme":   packTheme(m.DefaultLightTheme),
+		"defaultDarkTheme":    packTheme(m.DefaultDarkTheme),
 		"serverErrorImageUrl": m.ServerErrorImageURL,
 		"notFoundImageUrl":    m.NotFoundImageURL,
 		"infoImageUrl":        m.InfoImageURL,
@@ -389,3 +390,27 @@ func jsonArrayOrEmpty(raw datatypes.JSON) any {
 	}
 	return out
 }
+
+// PackTheme converts a stored JSON5 theme into JSON for the client (#2583).
+//
+// **Misskey のテーマは JSON5 で配布される。** キーが無引用符で文字列が
+// シングルクォート。本家 MetaEntityService.pack は「クライアントの手間を減らす
+// ためあらかじめJSONに変換しておく」として同じ変換をしており、生のまま返すと
+// frontend の `JSON.parse(instance.defaultDarkTheme)` (boot/common.ts) が落ちて
+// 起動しなくなる。
+//
+// **読めなければ null を返す。** 本家も catch で握りつぶしている。壊れたテーマ
+// 1 つでインスタンス全体を落とさない。
+func PackTheme(raw *string) any {
+	if raw == nil || *raw == "" {
+		return nil
+	}
+	out, err := json5.ToJSON(*raw)
+	if err != nil {
+		return nil
+	}
+	return out
+}
+
+// packTheme is the package-local alias used by the /api/meta response.
+func packTheme(raw *string) any { return PackTheme(raw) }

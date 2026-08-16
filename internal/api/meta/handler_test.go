@@ -847,3 +847,75 @@ func TestMeta_ApprovalRequiredForSignup(t *testing.T) {
 		})
 	}
 }
+
+// **Misskey のテーマは JSON5 で配布される (#2583)。** 生のまま返すと frontend の
+// `JSON.parse(instance.defaultDarkTheme)` (boot/common.ts) が落ちて起動しない。
+// 本家 MetaEntityService.pack と同じく、JSON に直してから返す。
+func TestMeta_PacksThemeAsJSON(t *testing.T) {
+	h, metaRepo := newTestHandler()
+	theme := `{id:'6c445bcb',base:'dark',name:'夜の世界',props:{bg:'rgb(32, 34, 37)',hashtag:'@accent'}}`
+	light := `{id:'l1',base:'light',props:{bg:'#fff'}}`
+	metaRepo.Meta = &model.Meta{ID: "x", DefaultDarkTheme: &theme, DefaultLightTheme: &light}
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/meta", nil)
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Meta(e.NewContext(req, rec)))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+
+	dark, ok := resp["defaultDarkTheme"].(string)
+	require.True(t, ok, "文字列で返ること (client は JSON.parse する)")
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal([]byte(dark), &parsed), "JSON として読めること")
+	assert.Equal(t, "夜の世界", parsed["name"])
+	assert.Equal(t, "rgb(32, 34, 37)", parsed["props"].(map[string]any)["bg"])
+
+	lightOut, ok := resp["defaultLightTheme"].(string)
+	require.True(t, ok)
+	require.NoError(t, json.Unmarshal([]byte(lightOut), &parsed))
+	assert.Equal(t, "light", parsed["base"])
+}
+
+// **読めなければ null。** 壊れたテーマ 1 つでインスタンス全体を落とさない
+// (本家も catch で握りつぶす)。
+func TestMeta_BrokenThemeBecomesNull(t *testing.T) {
+	for name, raw := range map[string]string{
+		"garbage":    "not a theme",
+		"unbalanced": "{a:1",
+		"empty":      "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, metaRepo := newTestHandler()
+			v := raw
+			metaRepo.Meta = &model.Meta{ID: "x", DefaultDarkTheme: &v}
+
+			e := echo.New()
+			rec := httptest.NewRecorder()
+			require.NoError(t, h.Meta(e.NewContext(
+				httptest.NewRequest(http.MethodPost, "/api/meta", nil), rec)))
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Nil(t, resp["defaultDarkTheme"])
+		})
+	}
+}
+
+func TestMeta_UnsetThemeStaysNull(t *testing.T) {
+	h, metaRepo := newTestHandler()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Meta(e.NewContext(
+		httptest.NewRequest(http.MethodPost, "/api/meta", nil), rec)))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp["defaultDarkTheme"])
+	assert.Nil(t, resp["defaultLightTheme"])
+}

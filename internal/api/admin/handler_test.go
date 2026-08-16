@@ -686,6 +686,23 @@ func TestAdminMeta_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
+// **admin/meta のテーマは生文字列のまま返す (#2583)。** ブランディング画面の
+// テキストエリアは管理者が入力したものをそのまま出す必要があり、JSON に変換
+// すると書いた形式 (JSON5 / 整形 / コメント) が失われる。本家 admin/meta.ts も
+// raw を返している。変換するのは /api/meta と SSR 埋め込み meta だけ。
+func TestAdminMeta_ThemeStaysRaw(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	theme := `{id:'6c445bcb',base:'dark',props:{bg:'#000'}} // 手書きのコメント`
+	metaRepo.Meta = &model.Meta{ID: "x", DefaultDarkTheme: &theme}
+
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, theme, resp["defaultDarkTheme"])
+}
+
 func TestAdminMeta_FetchError(t *testing.T) {
 	h, _, metaRepo, _ := newTestHandler(t)
 	metaRepo.Meta = nil
