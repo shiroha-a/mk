@@ -438,6 +438,53 @@ func TestRun_DirectoryEntry(t *testing.T) {
 	require.NoError(t, err)
 }
 
+// パストラバーサルは zip エントリ名側だけでなく、lookup キーになる meta.json の
+// fileName 側も制御される。validFileName が `/` を弾くので fileName が traversal
+// を含んでいれば Skipped になることを固定する (正規表現が緩められたときに検出)。
+func TestRun_MetaFileNameTraversalSkipped(t *testing.T) {
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "../evil.png", "downloaded": true, "emoji": map[string]any{"name": "evil"}},
+	})
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"evil.png", []byte("not an image but still stored")},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Total)
+	assert.Equal(t, 0, res.Imported)
+	assert.Equal(t, 1, res.Skipped)
+	assert.Empty(t, repo.Emojis)
+}
+
+// meta.json/ のような名前のディレクトリエントリは meta.json として採用されず、
+// 正しい meta.json だけが使われる (#IsDir で弾く)。
+func TestRun_MetaJSONDirectoryEntryIgnored(t *testing.T) {
+	img := pngBytes(t)
+	meta := metaJSON(t, []map[string]any{
+		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
+	})
+	// `meta.json/` は path.Base で `meta.json` になるがディレクトリなので対象外。
+	// これが採用されると readZipEntry が空を返して ErrMalformedMeta になる。
+	body := buildZip(t, []zipEntry{
+		{"meta.json", meta},
+		{"meta.json/", nil},
+		{"smile.png", img},
+	})
+	deps, _, repo, _ := newDeps(t, body)
+	imp := emojiimport.NewImporter(deps)
+
+	res, err := imp.Run(context.Background(), "admin", "f1")
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Imported)
+	assert.Equal(t, 0, res.Skipped)
+	_, err = repo.FindByNameAndHost("smile", nil)
+	require.NoError(t, err)
+}
+
 // --- 対象 3: 同名エントリの重複 (index は後勝ち) ---
 
 func TestRun_DuplicateImageEntry_LastWins(t *testing.T) {
@@ -525,7 +572,7 @@ func TestRun_SameBasenameDifferentDir(t *testing.T) {
 		{"fileName": "smile.png", "downloaded": true, "emoji": map[string]any{"name": "smile"}},
 	})
 	// a/smile.png と b/smile.png は index で後勝ちに 1 エントリへ畳まれ、
-	// import は 1 件になる。
+	// import は 1 件になる。後勝ちなので b/smile.png の内容が採用される。
 	body := buildZip(t, []zipEntry{
 		{"meta.json", meta},
 		{"a/smile.png", first},
@@ -538,7 +585,17 @@ func TestRun_SameBasenameDifferentDir(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, res.Imported)
 	assert.Equal(t, 0, res.Skipped)
+
+	// drive file は 1 つだけ作られ、その内容 (= MD5) は後勝ちの b/smile.png と
+	// 一致する。索引を先勝ちに変えたときだけこの assert が落ちる。
 	require.Len(t, fileRepo.Files, 1)
+	var df *model.DriveFile
+	for _, f := range fileRepo.Files {
+		df = f
+	}
+	require.NotNil(t, df)
+	assert.Equal(t, md5Hex(second), df.MD5, "後勝ちの b/smile.png が保存される")
+
 	_, err = repo.FindByNameAndHost("smile", nil)
 	require.NoError(t, err)
 }

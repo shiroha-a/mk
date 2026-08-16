@@ -140,6 +140,12 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 	index := make(map[string]*zip.File, len(zr.File))
 	var metaFile *zip.File
 	for _, f := range zr.File {
+		// ディレクトリエントリ (末尾 `/`) は対象外。`path.Base("meta.json/")` が
+		// `meta.json` になるため、ここで弾かないと空のディレクトリを meta.json
+		// として採用して ErrMalformedMeta になる。
+		if f.FileInfo().IsDir() {
+			continue
+		}
 		base := path.Base(f.Name)
 		if base == "meta.json" {
 			metaFile = f
