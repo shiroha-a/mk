@@ -556,6 +556,8 @@ func TestDeliverToFollowersExcluding_ExcludesAll_NoEnqueue(t *testing.T) {
 }
 
 // exclude で省いた残りに対しても shared inbox フラグは伝播する (#1811 / #2567)。
+// shared inbox を配送対象に残したまま IsSharedInbox=true が付くことを検証する
+// (除外 URL は配送対象に無いものを指定し、フラグ伝播を直接検査する)。
 func TestDeliverToFollowersExcluding_ThreadsSharedInboxFlag(t *testing.T) {
 	svc, enq, userRepo, followingRepo, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)
@@ -565,11 +567,15 @@ func TestDeliverToFollowersExcluding_ThreadsSharedInboxFlag(t *testing.T) {
 	followingRepo.RemoteSharedInboxes[sharedInbox] = true
 
 	require.NoError(t, svc.DeliverToFollowersExcluding("alice", []byte(`{}`), map[string]bool{
-		"https://remote.example/inbox": true, // sharedInbox 側を除外
+		"https://unrelated.example/inbox": true, // 配送対象に無い URL を除外しても残りは全て届く
 	}))
-	require.Len(t, enq.calls, 1)
-	assert.Equal(t, personalInbox, enq.calls[0].Inbox)
-	assert.False(t, enq.calls[0].IsSharedInbox)
+	require.Len(t, enq.calls, 2)
+	byInbox := map[string]bool{}
+	for _, c := range enq.calls {
+		byInbox[c.Inbox] = c.IsSharedInbox
+	}
+	assert.True(t, byInbox[sharedInbox], "shared inbox は IsSharedInbox=true")
+	assert.False(t, byInbox[personalInbox], "個別 inbox は IsSharedInbox=false")
 }
 
 func TestDeliverToFollowersExcluding_RepoError(t *testing.T) {
