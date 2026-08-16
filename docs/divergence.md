@@ -28,7 +28,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 8 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 6 | chat 15 | **0** |
 | API レスポンスの additive field | 4 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 7 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 11 (+ 未使用の残存列 3) | 3 | 0 |
@@ -44,13 +44,13 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (53)
+### 1-1. mk-go にしかない (51)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
 | GET variant 追加 | 23 | `charts/*` 12 件、`emoji` / `emojis` / `federation/instances` / `federation/stats` / `fetch-rss` / `get-online-users-count` / `hashtags/trend` / `notes/featured` / `notes/reactions` / `server-info` / `bubble-game/ranking`。**対応する POST は両側にある**。ブラウザから直接叩く利便目的 |
 | cherrypick chat 拡張 | 15 | `chat/messages` / `chat/messages/create` / `read` / `update` / `reactions/create` / `reactions/delete`、`chat/rooms/joined` / `unmute` / `transfer-ownership` / `members/ban` / `members/update-membership` / `invitations/accept` / `delete` / `reject`、`chat/unread-count` |
-| 承認制の登録の申請 | 5 | `signup-application/miauth/start` / `miauth/complete` / `status` / `apply` / `register` (#2556)。upstream に承認制が無いため対応物なし。認証不要 (本人確認は MiAuth が担う)。承認制が有効でない構成では 503 |
+| 承認制の登録の申請 | 3 | `signup-application/apply` / `status` / `register` (#2569)。upstream に承認制が無いため対応物なし。認証不要で、本人性は申請時に発行するクレームコードが担保する (hash で保存し、平文は申請直後に 1 度だけ返す)。**外部サーバーには一切依存しない** — 当初は MiAuth を使っていたが、相手サーバーに消せない access_token 行と通知を残すため廃止した (#2568)。承認制が有効でない構成では 503 |
 | 承認制の登録の審査 | 3 | `admin/signup-application/list` / `approve` / `reject` (#2555)。upstream に承認制が無いため対応物なし。scope は `read:admin:invite-codes` / `write:admin:invite-codes` を再利用する (承認は最終的に `registration_ticket` の発行につながり管轄が同じ。`internal/misc/permissions` は upstream misskey-js と完全一致させる契約があり mk-go 固有 scope を足せない) |
 | その他 / alias | 3 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim) |
 
@@ -93,7 +93,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `antenna_note_unread` | mk-go 独自 | per-user per-note の antenna 未読 |
 | `channel_note_unread` | mk-go 独自 | channel follower の未読追跡 |
 | `chunked_upload_session` | mk-go 独自 | 分割アップロード (#2313) の進行中セッション。S3 の `UploadId` はここでだけ保持しクライアントには露出しない。`user` への FK は張らない — CASCADE で行だけ消えると `AbortMultipartUpload` されない未完了マルチパートアップロードが孤児として課金され続けるため、期限切れ GC に回収させる |
-| `signup_application` | mk-go 独自 | 承認制の登録 (#2554 / #2555) の申請。**承認待ちを `user` 行として持たないための箱**で、`user` に承認列を足す設計だと TS へ切り替えた瞬間に承認待ち全員が有効なアカウントになる (TS はその列を知らないので素通りする)。連絡先は `(host, リモート user.id)` を鍵にする — username は相手サーバーでの改名で壊れる。同一連絡先で申請が二重に生きることは部分一意インデックス (`status IN ('pending','approved')`) で防ぐ。TS は未知のテーブルを無視するだけ |
+| `signup_application` | mk-go 独自 | 承認制の登録 (#2554 / #2555) の申請。**承認待ちを `user` 行として持たないための箱**で、`user` に承認列を足す設計だと TS へ切り替えた瞬間に承認待ち全員が有効なアカウントになる (TS はその列を知らないので素通りする)。本人性は**クレームコードの SHA-256** が担保する (#2569) — 平文で持つと DB が漏れた時点で全申請が乗っ取れる。重複申請を DB では抑止しないので、captcha とレート制限が防波堤になる。TS は未知のテーブルを無視するだけ |
 | `note_unread` | 準・独自 | upstream DB にも legacy 遺物として残るが 2026.7.0 の `models/` に entity は無く参照 0 件。mk-go はこれを実用し `/api/i` の `hasUnreadSpecifiedNotes` / `hasUnreadMentions` を Redis stream を舐めずに解決する。upstream legacy 版にある `noteChannelId` は mk-go の定義に無い (TS 製 DB では `CREATE TABLE IF NOT EXISTS` が no-op なので実害なし) |
 | `migrations` | drop-in 互換 | TypeORM の bookkeeping。mk-go 由来 DB に TS を後から繋いだ時に migration を再実行させないための seed。name は本家と同じ `ClassName+timestamp` 形式で 346 件を保持する (#2244 で短縮形から是正)。漏れは `TestMigrationSeed_CoversUpstream` が CI で検出する |
 | `schema_migrations` | tooling | golang-migrate 用 |
@@ -193,7 +193,6 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | 軽量 JSON-LD 正規化 | `activitypub/jsonld.go` | mk-go 独自実装。json-gold のフルパイプラインを避け、Mastodon 系 prefix / IRI 直記述 / type 配列 / 言語マップを canonical 短形式に揃える。CherryPick group chat 用 `@context` は破棄せず保持 |
 | Collection unroll 制限 | `core/federation/processor.go` | 安全側。深さ 1、item の host 一致を要求 (spoofing 防止)、URI 文字列 item は fetch 増幅回避で skip |
 | `published` の異常値 fallback | `core/federation/published_time.go` | mk-go 独自 hardening。clock skew 5min / 過去 10 年 floor |
-| 承認制の登録の通知 bot | `core/registrationbot` | **mk-go 独自** (#2557)。`@registration_service` を機能有効時に冪等生成し、承認結果の DM を送る。**ユーザー名にドットを含めない**ので、システムアカウント判定 (`username.includes('.')`) に当たらず AP 上 `Service` として配信される (`Application` は実装によって特別扱いされうる)。`isLocked` は false — 通知を相手の受信設定に通すためフォローを案内するので、true だとフォローが承認待ちで滞留し永久に成立しない。パスワードもトークンも持たせず、`admin/reset-password` とアカウント削除を mk-go 側で拒否する (ドットが無いため upstream 由来のガードには当たらない)。**DB に触れる管理者は止められない**ので、これは権限境界ではなく製品上の経路を塞ぐもの |
 | featured (ピン留め) の取り込み | `core/federation/featured.go` | **upstream と同等** (`ApPersonService.updateFeatured`) で、actor の新規取得時と更新時に取り込み、上限 5 件・既存を全置換。差分は 3 点いずれも安全側 (#2552)。(1) upstream は items を**全件**解決してから Note に絞るが、mk-go は走査を 50 件で打ち切る (巨大なコレクションを置くだけで取得を増幅させられるため。得られるピン留めは同じ)。(2) 著者が actor 本人であることを要求する (upstream は見ないので、他人の投稿を自分のプロフィールに並べられる)。(3) 個々の item の解決失敗を読み飛ばす (upstream は `Promise.all` なので 1 件でも失敗するとピン留めが 1 件も入らない)。またノート解決は depth 1 から始め、**その内側で作られた actor では featured を引かない** (引用先 → その著者 → その featured と入れ子になると 1 段ごとに 5 分岐する取得の連鎖になる) |
 | outbound User-Agent | `config/config.go` | `mk-go/<ver> (<url>)` |
 | AP object id の https スキーム非強制 | `core/federation/resolver.go` | **意図的な未実装** (#2507)。upstream の `checkHttps` は非 https の object id を reject する (テスト環境除く)。mk-go は id/attributedTo の host 一致 + SSRF guard で検証するがスキームは見ない。http ベースの e2e stack (dropin / federation) が前提のため、強制するなら upstream 同様の環境ゲートが要る。ブラウザ / AP クライアントは非 https の Location を追わないため実害は限定的 |
