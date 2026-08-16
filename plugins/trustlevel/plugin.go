@@ -81,6 +81,13 @@ type config struct {
 	PageSize int `json:"pageSize"`
 }
 
+// errUnconfigured means the operator has not set the plugin up yet.
+//
+// 同梱プラグインは「ビルドに含まれている」だけで有効になる (runtime の enabled は
+// 既定 true)。未設定で起動を止めると、config を書いていないインスタンスが
+// 全断するので、この場合だけは何も登録せずに見送る。
+var errUnconfigured = errors.New("trustlevel: 未設定")
+
 func loadConfig(ctx plugin.Context) (config, error) {
 	c := config{
 		MinAccountAgeDays: 7,
@@ -91,8 +98,15 @@ func loadConfig(ctx plugin.Context) (config, error) {
 	if err := ctx.Config().Unmarshal(&c); err != nil {
 		return c, err
 	}
-	// **設定漏れは起動で落とす。** 黙って何もしないと、運営者は「有効にした
-	// のに昇格しない」を延々と追うことになる。
+	// roleId / actorId が両方とも空なら「まだ設定していない」とみなす。
+	// **同梱プラグインなので、未設定で起動を止めてはいけない。** ルート登録が
+	// エラーを返すとインスタンスごと起動しなくなる (plugin_wiring.go)。ビルドに
+	// 含まれただけの状態で全断するのは割に合わない。
+	if c.RoleID == "" && c.ActorID == "" {
+		return c, errUnconfigured
+	}
+	// 片方だけ書いてあるのは書き途中か書き間違い。**ここは落とす** — 黙って何も
+	// しないと、運営者は「設定したのに昇格しない」を延々と追うことになる。
 	if c.RoleID == "" {
 		return c, errors.New("roleId を設定してください (付与するロールの ID)")
 	}

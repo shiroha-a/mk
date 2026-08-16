@@ -319,8 +319,9 @@ func TestAdminRoutes_RequireModerator(t *testing.T) {
 // 設定漏れは起動で落とす。**黙って何もしないと運営者が原因を追えない。**
 func TestConfig_RejectsMissingValues(t *testing.T) {
 	tests := map[string]map[string]any{
-		"roleId 未設定":  {"roleId": ""},
-		"actorId 未設定": {"actorId": ""},
+		// **片方だけ空は書き途中か書き間違い。** 落として気づかせる。
+		"roleId だけ空":  {"roleId": ""},
+		"actorId だけ空": {"actorId": ""},
 		"pageSize 過大": {"pageSize": 500},
 		"pageSize 0":  {"pageSize": 0},
 		"minNotes 負":  {"minNotes": -1},
@@ -333,6 +334,23 @@ func TestConfig_RejectsMissingValues(t *testing.T) {
 				t.Fatal("不正な設定が通っている")
 			}
 		})
+	}
+}
+
+// **未設定では何も登録せず、起動も止めない。** 同梱プラグインはビルドに含まれた
+// だけで有効になる (runtime の enabled は既定 true) ので、config を書いていない
+// インスタンスがルート登録のエラーで全断する。
+func TestUnconfigured_RegistersNothingAndDoesNotFail(t *testing.T) {
+	h := newHarness(t, &stubAPI{}, map[string]any{"roleId": "", "actorId": ""})
+
+	jobs := h.Jobs(Plugin)
+	if len(jobs.Schedules) != 0 || len(jobs.Handlers) != 0 {
+		t.Fatalf("未設定なのにジョブが登録された: %+v", jobs.Schedules)
+	}
+
+	handlers := h.Routes(Plugin)
+	if len(handlers) != 0 {
+		t.Fatalf("未設定なのにルートが登録された: %v", handlers)
 	}
 }
 

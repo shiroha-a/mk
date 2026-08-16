@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -12,6 +13,11 @@ import (
 
 func jobs(ctx plugin.Context, j plugin.Jobs) error {
 	cfg, err := loadConfig(ctx)
+	if errors.Is(err, errUnconfigured) {
+		// **起動は止めない。** 何も登録せず、設定が要ることだけ伝える。
+		ctx.Logger().Info("設定されていないので何もしません (roleId と actorId を設定してください)")
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -26,6 +32,10 @@ func jobs(ctx plugin.Context, j plugin.Jobs) error {
 
 func routes(ctx plugin.Context, router plugin.Router) error {
 	cfg, err := loadConfig(ctx)
+	if errors.Is(err, errUnconfigured) {
+		ctx.Logger().Info("設定されていないので何もしません (roleId と actorId を設定してください)")
+		return nil
+	}
 	if err != nil {
 		return err
 	}
