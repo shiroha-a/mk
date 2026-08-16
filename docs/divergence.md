@@ -28,7 +28,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 3 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 8 | chat 15 | **0** |
 | API レスポンスの additive field | 4 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 7 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 11 (+ 未使用の残存列 3) | 3 | 0 |
@@ -44,12 +44,13 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (48)
+### 1-1. mk-go にしかない (53)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
 | GET variant 追加 | 23 | `charts/*` 12 件、`emoji` / `emojis` / `federation/instances` / `federation/stats` / `fetch-rss` / `get-online-users-count` / `hashtags/trend` / `notes/featured` / `notes/reactions` / `server-info` / `bubble-game/ranking`。**対応する POST は両側にある**。ブラウザから直接叩く利便目的 |
 | cherrypick chat 拡張 | 15 | `chat/messages` / `chat/messages/create` / `read` / `update` / `reactions/create` / `reactions/delete`、`chat/rooms/joined` / `unmute` / `transfer-ownership` / `members/ban` / `members/update-membership` / `invitations/accept` / `delete` / `reject`、`chat/unread-count` |
+| 承認制の登録の申請 | 5 | `signup-application/miauth/start` / `miauth/complete` / `status` / `apply` / `register` (#2556)。upstream に承認制が無いため対応物なし。認証不要 (本人確認は MiAuth が担う)。承認制が有効でない構成では 503 |
 | 承認制の登録の審査 | 3 | `admin/signup-application/list` / `approve` / `reject` (#2555)。upstream に承認制が無いため対応物なし。scope は `read:admin:invite-codes` / `write:admin:invite-codes` を再利用する (承認は最終的に `registration_ticket` の発行につながり管轄が同じ。`internal/misc/permissions` は upstream misskey-js と完全一致させる契約があり mk-go 固有 scope を足せない) |
 | その他 / alias | 3 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim) |
 
