@@ -92,6 +92,7 @@ import (
 	corehashtag "github.com/shiroha-a/mk/internal/core/hashtag"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	coremediaproxy "github.com/shiroha-a/mk/internal/core/mediaproxy"
+	"github.com/shiroha-a/mk/internal/core/miauth"
 	coremodlog "github.com/shiroha-a/mk/internal/core/moderationlog"
 	coremoderatoractivity "github.com/shiroha-a/mk/internal/core/moderatoractivity"
 	coremove "github.com/shiroha-a/mk/internal/core/move"
@@ -1469,13 +1470,33 @@ func (s *Server) setupRoutes() {
 	// signupTicketRepo は repository.RegistrationTicketRepository で、
 	// apisignup.TicketStore (FindByCode + MarkUsed) を superset として満たす。
 	// 旧 gormTicketStore wrapper を直接 repo に置き換え (#610 item 1)。
+	// 承認制の登録 (#2554 / #2555)。承認待ちを user 行として持たず、専用
+	// テーブルに閉じ込める。TS へ切り替えても承認待ちが有効化されない。
+	// signup (申請・登録) と admin (審査) の両方が同じインスタンスを見る。
+	signupApplicationService := signupapplication.NewService(
+		repository.NewSignupApplicationRepository(s.db), idGen)
 	signupHandler.SetTicketStore(signupTicketRepo)
+	// 承認制の登録 (#2554 / #2556)。host は利用者入力なので、MiAuth の外部
+	// リクエストは必ず SSRF ガードを通した client で撃つ。
+	signupHandler.SetSignupApplications(
+		signupApplicationService,
+		miauth.NewClient(s.outboundClient(10*time.Second), s.config.UserAgent),
+		miauth.NewSessionStore(s.redis.Default),
+		s.config.URL,
+	)
 	signupHandler.SetTestMode(s.config.TestMode)
 	// emailRequiredForSignup フローの確認メール送信。常に sender を配線し、
 	// closure 内で毎回 meta を読み直すことで admin UI の SMTP 設定変更が
 	// 再起動なしに反映される (#1112)。smtpSecure も meta 経由で反映 (#1111)。
 	signupHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
 	api.POST("/signup", signupHandler.Signup)
+	// 承認制の登録 (#2554 / #2556)。認証は不要 — 本人確認は MiAuth が担う。
+	// 有効になっていない構成では 503 を返す。
+	api.POST("/signup-application/miauth/start", signupHandler.ApplicationMiAuthStart)
+	api.POST("/signup-application/miauth/complete", signupHandler.ApplicationMiAuthComplete)
+	api.POST("/signup-application/status", signupHandler.ApplicationStatus)
+	api.POST("/signup-application/apply", signupHandler.ApplicationApply)
+	api.POST("/signup-application/register", signupHandler.ApplicationRegister)
 	api.POST("/signup-pending", signupHandler.SignupPending)
 
 	// Username availability check (フロントエンドの signup フォームが呼ぶ)
@@ -2976,10 +2997,6 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
-	// 承認制の登録 (#2554 / #2555)。承認待ちを user 行として持たず、専用
-	// テーブルに閉じ込める。TS へ切り替えても承認待ちが有効化されない。
-	signupApplicationService := signupapplication.NewService(
-		repository.NewSignupApplicationRepository(s.db), idGen)
 	adminHandler.SetSignupApplicationReviewer(signupApplicationService)
 	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
 	// (server 側は既に migrate 済みで動いている前提。適用漏れの検出は

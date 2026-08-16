@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	coreemail "github.com/shiroha-a/mk/internal/core/email"
+	"github.com/shiroha-a/mk/internal/core/miauth"
 	"github.com/shiroha-a/mk/internal/core/role"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -64,6 +65,14 @@ type Handler struct {
 	// main publish) を発火する。upstream SignupApiService が signinService.signin を
 	// 呼ぶのに相当 (#1804)。未配線なら副作用なし。
 	signinRecorder SigninRecorder
+	// applications / miauth / miauthSessions は承認制の登録 (#2556)。
+	// 未配線なら該当 endpoint は 503 を返す。
+	applications   SignupApplications
+	miauth         *miauth.Client
+	miauthSessions *miauth.SessionStore
+	// publicURL は承認フローのコールバックの組み立てに使う。
+	publicURL string
+	// ticketStore は承認済み申請の登録でも使う (内部で招待を発行して即消費する)。
 }
 
 // SetSigninRecorder wires the recorder used to fire login side-effects after
