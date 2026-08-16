@@ -110,6 +110,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/selfcheck"
 	"github.com/shiroha-a/mk/internal/core/serverstats"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
+	"github.com/shiroha-a/mk/internal/core/signupapplication"
 	coresystemaccount "github.com/shiroha-a/mk/internal/core/systemaccount"
 	coretimeline "github.com/shiroha-a/mk/internal/core/timeline"
 	coretransfer "github.com/shiroha-a/mk/internal/core/transfer"
@@ -2975,6 +2976,11 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
+	// 承認制の登録 (#2554 / #2555)。承認待ちを user 行として持たず、専用
+	// テーブルに閉じ込める。TS へ切り替えても承認待ちが有効化されない。
+	signupApplicationService := signupapplication.NewService(
+		repository.NewSignupApplicationRepository(s.db), idGen)
+	adminHandler.SetSignupApplicationReviewer(signupApplicationService)
 	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
 	// (server 側は既に migrate 済みで動いている前提。適用漏れの検出は
 	// `misskey -doctor` の担当で、あちらは同梱ファイルを数えられる)。
@@ -3165,6 +3171,13 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/federation/delivery-health", adminHandler.FederationDeliveryHealth, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))
 	api.POST("/admin/invite/create", adminHandler.InviteCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:invite-codes"))
 	api.POST("/admin/invite/list", adminHandler.InviteList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:invite-codes"))
+	// 承認制の登録の審査 (#2555)。mk-go 独自。scope は invite-codes を再利用する
+	// — 承認は最終的に registration_ticket の発行につながるので管轄が同じで、
+	// internal/misc/permissions は upstream misskey-js と完全一致させる契約が
+	// あり mk-go 固有 scope を足せない。
+	api.POST("/admin/signup-application/list", adminHandler.SignupApplicationList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:invite-codes"))
+	api.POST("/admin/signup-application/approve", adminHandler.SignupApplicationApprove, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:invite-codes"))
+	api.POST("/admin/signup-application/reject", adminHandler.SignupApplicationReject, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:invite-codes"))
 	api.POST("/admin/promo/create", adminHandler.PromoCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:promo"))
 	api.POST("/admin/relays/add", adminHandler.RelaysAdd, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:relays"))
 	api.POST("/admin/relays/list", adminHandler.RelaysList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:relays"))

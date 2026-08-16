@@ -182,6 +182,9 @@ type Handler struct {
 	deliveryHealth DeliveryHealthProvider
 	// inboxHealth は admin/federation/inbox-health の集計元 (#2471)。
 	inboxHealth DeliveryHealthProvider
+	// signupApplications は承認制の登録の審査面 (#2555)。未配線なら該当
+	// endpoint は 503 を返す。
+	signupApplications SignupApplicationReviewer
 	// selfCheck は admin/self-check の実行元 (#2463)。未配線なら空の結果を返す。
 	selfCheck SelfCheckRunner
 	// userTokenInvalidator は admin が他 user を suspend / unsuspend /
