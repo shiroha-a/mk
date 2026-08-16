@@ -25,9 +25,20 @@ jobs:
       #
       # frontend の生成は submodule が要るので、ここでは backend だけを見る
       # (TS 側は frontend-check が見る)。
-      - name: Build bundled sample plugin
-        working-directory: plugins/status
-        run: go build ./...
+      # `go vet` にしているのは、build と違って**テストファイルもコンパイルする**
+      # から。plugin/ の公開面を変えたとき、本体だけ直してプラグインのテストが
+      # 置き去りになるのを検出する。
+      #
+      # なお**プラグインのテスト自体はどの job でも実行されない**。DB を要する
+      # ものが多く、この job に PostgreSQL が無いため。走らせるなら shard 側に
+      # 寄せる必要があり、それは別途。
+      - name: Vet bundled plugins
+        run: |
+          set -o pipefail
+          for dir in plugins/status plugins/trustlevel; do
+            echo "==> $dir"
+            (cd "$dir" && GOWORK=off go vet ./...)
+          done
 
   # 各shardは並列に走るが、checkは `test-shards (N)` という名前で個別に登録される。
   # ブランチ保護が `test` という名前のcheckを要求するため、後段の `test` job が

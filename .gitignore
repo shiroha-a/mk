@@ -86,6 +86,9 @@ tests/dropin_frontend/cypress/cypress/
 plugins/*
 !plugins/.gitkeep
 !plugins/status/
+# trustlevel も同梱する (#2586)。#2585 の公開面を実プラグインで検証する台なので、
+# ツリー外に置くと CI で `plugin/` の破壊に気付けない (status と同じ理由)。
+!plugins/trustlevel/
 go.work
 go.work.sum
 cmd/misskey/plugins_generated.go
