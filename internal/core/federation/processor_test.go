@@ -2143,3 +2143,43 @@ func TestProcess_CreateReplyClampedToSpecifiedKeepsTargetVisible(t *testing.T) {
 	assert.Contains(t, []string(created.VisibleUserIDs), "bob",
 		"reply 先の作者が visibleUserIds に入っていないと当人が本文を読めない")
 }
+
+// 同じ Create(Note) が再配送されても通知は 1 度しか出ないこと。
+//
+// **通知は冪等ではない。** 呼ぶたびに新しい id で 1 件積まれるので、配送リトライや
+// inbox / sharedInbox への二重投げがあると、受信者の通知一覧に同じメンションや
+// DM が 2 件並ぶ。実運用のインスタンスでは日常的に起きる (実験環境では配送が
+// 一度きりなので再現しない)。fanout は note id で冪等なので従来どおり発火する。
+func TestProcess_CreateDoesNotRenotifyOnRedelivery(t *testing.T) {
+	p, _, _, noteRepo := newProcessor(t, aliceActor)
+	hook := &fakeNotificationHook{}
+	p.SetNotificationHook(hook)
+
+	body := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Note",
+			"id": "https://remote.example/notes/n-redelivered",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "Hello again",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}
+	}`)
+
+	require.NoError(t, p.Process(body))
+	require.Eventually(t, func() bool {
+		return len(hook.snapshot()) == 1
+	}, time.Second, 10*time.Millisecond)
+	notesAfterFirst := len(noteRepo.Notes)
+
+	// 同じ activity をもう一度受ける (= 配送リトライ / 二重投げ)。
+	require.NoError(t, p.Process(body))
+
+	// ノートは増えない (URI で dedup される)。
+	assert.Equal(t, notesAfterFirst, len(noteRepo.Notes))
+	// 通知も増えないこと。**ここが増えると一覧に同じ通知が 2 件並ぶ。**
+	assert.Never(t, func() bool {
+		return len(hook.snapshot()) > 1
+	}, 200*time.Millisecond, 20*time.Millisecond)
+}

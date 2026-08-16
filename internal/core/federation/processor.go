@@ -1268,7 +1268,8 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 	}
 	if note != nil {
 		// IngestNoteが既存ノートを返した場合 (重複) でもfanout自体は
-		// べき等なので呼んで問題ない。authorはnoteに紐付くUserを使うが、
+		// べき等なので呼んで問題ない (通知フックは冪等でないので下で created
+		// ゲートを掛ける)。authorはnoteに紐付くUserを使うが、
 		// IngestNoteはUser fieldを設定しないためactorを使う。
 		// Renote/Reply relation は IngestNote 直後では未ロード (ID だけ) な
 		// ので、ストリーミング payload で renote 先が null にならないように
@@ -1293,7 +1294,15 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 		if p.fanoutHook != nil {
 			safeGoFedHook(func() { p.fanoutHook.OnNoteCreated(hydrated, actor) })
 		}
-		if p.notificationHook != nil {
+		// 通知フックは dedup hit では発火させない。**通知は冪等ではない** —
+		// 呼ぶたびに新しい id で 1 件積まれるので、同じ Create(Note) が再配送
+		// されると受信者の通知一覧に同じメンション / DM が 2 件並ぶ。実運用の
+		// インスタンスでは配送リトライや inbox / sharedInbox への二重投げが
+		// 日常的に起きるため、fanout (note id で冪等) と同じ扱いにはできない。
+		//
+		// upstream も通知は NoteCreateService.create の中でしか作らないので、
+		// 既存ノートを返した経路では通知が出ない (= ここと同じ挙動)。
+		if p.notificationHook != nil && created {
 			safeGoFedHook(func() {
 				// reply / quote / mention 通知を local notifiee に対して
 				// 生成する。hydrated.Reply / hydrated.Renote は preload
