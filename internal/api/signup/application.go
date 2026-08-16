@@ -3,12 +3,11 @@ package signup
 import (
 	"errors"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
-	"github.com/shiroha-a/mk/internal/core/miauth"
+	"github.com/shiroha-a/mk/internal/core/captcha"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
 	"github.com/shiroha-a/mk/internal/model"
@@ -16,37 +15,23 @@ import (
 
 // approvalTicketTTL bounds how long the internally minted invite stays usable.
 //
-// **短くてよい。** 発行するのは MiAuth を通した直後で、そのまま同じリクエスト
-// 内で消費する。長くすると、利用者に渡していない credential が DB に残る時間が
-// 伸びるだけ。
+// **短くてよい。** 発行するのは登録の直前で、そのまま同じリクエスト内で消費する。
+// 長くすると、利用者に渡していない credential が DB に残る時間が伸びるだけ。
 const approvalTicketTTL = 5 * time.Minute
 
 // SignupApplications is the applicant-side surface of the state machine.
 // 循環依存を避けるため interface で受け取る。実装は
 // core/signupapplication.Service。
 type SignupApplications interface {
-	Apply(contact signupapplication.Contact, reason string) (*model.SignupApplication, error)
-	Current(contact signupapplication.Contact) (*model.SignupApplication, error)
-	Latest(contact signupapplication.Contact) (*model.SignupApplication, error)
+	Apply(reason string) (*model.SignupApplication, string, error)
+	ByClaimCode(code string) (*model.SignupApplication, error)
 	MarkCompleted(applicationID, userID, ticketID string) error
 }
 
-// SetSignupApplications wires the approval-based signup flow (#2556).
+// SetSignupApplications wires the approval-based signup flow (#2569).
 // 未配線なら該当 endpoint は 503 を返す。
-// publicURL はコールバックの組み立てに使うインスタンスの公開 URL。
-// **email 送信用の serverURL を流用しない。** あちらは SetEmailSender でしか
-// 設定されないため、メール周りの配線を変えると気づかないままコールバックが
-// 空になり、承認フローだけが黙って戻れなくなる。
-func (h *Handler) SetSignupApplications(
-	apps SignupApplications,
-	client *miauth.Client,
-	sessions *miauth.SessionStore,
-	publicURL string,
-) {
+func (h *Handler) SetSignupApplications(apps SignupApplications) {
 	h.applications = apps
-	h.miauth = client
-	h.miauthSessions = sessions
-	h.publicURL = publicURL
 }
 
 // applicationView is what the applicant is allowed to see about their own
@@ -66,30 +51,6 @@ func applicationView(a *model.SignupApplication) map[string]any {
 	}
 }
 
-// contactView is the verified identity echoed back so the page can show
-// "you are signed in as @alice@remote.example".
-func contactView(c *miauth.Contact) map[string]any {
-	return map[string]any{
-		"host":      c.Host,
-		"username":  c.Username,
-		"acct":      "@" + c.Username + "@" + c.Host,
-		"name":      c.Name,
-		"avatarUrl": c.AvatarURL,
-	}
-}
-
-// approvalEnabled reports whether the approval flow is configured and turned on.
-func (h *Handler) approvalEnabled() (bool, error) {
-	if h.applications == nil || h.miauth == nil || h.miauthSessions == nil {
-		return false, nil
-	}
-	meta, err := h.metaRepo.Fetch()
-	if err != nil {
-		return false, err
-	}
-	return meta.ApprovalRequiredForSignup, nil
-}
-
 // approvalReady writes an error response and returns ok=false when the flow is
 // unavailable.
 //
@@ -97,298 +58,113 @@ func (h *Handler) approvalEnabled() (bool, error) {
 // エラー応答を書いたことを err の非 nil で表そうとすると、書いた直後に呼び出し
 // 側が素通りして処理を続けてしまう。
 func (h *Handler) approvalReady(c echo.Context) (bool, error) {
-	enabled, err := h.approvalEnabled()
+	if h.applications == nil {
+		return false, c.JSON(http.StatusServiceUnavailable,
+			apierr.Error("UNAVAILABLE", "Approval-based signup is not enabled.", "7c1c9c2f-1a2b-4c3d-8e5f-6a7b8c9d0e1f"))
+	}
+	meta, err := h.metaRepo.Fetch()
 	if err != nil {
 		return false, c.JSON(http.StatusInternalServerError,
 			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	if !enabled {
+	if !meta.ApprovalRequiredForSignup {
 		return false, c.JSON(http.StatusServiceUnavailable,
 			apierr.Error("UNAVAILABLE", "Approval-based signup is not enabled.", "7c1c9c2f-1a2b-4c3d-8e5f-6a7b8c9d0e1f"))
 	}
 	return true, nil
 }
 
-// ApplicationMiAuthStart handles POST /api/signup-application/miauth/start.
+// ApplicationApply handles POST /api/signup-application/apply.
 //
-// host を受けて MiAuth の認可 URL を返す。**リダイレクト先として使う前に、
-// 相手が Misskey 系であることを確かめる** — これが無いと任意のホストへ利用者を
-// 飛ばすオープンリダイレクタになる。
-func (h *Handler) ApplicationMiAuthStart(c echo.Context) error {
+// **クレームコードを返すのはここだけ。** 保存しているのは hash なので、以後
+// サーバー側から平文を出す手段は無い。失くしたら再申請してもらうしかない。
+func (h *Handler) ApplicationApply(c echo.Context) error {
 	if ok, err := h.approvalReady(c); !ok {
 		return err
 	}
 	var req struct {
-		Host string `json:"host"`
+		Reason string `json:"reason"`
+		// captcha の応答。**申請フォームは誰でも叩けるので、ここが唯一の
+		// 防波堤になる** — 連絡先という自然キーが無くなり、重複申請を DB で
+		// 抑止できなくなったため (#2569)。
+		HcaptchaResponse    string `json:"hcaptcha-response"`
+		RecaptchaResponse   string `json:"g-recaptcha-response"`
+		TurnstileResponse   string `json:"turnstile-response"`
+		McaptchaResponse    string `json:"m-captcha-response"`
+		TestcaptchaResponse string `json:"testcaptcha-response"`
 	}
-	if err := c.Bind(&req); err != nil || req.Host == "" {
-		return c.JSON(http.StatusBadRequest,
-			apierr.Error("INVALID_PARAM", "host is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
-	}
-	host := normalizeContactHost(req.Host)
-	if err := miauth.ValidateHost(host); err != nil {
-		return c.JSON(http.StatusBadRequest,
-			apierr.Error("INVALID_HOST", "That is not a valid host.", "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9"))
-	}
+	_ = c.Bind(&req)
 
-	ctx := c.Request().Context()
-	if err := h.miauth.Probe(ctx, host); err != nil {
-		// MiAuth を持つのは Misskey 系だけ。認証が失敗する前に案内する。
-		return c.JSON(http.StatusBadRequest,
-			apierr.Error("NOT_MISSKEY_HOST", "That host does not look like a Misskey server.", "6f7a8b9c-0d1e-4f2a-b3c4-d5e6f7a8b9c0"))
-	}
-
-	session, err := miauth.NewSessionID()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-	url, err := miauth.AuthorizeURL(host, session, h.instanceDisplayName(), h.applicationCallbackURL())
-	if err != nil {
-		return c.JSON(http.StatusBadRequest,
-			apierr.Error("INVALID_HOST", "That is not a valid host.", "5e6f7a8b-9c0d-4e1f-a2b3-c4d5e6f7a8b9"))
-	}
-	token, err := h.miauthSessions.StartPending(ctx, host, session)
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-	return c.JSON(http.StatusOK, map[string]any{"token": token, "url": url})
-}
-
-// ApplicationMiAuthComplete handles POST /api/signup-application/miauth/complete.
-//
-// **コールバックの `session` は受け取らない。** どのフローかは呼び出し側が持つ
-// トークンで決まる。URL 経由の値を信じると、攻撃者が開始したフローを被害者に
-// 承認させ、攻撃者のブラウザで踏む筋が残る。
-func (h *Handler) ApplicationMiAuthComplete(c echo.Context) error {
-	if ok, err := h.approvalReady(c); !ok {
-		return err
-	}
-	var req struct {
-		Token string `json:"token"`
-	}
-	if err := c.Bind(&req); err != nil || req.Token == "" {
-		return c.JSON(http.StatusBadRequest,
-			apierr.Error("INVALID_PARAM", "token is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
-	}
-
-	ctx := c.Request().Context()
-	pending, err := h.miauthSessions.TakePending(ctx, req.Token)
-	if err != nil {
-		if errors.Is(err, miauth.ErrSessionNotFound) {
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("SESSION_EXPIRED", "The authentication session has expired. Start again.", "8b9c0d1e-2f3a-4b5c-9d6e-7f8a9b0c1d2e"))
+	if !h.testMode && h.captchaSvc != nil {
+		tokens := captcha.CaptchaTokens{
+			Hcaptcha:    req.HcaptchaResponse,
+			Recaptcha:   req.RecaptchaResponse,
+			Turnstile:   req.TurnstileResponse,
+			Mcaptcha:    req.McaptchaResponse,
+			Testcaptcha: req.TestcaptchaResponse,
 		}
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-
-	// **認証先は申請フローの記録から引く。** リクエスト側に選ばせると、攻撃者が
-	// 自分のアカウントで認証して他人のフローを乗っ取れる。
-	contact, err := h.miauth.Check(ctx, pending.Host, pending.Session)
-	if err != nil {
-		switch {
-		case errors.Is(err, miauth.ErrNotAuthorized):
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("NOT_AUTHORIZED", "The authentication was not completed.", "9c0d1e2f-3a4b-4c5d-8e6f-7a8b9c0d1e2f"))
-		case errors.Is(err, miauth.ErrNotLocalToHost):
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("NOT_LOCAL_ACCOUNT", "That account does not belong to the host you chose.", "0d1e2f3a-4b5c-4d6e-9f7a-8b9c0d1e2f3a"))
-		default:
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("NOT_MISSKEY_HOST", "That host did not answer as a Misskey server.", "6f7a8b9c-0d1e-4f2a-b3c4-d5e6f7a8b9c0"))
+		if err := h.captchaSvc.Verify(c.Request().Context(), tokens); err != nil {
+			return apierr.FastifyReply(c, http.StatusBadRequest, "CAPTCHA_FAILED")
 		}
 	}
 
-	verified, err := h.miauthSessions.SaveVerified(ctx, contact)
+	app, code, err := h.applications.Apply(req.Reason)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-	app, err := h.currentOrLatest(toServiceContact(contact))
-	if err != nil {
+		if errors.Is(err, signupapplication.ErrReasonTooLong) {
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("REASON_TOO_LONG", "The reason is too long.", "2f3a4b5c-6d7e-4f8a-9b0c-1d2e3f4a5b6c"))
+		}
 		return c.JSON(http.StatusInternalServerError,
 			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	return c.JSON(http.StatusOK, map[string]any{
-		"token":       verified,
-		"contact":     contactView(contact),
+		"claimCode":   code,
 		"application": applicationView(app),
 	})
 }
 
 // ApplicationStatus handles POST /api/signup-application/status.
 //
-// 検証済みトークンで申請の状態を引き直す。**登録ページに戻ってきた人が続きから
-// 進めるための入口**で、DM が届かなくても詰まないのはこれがあるため。
+// 申請者がコードを持って戻ってくる入口。**これが唯一の導線**なので、コードを
+// 失くした場合は再申請しかない。
 func (h *Handler) ApplicationStatus(c echo.Context) error {
-	if ok, err := h.approvalReady(c); !ok {
-		return err
-	}
-	var req struct {
-		Token string `json:"token"`
-	}
-	_ = c.Bind(&req)
-	contact, ok, err := h.contactFor(c, req.Token)
+	app, ok, err := h.applicationForClaimCode(c)
 	if !ok {
 		return err
-	}
-	app, err := h.currentOrLatest(toServiceContact(contact))
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-	return c.JSON(http.StatusOK, map[string]any{
-		"contact":     contactView(contact),
-		"application": applicationView(app),
-	})
-}
-
-// ApplicationApply handles POST /api/signup-application/apply.
-func (h *Handler) ApplicationApply(c echo.Context) error {
-	if ok, err := h.approvalReady(c); !ok {
-		return err
-	}
-	var req struct {
-		Token  string `json:"token"`
-		Reason string `json:"reason"`
-	}
-	_ = c.Bind(&req)
-	contact, ok, err := h.contactFor(c, req.Token)
-	if !ok {
-		return err
-	}
-
-	app, err := h.applications.Apply(toServiceContact(contact), req.Reason)
-	if err != nil {
-		switch {
-		case errors.Is(err, signupapplication.ErrLiveApplicationExists):
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("ALREADY_APPLIED", "There is already an application for this account.", "1e2f3a4b-5c6d-4e7f-8a9b-0c1d2e3f4a5b"))
-		case errors.Is(err, signupapplication.ErrReasonTooLong):
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("REASON_TOO_LONG", "The reason is too long.", "2f3a4b5c-6d7e-4f8a-9b0c-1d2e3f4a5b6c"))
-		case errors.Is(err, signupapplication.ErrInvalidContact):
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("INVALID_PARAM", "Invalid contact.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
-		default:
-			return c.JSON(http.StatusInternalServerError,
-				apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-		}
 	}
 	return c.JSON(http.StatusOK, map[string]any{"application": applicationView(app)})
-}
-
-// currentOrLatest returns the live application, falling back to the most recent
-// terminal one so the applicant can see that they were rejected / expired.
-func (h *Handler) currentOrLatest(contact signupapplication.Contact) (*model.SignupApplication, error) {
-	app, err := h.applications.Current(contact)
-	if err != nil {
-		return nil, err
-	}
-	if app != nil {
-		return app, nil
-	}
-	return h.applications.Latest(contact)
-}
-
-// contactFor resolves a verified MiAuth token, writing the error response and
-// returning ok=false when it cannot.
-//
-// **トークンは呼び出し側が bind 済みのものを渡す。** ここで再度 c.Bind すると
-// 本文を二度読むことになり、handler 側の bind が空になる (register で username /
-// password が消えて INVALID_PARAM になった)。
-func (h *Handler) contactFor(c echo.Context, token string) (*miauth.Contact, bool, error) {
-	if token == "" {
-		return nil, false, c.JSON(http.StatusBadRequest,
-			apierr.Error("INVALID_PARAM", "token is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
-	}
-	contact, err := h.miauthSessions.Verified(c.Request().Context(), token)
-	if err != nil {
-		if errors.Is(err, miauth.ErrSessionNotFound) {
-			return nil, false, c.JSON(http.StatusBadRequest,
-				apierr.Error("SESSION_EXPIRED", "The authentication session has expired. Start again.", "8b9c0d1e-2f3a-4b5c-9d6e-7f8a9b0c1d2e"))
-		}
-		return nil, false, c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-	return contact, true, nil
-}
-
-func toServiceContact(c *miauth.Contact) signupapplication.Contact {
-	return signupapplication.Contact{Host: c.Host, RemoteID: c.RemoteID, Username: c.Username}
-}
-
-// normalizeContactHost accepts what a person is likely to type and reduces it
-// to a bare host.
-//
-// `@name@host` / `host` / `https://host/` のいずれで来ても同じ host に落とす。
-// **ここで揃えておかないと、表記違いが (host, remoteID) の一致判定に効いて
-// 「申請したのに見つからない」になる。**
-func normalizeContactHost(input string) string {
-	s := strings.TrimSpace(input)
-	s = strings.TrimPrefix(s, "https://")
-	s = strings.TrimPrefix(s, "http://")
-	// `@name@host` は最後の `@` の後ろが host。
-	if i := strings.LastIndex(s, "@"); i >= 0 {
-		s = s[i+1:]
-	}
-	// 末尾のパスやスラッシュを落とす。
-	if i := strings.IndexAny(s, "/?#"); i >= 0 {
-		s = s[:i]
-	}
-	return strings.ToLower(strings.TrimSpace(s))
-}
-
-// instanceDisplayName is the name shown on the remote consent screen.
-// 相手には「どこからの要求か」がこれでしか分からないので、インスタンス名を出す。
-func (h *Handler) instanceDisplayName() string {
-	if m, err := h.metaRepo.Fetch(); err == nil && m != nil && m.Name != nil && *m.Name != "" {
-		return *m.Name
-	}
-	return h.publicURL
-}
-
-// applicationCallbackURL is where the remote sends the applicant back to.
-func (h *Handler) applicationCallbackURL() string {
-	if h.publicURL == "" {
-		return ""
-	}
-	return strings.TrimSuffix(h.publicURL, "/") + "/signup-application/callback"
 }
 
 // ApplicationRegister handles POST /api/signup-application/register.
 //
 // 承認済みの申請に対して、実際にアカウントを作る。**招待コードは利用者に渡さない**
-// — ここで発行し、同じ流れで消費する。DM に載せて 7 日間置くと、渡していない
-// bearer 相当の credential が DB に残るだけで得るものが無い (#2554)。
+// — ここで発行し、同じ流れで消費する。
 func (h *Handler) ApplicationRegister(c echo.Context) error {
 	if ok, err := h.approvalReady(c); !ok {
 		return err
 	}
 	var req struct {
-		Token    string `json:"token"`
-		Username string `json:"username"`
-		Password string `json:"password"`
+		ClaimCode string `json:"claimCode"`
+		Username  string `json:"username"`
+		Password  string `json:"password"`
 	}
 	if err := c.Bind(&req); err != nil || req.Username == "" || req.Password == "" {
 		return c.JSON(http.StatusBadRequest,
 			apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	contact, ok, err := h.contactFor(c, req.Token)
-	if !ok {
-		return err
-	}
 
 	// **申請の状態はここで引き直す。** 画面が古い状態を握っていても、承認されて
 	// いないものが通ることは無い。
-	app, err := h.applications.Current(toServiceContact(contact))
+	app, err := h.applications.ByClaimCode(req.ClaimCode)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError,
 			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	if app == nil || app.Status != model.SignupApplicationApproved {
+	if app == nil {
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("NO_SUCH_APPLICATION", "No such application.", "1f2c0f7a-9b0e-4d5e-8a3f-4b1f5c210c5b"))
+	}
+	if app.Status != model.SignupApplicationApproved {
 		return c.JSON(http.StatusBadRequest,
 			apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
 	}
@@ -407,27 +183,51 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 		return h.signupServiceError(c, err)
 	}
 
-	if ticket != nil && h.ticketStore != nil {
-		if merr := h.ticketStore.MarkUsed(ticket.ID, result.User.ID); merr != nil {
-			// 消費の記録に失敗してもアカウントは作られている。ここで 500 を
-			// 返すと、利用者には「失敗したのに登録されている」状態になる。
-			c.Logger().Warnf("signup application: mark ticket used failed: %v", merr)
-		}
-	}
 	ticketID := ""
 	if ticket != nil {
 		ticketID = ticket.ID
+		if h.ticketStore != nil {
+			if merr := h.ticketStore.MarkUsed(ticket.ID, result.User.ID); merr != nil {
+				// 消費の記録に失敗してもアカウントは作られている。ここで 500 を
+				// 返すと、利用者には「失敗したのに登録されている」状態になる。
+				c.Logger().Warnf("signup application: mark ticket used failed: %v", merr)
+			}
+		}
 	}
 	if cerr := h.applications.MarkCompleted(app.ID, result.User.ID, ticketID); cerr != nil {
 		// 同上。申請の完了記録は監査用で、アカウントの成立とは独立。
 		c.Logger().Warnf("signup application: mark completed failed: %v", cerr)
 	}
-	// 登録が済んだら検証済みトークンは用済み。**残すと、同じトークンで再度
-	// 登録画面に入れる。**
-	_ = h.miauthSessions.DropVerified(c.Request().Context(), req.Token)
 
 	h.fireSigninSideEffects(c, result.User.ID)
 	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Profile, result.Token, h.idGen))
+}
+
+// applicationForClaimCode resolves the caller's claim code, writing the error
+// response and returning ok=false when it cannot.
+func (h *Handler) applicationForClaimCode(c echo.Context) (*model.SignupApplication, bool, error) {
+	if ok, err := h.approvalReady(c); !ok {
+		return nil, false, err
+	}
+	var req struct {
+		ClaimCode string `json:"claimCode"`
+	}
+	if err := c.Bind(&req); err != nil || req.ClaimCode == "" {
+		return nil, false, c.JSON(http.StatusBadRequest,
+			apierr.Error("INVALID_PARAM", "claimCode is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	app, err := h.applications.ByClaimCode(req.ClaimCode)
+	if err != nil {
+		return nil, false, c.JSON(http.StatusInternalServerError,
+			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	if app == nil {
+		// **存在しないコードと期限切れのコードを区別しない。** 区別できると、
+		// 総当たりで「そのコードは実在する」ことだけ漏れる。
+		return nil, false, c.JSON(http.StatusBadRequest,
+			apierr.Error("NO_SUCH_APPLICATION", "No such application.", "1f2c0f7a-9b0e-4d5e-8a3f-4b1f5c210c5b"))
+	}
+	return app, true, nil
 }
 
 // mintApprovalTicket issues the short-lived invite consumed by this signup.
@@ -443,7 +243,7 @@ func (h *Handler) mintApprovalTicket(app *model.SignupApplication) (*model.Regis
 	if !ok {
 		return nil, nil
 	}
-	code, err := miauth.NewSessionID()
+	code, err := signupapplication.NewClaimCode()
 	if err != nil {
 		return nil, err
 	}

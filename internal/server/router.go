@@ -92,7 +92,6 @@ import (
 	corehashtag "github.com/shiroha-a/mk/internal/core/hashtag"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	coremediaproxy "github.com/shiroha-a/mk/internal/core/mediaproxy"
-	"github.com/shiroha-a/mk/internal/core/miauth"
 	coremodlog "github.com/shiroha-a/mk/internal/core/moderationlog"
 	coremoderatoractivity "github.com/shiroha-a/mk/internal/core/moderatoractivity"
 	coremove "github.com/shiroha-a/mk/internal/core/move"
@@ -103,7 +102,6 @@ import (
 	corepoll "github.com/shiroha-a/mk/internal/core/poll"
 	"github.com/shiroha-a/mk/internal/core/procstats"
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
-	"github.com/shiroha-a/mk/internal/core/registrationbot"
 	corerelay "github.com/shiroha-a/mk/internal/core/relay"
 	coreretention "github.com/shiroha-a/mk/internal/core/retention"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
@@ -113,7 +111,6 @@ import (
 	"github.com/shiroha-a/mk/internal/core/serverstats"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
-	"github.com/shiroha-a/mk/internal/core/signupnotify"
 	coresystemaccount "github.com/shiroha-a/mk/internal/core/systemaccount"
 	coretimeline "github.com/shiroha-a/mk/internal/core/timeline"
 	coretransfer "github.com/shiroha-a/mk/internal/core/transfer"
@@ -1478,14 +1475,9 @@ func (s *Server) setupRoutes() {
 	signupApplicationService := signupapplication.NewService(
 		repository.NewSignupApplicationRepository(s.db), idGen)
 	signupHandler.SetTicketStore(signupTicketRepo)
-	// 承認制の登録 (#2554 / #2556)。host は利用者入力なので、MiAuth の外部
-	// リクエストは必ず SSRF ガードを通した client で撃つ。
-	signupHandler.SetSignupApplications(
-		signupApplicationService,
-		miauth.NewClient(s.outboundClient(10*time.Second), s.config.UserAgent),
-		miauth.NewSessionStore(s.redis.Default),
-		s.config.URL,
-	)
+	// 承認制の登録 (#2554 / #2569)。本人性はクレームコードが担保するので、
+	// 外部サーバーには一切依存しない。
+	signupHandler.SetSignupApplications(signupApplicationService)
 	signupHandler.SetTestMode(s.config.TestMode)
 	// emailRequiredForSignup フローの確認メール送信。常に sender を配線し、
 	// closure 内で毎回 meta を読み直すことで admin UI の SMTP 設定変更が
@@ -1494,10 +1486,8 @@ func (s *Server) setupRoutes() {
 	api.POST("/signup", signupHandler.Signup)
 	// 承認制の登録 (#2554 / #2556)。認証は不要 — 本人確認は MiAuth が担う。
 	// 有効になっていない構成では 503 を返す。
-	api.POST("/signup-application/miauth/start", signupHandler.ApplicationMiAuthStart)
-	api.POST("/signup-application/miauth/complete", signupHandler.ApplicationMiAuthComplete)
-	api.POST("/signup-application/status", signupHandler.ApplicationStatus)
 	api.POST("/signup-application/apply", signupHandler.ApplicationApply)
+	api.POST("/signup-application/status", signupHandler.ApplicationStatus)
 	api.POST("/signup-application/register", signupHandler.ApplicationRegister)
 	api.POST("/signup-pending", signupHandler.SignupPending)
 
@@ -3000,16 +2990,6 @@ func (s *Server) setupRoutes() {
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
 	adminHandler.SetSignupApplicationReviewer(signupApplicationService)
-	// 承認結果を申請者へ DM で知らせる (#2557)。**通知でしかない** — 申請者は
-	// 登録ページに戻れば自分で状態を確認できるので、ここが動かなくても登録は
-	// 完了できる。送信元は専用 bot (@registration_service) で、システムアカウント
-	// は使わない (AP 上 Application になり、用途も混ざるため)。
-	signupApplicationService.SetNotifier(signupnotify.NewNotifier(
-		registrationbot.NewService(userRepo, keypairRepo, usedUsernameRepo, idGen),
-		federationResolver,
-		noteCreateService,
-		s.config.URL,
-	))
 	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
 	// (server 側は既に migrate 済みで動いている前提。適用漏れの検出は
 	// `misskey -doctor` の担当で、あちらは同梱ファイルを数えられる)。

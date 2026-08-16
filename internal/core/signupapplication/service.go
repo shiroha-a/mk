@@ -1,9 +1,12 @@
 // Package signupapplication implements the state machine behind approval-based
 // registration (#2554 / #2555).
 //
-// 申請は「他の Misskey サーバーのアカウント」を連絡先として作られ、管理者の審査を
-// 経て登録に至る。**承認待ちを user 行として持たない**のが設計の核で、user が
-// 作られるのは承認後の登録時 (#2556) だけ。
+// 申請は管理者の審査を経て登録に至る。**承認待ちを user 行として持たない**のが
+// 設計の核で、user が作られるのは承認後の登録時だけ。
+//
+// 本人性は**申請時に発行するクレームコード**が担保する。外部サーバーには一切
+// 依存しない (#2568)。コードは hash で保存し、平文はこの package の外へ 1 度だけ
+// 返す。
 //
 //	無し       -> pending                (Apply)
 //	pending    -> approved / rejected    (Approve / Reject)
@@ -15,6 +18,9 @@
 package signupapplication
 
 import (
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -37,9 +43,6 @@ const DefaultTTL = 7 * 24 * time.Hour
 const MaxReasonLength = 2048
 
 var (
-	// ErrLiveApplicationExists is returned when the contact already has a
-	// pending or approved application.
-	ErrLiveApplicationExists = errors.New("signupapplication: a live application already exists for this contact")
 	// ErrNotFound is returned when the application does not exist.
 	ErrNotFound = errors.New("signupapplication: not found")
 	// ErrNotPending is returned when approving / rejecting an application that
@@ -54,40 +57,16 @@ var (
 	// まま残りうる (掃除は遅延反映) ので、まとめて「審査待ちではない」と返すと
 	// 管理者には「審査待ちに見えるのに審査待ちではない」という説明になる。
 	ErrExpired = errors.New("signupapplication: application has expired")
-	// ErrInvalidContact is returned when the contact identity is incomplete.
-	ErrInvalidContact = errors.New("signupapplication: invalid contact")
 	// ErrReasonTooLong is returned when the free-text reason exceeds the limit.
 	ErrReasonTooLong = errors.New("signupapplication: reason is too long")
 )
 
-// Contact identifies the remote account used as the applicant's contact.
-//
-// **Host と RemoteID が一致判定の鍵。** Username は表示専用で、相手サーバーでの
-// 改名により変わりうる。MiAuth の `check` 応答は相手サーバーのローカルユーザーを
-// 返すため `uri` が null であり、安定して使えるのはこの組だけ。
-type Contact struct {
-	Host     string
-	RemoteID string
-	Username string
-}
-
-// ResultNotifier is told about review outcomes so the applicant can be
-// informed (#2557).
-//
-// **通知でしかない。** 申請者は登録ページに戻れば自分で状態を確認できるので、
-// ここが動かなくても登録は完了できる。
-type ResultNotifier interface {
-	NotifyApproved(app *model.SignupApplication)
-	NotifyRejected(app *model.SignupApplication)
-}
-
 // Service manages signup applications.
 type Service struct {
-	repo     repository.SignupApplicationRepository
-	idGen    id.Generator
-	clock    func() time.Time
-	ttl      time.Duration
-	notifier ResultNotifier
+	repo  repository.SignupApplicationRepository
+	idGen id.Generator
+	clock func() time.Time
+	ttl   time.Duration
 }
 
 // NewService constructs a Service.
@@ -98,12 +77,6 @@ func NewService(repo repository.SignupApplicationRepository, idGen id.Generator)
 		clock: time.Now,
 		ttl:   DefaultTTL,
 	}
-}
-
-// SetNotifier wires the applicant-facing notification (#2557). 未配線なら
-// 通知を行わないだけで、審査そのものは変わらない。
-func (s *Service) SetNotifier(n ResultNotifier) {
-	s.notifier = n
 }
 
 // SetClock replaces the clock, primarily for tests.
@@ -121,100 +94,83 @@ func (s *Service) SetTTL(d time.Duration) {
 	}
 }
 
-// Apply records a new application for the contact.
-func (s *Service) Apply(contact Contact, reason string) (*model.SignupApplication, error) {
-	if err := validateContact(contact); err != nil {
-		return nil, err
-	}
+// Apply records a new application and returns it along with the claim code.
+//
+// **コードの平文を返すのはここだけ。** 保存するのは hash で、呼び出し側が申請者へ
+// 1 度だけ見せる。失くしたら再申請してもらうしかない (伝える経路が無い)。
+func (s *Service) Apply(reason string) (*model.SignupApplication, string, error) {
 	reason = strings.TrimSpace(reason)
 	// rune 単位で数える。varchar(2048) は文字数なので、byte で見ると日本語が
 	// 通らなくなる。
 	if len([]rune(reason)) > MaxReasonLength {
-		return nil, ErrReasonTooLong
+		return nil, "", ErrReasonTooLong
 	}
 
 	now := s.clock()
-	// 期限切れの申請が席を占めたままだと、本人が申請し直せない。**参照の
-	// たびに掃除する**ことで、掃除ジョブが無くても回るようにする。
-	if _, err := s.expireIfStale(contact, now); err != nil {
-		return nil, err
-	}
-
-	app := &model.SignupApplication{
-		ID:              s.idGen.Generate(now),
-		ContactHost:     contact.Host,
-		ContactRemoteID: contact.RemoteID,
-		ContactUsername: contact.Username,
-		Status:          model.SignupApplicationPending,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		ExpiresAt:       now.Add(s.ttl),
-	}
-	if reason != "" {
-		app.Reason = &reason
-	}
-
-	if err := s.repo.Create(app); err != nil {
-		if errors.Is(err, repository.ErrSignupApplicationLiveExists) {
-			return nil, ErrLiveApplicationExists
+	// 衝突は crypto/rand なので実質起きないが、**黙って別の申請を上書きしない**
+	// ように採り直す。
+	for attempt := range claimCodeAttempts {
+		code, err := NewClaimCode()
+		if err != nil {
+			return nil, "", err
 		}
-		return nil, fmt.Errorf("signupapplication: create: %w", err)
+		app := &model.SignupApplication{
+			ID:            s.idGen.Generate(now),
+			ClaimCodeHash: HashClaimCode(code),
+			Status:        model.SignupApplicationPending,
+			CreatedAt:     now,
+			UpdatedAt:     now,
+			ExpiresAt:     now.Add(s.ttl),
+		}
+		if reason != "" {
+			app.Reason = &reason
+		}
+		err = s.repo.Create(app)
+		switch {
+		case err == nil:
+			return app, code, nil
+		case errors.Is(err, repository.ErrSignupApplicationCodeCollision):
+			_ = attempt // 採り直す
+			continue
+		default:
+			return nil, "", fmt.Errorf("signupapplication: create: %w", err)
+		}
 	}
-	return app, nil
+	return nil, "", errors.New("signupapplication: could not allocate a claim code")
 }
 
-// Current returns the contact's live application, lazily expiring it when it is
-// past its deadline. Returns nil (and no error) when there is none.
+// ByClaimCode returns the application the code stands for, lazily expiring it
+// when it is past its deadline.
 //
-// 登録ページが「いまこの人はどの状態か」を出すための入口。
-func (s *Service) Current(contact Contact) (*model.SignupApplication, error) {
-	if err := validateContact(contact); err != nil {
-		return nil, err
+// 見つからないときは nil を返す (エラーにしない)。**存在しないコードと期限切れの
+// コードを呼び出し側から区別させない** — 区別できると、コードの総当たりで「その
+// コードは実在する」ことだけ漏れる。
+func (s *Service) ByClaimCode(code string) (*model.SignupApplication, error) {
+	if code == "" {
+		return nil, nil
 	}
-	return s.expireIfStale(contact, s.clock())
-}
-
-// Latest returns the contact's most recent application regardless of status.
-// 却下・期限切れの結果を申請者に見せるために使う。
-func (s *Service) Latest(contact Contact) (*model.SignupApplication, error) {
-	if err := validateContact(contact); err != nil {
-		return nil, err
-	}
-	app, err := s.repo.FindLatestByContact(contact.Host, contact.RemoteID)
+	app, err := s.repo.FindByClaimCodeHash(HashClaimCode(code))
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("signupapplication: find latest: %w", err)
+		return nil, fmt.Errorf("signupapplication: find by claim code: %w", err)
 	}
-	return app, nil
-}
-
-// expireIfStale returns the contact's live application, flipping it to expired
-// (and returning nil) when it is past its deadline.
-func (s *Service) expireIfStale(contact Contact, now time.Time) (*model.SignupApplication, error) {
-	app, err := s.repo.FindLiveByContact(contact.Host, contact.RemoteID)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, nil
-		}
-		return nil, fmt.Errorf("signupapplication: find live: %w", err)
-	}
-	if now.Before(app.ExpiresAt) {
+	now := s.clock()
+	if !app.IsLive() || now.Before(app.ExpiresAt) {
 		return app, nil
 	}
+	// 期限切れは参照のたびに反映する。掃除ジョブが無くても実態に寄る。
 	if err := s.transition(app.ID, now, func(cur *model.SignupApplication) decision {
 		if !cur.IsLive() || now.Before(cur.ExpiresAt) {
-			// 別の経路が先に処理していたら何もしない。
 			return decision{}
 		}
-		// 掃除の経路では ErrExpired を呼び出し側に返さない (期限切れは
-		// 「申請が無い」と同じ意味になる)。
 		return decision{fields: map[string]any{"status": model.SignupApplicationExpired}}
 	}); err != nil {
 		return nil, err
 	}
-	return nil, nil
+	app.Status = model.SignupApplicationExpired
+	return app, nil
 }
 
 // Approve marks the application as approved.
@@ -239,8 +195,7 @@ func (s *Service) review(applicationID, moderatorID string, approve bool) error 
 	if approve {
 		status = model.SignupApplicationApproved
 	}
-	var reviewed *model.SignupApplication
-	err := s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
+	return s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
 		if cur.Status != model.SignupApplicationPending {
 			return decision{err: ErrNotPending}
 		}
@@ -250,26 +205,12 @@ func (s *Service) review(applicationID, moderatorID string, approve bool) error 
 		if !now.Before(cur.ExpiresAt) {
 			return expireDecision()
 		}
-		reviewed = cur
 		return decision{fields: map[string]any{
 			"status":        status,
 			"processedById": moderatorID,
 			"processedAt":   now,
 		}}
 	})
-	if err != nil || reviewed == nil || s.notifier == nil {
-		return err
-	}
-	// 申請者に知らせるのは**保存できてから**。先に送ると、書き込みに失敗した
-	// 承認を伝えてしまう。
-	reviewed.Status = status
-	reviewed.ProcessedByID = &moderatorID
-	if approve {
-		s.notifier.NotifyApproved(reviewed)
-	} else {
-		s.notifier.NotifyRejected(reviewed)
-	}
-	return nil
 }
 
 // MarkCompleted records that the approved application produced a local account.
@@ -392,9 +333,26 @@ func (s *Service) ExpireStale() (int, error) {
 	return n, nil
 }
 
-func validateContact(c Contact) error {
-	if strings.TrimSpace(c.Host) == "" || strings.TrimSpace(c.RemoteID) == "" {
-		return ErrInvalidContact
+// claimCodeAttempts bounds how many times Apply retries on a hash collision.
+const claimCodeAttempts = 4
+
+// NewClaimCode returns a fresh 256-bit code in hex.
+//
+// **推測されると他人の申請を乗っ取れる** (状態確認と登録の両方の入口になる) ので
+// crypto/rand から作る。
+func NewClaimCode() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("signupapplication: generate claim code: %w", err)
 	}
-	return nil
+	return hex.EncodeToString(b), nil
+}
+
+// HashClaimCode returns the value stored in the database for a claim code.
+//
+// **平文は保存しない。** 保存すると DB が漏れた時点で全申請が乗っ取れる。総当たり
+// への耐性はコード自身のエントロピー (256bit) が担うので、伸長は要らない。
+func HashClaimCode(code string) string {
+	sum := sha256.Sum256([]byte(code))
+	return hex.EncodeToString(sum[:])
 }

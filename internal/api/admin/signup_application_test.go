@@ -67,15 +67,13 @@ func sampleApplication() *model.SignupApplication {
 	reason := "よろしくお願いします"
 	now := time.Now().UTC()
 	return &model.SignupApplication{
-		ID:              "app-1",
-		ContactHost:     "remote.example",
-		ContactRemoteID: "r1",
-		ContactUsername: "alice",
-		Status:          model.SignupApplicationPending,
-		Reason:          &reason,
-		CreatedAt:       now,
-		UpdatedAt:       now,
-		ExpiresAt:       now.Add(7 * 24 * time.Hour),
+		ID:            "app-1",
+		ClaimCodeHash: "hash-1",
+		Status:        model.SignupApplicationPending,
+		Reason:        &reason,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+		ExpiresAt:     now.Add(7 * 24 * time.Hour),
 	}
 }
 
@@ -96,11 +94,12 @@ func TestSignupApplicationList(t *testing.T) {
 
 	app := body.Applications[0]
 	assert.Equal(t, "app-1", app["id"])
-	assert.Equal(t, "remote.example", app["contactHost"])
-	assert.Equal(t, "r1", app["contactRemoteId"])
-	// 審査には「どのサーバーの誰か」が要る。
-	assert.Equal(t, "@alice@remote.example", app["contactAcct"])
 	assert.Equal(t, "pending", app["status"])
+	assert.Equal(t, "よろしくお願いします", app["reason"])
+	// **クレームコードは出さない。** hash しか持っていないうえ、出せてしまうと
+	// 管理者が申請者になりすまして登録できる。
+	assert.NotContains(t, app, "claimCode")
+	assert.NotContains(t, app, "claimCodeHash")
 
 	assert.Equal(t, "pending", rev.lastFilter)
 	assert.Equal(t, 10, rev.lastLimit)

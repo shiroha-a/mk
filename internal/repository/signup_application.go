@@ -27,31 +27,23 @@ const (
 	SignupApplicationFilterProcessed = "processed"
 )
 
-// ErrSignupApplicationLiveExists is returned when a second application would
-// collide with one that is still live (pending / approved) for the same
-// contact.
+// ErrSignupApplicationCodeCollision is returned when the generated claim code
+// hash collides with an existing row.
 //
-// 部分一意インデックスの違反を呼び出し側が判別できるようにするための番兵。
-// 生の gorm エラーを上に流すと、handler が「重複」と「DB 障害」を区別できない。
-var ErrSignupApplicationLiveExists = errors.New("a live signup application already exists for this contact")
+// 生成は crypto/rand なので実質起きないが、**起きたときに黙って別の申請を
+// 上書きしない**ように番兵で区別する (呼び出し側は採り直す)。
+var ErrSignupApplicationCodeCollision = errors.New("signup application claim code collision")
 
 // SignupApplicationRepository handles persistence for the
 // `signup_application` table (#2555).
 type SignupApplicationRepository interface {
-	// Create inserts a new application. Returns ErrSignupApplicationLiveExists
-	// when the contact already has a pending / approved application.
+	// Create inserts a new application. Returns
+	// ErrSignupApplicationCodeCollision when the claim code hash is taken.
 	Create(a *model.SignupApplication) error
 	// FindByID returns the application by primary key.
 	FindByID(id string) (*model.SignupApplication, error)
-	// FindLiveByContact returns the pending / approved application for the
-	// contact, if any.
-	//
-	// **一致判定は (host, remoteID)。** username は相手サーバーでの改名で
-	// 変わるので鍵にしない。
-	FindLiveByContact(host, remoteID string) (*model.SignupApplication, error)
-	// FindLatestByContact returns the most recent application for the contact
-	// regardless of status. 却下・期限切れの結果を申請者に見せるために使う。
-	FindLatestByContact(host, remoteID string) (*model.SignupApplication, error)
+	// FindByClaimCodeHash returns the application the code stands for.
+	FindByClaimCodeHash(hash string) (*model.SignupApplication, error)
 	// FindByIDForUpdateTx returns the application by ID with a row-level write
 	// lock (`SELECT ... FOR UPDATE`), inside the caller's transaction.
 	// 審査と登録消費を直列化するために使う。
@@ -85,13 +77,13 @@ func (r *signupApplicationRepository) DB() *gorm.DB { return r.db }
 func (r *signupApplicationRepository) Create(a *model.SignupApplication) error {
 	if err := r.db.Create(a).Error; err != nil {
 		// PostgreSQL の一意制約違反 (23505) を専用エラーに変換する。生の gorm
-		// エラーを上に流すと、handler が「重複」と「DB 障害」を区別できない。
+		// エラーを上に流すと、handler が「衝突」と「DB 障害」を区別できない。
 		//
-		// このテーブルに一意制約は部分インデックス 1 本しか無いので、制約名まで
-		// 見なくても取り違えない。**制約を足すときはここも見直すこと。**
+		// このテーブルの一意制約は claimCodeHash だけなので、制約名まで見なくても
+		// 取り違えない。**制約を足すときはここも見直すこと。**
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
-			return ErrSignupApplicationLiveExists
+			return ErrSignupApplicationCodeCollision
 		}
 		return err
 	}
@@ -106,23 +98,9 @@ func (r *signupApplicationRepository) FindByID(id string) (*model.SignupApplicat
 	return &a, nil
 }
 
-func (r *signupApplicationRepository) FindLiveByContact(host, remoteID string) (*model.SignupApplication, error) {
+func (r *signupApplicationRepository) FindByClaimCodeHash(hash string) (*model.SignupApplication, error) {
 	var a model.SignupApplication
-	if err := r.db.
-		Where(`"contactHost" = ? AND "contactRemoteId" = ? AND "status" IN ?`,
-			host, remoteID, []string{model.SignupApplicationPending, model.SignupApplicationApproved}).
-		First(&a).Error; err != nil {
-		return nil, err
-	}
-	return &a, nil
-}
-
-func (r *signupApplicationRepository) FindLatestByContact(host, remoteID string) (*model.SignupApplication, error) {
-	var a model.SignupApplication
-	if err := r.db.
-		Where(`"contactHost" = ? AND "contactRemoteId" = ?`, host, remoteID).
-		Order(`"createdAt" DESC`).
-		First(&a).Error; err != nil {
+	if err := r.db.Where(`"claimCodeHash" = ?`, hash).First(&a).Error; err != nil {
 		return nil, err
 	}
 	return &a, nil

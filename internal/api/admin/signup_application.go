@@ -36,24 +36,19 @@ const (
 
 // packSignupApplication converts a row into the admin list response shape.
 //
-// **連絡先をそのまま出す。** 審査には「どのサーバーの誰か」が要る。
-// contactRemoteId は相手サーバー内部の ID で、改名しても変わらないため
-// 問い合わせ対応の手がかりになる。
+// **クレームコードは出さない。** hash しか保存していないうえ、出せてしまうと
+// 管理者が申請者になりすまして登録できる。
 func packSignupApplication(a *model.SignupApplication) map[string]any {
 	return map[string]any{
-		"id":              a.ID,
-		"contactHost":     a.ContactHost,
-		"contactRemoteId": a.ContactRemoteID,
-		"contactUsername": a.ContactUsername,
-		"contactAcct":     "@" + a.ContactUsername + "@" + a.ContactHost,
-		"status":          a.Status,
-		"reason":          a.Reason,
-		"createdAt":       a.CreatedAt,
-		"updatedAt":       a.UpdatedAt,
-		"expiresAt":       a.ExpiresAt,
-		"processedById":   a.ProcessedByID,
-		"processedAt":     a.ProcessedAt,
-		"usedById":        a.UsedByID,
+		"id":            a.ID,
+		"status":        a.Status,
+		"reason":        a.Reason,
+		"createdAt":     a.CreatedAt,
+		"updatedAt":     a.UpdatedAt,
+		"expiresAt":     a.ExpiresAt,
+		"processedById": a.ProcessedByID,
+		"processedAt":   a.ProcessedAt,
+		"usedById":      a.UsedByID,
 	}
 }
 

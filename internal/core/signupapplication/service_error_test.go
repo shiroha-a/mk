@@ -21,21 +21,27 @@ var errBoom = errors.New("boom")
 // DB() は本物を返す。transition がトランザクションを開けないと、その中の分岐に
 // 到達できないため。
 type stubRepo struct {
-	createErr     error
-	findLiveErr   error
-	findLatestErr error
-	findByIDErr   error
-	lockErr       error
-	updateErr     error
-	listErr       error
-	countErr      error
-	expireErr     error
+	createErrs  []error // 呼び出しごとに返すエラー (足りなければ nil)
+	createCalls int
+	findErr     error
+	findByIDErr error
+	lockErr     error
+	updateErr   error
+	listErr     error
+	countErr    error
+	expireErr   error
 
-	live   *model.SignupApplication
+	found  *model.SignupApplication
 	locked *model.SignupApplication
 }
 
-func (s *stubRepo) Create(*model.SignupApplication) error { return s.createErr }
+func (s *stubRepo) Create(*model.SignupApplication) error {
+	defer func() { s.createCalls++ }()
+	if s.createCalls < len(s.createErrs) {
+		return s.createErrs[s.createCalls]
+	}
+	return nil
+}
 
 func (s *stubRepo) FindByID(string) (*model.SignupApplication, error) {
 	if s.findByIDErr != nil {
@@ -44,21 +50,14 @@ func (s *stubRepo) FindByID(string) (*model.SignupApplication, error) {
 	return &model.SignupApplication{ID: "x"}, nil
 }
 
-func (s *stubRepo) FindLiveByContact(string, string) (*model.SignupApplication, error) {
-	if s.findLiveErr != nil {
-		return nil, s.findLiveErr
+func (s *stubRepo) FindByClaimCodeHash(string) (*model.SignupApplication, error) {
+	if s.findErr != nil {
+		return nil, s.findErr
 	}
-	if s.live != nil {
-		return s.live, nil
+	if s.found != nil {
+		return s.found, nil
 	}
 	return nil, gorm.ErrRecordNotFound
-}
-
-func (s *stubRepo) FindLatestByContact(string, string) (*model.SignupApplication, error) {
-	if s.findLatestErr != nil {
-		return nil, s.findLatestErr
-	}
-	return &model.SignupApplication{ID: "x"}, nil
 }
 
 func (s *stubRepo) FindByIDForUpdateTx(*gorm.DB, string) (*model.SignupApplication, error) {
@@ -90,29 +89,41 @@ func newStubService(t *testing.T, repo *stubRepo) *Service {
 	return NewService(repo, idGen)
 }
 
+// hash 衝突は crypto/rand なので実質起きないが、**黙って別の申請を上書きしない**
+// ように採り直す。
+func TestApply_RetriesOnCodeCollision(t *testing.T) {
+	repo := &stubRepo{createErrs: []error{repository.ErrSignupApplicationCodeCollision}}
+	svc := newStubService(t, repo)
+
+	app, code, err := svc.Apply("")
+	require.NoError(t, err)
+	assert.NotEmpty(t, code)
+	assert.NotNil(t, app)
+	assert.Equal(t, 2, repo.createCalls, "1 度衝突したら採り直す")
+}
+
+// 何度も衝突するなら諦める。**無限に回すと、DB が壊れているときに固まる。**
+func TestApply_GivesUpAfterRepeatedCollisions(t *testing.T) {
+	errs := make([]error, claimCodeAttempts)
+	for i := range errs {
+		errs[i] = repository.ErrSignupApplicationCodeCollision
+	}
+	svc := newStubService(t, &stubRepo{createErrs: errs})
+
+	_, _, err := svc.Apply("")
+	assert.Error(t, err)
+}
+
 func TestErrorPaths(t *testing.T) {
-	t.Run("Apply propagates a lookup failure", func(t *testing.T) {
-		svc := newStubService(t, &stubRepo{findLiveErr: errBoom})
-		_, err := svc.Apply(testContact, "")
-		assert.ErrorIs(t, err, errBoom)
-	})
-
 	t.Run("Apply wraps a create failure", func(t *testing.T) {
-		svc := newStubService(t, &stubRepo{createErr: errBoom})
-		_, err := svc.Apply(testContact, "")
+		svc := newStubService(t, &stubRepo{createErrs: []error{errBoom}})
+		_, _, err := svc.Apply("")
 		assert.ErrorIs(t, err, errBoom)
-		assert.NotErrorIs(t, err, ErrLiveApplicationExists)
 	})
 
-	t.Run("Apply translates the unique violation", func(t *testing.T) {
-		svc := newStubService(t, &stubRepo{createErr: repository.ErrSignupApplicationLiveExists})
-		_, err := svc.Apply(testContact, "")
-		assert.ErrorIs(t, err, ErrLiveApplicationExists)
-	})
-
-	t.Run("Latest propagates a failure", func(t *testing.T) {
-		svc := newStubService(t, &stubRepo{findLatestErr: errBoom})
-		_, err := svc.Latest(testContact)
+	t.Run("ByClaimCode propagates a lookup failure", func(t *testing.T) {
+		svc := newStubService(t, &stubRepo{findErr: errBoom})
+		_, err := svc.ByClaimCode("code")
 		assert.ErrorIs(t, err, errBoom)
 	})
 
@@ -146,42 +157,36 @@ func TestErrorPaths(t *testing.T) {
 	})
 
 	t.Run("transition propagates an update failure", func(t *testing.T) {
-		svc := newStubService(t, &stubRepo{updateErr: errBoom})
+		repo := &stubRepo{
+			updateErr: errBoom,
+			locked: &model.SignupApplication{
+				ID: "x", Status: model.SignupApplicationPending,
+				ExpiresAt: time.Now().Add(time.Hour),
+			},
+		}
+		svc := newStubService(t, repo)
 		svc.SetClock(func() time.Time { return time.Now().Add(-time.Hour) })
-		svc.locked(t, &model.SignupApplication{
-			ID: "x", Status: model.SignupApplicationPending,
-			ExpiresAt: time.Now().Add(time.Hour),
-		})
 		assert.ErrorIs(t, svc.Approve("x", "mod"), errBoom)
 	})
 }
 
-// locked replaces the row the stub hands back under the write lock.
-func (s *Service) locked(t *testing.T, app *model.SignupApplication) {
-	t.Helper()
-	stub, ok := s.repo.(*stubRepo)
-	require.True(t, ok)
-	stub.locked = app
-}
-
 // 期限切れの掃除は、ロックを取った時点で別経路が既に処理していたら何もしない。
 // **ここで無条件に上書きすると、承認済みの申請を期限切れに落としうる。**
-func TestExpireIfStale_SkipsWhenAlreadyHandled(t *testing.T) {
+func TestByClaimCode_SkipsWhenAlreadyHandled(t *testing.T) {
 	now := time.Now().UTC()
 	stale := &model.SignupApplication{
 		ID: "x", Status: model.SignupApplicationPending, ExpiresAt: now.Add(-time.Hour),
 	}
-	// ロック後に見えるのは既に終端へ遷移した行。
 	handled := &model.SignupApplication{
 		ID: "x", Status: model.SignupApplicationCompleted, ExpiresAt: now.Add(-time.Hour),
 	}
-	repo := &stubRepo{live: stale, locked: handled, updateErr: errBoom}
+	repo := &stubRepo{found: stale, locked: handled, updateErr: errBoom}
 	svc := newStubService(t, repo)
 	svc.SetClock(func() time.Time { return now })
 
-	got, err := svc.Current(testContact)
 	// updateErr を仕込んであるので、更新に入ったらエラーが返る。返らない =
 	// 何もしなかった、ということ。
+	got, err := svc.ByClaimCode("code")
 	require.NoError(t, err)
-	assert.Nil(t, got)
+	require.NotNil(t, got)
 }

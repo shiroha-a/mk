@@ -27,8 +27,6 @@ func TestMain(m *testing.M) {
 	os.Exit(m.Run())
 }
 
-var testContact = Contact{Host: "remote.example", RemoteID: "r1", Username: "alice"}
-
 // newService builds a Service on a clean table with a fixed clock.
 func newService(t *testing.T) (*Service, *time.Time) {
 	t.Helper()
@@ -43,160 +41,101 @@ func newService(t *testing.T) (*Service, *time.Time) {
 	return svc, &now
 }
 
-func TestApply_CreatesPending(t *testing.T) {
+func TestApply_CreatesPendingWithClaimCode(t *testing.T) {
 	svc, now := newService(t)
 
-	app, err := svc.Apply(testContact, "  よろしくお願いします  ")
+	app, code, err := svc.Apply("  よろしくお願いします  ")
 	require.NoError(t, err)
 	assert.Equal(t, model.SignupApplicationPending, app.Status)
-	assert.Equal(t, "remote.example", app.ContactHost)
-	assert.Equal(t, "r1", app.ContactRemoteID)
-	assert.Equal(t, "alice", app.ContactUsername)
 	require.NotNil(t, app.Reason)
 	assert.Equal(t, "よろしくお願いします", *app.Reason, "前後の空白は落とす")
 	assert.Equal(t, now.Add(DefaultTTL), app.ExpiresAt)
+
+	// 256bit を hex にした長さ。
+	assert.Len(t, code, 64)
+	// **平文は保存しない。** 保存すると DB が漏れた時点で全申請が乗っ取れる。
+	assert.Equal(t, HashClaimCode(code), app.ClaimCodeHash)
+	assert.NotEqual(t, code, app.ClaimCodeHash)
 }
 
 func TestApply_EmptyReasonIsNil(t *testing.T) {
 	svc, _ := newService(t)
 
-	app, err := svc.Apply(testContact, "   ")
+	app, _, err := svc.Apply("   ")
 	require.NoError(t, err)
 	assert.Nil(t, app.Reason)
-}
-
-func TestApply_RejectsDuplicateLive(t *testing.T) {
-	svc, _ := newService(t)
-
-	_, err := svc.Apply(testContact, "")
-	require.NoError(t, err)
-
-	_, err = svc.Apply(testContact, "")
-	assert.ErrorIs(t, err, ErrLiveApplicationExists)
-}
-
-// 期限切れの申請が席を占めたままだと、本人が申請し直せない。**参照のたびに
-// 掃除する**ことで、掃除ジョブが無くても回る。
-func TestApply_AfterExpiryFreesTheContact(t *testing.T) {
-	svc, now := newService(t)
-
-	first, err := svc.Apply(testContact, "")
-	require.NoError(t, err)
-
-	*now = now.Add(DefaultTTL + time.Minute)
-
-	second, err := svc.Apply(testContact, "")
-	require.NoError(t, err)
-	assert.NotEqual(t, first.ID, second.ID)
-
-	// 古い方は expired に落ちていること。
-	old, err := svc.Get(first.ID)
-	require.NoError(t, err)
-	assert.Equal(t, model.SignupApplicationExpired, old.Status)
-}
-
-func TestApply_ValidatesContact(t *testing.T) {
-	svc, _ := newService(t)
-
-	for _, tt := range []struct {
-		name    string
-		contact Contact
-	}{
-		{name: "empty host", contact: Contact{RemoteID: "r1"}},
-		{name: "empty remote id", contact: Contact{Host: "remote.example"}},
-		{name: "blank host", contact: Contact{Host: "   ", RemoteID: "r1"}},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := svc.Apply(tt.contact, "")
-			assert.ErrorIs(t, err, ErrInvalidContact)
-		})
-	}
 }
 
 // 理由は rune 単位で数える。**byte で見ると日本語が通らなくなる。**
 func TestApply_ReasonLength(t *testing.T) {
 	svc, _ := newService(t)
 
-	t.Run("multibyte at the limit is accepted", func(t *testing.T) {
-		_, err := svc.Apply(testContact, strings.Repeat("あ", MaxReasonLength))
-		assert.NoError(t, err)
-	})
+	_, _, err := svc.Apply(strings.Repeat("あ", MaxReasonLength))
+	assert.NoError(t, err)
 
-	t.Run("over the limit is rejected", func(t *testing.T) {
-		_, err := svc.Apply(Contact{Host: "remote.example", RemoteID: "r2"},
-			strings.Repeat("a", MaxReasonLength+1))
-		assert.ErrorIs(t, err, ErrReasonTooLong)
-	})
+	_, _, err = svc.Apply(strings.Repeat("a", MaxReasonLength+1))
+	assert.ErrorIs(t, err, ErrReasonTooLong)
 }
 
-func TestCurrent(t *testing.T) {
-	svc, now := newService(t)
+// 連絡先という自然キーが無くなったので、DB は重複申請を妨げない。
+// **抑止は captcha とレート制限が担う** (#2569)。
+func TestApply_AllowsRepeatedApplications(t *testing.T) {
+	svc, _ := newService(t)
 
-	t.Run("nil when there is none", func(t *testing.T) {
-		got, err := svc.Current(testContact)
-		require.NoError(t, err)
-		assert.Nil(t, got)
-	})
-
-	app, err := svc.Apply(testContact, "")
+	first, code1, err := svc.Apply("")
+	require.NoError(t, err)
+	second, code2, err := svc.Apply("")
 	require.NoError(t, err)
 
-	t.Run("returns the live application", func(t *testing.T) {
-		got, err := svc.Current(testContact)
+	assert.NotEqual(t, first.ID, second.ID)
+	assert.NotEqual(t, code1, code2, "コードは毎回別")
+}
+
+func TestByClaimCode(t *testing.T) {
+	svc, now := newService(t)
+
+	app, code, err := svc.Apply("")
+	require.NoError(t, err)
+
+	t.Run("returns the application", func(t *testing.T) {
+		got, err := svc.ByClaimCode(code)
 		require.NoError(t, err)
 		require.NotNil(t, got)
 		assert.Equal(t, app.ID, got.ID)
 	})
 
-	t.Run("expires lazily", func(t *testing.T) {
-		*now = now.Add(DefaultTTL)
-		got, err := svc.Current(testContact)
+	// **存在しないコードと期限切れのコードを区別しない。** 区別できると、
+	// 総当たりで「そのコードは実在する」ことだけ漏れる。
+	t.Run("unknown code is nil, not an error", func(t *testing.T) {
+		got, err := svc.ByClaimCode("no-such-code")
 		require.NoError(t, err)
 		assert.Nil(t, got)
+	})
+
+	t.Run("empty code is nil", func(t *testing.T) {
+		got, err := svc.ByClaimCode("")
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	t.Run("expires lazily", func(t *testing.T) {
+		*now = now.Add(DefaultTTL)
+		got, err := svc.ByClaimCode(code)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, model.SignupApplicationExpired, got.Status)
 
 		stored, err := svc.Get(app.ID)
 		require.NoError(t, err)
-		assert.Equal(t, model.SignupApplicationExpired, stored.Status)
-	})
-
-	t.Run("validates contact", func(t *testing.T) {
-		_, err := svc.Current(Contact{})
-		assert.ErrorIs(t, err, ErrInvalidContact)
-	})
-}
-
-func TestLatest(t *testing.T) {
-	svc, _ := newService(t)
-
-	t.Run("nil when there is none", func(t *testing.T) {
-		got, err := svc.Latest(testContact)
-		require.NoError(t, err)
-		assert.Nil(t, got)
-	})
-
-	app, err := svc.Apply(testContact, "")
-	require.NoError(t, err)
-	require.NoError(t, svc.Reject(app.ID, "mod1"))
-
-	t.Run("returns terminal applications too", func(t *testing.T) {
-		got, err := svc.Latest(testContact)
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, model.SignupApplicationRejected, got.Status)
-	})
-
-	t.Run("validates contact", func(t *testing.T) {
-		_, err := svc.Latest(Contact{})
-		assert.ErrorIs(t, err, ErrInvalidContact)
+		assert.Equal(t, model.SignupApplicationExpired, stored.Status, "保存側にも反映されること")
 	})
 }
 
 func TestApprove(t *testing.T) {
 	svc, now := newService(t)
 
-	app, err := svc.Apply(testContact, "")
+	app, _, err := svc.Apply("")
 	require.NoError(t, err)
-
 	require.NoError(t, svc.Approve(app.ID, "mod1"))
 
 	stored, err := svc.Get(app.ID)
@@ -204,7 +143,6 @@ func TestApprove(t *testing.T) {
 	assert.Equal(t, model.SignupApplicationApproved, stored.Status)
 	require.NotNil(t, stored.ProcessedByID)
 	assert.Equal(t, "mod1", *stored.ProcessedByID)
-	require.NotNil(t, stored.ProcessedAt)
 	// 承認時点ではチケットを発行しない (登録経路で発行して即消費する)。
 	assert.Nil(t, stored.TicketID)
 
@@ -216,16 +154,14 @@ func TestApprove(t *testing.T) {
 		assert.ErrorIs(t, svc.Approve("no-such-id", "mod1"), ErrNotFound)
 	})
 
+	// **ErrNotPending ではなく ErrExpired。** 掃除は遅延反映なので行は pending の
+	// まま残っており、まとめると「審査待ちに見えるのに審査待ちではない」になる。
 	t.Run("expired cannot be approved", func(t *testing.T) {
-		other, err := svc.Apply(Contact{Host: "remote.example", RemoteID: "r9"}, "")
+		other, _, err := svc.Apply("")
 		require.NoError(t, err)
 		*now = now.Add(DefaultTTL)
-		// **ErrNotPending ではなく ErrExpired。** 掃除は遅延反映なので行は
-		// pending のまま残っており、「審査待ちに見えるのに審査待ちではない」
-		// という説明になってしまう。
 		assert.ErrorIs(t, svc.Approve(other.ID, "mod1"), ErrExpired)
 
-		// 実態へ寄せてあること。
 		stored, err := svc.Get(other.ID)
 		require.NoError(t, err)
 		assert.Equal(t, model.SignupApplicationExpired, stored.Status)
@@ -236,16 +172,13 @@ func TestApprove(t *testing.T) {
 func TestReject(t *testing.T) {
 	svc, now := newService(t)
 
-	app, err := svc.Apply(testContact, "")
+	app, _, err := svc.Apply("")
 	require.NoError(t, err)
-
 	require.NoError(t, svc.Reject(app.ID, "mod2"))
 
 	stored, err := svc.Get(app.ID)
 	require.NoError(t, err)
 	assert.Equal(t, model.SignupApplicationRejected, stored.Status)
-	require.NotNil(t, stored.ProcessedByID)
-	assert.Equal(t, "mod2", *stored.ProcessedByID)
 
 	t.Run("cannot reject twice", func(t *testing.T) {
 		assert.ErrorIs(t, svc.Reject(app.ID, "mod2"), ErrNotPending)
@@ -255,17 +188,16 @@ func TestReject(t *testing.T) {
 		assert.ErrorIs(t, svc.Reject("no-such-id", "mod2"), ErrNotFound)
 	})
 
-	// 期限切れは却下ではなく期限切れのまま残す。**審査していないものを
-	// 「審査して落とした」と記録しない。**
+	// 期限切れは却下として記録しない。**審査していないものを「審査して落とした」と
+	// 残すと、監査の意味が壊れる。**
 	t.Run("expired cannot be rejected", func(t *testing.T) {
-		other, err := svc.Apply(Contact{Host: "remote.example", RemoteID: "r8"}, "")
+		other, _, err := svc.Apply("")
 		require.NoError(t, err)
 		*now = now.Add(DefaultTTL)
 		assert.ErrorIs(t, svc.Reject(other.ID, "mod2"), ErrExpired)
 
 		stored, err := svc.Get(other.ID)
 		require.NoError(t, err)
-		assert.Equal(t, model.SignupApplicationExpired, stored.Status)
 		assert.Nil(t, stored.ProcessedByID, "却下として記録しないこと")
 	})
 }
@@ -273,7 +205,7 @@ func TestReject(t *testing.T) {
 func TestMarkCompleted(t *testing.T) {
 	svc, now := newService(t)
 
-	app, err := svc.Apply(testContact, "")
+	app, _, err := svc.Apply("")
 	require.NoError(t, err)
 
 	t.Run("pending cannot be completed", func(t *testing.T) {
@@ -300,7 +232,7 @@ func TestMarkCompleted(t *testing.T) {
 	})
 
 	t.Run("expired cannot be completed", func(t *testing.T) {
-		other, err := svc.Apply(Contact{Host: "remote.example", RemoteID: "r7"}, "")
+		other, _, err := svc.Apply("")
 		require.NoError(t, err)
 		require.NoError(t, svc.Approve(other.ID, "mod1"))
 		*now = now.Add(DefaultTTL)
@@ -309,7 +241,7 @@ func TestMarkCompleted(t *testing.T) {
 
 	t.Run("empty ticket id is not recorded", func(t *testing.T) {
 		svc2, _ := newService(t)
-		a, err := svc2.Apply(testContact, "")
+		a, _, err := svc2.Apply("")
 		require.NoError(t, err)
 		require.NoError(t, svc2.Approve(a.ID, "mod1"))
 		require.NoError(t, svc2.MarkCompleted(a.ID, "u3", ""))
@@ -329,12 +261,12 @@ func TestGet_NotFound(t *testing.T) {
 func TestListAndCount(t *testing.T) {
 	svc, _ := newService(t)
 
-	pending, err := svc.Apply(Contact{Host: "remote.example", RemoteID: "r1"}, "")
+	pending, _, err := svc.Apply("")
 	require.NoError(t, err)
-	approved, err := svc.Apply(Contact{Host: "remote.example", RemoteID: "r2"}, "")
+	approved, _, err := svc.Apply("")
 	require.NoError(t, err)
 	require.NoError(t, svc.Approve(approved.ID, "mod1"))
-	rejected, err := svc.Apply(Contact{Host: "remote.example", RemoteID: "r3"}, "")
+	rejected, _, err := svc.Apply("")
 	require.NoError(t, err)
 	require.NoError(t, svc.Reject(rejected.ID, "mod1"))
 
@@ -351,7 +283,7 @@ func TestListAndCount(t *testing.T) {
 func TestExpireStale(t *testing.T) {
 	svc, now := newService(t)
 
-	app, err := svc.Apply(testContact, "")
+	app, _, err := svc.Apply("")
 	require.NoError(t, err)
 
 	changed, err := svc.ExpireStale()
@@ -375,12 +307,12 @@ func TestSetters_IgnoreInvalidValues(t *testing.T) {
 
 	svc.SetTTL(0)
 	svc.SetTTL(-time.Hour)
-	app, err := svc.Apply(testContact, "")
+	app, code, err := svc.Apply("")
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(DefaultTTL), app.ExpiresAt)
 
 	svc.SetClock(nil)
-	got, err := svc.Current(testContact)
+	got, err := svc.ByClaimCode(code)
 	require.NoError(t, err)
 	require.NotNil(t, got, "clock が nil で潰れていないこと")
 }
@@ -389,110 +321,27 @@ func TestSetTTL(t *testing.T) {
 	svc, now := newService(t)
 	svc.SetTTL(time.Hour)
 
-	app, err := svc.Apply(testContact, "")
+	app, _, err := svc.Apply("")
 	require.NoError(t, err)
 	assert.Equal(t, now.Add(time.Hour), app.ExpiresAt)
 }
 
-// recordingNotifier captures the calls made after a review.
-type recordingNotifier struct {
-	approved []*model.SignupApplication
-	rejected []*model.SignupApplication
-}
-
-func (r *recordingNotifier) NotifyApproved(app *model.SignupApplication) {
-	r.approved = append(r.approved, app)
-}
-
-func (r *recordingNotifier) NotifyRejected(app *model.SignupApplication) {
-	r.rejected = append(r.rejected, app)
-}
-
-func TestReview_NotifiesTheApplicant(t *testing.T) {
-	t.Run("approve", func(t *testing.T) {
-		svc, _ := newService(t)
-		n := &recordingNotifier{}
-		svc.SetNotifier(n)
-
-		app, err := svc.Apply(testContact, "")
+// コードは推測されると他人の申請を乗っ取れる (状態確認と登録の両方の入口)。
+func TestNewClaimCode_IsUnique(t *testing.T) {
+	seen := make(map[string]bool, 32)
+	for range 32 {
+		code, err := NewClaimCode()
 		require.NoError(t, err)
-		require.NoError(t, svc.Approve(app.ID, "mod1"))
-
-		require.Len(t, n.approved, 1)
-		assert.Empty(t, n.rejected)
-		// 通知側が連絡先を引けるだけの情報が渡っていること。
-		assert.Equal(t, "remote.example", n.approved[0].ContactHost)
-		assert.Equal(t, "r1", n.approved[0].ContactRemoteID)
-		assert.Equal(t, model.SignupApplicationApproved, n.approved[0].Status)
-	})
-
-	t.Run("reject", func(t *testing.T) {
-		svc, _ := newService(t)
-		n := &recordingNotifier{}
-		svc.SetNotifier(n)
-
-		app, err := svc.Apply(testContact, "")
-		require.NoError(t, err)
-		require.NoError(t, svc.Reject(app.ID, "mod1"))
-
-		require.Len(t, n.rejected, 1)
-		assert.Empty(t, n.approved)
-	})
-}
-
-// **保存できなかった審査を伝えない。** 先に送ると、失敗した承認を申請者に
-// 知らせてしまう。
-func TestReview_DoesNotNotifyOnFailure(t *testing.T) {
-	for _, tt := range []struct {
-		name string
-		act  func(svc *Service, id string) error
-	}{
-		{name: "approve", act: func(svc *Service, id string) error { return svc.Approve(id, "mod1") }},
-		{name: "reject", act: func(svc *Service, id string) error { return svc.Reject(id, "mod1") }},
-	} {
-		t.Run(tt.name+"/not found", func(t *testing.T) {
-			svc, _ := newService(t)
-			n := &recordingNotifier{}
-			svc.SetNotifier(n)
-
-			assert.Error(t, tt.act(svc, "no-such-id"))
-			assert.Empty(t, n.approved)
-			assert.Empty(t, n.rejected)
-		})
-
-		t.Run(tt.name+"/expired", func(t *testing.T) {
-			svc, now := newService(t)
-			n := &recordingNotifier{}
-			svc.SetNotifier(n)
-
-			app, err := svc.Apply(testContact, "")
-			require.NoError(t, err)
-			*now = now.Add(DefaultTTL)
-
-			assert.ErrorIs(t, tt.act(svc, app.ID), ErrExpired)
-			assert.Empty(t, n.approved)
-			assert.Empty(t, n.rejected)
-		})
-
-		t.Run(tt.name+"/already processed", func(t *testing.T) {
-			svc, _ := newService(t)
-			app, err := svc.Apply(testContact, "")
-			require.NoError(t, err)
-			require.NoError(t, svc.Approve(app.ID, "mod1"))
-
-			n := &recordingNotifier{}
-			svc.SetNotifier(n)
-			assert.ErrorIs(t, tt.act(svc, app.ID), ErrNotPending)
-			assert.Empty(t, n.approved)
-			assert.Empty(t, n.rejected)
-		})
+		assert.Len(t, code, 64)
+		assert.False(t, seen[code], "duplicate claim code")
+		seen[code] = true
 	}
 }
 
-// 未配線でも審査そのものは動くこと。
-func TestReview_WithoutNotifier(t *testing.T) {
-	svc, _ := newService(t)
-	app, err := svc.Apply(testContact, "")
-	require.NoError(t, err)
-	assert.NoError(t, svc.Approve(app.ID, "mod1"))
+func TestHashClaimCode(t *testing.T) {
+	h1 := HashClaimCode("abc")
+	assert.Len(t, h1, 64)
+	assert.Equal(t, h1, HashClaimCode("abc"), "同じ入力は同じ hash")
+	assert.NotEqual(t, h1, HashClaimCode("abd"))
+	assert.NotEqual(t, "abc", h1)
 }
