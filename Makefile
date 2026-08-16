@@ -1,4 +1,4 @@
-.PHONY: help check gates version frontend-check diff-check playwright-check e2e-down-all \
+.PHONY: help check gates version plugin-test frontend-check diff-check playwright-check e2e-down-all \
 	update docker-update uds-update \
 	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
@@ -171,6 +171,16 @@ tidy: ## go mod tidy
 
 test: ## 全テストを実行
 	go test ./... -v
+
+plugin-test: ## 同梱プラグインのテストを実行 (PostgreSQL が要る)
+	@set -e; \
+	mods=$$(git ls-files 'plugins/*/go.mod'); \
+	if [ -z "$$mods" ]; then echo "同梱プラグインが見つかりません"; exit 1; fi; \
+	for mod in $$mods; do \
+		dir=$$(dirname "$$mod"); \
+		echo "==> $$dir"; \
+		(cd "$$dir" && MK_PLUGIN_TESTS_REQUIRE_DB=1 GOWORK=off go test ./... -count=1); \
+	done
 
 fmt: ## gofmt -s -w . で整形
 	gofmt -s -w .

@@ -113,6 +113,7 @@ make lint                   # go vet ./...
 
 # テスト
 make test                   # go test ./... -v
+make plugin-test            # 同梱プラグインのテスト (別 module なので ./... に含まれない)
 
 # マイグレーション（DATABASE_URL環境変数が必要）
 make migrate-up             # 最新まで適用
@@ -404,6 +405,20 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
   要求する `test` という名前の単一checkを公開する。いずれかのshardが失敗したら
   `needs.test-shards.result != 'success'` で `exit 1`。
 
+### `plugin-tests`ジョブ
+
+- 同梱プラグイン (`plugins/*/go.mod` のうち git tracked なもの) のテストを実行する (#2588)。
+- プラグインは**別 module** なので `go list ./...` に含まれず `test-shards` の対象に
+  ならない。実行時間が短いため shard の分配ロジックに手を入れず独立させている。
+- **`MK_PLUGIN_TESTS_REQUIRE_DB` を渡すのが要点。** テストは手元で PostgreSQL を
+  用意していない開発者のために接続不能を skip するが、**skip は成功として扱われる**
+  ので CI でそのままだと接続に失敗しても緑になる (= 無検証で通る)。この変数がある
+  とテスト側が skip せず落ちる。
+- 列挙は `git ls-files 'plugins/*/go.mod'`。`plugins/*` は gitignore 済みで同梱する
+  ものだけ例外指定しているため、tracked 一覧がそのまま「同梱プラグイン」になる。
+  新しく同梱したものは自動で対象になる。
+- ローカルでは `make plugin-test` が同じ手順を回す。
+
 ### `lint`ジョブ
 
 - `go vet ./...`
@@ -589,6 +604,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-08-16**: `plugin-tests` job を追加 (#2588)。同梱プラグインのテストは**どの job でも実行されていなかった** (別 module で `go list ./...` に含まれず、`build` job に PostgreSQL が無い)。テストが落ちる変更を入れても CI は緑のままだった。あわせて `build` job の同梱プラグイン検証を `go build` から `go vet` に変更 (テストファイルもコンパイルされるので、公開面を変えて本体だけ直したときに検出できる)。Section 3 に `make plugin-test` を追記。
 - **2026-08-15**: PostgreSQL を 16 → 18 に統一 (#2513)。compose 全構成・CI service container・testcontainers を `postgres:18-alpine` へ。upstream Misskey の compose 例 (18-alpine) に整合。**postgres:18 image は data layout が変わった** (default PGDATA が `/var/lib/postgresql/18/docker`、VOLUME 宣言が親 `/var/lib/postgresql`) ため、永続 volume を持つ compose のマウント先を `/var/lib/postgresql` へ変更 (旧パスのままだと新規デプロイが匿名 volume に initdb して down で消える。UDS example は明示 PGDATA で回避)。既存の 16 volume は dump→restore が必要 (手順は docs/deployment.md 冒頭)。Section 4 / 8 の版数記述を更新。
 - **2026-08-10**: Section 4 に「DB を使うテストの分離」を追記 (#2450)。`testutil.OpenTestDB` が呼び出し元パッケージ専用の PostgreSQL schema に接続するようになった。`go test` はパッケージを並行実行し CI の shard は DB を 1 つしか持たないため、共有すると一方の後片付けが他方を壊す (実際に Go を触っていない PR で CI が落ちた)。削除範囲を絞るだけでは解けない (干渉が双方向) 点と、migration の enum guard に `pg_type WHERE typname` を使わない旨も明記。
 - **2026-08-07**: Section 3 に本家 backend e2e の Makefile target (`make upstream-e2e` 系 5 つ) を、Section 8 に `upstream-backend-e2e` workflow を追記 (#2347)。Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて回す PR トリガーの workflow で、required check には含めない。既知乖離は skip でなく expected-failure (`task.fails`) で扱う運用も明記。

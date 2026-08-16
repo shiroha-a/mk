@@ -41,11 +41,11 @@ func testDB(t *testing.T) *sql.DB {
 
 	admin, err := sql.Open("pgx", base)
 	if err != nil {
-		t.Skipf("PostgreSQL に接続できません: %v", err)
+		dbUnavailable(t, err)
 	}
 	defer admin.Close() //nolint:errcheck // 使い捨て
 	if err := admin.Ping(); err != nil {
-		t.Skipf("PostgreSQL に接続できません: %v", err)
+		dbUnavailable(t, err)
 	}
 	for _, q := range []string{
 		`DROP SCHEMA IF EXISTS ` + testSchema + ` CASCADE`,
@@ -378,4 +378,17 @@ func assertSlice[T comparable](t *testing.T, want, got []T) {
 // asStatusError unwraps a plugin.StatusError.
 func asStatusError(err error, target **plugin.StatusError) bool {
 	return errors.As(err, target)
+}
+
+// dbUnavailable decides what to do when the test database cannot be reached.
+//
+// **CI では skip を許さない。** skip は成功として扱われるので、接続に失敗した
+// ことに気づかないまま緑になる = 無検証で通る (#2588)。手元では PostgreSQL を
+// 用意していない開発者のために skip したいので、CI 側だけ環境変数で切り替える。
+func dbUnavailable(t *testing.T, err error) {
+	t.Helper()
+	if os.Getenv("MK_PLUGIN_TESTS_REQUIRE_DB") != "" {
+		t.Fatalf("PostgreSQL に接続できません (MK_PLUGIN_TESTS_REQUIRE_DB が設定されているので skip しません): %v", err)
+	}
+	t.Skipf("PostgreSQL に接続できません: %v", err)
 }

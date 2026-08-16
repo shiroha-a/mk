@@ -29,9 +29,7 @@ jobs:
       # から。plugin/ の公開面を変えたとき、本体だけ直してプラグインのテストが
       # 置き去りになるのを検出する。
       #
-      # なお**プラグインのテスト自体はどの job でも実行されない**。DB を要する
-      # ものが多く、この job に PostgreSQL が無いため。走らせるなら shard 側に
-      # 寄せる必要があり、それは別途。
+      # テストの実行そのものは `plugin-tests` job が行う (PostgreSQL が要るため)。
       - name: Vet bundled plugins
         run: |
           set -o pipefail
@@ -171,6 +169,67 @@ jobs:
             exit 1
           fi
           echo "All test shards passed"
+
+  # 同梱プラグインのテストを実行する (#2588)。
+  #
+  # プラグインは**別 module** なので `go list ./...` に含まれず、test-shards の
+  # 対象にならない。実行時間が短い (1 秒未満) ので shard の分配ロジックに手を
+  # 入れるより独立させる方が単純。
+  #
+  # **MK_PLUGIN_TESTS_REQUIRE_DB を渡すのが要点。** テストは手元で PostgreSQL を
+  # 用意していない開発者のために接続不能を skip するが、skip は成功として扱われる
+  # ので、CI でそのままだと接続に失敗しても緑になる = 無検証で通る。この変数が
+  # あるとテスト側が skip せず落ちる。
+  plugin-tests:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mk
+          POSTGRES_PASSWORD: mk
+          POSTGRES_DB: misskey_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      TEST_DB_HOST: localhost
+      TEST_DB_PORT: 5432
+      TEST_DB_NAME: misskey_test
+      TEST_DB_USER: mk
+      TEST_DB_PASS: mk
+      MK_PLUGIN_TESTS_REQUIRE_DB: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # tracked な同梱プラグインを列挙する。新しく同梱したものが自動で入る。
+      # **`plugins/*` は .gitignore 済みで、同梱するものだけ例外指定している**
+      # ので、git の tracked 一覧がそのまま「同梱プラグイン」になる。
+      - name: Test bundled plugins
+        run: |
+          set -o pipefail
+          mods=$(git ls-files 'plugins/*/go.mod')
+          if [ -z "$mods" ]; then
+            echo "同梱プラグインが 1 つも見つかりません (列挙が壊れています)"
+            exit 1
+          fi
+          for mod in $mods; do
+            dir=$(dirname "$mod")
+            echo "==> $dir"
+            (cd "$dir" && GOWORK=off go test ./... -count=1)
+          done
 
   lint:
     runs-on: ubuntu-latest
