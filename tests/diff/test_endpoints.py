@@ -33,6 +33,11 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # 対応キーが無い。docs/divergence.md に additive field として記載済み。
     "canUseChunkedUpload", "chunkedUploadMaxConcurrentSessions",
     "chunkedUploadMaxPendingMb",
+    # 承認制の登録 (#2554 / #2555) は mk-go 独自機能なので TS 側にキーが無い。
+    # meta 直下と features の両方に出る (frontend は features を feature
+    # detection に使うため片方だけだと検出できない)。docs/divergence.md に
+    # additive field として記載済み。
+    "approvalRequiredForSignup",
     "globalTimeline", "localTimeline",
 }
 
