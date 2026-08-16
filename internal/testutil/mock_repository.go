@@ -386,16 +386,18 @@ func (m *MockUserRepository) ListUsers(filter model.UserListFilter) ([]*model.Us
 
 // ListRemoteInboxes returns dedup'd inbox URLs for every remote user in the
 // mock store. sharedInbox を優先。
-func (m *MockUserRepository) ListRemoteInboxes() ([]string, error) {
+func (m *MockUserRepository) ListRemoteInboxes() ([]model.RemoteInbox, error) {
 	seen := make(map[string]struct{})
-	var out []string
+	var out []model.RemoteInbox
 	for _, u := range m.Users {
 		if u.Host == nil {
 			continue
 		}
 		var inbox string
+		shared := false
 		if u.SharedInbox != nil && *u.SharedInbox != "" {
 			inbox = *u.SharedInbox
+			shared = true
 		} else if u.Inbox != nil && *u.Inbox != "" {
 			inbox = *u.Inbox
 		}
@@ -406,7 +408,7 @@ func (m *MockUserRepository) ListRemoteInboxes() ([]string, error) {
 			continue
 		}
 		seen[inbox] = struct{}{}
-		out = append(out, inbox)
+		out = append(out, model.RemoteInbox{Inbox: inbox, Shared: shared})
 	}
 	return out, nil
 }

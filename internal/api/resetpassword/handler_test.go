@@ -48,7 +48,7 @@ func (m *mockUserRepo) SearchByUsernameAndHost(string, *string, bool, int) ([]*m
 func (m *mockUserRepo) UpdateUser(string, map[string]any) error               { return nil }
 func (m *mockUserRepo) CreateProfile(*model.UserProfile) error                { return nil }
 func (m *mockUserRepo) ListUsers(model.UserListFilter) ([]*model.User, error) { return nil, nil }
-func (m *mockUserRepo) ListRemoteInboxes() ([]string, error)                  { return nil, nil }
+func (m *mockUserRepo) ListRemoteInboxes() ([]model.RemoteInbox, error)       { return nil, nil }
 func (m *mockUserRepo) CountOnlineUsers() (int64, error)                      { return 0, nil }
 func (m *mockUserRepo) CountLocalUsers() (int64, error)                       { return 0, nil }
 func (m *mockUserRepo) CountLocalUsersActiveSince(time.Time) (int64, error)   { return 0, nil }

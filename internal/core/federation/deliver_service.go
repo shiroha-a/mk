@@ -338,6 +338,27 @@ func (s *DeliverService) DeliverToFollowersExcluding(signerUserID string, body [
 	return s.deliverInternal(signerUserID, body, inboxes, nil, sharedInboxes)
 }
 
+// DeliverToInboxes enqueues delivery to an explicit set of remote inboxes,
+// threading the shared-inbox flag (#2575).
+//
+// **フォロワー配送と同じ型を受け取るのが要点。** inbox URL の羅列を渡す形だと
+// shared かどうかが落ち、410 Gone でインスタンス全体を suspend する判定
+// (#1811) がこの経路だけ効かなくなる。
+func (s *DeliverService) DeliverToInboxes(signerUserID string, body []byte, rows []model.RemoteInbox) error {
+	inboxes := make([]string, 0, len(rows))
+	var sharedInboxes map[string]bool
+	for _, row := range rows {
+		inboxes = append(inboxes, row.Inbox)
+		if row.Shared {
+			if sharedInboxes == nil {
+				sharedInboxes = make(map[string]bool)
+			}
+			sharedInboxes[row.Inbox] = true
+		}
+	}
+	return s.deliverInternal(signerUserID, body, inboxes, nil, sharedInboxes)
+}
+
 // DeliverToUser enqueues a delivery to a single recipient user. Local users
 // are skipped (no AP delivery needed). リモートユーザーの sharedInbox があれば
 // 優先する。recipient actor が既知なので FEP-521a Multikey による Ed25519

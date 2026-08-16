@@ -169,7 +169,7 @@ func TestNoteDeleteHook_BroadcastEmptyInboxes(t *testing.T) {
 // error-logging branch in the delete delivery hook.
 type failingListInboxes struct{ *testutil.MockUserRepository }
 
-func (f *failingListInboxes) ListRemoteInboxes() ([]string, error) {
+func (f *failingListInboxes) ListRemoteInboxes() ([]model.RemoteInbox, error) {
 	return nil, assert.AnError
 }
 
@@ -200,4 +200,103 @@ func TestNoteDeleteHook_BroadcastDeliverError_DoesNotPanic(t *testing.T) {
 
 	note := &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
 	hook.OnNoteDeleted(author, note)
+}
+
+// フォロワーは既知リモートの部分集合 (どちらも sharedInbox 優先で解決する) なので、
+// フォロワー配送と broadcast を重ねると全フォロワーが同じ Delete を同じ URL に
+// 2 回受け取る (#2575)。
+func TestNoteDeleteHook_DoesNotDoubleDeliverToFollowers(t *testing.T) {
+	hook, enq, userRepo, followingRepo, keypairRepo := newDeleteHook(t)
+	hook.SetUserRepo(userRepo)
+
+	author := &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["alice"] = author
+	keypairRepo.Keypairs["alice"] = &model.UserKeypair{UserID: "alice", PrivateKey: "PEM"}
+
+	// フォロワー (shared inbox 持ち) と、フォローしていない既知リモート。
+	host := "remote.example"
+	sharedInbox := "https://remote.example/inbox"
+	follower := &model.User{ID: "bob", Host: &host, SharedInbox: &sharedInbox}
+	userRepo.Users["bob"] = follower
+	otherHost := "other.example"
+	otherInbox := "https://other.example/users/x/inbox"
+	userRepo.Users["carol"] = &model.User{ID: "carol", Host: &otherHost, Inbox: &otherInbox}
+	followingRepo.RemoteInboxes["alice"] = []string{sharedInbox}
+	followingRepo.RemoteSharedInboxes[sharedInbox] = true
+
+	hook.OnNoteDeleted(author, &model.Note{
+		ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic,
+	})
+
+	byInbox := map[string]int{}
+	shared := map[string]bool{}
+	for _, c := range enq.calls {
+		byInbox[c.Inbox]++
+		shared[c.Inbox] = c.IsSharedInbox
+	}
+	assert.Equal(t, 1, byInbox[sharedInbox], "フォロワーの inbox は 1 回だけ")
+	assert.Equal(t, 1, byInbox[otherInbox], "フォローしていない既知リモートにも届く")
+	// **shared フラグを落とさない。** 410 Gone でインスタンス全体を suspend する
+	// 判定 (#1811) がこれを見る。従来 broadcast は常に false で送っていた。
+	assert.True(t, shared[sharedInbox], "shared inbox は IsSharedInbox=true")
+	assert.False(t, shared[otherInbox], "個別 inbox は IsSharedInbox=false")
+}
+
+// 一覧が引けないときはフォロワーには届ける。**何も送らないのは今より悪い。**
+func TestNoteDeleteHook_FallsBackToFollowersWhenListFails(t *testing.T) {
+	hook, enq, userRepo, followingRepo, keypairRepo := newDeleteHook(t)
+	hook.SetUserRepo(&failingListInboxes{MockUserRepository: userRepo})
+
+	author := &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["alice"] = author
+	keypairRepo.Keypairs["alice"] = &model.UserKeypair{UserID: "alice", PrivateKey: "PEM"}
+	followingRepo.RemoteInboxes["alice"] = []string{"https://remote.example/inbox"}
+
+	hook.OnNoteDeleted(author, &model.Note{
+		ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic,
+	})
+
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, "https://remote.example/inbox", enq.calls[0].Inbox)
+}
+
+// Public / Home 以外は broadcast しないので、従来どおりフォロワーだけ。
+func TestNoteDeleteHook_NonPublicStaysFollowersOnly(t *testing.T) {
+	hook, enq, userRepo, followingRepo, keypairRepo := newDeleteHook(t)
+	hook.SetUserRepo(userRepo)
+
+	author := &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["alice"] = author
+	keypairRepo.Keypairs["alice"] = &model.UserKeypair{UserID: "alice", PrivateKey: "PEM"}
+	otherHost := "other.example"
+	otherInbox := "https://other.example/users/x/inbox"
+	userRepo.Users["carol"] = &model.User{ID: "carol", Host: &otherHost, Inbox: &otherInbox}
+	followingRepo.RemoteInboxes["alice"] = []string{"https://remote.example/inbox"}
+
+	hook.OnNoteDeleted(author, &model.Note{
+		ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityFollowers,
+	})
+
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, "https://remote.example/inbox", enq.calls[0].Inbox)
+}
+
+// 既知リモートが 0 件でもフォロワー配送は走る。**0 件を「送るものが無い」と
+// 解釈すると、片方のクエリだけが変わったときに黙って配送が消える。**
+func TestNoteDeleteHook_EmptyBroadcastListStillDeliversToFollowers(t *testing.T) {
+	hook, enq, userRepo, followingRepo, keypairRepo := newDeleteHook(t)
+	hook.SetUserRepo(userRepo)
+
+	author := &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["alice"] = author
+	keypairRepo.Keypairs["alice"] = &model.UserKeypair{UserID: "alice", PrivateKey: "PEM"}
+	// userRepo にリモートユーザーを入れないので ListRemoteInboxes は空。
+	followingRepo.RemoteInboxes["alice"] = []string{"https://remote.example/inbox"}
+
+	hook.OnNoteDeleted(author, &model.Note{
+		ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic,
+	})
+
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, "https://remote.example/inbox", enq.calls[0].Inbox)
 }

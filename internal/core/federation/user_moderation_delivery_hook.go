@@ -64,21 +64,38 @@ func (h *UserModerationDeliveryHook) broadcast(user *model.User, activity any) {
 		slog.Warn("user moderation delivery: marshal failed", "userId", user.ID, "err", err)
 		return
 	}
+	// **フォロワー配送と重ねない (#2575)。** 既知リモートはフォロワーの上位集合
+	// (どちらも COALESCE(NULLIF(sharedInbox,''), inbox) で解決する) なので、両方
+	// 走らせると全フォロワーが同じ activity を同じ URL に 2 回受け取る。
+	//
+	// 一覧が引けないときはフォロワーには送る。何も送らないのは今より悪い。
+	if h.broadcast_(user, body) {
+		return
+	}
 	if err := h.deliver.DeliverToFollowers(user.ID, body); err != nil {
 		slog.Warn("user moderation delivery: followers deliver failed", "userId", user.ID, "err", err)
 	}
+}
+
+// broadcast_ sends to every known remote inbox, reporting whether it took over
+// delivery.
+func (h *UserModerationDeliveryHook) broadcast_(user *model.User, body []byte) bool {
 	if h.userRepo == nil {
-		return
+		return false
 	}
 	inboxes, err := h.userRepo.ListRemoteInboxes()
 	if err != nil {
 		slog.Warn("user moderation delivery: list remote inboxes failed", "userId", user.ID, "err", err)
-		return
+		return false
 	}
 	if len(inboxes) == 0 {
-		return
+		// **0 件を「送るものが無い」と解釈しない。** 既知リモートがフォロワーの
+		// 上位集合であることに寄りかかると、片方のクエリだけが変わったときに
+		// 黙って配送が消える。空ならフォロワー配送に任せる。
+		return false
 	}
-	if err := h.deliver.DeliverActivity(user.ID, body, inboxes); err != nil {
+	if err := h.deliver.DeliverToInboxes(user.ID, body, inboxes); err != nil {
 		slog.Warn("user moderation delivery: broadcast failed", "userId", user.ID, "err", err)
 	}
+	return true
 }

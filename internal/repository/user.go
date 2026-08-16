@@ -68,7 +68,7 @@ type UserRepository interface {
 	UpdateProfile(userID string, fields map[string]any) error
 	CreateProfile(profile *model.UserProfile) error
 	ListUsers(filter model.UserListFilter) ([]*model.User, error)
-	ListRemoteInboxes() ([]string, error)
+	ListRemoteInboxes() ([]model.RemoteInbox, error)
 	FindProfileByVerifyCode(code string) (*model.UserProfile, error)
 	FindProfileByEmail(email string) (*model.UserProfile, error)
 	CountOnlineUsers() (int64, error)
@@ -472,14 +472,27 @@ func (r *userRepository) FindProfileByEmail(email string) (*model.UserProfile, e
 // SELECT DISTINCT で PostgreSQL 側 dedup させるのでリモートユーザー数が
 // 数十万規模でも Go 側でマップを持たずに済む。空文字は NULLIF で NULL 化して
 // WHERE inbox IS NOT NULL で除外している。
-func (r *userRepository) ListRemoteInboxes() ([]string, error) {
-	const query = `SELECT DISTINCT COALESCE(NULLIF("sharedInbox", ''), inbox) AS inbox
+func (r *userRepository) ListRemoteInboxes() ([]model.RemoteInbox, error) {
+	// shared フラグはフォロワー側 (ListRemoteFollowerInboxes) と**同じ式**で出す。
+	// 揃えないと、同じ inbox がどちらの経路を通ったかで 410 Gone の扱いが変わる
+	// (#1811 の goneSuspended は IsSharedInbox を見る)。
+	const query = `SELECT DISTINCT COALESCE(NULLIF("sharedInbox", ''), inbox) AS inbox,
+       ("sharedInbox" IS NOT NULL AND "sharedInbox" != '') AS shared
 FROM "user"
 WHERE host IS NOT NULL
   AND (COALESCE(NULLIF("sharedInbox", ''), inbox)) IS NOT NULL`
-	var out []string
-	if err := r.db.Raw(query).Scan(&out).Error; err != nil {
+	var rows []struct {
+		Inbox  string
+		Shared bool
+	}
+	if err := r.db.Raw(query).Scan(&rows).Error; err != nil {
 		return nil, err
+	}
+	out := make([]model.RemoteInbox, 0, len(rows))
+	for _, row := range rows {
+		if row.Inbox != "" {
+			out = append(out, model.RemoteInbox{Inbox: row.Inbox, Shared: row.Shared})
+		}
 	}
 	return out, nil
 }

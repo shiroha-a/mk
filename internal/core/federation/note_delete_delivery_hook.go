@@ -58,31 +58,50 @@ func (h *NoteDeleteDeliveryHook) OnNoteDeleted(author *model.User, note *model.N
 	}
 	del := h.renderer.RenderDelete(author, noteURI)
 	body, _ := json.Marshal(del)
+	// Public / Home は既知のリモートインスタンス全体へ送る。フォロワー以外が
+	// ap/show 経由で note を取り込んでいるケースを補償する。
+	//
+	// **フォロワー配送と重ねない (#2575)。** 既知リモートはフォロワーの上位集合
+	// (どちらも COALESCE(NULLIF(sharedInbox,''), inbox) で解決する) なので、
+	// 両方走らせると全フォロワーが同じ Delete を同じ URL に 2 回受け取る。
+	if h.broadcastDelete(author, note, body) {
+		return
+	}
 	if err := h.deliver.DeliverToFollowers(author.ID, body); err != nil {
 		slog.Warn("note delete delivery failed",
 			"noteId", note.ID, "err", err)
 	}
-	// Public / Home などは既知のリモートインスタンス全体にも Delete を送る。
-	// フォロワー以外が ap/show 経由で note を取り込んでいるケースを補償する。
+}
+
+// broadcastDelete sends the Delete to every known remote inbox, reporting
+// whether it took over delivery.
+//
+// **false を返したらフォロワーには送る。** 一覧が引けないときに何も送らないのは、
+// フォロワーにすら届かなくなるぶん今より悪い。
+func (h *NoteDeleteDeliveryHook) broadcastDelete(author *model.User, note *model.Note, body []byte) bool {
 	if h.userRepo == nil {
-		return
+		return false
 	}
 	switch note.Visibility {
 	case model.NoteVisibilityPublic, model.NoteVisibilityHome:
 	default:
-		return
+		return false
 	}
 	inboxes, err := h.userRepo.ListRemoteInboxes()
 	if err != nil {
 		slog.Warn("note delete delivery: list remote inboxes failed",
 			"noteId", note.ID, "err", err)
-		return
+		return false
 	}
 	if len(inboxes) == 0 {
-		return
+		// **0 件を「送るものが無い」と解釈しない。** 既知リモートがフォロワーの
+		// 上位集合であることに寄りかかると、片方のクエリだけが変わったときに
+		// 黙って配送が消える。空ならフォロワー配送に任せる。
+		return false
 	}
-	if err := h.deliver.DeliverActivity(author.ID, body, inboxes); err != nil {
+	if err := h.deliver.DeliverToInboxes(author.ID, body, inboxes); err != nil {
 		slog.Warn("note delete delivery: broadcast failed",
 			"noteId", note.ID, "err", err)
 	}
+	return true
 }

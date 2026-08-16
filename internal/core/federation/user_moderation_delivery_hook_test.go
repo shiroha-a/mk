@@ -76,3 +76,30 @@ func TestUserModHook_RemoteUserSkipped(t *testing.T) {
 	hook.OnUserDeleted(&model.User{ID: "bob", Username: "bob", Host: &host})
 	assert.Empty(t, enq.calls, "remote user must not trigger delivery")
 }
+
+// フォロワーは既知リモートの部分集合なので、重ねると全フォロワーが同じ activity を
+// 2 回受け取る (#2575)。
+func TestUserModHook_DoesNotDoubleDeliverToFollowers(t *testing.T) {
+	hook, enq, userRepo, followingRepo, keypairRepo := newUserModHook(t)
+	u := &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["alice"] = u
+	keypairRepo.Keypairs["alice"] = &model.UserKeypair{UserID: "alice", PrivateKey: "PEM"}
+
+	host := "remote.example"
+	sharedInbox := "https://remote.example/inbox"
+	userRepo.Users["bob"] = &model.User{ID: "bob", Host: &host, SharedInbox: &sharedInbox}
+	followingRepo.RemoteInboxes["alice"] = []string{sharedInbox}
+	followingRepo.RemoteSharedInboxes[sharedInbox] = true
+
+	hook.OnUserDeleted(u)
+
+	byInbox := map[string]int{}
+	shared := map[string]bool{}
+	for _, c := range enq.calls {
+		byInbox[c.Inbox]++
+		shared[c.Inbox] = c.IsSharedInbox
+	}
+	assert.Equal(t, 1, byInbox[sharedInbox], "フォロワーの inbox は 1 回だけ")
+	// **shared フラグを落とさない** (#1811 の goneSuspended が見る)。
+	assert.True(t, shared[sharedInbox])
+}

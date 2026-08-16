@@ -62,7 +62,7 @@ func (s *stubUserRepo) UpdateUser(string, map[string]any) error               { 
 func (s *stubUserRepo) UpdateProfile(string, map[string]any) error            { return nil }
 func (s *stubUserRepo) CreateProfile(*model.UserProfile) error                { return nil }
 func (s *stubUserRepo) ListUsers(model.UserListFilter) ([]*model.User, error) { return nil, nil }
-func (s *stubUserRepo) ListRemoteInboxes() ([]string, error)                  { return nil, nil }
+func (s *stubUserRepo) ListRemoteInboxes() ([]model.RemoteInbox, error)       { return nil, nil }
 func (s *stubUserRepo) FindProfileByVerifyCode(string) (*model.UserProfile, error) {
 	return nil, nil
 }

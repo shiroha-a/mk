@@ -1293,18 +1293,22 @@ func TestUserRepository_ListRemoteInboxes(t *testing.T) {
 
 	// sharedA と inboxB が含まれる (localは host=NULL で除外、D は空でスキップ、
 	// C は A と同じ sharedInbox なので dedup)。
-	assert.Contains(t, inboxes, sharedA)
-	assert.Contains(t, inboxes, inboxB)
-	// inboxA は shared が優先されるので出ない。
-	assert.NotContains(t, inboxes, inboxA)
-	// dedup 確認: sharedA は 1 回だけ。
-	seen := 0
+	byInbox := make(map[string]int)
+	shared := make(map[string]bool)
 	for _, ib := range inboxes {
-		if ib == sharedA {
-			seen++
-		}
+		byInbox[ib.Inbox]++
+		shared[ib.Inbox] = ib.Shared
 	}
-	assert.Equal(t, 1, seen)
+	assert.Contains(t, byInbox, sharedA)
+	assert.Contains(t, byInbox, inboxB)
+	// inboxA は shared が優先されるので出ない。
+	assert.NotContains(t, byInbox, inboxA)
+	// dedup 確認: sharedA は 1 回だけ。
+	assert.Equal(t, 1, byInbox[sharedA])
+	// **shared フラグはフォロワー側と同じ式で立てる。** 揃えないと、同じ inbox が
+	// どちらの経路を通ったかで 410 Gone の扱いが変わる (#1811 / #2575)。
+	assert.True(t, shared[sharedA], "sharedInbox 由来は shared=true")
+	assert.False(t, shared[inboxB], "個別 inbox は shared=false")
 }
 
 func TestUserRepository_ListUserRecommendations(t *testing.T) {
