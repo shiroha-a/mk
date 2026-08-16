@@ -1,6 +1,7 @@
 package signupapplication
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -35,14 +36,18 @@ func TestValidateForm(t *testing.T) {
 	}
 	assert.NoError(t, ValidateForm(valid))
 	assert.NoError(t, ValidateForm(nil), "空フォームは許す")
+	assert.NoError(t, ValidateForm(validFields(MaxFormFields)), "上限ちょうどは許す")
 
 	tests := []struct {
 		name   string
 		fields []FormField
 	}{
 		{
+			// **他の検査に引っかからない形にする。** make([]FormField, N) だと
+			// ラベルが空なのでラベル検査でも同じ error になり、上限を外しても
+			// 通ってしまう (実際にガードを削除しても緑だった)。
 			name:   "too many fields",
-			fields: make([]FormField, MaxFormFields+1),
+			fields: validFields(MaxFormFields + 1),
 		},
 		{
 			name:   "empty label",
@@ -144,4 +149,16 @@ func TestBuildAnswers_EmptyForm(t *testing.T) {
 	answers, err := BuildAnswers(nil, nil)
 	require.NoError(t, err)
 	assert.Empty(t, answers)
+}
+
+// validFields builds n fields that violate nothing but the count limit.
+func validFields(n int) []FormField {
+	out := make([]FormField, 0, n)
+	for i := range n {
+		out = append(out, FormField{
+			Label: fmt.Sprintf("設問 %d", i+1),
+			Type:  FieldTypeText,
+		})
+	}
+	return out
 }

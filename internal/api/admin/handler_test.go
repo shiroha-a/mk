@@ -3843,8 +3843,16 @@ func TestUpdateMeta_SignupApplicationForm_Absent(t *testing.T) {
 	h, _, metaRepo, _ := newTestHandler(t)
 	metaRepo.Meta = &model.Meta{ID: "x"}
 
+	existing := []byte(`[{"label":"動機","type":"textarea","required":true}]`)
+	metaRepo.Meta.SignupApplicationForm = existing
+
 	rec := doPost(h.UpdateMeta, `{"name":"x"}`, adminUser)
-	assert.Equal(t, http.StatusNoContent, rec.Code)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	// **触れていないことまで見る。** 204 だけ見ていると、未送出でも null を
+	// 書き込む実装に退行したときに素通りする (実際 `if !ok { return nil }` を
+	// 外してもこのテストは通っていた)。
+	assert.JSONEq(t, string(existing), string(metaRepo.Meta.SignupApplicationForm))
 }
 
 // **未知のキーを jsonb に残さない。** 残すと後で読み手を混乱させる。
@@ -3856,4 +3864,15 @@ func TestUpdateMeta_SignupApplicationForm_Normalizes(t *testing.T) {
 		`{"signupApplicationForm":[{"label":"動機","type":"text","bogus":"nope"}]}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assert.NotContains(t, string(metaRepo.Meta.SignupApplicationForm), "bogus")
+}
+
+// 明示的な null は空配列に寄せる。**jsonb null を入れると他の jsonb 列と
+// 中身が揃わない** (他は coerceMetaJSONBFields が `[]` にする)。
+func TestUpdateMeta_SignupApplicationForm_Null(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
+
+	rec := doPost(h.UpdateMeta, `{"signupApplicationForm":null}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `[]`, string(metaRepo.Meta.SignupApplicationForm))
 }

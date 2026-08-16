@@ -20,6 +20,7 @@ import (
 	"github.com/shiroha-a/mk/internal/frontendutil"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"gorm.io/datatypes"
 )
 
 // defaultInstanceDescription mirrors upstream `views/_.ts` の defaultDescription.
@@ -415,15 +416,21 @@ func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.
 		// /api/meta と同じく mk-go の実装バージョンを additive に出す (#2274)。
 		// SSR 埋め込みにも載せることで、about 系ページが fetchInstance を
 		// 待たずに表示できる。
-		"mkGoVersion":                  config.MkGoVersion,
-		"name":                         m.Name,
-		"shortName":                    m.ShortName,
-		"uri":                          cfg.URL,
-		"description":                  m.Description,
-		"langs":                        m.Langs,
-		"disableRegistration":          m.DisableRegistration,
-		"emailRequiredForSignup":       m.EmailRequiredForSignup,
-		"approvalRequiredForSignup":    m.ApprovalRequiredForSignup,
+		"mkGoVersion":               config.MkGoVersion,
+		"name":                      m.Name,
+		"shortName":                 m.ShortName,
+		"uri":                       cfg.URL,
+		"description":               m.Description,
+		"langs":                     m.Langs,
+		"disableRegistration":       m.DisableRegistration,
+		"emailRequiredForSignup":    m.EmailRequiredForSignup,
+		"approvalRequiredForSignup": m.ApprovalRequiredForSignup,
+		// 申請フォームの定義 (#2570)。**ここに載せ忘れると申請が完了不能になる** —
+		// instance.ts は SSR 埋め込みを localStorage cache より優先し、以後 1 時間
+		// /api/meta を再取得しない。申請ページは定義を空と見て answers を 0 件送り、
+		// サーバーは定義どおりの件数を期待するので FORM_CHANGED で弾き続ける。
+		// 「再読み込みしてやり直してください」と出るが、再読み込みしても直らない。
+		"signupApplicationForm":        ssrJSONArray(m.SignupApplicationForm),
 		"enableHcaptcha":               m.EnableHcaptcha,
 		"hcaptchaSiteKey":              m.HcaptchaSiteKey,
 		"enableRecaptcha":              m.EnableRecaptcha,
@@ -676,4 +683,17 @@ func newViteProxy(target string) echo.HandlerFunc {
 		proxy.ServeHTTP(c.Response(), c.Request())
 		return nil
 	}
+}
+
+// ssrJSONArray renders a JSONB column as an array for the embedded meta,
+// falling back to an empty array. api/meta の jsonArrayOrEmpty と同じ契約。
+func ssrJSONArray(raw datatypes.JSON) any {
+	if len(raw) == 0 {
+		return []any{}
+	}
+	var out []any
+	if err := json.Unmarshal(raw, &out); err != nil || out == nil {
+		return []any{}
+	}
+	return out
 }

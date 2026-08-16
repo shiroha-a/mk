@@ -3542,6 +3542,14 @@ func validateSignupApplicationForm(fields map[string]any) error {
 	}
 	// 検証済みの形に正規化して渡す。**生の any をそのまま入れると、未知のキーが
 	// jsonb に残って後で読み手を混乱させる。**
+	//
+	// nil を空配列に寄せるのは、`{"signupApplicationForm": null}` を素直に
+	// marshal すると jsonb の `null` が入るため。読み手は全て耐えるが、他の
+	// jsonb 列は coerceMetaJSONBFields が `[]` に正規化しており、ここだけ
+	// datatypes.JSON なのでその分岐に入らない。列ごとに中身が違う状態にしない。
+	if parsed == nil {
+		parsed = []signupapplication.FormField{}
+	}
 	normalized, err := json.Marshal(parsed)
 	if err != nil {
 		return fmt.Errorf("%w: signupApplicationForm is not encodable", signupapplication.ErrInvalidForm)
