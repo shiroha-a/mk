@@ -1385,6 +1385,7 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	if err := validateSignupConditions(fields, currentMeta); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_SIGNUP_CONDITIONS", err.Error(), "8f3c1d2e-4a5b-4c6d-9e7f-0a1b2c3d4e5f"))
 	}
+	normalizeSignupConditions(fields, currentMeta)
 	// frontend が送る API 名 → DB カラム名の差異を吸収する (#348)。API は
 	// 本家互換の camelCase alias (tosUrl 等) を使うが、DB 側は
 	// packages/backend/src/models/Meta.ts と同じ正規名で保持している。
@@ -3470,10 +3471,7 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 // 実際には要求されない**という食い違いになる。
 //
 // どちらも管理画面で普通に作れてしまい、作った側は矛盾に気づけない。
-var (
-	errApprovalNeedsOpenRegistration = errors.New("approvalRequiredForSignup requires registration to be open (disableRegistration must be false)")
-	errApprovalExcludesEmail         = errors.New("approvalRequiredForSignup and emailRequiredForSignup are mutually exclusive")
-)
+var errApprovalExcludesEmail = errors.New("approvalRequiredForSignup and emailRequiredForSignup are mutually exclusive")
 
 // validateSignupConditions checks the *resulting* meta state.
 //
@@ -3485,13 +3483,31 @@ func validateSignupConditions(fields map[string]any, current *model.Meta) error 
 	if !approval {
 		return nil
 	}
-	disabled := metaBoolAfterUpdate(fields, "disableRegistration", current != nil && current.DisableRegistration)
-	if disabled {
-		return errApprovalNeedsOpenRegistration
-	}
 	emailRequired := metaBoolAfterUpdate(fields, "emailRequiredForSignup", current != nil && current.EmailRequiredForSignup)
 	if emailRequired {
 		return errApprovalExcludesEmail
 	}
 	return nil
+}
+
+// normalizeSignupConditions opens registration when approval is being turned on.
+//
+// **拒否ではなく同じ更新で開けるのが要点。** 「先に開放してから承認制を入れる」
+// 手順を強制すると、開放してから承認制が入るまでの間に素通しで登録される窓が
+// できる。承認制それ自体が `/api/signup` を 403 で塞ぐので、この開放は安全性
+// ではなく表示上の整合のため (訪問者に「招待制」と出さない)。
+//
+// 承認制を切る更新や、承認制が元から有効なだけの更新では触らない。**無条件に
+// 開けると、管理者が登録を閉じた操作を黙って巻き戻すことになる。**
+func normalizeSignupConditions(fields map[string]any, current *model.Meta) {
+	turningOn, ok := fields["approvalRequiredForSignup"].(bool)
+	if !ok || !turningOn {
+		return
+	}
+	if current != nil && current.ApprovalRequiredForSignup {
+		return // 既に有効。今回の更新で入れたわけではない。
+	}
+	if disabled := metaBoolAfterUpdate(fields, "disableRegistration", current != nil && current.DisableRegistration); disabled {
+		fields["disableRegistration"] = false
+	}
 }

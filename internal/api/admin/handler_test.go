@@ -3701,72 +3701,69 @@ func TestAdminMeta_ApprovalRequiredForSignup(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"approvalRequiredForSignup":true`)
 }
 
-// 登録可否の組み合わせを検証する (#2565)。
+// 登録可否の組み合わせ (#2565)。
 //
-// 承認制は「登録を開放したうえで申請と承認を挟む」もの。招待制と重ねると、招待
-// コードを持つ人がさらに承認を待つことになるが、**承認は内部で招待を発行するので
-// 二重のゲートに意味が無い**。メール必須と重ねると、承認フローは signupService を
-// 直接呼んでメール確認の経路を通らないため、**設定していても実際には要求されない**
-// という食い違いになる。
+// 唯一の制約は「承認制とメール必須は排他」。承認制それ自体が /api/signup を 403 で
+// 塞ぐので、登録開放は安全性の条件ではなく表示上の整合にすぎない。**「先に開放して
+// から承認制を入れる」手順を強制すると、その間に素通しで登録される窓ができる**ため、
+// 承認制を入れる更新では同じ更新で開放する。
 func TestUpdateMeta_SignupConditions(t *testing.T) {
 	tests := []struct {
-		name    string
-		current *model.Meta
-		body    string
-		wantOK  bool
+		name         string
+		current      *model.Meta
+		body         string
+		wantRejected bool
+		// wantDisableRegistration は更新後に期待する disableRegistration。
+		// nil なら検証しない。
+		wantDisableRegistration *bool
 	}{
 		{
-			name:    "承認制のみを入れる (登録は開放済み)",
-			current: &model.Meta{ID: "x", DisableRegistration: false},
-			body:    `{"approvalRequiredForSignup":true}`,
-			wantOK:  true,
+			name:                    "招待制のまま承認制を入れると同じ更新で開放される",
+			current:                 &model.Meta{ID: "x", DisableRegistration: true},
+			body:                    `{"approvalRequiredForSignup":true}`,
+			wantDisableRegistration: boolPtr(false),
 		},
 		{
-			name:    "招待制のまま承認制を入れる",
-			current: &model.Meta{ID: "x", DisableRegistration: true},
-			body:    `{"approvalRequiredForSignup":true}`,
-			wantOK:  false,
+			name:                    "既に開放済みなら触らない",
+			current:                 &model.Meta{ID: "x", DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":true}`,
+			wantDisableRegistration: boolPtr(false),
 		},
 		{
-			// **部分更新でも既存値を見る。** 見ないと、片方だけ送るだけで
-			// 矛盾する組み合わせを素通しさせられる。
-			name:    "承認制が有効なまま登録を閉じる",
-			current: &model.Meta{ID: "x", ApprovalRequiredForSignup: true},
-			body:    `{"disableRegistration":true}`,
-			wantOK:  false,
+			// **無条件に開けると、管理者が閉じた操作を黙って巻き戻すことになる。**
+			name:                    "承認制が元から有効なだけの更新では開放しない",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: false},
+			body:                    `{"disableRegistration":true}`,
+			wantDisableRegistration: boolPtr(true),
 		},
 		{
-			name:    "承認制が有効なままメール必須を入れる",
-			current: &model.Meta{ID: "x", ApprovalRequiredForSignup: true},
-			body:    `{"emailRequiredForSignup":true}`,
-			wantOK:  false,
+			name:                    "承認制を切る更新では開放しない",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: true},
+			body:                    `{"approvalRequiredForSignup":false}`,
+			wantDisableRegistration: boolPtr(true),
 		},
 		{
-			name:    "メール必須が有効なまま承認制を入れる",
-			current: &model.Meta{ID: "x", EmailRequiredForSignup: true},
-			body:    `{"approvalRequiredForSignup":true}`,
-			wantOK:  false,
+			name:         "承認制が有効なままメール必須を入れる",
+			current:      &model.Meta{ID: "x", ApprovalRequiredForSignup: true},
+			body:         `{"emailRequiredForSignup":true}`,
+			wantRejected: true,
 		},
 		{
-			// 同時に送って両立させる形なら通る (承認制 + 登録開放)。
-			name:    "承認制と登録開放を同時に送る",
-			current: &model.Meta{ID: "x", DisableRegistration: true},
-			body:    `{"approvalRequiredForSignup":true,"disableRegistration":false}`,
-			wantOK:  true,
+			name:         "メール必須が有効なまま承認制を入れる",
+			current:      &model.Meta{ID: "x", EmailRequiredForSignup: true},
+			body:         `{"approvalRequiredForSignup":true}`,
+			wantRejected: true,
 		},
 		{
-			// 承認制を切る側は常に通る。**片方向だけ拒否すると「承認制を
-			// 切らないと登録を閉じられない」詰みが起きる。**
+			// 片方向だけ拒否すると詰むので、入れ替えは通ること。
 			name:    "承認制とメール必須を入れ替える",
 			current: &model.Meta{ID: "x", ApprovalRequiredForSignup: true},
 			body:    `{"approvalRequiredForSignup":false,"emailRequiredForSignup":true}`,
-			wantOK:  true,
 		},
 		{
 			name:    "承認制が無効なら招待制とメール必須は自由",
 			current: &model.Meta{ID: "x"},
 			body:    `{"disableRegistration":true,"emailRequiredForSignup":true}`,
-			wantOK:  true,
 		},
 	}
 	for _, tt := range tests {
@@ -3775,12 +3772,17 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 			metaRepo.Meta = tt.current
 
 			rec := doPost(h.UpdateMeta, tt.body, adminUser)
-			if tt.wantOK {
-				assert.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			if tt.wantRejected {
+				assert.Equal(t, http.StatusBadRequest, rec.Code)
+				assert.Contains(t, rec.Body.String(), "INVALID_SIGNUP_CONDITIONS")
 				return
 			}
-			assert.Equal(t, http.StatusBadRequest, rec.Code)
-			assert.Contains(t, rec.Body.String(), "INVALID_SIGNUP_CONDITIONS")
+			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+			if tt.wantDisableRegistration != nil {
+				assert.Equal(t, *tt.wantDisableRegistration, metaRepo.Meta.DisableRegistration)
+			}
 		})
 	}
 }
+
+func boolPtr(b bool) *bool { return &b }

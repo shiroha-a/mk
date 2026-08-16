@@ -2612,6 +2612,20 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			case nil:
 				m.Meta.ProxyAccountID = nil
 			}
+		// 登録可否の 3 設定 (#2565)。組み合わせの検証・正規化を test から
+		// 観測するために反映する。
+		case "disableRegistration":
+			if b, ok := v.(bool); ok {
+				m.Meta.DisableRegistration = b
+			}
+		case "emailRequiredForSignup":
+			if b, ok := v.(bool); ok {
+				m.Meta.EmailRequiredForSignup = b
+			}
+		case "approvalRequiredForSignup":
+			if b, ok := v.(bool); ok {
+				m.Meta.ApprovalRequiredForSignup = b
+			}
 		case "enableHcaptcha":
 			if b, ok := v.(bool); ok {
 				m.Meta.EnableHcaptcha = b
