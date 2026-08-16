@@ -3713,9 +3713,10 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 		current      *model.Meta
 		body         string
 		wantRejected bool
-		// wantDisableRegistration は更新後に期待する disableRegistration。
-		// nil なら検証しない。
+		// 更新後に期待する各値。nil なら検証しない。
 		wantDisableRegistration *bool
+		wantEmailRequired       *bool
+		wantApprovalRequired    *bool
 	}{
 		{
 			name:                    "招待制のまま承認制を入れると同じ更新で開放される",
@@ -3743,22 +3744,30 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 			wantDisableRegistration: boolPtr(true),
 		},
 		{
-			name:         "承認制が有効なままメール必須を入れる",
-			current:      &model.Meta{ID: "x", ApprovalRequiredForSignup: true},
-			body:         `{"emailRequiredForSignup":true}`,
-			wantRejected: true,
+			// 排他は撤去した (#2571)。承認済みからの登録も確認メールの経路を
+			// 通るようになり、設定と実態が食い違わなくなったため。
+			name:                    "承認制が有効なままメール必須を入れる",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true},
+			body:                    `{"emailRequiredForSignup":true}`,
+			wantEmailRequired:       boolPtr(true),
+			wantApprovalRequired:    boolPtr(true),
+			wantDisableRegistration: boolPtr(false),
 		},
 		{
-			name:         "メール必須が有効なまま承認制を入れる",
-			current:      &model.Meta{ID: "x", EmailRequiredForSignup: true},
-			body:         `{"approvalRequiredForSignup":true}`,
-			wantRejected: true,
+			name:                 "メール必須が有効なまま承認制を入れる",
+			current:              &model.Meta{ID: "x", EmailRequiredForSignup: true},
+			body:                 `{"approvalRequiredForSignup":true}`,
+			wantEmailRequired:    boolPtr(true),
+			wantApprovalRequired: boolPtr(true),
 		},
 		{
-			// 片方向だけ拒否すると詰むので、入れ替えは通ること。
-			name:    "承認制とメール必須を入れ替える",
-			current: &model.Meta{ID: "x", ApprovalRequiredForSignup: true},
-			body:    `{"approvalRequiredForSignup":false,"emailRequiredForSignup":true}`,
+			name:                 "承認制とメール必須を同時に入れる",
+			current:              &model.Meta{ID: "x", DisableRegistration: true},
+			body:                 `{"approvalRequiredForSignup":true,"emailRequiredForSignup":true}`,
+			wantEmailRequired:    boolPtr(true),
+			wantApprovalRequired: boolPtr(true),
+			// 承認制を入れる更新なので登録も開く (表示の整合)。
+			wantDisableRegistration: boolPtr(false),
 		},
 		{
 			name:    "承認制が無効なら招待制とメール必須は自由",
@@ -3780,6 +3789,12 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 			if tt.wantDisableRegistration != nil {
 				assert.Equal(t, *tt.wantDisableRegistration, metaRepo.Meta.DisableRegistration)
+			}
+			if tt.wantEmailRequired != nil {
+				assert.Equal(t, *tt.wantEmailRequired, metaRepo.Meta.EmailRequiredForSignup)
+			}
+			if tt.wantApprovalRequired != nil {
+				assert.Equal(t, *tt.wantApprovalRequired, metaRepo.Meta.ApprovalRequiredForSignup)
 			}
 		})
 	}

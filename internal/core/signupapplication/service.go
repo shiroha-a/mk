@@ -242,6 +242,27 @@ type decision struct {
 // **ロックを取るのが要点。** 審査は管理者が、完了は登録経路が触るので、素の
 // read-modify-write だと「却下と同時に登録が通る」ような取り違えが起きる。
 // decide が nil の fields を返したら何もしない (競合して既に処理済み)。
+// MarkTicket records the invitation ticket minted for an in-flight signup,
+// leaving the application approved (#2571).
+//
+// メール確認を挟むとき、確認が終わるまでアカウントは無いので completed にできない。
+// **その間に発行した ticket を申請に覚えさせておく。** 覚えていないと、申請者が
+// 登録をやり直すたびに ticket と pending が積み上がり、届いたメールを両方確認
+// すれば 1 つの承認から複数アカウントを作れてしまう。次の試行はここに記録された
+// ticket を破棄してから新しく発行する。
+func (s *Service) MarkTicket(applicationID, ticketID string) error {
+	now := s.clock()
+	return s.transition(applicationID, now, func(cur *model.SignupApplication) decision {
+		if cur.Status != model.SignupApplicationApproved {
+			return decision{err: ErrNotApproved}
+		}
+		if !now.Before(cur.ExpiresAt) {
+			return expireDecision()
+		}
+		return decision{fields: map[string]any{"ticketId": ticketID}}
+	})
+}
+
 func (s *Service) transition(
 	applicationID string,
 	now time.Time,

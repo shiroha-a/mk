@@ -26,6 +26,9 @@ type SignupApplications interface {
 	Apply(answers []signupapplication.Answer) (*model.SignupApplication, string, error)
 	ByClaimCode(code string) (*model.SignupApplication, error)
 	MarkCompleted(applicationID, userID, ticketID string) error
+	// MarkTicket records the ticket minted for an in-flight email-confirmation
+	// signup, leaving the application approved (#2571).
+	MarkTicket(applicationID, ticketID string) error
 }
 
 // SetSignupApplications wires the approval-based signup flow (#2569).
@@ -168,10 +171,34 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 		ClaimCode string `json:"claimCode"`
 		Username  string `json:"username"`
 		Password  string `json:"password"`
+		// EmailAddress は emailRequiredForSignup が有効なときだけ要る (#2571)。
+		EmailAddress string `json:"emailAddress"`
 	}
 	if err := c.Bind(&req); err != nil || req.Username == "" || req.Password == "" {
 		return c.JSON(http.StatusBadRequest,
 			apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+
+	meta, err := h.metaRepo.Fetch()
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError,
+			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// testMode は通常の signup と同じくメール確認を丸ごと迂回する。フロントの
+	// test が確認リンクを踏めないため。
+	emailRequired := !h.testMode && meta.EmailRequiredForSignup
+	if emailRequired {
+		if req.EmailAddress == "" {
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("INVALID_PARAM", "emailAddress is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
+		if verr := validateEmailWithMeta(c.Request().Context(), meta, req.EmailAddress, h.emailValidationClient); verr != nil {
+			// `/api/signup` はここで UNAVAILABLE を返すが、この endpoint では
+			// UNAVAILABLE が既に「承認制が無効」の意味を持つ。**同じ code で
+			// 別のことを言うと、client がどちらか一方の文言しか出せない。**
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("EMAIL_UNAVAILABLE", "Email is not available.", "a25440a9-451e-41de-b291-00a8f29fbca6"))
+		}
 	}
 
 	// **申請の状態はここで引き直す。** 画面が古い状態を握っていても、承認されて
@@ -190,10 +217,21 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 			apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
 	}
 
+	// **前回の試行で発行した ticket を破棄してから新しく発行する。** メール確認を
+	// 挟むと、届かなかった / アドレスを打ち間違えたときに登録をやり直すことになる。
+	// 積み上げると、届いた分をすべて確認して 1 つの承認から複数アカウントを作れる。
+	// 破棄すると古いメールのリンクは INVITATION_REVOKED になり、最新の試行だけが
+	// 通る。
+	h.discardStaleApprovalTicket(app)
+
 	ticket, err := h.mintApprovalTicket(app)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError,
 			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+
+	if emailRequired {
+		return h.registerViaEmailConfirmation(c, meta, app, ticket, req.Username, req.EmailAddress, req.Password)
 	}
 
 	result, err := h.signupService.Signup(req.Username, req.Password, false)
@@ -222,6 +260,63 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 
 	h.fireSigninSideEffects(c, result.User.ID)
 	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Profile, result.Token, h.idGen))
+}
+
+// registerViaEmailConfirmation stages the approved signup as a pending row and
+// mails the confirmation link (#2571).
+//
+// **この時点ではまだアカウントが無いので、申請を completed にできない。** pending
+// row に申請 ID を持たせ、確認が終わった `/api/signup-pending` 側で completed に
+// する。申請は approved のまま残るが、発行した ticket を申請に覚えさせておくので、
+// やり直しは前回を破棄してから進む。
+func (h *Handler) registerViaEmailConfirmation(
+	c echo.Context,
+	meta *model.Meta,
+	app *model.SignupApplication,
+	ticket *model.RegistrationTicket,
+	username, email, password string,
+) error {
+	var ticketID *string
+	if ticket != nil {
+		ticketID = &ticket.ID
+	}
+	appID := app.ID
+	pending, err := h.signupService.CreatePendingForApplication(username, email, password, ticketID, &appID)
+	if err != nil {
+		// 使われないまま残った ticket は消す。**残すと、次の試行で「使用済み」に
+		// 見えないまま浮いた招待が積み上がる。**
+		h.discardApprovalTicket(ticket)
+		// 承認制の登録は mk-go 独自の endpoint なので、即時作成の分岐と同じ
+		// エラー集合に揃える。`/api/signup` のメール経路は予約 username を
+		// DENIED_USERNAME で返す upstream 互換の分岐を持つが (#2080)、ここで
+		// 分けると同じ画面の同じ操作で code が変わってしまう。
+		return h.signupServiceError(c, err)
+	}
+	if ticket != nil {
+		if h.ticketStore != nil {
+			if merr := h.ticketStore.MarkPending(ticket.ID, pending.ID); merr != nil {
+				// 再送防止窓が効かなくなるだけで pending は成立している。
+				c.Logger().Warnf("signup application: mark ticket pending failed: %v", merr)
+			}
+		}
+		if merr := h.applications.MarkTicket(app.ID, ticket.ID); merr != nil {
+			// **ここが落ちると、次の試行で前回の ticket を破棄できない。**
+			// pending は成立しているので 500 にはしないが、痕跡は残す。
+			c.Logger().Warnf("signup application: mark ticket failed: %v", merr)
+		}
+	}
+	h.sendSignupConfirmation(meta, email, pending.Code)
+	// TS の signup と同じく本体は返さない (frontend は確認メールを待つ)。
+	return c.NoContent(http.StatusNoContent)
+}
+
+// discardStaleApprovalTicket removes the ticket left over by a previous
+// in-flight attempt on the same application (#2571).
+func (h *Handler) discardStaleApprovalTicket(app *model.SignupApplication) {
+	if app == nil || app.TicketID == nil || *app.TicketID == "" {
+		return
+	}
+	h.discardApprovalTicket(&model.RegistrationTicket{ID: *app.TicketID})
 }
 
 // applicationForClaimCode resolves the caller's claim code, writing the error

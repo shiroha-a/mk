@@ -8,8 +8,12 @@ import (
 	"time"
 
 	apisignup "github.com/shiroha-a/mk/internal/api/signup"
+	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
+	"github.com/shiroha-a/mk/internal/misc/id"
+	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -28,6 +32,9 @@ type stubApplications struct {
 	completedUsr   string
 	completedTkt   string
 	lastCode       string
+	markedTktApp   string
+	markedTkt      string
+	markTicketErr  error
 }
 
 func (s *stubApplications) Apply(answers []signupapplication.Answer) (*model.SignupApplication, string, error) {
@@ -54,6 +61,11 @@ func (s *stubApplications) MarkCompleted(applicationID, userID, ticketID string)
 	return s.markErr
 }
 
+func (s *stubApplications) MarkTicket(applicationID, ticketID string) error {
+	s.markedTktApp, s.markedTkt = applicationID, ticketID
+	return s.markTicketErr
+}
+
 // stubTicketStore satisfies TicketStore plus the optional issue / discard halves.
 type stubTicketStore struct {
 	created   []*model.RegistrationTicket
@@ -62,6 +74,9 @@ type stubTicketStore struct {
 	usedUsr   string
 	createErr error
 	markErr   error
+
+	pendingTkt string
+	pendingRow string
 }
 
 func (s *stubTicketStore) FindByCode(string) (*model.RegistrationTicket, error) {
@@ -73,7 +88,10 @@ func (s *stubTicketStore) MarkUsed(ticketID, userID string) error {
 	return s.markErr
 }
 
-func (s *stubTicketStore) MarkPending(string, string) error { return nil }
+func (s *stubTicketStore) MarkPending(ticketID, pendingID string) error {
+	s.pendingTkt, s.pendingRow = ticketID, pendingID
+	return nil
+}
 
 func (s *stubTicketStore) Create(t *model.RegistrationTicket) error {
 	if s.createErr != nil {
@@ -416,4 +434,224 @@ func TestSignup_AllowedWhenApprovalIsOff(t *testing.T) {
 
 	rec := doPost(h.Signup, `{"username":"newbie","password":"hunter22"}`)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// --- メール必須との併用 (#2571) ---
+
+// newApprovalEnvWithEmail wires the pending repo and the mail sender so the
+// approval flow can go through email confirmation.
+func newApprovalEnvWithEmail(t *testing.T) (*approvalEnv, *testutil.MockUserPendingRepository, *stubTicketStore, chan string) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{
+		ID: "x", ApprovalRequiredForSignup: true, EmailRequiredForSignup: true,
+	}
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := coresignup.NewService(userRepo, metaRepo, idGen)
+	svc.SetUserPendingRepo(pendingRepo)
+	h := apisignup.NewHandler(svc, metaRepo, idGen)
+
+	apps := &stubApplications{app: approvedApplication()}
+	h.SetSignupApplications(apps)
+	tickets := &stubTicketStore{}
+	h.SetTicketStore(tickets)
+
+	// 送信は goroutine なので、宛先を channel で受ける。
+	sent := make(chan string, 1)
+	h.SetEmailSender("https://example.test", func(to string, _ miscsmtp.Message) {
+		sent <- to
+	})
+	return &approvalEnv{handler: h, apps: apps, meta: metaRepo.Meta}, pendingRepo, tickets, sent
+}
+
+// メール必須のときは即時作成せず、確認メールの経路に乗せる。**乗せないと、設定
+// しているのに実際にはメールを要求しない状態になる。**
+func TestApplicationRegister_EmailRequired_CreatesPendingAndSendsEmail(t *testing.T) {
+	env, pendingRepo, tickets, sent := newApprovalEnvWithEmail(t)
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"newbie@example.com"}`)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	require.Len(t, pendingRepo.Rows, 1)
+	row := onlyPending(t, pendingRepo)
+	assert.Equal(t, "newbie", row.Username)
+	assert.Equal(t, "newbie@example.com", row.Email)
+
+	// **申請 ID を持たせないと、確認完了時に申請を completed にできない。**
+	require.NotNil(t, row.SignupApplicationID)
+	assert.Equal(t, "app-1", *row.SignupApplicationID)
+
+	// 発行した ticket は pending に結び付き、まだ消費されていない。
+	require.Len(t, tickets.created, 1)
+	issued := tickets.created[0]
+	require.NotNil(t, row.InvitationTicketID)
+	assert.Equal(t, issued.ID, *row.InvitationTicketID)
+	assert.Equal(t, issued.ID, tickets.pendingTkt)
+	assert.Equal(t, row.ID, tickets.pendingRow)
+	assert.Empty(t, tickets.usedTkt, "確認が終わるまで消費しない")
+
+	// 次の試行で破棄できるよう、申請が ticket を覚えている。
+	assert.Equal(t, "app-1", env.apps.markedTktApp)
+	assert.Equal(t, issued.ID, env.apps.markedTkt)
+
+	// この時点ではまだアカウントが無いので完了扱いにしない。
+	assert.Empty(t, env.apps.completedApp)
+
+	select {
+	case to := <-sent:
+		assert.Equal(t, "newbie@example.com", to)
+	case <-time.After(2 * time.Second):
+		t.Fatal("確認メールが送られていない")
+	}
+}
+
+func TestApplicationRegister_EmailRequired_RejectsMissingOrBadAddress(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		env, pendingRepo, _, _ := newApprovalEnvWithEmail(t)
+		rec := doPost(env.handler.ApplicationRegister,
+			`{"claimCode":"c","username":"newbie","password":"hunter22"}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Empty(t, pendingRepo.Rows)
+	})
+
+	t.Run("banned domain", func(t *testing.T) {
+		env, pendingRepo, tickets, _ := newApprovalEnvWithEmail(t)
+		env.meta.BannedEmailDomains = []string{"bad.example"}
+		rec := doPost(env.handler.ApplicationRegister,
+			`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"x@bad.example"}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		// **UNAVAILABLE は使わない。** この endpoint では既に「承認制が無効」の
+		// 意味を持っており、同じ code だと client がどちらかしか出せない。
+		assert.Contains(t, rec.Body.String(), "EMAIL_UNAVAILABLE")
+		assert.Empty(t, pendingRepo.Rows)
+		// **アドレスを見る前に ticket を発行しない。** 弾いた分だけ浮いた招待が残る。
+		assert.Empty(t, tickets.created)
+	})
+}
+
+// メール必須が無効なら従来どおり即時作成する。
+func TestApplicationRegister_EmailNotRequired_CreatesImmediately(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	env.apps.app = approvedApplication()
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, "app-1", env.apps.completedApp, "その場で完了扱いになる")
+	assert.Empty(t, env.apps.markedTkt, "確認待ちの記録は要らない")
+}
+
+// **やり直しは前回の ticket を破棄してから進む。** 積み上げると、届いたメールを
+// すべて確認して 1 つの承認から複数アカウントを作れる。
+func TestApplicationRegister_EmailRequired_RetryDiscardsPreviousTicket(t *testing.T) {
+	env, pendingRepo, tickets, sent := newApprovalEnvWithEmail(t)
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"typo@example.com"}`)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	<-sent
+	first := tickets.created[0].ID
+	assert.Empty(t, tickets.deleted, "1 回目は破棄しない")
+
+	// 申請が 1 回目の ticket を覚えている状態を再現する。
+	env.apps.app.TicketID = &first
+
+	rec = doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"right@example.com"}`)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	<-sent
+
+	assert.Equal(t, []string{first}, tickets.deleted, "前回の ticket を破棄する")
+	require.Len(t, tickets.created, 2)
+	assert.NotEqual(t, first, tickets.created[1].ID)
+	require.Len(t, pendingRepo.Rows, 2)
+	second := pendingByEmail(t, pendingRepo, "right@example.com")
+	require.NotNil(t, second.InvitationTicketID)
+	assert.Equal(t, tickets.created[1].ID, *second.InvitationTicketID)
+}
+
+// pending 作成に失敗したら ticket を残さない。
+func TestApplicationRegister_EmailRequired_DiscardsTicketOnPendingFailure(t *testing.T) {
+	env, _, tickets, _ := newApprovalEnvWithEmail(t)
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"!!!invalid!!!","password":"hunter22","emailAddress":"x@example.com"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Len(t, tickets.created, 1)
+	assert.Equal(t, []string{tickets.created[0].ID}, tickets.deleted)
+	assert.Empty(t, env.apps.completedApp)
+}
+
+// 記録の失敗はアカウント作成を妨げない (pending は成立している)。
+func TestApplicationRegister_EmailRequired_BookkeepingFailureStillSucceeds(t *testing.T) {
+	env, pendingRepo, _, sent := newApprovalEnvWithEmail(t)
+	env.apps.markTicketErr = errors.New("boom")
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"x@example.com"}`)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Len(t, pendingRepo.Rows, 1)
+	<-sent
+}
+
+// onlyPending returns the single pending row, failing when there is not exactly one.
+func onlyPending(t *testing.T, repo *testutil.MockUserPendingRepository) *model.UserPending {
+	t.Helper()
+	require.Len(t, repo.Rows, 1)
+	for _, r := range repo.Rows {
+		return r
+	}
+	return nil
+}
+
+func pendingByEmail(t *testing.T, repo *testutil.MockUserPendingRepository, email string) *model.UserPending {
+	t.Helper()
+	for _, r := range repo.Rows {
+		if r.Email == email {
+			return r
+		}
+	}
+	t.Fatalf("pending row for %s not found", email)
+	return nil
+}
+
+// 確認が終わって初めてアカウントになり、そこで申請が完了扱いになる。
+// **completed にしないと approved のまま残り、同じクレームコードで何度でも
+// 登録を始められる。**
+func TestSignupPending_CompletesApplication(t *testing.T) {
+	env, pendingRepo, tickets, sent := newApprovalEnvWithEmail(t)
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"x@example.com"}`)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	<-sent
+	row := onlyPending(t, pendingRepo)
+
+	rec = doPost(env.handler.SignupPending, `{"code":"`+row.Code+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	resp := parseResp(t, rec)
+
+	assert.Equal(t, "app-1", env.apps.completedApp)
+	assert.Equal(t, resp["id"], env.apps.completedUsr)
+	assert.Equal(t, tickets.created[0].ID, env.apps.completedTkt)
+}
+
+// 申請と無関係な pending の確認では申請に触らない。
+func TestSignupPending_WithoutApplicationLeavesApplicationsAlone(t *testing.T) {
+	env, pendingRepo, _, _ := newApprovalEnvWithEmail(t)
+	env.meta.ApprovalRequiredForSignup = false
+
+	// 通常の /api/signup 経路で積まれた pending を模す。
+	rec := doPost(env.handler.Signup,
+		`{"username":"other","password":"hunter22","emailAddress":"other@example.com"}`)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	row := onlyPending(t, pendingRepo)
+	require.Nil(t, row.SignupApplicationID)
+
+	rec = doPost(env.handler.SignupPending, `{"code":"`+row.Code+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, env.apps.completedApp)
 }

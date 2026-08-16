@@ -89,6 +89,10 @@ type UserPending struct {
 	// registration_ticket の ID。PromotePending 完了時に MarkUsed する。
 	// 通常 (招待制無効) signup では nil。
 	InvitationTicketID *string `gorm:"column:invitationTicketId;type:varchar(32)" json:"invitationTicketId,omitempty"`
+	// SignupApplicationID は承認制 (#2571) でメール確認を挟むときの申請 ID。
+	// 確認完了時に申請を completed にするために持つ。**これが無いと申請が
+	// approved のまま残り、1 つの承認から複数アカウントを作れる。**
+	SignupApplicationID *string `gorm:"column:signupApplicationId;type:varchar(32)" json:"signupApplicationId,omitempty"`
 }
 
 func (UserPending) TableName() string { return "user_pending" }

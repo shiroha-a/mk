@@ -1384,9 +1384,6 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// 素通しする (ここで 500 にすると、meta が壊れているときに設定を直す
 	// 手段まで塞いでしまう)。
 	currentMeta, _ := h.metaRepo.Fetch()
-	if err := validateSignupConditions(fields, currentMeta); err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_SIGNUP_CONDITIONS", err.Error(), "8f3c1d2e-4a5b-4c6d-9e7f-0a1b2c3d4e5f"))
-	}
 	normalizeSignupConditions(fields, currentMeta)
 	// 申請フォームの定義を検証する (#2570)。**上限を置かないと管理者が自分で
 	// 壊せる** — 項目を無制限に足せば申請ページが使い物にならなくなる。
@@ -3479,24 +3476,10 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 // 実際には要求されない**という食い違いになる。
 //
 // どちらも管理画面で普通に作れてしまい、作った側は矛盾に気づけない。
-var errApprovalExcludesEmail = errors.New("approvalRequiredForSignup and emailRequiredForSignup are mutually exclusive")
-
-// validateSignupConditions checks the *resulting* meta state.
-//
-// **部分更新があるので、リクエストに無いキーは既存値で埋める。** 片方だけ送られた
-// ときに既存値を見ないと、矛盾する組み合わせを素通しさせてしまう。判定は双方向で
-// 同じ式に落ちるので、「承認制を切らないと登録を閉じられない」ような詰みは無い。
-func validateSignupConditions(fields map[string]any, current *model.Meta) error {
-	approval := metaBoolAfterUpdate(fields, "approvalRequiredForSignup", current != nil && current.ApprovalRequiredForSignup)
-	if !approval {
-		return nil
-	}
-	emailRequired := metaBoolAfterUpdate(fields, "emailRequiredForSignup", current != nil && current.EmailRequiredForSignup)
-	if emailRequired {
-		return errApprovalExcludesEmail
-	}
-	return nil
-}
+// メール必須との排他は撤去した (#2571)。承認済みからの登録も
+// emailRequiredForSignup が有効なら確認メールの経路を通るようになり、設定と実態が
+// 食い違わなくなったため。**クレームコードは常に必須のまま**で、本人性の担保は
+// コードが持つ。メールは独立した任意設定。
 
 // normalizeSignupConditions opens registration when approval is being turned on.
 //
@@ -3507,6 +3490,12 @@ func validateSignupConditions(fields map[string]any, current *model.Meta) error 
 //
 // 承認制を切る更新や、承認制が元から有効なだけの更新では触らない。**無条件に
 // 開けると、管理者が登録を閉じた操作を黙って巻き戻すことになる。**
+//
+// 送っていない列を書き換える形なので「検証のみにして両方を送らせる」案もあるが、
+// 残す (#2571 で判断)。**結合はサーバー側の都合** — 承認制それ自体はゲートとして
+// 完結していて、開放は訪問者への表示を実態に合わせるためだけにある。それを知らない
+// クライアントが「承認制を入れる」だけの自然な 1 リクエストで 400 を食うのは筋が
+// 悪い。モデレーション画面は既に両方を送るので、ここは二重の保険として効く。
 func normalizeSignupConditions(fields map[string]any, current *model.Meta) {
 	turningOn, ok := fields["approvalRequiredForSignup"].(bool)
 	if !ok || !turningOn {

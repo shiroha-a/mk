@@ -256,26 +256,7 @@ func (h *Handler) Signup(c echo.Context) error {
 				slog.Warn("signup: failed to mark invitation ticket pending", "ticketId", ticket.ID, "err", merr)
 			}
 		}
-		if h.emailSender != nil {
-			siteName := "Misskey"
-			if meta.Name != nil && *meta.Name != "" {
-				siteName = *meta.Name
-			}
-			confirmURL := h.signupConfirmURL(pending.Code)
-			lead := "Welcome to " + siteName + "! Click the link to complete your signup:"
-			text, bodyHTML := coreemail.LinkText(lead, "Complete signup", confirmURL)
-			html := coreemail.WrapHTML(coreemail.HTMLWrapInput{
-				SiteName: siteName,
-				SiteURL:  h.serverURL,
-				Subject:  "Confirm your account",
-				BodyHTML: bodyHTML,
-			})
-			go h.emailSender(req.EmailAddress, miscsmtp.Message{
-				Subject: "Confirm your account",
-				Text:    text,
-				HTML:    html,
-			})
-		}
+		h.sendSignupConfirmation(meta, req.EmailAddress, pending.Code)
 		// TS 互換: 本体は何も返さない (frontend は確認メールを待つ)。
 		return c.NoContent(http.StatusNoContent)
 	}
@@ -379,11 +360,54 @@ func (h *Handler) SignupPending(c echo.Context) error {
 	if result.InvitationTicketID != nil && !result.InvitationTicketConsumed && h.ticketStore != nil {
 		_ = h.ticketStore.MarkUsed(*result.InvitationTicketID, result.User.ID)
 	}
+	// 承認制 + メール必須の登録はここで初めてアカウントになる (#2571)。
+	// **申請を completed にしないと approved のまま残り、同じクレームコードで
+	// 何度でも登録を始められる。**
+	if result.SignupApplicationID != nil && h.applications != nil {
+		ticketID := ""
+		if result.InvitationTicketID != nil {
+			ticketID = *result.InvitationTicketID
+		}
+		if cerr := h.applications.MarkCompleted(*result.SignupApplicationID, result.User.ID, ticketID); cerr != nil {
+			// アカウントは成立しているので 500 にはしない。申請の完了記録は監査用。
+			slog.Warn("signup: mark application completed failed",
+				"applicationId", *result.SignupApplicationID, "userId", result.User.ID, "err", cerr)
+		}
+	}
 	// signup-pending 完了も signin 経路を通す (履歴 / login 通知 / main publish、#1804)。
 	h.fireSigninSideEffects(c, result.User.ID)
 	return c.JSON(http.StatusOK, map[string]any{
 		"id": result.User.ID,
 		"i":  result.Token,
+	})
+}
+
+// sendSignupConfirmation mails the confirmation link for a pending signup.
+//
+// 承認制の登録 (#2571) も同じメールに合流させるため helper 化している。
+// **2 箇所に同じ文面を書かない** — 片方だけ直すと、どちらの経路で登録したかで
+// 届く内容が変わる。
+func (h *Handler) sendSignupConfirmation(meta *model.Meta, to, code string) {
+	if h.emailSender == nil {
+		return
+	}
+	siteName := "Misskey"
+	if meta != nil && meta.Name != nil && *meta.Name != "" {
+		siteName = *meta.Name
+	}
+	confirmURL := h.signupConfirmURL(code)
+	lead := "Welcome to " + siteName + "! Click the link to complete your signup:"
+	text, bodyHTML := coreemail.LinkText(lead, "Complete signup", confirmURL)
+	html := coreemail.WrapHTML(coreemail.HTMLWrapInput{
+		SiteName: siteName,
+		SiteURL:  h.serverURL,
+		Subject:  "Confirm your account",
+		BodyHTML: bodyHTML,
+	})
+	go h.emailSender(to, miscsmtp.Message{
+		Subject: "Confirm your account",
+		Text:    text,
+		HTML:    html,
 	})
 }
 

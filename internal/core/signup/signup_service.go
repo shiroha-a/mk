@@ -262,6 +262,10 @@ type SignupResult struct {
 	// Profile は作成した user_profile。/api/signup のレスポンスは upstream と
 	// 同じく MeDetailed そのものなので、packer に渡す profile が要る。
 	Profile *model.UserProfile
+	// SignupApplicationID は承認制 (#2571) の確認メール経路で pending row から
+	// 復元した申請 ID。handler がこれを見て申請を completed にする。**返さないと
+	// 申請が approved のまま残り、1 つの承認から複数アカウントを作れる。**
+	SignupApplicationID *string
 }
 
 // Signup creates a new local user with the given username and password.
@@ -427,6 +431,15 @@ func generatePendingCode() string {
 // 成功時に SignupResult.InvitationTicketID 経由で handler に伝える
 // (招待制 + email 確認制併用時の MarkUsed 用)。
 func (s *Service) CreatePending(username, email, password string, invitationTicketID *string) (*model.UserPending, error) {
+	return s.CreatePendingForApplication(username, email, password, invitationTicketID, nil)
+}
+
+// CreatePendingForApplication is CreatePending carrying the approval
+// application this signup belongs to (#2571).
+//
+// 承認制 + メール必須のとき、確認完了まではアカウントが無いので申請を completed
+// にできない。pending row に申請 ID を持たせ、PromotePending の戻り値で返す。
+func (s *Service) CreatePendingForApplication(username, email, password string, invitationTicketID, signupApplicationID *string) (*model.UserPending, error) {
 	username, err := normalizeAndValidateUsername(username)
 	if err != nil {
 		return nil, err
@@ -461,12 +474,13 @@ func (s *Service) CreatePending(username, email, password string, invitationTick
 	}
 	now := time.Now()
 	row := &model.UserPending{
-		ID:                 s.idGen.Generate(now),
-		Code:               generatePendingCode(),
-		Username:           username,
-		Email:              email,
-		Password:           string(hash),
-		InvitationTicketID: invitationTicketID,
+		ID:                  s.idGen.Generate(now),
+		Code:                generatePendingCode(),
+		Username:            username,
+		Email:               email,
+		Password:            string(hash),
+		InvitationTicketID:  invitationTicketID,
+		SignupApplicationID: signupApplicationID,
 	}
 	if err := s.pendingRepo.Create(row); err != nil {
 		return nil, err
@@ -649,6 +663,7 @@ func (s *Service) promotePendingTx(pending *model.UserPending) (*SignupResult, e
 		// 非招待 pending では nil なので consumed = false で返し、handler 側でも
 		// 何もしない (InvitationTicketID nil で早期 return)。
 		InvitationTicketConsumed: pending.InvitationTicketID != nil,
+		SignupApplicationID:      pending.SignupApplicationID,
 	}, nil
 }
 
@@ -721,9 +736,10 @@ func (s *Service) promotePendingNoTx(pending *model.UserPending) (*SignupResult,
 		s.webhookHook.OnUserCreated(user)
 	}
 	return &SignupResult{
-		User:               user,
-		Token:              token,
-		InvitationTicketID: pending.InvitationTicketID,
+		User:                user,
+		Token:               token,
+		InvitationTicketID:  pending.InvitationTicketID,
+		SignupApplicationID: pending.SignupApplicationID,
 	}, nil
 }
 

@@ -31,7 +31,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 6 | chat 15 | **0** |
 | API レスポンスの additive field | 5 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup` / `signupApplicationForm`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 7 (+ bookkeeping 2) | 0 | 0 |
-| DB カラム | 11 (+ 未使用の残存列 3) | 3 | 0 |
+| DB カラム | 12 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
 | fork frontend の独自変更 | 10 tag (`-mk.1` ～ `-mk.10`) | — | — |
@@ -103,12 +103,12 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 
 ### 2-2. 独自カラム (17 = 実使用 14 + 未使用の残存 3)
 
-うち **mk-go が実際に読み書きするのは 14 件** (cherrypick 由来 3 + mk-go 独自 11)。残り 3 件は fresh な mk-go DB に列だけ残る未使用列で、#2243 で依存を外した。
+うち **mk-go が実際に読み書きするのは 15 件** (cherrypick 由来 3 + mk-go 独自 12)。残り 3 件は fresh な mk-go DB に列だけ残る未使用列で、#2243 で依存を外した。
 
 | テーブル | カラム | 由来 | 理由 |
 |---|---|---|---|
 | `chat_message` | `emojis` / `isDelivering` / `isDeliverFailed` | cherrypick | 連合配送の状態追跡 |
-| `meta` | `approvalRequiredForSignup` | mk-go 独自 | 承認制の登録 (#2554) の有効化。**これ自体がゲート**で、有効時は `/api/signup` を 403 で閉じる (#2557)。**メール必須とは排他** (#2565) — 承認フローがメール確認を通らないため、両立させると設定と実態が食い違う。`admin/update-meta` が更新後の状態で検証して拒否する。有効化する更新では**同じ更新でアカウント作成も開放する** — 「先に開放してから承認制を入れる」順を強制すると、その間に素通しで登録される窓ができるため。開放は安全性の条件ではなく (承認制それ自体がゲート)、訪問者に「招待制」と表示しないための整合。`disableRegistration` と組み合わせる運用にすると、訪問者には「招待制」と表示されて実態と食い違う。承認フローは signup service を直接呼ぶのでこの分岐を通らない。TS はこの列を認識しないので、TS へ戻すと承認制が単に無効になる (登録が開くので、切り替え前に `disableRegistration` を検討すること) |
+| `meta` | `approvalRequiredForSignup` | mk-go 独自 | 承認制の登録 (#2554) の有効化。**これ自体がゲート**で、有効時は `/api/signup` を 403 で閉じる (#2557)。**メール必須と併用できる** (#2571) — 承認済みからの登録も `emailRequiredForSignup` が有効なら `user_pending` に積んで確認メールを送るので、設定と実態が食い違わない (#2565 の排他は撤去済み)。クレームコードは常に必須で、本人性の担保はコードが持つ。有効化する更新では**同じ更新でアカウント作成も開放する** — 「先に開放してから承認制を入れる」順を強制すると、その間に素通しで登録される窓ができるため。開放は安全性の条件ではなく (承認制それ自体がゲート)、訪問者に「招待制」と表示しないための整合。`disableRegistration` と組み合わせる運用にすると、訪問者には「招待制」と表示されて実態と食い違う。承認フローは signup service を直接呼ぶのでこの分岐を通らない。TS はこの列を認識しないので、TS へ戻すと承認制が単に無効になる (登録が開くので、切り替え前に `disableRegistration` を検討すること) |
 | `user` | `isRoot` | mk-go 独自 | upstream は system_account 移行で DROP 済み。`role.Service.isRootUser` の fallback に必要 |
 | `meta` | `proxyAccountId` | mk-go 独自 | 同じく upstream は DROP 済み。`admin/update-proxy-account` が書き込む |
 | `note_favorite` | `createdAt` | mk-go 独自 | upstream は `deleteCreatedAt` で DROP 済み。`/api/i/favorites` の response 要件で復活 |
@@ -116,6 +116,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `clip` | `notesCount` | 列のみ残存 | 旧・非正規化カウンタ。#2243 で撤去し、件数は upstream 同様 `clip_note` の実カウントで算出する |
 | `poll` | `notifiedAt` | mk-go 独自 | pollEnded 通知の二重送信防止 |
 | `user_pending` | `invitationTicketId` | mk-go 独自 | 1 招待で複数アカウントを作れる gap を塞ぐ |
+| `user_pending` | `signupApplicationId` | mk-go 独自 | 承認制 (#2571) でメール確認を挟むときの申請 ID。確認完了まではアカウントが無いので申請を `completed` にできず、**紐付けが無いと申請が `approved` のまま残って 1 つの承認から複数アカウントを作れる**。`/api/signup-pending` が `PromotePending` の戻り値からこれを読んで申請を完了させる。TS は未知の列を無視するので drop-in の復路は壊れない |
 | `meta` | `signupApplicationForm` | mk-go 独自 | 承認制の申請フォームの定義 (#2570)。管理者が項目を決める jsonb 配列。上限は 10 項目 / ラベル 100 文字 / 回答 2000 文字で、**上限を置かないと管理者が自分で壊せる** (項目無制限で申請ページが使えなくなる、最大長無制限で 1 件の申請が DB を膨らませる)。壊れた JSON は空フォーム扱いにして申請ページを 500 で潰さない |
 | `meta` | `chunkedUploadEnabled` / `chunkedUploadChunkSizeMb` / `chunkedUploadSessionTtlMinutes` / `chunkedUploadMaxSessionsPerUser` / `chunkedUploadMaxPendingMbPerUser` | mk-go 独自 | 分割アップロード (#2313) の設定。既存の `objectStorage*` と同じくコントロールパネルから編集する。TS は未知の列を無視するので drop-in の復路は壊れない |
 

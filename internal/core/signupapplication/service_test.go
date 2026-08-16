@@ -237,6 +237,55 @@ func TestMarkCompleted(t *testing.T) {
 	})
 }
 
+// MarkTicket は承認済みのまま ticket だけを記録する (#2571)。**completed には
+// しない** — メール確認が終わるまでアカウントは無い。
+func TestMarkTicket(t *testing.T) {
+	svc, now := newService(t)
+
+	app, _, err := svc.Apply(testAnswers())
+	require.NoError(t, err)
+
+	t.Run("pending cannot record a ticket", func(t *testing.T) {
+		assert.ErrorIs(t, svc.MarkTicket(app.ID, "t1"), ErrNotApproved)
+	})
+
+	require.NoError(t, svc.Approve(app.ID, "mod1"))
+	require.NoError(t, svc.MarkTicket(app.ID, "t1"))
+
+	stored, err := svc.Get(app.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.SignupApplicationApproved, stored.Status, "承認済みのまま")
+	require.NotNil(t, stored.TicketID)
+	assert.Equal(t, "t1", *stored.TicketID)
+	assert.Nil(t, stored.UsedByID, "まだ誰も登録していない")
+
+	// やり直しで別の ticket に差し替わる。
+	require.NoError(t, svc.MarkTicket(app.ID, "t2"))
+	stored, err = svc.Get(app.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "t2", *stored.TicketID)
+
+	// 記録した後でも完了できる (確認メールの経路の終点)。
+	require.NoError(t, svc.MarkCompleted(app.ID, "u1", "t2"))
+	assert.ErrorIs(t, svc.MarkTicket(app.ID, "t3"), ErrNotApproved)
+
+	t.Run("not found", func(t *testing.T) {
+		assert.ErrorIs(t, svc.MarkTicket("no-such-id", "t1"), ErrNotFound)
+	})
+
+	t.Run("expired", func(t *testing.T) {
+		other, _, err := svc.Apply(testAnswers())
+		require.NoError(t, err)
+		require.NoError(t, svc.Approve(other.ID, "mod1"))
+		*now = now.Add(DefaultTTL)
+		assert.ErrorIs(t, svc.MarkTicket(other.ID, "t9"), ErrExpired)
+
+		expired, err := svc.Get(other.ID)
+		require.NoError(t, err)
+		assert.Equal(t, model.SignupApplicationExpired, expired.Status, "期限切れに落ちること")
+	})
+}
+
 func TestGet_NotFound(t *testing.T) {
 	svc, _ := newService(t)
 	_, err := svc.Get("no-such-id")
