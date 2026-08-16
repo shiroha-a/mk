@@ -305,3 +305,124 @@ func TestAssetsHandler_PathTraversalBlocked(t *testing.T) {
 	_, err := doAssetsRequest(h, "../../../etc/passwd")
 	assert.Equal(t, echo.ErrNotFound, err)
 }
+
+// **参照のままにすると loader の更新が閲覧側に届かない (#2551)。** 読めたものは
+// 埋め込み、読めなければ空を返して呼び出し側が URL 参照に落とす。
+func TestReadLoaderAssets(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "style.css"),
+		[]byte("#splash{opacity:1}"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "boot.js"),
+		[]byte("console.log('boot')"), 0o644))
+
+	got := readLoaderAssets(dir)
+	assert.Equal(t, "#splash{opacity:1}", got.CSS)
+	assert.Equal(t, "console.log('boot')", got.JS)
+}
+
+func TestReadLoaderAssets_MissingFilesYieldEmpty(t *testing.T) {
+	got := readLoaderAssets(t.TempDir())
+	assert.Empty(t, got.CSS)
+	assert.Empty(t, got.JS)
+}
+
+// **閉じタグに化ける並びは埋め込まない。** `<style>` / `<script>` の中身は
+// エスケープが効かず、`</script` ひとつで後続が HTML として解釈される。
+func TestReadInlinableAsset_RejectsTerminators(t *testing.T) {
+	dir := t.TempDir()
+	for name, body := range map[string]string{
+		"script.js":  `var a = "</script><img src=x onerror=alert(1)>"`,
+		"style.css":  `/* </style><script>alert(1)</script> */`,
+		"upper.js":   `var a = "</SCRIPT>"`,
+		"comment.js": `<!-- x`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := filepath.Join(dir, name)
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o644))
+			assert.Empty(t, readInlinableAsset(path), "埋め込まずに参照へ落とす")
+		})
+	}
+}
+
+// 読み込みは 1 回だけ。**再ビルド後は再起動が要る** (client entry と同じ前提)。
+func TestBootLoaderAssets_ReadsOnce(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "style.css"),
+		[]byte("first"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
+
+	first := BootLoaderAssets()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "style.css"),
+		[]byte("second"), 0o644))
+	assert.Equal(t, first, BootLoaderAssets(), "2 回目もキャッシュを返す")
+}
+
+func TestFrontendEmbedDir_Default(t *testing.T) {
+	t.Setenv("MISSKEY_FRONTEND_DIR", "")
+	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", "")
+	assert.Equal(t,
+		filepath.Join("third_party/misskey", "built", "_frontend_embed_vite_"),
+		FrontendEmbedDir())
+}
+
+func TestFrontendEmbedDir_EnvOverride(t *testing.T) {
+	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", "/custom/embed")
+	assert.Equal(t, "/custom/embed", FrontendEmbedDir())
+}
+
+// embed は通常の SPA とは別 build なので entry も別物 (#2389)。
+func TestDetectEmbedEntry(t *testing.T) {
+	t.Run("no manifest", func(t *testing.T) {
+		t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", t.TempDir())
+		info := DetectEmbedEntry()
+		assert.Empty(t, info.Script)
+	})
+
+	t.Run("valid manifest", func(t *testing.T) {
+		dir := t.TempDir()
+		t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", dir)
+		manifest := `{"src/boot.ts":{"file":"assets/embed.abc.js","isEntry":true,"css":["assets/embed.def.css"]}}`
+		require.NoError(t, os.WriteFile(
+			filepath.Join(dir, "manifest.json"), []byte(manifest), 0o644))
+
+		info := DetectEmbedEntry()
+		assert.Equal(t, "assets/embed.abc.js", info.Script)
+		assert.Equal(t, []string{"assets/embed.def.css"}, info.CSS)
+	})
+}
+
+// embed 側の loader も同じく 1 回だけ読む (#2551)。
+func TestEmbedLoaderAssets(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "boot.js"),
+		[]byte("embed-boot"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", dir)
+	ResetLoaderCacheForTest()
+
+	assert.Equal(t, "embed-boot", EmbedLoaderAssets().JS)
+	assert.Empty(t, EmbedLoaderAssets().CSS, "無いものは空のまま")
+}
+
+// **キャッシュを捨てられないと、ディレクトリを差し替える test 同士が干渉する。**
+func TestResetLoaderCacheForTest(t *testing.T) {
+	first := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(first, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(first, "loader", "style.css"),
+		[]byte("first"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_DIR", first)
+	ResetLoaderCacheForTest()
+	require.Equal(t, "first", BootLoaderAssets().CSS)
+
+	second := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(second, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(second, "loader", "style.css"),
+		[]byte("second"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_DIR", second)
+	assert.Equal(t, "first", BootLoaderAssets().CSS, "捨てるまではキャッシュのまま")
+
+	ResetLoaderCacheForTest()
+	assert.Equal(t, "second", BootLoaderAssets().CSS)
+}

@@ -233,6 +233,12 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, them
 		)
 	}
 
+	// SPA シェルと同じく loader は埋め込む (#2551)。embed も同じファイル名 (ハッシュ
+	// 無し) を参照していたので、同じ形で古い版が居座る。
+	loader := embedLoaderAssetsFor(h.cfg)
+	loaderCSSTag := inlineOrLinkCSS(loader.CSS, "/embed_vite/loader/style.css")
+	loaderJSTag := inlineOrLinkJS(loader.JS, "/embed_vite/loader/boot.js")
+
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -249,15 +255,14 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, them
 <link rel="icon" href="%s">
 <link rel="apple-touch-icon" href="%s">
 <title>%s</title>
-%s<link rel="stylesheet" href="/embed_vite/loader/style.css">
-<script>
+%s%s<script>
 const VERSION = "%s";
 const CLIENT_ENTRY = %s;
 const LANGS = ["ja-JP","en-US"];
 </script>
 %s
 %s
-<script src="/embed_vite/loader/boot.js"></script>
+%s
 </head>
 <body>
 <noscript><p>JavaScriptを有効にしてください<br>Please turn on your JavaScript</p></noscript>
@@ -270,10 +275,12 @@ const LANGS = ["ja-JP","en-US"];
 		html.EscapeString(appleTouchIconURL),
 		html.EscapeString(instanceName),
 		head.String(),
+		loaderCSSTag,
 		html.EscapeString(h.cfg.Version),
 		clientEntry,
 		metaBlock,
 		ctxBlock,
+		loaderJSTag,
 	)
 }
 

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 )
@@ -241,4 +243,78 @@ func AssetsHandler(primary, fallback string) echo.HandlerFunc {
 		}
 		return echo.ErrNotFound
 	}
+}
+
+// LoaderAssets holds the bootloader CSS / JS that upstream inlines into the
+// HTML shell (`HtmlTemplateService.prepareFrontendAssets`).
+type LoaderAssets struct {
+	CSS string
+	JS  string
+}
+
+var (
+	loaderOnce       sync.Once
+	loaderCache      LoaderAssets
+	embedLoaderOnce  sync.Once
+	embedLoaderCache LoaderAssets
+)
+
+// BootLoaderAssets returns the SPA bootloader assets, read once per process.
+//
+// **参照のままにすると loader の更新が閲覧側に届かない (#2551)。**
+// `loader/style.css` と `loader/boot.js` はファイル名にハッシュが付かないので、
+// 内容を変えても URL が変わらない。CDN を挟むと HTML だけが新しくなり、
+// 「新しいマークアップに古い CSS が当たる」状態で表示が壊れる。
+//
+// 読み込みは 1 回だけ。**再ビルド後は再起動が要る**が、これは client entry
+// (DetectClientEntry) が既にそうなので前提は変わらない。
+func BootLoaderAssets() LoaderAssets {
+	loaderOnce.Do(func() { loaderCache = readLoaderAssets(FrontendDir()) })
+	return loaderCache
+}
+
+// EmbedLoaderAssets is BootLoaderAssets for the embed bundle.
+func EmbedLoaderAssets() LoaderAssets {
+	embedLoaderOnce.Do(func() { embedLoaderCache = readLoaderAssets(FrontendEmbedDir()) })
+	return embedLoaderCache
+}
+
+func readLoaderAssets(dir string) LoaderAssets {
+	return LoaderAssets{
+		CSS: readInlinableAsset(filepath.Join(dir, "loader", "style.css")),
+		JS:  readInlinableAsset(filepath.Join(dir, "loader", "boot.js")),
+	}
+}
+
+// readInlinableAsset reads a file that will be pasted verbatim into a
+// `<style>` / `<script>` element. 読めなければ空文字を返し、呼び出し側は
+// 従来どおり URL 参照に落とす。
+//
+// **閉じタグに化ける並びを含むものは埋め込まない。** `<style>` / `<script>` の
+// 中身はエスケープが効かず、`</script` ひとつで後続が HTML として解釈される。
+// 自前のビルド成果物とはいえ、埋め込む先が生テキストである以上ここで見る。
+func readInlinableAsset(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	s := string(b)
+	lower := strings.ToLower(s)
+	for _, bad := range []string{"</script", "</style", "<!--"} {
+		if strings.Contains(lower, bad) {
+			return ""
+		}
+	}
+	return s
+}
+
+// ResetLoaderCacheForTest clears the once-per-process loader cache.
+//
+// 本番では使わない。**キャッシュは意図的に 1 回きり**なので、環境変数で
+// ディレクトリを差し替える test 同士が干渉しないよう明示的に捨てる口だけ出す。
+func ResetLoaderCacheForTest() {
+	loaderOnce = sync.Once{}
+	embedLoaderOnce = sync.Once{}
+	loaderCache = LoaderAssets{}
+	embedLoaderCache = LoaderAssets{}
 }

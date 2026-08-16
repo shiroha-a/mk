@@ -63,3 +63,24 @@ func logDevModeBanner(cfg *config.Config) {
 		"embedDevServer", viteEmbedDevServerURL,
 		"注意", "本番では無効にしてください (dev server が無いと frontend が配信されません)")
 }
+
+// loaderAssetsFor returns the bootloader assets to inline into the SPA shell.
+//
+// **dev では埋め込まない (#2477 と同じ理由)。** ビルド成果物が残っているだけの
+// 状態で埋め込むと、dev server が返す新しい loader ではなく古い built を読んで
+// しまう。空を返せば描画側は従来どおり `/vite/loader/*` を参照し、それが dev
+// server にプロキシされる。
+func loaderAssetsFor(cfg *config.Config) frontendutil.LoaderAssets {
+	if isDev(cfg) {
+		return frontendutil.LoaderAssets{}
+	}
+	return frontendutil.BootLoaderAssets()
+}
+
+// embedLoaderAssetsFor is loaderAssetsFor for the embed bundle.
+func embedLoaderAssetsFor(cfg *config.Config) frontendutil.LoaderAssets {
+	if isDev(cfg) {
+		return frontendutil.LoaderAssets{}
+	}
+	return frontendutil.EmbedLoaderAssets()
+}

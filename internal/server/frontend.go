@@ -308,6 +308,14 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 			`<meta name="twitter:card" content="summary">` + "\n"
 	}
 
+	// loader は URL 参照ではなく埋め込む (#2551)。ファイル名にハッシュが付かない
+	// ので、参照のままだと内容を変えても URL が変わらず、CDN の手前で古い版が
+	// 居座る。HTML だけが新しくなると「新しいマークアップに古い CSS が当たる」
+	// 状態になり、スプラッシュが静止したまま表示されなくなる。
+	loader := loaderAssetsFor(cfg)
+	loaderCSSTag := inlineOrLinkCSS(loader.CSS, "/vite/loader/style.css")
+	loaderJSTag := inlineOrLinkJS(loader.JS, "/vite/loader/boot.js")
+
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
@@ -327,11 +335,10 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 %s%s
 %s
 %s
-<link rel="stylesheet" href="/vite/loader/style.css">
-<style>:root{--splash-color:%s}</style>
+%s<style>:root{--splash-color:%s}</style>
 <script>const VERSION = '%s'; const CLIENT_ENTRY = %s; const LANGS = ["ja-JP","en-US"];</script>
 <script type="application/json" id="misskey_meta" data-generated-at="%d">%s</script>
-<script src="/vite/loader/boot.js"></script>
+%s
 </head><body>
 <noscript><p>Please turn on your JavaScript</p></noscript>
 <div id="splash">
@@ -344,8 +351,9 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		pageTitleEsc, noindexTag, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
 		pageTitleEsc, baseURLEsc,
 		prefetchTags, ov.OG+ov.Head, viteClientTag, cssLinkTags,
-		splashColor(themeColor), cfg.Version, clientEntryJS,
-		time.Now().UnixMilli(), metaJSON, stdhtml.EscapeString(splashIconURL), splashSpinnerSVG)
+		loaderCSSTag, splashColor(themeColor), cfg.Version, clientEntryJS,
+		time.Now().UnixMilli(), metaJSON, loaderJSTag,
+		stdhtml.EscapeString(splashIconURL), splashSpinnerSVG)
 
 	// SPA shell にだけ CSP を付ける (#2425)。shell を返す経路は catch-all と
 	// AP の non-AP fallback の 2 つで、どちらもこの関数を通るので path 判定が
@@ -696,4 +704,23 @@ func ssrJSONArray(raw datatypes.JSON) any {
 		return []any{}
 	}
 	return out
+}
+
+// inlineOrLinkCSS renders the bootloader stylesheet, falling back to a URL
+// reference when the file could not be read (#2551)。
+//
+// upstream base.tsx も同じ形で、読めたときだけ `<style>` に落とす。
+func inlineOrLinkCSS(css, href string) string {
+	if css == "" {
+		return fmt.Sprintf(`<link rel="stylesheet" href="%s">`, href) + "\n"
+	}
+	return "<style>" + css + "</style>\n"
+}
+
+// inlineOrLinkJS is inlineOrLinkCSS for the bootloader script.
+func inlineOrLinkJS(js, src string) string {
+	if js == "" {
+		return fmt.Sprintf(`<script src="%s"></script>`, src)
+	}
+	return "<script>" + js + "</script>"
 }

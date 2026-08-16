@@ -3,11 +3,14 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/frontendutil"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -159,4 +162,48 @@ func TestEmbedShell_IconLinks(t *testing.T) {
 		assert.Contains(t, body, `<link rel="icon" href="`+icon+`">`)
 		assert.Contains(t, body, `<link rel="apple-touch-icon" href="`+appIcon+`">`)
 	})
+}
+
+// embed も SPA シェルと同じく loader を埋め込む (#2551)。同じファイル名 (ハッシュ
+// 無し) を参照していたので、同じ形で古い版が居座る。
+func TestEmbedShell_InlinesLoaderAssets(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "style.css"),
+		[]byte("#embed{--marker:inlined-embed-css}"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "boot.js"),
+		[]byte("window.__markerEmbedJs = 1;"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", dir)
+	frontendutil.ResetLoaderCacheForTest()
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	h := &embedHandlers{cfg: cfg, metaRepo: testutil.NewMockMetaRepository()}
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/embed/notes/x", nil), rec)
+	require.NoError(t, h.render(c, nil))
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "#embed{--marker:inlined-embed-css}")
+	assert.Contains(t, body, "window.__markerEmbedJs = 1;")
+	assert.NotContains(t, body, `href="/embed_vite/loader/style.css"`)
+	assert.NotContains(t, body, `src="/embed_vite/loader/boot.js"`)
+}
+
+func TestEmbedShell_FallsBackToLoaderReferences(t *testing.T) {
+	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", t.TempDir())
+	frontendutil.ResetLoaderCacheForTest()
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	h := &embedHandlers{cfg: cfg, metaRepo: testutil.NewMockMetaRepository()}
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/embed/notes/x", nil), rec)
+	require.NoError(t, h.render(c, nil))
+
+	body := rec.Body.String()
+	assert.Contains(t, body, `<link rel="stylesheet" href="/embed_vite/loader/style.css">`)
+	assert.Contains(t, body, `<script src="/embed_vite/loader/boot.js"></script>`)
 }

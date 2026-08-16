@@ -5,6 +5,8 @@ import (
 	"html"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -852,4 +854,76 @@ func TestFrontendHTML_SplashColor(t *testing.T) {
 		require.NotEmpty(t, style, "splash color style block not found")
 		assert.Equal(t, `<style>:root{--splash-color:#86b300}</style>`, style)
 	})
+}
+
+// **loader は URL 参照ではなく埋め込む (#2551)。** ファイル名にハッシュが付かない
+// ので、参照のままだと内容を変えても URL が変わらず、CDN の手前で古い版が居座る。
+// HTML だけが新しくなると「新しいマークアップに古い CSS が当たる」状態になり、
+// スプラッシュが静止したまま表示されなくなる (#2549 で実際に踏んだ)。
+func TestFrontendHTML_InlinesLoaderAssets(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "style.css"),
+		[]byte("#splash{--marker:inlined-css}"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "boot.js"),
+		[]byte("window.__markerInlinedJs = 1;"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
+	frontendutil.ResetLoaderCacheForTest()
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	require.NoError(t, handler(c))
+
+	body := rec.Body.String()
+	assert.Contains(t, body, "#splash{--marker:inlined-css}")
+	assert.Contains(t, body, "window.__markerInlinedJs = 1;")
+	// 参照が残っていると、埋め込みと二重に読むうえ古い版が当たる余地が残る。
+	assert.NotContains(t, body, `href="/vite/loader/style.css"`)
+	assert.NotContains(t, body, `src="/vite/loader/boot.js"`)
+}
+
+// 読めなければ従来どおり参照に落とす。**ここが落ちると loader を一切読まない
+// シェルになり、スプラッシュどころか起動しない。**
+func TestFrontendHTML_FallsBackToLoaderReferences(t *testing.T) {
+	t.Setenv("MISSKEY_FRONTEND_DIR", t.TempDir())
+	frontendutil.ResetLoaderCacheForTest()
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	require.NoError(t, handler(c))
+
+	body := rec.Body.String()
+	assert.Contains(t, body, `<link rel="stylesheet" href="/vite/loader/style.css">`)
+	assert.Contains(t, body, `<script src="/vite/loader/boot.js"></script>`)
+}
+
+// **dev では埋め込まない (#2477 と同じ理由)。** ビルド成果物が残っているだけの
+// 状態で埋め込むと、dev server が返す新しい loader ではなく古い built を読む。
+func TestFrontendHTML_DevModeKeepsReferences(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "style.css"),
+		[]byte("#splash{--marker:stale}"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
+	frontendutil.ResetLoaderCacheForTest()
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test", Dev: true}
+	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	require.NoError(t, handler(c))
+
+	body := rec.Body.String()
+	assert.NotContains(t, body, "--marker:stale", "古い built を埋め込まない")
+	assert.Contains(t, body, `href="/vite/loader/style.css"`)
 }
