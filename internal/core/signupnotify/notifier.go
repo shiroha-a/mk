@@ -128,6 +128,12 @@ func (n *Notifier) text(app *model.SignupApplication, target *model.User, approv
 		}
 	} else {
 		b.WriteString("登録の申請は承認されませんでした。\n")
+		// **どのサーバーからの通知か分かるようにする。** 送信元アカウントの
+		// ホストからも辿れるが、却下の連絡は文面だけで完結している方がよい。
+		if n.publicURL != "" {
+			b.WriteString(strings.TrimSuffix(n.publicURL, "/"))
+			b.WriteString("\n")
+		}
 	}
 	return b.String()
 }

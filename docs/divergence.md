@@ -107,7 +107,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | テーブル | カラム | 由来 | 理由 |
 |---|---|---|---|
 | `chat_message` | `emojis` / `isDelivering` / `isDeliverFailed` | cherrypick | 連合配送の状態追跡 |
-| `meta` | `approvalRequiredForSignup` | mk-go 独自 | 承認制の登録 (#2554) の有効化。**単体では登録を止めない** — 実際のゲートは `disableRegistration` + 招待コードで、承認は内部で `registration_ticket` を発行して通す。TS はこの列を認識しないので、TS へ戻すと承認制が単に無効になる (既存の挙動に戻るだけで壊れない) |
+| `meta` | `approvalRequiredForSignup` | mk-go 独自 | 承認制の登録 (#2554) の有効化。**これ自体がゲート**で、有効時は `/api/signup` を 403 で閉じる (#2557)。`disableRegistration` と組み合わせる運用にすると、訪問者には「招待制」と表示されて実態と食い違う。承認フローは signup service を直接呼ぶのでこの分岐を通らない。TS はこの列を認識しないので、TS へ戻すと承認制が単に無効になる (登録が開くので、切り替え前に `disableRegistration` を検討すること) |
 | `user` | `isRoot` | mk-go 独自 | upstream は system_account 移行で DROP 済み。`role.Service.isRootUser` の fallback に必要 |
 | `meta` | `proxyAccountId` | mk-go 独自 | 同じく upstream は DROP 済み。`admin/update-proxy-account` が書き込む |
 | `note_favorite` | `createdAt` | mk-go 独自 | upstream は `deleteCreatedAt` で DROP 済み。`/api/i/favorites` の response 要件で復活 |

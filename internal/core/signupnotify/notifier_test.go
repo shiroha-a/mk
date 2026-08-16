@@ -108,6 +108,8 @@ func TestSend_Rejected(t *testing.T) {
 	assert.NotContains(t, body, "理由")
 	// 却下なのに登録ページへ誘導しない。
 	assert.NotContains(t, body, "/signup-application")
+	// **どのサーバーからの通知か分かるようにする。**
+	assert.Contains(t, body, "https://mk.example")
 }
 
 // **秘密は載せない。** 登録 URL も招待コードも要らない — 申請者は登録ページで

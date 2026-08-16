@@ -170,6 +170,16 @@ func (h *Handler) Signup(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
+	// 承認制のときは通常の登録経路を閉じる (#2557)。
+	//
+	// **承認制それ自体がゲート。** disableRegistration と組み合わせる運用にすると、
+	// 訪問者には「招待制」と表示されてしまい実態と食い違う。承認フローは
+	// signupService を直接呼ぶのでこの分岐を通らない。
+	if !h.testMode && meta.ApprovalRequiredForSignup {
+		return c.JSON(http.StatusForbidden,
+			apierr.Error("APPROVAL_REQUIRED", "This server requires an approved application to sign up.", "5b6c7d8e-9f0a-4b1c-8d2e-3f4a5b6c7d8e"))
+	}
+
 	// 登録無効時はinvitation code必須 (テストモードではバイパス — 本家 TS 互換)
 	var ticket *model.RegistrationTicket
 	if !h.testMode && meta.DisableRegistration {

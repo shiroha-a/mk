@@ -689,3 +689,35 @@ func TestApplicationCallbackAndName(t *testing.T) {
 	assert.Equal(t, name, u.Query().Get("name"))
 	assert.Contains(t, u.Query().Get("callback"), "/signup-application/callback")
 }
+
+// 承認制のときは通常の登録経路を閉じる (#2557)。
+//
+// **承認制それ自体がゲート。** disableRegistration と組み合わせる運用にすると、
+// 訪問者には「招待制」と表示されてしまい実態と食い違う。
+func TestSignup_BlockedWhileApprovalRequired(t *testing.T) {
+	h, _, metaRepo := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x", ApprovalRequiredForSignup: true}
+
+	rec := doPost(h.Signup, `{"username":"newbie","password":"hunter22"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "APPROVAL_REQUIRED")
+}
+
+// 承認フローは signupService を直接呼ぶので、このゲートを通らないこと。
+func TestApplicationRegister_NotBlockedByTheSignupGate(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	token := env.verifiedToken(t)
+	env.apps.current = &model.SignupApplication{ID: "app-1", Status: model.SignupApplicationApproved}
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"token":"`+token+`","username":"newbie","password":"hunter22"}`)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+func TestSignup_AllowedWhenApprovalIsOff(t *testing.T) {
+	h, _, metaRepo := newTestHandler(t)
+	metaRepo.Meta = &model.Meta{ID: "x", ApprovalRequiredForSignup: false}
+
+	rec := doPost(h.Signup, `{"username":"newbie","password":"hunter22"}`)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
