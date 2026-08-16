@@ -217,9 +217,14 @@ func (r *Resolver) dropSupersededEphemeral(uri, visibility string, author *model
 //     これが無いと投稿ごとに別 ID を採番して同一人物が別人として並ぶ
 //  3. どちらにも無ければ通常の ResolveActor で解決する。DB 行は作られるが、
 //     ephemeral な著者を作る経路は Phase 2 (materialize) で扱う
-func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool) (*model.User, error) {
+func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool, depth int) (*model.User, error) {
 	if !ephemeral || r.ephemeralSink == nil {
-		return r.ResolveActor(uri)
+		// depth > 0 は「既にノート解決の内側に居る」ことを意味する。ここで
+		// featured を引くと、ピン留め → 引用先 → その著者 → その featured …
+		// と入れ子になり、1 段ごとに 5 分岐する取得の連鎖になる (#2552)。
+		// 入口が depth 0 なので、通常の配送で著者を初めて観測する経路は
+		// これまでどおり featured を引く。
+		return r.resolveActor(uri, false, depth > 0)
 	}
 	if existing, err := r.userRepo.FindByURI(uri); err == nil && existing != nil {
 		return existing, nil
@@ -245,7 +250,8 @@ func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool) (*model.User, e
 // 混ざると片方が意図しない層へ書かれるため (note 側と同じ理由)。
 func (r *Resolver) resolveActorEphemeral(uri string) (*model.User, error) {
 	v, err, _ := r.resolveActorGroup.Do("eph\x00"+crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, "", true, false)
+		// ephemeral な行は DB に載らないので featured の取り込み対象外。
+		return r.resolveActorOnceWithID(uri, false, "", true, false, true)
 	})
 	if err != nil {
 		return nil, err
@@ -318,16 +324,20 @@ type Resolver struct {
 	// moveProcessor はリモートアカウント移行の検知時に呼ぶ引き継ぎ処理
 	// (#2414)。実体は core/move.Service。nil なら移行を検知しても何もしない。
 	moveProcessor      RemoteMoveProcessor
-	instanceTracker    InstanceTracker                // optional: ホスト発見を通知
-	chartHook          ChartHook                      // optional: 新規 remote user の集計
-	hashtagHook        HashtagHook                    // optional: per-tag mentionedUsersCount 集計 (#680)
-	publickeyRepo      PublickeyStore                 // optional: 公開鍵の永続化 (RSA)
-	publickeyExtraRepo PublickeyExtraStore            // optional: 追加公開鍵 (Ed25519 / Multikey) の永続化
-	capabilities       SignatureCapabilityDeclarer    // optional: Ed25519 対応宣言の記録 (#2393)
-	pollRepo           repository.PollRepository      // optional: Question(投票)のPoll作成
-	pollVoter          PollVoter                      // optional: AP vote (Note.name) の投票記録
-	emojiRepo          repository.EmojiRepository     // optional: リモート絵文字の永続化
-	driveFileRepo      repository.DriveFileRepository // optional: リモート添付の link 化
+	instanceTracker    InstanceTracker             // optional: ホスト発見を通知
+	chartHook          ChartHook                   // optional: 新規 remote user の集計
+	hashtagHook        HashtagHook                 // optional: per-tag mentionedUsersCount 集計 (#680)
+	publickeyRepo      PublickeyStore              // optional: 公開鍵の永続化 (RSA)
+	publickeyExtraRepo PublickeyExtraStore         // optional: 追加公開鍵 (Ed25519 / Multikey) の永続化
+	capabilities       SignatureCapabilityDeclarer // optional: Ed25519 対応宣言の記録 (#2393)
+	pollRepo           repository.PollRepository   // optional: Question(投票)のPoll作成
+	// pinningRepo / pinningIDGen はリモート actor の featured コレクション
+	// (ピン留め投稿) の取り込み先 (#2552)。未配線なら取り込まない。
+	pinningRepo   repository.UserNotePiningRepository
+	pinningIDGen  id.Generator
+	pollVoter     PollVoter                      // optional: AP vote (Note.name) の投票記録
+	emojiRepo     repository.EmojiRepository     // optional: リモート絵文字の永続化
+	driveFileRepo repository.DriveFileRepository // optional: リモート添付の link 化
 	// imageProbeClient は image attachment の dimension probe (#461) で
 	// 使う outbound HTTP client。SSRF-safe transport (router.go で
 	// safehttp.NewSSRFSafeTransport を適用したもの) を渡す前提で、
@@ -455,6 +465,13 @@ func (r *Resolver) SetPollRepo(repo repository.PollRepository) {
 	r.pollRepo = repo
 }
 
+// SetPinningRepo wires the pinned-notes store used to import a remote actor's
+// featured collection (#2552). 未配線なら featured の取り込み自体を行わない。
+func (r *Resolver) SetPinningRepo(repo repository.UserNotePiningRepository, idGen id.Generator) {
+	r.pinningRepo = repo
+	r.pinningIDGen = idGen
+}
+
 // PollVoter records a poll vote on behalf of a remote actor when an
 // inbound AP Note carries `name` + `inReplyTo` to a poll-bearing note
 // (Misskey TS の vote AP wire format)。実装は core/poll.Service。循環依存
@@ -569,7 +586,7 @@ func (r *Resolver) PublicKeyForActor(actorID string) (string, error) {
 // が actorTTL を超えていたら fetch しなおして name / inbox / sharedInbox /
 // publicKey を更新する。fetch 失敗時はベストエフォートで既存値を返す。
 func (r *Resolver) ResolveActor(uri string) (*model.User, error) {
-	return r.resolveActor(uri, false)
+	return r.resolveActor(uri, false, false)
 }
 
 // ResolveActorAllowCrossHost is ResolveActor for user-initiated lookups
@@ -578,7 +595,7 @@ func (r *Resolver) ResolveActor(uri string) (*model.User, error) {
 // attacker 制御でないため cross-host redirect を許容する。finalURL ↔ id binding は
 // 引き続き適用される。
 func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
-	return r.resolveActor(uri, true)
+	return r.resolveActor(uri, true, false)
 }
 
 // resolveActor is ResolveActor carrying the cross-host-allowed flag (#1828)。
@@ -591,7 +608,7 @@ func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
 // して **ミュートしたのにタイムラインから消えない** 状態が TTL 切れまで続く。
 func (r *Resolver) resolveActorWithID(uri, preassignedID string) (*model.User, error) {
 	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, preassignedID, false, false)
+		return r.resolveActorOnceWithID(uri, false, preassignedID, false, false, false)
 	})
 	if err != nil {
 		return nil, err
@@ -602,13 +619,13 @@ func (r *Resolver) resolveActorWithID(uri, preassignedID string) (*model.User, e
 	return v.(*model.User), nil
 }
 
-func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, error) {
+func (r *Resolver) resolveActor(uri string, allowCrossHost, skipFeatured bool) (*model.User, error) {
 	// 同一 URI への並行呼び出しは singleflight で 1 つに collapse する
 	// (#300 3-7)。cache hit 経路は微秒なので serialize の影響は無視でき、
 	// cold な fetch + Create で発生する HTTP fan-out + UNIQUE 衝突を抑える
 	// 効果が大きい。
-	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, allowCrossHost), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, allowCrossHost, "", false, false)
+	v, err, _ := r.resolveActorGroup.Do(actorGroupKey(uri, allowCrossHost, skipFeatured), func() (any, error) {
+		return r.resolveActorOnceWithID(uri, allowCrossHost, "", false, false, skipFeatured)
 	})
 	if err != nil {
 		return nil, err
@@ -621,7 +638,7 @@ func (r *Resolver) resolveActor(uri string, allowCrossHost bool) (*model.User, e
 
 // resolveActorOnce is the body of resolveActor, invoked once per URI by
 // singleflight.Do.
-func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string, ephemeral, viaRelay bool) (*model.User, error) {
+func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string, ephemeral, viaRelay, skipFeatured bool) (*model.User, error) {
 	// fragment 付き URL は HTTP(S) で fragment が送られず正しく解決できないため
 	// 拒否する (本家 Resolver の b94fd5b1 guard、#1828)。keyId fragment は
 	// ResolveActorByKeyID -> ResolveKeyURL で除去済みなのでここには来ない。
@@ -630,7 +647,7 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	}
 	if existing, err := r.userRepo.FindByURI(uri); err == nil {
 		if r.shouldRefreshActor(existing) {
-			r.refreshActor(existing, uri)
+			r.refreshActor(existing, uri, skipFeatured)
 		} else {
 			r.keysMu.RLock()
 			_, cached := r.keys[existing.ID]
@@ -773,6 +790,12 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	if r.chartHook != nil {
 		r.chartHook.OnRemoteUserCreated(user)
 	}
+	// 観測を始めた時点で既にピン留めされていた投稿を取り込む (#2552)。inbound の
+	// Add はピン留めされた瞬間にしか飛んで来ないので、これが無いと観測より前の
+	// ピン留めは永久に拾えない。
+	if !skipFeatured && !ephemeral {
+		r.updateFeatured(user)
+	}
 	return user, nil
 }
 
@@ -812,7 +835,7 @@ func extractRemoteDescription(actor *activitypub.Person) *string {
 // bypassing the TTL cache. Move activityなどプロフィール更新が確実に必要な場合に使う。
 func (r *Resolver) ForceResolveActor(uri string) (*model.User, error) {
 	if existing, err := r.userRepo.FindByURI(uri); err == nil {
-		r.refreshActor(existing, uri)
+		r.refreshActor(existing, uri, false)
 		return existing, nil
 	}
 	return r.ResolveActor(uri)
@@ -839,7 +862,7 @@ func (r *Resolver) shouldRefreshActor(u *model.User) bool {
 // refreshActor refetches the remote actor document and updates mutable fields
 // on the local user row. 失敗してもエラーは返さず (呼び出し側はベストエフォート
 // で既存値を使う)、ログは呼び出し元側で残す。
-func (r *Resolver) refreshActor(existing *model.User, uri string) {
+func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured bool) {
 	// background refresh は federation-loop 扱いで Strict (request host binding 有効)。
 	actor, err := r.fetchActor(uri, false)
 	if err != nil {
@@ -989,6 +1012,11 @@ func (r *Resolver) refreshActor(existing *model.User, uri string) {
 	// 引き継ぎ処理が movedToUri の永続化済みを前提にするため。
 	if movedThisRefresh {
 		r.processRemoteMove(existing, prevMovedAt, nil)
+	}
+	// 既に観測済みのユーザーはここでピン留めが埋まる (#2552)。actor の TTL が
+	// 切れるたびに引き直すので、featured を後から公開した相手にも追従する。
+	if !skipFeatured {
+		r.updateFeatured(existing)
 	}
 }
 
@@ -1411,7 +1439,7 @@ func (r *Resolver) ResolveNoteEphemeral(uri string) (*model.Note, error) {
 // スレッド遡りで解決された行を巻き込まないため。
 func (r *Resolver) ResolveActorViaRelay(uri string) (*model.User, error) {
 	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, "", false, true)
+		return r.resolveActorOnceWithID(uri, false, "", false, true, false)
 	})
 	if err != nil {
 		return nil, err
@@ -1428,7 +1456,7 @@ func (r *Resolver) ResolveActorEphemeral(uri string) (*model.User, error) {
 	if r.ephemeralSink == nil || !r.ephemeralSink.Enabled() {
 		return r.ResolveActor(uri)
 	}
-	return r.resolveNoteAuthor(uri, true)
+	return r.resolveNoteAuthor(uri, true, 0)
 }
 
 // IngestNoteEphemeral is IngestNoteWithCreated for relay-forwarded Create
@@ -1709,7 +1737,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if !r.hostAllowedForURI(apNote.AttributedTo) {
 		return nil, false, ErrHostNotAllowed
 	}
-	actor, err := r.resolveNoteAuthor(apNote.AttributedTo, ephemeral)
+	actor, err := r.resolveNoteAuthor(apNote.AttributedTo, ephemeral, depth)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2796,6 +2824,18 @@ func pickID(preassigned string, gen id.Generator, now time.Time) string {
 		return preassigned
 	}
 	return gen.Generate(now)
+}
+
+// actorGroupKey extends crossHostKey with the skip-featured flag.
+//
+// **キーに混ぜないと再帰の抑止が破れる。** singleflight は同じキーの呼び出しを
+// 1 つに畳むので、featured を引く呼び出しと引かない呼び出しが合流すると、
+// ノート解決の内側から featured の取り込みが走りうる (#2552)。
+func actorGroupKey(uri string, allowCrossHost, skipFeatured bool) string {
+	if skipFeatured {
+		return "nofeat\x00" + crossHostKey(uri, allowCrossHost)
+	}
+	return crossHostKey(uri, allowCrossHost)
 }
 
 func crossHostKey(uri string, allowCrossHost bool) string {

@@ -3025,6 +3025,9 @@ func (m *MockAccessTokenRepository) DeleteByID(id string) error {
 // MockUserNotePiningRepository is a test double for repository.UserNotePiningRepository.
 type MockUserNotePiningRepository struct {
 	Pinings map[string]*model.UserNotePining // keyed by ID
+	// ReplaceErr forces ReplaceByUser to fail, for exercising the
+	// best-effort paths that must not abort actor resolution.
+	ReplaceErr error
 }
 
 func NewMockUserNotePiningRepository() *MockUserNotePiningRepository {
@@ -3062,6 +3065,21 @@ func (m *MockUserNotePiningRepository) ListByUser(userID string) ([]*model.UserN
 	// 備える。
 	sort.Slice(rows, func(i, j int) bool { return rows[i].ID > rows[j].ID })
 	return rows, nil
+}
+
+func (m *MockUserNotePiningRepository) ReplaceByUser(userID string, pins []*model.UserNotePining) error {
+	if m.ReplaceErr != nil {
+		return m.ReplaceErr
+	}
+	for key, p := range m.Pinings {
+		if p.UserID == userID {
+			delete(m.Pinings, key)
+		}
+	}
+	for _, p := range pins {
+		m.Pinings[p.ID] = p
+	}
+	return nil
 }
 
 func (m *MockUserNotePiningRepository) CountByUser(userID string) (int, error) {

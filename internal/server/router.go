@@ -703,6 +703,10 @@ func (s *Server) setupRoutes() {
 	// user_publickey_extra に persist する (#1067 / #1070)。
 	federationResolver.SetPublickeyExtraRepo(repository.NewUserPublickeyExtraRepository(s.db))
 	federationResolver.SetPollRepo(pollRepo)
+	// リモート actor の featured コレクション (ピン留め投稿) を取り込む (#2552)。
+	// inbound の Add (processor 側) はピン留めされた瞬間にしか飛んで来ないので、
+	// 観測より前からのピン留めはこちらでしか拾えない。
+	federationResolver.SetPinningRepo(piningRepo, idGen)
 	// AP vote (Note.name + inReplyTo to a poll) を local poll service に
 	// 流して投票として記録する (#690)。これがないとリモートからの投票が
 	// 通常 reply として扱われ frontend に DM のように表示される。

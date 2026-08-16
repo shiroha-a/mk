@@ -96,3 +96,72 @@ func TestUserNotePiningRepository_QueryErrors(t *testing.T) {
 	_, err = repo.CountByUser("a")
 	assert.Error(t, err)
 }
+
+// リモートの featured を取り込む経路は差分更新ではなく全置換にする (#2552)。
+// **差分にすると、リモート側で外されたピンがこちらに残り続ける。**
+func TestUserNotePiningRepository_ReplaceByUser(t *testing.T) {
+	repo := NewUserNotePiningRepository(testDB)
+	user := insertTestUser(t, "u_pin_rep", "pinrepuser")
+	defer cleanupUser(t, user.ID)
+	stale := insertTestNote(t, "n_pin_rep_stale", user.ID)
+	fresh1 := insertTestNote(t, "n_pin_rep_1", user.ID)
+	fresh2 := insertTestNote(t, "n_pin_rep_2", user.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, user.ID)
+	defer testDB.Exec(`DELETE FROM "user_note_pining" WHERE "userId" = ?`, user.ID)
+
+	require.NoError(t, repo.Create(&model.UserNotePining{
+		ID: "pin_rep_stale", UserID: user.ID, NoteID: stale.ID,
+	}))
+
+	require.NoError(t, repo.ReplaceByUser(user.ID, []*model.UserNotePining{
+		{ID: "pin_rep_b", UserID: user.ID, NoteID: fresh1.ID},
+		{ID: "pin_rep_a", UserID: user.ID, NoteID: fresh2.ID},
+	}))
+
+	rows, err := repo.ListByUser(user.ID)
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "置換前のピンが残らないこと")
+	// ListByUser は id の降順。取り込み側はこの順序に載せて並びを表現する。
+	assert.Equal(t, "pin_rep_b", rows[0].ID)
+	assert.Equal(t, "pin_rep_a", rows[1].ID)
+}
+
+// 空で置換するとピンが全部消えること (リモートが全部外した場合)。
+func TestUserNotePiningRepository_ReplaceByUser_Empty(t *testing.T) {
+	repo := NewUserNotePiningRepository(testDB)
+	user := insertTestUser(t, "u_pin_rep_e", "pinrepempty")
+	defer cleanupUser(t, user.ID)
+	note := insertTestNote(t, "n_pin_rep_e", user.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, user.ID)
+	defer testDB.Exec(`DELETE FROM "user_note_pining" WHERE "userId" = ?`, user.ID)
+
+	require.NoError(t, repo.Create(&model.UserNotePining{
+		ID: "pin_rep_e", UserID: user.ID, NoteID: note.ID,
+	}))
+	require.NoError(t, repo.ReplaceByUser(user.ID, nil))
+
+	count, err := repo.CountByUser(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+// 他のユーザーのピンを巻き込まないこと。
+func TestUserNotePiningRepository_ReplaceByUser_ScopedToUser(t *testing.T) {
+	repo := NewUserNotePiningRepository(testDB)
+	mine := insertTestUser(t, "u_pin_rep_m", "pinrepmine")
+	defer cleanupUser(t, mine.ID)
+	other := insertTestUser(t, "u_pin_rep_o", "pinrepother")
+	defer cleanupUser(t, other.ID)
+	otherNote := insertTestNote(t, "n_pin_rep_o", other.ID)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" IN (?, ?)`, mine.ID, other.ID)
+	defer testDB.Exec(`DELETE FROM "user_note_pining" WHERE "userId" IN (?, ?)`, mine.ID, other.ID)
+
+	require.NoError(t, repo.Create(&model.UserNotePining{
+		ID: "pin_rep_o", UserID: other.ID, NoteID: otherNote.ID,
+	}))
+	require.NoError(t, repo.ReplaceByUser(mine.ID, nil))
+
+	count, err := repo.CountByUser(other.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "他ユーザーのピンは残ること")
+}

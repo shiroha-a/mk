@@ -12,6 +12,12 @@ type UserNotePiningRepository interface {
 	FindByPair(userID, noteID string) (*model.UserNotePining, error)
 	ListByUser(userID string) ([]*model.UserNotePining, error)
 	CountByUser(userID string) (int, error)
+	// ReplaceByUser swaps every pin of userID for pins in one transaction.
+	//
+	// リモートの featured コレクションを取り込む経路で使う (#2552)。差分更新に
+	// しないのは、**リモート側で外されたピンを残さない**ため。upstream
+	// ApPersonService.updateFeatured も同じく全削除してから入れ直す。
+	ReplaceByUser(userID string, pins []*model.UserNotePining) error
 }
 
 type userNotePiningRepository struct {
@@ -47,6 +53,20 @@ func (r *userNotePiningRepository) ListByUser(userID string) ([]*model.UserNoteP
 		return nil, err
 	}
 	return rows, nil
+}
+
+func (r *userNotePiningRepository) ReplaceByUser(userID string, pins []*model.UserNotePining) error {
+	// 削除と挿入の間に他経路 (inbound Add) が割り込むと、ピンが一瞬消えた状態が
+	// 見える。トランザクションに包んで外から見えないようにする。
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("\"userId\" = ?", userID).Delete(&model.UserNotePining{}).Error; err != nil {
+			return err
+		}
+		if len(pins) == 0 {
+			return nil
+		}
+		return tx.Create(pins).Error
+	})
 }
 
 func (r *userNotePiningRepository) CountByUser(userID string) (int, error) {

@@ -1,0 +1,594 @@
+package federation_test
+
+import (
+	"errors"
+	"fmt"
+	"strings"
+	"testing"
+
+	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/core/federation"
+	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// countingDocFetcher serves a document per URI and records every request, so a
+// test can assert which collections were (and were not) fetched.
+type countingDocFetcher struct {
+	docs  map[string]string
+	calls []string
+}
+
+func (d *countingDocFetcher) FetchObject(uri string) ([]byte, error) {
+	d.calls = append(d.calls, uri)
+	if body, ok := d.docs[uri]; ok {
+		return []byte(body), nil
+	}
+	return nil, errors.New("no fixture for " + uri)
+}
+
+func (d *countingDocFetcher) fetched(uri string) bool {
+	for _, c := range d.calls {
+		if c == uri {
+			return true
+		}
+	}
+	return false
+}
+
+// featuredActor builds an actor document advertising a featured collection.
+func featuredActor(host, name, featured string) string {
+	base := fmt.Sprintf("https://%s/users/%s", host, name)
+	featuredLine := ""
+	if featured != "" {
+		featuredLine = fmt.Sprintf("\t\"featured\": %q,\n", featured)
+	}
+	return fmt.Sprintf(`{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": %q,
+	"type": "Person",
+	"preferredUsername": %q,
+	"inbox": %q,
+%s	"publicKey": {
+		"id": %q,
+		"owner": %q,
+		"publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"
+	}
+}`, base, name, base+"/inbox", featuredLine, base+"#main-key", base)
+}
+
+// featuredNote builds a Note document attributed to the given actor.
+func featuredNote(noteURI, authorURI, body string) string {
+	return fmt.Sprintf(`{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": %q,
+	"type": "Note",
+	"attributedTo": %q,
+	"content": "<p>%s</p>",
+	"to": ["https://www.w3.org/ns/activitystreams#Public"]
+}`, noteURI, authorURI, body)
+}
+
+// featuredCollection builds a featured collection listing the given URIs.
+func featuredCollection(collectionURI, apType string, itemURIs ...string) string {
+	items := make([]string, 0, len(itemURIs))
+	for _, u := range itemURIs {
+		items = append(items, fmt.Sprintf("%q", u))
+	}
+	field := "orderedItems"
+	if strings.EqualFold(apType, "Collection") {
+		field = "items"
+	}
+	return fmt.Sprintf(`{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": %q,
+	"type": %q,
+	"%s": [%s]
+}`, collectionURI, apType, field, strings.Join(items, ", "))
+}
+
+type featuredEnv struct {
+	resolver *federation.Resolver
+	users    *testutil.MockUserRepository
+	notes    *testutil.MockNoteRepository
+	pins     *testutil.MockUserNotePiningRepository
+	fetcher  *countingDocFetcher
+}
+
+func newFeaturedEnv(t *testing.T, docs map[string]string) *featuredEnv {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	pinRepo := testutil.NewMockUserNotePiningRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	f := &countingDocFetcher{docs: docs}
+	r := federation.NewResolver(userRepo, noteRepo, urls, f, idGen)
+	r.SetPinningRepo(pinRepo, idGen)
+	return &featuredEnv{resolver: r, users: userRepo, notes: noteRepo, pins: pinRepo, fetcher: f}
+}
+
+// pinnedNoteURIs returns the note URIs pinned for userID, in display order
+// (user_note_pining は id の降順で読まれる)。
+func (e *featuredEnv) pinnedNoteURIs(t *testing.T, userID string) []string {
+	t.Helper()
+	rows, err := e.pins.ListByUser(userID)
+	require.NoError(t, err)
+	uris := make([]string, 0, len(rows))
+	for _, row := range rows {
+		note, err := e.notes.FindByID(row.NoteID)
+		require.NoError(t, err)
+		require.NotNil(t, note.URI)
+		uris = append(uris, *note.URI)
+	}
+	return uris
+}
+
+// 観測を始めた時点で既にピン留めされていた投稿を取り込むこと (#2552)。
+// inbound の Add はピン留めされた瞬間にしか飛んで来ないので、これが無いと
+// 観測より前のピン留めは永久に拾えない。
+func TestUpdateFeatured_ImportsPinsOnFirstResolve(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/alice"
+		featured = "https://remote.example/users/alice/collections/featured"
+		note1    = "https://remote.example/notes/1"
+		note2    = "https://remote.example/notes/2"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "alice", featured),
+		featured: featuredCollection(featured, "OrderedCollection", note1, note2),
+		note1:    featuredNote(note1, actorURI, "first"),
+		note2:    featuredNote(note2, actorURI, "second"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	// コレクションの並びがそのまま表示順になること。
+	assert.Equal(t, []string{note1, note2}, env.pinnedNoteURIs(t, user.ID))
+}
+
+// `items` を使う Collection も受けること (upstream は type に応じて片方だけ読む)。
+func TestUpdateFeatured_AcceptsPlainCollection(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/bob"
+		featured = "https://remote.example/users/bob/collections/featured"
+		note1    = "https://remote.example/notes/b1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "bob", featured),
+		featured: featuredCollection(featured, "Collection", note1),
+		note1:    featuredNote(note1, actorURI, "hi"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Equal(t, []string{note1}, env.pinnedNoteURIs(t, user.ID))
+}
+
+// 既に観測済みのユーザーは actor の更新時に埋まること (#2552 の遡り取り込み)。
+func TestUpdateFeatured_BackfillsOnActorRefresh(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/carol"
+		featured = "https://remote.example/users/carol/collections/featured"
+		note1    = "https://remote.example/notes/c1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "carol", featured),
+		featured: featuredCollection(featured, "OrderedCollection", note1),
+		note1:    featuredNote(note1, actorURI, "pinned"),
+	})
+
+	// featured を取り込む前の行を模す (この経路が無かった頃に作られた行)。
+	host := "remote.example"
+	uri := actorURI
+	existing := &model.User{
+		ID: "9existinguser0000000", Username: "carol", Host: &host, URI: &uri,
+	}
+	require.NoError(t, env.users.Create(existing))
+	require.Empty(t, env.pinnedNoteURIs(t, existing.ID))
+
+	// LastFetchedAt が nil なので shouldRefreshActor が true になり、refreshActor
+	// 経由で featured が引かれる。
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	require.Equal(t, existing.ID, user.ID)
+
+	assert.Equal(t, []string{note1}, env.pinnedNoteURIs(t, existing.ID))
+}
+
+// featured の URL は actor 文書内の申告値なので別ホストを指せる。他人のサーバーの
+// コレクションを自分のピン留めとして取り込ませないこと。
+func TestUpdateFeatured_RejectsCrossHostCollection(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/mallory"
+		featured = "https://victim.example/users/someone/collections/featured"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "mallory", featured),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	assert.Empty(t, env.pinnedNoteURIs(t, user.ID))
+	assert.False(t, env.fetcher.fetched(featured),
+		"別ホストの featured は取得すらしないこと")
+}
+
+// コレクションの中身に他ホストの URI を混ぜてこられる。相手のホストに限ること。
+func TestUpdateFeatured_SkipsCrossHostItems(t *testing.T) {
+	const (
+		actorURI  = "https://remote.example/users/dave"
+		featured  = "https://remote.example/users/dave/collections/featured"
+		foreign   = "https://victim.example/notes/secret"
+		ownNote   = "https://remote.example/notes/d1"
+		actorHost = "remote.example"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor(actorHost, "dave", featured),
+		featured: featuredCollection(featured, "OrderedCollection", foreign, ownNote),
+		ownNote:  featuredNote(ownNote, actorURI, "mine"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{ownNote}, env.pinnedNoteURIs(t, user.ID))
+	assert.False(t, env.fetcher.fetched(foreign), "他ホストの item は取得しないこと")
+}
+
+// ピン留めできるのは自分の投稿だけ。他人の投稿を自分のプロフィールに並べられない
+// こと (upstream updateFeatured は著者を見ないので、そのぶん厳しい)。
+func TestUpdateFeatured_SkipsNotesByOtherAuthors(t *testing.T) {
+	const (
+		actorURI   = "https://remote.example/users/erin"
+		otherURI   = "https://remote.example/users/frank"
+		featured   = "https://remote.example/users/erin/collections/featured"
+		othersNote = "https://remote.example/notes/f1"
+		ownNote    = "https://remote.example/notes/e1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI:   featuredActor("remote.example", "erin", featured),
+		otherURI:   featuredActor("remote.example", "frank", ""),
+		featured:   featuredCollection(featured, "OrderedCollection", othersNote, ownNote),
+		othersNote: featuredNote(othersNote, otherURI, "not mine"),
+		ownNote:    featuredNote(ownNote, actorURI, "mine"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Equal(t, []string{ownNote}, env.pinnedNoteURIs(t, user.ID))
+}
+
+// inline で type が分かるものは、取得する前に落とすこと。
+func TestUpdateFeatured_SkipsNonNoteItems(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/grace"
+		featured = "https://remote.example/users/grace/collections/featured"
+		hashtag  = "https://remote.example/tags/misskey"
+		ownNote  = "https://remote.example/notes/g1"
+	)
+	collection := fmt.Sprintf(`{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": %q,
+	"type": "OrderedCollection",
+	"orderedItems": [
+		{"id": %q, "type": "Hashtag", "name": "#misskey"},
+		{"id": %q, "type": "Note"}
+	]
+}`, featured, hashtag, ownNote)
+
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "grace", featured),
+		featured: collection,
+		ownNote:  featuredNote(ownNote, actorURI, "mine"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{ownNote}, env.pinnedNoteURIs(t, user.ID))
+	assert.False(t, env.fetcher.fetched(hashtag), "Note でない item は取得しないこと")
+}
+
+// 上限は upstream の `.slice(0, 5)` と同値。
+func TestUpdateFeatured_StopsAtLimit(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/heidi"
+		featured = "https://remote.example/users/heidi/collections/featured"
+	)
+	docs := map[string]string{
+		actorURI: featuredActor("remote.example", "heidi", featured),
+	}
+	uris := make([]string, 0, 8)
+	for i := range 8 {
+		u := fmt.Sprintf("https://remote.example/notes/h%d", i)
+		uris = append(uris, u)
+		docs[u] = featuredNote(u, actorURI, "n")
+	}
+	docs[featured] = featuredCollection(featured, "OrderedCollection", uris...)
+
+	env := newFeaturedEnv(t, docs)
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	assert.Equal(t, uris[:5], env.pinnedNoteURIs(t, user.ID))
+	assert.False(t, env.fetcher.fetched(uris[5]), "上限を超えた item は取得しないこと")
+}
+
+// 取得に失敗したときは既存のピン留めを触らないこと。**空のコレクションと区別
+// せずに置き換えると、相手が一時的に落ちているだけでピン留めが消える。**
+func TestUpdateFeatured_KeepsExistingPinsWhenFetchFails(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/ivan"
+		featured = "https://remote.example/users/ivan/collections/featured"
+	)
+	// featured の fixture を置かない = 取得失敗。
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "ivan", featured),
+	})
+
+	host := "remote.example"
+	uri := actorURI
+	existing := &model.User{ID: "9ivanuser00000000000", Username: "ivan", Host: &host, URI: &uri}
+	require.NoError(t, env.users.Create(existing))
+	require.NoError(t, env.pins.Create(&model.UserNotePining{
+		ID: "9pin00000000000000000", UserID: existing.ID, NoteID: "9note0000000000000000",
+	}))
+
+	_, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	count, err := env.pins.CountByUser(existing.ID)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "取得に失敗しただけで既存のピン留めを消さないこと")
+}
+
+// リモート側で外されたピンが残らないこと (差分更新ではなく全置換)。
+func TestUpdateFeatured_ReplacesStalePins(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/judy"
+		featured = "https://remote.example/users/judy/collections/featured"
+		note1    = "https://remote.example/notes/j1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "judy", featured),
+		featured: featuredCollection(featured, "OrderedCollection", note1),
+		note1:    featuredNote(note1, actorURI, "still pinned"),
+	})
+
+	host := "remote.example"
+	uri := actorURI
+	existing := &model.User{ID: "9judyuser00000000000", Username: "judy", Host: &host, URI: &uri}
+	require.NoError(t, env.users.Create(existing))
+	require.NoError(t, env.pins.Create(&model.UserNotePining{
+		ID: "9stalepin000000000000", UserID: existing.ID, NoteID: "9stalenote00000000000",
+	}))
+
+	_, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{note1}, env.pinnedNoteURIs(t, existing.ID))
+}
+
+// ピン留めの保存に失敗しても actor の取得そのものは成立すること (best-effort)。
+func TestUpdateFeatured_StoreFailureDoesNotBreakActorResolve(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/ken"
+		featured = "https://remote.example/users/ken/collections/featured"
+		note1    = "https://remote.example/notes/k1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "ken", featured),
+		featured: featuredCollection(featured, "OrderedCollection", note1),
+		note1:    featuredNote(note1, actorURI, "pinned"),
+	})
+	env.pins.ReplaceErr = errors.New("boom")
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Equal(t, "ken", user.Username)
+}
+
+// ピン留めの取り込みが入れ子にならないこと (#2552)。
+//
+// ピン留め → 引用先 → その著者 → その featured … と入れ子になると、1 段ごとに
+// 5 分岐する取得の連鎖になる。ノート解決の内側で作られた actor では featured を
+// 引かない。
+func TestUpdateFeatured_DoesNotRecurseThroughQuotedAuthors(t *testing.T) {
+	const (
+		aliceURI     = "https://remote.example/users/alice"
+		aliceFeat    = "https://remote.example/users/alice/collections/featured"
+		alicePinned  = "https://remote.example/notes/a1"
+		bobURI       = "https://other.example/users/bob"
+		bobFeat      = "https://other.example/users/bob/collections/featured"
+		bobQuoted    = "https://other.example/notes/b1"
+		bobOwnPinned = "https://other.example/notes/b2"
+	)
+	// alice のピン留めが bob の投稿を引用している。bob は未観測。
+	alicePinnedDoc := fmt.Sprintf(`{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": %q,
+	"type": "Note",
+	"attributedTo": %q,
+	"content": "<p>quoting</p>",
+	"_misskey_quote": %q,
+	"to": ["https://www.w3.org/ns/activitystreams#Public"]
+}`, alicePinned, aliceURI, bobQuoted)
+
+	env := newFeaturedEnv(t, map[string]string{
+		aliceURI:     featuredActor("remote.example", "alice", aliceFeat),
+		aliceFeat:    featuredCollection(aliceFeat, "OrderedCollection", alicePinned),
+		alicePinned:  alicePinnedDoc,
+		bobURI:       featuredActor("other.example", "bob", bobFeat),
+		bobFeat:      featuredCollection(bobFeat, "OrderedCollection", bobOwnPinned),
+		bobQuoted:    featuredNote(bobQuoted, bobURI, "quoted"),
+		bobOwnPinned: featuredNote(bobOwnPinned, bobURI, "bob pin"),
+	})
+
+	user, err := env.resolver.ResolveActor(aliceURI)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{alicePinned}, env.pinnedNoteURIs(t, user.ID))
+	assert.False(t, env.fetcher.fetched(bobFeat),
+		"ノート解決の内側で作られた actor の featured は引かないこと")
+}
+
+// featured を宣言していない actor では何もしないこと。
+func TestUpdateFeatured_NoFeaturedDeclared(t *testing.T) {
+	const actorURI = "https://remote.example/users/leo"
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "leo", ""),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Empty(t, env.pinnedNoteURIs(t, user.ID))
+}
+
+// Collection でも OrderedCollection でもない文書は受け付けないこと。
+func TestUpdateFeatured_RejectsNonCollection(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/mia"
+		featured = "https://remote.example/users/mia/collections/featured"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "mia", featured),
+		featured: featuredNote(featured, actorURI, "not a collection"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Empty(t, env.pinnedNoteURIs(t, user.ID))
+}
+
+// ピン留めのリポジトリが未配線なら取り込み自体を行わないこと。
+func TestUpdateFeatured_NotWiredIsNoop(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/nina"
+		featured = "https://remote.example/users/nina/collections/featured"
+	)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	f := &countingDocFetcher{docs: map[string]string{
+		actorURI: featuredActor("remote.example", "nina", featured),
+	}}
+	r := federation.NewResolver(userRepo, noteRepo, urls, f, idGen)
+
+	_, err = r.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.False(t, f.fetched(featured), "未配線なら featured を取得しないこと")
+}
+
+// 上の再帰テストが空振りしていないことの確認。引用先の解決が実際に bob を
+// 作っていなければ、featured を引かないのは当たり前になってしまう。
+func TestUpdateFeatured_RecursionGuardIsNotVacuous(t *testing.T) {
+	const (
+		aliceURI    = "https://remote.example/users/alice"
+		aliceFeat   = "https://remote.example/users/alice/collections/featured"
+		alicePinned = "https://remote.example/notes/a1"
+		bobURI      = "https://other.example/users/bob"
+		bobFeat     = "https://other.example/users/bob/collections/featured"
+		bobQuoted   = "https://other.example/notes/b1"
+	)
+	alicePinnedDoc := fmt.Sprintf(`{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": %q,
+	"type": "Note",
+	"attributedTo": %q,
+	"content": "<p>quoting</p>",
+	"_misskey_quote": %q,
+	"to": ["https://www.w3.org/ns/activitystreams#Public"]
+}`, alicePinned, aliceURI, bobQuoted)
+
+	env := newFeaturedEnv(t, map[string]string{
+		aliceURI:    featuredActor("remote.example", "alice", aliceFeat),
+		aliceFeat:   featuredCollection(aliceFeat, "OrderedCollection", alicePinned),
+		alicePinned: alicePinnedDoc,
+		bobURI:      featuredActor("other.example", "bob", bobFeat),
+		bobFeat:     featuredCollection(bobFeat, "OrderedCollection"),
+		bobQuoted:   featuredNote(bobQuoted, bobURI, "quoted"),
+	})
+
+	_, err := env.resolver.ResolveActor(aliceURI)
+	require.NoError(t, err)
+
+	// bob 自身は引用の解決で作られている (= 再帰の入口には到達している)。
+	assert.True(t, env.fetcher.fetched(bobURI), "引用先の著者は解決されること")
+	bob, err := env.users.FindByURI(bobURI)
+	require.NoError(t, err, "引用先の著者が作られていること")
+	require.NotNil(t, bob)
+	// それでも bob の featured は引かない。
+	assert.False(t, env.fetcher.fetched(bobFeat))
+}
+
+// 同じ URI が複数回並んでいても 1 件にすること。
+func TestUpdateFeatured_DeduplicatesItems(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/olga"
+		featured = "https://remote.example/users/olga/collections/featured"
+		note1    = "https://remote.example/notes/o1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "olga", featured),
+		featured: featuredCollection(featured, "OrderedCollection", note1, note1),
+		note1:    featuredNote(note1, actorURI, "once"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Equal(t, []string{note1}, env.pinnedNoteURIs(t, user.ID))
+}
+
+// 走査する件数に上限を置くこと。**上限が無いと、巨大なコレクションを置くだけで
+// 取得を増幅させられる。**
+func TestUpdateFeatured_BoundsScannedItems(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/pete"
+		featured = "https://remote.example/users/pete/collections/featured"
+		buried   = "https://remote.example/notes/buried"
+	)
+	// 先頭に解決できない item を大量に並べ、その後ろに Note を置く。
+	items := make([]string, 0, 80)
+	for i := range 80 {
+		items = append(items, fmt.Sprintf("https://remote.example/missing/%d", i))
+	}
+	items = append(items, buried)
+
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "pete", featured),
+		featured: featuredCollection(featured, "OrderedCollection", items...),
+		buried:   featuredNote(buried, actorURI, "too deep"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+
+	assert.Empty(t, env.pinnedNoteURIs(t, user.ID))
+	assert.False(t, env.fetcher.fetched(buried), "上限より後ろは見ないこと")
+	assert.Less(t, len(env.fetcher.calls), 60, "取得が item 数に比例しないこと")
+}
+
+// featured がそもそも JSON オブジェクトでないときは既存を触らないこと。
+func TestUpdateFeatured_RejectsNonObjectDocument(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/quinn"
+		featured = "https://remote.example/users/quinn/collections/featured"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "quinn", featured),
+		featured: `["not", "an", "object"]`,
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Empty(t, env.pinnedNoteURIs(t, user.ID))
+}
