@@ -890,3 +890,84 @@ func TestFetch_Remote_BodyExceedsMaxNoContentLength(t *testing.T) {
 	_, err := s.Fetch(context.Background(), ts.URL+"/huge.png", ModeDefault, FormatWebP)
 	assert.ErrorIs(t, err, ErrTooLarge)
 }
+
+// **部分的に透明な NYCbCrA を imaging に直接渡すと全画素が 0 になる (#2591)。**
+//
+// アルファ付きの拡張 WebP (VP8X + ALPH + VP8) を Go の webp デコーダが返す型で、
+// リモート利用者のアイコンが「200 が返るのに真っ白」という壊れ方をしていた。
+//
+// **全面不透明なら通るので気づきにくい。** アルファを持つ画像だけが壊れる。
+func TestNormalizeForResize_PartiallyTransparentNYCbCrA(t *testing.T) {
+	const w, h = 260, 240
+
+	build := func(alphaAt func(x, y int) byte) *image.NYCbCrA {
+		img := image.NewNYCbCrA(image.Rect(0, 0, w, h), image.YCbCrSubsampleRatio420)
+		for y := range h {
+			for x := range w {
+				img.Y[img.YOffset(x, y)] = 200
+				img.Cb[img.COffset(x, y)] = 100
+				img.Cr[img.COffset(x, y)] = 150
+				img.A[img.AOffset(x, y)] = alphaAt(x, y)
+			}
+		}
+		return img
+	}
+	nonZero := func(img image.Image) int {
+		b := img.Bounds()
+		n := 0
+		for y := b.Min.Y; y < b.Max.Y; y++ {
+			for x := b.Min.X; x < b.Max.X; x++ {
+				if r, g, bl, a := img.At(x, y).RGBA(); r|g|bl|a != 0 {
+					n++
+				}
+			}
+		}
+		return n
+	}
+
+	tests := []struct {
+		name       string
+		alphaAt    func(x, y int) byte
+		wantPixels bool
+	}{
+		{"半分だけ不透明", func(x, _ int) byte {
+			if x > w/2 {
+				return 255
+			}
+			return 0
+		}, true},
+		{"全面不透明", func(int, int) byte { return 255 }, true},
+		{"全面透明", func(int, int) byte { return 0 }, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := build(tt.alphaAt)
+			// 素の At() では中身がある = デコードは成功している。
+			if tt.wantPixels {
+				require.NotZero(t, nonZero(src), "元画像に中身があること")
+			}
+
+			got := nonZero(resizeToHeight(src, 60))
+			if tt.wantPixels {
+				assert.NotZero(t, got, "リサイズで中身が消えている (真っ白なアイコンになる)")
+			} else {
+				assert.Zero(t, got)
+			}
+		})
+	}
+}
+
+// 対象を絞っていることの確認。**NRGBA 化は画素あたりのコピーを 1 回増やす**ので、
+// 影響を受けない型には掛けない。
+func TestNormalizeForResize_LeavesOtherTypesAlone(t *testing.T) {
+	nrgba := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	assert.Same(t, nrgba, normalizeForResize(nrgba))
+
+	ycbcr := image.NewYCbCr(image.Rect(0, 0, 4, 4), image.YCbCrSubsampleRatio420)
+	assert.Same(t, ycbcr, normalizeForResize(ycbcr))
+
+	nycbcra := image.NewNYCbCrA(image.Rect(0, 0, 4, 4), image.YCbCrSubsampleRatio420)
+	converted := normalizeForResize(nycbcra)
+	assert.NotSame(t, image.Image(nycbcra), converted)
+	assert.IsType(t, &image.NRGBA{}, converted)
+}

@@ -777,6 +777,27 @@ func decodeImage(data []byte, contentType string) (image.Image, error) {
 	return img, nil
 }
 
+// normalizeForResize converts img to NRGBA when the resize library cannot read
+// its type correctly.
+//
+// **`*image.NYCbCrA` を imaging に直接渡すと全画素が 0 になる。** アルファ付きの
+// 拡張 WebP (VP8X + ALPH + VP8) を Go の webp デコーダが返す型で、
+// kovidgoyal/imaging v1.8.21 の scanner が 4:2:0 の NYCbCrA を読めていない。
+// デコード自体は成功しているので、**200 で真っ白 (完全透明) の画像が返る**
+// という気づきにくい壊れ方をする (リモート利用者のアイコンが出ない、#2591)。
+//
+// 単純な VP8 は `*image.YCbCr` になるので影響を受けない。ここで型を絞って
+// 変換するのは、NRGBA 化が画素あたりのコピーを 1 回増やすため。
+func normalizeForResize(img image.Image) image.Image {
+	if _, ok := img.(*image.NYCbCrA); !ok {
+		return img
+	}
+	b := img.Bounds()
+	dst := image.NewNRGBA(b)
+	draw.Draw(dst, b, img, b.Min, draw.Src)
+	return dst
+}
+
 // resizeToHeight resizes image to the specified height while preserving aspect
 // ratio. 元画像がheight以下の場合は拡大し��い。
 func resizeToHeight(img image.Image, height int) image.Image {
@@ -784,7 +805,7 @@ func resizeToHeight(img image.Image, height int) image.Image {
 	if bounds.Dy() <= height {
 		return img
 	}
-	return imaging.Resize(img, 0, height, imaging.Lanczos)
+	return imaging.Resize(normalizeForResize(img), 0, height, imaging.Lanczos)
 }
 
 // resizeFit resizes img to fit within maxW x maxH preserving aspect ratio.
@@ -794,7 +815,7 @@ func resizeFit(img image.Image, maxW, maxH int) image.Image {
 	if w <= maxW && h <= maxH {
 		return img
 	}
-	return imaging.Fit(img, maxW, maxH, imaging.Lanczos)
+	return imaging.Fit(normalizeForResize(img), maxW, maxH, imaging.Lanczos)
 }
 
 func encodeWebP(img image.Image) ([]byte, error) {
