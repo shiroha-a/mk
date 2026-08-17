@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/spf13/viper"
 )
 
@@ -117,12 +118,15 @@ type SQLLoggingOptions struct {
 
 // Source represents the raw YAML configuration file structure.
 type Source struct {
-	URL               string `mapstructure:"url"`
-	Port              int    `mapstructure:"port"`
-	Socket            string `mapstructure:"socket"`
-	ChmodSocket       string `mapstructure:"chmodSocket"`
-	DisableHSTS       bool   `mapstructure:"disableHsts"`
-	EnableIPRateLimit *bool  `mapstructure:"enableIpRateLimit"`
+	URL         string `mapstructure:"url"`
+	Port        int    `mapstructure:"port"`
+	Socket      string `mapstructure:"socket"`
+	ChmodSocket string `mapstructure:"chmodSocket"`
+	DisableHSTS bool   `mapstructure:"disableHsts"`
+	// BcryptCost は account password のハッシュ強度 (work factor)。
+	// 未設定なら password.DefaultCost。範囲外の値は警告して既定に落とす。
+	BcryptCost        *int  `mapstructure:"bcryptCost"`
+	EnableIPRateLimit *bool `mapstructure:"enableIpRateLimit"`
 	// DisableEndpointRateLimits, when true, drops the per-endpoint rate
 	// limit table entirely. Intended for benchmarking parity with Misskey TS
 	// `NODE_ENV=development`. Never enable in production. Default false.
@@ -326,6 +330,7 @@ type Config struct {
 	DriveURL    string
 
 	DisableHSTS               bool
+	BcryptCost                int
 	EnableIPRateLimit         bool
 	DisableEndpointRateLimits bool
 	SetupPassword             string
@@ -496,6 +501,7 @@ func bindEnvKeys(v *viper.Viper) {
 		// 運用/セキュリティ系: 既存ymlから環境変数オーバーライドできるようにする
 		"trustProxy",
 		"disableHsts",
+		"bcryptCost",
 		"enableIpRateLimit",
 		"disableEndpointRateLimits",
 		"mediaProxy",
@@ -533,6 +539,19 @@ func resolve(src *Source) (*Config, error) {
 	maxFileSize := defaultMaxFileSize
 	if src.MaxFileSize != nil {
 		maxFileSize = *src.MaxFileSize
+	}
+
+	// **範囲外は既定に落として警告する。** 設定の書き間違いで cost 4 の
+	// ハッシュを量産すると、気づいた時点で全員のパスワードが弱い。
+	bcryptCost := password.DefaultCost
+	if src.BcryptCost != nil {
+		if *src.BcryptCost < password.MinCost || *src.BcryptCost > password.MaxCost {
+			slog.Warn("bcryptCost が範囲外なので既定値を使います",
+				"value", *src.BcryptCost, "min", password.MinCost, "max", password.MaxCost,
+				"default", password.DefaultCost)
+		} else {
+			bcryptCost = *src.BcryptCost
+		}
 	}
 
 	enableIPRateLimit := true
@@ -593,6 +612,7 @@ func resolve(src *Source) (*Config, error) {
 		DriveURL:    fmt.Sprintf("%s://%s/files", scheme, host),
 
 		DisableHSTS:               src.DisableHSTS,
+		BcryptCost:                bcryptCost,
 		EnableIPRateLimit:         enableIPRateLimit,
 		DisableEndpointRateLimits: disableEndpointRateLimits,
 		SetupPassword:             src.SetupPassword,

@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -357,6 +358,45 @@ redis:
 	require.NoError(t, err)
 
 	assert.False(t, cfg.EnableIPRateLimit)
+}
+
+// bcryptCost は未設定なら既定、範囲内ならそのまま、範囲外なら既定に落ちる。
+//
+// **範囲外を既定に落とすのが要点。** そのまま通すと、設定の書き間違いで cost 4 の
+// ハッシュを量産して、気づいた時点で全員のパスワードが弱い。
+func TestLoad_BcryptCost(t *testing.T) {
+	base := `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`
+	for name, tc := range map[string]struct {
+		line string
+		want int
+	}{
+		"未設定は既定":   {"", password.DefaultCost},
+		"範囲内はそのまま": {"bcryptCost: 12", 12},
+		"下限ちょうど":   {"bcryptCost: 4", password.MinCost},
+		"上限ちょうど":   {"bcryptCost: 31", password.MaxCost},
+		"下限未満は既定":  {"bcryptCost: 3", password.DefaultCost},
+		"上限超過は既定":  {"bcryptCost: 32", password.DefaultCost},
+		"負値は既定":    {"bcryptCost: -1", password.DefaultCost},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTestConfig(t, base+tc.line+"\n")
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.BcryptCost)
+		})
+	}
 }
 
 func TestLoad_CustomCountsAndThreshold(t *testing.T) {

@@ -7,9 +7,9 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/misc"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // ResetPassword handles POST /api/admin/reset-password.
@@ -57,12 +57,12 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 	}
 	// upstream secureRndstr(8) = 英数字 8 文字。
 	newPass := misc.SecureRandomString(8, misc.AlphanumericChars)
-	hash, err := bcrypt.GenerateFromPassword([]byte(newPass), bcrypt.DefaultCost)
+	hash, err := password.Hash(newPass)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	if h.userRepo != nil {
-		if err := h.userRepo.UpdateProfile(req.UserID, map[string]any{"password": string(hash)}); err != nil {
+		if err := h.userRepo.UpdateProfile(req.UserID, map[string]any{"password": hash}); err != nil {
 			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 		}
 	}

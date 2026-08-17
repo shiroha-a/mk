@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/achievement"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -59,14 +60,14 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	// bcrypt は 73 byte 以上の password で ErrPasswordTooLong を返す。Node 側
 	// (upstream Misskey TS) は silent truncation するが、Go では error で
 	// 弾かれて空 hash が DB に書かれてしまうため明示的に 400 にする (#1075)。
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcrypt.DefaultCost)
+	hash, err := password.Hash(req.NewPassword)
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("PASSWORD_TOO_LONG", "Password is too long.", "f2e62243-b80a-43e4-9b17-329b422deded"))
 		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	hashStr := string(hash)
+	hashStr := hash
 	if err := h.userService.UpdateProfileFields(u.ID, map[string]any{"password": hashStr}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

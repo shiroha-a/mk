@@ -10,10 +10,10 @@ import (
 	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
-	"golang.org/x/crypto/bcrypt"
 )
 
 // EmailSender sends an email message (subject + text + optional HTML).
@@ -131,14 +131,15 @@ func (h *Handler) Reset(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Token expired.", "6382759e-0a0d-4e32-893e-0e1e66cec4d5"))
 	}
 
-	// bcrypt hash (cost 8、Misskey本家と同じ)
-	hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), 8)
+	// cost は misc/password に集約してある。**ここだけ 8 を直書きしていたので、
+	// リセットするとハッシュの強度が下がっていた。**
+	hashed, err := password.Hash(req.Password)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 
 	// パスワード更新
-	pw := string(hashed)
+	pw := hashed
 	if err := h.userRepo.UpdateProfile(resetReq.UserID, map[string]any{"password": pw}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

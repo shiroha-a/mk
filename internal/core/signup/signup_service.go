@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/keyword"
+	passwordpkg "github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/crypto/bcrypt"
@@ -340,7 +341,7 @@ func (s *Service) SignupWithHost(username, password string, isInitialSetup bool,
 	// bcrypt が silent truncation するのと異なり、Go の bcrypt は error にする
 	// ため、ここで拾わないと空 hash が DB に書かれて user が永久 login 不能に
 	// なる (#1075)。
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := passwordpkg.Hash(password)
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
 			return nil, ErrPasswordTooLong
@@ -372,7 +373,7 @@ func (s *Service) SignupWithHost(username, password string, isInitialSetup bool,
 	}
 
 	// user_profile 作成
-	hashStr := string(hash)
+	hashStr := hash
 	profile := &model.UserProfile{
 		UserID:             userID,
 		Password:           &hashStr,
@@ -483,7 +484,7 @@ func (s *Service) CreatePendingForApplication(username, email, password string, 
 		}
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := passwordpkg.Hash(password)
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
 			return nil, ErrPasswordTooLong
@@ -496,7 +497,7 @@ func (s *Service) CreatePendingForApplication(username, email, password string, 
 		Code:                generatePendingCode(),
 		Username:            username,
 		Email:               email,
-		Password:            string(hash),
+		Password:            hash,
 		InvitationTicketID:  invitationTicketID,
 		SignupApplicationID: signupApplicationID,
 	}
@@ -762,7 +763,7 @@ func (s *Service) SignupForApplication(username, password, applicationID, ticket
 		}
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+	hash, err := passwordpkg.Hash(password)
 	if err != nil {
 		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
 			return nil, ErrPasswordTooLong
@@ -786,7 +787,7 @@ func (s *Service) SignupForApplication(username, password, applicationID, ticket
 			username:     username,
 			lower:        lower,
 			token:        token,
-			passwordHash: string(hash),
+			passwordHash: hash,
 			// メール確認を通っていないので、プロフィールにメールは持たせない
 			// (Signup と同じ)。
 		})

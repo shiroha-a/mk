@@ -214,6 +214,7 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | `MK_MEDIAPROXYSECRET` | `mediaProxySecret` |
 | `MK_TESTMODE` | `testMode` |
 | `MK_DISABLEENDPOINTRATELIMITS` | `disableEndpointRateLimits` |
+| `MK_BCRYPTCOST` | `bcryptCost` |
 
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
 

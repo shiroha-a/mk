@@ -79,6 +79,20 @@ port: 3000
 # limiting in the reverse proxy / WAF layer.
 #enableIpRateLimit: true
 
+# bcrypt work factor for account passwords (default: 10, range 4-31).
+# Misskey TS uses 8 everywhere; mk-go defaults to 10 and lets you raise it.
+# Each +1 doubles the time to hash *and* to verify, so it is also the cost of
+# every login. Measured on a modern x86 core: 10 = ~50ms, 11 = ~90ms,
+# 12 = ~185ms, 13 = ~370ms. 12 is a reasonable target if you can spend it.
+#
+# Raising this is safe for drop-in: the cost is embedded in the `$2a$NN$`
+# hash, so Misskey TS can still verify hashes written by mk-go.
+#
+# Existing users keep their old hash until they log in — mk-go re-hashes on a
+# successful signin, so raising this migrates everyone as they come back.
+# Out-of-range values are ignored with a warning.
+#bcryptCost: 10
+
 #   ┌──────────────────────────┐
 #───┘ PostgreSQL configuration └────────────────────────────────
 

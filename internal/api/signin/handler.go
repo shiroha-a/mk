@@ -18,6 +18,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -167,6 +168,7 @@ func (h *Handler) Signin(c echo.Context) error {
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(*req.Password)); err != nil {
 		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	}
+	h.maybeRehashPassword(user.ID, *profile.Password, *req.Password)
 
 	// #2106 H2 (CRITICAL): 2FA 有効ユーザーには password のみで token を発行しない。
 	// レガシー /api/signin は 2 要素を完遂できない (req に token/credential が無い)
@@ -255,6 +257,9 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	}
 
 	passwordOK := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(*req.Password)) == nil
+	if passwordOK {
+		h.maybeRehashPassword(user.ID, *profile.Password, *req.Password)
+	}
 
 	// CAPTCHA 検証 (password step 完了後、2FA 無しの場合のみ)。
 	// 本家 Misskey と同じく 2FA 有効なユーザーはキーデバイスが人間性を担保する
@@ -537,4 +542,29 @@ func wrapWebAuthnRequest(orig *http.Request, body json.RawMessage) (*http.Reques
 // CredentialToModel and signin's counter update path.
 func encodeCredID(raw []byte) string {
 	return base64.RawURLEncoding.EncodeToString(raw)
+}
+
+// maybeRehashPassword upgrades a stored hash that was produced with a weaker
+// work factor than the one configured now.
+//
+// **ログインは平文を握っている唯一の機会。** bcryptCost を上げても、既存の
+// 利用者のハッシュはパスワードを変更するまで古い強度のまま残る。ここで焼き直さ
+// ないと、設定を上げても新規登録の分にしか効かない。
+//
+// 呼ぶのは**パスワードの照合が通った後だけ**。失敗しても認証自体は成立して
+// いるので握りつぶす (次のログインでまた試す)。
+func (h *Handler) maybeRehashPassword(userID, storedHash, plain string) {
+	if !password.NeedsRehash(storedHash) {
+		return
+	}
+	fresh, err := password.Hash(plain)
+	if err != nil {
+		// 72 byte を超える平文で通ることは無い (登録時に弾いている) が、
+		// 通ったとしても認証は済んでいるので進める。
+		slog.Warn("signin: failed to rehash password", "userId", userID, "err", err)
+		return
+	}
+	if err := h.userRepo.UpdateProfile(userID, map[string]any{"password": fresh}); err != nil {
+		slog.Warn("signin: failed to store rehashed password", "userId", userID, "err", err)
+	}
 }

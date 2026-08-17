@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/cache"
 	"github.com/shiroha-a/mk/internal/core/chart"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/misc/redact"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -288,6 +289,26 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 			"runsServer", role.RunsServer(), "runsQueue", role.RunsQueue())
 	}
 	logDevModeBanner(cfg)
+
+	// パスワードのハッシュ強度をプロセス全体に反映する。
+	//
+	// **ゼロ値は「未設定」として扱う。** config.resolve を通れば必ず範囲内の値が
+	// 入るが、Config を構造体リテラルで組む呼び出し元 (テスト / ツール) では 0 の
+	// まま来る。そこで起動を失敗させると、この項目を知らない呼び出し元が全部壊れる。
+	bcryptCost := cfg.BcryptCost
+	if bcryptCost == 0 {
+		bcryptCost = password.DefaultCost
+	}
+	if err := password.SetCost(bcryptCost); err != nil {
+		// resolve を通っていれば到達しない。通っていない呼び出し元のために
+		// 既定へ落として続行する。
+		slog.Warn("bcrypt cost が不正なので既定値を使います", "value", bcryptCost, "err", err)
+		bcryptCost = password.DefaultCost
+		_ = password.SetCost(bcryptCost)
+	}
+	if bcryptCost != password.DefaultCost {
+		slog.Info("bcrypt cost overridden", "cost", bcryptCost, "default", password.DefaultCost)
+	}
 
 	e := echo.New()
 	e.HideBanner = true

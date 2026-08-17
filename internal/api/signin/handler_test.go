@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/signin"
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -594,4 +595,54 @@ func TestSignin_LegacyTwoFactorNotBypassed(t *testing.T) {
 	assert.Equal(t, "totp", resp["next"])
 	_, hasToken := resp["i"]
 	assert.False(t, hasToken, "2FA user must NOT receive a session token via legacy /signin")
+}
+
+// ログインが通ったら、設定より弱いハッシュをその場で焼き直すこと。
+//
+// **これが無いと bcryptCost を上げても意味がない。** 既存の利用者のハッシュは
+// パスワードを変更するまで古い強度のまま残る。ログインは平文を握っている唯一の
+// 機会なので、そこで上げる。
+func TestSignin_RehashesWeakPasswordOnSuccess(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "admin", "pass123") // bcrypt.MinCost で作られる
+
+	before := *repo.Profiles["u1"].Password
+	beforeCost, err := bcrypt.Cost([]byte(before))
+	require.NoError(t, err)
+	require.Less(t, beforeCost, password.Cost(), "前提: 設定より弱いこと")
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	after := *repo.Profiles["u1"].Password
+	afterCost, err := bcrypt.Cost([]byte(after))
+	require.NoError(t, err)
+	assert.Equal(t, password.Cost(), afterCost, "設定した cost に焼き直されていない")
+	// **平文は変わっていないこと。** 焼き直しでパスワードが変わると締め出す。
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(after), []byte("pass123")))
+}
+
+// パスワードが違うときは焼き直さない。**間違った平文で上書きすると締め出す。**
+func TestSignin_DoesNotRehashOnWrongPassword(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "admin", "pass123")
+	before := *repo.Profiles["u1"].Password
+
+	doPost(h.Signin, `{"username":"admin","password":"wrong"}`)
+
+	assert.Equal(t, before, *repo.Profiles["u1"].Password, "失敗したのに書き換えている")
+}
+
+// 既に設定どおりの強度なら触らない (毎回のログインで無駄な書き込みをしない)。
+func TestSignin_DoesNotRehashWhenAlreadyStrong(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "admin", "pass123")
+	strong, err := password.Hash("pass123")
+	require.NoError(t, err)
+	repo.Profiles["u1"].Password = &strong
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	assert.Equal(t, strong, *repo.Profiles["u1"].Password, "同じ強度なのに焼き直している")
 }
