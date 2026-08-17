@@ -165,3 +165,50 @@ func TestToJSON_BundledThemes(t *testing.T) {
 	}
 	require.NotZero(t, count, "テーマを 1 つも読んでいないと素通りする")
 }
+
+// 入れ子の深さに上限があること。**上限が無いと入力 1 つでプロセスが落ちる**
+// (`fatal error: stack overflow` は recover できない)。
+func TestToJSON_NestingDepth(t *testing.T) {
+	// 一番内側に値を置く。置かないと深さではなく構文で落ちて、上限の検査に
+	// ならない。
+	nest := func(depth int, open, close string) string {
+		return strings.Repeat(open, depth) + "1" + strings.Repeat(close, depth)
+	}
+	kinds := map[string][2]string{
+		"array":  {"[", "]"},
+		"object": {`{"a":`, "}"},
+	}
+
+	t.Run("上限ちょうどは通る", func(t *testing.T) {
+		for name, pair := range kinds {
+			t.Run(name, func(t *testing.T) {
+				_, err := ToJSON(nest(MaxNestingDepth, pair[0], pair[1]))
+				require.NoError(t, err)
+			})
+		}
+	})
+
+	t.Run("上限を 1 つ超えると弾く", func(t *testing.T) {
+		for name, pair := range kinds {
+			t.Run(name, func(t *testing.T) {
+				_, err := ToJSON(nest(MaxNestingDepth+1, pair[0], pair[1]))
+				require.ErrorIs(t, err, ErrSyntax)
+			})
+		}
+	})
+
+	// **深さは兄弟間で持ち越さない。** enter / leave が対称でないと、平坦だが
+	// 要素数の多いテーマが「深すぎる」で落ちる。
+	t.Run("兄弟要素で depth が積み上がらない", func(t *testing.T) {
+		out, err := ToJSON("[" + strings.Repeat("[1],", MaxNestingDepth*2) + "[1]]")
+		require.NoError(t, err)
+		require.True(t, strings.HasPrefix(out, "[[1],[1],"))
+	})
+
+	// スタックを食い潰す規模でも、落ちずにエラーで返ること。上限が無いと
+	// この規模で `fatal error: stack overflow` になる。
+	t.Run("極端に深い入力でも落ちない", func(t *testing.T) {
+		_, err := ToJSON(strings.Repeat("[", 5_000_000))
+		require.ErrorIs(t, err, ErrSyntax)
+	})
+}

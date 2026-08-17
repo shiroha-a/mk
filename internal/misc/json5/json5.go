@@ -26,6 +26,18 @@ import (
 // ErrSyntax is returned for input this package cannot convert.
 var ErrSyntax = errors.New("json5: invalid document")
 
+// MaxNestingDepth bounds how deeply objects and arrays may nest.
+//
+// **再帰の深さがそのまま goroutine スタックの深さになる。** 上限が無いと、
+// 深く入れ子にしただけの入力 1 つで `fatal error: stack overflow` を起こせる。
+// これは Go では recover できないので、echo の Recover middleware も効かず
+// プロセスごと落ちる。
+//
+// 変換対象はテーマ (入れ子は数段) なので、256 でも桁違いに余裕がある。上限に
+// 当たったときは他の構文エラーと同じく ErrSyntax なので、呼び出し側 (PackTheme)
+// は既に「テーマ無し」へ倒す。
+const MaxNestingDepth = 256
+
 // ToJSON converts a JSON5 document into equivalent JSON.
 //
 // 既に JSON なものはそのまま通る (JSON は JSON5 の部分集合)。
@@ -46,7 +58,21 @@ func ToJSON(src string) (string, error) {
 type parser struct {
 	src string
 	pos int
+	// depth は現在入っている object / array の数。MaxNestingDepth 参照。
+	depth int
 }
+
+// enter increments the nesting depth, refusing to go past MaxNestingDepth.
+// 対応する leave を defer で呼ぶこと。
+func (p *parser) enter() error {
+	p.depth++
+	if p.depth > MaxNestingDepth {
+		return p.errf("nesting is deeper than %d", MaxNestingDepth)
+	}
+	return nil
+}
+
+func (p *parser) leave() { p.depth-- }
 
 func (p *parser) errf(format string, args ...any) error {
 	return fmt.Errorf("%w: "+format+" at %d", append(append([]any{ErrSyntax}, args...), p.pos)...)
@@ -119,6 +145,10 @@ func (p *parser) value(out *strings.Builder) error {
 }
 
 func (p *parser) object(out *strings.Builder) error {
+	if err := p.enter(); err != nil {
+		return err
+	}
+	defer p.leave()
 	p.pos++ // '{'
 	out.WriteByte('{')
 	first := true
@@ -165,6 +195,10 @@ func (p *parser) object(out *strings.Builder) error {
 }
 
 func (p *parser) array(out *strings.Builder) error {
+	if err := p.enter(); err != nil {
+		return err
+	}
+	defer p.leave()
 	p.pos++ // '['
 	out.WriteByte('[')
 	first := true
