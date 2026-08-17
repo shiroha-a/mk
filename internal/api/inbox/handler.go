@@ -288,7 +288,8 @@ func (h *Handler) admitInbox(req *http.Request, body []byte) error {
 	if err != nil {
 		return err
 	}
-	return activitypub.VerifyInboxAdmission(parsed, req.Host, h.expectedHost, req.Header.Get("Digest"), body)
+	return activitypub.VerifyInboxAdmission(parsed, req.Host, h.expectedHost,
+		activitypub.InboxDateHeader(req.Header), req.Header.Get("Digest"), body)
 }
 
 // verifySignature parses the Signature header, resolves the actor, and

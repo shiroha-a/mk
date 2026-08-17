@@ -390,7 +390,7 @@ func (p *pluginPeer) verify(req *http.Request, body []byte) (string, error) {
 		return "", err
 	}
 	if err := activitypub.VerifyInboxAdmission(parsed, req.Host, p.deps.selfHost,
-		req.Header.Get("Digest"), body); err != nil {
+		activitypub.InboxDateHeader(req.Header), req.Header.Get("Digest"), body); err != nil {
 		return "", err
 	}
 	actorURI := activitypub.ResolveKeyURL(parsed.KeyID)

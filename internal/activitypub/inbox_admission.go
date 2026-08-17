@@ -5,8 +5,24 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"net/http"
 	"strings"
+	"time"
 )
+
+// InboxDateSkew bounds how far the signed Date may be from our clock.
+//
+// **これが無いと、署名済みリクエストを永久に再投函できる。** host が署名対象
+// かつ自ホスト一致なので他所へは転用できず、各ハンドラも冪等なので単発の再送は
+// ほぼ無害だが、Undo(Follow) / Undo(Block) のような**古い活動を後から差し込む**
+// 形で連合の状態を巻き戻せる。
+//
+// 300 秒は upstream (@peertube/http-signature の parseRequest 既定 clockSkew)
+// と同値。ここを詰めると時刻がずれている peer からの配送を落とすので揃える。
+const InboxDateSkew = 5 * time.Minute
+
+// nowFuncForAdmission is time.Now, replaced in tests.
+var nowFuncForAdmission = time.Now
 
 // Inbox admission errors mirror the 401 conditions Misskey's
 // ActivityPubServerService.inbox enforces before queueing an inbound activity.
@@ -41,6 +57,9 @@ var (
 	// ErrInboxDigestMismatch is returned when the SHA-256 of the body does not
 	// match the Digest value (body integrity violation).
 	ErrInboxDigestMismatch = errors.New("inbox: digest does not match request body")
+	// ErrInboxDateSkew is returned when the signed Date is further from our
+	// clock than InboxDateSkew allows (replay window).
+	ErrInboxDateSkew = errors.New("inbox: date is outside the accepted clock skew")
 )
 
 // VerifyInboxAdmission performs the body-integrity and host-binding checks that
@@ -54,13 +73,16 @@ var (
 //     empty, e.g. unit tests / unconfigured callers that cannot compare);
 //   - digest must be signed;
 //   - the Digest header must be `SHA-256=<base64>` and its value must equal
-//     base64(sha256(body)), compared in constant time.
+//     base64(sha256(body)), compared in constant time;
+//   - the Date must be within InboxDateSkew of our clock, so a captured request
+//     cannot be re-posted indefinitely.
 //
 // parsed is the parsed Signature header (parsed.Headers is the signed header
-// set), hostHeader is the request Host, digestHeader is the raw Digest header,
-// and body is the raw request body. A non-nil error means the request must be
+// set), hostHeader is the request Host, dateHeader is the raw Date (use
+// InboxDateHeader to resolve it), digestHeader is the raw Digest header, and
+// body is the raw request body. A non-nil error means the request must be
 // rejected with 401.
-func VerifyInboxAdmission(parsed *ParsedSignature, hostHeader, expectedHost, digestHeader string, body []byte) error {
+func VerifyInboxAdmission(parsed *ParsedSignature, hostHeader, expectedHost, dateHeader, digestHeader string, body []byte) error {
 	if parsed == nil {
 		return errors.New("inbox: missing parsed signature")
 	}
@@ -74,6 +96,9 @@ func VerifyInboxAdmission(parsed *ParsedSignature, hostHeader, expectedHost, dig
 	}
 	if !containsHeaderFold(parsed.Headers, "date") {
 		return ErrInboxDateUnsigned
+	}
+	if err := verifyDateSkew(dateHeader); err != nil {
+		return err
 	}
 
 	// host: 署名対象 + 自ホスト一致。expectedHost が未設定の呼び出し元
@@ -109,6 +134,41 @@ func VerifyInboxAdmission(parsed *ParsedSignature, hostHeader, expectedHost, dig
 	want := base64.StdEncoding.EncodeToString(sum[:])
 	if subtle.ConstantTimeCompare([]byte(want), []byte(value)) != 1 {
 		return ErrInboxDigestMismatch
+	}
+	return nil
+}
+
+// InboxDateHeader resolves the date value upstream's parser uses: `X-Date`
+// takes precedence over `Date` when both are present.
+func InboxDateHeader(h http.Header) string {
+	if v := h.Get("X-Date"); v != "" {
+		return v
+	}
+	return h.Get("Date")
+}
+
+// verifyDateSkew rejects a Date too far from our clock.
+//
+// **読めない値と空は通す。** upstream も `new Date(...)` が Invalid Date に
+// なると `Math.abs(NaN) > skew` が false になって素通りする。ここだけ厳しく
+// すると、JS では解釈できて Go では解釈できない書式を送ってくる peer からの
+// 配送を落とす。値を差し替えれば署名が壊れる (date は署名対象を必須にして
+// ある) ので、緩くても再投函の穴にはならない。
+func verifyDateSkew(dateHeader string) error {
+	raw := strings.TrimSpace(dateHeader)
+	if raw == "" {
+		return nil
+	}
+	t, err := http.ParseTime(raw)
+	if err != nil {
+		return nil
+	}
+	skew := nowFuncForAdmission().Sub(t)
+	if skew < 0 {
+		skew = -skew
+	}
+	if skew > InboxDateSkew {
+		return ErrInboxDateSkew
 	}
 	return nil
 }

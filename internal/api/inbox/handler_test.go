@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	emiddleware "github.com/labstack/echo/v4/middleware"
@@ -714,4 +715,36 @@ func TestInbox_FederationEnabled_NotGated(t *testing.T) {
 	req.Host = "example.com"
 	require.NoError(t, h.Inbox(c))
 	assert.NotEqual(t, http.StatusForbidden, rec.Code, "federation 有効時は gate を素通り")
+}
+
+// 署名済みリクエストの再投函が時間で止まること。**Date は署名対象なので
+// 差し替えれば署名が壊れる** — 古い Date のまま署名して、捕まえた配送をそのまま
+// 投げ直す形を再現する。
+//
+// 単体の検査は activitypub 側にあるが、ここは**配線**を固定する。
+// VerifyInboxAdmission の引数は date も digest も string なので、順序を取り違えても
+// コンパイルは通り、digest 側が壊れないほうの取り違えは他のテストで気づけない。
+func TestInbox_RejectsStaleSignedDate(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+
+	h, repo, followingRepo := newHandler(t, pub)
+	bobURI := "https://example.com/users/bob"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+
+	body := []byte(`{"type":"Follow","actor":"https://remote.example/users/alice","object":"https://example.com/users/bob"}`)
+
+	c, rec := newPost(t, body)
+	req := c.Request()
+	// SignRequest は Date が既にあれば触らないので、古い値のまま署名される。
+	req.Header.Set("Date", time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat))
+	require.NoError(t, activitypub.SignRequest(req, key, activitypub.SHA256Digest(body),
+		[]string{"(request-target)", "date", "host", "digest"}))
+	req.Host = "example.com"
+
+	require.NoError(t, h.Inbox(c))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Empty(t, followingRepo.Followings, "弾いた活動が処理されてはいけない")
 }
