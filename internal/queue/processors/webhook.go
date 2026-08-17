@@ -3,6 +3,9 @@ package processors
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -108,6 +111,13 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 	// #2106 L62: upstream は secret 空でも X-Misskey-Hook-Secret ヘッダーを無条件に送る
 	// (受信側が header の有無で分岐する場合の wire 互換)。
 	req.Header.Set("X-Misskey-Hook-Secret", secret)
+	// mk-go の追加。upstream は共有秘密を平文で載せるだけなので、受信側は
+	// 「本文が改ざんされていないか」を確認できない。本文の HMAC を足しておくと、
+	// 秘密を知っている者だけがこの本文を送れたことまで確かめられる。
+	// **未知のヘッダは無視されるだけ**なので、既存の受信側は影響を受けない。
+	if sig := webhookSignature(secret, payload.Body); sig != "" {
+		req.Header.Set(webhookSignatureHeader, sig)
+	}
 
 	resp, err := p.client.Do(req)
 	sentAt := time.Now()
@@ -187,4 +197,25 @@ func (p *WebhookProcessor) recordStatus(id string, user bool, sentAt time.Time, 
 		slog.Warn("webhook deliver: record status failed",
 			"hookId", id, "err", err)
 	}
+}
+
+// webhookSignatureHeader carries the HMAC of the request body.
+//
+// **`X-Hub-Signature-256` を選んでいる。** WebSub / GitHub で広く使われている
+// 名前で、受信側のライブラリがそのまま使えることが多い。`X-Misskey-Hook-*` の
+// 名前空間を使うと、upstream が将来同じ名前で別の意味を持たせたときに受信側が
+// 壊れる。
+const webhookSignatureHeader = "X-Hub-Signature-256"
+
+// webhookSignature returns `sha256=<hex>` of HMAC-SHA256(secret, body).
+//
+// 秘密が空なら署名しない (空鍵の HMAC は誰でも作れるので、付けると「検証できて
+// いる」という誤解だけを生む)。
+func webhookSignature(secret string, body []byte) string {
+	if secret == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
 }

@@ -218,6 +218,7 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `enableTimelineCache` / `timelineCacheTtlSeconds` | TL 1 ページ目の viewer 別短 TTL cache (opt-in) |
 | `db.maxOpenConns` ほか pool tuning / `redis*.poolSize` | Go 固有 |
 | `redis*.path` | ioredis 互換の UDS alias。同じ config を TS/mk で共有する drop-in 切替のため |
+| `bcryptCost` | account password のハッシュ強度 (既定 10、範囲 4-31)。upstream は全経路 cost 8 固定で設定不可 |
 | `MK_*` 環境変数オーバーライド | upstream に同等機構なし |
 
 逆方向 (upstream にあって mk-go に無い): `threadPoolSize`、`logging.format` / `logging.level` / `logging.domains` / `logging.access` (2026.7.0 のログ基盤刷新分。`logging.sql.*` は mk-go にもある)、`sentryForBackend.disabledIntegrations`。
@@ -401,6 +402,9 @@ Drive へ保存する。**mk-go はこれを実装しない。** 未実装では
 | frontend HTML の CSP | **無し** | `frontendContentSecurityPolicy` で opt-in (既定 `off`)。**mk-go 独自の硬化** (#2425)。段階導入のため `report-only` から始め、違反を潰してから `enforce` へ切り替える運用。現段階では SSR shell の inline script / SVG の inline style 属性が残っているので `'unsafe-inline'` を許している (nonce / hash 化は別段階)。`frame-ancestors` は含めない — `X-Frame-Options` 側が `/embed/` の除外を持っており、二重管理を避けるため |
 | `Referrer-Policy` | **設定しない** (`packages/backend/src/server/` に 1 件も無い) | 全応答に `strict-origin-when-cross-origin` を付ける。**mk-go 独自の硬化** (#2404)。無いとノート本文の外部リンクを踏んだ際に閲覧中の URL が path ごと Referer として送られる。Misskey の URL は `/notes/<id>` / `/@user` のように**何を見ていたかがそのまま分かる**形なので、遷移先に閲覧内容が漏れる。`no-referrer` まで強めないのは、cross-origin へ origin だけは送る方が連合先からの流入把握や hotlink 判定を壊さないため |
 | identicon の CSP | 付けない | `default-src 'none'; style-src 'unsafe-inline'` を付ける。**mk-go 独自の硬化** (#2404)。upstream が他のアセット route (`/emoji` / `/twemoji` / `/fluent-emoji` / `/files`) に付けているものと同じ値で揃えた。identicon は mk-go が実際に PNG バイトを返す route なので、他と扱いを分ける理由が無い |
+| account password のハッシュ強度 | 全経路で bcrypt cost 8 固定 (`bcrypt.genSalt(8)`)。設定不可 | 既定 cost 10 で、`bcryptCost` で 4-31 に変更できる。**さらにログイン成功時に古い強度のハッシュを焼き直す** ので、設定を上げれば既存の利用者も戻ってきた順に移行する。upstream にこの仕組みは無い。cost は `$2a$NN$` に埋まるので、上げても drop-in で TS 側が検証できる |
+| native session token の強度 | `secureRndstr(16)` = 62 文字集合 16 文字 (約 95 bit) | **同等** (英数字 62 文字集合 16 文字)。長さ 16 は TS の `isNativeUserToken` が長さだけで native / app token を判別するため動かせない。かつて 16 進 16 文字 (64 bit) で upstream より弱かったのを揃えた |
+| webhook 本文の完全性 | 共有秘密を `X-Misskey-Hook-Secret` に**平文で載せるだけ**。受信側は本文が改ざんされていないかを確認できない | 同ヘッダは互換のためそのまま送りつつ、`X-Hub-Signature-256: sha256=<hex>` (HMAC-SHA256(secret, body)) を**追加**する。**mk-go 独自の硬化**。未知のヘッダは無視されるだけなので既存の受信側は影響を受けない。秘密が空なら署名しない (空鍵の HMAC は誰でも作れるため) |
 | drive requestHeaders の credential 除去 | 全 header を生保存 (`drive/files/create.ts`) | `authorization` / `cookie` / `set-cookie` / `x-api-key` / `api-key` / `proxy-authorization` を保存しない deny-list。**mk-go 独自の硬化** |
 | TOTP replay guard | **2026.6.0 で実装済** (`UserAuthService.validateOtp` が Redis `SET NX EX` で使用済トークンを記録、TTL 90s) | 同等機構を持つ (mk-go が先行実装)。**差分なし** |
 | inbox admission の署名対象 header 強制 | `(request-target)` / `host` / `date` / `digest` の要求、Host 一致、SHA-256 body 照合を実施 (`ActivityPubServerService.inbox`) | 同等。**mk-go 固有なのは body 照合を定数時間比較 (`subtle.ConstantTimeCompare`) にしている点のみ** |

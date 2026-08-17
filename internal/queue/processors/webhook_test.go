@@ -3,6 +3,9 @@ package processors_test
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"io"
 	"net/http"
@@ -311,4 +314,56 @@ func TestWebhookProcessor_User_429Retries(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, driver.SkipRetry)
 	assert.Equal(t, http.StatusTooManyRequests, repo.statusCalled["h1"])
+}
+
+// 本文の HMAC を足すこと (mk-go の追加)。
+//
+// upstream は共有秘密を平文ヘッダに載せるだけなので、受信側は「本文が改ざん
+// されていないか」を確かめられない。**受信側が自分で計算して一致を見られる**
+// 形にする。
+func TestWebhookProcessor_SignsBody(t *testing.T) {
+	client := &stubHTTPClient{status: http.StatusOK}
+	p, _, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{
+		"h1": {ID: "h1", URL: "https://hook.example/u1", Secret: "s3cr3t"},
+	}, nil)
+
+	body := []byte(`{"type":"note","id":"abc"}`)
+	require.NoError(t, p.HandleUser(context.Background(), queue.NewUserWebhookTask(
+		queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: body})))
+	require.Len(t, client.reqs, 1)
+
+	mac := hmac.New(sha256.New, []byte("s3cr3t"))
+	mac.Write(body)
+	want := "sha256=" + hex.EncodeToString(mac.Sum(nil))
+	assert.Equal(t, want, client.reqs[0].Header.Get("X-Hub-Signature-256"))
+}
+
+// 本文が 1 byte 変わったら署名も変わること。**固定値を返す実装では上の
+// テストだけ通ってしまう。**
+func TestWebhookProcessor_SignatureCoversBody(t *testing.T) {
+	sigFor := func(t *testing.T, body []byte) string {
+		t.Helper()
+		client := &stubHTTPClient{status: http.StatusOK}
+		p, _, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{
+			"h1": {ID: "h1", URL: "https://hook.example/u1", Secret: "s3cr3t"},
+		}, nil)
+		require.NoError(t, p.HandleUser(context.Background(), queue.NewUserWebhookTask(
+			queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: body})))
+		return client.reqs[0].Header.Get("X-Hub-Signature-256")
+	}
+	assert.NotEqual(t, sigFor(t, []byte(`{"a":1}`)), sigFor(t, []byte(`{"a":2}`)))
+}
+
+// 秘密が空なら署名しない。**空鍵の HMAC は誰でも作れる**ので、付けると
+// 「検証できている」という誤解だけを生む。
+func TestWebhookProcessor_NoSignatureWithoutSecret(t *testing.T) {
+	client := &stubHTTPClient{status: http.StatusOK}
+	p, _, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{
+		"h1": {ID: "h1", URL: "https://hook.example/u1"},
+	}, nil)
+	require.NoError(t, p.HandleUser(context.Background(), queue.NewUserWebhookTask(
+		queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})))
+	require.Len(t, client.reqs, 1)
+	_, present := client.reqs[0].Header["X-Hub-Signature-256"]
+	assert.False(t, present, "秘密が無いのに署名ヘッダを送っている")
 }
