@@ -91,6 +91,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `deliverJobConcurrency` | int | `16` | AP配信worker数。mkq driver では deliver queue 専用、asynq driver では**総 worker pool 上限**として扱う (asynq は per-queue concurrency を持たないため、この値は queue 共通の上限) |
 | `inboxJobConcurrency` | int | `16` | Inbox処理 worker 数 (#534 で非同期化済)。mkq driver では inbox queue 専用 worker (未指定時の default は 16)。asynq driver では**現状 no-op** (asynq の queue priority weight も静的 1 固定で wire していないため、共有 worker pool 内の inbox tasks は他 queue と equal-weight で競合する) |
 | `frontendContentSecurityPolicy` | string | `off` | SPA shell (frontend HTML) に付ける CSP。`off` / `report-only` / `enforce` (#2425)。**upstream Misskey には無い mk-go 独自の hardening** なので opt-in。`report-only` は何もブロックせず違反を報告するだけだが、違反があると全利用者のブラウザ console に出る。`off` 以外にすると `POST /csp-report` が生え、ブラウザからの違反報告を INFO ログに落とす。**公開インスタンスで有効にする場合は、前段の nginx / CDN で `/csp-report` にレート制限を掛けること** (認証不要の POST なので、無いとログ増幅に使える。mk-go 側は body 64KiB 上限のみ)。`useObjectStorage` が有効なら `objectStorageBaseUrl` の origin を、外部 `mediaProxy` 構成ならその origin を `img-src` / `media-src` / `connect-src` に自動で加える (drive のファイル配信と通知音の fetch が別オリジンになるため、#2501)。有効な captcha 業者 (hCaptcha / reCAPTCHA / Turnstile) の origin も `script-src` (hCaptcha は公式要求に従い `connect-src` / `style-src` も) に自動で加える (#2502。mcaptcha は iframe + バンドル済み glue のため不要) |
+| `queueIdlePollSeconds` | int | mkq 既定 (実効 1 秒) | ジョブが無いとき worker が marker key を待つ秒数。**mkq driver のみ**。**ジョブ取得は遅くならない** — Lua が marker を push するので worker はミリ秒で起きる (interval 30 秒でも取得 18.9ms を実測)。この値は「marker を取り逃したときに気づくまで」の上限。既定を延ばしていないのは shutdown が延びるため (発行済みの BZPOPMIN は中断できないので停止に最大 interval かかる。実測 1 秒で 0.6 秒 / 5 秒で 4.6 秒)。Redis を共有していてアイドル時の負荷を下げたい場合に上げる (worker 44 個の構成でアイドル時 毎秒 774 コマンド、Misskey TS は 21.5。ただし Redis の CPU は 1 コアの 1.2%) |
 | `relationshipJobConcurrency` | int | `4` | follow / unfollow / block / unblock の worker 数。mkq driver では relationship queue 専用 worker (#2403)。asynq driver では **no-op** (per-queue concurrency 非対応。起動時に warning を出す)。既定を upstream の 16 でなく 4 にしているのは、relationship job が DB bound で `db.maxOpenConns` (既定 25) を HTTP 経路と共有するため |
 | `deliverJobPerSec` | int | - | AP配信レート上限 (tasks/sec)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
 | `inboxJobPerSec` | int | - | Inbox処理レート上限 (tasks/sec) (#534)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
@@ -220,6 +221,7 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | `MK_BCRYPTCOST` | `bcryptCost` |
 | `MK_CROSSORIGINOPENERPOLICY` | `crossOriginOpenerPolicy` |
 | `MK_NOTEHOOKCONCURRENCY` | `noteHookConcurrency` |
+| `MK_QUEUEIDLEPOLLSECONDS` | `queueIdlePollSeconds` |
 
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
 

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mkq"
@@ -72,6 +73,13 @@ type Config struct {
 	// no BullMQ metrics keys are written in that case (mkq's default
 	// behaviour pre-v1.0.1).
 	MaxMetricsDataPoints int
+
+	// IdlePollInterval is how long an idle worker waits on the marker key
+	// before re-checking. 0 applies `defaultIdlePollInterval`.
+	//
+	// **ジョブ取得の遅さには繋がらない** (marker push で起きるため)。
+	// 短くするとアイドル時の Redis コマンド数が worker 数に比例して増える。
+	IdlePollInterval time.Duration
 
 	// QueueConcurrency overrides the per-queue worker pool size for the
 	// named queue. Zero / missing entries fall back to the per-queue
@@ -362,6 +370,7 @@ func (d *Driver) Server() driver.Server {
 			driver:             d,
 			concurrency:        perQueue,
 			maxMetricsPoints:   metricsPoints,
+			idlePollInterval:   d.cfg.IdlePollInterval,
 			perQueueConcurrent: resolveQueueConcurrency(queueNames, d.cfg.QueueConcurrency),
 			perQueueRate:       d.cfg.QueueRateLimits,
 			handlers:           make(map[string]driver.HandlerFunc),

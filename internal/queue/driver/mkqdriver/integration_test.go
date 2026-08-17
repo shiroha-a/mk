@@ -1496,3 +1496,92 @@ func TestInspector_ListCompletedTasks(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown queue")
 }
+
+// **長い idle poll interval でもジョブ取得は遅くならないこと。**
+//
+// worker は BZPOPMIN で marker key を待ち、ジョブが積まれた時点で Lua 側が
+// marker を push するのでミリ秒で起きる。interval は「marker を取り逃した
+// 場合に気づくまで」の上限でしかない。ここが崩れると、間隔を延ばした分だけ
+// ジョブの処理が遅れる。
+func TestIdlePollInterval_DoesNotDelayPickup(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	// 取得が interval に律速されるなら、この値がそのまま遅延になる。
+	const interval = 30 * time.Second
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency:      2,
+		IdlePollInterval: interval,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	got := make(chan time.Time, 1)
+	srv.Handle("probe", func(_ context.Context, _ driver.Task) error {
+		select {
+		case got <- time.Now():
+		default:
+		}
+		return nil
+	})
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// worker が marker 待ちに入るのを待ってから積む。
+	time.Sleep(500 * time.Millisecond)
+
+	enqueued := time.Now()
+	require.NoError(t, d.Client().Enqueue(context.Background(), "probe", []byte(`{}`),
+		driver.WithQueue("deliver")))
+
+	select {
+	case at := <-got:
+		elapsed := at.Sub(enqueued)
+		// interval に律速されていないこと。marker 経由なら通常は 10ms 未満で
+		// 起きるが、CI の負荷を見込んで interval の 1/6 を上限にする。
+		if elapsed > interval/6 {
+			t.Fatalf("取得に %v かかった。interval (%v) に律速されている", elapsed, interval)
+		}
+		t.Logf("interval=%v でも %v で取得", interval, elapsed)
+	case <-time.After(interval / 3):
+		t.Fatal("interval 待ちになっている (marker で起きていない)")
+	}
+}
+
+// Shutdown が worker 数に比例して遅くならないこと。
+//
+// **待ち時間の実体は BZPOPMIN のタイムアウト。** 発行済みの読み取りは ctx
+// キャンセルで中断できないので、停止には最大 idlePollInterval だけかかる。
+// 直列に止めるとその待ちが worker 数だけ積み上がり、再起動が長引く
+// (実測: interval 1 秒 / 既定 worker 数で 4.5 秒 → 並列化で 0.6 秒)。
+func TestShutdown_DoesNotScaleWithWorkerCount(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	const interval = 2 * time.Second
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency:      8, // queue あたり複数 worker を確実に持たせる
+		IdlePollInterval: interval,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	srv.Handle("noop", func(context.Context, driver.Task) error { return nil })
+	require.NoError(t, srv.Start())
+	// 全 worker が marker 待ちに入るまで待つ。
+	time.Sleep(500 * time.Millisecond)
+
+	start := time.Now()
+	srv.Shutdown()
+	elapsed := time.Since(start)
+
+	// 並列なら interval 1 回分 + α で済む。直列だと worker 数倍に伸びる。
+	if elapsed > 2*interval {
+		t.Fatalf("shutdown に %v かかった (interval=%v)。worker を直列に止めている", elapsed, interval)
+	}
+	t.Logf("interval=%v / shutdown %v", interval, elapsed.Round(time.Millisecond))
+}

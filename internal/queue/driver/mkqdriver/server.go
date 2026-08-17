@@ -61,6 +61,9 @@ type Server struct {
 	// 書き込みを無効化、正値で BullMQ-spec の metrics LIST に書き込み
 	// が走る。
 	maxMetricsPoints int
+	// idlePollInterval は mkq.WithIdlePollInterval の引数。0 なら
+	// defaultIdlePollInterval を使う。
+	idlePollInterval time.Duration
 
 	// perQueueConcurrent / perQueueRate are runtime tuning overrides
 	// keyed by queue name (#495). Missing / zero entries fall back to
@@ -180,6 +183,23 @@ func (s *Server) Start() error {
 		if s.maxMetricsPoints > 0 {
 			// BullMQ-compatible per-queue metrics opt-in。
 			optsBase = append(optsBase, mkq.WithJobMetrics(s.maxMetricsPoints))
+		}
+		if s.idlePollInterval > 0 {
+			// アイドル時の空振りポーリングを間引きたい運用者向けの opt-in。
+			//
+			// **ジョブ取得は遅くならない。** worker は BZPOPMIN で marker key を
+			// 待っており、ジョブが積まれた時点で Lua 側が marker を push するので
+			// ミリ秒で起きる (interval 30 秒でも取得 18.9ms を実測)。この値は
+			// 「marker を取り逃した場合に気づくまで」の上限でしかない。
+			//
+			// **既定を延ばさないのは shutdown が延びるため。** 発行済みの
+			// BZPOPMIN は ctx キャンセルで中断できないので、停止には最大
+			// interval だけかかる (実測: 1 秒で 0.6 秒、5 秒で 4.6 秒)。
+			// mkq 既定の 100ms は go-redis が 1 秒へ切り上げるため実効 1 秒で、
+			// worker 44 個の構成ではアイドル時に Redis へ毎秒 774 コマンド撃つ
+			// (本番実測。Misskey TS は毎秒 21.5)。Redis の CPU は 1 コアの
+			// 1.2% なので、再起動の速さと引き換えにする価値は薄いと判断した。
+			optsBase = append(optsBase, mkq.WithIdlePollInterval(s.idlePollInterval))
 		}
 		// custom backoff (`{type:"custom"}`) で enqueue された job の retry delay
 		// を算出する strategy を全 Worker に登録する。deliver / inbox は
@@ -344,9 +364,22 @@ func (p *workerPool) resizeLocked(n int) error {
 // Caller must hold pool.mu. Used by Server.Shutdown.
 func (p *workerPool) shutdownLocked() {
 	p.shutdown = true
+	// **worker は並列に止める。** 待ち時間の実体は「BZPOPMIN のタイムアウトが
+	// 切れるまで」で、逐次に止めると worker 数の分だけ積み上がる。dispatchLoop は
+	// `runCtx` を BZPOPMIN に渡しているが、go-redis は発行済みの読み取りを
+	// 中断できないので、キャンセルしても最大 idlePollInterval だけ残る。
+	//
+	// 直列だったころは worker 数 x interval かかっていた (実測: interval 1 秒 /
+	// worker 数既定で 4.5 秒、5 秒なら 29.7 秒)。並列なら interval 1 回分で済む。
+	var wg sync.WaitGroup
 	for _, w := range p.workers {
-		stopWorker(w)
+		wg.Add(1)
+		go func(w *mkq.Worker) {
+			defer wg.Done()
+			stopWorker(w)
+		}(w)
 	}
+	wg.Wait()
 	p.workers = nil
 }
 

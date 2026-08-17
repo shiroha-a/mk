@@ -48,6 +48,7 @@ func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, e
 			Concurrency:      totalConcurrency,
 			QueueConcurrency: queueConcurrency,
 			QueueRateLimits:  queueRateLimits,
+			IdlePollInterval: time.Duration(cfg.QueueIdlePollSeconds) * time.Second,
 		})
 	case "asynq":
 		// asynq は per-queue concurrency を持たず、Concurrency (総 worker pool)

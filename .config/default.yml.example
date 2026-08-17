@@ -121,6 +121,23 @@ port: 3000
 # delay. Raise it if your instance has very wide fanout and CPU to spare.
 #noteHookConcurrency: 8
 
+# How long an idle queue worker waits on the marker key before re-checking,
+# in seconds (default: mkq's own, which is effectively 1s). mkq driver only.
+#
+# Workers wake within milliseconds of a job landing (the Lua scripts push to a
+# marker key that the worker blocks on), so raising this does NOT delay job
+# pickup — measured 18.9ms pickup even with a 30s interval. It only bounds how
+# long it takes to notice a *missed* marker push.
+#
+# Raise it if you share Redis and want less idle chatter: with the default,
+# 44 workers issue ~774 commands/sec while completely idle (Misskey TS issues
+# ~21.5/sec). That is only ~1.2% of one core, which is why the default is left
+# alone.
+#
+# The cost is shutdown time: an in-flight BZPOPMIN cannot be interrupted, so
+# stopping takes up to one interval (measured 0.6s at 1s, 4.6s at 5s).
+#queueIdlePollSeconds: 5
+
 #   ┌──────────────────────────┐
 #───┘ PostgreSQL configuration └────────────────────────────────
 

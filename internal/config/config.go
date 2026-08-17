@@ -128,8 +128,11 @@ type Source struct {
 	BcryptCost *int `mapstructure:"bcryptCost"`
 	// NoteHookConcurrency は投稿後のベストエフォートフックを種別ごとに
 	// 何本まで同時に走らせるか。未設定なら GOMAXPROCS x 2。
-	NoteHookConcurrency *int  `mapstructure:"noteHookConcurrency"`
-	EnableIPRateLimit   *bool `mapstructure:"enableIpRateLimit"`
+	NoteHookConcurrency *int `mapstructure:"noteHookConcurrency"`
+	// QueueIdlePollSeconds はジョブが無いときに worker が marker を待つ秒数。
+	// 未設定なら mkq driver の既定 (5 秒)。mkq driver のみ有効。
+	QueueIdlePollSeconds *int  `mapstructure:"queueIdlePollSeconds"`
+	EnableIPRateLimit    *bool `mapstructure:"enableIpRateLimit"`
 	// DisableEndpointRateLimits, when true, drops the per-endpoint rate
 	// limit table entirely. Intended for benchmarking parity with Misskey TS
 	// `NODE_ENV=development`. Never enable in production. Default false.
@@ -340,7 +343,9 @@ type Config struct {
 	DisableHSTS bool
 	BcryptCost  int
 	// NoteHookConcurrency: 0 なら実行時に既定 (GOMAXPROCS x 2) を使う。
-	NoteHookConcurrency       int
+	NoteHookConcurrency int
+	// QueueIdlePollSeconds: 0 なら driver 既定。
+	QueueIdlePollSeconds      int
 	EnableIPRateLimit         bool
 	DisableEndpointRateLimits bool
 	SetupPassword             string
@@ -515,6 +520,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"disableHsts",
 		"bcryptCost",
 		"noteHookConcurrency",
+		"queueIdlePollSeconds",
 		"crossOriginOpenerPolicy",
 		"enableIpRateLimit",
 		"disableEndpointRateLimits",
@@ -560,6 +566,11 @@ func resolve(src *Source) (*Config, error) {
 	bcryptCost := password.DefaultCost
 	// 0 以下は「未設定」として実行時の既定に委ねる。**負値を素通しすると
 	// semaphore が容量 0 になり、フックが 1 本も走らなくなる。**
+	queueIdlePollSeconds := 0
+	if src.QueueIdlePollSeconds != nil && *src.QueueIdlePollSeconds > 0 {
+		queueIdlePollSeconds = *src.QueueIdlePollSeconds
+	}
+
 	noteHookConcurrency := 0
 	if src.NoteHookConcurrency != nil {
 		if *src.NoteHookConcurrency < 0 {
@@ -639,6 +650,7 @@ func resolve(src *Source) (*Config, error) {
 		DisableHSTS:               src.DisableHSTS,
 		BcryptCost:                bcryptCost,
 		NoteHookConcurrency:       noteHookConcurrency,
+		QueueIdlePollSeconds:      queueIdlePollSeconds,
 		EnableIPRateLimit:         enableIPRateLimit,
 		DisableEndpointRateLimits: disableEndpointRateLimits,
 		SetupPassword:             src.SetupPassword,
