@@ -74,11 +74,14 @@ type Config struct {
 	// behaviour pre-v1.0.1).
 	MaxMetricsDataPoints int
 
-	// IdlePollInterval is how long an idle worker waits on the marker key
-	// before re-checking. 0 applies `defaultIdlePollInterval`.
+	// IdlePollInterval is the floor of how long an idle worker waits on the
+	// marker key before re-checking. 0 applies mkq's own default.
+	//
+	// mkq v1.0.4 以降、空振りのたびに待ちが倍になり 30 秒で頭打ちになる。
+	// つまりこれは初回の待ちで、アイドルが続けば実際の間隔はもっと長い。
 	//
 	// **ジョブ取得の遅さには繋がらない** (marker push で起きるため)。
-	// 短くするとアイドル時の Redis コマンド数が worker 数に比例して増える。
+	// 停止の速さにも影響しない (Stop が marker を突いて起こす)。
 	IdlePollInterval time.Duration
 
 	// QueueConcurrency overrides the per-queue worker pool size for the

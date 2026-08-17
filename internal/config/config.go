@@ -129,8 +129,9 @@ type Source struct {
 	// NoteHookConcurrency は投稿後のベストエフォートフックを種別ごとに
 	// 何本まで同時に走らせるか。未設定なら GOMAXPROCS x 2。
 	NoteHookConcurrency *int `mapstructure:"noteHookConcurrency"`
-	// QueueIdlePollSeconds はジョブが無いときに worker が marker を待つ秒数。
-	// 未設定なら mkq driver の既定 (5 秒)。mkq driver のみ有効。
+	// QueueIdlePollSeconds はジョブが無いときに worker が marker を待つ秒数の
+	// 下限。空振りのたびに mkq が待ちを倍にし 30 秒で頭打ちにするので、
+	// これは初回の待ちにあたる。未設定なら mkq の既定。mkq driver のみ有効。
 	QueueIdlePollSeconds *int  `mapstructure:"queueIdlePollSeconds"`
 	EnableIPRateLimit    *bool `mapstructure:"enableIpRateLimit"`
 	// DisableEndpointRateLimits, when true, drops the per-endpoint rate
@@ -564,13 +565,14 @@ func resolve(src *Source) (*Config, error) {
 	// **範囲外は既定に落として警告する。** 設定の書き間違いで cost 4 の
 	// ハッシュを量産すると、気づいた時点で全員のパスワードが弱い。
 	bcryptCost := password.DefaultCost
-	// 0 以下は「未設定」として実行時の既定に委ねる。**負値を素通しすると
-	// semaphore が容量 0 になり、フックが 1 本も走らなくなる。**
+	// 0 以下は「未設定」として driver 既定に委ねる。
 	queueIdlePollSeconds := 0
 	if src.QueueIdlePollSeconds != nil && *src.QueueIdlePollSeconds > 0 {
 		queueIdlePollSeconds = *src.QueueIdlePollSeconds
 	}
 
+	// 0 以下は「未設定」として実行時の既定に委ねる。**負値を素通しすると
+	// semaphore が容量 0 になり、フックが 1 本も走らなくなる。**
 	noteHookConcurrency := 0
 	if src.NoteHookConcurrency != nil {
 		if *src.NoteHookConcurrency < 0 {

@@ -1550,12 +1550,16 @@ func TestIdlePollInterval_DoesNotDelayPickup(t *testing.T) {
 	}
 }
 
-// Shutdown が worker 数に比例して遅くならないこと。
+// Shutdown が idlePollInterval にも worker 数にも比例しないこと。
 //
 // **待ち時間の実体は BZPOPMIN のタイムアウト。** 発行済みの読み取りは ctx
-// キャンセルで中断できないので、停止には最大 idlePollInterval だけかかる。
-// 直列に止めるとその待ちが worker 数だけ積み上がり、再起動が長引く
-// (実測: interval 1 秒 / 既定 worker 数で 4.5 秒 → 並列化で 0.6 秒)。
+// キャンセルで中断できない。mkq v1.0.4 で Stop が marker key を突いて
+// 待機中の dispatcher を起こすようになり、1 worker あたりの待ちが消えた
+// (実測: interval 2 秒で 9ms)。それ以前は 1 worker あたり最大 interval で、
+// 直列に止めると worker 数だけ積み上がっていた (interval 1 秒 / 既定
+// worker 数で 4.5 秒 → 並列化で 0.6 秒)。
+//
+// 両方の退行を見る。片方だけなら劣化は小さいが、揃うと再起動が長引く。
 func TestShutdown_DoesNotScaleWithWorkerCount(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushRedis(t)
@@ -1579,9 +1583,10 @@ func TestShutdown_DoesNotScaleWithWorkerCount(t *testing.T) {
 	srv.Shutdown()
 	elapsed := time.Since(start)
 
-	// 並列なら interval 1 回分 + α で済む。直列だと worker 数倍に伸びる。
-	if elapsed > 2*interval {
-		t.Fatalf("shutdown に %v かかった (interval=%v)。worker を直列に止めている", elapsed, interval)
+	// marker で起こせていれば ms 台。CI の負荷を見込んで interval の 1/2 を
+	// 上限にする (実測 9ms なので 100 倍以上の余裕がある)。
+	if elapsed > interval/2 {
+		t.Fatalf("shutdown に %v かかった (interval=%v)。marker で起こせていないか worker を直列に止めている", elapsed, interval)
 	}
 	t.Logf("interval=%v / shutdown %v", interval, elapsed.Round(time.Millisecond))
 }
