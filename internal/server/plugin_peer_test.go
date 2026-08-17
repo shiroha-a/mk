@@ -174,8 +174,35 @@ func TestNormalizePeerHost(t *testing.T) {
 		"https://example.com":  "example.com",
 		"https://example.com/": "example.com",
 		"  example.com  ":      "example.com",
+		"example.com:3000":     "example.com:3000",
+		"xn--r8jz45g.example":  "xn--r8jz45g.example", // IDN は punycode で来る
 	} {
 		assert.Equal(t, want, normalizePeerHost(in), in)
+	}
+}
+
+// ホスト名の形をしていない値は空にする。
+//
+// **`@` が要点。** 素通しすると peerURL / nodeinfo の URL に連結されて userinfo
+// として解釈され、宣言した宛先とは別のホストへ署名付きのリクエストが飛ぶ。
+func TestNormalizePeerHost_RejectsNonHost(t *testing.T) {
+	for _, in := range []string{
+		"",
+		"example.test@10.0.0.1",
+		"example.test@evil.example",
+		"example.test/../../evil",
+		"example.test?x=1",
+		"example.test#frag",
+		"example.test/path",
+		"example.test:80/x",
+		"exa mple.test",
+		"example.test:notaport",
+		"-example.test",
+		"example.test.",
+		"[::1]",
+		"日本語.example", // punycode 化されていない値は受けない
+	} {
+		assert.Equal(t, "", normalizePeerHost(in), in)
 	}
 }
 

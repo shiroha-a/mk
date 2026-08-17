@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -178,7 +179,7 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 	}
 	host = normalizePeerHost(host)
 	if host == "" {
-		return "", fmt.Errorf("plugin peer: 宛先が空です")
+		return "", fmt.Errorf("plugin peer: 宛先が空か、ホスト名として不正です")
 	}
 	if host == p.deps.selfHost {
 		return "", fmt.Errorf("plugin peer: 自分自身には送れません")
@@ -408,14 +409,39 @@ func (p *pluginPeer) verify(req *http.Request, body []byte) (string, error) {
 	if actor.Host == nil || *actor.Host == "" {
 		return "", fmt.Errorf("送信元がローカルユーザーです")
 	}
-	return normalizePeerHost(*actor.Host), nil
+	// 受信側でも形を見る。ここを通した値はブロック判定の key になり、そのまま
+	// プラグインの handler へ渡る。
+	from := normalizePeerHost(*actor.Host)
+	if from == "" {
+		return "", fmt.Errorf("送信元のホスト名が不正です")
+	}
+	return from, nil
 }
 
-// normalizePeerHost trims a host to its comparable form.
+// peerHostPattern is the shape a peer host must have: LDH labels, optional port.
+//
+// IDN は Misskey と同じく punycode で保存されるので ASCII に閉じてよい。
+var peerHostPattern = regexp.MustCompile(
+	`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$`)
+
+// normalizePeerHost trims a host to its comparable form, returning "" when the
+// result is not a plain host.
+//
+// **形まで見るのがこの関数の仕事。** scheme を剥がして小文字にするだけだと
+// `example.test@10.0.0.1` のような値が peerURL / nodeinfo の URL にそのまま
+// 連結され、userinfo として解釈されて別のホストへ飛ぶ。この層は「宛先の検査は
+// ここで担保する」と宣言しているので、プラグインに任せてはいけない。
+//
+// SSRF 自体は outbound が safehttp なので塞がっている。ここで防ぐのは、意図
+// しない**公開**ホストへ署名付きのリクエストを送ってしまうこと。
 func normalizePeerHost(host string) string {
 	host = strings.TrimSpace(host)
 	host = strings.TrimPrefix(host, "https://")
 	host = strings.TrimPrefix(host, "http://")
 	host = strings.TrimSuffix(host, "/")
-	return strings.ToLower(host)
+	host = strings.ToLower(host)
+	if !peerHostPattern.MatchString(host) {
+		return ""
+	}
+	return host
 }
