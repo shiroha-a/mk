@@ -147,6 +147,9 @@ type InboxProcessor struct {
 	// telemetry は受信結果をホストごとに記録する (#2471)。未配線なら記録
 	// しないだけで、inbox 処理そのものには影響しない。
 	telemetry DeliveryTelemetry
+	// replayGuard は処理済み activity を覚えて再投函を弾く。未配線なら
+	// 保護しないだけ (従来どおり冪等性に委ねる)。
+	replayGuard InboxReplayGuard
 	// keyCache は受信 HTTP Signature verify の公開鍵パースをメモ化する (#1426)。
 	// InboxProcessor は worker 間共有の単一インスタンス (router.go:616) なので、
 	// 同一 remote actor からの連続 activity で x509 パースを 1 回に集約できる
@@ -167,6 +170,16 @@ func NewInboxProcessor(p FederationProcessor) *InboxProcessor {
 // queue を ack するが Process は呼ばない)。
 func (p *InboxProcessor) SetLDSignatureVerifier(v LDSignatureVerifier) {
 	p.ldVerifier = v
+}
+
+// SetInboxReplayGuard wires the guard that drops re-posted activities.
+//
+// **署名検証を通った経路にしか効かせない。** activity.id は body の値なので、
+// 署名で本文が縛られていて、かつ authorizeActor が id の host と actor の host の
+// 一致を確かめた後でなければ信用できない。信用できない id を覚えると、他人の
+// activity id を先に登録して**本物を落とす**ことができてしまう。
+func (p *InboxProcessor) SetInboxReplayGuard(g InboxReplayGuard) {
+	p.replayGuard = g
 }
 
 // SetSignatureVerifier wires a verifier used to re-verify the inbound
@@ -279,6 +292,10 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 	started := time.Now()
 	// 署名者は Process へ渡してリレー転送の判定に使う (#2338)。
 	var signer *model.User
+	// activityID は再投函の判定に使う。**署名検証を通った経路でだけ埋まる** —
+	// 未署名の body から採った id は相手の申告でしかなく、覚えると他人の id を
+	// 先に登録して本物を落とせる。
+	activityID := ""
 	if len(payload.Headers) > 0 && p.verifier != nil {
 		actor, keyType, err := p.verifyPayload(payload)
 		if err != nil {
@@ -316,6 +333,15 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		if actor != nil && actor.Host != nil {
 			host = *actor.Host
 		}
+		// **ここまで来て初めて activity.id を信用できる。** 署名が本文を縛って
+		// いて、authorizeActor が id の host と actor の host の一致を見た後。
+		activityID = federation.ExtractActivityID(payload.Body)
+		if p.isReplay(activityID) {
+			slog.Debug("inbox: activity already processed, dropping replay",
+				"host", host, "activityId", activityID)
+			p.recordInboxTelemetry(host, deliveryhealth.ClassDuplicate, started, "")
+			return nil
+		}
 		p.touchInstance(actor)
 		p.recordSignatureCapability(actor, keyType, payload.Body)
 		p.commitChart(actor)
@@ -342,8 +368,37 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		p.recordInboxTelemetry(host, deliveryhealth.ClassProcessingError, started, err.Error())
 		return fmt.Errorf("process inbox activity: %w", err)
 	}
+	// **成功してから覚える。** 先に覚えると、処理が落ちてキューが再試行した
+	// ときに自分の再試行を再投函として捨ててしまう。
+	p.rememberActivity(activityID)
 	p.recordInboxTelemetry(host, deliveryhealth.ClassAccepted, started, "")
 	return nil
+}
+
+// isReplay reports whether this activity was already processed.
+//
+// guard の障害では**落とさない** (fail-open)。Redis が不調なだけで連合の受信が
+// 止まると、再投函を防ぐより害が大きい。
+func (p *InboxProcessor) isReplay(activityID string) bool {
+	if p.replayGuard == nil || activityID == "" {
+		return false
+	}
+	seen, err := p.replayGuard.Seen(context.Background(), activityID)
+	if err != nil {
+		slog.Warn("inbox: replay guard degraded, accepting without the check", "err", err)
+		return false
+	}
+	return seen
+}
+
+// rememberActivity records a successfully processed activity.
+func (p *InboxProcessor) rememberActivity(activityID string) {
+	if p.replayGuard == nil || activityID == "" {
+		return
+	}
+	if err := p.replayGuard.Remember(context.Background(), activityID); err != nil {
+		slog.Warn("inbox: failed to record processed activity", "activityId", activityID, "err", err)
+	}
 }
 
 // verifyPayload reconstructs the signed HTTP request from the queued

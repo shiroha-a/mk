@@ -830,3 +830,125 @@ func TestInboxProcessor_SignerIsActor_ForbiddenDirectiveDropped(t *testing.T) {
 	require.Len(t, stub.calls, 0, "forbidden directive は signer==actor でも drop する")
 	assert.Equal(t, 1, ldv.forbiddenCount)
 }
+
+// memReplayGuard is an in-memory InboxReplayGuard for tests.
+type memReplayGuard struct {
+	seen map[string]bool
+	err  error
+}
+
+func newMemReplayGuard() *memReplayGuard { return &memReplayGuard{seen: map[string]bool{}} }
+
+func (g *memReplayGuard) Seen(_ context.Context, id string) (bool, error) {
+	if g.err != nil {
+		return false, g.err
+	}
+	return g.seen[id], nil
+}
+
+func (g *memReplayGuard) Remember(_ context.Context, id string) error {
+	if g.err != nil {
+		return g.err
+	}
+	g.seen[id] = true
+	return nil
+}
+
+// signedReplayFixture builds a verifier + signed payload for one remote actor.
+// 既存の signedInboxFixture (telemetry test 側) は actor に URI を持たせないので、
+// authorizeActor を通る形の別ヘルパにしてある。
+func signedReplayFixture(t *testing.T, body []byte) (*stubVerifier, queue.InboxPayload) {
+	t.Helper()
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+	host := "remote.example"
+	aliceURI := "https://remote.example/users/alice"
+	v := &stubVerifier{actor: &model.User{ID: "alice", Host: &host, URI: &aliceURI}, pubKey: pub}
+	return v, signedInboxPayload(t, key, body)
+}
+
+// 同じ activity を 2 度投げたら 2 度目は処理されないこと。
+//
+// **署名の Date に窓を入れても、窓の内側はまだ投げ直せる。** ハンドラは冪等
+// なので単発の再送は無害だが、Undo(Follow) のような「状態を戻す」活動を後から
+// 差し込まれると連合の状態が巻き戻る。
+func TestInboxProcessor_DropsReplayedActivity(t *testing.T) {
+	body := []byte(`{"id":"https://remote.example/follows/1","type":"Follow","actor":"https://remote.example/users/alice"}`)
+	verifier, payload := signedReplayFixture(t, body)
+
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+	p.SetInboxReplayGuard(newMemReplayGuard())
+
+	task := driver.RawTask{TypeName: queue.TaskTypeInbox, Body: mustEncode(t, payload)}
+	require.NoError(t, p.Handle(context.Background(), task))
+	require.Len(t, stub.calls, 1)
+
+	// 同じ payload をそのまま投げ直す (= 捕まえた署名付きリクエストの再投函)。
+	require.NoError(t, p.Handle(context.Background(), task))
+	assert.Len(t, stub.calls, 1, "再投函が処理されている")
+}
+
+// **処理が失敗したら覚えない。** 先に覚えると、キューの再試行を自分で
+// 再投函として捨ててしまい、activity が永久に失われる。
+func TestInboxProcessor_RetryAfterFailureIsNotDropped(t *testing.T) {
+	body := []byte(`{"id":"https://remote.example/follows/2","type":"Follow","actor":"https://remote.example/users/alice"}`)
+	verifier, payload := signedReplayFixture(t, body)
+
+	failing := true
+	stub := &stubFedProcessor{returnFn: func([]byte) error {
+		if failing {
+			return errors.New("transient")
+		}
+		return nil
+	}}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+	p.SetInboxReplayGuard(newMemReplayGuard())
+
+	task := driver.RawTask{TypeName: queue.TaskTypeInbox, Body: mustEncode(t, payload)}
+	require.Error(t, p.Handle(context.Background(), task))
+	require.Len(t, stub.calls, 1)
+
+	// 再試行は通ること。
+	failing = false
+	require.NoError(t, p.Handle(context.Background(), task))
+	assert.Len(t, stub.calls, 2, "再試行が再投函として捨てられている")
+}
+
+// guard が壊れていても受信は止めない (fail-open)。**Redis の不調で連合の受信が
+// 止まるほうが、再投函を通すより害が大きい。**
+func TestInboxProcessor_ReplayGuardFailureIsFailOpen(t *testing.T) {
+	body := []byte(`{"id":"https://remote.example/follows/3","type":"Follow","actor":"https://remote.example/users/alice"}`)
+	verifier, payload := signedReplayFixture(t, body)
+
+	guard := newMemReplayGuard()
+	guard.err = errors.New("redis down")
+
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+	p.SetInboxReplayGuard(guard)
+
+	task := driver.RawTask{TypeName: queue.TaskTypeInbox, Body: mustEncode(t, payload)}
+	require.NoError(t, p.Handle(context.Background(), task))
+	assert.Len(t, stub.calls, 1, "guard 障害で受信が止まっている")
+}
+
+// guard 未配線でも従来どおり動くこと。
+func TestInboxProcessor_WorksWithoutReplayGuard(t *testing.T) {
+	body := []byte(`{"id":"https://remote.example/follows/4","type":"Follow","actor":"https://remote.example/users/alice"}`)
+	verifier, payload := signedReplayFixture(t, body)
+
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+
+	task := driver.RawTask{TypeName: queue.TaskTypeInbox, Body: mustEncode(t, payload)}
+	require.NoError(t, p.Handle(context.Background(), task))
+	require.NoError(t, p.Handle(context.Background(), task))
+	assert.Len(t, stub.calls, 2, "guard 未配線では従来どおり両方処理する")
+}

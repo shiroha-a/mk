@@ -867,6 +867,11 @@ func (s *Server) setupRoutes() {
 	// field があれば RsaSignature2017 + 2026.5.4 hardening を実行する。signature
 	// 無し / verify pass の activity は素通し、verify fail は drop。
 	inboxProcessor.SetLDSignatureVerifier(corefederation.NewLDSignatureVerifier(publickeyRepo))
+	// 処理済み activity の再投函を弾く。署名の Date に窓を入れても、窓の内側は
+	// まだ投げ直せる。**Default インスタンスを使う** — 2FA の replay guard と
+	// 同じ用途 (短命の使用済みマーカー) で、timelines / reactions のような
+	// 用途別インスタンスに載せる理由が無い。
+	inboxProcessor.SetInboxReplayGuard(processors.NewRedisInboxReplayGuard(s.redis.Default))
 	// chartHook は後段で SetChartHook 注入する (deliverProcessor と同じ pattern)。
 	s.queueServer.Handle(queue.TaskTypeInbox, inboxProcessor.Handle)
 

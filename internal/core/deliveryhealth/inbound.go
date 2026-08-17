@@ -26,12 +26,16 @@ const (
 	ClassLDSignatureFailed OutcomeClass = "ldSignatureFailed"
 	// ClassProcessingError は処理中の失敗。retry される。
 	ClassProcessingError OutcomeClass = "processingError"
+	// ClassDuplicate は処理済みの activity の再投函。**異常ではない**
+	// (正常な二重配送でも出る) が、急に増えたら再投函を試されている合図になる。
+	ClassDuplicate OutcomeClass = "duplicate"
 )
 
 // AllInboundClasses lists every inbound class in a stable order.
 var AllInboundClasses = []OutcomeClass{
 	ClassAccepted, ClassUnsupported, ClassSignatureFailed, ClassBlocked,
 	ClassActorUnauthorized, ClassLDSignatureFailed, ClassProcessingError,
+	ClassDuplicate,
 }
 
 // inboundSuccessClasses are the classes that count as "we took it".
@@ -43,6 +47,9 @@ var AllInboundClasses = []OutcomeClass{
 var inboundSuccessClasses = map[OutcomeClass]struct{}{
 	ClassAccepted:    {},
 	ClassUnsupported: {},
+	// duplicate も成功側。相手は正しく送っていて、こちらが既に処理済みなだけ。
+	// 失敗に積むと「二重配送する相手との連合が壊れている」に見える。
+	ClassDuplicate: {},
 }
 
 // SucceededInbound reports whether the class counts as accepted traffic.
