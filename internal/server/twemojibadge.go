@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/labstack/echo/v4"
 	"github.com/srwiley/oksvg"
 	"github.com/srwiley/rasterx"
@@ -35,13 +36,26 @@ const (
 	badgeContrast = 1.75
 )
 
+// badgeCacheSize bounds how many rendered badges are kept in memory.
+//
+// 同梱の twemoji は 4000 件強で、1 件の PNG は数 KB なので全件でも数 MB。
+// 4096 にしておけば実質 miss しない。
+const badgeCacheSize = 4096
+
 // twemojiBadgeHandler serves /twemoji-badge/:name.
 type twemojiBadgeHandler struct {
 	dir string
+	// cache は生成済みの PNG。**`/api` の外なのでレート制限が掛からない**
+	// (middleware は api グループにしか付いていない) 一方、1 リクエストあたり
+	// SVG のラスタライズと 512x512 のピクセルループ 2 周で 15ms 前後かかる。
+	// 名前空間は同梱ファイルで固定なので、素直に全部持ってよい。
+	cache *lru.Cache[string, []byte]
 }
 
 func newTwemojiBadgeHandler(dir string) *twemojiBadgeHandler {
-	return &twemojiBadgeHandler{dir: dir}
+	// lru.New は size <= 0 でのみ error を返す。badgeCacheSize は正の定数。
+	cache, _ := lru.New[string, []byte](badgeCacheSize)
+	return &twemojiBadgeHandler{dir: dir, cache: cache}
 }
 
 // Serve renders a Twemoji SVG into the monochrome badge PNG used by Web Push.
@@ -68,19 +82,38 @@ func (h *twemojiBadgeHandler) Serve(c echo.Context) error {
 		return echo.NewHTTPError(http.StatusNotFound)
 	}
 
-	svg, err := os.ReadFile(filepath.Join(h.dir, base+".svg"))
+	out, err := h.badge(base)
 	if err != nil {
-		return echo.NewHTTPError(http.StatusNotFound)
-	}
-
-	out, err := renderTwemojiBadge(svg)
-	if err != nil {
-		return echo.NewHTTPError(http.StatusInternalServerError)
+		return err
 	}
 
 	c.Response().Header().Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'")
 	c.Response().Header().Set("Cache-Control", "max-age=2592000")
 	return c.Blob(http.StatusOK, "image/png", out)
+}
+
+// badge returns the rendered PNG for base, rendering it on first use.
+//
+// **失敗はキャッシュしない。** ファイルが後から置かれる構成 (bind mount で
+// 差し替える等) で、一度 404 になった名前が永久に 404 のままになる。
+func (h *twemojiBadgeHandler) badge(base string) ([]byte, error) {
+	if h.cache != nil {
+		if out, ok := h.cache.Get(base); ok {
+			return out, nil
+		}
+	}
+	svg, err := os.ReadFile(filepath.Join(h.dir, base+".svg"))
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusNotFound)
+	}
+	out, err := renderTwemojiBadge(svg)
+	if err != nil {
+		return nil, echo.NewHTTPError(http.StatusInternalServerError)
+	}
+	if h.cache != nil {
+		h.cache.Add(base, out)
+	}
+	return out, nil
 }
 
 // renderTwemojiBadge rasterises the SVG and applies the upstream pipeline.

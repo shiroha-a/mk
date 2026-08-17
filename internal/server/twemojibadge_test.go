@@ -124,3 +124,36 @@ func TestNormalise(t *testing.T) {
 	// レンジが潰れている場合はそのまま返す。
 	assert.InDelta(t, 42, normalise(42, 100, 100), 0.01)
 }
+
+// 2 回目はキャッシュから返すこと。
+//
+// **この endpoint は `/api` の外なのでレート制限が掛からない** (middleware は
+// api グループにしか付いていない) 一方、1 回のラスタライズが 15ms 前後かかる。
+// 元の SVG を消しても 2 回目が返ることで、再生成していないことを示す。
+func TestTwemojiBadge_CachesRenderedPNG(t *testing.T) {
+	dir := t.TempDir()
+	svgPath := filepath.Join(dir, "1f004.svg")
+	require.NoError(t, os.WriteFile(svgPath, []byte(testSVG), 0o600))
+	h := newTwemojiBadgeHandler(dir)
+
+	first := doBadgeReq(t, h, "1f004.png")
+	require.Equal(t, http.StatusOK, first.Code)
+
+	require.NoError(t, os.Remove(svgPath))
+
+	second := doBadgeReq(t, h, "1f004.png")
+	require.Equal(t, http.StatusOK, second.Code, "2 回目が再生成に落ちている")
+	assert.Equal(t, first.Body.Bytes(), second.Body.Bytes())
+}
+
+// 見つからなかった名前はキャッシュしないこと。**キャッシュすると、後から
+// ファイルを置いた構成で永久に 404 のままになる。**
+func TestTwemojiBadge_DoesNotCacheMisses(t *testing.T) {
+	dir := t.TempDir()
+	h := newTwemojiBadgeHandler(dir)
+
+	require.Equal(t, http.StatusNotFound, doBadgeReq(t, h, "1f004.png").Code)
+
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "1f004.svg"), []byte(testSVG), 0o600))
+	assert.Equal(t, http.StatusOK, doBadgeReq(t, h, "1f004.png").Code)
+}
