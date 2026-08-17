@@ -37,6 +37,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `disableHsts` | bool | `false` | HSTSヘッダーを無効化。`url` が https のとき既定で `Strict-Transport-Security: max-age=15552000; preload` を付ける (upstream ServerService と同値・同条件)。http の構成では `disableHsts` に関わらず付けない — 平文で配っている host に付くと、ブラウザが以後 https でしか開かなくなり max-age の間は戻せない |
 | `bcryptCost` | int | `10` | アカウントパスワードの bcrypt work factor (4-31)。upstream は全経路 8 固定で設定不可。**+1 ごとにハッシュ生成も検証も倍**になるので、ログインの待ち時間でもある (実測: 10=約50ms / 12=約185ms / 13=約370ms)。cost は `$2a$NN$` に埋まるので上げても drop-in で TS 側が検証できる。既存利用者のハッシュはログイン成功時に焼き直されるので、上げれば戻ってきた順に移行する。範囲外は警告して既定に落とす |
 | `crossOriginOpenerPolicy` | string | `off` | `Cross-Origin-Opener-Policy` の値。`off` / `same-origin-allow-popups` / `same-origin`。upstream はテスト専用の cross-origin-isolation モードでしか出さない。**既定を off にしてあるのは、外部アプリが認証ページをポップアップで開いて閉じるのを待つ形の連携を切りうるため。** MiAuth / OAuth は callbackUrl で完結するので通常は問題にならないが、切れたときの症状から原因に辿り着きにくい。未知の値は警告して無視 |
+| `noteHookConcurrency` | int | `GOMAXPROCS * 2` | 投稿後のベストエフォートフック (タイムライン配布 / 通知 / 連合 / チャンネル / 索引 / チャート / webhook) を種別ごとに何本まで同時に走らせるか。**絞らないと応答のテールが伸びる** — 投稿の集中で数百 goroutine が生まれ、応答を返す goroutine と実行機会を奪い合うため (2 CPU の実測で `notes/create` p95 が 105ms → 181ms)。枠は「タイムライン配布」と「その他」の 2 つに分けてあり、遅いフックが配布を止めて反映が遅れるのを防ぐ。0 以下は既定値扱い |
 | `enableIpRateLimit` | bool | `true` | IPベースのレート制限を有効化 |
 | `disableEndpointRateLimits` | bool | `false` | per-endpoint rate limit table 全体を無効化。Misskey TS の `NODE_ENV=development` 相当で、ベンチマーク等で公正比較する用途専用。**本番で絶対に使わない** |
 | `pidFile` | string | - | PIDファイルパス |
@@ -218,6 +219,7 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | `MK_DISABLEENDPOINTRATELIMITS` | `disableEndpointRateLimits` |
 | `MK_BCRYPTCOST` | `bcryptCost` |
 | `MK_CROSSORIGINOPENERPOLICY` | `crossOriginOpenerPolicy` |
+| `MK_NOTEHOOKCONCURRENCY` | `noteHookConcurrency` |
 
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
 

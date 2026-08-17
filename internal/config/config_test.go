@@ -399,6 +399,42 @@ redis:
 	}
 }
 
+// noteHookConcurrency は未設定/0 を「実行時の既定に委ねる」意味の 0 にする。
+//
+// **負値を素通しさせない。** そのまま semaphore の容量になると 0 枠になり、
+// 投稿後のフックが 1 本も走らなくなる。
+func TestLoad_NoteHookConcurrency(t *testing.T) {
+	base := `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`
+	for name, tc := range map[string]struct {
+		line string
+		want int
+	}{
+		"未設定は 0 (実行時の既定)": {"", 0},
+		"正の値はそのまま":        {"noteHookConcurrency: 32", 32},
+		"0 はそのまま":         {"noteHookConcurrency: 0", 0},
+		"負値は 0 に落とす":      {"noteHookConcurrency: -5", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTestConfig(t, base+tc.line+"\n")
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.NoteHookConcurrency)
+		})
+	}
+}
+
 func TestLoad_CustomCountsAndThreshold(t *testing.T) {
 	yaml := `
 url: https://example.com

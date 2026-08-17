@@ -4,7 +4,6 @@ package note
 import (
 	"context"
 	"errors"
-	"log/slog"
 	"math/rand"
 	"regexp"
 	"slices"
@@ -869,7 +868,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// ベストエフォートフックを非同期で並列実行する。各フックは独立しており、
 	// 失敗してもノート作成自体は成功扱い。TS版と同様にfire-and-forgetで配信する。
 	if s.fanoutHook != nil {
-		safeGo(func() { s.fanoutHook.OnNoteCreated(finalNote, in.User) })
+		safeGoKind(hookFanout, func() { s.fanoutHook.OnNoteCreated(finalNote, in.User) })
 	}
 	if s.notificationHook != nil {
 		safeGo(func() { s.notificationHook.OnNoteCreated(finalNote, in.User, replyTarget, renoteTarget) })
@@ -1045,19 +1044,6 @@ func (s *CreateService) isThreadMuted(userID string, threadNote *model.Note) boo
 	}
 	muted, err := s.threadMuteRepo.Exists(userID, threadID)
 	return err == nil && muted
-}
-
-// safeGo runs fn in a new goroutine, recovering from panics.
-// ベストエフォートフックでパニックが発生してもプロセス全体が落ちないようにする。
-func safeGo(fn func()) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("recovered panic in best-effort hook", "panic", r)
-			}
-		}()
-		fn()
-	}()
 }
 
 // mentionRegex matches @username and @username@host occurrences anywhere in

@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/cache"
 	"github.com/shiroha-a/mk/internal/core/chart"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/misc/redact"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -308,6 +309,14 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	}
 	if bcryptCost != password.DefaultCost {
 		slog.Info("bcrypt cost overridden", "cost", bcryptCost, "default", password.DefaultCost)
+	}
+
+	// 投稿後のベストエフォートフックの同時実行数。**絞らないと応答のテールが
+	// 伸びる** (負荷時に数百 goroutine が GOMAXPROCS 個の P を奪い合い、応答を
+	// 返す goroutine もその列に並ぶ)。0 なら core/note 側の既定が入る。
+	corenote.SetHookConcurrency(cfg.NoteHookConcurrency)
+	if cfg.NoteHookConcurrency > 0 {
+		slog.Info("note hook concurrency overridden", "perKind", cfg.NoteHookConcurrency)
 	}
 
 	e := echo.New()

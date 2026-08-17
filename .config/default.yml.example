@@ -105,6 +105,22 @@ port: 3000
 # side needs the opener.
 #crossOriginOpenerPolicy: off
 
+# How many best-effort hooks may run at once, per kind (default: GOMAXPROCS * 2).
+#
+# After a note is created mk-go fires 7 hooks (timeline fanout, notifications,
+# federation, channel, index, chart, webhook) on goroutines and returns without
+# waiting for them. Without a bound, a burst of posts spawns hundreds of
+# goroutines that compete with request handling for the scheduler, which shows
+# up as tail latency on notes/create (p95 nearly doubles) while p50 stays fine.
+#
+# Two budgets are kept: one for the timeline fanout and one shared by the rest,
+# so a slow hook cannot starve fanout and delay when posts reach timelines.
+#
+# Measured on a 2-CPU container (20 VU posting, 9 followers): total budget 8
+# gave notes/create p95 ~105ms vs ~181ms unbounded, with no cost to propagation
+# delay. Raise it if your instance has very wide fanout and CPU to spare.
+#noteHookConcurrency: 8
+
 #   ┌──────────────────────────┐
 #───┘ PostgreSQL configuration └────────────────────────────────
 
