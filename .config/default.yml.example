@@ -93,6 +93,18 @@ port: 3000
 # Out-of-range values are ignored with a warning.
 #bcryptCost: 10
 
+# Cross-Origin-Opener-Policy header (default: off).
+# "off" / "same-origin-allow-popups" / "same-origin".
+# Misskey TS never sends this outside its test-only cross-origin-isolation mode.
+#
+# Default is off because it can cut the window.opener link for third-party apps
+# that open an auth page in a popup and wait for it to close. MiAuth / OAuth
+# complete via callbackUrl so they do not depend on it, but the failure mode
+# ("I authorised it but the app never noticed") is hard to trace back here.
+# The frontend itself opens every window with `noopener`, so nothing on this
+# side needs the opener.
+#crossOriginOpenerPolicy: off
+
 #   ┌──────────────────────────┐
 #───┘ PostgreSQL configuration └────────────────────────────────
 

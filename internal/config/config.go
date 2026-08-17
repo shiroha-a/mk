@@ -189,6 +189,11 @@ type Source struct {
 	// 違反があると全利用者のブラウザ console に出るため、頼んでいない operator
 	// に配らないよう既定は off。
 	FrontendContentSecurityPolicy string `mapstructure:"frontendContentSecurityPolicy"`
+	// CrossOriginOpenerPolicy controls the `Cross-Origin-Opener-Policy`
+	// header: "off" (default) / "same-origin-allow-popups" / "same-origin".
+	// upstream は既定で出さない。既定を off にしてあるのは、外部アプリが認証
+	// ページをポップアップで開く形の連携を切りうるため。
+	CrossOriginOpenerPolicy string `mapstructure:"crossOriginOpenerPolicy"`
 
 	// MaxWorkers is the per-queue worker upper bound used by the
 	// auto-scale controller. Default: runtime.NumCPU() * 16.
@@ -377,10 +382,12 @@ type Config struct {
 	JobQueueAutoScale bool
 	// FrontendContentSecurityPolicy: "off" / "report-only" / "enforce" (#2425)。
 	FrontendContentSecurityPolicy string
-	MaxWorkers                    *int
-	MinWorkers                    *int
-	MaxWorkersGlobal              *int
-	AutoScaleCooldownSeconds      *int
+	// CrossOriginOpenerPolicy: "off" / "same-origin-allow-popups" / "same-origin"。
+	CrossOriginOpenerPolicy  string
+	MaxWorkers               *int
+	MinWorkers               *int
+	MaxWorkersGlobal         *int
+	AutoScaleCooldownSeconds *int
 
 	// JobQueueDriver is one of "asynq" (default) or "mkq".
 	JobQueueDriver string
@@ -502,6 +509,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"trustProxy",
 		"disableHsts",
 		"bcryptCost",
+		"crossOriginOpenerPolicy",
 		"enableIpRateLimit",
 		"disableEndpointRateLimits",
 		"mediaProxy",
@@ -656,6 +664,7 @@ func resolve(src *Source) (*Config, error) {
 		InboxJobKeepCompleted:         src.InboxJobKeepCompleted,
 		JobQueueAutoScale:             src.JobQueueAutoScale,
 		FrontendContentSecurityPolicy: src.FrontendContentSecurityPolicy,
+		CrossOriginOpenerPolicy:       src.CrossOriginOpenerPolicy,
 		MaxWorkers:                    src.MaxWorkers,
 		MinWorkers:                    src.MinWorkers,
 		MaxWorkersGlobal:              src.MaxWorkersGlobal,

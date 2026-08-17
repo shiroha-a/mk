@@ -219,6 +219,7 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `db.maxOpenConns` ほか pool tuning / `redis*.poolSize` | Go 固有 |
 | `redis*.path` | ioredis 互換の UDS alias。同じ config を TS/mk で共有する drop-in 切替のため |
 | `bcryptCost` | account password のハッシュ強度 (既定 10、範囲 4-31)。upstream は全経路 cost 8 固定で設定不可 |
+| `crossOriginOpenerPolicy` | `Cross-Origin-Opener-Policy` の値 (既定 `off`)。upstream はテスト専用の cross-origin-isolation モードでしか出さない |
 | `MK_*` 環境変数オーバーライド | upstream に同等機構なし |
 
 逆方向 (upstream にあって mk-go に無い): `threadPoolSize`、`logging.format` / `logging.level` / `logging.domains` / `logging.access` (2026.7.0 のログ基盤刷新分。`logging.sql.*` は mk-go にもある)、`sentryForBackend.disabledIntegrations`。
@@ -406,6 +407,9 @@ Drive へ保存する。**mk-go はこれを実装しない。** 未実装では
 | native session token の強度 | `secureRndstr(16)` = 62 文字集合 16 文字 (約 95 bit) | **同等** (英数字 62 文字集合 16 文字)。長さ 16 は TS の `isNativeUserToken` が長さだけで native / app token を判別するため動かせない。かつて 16 進 16 文字 (64 bit) で upstream より弱かったのを揃えた |
 | webhook 本文の完全性 | 共有秘密を `X-Misskey-Hook-Secret` に**平文で載せるだけ**。受信側は本文が改ざんされていないかを確認できない | 同ヘッダは互換のためそのまま送りつつ、`X-Hub-Signature-256: sha256=<hex>` (HMAC-SHA256(secret, body)) を**追加**する。**mk-go 独自の硬化**。未知のヘッダは無視されるだけなので既存の受信側は影響を受けない。秘密が空なら署名しない (空鍵の HMAC は誰でも作れるため) |
 | 受信 activity の再投函 | **無し。** ハンドラの冪等性で二重配送を吸収する設計 | 署名検証を通った activity の id を短命 (Date の窓 * 2 + 余裕) に覚えて、同じものの再投函を落とす。**mk-go 独自の硬化**。冪等性は二重配送を吸収できても「古い Undo(Follow) / Undo(Block) を後から差し込む」形は吸収できない。覚えるのは**処理が成功してから**で、先に覚えるとキューの再試行を自分で捨ててしまう。guard 障害では落とさない (fail-open)。id を信用するのは authorizeActor が id の host と actor の host の一致を確かめた後だけ — 未署名経路で覚えると他人の id を先に登録して本物を落とせる |
+| HSTS | `config.url` が https かつ `disableHsts` が偽なら `strict-transport-security: max-age=15552000; preload` | **同じ値・同じ条件**。かつて mk-go は `disableHsts` を設定として読んでいたのに header を出しておらず、TS から切り替えると HSTS が黙って消えていた (parity 修正)。`includeSubDomains` を足さないのも upstream に合わせている — 同じドメインの別サブドメインを平文で運用している構成を切替の瞬間に壊さないため |
+| `Cross-Origin-Opener-Policy` | テスト専用の `enableCrossOriginIsolation` を立てたときだけ `same-origin` | `crossOriginOpenerPolicy` で opt-in (既定 `off`)。**mk-go 独自の硬化**。既定を off にしてあるのは、外部アプリが認証ページをポップアップで開いて閉じるのを待つ形の連携を切りうるため。MiAuth / OAuth は callbackUrl で完結するので通常は問題にならないが、切れたときの症状 (「認証したのにアプリが気づかない」) から原因に辿り着きにくい |
+| `Cross-Origin-Resource-Policy` | 付けない | **付けない (意図的)**。`/files/` に付けると、他インスタンスのブラウザがドライブの画像を直接読む構成で表示が壊れる。Misskey は既定でメディアプロキシ (サーバー側取得) を通すので CORP の対象外だが、フロントが生 URL を使う経路が残っており、壊れ方が「一部の画像だけ出ない」形になって切り分けが難しい。得られる保護に対して代償が大きいので入れない |
 | drive requestHeaders の credential 除去 | 全 header を生保存 (`drive/files/create.ts`) | `authorization` / `cookie` / `set-cookie` / `x-api-key` / `api-key` / `proxy-authorization` を保存しない deny-list。**mk-go 独自の硬化** |
 | TOTP replay guard | **2026.6.0 で実装済** (`UserAuthService.validateOtp` が Redis `SET NX EX` で使用済トークンを記録、TTL 90s) | 同等機構を持つ (mk-go が先行実装)。**差分なし** |
 | inbox admission の署名対象 header 強制 | `(request-target)` / `host` / `date` / `digest` の要求、Host 一致、SHA-256 body 照合を実施 (`ActivityPubServerService.inbox`) | 同等。**mk-go 固有なのは body 照合を定数時間比較 (`subtle.ConstantTimeCompare`) にしている点のみ** |

@@ -381,6 +381,18 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	// 外部リンク遷移で閲覧中の URL が path ごと漏れるのを防ぐ (#2404)。
 	// upstream には無い mk-go 独自の hardening。
 	e.Use(middleware.ReferrerPolicy())
+	// upstream ServerService と同じ HSTS。**disableHsts を設定として読んで
+	// いたのに header を出していなかった**ので、TS から切り替えると黙って
+	// 消えていた。https でない構成では付けない。
+	e.Use(middleware.HSTS(cfg.URL, cfg.DisableHSTS))
+	// Cross-Origin-Opener-Policy (既定 off)。**不正な値は黙って無視されるので、
+	// ここで気づけるようにする** — 設定したつもりで効いていない状態が一番厄介。
+	if !middleware.ValidCOOPMode(cfg.CrossOriginOpenerPolicy) {
+		slog.Warn("crossOriginOpenerPolicy が不正なので無視します",
+			"value", cfg.CrossOriginOpenerPolicy,
+			"accepted", []string{middleware.COOPOff, middleware.COOPSameOriginAllowPopups, middleware.COOPSameOrigin})
+	}
+	e.Use(middleware.COOP(cfg.CrossOriginOpenerPolicy))
 
 	// WWW-Authenticate は auth.Authenticate より外側に置く。auth は無効 token に
 	// 対して自分で 401 を書くので、内側 (api グループ) に置くと middleware まで
