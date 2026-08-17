@@ -75,10 +75,15 @@ E2E_COMPOSE_FILES = \
 	tests/bench/docker-compose.bench.yml \
 	tests/queue-bench/docker-compose.queue-bench.yml
 
+# 使われている profile を全部渡す。**`down` は有効な profile の container しか
+# 消さない**ので、付けないと seed / runner 系が残る。存在しない profile 名を
+# 渡してもエラーにはならないので、ファイルごとに出し分けず全部並べる。
+E2E_PROFILES = --profile test --profile bench --profile outbound --profile inbound --profile report
+
 e2e-down-all: ## 検証用スタックを一括撤去 (本番 project mk は対象外)
 	@for f in $(E2E_COMPOSE_FILES); do \
 		printf "==> %s\n" "$$f"; \
-		docker compose -f "$$f" down -v --remove-orphans 2>&1 | tail -1 || true; \
+		docker compose -f "$$f" $(E2E_PROFILES) down -v --remove-orphans 2>&1 | tail -1 || true; \
 	done
 
 ##@ 更新 (運用)
@@ -255,7 +260,7 @@ federation-misskey-e2e: ## 連合テストを起動から撤去まで通しで�
 	./tests/federation/run-misskey-test.sh
 
 federation-misskey-down: ## 連合テストスタックを撤去
-	docker compose -f $(FEDERATION_MISSKEY_COMPOSE) down -v
+	docker compose -f $(FEDERATION_MISSKEY_COMPOSE) --profile test down -v
 
 federation-misskey-logs: ## 連合テストスタックのログを表示
 	docker compose -f $(FEDERATION_MISSKEY_COMPOSE) logs -f
@@ -273,7 +278,7 @@ dropin-test: ## drop-in e2e の smoke test を実行
 	docker compose -f $(DROPIN_COMPOSE) --profile test run --rm test-runner
 
 dropin-down: ## drop-in e2e スタックを撤去
-	docker compose -f $(DROPIN_COMPOSE) down -v
+	docker compose -f $(DROPIN_COMPOSE) --profile test down -v
 
 dropin-logs: ## drop-in e2e スタックのログを表示
 	docker compose -f $(DROPIN_COMPOSE) logs -f
@@ -290,7 +295,7 @@ dropin-mk-test: ## mk-go overlay に対する smoke test を実行
 	docker compose -f $(DROPIN_COMPOSE) -f $(DROPIN_MK_OVERLAY) --profile test run --rm test-runner
 
 dropin-mk-down: ## mk-go overlay を撤去
-	docker compose -f $(DROPIN_COMPOSE) -f $(DROPIN_MK_OVERLAY) down -v
+	docker compose -f $(DROPIN_COMPOSE) -f $(DROPIN_MK_OVERLAY) --profile test down -v
 
 dropin-mk-logs: ## mk-go overlay のログを表示
 	docker compose -f $(DROPIN_COMPOSE) -f $(DROPIN_MK_OVERLAY) logs -f
@@ -327,7 +332,7 @@ dropin-frontend-up: ## drop-in frontend e2e スタックを起動
 	docker compose -f $(DROPIN_FRONTEND_COMPOSE) up -d
 
 dropin-frontend-down: ## drop-in frontend e2e スタックを撤去
-	docker compose -f $(DROPIN_FRONTEND_COMPOSE) down -v
+	docker compose -f $(DROPIN_FRONTEND_COMPOSE) --profile test down -v
 
 dropin-frontend-logs: ## drop-in frontend e2e のログを表示
 	docker compose -f $(DROPIN_FRONTEND_COMPOSE) logs -f
@@ -348,7 +353,7 @@ dropin-frontend-mk-up: ## drop-in frontend e2e に mk overlay を適用して起
 	docker compose -f $(DROPIN_FRONTEND_COMPOSE) -f $(DROPIN_FRONTEND_MK_OVERLAY) up -d --build
 
 dropin-frontend-mk-down: ## drop-in frontend e2e の mk overlay を撤去
-	docker compose -f $(DROPIN_FRONTEND_COMPOSE) -f $(DROPIN_FRONTEND_MK_OVERLAY) down -v
+	docker compose -f $(DROPIN_FRONTEND_COMPOSE) -f $(DROPIN_FRONTEND_MK_OVERLAY) --profile test down -v
 
 dropin-frontend-swap-test: ## TS-A → mk-A 切替まで含む frontend e2e
 	./tests/dropin_frontend/run-frontend-swap-test.sh
@@ -439,8 +444,14 @@ bench-up: ## k6 ベンチのスタックを起動
 bench-run: ## k6 ベンチを実行
 	docker compose -f $(BENCH_COMPOSE) --profile bench up --abort-on-container-exit compare
 
+# `--profile bench` が要る。**`down` は有効な profile のコンテナしか消さない**
+# ので、付けないと seed / k6 / compare / profile-collector が残る。残った
+# container は撤去済み network の ID を掴んだままなので、次の `up` が
+# `network <hash> not found` で落ちる (queue-bench が #1163 / #2364 で
+# `--force-recreate` を撒いて対症療法していたのと同じ現象。こちらは残さない
+# ことで根本を断つ)。
 bench-down: ## k6 ベンチのスタックを撤去
-	docker compose -f $(BENCH_COMPOSE) down -v
+	docker compose -f $(BENCH_COMPOSE) --profile bench down -v
 
 bench-logs: ## k6 ベンチのログを表示
 	docker compose -f $(BENCH_COMPOSE) logs -f
@@ -499,8 +510,12 @@ queue-bench-report: ## queue-bench のレポートを生成
 queue-bench-all: queue-bench-seed queue-bench-outbound queue-bench-inbound queue-bench-report ## queue-bench を一通り実行
 
 queue-bench-down: ## queue-bench スタックを撤去
-	# `--remove-orphans` で profile container も含めて確実に cleanup する (#1163)。
-	docker compose -f $(QUEUE_BENCH_COMPOSE) down -v --remove-orphans
+	# **`--remove-orphans` では profile container は消えない。** あれが消すのは
+	# compose ファイルに定義が無い container で、profile 付きは「定義はあるが
+	# 有効でない」だけなので対象外 (実測で確認)。profile を明示する必要がある。
+	docker compose -f $(QUEUE_BENCH_COMPOSE) \
+		--profile bench --profile outbound --profile inbound --profile report \
+		down -v --remove-orphans
 
 queue-bench-logs: ## queue-bench のログを表示
 	docker compose -f $(QUEUE_BENCH_COMPOSE) logs -f
@@ -539,7 +554,7 @@ playwright-test: ## Playwright spec を実行 (mk-go backend)
 	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test run --rm --build playwright-runner
 
 playwright-down: ## Playwright スタックを撤去
-	docker compose -f $(PLAYWRIGHT_COMPOSE) down -v
+	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test down -v
 
 playwright-logs: ## Playwright スタックのログを表示
 	docker compose -f $(PLAYWRIGHT_COMPOSE) logs -f
@@ -559,7 +574,7 @@ playwright-ts-test: ## Playwright spec を実行 (TS backend、upstream 追従�
 	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test run --rm --build playwright-runner
 
 playwright-ts-down: ## Playwright TS スタックを撤去
-	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) down -v
+	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test down -v
 
 # Differential e2e diff harness (#2089) ― mk-go と Misskey TS を同一版で
 # 並列に立て、同一 endpoint のレスポンスを diff して entitycompat
@@ -575,7 +590,7 @@ diff-test: ## mk-go ↔ TS の値レベル diff を実行
 	docker compose -f $(DIFF_COMPOSE) --profile test run --rm --build diff-runner
 
 diff-down: ## 差分比較ハーネスのスタックを撤去
-	docker compose -f $(DIFF_COMPOSE) down -v
+	docker compose -f $(DIFF_COMPOSE) --profile test down -v
 
 diff-logs: ## 差分比較ハーネスのログを表示
 	docker compose -f $(DIFF_COMPOSE) logs -f
