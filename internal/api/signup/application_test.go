@@ -148,6 +148,28 @@ func TestApplication_DisabledReturns503(t *testing.T) {
 		doPost(env.handler.ApplicationRegister, `{"claimCode":"x","username":"a","password":"b"}`).Code)
 }
 
+// 登録を停止したら、承認制の入口も閉じること。
+//
+// **承認制それ自体がゲートでも、停止の操作は別に効かせる。** 承認制を入れる更新は
+// disableRegistration を false に正規化するので同時には立たないが、後から閉じた
+// ときに承認経路だけ開いたままだと「止めたのに止まっていない」ことになる。
+func TestApplication_DisableRegistrationClosesEntryPoints(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	env.meta.DisableRegistration = true
+	env.apps.app = approvedApplication()
+
+	assert.Equal(t, http.StatusServiceUnavailable,
+		doPost(env.handler.ApplicationApply, `{"answers":["よろしく"]}`).Code)
+	assert.Equal(t, http.StatusServiceUnavailable,
+		doPost(env.handler.ApplicationRegister, `{"claimCode":"c","username":"alice","password":"pw"}`).Code)
+	assert.Nil(t, env.apps.appliedAnswers, "申請が作られてはいけない")
+
+	// 状態の照会は読むだけなので閉じない。**閉じると、既に申請した人が結果を
+	// 見られなくなる。**
+	assert.Equal(t, http.StatusOK,
+		doPost(env.handler.ApplicationStatus, `{"claimCode":"c"}`).Code)
+}
+
 func TestApplication_NotWiredReturns503(t *testing.T) {
 	h, _, metaRepo := newTestHandler(t)
 	metaRepo.Meta = &model.Meta{ID: "x", ApprovalRequiredForSignup: true}

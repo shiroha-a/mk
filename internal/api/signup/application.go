@@ -55,26 +55,48 @@ func applicationView(a *model.SignupApplication) map[string]any {
 }
 
 // approvalReady writes an error response and returns ok=false when the flow is
-// unavailable.
+// unavailable. 通ったときは fetch 済みの meta を返す (呼び出し側が引き直さない
+// ようにするため)。
 //
-// **戻り値を (ok, err) にしているのは、`c.JSON` が成功時に nil を返すため。**
+// **戻り値に ok を持たせているのは、`c.JSON` が成功時に nil を返すため。**
 // エラー応答を書いたことを err の非 nil で表そうとすると、書いた直後に呼び出し
 // 側が素通りして処理を続けてしまう。
-func (h *Handler) approvalReady(c echo.Context) (bool, error) {
+func (h *Handler) approvalReady(c echo.Context) (*model.Meta, bool, error) {
 	if h.applications == nil {
-		return false, c.JSON(http.StatusServiceUnavailable,
+		return nil, false, c.JSON(http.StatusServiceUnavailable,
 			apierr.Error("UNAVAILABLE", "Approval-based signup is not enabled.", "7c1c9c2f-1a2b-4c3d-8e5f-6a7b8c9d0e1f"))
 	}
 	meta, err := h.metaRepo.Fetch()
 	if err != nil {
-		return false, c.JSON(http.StatusInternalServerError,
+		return nil, false, c.JSON(http.StatusInternalServerError,
 			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	if !meta.ApprovalRequiredForSignup {
-		return false, c.JSON(http.StatusServiceUnavailable,
+		return nil, false, c.JSON(http.StatusServiceUnavailable,
 			apierr.Error("UNAVAILABLE", "Approval-based signup is not enabled.", "7c1c9c2f-1a2b-4c3d-8e5f-6a7b8c9d0e1f"))
 	}
-	return true, nil
+	return meta, true, nil
+}
+
+// approvalOpen is approvalReady plus the registration switch.
+//
+// **承認制それ自体がゲートでも、登録の停止は別に効かせる。** 承認制を入れる更新は
+// disableRegistration を false に正規化する (normalizeSignupConditions) が、その後に
+// 運営者が登録を閉じても承認経路は開いたままだった。荒らし対応で登録を止めたのに
+// 止まっていない、という形で表面化する。
+//
+// 状態の照会 (ApplicationStatus) には掛けない。読むだけで何も作らないので、
+// 既に申請した人が結果を見られなくなるほうが害が大きい。
+func (h *Handler) approvalOpen(c echo.Context) (*model.Meta, bool, error) {
+	meta, ok, err := h.approvalReady(c)
+	if !ok {
+		return nil, false, err
+	}
+	if meta.DisableRegistration {
+		return nil, false, c.JSON(http.StatusServiceUnavailable,
+			apierr.Error("UNAVAILABLE", "Registration is closed.", "7c1c9c2f-1a2b-4c3d-8e5f-6a7b8c9d0e1f"))
+	}
+	return meta, true, nil
 }
 
 // ApplicationApply handles POST /api/signup-application/apply.
@@ -82,7 +104,8 @@ func (h *Handler) approvalReady(c echo.Context) (bool, error) {
 // **クレームコードを返すのはここだけ。** 保存しているのは hash なので、以後
 // サーバー側から平文を出す手段は無い。失くしたら再申請してもらうしかない。
 func (h *Handler) ApplicationApply(c echo.Context) error {
-	if ok, err := h.approvalReady(c); !ok {
+	meta, ok, err := h.approvalOpen(c)
+	if !ok {
 		return err
 	}
 	var req struct {
@@ -114,11 +137,6 @@ func (h *Handler) ApplicationApply(c echo.Context) error {
 		}
 	}
 
-	meta, err := h.metaRepo.Fetch()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
 	answers, err := signupapplication.BuildAnswers(
 		signupapplication.ParseForm(meta.SignupApplicationForm), req.Answers)
 	if err != nil {
@@ -165,7 +183,8 @@ func (h *Handler) ApplicationStatus(c echo.Context) error {
 // 承認済みの申請に対して、実際にアカウントを作る。**招待コードは利用者に渡さない**
 // — ここで発行し、同じ流れで消費する。
 func (h *Handler) ApplicationRegister(c echo.Context) error {
-	if ok, err := h.approvalReady(c); !ok {
+	meta, ok, err := h.approvalOpen(c)
+	if !ok {
 		return err
 	}
 	var req struct {
@@ -180,11 +199,6 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 			apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	meta, err := h.metaRepo.Fetch()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
 	// testMode は通常の signup と同じくメール確認を丸ごと迂回する。フロントの
 	// test が確認リンクを踏めないため。
 	emailRequired := !h.testMode && meta.EmailRequiredForSignup
@@ -340,7 +354,7 @@ func (h *Handler) registerViaEmailConfirmation(
 // applicationForClaimCode resolves the caller's claim code, writing the error
 // response and returning ok=false when it cannot.
 func (h *Handler) applicationForClaimCode(c echo.Context) (*model.SignupApplication, bool, error) {
-	if ok, err := h.approvalReady(c); !ok {
+	if _, ok, err := h.approvalReady(c); !ok {
 		return nil, false, err
 	}
 	var req struct {
