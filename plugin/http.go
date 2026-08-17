@@ -11,6 +11,15 @@ import (
 // パスは `/api/plugin/<プラグイン名>/` の下に配置される。Misskey 本体の
 // エンドポイント空間とは**必ず分離する**: 将来 upstream が同名のエンドポイントを
 // 追加したときに衝突すると、API 互換 (本プロジェクトの最優先方針) が壊れる。
+//
+// 本体が用意するのは認証 (Request.UserID / IsModerator / IsAdministrator) と
+// body の上限 (1 MiB) まで。**次の 2 つはプラグイン側の責任になる**:
+//
+//   - 権限。Router は認証の有無しか見ない。管理用のルートを張っただけでは
+//     誰でも叩けるので、ハンドラの先頭で IsModerator などを確認すること。
+//   - レート制限。本体の per-endpoint テーブルはプラグインのパスを持たない
+//     ので、**登録したルートには上限が掛からない**。重い処理や外部への
+//     問い合わせを含むなら、自前で間隔を空けるか結果を持つこと。
 type Router interface {
 	// GET registers a handler. path is relative to the plugin's namespace and
 	// must start with "/".
