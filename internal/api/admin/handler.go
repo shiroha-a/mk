@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -704,7 +705,9 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 			clientPW = strings.TrimSpace(*req.SetupPassword)
 		}
 		if h.configSetupPassword != "" {
-			if clientPW != h.configSetupPassword {
+			// **定数時間で比較する。** ここは未認証で到達できる唯一の
+			// credential 検査で、素の != は一致した先頭バイト数だけ時間が延びる。
+			if subtle.ConstantTimeCompare([]byte(clientPW), []byte(h.configSetupPassword)) != 1 {
 				return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_INITIAL_PASSWORD", "Initial password is incorrect.", "97147c55-1ae1-4f6f-91d6-e1c3e0e76d62"))
 			}
 		} else if clientPW != "" {

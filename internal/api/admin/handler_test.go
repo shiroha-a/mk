@@ -1091,6 +1091,27 @@ func TestAccountsCreate_SetupPassword_ConfigSet_Mismatch(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "INCORRECT_INITIAL_PASSWORD")
 }
 
+// 前方一致・後方一致では通らないことを固定する。比較を定数時間の
+// subtle.ConstantTimeCompare にしてあるが、prefix 比較に書き換えても
+// 「wrong」を使う上のテストは通ってしまう。
+func TestAccountsCreate_SetupPassword_ConfigSet_PartialMatchRejected(t *testing.T) {
+	for name, sent := range map[string]string{
+		"prefix": "mysec",
+		"suffix": "secret",
+		"longer": "mysecretx",
+		"empty":  "",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _, _, _ := newTestHandler(t)
+			h.SetConfigSetupPassword("mysecret")
+			rec := doPost(h.AccountsCreate,
+				`{"username":"admin","password":"pass","setupPassword":"`+sent+`"}`, nil)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "INCORRECT_INITIAL_PASSWORD")
+		})
+	}
+}
+
 func TestAccountsCreate_SetupPassword_ConfigNotSet_ClientSendsNonEmpty(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	// configにsetupPasswordなし、クライアントが非空値を送信 → 拒否
