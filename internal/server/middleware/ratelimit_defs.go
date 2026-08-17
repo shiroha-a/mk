@@ -127,8 +127,29 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	// 30min 200 回 + 250ms minInterval、同 code (#1829)。
 	"signin-with-passkey": {Duration: 30 * time.Minute, Max: 200, MinInterval: 250 * time.Millisecond, RejectResponse: apierr.TooManyAuthenticationFailures},
 
+	// ── Auth (承認制の登録) ────────────────────────────
+	// 承認制は `/api/signup` を 403 で塞いで自分がゲートになる (#2557) ので、
+	// **signup が持っていた last-line guard もここが引き継ぐ**。captcha は
+	// 業者が 1 つも有効でないと素通りする (= 既定構成では効かない) ため、
+	// これが無いと未認証の入口に上限が 1 つも無くなる。
+	//
+	// apply は signup と同格。申請行と審査キューが無制限に積まれるのを防ぐ。
+	"signup-application/apply": {Duration: time.Hour, Max: 5},
+	// register は承認済みの申請から確認メールを出す経路なので、同じく signup
+	// と同格にする (signup の 1h 5 が「確認メール乱発」対策なのと同じ理由)。
+	"signup-application/register": {Duration: time.Hour, Max: 5},
+	// status はクレームコードの照会。コード自体が 256bit なので総当たりは
+	// 問題にならないが、参照そのものの上限として signup-pending と同格を置く。
+	"signup-application/status": {Duration: time.Hour, Max: 30},
+
 	// ── Admin ──────────────────────────────────────────
 	"admin/system-webhook/test": {Duration: 15 * time.Minute, Max: 60},
+	// 初回セットアップの窓 (rootUserId 未設定 + 未認証) だけは credential 無しで
+	// 通るので、setupPassword の試行回数に上限を置く。**signin の 10 ではなく 30
+	// にしてある** — この endpoint は administrator が正規にアカウントを作る経路
+	// でもあり、締めすぎると移行時の一括作成を無自覚に 429 で止める。30 でも
+	// 総当たりは成立しない。
+	"admin/accounts/create": {Duration: time.Hour, Max: 30},
 
 	// ── Misc ───────────────────────────────────────────
 	"fetch-external-resources": {Duration: time.Hour, Max: 50},

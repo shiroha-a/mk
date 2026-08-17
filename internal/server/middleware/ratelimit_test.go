@@ -555,6 +555,14 @@ func TestDefaultEndpointLimits_KnownEndpoints(t *testing.T) {
 		// Auth / password reset (#600 item 3): signup spam / brute-force 対策。
 		{"signup", 5},
 		{"signup-pending", 30},
+		// 承認制の登録も同格。**ここが抜けると未認証の入口に上限が 1 つも
+		// 無くなる** — 承認制は /api/signup を塞ぐので signup 側の上限が効かない。
+		{"signup-application/apply", 5},
+		{"signup-application/register", 5},
+		{"signup-application/status", 30},
+		// 初回セットアップの窓は credential 無しで通るので setupPassword の
+		// 試行に上限が要る。
+		{"admin/accounts/create", 30},
 		{"signin", 10},
 		{"signin-flow", 10},
 		{"signin-with-passkey", 200},
@@ -566,6 +574,47 @@ func TestDefaultEndpointLimits_KnownEndpoints(t *testing.T) {
 			limit, ok := DefaultEndpointLimits[tc.endpoint]
 			require.True(t, ok, "endpoint %s not found in limits", tc.endpoint)
 			assert.Equal(t, tc.max, limit.Max)
+		})
+	}
+}
+
+// TestDefaultEndpointLimits_UnauthenticatedEntryPoints guards the endpoints a
+// stranger can reach without any credential.
+//
+// **テーブルに載っていないエンドポイントは無制限になる** (Middleware は
+// `limits[endpoint]` が引けなければ即 next へ抜ける)。無制限であること自体は
+// 大半のエンドポイントで正しいので、`DefaultEndpointLimits` を眺めても抜けに
+// 気づけない。未認証で叩けてサーバー側に行やメールを作る入口だけは、ここで
+// 名指しで固定する。
+//
+// **router.go の実パスから引ける形で確かめる。** テーブルのキー名を直接見ると、
+// `/api` prefix の剥がし方が変わったときに「キーはあるのに引けない」状態を
+// 見逃す。
+func TestDefaultEndpointLimits_UnauthenticatedEntryPoints(t *testing.T) {
+	paths := []string{
+		"/api/signup",
+		"/api/signup-pending",
+		"/api/signup-application/apply",
+		"/api/signup-application/register",
+		"/api/signup-application/status",
+		"/api/signin",
+		"/api/signin-flow",
+		"/api/request-reset-password",
+		"/api/reset-password",
+		// 初回セットアップの窓だけ credential 無しで通る。
+		"/api/admin/accounts/create",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			store := &mockLimitStore{}
+			rl := NewRateLimiter(store, true, DefaultEndpointLimits)
+			e, h := setupEcho(rl)
+
+			doRequest(e, rl.Middleware(), h, path, nil)
+
+			require.NotEmpty(t, store.calls,
+				"%s が無制限。DefaultEndpointLimits にキーが無いか、"+
+					"path からキーへの変換が合っていない", path)
 		})
 	}
 }
