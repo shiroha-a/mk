@@ -2,11 +2,13 @@ package signup_test
 
 import (
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/signup"
+	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -224,11 +226,31 @@ func TestSignup_PasswordLengthBoundary(t *testing.T) {
 	}
 }
 
-func TestSignup_TokenIs16Chars(t *testing.T) {
+// **長さ 16 は drop-in の制約。** Misskey TS の isNativeUserToken は長さだけで
+// native token とアプリのアクセストークンを判別するので、伸ばすと TS に
+// 引き渡したときアプリのトークンとして扱われる。
+//
+// 中身は英数字 62 文字集合であることも固定する。16 進に戻すと見た目は同じ
+// 16 文字でも 64 bit しかなく、upstream (約 95 bit) より弱くなる。
+func TestSignup_TokenShape(t *testing.T) {
 	svc, _, _ := newTestService(t)
-	result, err := svc.Signup("user1", "pass", false)
-	require.NoError(t, err)
-	assert.Len(t, result.Token, 16) // 8 bytes hex = 16 chars
+
+	seen := map[string]bool{}
+	sawNonHex := false
+	for range 40 {
+		result, err := svc.Signup("user"+strconv.Itoa(len(seen)), "pass", false)
+		require.NoError(t, err)
+		assert.Len(t, result.Token, misc.NativeTokenLength)
+		assert.Regexp(t, `^[0-9a-zA-Z]{16}$`, result.Token)
+		if strings.ContainsAny(result.Token, "ghijklmnopqrstuvwxyzGHIJKLMNOPQRSTUVWXYZ") {
+			sawNonHex = true
+		}
+		assert.False(t, seen[result.Token], "同じ token が 2 度出た")
+		seen[result.Token] = true
+	}
+	// 16 進に戻ると 0-9a-f しか出ない。40 本引いて一度も 16 進の外が出ないのは
+	// 確率的にありえない (1 本あたり (16/62)^16 未満)。
+	assert.True(t, sawNonHex, "16 進の範囲しか出ていない = 文字集合が狭まっている")
 }
 
 func TestSignup_WithKeypairRepo(t *testing.T) {

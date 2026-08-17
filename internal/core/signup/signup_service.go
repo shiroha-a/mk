@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/model"
@@ -424,12 +425,11 @@ func (s *Service) SignupWithHost(username, password string, isInitialSetup bool,
 	return &SignupResult{User: user, Token: token, Profile: profile}, nil
 }
 
-// generateToken creates a random 16-character token.
-// crypto/rand.Read は実質的に失敗しない。
+// generateToken creates a native session token.
+//
+// 生成の実体と「なぜ 16 文字なのか」は misc.NewNativeToken 側に置いてある。
 func generateToken() string {
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
+	return misc.NewNativeToken()
 }
 
 // generatePendingCode creates a 32-char (16 byte) hex code used both as the

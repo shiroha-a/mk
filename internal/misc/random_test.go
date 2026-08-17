@@ -122,3 +122,39 @@ func (r *limitedReader) Read(p []byte) (int, error) {
 	r.remaining -= n
 	return n, nil
 }
+
+// native token は「16 文字」と「62 文字集合」の両方が要件。
+//
+// 長さは drop-in の制約 (TS の isNativeUserToken が長さだけで判別する)、
+// 文字集合は強度。**16 進にすると見た目は同じ 16 文字でも 64 bit しかなく、
+// upstream の secureRndstr(16) (約 95 bit) より弱くなる。**
+func TestNewNativeToken(t *testing.T) {
+	seen := map[string]bool{}
+	var outside []string
+	hexOnly := true
+	for range 200 {
+		tok := NewNativeToken()
+		if len(tok) != NativeTokenLength {
+			t.Fatalf("長さ %d, want %d", len(tok), NativeTokenLength)
+		}
+		for _, r := range tok {
+			if !strings.ContainsRune(AlphanumericChars, r) {
+				outside = append(outside, string(r))
+			}
+			if !strings.ContainsRune("0123456789abcdef", r) {
+				hexOnly = false
+			}
+		}
+		if seen[tok] {
+			t.Fatalf("同じ token が 2 度出た: %q", tok)
+		}
+		seen[tok] = true
+	}
+	if len(outside) > 0 {
+		t.Errorf("英数字の外の文字が出た: %v", outside)
+	}
+	// 200 本 * 16 文字を引いて一度も 16 進の外が出ないのは確率的にありえない。
+	if hexOnly {
+		t.Error("16 進の範囲しか出ていない = 文字集合が狭まっている")
+	}
+}

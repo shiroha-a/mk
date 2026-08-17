@@ -1,8 +1,6 @@
 package i
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -16,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/achievement"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -294,9 +293,7 @@ func (h *Handler) RegenerateToken(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
-	b := make([]byte, 8)
-	_, _ = rand.Read(b)
-	newToken := hex.EncodeToString(b)
+	newToken := misc.NewNativeToken()
 
 	var oldToken string
 	if u.Token != nil {
