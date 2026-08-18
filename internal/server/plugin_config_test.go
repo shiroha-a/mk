@@ -166,6 +166,45 @@ func TestSetupPlugins_DisabledDoesNotOpenStorage(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestSetupPlugins_DisabledEffectivePolicyInvokesNoCallbacks(t *testing.T) {
+	var opened, factoryCalled, routesCalled, jobsCalled bool
+	def := plugin.Definition{
+		Name:       "off",
+		APIVersion: plugin.APIVersion,
+		Migrations: []plugin.Migration{{Version: 1, SQL: "SELECT 1"}},
+		EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+			factoryCalled = true
+			return plugin.EffectivePolicyRegistration{}, errors.New("must not run")
+		},
+		Routes: func(plugin.Context, plugin.Router) error {
+			routesCalled = true
+			return nil
+		},
+		Jobs: func(plugin.Context, plugin.Jobs) error {
+			jobsCalled = true
+			return nil
+		},
+	}
+	e := echo.New()
+	s := &Server{
+		echo: e, role: config.RoleBoth,
+		config: &config.Config{
+			URL:     "https://example.com",
+			Plugins: map[string]map[string]any{"off": {"enabled": false}},
+		},
+	}
+
+	err := s.setupPlugins(e.Group("/api"), []plugin.Definition{def}, func(string) (plugin.Storage, error) {
+		opened = true
+		return nil, nil
+	})
+	require.NoError(t, err)
+	assert.False(t, opened)
+	assert.False(t, factoryCalled)
+	assert.False(t, routesCalled)
+	assert.False(t, jobsCalled)
+}
+
 // プラグインが自分の設定を受け取れること。
 func TestSetupPlugins_PassesConfigToPlugin(t *testing.T) {
 	var got string

@@ -136,7 +136,7 @@ import (
 	"log/slog"
 )
 
-func (s *Server) setupRoutes() {
+func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage pluginStorageOpener) {
 	idGen, err := id.NewGenerator(s.config.ID)
 	if err != nil {
 		idGen, _ = id.NewGenerator("aidx")
@@ -241,6 +241,7 @@ func (s *Server) setupRoutes() {
 	roleService.SetUserRepo(userRepo)
 	// プラグインのルートで管理者判定に使う (#2477)。setupPlugins より前に入れる。
 	s.pluginRoles = roleService
+	s.roleService = roleService
 	signupService := coresignup.NewService(userRepo, metaRepo, idGen)
 	// ActivityPub 配信のためにローカルユーザーは RSA 鍵対を必要とする。
 	signupService.SetKeypairRepo(keypairRepo)
@@ -470,9 +471,7 @@ func (s *Server) setupRoutes() {
 	// は BullMQ delayed job で実装しているが mk-go では queue infra を経由
 	// せずに簡素な ticker で実現。partial index で空 scan のコストは最小。
 	pollExpiryWorker := corepoll.NewExpiryWorker(pollRepo, pollVoteRepo, noteRepo, userRepo, notificationService, 60*time.Second, 100)
-	pollExpiryCtx, pollExpiryCancel := context.WithCancel(context.Background())
-	go pollExpiryWorker.Run(pollExpiryCtx)
-	s.registerShutdownHook(func(_ context.Context) { pollExpiryCancel() })
+	s.startConstructionWorker(pollExpiryWorker.Run)
 	// pollVoted を note の stream topic に publish して subscribe 中の
 	// frontend (note 詳細 / timeline) が reload なしで count を更新できる
 	// ようにする (#690)。streamPubSub は下方で生成されるため遅延配線。
@@ -970,13 +969,9 @@ func (s *Server) setupRoutes() {
 	// 別タイミングで打つと重複排除をすり抜けて二重に積まれる。
 	if s.role.RunsQueue() {
 		if bufMeta, err := metaRepo.Fetch(); err == nil && bufMeta.EnableReactionsBuffering {
-			go func() {
-				ticker := time.NewTicker(30 * time.Second)
-				defer ticker.Stop()
-				for range ticker.C {
-					_ = s.queueClient.EnqueueReactionFlush()
-				}
-			}()
+			s.startDrainedConstructionWorker(func(ctx context.Context) {
+				s.reactionFlushWorker(ctx, s.queueClient.EnqueueReactionFlush)
+			})
 		}
 	}
 
@@ -3686,7 +3681,7 @@ func (s *Server) setupRoutes() {
 	// プラグインのルート (#2478)。catchall より前に登録する。
 	// Echo の radix tree は静的パスを wildcard より優先するので順序に依存
 	// しないが、「catchall の後ろに実ルートがある」形は読み手を惑わせる。
-	registeredPlugins := plugin.Registered()
+	registeredPlugins := plugins
 	// プラグイン同士の通信 (#2537)。**署名・解決・ブロック判定は本体のものを
 	// そのまま使う** — inbox と同じ厳しさにするため、専用の実装を作らない。
 	s.peerDeps = &pluginPeerDeps{
@@ -3708,7 +3703,7 @@ func (s *Server) setupRoutes() {
 	}
 	nodeinfoHandler.SetPeeredPlugins(peered)
 
-	if err := s.setupPlugins(api, registeredPlugins, s.dbBackedStorage()); err != nil {
+	if err := s.setupPlugins(api, registeredPlugins, openPluginStorage); err != nil {
 		s.pluginSetupErr = err
 		return
 	}

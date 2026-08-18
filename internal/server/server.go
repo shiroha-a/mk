@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -22,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/chart"
 	corefederation "github.com/shiroha-a/mk/internal/core/federation"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/misc/redact"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -31,6 +33,7 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 	mksentry "github.com/shiroha-a/mk/internal/sentry"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"github.com/shiroha-a/mk/plugin"
 	"gorm.io/gorm"
 )
 
@@ -63,9 +66,7 @@ type Server struct {
 	queueRuntimeStats *runtimestats.Recorder
 	// startedAt は admin/server-metrics が返す uptime の起点 (#2395)。
 	startedAt time.Time
-	// peerDeps はプラグイン同士の通信 (#2537) に要る一式。setupRoutes が
-	// 署名・解決・ブロック判定を組み立ててから setupPlugins に渡す。
-	// 未配線 (nil) のときは peer を宣言したプラグインも受け口を張らない。
+	// peerDepsはplugin間通信に必要な署名・解決・block判定をまとめる。
 	peerDeps *pluginPeerDeps
 	// role は「このプロセスが Web を担うか、ジョブキューを担うか」(#2459)。
 	// 既定 (RoleBoth) は env 未設定時の従来どおりの挙動。setupRoutes は
@@ -76,8 +77,11 @@ type Server struct {
 	queueOnlyServer *http.Server
 
 	// pluginRoles はプラグインのルートで権限を判定するための参照 (#2477)。
-	// setupRoutes で roleService を作った後に入る。
 	pluginRoles middleware.RoleChecker
+	// roleService は HTTP と queue が共有する process-local policy registry。
+	// 有効な plugin provider の登録は起動時だけ行い、enabled の変更には
+	// 再起動を要求する。
+	roleService *corerole.Service
 
 	// pluginSetupErr はプラグイン登録の失敗を New まで運ぶ (#2478)。
 	// setupRoutes は巨大で戻り値を持たないため、signature を変えずに
@@ -101,6 +105,15 @@ type Server struct {
 	// in-flight worker、#727) を hook で wire できる。シンプルな
 	// stop/close 系 hook は引数 _ で受け流すだけ。
 	shutdownHooks []func(context.Context)
+	shutdownOnce  sync.Once
+	shutdownErr   error
+
+	// reactionFlushWorkerはqueue roleの定期enqueue loop。field化はconstructor
+	// rollbackをsleep無しで検証し、起動前にownershipを登録するため。
+	reactionFlushWorker   func(context.Context, func() error)
+	pluginGoStarter       func(func())
+	pluginGoGate          *pluginGoGate
+	beforePluginGoRelease func()
 }
 
 // registerShutdownHook registers fn to be invoked during Shutdown.
@@ -109,6 +122,51 @@ type Server struct {
 // として使える (#764)。
 func (s *Server) registerShutdownHook(fn func(context.Context)) {
 	s.shutdownHooks = append(s.shutdownHooks, fn)
+}
+
+func (s *Server) startConstructionWorker(run func(context.Context)) {
+	s.startConstructionWorkerWithDrain(run, false)
+}
+
+func (s *Server) startDrainedConstructionWorker(run func(context.Context)) {
+	s.startConstructionWorkerWithDrain(run, true)
+}
+
+func (s *Server) startConstructionWorkerWithDrain(run func(context.Context), drain bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	var once sync.Once
+	s.registerShutdownHook(func(shutdownCtx context.Context) {
+		once.Do(cancel)
+		if drain {
+			<-done
+			return
+		}
+		select {
+		case <-done:
+		case <-shutdownCtx.Done():
+		}
+	})
+	go func() {
+		defer close(done)
+		run(ctx)
+	}()
+}
+
+func runReactionFlushWorker(ctx context.Context, enqueue func() error) {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if ctx.Err() != nil {
+				return
+			}
+			_ = enqueue()
+		}
+	}
 }
 
 // buildIPExtractor returns an echo.IPExtractor that wraps Echo's standard
@@ -279,6 +337,10 @@ func applyServerTimeouts(srv *http.Server) {
 // fails to initialise (e.g. mkq driver failing to PING Redis at
 // startup).
 func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, error) {
+	return newServer(cfg, db, redis, plugin.Registered(), nil)
+}
+
+func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugins []plugin.Definition, openStorage pluginStorageOpener, beforeSetup ...func(*Server)) (*Server, error) {
 	// 役割は環境変数で決まる (#2459)。矛盾した指定はここで落として、
 	// 「起動はしたがジョブが処理されない」形の失敗にしない。
 	role, err := config.ResolveProcessRole()
@@ -291,18 +353,11 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	}
 	logDevModeBanner(cfg)
 
-	// パスワードのハッシュ強度をプロセス全体に反映する。
-	//
-	// **ゼロ値は「未設定」として扱う。** config.resolve を通れば必ず範囲内の値が
-	// 入るが、Config を構造体リテラルで組む呼び出し元 (テスト / ツール) では 0 の
-	// まま来る。そこで起動を失敗させると、この項目を知らない呼び出し元が全部壊れる。
 	bcryptCost := cfg.BcryptCost
 	if bcryptCost == 0 {
 		bcryptCost = password.DefaultCost
 	}
 	if err := password.SetCost(bcryptCost); err != nil {
-		// resolve を通っていれば到達しない。通っていない呼び出し元のために
-		// 既定へ落として続行する。
 		slog.Warn("bcrypt cost が不正なので既定値を使います", "value", bcryptCost, "err", err)
 		bcryptCost = password.DefaultCost
 		_ = password.SetCost(bcryptCost)
@@ -311,9 +366,6 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 		slog.Info("bcrypt cost overridden", "cost", bcryptCost, "default", password.DefaultCost)
 	}
 
-	// 投稿後のベストエフォートフックの同時実行数。**絞らないと応答のテールが
-	// 伸びる** (負荷時に数百 goroutine が GOMAXPROCS 個の P を奪い合い、応答を
-	// 返す goroutine もその列に並ぶ)。0 なら core/note 側の既定が入る。
 	corenote.SetHookConcurrency(cfg.NoteHookConcurrency)
 	if cfg.NoteHookConcurrency > 0 {
 		slog.Info("note hook concurrency overridden", "perKind", cfg.NoteHookConcurrency)
@@ -390,12 +442,7 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	// 外部リンク遷移で閲覧中の URL が path ごと漏れるのを防ぐ (#2404)。
 	// upstream には無い mk-go 独自の hardening。
 	e.Use(middleware.ReferrerPolicy())
-	// upstream ServerService と同じ HSTS。**disableHsts を設定として読んで
-	// いたのに header を出していなかった**ので、TS から切り替えると黙って
-	// 消えていた。https でない構成では付けない。
 	e.Use(middleware.HSTS(cfg.URL, cfg.DisableHSTS))
-	// Cross-Origin-Opener-Policy (既定 off)。**不正な値は黙って無視されるので、
-	// ここで気づけるようにする** — 設定したつもりで効いていない状態が一番厄介。
 	if !middleware.ValidCOOPMode(cfg.CrossOriginOpenerPolicy) {
 		slog.Warn("crossOriginOpenerPolicy が不正なので無視します",
 			"value", cfg.CrossOriginOpenerPolicy,
@@ -454,7 +501,11 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 
 		// role は New の入口で解決済み (#2459)。setupRoutes がこれを見て
 		// 背景処理を出し分ける。
-		role: role,
+		role:                role,
+		reactionFlushWorker: runReactionFlushWorker,
+	}
+	for _, fn := range beforeSetup {
+		fn(s)
 	}
 
 	// driver の dispatch hook を Prometheus と runtimestats の両方へ配る。
@@ -466,16 +517,47 @@ func New(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients) (*Server, e
 	mediaProxySecret, err := resolveMediaProxySecret(cfg, db)
 	if err != nil {
 		// 弱い鍵に fallback すると、直したはずの allowlist 迂回が黙って戻る。
+		s.cleanupConstruction()
 		return nil, err
 	}
 	s.mediaProxySecret = mediaProxySecret
 
-	s.setupRoutes()
+	if openStorage == nil {
+		openStorage = s.dbBackedStorage()
+	}
+	s.setupRoutes(plugins, openStorage)
 	if s.pluginSetupErr != nil {
+		s.cleanupConstruction()
 		return nil, s.pluginSetupErr
 	}
 
+	// setupRoutesの後にfallibleな初期化は置かない。pluginの保留workは完成した
+	// route treeだけを観測できる状態で、return直前にreleaseする。
+	if s.beforePluginGoRelease != nil {
+		s.beforePluginGoRelease()
+	}
+	if s.pluginGoGate != nil {
+		s.pluginGoGate.open()
+	}
 	return s, nil
+}
+
+func (s *Server) cleanupConstruction() {
+	s.shutdownOnce.Do(func() {
+		if s.pluginGoGate != nil {
+			s.pluginGoGate.discard()
+		}
+		for _, hook := range s.shutdownHooks {
+			hook(context.Background())
+		}
+		s.shutdownHooks = nil
+		if s.queueDriver != nil {
+			if err := s.queueDriver.Close(); err != nil {
+				slog.Warn("queue driver close failed during server construction rollback", "err", err)
+			}
+			s.queueDriver = nil
+		}
+	})
 }
 
 // Handler returns the underlying http.Handler for use with httptest.
@@ -659,6 +741,13 @@ func (s *Server) Start() error {
 // Shutdown gracefully shuts down the server, the asynq worker and
 // any background services such as the chart management loop.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.shutdownOnce.Do(func() {
+		s.shutdownErr = s.shutdown(ctx)
+	})
+	return s.shutdownErr
+}
+
+func (s *Server) shutdown(ctx context.Context) error {
 	// 登録順に shutdown hook を走らせる。publisher goroutine の clean 停止と、
 	// graceful drain が必要な service (hashtag #727 等) の Shutdown(ctx) を
 	// 兼ねる。hook が ctx を取るので timeout 共有が可能 (#764)。

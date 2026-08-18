@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,10 +13,12 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/labstack/echo/v4"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/pluginstore"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -31,10 +34,16 @@ import (
 // 方針) が壊れるため。
 const pluginRoutePrefix = "/plugin/"
 
-// setupPlugins registers the given plugins.
+var errPluginEffectivePolicySetup = errors.New("plugin effective policy provider setup failed")
+
+// setupPlugins prepares every enabled plugin before activating any callbacks.
 //
 // ロールに応じて登録先を出し分ける (#2459)。HTTP を担わないプロセスがルートを
 // 登録したり、キューを担わないプロセスがジョブを登録したりしないようにする。
+// 全pluginのstorage/migration/effective policyを先に確定してからRoutes/Jobsを
+// 呼ぶ。後続providerの失敗時に先行callbackがContext.Goで処理を開始し、rollback
+// 済みstorageへ触り続ける経路を作らないため。
+// setup中のContext.Goも共通gateへ保留し、constructor完成時にnewServerがreleaseする。
 //
 // 一覧と storage の生成を引数で受けるのは、グローバルレジストリや実 DB を直接
 // 触るとテストから差し替えられないため。plugin.Registered() を呼ぶのも、実
@@ -43,6 +52,20 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 	if len(plugins) == 0 {
 		return nil
 	}
+	goGate := &pluginGoGate{}
+	s.pluginGoGate = goGate
+	setupSucceeded := false
+	defer func() {
+		if !setupSucceeded {
+			goGate.discard()
+		}
+	}()
+	type preparedPlugin struct {
+		def  plugin.Definition
+		ctx  *pluginContext
+		peer *pluginPeer
+	}
+	prepared := make([]preparedPlugin, 0, len(plugins))
 	for _, def := range plugins {
 		settings := s.config.Plugins[def.Name]
 
@@ -55,7 +78,9 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		}
 
 		pctx := &pluginContext{
-			name: def.Name,
+			name:    def.Name,
+			goGate:  goGate,
+			goStart: s.pluginGoStarter,
 			logger: slog.With(
 				slog.String("plugin", def.Name),
 				slog.String("pluginVersion", def.Version),
@@ -83,11 +108,36 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 			}
 		}
 
-		// peer 経路。**宣言していないプラグインにも非 nil を渡す** (呼ぶと
-		// エラーになる実装)。nil を返すと nil チェック漏れが panic になる。
+		// peer経路。宣言していないpluginにも、呼ぶとerrorになる非nil実装を渡す。
 		peer := &pluginPeer{name: def.Name, peered: def.Peered, deps: s.peerDeps, logger: pctx.logger}
 		pctx.peer = peer
 
+		if def.EffectivePolicies != nil {
+			if s.roleService == nil {
+				return errPluginEffectivePolicySetup
+			}
+			reg, err := func() (reg plugin.EffectivePolicyRegistration, err error) {
+				defer func() {
+					if recover() != nil {
+						err = errPluginEffectivePolicySetup
+					}
+				}()
+				return def.EffectivePolicies(pctx, &roleEffectivePolicyInvalidator{service: s.roleService})
+			}()
+			if err != nil {
+				return errPluginEffectivePolicySetup
+			}
+			if err := s.roleService.RegisterEffectivePolicyProvider(def.Name, reg); err != nil {
+				return errPluginEffectivePolicySetup
+			}
+		}
+		prepared = append(prepared, preparedPlugin{def: def, ctx: pctx, peer: peer})
+	}
+
+	for _, p := range prepared {
+		def := p.def
+		pctx := p.ctx
+		peer := p.peer
 		if def.Routes != nil && s.role.RunsServer() {
 			group := api.Group(pluginRoutePrefix + def.Name)
 			r := &pluginRouter{group: group, roles: s.pluginRoles}
@@ -97,8 +147,6 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 			if err := r.err; err != nil {
 				return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
 			}
-			// 予約パスは **プラグインの登録より後**に張る。先に張ると
-			// プラグインが同じパスを登録できてしまい、受け口を奪える。
 			if def.Peered && s.peerDeps != nil {
 				group.POST(peerPath, peer.echoHandler())
 			}
@@ -123,7 +171,20 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 			"migrations", len(def.Migrations),
 			"schema", schema)
 	}
+	setupSucceeded = true
 	return nil
+}
+
+type roleEffectivePolicyInvalidator struct {
+	service *corerole.Service
+}
+
+func (i *roleEffectivePolicyInvalidator) InvalidateUser(ctx context.Context, userID string) error {
+	return i.service.InvalidateUser(ctx, userID)
+}
+
+func (i *roleEffectivePolicyInvalidator) InvalidateRole(ctx context.Context, roleID string) error {
+	return i.service.InvalidateRolePolicies(ctx, roleID)
 }
 
 // serverPluginInfos builds the admin-facing snapshot of compiled-in plugins
@@ -228,6 +289,8 @@ type pluginContext struct {
 	storage plugin.Storage
 	config  plugin.Config
 	peer    plugin.Peer
+	goGate  *pluginGoGate
+	goStart func(func())
 }
 
 func (c *pluginContext) Name() string            { return c.name }
@@ -235,11 +298,66 @@ func (c *pluginContext) Logger() *slog.Logger    { return c.logger }
 func (c *pluginContext) API() plugin.API         { return c.api }
 func (c *pluginContext) Storage() plugin.Storage { return c.storage }
 func (c *pluginContext) Config() plugin.Config   { return c.config }
+func (c *pluginContext) Peer() plugin.Peer       { return c.peer }
 
-// Peer は **常に非 nil** を返す。Peered を立てていないプラグインには、
-// 呼ぶとエラーになる実装を渡す — nil を返すと、プラグイン側の nil チェック
-// 漏れがそのまま panic になる。
-func (c *pluginContext) Peer() plugin.Peer { return c.peer }
+type pluginGoGate struct {
+	mu      sync.Mutex
+	state   uint8
+	pending []queuedPluginGo
+}
+
+type queuedPluginGo struct {
+	ctx *pluginContext
+	fn  func()
+}
+
+const (
+	pluginGoPending uint8 = iota
+	pluginGoOpen
+	pluginGoDiscarded
+)
+
+func (g *pluginGoGate) enqueue(ctx *pluginContext, fn func()) {
+	g.mu.Lock()
+	switch g.state {
+	case pluginGoPending:
+		g.pending = append(g.pending, queuedPluginGo{ctx: ctx, fn: fn})
+		g.mu.Unlock()
+		return
+	case pluginGoDiscarded:
+		g.mu.Unlock()
+		return
+	default:
+		g.mu.Unlock()
+		ctx.startGo(fn)
+	}
+}
+
+func (g *pluginGoGate) open() {
+	g.mu.Lock()
+	if g.state != pluginGoPending {
+		g.mu.Unlock()
+		return
+	}
+	g.state = pluginGoOpen
+	pending := g.pending
+	g.pending = nil
+	g.mu.Unlock()
+
+	for _, queued := range pending {
+		queued.ctx.startGo(queued.fn)
+	}
+}
+
+func (g *pluginGoGate) discard() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.state != pluginGoPending {
+		return
+	}
+	g.state = pluginGoDiscarded
+	g.pending = nil
+}
 
 // --- Config ---
 
@@ -346,14 +464,27 @@ func (s *pluginStorage) Migrate(ctx context.Context, migrations []plugin.Migrati
 // **プラグインが素の `go` を書くとプロセスごと落ちる。** Go は他 goroutine の
 // panic を回収できず、echo の Recover middleware では止められない。
 func (c *pluginContext) Go(fn func()) {
-	go func() {
+	if c.goGate != nil {
+		c.goGate.enqueue(c, fn)
+		return
+	}
+	c.startGo(fn)
+}
+
+func (c *pluginContext) startGo(fn func()) {
+	run := func() {
 		defer func() {
 			if r := recover(); r != nil {
 				c.logger.Error("plugin の goroutine が panic しました", "panic", r)
 			}
 		}()
 		fn()
-	}()
+	}
+	if c.goStart != nil {
+		c.goStart(run)
+		return
+	}
+	go run()
 }
 
 // --- Router ---
@@ -361,8 +492,7 @@ func (c *pluginContext) Go(fn func()) {
 type pluginRouter struct {
 	group *echo.Group
 	roles middleware.RoleChecker
-	// err holds the first registration failure (pluginJobs と同じ方針)。
-	err error
+	err   error
 }
 
 func (r *pluginRouter) GET(path string, h plugin.Handler) {
@@ -381,11 +511,6 @@ func (r *pluginRouter) POST(path string, h plugin.Handler) {
 	r.group.POST(path, wrapPluginHandler(h, r.roles))
 }
 
-// reservedPluginPath reports whether mk-go owns this path.
-//
-// **プラグインに受け口を奪わせない。** peer の受信 (#2537) のように本体が
-// 張るエンドポイントと同名を登録できると、署名検証を通らない経路で同じ URL を
-// 提供できてしまう。`_` 始まりをまとめて予約する。
 func reservedPluginPath(path string) bool {
 	return strings.HasPrefix(path, "/_")
 }

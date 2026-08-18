@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,10 +19,15 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/config"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/shiroha-a/mk/plugin"
+	"gorm.io/datatypes"
 )
 
 // noopStorage is the storage opener used by wiring tests. ルーティングの検証に
@@ -92,13 +98,13 @@ func TestWrapPluginHandler_NilResultIsNoContent(t *testing.T) {
 	assert.Empty(t, rec.Body.String())
 }
 
-func TestWrapPluginHandler_StatusError(t *testing.T) {
+func TestWrapPluginHandler_UncodedStatusErrorPreservesLegacyShape(t *testing.T) {
 	rec := serveWrapped(t, func(plugin.Request) (any, error) {
-		return nil, plugin.ErrNotFound("そんなものは無い")
+		return nil, &plugin.StatusError{Status: http.StatusNotFound, Message: "そんなものは無い"}
 	}, "{}")
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
-	assert.Contains(t, rec.Body.String(), "そんなものは無い")
+	assert.Equal(t, "{\"error\":{\"message\":\"そんなものは無い\"}}\n", rec.Body.String())
 }
 
 func TestWrapPluginHandler_StatusErrorWithCode(t *testing.T) {
@@ -144,6 +150,9 @@ func TestWrapPluginHandler_PlainErrorIsRedacted(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "password")
 	assert.Contains(t, rec.Body.String(), "Internal error.")
+	// 素の error に code を付けない。内部事情 (DB のエラー文字列) がそのまま
+	// 外に出るのを防ぐため。
+	assert.NotContains(t, rec.Body.String(), "code")
 }
 
 // エラーチェインしても code を潰さず透過する。
@@ -320,6 +329,47 @@ func TestPluginContext_Go_RecoversPanic(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Go() が返ってこない")
+	}
+}
+
+func TestPluginGoGate_ConcurrentOpenAndGoRunsExactlyOnce(t *testing.T) {
+	gate := &pluginGoGate{}
+	runs := make(chan int, 66)
+	c := &pluginContext{
+		name: "concurrent", logger: slog.Default(), goGate: gate,
+		goStart: func(fn func()) { fn() },
+	}
+	// release処理がlock中にplugin関数を実行すると、nested Goがdeadlockする。
+	c.Go(func() {
+		runs <- 64
+		c.Go(func() { runs <- 65 })
+	})
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := range 64 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			c.Go(func() { runs <- i })
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-start
+		gate.open()
+	}()
+	close(start)
+	wg.Wait()
+
+	seen := make(map[int]int, 66)
+	for range 66 {
+		seen[<-runs]++
+	}
+	for i := range 66 {
+		require.Equal(t, 1, seen[i])
 	}
 }
 
@@ -630,6 +680,489 @@ func TestSetupPlugins_RoutesAreNamespaced(t *testing.T) {
 	rec = httptest.NewRecorder()
 	s.echo.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/plugin/gameinfo/refresh", nil))
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+type recordingPluginStorage struct {
+	events *[]string
+}
+
+func (*recordingPluginStorage) DB() *sql.DB { return nil }
+
+func (s *recordingPluginStorage) Migrate(context.Context, []plugin.Migration) error {
+	*s.events = append(*s.events, "migrations")
+	return nil
+}
+
+func newEffectivePolicyTestService(t *testing.T) (*corerole.Service, *testutil.MockRoleRepository, *testutil.MockRoleAssignmentRepository) {
+	t.Helper()
+	roleRepo := testutil.NewMockRoleRepository()
+	assignmentRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	return corerole.NewService(roleRepo, assignmentRepo, testutil.NewMockMetaRepository(), idGen), roleRepo, assignmentRepo
+}
+
+func TestSetupPlugins_EffectivePolicyStartupOrderAndRegistration(t *testing.T) {
+	var events []string
+	def := plugin.Definition{
+		Name:       "policy",
+		APIVersion: plugin.APIVersion,
+		Migrations: []plugin.Migration{{Version: 1, SQL: "SELECT 1"}},
+		EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+			events = append(events, "factory")
+			return plugin.EffectivePolicyRegistration{
+				Keys: []string{"canSearchNotes"},
+				Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+					return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 1, Value: true}}, nil
+				},
+			}, nil
+		},
+		Routes: func(plugin.Context, plugin.Router) error {
+			events = append(events, "routes")
+			return nil
+		},
+		Jobs: func(plugin.Context, plugin.Jobs) error {
+			events = append(events, "jobs")
+			return nil
+		},
+	}
+
+	svc, _, _ := newEffectivePolicyTestService(t)
+	s, api := newPluginTestServer(config.RoleBoth)
+	s.roleService = svc
+	err := s.setupPlugins(api, []plugin.Definition{def}, func(string) (plugin.Storage, error) {
+		events = append(events, "storage")
+		return &recordingPluginStorage{events: &events}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"storage", "migrations", "factory", "routes", "jobs"}, events)
+
+	policies, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.Equal(t, true, policies["canSearchNotes"], "factory registration must be stored before startup completes")
+}
+
+func TestSetupPlugins_PreparesAllPluginsBeforeAnyCallback(t *testing.T) {
+	var events []string
+	definition := func(name string) plugin.Definition {
+		return plugin.Definition{
+			Name:       name,
+			APIVersion: plugin.APIVersion,
+			Migrations: []plugin.Migration{{Version: 1, SQL: "SELECT 1"}},
+			EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+				events = append(events, name+" factory")
+				return plugin.EffectivePolicyRegistration{
+					Keys: []string{"canSearchNotes"},
+					Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+						return nil, nil
+					},
+				}, nil
+			},
+			Routes: func(plugin.Context, plugin.Router) error {
+				events = append(events, name+" routes")
+				return nil
+			},
+			Jobs: func(plugin.Context, plugin.Jobs) error {
+				events = append(events, name+" jobs")
+				return nil
+			},
+		}
+	}
+
+	svc, _, _ := newEffectivePolicyTestService(t)
+	s, api := newPluginTestServer(config.RoleBoth)
+	s.roleService = svc
+	err := s.setupPlugins(api, []plugin.Definition{definition("first"), definition("second")}, func(name string) (plugin.Storage, error) {
+		events = append(events, name+" storage")
+		return &recordingPluginStorage{events: &events}, nil
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"first storage", "migrations", "first factory",
+		"second storage", "migrations", "second factory",
+		"first routes", "first jobs", "second routes", "second jobs",
+	}, events)
+}
+
+func TestSetupPlugins_SuccessLeavesGoQueuedForConstructorFinalization(t *testing.T) {
+	started := make(chan struct{}, 1)
+	def := pluginDef("queued", func(ctx plugin.Context, _ plugin.Router) error {
+		ctx.Go(func() { started <- struct{}{} })
+		return nil
+	}, nil)
+	s, api := newPluginTestServer(config.RoleServer)
+	s.pluginGoStarter = func(fn func()) { fn() }
+
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+	require.NotNil(t, s.pluginGoGate)
+	select {
+	case <-started:
+		t.Fatal("setupPlugins released Go work before constructor finalization")
+	default:
+	}
+	s.pluginGoGate.open()
+	select {
+	case <-started:
+	default:
+		t.Fatal("queued Go work was not released")
+	}
+}
+
+func TestSetupPlugins_DiscardsGoWorkWhenLaterActivationFails(t *testing.T) {
+	tests := []struct {
+		name   string
+		role   config.ProcessRole
+		first  plugin.Definition
+		second plugin.Definition
+	}{
+		{
+			name: "routes", role: config.RoleServer,
+			first: pluginDef("first", func(ctx plugin.Context, _ plugin.Router) error {
+				ctx.Go(func() {})
+				return nil
+			}, nil),
+			second: pluginDef("second", func(plugin.Context, plugin.Router) error {
+				return errors.New("later route activation failed")
+			}, nil),
+		},
+		{
+			name: "jobs", role: config.RoleQueue,
+			first: pluginDef("first", nil, func(ctx plugin.Context, _ plugin.Jobs) error {
+				ctx.Go(func() {})
+				return nil
+			}),
+			second: pluginDef("second", nil, func(plugin.Context, plugin.Jobs) error {
+				return errors.New("later job activation failed")
+			}),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			started := make(chan struct{}, 1)
+			var captured plugin.Context
+			if tt.first.Routes != nil {
+				tt.first.Routes = func(ctx plugin.Context, _ plugin.Router) error {
+					captured = ctx
+					ctx.Go(func() { started <- struct{}{} })
+					return nil
+				}
+			} else {
+				tt.first.Jobs = func(ctx plugin.Context, _ plugin.Jobs) error {
+					captured = ctx
+					ctx.Go(func() { started <- struct{}{} })
+					return nil
+				}
+			}
+
+			s, api := newPluginTestServer(tt.role)
+			s.pluginGoStarter = func(fn func()) { fn() }
+			require.Error(t, s.setupPlugins(api, []plugin.Definition{tt.first, tt.second}, noopStorage))
+			require.NotNil(t, captured)
+			captured.Go(func() { started <- struct{}{} })
+			select {
+			case <-started:
+				t.Fatal("plugin Go work started before every activation succeeded")
+			default:
+			}
+		})
+	}
+}
+
+type pluginLogWriter chan string
+
+func (w pluginLogWriter) Write(p []byte) (int, error) {
+	w <- string(p)
+	return len(p), nil
+}
+
+func TestPluginGoGate_QueuedGoRetainsPanicRecovery(t *testing.T) {
+	logs := make(pluginLogWriter, 1)
+	gate := &pluginGoGate{}
+	c := &pluginContext{
+		name: "panic-plugin",
+		logger: slog.New(slog.NewTextHandler(logs, nil)).With(
+			slog.String("plugin", "panic-plugin"),
+			slog.String("pluginVersion", "test"),
+		),
+		goGate:  gate,
+		goStart: func(fn func()) { fn() },
+	}
+	c.Go(func() { panic("private panic payload") })
+	gate.open()
+
+	logLine := <-logs
+	require.Contains(t, logLine, "plugin=panic-plugin")
+	require.Contains(t, logLine, "panic=\"private panic payload\"")
+}
+
+type policyBoundaryServer struct {
+	onHandle func(string)
+}
+
+func (s *policyBoundaryServer) Handle(taskType string, _ driver.HandlerFunc) {
+	s.onHandle(taskType)
+}
+func (*policyBoundaryServer) Start() error { return nil }
+func (*policyBoundaryServer) Shutdown()    {}
+
+type policyBoundaryDriver struct {
+	server driver.Server
+}
+
+func (*policyBoundaryDriver) Client() driver.Client       { return nil }
+func (d *policyBoundaryDriver) Server() driver.Server     { return d.server }
+func (*policyBoundaryDriver) Inspector() driver.Inspector { return nil }
+func (*policyBoundaryDriver) Scheduler() driver.Scheduler { return nil }
+func (*policyBoundaryDriver) Close() error                { return nil }
+func (*policyBoundaryDriver) WorkerCount(string) int      { return 0 }
+func (*policyBoundaryDriver) Resize(string, int) error    { return nil }
+
+func TestSetupPlugins_EffectivePolicyIsRegisteredAtJobRegistrationBoundary(t *testing.T) {
+	svc, _, _ := newEffectivePolicyTestService(t)
+	boundaryReached := false
+	queueDriver := &policyBoundaryDriver{server: &policyBoundaryServer{onHandle: func(taskType string) {
+		boundaryReached = true
+		assert.Equal(t, "plugin:policy:refresh", taskType)
+		policies, err := svc.GetUserPoliciesChecked("queue-user")
+		require.NoError(t, err)
+		assert.Equal(t, true, policies["canSearchNotes"], "provider must already be registered when the queue accepts the job handler")
+	}}}
+	def := plugin.Definition{
+		Name:       "policy",
+		APIVersion: plugin.APIVersion,
+		EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+			return plugin.EffectivePolicyRegistration{
+				Keys: []string{"canSearchNotes"},
+				Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+					return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Value: true}}, nil
+				},
+			}, nil
+		},
+		Jobs: func(_ plugin.Context, jobs plugin.Jobs) error {
+			jobs.Handle("refresh", func(context.Context, json.RawMessage) error { return nil })
+			return nil
+		},
+	}
+
+	s, api := newPluginTestServer(config.RoleQueue)
+	s.roleService = svc
+	s.queueServer = queue.NewServer(queueDriver)
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+	assert.True(t, boundaryReached)
+}
+
+func TestSetupPlugins_EffectivePolicyFactoryFailureIsFixedAndRedacted(t *testing.T) {
+	def := plugin.Definition{
+		Name:       "secret-plugin-id",
+		APIVersion: plugin.APIVersion,
+		EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+			return plugin.EffectivePolicyRegistration{}, errors.New("raw provider failure for user-secret")
+		},
+	}
+	svc, _, _ := newEffectivePolicyTestService(t)
+	s, api := newPluginTestServer(config.RoleServer)
+	s.roleService = svc
+
+	err := s.setupPlugins(api, []plugin.Definition{def}, noopStorage)
+	require.ErrorIs(t, err, errPluginEffectivePolicySetup)
+	assert.Equal(t, errPluginEffectivePolicySetup.Error(), err.Error())
+	assert.NotContains(t, err.Error(), "secret-plugin-id")
+	assert.NotContains(t, err.Error(), "user-secret")
+}
+
+func TestSetupPlugins_EffectivePolicyFactoryPanicIsFixedAndAbortsStartup(t *testing.T) {
+	tests := []struct {
+		name       string
+		panicValue any
+	}{
+		{
+			name:       "string panic",
+			panicValue: "secret-plugin-id secret-policy-key 01K2SECRETUSERID",
+		},
+		{
+			name:       "error panic",
+			panicValue: errors.New("secret-plugin-id secret-policy-key 01K2SECRETUSERID"),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var events []string
+			def := plugin.Definition{
+				Name:       "secret-plugin-id",
+				APIVersion: plugin.APIVersion,
+				Migrations: []plugin.Migration{{Version: 1, SQL: "SELECT 1"}},
+				EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+					events = append(events, "factory")
+					panic(tt.panicValue)
+				},
+				Routes: func(plugin.Context, plugin.Router) error {
+					events = append(events, "routes")
+					return nil
+				},
+				Jobs: func(plugin.Context, plugin.Jobs) error {
+					events = append(events, "jobs")
+					return nil
+				},
+			}
+			svc, _, _ := newEffectivePolicyTestService(t)
+			s, api := newPluginTestServer(config.RoleBoth)
+			s.roleService = svc
+
+			err := s.setupPlugins(api, []plugin.Definition{def}, func(string) (plugin.Storage, error) {
+				events = append(events, "storage")
+				return &recordingPluginStorage{events: &events}, nil
+			})
+
+			require.ErrorIs(t, err, errPluginEffectivePolicySetup)
+			assert.Equal(t, "plugin effective policy provider setup failed", err.Error())
+			assert.Equal(t, []string{"storage", "migrations", "factory"}, events)
+			assert.NotContains(t, err.Error(), "secret-plugin-id")
+			assert.NotContains(t, err.Error(), "secret-policy-key")
+			assert.NotContains(t, err.Error(), "01K2SECRETUSERID")
+		})
+	}
+}
+
+func TestSetupPlugins_DoesNotRecoverPanicsOutsideEffectivePolicyFactory(t *testing.T) {
+	tests := []struct {
+		name string
+		role config.ProcessRole
+		def  plugin.Definition
+		open pluginStorageOpener
+	}{
+		{
+			name: "migration",
+			role: config.RoleBoth,
+			def: plugin.Definition{
+				Name:       "policy",
+				APIVersion: plugin.APIVersion,
+				Migrations: []plugin.Migration{{Version: 1, SQL: "SELECT 1"}},
+			},
+			open: func(string) (plugin.Storage, error) {
+				return &panicPluginStorage{value: "migration panic"}, nil
+			},
+		},
+		{
+			name: "routes",
+			role: config.RoleServer,
+			def: plugin.Definition{
+				Name:       "policy",
+				APIVersion: plugin.APIVersion,
+				Routes: func(plugin.Context, plugin.Router) error {
+					panic("routes panic")
+				},
+			},
+			open: noopStorage,
+		},
+		{
+			name: "jobs",
+			role: config.RoleQueue,
+			def: plugin.Definition{
+				Name:       "policy",
+				APIVersion: plugin.APIVersion,
+				Jobs: func(plugin.Context, plugin.Jobs) error {
+					panic("jobs panic")
+				},
+			},
+			open: noopStorage,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s, api := newPluginTestServer(tt.role)
+			assert.PanicsWithValue(t, tt.name+" panic", func() {
+				_ = s.setupPlugins(api, []plugin.Definition{tt.def}, tt.open)
+			})
+		})
+	}
+}
+
+type panicPluginStorage struct {
+	value any
+}
+
+func (*panicPluginStorage) DB() *sql.DB { return nil }
+
+func (s *panicPluginStorage) Migrate(context.Context, []plugin.Migration) error {
+	panic(s.value)
+}
+
+func TestSetupPlugins_NilEffectivePolicyServiceIsFixedAndAbortsStartup(t *testing.T) {
+	var routesCalled, jobsCalled bool
+	def := plugin.Definition{
+		Name:       "secret-plugin-id",
+		APIVersion: plugin.APIVersion,
+		EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+			return plugin.EffectivePolicyRegistration{}, nil
+		},
+		Routes: func(plugin.Context, plugin.Router) error { routesCalled = true; return nil },
+		Jobs:   func(plugin.Context, plugin.Jobs) error { jobsCalled = true; return nil },
+	}
+	s, api := newPluginTestServer(config.RoleBoth)
+
+	err := s.setupPlugins(api, []plugin.Definition{def}, noopStorage)
+	require.ErrorIs(t, err, errPluginEffectivePolicySetup)
+	assert.Equal(t, "plugin effective policy provider setup failed", err.Error())
+	assert.NotContains(t, err.Error(), "secret-plugin-id")
+	assert.False(t, routesCalled)
+	assert.False(t, jobsCalled)
+}
+
+func TestSetupPlugins_EffectivePolicyRegistrationFailureAbortsBeforeRoutes(t *testing.T) {
+	var routesCalled bool
+	def := plugin.Definition{
+		Name:       "secret-plugin-id",
+		APIVersion: plugin.APIVersion,
+		EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+			return plugin.EffectivePolicyRegistration{
+				Keys: []string{"secret-policy-key"},
+				Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+					return nil, nil
+				},
+			}, nil
+		},
+		Routes: func(plugin.Context, plugin.Router) error {
+			routesCalled = true
+			return nil
+		},
+	}
+	svc, _, _ := newEffectivePolicyTestService(t)
+	s, api := newPluginTestServer(config.RoleServer)
+	s.roleService = svc
+
+	err := s.setupPlugins(api, []plugin.Definition{def}, noopStorage)
+	require.ErrorIs(t, err, errPluginEffectivePolicySetup)
+	assert.Equal(t, errPluginEffectivePolicySetup.Error(), err.Error())
+	assert.NotContains(t, err.Error(), "secret-plugin-id")
+	assert.NotContains(t, err.Error(), "secret-policy-key")
+	assert.False(t, routesCalled)
+}
+
+func TestRoleEffectivePolicyInvalidator_InvalidateUserDelegatesToService(t *testing.T) {
+	svc, roleRepo, assignmentRepo := newEffectivePolicyTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`))}
+	assignmentRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+	assert.Equal(t, true, svc.GetUserPolicies("u1")["canSearchNotes"])
+	roleRepo.Roles["r1"].Policies = datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":false}}`))
+
+	err := (&roleEffectivePolicyInvalidator{service: svc}).InvalidateUser(context.Background(), "u1")
+	require.NoError(t, err)
+	assert.Equal(t, false, svc.GetUserPolicies("u1")["canSearchNotes"])
+}
+
+func TestRoleEffectivePolicyInvalidator_InvalidateRoleDelegatesToService(t *testing.T) {
+	svc, roleRepo, assignmentRepo := newEffectivePolicyTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`))}
+	assignmentRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+	assignmentRepo.Assignments["u2:r1"] = &model.RoleAssignment{ID: "a2", UserID: "u2", RoleID: "r1"}
+	assert.Equal(t, true, svc.GetUserPolicies("u1")["canSearchNotes"])
+	assert.Equal(t, true, svc.GetUserPolicies("u2")["canSearchNotes"])
+	roleRepo.Roles["r1"].Policies = datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":false}}`))
+
+	err := (&roleEffectivePolicyInvalidator{service: svc}).InvalidateRole(context.Background(), "r1")
+	require.NoError(t, err)
+	assert.Equal(t, false, svc.GetUserPolicies("u1")["canSearchNotes"])
+	assert.Equal(t, false, svc.GetUserPolicies("u2")["canSearchNotes"])
 }
 
 // --- serverPluginInfos (#2497) ---
