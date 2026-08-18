@@ -76,6 +76,10 @@ type Definition struct {
 	// 晒すと、運営者がどんな拡張を使っているかが攻撃面の情報になる。
 	// 連合しないプラグインは名前も出さない。
 	Peered bool
+
+	// EffectivePolicies declares effective-policy contributions. The host calls
+	// it after Migrations and before any Routes or Jobs callback.
+	EffectivePolicies func(Context, EffectivePolicyInvalidator) (EffectivePolicyRegistration, error)
 }
 
 // Validate reports whether the definition is usable.
@@ -90,8 +94,8 @@ func (d Definition) Validate() error {
 		return fmt.Errorf("plugin %q: APIVersion %d はこの mk-go (APIVersion %d) と互換がありません",
 			d.Name, d.APIVersion, APIVersion)
 	}
-	if d.Routes == nil && d.Jobs == nil {
-		return fmt.Errorf("plugin %q: Routes も Jobs も設定されていません", d.Name)
+	if d.Routes == nil && d.Jobs == nil && d.EffectivePolicies == nil {
+		return fmt.Errorf("plugin %q: Routes も Jobs も EffectivePolicies も設定されていません", d.Name)
 	}
 	return nil
 }
