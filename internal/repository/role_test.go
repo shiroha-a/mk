@@ -159,6 +159,61 @@ func TestRoleAssignmentRepository_CRUD(t *testing.T) {
 	assert.False(t, exists)
 }
 
+func TestRoleAssignmentRepository_FindActive(t *testing.T) {
+	roleRepo := NewRoleRepository(testDB)
+	assignRepo := NewRoleAssignmentRepository(testDB)
+	now := time.Now()
+	role := &model.Role{
+		ID: "role_find_active", UpdatedAt: now, LastUsedAt: now, Name: "Exact",
+		Target: model.RoleTargetManual, Policies: datatypes.JSON([]byte("{}")),
+		CondFormula: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, roleRepo.Create(role))
+	defer cleanupRole(t, role.ID)
+	otherRole := &model.Role{
+		ID: "role_find_active_other", UpdatedAt: now, LastUsedAt: now, Name: "Other",
+		Target: model.RoleTargetManual, Policies: datatypes.JSON([]byte("{}")),
+		CondFormula: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, roleRepo.Create(otherRole))
+	defer cleanupRole(t, otherRole.ID)
+	createTestUser(t, "find_active_u1")
+	createTestUser(t, "find_active_u2")
+	createTestUser(t, "find_active_u3")
+
+	at := time.Date(2026, 8, 18, 12, 0, 0, 0, time.UTC)
+	future := at.Add(time.Second)
+	boundary := at
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "find_active_a1", UserID: "find_active_u1", RoleID: role.ID, ExpiresAt: &future}))
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "find_active_a2", UserID: "find_active_u2", RoleID: otherRole.ID}))
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "find_active_a3", UserID: "find_active_u3", RoleID: role.ID}))
+
+	active, err := assignRepo.FindActive("find_active_u1", role.ID, at)
+	require.NoError(t, err)
+	require.NotNil(t, active)
+	require.NotNil(t, active.ExpiresAt)
+	assert.WithinDuration(t, future, *active.ExpiresAt, time.Millisecond)
+
+	active, err = assignRepo.FindActive("find_active_u2", role.ID, at)
+	require.NoError(t, err)
+	assert.Nil(t, active, "an active assignment to another role is confirmed absence for the target role")
+
+	require.NoError(t, testDB.Model(&model.RoleAssignment{}).Where("id = ?", "find_active_a1").Update("expiresAt", boundary).Error)
+	active, err = assignRepo.FindActive("find_active_u1", role.ID, at)
+	require.NoError(t, err)
+	assert.Nil(t, active, "expiresAt equal to evaluation time is inactive")
+
+	active, err = assignRepo.FindActive("find_active_u3", role.ID, at)
+	require.NoError(t, err)
+	require.NotNil(t, active, "nil expiresAt is active")
+}
+
+func TestRoleAssignmentRepository_FindActive_Error(t *testing.T) {
+	repo := NewRoleAssignmentRepository(cancelledDB(t))
+	_, err := repo.FindActive("user", "role", time.Now())
+	assert.Error(t, err)
+}
+
 func TestRoleRepository_List_Error(t *testing.T) {
 	db := cancelledDB(t)
 	repo := NewRoleRepository(db)

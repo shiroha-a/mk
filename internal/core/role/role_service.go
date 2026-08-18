@@ -329,6 +329,14 @@ func (s *Service) GetUserAssigns(userID string) ([]*model.RoleAssignment, error)
 	return s.assignmentRepo.ListByUser(userID)
 }
 
+// GetUserAssign returns the user's active assignment for one exact role.
+func (s *Service) GetUserAssign(userID, roleID string, at time.Time) (*model.RoleAssignment, error) {
+	if userID == "" || roleID == "" {
+		return nil, nil
+	}
+	return s.assignmentRepo.FindActive(userID, roleID, at)
+}
+
 // evaluateConditionalRoles returns the subset of `target=conditional`
 // roles whose `condFormula` evaluates to true for the user. Best-effort:
 // when prerequisites are missing (no userRepo wired, role list fetch

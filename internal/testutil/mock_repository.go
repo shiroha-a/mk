@@ -6879,6 +6879,14 @@ func (m *MockRoleAssignmentRepository) DeleteExpired(now time.Time) (int64, erro
 	return deleted, nil
 }
 
+func (m *MockRoleAssignmentRepository) FindActive(userID, roleID string, at time.Time) (*model.RoleAssignment, error) {
+	a := m.Assignments[m.key(userID, roleID)]
+	if a == nil || (a.ExpiresAt != nil && !a.ExpiresAt.After(at)) {
+		return nil, nil
+	}
+	return a, nil
+}
+
 func (m *MockRoleAssignmentRepository) ListByUser(userID string) ([]*model.RoleAssignment, error) {
 	var result []*model.RoleAssignment
 	now := time.Now()

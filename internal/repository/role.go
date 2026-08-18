@@ -71,6 +71,10 @@ func (r *roleRepository) Delete(id string) error {
 type RoleAssignmentRepository interface {
 	Create(a *model.RoleAssignment) error
 	Delete(userID, roleID string) error
+	// FindActive returns the matching assignment when ExpiresAt is nil or
+	// strictly after at. Absence and expiry at the boundary return (nil, nil);
+	// persistence failures are returned unchanged.
+	FindActive(userID, roleID string, at time.Time) (*model.RoleAssignment, error)
 	ListByUser(userID string) ([]*model.RoleAssignment, error)
 	ListByRole(roleID string, untilID, sinceID string, limit int) ([]*model.RoleAssignment, error)
 	Exists(userID, roleID string) (bool, error)
@@ -104,6 +108,22 @@ func (r *roleAssignmentRepository) Delete(userID, roleID string) error {
 func (r *roleAssignmentRepository) DeleteExpired(now time.Time) (int64, error) {
 	res := r.db.Where(`"expiresAt" IS NOT NULL AND "expiresAt" < ?`, now).Delete(&model.RoleAssignment{})
 	return res.RowsAffected, res.Error
+}
+
+// FindActive returns the active exact assignment, or (nil, nil) when no row is
+// active. A nil expiry is active; an expiry equal to at is inactive.
+func (r *roleAssignmentRepository) FindActive(userID, roleID string, at time.Time) (*model.RoleAssignment, error) {
+	var assignment model.RoleAssignment
+	result := r.db.Where(`"userId" = ? AND "roleId" = ? AND ("expiresAt" IS NULL OR "expiresAt" > ?)`, userID, roleID, at).
+		Limit(1).
+		Find(&assignment)
+	if result.Error != nil {
+		return nil, result.Error
+	}
+	if result.RowsAffected == 0 {
+		return nil, nil
+	}
+	return &assignment, nil
 }
 
 func (r *roleAssignmentRepository) ListByUser(userID string) ([]*model.RoleAssignment, error) {
