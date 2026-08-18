@@ -44,3 +44,35 @@ func TestGetUserRoles_CacheExpiryCappedAtAssignmentExpiry(t *testing.T) {
 	assert.True(t, v2.(*roleCacheEntry).expiresAt.After(time.Now().Add(4*time.Minute)),
 		"non-expiring assignment keeps the full TTL")
 }
+
+func TestGetUserRoles_ExpiredEntryPublishesAndReturnsIndependentSnapshot(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := NewService(roleRepo, assignRepo, metaRepo, idGen)
+	oldRole := &model.Role{ID: "r1", Name: "Old"}
+	roleRepo.Roles["r1"] = oldRole
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+	_, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	v, ok := svc.userRoleCache.Load("u1")
+	require.True(t, ok)
+	svc.roleCacheMu.Lock()
+	v.(*roleCacheEntry).expiresAt = time.Now().Add(-time.Second)
+	svc.roleCacheMu.Unlock()
+	replacement := &model.Role{ID: "r1", Name: "New"}
+	roleRepo.Roles["r1"] = replacement
+
+	refreshed, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	require.Len(t, refreshed, 1)
+	assert.Equal(t, "New", refreshed[0].Name)
+	require.NotSame(t, replacement, refreshed[0])
+	refreshed[0].Name = "Changed"
+
+	cached, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	assert.Equal(t, "New", cached[0].Name)
+}

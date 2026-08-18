@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -97,6 +96,46 @@ type roleCacheEntry struct {
 	expiresAt time.Time
 }
 
+type roleListFlight struct {
+	epoch uint64
+	done  chan struct{}
+}
+
+func cloneRole(role *model.Role) *model.Role {
+	if role == nil {
+		return nil
+	}
+	cloned := *role
+	if role.Color != nil {
+		color := *role.Color
+		cloned.Color = &color
+	}
+	if role.IconURL != nil {
+		iconURL := *role.IconURL
+		cloned.IconURL = &iconURL
+	}
+	if role.CondFormula != nil {
+		cloned.CondFormula = make(datatypes.JSON, len(role.CondFormula))
+		copy(cloned.CondFormula, role.CondFormula)
+	}
+	if role.Policies != nil {
+		cloned.Policies = make(datatypes.JSON, len(role.Policies))
+		copy(cloned.Policies, role.Policies)
+	}
+	return &cloned
+}
+
+func cloneRoles(roles []*model.Role) []*model.Role {
+	if roles == nil {
+		return nil
+	}
+	cloned := make([]*model.Role, len(roles))
+	for i, role := range roles {
+		cloned[i] = cloneRole(role)
+	}
+	return cloned
+}
+
 // Service manages roles and role assignments.
 type Service struct {
 	roleRepo       repository.RoleRepository
@@ -116,12 +155,16 @@ type Service struct {
 	// ので setter で wire しなくても挙動は変わらない (= 後方互換性は保たれる)。
 	userRepo repository.UserRepository
 
-	// userRoleCache は GetUserRoles 結果の per-user TTL キャッシュ
-	// (sync.Map で hot path に lock を持ち込まない)。Assign / Unassign で
+	// userRoleCache は GetUserRoles 結果の per-user TTL キャッシュ。
+	// Assign / Unassign で
 	// 当該 userID を、Delete (role 削除) で全 entry を invalidate する。
 	// admin/roles/update が roleRepo を直接叩く経路は TTL でしかカバー
 	// できないが、roleCacheTTL = 5 min で staleness は bounded (#300 3-5)。
 	userRoleCache sync.Map // userID -> *roleCacheEntry
+	// roleCacheMuはcacheのload/store/deleteとepochを同期する。repository呼び出し中は
+	// 保持せず、invalidation後に古いmiss結果がpublishされることだけを防ぐ。
+	roleCacheMu    sync.Mutex
+	roleCacheEpoch uint64
 
 	// rolesListCache は roleRepo.List() 結果の TTL キャッシュ (#1030)。
 	// evaluateConditionalRoles から呼ばれて全 role を fetch する経路で、cache
@@ -131,17 +174,21 @@ type Service struct {
 	// fire するのは cache miss / TTL 失効 / conditional role 評価が要る user
 	// に限られる。Create / UpdateFields / Delete で flush する。
 	//
-	// sync.RWMutex で hot path (cache hit) を RLock に倒し、cache miss /
-	// invalidate の writer のみ Lock を取る。複数 goroutine が同時に cache
-	// hit する場合のロック競合を排除する (#1035 review)。
-	rolesListMu        sync.RWMutex
 	rolesListCache     []*model.Role
 	rolesListExpiresAt time.Time
+	rolesListFlight    *roleListFlight
 
 	// roleAssignNotifier は local public role 割当時に被割当ユーザーへ
 	// 'roleAssigned' 通知を送る (#1559)。循環依存を避けるため interface で
 	// 受け取る (実装は core/notification.Hook)。nil なら通知しない。
 	roleAssignNotifier RoleAssignNotifier
+
+	// policyProviderMu は policyProviders を guard する。登録は wire-time の
+	// 書き込みのみで、解決の hot path は RLock で snapshot を取る。
+	policyProviderMu sync.RWMutex
+	// policyProviders は plugin name でソートされた不変の登録一覧。
+	// snapshotPolicyProviders が防御的コピーを返す (caller は書き換え不可)。
+	policyProviders []policyProvider
 }
 
 // RoleAssignNotifier records a 'roleAssigned' notification on role assignment
@@ -188,6 +235,9 @@ func (s *Service) InvalidateUserRoleCache(userID string) {
 	if userID == "" {
 		return
 	}
+	s.roleCacheMu.Lock()
+	defer s.roleCacheMu.Unlock()
+	s.roleCacheEpoch++
 	s.userRoleCache.Delete(userID)
 }
 
@@ -196,11 +246,15 @@ func (s *Service) InvalidateUserRoleCache(userID string) {
 // so the simplest safe action is to flush the whole cache). 全 user role
 // cache に加え roleRepo.List() cache (#1030) も flush する。
 func (s *Service) InvalidateAllRoleCaches() {
+	s.roleCacheMu.Lock()
+	defer s.roleCacheMu.Unlock()
+	s.roleCacheEpoch++
 	s.userRoleCache.Range(func(k, _ any) bool {
 		s.userRoleCache.Delete(k)
 		return true
 	})
-	s.invalidateRolesListCache()
+	s.rolesListCache = nil
+	s.rolesListExpiresAt = time.Time{}
 }
 
 // listRolesCached returns the role list backed by a single-slot TTL cache
@@ -212,47 +266,42 @@ func (s *Service) InvalidateAllRoleCaches() {
 // (admin/roles の直接 repo 更新等) は TTL でしか cover できない。
 // roleCacheTTL = 5 min で staleness は bounded (= userRoleCache と同 trade-off)。
 //
-// 返却される slice は **shared snapshot** で、caller は read-only に扱う
-// (mutate 不可、append / sort 等で書き換えない)。複数 goroutine が同 cache
-// snapshot を同時に iterate するので、要素 (*model.Role) の field mutate
-// もしない。mutation が要るなら slices.Clone(...) で copy を取ってから操作する。
+// Cache entries are immutable snapshots. Repository results are cloned before
+// publication and every return receives a separate deep clone.
 func (s *Service) listRolesCached() ([]*model.Role, error) {
-	// Fast path: RLock で cache hit を確認、cache hit なら lock を即座に
-	// 解放して return。複数 goroutine の hot path 並列実行を許す。
-	s.rolesListMu.RLock()
-	if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
-		roles := s.rolesListCache
-		s.rolesListMu.RUnlock()
-		return roles, nil
-	}
-	s.rolesListMu.RUnlock()
+	for {
+		s.roleCacheMu.Lock()
+		if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
+			roles := s.rolesListCache
+			s.roleCacheMu.Unlock()
+			return cloneRoles(roles), nil
+		}
+		epoch := s.roleCacheEpoch
+		if flight := s.rolesListFlight; flight != nil && flight.epoch == epoch {
+			done := flight.done
+			s.roleCacheMu.Unlock()
+			<-done
+			continue
+		}
+		flight := &roleListFlight{epoch: epoch, done: make(chan struct{})}
+		s.rolesListFlight = flight
+		s.roleCacheMu.Unlock()
 
-	// Slow path: write lock で cache を更新。再 check で double-check pattern
-	// (= 他 goroutine が RUnlock 〜 Lock 間に cache を埋めた場合、重複 fetch
-	// を避ける)。これにより同時 cache miss する N goroutine でも roleRepo.List()
-	// は通常 1 回しか発火しない (single-flight 相当)。
-	s.rolesListMu.Lock()
-	defer s.rolesListMu.Unlock()
-	if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
-		return s.rolesListCache, nil
-	}
-	roles, err := s.roleRepo.List()
-	if err != nil {
-		return nil, err
-	}
-	s.rolesListCache = roles
-	s.rolesListExpiresAt = time.Now().Add(roleCacheTTL)
-	return roles, nil
-}
+		roles, err := s.roleRepo.List()
+		snapshot := cloneRoles(roles)
 
-// invalidateRolesListCache clears the rolesListCache so the next call hits
-// roleRepo.List() again. Called from Create / UpdateFields / Delete and
-// from InvalidateAllRoleCaches.
-func (s *Service) invalidateRolesListCache() {
-	s.rolesListMu.Lock()
-	defer s.rolesListMu.Unlock()
-	s.rolesListCache = nil
-	s.rolesListExpiresAt = time.Time{}
+		s.roleCacheMu.Lock()
+		if err == nil && s.roleCacheEpoch == epoch {
+			s.rolesListCache = snapshot
+			s.rolesListExpiresAt = time.Now().Add(roleCacheTTL)
+		}
+		if s.rolesListFlight == flight {
+			s.rolesListFlight = nil
+		}
+		close(flight.done)
+		s.roleCacheMu.Unlock()
+		return cloneRoles(snapshot), err
+	}
 }
 
 // GetUserRoles returns all active roles applied to the user. The returned
@@ -270,12 +319,17 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 	if userID == "" {
 		return nil, nil
 	}
+	s.roleCacheMu.Lock()
 	if v, ok := s.userRoleCache.Load(userID); ok {
 		if entry, ok := v.(*roleCacheEntry); ok && time.Now().Before(entry.expiresAt) {
-			return entry.roles, nil
+			roles := entry.roles
+			s.roleCacheMu.Unlock()
+			return cloneRoles(roles), nil
 		}
 		s.userRoleCache.Delete(userID)
 	}
+	epoch := s.roleCacheEpoch
+	s.roleCacheMu.Unlock()
 
 	assignments, err := s.assignmentRepo.ListByUser(userID)
 	if err != nil {
@@ -309,11 +363,16 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 			cacheExpiry = *a.ExpiresAt
 		}
 	}
-	s.userRoleCache.Store(userID, &roleCacheEntry{
-		roles:     roles,
-		expiresAt: cacheExpiry,
-	})
-	return roles, nil
+	snapshot := cloneRoles(roles)
+	s.roleCacheMu.Lock()
+	if s.roleCacheEpoch == epoch {
+		s.userRoleCache.Store(userID, &roleCacheEntry{
+			roles:     snapshot,
+			expiresAt: cacheExpiry,
+		})
+	}
+	s.roleCacheMu.Unlock()
+	return cloneRoles(snapshot), nil
 }
 
 // GetUserAssigns returns the user's currently active role assignments.
@@ -613,7 +672,7 @@ func (s *Service) capServerMaxFileSize(policies map[string]any) map[string]any {
 		return policies
 	}
 	if v, ok := policies["maxFileSizeMb"]; ok {
-		if cur, ok := policyIntValue(v); ok && cur > s.serverMaxFileSizeMb {
+		if policyUnlimitedOrAboveCap(v, s.serverMaxFileSizeMb) {
 			policies["maxFileSizeMb"] = s.serverMaxFileSizeMb
 		}
 	}
@@ -653,7 +712,7 @@ func capIntPolicy(policies map[string]any, key string, limit int) {
 	if !ok {
 		return
 	}
-	if cur, ok := policyIntValue(v); ok && cur > limit {
+	if policyUnlimitedOrAboveCap(v, limit) {
 		policies[key] = limit
 	}
 }
@@ -664,55 +723,27 @@ func (s *Service) applyServerCaps(policies map[string]any) map[string]any {
 	return s.capChunkedUpload(s.capServerMaxFileSize(policies))
 }
 
-// policyIntValue extracts an int from a policy value (int / int64 / float64)。
-func policyIntValue(v any) (int, bool) {
+// policyUnlimitedOrAboveCap reports whether a numeric policy would disable a
+// consumer's gate (<= 0) or exceed an authoritative positive instance cap.
+// float64 is compared directly so a valid fractional maxFileSizeMb is not
+// truncated to zero and accidentally replaced by a much larger cap.
+func policyUnlimitedOrAboveCap(v any, limit int) bool {
 	switch x := v.(type) {
 	case int:
-		return x, true
+		return x <= 0 || x > limit
 	case int64:
-		return int(x), true
+		return x <= 0 || x > int64(limit)
 	case float64:
-		return int(x), true
+		return x <= 0 || x > float64(limit)
 	}
-	return 0, false
+	return false
 }
 
 func (s *Service) GetUserPolicies(userID string) map[string]any {
-	// applyMetaBasePolicies が basePolicies を mutate するため、共有 cache では
-	// なく clone を使う (DefaultPolicies の共有 map を壊さない、#1377)。
-	basePolicies := DefaultPoliciesClone()
-	s.applyMetaBasePolicies(basePolicies)
-
-	if userID == "" {
-		return s.applyServerCaps(basePolicies)
-	}
-	roles, err := s.GetUserRoles(userID)
-	if err != nil {
-		// role 取得失敗時は base policies で fallback (upstream は throw
-		// するが、mk-go は fail-soft で gate を default 値に倒す)。
-		return s.applyServerCaps(basePolicies)
-	}
-	if len(roles) == 0 {
-		// upstream #17389: base role only でも server cap を効かせる (旧 upstream は
-		// 素通しだった base-role-only bug を aggregate([base]) で修正)。
-		return s.applyServerCaps(basePolicies)
-	}
-
-	// 各 role の policies JSON を Unmarshal して一度だけ展開する。
-	roleOverrides := make([]map[string]rolePolicyOverride, 0, len(roles))
-	for _, r := range roles {
-		if r == nil || len(r.Policies) == 0 {
-			roleOverrides = append(roleOverrides, nil)
-			continue
-		}
-		roleOverrides = append(roleOverrides, parseRolePolicies(r.Policies))
-	}
-
-	out := make(map[string]any, len(basePolicies))
-	for key, baseVal := range basePolicies {
-		out[key] = computePolicy(key, baseVal, roleOverrides)
-	}
-	return s.applyServerCaps(out)
+	// 解決は resolvePolicies に委譲する (provider 失敗時は errorless で
+	// native-onlyの安全なmapを返す)。checked版はGetUserPoliciesCheckedがerrorを返す。
+	out, _ := s.resolvePolicies(userID)
+	return out
 }
 
 // applyMetaBasePolicies overlays `meta.policies` (admin UI 設定の base
@@ -836,11 +867,13 @@ type policyEntry struct {
 // computePolicy resolves the effective value for a single policy key by
 // applying upstream TS priority cascade + per-key aggregator. baseVal is
 // the merged default+meta value used when a role specifies useDefault=true
-// or when no role has an override.
-func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolicyOverride) any {
+// or when no role has an override. extra carries effective-policy provider
+// contributions for the key (already validated & type-checked by the host);
+// it is merged into the same priority cascade as the role overrides.
+func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolicyOverride, extra []policyEntry) any {
 	// 各 role について本 policy の override を組み立てる。entry 無し =
 	// priority=0, useDefault=true (= base にフォールバック) として扱う。
-	collected := make([]policyEntry, 0, len(roleOverrides))
+	collected := make([]policyEntry, 0, len(roleOverrides)+len(extra))
 	for _, m := range roleOverrides {
 		if m == nil {
 			collected = append(collected, policyEntry{priority: 0, value: baseVal})
@@ -857,6 +890,9 @@ func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolic
 			collected = append(collected, policyEntry{priority: p.Priority, value: p.Value})
 		}
 	}
+	// provider contribution は同じ priority cascade に参加させる
+	// (= native と provider は同一 priority グループ内で aggregate される)。
+	collected = append(collected, extra...)
 	// upstream: priority 2 → 1 → 0 の順で「該当 priority に少なくとも 1 件
 	// あればそのグループだけ aggregate」。fallback の priority 0 は全 role
 	// を対象とする (= entry が無い role の priority=0 default も含めて集約)。
@@ -993,46 +1029,102 @@ func normalizeStringSlice(raw any) []string {
 	}
 }
 
-// maxNumberAsInt picks the maximum int across values, ignoring entries
-// that fail type assertion. base is returned when no usable entry exists.
-// JSON unmarshal で role policy の数値が float64 になっているケース (= role
-// admin UI 由来の override) も拾えるよう、float64 を int に丸めて比較する。
-// NaN / +-Inf / overflow した float64 entry は coerceToBaseType と同じく
-// silently skip する (= 不正値が aggregator を汚染しない fail-soft)。
+// maxNumber picks the maximum host-int-compatible number without converting
+// typed integers through float64. Fractional float64 values remain supported
+// for native role policies such as sub-megabyte maxFileSizeMb values.
 func maxNumber(values []any, base any) any {
-	var best float64
+	var best intBaseNumeric
 	found := false
 	for _, v := range values {
-		var f float64
-		switch x := v.(type) {
-		case int:
-			f = float64(x)
-		case int64:
-			f = float64(x)
-		case float64:
-			if !isFiniteAndInRange(x, math.MinInt, math.MaxInt) {
-				continue
-			}
-			f = x
-		default:
+		candidate, ok := intBaseNumber(v)
+		if !ok {
 			continue
 		}
-		if !found || f > best {
-			best = f
+		if !found || candidate.greaterThan(best) {
+			best = candidate
 			found = true
 		}
 	}
 	if !found {
 		return base
 	}
-	// 整数値なら int で返して既存 consumer の type assertion を維持する。
-	// 小数はそのまま float64 で返す: role で 1MB 未満の maxFileSizeMb を
-	// 設定できるようにするため (int に丸めると 0 になり、gate が事実上
-	// 無効化される)。小数を取りうる policy の consumer は float も受けること。
-	if best == math.Trunc(best) {
-		return int(best)
+	return best.normalized
+}
+
+type intBaseNumeric struct {
+	integer    bool
+	intValue   int64
+	floatValue float64
+	normalized any
+}
+
+func intBaseNumber(value any) (intBaseNumeric, bool) {
+	switch v := value.(type) {
+	case int:
+		return intBaseNumeric{integer: true, intValue: int64(v), normalized: v}, true
+	case int64:
+		converted := int(v)
+		if int64(converted) != v {
+			return intBaseNumeric{}, false
+		}
+		return intBaseNumeric{integer: true, intValue: v, normalized: converted}, true
+	case float64:
+		converted, ok := safelyConvertFloatToHostInt(v)
+		if !ok {
+			return intBaseNumeric{}, false
+		}
+		if v == math.Trunc(v) {
+			return intBaseNumeric{integer: true, intValue: int64(converted), normalized: converted}, true
+		}
+		return intBaseNumeric{floatValue: v, normalized: v}, true
+	default:
+		return intBaseNumeric{}, false
 	}
-	return best
+}
+
+func (n intBaseNumeric) greaterThan(other intBaseNumeric) bool {
+	if n.integer && other.integer {
+		return n.intValue > other.intValue
+	}
+	if !n.integer && !other.integer {
+		return n.floatValue > other.floatValue
+	}
+	if n.integer {
+		return compareIntToFraction(n.intValue, other.floatValue) > 0
+	}
+	return compareIntToFraction(other.intValue, n.floatValue) < 0
+}
+
+// compareIntToFraction compares exact i with finite, in-range, non-integral f.
+// Converting f's truncated integer part is safe and avoids converting i to a
+// potentially lossy float64.
+func compareIntToFraction(i int64, f float64) int {
+	truncated := int64(f)
+	if f > 0 {
+		if i <= truncated {
+			return -1
+		}
+		return 1
+	}
+	if i < truncated {
+		return -1
+	}
+	return 1
+}
+
+// safelyConvertFloatToHostInt checks the host-int half-open range before the
+// conversion. The positive bound is exclusive because float64(MaxInt64)
+// rounds to 2^63, while the exact MaxInt32 remains safely below 2^31.
+func safelyConvertFloatToHostInt(v float64) (int, bool) {
+	if math.IsNaN(v) || math.IsInf(v, 0) {
+		return 0, false
+	}
+	min := float64(math.MinInt)
+	maxExclusive := -min
+	if v < min || v >= maxExclusive {
+		return 0, false
+	}
+	return int(v), true
 }
 
 // aggregateChatAvailability picks the most permissive value among
@@ -1319,11 +1411,26 @@ func DefaultPolicies() map[string]any {
 }
 
 // DefaultPoliciesClone returns a fresh mutable copy of the default policies for
-// callers that overlay values (e.g. GetUserPolicies merging meta / role
-// overrides). The clone is shallow, which is safe because all overlay paths
-// replace map entries by key rather than mutating the contained slice in place.
+// callers that overlay or return values (e.g. GetUserPolicies merging meta /
+// role overrides). Mutable policy values are cloned as well so callers cannot
+// mutate the shared defaults through a returned slice.
 func DefaultPoliciesClone() map[string]any {
-	return maps.Clone(defaultPoliciesCache)
+	clone := make(map[string]any, len(defaultPoliciesCache))
+	for key, value := range defaultPoliciesCache {
+		clone[key] = clonePolicyValue(value)
+	}
+	return clone
+}
+
+func clonePolicyValue(value any) any {
+	switch value := value.(type) {
+	case []string:
+		return append([]string(nil), value...)
+	case []any:
+		return append([]any(nil), value...)
+	default:
+		return value
+	}
 }
 
 // MergeMetaPolicies returns the default policies overlaid with the instance's

@@ -1,6 +1,7 @@
 package role_test
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -1028,6 +1029,21 @@ func TestDefaultPoliciesClone_Isolation(t *testing.T) {
 	assert.False(t, leaked, "clone への key 追加が共有 default に漏れている")
 }
 
+func TestGetUserPolicies_NativeSliceMutationIsIsolated(t *testing.T) {
+	want := []string{"text/*", "application/json", "image/*", "video/*", "audio/*"}
+	shared := role.DefaultPolicies()["uploadableFileTypes"].([]string)
+	original := append([]string(nil), shared...)
+	defer copy(shared, original)
+
+	svc, _, _, _ := newTestService(t)
+	policies := svc.GetUserPolicies("u1")
+	policies["uploadableFileTypes"].([]string)[0] = "application/x-corrupt"
+
+	assert.Equal(t, want, role.DefaultPolicies()["uploadableFileTypes"])
+	assert.Equal(t, want, svc.GetUserPolicies("u1")["uploadableFileTypes"])
+	assert.Equal(t, want, role.DefaultPoliciesClone()["uploadableFileTypes"])
+}
+
 // #1377: GetUserPolicies は applyMetaBasePolicies で base を mutate するため
 // clone を使う。meta override が共有 DefaultPolicies cache を汚染しないことを
 // 保証する (= 本最適化の安全性の要)。clone を使わないと本テストは fail する。
@@ -1109,6 +1125,177 @@ func TestGetUserRoles_CachedHitsRepoOnce(t *testing.T) {
 	}
 	assert.Equal(t, 1, assignRepo.listByUserCalls,
 		"per-user role list should be cached; only the first call hits the repo")
+}
+
+func TestGetUserRoles_ReturnsIndependentDeepClones(t *testing.T) {
+	svc, roleRepo, assignRepo := newServiceWithCountingAssign(t)
+	manualColor := "red"
+	manualIcon := "https://example.com/manual.png"
+	manual := &model.Role{
+		ID:          "manual",
+		Name:        "Manual",
+		Color:       &manualColor,
+		IconURL:     &manualIcon,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+		Policies:    datatypes.JSON([]byte(`{"canSearchNotes":{"value":true}}`)),
+	}
+	conditionalColor := "blue"
+	conditionalIcon := "https://example.com/conditional.png"
+	conditional := &model.Role{
+		ID:          "conditional",
+		Name:        "Conditional",
+		Color:       &conditionalColor,
+		IconURL:     &conditionalIcon,
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+		Policies:    datatypes.JSON([]byte(`{"canSearchUsers":{"value":true}}`)),
+	}
+	roleRepo.Roles[manual.ID] = manual
+	roleRepo.Roles[conditional.ID] = conditional
+	assignRepo.Assignments["u1:manual"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: manual.ID}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "u1", Username: "bot", IsBot: true}))
+	svc.SetUserRepo(userRepo)
+
+	first, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	require.NotSame(t, manual, first[0])
+	require.NotSame(t, conditional, first[1])
+
+	first[0].Name = "changed"
+	*first[0].Color = "green"
+	*first[0].IconURL = "https://example.com/changed.png"
+	first[0].CondFormula[0] = '['
+	first[0].Policies[0] = '['
+	first[1] = nil
+
+	second, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	require.Len(t, second, 2)
+	assert.Equal(t, "Manual", second[0].Name)
+	assert.Equal(t, "red", *second[0].Color)
+	assert.Equal(t, "https://example.com/manual.png", *second[0].IconURL)
+	assert.JSONEq(t, `{"type":"isBot"}`, string(second[0].CondFormula))
+	assert.JSONEq(t, `{"canSearchNotes":{"value":true}}`, string(second[0].Policies))
+	assert.Equal(t, "Conditional", second[1].Name)
+	require.NotSame(t, first[0], second[0])
+	require.NotSame(t, manual.Color, second[0].Color)
+	require.NotSame(t, manual.IconURL, second[0].IconURL)
+	assert.Equal(t, 1, assignRepo.listByUserCalls)
+
+	second[0].Policies[0] = '['
+	third, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"canSearchNotes":{"value":true}}`, string(third[0].Policies))
+}
+
+func TestGetUserRoles_PreservesNilAndEmptyMutableFields(t *testing.T) {
+	svc, roleRepo, assignRepo := newServiceWithCountingAssign(t)
+	roleRepo.Roles["r1"] = &model.Role{
+		ID:          "r1",
+		CondFormula: datatypes.JSON{},
+		Policies:    nil,
+	}
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+	roles, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	require.Len(t, roles, 1)
+	assert.Nil(t, roles[0].Color)
+	assert.Nil(t, roles[0].IconURL)
+	assert.NotNil(t, roles[0].CondFormula)
+	assert.Empty(t, roles[0].CondFormula)
+	assert.Nil(t, roles[0].Policies)
+}
+
+func TestGetUserRoles_CacheSnapshotIgnoresRepositoryMutationUntilInvalidated(t *testing.T) {
+	svc, roleRepo, assignRepo := newServiceWithCountingAssign(t)
+	oldColor := "red"
+	oldRole := &model.Role{
+		ID:       "r1",
+		Name:     "Old",
+		Color:    &oldColor,
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"value":true}}`)),
+	}
+	roleRepo.Roles["r1"] = oldRole
+	assignRepo.Assignments["u1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "u1", RoleID: "r1"}
+
+	warmed, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	require.Len(t, warmed, 1)
+	oldRole.Name = "Mutated"
+	*oldRole.Color = "green"
+	oldRole.Policies[0] = '['
+	newColor := "blue"
+	replacement := &model.Role{
+		ID:       "r1",
+		Name:     "New",
+		Color:    &newColor,
+		Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"value":false}}`)),
+	}
+	roleRepo.Roles["r1"] = replacement
+
+	cached, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	assert.Equal(t, "Old", cached[0].Name)
+	assert.Equal(t, "red", *cached[0].Color)
+	assert.JSONEq(t, `{"canSearchNotes":{"value":true}}`, string(cached[0].Policies))
+
+	require.NoError(t, svc.InvalidateUser(context.Background(), "u1"))
+	refreshed, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	assert.Equal(t, "New", refreshed[0].Name)
+	require.NotSame(t, replacement, refreshed[0])
+	require.NotSame(t, replacement.Color, refreshed[0].Color)
+	assert.JSONEq(t, `{"canSearchNotes":{"value":false}}`, string(refreshed[0].Policies))
+}
+
+func TestGetUserRoles_ConditionalCacheSnapshotIgnoresRepositoryMutationUntilInvalidated(t *testing.T) {
+	svc, roleRepo, _ := newServiceWithCountingRoleRepo(t)
+	oldRole := &model.Role{
+		ID:          "r1",
+		Name:        "Old",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+		Policies:    datatypes.JSON([]byte(`{"canSearchNotes":{"value":true}}`)),
+	}
+	roleRepo.Roles["r1"] = oldRole
+	userRepo := testutil.NewMockUserRepository()
+	for _, userID := range []string{"u1", "u2", "u3"} {
+		require.NoError(t, userRepo.Create(&model.User{ID: userID, Username: userID, IsBot: true}))
+	}
+	svc.SetUserRepo(userRepo)
+
+	warmed, err := svc.GetUserRoles("u1")
+	require.NoError(t, err)
+	require.Len(t, warmed, 1)
+	oldRole.Name = "Mutated"
+	oldRole.CondFormula[0] = '['
+	oldRole.Policies[0] = '['
+	replacement := &model.Role{
+		ID:          "r1",
+		Name:        "New",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+		Policies:    datatypes.JSON([]byte(`{"canSearchNotes":{"value":false}}`)),
+	}
+	roleRepo.Roles["r1"] = replacement
+
+	cached, err := svc.GetUserRoles("u2")
+	require.NoError(t, err)
+	require.Len(t, cached, 1)
+	assert.Equal(t, "Old", cached[0].Name)
+	assert.JSONEq(t, `{"canSearchNotes":{"value":true}}`, string(cached[0].Policies))
+	assert.Equal(t, 1, roleRepo.listCalls)
+
+	require.NoError(t, svc.InvalidateRolePolicies(context.Background(), "r1"))
+	refreshed, err := svc.GetUserRoles("u3")
+	require.NoError(t, err)
+	require.Len(t, refreshed, 1)
+	assert.Equal(t, "New", refreshed[0].Name)
+	require.NotSame(t, replacement, refreshed[0])
+	assert.Equal(t, 2, roleRepo.listCalls)
 }
 
 // Assign で当該ユーザーの cache が invalidate されることを担保。
@@ -1729,6 +1916,44 @@ func TestGetUserPolicies_ChunkedUploadServerCap(t *testing.T) {
 	assert.Equal(t, 64, base[role.PolicyChunkedUploadMaxPendingMb])
 }
 
+func TestGetUserPolicies_NativeNegativeUnlimitedCannotBypassInstanceCaps(t *testing.T) {
+	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
+	svc.SetServerMaxFileSizeMb(100)
+	metaRepo.Meta = &model.Meta{
+		ID:                               "x",
+		ChunkedUploadMaxSessionsPerUser:  2,
+		ChunkedUploadMaxPendingMbPerUser: 64,
+	}
+	roleRepo.Roles["r1"] = &model.Role{
+		ID: "r1", Name: "Unlimited",
+		Policies: datatypes.JSON([]byte(`{
+			"maxFileSizeMb": {"useDefault": false, "priority": 2, "value": -1},
+			"chunkedUploadMaxConcurrentSessions": {"useDefault": false, "priority": 2, "value": -1},
+			"chunkedUploadMaxPendingMb": {"useDefault": false, "priority": 2, "value": -1}
+		}`)),
+	}
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "r1"}
+
+	policies := svc.GetUserPolicies("user1")
+	assert.Equal(t, 100, policies["maxFileSizeMb"])
+	assert.Equal(t, 2, policies[role.PolicyChunkedUploadMaxConcurrentSessions])
+	assert.Equal(t, 64, policies[role.PolicyChunkedUploadMaxPendingMb])
+}
+
+func TestGetUserPolicies_PositiveFractionalMaxFileSizeBelowCapRemainsUnchanged(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	svc.SetServerMaxFileSizeMb(100)
+	roleRepo.Roles["r1"] = &model.Role{
+		ID: "r1", Name: "Small",
+		Policies: datatypes.JSON([]byte(`{
+			"maxFileSizeMb": {"useDefault": false, "priority": 2, "value": 0.5}
+		}`)),
+	}
+	assignRepo.Assignments["user1:r1"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "r1"}
+
+	assert.Equal(t, 0.5, svc.GetUserPolicies("user1")["maxFileSizeMb"])
+}
+
 // cap が既定値より大きい場合は既定値のまま。cap は上限であって強制値ではない。
 func TestGetUserPolicies_ChunkedUploadCapAboveDefaultKeepsDefault(t *testing.T) {
 	svc, _, _, metaRepo := newTestService(t)
@@ -1742,26 +1967,29 @@ func TestGetUserPolicies_ChunkedUploadCapAboveDefaultKeepsDefault(t *testing.T) 
 	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
 }
 
-// meta が引けない / 値が 0 の構成では cap しない。ここで fail-closed に倒すと
-// transient DB error で全ユーザーの分割アップロードが止まる。
+// meta が引けない場合は数値上限を推測せず、機能可否だけfail-closedに倒す。
+// meta の値が0なら、取得済みの明示的な「cap無効」として数値を制限しない。
 func TestGetUserPolicies_ChunkedUploadCapDisabled(t *testing.T) {
 	svc, _, _, metaRepo := newTestService(t)
 
 	// meta 取得失敗 (Meta == nil → ErrNotFound)。
 	p := svc.GetUserPolicies("user1")
+	assert.Equal(t, false, p[role.PolicyCanUseChunkedUpload])
 	assert.Equal(t, 4, p[role.PolicyChunkedUploadMaxConcurrentSessions])
 	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
 
 	// 0 は「cap 無効」の意味 (capServerMaxFileSize と同じ規約)。
 	metaRepo.Meta = &model.Meta{ID: "x"}
 	p = svc.GetUserPolicies("user1")
+	assert.Equal(t, true, p[role.PolicyCanUseChunkedUpload])
 	assert.Equal(t, 4, p[role.PolicyChunkedUploadMaxConcurrentSessions])
 	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
 }
 
 // bool policy は OR 集約される。片方の role が許可していれば使える。
 func TestGetUserPolicies_CanUseChunkedUploadAggregation(t *testing.T) {
-	svc, roleRepo, assignRepo, _ := newTestService(t)
+	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
+	metaRepo.Meta = &model.Meta{ID: "x"}
 	roleRepo.Roles["deny"] = &model.Role{
 		ID: "deny", Name: "Deny",
 		Policies: datatypes.JSON([]byte(`{"canUseChunkedUpload": {"useDefault": false, "priority": 0, "value": false}}`)),

@@ -297,6 +297,28 @@ func TestMaxNumberAsInt_SkipsInvalidFloat(t *testing.T) {
 	assert.Equal(t, 42, got)
 }
 
+func TestMaxNumber_ExactMixedNumericOrdering(t *testing.T) {
+	assert.Equal(t, 3, maxNumber([]any{int64(3), 2.5}, 0))
+	assert.Equal(t, 1.5, maxNumber([]any{1, 1.5}, 0))
+	assert.Equal(t, 1.5, maxNumber([]any{1.5, 1}, 0))
+	assert.Equal(t, -1, maxNumber([]any{-1.5, -1}, 0))
+	assert.Equal(t, -1, maxNumber([]any{-1, -1.5}, 0))
+	assert.Equal(t, 2.5, maxNumber([]any{1.5, 2.5}, 0))
+}
+
+func TestPolicyUnlimitedOrAboveCap(t *testing.T) {
+	assert.True(t, policyUnlimitedOrAboveCap(-1, 10))
+	assert.True(t, policyUnlimitedOrAboveCap(11, 10))
+	assert.False(t, policyUnlimitedOrAboveCap(5, 10))
+	assert.True(t, policyUnlimitedOrAboveCap(int64(-1), 10))
+	assert.True(t, policyUnlimitedOrAboveCap(int64(11), 10))
+	assert.False(t, policyUnlimitedOrAboveCap(int64(5), 10))
+	assert.True(t, policyUnlimitedOrAboveCap(-0.5, 10))
+	assert.True(t, policyUnlimitedOrAboveCap(10.5, 10))
+	assert.False(t, policyUnlimitedOrAboveCap(0.5, 10))
+	assert.False(t, policyUnlimitedOrAboveCap("invalid", 10))
+}
+
 func TestAggregateChatAvailability_AvailableShortCircuit(t *testing.T) {
 	// "available" を含む場合は readonly / unavailable をスキップして即返す。
 	got := aggregateChatAvailability([]any{"readonly", "unavailable", "available"})
