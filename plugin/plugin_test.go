@@ -152,6 +152,35 @@ func TestStatusError(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, se.Status)
 }
 
+func TestNewCodedStatusError(t *testing.T) {
+	err := NewCodedStatusError(http.StatusConflict, "設定が更新されています", "REVISION_CONFLICT")
+
+	var se *StatusError
+	require.True(t, errors.As(err, &se))
+	assert.Equal(t, http.StatusConflict, se.Status)
+	assert.Equal(t, "設定が更新されています", se.Message)
+	assert.Equal(t, "409: 設定が更新されています", err.Error())
+}
+
+func TestNewCodedStatusError_EmptyCodeIsLegacyStatusError(t *testing.T) {
+	err := NewCodedStatusError(http.StatusBadRequest, "id が不正です", "")
+
+	var se *StatusError
+	require.True(t, errors.As(err, &se))
+	assert.Equal(t, http.StatusBadRequest, se.Status)
+	assert.Equal(t, "id が不正です", se.Message)
+}
+
+func TestNewCodedStatusError_InvalidCodeFallsBackToLegacyStatusError(t *testing.T) {
+	err := NewCodedStatusError(http.StatusBadRequest, "140 文字以内にしてください", "too-long")
+
+	var statusErr *StatusError
+	require.True(t, errors.As(err, &statusErr))
+	assert.Equal(t, http.StatusBadRequest, statusErr.Status)
+	assert.Equal(t, "140 文字以内にしてください", statusErr.Message)
+	assert.NotContains(t, err.Error(), "too-long")
+}
+
 func TestErrNotFound(t *testing.T) {
 	err := ErrNotFound("note %s", "abc")
 	assert.Equal(t, http.StatusNotFound, err.Status)

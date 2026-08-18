@@ -90,6 +90,17 @@ func TestWrapPluginHandler_StatusError(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "そんなものは無い")
 }
 
+func TestWrapPluginHandler_StatusErrorWithInvalidCodeFallsBackToLegacy(t *testing.T) {
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return nil, plugin.NewCodedStatusError(http.StatusBadRequest, "secret", "invalid code")
+	}, "{}")
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "secret")
+	assert.NotContains(t, rec.Body.String(), "invalid code")
+	assert.NotContains(t, rec.Body.String(), "\"code\"")
+}
+
 // **素の error はメッセージを外に出さない。** プラグインの内部事情 (DB のエラー
 // 文字列など) がそのまま利用者に見えるのを防ぐ。
 func TestWrapPluginHandler_PlainErrorIsRedacted(t *testing.T) {

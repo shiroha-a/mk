@@ -531,6 +531,7 @@ type StatusError struct { Status int; Message string }
 type APIError struct { Endpoint string; Status int; Body json.RawMessage }
 
 func Errorf(int, string, ...any) *StatusError
+func NewCodedStatusError(int, string, string) error
 func ErrNotFound(string, ...any) *StatusError
 func Register(Definition)
 func Registered() []Definition

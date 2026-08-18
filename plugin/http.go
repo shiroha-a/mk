@@ -118,6 +118,39 @@ func Errorf(status int, format string, args ...any) *StatusError {
 	return &StatusError{Status: status, Message: fmt.Sprintf(format, args...)}
 }
 
+type codedStatusError struct {
+	statusError *StatusError
+	code        string
+}
+
+// NewCodedStatusError builds an error with a stable, client-actionable code.
+// Code must use uppercase ASCII letters, digits, and underscores, starting with
+// a letter. An empty code preserves the legacy uncoded response.
+func NewCodedStatusError(status int, message, code string) error {
+	statusErr := &StatusError{Status: status, Message: message}
+	if code == "" || !validErrorCode(code) {
+		return statusErr
+	}
+	return &codedStatusError{
+		statusError: statusErr,
+		code:        code,
+	}
+}
+
+func (e *codedStatusError) Error() string           { return e.statusError.Error() }
+func (e *codedStatusError) Unwrap() error           { return e.statusError }
+func (e *codedStatusError) PluginErrorCode() string { return e.code }
+
+func validErrorCode(code string) bool {
+	for i, r := range code {
+		if r >= 'A' && r <= 'Z' || i > 0 && (r >= '0' && r <= '9' || r == '_') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // ErrNotFound is a convenience for the most common plugin error.
 func ErrNotFound(format string, args ...any) *StatusError {
 	return Errorf(http.StatusNotFound, format, args...)
