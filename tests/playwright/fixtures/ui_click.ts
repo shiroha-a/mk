@@ -171,3 +171,34 @@ export function clickButtonWithIcon(
     options,
   );
 }
+
+/**
+ * Clicks the `MkSwitch` whose label contains `label`.
+ *
+ * MkSwitch renders its `<input type="checkbox">` and its label inside the same
+ * root element, so the input's parent carries the label text.
+ */
+// **index で switch を引かない。** 画面に switch が 1 つ足されるだけでずれる。
+// `admin_moderation_email_required_signup_toggle` は独自の switch (#2570) が
+// 2 番目に入ったせいで別の設定を切り替えており、それでも spec は緑だった
+// (#2620)。ラベルで引けばこの壊れ方はしない。
+//
+// ラベルが同じ switch が同居する画面 (admin/security の "Enable" など) では
+// 引けないので、そこは folder などに scope した finder を clickWhenReady へ
+// 直接渡すこと。
+export function clickSwitchByLabel(
+  page: Page,
+  label: string,
+  options?: ClickOptions,
+): Promise<void> {
+  return clickWhenReady(
+    page,
+    `「${label}」のスイッチ`,
+    (l: string) =>
+      Array.from(document.querySelectorAll('input[type="checkbox"]')).find((cb) =>
+        (cb.parentElement?.textContent ?? '').includes(l),
+      ),
+    label,
+    options,
+  );
+}

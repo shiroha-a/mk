@@ -3,22 +3,28 @@
  * SPDX-License-Identifier: AGPL-3.0-only
  */
 
-// /admin/moderation で 2 番目の MkSwitch (emailRequiredForSignup) を click
-// → /api/admin/update-meta が round-trip する write-flow spec。
+// /admin/moderation の emailRequiredForSignup switch を click → admin/meta に
+// 反映されることを verify する write-flow spec。
 //
-// admin/moderation.vue:22 の MkSwitch v-model="emailRequiredForSignup" は
+// admin/moderation.vue:91 の MkSwitch v-model="emailRequiredForSignup" は
 // @change で onChange_emailRequiredForSignup → admin/update-meta を直接
-// 呼ぶ (line 216)。confirm dialog なし、最も simple な toggle pattern。
+// 呼ぶ。confirm dialog なし、最も simple な toggle pattern。
 //
-// 1 番目 switch (enableRegistration) は false → true 切替時に warning
-// confirm が入るので flow が長くなる。本 spec は dialog 経由しない 2 番目
-// を選ぶことで最短 round-trip を verify する。
+// **index で switch を引かない。** 旧実装は `cbs[1]` を押していたが、mk-go
+// 独自の「登録を承認制にする」switch (#2570) が enableRegistration の直後に
+// 入ったため、2 番目は approvalRequiredForSignup になっていた。押している
+// ものが違っても spec は緑で、approvalRequiredForSignup が on のまま残って
+// **以降の全 spec の signup が 403 になっていた** (#2620)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
-import { clickWhenReady } from '../../../fixtures/ui_click';
+import { clickSwitchByLabel } from '../../../fixtures/ui_click';
+
+// i18n.ts.emailRequiredForSignup の en-US 値。playwright.config.ts で
+// locale を en-US に固定しているのでこの表記で引ける。
+const EMAIL_REQUIRED_LABEL = 'Require email address for sign-up';
 
 test.describe('UI: /admin/moderation emailRequiredForSignup toggle flow', () => {
   let root: RootFixture;
@@ -27,16 +33,17 @@ test.describe('UI: /admin/moderation emailRequiredForSignup toggle flow', () => 
   });
   test.setTimeout(60_000);
 
-  test('toggle emailRequiredForSignup switch (2nd) → /api/admin/update-meta', async ({
+  test('toggle emailRequiredForSignup switch → /api/admin/update-meta', async ({
     page,
     baseURL,
     request,
   }) => {
-    // setup: 既知 state (false) に reset。click で false→true に切替わる
-    // ことを strict assert できるようにする。
+    // setup: 両方を既知 state (false) に reset する。approvalRequiredForSignup
+    // も揃えるのは、押し間違いを下の assert で検出できるようにするため。
     await callApi(request, 'admin/update-meta', {
       i: root.token,
       emailRequiredForSignup: false,
+      approvalRequiredForSignup: false,
     });
 
     try {
@@ -45,31 +52,29 @@ test.describe('UI: /admin/moderation emailRequiredForSignup toggle flow', () => 
         waitUntil: 'domcontentloaded',
       });
 
-      // 2 個以上の checkbox が hydrate するまで待つ
-      await page.waitForFunction(
-        () => document.querySelectorAll('input[type="checkbox"]').length >= 2,
-        { timeout: 20_000 },
-      );
-
       const updateResp = page.waitForResponse(
         (r) => r.url().includes('/api/admin/update-meta') && r.status() < 300,
         { timeout: 15_000 },
       );
-      await clickWhenReady(page, '2 番目の checkbox', () => {
-        const cbs = Array.from(
-          document.querySelectorAll('input[type="checkbox"]'),
-        ) as HTMLInputElement[];
-        // index 1 = 2 番目 = emailRequiredForSignup
-        return cbs[1];
-      });
+      await clickSwitchByLabel(page, EMAIL_REQUIRED_LABEL);
       await updateResp;
+
+      // **どの field が変わったかまで見る。** update-meta が返ってきたことしか
+      // 見ないと、別の switch を押しても緑になる (#2620)。
+      const metaResp = await callApi(request, 'admin/meta', { i: root.token });
+      expect(metaResp.status()).toBe(200);
+      const meta = await metaResp.json();
+      expect(meta.emailRequiredForSignup).toBe(true);
+      expect(meta.approvalRequiredForSignup).toBe(false);
     } finally {
-      // cleanup: 必ず false に戻す。on のまま残すと以降の signup spec が
-      // 全て INVALID_PARAM (emailAddress required) で fail する重大な
-      // isolation 破壊を引き起こす。pass / fail どちらでも cleanup を実行。
+      // cleanup: 必ず false に戻す。emailRequiredForSignup が残ると以降の
+      // signup spec が INVALID_PARAM (emailAddress required)、
+      // approvalRequiredForSignup が残ると APPROVAL_REQUIRED (403) で
+      // 全滅する。pass / fail どちらでも cleanup を実行する。
       await callApi(request, 'admin/update-meta', {
         i: root.token,
         emailRequiredForSignup: false,
+        approvalRequiredForSignup: false,
       });
     }
   });
