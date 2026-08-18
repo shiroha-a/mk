@@ -845,6 +845,14 @@ func TestEffectivePolicy_AnonymousInvokesProvidersWithoutRepositoryLookup(t *tes
 	}
 }
 
+func TestEffectivePolicy_NoProviderAnonymousFastPathAllocations(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	allocs := testing.AllocsPerRun(100, func() {
+		_ = svc.GetUserPolicies("")
+	})
+	assert.LessOrEqual(t, allocs, 7.0)
+}
+
 func TestEffectivePolicy_AnonymousUsesNativeBaselineOrderingCloningAndCaps(t *testing.T) {
 	svc, _, _, metaRepo := newTestService(t)
 	svc.SetServerMaxFileSizeMb(100)
@@ -1328,4 +1336,18 @@ func TestInvalidateRolePolicies_InFlightConditionalSnapshotCannotRepublish(t *te
 func TestInvalidateRolePolicies_EmptyRoleNoop(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	require.NoError(t, svc.InvalidateRolePolicies(context.Background(), ""))
+}
+
+func BenchmarkEffectivePolicy_NoProviderAnonymous(b *testing.B) {
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(b, err)
+	svc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = svc.GetUserPolicies("")
+	}
 }

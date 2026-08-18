@@ -117,9 +117,13 @@ func (s *Service) GetUserPoliciesChecked(userID string) (map[string]any, error) 
 // the returned map has the failed providers' declared keys restored to their
 // native policy results.
 func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
+	providers := s.snapshotPolicyProviders()
 	// applyMetaBasePolicies が base を mutate するため共有 cache ではなく clone を使う。
 	base := DefaultPoliciesClone()
 	s.applyMetaBasePolicies(base)
+	if userID == "" && len(providers) == 0 {
+		return s.applyServerCaps(base), nil
+	}
 
 	roles := []*model.Role{}
 	if userID != "" {
@@ -130,6 +134,9 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 			// mk-go は fail-soft で gate を default 値に倒す)。
 			return s.applyServerCaps(base), nil
 		}
+	}
+	if len(roles) == 0 && len(providers) == 0 {
+		return s.applyServerCaps(base), nil
 	}
 	roleOverrides := make([]map[string]rolePolicyOverride, 0, len(roles))
 	for _, r := range roles {
@@ -144,14 +151,12 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 	for key, baseVal := range base {
 		out[key] = computePolicy(key, baseVal, roleOverrides, nil)
 	}
+	if len(providers) == 0 {
+		return s.applyServerCaps(out), nil
+	}
 	native := make(map[string]any, len(out))
 	for key, value := range out {
 		native[key] = clonePolicyValue(value)
-	}
-
-	providers := s.snapshotPolicyProviders()
-	if len(providers) == 0 {
-		return s.applyServerCaps(out), nil
 	}
 
 	// provider には現在 active な native RoleID のみを、ソート + clone して渡す。

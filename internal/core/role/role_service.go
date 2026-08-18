@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"maps"
 	"math"
 	"sort"
 	"strings"
@@ -1402,6 +1403,17 @@ func (s *Service) Delete(id string) error {
 // pressure / tail latency.
 var defaultPoliciesCache = buildDefaultPolicies()
 
+var mutableDefaultPolicyKeys = func() []string {
+	keys := make([]string, 0, 1)
+	for key, value := range defaultPoliciesCache {
+		switch value.(type) {
+		case []string, []any:
+			keys = append(keys, key)
+		}
+	}
+	return keys
+}()
+
 // DefaultPolicies returns the shared, immutable Misskey default policies map.
 //
 // The returned map is shared across all callers and MUST NOT be mutated. Use
@@ -1415,9 +1427,9 @@ func DefaultPolicies() map[string]any {
 // role overrides). Mutable policy values are cloned as well so callers cannot
 // mutate the shared defaults through a returned slice.
 func DefaultPoliciesClone() map[string]any {
-	clone := make(map[string]any, len(defaultPoliciesCache))
-	for key, value := range defaultPoliciesCache {
-		clone[key] = clonePolicyValue(value)
+	clone := maps.Clone(defaultPoliciesCache)
+	for _, key := range mutableDefaultPolicyKeys {
+		clone[key] = clonePolicyValue(defaultPoliciesCache[key])
 	}
 	return clone
 }
