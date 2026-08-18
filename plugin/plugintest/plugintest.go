@@ -43,12 +43,13 @@ import (
 
 // Harness builds the fake environment a plugin sees.
 type Harness struct {
-	t       *testing.T
-	name    string
-	config  map[string]any
-	db      *sql.DB
-	api     plugin.API
-	migrate bool
+	t           *testing.T
+	name        string
+	config      map[string]any
+	db          *sql.DB
+	api         plugin.API
+	migrate     bool
+	invalidator plugin.EffectivePolicyInvalidator
 
 	// peer 経路 (#2537) の記録。Handle / OnReply はプラグインが登録し、
 	// テストは DeliverPeer / DeliverPeerReply から叩く。
@@ -93,6 +94,13 @@ func (h *Harness) WithDB(db *sql.DB) *Harness {
 // mk-go の API を呼ぶプラグインは自分でフェイクを渡すこと.
 func (h *Harness) WithAPI(api plugin.API) *Harness {
 	h.api = api
+	return h
+}
+
+// WithEffectivePolicyInvalidator sets the invalidator passed to the policy
+// provider factory.
+func (h *Harness) WithEffectivePolicyInvalidator(v plugin.EffectivePolicyInvalidator) *Harness {
+	h.invalidator = v
 	return h
 }
 
@@ -238,6 +246,37 @@ func (h *Harness) Jobs(def plugin.Definition) *JobSet {
 	}
 	return j.set
 }
+
+// EffectivePolicies runs def.EffectivePolicies and returns its registration.
+func (h *Harness) EffectivePolicies(def plugin.Definition) plugin.EffectivePolicyRegistration {
+	h.t.Helper()
+	h.applyMigrations(def)
+	if def.EffectivePolicies == nil {
+		return plugin.EffectivePolicyRegistration{}
+	}
+	invalidator := h.invalidator
+	if invalidator == nil {
+		invalidator = noopInvalidator{}
+	}
+	registration, err := def.EffectivePolicies(h.Context(), invalidator)
+	if err != nil {
+		h.t.Fatalf("plugintest: EffectivePolicies に失敗しました: %v", err)
+	}
+	registration.Keys = append([]string(nil), registration.Keys...)
+	resolver := registration.Resolve
+	if resolver != nil {
+		registration.Resolve = func(ctx context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+			req.RoleIDs = append([]string(nil), req.RoleIDs...)
+			return resolver(ctx, req)
+		}
+	}
+	return registration
+}
+
+type noopInvalidator struct{}
+
+func (noopInvalidator) InvalidateUser(context.Context, string) error { return nil }
+func (noopInvalidator) InvalidateRole(context.Context, string) error { return nil }
 
 // applyMigrations mirrors what mk-go does before the callbacks run.
 func (h *Harness) applyMigrations(def plugin.Definition) {
