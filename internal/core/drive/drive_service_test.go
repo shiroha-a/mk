@@ -238,6 +238,11 @@ func TestCapacity_FromPolicy(t *testing.T) {
 	assert.Equal(t, int64(500*1024*1024), svc.Capacity("u1"))
 	// override の無い user は default 100 MiB に fallback。
 	assert.Equal(t, int64(100*1024*1024), svc.Capacity("u2"))
+	// **小数の policy でも gate と同じ値を返す。** 素の `.(int)` だと型
+	// アサーションに失敗して既定の 100MB を返し、実際の上限 (gate 側は
+	// 小数を尊重する) と表示がずれる (#2611)。
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{"u1": {"driveCapacityMb": 1.5}}})
+	assert.Equal(t, int64(1.5*1024*1024), svc.Capacity("u1"))
 }
 
 func TestShow_ModeratorBypass(t *testing.T) {

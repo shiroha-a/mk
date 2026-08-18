@@ -899,9 +899,12 @@ func (s *Service) FindByHash(user *model.User, md5 string) ([]*model.DriveFile, 
 // drive.ts (`capacity: 1024 * 1024 * policies.driveCapacityMb`). Falls back to
 // the default 100 MiB when no role checker is wired (#1769)。
 func (s *Service) Capacity(userID string) int64 {
-	mb := 100 // DefaultPolicies driveCapacityMb
+	mb := 100.0 // DefaultPolicies driveCapacityMb
 	if s.roleChecker != nil {
-		if v, ok := s.roleChecker.GetUserPolicies(userID)["driveCapacityMb"].(int); ok {
+		// **policyNumber を通す。** 素の `.(int)` だと小数の policy で
+		// 型アサーションに失敗し、既定の 100MB を返してしまう。gate 側は
+		// 小数を尊重するので、表示だけが実際の上限とずれる (#2611)。
+		if v, ok := policyNumber(s.roleChecker.GetUserPolicies(userID)["driveCapacityMb"]); ok {
 			mb = v
 		}
 	}
