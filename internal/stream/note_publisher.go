@@ -8,6 +8,7 @@ import (
 
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	corenotification "github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -118,6 +119,21 @@ func (p *NotePublisher) SetFieldResolver(r *entity.NoteFieldResolver) {
 // PublishNote implements core/timeline.StreamingPublisher.
 func (p *NotePublisher) PublishNote(topic string, n *model.Note, author *model.User) {
 	if p.pub == nil || n == nil || author == nil {
+		return
+	}
+	// suspended-author gate (#2624)。取得経路 (repository.applyTimelineFilter /
+	// core/timeline.ApplyFilter / notesfilter.ApplySuspended) には suspended
+	// 除外があるのに streaming には無く、凍結したユーザーの note を対象にした
+	// inbound Announce がリアルタイムにだけ流れていた。
+	//
+	// **ここに置くのは、publish 経路が全部この 1 関数を通るため。** home / local /
+	// global / userList / channel / hashtag / roleTimeline (core/timeline.FanoutHook)
+	// も antenna (core/antenna) も同じ StreamingPublisher を使う。fanout 側で
+	// 打ち切ると Redis の timeline list にも入らなくなり、**凍結を解除しても
+	// list に ID が無いまま**になる (取得は list が limit を満たす限り DB へ
+	// fallback しない)。凍結は解除されうる moderation state なので、list には
+	// 積んだうえで配信だけを止め、可視性は取得時のフィルタに判断させる。
+	if notesfilter.HasSuspendedAuthor(n, author) {
 		return
 	}
 

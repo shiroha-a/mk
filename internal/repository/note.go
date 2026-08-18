@@ -490,6 +490,10 @@ func (r *noteRepository) ListByChannelID(channelID, viewerID, untilID, sinceID s
 	// post-fetch filter だとページが過少充填されるのと followers 判定が
 	// note ごとの N+1 になるため LIMIT 前に push down する (#1440)。
 	q = applyViewerVisibility(q, viewerID)
+	// channel 一覧は applyTimelineFilter を通らないので、suspended 除外を個別に
+	// 掛ける (#2624)。掛けないと streaming では止まるのに再取得で出るという
+	// 逆向きの食い違いになる。
+	q = applySuspendedAuthorExclusion(q)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -1006,6 +1010,9 @@ func (r *noteRepository) SearchByTag(tagGroups [][]string, viewerID string, limi
 	// visibility push-down: core/note.CanSeeNote と同じ条件を LIMIT 前に絞る。
 	// ListByUserIDFiltered / clip の ListByClipVisible と同じ可視性定義 (#1439)。
 	q = applyViewerVisibility(q, viewerID)
+	// hashtag 一覧も applyTimelineFilter を通らないので suspended 除外を個別に
+	// 掛ける (#2624)。channel 一覧 (ListByChannelID) と同じ理由。
+	q = applySuspendedAuthorExclusion(q)
 	// reply/renote/poll/withFiles filter (upstream search-by-tag.ts:124-150、#1554)。
 	if filter.Reply != nil {
 		if *filter.Reply {
@@ -1210,15 +1217,28 @@ func applyTimelineFilter(q *gorm.DB, f model.TimelineDBFilter) *gorm.DB {
 	// 適用。isSuspended は user table への NOT EXISTS で確認し bind parameter を
 	// 持たない。suspended user は post-suspension で fanout list に note ID が
 	// 残るため、Redis 経路の ApplyFilter にも対応する suspended check がある。
-	suspendedNotExists := func(col string) string {
+	q = applySuspendedAuthorExclusion(q)
+	return q
+}
+
+// applySuspendedAuthorExclusion excludes notes whose author, reply target, or
+// renote target belongs to a suspended user (upstream
+// generateSuspendedUserQueryForNote)。viewer に依らず常に適用する。
+//
+// **timeline 以外の読み取り経路からも呼ぶ (#2624)。** channel / hashtag の
+// 一覧は applyTimelineFilter を通らないため、以前はここだけ凍結ユーザーの
+// note が出ていた。streaming 側は publish 時に同じ 3 author を見て止めるので
+// (internal/stream の suspended-author gate)、経路ごとに結果が食い違わない
+// ようにここへ集約する。
+func applySuspendedAuthorExclusion(q *gorm.DB) *gorm.DB {
+	notExists := func(col string) string {
 		return `NOT EXISTS (SELECT 1 FROM "user" su WHERE su."id" = ` + col + ` AND su."isSuspended" = true)`
 	}
-	q = q.Where(
-		suspendedNotExists(`"note"."userId"`) +
-			` AND ("replyUserId" IS NULL OR ` + suspendedNotExists(`"note"."replyUserId"`) + `)` +
-			` AND ("renoteUserId" IS NULL OR ` + suspendedNotExists(`"note"."renoteUserId"`) + `)`,
+	return q.Where(
+		notExists(`"note"."userId"`) +
+			` AND ("replyUserId" IS NULL OR ` + notExists(`"note"."replyUserId"`) + `)` +
+			` AND ("renoteUserId" IS NULL OR ` + notExists(`"note"."renoteUserId"`) + `)`,
 	)
-	return q
 }
 
 // ListHomeTimeline returns notes by the user and users they follow.

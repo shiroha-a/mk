@@ -204,8 +204,12 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 		// だけ削除され、その author は suspended のまま残っている」ケースでだけ
 		// 結果が食い違う。両者を厳密に揃えるには viewer ごとの timeline read
 		// (hot path) で suspended 判定用のクエリを 1 本増やす必要があり、この
-		// 稀なケースには見合わない。実運用側の穴は fanout 時の判定
-		// (FanoutHook.hasSuspendedAuthor) が塞ぐ。
+		// 稀なケースには見合わない。
+		//
+		// なお streaming 側は publish 時に同じ 3 author を見て止める
+		// (internal/stream の suspended-author gate)。**Redis の list には積んだ
+		// うえで配信だけを落とす**設計なので、凍結を解除すればこのフィルタが
+		// 判断して普通に出るようになる。
 		if userSuspended(n.User) ||
 			(n.Reply != nil && userSuspended(n.Reply.User)) ||
 			(n.Renote != nil && userSuspended(n.Renote.User)) {

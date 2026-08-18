@@ -323,10 +323,6 @@ func (s *Server) setupRoutes() {
 	timelineService.SetFanoutToggle(fanoutToggle)
 	timelineFanoutHook.SetUserListRepo(userListRepo)
 	timelineFanoutHook.SetUserRolesLookup(roleService) // #1549: roleTimeline fanout
-	// #2624: 凍結ユーザーの note (本人 / reply 先 / renote 先) を fanout しない。
-	// 取得経路には元から suspended フィルタがあるが streaming には無く、
-	// 凍結後も inbound Announce 由来のリノートがリアルタイムにだけ流れていた。
-	timelineFanoutHook.SetSuspendedAuthorLookup(userRepo)
 	// #1686: channel note を channel follower の home timeline へ fanout する。
 	timelineFanoutHook.SetChannelFollowerRepo(channelFollowingRepo)
 	noteCreateService.SetFanoutHook(timelineFanoutHook)
