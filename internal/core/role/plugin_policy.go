@@ -213,17 +213,20 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 	if provider.runtime.disabled.Load() {
 		return nil, false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), effectivePolicyProviderTimeout)
-	defer cancel()
 
-	if !acquirePolicyProviderToken(ctx, provider.runtime) {
-		provider.runtime.disabled.Store(true)
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), effectivePolicyProviderTimeout)
+	if !acquirePolicyProviderToken(waitCtx, provider.runtime) {
+		cancelWait()
 		return nil, false
 	}
+	cancelWait()
 	if provider.runtime.disabled.Load() {
 		provider.runtime.token <- struct{}{}
 		return nil, false
 	}
+
+	resolveCtx, cancelResolve := context.WithTimeout(context.Background(), effectivePolicyProviderTimeout)
+	defer cancelResolve()
 
 	result := make(chan policyProviderResult, 1)
 	go func() {
@@ -233,14 +236,17 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 				out = policyProviderResult{}
 			}
 			out.completedAt = time.Now()
+			if deadline, ok := resolveCtx.Deadline(); ok && !out.completedAt.Before(deadline) {
+				provider.runtime.disabled.Store(true)
+			}
 			result <- out
 			provider.runtime.token <- struct{}{}
 		}()
-		contributions, err := provider.reg.Resolve(ctx, req)
+		contributions, err := provider.reg.Resolve(resolveCtx, req)
 		out = policyProviderResult{contributions: contributions, ok: err == nil}
 	}()
 
-	out, completedBeforeDeadline := receivePolicyProviderResult(ctx, result)
+	out, completedBeforeDeadline := receivePolicyProviderResult(resolveCtx, result)
 	if !completedBeforeDeadline {
 		provider.runtime.disabled.Store(true)
 		return nil, false

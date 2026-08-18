@@ -592,6 +592,69 @@ func TestEffectivePolicy_TimeoutDisablesProviderAndBoundsHang(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load())
 }
 
+func TestEffectivePolicy_TokenWaitTimeoutDoesNotDisableHealthyProvider(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	var calls atomic.Int32
+	registerProvider(t, svc, "healthy", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		calls.Add(1)
+		time.Sleep(100 * time.Millisecond)
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+	})
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	var failures atomic.Int32
+	for range 20 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := svc.GetUserPoliciesChecked("")
+			if err != nil {
+				failures.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	assert.Positive(t, failures.Load())
+
+	before := calls.Load()
+	policies, err := svc.GetUserPoliciesChecked("")
+	require.NoError(t, err)
+	assert.Equal(t, true, policies["canSearchNotes"])
+	assert.Equal(t, before+1, calls.Load())
+}
+
+func TestEffectivePolicy_ResolverGetsFreshDeadlineAfterTokenWait(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	registerProvider(t, svc, "queued", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+			return nil, nil
+		}
+		time.Sleep(400 * time.Millisecond)
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+	})
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := svc.GetUserPoliciesChecked("")
+		first <- err
+	}()
+	<-started
+	time.AfterFunc(800*time.Millisecond, func() { close(release) })
+
+	policies, err := svc.GetUserPoliciesChecked("")
+	require.NoError(t, <-first)
+	require.NoError(t, err)
+	assert.Equal(t, true, policies["canSearchNotes"])
+}
+
 func TestEffectivePolicy_ProviderErrorUncheckedRestoresOnlyDeclared(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
