@@ -44,11 +44,11 @@ token取得待ちのtimeoutはproviderの健全性を示さない。同じruntim
 providerを登録していないinstanceでは、plugin機構追加前のnative policy解決経路と計算量を維持する。
 
 - provider snapshotはnative policyの全key集約やexact native snapshot作成より前に取得する。
-- provider未登録時のdefault policy copyは従来のshallow map cloneを使う。pluginへslice値を渡さないため、provider経路用のdeep cloneは不要とする。
+- provider未登録時も返却mapのslice mutationを共有defaultへ漏らさないため、baseのdeep cloneは維持する。`TestGetUserPolicies_NativeSliceMutationIsIsolated`の既存契約を性能対策のために弱めない。
 - anonymous requestはmeta base policy適用後、全keyの`computePolicy`を行わずserver/instance capを適用して返す。
 - userにactive roleが無い場合も同じ早期returnを使う。
 - active roleがありprovider未登録の場合は従来どおりnative role aggregationを行うが、provider failure用のexact native deep cloneは作らない。
-- provider登録時だけdeep-cloned base、全keyのnative aggregation、failure fallback用snapshotを作成する。
+- provider登録時だけ全keyのnative aggregationとfailure fallback用snapshotを作成する。
 
 この分岐はproviderの有無だけで決まり、provider登録後に出力cacheや別のpolicy semanticsを導入しない。
 
