@@ -198,6 +198,14 @@ func ApplyFilter(notes []*model.Note, viewerID string, f TimelineFilter) []*mode
 		// FindManyByIDsWithUser が note/sub-note の User relation を配線するため、
 		// reply/renote 先の author suspended も判定できる。SQL 側の
 		// applyTimelineFilter にも同等の NOT EXISTS があり 2 経路で一致する。
+		//
+		// **relation が引けないときの限界 (#2624)**: sub-note が nil だと判定を
+		// 飛ばす。SQL 側は `renoteUserId` 列を直接見るので、「renote 先の note
+		// だけ削除され、その author は suspended のまま残っている」ケースでだけ
+		// 結果が食い違う。両者を厳密に揃えるには viewer ごとの timeline read
+		// (hot path) で suspended 判定用のクエリを 1 本増やす必要があり、この
+		// 稀なケースには見合わない。実運用側の穴は fanout 時の判定
+		// (FanoutHook.hasSuspendedAuthor) が塞ぐ。
 		if userSuspended(n.User) ||
 			(n.Reply != nil && userSuspended(n.Reply.User)) ||
 			(n.Renote != nil && userSuspended(n.Renote.User)) {

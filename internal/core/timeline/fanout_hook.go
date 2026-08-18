@@ -63,6 +63,19 @@ type UserRolesLookup interface {
 	GetUserRoles(userID string) ([]*model.Role, error)
 }
 
+// SuspendedAuthorLookup abstracts "is this user suspended?" for the fanout-time
+// suspended filter (#2624). 循環依存回避のため narrow interface で受け取る
+// (実装は repository.UserRepository)。
+//
+// 取得経路 (repository.applyTimelineFilter / ApplyFilter) は既に note / reply /
+// renote の 3 author を見て suspended を除外するが、**streaming には同等の
+// フィルタが無い**。凍結したリモートユーザーの note を対象にした Announce は
+// 相手インスタンスから届き続けるので、fanout の時点で止めないとリアルタイムに
+// だけ流れてくる (リロードすると消える) という食い違いになる。
+type SuspendedAuthorLookup interface {
+	FindByID(id string) (*model.User, error)
+}
+
 // ChannelFollowerLister abstracts cursor-paged "who follows this channel?" for
 // channel note home fanout (#1686). 循環依存回避のため narrow interface で受け
 // 取る (実装は repository.ChannelFollowingRepository)。channel note は author の
@@ -108,6 +121,7 @@ type FanoutHook struct {
 	userListRepo        UserListMemberLookup
 	userRoles           UserRolesLookup
 	channelFollowerRepo ChannelFollowerLister
+	suspendedAuthors    SuspendedAuthorLookup
 }
 
 // NewFanoutHook constructs a FanoutHook.
@@ -155,10 +169,74 @@ func (h *FanoutHook) SetUserRolesLookup(r UserRolesLookup) {
 	h.userRoles = r
 }
 
+// SetSuspendedAuthorLookup attaches a SuspendedAuthorLookup so that notes whose
+// author / reply target / renote target belongs to a suspended user are not
+// fanned out (#2624). 未配線なら従来どおり素通しする。
+func (h *FanoutHook) SetSuspendedAuthorLookup(l SuspendedAuthorLookup) {
+	h.suspendedAuthors = l
+}
+
+// hasSuspendedAuthor reports whether the note itself, its reply target, or its
+// renote target was written by a suspended user.
+//
+// 取得経路 (repository.applyTimelineFilter / ApplyFilter) と**同じ 3 author** を
+// 見る。ここだけ対象が狭いと、fanout では通ったのに再取得で消える (またはその逆)
+// という食い違いが出る。
+//
+// note の author は引数で渡ってくるので DB を引かない。reply / renote 先は
+// preload があればそれを使い、無いときだけ ID から引く。reply も renote も
+// 持たない note が大半なので、追加クエリは通常 0 回になる。
+func (h *FanoutHook) hasSuspendedAuthor(n *model.Note, author *model.User) bool {
+	if author != nil && author.IsSuspended {
+		return true
+	}
+	if suspendedPreloaded(n.Reply) || suspendedPreloaded(n.Renote) {
+		return true
+	}
+	if h.suspendedAuthors == nil {
+		return false
+	}
+	for _, target := range []struct {
+		embedded *model.Note
+		userID   *string
+	}{
+		{n.Reply, n.ReplyUserID},
+		{n.Renote, n.RenoteUserID},
+	} {
+		// preload 済みなら上の suspendedPreloaded で判定済み。
+		if target.embedded != nil && target.embedded.User != nil {
+			continue
+		}
+		if target.userID == nil || *target.userID == "" {
+			continue
+		}
+		u, err := h.suspendedAuthors.FindByID(*target.userID)
+		// 引けない場合は素通しする。SQL 側の `NOT EXISTS` も user 行が無ければ
+		// 通すので、削除済みユーザーの扱いが両経路で揃う。
+		if err == nil && u != nil && u.IsSuspended {
+			return true
+		}
+	}
+	return false
+}
+
+// suspendedPreloaded reports whether an embedded note carries a preloaded
+// suspended author. relation が未取得なら false (SQL 側の pass-through と同じ)。
+func suspendedPreloaded(n *model.Note) bool {
+	return n != nil && n.User != nil && n.User.IsSuspended
+}
+
 // OnNoteCreated delivers the given note to user/home/local/global timelines.
 // 配信失敗はログに記録するだけで上位に伝搬しない (ベストエフォート)。
 func (h *FanoutHook) OnNoteCreated(n *model.Note, author *model.User) {
 	if n == nil || author == nil {
+		return
+	}
+	// suspended フィルタ (#2624)。取得経路にしか無かったので、凍結したユーザーの
+	// note を対象にした inbound Announce がリアルタイムにだけ流れていた。
+	// Redis list への push も WebSocket への publish もこの下なので、ここで
+	// 打ち切れば両方止まる。
+	if h.hasSuspendedAuthor(n, author) {
 		return
 	}
 	// FTT が無効なら Redis へは一切 push しない (upstream pushToTl の冒頭 return

@@ -344,6 +344,7 @@ cron の多重実行防止は **job option ではなく mkq の job ID 設計**�
 | `notes` の noteIds bulk lookup | upstream の public-note timeline に加え `{noteIds:[...]}` bulk (max 100、visibility filter 付き) を同 endpoint で両立 |
 | `webpublicUrl` | drive entity の拡張 field (proxy 化済で IP leak なし) |
 | mention による reply filter escape | viewer が `note.mentions` に含まれれば withReplies 設定に関係なく reply gate を pass。streaming と fanout の両方に実装 |
+| fanout 時の suspended フィルタ | 凍結ユーザー (本人 / reply 先 / renote 先) の note を Redis fanout と WebSocket publish から除外する (#2624)。**upstream は fanout 時に suspended を見ない** (`packages/backend/src/server/api/stream/` に `isSuspended` の参照が無い)。upstream で顕在化しないのは suspended ユーザーが投稿できないためで、mk-go では**凍結したリモートユーザーの note を対象にした inbound Announce が相手インスタンスから届き続ける**ため、取得経路 (`applyTimelineFilter` / `ApplyFilter`) にしかフィルタが無いと「リアルタイムには流れるがリロードで消える」という食い違いになっていた。判定対象は取得経路と同じ note / reply / renote の 3 author |
 
 ---
 
