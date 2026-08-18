@@ -21,6 +21,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/drive folder delete via context menu flow', () => {
   let root: RootFixture;
@@ -82,23 +83,11 @@ test.describe('UI: /my/drive folder delete via context menu flow', () => {
     }, folderName);
 
     // 4. popup menu の "Delete" item (ti-fw ti-trash) を待って click
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-fw.ti-trash') !== null);
-      },
-      { timeout: 15_000 },
-    );
-
     const deleteResp = page.waitForResponse(
       (r) => r.url().includes('/api/drive/folders/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-fw.ti-trash') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-trash');
     await deleteResp;
 
     // 5. API 経由で削除確認 — drive/folders/show は 404 + NO_SUCH_FOLDER を返す

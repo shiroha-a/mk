@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: note renote via menu flow', () => {
   let root: RootFixture;
@@ -107,13 +108,7 @@ test.describe('UI: note renote via menu flow', () => {
       },
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
-        (b) => b.querySelector('i.ti-fw.ti-repeat') !== null,
-      );
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-repeat');
     const renote = await renoteResp;
     const body = await renote.json();
     expect(body.createdNote.renoteId).toBe(noteId);

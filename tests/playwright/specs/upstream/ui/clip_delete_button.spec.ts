@@ -15,6 +15,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickButtonWithIcon, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /clips/:id delete button flow', () => {
   let root: RootFixture;
@@ -62,11 +63,7 @@ test.describe('UI: /clips/:id delete button flow', () => {
     );
 
     // delete button click → confirm dialog 出現
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-trash') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-trash');
 
     // 4. confirm dialog OK click → API 呼出
     await page.waitForFunction(
@@ -78,12 +75,7 @@ test.describe('UI: /clips/:id delete button flow', () => {
       (r) => r.url().includes('/api/clips/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // 5. API 経由で削除確認 — clips/show は 404 + NO_SUCH_CLIP を返す

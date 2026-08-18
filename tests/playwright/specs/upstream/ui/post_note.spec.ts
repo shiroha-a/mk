@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: post note via composer modal', () => {
   let root: RootFixture;
@@ -34,10 +35,7 @@ test.describe('UI: post note via composer modal', () => {
     // programmatic click で navbar の hover state / animation 干渉を回避する
     // (force: true でも actionable check が race することがあるため、
     // dispatchEvent で直接 button の click handler を呼ぶ)。
-    await page.evaluate(() => {
-      const btn = document.querySelector('[data-testid="open-post-form"]') as HTMLButtonElement | null;
-      btn?.click();
-    });
+    await clickByTestId(page, 'open-post-form');
     await page.waitForFunction(
       () => document.querySelector('[data-testid="post-form-text"]') !== null,
       { timeout: 15_000 },
@@ -76,10 +74,7 @@ test.describe('UI: post note via composer modal', () => {
       (resp) => resp.url().includes('/api/notes/create') && resp.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const submit = document.querySelector('[data-testid="post-form-submit"]') as HTMLButtonElement | null;
-      submit?.click();
-    });
+    await clickByTestId(page, 'post-form-submit');
     const noteCreate = await createResp;
     const noteCreateBody = await noteCreate.json();
     expect(noteCreateBody.createdNote, 'POST /api/notes/create should return createdNote').toBeTruthy();

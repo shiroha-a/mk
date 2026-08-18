@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/drive folder rename via context menu flow', () => {
   let root: RootFixture;
@@ -71,18 +72,7 @@ test.describe('UI: /my/drive folder rename via context menu flow', () => {
     }, initialName);
 
     // 3. popup menu の "Rename" item (ti-fw ti-forms) を click
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-fw.ti-forms') !== null);
-      },
-      { timeout: 15_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-fw.ti-forms') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-forms');
 
     // 4. inputText dialog の text input が出るまで待つ
     await page.waitForFunction(
@@ -114,12 +104,7 @@ test.describe('UI: /my/drive folder rename via context menu flow', () => {
       (r) => r.url().includes('/api/drive/folders/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await updateResp;
 
     // 6. API 経由で name 更新 verify

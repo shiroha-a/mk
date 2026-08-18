@@ -10,6 +10,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/profile description save flow', () => {
   let root: RootFixture;
@@ -64,12 +65,7 @@ test.describe('UI: /settings/profile description save flow', () => {
       (r) => r.url().includes('/api/i/update') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Save');
     await updateResp;
 
     const meResp = await callApi(request, 'i', { i: root.token });

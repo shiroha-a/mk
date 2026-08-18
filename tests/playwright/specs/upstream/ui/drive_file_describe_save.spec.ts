@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { uploadTinyPNG } from '../../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/drive/file/:fileId describe save flow', () => {
   let root: RootFixture;
@@ -51,26 +52,13 @@ test.describe('UI: /my/drive/file/:fileId describe save flow', () => {
     // 含む button) を click。drive.file.info.vue にはレイアウト上 2 つの
     // kvEditBtn (move folder / describe) があり、describe は MkKeyValue
     // の key text が "Description"。最初の hit で当てる。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some(
-          (b) =>
-            (b.textContent ?? '').includes('Description') &&
-            b.querySelector('i.ti-pencil') !== null,
-        );
-      },
-      { timeout: 15_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「Description」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           (b.textContent ?? '').includes('Description') &&
           b.querySelector('i.ti-pencil') !== null,
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // 4. MkModalWindow + MkTextarea が出現するまで待つ。caption textarea は
     // autofocus 属性付き。テキスト入力は post_note.spec.ts と同じ native
@@ -102,13 +90,11 @@ test.describe('UI: /my/drive/file/:fileId describe save flow', () => {
       (r) => r.url().includes('/api/drive/files/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const ok = btns.find(
+    await clickWhenReady(page, 'i.ti-check を持つボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) => !b.disabled && b.querySelector('i.ti-check') !== null,
-      );
-      ok?.click();
-    });
+      ),
+    );
     await updateResp;
 
     // 6. API 経由で comment 反映 verify

@@ -18,6 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickByTestId, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /chat room create via menu flow', () => {
   let root: RootFixture;
@@ -51,16 +52,14 @@ test.describe('UI: /chat room create via menu flow', () => {
     );
 
     // Start chat click → popup menu (2 items)
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「start」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           b.querySelector('i.ti-plus') !== null &&
           !b.querySelector('i.ti-fw') &&
           (b.textContent ?? '').toLowerCase().includes('start'),
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // popup menu の "Room chat" parent (ti-fw ti-users-group) を click。
     // mouseenter で children を expand する mode が default だが、Playwright
@@ -74,29 +73,21 @@ test.describe('UI: /chat room create via menu flow', () => {
       },
       { timeout: 10_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    // mouseenter は click と別 event なのでヘルパでは撃てない。expand の起点だけ
+    // ここで先に撃ち、click 本体はヘルパに任せる。見つからなければその場で落とす。
+    const hovered = await page.evaluate(() => {
+      const target = Array.from(document.querySelectorAll('button')).find(
         (b) => b.querySelector('i.ti-fw.ti-users-group') !== null,
       );
-      // mouseenter event で children が出る場合があるので両方発火する
-      target?.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
-      target?.click();
+      if (!target) return false;
+      target.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      return true;
     });
+    expect(hovered, 'Room chat の親メニュー項目が見つからない').toBe(true);
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-users-group');
 
     // children menu の "Create room" (ti-fw ti-plus) を click → inputText dialog
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-fw.ti-plus') !== null);
-      },
-      { timeout: 10_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-fw.ti-plus') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-plus');
 
     // inputText dialog の text input が出るまで待つ
     await page.waitForFunction(
@@ -129,12 +120,7 @@ test.describe('UI: /chat room create via menu flow', () => {
       (r) => r.url().includes('/api/chat/rooms/create') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     const create = await createResp;
     const body = await create.json();
     expect(body.id).toBeTruthy();

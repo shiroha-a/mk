@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/profile isCat toggle flow', () => {
   let root: RootFixture;
@@ -59,11 +60,11 @@ test.describe('UI: /settings/profile isCat toggle flow', () => {
       () => document.querySelectorAll('input[type="checkbox"]').length,
     );
 
-    await page.evaluate(() => {
+    await clickWhenReady(page, '「Advanced settings」の folder-header', () => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
-      headers[1]?.click();
+      return headers[1];
     });
     await page.waitForFunction(
       (n) => document.querySelectorAll('input[type="checkbox"]').length >= n + 2,
@@ -76,12 +77,12 @@ test.describe('UI: /settings/profile isCat toggle flow', () => {
       (r) => r.url().includes('/api/i/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate((before) => {
+    await clickWhenReady(page, 'isCat の checkbox', (before) => {
       const cbs = Array.from(
         document.querySelectorAll('input[type="checkbox"]'),
       ) as HTMLInputElement[];
       // expand 前に居なかった checkbox 群の先頭が isCat
-      cbs[before]?.click();
+      return cbs[before];
     }, beforeCheckboxes);
     const update = await updateResp;
     const body = await update.json();

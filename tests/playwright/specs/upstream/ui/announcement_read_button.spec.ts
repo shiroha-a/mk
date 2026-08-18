@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /announcements read button flow', () => {
   let root: RootFixture;
@@ -64,13 +65,7 @@ test.describe('UI: /announcements read button flow', () => {
       (r) => r.url().includes('/api/i/read-announcement') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button'));
-      const btn = btns.find((b) => (b.textContent ?? '').includes('Got it!')) as
-        | HTMLButtonElement
-        | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Got it!');
     const resp = await readResp;
     expect(resp.status()).toBeLessThan(400);
   });

@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/lists "Create list" form flow', () => {
   let root: RootFixture;
@@ -39,12 +40,7 @@ test.describe('UI: /my/lists "Create list" form flow', () => {
     );
 
     // Create list button click → os.inputText popup (= MkDialog) が出る
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Create list'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Create list');
 
     // MkDialog input field 出現を polling 待ち。data-cy-modal-dialog-ok の
     // 兄弟要素として input が render される。
@@ -78,12 +74,7 @@ test.describe('UI: /my/lists "Create list" form flow', () => {
       (r) => r.url().includes('/api/users/lists/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await createResp;
 
     // list が一覧に追加されて render される (= /my/lists が cache reload)

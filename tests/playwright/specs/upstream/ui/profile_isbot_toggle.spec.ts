@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/profile isBot toggle flow', () => {
   let root: RootFixture;
@@ -51,14 +52,14 @@ test.describe('UI: /settings/profile isBot toggle flow', () => {
     // sidebar (= MkSuperMenu) や SearchMarker inlining で MkFolder が増減する
     // 可能性があるため、**i18n label "Advanced settings" で identify**。
     // en-US.yml の `advancedSettings: "Advanced settings"` を直 reference。
-    await page.evaluate(() => {
+    await clickWhenReady(page, '「Advanced settings」の folder-header', () => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('Advanced settings'),
       );
-      target?.click();
+      return target;
     });
     await page.waitForFunction(
       (n) => document.querySelectorAll('input[type="checkbox"]').length >= n + 2,
@@ -71,11 +72,11 @@ test.describe('UI: /settings/profile isBot toggle flow', () => {
       (r) => r.url().includes('/api/i/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate((before) => {
+    await clickWhenReady(page, 'isBot の checkbox', (before) => {
       const cbs = Array.from(
         document.querySelectorAll('input[type="checkbox"]'),
       ) as HTMLInputElement[];
-      cbs[before + 1]?.click();
+      return cbs[before + 1];
     }, beforeCheckboxes);
     const update = await updateResp;
     const body = await update.json();

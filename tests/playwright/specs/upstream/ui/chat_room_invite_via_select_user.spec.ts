@@ -19,6 +19,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /chat/room invite via selectUser flow', () => {
   let root: RootFixture;
@@ -65,43 +66,18 @@ test.describe('UI: /chat/room invite via selectUser flow', () => {
 
     // 4. Members tab (= ti-users icon を持つ tab button) を click。
     // MkPageHeader の tab button は通常 page header section にある。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-users') !== null);
-      },
-      { timeout: 20_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-users') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-users');
 
     // 5. "Invite user" button (= room.members.vue:8、ti-plus icon、
     // ti-fw 修飾無し = page top の primary button) を待って click
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some(
-          (b) =>
-            b.querySelector('i.ti-plus') !== null &&
-            !b.querySelector('i.ti-fw') &&
-            (b.textContent ?? '').toLowerCase().includes('invite'),
-        );
-      },
-      { timeout: 15_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「invite」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           b.querySelector('i.ti-plus') !== null &&
           !b.querySelector('i.ti-fw') &&
           (b.textContent ?? '').toLowerCase().includes('invite'),
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // 6. MkUserSelectDialog の username input が現れる (autofocus)。
     // 同 dialog は localOnly=true mode なので host input は無く、username
@@ -136,14 +112,14 @@ test.describe('UI: /chat/room invite via selectUser flow', () => {
 
     // 9. 検索結果の user item を click (= selected = user)
     // user item は `_button` class + MkAcct で username text を含む。
-    await page.evaluate((u) => {
+    await clickWhenReady(page, '検索結果の user item', (u) => {
       const els = Array.from(document.querySelectorAll('div')) as HTMLDivElement[];
       const target = els.find(
         (el) =>
           el.classList.contains('_button') &&
           (el.textContent ?? '').includes(u),
       );
-      target?.click();
+      return target;
     }, invitee.username);
 
     // 10. MkModalWindow の OK button (ti-check) を click → API
@@ -153,13 +129,11 @@ test.describe('UI: /chat/room invite via selectUser flow', () => {
         r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const ok = btns.find(
+    await clickWhenReady(page, 'i.ti-check を持つボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) => !b.disabled && b.querySelector('i.ti-check') !== null,
-      );
-      ok?.click();
-    });
+      ),
+    );
     await inviteResp;
   });
 });

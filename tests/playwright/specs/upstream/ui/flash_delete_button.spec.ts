@@ -14,6 +14,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickByTestId, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /play/:id/edit delete button flow', () => {
   let root: RootFixture;
@@ -54,15 +55,13 @@ test.describe('UI: /play/:id/edit delete button flow', () => {
     );
 
     // Delete button (ti-trash + "Delete" text) を click
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, 'i.ti-trash を持つボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           b.querySelector('i.ti-trash') !== null &&
           (b.textContent ?? '').trim().match(/^Delete$/i),
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // confirm dialog OK
     await page.waitForFunction(
@@ -74,12 +73,7 @@ test.describe('UI: /play/:id/edit delete button flow', () => {
       (r) => r.url().includes('/api/flash/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // 削除確認 — flash/show は 404 + NO_SUCH_FLASH を返す

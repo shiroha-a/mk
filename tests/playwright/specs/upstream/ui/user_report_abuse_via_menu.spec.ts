@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /@target abuse report flow', () => {
   let root: RootFixture;
@@ -47,36 +48,9 @@ test.describe('UI: /@target abuse report flow', () => {
     );
 
     // 3. 3-dot menu (ti-dots) → Report abuse item (ti-fw ti-exclamation-circle)
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-dots') !== null);
-      },
-      { timeout: 15_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-dots') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-dots');
 
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some(
-          (b) => b.querySelector('i.ti-fw.ti-exclamation-circle') !== null,
-        );
-      },
-      { timeout: 10_000 },
-    );
-
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
-        (b) => b.querySelector('i.ti-fw.ti-exclamation-circle') !== null,
-      );
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-exclamation-circle');
 
     // 4. MkAbuseReportWindow が popup → textarea が出る。spam content など
     // 任意の文字列を送って round-trip を確認する (admin 側で削除すべき
@@ -105,13 +79,11 @@ test.describe('UI: /@target abuse report flow', () => {
       (r) => r.url().includes('/api/users/report-abuse') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const send = btns.find(
+    await clickWhenReady(page, 'Send ボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) => !b.disabled && (b.textContent ?? '').trim().match(/^Send$/i),
-      );
-      send?.click();
-    });
+      ),
+    );
     await reportResp;
   });
 });

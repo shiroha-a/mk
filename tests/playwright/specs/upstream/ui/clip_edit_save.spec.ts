@@ -15,6 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /clips/:id edit name round-trip', () => {
   let root: RootFixture;
@@ -61,19 +62,11 @@ test.describe('UI: /clips/:id edit name round-trip', () => {
     // 実際 post form が開いてしまい clips/update は永久に飛ばなかった。
     // header action の pencil は icon only (= textContent が空) なので、
     // "Note" / "Edit widgets" 等ラベル付きの pencil button を除外する。
-    await page.waitForFunction(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      return btns.some(
+    await clickWhenReady(page, 'i.ti-pencil を持つボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) => b.querySelector('i.ti-pencil') !== null && (b.textContent ?? '').trim() === '',
-      );
-    }, { timeout: 15_000 });
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const editBtn = btns.find(
-        (b) => b.querySelector('i.ti-pencil') !== null && (b.textContent ?? '').trim() === '',
-      );
-      editBtn?.click();
-    });
+      ),
+    );
 
     // 4. MkFormDialog が popup → 最初の text input (= name) が見える
     await page.waitForFunction(
@@ -114,16 +107,14 @@ test.describe('UI: /clips/:id edit name round-trip', () => {
       (r) => r.url().includes('/api/clips/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const ok = btns.find(
+    await clickWhenReady(page, '「Done」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           !b.disabled &&
           b.querySelector('i.ti-check') !== null &&
           (b.textContent ?? '').includes('Done'),
-      );
-      ok?.click();
-    });
+      ),
+    );
     const update = await updateResp;
     expect(update.status()).toBeLessThan(300);
 

@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/roles/new form flow', () => {
   let root: RootFixture;
@@ -57,12 +58,7 @@ test.describe('UI: /admin/roles/new form flow', () => {
       (r) => r.url().includes('/api/admin/roles/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Save');
     const created = await createResp;
     const createdBody = await created.json();
     expect(createdBody.id).toBeTruthy();

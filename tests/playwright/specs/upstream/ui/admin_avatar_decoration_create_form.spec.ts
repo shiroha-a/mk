@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonByText, clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/avatar-decorations create form flow', () => {
   let root: RootFixture;
@@ -44,12 +45,7 @@ test.describe('UI: /admin/avatar-decorations create form flow', () => {
     );
 
     // "+" header click → edit dialog popup
-    await page.evaluate(() => {
-      const btn = (document.querySelector('button i.ti-plus')?.closest('button')) as
-        | HTMLButtonElement
-        | null;
-      btn?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-plus');
 
     // dialog 内 input が +2 (name / imageUrl) されたら expand 完了
     await page.waitForFunction(
@@ -89,14 +85,9 @@ test.describe('UI: /admin/avatar-decorations create form flow', () => {
         r.url().includes('/api/admin/avatar-decorations/create') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      // dialog 内の "Create" button (= MkButton primary、textContent に
-      // "Create" を含む)
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').trim() === 'Create',
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    // dialog 内の "Create" button (= MkButton primary、textContent に
+    // "Create" を含む)
+    await clickButtonByText(page, 'Create');
     const resp = await createResp;
     expect(resp.status()).toBeLessThan(400);
   });

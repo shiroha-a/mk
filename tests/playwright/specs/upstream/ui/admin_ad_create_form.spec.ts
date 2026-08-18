@@ -15,6 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText, clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/ads create form flow', () => {
   let root: RootFixture;
@@ -37,12 +38,7 @@ test.describe('UI: /admin/ads create form flow', () => {
     );
 
     // "+" header action click → 新規 ad form が unshift される
-    await page.evaluate(() => {
-      const btn = (document.querySelector('button i.ti-plus')?.closest('button')) as
-        | HTMLButtonElement
-        | null;
-      btn?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-plus');
 
     // 新規 ad form の url MkInput が hydrate (= type="url" の input)
     await page.waitForFunction(
@@ -80,13 +76,8 @@ test.describe('UI: /admin/ads create form flow', () => {
       (r) => r.url().includes('/api/admin/ad/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      // 新規 ad form の Save button が最初の textContent "Save" 持ち button。
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    // 新規 ad form の Save button が最初の textContent "Save" 持ち button。
+    await clickButtonContainingText(page, 'Save');
     await createResp;
   });
 });

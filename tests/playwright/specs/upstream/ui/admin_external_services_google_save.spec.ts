@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonByText, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/external-services Google Analytics save flow', () => {
   let root: RootFixture;
@@ -34,16 +35,7 @@ test.describe('UI: /admin/external-services Google Analytics save flow', () => {
     });
 
     // 1 つ目の folder header (Google Analytics) を click して expand
-    await page.waitForFunction(
-      () => document.querySelector('[data-testid="folder-header"]') !== null,
-      { timeout: 20_000 },
-    );
-    await page.evaluate(() => {
-      const header = document.querySelector('[data-testid="folder-header"]') as
-        | HTMLButtonElement
-        | null;
-      header?.click();
-    });
+    await clickByTestId(page, 'folder-header');
 
     // Save button が visible になるまで待つ
     await page.waitForFunction(
@@ -58,12 +50,7 @@ test.describe('UI: /admin/external-services Google Analytics save flow', () => {
       (r) => r.url().includes('/api/admin/update-meta') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find(
-        (b) => (b.textContent ?? '').trim() === 'Save',
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonByText(page, 'Save');
     const resp = await updateResp;
     expect(resp.status()).toBeLessThan(400);
   });

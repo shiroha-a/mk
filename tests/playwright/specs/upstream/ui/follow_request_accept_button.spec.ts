@@ -21,6 +21,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/follow-requests accept button flow', () => {
   let root: RootFixture;
@@ -79,15 +80,13 @@ test.describe('UI: /my/follow-requests accept button flow', () => {
         r.url().includes('/api/following/requests/accept') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「Accept」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           (b.textContent ?? '').includes('Accept') &&
           b.querySelector('i.ti-check') !== null,
-      );
-      target?.click();
-    });
+      ),
+    );
     await acceptResp;
 
     // 7. API 経由で関係性 verify: requester is now following root.

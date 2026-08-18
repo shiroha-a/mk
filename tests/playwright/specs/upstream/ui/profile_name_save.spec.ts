@@ -23,6 +23,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/profile name save flow', () => {
   let root: RootFixture;
@@ -92,13 +93,8 @@ test.describe('UI: /settings/profile name save flow', () => {
       (r) => r.url().includes('/api/i/update') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      // 最初の "Save" button を click (= name MkInput の save)
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    // 最初の "Save" button を click (= name MkInput の save)
+    await clickButtonContainingText(page, 'Save');
     // i/update 応答 body は更新後 user object を返す (handler が fresh fetch)。
     const update = await updateResp;
     const updateBody = await update.json();

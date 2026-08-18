@@ -17,6 +17,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickButtonWithIcon, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/antennas/:id delete button flow', () => {
   let root: RootFixture;
@@ -64,19 +65,7 @@ test.describe('UI: /my/antennas/:id delete button flow', () => {
     // 旧実装は body wait で 20s timeout していた。直接 Delete button (=
     // ti-trash icon を持つ MkButton inline danger) が出るのを待てば
     // MkAntennaEditor mount 完了の verify として十分。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-trash') !== null);
-      },
-      { timeout: 30_000 },
-    );
-
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-trash') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-trash', { timeout: 30_000 });
 
     // 4. confirm dialog OK click → API 呼出
     await page.waitForFunction(
@@ -88,12 +77,7 @@ test.describe('UI: /my/antennas/:id delete button flow', () => {
       (r) => r.url().includes('/api/antennas/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // 5. API 経由で削除確認 — antennas/show は 404 + NO_SUCH_ANTENNA を返す

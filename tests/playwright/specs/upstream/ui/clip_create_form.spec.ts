@@ -15,6 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/clips create form flow', () => {
   let root: RootFixture;
@@ -46,12 +47,7 @@ test.describe('UI: /my/clips create form flow', () => {
     );
 
     // "+ Add" click → MkFormDialog popup
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Add'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Add');
 
     // MkFormDialog の name MkInput (= form の text 入力 1 個) が出るまで待つ。
     await page.waitForFunction(
@@ -86,13 +82,8 @@ test.describe('UI: /my/clips create form flow', () => {
       (r) => r.url().includes('/api/clips/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      // MkModalWindow の ok button (i18n.ts.done = "Done")
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Done'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    // MkModalWindow の ok button (i18n.ts.done = "Done")
+    await clickButtonContainingText(page, 'Done');
     const created = await createResp;
     const body = await created.json();
     expect(body.id).toBeTruthy();

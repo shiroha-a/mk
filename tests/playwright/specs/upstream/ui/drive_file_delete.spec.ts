@@ -16,6 +16,7 @@ import { expect, test } from '@playwright/test';
 import { uploadTinyPNG } from '../../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickButtonWithIcon, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/drive/file/:fileId delete flow', () => {
   let root: RootFixture;
@@ -50,11 +51,7 @@ test.describe('UI: /my/drive/file/:fileId delete flow', () => {
     );
 
     // 3. trash click → confirm dialog 出現
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const trash = btns.find((b) => b.querySelector('i.ti-trash') !== null);
-      trash?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-trash');
 
     await page.waitForFunction(
       () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
@@ -66,12 +63,7 @@ test.describe('UI: /my/drive/file/:fileId delete flow', () => {
       (r) => r.url().includes('/api/drive/files/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // 5. API 経由で 削除確認 — drive/files/show は削除済 file に対して

@@ -19,6 +19,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { DEFAULT_TEST_PASSWORD, randomUsername, signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 /**
  * Create a peer that root is allowed to chat with.
@@ -115,12 +116,7 @@ test.describe('UI: /chat/user/:userId direct message', () => {
       (r) => r.url().includes('/api/chat/messages/create-to-user') && r.status() < 400,
       { timeout: 20_000 },
     );
-    await page.evaluate(() => {
-      const btn = document.querySelector('button i.ti-send')?.closest('button') as
-        | HTMLButtonElement
-        | null;
-      btn?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-send');
     await sendResp;
 
     // 送信直後に自分の画面へ出る (楽観描画でなく実データ)。

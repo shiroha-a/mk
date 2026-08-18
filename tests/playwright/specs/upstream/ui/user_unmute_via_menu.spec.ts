@@ -18,6 +18,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: user 3-dot menu unmute flow', () => {
   let root: RootFixture;
@@ -57,39 +58,16 @@ test.describe('UI: user 3-dot menu unmute flow', () => {
     );
 
     // 4. 3-dot menu button (= ti-dots) を click
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-dots') !== null);
-      },
-      { timeout: 15_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-dots') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-dots');
 
     // 5. popup menu の "Unmute" item (= ti-fw ti-eye) を待って click
     // user.isMuted=true 時の icon は ti-eye、isMuted=false なら ti-eye-off。
     // menu icon は ti-fw 修飾を持つ (MkMenu.vue:56)。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-fw.ti-eye') !== null);
-      },
-      { timeout: 10_000 },
-    );
-
     const unmuteResp = page.waitForResponse(
       (r) => r.url().includes('/api/mute/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-fw.ti-eye') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-eye');
     await unmuteResp;
 
     // 6. API 経由で関係性 verify: root の muting list から target が消える

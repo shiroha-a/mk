@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/privacy autoAcceptFollowed toggle flow', () => {
   let root: RootFixture;
@@ -44,12 +45,12 @@ test.describe('UI: /settings/privacy autoAcceptFollowed toggle flow', () => {
       (r) => r.url().includes('/api/i/update') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
+    await clickWhenReady(page, '2 番目の checkbox', () => {
       const cbs = Array.from(
         document.querySelectorAll('input[type="checkbox"]'),
       ) as HTMLInputElement[];
       // index 1 = 2 番目 = autoAcceptFollowed
-      cbs[1]?.click();
+      return cbs[1];
     });
     const update = await updateResp;
     const body = await update.json();

@@ -19,6 +19,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
   let root: RootFixture;
@@ -114,14 +115,14 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
       decorationName,
       { timeout: 20_000 },
     );
-    await page.evaluate((n) => {
+    await clickWhenReady(page, 'decoration 名を含む最内要素', (n) => {
       const hits = Array.from(document.querySelectorAll('*')).filter((el) =>
         (el.textContent ?? '').includes(n),
       );
       const innermost = hits.filter(
         (el) => !hits.some((other) => other !== el && el.contains(other)),
       );
-      (innermost[0] as HTMLElement | undefined)?.click();
+      return (innermost[0] as HTMLElement | undefined);
     }, decorationName);
 
     // 5. XDialog の detach button hydrate を待つ。
@@ -153,16 +154,14 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
         (r.request().postData() ?? '').includes('avatarDecorations'),
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「Remove」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           !b.disabled &&
           b.querySelector('i.ti-x') !== null &&
           (b.textContent ?? '').trim() === 'Remove',
-      );
-      target?.click();
-    });
+      ),
+    );
     const update = await updateResp;
     const body = await update.json();
     expect(Array.isArray(body.avatarDecorations)).toBe(true);

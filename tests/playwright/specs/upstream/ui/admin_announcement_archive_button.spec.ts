@@ -18,6 +18,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/announcements archive button flow', () => {
   let root: RootFixture;
@@ -56,12 +57,12 @@ test.describe('UI: /admin/announcements archive button flow', () => {
 
     // 該当 folder の header をすべて click すると expand する。
     // textContent に title を含む button (= folder header) を click。
-    await page.evaluate((t) => {
+    await clickWhenReady(page, '対象 announcement の folder-header', (t) => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLButtonElement[];
       const target = headers.find((h) => (h.textContent ?? '').includes(t));
-      target?.click();
+      return target;
     }, title);
 
     // Archive button が visible になるまで待つ。textContent は
@@ -78,12 +79,7 @@ test.describe('UI: /admin/announcements archive button flow', () => {
       (r) => r.url().includes('/api/admin/announcements/update') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Archive'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Archive');
     const resp = await updateResp;
     expect(resp.status()).toBeLessThan(400);
   });

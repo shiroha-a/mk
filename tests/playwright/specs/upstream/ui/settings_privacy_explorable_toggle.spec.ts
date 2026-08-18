@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/privacy isExplorable toggle flow', () => {
   let root: RootFixture;
@@ -47,12 +48,12 @@ test.describe('UI: /settings/privacy isExplorable toggle flow', () => {
       (r) => r.url().includes('/api/i/update') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
+    await clickWhenReady(page, '7 番目の checkbox', () => {
       // 7 番目 (index 6) = isExplorable switch (privacy.vue:69)
       const cbs = Array.from(
         document.querySelectorAll('input[type="checkbox"]'),
       ) as HTMLInputElement[];
-      cbs[6]?.click();
+      return cbs[6];
     });
     // beforeAll の API reset で isExplorable=true から始まるので、click
     // 後は必ず false が返る strict assertion。i/update が MeDetailed

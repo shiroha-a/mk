@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/notifications mark-all-as-read flow', () => {
   let root: RootFixture;
@@ -44,14 +45,9 @@ test.describe('UI: /my/notifications mark-all-as-read flow', () => {
         r.url().includes('/api/notifications/mark-all-as-read') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      // header の filter / mark-all-as-read 2 button が並ぶ。filter は
-      // ti-filter icon、mark-all-as-read は ti-check icon。
-      const btn = (document.querySelector('button i.ti-check')?.closest('button')) as
-        | HTMLButtonElement
-        | null;
-      btn?.click();
-    });
+    // header の filter / mark-all-as-read 2 button が並ぶ。filter は
+    // ti-filter icon、mark-all-as-read は ti-check icon。
+    await clickButtonWithIcon(page, 'i.ti-check');
     const resp = await markResp;
     expect(resp.status()).toBeLessThan(300);
   });

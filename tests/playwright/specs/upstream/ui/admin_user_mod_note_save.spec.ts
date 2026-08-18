@@ -18,6 +18,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/user moderationNote save flow', () => {
   let root: RootFixture;
@@ -90,12 +91,7 @@ test.describe('UI: /admin/user moderationNote save flow', () => {
         r.url().includes('/api/admin/update-user-note') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Save');
     await updateResp;
 
     // 5. API 経由で moderationNote 反映 verify

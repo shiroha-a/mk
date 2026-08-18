@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/moderation preservedUsernames save flow', () => {
   let root: RootFixture;
@@ -58,14 +59,14 @@ test.describe('UI: /admin/moderation preservedUsernames save flow', () => {
       );
 
       // "Preserved usernames" folder を expand
-      await page.evaluate(() => {
+      await clickWhenReady(page, '「Reserved usernames」の folder-header', () => {
         const headers = Array.from(
           document.querySelectorAll('[data-testid="folder-header"]'),
         ) as HTMLElement[];
         const target = headers.find((h) =>
           (h.textContent ?? '').includes('Reserved usernames'),
         );
-        target?.click();
+        return target;
       });
 
       // textarea が DOM に出るまで待つ
@@ -94,13 +95,11 @@ test.describe('UI: /admin/moderation preservedUsernames save flow', () => {
         (r) => r.url().includes('/api/admin/update-meta') && r.status() < 300,
         { timeout: 15_000 },
       );
-      await page.evaluate(() => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        const save = btns.find(
+      await clickWhenReady(page, '「Save」のボタン', () =>
+        Array.from(document.querySelectorAll('button')).find(
           (b) => !b.disabled && (b.textContent ?? '').includes('Save'),
-        );
-        save?.click();
-      });
+        ),
+      );
       await updateResp;
     } finally {
       // cleanup: preservedUsernames に "admin"/"root" 等が残ると以降の

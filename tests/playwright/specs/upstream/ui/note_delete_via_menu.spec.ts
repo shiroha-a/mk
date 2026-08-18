@@ -24,6 +24,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickButtonWithIcon, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: note 3-dot menu delete flow', () => {
   let root: RootFixture;
@@ -93,11 +94,7 @@ test.describe('UI: note 3-dot menu delete flow', () => {
     );
 
     // 5. Delete menu item を click → confirm dialog 出現
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-fw.ti-trash') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-trash');
 
     await page.waitForFunction(
       () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
@@ -109,12 +106,7 @@ test.describe('UI: note 3-dot menu delete flow', () => {
       (r) => r.url().includes('/api/notes/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // 7. API 経由で削除確認 — notes/show は 404 + NO_SUCH_NOTE を返す

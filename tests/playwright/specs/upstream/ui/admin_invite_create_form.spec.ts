@@ -15,6 +15,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonByText, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/invites create form flow', () => {
   let root: RootFixture;
@@ -37,10 +38,7 @@ test.describe('UI: /admin/invites create form flow', () => {
     );
 
     // 1 つ目の MkFolder を expand (= "Create invite code" form を開く)
-    await page.evaluate(() => {
-      const header = document.querySelector('[data-testid="folder-header"]') as HTMLButtonElement | null;
-      header?.click();
-    });
+    await clickByTestId(page, 'folder-header');
 
     // Create button が visible になるまで待つ (= folder content が expand 完了)
     await page.waitForFunction(
@@ -56,12 +54,7 @@ test.describe('UI: /admin/invites create form flow', () => {
       (r) => r.url().includes('/api/admin/invite/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find(
-        (b) => (b.textContent ?? '').trim() === 'Create',
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonByText(page, 'Create');
     const created = await createResp;
     const body = await created.json();
     // admin/invite/create returns array of {code, ...}

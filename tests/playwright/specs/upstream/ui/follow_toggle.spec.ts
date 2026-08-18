@@ -7,8 +7,8 @@
 // isFollowing=true round-trip を verify する **真の write-flow** spec。
 //
 // MkFollowButton に data-cy は無いが、未 follow 時は i18n.ts.follow
-// → "Follow" text を持つ <button> として render される。Playwright の
-// getByRole('button', { name: 'Follow' }) で locate して click する。
+// → "Follow" text を持つ <button> として render される。この text を述語に
+// 待機と click を束ねる (fixtures/ui_click.ts)。
 
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
@@ -16,6 +16,7 @@ import { callApi } from '../../../fixtures/api';
 import { DEFAULT_TEST_PASSWORD, signupUser } from '../../../fixtures/auth';
 import { resetRateLimit } from '../../../fixtures/rate_limit';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonByText, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: follow button click toggles following relation', () => {
   let root: RootFixture;
@@ -45,53 +46,18 @@ test.describe('UI: follow button click toggles following relation', () => {
     // 待つ条件になっていなかった。実測で click が navigation の 360ms 後に
     // 走り、ボタン未描画のまま次へ進んでいた (#2600)。
     //
-    // 待つ対象を「押したいボタンそのもの」にする。**待機の述語を click と
-    // 同じにするのが要点。** `getByRole(...).waitFor({state:'visible'})` は
-    // 使えない: MkFollowButton は DOM にはあるが Playwright の visible 判定に
-    // 入らず 20 秒待っても解決しない (実測)。下の click が programmatic なのも
-    // 同じ理由と思われる。判定がずれていると「待てたのに押せない」が起きる。
-    await page.waitForFunction(
-      () =>
-        Array.from(document.querySelectorAll('button')).some(
-          (b) => (b.textContent ?? '').trim() === 'Follow',
-        ),
-      undefined,
-      { timeout: 20_000 },
-    );
+    // 待機と click は clickButtonByText が 1 つの述語で束ねるのでずれない
+    // (#2617)。programmatic click なのは MkFollowButton が DOM にあっても
+    // Playwright の visible 判定に入らないため。詳細は fixtures/ui_click.ts。
+    await clickButtonByText(page, 'Follow');
 
     // MkFollowButton click → prefer.alwaysConfirmFollow=true (def.ts:370)
     // で os.confirm() dialog が出る → OK click が follow API trigger。
-    // programmatic dispatchEvent で直接 button の click handler を呼び、
-    // dialog 出現を待ってから data-cy-modal-dialog-ok を click する
-    // (#744 batch3 で発覚)。
-    // **見つからなければその場で落とす。** `btn?.click()` は要素が無くても
-    // 黙って何もしないので、失敗が「ダイアログが出ない」という原因から遠い
-    // 症状に化ける。実際に 60 秒 timeout の正体がこれだった (#2600)。
-    const followClicked = await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find(
-        (b) => (b.textContent ?? '').trim() === 'Follow',
-      ) as HTMLButtonElement | undefined;
-      if (!btn) return false;
-      btn.click();
-      return true;
-    });
-    expect(followClicked, 'Follow ボタンが見つからない').toBe(true);
-    // confirm dialog 出現待ち
-    await page.waitForFunction(
-      () => document.querySelector('[data-testid="modal-dialog-ok"]') !== null,
-      { timeout: 10_000 },
-    );
     const followResp = page.waitForResponse(
       (r) => r.url().includes('/api/following/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    const okClicked = await page.evaluate(() => {
-      const ok = document.querySelector('[data-testid="modal-dialog-ok"]') as HTMLButtonElement | null;
-      if (!ok) return false;
-      ok.click();
-      return true;
-    });
-    expect(okClicked, '確認ダイアログの OK が見つからない').toBe(true);
+    await clickByTestId(page, 'modal-dialog-ok', { timeout: 10_000 });
     await followResp;
 
     // backend で users/show を引いて isFollowing=true を verify

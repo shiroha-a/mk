@@ -11,6 +11,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { deleteAntennasNamed } from '../../../fixtures/quota';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/antennas/:id update flow', () => {
   let root: RootFixture;
@@ -91,12 +92,7 @@ test.describe('UI: /my/antennas/:id update flow', () => {
       (r) => r.url().includes('/api/antennas/update') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Save');
     const resp = await updateResp;
     expect(resp.status()).toBeLessThan(400);
   });

@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText, clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/announcements create form flow', () => {
   let root: RootFixture;
@@ -38,12 +39,7 @@ test.describe('UI: /admin/announcements create form flow', () => {
     );
 
     // "+" header action click → 新規 announcement folder が unshift される
-    await page.evaluate(() => {
-      const btn = (document.querySelector('button i.ti-plus')?.closest('button')) as
-        | HTMLButtonElement
-        | null;
-      btn?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-plus');
 
     // 新 folder の title MkInput が hydrate するまで待つ
     // (default title "New announcement" が初期値で入っている)
@@ -100,15 +96,10 @@ test.describe('UI: /admin/announcements create form flow', () => {
       (r) => r.url().includes('/api/admin/announcements/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      // 最初の Save button (= 新規 folder 内) を click。
-      // 既存 announcement folder は default closed なので Save button は
-      // 新 folder の 1 個だけ visible/clickable。
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    // 最初の Save button (= 新規 folder 内) を click。
+    // 既存 announcement folder は default closed なので Save button は
+    // 新 folder の 1 個だけ visible/clickable。
+    await clickButtonContainingText(page, 'Save');
     await createResp;
 
     // refresh() で list 再取得 → 新 announcement の title が一覧に出る

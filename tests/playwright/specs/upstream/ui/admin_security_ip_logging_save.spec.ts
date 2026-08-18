@@ -20,6 +20,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/security IP logging form save flow', () => {
   let root: RootFixture;
@@ -52,14 +53,14 @@ test.describe('UI: /admin/security IP logging form save flow', () => {
     );
 
     // "Log IP address" を含む folder header を click して expand
-    await page.evaluate(() => {
+    await clickWhenReady(page, '「Log IP address」の folder-header', () => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('Log IP address'),
       );
-      target?.click();
+      return target;
     });
 
     // expand 後に新しい checkbox (= enableIpLogging) が DOM に出るのを待つ
@@ -69,11 +70,11 @@ test.describe('UI: /admin/security IP logging form save flow', () => {
     );
 
     // checkbox を click → form.modified=true → footer の Save button 出現
-    await page.evaluate(() => {
+    await clickWhenReady(page, '1 番目の checkbox', () => {
       const cbs = Array.from(
         document.querySelectorAll('input[type="checkbox"]'),
       ) as HTMLInputElement[];
-      cbs[0]?.click();
+      return cbs[0];
     });
 
     // footer の Save button hydrate を待つ
@@ -90,12 +91,7 @@ test.describe('UI: /admin/security IP logging form save flow', () => {
       (r) => r.url().includes('/api/admin/update-meta') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Save'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Save');
     await updateResp;
 
     // cleanup: 念のため false に戻す。残るとログ容量を肥大させるが、本 spec

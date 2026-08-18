@@ -16,6 +16,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/system-webhook create flow', () => {
   let root: RootFixture;
@@ -34,19 +35,7 @@ test.describe('UI: /admin/system-webhook create flow', () => {
     });
 
     // "Create webhook" primary button (= ti-plus icon を持つ button) hydrate
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-plus') !== null);
-      },
-      { timeout: 20_000 },
-    );
-
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const create = btns.find((b) => b.querySelector('i.ti-plus') !== null);
-      create?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-plus');
 
     // dialog 内 text input が 3 個 (title / url / secret) hydrate するまで待つ
     await page.waitForFunction(
@@ -95,16 +84,14 @@ test.describe('UI: /admin/system-webhook create flow', () => {
         r.url().includes('/api/admin/system-webhook/create') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const save = btns.find(
+    await clickWhenReady(page, '「OK」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           !b.disabled &&
           b.querySelector('i.ti-check') !== null &&
           (b.textContent ?? '').trim() === 'OK',
-      );
-      save?.click();
-    });
+      ),
+    );
     const create = await createResp;
     expect(create.status()).toBeLessThan(300);
   });

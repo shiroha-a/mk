@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: /chat/room/:id send message flow', () => {
   let root: RootFixture;
@@ -73,12 +74,7 @@ test.describe('UI: /chat/room/:id send message flow', () => {
         r.url().includes('/api/chat/messages/create-to-room') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = (document.querySelector('button i.ti-send')?.closest('button')) as
-        | HTMLButtonElement
-        | null;
-      btn?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-send');
     const resp = await sendResp;
     expect(resp.status()).toBeLessThan(400);
   });

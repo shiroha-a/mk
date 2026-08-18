@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonByText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /search user submit flow', () => {
   let root: RootFixture;
@@ -54,12 +55,7 @@ test.describe('UI: /search user submit flow', () => {
       (r) => r.url().includes('/api/users/search') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').trim() === 'Search',
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonByText(page, 'Search');
     await searchResp;
 
     // 検索結果の MkUserList に root.username が render される

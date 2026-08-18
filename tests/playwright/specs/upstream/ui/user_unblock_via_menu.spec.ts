@@ -15,6 +15,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: user 3-dot menu unblock flow', () => {
   let root: RootFixture;
@@ -50,35 +51,12 @@ test.describe('UI: user 3-dot menu unblock flow', () => {
     );
 
     // 3-dot menu click
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-dots') !== null);
-      },
-      { timeout: 15_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-dots') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-dots');
 
     // "Unblock" item (= ti-fw ti-ban) を待って click。block / unblock どちら
     // でも icon は ti-ban (= text 切替のみ) なので、isBlocking=true 状態の
     // menu item は "Unblock" 動作を行う。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-fw.ti-ban') !== null);
-      },
-      { timeout: 10_000 },
-    );
-
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-fw.ti-ban') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-ban');
 
     // confirm dialog の OK click → /api/blocking/delete
     await page.waitForFunction(
@@ -89,12 +67,7 @@ test.describe('UI: user 3-dot menu unblock flow', () => {
       (r) => r.url().includes('/api/blocking/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await unblockResp;
 
     // API verify: relation isBlocking=false

@@ -20,6 +20,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonByText, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/abuses report resolve flow', () => {
   let root: RootFixture;
@@ -70,27 +71,14 @@ test.describe('UI: /admin/abuses report resolve flow', () => {
     // 「最初の ti-check button を click」という旧実装は、ページ上唯一の
     // ti-check が AGPL source-code 告知 popup の "Got it!" だったため、
     // 無関係な button を押して API が飛ばず 15s timeout していた。
-    await page.waitForFunction(
-      (u) => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        return btns.some(
-          (b) =>
-            b.querySelector('i.ti-exclamation-circle') !== null &&
-            (b.textContent ?? '').includes(u),
-        );
-      },
-      target.username,
-      { timeout: 15_000 },
-    );
-    await page.evaluate((u) => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const header = btns.find(
+    await clickWhenReady(page, 'i.ti-exclamation-circle を持つボタン', (u) =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           b.querySelector('i.ti-exclamation-circle') !== null &&
           (b.textContent ?? '').includes(u),
-      );
-      header?.click();
-    }, target.username);
+      ),
+      target.username,
+    );
 
     await page.waitForFunction(
       () =>
@@ -106,11 +94,7 @@ test.describe('UI: /admin/abuses report resolve flow', () => {
         r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const accept = btns.find((b) => (b.textContent ?? '').trim() === 'Resolve (Accept)');
-      accept?.click();
-    });
+    await clickButtonByText(page, 'Resolve (Accept)');
     await resolveResp;
   });
 });

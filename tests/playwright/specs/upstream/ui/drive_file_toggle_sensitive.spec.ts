@@ -17,6 +17,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { uploadTinyPNG } from '../../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/drive/file/:fileId toggle sensitive flow', () => {
   let root: RootFixture;
@@ -62,11 +63,7 @@ test.describe('UI: /my/drive/file/:fileId toggle sensitive flow', () => {
       (r) => r.url().includes('/api/drive/files/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-eye-exclamation') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-eye-exclamation');
     await updateResp;
 
     // 4. API 経由で isSensitive=true を verify

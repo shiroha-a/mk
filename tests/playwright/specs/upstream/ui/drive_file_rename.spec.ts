@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { uploadTinyPNG } from '../../../fixtures/files';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickByTestId, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/drive/file/:fileId rename round-trip', () => {
   let root: RootFixture;
@@ -51,13 +52,11 @@ test.describe('UI: /my/drive/file/:fileId rename round-trip', () => {
     // 3. rename ボタンを click。drive.file.info.vue の rename() ボタンは
     // 「<h2> file name + <i.ti-pencil>」を子に持つ唯一の <button>。
     // vite hash で class セレクタは production で死ぬので、構造で当てる。
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const renameBtn = btns.find(
+    await clickWhenReady(page, 'i.ti-pencil を持つボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) => b.querySelector('h2') !== null && b.querySelector('i.ti-pencil') !== null,
-      );
-      renameBtn?.click();
-    });
+      ),
+    );
 
     // 4. inputText dialog (= MkDialog with single MkInput type='text') を待つ
     await page.waitForFunction(
@@ -95,12 +94,7 @@ test.describe('UI: /my/drive/file/:fileId rename round-trip', () => {
         r.url().includes('/api/drive/files/update') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     const update = await updateResp;
     expect(update.status()).toBeLessThan(300);
 

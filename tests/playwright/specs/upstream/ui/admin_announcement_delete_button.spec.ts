@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickByTestId, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/announcements delete button flow', () => {
   let root: RootFixture;
@@ -59,12 +60,12 @@ test.describe('UI: /admin/announcements delete button flow', () => {
     );
 
     // 3. 該当 folder を expand
-    await page.evaluate((t) => {
+    await clickWhenReady(page, '対象 announcement の folder-header', (t) => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLButtonElement[];
       const target = headers.find((h) => (h.textContent ?? '').includes(t));
-      target?.click();
+      return target;
     }, title);
 
     // 4. Delete button (= "Delete" text + ti-trash icon) が visible まで待つ
@@ -81,15 +82,13 @@ test.describe('UI: /admin/announcements delete button flow', () => {
     );
 
     // Delete click → confirm dialog 出現
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「Delete」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           (b.textContent ?? '').includes('Delete') &&
           b.querySelector('i.ti-trash') !== null,
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // 5. confirm dialog OK click → API 呼出
     await page.waitForFunction(
@@ -102,12 +101,7 @@ test.describe('UI: /admin/announcements delete button flow', () => {
         r.url().includes('/api/admin/announcements/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // 6. API 経由で list から消失 verify

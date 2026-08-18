@@ -14,6 +14,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/relays add form flow', () => {
   let root: RootFixture;
@@ -36,12 +37,7 @@ test.describe('UI: /admin/relays add form flow', () => {
     );
 
     // "+" header action click → os.inputText popup (= MkDialog)
-    await page.evaluate(() => {
-      const btn = (document.querySelector('button i.ti-plus')?.closest('button')) as
-        | HTMLButtonElement
-        | null;
-      btn?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-plus');
 
     // MkDialog が open するまで待つ
     await page.waitForFunction(
@@ -70,12 +66,7 @@ test.describe('UI: /admin/relays add form flow', () => {
       (r) => r.url().includes('/api/admin/relays/add') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     const resp = await addResp;
     expect(resp.status()).toBeLessThan(400);
   });

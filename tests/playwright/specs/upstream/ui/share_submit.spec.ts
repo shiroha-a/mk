@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /share submit creates note via form', () => {
   let root: RootFixture;
@@ -65,12 +66,7 @@ test.describe('UI: /share submit creates note via form', () => {
       (r) => r.url().includes('/api/notes/create') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = document.querySelector(
-        '[data-testid="post-form-submit"]',
-      ) as HTMLButtonElement | null;
-      btn?.click();
-    });
+    await clickByTestId(page, 'post-form-submit');
     const created = await createResp;
     const body = await created.json();
     expect(body.createdNote.text).toBe(noteText);

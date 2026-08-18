@@ -21,6 +21,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickByTestId, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/follow-requests cancel button flow', () => {
   let root: RootFixture;
@@ -75,15 +76,13 @@ test.describe('UI: /my/follow-requests cancel button flow', () => {
     );
 
     // Cancel click → confirm dialog 出現
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「Cancel」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           (b.textContent ?? '').includes('Cancel') &&
           b.querySelector('i.ti-x') !== null,
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // 6. confirm dialog OK click → following/requests/cancel
     await page.waitForFunction(
@@ -96,12 +95,7 @@ test.describe('UI: /my/follow-requests cancel button flow', () => {
         r.url().includes('/api/following/requests/cancel') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await cancelResp;
 
     // 7. API 経由で 関係性 verify: pending request が消える

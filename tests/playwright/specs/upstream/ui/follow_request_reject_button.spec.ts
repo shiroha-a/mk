@@ -21,6 +21,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/follow-requests reject button flow', () => {
   let root: RootFixture;
@@ -79,15 +80,13 @@ test.describe('UI: /my/follow-requests reject button flow', () => {
         r.url().includes('/api/following/requests/reject') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「Reject」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           (b.textContent ?? '').includes('Reject') &&
           b.querySelector('i.ti-x') !== null,
-      );
-      target?.click();
-    });
+      ),
+    );
     await rejectResp;
 
     // 7. API 経由で関係性 verify: requester は root を follow していない

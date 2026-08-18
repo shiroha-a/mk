@@ -17,6 +17,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { signupUser } from '../../../fixtures/auth';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickByTestId } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/user suspend toggle flow', () => {
   let root: RootFixture;
@@ -106,12 +107,7 @@ test.describe('UI: /admin/user suspend toggle flow', () => {
         r.url().includes('/api/admin/suspend-user') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await suspendResp;
 
     // 5. API 経由で target.isSuspended=true を verify

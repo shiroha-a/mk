@@ -18,6 +18,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/account-data export notes button flow', () => {
   let root: RootFixture;
@@ -51,14 +52,14 @@ test.describe('UI: /settings/account-data export notes button flow', () => {
       },
       { timeout: 20_000 },
     );
-    await page.evaluate(() => {
+    await clickWhenReady(page, '「All notes」の folder-header', () => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('All notes'),
       );
-      target?.click();
+      return target;
     });
 
     // expand 後、Export button (= ti-download icon を持つ button) が mount
@@ -82,16 +83,14 @@ test.describe('UI: /settings/account-data export notes button flow', () => {
       (r) => r.url().includes('/api/i/export-notes') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, '「Export」のボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           b.querySelector('i.ti-download') !== null &&
           (b.textContent ?? '').includes('Export') &&
           b.closest('[data-testid="folder-header"]') === null,
-      );
-      target?.click();
-    });
+      ),
+    );
     await exportResp;
   });
 });

@@ -13,6 +13,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/privacy noCrawle toggle flow', () => {
   let root: RootFixture;
@@ -42,14 +43,14 @@ test.describe('UI: /settings/privacy noCrawle toggle flow', () => {
       (r) => r.url().includes('/api/i/update') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
+    await clickWhenReady(page, '5 番目の checkbox', () => {
       // privacy.vue の switch 順: isLocked / autoAcceptFollowed /
       // publicReactions / hideOnlineStatus / noCrawle (= index 4) /
       // preventAiLearning / isExplorable
       const cbs = Array.from(
         document.querySelectorAll('input[type="checkbox"]'),
       ) as HTMLInputElement[];
-      cbs[4]?.click();
+      return cbs[4];
     });
     const update = await updateResp;
     const body = await update.json();

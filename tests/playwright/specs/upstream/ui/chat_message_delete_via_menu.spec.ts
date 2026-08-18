@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonWithIcon, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /chat/room message delete via menu flow', () => {
   let root: RootFixture;
@@ -78,7 +79,7 @@ test.describe('UI: /chat/room message delete via menu flow', () => {
       { timeout: 15_000 },
     );
 
-    await page.evaluate((t) => {
+    await clickWhenReady(page, 'i.ti-dots-circle-horizontal を持つボタン', (t) => {
       const els = Array.from(document.querySelectorAll('div')) as HTMLDivElement[];
       const target = els.find((el) => {
         if (!(el.textContent ?? '').includes(t)) return false;
@@ -88,27 +89,15 @@ test.describe('UI: /chat/room message delete via menu flow', () => {
       const btn = Array.from(target.querySelectorAll('button')).find(
         (b) => b.querySelector('i.ti-dots-circle-horizontal') !== null,
       ) as HTMLButtonElement | undefined;
-      btn?.click();
+      return btn;
     }, messageText);
 
     // 5. popupMenu の "Delete" item (ti-fw ti-trash) を click
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-        return btns.some((b) => b.querySelector('i.ti-fw.ti-trash') !== null);
-      },
-      { timeout: 10_000 },
-    );
-
     const deleteResp = page.waitForResponse(
       (r) => r.url().includes('/api/chat/messages/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => b.querySelector('i.ti-fw.ti-trash') !== null);
-      target?.click();
-    });
+    await clickButtonWithIcon(page, 'i.ti-fw.ti-trash');
     await deleteResp;
   });
 });

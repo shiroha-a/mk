@@ -13,6 +13,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /settings/notifications mark all read button flow', () => {
   let root: RootFixture;
@@ -32,27 +33,12 @@ test.describe('UI: /settings/notifications mark all read button flow', () => {
 
     // "Mark all notifications as read" button が hydrate するまで待つ。
     // i18n.ts.markAsReadAllNotifications。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        return btns.some((b) =>
-          (b.textContent ?? '').includes('Mark all notifications as read'),
-        );
-      },
-      { timeout: 20_000 },
-    );
-
     const markResp = page.waitForResponse(
       (r) =>
         r.url().includes('/api/notifications/mark-all-as-read') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Mark all notifications as read'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Mark all notifications as read');
     const resp = await markResp;
     expect(resp.status()).toBeLessThan(300);
   });

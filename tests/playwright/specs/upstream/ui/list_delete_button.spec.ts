@@ -15,6 +15,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickByTestId, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /my/lists/:id delete button flow', () => {
   let root: RootFixture;
@@ -70,14 +71,14 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
       },
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
+    await clickWhenReady(page, '「Settings」の folder-header', () => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLElement[];
       const target = headers.find((h) =>
         (h.textContent ?? '').includes('Settings'),
       );
-      target?.click();
+      return target;
     });
 
     // Delete button (= "Delete" text を持つ button) hydrate を待つ
@@ -92,13 +93,11 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
     );
 
     // Delete click → confirm dialog 出現
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, 'Delete ボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) => (b.textContent ?? '').trim().match(/^Delete$/i),
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // 4. confirm dialog OK click → API 呼出
     await page.waitForFunction(
@@ -110,12 +109,7 @@ test.describe('UI: /my/lists/:id delete button flow', () => {
       (r) => r.url().includes('/api/users/lists/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // 5. API 経由で削除確認 — users/lists/show は 404 + NO_SUCH_LIST を返す

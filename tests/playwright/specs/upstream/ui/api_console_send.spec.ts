@@ -10,6 +10,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonContainingText } from '../../../fixtures/ui_click';
 
 test.describe('UI: /api-console send flow', () => {
   let root: RootFixture;
@@ -54,12 +55,7 @@ test.describe('UI: /api-console send flow', () => {
       (r) => r.url().includes('/api/i') && !r.url().includes('/api/i/') && r.status() === 200,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Send'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Send');
     await apiResp;
 
     // response textarea (= readonly textarea) に root.username を含む

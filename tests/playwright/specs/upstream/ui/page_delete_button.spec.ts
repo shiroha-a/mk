@@ -16,6 +16,7 @@ import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { NOT_FOUND_STATUS } from '../../../fixtures/backend';
+import { clickByTestId, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /pages/edit/:id delete button flow', () => {
   let root: RootFixture;
@@ -60,15 +61,13 @@ test.describe('UI: /pages/edit/:id delete button flow', () => {
 
     // Delete button を click。eyeCatchingImageRemove も ti-trash を持つので
     // textContent に "Delete" を含むことで区別する。
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find(
+    await clickWhenReady(page, 'i.ti-trash を持つボタン', () =>
+      Array.from(document.querySelectorAll('button')).find(
         (b) =>
           b.querySelector('i.ti-trash') !== null &&
           (b.textContent ?? '').trim().match(/^Delete$/i),
-      );
-      target?.click();
-    });
+      ),
+    );
 
     // confirm dialog OK click
     await page.waitForFunction(
@@ -80,12 +79,7 @@ test.describe('UI: /pages/edit/:id delete button flow', () => {
       (r) => r.url().includes('/api/pages/delete') && r.status() < 300,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const ok = document.querySelector(
-        '[data-testid="modal-dialog-ok"]',
-      ) as HTMLButtonElement | null;
-      ok?.click();
-    });
+    await clickByTestId(page, 'modal-dialog-ok');
     await deleteResp;
 
     // API 経由で削除確認 — pages/show は 404 + NO_SUCH_PAGE を返す

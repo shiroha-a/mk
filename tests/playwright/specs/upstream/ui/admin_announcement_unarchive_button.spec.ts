@@ -16,6 +16,7 @@ import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
+import { clickButtonByText, clickButtonContainingText, clickWhenReady } from '../../../fixtures/ui_click';
 
 test.describe('UI: /admin/announcements unarchive button flow', () => {
   let root: RootFixture;
@@ -97,18 +98,7 @@ test.describe('UI: /admin/announcements unarchive button flow', () => {
 
     // 5. popupMenu の "Archived" item を click。MkMenu の menu item は
     // 標準 click で OK (MkMenu.vue:151 の @click.prevent)。
-    await page.waitForFunction(
-      () => {
-        const btns = Array.from(document.querySelectorAll('button'));
-        return btns.some((b) => (b.textContent ?? '').trim() === 'Archived');
-      },
-      { timeout: 10_000 },
-    );
-    await page.evaluate(() => {
-      const btns = Array.from(document.querySelectorAll('button')) as HTMLButtonElement[];
-      const target = btns.find((b) => (b.textContent ?? '').trim() === 'Archived');
-      target?.click();
-    });
+    await clickButtonByText(page, 'Archived');
 
     // 6. archived list が hydrate して target title が body に出るのを待つ
     await page.waitForFunction(
@@ -118,12 +108,12 @@ test.describe('UI: /admin/announcements unarchive button flow', () => {
     );
 
     // 3. 該当 folder を expand
-    await page.evaluate((t) => {
+    await clickWhenReady(page, '対象 announcement の folder-header', (t) => {
       const headers = Array.from(
         document.querySelectorAll('[data-testid="folder-header"]'),
       ) as HTMLButtonElement[];
       const target = headers.find((h) => (h.textContent ?? '').includes(t));
-      target?.click();
+      return target;
     }, title);
 
     // Unarchive button が visible になるまで待つ
@@ -141,12 +131,7 @@ test.describe('UI: /admin/announcements unarchive button flow', () => {
         r.url().includes('/api/admin/announcements/update') && r.status() < 400,
       { timeout: 15_000 },
     );
-    await page.evaluate(() => {
-      const btn = Array.from(document.querySelectorAll('button')).find((b) =>
-        (b.textContent ?? '').includes('Unarchive'),
-      ) as HTMLButtonElement | undefined;
-      btn?.click();
-    });
+    await clickButtonContainingText(page, 'Unarchive');
     const resp = await updateResp;
     expect(resp.status()).toBeLessThan(400);
 
