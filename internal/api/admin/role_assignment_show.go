@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entity"
 	"gorm.io/gorm"
 )
@@ -21,9 +22,14 @@ func (h *Handler) RolesAssignmentShow(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId and roleId are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	r, handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "2c7a9e1f-6d84-4f3b-9a0c-5e2b8d1f7a34", "8d1e4f2b-9a70-4c3e-b5d2-6f1a8c4e9b05")
-	if handled {
-		return err
+	// moderator向けread endpointなのでroleを先に確認する。private roleを未付与userへ
+	// 隠すself側とは意図的に非対称で、編集gateはここへ適用しない。
+	r, err := h.roleService.Show(req.RoleID)
+	if err != nil {
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "2c7a9e1f-6d84-4f3b-9a0c-5e2b8d1f7a34"))
+		}
+		return apierr.JSONInternalError(c)
 	}
 	if h.userRepo != nil {
 		if _, err := h.userRepo.FindByID(req.UserID); err != nil {

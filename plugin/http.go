@@ -172,9 +172,8 @@ func ExtractStatusError(err error) (*StatusError, string) {
 	return nil, ""
 }
 
-func (e *codedStatusError) Error() string           { return e.statusError.Error() }
-func (e *codedStatusError) Unwrap() error           { return e.statusError }
-func (e *codedStatusError) PluginErrorCode() string { return e.code }
+func (e *codedStatusError) Error() string { return e.statusError.Error() }
+func (e *codedStatusError) Unwrap() error { return e.statusError }
 
 func validErrorCode(code string) bool {
 	if code == "" {

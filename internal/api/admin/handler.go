@@ -2275,7 +2275,7 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	// gate の順で、moderator (非 administrator) は canEditMembersByModerator が
 	// 立つ role しか付け外しできない。NO_SUCH_ROLE / ACCESS_DENIED の UUID は
 	// assign 固有のもの。
-	if _, handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6503c040-6af4-4ed9-bf07-f2dd16678eab", "25b5bc31-dc79-4ebd-9bd2-c84978fd052c"); handled {
+	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6503c040-6af4-4ed9-bf07-f2dd16678eab", "25b5bc31-dc79-4ebd-9bd2-c84978fd052c"); handled {
 		return err
 	}
 	// upstream assign.ts:77-81: 対象 user 不在なら NO_SUCH_USER (#1542)。
@@ -2322,21 +2322,21 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 // 取得できない場合は administrator とみなさず ACCESS_DENIED に倒す (fail-closed)。
 // NO_SUCH_ROLE / ACCESS_DENIED の UUID は assign と unassign で異なるため呼び
 // 出し側から渡す。
-func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID, accessDeniedID string) (checkedRole *model.Role, handled bool, err error) {
+func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID, accessDeniedID string) (handled bool, err error) {
 	r, err := h.roleService.Show(roleID)
 	if err != nil {
 		if errors.Is(err, role.ErrRoleNotFound) {
-			return nil, true, c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", noSuchRoleID))
+			return true, c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", noSuchRoleID))
 		}
-		return nil, true, apierr.JSONInternalError(c)
+		return true, apierr.JSONInternalError(c)
 	}
 	if r.CanEditMembersByModerator {
-		return r, false, nil
+		return false, nil
 	}
 	if me := middleware.GetUser(c); me != nil && h.roleService.IsAdministrator(me.ID) {
-		return r, false, nil
+		return false, nil
 	}
-	return nil, true, c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of the role.", accessDeniedID))
+	return true, c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of the role.", accessDeniedID))
 }
 
 // RolesUnassign handles POST /api/admin/roles/unassign.
@@ -2351,7 +2351,7 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	// canEditMembersByModerator gate (upstream unassign.ts:71-78)。role 不在は
 	// assign 同様 NO_SUCH_ROLE を先に返す (TS と同順)。NO_SUCH_ROLE /
 	// ACCESS_DENIED の UUID は unassign 固有のもの。
-	if _, handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6e519036-a70d-4c76-b679-bc8fb18194e2", "24636eee-e8c1-493e-94b2-e16ad401e262"); handled {
+	if handled, err := h.requireCanEditRoleMembers(c, req.RoleID, "6e519036-a70d-4c76-b679-bc8fb18194e2", "24636eee-e8c1-493e-94b2-e16ad401e262"); handled {
 		return err
 	}
 	// upstream unassign.ts:80-84: 対象 user 不在なら NO_SUCH_USER (#1542)。
