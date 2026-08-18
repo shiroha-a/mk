@@ -28,15 +28,22 @@ export default defineConfig({
     // API テスト中心なので screenshot / trace は失敗時のみで十分。
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
-    // 全 spec で動画を保存する (pass / fail どちらも tests/playwright/
-    // test-results/ に webm 出力)。batch 5 以降は popup menu / contextmenu
-    // / MkUserSelectDialog 等 multi-step interaction が増え、失敗時の
-    // スクショ 1 枚では原因特定が辛くなった。pass 時の動画も spec の
-    // 挙動を後から目視確認する資料として価値があるので、'on' で常に
-    // 残す。size は 800x600 デフォルトで十分 (popup menu の click 連鎖が
-    // 目視確認できる解像度)。CI artifact 容量との trade-off はあるが、
-    // nightly 1 回 / 全 spec の webm 数百 MB は許容範囲。
-    video: 'on',
+    // **録画しない。** 以前は 'on' で全 spec を録画していたが、CI では
+    // 成功 run の成果物を一切アップロードしない (`if: failure() ||
+    // cancelled()`) ので、録画したものをそのまま捨てていた。失敗 run でも
+    // 実測で webm 256 本 40MB のうち失敗に対応するのは 2 本だけで、残りは
+    // 成功した spec のもの。
+    //
+    // 'retain-on-failure' は全 spec を録画してから成功分を消す方式なので
+    // 録画コストが残る。落とすなら 'off'。
+    //
+    // 失敗時の調査材料は trace が担う。trace には操作ごとの DOM スナップ
+    // ショット・ネットワーク・コンソールが入っており、#2600 の flaky 調査で
+    // 原因を特定したのも trace (「click したが /api/following/create が
+    // 一度も呼ばれていない」) で、動画では判断できなかった。
+    //
+    // ローカルで動画が欲しいときは `--video=on` を渡す (#2609)。
+    video: 'off',
     // nginx tls proxy が self-signed cert を提供する (#817 part2)。
     // Playwright はそれを accept できる必要がある。`request` fixture と
     // `page` fixture の両方に効く。
