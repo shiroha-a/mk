@@ -463,20 +463,33 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
   `compose.log` / `ps.log` を残すので、workflow 側の収集は `-post` 付きの別名で書く。
   同名にすると撤去済み stack の空ログで上書きしてしまう (#2383)。
 
-### `playwright` workflow (nightly)
+### `playwright` workflow (PR トリガー)
 
-- `.github/workflows/playwright.yml` で Phase 1 Playwright spec を毎日 17:00
-  UTC (= JST 02:00) に develop に対して実行する。
-- matrix で `backend = [mk-go, ts]` の 2 job を並列実行 (= 両 backend で
-  drop-in shape 互換が維持されることを担保)。`fail-fast: false` で片方失敗
-  しても他方は完走。
-- `workflow_dispatch` で任意の ref に対して手動実行も可。
-- PR の required check には**含めない** (TS image pull + spec 増加で実行
-  時間が伸びる + 外部 image flaky 要素)。drop-in shape regression は
-  nightly で検出する運用。
+- `.github/workflows/playwright.yml` で Playwright spec を実行する。
+  `pull_request` (paths フィルタ) と `workflow_dispatch` で発火。nightly から
+  PR トリガーへ移行済み (#2291)。
+- **4 シャード並列** (`--shard=i/4`)。`fail-fast: false` で 1 つが落ちても
+  他は完走する。
+- **1 スタックあたりは直列でしか回せない。** 289 spec ファイル中 173 が共有の
+  root (alice) でサインインし、instance meta も全 spec が共有する。Playwright は
+  ファイル単位で並列化するので、`workers` を上げると `profile_iscat_toggle` と
+  `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
+  `about_page_render` が同じ meta を取り合う。root の quota
+  (antenna 5 / webhook 3 / clip 10) を消費するファイルも 18 ある。
+  **並列度はスタックごと分ける = シャードでしか稼げない** (#2609)。
+- `backend = ts` は `workflow_dispatch` 専用 (plan job が matrix を切り替え)。
+  upstream 追従のタイミングだけ回す運用。
+- **shard を matrix の軸として書かないこと。** `include` は既存の combination に
+  merge できない entry を新規 combination として足す semantics なので、軸と
+  併用すると pull_request で TS backend を落とす絞り込みが壊れる。plan job で
+  backend x shard の直積を組んで include 配列ごと渡す。
+- PR の required check には**含めない**。
+- **録画はしない** (`video: 'off'`)。CI は成功 run の成果物を一切アップロード
+  しないので録画しても捨てるだけで、失敗 run でも実測 webm 256 本のうち失敗に
+  対応するのは 2 本だけだった。調査材料は trace が担う (#2609)。
 - 失敗時は `tests/playwright/test-results/` (trace / screenshot 含む) と
-  docker compose logs を `playwright-results-<backend>` /
-  `playwright-logs-<backend>` artifact として 14 日保持。
+  docker compose logs を `playwright-results-<backend>-<shard>` /
+  `playwright-logs-<backend>-<shard>` artifact として 14 日保持。
 
 ### `upstream-backend-e2e` workflow (PR トリガー)
 
@@ -487,13 +500,19 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
   `tests/upstream-e2e/**` / `third_party/misskey` / `Makefile` / `go.mod` /
   `go.sum` / 当 workflow) に該当する変更のみ発火。`workflow_dispatch` で任意の
   ref に対して手動実行も可。
-- PR の required check には**含めない** (18-20 min かかり、1200 件超のテストに
-  flaky 要素があるため merge ブロッカーには適さない)。非ブロッキングを
+- **4 シャード並列** (`--shard=i/4`)。`fail-fast: false`。**プロセス内では
+  並列にできない**: upstream の vitest 設定が `maxWorkers: 1` で、かつ
+  setupFiles がファイルごとに mk-go の `/api/reset-db` (全テーブル truncate) を
+  叩くため、同じ DB に 2 ファイルを並行させると片方が相手のフィクスチャを
+  実行中に消す。job を分ければ PostgreSQL / Redis の service container も
+  別に立つ (#2609)。
+- PR の required check には**含めない** (1200 件超のテストに flaky 要素が
+  あるため merge ブロッカーには適さない)。非ブロッキングを
   `continue-on-error` で実現しないこと (job が成功扱いになり失敗が不可視になる)。
 - 『通らないことが正しい』テストは `tests/upstream-e2e/known-divergences.json` に
   根拠付きで登録し、expected-failure (`task.fails`) として扱う。skip ではないので
   乖離が解消したテストは逆に落ち、一覧の陳腐化に気付ける。
-- 失敗時は mk-go のログを `upstream-e2e-mkgo-log` artifact として 14 日保持。
+- 失敗時は mk-go のログを `upstream-e2e-mkgo-log-<shard>` artifact として 14 日保持。
 
 ### `diff-e2e` workflow (PR トリガー)
 
@@ -604,6 +623,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-08-18**: Section 8 の `playwright` / `upstream-backend-e2e` を 4 シャード並列として書き換え (#2609)。どちらも**プロセス内では並列にできない** (前者は共有の root アカウントと instance meta、後者は `maxWorkers: 1` + ファイルごとの `/api/reset-db`) ため、並列度はシャードごとに job を分けて稼ぐ。あわせて実態と乖離していた記述を修正: `playwright` は nightly ではなく PR トリガー (#2291 の反映漏れ)、`upstream-backend-e2e` の所要時間は「18-20 min」ではなく分割前で 8.5 分。Playwright の録画を止めた理由も明記。
 - **2026-08-16**: `plugin-tests` job を追加 (#2588)。同梱プラグインのテストは**どの job でも実行されていなかった** (別 module で `go list ./...` に含まれず、`build` job に PostgreSQL が無い)。テストが落ちる変更を入れても CI は緑のままだった。あわせて `build` job の同梱プラグイン検証を `go build` から `go vet` に変更 (テストファイルもコンパイルされるので、公開面を変えて本体だけ直したときに検出できる)。Section 3 に `make plugin-test` を追記。
 - **2026-08-15**: PostgreSQL を 16 → 18 に統一 (#2513)。compose 全構成・CI service container・testcontainers を `postgres:18-alpine` へ。upstream Misskey の compose 例 (18-alpine) に整合。**postgres:18 image は data layout が変わった** (default PGDATA が `/var/lib/postgresql/18/docker`、VOLUME 宣言が親 `/var/lib/postgresql`) ため、永続 volume を持つ compose のマウント先を `/var/lib/postgresql` へ変更 (旧パスのままだと新規デプロイが匿名 volume に initdb して down で消える。UDS example は明示 PGDATA で回避)。既存の 16 volume は dump→restore が必要 (手順は docs/deployment.md 冒頭)。Section 4 / 8 の版数記述を更新。
 - **2026-08-10**: Section 4 に「DB を使うテストの分離」を追記 (#2450)。`testutil.OpenTestDB` が呼び出し元パッケージ専用の PostgreSQL schema に接続するようになった。`go test` はパッケージを並行実行し CI の shard は DB を 1 つしか持たないため、共有すると一方の後片付けが他方を壊す (実際に Go を触っていない PR で CI が落ちた)。削除範囲を絞るだけでは解けない (干渉が双方向) 点と、migration の enum guard に `pg_type WHERE typname` を使わない旨も明記。
