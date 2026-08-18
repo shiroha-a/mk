@@ -72,6 +72,11 @@ func (s *Service) RegisterEffectivePolicyProvider(name string, reg plugin.Effect
 
 	s.policyProviderMu.Lock()
 	defer s.policyProviderMu.Unlock()
+	for _, existing := range s.policyProviders {
+		if existing.name == name {
+			return errors.New("role: effective policy provider name is already registered")
+		}
+	}
 	providers := make([]policyProvider, 0, len(s.policyProviders)+1)
 	providers = append(providers, s.policyProviders...)
 	providers = append(providers, policyProvider{name: name, reg: reg, runtime: newPolicyProviderRuntime()})

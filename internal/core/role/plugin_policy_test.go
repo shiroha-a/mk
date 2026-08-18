@@ -69,6 +69,21 @@ func TestRegisterEffectivePolicyProvider_RejectsUndeclaredKeyAgainstDefaults(t *
 	require.Error(t, err, "key not present in DefaultPolicies must be rejected")
 }
 
+func TestRegisterEffectivePolicyProvider_RejectsDuplicateName(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	first := plugin.EffectivePolicyRegistration{Keys: []string{"canSearchNotes"}, Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+	}}
+	second := plugin.EffectivePolicyRegistration{Keys: []string{"canSearchNotes"}, Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: false}}, nil
+	}}
+	require.NoError(t, svc.RegisterEffectivePolicyProvider("same", first))
+	require.Error(t, svc.RegisterEffectivePolicyProvider("same", second))
+	policies, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.Equal(t, true, policies["canSearchNotes"])
+}
+
 // docs/plugins/authoring.md の公開例と同じ Definition が、Definition.Validate、
 // factory、production registration、resolution の全経路を通ること。
 func TestEffectivePolicy_AuthoringExamplePassesProductionValidation(t *testing.T) {
