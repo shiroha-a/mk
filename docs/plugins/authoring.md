@@ -248,11 +248,13 @@ handler 自体は止まらない** (Go では goroutine を殺せない) ので�
 
 **任意のタイミングで enqueue する経路は無い。** プロセス内で完結する非同期処理は `ctx.Go()` を使う（recover 付き）。
 
+起動中に呼んだ`ctx.Go()`は、全pluginのstorage、migration、`EffectivePolicies`、`Routes`、`Jobs`とhost側のroute配線が成功するまで開始されない。起動に失敗した場合は保留した処理を破棄する。起動成功後の呼び出しは直ちに開始する。cancelやdrainは提供しないため、正常終了時の停止が必要な処理はplugin側で終了条件を持つこと。
+
 > **プラグインが素の `go` を書くとプロセスごと落ちる。** Go は他 goroutine の panic を回収できず、mk-go 側の recover では止められない。
 
 ## 効果ポリシー
 
-`Definition.EffectivePolicies`で、native policyの解決に参加するproviderを宣言できる。
+`Definition.EffectivePolicies`で、native policyの解決に参加するproviderを宣言できる。有効なpluginは、全pluginのstorage/migration/provider登録が成功した後にだけ`Routes`と`Jobs`を有効化する。
 
 ```go
 func effectivePolicies(ctx plugin.Context, inv plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
@@ -267,9 +269,17 @@ func effectivePolicies(ctx plugin.Context, inv plugin.EffectivePolicyInvalidator
 }
 ```
 
-`Keys`は空・空文字・重複を許さず、`Resolve`は必須。resolverは`req.UserID`と、activeなnative role IDをソート・重複除去した`req.RoleIDs`を受け取る。匿名解決では`UserID`が空文字で、`RoleIDs`はnilではない空sliceになる。
+`Keys`は空・空文字・重複を許さず、hostが持つnative policy keyだけを宣言できる。`Resolve`は必須。resolverは`req.UserID`と、activeなnative role IDをソート・重複除去した`req.RoleIDs`を受け取る。匿名解決では`UserID`が空文字で、`RoleIDs`はnilではない空sliceになる。入力sliceはproviderごとに複製されるが、resolver側でも変更しないこと。
 
-plugin独自の書き込みでpolicy入力が変わった場合は、永続化のcommit成功後にだけ`inv.InvalidateUser`または`inv.InvalidateRole`を呼ぶ。conditional roleの対象userはassignment rowから列挙できないため、role invalidationは指定roleより広いcacheを破棄できる契約とする。
+contributionの`Priority`は`0..2`で、大きいpriorityのgroupだけをnative roleと同じ規則で集約する。同じprovider内では同じ`Key`と`Order`の組を重複できない。`UseDefault: true`では`Value`を無視し、そのkeyのnative defaultを同じpriorityへ参加させる。
+
+値はnative keyの型に一致させる。boolはOR、integerは最大値、`chatAvailability`は`available`、`readonly`、`unavailable`の順で寛容な値、`uploadableFileTypes`はtrim後のset unionを使う。integerは`int`、host `int`範囲内の`int64`、または有限、整数、小数部なし、host `int`範囲内の`float64`だけを受理する。typed integerは`2^53`を超えても`float64`へ変換せず比較する。
+
+未宣言key、unknown key、priority範囲外、order重複、型不一致、NaN、infinity、範囲外整数、enum外の値、空または非文字列の配列要素が1件でもあればprovider全体を失敗として扱う。resolverのerrorやpanicも同様。失敗providerが宣言したkeyはnative結果へ戻し、同じkeyに対する他providerの貢献も破棄する。宣言していないkeyには成功providerの貢献を適用し続ける。以前の成功値は再利用せず、診断errorはplugin名、user/role/policy ID、provider output、panic値を含まない。
+
+instance/server capはplugin集約の後に適用する。`maxFileSizeMb`、`chunkedUploadMaxConcurrentSessions`、`chunkedUploadMaxPendingMb`へ`0`以下の無制限値を返しても、positiveなcapが設定されていればcap値になる。
+
+plugin独自の書き込みでpolicy入力が変わった場合は、永続化のcommit成功後にだけ`inv.InvalidateUser`または`inv.InvalidateRole`を呼ぶ。provider output自体はcacheしない。in-flightの古いnative role結果はinvalidation後にcacheへ戻さない。conditional roleの対象userはassignment rowから列挙できないため、role invalidationは全userのrole/policy cacheを保守的に破棄する。
 
 ## 設定
 
