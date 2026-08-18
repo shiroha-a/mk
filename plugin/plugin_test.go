@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -31,6 +32,30 @@ func validDef(name string) Definition {
 		APIVersion: APIVersion,
 		Routes:     func(Context, Router) error { return nil },
 	}
+}
+
+type customPluginErrorCode struct {
+	err  error
+	code string
+}
+
+func (c customPluginErrorCode) Error() string { return c.err.Error() }
+func (c customPluginErrorCode) Unwrap() error {
+	return c.err
+}
+func (c customPluginErrorCode) PluginErrorCode() string { return c.code }
+
+type customStatusErrorAs struct {
+	statusErr *StatusError
+}
+
+func (e customStatusErrorAs) Error() string { return "custom status error" }
+func (e customStatusErrorAs) As(target any) bool {
+	statusErr, ok := target.(**StatusError)
+	if ok {
+		*statusErr = e.statusErr
+	}
+	return ok
 }
 
 func TestDefinition_Validate_Accepts(t *testing.T) {
@@ -174,11 +199,71 @@ func TestNewCodedStatusError_EmptyCodeIsLegacyStatusError(t *testing.T) {
 func TestNewCodedStatusError_InvalidCodeFallsBackToLegacyStatusError(t *testing.T) {
 	err := NewCodedStatusError(http.StatusBadRequest, "140 文字以内にしてください", "too-long")
 
-	var statusErr *StatusError
-	require.True(t, errors.As(err, &statusErr))
+	statusErr, code := ExtractStatusError(err)
+	require.NotNil(t, statusErr)
 	assert.Equal(t, http.StatusBadRequest, statusErr.Status)
 	assert.Equal(t, "140 文字以内にしてください", statusErr.Message)
+	assert.Empty(t, code)
 	assert.NotContains(t, err.Error(), "too-long")
+}
+
+func TestValidErrorCodeRejectsEmpty(t *testing.T) {
+	assert.False(t, validErrorCode(""))
+}
+
+func TestExtractStatusError_PrefersOuterStatusError(t *testing.T) {
+	err := errors.Join(
+		fmt.Errorf("ctx: %w", Errorf(http.StatusBadRequest, "bad")),
+		NewCodedStatusError(http.StatusConflict, "conflict", "REVISION_CONFLICT"),
+	)
+
+	statusErr, code := ExtractStatusError(err)
+	require.NotNil(t, statusErr)
+	assert.Equal(t, http.StatusBadRequest, statusErr.Status)
+	assert.Equal(t, "bad", statusErr.Message)
+	assert.Empty(t, code)
+}
+
+func TestExtractStatusError_PreservesJoinOrderWhenCodedIsFirst(t *testing.T) {
+	err := errors.Join(
+		NewCodedStatusError(http.StatusConflict, "conflict", "REVISION_CONFLICT"),
+		Errorf(http.StatusBadRequest, "bad"),
+	)
+
+	statusErr, code := ExtractStatusError(err)
+	require.NotNil(t, statusErr)
+	assert.Equal(t, http.StatusConflict, statusErr.Status)
+	assert.Equal(t, "conflict", statusErr.Message)
+	assert.Equal(t, "REVISION_CONFLICT", code)
+}
+
+func TestExtractStatusError_CustomWrapperDoesNotInjectCode(t *testing.T) {
+	err := errors.Join(
+		Errorf(http.StatusForbidden, "denied"),
+		customPluginErrorCode{
+			err:  Errorf(http.StatusConflict, "conflict"),
+			code: "CUSTOM_CODE_SHOULD_NOT_WIN",
+		},
+	)
+
+	statusErr, code := ExtractStatusError(err)
+	require.NotNil(t, statusErr)
+	assert.Equal(t, http.StatusForbidden, statusErr.Status)
+	assert.Equal(t, "denied", statusErr.Message)
+	assert.Empty(t, code)
+}
+
+func TestExtractStatusError_PreservesCustomAsCompatibility(t *testing.T) {
+	err := errors.Join(
+		customStatusErrorAs{statusErr: Errorf(http.StatusTeapot, "legacy custom As")},
+		NewCodedStatusError(http.StatusConflict, "conflict", "REVISION_CONFLICT"),
+	)
+
+	statusErr, code := ExtractStatusError(err)
+	require.NotNil(t, statusErr)
+	assert.Equal(t, http.StatusTeapot, statusErr.Status)
+	assert.Equal(t, "legacy custom As", statusErr.Message)
+	assert.Empty(t, code)
 }
 
 func TestErrNotFound(t *testing.T) {

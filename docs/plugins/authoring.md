@@ -104,6 +104,8 @@ return nil, plugin.ErrNotFound("見つかりません")
 
 **素の `error` を返すとメッセージは外に出ない**（ログに残り、利用者には汎用メッセージが返る）。プラグインの内部事情が利用者に見えるのを防ぐため。利用者が直せるものだけ `StatusError` で返す。
 
+clientが分岐する安定codeも必要なら`plugin.NewCodedStatusError(status, message, code)`を返す。codeは英大文字で始まり、英大文字・数字・underscoreだけを使う。空codeまたは書式不正codeはcodeなしの`StatusError`へ降格し、statusとmessageは維持する。errorをwrapした場合はerror treeの外側から最初の`StatusError`またはcoded errorを返すため、外側で丸めたstatus/messageを内側のcodeが上書きしない。
+
 ### バイナリ応答
 
 ```go
@@ -531,6 +533,7 @@ type StatusError struct { Status int; Message string }
 type APIError struct { Endpoint string; Status int; Body json.RawMessage }
 
 func Errorf(int, string, ...any) *StatusError
+func ExtractStatusError(error) (*StatusError, string)
 func NewCodedStatusError(int, string, string) error
 func ErrNotFound(string, ...any) *StatusError
 func Register(Definition)

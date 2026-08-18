@@ -86,6 +86,7 @@ plugin: func (*StatusError) Error() string
 plugin: func (Definition) Validate() error
 plugin: func ErrNotFound(string, ...any) *StatusError
 plugin: func Errorf(int, string, ...any) *StatusError
+plugin: func ExtractStatusError(error) (*StatusError, string)
 plugin: func NewCodedStatusError(int, string, string) error
 plugin: func Register(Definition)
 plugin: func Registered() []Definition

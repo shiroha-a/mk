@@ -125,7 +125,7 @@ type codedStatusError struct {
 
 // NewCodedStatusError builds an error with a stable, client-actionable code.
 // Code must use uppercase ASCII letters, digits, and underscores, starting with
-// a letter. An empty code preserves the legacy uncoded response.
+// a letter. An empty or invalid code preserves the legacy uncoded response.
 func NewCodedStatusError(status int, message, code string) error {
 	statusErr := &StatusError{Status: status, Message: message}
 	if code == "" || !validErrorCode(code) {
@@ -137,11 +137,49 @@ func NewCodedStatusError(status int, message, code string) error {
 	}
 }
 
+// ExtractStatusError searches an error chain and extracts the plugin status error
+// to return to the client.
+//
+// Traversal follows the error tree from the outside in, preserving unwrap and
+// errors.Join child order. Only host-owned coded errors carry a code; a legacy
+// StatusError encountered first remains uncoded.
+func ExtractStatusError(err error) (*StatusError, string) {
+	if err == nil {
+		return nil, ""
+	}
+	switch err := err.(type) {
+	case *codedStatusError:
+		return err.statusError, err.code
+	case *StatusError:
+		return err, ""
+	}
+	if aser, ok := err.(interface{ As(any) bool }); ok {
+		var statusErr *StatusError
+		if aser.As(&statusErr) && statusErr != nil {
+			return statusErr, ""
+		}
+	}
+	switch err := err.(type) {
+	case interface{ Unwrap() []error }:
+		for _, child := range err.Unwrap() {
+			if statusErr, code := ExtractStatusError(child); statusErr != nil {
+				return statusErr, code
+			}
+		}
+	case interface{ Unwrap() error }:
+		return ExtractStatusError(err.Unwrap())
+	}
+	return nil, ""
+}
+
 func (e *codedStatusError) Error() string           { return e.statusError.Error() }
 func (e *codedStatusError) Unwrap() error           { return e.statusError }
 func (e *codedStatusError) PluginErrorCode() string { return e.code }
 
 func validErrorCode(code string) bool {
+	if code == "" {
+		return false
+	}
 	for i, r := range code {
 		if r >= 'A' && r <= 'Z' || i > 0 && (r >= '0' && r <= '9' || r == '_') {
 			continue

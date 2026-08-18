@@ -5,7 +5,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -393,16 +392,20 @@ func reservedPluginPath(path string) bool {
 
 // wrapPluginHandler adapts a plugin handler to echo.
 //
-// エラーは **StatusError のときだけ** メッセージを返す。素の error を返すと
-// プラグインの内部事情 (DB のエラー文字列など) がそのまま外に出るため、
-// ログにだけ残して汎用メッセージを返す。
+// エラーはhost-ownedのStatusErrorまたはcoded status errorのときだけメッセージを
+// 返す。素のerrorを返すとプラグインの内部事情 (DBのエラー文字列など) がそのまま
+// 外に出るため、ログにだけ残して汎用メッセージを返す。
 func wrapPluginHandler(h plugin.Handler, roles middleware.RoleChecker) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		res, err := h(&pluginRequest{c: c, roles: roles})
 		if err != nil {
-			var se *plugin.StatusError
-			if errors.As(err, &se) {
-				return c.JSON(se.Status, map[string]any{"error": map[string]any{"message": se.Message}})
+			se, code := plugin.ExtractStatusError(err)
+			if se != nil {
+				errorBody := map[string]any{"message": se.Message}
+				if code != "" {
+					errorBody["code"] = code
+				}
+				return c.JSON(se.Status, map[string]any{"error": errorBody})
 			}
 			slog.Error("plugin handler がエラーを返しました", "path", c.Path(), "err", err)
 			return c.JSON(http.StatusInternalServerError, map[string]any{

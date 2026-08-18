@@ -66,6 +66,17 @@ func serveWrapped(t *testing.T, h plugin.Handler, body string) *httptest.Respons
 	return rec
 }
 
+type customPluginErrorCode struct {
+	err  error
+	code string
+}
+
+func (e customPluginErrorCode) Error() string { return e.err.Error() }
+
+func (e customPluginErrorCode) Unwrap() error { return e.err }
+
+func (e customPluginErrorCode) PluginErrorCode() string { return e.code }
+
 func TestWrapPluginHandler_JSONResult(t *testing.T) {
 	rec := serveWrapped(t, func(plugin.Request) (any, error) {
 		return map[string]string{"hello": "world"}, nil
@@ -90,6 +101,15 @@ func TestWrapPluginHandler_StatusError(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "そんなものは無い")
 }
 
+func TestWrapPluginHandler_StatusErrorWithCode(t *testing.T) {
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return nil, plugin.NewCodedStatusError(http.StatusConflict, "更新競合", "REVISION_CONFLICT")
+	}, "{}")
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.JSONEq(t, `{"error": {"message":"更新競合", "code":"REVISION_CONFLICT"}}`, rec.Body.String())
+}
+
 func TestWrapPluginHandler_StatusErrorWithInvalidCodeFallsBackToLegacy(t *testing.T) {
 	rec := serveWrapped(t, func(plugin.Request) (any, error) {
 		return nil, plugin.NewCodedStatusError(http.StatusBadRequest, "secret", "invalid code")
@@ -98,6 +118,19 @@ func TestWrapPluginHandler_StatusErrorWithInvalidCodeFallsBackToLegacy(t *testin
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "secret")
 	assert.NotContains(t, rec.Body.String(), "invalid code")
+	assert.NotContains(t, rec.Body.String(), "\"code\"")
+}
+
+func TestWrapPluginHandler_CustomWrappedStatusErrorHasNoCode(t *testing.T) {
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return nil, customPluginErrorCode{
+			err:  plugin.ErrNotFound("secret"),
+			code: "CUSTOM_CODE",
+		}
+	}, "{}")
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, `{"error":{"message":"secret"}}`, strings.TrimSpace(rec.Body.String()))
 	assert.NotContains(t, rec.Body.String(), "\"code\"")
 }
 
@@ -111,6 +144,32 @@ func TestWrapPluginHandler_PlainErrorIsRedacted(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NotContains(t, rec.Body.String(), "password")
 	assert.Contains(t, rec.Body.String(), "Internal error.")
+}
+
+// エラーチェインしても code を潰さず透過する。
+func TestWrapPluginHandler_WrappedCodedStatusError(t *testing.T) {
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return nil, fmt.Errorf("ctx: %w", plugin.NewCodedStatusError(http.StatusConflict, "更新競合", "REVISION_CONFLICT"))
+	}, "{}")
+
+	assert.Equal(t, http.StatusConflict, rec.Code)
+	assert.JSONEq(t, `{"error": {"message":"更新競合", "code":"REVISION_CONFLICT"}}`, rec.Body.String())
+}
+
+func TestWrapPluginHandler_ErrorsJoinDoesNotMixStatusAndCustomCode(t *testing.T) {
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return nil, errors.Join(
+			plugin.Errorf(http.StatusForbidden, "権限がありません"),
+			customPluginErrorCode{
+				err:  plugin.Errorf(http.StatusConflict, "更新競合"),
+				code: "CUSTOM_WRAPPER_CODE",
+			},
+		)
+	}, "{}")
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, `{"error":{"message":"権限がありません"}}`, strings.TrimSpace(rec.Body.String()))
+	assert.NotContains(t, rec.Body.String(), "\"code\"")
 }
 
 // wrapped した StatusError も status が効くこと (errors.As 経由)。
