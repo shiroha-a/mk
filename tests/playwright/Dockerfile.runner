@@ -17,12 +17,11 @@
 # version を上げるときは **この FROM と package.json を同一 PR で両方**変更する。
 FROM mcr.microsoft.com/playwright:v1.62.1-jammy
 
-# globalSetup から redis-cli を呼んで rate limit counter を flush する
-# (#744 PR-2): mk-go の signup endpoint は IP base で 1h 5 回 hardcoded で
-# spec 累積で 429 になる。test 開始時に Redis を空にすれば毎回 fresh。
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends redis-tools \
-    && rm -rf /var/lib/apt/lists/*
+# **apt を使わない。** 以前は rate limit counter の flush に redis-cli が
+# 必要で redis-tools を入れていたが、CI ではシャードごとに image を作り直す
+# ので apt の実行回数がシャード数だけ増える。実際に `apt-get update` がミラー
+# 待ちで止まり、1 シャードだけ 20 分を超えた (#2609)。FLUSHDB は引数なしの
+# 単一コマンドなので、fixtures/rate_limit.ts が RESP を直接書いて依存を消した。
 
 WORKDIR /work
 
