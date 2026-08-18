@@ -3,7 +3,6 @@ package model
 import (
 	"time"
 
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -24,7 +23,7 @@ type ReversiGame struct {
 	TimeoutUserID        *string        `gorm:"column:timeoutUserId;type:varchar(32)" json:"timeoutUserId"`
 	TimeLimitForEachTurn int            `gorm:"column:timeLimitForEachTurn;type:smallint;default:90" json:"timeLimitForEachTurn"`
 	Logs                 datatypes.JSON `gorm:"column:logs;type:jsonb;default:'[]'" json:"logs"`
-	Map                  pq.StringArray `gorm:"column:map;type:varchar(64)[]" json:"map"`
+	Map                  StringArray    `gorm:"column:map;type:varchar(64)[]" json:"map"`
 	BW                   string         `gorm:"column:bw;type:varchar(32)" json:"bw"`
 	NoIrregularRules     bool           `gorm:"column:noIrregularRules;default:false" json:"noIrregularRules"`
 	IsLlotheo            bool           `gorm:"column:isLlotheo;default:false" json:"isLlotheo"`

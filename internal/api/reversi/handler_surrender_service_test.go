@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/lib/pq"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -123,7 +122,7 @@ func TestSurrender_FallbackPath_NoServiceInjected(t *testing.T) {
 	// h.svc は nil のまま
 	g := &model.ReversiGame{
 		ID: "gX", User1ID: "u1", User2ID: "u2",
-		Map:  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:   "random",
 		Logs: datatypes.JSON("[]"),
 	}

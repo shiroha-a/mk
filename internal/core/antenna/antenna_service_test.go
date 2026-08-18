@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -258,7 +257,7 @@ func TestUpdate_InvalidSource(t *testing.T) {
 	assert.ErrorIs(t, err, ErrInvalidSource)
 }
 
-// Update で empty Users を渡しても、UpdateFields に pq.StringArray
+// Update で empty Users を渡しても、UpdateFields に model.StringArray
 // として渡されることを担保する (#896 と同 pattern)。plain []string で
 // 渡すと production の GORM 経由で NULL 化して NOT NULL 制約違反になる。
 func TestUpdate_EmptyUsersWrappedAsStringArray(t *testing.T) {
@@ -268,8 +267,8 @@ func TestUpdate_EmptyUsersWrappedAsStringArray(t *testing.T) {
 	_, err := svc.Update("u1", "a1", UpdateInput{Users: &emptyUsers})
 	require.NoError(t, err)
 	require.Contains(t, repo.LastUpdates, "users")
-	v, ok := repo.LastUpdates["users"].(pq.StringArray)
-	require.True(t, ok, "users should be pq.StringArray, got %T", repo.LastUpdates["users"])
+	v, ok := repo.LastUpdates["users"].(model.StringArray)
+	require.True(t, ok, "users should be model.StringArray, got %T", repo.LastUpdates["users"])
 	assert.Empty(t, v)
 }
 
@@ -1358,34 +1357,34 @@ func TestOnMoveAccount(t *testing.T) {
 
 	cases := []struct {
 		name      string
-		users     pq.StringArray
+		users     model.StringArray
 		isActive  bool
-		wantUsers pq.StringArray
+		wantUsers model.StringArray
 	}{
 		{
 			name:      "src を挙げているアンテナに dst を追記する",
-			users:     pq.StringArray{"@alice", "@bob"},
+			users:     model.StringArray{"@alice", "@bob"},
 			isActive:  true,
-			wantUsers: pq.StringArray{"@alice", "@bob", "@alice2@remote.example"},
+			wantUsers: model.StringArray{"@alice", "@bob", "@alice2@remote.example"},
 		},
 		{
 			// upstream 同様 acct 比較は大文字小文字を無視する。
 			name:      "大文字小文字が違っても一致させる",
-			users:     pq.StringArray{"@ALICE"},
+			users:     model.StringArray{"@ALICE"},
 			isActive:  true,
-			wantUsers: pq.StringArray{"@ALICE", "@alice2@remote.example"},
+			wantUsers: model.StringArray{"@ALICE", "@alice2@remote.example"},
 		},
 		{
 			name:      "src が居ないアンテナは触らない",
-			users:     pq.StringArray{"@bob"},
+			users:     model.StringArray{"@bob"},
 			isActive:  true,
-			wantUsers: pq.StringArray{"@bob"},
+			wantUsers: model.StringArray{"@bob"},
 		},
 		{
 			name:      "既に dst が居れば重複させない",
-			users:     pq.StringArray{"@alice", "@alice2@remote.example"},
+			users:     model.StringArray{"@alice", "@alice2@remote.example"},
 			isActive:  true,
-			wantUsers: pq.StringArray{"@alice", "@alice2@remote.example"},
+			wantUsers: model.StringArray{"@alice", "@alice2@remote.example"},
 		},
 	}
 	for _, tc := range cases {

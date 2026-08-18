@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -215,7 +214,7 @@ func TestCreate_DBError(t *testing.T) {
 
 func TestShow_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", Permission: pq.StringArray{"read:account"}}
+	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", Permission: model.StringArray{"read:account"}}
 
 	rec := post(h.Show, `{"appId":"app1"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -235,7 +234,7 @@ func TestShow_Success(t *testing.T) {
 // 持たない → false。me!=null では field を含める。
 func TestShow_IsAuthorized(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Permission: pq.StringArray{"read:account"}}
+	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Permission: model.StringArray{"read:account"}}
 
 	// token 無し viewer → isAuthorized false (present)
 	rec := post(h.Show, `{"appId":"app1"}`, &model.User{ID: "viewer1"})
@@ -256,7 +255,7 @@ func TestShow_IsAuthorized(t *testing.T) {
 func TestShow_WithOwner(t *testing.T) {
 	h, repo := newTestHandler()
 	uid := "u1"
-	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", UserID: &uid, Permission: pq.StringArray{"read:account"}}
+	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", UserID: &uid, Permission: model.StringArray{"read:account"}}
 
 	nativeTok := "native-session-token"
 	rec := postWithToken(h.Show, `{"appId":"app1"}`, &model.User{ID: "u1", Token: &nativeTok}, nativeTok)
@@ -273,7 +272,7 @@ func TestShow_WithOwner(t *testing.T) {
 func TestShow_OwnerViaAppTokenNoSecret(t *testing.T) {
 	h, repo := newTestHandler()
 	uid := "u1"
-	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", UserID: &uid, Permission: pq.StringArray{"read:account"}}
+	repo.apps["app1"] = &model.App{ID: "app1", Name: "MyApp", Secret: "s1", UserID: &uid, Permission: model.StringArray{"read:account"}}
 
 	nativeTok := "native-session-token"
 	// raw token は app access token (native token とは別) を渡す。
@@ -307,8 +306,8 @@ func TestShow_InvalidParam(t *testing.T) {
 func TestMyApps_Success(t *testing.T) {
 	h, repo := newTestHandler()
 	uid := "u1"
-	repo.apps["a1"] = &model.App{ID: "a1", Name: "App1", Secret: "s1", UserID: &uid, Permission: pq.StringArray{"read:account"}}
-	repo.apps["a2"] = &model.App{ID: "a2", Name: "App2", Secret: "s2", UserID: &uid, Permission: pq.StringArray{"read:account"}}
+	repo.apps["a1"] = &model.App{ID: "a1", Name: "App1", Secret: "s1", UserID: &uid, Permission: model.StringArray{"read:account"}}
+	repo.apps["a2"] = &model.App{ID: "a2", Name: "App2", Secret: "s2", UserID: &uid, Permission: model.StringArray{"read:account"}}
 
 	rec := post(h.MyApps, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -341,7 +340,7 @@ func TestMyApps_WithLimit(t *testing.T) {
 	uid := "u1"
 	for i := 0; i < 5; i++ {
 		appID := "a" + string(rune('0'+i))
-		repo.apps[appID] = &model.App{ID: appID, Name: "App", Secret: "s", UserID: &uid, Permission: pq.StringArray{"read:account"}}
+		repo.apps[appID] = &model.App{ID: appID, Name: "App", Secret: "s", UserID: &uid, Permission: model.StringArray{"read:account"}}
 	}
 
 	rec := post(h.MyApps, `{"limit":2}`, &model.User{ID: "u1"})
@@ -376,7 +375,7 @@ func TestMyApps_WithOffset(t *testing.T) {
 	uid := "u1"
 	for i := range 5 {
 		appID := "a" + string(rune('0'+i))
-		repo.apps[appID] = &model.App{ID: appID, Name: "App", Secret: "s", UserID: &uid, Permission: pq.StringArray{"read:account"}}
+		repo.apps[appID] = &model.App{ID: appID, Name: "App", Secret: "s", UserID: &uid, Permission: model.StringArray{"read:account"}}
 	}
 
 	rec := post(h.MyApps, `{"offset":3}`, &model.User{ID: "u1"})
@@ -402,7 +401,7 @@ func TestSecureRandomHex(t *testing.T) {
 }
 
 func TestPackApp_NoSecret(t *testing.T) {
-	a := &model.App{ID: "a1", Name: "App", Permission: pq.StringArray{"read:account"}}
+	a := &model.App{ID: "a1", Name: "App", Permission: model.StringArray{"read:account"}}
 	result := packApp(a, false, nil)
 	_, has := result["secret"]
 	assert.False(t, has)
@@ -412,14 +411,14 @@ func TestPackApp_NoSecret(t *testing.T) {
 }
 
 func TestPackApp_WithSecret(t *testing.T) {
-	a := &model.App{ID: "a1", Name: "App", Secret: "s123", Permission: pq.StringArray{"read:account"}}
+	a := &model.App{ID: "a1", Name: "App", Secret: "s123", Permission: model.StringArray{"read:account"}}
 	result := packApp(a, true, nil)
 	assert.Equal(t, "s123", result["secret"])
 }
 
 // #1557 isAuthorized は non-nil 渡しで値が出る。
 func TestPackApp_IsAuthorized(t *testing.T) {
-	a := &model.App{ID: "a1", Name: "App", Permission: pq.StringArray{"read:account"}}
+	a := &model.App{ID: "a1", Name: "App", Permission: model.StringArray{"read:account"}}
 	yes := true
 	assert.Equal(t, true, packApp(a, false, &yes)["isAuthorized"])
 	no := false

@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,7 +22,7 @@ func TestReversiRepository_DeleteOutdatedGames(t *testing.T) {
 	mk := func(id string, started bool) *model.ReversiGame {
 		return &model.ReversiGame{
 			ID: id, User1ID: u1.ID, User2ID: u2.ID, IsStarted: started,
-			Map: pq.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
+			Map: model.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
 		}
 	}
 	// id は時刻順ソート可能 (aidx)。"a..." < "z..." を閾値として使う。
@@ -54,7 +53,7 @@ func TestReversiRepository_UpdateReadyState_Guards(t *testing.T) {
 
 	game := &model.ReversiGame{
 		ID: "rev_grd_1", User1ID: u1.ID, User2ID: u2.ID,
-		Map: pq.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
+		Map: model.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
 	}
 	require.NoError(t, repo.Create(game))
 	defer testDB.Exec(`DELETE FROM "reversi_game" WHERE id = ?`, game.ID)
@@ -98,7 +97,7 @@ func TestReversiRepository_UpdateReadyState_ConcurrentNoLostUpdate(t *testing.T)
 		gameID := fmt.Sprintf("rev_con_%02d", i)
 		game := &model.ReversiGame{
 			ID: gameID, User1ID: u1.ID, User2ID: u2.ID,
-			Map: pq.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
+			Map: model.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
 		}
 		require.NoError(t, repo.Create(game))
 
@@ -138,7 +137,7 @@ func TestReversiRepository_MarkStarted_SingleWinner(t *testing.T) {
 		gameID := fmt.Sprintf("rev_mrk_%02d", i)
 		game := &model.ReversiGame{
 			ID: gameID, User1ID: u1.ID, User2ID: u2.ID,
-			Map: pq.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
+			Map: model.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90, Logs: datatypes.JSON("[]"),
 		}
 		require.NoError(t, repo.Create(game))
 
@@ -191,7 +190,7 @@ func TestReversiRepository_CRUD(t *testing.T) {
 		ID:                   "rev_g1",
 		User1ID:              u1.ID,
 		User2ID:              u2.ID,
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "random",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),

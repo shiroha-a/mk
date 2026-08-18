@@ -134,7 +134,7 @@ func packGalleryPost(p *model.GalleryPost, idGen id.Generator, files []any, isLi
 		}
 	}
 	// fileIds / tags は golden GalleryPost で string[] (non-null)。nil の
-	// pq.StringArray は JSON null になるため [] へ coalesce する (#1322)。
+	// model.StringArray は JSON null になるため [] へ coalesce する (#1322)。
 	fileIDs := []string(p.FileIDs)
 	if fileIDs == nil {
 		fileIDs = []string{}

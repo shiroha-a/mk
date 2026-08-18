@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/config"
@@ -1401,12 +1400,12 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 
 	// upstream update-meta.ts の値正規化 (host lowercase/sort/dedup、空文字→null、
 	// URL 検証、trim) を再現する。coerceMetaArrayFields より前に走らせ、host 系は
-	// ここで pq.StringArray 化まで済ませる (coerce 側は pass-through になる)。
+	// ここで model.StringArray 化まで済ませる (coerce 側は pass-through になる)。
 	normalizeUpdateMetaFields(fields)
 
-	// JSON Bind 後の []any{...} (中身は string) を pq.StringArray に揃える
+	// JSON Bind 後の []any{...} (中身は string) を model.StringArray に揃える
 	// (#590)。GORM は map[string]any を Updates() に渡すと値の型をそのまま
-	// driver に流すため、pq.StringArray (= driver.Valuer 実装) に変換しない
+	// driver に流すため、model.StringArray (= driver.Valuer 実装) に変換しない
 	// と varchar[] 列の UPDATE が `expression is of type record` で失敗する。
 	// これは federationHosts / blockedHosts / silencedHosts / langs 等
 	// すべての varchar[] 列に影響していたバグで、admin が whitelist 連合や
@@ -1689,16 +1688,16 @@ var metaArrayColumns = map[string]struct{}{
 }
 
 // coerceMetaArrayFields normalises array-shaped values bound from JSON
-// into pq.StringArray for known varchar[] columns on the meta row. It is
+// into model.StringArray for known varchar[] columns on the meta row. It is
 // the admin/update-meta only helper — every meta varchar[] column listed
 // in metaArrayColumns is NOT NULL with DEFAULT '{}'.
 //
 // 必要な理由 (#590): JSON decoder は array を []any に decode するが、
 // lib/pq の Value driver は []any を varchar[] に変換できず
 // "expression is of type record" で PostgreSQL 側エラーになり、UPDATE 全体
-// が rollback する。さらに JSON null を送られると nil が pq.StringArray
+// が rollback する。さらに JSON null を送られると nil が model.StringArray
 // 列に流れて NOT NULL 制約違反でも rollback する。両方を空配列もしくは
-// pq.StringArray に揃えることで、admin の whitelist / blocklist 設定が
+// model.StringArray に揃えることで、admin の whitelist / blocklist 設定が
 // 期待どおり永続化される。
 //
 // 関連列以外 (例: rootUserId のような nullable string) は触らない。
@@ -1713,9 +1712,9 @@ func coerceMetaArrayFields(fields map[string]any) {
 			// JSON null は admin の「リスト解除」意図と解釈し、空配列に
 			// 揃えて NOT NULL 制約違反を避ける (Misskey TS は配列型で
 			// declared、null 自体を弾くので mk-go 側で寄せる)。
-			fields[k] = pq.StringArray{}
+			fields[k] = model.StringArray{}
 		case []any:
-			// 全要素 string なら pq.StringArray、不正型混入 (string 以外)
+			// 全要素 string なら model.StringArray、不正型混入 (string 以外)
 			// は実 repo に流して error にさせる (型エラーを silently 飲み
 			// 込まないため)。
 			strs := make([]string, 0, len(arr))
@@ -1729,10 +1728,10 @@ func coerceMetaArrayFields(fields map[string]any) {
 				strs = append(strs, s)
 			}
 			if allStrings {
-				fields[k] = pq.StringArray(strs)
+				fields[k] = model.StringArray(strs)
 			}
 		}
-		// pq.StringArray / []string が来ているケースは driver.Valuer 互換
+		// model.StringArray / []string が来ているケースは driver.Valuer 互換
 		// なのでそのまま real repo に流す。
 	}
 }
@@ -1788,13 +1787,13 @@ func coerceMetaJSONBFields(fields map[string]any) {
 // normalizeUpdateMetaFields reproduces upstream update-meta.ts の値正規化:
 // host リストの filter(Boolean)/lowercase/sort/dedup/blocked 除外、空文字→null、
 // repositoryUrl の URL 検証、urlPreviewUserAgent/summalyProxy の trim。fields は
-// rename 済 (canonical column name) を前提とする。array 系は pq.StringArray に
+// rename 済 (canonical column name) を前提とする。array 系は model.StringArray に
 // 変換するので、後続の coerceMetaArrayFields は pass-through となる。
 func normalizeUpdateMetaFields(fields map[string]any) {
 	// filter(Boolean): 空文字列要素を除去する array columns。
 	for _, key := range []string{"langs", "pinnedUsers", "hiddenTags", "sensitiveWords", "prohibitedWords", "prohibitedWordsForNameOfUser", "urlPreviewSensitiveList"} {
 		if arr, ok := metaStringSlice(fields[key]); ok {
-			fields[key] = pq.StringArray(filterNonEmptyHosts(arr, false))
+			fields[key] = model.StringArray(filterNonEmptyHosts(arr, false))
 		}
 	}
 	// blockedHosts / federationHosts: filter(Boolean) + lowercase。
@@ -1802,7 +1801,7 @@ func normalizeUpdateMetaFields(fields map[string]any) {
 	for _, key := range []string{"blockedHosts", "federationHosts"} {
 		if arr, ok := metaStringSlice(fields[key]); ok {
 			norm := filterNonEmptyHosts(arr, true)
-			fields[key] = pq.StringArray(norm)
+			fields[key] = model.StringArray(norm)
 			if key == "blockedHosts" {
 				blocked = norm
 			}
@@ -1813,7 +1812,7 @@ func normalizeUpdateMetaFields(fields map[string]any) {
 	// (upstream は set.blockedHosts?.includes、= リクエストに無ければ除外しない)。
 	for _, key := range []string{"silencedHosts", "mediaSilencedHosts"} {
 		if arr, ok := metaStringSlice(fields[key]); ok {
-			fields[key] = pq.StringArray(sortDedupExcludeHosts(arr, blocked))
+			fields[key] = model.StringArray(sortDedupExcludeHosts(arr, blocked))
 		}
 	}
 	// 空文字→null の string columns (deeplAuthKey 等)。
@@ -1871,7 +1870,7 @@ func metaStringSlice(v any) ([]string, bool) {
 	switch arr := v.(type) {
 	case []string:
 		return arr, true
-	case pq.StringArray:
+	case model.StringArray:
 		return []string(arr), true
 	case []any:
 		out := make([]string, 0, len(arr))
@@ -2614,11 +2613,11 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		PublicURL:                               publicURL,
 		Type:                                    fileType,
 		Category:                                req.Category,
-		Aliases:                                 pq.StringArray(req.Aliases),
+		Aliases:                                 model.StringArray(req.Aliases),
 		License:                                 req.License,
 		IsSensitive:                             req.IsSensitive,
 		LocalOnly:                               req.LocalOnly,
-		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray(req.RoleIDs),
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray(req.RoleIDs),
 	}
 	if err := h.emojiRepo.Create(e); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -2783,11 +2782,11 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	}
 	if req.Aliases != nil {
 		// `[]string` を直接 GORM に渡すと PostgreSQL の varchar[] 列に対して
-		// NULL として serialize される (#729)。`pq.StringArray` で wrap する
+		// NULL として serialize される (#729)。`model.StringArray` で wrap する
 		// と空 slice 含めて `'{}'` PostgreSQL array リテラルに正しく変換さ
 		// れる。Aliases 列は NOT NULL DEFAULT '{}' なので NULL 書き込みは
 		// 即制約違反でエラーになっていた。
-		fields["aliases"] = pq.StringArray(req.Aliases)
+		fields["aliases"] = model.StringArray(req.Aliases)
 	}
 	if req.License != nil {
 		fields["license"] = *req.License
@@ -2800,7 +2799,7 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	}
 	// リアクション利用可能ロールの更新 (upstream の roleIdsThatCanBeUsedThisEmojiAsReaction)。
 	if req.RoleIDs != nil {
-		fields["roleIdsThatCanBeUsedThisEmojiAsReaction"] = pq.StringArray(req.RoleIDs)
+		fields["roleIdsThatCanBeUsedThisEmojiAsReaction"] = model.StringArray(req.RoleIDs)
 	}
 	if len(fields) == 0 {
 		// 何も変更しないリクエストは log を書かずに 204 で返す。
@@ -3066,7 +3065,7 @@ func packEmojiDetailedAdmin(e *model.Emoji, roleByID map[string]*model.Role) map
 	for _, r := range resolved {
 		roles = append(roles, map[string]any{"id": r.ID, "name": r.Name})
 	}
-	// golden aliases は string[] 必須 (non-null)。nil pq.StringArray は null に
+	// golden aliases は string[] 必須 (non-null)。nil model.StringArray は null に
 	// なるため [] へ coalesce する。
 	aliases := []string(e.Aliases)
 	if aliases == nil {

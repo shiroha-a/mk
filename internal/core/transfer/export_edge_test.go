@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/transfer"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -170,7 +169,7 @@ func TestExport_Antennas_WithUserList(t *testing.T) {
 		UserListID:      &listID,
 		Keywords:        []byte(`[]`),
 		ExcludeKeywords: []byte(`[]`),
-		Users:           pq.StringArray{},
+		Users:           model.StringArray{},
 	}
 
 	exporter := transfer.NewExporter(deps)
@@ -276,7 +275,7 @@ func TestExport_Antennas_UserListAccts(t *testing.T) {
 	listID := "list1"
 	aRepo.Antennas["a1"] = &model.Antenna{
 		ID: "a1", UserID: user.ID, Name: "news", Src: "list", UserListID: &listID,
-		Keywords: []byte(`[]`), ExcludeKeywords: []byte(`[]`), Users: pq.StringArray{},
+		Keywords: []byte(`[]`), ExcludeKeywords: []byte(`[]`), Users: model.StringArray{},
 		ExcludeNotesInSensitiveChannel: true,
 	}
 	listRepo.Lists[listID] = &model.UserList{ID: listID, UserID: user.ID, Name: "src"}

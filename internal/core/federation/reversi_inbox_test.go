@@ -8,7 +8,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
@@ -234,7 +233,7 @@ func seedFederatedGame(t *testing.T, b *reversiFedBundle, sessionID string, star
 		ID:                   "fedg-" + sessionID,
 		User1ID:              "bob",
 		User2ID:              "alice",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "1",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),
@@ -529,7 +528,7 @@ func TestReversiInbox_UndoInvite_CancelsPreStartGame(t *testing.T) {
 		ID:                   "fedg-undo",
 		User1ID:              "alice",
 		User2ID:              "bob",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "1",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),

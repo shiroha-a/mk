@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -183,7 +182,7 @@ var u1 = &model.User{ID: "u1", Username: "alice"}
 func sampleGame() *model.ReversiGame {
 	return &model.ReversiGame{
 		ID: "g1", User1ID: "u1", User2ID: "u2",
-		Map: pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map: model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:  "random", TimeLimitForEachTurn: 90,
 		Logs:  datatypes.JSON("[]"),
 		User1: &model.User{ID: "u1", Username: "alice"},

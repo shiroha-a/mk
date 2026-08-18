@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -76,9 +75,9 @@ func TestNoteFieldResolver_ResolveFiles_EmbedsRenoteAndReply(t *testing.T) {
 
 	notes := []NoteEntity{{
 		ID:      "n1",
-		FileIDs: pq.StringArray{"f1"},
-		Renote:  &NoteEntity{ID: "n2", FileIDs: pq.StringArray{"f2"}},
-		Reply:   &NoteEntity{ID: "n3", FileIDs: pq.StringArray{"f3"}},
+		FileIDs: model.StringArray{"f1"},
+		Renote:  &NoteEntity{ID: "n2", FileIDs: model.StringArray{"f2"}},
+		Reply:   &NoteEntity{ID: "n3", FileIDs: model.StringArray{"f3"}},
 	}}
 	r.ResolveFiles(notes)
 
@@ -208,7 +207,7 @@ func TestNoteFieldResolver_ResolveFiles_EmbedsFolderAndOwner(t *testing.T) {
 	}}
 	r := NewNoteFieldResolver(files, folders, owners, nil, nil, makeIDGen(t))
 
-	notes := []NoteEntity{{ID: "n1", FileIDs: pq.StringArray{"f1", "f2"}}}
+	notes := []NoteEntity{{ID: "n1", FileIDs: model.StringArray{"f1", "f2"}}}
 	r.ResolveFiles(notes)
 	require.Len(t, notes[0].Files, 2)
 }
@@ -282,7 +281,7 @@ func TestNoteFieldResolver_ResolveFiles_BatchesFolderAndOwner(t *testing.T) {
 	}}
 	r := NewNoteFieldResolver(files, folders, owners, nil, nil, makeIDGen(t))
 
-	notes := []NoteEntity{{ID: "n1", FileIDs: pq.StringArray{"f1", "f2", "f3"}}}
+	notes := []NoteEntity{{ID: "n1", FileIDs: model.StringArray{"f1", "f2", "f3"}}}
 	r.ResolveFiles(notes)
 
 	require.Len(t, notes[0].Files, 3)
@@ -305,7 +304,7 @@ func TestNoteFieldResolver_ResolveFiles_LookupErrorsTolerated(t *testing.T) {
 	owners := &stubFileOwnerLookup{err: assertError("db down")}
 	r := NewNoteFieldResolver(files, folders, owners, nil, nil, makeIDGen(t))
 
-	notes := []NoteEntity{{ID: "n1", FileIDs: pq.StringArray{"f1"}}}
+	notes := []NoteEntity{{ID: "n1", FileIDs: model.StringArray{"f1"}}}
 	r.ResolveFiles(notes)
 	require.Len(t, notes[0].Files, 1)
 }
@@ -425,7 +424,7 @@ func TestPackPoll(t *testing.T) {
 	// choices < votes (votes 余り無視)
 	p := &model.Poll{
 		Choices: []string{"a", "b"},
-		Votes:   pq.Int64Array{3, 7, 99}, // 99 は破棄される
+		Votes:   model.Int64Array{3, 7, 99}, // 99 は破棄される
 	}
 	got := packPoll(p)
 	require.NotNil(t, got)
@@ -439,7 +438,7 @@ func TestPackPoll(t *testing.T) {
 	t1 := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
 	p2 := &model.Poll{
 		Choices:   []string{"x"},
-		Votes:     pq.Int64Array{0},
+		Votes:     model.Int64Array{0},
 		ExpiresAt: &t1,
 	}
 	got2 := packPoll(p2)
@@ -449,7 +448,7 @@ func TestPackPoll(t *testing.T) {
 	// votes < choices (choices 多い → votes=0 で埋まる)
 	p3 := &model.Poll{
 		Choices: []string{"a", "b", "c"},
-		Votes:   pq.Int64Array{1},
+		Votes:   model.Int64Array{1},
 	}
 	got3 := packPoll(p3)
 	assert.Equal(t, 1, got3.Choices[0].Votes)

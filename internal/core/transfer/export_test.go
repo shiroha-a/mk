@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/core/transfer"
@@ -154,10 +153,10 @@ func TestExport_Notes_WithPoll(t *testing.T) {
 		Text:       &text,
 		Visibility: model.NoteVisibilityPublic,
 		HasPoll:    true,
-		FileIDs:    pq.StringArray{"f1"},
+		FileIDs:    model.StringArray{"f1"},
 	}
 	noteRepo.Notes[n.ID] = n
-	pollRepo.Polls[n.ID] = &model.Poll{NoteID: n.ID, Multiple: true, Choices: pq.StringArray{"a", "b"}}
+	pollRepo.Polls[n.ID] = &model.Poll{NoteID: n.ID, Multiple: true, Choices: model.StringArray{"a", "b"}}
 
 	exporter := transfer.NewExporter(deps)
 	_, err := exporter.Export(context.Background(), user.ID, transfer.ExportNotes)

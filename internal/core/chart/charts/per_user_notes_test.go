@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -35,7 +34,7 @@ func TestPerUserNotesChart_RenoteWithFileDelete(t *testing.T) {
 	note := &model.Note{
 		ID:       "n2",
 		RenoteID: strPtr("orig"),
-		FileIDs:  pq.StringArray{"f1"},
+		FileIDs:  model.StringArray{"f1"},
 	}
 	require.NoError(t, pc.Update("u2", note, false))
 	require.NoError(t, engine.Save(context.Background()))

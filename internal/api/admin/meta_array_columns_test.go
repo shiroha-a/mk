@@ -6,7 +6,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -14,7 +13,7 @@ import (
 )
 
 // TestMetaArrayColumns_CoversAllStringArrayFields は metaArrayColumns set が
-// model.Meta の全 pq.StringArray (= varchar[]) 列を漏れなく被覆していること
+// model.Meta の全 model.StringArray (= varchar[]) 列を漏れなく被覆していること
 // を reflection で担保する (#592)。
 //
 // 背景: #590 で追加した coerceMetaArrayFields は metaArrayColumns に列挙
@@ -26,9 +25,9 @@ import (
 // と過剰 (set にあるが model に存在しない列、typo 等) を両方検出する。
 func TestMetaArrayColumns_CoversAllStringArrayFields(t *testing.T) {
 	metaType := reflect.TypeOf(model.Meta{})
-	pqStringArrayType := reflect.TypeOf(pq.StringArray{})
+	pqStringArrayType := reflect.TypeOf(model.StringArray{})
 
-	// model.Meta から pq.StringArray 型のフィールドの gorm column 名を集める。
+	// model.Meta から model.StringArray 型のフィールドの gorm column 名を集める。
 	expected := map[string]struct{}{}
 	for i := 0; i < metaType.NumField(); i++ {
 		f := metaType.Field(i)
@@ -47,7 +46,7 @@ func TestMetaArrayColumns_CoversAllStringArrayFields(t *testing.T) {
 	assert.Empty(t, missing,
 		"metaArrayColumns に未登録の varchar[] 列がある。新しい列を追加した際は internal/api/admin/handler.go の metaArrayColumns も更新してください")
 
-	// 過剰: metaArrayColumns にあるが model.Meta に対応する pq.StringArray が無い。
+	// 過剰: metaArrayColumns にあるが model.Meta に対応する model.StringArray が無い。
 	// typo / 列削除し忘れの検出用。
 	extra := diffSorted(metaArrayColumns, expected)
 	assert.Empty(t, extra,

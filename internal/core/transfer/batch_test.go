@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/transfer"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -54,7 +53,7 @@ func TestExport_Notes_PackFields(t *testing.T) {
 	noteRepo.Notes["nx"] = &model.Note{
 		ID: "nx", UserID: user.ID, Text: &text, CW: &cw,
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"bob", "carol"},
+		VisibleUserIDs: model.StringArray{"bob", "carol"},
 		ReplyID:        &reply,
 		RenoteID:       &ren,
 	}

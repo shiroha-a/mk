@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
@@ -20,8 +19,8 @@ import (
 // (which encoding/json would emit as RFC3339Nano). Returning the model directly
 // diverged on those two timestamp fields (#1948-10).
 func packSystemWebhook(w *model.SystemWebhook) map[string]any {
-	// on は string[] 必須 (non-null)。nil pq.StringArray は null になるため
-	// [] へ coalesce する (model 直返し時の pq.StringArray と同じ array 表現を維持)。
+	// on は string[] 必須 (non-null)。nil model.StringArray は null になるため
+	// [] へ coalesce する (model 直返し時の model.StringArray と同じ array 表現を維持)。
 	on := []string(w.On)
 	if on == nil {
 		on = []string{}
@@ -265,9 +264,9 @@ func (h *Handler) SystemWebhookUpdate(c echo.Context) error {
 		if !validSystemWebhookEvents(*req.On) {
 			return c.JSON(http.StatusBadRequest, apierr.InvalidParam("on contains an unknown event type."))
 		}
-		// pq.StringArray でラップしないと GORM Updates(map) が空 string[] を
+		// model.StringArray でラップしないと GORM Updates(map) が空 string[] を
 		// NULL 化して NOT NULL 制約違反になる (#932、#931 / #896 と同 class)。
-		fields["on"] = pq.StringArray(*req.On)
+		fields["on"] = model.StringArray(*req.On)
 	}
 	if req.IsActive != nil {
 		fields["isActive"] = *req.IsActive

@@ -15,7 +15,6 @@ import (
 	"github.com/shiroha-a/mk/internal/queue/driver"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -177,7 +176,7 @@ func TestPackDraft_ResolvesReplyRenoteChannelAndPoll(t *testing.T) {
 	repo.drafts["d1"] = &model.NoteDraft{
 		ID: "d1", UserID: "u1", Visibility: "public",
 		ReplyID: &replyID, RenoteID: &renoteID, ChannelID: &channelID,
-		HasPoll: true, PollChoices: pq.StringArray{"a", "b"}, // PollExpiresAt nil
+		HasPoll: true, PollChoices: model.StringArray{"a", "b"}, // PollExpiresAt nil
 	}
 	rec := postDraft(h.DraftsList, `{}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusOK, rec.Code)

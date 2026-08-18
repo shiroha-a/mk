@@ -7,7 +7,6 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -100,7 +99,7 @@ func TestRequireScopeWiring(t *testing.T) {
 	)
 
 	// broad app token が保有する scope 集合 (= 全代表 kind + read:account)。
-	broadScopes := pq.StringArray{
+	broadScopes := model.StringArray{
 		"read:account", "write:notes", "write:account", "write:drive",
 		"write:chat", "write:admin:suspend-user",
 	}
@@ -115,9 +114,9 @@ func TestRequireScopeWiring(t *testing.T) {
 		// native login token → full access (IsApp=false)。
 		userRepo.Tokens[nativeTok] = nativeUser
 		// app access token (narrow / broad / empty)。
-		tokenRepo.Tokens[narrowTok] = &model.AccessToken{Token: narrowTok, Permission: pq.StringArray{"read:account"}, User: appUser}
+		tokenRepo.Tokens[narrowTok] = &model.AccessToken{Token: narrowTok, Permission: model.StringArray{"read:account"}, User: appUser}
 		tokenRepo.Tokens[broadTok] = &model.AccessToken{Token: broadTok, Permission: broadScopes, User: appUser}
-		tokenRepo.Tokens[emptyAppTok] = &model.AccessToken{Token: emptyAppTok, Permission: pq.StringArray{}, User: appUser}
+		tokenRepo.Tokens[emptyAppTok] = &model.AccessToken{Token: emptyAppTok, Permission: model.StringArray{}, User: appUser}
 
 		auth := middleware.NewAuthMiddleware(userRepo, tokenRepo)
 

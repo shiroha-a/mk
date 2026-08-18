@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
@@ -209,7 +208,7 @@ func (h *Handler) PostsCreate(c echo.Context) error {
 		Title:       req.Title,
 		Description: req.Description,
 		UserID:      user.ID,
-		FileIDs:     pq.StringArray(owned),
+		FileIDs:     model.StringArray(owned),
 		IsSensitive: req.IsSensitive,
 		Tags:        []string{},
 	}
@@ -350,7 +349,7 @@ func (h *Handler) PostsUpdate(c echo.Context) error {
 		if len(owned) == 0 {
 			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "No valid files.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 		}
-		fields["fileIds"] = pq.StringArray(owned)
+		fields["fileIds"] = model.StringArray(owned)
 	}
 	result := h.db.Model(&model.GalleryPost{}).Where("id = ? AND \"userId\" = ?", req.PostID, user.ID).Updates(fields)
 	if result.RowsAffected == 0 {

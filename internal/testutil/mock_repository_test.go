@@ -75,7 +75,7 @@ func TestMockMeta_Update_RejectsInvalidArrayValue(t *testing.T) {
 		err := repo.Update(map[string]any{"blockedHosts": "not-an-array"})
 		require.Error(t, err)
 	})
-	t.Run("pq.StringArray succeeds", func(t *testing.T) {
+	t.Run("model.StringArray succeeds", func(t *testing.T) {
 		repo := NewMockMetaRepository()
 		err := repo.Update(map[string]any{"blockedHosts": []string{"ok.example"}})
 		require.NoError(t, err)

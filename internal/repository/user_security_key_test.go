@@ -3,7 +3,6 @@ package repository
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -28,7 +27,7 @@ func TestUserSecurityKeyRepository_CRUD(t *testing.T) {
 		Name:       "Yubikey",
 		PublicKey:  "pk-1",
 		Counter:    0,
-		Transports: pq.StringArray{"usb"},
+		Transports: model.StringArray{"usb"},
 	}
 	require.NoError(t, repo.Create(key))
 	defer cleanupSecurityKey(t, key.ID)

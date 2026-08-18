@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -70,7 +69,7 @@ func (r *pollRepository) IncrementVote(noteID string, choice int, delta int) err
 func (r *pollRepository) UpdateVotes(noteID string, votes []int64) error {
 	return r.db.Model(&model.Poll{}).
 		Where(`"noteId" = ?`, noteID).
-		UpdateColumn("votes", pq.Int64Array(votes)).Error
+		UpdateColumn("votes", model.Int64Array(votes)).Error
 }
 
 // ListExpiredUnnotified returns up to `limit` polls with expiresAt < now and

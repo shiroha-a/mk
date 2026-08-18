@@ -3,7 +3,6 @@ package model
 import (
 	"time"
 
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -43,7 +42,7 @@ type User struct {
 	AvatarBlurhash               *string        `gorm:"column:avatarBlurhash;type:varchar(128)" json:"avatarBlurhash"`
 	BannerBlurhash               *string        `gorm:"column:bannerBlurhash;type:varchar(128)" json:"bannerBlurhash"`
 	AvatarDecorations            datatypes.JSON `gorm:"column:avatarDecorations;type:jsonb;default:'[]'" json:"avatarDecorations"`
-	Tags                         pq.StringArray `gorm:"column:tags;type:varchar(128)[];default:'{}'" json:"tags"`
+	Tags                         StringArray    `gorm:"column:tags;type:varchar(128)[];default:'{}'" json:"tags"`
 	Score                        int            `gorm:"column:score;default:0" json:"score"`
 	IsSuspended                  bool           `gorm:"column:isSuspended;default:false" json:"isSuspended"`
 	IsLocked                     bool           `gorm:"column:isLocked;default:false" json:"isLocked"`
@@ -55,7 +54,7 @@ type User struct {
 	MakeNotesFollowersOnlyBefore *int           `gorm:"column:makeNotesFollowersOnlyBefore" json:"makeNotesFollowersOnlyBefore"`
 	MakeNotesHiddenBefore        *int           `gorm:"column:makeNotesHiddenBefore" json:"makeNotesHiddenBefore"`
 	IsDeleted                    bool           `gorm:"column:isDeleted;default:false" json:"isDeleted"`
-	Emojis                       pq.StringArray `gorm:"column:emojis;type:varchar(128)[];default:'{}'" json:"emojis"`
+	Emojis                       StringArray    `gorm:"column:emojis;type:varchar(128)[];default:'{}'" json:"emojis"`
 	ChatScope                    string         `gorm:"column:chatScope;type:varchar(128);default:'mutual'" json:"chatScope"`
 	Host                         *string        `gorm:"column:host;type:varchar(128)" json:"host"`
 	Inbox                        *string        `gorm:"column:inbox;type:varchar(512)" json:"inbox"`

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -206,9 +205,9 @@ func (s *Service) Update(userID, channelID string, in UpdateInput) (*model.Chann
 		}
 	}
 	if in.PinnedNoteIDs != nil {
-		// pq.StringArray でラップしないと空 slice が NULL 化して NOT NULL 制約
+		// model.StringArray でラップしないと空 slice が NULL 化して NOT NULL 制約
 		// 違反になる (aliases #729 と同型)。
-		fields["pinnedNoteIds"] = pq.StringArray(*in.PinnedNoteIDs)
+		fields["pinnedNoteIds"] = model.StringArray(*in.PinnedNoteIDs)
 	}
 	// upstream update.ts:119 は boolean のときのみ更新する (`typeof === 'boolean'`)。
 	// nil は無変更、明示値ならその値で上書きする。

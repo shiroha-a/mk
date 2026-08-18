@@ -5,7 +5,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
@@ -54,7 +53,7 @@ func (h *Handler) AvatarDecorationsCreate(c echo.Context) error {
 // model.AvatarDecoration は createdAt 列を持たず aidx ID に時刻を埋め込むため、
 // raw model を返すと createdAt が欠落する。ID から導出して付与する。
 func (h *Handler) packAvatarDecoration(d *model.AvatarDecoration) map[string]any {
-	// roleIds は upstream schema 上 nullable:false (必ず [])。pq.StringArray が
+	// roleIds は upstream schema 上 nullable:false (必ず [])。model.StringArray が
 	// nil のとき []string(nil) は JSON null になるので空 slice に正規化する。
 	roleIDs := []string(d.RoleIDs)
 	if roleIDs == nil {
@@ -166,9 +165,9 @@ func (h *Handler) AvatarDecorationsUpdate(c echo.Context) error {
 		fields["url"] = *req.URL
 	}
 	if req.RoleIDs != nil {
-		// pq.StringArray でラップしないと GORM Updates(map) が空 string[] を
+		// model.StringArray でラップしないと GORM Updates(map) が空 string[] を
 		// NULL 化して NOT NULL 制約違反になる (#931、#896 / #900 / #901 と同 class)。
-		fields["roleIdsThatCanBeUsedThisDecoration"] = pq.StringArray(*req.RoleIDs)
+		fields["roleIdsThatCanBeUsedThisDecoration"] = model.StringArray(*req.RoleIDs)
 	}
 	if req.Category != nil {
 		// nil = 未指定 (no update)、value = set。upstream の category 扱いと

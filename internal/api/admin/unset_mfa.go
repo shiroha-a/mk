@@ -5,9 +5,9 @@ import (
 	"net/http"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -60,7 +60,7 @@ func (h *Handler) UnsetMfa(c echo.Context) error {
 	// した時に露見する)。i/2fa/remove-key の 0 件時挙動とも揃う。
 	if err := h.userRepo.UpdateProfile(user.ID, map[string]any{
 		"twoFactorSecret":       nil,
-		"twoFactorBackupSecret": pq.StringArray(nil),
+		"twoFactorBackupSecret": model.StringArray(nil),
 		"twoFactorEnabled":      false,
 		"usePasswordLessLogin":  false,
 		"securityKeysAvailable": false,

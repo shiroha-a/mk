@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -46,7 +45,7 @@ func TestInstanceChart_UpdateNoteAndFollows(t *testing.T) {
 	note := &model.Note{
 		ID:       "rn1",
 		ReplyID:  strPtr("orig"),
-		FileIDs:  pq.StringArray{"f1", "f2"},
+		FileIDs:  model.StringArray{"f1", "f2"},
 		UserHost: strPtr("c.example"),
 	}
 	require.NoError(t, ic.UpdateNote("c.example", note, true))

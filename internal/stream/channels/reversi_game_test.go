@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/lib/pq"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/stream"
@@ -100,7 +99,7 @@ func newGameForChannel(t *testing.T) *model.ReversiGame {
 		ID:                   "g1",
 		User1ID:              "alice",
 		User2ID:              "bob",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "1",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),

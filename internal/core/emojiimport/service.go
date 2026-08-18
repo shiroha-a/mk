@@ -16,7 +16,6 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -257,7 +256,7 @@ func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []b
 	}
 
 	now := i.now()
-	aliases := pq.StringArray(append([]string(nil), record.Emoji.Aliases...))
+	aliases := model.StringArray(append([]string(nil), record.Emoji.Aliases...))
 	// 不変条件 (#722): emoji.originalUrl は drive_file.url と一致させる。
 	// `DriveFileRepository.DeleteOrphans` の cleanup guard は
 	// `NOT EXISTS (emoji.originalUrl = drive_file.url ...)` で system 所有

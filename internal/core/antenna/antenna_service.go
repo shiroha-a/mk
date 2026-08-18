@@ -11,7 +11,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -360,11 +359,11 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 		fields["userListId"] = in.UserListID
 	}
 	if in.Users != nil {
-		// model.Antenna.Users は pq.StringArray なので plain []string で
+		// model.Antenna.Users は model.StringArray なので plain []string で
 		// 渡すと GORM が空 slice を NULL に倒す drift がある (#896 と同 pattern)。
-		// Create と同じく pq.StringArray で wrap して空配列 '{}' として
+		// Create と同じく model.StringArray で wrap して空配列 '{}' として
 		// 書き込ませる。
-		fields["users"] = pq.StringArray(*in.Users)
+		fields["users"] = model.StringArray(*in.Users)
 	}
 	if in.Keywords != nil {
 		// Marshal of [][]string never fails.
@@ -951,7 +950,7 @@ func (s *Service) OnMoveAccount(src, dst *model.User) {
 		if matchesAntennaAcct(a.Users, dst) {
 			continue
 		}
-		next := append(append(pq.StringArray{}, a.Users...), dstAcct)
+		next := append(append(model.StringArray{}, a.Users...), dstAcct)
 		if err := s.repo.UpdateFields(a.ID, map[string]any{"users": next}); err != nil {
 			slog.Warn("antenna: append moved account failed",
 				"antennaID", a.ID, "dstID", dst.ID, "err", err)

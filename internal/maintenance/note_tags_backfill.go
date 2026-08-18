@@ -6,7 +6,6 @@ package maintenance
 import (
 	"slices"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
@@ -56,9 +55,9 @@ func BackfillNoteTagsBatch(db *gorm.DB, fromID string, batchSize int, dryRun boo
 			continue
 		}
 		// nil は SQL NULL になり note.tags (NOT NULL) を壊すので空配列に倒す。
-		newTags := pq.StringArray(normalized)
+		newTags := model.StringArray(normalized)
 		if newTags == nil {
-			newTags = pq.StringArray{}
+			newTags = model.StringArray{}
 		}
 		if err := db.Model(&model.Note{}).Where("id = ?", n.ID).Update("tags", newTags).Error; err != nil {
 			return res, err

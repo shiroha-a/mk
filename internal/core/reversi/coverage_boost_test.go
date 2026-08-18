@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -112,7 +111,7 @@ func TestService_CancelGame_DeleteError(t *testing.T) {
 
 	g := &model.ReversiGame{
 		ID: "g1", User1ID: "alice", User2ID: "bob",
-		Map:  pq.StringArray{"-"},
+		Map:  model.StringArray{"-"},
 		Logs: datatypes.JSON("[]"),
 	}
 	require.NoError(t, repo.Create(g))
@@ -191,7 +190,7 @@ func TestService_CheckTimeout_EngineTurnNil(t *testing.T) {
 
 	// 初期マップを使い、Turn=nil に誘導するのは難しいので直接 WhiteCount=4
 	// のような終局盤を注入する。engine.Turn==nil になる盤面: 全マスが埋まっている。
-	fullMap := pq.StringArray{"bbbb", "bbbb", "bbbb", "wwww"}
+	fullMap := model.StringArray{"bbbb", "bbbb", "bbbb", "wwww"}
 	black := 1
 	game := &model.ReversiGame{
 		ID:                   "full1",

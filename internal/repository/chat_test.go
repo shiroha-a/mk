@@ -4,7 +4,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -64,7 +63,7 @@ func TestChatRepository_Messages(t *testing.T) {
 	// CreateMessage (room message)
 	msg := &model.ChatMessage{
 		ID: "cm_1", FromUserID: user1.ID, ToRoomID: &room.ID,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{},
 	}
 	text := "hello"
 	msg.Text = &text
@@ -93,7 +92,7 @@ func TestChatRepository_Messages(t *testing.T) {
 	// CreateMessage (DM)
 	dm := &model.ChatMessage{
 		ID: "cm_2", FromUserID: user1.ID, ToUserID: &user2.ID,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{},
 	}
 	dmText := "dm"
 	dm.Text = &dmText
@@ -271,7 +270,7 @@ func TestChatRepository_Reactions(t *testing.T) {
 
 	msg := &model.ChatMessage{
 		ID: "cm_rx", FromUserID: user1.ID, ToUserID: &user2.ID,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(msg))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, msg.ID)
@@ -298,7 +297,7 @@ func TestChatRepository_DeliveryStatus(t *testing.T) {
 
 	msg := &model.ChatMessage{
 		ID: "cm_ds", FromUserID: user1.ID, ToUserID: &user2.ID,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(msg))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, msg.ID)
@@ -325,7 +324,7 @@ func TestChatRepository_MarkAllRead(t *testing.T) {
 	for _, id := range []string{"cm_mr1", "cm_mr2"} {
 		m := &model.ChatMessage{
 			ID: id, FromUserID: user1.ID, ToUserID: &user2.ID, Text: &text,
-			Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+			Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 		}
 		require.NoError(t, repo.CreateMessage(m))
 		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, id)
@@ -359,7 +358,7 @@ func TestChatRepository_ListHistory(t *testing.T) {
 	for _, id := range []string{"cm_h1", "cm_h2"} {
 		m := &model.ChatMessage{
 			ID: id, FromUserID: me.ID, ToUserID: &other1.ID, Text: &text,
-			Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+			Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 		}
 		require.NoError(t, repo.CreateMessage(m))
 		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, id)
@@ -367,14 +366,14 @@ func TestChatRepository_ListHistory(t *testing.T) {
 	// DM: me -> other2
 	dm3 := &model.ChatMessage{
 		ID: "cm_h3", FromUserID: me.ID, ToUserID: &other2.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(dm3))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, dm3.ID)
 	// ルームメッセージ
 	rm := &model.ChatMessage{
 		ID: "cm_h4", FromUserID: me.ID, ToRoomID: &room.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(rm))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, rm.ID)
@@ -428,21 +427,21 @@ func TestChatRepository_ListUserHistory(t *testing.T) {
 	for _, id := range []string{"cm_uh1", "cm_uh2"} {
 		m := &model.ChatMessage{
 			ID: id, FromUserID: me.ID, ToUserID: &other1.ID, Text: &text,
-			Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+			Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 		}
 		require.NoError(t, repo.CreateMessage(m))
 		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, id)
 	}
 	dm3 := &model.ChatMessage{
 		ID: "cm_uh3", FromUserID: me.ID, ToUserID: &other2.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(dm3))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, dm3.ID)
 	// room メッセージ → ListUserHistory では除外されるはず
 	rm := &model.ChatMessage{
 		ID: "cm_uh4", FromUserID: me.ID, ToRoomID: &room.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(rm))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, rm.ID)
@@ -479,9 +478,9 @@ func TestChatRepository_ListRoomHistory(t *testing.T) {
 	text := "rmsg"
 	// r1 に 2 件、r2 に 1 件
 	for _, msg := range []*model.ChatMessage{
-		{ID: "cm_rh1", FromUserID: owner.ID, ToRoomID: &r1.ID, Text: &text, Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{}},
-		{ID: "cm_rh2", FromUserID: owner.ID, ToRoomID: &r1.ID, Text: &text, Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{}},
-		{ID: "cm_rh3", FromUserID: owner.ID, ToRoomID: &r2.ID, Text: &text, Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{}},
+		{ID: "cm_rh1", FromUserID: owner.ID, ToRoomID: &r1.ID, Text: &text, Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{}},
+		{ID: "cm_rh2", FromUserID: owner.ID, ToRoomID: &r1.ID, Text: &text, Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{}},
+		{ID: "cm_rh3", FromUserID: owner.ID, ToRoomID: &r2.ID, Text: &text, Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{}},
 	} {
 		require.NoError(t, repo.CreateMessage(msg))
 		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, msg.ID)
@@ -489,7 +488,7 @@ func TestChatRepository_ListRoomHistory(t *testing.T) {
 	// 1on1 DM は除外される
 	dm := &model.ChatMessage{
 		ID: "cm_rh4", FromUserID: owner.ID, ToUserID: &other.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(dm))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, dm.ID)
@@ -530,7 +529,7 @@ func TestChatRepository_MarkAllReadFromUser(t *testing.T) {
 	for _, id := range []string{"cm_mrf_s1", "cm_mrf_s2"} {
 		m := &model.ChatMessage{
 			ID: id, FromUserID: sender.ID, ToUserID: &reader.ID, Text: &text,
-			Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+			Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 		}
 		require.NoError(t, repo.CreateMessage(m))
 		defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, id)
@@ -538,7 +537,7 @@ func TestChatRepository_MarkAllReadFromUser(t *testing.T) {
 	// stranger → reader (別人発、対象外)
 	mStranger := &model.ChatMessage{
 		ID: "cm_mrf_x", FromUserID: stranger.ID, ToUserID: &reader.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(mStranger))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, mStranger.ID)
@@ -576,14 +575,14 @@ func TestChatRepository_MarkAllReadInRoom(t *testing.T) {
 	// other 発 (reader=owner にとって既読対象)
 	mOther := &model.ChatMessage{
 		ID: "cm_mrr_o1", FromUserID: other.ID, ToRoomID: &room.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(mOther))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, mOther.ID)
 	// owner 自身発 (既読化対象外)
 	mSelf := &model.ChatMessage{
 		ID: "cm_mrr_self", FromUserID: owner.ID, ToRoomID: &room.ID, Text: &text,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{}, Emojis: pq.StringArray{},
+		Reads: model.StringArray{}, Reactions: model.StringArray{}, Emojis: model.StringArray{},
 	}
 	require.NoError(t, repo.CreateMessage(mSelf))
 	defer testDB.Exec(`DELETE FROM "chat_message" WHERE id = ?`, mSelf.ID)
@@ -677,7 +676,7 @@ func TestChatRepository_ListMessagesByFileID(t *testing.T) {
 		to := user.ID
 		return &model.ChatMessage{
 			ID: id, FromUserID: user.ID, ToUserID: &to, FileID: &f,
-			Reads: pq.StringArray{}, Reactions: pq.StringArray{},
+			Reads: model.StringArray{}, Reactions: model.StringArray{},
 		}
 	}
 	for _, m := range []*model.ChatMessage{mk("cmf_1", fileX), mk("cmf_2", fileX), mk("cmf_3", other)} {

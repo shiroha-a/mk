@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -24,9 +23,9 @@ var legacyPermRe = regexp.MustCompile(`^(.+)(/|-)(read|write)$`)
 // `<read|write>:<entity>` form and de-duplicates (preserving first-occurrence
 // order), mirroring upstream app/create.ts の `unique(ps.permission.map(...))`
 // (#1557)。
-func normalizeAppPermissions(perms []string) pq.StringArray {
+func normalizeAppPermissions(perms []string) model.StringArray {
 	seen := make(map[string]struct{}, len(perms))
-	out := make(pq.StringArray, 0, len(perms))
+	out := make(model.StringArray, 0, len(perms))
 	for _, p := range perms {
 		if m := legacyPermRe.FindStringSubmatch(p); m != nil {
 			p = m[3] + ":" + m[1]

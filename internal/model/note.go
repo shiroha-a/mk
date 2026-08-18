@@ -1,7 +1,6 @@
 package model
 
 import (
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -35,14 +34,14 @@ type Note struct {
 	Visibility               NoteVisibility `gorm:"column:visibility;type:note_visibility_enum;not null" json:"visibility"`
 	URI                      *string        `gorm:"column:uri;type:varchar(512)" json:"uri"`
 	URL                      *string        `gorm:"column:url;type:varchar(512)" json:"url"`
-	FileIDs                  pq.StringArray `gorm:"column:fileIds;type:varchar(32)[];default:'{}'" json:"fileIds"`
-	AttachedFileTypes        pq.StringArray `gorm:"column:attachedFileTypes;type:varchar(256)[];default:'{}'" json:"attachedFileTypes"`
-	VisibleUserIDs           pq.StringArray `gorm:"column:visibleUserIds;type:varchar(32)[];default:'{}'" json:"visibleUserIds"`
-	Mentions                 pq.StringArray `gorm:"column:mentions;type:varchar(32)[];default:'{}'" json:"mentions"`
+	FileIDs                  StringArray    `gorm:"column:fileIds;type:varchar(32)[];default:'{}'" json:"fileIds"`
+	AttachedFileTypes        StringArray    `gorm:"column:attachedFileTypes;type:varchar(256)[];default:'{}'" json:"attachedFileTypes"`
+	VisibleUserIDs           StringArray    `gorm:"column:visibleUserIds;type:varchar(32)[];default:'{}'" json:"visibleUserIds"`
+	Mentions                 StringArray    `gorm:"column:mentions;type:varchar(32)[];default:'{}'" json:"mentions"`
 	MentionedRemoteUsers     string         `gorm:"column:mentionedRemoteUsers;type:text;default:'[]'" json:"mentionedRemoteUsers"`
-	ReactionAndUserPairCache pq.StringArray `gorm:"column:reactionAndUserPairCache;type:varchar(1024)[];default:'{}'" json:"reactionAndUserPairCache"`
-	Emojis                   pq.StringArray `gorm:"column:emojis;type:varchar(128)[];default:'{}'" json:"emojis"`
-	Tags                     pq.StringArray `gorm:"column:tags;type:varchar(128)[];default:'{}'" json:"tags"`
+	ReactionAndUserPairCache StringArray    `gorm:"column:reactionAndUserPairCache;type:varchar(1024)[];default:'{}'" json:"reactionAndUserPairCache"`
+	Emojis                   StringArray    `gorm:"column:emojis;type:varchar(128)[];default:'{}'" json:"emojis"`
+	Tags                     StringArray    `gorm:"column:tags;type:varchar(128)[];default:'{}'" json:"tags"`
 	HasPoll                  bool           `gorm:"column:hasPoll;default:false" json:"hasPoll"`
 	ChannelID                *string        `gorm:"column:channelId;type:varchar(32)" json:"channelId"`
 	// Denormalized fields

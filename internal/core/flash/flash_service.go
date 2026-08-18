@@ -7,7 +7,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -96,7 +95,7 @@ func (s *Service) Create(in CreateInput) (*model.Flash, error) {
 		Summary:     in.Summary,
 		UserID:      in.OwnerID,
 		Script:      in.Script,
-		Permissions: pq.StringArray(in.Permissions),
+		Permissions: model.StringArray(in.Permissions),
 		Visibility:  in.Visibility,
 	}
 	if err := s.repo.Create(f); err != nil {
@@ -149,10 +148,10 @@ func (s *Service) Update(ownerID, flashID string, in UpdateInput) (*model.Flash,
 	}
 	if in.Permissions != nil {
 		// GORM の Updates(map) で plain []string を渡すと、空 slice が
-		// pq.StringArray の Valuer を経由しないまま NULL に倒れて
+		// model.StringArray の Valuer を経由しないまま NULL に倒れて
 		// NOT NULL 制約違反 (SQLSTATE 23502) になる (#896)。Create と同じ
-		// pq.StringArray で wrap して空配列 '{}' として書き込ませる。
-		fields["permissions"] = pq.StringArray(*in.Permissions)
+		// model.StringArray で wrap して空配列 '{}' として書き込ませる。
+		fields["permissions"] = model.StringArray(*in.Permissions)
 	}
 	if in.Visibility != nil {
 		fields["visibility"] = *in.Visibility

@@ -3,7 +3,6 @@ package entity
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -54,13 +53,13 @@ func TestNewEmojiResolver_BatchResolve(t *testing.T) {
 			ID:       "n1",
 			UserID:   "u1",
 			UserHost: &remoteHost,
-			Emojis:   pq.StringArray{"thumbsup", "wave"},
+			Emojis:   model.StringArray{"thumbsup", "wave"},
 		},
 		{
 			ID:       "n2",
 			UserID:   "u1",
 			UserHost: &remoteHost,
-			Emojis:   pq.StringArray{"thumbsup"}, // 重複する名前はbatchで一度だけfetch
+			Emojis:   model.StringArray{"thumbsup"}, // 重複する名前はbatchで一度だけfetch
 		},
 	}
 
@@ -92,7 +91,7 @@ func TestPopulateNoteEmojis(t *testing.T) {
 		ID:       "n1",
 		UserID:   "u1",
 		UserHost: &remoteHost,
-		Emojis:   pq.StringArray{"fire", "star"},
+		Emojis:   model.StringArray{"fire", "star"},
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
@@ -113,7 +112,7 @@ func TestPopulateNoteEmojis_Empty(t *testing.T) {
 	note := &model.Note{
 		ID:     "n1",
 		UserID: "u1",
-		Emojis: pq.StringArray{}, // 空の絵文字リスト
+		Emojis: model.StringArray{}, // 空の絵文字リスト
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
@@ -139,7 +138,7 @@ func TestPopulateUserEmojis(t *testing.T) {
 		ID:       "u1",
 		Username: "alice",
 		Host:     &remoteHost,
-		Emojis:   pq.StringArray{"cat"},
+		Emojis:   model.StringArray{"cat"},
 	}
 
 	// note経由でuserの絵文字もcacheに読み込ませる
@@ -148,7 +147,7 @@ func TestPopulateUserEmojis(t *testing.T) {
 		UserID:   "u1",
 		UserHost: &remoteHost,
 		User:     user,
-		Emojis:   pq.StringArray{},
+		Emojis:   model.StringArray{},
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
@@ -166,7 +165,7 @@ func TestPopulateUserEmojis_Empty(t *testing.T) {
 	user := &model.User{
 		ID:       "u1",
 		Username: "bob",
-		Emojis:   pq.StringArray{}, // 空の絵文字リスト
+		Emojis:   model.StringArray{}, // 空の絵文字リスト
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{})
@@ -183,7 +182,7 @@ func TestEmojiResolver_NilLookup(t *testing.T) {
 		ID:       "n1",
 		UserID:   "u1",
 		UserHost: &remoteHost,
-		Emojis:   pq.StringArray{"fire"},
+		Emojis:   model.StringArray{"fire"},
 	}
 
 	// lookup==nilでも空cacheのresolverが返りpanicしない
@@ -201,7 +200,7 @@ func TestEmojiResolver_NilLookup(t *testing.T) {
 		ID:       "u1",
 		Username: "alice",
 		Host:     &remoteHost,
-		Emojis:   pq.StringArray{"fire"},
+		Emojis:   model.StringArray{"fire"},
 	}
 	lite := &UserLite{Emojis: map[string]string{"keep": "this"}}
 	r.PopulateUserEmojis(user, lite)
@@ -215,7 +214,7 @@ func TestEmojiResolver_NilReceiver(t *testing.T) {
 	note := &model.Note{
 		ID:     "n1",
 		UserID: "u1",
-		Emojis: pq.StringArray{"fire"},
+		Emojis: model.StringArray{"fire"},
 	}
 	entity := &NoteEntity{}
 	assert.NotPanics(t, func() {
@@ -226,7 +225,7 @@ func TestEmojiResolver_NilReceiver(t *testing.T) {
 	user := &model.User{
 		ID:       "u1",
 		Username: "alice",
-		Emojis:   pq.StringArray{"fire"},
+		Emojis:   model.StringArray{"fire"},
 	}
 	lite := &UserLite{}
 	assert.NotPanics(t, func() {
@@ -249,7 +248,7 @@ func TestEmojiResolver_LocalEmojis(t *testing.T) {
 		ID:       "n1",
 		UserID:   "u1",
 		UserHost: nil,
-		Emojis:   pq.StringArray{"local_emoji"},
+		Emojis:   model.StringArray{"local_emoji"},
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
@@ -283,7 +282,7 @@ func TestEmojiResolver_PublicURLFallback(t *testing.T) {
 		ID:       "n1",
 		UserID:   "u1",
 		UserHost: &remoteHost,
-		Emojis:   pq.StringArray{"rare"},
+		Emojis:   model.StringArray{"rare"},
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})
@@ -317,13 +316,13 @@ func TestEmojiResolver_MultipleHosts(t *testing.T) {
 			ID:       "n1",
 			UserID:   "u1",
 			UserHost: &hostA,
-			Emojis:   pq.StringArray{"smile"},
+			Emojis:   model.StringArray{"smile"},
 		},
 		{
 			ID:       "n2",
 			UserID:   "u2",
 			UserHost: &hostB,
-			Emojis:   pq.StringArray{"smile", "wave"},
+			Emojis:   model.StringArray{"smile", "wave"},
 		},
 	}
 
@@ -378,14 +377,14 @@ func TestNewEmojiResolver_UserEmojisCollectedFromNoteUser(t *testing.T) {
 		ID:       "u1",
 		Username: "alice",
 		Host:     &remoteHost,
-		Emojis:   pq.StringArray{"user_emoji"},
+		Emojis:   model.StringArray{"user_emoji"},
 	}
 
 	note := &model.Note{
 		ID:       "n1",
 		UserID:   "u1",
 		UserHost: &remoteHost,
-		Emojis:   pq.StringArray{"note_emoji"},
+		Emojis:   model.StringArray{"note_emoji"},
 		User:     user,
 	}
 
@@ -411,7 +410,7 @@ func TestPopulateNoteEmojis_NilNoteOrEntity(t *testing.T) {
 	})
 
 	// entity==nilでもpanicしない
-	note := &model.Note{ID: "n1", UserID: "u1", Emojis: pq.StringArray{"x"}}
+	note := &model.Note{ID: "n1", UserID: "u1", Emojis: model.StringArray{"x"}}
 	assert.NotPanics(t, func() {
 		r.PopulateNoteEmojis(note, nil)
 	})
@@ -428,7 +427,7 @@ func TestPopulateUserEmojis_NilUserOrLite(t *testing.T) {
 	})
 
 	// lite==nilでもpanicしない
-	user := &model.User{ID: "u1", Username: "alice", Emojis: pq.StringArray{"x"}}
+	user := &model.User{ID: "u1", Username: "alice", Emojis: model.StringArray{"x"}}
 	assert.NotPanics(t, func() {
 		r.PopulateUserEmojis(user, nil)
 	})
@@ -587,7 +586,7 @@ func TestPopulateNoteEmojis_UnresolvedEmojiExcluded(t *testing.T) {
 		ID:       "n1",
 		UserID:   "u1",
 		UserHost: &remoteHost,
-		Emojis:   pq.StringArray{"known", "unknown"},
+		Emojis:   model.StringArray{"known", "unknown"},
 	}
 
 	r := NewEmojiResolver(lookup, []*model.Note{note})

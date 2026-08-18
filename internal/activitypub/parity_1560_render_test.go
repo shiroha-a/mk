@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -45,7 +44,7 @@ func TestRenderNote_QuoteInlineHTML(t *testing.T) {
 func TestRenderPerson_SharedInboxAndHashtags(t *testing.T) {
 	r := newRenderer()
 	r.SetHost("example.com")
-	u := &model.User{ID: "u1", Username: "alice", Tags: pq.StringArray{"go", "misskey"}}
+	u := &model.User{ID: "u1", Username: "alice", Tags: model.StringArray{"go", "misskey"}}
 	p := r.RenderPerson(u, nil, "PEM", nil)
 	assert.Equal(t, "https://example.com/inbox", p.SharedInbox, "top-level sharedInbox must be set")
 	assert.Equal(t, "https://example.com/inbox", p.Endpoints.SharedInbox)

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -193,7 +192,7 @@ func isoOrNull(t *time.Time) any {
 }
 
 // 標準8x8盤面
-var defaultMap = pq.StringArray{
+var defaultMap = model.StringArray{
 	"--------",
 	"--------",
 	"--------",

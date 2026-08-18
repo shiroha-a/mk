@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -483,7 +482,7 @@ func TestRenderer_RenderNote_Specified(t *testing.T) {
 		ID:             idGen.Generate(time.Now()),
 		UserID:         "author",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"u2", "u3"},
+		VisibleUserIDs: model.StringArray{"u2", "u3"},
 	}
 	out := r.RenderNote(n, idGen)
 	assert.Contains(t, out.To, "https://example.com/users/u2")
@@ -514,7 +513,7 @@ func TestRenderer_RenderNote_WithMentions(t *testing.T) {
 		ID:         idGen.Generate(time.Now()),
 		UserID:     "author",
 		Visibility: model.NoteVisibilityPublic,
-		Mentions:   pq.StringArray{"uA", "uB", "unknown"},
+		Mentions:   model.StringArray{"uA", "uB", "unknown"},
 	}
 	out := r.RenderNote(n, idGen)
 
@@ -545,8 +544,8 @@ func TestRenderer_RenderNote_WithMentions_DuplicateTo(t *testing.T) {
 		ID:             idGen.Generate(time.Now()),
 		UserID:         "author",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"u2"},
-		Mentions:       pq.StringArray{"u2"},
+		VisibleUserIDs: model.StringArray{"u2"},
+		Mentions:       model.StringArray{"u2"},
 	}
 	out := r.RenderNote(n, idGen)
 	// u2 URI appears only once.
@@ -1014,7 +1013,7 @@ func TestRenderer_RenderNote_WithAttachment(t *testing.T) {
 		ID:         idGen.Generate(time.Now()),
 		UserID:     "author",
 		Visibility: model.NoteVisibilityPublic,
-		FileIDs:    pq.StringArray{"f1", "f2"},
+		FileIDs:    model.StringArray{"f1", "f2"},
 	}
 	out := r.RenderNote(n, idGen)
 	require.Len(t, out.Attachment, 2)
@@ -1045,7 +1044,7 @@ func TestRenderer_RenderNote_AttachmentError(t *testing.T) {
 		ID:         idGen.Generate(time.Now()),
 		UserID:     "author",
 		Visibility: model.NoteVisibilityPublic,
-		FileIDs:    pq.StringArray{"f1"},
+		FileIDs:    model.StringArray{"f1"},
 	}
 	out := r.RenderNote(n, idGen)
 	// エラー時は添付なしで進む
@@ -1145,7 +1144,7 @@ func TestRenderer_RenderNote_HashtagTag(t *testing.T) {
 		ID:         idGen.Generate(time.Now()),
 		UserID:     "author",
 		Visibility: model.NoteVisibilityPublic,
-		Tags:       pq.StringArray{"golang", "misskey"},
+		Tags:       model.StringArray{"golang", "misskey"},
 	}
 	out := r.RenderNote(n, idGen)
 	require.Len(t, out.Tag, 2)
@@ -1181,7 +1180,7 @@ func TestRenderer_RenderNote_EmojiTag(t *testing.T) {
 		ID:         idGen.Generate(time.Now()),
 		UserID:     "author",
 		Visibility: model.NoteVisibilityPublic,
-		Emojis:     pq.StringArray{"blobcat", "unknown"},
+		Emojis:     model.StringArray{"blobcat", "unknown"},
 	}
 	out := r.RenderNote(n, idGen)
 	// "unknown"は解決失敗してスキップされる
@@ -1207,7 +1206,7 @@ func TestRenderer_RenderPerson_EmojiTag(t *testing.T) {
 	u := &model.User{
 		ID:       "u1",
 		Username: "alice",
-		Emojis:   pq.StringArray{"verified"},
+		Emojis:   model.StringArray{"verified"},
 	}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.Len(t, p.Tag, 1)
@@ -1229,7 +1228,7 @@ func TestRenderer_RenderNote_LocalOnlyEmojiExcluded(t *testing.T) {
 		ID:         idGen.Generate(time.Now()),
 		UserID:     "author",
 		Visibility: model.NoteVisibilityPublic,
-		Emojis:     pq.StringArray{"pub", "secret"},
+		Emojis:     model.StringArray{"pub", "secret"},
 	}
 	out := r.RenderNote(n, idGen)
 	require.Len(t, out.Tag, 1, "localOnly emoji must be excluded")
@@ -1243,7 +1242,7 @@ func TestRenderer_RenderPerson_LocalOnlyEmojiExcluded(t *testing.T) {
 	r.SetEmojiResolver(&stubEmojiResolver{emojis: map[string]*model.Emoji{
 		"secret": {Name: "secret", PublicURL: "https://example.com/files/secret.webp", LocalOnly: true},
 	}})
-	u := &model.User{ID: "u1", Username: "alice", Emojis: pq.StringArray{"secret"}}
+	u := &model.User{ID: "u1", Username: "alice", Emojis: model.StringArray{"secret"}}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.Empty(t, p.Tag, "localOnly emoji must be excluded from Person tag")
 }
@@ -1447,7 +1446,7 @@ func TestRenderer_RenderNote_SpecifiedRemoteRecipient(t *testing.T) {
 		ID:             idGen.Generate(time.Now()),
 		UserID:         "author",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"u2", "uRemote"},
+		VisibleUserIDs: model.StringArray{"u2", "uRemote"},
 	}
 	out := r.RenderNote(n, idGen)
 	assert.Contains(t, out.To, "https://remote.example/users/bob", "remote recipient must get its real remote URI")

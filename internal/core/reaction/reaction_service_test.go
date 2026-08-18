@@ -4,7 +4,6 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -361,7 +360,7 @@ func TestIsPureRenote_Variants(t *testing.T) {
 		{"pure", &model.Note{RenoteID: &target}, true},
 		{"with text", &model.Note{RenoteID: &target, Text: ptrString("hi")}, false},
 		{"with cw", &model.Note{RenoteID: &target, CW: ptrString("warn")}, false},
-		{"with file", &model.Note{RenoteID: &target, FileIDs: pq.StringArray{"f1"}}, false},
+		{"with file", &model.Note{RenoteID: &target, FileIDs: model.StringArray{"f1"}}, false},
 		{"with poll", &model.Note{RenoteID: &target, HasPoll: true}, false},
 	}
 	// IsPureRenote はパッケージ内なのでテストヘルパ経由ではなく
@@ -723,7 +722,7 @@ func (s stubMediaSilence) IsMediaSilenced(host string) bool { return s.hosts[hos
 func seedLocalEmoji(repo *testutil.MockEmojiRepository, name string, sensitive bool, roleIDs []string) {
 	repo.Emojis[name+"@"] = &model.Emoji{
 		ID: "e_" + name, Name: name, IsSensitive: sensitive,
-		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray(roleIDs),
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray(roleIDs),
 	}
 }
 

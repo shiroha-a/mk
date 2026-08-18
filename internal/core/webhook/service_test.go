@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/webhook"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -129,8 +128,8 @@ func TestDispatchUser_NoActiveHooksIsNoop(t *testing.T) {
 func TestDispatchUser_FiltersByEvent(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	repo := &fakeWebhookRepo{hooks: map[string]*model.Webhook{
-		"h1": {ID: "h1", UserID: "alice", Active: true, URL: "u", On: pq.StringArray{"note"}},
-		"h2": {ID: "h2", UserID: "alice", Active: true, URL: "u", On: pq.StringArray{"reaction"}},
+		"h1": {ID: "h1", UserID: "alice", Active: true, URL: "u", On: model.StringArray{"note"}},
+		"h2": {ID: "h2", UserID: "alice", Active: true, URL: "u", On: model.StringArray{"reaction"}},
 	}}
 	svc := webhook.NewService(enq, repo, nil, "https://example.com")
 	svc.DispatchUser("alice", webhook.EventNote, map[string]any{"note": "x"})
@@ -149,7 +148,7 @@ func TestDispatchUser_FiltersByEvent(t *testing.T) {
 func TestDispatchUser_InactiveSkipped(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	repo := &fakeWebhookRepo{hooks: map[string]*model.Webhook{
-		"h1": {ID: "h1", UserID: "alice", Active: false, URL: "u", On: pq.StringArray{"note"}},
+		"h1": {ID: "h1", UserID: "alice", Active: false, URL: "u", On: model.StringArray{"note"}},
 	}}
 	svc := webhook.NewService(enq, repo, nil, "https://example.com")
 	svc.DispatchUser("alice", webhook.EventNote, map[string]any{"note": "x"})
@@ -167,7 +166,7 @@ func TestDispatchUser_RepoError(t *testing.T) {
 func TestDispatchUser_EnqueueError(t *testing.T) {
 	enq := &fakeEnqueuer{userErr: errors.New("enq boom")}
 	repo := &fakeWebhookRepo{hooks: map[string]*model.Webhook{
-		"h1": {ID: "h1", UserID: "alice", Active: true, URL: "u", On: pq.StringArray{"note"}},
+		"h1": {ID: "h1", UserID: "alice", Active: true, URL: "u", On: model.StringArray{"note"}},
 	}}
 	svc := webhook.NewService(enq, repo, nil, "https://example.com")
 	svc.DispatchUser("alice", webhook.EventNote, nil) // should log but not panic
@@ -183,7 +182,7 @@ func TestDispatchUser_NilSafe(t *testing.T) {
 func TestDispatchSystem_Works(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
-		"h1": {ID: "h1", IsActive: true, On: pq.StringArray{"userCreated"}, URL: "u"},
+		"h1": {ID: "h1", IsActive: true, On: model.StringArray{"userCreated"}, URL: "u"},
 	}}
 	svc := webhook.NewService(enq, nil, repo, "https://example.com")
 	svc.DispatchSystem(webhook.SystemEventUserCreated, map[string]any{"id": "u1"})
@@ -195,7 +194,7 @@ func TestDispatchSystem_Works(t *testing.T) {
 func TestDispatchSystem_FiltersByEvent(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
-		"h1": {ID: "h1", IsActive: true, On: pq.StringArray{"abuseReport"}},
+		"h1": {ID: "h1", IsActive: true, On: model.StringArray{"abuseReport"}},
 	}}
 	svc := webhook.NewService(enq, nil, repo, "https://example.com")
 	svc.DispatchSystem(webhook.SystemEventUserCreated, nil)
@@ -205,7 +204,7 @@ func TestDispatchSystem_FiltersByEvent(t *testing.T) {
 func TestDispatchSystem_InactiveSkipped(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
-		"h1": {ID: "h1", IsActive: false, On: pq.StringArray{"userCreated"}},
+		"h1": {ID: "h1", IsActive: false, On: model.StringArray{"userCreated"}},
 	}}
 	svc := webhook.NewService(enq, nil, repo, "https://example.com")
 	svc.DispatchSystem(webhook.SystemEventUserCreated, nil)
@@ -223,7 +222,7 @@ func TestDispatchSystem_RepoError(t *testing.T) {
 func TestDispatchSystem_EnqueueError(t *testing.T) {
 	enq := &fakeEnqueuer{systemErr: errors.New("enq boom")}
 	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
-		"h1": {ID: "h1", IsActive: true, On: pq.StringArray{"userCreated"}},
+		"h1": {ID: "h1", IsActive: true, On: model.StringArray{"userCreated"}},
 	}}
 	svc := webhook.NewService(enq, nil, repo, "https://example.com")
 	svc.DispatchSystem(webhook.SystemEventUserCreated, nil)
@@ -241,8 +240,8 @@ func TestDispatchSystem_NilSafe(t *testing.T) {
 func TestDispatchSystemExcluding_SkipsExcluded(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
-		"h1": {ID: "h1", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
-		"h2": {ID: "h2", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
+		"h1": {ID: "h1", IsActive: true, On: model.StringArray{"abuseReportResolved"}},
+		"h2": {ID: "h2", IsActive: true, On: model.StringArray{"abuseReportResolved"}},
 	}}
 	svc := webhook.NewService(enq, nil, repo, "https://example.com")
 	svc.DispatchSystemExcluding(webhook.SystemEventAbuseReportResolved, map[string]any{"id": "r1"}, []string{"h2"})
@@ -274,8 +273,8 @@ func TestDispatchSystemTest_NilSafe(t *testing.T) {
 func TestDispatchSystemExcluding_NilExcludesDeliversAll(t *testing.T) {
 	enq := &fakeEnqueuer{}
 	repo := &fakeSystemWebhookRepo{hooks: map[string]*model.SystemWebhook{
-		"h1": {ID: "h1", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
-		"h2": {ID: "h2", IsActive: true, On: pq.StringArray{"abuseReportResolved"}},
+		"h1": {ID: "h1", IsActive: true, On: model.StringArray{"abuseReportResolved"}},
+		"h2": {ID: "h2", IsActive: true, On: model.StringArray{"abuseReportResolved"}},
 	}}
 	svc := webhook.NewService(enq, nil, repo, "https://example.com")
 	svc.DispatchSystemExcluding(webhook.SystemEventAbuseReportResolved, nil, nil)

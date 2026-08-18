@@ -485,7 +485,7 @@ func (h *Handler) antennaToMap(a *model.Antenna) map[string]any {
 			createdAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
 		}
 	}
-	// users は pq.StringArray (nil なら null になる) を golden の非null array に
+	// users は model.StringArray (nil なら null になる) を golden の非null array に
 	// 合わせて [] へ coalesce する (#1270 L3 検出)。
 	users := []string(a.Users)
 	if users == nil {

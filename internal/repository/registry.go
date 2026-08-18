@@ -3,7 +3,6 @@ package repository
 import (
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -35,7 +34,7 @@ func NewRegistryRepository(db *gorm.DB) RegistryRepository {
 }
 
 func (r *registryRepository) scopeQuery(q *gorm.DB, scope []string, domain *string) *gorm.DB {
-	q = q.Where("scope = ?", pq.StringArray(scope))
+	q = q.Where("scope = ?", model.StringArray(scope))
 	if domain == nil {
 		q = q.Where("domain IS NULL")
 	} else {

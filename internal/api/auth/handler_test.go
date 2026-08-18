@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -206,7 +205,7 @@ func post(handler func(echo.Context) error, body string, user *model.User) *http
 
 func TestSessionGenerate_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.apps["secret123"] = &model.App{ID: "app1", Secret: "secret123", Name: "TestApp", Permission: pq.StringArray{"read:account"}}
+	repo.apps["secret123"] = &model.App{ID: "app1", Secret: "secret123", Name: "TestApp", Permission: model.StringArray{"read:account"}}
 
 	rec := post(h.SessionGenerate, `{"appSecret":"secret123"}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -241,7 +240,7 @@ func TestSessionGenerate_CreateError(t *testing.T) {
 
 func TestSessionShow_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Name: "App", Permission: pq.StringArray{"read:account"}}
+	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Name: "App", Permission: model.StringArray{"read:account"}}
 	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1"}
 
 	rec := post(h.SessionShow, `{"token":"tok1"}`, nil)
@@ -269,7 +268,7 @@ func TestSessionShow_InvalidParam(t *testing.T) {
 
 func TestAccept_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: pq.StringArray{"read:account"}}
+	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: model.StringArray{"read:account"}}
 	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1"}
 	user := &model.User{ID: "u1"}
 
@@ -282,7 +281,7 @@ func TestAccept_Success(t *testing.T) {
 
 func TestAccept_ExistingToken(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: pq.StringArray{}}
+	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: model.StringArray{}}
 	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1"}
 	appID := "a1"
 	repo.accessTokens["a1:u1"] = &model.AccessToken{ID: "at1", AppID: &appID, UserID: "u1", Token: "existing"}
@@ -313,7 +312,7 @@ func (f *failUpdateRepo) UpdateSessionUserID(_, _ string) error { return errNotF
 
 func TestAccept_UpdateSessionError(t *testing.T) {
 	base := newMockRepo()
-	base.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: pq.StringArray{}}
+	base.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: model.StringArray{}}
 	appID := "a1"
 	base.accessTokens["a1:u1"] = &model.AccessToken{ID: "at1", AppID: &appID, UserID: "u1"}
 	base.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1"}
@@ -328,7 +327,7 @@ func TestAccept_UpdateSessionError(t *testing.T) {
 
 func TestAccept_CreateTokenError(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: pq.StringArray{}}
+	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: model.StringArray{}}
 	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1"}
 	repo.createErr = errNotFound
 

@@ -15,7 +15,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/core/notification"
@@ -846,7 +845,7 @@ func (h *Handler) recordLoginDay(userID string, profile *model.UserProfile) {
 			return
 		}
 	}
-	newDates := append(append(pq.StringArray{}, profile.LoggedInDates...), today)
+	newDates := append(append(model.StringArray{}, profile.LoggedInDates...), today)
 	if err := h.userService.UpdateProfileFields(userID, map[string]any{"loggedInDates": newDates}); err != nil {
 		slog.Warn("i: record login day failed", "user", userID, "err", err)
 		return
@@ -1738,7 +1737,7 @@ func (h *Handler) Update(c echo.Context) error {
 	// verifiedLinks に積み直す (#1786)。同期で [] に reset (応答も空で返す)、
 	// goroutine で再検証して書き込む。fire-and-forget は upstream と同様。
 	if h.verifyLinkClient != nil && me.Username != "" && h.serverURL != "" {
-		if err := h.userService.UpdateProfileFields(me.ID, map[string]any{"verifiedLinks": pq.StringArray{}}); err == nil && bundle.Profile != nil {
+		if err := h.userService.UpdateProfileFields(me.ID, map[string]any{"verifiedLinks": model.StringArray{}}); err == nil && bundle.Profile != nil {
 			bundle.Profile.VerifiedLinks = nil
 		}
 		myLink := strings.TrimRight(h.serverURL, "/") + "/@" + me.Username
@@ -1746,7 +1745,7 @@ func (h *Handler) Update(c echo.Context) error {
 			uid := me.ID
 			go func() {
 				if verified := verifyLinks(h.verifyLinkClient, myLink, urls); len(verified) > 0 {
-					_ = h.userService.UpdateProfileFields(uid, map[string]any{"verifiedLinks": pq.StringArray(verified)})
+					_ = h.userService.UpdateProfileFields(uid, map[string]any{"verifiedLinks": model.StringArray(verified)})
 				}
 			}()
 		}

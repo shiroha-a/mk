@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -686,8 +685,8 @@ func applyUserFields(u *model.User, fields map[string]any) {
 				u.AvatarDecorations = append([]byte(nil), s...)
 			}
 		case "tags":
-			// core/user.UpdateProfile / federation.resolver は pq.StringArray で渡す。
-			if a, ok := v.(pq.StringArray); ok {
+			// core/user.UpdateProfile / federation.resolver は model.StringArray で渡す。
+			if a, ok := v.(model.StringArray); ok {
 				u.Tags = a
 			}
 		}
@@ -793,10 +792,10 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			}
 		case "twoFactorBackupSecret":
 			switch val := v.(type) {
-			case pq.StringArray:
+			case model.StringArray:
 				p.TwoFactorBackupSecret = val
 			case []string:
-				p.TwoFactorBackupSecret = pq.StringArray(val)
+				p.TwoFactorBackupSecret = model.StringArray(val)
 			case nil:
 				p.TwoFactorBackupSecret = nil
 			}
@@ -2115,11 +2114,11 @@ func (m *MockEmojiRepository) UpdateFields(id string, fields map[string]any) err
 						e.License = s
 					}
 				case "aliases":
-					// EmojiUpdate handler は pq.StringArray でラップして渡す
+					// EmojiUpdate handler は model.StringArray でラップして渡す
 					// (#729)。resolver / 旧 caller は []string を渡すので両方
 					// 受ける (PostgreSQL は同じ varchar[] に変換される)。
 					switch arr := v.(type) {
-					case pq.StringArray:
+					case model.StringArray:
 						e.Aliases = arr
 					case []string:
 						e.Aliases = arr
@@ -2157,7 +2156,7 @@ func (m *MockEmojiRepository) UpdateFields(id string, fields map[string]any) err
 					}
 				case "roleIdsThatCanBeUsedThisEmojiAsReaction":
 					switch arr := v.(type) {
-					case pq.StringArray:
+					case model.StringArray:
 						e.RoleIDsThatCanBeUsedThisEmojiAsReaction = arr
 					case []string:
 						e.RoleIDsThatCanBeUsedThisEmojiAsReaction = arr
@@ -2303,10 +2302,10 @@ func (m *MockEmojiRepository) UpdateFieldsMany(ids []string, fields map[string]a
 					e.License = &s
 				}
 			case "aliases":
-				// production 経路は pq.StringArray で wrap して渡す (#882
+				// production 経路は model.StringArray で wrap して渡す (#882
 				// で発覚した character varying[] vs record drift を回避)。
 				// test/legacy で plain []string を渡す呼び出しもあるので両対応。
-				if arr, ok := v.(pq.StringArray); ok {
+				if arr, ok := v.(model.StringArray); ok {
 					e.Aliases = []string(arr)
 				} else if arr, ok := v.([]string); ok {
 					e.Aliases = arr
@@ -2598,7 +2597,7 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 	// 返る。mock も最初の error を保持して最後に返すことで挙動を揃える
 	// (#590 review #4)。後続フィールドの処理は続けるが target は更新しない。
 	var firstErr error
-	setStrArr := func(target *pq.StringArray, column string, v any) {
+	setStrArr := func(target *model.StringArray, column string, v any) {
 		arr, err := mockMetaCoerceStringArray(column, v)
 		if err != nil {
 			if firstErr == nil {
@@ -2836,31 +2835,31 @@ func setNullableStr(target **string, v any) {
 }
 
 // mockMetaCoerceStringArray normalises any array-shaped value handed to
-// MockMetaRepository.Update into pq.StringArray. The real repository goes
+// MockMetaRepository.Update into model.StringArray. The real repository goes
 // through GORM + lib/pq's driver.Valuer machinery and refuses anything other
-// than pq.StringArray for varchar[] columns; this helper lets tests call
-// Update with either pq.StringArray or the raw []any produced by JSON
+// than model.StringArray for varchar[] columns; this helper lets tests call
+// Update with either model.StringArray or the raw []any produced by JSON
 // decoding so admin handler tests can exercise both code paths.
 //
 // 不正な型 (string 以外を含む []any、nil 等) は error を返すことで real
 // repo の挙動 ("expression is of type record" / NOT NULL 違反で UPDATE
 // rollback) に近づける。これにより handler 側で coerceMetaArrayFields の
 // 漏れが起きたとき、mock 経由のテストでも気付ける (#590 review #4)。
-func mockMetaCoerceStringArray(column string, v any) (pq.StringArray, error) {
+func mockMetaCoerceStringArray(column string, v any) (model.StringArray, error) {
 	switch arr := v.(type) {
-	case pq.StringArray:
-		out := make(pq.StringArray, len(arr))
+	case model.StringArray:
+		out := make(model.StringArray, len(arr))
 		copy(out, arr)
 		return out, nil
 	case []string:
-		out := make(pq.StringArray, len(arr))
+		out := make(model.StringArray, len(arr))
 		copy(out, arr)
 		return out, nil
 	case nil:
 		// real repo は NOT NULL 制約違反でエラーになる挙動を再現。
 		return nil, fmt.Errorf("mock meta: nil cannot be assigned to NOT NULL varchar[] column %q", column)
 	case []any:
-		out := make(pq.StringArray, 0, len(arr))
+		out := make(model.StringArray, 0, len(arr))
 		for _, e := range arr {
 			s, ok := e.(string)
 			if !ok {
@@ -4257,7 +4256,7 @@ type MockFlashRepository struct {
 	CreateErr error
 	UpdateErr error
 	// LastUpdates は UpdateFields に最後に渡された fields map を capture
-	// する。caller が slice value を pq.StringArray 等で正しく wrap して
+	// する。caller が slice value を model.StringArray 等で正しく wrap して
 	// いるかを test 側で assert するため (#896)。
 	LastUpdates map[string]any
 }
@@ -4654,7 +4653,7 @@ type MockAntennaRepository struct {
 	CreateErr error
 	UpdateErr error
 	// LastUpdates は UpdateFields に最後に渡された fields map を capture
-	// する。caller が pq.StringArray 等で正しく wrap しているかを test 側で
+	// する。caller が model.StringArray 等で正しく wrap しているかを test 側で
 	// assert するため (#896 と同 pattern)。
 	LastUpdates map[string]any
 }
@@ -4966,7 +4965,7 @@ func applyChannelFields(c *model.Channel, fields map[string]any) {
 			}
 		case "pinnedNoteIds":
 			switch arr := v.(type) {
-			case pq.StringArray:
+			case model.StringArray:
 				c.PinnedNoteIDs = arr
 			case []string:
 				c.PinnedNoteIDs = arr
@@ -7710,10 +7709,10 @@ func (m *MockSystemWebhookRepository) UpdateAdminFields(id string, fields map[st
 				w.Secret = s
 			}
 		case "on":
-			// production code は pq.StringArray でラップして送る (#932)。
+			// production code は model.StringArray でラップして送る (#932)。
 			// 旧 path との互換のため []string も受ける。
 			switch arr := v.(type) {
-			case pq.StringArray:
+			case model.StringArray:
 				w.On = []string(arr)
 			case []string:
 				w.On = arr
@@ -8081,10 +8080,10 @@ func (m *MockAvatarDecorationRepository) UpdateFields(id string, fields map[stri
 				d.URL = s
 			}
 		case "roleIdsThatCanBeUsedThisDecoration":
-			// production code は pq.StringArray でラップして送る (#931)。
+			// production code は model.StringArray でラップして送る (#931)。
 			// 旧 path との互換のため []string も受ける。
 			switch arr := v.(type) {
-			case pq.StringArray:
+			case model.StringArray:
 				d.RoleIDs = []string(arr)
 			case []string:
 				d.RoleIDs = arr

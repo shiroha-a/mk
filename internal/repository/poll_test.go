@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -29,8 +28,8 @@ func TestPollRepository_Create(t *testing.T) {
 	poll := &model.Poll{
 		NoteID:         note.ID,
 		Multiple:       false,
-		Choices:        pq.StringArray{"A", "B", "C"},
-		Votes:          pq.Int64Array{0, 0, 0},
+		Choices:        model.StringArray{"A", "B", "C"},
+		Votes:          model.Int64Array{0, 0, 0},
 		NoteVisibility: model.NoteVisibilityPublic,
 		UserID:         user.ID,
 	}
@@ -65,7 +64,7 @@ func TestPollRepository_ListExpiredUnnotified(t *testing.T) {
 		t.Cleanup(func() { cleanupNote(t, note.ID) })
 		p := &model.Poll{
 			NoteID: id, Multiple: false,
-			Choices: pq.StringArray{"a"}, Votes: pq.Int64Array{0},
+			Choices: model.StringArray{"a"}, Votes: model.Int64Array{0},
 			NoteVisibility: model.NoteVisibilityPublic, UserID: user.ID,
 			ExpiresAt:  &expires,
 			NotifiedAt: notified,
@@ -102,7 +101,7 @@ func TestPollRepository_ListExpiredUnnotified_LimitCap(t *testing.T) {
 		note := &model.Note{ID: nid, UserID: user.ID, Visibility: model.NoteVisibilityPublic, HasPoll: true, Reactions: datatypes.JSON([]byte("{}"))}
 		require.NoError(t, testDB.Create(note).Error)
 		t.Cleanup(func() { cleanupNote(t, nid) })
-		p := &model.Poll{NoteID: nid, Choices: pq.StringArray{"x"}, Votes: pq.Int64Array{0}, NoteVisibility: model.NoteVisibilityPublic, UserID: user.ID, ExpiresAt: &past}
+		p := &model.Poll{NoteID: nid, Choices: model.StringArray{"x"}, Votes: model.Int64Array{0}, NoteVisibility: model.NoteVisibilityPublic, UserID: user.ID, ExpiresAt: &past}
 		require.NoError(t, repo.Create(p))
 	}
 
@@ -138,7 +137,7 @@ func TestPollRepository_BackfillNotifiedAt(t *testing.T) {
 		require.NoError(t, testDB.Create(note).Error)
 		t.Cleanup(func() { cleanupNote(t, note.ID) })
 		require.NoError(t, repo.Create(&model.Poll{
-			NoteID: id, Choices: pq.StringArray{"a"}, Votes: pq.Int64Array{0},
+			NoteID: id, Choices: model.StringArray{"a"}, Votes: model.Int64Array{0},
 			NoteVisibility: model.NoteVisibilityPublic, UserID: user.ID,
 			ExpiresAt:  expires,
 			NotifiedAt: notified,
@@ -190,7 +189,7 @@ func TestPollRepository_MarkNotified(t *testing.T) {
 
 	expires := time.Now().Add(-time.Hour)
 	require.NoError(t, repo.Create(&model.Poll{
-		NoteID: noteID, Choices: pq.StringArray{"a"}, Votes: pq.Int64Array{0},
+		NoteID: noteID, Choices: model.StringArray{"a"}, Votes: model.Int64Array{0},
 		NoteVisibility: model.NoteVisibilityPublic, UserID: user.ID,
 		ExpiresAt: &expires,
 	}))
@@ -232,7 +231,7 @@ func TestPollRepository_ListRecommendation(t *testing.T) {
 		require.NoError(t, testDB.Create(note).Error)
 		t.Cleanup(func() { cleanupNote(t, id) })
 		p := &model.Poll{
-			NoteID: id, Multiple: false, Choices: pq.StringArray{"a"}, Votes: pq.Int64Array{0},
+			NoteID: id, Multiple: false, Choices: model.StringArray{"a"}, Votes: model.Int64Array{0},
 			NoteVisibility: vis, UserID: userID, UserHost: host, ExpiresAt: expires, ChannelID: channelID,
 		}
 		require.NoError(t, repo.Create(p))

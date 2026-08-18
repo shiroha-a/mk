@@ -47,7 +47,7 @@ type registryScopeDomainRequest struct {
 
 // normalizeRegistryScope treats a nil Scope as an empty slice. JSON で
 // `"scope"` が省略されると req.Scope は nil になるが、repository 側で
-// pq.StringArray(nil) は SQL NULL にシリアライズされ `scope = NULL` で
+// model.StringArray(nil) は SQL NULL にシリアライズされ `scope = NULL` で
 // どのレコードにも一致しなくなる (registry_item のデフォルト値は
 // `'{}'`)。他の registry* ハンドラ (RegistryGet / RegistryGetAll /
 // RegistrySet 等) と挙動を揃えるため nil → 空配列に寄せる。

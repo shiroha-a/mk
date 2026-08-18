@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
@@ -33,7 +32,7 @@ func BenchmarkPackNotes(b *testing.B) {
 			Text:       &text,
 			Visibility: model.NoteVisibilityPublic,
 			Reactions:  datatypes.JSON([]byte(`{"👍":5,"❤":2,"🎉":1}`)),
-			FileIDs:    pq.StringArray{"f1", "f2"},
+			FileIDs:    model.StringArray{"f1", "f2"},
 			User:       &model.User{ID: uid, Username: uid, AvatarDecorations: datatypes.JSON([]byte("[]"))},
 		}
 	}

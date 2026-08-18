@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/webhook"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -25,7 +24,7 @@ func newTestService(t *testing.T) (*webhook.Service, *fakeEnqueuer, *fakeWebhook
 func TestNoteCreateHook_FiresNoteEventOnAuthor(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h1"] = &model.Webhook{
-		ID: "h1", UserID: "alice", Active: true, On: pq.StringArray{"note"},
+		ID: "h1", UserID: "alice", Active: true, On: model.StringArray{"note"},
 	}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
@@ -43,7 +42,7 @@ func TestNoteCreateHook_FiresNoteEventOnAuthor(t *testing.T) {
 func TestNoteCreateHook_FiresReplyEventOnParentAuthor(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h_reply"] = &model.Webhook{
-		ID: "h_reply", UserID: "bob", Active: true, On: pq.StringArray{"reply"},
+		ID: "h_reply", UserID: "bob", Active: true, On: model.StringArray{"reply"},
 	}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
@@ -62,7 +61,7 @@ func TestNoteCreateHook_FiresReplyEventOnParentAuthor(t *testing.T) {
 // #1965: reply 先がスレッドをミュートしていれば reply webhook を出さない。
 func TestNoteCreateHook_ReplyThreadMutedSkipped(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
-	userRepo.hooks["h_reply"] = &model.Webhook{ID: "h_reply", UserID: "bob", Active: true, On: pq.StringArray{"reply"}}
+	userRepo.hooks["h_reply"] = &model.Webhook{ID: "h_reply", UserID: "bob", Active: true, On: model.StringArray{"reply"}}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
 	muteRepo := testutil.NewMockNoteThreadMutingRepository()
@@ -82,7 +81,7 @@ func TestNoteCreateHook_ReplyThreadMutedSkipped(t *testing.T) {
 // #1965: reply 先が threaded note (ThreadID 持ち) の場合、その threadId で判定する。
 func TestNoteCreateHook_ReplyThreadMuteUsesThreadID(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
-	userRepo.hooks["h_reply"] = &model.Webhook{ID: "h_reply", UserID: "bob", Active: true, On: pq.StringArray{"reply"}}
+	userRepo.hooks["h_reply"] = &model.Webhook{ID: "h_reply", UserID: "bob", Active: true, On: model.StringArray{"reply"}}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
 	muteRepo := testutil.NewMockNoteThreadMutingRepository()
@@ -103,7 +102,7 @@ func TestNoteCreateHook_ReplyThreadMuteUsesThreadID(t *testing.T) {
 // #1965: mention 先がスレッドをミュートしていれば mention webhook を出さない。
 func TestNoteCreateHook_MentionThreadMutedSkipped(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
-	userRepo.hooks["h_m"] = &model.Webhook{ID: "h_m", UserID: "bob", Active: true, On: pq.StringArray{"mention"}}
+	userRepo.hooks["h_m"] = &model.Webhook{ID: "h_m", UserID: "bob", Active: true, On: model.StringArray{"mention"}}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
 	muteRepo := testutil.NewMockNoteThreadMutingRepository()
@@ -112,7 +111,7 @@ func TestNoteCreateHook_MentionThreadMutedSkipped(t *testing.T) {
 
 	text := "hi @bob"
 	h.OnNoteCreated(
-		&model.Note{ID: "n_m", UserID: "alice", Text: &text, Visibility: model.NoteVisibilityPublic, Mentions: pq.StringArray{"bob"}},
+		&model.Note{ID: "n_m", UserID: "alice", Text: &text, Visibility: model.NoteVisibilityPublic, Mentions: model.StringArray{"bob"}},
 		&model.User{ID: "alice", Username: "alice", UsernameLower: "alice"},
 		nil, nil,
 	)
@@ -122,7 +121,7 @@ func TestNoteCreateHook_MentionThreadMutedSkipped(t *testing.T) {
 // #1965: renote はスレッドミュートで gate されない (upstream も ungated)。
 func TestNoteCreateHook_RenoteThreadMuteNotGated(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
-	userRepo.hooks["h_rn"] = &model.Webhook{ID: "h_rn", UserID: "bob", Active: true, On: pq.StringArray{"renote"}}
+	userRepo.hooks["h_rn"] = &model.Webhook{ID: "h_rn", UserID: "bob", Active: true, On: model.StringArray{"renote"}}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
 	muteRepo := testutil.NewMockNoteThreadMutingRepository()
@@ -141,7 +140,7 @@ func TestNoteCreateHook_RenoteThreadMuteNotGated(t *testing.T) {
 func TestNoteCreateHook_FiresRenoteEventOnRenoteAuthor(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h_renote"] = &model.Webhook{
-		ID: "h_renote", UserID: "bob", Active: true, On: pq.StringArray{"renote"},
+		ID: "h_renote", UserID: "bob", Active: true, On: model.StringArray{"renote"},
 	}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
@@ -159,13 +158,13 @@ func TestNoteCreateHook_FiresRenoteEventOnRenoteAuthor(t *testing.T) {
 func TestNoteCreateHook_FiresMentionEventOnMentionedUsers(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h_mention"] = &model.Webhook{
-		ID: "h_mention", UserID: "carol", Active: true, On: pq.StringArray{"mention"},
+		ID: "h_mention", UserID: "carol", Active: true, On: model.StringArray{"mention"},
 	}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
 
 	h.OnNoteCreated(
-		&model.Note{ID: "n4", UserID: "alice", Mentions: pq.StringArray{"carol"}, Visibility: model.NoteVisibilityPublic},
+		&model.Note{ID: "n4", UserID: "alice", Mentions: model.StringArray{"carol"}, Visibility: model.NoteVisibilityPublic},
 		&model.User{ID: "alice", Username: "alice", UsernameLower: "alice"},
 		nil, nil,
 	)
@@ -177,13 +176,13 @@ func TestNoteCreateHook_SkipsSelfReplyAndMention(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h_alice"] = &model.Webhook{
 		ID: "h_alice", UserID: "alice", Active: true,
-		On: pq.StringArray{"note", "reply", "renote", "mention"},
+		On: model.StringArray{"note", "reply", "renote", "mention"},
 	}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewNoteCreateHook(svc, idGen)
 
 	h.OnNoteCreated(
-		&model.Note{ID: "n5", UserID: "alice", Mentions: pq.StringArray{"alice"}, Visibility: model.NoteVisibilityPublic},
+		&model.Note{ID: "n5", UserID: "alice", Mentions: model.StringArray{"alice"}, Visibility: model.NoteVisibilityPublic},
 		&model.User{ID: "alice", Username: "alice", UsernameLower: "alice"},
 		&model.Note{ID: "np", UserID: "alice"},
 		&model.Note{ID: "nt", UserID: "alice"},
@@ -204,7 +203,7 @@ func TestNoteCreateHook_NilSafe(t *testing.T) {
 func TestReactionCreateHook(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h1"] = &model.Webhook{
-		ID: "h1", UserID: "alice", Active: true, On: pq.StringArray{"reaction"},
+		ID: "h1", UserID: "alice", Active: true, On: model.StringArray{"reaction"},
 	}
 	idGen, _ := id.NewGenerator("aidx")
 	h := webhook.NewReactionCreateHook(svc, idGen)
@@ -271,7 +270,7 @@ func renoteRenoteOf(t *testing.T, body []byte) map[string]any {
 // payload で blank される (#timeline nested quote の embed leak を webhook でも防ぐ)。
 func TestNoteCreateHook_GatesDepthTwoFollowersQuoteTarget(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
-	userRepo.hooks["h1"] = &model.Webhook{ID: "h1", UserID: "alice", Active: true, On: pq.StringArray{"note"}}
+	userRepo.hooks["h1"] = &model.Webhook{ID: "h1", UserID: "alice", Active: true, On: model.StringArray{"note"}}
 	idGen, _ := id.NewGenerator("aidx")
 	follow := testutil.NewMockFollowingRepository() // alice follows nobody
 	h := webhook.NewNoteCreateHook(svc, idGen)
@@ -289,7 +288,7 @@ func TestNoteCreateHook_GatesDepthTwoFollowersQuoteTarget(t *testing.T) {
 // 引用先がフォロワー受信者には見える (過剰 blank しない回帰)。
 func TestNoteCreateHook_DepthTwoQuoteTargetVisibleToFollower(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
-	userRepo.hooks["h1"] = &model.Webhook{ID: "h1", UserID: "alice", Active: true, On: pq.StringArray{"note"}}
+	userRepo.hooks["h1"] = &model.Webhook{ID: "h1", UserID: "alice", Active: true, On: model.StringArray{"note"}}
 	idGen, _ := id.NewGenerator("aidx")
 	follow := testutil.NewMockFollowingRepository()
 	follow.Followings["f"] = &model.Following{ID: "f", FollowerID: "alice", FolloweeID: "carol"}
@@ -310,8 +309,8 @@ func TestNoteCreateHook_DepthTwoQuoteTargetVisibleToFollower(t *testing.T) {
 // 共有 body だとこのテストは fail する。
 func TestNoteCreateHook_PerRecipientEmbedGate(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
-	userRepo.hooks["hd"] = &model.Webhook{ID: "hd", UserID: "dave", Active: true, On: pq.StringArray{"mention"}}
-	userRepo.hooks["he"] = &model.Webhook{ID: "he", UserID: "eve", Active: true, On: pq.StringArray{"mention"}}
+	userRepo.hooks["hd"] = &model.Webhook{ID: "hd", UserID: "dave", Active: true, On: model.StringArray{"mention"}}
+	userRepo.hooks["he"] = &model.Webhook{ID: "he", UserID: "eve", Active: true, On: model.StringArray{"mention"}}
 	idGen, _ := id.NewGenerator("aidx")
 	follow := testutil.NewMockFollowingRepository()
 	follow.Followings["f"] = &model.Following{ID: "f", FollowerID: "dave", FolloweeID: "carol"} // dave follows carol, eve does not
@@ -319,7 +318,7 @@ func TestNoteCreateHook_PerRecipientEmbedGate(t *testing.T) {
 	h.SetFollowingRepo(follow)
 
 	top := nestedQuoteNote("alice", "host", "carol", model.NoteVisibilityFollowers)
-	top.Mentions = pq.StringArray{"dave", "eve"}
+	top.Mentions = model.StringArray{"dave", "eve"}
 	h.OnNoteCreated(top, &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}, nil, nil)
 
 	require.Len(t, enq.userCalls, 2) // alice (note) は webhook 未登録 → call 無し
@@ -337,10 +336,10 @@ func TestNoteCreateHook_PerRecipientEmbedGate(t *testing.T) {
 func TestFollowingHook_FiresFollowAndFollowed(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h_follow"] = &model.Webhook{
-		ID: "h_follow", UserID: "alice", Active: true, On: pq.StringArray{"follow"},
+		ID: "h_follow", UserID: "alice", Active: true, On: model.StringArray{"follow"},
 	}
 	userRepo.hooks["h_followed"] = &model.Webhook{
-		ID: "h_followed", UserID: "bob", Active: true, On: pq.StringArray{"followed"},
+		ID: "h_followed", UserID: "bob", Active: true, On: model.StringArray{"followed"},
 	}
 	h := webhook.NewFollowingHook(svc)
 
@@ -360,7 +359,7 @@ func TestFollowingHook_FiresFollowAndFollowed(t *testing.T) {
 func TestFollowingHook_Unfollow(t *testing.T) {
 	svc, enq, userRepo, _ := newTestService(t)
 	userRepo.hooks["h_u"] = &model.Webhook{
-		ID: "h_u", UserID: "alice", Active: true, On: pq.StringArray{"unfollow"},
+		ID: "h_u", UserID: "alice", Active: true, On: model.StringArray{"unfollow"},
 	}
 	h := webhook.NewFollowingHook(svc)
 	h.OnUnfollow(
@@ -385,7 +384,7 @@ func TestFollowingHook_NilSafe(t *testing.T) {
 func TestSignupHook_FiresUserCreated(t *testing.T) {
 	svc, enq, _, sysRepo := newTestService(t)
 	sysRepo.hooks["sh1"] = &model.SystemWebhook{
-		ID: "sh1", IsActive: true, On: pq.StringArray{"userCreated"},
+		ID: "sh1", IsActive: true, On: model.StringArray{"userCreated"},
 	}
 	h := webhook.NewSignupHook(svc)
 	h.OnUserCreated(&model.User{ID: "alice", Username: "alice", UsernameLower: "alice"})

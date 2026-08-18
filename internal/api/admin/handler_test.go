@@ -12,7 +12,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
@@ -775,7 +774,7 @@ func TestAdminMeta_SensitiveDetectorFields(t *testing.T) {
 	metaRepo.Meta.SensitiveMediaDetectionAPIURL = &apiURL
 	metaRepo.Meta.SensitiveMediaDetectionTimeout = 60000
 	metaRepo.Meta.SensitiveMediaDetectionMaxImagesPerRequest = 4
-	metaRepo.Meta.URLPreviewSensitiveList = pq.StringArray{"nsfw.example"}
+	metaRepo.Meta.URLPreviewSensitiveList = model.StringArray{"nsfw.example"}
 
 	rec := doPost(h.AdminMeta, `{}`, adminUser)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -870,7 +869,7 @@ func TestUpdateMeta_ClientOptionsNullKeepsExisting(t *testing.T) {
 // JSON で送られてくる array は []any{...} に decode されるが、そのまま
 // repo.Update に流すと lib/pq が varchar[] 列に書けず "expression is of
 // type record" で UPDATE 全体が落ちる。handler 側の coerceMetaArrayFields
-// が []any → pq.StringArray に変換することで永続化できることを確認 (#590)。
+// が []any → model.StringArray に変換することで永続化できることを確認 (#590)。
 //
 // このテストは MockMetaRepository の Update が array 型を反映するよう
 // 拡張した上で成立する。実 DB 側は repository/meta_test.go の
@@ -899,7 +898,7 @@ func TestUpdateMeta_HostListArrays(t *testing.T) {
 }
 
 // 空配列も正しく永続化される (= リスト解除動作)。空 []any はゼロ要素の
-// pq.StringArray に変換される必要がある。
+// model.StringArray に変換される必要がある。
 func TestUpdateMeta_EmptyHostArrayClearsList(t *testing.T) {
 	h, _, metaRepo, _ := newTestHandler(t)
 	// 事前に値を持たせる

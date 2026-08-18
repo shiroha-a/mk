@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -467,7 +466,7 @@ func TestPackUserDetailed_VerifiedLinks(t *testing.T) {
 
 	profile := &model.UserProfile{
 		UserID:        "user6",
-		VerifiedLinks: pq.StringArray{"https://example.com", "https://blog.example.com"},
+		VerifiedLinks: model.StringArray{"https://example.com", "https://blog.example.com"},
 		Fields:        datatypes.JSON([]byte("[]")),
 	}
 
@@ -880,7 +879,7 @@ func TestPackMeDetailed_ListFields(t *testing.T) {
 		MutedWords:     datatypes.JSON([]byte(`[["foo","bar"],"baz"]`)),
 		MutedInstances: datatypes.JSON([]byte(`["evil.example"]`)),
 		Achievements:   datatypes.JSON([]byte(`[{"name":"a","unlockedAt":1}]`)),
-		LoggedInDates:  pq.StringArray{"2026-05-01", "2026-05-02"},
+		LoggedInDates:  model.StringArray{"2026-05-01", "2026-05-02"},
 	}
 	me := PackMeDetailed(u, profile)
 	assert.Len(t, me.MutedWords, 2)
@@ -929,7 +928,7 @@ func TestPackMeDetailed_ProfileDerivedHighFields(t *testing.T) {
 		HardMutedWords:        datatypes.JSON([]byte(`[["foo","bar"],["baz"]]`)),
 		TwoFactorEnabled:      true,
 		SecurityKeysAvailable: true,
-		TwoFactorBackupSecret: pq.StringArray{"a", "b"}, // 2 codes -> partial
+		TwoFactorBackupSecret: model.StringArray{"a", "b"}, // 2 codes -> partial
 	}
 	me := PackMeDetailed(u, profile)
 	assert.Len(t, me.HardMutedWords, 2, "hardMutedWords は jsonb から展開")
@@ -937,7 +936,7 @@ func TestPackMeDetailed_ProfileDerivedHighFields(t *testing.T) {
 	// #1921: 2FA 有効 + key 有り → securityKeys true。
 	assert.True(t, me.SecurityKeys, "2FA 有効 + key 有りで securityKeys true")
 
-	profile.TwoFactorBackupSecret = pq.StringArray{"a", "b", "c", "d", "e"} // >=5 -> full
+	profile.TwoFactorBackupSecret = model.StringArray{"a", "b", "c", "d", "e"} // >=5 -> full
 	assert.Equal(t, "full", PackMeDetailed(u, profile).TwoFactorBackupCodesStock)
 
 	profile.TwoFactorEnabled = false // 2FA off -> none

@@ -14,7 +14,6 @@ import (
 
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/model"
 )
@@ -433,7 +432,7 @@ func CredentialToModel(cred *webauthn.Credential, userID, name string) *model.Us
 		LastUsed:  time.Now(),
 	}
 	if len(transports) > 0 {
-		out.Transports = pq.StringArray(transports)
+		out.Transports = model.StringArray(transports)
 	}
 	// BackupEligible / BackupState フラグを upstream Misskey TS 互換の
 	// credentialDeviceType / credentialBackedUp 列に保存する (#707)。

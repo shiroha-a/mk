@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
@@ -1595,7 +1594,7 @@ func TestUpdateRemoteNote_RecalculatesHashtags(t *testing.T) {
 }
 
 // #1372: hashtag が消えて tags が非空→空に変わる場合、note.tags は非nilの空配列
-// ('{}') でなければならない。nil の pq.StringArray は Updates() 経由で SQL NULL に
+// ('{}') でなければならない。nil の model.StringArray は Updates() 経由で SQL NULL に
 // なり note.tags (NOT NULL) 制約に違反する。
 func TestUpdateRemoteNote_ClearsTagsToEmptyNotNull(t *testing.T) {
 	repo := testutil.NewMockUserRepository()
@@ -2323,7 +2322,7 @@ func TestResolveActor_UsertagHookFiresOnRefresh(t *testing.T) {
 }
 
 // #1372: refreshActor で remote actor が hashtag を持たない場合、user.tags は
-// 非nilの空配列 ('{}') に更新されなければならない。nil の pq.StringArray は
+// 非nilの空配列 ('{}') に更新されなければならない。nil の model.StringArray は
 // Updates() 経由で SQL NULL になり user.tags (NOT NULL) 制約に違反し、actor 更新
 // (emojis / name / lastFetchedAt 等を含む atomic UPDATE) 全体が失敗する。
 func TestResolveActor_RefreshClearsTagsToEmptyNotNull(t *testing.T) {
@@ -4210,7 +4209,7 @@ func TestUpdateRemoteNote_MentionsRecomputed(t *testing.T) {
 		UserID:   "remote-alice",
 		UserHost: &host,
 		URI:      &uri,
-		Mentions: pq.StringArray{},
+		Mentions: model.StringArray{},
 	}
 	noteRepo.Notes[existing.ID] = existing
 

@@ -3,7 +3,7 @@ package repository
 import (
 	"testing"
 
-	"github.com/lib/pq"
+	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
@@ -38,8 +38,8 @@ func TestHashtagRepository_RecordMention_LocalUser_FreshRow(t *testing.T) {
 	assert.Equal(t, 1, got.MentionedUsersCount)
 	assert.Equal(t, 1, got.MentionedLocalUsersCount)
 	assert.Equal(t, 0, got.MentionedRemoteUsersCount)
-	assert.Equal(t, pq.StringArray{user.ID}, got.MentionedUserIds)
-	assert.Equal(t, pq.StringArray{user.ID}, got.MentionedLocalUserIds)
+	assert.Equal(t, model.StringArray{user.ID}, got.MentionedUserIds)
+	assert.Equal(t, model.StringArray{user.ID}, got.MentionedLocalUserIds)
 	assert.Empty(t, []string(got.MentionedRemoteUserIds))
 }
 
@@ -56,7 +56,7 @@ func TestHashtagRepository_RecordMention_RemoteUser_FreshRow(t *testing.T) {
 	assert.Equal(t, 1, got.MentionedUsersCount)
 	assert.Equal(t, 0, got.MentionedLocalUsersCount)
 	assert.Equal(t, 1, got.MentionedRemoteUsersCount)
-	assert.Equal(t, pq.StringArray{user.ID}, got.MentionedRemoteUserIds)
+	assert.Equal(t, model.StringArray{user.ID}, got.MentionedRemoteUserIds)
 }
 
 func TestHashtagRepository_RecordMention_Idempotent(t *testing.T) {
@@ -73,7 +73,7 @@ func TestHashtagRepository_RecordMention_Idempotent(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.MentionedUsersCount, "duplicate mention should not double-count")
 	assert.Equal(t, 1, got.MentionedLocalUsersCount)
-	assert.Equal(t, pq.StringArray{user.ID}, got.MentionedUserIds)
+	assert.Equal(t, model.StringArray{user.ID}, got.MentionedUserIds)
 }
 
 func TestHashtagRepository_RecordMention_MultipleUsers(t *testing.T) {
@@ -113,7 +113,7 @@ func TestHashtagRepository_RecordAttach_FreshRow(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.AttachedUsersCount)
 	assert.Equal(t, 1, got.AttachedLocalUsersCount)
-	assert.Equal(t, pq.StringArray{user.ID}, got.AttachedLocalUserIds)
+	assert.Equal(t, model.StringArray{user.ID}, got.AttachedLocalUserIds)
 	// Mention 系は触らないこと
 	assert.Equal(t, 0, got.MentionedUsersCount)
 	assert.Empty(t, []string(got.MentionedUserIds))
@@ -151,7 +151,7 @@ func TestHashtagRepository_RecordDetach(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 1, got.AttachedUsersCount)
 	assert.Equal(t, 1, got.AttachedLocalUsersCount)
-	assert.Equal(t, pq.StringArray{u2.ID}, got.AttachedLocalUserIds)
+	assert.Equal(t, model.StringArray{u2.ID}, got.AttachedLocalUserIds)
 }
 
 // 存在しない user / hashtag の detach は no-op (冪等、count を負にしない)。

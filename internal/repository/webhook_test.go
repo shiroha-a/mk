@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +19,7 @@ func TestWebhookRepository_Full(t *testing.T) {
 		ID:     "wh_1",
 		UserID: user.ID,
 		Name:   "Test Hook",
-		On:     pq.StringArray{"note", "follow"},
+		On:     model.StringArray{"note", "follow"},
 		URL:    "https://example.com/hook",
 		Secret: "secret123",
 		Active: true,
@@ -76,11 +75,11 @@ func TestWebhookRepository_ListActiveByUserID(t *testing.T) {
 
 	active := &model.Webhook{
 		ID: "wh_act_1", UserID: user.ID, Name: "Active", URL: "https://a",
-		On: pq.StringArray{"note"}, Active: true,
+		On: model.StringArray{"note"}, Active: true,
 	}
 	inactive := &model.Webhook{
 		ID: "wh_act_2", UserID: user.ID, Name: "Inactive", URL: "https://b",
-		On: pq.StringArray{"note"}, Active: true,
+		On: model.StringArray{"note"}, Active: true,
 	}
 	require.NoError(t, repo.Create(active))
 	require.NoError(t, repo.Create(inactive))
@@ -102,7 +101,7 @@ func TestWebhookRepository_UpdateLatestStatus(t *testing.T) {
 
 	w := &model.Webhook{
 		ID: "wh_st_1", UserID: user.ID, Name: "Status Hook", URL: "https://a",
-		On: pq.StringArray{"note"}, Active: true,
+		On: model.StringArray{"note"}, Active: true,
 	}
 	require.NoError(t, repo.Create(w))
 	defer testDB.Exec(`DELETE FROM "webhook" WHERE id = ?`, w.ID)

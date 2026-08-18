@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -15,7 +14,7 @@ func TestSystemWebhookRepository_Full(t *testing.T) {
 
 	sw := &model.SystemWebhook{
 		ID: "sw_1", Name: "System Hook", URL: "https://example.com/s",
-		On: pq.StringArray{"userCreated"}, IsActive: true, UpdatedAt: time.Now(),
+		On: model.StringArray{"userCreated"}, IsActive: true, UpdatedAt: time.Now(),
 	}
 	require.NoError(t, repo.Create(sw))
 	defer testDB.Exec(`DELETE FROM "system_webhook" WHERE id = ?`, sw.ID)
@@ -64,11 +63,11 @@ func TestSystemWebhookRepository_ListActiveFiltersInactive(t *testing.T) {
 	repo := NewSystemWebhookRepository(testDB)
 
 	active := &model.SystemWebhook{
-		ID: "sw_a", Name: "A", URL: "https://a", On: pq.StringArray{"userCreated"},
+		ID: "sw_a", Name: "A", URL: "https://a", On: model.StringArray{"userCreated"},
 		IsActive: true, UpdatedAt: time.Now(),
 	}
 	inactive := &model.SystemWebhook{
-		ID: "sw_i", Name: "I", URL: "https://i", On: pq.StringArray{"userCreated"},
+		ID: "sw_i", Name: "I", URL: "https://i", On: model.StringArray{"userCreated"},
 		IsActive: true, UpdatedAt: time.Now(),
 	}
 	require.NoError(t, repo.Create(active))
@@ -93,7 +92,7 @@ func TestSystemWebhookRepository_UpdateAdminFieldsPreservesLatestStatus(t *testi
 
 	sw := &model.SystemWebhook{
 		ID: "sw_adm", Name: "orig", URL: "https://o", Secret: "s",
-		On: pq.StringArray{"userCreated"}, IsActive: true, UpdatedAt: time.Now(),
+		On: model.StringArray{"userCreated"}, IsActive: true, UpdatedAt: time.Now(),
 	}
 	require.NoError(t, repo.Create(sw))
 	defer testDB.Exec(`DELETE FROM "system_webhook" WHERE id = ?`, sw.ID)

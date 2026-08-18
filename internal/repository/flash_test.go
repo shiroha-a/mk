@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -25,7 +24,7 @@ func newTestFlash(id, ownerID, title string) *model.Flash {
 		Summary:     "summary-" + title,
 		UserID:      ownerID,
 		Script:      "<:0>",
-		Permissions: pq.StringArray{},
+		Permissions: model.StringArray{},
 		Visibility:  "public",
 	}
 }
@@ -77,9 +76,9 @@ func TestFlashRepository_UpdateFields_NoOp(t *testing.T) {
 	require.NoError(t, repo.UpdateFields("any", nil))
 }
 
-// UpdateFields で permissions に空 pq.StringArray を渡しても NOT NULL
+// UpdateFields で permissions に空 model.StringArray を渡しても NOT NULL
 // 制約違反を起こさないこと (#896)。core/flash.Service.Update が
-// pq.StringArray() で wrap せずに plain []string を渡していた時、
+// model.StringArray() で wrap せずに plain []string を渡していた時、
 // GORM が NULL に倒して 23502 を起こしていた regression guard。
 func TestFlashRepository_UpdateFields_EmptyPermissions(t *testing.T) {
 	repo := NewFlashRepository(testDB)
@@ -87,15 +86,15 @@ func TestFlashRepository_UpdateFields_EmptyPermissions(t *testing.T) {
 	defer cleanupUser(t, user.ID)
 
 	f := newTestFlash("fl_cr_perms", user.ID, "perms")
-	f.Permissions = pq.StringArray{"read:account"}
+	f.Permissions = model.StringArray{"read:account"}
 	require.NoError(t, repo.Create(f))
 	defer cleanupFlash(t, f.ID)
 
-	// 空 permissions で update — pq.StringArray{} なら '{}' に serialize、
+	// 空 permissions で update — model.StringArray{} なら '{}' に serialize、
 	// plain []string{} だと GORM が NULL に倒す drift があったので
-	// pq.StringArray で wrap する pattern を guard する。
+	// model.StringArray で wrap する pattern を guard する。
 	require.NoError(t, repo.UpdateFields(f.ID, map[string]any{
-		"permissions": pq.StringArray{},
+		"permissions": model.StringArray{},
 	}))
 
 	got, err := repo.FindByID(f.ID)

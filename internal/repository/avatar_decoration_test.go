@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -22,7 +21,7 @@ func TestAvatarDecorationRepository_CRUD(t *testing.T) {
 		ID:      "ad_1",
 		Name:    "deco",
 		URL:     "https://example.com/d.png",
-		RoleIDs: pq.StringArray{"role1"},
+		RoleIDs: model.StringArray{"role1"},
 	}
 	require.NoError(t, repo.Create(d))
 	defer cleanupAvatarDeco(t, d.ID)

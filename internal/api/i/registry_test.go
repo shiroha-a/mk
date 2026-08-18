@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -120,9 +119,9 @@ func TestRegistryScopesWithDomain_GroupedByDomain(t *testing.T) {
 	h, _ := newExtraHandler(t)
 	reg := testutil.NewMockRegistryRepository()
 	dom := "client.example"
-	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r1", UserID: stubUser.ID, Key: "a", Scope: pq.StringArray{"client", "base"}, Domain: &dom}))
-	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r2", UserID: stubUser.ID, Key: "b", Scope: pq.StringArray{"client", "theme"}, Domain: &dom}))
-	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r3", UserID: stubUser.ID, Key: "c", Scope: pq.StringArray{"main"}}))
+	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r1", UserID: stubUser.ID, Key: "a", Scope: model.StringArray{"client", "base"}, Domain: &dom}))
+	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r2", UserID: stubUser.ID, Key: "b", Scope: model.StringArray{"client", "theme"}, Domain: &dom}))
+	require.NoError(t, reg.Set(&model.RegistryItem{ID: "r3", UserID: stubUser.ID, Key: "c", Scope: model.StringArray{"main"}}))
 	h.SetRegistryRepo(reg)
 
 	rec := postExtra(h.RegistryScopesWithDomain, `{}`, stubUser)

@@ -2,8 +2,6 @@ package model
 
 import (
 	"time"
-
-	"github.com/lib/pq"
 )
 
 // Ad represents the `ad` table.
@@ -47,12 +45,12 @@ func (Relay) TableName() string { return "relay" }
 
 // AvatarDecoration represents the `avatar_decoration` table.
 type AvatarDecoration struct {
-	ID          string         `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	UpdatedAt   *time.Time     `gorm:"column:updatedAt;type:timestamp with time zone" json:"updatedAt"`
-	URL         string         `gorm:"column:url;type:varchar(1024);not null" json:"url"`
-	Name        string         `gorm:"column:name;type:varchar(256);not null" json:"name"`
-	Description string         `gorm:"column:description;type:varchar(2048);not null;default:''" json:"description"`
-	RoleIDs     pq.StringArray `gorm:"column:roleIdsThatCanBeUsedThisDecoration;type:varchar(128)[];default:'{}'" json:"roleIdsThatCanBeUsedThisDecoration"`
+	ID          string      `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	UpdatedAt   *time.Time  `gorm:"column:updatedAt;type:timestamp with time zone" json:"updatedAt"`
+	URL         string      `gorm:"column:url;type:varchar(1024);not null" json:"url"`
+	Name        string      `gorm:"column:name;type:varchar(256);not null" json:"name"`
+	Description string      `gorm:"column:description;type:varchar(2048);not null;default:''" json:"description"`
+	RoleIDs     StringArray `gorm:"column:roleIdsThatCanBeUsedThisDecoration;type:varchar(128)[];default:'{}'" json:"roleIdsThatCanBeUsedThisDecoration"`
 	// Category は upstream Misskey #17034 (= 2026.5.0) で導入された分類用 field。
 	// nullable で、管理画面の avatar decoration グルーピングに使う。
 	Category *string `gorm:"column:category;type:varchar(128)" json:"category"`
@@ -62,15 +60,15 @@ func (AvatarDecoration) TableName() string { return "avatar_decoration" }
 
 // SystemWebhook represents the `system_webhook` table.
 type SystemWebhook struct {
-	ID           string         `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	IsActive     bool           `gorm:"column:isActive;default:true" json:"isActive"`
-	UpdatedAt    time.Time      `gorm:"column:updatedAt;type:timestamp with time zone;default:now()" json:"updatedAt"`
-	LatestSentAt *time.Time     `gorm:"column:latestSentAt;type:timestamp with time zone" json:"latestSentAt"`
-	LatestStatus *int           `gorm:"column:latestStatus;type:integer" json:"latestStatus"`
-	Name         string         `gorm:"column:name;type:varchar(255);not null" json:"name"`
-	On           pq.StringArray `gorm:"column:on;type:varchar(128)[];default:'{}'" json:"on"`
-	URL          string         `gorm:"column:url;type:varchar(1024);not null" json:"url"`
-	Secret       string         `gorm:"column:secret;type:varchar(1024);not null;default:''" json:"secret"`
+	ID           string      `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	IsActive     bool        `gorm:"column:isActive;default:true" json:"isActive"`
+	UpdatedAt    time.Time   `gorm:"column:updatedAt;type:timestamp with time zone;default:now()" json:"updatedAt"`
+	LatestSentAt *time.Time  `gorm:"column:latestSentAt;type:timestamp with time zone" json:"latestSentAt"`
+	LatestStatus *int        `gorm:"column:latestStatus;type:integer" json:"latestStatus"`
+	Name         string      `gorm:"column:name;type:varchar(255);not null" json:"name"`
+	On           StringArray `gorm:"column:on;type:varchar(128)[];default:'{}'" json:"on"`
+	URL          string      `gorm:"column:url;type:varchar(1024);not null" json:"url"`
+	Secret       string      `gorm:"column:secret;type:varchar(1024);not null;default:''" json:"secret"`
 }
 
 func (SystemWebhook) TableName() string { return "system_webhook" }

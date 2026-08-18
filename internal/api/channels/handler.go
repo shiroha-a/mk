@@ -611,7 +611,7 @@ func (h *Handler) Timeline(c echo.Context) error {
 // is the caller-resolved `bannerUrl` value (nil = no banner / unresolved);
 // list callers batch-resolve it once to avoid an N+1 drive lookup (#1280).
 func (h *Handler) channelToMap(ch *model.Channel, bannerURL any) map[string]any {
-	// golden Channel の pinnedNoteIds は string[] 必須 (non-null)。pq.StringArray
+	// golden Channel の pinnedNoteIds は string[] 必須 (non-null)。model.StringArray
 	// は nil のとき JSON null に marshal されるため、空でも [] を返すよう coalesce
 	// する (#1280。Page content #1237 と同種の null-array drift)。
 	pinnedNoteIDs := []string(ch.PinnedNoteIDs)

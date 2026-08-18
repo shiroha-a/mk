@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	coreemail "github.com/shiroha-a/mk/internal/core/email"
@@ -313,7 +312,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 		}
 		if remaining, berr := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), *req.Token); berr == nil {
 			_ = h.userRepo.UpdateProfile(user.ID, map[string]any{
-				"twoFactorBackupSecret": pq.StringArray(remaining),
+				"twoFactorBackupSecret": model.StringArray(remaining),
 			})
 			return h.ok(c, user)
 		}

@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -377,7 +376,7 @@ func TestService_RecordResponseSuccess_UpdateError(t *testing.T) {
 
 func TestService_IsBlocked(t *testing.T) {
 	svc, _, metaRepo := newService(t)
-	metaRepo.Meta.BlockedHosts = pq.StringArray{"bad.example"}
+	metaRepo.Meta.BlockedHosts = model.StringArray{"bad.example"}
 	assert.True(t, svc.IsBlocked("bad.example"))
 	assert.False(t, svc.IsBlocked("good.example"))
 	assert.False(t, svc.IsBlocked(""))
@@ -391,7 +390,7 @@ func TestService_IsBlocked_MetaError(t *testing.T) {
 
 func TestService_IsSilenced(t *testing.T) {
 	svc, _, metaRepo := newService(t)
-	metaRepo.Meta.SilencedHosts = pq.StringArray{"quiet.example"}
+	metaRepo.Meta.SilencedHosts = model.StringArray{"quiet.example"}
 	assert.True(t, svc.IsSilenced("quiet.example"))
 	assert.False(t, svc.IsSilenced("loud.example"))
 	assert.False(t, svc.IsSilenced(""))
@@ -405,9 +404,9 @@ func TestService_IsSilenced_MetaError(t *testing.T) {
 
 func TestService_FederationHostLists(t *testing.T) {
 	svc, _, metaRepo := newService(t)
-	metaRepo.Meta.BlockedHosts = pq.StringArray{"bad.example"}
-	metaRepo.Meta.SilencedHosts = pq.StringArray{"quiet.example"}
-	metaRepo.Meta.MediaSilencedHosts = pq.StringArray{"media.example"}
+	metaRepo.Meta.BlockedHosts = model.StringArray{"bad.example"}
+	metaRepo.Meta.SilencedHosts = model.StringArray{"quiet.example"}
+	metaRepo.Meta.MediaSilencedHosts = model.StringArray{"media.example"}
 	hosts, err := svc.FederationHostLists()
 	require.NoError(t, err)
 	assert.Equal(t, []string{"bad.example"}, []string(hosts.Blocked))
@@ -427,7 +426,7 @@ func TestService_FederationHostLists_MetaError(t *testing.T) {
 func TestService_IsAllowed_AllMode(t *testing.T) {
 	svc, _, metaRepo := newService(t)
 	metaRepo.Meta.Federation = "all"
-	metaRepo.Meta.BlockedHosts = pq.StringArray{"bad.example"}
+	metaRepo.Meta.BlockedHosts = model.StringArray{"bad.example"}
 	assert.True(t, svc.IsAllowed("good.example"))
 	assert.False(t, svc.IsAllowed("bad.example"))
 	assert.True(t, svc.IsAllowed(""), "empty host (= local) is always allowed")
@@ -457,7 +456,7 @@ func TestService_FederationDisabled_MetaError(t *testing.T) {
 func TestService_IsAllowed_SpecifiedMode(t *testing.T) {
 	svc, _, metaRepo := newService(t)
 	metaRepo.Meta.Federation = "specified"
-	metaRepo.Meta.FederationHosts = pq.StringArray{"allowed.example"}
+	metaRepo.Meta.FederationHosts = model.StringArray{"allowed.example"}
 	assert.True(t, svc.IsAllowed("allowed.example"))
 	assert.False(t, svc.IsAllowed("other.example"))
 }
@@ -467,8 +466,8 @@ func TestService_IsAllowed_SpecifiedMode(t *testing.T) {
 func TestService_IsAllowed_SpecifiedRespectsBlock(t *testing.T) {
 	svc, _, metaRepo := newService(t)
 	metaRepo.Meta.Federation = "specified"
-	metaRepo.Meta.FederationHosts = pq.StringArray{"allowed.example"}
-	metaRepo.Meta.BlockedHosts = pq.StringArray{"allowed.example"}
+	metaRepo.Meta.FederationHosts = model.StringArray{"allowed.example"}
+	metaRepo.Meta.BlockedHosts = model.StringArray{"allowed.example"}
 	assert.False(t, svc.IsAllowed("allowed.example"),
 		"a host listed in both federationHosts and blockedHosts must be denied")
 }
@@ -477,7 +476,7 @@ func TestService_IsAllowed_SpecifiedRespectsBlock(t *testing.T) {
 func TestService_IsAllowed_NoneMode(t *testing.T) {
 	svc, _, metaRepo := newService(t)
 	metaRepo.Meta.Federation = "none"
-	metaRepo.Meta.FederationHosts = pq.StringArray{"allowed.example"}
+	metaRepo.Meta.FederationHosts = model.StringArray{"allowed.example"}
 	assert.False(t, svc.IsAllowed("allowed.example"))
 	assert.False(t, svc.IsAllowed("other.example"))
 	assert.True(t, svc.IsAllowed(""), "empty host (= local) is always allowed even in none mode")
@@ -531,17 +530,17 @@ func TestService_HostMatching(t *testing.T) {
 		t.Run("IsAllowed_specified/"+tc.name, func(t *testing.T) {
 			svc, _, metaRepo := newService(t)
 			metaRepo.Meta.Federation = "specified"
-			metaRepo.Meta.FederationHosts = pq.StringArray{tc.pattern}
+			metaRepo.Meta.FederationHosts = model.StringArray{tc.pattern}
 			assert.Equal(t, tc.want, svc.IsAllowed(tc.host))
 		})
 		t.Run("IsBlocked/"+tc.name, func(t *testing.T) {
 			svc, _, metaRepo := newService(t)
-			metaRepo.Meta.BlockedHosts = pq.StringArray{tc.pattern}
+			metaRepo.Meta.BlockedHosts = model.StringArray{tc.pattern}
 			assert.Equal(t, tc.want, svc.IsBlocked(tc.host))
 		})
 		t.Run("IsSilenced/"+tc.name, func(t *testing.T) {
 			svc, _, metaRepo := newService(t)
-			metaRepo.Meta.SilencedHosts = pq.StringArray{tc.pattern}
+			metaRepo.Meta.SilencedHosts = model.StringArray{tc.pattern}
 			assert.Equal(t, tc.want, svc.IsSilenced(tc.host))
 		})
 	}

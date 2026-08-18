@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -905,7 +904,7 @@ func TestAuthenticate_AppTokenScopesPropagated(t *testing.T) {
 	rawToken := "app-token-xyz"
 	tokenRepo.Tokens[rawToken] = &model.AccessToken{
 		Token:      rawToken,
-		Permission: pq.StringArray{"read:admin:queue"},
+		Permission: model.StringArray{"read:admin:queue"},
 		User:       appUser,
 	}
 	auth := NewAuthMiddleware(userRepo, tokenRepo)

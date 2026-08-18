@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/meself"
 	"github.com/shiroha-a/mk/internal/api/pagination"
@@ -215,9 +214,9 @@ func (h *Handler) Trend(c echo.Context) error {
 	cutoff := time.Now().Add(-time.Duration(bucketSeconds*bucketCount) * time.Second)
 	cutoffID := id.AidxCutoffPrefix(cutoff)
 
-	// pq.StringArray を含む struct を Scan(&rows) に渡すと GORM の
+	// model.StringArray を含む struct を Scan(&rows) に渡すと GORM の
 	// schema reflection が `unsupported data type: &[]` を warn-log する
-	// (pq.StringArray の Scanner で runtime には正しく動くが、初期 type
+	// (model.StringArray の Scanner で runtime には正しく動くが、初期 type
 	// infer で躓く)。Rows().Scan() で個別に scan するとこの noise を回避
 	// できるので、本 handler では明示的なループ scan を採用する。
 	type row struct {
@@ -239,7 +238,7 @@ func (h *Handler) Trend(c echo.Context) error {
 	defer sqlRows.Close()
 	for sqlRows.Next() {
 		var r row
-		var tags pq.StringArray
+		var tags model.StringArray
 		if err := sqlRows.Scan(&r.ID, &r.UserID, &tags); err != nil {
 			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 		}
@@ -386,7 +385,7 @@ func (h *Handler) Users(c echo.Context) error {
 	// 部分集合)。単一要素なので `tags @> {normTag}` と等価。
 	normTag := searchnorm.Normalize(req.Tag)
 	q := h.db.Model(&model.User{}).
-		Where("tags @> ?", pq.StringArray{normTag}).
+		Where("tags @> ?", model.StringArray{normTag}).
 		Where("\"isSuspended\" = FALSE")
 	if req.State == "alive" {
 		q = q.Where("\"updatedAt\" > ?", time.Now().Add(-usersAliveWindow))

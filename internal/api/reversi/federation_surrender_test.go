@@ -8,7 +8,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/lib/pq"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -94,7 +93,7 @@ func TestMatch_AcceptsPendingRemoteInvitation_ReusesGameAndSendsJoin(t *testing.
 		ID:                   "gPending",
 		User1ID:              "remoteAlice", // inviter (remote)
 		User2ID:              "u1",          // invitee (local viewer)
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "random",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),
@@ -183,7 +182,7 @@ func TestShowGame_AutoJoinDedup(t *testing.T) {
 
 	pending := &model.ReversiGame{
 		ID: "gAuto", User1ID: "inviter", User2ID: "u1",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "random",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),
@@ -218,7 +217,7 @@ func TestShowGame_AutoJoinSkipsWhenInviterMissing(t *testing.T) {
 
 	pending := &model.ReversiGame{
 		ID: "gMissing", User1ID: "ghost", User2ID: "u1",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "random",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),

@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/pquerna/otp/totp"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/model"
@@ -27,7 +26,7 @@ import (
 func enableTwoFactorWithBackupCodes(repo *testutil.MockUserRepository, uid string) {
 	p := repo.Profiles[uid]
 	p.TwoFactorEnabled = true
-	p.TwoFactorBackupSecret = pq.StringArray{"backup1", "backup2"}
+	p.TwoFactorBackupSecret = model.StringArray{"backup1", "backup2"}
 }
 
 // enableTwoFactorWithTOTP generates a fresh TOTP secret, stores it on the
@@ -228,7 +227,7 @@ func TestTwoFARegisterKey_Success(t *testing.T) {
 	// sessionId / creation という旧フィールドが残っていないこと
 	assert.NotContains(t, rec.Body.String(), "sessionId")
 	// backup code が消費されている
-	assert.Equal(t, pq.StringArray{"backup2"}, repo.Profiles["u1"].TwoFactorBackupSecret)
+	assert.Equal(t, model.StringArray{"backup2"}, repo.Profiles["u1"].TwoFactorBackupSecret)
 }
 
 func TestTwoFARegisterKey_TOTPSuccess(t *testing.T) {

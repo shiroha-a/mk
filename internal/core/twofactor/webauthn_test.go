@@ -16,7 +16,6 @@ import (
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/protocol/webauthncose"
 	"github.com/go-webauthn/webauthn/webauthn"
-	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -312,7 +311,7 @@ func TestUserAdapter_CredentialsRoundtrip(t *testing.T) {
 			ID:         "AAEC", // base64url("\x00\x01\x02")
 			PublicKey:  "AwQF",
 			Counter:    42,
-			Transports: pq.StringArray{"usb", "nfc"},
+			Transports: model.StringArray{"usb", "nfc"},
 		},
 	}
 	a := &userAdapter{user: &model.User{ID: "x"}, keys: keys}

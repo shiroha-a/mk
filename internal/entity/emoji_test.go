@@ -3,7 +3,6 @@ package entity
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 )
@@ -42,8 +41,8 @@ func TestPackEmojiDetailed_AllFields(t *testing.T) {
 		License:                                 &lic,
 		IsSensitive:                             true,
 		LocalOnly:                               true,
-		Aliases:                                 pq.StringArray{"happy", "joy"},
-		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray{"role1"},
+		Aliases:                                 model.StringArray{"happy", "joy"},
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray{"role1"},
 	}
 	d := PackEmojiDetailed(e)
 	assert.Equal(t, "e3", d.ID)
@@ -92,8 +91,8 @@ func TestPackEmojiDetailed_DoesNotMutateInput(t *testing.T) {
 	e := &model.Emoji{
 		ID:                                      "e5",
 		Name:                                    "safe",
-		Aliases:                                 pq.StringArray{"orig"},
-		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray{"r1"},
+		Aliases:                                 model.StringArray{"orig"},
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray{"r1"},
 		OriginalURL:                             "https://example.com/safe.png",
 	}
 	d := PackEmojiDetailed(e)

@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -42,7 +41,7 @@ func newStartedGameWithRedis(t *testing.T) (*model.ReversiGame, *fakeRepo, *capt
 		ID:                   "rg1",
 		User1ID:              "alice",
 		User2ID:              "bob",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "1",
 		TimeLimitForEachTurn: 1, // 1 second for fast timeout
 		Logs:                 datatypes.JSON("[]"),
@@ -113,7 +112,7 @@ func TestService_PutStone_EndsGame_SmallBoard(t *testing.T) {
 	pub := &capturePublisher{}
 	svc := NewService(repo, pub, reversiTestRedis.Client)
 
-	tinyMap := pq.StringArray{
+	tinyMap := model.StringArray{
 		"----",
 		"-wb-",
 		"-bw-",

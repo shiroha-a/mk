@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lib/pq"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -515,7 +514,7 @@ func TestMarkRead_AppendsToReads(t *testing.T) {
 	require.NoError(t, svc.MarkReadByMessageID(context.Background(), "bob", msg.ID))
 	stored := repo.Messages[msg.ID]
 	require.NotNil(t, stored)
-	assert.Equal(t, pq.StringArray{"bob"}, stored.Reads)
+	assert.Equal(t, model.StringArray{"bob"}, stored.Reads)
 }
 
 // --- HasPermissionToViewRoomInfo (upstream 2026.5.4 / #1164 Phase C) ---

@@ -3,7 +3,6 @@ package model
 import (
 	"time"
 
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -34,7 +33,7 @@ type Page struct {
 	Variables           datatypes.JSON `gorm:"column:variables;type:jsonb;default:'[]'" json:"variables"`
 	Script              string         `gorm:"column:script;type:varchar(16384);default:''" json:"script"`
 	Visibility          PageVisibility `gorm:"column:visibility;type:page_visibility_enum;default:'public'" json:"visibility"`
-	VisibleUserIDs      pq.StringArray `gorm:"column:visibleUserIds;type:varchar(32)[];default:'{}'" json:"visibleUserIds"`
+	VisibleUserIDs      StringArray    `gorm:"column:visibleUserIds;type:varchar(32)[];default:'{}'" json:"visibleUserIds"`
 	LikedCount          int            `gorm:"column:likedCount;default:0" json:"likedCount"`
 }
 

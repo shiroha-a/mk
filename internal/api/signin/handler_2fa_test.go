@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/pquerna/otp/totp"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
@@ -67,7 +66,7 @@ func newTestUserWithTOTP(repo *testutil.MockUserRepository, username, password, 
 		TwoFactorSecret:  &totpSecret,
 	}
 	if backupCodes != nil {
-		prof.TwoFactorBackupSecret = pq.StringArray(backupCodes)
+		prof.TwoFactorBackupSecret = model.StringArray(backupCodes)
 	}
 	repo.Profiles["u1"] = prof
 	return user

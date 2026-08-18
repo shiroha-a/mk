@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -56,7 +55,7 @@ func TestNotesChart_LocalDeleteReplyWithFile(t *testing.T) {
 	note := &model.Note{
 		ID:      "n2",
 		ReplyID: strPtr("p1"),
-		FileIDs: pq.StringArray{"f1"},
+		FileIDs: model.StringArray{"f1"},
 	}
 	require.NoError(t, nc.Update(note, false))
 	require.NoError(t, engine.Save(context.Background()))

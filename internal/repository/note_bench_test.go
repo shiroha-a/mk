@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
 )
@@ -53,7 +52,7 @@ func BenchmarkFindManyByIDsWithUser(b *testing.B) {
 			Text:       &text,
 			Visibility: model.NoteVisibilityPublic,
 			Reactions:  datatypes.JSON([]byte(`{"👍":3,"❤":1}`)),
-			FileIDs:    pq.StringArray{},
+			FileIDs:    model.StringArray{},
 		}
 		// 約 1/4 を renote / reply にして preload (Renote / Reply 系) を踏ませる。
 		if i >= 8 && i%4 == 0 {

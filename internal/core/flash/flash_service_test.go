@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/flash"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -137,7 +136,7 @@ func TestUpdate_TitleEmpty(t *testing.T) {
 	assert.ErrorIs(t, err, flash.ErrFlashTitleRequired)
 }
 
-// Update で empty Permissions を渡しても、UpdateFields に pq.StringArray
+// Update で empty Permissions を渡しても、UpdateFields に model.StringArray
 // として渡されることを担保する (#896)。plain []string で渡すと
 // production の GORM 経由で NULL 化して NOT NULL 制約違反になる。
 // ここでは mock repo の UpdateFields capture で wrap 型を検査する。
@@ -148,8 +147,8 @@ func TestUpdate_EmptyPermissionsWrappedAsStringArray(t *testing.T) {
 	_, err := svc.Update("u1", "f1", flash.UpdateInput{Permissions: &emptyPerms})
 	require.NoError(t, err)
 	require.Contains(t, repo.LastUpdates, "permissions")
-	v, ok := repo.LastUpdates["permissions"].(pq.StringArray)
-	require.True(t, ok, "permissions should be pq.StringArray, got %T", repo.LastUpdates["permissions"])
+	v, ok := repo.LastUpdates["permissions"].(model.StringArray)
+	require.True(t, ok, "permissions should be model.StringArray, got %T", repo.LastUpdates["permissions"])
 	assert.Empty(t, v)
 }
 

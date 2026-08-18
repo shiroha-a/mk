@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,7 +32,7 @@ func TestEmojiRepository_FindByNameAndHost_Local(t *testing.T) {
 }
 
 // UpdateFields は roleIdsThatCanBeUsedThisEmojiAsReaction (varchar[]) と type を
-// 実 DB に正しく書き込む。pq.StringArray でラップした array / 空 array / *string
+// 実 DB に正しく書き込む。model.StringArray でラップした array / 空 array / *string
 // type が round-trip することを実 PostgreSQL で検証する (aliases #729 と同型の
 // NULL 化罠を回帰防止)。
 func TestEmojiRepository_UpdateFields_RoleIdsAndType(t *testing.T) {
@@ -44,7 +43,7 @@ func TestEmojiRepository_UpdateFields_RoleIdsAndType(t *testing.T) {
 
 	// roleIds (非空) + type を書き込む。
 	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{
-		"roleIdsThatCanBeUsedThisEmojiAsReaction": pq.StringArray{"r1", "r2"},
+		"roleIdsThatCanBeUsedThisEmojiAsReaction": model.StringArray{"r1", "r2"},
 		"type": "image/webp",
 	}))
 	got, err := repo.FindByID(e.ID)
@@ -55,7 +54,7 @@ func TestEmojiRepository_UpdateFields_RoleIdsAndType(t *testing.T) {
 
 	// 空 array へのリセットも NOT NULL 制約に違反せず '{}' になる。
 	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{
-		"roleIdsThatCanBeUsedThisEmojiAsReaction": pq.StringArray{},
+		"roleIdsThatCanBeUsedThisEmojiAsReaction": model.StringArray{},
 	}))
 	got, err = repo.FindByID(e.ID)
 	require.NoError(t, err)
@@ -252,7 +251,7 @@ func TestEmojiRepository_ListWithFilter_ColonNameExactMatch(t *testing.T) {
 // query が :name: 形式でなければ name / aliases / category の部分一致で絞る (#1543)。
 func TestEmojiRepository_ListWithFilter_AliasAndCategoryMatch(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
-	byAlias := &model.Emoji{ID: "e_q_alias", Name: "nomatch1", Aliases: pq.StringArray{"zzqterm"}, OriginalURL: "https://example.com/al.png"}
+	byAlias := &model.Emoji{ID: "e_q_alias", Name: "nomatch1", Aliases: model.StringArray{"zzqterm"}, OriginalURL: "https://example.com/al.png"}
 	byCategory := &model.Emoji{ID: "e_q_cat", Name: "nomatch2", Category: strPtrEmoji("zzqterm-cat"), OriginalURL: "https://example.com/c.png"}
 	unrelated := &model.Emoji{ID: "e_q_none", Name: "nomatch3", OriginalURL: "https://example.com/n.png"}
 	require.NoError(t, repo.Create(byAlias))
@@ -404,31 +403,31 @@ func TestEmojiRepository_UpdateFields_Success(t *testing.T) {
 }
 
 // TestEmojiRepository_UpdateFields_AliasesEmptySlice は #729 regression
-// guard。`pq.StringArray{}` (空 slice) で aliases 列を更新する経路が
+// guard。`model.StringArray{}` (空 slice) で aliases 列を更新する経路が
 // PostgreSQL の NOT NULL DEFAULT '{}' 制約と整合することを確認する。
 //
 // 旧 EmojiUpdate handler は `[]string` を直接 GORM に渡していて、空 slice
 // が NULL として serialize され "null value in column \"aliases\" violates
 // not-null constraint" で UpdateFields が失敗していた (frontend が
 // aliases:[] で送るたびに NO_SUCH_EMOJI が返る病状)。本 test は
-// `pq.StringArray` 経由の UpdateFields が成功することを保証する。
+// `model.StringArray` 経由の UpdateFields が成功することを保証する。
 func TestEmojiRepository_UpdateFields_AliasesEmptySlice(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
 	e := &model.Emoji{
 		ID: "em_uf_alias", Name: "alias_target", OriginalURL: "https://x",
-		Aliases: pq.StringArray{"old"},
+		Aliases: model.StringArray{"old"},
 	}
 	require.NoError(t, repo.Create(e))
 	defer cleanupEmoji(t, e.ID)
 
-	// 空 slice の pq.StringArray は SQL の '{}' に変換される
-	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray{}}))
+	// 空 slice の model.StringArray は SQL の '{}' に変換される
+	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{"aliases": model.StringArray{}}))
 	after, err := repo.FindByID(e.ID)
 	require.NoError(t, err)
-	assert.Empty(t, []string(after.Aliases), "empty pq.StringArray should clear aliases without NULL constraint violation")
+	assert.Empty(t, []string(after.Aliases), "empty model.StringArray should clear aliases without NULL constraint violation")
 
 	// 通常の値も問題なく更新できる
-	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray{"a", "b"}}))
+	require.NoError(t, repo.UpdateFields(e.ID, map[string]any{"aliases": model.StringArray{"a", "b"}}))
 	after, err = repo.FindByID(e.ID)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"a", "b"}, []string(after.Aliases))
@@ -462,7 +461,7 @@ func TestEmojiRepository_UpdateFieldsMany(t *testing.T) {
 // TestEmojiRepository_UpdateFieldsMany_AliasesPqStringArray は #882 で
 // 発覚した bulk drift の regression guard。core/api/admin の bulk handler
 // は plain []string を渡すと GORM が record literal `('a','b')` を生成
-// して SQLSTATE 42804 (column type mismatch) になっていた。pq.StringArray
+// して SQLSTATE 42804 (column type mismatch) になっていた。model.StringArray
 // で wrap した場合に array literal `'{a,b}'` として正しく serialize され
 // ることを確認する (UpdateFields_AliasesEmptySlice の bulk 版)。
 func TestEmojiRepository_UpdateFieldsMany_AliasesPqStringArray(t *testing.T) {
@@ -474,9 +473,9 @@ func TestEmojiRepository_UpdateFieldsMany_AliasesPqStringArray(t *testing.T) {
 	defer cleanupEmoji(t, e1.ID)
 	defer cleanupEmoji(t, e2.ID)
 
-	// 通常の値: pq.StringArray wrap で 2 emoji 同時 update
+	// 通常の値: model.StringArray wrap で 2 emoji 同時 update
 	require.NoError(t, repo.UpdateFieldsMany([]string{e1.ID, e2.ID}, map[string]any{
-		"aliases": pq.StringArray{"alpha", "beta"},
+		"aliases": model.StringArray{"alpha", "beta"},
 	}))
 	a1, _ := repo.FindByID(e1.ID)
 	a2, _ := repo.FindByID(e2.ID)
@@ -485,7 +484,7 @@ func TestEmojiRepository_UpdateFieldsMany_AliasesPqStringArray(t *testing.T) {
 
 	// 空 slice: NOT NULL 制約に当たらず '{}' として保存される
 	require.NoError(t, repo.UpdateFieldsMany([]string{e1.ID, e2.ID}, map[string]any{
-		"aliases": pq.StringArray{},
+		"aliases": model.StringArray{},
 	}))
 	a1, _ = repo.FindByID(e1.ID)
 	assert.Empty(t, []string(a1.Aliases))
@@ -606,7 +605,7 @@ func TestEmojiRepository_ListV2_NameFilter(t *testing.T) {
 func TestEmojiRepository_ListV2_QueryParity(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
 	mk := func(id, name, category string, aliases []string) *model.Emoji {
-		e := &model.Emoji{ID: id, Name: name, Category: &category, Aliases: pq.StringArray(aliases), OriginalURL: "https://x"}
+		e := &model.Emoji{ID: id, Name: name, Category: &category, Aliases: model.StringArray(aliases), OriginalURL: "https://x"}
 		require.NoError(t, repo.Create(e))
 		t.Cleanup(func() { cleanupEmoji(t, id) })
 		return e
@@ -919,7 +918,7 @@ func TestEmojiRepository_ListV2_OriginalURLIgnored(t *testing.T) {
 // 跨ぎ誤 match を避ける)。
 func TestEmojiRepository_ListWithFilter_AliasesElementBoundary(t *testing.T) {
 	repo := NewEmojiRepository(testDB)
-	e := &model.Emoji{ID: "elb1", Name: "elbname", OriginalURL: "https://x", Aliases: pq.StringArray{"foo", "bar"}}
+	e := &model.Emoji{ID: "elb1", Name: "elbname", OriginalURL: "https://x", Aliases: model.StringArray{"foo", "bar"}}
 	require.NoError(t, repo.Create(e))
 	defer cleanupEmoji(t, e.ID)
 	// "foo,bar" は結合文字列 "foo,bar" には部分一致するが、単一 alias には無い。

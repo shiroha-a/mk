@@ -4,7 +4,6 @@ import (
 	"context"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,8 +30,8 @@ func setupPollNote(t *testing.T, noteID, userID string) {
 	p := &model.Poll{
 		NoteID:         noteID,
 		Multiple:       false,
-		Choices:        pq.StringArray{"A", "B", "C"},
-		Votes:          pq.Int64Array{0, 0, 0},
+		Choices:        model.StringArray{"A", "B", "C"},
+		Votes:          model.Int64Array{0, 0, 0},
 		NoteVisibility: model.NoteVisibilityPublic,
 		UserID:         userID,
 	}

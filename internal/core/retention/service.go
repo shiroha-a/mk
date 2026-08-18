@@ -20,7 +20,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -79,7 +78,7 @@ func (s *Service) Aggregate(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// nil のままだと pq.StringArray.Value が NULL を返し、`userIds` カラムに
+	// nil のままだと model.StringArray.Value が NULL を返し、`userIds` カラムに
 	// SQL NULL が入る。entity 層 / API JSON で `null` が露出すると Misskey
 	// 互換の `[]` 表現が崩れて frontend heatmap 描画が壊れるので、empty な
 	// 場合は明示的に non-nil の空 slice にしておく。
@@ -93,7 +92,7 @@ func (s *Service) Aggregate(ctx context.Context) error {
 		CreatedAt:  now,
 		UpdatedAt:  now,
 		DateKey:    dateKey,
-		UserIDs:    pq.StringArray(newIDs),
+		UserIDs:    model.StringArray(newIDs),
 		UsersCount: len(newIDs),
 		Data:       datatypes.JSON([]byte("{}")),
 	}

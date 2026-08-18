@@ -4,7 +4,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -38,7 +37,7 @@ func seedBackfillUser(t *testing.T, id string) {
 func seedBackfillNote(t *testing.T, id, userID string, tags []string) {
 	t.Helper()
 	require.NoError(t, testDB.Create(&model.Note{
-		ID: id, UserID: userID, Visibility: model.NoteVisibilityPublic, Tags: pq.StringArray(tags),
+		ID: id, UserID: userID, Visibility: model.NoteVisibilityPublic, Tags: model.StringArray(tags),
 	}).Error)
 	t.Cleanup(func() { testDB.Exec(`DELETE FROM "note" WHERE id = ?`, id) })
 }

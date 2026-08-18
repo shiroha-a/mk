@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/model"
@@ -148,7 +147,7 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 		"twoFactorSecret":       *profile.TwoFactorTempSecret,
 		"twoFactorTempSecret":   nil,
 		"twoFactorEnabled":      true,
-		"twoFactorBackupSecret": pq.StringArray(backupCodes),
+		"twoFactorBackupSecret": model.StringArray(backupCodes),
 	})
 
 	// upstream (done.ts) は 2FA 有効化後に meUpdated を publish して UI を更新する
@@ -192,7 +191,7 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"twoFactorSecret":       nil,
 		"twoFactorEnabled":      false,
-		"twoFactorBackupSecret": pq.StringArray(nil),
+		"twoFactorBackupSecret": model.StringArray(nil),
 	})
 
 	// upstream (unregister.ts) は 2FA 解除後に meUpdated を publish する (#1555)。
@@ -248,7 +247,7 @@ func (h *Handler) verify2FAToken(ctx context.Context, profile *model.UserProfile
 	}
 	if remaining, err := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), token); err == nil {
 		_ = h.userService.UpdateProfileFields(profile.UserID, map[string]any{
-			"twoFactorBackupSecret": pq.StringArray(remaining),
+			"twoFactorBackupSecret": model.StringArray(remaining),
 		})
 		return true
 	}

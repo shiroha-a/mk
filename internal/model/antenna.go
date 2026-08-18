@@ -3,7 +3,6 @@ package model
 import (
 	"time"
 
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -33,7 +32,7 @@ type Antenna struct {
 	Name                           string         `gorm:"column:name;type:varchar(128);not null" json:"name"`
 	Src                            AntennaSource  `gorm:"column:src;type:antenna_src_enum;not null" json:"src"`
 	UserListID                     *string        `gorm:"column:userListId;type:varchar(32)" json:"userListId"`
-	Users                          pq.StringArray `gorm:"column:users;type:varchar(1024)[];default:'{}'" json:"users"`
+	Users                          StringArray    `gorm:"column:users;type:varchar(1024)[];default:'{}'" json:"users"`
 	Keywords                       datatypes.JSON `gorm:"column:keywords;type:jsonb;default:'[]'" json:"keywords"`
 	ExcludeKeywords                datatypes.JSON `gorm:"column:excludeKeywords;type:jsonb;default:'[]'" json:"excludeKeywords"`
 	CaseSensitive                  bool           `gorm:"column:caseSensitive;default:false" json:"caseSensitive"`

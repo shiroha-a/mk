@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/poll"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -33,8 +32,8 @@ func seedPollNote(noteRepo *testutil.MockNoteRepository, pollRepo *testutil.Mock
 	pollRepo.Polls[noteID] = &model.Poll{
 		NoteID:    noteID,
 		Multiple:  multiple,
-		Choices:   pq.StringArray{"A", "B", "C"},
-		Votes:     pq.Int64Array{0, 0, 0},
+		Choices:   model.StringArray{"A", "B", "C"},
+		Votes:     model.Int64Array{0, 0, 0},
 		ExpiresAt: expiresAt,
 	}
 }
@@ -241,7 +240,7 @@ func TestVote_RemotePollFiresOnVote(t *testing.T) {
 	}
 	pollRepo.Polls["n_remote"] = &model.Poll{
 		NoteID: "n_remote", Multiple: false,
-		Choices: pq.StringArray{"X", "Y"}, Votes: pq.Int64Array{0, 0},
+		Choices: model.StringArray{"X", "Y"}, Votes: model.Int64Array{0, 0},
 	}
 	hook := &stubFedHook{}
 	svc.SetFederationHook(hook)

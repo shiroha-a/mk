@@ -4,7 +4,6 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -73,7 +72,7 @@ func TestUpdateEmail_With2FA_RequiresToken(t *testing.T) {
 		UserID:                "u1",
 		Password:              &pwd,
 		TwoFactorEnabled:      true,
-		TwoFactorBackupSecret: pq.StringArray{"backup1", "backup2"},
+		TwoFactorBackupSecret: model.StringArray{"backup1", "backup2"},
 	}
 	rec := postExtra(h.UpdateEmail, `{"password":"secret","email":"attacker@example.com"}`, stubUser)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
@@ -88,7 +87,7 @@ func TestUpdateEmail_With2FA_AcceptsBackupCode(t *testing.T) {
 		UserID:                "u1",
 		Password:              &pwd,
 		TwoFactorEnabled:      true,
-		TwoFactorBackupSecret: pq.StringArray{"backup1", "backup2"},
+		TwoFactorBackupSecret: model.StringArray{"backup1", "backup2"},
 	}
 	rec := postExtra(h.UpdateEmail, `{"password":"secret","email":"new@example.com","token":"backup1"}`, stubUser)
 	assert.Equal(t, http.StatusOK, rec.Code)

@@ -4,7 +4,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -69,7 +68,7 @@ func TestRegistryRepository_ScopesWithDomain(t *testing.T) {
 
 	require.NoError(t, testDB.Exec(
 		`INSERT INTO "registry_item" (id, "userId", scope, domain, key, value) VALUES (?, ?, ?, ?, ?, '{}'::jsonb) ON CONFLICT DO NOTHING`,
-		"reg_sd_i1", u.ID, pq.StringArray{"client"}, "dom", "k",
+		"reg_sd_i1", u.ID, model.StringArray{"client"}, "dom", "k",
 	).Error)
 	defer testDB.Exec(`DELETE FROM "registry_item" WHERE id = ?`, "reg_sd_i1")
 

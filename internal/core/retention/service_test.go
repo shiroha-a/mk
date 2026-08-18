@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -145,7 +144,7 @@ func (s *stubRetentionRepo) Update(id string, updatedAt time.Time, data datatype
 // --- tests ---
 
 // 新規登録がゼロの日でも UserIDs カラムに SQL NULL を書かず空配列で
-// 正規化されることを確認する。pq.StringArray(nil) は NULL を生成し、
+// 正規化されることを確認する。model.StringArray(nil) は NULL を生成し、
 // API JSON で `userIds: null` が露出して Misskey 互換が崩れる。
 func TestService_Aggregate_EmptyRegisteredYieldsEmptyArrayNotNull(t *testing.T) {
 	now := time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC)
@@ -164,7 +163,7 @@ func TestService_Aggregate_EmptyRegisteredYieldsEmptyArrayNotNull(t *testing.T) 
 	require.NotNil(t, row)
 	assert.Equal(t, 0, row.UsersCount)
 	assert.NotNil(t, row.UserIDs, "UserIDs must be a non-nil empty slice, never nil")
-	assert.Equal(t, pq.StringArray{}, row.UserIDs)
+	assert.Equal(t, model.StringArray{}, row.UserIDs)
 }
 
 func TestService_Aggregate_InsertsTodayRow(t *testing.T) {
@@ -183,7 +182,7 @@ func TestService_Aggregate_InsertsTodayRow(t *testing.T) {
 	row := retentions.rows["2026-4-25"]
 	require.NotNil(t, row, "today's row must be inserted")
 	assert.Equal(t, 2, row.UsersCount)
-	assert.Equal(t, pq.StringArray{"u1", "u2"}, row.UserIDs)
+	assert.Equal(t, model.StringArray{"u1", "u2"}, row.UserIDs)
 }
 
 func TestService_Aggregate_DuplicateDateKeyIsSkipped(t *testing.T) {
@@ -227,7 +226,7 @@ func TestService_Aggregate_DuplicateDateKeyStillRefreshesPastCohorts(t *testing.
 	retentions.rows["2026-4-24"] = &model.RetentionAggregation{
 		ID:      "row-yesterday",
 		DateKey: "2026-4-24",
-		UserIDs: pq.StringArray{"u_y_active", "u_y_dropped"},
+		UserIDs: model.StringArray{"u_y_active", "u_y_dropped"},
 		Data:    datatypes.JSON([]byte("{}")),
 	}
 
@@ -262,7 +261,7 @@ func TestService_Aggregate_UpdatesPastCohorts(t *testing.T) {
 	retentions.rows["2026-4-24"] = &model.RetentionAggregation{
 		ID:        "row-yesterday",
 		DateKey:   "2026-4-24",
-		UserIDs:   pq.StringArray{"u_yesterday_active", "u_yesterday_dropped"},
+		UserIDs:   model.StringArray{"u_yesterday_active", "u_yesterday_dropped"},
 		Data:      datatypes.JSON([]byte("{}")),
 		CreatedAt: now.Add(-24 * time.Hour),
 	}
@@ -376,7 +375,7 @@ func TestService_Aggregate_UpdateErrIsSwallowed(t *testing.T) {
 	retentions.rows["2026-4-24"] = &model.RetentionAggregation{
 		ID:      "row-yesterday",
 		DateKey: "2026-4-24",
-		UserIDs: pq.StringArray{"u_y"},
+		UserIDs: model.StringArray{"u_y"},
 		Data:    datatypes.JSON([]byte("{}")),
 	}
 
@@ -398,7 +397,7 @@ func TestService_Aggregate_MergesIntoExistingData(t *testing.T) {
 	retentions.rows["2026-4-24"] = &model.RetentionAggregation{
 		ID:      "row-yesterday",
 		DateKey: "2026-4-24",
-		UserIDs: pq.StringArray{"u_y"},
+		UserIDs: model.StringArray{"u_y"},
 		Data:    datatypes.JSON([]byte(`{"2026-4-24":1}`)),
 	}
 
@@ -424,7 +423,7 @@ func TestService_Aggregate_CorruptDataRowIsSkipped(t *testing.T) {
 	retentions.rows["2026-4-24"] = &model.RetentionAggregation{
 		ID:      "row-yesterday",
 		DateKey: "2026-4-24",
-		UserIDs: pq.StringArray{"u_y"},
+		UserIDs: model.StringArray{"u_y"},
 		Data:    datatypes.JSON([]byte(`not-json`)),
 	}
 

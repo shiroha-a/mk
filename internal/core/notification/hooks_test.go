@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -103,7 +102,7 @@ func TestHook_OnNoteCreated_MentionThreadMutedSkipped(t *testing.T) {
 	require.NoError(t, muteRepo.Create(&model.NoteThreadMuting{UserID: "alice", ThreadID: "n_m"}))
 	h.SetThreadMutingRepo(muteRepo)
 
-	note := &model.Note{ID: "n_m", UserID: "bob", Mentions: pq.StringArray{"alice"}}
+	note := &model.Note{ID: "n_m", UserID: "bob", Mentions: model.StringArray{"alice"}}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
 	out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
@@ -183,7 +182,7 @@ func TestHook_OnNoteCreated_Mention(t *testing.T) {
 
 	note := &model.Note{
 		ID: "n_mention", UserID: "bob",
-		Mentions: pq.StringArray{"alice"},
+		Mentions: model.StringArray{"alice"},
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
@@ -199,7 +198,7 @@ func TestHook_OnNoteCreated_MentionSkipsSelfAndUnknown(t *testing.T) {
 
 	note := &model.Note{
 		ID: "n_mention", UserID: "bob",
-		Mentions: pq.StringArray{"bob", "ghost", ""},
+		Mentions: model.StringArray{"bob", "ghost", ""},
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
@@ -216,7 +215,7 @@ func TestHook_OnNoteCreated_MentionDedupedWithReply(t *testing.T) {
 	parent := &model.Note{ID: "n_p", UserID: "alice"}
 	note := &model.Note{
 		ID: "n_r", UserID: "bob",
-		Mentions: pq.StringArray{"alice"},
+		Mentions: model.StringArray{"alice"},
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, parent, nil)
 
@@ -242,7 +241,7 @@ func TestHook_OnNoteCreated_NoteUnreadSpecified(t *testing.T) {
 		ID:             "n_spec",
 		UserID:         "bob",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"alice", "carol", "bob"}, // bob 自身は skip
+		VisibleUserIDs: model.StringArray{"alice", "carol", "bob"}, // bob 自身は skip
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
@@ -269,8 +268,8 @@ func TestHook_OnNoteCreated_NoteUnreadMentionMergesFlags(t *testing.T) {
 		ID:             "n_both",
 		UserID:         "bob",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"alice"},
-		Mentions:       pq.StringArray{"alice"},
+		VisibleUserIDs: model.StringArray{"alice"},
+		Mentions:       model.StringArray{"alice"},
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
@@ -293,7 +292,7 @@ func TestHook_OnNoteCreated_NoteUnreadSkipsRemoteUsers(t *testing.T) {
 		ID:             "n_mix",
 		UserID:         "bob",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"alice", "remote1"},
+		VisibleUserIDs: model.StringArray{"alice", "remote1"},
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
@@ -311,7 +310,7 @@ func TestHook_OnNoteCreated_NoteUnreadSkippedWhenRepoUnset(t *testing.T) {
 		ID:             "n_spec",
 		UserID:         "bob",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"alice"},
+		VisibleUserIDs: model.StringArray{"alice"},
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 	// no panic, no rows anywhere
@@ -331,7 +330,7 @@ func TestHook_OnNoteCreated_NoteUnreadPublicNoop(t *testing.T) {
 		ID:         "n_pub",
 		UserID:     "bob",
 		Visibility: model.NoteVisibilityPublic,
-		Mentions:   pq.StringArray{"alice"},
+		Mentions:   model.StringArray{"alice"},
 	}
 	h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
@@ -394,8 +393,8 @@ func TestHook_OnNoteCreated_NoteUnreadSkipsMentionWithoutUserRepo(t *testing.T) 
 		ID:             "n_nur",
 		UserID:         "bob",
 		Visibility:     model.NoteVisibilitySpecified,
-		VisibleUserIDs: pq.StringArray{"alice"},
-		Mentions:       pq.StringArray{"alice", "unknown"},
+		VisibleUserIDs: model.StringArray{"alice"},
+		Mentions:       model.StringArray{"alice", "unknown"},
 	}
 	// userRepo nil のため notifyLocalUser は no-op になり、recordNoteUnreads
 	// は visibleUserIds の alice のみ採用する。
@@ -697,7 +696,7 @@ func TestIsQuote_Variants(t *testing.T) {
 		{"pure renote", &model.Note{RenoteID: &target}, false},
 		{"with text", &model.Note{RenoteID: &target, Text: ptrString("hi")}, true},
 		{"with cw", &model.Note{RenoteID: &target, CW: ptrString("warn")}, true},
-		{"with file", &model.Note{RenoteID: &target, FileIDs: pq.StringArray{"f1"}}, true},
+		{"with file", &model.Note{RenoteID: &target, FileIDs: model.StringArray{"f1"}}, true},
 		{"with poll", &model.Note{RenoteID: &target, HasPoll: true}, true},
 		{"with reply", &model.Note{RenoteID: &target, ReplyID: ptrString("r1")}, true},
 	}
@@ -896,8 +895,8 @@ func TestHook_OnNoteCreated_VisibilityFiltersMentions(t *testing.T) {
 				ID:             "n_" + tc.name,
 				UserID:         "bob",
 				Visibility:     tc.visibility,
-				VisibleUserIDs: pq.StringArray(tc.visible),
-				Mentions:       pq.StringArray(tc.mentioned),
+				VisibleUserIDs: model.StringArray(tc.visible),
+				Mentions:       model.StringArray(tc.mentioned),
 			}
 			h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, nil)
 
@@ -934,7 +933,7 @@ func TestHook_OnNoteCreated_VisibilityFiltersReplyAndRenote(t *testing.T) {
 			ID:             "n_reply",
 			UserID:         "bob",
 			Visibility:     model.NoteVisibilitySpecified,
-			VisibleUserIDs: pq.StringArray{"someone_else"},
+			VisibleUserIDs: model.StringArray{"someone_else"},
 		}
 		h.OnNoteCreated(note, &model.User{ID: "bob"}, parent, nil)
 		out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
@@ -952,7 +951,7 @@ func TestHook_OnNoteCreated_VisibilityFiltersReplyAndRenote(t *testing.T) {
 			UserID:         "bob",
 			RenoteID:       &target,
 			Visibility:     model.NoteVisibilitySpecified,
-			VisibleUserIDs: pq.StringArray{"someone_else"},
+			VisibleUserIDs: model.StringArray{"someone_else"},
 		}
 		h.OnNoteCreated(note, &model.User{ID: "bob"}, nil, original)
 		out, _ := svc.List(context.Background(), "alice", "", "", 10, nil, nil)
@@ -981,7 +980,7 @@ func TestHook_NotifyVisibleToTarget(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			n := &model.Note{Visibility: tc.visibility, VisibleUserIDs: pq.StringArray(tc.visible)}
+			n := &model.Note{Visibility: tc.visibility, VisibleUserIDs: model.StringArray(tc.visible)}
 			assert.Equal(t, tc.want, h.notifyVisibleToTarget(n, tc.target))
 		})
 	}

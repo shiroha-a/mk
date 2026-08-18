@@ -3,7 +3,6 @@ package chat
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 )
@@ -25,9 +24,9 @@ func TestPackMessage_AllFieldsFilled(t *testing.T) {
 		ToRoomID:   &toRoom,
 		FileID:     &fileID,
 		URI:        &uri,
-		Reads:      pq.StringArray{"bob"},
+		Reads:      model.StringArray{"bob"},
 		// 保存形式は "<userId>/<reaction>" (handler.go の ReactionsCreate)。
-		Reactions: pq.StringArray{"bob/👍"},
+		Reactions: model.StringArray{"bob/👍"},
 	}
 	out := packMessage(msg)
 

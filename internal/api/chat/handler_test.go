@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -393,7 +392,7 @@ func TestMessagesShow_WithFromUser(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Messages["m1"] = &model.ChatMessage{
 		ID: "m1", FromUserID: "u1", FromUser: u1,
-		Reads: pq.StringArray{}, Reactions: pq.StringArray{"u2/👍"},
+		Reads: model.StringArray{}, Reactions: model.StringArray{"u2/👍"},
 	}
 	rec := post(h.MessagesShow, `{"messageId":"m1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -438,10 +437,10 @@ func TestRoomsJoined_WithRooms(t *testing.T) {
 type mockMsgRepo struct{ *testutil.MockChatRepository }
 
 func (m *mockMsgRepo) ListMessagesByRoom(_, _, _ string, _ int) ([]*model.ChatMessage, error) {
-	return []*model.ChatMessage{{ID: "m1", FromUserID: "u1", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}}, nil
+	return []*model.ChatMessage{{ID: "m1", FromUserID: "u1", Reads: model.StringArray{}, Reactions: model.StringArray{}}}, nil
 }
 func (m *mockMsgRepo) SearchMessages(_, _ string, _ int, _, _ string) ([]*model.ChatMessage, error) {
-	return []*model.ChatMessage{{ID: "m1", FromUserID: "u1", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}}, nil
+	return []*model.ChatMessage{{ID: "m1", FromUserID: "u1", Reads: model.StringArray{}, Reactions: model.StringArray{}}}, nil
 }
 
 func TestMessages_WithData(t *testing.T) {
@@ -486,7 +485,7 @@ func TestMessagesSearch_WithData(t *testing.T) {
 
 func TestMessagesShow_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u1", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u1", Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	rec := post(h.MessagesShow, `{"messageId":"m1"}`, u1)
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
@@ -822,7 +821,7 @@ func TestMessagesRead_Service_NotFound(t *testing.T) {
 type mockUserMsgRepo struct{ *testutil.MockChatRepository }
 
 func (m *mockUserMsgRepo) ListMessagesByUser(_, _, _, _ string, _ int) ([]*model.ChatMessage, error) {
-	return []*model.ChatMessage{{ID: "m2", FromUserID: "u2", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}}, nil
+	return []*model.ChatMessage{{ID: "m2", FromUserID: "u2", Reads: model.StringArray{}, Reactions: model.StringArray{}}}, nil
 }
 
 func TestMessages_ListByUser(t *testing.T) {
@@ -871,7 +870,7 @@ func TestMessagesSearch_RoomScoped(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
 	roomID := "r1"
 	txt := "hello room"
-	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID, Text: &txt, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID, Text: &txt, Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	rec := post(h.MessagesSearch, `{"query":"hello","roomId":"r1"}`, u1)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp []any
@@ -884,11 +883,11 @@ func TestMessagesSearch_UserScoped(t *testing.T) {
 	h, repo := newTestHandler()
 	to := "u2"
 	txt := "hi bob"
-	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: u1.ID, ToUserID: &to, Text: &txt, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: u1.ID, ToUserID: &to, Text: &txt, Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	// 別人との DM はヒットしない。
 	other := "u3"
 	txt2 := "hi carol"
-	repo.Messages["m2"] = &model.ChatMessage{ID: "m2", FromUserID: u1.ID, ToUserID: &other, Text: &txt2, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	repo.Messages["m2"] = &model.ChatMessage{ID: "m2", FromUserID: u1.ID, ToUserID: &other, Text: &txt2, Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	rec := post(h.MessagesSearch, `{"query":"hi","userId":"u2"}`, u1)
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp []any
@@ -904,7 +903,7 @@ func TestReactionsCreate(t *testing.T) {
 	// #1541 で react guard が入ったため、reactor (u1) が受信者である DM にする
 	// (own-message でも others-message でもない有効な react)。
 	to := u1.ID
-	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", ToUserID: &to, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", ToUserID: &to, Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	rec := post(h.ReactionsCreate, `{"messageId":"m1","reaction":"👍"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
@@ -913,7 +912,7 @@ func TestReactionsDelete(t *testing.T) {
 	h, repo := newHandlerWithService(t)
 	// missing params → 400
 	assert.Equal(t, http.StatusBadRequest, post(h.ReactionsDelete, `{}`, u1).Code)
-	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "sender", Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	rec := post(h.ReactionsDelete, `{"messageId":"m1","reaction":"👍"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
@@ -1211,7 +1210,7 @@ func TestHistory_IsRead_DM(t *testing.T) {
 	base := testutil.NewMockChatRepository()
 	idGen, _ := id.NewGenerator("aidx")
 	to := u1.ID
-	base.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &to, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	base.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &to, Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	hr := &historyRepo{MockChatRepository: base, userHistory: []*model.ChatMessage{base.Messages["m1"]}}
 	h := NewHandler(hr, idGen)
 
@@ -1222,7 +1221,7 @@ func TestHistory_IsRead_DM(t *testing.T) {
 	assert.Equal(t, false, resp[0]["isRead"])
 
 	// 既読化すると isRead=true
-	base.Messages["m1"].Reads = pq.StringArray{u1.ID}
+	base.Messages["m1"].Reads = model.StringArray{u1.ID}
 	var resp2 []map[string]any
 	require.NoError(t, json.Unmarshal(post(h.History, `{}`, u1).Body.Bytes(), &resp2))
 	require.Len(t, resp2, 1)
@@ -1234,7 +1233,7 @@ func TestHistory_IsRead_Room(t *testing.T) {
 	base := testutil.NewMockChatRepository()
 	idGen, _ := id.NewGenerator("aidx")
 	roomID := "r1"
-	base.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+	base.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &roomID, Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	hr := &historyRepo{MockChatRepository: base, roomHistory: []*model.ChatMessage{base.Messages["m1"]}}
 	h := NewHandler(hr, idGen)
 
@@ -1288,7 +1287,7 @@ func TestUserTimeline_Pagination(t *testing.T) {
 	h, repo := newTestHandler()
 	to := "u2"
 	for _, mid := range []string{"c1", "c2", "c3"} {
-		repo.Messages[mid] = &model.ChatMessage{ID: mid, FromUserID: u1.ID, ToUserID: &to, Reads: pq.StringArray{}, Reactions: pq.StringArray{}}
+		repo.Messages[mid] = &model.ChatMessage{ID: mid, FromUserID: u1.ID, ToUserID: &to, Reads: model.StringArray{}, Reactions: model.StringArray{}}
 	}
 	// untilId=c3 → c2, c1 (id < c3)
 	resp := decodeList(t, post(h.UserTimeline, `{"userId":"u2","untilId":"c3"}`, u1))
@@ -1506,8 +1505,8 @@ func TestPackMessageDetailed_FieldsPresent(t *testing.T) {
 		FromUser:   &model.User{ID: "u_from", Username: "from", Host: &host},
 		ToUser:     &model.User{ID: "u_to", Username: "to"},
 		ToRoom:     &model.ChatRoom{ID: roomID, Name: "Room"},
-		Reads:      pq.StringArray{},
-		Reactions:  pq.StringArray{},
+		Reads:      model.StringArray{},
+		Reactions:  model.StringArray{},
 	}
 	out := h.packMessageDetailed(msg, "u_from")
 	assert.NotEmpty(t, out["createdAt"], "createdAt が ID から派生して埋まること")

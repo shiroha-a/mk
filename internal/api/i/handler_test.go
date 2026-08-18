@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -365,7 +364,7 @@ func TestMe_LoggedInDays(t *testing.T) {
 	userRepo.Profiles["user1"] = &model.UserProfile{
 		UserID:              "user1",
 		Fields:              datatypes.JSON([]byte("[]")),
-		LoggedInDates:       pq.StringArray{"2026-04-01", "2026-04-02", "2026-04-03"},
+		LoggedInDates:       model.StringArray{"2026-04-01", "2026-04-02", "2026-04-03"},
 		FollowersVisibility: model.FollowingVisibilityPublic,
 		FollowingVisibility: model.FollowingVisibilityPublic,
 	}
@@ -399,13 +398,13 @@ func TestMe_BackupCodesStock(t *testing.T) {
 	tests := []struct {
 		name     string
 		enabled  bool
-		codes    pq.StringArray
+		codes    model.StringArray
 		expected string
 	}{
 		{"disabled 2FA", false, nil, "none"},
-		{"enabled but no codes", true, pq.StringArray{}, "none"},
-		{"enabled with partial codes", true, pq.StringArray{"code1", "code2"}, "partial"},
-		{"enabled with full codes", true, pq.StringArray{"c1", "c2", "c3", "c4", "c5"}, "full"},
+		{"enabled but no codes", true, model.StringArray{}, "none"},
+		{"enabled with partial codes", true, model.StringArray{"code1", "code2"}, "partial"},
+		{"enabled with full codes", true, model.StringArray{"c1", "c2", "c3", "c4", "c5"}, "full"},
 	}
 
 	for _, tt := range tests {
@@ -1997,7 +1996,7 @@ func TestUpdate_AvatarDecorations_RestrictedByRole(t *testing.T) {
 	}
 	repo.Users["user1"] = user
 	deco := testutil.NewMockAvatarDecorationRepository()
-	deco.Decorations["dec1"] = &model.AvatarDecoration{ID: "dec1", RoleIDs: pq.StringArray{"role-vip"}}
+	deco.Decorations["dec1"] = &model.AvatarDecoration{ID: "dec1", RoleIDs: model.StringArray{"role-vip"}}
 	h.SetAvatarDecorationRepo(deco)
 	// ユーザーは role-other のみ所持 → role-vip 必須の dec1 は弾かれる。
 	h.SetRoleProvider(&stubRoleProvider{
@@ -2020,7 +2019,7 @@ func TestUpdate_AvatarDecorations_RoleAllowed(t *testing.T) {
 	repo.Users["user1"] = user
 	repo.Profiles["user1"] = &model.UserProfile{UserID: "user1", Fields: datatypes.JSON([]byte("[]"))}
 	deco := testutil.NewMockAvatarDecorationRepository()
-	deco.Decorations["dec1"] = &model.AvatarDecoration{ID: "dec1", RoleIDs: pq.StringArray{"role-vip"}}
+	deco.Decorations["dec1"] = &model.AvatarDecoration{ID: "dec1", RoleIDs: model.StringArray{"role-vip"}}
 	h.SetAvatarDecorationRepo(deco)
 	h.SetRoleProvider(&stubRoleProvider{
 		roles:    []*model.Role{{ID: "role-vip"}, {ID: "role-other"}},

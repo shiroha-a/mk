@@ -3,7 +3,6 @@ package notes
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -18,7 +17,7 @@ import (
 func TestResolveFiles_NilRepo(t *testing.T) {
 	h, _ := newTestHandler(t)
 	notes := []entity.NoteEntity{
-		{FileIDs: pq.StringArray{"f1"}},
+		{FileIDs: model.StringArray{"f1"}},
 	}
 	h.fieldResolver().ResolveFiles(notes)
 	// driveFileRepo 未設定なので Files は埋まらない
@@ -29,7 +28,7 @@ func TestResolveFiles_NoFileIDs(t *testing.T) {
 	h, _ := newTestHandler(t)
 	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository())
 	notes := []entity.NoteEntity{
-		{FileIDs: pq.StringArray{}},
+		{FileIDs: model.StringArray{}},
 	}
 	h.fieldResolver().ResolveFiles(notes)
 	assert.Nil(t, notes[0].Files)
@@ -44,8 +43,8 @@ func TestResolveFiles_Populates(t *testing.T) {
 	h.SetDriveFileRepo(fileRepo)
 
 	notes := []entity.NoteEntity{
-		{FileIDs: pq.StringArray{"f1", "f2"}},
-		{FileIDs: pq.StringArray{"f1"}},
+		{FileIDs: model.StringArray{"f1", "f2"}},
+		{FileIDs: model.StringArray{"f1"}},
 	}
 	h.fieldResolver().ResolveFiles(notes)
 
@@ -66,9 +65,9 @@ func TestResolveFiles_EmbeddedRenoteAndReply(t *testing.T) {
 	h.SetDriveFileRepo(fileRepo)
 
 	notes := []entity.NoteEntity{{
-		FileIDs: pq.StringArray{"f1"},
-		Renote:  &entity.NoteEntity{FileIDs: pq.StringArray{"f2"}},
-		Reply:   &entity.NoteEntity{FileIDs: pq.StringArray{"f3"}},
+		FileIDs: model.StringArray{"f1"},
+		Renote:  &entity.NoteEntity{FileIDs: model.StringArray{"f2"}},
+		Reply:   &entity.NoteEntity{FileIDs: model.StringArray{"f3"}},
 	}}
 	h.fieldResolver().ResolveFiles(notes)
 
@@ -87,7 +86,7 @@ func TestResolveFiles_EmbeddedRenoteOnly(t *testing.T) {
 	h.SetDriveFileRepo(fileRepo)
 
 	notes := []entity.NoteEntity{{
-		Renote: &entity.NoteEntity{FileIDs: pq.StringArray{"f2"}},
+		Renote: &entity.NoteEntity{FileIDs: model.StringArray{"f2"}},
 	}}
 	h.fieldResolver().ResolveFiles(notes)
 	assert.Len(t, notes[0].Renote.Files, 1)
@@ -102,7 +101,7 @@ func TestResolveFiles_UnknownFileIDsIgnored(t *testing.T) {
 	h.SetDriveFileRepo(fileRepo)
 
 	notes := []entity.NoteEntity{
-		{FileIDs: pq.StringArray{"f1", "missing"}},
+		{FileIDs: model.StringArray{"f1", "missing"}},
 	}
 	h.fieldResolver().ResolveFiles(notes)
 	assert.Len(t, notes[0].Files, 1)

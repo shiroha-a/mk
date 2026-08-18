@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	corepoll "github.com/shiroha-a/mk/internal/core/poll"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -36,8 +35,8 @@ func seedPollNote(noteRepo *testutil.MockNoteRepository, pollRepo *testutil.Mock
 	pollRepo.Polls["n1"] = &model.Poll{
 		NoteID:    "n1",
 		Multiple:  false,
-		Choices:   pq.StringArray{"A", "B", "C"},
-		Votes:     pq.Int64Array{0, 0, 0},
+		Choices:   model.StringArray{"A", "B", "C"},
+		Votes:     model.Int64Array{0, 0, 0},
 		ExpiresAt: expiresAt,
 	}
 }

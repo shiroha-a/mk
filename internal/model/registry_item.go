@@ -3,7 +3,6 @@ package model
 import (
 	"time"
 
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -15,7 +14,7 @@ type RegistryItem struct {
 	UserID    string         `gorm:"column:userId;type:varchar(32);not null" json:"userId"`
 	Key       string         `gorm:"column:key;type:varchar(1024);not null" json:"key"`
 	Value     datatypes.JSON `gorm:"column:value;type:jsonb;default:'{}'" json:"value"`
-	Scope     pq.StringArray `gorm:"column:scope;type:varchar(1024)[];default:'{}'" json:"scope"`
+	Scope     StringArray    `gorm:"column:scope;type:varchar(1024)[];default:'{}'" json:"scope"`
 	Domain    *string        `gorm:"column:domain;type:varchar(512)" json:"domain"`
 }
 

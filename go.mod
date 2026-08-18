@@ -28,7 +28,6 @@ require (
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/kovidgoyal/imaging v1.8.21
 	github.com/labstack/echo/v4 v4.15.1
-	github.com/lib/pq v1.12.3
 	github.com/meilisearch/meilisearch-go v0.36.1
 	github.com/mmcdole/gofeed v1.3.0
 	github.com/mrjoshuak/go-jpeg2000 v1.2.1

@@ -3,7 +3,6 @@ package repository
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -65,7 +64,7 @@ func TestAuthSessionRepository_FindAppByID_ListAppsByUserID(t *testing.T) {
 		Secret:      "sec_cov_1",
 		Name:        "test app",
 		Description: "",
-		Permission:  pq.StringArray{"read"},
+		Permission:  model.StringArray{"read"},
 	}
 	require.NoError(t, repo.CreateApp(app))
 	defer testDB.Exec(`DELETE FROM "app" WHERE id = ?`, app.ID)
@@ -134,8 +133,8 @@ func TestFlashRepository_ListPublicByUser(t *testing.T) {
 	require.NoError(t, testDB.Exec(
 		`INSERT INTO "flash" (id, "updatedAt", "userId", title, summary, script, permissions, visibility)
 		 VALUES (?, NOW(), ?, ?, ?, ?, ?, ?), (?, NOW(), ?, ?, ?, ?, ?, ?)`,
-		"fl_pub_1", u.ID, "pub", "", "", pq.StringArray{}, "public",
-		"fl_priv_1", u.ID, "priv", "", "", pq.StringArray{}, "private",
+		"fl_pub_1", u.ID, "pub", "", "", model.StringArray{}, "public",
+		"fl_priv_1", u.ID, "priv", "", "", model.StringArray{}, "private",
 	).Error)
 	defer testDB.Exec(`DELETE FROM "flash" WHERE id IN (?, ?)`, "fl_pub_1", "fl_priv_1")
 

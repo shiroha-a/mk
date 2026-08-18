@@ -1,7 +1,6 @@
 package model
 
 import (
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -22,7 +21,7 @@ type UserProfile struct {
 	Description               *string             `gorm:"column:description;type:varchar(2048)" json:"description"`
 	FollowedMessage           *string             `gorm:"column:followedMessage;type:varchar(256)" json:"followedMessage"`
 	Fields                    datatypes.JSON      `gorm:"column:fields;type:jsonb;default:'[]'" json:"fields"`
-	VerifiedLinks             pq.StringArray      `gorm:"column:verifiedLinks;type:varchar[];default:'{}'" json:"verifiedLinks"`
+	VerifiedLinks             StringArray         `gorm:"column:verifiedLinks;type:varchar[];default:'{}'" json:"verifiedLinks"`
 	Lang                      *string             `gorm:"column:lang;type:varchar(32)" json:"lang"`
 	URL                       *string             `gorm:"column:url;type:varchar(512)" json:"url"`
 	Email                     *string             `gorm:"column:email;type:varchar(128)" json:"email"`
@@ -34,7 +33,7 @@ type UserProfile struct {
 	FollowersVisibility       FollowingVisibility `gorm:"column:followersVisibility;type:followers_visibility_enum;default:'public'" json:"followersVisibility"`
 	TwoFactorTempSecret       *string             `gorm:"column:twoFactorTempSecret;type:varchar(128)" json:"-"`
 	TwoFactorSecret           *string             `gorm:"column:twoFactorSecret;type:varchar(128)" json:"-"`
-	TwoFactorBackupSecret     pq.StringArray      `gorm:"column:twoFactorBackupSecret;type:varchar[]" json:"-"`
+	TwoFactorBackupSecret     StringArray         `gorm:"column:twoFactorBackupSecret;type:varchar[]" json:"-"`
 	TwoFactorEnabled          bool                `gorm:"column:twoFactorEnabled;default:false" json:"twoFactorEnabled"`
 	SecurityKeysAvailable     bool                `gorm:"column:securityKeysAvailable;default:false" json:"securityKeysAvailable"`
 	UsePasswordLessLogin      bool                `gorm:"column:usePasswordLessLogin;default:false" json:"usePasswordLessLogin"`
@@ -54,7 +53,7 @@ type UserProfile struct {
 	HardMutedWords            datatypes.JSON      `gorm:"column:hardMutedWords;type:jsonb;default:'[]'" json:"hardMutedWords"`
 	MutedInstances            datatypes.JSON      `gorm:"column:mutedInstances;type:jsonb;default:'[]'" json:"mutedInstances"`
 	NotificationRecieveConfig datatypes.JSON      `gorm:"column:notificationRecieveConfig;type:jsonb;default:'{}'" json:"notificationRecieveConfig"`
-	LoggedInDates             pq.StringArray      `gorm:"column:loggedInDates;type:varchar(32)[];default:'{}'" json:"loggedInDates"`
+	LoggedInDates             StringArray         `gorm:"column:loggedInDates;type:varchar(32)[];default:'{}'" json:"loggedInDates"`
 	Achievements              datatypes.JSON      `gorm:"column:achievements;type:jsonb;default:'[]'" json:"achievements"`
 	// ClientData / Room はクライアント固有の任意 JSON を pass-through 保存する
 	// フィールド。Go バックエンドは値を解釈せず、i/update で受け取ったものをそのまま

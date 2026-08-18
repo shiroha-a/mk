@@ -6,7 +6,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -71,7 +70,7 @@ func TestUnsetMfa_Success(t *testing.T) {
 		UserID:                "u1",
 		TwoFactorEnabled:      true,
 		TwoFactorSecret:       &secret,
-		TwoFactorBackupSecret: pq.StringArray{"b1", "b2"},
+		TwoFactorBackupSecret: model.StringArray{"b1", "b2"},
 		UsePasswordLessLogin:  true,
 		SecurityKeysAvailable: true,
 	}

@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	coreflash "github.com/shiroha-a/mk/internal/core/flash"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -406,7 +405,7 @@ func TestMy_OmitsIsLiked(t *testing.T) {
 // 応答 shape からは除外する。
 func TestFlashResponse_OmitsPermissions(t *testing.T) {
 	h, repo, _ := newHandler(t)
-	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "alice", Title: "x", Permissions: pq.StringArray{"a", "b"}}
+	repo.Flashes["f1"] = &model.Flash{ID: "f1", UserID: "alice", Title: "x", Permissions: model.StringArray{"a", "b"}}
 	c, rec := newReq(t, `{}`)
 	setUser(c, "alice")
 	require.NoError(t, h.My(c))

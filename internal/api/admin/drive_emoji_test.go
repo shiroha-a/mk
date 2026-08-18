@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -773,8 +772,8 @@ func TestEmojiListV2_RoleObjectsAndShape(t *testing.T) {
 	require.NoError(t, repo.Create(&model.Emoji{
 		ID: "e1", Name: "smile",
 		PublicURL: "https://example.com/s.png", OriginalURL: "https://example.com/s-orig.png",
-		Aliases:                                 pq.StringArray{"happy"},
-		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray{"role1", "ghost"},
+		Aliases:                                 model.StringArray{"happy"},
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray{"role1", "ghost"},
 	}))
 	h.SetEmojiRepo(repo)
 
@@ -808,7 +807,7 @@ func TestEmojiListV2_RoleSortByDisplayOrder(t *testing.T) {
 	require.NoError(t, repo.Create(&model.Emoji{
 		ID: "e1", Name: "smile", PublicURL: "https://example.com/s.png",
 		// 格納順は意図的にバラバラ。
-		RoleIDsThatCanBeUsedThisEmojiAsReaction: pq.StringArray{"rA", "rC", "rB"},
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray{"rA", "rC", "rB"},
 	}))
 	h.SetEmojiRepo(repo)
 

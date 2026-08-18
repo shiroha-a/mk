@@ -13,7 +13,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
@@ -715,7 +714,7 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 		ChannelID:          effectiveChannelID,
 		FileIDs:            in.FileIDs,
 		UserHost:           in.User.Host,
-		Tags:               pq.StringArray(tags),
+		Tags:               model.StringArray(tags),
 	}
 
 	// reply/renote先の非正規化フィールドを埋める

@@ -16,7 +16,6 @@ import (
 
 	"log/slog"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
@@ -738,7 +737,7 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	user.Emojis = r.upsertEmojis(extractEmojiTags(actor.Tag), host)
 	// upstream ApPersonService と同じく person.tag の Hashtag entry を user.tags に
 	// 取り込む (hashtags/users の containment query 用)。summary text からは抽出しない。
-	user.Tags = pq.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
+	user.Tags = model.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
 	if ephemeral {
 		// リレー経由でしか観測しない著者は DB に入れない (#2332)。呼び出し元
 		// (ingestNoteWithCreated) が PutNote でノートごと Redis に置く。
@@ -971,13 +970,13 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	// person.tag の Hashtag entry を user.tags に追従させる (actor 更新時に
 	// 自己紹介の hashtag が変わったら反映する。新規取り込みと同じ正規化)。
 	oldTags := []string(existing.Tags)
-	// ExtractUserTags は hashtag が無いと nil を返すが、nil の pq.StringArray は
+	// ExtractUserTags は hashtag が無いと nil を返すが、nil の model.StringArray は
 	// Updates() map 経由で SQL NULL になり user.tags (NOT NULL) 制約に違反する。
 	// その場合 actor 更新 (emojis / name / lastFetchedAt 等を含む atomic UPDATE)
 	// 全体が失敗するため空配列に倒して '{}' を書く。
-	tags := pq.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
+	tags := model.StringArray(hashtag.ExtractUserTags(extractHashtagTagNames(actor.Tag)...))
 	if tags == nil {
-		tags = pq.StringArray{}
+		tags = model.StringArray{}
 	}
 	fields["tags"] = tags
 	existing.Tags = tags
@@ -1901,7 +1900,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 				visible = append(visible, replyTarget.UserID)
 			}
 		}
-		note.VisibleUserIDs = pq.StringArray(visible)
+		note.VisibleUserIDs = model.StringArray(visible)
 	}
 	// AP Note Tag配列からカスタム絵文字を抽出してDBにupsert
 	if actor.Host != nil {
@@ -1921,7 +1920,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// note.tags は upstream と同じく normalizeForSearch (NFKC+lowercase) + 128drop
 	// + 32cap で正規化して格納する (#1948-18)。
 	if tags := hashtag.ExtractNoteTags(hashtagSources...); len(tags) > 0 {
-		note.Tags = pq.StringArray(tags)
+		note.Tags = model.StringArray(tags)
 	}
 	// AP `attachment` 配列を drive_file 行に upsert (#378)。link 形式のみで
 	// 実 fetch はせず、frontend が drive_file.url 経由で remote 取得する。
@@ -2230,12 +2229,12 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	newTags := hashtag.ExtractNoteTags(hashtagSources...) // 正規化して格納 (#1948-18)
 	tagsChanged := !slices.Equal([]string(existing.Tags), newTags)
 	if tagsChanged {
-		// Extract は hashtag が無いと nil を返すが、nil の pq.StringArray は
+		// Extract は hashtag が無いと nil を返すが、nil の model.StringArray は
 		// Updates() map 経由で SQL NULL になり note.tags (NOT NULL) 制約に違反する。
 		// tags が非空→空に変わるケースで踏むため空配列に倒して '{}' を書く。
-		noteTags := pq.StringArray(newTags)
+		noteTags := model.StringArray(newTags)
 		if noteTags == nil {
-			noteTags = pq.StringArray{}
+			noteTags = model.StringArray{}
 		}
 		fields["tags"] = noteTags
 		existing.Tags = noteTags
@@ -2246,11 +2245,11 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	if r.driveFileRepo != nil {
 		fileIDs := r.upsertAttachments(extractAttachments(apNote.Attachment), &existing.UserID, existing.UserHost)
 		if !slices.Equal([]string(existing.FileIDs), []string(fileIDs)) {
-			fields["fileIds"] = pq.StringArray(fileIDs)
-			existing.FileIDs = pq.StringArray(fileIDs)
+			fields["fileIds"] = model.StringArray(fileIDs)
+			existing.FileIDs = model.StringArray(fileIDs)
 			types := r.collectAttachedFileTypes(fileIDs)
-			fields["attachedFileTypes"] = pq.StringArray(types)
-			existing.AttachedFileTypes = pq.StringArray(types)
+			fields["attachedFileTypes"] = model.StringArray(types)
+			existing.AttachedFileTypes = model.StringArray(types)
 		}
 	}
 	if len(fields) == 0 {
@@ -2325,8 +2324,8 @@ func pointerStringsEqual(a, b *string) bool {
 // duplicates. text 由来 mention と AP `tag` Mention 由来 mention を合算する
 // (#397) ために使う。両方空なら nil ではなく非 nil 空 (pq の '{}' 既定値と
 // 整合) を返す。
-func mergeMentionIDs(a, b []string) pq.StringArray {
-	out := make(pq.StringArray, 0, len(a)+len(b))
+func mergeMentionIDs(a, b []string) model.StringArray {
+	out := make(model.StringArray, 0, len(a)+len(b))
 	seen := make(map[string]struct{}, len(a)+len(b))
 	for _, id := range a {
 		if id == "" {
@@ -2536,9 +2535,9 @@ func extractEmojiTags(tags []any) []activitypub.EmojiTag {
 // Create/UpdateFieldsが失敗した場合はその名前を結果から除外し、後段で
 // 「名前は載っているが行が存在しない」状態を防ぐ。emojiRepoが未設定なら
 // 空配列を返す。
-func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) pq.StringArray {
+func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.StringArray {
 	if r.emojiRepo == nil || len(tags) == 0 {
-		return pq.StringArray{}
+		return model.StringArray{}
 	}
 	// 同名タグが重複して来るケースに備えて重複排除しつつ name → tag を保持
 	tagByName := make(map[string]activitypub.EmojiTag, len(tags))
@@ -2555,19 +2554,19 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) pq.Str
 		order = append(order, name)
 	}
 	if len(order) == 0 {
-		return pq.StringArray{}
+		return model.StringArray{}
 	}
 
 	existingRows, err := r.emojiRepo.FindManyByNamesAndHost(order, &host)
 	if err != nil {
-		return pq.StringArray{}
+		return model.StringArray{}
 	}
 	existingByName := make(map[string]*model.Emoji, len(existingRows))
 	for _, e := range existingRows {
 		existingByName[e.Name] = e
 	}
 
-	names := make(pq.StringArray, 0, len(order))
+	names := make(model.StringArray, 0, len(order))
 	for _, name := range order {
 		tag := tagByName[name]
 		if existing, ok := existingByName[name]; ok {
@@ -2973,14 +2972,14 @@ func numberAsInt(v any) int {
 // in original order. URI による dedup を行うので、同じ remote attachment が
 // 複数の note に紐付いても drive_file は 1 行のみ。
 //
-// driveFileRepo が未設定なら空 (pq.StringArray{}) を返す (旧挙動)。userID は
+// driveFileRepo が未設定なら空 (model.StringArray{}) を返す (旧挙動)。userID は
 // リモート user の ID (note.UserID 相当)、host はリモート host (nil =
 // ローカル、attachment 文脈ではほぼ常に non-nil)。
-func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *string) pq.StringArray {
+func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *string) model.StringArray {
 	if r.driveFileRepo == nil || len(docs) == 0 {
-		return pq.StringArray{}
+		return model.StringArray{}
 	}
-	ids := make(pq.StringArray, 0, len(docs))
+	ids := make(model.StringArray, 0, len(docs))
 	for _, doc := range docs {
 		// URI ベースで dedup。既存ならその ID を再利用する。
 		if existing, err := r.driveFileRepo.FindByURI(doc.URL); err == nil && existing != nil {
@@ -3073,20 +3072,20 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 
 // collectAttachedFileTypes returns the MIME type list for the given drive
 // file IDs. note.AttachedFileTypes は TS 互換のためノート行に冗長保持される。
-func (r *Resolver) collectAttachedFileTypes(fileIDs []string) pq.StringArray {
+func (r *Resolver) collectAttachedFileTypes(fileIDs []string) model.StringArray {
 	if r.driveFileRepo == nil || len(fileIDs) == 0 {
-		return pq.StringArray{}
+		return model.StringArray{}
 	}
 	files, err := r.driveFileRepo.FindByIDs(fileIDs)
 	if err != nil {
-		return pq.StringArray{}
+		return model.StringArray{}
 	}
 	// FindByIDs の戻り順は不定なので id → type のマップで再整列する。
 	byID := make(map[string]string, len(files))
 	for _, f := range files {
 		byID[f.ID] = f.Type
 	}
-	out := make(pq.StringArray, 0, len(fileIDs))
+	out := make(model.StringArray, 0, len(fileIDs))
 	for _, id := range fileIDs {
 		if t, ok := byID[id]; ok {
 			out = append(out, t)

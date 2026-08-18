@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -280,7 +279,7 @@ func TestInstances_BlockedFilter(t *testing.T) {
 	h, repo, metaRepo := newHandlerWithMeta(t)
 	seedInstance(t, repo, "blocked.example")
 	seedInstance(t, repo, "normal.example")
-	metaRepo.Meta = &model.Meta{BlockedHosts: pq.StringArray{"blocked.example"}}
+	metaRepo.Meta = &model.Meta{BlockedHosts: model.StringArray{"blocked.example"}}
 
 	c, rec := newReq(t, `{"blocked":true}`)
 	require.NoError(t, h.Instances(c))
@@ -314,7 +313,7 @@ func TestInstances_SilencedFilter(t *testing.T) {
 	h, repo, metaRepo := newHandlerWithMeta(t)
 	seedInstance(t, repo, "silenced.example")
 	seedInstance(t, repo, "normal.example")
-	metaRepo.Meta = &model.Meta{SilencedHosts: pq.StringArray{"silenced.example"}}
+	metaRepo.Meta = &model.Meta{SilencedHosts: model.StringArray{"silenced.example"}}
 
 	c, rec := newReq(t, `{"silenced":true}`)
 	require.NoError(t, h.Instances(c))
@@ -334,9 +333,9 @@ func TestInstances_StatusFields(t *testing.T) {
 	h, repo, metaRepo := newHandlerWithMeta(t)
 	seedInstance(t, repo, "sub.blocked.example")
 	metaRepo.Meta = &model.Meta{
-		BlockedHosts:       pq.StringArray{"blocked.example"},
-		SilencedHosts:      pq.StringArray{"sub.blocked.example"},
-		MediaSilencedHosts: pq.StringArray{"other.example"},
+		BlockedHosts:       model.StringArray{"blocked.example"},
+		SilencedHosts:      model.StringArray{"sub.blocked.example"},
+		MediaSilencedHosts: model.StringArray{"other.example"},
 	}
 
 	c, rec := newReq(t, `{"host":"sub.blocked.example"}`)

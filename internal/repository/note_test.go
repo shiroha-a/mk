@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -538,7 +537,7 @@ func TestNoteRepository_ListByChannelID_Visibility(t *testing.T) {
 	notes := []*model.Note{
 		{ID: "n_cv_pub", UserID: author.ID, ChannelID: &cid, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
 		{ID: "n_cv_fol", UserID: author.ID, ChannelID: &cid, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}"))},
-		{ID: "n_cv_spec", UserID: author.ID, ChannelID: &cid, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_cv_spec", UserID: author.ID, ChannelID: &cid, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: model.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}"))},
 	}
 	for _, n := range notes {
 		require.NoError(t, repo.Create(n))
@@ -705,8 +704,8 @@ func TestNoteRepository_ListByUserIDFiltered(t *testing.T) {
 	// 4 種類のノートを seed (file 添付 / reply / pure renote / 通常)。
 	text := "plain"
 	notes := []*model.Note{
-		{ID: "n_lf_plain", UserID: user.ID, Text: &text, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
-		{ID: "n_lf_file", UserID: user.ID, Text: &text, FileIDs: pq.StringArray{"f1"}, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_lf_plain", UserID: user.ID, Text: &text, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")), FileIDs: model.StringArray{}},
+		{ID: "n_lf_file", UserID: user.ID, Text: &text, FileIDs: model.StringArray{"f1"}, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
 	}
 	for _, n := range notes {
 		require.NoError(t, repo.Create(n))
@@ -776,9 +775,9 @@ func TestNoteRepository_ListByUserIDFiltered_VisibilityPushDown(t *testing.T) {
 	stranger := mkUser("u_lfv_s", "lfvstranger")
 
 	notes := []*model.Note{
-		{ID: "n_lfv_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
-		{ID: "n_lfv_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
-		{ID: "n_lfv_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}")), FileIDs: pq.StringArray{}},
+		{ID: "n_lfv_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")), FileIDs: model.StringArray{}},
+		{ID: "n_lfv_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}")), FileIDs: model.StringArray{}},
+		{ID: "n_lfv_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: model.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}")), FileIDs: model.StringArray{}},
 	}
 	for _, n := range notes {
 		require.NoError(t, repo.Create(n))
@@ -885,7 +884,7 @@ func TestNoteRepository_FindManyByIDsWithUser_HydratesRelations(t *testing.T) {
 	}
 	mkPoll := func(noteID, uid string) {
 		require.NoError(t, pollRepo.Create(&model.Poll{
-			NoteID: noteID, Choices: pq.StringArray{"A", "B"}, Votes: pq.Int64Array{0, 0},
+			NoteID: noteID, Choices: model.StringArray{"A", "B"}, Votes: model.Int64Array{0, 0},
 			NoteVisibility: model.NoteVisibilityPublic, UserID: uid,
 		}))
 	}
@@ -1296,7 +1295,7 @@ func TestNoteRepository_ListChildrenOf_PureRenoteExcluded(t *testing.T) {
 	// renote + file → 含める (text なしでも fileIds 非空なら pure ではない)
 	mk("n_lcpr_c4_file", func(n *model.Note) {
 		n.RenoteID = &parentID
-		n.FileIDs = pq.StringArray{"file-x"}
+		n.FileIDs = model.StringArray{"file-x"}
 	})
 	// renote + poll → 含める (hasPoll=true なら pure ではない)
 	mk("n_lcpr_c5_poll", func(n *model.Note) {
@@ -1377,7 +1376,7 @@ func threadVizFixture(t *testing.T, repo NoteRepository, prefix, childKind strin
 	mk := func(id string, vis model.NoteVisibility, visible []string) {
 		n := &model.Note{ID: id, UserID: author.ID, Visibility: vis, Reactions: datatypes.JSON([]byte("{}"))}
 		if len(visible) > 0 {
-			n.VisibleUserIDs = pq.StringArray(visible)
+			n.VisibleUserIDs = model.StringArray(visible)
 		}
 		switch childKind {
 		case "renote":
@@ -1715,12 +1714,12 @@ func TestNoteRepository_ListFeaturedByUser(t *testing.T) {
 	// ことを明示的に断定するため意図的にずらしている (= engagement DESC で
 	// 返してしまうとこのテストが落ちる)。
 	notes := []*model.Note{
-		{ID: "feat_by_aaa", UserID: author.ID, Visibility: "public", RenoteCount: 10},                                                  // 最大 engagement / 最小 id
-		{ID: "feat_by_mmm", UserID: author.ID, Visibility: "public", RenoteCount: 3, RepliesCount: 2},                                  //
-		{ID: "feat_by_zzz", UserID: author.ID, Visibility: "public", RenoteCount: 1},                                                   // 最小 engagement / 最大 id
-		{ID: "feat_by_fol", UserID: author.ID, Visibility: "followers", RenoteCount: 100},                                              //
-		{ID: "feat_by_spc", UserID: author.ID, Visibility: "specified", VisibleUserIDs: pq.StringArray{specified.ID}, RenoteCount: 50}, //
-		{ID: "feat_by_chn", UserID: author.ID, Visibility: "public", RenoteCount: 999, ChannelID: &chPtr},                              //
+		{ID: "feat_by_aaa", UserID: author.ID, Visibility: "public", RenoteCount: 10},                                                     // 最大 engagement / 最小 id
+		{ID: "feat_by_mmm", UserID: author.ID, Visibility: "public", RenoteCount: 3, RepliesCount: 2},                                     //
+		{ID: "feat_by_zzz", UserID: author.ID, Visibility: "public", RenoteCount: 1},                                                      // 最小 engagement / 最大 id
+		{ID: "feat_by_fol", UserID: author.ID, Visibility: "followers", RenoteCount: 100},                                                 //
+		{ID: "feat_by_spc", UserID: author.ID, Visibility: "specified", VisibleUserIDs: model.StringArray{specified.ID}, RenoteCount: 50}, //
+		{ID: "feat_by_chn", UserID: author.ID, Visibility: "public", RenoteCount: 999, ChannelID: &chPtr},                                 //
 	}
 	for _, n := range notes {
 		require.NoError(t, testDB.Create(n).Error)
@@ -1870,7 +1869,7 @@ func TestNoteRepository_ListByUserList_VisibilityPushdown(t *testing.T) {
 		{ID: "ult_n_a_pub", UserID: m1.ID, Visibility: "public"},
 		{ID: "ult_n_b_home", UserID: m1.ID, Visibility: "home"},
 		{ID: "ult_n_c_fol", UserID: m1.ID, Visibility: "followers"},
-		{ID: "ult_n_d_spec", UserID: m1.ID, Visibility: "specified", VisibleUserIDs: pq.StringArray{viewer.ID}},
+		{ID: "ult_n_d_spec", UserID: m1.ID, Visibility: "specified", VisibleUserIDs: model.StringArray{viewer.ID}},
 		{ID: "ult_n_e_pub2", UserID: m2.ID, Visibility: "public"},
 		{ID: "ult_n_f_self_fol", UserID: viewer.ID, Visibility: "followers"},
 		{ID: "ult_n_g_ch", UserID: m1.ID, Visibility: "public", ChannelID: &chPtr},
@@ -2097,7 +2096,7 @@ func TestNoteRepository_ListByUserList_RenoteFilters(t *testing.T) {
 	require.NoError(t, testDB.Create(&model.Note{ID: target, UserID: member.ID, Visibility: "public"}).Error)
 	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, target)
 
-	emptyFiles := pq.StringArray{}
+	emptyFiles := model.StringArray{}
 	remoteHost := "remote.example"
 	// plain (通常投稿), pure renote (member, ローカル), quote renote (member, text
 	// あり), file 付き plain, viewer の pure renote, remote pure renote
@@ -2106,7 +2105,7 @@ func TestNoteRepository_ListByUserList_RenoteFilters(t *testing.T) {
 	pureRenote := &model.Note{ID: "ulr_pure", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, FileIDs: emptyFiles}
 	quoteText := "quote"
 	quoteRenote := &model.Note{ID: "ulr_quote", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, Text: &quoteText, FileIDs: emptyFiles}
-	withFile := &model.Note{ID: "ulr_file", UserID: member.ID, Visibility: "public", FileIDs: pq.StringArray{"f1"}}
+	withFile := &model.Note{ID: "ulr_file", UserID: member.ID, Visibility: "public", FileIDs: model.StringArray{"f1"}}
 	myPureRenote := &model.Note{ID: "ulr_my_pure", UserID: viewer.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, FileIDs: emptyFiles}
 	remotePureRenote := &model.Note{ID: "ulr_remote", UserID: member.ID, Visibility: "public", RenoteID: &target, RenoteUserID: &member.ID, RenoteUserHost: &remoteHost, FileIDs: emptyFiles}
 	for _, n := range []*model.Note{plain, pureRenote, quoteRenote, withFile, myPureRenote, remotePureRenote} {
@@ -2283,10 +2282,10 @@ func TestNoteRepository_ListMentions_VisibilityPushDown(t *testing.T) {
 	victim := mkUser("u_lm_v", "lmvictim")
 
 	notes := []*model.Note{
-		{ID: "n_lm_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Mentions: pq.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
-		{ID: "n_lm_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Mentions: pq.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_lm_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Mentions: model.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_lm_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Mentions: model.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
 		// specified だが visibleUserIds に victim を含まない (mentions のみ)。
-		{ID: "n_lm_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{"someone-else"}, Mentions: pq.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_lm_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: model.StringArray{"someone-else"}, Mentions: model.StringArray{victim.ID}, Reactions: datatypes.JSON([]byte("{}"))},
 	}
 	for _, n := range notes {
 		require.NoError(t, repo.Create(n))
@@ -2313,7 +2312,7 @@ func TestNoteRepository_ListMentions_VisibilityPushDown(t *testing.T) {
 	f := &model.Following{ID: "fl_lm_1", FollowerID: victim.ID, FolloweeID: author.ID}
 	require.NoError(t, followingRepo.Create(f))
 	defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, f.ID)
-	require.NoError(t, repo.UpdateFields("n_lm_spec", map[string]any{"visibleUserIds": pq.StringArray{victim.ID}}))
+	require.NoError(t, repo.UpdateFields("n_lm_spec", map[string]any{"visibleUserIds": model.StringArray{victim.ID}}))
 	out, err = repo.ListMentions(victim.ID, "", false, 50, "", "")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"n_lm_fol", "n_lm_pub", "n_lm_spec"}, idsOf(out))
@@ -2351,14 +2350,14 @@ func TestNoteRepository_ListMentions_VisibilityFilter(t *testing.T) {
 	for i, nid := range ids {
 		n := &model.Note{
 			ID: nid, UserID: author.ID,
-			Mentions:  pq.StringArray{me.ID},
+			Mentions:  model.StringArray{me.ID},
 			Reactions: datatypes.JSON([]byte("{}")),
 		}
 		if i%2 == 0 {
 			n.Visibility = model.NoteVisibilityPublic
 		} else {
 			n.Visibility = model.NoteVisibilitySpecified
-			n.VisibleUserIDs = pq.StringArray{me.ID}
+			n.VisibleUserIDs = model.StringArray{me.ID}
 		}
 		require.NoError(t, repo.Create(n))
 		defer cleanupNote(t, n.ID)
@@ -2405,9 +2404,9 @@ func TestNoteRepository_ListMentions_VisibleUserIDsOnly(t *testing.T) {
 
 	notes := []*model.Note{
 		// 本文 @mention 無し / visibleUserIds に recipient のみ (= 宛先指定だけの DM)。
-		{ID: "n_vu_dm", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_vu_dm", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: model.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
 		// mentions と visibleUserIds の両方に recipient (重複行が出ないことの確認用)。
-		{ID: "n_vu_both", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, Mentions: pq.StringArray{recipient.ID}, VisibleUserIDs: pq.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_vu_both", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, Mentions: model.StringArray{recipient.ID}, VisibleUserIDs: model.StringArray{recipient.ID}, Reactions: datatypes.JSON([]byte("{}"))},
 	}
 	for _, n := range notes {
 		require.NoError(t, repo.Create(n))
@@ -2616,9 +2615,9 @@ func TestNoteRepository_SearchByTag_VisibilityPushDown(t *testing.T) {
 	stranger := mkUser("u_sbt_s", "sbtstranger")
 
 	notes := []*model.Note{
-		{ID: "n_sbt_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Tags: pq.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
-		{ID: "n_sbt_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Tags: pq.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
-		{ID: "n_sbt_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Tags: pq.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sbt_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Tags: model.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sbt_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Tags: model.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_sbt_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: model.StringArray{allowed.ID}, Tags: model.StringArray{"sbttag"}, Reactions: datatypes.JSON([]byte("{}"))},
 	}
 	for _, n := range notes {
 		require.NoError(t, repo.Create(n))
@@ -3121,7 +3120,7 @@ func TestNoteRepository_CountReplyTargets_VisibilityPushdown(t *testing.T) {
 	// author → t2: specified (visibleUserIds=[specified]) 1 件
 	pubNote := &model.Note{ID: "n_crt_vp_pub", UserID: author.ID, ReplyID: &replyID, ReplyUserID: &t1.ID, Visibility: model.NoteVisibilityPublic}
 	folNote := &model.Note{ID: "n_crt_vp_fol", UserID: author.ID, ReplyID: &replyID, ReplyUserID: &t1.ID, Visibility: model.NoteVisibilityFollowers}
-	spNote := &model.Note{ID: "n_crt_vp_sp", UserID: author.ID, ReplyID: &replyID, ReplyUserID: &t2.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{specified.ID}}
+	spNote := &model.Note{ID: "n_crt_vp_sp", UserID: author.ID, ReplyID: &replyID, ReplyUserID: &t2.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: model.StringArray{specified.ID}}
 	for _, n := range []*model.Note{pubNote, folNote, spNote} {
 		require.NoError(t, testDB.Create(n).Error)
 		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
@@ -3188,7 +3187,7 @@ func TestNoteRepository_ListByFileID(t *testing.T) {
 		Text:       &text,
 		Visibility: model.NoteVisibilityPublic,
 		Reactions:  datatypes.JSON([]byte("{}")),
-		FileIDs:    pq.StringArray{"file_abc"},
+		FileIDs:    model.StringArray{"file_abc"},
 	}
 	require.NoError(t, repo.Create(n))
 	defer cleanupNote(t, n.ID)
@@ -3217,7 +3216,7 @@ func TestNoteRepository_ListByFileID_Cursor(t *testing.T) {
 			Text:       &text,
 			Visibility: model.NoteVisibilityPublic,
 			Reactions:  datatypes.JSON([]byte("{}")),
-			FileIDs:    pq.StringArray{"file_pg"},
+			FileIDs:    model.StringArray{"file_pg"},
 		}
 		require.NoError(t, repo.Create(n))
 		defer cleanupNote(t, n.ID)
@@ -3515,11 +3514,11 @@ func TestNoteRepository_ListByUserList_OtherSpecifiedHidden(t *testing.T) {
 
 	require.NoError(t, repo.Create(&model.Note{
 		ID: "osp_mine", UserID: member.ID, Visibility: "specified",
-		VisibleUserIDs: pq.StringArray{viewer.ID},
+		VisibleUserIDs: model.StringArray{viewer.ID},
 	}))
 	require.NoError(t, repo.Create(&model.Note{
 		ID: "osp_other", UserID: member.ID, Visibility: "specified",
-		VisibleUserIDs: pq.StringArray{third.ID},
+		VisibleUserIDs: model.StringArray{third.ID},
 	}))
 
 	got, err := repo.ListByUserList(listID, 50, "", "", model.TimelineDBFilter{ViewerID: viewer.ID})
@@ -3791,7 +3790,7 @@ func TestNoteRepository_ListPublicNotes(t *testing.T) {
 	remote := mk("n_lpn_remote", func(n *model.Note) { n.UserHost = &host })
 	reply := mk("n_lpn_reply", func(n *model.Note) { n.ReplyID = &ref })
 	renote := mk("n_lpn_renote", func(n *model.Note) { n.RenoteID = &ref })
-	files := mk("n_lpn_files", func(n *model.Note) { n.FileIDs = pq.StringArray{"f1"} })
+	files := mk("n_lpn_files", func(n *model.Note) { n.FileIDs = model.StringArray{"f1"} })
 	poll := mk("n_lpn_poll", func(n *model.Note) { n.HasPoll = true })
 	localonly := mk("n_lpn_localonly", func(n *model.Note) { n.LocalOnly = true })
 	followers := mk("n_lpn_followers", func(n *model.Note) { n.Visibility = model.NoteVisibilityFollowers })

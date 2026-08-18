@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -35,8 +34,8 @@ func TestPackNote_Basic(t *testing.T) {
 		CW:         &cw,
 		Visibility: model.NoteVisibilityPublic,
 		Reactions:  datatypes.JSON([]byte("{}")),
-		FileIDs:    pq.StringArray{"file1", "file2"},
-		Tags:       pq.StringArray{"tag1"},
+		FileIDs:    model.StringArray{"file1", "file2"},
+		Tags:       model.StringArray{"tag1"},
 	}
 
 	entity := PackNote(note, idGen)
@@ -164,8 +163,8 @@ func TestPackNote_VisibleUserIDs_Mentions_HasPoll(t *testing.T) {
 		UserID:         "user1",
 		Visibility:     model.NoteVisibilitySpecified,
 		Reactions:      datatypes.JSON([]byte("{}")),
-		VisibleUserIDs: pq.StringArray{"user2", "user3"},
-		Mentions:       pq.StringArray{"user2"},
+		VisibleUserIDs: model.StringArray{"user2", "user3"},
+		Mentions:       model.StringArray{"user2"},
 		HasPoll:        true,
 	}
 
@@ -413,7 +412,7 @@ func TestPackNote_ReplyEmbedDetailFalse(t *testing.T) {
 	noteID := idGen.Generate(time.Now())
 	text := "top"
 
-	poll := &model.Poll{Choices: pq.StringArray{"a", "b"}, Votes: pq.Int64Array{1, 2}}
+	poll := &model.Poll{Choices: model.StringArray{"a", "b"}, Votes: model.Int64Array{1, 2}}
 	note := &model.Note{
 		ID:         noteID,
 		UserID:     "user1",

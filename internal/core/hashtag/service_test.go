@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -93,7 +92,7 @@ func newTestService(t *testing.T) (*Service, *fakeRepo) {
 func TestService_OnNoteCreated_LocalUser(t *testing.T) {
 	s, repo := newTestService(t)
 	user := &model.User{ID: "u1"} // Host == nil → local
-	note := &model.Note{ID: "n1", UserID: "u1", Tags: pq.StringArray{"#go", "#test"}}
+	note := &model.Note{ID: "n1", UserID: "u1", Tags: model.StringArray{"#go", "#test"}}
 
 	s.OnNoteCreated(note, user)
 	s.WaitForPendingWrites()
@@ -124,11 +123,11 @@ func TestService_OnNoteCreated_LocalUser(t *testing.T) {
 func TestService_OnNoteCreated_SkipsSensitiveTags(t *testing.T) {
 	s, repo := newTestService(t)
 	metaRepo := testutil.NewMockMetaRepository()
-	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: pq.StringArray{"nsfw"}}
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: model.StringArray{"nsfw"}}
 	s.SetMetaRepo(metaRepo)
 
 	user := &model.User{ID: "u1"}
-	note := &model.Note{ID: "n1", UserID: "u1", Tags: pq.StringArray{"#nsfw", "#safe"}}
+	note := &model.Note{ID: "n1", UserID: "u1", Tags: model.StringArray{"#nsfw", "#safe"}}
 
 	s.OnNoteCreated(note, user)
 	s.WaitForPendingWrites()
@@ -148,11 +147,11 @@ func TestService_OnNoteCreated_SkipsSensitiveTags(t *testing.T) {
 func TestService_OnNoteCreated_SkipsHiddenTags(t *testing.T) {
 	s, repo := newTestService(t)
 	metaRepo := testutil.NewMockMetaRepository()
-	metaRepo.Meta = &model.Meta{ID: "m1", HiddenTags: pq.StringArray{"#HIDDEN"}}
+	metaRepo.Meta = &model.Meta{ID: "m1", HiddenTags: model.StringArray{"#HIDDEN"}}
 	s.SetMetaRepo(metaRepo)
 
 	user := &model.User{ID: "u1"}
-	note := &model.Note{ID: "n1", UserID: "u1", Tags: pq.StringArray{"#hidden", "#visible"}}
+	note := &model.Note{ID: "n1", UserID: "u1", Tags: model.StringArray{"#hidden", "#visible"}}
 
 	s.OnNoteCreated(note, user)
 	s.WaitForPendingWrites()
@@ -169,7 +168,7 @@ func TestService_OnNoteCreated_NoMetaRepoMeansNoFilter(t *testing.T) {
 	// SetMetaRepo を呼ばない
 
 	user := &model.User{ID: "u1"}
-	note := &model.Note{ID: "n1", UserID: "u1", Tags: pq.StringArray{"#nsfw", "#anything"}}
+	note := &model.Note{ID: "n1", UserID: "u1", Tags: model.StringArray{"#nsfw", "#anything"}}
 
 	s.OnNoteCreated(note, user)
 	s.WaitForPendingWrites()
@@ -183,7 +182,7 @@ func TestService_OnNoteCreated_RemoteUser(t *testing.T) {
 	s, repo := newTestService(t)
 	host := "remote.example"
 	user := &model.User{ID: "u2", Host: &host}
-	note := &model.Note{ID: "n2", UserID: "u2", Tags: pq.StringArray{"#federation"}}
+	note := &model.Note{ID: "n2", UserID: "u2", Tags: model.StringArray{"#federation"}}
 
 	s.OnNoteCreated(note, user)
 	s.WaitForPendingWrites()
@@ -203,10 +202,10 @@ func TestService_OnNoteCreated_SkipEmpty(t *testing.T) {
 		author *model.User
 	}{
 		"nil note":    {note: nil, author: &model.User{ID: "u"}},
-		"nil author":  {note: &model.Note{Tags: pq.StringArray{"#x"}}, author: nil},
-		"empty tags":  {note: &model.Note{Tags: pq.StringArray{}}, author: &model.User{ID: "u"}},
+		"nil author":  {note: &model.Note{Tags: model.StringArray{"#x"}}, author: nil},
+		"empty tags":  {note: &model.Note{Tags: model.StringArray{}}, author: &model.User{ID: "u"}},
 		"nil tags":    {note: &model.Note{}, author: &model.User{ID: "u"}},
-		"empty entry": {note: &model.Note{Tags: pq.StringArray{""}}, author: &model.User{ID: "u"}},
+		"empty entry": {note: &model.Note{Tags: model.StringArray{""}}, author: &model.User{ID: "u"}},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -223,14 +222,14 @@ func TestService_OnNoteCreated_SkipEmpty(t *testing.T) {
 func TestService_OnNoteCreated_NilService(t *testing.T) {
 	// nil receiver でも panic しないこと (defensive guard)。
 	var s *Service
-	s.OnNoteCreated(&model.Note{Tags: pq.StringArray{"#x"}}, &model.User{ID: "u"})
+	s.OnNoteCreated(&model.Note{Tags: model.StringArray{"#x"}}, &model.User{ID: "u"})
 }
 
 func TestService_OnNoteCreated_NilRepo(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	s := &Service{repo: nil, idGen: idGen}
 	// repo nil でも panic せず early return すること。
-	s.OnNoteCreated(&model.Note{Tags: pq.StringArray{"#x"}}, &model.User{ID: "u"})
+	s.OnNoteCreated(&model.Note{Tags: model.StringArray{"#x"}}, &model.User{ID: "u"})
 }
 
 func TestService_OnNoteCreated_RepoError_BestEffort(t *testing.T) {
@@ -240,7 +239,7 @@ func TestService_OnNoteCreated_RepoError_BestEffort(t *testing.T) {
 	repo.errOn = "#fail"
 	repo.mu.Unlock()
 	user := &model.User{ID: "u3"}
-	note := &model.Note{Tags: pq.StringArray{"#ok1", "#fail", "#ok2"}}
+	note := &model.Note{Tags: model.StringArray{"#ok1", "#fail", "#ok2"}}
 
 	s.OnNoteCreated(note, user)
 	s.WaitForPendingWrites()
@@ -260,7 +259,7 @@ func TestService_OnNoteCreated_ReturnsImmediately(t *testing.T) {
 	s := NewService(slow, idGen)
 
 	user := &model.User{ID: "u1"}
-	note := &model.Note{Tags: pq.StringArray{"#a"}}
+	note := &model.Note{Tags: model.StringArray{"#a"}}
 
 	start := time.Now()
 	s.OnNoteCreated(note, user)
@@ -310,7 +309,7 @@ func TestService_Shutdown_DrainsPending(t *testing.T) {
 	repo := &slowRepo{block: make(chan struct{})}
 	s := &Service{repo: repo, idGen: idGen}
 	user := &model.User{ID: "u1"}
-	note := &model.Note{Tags: pq.StringArray{"#a"}}
+	note := &model.Note{Tags: model.StringArray{"#a"}}
 	s.OnNoteCreated(note, user)
 
 	go func() {
@@ -333,7 +332,7 @@ func TestService_Shutdown_RespectsContextDeadline(t *testing.T) {
 	repo := &slowRepo{block: make(chan struct{})}
 	s := &Service{repo: repo, idGen: idGen}
 	user := &model.User{ID: "u1"}
-	note := &model.Note{Tags: pq.StringArray{"#a"}}
+	note := &model.Note{Tags: model.StringArray{"#a"}}
 	s.OnNoteCreated(note, user)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
@@ -407,7 +406,7 @@ func TestService_UpdateUsertags_FreshAttachesAll(t *testing.T) {
 func TestService_UpdateUsertags_FiltersSensitiveOnAttach(t *testing.T) {
 	s, repo := newTestService(t)
 	metaRepo := testutil.NewMockMetaRepository()
-	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: pq.StringArray{"nsfw"}, HiddenTags: pq.StringArray{"hide"}}
+	metaRepo.Meta = &model.Meta{ID: "m1", SensitiveWords: model.StringArray{"nsfw"}, HiddenTags: model.StringArray{"hide"}}
 	s.SetMetaRepo(metaRepo)
 
 	// added=[nsfw(sensitive), hide(hidden), safe]、removed なし → safe のみ attach。

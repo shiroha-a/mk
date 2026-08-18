@@ -13,7 +13,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/core/transfer"
 	"github.com/shiroha-a/mk/internal/model"
@@ -64,7 +63,7 @@ func strptr(s string) *string { return &s }
 func TestExport_CustomEmojis(t *testing.T) {
 	saver, notifier, deps, user := newExportDeps(t)
 	deps.EmojiRepo = &fakeEmojiSource{emojis: []*model.Emoji{
-		{ID: "e1", Name: "smile", PublicURL: "https://x/e/smile.png", Type: strptr("image/png"), Category: strptr("fun"), Aliases: pq.StringArray{"happy"}, IsSensitive: true, LocalOnly: false},
+		{ID: "e1", Name: "smile", PublicURL: "https://x/e/smile.png", Type: strptr("image/png"), Category: strptr("fun"), Aliases: model.StringArray{"happy"}, IsSensitive: true, LocalOnly: false},
 		{ID: "e2", Name: "broken", PublicURL: "https://x/e/broken.png", Type: strptr("image/png")},
 	}}
 	deps.EmojiImageFetcher = &fakeEmojiFetcher{

@@ -3,7 +3,6 @@ package timeline
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 )
@@ -24,7 +23,7 @@ func makeNote(id string, opts ...func(*model.Note)) *model.Note {
 	return n
 }
 
-func withFiles(n *model.Note)               { n.FileIDs = pq.StringArray{"file1"} }
+func withFiles(n *model.Note)               { n.FileIDs = model.StringArray{"file1"} }
 func withRenote(n *model.Note)              { n.RenoteID = strPtr("rn1") }
 func withText(n *model.Note)                { n.Text = strPtr("hello") }
 func withReply(n *model.Note)               { n.ReplyID = strPtr("rp1"); n.ReplyUserID = strPtr("other") }

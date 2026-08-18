@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
 )
@@ -52,15 +51,15 @@ func (i *Importer) importAntennas(user *model.User, body []byte) (*ImportResult,
 		// userListAccts を users source へ倒して取り込む (cross-instance では userListId が
 		// 無意味なため)。userListAccts が無ければ src は維持する。
 		src := model.AntennaSource(ent.Src)
-		users := pq.StringArray(ent.Users)
+		users := model.StringArray(ent.Users)
 		userListID := ent.UserListID
 		if src == model.AntennaSourceList && len(ent.UserListAccts) > 0 {
 			src = model.AntennaSourceUsers
-			users = pq.StringArray(ent.UserListAccts)
+			users = model.StringArray(ent.UserListAccts)
 			userListID = nil
 		}
 		if users == nil {
-			users = pq.StringArray{}
+			users = model.StringArray{}
 		}
 
 		antenna := &model.Antenna{

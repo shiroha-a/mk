@@ -3,7 +3,6 @@ package repository
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -20,7 +19,7 @@ func TestAuthSessionRepository_Full(t *testing.T) {
 		Secret:      "secret_as_1",
 		Name:        "TestApp",
 		Description: "test app",
-		Permission:  pq.StringArray{"read:account"},
+		Permission:  model.StringArray{"read:account"},
 	}
 	require.NoError(t, repo.CreateApp(app))
 	defer testDB.Exec(`DELETE FROM "app" WHERE id = ?`, app.ID)
@@ -76,7 +75,7 @@ func TestAuthSessionRepository_Full(t *testing.T) {
 		Hash:       "hash_as_1",
 		UserID:     user.ID,
 		AppID:      &app.ID,
-		Permission: pq.StringArray{"read:account"},
+		Permission: model.StringArray{"read:account"},
 	}
 	require.NoError(t, repo.CreateAccessToken(accessToken))
 	defer testDB.Exec(`DELETE FROM "access_token" WHERE id = ?`, accessToken.ID)
@@ -95,7 +94,7 @@ func TestAuthSessionRepository_Full(t *testing.T) {
 	miSession := "misess_as_1"
 	miToken := &model.AccessToken{
 		ID: "at_as_mi", Token: "mirawtoken", Hash: "mihash", UserID: user.ID,
-		Session: &miSession, Permission: pq.StringArray{"read:account"},
+		Session: &miSession, Permission: model.StringArray{"read:account"},
 	}
 	require.NoError(t, repo.CreateAccessToken(miToken))
 	defer testDB.Exec(`DELETE FROM "access_token" WHERE id = ?`, miToken.ID)

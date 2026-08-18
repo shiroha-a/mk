@@ -5,7 +5,6 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -222,7 +221,7 @@ func TestClipNoteRepository_ListByClipVisible(t *testing.T) {
 	notes := []*model.Note{
 		{ID: "n_cnv_pub", UserID: author.ID, Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}"))},
 		{ID: "n_cnv_fol", UserID: author.ID, Visibility: model.NoteVisibilityFollowers, Reactions: datatypes.JSON([]byte("{}"))},
-		{ID: "n_cnv_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: pq.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}"))},
+		{ID: "n_cnv_spec", UserID: author.ID, Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: model.StringArray{allowed.ID}, Reactions: datatypes.JSON([]byte("{}"))},
 	}
 	for _, n := range notes {
 		require.NoError(t, noteRepo.Create(n))

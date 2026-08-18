@@ -6,7 +6,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,7 +172,7 @@ func TestService_CancelGame_InviteeSendsLeaveToRemote(t *testing.T) {
 		ID:                   "g2",
 		User1ID:              "bob",
 		User2ID:              "alice",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "1",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),

@@ -1,7 +1,6 @@
 package model
 
 import (
-	"github.com/lib/pq"
 	"gorm.io/datatypes"
 )
 
@@ -18,13 +17,13 @@ type Meta struct {
 
 	DisableRegistration bool `gorm:"column:disableRegistration;default:true" json:"disableRegistration"`
 
-	Langs           pq.StringArray `gorm:"column:langs;type:varchar(1024)[];default:'{}'" json:"langs"`
-	PinnedUsers     pq.StringArray `gorm:"column:pinnedUsers;type:varchar(1024)[];default:'{}'" json:"pinnedUsers"`
-	HiddenTags      pq.StringArray `gorm:"column:hiddenTags;type:varchar(1024)[];default:'{}'" json:"hiddenTags"`
-	BlockedHosts    pq.StringArray `gorm:"column:blockedHosts;type:varchar(1024)[];default:'{}'" json:"blockedHosts"`
-	SensitiveWords  pq.StringArray `gorm:"column:sensitiveWords;type:varchar(1024)[];default:'{}'" json:"sensitiveWords"`
-	ProhibitedWords pq.StringArray `gorm:"column:prohibitedWords;type:varchar(1024)[];default:'{}'" json:"prohibitedWords"`
-	SilencedHosts   pq.StringArray `gorm:"column:silencedHosts;type:varchar(1024)[];default:'{}'" json:"silencedHosts"`
+	Langs           StringArray `gorm:"column:langs;type:varchar(1024)[];default:'{}'" json:"langs"`
+	PinnedUsers     StringArray `gorm:"column:pinnedUsers;type:varchar(1024)[];default:'{}'" json:"pinnedUsers"`
+	HiddenTags      StringArray `gorm:"column:hiddenTags;type:varchar(1024)[];default:'{}'" json:"hiddenTags"`
+	BlockedHosts    StringArray `gorm:"column:blockedHosts;type:varchar(1024)[];default:'{}'" json:"blockedHosts"`
+	SensitiveWords  StringArray `gorm:"column:sensitiveWords;type:varchar(1024)[];default:'{}'" json:"sensitiveWords"`
+	ProhibitedWords StringArray `gorm:"column:prohibitedWords;type:varchar(1024)[];default:'{}'" json:"prohibitedWords"`
+	SilencedHosts   StringArray `gorm:"column:silencedHosts;type:varchar(1024)[];default:'{}'" json:"silencedHosts"`
 
 	ThemeColor         *string `gorm:"column:themeColor;type:varchar(1024)" json:"themeColor"`
 	BannerURL          *string `gorm:"column:bannerUrl;type:varchar(1024)" json:"bannerUrl"`
@@ -108,7 +107,7 @@ type Meta struct {
 
 	// Policies & Rules
 	Policies    datatypes.JSON `gorm:"column:policies;type:jsonb;default:'{}'" json:"policies"`
-	ServerRules pq.StringArray `gorm:"column:serverRules;type:varchar(280)[];default:'{}'" json:"serverRules"`
+	ServerRules StringArray    `gorm:"column:serverRules;type:varchar(280)[];default:'{}'" json:"serverRules"`
 
 	// URLs
 	TermsOfServiceURL *string `gorm:"column:termsOfServiceUrl;type:varchar(1024)" json:"termsOfServiceUrl"`
@@ -118,8 +117,8 @@ type Meta struct {
 	PrivacyPolicyURL  *string `gorm:"column:privacyPolicyUrl;type:varchar(1024)" json:"privacyPolicyUrl"`
 
 	// Federation
-	Federation      string         `gorm:"column:federation;type:varchar(128);default:'none'" json:"federation"`
-	FederationHosts pq.StringArray `gorm:"column:federationHosts;type:varchar(1024)[];default:'{}'" json:"federationHosts"`
+	Federation      string      `gorm:"column:federation;type:varchar(128);default:'none'" json:"federation"`
+	FederationHosts StringArray `gorm:"column:federationHosts;type:varchar(1024)[];default:'{}'" json:"federationHosts"`
 
 	// Feature flags
 	EnableFanoutTimeline           bool `gorm:"column:enableFanoutTimeline;default:true" json:"enableFanoutTimeline"`
@@ -163,11 +162,11 @@ type Meta struct {
 	// Sensitive media detection (5)
 	// sensitiveMediaDetection / sensitiveMediaDetectionSensitivity は
 	// 本家では enum 型だが、Go 側は varchar(128) に寄せて型制約を動的にする。
-	SensitiveMediaDetection                string         `gorm:"column:sensitiveMediaDetection;type:varchar(128);default:'none'" json:"sensitiveMediaDetection"`
-	SensitiveMediaDetectionSensitivity     string         `gorm:"column:sensitiveMediaDetectionSensitivity;type:varchar(128);default:'medium'" json:"sensitiveMediaDetectionSensitivity"`
-	SetSensitiveFlagAutomatically          bool           `gorm:"column:setSensitiveFlagAutomatically;default:false" json:"setSensitiveFlagAutomatically"`
-	EnableSensitiveMediaDetectionForVideos bool           `gorm:"column:enableSensitiveMediaDetectionForVideos;default:false" json:"enableSensitiveMediaDetectionForVideos"`
-	MediaSilencedHosts                     pq.StringArray `gorm:"column:mediaSilencedHosts;type:varchar(1024)[];default:'{}'" json:"mediaSilencedHosts"`
+	SensitiveMediaDetection                string      `gorm:"column:sensitiveMediaDetection;type:varchar(128);default:'none'" json:"sensitiveMediaDetection"`
+	SensitiveMediaDetectionSensitivity     string      `gorm:"column:sensitiveMediaDetectionSensitivity;type:varchar(128);default:'medium'" json:"sensitiveMediaDetectionSensitivity"`
+	SetSensitiveFlagAutomatically          bool        `gorm:"column:setSensitiveFlagAutomatically;default:false" json:"setSensitiveFlagAutomatically"`
+	EnableSensitiveMediaDetectionForVideos bool        `gorm:"column:enableSensitiveMediaDetectionForVideos;default:false" json:"enableSensitiveMediaDetectionForVideos"`
+	MediaSilencedHosts                     StringArray `gorm:"column:mediaSilencedHosts;type:varchar(1024)[];default:'{}'" json:"mediaSilencedHosts"`
 	// 公式 sensitive-detector サービスへの接続設定 (upstream 2026.7.0 #17570)。
 	SensitiveMediaDetectionAPIURL              *string `gorm:"column:sensitiveMediaDetectionApiUrl;type:varchar(1024)" json:"sensitiveMediaDetectionApiUrl"`
 	SensitiveMediaDetectionAPIKey              *string `gorm:"column:sensitiveMediaDetectionApiKey;type:varchar(1024)" json:"sensitiveMediaDetectionApiKey"`
@@ -184,7 +183,7 @@ type Meta struct {
 	URLPreviewUserAgent            *string `gorm:"column:urlPreviewUserAgent;type:varchar(1024)" json:"urlPreviewUserAgent"`
 	// URLPreviewSensitiveList は URL が keyword 一致したプレビューを
 	// sensitive 扱いにするリスト (upstream 2026.7.0 #17635)。
-	URLPreviewSensitiveList pq.StringArray `gorm:"column:urlPreviewSensitiveList;type:varchar(3072)[];default:'{}'" json:"urlPreviewSensitiveList"`
+	URLPreviewSensitiveList StringArray `gorm:"column:urlPreviewSensitiveList;type:varchar(3072)[];default:'{}'" json:"urlPreviewSensitiveList"`
 
 	// Cache tuning (4)
 	PerLocalUserUserTimelineCacheMax  int `gorm:"column:perLocalUserUserTimelineCacheMax;default:300" json:"perLocalUserUserTimelineCacheMax"`
@@ -193,13 +192,13 @@ type Meta struct {
 	PerUserListTimelineCacheMax       int `gorm:"column:perUserListTimelineCacheMax;default:300" json:"perUserListTimelineCacheMax"`
 
 	// Ads / usernames / emails (5)
-	NotesPerOneAd        int            `gorm:"column:notesPerOneAd;default:0" json:"notesPerOneAd"`
-	ManifestJSONOverride string         `gorm:"column:manifestJsonOverride;type:varchar(8192);default:'{}'" json:"manifestJsonOverride"`
-	BannedEmailDomains   pq.StringArray `gorm:"column:bannedEmailDomains;type:varchar(1024)[];default:'{}'" json:"bannedEmailDomains"`
+	NotesPerOneAd        int         `gorm:"column:notesPerOneAd;default:0" json:"notesPerOneAd"`
+	ManifestJSONOverride string      `gorm:"column:manifestJsonOverride;type:varchar(8192);default:'{}'" json:"manifestJsonOverride"`
+	BannedEmailDomains   StringArray `gorm:"column:bannedEmailDomains;type:varchar(1024)[];default:'{}'" json:"bannedEmailDomains"`
 	// デフォルト値は SQL 側の 43 要素プリセット。Go タグで書くと重いので
 	// default:(-) で「DB 側のデフォルトに任せる」ことを GORM に指示する。
-	PreservedUsernames           pq.StringArray `gorm:"column:preservedUsernames;type:varchar(1024)[];default:(-)" json:"preservedUsernames"`
-	ProhibitedWordsForNameOfUser pq.StringArray `gorm:"column:prohibitedWordsForNameOfUser;type:varchar(1024)[];default:'{}'" json:"prohibitedWordsForNameOfUser"`
+	PreservedUsernames           StringArray `gorm:"column:preservedUsernames;type:varchar(1024)[];default:(-)" json:"preservedUsernames"`
+	ProhibitedWordsForNameOfUser StringArray `gorm:"column:prohibitedWordsForNameOfUser;type:varchar(1024)[];default:'{}'" json:"prohibitedWordsForNameOfUser"`
 
 	// DeepL (2)
 	DeeplAuthKey *string `gorm:"column:deeplAuthKey;type:varchar(1024)" json:"deeplAuthKey"`

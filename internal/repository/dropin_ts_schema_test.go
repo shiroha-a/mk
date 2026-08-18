@@ -3,7 +3,6 @@ package repository
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -56,7 +55,7 @@ func TestDropIn_TSShapedSchema_AppAndAuthSession(t *testing.T) {
 			Secret:      "secret_dropin_1",
 			Name:        "DropinApp",
 			Description: "",
-			Permission:  pq.StringArray{"read:account"},
+			Permission:  model.StringArray{"read:account"},
 		}
 		require.NoError(t, repo.CreateApp(app), "app INSERT must not reference createdAt")
 		defer testDB.Exec(`DELETE FROM "app" WHERE id = ?`, app.ID)

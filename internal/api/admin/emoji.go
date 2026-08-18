@@ -6,12 +6,12 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -39,12 +39,12 @@ func (h *Handler) EmojiAddAliasesBulk(c echo.Context) error {
 	}
 	for _, e := range rows {
 		merged := dedupe(append(append([]string{}, e.Aliases...), req.Aliases...))
-		// model.Emoji.Aliases は pq.StringArray なので plain []string で
+		// model.Emoji.Aliases は model.StringArray なので plain []string で
 		// 渡すと GORM が record literal `('a','b')` を生成して
 		// SQLSTATE 42804 (column type mismatch) になる drift がある
-		// (#896 と同 pattern)。pq.StringArray で wrap して
+		// (#896 と同 pattern)。model.StringArray で wrap して
 		// `'{a,b}'` array literal として書き込ませる。
-		if err := h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray(merged)}); err != nil {
+		if err := h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": model.StringArray(merged)}); err != nil {
 			// per-emoji 失敗は bulk 操作全体を中断せず log で観測する
 			// (#882 で発覚した silent failure 防止)。複数件のうち一部が
 			// 失敗しても他の emoji は更新したい意図。
@@ -306,9 +306,9 @@ func (h *Handler) EmojiRemoveAliasesBulk(c echo.Context) error {
 				filtered = append(filtered, a)
 			}
 		}
-		// pq.StringArray wrap (#896 と同 pattern) — add-aliases-bulk と
+		// model.StringArray wrap (#896 と同 pattern) — add-aliases-bulk と
 		// 同じ理由で plain []string では SQLSTATE 42804 になる。
-		if err := h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": pq.StringArray(filtered)}); err != nil {
+		if err := h.emojiRepo.UpdateFields(e.ID, map[string]any{"aliases": model.StringArray(filtered)}); err != nil {
 			// per-emoji 失敗は他 emoji への影響を避けるため warn log で
 			// 観測しつつ continue する (add-aliases-bulk と同 policy)。
 			slog.WarnContext(c.Request().Context(), "admin/emoji/remove-aliases-bulk: per-emoji update failed",
@@ -334,9 +334,9 @@ func (h *Handler) EmojiSetAliasesBulk(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// pq.StringArray wrap (#896 と同 pattern) — UpdateFieldsMany 経由でも
+	// model.StringArray wrap (#896 と同 pattern) — UpdateFieldsMany 経由でも
 	// 同 drift が発生するので caller 側で wrap する。
-	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"aliases": pq.StringArray(req.Aliases)}); err != nil {
+	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"aliases": model.StringArray(req.Aliases)}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	h.publishEmojiUpdatedByIDs(req.IDs) // #2046

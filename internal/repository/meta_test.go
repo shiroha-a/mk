@@ -3,7 +3,6 @@ package repository
 import (
 	"testing"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,8 +62,8 @@ func TestMetaRepository_Update(t *testing.T) {
 	assert.Equal(t, &newName, found.Name)
 }
 
-// pq.StringArray を varchar[] 列に Update できることを担保する。admin
-// handler 側の coerceMetaArrayFields が []any → pq.StringArray 変換を
+// model.StringArray を varchar[] 列に Update できることを担保する。admin
+// handler 側の coerceMetaArrayFields が []any → model.StringArray 変換を
 // 行った後で、ここで実 DB 経由で永続化されることを最後の砦として確認。
 // #590 で修正したバグの regression test。
 func TestMetaRepository_Update_FederationHosts(t *testing.T) {
@@ -76,8 +75,8 @@ func TestMetaRepository_Update_FederationHosts(t *testing.T) {
 
 	require.NoError(t, repo.Update(map[string]any{
 		"federation":      "specified",
-		"federationHosts": pq.StringArray{"allowed.example", "trusted.example"},
-		"blockedHosts":    pq.StringArray{"bad.example"},
+		"federationHosts": model.StringArray{"allowed.example", "trusted.example"},
+		"blockedHosts":    model.StringArray{"bad.example"},
 	}))
 
 	found, err := repo.Fetch()

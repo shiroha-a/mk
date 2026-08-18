@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -189,8 +188,8 @@ func (s *stubRolePolicyProvider) GetUserPolicies(_ string) map[string]any { retu
 func TestCreate_WebhookLimitExceeded(t *testing.T) {
 	h, repo := newTestHandler()
 	// 既に 2 webhook 保有
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: pq.StringArray{}}
-	repo.webhooks["w2"] = &model.Webhook{ID: "w2", UserID: "u1", On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: model.StringArray{}}
+	repo.webhooks["w2"] = &model.Webhook{ID: "w2", UserID: "u1", On: model.StringArray{}}
 	h.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
 		"webhookLimit": 2,
 	}})
@@ -230,7 +229,7 @@ func TestCreate_WebhookLimit_CountError(t *testing.T) {
 
 func TestList_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: pq.StringArray{"note"}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: model.StringArray{"note"}}
 	rec := post(h.List, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -250,8 +249,8 @@ func TestList_Empty(t *testing.T) {
 func TestList_LatestSentAtFormat(t *testing.T) {
 	h, repo := newTestHandler()
 	sent := time.Date(2026, 6, 21, 1, 2, 3, 456_000_000, time.UTC)
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: pq.StringArray{"note"}, LatestSentAt: &sent}
-	repo.webhooks["w2"] = &model.Webhook{ID: "w2", UserID: "u1", Name: "hook2", On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: model.StringArray{"note"}, LatestSentAt: &sent}
+	repo.webhooks["w2"] = &model.Webhook{ID: "w2", UserID: "u1", Name: "hook2", On: model.StringArray{}}
 	rec := post(h.List, `{}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp []map[string]any
@@ -279,7 +278,7 @@ func TestList_Error(t *testing.T) {
 
 func TestShow_Success(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "hook1", On: model.StringArray{}}
 	rec := post(h.Show, `{"webhookId":"w1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
 
@@ -306,7 +305,7 @@ func TestUpdate_Success(t *testing.T) {
 	// upstream Misskey TS の i/webhooks/update は body 無しの 204 を返すので
 	// drop-in 互換のため mk-go 側も 204 + body 無しに揃える (#936)。
 	h, repo := newTestHandler()
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "old", URL: "https://old.example", On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "old", URL: "https://old.example", On: model.StringArray{}}
 	rec := post(h.Update, `{"webhookId":"w1","name":"new","url":"https://new.example","on":["follow"],"active":false}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Empty(t, rec.Body.String())
@@ -318,7 +317,7 @@ func TestUpdate_Success(t *testing.T) {
 func TestUpdate_Partial(t *testing.T) {
 	h, repo := newTestHandler()
 	secret := "oldsecret"
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "name", URL: "https://example.com", Secret: secret, On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "name", URL: "https://example.com", Secret: secret, On: model.StringArray{}}
 	newSecret := "newsecret"
 	rec := post(h.Update, `{"webhookId":"w1","secret":"`+newSecret+`"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -332,7 +331,7 @@ func TestUpdate_Partial(t *testing.T) {
 //	"x"     → 設定
 func TestUpdate_SecretNullAbsentValue(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "n", URL: "https://e", Secret: "old", On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", Name: "n", URL: "https://e", Secret: "old", On: model.StringArray{}}
 
 	// absent → 維持。
 	rec := post(h.Update, `{"webhookId":"w1","name":"x"}`, &model.User{ID: "u1"})
@@ -365,14 +364,14 @@ func TestUpdate_InvalidParam(t *testing.T) {
 func TestUpdate_InvalidOnEnum(t *testing.T) {
 	// upstream paramDef.on.items.enum: webhookEventTypes (#939)。
 	h, repo := newTestHandler()
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: model.StringArray{}}
 	rec := post(h.Update, `{"webhookId":"w1","on":["note","unknownEvent"]}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
 func TestUpdate_Error(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: pq.StringArray{}}
+	repo.webhooks["w1"] = &model.Webhook{ID: "w1", UserID: "u1", On: model.StringArray{}}
 	repo.updateErr = errMock
 	rec := post(h.Update, `{"webhookId":"w1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)

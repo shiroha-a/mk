@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -199,7 +198,7 @@ func newPendingGame(t *testing.T) (*model.ReversiGame, *fakeRepo, *capturePublis
 		ID:                   "g1",
 		User1ID:              "alice",
 		User2ID:              "bob",
-		Map:                  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:                  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		BW:                   "1",
 		TimeLimitForEachTurn: 90,
 		Logs:                 datatypes.JSON("[]"),
@@ -713,7 +712,7 @@ func TestIsPlayerOpponent(t *testing.T) {
 
 func TestEngineFromGame_ReplaysLogs(t *testing.T) {
 	game := &model.ReversiGame{
-		Map:  pq.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
+		Map:  model.StringArray{"--------", "--------", "--------", "---wb---", "---bw---", "--------", "--------", "--------"},
 		Logs: datatypes.JSON(`[[19,1]]`),
 	}
 	engine, err := EngineFromGame(game)
@@ -725,7 +724,7 @@ func TestEngineFromGame_ReplaysLogs(t *testing.T) {
 
 func TestEngineFromGame_BadLogs(t *testing.T) {
 	game := &model.ReversiGame{
-		Map:  pq.StringArray{"--------"},
+		Map:  model.StringArray{"--------"},
 		Logs: datatypes.JSON(`not-json`),
 	}
 	_, err := EngineFromGame(game)

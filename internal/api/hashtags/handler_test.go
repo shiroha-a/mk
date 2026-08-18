@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/hashtags"
 	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
@@ -325,7 +324,7 @@ func insertNoteWithVisibility(t *testing.T, gen id.Generator, userID string, tag
 	require.NoError(t, testDB.Exec(
 		`INSERT INTO "note" ("id", "userId", "tags", "visibility", "text")
 		 VALUES (?, ?, ?, ?::note_visibility_enum, '')`,
-		noteID, userID, pq.StringArray(tags), visibility,
+		noteID, userID, model.StringArray(tags), visibility,
 	).Error)
 }
 
@@ -425,7 +424,7 @@ func seedTagUser(t *testing.T, id, username string, tags []string, host *string,
 		ID:                id,
 		Username:          username,
 		UsernameLower:     strings.ToLower(username),
-		Tags:              pq.StringArray(tags),
+		Tags:              model.StringArray(tags),
 		Host:              host,
 		IsSuspended:       suspended,
 		FollowersCount:    followers,

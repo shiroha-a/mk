@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
-	"github.com/lib/pq"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
@@ -185,10 +184,10 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 		Text:                req.Text,
 		CW:                  req.CW,
 		Visibility:          req.Visibility,
-		VisibleUserIDs:      pq.StringArray(req.VisibleUserIDs),
+		VisibleUserIDs:      model.StringArray(req.VisibleUserIDs),
 		LocalOnly:           req.LocalOnly,
 		ReactionAcceptance:  req.ReactionAcceptance,
-		FileIDs:             pq.StringArray(req.FileIDs),
+		FileIDs:             model.StringArray(req.FileIDs),
 		ReplyID:             req.ReplyID,
 		RenoteID:            req.RenoteID,
 		ChannelID:           req.ChannelID,
@@ -267,7 +266,7 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 		draft.Visibility = req.Visibility
 	}
 	if req.VisibleUserIDs != nil {
-		draft.VisibleUserIDs = pq.StringArray(*req.VisibleUserIDs)
+		draft.VisibleUserIDs = model.StringArray(*req.VisibleUserIDs)
 	}
 	if req.LocalOnly != nil {
 		draft.LocalOnly = *req.LocalOnly
@@ -280,7 +279,7 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 		if !h.allDraftFilesOwned(req.FileIDs, user.ID) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "Some files are not found.", "b6992544-63e7-67f0-fa7f-32444b1b5306"))
 		}
-		draft.FileIDs = pq.StringArray(req.FileIDs)
+		draft.FileIDs = model.StringArray(req.FileIDs)
 	}
 	if req.ReplyID != nil {
 		draft.ReplyID = req.ReplyID
@@ -513,14 +512,14 @@ func pollAlreadyExpired(p *draftPoll, now time.Time) bool {
 func applyDraftPoll(d *model.NoteDraft, p *draftPoll) {
 	if p == nil {
 		d.HasPoll = false
-		d.PollChoices = pq.StringArray{}
+		d.PollChoices = model.StringArray{}
 		d.PollMultiple = false
 		d.PollExpiresAt = nil
 		d.PollExpiredAfter = nil
 		return
 	}
 	d.HasPoll = true
-	d.PollChoices = pq.StringArray(p.Choices)
+	d.PollChoices = model.StringArray(p.Choices)
 	d.PollMultiple = p.Multiple
 	d.PollExpiredAfter = p.ExpiredAfter
 	if p.ExpiresAt != nil {
