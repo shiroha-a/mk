@@ -17,6 +17,8 @@ import (
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // SetDraftRepo attaches a NoteDraftRepository for draft operations.
@@ -134,24 +136,24 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 	// 配線済 (timeline gate と共用)。CountByUser で current 件数を取得。
 	if h.policyProvider != nil {
 		policies := h.policyProvider.GetUserPolicies(user.ID)
-		if limit, ok := policies["noteDraftLimit"].(int); ok && limit >= 0 {
+		if limit, ok := role.PolicyNumber(policies["noteDraftLimit"]); ok && limit >= 0 {
 			count, err := h.draftRepo.CountByUser(user.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if count >= int64(limit) {
+			if float64(count) >= limit {
 				return apierr.JSONTooManyNoteDrafts(c)
 			}
 		}
 		// scheduledNoteLimit gate (#1040)。isActuallyScheduled draft の数を
 		// 集計して上限と比較する。upstream `NoteDraftService.create` と同 logic。
 		if req.IsActuallyScheduled {
-			if limit, ok := policies["scheduledNoteLimit"].(int); ok && limit >= 0 {
+			if limit, ok := role.PolicyNumber(policies["scheduledNoteLimit"]); ok && limit >= 0 {
 				count, err := h.draftRepo.CountScheduledByUser(user.ID)
 				if err != nil {
 					return apierr.JSONInternalError(c)
 				}
-				if count >= int64(limit) {
+				if float64(count) >= limit {
 					return c.JSON(http.StatusBadRequest, apierr.Error("TOO_MANY_SCHEDULED_NOTES", "You cannot create scheduled notes any more.", "22ae69eb-09e3-4541-a850-773cfa45e693"))
 				}
 			}

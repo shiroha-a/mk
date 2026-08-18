@@ -19,6 +19,8 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"gorm.io/datatypes"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // Errors returned by Service.
@@ -72,27 +74,9 @@ var (
 	ErrRecursiveNesting = errors.New("recursive folder nesting")
 )
 
-// policyNumber normalizes a numeric policy value into a float.
-//
-// **policy の数値は int と float64 のどちらも取りうる。** role_service.go の
-// maxNumber が「整数値なら int、小数はそのまま float64」で返すと決めており、
-// 「小数を取りうる policy の consumer は float も受けること」と明記している。
-//
-// int だけを受けていると、role で 1MB 未満を設定したとき (upstream の e2e は
-// 10 バイト = 10/1024/1024 MB を使う) 型アサーションに失敗して gate ごと
-// スキップされ、**上限違反で弾くのではなく上限そのものが消える**。単位に
-// 依らず同じ失敗の仕方をするので、サイズでも個数でもここを通す (#2611)。
-func policyNumber(v any) (float64, bool) {
-	switch x := v.(type) {
-	case int:
-		return float64(x), true
-	case int64:
-		return float64(x), true
-	case float64:
-		return x, true
-	}
-	return 0, false
-}
+// policyNumber は [role.PolicyNumber] の別名。呼び出し箇所が多いので短く
+// 参照できるようにしてある。契約と理由はそちらの doc を参照。
+func policyNumber(v any) (float64, bool) { return role.PolicyNumber(v) }
 
 // ValidateFileName mirrors upstream DriveFileEntityService.validateFileName:
 // the trimmed name must be non-empty, at most 200 characters, and must not

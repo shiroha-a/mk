@@ -14,6 +14,8 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // Handler handles users/lists API endpoints.
@@ -181,12 +183,12 @@ func (h *Handler) Create(c echo.Context) error {
 	}
 	// userListLimit role policy gate (#1029)。
 	if h.rolePolicyProvider != nil {
-		if limit, ok := h.rolePolicyProvider.GetUserPolicies(user.ID)["userListLimit"].(int); ok && limit >= 0 {
+		if limit, ok := role.PolicyNumber(h.rolePolicyProvider.GetUserPolicies(user.ID)["userListLimit"]); ok && limit >= 0 {
 			count, err := h.repo.CountByUser(user.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if count >= int64(limit) {
+			if float64(count) >= limit {
 				return apierr.JSONTooManyUserLists(c)
 			}
 		}
@@ -322,7 +324,7 @@ func (h *Handler) Push(c echo.Context) error {
 	// userEachUserListsLimit role policy gate (#1029)。list owner の policy
 	// で評価する (= owner == viewer は直上で確定済)。
 	if h.rolePolicyProvider != nil {
-		if limit, ok := h.rolePolicyProvider.GetUserPolicies(list.UserID)["userEachUserListsLimit"].(int); ok && limit >= 0 {
+		if limit, ok := role.PolicyNumber(h.rolePolicyProvider.GetUserPolicies(list.UserID)["userEachUserListsLimit"]); ok && limit >= 0 {
 			count, err := h.repo.CountMembers(list.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)

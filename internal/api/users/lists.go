@@ -14,6 +14,8 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"gorm.io/gorm"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // UserListFavoriteRepository is the interface for user list favorite operations.
@@ -63,12 +65,12 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 	}
 	// userListLimit gate (TOO_MANY_USERLISTS)。
 	if h.rolePolicyProvider != nil {
-		if limit, ok := h.rolePolicyProvider.GetUserPolicies(viewer.ID)["userListLimit"].(int); ok && limit >= 0 {
+		if limit, ok := role.PolicyNumber(h.rolePolicyProvider.GetUserPolicies(viewer.ID)["userListLimit"]); ok && limit >= 0 {
 			count, cerr := h.userListRepo.CountByUser(viewer.ID)
 			if cerr != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if count >= int64(limit) {
+			if float64(count) >= limit {
 				return c.JSON(http.StatusBadRequest, apierr.Error("TOO_MANY_USERLISTS", "You cannot create user list any more.", "e9c105b2-c595-47de-97fb-7f7c2c33e92f"))
 			}
 		}
@@ -89,9 +91,9 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 		return c.JSON(http.StatusOK, entity.PackUserList(newList, nil, h.idGen))
 	}
 	// member 上限 (userEachUserListsLimit)。-1 は無制限扱い。
-	memberLimit := -1
+	memberLimit := -1.0
 	if h.rolePolicyProvider != nil {
-		if l, ok := h.rolePolicyProvider.GetUserPolicies(viewer.ID)["userEachUserListsLimit"].(int); ok {
+		if l, ok := role.PolicyNumber(h.rolePolicyProvider.GetUserPolicies(viewer.ID)["userEachUserListsLimit"]); ok {
 			memberLimit = l
 		}
 	}
@@ -115,7 +117,7 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 			}
 		}
 		// TOO_MANY_USERS: member 上限に達したら中断 (upstream addMember の TooManyUsersError)。
-		if memberLimit >= 0 && len(memberIDs) >= memberLimit {
+		if memberLimit >= 0 && float64(len(memberIDs)) >= memberLimit {
 			return c.JSON(http.StatusBadRequest, apierr.Error("TOO_MANY_USERS", "You can not push users any more.", "1845ea77-38d1-426e-8e4e-8b83b24f5bd7"))
 		}
 		mb := &model.UserListMembership{
