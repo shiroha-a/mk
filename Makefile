@@ -547,11 +547,19 @@ PLAYWRIGHT_COMPOSE=docker-compose.playwright.yml
 playwright-up: ## Playwright スタック (mk-go backend) を起動
 	docker compose -f $(PLAYWRIGHT_COMPOSE) up -d --build
 
-playwright-test: ## Playwright spec を実行 (mk-go backend)
+# PLAYWRIGHT_ARGS は runner の `playwright` に素通しする追加引数。CI が
+# `--shard=i/N` を渡してシャード分割するために使う (#2609)。ローカルで
+# 動画が欲しいときは `PLAYWRIGHT_ARGS=--video=on` を渡す。
+#
+# runner の ENTRYPOINT は `playwright` で CMD が `test`。引数を足すと CMD が
+# 丸ごと置き換わるので、`test` を明示してから追加する。
+PLAYWRIGHT_ARGS ?=
+
+playwright-test: ## Playwright spec を実行 (mk-go backend、PLAYWRIGHT_ARGS で引数追加)
 	# `--build` を付けて runner image を rebuild check させる。package.json
 	# 更新時に node_modules が古いままにならないよう、毎回 build context を
 	# 確認する (cache hit なら ms 単位で済むので overhead 無視可)。
-	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test run --rm --build playwright-runner
+	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test run --rm --build playwright-runner test $(PLAYWRIGHT_ARGS)
 
 playwright-down: ## Playwright スタックを撤去
 	docker compose -f $(PLAYWRIGHT_COMPOSE) --profile test down -v
@@ -571,7 +579,7 @@ playwright-ts-up: ## Playwright スタック (Misskey TS backend) を起動
 
 playwright-ts-test: ## Playwright spec を実行 (TS backend、upstream 追従時のみ)
 	# `playwright-test` と同じく `--build` で runner image を最新化する。
-	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test run --rm --build playwright-runner
+	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test run --rm --build playwright-runner test $(PLAYWRIGHT_ARGS)
 
 playwright-ts-down: ## Playwright TS スタックを撤去
 	docker compose -f $(PLAYWRIGHT_COMPOSE) -f $(PLAYWRIGHT_TS_OVERLAY) --profile test down -v
@@ -635,12 +643,21 @@ upstream-e2e-migrate: ## e2e 用 DB にマイグレーションを適用
 	go run ./cmd/migrate -config $(UPSTREAM_E2E_CONFIG) -direction up
 
 # FILE で 1 ファイルだけ流せる: make upstream-e2e-test FILE=test/e2e/note.ts
-upstream-e2e-test: build ## 本家 backend e2e を mk-go に対して実行
+# VITEST_ARGS は vitest に素通しする追加引数。CI が `--shard=i/N` を渡して
+# シャード分割するために使う (#2609)。
+#
+# **プロセス内で並列にはできない。** upstream の vitest 設定が `maxWorkers: 1`
+# で、かつ setupFiles がファイルごとに mk-go の `/api/reset-db` (全テーブル
+# truncate) を叩く。同じ DB に 2 ファイルを並行させると片方が相手のフィクスチャ
+# を実行中に消す。シャードごとに DB を分けるのが前提。
+VITEST_ARGS ?=
+
+upstream-e2e-test: build ## 本家 backend e2e を mk-go に対して実行 (VITEST_ARGS で引数追加)
 	cd $(UPSTREAM_E2E_BACKEND) && \
 		MKGO_BIN=$(CURDIR)/built/misskey \
 		MKGO_CONFIG=$(CURDIR)/$(UPSTREAM_E2E_CONFIG) \
 		MKGO_CWD=$(CURDIR) \
-		npx --no vitest run --config vitest.config.e2e.mkgo.ts $(FILE)
+		npx --no vitest run --config vitest.config.e2e.mkgo.ts $(VITEST_ARGS) $(FILE)
 
 upstream-e2e: upstream-e2e-deps upstream-e2e-up upstream-e2e-migrate upstream-e2e-test ## 依存の用意からテストまで一括で実行
 
