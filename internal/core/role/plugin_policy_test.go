@@ -847,10 +847,13 @@ func TestEffectivePolicy_AnonymousInvokesProvidersWithoutRepositoryLookup(t *tes
 
 func TestEffectivePolicy_NoProviderAnonymousFastPathAllocations(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
-	allocs := testing.AllocsPerRun(100, func() {
+	cloneAllocs := testing.AllocsPerRun(100, func() {
+		_ = role.DefaultPoliciesClone()
+	})
+	policyAllocs := testing.AllocsPerRun(100, func() {
 		_ = svc.GetUserPolicies("")
 	})
-	assert.LessOrEqual(t, allocs, 7.0)
+	assert.Equal(t, cloneAllocs, policyAllocs)
 }
 
 func TestEffectivePolicy_AnonymousUsesNativeBaselineOrderingCloningAndCaps(t *testing.T) {

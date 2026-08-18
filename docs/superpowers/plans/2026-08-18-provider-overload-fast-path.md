@@ -196,10 +196,13 @@ git commit -m "Fix policy: token待ちtimeoutを一時fallbackにする"
 ```go
 func TestEffectivePolicy_NoProviderAnonymousFastPathAllocations(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
-	allocs := testing.AllocsPerRun(100, func() {
+	cloneAllocs := testing.AllocsPerRun(100, func() {
+		_ = role.DefaultPoliciesClone()
+	})
+	policyAllocs := testing.AllocsPerRun(100, func() {
 		_ = svc.GetUserPolicies("")
 	})
-	assert.LessOrEqual(t, allocs, 3.0)
+	assert.Equal(t, cloneAllocs, policyAllocs)
 }
 ```
 

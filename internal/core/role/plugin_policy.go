@@ -240,12 +240,7 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 			if recover() != nil {
 				out = policyProviderResult{}
 			}
-			out.completedAt = time.Now()
-			if deadline, ok := resolveCtx.Deadline(); ok && !out.completedAt.Before(deadline) {
-				provider.runtime.disabled.Store(true)
-			}
-			result <- out
-			provider.runtime.token <- struct{}{}
+			finishPolicyProviderInvocation(resolveCtx, provider.runtime, result, out)
 		}()
 		contributions, err := provider.reg.Resolve(resolveCtx, req)
 		out = policyProviderResult{contributions: contributions, ok: err == nil}
@@ -257,6 +252,15 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 		return nil, false
 	}
 	return out.contributions, out.ok
+}
+
+func finishPolicyProviderInvocation(ctx context.Context, runtime *policyProviderRuntime, result chan<- policyProviderResult, out policyProviderResult) {
+	out.completedAt = time.Now()
+	if deadline, ok := ctx.Deadline(); ok && !out.completedAt.Before(deadline) {
+		runtime.disabled.Store(true)
+	}
+	result <- out
+	runtime.token <- struct{}{}
 }
 
 func acquirePolicyProviderToken(ctx context.Context, runtime *policyProviderRuntime) bool {

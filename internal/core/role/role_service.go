@@ -1406,8 +1406,7 @@ var defaultPoliciesCache = buildDefaultPolicies()
 var mutableDefaultPolicyKeys = func() []string {
 	keys := make([]string, 0, 1)
 	for key, value := range defaultPoliciesCache {
-		switch value.(type) {
-		case []string, []any:
+		if _, mutable := cloneMutablePolicyValue(value); mutable {
 			keys = append(keys, key)
 		}
 	}
@@ -1435,13 +1434,18 @@ func DefaultPoliciesClone() map[string]any {
 }
 
 func clonePolicyValue(value any) any {
+	clone, _ := cloneMutablePolicyValue(value)
+	return clone
+}
+
+func cloneMutablePolicyValue(value any) (any, bool) {
 	switch value := value.(type) {
 	case []string:
-		return append([]string(nil), value...)
+		return append([]string(nil), value...), true
 	case []any:
-		return append([]any(nil), value...)
+		return append([]any(nil), value...), true
 	default:
-		return value
+		return value, false
 	}
 }
 
