@@ -34,7 +34,7 @@ on:
   pull_request:
     branches: [develop, main]
     # backend の API 形状・DB schema・spec 自体・起動まわりを触る変更だけを
-    # 対象にする。ドキュメントのみの PR で 15 分待たされないようにする。
+    # 対象にする。ドキュメントのみの PR で待たされないようにする。
     paths:
       - "internal/**"
       - "cmd/**"
@@ -75,6 +75,11 @@ jobs:
     steps:
       - id: pick
         shell: bash
+        env:
+          # シャード数。spec は 1 スタックあたり直列でしか回せない
+          # (共有 root アカウント / instance meta のため) ので、並列度は
+          # 「スタックごと分ける」= シャード数でしか稼げない。
+          SHARD_TOTAL: "4"
         # backend 固有の make target / compose 引数 / prepull / timeout を
         # ここで一元定義する (= matrix.include の単一の情報源)。
         run: |
@@ -85,7 +90,7 @@ jobs:
             "down_target": "playwright-down",
             "compose_args": "-f docker-compose.playwright.yml",
             "prepull": "",
-            "timeout_minutes": 45,
+            "timeout_minutes": 25,
             "continue_on_error": false
           }'
           # prepull: upstream image を先取りで pull しておく。compose up と
@@ -105,26 +110,35 @@ jobs:
             "down_target": "playwright-ts-down",
             "compose_args": "-f docker-compose.playwright.yml -f docker-compose.playwright.ts.yml",
             "prepull": "docker pull misskey/misskey:2026.7.0",
-            "timeout_minutes": 90,
+            "timeout_minutes": 45,
             "continue_on_error": true
           }'
           # TS backend は upstream 追従のタイミングだけ回す運用なので、
           # pull_request では matrix から落とす (#2291 / #2289)。
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            matrix=$(jq -c -n --argjson a "$mkgo" '[$a]')
+            backends=$(jq -c -n --argjson a "$mkgo" '[$a]')
           else
-            matrix=$(jq -c -n --argjson a "$mkgo" --argjson b "$ts" '[$a, $b]')
+            backends=$(jq -c -n --argjson a "$mkgo" --argjson b "$ts" '[$a, $b]')
           fi
+          # backend x shard の直積を作る (#2609)。
+          #
+          # **shard を matrix の軸として書かない。** `include` は既存の
+          # combination に merge できない entry を新規 combination として
+          # 足す semantics なので、軸と併用すると backend 側の絞り込み
+          # (pull_request で TS を落とす) が壊れる。include 配列そのものを
+          # 直積にして渡すのが唯一の方法。
+          matrix=$(jq -c -n --argjson bs "$backends" --argjson n "$SHARD_TOTAL" \
+            '[$bs[] as $b | range(1; $n + 1) | $b + {shard: ., shard_total: $n}]')
           echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
           echo "$matrix" | jq .
 
   spec:
-    name: spec (${{ matrix.backend }})
+    name: spec (${{ matrix.backend }} ${{ matrix.shard }}/${{ matrix.shard_total }})
     needs: plan
     runs-on: ubuntu-latest
-    # backend ごとに枠を変える。mk-go は 45 min のままにして hang を早く検出
-    # する。TS は #2288 で初めて spec が走った際 45 min で 360/370 までしか
-    # 進まず timeout したため 90 min。
+    # backend ごとに枠を変える。mk-go は hang を早く検出したいので短め。
+    # TS は #2288 で初めて spec が走った際 45 min で 360/370 までしか進まず
+    # timeout したため、分割前は 90 min にしていた。
     #
     # 念のため: この差は backend の速度差ではない。同一 CI 環境で両方が成功した
     # 同一 spec 263 件を突き合わせると所要時間はほぼ同じ (TS/mk-go の中央値
@@ -135,6 +149,10 @@ jobs:
     # に対して全 438 spec を完走させたところ 434 pass / 3 fail / 1 skip・12.1 min
     # で、落ちた 3 件はいずれも別種の spec 側の問題だった (修正済み)。CI 側の
     # 77 件は追わない。
+    # シャード分割で 1 job あたりの spec 数が 1/4 になったので、枠も
+    # 縮めた (mk-go 45 → 25 / TS 90 → 45)。hang の検出を遅らせないため。
+    # frontend build が cache miss する submodule bump 時 (5-10 min) と
+    # スタック起動 (2 min) を見込んでも余裕がある。
     timeout-minutes: ${{ matrix.timeout_minutes }}
 
     strategy:
@@ -215,7 +233,13 @@ jobs:
         run: make ${{ matrix.up_target }}
 
       - name: Run Playwright
-        run: make ${{ matrix.test_target }}
+        # spec は 1 スタックあたり直列でしか回せない。共有の root アカウント
+        # (289 ファイル中 173 がサインインする) と instance meta を全 spec が
+        # 共有しており、Playwright のファイル並列だと `profile_iscat_toggle`
+        # と `profile_isbot_toggle` が同じ alice を、`admin_branding_save` と
+        # `about_page_render` が同じ meta を取り合う。並列度はスタックごと
+        # 分ける = シャードでしか稼げない (#2609)。
+        run: make ${{ matrix.test_target }} PLAYWRIGHT_ARGS="--shard=${{ matrix.shard }}/${{ matrix.shard_total }}"
 
       # spec が 1 件も実行されないまま "成功" になる状態を検知する。
       #
@@ -253,7 +277,7 @@ jobs:
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-results-${{ matrix.backend }}
+          name: playwright-results-${{ matrix.backend }}-${{ matrix.shard }}
           path: tests/playwright/test-results/
           if-no-files-found: ignore
           retention-days: 14
@@ -271,7 +295,7 @@ jobs:
         if: failure() || cancelled()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-logs-${{ matrix.backend }}
+          name: playwright-logs-${{ matrix.backend }}-${{ matrix.shard }}
           path: /tmp/playwright-logs/
           if-no-files-found: ignore
           retention-days: 14

@@ -14,7 +14,7 @@ name: Upstream backend e2e
 #
 # - pull_request: paths に該当する変更のみ。**branch protection の required
 #   checks には入れない**ので、落ちても merge はブロックされない。実行に
-#   18-20 分かかるうえ、外部 image pull と 1200 件超のテストで flaky 要素が
+#   4 シャード並列でも 4 分前後かかるうえ、1200 件超のテストで flaky 要素が
 #   あるため merge ブロッカーには適さない
 # - workflow_dispatch: upstream 追従で submodule を bump したときに手動で発火できる
 #
@@ -49,10 +49,26 @@ permissions:
 
 jobs:
   e2e:
+    name: e2e (${{ matrix.shard }}/4)
     runs-on: ubuntu-latest
-    # 実測でテスト本体が 14 分、これに Go / pnpm のビルドが乗る。上流で
-    # テストが増えることを見込んで余裕を持たせる。
-    timeout-minutes: 45
+    # シャード分割で 1 job あたりのテストが 1/4 になったので枠を縮めた
+    # (45 → 20)。Go / pnpm のビルドはシャードごとに重複するので、その分は
+    # 割り算されない。上流でテストが増えることを見込んで余裕は残す。
+    timeout-minutes: 20
+
+    # **プロセス内では並列にできない。** upstream の vitest 設定が
+    # `maxWorkers: 1` で、かつ setupFiles がファイルごとに mk-go の
+    # `/api/reset-db` (全テーブル truncate) を叩く。同じ DB に 2 ファイルを
+    # 並行させると片方が相手のフィクスチャを実行中に消す。
+    #
+    # 並列度はシャードごとに job を分けて稼ぐ (#2609)。job が別なら
+    # PostgreSQL / Redis の service container も別に立つので、DB の共有が
+    # 起きない。fail-fast: false で 1 シャードが落ちても他は完走させる
+    # (どのシャードが落ちたかで原因の当たりが付く)。
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
 
     # ポートは本家 .github/misskey/test.yml に合わせる。tests/upstream-e2e/mkgo.yml
     # がこの番号を向いているので、compose 版 (make upstream-e2e-up) と CI で
@@ -120,7 +136,7 @@ jobs:
         run: make upstream-e2e-migrate
 
       - name: Run upstream backend e2e
-        run: make upstream-e2e-test
+        run: make upstream-e2e-test VITEST_ARGS="--shard=${{ matrix.shard }}/4"
 
       # 失敗時は mk-go 側のログを artifact 化する。vitest の出力だけでは
       # 「サーバーが何を返したか」が分からないことが多い。
@@ -128,7 +144,7 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: upstream-e2e-mkgo-log
+          name: upstream-e2e-mkgo-log-${{ matrix.shard }}
           path: /tmp/mkgo-upstream-e2e.log
           if-no-files-found: ignore
           retention-days: 14
