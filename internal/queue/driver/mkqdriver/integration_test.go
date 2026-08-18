@@ -1590,3 +1590,52 @@ func TestShutdown_DoesNotScaleWithWorkerCount(t *testing.T) {
 	}
 	t.Logf("interval=%v / shutdown %v", interval, elapsed.Round(time.Millisecond))
 }
+
+// **scale-down が dispatcher の待ち時間に律速されないこと。**
+//
+// worker を縮めるとき、止める側の dispatcher は BZPOPMIN で park している。
+// mkq は Stop で worker 専用の wake key を突いて起こすが、それが届かないと
+// park の上限 (30 秒) まで待つ。逐次に止めていると本数分積み上がる。
+//
+// 実際に本番が起動不能になった経路: オートスケーラが inbox を 16 → 4 に
+// 縮める過程で Stop が返らず、Server.Start が完了せず HTTP の listen まで
+// 到達しなかった。当時は stopWorker が context.Background() を渡していたので
+// 待ちが無制限だった (#2602)。
+//
+// delayed job を 1 件積むのは、dispatcher を最初から長い待ちに入らせるため。
+// アイドルのバックオフが伸びるのを待たずに同じ条件を作れる。
+func TestResize_ScaleDownDoesNotHang(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:       redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency: 8,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	srv := d.Server()
+	srv.Handle("noop", func(context.Context, driver.Task) error { return nil })
+	require.NoError(t, srv.Start())
+	t.Cleanup(srv.Shutdown)
+
+	// 遠い delayed job を 1 件だけ積む。テスト中に due にはならない。
+	require.NoError(t, d.Client().Enqueue(context.Background(), "noop", []byte(`{}`),
+		driver.WithQueue("deliver"), driver.WithProcessIn(time.Hour)))
+
+	require.NoError(t, d.Resize("deliver", 8))
+	// 全 dispatcher が BZPOPMIN に入るまで待つ。
+	time.Sleep(2 * time.Second)
+
+	start := time.Now()
+	require.NoError(t, d.Resize("deliver", 2))
+	elapsed := time.Since(start)
+
+	// 起こせていれば ms 台。取りこぼすと 1 本あたり最大 30 秒かかる。
+	if elapsed > 5*time.Second {
+		t.Fatalf("scale-down に %v かかった。dispatcher を起こせていない", elapsed)
+	}
+	assert.Equal(t, 2, d.WorkerCount("deliver"))
+	t.Logf("8 → 2 の scale-down が %v", elapsed.Round(time.Millisecond))
+}

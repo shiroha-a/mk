@@ -314,7 +314,7 @@ func (s *Server) workerCount(qname string) int {
 // resizeLocked is the workerPool's internal resize implementation.
 // Caller must hold pool.mu. On scale-up, new Workers are spawned via
 // mkq.Process. On scale-down, the trailing surplus Workers are removed
-// from the slice and stopped sequentially (Stop = cancel in-flight,
+// from the slice and stopped concurrently (Stop = cancel in-flight,
 // not wait for completion — see Server type doc).
 //
 // Post-Shutdown guard: returns ErrResizeAfterShutdown if shutdownLocked
@@ -337,9 +337,7 @@ func (p *workerPool) resizeLocked(n int) error {
 			w, err := mkq.Process(p.queue, p.handler, opts...)
 			if err != nil {
 				// 既に spawn した Worker は停止して回復
-				for _, sw := range spawned {
-					stopWorker(sw)
-				}
+				stopWorkers(spawned)
 				return fmt.Errorf("mkqdriver: spawn worker: %w", err)
 			}
 			spawned = append(spawned, w)
@@ -352,9 +350,7 @@ func (p *workerPool) resizeLocked(n int) error {
 		// キャンセル、ms オーダーで return)。
 		toStop := p.workers[n:]
 		p.workers = p.workers[:n]
-		for _, w := range toStop {
-			stopWorker(w)
-		}
+		stopWorkers(toStop)
 		return nil
 	}
 }
@@ -364,15 +360,42 @@ func (p *workerPool) resizeLocked(n int) error {
 // Caller must hold pool.mu. Used by Server.Shutdown.
 func (p *workerPool) shutdownLocked() {
 	p.shutdown = true
-	// **worker は並列に止める。** 待ち時間の実体は「BZPOPMIN のタイムアウトが
-	// 切れるまで」で、逐次に止めると worker 数の分だけ積み上がる。dispatchLoop は
-	// `runCtx` を BZPOPMIN に渡しているが、go-redis は発行済みの読み取りを
-	// 中断できないので、キャンセルしても最大 idlePollInterval だけ残る。
-	//
-	// 直列だったころは worker 数 x interval かかっていた (実測: interval 1 秒 /
-	// worker 数既定で 4.5 秒、5 秒なら 29.7 秒)。並列なら interval 1 回分で済む。
+	stopWorkers(p.workers)
+	p.workers = nil
+}
+
+// stopWorkerTimeout bounds how long stopWorker waits for one Worker.
+//
+// **上限が無いと、起こしを取りこぼした 1 本が起動全体を止める。** dispatcher は
+// BZPOPMIN で最大 30 秒 park するが、発行済みの読み取りは ctx キャンセルで
+// 中断できない。mkq は Stop で専用 key を突いて起こすので通常は ms で返る。
+// ここはその起こしが届かなかった場合の保険で、30 秒は park の上限に合わせて
+// ある (それを過ぎれば dispatcher は自力で目を覚ます)。
+//
+// 実際に無制限で踏んだ: Resize が inbox を 16 → 4 に縮める過程で Stop が
+// 返らず、Server.Start が完了せず HTTP の listen まで到達しなかった。
+const stopWorkerTimeout = 30 * time.Second
+
+// stopWorker wraps mkq.Worker.Stop with structured error logging. Stop
+// failures here are non-fatal (the goroutine still exits via runCancel)
+// but operators should be alerted via logs because frequent failures
+// usually indicate Redis connectivity issues that need investigation.
+func stopWorker(w *mkq.Worker) {
+	ctx, cancel := context.WithTimeout(context.Background(), stopWorkerTimeout)
+	defer cancel()
+	if err := w.Stop(ctx); err != nil {
+		slog.Warn("mkqdriver: worker stop error", "err", err)
+	}
+}
+
+// stopWorkers stops every Worker in ws concurrently.
+//
+// **逐次に止めない。** 1 本あたりの待ちは通常 ms だが、起こしを取りこぼすと
+// stopWorkerTimeout まで伸びる。逐次だとそれが本数分積み上がる (16 本なら
+// 最悪 8 分)。並列なら 1 回分で済む。
+func stopWorkers(ws []*mkq.Worker) {
 	var wg sync.WaitGroup
-	for _, w := range p.workers {
+	for _, w := range ws {
 		wg.Add(1)
 		go func(w *mkq.Worker) {
 			defer wg.Done()
@@ -380,17 +403,6 @@ func (p *workerPool) shutdownLocked() {
 		}(w)
 	}
 	wg.Wait()
-	p.workers = nil
-}
-
-// stopWorker wraps mkq.Worker.Stop with structured error logging. Stop
-// failures here are non-fatal (the goroutine still exits via runCancel)
-// but operators should be alerted via logs because frequent failures
-// usually indicate Redis connectivity issues that need investigation.
-func stopWorker(w *mkq.Worker) {
-	if err := w.Stop(context.Background()); err != nil {
-		slog.Warn("mkqdriver: worker stop error", "err", err)
-	}
 }
 
 // newDispatchHandler builds the mkq handler closure that demuxes
