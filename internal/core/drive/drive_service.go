@@ -72,14 +72,17 @@ var (
 	ErrRecursiveNesting = errors.New("recursive folder nesting")
 )
 
-// policyMegabytes normalizes a size policy (maxFileSizeMb / driveCapacityMb)
-// into megabytes as a float.
+// policyNumber normalizes a numeric policy value into a float.
+//
+// **policy の数値は int と float64 のどちらも取りうる。** role_service.go の
+// maxNumber が「整数値なら int、小数はそのまま float64」で返すと決めており、
+// 「小数を取りうる policy の consumer は float も受けること」と明記している。
 //
 // int だけを受けていると、role で 1MB 未満を設定したとき (upstream の e2e は
 // 10 バイト = 10/1024/1024 MB を使う) 型アサーションに失敗して gate ごと
-// スキップされ、上限が事実上無効になっていた。JSON 由来の値は float64 で
-// 入るので、整数系と両方受けて MB のまま float で返す。
-func policyMegabytes(v any) (float64, bool) {
+// スキップされ、**上限違反で弾くのではなく上限そのものが消える**。単位に
+// 依らず同じ失敗の仕方をするので、サイズでも個数でもここを通す (#2611)。
+func policyNumber(v any) (float64, bool) {
 	switch x := v.(type) {
 	case int:
 		return float64(x), true
@@ -454,13 +457,13 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		// gate すべき容量そのものが発生しない (link 行は `size=0`)。expireOldFile
 		// 相当を足さないのも同じ理由で、意図的な差分 (docs/divergence.md §5.5)。
 		if in.User.IsLocal() && policies != nil {
-			if mb, ok := policyMegabytes(policies["maxFileSizeMb"]); ok && mb > 0 {
+			if mb, ok := policyNumber(policies["maxFileSizeMb"]); ok && mb > 0 {
 				maxBytes := int64(mb * 1024 * 1024)
 				if int64(len(info.Body)) > maxBytes {
 					return nil, ErrMaxFileSizeExceeded
 				}
 			}
-			if mb, ok := policyMegabytes(policies["driveCapacityMb"]); ok && mb > 0 {
+			if mb, ok := policyNumber(policies["driveCapacityMb"]); ok && mb > 0 {
 				capBytes := int64(mb * 1024 * 1024)
 				// UsageByUser の DB error を握り潰すと usage=0 として gate を
 				// pass してしまい driveCapacityMb 制限が事実上効かなくなる。

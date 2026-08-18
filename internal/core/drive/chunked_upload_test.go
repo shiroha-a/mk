@@ -902,3 +902,63 @@ func TestGCChunkedUploads_ReclaimsStuckFinish(t *testing.T) {
 	assert.Equal(t, 1, n)
 	assert.Len(t, f.storage.Aborted, 1)
 }
+
+// **小数の policy でもゲートが効くこと。**
+//
+// policy の数値は小数を取りうる (role_service.go の maxNumber が
+// 「小数はそのまま float64 で返す」と明記している)。素の `.(int)` で読むと
+// float64 で型アサーションに失敗し、**上限違反で弾くのではなく上限そのものが
+// 消える**。通常アップロードは policyNumber で float を受けているので、
+// ここが int だけだと経路差になる (#2611)。
+func TestStartChunkedUpload_FractionalMaxFileSize(t *testing.T) {
+	f := newChunkedFixture(t)
+	// 0.5MB 上限に対し 1MB を要求する。
+	f.roles.policies["u1"]["maxFileSizeMb"] = 0.5
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: 1024 * 1024,
+	})
+	assert.ErrorIs(t, err, drive.ErrMaxFileSizeExceeded)
+}
+
+func TestStartChunkedUpload_FractionalDriveCapacity(t *testing.T) {
+	f := newChunkedFixture(t)
+	f.roles.policies["u1"]["driveCapacityMb"] = 1.5
+	uid := "u1"
+	require.NoError(t, f.files.Create(&model.DriveFile{ID: "f1", UserID: &uid, Size: 1024 * 1024}))
+
+	// 既存 1MB + 新規 1MB = 2MB > 1.5MB。
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: 1024 * 1024,
+	})
+	assert.ErrorIs(t, err, drive.ErrNoFreeSpace)
+}
+
+func TestStartChunkedUpload_FractionalPendingLimit(t *testing.T) {
+	f := newChunkedFixture(t)
+	// 他のゲートに先に引っかからないよう広げておく。
+	f.roles.policies["u1"]["maxFileSizeMb"] = 100
+	f.roles.policies["u1"]["driveCapacityMb"] = 1024
+	f.roles.policies["u1"][role.PolicyChunkedUploadMaxPendingMb] = 1.5
+	f.start(t, 1024*1024)
+
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: 1024 * 1024,
+	})
+	assert.ErrorIs(t, err, drive.ErrPendingUploadLimitExceeded)
+}
+
+// 個数の policy も小数を取りうる。int に丸めると 0.5 が 0 になり
+// `limit > 0` を抜けて gate ごと消えるので、float のまま比較する。
+func TestStartChunkedUpload_FractionalConcurrentSessions(t *testing.T) {
+	f := newChunkedFixture(t)
+	f.roles.policies["u1"][role.PolicyChunkedUploadMaxConcurrentSessions] = 1.5
+	f.start(t, 1024)
+	// active=1 に対し上限 1.5 なのでまだ開ける。
+	f.start(t, 1024)
+
+	// active=2 >= 1.5 で弾く。
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: 1024,
+	})
+	assert.ErrorIs(t, err, drive.ErrTooManyUploadSessions)
+}

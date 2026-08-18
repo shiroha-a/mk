@@ -238,8 +238,15 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 	// Upload は remote user を skip するが (expireOldFile 相当が無いため)、
 	// こちらは remote / local を問わず適用する: 分割アップロードは申告値を
 	// 信用して受け入れ枠を確保する経路なので、gate が外れる分岐を作らない。
-	if mb, ok := policies["maxFileSizeMb"].(int); ok && mb > 0 {
-		if in.Size > int64(mb)*1024*1024 {
+	//
+	// **値の読み取りは policyNumber に通す。** policy の数値は小数を取りうる
+	// (role_service.go の maxNumber が「小数はそのまま float64 で返す」と明記)。
+	// 素の `.(int)` だと float64 で型アサーションに失敗し、上限違反で弾くのでは
+	// なく**上限そのものが消える**。Upload 側は最初からこれを通しているので、
+	// int だけで読むと同じ policy が経路によって効いたり効かなかったりする
+	// (#2611)。
+	if mb, ok := policyNumber(policies["maxFileSizeMb"]); ok && mb > 0 {
+		if in.Size > int64(mb*1024*1024) {
 			return nil, ErrMaxFileSizeExceeded
 		}
 	}
@@ -248,7 +255,7 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 	if err != nil {
 		return nil, fmt.Errorf("count pending chunked uploads: %w", err)
 	}
-	if mb, ok := policies["driveCapacityMb"].(int); ok && mb > 0 {
+	if mb, ok := policyNumber(policies["driveCapacityMb"]); ok && mb > 0 {
 		usage, err := s.fileRepo.UsageByUser(in.User.ID)
 		if err != nil {
 			// Upload と同じ理由で握り潰さない。usage=0 として素通しにすると
@@ -257,13 +264,13 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 		}
 		// 未完了セッションの申告分も加算する。これが無いと「残容量ぎりぎりの
 		// セッションを複数開く」で driveCapacityMb を丸ごと迂回できる。
-		if usage+pending+in.Size > int64(mb)*1024*1024 {
+		if usage+pending+in.Size > int64(mb*1024*1024) {
 			return nil, ErrNoFreeSpace
 		}
 	}
 
-	if limit, ok := policies[role.PolicyChunkedUploadMaxPendingMb].(int); ok && limit > 0 {
-		maxPending := int64(limit) * 1024 * 1024
+	if limit, ok := policyNumber(policies[role.PolicyChunkedUploadMaxPendingMb]); ok && limit > 0 {
+		maxPending := int64(limit * 1024 * 1024)
 		if settings.MaxPendingBytesPerUser > 0 && maxPending > settings.MaxPendingBytesPerUser {
 			maxPending = settings.MaxPendingBytesPerUser
 		}
@@ -272,15 +279,17 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 		}
 	}
 
-	if limit, ok := policies[role.PolicyChunkedUploadMaxConcurrentSessions].(int); ok && limit > 0 {
-		if settings.MaxSessionsPerUser > 0 && limit > settings.MaxSessionsPerUser {
-			limit = settings.MaxSessionsPerUser
+	// 個数の policy も同じく小数を取りうる。int に丸めると 0.5 が 0 になり
+	// `limit > 0` を抜けて gate ごと消えるので、float のまま比較する。
+	if limit, ok := policyNumber(policies[role.PolicyChunkedUploadMaxConcurrentSessions]); ok && limit > 0 {
+		if cap := float64(settings.MaxSessionsPerUser); cap > 0 && limit > cap {
+			limit = cap
 		}
 		active, err := s.chunkedRepo.CountActiveByUser(in.User.ID, now)
 		if err != nil {
 			return nil, fmt.Errorf("count chunked upload sessions: %w", err)
 		}
-		if active >= int64(limit) {
+		if float64(active) >= limit {
 			return nil, ErrTooManyUploadSessions
 		}
 	}
