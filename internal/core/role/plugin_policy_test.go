@@ -7,6 +7,7 @@ import (
 	"math"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -512,6 +513,60 @@ func TestEffectivePolicy_ProviderPanicCheckedRestoresDeclaredKeys(t *testing.T) 
 	require.Equal(t, role.ErrEffectivePolicyProvider, err)
 	assert.Equal(t, role.DefaultPolicies()["canSearchUsers"], p["canSearchUsers"])
 	assert.Equal(t, role.DefaultPolicies()["driveCapacityMb"], p["driveCapacityMb"])
+}
+
+func TestEffectivePolicy_CooperativeTimeoutFallsBackToNative(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	registerProvider(t, svc, "slow", []string{"canSearchNotes"}, func(ctx context.Context, _ plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	})
+
+	started := time.Now()
+	policies, err := svc.GetUserPoliciesChecked("")
+	require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	assert.Less(t, time.Since(started), 2*time.Second)
+	assert.Equal(t, false, policies["canSearchNotes"])
+}
+
+func TestEffectivePolicy_TimeoutDisablesProviderAndBoundsHang(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	block := make(chan struct{})
+	t.Cleanup(func() { close(block) })
+	var calls atomic.Int32
+	registerProvider(t, svc, "hung", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		calls.Add(1)
+		<-block
+		return nil, nil
+	})
+
+	var wg sync.WaitGroup
+	for range 8 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			policies, err := svc.GetUserPoliciesChecked("u1")
+			assert.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+			assert.Equal(t, false, policies["canSearchNotes"])
+		}()
+	}
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("policy resolution did not time out")
+	}
+	assert.Equal(t, int32(1), calls.Load())
+
+	started := time.Now()
+	_, err := svc.GetUserPoliciesChecked("u2")
+	assert.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	assert.Less(t, time.Since(started), 250*time.Millisecond)
+	assert.Equal(t, int32(1), calls.Load())
 }
 
 func TestEffectivePolicy_ProviderErrorUncheckedRestoresOnlyDeclared(t *testing.T) {

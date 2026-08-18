@@ -7,6 +7,8 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/plugin"
@@ -17,12 +19,26 @@ import (
 // the underlying provider error is never surfaced to the caller.
 var ErrEffectivePolicyProvider = errors.New("effective policy provider failed")
 
+const effectivePolicyProviderTimeout = time.Second
+
+type policyProviderRuntime struct {
+	token    chan struct{}
+	disabled atomic.Bool
+}
+
+func newPolicyProviderRuntime() *policyProviderRuntime {
+	runtime := &policyProviderRuntime{token: make(chan struct{}, 1)}
+	runtime.token <- struct{}{}
+	return runtime
+}
+
 // policyProvider pairs a plugin name with its validated registration. The
 // registration's Keys slice is defensively copied at registration time so the
 // stored value is never aliased by the caller.
 type policyProvider struct {
-	name string
-	reg  plugin.EffectivePolicyRegistration
+	name    string
+	reg     plugin.EffectivePolicyRegistration
+	runtime *policyProviderRuntime
 }
 
 // RegisterEffectivePolicyProvider registers an effective-policy provider under
@@ -58,7 +74,7 @@ func (s *Service) RegisterEffectivePolicyProvider(name string, reg plugin.Effect
 	defer s.policyProviderMu.Unlock()
 	providers := make([]policyProvider, 0, len(s.policyProviders)+1)
 	providers = append(providers, s.policyProviders...)
-	providers = append(providers, policyProvider{name: name, reg: reg})
+	providers = append(providers, policyProvider{name: name, reg: reg, runtime: newPolicyProviderRuntime()})
 	sort.Slice(providers, func(i, j int) bool {
 		return providers[i].name < providers[j].name
 	})
@@ -144,7 +160,7 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 	for _, p := range providers {
 		providerRoleIDs := make([]string, len(roleIDs))
 		copy(providerRoleIDs, roleIDs)
-		res, ok := invokePolicyProvider(p.reg.Resolve, plugin.EffectivePolicyRequest{UserID: userID, RoleIDs: providerRoleIDs})
+		res, ok := invokePolicyProvider(p, plugin.EffectivePolicyRequest{UserID: userID, RoleIDs: providerRoleIDs})
 		if !ok || !validatePolicyContributions(p.reg.Keys, base, res) {
 			// provider の失敗は logging しない (identifier / 値を露出させない)。
 			for _, k := range p.reg.Keys {
@@ -182,15 +198,50 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 	return out, nil
 }
 
-func invokePolicyProvider(resolve plugin.EffectivePolicyResolver, req plugin.EffectivePolicyRequest) (res []plugin.EffectivePolicyContribution, ok bool) {
-	defer func() {
-		if recover() != nil {
-			res = nil
-			ok = false
-		}
+type policyProviderResult struct {
+	contributions []plugin.EffectivePolicyContribution
+	ok            bool
+}
+
+func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, bool) {
+	if provider.runtime.disabled.Load() {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), effectivePolicyProviderTimeout)
+	defer cancel()
+
+	select {
+	case <-ctx.Done():
+		provider.runtime.disabled.Store(true)
+		return nil, false
+	case <-provider.runtime.token:
+	}
+	if provider.runtime.disabled.Load() {
+		provider.runtime.token <- struct{}{}
+		return nil, false
+	}
+
+	result := make(chan policyProviderResult, 1)
+	go func() {
+		out := policyProviderResult{}
+		defer func() {
+			if recover() != nil {
+				out = policyProviderResult{}
+			}
+			result <- out
+			provider.runtime.token <- struct{}{}
+		}()
+		contributions, err := provider.reg.Resolve(ctx, req)
+		out = policyProviderResult{contributions: contributions, ok: err == nil}
 	}()
-	res, err := resolve(context.Background(), req)
-	return res, err == nil
+
+	select {
+	case <-ctx.Done():
+		provider.runtime.disabled.Store(true)
+		return nil, false
+	case out := <-result:
+		return out.contributions, out.ok
+	}
 }
 
 func validatePolicyContributions(keys []string, base map[string]any, contributions []plugin.EffectivePolicyContribution) bool {
