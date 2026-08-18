@@ -58,19 +58,17 @@ test.describe('UI: /admin/security email validation form save flow', () => {
         return target;
       });
 
-      // checkbox が 1 個以上 mount するまで待つ
-      await page.waitForFunction(
-        () => document.querySelectorAll('input[type="checkbox"]').length >= 1,
-        { timeout: 10_000 },
-      );
-
-      // 最初の checkbox を toggle (= modified=true → Save 出現)
-      await clickWhenReady(page, '1 番目の checkbox', () => {
-        const cbs = Array.from(
-          document.querySelectorAll('input[type="checkbox"]'),
-        ) as HTMLInputElement[];
-        return cbs[0];
-      });
+      // **checkbox を index で引かない。** この folder は Enable /
+      // Verifymail / TrueMail の 3 つを持ち、他の folder が開いていれば
+      // 先頭はそちらのものになる。押す対象が変わっても spec は緑のままに
+      // なるので (#2620)、folder に scope して先頭 = Enable を引く。
+      // MkFolder の root は role="group" で header と本文の両方を含む。
+      await clickWhenReady(page, '「Active Email Validation」の Enable スイッチ', (l: string) => {
+        const group = Array.from(document.querySelectorAll('[role="group"]')).find((g) =>
+          (g.querySelector('[data-testid="folder-header"]')?.textContent ?? '').includes(l),
+        );
+        return group?.querySelector('input[type="checkbox"]');
+      }, 'Active Email Validation');
 
       await page.waitForFunction(
         () => {
@@ -86,6 +84,12 @@ test.describe('UI: /admin/security email validation form save flow', () => {
       );
       await clickButtonContainingText(page, 'Save');
       await updateResp;
+
+      // update-meta が返ってきたことだけを見ると、別の switch を押していても
+      // 緑になる。実際に変わった field を meta で確かめる。
+      const metaResp = await callApi(request, 'admin/meta', { i: root.token });
+      expect(metaResp.status()).toBe(200);
+      expect((await metaResp.json()).enableActiveEmailValidation).toBe(true);
     } finally {
       // cleanup: enable* / verifymail / truemail 系を全部 false に戻す。
       // on のまま残ると以降の signup 系 spec が email validation で fail
