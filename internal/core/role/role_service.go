@@ -1184,7 +1184,10 @@ type CreateOptions struct {
 func (s *Service) Show(id string) (*model.Role, error) {
 	r, err := s.roleRepo.FindByID(id)
 	if err != nil {
-		return nil, ErrRoleNotFound
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrRoleNotFound
+		}
+		return nil, err
 	}
 	return r, nil
 }
