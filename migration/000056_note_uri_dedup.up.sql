@@ -7,8 +7,10 @@
 --
 -- 重複行は race で作られた冗長コピーなので削除して問題ない。FK の挙動:
 --   - note_reaction / poll 等 (noteId が ON DELETE CASCADE) → 当該重複行ぶんは削除される
---   - 他 note の renoteId / replyId (ON DELETE SET NULL) → 参照していた note 自体は
---     残り、リンクのみ NULL 化される (= note 本体の data loss ではない)
+--   - 他 note の renoteId / replyId → **000080 で自己参照 FK を落とした**ので、
+--     参照する側の note は値を保ったまま残る (upstream と同じ「参照先が消えた
+--     リノート / 返信」の形になり、frontend は「削除されたノート」と描画する)。
+--     000080 より前は ON DELETE SET NULL でリンクが NULL 化されていた
 -- 残す側 (最小 id) の子行・被参照は影響を受けない。TS 移行済み / 新規 DB では重複は
 -- 無いので DELETE は事実上 no-op。
 --

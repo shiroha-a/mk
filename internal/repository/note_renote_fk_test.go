@@ -1,12 +1,23 @@
 package repository
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// migrationSQL reads a migration file so the tests exercise the SQL that
+// actually ships. 手で書き写すとファイルを変更してもテストが追随しない。
+func migrationSQL(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "..", "migration", name))
+	require.NoError(t, err, "migration %s を読めない", name)
+	return string(b)
+}
 
 // #2623: note の自己参照 FK (renoteId / replyId) を落としたので、元ノートが
 // 削除されてもリノート / 返信側の参照は NULL 化されない。
@@ -22,98 +33,70 @@ func TestNoteRepository_SelfReferenceSurvivesTargetDeletion(t *testing.T) {
 	targetID := "rnfk_target"
 	userID := user.ID
 
-	target := &model.Note{ID: targetID, UserID: user.ID, Visibility: "public"}
-	require.NoError(t, testDB.Create(target).Error)
-
-	renote := &model.Note{
+	require.NoError(t, testDB.Create(&model.Note{ID: targetID, UserID: user.ID, Visibility: "public"}).Error)
+	require.NoError(t, testDB.Create(&model.Note{
 		ID: "rnfk_renote", UserID: user.ID, Visibility: "public",
 		RenoteID: &targetID, RenoteUserID: &userID,
-	}
-	reply := &model.Note{
+	}).Error)
+	require.NoError(t, testDB.Create(&model.Note{
 		ID: "rnfk_reply", UserID: user.ID, Visibility: "public",
 		ReplyID: &targetID, ReplyUserID: &userID,
-	}
-	for _, n := range []*model.Note{renote, reply} {
-		require.NoError(t, testDB.Create(n).Error)
-		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
-	}
+	}).Error)
 
 	// 対象ノートを消す。FK が残っていればここで renoteId / replyId が NULL 化される。
 	require.NoError(t, testDB.Exec(`DELETE FROM "note" WHERE id = ?`, targetID).Error)
 
 	var gotRenote model.Note
-	require.NoError(t, testDB.First(&gotRenote, "id = ?", renote.ID).Error)
+	require.NoError(t, testDB.First(&gotRenote, "id = ?", "rnfk_renote").Error)
 	require.NotNil(t, gotRenote.RenoteID, "FK を落としたので renoteId は NULL 化されない")
 	assert.Equal(t, targetID, *gotRenote.RenoteID)
 
 	var gotReply model.Note
-	require.NoError(t, testDB.First(&gotReply, "id = ?", reply.ID).Error)
+	require.NoError(t, testDB.First(&gotReply, "id = ?", "rnfk_reply").Error)
 	require.NotNil(t, gotReply.ReplyID, "FK を落としたので replyId は NULL 化されない")
 	assert.Equal(t, targetID, *gotReply.ReplyID)
 }
 
-// #2623: 孤児行を消す migration の条件が、中身のあるノートを巻き込まないこと。
+// #2623: 孤児行を後始末する migration (000081) を**ファイルから読んで実行し**、
+// 削除する行と残す行の境界を固定する。
 //
-// migration/000080 の DELETE と同じ条件をここで実行する。条件を緩めると
-// 「リノート由来だが本文を持つノート (引用)」まで消えるので、その境界を固定する。
-func TestNoteRepository_OrphanRenoteDeleteScope(t *testing.T) {
+// SQL を手で書き写すとファイルを変更してもテストが通ってしまうので、
+// migration そのものを流す。
+func TestMigration000081_OrphanRepairScope(t *testing.T) {
 	user := insertTestUser(t, "orph_u", "orphuser")
 	defer cleanupUser(t, user.ID)
 
 	userID := user.ID
-	someID := "orph_someid"
+	liveTarget := "orph_live_target"
 	text := "残す"
 	cw := "cw"
 
-	// 消えるべき: 元が pure renote で、対象が SET NULL で消えたもの。
-	orphan := &model.Note{
-		ID: "orph_target", UserID: user.ID, Visibility: "public",
-		RenoteUserID: &userID,
+	notes := map[string]*model.Note{
+		// 消えるべき: 元が pure renote、対象が消えていて、誰も触っていない。
+		"orphan": {ID: "orph_orphan", UserID: user.ID, Visibility: "public", RenoteUserID: &userID},
+		// 残すべき (中身がある)。
+		"quote":    {ID: "orph_quote", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, Text: &text},
+		"withCW":   {ID: "orph_cw", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, CW: &cw},
+		"withFile": {ID: "orph_file", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, FileIDs: []string{"f1"}},
+		"withPoll": {ID: "orph_poll", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, HasPoll: true},
+		// 残すべき (他の利用者が触っている)。消すと note への CASCADE で
+		// リアクション等の記録まで道連れになる。
+		"reacted": {ID: "orph_reacted", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, Reactions: []byte(`{"👍": 1}`)},
+		"replied": {ID: "orph_replied", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, RepliesCount: 1},
+		"renoted": {ID: "orph_renoted", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, RenoteCount: 1},
+		"clipped": {ID: "orph_clipped", UserID: user.ID, Visibility: "public", RenoteUserID: &userID, ClippedCount: 1},
+		// そもそもリノートではない空ノート。
+		"plain": {ID: "orph_plain", UserID: user.ID, Visibility: "public"},
+		// 参照が生きているリノート。
+		"intact": {ID: "orph_intact", UserID: user.ID, Visibility: "public", RenoteID: &liveTarget, RenoteUserID: &userID},
+		"target": {ID: liveTarget, UserID: user.ID, Visibility: "public", Text: &text},
 	}
-	// 消えないべきもの。
-	quote := &model.Note{ // 本文がある (引用)
-		ID: "orph_quote", UserID: user.ID, Visibility: "public",
-		RenoteUserID: &userID, Text: &text,
-	}
-	withCW := &model.Note{ // CW がある
-		ID: "orph_cw", UserID: user.ID, Visibility: "public",
-		RenoteUserID: &userID, CW: &cw,
-	}
-	withFile := &model.Note{ // 添付がある
-		ID: "orph_file", UserID: user.ID, Visibility: "public",
-		RenoteUserID: &userID, FileIDs: []string{"f1"},
-	}
-	withPoll := &model.Note{ // 投票がある
-		ID: "orph_poll", UserID: user.ID, Visibility: "public",
-		RenoteUserID: &userID, HasPoll: true,
-	}
-	plain := &model.Note{ // そもそもリノートではない空ノート
-		ID: "orph_plain", UserID: user.ID, Visibility: "public",
-	}
-	intact := &model.Note{ // 参照が生きているリノート
-		ID: "orph_intact", UserID: user.ID, Visibility: "public",
-		RenoteID: &someID, RenoteUserID: &userID,
-	}
-	// intact が指す先も必要 (FK は無いが、条件の意味を揃えるため実在させる)。
-	base := &model.Note{ID: someID, UserID: user.ID, Visibility: "public", Text: &text}
-
-	all := []*model.Note{base, orphan, quote, withCW, withFile, withPoll, plain, intact}
-	for _, n := range all {
+	for _, n := range notes {
 		require.NoError(t, testDB.Create(n).Error)
-		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
 	}
 
-	// migration/000080 と同じ条件。
-	require.NoError(t, testDB.Exec(`
-		DELETE FROM "note"
-		WHERE "renoteId" IS NULL
-		  AND "renoteUserId" IS NOT NULL
-		  AND (text IS NULL OR text = '')
-		  AND (cw IS NULL OR cw = '')
-		  AND "replyId" IS NULL
-		  AND ("fileIds" IS NULL OR "fileIds" = '{}')
-		  AND "hasPoll" = false
-		  AND "userId" = ?`, user.ID).Error)
+	// migration ファイルをそのまま実行する。
+	require.NoError(t, testDB.Exec(migrationSQL(t, "000081_repair_orphan_renote_rows.up.sql")).Error)
 
 	exists := func(id string) bool {
 		var n int64
@@ -121,12 +104,64 @@ func TestNoteRepository_OrphanRenoteDeleteScope(t *testing.T) {
 		return n > 0
 	}
 
-	assert.False(t, exists(orphan.ID), "対象が消えた pure renote は削除される")
-	assert.True(t, exists(quote.ID), "本文を持つ引用は残す")
-	assert.True(t, exists(withCW.ID), "CW を持つノートは残す")
-	assert.True(t, exists(withFile.ID), "添付を持つノートは残す")
-	assert.True(t, exists(withPoll.ID), "投票を持つノートは残す")
-	assert.True(t, exists(plain.ID), "リノートでない空ノートは巻き込まない")
-	assert.True(t, exists(intact.ID), "参照が生きているリノートは残す")
-	assert.True(t, exists(base.ID), "参照先は残す")
+	assert.False(t, exists(notes["orphan"].ID), "対象が消えていて誰も触っていない pure renote は削除される")
+	for _, k := range []string{"quote", "withCW", "withFile", "withPoll"} {
+		assert.True(t, exists(notes[k].ID), "%s: 中身を持つノートは残す", k)
+	}
+	for _, k := range []string{"reacted", "replied", "renoted", "clipped"} {
+		assert.True(t, exists(notes[k].ID), "%s: 他利用者の操作がある行は残す", k)
+	}
+	assert.True(t, exists(notes["plain"].ID), "リノートでない空ノートは巻き込まない")
+	assert.True(t, exists(notes["intact"].ID), "参照が生きているリノートは残す")
+	assert.True(t, exists(notes["target"].ID), "参照先は残す")
+
+	// 残した孤児行からは、切れたリンクの痕跡が消えていること。
+	// ここが残ると mute / block / instance-mute の判定に効き続ける。
+	var quote model.Note
+	require.NoError(t, testDB.First(&quote, "id = ?", notes["quote"].ID).Error)
+	assert.Nil(t, quote.RenoteUserID, "renoteId が無い行の renoteUserId は消す")
+	assert.Nil(t, quote.RenoteUserHost, "renoteUserHost も消す")
+
+	// 参照が生きている行は触らない。
+	var intact model.Note
+	require.NoError(t, testDB.First(&intact, "id = ?", notes["intact"].ID).Error)
+	require.NotNil(t, intact.RenoteID)
+	assert.NotNil(t, intact.RenoteUserID, "生きているリノートの renoteUserId は残す")
+}
+
+// #2623: down migration が、参照先の無い値を持つ DB でも成功すること。
+//
+// 通常の ADD CONSTRAINT は既存行を全件検証するので 23503 で落ちる。NOT VALID を
+// 付けて既存行を検証しない形にしてあり、**この性質が壊れると本番で巻き戻せなく
+// なる**。実際に dangling な行を置いた状態で down SQL を流して確かめる。
+func TestMigration000080_DownSucceedsWithDanglingReferences(t *testing.T) {
+	user := insertTestUser(t, "dang_u", "danguser")
+	defer cleanupUser(t, user.ID)
+
+	missing := "dang_missing_note"
+	require.NoError(t, testDB.Create(&model.Note{
+		ID: "dang_note", UserID: user.ID, Visibility: "public",
+		RenoteID: &missing, ReplyID: &missing,
+	}).Error)
+
+	// down を流したら必ず元に戻す (同パッケージの他テストへ FK を残さない)。
+	t.Cleanup(func() {
+		testDB.Exec(migrationSQL(t, "000080_drop_note_self_fk.up.sql"))
+	})
+
+	err := testDB.Exec(migrationSQL(t, "000080_drop_note_self_fk.down.sql")).Error
+	require.NoError(t, err, "dangling 参照があっても down は成功しなければならない")
+
+	// FK が復元されていること。
+	var n int64
+	require.NoError(t, testDB.Raw(`
+		SELECT count(*) FROM pg_constraint
+		WHERE conrelid = '"note"'::regclass AND conname IN ('FK_note_renoteId','FK_note_replyId')`).Scan(&n).Error)
+	assert.EqualValues(t, 2, n, "down で FK が 2 本とも復元される")
+
+	// dangling な行はそのまま残っていること (NULL 化して壊さない)。
+	var got model.Note
+	require.NoError(t, testDB.First(&got, "id = ?", "dang_note").Error)
+	require.NotNil(t, got.RenoteID, "down は参照先の無い renoteId を NULL 化しない")
+	assert.Equal(t, missing, *got.RenoteID)
 }

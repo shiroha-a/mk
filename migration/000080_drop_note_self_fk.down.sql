@@ -1,21 +1,22 @@
--- #2623 の巻き戻し。000001 と同じ定義で自己参照 FK を張り直す。
+-- #2623 の巻き戻し。000001 と同じ定義で mk-go 側の自己参照 FK を張り直す。
 --
--- **削除した孤児行は戻らない** (up 側のコメント参照)。ここで復元するのは
--- 制約だけ。
+-- **NOT VALID を付けるのが要点。** FK を外している間に「対象が削除された
+-- リノート / 返信」が正常に生まれる (それがこの migration の目的そのもの)。
+-- 通常の ADD CONSTRAINT は既存行を全件検証するので、そのままでは 23503 で
+-- 失敗して巻き戻せない。かといって参照先の無い値を NULL へ落とすと、
+-- **000080 が直そうとした壊れ方を down 自身が作り出し**、再度 up したときに
+-- 000081 の DELETE がそれらを消してしまう (down → up でデータが消える)。
 --
--- FK を外している間に「対象が削除されたリノート / 返信」が生まれるので、
--- 先に参照先の無い値を NULL に落とさないと `ADD CONSTRAINT` が制約違反で
--- 失敗する。この UPDATE は up 側が防ごうとしていた状態 (renoteId の消失) を
--- 意図的に作ることになるが、FK を復元する以上は避けられない。
-UPDATE "note" SET "renoteId" = NULL
-WHERE "renoteId" IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM "note" t WHERE t."id" = "note"."renoteId");
-
-UPDATE "note" SET "replyId" = NULL
-WHERE "replyId" IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM "note" t WHERE t."id" = "note"."replyId");
+-- NOT VALID なら既存行は検証せず、以後の INSERT / UPDATE にだけ制約が効く。
+-- 既存行も検証したくなったら、参照先を整えたうえで
+-- `ALTER TABLE "note" VALIDATE CONSTRAINT "FK_note_renoteId";` を別途実行する
+-- (VALIDATE は ACCESS EXCLUSIVE を取らないので運用中でも流せる)。
+--
+-- upstream 由来の名前 (FK_52ccc80... / FK_17cb355...) は復元しない。あれは
+-- TS 側の migration が管理するもので、mk-go が勝手に作り直すと TS へ戻した
+-- ときに TypeORM の状態と食い違う。
 
 ALTER TABLE "note" ADD CONSTRAINT "FK_note_replyId"
-  FOREIGN KEY ("replyId") REFERENCES "note"("id") ON DELETE SET NULL;
+  FOREIGN KEY ("replyId") REFERENCES "note"("id") ON DELETE SET NULL NOT VALID;
 ALTER TABLE "note" ADD CONSTRAINT "FK_note_renoteId"
-  FOREIGN KEY ("renoteId") REFERENCES "note"("id") ON DELETE SET NULL;
+  FOREIGN KEY ("renoteId") REFERENCES "note"("id") ON DELETE SET NULL NOT VALID;
