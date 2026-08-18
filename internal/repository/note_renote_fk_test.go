@@ -19,6 +19,24 @@ func migrationSQL(t *testing.T, name string) string {
 	return string(b)
 }
 
+// #2629: 000001 が note の自己参照 FK を張らないこと。
+//
+// 張ると、upstream 2025.8.0 (migration 1753868431598 / misskey-dev#16332) 以降の
+// TS 製 DB を引き継げなくなる。upstream は同版で自己参照 FK を削除しており、
+// 以後はノートを削除しても参照する側の renoteId / replyId が**正常に残る**。
+// `ADD CONSTRAINT` は既存行を全件検証するので、そういう行が 1 つでもあると
+// 23503 で失敗し、golang-migrate は version 1 で dirty のまま停止する。
+//
+// 000080 で drop する以上ここで張る意味も無い。誰かが戻したときに気付けるよう
+// ファイルの内容そのものを検査する。
+func TestMigration000001_DoesNotAddNoteSelfFK(t *testing.T) {
+	sql := migrationSQL(t, "000001_initial.up.sql")
+	assert.NotContains(t, sql, `ADD CONSTRAINT "FK_note_replyId"`,
+		"000001 で自己参照 FK を張ると TS 製 DB の migration が version 1 で止まる")
+	assert.NotContains(t, sql, `ADD CONSTRAINT "FK_note_renoteId"`,
+		"000001 で自己参照 FK を張ると TS 製 DB の migration が version 1 で止まる")
+}
+
 // #2623: note の自己参照 FK (renoteId / replyId) を落としたので、元ノートが
 // 削除されてもリノート / 返信側の参照は NULL 化されない。
 //

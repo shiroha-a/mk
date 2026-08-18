@@ -21,6 +21,9 @@ HOME_NOTE_TEXT = "dropin-home-visibility-pre-swap"
 FOLLOWERS_NOTE_TEXT = "dropin-followers-visibility-pre-swap"
 SPECIFIED_NOTE_TEXT = "dropin-specified-visibility-pre-swap"
 LIST_NAME = "dropin-buddies"
+# #2629: 参照先を削除して dangling な renoteId を作るための組。
+DANGLING_TARGET_TEXT = "dropin-dangling-target-pre-swap"
+DANGLING_QUOTE_TEXT = "dropin-dangling-quote-pre-swap"
 
 
 def test_setup_alice_follows_bob(
@@ -184,3 +187,40 @@ def test_setup_user_list_with_remote_member(
     # この差分の影響を避けるため間接検証に倒す)。
     shown = instance_a._api("users/lists/show", {"listId": list_id})
     assert shown.get("id") == list_id, "user list lookup failed right after creation"
+
+
+def test_setup_dangling_renote_target(
+    instance_a: MisskeyLikeClient,
+    alice: dict,
+) -> None:
+    """引用先 / リノート先が削除された行を DB-A に残す (#2629)。
+
+    upstream Misskey は 2025.8.0 (migration 1753868431598 /
+    misskey-dev#16332「ノートの脱CASCADE削除」) で note の自己参照 FK を削除した。
+    以後、元ノートを削除しても、それを参照するリノート / 引用の renoteId は
+    **そのまま残る** (frontend が「削除されたノート」として描画する正常な状態)。
+
+    mk-go 側の migration が 000001 でこの FK を張ると、`ADD CONSTRAINT` が既存行を
+    全件検証するためこの行に当たって 23503 で失敗し、golang-migrate は version 1 で
+    dirty のまま停止する。**運用実績のある TS インスタンスほど踏む**ので、swap 前に
+    その状態を作って mk-go 側が引き継げることを検証する。
+
+    この setup が無いと空に近い DB しか渡らず、原理的に検出できない。
+    """
+    target = instance_a.create_note(DANGLING_TARGET_TEXT)["createdNote"]
+    target_id = target["id"]
+
+    # pure renote (text 無し) と quote (text あり) の両方を作る。後段の
+    # 000081 は「本文が無い孤児」だけを消すので、両方あると削除範囲も確かめられる。
+    pure = instance_a._api("notes/create", {"renoteId": target_id})["createdNote"]
+    quote = instance_a.create_note(DANGLING_QUOTE_TEXT, renoteId=target_id)["createdNote"]
+
+    instance_a.delete_note(target_id)
+
+    # 参照元は残り、renoteId も保持されている (upstream に FK が無いため)。
+    for note_id, label in ((pure["id"], "pure renote"), (quote["id"], "quote")):
+        shown = instance_a._api("notes/show", {"noteId": note_id})
+        assert shown.get("renoteId") == target_id, (
+            f"{label} should keep renoteId after the target was deleted "
+            "(upstream 2025.8.0+ has no self-referencing FK)"
+        )

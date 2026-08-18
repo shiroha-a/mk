@@ -206,8 +206,28 @@ CREATE TABLE IF NOT EXISTS "note" (
     "renoteChannelId" varchar(32)
 );
 
-ALTER TABLE "note" ADD CONSTRAINT "FK_note_replyId" FOREIGN KEY ("replyId") REFERENCES "note"("id") ON DELETE SET NULL;
-ALTER TABLE "note" ADD CONSTRAINT "FK_note_renoteId" FOREIGN KEY ("renoteId") REFERENCES "note"("id") ON DELETE SET NULL;
+-- note の自己参照 (replyId / renoteId) には FK を張らない (#2629)。
+--
+-- 以前はここで `ON DELETE SET NULL` の FK を 2 本張っていたが、2 つの理由で
+-- やめた。
+--
+-- 1. **upstream に無い。** upstream Misskey は 2025.8.0 (migration
+--    1753868431598 / misskey-dev#16332「ノートの脱CASCADE削除」) でこの 2 本を
+--    削除しており、現在の MiNote は `createForeignKeyConstraints: false` を
+--    指定している。#2623 で mk-go も 000080 で drop したので、ここで張っても
+--    79 個先で落とすだけになる。
+--
+-- 2. **TS 製 DB を引き継げなくなる。** upstream が FK を外して以降、TS 側では
+--    ノートを削除しても、それを参照するリノート / 返信の renoteId / replyId は
+--    そのまま残る (frontend が「削除されたノート」として描画する正常な状態)。
+--    `ADD CONSTRAINT` は既存行を全件検証するので、そういう行が 1 つでもあると
+--    23503 で失敗し、golang-migrate は version 1 で dirty のまま停止する。
+--    docs/migration-from-ts.md の手順が**運用実績のある TS インスタンスほど
+--    通らない**という形になっていた。
+--
+-- 既に適用済みの DB では本ファイルは再実行されないので FK は残っているが、
+-- 000080 が drop する。新規 DB では最初から作られないので 000080 の
+-- DROP CONSTRAINT IF EXISTS が空振りする。どちらも最終状態は同じ。
 CREATE INDEX IF NOT EXISTS "IDX_note_userId" ON "note" ("userId");
 CREATE INDEX IF NOT EXISTS "IDX_note_visibility" ON "note" ("visibility");
 CREATE INDEX IF NOT EXISTS "IDX_note_userHost" ON "note" ("userHost");

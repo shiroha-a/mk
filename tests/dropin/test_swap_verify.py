@@ -17,6 +17,7 @@ from conftest import A_DOMAIN  # type: ignore[import-not-found]
 from conftest_base import MisskeyLikeClient, poll_until  # type: ignore[import-not-found]
 from test_swap_setup import (  # type: ignore[import-not-found]
     BASELINE_NOTE_TEXT,
+    DANGLING_QUOTE_TEXT,
     FOLLOWERS_NOTE_TEXT,
     HOME_NOTE_TEXT,
     LIST_NAME,
@@ -259,3 +260,28 @@ def test_post_swap_alice_can_react(
         return False
 
     assert poll_until(_arrived, timeout=120, desc="bob receives reaction from mk-A alice")
+
+
+def test_verify_dangling_quote_survived_swap(
+    instance_a: MisskeyLikeClient,
+) -> None:
+    """引用先が消えた quote が mk-go 側でも残っていること (#2629 / #2623)。
+
+    setup で作った「参照先を削除した引用」がここまで到達しているということは、
+    mk-go の migration が **dangling な renoteId を持つ DB を引き継げた**という
+    ことでもある (000001 が自己参照 FK を張っていた頃は ADD CONSTRAINT が
+    23503 で失敗し、version 1 で止まってこのテストまで来られなかった)。
+
+    あわせて 000081 の後始末が、本文を持つ引用まで消していないことを確認する
+    (削除対象は本文も添付もリアクションも無い孤児だけ)。
+    """
+    found = None
+    for note in instance_a._api("notes/timeline", {"limit": 60}):
+        if note.get("text") == DANGLING_QUOTE_TEXT:
+            found = note
+            break
+    assert found is not None, (
+        "引用先が削除された quote が swap 後も残っているべき "
+        "(000081 の削除条件は本文を持つ行を対象にしない)"
+    )
+    assert found.get("renoteId"), "renoteId は保持されるべき (自己参照 FK は張らない)"
