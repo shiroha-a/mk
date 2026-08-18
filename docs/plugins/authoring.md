@@ -250,6 +250,27 @@ handler 自体は止まらない** (Go では goroutine を殺せない) ので�
 
 > **プラグインが素の `go` を書くとプロセスごと落ちる。** Go は他 goroutine の panic を回収できず、mk-go 側の recover では止められない。
 
+## 効果ポリシー
+
+`Definition.EffectivePolicies`で、native policyの解決に参加するproviderを宣言できる。
+
+```go
+func effectivePolicies(ctx plugin.Context, inv plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+	return plugin.EffectivePolicyRegistration{
+		Keys: []string{"driveCapacityMb"},
+		Resolve: func(c context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+			return []plugin.EffectivePolicyContribution{
+				{Key: "driveCapacityMb", Priority: 1, Value: 1000},
+			}, nil
+		},
+	}, nil
+}
+```
+
+`Keys`は空・空文字・重複を許さず、`Resolve`は必須。resolverは`req.UserID`と、activeなnative role IDをソート・重複除去した`req.RoleIDs`を受け取る。匿名解決では`UserID`が空文字で、`RoleIDs`はnilではない空sliceになる。
+
+plugin独自の書き込みでpolicy入力が変わった場合は、永続化のcommit成功後にだけ`inv.InvalidateUser`または`inv.InvalidateRole`を呼ぶ。conditional roleの対象userはassignment rowから列挙できないため、role invalidationは指定roleより広いcacheを破棄できる契約とする。
+
 ## 設定
 
 ```go

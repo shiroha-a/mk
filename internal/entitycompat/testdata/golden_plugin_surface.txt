@@ -18,12 +18,14 @@ plugin/plugintest:   field Schedule.Payload any
 plugin/plugintest: func (*Harness) Context() plugin.Context
 plugin/plugintest: func (*Harness) DeliverPeer(string, any) (any, error)
 plugin/plugintest: func (*Harness) DeliverPeerReply(string, string, any) error
+plugin/plugintest: func (*Harness) EffectivePolicies(plugin.Definition) plugin.EffectivePolicyRegistration
 plugin/plugintest: func (*Harness) Jobs(plugin.Definition) *JobSet
 plugin/plugintest: func (*Harness) PeerSends() []PeerSend
 plugin/plugintest: func (*Harness) Routes(plugin.Definition) Handlers
 plugin/plugintest: func (*Harness) WithAPI(plugin.API) *Harness
 plugin/plugintest: func (*Harness) WithConfig(map[string]any) *Harness
 plugin/plugintest: func (*Harness) WithDB(*sql.DB) *Harness
+plugin/plugintest: func (*Harness) WithEffectivePolicyInvalidator(plugin.EffectivePolicyInvalidator) *Harness
 plugin/plugintest: func (*Harness) WithName(string) *Harness
 plugin/plugintest: func (*Harness) WithPeers(...string) *Harness
 plugin/plugintest: func (*JobSet) Run(*testing.T, string, string) error
@@ -42,12 +44,22 @@ plugin:   field Blob.Body []byte
 plugin:   field Blob.CacheControl string
 plugin:   field Blob.ContentType string
 plugin:   field Definition.APIVersion int
+plugin:   field Definition.EffectivePolicies func(Context, EffectivePolicyInvalidator) (EffectivePolicyRegistration, error)
 plugin:   field Definition.Jobs func(Context, Jobs) error
 plugin:   field Definition.Migrations []Migration
 plugin:   field Definition.Name string
 plugin:   field Definition.Peered bool
 plugin:   field Definition.Routes func(Context, Router) error
 plugin:   field Definition.Version string
+plugin:   field EffectivePolicyContribution.Key string
+plugin:   field EffectivePolicyContribution.Order int
+plugin:   field EffectivePolicyContribution.Priority int
+plugin:   field EffectivePolicyContribution.UseDefault bool
+plugin:   field EffectivePolicyContribution.Value any
+plugin:   field EffectivePolicyRegistration.Keys []string
+plugin:   field EffectivePolicyRegistration.Resolve EffectivePolicyResolver
+plugin:   field EffectivePolicyRequest.RoleIDs []string
+plugin:   field EffectivePolicyRequest.UserID string
 plugin:   field Migration.SQL string
 plugin:   field Migration.Version int
 plugin:   field StatusError.Message string
@@ -63,6 +75,8 @@ plugin:   method Context.Logger() *slog.Logger
 plugin:   method Context.Name() string
 plugin:   method Context.Peer() Peer
 plugin:   method Context.Storage() Storage
+plugin:   method EffectivePolicyInvalidator.InvalidateRole(context.Context, string) error
+plugin:   method EffectivePolicyInvalidator.InvalidateUser(context.Context, string) error
 plugin:   method Jobs.Handle(string, JobHandler)
 plugin:   method Jobs.Schedule(string, string, any)
 plugin:   method Peer.Handle(PeerHandler)
@@ -84,6 +98,7 @@ plugin: const APIVersion
 plugin: func (*APIError) Error() string
 plugin: func (*StatusError) Error() string
 plugin: func (Definition) Validate() error
+plugin: func (EffectivePolicyRegistration) Validate() error
 plugin: func ErrNotFound(string, ...any) *StatusError
 plugin: func Errorf(int, string, ...any) *StatusError
 plugin: func ExtractStatusError(error) (*StatusError, string)
@@ -97,6 +112,11 @@ plugin: type Caller interface
 plugin: type Config interface
 plugin: type Context interface
 plugin: type Definition struct
+plugin: type EffectivePolicyContribution struct
+plugin: type EffectivePolicyInvalidator interface
+plugin: type EffectivePolicyRegistration struct
+plugin: type EffectivePolicyRequest struct
+plugin: type EffectivePolicyResolver func
 plugin: type Handler func
 plugin: type JobHandler func
 plugin: type Jobs interface

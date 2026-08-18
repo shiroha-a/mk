@@ -24,6 +24,10 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 
 **`APIVersion` は上げない。**
 
+`plugin.Definition` はフィールド名を指定したkeyed struct literalだけを互換対象とする。外部プラグインのpositional / unkeyed literalはサポートしない。既存フィールドの意味や型を変えないoptional fieldはv1のまま追加できるため、プラグイン作者は必ず`Name: ...`のようにフィールド名を書くこと。
+
+`Definition.EffectivePolicies`と関連型の追加はこのadditive契約に従い、`Validate`もRoutes、Jobs、EffectivePoliciesのいずれかを要求する形へ緩和するだけなので、`APIVersion`は1のまま維持する。
+
 ### 破壊的変更（メジャー）
 
 既存のシグネチャ変更、削除、意味の変更。
