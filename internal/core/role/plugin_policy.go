@@ -206,6 +206,7 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 type policyProviderResult struct {
 	contributions []plugin.EffectivePolicyContribution
 	ok            bool
+	completedAt   time.Time
 }
 
 func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, bool) {
@@ -215,11 +216,9 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 	ctx, cancel := context.WithTimeout(context.Background(), effectivePolicyProviderTimeout)
 	defer cancel()
 
-	select {
-	case <-ctx.Done():
+	if !acquirePolicyProviderToken(ctx, provider.runtime) {
 		provider.runtime.disabled.Store(true)
 		return nil, false
-	case <-provider.runtime.token:
 	}
 	if provider.runtime.disabled.Load() {
 		provider.runtime.token <- struct{}{}
@@ -233,6 +232,7 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 			if recover() != nil {
 				out = policyProviderResult{}
 			}
+			out.completedAt = time.Now()
 			result <- out
 			provider.runtime.token <- struct{}{}
 		}()
@@ -240,13 +240,63 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 		out = policyProviderResult{contributions: contributions, ok: err == nil}
 	}()
 
-	select {
-	case <-ctx.Done():
+	out, completedBeforeDeadline := receivePolicyProviderResult(ctx, result)
+	if !completedBeforeDeadline {
 		provider.runtime.disabled.Store(true)
 		return nil, false
-	case out := <-result:
-		return out.contributions, out.ok
 	}
+	return out.contributions, out.ok
+}
+
+func acquirePolicyProviderToken(ctx context.Context, runtime *policyProviderRuntime) bool {
+	if policyProviderDeadlineExceeded(ctx) {
+		return false
+	}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-runtime.token:
+		if policyProviderDeadlineExceeded(ctx) {
+			runtime.token <- struct{}{}
+			return false
+		}
+		return true
+	}
+}
+
+func receivePolicyProviderResult(ctx context.Context, result <-chan policyProviderResult) (policyProviderResult, bool) {
+	accept := func(out policyProviderResult) (policyProviderResult, bool) {
+		deadline, hasDeadline := ctx.Deadline()
+		if hasDeadline {
+			return out, out.completedAt.Before(deadline)
+		}
+		return out, ctx.Err() == nil
+	}
+
+	select {
+	case out := <-result:
+		return accept(out)
+	default:
+	}
+	select {
+	case out := <-result:
+		return accept(out)
+	case <-ctx.Done():
+		select {
+		case out := <-result:
+			return accept(out)
+		default:
+			return policyProviderResult{}, false
+		}
+	}
+}
+
+func policyProviderDeadlineExceeded(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return true
+	}
+	deadline, ok := ctx.Deadline()
+	return ok && !time.Now().Before(deadline)
 }
 
 func validatePolicyContributions(keys []string, base map[string]any, contributions []plugin.EffectivePolicyContribution) bool {

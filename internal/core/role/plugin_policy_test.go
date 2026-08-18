@@ -532,7 +532,9 @@ func TestEffectivePolicy_ProviderPanicCheckedRestoresDeclaredKeys(t *testing.T) 
 
 func TestEffectivePolicy_CooperativeTimeoutFallsBackToNative(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
+	var calls atomic.Int32
 	registerProvider(t, svc, "slow", []string{"canSearchNotes"}, func(ctx context.Context, _ plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		calls.Add(1)
 		<-ctx.Done()
 		return nil, ctx.Err()
 	})
@@ -542,6 +544,12 @@ func TestEffectivePolicy_CooperativeTimeoutFallsBackToNative(t *testing.T) {
 	require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
 	assert.Less(t, time.Since(started), 2*time.Second)
 	assert.Equal(t, false, policies["canSearchNotes"])
+
+	started = time.Now()
+	_, err = svc.GetUserPoliciesChecked("")
+	assert.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	assert.Less(t, time.Since(started), 250*time.Millisecond)
+	assert.Equal(t, int32(1), calls.Load())
 }
 
 func TestEffectivePolicy_TimeoutDisablesProviderAndBoundsHang(t *testing.T) {
