@@ -271,7 +271,7 @@ func effectivePolicies(ctx plugin.Context, inv plugin.EffectivePolicyInvalidator
 
 `Keys`は空・空文字・重複を許さず、hostが持つnative policy keyだけを宣言できる。`Resolve`は必須。resolverは`req.UserID`と、activeなnative role IDをソート・重複除去した`req.RoleIDs`を受け取る。匿名解決では`UserID`が空文字で、`RoleIDs`はnilではない空sliceになる。入力sliceはproviderごとに複製されるが、resolver側でも変更しないこと。
 
-resolverの実行token取得から完了までの期限は1秒。期限を超えたproviderはprocess再起動まで無効化され、declared keyは既存のnative fallbackへ戻る。resolverへ渡されたcontextをStorage I/Oにも必ず渡すこと。contextを無視する処理はhostから強制終了できないが、hostは同じproviderの実行をcapacity 1に制限するため、timeout後に残留するresolver goroutineはproviderごと最大1本になる。
+resolverの実行token取得待ちとresolver実行の期限はそれぞれ1秒。tokenを期限内に取得できないrequestはnative fallbackへ戻るが、providerは無効化されない。token取得後にresolver専用の新しい1秒deadlineが始まり、この実行期限を超えたproviderだけがprocess再起動まで無効化される。resolverへ渡されたcontextをStorage I/Oにも必ず渡すこと。contextを無視する処理はhostから強制終了できないが、hostは同じproviderの実行をcapacity 1に制限するため、timeout後に残留するresolver goroutineはproviderごと最大1本になる。
 
 contributionの`Priority`は`0..2`で、大きいpriorityのgroupだけをnative roleと同じ規則で集約する。同じprovider内では同じ`Key`と`Order`の組を重複できない。`UseDefault: true`では`Value`を無視し、そのkeyのnative defaultを同じpriorityへ参加させる。
 
