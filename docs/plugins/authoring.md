@@ -271,6 +271,8 @@ func effectivePolicies(ctx plugin.Context, inv plugin.EffectivePolicyInvalidator
 
 `Keys`は空・空文字・重複を許さず、hostが持つnative policy keyだけを宣言できる。`Resolve`は必須。resolverは`req.UserID`と、activeなnative role IDをソート・重複除去した`req.RoleIDs`を受け取る。匿名解決では`UserID`が空文字で、`RoleIDs`はnilではない空sliceになる。入力sliceはproviderごとに複製されるが、resolver側でも変更しないこと。
 
+resolverの実行token取得から完了までの期限は1秒。期限を超えたproviderはprocess再起動まで無効化され、declared keyは既存のnative fallbackへ戻る。resolverへ渡されたcontextをStorage I/Oにも必ず渡すこと。contextを無視する処理はhostから強制終了できないが、hostは同じproviderの実行をcapacity 1に制限するため、timeout後に残留するresolver goroutineはproviderごと最大1本になる。
+
 contributionの`Priority`は`0..2`で、大きいpriorityのgroupだけをnative roleと同じ規則で集約する。同じprovider内では同じ`Key`と`Order`の組を重複できない。`UseDefault: true`では`Value`を無視し、そのkeyのnative defaultを同じpriorityへ参加させる。
 
 値はnative keyの型に一致させる。boolはOR、integerは最大値、`chatAvailability`は`available`、`readonly`、`unavailable`の順で寛容な値、`uploadableFileTypes`はtrim後のset unionを使う。integerは`int`、host `int`範囲内の`int64`、または有限、整数、小数部なし、host `int`範囲内の`float64`だけを受理する。typed integerは`2^53`を超えても`float64`へ変換せず比較する。
