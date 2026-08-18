@@ -39,6 +39,12 @@ func (i *Inspector) GetQueueInfo(qname string) (*InspectorInfo, error) {
 	return i.inner.GetQueueInfo(qname)
 }
 
+// PendingCount returns just the pending count for the named queue,
+// skipping the rest of the summary (#2605).
+func (i *Inspector) PendingCount(qname string) (int, error) {
+	return i.inner.PendingCount(qname)
+}
+
 // PauseQueue pauses the named queue (#17436)。
 func (i *Inspector) PauseQueue(qname string) error {
 	return i.inner.PauseQueue(qname)

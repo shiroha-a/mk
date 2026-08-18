@@ -100,6 +100,23 @@ func (i *Inspector) ListActiveTasks(qname string, page, pageSize int) ([]*driver
 	return i.listTasks(qname, "active", page, pageSize)
 }
 
+// PendingCount returns InspectorInfo.Pending for the named queue.
+//
+// asynq has no cheaper path than its own aggregate GetQueueInfo, so this
+// just delegates. mkqdriver reads the `wait` list length directly; asynq
+// support is being dropped in favour of mkq, so it is not worth building
+// a dedicated path here (#2605).
+func (i *Inspector) PendingCount(qname string) (int, error) {
+	info, err := i.GetQueueInfo(qname)
+	if err != nil {
+		return 0, err
+	}
+	if info == nil {
+		return 0, nil
+	}
+	return info.Pending, nil
+}
+
 // ListCompletedTasks / ListFailedTasks return nil: asynq does not retain
 // finished-job history without per-task retention, and asynq support is being
 // dropped in favour of mkq. Provided to satisfy driver.Inspector.

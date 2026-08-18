@@ -1639,3 +1639,59 @@ func TestResize_ScaleDownDoesNotHang(t *testing.T) {
 	assert.Equal(t, 2, d.WorkerCount("deliver"))
 	t.Logf("8 → 2 の scale-down が %v", elapsed.Round(time.Millisecond))
 }
+
+// **PendingCount が GetQueueInfo.Pending と一致すること。**
+//
+// autoscaler の読み取りを集計 API から切り替えた (#2605)。両者がずれると
+// スケール判断が変わってしまうので、同じ値であることを固定する。
+func TestPendingCount_MatchesQueueInfo(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	ins := d.Inspector()
+
+	// 空のとき。
+	n, err := ins.PendingCount("deliver")
+	require.NoError(t, err)
+	assert.Equal(t, 0, n)
+
+	// worker を起動していないので wait に積まれたまま残る。
+	for range 5 {
+		require.NoError(t, d.Client().Enqueue(context.Background(), "noop", []byte(`{}`),
+			driver.WithQueue("deliver")))
+	}
+	// delayed も混ぜる。Pending には数えない。
+	require.NoError(t, d.Client().Enqueue(context.Background(), "noop", []byte(`{}`),
+		driver.WithQueue("deliver"), driver.WithProcessIn(time.Hour)))
+
+	info, err := ins.GetQueueInfo("deliver")
+	require.NoError(t, err)
+	n, err = ins.PendingCount("deliver")
+	require.NoError(t, err)
+
+	assert.Equal(t, 5, n)
+	assert.Equal(t, info.Pending, n, "PendingCount が GetQueueInfo.Pending とずれている")
+}
+
+// 未知の queue はエラーにする。**0 を返さない。** autoscaler が 0 と
+// 受け取ると「捌けている」と誤認して縮めにかかる。
+func TestPendingCount_UnknownQueue(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	_, err = d.Inspector().PendingCount("does-not-exist")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown queue")
+}

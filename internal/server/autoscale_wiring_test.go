@@ -31,6 +31,11 @@ type scriptableDriver struct {
 	resizes   atomic.Int32
 
 	insp *scriptableInspector
+
+	// 呼び出し経路の検証用。autoscaler は集計 API (GetQueueInfo) ではなく
+	// PendingCount を使うべき (#2605)。
+	queueInfoCalls    atomic.Int64
+	pendingCountCalls atomic.Int64
 }
 
 func newScriptableDriver(initial map[string]int) *scriptableDriver {
@@ -86,8 +91,21 @@ func (i *scriptableInspector) Queues() ([]string, error) { return nil, nil }
 func (i *scriptableInspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	i.parent.mu.Lock()
 	defer i.parent.mu.Unlock()
+	i.parent.queueInfoCalls.Add(1)
 	return &driver.InspectorInfo{Queue: qname, Pending: i.parent.pending[qname]}, nil
 }
+
+// PendingCount serves the same scripted depth as GetQueueInfo. **同じ値を
+// 返させる。** autoscaler が読む経路はこちらに変わったので、ここがずれると
+// 制御ループのテストが何も検証しなくなる。
+func (i *scriptableInspector) PendingCount(qname string) (int, error) {
+	i.parent.mu.Lock()
+	defer i.parent.mu.Unlock()
+	// 集計 API を経由していないことを見えるようにする。
+	i.parent.pendingCountCalls.Add(1)
+	return i.parent.pending[qname], nil
+}
+
 func (i *scriptableInspector) DeleteTask(qname, taskID string) error { return nil }
 func (i *scriptableInspector) DeleteAllPendingTasks(qname string) (int, error) {
 	return 0, nil
@@ -480,4 +498,37 @@ func TestStartAutoScale_RecordsScaleEventsForAdminUI(t *testing.T) {
 
 	// 他 queue は depth 0 のままなので履歴も空 (誤って全 queue に記録しない)。
 	assert.Empty(t, stats.Snapshot("inbox").ScaleEvents)
+}
+
+// **オートスケーラが admin 集計 API を叩かないこと。**
+//
+// ticker は 1Hz x 管理キュー数で回る。`GetQueueInfo` は全カウント +
+// repeat の ZCARD + delayed 全件の ZRANGE + N x HGETALL + paused 判定を
+// 1 回で引くので、毎秒引くとアイドル時の Redis コマンドの大半をこれが
+// 占める (本番実測で毎秒 90 前後、全体の 6 割)。使うのは Pending 1 個
+// だけなので、キューあたり 1 コマンドで足りる (#2605)。
+//
+// delayed が federation 障害で数千件に膨らむと GetQueueInfo のコストも
+// それに比例するので、常時経路から外しておく意味は平常時より大きい。
+func TestStartAutoScale_UsesPendingCountNotQueueInfo(t *testing.T) {
+	cfg := &config.Config{JobQueueAutoScale: true}
+	d := newScriptableDriver(map[string]int{"export": 4})
+
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, runner)
+	t.Cleanup(func() { runner.Stop(context.Background()) })
+
+	// tick を数回踏ませる。
+	deadline := time.After(5 * time.Second)
+	for d.pendingCountCalls.Load() < 3 {
+		select {
+		case <-deadline:
+			t.Fatalf("PendingCount が呼ばれていない (%d 回)", d.pendingCountCalls.Load())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+
+	assert.Zerof(t, d.queueInfoCalls.Load(),
+		"GetQueueInfo が %d 回呼ばれている。集計 API を毎秒引いている", d.queueInfoCalls.Load())
 }

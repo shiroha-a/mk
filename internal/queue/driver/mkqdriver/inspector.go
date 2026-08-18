@@ -114,6 +114,23 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	}, nil
 }
 
+// PendingCount returns the `wait` list length for the named queue.
+//
+// GetQueueInfo derives Pending from the same list (`Pending:
+// int(counts.Wait)`), so this is exactly equal — it just skips the rest
+// of the summary. **オートスケーラの 1Hz ポーリング用**で、admin 表示には
+// 使わない (#2605)。
+func (i *Inspector) PendingCount(qname string) (int, error) {
+	if i.driver.queueFor(qname) == nil {
+		return 0, fmt.Errorf("mkqdriver: unknown queue %q", qname)
+	}
+	n, err := i.driver.rdb.LLen(inspectorCtx(), i.driver.waitKey(qname)).Result()
+	if err != nil {
+		return 0, fmt.Errorf("mkqdriver: llen wait %q: %w", qname, err)
+	}
+	return int(n), nil
+}
+
 // PauseQueue pauses the named queue via mkq's BullMQ-compatible Queue.Pause
 // (meta.paused フラグ + wait→paused list 移動)。paused 中の enqueue も paused に
 // 入り orphan しない (mkq v1.0.3 #70)。

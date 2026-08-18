@@ -348,11 +348,16 @@ func autoScaledQueues(cfg *config.Config) (managed, skipped []string) {
 // queue, or 0 on error (= treat unobservable depth as idle so the
 // controller does not aggressively scale up on a Redis hiccup).
 func readQueueDepth(drv driver.Driver, qname string) int {
-	info, err := drv.Inspector().GetQueueInfo(qname)
-	if err != nil || info == nil {
+	// **集計 API を使わない。** ここは 1Hz x 管理キュー数で回るので、
+	// GetQueueInfo (全カウント + repeat ZCARD + delayed 全件の ZRANGE +
+	// N x HGETALL + paused 判定) を毎秒引くとアイドル時の Redis コマンドの
+	// 大半をこれが占める。実測で毎秒 90 前後 (#2605)。使うのは Pending
+	// 1 個だけなので、キューあたり 1 コマンドで足りる。
+	n, err := drv.Inspector().PendingCount(qname)
+	if err != nil {
 		return 0
 	}
-	return info.Pending
+	return n
 }
 
 // maxWorkersGlobalDescription renders the optional global cap for

@@ -163,6 +163,17 @@ func TestInspector_LiveQueue(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "deliver", info.Queue)
 
+	// PendingCount は GetQueueInfo.Pending への委譲 (#2605)。autoscaler が
+	// 読む値なので、集計 API とずれないことを固定する。
+	pendingCount, err := ins.PendingCount("deliver")
+	require.NoError(t, err)
+	assert.Equal(t, info.Pending, pendingCount)
+
+	// 未知の queue はエラーを素通しする。**0 を返さない** (autoscaler が
+	// 「捌けている」と誤認して縮めにかかる)。
+	_, err = ins.PendingCount("does-not-exist")
+	require.Error(t, err)
+
 	pending, err := ins.ListPendingTasks("deliver", 1, 30)
 	require.NoError(t, err)
 	require.NotEmpty(t, pending)

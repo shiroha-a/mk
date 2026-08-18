@@ -95,6 +95,21 @@ type Inspector interface {
 	Queues() ([]string, error)
 	GetQueueInfo(qname string) (*InspectorInfo, error)
 
+	// PendingCount returns just InspectorInfo.Pending for the named
+	// queue, without computing the rest of the summary.
+	//
+	// **オートスケーラは 1Hz x 管理キュー数で回るので、集計 API を使わせない。**
+	// GetQueueInfo は admin パネル向けに wait/active/delayed/completed/failed の
+	// 全カウント + repeat の ZCARD + delayed 全件の ZRANGE + N x HGETALL +
+	// paused 判定を 1 回で引く。オートスケーラが使うのは Pending 1 個だけで、
+	// 残りは捨てている。実測でこれがアイドル時の Redis コマンドの 6 割 (毎秒
+	// 90 前後) を占めていた (#2605)。
+	//
+	// delayed が federation 障害で数千件に膨らむと GetQueueInfo の
+	// ZRANGE + N x HGETALL もそれに比例する。admin パネルを開いている間だけ
+	// なら許容でも、常時 1Hz で走らせる先ではない。
+	PendingCount(qname string) (int, error)
+
 	DeleteTask(qname, taskID string) error
 	DeleteAllPendingTasks(qname string) (int, error)
 	RunTask(qname, taskID string) error

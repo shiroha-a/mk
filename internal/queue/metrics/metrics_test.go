@@ -61,6 +61,16 @@ func (i *fakeInspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error
 	}
 	return &driver.InspectorInfo{Queue: qname, Pending: pending}, nil
 }
+
+// PendingCount mirrors GetQueueInfo. この fake は Prometheus 経路の検証用で
+// autoscaler は通らないが、driver.Inspector を満たすために要る。
+func (i *fakeInspector) PendingCount(qname string) (int, error) {
+	if err, ok := i.errByQueue[qname]; ok {
+		return 0, err
+	}
+	return i.pendingByQueue[qname], nil
+}
+
 func (i *fakeInspector) DeleteTask(qname, taskID string) error           { return nil }
 func (i *fakeInspector) DeleteAllPendingTasks(qname string) (int, error) { return 0, nil }
 func (i *fakeInspector) PauseQueue(qname string) error                   { return nil }

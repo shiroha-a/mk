@@ -202,6 +202,13 @@ func (d *Driver) repeatKey(queue string) string {
 	return d.keyPrefix + ":" + queue + ":repeat"
 }
 
+// waitKey returns the BullMQ `wait` LIST key for the named queue.
+// Inspector.PendingCount reads its length directly instead of going
+// through the aggregate Counts path.
+func (d *Driver) waitKey(queue string) string {
+	return d.keyPrefix + ":" + queue + ":wait"
+}
+
 // queueFor returns the pre-defined queue for the given name, or nil.
 func (d *Driver) queueFor(name string) *mkq.Queue[framedPayload] {
 	return d.queues[name]
