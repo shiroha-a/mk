@@ -17,6 +17,8 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // Errors returned by Service.
@@ -239,12 +241,14 @@ func (s *Service) Create(in CreateInput) (*model.Antenna, error) {
 	// antennaLimit role policy gate (#1029)。policy 経由で取得した上限と
 	// 現在保有数を比較。provider 未配線 / policy 不在は gate skip (旧挙動)。
 	if s.rolePolicyProvider != nil {
-		if limit, ok := s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["antennaLimit"].(int); ok && limit >= 0 {
+		// float のまま比較する。int に丸めると 0.5 が 0 になり、`>= 0` の
+		// ガードは通っても上限が 0 になって挙動が変わる (#2613)。
+		if limit, ok := role.PolicyNumber(s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["antennaLimit"]); ok && limit >= 0 {
 			count, err := s.repo.CountByUser(in.OwnerID)
 			if err != nil {
 				return nil, err
 			}
-			if count >= int64(limit) {
+			if float64(count) >= limit {
 				return nil, ErrTooManyAntennas
 			}
 		}

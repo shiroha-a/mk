@@ -440,3 +440,32 @@ func TestSetClock(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, c.ID)
 }
+
+// **小数の policy でもゲートが効くこと。**
+//
+// policy の数値は小数を取りうる (role.PolicyNumber の doc 参照)。素の
+// `.(int)` で読むと型アサーションに失敗し、上限違反で弾くのではなく
+// **上限そのものが消える** (#2613)。
+func TestCreate_ClipLimit_Fractional(t *testing.T) {
+	svc, repo, _, _ := newSvc(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
+	repo.Clips["c2"] = &model.Clip{ID: "c2", UserID: "u1"}
+	// 上限 1.5 に対し既に 2 件あるので弾く。
+	svc.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"clipLimit": 1.5,
+	}})
+	_, err := svc.Create(clip.CreateInput{OwnerID: "u1", Name: "third"})
+	require.ErrorIs(t, err, clip.ErrTooManyClips)
+}
+
+// 小数の上限を下回っていれば通ること (常に弾く実装になっていないこと)。
+func TestCreate_ClipLimit_FractionalPasses(t *testing.T) {
+	svc, repo, _, _ := newSvc(t)
+	repo.Clips["c1"] = &model.Clip{ID: "c1", UserID: "u1"}
+	// 1 件 < 1.5 なのでまだ作れる。
+	svc.SetRolePolicyProvider(&stubRolePolicyProvider{policies: map[string]any{
+		"clipLimit": 1.5,
+	}})
+	_, err := svc.Create(clip.CreateInput{OwnerID: "u1", Name: "second"})
+	require.NoError(t, err)
+}

@@ -13,6 +13,8 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"gorm.io/gorm"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // Errors returned by Service.
@@ -102,12 +104,12 @@ func (s *Service) Create(in CreateInput) (*model.Clip, error) {
 	}
 	// clipLimit role policy gate (#1029)。
 	if s.rolePolicyProvider != nil {
-		if limit, ok := s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["clipLimit"].(int); ok && limit >= 0 {
+		if limit, ok := role.PolicyNumber(s.rolePolicyProvider.GetUserPolicies(in.OwnerID)["clipLimit"]); ok && limit >= 0 {
 			count, err := s.repo.CountByUser(in.OwnerID)
 			if err != nil {
 				return nil, err
 			}
-			if count >= int64(limit) {
+			if float64(count) >= limit {
 				return nil, ErrTooManyClips
 			}
 		}
@@ -248,12 +250,12 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	// owner の policy で評価する (clip 自体は owner-only mutation なので
 	// ownerID と一致する)。
 	if s.rolePolicyProvider != nil {
-		if limit, ok := s.rolePolicyProvider.GetUserPolicies(ownerID)["noteEachClipsLimit"].(int); ok && limit >= 0 {
+		if limit, ok := role.PolicyNumber(s.rolePolicyProvider.GetUserPolicies(ownerID)["noteEachClipsLimit"]); ok && limit >= 0 {
 			count, err := s.noteRepo.CountByClip(clipID)
 			if err != nil {
 				return err
 			}
-			if count >= int64(limit) {
+			if float64(count) >= limit {
 				return ErrTooManyClipNotes
 			}
 		}

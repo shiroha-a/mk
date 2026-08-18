@@ -4,6 +4,7 @@ package note
 import (
 	"context"
 	"errors"
+	"math"
 	"math/rand"
 	"regexp"
 	"slices"
@@ -20,6 +21,8 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // featured ランキング更新の sampling rate / note 年齢上限 (upstream
@@ -1333,8 +1336,10 @@ func (s *CreateService) mentionLimitFor(userID string) int {
 	if policies == nil {
 		return DefaultMentionLimit
 	}
-	if v, ok := policies["mentionLimit"].(int); ok {
-		return v
+	// 戻り値が int なので小数は切り捨てる。**厳しい側に倒れる**ので
+	// ゲートが消える方向ではない (0.5 → 0 = メンション不可、#2613)。
+	if v, ok := role.PolicyNumber(policies["mentionLimit"]); ok {
+		return int(math.Floor(v))
 	}
 	return DefaultMentionLimit
 }

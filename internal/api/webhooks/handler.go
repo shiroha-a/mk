@@ -12,6 +12,8 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // webhookEventTypes mirrors upstream Misskey TS の webhookEventTypes constant
@@ -130,12 +132,12 @@ func (h *Handler) Create(c echo.Context) error {
 	// webhookLimit role policy gate (#1029)。policy 経由で取得した上限と
 	// 現在保有数を比較。provider 未配線 / policy 不在は gate skip。
 	if h.rolePolicyProvider != nil {
-		if limit, ok := h.rolePolicyProvider.GetUserPolicies(user.ID)["webhookLimit"].(int); ok && limit >= 0 {
+		if limit, ok := role.PolicyNumber(h.rolePolicyProvider.GetUserPolicies(user.ID)["webhookLimit"]); ok && limit >= 0 {
 			count, err := h.repo.CountByUserID(user.ID)
 			if err != nil {
 				return apierr.JSONInternalError(c)
 			}
-			if count >= int64(limit) {
+			if float64(count) >= limit {
 				return apierr.JSONTooManyWebhooks(c)
 			}
 		}

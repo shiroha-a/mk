@@ -361,3 +361,46 @@ func TestLimit_CountErrorReturns500(t *testing.T) {
 	rec := post(h.Limit, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// **小数の分が切り捨てられないこと。**
+//
+// `time.Duration(f) * time.Minute` と書くと Duration への変換で小数が
+// 落ちてから掛かるので、0.5 分が 0 になり expiresAt が「今」になる。
+// 掛けてから変換しないと、招待コードが発行直後に失効する (#2613)。
+func TestCreate_ExpiresAtFractionalMinutes(t *testing.T) {
+	h, repo := newTestHandler(t)
+	h.SetRolePolicyProvider(&stubInvitePolicy{policies: map[string]any{
+		"inviteExpirationTime": 0.5, // 30 秒
+	}})
+	before := time.Now()
+	rec := post(h.Create, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Len(t, repo.Tickets, 1)
+	var saved *model.RegistrationTicket
+	for _, tk := range repo.Tickets {
+		saved = tk
+	}
+	require.NotNil(t, saved.ExpiresAt, "0.5 分でも expiresAt が設定される")
+	// 切り捨てられていれば before とほぼ同時刻になる。30 秒後になっていること。
+	assert.Greater(t, saved.ExpiresAt.Sub(before), 25*time.Second,
+		"expiresAt が %v しか先でない。分が切り捨てられている", saved.ExpiresAt.Sub(before))
+	assert.Less(t, saved.ExpiresAt.Sub(before), 35*time.Second)
+}
+
+// 小数の inviteLimit でもゲートが効くこと。
+func TestCreate_InviteLimitFractional(t *testing.T) {
+	h, repo := newTestHandler(t)
+	h.SetRolePolicyProvider(&stubInvitePolicy{policies: map[string]any{
+		"inviteLimit":      1.5,
+		"inviteLimitCycle": 60 * 24,
+	}})
+	// 判定は「作成前の件数」に対して行う。0 >= 1.5 は false なので 1 件目は通る。
+	require.Equal(t, http.StatusOK, post(h.Create, `{}`, &model.User{ID: "u1"}).Code)
+	// 1 >= 1.5 も false なので 2 件目も通る。
+	require.Equal(t, http.StatusOK, post(h.Create, `{}`, &model.User{ID: "u1"}).Code)
+	require.Len(t, repo.Tickets, 2)
+	// 2 >= 1.5 で 3 件目を弾く。int に丸めていると上限が 1 になって
+	// 2 件目で弾かれ、素の `.(int)` だとゲートごと消えて 3 件目も通る。
+	assert.NotEqual(t, http.StatusOK, post(h.Create, `{}`, &model.User{ID: "u1"}).Code,
+		"上限 1.5 に対し 3 件目が通っている。ゲートが消えている")
+}

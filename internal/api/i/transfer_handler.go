@@ -11,6 +11,8 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // ImportFileReader reads a drive file's content synchronously. Satisfied by
@@ -227,7 +229,7 @@ func (h *Handler) antennaImportWouldExceedLimit(userID, fileID string) bool {
 	if h.importDriveReader == nil || h.antennaCounter == nil || h.roleProvider == nil {
 		return false
 	}
-	limit, ok := h.roleProvider.GetUserPolicies(userID)["antennaLimit"].(int)
+	limit, ok := role.PolicyNumber(h.roleProvider.GetUserPolicies(userID)["antennaLimit"])
 	if !ok || limit < 0 {
 		return false
 	}
@@ -244,7 +246,7 @@ func (h *Handler) antennaImportWouldExceedLimit(userID, fileID string) bool {
 	if err != nil {
 		return false
 	}
-	return current+int64(len(entries)) >= int64(limit)
+	return float64(current+int64(len(entries))) >= limit
 }
 
 // Export handler factory methods — one per endpoint for router binding.

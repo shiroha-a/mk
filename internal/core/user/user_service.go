@@ -14,6 +14,8 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // MaxPinnedNotes is the upper limit on pinned notes per user.
@@ -831,13 +833,13 @@ func (s *Service) PinNote(userID, noteID string) error {
 	}
 	// role policy `pinLimit` で上限を override (#1029)。未配線 / key 不在 /
 	// 非 int の場合は MaxPinnedNotes 定数 fallback (= 旧挙動互換)。
-	limit := MaxPinnedNotes
+	limit := float64(MaxPinnedNotes)
 	if s.rolePolicyProvider != nil {
-		if v, ok := s.rolePolicyProvider.GetUserPolicies(userID)["pinLimit"].(int); ok {
+		if v, ok := role.PolicyNumber(s.rolePolicyProvider.GetUserPolicies(userID)["pinLimit"]); ok {
 			limit = v
 		}
 	}
-	if count >= limit {
+	if float64(count) >= limit {
 		return ErrPinLimitExceeded
 	}
 

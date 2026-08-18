@@ -18,6 +18,8 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // RolePolicyProvider returns the merged role policy map for a user. The
@@ -64,17 +66,19 @@ func (h *Handler) Create(c echo.Context) error {
 	now := time.Now()
 
 	policies := h.policies(user.ID)
-	if invLimit, ok := policies["inviteLimit"].(int); ok && invLimit > 0 {
-		cycleMin := 0
-		if v, ok2 := policies["inviteLimitCycle"].(int); ok2 {
-			cycleMin = v
+	if invLimit, ok := role.PolicyNumber(policies["inviteLimit"]); ok && invLimit > 0 {
+		// **`time.Duration(f) * time.Minute` と書かない。** Duration への変換で
+		// 小数が切り捨てられてから掛かるので 0.5 分が 0 になる (#2613)。
+		cycle := time.Duration(0)
+		if v, ok2 := role.PolicyMinutes(policies["inviteLimitCycle"]); ok2 {
+			cycle = v
 		}
-		sinceID := h.idGen.Generate(now.Add(-time.Duration(cycleMin) * time.Minute))
+		sinceID := h.idGen.Generate(now.Add(-cycle))
 		count, err := h.repo.CountByCreatorSince(user.ID, sinceID)
 		if err != nil {
 			return apierr.JSONInternalError(c)
 		}
-		if count >= int64(invLimit) {
+		if float64(count) >= invLimit {
 			return apierr.JSONExceededLimitOfCreateInviteCode(c)
 		}
 	}
@@ -82,8 +86,8 @@ func (h *Handler) Create(c echo.Context) error {
 	// inviteExpirationTime (= 分単位) が truthy なら expiresAt を計算する。
 	// 0 / 未設定なら null (= 無期限) を維持し、upstream の falsy skip と一致する。
 	var expiresAt *time.Time
-	if v, ok := policies["inviteExpirationTime"].(int); ok && v > 0 {
-		exp := now.Add(time.Duration(v) * time.Minute)
+	if d, ok := role.PolicyMinutes(policies["inviteExpirationTime"]); ok && d > 0 {
+		exp := now.Add(d)
 		expiresAt = &exp
 	}
 
@@ -226,15 +230,15 @@ func (h *Handler) Delete(c echo.Context) error {
 func (h *Handler) Limit(c echo.Context) error {
 	user := middleware.GetUser(c)
 	policies := h.policies(user.ID)
-	invLimit, hasLimit := policies["inviteLimit"].(int)
+	invLimit, hasLimit := role.PolicyNumber(policies["inviteLimit"])
 	if !hasLimit || invLimit <= 0 {
 		return c.JSON(http.StatusOK, map[string]any{"remaining": nil})
 	}
-	cycleMin := 0
-	if v, ok := policies["inviteLimitCycle"].(int); ok {
-		cycleMin = v
+	cycle := time.Duration(0)
+	if v, ok := role.PolicyMinutes(policies["inviteLimitCycle"]); ok {
+		cycle = v
 	}
-	sinceID := h.idGen.Generate(time.Now().Add(-time.Duration(cycleMin) * time.Minute))
+	sinceID := h.idGen.Generate(time.Now().Add(-cycle))
 	count, err := h.repo.CountByCreatorSince(user.ID, sinceID)
 	if err != nil {
 		return apierr.JSONInternalError(c)

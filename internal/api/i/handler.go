@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/http"
 	"regexp"
 	"strings"
@@ -1531,8 +1532,9 @@ func (h *Handler) Update(c echo.Context) error {
 		if !wordMuteLimitChecked {
 			wordMuteLimitChecked = true
 			if h.roleProvider != nil {
-				if v, ok := h.roleProvider.GetUserPolicies(me.ID)["wordMuteLimit"].(int); ok && v >= 0 {
-					wordMuteLimitValue = v
+				// 小数は切り捨てる (厳しい側)。ゲートが消える方向ではない (#2613)。
+				if v, ok := role.PolicyNumber(h.roleProvider.GetUserPolicies(me.ID)["wordMuteLimit"]); ok && v >= 0 {
+					wordMuteLimitValue = int(math.Floor(v))
 					wordMuteLimitOk = true
 				}
 			}
