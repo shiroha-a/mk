@@ -181,6 +181,9 @@ tidy: ## go mod tidy
 test: ## 全テストを実行
 	go test ./... -v
 
+plugin-doc-check: ## authoring.md の Go スニペットがコンパイルできるか検査
+	./tests/plugin-doc/check-snippets.sh
+
 plugin-test: ## 同梱プラグインのテストを実行 (PostgreSQL が要る)
 	@set -e; \
 	mods=$$(git ls-files 'plugins/*/go.mod'); \

@@ -98,7 +98,8 @@ go run ./tools/pluginspec -write
 - [ ] 破壊的変更なら `plugin.APIVersion` を上げた
 - [ ] 同梱プラグインが通る（`make plugin-test`。recipe が `MK_PLUGIN_TESTS_REQUIRE_DB=1 GOWORK=off` で回す。**この変数が無いと DB 不通で skip = 成功扱い**になるので、素の `go test` で代用しない）
 - [ ] `plugin-api.ts` を変えたなら `make frontend-check` が通る
-- [ ] `docs/plugins/authoring.md` の公開面一覧を更新した
+- [ ] `docs/plugins/authoring.md` の公開面一覧を更新した (`TestPluginDoc_*` が CI で検査する)
+- [ ] `make plugin-doc-check` が通る (スニペットのコンパイル。**CI には載っていないので手で回す**)
 
 ## 参考
 

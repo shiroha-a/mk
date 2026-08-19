@@ -104,3 +104,13 @@ make plugin-test   # 同梱プラグイン全部。MK_PLUGIN_TESTS_REQUIRE_DB=1 
 PostgreSQL が要る（`TEST_DB_*` 環境変数、既定は `localhost:5432` の `misskey_test`）。
 
 `plugin/plugintest` の使い方は[作者向け](authoring.md#テスト)を参照。
+
+### ドキュメントのスニペット
+
+```bash
+make plugin-doc-check
+```
+
+`authoring.md` の Go スニペットを使い捨ての module に展開してビルドし、**実際に噛んだ 3 クラス** (`declared and not used` / `no new variables` / `does not implement`) を検査する。断片は `lookup(...)` のようなヘルパを意図的に省くので `undefined: X` は正常。
+
+完全なコンパイル検査ではないが、**推論では判別できない**ので doc を触ったら回すこと (#2639 では「コンパイルできない例を直す」作業が 4 周にわたって別のエラーを作り続けた)。CI には載せていない (別 module の解決が走るため)。
