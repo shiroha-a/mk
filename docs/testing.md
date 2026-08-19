@@ -14,7 +14,7 @@
 | 連合テスト | mk-go ↔ 本物の Misskey TS の AP 通信 | Docker Compose多段 | `make federation-misskey-e2e` (起動から撤去まで通し。個別に叩くなら `-up` → `-test` → `-down`) |
 | Drop-in e2e (pytest) | TS-A backend を mk-A に差し替えて state preservation 検証 | TS 2 instance + mk overlay | `make dropin-swap-test` (#365 / #367 / #372 / #374、詳細は[dropin-e2e.md](dropin-e2e.md)) |
 | Drop-in frontend e2e (cypress) | 3 TS instance + mk overlay swap で frontend 視点の互換 | cypress + 3 TS + mk-A | `make dropin-frontend-swap-test` (#380 / #381 / #387 / #394、詳細は[dropin-frontend-e2e.md](dropin-frontend-e2e.md)) |
-| Playwright e2e | mk-go と Misskey TS の両 backend で API/frontend 統合互換を検証 | Docker Compose 全部 | `tests/playwright/` 配下 (#744、370 spec。PR ごとに mk-go、upstream 追従時に TS backend) |
+| Playwright e2e | mk-go と Misskey TS の両 backend で API/frontend 統合互換を検証 | Docker Compose 全部 | `tests/playwright/` 配下 (#744、289 spec ファイル。PR ごとに mk-go、upstream 追従時に TS backend) |
 | 本家 backend e2e | Misskey 本家の `test/e2e/**` をテスト本体無改変で mk-go に向けて実行 | PostgreSQL / Redis + mk-go バイナリ | `make upstream-e2e` (#2347、25 ファイル 1245 テスト。詳細は[upstream-backend-e2e.md](upstream-backend-e2e.md)) |
 
 ## 手元の準備
@@ -25,7 +25,7 @@
 cp .env.test.example .env.test    # TEST_DB_* が入っている。必要なら編集する
 ```
 
-`internal/testutil` が起動時にプロジェクトルートの `.env.test` を読み、既に設定済みの環境変数は上書きしない。**export で直接渡してもよい。** `.env.test` は `.gitignore` 済み。
+`internal/testutil` は接続時 (`OpenTestDB` などの呼び出し時) にプロジェクトルートの `.env.test` を読み、既に設定済みの環境変数は上書きしない。**export で直接渡してもよい。** `.env.test` は `.gitignore` 済み。
 
 接続先の PostgreSQL には `TEST_DB_NAME` (既定 `misskey_test`) のデータベースが要る。CI は service container を立てて同じ環境変数を渡している。
 
@@ -82,8 +82,12 @@ migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL
 
 | | testcontainers | 外部サービス |
 |---|---|---|
-| Redis | `SetupRedis` を **25 パッケージ**が使う。`SkipIfNoDocker` で Docker が無ければ skip する | — |
-| PostgreSQL | `SetupPostgres` は `internal/api/test` と `test/e2e` / `test/e2e_federation` の **3 パッケージだけ** | `OpenTestDB` / `MustOpenTestDB` を `internal/` 配下の **15 パッケージ**が使い、`TEST_DB_*` の指す PostgreSQL に直接つなぐ |
+件数はいずれもリポジトリ全体 (`internal/` + `test/`) の実測。
+
+| | testcontainers | 外部サービス |
+|---|---|---|
+| Redis | `SetupRedis` を **27 パッケージ**が使う。`SkipIfNoDocker` で Docker が無ければ skip する | — |
+| PostgreSQL | `SetupPostgres` は `internal/api/test` / `test/e2e` / `test/e2e_federation` の **3 パッケージだけ** | `OpenTestDB` / `MustOpenTestDB` を **15 パッケージ**が使い、`TEST_DB_*` の指す PostgreSQL に直接つなぐ |
 
 つまり **Redis は Docker があれば足りるが、PostgreSQL は自分で用意する必要がある**。`MustOpenTestDB` は失敗時に panic し、しかも `init()` から呼ばれるので、PostgreSQL が無いと該当パッケージはまとめて落ちる (skip されない)。
 

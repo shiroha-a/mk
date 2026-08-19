@@ -12,7 +12,12 @@ VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/cont
 - `postCreate.sh`で初期化
 
 ```bash
-# VS Codeで開いたら
+# VS Code で開いたら、まず設定ファイルを複製する
+# (.config/default.yml は gitignore 済みで postCreate.sh も作らない。
+#  無いと make dev / make migrate-up が failed to load config で落ちる)
+cp .config/default.yml.example .config/default.yml
+
+make migrate-up
 make dev
 ```
 
@@ -27,16 +32,15 @@ make dev
 **テストを回すには PostgreSQL を自分で用意して `.env.test` で指す。** Redis は testcontainers が立てるが、DB を使うテストの大半は外部の PostgreSQL に直接つなぐ (→ [testing.md](testing.md))。
 
 ```bash
-cp .env.test.example .env.test   # TEST_DB_* が入っている。必要なら編集する
-```
-
-```bash
 git clone --recursive https://github.com/shiroha-a/mk.git
 cd mk
 
 # 設定ファイルを作成
 cp .config/default.yml.example .config/default.yml
 # default.yml を編集してDB/Redis接続先を設定
+
+# テスト用の DB 接続先 (make test に要る)
+cp .env.test.example .env.test
 
 # マイグレーション適用 (接続先は上で編集した default.yml から読む)
 make migrate-up

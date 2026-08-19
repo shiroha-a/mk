@@ -176,6 +176,7 @@ gh workflow run docker.yml -f tag=1.1.0
 - `MISSKEY_FRONTEND_DIR` — viteビルド出力
 - `MISSKEY_FRONTEND_DIST_DIR` — dist出力 (locales, fonts)
 - `MISSKEY_TWEMOJI_DIR` — twemoji SVG
+- `MISSKEY_FLUENT_EMOJI_DIR` — fluent-emoji (実績バッジ / 通知アイコン)
 - `MISSKEY_CLIENT_ASSETS_DIR` — クライアントアセット
 - `MISSKEY_STATIC_DIR` — 静的ファイル (backend/assets: favicon等)
 - `MISSKEY_REPO_ASSETS_DIR` — リポジトリ直下の共通アセット (ai.png, banner等)
