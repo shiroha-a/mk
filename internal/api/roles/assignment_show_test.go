@@ -73,11 +73,11 @@ func postAssignment(h *roles.Handler, body, viewerID string) *httptest.ResponseR
 
 func TestAssignmentShow_PublicRole(t *testing.T) {
 	h, assignments, rolesRepo := assignmentFixture(t)
-	rolesRepo.Roles["role"] = &model.Role{ID: "role", IsPublic: true, CanEditMembersByModerator: true}
+	rolesRepo.Roles["role"] = &model.Role{ID: "role", Target: model.RoleTargetManual, IsPublic: true, CanEditMembersByModerator: true}
 
 	rec := postAssignment(h, `{"roleId":"role"}`, "viewer")
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"role","isPublic":true,"canEditMembersByModerator":true}}`, rec.Body.String())
+	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"role","target":"manual","isPublic":true,"canEditMembersByModerator":true}}`, rec.Body.String())
 	assert.Equal(t, 1, assignments.findCalls)
 	assert.Equal(t, "viewer", assignments.userID)
 	assert.Equal(t, "role", assignments.roleID)
@@ -86,13 +86,13 @@ func TestAssignmentShow_PublicRole(t *testing.T) {
 
 func TestAssignmentShow_PrivateActiveAssignment(t *testing.T) {
 	h, assignments, rolesRepo := assignmentFixture(t)
-	rolesRepo.Roles["private"] = &model.Role{ID: "private", IsPublic: false}
+	rolesRepo.Roles["private"] = &model.Role{ID: "private", Target: model.RoleTargetManual, IsPublic: false}
 	expires := time.Date(2026, 8, 20, 3, 4, 5, 0, time.UTC)
 	assignments.Assignments["viewer:private"] = &model.RoleAssignment{UserID: "viewer", RoleID: "private", ExpiresAt: &expires}
 
 	rec := postAssignment(h, `{"roleId":"private"}`, "viewer")
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"assigned":true,"expiresAt":"2026-08-20T03:04:05.000Z","role":{"id":"private","isPublic":false,"canEditMembersByModerator":false}}`, rec.Body.String())
+	assert.JSONEq(t, `{"assigned":true,"expiresAt":"2026-08-20T03:04:05.000Z","role":{"id":"private","target":"manual","isPublic":false,"canEditMembersByModerator":false}}`, rec.Body.String())
 }
 
 func TestAssignmentShow_PrivateInactiveMatchesMissing(t *testing.T) {
@@ -159,4 +159,40 @@ func TestAssignmentShow_InvalidParam(t *testing.T) {
 	rec := postAssignment(h, `{}`, "viewer")
 	require.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"code":"INVALID_PARAM"`)
+}
+
+// conditional role は role_assignment 行を持たず condFormula の read 時評価で決まる。
+// この endpoint は行だけを見るので assigned は常に false になる。呼び出し側が
+// 「条件を満たしていない」と誤読しないよう role.target を返している (#2633)。
+func TestAssignmentShow_ConditionalRoleIsNeverAssigned(t *testing.T) {
+	h, assignments, rolesRepo := assignmentFixture(t)
+	rolesRepo.Roles["cond"] = &model.Role{ID: "cond", Target: model.RoleTargetConditional, IsPublic: true}
+
+	rec := postAssignment(h, `{"roleId":"cond"}`, "viewer")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"cond","target":"conditional","isPublic":true,"canEditMembersByModerator":false}}`, rec.Body.String())
+	// condFormula の評価には全 role の走査が要る。exact lookup の O(1) 性を保つため
+	// 評価しないので、参照するのは FindActive 1 回だけ。
+	assert.Equal(t, 1, assignments.findCalls)
+	assert.Zero(t, assignments.listCalls)
+}
+
+// private な conditional role は、条件を満たす viewer にも NO_SUCH_ROLE になる。
+// existence oracle 対策の秘匿と conditional の制約が重なる箇所で、緩めると
+// oracle が戻るため意図的にこの挙動にしている (#2633)。
+//
+// 保証は「NO_SUCH_ROLE が返る」ことではなく **存在しない role と区別できない**
+// ことなので、両者のレスポンスを突き合わせる。status だけを見ると、body に
+// target や isPublic が漏れても通ってしまう。
+func TestAssignmentShow_PrivateConditionalRoleIsHidden(t *testing.T) {
+	h, _, rolesRepo := assignmentFixture(t)
+	rolesRepo.Roles["cond"] = &model.Role{ID: "cond", Target: model.RoleTargetConditional, IsPublic: false}
+
+	hidden := postAssignment(h, `{"roleId":"cond"}`, "viewer")
+	missing := postAssignment(h, `{"roleId":"nonexistent"}`, "viewer")
+
+	require.Equal(t, http.StatusBadRequest, hidden.Code)
+	assert.JSONEq(t, assignmentNoSuchRoleJSON, hidden.Body.String())
+	assert.Equal(t, missing.Code, hidden.Code)
+	assert.JSONEq(t, missing.Body.String(), hidden.Body.String())
 }

@@ -78,7 +78,7 @@ func assignmentAdminHandler(t *testing.T, roleRepo repository.RoleRepository, us
 
 func TestRolesAssignmentShow_ExactLookup(t *testing.T) {
 	roleRepo := testutil.NewMockRoleRepository()
-	roleRepo.Roles["role"] = &model.Role{ID: "role", IsPublic: true, CanEditMembersByModerator: true}
+	roleRepo.Roles["role"] = &model.Role{ID: "role", Target: model.RoleTargetManual, IsPublic: true, CanEditMembersByModerator: true}
 	baseAssignments := testutil.NewMockRoleAssignmentRepository(roleRepo)
 	baseAssignments.Assignments["user:other"] = &model.RoleAssignment{UserID: "user", RoleID: "other"}
 	assignments := &adminExactAssignmentRepo{MockRoleAssignmentRepository: baseAssignments}
@@ -88,7 +88,7 @@ func TestRolesAssignmentShow_ExactLookup(t *testing.T) {
 
 	rec := doPost(h.RolesAssignmentShow, `{"roleId":"role","userId":"user"}`, &model.User{ID: "moderator"})
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"role","isPublic":true,"canEditMembersByModerator":true}}`, rec.Body.String())
+	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"role","target":"manual","isPublic":true,"canEditMembersByModerator":true}}`, rec.Body.String())
 	assert.Equal(t, 1, assignments.findCalls)
 	assert.Equal(t, "user", assignments.userID)
 	assert.Equal(t, "role", assignments.roleID)
@@ -97,7 +97,7 @@ func TestRolesAssignmentShow_ExactLookup(t *testing.T) {
 
 func TestRolesAssignmentShow_LockedRoleReadableByModerator(t *testing.T) {
 	h, users, _, rolesRepo, assignments := newTestHandlerWithAssign(t)
-	rolesRepo.Roles["role"] = &model.Role{ID: "role", CanEditMembersByModerator: false}
+	rolesRepo.Roles["role"] = &model.Role{ID: "role", Target: model.RoleTargetManual, CanEditMembersByModerator: false}
 	rolesRepo.Roles["modrole"] = &model.Role{ID: "modrole", IsModerator: true}
 	users.Users["mod"] = &model.User{ID: "mod"}
 	users.Users["user"] = &model.User{ID: "user"}
@@ -105,7 +105,7 @@ func TestRolesAssignmentShow_LockedRoleReadableByModerator(t *testing.T) {
 
 	rec := doPost(h.RolesAssignmentShow, `{"roleId":"role","userId":"user"}`, &model.User{ID: "mod"})
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"role","isPublic":false,"canEditMembersByModerator":false}}`, rec.Body.String())
+	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"role","target":"manual","isPublic":false,"canEditMembersByModerator":false}}`, rec.Body.String())
 }
 
 func TestRolesAssignmentShow_RoleNotFound(t *testing.T) {
@@ -198,4 +198,25 @@ func TestRolesAssignmentShow_UsesSingleRoleSnapshot(t *testing.T) {
 	rec := doPost(h.RolesAssignmentShow, `{"roleId":"role","userId":"user"}`, &model.User{ID: "moderator"})
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, 1, roleRepo.calls)
+}
+
+// conditional role は role_assignment 行を持たないので assigned は常に false になる。
+// 既存の admin/roles/users も ListByRole で同じテーブルを引くため挙動は揃っており、
+// 判別の手掛かりとして role.target を返している (#2633)。
+func TestRolesAssignmentShow_ConditionalRoleIsNeverAssigned(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	roleRepo.Roles["cond"] = &model.Role{ID: "cond", Target: model.RoleTargetConditional, IsPublic: false}
+	assignments := &adminExactAssignmentRepo{MockRoleAssignmentRepository: testutil.NewMockRoleAssignmentRepository(roleRepo)}
+	users := testutil.NewMockUserRepository()
+	users.Users["user"] = &model.User{ID: "user"}
+	h := assignmentAdminHandler(t, roleRepo, users, assignments)
+
+	rec := doPost(h.RolesAssignmentShow, `{"roleId":"cond","userId":"user"}`, &model.User{ID: "moderator"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	// self 側と違い private でも moderator には body を返すので、conditional の
+	// 制約だけが効く形になる。
+	assert.JSONEq(t, `{"assigned":false,"expiresAt":null,"role":{"id":"cond","target":"conditional","isPublic":false,"canEditMembersByModerator":false}}`, rec.Body.String())
+	// condFormula の評価には全 role の走査が要る。評価しないので参照は FindActive 1 回。
+	assert.Equal(t, 1, assignments.findCalls)
+	assert.Zero(t, assignments.listCalls)
 }
