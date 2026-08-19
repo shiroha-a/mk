@@ -49,7 +49,7 @@ make queue-bench-autoscale-down
 各 scenario で:
 
 1. **idle Redis client 数** (= mkq Worker pool 内 BLPOP 接続数の proxy)
-   - `auto` は minWorkers=4 で起動するので 5 queue × 4 = 20 接続程度
+   - `auto` は minWorkers=4 で起動するので 7 queue × 4 = 28 接続程度
    - `fixed16` は 16 接続程度
    - `fixed64` は 64 接続程度
 2. **deliver burst drain time** = N notes を post → fan-out で N × FOLLOWERS deliver job が enqueue されて全 blackhole にヒットするまでの時間

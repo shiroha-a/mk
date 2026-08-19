@@ -1,6 +1,8 @@
 # Job queue worker auto-scaling
 
-**Status**: Proposed (#1120 tracker, 2026-05-18) / **Scope**: `internal/queue/autoscale/` (new) + `internal/queue/driver/mkqdriver/` + `internal/server/queue_factory.go`
+**Status**: 実装済 (#1120)。`jobQueueAutoScale: true` で有効になる opt-in 機能として
+配線済み / **Scope**: `internal/queue/autoscale/` + `internal/queue/driver/mkqdriver/` +
+`internal/server/autoscale_wiring.go`
 
 ---
 
@@ -8,7 +10,9 @@
 
 ### 1.1 operator UX の現状問題
 
-mk-go の job queue は `internal/queue/queue.go` で 5 系統の queue (`deliver` / `inbox` / `export` / `push` / `webhook`) を定義しており、operator は以下の knob を YAML で握る:
+mk-go の job queue は `internal/queue/queue.go` で 7 系統の queue
+(`deliver` / `inbox` / `relationship` / `export` / `push` / `webhook` /
+`objectStorage`) を定義しており、operator は以下の knob を YAML で握る:
 
 ```yaml
 deliverJobConcurrency: 16      # default
@@ -21,7 +25,9 @@ redisForJobQueue.poolSize: <cores * 10>
 db.poolSize:            10-100
 ```
 
-(参考: `relationshipJobConcurrency` は TS-compat の受け付けのみで mk-go では no-op、`queue_factory.go` で forward されない)
+(`relationshipJobConcurrency` は #2403 で mkq driver に forward されるようになった。
+auto-scale では他の per-queue knob と同じく「設定されていれば `relationship` を
+管理対象から外す」判定に使う。asynq driver では依然 no-op で、起動時に warning が出る)
 
 これらの「最適値」は workload に強く依存する:
 
@@ -115,7 +121,7 @@ global controller (driver 1 つで全 queue 統合) ではなく、**queue ご�
 
 各 queue の controller は `maxWorkers` (per-queue 上限、§2 で定義) までスケールする。`maxWorkersGlobal` (optional) が設定されている場合、全 queue worker 合計がこの値を超えるスケール要求は controller 側で reject する (= maxWorkersGlobal 達した時点でそれ以上スケールできない)。
 
-`maxWorkersGlobal` 未設定時は **per-queue 上限の総和まで** (= 5 queue × `maxWorkers=128` = 640 worker まで膨張可能。実際は spike が deliver に集中するため deliver 単独で 128 まで scale up、他 queue は概ね `minWorkers=4` 付近の floor で待機)。multi-pod 環境で cluster 全体の DB/Redis pool を守りたい operator のみ明示設定する。
+`maxWorkersGlobal` 未設定時は **per-queue 上限の総和まで** (= 7 queue × `maxWorkers=128` = 896 worker まで膨張可能。実際は spike が deliver に集中するため deliver 単独で 128 まで scale up、他 queue は概ね `minWorkers=4` 付近の floor で待機)。multi-pod 環境で cluster 全体の DB/Redis pool を守りたい operator のみ明示設定する。
 
 ### 3.3 scale unit: AI `+max(1, N×0.25)` / MD `N×0.5`
 
@@ -149,9 +155,9 @@ scale event 発火後の **連続発火抑止 interval は 1 秒** (scale-up / s
 multi-pod 運用への現実的アドバイス:
 - 「pod 数 × per-pod `maxWorkersGlobal` ≦ DB pool size × 0.8」を operator が確認
 - `maxWorkersGlobal` 設定時は **minWorkers floor を引いた残りが scaling headroom** になる点に注意:
-  - 1 pod あたり常時 `minWorkers × len(autoScaled queues)` worker が起動 (e.g., 5 queue × min=4 = **20 worker は idle 時でも常時占有**)
-  - `maxWorkersGlobal = 24` だと headroom = `24 - 20 = 4` worker しか scaling に使えない → deliver spike 時にほぼスケールできない
-- **現実的な例**: 3 pod、DB pool=240 → per-pod `maxWorkersGlobal=64` (合計 192 ≦ 192 = DB pool × 0.8、各 pod の scaling headroom = `64 - 20 = 44` worker)
+  - 1 pod あたり常時 `minWorkers × len(autoScaled queues)` worker が起動 (e.g., 7 queue × min=4 = **28 worker は idle 時でも常時占有**)
+  - `maxWorkersGlobal = 32` だと headroom = `32 - 28 = 4` worker しか scaling に使えない → deliver spike 時にほぼスケールできない
+- **現実的な例**: 3 pod、DB pool=240 → per-pod `maxWorkersGlobal=64` (合計 192 ≦ 192 = DB pool × 0.8、各 pod の scaling headroom = `64 - 28 = 36` worker)
 - DB pool が小さい (< 100) 環境では auto-scale の恩恵が薄いため、固定 `deliverJobConcurrency` の運用が現実的
 
 ### 3.6 既存 knob との優先順位
@@ -226,11 +232,15 @@ config struct での「未設定」表現は **`*int` ポインタ型 + `nil` = 
 ```
 Server 起動時:
   if cfg.JobQueueAutoScale:
-    for queue in [deliver, inbox, export, push, webhook]:
+    # 個別 knob を持つのは deliver / inbox / relationship の 3 つだけ。
+    # export / push / webhook / objectStorage には knob が無いので常に管理対象。
+    for queue in [deliver, inbox, relationship]:
       if !cfg.<queue>JobConcurrency.IsSet():
-        controllers[queue] = NewAIMDController(min, cfg.MaxWorkers, cooldown, clock)
-        go controllers[queue].Run(ctx)  # 1s tick で observe + decide
-  # controllers が空 (全 queue に個別 knob) なら goroutine 一切起動しない
+        managed += [queue]
+    managed += [export, push, webhook, objectStorage]
+    for queue in managed:
+      controllers[queue] = NewAIMDController(min, cfg.MaxWorkers, cooldown, clock)
+      go controllers[queue].Run(ctx)  # 1s tick で observe + decide
 
 ticker (per controller, 1s):
   depth = Redis.ZCARD(queue)
@@ -276,7 +286,7 @@ runtime kill switch は **auto-scale が cluster を喰い尽くして restart �
 
 #### 制約: mkq library 側に Resize API は無い
 
-`github.com/shiroha-a/mkq@v1.0.1` の `worker_options.go` では `concurrency int` が `mkq.NewWorker` 構築時に固定される設計で、起動後の動的変更 API は存在しない。本 ADR では mkq library 自体には変更を加えず、**mkqdriver layer に Worker 群を管理する pool-of-workers 層を追加** する方針を採る (mkq library への PR は別途中長期検討、本 tracker scope 外)。
+`github.com/shiroha-a/mkq` (現在 v1.0.6) の `worker_options.go` では `concurrency int` が `mkq.NewWorker` 構築時に固定される設計で、起動後の動的変更 API は存在しない。本 ADR では mkq library 自体には変更を加えず、**mkqdriver layer に Worker 群を管理する pool-of-workers 層を追加** する方針を採る (mkq library への PR は別途中長期検討、本 tracker scope 外)。
 
 #### 実装: pool-of-Workers 方式
 

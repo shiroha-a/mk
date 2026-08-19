@@ -1,6 +1,7 @@
 # Playwright LCD → strict 化による drift detection strategy
 
-**Status**: Active (Phase 1-4 完了で 96 spec, 40+ drift fix 実績) / **Scope**: `tests/playwright/`
+**Status**: Active。spec は現在 289 ファイル (`tests/playwright/`)。以下 §5 の数値は
+**Phase 1-4 完了時点のスナップショット**で、現状は [testing.md](../testing.md) を参照
 
 ---
 
@@ -77,11 +78,12 @@ drift 解消後は LCD と strict で diff が綺麗に出る (= `[200, 204, 500
 - 96 spec / 35 directory / 242 endpoint cover (= router.go 登録 448 endpoint の 54.3%)
 - 40+ 件 drift を発見・修正 (#798 ~ #944)
 - 残 LCD 数: ~68 (= mostly `[200, 204]` の 2xx ambiguity、benign)
-- nightly green を両 backend で維持 (matrix で `mk-go` / `ts` 並列、`fail-fast: false`)
+- 両 backend で green を維持 (当時は nightly の matrix 実行。現在は PR トリガーで
+  mk-go を 4 シャード、TS backend は upstream 追従時の `workflow_dispatch` のみ、#2291 / #2609)
 
 ## 6. 関連
 
 - 親 tracker: #744 (Playwright Phase 1-4)
-- drift fix list: [docs/api-compatibility.md](../api-compatibility.md) の「対応済 drift fix」section
+- drift fix list: [docs/api-compatibility.md](../api-compatibility.md) の「Playwright Phase 1-4 由来の drift backlog」section
 - workflow: [docs/testing.md](../testing.md) の「Playwright e2e」section
-- nightly CI: `.github/workflows/playwright.yml`
+- CI: `.github/workflows/playwright.yml` (PR トリガー、4 シャード)

@@ -23,7 +23,7 @@ allowedPrivateNetworks:
 jobQueueDriver: mkq
 
 # Scenario C: AIMD auto-scale (#1120 tracker) — opt-in 配線
-# 個別 knob (deliver/inbox JobConcurrency) は未設定なので controller が全 5 queue を管理
+# 個別 knob (deliver/inbox/relationship JobConcurrency) は未設定なので controller が全 7 queue を管理
 jobQueueAutoScale: true
 minWorkers: 4
 maxWorkers: 64
