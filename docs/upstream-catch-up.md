@@ -53,7 +53,7 @@ make uds-frontend-build
 
 ### 1-5. UDS production stack の再ビルド
 
-[compose.uds.yaml](../compose.uds.yaml) で本番運用している場合、Misskey TS の prebuilt image を pull しているわけではなく **mk-go バイナリ + submodule の静的アセットを image に焼き込んでビルドしている** ([`deploy/uds/Dockerfile.mkgo`](../deploy/uds/Dockerfile.mkgo) の `COPY . .` 経由)。submodule update + frontend rebuild 後に image を作り直さないと古い asset が image にキャッシュされたまま:
+[compose.uds.yaml](../compose.uds.yaml.example) で本番運用している場合、Misskey TS の prebuilt image を pull しているわけではなく **mk-go バイナリ + submodule の静的アセットを image に焼き込んでビルドしている** ([`deploy/uds/Dockerfile.mkgo`](../deploy/uds/Dockerfile.mkgo) の `COPY . .` 経由)。submodule update + frontend rebuild 後に image を作り直さないと古い asset が image にキャッシュされたまま:
 
 ```bash
 # 1-1 / 1-2 と 1-4 を済ませた状態 (= submodule + frontend asset が最新) で

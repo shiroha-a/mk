@@ -35,7 +35,7 @@ Misskey互換クライアント(Miria等)は、misskey-jsの型に従ってレ�
 | `tools/shapediff/` | snapshot再生成 + 全family drift report |
 | `internal/entitycompat/plugin_surface_test.go` | 公開プラグイン API の面 (`TestPluginSurfaceDrift`) |
 | `internal/entitycompat/plugin_doc_test.go` | `docs/plugins/authoring.md` の一覧 ↔ 公開面 golden (`TestPluginDoc_*` 5 本) |
-| `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物 (`TestDivergenceDoc_*` 5 本)、`docs/api-compat.md` ↔ router.go (`TestAPICompatDoc_MatchesRouter`) |
+| `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物 / router.go (`TestDivergenceDoc_*` 6 本)、`docs/api-compat.md` ↔ router.go (`TestAPICompatDoc_MatchesRouter`) |
 | `internal/entitycompat/schema_drift_test.go` | migration の列 ↔ upstream entity (`TestSchemaDrift_CreateOnlyColumns`) |
 | `internal/entitycompat/migration_seed_test.go` | TypeORM `migrations` seed の網羅 (`TestMigrationSeed_CoversUpstream`) |
 
@@ -432,6 +432,20 @@ upstream の endpoint 一覧を `tools/apicompat` から直接引くことはで
 
 サマリは 10 tag と言い、表には 11 行あり、実際の submodule には 23 個の tag があった (#2640)。**この gate が捕まえるのは前 2 つの食い違いだけ**で、3 つ目 (= submodule 側が進んだこと) は検出できない — `test-shards` job は submodule を checkout しないため、サマリと表を両方据え置けば submodule が先に進んでもすり抜ける。submodule bump の PR で表を足すのは人の仕事。
 
+### `TestDivergenceDoc_StreamChannelsMatchRegistry`
+
+§4-1 のチャンネル一覧 == `router.go` の `streamRegistry.Register*` の登録名。
+
+**チャンネル名はソースのファイル名と違う。** upstream のソースは `chat-room.ts` だが
+wire 上の名前 (`chName`) は `chatRoom`。#2640 の初稿はファイル名をそのまま
+「チャンネル名も upstream に揃えてある」として並べており、**18 件中 11 件が実在
+しない名前**だった。人が目で照合すると通る類の誤り。
+
+upstream 側の一覧は submodule を要するので参照できないが、mk-go は upstream の 18 を
+すべて同名で実装しているので、**router.go の登録名と突き合わせれば doc の主張は
+全部検証できる**。doc 側は §4-1 の表 (mk-go 独自) と ```text フェンス (upstream 由来)
+の和を母集団にする。
+
 ### `TestAPICompatDoc_MatchesRouter`
 
 `docs/api-compat.md` の endpoint 行 == `router.go` が静的登録する `/api/*`。POST と GET の
@@ -450,16 +464,23 @@ route dump には stack が要るのでテストからは呼べない。代わ�
 (「TS 側に存在するが mk-go で未実装」を混ぜると、upstream が endpoint を足した直後 =
 生成物が正しい状態で落ちる)。
 
-**静的抽出は取りこぼすと gate が緩くなる方向に倒れる**ので、fail-closed を 2 段に
+**静的抽出は取りこぼすと gate が緩くなる方向に倒れる**ので、fail-closed を 3 段に
 している。
 
-- 抽出できた数 == 呼び出しの総数 (path が定数 / 変数経由、複数行に分かれている形を検出)
-- `/api` 配下を生やす別経路を 0 件で固定 — `api.Group(` / `api.PUT|DELETE|PATCH(` /
-  `s.echo.<METHOD>("/api/` は 0、`s.echo.Group("/api"` と `api.Any(` (catchall) は 1
+1. どちらかの集合が 0 件なら `t.Fatal` (書式が変わって空集合同士が一致するのを防ぐ)
+2. 抽出できた数 == 呼び出しの総数 (path が定数 / 変数経由、複数行に分かれている形を検出)
+3. `/api` 配下を生やす別経路を想定件数で固定 — `api.Group(` は 1
+   (`plugin_wiring.go` がプラグイン用に使う)、`s.echo.Group("/api"` と catchall の
+   `api.Any(` は各 1、`api.Add(` / `api.PUT|DELETE|PATCH|HEAD|CONNECT|TRACE(` /
+   `s.echo.<METHOD>("/api` は 0
 
-いずれも「正当な理由でその形を使うことになったら、抽出をそちらへ拡張してから固定を
-解除する」という運用。**0 件チェックだけでは足りない** — 部分的な取りこぼしは router
-側の集合が小さくなるだけで、生成物との差が出ずに黙って一致する。
+**0 件チェックだけでは足りない** — 部分的な取りこぼしは router 側の集合が小さく
+なるだけで、生成物との差が出ずに黙って一致する。走査は `internal/server/` の
+非テスト `.go` 全体で、router.go だけを見ると別ファイルからの登録を取りこぼす。
+
+3 は「正当な理由でその形を使うことになったら、抽出をそちらへ拡張してから固定を
+解除する」という運用。**塞ぎきれてはいない** — `*echo.Group` を helper に渡して
+その中で登録する形 (`func(g *echo.Group){ g.POST(…) }(api)`) は静的には追えない。
 
 ### `TestDivergenceDoc_TableCountMatchesSchema` / `TestDivergenceDoc_ColumnCountMatchesSchema`
 

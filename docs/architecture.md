@@ -74,8 +74,14 @@ mk-go は Misskey (TypeScript/NestJS) のバックエンドを Go で書き換�
 
 upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位で実装。**upstream の 444 endpoint をすべて実装済み** (coverage 100.0%)。一次情報は `make apicompat` が生成する [api-compat.md](api-compat.md)。
 
-ルート数は `router.go` が `/api/*` に静的登録する数。実行時はこれに同梱プラグインの
-ルートが乗る。
+ルート数は `router.go` が `/api/*` に静的登録する数 (`api.POST` 466 + `api.GET` 12 +
+`api.Match(chartMethods, …)` 12 × 2 methods + catchall の `api.Any` 1 = 503)。実行時は
+これに同梱プラグインのルートが乗る。`docs/api-compat.md` の 444 + 58 = 502 に catchall を
+足した数と一致する。
+
+`/api` の外は `s.echo` へ直接登録していて、HTTP メソッドの登録が 55
+(`GET` 45 / `POST` 5 / `OPTIONS` 2 / `Any` 3)、静的配信が 8 (`Static` 4 / `File` 4)、
+`/debug/pprof` 配下が 8。**数え方で値が変わるので、引用するときは何を数えたかも書くこと。**
 
 **endpoint 群**（`server/api/endpoints/<同名>` に対応）:
 
@@ -281,7 +287,7 @@ server.New() → setupRoutes()
   ├→ Repository 生成 (userRepo, noteRepo, … 30+)
   ├→ Core サービス生成 (noteCreateService, followingService, …)
   ├→ hook 注入 (§6)
-  ├→ Handler 生成 + ルート登録 (/api/* 503 + それ以外 53。後者は設定次第で登録されないものを含む)
+  ├→ Handler 生成 + ルート登録 (§3.1)
   └→ WebSocket / 静的ファイル / middleware
 ```
 

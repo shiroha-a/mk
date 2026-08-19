@@ -285,16 +285,22 @@ id: 'aidx'
 #   ┌─────────────────────┐
 #───┘ Job queue settings └──────────────────────────────────────
 
-# Per-queue worker counts. The asynq driver has a single shared pool,
-# so deliverJobConcurrency acts as the global pool size there. The mkq
-# driver runs one pool per queue and treats each key as that queue's
-# own worker count; the 8 queues it does not get an explicit value for
-# fall back to hot-tuned defaults (see docs/configuration.md).
+# Per-queue worker counts. mk-go defines 8 queues (deliver / inbox /
+# relationship / webhook / push / export / maintenance / objectStorage)
+# but only these three have a knob; every queue left unset uses a
+# hot-tuned default (see docs/configuration.md).
+#
+# The asynq driver has a single shared pool, so deliverJobConcurrency
+# acts as the global pool size there and the other two are no-ops.
+# The mkq driver runs one pool per queue and treats each key as that
+# queue's own worker count.
 #deliverJobConcurrency: 128
 #inboxJobConcurrency: 16
 #relationshipJobConcurrency: 16
 
-# Job rate limiter (asynq driver only — mkq schedules per-queue)
+# Job rate limiter. Honoured by both drivers, but differently: asynq
+# waits inside the handler (a throttled queue can starve the shared
+# pool), mkq applies it at the worker pull layer. See docs/configuration.md.
 #deliverJobPerSec: 128
 #inboxJobPerSec: 32
 #relationshipJobPerSec: 64

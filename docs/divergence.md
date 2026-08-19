@@ -238,10 +238,21 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 |---|---|
 | `notifications` | **mk-go 独自**。upstream の 18 チャンネルに無い (upstream は `main` に通知を流す) ので mk-go は 19。通知だけを購読したいクライアント向け。**これに依存するクライアントは Misskey TS では動かない**ので、drop-in で戻す可能性があるなら `main` を使うこと |
 
-upstream の 18 チャンネル (`admin` / `antenna` / `channel` / `chat-room` / `chat-user` /
-`drive` / `global-timeline` / `hashtag` / `home-timeline` / `hybrid-timeline` /
-`local-timeline` / `main` / `queue-stats` / `reversi` / `reversi-game` / `role-timeline` /
-`server-stats` / `user-list`) は**すべて実装済み**で、名前も upstream に揃えてある。
+upstream の 18 チャンネルは**すべて実装済み**で、名前も upstream に揃えてある。
+以下は wire 上のチャンネル名 (`connect` の `channel` に渡す値 = upstream の `chName`)。
+**ソースのファイル名は kebab-case だが、チャンネル名は camelCase** なので取り違えないこと
+(`chat-room.ts` の `chName` は `chatRoom`)。
+
+```text
+admin antenna channel chatRoom chatUser drive globalTimeline hashtag
+homeTimeline hybridTimeline localTimeline main queueStats reversi
+reversiGame roleTimeline serverStats userList
+```
+
+この一覧と上の表の合計が `internal/server/router.go` の `streamRegistry` 登録名と
+一致することは `TestDivergenceDoc_StreamChannelsMatchRegistry` が固定する。
+
+---
 
 ## 4-2. fork frontend の独自変更
 
@@ -500,7 +511,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
   - `TestMigrationSeed_CoversUpstream` — TypeORM `migrations` テーブルの seed 漏れ (TS 復帰時の再実行)
   - `TestMigrationIdempotency_RequiresIfExists` — DDL の `IF [NOT] EXISTS` 漏れ (drop-in で migration が dirty 停止)
   - `TestIndexNaming_NoNewUpstreamDuplicates` — upstream と同内容の index を別名で追加 (TS 製 DB で二重化)
-- **本ドキュメントの件数**: `TestDivergenceDoc_*` 5 件が CI で強制する。別途 `TestAPICompatDoc_MatchesRouter` が §1-1 の突き合わせ先 (`docs/api-compat.md`) を router.go と照合し、**錨が腐らないこと**を担保する。
+- **本ドキュメントの件数**: `TestDivergenceDoc_*` 6 件が CI で強制する (§1-1 の内部整合と生成物との突き合わせ、§2-1 / §2-2 の実 schema との突き合わせ、§4-1 の streaming チャンネル、§4-2 の fork tag)。別途 `TestAPICompatDoc_MatchesRouter` が §1-1 の突き合わせ先 (`docs/api-compat.md`) を router.go と照合し、**錨が腐らないこと**を担保する。
   - §1-1 は (a) 見出し・表・サマリの内部整合と、(b) **`docs/api-compat.md` (= `make apicompat` の生成物) との突き合わせ**。(a) だけでは 3 箇所が揃って同じだけ間違っている状態を通す (実際に §1-1 は 53 と言い続け、生成物は 58 だった、#2640)
   - §2-1 / §2-2 は**実 schema (migration + `golden_upstream_columns.json`) との突き合わせ**。件数だけでなく行の有無も見るので、テーブル・カラムを足して表を更新し忘れると落ちる (#2634)
   - §4-2 の fork frontend tag は冒頭サマリの件数・範囲・連番と突き合わせる。**submodule 側が進んだことは検出できない** (`test-shards` job は submodule を checkout しないため)。サマリと表を両方据え置くとすり抜ける
