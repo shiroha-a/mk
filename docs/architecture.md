@@ -70,9 +70,12 @@ mk-go は Misskey (TypeScript/NestJS) のバックエンドを Go で書き換�
 
 ## 3. レイヤ詳細
 
-### 3.1 `internal/api/` — HTTP ハンドラ（≈50 パッケージ / 459 ルート）
+### 3.1 `internal/api/` — HTTP ハンドラ（52 パッケージ / 503 ルート）
 
-upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位で実装。upstream 439 endpoint の **ほぼ全て（charts 含む）を実装**。
+upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位で実装。**upstream の 444 endpoint をすべて実装済み** (coverage 100.0%)。一次情報は `make apicompat` が生成する [api-compat.md](api-compat.md)。
+
+ルート数は `router.go` が `/api/*` に静的登録する数。実行時はこれに同梱プラグインの
+ルートが乗る。
 
 **endpoint 群**（`server/api/endpoints/<同名>` に対応）:
 
@@ -90,7 +93,7 @@ upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位�
 | `gallery` `pages` `flash` | ギャラリー / ページ / Play (AiScript) |
 | `emojis` `hashtags` `federation` | カスタム絵文字 / ハッシュタグ / 連合情報 |
 | `auth` `oauth` `signin` `signup` `resetpassword` | MiAuth / OAuth2 / ログイン (TOTP/passkey/captcha) / 登録 |
-| `app` `webhooks` `invite` `abuse` `meta` | アプリ / Webhook / 招待 / 通報 / meta |
+| `app` `webhooks` `invite` `meta` | アプリ / Webhook / 招待 / meta (通報は `users` と `admin` に分かれて入る) |
 | `reversi` `chat` `bubblegame` | リバーシ / チャット / バブルゲーム（§9 参照） |
 | `ap` | `ap/show`, `ap/get` — リモート AP オブジェクト解決 |
 | `charts` | `charts/*` — 12 chart engine（別登録、`buildChartBundle`） |
@@ -115,7 +118,7 @@ upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位�
 | `optional` | JSON の null/absent を区別する Nullable 型 |
 | `notehide` | per-viewer の hideNote ゲートを全 REST に一律適用（TS は各 pack 内 `hideNote`） |
 | `userrelation` | viewer 視点の relation block (isFollowing 等) 解決 |
-| `middleware` | 認証 / rate limit / WWW-Authenticate / Cache-Control |
+| `middleware` (**`internal/server/middleware`**。`internal/api/` 配下ではない) | 認証 / rate limit / WWW-Authenticate / Cache-Control |
 
 ### 3.2 `internal/core/` — ビジネスロジック（≈50 パッケージ）
 
@@ -175,7 +178,7 @@ upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位�
 | `note_field_resolver.go` | （pack 内の field 解決を batch 化した mk-go 集約） |
 | `emoji_resolver.go` / `instance_resolver.go` / `mediaurl.go` | 絵文字/instance/メディア URL の解決ヘルパー |
 
-### 3.4 `internal/repository/` — データアクセス（74 ファイル）
+### 3.4 `internal/repository/` — データアクセス（79 ファイル）
 
 エンティティ毎に `interface + GORM 実装 + コンストラクタ`。**Misskey-TS には明示層が無く**、各サービスが TypeORM repository を直接注入する。mk-go は mock 注入で単体テストを成立させるためにこの層を設けている。
 
@@ -192,7 +195,7 @@ func NewNoteRepository(db *gorm.DB) NoteRepository { return &noteRepository{db: 
 
 可視性の SQL push-down（`applyViewerVisibility`）は upstream `QueryService.generateVisibilityQuery` に対応。
 
-### 3.5 `internal/model/` — DB モデル（61 ファイル）
+### 3.5 `internal/model/` — DB モデル（66 ファイル）
 
 Misskey-TS の `models/`（TypeORM entity）とテーブル 1:1 対応の GORM 構造体。列名・型・default を upstream に合わせる。enum・jsonb の扱いも互換。
 
@@ -278,7 +281,7 @@ server.New() → setupRoutes()
   ├→ Repository 生成 (userRepo, noteRepo, … 30+)
   ├→ Core サービス生成 (noteCreateService, followingService, …)
   ├→ hook 注入 (§6)
-  ├→ Handler 生成 + ルート登録 (459)
+  ├→ Handler 生成 + ルート登録 (/api/* 503 + それ以外 52)
   └→ WebSocket / 静的ファイル / middleware
 ```
 

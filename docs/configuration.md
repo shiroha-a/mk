@@ -29,7 +29,7 @@ cp .config/docker.yml.example .config/docker.yml
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
 | `url` | string | (必須) | サーバーの公開URL (例: `https://misskey.example.com`) |
-| `port` | int | `3000` | HTTPポート |
+| `port` | int | - | HTTPポート。**既定値は無い** (`SetDefault` していないので未指定だと `:0` を listen し、OS が空きポートを割り当てる)。`socket` を使うときを除いて必ず指定する |
 | `socket` | string | - | UNIXドメインソケットパス (設定するとTCPの代わりにUDSでリッスン) |
 | `chmodSocket` | string | - | UDSファイルのパーミッション (例: `"770"`) |
 | `id` | string | `"aidx"` | IDジェネレータ (`aidx`, `aid`, `meid`, `ulid`, `objectid`) |
@@ -55,7 +55,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `db.db` | string | `"misskey"` | データベース名 |
 | `db.user` | string | `"misskey"` | ユーザー名 |
 | `db.pass` | string | - | パスワード |
-| `db.disableCache` | bool | `false` | GORMのキャッシュ無効化 |
+| `db.disableCache` | bool | `false` | **no-op**。Misskey YAML 互換のために受け付けるだけで、どこからも読んでいない |
 | `db.extra.ssl` | bool | `false` | SSL接続 |
 
 `dbReplications: true`とすると`dbSlaves`設定でリードレプリカを使用可能。
@@ -106,7 +106,7 @@ cp .config/docker.yml.example .config/docker.yml
 
 > **driver 間の差分**:
 > - `asynq` driver は worker pool が共有なので `deliverJobConcurrency` は **総 concurrency** として扱われる。queue 間の priority weight は全 queue 静的 1 で固定 (deliver / inbox / push / export / webhook / maintenance すべて equal-weight)。
-> - `mkq` driver は queue ごとに worker を分けているので `deliverJobConcurrency` / `inboxJobConcurrency` はそれぞれの queue 専用 worker 数として扱われる。明示指定の無い queue は hot queue 優先の per-queue 既定値 (inbox=16 / deliver=16 / webhook=4 / push=4 / export=2 / maintenance=2) を使う。旧来の `総budget / len(queues)` 均等割りだと inbox が starve していた (#1374) ため hot-tuned default に変更。worker 数 ≒ Redis 接続数 (worker 毎に BZPopMin で接続を保持) なので、`redisForJobQueue.poolSize` 未設定時は mkq driver が worker 総数 + 余裕に自動サイジングする (`<queue>JobConcurrency` を上げると pool も追従)。明示設定した場合はその値が尊重される。
+> - `mkq` driver は queue ごとに worker を分けているので `deliverJobConcurrency` / `inboxJobConcurrency` / `relationshipJobConcurrency` はそれぞれの queue 専用 worker 数として扱われる。明示指定の無い queue は hot queue 優先の per-queue 既定値 (inbox=16 / deliver=16 / relationship=4 / objectStorage=4 / webhook=4 / push=4 / export=2 / maintenance=2) を使う。旧来の `総budget / len(queues)` 均等割りだと inbox が starve していた (#1374) ため hot-tuned default に変更。worker 数 ≒ Redis 接続数 (worker 毎に BZPopMin で接続を保持) なので、`redisForJobQueue.poolSize` 未設定時は mkq driver が worker 総数 + 余裕に自動サイジングする (`<queue>JobConcurrency` を上げると pool も追従)。明示設定した場合はその値が尊重される。
 > - **per-queue concurrency tuning は `mkq` driver でしか効かない**。asynq で inbox / deliver を独立に絞りたい場合は `mkq` 推奨。
 >
 > **rate limit (`*JobPerSec`) の挙動差**:
@@ -161,7 +161,7 @@ cp .config/docker.yml.example .config/docker.yml
 
 provider 別の挙動:
 
-- `sqlLike` (デフォルト) — `text ILIKE '%q%'` で全文検索する。追加の DB 拡張は不要だが、note 行数が増えると線形スキャンになるため大規模インスタンスでは遅くなる。
+- `sqlLike` (デフォルト) — `lower(text) LIKE '%q%'` で部分一致検索する。**ILIKE ではない** — pg_bigm の GIN index (`gin (lower(text) gin_bigm_ops)`) は LIKE しか加速せず、ILIKE だと拡張を入れても index が効かないため。追加の DB 拡張は不要だが、index が無ければ note 行数に対して線形スキャンになる。
 - `sqlPgroonga` — PGroonga の `&@~` 演算子で全文検索する。日本語を含む高速な転置 index 検索が利用可能。**事前に PostgreSQL 側で pgroonga 拡張のインストールと note.text への index 作成が必要** (下記)。
 - `meilisearch` — 別プロセスの Meilisearch にノートを index する。`meilisearch.host` 必須。未設定時は自動的に `sqlLike` にフォールバックする。
 
@@ -183,9 +183,15 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
-| `perChannelMaxNoteCacheCount` | int | `1000` | チャンネルあたりのノートキャッシュ上限 |
-| `perUserNotificationsMaxCount` | int | `500` | ユーザーあたりの通知キャッシュ上限 |
-| `deactivateAntennaThreshold` | int | - | アンテナ非活性化の閾値 |
+| `deactivateAntennaThreshold` | int | `604800000` (7 日) | この期間アクセスの無いアンテナを非活性化する閾値 (ミリ秒)。`clean` ジョブが使う |
+
+以下の 2 つは **no-op**。Misskey YAML 互換のために受け付けて既定値も持つが、
+`internal/config` の外から読まれていない。
+
+| キー | 型 | デフォルト |
+|---|---|---|
+| `perChannelMaxNoteCacheCount` | int | `1000` |
+| `perUserNotificationsMaxCount` | int | `500` |
 
 ### ロギング
 
@@ -224,6 +230,15 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | `MK_QUEUEIDLEPOLLSECONDS` | `queueIdlePollSeconds` |
 
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
+
+**上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **86 キー**を
+登録している (`redisForPubsub.*` / `redisForJobQueue.*` / `redisForTimelines.*` /
+`redisForReactions.*` / `meilisearch.*` / `sentry.*` / queue の各 concurrency など)。
+全量はその関数を見ること。Viper は**登録済みのキーにしか環境変数を適用しない**ので、
+ここに無いキーを `MK_` で上書きしたい場合は `bindEnvKeys()` への追加が要る。
+
+**`MK_*` は設定ファイルより優先される。** 手元で export したまま
+`internal/config` のテストを走らせると、ファイルの値を期待するケースが落ちる。
 
 新しいオーバーライド対象を追加する場合は`internal/config/config.go`の`bindEnvKeys()`にキーを追加する。
 

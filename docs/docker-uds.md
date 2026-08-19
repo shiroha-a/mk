@@ -12,7 +12,7 @@ Phase 12-1 で入った UNIX domain socket (UDS) 対応を使って、mk-go の�
 ## 前提条件
 
 - Docker と docker compose v2
-- `third_party/misskey` サブモジュールの初期化 (tag `2026.7.0-mk.10` が pin されています)
+- `third_party/misskey` サブモジュールの初期化 (**tag はスーパープロジェクトが pin しています**。実際に何が pin されているかは `git -C third_party/misskey describe --tags`)
 - host 側のインストールは不要です。フロントエンドのビルドも docker 経由で行います。
 
 ```sh
@@ -33,7 +33,7 @@ make uds-init
 
 ### 1. 本家フロントエンドのビルド
 
-初回のみ、本家 Misskey の vite ビルドを行います (3〜10 分)。`make uds-frontend-build` は既存の `e2e-frontend-build` と同一のターゲットで、`node:20-bookworm` コンテナの中で `pnpm install --frozen-lockfile && pnpm build` を走らせます。
+初回のみ、本家 Misskey の vite ビルドを行います (3〜10 分)。`make uds-frontend-build` は既存の `e2e-frontend-build` と同一のターゲットで、`node:22-bookworm` コンテナの中で `pnpm install --frozen-lockfile && pnpm build` を走らせます。
 
 ```sh
 make uds-frontend-build
@@ -126,7 +126,7 @@ git submodule update --init --recursive third_party/misskey
 make uds-frontend-build
 ```
 
-submodule のチェックアウト先 (tag `2026.7.0-mk.10`) は本リポジトリで pin 済みです。
+submodule のチェックアウト先は本リポジトリで pin 済みです (現在の値は `git -C third_party/misskey describe --tags` で確認できます。**doc に版を書くと bump のたびに腐る**ので書きません)。
 
 ### `third_party/misskey/built` が無い
 
@@ -147,17 +147,17 @@ docker compose -f compose.uds.yaml logs mkgo | tail -50  # mkgo だけ、過去�
 
 対応:
 
-- スキーマが壊れている場合は手動で `psql` で問題を解消する (`./built/migrate -direction down -steps 1` で直前の migration を巻き戻し、修正後に `up` し直す)
+- スキーマが壊れている場合は手動で `psql` で問題を解消する (`go run ./cmd/migrate -direction down -steps 1` で直前の migration を巻き戻し、修正後に `up` し直す。**`./built/migrate` というバイナリは無い** — `make build` が作るのは `./built/misskey` だけ)
 - volume 自体がおかしい場合は `make uds-down-v` で named volume を消して綺麗な状態から再構築する (**DB データは全部消える**ので注意)
-- 開発中の migration 自体に問題があれば、まず `go run ./cmd/migrate -direction down -steps 1` で 1 段戻してから修正する
+- **`-steps` を省略すると全段 down する** (schema が消える)。1 段だけ戻したいときは必ず `-steps 1` を付ける
 
 ### `/healthz` が 404 になる
 
-mk-go 側の実装変更で `/healthz` のパスが変わっている可能性があります。`internal/server/router.go` を grep して、存在するパスに `deploy/uds/Dockerfile.mkgo` の curl 先を合わせてください。
+mk-go 側の実装変更で `/healthz` のパスが変わっている可能性があります。`internal/server/router.go` を grep して、存在するパスに合わせてください。**healthcheck を定義しているのは `compose.uds.yaml` の mkgo service** で、`deploy/uds/Dockerfile.mkgo` には `HEALTHCHECK` 命令はありません (Dockerfile がやっているのは curl の同梱だけ)。
 
 ### nginx が `connect() to unix:/run/mkgo/mkgo.sock failed (13: Permission denied)`
 
-`chmodSocket: "666"` が正しく反映されていません。`deploy/uds/config/default.yml` を確認し、mk-go 側のログ `[server] listening on unix:` が `mode=0666` になっているか見てください。
+`chmodSocket: "666"` が正しく反映されていません。`deploy/uds/config/default.yml` を確認してください。mk-go の起動ログは `starting Misskey server socket=<path> url=<url>` の形 (`[server] listening on unix:` という行は出ません)。実際のパーミッションは `ls -l` で直接見るのが確実です。
 
 ### valkey が `Creating Server TCP listening socket *:6379: bind` で起動しない
 

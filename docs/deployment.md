@@ -175,6 +175,8 @@ gh workflow run docker.yml -f tag=1.1.0
 
 - `MISSKEY_FRONTEND_DIR` — viteビルド出力
 - `MISSKEY_FRONTEND_DIST_DIR` — dist出力 (locales, fonts)
+- `MISSKEY_FRONTEND_EMBED_DIR` — embed 用の vite 出力。**既定は `MISSKEY_FRONTEND_DIR` の sibling として解決される**ので通常は不要。既定から外れた配置のときだけ指定する (指定を忘れると dev server proxy に落ちて 502 になる)
+- `MISSKEY_SW_DIST_DIR` — service worker の出力。既定値の解決は embed と同じ
 - `MISSKEY_TWEMOJI_DIR` — twemoji SVG
 - `MISSKEY_FLUENT_EMOJI_DIR` — fluent-emoji (実績バッジ / 通知アイコン)
 - `MISSKEY_CLIENT_ASSETS_DIR` — クライアントアセット

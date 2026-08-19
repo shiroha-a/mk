@@ -238,7 +238,7 @@ func (d *Driver) Client() driver.Client {
 // 保持し、worker.go が "recommended pool = concurrency + 8" を warn する) なので、
 // 接続数を抑えるため deliver は upstream の 128 ではなく 16 に留める (outbound
 // bench で 2 worker でも BullMQ の 6.6x スループットがあり Go 側は余力十分)。
-// 合計 16+16+4+4+4+2+2 = 48 worker。worker Redis pool は New() が
+// 合計 16+16+4+4+4+4+2+2 = 52 worker。worker Redis pool は New() が
 // workerPoolSize() で自動的にこの合計 + poolHeadroom に合わせる。operator は
 // <queue>JobConcurrency でいつでも上書きできる (pool も追従する)。
 var defaultQueueConcurrency = map[string]int{

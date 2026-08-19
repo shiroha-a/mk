@@ -2,7 +2,7 @@
 
 Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](https://github.com/misskey-dev/misskey)と同一のDB・Redis・フロントエンドを共有し、バックエンドを差し替えられる。
 
-互換バージョン: **Misskey 2026.7.0** (mk-go `1.1.1`)
+互換バージョン: **Misskey 2026.7.0** (mk-go `1.2.1`)
 
 ## 特徴
 
@@ -65,7 +65,7 @@ cp .config/docker.yml.example .config/docker.yml
 # .config/docker.yml の url を実際のアドレスに変更する
 ```
 
-`url` は必須項目で、既定値は `https://example.tld/` のまま。編集したら `docker-compose.yml` の **`app` と `migrate` の両方**にある volumes のコメントを外す。
+`url` は必須項目。`.config/docker.yml.example` の既定値は `http://localhost:3000` なので、そのままでは連合できない (`https://example.tld/` は `default.yml.example` 側の値)。編集したら `docker-compose.yml` の **`app` と `migrate` の両方**にある volumes のコメントを外す。
 
 ```yaml
 - ./.config/docker.yml:/app/.config/default.yml:ro
@@ -165,6 +165,7 @@ go test -race -count=1 -timeout 10m \
 | [設定リファレンス](docs/configuration.md) | 全設定項目、環境変数オーバーライド |
 | [開発ガイド](docs/development.md) | 環境セットアップ、コーディング規約、CI |
 | [テスト](docs/testing.md) | テスト戦略、カバレッジ目標、testcontainers |
+| [CI で回る項目](docs/ci.md) | どの check が何を見ていて、落ちたとき何を疑うか |
 | [ActivityPub連合](docs/federation.md) | AP実装、HTTP Signatures、配信パイプライン |
 | [デプロイ](docs/deployment.md) | Docker/Compose/systemd、逆プロキシ |
 | [コントリビューション](docs/contributing.md) | Issue/PR運用、レビュー基準 |
@@ -174,9 +175,12 @@ go test -race -count=1 -timeout 10m \
 | [Drop-in frontend e2e (cypress)](docs/dropin-frontend-e2e.md) | 3 TS instance + cypress で frontend 視点の互換 |
 | [差分比較ハーネス](docs/diff-e2e.md) | mk-go と TS の実APIレスポンスを値レベルでdiff |
 | [シェイプドリフト検出](docs/shape-drift.md) | レスポンス形状・エラーID・権限のドリフトを検出する静的ゲート |
+| [本家 backend e2e](docs/upstream-backend-e2e.md) | Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて実行する |
+| [プラグイン](docs/plugins/) | ビルド時組み込みプラグインの書き方・運用 |
 | [UDSデプロイ](docs/docker-uds.md) | UNIXドメインソケット構成 |
 | [queue-bench](docs/queue-bench.md) | BullMQ / asynq / mkq の 3-way 比較 (#563) |
 | [ベンチプロファイリング](docs/bench-pprof.md) | k6負荷時のpprof取得と解析 |
+| [メディアプロキシの govips 評価](docs/mediaproxy-govips-evaluation.md) | 画像変換ライブラリの比較検討 |
 | [upstream追従手順](docs/upstream-catch-up.md) | Misskey TSの新リリース取り込みとsubmodule bump |
 | [設計メモ](docs/design/) | オートスケール、inbox verify、mkq等の設計判断 |
 | [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.7.0 の backend 差分 (`yyyymmdd*` 命名) |
