@@ -441,10 +441,16 @@ wire 上の名前 (`chName`) は `chatRoom`。#2640 の初稿はファイル名�
 「チャンネル名も upstream に揃えてある」として並べており、**18 件中 11 件が実在
 しない名前**だった。人が目で照合すると通る類の誤り。
 
-upstream 側の一覧は submodule を要するので参照できないが、mk-go は upstream の 18 を
-すべて同名で実装しているので、**router.go の登録名と突き合わせれば doc の主張は
-全部検証できる**。doc 側は §4-1 の表 (mk-go 独自) と ```text フェンス (upstream 由来)
-の和を母集団にする。
+doc 側は §4-1 の表 (mk-go 独自) と ```text フェンス (upstream 由来) の和を母集団に、
+実装側は `internal/server/` 非テスト `.go` 全体の `streamRegistry.Register*` を見る。
+呼び出しの総数と抽出できた数が一致することも見る (名前が定数経由だったり英字以外を
+含むと registry から丸ごと消えるため)。
+
+**固定できるのは「doc の一覧 == mk-go の登録」だけ。** §4-1 のもう半分の主張
+「upstream は 18」「名前も upstream に揃えてある」は検証していない — `test-shards`
+job は submodule を checkout しないため。doc と実装を同時に間違った名前へ変えれば
+この gate は通る。upstream が 19 個目を足した / 名前を変えた場合も検出できないので、
+**submodule bump の PR で人が見る**。
 
 ### `TestAPICompatDoc_MatchesRouter`
 
@@ -479,8 +485,11 @@ route dump には stack が要るのでテストからは呼べない。代わ�
 非テスト `.go` 全体で、router.go だけを見ると別ファイルからの登録を取りこぼす。
 
 3 は「正当な理由でその形を使うことになったら、抽出をそちらへ拡張してから固定を
-解除する」という運用。**塞ぎきれてはいない** — `*echo.Group` を helper に渡して
-その中で登録する形 (`func(g *echo.Group){ g.POST(…) }(api)`) は静的には追えない。
+解除する」という運用。`Static` / `File` / `RouteNotFound` も対象に含める
+(`echo.File` はそのパスに GET を 1 本生やす)。
+
+**塞ぎきれてはいない** — `*echo.Group` を helper に渡してその中で登録する形
+(`func(g *echo.Group){ g.POST(…) }(api)`) は静的には追えない。
 
 ### `TestDivergenceDoc_TableCountMatchesSchema` / `TestDivergenceDoc_ColumnCountMatchesSchema`
 

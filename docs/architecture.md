@@ -79,9 +79,14 @@ upstream `server/api/endpoints/` の endpoint 群を、ディレクトリ単位�
 これに同梱プラグインのルートが乗る。`docs/api-compat.md` の 444 + 58 = 502 に catchall を
 足した数と一致する。
 
-`/api` の外は `s.echo` へ直接登録していて、HTTP メソッドの登録が 55
-(`GET` 45 / `POST` 5 / `OPTIONS` 2 / `Any` 3)、静的配信が 8 (`Static` 4 / `File` 4)、
-`/debug/pprof` 配下が 8。**数え方で値が変わるので、引用するときは何を数えたかも書くこと。**
+`/api` の外は `s.echo` へ直接登録していて、**呼び出し**の数は 55
+(`GET` 45 / `POST` 5 / `OPTIONS` 2 / `Any` 3)。`Any` は 1 呼び出しで全メソッドを
+登録するので、ルート単位に展開すると増える。ほかに静的配信が 8 (`Static` 4 /
+`File` 4)、`/debug/pprof` 配下が 8。
+
+**このうち Static / File / pprof は `if` の中**で、設定次第では登録されない。
+
+**数え方で値が変わるので、引用するときは何を数えたかも書くこと。**
 
 **endpoint 群**（`server/api/endpoints/<同名>` に対応）:
 

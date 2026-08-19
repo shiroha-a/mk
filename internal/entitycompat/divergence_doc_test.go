@@ -609,34 +609,10 @@ func TestAPICompatDoc_MatchesRouter(t *testing.T) {
 		doc[m[1]+" "+strings.TrimPrefix(m[2], "/api")] = true
 	}
 
-	// **package 全体を読む。** router.go だけを見ると別ファイルからの登録を
-	// 取りこぼす。実際 plugin_wiring.go は `api.Group(...)` で `/api` 配下を
-	// 生やしており、同じ形が今後 router.go の外に増えうる。
-	files, err := filepath.Glob(filepath.Join("..", "..", "internal", "server", "*.go"))
+	joined, err := serverPackageSource()
 	if err != nil {
-		t.Fatalf("glob internal/server/*.go: %v", err)
+		t.Fatalf("read internal/server/*.go: %v", err)
 	}
-	var body []string
-	read := 0
-	for _, f := range files {
-		if strings.HasSuffix(f, "_test.go") {
-			continue
-		}
-		src, err := os.ReadFile(f)
-		if err != nil {
-			t.Fatalf("read %s: %v", f, err)
-		}
-		read++
-		for _, line := range strings.Split(string(src), "\n") {
-			if !strings.HasPrefix(strings.TrimSpace(line), "//") {
-				body = append(body, line)
-			}
-		}
-	}
-	if read == 0 {
-		t.Fatal("internal/server/*.go を 1 ファイルも読めない")
-	}
-	joined := strings.Join(body, "\n")
 	router := map[string]bool{}
 	for _, m := range routerPostRe.FindAllStringSubmatch(joined, -1) {
 		router["POST "+m[1]] = true
@@ -707,7 +683,7 @@ func TestAPICompatDoc_MatchesRouter(t *testing.T) {
 			"メソッドを文字列で渡す登録は api.<METHOD>( に一致しない"},
 		{"api.Any(", regexp.MustCompile(`\bapi\.Any\(`), 1,
 			"catchall (\"/*\") 1 件だけを想定している。増えたら実 endpoint かを確認する"},
-		{`s.echo.<METHOD>("/api`, regexp.MustCompile(`\bs\.echo\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT|TRACE|Any|Match|Add)\("/api(/|")`), 0,
+		{`s.echo.<METHOD>("/api`, regexp.MustCompile(`\bs\.echo\.(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS|CONNECT|TRACE|Any|Match|Add|Static|File|RouteNotFound)\("/api(/|")`), 0,
 			"group を通さず /api 配下へ直接登録すると、このテストから見えない"},
 	} {
 		if n := len(g.re.FindAllString(joined, -1)); n != g.want {
@@ -751,8 +727,44 @@ func diffKeys(a, b map[string]bool) []string {
 }
 
 // streamRegistryRe matches `streamRegistry.Register("name", …)` and its
-// Credentialed variant in router.go.
-var streamRegistryRe = regexp.MustCompile(`\bstreamRegistry\.Register(?:Credentialed)?\("([a-zA-Z]+)"`)
+// Credentialed variant. streamRegistryCallRe counts the calls so a name the
+// strict form cannot read is detected instead of silently dropped.
+var (
+	streamRegistryRe     = regexp.MustCompile(`\bstreamRegistry\.Register(?:Credentialed)?\("([a-zA-Z]+)"`)
+	streamRegistryCallRe = regexp.MustCompile(`\bstreamRegistry\.Register(?:Credentialed)?\(`)
+)
+
+// serverPackageSource concatenates internal/server's non-test sources with
+// line comments removed. **package 全体を読む** — router.go だけを見ると別
+// ファイルからの登録を取りこぼす。実際 plugin_wiring.go は `api.Group(...)` で
+// `/api` 配下を生やしている。
+func serverPackageSource() (string, error) {
+	files, err := filepath.Glob(filepath.Join("..", "..", "internal", "server", "*.go"))
+	if err != nil {
+		return "", err
+	}
+	var body []string
+	read := 0
+	for _, f := range files {
+		if strings.HasSuffix(f, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(f)
+		if err != nil {
+			return "", err
+		}
+		read++
+		for _, line := range strings.Split(string(src), "\n") {
+			if !strings.HasPrefix(strings.TrimSpace(line), "//") {
+				body = append(body, line)
+			}
+		}
+	}
+	if read == 0 {
+		return "", fmt.Errorf("internal/server/*.go を 1 ファイルも読めない")
+	}
+	return strings.Join(body, "\n"), nil
+}
 
 // docChannelRowRe matches a §4-1 table row `| `notifications` | … |`.
 var docChannelRowRe = regexp.MustCompile("^\\| `([a-zA-Z]+)` \\|")
@@ -769,28 +781,49 @@ var docChannelRowRe = regexp.MustCompile("^\\| `([a-zA-Z]+)` \\|")
 // checkout しない)。ただし mk-go は upstream の 18 をすべて同名で実装している
 // ので、**router.go の登録名と突き合わせれば doc の主張は全部検証できる**。
 func TestDivergenceDoc_StreamChannelsMatchRegistry(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "..", "internal", "server", "router.go"))
+	// 走査は `TestAPICompatDoc_MatchesRouter` と揃えて package 全体。router.go
+	// だけを見ると別ファイルからの登録を取りこぼす。
+	joined, err := serverPackageSource()
 	if err != nil {
-		t.Fatalf("read internal/server/router.go: %v", err)
+		t.Fatalf("read internal/server/*.go: %v", err)
 	}
 	registry := map[string]bool{}
-	for _, m := range streamRegistryRe.FindAllStringSubmatch(string(src), -1) {
+	for _, m := range streamRegistryRe.FindAllStringSubmatch(joined, -1) {
 		registry[m[1]] = true
 	}
 	if len(registry) == 0 {
-		t.Fatal("router.go から streamRegistry.Register(...) を 1 件も読めない (登録の書き方が変わった?)")
+		t.Fatal("internal/server から streamRegistry.Register(...) を 1 件も読めない (登録の書き方が変わった?)")
+	}
+	// **抽出の取りこぼしを検出する。** 名前が定数 / 変数経由だったり、`[a-zA-Z]+`
+	// に収まらない文字 (数字・`_`・`-`) を含むと registry から丸ごと消え、doc に
+	// 書かなくても通ってしまう。
+	if got, matched := len(streamRegistryCallRe.FindAllString(joined, -1)),
+		len(streamRegistryRe.FindAllStringSubmatch(joined, -1)); got != matched {
+		t.Fatalf(`streamRegistry.Register(...) は %d 件あるが、名前を抽出できたのは %d 件。
+
+**取りこぼした分だけ gate が緩くなる。** 名前が literal でない (定数 / 変数経由) か、
+英字以外の文字 (数字・アンダースコア・ハイフン) を含む可能性がある。このテストの
+正規表現を実態に合わせること。`, got, matched)
 	}
 
 	lines := readDivergenceDoc(t)
 	start, _ := findDivergenceHeading(t, lines, "4-1")
+	// **収集するのは ```text フェンスだけ。** 無条件にトグルすると、§4-1 に
+	// `connect` の JSON 例を足しただけで `{` や `"type":` をチャンネル名として
+	// 拾い、診断が意味不明になる。
 	doc := map[string]bool{}
-	inFence := false
+	inFence, collect := false, false
 	for _, line := range sectionLines(lines, start) {
 		if strings.HasPrefix(line, "```") {
-			inFence = !inFence
+			if inFence {
+				inFence, collect = false, false
+			} else {
+				inFence = true
+				collect = strings.TrimSpace(line) == "```text"
+			}
 			continue
 		}
-		if inFence {
+		if collect {
 			for _, f := range strings.Fields(line) {
 				doc[f] = true
 			}

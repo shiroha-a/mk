@@ -293,14 +293,21 @@ id: 'aidx'
 # The asynq driver has a single shared pool, so deliverJobConcurrency
 # acts as the global pool size there and the other two are no-ops.
 # The mkq driver runs one pool per queue and treats each key as that
-# queue's own worker count.
+# queue's own worker count. NOTE: the sample values below are upstream
+# Misskey's, not mk-go's defaults. mk-go defaults to deliver=16,
+# inbox=16, relationship=4 (see docs/configuration.md).
 #deliverJobConcurrency: 128
 #inboxJobConcurrency: 16
 #relationshipJobConcurrency: 16
 
-# Job rate limiter. Honoured by both drivers, but differently: asynq
-# waits inside the handler (a throttled queue can starve the shared
-# pool), mkq applies it at the worker pull layer. See docs/configuration.md.
+# Job rate limiter. Honoured by both drivers, but differently.
+#
+# asynq waits inside the handler, so a throttled queue can starve the
+# shared pool. mkq applies it at the worker pull layer, PER WORKER --
+# the effective cap is <queue>JobPerSec x that queue's worker count.
+# With mkq (the default driver) and deliver's default of 16 workers,
+# "deliverJobPerSec: 128" means 2048 jobs/sec, not 128. Divide by the
+# worker count to get the value you want. See docs/configuration.md.
 #deliverJobPerSec: 128
 #inboxJobPerSec: 32
 #relationshipJobPerSec: 64

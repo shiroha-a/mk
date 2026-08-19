@@ -249,8 +249,11 @@ homeTimeline hybridTimeline localTimeline main queueStats reversi
 reversiGame roleTimeline serverStats userList
 ```
 
-この一覧と上の表の合計が `internal/server/router.go` の `streamRegistry` 登録名と
-一致することは `TestDivergenceDoc_StreamChannelsMatchRegistry` が固定する。
+この一覧と上の表の合計が `internal/server` の `streamRegistry` 登録名と一致すること
+は `TestDivergenceDoc_StreamChannelsMatchRegistry` が固定する。ただし固定できるのは
+**mk-go 側だけ**で、「upstream は 18」「名前も upstream に揃えてある」の検証は入って
+いない (`test-shards` は submodule を checkout しない)。upstream が増減した場合は
+submodule bump の PR で人が見る。
 
 ---
 

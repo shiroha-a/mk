@@ -10,9 +10,15 @@
 
 ### 1.1 operator UX の現状問題
 
-mk-go の job queue は `internal/queue/queue.go` で 7 系統の queue
-(`deliver` / `inbox` / `relationship` / `export` / `push` / `webhook` /
-`objectStorage`) を定義しており、operator は以下の knob を YAML で握る:
+mk-go の job queue は **8 系統**ある (`deliver` / `inbox` / `relationship` /
+`export` / `push` / `webhook` / `objectStorage` / `maintenance`)。名前定数は
+`internal/queue/queue.go` に 7 つ、cron 専用の `maintenance` だけ
+`internal/queue/scheduler.go` にある。
+
+**auto-scale が管理するのはこのうち 7 で、`maintenance` は対象外**
+(`autoScaledQueues()`)。以下 §3 の「7 queue」はすべて auto-scale 対象の数。
+
+operator は以下の knob を YAML で握る:
 
 ```yaml
 deliverJobConcurrency: 16      # default
@@ -388,7 +394,7 @@ operator が「いつ何が起きたか」を grep で追えること。
 `internal/queue/driver/mkqdriver/integration_test.go` に追加:
 
 - `TestServer_ResizeUp_ProcessesMoreInParallel` — Resize(8 → 16) で並列度が倍になることを確認
-- `TestServer_ResizeDown_DrainsGracefully` — Resize(16 → 4) で in-flight job が完了してから worker 終了
+- `TestServer_ResizeDown_CancelsInFlight` — Resize(16 → 4) で goroutine が leak しないことを見る。**in-flight job は完了を待たず cancel される** (next pickup で retry される前提)。ADR §7.2 の「graceful drain」はこの意味
 - `TestServer_ResizeRace` — 同時 multiple Resize 呼び出しで panic / leak しない
 
 testcontainers-go で実 Redis 起動。
