@@ -189,6 +189,12 @@ TypeORM の decorator から正規形を再現できないため **実 DB から
 同内容・別名の index があれば検出されるので、upstream 名に揃えるか
 `known_duplicate_indexes.json` に追加して `000068` の扱いを見直す (#2246)。
 
+### submodule bump 後に必須: divergence doc の件数
+
+`golden_upstream_columns.json` を撮り直すと `TestDivergenceDoc_ColumnCountMatchesSchema` が動く。**upstream が列を DROP すると、その列は「mk-go 独自カラム」に転じる**ので `docs/divergence.md` §2-2 の件数が増える (`note_favorite.createdAt` がその経緯で独自列になっている)。
+
+落ちたら doc の件数・内訳・冒頭サマリ・表の行をまとめて直す。gate は 4 箇所すべてを見るので、どれか 1 つを直し忘れると通らない (#2634)。
+
 ### submodule bump 後に必須: 比較対象の TS image を全部揃える
 
 mk-go と Misskey TS を並べて比較するハーネスは、**比較対象の image tag を

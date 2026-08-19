@@ -401,6 +401,41 @@ go test ./internal/entitycompat/ -run TestMigrationSeed   # gate をローカル
 make shapecheck-gen                                        # golden_upstream_migrations.json も再生成
 ```
 
+## divergence doc gate（差分の一次資料が実態からずれない）
+
+`docs/divergence.md` は upstream との差分の一次資料で、`diff-e2e` の ignore-list を足すときに「対応する記述があるか」を確認する運用になっている。**実態より少ない表を信じると、そこに載っていない差分を差分として認識しないまま調査が進む。**
+
+実際に 3 箇所が静かにずれていた (#2634)。#2313 で分割アップロードの endpoint 4 件を足したときに冒頭サマリだけ更新して §1-1 の内訳表を更新せず、#2332 / #2340 / `instance_secret` でも同じことが起きた。§2-2 に至っては見出しの「実使用 14」と直後の散文の「15 件」が**隣接 2 行で矛盾**していた。どれも人が数え直さない限り気付けない。
+
+### `TestDivergenceDoc_EndpointCountMatchesTable`
+
+§1-1 の見出しの件数 == 表の件数列の合計 == 冒頭サマリの和の式。
+
+upstream の endpoint 一覧は `tools/apicompat` が submodule から抽出できるが、**`test-shards` job は submodule を checkout しない** (`submodules: recursive` があるのは `frontend-check` だけ) ので、この gate が見られるのは内部整合だけ。それでも #2634 で見つかった形は捕まる。
+
+### `TestDivergenceDoc_TableCountMatchesSchema` / `TestDivergenceDoc_ColumnCountMatchesSchema`
+
+§2-1 / §2-2 の見出しの件数を**実 schema と突き合わせる**。母集団の作り方は 2 つで違う。
+
+- §2-1 は `parseMigrations` が返す `CREATE TABLE` 由来のテーブル名から、golden にあるものを引いたもの。`__chart__*` / `__chart_day__*` は upstream でも定義位置が違うだけ (`models/` ではなく `core/chart/charts/entities/`) なので、prefix で明示的に除く
+- §2-2 は **`CREATE TABLE` 本体の列を起点に、全 `ALTER` を出現順に適用した後の列**と golden の差分。`DROP COLUMN` した列は入らない。**`CREATE TABLE` 由来を除くと成立しない** — 「未使用の残存 3」(`app.createdAt` / `auth_session.createdAt` / `clip.notesCount`) はいずれも `ALTER` ではなく `CREATE TABLE` の中でだけ定義されている列で、これがそのまま `TestSchemaDrift_CreateOnlyColumns` の allowlist と対応する
+
+`ALTER TABLE` は**文単位で切ってから句を拾う**。`ADD COLUMN` を 1 文 1 句として数える正規表現だと複数句形式を取りこぼし、**独自カラムを足しても gate が落ちない**方向に倒れる。実測では `ADD COLUMN` 102 句のうち 63 句 (62%) が複数句の文 (11 文) にあり、1 文 1 句として数えると 52 句 (51%) を落としていた。
+
+**コメント・文字列リテラル・ドル引用符の中身は解析前に空白へ潰す。** 文の終端を素の `;` で決めているので、`CREATE TABLE` の本体に `);` を含むコメントや `DEFAULT 'f(x);'` が 1 つあるだけで body がそこで切れ、そのテーブルの列が母集団から丸ごと消える (= gate が黙って通る)。`ALTER` 側も同じで、途中で文が切れると 2 句目以降を落とす。**読み飛ばすのではなく空白化する**のが要点で、読み飛ばすとその範囲のコメントが素通りして幻の DDL として拾われる (`DO $$` の中に例示として `ALTER TABLE ... ADD COLUMN` を書くと、drop-in gate がそれを「ALTER で足してあるから安全」と誤認する)。
+
+既知の制約。**いずれも現行 migration に該当が 0 件**だが、踏むと母集団が過小になる (= gate が落ちない方向) ので、migration を書くときは避けること。
+
+- `RENAME COLUMN` を追跡しない
+- **`DO $$ ... $$` の中の DDL は見えない。** 中身を空白化しているため (幻の DDL を拾わないための選択で、実 DDL も一緒に見えなくなる)。`TestMigrationIdempotency_RequiresIfExists` も `DO` を含むファイルを丸ごと skip するので、**この形はどの gate にも捕まらない**。CLAUDE.md が enum 作成で `DO $$ ... EXCEPTION` を求めている都合上 `DO` 自体は日常的に書かれるので、その中で列を足さないこと
+- ネストしたブロックコメント `/* /* */ */` を 1 段しか閉じない
+- `COLUMN` を省いた `ADD "x"` と、引用符なしの識別子を拾わない
+- 同一ファイル内で `ALTER` が `CREATE TABLE` より前にある場合は `CREATE` を先に処理する (現行の 2 ファイルは対象テーブルが重ならない)
+
+件数だけでなく**行の存在**も見る。§2-2 は table と column の両方で照合する — 列名だけで探すと、`createdAt` のように複数テーブルにある名前は他の行に残っているせいで行が丸ごと消えても素通りする。
+
+**`golden_upstream_columns.json` を撮り直すとこの gate が動く。** upstream が列を DROP するとその列が「mk-go 独自」に転じて §2-2 の件数が増えるので、submodule bump の PR で落ちる (`note_favorite.createdAt` がまさにその経緯で独自列になっている)。落ちたら doc の件数と行を実態に合わせること。
+
 ## Index naming gate / migration idempotency gate（drop-in で二重化・停止しない）
 
 drop-in では mk-go の migration が **Misskey TS の作った既存 DB** にも流れる(`docs/migration-from-ts.md`)。upstream が既に作った構造と衝突しないよう、2 つの静的 gate を置いている。
