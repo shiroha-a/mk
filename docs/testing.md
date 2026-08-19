@@ -80,8 +80,6 @@ migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL
 
 **PostgreSQL と Redis で使われ方がまったく違う。**
 
-| | testcontainers | 外部サービス |
-|---|---|---|
 件数はいずれもリポジトリ全体 (`internal/` + `test/`) の実測。
 
 | | testcontainers | 外部サービス |

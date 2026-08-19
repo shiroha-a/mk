@@ -11,7 +11,7 @@ Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](ht
 - TypeScript版と同じPostgreSQL/Redisを共有、無停止で移行可能
 - ActivityPub連合対応（HTTP Signatures、リモートオブジェクト解決、配信キュー）
 - ジョブキューは `mkq` (BullMQ wire-compat、デフォルト) または `asynq`
-- Playwright e2e (370 spec) を PR ごとに実行。upstream 追従時は Misskey TS backend に対しても回して drop-in 互換を検証
+- Playwright e2e (289 spec ファイル) を PR ごとに実行。upstream 追従時は Misskey TS backend に対しても回して drop-in 互換を検証
 - `RemoteStatsFetcher` でリモートユーザーの notesCount / followersCount / followingCount を origin から取得 (mk-go 独自拡張)
 
 ## クイックスタート

@@ -38,6 +38,7 @@ Docker内でフロントエンドがビルドされ、成果物は `third_party/
 ```bash
 export MISSKEY_FRONTEND_DIR=/path/to/misskey/built/_frontend_vite_
 export MISSKEY_FRONTEND_DIST_DIR=/path/to/misskey/built/_frontend_dist_
+export MISSKEY_REPO_ASSETS_DIR=/path/to/misskey/assets
 export MISSKEY_TWEMOJI_DIR=/path/to/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji
 export MISSKEY_FLUENT_EMOJI_DIR=/path/to/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/fluent-emoji
 export MISSKEY_CLIENT_ASSETS_DIR=/path/to/misskey/packages/frontend/assets
@@ -122,22 +123,23 @@ DELETE の対象はこの残骸で、条件は
 
 `000053` / `000056` / `000067` / `000068` / `000074` / `000081` の 6 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 5 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。
 
-#### mk-go 内での切り戻しで消えるもの
+#### mk-go 内での切り戻し
 
-上の表は「TS 製 DB へ流したときに何が起きるか」の観点なので、mk-go 専用テーブルは含めていない。**`make migrate-down` を繰り返して mk-go 内で戻す場合は別の一覧になる。** down が data loss を宣言しているのは以下。新しい順に当たる。
+上の表は「TS 製 DB へ流したときに何が起きるか」の観点なので、mk-go 専用テーブルは含めていない。
 
-| migration | 失われるもの |
+**`make migrate-down` を番号をまたいで繰り返すのは、原則としてデータを失う操作。** down の大半は `DROP TABLE` / `DROP COLUMN` で up を打ち消すだけなので、その版で入った行は戻らない。`000022` まで戻せばチャット履歴が、`000025` まで戻せば下書きが、`000001` まで戻せば `user` / `note` / `drive_file` ごと消える。
+
+**`-- data loss:` の宣言を目印にしないこと。** 宣言があるのは 8 本だけで、**宣言が無いまま `DROP TABLE` / `DROP COLUMN` / `DELETE` する down が 51 本ある**。運用も一貫していない — `000076` は `meta` の設定列 1 本を落とすだけで宣言しているが、同じく `meta` の設定列を落とす `000070` は「data loss も無い」と書いている。
+
+とくに注意するもの:
+
+| migration | 内容 |
 |---|---|
-| `000079` | 確認待ちの承認済み登録と申請の紐付け |
-| `000078` | 申請フォームの定義と各申請の回答 (**up 側でも `signup_application."reason"` を DROP する**) |
-| `000077` | クレームコードで作られた申請 (**up も down も無条件に `DELETE FROM "signup_application";`**) |
-| `000076` | 承認制の有効/無効の設定 |
-| `000075` | 審査中・承認済みの申請すべて |
-| `000073` | 蓄積した署名方式の観測履歴 |
-| `000072` | 生成済みの `instance_secret`。**media proxy の HMAC 鍵なので、消すと発行済みの proxy URL が全滅する** |
-| `000069` | 進行中の分割アップロードセッション |
+| `000077` / `000078` | **up も down も無条件に `DELETE FROM "signup_application";` を実行する。** up 方向でも申請が消える |
+| `000072` | `instance_secret` を DROP。media proxy の HMAC 鍵なので発行済みの署名付き URL は検証に失敗するが、`Authorize` は allowlist へフォールバックするので avatar / drive / emoji / instance icon の配信は続く。鍵は次回起動時に再生成される |
+| `000074` | backfill で入れた行と実観測で入った行を区別できないので、`instance_signature_capability` の内容は適用前に戻せない |
 
-各 migration の `.down.sql` 冒頭に `-- data loss:` として理由が書いてある。
+戻す前にバックアップを取ること。
 
 両バックエンドは同じデータベース上で共存できる。
 
@@ -159,7 +161,7 @@ docker compose stop web
 ./built/misskey -config .config/default.yml
 ```
 
-方法Bで環境変数を使う場合は `source .env` してから起動する。
+方法Bで環境変数を使う場合は、**`source .env` では効かない** (`.env` に `export` が無いのでシェル変数にしかならず、子プロセスへ渡らない)。`set -a; . ./.env; set +a` で読み込むか、各行を `export` して起動する。
 
 ## 7. 動作確認
 
@@ -211,7 +213,7 @@ Misskey-TSに戻す場合の手順:
 
 データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
-ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 9 件は戻らない。うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。ただし戻せもしないので、`000056` / `000081` が消した行と `000053` / `000067` が上書きした値は復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
+ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 9 件は戻らない。うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。構造を復元する down を持つのは `000029` / `000036` / `000064` / `000080` の 4 本で、残る 5 本は down が no-op。`000056` / `000081` が消した行と `000053` / `000067` が上書きした値は復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
 
 ## drop-in 互換性の現状 (2026-05-09 時点)
 
