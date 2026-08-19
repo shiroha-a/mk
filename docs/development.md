@@ -107,7 +107,9 @@ cd mk && docker compose up -d
 | `make dev` | `go run`で直接起動 |
 | `make run` | build + 実行 |
 | `make clean` | ビルド成果物を削除 |
-| `make tidy` | `go mod tidy` |
+| `make tidy` | `go mod tidy` (このリポジトリでは private plugin の解決に失敗するので使えない → [プラグイン開発](plugins/development.md)) |
+| `make plugins` | `plugins/` を走査して組み込み用ファイルを生成 (#2480)。`make build` が内部で呼ぶ |
+| `make plugins-all` | `disabled` のプラグインも含めて生成 (CI 検証用) |
 
 ### コード品質
 
@@ -117,6 +119,8 @@ cd mk && docker compose up -d
 | `make lint` | `go vet ./...` |
 | `make test` | `go test ./... -v` (PostgreSQL が要る → [testing.md](testing.md)) |
 | `make plugin-test` | 同梱プラグインのテスト (別 module なので `./...` に含まれない) |
+| `make plugin-doc-check` | `docs/plugins/authoring.md` の Go スニペットが実際にコンパイルできるか |
+| `make plugin-dev` | プラグインを編集しながら動かす (`PLUGIN=plugins/status`) |
 
 ### マイグレーション
 
@@ -175,10 +179,13 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | `make dropin-up` `dropin-test` `dropin-down` `dropin-logs` | TS 2 インスタンスの federation smoke | [Drop-in e2e](dropin-e2e.md) |
 | `make dropin-mk-up` `dropin-mk-test` `dropin-mk-down` `dropin-mk-logs` | 上記の backend を mk-go に差し替えた overlay | 同上 |
 | `make dropin-swap-test` | TS → mk-go 切替の state preservation を通しで検証 | 同上 |
+| `make dropin-mkgo-born-test` | **mk-go 生まれの DB を TS に引き渡せるか** (= ロックインの有無) | 同上 |
 | `make dropin-fedibird-test` | Fedibird-like AP mock との Ed25519 双方向 verify | 同上 |
 | `make dropin-frontend-baseline` `dropin-frontend-up` `dropin-frontend-down` `dropin-frontend-logs` | 3 TS インスタンス + cypress | [Drop-in frontend e2e](dropin-frontend-e2e.md) |
 | `make dropin-frontend-mk-up` `dropin-frontend-mk-down` `dropin-frontend-swap-test` | 上記の mk-go overlay と切替シナリオ | 同上 |
 | `make federation-misskey-build` `federation-misskey-up` `federation-misskey-test` `federation-misskey-down` `federation-misskey-logs` | Misskey 本家インスタンスを立てて実際に連合させる | [ActivityPub連合](federation.md) |
+| `make federation-misskey-e2e` | 上記を起動から撤去まで通しで実行 (CI の `federation` シナリオと同じ) | 同上 |
+| `make e2e-submodule-init` | submodule を初期化 (本家フロントエンドの取得)。e2e 系の前提 | — |
 | `make playwright-up` `playwright-test` `playwright-down` | Playwright によるフロントエンド / API テスト | [Playwright](playwright.md) |
 | `make upstream-e2e-deps` `upstream-e2e-up` `upstream-e2e-migrate` `upstream-e2e-test` `upstream-e2e-down` | Misskey 本家の backend e2e をテスト本体無改変で mk-go に向けて実行 | [本家 backend e2e](upstream-backend-e2e.md) |
 
@@ -270,14 +277,27 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 
 以下はPRで走るが**required checksには入っていない**ので、落ちてもマージはブロックされない。赤いチェックとして表示されるので、内容を確認して別PRで対処する。
 
-| workflow | 対象 | 内容 |
+| check | workflow | 内容 |
 |---|---|---|
-| `Playwright` | `internal/**` `cmd/**` `migration/**` `tests/playwright/**` 等 | mk-go backendに対するPlaywright spec。Misskey TS backendでの実行は`workflow_dispatch`のみ |
-| `Drop-in e2e` | `internal/**` `cmd/**` `migration/**` `tests/dropin/**` 等 | `make dropin-swap-test`によるTS↔mk-go切替検証 |
+| `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 |
+| `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + `make plugins-all` と統合バイナリの build |
+| `plugin-tests` | CI | 同梱プラグインのテスト (別 module なので `go list ./...` に入らない) |
+| `build-and-push` / `-bundled` | Docker | image がビルドできるか (PR では push しない) |
+| `spec (mk-go 1/4)` 〜 `4/4` | Playwright | ブラウザからの統合互換。TS backend での実行は `workflow_dispatch` のみ |
+| `e2e (1/4)` 〜 `4/4` | Upstream backend e2e | 本家の backend e2e が mk-go に対して通るか |
+| `diff` | Diff e2e | mk-go と TS の**レスポンスの値**が一致するか |
+| `swap-test` / `mkgo-born` / `ed25519-verify` / `federation` | Drop-in e2e | 切替・ロックイン・Ed25519・実連合の 4 シナリオ |
+
+どれが何を守っているかの対比は [ci.md](ci.md) にまとめてある。
 
 ### nightly
 
-`Drop-in frontend e2e`のみscheduleで実行される (cypress + 3インスタンスでflake要素が多く、Playwrightとカバー範囲も重なるため)。
+PR では回らず schedule で実行されるものが 2 つある。
+
+| workflow | 内容 | 時刻 |
+|---|---|---|
+| `Drop-in frontend e2e` | 3 TS インスタンス + cypress で frontend 視点の drop-in 互換 | 19:00 UTC |
+| `Queue-bench smoke` | queue driver がジョブを落としていないか (`ok == sent`) | 17:30 UTC |
 
 ### CI失敗時の対応
 

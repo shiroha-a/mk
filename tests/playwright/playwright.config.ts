@@ -1,7 +1,8 @@
 import { defineConfig } from '@playwright/test';
 
-// #744 Phase 1 PR-1: 基盤と smoke spec のみ。後続 PR で multi-browser /
-// projects / use.storageState を拡張する。
+// mk-go backend に対する Playwright e2e の設定 (#744)。spec は
+// `specs/upstream/` に 289 ファイル。CI では `--shard=i/4` を 4 job に
+// 分けて回す (docs/playwright.md)。
 export default defineConfig({
   testDir: './specs',
   // globalSetup: Redis を flush して rate limit counter をゼロから始める
@@ -21,11 +22,12 @@ export default defineConfig({
   // 両者を変えるときは必ず揃えること (#2276: reporter だけ入れ忘れて
   // guard が恒常 fail していた)。
   reporter: [['list'], ['json', { outputFile: 'results.json' }]],
-  // Phase 1 では全 spec を chromium で 1 回ずつ実行。multi-browser は
-  // CI 統合 PR で `projects` を追加する。
+  // chromium のみで 1 回ずつ実行する。`projects` は定義していない。検証対象は
+  // mk-go backend の API 互換であってブラウザ差ではないので、multi-browser 化は
+  // spec 数 x ブラウザ数だけ CI 時間を増やす割に得るものが少ない。
   use: {
     baseURL: process.env.MK_BASE_URL ?? 'https://mkgo.local',
-    // API テスト中心なので screenshot / trace は失敗時のみで十分。
+    // 失敗の調査にしか使わないので、成功 run では取らない。
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
     // **録画しない。** 以前は 'on' で全 spec を録画していたが、CI では
@@ -55,7 +57,13 @@ export default defineConfig({
     // i18n key 解決に使うので、これで全 spec の text 前提が安定する。
     locale: 'en-US',
   },
-  // CI 並列度の調整は CI 統合 PR で。本 PR はローカル直列実行。
+  // **1 スタックに対しては直列で回すしかない。** 289 spec のうち 173 が共有の
+  // root (alice) でサインインし、instance meta は全 spec が共有する。Playwright は
+  // ファイル単位で並列化するので、workers を上げると `profile_iscat_toggle` と
+  // `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
+  // `about_page_render` が同じ meta を取り合う。root の quota
+  // (antenna 5 / webhook 3 / clip 10) を消費する spec も 18 ある。
+  // 並列度は CI 側で `--shard=i/4` を 4 job に分けて稼ぐ (#2609)。
   workers: 1,
   // 1 度だけ retry を許可する。Chromium headless が稀に SIGSEGV (= signal 11
   // / GPF) で即死する infrastructure flake (= profile_iscat_toggle 1ms 即死

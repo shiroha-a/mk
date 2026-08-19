@@ -220,9 +220,10 @@ make federation-misskey-down
 
 `tests/playwright/` 配下の spec を mk-go と Misskey TS の **両 backend** で並列実行し、drop-in 互換 regression を PR ごとに検出する基盤。
 
-- 範囲: 289 spec ファイル / 38 directory (= router.go 登録 448 endpoint の 54.3%)
-- backend matrix: `mk-go` / `ts` 並列、`fail-fast: false` で片方失敗しても他方は完走
-- トリガー: `pull_request` (paths フィルタ) + `workflow_dispatch`。**nightly ではない** (#2291 で移行)。4 シャード並列で、TS backend は `workflow_dispatch` 専用 (`.github/workflows/playwright.yml`)
+- 範囲: 289 spec ファイル (ui 194 / api 95) / 39 directory
+- トリガー: `pull_request` (paths フィルタ) + `workflow_dispatch`。**nightly ではない** (#2291 で移行)。`.github/workflows/playwright.yml`
+- **4 シャード並列** (`--shard=i/4`、`fail-fast: false`)。1 スタックに対しては直列でしか回せない (共有の root と instance meta を spec が取り合う) ので、並列度はシャードごとに独立した stack を立てて稼ぐ (#2609)
+- **TS backend は `workflow_dispatch` 専用**で PR では回らない。upstream が変わらない限り答えも変わらないため、submodule bump のタイミングだけ回す
 - spec は **backend-agnostic** (= URL 切替だけで両 backend で動く)、spec 失敗 = drop-in 互換 regression として issue 化
 
 ### spec を書くときの注意: root の per-user quota
@@ -265,12 +266,16 @@ Playwright で発見した drift は LCD 化 → strict 化 のサイクルで�
 4. drift fix PR で mk-go 側を strict 仕様 (= upstream Misskey TS の挙動) に揃える
 5. 同 PR で spec の LCD を strict (`expect(...).toBe(204)` 等) に格上げ
 
-**実績**: Phase 1-4 で 40+ 件の drift を fix。詳細は [api-compatibility.md](api-compatibility.md) の「対応済 drift fix」section、または #744 / #947 tracker 参照。
+**実績**: Phase 1-4 で 40+ 件の drift を fix。詳細は [api-compatibility.md](api-compatibility.md) の
+「Playwright Phase 1-4 由来の drift backlog」section、または #744 / #947 tracker 参照。
 
 ## 差分比較 e2e (値レベル)
 
 mk-go と Misskey TS に**同一リクエストを投げてレスポンスを値レベルで diff** する
-(#2078、43 比較)。守備範囲が他のゲートと違う。
+(#2078、endpoint 比較 30 件)。守備範囲が他のゲートと違う。
+
+pytest の総数は 43 だが、うち 13 は `diff_core.py` (差分の取り方そのもの) の
+ユニットテストで、**mk-go と TS を突き合わせているのは 30 件**。
 
 | ゲート | 見ているもの |
 |---|---|
@@ -330,9 +335,18 @@ make dropin-mk-up              # 上から mk-A overlay (= clean DB の mk-A)
 make dropin-swap-test          # TS-then-mk 切替シナリオ (bash orchestrator)
 ```
 
-PR ごとに `.github/workflows/dropin-e2e.yml` が 2 シナリオを並列実行する
-(`swap-test` = `make dropin-swap-test`、`ed25519-verify` = `make dropin-fedibird-test`)。
-required check には入れない。
+PR ごとに `.github/workflows/dropin-e2e.yml` が **4 シナリオ**を並列実行する
+(`fail-fast: false`)。required check には入れない。
+
+| check 名 | make target | 見ているもの |
+|---|---|---|
+| `swap-test` | `dropin-swap-test` | TS→mk 切替で state が保たれるか (#374) |
+| `mkgo-born` | `dropin-mkgo-born-test` | **mk-go 生まれの DB を TS に引き渡せるか** (= ロックインの有無、#2383) |
+| `ed25519-verify` | `dropin-fedibird-test` | Fedibird-like mock との Ed25519 双方向 verify (#1083) |
+| `federation` | `federation-misskey-e2e` | 本物の Misskey TS を相手にした実連合 (#2362) |
+
+`swap-test` と `mkgo-born` は似て見えるが **DB を作った側が違う** (前者は TypeORM、
+後者は mk-go の migration)。TS が一度も触っていない schema を受け取るのは後者だけ。
 
 `make dropin-fedibird-test` は Fedibird-like な AP mock を立てて **Ed25519 署名の
 双方向 verify** を検証する (#1083)。Ed25519 は mk-go 独自の先行実装なので、他実装と

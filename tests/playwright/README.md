@@ -20,20 +20,20 @@ make playwright-down
 ## 構成
 
 ```
-[Playwright runner] → [mkgo] → [postgres / redis]
+[Playwright runner] → [nginx (TLS)] → [mkgo] → [postgres / redis]
 ```
 
-Phase 1 PR-1 では frontend は bundle せず API 中心 spec のみ。後続 PR で
-`page.goto` ベースの spec を追加するときに frontend asset を組み込む。
+frontend asset を組み込んだ mk-go に対して実ブラウザから叩く。nginx は
+self-signed cert で TLS を終端する (spec 側は `ignoreHTTPSErrors` で受ける)。
 
 ## upstream / mkgo の分割
 
 ```
 specs/
 ├── upstream/       # upstream Misskey にも存在する機能の検証
-│   ├── ui/         # ブラウザを駆動する (176 spec)
+│   ├── ui/         # ブラウザを駆動する (194 spec)
 │   └── api/        # API の shape / 挙動 (95 spec)
-└── mkgo/           # mk-go 独自機能の検証 (現時点で空)
+└── mkgo/           # mk-go 独自機能の検証 (現時点で空、.gitkeep のみ)
 ```
 
 ### ui と api の境界
@@ -67,7 +67,7 @@ shape や挙動を検証する spec。
 この境界は「どちらが上等か」ではない。API の shape 検証は drop-in 互換の regression
 検出に不可欠で、UI 操作より速く安定する。両方を別々に育てる。
 
-**現在の 271 spec はすべて `upstream/`。** 分割時に全 spec を確認したが、mk-go 独自
+**現在の 289 spec はすべて `upstream/`。** 分割時に全 spec を確認したが、mk-go 独自
 機能 (cherrypick 由来の chat 拡張、`mkGoVersion` 等の additive field) を検証するものは
 1 件も無かった。むしろ `i/profile_extra.spec.ts` のように **mk-go 拡張を明示的に scope
 外としている** spec もある。
@@ -75,8 +75,8 @@ shape や挙動を検証する spec。
 この境界には 2 つの意味がある。
 
   - **`upstream/` の spec は Misskey TS backend に対しても通る**。`make playwright-ts-test`
-    と nightly CI がそれを担保している。期待値そのものが upstream の実挙動と一致している
-    ことの検証になる
+    と CI の `workflow_dispatch` 実行がそれを担保している。期待値そのものが upstream の
+    実挙動と一致していることの検証になる
   - **本家へ還元しやすい**。`upstream/` の spec は本家にも存在する機能を検証しているので、
     本家の Playwright スイートへ持っていける
 
@@ -104,31 +104,40 @@ misskey-project` **または** `SPDX-License-Identifier: AGPL-3.0-only` の OR �
 
 ```
 tests/playwright/
-├── playwright.config.ts        # multi-browser 設定 (現状 chromium のみ)
+├── playwright.config.ts        # chromium のみ (`projects` は定義していない)
+├── global-setup.ts             # Redis flush / root 確保 / registration open / quota purge
 ├── package.json                # @playwright/test 依存
 ├── Dockerfile.runner           # Playwright runner image
 ├── instance.yml                # mk-go config
+├── nginx/                      # self-signed TLS を終端する reverse proxy
 ├── specs/
-│   ├── upstream/ui/            # ブラウザを駆動する (176 spec)
+│   ├── upstream/ui/            # ブラウザを駆動する (194 spec)
 │   ├── upstream/api/           # API の shape / 挙動 (95 spec)
 │   └── mkgo/                   # mk-go 独自 (現時点で空)
-├── fixtures/
-│   ├── api.ts                  # POST /api/<endpoint> ラッパ
-│   └── auth.ts                 # signup / signin helper
-└── specs/
-    └── smoke/                  # Phase 1 minimum
-        └── signup.spec.ts      # signup → /api/i 確認
+└── fixtures/                   # 13 ファイル
+    ├── api.ts                  # POST /api/<endpoint> ラッパ
+    ├── auth.ts                 # signup / signin helper
+    ├── ui_auth.ts              # ブラウザからのサインイン
+    ├── quota.ts                # role policy 上限の後始末
+    └── ...                     # backend / chat / drive / notes / streaming ほか
 ```
 
-## Phase 計画 (#744 ref)
+## 並列度
 
-- **Phase 1 PR-1 (本 PR)**: 基盤 + smoke spec 1 本
-- **Phase 1 PR-2-N**: 残り Phase 1 spec (notes / streaming / drive ほか)
-- **Phase 1 final**: CI nightly workflow 統合
-- **Phase 2-6**: timeline / users / chat / notification / ... を段階的に追加
+**1 スタックに対しては直列で回すしかない** (`workers: 1`)。289 spec のうち 173 が
+共有の root (alice) でサインインし、instance meta は全 spec が共有する。Playwright は
+ファイル単位で並列化するので、`workers` を上げると `profile_iscat_toggle` と
+`profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
+`about_page_render` が同じ meta を取り合う。root の quota
+(antenna 5 / webhook 3 / clip 10) を消費する spec も 18 ある。
+
+**並列度はスタックごと分けることでしか稼げない。** CI は `--shard=i/4` を 4 job に
+分けて、それぞれ独立した stack を立てる (#2609)。
 
 ## design 原則
 
 - spec は backend-agnostic (= TS / mk-go 両方で同 spec が pass するべき)
 - 失敗 = 非互換 / regression として issue 化する運用
-- Cypress (\`tests/dropin_frontend/\`) / pytest (\`tests/dropin/\`) は並走で残す
+- pytest 版の drop-in e2e (`tests/dropin/`) / cypress 版 (`tests/dropin_frontend/`) は
+  別系統として並走する。前者は TS ↔ mk-go の切替、後者は 3 TS インスタンスでの
+  frontend 互換を見ており、守備範囲が重ならない

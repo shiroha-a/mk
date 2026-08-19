@@ -219,7 +219,10 @@ Misskey-TSに戻す場合の手順:
 
 ## drop-in 互換性の現状 (2026-05-09 時点)
 
-Playwright Phase 1-4 完了 (#744) で **96 spec / 35 directory / 242 endpoint cover (54.3%)** を mk-go と Misskey TS の両 backend で nightly 検証中。発見した drop-in 互換 drift は 40+ 件すべて解消済 (詳細: [api-compatibility.md](api-compatibility.md))。
+Playwright spec (#744) を **289 ファイル / 39 directory** に育て、PR ごとに mk-go backend
+へ投げている。Misskey TS backend に対しては upstream 追従のタイミングで回し、spec の
+期待値が mk-go の挙動に引きずられていないかを検証する。発見した drop-in 互換 drift は
+40+ 件すべて解消済 (詳細: [api-compatibility.md](api-compatibility.md))。
 
 - **API endpoint 互換**: 主要 endpoint (admin / notes / users / i / drive / chat / reactions / timeline / emoji / auth / federation / channels / hashtags / roles 等) は両 backend で同 status / 同 shape を返す
 - **WebSocket チャンネル**: 19/19 実装済 (#125)

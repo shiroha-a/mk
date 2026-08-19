@@ -96,19 +96,37 @@ vitest の expected-failure (`task.fails`) として実行する。
 **載せてよいのは根拠を書ける乖離だけ。** 原因が分かっていない失敗を載せると、
 本物のバグを永久に隠すことになる。
 
-`name` は describe を ` > ` で連ねたフルネーム (ファイル名は含まない)。
+entry は `file` / `reason` / `names` の 3 キー。**`names` は配列**で、describe を
+` > ` で連ねたフルネームを並べる (ファイル名は含まない)。`test.each` の展開名も
+そのまま書く。同名テストが複数あるときは全てが expected-failure になる。
+
 照合は `file` 単位なので、同じ理由の乖離でもファイルが違えば entry を分ける。
+
+```json
+{
+  "file": "test/e2e/users.ts",
+  "reason": "policies に mk-go 独自の分割アップロード用キーが乗るため (#2313)",
+  "names": ["ユーザー > が作れる。（作りたての状態で自分のユーザー情報が取れる）"]
+}
+```
 
 ## CI
 
 `.github/workflows/upstream-backend-e2e.yml` が PR トリガー (paths フィルタ
 付き) と `workflow_dispatch` で回す。**branch protection の required checks に
-は入れない**ので、落ちても merge はブロックされない。18-20 分かかるうえ 1200
-件超のテストに flaky 要素があるため、merge ブロッカーには適さない。
+は入れない**ので、落ちても merge はブロックされない。1200 件超のテストに flaky
+要素があるため、merge ブロッカーには適さない。
+
+**4 シャード並列** (`--shard=i/4`、`fail-fast: false`)。check 名は `e2e (1/4)` 〜
+`4/4` で、実測 3-7 min。**プロセス内では並列にできない** — upstream の vitest 設定が
+`maxWorkers: 1` で、かつ setupFiles がファイルごとに mk-go の `/api/reset-db`
+(全テーブル truncate) を叩くため、同じ DB に 2 ファイルを並行させると片方が相手の
+フィクスチャを実行中に消す。job を分ければ PostgreSQL / Redis の service container も
+別に立つ (#2609)。
 
 非ブロッキングを `continue-on-error: true` で実現しないこと。あれは job を
 成功扱いにするので失敗が完全に不可視になる。job は正しく失敗させ、required に
 入れないことで非ブロッキングにする。
 
-失敗時は mk-go のログが `upstream-e2e-mkgo-log` artifact として 14 日残る。
+失敗時は mk-go のログが `upstream-e2e-mkgo-log-<shard>` artifact として 14 日残る。
 vitest の出力だけでは「サーバーが何を返したか」が分からないことが多い。
