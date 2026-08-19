@@ -13,6 +13,12 @@ import (
 )
 
 // RolesAssignmentShow handles POST /api/admin/roles/assignment-show.
+//
+// **見るのは role_assignment 行だけで、conditional role の condFormula は評価しない**
+// (#2633)。conditional role は行を持たないので、条件を満たしている user にも
+// assigned=false を返す。既存の admin/roles/users も ListByRole で同じテーブルを
+// 引くので挙動は揃っている。呼び出し側が判別できるよう role.target を返す。
+// effective 判定へ差し替えないこと (理由は roles.AssignmentShow の doc comment)。
 func (h *Handler) RolesAssignmentShow(c echo.Context) error {
 	var req struct {
 		UserID string `json:"userId"`

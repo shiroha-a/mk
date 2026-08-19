@@ -157,6 +157,47 @@ mk-go の既存エンドポイントをプロセス内で呼ぶ。**可視性・
 
 非 2xx は `*plugin.APIError` になる。本文が入っているので Misskey のエラーコードで分岐できる。
 
+### ロールの付与を確認する
+
+利用者に特定のロールが**手動で付与されているか**を、メンバー一覧を走査せずに 1 回で確認できる。条件つきロールは対象外（後述）。
+
+```go
+// AsUser に渡した利用者自身について答える
+raw, err := ctx.API().AsUser(userID).Call(ctx, "roles/assignment-show", map[string]any{
+    "roleId": roleID,
+})
+// 任意の利用者について答える。AsUser にはモデレーター以上の ID が要る
+raw, err := ctx.API().AsUser(moderatorID).Call(ctx, "admin/roles/assignment-show", map[string]any{
+    "userId": userID, "roleId": roleID,
+})
+```
+
+```json
+{ "assigned": true, "expiresAt": "2026-08-20T03:04:05.000Z",
+  "role": { "id": "...", "target": "manual", "isPublic": true, "canEditMembersByModerator": false } }
+```
+
+**`assigned` が答えるのは手動付与だけで、`target` が `conditional` のロールでは常に `false` になる。** 条件つきロールは付与のレコードを持たず、条件式を読み取り時に評価して決まるため。**`target` を必ず見ること** — `conditional` なら、返ってきた `false` は「条件を満たしていない」ではなく「この API では分からない」という意味になる。
+
+```go
+var res struct {
+    Assigned bool `json:"assigned"`
+    Role     struct {
+        Target string `json:"target"`
+    } `json:"role"`
+}
+if err := json.Unmarshal(raw, &res); err != nil {
+    return nil, err
+}
+if res.Role.Target == "conditional" {
+    // assigned は当てにならない。この endpoint では判定できない
+}
+```
+
+条件つきロールまで含めた実効的な判定は用意していない。条件式の評価は利用者ごとに全ロールを読み込む必要があり、この API の利点である「1 回引くだけで終わる」性質が失われるため。
+
+非公開ロールで `roles/assignment-show` を使うと、**付与されていない利用者には `NO_SUCH_ROLE`** が返る（存在の有無を漏らさないため）。条件つきかつ非公開のロールは、条件を満たす利用者にもこうなる。`admin/roles/assignment-show` にこの秘匿は無く、モデレーター以上なら非公開ロールも読める。
+
 ## ジョブ
 
 ```go
