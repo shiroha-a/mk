@@ -32,14 +32,14 @@
 ### 連合 / ActivityPub
 
 - **HTTP Signatures**: 自前実装（`internal/activitypub/`）
-- **JSON-LD**: 必要に応じてカスタム実装
+- **JSON-LD**: `piprate/json-gold` (LD-Signature の canonicalize。`internal/activitypub/ld/`)
 - **ActivityStreams Types**: カスタム構造体
 
 ### 認証
 
 - **bcrypt** (`golang.org/x/crypto/bcrypt`) - パスワードハッシュ
 - **pquerna/otp** - TOTP（2FA）
-- **golang-jwt/jwt/v5** - JWTトークン
+- **go-webauthn/webauthn** - パスキー / セキュリティキー（2FA、`signin-with-passkey`）
 
 ### テスト
 
@@ -53,9 +53,12 @@
 /
 ├── cmd/
 │   ├── misskey/            # メインバイナリのエントリポイント
-│   └── migrate/            # マイグレーションCLIツール
-├── internal/
+│   ├── migrate/            # マイグレーションCLIツール
+│   ├── backfill-note-tags/ # note.tags を NFKC 正規化し直す一回限りのバッチ
+│   └── dbgtimeline/        # タイムライン不整合を再現するデバッグ用ツール
+├── internal/               # 全22パッケージ
 │   ├── config/             # 設定ローダー（Misskey YAML互換）
+│   ├── db/                 # GORM の PostgreSQL 接続配線
 │   ├── server/             # HTTPサーバーのセットアップ、ルーティング、ミドルウェア
 │   ├── api/                # APIハンドラ（エンドポイント単位でサブディレクトリ）
 │   │   ├── admin/          # admin/* 管理API
@@ -68,15 +71,31 @@
 │   │   ├── federation/     # federation/* 連合情報API
 │   │   └── ...             # その他エンドポイント群
 │   ├── core/               # ビジネスロジック層（サービス）
-│   ├── activitypub/        # ActivityPub実装（Inbox、Deliver、Renderer、Resolver、HTTP署名）
+│   ├── activitypub/        # ActivityPub実装（Inbox、Deliver、Renderer、Resolver、HTTP署名、LD-Signature）
 │   ├── model/              # DBモデル（GORM、Misskeyエンティティ対応）
 │   ├── repository/         # データアクセス層
 │   ├── queue/              # ジョブキュー（既定mkq / legacy asynq）とプロセッサ
 │   ├── stream/             # WebSocketストリーミング（チャンネル実装）
 │   ├── entity/             # レスポンス用DTO（シリアライゼーション）
-│   ├── misc/               # ユーティリティ（ULID生成等）
+│   ├── entitycompat/       # 静的な shape drift 検出と doc gate（Section 8 / docs/shape-drift.md）
+│   ├── pluginspec/         # 公開プラグインAPIの面を抽出（entitycompat が使う）
+│   ├── pluginstore/        # プラグインごとの専用 PostgreSQL schema (#2481)
+│   ├── safehttp/           # 外向きHTTPの共通ヘルパー（SSRFガード等）
+│   ├── charttick/          # チャートの絶対時刻を再導出する TickFunc 群
+│   ├── maintenance/        # ジョブに載せられないアプリレベルのバッチ
+│   ├── frontendutil/       # 同梱フロントエンドの資産配信ヘルパー
+│   ├── pgarray/            # database/sql 用の PostgreSQL 配列型
+│   ├── sentry/             # sentry-go の配線
+│   ├── misc/               # ユーティリティ（ID生成 等。既定は`aidx`、Section 6 参照）
 │   └── testutil/           # テスト用ヘルパー（testcontainers、モック）
+├── plugin/                 # プラグインが import する公開パッケージ（docs/plugins/）
+├── plugins/                # プラグイン本体。gitignore 済で同梱するものだけ例外指定
+├── tools/                  # parity ゲート / コード生成のCLI群（apicompat、shapediff、pluginbuild 等）
 ├── migration/              # golang-migrate用SQLファイル（`NNNNNN_name.up.sql` / `.down.sql`）
+├── test/                   # Go の e2e（`test/e2e` / `test/e2e_federation`）
+├── tests/                  # Go 以外の検証基盤（playwright / diff / dropin / bench / upstream-e2e 等）
+├── third_party/misskey/    # fork した Misskey TS（submodule。フロントエンドの供給元）
+├── deploy/                 # デプロイ用の補助資材（UDS 構成、pg_bigm 入り postgres image）
 ├── .config/                # 設定ファイル（Misskey互換YAML）
 │   ├── default.yml.example # ローカル開発用テンプレート (track 対象)
 │   ├── docker.yml.example  # Docker Compose用テンプレート (track 対象)
@@ -85,9 +104,11 @@
 ├── docs/                   # プロジェクトドキュメント
 ├── Makefile
 ├── Dockerfile
-├── docker-compose.yml
+├── docker-compose.yml      # **`name:` が無い**。単体で使うと本番 project `mk` に合流する
 └── go.mod                  # Moduleパス: github.com/shiroha-a/mk
 ```
+
+`built/` と `drive-files/` は gitignored な生成物 / ローカルストレージ。
 
 レイヤ責務：
 - **api** → **core** → **repository** → **model** の順に依存。逆向きの依存は禁止。
@@ -105,15 +126,28 @@ make dev                    # go run で直接起動（開発用）
 make run                    # build + 実行
 
 # 依存管理
-make tidy                   # go mod tidy
+make tidy                   # go mod tidy。**このリポジトリでは private plugin の解決に
+                            # 失敗するので使えない**。依存追加は go get、go.sum の検証は
+                            # GOFLAGS=-mod=readonly go build
 
 # コード品質
 make fmt                    # gofmt -s -w . で整形
 make lint                   # go vet ./...
+make check                  # fmt → lint → test。コミット前に必須
 
 # テスト
 make test                   # go test ./... -v
 make plugin-test            # 同梱プラグインのテスト (別 module なので ./... に含まれない)
+make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
+
+# 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check を一括
+make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
+
+# プラグインの組み込み
+make plugins                # plugins/ を走査して生成 (make build が内部で呼ぶ)
+make plugins-all            # disabled のものも含める (CI 検証用)
+make plugin-dev             # 編集しながら動かす (PLUGIN=plugins/status)
 
 # マイグレーション（接続先は -config、既定 .config/default.yml から決まる）
 make migrate-up             # 最新まで適用
@@ -160,7 +194,18 @@ make dropin-frontend-down        # volume ごと cleanup
 make dropin-frontend-swap-test   # TS-A → mk-A 切替まで含む end-to-end (Phase 14-3)
 make dropin-frontend-mk-up       # mk overlay だけ立ち上げ (clean DB の mk-A から起動)
 make dropin-frontend-mk-down     # mk overlay cleanup
+
+# その他の e2e / 検証
+make dropin-mkgo-born-test   # mk-go 生まれの DB を TS に引き渡せるか (#2383)
+make federation-misskey-e2e  # 本物の Misskey TS との実連合を起動から撤去まで通しで (#2362)
+make diff-check              # mk-go と TS のレスポンスを値レベルで diff (#2078)
+make playwright-check        # Playwright を作り直して実行
+make frontend-check          # fork frontend の型チェック + プラグイン込みビルド
+make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
+
+**上記は全体ではない。** `make help` が全 110 target を出す。一覧と説明は
+[docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
 - メインサーバー: `./cmd/misskey -config .config/default.yml`
@@ -387,6 +432,9 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 ### `build`ジョブ
 
 - `go build ./...`で全パッケージのビルド確認。
+- **`Vet bundled plugins` step** で同梱プラグインを `go vet` する。`go build` ではなく
+  `vet` なのは、テストファイルもコンパイルされるので**公開面を変えて本体だけ直した**
+  ときに検出できるため (#2588)。
 
 ### `test-shards`ジョブ + `test` aggregator
 
@@ -410,6 +458,11 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 
 ### `plugin-tests`ジョブ
 
+同 job の末尾で **`Check authoring.md snippets compile`** (`make plugin-doc-check`) も
+回す。`docs/plugins/authoring.md` の Go スニペットを使い捨て module に展開して
+ビルドし、doc のとおりに書くとコンパイルできない状態を検出する (#2639)。
+
+
 - 同梱プラグイン (`plugins/*/go.mod` のうち git tracked なもの) のテストを実行する (#2588)。
 - プラグインは**別 module** なので `go list ./...` に含まれず `test-shards` の対象に
   ならない。実行時間が短いため shard の分配ロジックに手を入れず独立させている。
@@ -426,6 +479,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 
 - `go vet ./...`
 - `gofmt -s -d .` で差分がないことを確認。差分があれば失敗。
+- **`Check duplicate test fixture IDs` step** — テストフィクスチャの ID 重複を検出する。
 
 ### `vulncheck`ジョブ
 
@@ -520,7 +574,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 ### `diff-e2e` workflow (PR トリガー)
 
 - `.github/workflows/diff-e2e.yml` が `make diff-check` を実行し、mk-go と Misskey TS に
-  同一リクエストを投げて**レスポンスを値レベルで diff** する (#2078 / #2368、43 比較)。
+  同一リクエストを投げて**レスポンスを値レベルで diff** する (#2078 / #2368、endpoint 比較 30 件)。
 - 守備範囲が他のゲートと違う。本家 backend e2e は「本家のテストが通るか」、shape drift は
   「フィールドの有無・型」、diff-e2e は「**同じ入力に対する値そのもの**」を見る。shape が
   合っていても値が違う類のバグはこれでしか捕まらない。
@@ -536,6 +590,25 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 - `make uds-frontend-build` / `e2e-frontend-build` は本番が bind-mount している
   `third_party/misskey/built` を書き換えるため**検証には使えない**。
 - required check (build / test / lint) には**含めない**。
+
+### `docker` / `docker-branch` workflow
+
+- `docker.yml` は **`push` / `pull_request` / `workflow_dispatch`** で発火し、
+  image がビルドできるかを見る (PR では push しない)。check 名は
+  `build-and-push` / `build-and-push-bundled`。`workflow_dispatch` は過去の
+  リリースタグから image を publish し直す用途
+  (`gh workflow run docker.yml -f tag=1.1.1`)。
+- `docker-branch.yml` は `push` / `workflow_dispatch`。ブランチ image 用。
+- PR の required check には**含めない**。
+
+### schedule で回る workflow
+
+PR では回らないので、失敗は Actions 上で確認して別 PR で対処する。
+
+| workflow | 内容 | 時刻 |
+|---|---|---|
+| `dropin-frontend-e2e.yml` | 3 TS インスタンス + cypress で frontend 視点の drop-in 互換 | 19:00 UTC |
+| `queue-bench-smoke.yml` | queue driver がジョブを落としていないか (`ok == sent`) | 17:30 UTC |
 
 ### CI失敗時の対応
 
@@ -557,6 +630,8 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 
 `MK_`プレフィックス付きの環境変数で設定値を上書きできる。ネストキーは`_`区切り。
 
+よく使うもの:
+
 | 環境変数 | 対応YAMLキー |
 |---------|-------------|
 | `MK_URL` | `url` |
@@ -571,7 +646,17 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 | `MK_REDIS_PASS` | `redis.pass` |
 | `MK_ID` | `id` (デフォルト`aidx`) |
 
-新規にオーバーライド対象を増やす場合は`internal/config/config.go`の`bindEnvKeys()`に追加すること（Viperは既知のキーのみ環境変数を適用する）。
+**これは一部で、`bindEnvKeys()` は 86 キーを登録している** (`redisForPubsub.*` /
+`redisForJobQueue.*` / `redisForTimelines.*` / `redisForReactions.*` /
+`meilisearch.*` / `sentry.*` / queue の各 concurrency など)。全量は
+`internal/config/config.go` の `bindEnvKeys()` を見ること。運用向けの説明は
+[docs/configuration.md](docs/configuration.md)。
+
+新規にオーバーライド対象を増やす場合は同関数に追加すること（Viperは既知のキーのみ
+環境変数を適用する）。
+
+**`MK_*` はファイルより優先される。** 手元で export したまま `internal/config` の
+テストを走らせると、設定ファイルの値を期待するケースが落ちる。
 
 ### テスト用環境変数（CI）
 
