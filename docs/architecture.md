@@ -353,7 +353,7 @@ upstream に無い、または cherrypick 由来の加算機能（wire 互換を
 
 - TS Misskey の既存テーブルへは原則**追加のみ**。例外が 9 件あり、うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随 ([TS版からの移行](migration-from-ts.md#破壊的なマイグレーション))。Go 固有の追加列・テーブルは `IF NOT EXISTS`。
 - drop-in テストで発見した補完列は専用マイグレーションで追加。
-- down スクリプトは必須（data loss する場合はコメント明記）。
+- down スクリプトは必須（data loss する場合は `-- data loss:` で明記する）。**ただしこれは今後の規約で、既存の down は守れていない** — 宣言があるのは 8 本だけで、宣言が無いまま `DROP TABLE` / `DROP COLUMN` する down が 51 本ある（[migration-from-ts.md](migration-from-ts.md#mk-go-内での切り戻し)）。
 
 ```bash
 make migrate-up      # 最新まで

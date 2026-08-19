@@ -21,13 +21,20 @@
 
 **PostgreSQL は自分で用意する。** Redis は testcontainers が立ててくれるが、DB を使うテストの大半は外部の PostgreSQL に直接つなぐので、Docker があるだけでは `make test` は通らない (下記「testcontainers」参照)。
 
-```bash
-cp .env.test.example .env.test    # TEST_DB_* が入っている。必要なら編集する
+**必要なのは PostgreSQL 側の準備。** 既定では `localhost:5432` の `misskey_test` データベースに `mk` / `mk` で接続する。
+
+```sql
+CREATE ROLE mk LOGIN PASSWORD 'mk';
+CREATE DATABASE misskey_test OWNER mk;
 ```
 
-`internal/testutil` は接続時 (`OpenTestDB` などの呼び出し時) にプロジェクトルートの `.env.test` を読み、既に設定済みの環境変数は上書きしない。**export で直接渡してもよい。** `.env.test` は `.gitignore` 済み。
+**接続先が既定と違うときだけ** `.env.test` を置く。
 
-接続先の PostgreSQL には `TEST_DB_NAME` (既定 `misskey_test`) のデータベースが要る。CI は service container を立てて同じ環境変数を渡している。
+```bash
+cp .env.test.example .env.test    # 中身は既定値そのままなので、編集して使う
+```
+
+`internal/testutil` は接続時 (`OpenTestDB` などの呼び出し時) にこれを読み、既に設定済みの環境変数は上書きしない。**export で直接渡してもよい。** `.env.test` は `.gitignore` 済み。CI は service container を立てて同じ環境変数を渡している。
 
 ## 実行方法
 

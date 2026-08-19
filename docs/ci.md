@@ -51,7 +51,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | `mkgo-born` | Drop-in e2e | **mk-go 生まれの DB を TS に引き渡せるか** (= ロックインの有無) | 5 min | `make dropin-mkgo-born-test` |
 | `ed25519-verify` | Drop-in e2e | Fedibird-like mock との Ed25519 双方向 verify | 5 min | `make dropin-fedibird-test` |
 | `federation` | Drop-in e2e | 本物の Misskey TS との実連合 (follow/note/reaction/renote/reply/mention/delete) | 4 min | `make federation-misskey-e2e` |
-| `spec (mk-go)` | Playwright | ブラウザからの統合互換 (289 spec ファイル) | 15 min | `make playwright-check` |
+| `spec (mk-go 1/4)` 〜 `4/4` | Playwright | ブラウザからの統合互換 (289 spec ファイル) | 15 min | `make playwright-check` |
 | `build-and-push` / `-bundled` | Docker | image がビルドできるか (PR では push しない) | 4 min | `docker build -f Dockerfile .` |
 
 ### e2e 系が「何を守っているか」の違い

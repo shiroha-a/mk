@@ -1,5 +1,13 @@
--- data loss: 生成済みの秘密値が失われる。media proxy の HMAC 鍵を落とすと、
--- 発行済みの署名付き URL は検証に失敗する。ただし Authorize は署名検証に失敗しても
--- allowlist へフォールバックするため、avatar / drive / emoji / instance icon の
--- 配信は継続する。次回起動時に新しい鍵が生成される。
+-- data loss: 生成済みの秘密値が失われる。
+--
+-- **テーブルごと消えるので、この状態では mk-go が起動しない。** GetOrCreate は
+-- テーブル不在 (42P01) を gorm.ErrRecordNotFound として扱わないため生成の分岐に
+-- 入らず、resolveMediaProxySecret -> server.New が失敗して os.Exit(1) する。
+-- default.yml.example は mediaProxySecret をコメントアウトしているので、既定構成の
+-- 運用者は全員これに当たる。設定ファイルに mediaProxySecret を書いていれば回避できる。
+--
+-- 鍵だけを入れ替える (行を消してテーブルは残す) 場合は、発行済みの署名付き URL が
+-- 検証に失敗するが、Authorize は allowlist へフォールバックするので avatar / drive /
+-- emoji / instance icon の配信は継続する。allowlist に載らず署名だけで通していた
+-- URL (role icon / announcement image 等) は 401 になる。
 DROP TABLE IF EXISTS "instance_secret";

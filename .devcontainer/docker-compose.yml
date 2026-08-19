@@ -23,10 +23,12 @@ services:
       TEST_DB_USER: misskey
       TEST_DB_PASS: misskey
       TEST_DB_SSLMODE: disable
-      # postCreate.sh が複製する .config/default.yml.example は url が
-      # https://example.tld/ のまま。絶対 URL を永続化する経路 (drive file /
-      # emoji の publicUrl 等) が example.tld を書き込むので上書きしておく。
-      MK_URL: "http://localhost:3000"
+      # **MK_URL をここに置かないこと。** MK_* は viper で設定ファイルより優先
+      # されるので、internal/config のテストが fixture ではなくこの値を読んで
+      # 落ちる。url は postCreate.sh が複製後の default.yml を書き換える。
+      #
+      # 既存の MK_DB_* も同じ理由で TestLoad_DatabaseConfig を 1 件落とす。
+      # devcontainer 内でだけ再現し CI では起きないので気付きにくい。
       TEST_REDIS_HOST: localhost
       TEST_REDIS_PORT: "6379"
       # cmd/migrate は DATABASE_URL を読まない。-config (既定 .config/default.yml)

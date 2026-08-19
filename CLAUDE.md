@@ -200,7 +200,7 @@ go tool cover -html=coverage.out
 
 ### 統合テスト
 
-- **手元では `cp .env.test.example .env.test`** (`TEST_DB_*` が入っている)。`internal/testutil` が接続時に読み、設定済みの環境変数は上書きしない。
+- **手元には PostgreSQL が要る**。既定は `localhost:5432` の `misskey_test` に `mk` / `mk`。違う接続先を使うときだけ `cp .env.test.example .env.test` して編集する (`internal/testutil` が接続時に読み、設定済みの環境変数は上書きしない)。
 - DB を使うテストの主流は `testutil.OpenTestDB` / `MustOpenTestDB` で、**外部の PostgreSQL に直接つなぐ**。`MustOpenTestDB` は失敗時 panic。
 - **testcontainers は Redis 用**。`SetupRedis` は 27 パッケージが使うが、`SetupPostgres` は `internal/api/test` / `test/e2e` / `test/e2e_federation` の 3 つだけ。**PostgreSQL は「Docker があれば準備不要」ではない。**
 - ローカル実行にはDocker環境が必要。

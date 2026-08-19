@@ -132,14 +132,14 @@ DELETE の対象はこの残骸で、条件は
 **個別の migration を見て「これは安全」と判断しないこと。** 判断材料になりそうなものが 2 つあるが、どちらも当てにならない。
 
 - **`-- data loss:` の宣言。** あるのは 8 本だけで、**宣言が無いまま `DROP TABLE` / `DROP COLUMN` / `DELETE` する down が 51 本ある**。運用も一貫していない — `000076` は `meta` の設定列 1 本を落とすだけで宣言しているが、同じく `meta` の設定列を落とす `000070` は「data loss も無い」と書いている
-- **up が冪等かどうか。** `000029` の up は全 69 文が `IF NOT EXISTS` で TS 製 DB には何も作らないが、**down は無条件に DROP する**。落ちるのは `user_security_key` / `user_ip` / `user_memo` / `promo_note` / `promo_read` といった **upstream 所有のテーブル**と、`meta` / `user_profile` の 63 列、そして **TypeORM の `migrations` テーブル**。`000067` がわざわざ守っているものを、より悪い形で壊す。宣言は無い。同じ形 (up は冪等、down は無条件 DROP、対象は upstream) は `000030` / `000031` / `000032` / `000038` にもある
+- **up が冪等かどうか。** `000029` の up は大半が `IF NOT EXISTS` 付きだが、**down は無条件に DROP する**。落ちるのは `user_security_key` / `user_ip` / `user_memo` / `promo_note` / `promo_read` といった **upstream 所有のテーブル**と、`meta` / `user_profile` の 63 列、そして **TypeORM の `migrations` テーブル**。`000067` がわざわざ守っているものを、より悪い形で壊す。宣言は無い。同じ形 (up は冪等、down は無条件 DROP、対象は upstream) は `000030` / `000031` / `000032` / `000038` にもある
 
 方向が違うので別に挙げておくもの:
 
 | migration | 内容 |
 |---|---|
 | `000077` | **up も down も無条件に `DELETE FROM "signup_application";` を実行する。** 戻すときだけでなく進めるときも申請が消える |
-| `000078` | up で `signup_application."reason"`、down で `"answers"` を DROP する。申請理由と各申請の回答が失われる |
+| `000078` | up で `signup_application."reason"`、down で `"answers"` と `meta."signupApplicationForm"` を DROP する。申請理由・各申請の回答・管理者が定義した申請フォームが失われる |
 | `000072` | `instance_secret` を **テーブルごと** DROP する。`GetOrCreate` はテーブル不在を `ErrRecordNotFound` として扱わないので、**この状態で起動すると `resolveMediaProxySecret` が失敗して mk-go が立ち上がらない**。`mediaProxySecret` を設定ファイルに書いていれば回避できる |
 | `000074` | backfill で入れた行と実観測で入った行を区別できないので、`instance_signature_capability` の内容は適用前に戻せない |
 

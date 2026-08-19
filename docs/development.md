@@ -11,7 +11,7 @@ VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/cont
 - golang-migrate、Node.js 22、pnpmがプリインストール
 - `postCreate.sh`で初期化
 
-`postCreate.sh` が `.config/default.yml` を example から複製し、migration まで流す (`TEST_DB_*` は compose が渡すので `.env.test` は要らない) (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)。
+`postCreate.sh` が `.config/default.yml` を example から複製し (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)、`url` を `http://localhost:3000` へ書き換えたうえで migration まで流す。`TEST_DB_*` は compose が渡すので `.env.test` は要らない。
 
 ```bash
 # VS Code で開いたら
@@ -36,8 +36,9 @@ cd mk
 cp .config/default.yml.example .config/default.yml
 # default.yml を編集してDB/Redis接続先を設定
 
-# テスト用の DB 接続先 (make test に要る)
-cp .env.test.example .env.test
+# テスト用 PostgreSQL の接続先が既定 (localhost:5432 / misskey_test / mk) と
+# 違うときだけ複製して編集する (→ testing.md)
+# cp .env.test.example .env.test
 
 # マイグレーション適用 (接続先は上で編集した default.yml から読む)
 make migrate-up
@@ -110,7 +111,7 @@ cd mk && docker compose up -d
 |---|---|
 | `make fmt` | `gofmt -s -w .` |
 | `make lint` | `go vet ./...` |
-| `make test` | `go test ./... -v` (事前に `cp .env.test.example .env.test`) |
+| `make test` | `go test ./... -v` (PostgreSQL が要る → [testing.md](testing.md)) |
 | `make plugin-test` | 同梱プラグインのテスト (別 module なので `./...` に含まれない) |
 
 ### マイグレーション
