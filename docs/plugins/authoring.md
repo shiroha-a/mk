@@ -489,7 +489,7 @@ require.Len(t, sends, 1)
 assert.Equal(t, "other.example", sends[0].Host)
 
 // 受信側: 相手から届いたことにする
-res, err := h.DeliverPeer("other.example", map[string]any{"user": "alice"})
+_, err = h.DeliverPeer("other.example", map[string]any{"user": "alice"})
 
 // 応答が返ってきたことにする
 err = h.DeliverPeerReply("other.example", sends[0].ID, map[string]any{"score": 1})
@@ -552,7 +552,7 @@ type Peer interface
   Send(context.Context, string, any) (string, error)
   Handle(PeerHandler)
   OnReply(PeerReplyHandler)
-  Has(string) bool
+  Has(context.Context, string) (bool, error)
 
 type PeerHandler func(context.Context, string, json.RawMessage) (any, error)
 type PeerReplyHandler func(context.Context, string, string, json.RawMessage) error
@@ -594,6 +594,9 @@ type Migration struct { Version int; SQL string }
 type Blob struct { ContentType string; Body []byte; CacheControl string }
 type StatusError struct { Status int; Message string }
 type APIError struct { Endpoint string; Status int; Body json.RawMessage }
+
+func (*StatusError) Error() string
+func (*APIError) Error() string
 
 func Errorf(int, string, ...any) *StatusError
 func ExtractStatusError(error) (*StatusError, string)

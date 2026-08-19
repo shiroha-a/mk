@@ -18,7 +18,8 @@ import (
 //
 //   - 意図せず公開面が広がるのを防げる
 //   - golden の再生成が diff に出るのでレビューで必ず目に入る
-//   - ドキュメントの一覧を golden から生成すれば実装とずれない
+//   - ドキュメントの一覧 (docs/plugins/authoring.md) は手で書かれているが、
+//     golden との整合を TestPluginDoc_* が検査する (#2639)
 //
 // 差分が出たら、それが**意図した変更か**を確認してから
 // `go run ./tools/pluginspec -write` で更新すること。互換性を壊す変更なら

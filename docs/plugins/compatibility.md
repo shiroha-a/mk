@@ -34,7 +34,7 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 
 1. 非推奨期間を置く（可能なら新旧を並立させる）
 2. `APIVersion` を上げる
-3. `plugins/status/` を追従させる（サンプルが壊れたまま残らないように）
+3. 同梱プラグイン (`plugins/status/` / `plugins/trustlevel/`) を追従させる（サンプルが壊れたまま残らないように）
 
 ### 上流追従による破壊
 
@@ -53,7 +53,7 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 - [ ] 具体的なプラグインの具体的な用途がある（「あると便利そう」では足さない）
 - [ ] 内部の型を露出していない（`echo.Context` / `gorm.DB` / `model.User` などを渡さない）
 - [ ] 代替手段が無い（既存の組み合わせで書けないか確認した）
-- [ ] `plugins/status/` か新しいサンプルで実際に使われる、または doc に用例がある
+- [ ] 同梱プラグインか新しいサンプルで実際に使われる、または doc に用例がある
 
 ### 露出してはいけないもの
 
@@ -96,7 +96,7 @@ go run ./tools/pluginspec -write
 
 - [ ] `go run ./tools/pluginspec -write` で golden を更新した（差分をレビューで説明できる）
 - [ ] 破壊的変更なら `plugin.APIVersion` を上げた
-- [ ] 同梱プラグインが通る（`make plugin-test`。**`MK_PLUGIN_TESTS_REQUIRE_DB=1` が要る** — 無いと DB 不通で skip = 成功扱いになる）
+- [ ] 同梱プラグインが通る（`make plugin-test`。recipe が `MK_PLUGIN_TESTS_REQUIRE_DB=1 GOWORK=off` で回す。**この変数が無いと DB 不通で skip = 成功扱い**になるので、素の `go test` で代用しない）
 - [ ] `plugin-api.ts` を変えたなら `make frontend-check` が通る
 - [ ] `docs/plugins/authoring.md` の公開面一覧を更新した
 

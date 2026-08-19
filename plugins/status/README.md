@@ -18,7 +18,7 @@
 make build     # plugins/ を走査してビルドに取り込む
 ```
 
-`plugins/` に**既定では無効。** `mk-plugin.yml` に `disabled: true` があり `make build` の対象から外れる (同梱サンプルなので、clone しただけの人のビルドに勝手に入らないようにしてある)。有効にするには `disabled: true` を消す。
+`plugins/` に置いても**既定では無効**。 `mk-plugin.yml` に `disabled: true` があり `make build` の対象から外れる (同梱サンプルなので、clone しただけの人のビルドに勝手に入らないようにしてある)。有効にするには `disabled: true` を消す。
 
 ```yaml
 # .config/default.yml — 変えたいときだけ
@@ -75,7 +75,7 @@ frontend/
 ## テスト
 
 ```bash
-cd plugins/status && go test ./...
+make plugin-test   # リポジトリのルートで。GOWORK=off なので go.work に居なくても回る
 ```
 
 PostgreSQL が要る（`TEST_DB_*` 環境変数、既定は `localhost:5432` の `misskey_test`）。
