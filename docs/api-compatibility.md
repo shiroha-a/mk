@@ -276,6 +276,12 @@ Go側のマイグレーション (000001〜) はTS版テーブルに対して原
 
 **mk-go 固有のテーブル (upstream に対応するものが無い) は 9 件:**
 
+> [divergence.md](divergence.md) §2-1 は同じものを **12** と数えている。あちらは
+> `antenna_note_unread` / `channel_note_unread` を upstream 側の派生とみなさず、
+> bookkeeping の `migrations` / `schema_migrations` も含める数え方をしていて、CI の
+> `TestDivergenceDoc_TableCountMatchesSchema` がその定義で固定している。矛盾ではなく
+> 母集団の取り方の違い。
+
 | テーブル | 用途 | migration |
 |---|---|---|
 | `antenna_note_unread` / `channel_note_unread` | アンテナ / チャンネルの未読管理 | `000037` |

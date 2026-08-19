@@ -75,18 +75,18 @@ Redis 上の state がそのまま引き継がれる」ことを e2e で検証�
 make dropin-swap-test
 
 # orchestrator は以下を順次実行する (stage 番号はログの `===> stage N` と対応):
-#   1.  TS-A + TS-B stack 起動 → 両方 healthy 待ち
+#   1.  TS-A + TS-B stack (+ fedibird mock) 起動 → healthy 待ち
 #   2.  pytest test_swap_setup.py   (alice/bob/follow/baseline note)
 #   3.  docker compose stop app-a   (TS-A backend 停止、DB / Redis は維持)
 #   4.  overlay で app-a を mk-go ビルドに差し替えて起動
 #   5.  mk-A healthy 待ち → nginx-a を再起動して upstream を張り替え
 #   6.  pytest test_swap_verify.py  (timeline 残存、新規 reply / reaction の連合)
-#   6b. pytest test_swap_seed_mkgo_only.py (mk-go 独自機能の残留データを作る)
+#   6b. pytest test_swap_seed_{mkgo_only,ed25519_peer}.py (残留データと peer を作る)
 #   7.  mk-A backend 停止 (復路の準備)
 #   8.  overlay を外して TS-A backend を起動 → healthy 待ち → nginx-a 張り替え
 #   8d. TS が migration を再実行していないことを assert (#2244)
 #   9.  pytest test_swap_roundtrip_verify.py (TS へ戻したあとの連合継続、#1082)
-#   10. teardown
+#   (終了時) trap の `===> cleanup` で撤去
 ```
 
 **復路 (stage 7-9) まで含めて 1 本のシナリオ。** 「mk-go に移れる」だけでなく

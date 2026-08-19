@@ -225,7 +225,7 @@ Playwright spec (#744) を **289 ファイル / 39 directory** に育て、PR �
 40+ 件すべて解消済 (詳細: [api-compatibility.md](api-compatibility.md))。
 
 - **API endpoint 互換**: 主要 endpoint (admin / notes / users / i / drive / chat / reactions / timeline / emoji / auth / federation / channels / hashtags / roles 等) は両 backend で同 status / 同 shape を返す
-- **WebSocket チャンネル**: 19/19 実装済 (#125)
+- **WebSocket チャンネル**: upstream の 18 をすべて実装 (#125)。加えて mk-go 独自の `notifications` があり計 19
 - **ActivityPub 連合**: 主要 Activity (Create / Delete / Update / Follow / Accept / Reject / Undo / Like / Announce / Block / Flag / Move / Add/Remove) は送受信対応 (詳細: [federation.md](federation.md))
 
 ## 既知の制限

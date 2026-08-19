@@ -232,9 +232,24 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
 
 **上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **86 キー**を
-登録している (`redisForPubsub.*` / `redisForJobQueue.*` / `redisForTimelines.*` /
-`redisForReactions.*` / `meilisearch.*` / `sentry.*` / queue の各 concurrency など)。
-全量はその関数を見ること。Viper は**登録済みのキーにしか環境変数を適用しない**ので、
+登録している。内訳は用途別 Redis 5 系統 (`redis` / `redisForPubsub` /
+`redisForJobQueue` / `redisForTimelines` / `redisForReactions`) が各 9、`db.*` が 9、
+`logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 28 が
+トップレベル。全量はその関数を見ること。
+
+**登録していないキーは `MK_` で上書きできず、黙って無視される。** Viper は
+`AutomaticEnv` を有効にしているが、`Unmarshal` が拾うのは viper が知っているキー
+だけなので、`bindEnvKeys()` に無いものは効かない。よく間違えるもの:
+
+| 設定したいもの | `MK_` で設定できるか |
+|---|---|
+| `meilisearch.host` / `.apiKey` など | **できない** (設定ファイルに書く) |
+| `deliverJobConcurrency` / `inboxJobConcurrency` などの concurrency | **できない** |
+| `deliverJobPerSec` などの rate limit | **できない** |
+| `jobQueueDriver` / `jobQueueAutoScale` / `maxWorkers` / `minWorkers` / `maxWorkersGlobal` | できる |
+| `sentryForBackend.options.dsn` (`MK_SENTRYFORBACKEND_OPTIONS_DSN`) | できる |
+| 用途別 Redis の各項目 (`MK_REDISFORJOBQUEUE_HOST` など) | できる |
+
 ここに無いキーを `MK_` で上書きしたい場合は `bindEnvKeys()` への追加が要る。
 
 **`MK_*` は設定ファイルより優先される。** 手元で export したまま

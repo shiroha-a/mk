@@ -107,7 +107,7 @@ cd mk && docker compose up -d
 | `make dev` | `go run`で直接起動 |
 | `make run` | build + 実行 |
 | `make clean` | ビルド成果物を削除 |
-| `make tidy` | `go mod tidy` (このリポジトリでは private plugin の解決に失敗するので使えない → [プラグイン開発](plugins/development.md)) |
+| `make tidy` | `go mod tidy`。**このリポジトリでは private plugin の解決に失敗するので使えない**。依存追加は `go get`、`go.sum` の充足検証は `GOFLAGS=-mod=readonly go build` (→ [プラグインの書き方](plugins/authoring.md)) |
 | `make plugins` | `plugins/` を走査して組み込み用ファイルを生成 (#2480)。`make build` が内部で呼ぶ |
 | `make plugins-all` | `disabled` のプラグインも含めて生成 (CI 検証用) |
 

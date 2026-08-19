@@ -200,7 +200,7 @@ make dropin-mkgo-born-test   # mk-go 生まれの DB を TS に引き渡せる�
 make federation-misskey-e2e  # 本物の Misskey TS との実連合を起動から撤去まで通しで (#2362)
 make diff-check              # mk-go と TS のレスポンスを値レベルで diff (#2078)
 make playwright-check        # Playwright を作り直して実行
-make frontend-check          # fork frontend の型チェック + プラグイン込みビルド
+make frontend-check          # fork frontend の型チェック (vue-tsc --noEmit のみ)
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
@@ -458,11 +458,6 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 
 ### `plugin-tests`ジョブ
 
-同 job の末尾で **`Check authoring.md snippets compile`** (`make plugin-doc-check`) も
-回す。`docs/plugins/authoring.md` の Go スニペットを使い捨て module に展開して
-ビルドし、doc のとおりに書くとコンパイルできない状態を検出する (#2639)。
-
-
 - 同梱プラグイン (`plugins/*/go.mod` のうち git tracked なもの) のテストを実行する (#2588)。
 - プラグインは**別 module** なので `go list ./...` に含まれず `test-shards` の対象に
   ならない。実行時間が短いため shard の分配ロジックに手を入れず独立させている。
@@ -474,6 +469,9 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
   ものだけ例外指定しているため、tracked 一覧がそのまま「同梱プラグイン」になる。
   新しく同梱したものは自動で対象になる。
 - ローカルでは `make plugin-test` が同じ手順を回す。
+- **同 job の末尾で `Check authoring.md snippets compile`** (`make plugin-doc-check`) も
+  回す。`docs/plugins/authoring.md` の Go スニペットを使い捨て module に展開して
+  ビルドし、doc のとおりに書くとコンパイルできない状態を検出する (#2639)。
 
 ### `lint`ジョブ
 
@@ -646,14 +644,20 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 | `MK_REDIS_PASS` | `redis.pass` |
 | `MK_ID` | `id` (デフォルト`aidx`) |
 
-**これは一部で、`bindEnvKeys()` は 86 キーを登録している** (`redisForPubsub.*` /
-`redisForJobQueue.*` / `redisForTimelines.*` / `redisForReactions.*` /
-`meilisearch.*` / `sentry.*` / queue の各 concurrency など)。全量は
+**これは一部で、`bindEnvKeys()` は 86 キーを登録している。** 内訳は用途別 Redis 5 系統
+(`redis` / `redisForPubsub` / `redisForJobQueue` / `redisForTimelines` /
+`redisForReactions`) が各 9、`db.*` が 9、`logging.sql.*` が 2、
+`sentryForBackend.options.{dsn,environment}` が 2、残り 28 がトップレベル
+(`jobQueueDriver` / `jobQueueAutoScale` / `maxWorkers` / `minWorkers` /
+`maxWorkersGlobal` / `enableMetrics` / `trustProxy` など)。全量は
 `internal/config/config.go` の `bindEnvKeys()` を見ること。運用向けの説明は
 [docs/configuration.md](docs/configuration.md)。
 
-新規にオーバーライド対象を増やす場合は同関数に追加すること（Viperは既知のキーのみ
-環境変数を適用する）。
+**登録していないキーは `MK_` で上書きできず、黙って無視される。** Viper は
+`AutomaticEnv` を有効にしているが、`Unmarshal` が拾うのは viper が知っている
+キーだけなので、`bindEnvKeys()` に無いものは効かない。具体的には
+`meilisearch.*` と `<queue>JobConcurrency` / `<queue>JobPerSec` は**環境変数で
+設定できない** (設定ファイルに書くこと)。新規に増やす場合は同関数に追加する。
 
 **`MK_*` はファイルより優先される。** 手元で export したまま `internal/config` の
 テストを走らせると、設定ファイルの値を期待するケースが落ちる。
@@ -715,6 +719,7 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-08-20**: ドキュメント全体監査 (#2637) の残り 94 件を反映 (#2640)。CLAUDE.md 本体では 5 箇所を修正。(1) Section 1 の技術スタック表が Job Queue を **asynq** と書いていた (既定は #571 で mkq。ここを見て実装方針を決めると legacy 側に倒れる)。**`golang-jwt/jwt/v5` は indirect で未使用**、実際に使う `go-webauthn/webauthn` が未記載、JSON-LD は `piprate/json-gold` を直接依存。(2) Section 2 のディレクトリツリーが `...` 無しで閉じているのに `internal/` 22 中 12・`cmd/` 4 中 2・トップレベル 7 つが欠落していた。(3) Section 3 に無い target が 73 あったので、**罠のあるものを足したうえで `make help` が全量であることを明記**した (全列挙は腐るので採らない)。`make tidy` はこのリポジトリでは使えない。(4) Section 8 に `docker.yml` (**PR で走る**) / `docker-branch.yml` / schedule の 2 つ、ci.yml の 3 step が無かった。diff-e2e の「43 比較」は pytest 総数で **endpoint 比較は 30**。(5) Section 9 の環境変数表 11 件に対し `bindEnvKeys()` は **86 キー**。**`meilisearch.*` と `<queue>JobConcurrency` は登録されておらず `MK_` で上書きできない**ので、その旨も明記した。
 - **2026-08-19**: ドキュメント全体監査 (#2637) で見つかった、**手順どおりに実行すると壊れる記述**を修正 (#2638)。(1) `make migrate-down` は `-steps` 未指定で全 down が走っていたので `-steps 1` を付け、ヘルプ・doc の「1 段階」と挙動を一致させた (全段は `go run ./cmd/migrate -direction down` を直接叩く)。(2) **`DATABASE_URL` はどこからも読まれていない** — `cmd/migrate` は `-config` から DSN を組み立てる。Section 9 の該当項目を接続先の説明に置き換えた。(3) Section 4 のテスト準備を実態に合わせた: **testcontainers は Redis 用** (`SetupRedis` は 27 パッケージ、`SetupPostgres` は 3 パッケージ) で、PostgreSQL は外部のものを使う (既定は `localhost:5432` の `misskey_test` / `mk`)。`MustOpenTestDB` は失敗時 panic なので「Docker があれば準備不要」ではない。
 - **2026-08-18**: Section 8 の `playwright` / `upstream-backend-e2e` を 4 シャード並列として書き換え (#2609)。どちらも**プロセス内では並列にできない** (前者は共有の root アカウントと instance meta、後者は `maxWorkers: 1` + ファイルごとの `/api/reset-db`) ため、並列度はシャードごとに job を分けて稼ぐ。あわせて実態と乖離していた記述を修正: `playwright` は nightly ではなく PR トリガー (#2291 の反映漏れ)、`upstream-backend-e2e` の所要時間は「18-20 min」ではなく分割前で 8.5 分。Playwright の録画を止めた理由も明記。
 - **2026-08-16**: `plugin-tests` job を追加 (#2588)。同梱プラグインのテストは**どの job でも実行されていなかった** (別 module で `go list ./...` に含まれず、`build` job に PostgreSQL が無い)。テストが落ちる変更を入れても CI は緑のままだった。あわせて `build` job の同梱プラグイン検証を `go build` から `go vet` に変更 (テストファイルもコンパイルされるので、公開面を変えて本体だけ直したときに検出できる)。Section 3 に `make plugin-test` を追記。

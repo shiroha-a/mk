@@ -36,7 +36,8 @@ Misskey互換クライアント(Miria等)は、misskey-jsの型に従ってレ�
 | `internal/entitycompat/plugin_surface_test.go` | 公開プラグイン API の面 (`TestPluginSurfaceDrift`) |
 | `internal/entitycompat/plugin_doc_test.go` | `docs/plugins/authoring.md` の一覧 ↔ 公開面 golden (`TestPluginDoc_*` 5 本) |
 | `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物 (`TestDivergenceDoc_*` 5 本) |
-| `internal/entitycompat/schema_drift_test.go` | migration の列 ↔ upstream entity (`TestSchemaDrift_*`)、TypeORM seed の網羅 |
+| `internal/entitycompat/schema_drift_test.go` | migration の列 ↔ upstream entity (`TestSchemaDrift_CreateOnlyColumns`) |
+| `internal/entitycompat/migration_seed_test.go` | TypeORM `migrations` seed の網羅 (`TestMigrationSeed_CoversUpstream`) |
 
 golden側は**commit済みスナップショット**を読むため、テスト時にsubmoduleを必要としない(hermetic)。
 
@@ -429,7 +430,21 @@ upstream の endpoint 一覧を `tools/apicompat` から直接引くことはで
 
 冒頭サマリの `N tag (-mk.X ～ -mk.Y)` == §4-2 の表の行数と範囲。tag 番号が連番であることも見る。
 
-サマリは 10 tag と言い、表には 11 行あり、実際の submodule には 23 個の tag があった (#2640)。fork frontend の custom commit は upstream 追従のたびに増えるので、**人が数え直す運用では必ずずれる**。
+サマリは 10 tag と言い、表には 11 行あり、実際の submodule には 23 個の tag があった (#2640)。**この gate が捕まえるのは前 2 つの食い違いだけ**で、3 つ目 (= submodule 側が進んだこと) は検出できない — `test-shards` job は submodule を checkout しないため、サマリと表を両方据え置けば submodule が先に進んでもすり抜ける。submodule bump の PR で表を足すのは人の仕事。
+
+### `TestDivergenceDoc_APICompatIsFresh`
+
+`docs/api-compat.md` の POST 行 == `router.go` が静的登録する `/api/*` の POST。
+
+**錨そのものが腐ると、それを見る gate も一緒に無力化する。** 上の
+`EndpointCountMatchesAPICompat` は divergence.md と api-compat.md の一致しか見ないので、
+endpoint を足して**どちらも更新しない**と両方が古いまま緑になる (develop では
+`mk-go version: 1.1.2` / `mk-go only: 49` のまま腐っていた)。
+
+route dump には stack が要るのでテストからは呼べない。代わりに router.go の
+`api.POST("...")` / `api.Match(chartMethods, "...")` を静的に抽出して突き合わせる。
+同梱プラグインのルート (`/api/plugin/*`) は literal で現れないので母集団から外す。
+**どちらかが 0 件になったら `t.Fatal`** (書式が変わって空集合同士が一致するのを防ぐ)。
 
 ### `TestDivergenceDoc_TableCountMatchesSchema` / `TestDivergenceDoc_ColumnCountMatchesSchema`
 

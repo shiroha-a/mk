@@ -113,10 +113,11 @@ pytest の総数は 43 で、内訳は:
 
 **「43 比較」ではない。** 実際に 2 backend を突き合わせているのは 30 件。
 
-比較対象は meta / user / note (reaction / reply / renote / hashtag / state / poll) /
-clip / user list / channel / antenna / drive file / drive folder / OAuth app /
-page / announcement / emoji / flash / favorites / mute list / timeline
-(home / local / user notes / followee) / follow request / user relation。
+比較対象は meta / user (packing / rich profile / relation) / `i/me` (基本 / detailed) /
+note (packing / reaction / reply / renote / hashtag / state / poll) / clip / user list /
+channel / antenna / drive file / drive folder / OAuth app / page / announcement /
+emoji / flash / favorites / mute list / timeline (home / local / user notes /
+followee) / locked follow request。
 
 `test_meta_value_parity` の `META_IGNORE` は instance state (mediaProxy host /
 proxyAccountName) のノイズを吸収するためのもの。version-gap 由来の除外は TS image を

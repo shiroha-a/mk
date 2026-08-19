@@ -481,6 +481,10 @@ func TestDivergenceDoc_EndpointCountMatchesAPICompat(t *testing.T) {
 // TestDivergenceDoc_ForkFrontendTagsMatchTable asserts that the summary's tag
 // count and range agree with §4-2's rows. サマリは 10 tag と言い、表には 11 行
 // あり、実際の submodule には 23 個の tag があった (#2640)。
+//
+// **捕まえるのは前 2 つの食い違いだけ。** submodule 側が進んだことは検出できない
+// (test-shards job は submodule を checkout しない) ので、サマリと表を両方据え置けば
+// すり抜ける。submodule bump の PR で表を足すのは人の仕事。
 func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
 	lines := readDivergenceDoc(t)
 
@@ -540,4 +544,105 @@ func findDivergenceHeading(t *testing.T, lines []string, section string) (int, b
 	}
 	t.Fatalf("docs/divergence.md に §%s の見出しが無い", section)
 	return 0, false
+}
+
+// apiCompatRowRe matches a route row `| POST | `/api/notes/create` |` in the
+// generated matrix.
+var apiCompatRowRe = regexp.MustCompile("^\\| (GET|POST) \\| `(/api/[^`]*)` \\|")
+
+// routerPostRe / routerMatchRe extract the statically registered `/api/*`
+// routes from router.go. `api` is the echo group mounted at `/api`.
+var (
+	routerPostRe  = regexp.MustCompile(`\bapi\.POST\("([^"]+)"`)
+	routerMatchRe = regexp.MustCompile(`\bapi\.Match\(chartMethods, "([^"]+)"`)
+)
+
+// TestDivergenceDoc_APICompatIsFresh asserts that the committed
+// docs/api-compat.md still describes the routes router.go registers.
+//
+// **生成物そのものが腐ると、それを錨にしている gate も一緒に無力化する。**
+// TestDivergenceDoc_EndpointCountMatchesAPICompat は divergence.md と
+// api-compat.md の一致しか見ないので、endpoint を足して**どちらも更新しない**と
+// 両方が古いまま緑になる。実際 develop では `mk-go version: 1.1.2` /
+// `mk-go only: 49` のまま腐っていた (#2640)。
+//
+// `make apicompat` の route dump には stack (DB / Redis) が要るのでテストからは
+// 呼べない。代わりに router.go の**静的な登録**と突き合わせる。POST だけを見るのは
+// GET variant が生成物側で別扱いになるためで、endpoint を足す操作は必ず POST を
+// 伴うのでこれで足りる。
+//
+// 同梱プラグインのルート (`/api/plugin/*`) は router.go に literal で現れず、
+// 生成物にも (bundled のうち enabled なものだけが) 載る。母集団から外す。
+func TestDivergenceDoc_APICompatIsFresh(t *testing.T) {
+	blob, err := os.ReadFile(filepath.Join("..", "..", "docs", "api-compat.md"))
+	if err != nil {
+		t.Fatalf("read docs/api-compat.md: %v", err)
+	}
+	doc := map[string]bool{}
+	for _, line := range strings.Split(string(blob), "\n") {
+		m := apiCompatRowRe.FindStringSubmatch(line)
+		if m == nil || m[1] != "POST" || strings.HasPrefix(m[2], "/api/plugin/") {
+			continue
+		}
+		doc[strings.TrimPrefix(m[2], "/api")] = true
+	}
+
+	src, err := os.ReadFile(filepath.Join("..", "..", "internal", "server", "router.go"))
+	if err != nil {
+		t.Fatalf("read internal/server/router.go: %v", err)
+	}
+	var body []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if !strings.HasPrefix(strings.TrimSpace(line), "//") {
+			body = append(body, line)
+		}
+	}
+	joined := strings.Join(body, "\n")
+	router := map[string]bool{}
+	for _, m := range routerPostRe.FindAllStringSubmatch(joined, -1) {
+		router[m[1]] = true
+	}
+	// charts は GET/POST 両方を Match で登録する。POST 側だけ数える。
+	for _, m := range routerMatchRe.FindAllStringSubmatch(joined, -1) {
+		router[m[1]] = true
+	}
+
+	// **0 件で通さない。** どちらかの書式が変わったら黙って空集合同士が一致する。
+	if len(doc) == 0 {
+		t.Fatal("docs/api-compat.md から POST 行を 1 件も読めない (tools/apicompat の出力書式が変わった?)")
+	}
+	if len(router) == 0 {
+		t.Fatal("internal/server/router.go から api.POST(...) を 1 件も読めない (登録の書き方が変わった?)")
+	}
+
+	missing := diffKeys(router, doc) // router にあって doc に無い
+	stale := diffKeys(doc, router)   // doc にあって router に無い
+	if len(missing) == 0 && len(stale) == 0 {
+		return
+	}
+	t.Errorf(`docs/api-compat.md が internal/server/router.go と食い違っている。
+
+**再生成が要る**: `+"`make apicompat`"+` (route dump に stack 起動が必要)。生成物が腐ると
+TestDivergenceDoc_EndpointCountMatchesAPICompat の錨も一緒に無力化する。
+
+router.go にあって api-compat.md に無い (%d 件、= endpoint を足したが再生成していない):
+  %s
+
+api-compat.md にあって router.go に無い (%d 件、= endpoint を消したか、登録の書き方が
+regexp から外れた。後者ならこのテストの routerPostRe を直す):
+  %s`,
+		len(missing), strings.Join(missing, "\n  "),
+		len(stale), strings.Join(stale, "\n  "))
+}
+
+// diffKeys returns the keys of a that b lacks, sorted.
+func diffKeys(a, b map[string]bool) []string {
+	var out []string
+	for k := range a {
+		if !b[k] {
+			out = append(out, k)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
