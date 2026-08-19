@@ -20,15 +20,8 @@ echo "=== Config file ==="
 # .config/* は gitignore なので clone 直後は存在せず、無いと failed to load config
 # で落ちる。DB / Redis の向き先は compose の MK_DB_* / MK_REDIS_* が上書きする。
 if [ ! -f .config/default.yml ]; then
-	cp .config/default.yml.example .config/default.yml
-	echo "created .config/default.yml"
-fi
-
-echo "=== Test DB config ==="
-# internal/testutil が接続時に読む。無いと TEST_DB_* の既定値にフォールバックする。
-if [ ! -f .env.test ]; then
-	cp .env.test.example .env.test
-	echo "created .env.test"
+    cp .config/default.yml.example .config/default.yml
+    echo "created .config/default.yml"
 fi
 
 echo "=== Database migration ==="

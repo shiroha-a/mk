@@ -11,7 +11,7 @@ VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/cont
 - golang-migrate、Node.js 22、pnpmがプリインストール
 - `postCreate.sh`で初期化
 
-`postCreate.sh` が `.config/default.yml` と `.env.test` を example から複製し、migration まで流す (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)。
+`postCreate.sh` が `.config/default.yml` を example から複製し、migration まで流す (`TEST_DB_*` は compose が渡すので `.env.test` は要らない) (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)。
 
 ```bash
 # VS Code で開いたら

@@ -127,19 +127,21 @@ DELETE の対象はこの残骸で、条件は
 
 上の表は「TS 製 DB へ流したときに何が起きるか」の観点なので、mk-go 専用テーブルは含めていない。
 
-**`make migrate-down` を番号をまたいで繰り返すのは、原則としてデータを失う操作。** down の大半は `DROP TABLE` / `DROP COLUMN` で up を打ち消すだけなので、その版で入った行は戻らない。`000022` まで戻せばチャット履歴が、`000025` まで戻せば下書きが、`000001` まで戻せば `user` / `note` / `drive_file` ごと消える。
+**番号をまたいで `make migrate-down` を繰り返すのは、原則としてデータを失う操作。バックアップを取ってから行うこと。** down の大半は `DROP TABLE` / `DROP COLUMN` で up を打ち消すだけなので、その版で入った値は戻らない。`000022` まで戻せばチャット履歴が、`000025` まで戻せば下書きが、`000001` まで戻せば `user` / `note` / `drive_file` ごと消える。
 
-**`-- data loss:` の宣言を目印にしないこと。** 宣言があるのは 8 本だけで、**宣言が無いまま `DROP TABLE` / `DROP COLUMN` / `DELETE` する down が 51 本ある**。運用も一貫していない — `000076` は `meta` の設定列 1 本を落とすだけで宣言しているが、同じく `meta` の設定列を落とす `000070` は「data loss も無い」と書いている。
+**個別の migration を見て「これは安全」と判断しないこと。** 判断材料になりそうなものが 2 つあるが、どちらも当てにならない。
 
-とくに注意するもの:
+- **`-- data loss:` の宣言。** あるのは 8 本だけで、**宣言が無いまま `DROP TABLE` / `DROP COLUMN` / `DELETE` する down が 51 本ある**。運用も一貫していない — `000076` は `meta` の設定列 1 本を落とすだけで宣言しているが、同じく `meta` の設定列を落とす `000070` は「data loss も無い」と書いている
+- **up が冪等かどうか。** `000029` の up は全 69 文が `IF NOT EXISTS` で TS 製 DB には何も作らないが、**down は無条件に DROP する**。落ちるのは `user_security_key` / `user_ip` / `user_memo` / `promo_note` / `promo_read` といった **upstream 所有のテーブル**と、`meta` / `user_profile` の 63 列、そして **TypeORM の `migrations` テーブル**。`000067` がわざわざ守っているものを、より悪い形で壊す。宣言は無い。同じ形 (up は冪等、down は無条件 DROP、対象は upstream) は `000030` / `000031` / `000032` / `000038` にもある
+
+方向が違うので別に挙げておくもの:
 
 | migration | 内容 |
 |---|---|
-| `000077` / `000078` | **up も down も無条件に `DELETE FROM "signup_application";` を実行する。** up 方向でも申請が消える |
-| `000072` | `instance_secret` を DROP。media proxy の HMAC 鍵なので発行済みの署名付き URL は検証に失敗するが、`Authorize` は allowlist へフォールバックするので avatar / drive / emoji / instance icon の配信は続く。鍵は次回起動時に再生成される |
+| `000077` | **up も down も無条件に `DELETE FROM "signup_application";` を実行する。** 戻すときだけでなく進めるときも申請が消える |
+| `000078` | up で `signup_application."reason"`、down で `"answers"` を DROP する。申請理由と各申請の回答が失われる |
+| `000072` | `instance_secret` を **テーブルごと** DROP する。`GetOrCreate` はテーブル不在を `ErrRecordNotFound` として扱わないので、**この状態で起動すると `resolveMediaProxySecret` が失敗して mk-go が立ち上がらない**。`mediaProxySecret` を設定ファイルに書いていれば回避できる |
 | `000074` | backfill で入れた行と実観測で入った行を区別できないので、`instance_signature_capability` の内容は適用前に戻せない |
-
-戻す前にバックアップを取ること。
 
 両バックエンドは同じデータベース上で共存できる。
 
@@ -213,7 +215,7 @@ Misskey-TSに戻す場合の手順:
 
 データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
-ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 9 件は戻らない。うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。構造を復元する down を持つのは `000029` / `000036` / `000064` / `000080` の 4 本で、残る 5 本は down が no-op。`000056` / `000081` が消した行と `000053` / `000067` が上書きした値は復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
+ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 9 件は戻らない。うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。`000056` / `000081` が消した行と `000053` / `000067` が上書きした値は、down が no-op なので復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
 
 ## drop-in 互換性の現状 (2026-05-09 時点)
 

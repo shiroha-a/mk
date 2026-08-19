@@ -23,6 +23,10 @@ services:
       TEST_DB_USER: misskey
       TEST_DB_PASS: misskey
       TEST_DB_SSLMODE: disable
+      # postCreate.sh が複製する .config/default.yml.example は url が
+      # https://example.tld/ のまま。絶対 URL を永続化する経路 (drive file /
+      # emoji の publicUrl 等) が example.tld を書き込むので上書きしておく。
+      MK_URL: "http://localhost:3000"
       TEST_REDIS_HOST: localhost
       TEST_REDIS_PORT: "6379"
       # cmd/migrate は DATABASE_URL を読まない。-config (既定 .config/default.yml)
