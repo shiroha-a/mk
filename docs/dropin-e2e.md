@@ -8,15 +8,27 @@ Misskey TS から mk-go への **drop-in 切替互換** を自動検証する e2
 
 ```
 tests/dropin/
-  gen-certs.sh        # 自己署名証明書 (a, b 用)
-  instance_a.yml      # Misskey TS 設定 (instance A)
-  instance_b.yml      # Misskey TS 設定 (instance B)
-  nginx_a.conf        # SSL 前段 (a domain)
-  nginx_b.conf        # SSL 前段 (b domain)
-  conftest.py         # pytest fixtures (tests/federation/common/ の Client を再利用)
-  test_smoke.py       # Phase 13-1 の smoke test
+  gen-certs.sh                    # 自己署名証明書 (a, b 用)
+  instance_a.yml / instance_b.yml # Misskey TS 設定
+  instance_a_mk.yml               # mk-A に差し替えたときの mk-go 設定
+  nginx_a.conf / nginx_b.conf     # SSL 前段
+  conftest.py                     # pytest fixtures (tests/federation/common/ の Client を再利用)
+  test_smoke.py                   # federation smoke
+  run-swap-test.sh                # TS → mk-go → TS の orchestrator
+  run-mkgo-born-test.sh           # mk-go 生まれの DB を TS に引き渡す orchestrator
+  run-fedibird-test.sh            # Ed25519 双方向 verify の orchestrator
+  test_swap_setup.py              # swap 前の seed
+  test_swap_seed_mkgo_only.py     # mk-go 独自機能の残留データを作る
+  test_swap_seed_ed25519_peer.py  # Ed25519 peer の seed
+  test_swap_verify.py             # mk-A 上での state 引き継ぎ検証
+  test_swap_roundtrip_verify.py   # TS-A へ戻したあとの検証
+  test_mkgo_born_verify.py        # mk-go 生まれ DB を受けた TS の検証
+  test_fedibird_ed25519.py        # Fedibird-like mock との verify
+  fedibird_mock/                  # Ed25519 を expose する AP mock
 
-docker-compose.dropin.yml  # TS-A / TS-B stack
+docker-compose.dropin.yml           # TS-A / TS-B stack
+docker-compose.dropin.mk.yml        # instance A を mk-go に差し替える overlay
+docker-compose.dropin.fedibird.yml  # fedibird-like mock の overlay
 ```
 
 ### なぜ共通 harness が `tests/federation/common/` にあるのか
@@ -48,7 +60,7 @@ make dropin-logs
 - [x] Phase 13-1 (#365): TS ↔ TS 基盤 + smoke test
 - [x] Phase 13-2 (#367): mk-go 差し替え overlay + swap シナリオ test
 - [x] Phase 13-3 (#372): 機能マトリクス拡充 (visibility 種別 / userList / specified DM)
-- [x] Phase 13-4 (#374): GitHub Actions nightly 統合
+- [x] Phase 13-4 (#374): GitHub Actions 統合 (当時は nightly。#2291 で PR トリガーへ移行)
 
 ## Phase 13-2: mk-go 差し替え (drop-in swap)
 
@@ -62,14 +74,24 @@ Redis 上の state がそのまま引き継がれる」ことを e2e で検証�
 # 完全自動の swap シナリオ test (推奨)
 make dropin-swap-test
 
-# orchestrator は以下を順次実行する:
-#   1. TS-A + TS-B stack 起動
-#   2. pytest test_swap_setup.py    (alice/bob/follow/baseline note)
-#   3. docker compose stop app-a    (TS-A backend 停止、DB / Redis は維持)
-#   4. overlay で app-a を mk-go ビルドに差し替えて起動
-#   5. pytest test_swap_verify.py   (timeline 残存、新規 reply / reaction の連合)
-#   6. teardown
+# orchestrator は以下を順次実行する (stage 番号はログの `===> stage N` と対応):
+#   1.  TS-A + TS-B stack 起動 → 両方 healthy 待ち
+#   2.  pytest test_swap_setup.py   (alice/bob/follow/baseline note)
+#   3.  docker compose stop app-a   (TS-A backend 停止、DB / Redis は維持)
+#   4.  overlay で app-a を mk-go ビルドに差し替えて起動
+#   5.  mk-A healthy 待ち → nginx-a を再起動して upstream を張り替え
+#   6.  pytest test_swap_verify.py  (timeline 残存、新規 reply / reaction の連合)
+#   6b. pytest test_swap_seed_mkgo_only.py (mk-go 独自機能の残留データを作る)
+#   7.  mk-A backend 停止 (復路の準備)
+#   8.  overlay を外して TS-A backend を起動 → healthy 待ち → nginx-a 張り替え
+#   8d. TS が migration を再実行していないことを assert (#2244)
+#   9.  pytest test_swap_roundtrip_verify.py (TS へ戻したあとの連合継続、#1082)
+#   10. teardown
 ```
+
+**復路 (stage 7-9) まで含めて 1 本のシナリオ。** 「mk-go に移れる」だけでなく
+「戻れる」ことまで見ないと drop-in とは言えない。stage 6b で mk-go 独自機能の行を
+わざと残し、TS がそれを持ったまま起動・pack できるかを stage 9 で確かめる (#2372)。
 
 ### 手動運用 (デバッグ向け)
 
@@ -97,15 +119,33 @@ state 引き継ぎは検証されない。state 検証は `dropin-swap-test` 専
 | specified visibility (DM) 残存 | `test_post_swap_specified_note_preserved` | pass |
 | user list メタデータ残存 | `test_post_swap_user_list_preserved` | pass |
 | user list timeline 残存 (membership 間接検証) | `test_post_swap_user_list_timeline_preserved` | pass |
-| mk-A から remote bob への reply 配信 | `test_post_swap_alice_can_reply` | xfail (#369 待ち) |
-| mk-A から remote bob への reaction 配信 | `test_post_swap_alice_can_react` | xfail (#369 待ち) |
+| mk-A から remote bob への reply 配信 | `test_post_swap_alice_can_reply` | pass |
+| mk-A から remote bob への reaction 配信 | `test_post_swap_alice_can_react` | pass |
+| mk-A の actor が Ed25519 を expose する | `test_post_swap_alice_actor_exposes_ed25519_assertion_method` | pass |
+| 再取得しても Ed25519 鍵が変わらない | `test_post_swap_alice_actor_ed25519_stable_across_refetch` | pass |
+| 参照先を失った引用が残る | `test_verify_dangling_quote_survived_swap` | pass |
 
-未カバー (Phase 13-3.5 以降の検討対象):
+**reply / reaction はもう xfail ではない** (#369 解消済み)。`test_swap_verify.py` に
+xfail マーカーは 1 つも無く、すべて通常のアサートとして通る。
+
+復路 (`test_swap_roundtrip_verify.py`) では以下を検証する。
+
+| シナリオ | テスト |
+|---|---|
+| TS へ戻すと actor が `assertionMethod` を出さなくなる | `test_roundtrip_alice_actor_no_longer_exposes_assertion_method` |
+| TS-A から投稿して bob が受け取れる | `test_roundtrip_alice_can_post_and_bob_receives` |
+| bob が TS-A の note にリアクションできる | `test_roundtrip_bob_can_react_to_alice_note` |
+| mk-go 独自の chat / reversi 行が残っていても TS が動く | `test_roundtrip_ts_survives_remote_{chat,reversi}_rows` |
+| TS が alice の timeline を pack できる | `test_roundtrip_ts_can_still_pack_alice_timeline` |
+| RSA へ戻した相手と mock が配送できる | `test_roundtrip_mock_can_still_deliver_with_rsa` |
+| TS が Ed25519 peer を pack できる | `test_roundtrip_ts_can_pack_ed25519_peer` |
+| TS が drive のファイルを列挙できる | `test_roundtrip_ts_can_list_drive_files` |
+
+未カバー:
 
 - カスタム絵文字 (display name / note 本文の :emoji:) — TS で emoji を作成する admin API 周りが必要
 - WebSocket streaming (`/streaming` channel 接続後の note push 受信)
 - channel timeline 残存
-- 双方向切替 (mk-A → TS-A 戻し)
 
 ## トラブルシューティング
 
@@ -187,5 +227,5 @@ PKCS#1 のため TS 側の送信連合が全滅する不具合が見つかって
 | 落ちた段階 | 意味 |
 |---|---|
 | stage 4b (TS-A healthy 待ちで timeout) | mk-go の migration が作った schema を TypeORM が受け付けなかった |
-| stage 4d (migrations digest 不一致) | migration seed (`000029`) に漏れがあり TS が再実行した |
+| stage 4d (migrations digest 不一致) | TypeORM の `migrations` seed に漏れがあり TS が再実行した。追加する場所は **`000067`** (`ClassName + timestamp` 形式)。`000029` は短縮形で seed した初版で、`000067` がそれを本家と同じ形へ書き換えている |
 | stage 5 (pytest) | schema は通ったがデータを読めない / 連合が続かない |

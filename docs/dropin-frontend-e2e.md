@@ -24,29 +24,36 @@ Misskey TS の実フロントエンドが期待する挙動を cypress で固定
 ```
 
 3 インスタンス (A / B / C) + 各々独立の Postgres / Redis / nginx + cypress runner。
-Phase 14-1 では 3 台とも TS のまま (baseline)。mk 差し替え overlay は Phase 14-3。
+baseline は 3 台とも TS。instance A を mk-go に差し替える overlay がある。
 
 ```
 tests/dropin_frontend/
-  gen-certs.sh             # a / b / c + bundle.pem 用自己署名証明書
-  instance_a.yml           # TS 用 default.yml (A)
-  instance_b.yml
-  instance_c.yml
-  nginx_a.conf             # SSL 前段 (alias: a)
-  nginx_b.conf
-  nginx_c.conf
+  gen-certs.sh                # a / b / c + bundle.pem 用自己署名証明書
+  instance_a.yml              # TS 用 default.yml (A)
+  instance_a_mk.yml           # A を mk-go に差し替えたときの設定
+  instance_b.yml / instance_c.yml
+  nginx_a.conf / nginx_b.conf / nginx_c.conf   # SSL 前段
   cypress/
-    cypress.config.ts      # electron self-signed cert 許容
-    tsconfig.json
-    package.json
+    cypress.config.ts         # electron self-signed cert 許容
+    tsconfig.json / package.json
     support/
-      e2e.ts               # uncaught 抑制
-      api.ts               # cy.request wrapper (createRootOrSignin, retryUntil 等)
+      e2e.ts                  # uncaught 抑制
+      api.ts                  # cy.request wrapper (createRootOrSignin, retryUntil 等)
+      setup.ts                # 3 インスタンスの seed (setupTrio / establishFederation)
+      mode.ts                 # CYPRESS_MODE による skip 制御 (skipInSwap)
     e2e/
-      smoke.cy.ts          # baseline spec (Phase 14-1)
-  run-frontend-baseline.sh # bash orchestrator
+      smoke.cy.ts
+      visibility.cy.ts
+      user_list.cy.ts
+      cross_instance_view.cy.ts
+      delete_note.cy.ts
+      reply_chain.cy.ts
+      federation_allowlist.cy.ts
+  run-frontend-baseline.sh    # baseline orchestrator
+  run-frontend-swap-test.sh   # TS-A → mk-A 切替の orchestrator
 
-docker-compose.dropin-frontend.yml
+docker-compose.dropin-frontend.yml     # TS-A / TS-B / TS-C stack
+docker-compose.dropin-frontend.mk.yml  # instance A を mk-go に差し替える overlay
 ```
 
 ## 実行
@@ -79,7 +86,7 @@ make dropin-frontend-logs
 | `user_list.cy.ts` | alice が list 作成 + bob 追加 + list timeline 取得 | pass |
 | `cross_instance_view.cy.ts` | charlie note を A/B 両方から observe して一致確認 | pass |
 | `delete_note.cy.ts` | charlie 削除 → A/B timeline から消える | pass |
-| `reply_chain.cy.ts` | charlie → bob reply の 2 hop | skip (#389 で調整後 activate) |
+| `reply_chain.cy.ts` | charlie 起点の note への bob の reply が charlie に届く (1 hop) | pass |
 | `federation_allowlist.cy.ts` | A の federation mode を `specified [B]` / `none` に切替えて A→B 通過 / A→C ブロックを検証 | pass (#536) |
 
 attachment / emoji / reaction は Phase 14-2.5 以降 (admin emoji 投入フロー / 
@@ -100,7 +107,7 @@ make dropin-frontend-swap-test
 #   2. CYPRESS_MODE=baseline で cypress run (12 passing)
 #   3. docker compose stop app-a (TS-A backend 停止、DB / Redis は維持)
 #   4. overlay で app-a を mk-go に差し替えて起動
-#   5. CYPRESS_MODE=swap で cypress run (8 passing + 5 skipped)
+#   5. CYPRESS_MODE=swap で cypress run (skipInSwap の 4 本を除いて実行)
 #   6. teardown
 ```
 
@@ -108,10 +115,13 @@ make dropin-frontend-swap-test
 
 | spec / test | skip 理由 |
 |------------|-----------|
-| `delete_note.cy.ts` | mk-A が inbound Delete activity を fanout cache から purge しない (#379) |
-| `reply_chain.cy.ts` | federation queue back-pressure で flaky (Phase 14-2 から継続 skip, #389) |
-| `user_list.cy.ts` 2 本 | `users/lists/push` が既 member 時に 500 を返す (#396) |
-| `visibility.cy.ts` specified DM | inbound specified Note が mk-A の mentions に現れない (#397) |
+| `delete_note.cy.ts` 1 本 | mk-A が inbound Delete activity を fanout cache から purge しない (#379) |
+| `user_list.cy.ts` 2 本 | `users/lists/push` が既 member 時に 500 を返す (#396)。2 本目は 1 本目の skip で `listId` が未設定になるため |
+| `visibility.cy.ts` 1 本 | inbound specified Note が mk-A の mentions に現れない (#397) |
+
+**`reply_chain.cy.ts` は skip していない。** queue back-pressure で flaky だった
+2 hop 版 (#389) を **1 hop 版に書き換えて有効化済み**。AP の reply 配送は replyTo の
+owner への直接デリバリなので、そこに届くことを見れば連鎖の整合は担保できる。
 
 baseline (all TS) ではこれらも全 pass するため、skip は `CYPRESS_MODE=swap` 時のみ発動する。対応 issue 修正後に `skipInSwap` を外す。
 

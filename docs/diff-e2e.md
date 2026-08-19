@@ -65,7 +65,7 @@ make diff-down    # stop + volume ごと破棄
 | `tests/diff/diff_core.py` | JSON 値 diff の中核。ignore-list 付き再帰比較。**stdlib のみ**で unit-test 可能 |
 | `tests/diff/test_diff_core.py` | diff-core の unit test (`python3 tests/diff/test_diff_core.py` で単体実行) |
 | `tests/diff/conftest.py` | `mkgo` / `ts` fixture (Client) + health 待ち。env URL から接続 |
-| `tests/diff/test_endpoints.py` | endpoint 別の差分テスト (現状 meta + note packing の PoC) |
+| `tests/diff/test_endpoints.py` | endpoint 別の差分テスト (30 件) |
 | `tests/diff/{mkgo,ts}.yml` | 各 instance の config |
 | `tests/diff/Dockerfile.runner` | pytest + requests の runner image |
 | `docker-compose.diff.yml` | 2 backend + DB/Redis + runner |
@@ -84,34 +84,53 @@ endpoint 固有のノイズ (meta の operator 設定、note の user オブジ�
 ## 検出した乖離の扱い
 
 確認された値レベル乖離は **#2078 の sub-issue** として個別に起票し、通常の
-issue 消化ワークフロー (実装 → 敵対的レビュー → PR → CI → squash-merge) で潰す。
+issue 消化ワークフロー (実装 → 敵対的レビュー → PR → CI → rebase and merge) で潰す。
 ハーネス自体の endpoint coverage 拡張は #2089 で追う。
 
 ## CI 方針
 
-dropin/playwright 同様、**PR の required check には含めない** (2 backend 起動 +
-image pull で重く、external image の flaky 要素もある)。nightly か手動
-(`make diff-test`) 運用とする。diff-core の unit test だけは軽いので、必要なら
-別途 lint/test に組み込める。
+`.github/workflows/diff-e2e.yml` が **PR ごとに** `make diff-check` を実行する
+(paths フィルタ付き、`workflow_dispatch` でも発火)。
 
-## 検証状況
+dropin/playwright 同様、**required check には含めない** (2 backend 起動 +
+image pull で重く、external image の flaky 要素もある)。CI 上の check 名は `diff`。
 
-初回 bring-up で end-to-end 動作を確認済 (fresh stack):
+```bash
+make diff-check    # down → up → healthy 待ち → pytest を通しで (クリーン DB 前提)
+make diff-test     # スタックが既に上がっている場合
+```
 
-- diff-core unit test 13 件 + `test_meta_value_parity` + `test_note_packing_parity`
-  = **15 passed**。
-- `test_note_packing_parity`: mk-go と TS の packed note が (instance noise を除き)
-  **値レベルで一致** することを確認。
-- `test_meta_value_parity`: meta は instance state (mediaProxy host / proxyAccountName)
-  のノイズを `META_IGNORE` で吸収した上で pass。version-gap 由来の除外は TS image を
-  2026.7.0 に揃えた時点で不要になったため、`META_IGNORE` に残っているものは
-  instance state 起因だけかを追従のたびに見直すこと。
+非ブロッキングを `continue-on-error` で実現しないこと (job が成功扱いになる)。
+
+## カバレッジ
+
+pytest の総数は 43 で、内訳は:
+
+- **endpoint 比較 30 件** (`test_endpoints.py`) — mk-go と TS に同じリクエストを
+  投げて値を突き合わせるもの
+- diff-core の unit test 13 件 (`test_diff_core.py`) — 差分の取り方そのものの検証。
+  stdlib のみなので `python3 tests/diff/test_diff_core.py` で単体実行できる
+
+**「43 比較」ではない。** 実際に 2 backend を突き合わせているのは 30 件。
+
+比較対象は meta / user / note (reaction / reply / renote / hashtag / state / poll) /
+clip / user list / channel / antenna / drive file / drive folder / OAuth app /
+page / announcement / emoji / flash / favorites / mute list / timeline
+(home / local / user notes / followee) / follow request / user relation。
+
+`test_meta_value_parity` の `META_IGNORE` は instance state (mediaProxy host /
+proxyAccountName) のノイズを吸収するためのもの。version-gap 由来の除外は TS image を
+2026.7.0 に揃えた時点で不要になったため、**残っているものが instance state 起因だけかを
+追従のたびに見直すこと**。
 
 ## 既知の制約・今後
 
 - 公式 image の公開は upstream release から遅れる。追従直後に version を厳密に
   合わせたい場合は third_party/misskey からの source build に切り替える。
-- 初回 `make diff-test` は ignore-path の調整 (endpoint 固有ノイズの洗い出し) を
-  伴う。PoC endpoint で当たりを付けてから coverage を広げる。
+- endpoint を足すときは ignore-path の調整 (endpoint 固有ノイズの洗い出し) が
+  伴う。**ignore-list を安易に広げないこと** — 空振りさせると本物の乖離が埋もれる。
+  追加時は `docs/divergence.md` に対応する記述があるかを確認する。
+  `META_IGNORE` と `USER_IGNORE` は別定義で後者は前者を継承していないので、
+  `policies` のような両方に現れるキーは両方へ足す必要がある。
 - auth が要る endpoint は `Client.ensure_admin` の token を使う。複雑な seed
   (follow/反応/連合) が要る endpoint は fixture を足して対応する。

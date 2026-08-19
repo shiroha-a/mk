@@ -5,7 +5,7 @@
 ## 前提条件
 
 - Go 1.26+
-- PostgreSQL 16+ (既存のMisskey-TSデータベース)
+- PostgreSQL 16+ (既存のMisskey-TSデータベース)。**mk-go の compose 群と CI は 18 に統一している** (#2513) ので、docker で運用するなら 18 に上げてから移行する方が構成が揃う。既存の 16 volume はイメージを上げるだけでは開けず dump→restore が要る (手順: [deployment.md](deployment.md#postgresql-16--18-への移行-既存環境))
 - Redis 7+
 - git
 
