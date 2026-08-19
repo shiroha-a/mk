@@ -653,11 +653,16 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 `internal/config/config.go` の `bindEnvKeys()` を見ること。運用向けの説明は
 [docs/configuration.md](docs/configuration.md)。
 
-**登録していないキーは `MK_` で上書きできず、黙って無視される。** Viper は
-`AutomaticEnv` を有効にしているが、`Unmarshal` が拾うのは viper が知っている
-キーだけなので、`bindEnvKeys()` に無いものは効かない。具体的には
-`meilisearch.*` と `<queue>JobConcurrency` / `<queue>JobPerSec` は**環境変数で
-設定できない** (設定ファイルに書くこと)。新規に増やす場合は同関数に追加する。
+**登録の有無で「作れるか」だけが変わる。** Viper は `AutomaticEnv` を有効にしている
+ので、**設定ファイルにそのキーが書かれていれば `MK_` で上書きできる**。
+`bindEnvKeys()` に登録されているキーは、ファイルに書かれていなくても `MK_` だけで
+設定できる。逆に未登録かつファイルにも無いキーは `MK_` では作れない。
+
+実務上は `.config/*.yml.example` が既定でコメントアウトしているものが引っかかる。
+`meilisearch:` と `<queue>JobConcurrency` / `<queue>JobPerSec` は**コメントアウトされた
+まま**なので、example をそのまま使う構成では `MK_MEILISEARCH_HOST` /
+`MK_DELIVERJOBCONCURRENCY` を export しても効かない。使うならまず yml 側の
+コメントを外す。
 
 **`MK_*` はファイルより優先される。** 手元で export したまま `internal/config` の
 テストを走らせると、設定ファイルの値を期待するケースが落ちる。

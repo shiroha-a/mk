@@ -113,7 +113,7 @@ pytest の総数は 43 で、内訳は:
 
 **「43 比較」ではない。** 実際に 2 backend を突き合わせているのは 30 件。
 
-比較対象は meta / user (packing / rich profile / relation) / `i/me` (基本 / detailed) /
+比較対象は meta / user (packing / rich profile / relation) / `i/me` /
 note (packing / reaction / reply / renote / hashtag / state / poll) / clip / user list /
 channel / antenna / drive file / drive folder / OAuth app / page / announcement /
 emoji / flash / favorites / mute list / timeline (home / local / user notes /

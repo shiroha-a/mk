@@ -35,7 +35,7 @@ Misskey互換クライアント(Miria等)は、misskey-jsの型に従ってレ�
 | `tools/shapediff/` | snapshot再生成 + 全family drift report |
 | `internal/entitycompat/plugin_surface_test.go` | 公開プラグイン API の面 (`TestPluginSurfaceDrift`) |
 | `internal/entitycompat/plugin_doc_test.go` | `docs/plugins/authoring.md` の一覧 ↔ 公開面 golden (`TestPluginDoc_*` 5 本) |
-| `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物 (`TestDivergenceDoc_*` 5 本) |
+| `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物、`docs/api-compat.md` ↔ router.go (`TestDivergenceDoc_*` 6 本) |
 | `internal/entitycompat/schema_drift_test.go` | migration の列 ↔ upstream entity (`TestSchemaDrift_CreateOnlyColumns`) |
 | `internal/entitycompat/migration_seed_test.go` | TypeORM `migrations` seed の網羅 (`TestMigrationSeed_CoversUpstream`) |
 

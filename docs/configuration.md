@@ -237,23 +237,25 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 `logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 28 が
 トップレベル。全量はその関数を見ること。
 
-**登録していないキーは `MK_` で上書きできず、黙って無視される。** Viper は
-`AutomaticEnv` を有効にしているが、`Unmarshal` が拾うのは viper が知っているキー
-だけなので、`bindEnvKeys()` に無いものは効かない。よく間違えるもの:
+**登録の有無で「作れるか」だけが変わる。** Viper は `AutomaticEnv` を有効にしている
+ので、**設定ファイルにそのキーが書かれていれば `MK_` で上書きできる**。`bindEnvKeys()`
+に登録されているキーは、ファイルに書かれていなくても `MK_` だけで設定できる。
 
-| 設定したいもの | `MK_` で設定できるか |
-|---|---|
-| `meilisearch.host` / `.apiKey` など | **できない** (設定ファイルに書く) |
-| `deliverJobConcurrency` / `inboxJobConcurrency` などの concurrency | **できない** |
-| `deliverJobPerSec` などの rate limit | **できない** |
-| `jobQueueDriver` / `jobQueueAutoScale` / `maxWorkers` / `minWorkers` / `maxWorkersGlobal` | できる |
-| `sentryForBackend.options.dsn` (`MK_SENTRYFORBACKEND_OPTIONS_DSN`) | できる |
-| 用途別 Redis の各項目 (`MK_REDISFORJOBQUEUE_HOST` など) | できる |
+| | `bindEnvKeys()` に登録あり | 登録なし |
+|---|---|---|
+| yml にキーがある | `MK_` で上書きできる | **`MK_` で上書きできる** |
+| yml にキーが無い | `MK_` だけで設定できる | **効かない** (黙って無視される) |
 
-ここに無いキーを `MK_` で上書きしたい場合は `bindEnvKeys()` への追加が要る。
+引っかかるのは `.config/*.yml.example` が既定でコメントアウトしているものです。
+`meilisearch:` (`default.yml.example:245`) と `<queue>JobConcurrency` /
+`<queue>JobPerSec` (同 291-296) は**コメントアウトされたまま**なので、example を
+そのまま使う構成では `MK_MEILISEARCH_HOST` / `MK_DELIVERJOBCONCURRENCY` を export
+しても効きません。使うならまず yml 側のコメントを外してください。
 
-**`MK_*` は設定ファイルより優先される。** 手元で export したまま
-`internal/config` のテストを走らせると、ファイルの値を期待するケースが落ちる。
+ファイルに書かずに環境変数だけで設定したいものは `bindEnvKeys()` への追加が要ります。
+
+**`MK_*` は設定ファイルより優先されます。** 手元で export したまま
+`internal/config` のテストを走らせると、ファイルの値を期待するケースが落ちます。
 
 新しいオーバーライド対象を追加する場合は`internal/config/config.go`の`bindEnvKeys()`にキーを追加する。
 

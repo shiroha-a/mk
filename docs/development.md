@@ -62,7 +62,7 @@ make dev
 | `make check` | `fmt` → `lint` → `test`。コミット前に必須 |
 | `make gates` | 静的 parity ゲート 4 種を一括実行 |
 | `make version` | mk-go / 互換 Misskey / submodule のバージョンを表示 |
-| `make frontend-check` | 同梱フロントエンドを型チェック (`vue-tsc --noEmit`)。ビルド成果物を作らないので安全 |
+| `make frontend-check` | 同梱フロントエンドを型チェック (`vue-tsc --noEmit`) **だけ**。ビルド成果物を作らないので安全。CI の同名 job はこれに加えて `make plugins-all` と統合バイナリの build を別 step で走らせる |
 | `make diff-check` | 差分比較ハーネスを作り直して実行 (クリーン DB 前提のため) |
 | `make playwright-check` | Playwright を作り直して実行 (同上) |
 | `make e2e-down-all` | 検証用スタックを一括撤去。**本番 project `mk` は対象外** |
@@ -280,7 +280,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | check | workflow | 内容 |
 |---|---|---|
 | `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 |
-| `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + `make plugins-all` と統合バイナリの build |
+| `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + `make plugins-all` と統合バイナリの build。**`make frontend-check` は型チェックだけ**なので、job 全体を手元で再現するには `make plugins-all && go build ./cmd/misskey` も要る |
 | `plugin-tests` | CI | 同梱プラグインのテスト (別 module なので `go list ./...` に入らない) |
 | `build-and-push` / `-bundled` | Docker | image がビルドできるか (PR では push しない) |
 | `spec (mk-go 1/4)` 〜 `4/4` | Playwright | ブラウザからの統合互換。TS backend での実行は `workflow_dispatch` のみ |

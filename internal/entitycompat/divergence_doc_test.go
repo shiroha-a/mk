@@ -554,10 +554,11 @@ var apiCompatRowRe = regexp.MustCompile("^\\| (GET|POST) \\| `(/api/[^`]*)` \\|"
 // routes from router.go. `api` is the echo group mounted at `/api`.
 var (
 	routerPostRe  = regexp.MustCompile(`\bapi\.POST\("([^"]+)"`)
+	routerGetRe   = regexp.MustCompile(`\bapi\.GET\("([^"]+)"`)
 	routerMatchRe = regexp.MustCompile(`\bapi\.Match\(chartMethods, "([^"]+)"`)
 )
 
-// TestDivergenceDoc_APICompatIsFresh asserts that the committed
+// TestAPICompatDoc_MatchesRouter asserts that the committed
 // docs/api-compat.md still describes the routes router.go registers.
 //
 // **生成物そのものが腐ると、それを錨にしている gate も一緒に無力化する。**
@@ -567,13 +568,16 @@ var (
 // `mk-go only: 49` のまま腐っていた (#2640)。
 //
 // `make apicompat` の route dump には stack (DB / Redis) が要るのでテストからは
-// 呼べない。代わりに router.go の**静的な登録**と突き合わせる。POST だけを見るのは
-// GET variant が生成物側で別扱いになるためで、endpoint を足す操作は必ず POST を
-// 伴うのでこれで足りる。
+// 呼べない。代わりに router.go の**静的な登録**と突き合わせる。
+//
+// **POST と GET の両方を見る。** 「endpoint を足す操作は必ず POST を伴う」は
+// 成り立たない — `/api/v1/instance/peers` は upstream 側も fastify の
+// `get()` 直登録で、mk-go も `api.GET` 一本しか持たない。POST だけを母集団に
+// すると同種の GET-only endpoint がこの gate から見えなくなる。
 //
 // 同梱プラグインのルート (`/api/plugin/*`) は router.go に literal で現れず、
 // 生成物にも (bundled のうち enabled なものだけが) 載る。母集団から外す。
-func TestDivergenceDoc_APICompatIsFresh(t *testing.T) {
+func TestAPICompatDoc_MatchesRouter(t *testing.T) {
 	blob, err := os.ReadFile(filepath.Join("..", "..", "docs", "api-compat.md"))
 	if err != nil {
 		t.Fatalf("read docs/api-compat.md: %v", err)
@@ -581,10 +585,10 @@ func TestDivergenceDoc_APICompatIsFresh(t *testing.T) {
 	doc := map[string]bool{}
 	for _, line := range strings.Split(string(blob), "\n") {
 		m := apiCompatRowRe.FindStringSubmatch(line)
-		if m == nil || m[1] != "POST" || strings.HasPrefix(m[2], "/api/plugin/") {
+		if m == nil || strings.HasPrefix(m[2], "/api/plugin/") {
 			continue
 		}
-		doc[strings.TrimPrefix(m[2], "/api")] = true
+		doc[m[1]+" "+strings.TrimPrefix(m[2], "/api")] = true
 	}
 
 	src, err := os.ReadFile(filepath.Join("..", "..", "internal", "server", "router.go"))
@@ -600,11 +604,15 @@ func TestDivergenceDoc_APICompatIsFresh(t *testing.T) {
 	joined := strings.Join(body, "\n")
 	router := map[string]bool{}
 	for _, m := range routerPostRe.FindAllStringSubmatch(joined, -1) {
-		router[m[1]] = true
+		router["POST "+m[1]] = true
 	}
-	// charts は GET/POST 両方を Match で登録する。POST 側だけ数える。
+	for _, m := range routerGetRe.FindAllStringSubmatch(joined, -1) {
+		router["GET "+m[1]] = true
+	}
+	// charts は GET / POST の両方を 1 回の Match で登録する。
 	for _, m := range routerMatchRe.FindAllStringSubmatch(joined, -1) {
-		router[m[1]] = true
+		router["POST "+m[1]] = true
+		router["GET "+m[1]] = true
 	}
 
 	// **0 件で通さない。** どちらかの書式が変わったら黙って空集合同士が一致する。
@@ -612,7 +620,39 @@ func TestDivergenceDoc_APICompatIsFresh(t *testing.T) {
 		t.Fatal("docs/api-compat.md から POST 行を 1 件も読めない (tools/apicompat の出力書式が変わった?)")
 	}
 	if len(router) == 0 {
-		t.Fatal("internal/server/router.go から api.POST(...) を 1 件も読めない (登録の書き方が変わった?)")
+		t.Fatal("internal/server/router.go から api.POST/GET(...) を 1 件も読めない (登録の書き方が変わった?)")
+	}
+
+	// **0 件チェックだけでは足りない。** 部分的な取りこぼしは router 側の集合が
+	// 小さくなるだけなので、生成物との差が出ずに黙って一致する。呼び出しの総数と
+	// 抽出できた数が合うことまで見る。
+	//
+	// これで塞がるのは「path が literal でない / 複数行に分かれている」形。
+	// `api.Group(...)` でサブグループを切って登録する形は別途 0 件で固定する
+	// (現状 router.go に api.Group は無く、プラグインのルートだけが
+	// plugin_wiring.go で動的に生やしている)。
+	for _, c := range []struct {
+		call    string
+		matched int
+	}{
+		{"api.POST(", len(routerPostRe.FindAllStringSubmatch(joined, -1))},
+		{"api.GET(", len(routerGetRe.FindAllStringSubmatch(joined, -1))},
+		{"api.Match(", len(routerMatchRe.FindAllStringSubmatch(joined, -1))},
+	} {
+		if got := strings.Count(joined, c.call); got != c.matched {
+			t.Fatalf(`router.go の %s は %d 件あるが、path を抽出できたのは %d 件。
+
+**取りこぼした分だけ gate が緩くなる。** path が literal でない (変数経由) か、
+呼び出しが複数行に分かれている可能性がある。このテストの正規表現を実態に
+合わせるか、登録を 1 行の literal に戻すこと。`, c.call, got, c.matched)
+		}
+	}
+	if n := strings.Count(joined, "api.Group("); n != 0 {
+		t.Fatalf(`router.go に api.Group( が %d 件ある。
+
+サブグループ配下の登録は `+"`api.POST(`"+` として現れないのでこのテストから見えず、
+**そこに足した endpoint は生成物と照合されない**。抽出をサブグループ対応に
+拡張すること。`, n)
 	}
 
 	missing := diffKeys(router, doc) // router にあって doc に無い

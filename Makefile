@@ -40,7 +40,7 @@ version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "互換 Misskey     : %s\n" "$$(sed -n 's/^var MisskeyVersion = "\(.*\)"/\1/p' internal/config/config.go)"
 	@printf "submodule (fork) : %s\n" "$$(git -C third_party/misskey describe --tags 2>/dev/null || echo '(未取得)')"
 
-frontend-check: ## fork の frontend を型チェック (vue-tsc + eslint)
+frontend-check: ## fork の frontend を型チェック (vue-tsc --noEmit のみ)
 	# uds-frontend-build / e2e-frontend-build は本番が bind-mount している
 	# third_party/misskey/built を書き換えるため、検証目的では使わないこと。
 	# 型を見るだけならこちらで済む (Docker 不要、出力物も作らない)。

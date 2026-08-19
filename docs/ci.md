@@ -44,7 +44,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | check | workflow | 見ているもの | 実測 | 手元での再現 |
 |---|---|---|---|---|
 | `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 | 1 min | `GOOS=linux govulncheck ./...` |
-| `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + `make plugins-all` と統合バイナリの build | 1.5 min | `make frontend-check` |
+| `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + `make plugins-all` と統合バイナリの build | 1.5 min | `make frontend-check` (型のみ) + `make plugins-all && go build ./cmd/misskey` |
 | `plugin-tests` | CI | 同梱プラグインのテスト (別 module なので `go list ./...` に入らない) | 1 min | `make plugin-test` |
 | `e2e (1/4)` 〜 `4/4` | Upstream backend e2e | **本家の backend e2e 1245 テスト**が mk-go に対して通るか | 3-7 min | `make upstream-e2e` |
 | `diff` | Diff e2e | mk-go と TS の**レスポンスの値**が一致するか (endpoint 比較 30 件) | 4 min | `make diff-check` |
