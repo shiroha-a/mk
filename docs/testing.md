@@ -17,10 +17,22 @@
 | Playwright e2e | mk-go と Misskey TS の両 backend で API/frontend 統合互換を検証 | Docker Compose 全部 | `tests/playwright/` 配下 (#744、370 spec。PR ごとに mk-go、upstream 追従時に TS backend) |
 | 本家 backend e2e | Misskey 本家の `test/e2e/**` をテスト本体無改変で mk-go に向けて実行 | PostgreSQL / Redis + mk-go バイナリ | `make upstream-e2e` (#2347、25 ファイル 1245 テスト。詳細は[upstream-backend-e2e.md](upstream-backend-e2e.md)) |
 
+## 手元の準備
+
+**PostgreSQL は自分で用意する。** Redis は testcontainers が立ててくれるが、DB を使うテストの大半は外部の PostgreSQL に直接つなぐので、Docker があるだけでは `make test` は通らない (下記「testcontainers」参照)。
+
+```bash
+cp .env.test.example .env.test    # TEST_DB_* が入っている。必要なら編集する
+```
+
+`internal/testutil` が起動時にプロジェクトルートの `.env.test` を読み、既に設定済みの環境変数は上書きしない。**export で直接渡してもよい。** `.env.test` は `.gitignore` 済み。
+
+接続先の PostgreSQL には `TEST_DB_NAME` (既定 `misskey_test`) のデータベースが要る。CI は service container を立てて同じ環境変数を渡している。
+
 ## 実行方法
 
 ```bash
-# 全テスト (testcontainersでPostgreSQL/Redisが自動起動、Docker必須)
+# 全テスト (.env.test か TEST_DB_* で指した PostgreSQL に接続する)
 make test
 
 # 特定パッケージ
@@ -48,9 +60,32 @@ go tool cover -html=coverage.out
 
 CIではパッケージごとにカバレッジを計測し、閾値未達のパッケージがあればジョブが失敗する。CI は **4-way matrix shard** で並列実行され、ImportPath 順 modulo 分配で決定的にパッケージを割り当てる (約 4.7 分 → 1.5-2 分に短縮)。
 
+## DB を使うテストの分離 (#2450)
+
+`testutil.OpenTestDB` / `MustOpenTestDB` は**呼び出し元のパッケージ専用の PostgreSQL schema** に接続する (`internal/api/gallery` なら `internal_api_gallery`)。schema 名は呼び出し元から自動で決まるので、新しいパッケージも何もしなくても隔離される。
+
+`go test` は**パッケージのテストバイナリを並行実行する**。CI は shard ごとに PostgreSQL を 1 つしか立てないため、共有すると一方の後片付けが他方の前提を壊す。実際に `internal/charttick` の `DELETE FROM "user"` が `internal/api/gallery` の所有者 user を消し、**Go を一切触っていない PR で CI が落ちた**。
+
+守ること:
+
+- **DB を読み書きするテストで `OpenSharedTestDB` を使わない。** これは `internal/db` のように接続処理そのものを試すテスト専用
+- schema が分かれているので `DELETE FROM "user"` のような無条件の削除は書いてよい。ただし**それは自分の schema に閉じている前提**に依存するので、`search_path` を跨ぐ生 SQL (`public.` 明示など) を書かない
+- 行の投入は**戻り値を検査する** (`require.NoError(t, db.Create(x).Error)`)。捨てると FK 違反が黙って流れ、「200 のはずが 400」のような原因から遠い症状に化ける
+
+migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL` を使う。`pg_type WHERE typname = ...` は **schema を見ない**ため、別 schema に同名の型があるだけで作成を飛ばし、直後の `CREATE TABLE` が落ちる。
+
 ## testcontainers
 
-`internal/testutil/containers.go`がtestcontainers-goでPostgreSQL 18とRedis 7のコンテナを自動起動する。ローカルにDocker環境があれば特別な準備なしでテストを実行できる。
+`internal/testutil/containers.go` が testcontainers-go で PostgreSQL 18 / Redis 7 のコンテナを起動するヘルパー (`SetupPostgres` / `SetupRedis` / `SkipIfNoDocker`) を提供する。
+
+**PostgreSQL と Redis で使われ方がまったく違う。**
+
+| | testcontainers | 外部サービス |
+|---|---|---|
+| Redis | `SetupRedis` を **25 パッケージ**が使う。`SkipIfNoDocker` で Docker が無ければ skip する | — |
+| PostgreSQL | `SetupPostgres` は `internal/api/test` の **1 パッケージのみ** | `OpenTestDB` / `MustOpenTestDB` を **15 パッケージ**が使い、`TEST_DB_*` の指す PostgreSQL に直接つなぐ |
+
+つまり **Redis は Docker があれば足りるが、PostgreSQL は自分で用意する必要がある**。`MustOpenTestDB` は失敗時に panic し、しかも `init()` から呼ばれるので、PostgreSQL が無いと該当パッケージはまとめて落ちる (skip されない)。
 
 ```go
 // PostgreSQLコンテナ起動 + マイグレーション自動適用

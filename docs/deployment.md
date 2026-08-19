@@ -187,12 +187,14 @@ FROM misskey/misskey:2026.7.0 AS misskey-assets
 FROM ghcr.io/shiroha-a/mk:latest
 COPY --from=misskey-assets /misskey/built /frontend
 COPY --from=misskey-assets /misskey/packages/frontend/assets /client-assets
-COPY --from=misskey-assets /misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg /twemoji
+COPY --from=misskey-assets /misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji /twemoji
+COPY --from=misskey-assets /misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/fluent-emoji /fluent-emoji
 COPY --from=misskey-assets /misskey/packages/backend/assets /static
 COPY --from=misskey-assets /misskey/assets /repo-assets
 ENV MISSKEY_FRONTEND_DIR=/frontend/_frontend_vite_
 ENV MISSKEY_FRONTEND_DIST_DIR=/frontend/_frontend_dist_
 ENV MISSKEY_TWEMOJI_DIR=/twemoji
+ENV MISSKEY_FLUENT_EMOJI_DIR=/fluent-emoji
 ENV MISSKEY_CLIENT_ASSETS_DIR=/client-assets
 ENV MISSKEY_STATIC_DIR=/static
 ENV MISSKEY_REPO_ASSETS_DIR=/repo-assets
@@ -229,8 +231,7 @@ cp .config/default.yml.example .config/default.yml
 # ビルド
 make build
 
-# マイグレーション適用
-export DATABASE_URL="postgres://user:pass@localhost:5432/misskey?sslmode=disable"
+# マイグレーション適用 (接続先は .config/default.yml から読む)
 make migrate-up
 
 # 起動
@@ -583,7 +584,6 @@ make e2e-frontend-build
 make build
 
 # マイグレーションは手動適用 (compose と違い自動では走らない)
-export DATABASE_URL="postgres://user:pass@localhost:5432/misskey?sslmode=disable"
 make migrate-up
 
 # 再起動
@@ -592,7 +592,11 @@ sudo systemctl restart misskey    # systemd の場合
 
 ### 切り戻し
 
-`schema_migrations` のバージョンが進んでいるので、バイナリだけ戻すと古い mk-go が新しいスキーマを読むことになる。追加のみのマイグレーション (`ADD COLUMN` / `CREATE TABLE` / `CREATE INDEX`) であれば旧バイナリでも動くが、破壊的な変更を含むリリースでは `make migrate-down` で段階的に戻す必要がある。リリースノートで破壊的変更の有無を確認すること。
+`schema_migrations` のバージョンが進んでいるので、バイナリだけ戻すと古い mk-go が新しいスキーマを読むことになる。追加のみのマイグレーション (`ADD COLUMN` / `CREATE TABLE` / `CREATE INDEX`) であれば旧バイナリでも動くが、破壊的な変更を含むリリースでは `make migrate-down` (1 段) を必要な回数繰り返して戻す。リリースノートで破壊的変更の有無を確認すること。
+
+> **`go run ./cmd/migrate -direction down` を本番で叩かないこと。** `-steps` を省くと「全部」の意味になり、全 down マイグレーションが走って schema が消える。
+>
+> **down が用意されていても戻せない migration がある。** `000081` は孤児行を DELETE するが、削除した行の内容を保存していないので down は no-op。詳細は [TS版からの移行](migration-from-ts.md#破壊的なマイグレーション)。
 
 Misskey TS へ戻す場合は[TS版からの移行](migration-from-ts.md)を参照。
 

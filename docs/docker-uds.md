@@ -46,7 +46,8 @@ make uds-frontend-build
 
 なお `pnpm install --frozen-lockfile` が本家のnode_modulesも生成するため、以下も同時に揃います。これらは `deploy/uds/Dockerfile.mkgo` が `COPY` で runtime image に焼き込み、mk-go の `/twemoji/*` / `/assets/*` ルートから配信します。
 
-- `third_party/misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg/` (twemoji SVG set、約18MB)
+- `third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji/` (twemoji SVG set)
+- `third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/fluent-emoji/` (実績バッジ / 通知アイコン)
 - `third_party/misskey/assets/` (`ai.png` 等、約684KB)
 
 `make uds-frontend-build` を省略すると image ビルド時にこれらの存在チェックが fail してビルドが止まります。

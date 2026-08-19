@@ -32,8 +32,7 @@ cd mk
 cp .config/default.yml.example .config/default.yml
 # default.yml を編集してDB/Redis接続先を設定
 
-# マイグレーション適用
-export DATABASE_URL="postgres://user:pass@localhost:5432/misskey?sslmode=disable"
+# マイグレーション適用 (接続先は上で編集した default.yml から読む)
 make migrate-up
 
 # 起動
@@ -110,8 +109,9 @@ cd mk && docker compose up -d
 
 | ターゲット | 内容 |
 |---|---|
-| `make migrate-up` | 最新まで適用 (`DATABASE_URL`必要) |
-| `make migrate-down` | 1段階ロールバック |
+| `make migrate-up` | 最新まで適用 |
+| `make migrate-down` | 1段階ロールバック (`-steps 1`) |
+| `go run ./cmd/migrate -direction down` | **全段ロールバック**。`-steps` 未指定は「全部」の意味で、schema が消える |
 | `make migrate-create` | 新規マイグレーションファイル作成 |
 
 #### 大規模テーブルへの index 追加

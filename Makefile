@@ -193,13 +193,18 @@ fmt: ## gofmt -s -w . で整形
 lint: ## go vet ./...
 	go vet ./...
 
-# Migration (requires DATABASE_URL env var)
+# Migration
+#
+# 接続先は -config (既定 .config/default.yml) から決まる。DATABASE_URL は読まない。
+# 別の DB へ流すなら -config を渡すか MK_DB_* で上書きする。
 ##@ マイグレーション
-migrate-up: ## マイグレーションを最新まで適用 (DATABASE_URL 必要)
+migrate-up: ## マイグレーションを最新まで適用
 	go run ./cmd/migrate -direction up
 
+# **-steps 1 は必須。** cmd/migrate は steps 未指定 (0) を「全部」と解釈するので、
+# 付け忘れると 1 段のつもりで全 down が走り schema が消える。
 migrate-down: ## マイグレーションを 1 段階ロールバック
-	go run ./cmd/migrate -direction down
+	go run ./cmd/migrate -direction down -steps 1
 
 migrate-create: ## 新規マイグレーションファイルを作成
 	@read -p "Migration name: " name; \

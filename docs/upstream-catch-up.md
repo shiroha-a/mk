@@ -72,7 +72,8 @@ docker compose -f compose.uds.yaml up --build -d
 submodule bump PR には mk-go 側の migration が同梱されることが多い (例: PR #998 の `migration/000048_avatar_decoration_category.{up,down}.sql`)。本番環境では:
 
 ```bash
-DATABASE_URL='postgres://...' make migrate-up
+# 接続先は -config (既定 .config/default.yml) から決まる
+make migrate-up
 ```
 
 migration 連番は `migration/00NNNN_*.up.sql` の命名規則に従う (= 各 migration の番号は前との連続性を保つ)。

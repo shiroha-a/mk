@@ -38,7 +38,8 @@ Docker内でフロントエンドがビルドされ、成果物は `third_party/
 ```bash
 export MISSKEY_FRONTEND_DIR=/path/to/misskey/built/_frontend_vite_
 export MISSKEY_FRONTEND_DIST_DIR=/path/to/misskey/built/_frontend_dist_
-export MISSKEY_TWEMOJI_DIR=/path/to/misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg
+export MISSKEY_TWEMOJI_DIR=/path/to/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji
+export MISSKEY_FLUENT_EMOJI_DIR=/path/to/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/fluent-emoji
 export MISSKEY_CLIENT_ASSETS_DIR=/path/to/misskey/packages/frontend/assets
 export MISSKEY_STATIC_DIR=/path/to/misskey/packages/backend/assets
 ```
@@ -69,7 +70,9 @@ id: aidx             # Misskey-TS側のID生成方式と一致させること
 
 ## 4. データベースマイグレーション
 
-mk-goは既存のMisskey-TSテーブルには手を加えず、独自のテーブルを追加する形で共存する。既存データは保持される。
+mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは保持される。**
+
+共有テーブルにも触るものが 5 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
 
 ```bash
 # ローカルビルドの場合
@@ -81,7 +84,29 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 
 これによりGo側で必要な追加テーブル (`app`, `auth_session`, `webhook`, `sw_subscription`, `chat_room`, `chat_message`, `bubble_game_record` 等) が作成される。
 
-> **補足:** mk-goのマイグレーションは追加のみで、既存のMisskey-TSテーブルを変更しない。両バックエンドは同じデータベース上で共存できる。
+### 破壊的なマイグレーション
+
+「追加のみ」ではない。共有テーブルに触るものが 5 件ある。**うち 4 件は mk-go が余分に作ったものを削るか upstream に追随するもので、Misskey-TSが書いたデータには影響しない。**
+
+| migration | 内容 | 位置づけ |
+|---|---|---|
+| `000029` | `poll_vote."createdAt"` を DROP | mk-goが余分に作った列。upstream の `MiPollVote` に元から無く、mk-go も書き込むだけで読んでいなかった |
+| `000064` | `registration_ticket_pendingUserId_fkey` を DROP | mk-goが `000026` で余分に張った FK (#2083)。upstream の `pendingUserId` は無制約 `varchar`。この FK があると確認メール再送防止が必ず FK 違反で no-op になっていた |
+| `000068` | 冗長な index を DROP | **落とすのは mk-go の migration が作った index だけ**。upstream 由来の index は絶対に触らない (触ると本家が再作成できず復路が壊れるため) |
+| `000080` | `note` の自己参照 FK (`renoteId` / `replyId`) を DROP | **upstream 追随。** 本家も 2025.8.0 の `1753868431598-remove_note_constraints.js` でこの 2 本を削除しており、現在の `MiNote` は `createForeignKeyConstraints: false` で FK を作らない |
+| `000081` | 孤児化した `note` 行を DELETE + 痕跡列を NULL 化 | **mk-go 固有で、唯一 行を消すもの。** |
+
+`000081` だけ補足する。`000080` 以前の FK は `ON DELETE SET NULL` だったので、元ノートが消えるとリノート側の `renoteId` ごと NULL になり、`renoteUserId` だけが残った。frontend は `renoteId` があれば「削除されたノート」と描画できるが、消えていると本文の無い通常ノート扱いになり**何も表示されない**。`000081` が消すのはこの残骸で、条件は
+
+- `renoteId IS NULL` かつ `renoteUserId IS NOT NULL`
+- 本文・CW・返信先・添付ファイル・投票・リアクションがすべて無い
+- 返信数・リノート数・クリップ数がすべて 0
+
+を**同時に満たす行だけ**。中身を持つ引用リノートは消さず、痕跡列 (`renoteUserId` / `renoteUserHost` / `renoteChannelId`) の NULL 化にとどめる。
+
+**`000081` の down は `SELECT 1;` (no-op) で戻せない。** 削除した行の内容も、NULL 化する前の値も保存していないため。適用前にバックアップを取ること。
+
+両バックエンドは同じデータベース上で共存できる。
 
 ## 5. Misskey-TSの停止
 
@@ -153,6 +178,8 @@ Misskey-TSに戻す場合の手順:
 
 データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
+ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 5 件は戻らない。うち 4 件は mk-go が余分に作ったものの除去か upstream 追随なので**戻す必要が無い**が、`000081` が消した行は復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
+
 ## drop-in 互換性の現状 (2026-05-09 時点)
 
 Playwright Phase 1-4 完了 (#744) で **96 spec / 35 directory / 242 endpoint cover (54.3%)** を mk-go と Misskey TS の両 backend で nightly 検証中。発見した drop-in 互換 drift は 40+ 件すべて解消済 (詳細: [api-compatibility.md](api-compatibility.md))。
@@ -199,7 +226,7 @@ Playwright Phase 1-4 完了 (#744) で **96 spec / 35 directory / 242 endpoint c
 ### 絵文字が表示されない
 
 - twemoji SVGファイルが配置されているか確認する
-- 方法A: `ls third_party/misskey/packages/backend/node_modules/@discordapp/twemoji/dist/svg/1f44d.svg`
+- 方法A: `ls third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji/1f44d.svg`
 - 方法B: `ls $MISSKEY_TWEMOJI_DIR/1f44d.svg`
 
 ### favicon/アイコンが表示されない

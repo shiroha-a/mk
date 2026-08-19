@@ -129,8 +129,7 @@ cd mk
 cp .config/default.yml.example .config/default.yml
 # default.yml を環境に合わせて編集
 
-# マイグレーション適用
-export DATABASE_URL="postgres://user:pass@localhost:5432/misskey?sslmode=disable"
+# マイグレーション適用 (接続先は上で編集した default.yml から読む)
 make migrate-up
 
 # ビルド & 起動

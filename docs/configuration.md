@@ -269,11 +269,15 @@ CIでのテスト実行時に使用。ローカルではtestcontainersが自動�
 | `TEST_REDIS_HOST` | テスト用Redisホスト |
 | `TEST_REDIS_PORT` | テスト用Redisポート |
 
-## マイグレーション用環境変数
+## マイグレーションの接続先
 
-| 環境変数 | 用途 |
-|---|---|
-| `DATABASE_URL` | `make migrate-up/down`で使用するPostgreSQL接続文字列 |
+`cmd/migrate` は **`DATABASE_URL` を読まない**。`-config` (既定 `.config/default.yml`) を読み、`db.*` から DSN を組み立てる。
+
+```bash
+make migrate-up                                    # .config/default.yml へ
+go run ./cmd/migrate -config .config/other.yml     # 別の設定ファイルへ
+MK_DB_HOST=other-host make migrate-up              # 個別キーだけ環境変数で上書き
+```
 
 ## 設定例
 

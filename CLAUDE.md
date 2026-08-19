@@ -115,9 +115,10 @@ make lint                   # go vet ./...
 make test                   # go test ./... -v
 make plugin-test            # 同梱プラグインのテスト (別 module なので ./... に含まれない)
 
-# マイグレーション（DATABASE_URL環境変数が必要）
+# マイグレーション（接続先は -config、既定 .config/default.yml から決まる）
 make migrate-up             # 最新まで適用
-make migrate-down           # 1段階ロールバック
+make migrate-down           # 1段階ロールバック (-steps 1)
+go run ./cmd/migrate -direction down   # 全段ロールバック (破壊的。schema が消える)
 make migrate-create         # 新規マイグレーションファイル作成（プロンプト対話）
 
 # Docker
@@ -199,7 +200,9 @@ go tool cover -html=coverage.out
 
 ### 統合テスト
 
-- `internal/testutil/containers.go`がtestcontainers-goでPostgreSQL/Redisを起動する。
+- **手元では `cp .env.test.example .env.test`** (`TEST_DB_*` が入っている)。`internal/testutil` が起動時に読み、設定済みの環境変数は上書きしない。
+- DB を使うテストの主流は `testutil.OpenTestDB` / `MustOpenTestDB` で、**外部の PostgreSQL に直接つなぐ**。`MustOpenTestDB` は失敗時 panic。
+- **testcontainers は Redis 用**。`SetupRedis` は 25 パッケージが使うが、`SetupPostgres` は `internal/api/test` の 1 つだけ。**PostgreSQL は「Docker があれば準備不要」ではない。**
 - ローカル実行にはDocker環境が必要。
 - CIではGitHub Actionsの`services`でPostgreSQL 18 / Redis 7を起動し、以下の環境変数でDBへ接続：
   - `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, `TEST_DB_USER`, `TEST_DB_PASS`, `TEST_DB_SSLMODE`
@@ -575,11 +578,13 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 - `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, `TEST_DB_USER`, `TEST_DB_PASS`, `TEST_DB_SSLMODE`
 - `TEST_REDIS_HOST`, `TEST_REDIS_PORT`
 
-ローカルでは`testcontainers-go`が自動でコンテナを起動するため通常は不要。
+ローカルでは `.env.test` (= `.env.test.example` の複製) から読む。export で直接渡してもよい。
 
-### マイグレーション用環境変数
+### マイグレーションの接続先
 
-- `DATABASE_URL` — `make migrate-up/down`で使用するPostgreSQL接続文字列。
+`cmd/migrate` は **`DATABASE_URL` を読まない**。`-config` (既定 `.config/default.yml`) を
+`config.Load` して `db.*` から DSN を組み立てる。別の DB へ流すなら `-config` を渡すか
+`MK_DB_*` で上書きする。
 
 ## 10. 開発方針
 
@@ -622,6 +627,8 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-08-19**: ドキュメント全体監査 (#2637) で見つかった、**手順どおりに実行すると壊れる記述**を修正 (#2638)。(1) `make migrate-down` は `-steps` 未指定で全 down が走っていたので `-steps 1` を付け、ヘルプ・doc の「1 段階」と挙動を一致させた (全段は `go run ./cmd/migrate -direction down` を直接叩く)。(2) **`DATABASE_URL` はどこからも読まれていない** — `cmd/migrate` は `-config` から DSN を組み立てる。Section 9 の該当項目を接続先の説明に置き換えた。(3) Section 4 のテスト準備を実態に合わせた: **testcontainers は Redis 用** (`SetupRedis` は 25 パッケージ、`SetupPostgres` は 1 パッケージ) で、PostgreSQL は `.env.test` (= `.env.test.example` の複製) か `TEST_DB_*` で外部のものを指す。`MustOpenTestDB` は失敗時 panic なので「Docker があれば準備不要」ではない。
 
 - **2026-08-18**: Section 8 の `playwright` / `upstream-backend-e2e` を 4 シャード並列として書き換え (#2609)。どちらも**プロセス内では並列にできない** (前者は共有の root アカウントと instance meta、後者は `maxWorkers: 1` + ファイルごとの `/api/reset-db`) ため、並列度はシャードごとに job を分けて稼ぐ。あわせて実態と乖離していた記述を修正: `playwright` は nightly ではなく PR トリガー (#2291 の反映漏れ)、`upstream-backend-e2e` の所要時間は「18-20 min」ではなく分割前で 8.5 分。Playwright の録画を止めた理由も明記。
 - **2026-08-16**: `plugin-tests` job を追加 (#2588)。同梱プラグインのテストは**どの job でも実行されていなかった** (別 module で `go list ./...` に含まれず、`build` job に PostgreSQL が無い)。テストが落ちる変更を入れても CI は緑のままだった。あわせて `build` job の同梱プラグイン検証を `go build` から `go vet` に変更 (テストファイルもコンパイルされるので、公開面を変えて本体だけ直したときに検出できる)。Section 3 に `make plugin-test` を追記。
