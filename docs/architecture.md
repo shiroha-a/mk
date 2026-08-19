@@ -319,8 +319,8 @@ wire 互換を機械的に守る多層防御。upstream は **official `misskey/
 | golden / shapetest | misskey-js autogen 型に対する応答 shape 突合（`internal/entitycompat`） | shape-drift.md |
 | drift detector | CanSeeNote ↔ SQL push-down 等のロジック整合検出 | shape-drift.md |
 | 値レベル diff harness | TS インスタンス ↔ mk-go の応答を値単位で diff（`make diff-test`） | diff-e2e.md |
-| drop-in e2e | 実 Misskey TS ↔ mk-go 切替の連合/フロント互換（nightly） | dropin-e2e.md / dropin-frontend-e2e.md |
-| playwright | Phase 1 spec を mk-go/ts 両 backend で（nightly） | — |
+| drop-in e2e | 実 Misskey TS ↔ mk-go 切替の連合/フロント互換（PR ごと。frontend e2e のみ nightly） | dropin-e2e.md / dropin-frontend-e2e.md |
+| playwright | 289 spec を mk-go backend で（PR ごと、4 シャード）。TS backend は手動 | — |
 | inbound/outbound 連合 | Fedibird-like mock との Ed25519 双方向 verify | federation.md |
 
 CI（`ci.yml`）は build / 4-shard test（パッケージ毎 90% カバレッジ強制）/ lint を必須化。

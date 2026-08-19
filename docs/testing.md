@@ -34,7 +34,9 @@ sudo -u postgres psql -c "CREATE DATABASE misskey_test OWNER mk"
 cp .env.test.example .env.test    # 中身は既定値そのままなので、編集して使う
 ```
 
-`internal/testutil` は接続時 (`OpenTestDB` などの呼び出し時) にこれを読み、既に設定済みの環境変数は上書きしない。**export で直接渡してもよい。** `.env.test` は `.gitignore` 済み。CI は service container を立てて同じ環境変数を渡している。
+`internal/testutil` は接続時 (`OpenTestDB` などの呼び出し時) にこれを読み、既に設定済みの環境変数は上書きしない。**export で直接渡してもよい。** `.env.test` は `.gitignore` 済み。
+
+`TEST_REDIS_*` は `.env.test.example` に無い。これを読むのは `internal/core/chart` だけで、実 Redis (既定 `localhost:6379`) が無ければ **silently skip** する (落ちないがカバレッジだけ下がる)。他は `SetupRedis` が環境変数を見ずに testcontainers を立てる。CI は service container を立てて同じ環境変数を渡している。
 
 ## 実行方法
 
@@ -91,7 +93,7 @@ migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL
 
 | | testcontainers | 外部サービス |
 |---|---|---|
-| Redis | `SetupRedis` を **27 パッケージ**が使う。`SkipIfNoDocker` で Docker が無ければ skip する | — |
+| Redis | `SetupRedis` を **27 パッケージ**が使う。**`SkipIfNoDocker` を置いているのは 7 つだけで、残り 20 は `TestMain` で `log.Fatalf` する** (= Docker が無いとそのパッケージは落ちる) | — |
 | PostgreSQL | `SetupPostgres` は `internal/api/test` / `test/e2e` / `test/e2e_federation` の **3 パッケージだけ** | `OpenTestDB` / `MustOpenTestDB` を **15 パッケージ**が使い、`TEST_DB_*` の指す PostgreSQL に直接つなぐ |
 
 つまり **Redis は Docker があれば足りるが、PostgreSQL は自分で用意する必要がある**。`MustOpenTestDB` は失敗時に panic し、しかも `init()` から呼ばれるので、PostgreSQL が無いと該当パッケージはまとめて落ちる (skip されない)。
@@ -214,13 +216,13 @@ make federation-misskey-down
 
 テストはPython (pytest)で記述され、`tests/federation/`に配置。両インスタンスに共通のAPI互換クライアント(`MisskeyLikeClient`)を使ってフォロー、ノート作成、リアクション等の連合動作を検証する。
 
-## Playwright e2e (drop-in 互換 nightly)
+## Playwright e2e (drop-in 互換)
 
-`tests/playwright/` 配下の spec を mk-go と Misskey TS の **両 backend** で並列実行し、drop-in 互換 regression を nightly 監視する基盤。
+`tests/playwright/` 配下の spec を mk-go と Misskey TS の **両 backend** で並列実行し、drop-in 互換 regression を PR ごとに検出する基盤。
 
-- 範囲: 96 spec / 35 directory / 242 endpoint cover (= router.go 登録 448 endpoint の 54.3%)
+- 範囲: 289 spec ファイル / 38 directory (= router.go 登録 448 endpoint の 54.3%)
 - backend matrix: `mk-go` / `ts` 並列、`fail-fast: false` で片方失敗しても他方は完走
-- スケジュール: nightly 17:00 UTC (`.github/workflows/playwright.yml`)
+- トリガー: `pull_request` (paths フィルタ) + `workflow_dispatch`。**nightly ではない** (#2291 で移行)。4 シャード並列で、TS backend は `workflow_dispatch` 専用 (`.github/workflows/playwright.yml`)
 - spec は **backend-agnostic** (= URL 切替だけで両 backend で動く)、spec 失敗 = drop-in 互換 regression として issue 化
 
 ### spec を書くときの注意: root の per-user quota

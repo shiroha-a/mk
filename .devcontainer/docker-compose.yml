@@ -8,6 +8,14 @@ services:
     command: sleep infinity
     network_mode: host
     environment:
+      # **MK_* をここに増やさないこと。** viper で設定ファイルより優先されるので、
+      # internal/config のテストが fixture ではなくこの値を読んで落ちる。
+      # 既に MK_DB_USER / MK_DB_PASS が TestLoad_DatabaseConfig を、
+      # MK_REDIS_HOST が TestLoad_RedisForPubsub を落としている (計 2 件)。
+      # devcontainer 内でだけ再現し CI では起きないので気付きにくい。
+      # TestLoad_RedisConfig は fixture の値がたまたま localhost なので通って
+      # いるだけで、host network をやめて MK_REDIS_HOST: redis にすると 3 件目
+      # になる。
       # Go アプリ用 DB 接続
       MK_DB_HOST: localhost
       MK_DB_PORT: "5432"
@@ -23,14 +31,6 @@ services:
       TEST_DB_USER: misskey
       TEST_DB_PASS: misskey
       TEST_DB_SSLMODE: disable
-      # **MK_* をここに増やさないこと。** viper で設定ファイルより優先されるので、
-      # internal/config のテストが fixture ではなくこの値を読んで落ちる。
-      # 既に MK_DB_USER / MK_DB_PASS が TestLoad_DatabaseConfig を、
-      # MK_REDIS_HOST が TestLoad_RedisForPubsub を落としている (計 2 件)。
-      # devcontainer 内でだけ再現し CI では起きないので気付きにくい。
-      # TestLoad_RedisConfig は fixture の値がたまたま localhost なので通って
-      # いるだけで、host network をやめて MK_REDIS_HOST: redis にすると 3 件目
-      # になる。
       TEST_REDIS_HOST: localhost
       TEST_REDIS_PORT: "6379"
       # cmd/migrate は DATABASE_URL を読まない。-config (既定 .config/default.yml)

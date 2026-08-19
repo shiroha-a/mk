@@ -13,7 +13,9 @@ VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/cont
 
 `postCreate.sh` が `.config/default.yml` を example から複製し (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)、migration まで流す。`TEST_DB_*` は compose が渡すので `.env.test` は要らない。
 
-`url` は example の `https://example.tld/` のまま残る。絶対 URL を永続化する経路を触るなら手で書き換えること (`MK_URL` で渡すと `internal/config` のテストが落ちる)。
+**`url` は example の `https://example.tld/` のまま残るので、開いたら手で書き換えること。** `mediaProxy` の既定は `url` から組み立てられるため、放置するとリモートの avatar / emoji / 添付が `https://example.tld/proxy?...` になって全部読めない。`MK_URL` で渡す方法は使えない (`MK_*` は viper で設定ファイルより優先されるので `internal/config` のテストが落ちる)。
+
+なお **devcontainer では `make test` で `internal/config` が 2 件落ちる**。compose が渡す `MK_DB_USER` / `MK_DB_PASS` が `TestLoad_DatabaseConfig` を、`MK_REDIS_HOST` が `TestLoad_RedisForPubsub` を、それぞれ fixture より優先して読むため。既知の問題。
 
 ```bash
 # VS Code で開いたら

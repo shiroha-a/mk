@@ -204,7 +204,7 @@ go tool cover -html=coverage.out
 - DB を使うテストの主流は `testutil.OpenTestDB` / `MustOpenTestDB` で、**外部の PostgreSQL に直接つなぐ**。`MustOpenTestDB` は失敗時 panic。
 - **testcontainers は Redis 用**。`SetupRedis` は 27 パッケージが使うが、`SetupPostgres` は `internal/api/test` / `test/e2e` / `test/e2e_federation` の 3 つだけ。**PostgreSQL は「Docker があれば準備不要」ではない。**
 - ローカル実行にはDocker環境が必要。
-- CI では GitHub Actions の `services` で PostgreSQL 18 / Redis 7 を起動し、以下の環境変数で DB へ接続 (Redis を要するテストは CI でも testcontainers を立てる)：
+- CIではGitHub Actionsの`services`でPostgreSQL 18 / Redis 7を起動し、以下の環境変数でDBへ接続する (Redisを要するテストはCIでもtestcontainersを立てる)：
   - `TEST_DB_HOST`, `TEST_DB_PORT`, `TEST_DB_NAME`, `TEST_DB_USER`, `TEST_DB_PASS`, `TEST_DB_SSLMODE`
   - `TEST_REDIS_HOST`, `TEST_REDIS_PORT`
 
@@ -579,6 +579,8 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 - `TEST_REDIS_HOST`, `TEST_REDIS_PORT`
 
 既定は `localhost:5432` の `misskey_test` に `mk` / `mk`。違う接続先を使うときだけ `.env.test` を置くか export する。
+
+**`TEST_REDIS_*` は `.env.test.example` に無い。** これを読むのは `internal/core/chart` だけで、`SetupRedis` は環境変数を見ずに必ず testcontainers を立てる。
 
 ### マイグレーションの接続先
 
