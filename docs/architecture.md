@@ -281,7 +281,7 @@ server.New() → setupRoutes()
   ├→ Repository 生成 (userRepo, noteRepo, … 30+)
   ├→ Core サービス生成 (noteCreateService, followingService, …)
   ├→ hook 注入 (§6)
-  ├→ Handler 生成 + ルート登録 (/api/* 503 + それ以外 52。後者は設定次第で登録されないものを含む)
+  ├→ Handler 生成 + ルート登録 (/api/* 503 + それ以外 53。後者は設定次第で登録されないものを含む)
   └→ WebSocket / 静的ファイル / middleware
 ```
 

@@ -204,7 +204,6 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `published` の異常値 fallback | `core/federation/published_time.go` | mk-go 独自 hardening。clock skew 5min / 過去 10 年 floor |
 | featured (ピン留め) の取り込み | `core/federation/featured.go` | **upstream と同等** (`ApPersonService.updateFeatured`) で、actor の新規取得時と更新時に取り込み、上限 5 件・既存を全置換。差分は 3 点いずれも安全側 (#2552)。(1) upstream は items を**全件**解決してから Note に絞るが、mk-go は走査を 50 件で打ち切る (巨大なコレクションを置くだけで取得を増幅させられるため。得られるピン留めは同じ)。(2) 著者が actor 本人であることを要求する (upstream は見ないので、他人の投稿を自分のプロフィールに並べられる)。(3) 個々の item の解決失敗を読み飛ばす (upstream は `Promise.all` なので 1 件でも失敗するとピン留めが 1 件も入らない)。またノート解決は depth 1 から始め、**その内側で作られた actor では featured を引かない** (引用先 → その著者 → その featured と入れ子になると 1 段ごとに 5 分岐する取得の連鎖になる) |
 | outbound User-Agent | `config/config.go` | `mk-go/<ver> (<url>)` |
-| stream channel `notifications` | `stream/channels/notifications.go` | **mk-go 独自**。upstream の 18 チャンネルに無い (upstream は `main` で通知を流す) ので mk-go は 19。**これに依存するクライアントは Misskey TS では動かない** |
 | AP object id の https スキーム非強制 | `core/federation/resolver.go` | **意図的な未実装** (#2507)。upstream の `checkHttps` は非 https の object id を reject する (テスト環境除く)。mk-go は id/attributedTo の host 一致 + SSRF guard で検証するがスキームは見ない。http ベースの e2e stack (dropin / federation) が前提のため、強制するなら upstream 同様の環境ゲートが要る。ブラウザ / AP クライアントは非 https の Location を追わないため実害は限定的 |
 | AP dereference route の一部欠落 | `server/router.go` | **保留** (#2507)。`/follows/<follower>/<id>` (Follow activity id)・`/users/<id>/likes/<id>` (Like id)・`/emojis/<name>` (emoji tag id) は外向きに広告するが dereference route が無く 404。Follow / Like の id は Accept / Undo の相関にしか使われず他実装が dereference する事例は稀、emoji は tag に inline embed 済みで dereference 不要のため。`<note URI>/activity` は #2507 で実装済み。signature の keyId (`/users/<id>#main-key`) は actor 本体の fragment なので actor route で解決され、upstream の `/users/:user/publickey` 相当は不要 |
 
@@ -232,6 +231,17 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 逆方向 (upstream にあって mk-go に無い): `threadPoolSize`、`logging.format` / `logging.level` / `logging.domains` / `logging.access` (2026.7.0 のログ基盤刷新分。`logging.sql.*` は mk-go にもある)、`sentryForBackend.disabledIntegrations`。
 
 ---
+
+## 4-1. WebSocket streaming チャンネル
+
+| チャンネル | 内容 |
+|---|---|
+| `notifications` | **mk-go 独自**。upstream の 18 チャンネルに無い (upstream は `main` に通知を流す) ので mk-go は 19。通知だけを購読したいクライアント向け。**これに依存するクライアントは Misskey TS では動かない**ので、drop-in で戻す可能性があるなら `main` を使うこと |
+
+upstream の 18 チャンネル (`admin` / `antenna` / `channel` / `chat-room` / `chat-user` /
+`drive` / `global-timeline` / `hashtag` / `home-timeline` / `hybrid-timeline` /
+`local-timeline` / `main` / `queue-stats` / `reversi` / `reversi-game` / `role-timeline` /
+`server-stats` / `user-list`) は**すべて実装済み**で、名前も upstream に揃えてある。
 
 ## 4-2. fork frontend の独自変更
 
@@ -490,7 +500,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
   - `TestMigrationSeed_CoversUpstream` — TypeORM `migrations` テーブルの seed 漏れ (TS 復帰時の再実行)
   - `TestMigrationIdempotency_RequiresIfExists` — DDL の `IF [NOT] EXISTS` 漏れ (drop-in で migration が dirty 停止)
   - `TestIndexNaming_NoNewUpstreamDuplicates` — upstream と同内容の index を別名で追加 (TS 製 DB で二重化)
-- **本ドキュメントの件数**: `TestDivergenceDoc_*` 6 件のうち 5 件が CI で強制する (残る 1 件 `TestDivergenceDoc_APICompatIsFresh` は本ドキュメントではなく `docs/api-compat.md` の鮮度を見るもので、上記 §1-1 の突き合わせ先が腐らないことを担保する)。
+- **本ドキュメントの件数**: `TestDivergenceDoc_*` 5 件が CI で強制する。別途 `TestAPICompatDoc_MatchesRouter` が §1-1 の突き合わせ先 (`docs/api-compat.md`) を router.go と照合し、**錨が腐らないこと**を担保する。
   - §1-1 は (a) 見出し・表・サマリの内部整合と、(b) **`docs/api-compat.md` (= `make apicompat` の生成物) との突き合わせ**。(a) だけでは 3 箇所が揃って同じだけ間違っている状態を通す (実際に §1-1 は 53 と言い続け、生成物は 58 だった、#2640)
   - §2-1 / §2-2 は**実 schema (migration + `golden_upstream_columns.json`) との突き合わせ**。件数だけでなく行の有無も見るので、テーブル・カラムを足して表を更新し忘れると落ちる (#2634)
   - §4-2 の fork frontend tag は冒頭サマリの件数・範囲・連番と突き合わせる。**submodule 側が進んだことは検出できない** (`test-shards` job は submodule を checkout しないため)。サマリと表を両方据え置くとすり抜ける

@@ -285,9 +285,11 @@ id: 'aidx'
 #   ┌─────────────────────┐
 #───┘ Job queue settings └──────────────────────────────────────
 
-# Total job-worker concurrency budget. Both the asynq and mkq
-# drivers honour this as a global pool size; the mkq driver
-# subdivides it across its 5 logical queues.
+# Per-queue worker counts. The asynq driver has a single shared pool,
+# so deliverJobConcurrency acts as the global pool size there. The mkq
+# driver runs one pool per queue and treats each key as that queue's
+# own worker count; the 8 queues it does not get an explicit value for
+# fall back to hot-tuned defaults (see docs/configuration.md).
 #deliverJobConcurrency: 128
 #inboxJobConcurrency: 16
 #relationshipJobConcurrency: 16

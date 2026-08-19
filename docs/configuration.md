@@ -247,10 +247,13 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | yml にキーが無い | `MK_` だけで設定できる | **効かない** (黙って無視される) |
 
 引っかかるのは `.config/*.yml.example` が既定でコメントアウトしているものです。
-`meilisearch:` (`default.yml.example:245`) と `<queue>JobConcurrency` /
-`<queue>JobPerSec` (同 291-296) は**コメントアウトされたまま**なので、example を
-そのまま使う構成では `MK_MEILISEARCH_HOST` / `MK_DELIVERJOBCONCURRENCY` を export
-しても効きません。使うならまず yml 側のコメントを外してください。
+`#meilisearch:` と `#<queue>JobConcurrency` / `#<queue>JobPerSec` は**コメントアウト
+されたまま**なので、example をそのまま使う構成では `MK_MEILISEARCH_HOST` /
+`MK_DELIVERJOBCONCURRENCY` を export しても効きません。使うならまず yml 側の
+コメントを外してください。
+
+キー単位の判定です。`meilisearch:` ブロックだけあって `apiKey:` 行が無ければ
+`MK_MEILISEARCH_APIKEY` は効きません。
 
 ファイルに書かずに環境変数だけで設定したいものは `bindEnvKeys()` への追加が要ります。
 

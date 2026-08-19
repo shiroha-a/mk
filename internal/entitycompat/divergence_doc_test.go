@@ -556,6 +556,11 @@ var (
 	routerPostRe  = regexp.MustCompile(`\bapi\.POST\("([^"]+)"`)
 	routerGetRe   = regexp.MustCompile(`\bapi\.GET\("([^"]+)"`)
 	routerMatchRe = regexp.MustCompile(`\bapi\.Match\(chartMethods, "([^"]+)"`)
+
+	// 総数を数える側。抽出できた数と突き合わせて取りこぼしを検出する。
+	routerPostCallRe  = regexp.MustCompile(`\bapi\.POST\(`)
+	routerGetCallRe   = regexp.MustCompile(`\bapi\.GET\(`)
+	routerMatchCallRe = regexp.MustCompile(`\bapi\.Match\(`)
 )
 
 // TestAPICompatDoc_MatchesRouter asserts that the committed
@@ -582,8 +587,21 @@ func TestAPICompatDoc_MatchesRouter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read docs/api-compat.md: %v", err)
 	}
+	// **セクションを見る。** 生成物は「TS 側に存在するが mk-go で未実装」も同じ
+	// 行書式で出す。全行を拾うと、upstream が endpoint を足した直後 (= 生成物が
+	// 正しい状態) に「api-compat.md にあって router.go に無い」で落ち、しかも
+	// 診断が逆を指す。submodule bump のたびに現実的に起きる。
 	doc := map[string]bool{}
+	inScope := false
 	for _, line := range strings.Split(string(blob), "\n") {
+		if strings.HasPrefix(line, "## ") {
+			inScope = strings.Contains(line, "mk-go 側にしかない") ||
+				strings.Contains(line, "両方に存在する")
+			continue
+		}
+		if !inScope {
+			continue
+		}
 		m := apiCompatRowRe.FindStringSubmatch(line)
 		if m == nil || strings.HasPrefix(m[2], "/api/plugin/") {
 			continue
@@ -617,7 +635,7 @@ func TestAPICompatDoc_MatchesRouter(t *testing.T) {
 
 	// **0 件で通さない。** どちらかの書式が変わったら黙って空集合同士が一致する。
 	if len(doc) == 0 {
-		t.Fatal("docs/api-compat.md から POST 行を 1 件も読めない (tools/apicompat の出力書式が変わった?)")
+		t.Fatal("docs/api-compat.md の endpoint セクションから行を 1 件も読めない (tools/apicompat の出力書式か見出しが変わった?)")
 	}
 	if len(router) == 0 {
 		t.Fatal("internal/server/router.go から api.POST/GET(...) を 1 件も読めない (登録の書き方が変わった?)")
@@ -625,34 +643,57 @@ func TestAPICompatDoc_MatchesRouter(t *testing.T) {
 
 	// **0 件チェックだけでは足りない。** 部分的な取りこぼしは router 側の集合が
 	// 小さくなるだけなので、生成物との差が出ずに黙って一致する。呼び出しの総数と
-	// 抽出できた数が合うことまで見る。
+	// 抽出できた数が合うことまで見る (path が literal でない / 複数行に分かれている
+	// 形を塞ぐ)。
 	//
-	// これで塞がるのは「path が literal でない / 複数行に分かれている」形。
-	// `api.Group(...)` でサブグループを切って登録する形は別途 0 件で固定する
-	// (現状 router.go に api.Group は無く、プラグインのルートだけが
-	// plugin_wiring.go で動的に生やしている)。
+	// 総数も**正規表現で数える**。`strings.Count` だと `metaapi.GET(` のような
+	// 無関係な識別子まで数えて偽陽性になり、しかも診断が「正規表現を直せ」と
+	// 誤誘導する。
 	for _, c := range []struct {
-		call    string
-		matched int
+		call   string
+		loose  *regexp.Regexp
+		strict *regexp.Regexp
 	}{
-		{"api.POST(", len(routerPostRe.FindAllStringSubmatch(joined, -1))},
-		{"api.GET(", len(routerGetRe.FindAllStringSubmatch(joined, -1))},
-		{"api.Match(", len(routerMatchRe.FindAllStringSubmatch(joined, -1))},
+		{"api.POST(", routerPostCallRe, routerPostRe},
+		{"api.GET(", routerGetCallRe, routerGetRe},
+		{"api.Match(", routerMatchCallRe, routerMatchRe},
 	} {
-		if got := strings.Count(joined, c.call); got != c.matched {
+		got, matched := len(c.loose.FindAllString(joined, -1)), len(c.strict.FindAllStringSubmatch(joined, -1))
+		if got != matched {
 			t.Fatalf(`router.go の %s は %d 件あるが、path を抽出できたのは %d 件。
 
-**取りこぼした分だけ gate が緩くなる。** path が literal でない (変数経由) か、
+**取りこぼした分だけ gate が緩くなる。** path が literal でない (定数 / 変数経由) か、
 呼び出しが複数行に分かれている可能性がある。このテストの正規表現を実態に
-合わせるか、登録を 1 行の literal に戻すこと。`, c.call, got, c.matched)
+合わせるか、登録を 1 行の literal に戻すこと。`, c.call, got, matched)
 		}
 	}
-	if n := strings.Count(joined, "api.Group("); n != 0 {
-		t.Fatalf(`router.go に api.Group( が %d 件ある。
 
-サブグループ配下の登録は `+"`api.POST(`"+` として現れないのでこのテストから見えず、
-**そこに足した endpoint は生成物と照合されない**。抽出をサブグループ対応に
-拡張すること。`, n)
+	// **`/api` 配下を生やす経路は `api.<METHOD>(` だけではない。** 抜け道を
+	// 個別に固定する。fail-closed 側に倒すので、正当な理由で下記の形を使う
+	// ことになったら、このテストの抽出をそちらへ拡張してから解除すること。
+	for _, g := range []struct {
+		name string
+		re   *regexp.Regexp
+		want int
+		why  string
+	}{
+		{"api.Group(", regexp.MustCompile(`\bapi\.Group\(`), 0,
+			"サブグループ配下の登録は api.<METHOD>( として現れず、このテストから見えない"},
+		{`s.echo.Group("/api"`, regexp.MustCompile(`\bs\.echo\.Group\("/api`), 1,
+			"別名の group 変数を経由すると api.<METHOD>( に一致しない"},
+		{"api.PUT/DELETE/PATCH(", regexp.MustCompile(`\bapi\.(PUT|DELETE|PATCH)\(`), 0,
+			"POST / GET 以外のメソッドは母集団に入れていない"},
+		{"api.Any(", regexp.MustCompile(`\bapi\.Any\(`), 1,
+			"catchall (\"/*\") 1 件だけを想定している。増えたら実 endpoint かを確認する"},
+		{`s.echo.<METHOD>("/api/`, regexp.MustCompile(`\bs\.echo\.[A-Za-z]+\("/api/`), 0,
+			"group を通さず /api 配下へ直接登録すると、このテストから見えない"},
+	} {
+		if n := len(g.re.FindAllString(joined, -1)); n != g.want {
+			t.Fatalf(`router.go の %s が %d 件 (想定 %d)。
+
+理由: %s。**そこに足した endpoint は生成物と照合されない**ので、抽出をその形に
+対応させてからこの固定を解除すること。`, g.name, n, g.want, g.why)
+		}
 	}
 
 	missing := diffKeys(router, doc) // router にあって doc に無い

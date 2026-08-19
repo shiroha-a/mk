@@ -35,7 +35,7 @@ Misskey互換クライアント(Miria等)は、misskey-jsの型に従ってレ�
 | `tools/shapediff/` | snapshot再生成 + 全family drift report |
 | `internal/entitycompat/plugin_surface_test.go` | 公開プラグイン API の面 (`TestPluginSurfaceDrift`) |
 | `internal/entitycompat/plugin_doc_test.go` | `docs/plugins/authoring.md` の一覧 ↔ 公開面 golden (`TestPluginDoc_*` 5 本) |
-| `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物、`docs/api-compat.md` ↔ router.go (`TestDivergenceDoc_*` 6 本) |
+| `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物 (`TestDivergenceDoc_*` 5 本)、`docs/api-compat.md` ↔ router.go (`TestAPICompatDoc_MatchesRouter`) |
 | `internal/entitycompat/schema_drift_test.go` | migration の列 ↔ upstream entity (`TestSchemaDrift_CreateOnlyColumns`) |
 | `internal/entitycompat/migration_seed_test.go` | TypeORM `migrations` seed の網羅 (`TestMigrationSeed_CoversUpstream`) |
 
@@ -432,9 +432,11 @@ upstream の endpoint 一覧を `tools/apicompat` から直接引くことはで
 
 サマリは 10 tag と言い、表には 11 行あり、実際の submodule には 23 個の tag があった (#2640)。**この gate が捕まえるのは前 2 つの食い違いだけ**で、3 つ目 (= submodule 側が進んだこと) は検出できない — `test-shards` job は submodule を checkout しないため、サマリと表を両方据え置けば submodule が先に進んでもすり抜ける。submodule bump の PR で表を足すのは人の仕事。
 
-### `TestDivergenceDoc_APICompatIsFresh`
+### `TestAPICompatDoc_MatchesRouter`
 
-`docs/api-compat.md` の POST 行 == `router.go` が静的登録する `/api/*` の POST。
+`docs/api-compat.md` の endpoint 行 == `router.go` が静的登録する `/api/*`。POST と GET の
+両方を見る (「endpoint を足す操作は必ず POST を伴う」は成り立たない —
+`/api/v1/instance/peers` は upstream 側も `get()` 直登録で mk-go も `api.GET` 一本)。
 
 **錨そのものが腐ると、それを見る gate も一緒に無力化する。** 上の
 `EndpointCountMatchesAPICompat` は divergence.md と api-compat.md の一致しか見ないので、
@@ -442,9 +444,22 @@ endpoint を足して**どちらも更新しない**と両方が古いまま緑�
 `mk-go version: 1.1.2` / `mk-go only: 49` のまま腐っていた)。
 
 route dump には stack が要るのでテストからは呼べない。代わりに router.go の
-`api.POST("...")` / `api.Match(chartMethods, "...")` を静的に抽出して突き合わせる。
+`api.POST(` / `api.GET(` / `api.Match(chartMethods, ` を静的に抽出して突き合わせる。
 同梱プラグインのルート (`/api/plugin/*`) は literal で現れないので母集団から外す。
-**どちらかが 0 件になったら `t.Fatal`** (書式が変わって空集合同士が一致するのを防ぐ)。
+生成物側は「mk-go 側にしかない」「両方に存在する」の 2 セクションだけを見る
+(「TS 側に存在するが mk-go で未実装」を混ぜると、upstream が endpoint を足した直後 =
+生成物が正しい状態で落ちる)。
+
+**静的抽出は取りこぼすと gate が緩くなる方向に倒れる**ので、fail-closed を 2 段に
+している。
+
+- 抽出できた数 == 呼び出しの総数 (path が定数 / 変数経由、複数行に分かれている形を検出)
+- `/api` 配下を生やす別経路を 0 件で固定 — `api.Group(` / `api.PUT|DELETE|PATCH(` /
+  `s.echo.<METHOD>("/api/` は 0、`s.echo.Group("/api"` と `api.Any(` (catchall) は 1
+
+いずれも「正当な理由でその形を使うことになったら、抽出をそちらへ拡張してから固定を
+解除する」という運用。**0 件チェックだけでは足りない** — 部分的な取りこぼしは router
+側の集合が小さくなるだけで、生成物との差が出ずに黙って一致する。
 
 ### `TestDivergenceDoc_TableCountMatchesSchema` / `TestDivergenceDoc_ColumnCountMatchesSchema`
 
