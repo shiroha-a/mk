@@ -140,6 +140,9 @@ var migrations = []plugin.Migration{
 
 ```go
 db := ctx.Storage().DB()   // *sql.DB (search_path は自分の schema に固定)
+if _, err := db.ExecContext(req.Context(), `INSERT INTO items DEFAULT VALUES`); err != nil {
+    return nil, err
+}
 ```
 
 GORM を使いたければプラグイン側で包む（`postgres.New(postgres.Config{Conn: db})`）。mk-go が GORM を使っているのは内部の選択であって契約ではない。
@@ -153,8 +156,17 @@ GORM を使いたければプラグイン側で包む（`postgres.New(postgres.C
 ## 本体の API を呼ぶ
 
 ```go
+// 匿名で呼ぶ
 raw, err := ctx.API().Anonymous().Call(req.Context(), "users/show", map[string]any{"userId": id})
-raw, err = ctx.API().AsUser(userID).Call(req.Context(), "notes/create", params)
+if err != nil {
+    return nil, err
+}
+
+// その利用者として呼ぶ
+if _, err := ctx.API().AsUser(userID).Call(req.Context(), "notes/create", params); err != nil {
+    return nil, err
+}
+return raw, nil
 ```
 
 mk-go の既存エンドポイントをプロセス内で呼ぶ。**可視性・権限・レート制限が自動的に効く**ので、モデレーション状態などを自前で持たなくてよい。
@@ -174,11 +186,20 @@ mk-go の既存エンドポイントをプロセス内で呼ぶ。**可視性・
 raw, err := ctx.API().AsUser(userID).Call(req.Context(), "roles/assignment-show", map[string]any{
     "roleId": roleID,
 })
+if err != nil {
+    return nil, err
+}
+
 // 任意の利用者について答える。AsUser にはモデレーター以上の ID が要る
 raw, err = ctx.API().AsUser(moderatorID).Call(req.Context(), "admin/roles/assignment-show", map[string]any{
     "userId": userID, "roleId": roleID,
 })
+if err != nil {
+    return nil, err
+}
 ```
+
+返ってくる `raw` はこの形 (読み方は下の断片に続く)。
 
 ```json
 { "assigned": true, "expiresAt": "2026-08-20T03:04:05.000Z",
@@ -454,6 +475,7 @@ raw, err := caller.Call(req.Context(), "users/show", map[string]any{"userId": id
 if err != nil {
     return nil, err
 }
+return raw, nil
 ```
 
 未ログインの閲覧者では引けないままだが、それは「未ログインにリモートの情報を
@@ -493,6 +515,7 @@ assert.Equal(t, "other.example", sends[0].Host)
 
 // 受信側: 相手から届いたことにする
 _, err = h.DeliverPeer("other.example", map[string]any{"user": "alice"})
+require.NoError(t, err)
 
 // 応答が返ってきたことにする
 err = h.DeliverPeerReply("other.example", sends[0].ID, map[string]any{"score": 1})
@@ -526,7 +549,7 @@ require.NoError(t, jobs.Run(t, "prune", ""))
 
 ## 公開面の一覧
 
-以下が「壊さないと約束する範囲」のすべて。`plugin` パッケージの分は**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` の `plugin:` 行と突き合わせる gate が CI で回る** (`TestPluginDoc_*`)。識別子・宣言・method の署名・トップレベル func / const・struct のフィールドの型を見るので、足して載せ忘れても、写し間違えても、消えた API を載せ続けても落ちる。
+以下が「壊さないと約束する範囲」のすべて。`plugin` パッケージの分は**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` の `plugin:` 行と突き合わせる gate が CI で回る** (`TestPluginDoc_*`)。見るのは識別子の有無・宣言の有無・interface の method の署名・トップレベル func / const の行・struct のフィールドの型。**`type X func(...)` の署名だけは対象外** — golden が `type Handler func` としか出さず、照合する相手が無いため。
 
 `plugin/plugintest` の分はこの一覧に入れていない (テストの書き方は[テスト](#テスト)の節)。**gate の対象外**なので、そちらは golden の diff をレビューで見ること。
 
