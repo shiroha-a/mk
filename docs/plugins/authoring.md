@@ -104,7 +104,7 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 ### エラー
 
 ```go
-return nil, plugin.Errorf(http.StatusBadRequest, "%d 文字以内にしてください", max)
+return nil, plugin.Errorf(http.StatusBadRequest, "%d 文字以内にしてください", c.MaxLength)
 return nil, plugin.ErrNotFound("見つかりません")
 ```
 

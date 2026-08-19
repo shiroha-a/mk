@@ -27,6 +27,7 @@ fail() {
 }
 
 command -v go >/dev/null || fail "go が PATH に無い"
+command -v python3 >/dev/null || fail "python3 が PATH に無い (extract.py に要る)"
 [ -f "$repo/go.mod" ] || fail "repo root を解決できない: $repo"
 
 testify=$(awk '/^\tgithub.com\/stretchr\/testify /{print $1" "$2; exit}' "$repo/go.mod")
@@ -53,10 +54,22 @@ echo "検査対象の fence: $kept"
 
 cd "$work" || fail "作業ディレクトリへ移動できない"
 
-# -gcflags=all=-e: 既定はパッケージあたり 10 件でエラーを打ち切る。断片には
-# 意図的な undefined が並ぶので、打ち切られると本物の欠陥が押し出される。
-out=$(GOFLAGS=-mod=mod GOWORK=off go build -gcflags=all=-e ./snippets/... 2>&1)
-rc=$?
+# **先に canary を通す。** HEADER だけのパッケージで、module が解決できない /
+# ツールチェーンが壊れている場合はここで落ちる。断片側は意図的な undefined で
+# 常に非 0 になるので、その終了状態では「検査できなかった」を区別できない。
+# 実際、module 解決の失敗は snippet ファイルの import 行に帰属するため、
+# 「rc != 0 かつ拾ったエラーが 0 件」という判定では発火しなかった (#2639)。
+if ! canary=$(GOFLAGS=-mod=mod GOWORK=off go build ./canary 2>&1); then
+	echo
+	echo "NG: 検査環境が壊れている (断片のビルド以前の問題):"
+	printf '%s\n' "$canary"
+	exit 1
+fi
+
+# -gcflags=-e: 既定はパッケージあたり 10 件でエラーを打ち切る。断片には意図的な
+# undefined が並ぶので、打ち切られると本物の欠陥が押し出される。**all= は付けない**
+# — 依存グラフ全体が別キャッシュで再コンパイルされ、実測で 0.2s -> 9.5s になる。
+out=$(GOFLAGS=-mod=mod GOWORK=off go build -gcflags=-e ./snippets/... 2>&1)
 
 # 断片ゆえに出るものだけを捨てる。**`undefined:` は非修飾のものに限る** —
 # `undefined: plugin.Blob` のような修飾付きは「API が改名 / 削除されたのに doc が
@@ -64,6 +77,13 @@ rc=$?
 # 捨てていたので全部素通りしていた。
 noise='undefined: [A-Za-z_][A-Za-z0-9_]*$'
 real=$(printf '%s\n' "$out" | grep -vE "$noise" | grep -E 'snippets/s[0-9]+_[a-z]+/x\.go:[0-9]+:' || true)
+
+# **noise 扱いにしたものを見せる。** `undefined: <非修飾>` は「断片が省いた
+# ヘルパ」のつもりだが、**未 import のパッケージ名にも同じ形で当たる**
+# (`undefined: time`)。HEADER の import 集合が隠れた allow-list になるので、
+# 何を黙らせたかは常に見えるようにしておく。
+suppressed=$(printf '%s\n' "$out" | grep -oE 'undefined: [A-Za-z_][A-Za-z0-9_]*$' | sort -u | sed 's/^/  /')
+[ -n "$suppressed" ] && { echo "断片が省いた識別子として無視したもの:"; printf '%s\n' "$suppressed"; }
 
 # **fence ごとに 3 通りの文脈を試している。** どれか 1 つでも通れば良しとし、
 # 全滅したものだけを報告する (断片の置かれる文脈は top-level 宣言 /
@@ -77,7 +97,11 @@ for f in $fences; do
 		printf '%s\n' "$real" | grep -q "snippets/${f}_${v}/" || survived=1
 	done
 	[ "$survived" -eq 1 ] && continue
-	report="${report}$(printf '%s\n' "$real" | grep "snippets/${f}_any/")"$'\n'
+	# `have (...) / want (...)` のような継続行も拾う (行頭が空白のものが継続)。
+	report="${report}$(printf '%s\n' "$out" | awk -v p="snippets/${f}_any/" '
+		index($0, p) { show=1; print; next }
+		show && /^[[:space:]]/ { print; next }
+		{ show=0 }')"$'\n'
 done
 
 if [ -n "${report//[[:space:]]/}" ]; then
@@ -88,15 +112,6 @@ if [ -n "${report//[[:space:]]/}" ]; then
 	echo "  declared and not used  -> 値を実際に使うか if 文の中で受ける"
 	echo "  no new variables       -> 2 度目以降は := ではなく ="
 	echo "  does not implement     -> Call の第 1 引数は req.Context()"
-	exit 1
-fi
-
-# **ビルドが成立しなかった場合を成功と取り違えない。** go が無い / go.sum が
-# ずれた / module が解決できない等は上の grep に掛からないので、ここで落とす。
-if [ $rc -ne 0 ] && [ -z "$real" ]; then
-	echo
-	echo "NG: ビルドが成立しなかった (検査できていない):"
-	printf '%s\n' "$out"
 	exit 1
 fi
 

@@ -217,13 +217,6 @@ jobs:
       # tracked な同梱プラグインを列挙する。新しく同梱したものが自動で入る。
       # **`plugins/*` は .gitignore 済みで、同梱するものだけ例外指定している**
       # ので、git の tracked 一覧がそのまま「同梱プラグイン」になる。
-      # docs/plugins/authoring.md のスニペットが実際にコンパイルできるか。
-      # #2639 では「コンパイルできない例を直す」作業が 4 周にわたって別の
-      # コンパイルエラーを作り続けたので、人の目に頼らず回す。この job は既に
-      # 別 module のテストを GOWORK=off で回しているので構成は変わらない。
-      - name: Check authoring.md snippets compile
-        run: make plugin-doc-check
-
       - name: Test bundled plugins
         run: |
           set -o pipefail
@@ -237,6 +230,15 @@ jobs:
             echo "==> $dir"
             (cd "$dir" && GOWORK=off go test ./... -count=1)
           done
+
+      # docs/plugins/authoring.md のスニペットが実際にコンパイルできるか。
+      # #2639 では「コンパイルできない例を直す」作業が 6 周にわたって別の
+      # コンパイルエラーを作り続けたので、人の目に頼らず回す。この job は既に
+      # 別 module のテストを GOWORK=off で回しているので構成は変わらない。
+      # 本体テストの後ろに置くのは、doc が 1 つ壊れただけでプラグインの
+      # テストが走らなくなるのを避けるため。
+      - name: Check authoring.md snippets compile
+        run: make plugin-doc-check
 
   lint:
     runs-on: ubuntu-latest

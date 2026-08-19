@@ -1,7 +1,7 @@
 .PHONY: help check gates version plugin-test frontend-check diff-check playwright-check e2e-down-all \
 	update docker-update uds-update \
 	image-up image-down image-down-v image-logs image-build \
-	build run dev clean tidy test fmt lint migrate-up migrate-down migrate-create \
+	build run dev clean tidy test fmt lint plugin-doc-check migrate-up migrate-down migrate-create \
 	plugins plugins-all plugin-dev \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-e2e \

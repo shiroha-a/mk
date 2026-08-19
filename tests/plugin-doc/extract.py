@@ -32,10 +32,6 @@ var (
 )
 
 var _, _, _, _, _, _ = context.Background, json.Marshal, http.StatusOK, plugintest.New, require.NoError, assert.Equal
-
-// 断片が設定値の例として `max` を使う。組み込みの max を package scope で
-// 隠すのは Go では正当なので、これで型検査が通る。
-var max = 0
 '''
 
 # **断片ごとに置かれる文脈が違う** — top-level 宣言、`(any, error)` を返すハンドラの
@@ -52,6 +48,13 @@ VARIANTS = {
 def main() -> int:
     doc = pathlib.Path(sys.argv[1]).read_text()
     work = pathlib.Path(sys.argv[2])
+
+    # **canary。** HEADER だけのパッケージ。module 解決の失敗やツールチェーンの
+    # 不調はこれが落ちるかで判別する。断片側のビルドは意図的な undefined で常に
+    # 非 0 になるので、そちらの終了状態からは「検査できなかった」を区別できない。
+    canary = work / "canary"
+    canary.mkdir(parents=True, exist_ok=True)
+    (canary / "x.go").write_text(f"package canary\n\n{HEADER}\n")
 
     kept, dropped = 0, []
     for i, body in enumerate(re.findall(r"```go\n(.*?)```", doc, re.S)):

@@ -47,7 +47,7 @@ plugins:
 | `Request.IsModerator` | **管理用 API を自分で守る**。画面を隠すだけでは守れない |
 | `plugintest` | ルートとジョブのテスト |
 
-`plugin.Blob`（バイナリ応答）だけは使っていない。画像を返す例は [docs/plugins/authoring.md](../../docs/plugins/authoring.md) を参照。
+**使っていないものもある** — `plugin.Blob`（バイナリ応答）、peer 系（`Definition.Peered` / `Context.Peer()` / `Peer` interface / `PeerHandler` / `PeerReplyHandler`）、`API.AsUser`、`Request.IsAdministrator`、`NewCodedStatusError` / `ExtractStatusError`。**これらは status では壊れても検出できない**ので、[compatibility.md](../../docs/plugins/compatibility.md) の drift gate と `TestPluginDoc_*` に頼る。使い方は [authoring.md](../../docs/plugins/authoring.md) を参照。
 
 ## 読みどころ
 
