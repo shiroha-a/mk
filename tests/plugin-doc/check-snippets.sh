@@ -7,12 +7,14 @@
 #
 #   make plugin-doc-check
 #
-# 断片は `lookup(...)` のようなプラグイン側のヘルパを意図的に省くので
-# `undefined: X` だけは正常として捨てる。**それ以外のエラーは種類を問わず落とす**
+# 断片は `lookup(...)` のようなプラグイン側のヘルパを意図的に省くので、**非修飾の
+# `undefined: X` だけ**を正常として捨てる。`undefined: plugin.Blob` のような修飾
+# 付きは API の改名 / 削除なので落とす。それ以外のエラーも種類を問わず落とす
 # (allow-list にすると型の不一致を取りこぼす)。
 #
-# 一覧の署名の方は internal/entitycompat の TestPluginDoc_* が CI で見ている。
-# こちらは別 module の解決が走るので CI には載せていない。doc を触ったら回すこと。
+# 一覧の署名の方は internal/entitycompat の TestPluginDoc_* が見ている。
+# こちらは CI の plugin-tests job で回る (同 job は既に別 module のテストを
+# GOWORK=off で回しているので、module 解決が増えても構成は変わらない)。
 set -uo pipefail
 
 repo=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -56,8 +58,11 @@ cd "$work" || fail "作業ディレクトリへ移動できない"
 out=$(GOFLAGS=-mod=mod GOWORK=off go build -gcflags=all=-e ./snippets/... 2>&1)
 rc=$?
 
-# 断片ゆえに出るものだけを捨てる。ハーネスが置いたパッケージ変数の未使用も同様。
-noise='undefined: |imported and not used|max \(built-in\) must be called'
+# 断片ゆえに出るものだけを捨てる。**`undefined:` は非修飾のものに限る** —
+# `undefined: plugin.Blob` のような修飾付きは「API が改名 / 削除されたのに doc が
+# 追随していない」であり、このスクリプトが存在する理由そのもの。前は前方一致で
+# 捨てていたので全部素通りしていた。
+noise='undefined: [A-Za-z_][A-Za-z0-9_]*$'
 real=$(printf '%s\n' "$out" | grep -vE "$noise" | grep -E 'snippets/s[0-9]+_[a-z]+/x\.go:[0-9]+:' || true)
 
 # **fence ごとに 3 通りの文脈を試している。** どれか 1 つでも通れば良しとし、

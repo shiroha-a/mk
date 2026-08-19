@@ -32,6 +32,10 @@ var (
 )
 
 var _, _, _, _, _, _ = context.Background, json.Marshal, http.StatusOK, plugintest.New, require.NoError, assert.Equal
+
+// 断片が設定値の例として `max` を使う。組み込みの max を package scope で
+// 隠すのは Go では正当なので、これで型検査が通る。
+var max = 0
 '''
 
 # **断片ごとに置かれる文脈が違う** — top-level 宣言、`(any, error)` を返すハンドラの
@@ -49,11 +53,19 @@ def main() -> int:
     doc = pathlib.Path(sys.argv[1]).read_text()
     work = pathlib.Path(sys.argv[2])
 
-    kept = 0
+    kept, dropped = 0, []
     for i, body in enumerate(re.findall(r"```go\n(.*?)```", doc, re.S)):
         head = body.lstrip()
-        # 完全なファイル例 (package 宣言つき) と、意図的に省略記号を含むものは対象外。
-        if head.startswith("package ") or "..." in body:
+        # 完全なファイル例 (package 宣言つき) は対象外。
+        #
+        # 省略記号は **行がまるごと `...` のものだけ**を対象外にする。本文のどこかに
+        # `...` があるかで判定すると、`{"userId": ..., "roleId": ...}` のような
+        # コメントを含む fence が丸ごと検査から外れる (#2639 で実際に踏んだ)。
+        if head.startswith("package "):
+            dropped.append((i, "package 宣言つきの完全な例"))
+            continue
+        if any(line.strip() == "..." for line in body.splitlines()):
+            dropped.append((i, "省略記号の行がある"))
             continue
         kept += 1
         for name, tmpl in VARIANTS.items():
@@ -61,6 +73,8 @@ def main() -> int:
             d = work / "snippets" / pkg
             d.mkdir(parents=True, exist_ok=True)
             (d / "x.go").write_text(tmpl.format(pkg=pkg, header=HEADER, body=body))
+    for i, why in dropped:
+        print(f"  fence {i:02d} を対象外にした: {why}", file=sys.stderr)
     print(kept)
     return 0
 

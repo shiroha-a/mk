@@ -111,6 +111,8 @@ PostgreSQL が要る（`TEST_DB_*` 環境変数、既定は `localhost:5432` の
 make plugin-doc-check
 ```
 
-`authoring.md` の Go スニペットを使い捨ての module に展開してビルドし、**実際に噛んだ 3 クラス** (`declared and not used` / `no new variables` / `does not implement`) を検査する。断片は `lookup(...)` のようなヘルパを意図的に省くので `undefined: X` は正常。
+`authoring.md` の Go スニペットを使い捨ての module に展開してビルドする。断片は `lookup(...)` のようなプラグイン側のヘルパを意図的に省くので、**非修飾の `undefined: X` だけ**を正常として捨て、それ以外は種類を問わず落とす (`undefined: plugin.Blob` のような修飾付きは API の改名・削除なので落とす)。
 
-完全なコンパイル検査ではないが、**推論では判別できない**ので doc を触ったら回すこと (#2639 では「コンパイルできない例を直す」作業が 4 周にわたって別のエラーを作り続けた)。CI には載せていない (別 module の解決が走るため)。
+断片の置かれる文脈は 3 通り (top-level 宣言 / `(any, error)` を返すハンドラ / `error` を返す routes・jobs) あるので全部に展開し、どれか 1 つでも通れば良しとする。対象外にした fence は理由つきで出る。
+
+**推論では判別できない。** #2639 では「コンパイルできない例を直す」作業が 4 周にわたって別のエラーを作り続けた (`Call` の第 1 引数 → `no new variables` → `declared and not used`)。CI の `plugin-tests` job でも回している。
