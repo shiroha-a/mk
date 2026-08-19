@@ -11,7 +11,9 @@ VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/cont
 - golang-migrate、Node.js 22、pnpmがプリインストール
 - `postCreate.sh`で初期化
 
-`postCreate.sh` が `.config/default.yml` を example から複製し (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)、`url` を `http://localhost:3000` へ書き換えたうえで migration まで流す。`TEST_DB_*` は compose が渡すので `.env.test` は要らない。
+`postCreate.sh` が `.config/default.yml` を example から複製し (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)、migration まで流す。`TEST_DB_*` は compose が渡すので `.env.test` は要らない。
+
+`url` は example の `https://example.tld/` のまま残る。絶対 URL を永続化する経路を触るなら手で書き換えること (`MK_URL` で渡すと `internal/config` のテストが落ちる)。
 
 ```bash
 # VS Code で開いたら
@@ -26,7 +28,7 @@ make dev
 - Redis 7+
 - Docker (テストで Redis を要する箇所が testcontainers を使う)
 
-**テストを回すには PostgreSQL を自分で用意して `.env.test` で指す。** Redis は testcontainers が立てるが、DB を使うテストの大半は外部の PostgreSQL に直接つなぐ (→ [testing.md](testing.md))。
+**テストを回すには PostgreSQL を自分で用意する。** Redis は testcontainers が立てるが、DB を使うテストの大半は外部の PostgreSQL に直接つなぐ。既定の接続先とロール / DB の作り方は [testing.md](testing.md) を参照。
 
 ```bash
 git clone --recursive https://github.com/shiroha-a/mk.git

@@ -45,13 +45,13 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 |---|---|---|---|---|
 | `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 | 1 min | `GOOS=linux govulncheck ./...` |
 | `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) | 1.5 min | `make frontend-check` |
-| `e2e` | Upstream backend e2e | **本家の backend e2e 1245 テスト**が mk-go に対して通るか | 17 min | `make upstream-e2e` |
+| `e2e (1/4)` 〜 `4/4` | Upstream backend e2e | **本家の backend e2e 1245 テスト**が mk-go に対して通るか | 3-7 min | `make upstream-e2e` |
 | `diff` | Diff e2e | mk-go と TS の**レスポンスの値**が一致するか (43 比較) | 4 min | `make diff-check` |
 | `swap-test` | Drop-in e2e | TS→mk 切替で state が保たれるか | 5 min | `make dropin-swap-test` |
 | `mkgo-born` | Drop-in e2e | **mk-go 生まれの DB を TS に引き渡せるか** (= ロックインの有無) | 5 min | `make dropin-mkgo-born-test` |
 | `ed25519-verify` | Drop-in e2e | Fedibird-like mock との Ed25519 双方向 verify | 5 min | `make dropin-fedibird-test` |
 | `federation` | Drop-in e2e | 本物の Misskey TS との実連合 (follow/note/reaction/renote/reply/mention/delete) | 4 min | `make federation-misskey-e2e` |
-| `spec (mk-go 1/4)` 〜 `4/4` | Playwright | ブラウザからの統合互換 (289 spec ファイル) | 15 min | `make playwright-check` |
+| `spec (mk-go 1/4)` 〜 `4/4` | Playwright | ブラウザからの統合互換 (289 spec ファイル) | 4-9 min | `make playwright-check` |
 | `build-and-push` / `-bundled` | Docker | image がビルドできるか (PR では push しない) | 4 min | `docker build -f Dockerfile .` |
 
 ### e2e 系が「何を守っているか」の違い

@@ -23,9 +23,9 @@
 
 **必要なのは PostgreSQL 側の準備。** 既定では `localhost:5432` の `misskey_test` データベースに `mk` / `mk` で接続する。
 
-```sql
-CREATE ROLE mk LOGIN PASSWORD 'mk';
-CREATE DATABASE misskey_test OWNER mk;
+```bash
+sudo -u postgres psql -c "CREATE ROLE mk LOGIN PASSWORD 'mk'"
+sudo -u postgres psql -c "CREATE DATABASE misskey_test OWNER mk"
 ```
 
 **接続先が既定と違うときだけ** `.env.test` を置く。

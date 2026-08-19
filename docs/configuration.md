@@ -259,7 +259,9 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 
 ## テスト用環境変数
 
-CIでのテスト実行時に使用。ローカルでは `.env.test` (= `.env.test.example` の複製) から読む。Redis は testcontainers が立てるが、**PostgreSQL は自分で用意する** (→ [testing.md](testing.md))。
+CIでのテスト実行時に使用。Redis は testcontainers が立てるが、**PostgreSQL は自分で用意する**。既定は `localhost:5432` の `misskey_test` に `mk` / `mk` で、違う接続先を使うときだけ `.env.test` を置くか export する (→ [testing.md](testing.md))。
+
+`TEST_REDIS_*` を読むのは `internal/core/chart` だけで、`SetupRedis` は環境変数を見ずに必ず testcontainers を立てる。
 
 | 環境変数 | 用途 |
 |---|---|

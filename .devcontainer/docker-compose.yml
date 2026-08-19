@@ -23,19 +23,19 @@ services:
       TEST_DB_USER: misskey
       TEST_DB_PASS: misskey
       TEST_DB_SSLMODE: disable
-      # **MK_URL をここに置かないこと。** MK_* は viper で設定ファイルより優先
-      # されるので、internal/config のテストが fixture ではなくこの値を読んで
-      # 落ちる。url は postCreate.sh が複製後の default.yml を書き換える。
-      #
-      # 既存の MK_DB_* も同じ理由で TestLoad_DatabaseConfig を 1 件落とす。
+      # **MK_* をここに増やさないこと。** viper で設定ファイルより優先されるので、
+      # internal/config のテストが fixture ではなくこの値を読んで落ちる。
+      # 既に MK_DB_USER / MK_DB_PASS が TestLoad_DatabaseConfig を、
+      # MK_REDIS_HOST が TestLoad_RedisForPubsub を落としている (計 2 件)。
       # devcontainer 内でだけ再現し CI では起きないので気付きにくい。
+      # TestLoad_RedisConfig は fixture の値がたまたま localhost なので通って
+      # いるだけで、host network をやめて MK_REDIS_HOST: redis にすると 3 件目
+      # になる。
       TEST_REDIS_HOST: localhost
       TEST_REDIS_PORT: "6379"
       # cmd/migrate は DATABASE_URL を読まない。-config (既定 .config/default.yml)
       # を必ず読むので、**設定ファイルが無いと MK_DB_* があっても起動しない**
-      # (MK_DB_* はファイルの値を上書きするだけ)。
-      # .config/default.yml は gitignore 済みなので、migration を流す前に
-      # cp .config/default.yml.example .config/default.yml すること。
+      # (MK_DB_* はファイルの値を上書きするだけ)。複製は postCreate.sh が行う。
 
   db:
     image: postgres:18-alpine
