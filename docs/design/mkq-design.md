@@ -249,8 +249,8 @@ jobQueueDriver: mkq    # 既定 (未指定でも mkq)
 # jobQueueDriver: asynq  # legacy
 ```
 
-**設計当時は asynq が既定だった。** #571 の 3-way ベンチ (BullMQ / asynq / mkq) を経て
-mkq が既定になり、asynq は legacy 扱いになっている。
+**設計当時は asynq が既定だった。** 3-way ベンチ (BullMQ / asynq / mkq、#563) の結果を
+受けた #571 の audit で mkq が既定になり、asynq は legacy 扱いになっている。
 
 router.go で driver を 1 箇所で生成して wire。同じ binary で両 driver がコンパイル済み。
 

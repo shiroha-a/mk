@@ -770,16 +770,17 @@ func serverPackageSource() (string, error) {
 var docChannelRowRe = regexp.MustCompile("^\\| `([a-zA-Z]+)` \\|")
 
 // TestDivergenceDoc_StreamChannelsMatchRegistry asserts that §4-1 lists exactly
-// the stream channels router.go registers.
+// the stream channels internal/server registers.
 //
 // **チャンネル名はファイル名と違う。** upstream のソースは `chat-room.ts` だが
 // wire 上の名前 (`chName`) は `chatRoom`。#2640 の初稿はファイル名をそのまま
 // 「チャンネル名も upstream に揃えてある」として並べており、18 件中 11 件が
 // 実在しない名前だった。人が目で照合すると通る類の誤り。
 //
-// upstream 側の一覧は submodule を要するので参照できない (test-shards は
-// checkout しない)。ただし mk-go は upstream の 18 をすべて同名で実装している
-// ので、**router.go の登録名と突き合わせれば doc の主張は全部検証できる**。
+// **固定できるのは「doc の一覧 == mk-go の登録」だけ。** §4-1 のもう半分の主張
+// 「upstream は 18」「名前も upstream に揃えてある」は検証していない — test-shards は
+// submodule を checkout しないため。doc と実装を同時に間違えれば通る。upstream 側の
+// 増減も検出できないので、submodule bump の PR で人が見る。
 func TestDivergenceDoc_StreamChannelsMatchRegistry(t *testing.T) {
 	// 走査は `TestAPICompatDoc_MatchesRouter` と揃えて package 全体。router.go
 	// だけを見ると別ファイルからの登録を取りこぼす。
@@ -843,12 +844,12 @@ func TestDivergenceDoc_StreamChannelsMatchRegistry(t *testing.T) {
 	if len(missing) == 0 && len(stale) == 0 {
 		return
 	}
-	t.Errorf(`docs/divergence.md §4-1 のチャンネル一覧が router.go の登録と食い違っている。
+	t.Errorf(`docs/divergence.md §4-1 のチャンネル一覧が internal/server の登録と食い違っている。
 
-router.go にあって doc に無い (%d 件):
+実装にあって doc に無い (%d 件):
   %s
 
-doc にあって router.go に無い (%d 件、= 名前の綴り違いか、消えたチャンネル):
+doc にあって実装に無い (%d 件、= 名前の綴り違いか、消えたチャンネル):
   %s
 
 **ファイル名ではなくチャンネル名 (chName) を書くこと。** upstream のソースは

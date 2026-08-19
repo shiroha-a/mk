@@ -35,21 +35,21 @@
 | `mention_resolver.go` | メンション → AS Mentionタグ変換 |
 | `fetcher.go` | リモートオブジェクト取得。**既定は instance actor による署名付き GET**で、401/403 のときだけ unsigned にフォールバックする (authorized-fetch 対応、#419) |
 | `ld_signature_verifier.go` | inbound activity の LD-Signature 検証 |
-| `activity_unwrap.go` | ネストした activity の展開 |
+| `activity_unwrap.go` | **1 要素の JSON 配列**になっている body を剥がす (Foundkey 系、#1185)。ネストした activity の actor 正規化は `processor.go` の `normalizeActor` |
 | `pin_delivery_hook.go` | ピン留め時に Add/Remove を配信 (#2024) |
 | `poll_delivery_hook.go` | 投票関連の配信 |
 | `blocking_delivery_hook.go` / `user_moderation_delivery_hook.go` | ブロック・モデレーション操作の配信 |
 | `profile_update_delivery_hook.go` | プロフィール更新時に Update(Person) を配信 |
 | `chat_room_inbox.go` / `reversi_inbox.go` | cherrypick 由来 activity の受信 |
-| `featured.go` | featured コレクションの構築 |
+| `featured.go` | **リモート** actor の featured を取り込んで `user_note_pining` に反映 (upstream `ApPersonService.updateFeatured` 相当)。ローカルの featured を返すのは `internal/api/ap/handler.go` |
 | `permanent_error.go` | リトライしない失敗の判定 |
-| `suspended.go` | 凍結ユーザー由来 activity の扱い |
+| `suspended.go` | 配送先インスタンスの software 名 / 版で**送信をスキップ**するかの判定 (`meta.deliverSuspendedSoftware`) |
 | `remote_user_resolver.go` | `acct:` からのリモートユーザー解決 |
 | `image_dimensions.go` | 添付画像の寸法取得 |
 
 ## HTTP Signatures
 
-Cavage draft v12に準拠。RSA-SHA256で署名する。
+Cavage draft v12に準拠。
 
 署名アルゴリズムは `rsa-sha256` と `ed25519` の 2 種類。Ed25519 は配送先が
 FEP-521a Multikey で公開している場合のみ使う (後述)。
@@ -76,20 +76,28 @@ HTTP Signature は**そのリクエストを投げた相手**しか認証しな�
 HTTP Signature からは言えない。これを埋めるのが LD-Signature。
 
 - 実装: `internal/activitypub/ld/` (`sign.go` / `verify.go` / `canonicalize.go` / `hardening.go`) と `internal/core/federation/ld_signature_verifier.go`
-- 動作は body の `signature` field を gate にする — **無ければ skip** (HTTP Signature だけで処理続行)、あって verify 通過なら続行、あって失敗なら activity を drop
-- upstream Misskey TS 2026.5.4 の `InboxProcessorService.process` と同じ
-  `compact → checkForForbiddenDirectives → freeze → verifyRsaSignature2017` の順序
-- inbox の**転送活動の許可判定がこれに依存する**。HTTP 署名者と body の actor が
-  一致しない activity は、LD-Signature が body actor を認証している場合にのみ通る
-  (actor spoofing 対策)
-- canonicalize は外部 URL を引く操作なので、SSRF / キャッシュ増幅 / spoofing 対策を
+- **通常経路 (HTTP 署名者 == body の actor) では verify しない。** `@context` の
+  term 再定義を弾く `CheckForForbiddenDirectives` だけを掛ける (#2106 N26)。
+  upstream の `InboxProcessorService` もこの経路では LD-Signature を見ておらず、
+  ここで verify すると creator 鍵の未解決や legacy LD-sig で**HTTP 署名済みの正規
+  activity を落としてしまう**
+- **verify するのは 2 つの経路だけ。** (1) HTTP 署名ヘッダの無い legacy /
+  direct-enqueue 経路、(2) **HTTP 署名者と body の actor が食い違う転送経路**。
+  後者は LD-Signature が body actor を認証している場合にのみ通す (actor spoofing 対策)
+- **upstream と違って `compact` を呼ばない** (#2106 L49、divergence 登録済み)。
+  upstream は `compact → checkForForbiddenDirectives → freeze → verifyRsaSignature2017`
+  の順だが、mk-go は raw activity に直接 check を掛ける。`ld.PreloadedLoader` が
+  HTTP fetch を一切行わない (AS2.0 / security v1 / identity v1 の 3 つだけを resolve)
+  ので、remote context で directive を後付けする経路が構造的に無いことが前提。
+  **将来 fetch fallback を足すなら compact 後の check に切り替える必要がある**
+- canonicalize は外部 URL を引きうる操作なので、SSRF / キャッシュ増幅 / spoofing 対策を
   `ld/hardening.go` と `ld/loader.go` に置いている
 
 ## リモートオブジェクト解決
 
 `resolver.go`がリモートのアクターとノートを取得し、ローカルDBに永続化する。
 
-**公開鍵キャッシュ (2層):**
+**公開鍵キャッシュ:**
 1. インメモリ (`map[userID]publicKeyEntry`, TTL 24h)
 2. DB (`user_publickey`テーブル)
 3. HTTPフェッチ (キャッシュミス時。`fetcher.go` 経由なので既定は署名付き GET)

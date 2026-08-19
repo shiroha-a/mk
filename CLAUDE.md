@@ -55,7 +55,7 @@
 │   ├── misskey/            # メインバイナリのエントリポイント
 │   ├── migrate/            # マイグレーションCLIツール
 │   ├── backfill-note-tags/ # note.tags を NFKC 正規化し直す一回限りのバッチ
-│   └── dbgtimeline/        # タイムライン不整合を再現するデバッグ用ツール
+│   └── dbgtimeline/        # home/global timeline の JSON encoder panic を再現するデバッグ用ツール
 ├── internal/               # 全22パッケージ
 │   ├── config/             # 設定ローダー（Misskey YAML互換）
 │   ├── db/                 # GORM の PostgreSQL 接続配線
@@ -82,7 +82,7 @@
 │   ├── pluginstore/        # プラグインごとの専用 PostgreSQL schema (#2481)
 │   ├── safehttp/           # 外向きHTTPの共通ヘルパー（SSRFガード等）
 │   ├── charttick/          # チャートの絶対時刻を再導出する TickFunc 群
-│   ├── maintenance/        # ジョブに載せられないアプリレベルのバッチ
+│   ├── maintenance/        # SQL migration として書けない後始末バッチ（起動時に走る）
 │   ├── frontendutil/       # 同梱フロントエンドの資産配信ヘルパー
 │   ├── pgarray/            # database/sql 用の PostgreSQL 配列型
 │   ├── sentry/             # sentry-go の配線
@@ -596,7 +596,7 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
   `build-and-push` / `build-and-push-bundled`。`workflow_dispatch` は過去の
   リリースタグから image を publish し直す用途
   (`gh workflow run docker.yml -f tag=1.1.1`)。
-- `docker-branch.yml` は `push` / `workflow_dispatch`。ブランチ image 用。
+- `docker-branch.yml` は **image をビルドしない**。`develop` への push (paths フィルタ付き) と `workflow_dispatch` で、compose ファイルだけを載せた orphan ブランチ `docker` を force-push する (「pull して動かすだけ」の構成を配るため)。検査は `docker compose config --quiet` のみ。
 - PR の required check には**含めない**。
 
 ### schedule で回る workflow

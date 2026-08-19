@@ -266,7 +266,7 @@ mk-go の migration は Misskey TS が作った既存 DB にも流れる。以�
 ## 3. 参考リンク
 
 - 直近の triage 例: [`docs/update/20260512-947-triage.md`](./update/20260512-947-triage.md)
-- upstream release 差分まとめ: `docs/update/yyyymmdd*` 命名規則
+- upstream release 差分まとめ: `docs/update/<yyyymm><nn>diff.md` (`nn` は release 内の連番で日付ではない)。triage note は `<yyyymmdd>-<issue>-triage.md`
 - PR #998: 2026.3.2 → 2026.5.1 一括取り込みの reference 実装 (= Infrastructure + Wave 1-4 + follow-up audit + #17034)
 - [api-compatibility.md](./api-compatibility.md): 互換性追跡
 - [migration-from-ts.md](./migration-from-ts.md): TS → mk-go drop-in 切替

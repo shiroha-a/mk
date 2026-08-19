@@ -164,21 +164,18 @@ func (s *Server) Start() error {
 		}
 		var optsBase []mkq.WorkerOption
 		if rl, ok := s.perQueueRate[name]; ok && rl > 0 {
-			// mkq.WithRateLimit は per-Worker に適用される。Pool 内で N
-			// Worker いるなら合計 rate は rl × N に倍化するため、ADR §5.1
-			// trade-off の通り pool-of-Workers では rate limit が単一
-			// Worker 時と一致しない。#1126 queue-bench で挙動を検証予定。
+			// **リミッタは queue 単位で効く。** pool 内に N Worker いても
+			// 合計は rl のまま。実体は BullMQ 互換の `bull:<queue>:limiter`
+			// という queue ごとに 1 本の Redis キーで、全 Worker がそれを
+			// INCR するため。
+			//
+			// ここには以前「per-Worker なので合計 rate は rl × N」という
+			// コメントと、その値を出す slog.Warn があったが**誤り**だった
+			// (#2640)。operator にその値を信じさせると、狙ったレートを
+			// worker 数で割って設定してしまい配送が 1/N に絞られる。
+			// `TestServer_RateLimit_IsPerQueueNotPerWorker` が worker 1 と
+			// 16 で実効レートが変わらないことを固定している。
 			optsBase = append(optsBase, mkq.WithRateLimit(rl, time.Second))
-			if concurrency > 1 {
-				// operator が rate limit を「合計 N jobs/sec」と認識する誤読を
-				// 防ぐため、両方を非自明値に設定したケースで startup ログを出す。
-				// docs/configuration.md と #1124 PR 説明に同 trade-off を記載。
-				slog.Warn("mkqdriver: rate limit applies per-Worker; effective total rate = rl × concurrency",
-					"queue", name,
-					"rl", rl,
-					"concurrency", concurrency,
-					"effective_total_per_sec", rl*concurrency)
-			}
 		}
 		if s.maxMetricsPoints > 0 {
 			// BullMQ-compatible per-queue metrics opt-in。

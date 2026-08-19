@@ -296,8 +296,8 @@ PR では回らず schedule で実行されるものが 2 つある。
 
 | workflow | 内容 | 時刻 |
 |---|---|---|
-| `Drop-in frontend e2e` | 3 TS インスタンス + cypress で frontend 視点の drop-in 互換 | 19:00 UTC |
-| `Queue-bench smoke` | queue driver がジョブを落としていないか (`ok == sent`) | 17:30 UTC |
+| `Drop-in frontend e2e (nightly)` | 3 TS インスタンス + cypress で frontend 視点の drop-in 互換 | 19:00 UTC |
+| `Queue-bench smoke (nightly)` | queue driver がジョブを落としていないか (`ok == sent`) | 17:30 UTC |
 
 ### CI失敗時の対応
 

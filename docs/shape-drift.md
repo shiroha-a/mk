@@ -420,7 +420,7 @@ make shapecheck-gen                                        # golden_upstream_mig
 
 §1-1 の見出しの件数 == `docs/api-compat.md` の `mk-go only (TS spec 外)`。
 
-**内部整合だけでは足りない。** 上の gate は 3 箇所が互いに一致することしか見ないので、**3 つが揃って同じだけ間違っている**状態を通す。実際 §1-1 は 53 と言い続け、生成物は 58 だった (`admin/server-plugins` / `admin/server-metrics` / `admin/self-check` / `admin/federation/{delivery,inbox}-health` がどこにも載っていなかった、#2640)。
+**内部整合だけでは足りない。** 上の gate は 3 箇所が互いに一致することしか見ないので、**3 つが揃って同じだけ間違っている**状態を通す。実際 develop では §1-1 が 53、生成物が 49、真値が 58 だった (#2640)。§1-1 の内訳表に数えられていなかったのは `admin/server-plugins` / `admin/server-metrics` / `admin/self-check` / `admin/federation/{delivery,inbox}-health` の 5 件で、うち 4 件は生成物の側には載っていた (= 突き合わせていれば気付けた)。
 
 upstream の endpoint 一覧を `tools/apicompat` から直接引くことはできない (**`test-shards` job は submodule を checkout しない**。`submodules: recursive` があるのは `frontend-check` だけ)。ただし `make apicompat` の生成物は commit されているので、そちらを経由すれば submodule 無しで突き合わせられる。
 

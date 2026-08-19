@@ -114,12 +114,17 @@ cp .config/docker.yml.example .config/docker.yml
 > - `mkq`: `mkq.WithRateLimit` で **worker pull レイヤ** に制御が入るため、レート制限が他 queue の処理を阻害しない。
 > - **本格的に rate limit を運用するなら `mkq` driver を推奨**。
 >
-> **`mkq` driver の rate limit は per-Worker (#1124)**:
+> **`mkq` driver の rate limit は per-queue**:
 > - mk-go の `mkq` driver は queue ごとに **N 個の `mkq.Worker`** を起動する pool-of-Workers 構造で運用される (auto-scale (#1120) と queue 単位 dynamic Resize を実現するため)。
-> - `mkq.WithRateLimit` は **個々の Worker に独立に適用** されるため、`deliverJobConcurrency: N` + `deliverJobPerSec: rl` の組み合わせでは **合計 dispatch rate = N × rl** になる。
-> - 例: `deliverJobConcurrency: 4` + `deliverJobPerSec: 100` → 実 dispatch 上限は **400 jobs/sec** (= 4 × 100)、設定値 100 ではない。
-> - 起動時に該当条件 (rl > 0 かつ concurrency > 1) で `slog.Warn` で effective rate を通知する。auto-scale (#1125) 配線後は Resize 時にも同 effective rate が再計算される。
-> - 連合先に rate limit を厳密に守る運用が必要な場合は `deliverJobPerSec` を `<合計目標> / <deliverJobConcurrency>` で割って設定すること。
+> - それでも **`mkq.WithRateLimit` は queue 単位で効く**。リミッタの実体は BullMQ 互換の
+>   `bull:<queue>:limiter` という **queue ごとに 1 本の Redis キー**で、pool 内の全 Worker が
+>   同じキーを INCR する。Worker ごとの独立したバケットではない。
+> - したがって `deliverJobPerSec: 128` は **worker 数によらず約 128 jobs/sec**。
+>   `deliverJobConcurrency` で割る必要は無い。
+> - **以前ここには「per-Worker なので合計は N × rl。目標値を worker 数で割って設定せよ」と
+>   書いてあったが誤り** (#2640)。そのとおりにすると狙った値の 1/N しか出ない。
+>   `TestServer_RateLimit_IsPerQueueNotPerWorker` が worker 1 と 16 で実効レートが
+>   変わらないことを固定している (実測 2.02s / 2.01s)。
 
 ### メディア
 

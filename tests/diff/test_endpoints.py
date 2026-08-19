@@ -1,7 +1,7 @@
 """Differential endpoint tests (#2089): call the same endpoint on mk-go and TS,
 diff the JSON responses, fail on value-level deviations.
 
-This is the PoC coverage (meta + note packing). Extend with more endpoints as
+Currently 30 endpoint comparisons (see docs/diff-e2e.md). Extend with more endpoints as
 the harness matures; each confirmed deviation should become a #2078 sub-issue.
 
 Run via the diff-runner container: `make diff-test`.

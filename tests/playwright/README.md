@@ -119,7 +119,7 @@ tests/playwright/
     ├── auth.ts                 # signup / signin helper
     ├── ui_auth.ts              # ブラウザからのサインイン
     ├── quota.ts                # role policy 上限の後始末
-    └── ...                     # backend / chat / drive / notes / streaming ほか
+    └── ...                     # backend / chat / files / notes / notifications / streaming / timeline / ui_click
 ```
 
 ## 並列度

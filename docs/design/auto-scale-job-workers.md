@@ -308,7 +308,7 @@ mkqdriver.Server
  │
  └─ Resize(queue, n) error:
      - n > activeCount: 不足分の mkq.Worker を新規起動 (WithConcurrency(1))
-     - n < activeCount: 余剰 Worker に Close を呼び、in-flight job 完了を待って join
+     - n < activeCount: 余剰 Worker に Close を呼ぶ。**in-flight job の完了は待たない** — ctx が切れて cancel され、next pickup で retry される (`TestServer_ResizeDown_CancelsInFlight`)
      - n == activeCount: no-op
 ```
 
@@ -393,8 +393,8 @@ operator が「いつ何が起きたか」を grep で追えること。
 
 `internal/queue/driver/mkqdriver/integration_test.go` に追加:
 
-- `TestServer_ResizeUp_ProcessesMoreInParallel` — Resize(8 → 16) で並列度が倍になることを確認
-- `TestServer_ResizeDown_CancelsInFlight` — Resize(16 → 4) で goroutine が leak しないことを見る。**in-flight job は完了を待たず cancel される** (next pickup で retry される前提)。ADR §7.2 の「graceful drain」はこの意味
+- `TestServer_ResizeUp_ProcessesMoreInParallel` — Resize(2 → 8) で並列度が上がることを確認
+- `TestServer_ResizeDown_CancelsInFlight` — Resize(4 → 1) で **in-flight job は完了を待たず cancel される** ことを固定する (next pickup で retry される前提)。assert は「2 秒以内に返る / 3 件以上 cancel / 完了 0 / WorkerCount が 1」
 - `TestServer_ResizeRace` — 同時 multiple Resize 呼び出しで panic / leak しない
 
 testcontainers-go で実 Redis 起動。

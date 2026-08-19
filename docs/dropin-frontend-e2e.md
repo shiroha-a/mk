@@ -104,7 +104,7 @@ make dropin-frontend-swap-test
 
 # orchestrator の流れ:
 #   1. TS-A / TS-B / TS-C stack 起動 (baseline)
-#   2. CYPRESS_MODE=baseline で cypress run (12 passing)
+#   2. CYPRESS_MODE=baseline で cypress run (15 spec)
 #   3. docker compose stop app-a (TS-A backend 停止、DB / Redis は維持)
 #   4. overlay で app-a を mk-go に差し替えて起動
 #   5. CYPRESS_MODE=swap で cypress run (skipInSwap の 4 本を除いて実行)

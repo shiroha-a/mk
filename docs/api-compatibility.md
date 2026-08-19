@@ -17,7 +17,7 @@
 
 ## 概要
 
-- **upstream catch-up**: **2026.7.0 まで追従完了**。2026.3.2 → 2026.5.1 → 2026.5.4 → 2026.6.0 → 2026.7.0 と段階的に追従した。各 release 差分は [`docs/update/`](update/) (`yyyymmdd*` 命名) を参照
+- **upstream catch-up**: **2026.7.0 まで追従完了**。2026.3.2 → 2026.5.1 → 2026.5.4 → 2026.6.0 → 2026.7.0 と段階的に追従した。各 release 差分は [`docs/update/`](update/) を参照 (`<yyyymm><nn>diff.md`。`nn` は release 内の連番で日付ではない。同じディレクトリに `<yyyymmdd>-<issue>-triage.md` 形式の triage note も同居する)
 - **本家 backend e2e**: Misskey 本家の `test/e2e/**` をテスト本体無改変で mk-go に向けて実行する基盤を整備し、**25 ファイル 1245 テストが全通過**。PR ごとに CI で回る。『通らないことが正しい』23 件は根拠付きで expected-failure として登録している ([`upstream-backend-e2e.md`](upstream-backend-e2e.md))
 - **Playwright e2e**: 289 spec ファイルを PR ごとに実行。Misskey TS backend に対しては upstream 追従時に実行し、spec が mk-go の挙動に引きずられていないかを検証する
 - **drift backlog**: Phase 1-4 の spec 整備中に発見した 40+ 件の drop-in 互換 drift は fix 済
@@ -325,7 +325,7 @@ drop-in テスト (#367) で発見した補完カラム:
   (`chat/messages/create` / `chat/rooms/joined` / `chat/rooms/members/ban` 等) を
   additive に足している。upstream のクライアントから見て欠けているものは無い
 - **search backend** — `fulltextSearch.provider` で挙動切替: 既定の `sqlLike` (= `lower(text) LIKE` による部分一致。**ILIKE ではない** — pg_bigm の GIN index `gin (lower(text) gin_bigm_ops)` は LIKE しか加速せず、ILIKE だと拡張を入れても index が効かないため。Meilisearch 不要、軽量 deploy 向け) / `meilisearch` (要 host 設定) / `sqlPgroonga` (要 PGroonga 拡張) / `none` (= upstream TS strict-mode 互換、400 UNAVAILABLE で reject、#877)
-- **upstream 2026.7.0 まで追従済** — `#947` (2026.3.2 → 2026.5.1) / `#1164` (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) を経て 2026.6.0 → 2026.7.0 まで完了。各 release 差分は [`docs/update/`](update/) (`yyyymmdd*` 命名) を参照
+- **upstream 2026.7.0 まで追従済** — `#947` (2026.3.2 → 2026.5.1) / `#1164` (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) を経て 2026.6.0 → 2026.7.0 まで完了。各 release 差分は [`docs/update/`](update/) を参照 (`<yyyymm><nn>diff.md`。`nn` は release 内の連番で日付ではない。同じディレクトリに `<yyyymmdd>-<issue>-triage.md` 形式の triage note も同居する)
 
 詳細は[TS版からの移行ガイド](migration-from-ts.md)の「既知の制限」セクションも参照。
 

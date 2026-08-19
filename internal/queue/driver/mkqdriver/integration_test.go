@@ -1695,3 +1695,73 @@ func TestPendingCount_UnknownQueue(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown queue")
 }
+
+// TestServer_RateLimit_IsPerQueueNotPerWorker pins the scope of
+// mkq.WithRateLimit.
+//
+// **worker 数を変えても実効レートは変わらない。** mkq のリミッタは
+// `bull:<queue>:limiter` という **queue ごとに 1 本の Redis キー**を全 Worker が
+// INCR する BullMQ 互換の実装で、Worker ごとに独立したバケットではない。
+//
+// これを取り違えると被害が両方向に出る。「per-Worker だから worker 数で割れ」と
+// 案内すると operator は狙った値の 1/N を設定してしまい、配送が N 分の 1 に絞られる
+// (#2640 で実際に doc をそう書きかけた)。逆に「合計 rl × N」と信じると、設定した
+// つもりの上限より N 倍緩いと誤解する。
+//
+// 同じ rate / 同じ job 数を worker 1 と worker 16 で流し、所要時間が同程度に
+// なることで固定する。
+func TestServer_RateLimit_IsPerQueueNotPerWorker(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+
+	const (
+		rate = 4
+		jobs = 12
+	)
+	elapsed := map[int]time.Duration{}
+	for _, workers := range []int{1, 16} {
+		flushRedis(t)
+
+		d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+			Redis:            redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+			Concurrency:      workers,
+			QueueConcurrency: map[string]int{"deliver": workers},
+			QueueRateLimits:  map[string]int{"deliver": rate},
+		})
+		require.NoError(t, err)
+
+		srv := d.Server()
+		var wg sync.WaitGroup
+		wg.Add(jobs)
+		srv.Handle("rlscope:tick", func(_ context.Context, _ driver.Task) error {
+			wg.Done()
+			return nil
+		})
+		require.NoError(t, srv.Start())
+
+		start := time.Now()
+		for range jobs {
+			require.NoError(t, d.Client().Enqueue(context.Background(), "rlscope:tick", nil,
+				driver.WithQueue("deliver")))
+		}
+		if !waitGroupTimeout(&wg, 30*time.Second) {
+			srv.Shutdown()
+			_ = d.Close()
+			t.Fatalf("worker=%d: rate-limited handler did not complete within timeout", workers)
+		}
+		elapsed[workers] = time.Since(start)
+		srv.Shutdown()
+		require.NoError(t, d.Close())
+	}
+
+	// 12 job を 4/sec なら約 2 秒。per-Worker なら worker 16 では 64/sec に
+	// なるので 1 秒を切る。**flaky を避けるため下限だけを見る。**
+	perSec := float64(jobs) / float64(rate)
+	floor := time.Duration(perSec * 0.6 * float64(time.Second))
+	for workers, d := range elapsed {
+		assert.GreaterOrEqual(t, d, floor,
+			"worker=%d: %s で drain した。per-queue のリミッタなら worker 数によらず "+
+				"約 %ds かかるはずで、これより速いのは per-Worker になっている兆候",
+			workers, d, jobs/rate)
+	}
+	t.Logf("worker=1: %s / worker=16: %s (per-queue なら同程度)", elapsed[1], elapsed[16])
+}
