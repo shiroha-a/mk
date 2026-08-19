@@ -68,10 +68,10 @@ coreサービス (note/following/reaction)
 DeliveryHook (note_delivery_hook等)
   ↓ Activity構築 + エンキュー
 DeliverService
-  ↓ asynq タスク投入
+  ↓ deliver queue へタスク投入
 Redis (ジョブキュー)
   ↓
-DeliverProcessor (asynqワーカー)
+DeliverProcessor (queue ワーカー)
   ↓ 署名付きPOST
 リモートInbox
 ```
@@ -99,7 +99,7 @@ DeliverProcessor (asynqワーカー)
 
 ### Redis に格納される秘密情報
 
-DeliverPayload は `KeyPEM` (RSA private key) および `Ed25519PrivPEM` (Ed25519 private key) を含んだ JSON として asynq queue (= Redis) に書き込まれる。これは upstream Misskey TS の BullMQ payload と同じ pattern だが、本番運用では以下が推奨される:
+DeliverPayload は `KeyPEM` (RSA private key) および `Ed25519PrivPEM` (Ed25519 private key) を含んだ JSON としてジョブキュー (= Redis) に書き込まれる。これは upstream Misskey TS の BullMQ payload と同じ pattern だが、本番運用では以下が推奨される:
 
 - **Redis 通信の TLS 化** (in-transit 暗号化)
 - **Redis の persistence 暗号化** (encrypt-at-rest、Disk full encryption / Redis Enterprise の透過暗号化など)
@@ -109,12 +109,12 @@ DeliverPayload は `KeyPEM` (RSA private key) および `Ed25519PrivPEM` (Ed2551
 
 ## Inbox処理
 
-`internal/api/inbox/handler.go`がShared InboxとユーザーInboxの両方を処理する。**verify-in-worker 化済 (#565)**: HTTP handler では body + signature header を payload として queue に詰めて 202 即返し、verify は inbox worker (asynq processor) で行う。これにより HTTP 受信スループットが TS の 2.6-2.8x。
+`internal/api/inbox/handler.go`がShared InboxとユーザーInboxの両方を処理する。**verify-in-worker 化済 (#565)**: HTTP handler では body + signature header を payload として queue に詰めて 202 即返し、verify は inbox worker で行う。これにより HTTP 受信スループットが TS の 2.6-2.8x。
 
 **HTTP handler フロー (同期、軽量):**
 1. リクエストボディ読み取り
 2. queue/processors の inbox 用 payload を作成 (body + signature header)
-3. asynq enqueue
+3. inbox queue へ enqueue
 4. 202 Accepted 即返し
 
 **inbox worker フロー (非同期、`internal/queue/processors/inbox.go`):**
@@ -122,7 +122,7 @@ DeliverPayload は `KeyPEM` (RSA private key) および `Ed25519PrivPEM` (Ed2551
 2. Signature 解析 → `keyId` からアクター解決
 3. 公開鍵取得 (キャッシュ優先) → 署名検証
 4. ホストブロックチェック
-5. インスタンスメタデータ更新 (`InstanceTouchBuffer` で per-host 1s buffer 集約、#569)
+5. インスタンスメタデータ更新 (`coreinstance.TouchBuffer` で per-host 1s buffer 集約、#569)
 6. チャートメトリクス記録
 7. Processor にディスパッチ
 8. fanoutHook / notificationHook を `safeGo` で async 発火 (#569)

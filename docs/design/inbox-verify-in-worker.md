@@ -12,16 +12,16 @@ upstream Misskey TS は `InboxProcessorService` (BullMQ worker) で verify す�
 
 ## 2. 設計判断: HTTP handler を 202 即返し、検証は worker
 
-mk-go は **HTTP handler を最小化** し、検証を inbox worker (asynq processor) で行う構成にした。
+mk-go は **HTTP handler を最小化** し、検証を inbox worker で行う構成にした。
 
 ```
 [外部 instance]
       │ POST /inbox (signed)
       ▼
-[HTTP handler] ───────► body + signature header を payload に詰めて asynq enqueue
+[HTTP handler] ───────► body + signature header を payload に詰めて inbox queue へ
       │ 202 Accepted 即返し
       ▼
-[asynq queue]
+[ジョブキュー]
       │
       ▼
 [inbox worker] ─────► signature verify
@@ -38,7 +38,7 @@ mk-go は **HTTP handler を最小化** し、検証を inbox worker (asynq proc
 
 1. body を読み取る (上限あり)
 2. `Signature` header と関連 header (`Date`, `Host`, `Digest`) を payload と一緒に dump
-3. asynq enqueue
+3. inbox queue へ enqueue
 4. 202 Accepted
 
 ### inbox worker (`internal/queue/processors/inbox.go`) が行うこと
@@ -47,7 +47,7 @@ mk-go は **HTTP handler を最小化** し、検証を inbox worker (asynq proc
 2. Signature 解析 → `keyId` からアクター解決
 3. 公開鍵取得 (キャッシュ優先) → 署名検証
 4. ホストブロックチェック
-5. インスタンスメタデータ更新 (`InstanceTouchBuffer` で per-host 1s buffer 集約、#569)
+5. インスタンスメタデータ更新 (`coreinstance.TouchBuffer` で per-host 1s buffer 集約、#569)
 6. チャートメトリクス記録
 7. Processor ディスパッチ (Create / Update / Follow / Like / Announce / etc.)
 8. `fanoutHook` / `notificationHook` を `safeGo` で async 発火
@@ -68,7 +68,7 @@ queue-bench (`tests/queue-bench/`、#563) で計測:
 
 ### worker drain time も改善 (#569)
 
-- `MarkRequestReceived` を per-host で 1s buffer に集約する `InstanceTouchBuffer` 導入
+- `MarkRequestReceived` を per-host で 1s buffer に集約する `coreinstance.TouchBuffer` 導入
 - federation processor の `handleCreate` で Reply/Renote 関係が無い fresh note への redundant `hydrateNoteForFanout` (DB SELECT) を skip
 - fanoutHook / notificationHook を local note service と同じ `safeGo` pattern で async 化
 
@@ -81,7 +81,7 @@ queue-bench で **asynq drain 29.3s → 22.4s (-24%)、mkq 45.7s → 34.0s (-26%
 - unsigned / malformed activity は worker で drop されるため queue が一時的に膨らむ可能性あり
 - 攻撃想定: 攻撃者が 202 即返しの handler に大量の偽 activity を投げ込み、worker queue を埋める
 - 対策: CDN / WAF 層で粗い filter を入れる前提 (= mk-go 単独で粗 filter は持たない、Misskey TS 同様)
-- 検証 fail した activity の queue 上での生存期間は asynq の retention policy 依存 (デフォルト数分)
+- 検証 fail した activity の queue 上での生存期間は driver の retention policy 依存
 
 ### 可観測性の劣化
 
@@ -90,7 +90,7 @@ queue-bench で **asynq drain 29.3s → 22.4s (-24%)、mkq 45.7s → 34.0s (-26%
 
 ### 順序保証
 
-旧構成では handler ↔ Processor 間で Activity の順序が保たれていた (= 同 actor の Create → Update が順番に処理される保証)。新構成では asynq queue 経由なので、worker concurrency > 1 にすると順序がずれる可能性がある。
+旧構成では handler ↔ Processor 間で Activity の順序が保たれていた (= 同 actor の Create → Update が順番に処理される保証)。新構成ではジョブキュー経由なので、worker concurrency > 1 にすると順序がずれる可能性がある。
 
 → Misskey TS / Mastodon でも同 worker concurrency 環境で順序保証は提供されない。Activity 自体に `published` 時刻があるので最終的整合は取れる (= 順序ずれは UI の即時性のみに影響)。
 

@@ -1,12 +1,15 @@
 # mkq: BullMQ互換 Go-native Job Queue ライブラリ 設計ドキュメント
 
-**Status**: Draft (Phase 2 of #377) / **Target**: 別 OSS リポジトリとして公開、mk-go から driver 経由で利用
+**Status**: 実装済 (#377 Phase 2)。mkq は別 OSS リポジトリとして公開され、**mk-go の
+既定 driver** になっている (#571)。**以下は設計時点の記録**で、現在の設定値・挙動の
+一次情報ではない。運用時の値は [configuration.md](../configuration.md)、実測は
+[queue-bench.md](../queue-bench.md) を参照。
 
 ---
 
 ## 1. 背景
 
-mk-go は現状 [asynq](https://github.com/hibiken/asynq) をジョブキューとして使用している。しかし本家 Misskey (TS) は [BullMQ](https://docs.bullmq.io/) を採用しており、admin UI (ジョブキュー画面) は BullMQ 前提で以下の情報を要求する:
+設計当時、mk-go は [asynq](https://github.com/hibiken/asynq) をジョブキューとして使用していた。しかし本家 Misskey (TS) は [BullMQ](https://docs.bullmq.io/) を採用しており、admin UI (ジョブキュー画面) は BullMQ 前提で以下の情報を要求する:
 
 | BullMQ (frontend hardcode) | asynq (mk-go runtime) |
 |----------------------------|-----------------------|
@@ -242,9 +245,12 @@ type MkqDriver struct { /* ... */ }
 
 ```yaml
 # .config/default.yml
-jobQueueDriver: asynq  # default
-# jobQueueDriver: mkq
+jobQueueDriver: mkq    # 既定 (未指定でも mkq)
+# jobQueueDriver: asynq  # legacy
 ```
+
+**設計当時は asynq が既定だった。** #571 の 3-way ベンチ (BullMQ / asynq / mkq) を経て
+mkq が既定になり、asynq は legacy 扱いになっている。
 
 router.go で driver を 1 箇所で生成して wire。同じ binary で両 driver がコンパイル済み。
 

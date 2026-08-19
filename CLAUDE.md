@@ -25,7 +25,7 @@
 |-----------|---------|------|
 | PostgreSQL Driver | **pgx/v5** (`jackc/pgx/v5`) | PostgreSQL接続 |
 | Redis | **go-redis v9** (`redis/go-redis/v9`) | キャッシュ、PubSub |
-| Job Queue | **asynq** (`hibiken/asynq`) | Redisベースのジョブキュー（BullMQ相当） |
+| Job Queue | **mkq** (`shiroha-a/mkq`) | BullMQ wire互換のRedisジョブキュー（既定）。`asynq` (`hibiken/asynq`) はlegacyで削除予定 |
 | Search | **meilisearch-go** | Meilisearch連携 |
 | Object Storage | **aws-sdk-go-v2/s3** | S3互換ストレージ |
 
@@ -71,7 +71,7 @@
 │   ├── activitypub/        # ActivityPub実装（Inbox、Deliver、Renderer、Resolver、HTTP署名）
 │   ├── model/              # DBモデル（GORM、Misskeyエンティティ対応）
 │   ├── repository/         # データアクセス層
-│   ├── queue/              # ジョブキュー（asynq）とプロセッサ
+│   ├── queue/              # ジョブキュー（既定mkq / legacy asynq）とプロセッサ
 │   ├── stream/             # WebSocketストリーミング（チャンネル実装）
 │   ├── entity/             # レスポンス用DTO（シリアライゼーション）
 │   ├── misc/               # ユーティリティ（ULID生成等）

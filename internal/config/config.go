@@ -400,7 +400,7 @@ type Config struct {
 	MaxWorkersGlobal         *int
 	AutoScaleCooldownSeconds *int
 
-	// JobQueueDriver is one of "asynq" (default) or "mkq".
+	// JobQueueDriver is one of "mkq" (default) or "asynq" (legacy).
 	JobQueueDriver string
 
 	MediaProxy                   string

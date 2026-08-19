@@ -80,7 +80,7 @@ cp .config/docker.yml.example .config/docker.yml
 | キー | 用途 |
 |---|---|
 | `redisForPubsub.*` | PubSub (イベント配信) |
-| `redisForJobQueue.*` | ジョブキュー (asynq) |
+| `redisForJobQueue.*` | ジョブキュー (`jobQueueDriver` の実装が使う。既定は mkq) |
 | `redisForTimelines.*` | タイムラインキャッシュ |
 | `redisForReactions.*` | リアクションバッファ |
 
