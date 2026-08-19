@@ -154,7 +154,7 @@ GORM を使いたければプラグイン側で包む（`postgres.New(postgres.C
 
 ```go
 raw, err := ctx.API().Anonymous().Call(req.Context(), "users/show", map[string]any{"userId": id})
-raw, err := ctx.API().AsUser(userID).Call(req.Context(), "notes/create", params)
+raw, err = ctx.API().AsUser(userID).Call(req.Context(), "notes/create", params)
 ```
 
 mk-go の既存エンドポイントをプロセス内で呼ぶ。**可視性・権限・レート制限が自動的に効く**ので、モデレーション状態などを自前で持たなくてよい。
@@ -175,7 +175,7 @@ raw, err := ctx.API().AsUser(userID).Call(req.Context(), "roles/assignment-show"
     "roleId": roleID,
 })
 // 任意の利用者について答える。AsUser にはモデレーター以上の ID が要る
-raw, err := ctx.API().AsUser(moderatorID).Call(req.Context(), "admin/roles/assignment-show", map[string]any{
+raw, err = ctx.API().AsUser(moderatorID).Call(req.Context(), "admin/roles/assignment-show", map[string]any{
     "userId": userID, "roleId": roleID,
 })
 ```
@@ -451,6 +451,9 @@ if req.UserID() != "" {
     caller = ctx.API().AsUser(req.UserID())
 }
 raw, err := caller.Call(req.Context(), "users/show", map[string]any{"userId": id})
+if err != nil {
+    return nil, err
+}
 ```
 
 未ログインの閲覧者では引けないままだが、それは「未ログインにリモートの情報を
@@ -523,7 +526,7 @@ require.NoError(t, jobs.Run(t, "prune", ""))
 
 ## 公開面の一覧
 
-以下が「壊さないと約束する範囲」のすべて。`plugin` パッケージの分は**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` の `plugin:` 行と突き合わせる gate が CI で回る** (`TestPluginDoc_*`)。識別子・宣言・method の署名の 3 方向を見るので、足して載せ忘れても署名を写し間違えても落ちる。
+以下が「壊さないと約束する範囲」のすべて。`plugin` パッケージの分は**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` の `plugin:` 行と突き合わせる gate が CI で回る** (`TestPluginDoc_*`)。識別子・宣言・method の署名・トップレベル func / const・struct のフィールドの型を見るので、足して載せ忘れても、写し間違えても、消えた API を載せ続けても落ちる。
 
 `plugin/plugintest` の分はこの一覧に入れていない (テストの書き方は[テスト](#テスト)の節)。**gate の対象外**なので、そちらは golden の diff をレビューで見ること。
 

@@ -32,6 +32,13 @@ var (
 	pluginSurfaceIdentRe = regexp.MustCompile(`[A-Z][A-Za-z0-9_]*`)
 	// `pkg.Type` の `Type` は他パッケージの型なので公開面ではない。
 	pluginSurfaceQualifiedRe = regexp.MustCompile(`\b[a-z][A-Za-z0-9_]*\.([A-Z][A-Za-z0-9_]*)`)
+	// golden の `field Definition.Name string`。
+	pluginSurfaceFieldRe = regexp.MustCompile(`^field ([A-Z][A-Za-z0-9_]*)\.([A-Z][A-Za-z0-9_]*) (.+)$`)
+	// doc の `type Definition struct` と、その中の `  Name       string`。
+	pluginDocStructRe = regexp.MustCompile(`^type ([A-Z][A-Za-z0-9_]*) struct\s*\{?$`)
+	pluginDocFieldRe  = regexp.MustCompile(`^[ \t]+([A-Z][A-Za-z0-9_]*)\s+([^(].*)$`)
+	// doc は短い struct を 1 行で書く: `type Blob struct { ContentType string; Body []byte }`。
+	pluginDocInlineStructRe = regexp.MustCompile(`^type ([A-Z][A-Za-z0-9_]*) struct \{(.+)\}$`)
 	// golden の `type Peer interface` / `func Errorf(...)` / `const APIVersion`。
 	pluginSurfaceDeclRe = regexp.MustCompile(`^(type|func|const) ([A-Z][A-Za-z0-9_]*)\b`)
 	// golden の `method Peer.Has(context.Context, string) (bool, error)`。
@@ -190,7 +197,28 @@ func TestPluginDoc_SurfaceFuncsMatchGolden(t *testing.T) {
 	if checked == 0 {
 		t.Fatal("golden から func / const 行を 1 つも読めない (書式が変わった?)")
 	}
+
+	// **逆方向も要る。** golden→doc だけだと、公開面から消えた / 改名された API を
+	// doc が載せ続けても通る。この一覧は写して使うので、消えた `plugin.ErrNotFound`
+	// を書いてコンパイルできない、という形で読者に降りかかる。
+	goldenLines := map[string]bool{}
+	for _, entry := range readPluginSurfaceGolden(t) {
+		if strings.HasPrefix(entry, "plugin:") {
+			goldenLines[strings.TrimSpace(strings.TrimPrefix(entry, "plugin:"))] = true
+		}
+	}
+	var stale []string
+	for _, line := range strings.Split(section, "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "func ") && !strings.HasPrefix(line, "const ") {
+			continue
+		}
+		if !goldenLines[line] {
+			stale = append(stale, line)
+		}
+	}
 	sort.Strings(missing)
+	sort.Strings(stale)
 
 	if len(missing) > 0 {
 		t.Errorf(`docs/plugins/authoring.md の公開面一覧に、golden と同じ形の行が無い (%d 件):
@@ -200,6 +228,96 @@ func TestPluginDoc_SurfaceFuncsMatchGolden(t *testing.T) {
 (#2639 で足した Error() 2 行は署名が検証されていなかった)。`,
 			len(missing), strings.Join(missing, "\n  "))
 	}
+	if len(stale) > 0 {
+		t.Errorf(`docs/plugins/authoring.md の公開面一覧に、golden に無い func / const がある (%d 件):
+  %s
+
+消えた / 改名された API を載せ続けている。写した読者がコンパイルできない。`,
+			len(stale), strings.Join(stale, "\n  "))
+	}
+}
+
+// TestPluginDoc_SurfaceFieldsMatchGolden asserts that the struct fields the doc
+// lists have the types the code actually has.
+//
+// interface の method は署名まで見ているが、struct のフィールドは名前しか見て
+// いなかった。`Definition.Routes` の型が変わっても doc は古いまま通る。
+func TestPluginDoc_SurfaceFieldsMatchGolden(t *testing.T) {
+	golden := map[string]string{}
+	for _, entry := range readPluginSurfaceGolden(t) {
+		if !strings.HasPrefix(entry, "plugin:") {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(entry, "plugin:"))
+		if m := pluginSurfaceFieldRe.FindStringSubmatch(body); m != nil {
+			golden[m[1]+"."+m[2]] = strings.TrimSpace(m[3])
+		}
+	}
+	if len(golden) == 0 {
+		t.Fatal("golden から field 行を 1 つも読めない (書式が変わった?)")
+	}
+
+	doc := pluginDocFieldTypes(t)
+	if len(doc) == 0 {
+		t.Fatal("authoring.md の公開面一覧から struct のフィールドを 1 つも読めない")
+	}
+
+	var findings []string
+	for _, key := range sortedStringMapKeys(doc) {
+		want, ok := golden[key]
+		if !ok {
+			findings = append(findings, key+" は golden に無い (doc: "+doc[key]+")")
+			continue
+		}
+		if doc[key] != want {
+			findings = append(findings, key+"\n      doc:    "+doc[key]+"\n      golden: "+want)
+		}
+	}
+	for _, key := range sortedStringMapKeys(golden) {
+		if _, ok := doc[key]; !ok {
+			findings = append(findings, key+" が doc の一覧に無い (golden: "+golden[key]+")")
+		}
+	}
+
+	if len(findings) > 0 {
+		t.Errorf(`docs/plugins/authoring.md の公開面一覧の struct フィールドが実装と違う (%d 件):
+  %s`, len(findings), strings.Join(findings, "\n  "))
+	}
+}
+
+// pluginDocFieldTypes returns `Type.Field` -> type from the doc's
+// `type X struct` blocks.
+func pluginDocFieldTypes(t *testing.T) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	current := ""
+	for _, line := range strings.Split(pluginDocGoSection(t), "\n") {
+		if m := pluginDocInlineStructRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			for _, f := range strings.Split(m[2], ";") {
+				parts := strings.Fields(strings.TrimSpace(f))
+				if len(parts) >= 2 {
+					out[m[1]+"."+parts[0]] = strings.Join(parts[1:], " ")
+				}
+			}
+			current = ""
+			continue
+		}
+		if m := pluginDocStructRe.FindStringSubmatch(strings.TrimSpace(line)); m != nil {
+			current = m[1]
+			continue
+		}
+		if strings.TrimSpace(line) == "" || !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
+			current = ""
+			continue
+		}
+		if current == "" {
+			continue
+		}
+		if m := pluginDocFieldRe.FindStringSubmatch(line); m != nil {
+			out[current+"."+m[1]] = strings.TrimSpace(m[2])
+		}
+	}
+	return out
 }
 
 // pluginSurfaceIdents returns exported identifiers the plugin package declares,

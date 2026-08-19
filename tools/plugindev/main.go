@@ -186,7 +186,11 @@ func (d *dev) rebuildAndRestart(ctx context.Context) error {
 	}
 
 	bin := filepath.Join(os.TempDir(), "mk-plugindev")
-	if err := d.exec(ctx, "go", []string{"build", "-o", bin, "./cmd/misskey"}); err != nil {
+	// **GOWORK を明示的に戻す。** 生成物が import する mk-plugin-* は go.mod に
+	// 無く go.work 経由でしか解決できないので、呼び出し側から GOWORK=off を
+	// 継承すると `no required module provides package` で落ちる。空文字列は Go では
+	// auto 扱いで、exec.Cmd の env は後勝ちなので上の GOWORK=off を打ち消せる。
+	if err := d.exec(ctx, "go", []string{"build", "-o", bin, "./cmd/misskey"}, "GOWORK="); err != nil {
 		return fmt.Errorf("ビルドに失敗しました: %w", err)
 	}
 

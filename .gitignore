@@ -81,7 +81,7 @@ tests/dropin_frontend/cypress/cypress/
 # プラグイン (#2480)。運営者が plugins/ に置いたものと、そこから生成される
 # ファイル。mk-go 本体のリポジトリには持たない。
 #
-# 例外は plugins/status のみ。**常に動くサンプル**として同梱する (#2483) —
+# 例外は plugins/status と plugins/trustlevel。**常に動くサンプル**として同梱する (#2483) —
 # 別リポジトリに置くと plugin/ を変えたときに壊れても CI で気付けない。
 plugins/*
 !plugins/.gitkeep

@@ -26,8 +26,7 @@ plugin loaded name=status version=1.0.0 routes=true jobs=true migrations=1 schem
 cp .config/default.yml .config/dev.yml   # url / port / db を書き換える
 
 # make plugin-dev は追加引数を転送しないので、-config を渡すなら直接叩く
-# (GOWORK=off は付けない。plugindev が要る所だけ自分で渡す)
-go run ./tools/plugindev -plugin plugins/status -config .config/dev.yml
+GOWORK=off go run ./tools/plugindev -plugin plugins/status -config .config/dev.yml
 ```
 
 ## frontend も触る場合
