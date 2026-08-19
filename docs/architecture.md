@@ -351,7 +351,7 @@ upstream に無い、または cherrypick 由来の加算機能（wire 互換を
 
 マイグレーション（`migration/`、golang-migrate、現在 81 本）:
 
-- TS Misskey の既存テーブルへは原則**追加のみ**。例外が 9 件あり、うち 8 件は mk-go が自分で作ったもの (列 / FK / index / seed / 重複行) の除去か upstream 追随 ([TS版からの移行](migration-from-ts.md#破壊的なマイグレーション))。Go 固有の追加列・テーブルは `IF NOT EXISTS`。
+- TS Misskey の既存テーブルへは原則**追加のみ**。例外が 9 件あり、うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随 ([TS版からの移行](migration-from-ts.md#破壊的なマイグレーション))。Go 固有の追加列・テーブルは `IF NOT EXISTS`。
 - drop-in テストで発見した補完列は専用マイグレーションで追加。
 - down スクリプトは必須（data loss する場合はコメント明記）。
 

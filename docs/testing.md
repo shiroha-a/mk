@@ -83,7 +83,7 @@ migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL
 | | testcontainers | 外部サービス |
 |---|---|---|
 | Redis | `SetupRedis` を **25 パッケージ**が使う。`SkipIfNoDocker` で Docker が無ければ skip する | — |
-| PostgreSQL | `SetupPostgres` は `internal/api/test` の **1 パッケージのみ** | `OpenTestDB` / `MustOpenTestDB` を **15 パッケージ**が使い、`TEST_DB_*` の指す PostgreSQL に直接つなぐ |
+| PostgreSQL | `SetupPostgres` は `internal/api/test` と `test/e2e` / `test/e2e_federation` の **3 パッケージだけ** | `OpenTestDB` / `MustOpenTestDB` を `internal/` 配下の **15 パッケージ**が使い、`TEST_DB_*` の指す PostgreSQL に直接つなぐ |
 
 つまり **Redis は Docker があれば足りるが、PostgreSQL は自分で用意する必要がある**。`MustOpenTestDB` は失敗時に panic し、しかも `init()` から呼ばれるので、PostgreSQL が無いと該当パッケージはまとめて落ちる (skip されない)。
 
@@ -105,7 +105,7 @@ Docker環境がない場合は`testutil.SkipIfNoDocker(t)`でテストをスキ�
 
 ### CI環境
 
-CI では GitHub Actions の `services` で PostgreSQL を起動し (Redis を要するテストは CI でも testcontainers を立てる)、環境変数で接続先を指定する:
+CI では GitHub Actions の `services` で PostgreSQL / Redis を起動し (`SetupRedis` を使うテストは CI でも別途 testcontainers を立てる)、環境変数で接続先を指定する:
 
 | 環境変数 | 値 |
 |---|---|

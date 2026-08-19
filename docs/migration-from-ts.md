@@ -72,7 +72,7 @@ id: aidx             # Misskey-TS側のID生成方式と一致させること
 
 mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは原則として保持される** (例外は `000081`、後述)。
 
-共有テーブルにも触るものが 5 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
+共有テーブルにも触るものが 9 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
 
 ```bash
 # ローカルビルドの場合
@@ -86,7 +86,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 
 ### 破壊的なマイグレーション
 
-「追加のみ」ではない。共有テーブルに触るものが 9 件ある。**うち 8 件は mk-go が自分で作ったもの (列 / FK / index / seed / 重複行) の除去か upstream 追随で、Misskey-TS が書いた行の内容には影響しない。**
+「追加のみ」ではない。共有テーブルに触るものが 9 件ある。**うち 8 件は mk-go が自分で作ったもの (列 / FK / index / seed / 重複行) の除去、その初期化、または upstream 追随で、Misskey-TS が書いた列の値には影響しない。**
 
 | migration | 内容 | 位置づけ |
 |---|---|---|
@@ -95,7 +95,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 | `000053` | `poll."notifiedAt"` の過去分を backfill (`UPDATE`) | mk-go独自列 (`000044` で追加) の初期化。TS 由来の列には触らない。埋めておかないと `ExpiryWorker` の初回 tick で過去のアンケート全件に `pollEnded` 通知が一斉発火する (#1415) |
 | `000056` | `note.uri` の重複行を DELETE (最小 `id` を残す) | **mk-go固有の race で作られた重複コピーの除去** (#1527)。`IngestNote` の `FindByURI` → `Create` が並行すると同一 URI の行が増えていた。`000057` で UNIQUE index を張る前提として要る |
 | `000064` | `registration_ticket_pendingUserId_fkey` を DROP | mk-goが `000026` で余分に張った FK (#2083)。upstream の `pendingUserId` は無制約 `varchar`。この FK があると確認メール再送防止が必ず FK 違反で no-op になっていた |
-| `000067` | `migrations` の seed 行を DELETE + 正式名へ `UPDATE` | **`000029` が seed した mk-go 由来の行を直すもの** (#2244)。TypeORM は `name` 列の文字列一致で未実行判定するので、短縮形のままだと TS 復帰時に本家 migration が再実行される |
+| `000067` | `migrations` の seed 行を DELETE + 正式名へ `UPDATE` + 未 seed 分を `INSERT` | **`000029` が seed した mk-go 由来の行を直すもの** (#2244)。TypeORM は `name` 列の文字列一致で未実行判定するので、短縮形のままだと TS 復帰時に本家 migration が再実行される |
 | `000068` | 冗長な index を DROP | **落とすのは mk-go の migration が作った index だけ**。upstream 由来の index は絶対に触らない (触ると本家が再作成できず復路が壊れるため) |
 | `000080` | `note` の自己参照 FK (`renoteId` / `replyId`) を DROP | **upstream 追随。** 本家も 2025.8.0 の `1753868431598-remove_note_constraints.js` でこの 2 本を削除しており、現在の `MiNote` は `createForeignKeyConstraints: false` で FK を作らない |
 | `000081` | 孤児化した `note` 行を DELETE + 痕跡列を NULL 化 | **TS が書いた行が対象になりうる唯一のもの。** 下記参照 |
@@ -120,7 +120,11 @@ DELETE の対象はこの残骸で、条件は
 
 #### down が no-op のもの
 
-`000053` / `000056` / `000067` / `000068` / `000074` / `000081` の 6 本は down が `SELECT 1;` で、up を巻き戻せない。うちデータを不可逆に変えるのは `000053` / `000056` / `000067` / `000081` の 4 本。
+`000053` / `000056` / `000067` / `000068` / `000074` / `000081` の 6 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 5 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。
+
+#### mk-go 内での切り戻しで消えるもの
+
+上の表は「TS 製 DB へ流したときに何が起きるか」の観点なので、mk-go 専用テーブルは含めていない。**`make migrate-down` を繰り返して mk-go 内で戻す場合は `000077` に注意する。** up も down も無条件に `DELETE FROM "signup_application";` を実行するので、承認制の登録の申請が全消しになる。
 
 両バックエンドは同じデータベース上で共存できる。
 

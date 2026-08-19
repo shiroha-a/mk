@@ -22,7 +22,13 @@ make dev
 - Go 1.26+
 - PostgreSQL 18推奨 (16以降で動作、CI検証は18)
 - Redis 7+
-- Docker (testcontainers用、テスト実行に必要)
+- Docker (テストで Redis を要する箇所が testcontainers を使う)
+
+**テストを回すには PostgreSQL を自分で用意して `.env.test` で指す。** Redis は testcontainers が立てるが、DB を使うテストの大半は外部の PostgreSQL に直接つなぐ (→ [testing.md](testing.md))。
+
+```bash
+cp .env.test.example .env.test   # TEST_DB_* が入っている。必要なら編集する
+```
 
 ```bash
 git clone --recursive https://github.com/shiroha-a/mk.git
@@ -103,7 +109,8 @@ cd mk && docker compose up -d
 |---|---|
 | `make fmt` | `gofmt -s -w .` |
 | `make lint` | `go vet ./...` |
-| `make test` | `go test ./... -v` |
+| `make test` | `go test ./... -v` (事前に `cp .env.test.example .env.test`) |
+| `make plugin-test` | 同梱プラグインのテスト (別 module なので `./...` に含まれない) |
 
 ### マイグレーション
 

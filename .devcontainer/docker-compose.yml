@@ -25,8 +25,11 @@ services:
       TEST_DB_SSLMODE: disable
       TEST_REDIS_HOST: localhost
       TEST_REDIS_PORT: "6379"
-      # マイグレーションの接続先は MK_DB_* か .config/default.yml から決まる。
-      # cmd/migrate は DATABASE_URL を読まない。
+      # cmd/migrate は DATABASE_URL を読まない。-config (既定 .config/default.yml)
+      # を必ず読むので、**設定ファイルが無いと MK_DB_* があっても起動しない**
+      # (MK_DB_* はファイルの値を上書きするだけ)。
+      # .config/default.yml は gitignore 済みなので、migration を流す前に
+      # cp .config/default.yml.example .config/default.yml すること。
 
   db:
     image: postgres:18-alpine

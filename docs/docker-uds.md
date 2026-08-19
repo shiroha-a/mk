@@ -44,7 +44,7 @@ make uds-frontend-build
 - `third_party/misskey/built/_frontend_vite_/manifest.json`
 - `third_party/misskey/built/_frontend_dist_/`
 
-なお `pnpm install --frozen-lockfile` が本家のnode_modulesも生成するため、以下も同時に揃います。これらは `deploy/uds/Dockerfile.mkgo` が `COPY` で runtime image に焼き込み、mk-go の `/twemoji/*` / `/assets/*` ルートから配信します。
+なお `pnpm install --frozen-lockfile` が本家のnode_modulesも生成するため、以下も同時に揃います。これらは `deploy/uds/Dockerfile.mkgo` が `COPY` で runtime image に焼き込み、mk-go の `/twemoji/*` / `/fluent-emoji/*` / `/assets/*` ルートから配信します。
 
 - `third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji/` (twemoji SVG set)
 - `third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/fluent-emoji/` (実績バッジ / 通知アイコン)

@@ -26,8 +26,10 @@ services:
       context: .
       # 既存の federation 用 Dockerfile を再利用する。migrate と server を
       # 両方ビルドし、entrypoint で migrate up → server start する構成。
-      # mk-go のマイグレーションは TS schema に対して追加のみで破壊的変更
-      # なし (CLAUDE.md §10) なので、TS-A が書いた DB-A をそのまま読める。
+      # mk-go のマイグレーションは TS schema に対して原則追加のみで、例外の
+      # 9 件も mk-go が自分で作ったものの除去か upstream 追随なので
+      # (docs/migration-from-ts.md#破壊的なマイグレーション)、TS-A が書いた
+      # DB-A をそのまま読める。
       dockerfile: tests/federation/common/Dockerfile.mkgo
     environment:
       # Go 標準 trust store に dropin 用 self-signed cert を読ませる。

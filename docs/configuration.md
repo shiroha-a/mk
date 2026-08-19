@@ -247,8 +247,10 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 
 | 環境変数 | 用途 |
 |---|---|
-| `MISSKEY_FRONTEND_DIR` | フロントエンドのルートディレクトリ |
-| `MISSKEY_FRONTEND_DIST_DIR` | ビルド済みフロントエンドディレクトリ |
+| `MISSKEY_FRONTEND_DIR` | ビルド済み SPA (vite 出力)。既定 `third_party/misskey/built/_frontend_vite_` |
+| `MISSKEY_FRONTEND_DIST_DIR` | locales / fonts 等の dist。既定 `third_party/misskey/built/_frontend_dist_` |
+| `MISSKEY_FRONTEND_EMBED_DIR` | embed 用の vite 出力。**既定値は `MISSKEY_FRONTEND_DIR` の sibling として解決される** — 別の変数を要求すると設定漏れに気付けないまま dev server proxy へ落ちて 502 になるため |
+| `MISSKEY_SW_DIST_DIR` | service worker の出力。既定値の解決は embed と同じ |
 | `MISSKEY_FLUENT_EMOJI_DIR` | fluent-emoji ディレクトリ (実績バッジ / 通知アイコン) |
 | `MISSKEY_TWEMOJI_DIR` | Twemojiアセットディレクトリ |
 | `MISSKEY_CLIENT_ASSETS_DIR` | クライアントアセットディレクトリ |
