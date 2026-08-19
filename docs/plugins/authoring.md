@@ -181,25 +181,7 @@ mk-go の既存エンドポイントをプロセス内で呼ぶ。**可視性・
 
 利用者に特定のロールが**手動で付与されているか**を、メンバー一覧を走査せずに 1 回で確認できる。条件つきロールは対象外（後述）。
 
-```go
-// AsUser に渡した利用者自身について答える
-raw, err := ctx.API().AsUser(userID).Call(req.Context(), "roles/assignment-show", map[string]any{
-    "roleId": roleID,
-})
-if err != nil {
-    return nil, err
-}
-
-// 任意の利用者について答える。AsUser にはモデレーター以上の ID が要る
-raw, err = ctx.API().AsUser(moderatorID).Call(req.Context(), "admin/roles/assignment-show", map[string]any{
-    "userId": userID, "roleId": roleID,
-})
-if err != nil {
-    return nil, err
-}
-```
-
-返ってくる `raw` はこの形 (読み方は下の断片に続く)。
+返ってくるのはこの形。
 
 ```json
 { "assigned": true, "expiresAt": "2026-08-20T03:04:05.000Z",
@@ -209,6 +191,16 @@ if err != nil {
 **`assigned` が答えるのは手動付与だけで、`target` が `conditional` のロールでは常に `false` になる。** 条件つきロールは付与のレコードを持たず、条件式を読み取り時に評価して決まるため。**`target` を必ず見ること** — `conditional` なら、返ってきた `false` は「条件を満たしていない」ではなく「この API では分からない」という意味になる。
 
 ```go
+// AsUser に渡した利用者自身について答える。
+// 任意の利用者を見るなら "admin/roles/assignment-show" に
+// {"userId": ..., "roleId": ...} を渡す (AsUser はモデレーター以上の ID)。
+raw, err := ctx.API().AsUser(userID).Call(req.Context(), "roles/assignment-show", map[string]any{
+    "roleId": roleID,
+})
+if err != nil {
+    return nil, err
+}
+
 var res struct {
     Assigned bool `json:"assigned"`
     Role     struct {
@@ -220,7 +212,9 @@ if err := json.Unmarshal(raw, &res); err != nil {
 }
 if res.Role.Target == "conditional" {
     // assigned は当てにならない。この endpoint では判定できない
+    return nil, nil
 }
+return res.Assigned, nil
 ```
 
 条件つきロールまで含めた実効的な判定は用意していない。条件式の評価は利用者ごとに全ロールを読み込む必要があり、この API の利点である「1 回引くだけで終わる」性質が失われるため。
