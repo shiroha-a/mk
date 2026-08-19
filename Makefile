@@ -156,8 +156,13 @@ plugins-all: ## disabled のプラグインも含めて生成 (CI 検証用)
 # プラグイン開発用。ソースを監視して 生成 → ビルド → 再起動 を繰り返す (#2477)。
 # frontend の HMR は別端末の Vite dev server が担う:
 #   cd third_party/misskey/packages/frontend && pnpm watch
+# **GOWORK=off を付けないこと。** plugindev は生成ステップにだけ自分で
+# GOWORK=off を渡す (消したプラグインを参照する go.work が残っていると生成が
+# 失敗するため)。続く go build ./cmd/misskey は環境をそのまま継承するので、
+# ここで渡すと生成物が import する mk-plugin-* を go.work 経由で解決できず
+# `no required module provides package` で落ちる。
 plugin-dev: ## プラグインを編集しながら動かす (PLUGIN=plugins/status)
-	GOWORK=off go run ./tools/plugindev $(if $(PLUGIN),-plugin $(PLUGIN),)
+	go run ./tools/plugindev $(if $(PLUGIN),-plugin $(PLUGIN),)
 
 build: plugins ## バイナリを ./built/misskey に生成
 	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/misskey

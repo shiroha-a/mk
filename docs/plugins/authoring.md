@@ -510,18 +510,22 @@ h := plugintest.New(t).
 	Routes(Plugin)
 
 res, err := h.Call(t, "POST /me/set", plugintest.Request{UserID: "u1", Body: `{"text":"x"}`})
+require.NoError(t, err)
+require.NotNil(t, res)
 ```
 
 ```go
 jobs := plugintest.New(t).WithDB(db).Jobs(Plugin)
-err := jobs.Run(t, "prune", "")
+require.NoError(t, jobs.Run(t, "prune", ""))
 ```
 
 **DB はフェイクにしない。** SQL の挙動を模した偽物は本物とずれ、通ったのに本番で落ちるテストになる。`plugintest` も migration の適用は mk-go 本体と同じ実装を使っている。
 
 ## 公開面の一覧
 
-以下が「壊さないと約束する範囲」のすべて。**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` に載る識別子が全部ここにあることを `TestPluginDoc_SurfaceListCoversGolden` が CI で検査する**ので、公開面を足して載せ忘れると落ちる。
+以下が「壊さないと約束する範囲」のすべて。`plugin` パッケージの分は**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` の `plugin:` 行と突き合わせる gate が CI で回る** (`TestPluginDoc_*`)。識別子・宣言・method の署名の 3 方向を見るので、足して載せ忘れても署名を写し間違えても落ちる。
+
+`plugin/plugintest` の分はこの一覧に入れていない (テストの書き方は[テスト](#テスト)の節)。**gate の対象外**なので、そちらは golden の diff をレビューで見ること。
 
 ### Go (`github.com/shiroha-a/mk/plugin`)
 

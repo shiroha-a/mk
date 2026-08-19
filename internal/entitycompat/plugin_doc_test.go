@@ -37,8 +37,11 @@ var (
 	// golden の `method Peer.Has(context.Context, string) (bool, error)`。
 	pluginSurfaceMethodRe = regexp.MustCompile(`^method ([A-Z][A-Za-z0-9_]*)\.([A-Z][A-Za-z0-9_]*)(\(.*)$`)
 	// doc の `type Peer interface` と、その中の `  Has(context.Context, string) (bool, error)`。
-	pluginDocTypeRe   = regexp.MustCompile(`^type ([A-Z][A-Za-z0-9_]*) interface$`)
-	pluginDocMethodRe = regexp.MustCompile(`^\s+([A-Z][A-Za-z0-9_]*)(\(.*)$`)
+	// 書式ゆれを吸収する。`type X interface` / `type X interface {` の両方、
+	// インデントはスペースでもタブでも拾う (**書式を変えるだけで検査が
+	// 素通りする**のを避ける)。
+	pluginDocTypeRe   = regexp.MustCompile(`^type ([A-Z][A-Za-z0-9_]*) interface\s*\{?$`)
+	pluginDocMethodRe = regexp.MustCompile(`^[ \t]+([A-Z][A-Za-z0-9_]*)(\(.*)$`)
 
 	pluginDocGoSectionStart = "### Go (`github.com/shiroha-a/mk/plugin`)"
 	pluginDocGoSectionEnd   = "### TypeScript"
@@ -136,6 +139,14 @@ func TestPluginDoc_SurfaceSignaturesMatchGolden(t *testing.T) {
 			findings = append(findings, key+"\n      doc:    "+doc[key]+"\n      golden: "+wantSig)
 		}
 	}
+	// **逆方向も要る。** doc→golden だけだと、行ごと消えた method は doc 側の
+	// 集合に入らないので検出できない。`Context.Peer()` (#2639 で抜けていた当の
+	// もの) を含め、interface の method は 9/28 が黙って消せる状態だった。
+	for _, key := range sortedStringMapKeys(golden) {
+		if _, ok := doc[key]; !ok {
+			findings = append(findings, key+" が doc の一覧に無い (golden: "+golden[key]+")")
+		}
+	}
 
 	if len(findings) > 0 {
 		t.Errorf(`docs/plugins/authoring.md の公開面一覧の署名が実装と違う (%d 件):
@@ -144,6 +155,50 @@ func TestPluginDoc_SurfaceSignaturesMatchGolden(t *testing.T) {
 **この一覧は読んだ人が写して使う。** 署名が違うとサンプルどおりに書いても
 コンパイルできない (#2639 の Peer.Has がこれ)。`,
 			len(findings), strings.Join(findings, "\n  "))
+	}
+}
+
+// TestPluginDoc_SurfaceFuncsMatchGolden asserts that the top-level funcs and
+// consts the doc lists are written exactly as the golden has them.
+//
+// interface の method は `pluginDocMethodSignatures` で見ているが、
+// `func (*StatusError) Error() string` のようなレシーバ形やトップレベル関数は
+// そちらに入らない。**doc はこれらを golden と同じ書式で列挙している**ので、
+// 行の逐語一致で照合できる。#2639 で足した `Error()` 2 行がまさに未検証だった。
+func TestPluginDoc_SurfaceFuncsMatchGolden(t *testing.T) {
+	section := pluginDocGoSection(t)
+	docLines := map[string]bool{}
+	for _, line := range strings.Split(section, "\n") {
+		docLines[strings.TrimSpace(line)] = true
+	}
+
+	var missing []string
+	checked := 0
+	for _, entry := range readPluginSurfaceGolden(t) {
+		if !strings.HasPrefix(entry, "plugin:") {
+			continue
+		}
+		body := strings.TrimSpace(strings.TrimPrefix(entry, "plugin:"))
+		if !strings.HasPrefix(body, "func ") && !strings.HasPrefix(body, "const ") {
+			continue
+		}
+		checked++
+		if !docLines[body] {
+			missing = append(missing, body)
+		}
+	}
+	if checked == 0 {
+		t.Fatal("golden から func / const 行を 1 つも読めない (書式が変わった?)")
+	}
+	sort.Strings(missing)
+
+	if len(missing) > 0 {
+		t.Errorf(`docs/plugins/authoring.md の公開面一覧に、golden と同じ形の行が無い (%d 件):
+  %s
+
+**doc の一覧は読んだ人が写して使う**ので、golden の行をそのまま載せること
+(#2639 で足した Error() 2 行は署名が検証されていなかった)。`,
+			len(missing), strings.Join(missing, "\n  "))
 	}
 }
 
@@ -209,8 +264,8 @@ func pluginDocMethodSignatures(t *testing.T) map[string]string {
 			current = m[1]
 			continue
 		}
-		// インデントの無い行で interface ブロックを抜ける。
-		if strings.TrimSpace(line) == "" || !strings.HasPrefix(line, " ") {
+		// インデントの無い行で interface ブロックを抜ける (スペース / タブ両対応)。
+		if strings.TrimSpace(line) == "" || !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
 			current = ""
 			continue
 		}
