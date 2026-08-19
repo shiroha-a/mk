@@ -12,7 +12,7 @@ make plugin-dev PLUGIN=plugins/status
 
 ```
 ==> 変更を検出: plugin.go
-plugin loaded name=status version=1.0.1 routes=true jobs=true migrations=1 schema=plugin_status
+plugin loaded name=status version=1.0.0 routes=true jobs=true migrations=1 schema=plugin_status
 ```
 
 - `PLUGIN=` を省くと `plugins/` 全体を監視する
@@ -24,7 +24,9 @@ plugin loaded name=status version=1.0.1 routes=true jobs=true migrations=1 schem
 
 ```bash
 cp .config/default.yml .config/dev.yml   # url / port / db を書き換える
-make plugin-dev PLUGIN=plugins/status -- -config .config/dev.yml
+
+# make plugin-dev は追加引数を転送しないので、-config を渡すなら直接叩く
+GOWORK=off go run ./tools/plugindev -plugin plugins/status -config .config/dev.yml
 ```
 
 ## frontend も触る場合
@@ -96,7 +98,7 @@ mk-go は起動時に一度だけ manifest を読む。**ビルド後は必ず�
 ## テスト
 
 ```bash
-cd plugins/status && go test ./...
+make plugin-test   # 同梱プラグイン全部。MK_PLUGIN_TESTS_REQUIRE_DB=1 GOWORK=off で回す
 ```
 
 PostgreSQL が要る（`TEST_DB_*` 環境変数、既定は `localhost:5432` の `misskey_test`）。

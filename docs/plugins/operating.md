@@ -98,9 +98,12 @@ disabled: true
 
 判定は`apiVersion`等の検証より**先**に行われるので、mk-goの更新でビルドが通らなくなったプラグインを一時的に外す用途にも使える。
 
-### 同梱サンプルは既定で無効
+### 同梱プラグインの既定
 
-`plugins/status/`はこの仕組みで既定無効になっている。動かしたい場合は`plugins/status/mk-plugin.yml`から`disabled: true`の行を消して再ビルドする。
+同梱しているのは`plugins/status/`と`plugins/trustlevel/`の2つ。
+
+- `status`はこの仕組みで**既定無効**。動かしたい場合は`plugins/status/mk-plugin.yml`から`disabled: true`の行を消して再ビルドする
+- **`trustlevel`は`disabled`を持たないので既定で有効**。clone して`make build`すると組み込まれ、起動時に`plugin_trustlevel` schemaも作られる。入れたくない場合は`mk-plugin.yml`に`disabled: true`を足す
 
 ## 入っているものを確認する
 
@@ -109,7 +112,7 @@ disabled: true
 起動ログにも出る。
 
 ```
-INFO plugin loaded name=status version=1.0.0 routes=true jobs=true
+INFO plugin loaded name=status version=1.0.0 routes=true jobs=true migrations=1 schema=plugin_status
 INFO plugin disabled name=foo version=0.2.0
 ```
 

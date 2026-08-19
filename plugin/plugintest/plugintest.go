@@ -7,7 +7,7 @@
 //	        WithConfig(map[string]any{"apiKey": "test"}).
 //	        Routes(myplugin.Plugin)
 //
-//	    res, err := h["POST /me"].Call(plugintest.Request{UserID: "u1", Body: `{}`})
+//	    res, err := h.Call(t, "POST /me", plugintest.Request{UserID: "u1", Body: `{}`})
 //	    ...
 //	}
 //

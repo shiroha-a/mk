@@ -86,17 +86,17 @@ go run ./tools/pluginspec -write
 
 ## サンプルプラグイン
 
-`plugins/status/` は**リポジトリに同梱**してある。
+`plugins/status/` と `plugins/trustlevel/` を**リポジトリに同梱**してある。
 
 別リポジトリに置くと、`plugin/` を変えたときに壊れても CI で気付けない。同梱していれば公開面を壊した時点でビルドが落ちる。**サンプルの一番の価値は「常に動くこと」**。
 
-`plugins/*` は gitignore されているが、`!plugins/status/` で例外指定してある。
+`plugins/*` は gitignore されているが、`!plugins/status/` と `!plugins/trustlevel/` (#2586) で例外指定してある。**`trustlevel` は `disabled` を持たない**ので、clone して `make build` すると組み込まれて有効になり、起動時に `plugin_trustlevel` schema も作られる。
 
 ## 変更時のチェック
 
 - [ ] `go run ./tools/pluginspec -write` で golden を更新した（差分をレビューで説明できる）
 - [ ] 破壊的変更なら `plugin.APIVersion` を上げた
-- [ ] `plugins/status/` が通る（`cd plugins/status && go test ./...`）
+- [ ] 同梱プラグインが通る（`make plugin-test`。**`MK_PLUGIN_TESTS_REQUIRE_DB=1` が要る** — 無いと DB 不通で skip = 成功扱いになる）
 - [ ] `plugin-api.ts` を変えたなら `make frontend-check` が通る
 - [ ] `docs/plugins/authoring.md` の公開面一覧を更新した
 

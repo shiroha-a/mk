@@ -36,9 +36,15 @@ module github.com/you/mk-plugin-myplugin
 go 1.26.6
 
 require github.com/shiroha-a/mk v0.0.0
+
+replace github.com/shiroha-a/mk => ../..
 ```
 
+**`replace` は要る。** `make build` は生成される `go.work` で解決できるが、**`make plugin-test` は `GOWORK=off` で回す**ので、これが無いと `missing go.sum entry` で落ちる。同梱プラグインは全部この形。
+
 **独立した Go module である必要がある。** これは形式ではなく、Go の internal ルールにより「mk-go の内部パッケージを import できない」ことを保証する仕組み。`go.mod` を持たないディレクトリはビルド時にエラーになる。
+
+依存を足すときは自分の module の中で `go get` する。**リポジトリのルートで `go mod tidy` を走らせないこと** — 生成物 `cmd/misskey/plugins_generated.go` が `github.com/shiroha-a/mk-plugin-*` を import しており、private repo だと解決に失敗する。
 
 ### `plugin.go`
 
@@ -147,11 +153,13 @@ GORM を使いたければプラグイン側で包む（`postgres.New(postgres.C
 ## 本体の API を呼ぶ
 
 ```go
-raw, err := ctx.API().Anonymous().Call(ctx, "users/show", map[string]any{"userId": id})
-raw, err := ctx.API().AsUser(userID).Call(ctx, "notes/create", params)
+raw, err := ctx.API().Anonymous().Call(req.Context(), "users/show", map[string]any{"userId": id})
+raw, err := ctx.API().AsUser(userID).Call(req.Context(), "notes/create", params)
 ```
 
 mk-go の既存エンドポイントをプロセス内で呼ぶ。**可視性・権限・レート制限が自動的に効く**ので、モデレーション状態などを自前で持たなくてよい。
+
+**`Call` の第 1 引数は `context.Context`。** `plugin.Context` は満たさないので `ctx` を渡すとコンパイルできない。ルートの中なら `req.Context()`、ジョブの中なら受け取った `context.Context` を渡す。
 
 `AsUser` はその利用者として振る舞う（レート制限もその利用者のものが適用される）。「すべてを迂回する」経路は用意していない。管理操作が必要なら管理者の ID を渡す。
 
@@ -163,11 +171,11 @@ mk-go の既存エンドポイントをプロセス内で呼ぶ。**可視性・
 
 ```go
 // AsUser に渡した利用者自身について答える
-raw, err := ctx.API().AsUser(userID).Call(ctx, "roles/assignment-show", map[string]any{
+raw, err := ctx.API().AsUser(userID).Call(req.Context(), "roles/assignment-show", map[string]any{
     "roleId": roleID,
 })
 // 任意の利用者について答える。AsUser にはモデレーター以上の ID が要る
-raw, err := ctx.API().AsUser(moderatorID).Call(ctx, "admin/roles/assignment-show", map[string]any{
+raw, err := ctx.API().AsUser(moderatorID).Call(req.Context(), "admin/roles/assignment-show", map[string]any{
     "userId": userID, "roleId": roleID,
 })
 ```
@@ -262,7 +270,7 @@ export default definePlugin({
 
 **描画されることは権限の保証ではない。** `admin:` で始まるスロットはモデレーター
 向けのページにしか無いが、それは UI の都合でしかない。バックエンドは
-[`Request.IsModerator()`](#リクエスト) で必ず自分で守ること。
+`Request.IsModerator()` (公開面は[一覧](#公開面の一覧)を参照) で必ず自分で守ること。
 
 管理向けのスロットでは、**権限が無いときに何も描かないこと**も考える。空の枠が
 挟まると、本体の UI の邪魔になる。
@@ -370,8 +378,9 @@ const res = await host.api<T>('plugin/myplugin/me', { ... });
 同じプラグインを入れている **mk-go 同士**でだけ通信できる (#2537)。
 
 ```go
-plugin.Register(plugin.Definition{
+var Plugin = plugin.Definition{
     Name:       "demo",
+    Version:    "1.0.0",
     APIVersion: plugin.APIVersion,
     Peered:     true,   // ← 宣言したものだけが使える
     Routes: func(ctx plugin.Context, r plugin.Router) error {
@@ -400,7 +409,7 @@ plugin.Register(plugin.Definition{
         })
         return nil
     },
-})
+}
 ```
 
 **ActivityPub には出ない。** AP に載せると不具合の症状が他人のサーバー側に出るうえ、
@@ -473,7 +482,7 @@ h := plugintest.New(t).WithPeers("other.example")
 routes := h.Routes(def)
 
 // 送信側: Send した内容を検査する
-_, err := routes["POST /ask"].Call(plugintest.Request{UserID: "u1", Body: `{}`})
+_, err := routes.Call(t, "POST /ask", plugintest.Request{UserID: "u1", Body: `{}`})
 require.NoError(t, err)
 sends := h.PeerSends()
 require.Len(t, sends, 1)
@@ -512,7 +521,7 @@ err := jobs.Run(t, "prune", "")
 
 ## 公開面の一覧
 
-以下が「壊さないと約束する範囲」のすべて。`internal/entitycompat/testdata/golden_plugin_surface.txt` から生成される（実装とずれない）。
+以下が「壊さないと約束する範囲」のすべて。**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` に載る識別子が全部ここにあることを `TestPluginDoc_SurfaceListCoversGolden` が CI で検査する**ので、公開面を足して載せ忘れると落ちる。
 
 ### Go (`github.com/shiroha-a/mk/plugin`)
 
@@ -523,9 +532,12 @@ type Definition struct
   Name       string
   Version    string
   APIVersion int
+  Peered     bool
   Migrations []Migration
   Routes     func(Context, Router) error
   Jobs       func(Context, Jobs) error
+
+func (Definition) Validate() error
 
 type Context interface
   Name() string
@@ -533,7 +545,17 @@ type Context interface
   API() API
   Storage() Storage
   Config() Config
+  Peer() Peer
   Go(func())
+
+type Peer interface
+  Send(context.Context, string, any) (string, error)
+  Handle(PeerHandler)
+  OnReply(PeerReplyHandler)
+  Has(string) bool
+
+type PeerHandler func(context.Context, string, json.RawMessage) (any, error)
+type PeerReplyHandler func(context.Context, string, string, json.RawMessage) error
 
 type Router interface
   GET(string, Handler)

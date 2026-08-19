@@ -18,7 +18,7 @@
 make build     # plugins/ を走査してビルドに取り込む
 ```
 
-`plugins/` に置いてビルドするだけで組み込まれる。設定は不要（既定で有効）。
+`plugins/` に**既定では無効。** `mk-plugin.yml` に `disabled: true` があり `make build` の対象から外れる (同梱サンプルなので、clone しただけの人のビルドに勝手に入らないようにしてある)。有効にするには `disabled: true` を消す。
 
 ```yaml
 # .config/default.yml — 変えたいときだけ
@@ -66,8 +66,10 @@ plugin_test.go     plugintest によるテスト
 frontend/
   index.ts         スロットへの登録
   api.ts           バックエンド呼び出し
-  StatusCard.vue   プロフィール表示
+  StatusCard.vue      プロフィール表示
   StatusSettings.vue  設定画面
+  RecentPage.vue      一覧ページ (/plugin/status)
+  AdminStats.vue      管理画面 (/admin/plugin/status)
 ```
 
 ## テスト
