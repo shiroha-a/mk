@@ -28,11 +28,15 @@ import (
 //	3. 見出しの件数 <-> 冒頭サマリ (**#2634 の起点はサマリだけ更新して表を更新しなかったこと**。
 //	   鏡像の「表だけ更新してサマリを更新しない」も同じだけ起きうる)
 //
-// §1-1 だけは実 schema にあたるものが無く内部整合しか見られない。upstream の
-// endpoint 一覧自体は tools/apicompat が submodule から抽出できるが、
-// **test-shards job は submodule を checkout しない** (.github/workflows/ci.yml で
-// `submodules: recursive` を指定しているのは frontend-check だけ) ため、この
-// パッケージのテストからは参照できない。
+// §1-1 は実 schema にあたるものが無いので、当初は内部整合しか見ていなかった。
+// **3 つが揃って同じだけ間違っていることがある**ので、それだけでは足りない —
+// 実際に §1-1 は 53 と言い続け、生成物の docs/api-compat.md は 58 だった (#2640)。
+//
+// upstream の endpoint 一覧を tools/apicompat から直接引くことはできない
+// (**test-shards job は submodule を checkout しない**。.github/workflows/ci.yml で
+// `submodules: recursive` を指定しているのは frontend-check だけ)。ただし
+// **`make apicompat` の生成物は commit されている**ので、それを経由すれば
+// submodule 無しでも突き合わせられる (TestDivergenceDoc_EndpointCountMatchesAPICompat)。
 
 var (
 	divergenceHeadingRe = regexp.MustCompile(`^### (\d+-\d+)\. .*?\((\d+)`)
@@ -423,4 +427,117 @@ func sortedKeys(m map[string]bool) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// apiCompatOnlyRe matches the generated matrix's summary line
+// `- mk-go only (TS spec 外): **58**`.
+var apiCompatOnlyRe = regexp.MustCompile(`^- mk-go only \(TS spec 外\): \*\*(\d+)\*\*`)
+
+// forkTagSummaryRe matches the summary row
+// `| fork frontend の独自変更 | 23 tag (`-mk.0` ～ `-mk.22`) | — | — |`.
+var forkTagSummaryRe = regexp.MustCompile("^\\| fork frontend の独自変更 \\| (\\d+) tag \\(`-mk\\.(\\d+)` ～ `-mk\\.(\\d+)`\\)")
+
+// forkTagRowRe matches a §4-2 table row `| `2026.7.0-mk.12` | ... |`.
+var forkTagRowRe = regexp.MustCompile("^\\| `[0-9.]+-mk\\.(\\d+)` \\|")
+
+// TestDivergenceDoc_EndpointCountMatchesAPICompat ties §1-1 to the generated
+// matrix. TestDivergenceDoc_EndpointCountMatchesTable only checks that the
+// heading, the table and the summary agree **with each other**, so all three
+// can be wrong together — and they were: §1-1 said 53 while the matrix said 58
+// (`admin/server-plugins` / `admin/server-metrics` / `admin/self-check` /
+// `admin/federation/{delivery,inbox}-health` were missing from every one of
+// them, #2640).
+//
+// docs/api-compat.md は `make apicompat` が生成して commit されているので、
+// **submodule を checkout しない test-shards job からでも読める**。upstream の
+// endpoint 一覧を直接引けないという制約は、この生成物を経由すれば回避できる。
+func TestDivergenceDoc_EndpointCountMatchesAPICompat(t *testing.T) {
+	blob, err := os.ReadFile(filepath.Join("..", "..", "docs", "api-compat.md"))
+	if err != nil {
+		t.Fatalf("read docs/api-compat.md: %v", err)
+	}
+	generated := -1
+	for _, line := range strings.Split(string(blob), "\n") {
+		if m := apiCompatOnlyRe.FindStringSubmatch(line); m != nil {
+			generated = atoi(t, m[1])
+			break
+		}
+	}
+	if generated < 0 {
+		t.Fatal("docs/api-compat.md に `- mk-go only (TS spec 外): **N**` の行が無い " +
+			"(tools/apicompat の出力書式が変わった?)")
+	}
+
+	_, declared := findDivergenceSection(t, readDivergenceDoc(t), "1-1")
+	if declared != generated {
+		t.Errorf(`docs/divergence.md §1-1 の見出しは %d だが、docs/api-compat.md は %d と言っている。
+
+**どちらが古いかは中身を見ないと決まらない。** api-compat.md 側が古いなら
+`+"`make apicompat`"+` で再生成する (route dump に stack が要る)。divergence.md 側が
+古いなら §1-1 の表・見出し・冒頭サマリの 3 箇所すべてを直す。`, declared, generated)
+	}
+}
+
+// TestDivergenceDoc_ForkFrontendTagsMatchTable asserts that the summary's tag
+// count and range agree with §4-2's rows. サマリは 10 tag と言い、表には 11 行
+// あり、実際の submodule には 23 個の tag があった (#2640)。
+func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
+	lines := readDivergenceDoc(t)
+
+	var declared, lo, hi int
+	found := false
+	for _, line := range lines {
+		if m := forkTagSummaryRe.FindStringSubmatch(line); m != nil {
+			declared, lo, hi = atoi(t, m[1]), atoi(t, m[2]), atoi(t, m[3])
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("docs/divergence.md のサマリ表に " +
+			"`| fork frontend の独自変更 | N tag (`-mk.X` ～ `-mk.Y`) |` の行が無い")
+	}
+
+	start, _ := findDivergenceHeading(t, lines, "4-2")
+	var tags []int
+	for _, line := range sectionLines(lines, start) {
+		if m := forkTagRowRe.FindStringSubmatch(line); m != nil {
+			tags = append(tags, atoi(t, m[1]))
+		}
+	}
+	if len(tags) == 0 {
+		t.Fatal("docs/divergence.md §4-2 に `| `X.Y.Z-mk.N` |` 形式の行が無い")
+	}
+
+	if len(tags) != declared {
+		t.Errorf(`docs/divergence.md のサマリは fork frontend の変更を %d tag と言っているが、§4-2 の表は %d 行。
+
+tag を足したら**サマリの件数と範囲、§4-2 の表の両方**を直すこと。`, declared, len(tags))
+	}
+	sort.Ints(tags)
+	if tags[0] != lo || tags[len(tags)-1] != hi {
+		t.Errorf(`docs/divergence.md のサマリの範囲は -mk.%d ～ -mk.%d だが、§4-2 の表は -mk.%d ～ -mk.%d。`,
+			lo, hi, tags[0], tags[len(tags)-1])
+	}
+	for i, n := range tags {
+		if n != tags[0]+i {
+			t.Errorf(`docs/divergence.md §4-2 の tag が連番になっていない (-mk.%d の次が -mk.%d)。
+抜けているなら「載せない」判断の根拠を書くか、行を足すこと。`, tags[0]+i-1, n)
+			break
+		}
+	}
+}
+
+// findDivergenceHeading is findDivergenceSection without the count requirement:
+// §4-2 の見出しには件数が付かない。
+func findDivergenceHeading(t *testing.T, lines []string, section string) (int, bool) {
+	t.Helper()
+	prefix := "## " + section + "."
+	for i, line := range lines {
+		if strings.HasPrefix(line, prefix) {
+			return i, true
+		}
+	}
+	t.Fatalf("docs/divergence.md に §%s の見出しが無い", section)
+	return 0, false
 }

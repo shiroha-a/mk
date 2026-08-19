@@ -8,10 +8,15 @@
 |---|---|
 | `types.go` | ActivityStreams 2.0の型定義 (Object, Person, Note, Activity等) |
 | `renderer.go` | Goモデル → AP JSON-LD変換 (RenderPerson, RenderNote, RenderFollow等) |
-| `signature.go` | HTTP Signatures (RSA-SHA256, Cavage draft v12) の署名・検証 |
+| `signature.go` | HTTP Signatures (Cavage draft v12) の署名・検証。`rsa-sha256` と `ed25519` |
 | `client.go` | AP HTTPクライアント (署名付きPOST/GET、リダイレクト制御) |
 | `jsonld.go` | `@context`構築、JSON-LD正規化 (Mastodonプレフィックス互換) |
-| `keypair.go` | RSA 2048bit鍵ペアの生成・PEM解析 |
+| `keypair.go` | RSA 2048bit / Ed25519 鍵ペアの生成・PEM解析 |
+| `multikey.go` | FEP-521a Multikey (`assertionMethod`) の組み立て・解釈 |
+| `public_key_cache.go` | 公開鍵のインメモリキャッシュ |
+| `webfinger.go` | WebFinger クライアント |
+| `inbox_admission.go` | inbox で受け入れる activity の入口判定 |
+| `ld/` | **LD-Signature** (RsaSignature2017) の署名・検証、canonicalize、hardening |
 | `mfm/` | MFM(Misskey Flavored Markdown) → HTML変換 |
 
 ### `internal/core/federation/` (ビジネスロジック層)
@@ -28,15 +33,30 @@
 | `reaction_delivery_hook.go` | リアクション時にLikeを配信 |
 | `note_delete_delivery_hook.go` | ノート削除時にDeleteを配信 |
 | `mention_resolver.go` | メンション → AS Mentionタグ変換 |
-| `fetcher.go` | 署名なしGETによるリモートオブジェクト取得 |
+| `fetcher.go` | リモートオブジェクト取得。**既定は instance actor による署名付き GET**で、401/403 のときだけ unsigned にフォールバックする (authorized-fetch 対応、#419) |
+| `ld_signature_verifier.go` | inbound activity の LD-Signature 検証 |
+| `activity_unwrap.go` | ネストした activity の展開 |
+| `pin_delivery_hook.go` | ピン留め時に Add/Remove を配信 (#2024) |
+| `poll_delivery_hook.go` | 投票関連の配信 |
+| `blocking_delivery_hook.go` / `user_moderation_delivery_hook.go` | ブロック・モデレーション操作の配信 |
+| `profile_update_delivery_hook.go` | プロフィール更新時に Update(Person) を配信 |
+| `chat_room_inbox.go` / `reversi_inbox.go` | cherrypick 由来 activity の受信 |
+| `featured.go` | featured コレクションの構築 |
+| `permanent_error.go` | リトライしない失敗の判定 |
+| `suspended.go` | 凍結ユーザー由来 activity の扱い |
+| `remote_user_resolver.go` | `acct:` からのリモートユーザー解決 |
+| `image_dimensions.go` | 添付画像の寸法取得 |
 
 ## HTTP Signatures
 
 Cavage draft v12に準拠。RSA-SHA256で署名する。
 
+署名アルゴリズムは `rsa-sha256` と `ed25519` の 2 種類。Ed25519 は配送先が
+FEP-521a Multikey で公開している場合のみ使う (後述)。
+
 **署名対象ヘッダー:**
 - `(request-target)`: メソッド + パス
-- `date`: RFC 2822形式
+- `date`: RFC 1123 形式 (`http.TimeFormat`、GMT)
 - `host`: リクエストホスト
 - `digest`: リクエストボディのSHA-256 (POSTのみ)
 
@@ -49,6 +69,22 @@ Signature: keyId="https://example.com/users/abc#main-key",
 
 すべての送信リクエストに署名を付与する。受信時は`keyId`からアクターの公開鍵を取得して検証する。
 
+### LD-Signature (RsaSignature2017)
+
+HTTP Signature は**そのリクエストを投げた相手**しか認証しない。リレー経由の
+配送のように**転送者と原著者が違う**経路では、body の `actor` が本物かを
+HTTP Signature からは言えない。これを埋めるのが LD-Signature。
+
+- 実装: `internal/activitypub/ld/` (`sign.go` / `verify.go` / `canonicalize.go` / `hardening.go`) と `internal/core/federation/ld_signature_verifier.go`
+- 動作は body の `signature` field を gate にする — **無ければ skip** (HTTP Signature だけで処理続行)、あって verify 通過なら続行、あって失敗なら activity を drop
+- upstream Misskey TS 2026.5.4 の `InboxProcessorService.process` と同じ
+  `compact → checkForForbiddenDirectives → freeze → verifyRsaSignature2017` の順序
+- inbox の**転送活動の許可判定がこれに依存する**。HTTP 署名者と body の actor が
+  一致しない activity は、LD-Signature が body actor を認証している場合にのみ通る
+  (actor spoofing 対策)
+- canonicalize は外部 URL を引く操作なので、SSRF / キャッシュ増幅 / spoofing 対策を
+  `ld/hardening.go` と `ld/loader.go` に置いている
+
 ## リモートオブジェクト解決
 
 `resolver.go`がリモートのアクターとノートを取得し、ローカルDBに永続化する。
@@ -56,7 +92,7 @@ Signature: keyId="https://example.com/users/abc#main-key",
 **公開鍵キャッシュ (2層):**
 1. インメモリ (`map[userID]publicKeyEntry`, TTL 24h)
 2. DB (`user_publickey`テーブル)
-3. HTTPフェッチ (キャッシュミス時、署名なしGET)
+3. HTTPフェッチ (キャッシュミス時。`fetcher.go` 経由なので既定は署名付き GET)
 
 リモートユーザー作成時にはインスタンス情報の登録とチャートメトリクスの記録も行う。
 
@@ -140,16 +176,16 @@ origin instance の downtime / 遅延配送等で過去の note が遅れて inb
 
 ## AP variant handling
 
-upstream / 他実装が出してくる variant に対するロバスト性 (一部は #947 配下で対応中):
+upstream / 他実装が出してくる variant に対するロバスト性:
 
 | variant | 状態 |
 |---|---|
-| `published` parse + 異常値 fallback | ✅ 対応済 (#940) |
-| `attributedTo` / `actor` の string / object 双方受け入れ | 🟡 #947 配下で対応予定 (upstream #17340) |
-| `alsoKnownAs` の array / string 双方受け入れ | 🟡 #947 配下で対応予定 (upstream #17275) |
-| 存在しない Actor の Delete を ignore | 🟡 #947 配下で対応予定 (upstream #17294) |
-| リレー由来 Announce で renote を作らず元 note を直接 publish | 🟡 #947 配下で対応予定 (upstream #17308) |
-| ブロック中インスタンスの inbox job 蓄積防止 | 🟡 #947 配下で対応予定 (upstream #17336) |
+| `published` parse + 異常値 fallback | 対応済 (#940) |
+| `actor` が embedded object のケースを救済 | 対応済 (#999、upstream #17340)。`normalizeActor` が inner activity にも効く |
+| `alsoKnownAs` の array / string 双方受け入れ | 対応済 (#1000、upstream #17275)。`APStringList` |
+| 存在しない Actor の Delete を ignore | 対応済 (#1001、upstream #17294)。無いと 404 で queue retry に乗り続ける |
+| リレー由来 Announce で renote を作らず元 note を直接 publish | 対応済 (#1002、upstream #17308) |
+| ブロック中インスタンスの inbox job 蓄積防止 | **設計上不要** (#1003)。upstream は NoteCreate 深部の `Instance is blocked` を error handler で捕まえて retry を防ぐが、mk-go は verify-in-worker (#565) で signature verify 直後に block check するので body parse にすら届かない |
 
 ## RemoteStatsFetcher (mk-go 独自拡張、#943)
 
@@ -190,20 +226,38 @@ upstream Misskey TS の `users/show` は **自インスタンスで観測した�
 | Like (Reaction) | o | o |
 | Announce (Renote) | o | o |
 | Block | o | o |
-| Flag (Report) | - | o |
-| Move (Account Migration) | - | o |
-| Add/Remove (Pin) | - | o |
+| Flag (Report) | o | o |
+| Move (Account Migration) | o | o |
+| Add/Remove (Pin) | o | o |
+
+送信側の実体: `Flag` は `core/abuse` の forwarder (`RenderFlag`)、`Move` は
+`core/move` (`RenderMove`)、`Add`/`Remove` は pin の delivery hook
+(`RenderAddToFeatured` / `RenderRemoveFromFeatured`、#2024)。
 
 ## ディスカバリ
 
 | エンドポイント | 内容 |
 |---|---|
 | `GET /.well-known/webfinger` | `acct:user@host`のリソース検索 |
-| `GET /.well-known/host-meta` | WebFinger URLテンプレート |
+| `GET /.well-known/host-meta` | WebFinger URLテンプレート (XRD) |
+| `GET /.well-known/host-meta.json` | 同上の JRD 版 |
 | `GET /.well-known/nodeinfo` | NodeInfo URL |
 | `GET /nodeinfo/2.0` | サーバーメタデータ (バージョン、プロトコル、利用統計) |
+| `GET /nodeinfo/2.1` | 同上 (2.1 スキーマ) |
 | `GET /users/:id` | AP Person |
 | `GET /notes/:id` | AP Note |
+| `GET /notes/:id/activity` | Create / Announce の activity。renderer が広告する `<note URI>/activity` の dereference 先 (ローカルノート専用) |
 | `GET /users/:id/followers` | フォロワーコレクション |
 | `GET /users/:id/following` | フォローコレクション |
-| `GET /users/:id/featured` | ピン留めノートコレクション |
+| `GET /users/:id/outbox` | アウトボックスコレクション |
+| `GET /users/:id/collections/featured` | ピン留めノートコレクション |
+| `POST /inbox` | Shared Inbox |
+| `POST /users/:id/inbox` | ユーザー Inbox |
+
+**ピン留めは `/users/:id/featured` ではない。** upstream と同じく
+`/users/:id/collections/featured` に登録されており、前者は AP ハンドラに
+到達しない。
+
+AP リソース系 (`/users/:id` / `/notes/:id` 等) は Accept ヘッダで content
+negotiation する。ブラウザからのリロード (`Accept: text/html`) では SPA 用の
+HTML を返すので、`Vary: Accept` が付く。

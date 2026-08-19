@@ -33,6 +33,10 @@ Misskey互換クライアント(Miria等)は、misskey-jsの型に従ってレ�
 | `internal/entitycompat/testdata/golden_schemas.json` | golden契約のスナップショット(commit対象) |
 | `internal/entitycompat/testdata/allowlist.json` / `allowlist_l2.json` | 既知/意図的ドリフトのallowlist(baseline backlog) |
 | `tools/shapediff/` | snapshot再生成 + 全family drift report |
+| `internal/entitycompat/plugin_surface_test.go` | 公開プラグイン API の面 (`TestPluginSurfaceDrift`) |
+| `internal/entitycompat/plugin_doc_test.go` | `docs/plugins/authoring.md` の一覧 ↔ 公開面 golden (`TestPluginDoc_*` 5 本) |
+| `internal/entitycompat/divergence_doc_test.go` | `docs/divergence.md` ↔ 実 schema / 生成物 (`TestDivergenceDoc_*` 5 本) |
+| `internal/entitycompat/schema_drift_test.go` | migration の列 ↔ upstream entity (`TestSchemaDrift_*`)、TypeORM seed の網羅 |
 
 golden側は**commit済みスナップショット**を読むため、テスト時にsubmoduleを必要としない(hermetic)。
 
@@ -411,7 +415,21 @@ make shapecheck-gen                                        # golden_upstream_mig
 
 §1-1 の見出しの件数 == 表の件数列の合計 == 冒頭サマリの和の式。
 
-upstream の endpoint 一覧は `tools/apicompat` が submodule から抽出できるが、**`test-shards` job は submodule を checkout しない** (`submodules: recursive` があるのは `frontend-check` だけ) ので、この gate が見られるのは内部整合だけ。それでも #2634 で見つかった形は捕まる。
+### `TestDivergenceDoc_EndpointCountMatchesAPICompat`
+
+§1-1 の見出しの件数 == `docs/api-compat.md` の `mk-go only (TS spec 外)`。
+
+**内部整合だけでは足りない。** 上の gate は 3 箇所が互いに一致することしか見ないので、**3 つが揃って同じだけ間違っている**状態を通す。実際 §1-1 は 53 と言い続け、生成物は 58 だった (`admin/server-plugins` / `admin/server-metrics` / `admin/self-check` / `admin/federation/{delivery,inbox}-health` がどこにも載っていなかった、#2640)。
+
+upstream の endpoint 一覧を `tools/apicompat` から直接引くことはできない (**`test-shards` job は submodule を checkout しない**。`submodules: recursive` があるのは `frontend-check` だけ)。ただし `make apicompat` の生成物は commit されているので、そちらを経由すれば submodule 無しで突き合わせられる。
+
+この gate が落ちたとき**どちらが古いかは中身を見ないと決まらない**。api-compat.md 側が古いなら `make apicompat` で再生成する (route dump に stack が要る)。divergence.md 側が古いなら §1-1 の表・見出し・冒頭サマリの 3 箇所すべてを直す。
+
+### `TestDivergenceDoc_ForkFrontendTagsMatchTable`
+
+冒頭サマリの `N tag (-mk.X ～ -mk.Y)` == §4-2 の表の行数と範囲。tag 番号が連番であることも見る。
+
+サマリは 10 tag と言い、表には 11 行あり、実際の submodule には 23 個の tag があった (#2640)。fork frontend の custom commit は upstream 追従のたびに増えるので、**人が数え直す運用では必ずずれる**。
 
 ### `TestDivergenceDoc_TableCountMatchesSchema` / `TestDivergenceDoc_ColumnCountMatchesSchema`
 

@@ -1,7 +1,7 @@
 # API互換性状況
 
-対象バージョン: **Misskey 2026.7.0** (mk-go 1.1.1)
-最終更新: 2026-08-07
+対象バージョン: **Misskey 2026.7.0** (mk-go 1.2.1)
+最終更新: 2026-08-19
 
 本ドキュメントは互換性調査 (#107, #124) と、Playwright Phase 1-4 で発見・修正した drift backlog の**履歴**を集約したもの。
 
@@ -55,7 +55,10 @@ smoke 範囲外 (WebSocket / 複雑 mutation / federation delivery / cron / push
 | antennas/* / search/* | shape | ✅ Phase 3 verified |
 | その他 (charts, miauth, app, sw, utility, …) | shape | ✅ Phase 3-4 verified |
 
-未実装エンドポイントへのリクエストはキャッチオールハンドラが `200 {}` で応答するため、クライアントがクラッシュすることはない。なお **upstream endpoint の未実装は現在ゼロ (coverage 100.0%、444/444)**。
+未実装エンドポイントの応答は **method で分かれる**。GET は
+`404 UNKNOWN_API_ENDPOINT`、それ以外は `200 {}`。後者を 404 にしないのは、
+Misskey 公式フロントの一部ページが未登録エンドポイントの 404 で例外を投げる
+ため。いずれも warn ログ (`unimplemented API endpoint`) が出る。なお **upstream endpoint の未実装は現在ゼロ (coverage 100.0%、444/444)**。
 
 ## 対応済みの互換性修正
 
@@ -196,16 +199,23 @@ MFM→HTML変換、`featured`、`attachment`(プロフィールフィールド)�
 upstream / 他実装が出してくる variant に対するロバスト性:
 
 - **`published` の parse + 異常値 fallback** (#940): RFC3339 / RFC3339Nano、未来 5min skew / 過去 10 年で fallback
-- **`attributedTo` / `actor` の string / object 双方受け入れ** (upstream #17340 由来、#947 配下で対応予定)
-- **`alsoKnownAs` の array / string 双方受け入れ** (upstream #17275 由来、#947 配下で対応予定)
-- **存在しない Actor の Delete を ignore** (upstream #17294 由来、#947 配下で対応予定)
-- **リレー由来 Announce の正しい処理** (upstream #17308 由来、#947 配下で対応予定)
+- **`actor` が embedded object のケースを救済** (#999、upstream #17340)
+- **`alsoKnownAs` の array / string 双方受け入れ** (#1000、upstream #17275)
+- **存在しない Actor の Delete を ignore** (#1001、upstream #17294)
+- **リレー由来 Announce の正しい処理** (#1002、upstream #17308)
+- **ブロック中インスタンスの inbox job 蓄積**は verify-in-worker (#565) の構造上起きない (#1003、upstream #17336)
+
+詳細な状態は [federation.md](federation.md) の「AP variant handling」を参照。
 
 ## WebSocket/Streaming
 
 ### チャンネルカバー率
 
-全19チャンネル中19チャンネル実装済み (**100%**)。#125で欠損9チャンネルを追加。
+**upstream の 18 チャンネルをすべて実装**し、mk-go 独自の `notifications` を
+加えて 19。#125 で欠損 9 チャンネルを追加した。
+
+`notifications` は upstream に無い (upstream は `main` チャンネルで通知を流す)
+ので、これに依存するクライアントは Misskey TS では動かない。
 
 プロトコル改善 (#132):
 - OAuth2スコープに基づくチャンネルアクセス制御
@@ -264,15 +274,29 @@ TS版の`.config/default.yml`をそのまま使用可能。以下の設定もGo�
 
 Go側のマイグレーション (000001〜) はTS版テーブルに対して原則追加のみだが、例外が 9 件ある ([migration-from-ts.md](migration-from-ts.md#破壊的なマイグレーション))。TS版のマイグレーションで作成される全テーブルは維持される。
 
-Go版で追加したテーブル:
-- `password_reset_request` — パスワードリセット要求
-- `signin` — ログイン履歴
-- `channel_favorite`, `channel_muting` — チャンネルお気に入り/ミュート
-- `clip_favorite`, `user_list_favorite` — クリップ/リストお気に入り
-- `retention_aggregation` — リテンション統計
-- `system_account` — システムアカウント
-- `used_username` — ユーザー名再利用防止
-- `note_thread_muting` — スレッドミュート
+**mk-go 固有のテーブル (upstream に対応するものが無い) は 9 件:**
+
+| テーブル | 用途 | migration |
+|---|---|---|
+| `antenna_note_unread` / `channel_note_unread` | アンテナ / チャンネルの未読管理 | `000037` |
+| `user_keypair_extra` / `user_publickey_extra` | Ed25519 鍵の保持 (FEP-521a Multikey) | `000049` / `000050` |
+| `chunked_upload_session` | 分割アップロードのセッション (#2313) | `000069` |
+| `relay_observed_user` | リレー経由で観測したユーザー | `000071` |
+| `instance_secret` | インスタンス単位の秘密値 | `000072` |
+| `instance_signature_capability` | 相手インスタンスの署名方式 capability | `000073` |
+| `signup_application` | 登録申請 | `000075` |
+
+mk-go の migration が作るテーブルは 112。上記 9 件と golang-migrate 台帳の
+`schema_migrations` を除く **102 はすべて upstream にも存在する** (TypeORM 台帳の
+`migrations` を含む)。
+
+mk-go は schema を自前の migration で 0 から作るので、**「mk-go の migration が
+作る = mk-go が足した」ではない**。`password_reset_request` / `signin` /
+`channel_favorite` / `channel_muting` / `clip_favorite` / `user_list_favorite` /
+`retention_aggregation` / `system_account` / `used_username` /
+`note_thread_muting` はいずれも upstream のテーブルで、drop-in の可否には影響
+しない。
+
 
 drop-in テスト (#367) で発見した補完カラム:
 - `note.pageCount` (= `note_id` 配下の page 数キャッシュ) を `migration/000039_dropin_compat.up.sql` で追加
@@ -289,9 +313,12 @@ drop-in テスト (#367) で発見した補完カラム:
 ## 既知の制限
 
 - **Identicon の外見** — TS版と生成アルゴリズムが異なるため、アイコン未設定ユーザーの表示が異なる
-- **chat/* の API 設計** — TS版とパス名・パラメータが異なる (mk-go は独自設計)
-- **search backend** — `fulltextSearch.provider` で挙動切替: 既定の `sqlLike` (= PostgreSQL `ILIKE` fallback、Meilisearch 不要、軽量 deploy 向け) / `meilisearch` (要 host 設定) / `sqlPgroonga` (要 PGroonga 拡張) / `none` (= upstream TS strict-mode 互換、400 UNAVAILABLE で reject、#877)
-- **upstream 2026.5.4 まで追従済** — `#947` (2026.3.2 → 2026.5.1) と `#1164` (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) で完了。各 release 差分は `docs/update/2026050*diff.md` (= `yyyymmdd*` 命名) を参照
+- **chat/* は upstream + 拡張** — upstream の 25 endpoint は**すべて同じパスで実装済み**。
+  これに加えて yojo-art/cherrypick (federated chat) 由来の 15 endpoint
+  (`chat/messages/create` / `chat/rooms/joined` / `chat/rooms/members/ban` 等) を
+  additive に足している。upstream のクライアントから見て欠けているものは無い
+- **search backend** — `fulltextSearch.provider` で挙動切替: 既定の `sqlLike` (= `lower(text) LIKE` による部分一致。**ILIKE ではない** — pg_bigm の GIN index `gin (lower(text) gin_bigm_ops)` は LIKE しか加速せず、ILIKE だと拡張を入れても index が効かないため。Meilisearch 不要、軽量 deploy 向け) / `meilisearch` (要 host 設定) / `sqlPgroonga` (要 PGroonga 拡張) / `none` (= upstream TS strict-mode 互換、400 UNAVAILABLE で reject、#877)
+- **upstream 2026.7.0 まで追従済** — `#947` (2026.3.2 → 2026.5.1) / `#1164` (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) を経て 2026.6.0 → 2026.7.0 まで完了。各 release 差分は [`docs/update/`](update/) (`yyyymmdd*` 命名) を参照
 
 詳細は[TS版からの移行ガイド](migration-from-ts.md)の「既知の制限」セクションも参照。
 

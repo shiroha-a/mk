@@ -3,7 +3,7 @@
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
 - 基準: **mk-go 1.2.1** ⇔ Misskey TS `2026.7.0`
-- 最終更新: 2026-08-14
+- 最終更新: 2026-08-19
 
 > ベースラインを固定したのは 1.0.0 (= Misskey TS `2026.7.0` 追従完了時点)。以降の 1.1.x は
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもの。したがって
@@ -28,13 +28,13 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 6 + exact assignment lookup 2 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 6 + exact assignment lookup 2 + admin 観測 5 | chat 15 | **0** |
 | API レスポンスの additive field | 5 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup` / `signupApplicationForm`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 10 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 10 tag (`-mk.1` ～ `-mk.10`) | — | — |
+| fork frontend の独自変更 | 23 tag (`-mk.0` ～ `-mk.22`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -44,7 +44,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (53)
+### 1-1. mk-go にしかない (58)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
@@ -54,6 +54,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | 承認制の登録の申請 | 3 | `signup-application/apply` / `status` / `register` (#2569)。upstream に承認制が無いため対応物なし。認証不要で、本人性は申請時に発行するクレームコードが担保する (hash で保存し、平文は申請直後に 1 度だけ返す)。**外部サーバーには一切依存しない** — 当初は MiAuth を使っていたが、相手サーバーに消せない access_token 行と通知を残すため廃止した (#2568)。承認制が有効でない構成では 503 |
 | 承認制の登録の審査 | 3 | `admin/signup-application/list` / `approve` / `reject` (#2555)。upstream に承認制が無いため対応物なし。scope は `read:admin:invite-codes` / `write:admin:invite-codes` を再利用する (承認は最終的に `registration_ticket` の発行につながり管轄が同じ。`internal/misc/permissions` は upstream misskey-js と完全一致させる契約があり mk-go 固有 scope を足せない) |
 | role assignment exact lookup | 2 | `roles/assignment-show` / `admin/roles/assignment-show` (#2607)。member一覧を走査せず、指定したuser/roleのactive assignmentだけを確認するbuild-time plugin向けhost API。self側は本人、admin側はmoderator以上に限定し、admin側は既存`admin/roles/users`と同じ`read:admin:roles` scopeを使う。**見るのは`role_assignment`行だけなので`target=conditional`のroleでは常に`assigned:false`**になる (行を持たずcondFormulaのread時評価で決まるため)。判別用に`role.target`を返す。既存の`admin/roles/users`も`ListByRole`で同じテーブルを引くので挙動は揃っている。effective判定は#2608側の担当 (#2633) |
+| admin の観測系 | 5 | `admin/server-plugins` (組み込みプラグインの一覧、`read:admin:meta`)、`admin/server-metrics` / `admin/self-check` / `admin/federation/delivery-health` / `admin/federation/inbox-health` (いずれも `read:admin:server-info`)。upstream に対応物が無い。**mk-go は連合の配送 / 受信の健全性を DB に記録している**ので、それを admin 画面から読むための endpoint |
 | その他 / alias | 3 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim) |
 
 ランダムマッチ (`reversi/match` の `userId` 無し) は **local user 同士のみ**。待機列 (`reversi:matchAny`) に載るのはこのインスタンスで認証を通した local user だけなので、相手がリモートになることはない。upstream Misskey も yojo-art/cherrypick も**連合ランダムマッチは持っていない**ので意図的に揃えている。名指しの招待 (`userId` 指定) は従来どおり連合する。
@@ -248,6 +249,18 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 | `2026.7.0-mk.8` | `objectStorage` queue の追加に伴うタブの追従 (#2325) |
 | `2026.7.0-mk.9` | リレー投稿の揮発化設定をリレー画面に追加 (#2335) |
 | `2026.7.0-mk.10` | リレー由来ユーザーの整理設定を追加し、表示上の実装用語を平易な表現に置換 (#2340) |
+| `2026.7.0-mk.11` | インスタンス情報ページにプラグイン用のスロットを追加 |
+| `2026.7.0-mk.12` | 起動時のスピナーを mk-go 独自のものにする |
+| `2026.7.0-mk.13` | 承認制の登録の審査画面を追加 |
+| `2026.7.0-mk.14` | 承認制の登録の申請ページを追加 |
+| `2026.7.0-mk.15` | 承認制の設定をモデレーションへ移動 |
+| `2026.7.0-mk.16` | 登録可否の矛盾する組み合わせを選べないようにする |
+| `2026.7.0-mk.17` | 承認制はメール必須が OFF なら設定できるようにする |
+| `2026.7.0-mk.18` | 承認制の申請をクレームコード方式にする |
+| `2026.7.0-mk.19` | ビルド生成物 `server-plugins.generated.ts` のローカル版を戻す revert |
+| `2026.7.0-mk.20` | 申請フォームの項目を管理者が定義できるようにする |
+| `2026.7.0-mk.21` | 申請の登録で返りうるエラーコードを表示する |
+| `2026.7.0-mk.22` | 承認済みの登録をメール確認に対応させる |
 
 `2026.7.0-mk.1` の内訳:
 
