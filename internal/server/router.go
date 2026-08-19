@@ -2914,6 +2914,7 @@ func (s *Server) setupRoutes() {
 	rolesHandler.SetRelationRepos(listRelationRepos)                            // #1973: roles/users の embed user に viewer-relation
 	api.POST("/roles/list", rolesHandler.List, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/roles/show", rolesHandler.Show)
+	api.POST("/roles/assignment-show", rolesHandler.AssignmentShow, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	api.POST("/roles/users", rolesHandler.Users)
 	api.POST("/roles/notes", rolesHandler.Notes, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 
@@ -3107,6 +3108,7 @@ func (s *Server) setupRoutes() {
 	api.POST("/admin/roles/delete", adminHandler.RolesDelete, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:roles"))
 	api.POST("/admin/roles/assign", adminHandler.RolesAssign, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:roles"))
 	api.POST("/admin/roles/unassign", adminHandler.RolesUnassign, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:roles"))
+	api.POST("/admin/roles/assignment-show", adminHandler.RolesAssignmentShow, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:roles"))
 	api.POST("/admin/roles/users", adminHandler.RolesUsers, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:roles"))
 	api.POST("/admin/roles/update-default-policies", adminHandler.RolesUpdateDefaultPolicies, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:roles"))
 	api.POST("/admin/abuse-user-reports", adminHandler.AbuseReports, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:abuse-user-reports"))

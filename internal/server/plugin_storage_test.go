@@ -57,6 +57,9 @@ func dropPluginSchema(t *testing.T, cfg *config.Config, name string) {
 // テストは揃っているが、配線 (dbBackedStorage が本物の DSN で開く経路) は
 // ここでしか通らない。
 func TestPluginStorage_EndToEnd(t *testing.T) {
+	if serverIntegrationDB == nil {
+		t.Skip("PostgreSQL unavailable")
+	}
 	const name = "storee2e"
 	cfg := testDBConfig(t)
 	dropPluginSchema(t, cfg, name)
@@ -113,6 +116,9 @@ func TestPluginStorage_EndToEnd(t *testing.T) {
 
 // 再起動しても migration が二重に流れないこと (起動のたびに呼ばれる)。
 func TestPluginStorage_RestartIsSafe(t *testing.T) {
+	if serverIntegrationDB == nil {
+		t.Skip("PostgreSQL unavailable")
+	}
 	const name = "storerestart"
 	cfg := testDBConfig(t)
 	dropPluginSchema(t, cfg, name)

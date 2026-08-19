@@ -619,6 +619,24 @@ func TestDefaultEndpointLimits_UnauthenticatedEntryPoints(t *testing.T) {
 	}
 }
 
+func TestDefaultEndpointLimits_RoleAssignmentShow(t *testing.T) {
+	tests := []struct {
+		endpoint string
+		max      int
+	}{
+		{endpoint: "roles/assignment-show", max: 60},
+		{endpoint: "admin/roles/assignment-show", max: 120},
+	}
+	for _, tc := range tests {
+		t.Run(tc.endpoint, func(t *testing.T) {
+			limit, ok := DefaultEndpointLimits[tc.endpoint]
+			require.True(t, ok)
+			assert.Equal(t, time.Minute, limit.Duration)
+			assert.Equal(t, tc.max, limit.Max)
+		})
+	}
+}
+
 func TestDefaultEndpointLimits_MinIntervalEndpoints(t *testing.T) {
 	cases := []struct {
 		endpoint    string

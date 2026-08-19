@@ -143,7 +143,8 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	"signup-application/status": {Duration: time.Hour, Max: 30},
 
 	// ── Admin ──────────────────────────────────────────
-	"admin/system-webhook/test": {Duration: 15 * time.Minute, Max: 60},
+	"admin/system-webhook/test":   {Duration: 15 * time.Minute, Max: 60},
+	"admin/roles/assignment-show": {Duration: time.Minute, Max: 120},
 	// 初回セットアップの窓 (rootUserId 未設定 + 未認証) だけは credential 無しで
 	// 通るので、setupPassword の試行回数に上限を置く。**signin の 10 ではなく 30
 	// にしてある** — この endpoint は administrator が正規にアカウントを作る経路
@@ -154,6 +155,7 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	// ── Misc ───────────────────────────────────────────
 	"fetch-external-resources": {Duration: time.Hour, Max: 50},
 	// upstream 2026.7.0 GHSA hardening: fetch-rss は 60s/300 回。
-	"fetch-rss":        {Duration: time.Minute, Max: 300},
-	"users/lists/push": {Duration: time.Hour, Max: 30},
+	"fetch-rss":             {Duration: time.Minute, Max: 300},
+	"roles/assignment-show": {Duration: time.Minute, Max: 60},
+	"users/lists/push":      {Duration: time.Hour, Max: 30},
 }
