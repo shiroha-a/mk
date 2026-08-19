@@ -203,6 +203,8 @@ migrate-up: ## マイグレーションを最新まで適用
 
 # **-steps 1 は必須。** cmd/migrate は steps 未指定 (0) を「全部」と解釈するので、
 # 付け忘れると 1 段のつもりで全 down が走り schema が消える。
+# 適用済みが 0 件のときは golang-migrate が "file does not exist" で exit 1 する
+# (steps 指定時は ErrNoChange に落ちないため)。冪等に叩くなら呼び出し側で吸収する。
 migrate-down: ## マイグレーションを 1 段階ロールバック
 	go run ./cmd/migrate -direction down -steps 1
 

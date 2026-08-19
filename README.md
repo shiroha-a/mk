@@ -143,7 +143,7 @@ make dev
 ## テスト
 
 ```bash
-# 全テスト (testcontainersでPostgreSQL/Redisが自動起動、Docker必須)
+# 全テスト (事前に `cp .env.test.example .env.test`。→ docs/testing.md)
 make test
 
 # 特定パッケージ

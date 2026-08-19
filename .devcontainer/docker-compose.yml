@@ -25,8 +25,8 @@ services:
       TEST_DB_SSLMODE: disable
       TEST_REDIS_HOST: localhost
       TEST_REDIS_PORT: "6379"
-      # マイグレーション用
-      DATABASE_URL: "postgres://misskey:misskey@localhost:5432/misskey?sslmode=disable"
+      # マイグレーションの接続先は MK_DB_* か .config/default.yml から決まる。
+      # cmd/migrate は DATABASE_URL を読まない。
 
   db:
     image: postgres:18-alpine

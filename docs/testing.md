@@ -9,7 +9,7 @@
 | 種類 | 対象 | DB/Redis | 実行方法 |
 |---|---|---|---|
 | ユニットテスト | APIハンドラ、サービスロジック | モック | `go test ./internal/api/...` |
-| 統合テスト | リポジトリ、Redis連携 | 実DB (testcontainers) | `go test ./internal/core/...` |
+| 統合テスト | リポジトリ、Redis連携 | 実 PostgreSQL (`TEST_DB_*`) + Redis (testcontainers) | `go test ./internal/core/...` |
 | E2Eテスト (Playwright) | フロントエンド操作 / API | 実DB + フロントエンド | `make playwright-test` (詳細は[Playwright](playwright.md)) |
 | 連合テスト | mk-go ↔ 本物の Misskey TS の AP 通信 | Docker Compose多段 | `make federation-misskey-e2e` (起動から撤去まで通し。個別に叩くなら `-up` → `-test` → `-down`) |
 | Drop-in e2e (pytest) | TS-A backend を mk-A に差し替えて state preservation 検証 | TS 2 instance + mk overlay | `make dropin-swap-test` (#365 / #367 / #372 / #374、詳細は[dropin-e2e.md](dropin-e2e.md)) |
@@ -105,7 +105,7 @@ Docker環境がない場合は`testutil.SkipIfNoDocker(t)`でテストをスキ�
 
 ### CI環境
 
-CIではtestcontainersの代わりにGitHub Actionsの`services`でPostgreSQL/Redisを起動し、環境変数で接続先を指定する:
+CI では GitHub Actions の `services` で PostgreSQL を起動し (Redis を要するテストは CI でも testcontainers を立てる)、環境変数で接続先を指定する:
 
 | 環境変数 | 値 |
 |---|---|

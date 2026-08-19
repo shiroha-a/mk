@@ -249,6 +249,7 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 |---|---|
 | `MISSKEY_FRONTEND_DIR` | フロントエンドのルートディレクトリ |
 | `MISSKEY_FRONTEND_DIST_DIR` | ビルド済みフロントエンドディレクトリ |
+| `MISSKEY_FLUENT_EMOJI_DIR` | fluent-emoji ディレクトリ (実績バッジ / 通知アイコン) |
 | `MISSKEY_TWEMOJI_DIR` | Twemojiアセットディレクトリ |
 | `MISSKEY_CLIENT_ASSETS_DIR` | クライアントアセットディレクトリ |
 | `MISSKEY_STATIC_DIR` | 静的ファイルディレクトリ (backend/assets: favicon等) |
@@ -256,7 +257,7 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 
 ## テスト用環境変数
 
-CIでのテスト実行時に使用。ローカルではtestcontainersが自動起動するため通常不要。
+CIでのテスト実行時に使用。ローカルでは `.env.test` (= `.env.test.example` の複製) から読む。Redis は testcontainers が立てるが、**PostgreSQL は自分で用意する** (→ [testing.md](testing.md))。
 
 | 環境変数 | 用途 |
 |---|---|
