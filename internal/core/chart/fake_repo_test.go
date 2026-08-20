@@ -23,6 +23,9 @@ type fakeRepo struct {
 	// armError() to push an error and skipFirstError() to skip a call
 	// before failing the next one.
 	errOn map[string][]error
+	// failApplyDeltas, when non-nil, makes ApplyDeltas fail for the rows it
+	// matches, so tests can model a permanently poisoned group (#2651).
+	failApplyDeltas *applyDeltasFailure
 	// calls records the arguments of every ApplyDeltas invocation in order.
 	//
 	// deltas と setInts はどちらも toColumnName() の同じ列に展開されるので、
@@ -39,6 +42,29 @@ type fakeRepo struct {
 	// up twice when it has to insert one, so consecutive duplicates are
 	// expected.
 	groupOrder []string
+}
+
+// applyDeltasFailure narrows a simulated ApplyDeltas failure.
+//
+// group を *string にしているのは、ungrouped chart のキーが空文字列で、
+// 「全 group」と「空 group だけ」を区別する必要があるため。span が空なら
+// 両 span。「hour は通るが day だけ恒久的に失敗する」形が現実のトリガ
+// (day 行は 1 日ぶんを積むので smallint をあふれさせやすい) なので、
+// span を選べるようにしてある。
+type applyDeltasFailure struct {
+	group *string
+	span  Span
+}
+
+// matches reports whether the failure applies to the given row.
+func (f *applyDeltasFailure) matches(span Span, group string, found bool) bool {
+	if f.span != "" && f.span != span {
+		return false
+	}
+	if f.group == nil {
+		return true
+	}
+	return found && *f.group == group
 }
 
 // applyDeltasCall captures one ApplyDeltas invocation for assertions.
@@ -200,6 +226,12 @@ func (r *fakeRepo) ApplyDeltas(_ context.Context, span Span, id int64, deltas ma
 	if row == nil {
 		return fmt.Errorf("fakeRepo: row %d not found", id)
 	}
+	if r.failApplyDeltas != nil {
+		group, found := r.groupOf(span, id)
+		if r.failApplyDeltas.matches(span, group, found) {
+			return fmt.Errorf("fakeRepo: poisoned group %q (%s)", group, span)
+		}
+	}
 	for k, v := range deltas {
 		row.Cols[k] = toInt64(row.Cols[k]) + v
 	}
@@ -246,6 +278,20 @@ func (r *fakeRepo) ResetUniqueTempColumns(_ context.Context, span Span, gt, lt i
 		}
 	}
 	return nil
+}
+
+// groupOf returns the group a row belongs to. ok=false when the id is unknown,
+// so an ungrouped chart (group "") is not confused with "not found".
+// Caller must hold r.mu.
+func (r *fakeRepo) groupOf(span Span, id int64) (string, bool) {
+	for group, rows := range r.tableFor(span) {
+		for _, row := range rows {
+			if row.ID == id {
+				return group, true
+			}
+		}
+	}
+	return "", false
 }
 
 func (r *fakeRepo) findByID(span Span, id int64) *Row {

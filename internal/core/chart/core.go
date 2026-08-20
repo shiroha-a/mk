@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
 	"time"
@@ -54,6 +55,9 @@ type groupBuffer struct {
 	// なる。bakeUniqueAndIntersection は集合の濃度しか使わないので、重複を
 	// 落としても DB に書く値は変わらない。
 	uniques map[string]map[string]struct{}
+	// attempts は、このバッファが Save に失敗して戻された回数。
+	// maxSaveAttempts に達したら捨てる (Save の doc を参照)。
+	attempts int
 }
 
 // newGroupBuffer returns an empty buffer for one group.
@@ -79,6 +83,55 @@ func (b *groupBuffer) addUnique(name string, keys []string) {
 	for _, k := range keys {
 		set[k] = struct{}{}
 	}
+}
+
+// mergeFrom folds another buffer for the same group into this one. Used when a
+// failed Save puts work back while concurrent Commit() calls have already
+// started a fresh buffer for that group.
+func (b *groupBuffer) mergeFrom(other *groupBuffer) {
+	for name, v := range other.ints {
+		b.ints[name] += v
+	}
+	for name, set := range other.uniques {
+		if len(set) == 0 {
+			continue
+		}
+		dst := b.uniques[name]
+		if dst == nil {
+			if b.uniques == nil {
+				b.uniques = make(map[string]map[string]struct{}, len(other.uniques))
+			}
+			dst = make(map[string]struct{}, len(set))
+			b.uniques[name] = dst
+		}
+		for k := range set {
+			dst[k] = struct{}{}
+		}
+	}
+}
+
+// uniquesOnly returns a buffer carrying just this one's unique-column sets, or
+// nil when there are none. The sets are moved, not copied: the receiver must
+// not be used afterwards.
+//
+// hour 側の UPDATE が通った後に day 側が落ちた group を戻すのに使う。int の
+// delta を戻すと次回 hour に二重計上されるが、unique 列は append が行の既存
+// 要素を除いて積み、bake も集合から数え直すので**同じ行に対しては冪等**。
+// day を取り戻すために unique だけ戻す。
+//
+// **行をまたぐと冪等ではない。** 再試行が hour 境界をまたぐと、そのキーは次の
+// バケットにも計上される (filter も bake も「その行の集合」としか突き合わせない
+// ため)。Save 間隔 20 分に対し hour 境界は 60 分ごとなので、再試行 1 回あたり
+// 3 回に 1 回ほど踏む。実害は hour 1 バケットの過大計上で、day を丸ごと失うより
+// 軽いと判断している。maxSaveAttempts を増やすときはこの確率も増える。
+func (b *groupBuffer) uniquesOnly() *groupBuffer {
+	if len(b.uniques) == 0 {
+		return nil
+	}
+	out := newGroupBuffer()
+	out.uniques = b.uniques
+	out.attempts = b.attempts
+	return out
 }
 
 // Config bundles the dependencies a Chart needs at construction time.
@@ -114,6 +167,15 @@ func New(cfg Config) (*Chart, error) {
 		clock:  clk,
 		tick:   cfg.Tick,
 	}, nil
+}
+
+// BufferedGroups reports how many groups still hold unsaved work. Used by the
+// shutdown log: プロセス終了時の失敗は次の周期が無いぶん恒久的なので、
+// 「まだ残っていた」ことだけは伝える。
+func (c *Chart) BufferedGroups() int {
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	return len(c.buffer)
 }
 
 // Name returns the chart's camelCase name.
@@ -195,27 +257,66 @@ func (c *Chart) groupBufferLocked(group string) *groupBuffer {
 	return g
 }
 
-// Save flushes the buffered Commit() entries to the database. Steps 1-3
-// mirror the upstream; the handling of a failure partway through does not.
+// maxSaveAttempts bounds how many consecutive Save cycles one group's buffer may
+// fail before it is dropped.
+//
+// 恒久的に失敗する group がある (例: smallint の桁あふれ、group 名が
+// varchar(128) を超える) と、戻し続ける限りそのバッファは伸び続ける。
+// 一方で一時的な DB 障害を 1 回で諦めると、従来と同じ取りこぼしになる。
+//
+// ManagementService の既定間隔は 20 分なので、**最古のデータは最大 40 分粘る**。
+// ただし戻したバッファに新しい Commit が合流すると attempts は大きい方を継ぐので、
+// **捨てるときは最大 3 周期 (約 60 分) ぶんをまとめて捨てる**。周期 2 以降に
+// 入ったデータは 1 回しか試されない。それでも復旧しない障害は、そもそも
+// 取りこぼしが問題になる状態ではない。
+const maxSaveAttempts = 3
+
+// saveOutcome reports how far a group's save got, so Save knows what can be
+// requeued without double counting.
+type saveOutcome int
+
+const (
+	// saveNothingApplied: 1 行も書いていないので全部戻せる。
+	saveNothingApplied saveOutcome = iota
+	// saveHourApplied: hour 側の UPDATE が通った (かもしれない) 後で day 側が
+	// 落ちた。int の delta を戻すと二重計上になる。
+	saveHourApplied
+	// saveAllApplied: 両 span とも書けた。
+	saveAllApplied
+)
+
+// Save flushes the buffered Commit() entries to the database. Steps 1-3 mirror
+// the upstream; step 4 and the retry limit do not (see below):
 //
 //  1. Take the pending per-group buffers.
 //  2. For each group, claim the current hour and day rows.
 //  3. Push the group's merged int deltas + unique-temp appends + bake
 //     operations as two UPDATE statements (hour + day).
+//  4. Drop only the work that was applied; a group that failed goes back into
+//     the buffer so the next tick retries it.
 //
 // Save is safe to call concurrently with Commit; it captures the
 // buffer under the mutex before processing.
 //
-// **取り出した分は成否にかかわらず捨てる。** 失敗した group とそれ以降の
-// group の集計は、その周期ぶん失われる。applyDiffs は hour -> day の順に
-// 2 本の UPDATE を投げるので、hour だけ通って day で落ちた group は片側だけ
-// 適用された状態で残る。
+// **1 つの group の失敗が他の group を止めない。** 全 group を試みてから
+// 集約エラーを返す (upstream も `Promise.all(groups.map(...))` で group ごとに
+// 独立して処理する)。以前は最初のエラーで return していたため、恒久的に失敗する
+// group が 1 つあるだけで、ソート順で後続の group が二度と flush されなかった。
 //
-// バッファへ戻す実装にすると、恒久的に失敗する group (例: smallint の
-// 桁あふれ) が 1 つあるだけで毎周期そこで止まり、後続の group が二度と
-// flush されないうえバッファが際限なく伸びる。**原因は直列であることでは
-// なく、最初のエラーで return していること。** upstream (core.ts) は group
-// ごとに独立して処理し、成功した分だけをバッファから落とす。修正は #2651。
+// 戻す範囲は失敗した位置で決まる。1 行も書いていなければ全部、hour だけ通って
+// day で落ちたなら unique 列だけ (int の delta は二重計上になる)。戻したバッファは
+// maxSaveAttempts 回まで再試行し、それを超えたら捨てて warn を出す。捨てないと
+// 恒久的に失敗する group のバッファが際限なく伸びる。
+//
+// **int の delta は「高々 1 回」から「少なくとも 1 回」に変わる。** UPDATE が
+// サーバー側で commit された後に応答を失う (接続断 / timeout) と、次の周期で
+// 二重計上される。以前は失われるだけだった。上限は maxSaveAttempts 倍。
+// chart は概算値なので、取りこぼしより二重計上を選んでいる。
+//
+// **maxSaveAttempts で諦めて捨てるのは upstream に無い挙動。** upstream は
+// 失敗した group の buffer を保持し続け、上限を持たない。また upstream の
+// Promise.all は最初の reject で待たずに返るので、「全 group を試みてから
+// 集約エラーを返す」のも mk-go 固有。group ごとに独立して処理する点は同じ。
 func (c *Chart) Save(ctx context.Context) error {
 	c.bufMu.Lock()
 	if len(c.buffer) == 0 {
@@ -226,29 +327,260 @@ func (c *Chart) Save(ctx context.Context) error {
 	c.buffer = nil
 	c.bufMu.Unlock()
 
-	// map の反復順はランダムなので、どこまで適用されてから失敗したかが
-	// 実行ごとに変わらないよう group をソートしてから処理する。
-	// 空文字列 ("") は ungrouped charts のキー。
+	// map の反復順はランダムなので、処理順が実行ごとに変わらないよう group を
+	// ソートしてから回す。空文字列 ("") は ungrouped charts のキー。
 	groups := make([]string, 0, len(pending))
 	for g := range pending {
 		groups = append(groups, g)
 	}
 	sort.Strings(groups)
 
+	var errs []error
+	var dropped []droppedWork
 	for _, g := range groups {
-		hour, err := c.claimCurrentLog(ctx, g, SpanHour)
-		if err != nil {
-			return fmt.Errorf("claim hour for %s: %w", c.schema.Name, err)
+		gb := pending[g]
+		outcome, err := c.saveGroup(ctx, g, gb)
+		if err == nil {
+			continue
 		}
-		day, err := c.claimCurrentLog(ctx, g, SpanDay)
-		if err != nil {
-			return fmt.Errorf("claim day for %s: %w", c.schema.Name, err)
+		errs = append(errs, fmt.Errorf("%s: %w", c.qualify(g), err))
+		dropped = append(dropped, c.requeueFailed(g, gb, outcome, err)...)
+	}
+	c.warnDropped(dropped)
+	return joinBounded(errs)
+}
+
+// maxReportedGroupErrors bounds how many per-group errors Save folds into its
+// returned error.
+//
+// DB 全断のような状況では失敗 group 数がそのまま件数になる。1 件あたり
+// 100 バイト前後なので、perUserPv のように group 数が distinct owner 数まで
+// 伸びる chart では**エラー文字列だけで数百 KB** になり、しかも slog の
+// TextHandler は改行をエスケープするので 1 物理行に収まってしまう。
+// journald (既定 LineMax 48K) でも docker json-file (16K 分割) でも、読みたい
+// 代表例がその中に埋もれる。件数だけ残して打ち切る。
+const maxReportedGroupErrors = 5
+
+// joinBounded folds at most maxReportedGroupErrors errors, appending a count of
+// the rest.
+func joinBounded(errs []error) error {
+	if len(errs) <= maxReportedGroupErrors {
+		return errors.Join(errs...)
+	}
+	kept := make([]error, 0, maxReportedGroupErrors+1)
+	kept = append(kept, errs[:maxReportedGroupErrors]...)
+	kept = append(kept, fmt.Errorf("and %d more group(s) failed", len(errs)-maxReportedGroupErrors))
+	return errors.Join(kept...)
+}
+
+// qualify formats a chart/group pair for error messages. ungrouped chart は
+// group が空なので、区切りの "/" を出さない。
+func (c *Chart) qualify(group string) string {
+	if group == "" {
+		return c.schema.Name
+	}
+	return c.schema.Name + "/" + group
+}
+
+// Reasons Save can give up on buffered work.
+const (
+	// droppedReasonRetryLimit: maxSaveAttempts 回失敗したので諦めた。多くは
+	// 一過性の障害で、復旧すれば以後は流れる。
+	droppedReasonRetryLimit = "retry limit reached"
+	// droppedReasonNotRetryable: hour 側が適用済みなので int の delta を戻すと
+	// 二重計上になる。恒久的な失敗 (smallint あふれ等) なら operator の対処が要る。
+	droppedReasonNotRetryable = "hour applied, day delta not retryable"
+)
+
+// droppedWork records buffered work Save gave up on, for the summary warning.
+type droppedWork struct {
+	group  string
+	reason string
+	cause  error
+	// ints は捨てた delta の絶対値の和。列数ではない (列数だと groups と並んだ
+	// ときに「失ったイベント数」と誤読される)。
+	ints int64
+	// uniques は捨てた unique キーの数。
+	uniques int
+}
+
+// droppedIntTotal sums the magnitude of the deltas that applyDiffs would have
+// written. 素の和だと減算列 (dec 系) と打ち消し合って「何も失っていない」ように
+// 見えるので絶対値で足す。
+//
+// uniqueIncrement / intersection 列に積まれた int は applyDiffs が deltas から
+// 外す (bake した絶対値を SET する) ので、**そもそも書かれない**。捨てた量として
+// 数えると過大報告になる。
+func (c *Chart) droppedIntTotal(ints map[string]int64) int64 {
+	var total int64
+	for _, col := range c.schema.Columns {
+		if col.UniqueIncrement || col.IntersectionOf != nil {
+			continue
 		}
-		if err := c.applyDiffs(ctx, hour, day, pending[g]); err != nil {
-			return fmt.Errorf("apply diffs for %s/%s: %w", c.schema.Name, g, err)
+		v := ints[col.Name]
+		if v < 0 {
+			v = -v
+		}
+		total += v
+	}
+	return total
+}
+
+// droppedUniqueTotal counts the unique keys that applyDiffs would have written.
+//
+// uniqueAppendsFor と bakeUniqueAndIntersection はどちらも schema の
+// uniqueIncrement 列しか見るので、それ以外の名前に積まれたキーは書かれない。
+// droppedIntTotal と同じ理由で、捨てた量として数えると過大報告になる。
+func (c *Chart) droppedUniqueTotal(uniques map[string]map[string]struct{}) int {
+	total := 0
+	for _, col := range c.schema.Columns {
+		if !col.UniqueIncrement {
+			continue
+		}
+		total += len(uniques[col.Name])
+	}
+	return total
+}
+
+// newDroppedWork snapshots how much of gb is being thrown away.
+func (c *Chart) newDroppedWork(group, reason string, cause error, gb *groupBuffer) droppedWork {
+	return droppedWork{
+		group:   group,
+		reason:  reason,
+		cause:   cause,
+		ints:    c.droppedIntTotal(gb.ints),
+		uniques: c.droppedUniqueTotal(gb.uniques),
+	}
+}
+
+// newDroppedIntWork snapshots only the int deltas, for the case where the unique
+// columns are being requeued but the deltas cannot be. ok=false when nothing
+// that would have been written is being lost, so no warning is emitted for work
+// that carried nothing.
+func (c *Chart) newDroppedIntWork(group string, cause error, gb *groupBuffer) (droppedWork, bool) {
+	total := c.droppedIntTotal(gb.ints)
+	if total == 0 {
+		return droppedWork{}, false
+	}
+	return droppedWork{group: group, reason: droppedReasonNotRetryable, cause: cause, ints: total}, true
+}
+
+// warnDropped emits one line per Save summarising the work that was discarded.
+//
+// **本番でこれが唯一の signal になりうる。** ManagementService の logger は
+// router で slog に配線しているが、そちらは「Save がエラーを返した」ことしか
+// 伝えず、諦めて捨てたかどうかは区別できない。
+//
+// group ごとに出さないのは、DB 全断のような状況では grouped chart (12 個中 6 個)
+// の全 group が同じ周期で上限に達し、perUserPv なら distinct owner 数ぶんの行が
+// 一斉に出るため。件数と代表例に畳む。
+func (c *Chart) warnDropped(dropped []droppedWork) {
+	if len(dropped) == 0 {
+		return
+	}
+	var ints int64
+	var uniques int
+	counts := make(map[string]int, 2)
+	examples := make(map[string]droppedWork, 2)
+	// 1 group が 1 周期で 2 レコード (int の破棄 + retry limit) を出しうるので、
+	// レコード数と group 数は一致しない。operator は「何人 / 何ホストが失ったか」
+	// で影響範囲を測るので、group は distinct で数える。レコード数は
+	// retryLimit + notRetryable で読める。
+	seenGroups := make(map[string]struct{}, len(dropped))
+	for _, d := range dropped {
+		ints += d.ints
+		uniques += d.uniques
+		counts[d.reason]++
+		seenGroups[d.group] = struct{}{}
+		if _, seen := examples[d.reason]; !seen {
+			examples[d.reason] = d
 		}
 	}
-	return nil
+
+	// reason ごとに数え、**代表例も reason ごとに出す**。まとめて 1 件だけに
+	// すると、DB 障害で 4999 件が retry limit に落ちたところへ smallint あふれが
+	// 1 件混ざったときに、対処の要る方が代表例から漏れる。
+	args := []any{
+		"chart", c.schema.Name,
+		"groups", len(seenGroups),
+		"retryLimit", counts[droppedReasonRetryLimit],
+		"notRetryable", counts[droppedReasonNotRetryable],
+		"intDelta", ints,
+		"uniqueKeys", uniques,
+	}
+	for _, r := range []struct{ reason, key string }{
+		{droppedReasonRetryLimit, "retryLimitExample"},
+		{droppedReasonNotRetryable, "notRetryableExample"},
+	} {
+		d, ok := examples[r.reason]
+		if !ok {
+			continue
+		}
+		args = append(args, r.key+"Group", d.group, r.key+"Error", d.cause)
+	}
+	slog.Warn("chart: dropped buffered work that could not be saved", args...)
+}
+
+// saveGroup claims the current rows for one group and applies its buffer.
+func (c *Chart) saveGroup(ctx context.Context, group string, gb *groupBuffer) (saveOutcome, error) {
+	hour, err := c.claimCurrentLog(ctx, group, SpanHour)
+	if err != nil {
+		return saveNothingApplied, fmt.Errorf("claim hour: %w", err)
+	}
+	day, err := c.claimCurrentLog(ctx, group, SpanDay)
+	if err != nil {
+		return saveNothingApplied, fmt.Errorf("claim day: %w", err)
+	}
+	return c.applyDiffs(ctx, hour, day, gb)
+}
+
+// requeueFailed puts a failed group's work back into the live buffer, dropping
+// it once it has failed maxSaveAttempts times in a row. The returned records
+// describe what was thrown away; **Save aggregates them into a single warning**
+// (see warnDropped). ここで直接ログを出さないこと: 1 group が 1 周期で
+// 2 レコード (int の破棄 + retry limit) を出しうるうえ、grouped chart では
+// group 数ぶんの行が一斉に出る。
+func (c *Chart) requeueFailed(group string, gb *groupBuffer, outcome saveOutcome, cause error) []droppedWork {
+	var dropped []droppedWork
+	retry := gb
+	if outcome == saveHourApplied {
+		// int の delta は hour に適用済みなので戻せない。**戻すものが他に
+		// あるかどうかに関わらず、捨てたことを記録する。** instance chart は
+		// unique 列を持たず requests.received が smallint で、day 行は 1 日ぶんを
+		// 積むぶん hour より 24 倍あふれやすい。perUserPv のように unique 列を
+		// 持つ chart でも、pv.user / pv.visitor のような素のカウンタは同じように
+		// day 側で消える。ここを黙って通すと、その日一杯 day が更新されない
+		// ことに誰も気付けない。
+		if d, ok := c.newDroppedIntWork(group, cause, gb); ok {
+			dropped = append(dropped, d)
+		}
+		retry = gb.uniquesOnly()
+		if retry == nil {
+			return dropped
+		}
+	}
+	retry.attempts++
+	if retry.attempts >= maxSaveAttempts {
+		return append(dropped, c.newDroppedWork(group, droppedReasonRetryLimit, cause, retry))
+	}
+
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	if cur, ok := c.buffer[group]; ok {
+		// Save 中に走った Commit が同じ group のバッファを作り直している。
+		// 上書きせずマージし、attempts は大きい方を引き継ぐ (合流したあとは
+		// 区別が付かないので、捨てる側に倒して滞留を止める)。
+		cur.mergeFrom(retry)
+		if retry.attempts > cur.attempts {
+			cur.attempts = retry.attempts
+		}
+		return dropped
+	}
+	if c.buffer == nil {
+		c.buffer = make(map[string]*groupBuffer, 1)
+	}
+	c.buffer[group] = retry
+	return dropped
 }
 
 // Tick computes a snapshot via the configured TickFunc and writes the
@@ -373,7 +705,7 @@ func (c *Chart) newLogValues(latest *Row) map[string]int64 {
 // repository. setInts is used for uniqueIncrement bake and
 // intersection columns whose absolute value cannot be expressed as a
 // delta.
-func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, gb *groupBuffer) error {
+func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, gb *groupBuffer) (saveOutcome, error) {
 	deltas := make(map[string]int64)
 	for _, col := range c.schema.Columns {
 		if col.UniqueIncrement || col.IntersectionOf != nil {
@@ -406,9 +738,12 @@ func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, gb *groupBuffer)
 	daySetInts := bakeUniqueAndIntersection(c.schema, dayIdx, gb)
 
 	if err := c.repo.ApplyDeltas(ctx, SpanHour, hour.ID, deltas, hourAppends, hourSetInts); err != nil {
-		return err
+		return saveNothingApplied, err
 	}
-	return c.repo.ApplyDeltas(ctx, SpanDay, day.ID, deltas, dayAppends, daySetInts)
+	if err := c.repo.ApplyDeltas(ctx, SpanDay, day.ID, deltas, dayAppends, daySetInts); err != nil {
+		return saveHourApplied, err
+	}
+	return saveAllApplied, nil
 }
 
 // uniqueAppendsFor returns, per uniqueIncrement column, the buffered keys that

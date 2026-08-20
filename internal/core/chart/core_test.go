@@ -49,6 +49,22 @@ var perUserNotesSchema = Schema{
 	},
 }
 
+// twoIntColumnSchema backs the droppedWork accounting tests: two plain int
+// columns plus one uniqueIncrement column.
+var twoIntColumnSchema = Schema{
+	Name: "twoInt",
+	Columns: []ColumnDef{
+		{Name: "up"},
+		{Name: "down"},
+		{Name: "x"},
+		{Name: "k", UniqueIncrement: true},
+	},
+}
+
+// strPtrOf returns a pointer to s. Used to target a specific group (including
+// the ungrouped "" key) in applyDeltasFailure.
+func strPtrOf(s string) *string { return &s }
+
 // setKeysSorted returns a set's members in a deterministic order. Only used by
 // tests that assert on buffer contents.
 func setKeysSorted(set map[string]struct{}) []string {
@@ -58,6 +74,18 @@ func setKeysSorted(set map[string]struct{}) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// perUserPvSchema mirrors the real per-user PV chart: a uniqueIncrement column
+// plus a plain counter. activeUsers は unique 列しか持たず、そこに int を積むと
+// applyDiffs が deltas から外すので「捨てた delta」の検証に使えない。
+var perUserPvSchema = Schema{
+	Name:    "perUserPv",
+	Grouped: true,
+	Columns: []ColumnDef{
+		{Name: "upv.visitor", UniqueIncrement: true},
+		{Name: "pv.visitor"},
+	},
 }
 
 func newTestChart(t *testing.T, schema Schema) (*Chart, *fakeRepo, *fakeClock) {
@@ -236,6 +264,493 @@ func TestApplyDiffs_ColumnNeverAssignedTwiceInOneUpdate(t *testing.T) {
 			}
 		}
 	}
+}
+
+// 1 つの group が恒久的に失敗しても、他の group は flush され続ける。
+// 以前は最初のエラーで return していたため、ソート順で後続の group が
+// 二度と書かれなかった (#2651)。
+func TestSave_OneFailingGroupDoesNotBlockOthers(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+	require.NoError(t, c.Commit(Diff{"inc": 2}, "u2"))
+	require.NoError(t, c.Commit(Diff{"inc": 3}, "u3"))
+
+	// 先頭の group (u1) の ApplyDeltas を恒久的に落とす (hour が先に落ちるので
+	// day には到達しない)。
+	repo.failApplyDeltas = &applyDeltasFailure{group: strPtrOf("u1")}
+	err := c.Save(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "u1")
+
+	// u2 / u3 は書かれている。
+	require.Len(t, repo.hour["u2"], 1)
+	require.Len(t, repo.hour["u3"], 1)
+	assert.Equal(t, int64(2), toInt64(repo.hour["u2"][0].Cols["inc"]))
+	assert.Equal(t, int64(3), toInt64(repo.hour["u3"][0].Cols["inc"]))
+
+	// 失敗した u1 だけがバッファに戻っている。
+	c.bufMu.Lock()
+	require.Len(t, c.buffer, 1)
+	require.NotNil(t, c.buffer["u1"])
+	assert.Equal(t, int64(1), c.buffer["u1"].ints["inc"])
+	c.bufMu.Unlock()
+}
+
+// 失敗が続いてもバッファが単調増加しない。maxSaveAttempts 回で諦める。
+func TestSave_DropsGroupAfterRepeatedFailures(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	repo.failApplyDeltas = &applyDeltasFailure{group: strPtrOf("u1")}
+
+	for i := 1; i <= maxSaveAttempts; i++ {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		require.Error(t, c.Save(context.Background()))
+
+		c.bufMu.Lock()
+		if i < maxSaveAttempts {
+			require.NotNil(t, c.buffer["u1"], "attempt %d: まだ戻す", i)
+			assert.Equal(t, i, c.buffer["u1"].attempts)
+		} else {
+			assert.Empty(t, c.buffer, "attempt %d: 諦めて捨てる", i)
+		}
+		c.bufMu.Unlock()
+	}
+
+	// 諦めたあとに来た Commit は attempts がリセットされた新しいバッファに入る。
+	require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+	c.bufMu.Lock()
+	assert.Equal(t, 0, c.buffer["u1"].attempts)
+	c.bufMu.Unlock()
+}
+
+// **unique 列を持つ group が「hour は通るが day だけ恒久失敗」でも、
+// maxSaveAttempts で捨てる。** uniquesOnly が attempts を引き継がないと、
+// この経路の group は永久に retry されて unique 集合が単調増加する。
+// federation / activeUsers / perUserPv がこの形になる。
+func TestSave_DropsUniqueOnlyRequeueAfterRepeatedDayFailures(t *testing.T) {
+	// perUserPv と同じ形 (unique 列 + 素の int カウンタ)。activeUsers では
+	// int を積んでも applyDiffs が deltas から外すので、捨てた delta の検証に
+	// ならない。
+	c, repo, _ := newTestChart(t, perUserPvSchema)
+	// day 側だけを恒久的に落とす。hour は通り続ける。
+	repo.failApplyDeltas = &applyDeltasFailure{span: SpanDay}
+	buf := captureWarnings(t)
+
+	for i := 1; i <= maxSaveAttempts; i++ {
+		// unique 列と int 列の両方を積む。int は hour 適用済みで戻せないので
+		// 毎周期 notRetryable として記録され、unique だけが retry される。
+		require.NoError(t, c.Commit(Diff{
+			"upv.visitor": []string{fmt.Sprintf("u%d", i)},
+			"pv.visitor":  int64(1),
+		}, "owner"))
+		require.Error(t, c.Save(context.Background()))
+
+		c.bufMu.Lock()
+		if i < maxSaveAttempts {
+			require.NotNil(t, c.buffer["owner"], "attempt %d: まだ戻す", i)
+			assert.Equal(t, i, c.buffer["owner"].attempts)
+			assert.Empty(t, c.buffer["owner"].ints, "int は戻さない")
+		} else {
+			assert.Empty(t, c.buffer, "attempt %d: 諦めて捨てる", i)
+		}
+		c.bufMu.Unlock()
+	}
+
+	// **1 周期につき warn は 1 行。** group ごとに出すと grouped chart で
+	// distinct group 数ぶんの行が一斉に出る。
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	require.Len(t, lines, maxSaveAttempts, "1 周期 1 行")
+
+	// 最初の 2 周期は「戻せなかった int」だけ。unique は戻すので捨てた扱いに
+	// しない (記録元を uniquesOnly 前の gb に取り違えるとここが崩れる)。
+	for i := range maxSaveAttempts - 1 {
+		assert.Contains(t, lines[i], "notRetryable=1", "line %d", i)
+		assert.Contains(t, lines[i], "retryLimit=0", "line %d", i)
+		assert.Contains(t, lines[i], "intDelta=1", "line %d", i)
+		assert.Contains(t, lines[i], "uniqueKeys=0", "line %d", i)
+	}
+
+	// 最後の周期は int の破棄と retry limit の 2 レコードが 1 行に畳まれる。
+	last := lines[len(lines)-1]
+	// 1 group が 2 レコード (int の破棄 + retry limit) を出しても、group は 1。
+	assert.Contains(t, last, "groups=1", "group は distinct で数える")
+	assert.Contains(t, last, "notRetryable=1")
+	assert.Contains(t, last, "retryLimit=1")
+	assert.Contains(t, last, "intDelta=1", "捨てた int は 1 周期ぶん")
+	assert.Contains(t, last, "uniqueKeys=3", "捨てた unique は 3 周期ぶん")
+	// reason ごとに代表例が出る。
+	assert.Contains(t, last, "retryLimitExampleError=")
+	assert.Contains(t, last, "notRetryableExampleError=")
+}
+
+// 捨てたときは warn を出す。**本番ではこれが唯一の signal になりうる**ので、
+// 件数・規模・代表エラーが載っていることまで見る。
+func TestSave_WarnsWhenDroppingWork(t *testing.T) {
+	t.Run("retry limit", func(t *testing.T) {
+		c, repo, _ := newTestChart(t, perUserNotesSchema)
+		repo.failApplyDeltas = &applyDeltasFailure{group: strPtrOf("u1")}
+		for i := 1; i < maxSaveAttempts; i++ {
+			require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+			require.Error(t, c.Save(context.Background()))
+		}
+
+		buf := captureWarnings(t)
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		require.Error(t, c.Save(context.Background()))
+
+		out := buf.String()
+		assert.Contains(t, out, "dropped buffered work")
+		assert.Contains(t, out, "chart=perUserNotes")
+		assert.Contains(t, out, "groups=1")
+		assert.Contains(t, out, "retryLimit=1")
+		assert.Contains(t, out, "notRetryable=0")
+		assert.Contains(t, out, "retryLimitExampleGroup=u1")
+		assert.Contains(t, out, "poisoned group", "原因のエラーが載っている")
+		// 3 周期ぶんの delta が合算されている (列数ではない)。
+		assert.Contains(t, out, "intDelta=3", "捨てた規模が載っている")
+	})
+
+	// int だけの group が hour 適用済みで day に落ちた場合。戻すものが無いので
+	// 黙って消えていたが、instance chart (unique 列なし・day 側があふれやすい)
+	// で最も踏みやすい経路なので記録する。
+	t.Run("hour applied without uniques", func(t *testing.T) {
+		c, repo, _ := newTestChart(t, perUserNotesSchema)
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		repo.failApplyDeltas = &applyDeltasFailure{span: SpanDay}
+
+		buf := captureWarnings(t)
+		require.Error(t, c.Save(context.Background()))
+
+		out := buf.String()
+		assert.Contains(t, out, "dropped buffered work")
+		assert.Contains(t, out, "notRetryable=1")
+		assert.Contains(t, out, "notRetryableExampleGroup=u1")
+		assert.Contains(t, out, "intDelta=1")
+
+		c.bufMu.Lock()
+		assert.Empty(t, c.buffer)
+		c.bufMu.Unlock()
+	})
+
+	// 成功したときは何も出さない。
+	t.Run("no warning on success", func(t *testing.T) {
+		c, _, _ := newTestChart(t, perUserNotesSchema)
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		buf := captureWarnings(t)
+		require.NoError(t, c.Save(context.Background()))
+		assert.Empty(t, buf.String())
+	})
+
+	// 複数 group が同時に捨てられたら 1 行に畳む。grouped chart の全 group が
+	// 同じ周期で上限に達すると、group ごとに出していては distinct owner 数ぶんの
+	// 行が一斉に出る。
+	t.Run("aggregates multiple groups into one line", func(t *testing.T) {
+		c, repo, _ := newTestChart(t, perUserNotesSchema)
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u2"))
+		repo.failApplyDeltas = &applyDeltasFailure{span: SpanDay}
+
+		buf := captureWarnings(t)
+		require.Error(t, c.Save(context.Background()))
+
+		out := buf.String()
+		assert.Equal(t, 1, strings.Count(out, "dropped buffered work"))
+		assert.Contains(t, out, "groups=2")
+		assert.Contains(t, out, "intDelta=2")
+	})
+}
+
+// 成功した group の attempts は持ち越さない (バッファごと消えるため)。
+func TestSave_SuccessClearsGroup(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	repo.failApplyDeltas = &applyDeltasFailure{group: strPtrOf("u1")}
+	require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+	require.Error(t, c.Save(context.Background()))
+
+	repo.failApplyDeltas = nil
+	require.NoError(t, c.Save(context.Background()))
+
+	c.bufMu.Lock()
+	assert.Empty(t, c.buffer)
+	c.bufMu.Unlock()
+	assert.Equal(t, int64(1), toInt64(repo.hour["u1"][0].Cols["inc"]))
+}
+
+// hour が通って day で落ちた group は、int の delta を戻さない (二重計上に
+// なる)。unique 列は冪等なので戻して day を取り戻す。
+func TestSave_HourAppliedDayFailed_RequeuesUniquesOnly(t *testing.T) {
+	c, repo, _ := newTestChart(t, activeUsersSchema)
+	require.NoError(t, c.Commit(Diff{"read": []string{"u1"}, "readWrite": int64(5)}, ""))
+	// hour の ApplyDeltas は成功し、day で落ちる。
+	repo.armSkipThenError("ApplyDeltas", 1, errors.New("day boom"))
+	require.Error(t, c.Save(context.Background()))
+
+	c.bufMu.Lock()
+	require.NotNil(t, c.buffer[""])
+	assert.Equal(t, []string{"u1"}, setKeysSorted(c.buffer[""].uniques["read"]),
+		"unique 列は戻す")
+	assert.Empty(t, c.buffer[""].ints, "int の delta は戻さない (hour に二重計上される)")
+	c.bufMu.Unlock()
+
+	// 次の Save で day が追いつき、hour は変わらない。
+	require.NoError(t, c.Save(context.Background()))
+	assert.Equal(t, int64(1), toInt64(repo.hour[""][0].Cols["read"]))
+	assert.Equal(t, int64(1), toInt64(repo.day[""][0].Cols["read"]))
+}
+
+// hour が通って day で落ちた group が unique 列を持たないなら、戻すものが無い。
+func TestSave_HourAppliedDayFailed_NothingToRequeueWithoutUniques(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+	repo.armSkipThenError("ApplyDeltas", 1, errors.New("day boom"))
+	require.Error(t, c.Save(context.Background()))
+
+	c.bufMu.Lock()
+	assert.Empty(t, c.buffer, "int だけの group は戻さない")
+	c.bufMu.Unlock()
+	assert.Equal(t, int64(1), toInt64(repo.hour["u1"][0].Cols["inc"]))
+}
+
+// エラー文字列の chart/group 表記。ungrouped chart は group が空なので、
+// 区切りの "/" を出すと `federation/: ...` になって読みにくい。
+func TestSave_ErrorNamesChartAndGroup(t *testing.T) {
+	t.Run("grouped", func(t *testing.T) {
+		c, repo, _ := newTestChart(t, perUserNotesSchema)
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		repo.armError("FindCurrent", errors.New("boom"))
+		err := c.Save(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "perUserNotes/u1:")
+	})
+
+	t.Run("ungrouped", func(t *testing.T) {
+		c, repo, _ := newTestChart(t, notesSchema)
+		require.NoError(t, c.Commit(Diff{"local.inc": 1}, ""))
+		repo.armError("FindCurrent", errors.New("boom"))
+		err := c.Save(context.Background())
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "notes:")
+		assert.NotContains(t, err.Error(), "notes/:")
+	})
+}
+
+// schema に無い列 / uniqueIncrement でない列に積まれた unique キーは、
+// applyDiffs が書かないので捨てた量に数えない (int 側と同じ理由)。
+func TestDroppedWork_DoesNotCountUniquesOnNonUniqueColumns(t *testing.T) {
+	c, _, _ := newTestChart(t, twoIntColumnSchema)
+	gb := newGroupBuffer()
+	gb.addUnique("k", []string{"a", "b"}) // uniqueIncrement 列
+	gb.addUnique("up", []string{"c"})     // 素の int 列
+	gb.addUnique("bogus", []string{"d"})  // schema に無い
+
+	d := c.newDroppedWork("g", droppedReasonRetryLimit, errors.New("boom"), gb)
+	assert.Equal(t, 2, d.uniques, "書かれる列のキーだけ数える")
+}
+
+// 捨てた delta は **絶対値** で数える。減算 (dec 系の列) を素で足すと打ち消し
+// 合って「何も失っていない」ように見える。
+func TestDroppedWork_CountsAbsoluteDelta(t *testing.T) {
+	gb := newGroupBuffer()
+	gb.addInt("up", 3)
+	gb.addInt("down", -4)
+	gb.addUnique("k", []string{"a", "b"})
+
+	c, _, _ := newTestChart(t, twoIntColumnSchema)
+	all := c.newDroppedWork("g", droppedReasonRetryLimit, errors.New("boom"), gb)
+	assert.Equal(t, int64(7), all.ints, "3 + |-4|")
+	assert.Equal(t, 2, all.uniques)
+
+	// int だけを数える版は unique を含めない。
+	ints, ok := c.newDroppedIntWork("g", errors.New("boom"), gb)
+	require.True(t, ok)
+	assert.Equal(t, int64(7), ints.ints)
+	assert.Equal(t, 0, ints.uniques)
+	assert.Equal(t, droppedReasonNotRetryable, ints.reason)
+
+	// **同じ列**で相殺して 0 になったら記録しない (intDelta=0 の警告行を
+	// 出さない)。別の列どうしは絶対値で足すので相殺しない。
+	cancelled := newGroupBuffer()
+	cancelled.addInt("x", 1)
+	cancelled.addInt("x", -1)
+	require.Equal(t, int64(0), cancelled.ints["x"])
+	_, ok = c.newDroppedIntWork("g", errors.New("boom"), cancelled)
+	assert.False(t, ok, "delta が相殺したら警告しない")
+}
+
+// reason ごとの代表例は **最初に見たもの** を採る。group はソート済みなので
+// 最小の group で決定的になる。last-wins にすると実行ごとに変わりはしないが、
+// どの group が代表なのかが読む人に予測できなくなる。
+func TestWarnDropped_ExampleIsFirstSeenPerReason(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	for _, g := range []string{"u1", "u2", "u3"} {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, g))
+	}
+	// 全 group を retry limit まで進める。
+	repo.failApplyDeltas = &applyDeltasFailure{}
+	for i := 1; i < maxSaveAttempts; i++ {
+		require.Error(t, c.Save(context.Background()))
+		for _, g := range []string{"u1", "u2", "u3"} {
+			require.NoError(t, c.Commit(Diff{"inc": 1}, g))
+		}
+	}
+
+	buf := captureWarnings(t)
+	require.Error(t, c.Save(context.Background()))
+
+	out := buf.String()
+	assert.Contains(t, out, "groups=3")
+	assert.Contains(t, out, "retryLimitExampleGroup=u1", "ソート順で最初の group")
+}
+
+// 返すエラーは有界にする。DB 全断だと失敗 group 数がそのまま件数になり、
+// perUserPv のように group 数が distinct owner 数まで伸びる chart では
+// エラー文字列だけで数百 KB になる。slog の TextHandler は改行をエスケープ
+// するので 1 物理行に収まってしまい、読みたい代表例が埋もれる。
+func TestSave_BoundsReportedGroupErrors(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	const groups = maxReportedGroupErrors + 7
+	for i := range groups {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, fmt.Sprintf("u%02d", i)))
+	}
+	repo.failApplyDeltas = &applyDeltasFailure{}
+
+	err := c.Save(context.Background())
+	require.Error(t, err)
+	msg := err.Error()
+	// 代表例は maxReportedGroupErrors 件まで。
+	assert.Equal(t, maxReportedGroupErrors, strings.Count(msg, "poisoned group"))
+	assert.Contains(t, msg, fmt.Sprintf("and %d more group(s) failed", groups-maxReportedGroupErrors))
+	// 捨てた件数は warn 側が持つので、エラーの伸びは頭打ちで足りる。
+	assert.Less(t, len(msg), 2000)
+}
+
+// 件数がちょうど上限なら "and N more" は出さない (境界)。
+func TestSave_DoesNotAnnotateAtExactlyTheLimit(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	for i := range maxReportedGroupErrors {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, fmt.Sprintf("u%02d", i)))
+	}
+	repo.failApplyDeltas = &applyDeltasFailure{}
+
+	err := c.Save(context.Background())
+	require.Error(t, err)
+	assert.Equal(t, maxReportedGroupErrors, strings.Count(err.Error(), "poisoned group"))
+	assert.NotContains(t, err.Error(), "more group(s) failed")
+}
+
+// 件数が上限以下なら "and N more" は出さない。
+func TestSave_DoesNotAnnotateWhenUnderLimit(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+	require.NoError(t, c.Commit(Diff{"inc": 1}, "u2"))
+	repo.failApplyDeltas = &applyDeltasFailure{}
+
+	err := c.Save(context.Background())
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "more group(s) failed")
+}
+
+// 複数 group が失敗したら、全部のエラーを束ねて返す。
+func TestSave_AggregatesErrorsFromAllGroups(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+	require.NoError(t, c.Commit(Diff{"inc": 2}, "u2"))
+	repo.armError("FindCurrent", errors.New("boom1"))
+	repo.armError("FindCurrent", errors.New("boom2"))
+
+	err := c.Save(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "u1")
+	assert.Contains(t, err.Error(), "u2")
+}
+
+// Save 中に走った Commit が同じ group のバッファを作り直していても、戻す側は
+// 上書きせずマージする。
+func TestRequeueFailed_MergesIntoLiveBuffer(t *testing.T) {
+	c, _, _ := newTestChart(t, perUserNotesSchema)
+	require.NoError(t, c.Commit(Diff{"inc": 5}, "u1"))
+
+	stale := newGroupBuffer()
+	stale.addInt("inc", 3)
+	assert.Empty(t, c.requeueFailed("u1", stale, saveNothingApplied, errors.New("boom")))
+
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	assert.Equal(t, int64(8), c.buffer["u1"].ints["inc"])
+	assert.Equal(t, 1, c.buffer["u1"].attempts, "attempts は大きい方を引き継ぐ")
+}
+
+func TestGroupBuffer_MergeFrom(t *testing.T) {
+	dst := newGroupBuffer()
+	dst.addInt("n", 2)
+	dst.addUnique("k", []string{"a"})
+
+	src := newGroupBuffer()
+	src.addInt("n", 3)
+	src.addInt("m", 1)
+	src.addUnique("k", []string{"b"})
+	src.addUnique("j", []string{"c"})
+
+	dst.mergeFrom(src)
+
+	assert.Equal(t, int64(5), dst.ints["n"])
+	assert.Equal(t, int64(1), dst.ints["m"])
+	assert.Equal(t, []string{"a", "b"}, setKeysSorted(dst.uniques["k"]))
+	assert.Equal(t, []string{"c"}, setKeysSorted(dst.uniques["j"]))
+}
+
+// unique 列を 1 つも持たない側へ unique 付きのバッファを merge する。
+// uniquesOnly を戻したときに実際に踏む経路。
+func TestGroupBuffer_MergeFromIntoBufferWithoutUniques(t *testing.T) {
+	dst := newGroupBuffer()
+	dst.addInt("n", 1)
+
+	src := newGroupBuffer()
+	src.addUnique("k", []string{"a", "b"})
+
+	dst.mergeFrom(src)
+	assert.Equal(t, []string{"a", "b"}, setKeysSorted(dst.uniques["k"]))
+}
+
+func TestGroupBuffer_MergeFromSkipsEmptySet(t *testing.T) {
+	dst := newGroupBuffer()
+	src := newGroupBuffer()
+	src.uniques = map[string]map[string]struct{}{"k": {}}
+	dst.mergeFrom(src)
+	assert.Empty(t, dst.uniques["k"])
+}
+
+// Save 中に走った Commit が unique 列を積んでいた group を、hour だけ通った
+// 状態から戻す。uniquesOnly の中身が既存のバッファへマージされる。
+func TestRequeueFailed_MergesUniquesIntoLiveBuffer(t *testing.T) {
+	c, _, _ := newTestChart(t, perUserPvSchema)
+	require.NoError(t, c.Commit(Diff{"upv.visitor": []string{"new"}}, "owner"))
+
+	stale := newGroupBuffer()
+	stale.addInt("pv.visitor", 9)
+	stale.addUnique("upv.visitor", []string{"old"})
+	dropped := c.requeueFailed("owner", stale, saveHourApplied, errors.New("boom"))
+	require.Len(t, dropped, 1, "戻せない int を記録する")
+	assert.Equal(t, droppedReasonNotRetryable, dropped[0].reason)
+	assert.Equal(t, int64(9), dropped[0].ints)
+
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	assert.Equal(t, []string{"new", "old"}, setKeysSorted(c.buffer["owner"].uniques["upv.visitor"]))
+	assert.Empty(t, c.buffer["owner"].ints, "hour 適用済みなので int は戻さない")
+}
+
+// uniqueIncrement / intersection 列に積まれた int は applyDiffs が deltas から
+// 外すので、そもそも書かれない。「捨てた量」として数えると過大報告になる。
+func TestRequeueFailed_DoesNotCountIntsOnNonDeltaColumns(t *testing.T) {
+	c, _, _ := newTestChart(t, activeUsersSchema)
+
+	stale := newGroupBuffer()
+	stale.addInt("readWrite", 9) // intersection 列
+	stale.addInt("read", 9)      // uniqueIncrement 列
+	stale.addUnique("read", []string{"u1"})
+
+	dropped := c.requeueFailed("", stale, saveHourApplied, errors.New("boom"))
+	assert.Empty(t, dropped, "書かれない delta は捨てた量に数えない")
 }
 
 func TestSave_NoBuffer(t *testing.T) {
@@ -1065,9 +1580,14 @@ func TestSave_DayClaimErrorBubbles(t *testing.T) {
 	// Hour claim's Insert succeeds (1st queued nil), day claim's
 	// Insert fails. This exercises the "claim day" error branch.
 	repo.armSkipThenError("Insert", 1, errors.New("day insert boom"))
-	if err := c.Save(context.Background()); err == nil {
-		t.Fatal("expected error from day Insert")
-	}
+	require.Error(t, c.Save(context.Background()))
+
+	// claim の段階では 1 行も書いていないので、int の delta ごと戻る。
+	// ここを saveHourApplied として扱うと delta が黙って消える。
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+	require.NotNil(t, c.buffer[""])
+	assert.Equal(t, int64(1), c.buffer[""].ints["local.inc"])
 }
 
 func TestSave_DayApplyDeltasErrorBubbles(t *testing.T) {
@@ -1264,7 +1784,9 @@ func TestApplyDiffs_UniqueAppendsFilteredPerSpanSortedAndOmittedWhenEmpty(t *tes
 	gb := newGroupBuffer()
 	gb.addUnique("read", []string{"u3", "u1", "u2"})
 	gb.addUnique("write", []string{"w1"}) // 両 span とも行が既に持っている
-	require.NoError(t, c.applyDiffs(context.Background(), hour, day, gb))
+	outcome, err := c.applyDiffs(context.Background(), hour, day, gb)
+	require.NoError(t, err)
+	assert.Equal(t, saveAllApplied, outcome)
 
 	require.Len(t, repo.calls, 2)
 	assert.Equal(t, SpanHour, repo.calls[0].span)
@@ -1293,7 +1815,9 @@ func TestApplyDiffs_IntersectionColumnInDiffSkipped(t *testing.T) {
 	repo.day[""] = []*Row{day}
 	gb := newGroupBuffer()
 	gb.addInt("readWrite", 99)
-	require.NoError(t, c.applyDiffs(context.Background(), hour, day, gb))
+	outcome, err := c.applyDiffs(context.Background(), hour, day, gb)
+	require.NoError(t, err)
+	assert.Equal(t, saveAllApplied, outcome)
 	// intersection 列は delta として書かず、bake した絶対値だけを SET する。
 	assert.Equal(t, int64(0), toInt64(hour.Cols["readWrite"]))
 }
@@ -1309,7 +1833,9 @@ func TestApplyDiffs_UniqueIncrementSkipsEmptySet(t *testing.T) {
 	repo.day[""] = []*Row{day}
 	gb := newGroupBuffer()
 	gb.addInt("read", 1) // uniqueIncrement 列だが int なので appends には出ない
-	require.NoError(t, c.applyDiffs(context.Background(), hour, day, gb))
+	outcome, err := c.applyDiffs(context.Background(), hour, day, gb)
+	require.NoError(t, err)
+	assert.Equal(t, saveAllApplied, outcome)
 	_, ok := hour.Cols["read:unique"]
 	assert.False(t, ok, "空集合では array_cat を発行しない")
 }

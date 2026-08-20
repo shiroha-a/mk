@@ -34,9 +34,13 @@ func NewManagementService(charts []*Chart, interval time.Duration) *ManagementSe
 	}
 }
 
-// SetLogger installs a printf-style logger for save errors. Defaults to
-// a no-op so library users can opt out of logging.
-func (m *ManagementService) SetLogger(fn func(format string, args ...any)) {
+// SetLogger installs a structured logger for save errors. Defaults to a no-op
+// so library users can opt out of logging.
+//
+// 引数は slog.Logger.Warn と同じ (message + key/value)。printf 形式にすると
+// chart 名がメッセージ本文に埋もれてフィルタできず、呼び出し側で
+// fmt.Sprintf する shim が要る。
+func (m *ManagementService) SetLogger(fn func(msg string, args ...any)) {
 	if fn != nil {
 		m.logger = fn
 	}
@@ -70,26 +74,47 @@ func (m *ManagementService) Stop(ctx context.Context) {
 		cancel()
 	}
 	m.wg.Wait()
-	// 終了時にも一度 Save する (本家の dispose と同じ)
+	// 終了時にも一度 Save する (本家の dispose と同じ)。
+	// エラーの中身は SaveAll が chart ごとに出しているので、ここでは
+	// 「最後の Save だった」ことだけ足す (同じ文字列を 2 度出さない)。
 	if err := m.SaveAll(ctx); err != nil {
-		m.logger("chart: final save failed: %v", err)
+		// 終了時の失敗は次の周期が無いぶん恒久的なので、バッファに残ったまま
+		// 失われる規模を添える。warn が出るのは retry limit / not retryable に
+		// 該当した group だけで、残っているものは黙って消えるため。
+		m.logger("chart: final save reported errors",
+			"phase", "shutdown", "unsavedGroups", m.bufferedGroups())
 	}
 }
 
 // SaveAll iterates the registered charts and calls Save() on each.
-// Errors are logged and accumulated; the first error is returned so
-// callers can decide whether to retry.
+// Errors are logged here and the first one is returned as a signal that
+// something failed. **呼び出し側は retry しない** (Chart.Save が失敗した group を
+// 自分でバッファへ戻し、次の周期で再試行する)。戻り値は「失敗したか」の判定
+// だけに使う。
+//
+// **ここが唯一エラーの中身を出す場所。** 呼び出し側は戻り値を再ログしない
+// (同じ文字列が 2 本になる)。Chart.Save が返すエラーは失敗 group 数ぶんに
+// 伸びうるので、Save 側で件数を打ち切っている (maxReportedGroupErrors)。
 func (m *ManagementService) SaveAll(ctx context.Context) error {
 	var firstErr error
 	for _, c := range m.charts {
 		if err := c.Save(ctx); err != nil {
-			m.logger("chart: save %s failed: %v", c.Name(), err)
+			m.logger("chart: save failed", "chart", c.Name(), "err", err)
 			if firstErr == nil {
 				firstErr = err
 			}
 		}
 	}
 	return firstErr
+}
+
+// bufferedGroups sums the still-unsaved groups across the registered charts.
+func (m *ManagementService) bufferedGroups() int {
+	total := 0
+	for _, c := range m.charts {
+		total += c.BufferedGroups()
+	}
+	return total
 }
 
 func (m *ManagementService) loop(ctx context.Context) {
@@ -101,9 +126,8 @@ func (m *ManagementService) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-tick.C:
-			if err := m.SaveAll(ctx); err != nil {
-				m.logger("chart: periodic save failed: %v", err)
-			}
+			// 中身は SaveAll が chart ごとに出しているので再ログしない。
+			_ = m.SaveAll(ctx)
 		}
 	}
 }

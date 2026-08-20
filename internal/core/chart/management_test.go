@@ -3,6 +3,7 @@ package chart
 import (
 	"context"
 	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -62,15 +63,57 @@ func TestManagementService_SaveAllReturnsFirstError(t *testing.T) {
 	repoA.armError("FindCurrent", errors.New("a fail"))
 	require.NoError(t, a.Commit(Diff{"v": 1}, ""))
 
-	captured := make([]string, 0)
+	type logLine struct {
+		msg  string
+		args []any
+	}
+	captured := make([]logLine, 0)
 	m := NewManagementService([]*Chart{a}, time.Minute)
-	m.SetLogger(func(format string, args ...any) {
-		captured = append(captured, format)
+	m.SetLogger(func(msg string, args ...any) {
+		captured = append(captured, logLine{msg: msg, args: args})
 	})
 	if err := m.SaveAll(context.Background()); err == nil {
 		t.Fatal("expected error")
 	}
-	assert.NotEmpty(t, captured)
+	require.Len(t, captured, 1)
+	// chart 名は key/value で出す。メッセージ本文に埋めるとフィルタできない。
+	assert.Equal(t, "chart: save failed", captured[0].msg)
+	assert.Contains(t, captured[0].args, "chart")
+	assert.Contains(t, captured[0].args, "a")
+	// **原因を運ぶのはこの属性だけ。** 落とすと本番で「どの chart が失敗した
+	// か」しか分からなくなる。
+	assert.Contains(t, captured[0].args, "err")
+	var errArg error
+	for i := 0; i+1 < len(captured[0].args); i += 2 {
+		if captured[0].args[i] == "err" {
+			errArg, _ = captured[0].args[i+1].(error)
+		}
+	}
+	require.NotNil(t, errArg)
+	assert.Contains(t, errArg.Error(), "a fail")
+}
+
+// SaveAll が chart ごとに中身を出すので、呼び出し側は戻り値を再ログしない。
+// 再ログすると、失敗 group 数ぶんに伸びた同じ文字列が 2 本出る。
+func TestManagementService_DoesNotDoubleLogSaveErrors(t *testing.T) {
+	c := makeChart(t, "dup")
+	repo := c.repo.(*fakeRepo)
+	repo.armError("FindCurrent", errors.New("boom"))
+	require.NoError(t, c.Commit(Diff{"v": 1}, ""))
+
+	var msgs []string
+	m := NewManagementService([]*Chart{c}, 2*time.Millisecond)
+	m.SetLogger(func(msg string, args ...any) { msgs = append(msgs, msg) })
+	require.NoError(t, m.Start(context.Background()))
+	time.Sleep(15 * time.Millisecond)
+	m.Stop(context.Background())
+
+	// エラーの中身を出すのは "chart: save failed" だけ。
+	for _, msg := range msgs {
+		assert.NotContains(t, msg, "periodic save failed",
+			"loop は SaveAll の戻り値を再ログしない")
+	}
+	assert.Contains(t, msgs, "chart: save failed")
 }
 
 func TestManagementService_StartStopFlushes(t *testing.T) {
@@ -125,14 +168,38 @@ func TestManagementService_StopFinalSaveErrorIsLogged(t *testing.T) {
 	// Arm the FindCurrent error so the *final* SaveAll inside Stop fails.
 	repo.armError("FindCurrent", errors.New("stop boom"))
 
-	logged := atomic.Int32{}
+	var mu sync.Mutex
+	var msgs []string
+	var shutdownArgs []any
 	m := NewManagementService([]*Chart{c}, 24*time.Hour)
-	m.SetLogger(func(string, ...any) { logged.Add(1) })
+	m.SetLogger(func(msg string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		msgs = append(msgs, msg)
+		if msg == "chart: final save reported errors" {
+			shutdownArgs = args
+		}
+	})
 	require.NoError(t, m.Start(context.Background()))
 	m.Stop(context.Background())
-	if logged.Load() == 0 {
-		t.Fatal("expected final save error to be logged from Stop")
+
+	mu.Lock()
+	defer mu.Unlock()
+	// SaveAll の詳細行に加えて、Stop 由来の marker が出る。marker が無いと
+	// 「最後の Save だった」= 次の周期が無いことが読み取れない。
+	assert.Contains(t, msgs, "chart: save failed")
+	require.Contains(t, msgs, "chart: final save reported errors")
+	assert.Contains(t, shutdownArgs, "phase")
+	assert.Contains(t, shutdownArgs, "shutdown")
+	// 終了時に残っていた group 数も出す。**値まで見る** — キーの存在だけだと
+	// 常に 0 を返す実装でも通る。
+	var unsaved any
+	for i := 0; i+1 < len(shutdownArgs); i += 2 {
+		if shutdownArgs[i] == "unsavedGroups" {
+			unsaved = shutdownArgs[i+1]
+		}
 	}
+	assert.Equal(t, 1, unsaved, "戻された group が 1 つ残っている")
 }
 
 func TestManagementService_LoopErrorIsLogged(t *testing.T) {

@@ -999,6 +999,9 @@ func (s *Server) setupRoutes() {
 		chartCharts.PerUserPv,
 		chartCharts.PerUserReaction,
 	}, 0)
+	// Save の集約エラーを slog に出す。既定は no-op なので、配線しないと
+	// 「どの group が書けなかったか」が本番でどこにも残らない (#2651)。
+	chartMgmt.SetLogger(slog.Warn)
 	s.setChartManagement(chartMgmt)
 	chartHooks := charthook.New(charthook.Config{
 		Notes:            chartCharts.Notes,
