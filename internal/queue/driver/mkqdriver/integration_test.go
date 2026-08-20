@@ -1753,15 +1753,17 @@ func TestServer_RateLimit_IsPerQueueNotPerWorker(t *testing.T) {
 		require.NoError(t, d.Close())
 	}
 
-	// 12 job を 4/sec なら約 2 秒。per-Worker なら worker 16 では 64/sec に
-	// なるので 1 秒を切る。**flaky を避けるため下限だけを見る。**
-	perSec := float64(jobs) / float64(rate)
-	floor := time.Duration(perSec * 0.6 * float64(time.Second))
+	// 12 job を 4/sec なら**約 2 秒**。最初の窓の 4 件は即時に流れるので
+	// (jobs/rate - 1) 秒が目安で、jobs/rate = 3 秒ではない。per-Worker なら
+	// worker 16 では 64/sec になり 0.1 秒を切る (実測 20ms)。
+	// **flaky を避けるため下限だけを見る。** elapsed は負荷で伸びる方向にしか
+	// 動かないので、下限割れは per-Worker 化の兆候に限られる。
+	floor := time.Duration(float64(jobs-rate) / float64(rate) * 0.8 * float64(time.Second))
 	for workers, d := range elapsed {
 		assert.GreaterOrEqual(t, d, floor,
 			"worker=%d: %s で drain した。per-queue のリミッタなら worker 数によらず "+
-				"約 %ds かかるはずで、これより速いのは per-Worker になっている兆候",
-			workers, d, jobs/rate)
+				"%s は超えるはずで、これより速いのは per-Worker になっている兆候",
+			workers, d, floor)
 	}
 	t.Logf("worker=1: %s / worker=16: %s (per-queue なら同程度)", elapsed[1], elapsed[16])
 }

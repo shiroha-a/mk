@@ -99,8 +99,9 @@ func TestApplyClientPolicies_NoOpForZero(t *testing.T) {
 
 // recordingDriverClient is a minimal driver.Client implementation that
 // captures the last Enqueue call's options. server _test 内に持つ用途は
-// applyClientPolicies が 5 queue 全てに Policy を伝搬するのを enqueue
-// 経由で観測すること (queue.Client.policyFor が unexported のため)。
+// applyClientPolicies が対象 queue (maintenance を除く 7 つ) に Policy を
+// 伝搬するのを enqueue 経由で観測すること (queue.Client.policyFor が
+// unexported のため)。
 type recordingDriverClient struct {
 	lastTaskType string
 	lastOpts     driver.EnqueueOptions

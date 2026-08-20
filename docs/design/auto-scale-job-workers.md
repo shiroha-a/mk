@@ -308,7 +308,7 @@ mkqdriver.Server
  │
  └─ Resize(queue, n) error:
      - n > activeCount: 不足分の mkq.Worker を新規起動 (WithConcurrency(1))
-     - n < activeCount: 余剰 Worker に Close を呼ぶ。**in-flight job の完了は待たない** — ctx が切れて cancel され、next pickup で retry される (`TestServer_ResizeDown_CancelsInFlight`)
+     - n < activeCount: 余剰 Worker に `Stop(ctx)` を呼ぶ。**in-flight job の完了は待たない** — ctx が切れて cancel され、next pickup で retry される (`TestServer_ResizeDown_CancelsInFlight`)
      - n == activeCount: no-op
 ```
 

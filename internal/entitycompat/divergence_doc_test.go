@@ -30,7 +30,7 @@ import (
 //
 // §1-1 は実 schema にあたるものが無いので、当初は内部整合しか見ていなかった。
 // **3 つが揃って同じだけ間違っていることがある**ので、それだけでは足りない —
-// 実際に §1-1 は 53 と言い続け、生成物の docs/api-compat.md は 58 だった (#2640)。
+// develop では §1-1 が 53、生成物の docs/api-compat.md が 49、真値が 58 だった (#2640)。
 //
 // upstream の endpoint 一覧を tools/apicompat から直接引くことはできない
 // (**test-shards job は submodule を checkout しない**。.github/workflows/ci.yml で
@@ -443,10 +443,11 @@ var forkTagRowRe = regexp.MustCompile("^\\| `[0-9.]+-mk\\.(\\d+)` \\|")
 // TestDivergenceDoc_EndpointCountMatchesAPICompat ties §1-1 to the generated
 // matrix. TestDivergenceDoc_EndpointCountMatchesTable only checks that the
 // heading, the table and the summary agree **with each other**, so all three
-// can be wrong together — and they were: §1-1 said 53 while the matrix said 58
-// (`admin/server-plugins` / `admin/server-metrics` / `admin/self-check` /
-// `admin/federation/{delivery,inbox}-health` were missing from every one of
-// them, #2640).
+// can be wrong together — and they were: on develop §1-1 said 53 while the
+// (stale) matrix said 49 and the true count was 58. §1-1 の内訳表に数えられて
+// いなかったのは `admin/server-plugins` / `admin/server-metrics` /
+// `admin/self-check` / `admin/federation/{delivery,inbox}-health` の 5 件で、
+// **うち 4 件は生成物の側には載っていた** (= 突き合わせていれば気付けた、#2640)。
 //
 // docs/api-compat.md は `make apicompat` が生成して commit されているので、
 // **submodule を checkout しない test-shards job からでも読める**。upstream の

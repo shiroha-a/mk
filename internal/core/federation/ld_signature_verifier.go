@@ -19,9 +19,10 @@ import (
 //   - signature 有り + verify pass → nil
 //   - signature 有り + verify fail → error (caller は activity を drop する)
 //
-// upstream Misskey TS 2026.5.4 の InboxProcessorService.process が
+// upstream Misskey TS 2026.5.4 の InboxProcessorService.process は
 // `compact → checkForForbiddenDirectives → freeze → verifyRsaSignature2017`
-// の sequence を全 inbound activity に適用するのと同 semantics を提供する。
+// の sequence を全 inbound activity に適用する。**mk-go は compact を呼ばない**
+// (#2106 L49、下の CheckForForbiddenDirectives 呼び出し前のコメント参照)。
 // canonicalize 中の SSRF / cache amplification / spoofing 攻撃は ld.Processor
 // 側の hardening (forbidden directives / cache cap / freeze) で遮断する。
 type LDSignatureVerifier struct {

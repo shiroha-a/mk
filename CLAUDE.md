@@ -82,7 +82,7 @@
 │   ├── pluginstore/        # プラグインごとの専用 PostgreSQL schema (#2481)
 │   ├── safehttp/           # 外向きHTTPの共通ヘルパー（SSRFガード等）
 │   ├── charttick/          # チャートの絶対時刻を再導出する TickFunc 群
-│   ├── maintenance/        # SQL migration として書けない後始末バッチ（起動時に走る）
+│   ├── maintenance/        # SQL migration として書けない後始末バッチ（`cmd/` の CLI から手動で回す）
 │   ├── frontendutil/       # 同梱フロントエンドの資産配信ヘルパー
 │   ├── pgarray/            # database/sql 用の PostgreSQL 配列型
 │   ├── sentry/             # sentry-go の配線

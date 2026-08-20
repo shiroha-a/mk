@@ -140,8 +140,8 @@ func TestClient_EnqueueDeliver_PolicyZeroKeepCompletedSkipped(t *testing.T) {
 }
 
 // TestClient_EnqueueExport_PolicyApplied: export queue (= TS の dbQueue
-// 相当) でも Policy が適用される (#1193 で applyClientPolicies が 5 queue
-// 全てに広がった)。
+// 相当) でも Policy が適用される (#1193 で applyClientPolicies が deliver /
+// inbox 以外にも広がった。現在は maintenance を除く 7 queue が対象)。
 func TestClient_EnqueueExport_PolicyApplied(t *testing.T) {
 	rec := &recordingDriverClient{}
 	c := queue.NewClient(&stubDriver{client: rec})

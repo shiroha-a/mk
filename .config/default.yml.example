@@ -294,8 +294,8 @@ id: 'aidx'
 # acts as the global pool size there and the other two are no-ops.
 # The mkq driver runs one pool per queue and treats each key as that
 # queue's own worker count, defaulting to deliver=16, inbox=16,
-# relationship=4. asynq has no per-queue default -- its shared pool is
-# whatever deliverJobConcurrency says. NOTE: the sample values below
+# relationship=4. asynq has no per-queue split -- its shared pool is
+# whatever deliverJobConcurrency says, defaulting to 16. NOTE: the values below
 # are upstream Misskey's, not mk-go's (see docs/configuration.md).
 #deliverJobConcurrency: 128
 #inboxJobConcurrency: 16

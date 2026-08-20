@@ -234,7 +234,7 @@ Playwright spec (#744) を **289 ファイル / 39 directory** に育て、PR �
 
 - **公開サインアップのメール認証** — `emailRequiredForSignup` 有効時の pending user → 確認メール → promote まで実装済み。**SMTP を配線していないと確認メールが飛ばず、登録が完了できない**。`email` 設定を入れるか、`emailRequiredForSignup` を無効にすること
 - **サーバーマシン統計** — `enableServerMachineStats` 有効時に gopsutil で CPU / メモリ / ディスク / ネットワークを 2 秒間隔で収集する。**コンテナで動かしている場合、既定では host の値が返る** (gopsutil は cgroup の制限値ではなくホストを見る)。コンテナに割り当てたリソースを見たい場合は別途 cgroup を読む必要がある
-- **search backend** — `notes/search` の provider は `fulltextSearch.provider` で切替。既定 `sqlLike` で **Meilisearch 不要のまま動く** (PostgreSQL `ILIKE` fallback)。upstream TS strict-mode (400 UNAVAILABLE) で揃えたい operator は `provider: "none"` を opt-in で選べる (#877)。Meilisearch / pgroonga は optional
+- **search backend** — `notes/search` の provider は `fulltextSearch.provider` で切替。既定 `sqlLike` で **Meilisearch 不要のまま動く** (`lower(text) LIKE` による部分一致。**ILIKE ではない** — pg_bigm の GIN index が効かなくなるため)。upstream TS strict-mode (400 UNAVAILABLE) で揃えたい operator は `provider: "none"` を opt-in で選べる (#877)。Meilisearch / pgroonga は optional
 - **upstream 2026.7.0 まで追従済** — 2026.3.2 → 2026.5.1 → 2026.5.4 → 2026.6.0 → 2026.7.0 と段階的に追従した。各 release の差分は [docs/update/](update/) を参照 (`<yyyymm><nn>diff.md`)
 
 差分の網羅的な一覧は [divergence.md](divergence.md) を参照。

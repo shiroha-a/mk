@@ -28,9 +28,14 @@ import (
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
 
-// Standard queue label set covering all 5 queues defined in queue/queue.go.
-// Used so metric collectors return zero-valued series for unseen queues at
-// startup (Prometheus convention: zero-init avoids "no data" gaps in graphs).
+// Queue labels that get a zero-valued series at startup (Prometheus
+// convention: zero-init avoids "no data" gaps in graphs).
+//
+// **これは全 queue ではない。** mk-go は 8 queue ある (`queue.go` の 7 +
+// `scheduler.go` の maintenance) が、後から足した relationship (#2403) /
+// objectStorage (#2325) / maintenance はここに入っていないので、最初の
+// ジョブが流れるまで系列が出ない。**表示の問題だけ**で集計は正しい。
+// 揃えるなら metric の系列が増えるので、ダッシュボードの確認とセットで。
 var standardQueues = []string{"deliver", "inbox", "export", "push", "webhook"}
 
 // Metrics bundles every Prometheus collector owned by the queue subsystem.
