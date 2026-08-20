@@ -23,11 +23,15 @@ type fakeRepo struct {
 	// armError() to push an error and skipFirstError() to skip a call
 	// before failing the next one.
 	errOn map[string][]error
-	// calls records the deltas / setInts of every ApplyDeltas invocation in
-	// order. どちらも toColumnName() の同じ列に展開されるので、キーが重なると
-	// PostgreSQL が 42601 (multiple assignments to same column) で落ちる。
-	// fakeRepo はマップを順に適用するだけでその衝突を再現しないため、
-	// 不変条件はテスト側で見る (uniqueAppends は別列なので記録しない)。
+	// calls records the arguments of every ApplyDeltas invocation in order.
+	//
+	// deltas と setInts はどちらも toColumnName() の同じ列に展開されるので、
+	// キーが重なると PostgreSQL が 42601 (multiple assignments to same column)
+	// で落ちる。fakeRepo はマップを順に適用するだけでその衝突を再現しないため、
+	// 不変条件はテスト側で見る。
+	//
+	// appends は span ごとに行の既存要素で filter した結果 (#2652) を確かめる
+	// ために記録する。適用後の行を見るだけでは「何を送ったか」が分からない。
 	calls []applyDeltasCall
 	// groupOrder records the group of every SpanHour FindCurrent, before the
 	// armed-error check, so tests can assert the processing order. Save
@@ -41,6 +45,7 @@ type fakeRepo struct {
 type applyDeltasCall struct {
 	span    Span
 	deltas  map[string]int64
+	appends map[string][]string
 	setInts map[string]int64
 }
 
@@ -185,6 +190,7 @@ func (r *fakeRepo) ApplyDeltas(_ context.Context, span Span, id int64, deltas ma
 	r.calls = append(r.calls, applyDeltasCall{
 		span:    span,
 		deltas:  maps.Clone(deltas),
+		appends: maps.Clone(uniqueAppends),
 		setInts: maps.Clone(setInts),
 	})
 	if err := r.errIfArmed("ApplyDeltas"); err != nil {

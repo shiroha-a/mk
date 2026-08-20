@@ -1,9 +1,14 @@
 package chart
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"sort"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,6 +47,17 @@ var perUserNotesSchema = Schema{
 		{Name: "total", Accumulate: true},
 		{Name: "inc"},
 	},
+}
+
+// setKeysSorted returns a set's members in a deterministic order. Only used by
+// tests that assert on buffer contents.
+func setKeysSorted(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func newTestChart(t *testing.T, schema Schema) (*Chart, *fakeRepo, *fakeClock) {
@@ -144,7 +160,7 @@ func TestCommit_UniqueBufferBoundedByDistinctKeys(t *testing.T) {
 
 	c.bufMu.Lock()
 	require.Len(t, c.buffer, 1)
-	assert.Equal(t, []string{"u1", "u2"}, sortedSetKeys(c.buffer[""].uniques["read"]))
+	assert.Equal(t, []string{"u1", "u2"}, setKeysSorted(c.buffer[""].uniques["read"]))
 	c.bufMu.Unlock()
 
 	require.NoError(t, c.Save(context.Background()))
@@ -693,6 +709,83 @@ func TestSave_SecondClaimErrorBubbles(t *testing.T) {
 	}
 }
 
+// rowUniqueIndex.set が返す map は **共有**。bake は intersection のループで
+// 結果を破壊的に絞り込むので、必ず clone してから使わなければならない。
+//
+// 同じ unique 列を参照する intersection 列が 2 本あると、共有 map を返した
+// 場合に 1 本目の絞り込みが 2 本目に漏れて濃度が過小になる。activeUsers は
+// intersection が 1 本しかなくこの形にならないので、専用の schema で試す。
+func TestBakeUniqueAndIntersection_DoesNotMutateSharedRowSet(t *testing.T) {
+	schema := Schema{
+		Name: "twoIntersections",
+		Columns: []ColumnDef{
+			{Name: "a", UniqueIncrement: true},
+			{Name: "b", UniqueIncrement: true},
+			{Name: "c", UniqueIncrement: true},
+			{Name: "ab", IntersectionOf: []string{"a", "b"}},
+			{Name: "ac", IntersectionOf: []string{"a", "c"}},
+		},
+	}
+	row := &Row{Cols: map[string]any{
+		"a:unique": []string{"u1", "u2", "u3", "u4"},
+		"b:unique": []string{"u1"},
+		"c:unique": []string{"u2"},
+	}}
+	idx := newRowUniqueIndex(row)
+	before := len(idx.set("a"))
+
+	got := bakeUniqueAndIntersection(schema, idx, newGroupBuffer())
+
+	// ab = {u1..u4} ∩ {u1} = {u1}、ac = {u1..u4} ∩ {u2} = {u2}。
+	// 共有 map を絞り込んでいると ac が (a∩b)∩c = {} になって 0 に落ちる。
+	assert.Equal(t, int64(1), got["ab"])
+	assert.Equal(t, int64(1), got["ac"], "1 本目の intersection が 2 本目に漏れていない")
+	assert.Equal(t, before, len(idx.set("a")), "共有の集合を書き換えていない")
+}
+
+// bake するのは **この window に差分があった unique 列だけ** (upstream core.ts の
+// `Object.entries(finalDiffs)`)。intersection 列は差分の有無によらず毎回 SET する
+// (upstream も `Object.entries(this.schema)` を回す)。
+//
+// row 側の集合が正しく読めていれば、差分の無い列を bake し直しても同じ値になる
+// ので観測できる差は出ない。差が出るのは **行の unique-temp 配列が空なのに
+// 濃度列に値がある** ときで、Clean() が古い行の配列をリセットした後がそれに
+// あたる。現状 Save は現在バケットしか触らないので到達しないが、upstream と
+// 同じ範囲に揃えておく。
+func TestBakeUniqueAndIntersection_OnlyBakesColumnsWithDiff(t *testing.T) {
+	row := &Row{Cols: map[string]any{
+		"read:unique":  []string{"u1", "u2"},
+		"write:unique": []string{"u1"},
+	}}
+	gb := newGroupBuffer()
+	gb.addUnique("read", []string{"u3"})
+
+	got := bakeUniqueAndIntersection(activeUsersSchema, newRowUniqueIndex(row), gb)
+
+	assert.Equal(t, int64(3), got["read"], "差分のあった列は row の集合と union して bake")
+	_, ok := got["write"]
+	assert.False(t, ok, "差分の無い unique 列は SET しない")
+	// readWrite = {u1,u2,u3} ∩ {u1} = {u1}
+	assert.Equal(t, int64(1), got["readWrite"], "intersection は毎回 SET する")
+}
+
+// 行の unique-temp 配列が空で濃度列にだけ値がある状態 (Clean 後に相当) では、
+// 差分の無い列まで bake すると 0 で上書きしてしまう。上の範囲制限がそれを防ぐ。
+func TestBakeUniqueAndIntersection_DoesNotZeroClearedColumn(t *testing.T) {
+	row := &Row{Cols: map[string]any{
+		"read:unique":  []string{},
+		"write:unique": []string{},
+	}}
+	gb := newGroupBuffer()
+	gb.addUnique("read", []string{"u1"})
+
+	got := bakeUniqueAndIntersection(activeUsersSchema, newRowUniqueIndex(row), gb)
+
+	assert.Equal(t, int64(1), got["read"])
+	_, ok := got["write"]
+	assert.False(t, ok, "配列が空でも、差分が無ければ 0 を書きに行かない")
+}
+
 func TestBakeUniqueAndIntersection_EmptyIntersectionList(t *testing.T) {
 	schema := Schema{
 		Name: "x",
@@ -701,12 +794,12 @@ func TestBakeUniqueAndIntersection_EmptyIntersectionList(t *testing.T) {
 		},
 	}
 	row := &Row{Cols: map[string]any{}}
-	got := bakeUniqueAndIntersection(schema, row, newGroupBuffer())
+	got := bakeUniqueAndIntersection(schema, newRowUniqueIndex(row), newGroupBuffer())
 	assert.Equal(t, int64(0), got["i"])
 }
 
 func TestBakeUniqueAndIntersection_RowUniquesNonStringSlice(t *testing.T) {
-	// rowUniques の "[]string でない" フォールバック分岐を踏むため
+	// rowUniqueIndex.set の "[]string でない" フォールバック分岐を踏むため
 	// あえて任意型を入れる。
 	schema := Schema{
 		Name: "x",
@@ -717,7 +810,7 @@ func TestBakeUniqueAndIntersection_RowUniquesNonStringSlice(t *testing.T) {
 	row := &Row{Cols: map[string]any{"u:unique": "not-a-slice"}}
 	gb := newGroupBuffer()
 	gb.addUnique("u", []string{"a"})
-	got := bakeUniqueAndIntersection(schema, row, gb)
+	got := bakeUniqueAndIntersection(schema, newRowUniqueIndex(row), gb)
 	assert.Equal(t, int64(1), got["u"])
 }
 
@@ -725,7 +818,140 @@ func TestGroupBuffer_UniqueKeysAreUnioned(t *testing.T) {
 	gb := newGroupBuffer()
 	gb.addUnique("k", []string{"a"})
 	gb.addUnique("k", []string{"b", "a"})
-	assert.Equal(t, []string{"a", "b"}, sortedSetKeys(gb.uniques["k"]))
+	assert.Equal(t, []string{"a", "b"}, setKeysSorted(gb.uniques["k"]))
+}
+
+func TestParsePgTextArray(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want []string
+	}{
+		{"empty array", "{}", []string{}},
+		{"unquoted", "{u1,u2,u3}", []string{"u1", "u2", "u3"}},
+		{"quoted", `{"u1","u2"}`, []string{"u1", "u2"}},
+		{"mixed", `{u1,"u 2"}`, []string{"u1", "u 2"}},
+		{"comma inside quotes", `{"a,b",c}`, []string{"a,b", "c"}},
+		{"escaped quote", `{"a\"b"}`, []string{`a"b`}},
+		{"escaped backslash", `{"a\\b"}`, []string{`a\b`}},
+		{"braces inside quotes", `{"{x}"}`, []string{"{x}"}},
+		{"empty string element", `{""}`, []string{""}},
+		// 引用符なしの NULL は SQL NULL。要素として数えない。
+		{"sql null dropped", `{a,NULL,b}`, []string{"a", "b"}},
+		// 引用符付きの NULL は文字列。
+		{"quoted NULL kept", `{a,"NULL"}`, []string{"a", "NULL"}},
+		// 配列リテラルでないものは nil (呼び出し側は空集合として扱う)。
+		{"not an array", "u1", nil},
+		{"empty string", "", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, parsePgTextArray(tc.in))
+		})
+	}
+}
+
+// 書き込み側 (pgArrayLiteral) と読み込み側 (parsePgTextArray) が往復すること。
+// 片方だけ直すとエスケープの取り違えに気付けない。
+func TestPgArrayLiteral_RoundTrip(t *testing.T) {
+	values := []string{
+		"u1",
+		"host.example",
+		`a"b`,
+		`c\d`,
+		"a,b",
+		"{x}",
+		"",
+		"NULL",
+		"日本語",
+		" leading and trailing ",
+	}
+	assert.Equal(t, values, parsePgTextArray(pgArrayLiteral(values)))
+}
+
+func TestToStringSlice(t *testing.T) {
+	assert.Nil(t, toStringSlice(nil))
+	assert.Equal(t, []string{"a"}, toStringSlice([]string{"a"}))
+	assert.Equal(t, []string{"a", "b"}, toStringSlice("{a,b}"))
+	assert.Equal(t, []string{"a", "b"}, toStringSlice([]byte("{a,b}")))
+}
+
+// デコードできない値は **黙って空にせず** warn を出す。黙って空になるのが
+// #2652 の壊れ方そのものなので、型が違う経路と配列リテラルとして読めない経路の
+// 両方で出ることを固定する。
+func TestToStringSlice_WarnsOnUndecodableValue(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     any
+		reason string
+	}{
+		{"unexpected type", 42, "unexpected driver type"},
+		{"not an array literal", "not-an-array", "not a PostgreSQL array literal"},
+		{"truncated literal", "{a,b", "not a PostgreSQL array literal"},
+		{"dimension prefix", "[0:1]={a,b}", "not a PostgreSQL array literal"},
+		{"empty string", "", "not a PostgreSQL array literal"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureWarnings(t)
+			assert.Nil(t, toStringSlice(tc.in))
+			assert.Contains(t, buf.String(), "cannot decode unique-temp column")
+			// reason は本番ログで「型が変わったのか / 出力形式が変わったのか」を
+			// 切り分ける唯一の情報なので、入れ替わりも検出する。
+			assert.Contains(t, buf.String(), `reason="`+tc.reason+`"`)
+		})
+	}
+}
+
+// **正常系では warn を出さない。** ここが緩いと、空配列 `{}` (新規バケットや
+// Clean 済みの行) で毎回 warn を呼ぶ実装でもテストが通ってしまう。それは
+// sync.Once と噛み合うと最悪で、起動直後の偽 warn が Once を使い切り、以後の
+// 本物の decode 失敗が**永久に記録されなくなる**。
+func TestToStringSlice_DoesNotWarnOnValidValues(t *testing.T) {
+	cases := []struct {
+		name string
+		in   any
+		want []string
+	}{
+		{"empty array", "{}", []string{}},
+		{"populated array", "{a,b}", []string{"a", "b"}},
+		{"bytes", []byte("{a}"), []string{"a"}},
+		{"already a slice", []string{"a"}, []string{"a"}},
+		{"empty slice", []string{}, []string{}},
+		{"nil", nil, nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			buf := captureWarnings(t)
+			assert.Equal(t, tc.want, toStringSlice(tc.in))
+			assert.Empty(t, buf.String(), "正常な値で warn を出さない")
+		})
+	}
+}
+
+// captureWarnings redirects slog warnings into a buffer for the duration of the
+// test and resets the once-guard so each case observes its own output.
+func captureWarnings(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	uniqueTempDecodeWarnOnce = sync.Once{}
+	t.Cleanup(func() {
+		slog.SetDefault(restore)
+		uniqueTempDecodeWarnOnce = sync.Once{}
+	})
+	return &buf
+}
+
+// warn はプロセス 1 回だけ。scanRow は行ごと・unique 列ごとに呼ばれるので、
+// 抑制しないと公開 GET 1 本で数千行出る。
+func TestToStringSlice_WarnsOnlyOnce(t *testing.T) {
+	buf := captureWarnings(t)
+	for range 100 {
+		toStringSlice(42)
+	}
+	assert.Equal(t, 1, strings.Count(buf.String(), "cannot decode unique-temp column"))
 }
 
 func TestPgArrayLiteral_EscapesQuotesAndBackslashes(t *testing.T) {
@@ -1017,6 +1243,42 @@ func TestGetChart_FindLatestNotFoundLeavesEmpty(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []int64{0, 0}, out["local.inc"])
 	assert.Equal(t, []int64{0, 0}, out["local.total"])
+}
+
+// unique-temp への append は span ごとに行の既存要素を除き、残りを昇順で送る。
+// 追加するものが無ければ array_cat を発行しない。
+func TestApplyDiffs_UniqueAppendsFilteredPerSpanSortedAndOmittedWhenEmpty(t *testing.T) {
+	c, repo, _ := newTestChart(t, activeUsersSchema)
+	// hour と day で行の持っているものを変える。
+	hour := &Row{ID: 1, Cols: map[string]any{
+		"read:unique":  []string{"u2"},
+		"write:unique": []string{"w1"},
+	}}
+	day := &Row{ID: 2, Cols: map[string]any{
+		"read:unique":  []string{},
+		"write:unique": []string{"w1"},
+	}}
+	repo.hour[""] = []*Row{hour}
+	repo.day[""] = []*Row{day}
+
+	gb := newGroupBuffer()
+	gb.addUnique("read", []string{"u3", "u1", "u2"})
+	gb.addUnique("write", []string{"w1"}) // 両 span とも行が既に持っている
+	require.NoError(t, c.applyDiffs(context.Background(), hour, day, gb))
+
+	require.Len(t, repo.calls, 2)
+	assert.Equal(t, SpanHour, repo.calls[0].span)
+	assert.Equal(t, SpanDay, repo.calls[1].span)
+
+	// hour は u2 を持っているので除かれる。昇順。
+	assert.Equal(t, []string{"u1", "u3"}, repo.calls[0].appends["read"])
+	// day は空なので全部。昇順。
+	assert.Equal(t, []string{"u1", "u2", "u3"}, repo.calls[1].appends["read"])
+
+	for i, call := range repo.calls {
+		_, ok := call.appends["write"]
+		assert.False(t, ok, "call %d: 追加するものが無ければ array_cat を発行しない", i)
+	}
 }
 
 func TestApplyDiffs_IntersectionColumnInDiffSkipped(t *testing.T) {

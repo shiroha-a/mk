@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"gorm.io/gorm"
 )
@@ -118,7 +120,11 @@ func (r *gormRepository) scanRow(raw map[string]any) *Row {
 			if strings.HasPrefix(k, uniqueTempPrefix) {
 				rest := k[len(uniqueTempPrefix):]
 				name := strings.ReplaceAll(rest, columnDelimiter, ".")
-				row.Cols[name+":unique"] = v
+				// driver の生の値をそのまま入れてはいけない。pgx は varchar[] を
+				// Go の string (`"{u1,u2}"`) で返すので、`[]string` を期待する
+				// 読み手 (bakeUniqueAndIntersection) の型アサーションが必ず失敗
+				// し、行側の集合が常に空として扱われていた (#2652)。
+				row.Cols[name+":unique"] = toStringSlice(v)
 			}
 		}
 	}
@@ -330,6 +336,115 @@ func (r *gormRepository) ResetUniqueTempColumns(ctx context.Context, span Span, 
 	}
 	q := fmt.Sprintf(`UPDATE "%s" SET %s WHERE "date" > ? AND "date" < ?`, table, strings.Join(sets, ","))
 	return r.db.WithContext(ctx).Exec(q, gt, lt).Error
+}
+
+// uniqueTempDecodeWarnOnce keeps the decode warning to one line per process.
+//
+// scanRow は FindRange が返す行ごと・unique 列ごとに呼ばれる。activeUsers は
+// unique 列を 8 本持ち、/api/charts/* の limit は 500 まで通るので、抑制しないと
+// **未認証の GET 1 本で最大 4000 行**の warn が出る。1 回出れば気付けるので
+// それで足りる。
+var uniqueTempDecodeWarnOnce sync.Once
+
+// warnUniqueTempDecode reports that a unique-temp column could not be decoded.
+func warnUniqueTempDecode(reason string, v any) {
+	uniqueTempDecodeWarnOnce.Do(func() {
+		slog.Warn("chart: cannot decode unique-temp column; unique cardinality will be undercounted",
+			"reason", reason, "type", fmt.Sprintf("%T", v))
+	})
+}
+
+// toStringSlice coerces a driver value for a `varchar[]` column into a string
+// slice. pgx (through database/sql) hands back the array literal as a string;
+// other drivers may use []byte.
+//
+// **黙って nil に落とさない。** それが #2652 そのもので、行側の集合が常に空に
+// なり、bake が buffer だけの濃度を絶対値で SET し続けて既存の値を壊していた。
+// 自己修復しない壊れ方なので、気付けるように warn を出す。
+//
+// 型が変わる経路だけでなく、**string では受け取れたが配列リテラルとして読めない**
+// 経路も同じ壊れ方をする (PostgreSQL 側の出力形式が変わった場合など) ので、
+// 両方を拾う。
+func toStringSlice(v any) []string {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []string:
+		return x
+	case string:
+		return decodePgTextArray(x, v)
+	case []byte:
+		return decodePgTextArray(string(x), v)
+	default:
+		warnUniqueTempDecode("unexpected driver type", v)
+		return nil
+	}
+}
+
+// decodePgTextArray parses the literal and warns when it is not one.
+func decodePgTextArray(lit string, raw any) []string {
+	out := parsePgTextArray(lit)
+	if out == nil {
+		warnUniqueTempDecode("not a PostgreSQL array literal", raw)
+	}
+	return out
+}
+
+// parsePgTextArray parses a one-dimensional PostgreSQL text array literal
+// (`{}`, `{a,b}`, `{"a,b","c\"d"}`) into its elements. It is the inverse of
+// pgArrayLiteral, but must also accept the unquoted form because PostgreSQL
+// only quotes elements that need it on output.
+//
+// SQL NULL の要素 (引用符なしの `NULL`) は落とす。chart の unique-temp 配列に
+// NULL は入らないが、入っていたときに空文字列として濃度に数えてしまうより
+// 無視する方が安全側。
+// 注意: integration test は testutil が PreferSimpleProtocol: true で接続する
+// のに対し、本番は extended protocol + PrepareStmt (internal/db) で走る。
+// varchar[] はどちらでも string で返ってくることを実測で確認しているが、
+// テストが本番の protocol を pin しているわけではない。
+func parsePgTextArray(s string) []string {
+	if len(s) < 2 || s[0] != '{' || s[len(s)-1] != '}' {
+		return nil
+	}
+	inner := s[1 : len(s)-1]
+	if inner == "" {
+		return []string{}
+	}
+	out := make([]string, 0, strings.Count(inner, ",")+1)
+	var buf strings.Builder
+	inQuotes := false
+	escaped := false
+	quoted := false
+	flush := func() {
+		v := buf.String()
+		buf.Reset()
+		// 引用符なしの NULL だけが SQL NULL。`"NULL"` は文字列の NULL。
+		if !quoted && v == "NULL" {
+			quoted = false
+			return
+		}
+		quoted = false
+		out = append(out, v)
+	}
+	for i := 0; i < len(inner); i++ {
+		c := inner[i]
+		switch {
+		case escaped:
+			buf.WriteByte(c)
+			escaped = false
+		case c == '\\':
+			escaped = true
+		case c == '"':
+			inQuotes = !inQuotes
+			quoted = true
+		case c == ',' && !inQuotes:
+			flush()
+		default:
+			buf.WriteByte(c)
+		}
+	}
+	flush()
+	return out
 }
 
 // pgArrayLiteral builds a PostgreSQL array literal string for a slice of

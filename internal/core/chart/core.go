@@ -195,18 +195,13 @@ func (c *Chart) groupBufferLocked(group string) *groupBuffer {
 	return g
 }
 
-// Save flushes the buffered Commit() entries to the database. Steps 1-2
-// mirror the upstream; step 3 and the handling of a failure partway through
-// do not.
+// Save flushes the buffered Commit() entries to the database. Steps 1-3
+// mirror the upstream; the handling of a failure partway through does not.
 //
 //  1. Take the pending per-group buffers.
 //  2. For each group, claim the current hour and day rows.
 //  3. Push the group's merged int deltas + unique-temp appends + bake
-//     operations as two UPDATE statements (hour + day). ここは upstream と
-//     2 点ずれている。upstream (core.ts) は **その window に差分があった列
-//     だけ** を bake し、append する前に行の temp 配列と重複するキーを
-//     落とす。mk-go はどちらもしていない (#2652。理由は
-//     bakeUniqueAndIntersection のコメント)。
+//     operations as two UPDATE statements (hour + day).
 //
 // Save is safe to call concurrently with Commit; it captures the
 // buffer under the mutex before processing.
@@ -380,15 +375,11 @@ func (c *Chart) newLogValues(latest *Row) map[string]int64 {
 // delta.
 func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, gb *groupBuffer) error {
 	deltas := make(map[string]int64)
-	appends := make(map[string][]string)
 	for _, col := range c.schema.Columns {
-		if col.UniqueIncrement {
-			if set := gb.uniques[col.Name]; len(set) > 0 {
-				appends[col.Name] = sortedSetKeys(set)
-			}
-			continue
-		}
-		if col.IntersectionOf != nil {
+		if col.UniqueIncrement || col.IntersectionOf != nil {
+			// unique / intersection 列は delta ではなく bake した絶対値を SET
+			// する。ここで delta にも入れると 1 本の UPDATE で同じ列に 2 回
+			// 代入することになり PostgreSQL が 42601 で落ちる。
 			continue
 		}
 		if n := gb.ints[col.Name]; n != 0 {
@@ -396,23 +387,125 @@ func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, gb *groupBuffer)
 		}
 	}
 
-	hourSetInts := bakeUniqueAndIntersection(c.schema, hour, gb)
-	daySetInts := bakeUniqueAndIntersection(c.schema, day, gb)
+	// 行の unique-temp 集合は span ごとに列単位で 1 度だけ作って使い回す。
+	// 同じ列を append の filter・濃度の bake・intersection が引くので、
+	// 都度 slice から作り直すと同じ配列を何度も走査することになる。
+	// day バケットの配列は本番で数万件になりうるので効いてくる。
+	// コピーが要るのは intersection だけ (bake は unionSize で数える)。
+	hourIdx := newRowUniqueIndex(hour)
+	dayIdx := newRowUniqueIndex(day)
 
-	if err := c.repo.ApplyDeltas(ctx, SpanHour, hour.ID, deltas, appends, hourSetInts); err != nil {
+	// unique-temp への append は **span ごとに** 行の既存要素を除いてから積む
+	// (upstream core.ts の `v.filter(item => !logHour[temp].includes(item))`)。
+	// 行が既に持っているキーを積み直しても濃度は変わらないので、配列が
+	// バケット内で伸び続けるだけになる。
+	hourAppends := c.uniqueAppendsFor(hourIdx, gb)
+	dayAppends := c.uniqueAppendsFor(dayIdx, gb)
+
+	hourSetInts := bakeUniqueAndIntersection(c.schema, hourIdx, gb)
+	daySetInts := bakeUniqueAndIntersection(c.schema, dayIdx, gb)
+
+	if err := c.repo.ApplyDeltas(ctx, SpanHour, hour.ID, deltas, hourAppends, hourSetInts); err != nil {
 		return err
 	}
-	return c.repo.ApplyDeltas(ctx, SpanDay, day.ID, deltas, appends, daySetInts)
+	return c.repo.ApplyDeltas(ctx, SpanDay, day.ID, deltas, dayAppends, daySetInts)
 }
 
-// sortedSetKeys returns a set's members in a deterministic order so the
-// generated `array_cat` operand does not depend on map iteration order.
-func sortedSetKeys(set map[string]struct{}) []string {
-	out := make([]string, 0, len(set))
-	for k := range set {
-		out = append(out, k)
+// uniqueAppendsFor returns, per uniqueIncrement column, the buffered keys that
+// the row does not already carry in its unique-temp array.
+func (c *Chart) uniqueAppendsFor(idx *rowUniqueIndex, gb *groupBuffer) map[string][]string {
+	appends := make(map[string][]string)
+	for _, col := range c.schema.Columns {
+		if !col.UniqueIncrement {
+			continue
+		}
+		set := gb.uniques[col.Name]
+		if len(set) == 0 {
+			continue
+		}
+		existing := idx.set(col.Name)
+		items := make([]string, 0, len(set))
+		for k := range set {
+			if _, dup := existing[k]; dup {
+				continue
+			}
+			items = append(items, k)
+		}
+		// 追加するものが無いなら array_cat を打たない (upstream も
+		// `if (itemsForHour.length > 0)` で抑止する)。
+		if len(items) == 0 {
+			continue
+		}
+		// 生成される SQL を map の反復順に依存させない。
+		sort.Strings(items)
+		appends[col.Name] = items
 	}
-	sort.Strings(out)
+	return appends
+}
+
+// unionSize returns |existing ∪ buffered| without materialising the union.
+func unionSize(existing, buffered map[string]struct{}) int {
+	n := len(existing)
+	for k := range buffered {
+		if _, ok := existing[k]; !ok {
+			n++
+		}
+	}
+	return n
+}
+
+// rowUniqueIndex memoizes one row's per-column unique-temp sets. A single Save
+// looks the same column up from the append filter, the cardinality bake and the
+// intersection computation, and the day-bucket arrays can hold tens of
+// thousands of keys, so the slice is turned into a set once per column.
+type rowUniqueIndex struct {
+	row  *Row
+	sets map[string]map[string]struct{}
+}
+
+// newRowUniqueIndex builds an empty index over row. The backing map and each
+// column's set are materialised lazily.
+//
+// chart schema 12 個のうち unique 列を持つのは activeUsers / federation /
+// perUserPv の 3 つだけなので、残り 9 個では index が何も確保しない。
+func newRowUniqueIndex(row *Row) *rowUniqueIndex {
+	return &rowUniqueIndex{row: row}
+}
+
+// set returns the row's persisted unique-temp set for one column.
+//
+// **The returned map is shared across calls; callers must not modify it.**
+// Use clone when the set has to be extended (bakeUniqueAndIntersection does).
+//
+// scanRow が driver の値を []string に正規化する (#2652) ので、ここでの型
+// アサーションは通常成功する。失敗しうるのは driver の返す型が変わったときと、
+// 配列リテラルとして読めない形で返ってきたときで、どちらも**自己修復しない**:
+// 行側が常に空集合になり、bake が buffer だけの濃度を絶対値で SET し続けるので、
+// 既存の正しい値を小さい値で壊す。#2652 と同じ壊れ方なので、toStringSlice 側が
+// 両方の経路で warn を出す。
+func (r *rowUniqueIndex) set(name string) map[string]struct{} {
+	if s, ok := r.sets[name]; ok {
+		return s
+	}
+	v, _ := r.row.Cols[name+":unique"].([]string)
+	s := make(map[string]struct{}, len(v))
+	for _, x := range v {
+		s[x] = struct{}{}
+	}
+	if r.sets == nil {
+		r.sets = make(map[string]map[string]struct{}, 1)
+	}
+	r.sets[name] = s
+	return s
+}
+
+// clone returns a fresh mutable copy of the row's set for one column.
+func (r *rowUniqueIndex) clone(name string) map[string]struct{} {
+	src := r.set(name)
+	out := make(map[string]struct{}, len(src))
+	for k := range src {
+		out[k] = struct{}{}
+	}
 	return out
 }
 
@@ -420,35 +513,33 @@ func sortedSetKeys(set map[string]struct{}) []string {
 // each uniqueIncrement and intersection column based on the group's pending
 // buffer and the current row's unique-temp arrays. The returned map contains
 // only the columns the row should be SET to (not deltas).
-func bakeUniqueAndIntersection(schema Schema, row *Row, gb *groupBuffer) map[string]int64 {
+func bakeUniqueAndIntersection(schema Schema, idx *rowUniqueIndex, gb *groupBuffer) map[string]int64 {
 	out := make(map[string]int64)
 	// union は row の unique-temp 配列と、まだ書き込んでいないバッファの集合の和。
+	// intersection のループが結果を破壊的に絞り込むので、必ず新しい map を返す。
+	// **intersection でしか使わない。** 濃度だけで足りる unique 側は
+	// unionSize で数える。
 	union := func(name string) map[string]struct{} {
-		s := make(map[string]struct{})
-		// **本番ではこの型アサーションは必ず失敗する。** scanRow は driver の
-		// 戻り値をそのまま入れており、pgx は varchar[] を Go の string
-		// (`"{u1,u2}"`) で返すため、row 側は常に空集合になる。結果、bucket を
-		// またいだ濃度の累積が効かない。さらに下の 2 つのループは
-		// uniqueIncrement 列と intersection 列を**無条件に** setInts へ載せる
-		// ので、**その列に差分が無い Save が既存の濃度を 0 で上書きする**
-		// (activeUsers なら read / write だけでなく readWrite も潰れる)。
-		// 別バグ (#2652) で、develop も同じ挙動。ここでは挙動を変えずに
-		// 実態だけ記録する。
-		if v, ok := row.Cols[name+":unique"].([]string); ok {
-			for _, x := range v {
-				s[x] = struct{}{}
-			}
-		}
+		s := idx.clone(name)
 		for x := range gb.uniques[name] {
 			s[x] = struct{}{}
 		}
 		return s
 	}
 	for _, col := range schema.Columns {
-		if col.UniqueIncrement {
-			out[col.Name] = int64(len(union(col.Name)))
+		// **この window に差分があった列だけ** bake する (upstream core.ts の
+		// `for (const [k, v] of Object.entries(finalDiffs))`)。差分の無い列まで
+		// SET すると、その列に何も起きていない Save が既存の濃度を上書きする。
+		//
+		// ここで必要なのは濃度だけなので和集合を作らない。行の配列は本番で
+		// 数万件になるため、コピーするかどうかが効く。
+		if col.UniqueIncrement && len(gb.uniques[col.Name]) > 0 {
+			out[col.Name] = int64(unionSize(idx.set(col.Name), gb.uniques[col.Name]))
 		}
 	}
+	// intersection 列は差分の有無にかかわらず毎回 SET する (upstream も
+	// `Object.entries(this.schema)` を回す)。row 側の集合が正しく読めていれば
+	// 再計算しても同じ値になるので、上書きにはならない。
 	for _, col := range schema.Columns {
 		if col.IntersectionOf == nil {
 			continue

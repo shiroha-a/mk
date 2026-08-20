@@ -286,11 +286,12 @@ func TestIntegration_GormRepository_UniqueIncrementApplyDeltas(t *testing.T) {
 	got, err := repo.FindCurrent(ctx, SpanHour, "", 1000)
 	require.NoError(t, err)
 	assert.Equal(t, int64(2), toInt64(got.Cols["read"]))
-	// unique-temp 配列も更新されている
-	if v, ok := got.Cols["read:unique"]; ok {
-		assert.Contains(t, v, "u1")
-		assert.Contains(t, v, "u2")
-	}
+	// unique-temp 配列も更新されている。**型まで見ること。** assert.Contains は
+	// string に対する部分文字列判定としても成立するので、`[]string` を要求しないと
+	// driver が string を返していても素通りする (#2652)。
+	uniques, ok := got.Cols["read:unique"].([]string)
+	require.True(t, ok, "unique-temp は []string に正規化されること")
+	assert.ElementsMatch(t, []string{"u1", "u2"}, uniques)
 }
 
 func TestIntegration_GormRepository_ResetUniqueTempColumns(t *testing.T) {
@@ -308,19 +309,143 @@ func TestIntegration_GormRepository_ResetUniqueTempColumns(t *testing.T) {
 
 	got, err := repo.FindCurrent(ctx, SpanHour, "", 2000)
 	require.NoError(t, err)
-	if v, ok := got.Cols["read:unique"]; ok {
-		// 空配列にリセットされている
-		switch x := v.(type) {
-		case []string:
-			assert.Empty(t, x)
-		}
-	}
+	// 空配列にリセットされている。型が違えば分岐に入らず素通りしていたので、
+	// ここも型を要求する (#2652)。
+	uniques, ok := got.Cols["read:unique"].([]string)
+	require.True(t, ok, "unique-temp は []string に正規化されること")
+	assert.Empty(t, uniques)
 }
 
 func TestIntegration_GormRepository_ResetUniqueTempEmptyNoOp(t *testing.T) {
 	requirePostgres(t)
 	repo := NewRepository(testDB, activeUsersIntegrationSchema)
 	require.NoError(t, repo.ResetUniqueTempColumns(context.Background(), SpanHour, 0, 0, nil))
+}
+
+// unique 列を実 DB の Chart.Save に通す。**ここが #2652 の再現テスト。**
+// fakeRepo は unique-temp 配列を []string で持つのでこの経路を試せず、pgx が
+// varchar[] を string で返すことに気付けなかった。
+func TestIntegration_ChartEngine_UniqueAccumulatesAcrossSaves(t *testing.T) {
+	truncateChartTable(t, activeUsersIntegrationSchema.Name)
+	repo := NewRepository(testDB, activeUsersIntegrationSchema)
+	clk := newFakeClock(time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC))
+	c, err := New(Config{Schema: activeUsersIntegrationSchema, Repo: repo, Lock: NewMemoryLocker(), Clock: clk})
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	require.NoError(t, c.Commit(Diff{"read": []string{"u1", "u2"}, "write": []string{"u1"}}, ""))
+	require.NoError(t, c.Save(ctx))
+
+	row, err := repo.FindCurrent(ctx, SpanHour, "", truncateToHour(clk.Now()).Unix())
+	require.NoError(t, err)
+	// scanRow が driver の値を []string に正規化していること。
+	uniques, ok := row.Cols["read:unique"].([]string)
+	require.True(t, ok, "unique-temp は []string で読めること")
+	assert.ElementsMatch(t, []string{"u1", "u2"}, uniques)
+	assert.Equal(t, int64(2), toInt64(row.Cols["read"]))
+	assert.Equal(t, int64(1), toInt64(row.Cols["readWrite"]))
+
+	// 同じ bucket に別のキーを積む。行側の集合が読めていれば濃度は累積する。
+	require.NoError(t, c.Commit(Diff{"read": []string{"u2", "u3"}}, ""))
+	require.NoError(t, c.Save(ctx))
+
+	row, err = repo.FindCurrent(ctx, SpanHour, "", truncateToHour(clk.Now()).Unix())
+	require.NoError(t, err)
+	assert.Equal(t, int64(3), toInt64(row.Cols["read"]), "bucket をまたいで濃度が累積する")
+	// 既に行にある u2 は積み直さない。
+	uniques, _ = row.Cols["read:unique"].([]string)
+	assert.ElementsMatch(t, []string{"u1", "u2", "u3"}, uniques, "既存キーを重複して積まない")
+	// write は今回の差分に無いので据え置き。intersection も再計算されて維持される。
+	assert.Equal(t, int64(1), toInt64(row.Cols["write"]))
+	assert.Equal(t, int64(1), toInt64(row.Cols["readWrite"]))
+}
+
+// hour と day で行の unique-temp 配列の中身が違う状態を作る。**これが無いと
+// hour 行と day 行を取り違える実装ミスをテストが一切検出できない** (固定 clock の
+// テストだけだと両者の配列が常に同じになるため)。
+//
+// day は 1 日ぶんを積むので hour より大きい集合を持つ。append の filter も
+// bake も span ごとに行を見る必要がある。
+func TestIntegration_ChartEngine_HourAndDayDivergeWithinSameDay(t *testing.T) {
+	truncateChartTable(t, activeUsersIntegrationSchema.Name)
+	repo := NewRepository(testDB, activeUsersIntegrationSchema)
+	clk := newFakeClock(time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC))
+	c, err := New(Config{Schema: activeUsersIntegrationSchema, Repo: repo, Lock: NewMemoryLocker(), Clock: clk})
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	// 12 時台に u1 を積む。hour(12) と day(04-09) の両方に入る。
+	require.NoError(t, c.Commit(Diff{"read": []string{"u1"}}, ""))
+	require.NoError(t, c.Save(ctx))
+
+	// 13 時台に u2 / u3。hour は新しいバケットなので u1 を持たないが、
+	// day は同じバケットのまま u1 を持っている。
+	clk.set(time.Date(2026, 4, 9, 13, 15, 0, 0, time.UTC))
+	require.NoError(t, c.Commit(Diff{"read": []string{"u2", "u3"}}, ""))
+	require.NoError(t, c.Save(ctx))
+
+	hour, err := repo.FindCurrent(ctx, SpanHour, "", truncateToHour(clk.Now()).Unix())
+	require.NoError(t, err)
+	day, err := repo.FindCurrent(ctx, SpanDay, "", truncateToSpan(clk.Now(), SpanDay).Unix())
+	require.NoError(t, err)
+
+	hourUniques, ok := hour.Cols["read:unique"].([]string)
+	require.True(t, ok)
+	dayUniques, ok := day.Cols["read:unique"].([]string)
+	require.True(t, ok)
+
+	// 13 時のバケットは 13 時台のぶんだけ。
+	assert.ElementsMatch(t, []string{"u2", "u3"}, hourUniques)
+	assert.Equal(t, int64(2), toInt64(hour.Cols["read"]))
+	// day は 1 日ぶん。
+	assert.ElementsMatch(t, []string{"u1", "u2", "u3"}, dayUniques)
+	assert.Equal(t, int64(3), toInt64(day.Cols["read"]))
+
+	// もう一度 u1 を積む。day は既に持っているので配列は伸びず、hour には入る。
+	require.NoError(t, c.Commit(Diff{"read": []string{"u1"}}, ""))
+	require.NoError(t, c.Save(ctx))
+
+	hour, err = repo.FindCurrent(ctx, SpanHour, "", truncateToHour(clk.Now()).Unix())
+	require.NoError(t, err)
+	day, err = repo.FindCurrent(ctx, SpanDay, "", truncateToSpan(clk.Now(), SpanDay).Unix())
+	require.NoError(t, err)
+	hourUniques, _ = hour.Cols["read:unique"].([]string)
+	dayUniques, _ = day.Cols["read:unique"].([]string)
+	assert.ElementsMatch(t, []string{"u1", "u2", "u3"}, hourUniques, "hour には u1 が入る")
+	assert.ElementsMatch(t, []string{"u1", "u2", "u3"}, dayUniques, "day は既に持っているので伸びない")
+	assert.Equal(t, int64(3), toInt64(hour.Cols["read"]))
+	assert.Equal(t, int64(3), toInt64(day.Cols["read"]))
+}
+
+// 差分の無い列を 0 で上書きしないこと。**#2652 の 2 つ目の症状**で、
+// uniqueIncrement 列は毎回 setInts に載っていたため、その列に何も起きていない
+// Save が既存の濃度を潰していた。
+//
+// このテストが捕まえるのは **scanRow のパース**の方。パースが直れば毎回 bake し
+// 直しても同じ値が再計算されるので、bake の範囲を絞る変更単独の回帰は
+// TestBakeUniqueAndIntersection_OnlyBakesColumnsWithDiff /
+// _DoesNotZeroClearedColumn が見る。
+func TestIntegration_ChartEngine_SaveDoesNotClobberUntouchedColumns(t *testing.T) {
+	truncateChartTable(t, activeUsersIntegrationSchema.Name)
+	repo := NewRepository(testDB, activeUsersIntegrationSchema)
+	clk := newFakeClock(time.Date(2026, 4, 9, 12, 30, 0, 0, time.UTC))
+	c, err := New(Config{Schema: activeUsersIntegrationSchema, Repo: repo, Lock: NewMemoryLocker(), Clock: clk})
+	require.NoError(t, err)
+	ctx := context.Background()
+
+	require.NoError(t, c.Commit(Diff{"read": []string{"u1", "u2"}, "write": []string{"u1"}}, ""))
+	require.NoError(t, c.Save(ctx))
+
+	// まったく無関係な列だけを動かす。
+	require.NoError(t, c.Commit(Diff{"registeredWithinWeek": []string{"u9"}}, ""))
+	require.NoError(t, c.Save(ctx))
+
+	row, err := repo.FindCurrent(ctx, SpanHour, "", truncateToHour(clk.Now()).Unix())
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), toInt64(row.Cols["read"]), "触っていない unique 列が 0 に落ちない")
+	assert.Equal(t, int64(1), toInt64(row.Cols["write"]))
+	assert.Equal(t, int64(1), toInt64(row.Cols["readWrite"]), "intersection も維持される")
+	assert.Equal(t, int64(1), toInt64(row.Cols["registeredWithinWeek"]))
 }
 
 func TestIntegration_ChartEngine_EndToEnd(t *testing.T) {
