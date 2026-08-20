@@ -50,7 +50,9 @@ func TestFederationChart_Inbox(t *testing.T) {
 	require.NoError(t, engine.Save(context.Background()))
 
 	row := repo.hour[""][0]
+	// unique-temp 配列には重複が積まれない (engine 側のバッファが集合)。
+	// 濃度は下のアサーションのとおり変わらない。
 	inboxes, _ := row.Cols["inboxInstances:unique"].([]string)
-	assert.Len(t, inboxes, 3)
+	assert.ElementsMatch(t, []string{"peer.test", "other.test"}, inboxes)
 	assert.Equal(t, int64(2), toInt64(row.Cols["inboxInstances"]))
 }

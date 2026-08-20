@@ -3,6 +3,7 @@ package chart
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -108,6 +109,119 @@ func TestCommit_ZerosAndEmptySlicesDropped(t *testing.T) {
 	}
 }
 
+func TestCommit_BufferBoundedByDistinctGroups(t *testing.T) {
+	// Commit はイベント 1 件ごとにエントリを増やさない。滞留量は
+	// distinct group 数で頭打ちになる (Save は既定 20 分間隔なので、
+	// イベント数に比例させると 20 分ぶんが際限なく積まれる)。
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	for i := range 1000 {
+		group := fmt.Sprintf("u%d", i%3)
+		require.NoError(t, c.Commit(Diff{"inc": 1, "total": 1}, group))
+	}
+
+	c.bufMu.Lock()
+	assert.Len(t, c.buffer, 3)
+	for group, gb := range c.buffer {
+		assert.Len(t, gb.ints, 2, "group %s", group)
+	}
+	c.bufMu.Unlock()
+
+	// 畳んでも合計は変わらない。1000 回を 3 group に配ったので
+	// u0 が 334、u1 / u2 が 333。
+	require.NoError(t, c.Save(context.Background()))
+	assert.Equal(t, int64(334), toInt64(repo.hour["u0"][0].Cols["inc"]))
+	assert.Equal(t, int64(333), toInt64(repo.hour["u1"][0].Cols["inc"]))
+	assert.Equal(t, int64(333), toInt64(repo.hour["u2"][0].Cols["inc"]))
+}
+
+func TestCommit_UniqueBufferBoundedByDistinctKeys(t *testing.T) {
+	// unique 列は連結ではなく集合なので、同じ key を何度 Commit しても
+	// 滞留量は distinct key 数で頭打ちになる。
+	c, repo, _ := newTestChart(t, activeUsersSchema)
+	for range 1000 {
+		require.NoError(t, c.Commit(Diff{"read": []string{"u1", "u2"}}, ""))
+	}
+
+	c.bufMu.Lock()
+	require.Len(t, c.buffer, 1)
+	assert.Equal(t, []string{"u1", "u2"}, sortedSetKeys(c.buffer[""].uniques["read"]))
+	c.bufMu.Unlock()
+
+	require.NoError(t, c.Save(context.Background()))
+	assert.Equal(t, int64(2), toInt64(repo.hour[""][0].Cols["read"]))
+}
+
+func TestSave_ProcessesGroupsInSortedOrder(t *testing.T) {
+	// map の反復順はランダムなので、Save は group をソートしてから処理する。
+	// これが無いと「どこまで適用されてから失敗したか」が実行ごとに変わり、
+	// 部分適用を検証するテストが flaky になる。
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	// **Commit する順序を昇順にしないこと。** Go の map の反復順は
+	// 開始バケット / オフセットのランダム化なので、1 バケットに収まる
+	// 小さな map では insertion order の「回転」しか出ない (8 キーでも
+	// 出現する順序は 8 通りで、8! ではない)。昇順に入れると回転の中に
+	// ソート済みの順序が含まれ、sort.Strings を外してもこのテストが
+	// 通ってしまう (実測で全 200000 回中 12% が昇順になった)。昇順以外で
+	// 入れれば、ソート済みの順序は回転として現れない (実測 0 回)。
+	for _, g := range []string{"u3", "u1", "u8", "u2", "u6", "u4", "u7", "u5"} {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, g))
+	}
+	require.NoError(t, c.Save(context.Background()))
+	// claimCurrentLog は row を新規作成する経路でロック取得の前後に
+	// FindCurrent を 2 回引くので、連続する重複を畳んでから順序を見る。
+	var order []string
+	for _, g := range repo.groupOrder {
+		if len(order) == 0 || order[len(order)-1] != g {
+			order = append(order, g)
+		}
+	}
+	assert.Equal(t, []string{"u1", "u2", "u3", "u4", "u5", "u6", "u7", "u8"}, order)
+}
+
+func TestApplyDiffs_ColumnNeverAssignedTwiceInOneUpdate(t *testing.T) {
+	// ApplyDeltas の 3 マップは 1 本の UPDATE の SET 句に展開されるので、
+	// 同じ列が 2 つ以上のマップに現れると PostgreSQL が 42601
+	// (multiple assignments to same column) で落ちる。uniqueIncrement 列と
+	// intersection 列を deltas から外す `continue` がこの不変条件を守っている。
+	c, repo, _ := newTestChart(t, activeUsersSchema)
+	require.NoError(t, c.Commit(Diff{
+		"read":  []string{"u1"},
+		"write": []string{"u1"},
+	}, ""))
+	// uniqueIncrement 列 (read) と intersection 列 (readWrite) を、通常の
+	// 呼び出し元が出さない int としても積む。どちらも deltas から外れて
+	// いなければ、同じ列が deltas と setInts の両方に現れる。
+	require.NoError(t, c.Commit(Diff{
+		"read":      int64(7),
+		"readWrite": int64(7),
+	}, ""))
+
+	// **前提を固定する。** 現在の実装ではこの検査の対象になる `deltas` は
+	// 空のままなので、下のループは変異を入れたときだけ意味を持つ。Commit が
+	// 「1 キー 1 型」に整理されて int が捨てられるようになると、テストは
+	// 緑のまま無力化される。そうなったらここで落ちて、不変条件を導出し直す
+	// きっかけになるようにしておく。
+	c.bufMu.Lock()
+	require.NotNil(t, c.buffer[""])
+	require.NotZero(t, c.buffer[""].ints["read"], "uniqueIncrement 列に int が積まれていない")
+	require.NotZero(t, c.buffer[""].ints["readWrite"], "intersection 列に int が積まれていない")
+	c.bufMu.Unlock()
+
+	require.NoError(t, c.Save(context.Background()))
+
+	// deltas と setInts はどちらも toColumnName() の列に展開されるので、
+	// キーが重なると 1 本の UPDATE で同じ列に 2 回代入することになる。
+	// appends だけは toUniqueTempColumnName() の別列なので対象外。
+	require.NotEmpty(t, repo.calls)
+	for i, call := range repo.calls {
+		for k := range call.deltas {
+			if _, dup := call.setInts[k]; dup {
+				t.Fatalf("call %d (%s): column %q assigned by both deltas and setInts", i, call.span, k)
+			}
+		}
+	}
+}
+
 func TestSave_NoBuffer(t *testing.T) {
 	c, _, _ := newTestChart(t, notesSchema)
 	require.NoError(t, c.Save(context.Background()))
@@ -180,9 +294,11 @@ func TestSave_UniqueIncrementAndIntersection(t *testing.T) {
 	// intersection = {u1}∩{u2,u3,...} → wait it's read∩write = {u1,u3} → 2
 	assert.Equal(t, int64(2), toInt64(row.Cols["readWrite"]))
 
-	// unique-temp 配列も保持されている
+	// unique-temp 配列も保持されている。バッファは集合なので、同じ key を
+	// 複数回 Commit しても配列には 1 度しか積まれない (濃度は上の read/write
+	// アサーションのとおり変わらない)。
 	uniqueRead, _ := row.Cols["read:unique"].([]string)
-	assert.ElementsMatch(t, []string{"u1", "u2", "u2", "u3"}, uniqueRead)
+	assert.ElementsMatch(t, []string{"u1", "u2", "u3"}, uniqueRead)
 }
 
 func TestSave_IntersectionAcrossBucketAndDiff(t *testing.T) {
@@ -585,7 +701,7 @@ func TestBakeUniqueAndIntersection_EmptyIntersectionList(t *testing.T) {
 		},
 	}
 	row := &Row{Cols: map[string]any{}}
-	got := bakeUniqueAndIntersection(schema, row, Diff{})
+	got := bakeUniqueAndIntersection(schema, row, newGroupBuffer())
 	assert.Equal(t, int64(0), got["i"])
 }
 
@@ -599,18 +715,17 @@ func TestBakeUniqueAndIntersection_RowUniquesNonStringSlice(t *testing.T) {
 		},
 	}
 	row := &Row{Cols: map[string]any{"u:unique": "not-a-slice"}}
-	got := bakeUniqueAndIntersection(schema, row, Diff{"u": []string{"a"}})
+	gb := newGroupBuffer()
+	gb.addUnique("u", []string{"a"})
+	got := bakeUniqueAndIntersection(schema, row, gb)
 	assert.Equal(t, int64(1), got["u"])
 }
 
-func TestMergeDiffs_StringConcatenation(t *testing.T) {
-	merged := mergeDiffs([]bufferedDiff{
-		{diff: Diff{"k": []string{"a"}}},
-		{diff: Diff{"k": []string{"b"}}},
-	})
-	if v, ok := merged["k"].([]string); !ok || len(v) != 2 {
-		t.Fatalf("got %v", merged)
-	}
+func TestGroupBuffer_UniqueKeysAreUnioned(t *testing.T) {
+	gb := newGroupBuffer()
+	gb.addUnique("k", []string{"a"})
+	gb.addUnique("k", []string{"b", "a"})
+	assert.Equal(t, []string{"a", "b"}, sortedSetKeys(gb.uniques["k"]))
 }
 
 func TestPgArrayLiteral_EscapesQuotesAndBackslashes(t *testing.T) {
@@ -904,58 +1019,37 @@ func TestGetChart_FindLatestNotFoundLeavesEmpty(t *testing.T) {
 	assert.Equal(t, []int64{0, 0}, out["local.total"])
 }
 
-func TestApplyDiffs_UniqueIncrementSkipsNonStringSlice(t *testing.T) {
-	// applyDiffs の "v が []string でない" 分岐を踏むため、buffered diff
-	// に直接 int を渡す。Commit() を経由するとフィルタされるので、
-	// 内部 API である applyDiffs を直接呼ぶ。
-	c, _, _ := newTestChart(t, activeUsersSchema)
-	hour := &Row{ID: 1, Cols: map[string]any{}}
-	day := &Row{ID: 2, Cols: map[string]any{}}
-	repo := c.repo.(*fakeRepo)
-	repo.hour[""] = []*Row{hour}
-	repo.day[""] = []*Row{day}
-	require.NoError(t, c.applyDiffs(context.Background(), hour, day, []bufferedDiff{
-		{diff: Diff{"read": int64(99)}}, // wrong type for uniqueIncrement column
-	}))
-}
-
 func TestApplyDiffs_IntersectionColumnInDiffSkipped(t *testing.T) {
 	// applyDiffs の `if col.IntersectionOf != nil { continue }` 分岐は
-	// merged に intersection 列のキーが含まれているときに踏む。Commit
-	// 経由ではこのキーは出ないので、直接 applyDiffs を呼ぶ。
+	// intersection 列そのものが int として Commit されたときに踏む。
+	// 通常の呼び出し元は出さないキーなので、ここで明示的に踏ませる。
 	c, _, _ := newTestChart(t, activeUsersSchema)
 	hour := &Row{ID: 1, Cols: map[string]any{}}
 	day := &Row{ID: 2, Cols: map[string]any{}}
 	repo := c.repo.(*fakeRepo)
 	repo.hour[""] = []*Row{hour}
 	repo.day[""] = []*Row{day}
-	require.NoError(t, c.applyDiffs(context.Background(), hour, day, []bufferedDiff{
-		{diff: Diff{"readWrite": int64(99)}}, // intersection 列を直接渡す
-	}))
+	gb := newGroupBuffer()
+	gb.addInt("readWrite", 99)
+	require.NoError(t, c.applyDiffs(context.Background(), hour, day, gb))
+	// intersection 列は delta として書かず、bake した絶対値だけを SET する。
+	assert.Equal(t, int64(0), toInt64(hour.Cols["readWrite"]))
 }
 
-func TestApplyDiffs_UniqueIncrementSkipsEmptySlice(t *testing.T) {
-	// applyDiffs の `len(items) > 0` の false 分岐を踏むため、空の
-	// []string を直接渡す。Commit はフィルタするのでこちらも直接呼ぶ。
+func TestApplyDiffs_UniqueIncrementSkipsEmptySet(t *testing.T) {
+	// applyDiffs の `len(set) > 0` の false 分岐 (unique 列に 1 件も
+	// 積まれていない group) を踏む。
 	c, _, _ := newTestChart(t, activeUsersSchema)
 	hour := &Row{ID: 1, Cols: map[string]any{}}
 	day := &Row{ID: 2, Cols: map[string]any{}}
 	repo := c.repo.(*fakeRepo)
 	repo.hour[""] = []*Row{hour}
 	repo.day[""] = []*Row{day}
-	require.NoError(t, c.applyDiffs(context.Background(), hour, day, []bufferedDiff{
-		{diff: Diff{"read": []string{}}},
-	}))
-}
-
-func TestUniqueGroups_DuplicateAreCollapsed(t *testing.T) {
-	in := []bufferedDiff{
-		{group: "a"},
-		{group: "b"},
-		{group: "a"},
-	}
-	got := uniqueGroups(in)
-	assert.Equal(t, []string{"a", "b"}, got)
+	gb := newGroupBuffer()
+	gb.addInt("read", 1) // uniqueIncrement 列だが int なので appends には出ない
+	require.NoError(t, c.applyDiffs(context.Background(), hour, day, gb))
+	_, ok := hour.Cols["read:unique"]
+	assert.False(t, ok, "空集合では array_cat を発行しない")
 }
 
 func TestChart_IsGrouped(t *testing.T) {

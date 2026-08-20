@@ -23,6 +23,25 @@ type fakeRepo struct {
 	// armError() to push an error and skipFirstError() to skip a call
 	// before failing the next one.
 	errOn map[string][]error
+	// calls records the deltas / setInts of every ApplyDeltas invocation in
+	// order. どちらも toColumnName() の同じ列に展開されるので、キーが重なると
+	// PostgreSQL が 42601 (multiple assignments to same column) で落ちる。
+	// fakeRepo はマップを順に適用するだけでその衝突を再現しないため、
+	// 不変条件はテスト側で見る (uniqueAppends は別列なので記録しない)。
+	calls []applyDeltasCall
+	// groupOrder records the group of every SpanHour FindCurrent, before the
+	// armed-error check, so tests can assert the processing order. Save
+	// reaches FindCurrent only through claimCurrentLog, which looks the row
+	// up twice when it has to insert one, so consecutive duplicates are
+	// expected.
+	groupOrder []string
+}
+
+// applyDeltasCall captures one ApplyDeltas invocation for assertions.
+type applyDeltasCall struct {
+	span    Span
+	deltas  map[string]int64
+	setInts map[string]int64
 }
 
 func newFakeRepo() *fakeRepo {
@@ -69,6 +88,9 @@ func (r *fakeRepo) armSkipThenError(method string, skip int, err error) {
 func (r *fakeRepo) FindCurrent(_ context.Context, span Span, group string, ts int64) (*Row, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if span == SpanHour {
+		r.groupOrder = append(r.groupOrder, group)
+	}
 	if err := r.errIfArmed("FindCurrent"); err != nil {
 		return nil, err
 	}
@@ -160,6 +182,11 @@ func (r *fakeRepo) Insert(_ context.Context, span Span, group string, ts int64, 
 func (r *fakeRepo) ApplyDeltas(_ context.Context, span Span, id int64, deltas map[string]int64, uniqueAppends map[string][]string, setInts map[string]int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.calls = append(r.calls, applyDeltasCall{
+		span:    span,
+		deltas:  maps.Clone(deltas),
+		setInts: maps.Clone(setInts),
+	})
 	if err := r.errIfArmed("ApplyDeltas"); err != nil {
 		return err
 	}

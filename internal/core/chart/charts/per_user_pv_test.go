@@ -19,9 +19,11 @@ func TestPerUserPvChart_CommitByUser(t *testing.T) {
 	require.NoError(t, engine.Save(context.Background()))
 
 	row := repo.hour["owner"][0]
+	// unique-temp 配列には重複が積まれない (engine 側のバッファが集合)。
+	// 濃度 (upv.user) と延べ回数 (pv.user) は従来どおり。
 	uniques, ok := row.Cols["upv.user:unique"].([]string)
 	require.True(t, ok)
-	assert.Len(t, uniques, 3)
+	assert.ElementsMatch(t, []string{"u-a", "u-b"}, uniques)
 	assert.Equal(t, int64(2), toInt64(row.Cols["upv.user"]))
 	assert.Equal(t, int64(3), toInt64(row.Cols["pv.user"]))
 }

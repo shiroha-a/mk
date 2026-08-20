@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"time"
 )
@@ -32,14 +33,52 @@ type Chart struct {
 	tick   TickFunc
 
 	bufMu  sync.Mutex
-	buffer []bufferedDiff
+	buffer map[string]*groupBuffer
 }
 
-// bufferedDiff is one queued Commit() entry. The diff is stored as the
-// raw map; merging across diffs happens on Save().
-type bufferedDiff struct {
-	group string
-	diff  Diff
+// groupBuffer holds the merged pending diff for one group. Commit() folds
+// into it in place, so the retained memory is proportional to the number of
+// distinct groups (and distinct unique-column keys) rather than to the number
+// of Commit() calls.
+//
+// 以前は Commit のたびに 1 エントリを slice に append し、畳み込みは Save まで
+// 遅延していた。Save は既定 20 分間隔 (ManagementService) なので、滞留量が
+// 「20 分間のイベント数」に比例して上限が無かった。bench の heap profile では
+// live heap 104MB のうち 44MB がこのバッファで、その大半が users/show ごとに
+// Commit される per-user PV chart だった。
+type groupBuffer struct {
+	// ints は加算可能な列の累計。
+	ints map[string]int64
+	// uniques は uniqueIncrement 列の集合。[]string の連結ではなく set にする
+	// ことで、同じ key が何度 Commit されても滞留量が distinct key 数で頭打ちに
+	// なる。bakeUniqueAndIntersection は集合の濃度しか使わないので、重複を
+	// 落としても DB に書く値は変わらない。
+	uniques map[string]map[string]struct{}
+}
+
+// newGroupBuffer returns an empty buffer for one group.
+func newGroupBuffer() *groupBuffer {
+	return &groupBuffer{ints: make(map[string]int64)}
+}
+
+// addInt folds a signed delta into the pending total for one column.
+func (b *groupBuffer) addInt(name string, delta int64) {
+	b.ints[name] += delta
+}
+
+// addUnique adds the given keys to the pending set for one unique column.
+func (b *groupBuffer) addUnique(name string, keys []string) {
+	set := b.uniques[name]
+	if set == nil {
+		if b.uniques == nil {
+			b.uniques = make(map[string]map[string]struct{}, 1)
+		}
+		set = make(map[string]struct{}, len(keys))
+		b.uniques[name] = set
+	}
+	for _, k := range keys {
+		set[k] = struct{}{}
+	}
 }
 
 // Config bundles the dependencies a Chart needs at construction time.
@@ -87,9 +126,9 @@ func (c *Chart) Name() string { return c.schema.Name }
 func (c *Chart) IsGrouped() bool { return c.schema.Grouped }
 
 // Commit queues a diff to be merged into the current bucket on the next
-// Save(). The diff values may be int (any signed int type), int64, or
-// []string for uniqueIncrement columns. Unknown keys are silently
-// dropped on Save().
+// Save(). The diff values may be int, int64, or []string for
+// uniqueIncrement columns; values of any other type (int32 / int16 / int8
+// included) are silently dropped, as are keys the schema does not know.
 //
 // `group` must be non-empty when the schema is grouped; it must be
 // empty otherwise. Commit returns an error in those mismatch cases so
@@ -104,46 +143,84 @@ func (c *Chart) Commit(diff Diff, group string) error {
 	if !c.schema.Grouped && group != "" {
 		return errors.New("chart: group must be empty for ungrouped chart")
 	}
-	// 0 や空配列のエントリは省く (本家と同じ挙動)
-	cleaned := make(Diff, len(diff))
+	c.bufMu.Lock()
+	defer c.bufMu.Unlock()
+
+	// 0 や空配列のエントリは省く (本家と同じ挙動)。生き残るエントリが 1 つも
+	// 無ければ group のバッファ自体を作らないので、no-op な Commit は何も
+	// 確保しない。
+	var g *groupBuffer
 	for k, v := range diff {
 		switch x := v.(type) {
 		case int:
-			if x != 0 {
-				cleaned[k] = int64(x)
+			if x == 0 {
+				continue
 			}
+			if g == nil {
+				g = c.groupBufferLocked(group)
+			}
+			g.addInt(k, int64(x))
 		case int64:
-			if x != 0 {
-				cleaned[k] = x
+			if x == 0 {
+				continue
 			}
+			if g == nil {
+				g = c.groupBufferLocked(group)
+			}
+			g.addInt(k, x)
 		case []string:
-			if len(x) > 0 {
-				cleaned[k] = x
+			if len(x) == 0 {
+				continue
 			}
+			if g == nil {
+				g = c.groupBufferLocked(group)
+			}
+			g.addUnique(k, x)
 		}
 	}
-	if len(cleaned) == 0 {
-		return nil
-	}
-	c.bufMu.Lock()
-	c.buffer = append(c.buffer, bufferedDiff{group: group, diff: cleaned})
-	c.bufMu.Unlock()
 	return nil
 }
 
-// Save flushes the buffered Commit() entries to the database. The
-// algorithm mirrors the upstream:
+// groupBufferLocked returns the pending buffer for group, creating it if
+// absent. Caller must hold bufMu.
+func (c *Chart) groupBufferLocked(group string) *groupBuffer {
+	if c.buffer == nil {
+		c.buffer = make(map[string]*groupBuffer, 1)
+	}
+	g, ok := c.buffer[group]
+	if !ok {
+		g = newGroupBuffer()
+		c.buffer[group] = g
+	}
+	return g
+}
+
+// Save flushes the buffered Commit() entries to the database. Steps 1-2
+// mirror the upstream; step 3 and the handling of a failure partway through
+// do not.
 //
-//  1. Collect all distinct groups in the buffer.
+//  1. Take the pending per-group buffers.
 //  2. For each group, claim the current hour and day rows.
-//  3. Merge all diffs targeted at that group into a single set of
-//     int deltas + unique-temp appends + bake operations, then issue
-//     two UPDATE statements (hour + day).
-//  4. Drop only the diffs that were applied (other groups' diffs stay
-//     in the buffer).
+//  3. Push the group's merged int deltas + unique-temp appends + bake
+//     operations as two UPDATE statements (hour + day). ここは upstream と
+//     2 点ずれている。upstream (core.ts) は **その window に差分があった列
+//     だけ** を bake し、append する前に行の temp 配列と重複するキーを
+//     落とす。mk-go はどちらもしていない (#2652。理由は
+//     bakeUniqueAndIntersection のコメント)。
 //
 // Save is safe to call concurrently with Commit; it captures the
 // buffer under the mutex before processing.
+//
+// **取り出した分は成否にかかわらず捨てる。** 失敗した group とそれ以降の
+// group の集計は、その周期ぶん失われる。applyDiffs は hour -> day の順に
+// 2 本の UPDATE を投げるので、hour だけ通って day で落ちた group は片側だけ
+// 適用された状態で残る。
+//
+// バッファへ戻す実装にすると、恒久的に失敗する group (例: smallint の
+// 桁あふれ) が 1 つあるだけで毎周期そこで止まり、後続の group が二度と
+// flush されないうえバッファが際限なく伸びる。**原因は直列であることでは
+// なく、最初のエラーで return していること。** upstream (core.ts) は group
+// ごとに独立して処理し、成功した分だけをバッファから落とす。修正は #2651。
 func (c *Chart) Save(ctx context.Context) error {
 	c.bufMu.Lock()
 	if len(c.buffer) == 0 {
@@ -154,8 +231,15 @@ func (c *Chart) Save(ctx context.Context) error {
 	c.buffer = nil
 	c.bufMu.Unlock()
 
-	// 集計対象 group を一意化。空文字列 ("") は ungrouped charts のキー。
-	groups := uniqueGroups(pending)
+	// map の反復順はランダムなので、どこまで適用されてから失敗したかが
+	// 実行ごとに変わらないよう group をソートしてから処理する。
+	// 空文字列 ("") は ungrouped charts のキー。
+	groups := make([]string, 0, len(pending))
+	for g := range pending {
+		groups = append(groups, g)
+	}
+	sort.Strings(groups)
+
 	for _, g := range groups {
 		hour, err := c.claimCurrentLog(ctx, g, SpanHour)
 		if err != nil {
@@ -165,8 +249,7 @@ func (c *Chart) Save(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("claim day for %s: %w", c.schema.Name, err)
 		}
-		groupDiffs := filterByGroup(pending, g)
-		if err := c.applyDiffs(ctx, hour, day, groupDiffs); err != nil {
+		if err := c.applyDiffs(ctx, hour, day, pending[g]); err != nil {
 			return fmt.Errorf("apply diffs for %s/%s: %w", c.schema.Name, g, err)
 		}
 	}
@@ -290,36 +373,31 @@ func (c *Chart) newLogValues(latest *Row) map[string]int64 {
 	return out
 }
 
-// applyDiffs merges a slice of buffered diffs targeting one group into
-// a single (deltas, uniqueAppends, setInts) tuple per span and pushes
-// it to the repository. setInts is used for uniqueIncrement bake and
+// applyDiffs turns one group's merged buffer into a (deltas,
+// uniqueAppends, setInts) tuple per span and pushes it to the
+// repository. setInts is used for uniqueIncrement bake and
 // intersection columns whose absolute value cannot be expressed as a
 // delta.
-func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, diffs []bufferedDiff) error {
-	merged := mergeDiffs(diffs)
+func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, gb *groupBuffer) error {
 	deltas := make(map[string]int64)
 	appends := make(map[string][]string)
 	for _, col := range c.schema.Columns {
-		v, ok := merged[col.Name]
-		if !ok {
-			continue
-		}
 		if col.UniqueIncrement {
-			if items, ok := v.([]string); ok && len(items) > 0 {
-				appends[col.Name] = items
+			if set := gb.uniques[col.Name]; len(set) > 0 {
+				appends[col.Name] = sortedSetKeys(set)
 			}
 			continue
 		}
 		if col.IntersectionOf != nil {
 			continue
 		}
-		if n, ok := v.(int64); ok && n != 0 {
+		if n := gb.ints[col.Name]; n != 0 {
 			deltas[col.Name] = n
 		}
 	}
 
-	hourSetInts := bakeUniqueAndIntersection(c.schema, hour, merged)
-	daySetInts := bakeUniqueAndIntersection(c.schema, day, merged)
+	hourSetInts := bakeUniqueAndIntersection(c.schema, hour, gb)
+	daySetInts := bakeUniqueAndIntersection(c.schema, day, gb)
 
 	if err := c.repo.ApplyDeltas(ctx, SpanHour, hour.ID, deltas, appends, hourSetInts); err != nil {
 		return err
@@ -327,85 +405,63 @@ func (c *Chart) applyDiffs(ctx context.Context, hour, day *Row, diffs []buffered
 	return c.repo.ApplyDeltas(ctx, SpanDay, day.ID, deltas, appends, daySetInts)
 }
 
-// mergeDiffs combines a slice of diffs into a single map. Integer
-// values are summed; string slices are concatenated.
-func mergeDiffs(diffs []bufferedDiff) Diff {
-	out := make(Diff)
-	for _, d := range diffs {
-		for k, v := range d.diff {
-			cur, exists := out[k]
-			if !exists {
-				out[k] = v
-				continue
-			}
-			switch x := v.(type) {
-			case int64:
-				if y, ok := cur.(int64); ok {
-					out[k] = y + x
-				}
-			case []string:
-				if y, ok := cur.([]string); ok {
-					out[k] = append(y, x...)
-				}
-			}
-		}
+// sortedSetKeys returns a set's members in a deterministic order so the
+// generated `array_cat` operand does not depend on map iteration order.
+func sortedSetKeys(set map[string]struct{}) []string {
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
 	}
+	sort.Strings(out)
 	return out
 }
 
 // bakeUniqueAndIntersection computes the absolute cardinality value for
-// each uniqueIncrement and intersection column based on the merged diff
-// and the current row's unique-temp arrays. The returned map contains
+// each uniqueIncrement and intersection column based on the group's pending
+// buffer and the current row's unique-temp arrays. The returned map contains
 // only the columns the row should be SET to (not deltas).
-func bakeUniqueAndIntersection(schema Schema, row *Row, merged Diff) map[string]int64 {
+func bakeUniqueAndIntersection(schema Schema, row *Row, gb *groupBuffer) map[string]int64 {
 	out := make(map[string]int64)
-	rowUniques := func(name string) []string {
+	// union は row の unique-temp 配列と、まだ書き込んでいないバッファの集合の和。
+	union := func(name string) map[string]struct{} {
+		s := make(map[string]struct{})
+		// **本番ではこの型アサーションは必ず失敗する。** scanRow は driver の
+		// 戻り値をそのまま入れており、pgx は varchar[] を Go の string
+		// (`"{u1,u2}"`) で返すため、row 側は常に空集合になる。結果、bucket を
+		// またいだ濃度の累積が効かない。さらに下の 2 つのループは
+		// uniqueIncrement 列と intersection 列を**無条件に** setInts へ載せる
+		// ので、**その列に差分が無い Save が既存の濃度を 0 で上書きする**
+		// (activeUsers なら read / write だけでなく readWrite も潰れる)。
+		// 別バグ (#2652) で、develop も同じ挙動。ここでは挙動を変えずに
+		// 実態だけ記録する。
 		if v, ok := row.Cols[name+":unique"].([]string); ok {
-			return v
+			for _, x := range v {
+				s[x] = struct{}{}
+			}
 		}
-		// gormは pgsql の text[] を []byte でも返すケースがあるので、
-		// nil として扱って空集合と同じにする。
-		return nil
+		for x := range gb.uniques[name] {
+			s[x] = struct{}{}
+		}
+		return s
 	}
 	for _, col := range schema.Columns {
 		if col.UniqueIncrement {
-			set := make(map[string]struct{})
-			for _, v := range rowUniques(col.Name) {
-				set[v] = struct{}{}
-			}
-			if items, ok := merged[col.Name].([]string); ok {
-				for _, v := range items {
-					set[v] = struct{}{}
-				}
-			}
-			out[col.Name] = int64(len(set))
+			out[col.Name] = int64(len(union(col.Name)))
 		}
 	}
 	for _, col := range schema.Columns {
 		if col.IntersectionOf == nil {
 			continue
 		}
-		// intersection は集合演算: union(rowTemp, mergedDiff) を各キーごとに
-		// 求めて intersect する。
-		merge := func(name string) map[string]struct{} {
-			s := make(map[string]struct{})
-			for _, v := range rowUniques(name) {
-				s[v] = struct{}{}
-			}
-			if items, ok := merged[name].([]string); ok {
-				for _, v := range items {
-					s[v] = struct{}{}
-				}
-			}
-			return s
-		}
 		if len(col.IntersectionOf) == 0 {
 			out[col.Name] = 0
 			continue
 		}
-		current := merge(col.IntersectionOf[0])
+		// intersection は集合演算: union(rowTemp, buffer) を各キーごとに
+		// 求めて intersect する。
+		current := union(col.IntersectionOf[0])
 		for _, k := range col.IntersectionOf[1:] {
-			target := merge(k)
+			target := union(k)
 			for v := range current {
 				if _, ok := target[v]; !ok {
 					delete(current, v)
@@ -413,32 +469,6 @@ func bakeUniqueAndIntersection(schema Schema, row *Row, merged Diff) map[string]
 			}
 		}
 		out[col.Name] = int64(len(current))
-	}
-	return out
-}
-
-// uniqueGroups returns the distinct group identifiers in the buffer in
-// insertion order. Empty string is preserved as the "ungrouped" key.
-func uniqueGroups(diffs []bufferedDiff) []string {
-	seen := make(map[string]struct{}, len(diffs))
-	out := make([]string, 0, len(diffs))
-	for _, d := range diffs {
-		if _, ok := seen[d.group]; ok {
-			continue
-		}
-		seen[d.group] = struct{}{}
-		out = append(out, d.group)
-	}
-	return out
-}
-
-// filterByGroup returns the subset of diffs targeting the given group.
-func filterByGroup(diffs []bufferedDiff, group string) []bufferedDiff {
-	out := make([]bufferedDiff, 0, len(diffs))
-	for _, d := range diffs {
-		if d.group == group {
-			out = append(out, d)
-		}
 	}
 	return out
 }
