@@ -2,6 +2,7 @@ package roles_test
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/api/roles"
 	corerole "github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -87,12 +89,22 @@ func TestAssignmentShow_PublicRole(t *testing.T) {
 func TestAssignmentShow_PrivateActiveAssignment(t *testing.T) {
 	h, assignments, rolesRepo := assignmentFixture(t)
 	rolesRepo.Roles["private"] = &model.Role{ID: "private", Target: model.RoleTargetManual, IsPublic: false}
-	expires := time.Date(2026, 8, 20, 3, 4, 5, 0, time.UTC)
+	// **有効期限は time.Now() からの相対値で置く。** ハンドラは
+	// `GetUserAssign(..., time.Now())` で期限切れを弾くので、絶対時刻を書くと
+	// **その時刻を過ぎた日から落ちる**。実際 `2026-08-20T03:04:05Z` をハードコード
+	// していて、その日の 03:04 UTC に develop が赤くなった (#2646)。
+	// private role では assigned=false が 400 NO_SUCH_ROLE に化けるので、
+	// 症状 (200 のはずが 400) からは時刻依存だと分かりにくい。
+	expires := time.Now().Add(time.Hour).UTC().Truncate(time.Millisecond)
 	assignments.Assignments["viewer:private"] = &model.RoleAssignment{UserID: "viewer", RoleID: "private", ExpiresAt: &expires}
 
 	rec := postAssignment(h, `{"roleId":"private"}`, "viewer")
 	require.Equal(t, http.StatusOK, rec.Code)
-	assert.JSONEq(t, `{"assigned":true,"expiresAt":"2026-08-20T03:04:05.000Z","role":{"id":"private","target":"manual","isPublic":false,"canEditMembersByModerator":false}}`, rec.Body.String())
+	// 期待値も同じ値から組み立てる。文字列を別に持つと二重管理になる。
+	want := fmt.Sprintf(
+		`{"assigned":true,"expiresAt":%q,"role":{"id":"private","target":"manual","isPublic":false,"canEditMembersByModerator":false}}`,
+		entity.ISOMillis(expires))
+	assert.JSONEq(t, want, rec.Body.String())
 }
 
 func TestAssignmentShow_PrivateInactiveMatchesMissing(t *testing.T) {
