@@ -517,6 +517,63 @@ func TestPopulateNoteReactionEmojis_SameNameDifferentHosts(t *testing.T) {
 	assert.Len(t, entity.ReactionEmojis, 2)
 }
 
+// PopulateNoteReactionEmojis は resolver 構築時にデコードした (name, host) を
+// 使い回し、note.Reactions を 2 度デコードしない。構築後に Reactions を差し替え
+// ても構築時の内容で解決されることで、メモが使われていることを観測する。
+//
+// これは「resolver は note.Reactions の書き換えより後に構築する」という前提に
+// 依存する。PackNotes は mergeBufferedReactions → NewEmojiResolver の順で
+// それを満たしており、順序が壊れれば TestPackNotes_MergesBufferedReactions が
+// 落ちる。
+func TestPopulateNoteReactionEmojis_UsesMemoizedPairs(t *testing.T) {
+	host := "remote.example"
+	note := &model.Note{
+		UserHost:  strPtr(host),
+		Reactions: []byte(`{":party@remote.example:": 1}`),
+	}
+	lookup := &stubEmojiLookup{data: map[string][]*model.Emoji{
+		host: {
+			{Name: "party", PublicURL: "https://remote.example/party.png"},
+			{Name: "other", PublicURL: "https://remote.example/other.png"},
+		},
+	}}
+	r := NewEmojiResolver(lookup, []*model.Note{note})
+
+	note.Reactions = []byte(`{":other@remote.example:": 1}`)
+
+	var e NoteEntity
+	r.PopulateNoteReactionEmojis(note, &e)
+	assert.Equal(t, map[string]string{
+		"party@remote.example": "https://remote.example/party.png",
+	}, e.ReactionEmojis)
+}
+
+// resolver の構築対象に無い note を渡された場合はその場でデコードする。
+// flattenNotesPlusRelations は 1 段しか辿らないが applyNoteResolvers は
+// entity の木をそれより深く辿る (depth-2 の renote.renote) ので、この経路は
+// 実際に踏まれる。
+func TestPopulateNoteReactionEmojis_FallsBackForUnseenNote(t *testing.T) {
+	host := "remote.example"
+	seen := &model.Note{
+		UserHost:  strPtr(host),
+		Reactions: []byte(`{":party@remote.example:": 1}`),
+	}
+	lookup := &stubEmojiLookup{data: map[string][]*model.Emoji{
+		host: {{Name: "party", PublicURL: "https://remote.example/party.png"}},
+	}}
+	r := NewEmojiResolver(lookup, []*model.Note{seen})
+
+	unseen := &model.Note{
+		UserHost:  strPtr(host),
+		Reactions: []byte(`{":party@remote.example:": 2}`),
+	}
+	var e NoteEntity
+	r.PopulateNoteReactionEmojis(unseen, &e)
+	assert.Equal(t, map[string]string{
+		"party@remote.example": "https://remote.example/party.png",
+	}, e.ReactionEmojis)
+}
+
 func TestPopulateNoteReactionEmojis_NoCustomEmoji(t *testing.T) {
 	// reactions が unicode のみ / 空の場合は ReactionEmojis を populate しない
 	// (空 map で初期化されている前提を維持する)。

@@ -277,6 +277,72 @@ func TestPackNote_ReactionsLegacyTextAlias(t *testing.T) {
 	assert.Equal(t, 6, e.ReactionCount)
 }
 
+// packReactions は合計を **正規化前** の各値から求める (統合前の sumReactions と
+// 同じ)。集約後の値から求めると、小数を含むレコードで切り捨ての位置が変わる。
+// 実データに小数は入らないが、統合で挙動を変えていないことをここで固定する。
+func TestPackNote_ReactionCount_SummedBeforeNormalization(t *testing.T) {
+	idGen := newTestIDGen(t)
+	noteID := idGen.Generate(time.Now())
+
+	// "like" は 👍 に正規化されるので、正規化後は 👍:3.0 の 1 キーになる。
+	// 正規化前から足すと int(1.5)+int(1.5)=2、正規化後から足すと int(3.0)=3。
+	note := &model.Note{
+		ID:         noteID,
+		UserID:     "user1",
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte(`{"like":1.5,"👍":1.5}`)),
+	}
+
+	e := PackNote(note, idGen)
+	assert.Equal(t, 2, e.ReactionCount, "合計は正規化前の各値を int に落として足す")
+
+	var reactions map[string]float64
+	require.NoError(t, json.Unmarshal(e.Reactions, &reactions))
+	assert.Equal(t, float64(3), reactions["👍"], "reactions 側は正規化後にマージされる")
+}
+
+// packReactions の戻り値 (正規化済み JSON, 合計) が、統合前の
+// normalizeReactionKeys / sumReactions の組と全分岐で一致することを固定する。
+func TestPackReactions(t *testing.T) {
+	cases := []struct {
+		name      string
+		raw       string
+		wantJSON  string
+		wantTotal int
+	}{
+		// nil / 空は golden Note.reactions が object 必須なので {} に coalesce
+		// する (#1312)。
+		{"nil", "", "{}", 0},
+		{"empty object", "{}", "{}", 0},
+		// unmarshal に失敗したら raw をそのまま返して合計 0 (fail-soft)。
+		{"invalid json", "not json", "not json", 0},
+		// JSON null は unmarshal に成功して nil map になるので {} が出る。
+		{"json null", "null", "{}", 0},
+		{"canonical only", `{"❤":2}`, `{"❤":2}`, 2},
+		{"legacy alias merged", `{"like":2,"👍":3}`, `{"👍":5}`, 5},
+		{"legacy colon form", `{":smile:":1}`, `{":smile@.:":1}`, 1},
+		{"negative value", `{"❤":-1}`, `{"❤":-1}`, -1},
+		// **raw をそのまま返す最適化を入れると落ちるケース。** キーが 1 つも
+		// 変わらないので raw passthrough が成立してしまうが、raw の順
+		// ({"bb","a"}) と json.Marshal の順 (バイト列昇順) は違う。キーが
+		// 1 個以下のケースだけでは順序の変化を観測できない。
+		{"multi key reordered by marshal", `{"bb":1,"a":2}`, `{"a":2,"bb":1}`, 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var raw datatypes.JSON
+			if tc.raw != "" {
+				raw = datatypes.JSON([]byte(tc.raw))
+			}
+			gotJSON, gotTotal := packReactions(raw)
+			// bytes で比較する。JSONEq だと不正 JSON のケースを見られず、
+			// キー順の変化 (multi key reordered by marshal) も見逃す。
+			assert.Equal(t, tc.wantJSON, string(gotJSON))
+			assert.Equal(t, tc.wantTotal, gotTotal)
+		})
+	}
+}
+
 func TestPackNote_WithRenoteAndReply(t *testing.T) {
 	idGen := newTestIDGen(t)
 	renoteID := idGen.Generate(time.Now())

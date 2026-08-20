@@ -76,7 +76,7 @@ func injectRenoteMyReaction(payload []byte, viewerID string) []byte {
 
 // reactionValueSum returns Σ of a reactions JSON object's values (the total
 // reaction count, matching upstream `Object.values(reactions).reduce(...)` /
-// entity.sumReactions、#2058)。0 for null / empty / parse error。
+// entity.packReactions、#2058)。0 for null / empty / parse error。
 func reactionValueSum(raw json.RawMessage) int {
 	if len(raw) == 0 {
 		return 0

@@ -63,6 +63,23 @@ type EmojiLookup interface {
 // nilレシーバは常にno-opを返す (EmojiLookupが未配線な呼出し元向け)。
 type EmojiResolver struct {
 	cache map[string]string // "name@host" → url
+	// reactionPairs memoizes the custom-emoji (name, host) pairs decoded from
+	// each note's Reactions during construction, so PopulateNoteReactionEmojis
+	// does not decode the same JSONB a second time.
+	//
+	// PackNotes / PackNoteWithInstance が渡すのは flattenNotesPlusRelations の
+	// 結果 (top-level + 1 段目の Renote / Reply) なので、大半の note はここに
+	// 載る。一方 applyNoteResolvers は entity の木をそれより深く辿る (depth-2 の
+	// renote.renote など) ため、未登録の note が来る。PackNotifications はさらに
+	// User だけを持つ合成 note を足して渡す (Reactions は nil なので nil エントリ
+	// が増えるだけ)。未登録のときは PopulateNoteReactionEmojis 側でデコードして
+	// 従来どおりの結果を返す。
+	//
+	// 値が nil のエントリは「見たが remote custom emoji reaction が無かった」を
+	// 表す。ここを省くと、`{}` や unicode だけの reactions を持つ note で毎回
+	// フォールバックのデコードが走ってしまう (Reactions が空の note は
+	// PopulateNoteReactionEmojis の最初の guard で抜けるのでメモまで来ない)。
+	reactionPairs map[*model.Note][]emojiNameHost
 }
 
 // NewEmojiResolver collects unique (name, host) pairs from the notes and
@@ -74,6 +91,7 @@ func NewEmojiResolver(lookup EmojiLookup, notes []*model.Note) *EmojiResolver {
 	if lookup == nil {
 		return r
 	}
+	r.reactionPairs = make(map[*model.Note][]emojiNameHost, len(notes))
 	// host別に絵文字名を集約
 	hostNames := map[string]map[string]struct{}{}
 	addNames := func(names []string, host *string) {
@@ -104,7 +122,9 @@ func NewEmojiResolver(lookup EmojiLookup, notes []*model.Note) *EmojiResolver {
 		// host は note.UserHost と必ずしも一致しないため、reaction
 		// 文字列内の `@host` を信頼する。同名の絵文字が複数 host から
 		// 届くケースを失わないよう slice で受け取る。
-		for _, pair := range collectReactionEmojiNames(n.Reactions) {
+		pairs := collectReactionEmojiNames(n.Reactions)
+		r.reactionPairs[n] = pairs
+		for _, pair := range pairs {
 			h := pair.host
 			var hostPtr *string
 			if h != "" {
@@ -171,8 +191,20 @@ func (r *EmojiResolver) PopulateNoteReactionEmojis(note *model.Note, entity *Not
 	if r == nil || note == nil || entity == nil || len(note.Reactions) == 0 {
 		return
 	}
+	// cache が空なら一致する emoji は 1 つも無いので、デコードするだけ無駄。
+	// lookup==nil で構築された resolver もここで抜ける。
+	if len(r.cache) == 0 {
+		return
+	}
+	pairs, memoized := r.reactionPairs[note]
+	if !memoized {
+		pairs = collectReactionEmojiNames(note.Reactions)
+	}
+	if len(pairs) == 0 {
+		return
+	}
 	out := make(map[string]string)
-	for _, pair := range collectReactionEmojiNames(note.Reactions) {
+	for _, pair := range pairs {
 		if url, ok := r.cache[pair.name+"@"+pair.host]; ok {
 			out[reactionEmojiKey(pair.name, pair.host)] = url
 		}

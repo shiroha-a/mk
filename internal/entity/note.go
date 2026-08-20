@@ -256,6 +256,9 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int, detail bool) 
 		}
 	}
 
+	// reactions JSONB は正規化と合計の両方に要るので、1 回だけデコードする。
+	packedReactions, reactionCount := packReactions(n.Reactions)
+
 	entity := NoteEntity{
 		ID:                 n.ID,
 		CreatedAt:          createdAt,
@@ -265,8 +268,8 @@ func packNoteAtDepth(n *model.Note, idGen id.Generator, depth int, detail bool) 
 		Visibility:         string(n.Visibility),
 		LocalOnly:          n.LocalOnly,
 		ReactionAcceptance: n.ReactionAcceptance,
-		Reactions:          normalizeReactionKeys(n.Reactions),
-		ReactionCount:      sumReactions(n.Reactions),
+		Reactions:          packedReactions,
+		ReactionCount:      reactionCount,
 		ReactionEmojis:     make(map[string]string),
 		RenoteCount:        n.RenoteCount,
 		RepliesCount:       n.RepliesCount,
@@ -546,13 +549,25 @@ func normalizeReactionWithLegacy(raw string) string {
 	return NormalizeReactionKey(raw)
 }
 
-// normalizeReactionKeys rewrites reaction JSONB keys so that legacy text
-// aliases (like→👍 等) are converted to their Unicode equivalent and legacy
-// `:name:` entries are merged into `:name@.:`. Counts for keys that collapse
-// to the same canonical reaction are summed. TS時代のレコードとmk時代の
-// レコードが同一キーに集約される。
+// packReactions decodes the reactions JSONB once and derives both values the
+// packer needs from it: the key-normalized JSON and the total reaction count.
 //
-// upstream NoteEntityService.ts:373 は reactions を必ず convertLegacyReactions
+// Key normalization converts legacy text aliases (like→👍) to the Unicode
+// emoji and merges legacy `:name:` entries into `:name@.:`. Counts for keys that
+// collapse to the same canonical reaction are summed. The returned total is
+// computed from the pre-normalization values.
+//
+// 統合前は normalizeReactionKeys と sumReactions が同じ bytes を別々に
+// デコードしていた。timeline は 1 リクエストで数十件を pack するので、
+// note ごとに 1 回で済ませる。
+//
+// 合計を **正規化前** の各値から求めるのは、統合前の sumReactions と結果を
+// 揃えるため。集約後の値から求めると、小数を含む不正なレコードで切り捨ての
+// 位置が変わる ({"like":1.5,"👍":1.5} は正規化前なら 1+1=2、正規化後なら
+// int(3.0)=3)。実データに小数は入らないが、統合で挙動を変えない方を採る。
+//
+// TS 時代のレコードと mk 時代のレコードが同一キーに集約される。upstream
+// NoteEntityService.ts:373 は reactions を必ず convertLegacyReactions
 // (legacies map + decodeReaction) に通す (#1816)。upstream の `count>0` filter は
 // 適用しない: mk-native の write path (repository.IncrementReaction /
 // count_writer) は count が 0 以下になった key を削除するため 0-count entry が
@@ -560,29 +575,45 @@ func normalizeReactionWithLegacy(raw string) string {
 // あるが、それは別途扱う drop-in データ移行の話で本変換の対象外。なお
 // `:name:`→`:name@.:` の colon-form は mk-go の canonical (decodeReaction の逆)
 // で、reactions map の永続/出力形式として既存挙動を維持する。
-func normalizeReactionKeys(raw datatypes.JSON) datatypes.JSON {
+func packReactions(raw datatypes.JSON) (datatypes.JSON, int) {
 	if len(raw) == 0 {
 		// golden Note.reactions は Record (object) 必須。reactions 未設定の note
 		// (create 直後の in-memory note 等、DB default '{}' を経ていないもの) は
 		// nil datatypes.JSON が JSON null になり drift するため {} に coalesce する
 		// (#1312。channels pinnedNoteIds #1283 と同種の null-object drift)。
-		return datatypes.JSON("{}")
+		return datatypes.JSON("{}"), 0
 	}
 	var m map[string]float64
 	if err := json.Unmarshal(raw, &m); err != nil {
-		return raw
+		return raw, 0
 	}
+	total := 0
 	normalized := make(map[string]float64, len(m))
 	for k, v := range m {
+		total += int(v)
 		// legacy text alias (like→👍 等) を Unicode へ変換し colon-form 正規化を
 		// 通す。同一 canonical key に集約される count は += でマージする。
 		normalized[normalizeReactionWithLegacy(k)] += v
 	}
+	// キーが 1 つも変わらなかったときに raw をそのまま返せば marshal を丸ごと
+	// 省けるが、**それはレスポンスのキー順を変える**。marshal 後は Go の順
+	// (バイト列) で固定されるのに対し、raw の順は出どころで変わる。DB 由来なら
+	// PostgreSQL jsonb の順 (長さ → バイト列)、reactionsBuffering 有効時は
+	// mergeBufferedReactions が Go で marshal し直したものが入る。
+	//
+	// キー順はフロントエンドから見える。MkReactionsViewer.vue は count 降順に
+	// ソートするので効くのは同着のときだが、**並び順だけの話ではない**。
+	// タイムラインは MkNote.vue が maxNumber=16 を渡し、viewer は sort の
+	// **後** に index で filter するので、同着が 16 件目の境界に掛かると
+	// キー順が「そのリアクションを表示するかどうか」を決める。
+	// MkNoteDetailed.vue のリアクションタブは `Object.keys(...)` を素通しする
+	// のでキー順がそのまま出る。省リソース化の範囲で黙って入れてよい変更では
+	// ないので、従来どおり必ず marshal し直す。
 	data, err := json.Marshal(normalized)
 	if err != nil {
-		return raw
+		return raw, total
 	}
-	return data
+	return data, total
 }
 
 // NormalizeReactionWithLegacy normalizes a raw reaction string (colon-form +
@@ -591,20 +622,4 @@ func normalizeReactionKeys(raw datatypes.JSON) datatypes.JSON {
 // (#2058)。reactionAndUserPairCache は raw reaction を保持するため必須。
 func NormalizeReactionWithLegacy(raw string) string {
 	return normalizeReactionWithLegacy(raw)
-}
-
-// sumReactions decodes the reactions JSONB and sums all values.
-func sumReactions(raw datatypes.JSON) int {
-	if len(raw) == 0 {
-		return 0
-	}
-	var m map[string]float64
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return 0
-	}
-	total := 0
-	for _, v := range m {
-		total += int(v)
-	}
-	return total
 }
