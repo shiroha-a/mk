@@ -1835,6 +1835,466 @@ func TestResolveActor_TTLRefreshUpdatesDescription(t *testing.T) {
 	assert.Equal(t, "new bio", *repo.Profiles["existing"].Description)
 }
 
+// attachment はあるが PropertyValue が 1 件も無い actor (Mastodon が画像だけを
+// 付けるケース等)。fields は nil ではなく "[]" にする。nil を渡すと jsonb 列が
+// 空文字を受けて SQLSTATE 22P02 になり、UPDATE ごと落ちて description まで
+// 巻き添えになる。**refresh 経路でしか踏まないので、更新まで通して見る。**
+func TestResolveActor_ProfileExtrasNoPropertyValueAttachments(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/liam"
+	old := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing-liam"] = &model.User{
+		ID: "existing-liam", Username: "liam", URI: &uri, LastFetchedAt: &old,
+	}
+	repo.Profiles["existing-liam"] = &model.UserProfile{
+		UserID: "existing-liam", Fields: []byte("[]"),
+	}
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/liam",
+		"type": "Person",
+		"preferredUsername": "liam",
+		"inbox": "https://mstdn.example/users/liam/inbox",
+		"summary": "bio",
+		"attachment": [
+			{"type":"Image","url":"https://mstdn.example/img.png"},
+			"https://mstdn.example/plain-string"
+		],
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+
+	p := repo.Profiles["existing-liam"]
+	require.NotNil(t, p.Description, "description が巻き添えにならない")
+	assert.JSONEq(t, "[]", string(p.Fields))
+}
+
+// PropertyValue でも name / value が string でなければ落とす。upstream の
+// isPropertyValue は両方に string を要求する。
+func TestResolveActor_ProfileExtrasRequiresStringNameValue(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/mona"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/mona",
+		"type": "Person",
+		"preferredUsername": "mona",
+		"inbox": "https://mstdn.example/users/mona/inbox",
+		"attachment": [
+			{"type":"PropertyValue","name":"NumValue","value":42},
+			{"type":"PropertyValue","name":123,"value":"x"},
+			{"type":"PropertyValue","name":"NoValue"},
+			{"type":"PropertyValue","name":"  ","value":"blank name"},
+			{"type":"PropertyValue","name":"Blank","value":"   "},
+			{"type":"PropertyValue","name":"Good","value":"kept"}
+		],
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(repo.Profiles[user.ID].Fields, &fields))
+	require.Len(t, fields, 1, "string でない name / value と、trim 後に空になる entry は落とす")
+	assert.Equal(t, "Good", fields[0].Name)
+}
+
+// _misskey_summary は mfm.FromHTML を通らないので、NUL を明示的に落とす必要が
+// ある。ここが抜けると Misskey 系の actor で profile の書き込みごと落ちる。
+func TestResolveActor_DescriptionStripsNULFromMisskeySummary(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://misskey.example/users/nina"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://misskey.example/users/nina",
+		"type": "Person",
+		"preferredUsername": "nina",
+		"inbox": "https://misskey.example/users/nina/inbox",
+		"_misskey_summary": "bi\u0000o",
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	got := repo.Profiles[user.ID].Description
+	require.NotNil(t, got)
+	assert.Equal(t, "bio", *got)
+}
+
+// NUL を含む値で profile の書き込みごと落とさない (#2661)。JSON の NUL
+// エスケープは正当な入力で、Go の decoder は実 NUL を作る。PostgreSQL の
+// text 系列も jsonb もこれを拒否するので、同じ書き込みに乗っている
+// description まで巻き添えになり、create 経路では profile 行が 1 行も
+// 作られなくなる (以後の refresh も同じ create を繰り返して失敗し続ける)。
+func TestResolveActor_ProfileExtrasStripsNUL(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/ivan"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/ivan",
+		"type": "Person",
+		"preferredUsername": "ivan",
+		"inbox": "https://mstdn.example/users/ivan/inbox",
+		"summary": "bio",
+		"vcard:Address": "To\u0000kyo",
+		"attachment": [{"type":"PropertyValue","name":"We\u0000b","value":"exa\u0000mple.org"}],
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+
+	p := repo.Profiles[user.ID]
+	require.NotNil(t, p, "profile 行は作られる")
+	require.NotNil(t, p.Description, "description が巻き添えにならない")
+	require.NotNil(t, p.Location)
+	assert.Equal(t, "Tokyo", *p.Location)
+	assert.NotContains(t, *p.Location, "\x00")
+
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(p.Fields, &fields))
+	require.Len(t, fields, 1)
+	assert.Equal(t, "Web", fields[0].Name)
+	assert.Equal(t, "example.org", fields[0].Value)
+	assert.NotContains(t, string(p.Fields), "\x00")
+	// jsonb は NUL のエスケープ表現も拒否する。
+	assert.NotContains(t, string(p.Fields), `\u0000`)
+}
+
+// `type` が配列の PropertyValue も拾う。upstream の getApType は配列なら
+// 先頭要素を見るので、string 決め打ちだと取りこぼす。
+func TestResolveActor_ProfileExtrasAcceptsArrayType(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/judy"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/judy",
+		"type": "Person",
+		"preferredUsername": "judy",
+		"inbox": "https://mstdn.example/users/judy/inbox",
+		"attachment": [
+			{"type":["PropertyValue"],"name":"Web","value":"example.org"},
+			{"type":[],"name":"Empty","value":"x"},
+			{"type":[123],"name":"NonString","value":"x"}
+		],
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(repo.Profiles[user.ID].Fields, &fields))
+	require.Len(t, fields, 1)
+	assert.Equal(t, "Web", fields[0].Name)
+}
+
+// リモート側が追加項目を消したら、こちらでも消える。refresh のたびに無条件で
+// 3 列を書く (upstream の updatePerson も同じ) ので、消えることまで固定する。
+func TestResolveActor_TTLRefreshClearsRemovedProfileExtras(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/karl"
+	old := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing-karl"] = &model.User{
+		ID: "existing-karl", Username: "karl", URI: &uri, LastFetchedAt: &old,
+	}
+	loc, bday := "Kyoto", "1988-01-02"
+	repo.Profiles["existing-karl"] = &model.UserProfile{
+		UserID:   "existing-karl",
+		Location: &loc,
+		Birthday: &bday,
+		Fields:   []byte(`[{"name":"Old","value":"gone"}]`),
+	}
+	// 追加項目を持たない actor に差し替わった。
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/karl",
+		"type": "Person",
+		"preferredUsername": "karl",
+		"inbox": "https://mstdn.example/users/karl/inbox",
+		"publicKey": {"publicKeyPem": "REFRESHED"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+
+	p := repo.Profiles["existing-karl"]
+	assert.Nil(t, p.Location, "リモートが消したらこちらも消す")
+	assert.Nil(t, p.Birthday)
+	assert.JSONEq(t, "[]", string(p.Fields))
+}
+
+// リモート actor の location / birthday / fields を取り込む (#2661)。送信側
+// (renderer) は vcard:Address / vcard:bday / PropertyValue を出していたのに、
+// 受信側が description しか読んでおらず、本番のリモートユーザー 28265 件が
+// 全て空だった。
+func TestResolveActor_ImportsProfileExtras(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/carol"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/carol",
+		"type": "Person",
+		"preferredUsername": "carol",
+		"inbox": "https://mstdn.example/users/carol/inbox",
+		"vcard:Address": "Tokyo",
+		"vcard:bday": "1990-05-03",
+		"attachment": [
+			{"type": "PropertyValue", "name": "Web", "value": "<a href=\"https://carol.example\">carol.example</a>"},
+			{"type": "PropertyValue", "name": "Pronouns", "value": "she/her"},
+			{"type": "Note", "name": "ignored", "value": "not a PropertyValue"}
+		],
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+
+	p := repo.Profiles[user.ID]
+	require.NotNil(t, p)
+	require.NotNil(t, p.Location)
+	assert.Equal(t, "Tokyo", *p.Location)
+	require.NotNil(t, p.Birthday)
+	assert.Equal(t, "1990-05-03", *p.Birthday)
+
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(p.Fields, &fields))
+	require.Len(t, fields, 2, "PropertyValue でない attachment は無視する")
+	assert.Equal(t, "Web", fields[0].Name)
+	// value は HTML で来るので MFM に変換する (description と同じ理由)。
+	assert.NotContains(t, fields[0].Value, "<a ")
+	assert.Contains(t, fields[0].Value, "carol.example")
+	assert.Equal(t, "Pronouns", fields[1].Name)
+	assert.Equal(t, "she/her", fields[1].Value)
+}
+
+// 追加項目が無い actor では空のまま。fields は jsonb 列なので null ではなく
+// [] を書く (golden の fields は配列必須)。
+func TestResolveActor_ProfileExtrasAbsent(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/dave"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/dave",
+		"type": "Person",
+		"preferredUsername": "dave",
+		"inbox": "https://mstdn.example/users/dave/inbox",
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+
+	p := repo.Profiles[user.ID]
+	require.NotNil(t, p)
+	assert.Nil(t, p.Location)
+	assert.Nil(t, p.Birthday)
+	assert.JSONEq(t, "[]", string(p.Fields))
+}
+
+// 不正な vcard:bday は取り込まない。birthday 列は char(10) で、upstream も
+// `^\d{4}-\d{2}-\d{2}` にマッチしたものだけを使う。
+func TestResolveActor_ProfileExtrasRejectsBadBirthday(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		bday string
+		want *string
+	}{
+		{"empty", "", nil},
+		{"not a date", "yesterday", nil},
+		{"wrong order", "03-05-1990", nil},
+		{"short year", "90-05-03", nil},
+		// 先頭アンカーが効いていること。upstream の match も先頭からしか拾わない。
+		{"prefixed", "born 1990-05-03", nil},
+		{"leading space", " 1990-05-03", nil},
+		{"date only", "1990-05-03", strPtr("1990-05-03")},
+		// 時刻付きは先頭の日付だけを取る (upstream の match と同じ)。
+		{"with time", "1990-05-03T00:00:00Z", strPtr("1990-05-03")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			uri := "https://mstdn.example/users/eve"
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://mstdn.example/users/eve",
+				"type": "Person",
+				"preferredUsername": "eve",
+				"inbox": "https://mstdn.example/users/eve/inbox",
+				"vcard:bday": "` + tc.bday + `",
+				"publicKey": {"publicKeyPem": "PEM"}
+			}`
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+			user, err := r.ResolveActor(uri)
+			require.NoError(t, err)
+			got := repo.Profiles[user.ID].Birthday
+			if tc.want == nil {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, *tc.want, *got)
+		})
+	}
+}
+
+// location は trim して、空になったら NULL にする (divergence.md に書いた挙動)。
+// upstream は `person['vcard:Address'] ?? null` でそのまま保存する。
+func TestResolveActor_ProfileExtrasTrimsLocation(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		want *string
+	}{
+		{"surrounding space", " Tokyo ", strPtr("Tokyo")},
+		{"blank only", "   ", nil},
+		{"empty", "", nil},
+		// JSON のエスケープとして渡す (生のタブ / 改行は JSON 文字列に置けない)。
+		{"tab and newline", `\tKyoto\n`, strPtr("Kyoto")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			uri := "https://mstdn.example/users/olga"
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://mstdn.example/users/olga",
+				"type": "Person",
+				"preferredUsername": "olga",
+				"inbox": "https://mstdn.example/users/olga/inbox",
+				"vcard:Address": "` + tc.in + `",
+				"publicKey": {"publicKeyPem": "PEM"}
+			}`
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+			user, err := r.ResolveActor(uri)
+			require.NoError(t, err)
+			got := repo.Profiles[user.ID].Location
+			if tc.want == nil {
+				assert.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			assert.Equal(t, *tc.want, *got)
+		})
+	}
+}
+
+// location は varchar(128)。**upstream は truncate しない**が、mk-go では
+// 超過値をそのまま渡すと profile の書き込みごと落ちて description まで
+// 巻き添えになるので切る。
+func TestResolveActor_ProfileExtrasTruncatesLocation(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/frank"
+	long := strings.Repeat("あ", 200)
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/frank",
+		"type": "Person",
+		"preferredUsername": "frank",
+		"inbox": "https://mstdn.example/users/frank/inbox",
+		"vcard:Address": "` + long + `",
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	got := repo.Profiles[user.ID].Location
+	require.NotNil(t, got)
+	// rune 単位で切る (byte で切ると多バイト文字が壊れる)。
+	assert.Equal(t, 128, len([]rune(*got)))
+}
+
+// fields の件数上限。upstream の analyzeAttachments には上限が無いが、
+// ローカルの i/update は maxItems: 16 なのでリモートも揃える。
+func TestResolveActor_ProfileExtrasCapsFieldCount(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/grace"
+	var items []string
+	for i := range 40 {
+		items = append(items, fmt.Sprintf(`{"type":"PropertyValue","name":"n%d","value":"v%d"}`, i, i))
+	}
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/grace",
+		"type": "Person",
+		"preferredUsername": "grace",
+		"inbox": "https://mstdn.example/users/grace/inbox",
+		"attachment": [` + strings.Join(items, ",") + `],
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(repo.Profiles[user.ID].Fields, &fields))
+	assert.Len(t, fields, 16)
+}
+
+// 既存 remote user も refresh で back-fill される。本番の 28265 件はこの経路で
+// 埋まる (description が #1022 で同じ形をとったのと同様)。
+func TestResolveActor_TTLRefreshBackfillsProfileExtras(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/heidi"
+	old := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing-heidi"] = &model.User{
+		ID: "existing-heidi", Username: "heidi", URI: &uri, LastFetchedAt: &old,
+	}
+	// 取り込み以前に作られた profile 行 (追加項目が空)。
+	desc := "bio"
+	repo.Profiles["existing-heidi"] = &model.UserProfile{
+		UserID: "existing-heidi", Description: &desc,
+	}
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/heidi",
+		"type": "Person",
+		"preferredUsername": "heidi",
+		"inbox": "https://mstdn.example/users/heidi/inbox",
+		"vcard:Address": "Osaka",
+		"vcard:bday": "2001-12-24",
+		"attachment": [{"type":"PropertyValue","name":"Site","value":"example.org"}],
+		"publicKey": {"publicKeyPem": "REFRESHED"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+
+	p := repo.Profiles["existing-heidi"]
+	require.NotNil(t, p.Location)
+	assert.Equal(t, "Osaka", *p.Location)
+	require.NotNil(t, p.Birthday)
+	assert.Equal(t, "2001-12-24", *p.Birthday)
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(p.Fields, &fields))
+	require.Len(t, fields, 1)
+	assert.Equal(t, "Site", fields[0].Name)
+}
+
 // TestResolveActor_TTLRefreshConvertsHTMLDescription guards #1140 on the
 // refresh path: 既存 remote actor が 旧 mk-go (生 HTML 保存) で取り込まれて
 // いた場合、次の TTL refresh で MFM 化されて natural healing する。本 PR で

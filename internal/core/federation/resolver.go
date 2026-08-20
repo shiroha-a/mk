@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/net/idna"
 	"golang.org/x/sync/singleflight"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -771,10 +773,19 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	// `user_profile.description` に取り込む (#1022)。profile 行を作成しないと
 	// 既存の Description 取得経路が常に NULL を返してしまい、frontend で
 	// 自己紹介欄が空のまま表示される regression につながる。
+	//
+	// あわせて location / birthday / fields も取り込む (#2661)。送信側
+	// (renderer) は vcard:Address / vcard:bday / PropertyValue を出していたが、
+	// 受信側が description しか読んでおらず、リモートユーザーのプロフィール
+	// 追加項目が常に空になっていた。
 	hostCopy := host
+	extras := extractRemoteProfileExtras(actor)
 	profile := &model.UserProfile{
 		UserID:      user.ID,
 		Description: extractRemoteDescription(actor),
+		Location:    extras.location,
+		Birthday:    extras.birthday,
+		Fields:      extras.fields,
 		UserHost:    &hostCopy,
 	}
 	if err := r.userRepo.CreateProfile(profile); err != nil {
@@ -796,6 +807,162 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		r.updateFeatured(user)
 	}
 	return user, nil
+}
+
+// Limits applied when importing a remote actor's profile extras.
+//
+// **upstream は location を truncate していない**が、mk-go の
+// user_profile.location は varchar(128) (migration/000001_initial.up.sql)。
+// 超過値をそのまま渡すと insert / update ごと落ちて、同じ書き込みに乗っている
+// description まで巻き添えになる。description が 2048 文字で切っているのと
+// 同じ形で切る。
+//
+// fields の件数も upstream の analyzeAttachments には上限が無い。ローカルの
+// i/update は maxItems: 16 なので、リモートも同じ上限に揃える。上限が無いと
+// 任意件数を送り込める。
+const (
+	maxRemoteLocationLen = 128
+	maxRemoteFields      = 16
+)
+
+// sanitizeRemoteText strips NUL bytes from a remote-supplied string.
+//
+// **NUL は書き込みごと落とす。** JSON の NUL エスケープは正当な入力で、Go の
+// decoder は実 NUL バイトを作る。PostgreSQL の text 系列はこれを受け付けず
+// (実測 SQLSTATE 08P01)、jsonb も拒否する (22P05)。
+//
+// 同じ書き込みに乗っている description まで巻き添えになり、しかも create 経路
+// では **user_profile 行が 1 行も作られない** (以後の refresh も同じ create を
+// 繰り返して失敗し続ける)。長さの truncate と同じ理由で、ここで落とす。
+//
+// 適用先は「列へ生で行く可能性のある文字列」すべて。summary 経由の
+// description は mfm.FromHTML が NUL を落とすが、**_misskey_summary は
+// FromHTML を通らない** ので description も対象に含める。
+func sanitizeRemoteText(s string) string {
+	if !strings.ContainsRune(s, 0) {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == 0 {
+			return -1
+		}
+		return r
+	}, s)
+}
+
+// apTypeOf returns an AP object's `type`, tolerating the array form.
+//
+// upstream の getApType は `type` が配列なら先頭要素を見る
+// (`activitypub/type.ts` の getApType / isPropertyValue)。string 決め打ちに
+// すると `"type": ["PropertyValue"]` を送る実装を取りこぼす。
+func apTypeOf(m map[string]any) string {
+	switch t := m["type"].(type) {
+	case string:
+		return t
+	case []any:
+		if len(t) == 0 {
+			return ""
+		}
+		first, _ := t[0].(string)
+		return first
+	}
+	return ""
+}
+
+// birthdayPattern matches the leading YYYY-MM-DD of a vcard:bday value.
+// upstream ApPersonService は `person['vcard:bday']?.match(/^\d{4}-\d{2}-\d{2}/)`
+// で先頭だけを取る (= 時刻付きでも日付部分を使う)。
+var birthdayPattern = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}`)
+
+// remoteProfileExtras holds the profile columns imported from a remote actor
+// besides the description.
+type remoteProfileExtras struct {
+	location *string
+	birthday *string
+	fields   datatypes.JSON
+}
+
+// extractRemoteProfileExtras maps the actor's vcard / attachment properties to
+// user_profile columns, mirroring upstream ApPersonService:
+//
+// **upstream との乖離**: 空文字 / 空白のみの vcard:Address は NULL にする
+// (upstream はそのまま保存する)。ローカルの i/update と同じ正規化。
+//
+//	fields:   analyzeAttachments(person.attachment ?? [])
+//	birthday: person['vcard:bday']?.match(/^\d{4}-\d{2}-\d{2}/)?.[0] ?? null
+//	location: person['vcard:Address'] ?? null
+func extractRemoteProfileExtras(actor *activitypub.Person) remoteProfileExtras {
+	var out remoteProfileExtras
+	if loc := strings.TrimSpace(sanitizeRemoteText(actor.VcardAddress)); loc != "" {
+		if runes := []rune(loc); len(runes) > maxRemoteLocationLen {
+			loc = string(runes[:maxRemoteLocationLen])
+		}
+		out.location = &loc
+	}
+	if bday := birthdayPattern.FindString(actor.VcardBday); bday != "" {
+		out.birthday = &bday
+	}
+	out.fields = extractRemoteFields(actor.Attachment)
+	return out
+}
+
+// extractRemoteFields converts the actor's `attachment` array into the
+// [{name, value}] shape stored in user_profile.fields.
+//
+// upstream analyzeAttachments は isPropertyValue (getApType が "PropertyValue"
+// かつ name が string かつ value を持ち string) で絞り、value を fromHtml で
+// MFM に変換する。value は Mastodon 等が HTML (`<a href=...>`) で送るため、
+// 素通しすると frontend でタグがリテラル表示される (description と同じ問題)。
+//
+// **upstream との乖離**: trim して name / value のどちらかが空になる entry は
+// 落とす。upstream の analyzeAttachments は trim も空排除もしないが、ローカルの
+// i/update (core/user) が同じ正規化をしているので揃える。
+//
+// 返り値は常に non-nil。取り込むものが無ければ "[]" を返して、jsonb 列を
+// null にしない (golden の fields は配列必須)。
+func extractRemoteFields(attachments []any) datatypes.JSON {
+	empty := datatypes.JSON([]byte("[]"))
+	if len(attachments) == 0 {
+		return empty
+	}
+	type field struct {
+		Name  string `json:"name"`
+		Value string `json:"value"`
+	}
+	out := make([]field, 0, min(len(attachments), maxRemoteFields))
+	for _, raw := range attachments {
+		m, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if apTypeOf(m) != "PropertyValue" {
+			continue
+		}
+		name, nameOK := m["name"].(string)
+		value, valueOK := m["value"].(string)
+		if !nameOK || !valueOK {
+			continue
+		}
+		name = strings.TrimSpace(sanitizeRemoteText(name))
+		// FromHTML は末尾で TrimSpace 済み。NUL も x/net/html のトークナイザが
+		// 落とすが、経路の前提に依存しないよう明示的に落とす。
+		value = mfm.FromHTML(sanitizeRemoteText(value))
+		if name == "" || value == "" {
+			continue
+		}
+		out = append(out, field{Name: name, Value: value})
+		if len(out) >= maxRemoteFields {
+			break
+		}
+	}
+	if len(out) == 0 {
+		return empty
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		return empty
+	}
+	return datatypes.JSON(data)
 }
 
 // extractRemoteDescription returns the actor's bio mapped to
@@ -820,6 +987,7 @@ func extractRemoteDescription(actor *activitypub.Person) *string {
 		// そのまま渡すと escape されてタグがリテラル表示される。
 		raw = mfm.FromHTML(actor.Summary)
 	}
+	raw = sanitizeRemoteText(raw)
 	if raw == "" {
 		return nil
 	}
@@ -988,19 +1156,32 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	if r.hashtagHook != nil {
 		r.hashtagHook.UpdateUsertags(existing.ID, false, oldTags, []string(tags))
 	}
-	// UserProfile.Description (#1022)。actor.Summary が変わった場合に追従する。
-	// profile 行が無いケース (= 本 fix 以前に取り込まれた remote user) は
-	// back-fill する。Update / Create のいずれも best-effort で fail しても
-	// user 更新は維持する。
+	// UserProfile の description (#1022) と location / birthday / fields (#2661)。
+	// actor 側が変わった場合に追従する。profile 行が無いケース (= それぞれの
+	// fix 以前に取り込まれた remote user) は back-fill する。Update / Create の
+	// いずれも best-effort で fail しても user 更新は維持する。
 	desc := extractRemoteDescription(actor)
+	extras := extractRemoteProfileExtras(actor)
 	if _, err := r.userRepo.FindProfileByUserID(existing.ID); err != nil {
 		_ = r.userRepo.CreateProfile(&model.UserProfile{
 			UserID:      existing.ID,
 			Description: desc,
+			Location:    extras.location,
+			Birthday:    extras.birthday,
+			Fields:      extras.fields,
 			UserHost:    existing.Host,
 		})
 	} else {
-		_ = r.userRepo.UpdateProfile(existing.ID, map[string]any{"description": desc})
+		// fields は jsonb 列に string で渡す。**素の []byte を渡してはいけない**
+		// (実測 SQLSTATE 22P02 で UPDATE ごと落ち、同じ書き込みの description も
+		// 巻き添えになる)。datatypes.JSON は driver.Valuer を実装しているので
+		// そのままでも書けるが、値の形を呼び出し側で確定させておく。
+		_ = r.userRepo.UpdateProfile(existing.ID, map[string]any{
+			"description": desc,
+			"location":    extras.location,
+			"birthday":    extras.birthday,
+			"fields":      string(extras.fields),
+		})
 	}
 	r.cachePublicKey(existing.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
 	r.cacheAssertionMethods(existing.ID, actor.ID, actor.AssertionMethod)

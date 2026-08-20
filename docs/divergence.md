@@ -475,6 +475,10 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | 項目 | upstream | mk-go |
 |---|---|---|
 | リモート actor の `movedTo` 消滅 | `movedToUri: person.movedTo ?? null` で null に戻す | **既存値を温存する** (削除は追わない)。一時的な欠落でクリアすると、次の取得が「無→有」の遷移に見えて `movedAt` が打ち直され、移行の時間窓 (2h / 14 日) の基準が壊れるため。移行の取り消しに追従できない代わりに基準が安定する (#2412) |
+| リモート actor の `vcard:Address` の長さ | truncate せずそのまま保存 | **128 文字 (rune) で切る**。`user_profile.location` は varchar(128) で、超過値を渡すと insert / update ごと失敗し、同じ書き込みに乗っている `description` まで巻き添えになる (create 経路では profile 行が 1 行も作られず、以後の refresh も同じ失敗を繰り返す)。description の 2048 文字 truncate と同じ扱い (#2661) |
+| リモート actor の profile `fields` の件数 | `analyzeAttachments` に上限なし | **16 件で打ち切る**。ローカルの `i/update` が `maxItems: 16` なので揃える。上限が無いと任意件数を送り込める (#2661) |
+| リモート actor の `vcard:Address` / profile `fields` の空白 | trim も空排除もせず保存 | **trim して空なら NULL / entry ごと落とす**。ローカルの `i/update` と同形の正規化 (#2661) |
+| リモート actor の profile 由来文字列に含まれる NUL | **未処理** (upstream も同じ理由で書き込みが失敗する) | **除去する**。PostgreSQL の text は NUL を受け付けず (SQLSTATE 08P01)、jsonb も拒否する (22P05)。同じ書き込みに乗っている他の列まで巻き添えになり、create 経路では `user_profile` 行が 1 行も作られない (以後の refresh も同じ失敗を繰り返す)。対象は `vcard:Address` / profile `fields` の name・value / `description` (`_misskey_summary` は `mfm.FromHTML` を通らない)。`user.name` / `preferredUsername` は未対応 (#2662) (#2661) |
 | リモートメディアのキャッシュ | `cacheRemoteFiles` が真なら実体を自 Drive へ保存 | **保存しない** (相手の削除の権利 / 違法コンテンツ保持のリスク回避)。詳細と弱点は §5.5 |
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |

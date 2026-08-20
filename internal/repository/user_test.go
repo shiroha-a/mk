@@ -146,6 +146,72 @@ func TestUserRepository_FindByUsernameLower_Remote(t *testing.T) {
 	assert.Equal(t, &host, found.Host)
 }
 
+// federation の remote profile 取り込み (#2661) が UpdateProfile へ渡す 4 キーを
+// **実 PostgreSQL** に通す。mock は jsonb 列に []byte を渡しても受けてしまうが、
+// 本物は SQLSTATE 22P02 で UPDATE ごと落ち、同じ書き込みの description まで
+// 巻き添えになる。値の形はここでしか固定できない。
+func TestUserRepository_UpdateProfile_RemoteExtras(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	user := insertTestUser(t, "u_rpx_1", "remoteextras")
+	defer cleanupUser(t, user.ID)
+	require.NoError(t, testDB.Create(&model.UserProfile{
+		UserID: user.ID,
+		Fields: datatypes.JSON([]byte("[]")),
+	}).Error)
+
+	desc := "bio"
+	loc := "Tokyo"
+	bday := "1990-05-03"
+	require.NoError(t, repo.UpdateProfile(user.ID, map[string]any{
+		"description": &desc,
+		"location":    &loc,
+		"birthday":    &bday,
+		"fields":      `[{"name":"Web","value":"example.org"}]`,
+	}))
+
+	got, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Description)
+	assert.Equal(t, desc, *got.Description)
+	require.NotNil(t, got.Location)
+	assert.Equal(t, loc, *got.Location)
+	require.NotNil(t, got.Birthday)
+	// birthday は char(10)。padding されずちょうど 10 文字で返る。
+	assert.Equal(t, bday, *got.Birthday)
+	assert.JSONEq(t, `[{"name":"Web","value":"example.org"}]`, string(got.Fields))
+
+	// nil / [] でクリアできる (リモートが消したケース)。
+	require.NoError(t, repo.UpdateProfile(user.ID, map[string]any{
+		"location": (*string)(nil),
+		"birthday": (*string)(nil),
+		"fields":   "[]",
+	}))
+	got, err = repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Nil(t, got.Location)
+	assert.Nil(t, got.Birthday)
+	assert.JSONEq(t, "[]", string(got.Fields))
+}
+
+// location は varchar(128)。取り込み側が rune 128 で切っているので、
+// ちょうど 128 文字の多バイト文字列が入ることを実物で確かめる。
+func TestUserRepository_UpdateProfile_LocationAtColumnLimit(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	user := insertTestUser(t, "u_rpx_2", "loclimit")
+	defer cleanupUser(t, user.ID)
+	require.NoError(t, testDB.Create(&model.UserProfile{
+		UserID: user.ID,
+		Fields: datatypes.JSON([]byte("[]")),
+	}).Error)
+
+	loc := strings.Repeat("\u3042", 128)
+	require.NoError(t, repo.UpdateProfile(user.ID, map[string]any{"location": &loc}))
+	got, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Location)
+	assert.Equal(t, 128, len([]rune(*got.Location)))
+}
+
 func TestUserRepository_FindProfileByUserID(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	user := insertTestUser(t, "u_fpb_1", "profileuser")

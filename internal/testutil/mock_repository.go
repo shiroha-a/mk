@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"encoding/json"
 	"fmt"
 	"regexp"
 	"sort"
@@ -853,15 +854,29 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 				p.HardMutedWords = val
 			}
 		case "fields":
-			// production の core/user.UpdateProfile は trim + 空 entry 排除
-			// 後の JSON を `string(json.Marshal(...))` で渡す。テストでは
-			// []byte / string どちらでも受け取れるようにしておく (#956)。
-			switch val := v.(type) {
-			case string:
-				p.Fields = []byte(val)
-			case []byte:
-				p.Fields = append([]byte(nil), val...)
+			// **PostgreSQL と同じだけ厳しくする。** production の call site は
+			// core/user.UpdateProfile と federation の remote profile 取り込みの
+			// 2 つで、どちらも `string(json.Marshal(...))` を渡す。jsonb 列は
+			// 素の []byte を SQLSTATE 22P02 で、NULL を 23502 で拒否し、UPDATE ごと
+			// 落として同じ書き込みの他の列まで巻き添えにするので、mock がそれを
+			// 受けると実 DB でしか出ない壊れ方を隠してしまう (#2661)。空文字や
+			// 不正な JSON も同じ理由で弾く。
+			//
+			// **この厳格化は fields 列だけ。** 同じ関数の他の jsonb 列
+			// (mutedWords / hardMutedWords / clientData / mutedInstances /
+			// emailNotificationTypes / notificationRecieveConfig / room /
+			// avatarDecorations) は今も []byte を受けるので、同じ壊れ方を
+			// 隠したままになっている。
+			val, ok := v.(string)
+			if !ok {
+				panic(fmt.Sprintf("mock: profile fields must be a string, got %T "+
+					"(the jsonb column rejects raw []byte and NULL)", v))
 			}
+			if !json.Valid([]byte(val)) {
+				panic(fmt.Sprintf("mock: profile fields must be valid JSON, got %q "+
+					"(the jsonb column rejects it with SQLSTATE 22P02)", val))
+			}
+			p.Fields = []byte(val)
 		case "clientData":
 			switch val := v.(type) {
 			case string:
