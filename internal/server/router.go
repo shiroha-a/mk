@@ -2572,14 +2572,24 @@ func (s *Server) setupRoutes() {
 	// CachedMetaRepository を invalidate する。upstream の
 	// globalEventService.publishInternalEvent('metaUpdated'/'policiesUpdated') 相当で、
 	// update-meta / update-default-policies 等あらゆる meta 更新を 1 箇所で伝播する。
+	//
+	// /api/meta は serialize 済みレスポンスも持つ (#2649) ので、meta 行の
+	// cache を落とす両方の経路 (自 worker の更新 / 他 worker からの受信) で
+	// あわせて落とす。**どちらも meta 行の cache を先に落とすこと。** 逆順だと、
+	// response cache を落とした直後に走った組み立てが古い meta 行を読んで
+	// しまう (その窓は respCache の世代チェックでは塞げない)。hook 側は
+	// CachedMetaRepository.Update が invalidate してから notifyUpdate する
+	// 実装がその順序を保証しており、subscriber 側はここの並び順で保証する。
 	internalPubSub := event.NewPubSubService(s.redis.Pubsub, "internal:")
 	cachedMeta.SetInvalidationHook(func() {
+		metaHandler.InvalidateResponseCache()
 		if err := internalPubSub.Publish(context.Background(), "metaUpdated", struct{}{}); err != nil {
 			slog.Warn("meta: publish metaUpdated failed", "err", err)
 		}
 	})
 	internalPubSub.Subscribe(context.Background(), "metaUpdated", func([]byte) {
 		cachedMeta.Invalidate()
+		metaHandler.InvalidateResponseCache()
 	})
 
 	// pollVoted / reacted / unreacted / deleted を noteStream:<id> に publish
@@ -2987,6 +2997,8 @@ func (s *Server) setupRoutes() {
 	// catalog 更新を entity 側 packer に即時反映する (#2258)。TTL 任せだと
 	// 作成直後に装着された decoration が lookup miss で silent drop される。
 	adminHandler.SetAvatarDecorationInvalidator(avatarDecorationResolver)
+	// admin/ad/* の変更を /api/meta の response cache に反映する (#2649)。
+	adminHandler.SetMetaResponseInvalidator(metaHandler)
 	// admin/suspend-user / admin/unsuspend-user / admin/accounts/delete が
 	// target user の全 token cache entry を即時 invalidate するために、
 	// auth middleware を inject する (#965)。未配線時は 30 秒 cache TTL 待ち

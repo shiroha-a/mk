@@ -57,6 +57,7 @@ func (h *Handler) AdCreate(c echo.Context) error {
 	if err := h.adRepo.Create(ad); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	h.invalidateMetaResponseCache()
 	h.logModeration(c, moderationlog.LogCreateAd, map[string]any{
 		"adId": ad.ID,
 		"ad":   ad,
@@ -109,11 +110,15 @@ func (h *Handler) AdDelete(c echo.Context) error {
 	}
 	// log info に snapshot を含めるため削除前に取得 (失敗時は log を諦める)
 	snapshot, _ := h.adRepo.FindByID(req.ID)
-	if err := h.adRepo.Delete(req.ID); err == nil && snapshot != nil {
-		h.logModeration(c, moderationlog.LogDeleteAd, map[string]any{
-			"adId": req.ID,
-			"ad":   snapshot,
-		})
+	if err := h.adRepo.Delete(req.ID); err == nil {
+		// snapshot が取れたかどうかは moderation log の話で、cache とは無関係。
+		h.invalidateMetaResponseCache()
+		if snapshot != nil {
+			h.logModeration(c, moderationlog.LogDeleteAd, map[string]any{
+				"adId": req.ID,
+				"ad":   snapshot,
+			})
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }
@@ -229,6 +234,7 @@ func (h *Handler) AdUpdate(c echo.Context) error {
 	if err := h.adRepo.UpdateFields(req.ID, fields); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	h.invalidateMetaResponseCache()
 	if after, err := h.adRepo.FindByID(req.ID); err == nil && after != nil {
 		h.logModeration(c, moderationlog.LogUpdateAd, map[string]any{
 			"adId":   req.ID,

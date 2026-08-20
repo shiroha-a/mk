@@ -1,6 +1,7 @@
 package meta
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -29,6 +30,10 @@ type Handler struct {
 	// chunkedUpload は分割アップロード (#2313) の能力告知。nil / ok=false なら
 	// field ごと出さない。
 	chunkedUpload ChunkedUploadCapability
+	// respCache は serialize 済みレスポンスのキャッシュ (#2649)。
+	// 上の依存を差し替える SetXxx は、レスポンスの中身が変わるので
+	// いずれも respCache を落とす。
+	respCache metaResponseCache
 }
 
 // NewHandler creates a new meta Handler.
@@ -41,6 +46,7 @@ func NewHandler(cfg *config.Config, metaRepo repository.MetaRepository) *Handler
 // without ad wiring keep passing.
 func (h *Handler) SetAdRepo(r repository.AdRepository) {
 	h.adRepo = r
+	h.respCache.invalidate()
 }
 
 // SetProxyAccountResolver wires the resolver used to populate the
@@ -48,6 +54,7 @@ func (h *Handler) SetAdRepo(r repository.AdRepository) {
 // pre-setup instances), the field is reported as null.
 func (h *Handler) SetProxyAccountResolver(r ProxyAccountResolver) {
 	h.proxyAccountName = r
+	h.respCache.invalidate()
 }
 
 // ChunkedUploadCapability describes the chunked upload support advertised on
@@ -61,6 +68,7 @@ type ChunkedUploadCapability func() (chunkSize int64, ok bool)
 // Misskey never emits it either.
 func (h *Handler) SetChunkedUploadCapability(f ChunkedUploadCapability) {
 	h.chunkedUpload = f
+	h.respCache.invalidate()
 }
 
 // chunkedUploadInfo returns the value of the additive `chunkedUpload` field,
@@ -87,9 +95,53 @@ func (h *Handler) Meta(c echo.Context) error {
 	_ = c.Bind(&params)
 	detail := params.Detail == nil || *params.Detail
 
+	body, gen := h.respCache.get(detail)
+	if body == nil {
+		resp, err := h.buildMeta(detail)
+		if err != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
+		marshaled, err := json.Marshal(resp)
+		if err != nil {
+			// ここに来る値は c.JSON でも書けないが、挙動を変えないため従来どおり
+			// echo に委ねる。
+			return c.JSON(http.StatusOK, resp)
+		}
+		// 本番の serializer (server.fastJSONSerializer) も echo 標準も
+		// json.Encoder.Encode を使うので末尾に改行が付く。cache 経由でも bytes を
+		// 揃えるためここで足す。Content-Type は c.JSON も c.JSONBlob も
+		// MIMEApplicationJSON で同じ。
+		body = append(marshaled, '\n')
+		h.respCache.putIfCurrent(detail, body, gen)
+	}
+
+	// echo は ?pretty / Debug のとき indent 付きで書く (context.JSON)。cache は
+	// compact な bytes しか持たないので、ここで同じ形に整える。**cache を
+	// 素通しにはしない**: /api/meta は未認証で叩けて per-endpoint の rate limit も
+	// 無いので、素通しにすると ?pretty を付けるだけで誰でもキャッシュを外せる。
+	if _, pretty := c.QueryParams()["pretty"]; c.Echo().Debug || pretty {
+		var buf bytes.Buffer
+		if err := json.Indent(&buf, body, "", metaPrettyIndent); err != nil {
+			return c.JSONBlob(http.StatusOK, body)
+		}
+		return c.JSONBlob(http.StatusOK, buf.Bytes())
+	}
+	return c.JSONBlob(http.StatusOK, body)
+}
+
+// buildMeta assembles the /api/meta response map. Split out of Meta so the
+// response can be marshalled once and cached (#2649).
+//
+// レスポンスは meta 行 / 起動時 config / ads / proxy account /
+// chunkedUpload の能力告知 / detail にしか依存せず、リクエストごとに変わる要素が
+// 無いので丸ごとキャッシュできる。**chunkedUpload も含めて runtime に変わりうる
+// ものは全て meta 行に帰着する** (能力告知の closure は metaRepo.Fetch() を読み、
+// ストレージ backend も MetaStorage が meta から決める) ので、meta の
+// invalidation で覆える。
+func (h *Handler) buildMeta(detail bool) (map[string]any, error) {
 	m, err := h.metaRepo.Fetch()
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		return nil, err
 	}
 
 	// upstream MetaEntityService と同じく policies は { ...DEFAULT_POLICIES,
@@ -230,10 +282,10 @@ func (h *Handler) Meta(c echo.Context) error {
 				lite[k] = v
 			}
 		}
-		return c.JSON(http.StatusOK, lite)
+		return lite, nil
 	}
 
-	return c.JSON(http.StatusOK, resp)
+	return resp, nil
 }
 
 // Ping returns a simple pong response.

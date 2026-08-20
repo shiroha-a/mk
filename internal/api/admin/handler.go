@@ -139,6 +139,7 @@ type Handler struct {
 	// (*core/webhook.Service)。nil なら発火しない (#1723)。
 	systemWebhookDispatcher SystemWebhookDispatcher
 	adRepo                  repository.AdRepository
+	metaResponseInvalidator MetaResponseCacheInvalidator
 	avatarDecoRepo          repository.AvatarDecorationRepository
 	avatarDecoInvalidator   AvatarDecorationCacheInvalidator
 	inviteRepo              repository.RegistrationTicketRepository
@@ -371,6 +372,33 @@ func (h *Handler) SetSystemWebhookDispatcher(d SystemWebhookDispatcher) {
 
 // SetAdRepo attaches an AdRepository for admin/ad/*.
 func (h *Handler) SetAdRepo(r repository.AdRepository) { h.adRepo = r }
+
+// MetaResponseCacheInvalidator drops the cached /api/meta response bodies.
+// Implemented by api/meta.Handler (#2649). `ads` は /api/meta にそのまま載るので、
+// admin 側で ad を作り替えたら落とす必要がある。
+//
+// **これは process-local。** meta 行には internal:metaUpdated の cross-worker
+// 経路がある (#1740) が、ads には無いので、複数プロセス構成では mutation を
+// 処理した worker 以外は最大 TTL 分だけ古い ads を返す。TTL が数秒なので
+// そこで頭打ちになる。
+type MetaResponseCacheInvalidator interface {
+	InvalidateResponseCache()
+}
+
+// SetMetaResponseInvalidator wires the /api/meta response cache invalidator so
+// ad mutations are reflected immediately in the worker that handled them.
+func (h *Handler) SetMetaResponseInvalidator(inv MetaResponseCacheInvalidator) {
+	h.metaResponseInvalidator = inv
+}
+
+// invalidateMetaResponseCache is a nil-safe helper for the ad mutation
+// handlers. noop when the invalidator is not wired (unit tests).
+func (h *Handler) invalidateMetaResponseCache() {
+	if h.metaResponseInvalidator == nil {
+		return
+	}
+	h.metaResponseInvalidator.InvalidateResponseCache()
+}
 
 // AvatarDecorationCacheInvalidator drops the process-wide avatar decoration
 // catalog cache used by entity.PackUserLite. Implemented by

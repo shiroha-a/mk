@@ -102,6 +102,58 @@ func TestAdCreate_RepoError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
+// fakeMetaResponseInvalidator counts InvalidateResponseCache calls.
+type fakeMetaResponseInvalidator struct{ calls int }
+
+func (f *fakeMetaResponseInvalidator) InvalidateResponseCache() { f.calls++ }
+
+// ad の変更は /api/meta の `ads` に載るので、response cache を落とす (#2649)。
+// 落とし忘れると TTL 分だけ古い ads が返り続ける。
+func TestAd_MutationsInvalidateMetaResponseCache(t *testing.T) {
+	t.Run("create", func(t *testing.T) {
+		h, _ := setupAdHandler(t)
+		inv := &fakeMetaResponseInvalidator{}
+		h.SetMetaResponseInvalidator(inv)
+		rec := doPost(h.AdCreate, `{"url":"https://x","imageUrl":"https://y"}`, adminUser)
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, 1, inv.calls)
+	})
+
+	t.Run("create failure does not invalidate", func(t *testing.T) {
+		h, repo := setupAdHandler(t)
+		repo.CreateErr = assertError{}
+		inv := &fakeMetaResponseInvalidator{}
+		h.SetMetaResponseInvalidator(inv)
+		rec := doPost(h.AdCreate, `{"url":"https://x","imageUrl":"https://y"}`, adminUser)
+		require.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.Equal(t, 0, inv.calls)
+	})
+
+	t.Run("update", func(t *testing.T) {
+		h, _ := setupAdHandler(t, &model.Ad{ID: "ad1", URL: "https://x", Place: "square"})
+		inv := &fakeMetaResponseInvalidator{}
+		h.SetMetaResponseInvalidator(inv)
+		rec := doPost(h.AdUpdate, `{"id":"ad1","memo":"m"}`, adminUser)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		assert.Equal(t, 1, inv.calls)
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		h, _ := setupAdHandler(t, &model.Ad{ID: "ad1", URL: "https://x", Place: "square"})
+		inv := &fakeMetaResponseInvalidator{}
+		h.SetMetaResponseInvalidator(inv)
+		rec := doPost(h.AdDelete, `{"id":"ad1"}`, adminUser)
+		require.Equal(t, http.StatusNoContent, rec.Code)
+		assert.Equal(t, 1, inv.calls)
+	})
+
+	t.Run("unwired invalidator does not panic", func(t *testing.T) {
+		h, _ := setupAdHandler(t)
+		rec := doPost(h.AdCreate, `{"url":"https://x","imageUrl":"https://y"}`, adminUser)
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+}
+
 func TestAdList_Paginated(t *testing.T) {
 	ads := make([]*model.Ad, 5)
 	for i := 0; i < 5; i++ {

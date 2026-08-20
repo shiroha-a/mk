@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -38,6 +39,37 @@ func TestFastJSONSerializer_SerializeMatchesStdlib(t *testing.T) {
 	assert.Equal(t, "alice", got["name"])
 	assert.Equal(t, float64(42), got["n"])
 	assert.Equal(t, true, got["ok"])
+}
+
+// /api/meta は serialize 済みの bytes をキャッシュして c.JSONBlob で返す
+// (#2649)。その bytes は `json.Marshal(v)` に改行を足したもので、`?pretty` は
+// それを `json.Indent` で整形したものとして組み立てている。つまり
+// **この serializer の出力形式がその前提そのもの**なので、ここで固定する。
+//
+// gate を meta 側に置けないのは、api/meta が internal/server を import できない
+// ため (逆向きの依存)。serializer を差し替えるときはこのテストが落ちる。
+func TestFastJSONSerializer_OutputIsMarshalPlusNewline(t *testing.T) {
+	payload := map[string]any{
+		"name": "alice",
+		"n":    42,
+		"ok":   true,
+		"html": "<a>&</a>", // HTML escape の有無まで見る
+		"arr":  []any{1, nil, "x"},
+		"obj":  map[string]any{"k": "v"},
+	}
+
+	c, rec := withSerializer("")
+	require.NoError(t, c.JSON(http.StatusOK, payload))
+	want, err := json.Marshal(payload)
+	require.NoError(t, err)
+	assert.Equal(t, string(append(want, '\n')), rec.Body.String())
+
+	// ?pretty 相当。echo の defaultIndent は 2 スペース。
+	c2, rec2 := withSerializer("")
+	require.NoError(t, c2.JSONPretty(http.StatusOK, payload, "  "))
+	var indented bytes.Buffer
+	require.NoError(t, json.Indent(&indented, append(want, '\n'), "", "  "))
+	assert.Equal(t, indented.String(), rec2.Body.String())
 }
 
 func TestFastJSONSerializer_SerializeIndent(t *testing.T) {

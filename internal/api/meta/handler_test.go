@@ -17,6 +17,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// newTestHandler returns a handler with a mock meta repository.
+//
+// **同じ handler で Meta を 2 回呼ぶと 2 回目は response cache に当たる**
+// (#2649)。「状態を変えてもう一度呼び、field が変わったことを確認する」型の
+// テストを書くときは、間に h.InvalidateResponseCache() を挟むか handler を
+// 作り直すこと。挟まないと cache が返って偽陽性で緑になる。
 func newTestHandler() (*Handler, *testutil.MockMetaRepository) {
 	cfg := &config.Config{
 		Version: config.MisskeyVersion,
