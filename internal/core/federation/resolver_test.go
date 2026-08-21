@@ -6035,6 +6035,38 @@ func TestExtractAttachments_InheritsNoteSensitive(t *testing.T) {
 	assert.False(t, docs2[0].Sensitive)
 }
 
+// 添付の `icon.type` も配列形を受ける (upstream `getApType` と同じ head 方式)。
+// **現状 `Document.Icon.Type` を読む下流は無く**、thumbnail は
+// `doc.Icon.URL` だけで決まる (resolver.go の upsertAttachments)。1 件目は
+// その意味で予防的で、parse 結果を直接固定している (#2665)。
+//
+// **2 件目は消さないこと。** こちらが固定しているのは icon 固有の値ではなく
+// 共有ヘルパー `apTypeOf` の head 方式で、これは添付本体の type 判定
+// (`extractAttachments` の switch / PropertyValue 判定) と同じ関数。走査方式に
+// すると `{"type": [42, "Image"]}` の添付が skip されずに取り込まれるように
+// なる = 観測可能な挙動が変わるが、ツリー内でそれを落とすのはこのテストだけ。
+func TestExtractAttachments_ArrayIconType(t *testing.T) {
+	docs := federation.ExtractAttachments([]any{
+		map[string]any{
+			"type": "Document", "url": "https://r/a.mp4", "mediaType": "video/mp4",
+			"icon": map[string]any{"type": []any{"Image"}, "url": "https://r/thumb.png"},
+		},
+		// 先頭が非 string なら空。走査方式にするとここが "Image" になるので、
+		// head 方式かどうかはこの 2 件目でしか区別できない。
+		map[string]any{
+			"type": "Document", "url": "https://r/b.mp4", "mediaType": "video/mp4",
+			"icon": map[string]any{"type": []any{42, "Image"}, "url": "https://r/thumb2.png"},
+		},
+	}, false)
+	require.Len(t, docs, 2)
+	require.NotNil(t, docs[0].Icon)
+	assert.Equal(t, "Image", docs[0].Icon.Type.String(), "配列形の icon type を読む")
+	assert.Equal(t, "https://r/thumb.png", docs[0].Icon.URLOrEmpty())
+	require.NotNil(t, docs[1].Icon)
+	assert.Empty(t, docs[1].Icon.Type.String(), "先頭が非 string なら type は空")
+	assert.Equal(t, "https://r/thumb2.png", docs[1].Icon.URLOrEmpty(), "type が空でも thumbnail は残る")
+}
+
 // **`id` も正規化する。** upstream は `assertActivityMatchesUrl` が
 // `new URL(activity.id)` を通すので末尾改行でも通る。落とすとその actor / Note が
 // まったく取り込めない。`id` は全 field の中で最も必ず存在する URL なので、

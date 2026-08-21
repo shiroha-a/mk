@@ -1120,8 +1120,9 @@ func TestLenientPollAndOwnerFields(t *testing.T) {
 	assert.Equal(t, "PEM", p.PublicKey.PublicKeyPEM.String())
 }
 
-// APRawList は単一値も 1 件として拾う。`[]json.RawMessage` 決め打ちだと、
-// 無関係な片方がスカラーなだけで**もう片方まで巻き添えで捨てられる** (#2662)。
+// APRawList は単一値も 1 件として拾う。`[]json.RawMessage` 決め打ちだと
+// その field の unmarshal が失敗し、**decode の error を見て捨てる呼び出し側
+// (featured.go の fetchFeaturedItems) では collection ごと落ちる** (#2662)。
 func TestAPRawList_UnmarshalJSON(t *testing.T) {
 	var v struct {
 		Items        APRawList `json:"items"`
@@ -1137,7 +1138,10 @@ func TestAPRawList_UnmarshalJSON(t *testing.T) {
 		OrderedItems APRawList `json:"orderedItems"`
 	}
 	require.NoError(t, json.Unmarshal([]byte(`{"items":"x","orderedItems":["https://a/2"]}`), &v2))
-	assert.Len(t, v2.OrderedItems, 1, "orderedItems が生き残ること")
+	// **`encoding/json` は型エラーの後も他 field を decode し続ける**ので、
+	// sibling が埋まること自体は素の `[]json.RawMessage` でも同じ。ここで
+	// 差が出るのは 1 行上の `require.NoError` (= error にしない) 側。
+	assert.Len(t, v2.OrderedItems, 1, "スカラーの兄弟があっても要素を読めること")
 
 	var v3 struct {
 		Items APRawList `json:"items"`

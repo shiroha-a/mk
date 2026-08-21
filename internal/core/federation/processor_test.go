@@ -480,6 +480,40 @@ func TestProcess_UndoNestedObjectInvalid(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// inner activity に型エラーがあっても Undo を落とさない。`inner.actor` が
+// embedded object だと `Actor string` で型エラーになり、握らないと
+// `invalid undo object` を返す。**inbox job は error だと retry を
+// 使い切って failed bucket に落ちる** (既定 8 回、
+// `server/queue_factory.go` の defaultInboxJobMaxAttempts) ので、
+// unfollow がまったく届かない (#2665)。
+//
+// (この経路が使うのは外側の `act.Actor` と `inner.Object` で、`inner.Actor`
+// 自体は読まない。効いているのは型エラーを握ることだけ。)
+func TestProcess_UndoFollow_InnerActorEmbeddedObject(t *testing.T) {
+	p, repo, followingRepo, _ := newProcessor(t, aliceActor)
+	// **local user は本番と同じく uri NULL。** `resolveTargetUser` の
+	// local-ID 分岐を通すために base URL を配線する。
+	p.SetLocalBaseURL("https://example.com")
+	// remote follower alice が local followee bob をフォロー済み。
+	aliceURI := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["alice1"] = &model.User{ID: "alice1", Username: "alice", UsernameLower: "alice", URI: &aliceURI, Host: &host}
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob"}
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "alice1", FolloweeID: "bob"}
+
+	body := []byte(`{
+		"type": "Undo",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Follow",
+			"actor": {"id": "https://remote.example/users/alice", "type": "Person"},
+			"object": "https://example.com/users/bob"
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, followingRepo.Followings, "embedded object の actor でも Undo(Follow) が届くこと")
+}
+
 func TestProcess_UndoNestedObjectBadJSON(t *testing.T) {
 	p, repo, _, _ := newProcessor(t, aliceActor)
 	bobURI := "https://example.com/users/bob"
@@ -729,6 +763,63 @@ func TestProcess_FlagSingleURI(t *testing.T) {
 	}`)
 	require.NoError(t, p.Process(body))
 	assert.Len(t, abuseRepo.Reports, 1)
+}
+
+// upstream は `getApIds(activity.object)` なので、要素が `{"id": ...}` の
+// object 形式でも読む (ApInboxService.ts:560)。`[]string` 決め打ちに戻すと
+// この形の通報が丸ごと落ちる (#2665)。
+func TestProcess_FlagObjectFormURIs(t *testing.T) {
+	p, repo, _ := newProcessorWithBlocking(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	idGenFlag, _ := id.NewGenerator("aidx")
+	p.SetAbuseReportRepo(abuseRepo, idGenFlag)
+
+	// **local user は本番と同じく uri NULL。** handleFlag は
+	// `ExtractLocalUserID` → `FindByID` で解決する (#1560 で「任意 host の
+	// URI を受ける」旧実装を潰した硬化)。偽の uri を持たせると `FindByURI`
+	// に差し戻す変異が素通りする。
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+
+	body := []byte(`{
+		"type": "Flag",
+		"actor": "https://remote.example/users/alice",
+		"object": [{"id": "https://example.com/users/bob", "type": "Person"}],
+		"content": "spam"
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Len(t, abuseRepo.Reports, 1, "object 形式の要素でも通報を保存する")
+	for _, r := range abuseRepo.Reports {
+		// **`TestProcess_FlagHappyPath` (素の URI 配列) と一字一句同じになる
+		// ことが「id を剥がしている」ことの証明。** object がそのまま
+		// 載っていれば別の文字列になる。
+		assert.Equal(t, "spam\n[\"https://example.com/users/bob\"]", r.Comment)
+	}
+}
+
+// 単一の object 形式 (配列ですらない) も同じ。`getApIds` は非配列を 1 件に
+// 包んでから `getApId` を通す。
+//
+// **uniqueness は主張しない。** `APIDList` の型レベルは
+// `internal/activitypub` の `TestAPIDList_UnmarshalJSON/single_object` が
+// 固定しており、同じ shape は `TestMergeCreateAudience` も通る。ここが見て
+// いるのは handleFlag が `[]string` 決め打ちに戻る変異で、それを落とすのは
+// Flag 系 3 件 (SingleURI / ObjectFormURIs / 本テスト) だけ (実測)。
+func TestProcess_FlagSingleObjectForm(t *testing.T) {
+	p, repo, _ := newProcessorWithBlocking(t)
+	abuseRepo := testutil.NewMockAbuseReportRepository()
+	idGenFlag, _ := id.NewGenerator("aidx")
+	p.SetAbuseReportRepo(abuseRepo, idGenFlag)
+
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+
+	body := []byte(`{
+		"type": "Flag",
+		"actor": "https://remote.example/users/alice",
+		"object": {"id": "https://example.com/users/bob", "type": "Person"},
+		"content": "abuse"
+	}`)
+	require.NoError(t, p.Process(body))
+	require.Len(t, abuseRepo.Reports, 1, "単一 object 形式でも通報を保存する")
 }
 
 func TestProcess_FlagFromNote(t *testing.T) {
@@ -988,8 +1079,24 @@ func TestProcess_AcceptFollow(t *testing.T) {
 // readActorString(inner) で follower URI が抽出できることを実証する。
 // TestProcess_AcceptFollow と対になる "inner side" の coverage。
 func TestProcess_AcceptFollow_InnerActorEmbeddedObject(t *testing.T) {
-	p, repo, _, _ := newProcessor(t, aliceActor)
-	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	reqRepo := testutil.NewMockFollowRequestRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(aliceActor)}, idGen)
+	followingSvc := corefollowing.NewService(repo, followingRepo, reqRepo, idGen)
+	p := federation.NewProcessor(resolver, followingSvc, nil, nil, repo, noteRepo)
+
+	// remote followee alice と local follower bob。**承認待ちの request を
+	// 置いて「承認された」ことを観測可能にする。** nil 返却だけを見る形だと
+	// 救済が効かなくなっても test が通ってしまう (#2665)。
+	aliceURI := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["alice1"] = &model.User{ID: "alice1", Username: "alice", UsernameLower: "alice", URI: &aliceURI, Host: &host}
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob"}
+	reqRepo.Requests["r1"] = &model.FollowRequest{ID: "r1", FollowerID: "bob", FolloweeID: "alice1"}
 
 	acceptBody := []byte(`{
 		"type": "Accept",
@@ -1000,10 +1107,9 @@ func TestProcess_AcceptFollow_InnerActorEmbeddedObject(t *testing.T) {
 			"object": "https://remote.example/users/alice"
 		}
 	}`)
-	// FollowRequest が存在しなくても nil 返却 (= TestProcess_AcceptFollow と同じ
-	// 挙動)。重要なのは inner.actor の embedded object が原因で missing actor
-	// error を吐かないこと。
 	require.NoError(t, p.Process(acceptBody))
+	assert.Len(t, followingRepo.Followings, 1, "embedded object の actor でもフォローが成立すること")
+	assert.Empty(t, reqRepo.Requests, "承認された request は消えること")
 }
 
 func TestProcess_AcceptNonFollow(t *testing.T) {

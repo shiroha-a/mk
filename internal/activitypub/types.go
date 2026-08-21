@@ -353,9 +353,11 @@ func (v APLenientBool) Bool() bool { return bool(v) }
 // keeping the elements undecoded.
 //
 // `items` / `orderedItems` のように「要素を後段で個別に解釈する」場所で使う。
-// `[]json.RawMessage` 決め打ちだと、単一 object の collection で unmarshal ごと
-// 失敗し、**同じ document の別 field (orderedItems) まで巻き添えで捨てられる**
-// (#2662)。upstream は `toArray(...)` で 1 件として拾う。
+// `[]json.RawMessage` 決め打ちだと、単一 object の collection でその field の
+// unmarshal が失敗する。**巻き添えの範囲は呼び出し側次第。** decode の error を
+// 見て捨てる側 (`featured.go` の fetchFeaturedItems は `nil, false` を返す) では
+// collection ごと落ち、error を握る側 (`processor.go` の handleCollection) では
+// 別 field が生き残る (#2662)。upstream は `toArray(...)` で 1 件として拾う。
 type APRawList []json.RawMessage
 
 // UnmarshalJSON never fails; unreadable shapes yield a nil slice.

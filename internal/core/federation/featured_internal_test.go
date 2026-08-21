@@ -21,6 +21,12 @@ func TestSingleAPType(t *testing.T) {
 		{name: "absent", raw: ``, want: ""},
 		{name: "unexpected shape", raw: `{"foo": 1}`, want: ""},
 		{name: "array of non-strings", raw: `[1, 2]`, want: ""},
+		// **先頭だけを見る (upstream `getApType` と同じ)。** 走査方式にすると
+		// `[42, "Note"]` が "Note" を返すので、head 方式との差はこの 2 件目で
+		// 必ず表面化する (1 件目だけだと走査方式でも同じ結果になり判別
+		// できない)。
+		{name: "array with trailing non-string", raw: `["Note", 42]`, want: "Note"},
+		{name: "array with leading non-string", raw: `[42, "Note"]`, want: ""},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

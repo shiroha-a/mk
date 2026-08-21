@@ -452,8 +452,9 @@ func TestUpdateFeatured_NoFeaturedDeclared(t *testing.T) {
 }
 
 // items / orderedItems が単一 object でも取り込む。さらに**片方がスカラーでも
-// もう片方を巻き添えにしない** (`[]json.RawMessage` 決め打ちだと同じ document の
-// 別 field まで捨てられる、#2662)。
+// もう片方を巻き添えにしない**。この経路は decode の error を見て
+// `nil, false` を返すので、`[]json.RawMessage` 決め打ちだと collection ごと
+// 落ちて featured の取り込みが丸ごと空振りする (#2662)。
 func TestUpdateFeatured_AcceptsSingleItemAndSurvivesScalarSibling(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

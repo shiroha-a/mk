@@ -455,9 +455,10 @@ func (p *Processor) handleCollection(act genericActivity, depth int, signer *mod
 		return nil // skip: nested collection beyond depth limit
 	}
 	var col struct {
-		// APRawList は単一 object も 1 件として拾う。`[]json.RawMessage` 決め打ち
-		// だと、片方がスカラーなだけで**もう片方まで巻き添えで捨てられる**
-		// (featured.go と同型、#2662)。upstream は `toArray(...)` で展開する。
+		// APRawList は単一 object も 1 件として拾う。upstream は
+		// `toArray(...)` で展開する (#2662)。**ここは decode の error を
+		// 握るので、片方がスカラーでももう片方は生き残る** (featured.go は
+		// error を見て collection ごと捨てるので、そちらだけ巻き添えになる)。
 		Items        activitypub.APRawList `json:"items"`
 		OrderedItems activitypub.APRawList `json:"orderedItems"`
 	}
@@ -790,6 +791,12 @@ func (p *Processor) handleUndo(act genericActivity) error {
 		return fmt.Errorf("invalid undo object: %w", err)
 	}
 	// inner.actor が embedded object のケースも救済する (#999 / upstream #17340)。
+	//
+	// **現状の Undo 配下はどれも `inner.Actor` を読まない** (権威は外側の
+	// `act.Actor`、対象は `inner.Object`)。Accept / Reject と形を揃えるための
+	// 予防で、ここだけは挙動で観測できない = テストで固定できない。消しても
+	// 今は壊れないが、inner.actor を読む sub-handler を足したときに object
+	// 形式が黙って落ちるので残す (#2665)。
 	inner.normalizeActor(act.Object)
 	switch strings.ToLower(inner.Type) {
 	case "follow":
@@ -2094,7 +2101,10 @@ func (p *Processor) handleFlag(act genericActivity) error {
 		return nil
 	}
 	// contentフィールドを取得。upstream は comment に flagged URI 一覧を
-	// 付与する (`${content}\n${JSON.stringify(uris)}`、#1560)。
+	// 付与する (`${content}\n${JSON.stringify(uris, null, 2)}`、#1560)。
+	// **mk-go は pretty print しない** (upstream は 2 space indent)。通報の
+	// 本文だけの差で、既存の通報との一貫性を優先して compact のままにする
+	// (docs/divergence.md 3-3)。
 	var content struct {
 		Content string `json:"content"`
 	}

@@ -108,8 +108,10 @@ func (r *Resolver) fetchFeaturedItems(uri string) ([]json.RawMessage, bool) {
 		// (この経路は Normalize を通らない生 fetch、#2662)。
 		Type activitypub.APType `json:"type"`
 		// APRawList は単一 object も 1 件として拾う。`[]json.RawMessage`
-		// 決め打ちだと、無関係な片方がスカラーなだけで **もう片方まで
-		// 巻き添えで捨てられる** (#2662)。
+		// 決め打ちだと、単一 object や無関係な片方のスカラーだけで
+		// **collection ごと unmarshal に失敗し、その actor の featured
+		// 取り込みが丸ごと落ちる** (下の error 分岐で `nil, false`。既存の
+		// ピンは温存される、#2662)。
 		Items        activitypub.APRawList `json:"items"`
 		OrderedItems activitypub.APRawList `json:"orderedItems"`
 	}

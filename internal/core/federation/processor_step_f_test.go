@@ -1263,6 +1263,38 @@ func TestProcess_RejectFollow(t *testing.T) {
 	require.NoError(t, env.processor.Process(body))
 }
 
+// `TestProcess_AcceptFollow_InnerActorEmbeddedObject` の Reject 版。
+// (直前の `TestProcess_RejectFollow` は `require.NoError` だけの smoke test で
+// follower 解決が壊れても緑のままなので、実際の解除はこちらで見る。)
+// inner.actor が embedded object でも follow が解除されること。Reject は
+// `readActorString(inner)` で follower を決めるので、型エラーを握るだけでなく
+// 直後の `normalizeActor` (#999) も効いている (#2665)。
+func TestProcess_RejectFollow_InnerActorEmbeddedObject(t *testing.T) {
+	p, repo, followingRepo, _ := newProcessor(t, aliceActor)
+	// **local user は本番と同じく uri NULL。** `resolveTargetUser` の
+	// local-ID 分岐を通すために base URL を配線する (偽の uri を持たせて
+	// FindByURI で通すと、本番に無い経路でしかテストしていないことになる)。
+	p.SetLocalBaseURL("https://example.com")
+	// local follower bob が remote followee alice をフォロー済み。
+	aliceURI := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["alice1"] = &model.User{ID: "alice1", Username: "alice", UsernameLower: "alice", URI: &aliceURI, Host: &host}
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob"}
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "bob", FolloweeID: "alice1"}
+
+	body := []byte(`{
+		"type": "Reject",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Follow",
+			"actor": {"id": "https://example.com/users/bob", "type": "Person"},
+			"object": "https://remote.example/users/alice"
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, followingRepo.Followings, "embedded object の actor でも Reject が届くこと")
+}
+
 func TestProcess_RejectInvalidJSON(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
 	body := []byte(`{
@@ -1841,6 +1873,44 @@ func TestProcess_CollectionItemTypeErrorStillDispatched(t *testing.T) {
 	}`)
 	require.NoError(t, env.processor.Process(body))
 	require.Len(t, env.reactionRepo.Reactions, 1, "型エラーのある item を落とさない")
+}
+
+// `items` / `orderedItems` が単一 object の Collection。`[]json.RawMessage`
+// 決め打ちだとこの形の item が 1 件も dispatch されない (#2665)。
+//
+// **両方を見る。** AS2 の normative context では `items` が
+// `{"@type": "@id"}`、`orderedItems` が `@container: @list` なので、厳密な
+// compaction で潰れるのは `items` 側だけ。ただし mk-go の
+// `activitypub.Normalize` は本物の compaction ではなく、手書き JSON を出す
+// peer のスカラー `orderedItems` はそのまま到達する。upstream も
+// `toArray(activity.orderedItems)` で受ける (ApInboxService.ts:100)。
+func TestProcess_CollectionSingleObjectItems(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		colType  string
+		itemsKey string
+	}{
+		{"Collection items", "Collection", "items"},
+		{"OrderedCollection orderedItems", "OrderedCollection", "orderedItems"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newFullProcessor(t, aliceActor)
+			env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+			body := []byte(`{
+				"type": "` + tc.colType + `",
+				"actor": "https://remote.example/users/alice",
+				"` + tc.itemsKey + `": {
+					"id": "https://remote.example/likes/l1",
+					"type": "Like",
+					"actor": "https://remote.example/users/alice",
+					"object": "https://example.com/notes/n1",
+					"content": "⭐"
+				}
+			}`)
+			require.NoError(t, env.processor.Process(body))
+			require.Len(t, env.reactionRepo.Reactions, 1, "単一 object を 1 件として dispatch する")
+		})
+	}
 }
 
 // 文字列 URI だけの item は従来どおり skip する (id が無いので host gate に
