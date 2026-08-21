@@ -155,3 +155,29 @@ func TestResolveActor_DeclarerUnwired(t *testing.T) {
 	_, err := r.ResolveActor("https://remote.example/users/alice")
 	assert.NoError(t, err)
 }
+
+// 参照形式 (bare IRI) だけの assertionMethod では宣言しない。ref は purge 保護の
+// ために受領 keyId として扱うが、鍵素材が無いので Ed25519 対応の根拠にならない。
+// ref だけで宣言すると鍵が 1 本も無い host が「対応」と表示される (#2662)。
+func TestResolveActor_BareIRIAssertionMethodDoesNotDeclare(t *testing.T) {
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {
+			"id": "https://remote.example/users/alice#main-key",
+			"owner": "https://remote.example/users/alice",
+			"publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"
+		},
+		"assertionMethod": ["https://remote.example/users/alice#ed25519-key"]
+	}`
+	r, _ := newResolver(t, body, nil)
+	r.SetPublickeyExtraRepo(&stubPublickeyExtraRepo{})
+	declarer := &stubCapabilityDeclarer{}
+	r.SetSignatureCapabilityDeclarer(declarer)
+
+	_, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	assert.Empty(t, declarer.hosts, "鍵素材の無い参照だけでは宣言しない")
+}

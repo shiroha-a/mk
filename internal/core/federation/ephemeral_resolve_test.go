@@ -715,3 +715,28 @@ func TestEphemeralEntryPoints_NoSink(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, u)
 }
+
+// note.id の前後に空白がある document を取り込めること。WHATWG URL は先頭
+// C0/空白を落とすので upstream は素通しするが、生値のまま host 検証すると
+// scheme も host も取れず id host mismatch で落ちていた (#2662)。
+func TestResolveNoteEphemeral_PaddedNoteIDPassesHostGate(t *testing.T) {
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": " https://remote.example/notes/1 ",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "padded id",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	r, sink, _, _ := ephResolverDocs(t, map[string]string{
+		"https://remote.example/notes/1":     doc,
+		"https://remote.example/users/alice": ephActorDoc,
+	})
+
+	note, err := r.ResolveNoteEphemeral("https://remote.example/notes/1")
+	require.NoError(t, err, "空白付き id でも取り込めること")
+	require.NotNil(t, note)
+	require.NotNil(t, note.URI)
+	assert.Equal(t, "https://remote.example/notes/1", *note.URI, "保存値も正規化済みであること")
+	assert.Len(t, sink.notes, 1)
+}

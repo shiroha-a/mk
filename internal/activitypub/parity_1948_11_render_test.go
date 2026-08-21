@@ -135,7 +135,7 @@ func TestAddEmojiTags_LocalIDUpdatedMediaType(t *testing.T) {
 	l2 := r.RenderLike(&model.User{ID: "alice"}, "https://remote.example/notes/n1", ":foo@.:", "https://example.com/likes/l2")
 	require.Len(t, l2.Tag, 1)
 	et2 := l2.Tag[0].(EmojiTag)
-	assert.Equal(t, "https://example.com/files/foo-orig.png", et2.Icon.URL, "publicUrl 空は originalUrl fallback (#1948-11)")
+	assert.Equal(t, "https://example.com/files/foo-orig.png", et2.Icon.URL.String(), "publicUrl 空は originalUrl fallback (#1948-11)")
 	assert.Equal(t, "image/png", et2.Icon.MediaType, "Type nil は image/png default (#1948-11)")
 	assert.Regexp(t, millisZ, et2.Updated, "UpdatedAt nil は now(.000Z) (#1948-11)")
 }
@@ -157,10 +157,10 @@ func TestRenderNote_SimpleQuoteEmitsSource(t *testing.T) {
 	renoteID := "renote-target"
 	n := &model.Note{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &text, RenoteID: &renoteID}
 	out := r.RenderNote(n, idGen)
-	assert.Equal(t, "hi", out.MisskeyContent, "simple quote renote でも _misskey_content を出す (#1948-11)")
+	assert.Equal(t, "hi", out.MisskeyContent.String(), "simple quote renote でも _misskey_content を出す (#1948-11)")
 	require.NotNil(t, out.Source, "simple quote renote でも source を出す (#1948-11)")
 	assert.Equal(t, "text/x.misskeymarkdown", out.Source.MediaType)
-	assert.Equal(t, "https://remote.example/notes/orig", out.QuoteURL)
+	assert.Equal(t, "https://remote.example/notes/orig", out.QuoteURL.String())
 
 	// 対照: quote なしの simple text は従来どおり source/_misskey_content を省略。
 	n2 := &model.Note{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &text}

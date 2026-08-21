@@ -24,9 +24,17 @@ const MaxUserTags = 32
 // NoteCreateService の `.splice(0, 32)` と一致させる。
 const MaxNoteTags = 32
 
-// MaxTagLength は note.tags 列の varchar(128) 制約に合わせた tag 長
-// 上限。これを超える tag は truncate される (drop ではなく trim にする
-// のは Misskey TS の挙動互換)。
+// MaxTagLength は note.tags / user.tags 列の varchar(128) 制約に合わせた
+// tag 長上限。**これを超える tag は drop する** (truncate しない)。判定は
+// byte 数ではなく code point 数で行う。multibyte rune を途中で分割すると
+// 不正な UTF-8 になるため。
+//
+// upstream は note-tag 経路だけ `filter(t => Array.from(t).length <= 128)` を
+// 持ち、**user-tag 経路には長さ判定が無い** (`extractApHashtags(person.tag)
+// .map(normalizeForSearch).splice(0, 32)`)。mk-go は両方で落とす。
+//
+// 判定は**正規化の前後 2 回**行う。NFKC は合字を展開するので、前だけでは
+// 膨らんだ値が列制約を超えて INSERT ごと落ちる (#2662)。
 const MaxTagLength = 128
 
 // Extract pulls hashtag names out of text fragments (typically the note's
@@ -37,7 +45,7 @@ const MaxTagLength = 128
 // Order is preserved by first occurrence; case-insensitive duplicates collapse
 // to a single entry with the first-seen original case kept (Misskey TS も同じ
 // 挙動)。Empty / whitespace-only inputs return nil. Tags longer than
-// MaxTagLength are truncated.
+// MaxTagLength are dropped.
 func Extract(parts ...string) []string {
 	tags := mfm.CollectHashtags(parts...)
 	if len(tags) == 0 {
@@ -78,8 +86,9 @@ func ExtractNoteTags(parts ...string) []string {
 
 // NormalizeNoteTags applies the note.tags store normalization to a pre-extracted
 // tag list (used for AP-received apHashtags where the tags come from the remote
-// Object rather than MFM extraction). >128 code-point tags are dropped, the list
-// is capped at MaxNoteTags, each is normalized, and duplicates collapse (#1948-18).
+// Object rather than MFM extraction). >128 code-point tags are dropped (before
+// and after normalization), the list is capped at MaxNoteTags, each is
+// normalized, and duplicates collapse (#1948-18).
 func NormalizeNoteTags(tags []string) []string {
 	if len(tags) == 0 {
 		return nil
@@ -107,12 +116,32 @@ func NormalizeNoteTags(tags []string) []string {
 	// normalize して post-normalize の clean dedup を行う。upstream は normalize 後の
 	// duplicate (例 'Misskey'/'misskey' → ['misskey','misskey']) をそのまま格納するが、
 	// `@> ARRAY[]` 検索・trends 集計は duplicate に非感応なので clean array にする
-	// (surviving source tag 集合は cap を先に効かせたので upstream と一致)。
+	// (cap の**順序**は upstream と一致させてある。ただし下の post-normalize
+	// フィルタで落ちる tag があると surviving 集合自体は upstream とずれる。
+	// upstream は同じ入力で INSERT ごと落ちるので mk-go が安全側)。
 	normSeen := make(map[string]struct{}, len(capped))
 	out := make([]string, 0, len(capped))
 	for _, tag := range capped {
 		n := searchnorm.Normalize(tag)
 		if n == "" {
+			continue
+		}
+		// NUL 入りの tag は落とす。`note.tags` / `user.tags` は
+		// varchar(128)[] で NUL を受け付けず (SQLSTATE 22021)、INSERT ごと
+		// 落ちて **その actor / Note が 1 行も作られない** (#2662)。
+		// 正規化は NUL を除去しないのでここで見る。
+		if strings.ContainsRune(n, 0) {
+			continue
+		}
+		// ExtractUserTags と同じ理由で正規化のあとにもう一度長さを見る。
+		// 上の 128 rune フィルタは正規化前の値に効くが、NFKC は合字を展開する
+		// ので通過した tag が膨らむ (`㍿` x100 = 100 rune が 400 rune になる)。
+		// `note.tags` は varchar(128)[] なので、超過値を渡すと note の
+		// INSERT が SQLSTATE 22001 で落ち、**リモートの Note が取り込めない /
+		// ローカルの投稿が失敗する** (#2662)。upstream も同じ穴を持つが
+		// (`filter(<=128)` → `map(normalizeForSearch)` の順)、128 rune を
+		// 超えた tag は検索にも使えないので落とす。
+		if utf8.RuneCountInString(n) > MaxTagLength {
 			continue
 		}
 		if _, ok := normSeen[n]; ok {
@@ -146,6 +175,20 @@ func ExtractUserTags(parts ...string) []string {
 	for _, tag := range raw {
 		n := searchnorm.Normalize(tag)
 		if n == "" {
+			continue
+		}
+		// NormalizeNoteTags と同じ理由で NUL 入りの tag を落とす。
+		if strings.ContainsRune(n, 0) {
+			continue
+		}
+		// **正規化のあとにもう一度長さを見る。** Extract の 128 rune フィルタは
+		// 正規化前の値に効くが、NFKC は合字を展開するので通過した tag が
+		// 膨らむ (`㍿` x100 = 100 rune が 400 rune になる)。`user.tags` は
+		// varchar(128)[] なので、超過値を渡すと `INSERT INTO "user"` が
+		// SQLSTATE 22001 で落ち、**その actor が 1 行も作られない** (#2662)。
+		// upstream も同じ穴を持つが (`extractApHashtags(...).map(normalizeForSearch)`
+		// に長さ判定が無い)、128 rune を超えた tag は検索にも使えないので落とす。
+		if utf8.RuneCountInString(n) > MaxTagLength {
 			continue
 		}
 		if _, ok := seen[n]; ok {

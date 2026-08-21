@@ -273,3 +273,35 @@ func TestNormalize_ValueObjectWithOnlyValue(t *testing.T) {
 	m := asMap(t, out)
 	assert.Equal(t, "Bare", m["name"])
 }
+
+// flattenType は APType (= upstream getApType) と同じく index 0 だけを見る。
+// 走査すると同じ document が inbox 経由と生 fetch 経路で違う結果になる (#2662)。
+func TestNormalize_TypeArrayUsesFirstElementOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want any
+	}{
+		{"array of strings", `{"type":["Person","Service"]}`, "Person"},
+		// `{"@id": ...}` は normalizeValue が先に string へ潰すので head 判定の
+		// 材料にならない。潰れない値で見る。
+		{"non-string head", `{"type":[42,"Person"]}`, nil},
+		{"id object head is unwrapped first", `{"type":[{"@id":"as:Person"}]}`, "as:Person"},
+		{"empty array", `{"type":[]}`, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			out, err := Normalize([]byte(tc.in))
+			require.NoError(t, err)
+			var m map[string]any
+			require.NoError(t, json.Unmarshal(out, &m))
+			if tc.want == nil {
+				// flatten できなければ元の値がそのまま残る (string にはならない)。
+				_, isString := m["type"].(string)
+				assert.False(t, isString, "先頭が string でなければ採らない")
+				return
+			}
+			assert.Equal(t, tc.want, m["type"])
+		})
+	}
+}

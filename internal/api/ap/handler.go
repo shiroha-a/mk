@@ -523,9 +523,19 @@ func (h *Handler) APIShow(c echo.Context) error {
 			if objID, _ := parsed["id"].(string); objID == "" {
 				return c.JSON(http.StatusBadGateway, apierr.Error("RESPONSE_INVALID", "Response from remote server is invalid.", "70193c39-54f3-4813-82f0-70a680f7495b"))
 			}
-			t, _ := parsed["type"].(string)
+			// `type` は配列で来ることがある (JSON-LD の `@type` は配列表現が
+			// 正規)。string 決め打ちだと Note / Article / Question の分岐を
+			// 外れ、fallback は actor 解決しか試さないので **400
+			// NO_SUCH_OBJECT** になる。upstream は `getApType` 経由なので
+			// 先頭要素を採って解決する (#2662)。
+			t := activitypub.TypeOf(parsed["type"])
 			switch t {
-			case "Note", "Article", "Question":
+			// upstream の `validPost` (type.ts) と同じ集合。Note 取り込み側は
+			// type を見ないので、ここで落とすと PeerTube の `Video` や
+			// Mobilizon の `Event` の URL を貼ったときだけ 400 になる
+			// (inbox 経由の `Create(Video)` は既に通るので経路で結果が違う、
+			// #2662)。
+			case "Note", "Question", "Article", "Audio", "Document", "Image", "Page", "Video", "Event":
 				if h.remoteResolver != nil {
 					if remoteNote, err := h.remoteResolver.ResolveNoteAllowCrossHost(req.URI); err == nil {
 						return c.JSON(http.StatusOK, map[string]any{

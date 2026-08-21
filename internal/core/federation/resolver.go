@@ -318,10 +318,13 @@ type Resolver struct {
 	// access を保護する。queue worker や inbox handler は別 actor を並行
 	// 処理するため、ロック無しの map read/write は runtime panic を起こす
 	// (Devin review #555 FLAG-1)。
-	keysMu   sync.RWMutex
-	keys     map[string]publicKeyEntry // userID → publicKey + fetchedAt
-	clock    func() time.Time          // テストで差し替える時計
-	actorTTL time.Duration             // アクター情報の最大寿命
+	keysMu sync.RWMutex
+	keys   map[string]publicKeyEntry // userID → publicKey + fetchedAt
+	// keyFetchFailures は refreshPublicKey が失敗した時刻 (userID → 時刻)。
+	// keysMu で保護する。keyFetchBackoff の説明を参照。
+	keyFetchFailures map[string]time.Time
+	clock            func() time.Time // テストで差し替える時計
+	actorTTL         time.Duration    // アクター情報の最大寿命
 	// moveProcessor はリモートアカウント移行の検知時に呼ぶ引き継ぎ処理
 	// (#2414)。実体は core/move.Service。nil なら移行を検知しても何もしない。
 	moveProcessor      RemoteMoveProcessor
@@ -682,15 +685,15 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		Host:          &host,
 		URI:           &actor.ID,
 		Inbox:         &actor.Inbox,
-		IsBot:         activitypub.IsBotActorType(actor.Type),
+		IsBot:         activitypub.IsBotActorType(actor.Type.String()),
 		// AP actorの manuallyApprovesFollowers を IsLocked (承認制) として
 		// 取り込む。これが false だとリモートの承認制ユーザに対するフォロー
 		// が非 locked として処理されて即 Following が成立し、ボタン挙動と
 		// AP仕様が崩れる。
-		IsLocked:      actor.ManuallyApproves,
+		IsLocked:      actor.ManuallyApproves.Bool(),
 		LastFetchedAt: &now,
 	}
-	if name := actor.Name; name != "" {
+	if name := remoteDisplayName(actor.Name.String()); name != "" {
 		user.Name = &name
 	}
 	// remote actor の `_misskey_canChat` を chatScope に翻訳する (#692)。
@@ -711,14 +714,16 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	} else {
 		user.ChatScope = "everyone"
 	}
-	if actor.Endpoints.SharedInbox != "" {
-		user.SharedInbox = &actor.Endpoints.SharedInbox
+	if shared := remoteSharedInbox(actor); shared != "" {
+		user.SharedInbox = &shared
 	}
 	if actor.Featured != "" {
-		user.Featured = &actor.Featured
+		featured := actor.Featured.String()
+		user.Featured = &featured
 	}
 	if actor.MovedTo != "" {
-		user.MovedToURI = &actor.MovedTo
+		movedTo := actor.MovedTo.String()
+		user.MovedToURI = &movedTo
 		user.MovedAt = &now
 	}
 	if len(actor.AlsoKnownAs) > 0 {
@@ -727,12 +732,10 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	}
 	// actor.icon / actor.image はそれぞれアバター / バナー画像。空 URL や
 	// icon自体が欠落している actor (Service 系など) もあるので nil チェック。
-	if actor.Icon != nil && actor.Icon.URL != "" {
-		avatarURL := actor.Icon.URL
+	if avatarURL := remoteMediaURL(actor.ID, "user.avatarUrl", actor.Icon.URLOrEmpty(), maxRemoteAvatarURLLen); avatarURL != "" {
 		user.AvatarURL = &avatarURL
 	}
-	if actor.Image != nil && actor.Image.URL != "" {
-		bannerURL := actor.Image.URL
+	if bannerURL := remoteMediaURL(actor.ID, "user.bannerUrl", actor.Image.URLOrEmpty(), maxRemoteBannerURLLen); bannerURL != "" {
 		user.BannerURL = &bannerURL
 	}
 	// AP Person Tag配列からカスタム絵文字を抽出してDBにupsert
@@ -794,7 +797,7 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		// transient な失敗時に actor resolve 自体まで道連れにしない。
 		slog.Warn("create remote user profile failed", "userId", user.ID, "err", err)
 	}
-	r.cachePublicKey(user.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
+	r.cachePublicKey(user.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM.String())
 	r.cacheAssertionMethods(user.ID, actor.ID, actor.AssertionMethod)
 	r.notifyInstance(host)
 	if r.chartHook != nil {
@@ -807,6 +810,109 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		r.updateFeatured(user)
 	}
 	return user, nil
+}
+
+// Column limits for the remote media URLs we copy onto the user row.
+//
+// `user.avatarUrl` は varchar(1024)、`user.bannerUrl` は varchar(512)。
+// 超過値を渡すと `userRepo.Create` が SQLSTATE 22001 で落ち、**その actor が
+// 1 行も作られない** (#2662)。URL は truncate すると壊れるだけなので落とす。
+// upstream は Drive に取り込んで file id を持つので、長い URL でも user は
+// 作られる。
+const (
+	maxRemoteAvatarURLLen = 1024
+	maxRemoteBannerURLLen = 512
+)
+
+// remoteMediaURL returns the URL when it fits the target column, or "" when it
+// does not (the actor is still imported, just without that image).
+func remoteMediaURL(actorURI, column, raw string, max int) string {
+	if raw == "" {
+		return ""
+	}
+	// **NUL も落とす。** PostgreSQL の text は NUL を受け付けず (SQLSTATE 22021)、
+	// 長さ超過と同じく **INSERT / UPDATE ごと**落ちる。create 経路では actor が
+	// 1 行も作られず、refresh 経路では atomic UPDATE ごと失敗して
+	// `lastFetchedAt` が進まないため、inbound activity 1 件につき outbound
+	// fetch が 1 回走り続ける (#2662)。
+	//
+	// 除去ではなく破棄する。NUL を抜いた URL は別物で、取りに行っても無駄。
+	if strings.ContainsRune(raw, 0) {
+		slog.Warn("federation: dropping media url containing NUL",
+			"uri", actorURI, "column", column)
+		return ""
+	}
+	if len([]rune(raw)) > max {
+		slog.Warn("federation: dropping oversized media url",
+			"uri", actorURI, "column", column, "len", len([]rune(raw)), "max", max)
+		return ""
+	}
+	return raw
+}
+
+// remoteSharedInbox picks the actor's shared inbox, preferring the top-level
+// field like upstream's `x.sharedInbox ?? x.endpoints?.sharedInbox`.
+//
+// mk-go は endpoints しか見ていなかったので、top-level のみ publish する実装
+// (#1560 で mk-go 自身が両方出しているとおり、実在の慣習) では shared inbox を
+// 取りこぼしていた。取りこぼすと individual inbox へ落ちるだけなので配送は
+// 成立するが、束ね配送が効かない (#2662)。
+//
+// host 検証は fetchActor で済ませてあるので、ここに来る値は actor と同一
+// host か空。
+func remoteSharedInbox(actor *activitypub.Person) string {
+	if actor.SharedInbox != "" {
+		return actor.SharedInbox.String()
+	}
+	return actor.Endpoints.SharedInbox.String()
+}
+
+// maxRemoteNameLen bounds the imported display name (`user.name`).
+//
+// upstream validateActor は `name` が truthy な string のとき
+// `truncate(person.name, 128)` を通す (非 string なら throw、空文字なら
+// undefined 化)。mk-go は素通ししていたので、128 文字を超える `name` を持つ
+// actor は `user.name` (varchar(128)) の insert が SQLSTATE 22001 で落ち、
+// **その actor がまったく作られなかった** (#2662)。NUL も 22021 で同じく落とす。
+//
+// upstream の `truncate` は `stringz.substring` = 書記素クラスタ単位だが、
+// PostgreSQL の varchar はコードポイントで数えるので rune 単位で切る。
+const maxRemoteNameLen = 128
+
+// maxRemoteUsernameLen bounds `preferredUsername` (`user.username` /
+// `usernameLower`)。upstream validateActor の `length <= 128` に対応する。
+// 列長がたまたま同じだけで maxRemoteNameLen とは別の制約なので定数を分ける。
+const maxRemoteUsernameLen = 128
+
+// remoteDisplayName normalises a remote actor's display name for `user.name`.
+func remoteDisplayName(name string) string {
+	name = sanitizeRemoteText(name)
+	if runes := []rune(name); len(runes) > maxRemoteNameLen {
+		name = string(runes[:maxRemoteNameLen])
+	}
+	return name
+}
+
+// usernamePattern mirrors upstream validateActor's preferredUsername check
+// (`/^\w([\w-.]*\w)?$/`). 1 文字の場合は先頭の `\w` だけで成立する。
+var usernamePattern = regexp.MustCompile(`^\w([\w-.]*\w)?$`)
+
+// validRemoteUsername reports whether preferredUsername can be stored and is
+// shaped like upstream requires.
+//
+// `\w` は Go / JS とも ASCII `[0-9A-Za-z_]` なので、この pattern を通る値は
+// 必ず ASCII。したがって長さを byte で数えても upstream の UTF-16 `.length`
+// と一致する。
+//
+// `user.username` / `usernameLower` は varchar(128) NOT NULL。長すぎる値や NUL
+// 入りの値は `userRepo.Create` 自体を落とし、**その actor がまったく作られない**
+// (#2662)。upstream も同じ条件で `invalid Actor: wrong username` を投げるので、
+// DB エラーではなく検証で弾く。
+func validRemoteUsername(name string) bool {
+	if name == "" || len(name) > maxRemoteUsernameLen {
+		return false
+	}
+	return usernamePattern.MatchString(name)
 }
 
 // Limits applied when importing a remote actor's profile extras.
@@ -829,7 +935,13 @@ const (
 //
 // **NUL は書き込みごと落とす。** JSON の NUL エスケープは正当な入力で、Go の
 // decoder は実 NUL バイトを作る。PostgreSQL の text 系列はこれを受け付けず
-// (実測 SQLSTATE 08P01)、jsonb も拒否する (22P05)。
+// (実測 SQLSTATE 22021 `invalid byte sequence for encoding "UTF8": 0x00`)、
+// jsonb も拒否する (22P05)。
+//
+// **SQLSTATE は protocol mode で変わる。** 本番の `internal/db` は pgx の
+// extended protocol なので 22021 だが、`internal/testutil` は
+// `PreferSimpleProtocol: true` なので同じ入力が 08P01 (`invalid message
+// format`) になる。運用ログを grep するときは 22021 の方。
 //
 // 同じ書き込みに乗っている description まで巻き添えになり、しかも create 経路
 // では **user_profile 行が 1 行も作られない** (以後の refresh も同じ create を
@@ -893,13 +1005,13 @@ type remoteProfileExtras struct {
 //	location: person['vcard:Address'] ?? null
 func extractRemoteProfileExtras(actor *activitypub.Person) remoteProfileExtras {
 	var out remoteProfileExtras
-	if loc := strings.TrimSpace(sanitizeRemoteText(actor.VcardAddress)); loc != "" {
+	if loc := strings.TrimSpace(sanitizeRemoteText(actor.VcardAddress.String())); loc != "" {
 		if runes := []rune(loc); len(runes) > maxRemoteLocationLen {
 			loc = string(runes[:maxRemoteLocationLen])
 		}
 		out.location = &loc
 	}
-	if bday := birthdayPattern.FindString(actor.VcardBday); bday != "" {
+	if bday := birthdayPattern.FindString(actor.VcardBday.String()); bday != "" {
 		out.birthday = &bday
 	}
 	out.fields = extractRemoteFields(actor.Attachment)
@@ -980,12 +1092,12 @@ func extractRemoteFields(attachments []any) datatypes.JSON {
 func extractRemoteDescription(actor *activitypub.Person) *string {
 	var raw string
 	if actor.MisskeySummary != nil && *actor.MisskeySummary != "" {
-		raw = *actor.MisskeySummary
+		raw = actor.MisskeySummary.String()
 	} else if actor.Summary != "" {
 		// AP summary は Mastodon / Pleroma 等が HTML で送ってくる仕様
 		// (`<p>...</p>` ラップが典型)。MFM render を期待する frontend に
 		// そのまま渡すと escape されてタグがリテラル表示される。
-		raw = mfm.FromHTML(actor.Summary)
+		raw = mfm.FromHTML(actor.Summary.String())
 	}
 	raw = sanitizeRemoteText(raw)
 	if raw == "" {
@@ -1033,6 +1145,31 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	// background refresh は federation-loop 扱いで Strict (request host binding 有効)。
 	actor, err := r.fetchActor(uri, false)
 	if err != nil {
+		// **document が恒久的に不正なら lastFetchedAt だけ進める。**
+		// 進めないと shouldRefreshActor が永久に true のままで、その actor から
+		// inbound activity が 1 件来るたびに outbound fetch が 1 回走り続ける。
+		// 相手は同じ document を返すので自然回復しない (#2662 で
+		// preferredUsername の検証を足したことで、検証前に取り込まれた既存行が
+		// この状態になりうる)。
+		//
+		// 対象は **document の内容起因**のエラーだけ。ネットワーク断や 5xx で
+		// 進めると、一時的な障害の間に TTL を空振りさせて更新が遅れる。
+		// `ErrObjectHostMismatch` (inbox / publicKey.id の host 不一致など) も
+		// 相手が document を直さない限り変わらないので同じ扱いにする。
+		//
+		// **副作用**: lastFetchedAt を進めるので、`DeleteOrphanRemoteUsers` の
+		// 「graceDays 以上 fetch されていない」条件から外れ続ける。掃除対象は
+		// relay 由来の孤児行だけなので影響は小さいが、恒久的に壊れている
+		// actor はまさに掃除したい対象ではある。
+		if errors.Is(err, ErrInvalidActor) || errors.Is(err, ErrObjectHostMismatch) {
+			now := r.clock()
+			if uerr := r.userRepo.UpdateUser(existing.ID, map[string]any{"lastFetchedAt": &now}); uerr != nil {
+				slog.Warn("federation: lastFetchedAt backoff update failed",
+					"userID", existing.ID, "error", uerr)
+			} else {
+				existing.LastFetchedAt = &now
+			}
+		}
 		return
 	}
 	now := r.clock()
@@ -1041,15 +1178,14 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	}
 	// actor type が変わるケース (Person ↔ Service など) を反映する。常に上書きする
 	// (TS Misskey も同様)。
-	isBot := activitypub.IsBotActorType(actor.Type)
+	isBot := activitypub.IsBotActorType(actor.Type.String())
 	fields["isBot"] = isBot
 	existing.IsBot = isBot
 	// manuallyApprovesFollowers の切り替えも追従する (リモート側でlock/unlock
 	// された場合にローカルの判定もずれないように)。
-	fields["isLocked"] = actor.ManuallyApproves
-	existing.IsLocked = actor.ManuallyApproves
-	if actor.Name != "" {
-		name := actor.Name
+	fields["isLocked"] = actor.ManuallyApproves.Bool()
+	existing.IsLocked = actor.ManuallyApproves.Bool()
+	if name := remoteDisplayName(actor.Name.String()); name != "" {
 		fields["name"] = &name
 		existing.Name = &name
 	}
@@ -1058,13 +1194,12 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 		fields["inbox"] = &inbox
 		existing.Inbox = &inbox
 	}
-	if actor.Endpoints.SharedInbox != "" {
-		shared := actor.Endpoints.SharedInbox
+	if shared := remoteSharedInbox(actor); shared != "" {
 		fields["sharedInbox"] = &shared
 		existing.SharedInbox = &shared
 	}
 	if actor.Featured != "" {
-		featured := actor.Featured
+		featured := actor.Featured.String()
 		fields["featured"] = &featured
 		existing.Featured = &featured
 	}
@@ -1083,7 +1218,7 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	prevMovedAt := existing.MovedAt
 	movedThisRefresh := false
 	if actor.MovedTo != "" {
-		movedTo := actor.MovedTo
+		movedTo := actor.MovedTo.String()
 		moving := existing.MovedToURI == nil || *existing.MovedToURI != movedTo
 		fields["movedToUri"] = &movedTo
 		existing.MovedToURI = &movedTo
@@ -1108,13 +1243,11 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	}
 	// アバター / バナー画像のURLリモート側で変更された場合に追従する。
 	// 他フィールドと同様、空値や欠落時は既存値を温存する (削除は追わない)。
-	if actor.Icon != nil && actor.Icon.URL != "" {
-		avatarURL := actor.Icon.URL
+	if avatarURL := remoteMediaURL(actor.ID, "user.avatarUrl", actor.Icon.URLOrEmpty(), maxRemoteAvatarURLLen); avatarURL != "" {
 		fields["avatarUrl"] = &avatarURL
 		existing.AvatarURL = &avatarURL
 	}
-	if actor.Image != nil && actor.Image.URL != "" {
-		bannerURL := actor.Image.URL
+	if bannerURL := remoteMediaURL(actor.ID, "user.bannerUrl", actor.Image.URLOrEmpty(), maxRemoteBannerURLLen); bannerURL != "" {
 		fields["bannerUrl"] = &bannerURL
 		existing.BannerURL = &bannerURL
 	}
@@ -1183,7 +1316,7 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 			"fields":      string(extras.fields),
 		})
 	}
-	r.cachePublicKey(existing.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
+	r.cachePublicKey(existing.ID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM.String())
 	r.cacheAssertionMethods(existing.ID, actor.ID, actor.AssertionMethod)
 	if existing.Host != nil {
 		r.notifyInstance(*existing.Host)
@@ -1376,7 +1509,12 @@ func (r *Resolver) fetchActor(uri string, allowCrossHost bool) (*activitypub.Per
 		slog.Warn("federation: actor missing ActivityStreams @context", "uri", uri)
 		return nil, ErrInvalidActor
 	}
-	if actor.ID == "" || actor.PreferredUsername == "" {
+	// **`id` も正規化する。** upstream は `assertActivityMatchesUrl` が
+	// `new URL(activity.id)` を通すので、末尾改行のような形でも通る。ここで
+	// 落とすと **その actor がまったく取り込めない** (#2662)。`id` は全 field の
+	// 中で最も必ず存在する URL なので、inbox に改行を付ける実装は id にも付ける。
+	actor.ID = trimWHATWGURL(actor.ID)
+	if actor.ID == "" {
 		return nil, ErrInvalidActor
 	}
 	// actor.ID host が body を返した host と一致するか検証 (object-spoofing 防止、
@@ -1395,20 +1533,64 @@ func (r *Resolver) fetchActor(uri string, allowCrossHost bool) (*activitypub.Per
 			return nil, err
 		}
 	}
-	if !activitypub.IsValidActorType(actor.Type) {
+	// **型の検査を username より先に置く。** upstream validateActor も
+	// `isActor(x)` を最初に見る。逆順だと Note を actor として resolve した
+	// ときに「preferredUsername が不正」と報告され、型ミスマッチを username
+	// 問題と読み違える (#2662)。host 検証よりは後ろに置く。そちらは spoofing
+	// 対策で、専用のエラーを返せなくなると調査に効く情報が減る。
+	if !activitypub.IsValidActorType(actor.Type.String()) {
 		// Note/Activity 等 Actor でない object が actor として参照された場合の
 		// 防衛策。デバッグのため URI と type を残してから拒否する。
-		slog.Warn("federation: rejecting non-actor type", "uri", uri, "type", actor.Type)
+		slog.Warn("federation: rejecting non-actor type", "uri", uri, "type", actor.Type.String())
+		return nil, ErrInvalidActor
+	}
+	// **配送に使う URL は正規化してから保存する。** 検査だけ `trimWHATWGURL` で
+	// 緩めて生値を保存すると、actor は取り込めるのに `http.NewRequest` が毎回
+	// 落ちて**配送が永久に成立しない** (末尾空白なら `%20` 付きの URL を叩いて
+	// 相手が 404)。upstream は `new URL()` を通した値を使うので、そこに揃える。
+	// deliver 側は SkipRetry を付けないので、1 人いるだけで全 activity が
+	// MaxAttempts 回空振りする (#2662)。
+	actor.Inbox = trimWHATWGURL(actor.Inbox)
+	actor.SharedInbox = activitypub.APLenientID(trimWHATWGURL(actor.SharedInbox.String()))
+	actor.Endpoints.SharedInbox = activitypub.APLenientID(trimWHATWGURL(actor.Endpoints.SharedInbox.String()))
+	actor.PublicKey.ID = trimWHATWGURL(actor.PublicKey.ID)
+	// inbox / sharedInbox の host を actor に縛る。upstream validateActor と同型
+	// (前者は Error、後者は破棄)。ここを見ないと、任意のリモート actor が
+	// 第三者ホストを配送先として宣言できてしまう (deliver は blocklist しか
+	// 見ない)。
+	if !sameDeliveryHost(actor.Inbox, actor.ID) {
+		slog.Warn("federation: actor inbox host mismatch",
+			"uri", uri, "inbox", actor.Inbox)
+		return nil, ErrInvalidActor
+	}
+	if actor.SharedInbox != "" && !sameDeliveryHost(actor.SharedInbox.String(), actor.ID) {
+		slog.Warn("federation: dropping shared inbox with different host",
+			"uri", uri, "sharedInbox", actor.SharedInbox.String())
+		actor.SharedInbox = ""
+	}
+	if actor.Endpoints.SharedInbox != "" && !sameDeliveryHost(actor.Endpoints.SharedInbox.String(), actor.ID) {
+		slog.Warn("federation: dropping endpoints.sharedInbox with different host",
+			"uri", uri, "sharedInbox", actor.Endpoints.SharedInbox.String())
+		actor.Endpoints.SharedInbox = ""
+	}
+	// preferredUsername は user.username / usernameLower (varchar(128) NOT NULL)
+	// にそのまま入る。upstream validateActor と同じ条件で弾く (#2662)。素通しすると
+	// userRepo.Create が落ちて actor がまったく作られない。
+	if !validRemoteUsername(actor.PreferredUsername) {
+		slog.Warn("federation: actor has unusable preferredUsername", "uri", uri)
 		return nil, ErrInvalidActor
 	}
 	// publicKey.id (= HTTP Signature keyId) host を actor.ID host に縛る (Fix A、
-	// upstream validateActor の publicKey.id host check と同型、#1820 の object-host
-	// binding を鍵にも拡張)。これが無いと攻撃者 actor が publicKey.id に victim
+	// upstream validateActor の publicKey.id host check と同型)。**判定は
+	// `sameDeliveryHost`**: upstream は `punyHost` で比較しており `www.` を
+	// 同一視しない。`normalizeMatchHost` (object-host binding 用) を使うと `www.`
+	// サブドメインを名乗る actor が親ドメインの keyId を宣言できてしまう
+	// (#2662)。これが無いと攻撃者 actor が publicKey.id に victim
 	// ドメインの keyId を載せて自分の RSA 鍵を植え込み、LD-Signature 経路の
 	// global FindByKeyID 解決で victim を名乗る活動を verify 通過させられる
 	// (key confusion / 連合認証バイパス)。allowCrossHost (ap/show) でも keyId は
 	// actor 自身の host に縛る (request host とは独立、upstream expectHost と同じ)。
-	if actor.PublicKey.ID != "" && !sameURIHost(actor.PublicKey.ID, actor.ID) {
+	if actor.PublicKey.ID != "" && !sameDeliveryHost(actor.PublicKey.ID, actor.ID) {
 		slog.Warn("federation: actor publicKey.id host mismatch",
 			"uri", uri, "id", actor.ID, "publicKeyID", actor.PublicKey.ID)
 		return nil, ErrObjectHostMismatch
@@ -1416,21 +1598,91 @@ func (r *Resolver) fetchActor(uri string, allowCrossHost bool) (*activitypub.Per
 	return &actor, nil
 }
 
-// refreshPublicKey fetches the actor again and caches its public key. エラー
-// は呼び出し側でログするだけで上には伝搬しない。
+// keyFetchBackoff bounds how often we re-fetch an actor document solely to
+// refill the in-memory public key cache after a failure.
+//
+// この経路は TTL 内でもキャッシュが空なら毎回走る。鍵が入らない actor
+// (document が恒久的に不正 / `publicKey` を持たない / 相手が落ちている) では
+// 抑制しないと inbound activity 1 件につき outbound fetch が 1 回走り続ける。
+//
+// **エラーの種類で絞らない。** `refreshActor` 側は `ErrInvalidActor` に絞って
+// いるが、あちらは「lastFetchedAt を進める = TTL を空振りさせる」ので一時的な
+// 障害で進めると更新が遅れる。こちらは単なるレート制限で、5 分後には必ず
+// 再挑戦する。一時障害でも 5 分待つが、その間は `PublicKeyForActor` の
+// DB fallback が効く。
+const keyFetchBackoff = 5 * time.Minute
+
+// refreshPublicKey fetches the actor again and caches its public key.
+// エラーは上に伝搬せず、keyFetchBackoff に載せて次の機会に回す。
 func (r *Resolver) refreshPublicKey(userID, uri string) {
+	r.keysMu.RLock()
+	failedAt, failed := r.keyFetchFailures[userID]
+	r.keysMu.RUnlock()
+	if failed && r.clock().Sub(failedAt) < keyFetchBackoff {
+		return
+	}
 	// background refresh は federation-loop 扱いで Strict。
 	actor, err := r.fetchActor(uri, false)
 	if err != nil {
+		r.markKeyFetchFailed(userID)
 		return
 	}
-	r.cachePublicKey(userID, actor.PublicKey.ID, actor.PublicKey.PublicKeyPEM)
+	// **fetch は成功したが鍵が読めない場合も backoff に載せる。** この経路は
+	// 「TTL 内かつ in-memory 鍵キャッシュが空」なら毎回走るので、キャッシュに
+	// 何も入らないまま成功扱いにすると inbound activity 1 件につき outbound
+	// fetch が 1 回走り続ける (#2662)。空 PEM をキャッシュして黙らせるのは
+	// 論外 (既存の鍵を壊す)。
+	pem := actor.PublicKey.PublicKeyPEM.String()
+	if pem == "" {
+		r.markKeyFetchFailed(userID)
+		r.cacheAssertionMethods(userID, actor.ID, actor.AssertionMethod)
+		return
+	}
+	r.keysMu.Lock()
+	delete(r.keyFetchFailures, userID)
+	r.keysMu.Unlock()
+	r.cachePublicKey(userID, actor.PublicKey.ID, pem)
 	r.cacheAssertionMethods(userID, actor.ID, actor.AssertionMethod)
+}
+
+// markKeyFetchFailed records a failed key refresh so refreshPublicKey backs off.
+func (r *Resolver) markKeyFetchFailed(userID string) {
+	r.keysMu.Lock()
+	defer r.keysMu.Unlock()
+	if r.keyFetchFailures == nil {
+		r.keyFetchFailures = make(map[string]time.Time)
+	}
+	// backoff を過ぎた entry は用済みなので落とす。上限はリモート user 数
+	// なので暴走はしないが、消えないと単調増加する。
+	now := r.clock()
+	for id, at := range r.keyFetchFailures {
+		if now.Sub(at) >= keyFetchBackoff {
+			delete(r.keyFetchFailures, id)
+		}
+	}
+	r.keyFetchFailures[userID] = now
 }
 
 // cachePublicKey stores a PEM in the in-memory cache and optionally persists
 // it to the user_publickey table.
 func (r *Resolver) cachePublicKey(userID, keyID, pem string) {
+	// **空の PEM で既存の鍵を上書きしない。** 空を書くと in-memory も DB も
+	// 空になり、`PublicKeyForActor` が空文字を返して **その actor からの
+	// inbound HTTP Signature がすべて verify 失敗する**。refresh のたびに
+	// 同じ空が書き直されるので自然回復しない。
+	//
+	// `publicKeyPem` を寛容に読むようにした (#2662) ことで、`{"@value": ...}`
+	// のような形の document が「通るが値は空」で到達するようになった。それ以前
+	// から `publicKey` 欠落でも同じ経路には入る。鍵が読めないなら**何もしない**
+	// のが正しい (既存の鍵で verify を続けられる)。
+	if pem == "" {
+		// upstream の validateActor は `if (x.publicKey)` で publicKey を任意
+		// 扱いにするので、鍵を持たない actor は不正ではない (Ed25519 のみを
+		// publish する実装など)。Warn だと出続けるので Debug にする。
+		slog.Debug("federation: refusing to cache empty public key",
+			"userID", userID, "keyID", keyID)
+		return
+	}
 	r.keysMu.Lock()
 	r.keys[userID] = publicKeyEntry{pem: pem, fetchedAt: r.clock()}
 	r.keysMu.Unlock()
@@ -1476,13 +1728,36 @@ func (r *Resolver) declareEd25519Capability(actorURI string) {
 // 上必須。publickeyExtraRepo 未配線 (= 旧 deployment) のときは何もしない。
 // 不正な entry (非 Multikey type / decode 失敗 / persist 失敗) は warn log
 // + skip して RSA only にフォールバックする (fail-soft)。
-func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams []activitypub.Multikey) {
+func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams activitypub.MultikeyList) {
 	if r.publickeyExtraRepo == nil {
 		return
 	}
+	// **読めなかったときは purge しない。** 下の purge は「actor が申告しなかった
+	// keyId を消す」= key rotation 追従だが、それが成立するのは actor の申告を
+	// 正しく読めた場合だけ。読めない形 (string や壊れた entry) で空リストを
+	// 渡されて purge すると、キャッシュ済みの Ed25519 鍵を全消しし、Ed25519 のみを
+	// publish する相手では **inbound の署名検証が恒久的に失敗する** (相手は同じ
+	// 形を返し続けるので自然回復しない、#2662)。
+	if ams.Unreadable {
+		slog.Warn("assertionMethod partially unreadable; skipping stale-key purge",
+			"userID", userID, "actorURI", actorURI, "readable", len(ams.Keys))
+	}
 	// 1. 新 entries の upsert + 受領 keyId set を構築
-	receivedKeyIDs := make(map[string]bool, len(ams))
-	for _, am := range ams {
+	receivedKeyIDs := make(map[string]bool, len(ams.Keys)+len(ams.Refs))
+	// 参照形式 (bare IRI) は鍵素材を持たないので upsert はできないが、
+	// 「actor がその keyId を申告している」ことは分かるので purge から守る。
+	for _, ref := range ams.Refs {
+		ref = trimWHATWGURL(ref)
+		if sameDeliveryHost(ref, actorURI) {
+			receivedKeyIDs[ref] = true
+		}
+	}
+	upserted := 0
+	for _, am := range ams.Keys {
+		// **検査だけでなく保存値も正規化する。** 生値のまま入れると HTTP
+		// ヘッダ由来の keyId と一致しないゴミ行になり、しかも自分自身を
+		// purge から守ってしまう (#2662)。
+		am.ID = trimWHATWGURL(am.ID)
 		if am.Type != activitypub.MultikeyType || am.ID == "" || am.PublicKeyMultibase == "" {
 			continue
 		}
@@ -1494,7 +1769,7 @@ func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams []activity
 		// actor に縛れば植え込み経路は塞がる (controller は lookup に使われないため追加検証
 		// は不要)。不正 entry は既存の decode 失敗時と同じく warn + skip (fail-soft、
 		// actor 自体は取り込む)。
-		if !sameURIHost(am.ID, actorURI) {
+		if !sameDeliveryHost(am.ID, actorURI) {
 			slog.Warn("assertionMethod keyId host mismatch",
 				"userID", userID, "actorURI", actorURI, "keyID", am.ID)
 			continue
@@ -1522,15 +1797,23 @@ func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams []activity
 			continue
 		}
 		receivedKeyIDs[am.ID] = true
+		upserted++
 	}
 	// この host が Ed25519 を expose していることを instance 単位で記録する
 	// (#2393)。鍵が複数あっても host 単位の事実は 1 つなので、ループ内ではなく
 	// ここで 1 回だけ書く。actor resolve は inbound ほど高頻度ではないので buffer は
 	// 挟まない。best-effort なので失敗しても actor の取り込みは続ける。
-	if len(receivedKeyIDs) > 0 {
+	// **参照形式 (bare IRI) では宣言しない。** ref は purge 保護のために
+	// receivedKeyIDs へ入れるが、鍵素材が無いので Ed25519 対応の根拠にならない
+	// (FEP-521a の bare IRI は alg も分からない)。ref だけで宣言すると
+	// `SupportsEd25519()` が「対応」を返すのに鍵が 1 本も無い状態になる (#2662)。
+	if upserted > 0 {
 		r.declareEd25519Capability(actorURI)
 	}
 	// 2. actor JSON に無い既存 keyId を purge (key rotation 対応)
+	if ams.Unreadable {
+		return
+	}
 	existing, err := r.publickeyExtraRepo.ListByUserID(userID)
 	if err != nil {
 		slog.Warn("assertionMethod list failed", "userID", userID, "error", err)
@@ -1740,6 +2023,9 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 		slog.Warn("federation: note missing ActivityStreams @context", "uri", uri)
 		return nil, ErrInvalidNote
 	}
+	// host 検証も正規化後の値で行う (#2662)。実際の取り込みは
+	// ingestNoteWithCreated 側で改めて正規化する。
+	idProbe.ID = trimWHATWGURL(idProbe.ID)
 	if err := assertResponseHostMatches(finalURL, idProbe.ID); err != nil {
 		slog.Warn("federation: note id host mismatch", "uri", uri, "finalURL", finalURL, "id", idProbe.ID)
 		return nil, err
@@ -1875,6 +2161,10 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if err := json.Unmarshal(body, &apNote); err != nil {
 		return nil, false, ErrInvalidNote
 	}
+	// actor と同じ理由で URL 系を正規化する。`note.uri` にそのまま入るので、
+	// 生値だと後続の `FindByURI` / host 検証 / 配送先解決が全部ずれる (#2662)。
+	apNote.ID = trimWHATWGURL(apNote.ID)
+	apNote.AttributedTo = activitypub.APLenientID(trimWHATWGURL(apNote.AttributedTo.String()))
 	if apNote.ID == "" || apNote.AttributedTo == "" {
 		return nil, false, ErrInvalidNote
 	}
@@ -1895,13 +2185,13 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	//   2. inbound Create では note の著者が配送 actor 本人であること
 	//      (alice@a が bob@b になりすました note を作る forge を弾く)。
 	idHost, idErr := hostFromURI(apNote.ID)
-	attrHost, attrErr := hostFromURI(apNote.AttributedTo)
+	attrHost, attrErr := hostFromURI(apNote.AttributedTo.String())
 	// idna 正規化して Unicode/punycode mixed-form の同一 host を誤 reject しない (#1850)。
 	if idErr != nil || attrErr != nil || punyHost(idHost) != punyHost(attrHost) {
 		slog.Warn("federation: note id/attributedTo host mismatch", "id", apNote.ID, "attributedTo", apNote.AttributedTo)
 		return nil, false, ErrNoteAttributionMismatch
 	}
-	if deliveringActorURI != "" && apNote.AttributedTo != deliveringActorURI {
+	if deliveringActorURI != "" && apNote.AttributedTo.String() != deliveringActorURI {
 		slog.Warn("federation: note attribution does not match delivering actor", "attributedTo", apNote.AttributedTo, "actor", deliveringActorURI)
 		return nil, false, ErrNoteAttributionMismatch
 	}
@@ -1914,10 +2204,10 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// 中継経由で attributedTo が allowlist 外の host を指している payload を
 	// DB 永続化させない。既存 row hit (上の FindByURI) は素通しで legacy
 	// 互換を維持する。
-	if !r.hostAllowedForURI(apNote.AttributedTo) {
+	if !r.hostAllowedForURI(apNote.AttributedTo.String()) {
 		return nil, false, ErrHostNotAllowed
 	}
-	actor, err := r.resolveNoteAuthor(apNote.AttributedTo, ephemeral, depth)
+	actor, err := r.resolveNoteAuthor(apNote.AttributedTo.String(), ephemeral, depth)
 	if err != nil {
 		return nil, false, err
 	}
@@ -1925,7 +2215,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// では AP の `published` を採用しないと timeline 上の並びが受信時刻順に
 	// なってしまい remote とずれる (#940)。time-based ID (aidx 等) なので
 	// idGen.Generate に published を渡せば自動的に tl 並びも remote 一致する。
-	now := parseAPPublishedTime(apNote.Published, time.Now())
+	now := parseAPPublishedTime(apNote.Published.String(), time.Now())
 	noteURI := apNote.ID
 	note := &model.Note{
 		ID:         r.idGen.Generate(now),
@@ -1950,7 +2240,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		text := apNote.Source.Content
 		note.Text = &text
 	} else if apNote.MisskeyContent != "" {
-		text := apNote.MisskeyContent
+		text := apNote.MisskeyContent.String()
 		note.Text = &text
 	} else if apNote.Content != "" {
 		text := mfm.FromHTML(apNote.Content)
@@ -1959,7 +2249,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		}
 	}
 	if apNote.Summary != "" {
-		summary := apNote.Summary
+		summary := apNote.Summary.String()
 		note.CW = &summary
 	}
 	if apNote.Sensitive && note.CW == nil {
@@ -1971,11 +2261,13 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// 対応するため、現状では nil のままにする。
 	var replyTarget *model.Note
 	if apNote.InReplyTo != "" {
-		if id := r.extractLocalNoteID(apNote.InReplyTo); id != "" {
+		// inReplyTo も同じ (#2662)。生値だと返信チェーンが繋がらない。
+		apNote.InReplyTo = activitypub.APLenientID(trimWHATWGURL(apNote.InReplyTo.String()))
+		if id := r.extractLocalNoteID(apNote.InReplyTo.String()); id != "" {
 			if reply, err := r.noteRepo.FindByID(id); err == nil {
 				replyTarget = reply
 			}
-		} else if reply, err := r.noteRepo.FindByURI(apNote.InReplyTo); err == nil {
+		} else if reply, err := r.noteRepo.FindByURI(apNote.InReplyTo.String()); err == nil {
 			replyTarget = reply
 		}
 		if replyTarget != nil {
@@ -2009,7 +2301,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		if poll, err := r.pollRepo.FindByNoteID(replyTarget.ID); err == nil && poll != nil {
 			idx := -1
 			for i, c := range poll.Choices {
-				if c == apNote.Name {
+				if c == apNote.Name.String() {
 					idx = i
 					break
 				}
@@ -2088,8 +2380,8 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		note.Emojis = r.upsertEmojis(extractEmojiTags(apNote.Tag), *actor.Host)
 	}
 	// hashtag は AP `tag` 配列の Hashtag entry と本文 / CW の両方から拾い、
-	// hashtag.Extract で case-insensitive dedup + 長さ truncate を一括処理
-	// する (#679)。`tag` 配列が空 / Hashtag を含まない実装 (古い Mastodon
+	// hashtag.ExtractNoteTags で case-insensitive dedup + 件数 cap + 長さ判定を
+	// 一括処理する (#679)。長すぎる tag は truncate ではなく **drop** する。`tag` 配列が空 / Hashtag を含まない実装 (古い Mastodon
 	// 等) でも本文 fallback で trends 集計に乗るようにする。
 	hashtagSources := extractHashtagTagNames(apNote.Tag)
 	if note.Text != nil {
@@ -2105,7 +2397,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	}
 	// AP `attachment` 配列を drive_file 行に upsert (#378)。link 形式のみで
 	// 実 fetch はせず、frontend が drive_file.url 経由で remote 取得する。
-	note.FileIDs = r.upsertAttachments(extractAttachments(apNote.Attachment), &actor.ID, actor.Host)
+	note.FileIDs = r.upsertAttachments(extractAttachments(apNote.Attachment, apNote.Sensitive.Bool()), &actor.ID, actor.Host)
 	if len(note.FileIDs) > 0 {
 		// AttachedFileTypes は MIME type の配列 (TS との互換性)。
 		note.AttachedFileTypes = r.collectAttachedFileTypes(note.FileIDs)
@@ -2119,7 +2411,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// 「本文だけ」で引用元が表示されない。解決失敗は best-effort で quote 無し扱い。
 	// AP vote の早期 return より後 (= 実際に note を作る経路) で解決し、vote object に
 	// quote field が乗っていても無駄な fetch をしない。renoteCount の増分は Create 後。
-	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote, apNote.QuoteURL, depth, ephemeral)
+	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote.String(), apNote.QuoteURL.String(), depth, ephemeral)
 	// 引用先が followers / specified(DM) の場合は紐付けない。本家
 	// NoteCreateService.ts:346-352 は他人の followers note と全 specified note を
 	// renote 対象から reject するため、連合の正規 quote がこれらを指すことはない。
@@ -2218,11 +2510,11 @@ func (r *Resolver) createPollFromQuestion(note *model.Note, apNote *activitypub.
 	}
 	// endTime/closedから有効期限を設定
 	if apNote.EndTime != "" {
-		if t, err := time.Parse(time.RFC3339, apNote.EndTime); err == nil {
+		if t, err := time.Parse(time.RFC3339, apNote.EndTime.String()); err == nil {
 			poll.ExpiresAt = &t
 		}
 	} else if apNote.Closed != "" {
-		if t, err := time.Parse(time.RFC3339, apNote.Closed); err == nil {
+		if t, err := time.Parse(time.RFC3339, apNote.Closed.String()); err == nil {
 			poll.ExpiresAt = &t
 		}
 	}
@@ -2248,7 +2540,13 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 		return nil
 	}
 	var apNote activitypub.Note
-	if err := json.Unmarshal(object, &apNote); err != nil || apNote.ID == "" {
+	if err := json.Unmarshal(object, &apNote); err != nil {
+		return nil
+	}
+	// 書き込み側 (ingestNoteWithCreated) が正規化した値で保存しているので、
+	// lookup も同じ正規化を通す (#2662)。
+	apNote.ID = trimWHATWGURL(apNote.ID)
+	if apNote.ID == "" {
 		return nil
 	}
 	note, err := r.noteRepo.FindByURI(apNote.ID)
@@ -2318,6 +2616,8 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	if err := json.Unmarshal(body, &apNote); err != nil {
 		return nil, ErrInvalidNote
 	}
+	// lookup も書き込み側と同じ正規化を通す (#2662)。
+	apNote.ID = trimWHATWGURL(apNote.ID)
 	if apNote.ID == "" {
 		return nil, ErrInvalidNote
 	}
@@ -2348,7 +2648,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 		apNote.Source.Content != "" {
 		newText = apNote.Source.Content
 	} else if apNote.MisskeyContent != "" {
-		newText = apNote.MisskeyContent
+		newText = apNote.MisskeyContent.String()
 	} else if apNote.Content != "" {
 		newText = mfm.FromHTML(apNote.Content)
 	}
@@ -2373,7 +2673,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 		existing.Mentions = mentions
 	}
 	if apNote.Summary != "" {
-		summary := apNote.Summary
+		summary := apNote.Summary.String()
 		fields["cw"] = &summary
 		existing.CW = &summary
 	} else if apNote.Sensitive {
@@ -2424,7 +2724,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	// upsertAttachments が空 slice を返すので何もしない (= 既存 fileIDs を
 	// 誤って空に上書きしない、Devin #400 #1)。
 	if r.driveFileRepo != nil {
-		fileIDs := r.upsertAttachments(extractAttachments(apNote.Attachment), &existing.UserID, existing.UserHost)
+		fileIDs := r.upsertAttachments(extractAttachments(apNote.Attachment, apNote.Sensitive.Bool()), &existing.UserID, existing.UserHost)
 		if !slices.Equal([]string(existing.FileIDs), []string(fileIDs)) {
 			fields["fileIds"] = model.StringArray(fileIDs)
 			existing.FileIDs = model.StringArray(fileIDs)
@@ -2545,7 +2845,7 @@ func extractMentionTags(tags []any) []string {
 		if !ok {
 			continue
 		}
-		if typ, _ := m["type"].(string); typ != "Mention" {
+		if apTypeOf(m) != "Mention" {
 			continue
 		}
 		href, _ := m["href"].(string)
@@ -2635,7 +2935,7 @@ func extractHashtagTagNames(tags []any) []string {
 		if !ok {
 			continue
 		}
-		if typ, _ := m["type"].(string); typ != "Hashtag" {
+		if apTypeOf(m) != "Hashtag" {
 			continue
 		}
 		name, _ := m["name"].(string)
@@ -2666,7 +2966,7 @@ func extractEmojiTags(tags []any) []activitypub.EmojiTag {
 		if !ok {
 			continue
 		}
-		typ, _ := m["type"].(string)
+		typ := apTypeOf(m)
 		if typ != "Emoji" {
 			continue
 		}
@@ -2701,7 +3001,7 @@ func extractEmojiTags(tags []any) []activitypub.EmojiTag {
 		out = append(out, activitypub.EmojiTag{
 			Type:    "Emoji",
 			Name:    name,
-			Icon:    activitypub.Image{Type: "Image", URL: iconURL},
+			Icon:    activitypub.Image{Type: "Image", URL: activitypub.APLenientHref(iconURL)},
 			ID:      id,
 			Updated: updated,
 			License: license,
@@ -2753,9 +3053,9 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.
 		if existing, ok := existingByName[name]; ok {
 			// 既存絵文字: URL/URIが変わっていればまとめてupdate
 			updates := map[string]any{}
-			if existing.OriginalURL != tag.Icon.URL {
-				updates["originalUrl"] = tag.Icon.URL
-				updates["publicUrl"] = tag.Icon.URL
+			if existing.OriginalURL != tag.Icon.URL.String() {
+				updates["originalUrl"] = tag.Icon.URL.String()
+				updates["publicUrl"] = tag.Icon.URL.String()
 			}
 			if tag.ID != "" && (existing.URI == nil || *existing.URI != tag.ID) {
 				updates["uri"] = &tag.ID
@@ -2788,8 +3088,8 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.
 			ID:          r.idGen.Generate(now),
 			Name:        name,
 			Host:        &host,
-			OriginalURL: tag.Icon.URL,
-			PublicURL:   tag.Icon.URL,
+			OriginalURL: tag.Icon.URL.String(),
+			PublicURL:   tag.Icon.URL.String(),
 		}
 		// #731: AP `_misskey_license` 経由で federation 直後に保存。
 		// wrapper があれば FreeText (nil 含む) を取り込む、wrapper 自体が
@@ -3041,6 +3341,12 @@ func noteGroupKey(uri string, allowCrossHost, ephemeral bool) string {
 // `www.remote.example` vs `remote.example` を誤って弾く (#1820 review)。
 func normalizeMatchHost(u *url.URL) string {
 	// idna 正規化で Unicode IDN と punycode の mixed-form を同一視する (#1850)。
+	// `www.` 除去は upstream の `normalizeSynonymousSubdomain` 相当で、upstream も
+	// **`assertActivityMatchesUrl` (= fetch した document の id と URL の照合)
+	// でしか使わない**。actor が申告する値 (inbox / sharedInbox / publicKey.id /
+	// assertionMethod[].id) の host 検証は upstream の `punyHost` に合わせて
+	// `sameDeliveryHost` を使うこと。`www.` を同一視すると、`www` サブドメインを
+	// 名乗る actor が親ドメインの値を宣言できてしまう (#2662)。
 	host := punyHost(u.Hostname())
 	host = strings.TrimPrefix(host, "www.")
 	port := u.Port()
@@ -3051,24 +3357,56 @@ func normalizeMatchHost(u *url.URL) string {
 	return host
 }
 
-// sameURIHost reports whether two absolute URIs share the same normalized host
-// (normalizeMatchHost: punycode + default-port + leading-www 正規化)。署名鍵の
-// keyId (publicKey.id / assertionMethod[].id) を actor URI の host に縛るために
-// 使う。どちらかが parse 不能 / host 欠落なら false (= 不一致扱い) を返す。
-func sameURIHost(a, b string) bool {
-	au, aerr := url.Parse(a)
-	bu, berr := url.Parse(b)
+// sameDeliveryHost reports whether two absolute URIs share the same host under
+// upstream's punyHost rules (punycode + port, **no `www.` stripping**).
+//
+// 配送先 (`inbox` / `sharedInbox`) の host 検証はこちらを使う。
+// `normalizeMatchHost` は `#1820` の object-host binding 用に upstream の
+// `normalizeSynonymousSubdomain` (`/^www\./` 除去) を取り込んでいるが、
+// **upstream はそれを `assertActivityMatchesUrl` でしか使わず、
+// `validateActor` の inbox 検証には `punyHost` しか通さない**。`www.` を
+// 同一視すると、`www` サブドメインが別管理下にある (dangling DNS など) 環境で
+// DM を含む outbound をそちらへ向けられる (#2662)。
+func sameDeliveryHost(a, b string) bool {
+	au, aerr := url.Parse(trimWHATWGURL(a))
+	bu, berr := url.Parse(trimWHATWGURL(b))
 	if aerr != nil || berr != nil || au.Hostname() == "" || bu.Hostname() == "" {
 		return false
 	}
-	return normalizeMatchHost(au) == normalizeMatchHost(bu)
+	return punyHostPort(au) == punyHostPort(bu)
+}
+
+// trimWHATWGURL strips the characters that the WHATWG URL parser removes before
+// parsing, so `url.Parse` accepts what upstream's `new URL()` accepts.
+//
+// upstream は `punyHost` = `new URL()` なので、**前後の C0 制御文字と空白は
+// 除去され、tab / CR / LF は全位置で除去される**。Go の `net/url.Parse` は
+// これらをエラーにするので、そのままだと「末尾に改行が付いた inbox」を出す
+// 実装の actor が丸ごと reject される (#2662)。
+func trimWHATWGURL(raw string) string {
+	raw = strings.Trim(raw, "\x00\x01\x02\x03\x04\x05\x06\x07\x08\t\n\v\f\r\x0e\x0f"+
+		"\x10\x11\x12\x13\x14\x15\x16\x17\x18\x19\x1a\x1b\x1c\x1d\x1e\x1f ")
+	return strings.NewReplacer("\t", "", "\n", "", "\r", "").Replace(raw)
+}
+
+// punyHostPort mirrors upstream's punyHost (idna host + non-default port).
+func punyHostPort(u *url.URL) string {
+	host := punyHost(u.Hostname())
+	port := u.Port()
+	isDefaultPort := (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")
+	if port != "" && !isDefaultPort {
+		return host + ":" + port
+	}
+	return host
 }
 
 // extractAttachments parses the AP `attachment` array (heterogeneous []any
-// after JSON unmarshal) and returns Document entries. type が "Document" /
-// "Image" / "Audio" / "Video" のいずれかで `url` を持つもののみ採用する。
-// #378。
-func extractAttachments(rawAttachments []any) []activitypub.Document {
+// after JSON unmarshal) and returns Document entries. type が upstream の
+// `validDocumentTypes` ("Audio" / "Document" / "Image" / "Page" / "Video") の
+// いずれかで `url` を持つもののみ採用する。#378 / #2662。
+// noteSensitive は upstream の `attach.sensitive ??= note.sensitive` に対応する。
+// 添付側に `sensitive` が無いとき note レベルの値を継ぐ。
+func extractAttachments(rawAttachments []any, noteSensitive bool) []activitypub.Document {
 	if len(rawAttachments) == 0 {
 		return nil
 	}
@@ -3078,9 +3416,10 @@ func extractAttachments(rawAttachments []any) []activitypub.Document {
 		if !ok {
 			continue
 		}
-		typ, _ := m["type"].(string)
+		typ := apTypeOf(m)
 		switch typ {
-		case "Document", "Image", "Audio", "Video":
+		// upstream の validDocumentTypes は Page も含む (type.ts:263)。
+		case "Document", "Image", "Audio", "Video", "Page":
 			// ok
 		default:
 			continue
@@ -3091,7 +3430,19 @@ func extractAttachments(rawAttachments []any) []activitypub.Document {
 		}
 		mediaType, _ := m["mediaType"].(string)
 		name, _ := m["name"].(string)
-		sensitive, _ := m["sensitive"].(bool)
+		// upstream が実際に NSFW 判定に使うのは添付単位の `sensitive`
+		// (`attach.sensitive ??= note.sensitive` → `DriveFile.isSensitive`)。
+		// note レベルだけ寛容にして file レベルを `.(bool)` のままにすると、
+		// `"sensitive": "true"` の添付が非 NSFW になる (#2662)。
+		// 添付側に読める値が無ければ note レベルを継ぐ (upstream の `??=`)。
+		// `??=` は null / undefined のときだけ代入するので、**欠落と明示 null は
+		// 継承、読めた値は明示 false でも優先**する。
+		sensitive := noteSensitive
+		if raw, present := m["sensitive"]; present && raw != nil {
+			if v, known := activitypub.ParseBoolish(raw); known {
+				sensitive = v
+			}
+		}
 		// width / height / blurhash / icon は省略実装が多いので欠落時は
 		// zero value のまま。upsertAttachments 側で 0/空チェックして
 		// DriveFile に書き込むかを判断する (#460/#461)。
@@ -3101,9 +3452,9 @@ func extractAttachments(rawAttachments []any) []activitypub.Document {
 		var icon *activitypub.Image
 		if iconMap, ok := m["icon"].(map[string]any); ok {
 			iconURL, _ := iconMap["url"].(string)
-			iconType, _ := iconMap["type"].(string)
+			iconType := apTypeOf(iconMap)
 			if iconURL != "" {
-				icon = &activitypub.Image{Type: iconType, URL: iconURL}
+				icon = &activitypub.Image{Type: activitypub.APType(iconType), URL: activitypub.APLenientHref(iconURL)}
 			}
 		}
 		out = append(out, activitypub.Document{
@@ -3203,7 +3554,7 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		// 画像解析はしないが、remote 側が宣言している width/height/
 		// icon/blurhash を信頼してそのまま保存する。
 		if doc.Icon != nil && doc.Icon.URL != "" {
-			thumb := doc.Icon.URL
+			thumb := doc.Icon.URL.String()
 			f.ThumbnailURL = &thumb
 		}
 		width := doc.Width

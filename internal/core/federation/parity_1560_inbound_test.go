@@ -66,6 +66,34 @@ func TestProcess_UndoAccept_Unfollows(t *testing.T) {
 	assert.Empty(t, followingRepo.Followings, "Undo(Accept) must remove the following")
 }
 
+// 内側の Follow が `"actor": {"id": ...}` 形式でも unfollow できること。
+// 型エラーで早期 return すると、直後の normalizeActor (#999) が救うはずの
+// object 形式が dead code になる (#2662)。
+func TestProcess_UndoAccept_ObjectFormFollowActor(t *testing.T) {
+	p, repo, _, followingRepo := newProcForInbound1560(t, aliceActor)
+	aliceURI := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["alice1"] = &model.User{ID: "alice1", Username: "alice", UsernameLower: "alice", URI: &aliceURI, Host: &host}
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob"}
+	followingRepo.Followings["f1"] = &model.Following{ID: "f1", FollowerID: "bob", FolloweeID: "alice1"}
+
+	body := []byte(`{
+		"type": "Undo",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Accept",
+			"actor": "https://remote.example/users/alice",
+			"object": {
+				"type": "Follow",
+				"actor": {"id": "https://example.com/users/bob"},
+				"object": "https://remote.example/users/alice"
+			}
+		}
+	}`)
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, followingRepo.Followings, "object 形式の actor でも following を解除すること")
+}
+
 // #1560 [LOW] suspended remote actor の activity は dispatch 前に drop。
 func TestProcess_SuspendedActorDropped(t *testing.T) {
 	p, repo, noteRepo, _ := newProcForInbound1560(t, aliceActor)

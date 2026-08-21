@@ -451,6 +451,121 @@ func TestUpdateFeatured_NoFeaturedDeclared(t *testing.T) {
 	assert.Empty(t, env.pinnedNoteURIs(t, user.ID))
 }
 
+// items / orderedItems が単一 object でも取り込む。さらに**片方がスカラーでも
+// もう片方を巻き添えにしない** (`[]json.RawMessage` 決め打ちだと同じ document の
+// 別 field まで捨てられる、#2662)。
+func TestUpdateFeatured_AcceptsSingleItemAndSurvivesScalarSibling(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		collection string
+	}{
+		{"single object orderedItems", `{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": "https://remote.example/users/pat/collections/featured",
+	"type": "OrderedCollection",
+	"orderedItems": {"id": "https://remote.example/notes/pat-1"}
+}`},
+		{"scalar items does not clobber orderedItems", `{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": "https://remote.example/users/pat/collections/featured",
+	"type": "OrderedCollection",
+	"items": "nonsense",
+	"orderedItems": ["https://remote.example/notes/pat-1"]
+}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const (
+				actorURI = "https://remote.example/users/pat"
+				featured = "https://remote.example/users/pat/collections/featured"
+				noteURI  = "https://remote.example/notes/pat-1"
+			)
+			env := newFeaturedEnv(t, map[string]string{
+				actorURI: featuredActor("remote.example", "pat", featured),
+				featured: tc.collection,
+				noteURI:  featuredNote(noteURI, actorURI, "pinned"),
+			})
+			user, err := env.resolver.ResolveActor(actorURI)
+			require.NoError(t, err)
+			assert.Equal(t, []string{noteURI}, env.pinnedNoteURIs(t, user.ID))
+		})
+	}
+}
+
+// collection と **item** の type が混在配列でも先頭要素で判定する (他の type
+// 判定 5 実装と同じ head 方式)。`[]string` への一括 unmarshal だと
+// `["Person", 42]` が空になり、**Note でない item をピン留めに混ぜてしまう**
+// (#2662)。
+func TestUpdateFeatured_MixedArrayCollectionType(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/quill"
+		featured = "https://remote.example/users/quill/collections/featured"
+		noteURI  = "https://remote.example/notes/quill-1"
+	)
+	collection := `{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": "` + featured + `",
+	"type": ["OrderedCollection", 42],
+	"orderedItems": ["` + noteURI + `"]
+}`
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "quill", featured),
+		featured: collection,
+		noteURI:  featuredNote(noteURI, actorURI, "pinned"),
+	})
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteURI}, env.pinnedNoteURIs(t, user.ID))
+
+	// item 側の type が混在配列でも先頭で判定する。`[]string` 一括 decode だと
+	// 空になり、Note でない item が skip されずにピン留め候補に混ざる。
+	const (
+		actorURI2 = "https://remote.example/users/rex"
+		featured2 = "https://remote.example/users/rex/collections/featured"
+	)
+	collection2 := `{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": "` + featured2 + `",
+	"type": "OrderedCollection",
+	"orderedItems": [{"id": "https://remote.example/notes/rex-1", "type": ["Person", 42]}]
+}`
+	env2 := newFeaturedEnv(t, map[string]string{
+		actorURI2: featuredActor("remote.example", "rex", featured2),
+		featured2: collection2,
+		// URI 自体は解決できる Note にしておく。解決できないと「type を見て
+		// skip した」のか「解決に失敗した」のか区別できない。
+		"https://remote.example/notes/rex-1": featuredNote("https://remote.example/notes/rex-1", actorURI2, "not a pin"),
+	})
+	user2, err := env2.resolver.ResolveActor(actorURI2)
+	require.NoError(t, err)
+	assert.Empty(t, env2.pinnedNoteURIs(t, user2.ID), "Note でない item は採らない")
+}
+
+// collection の type が配列でもピン留めを取り込めること。この経路は
+// activitypub.Normalize を通らない生 fetch なので、string 決め打ちだと
+// **featured の取り込みが丸ごと落ちる** (#2662)。
+func TestUpdateFeatured_AcceptsArrayCollectionType(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/opal"
+		featured = "https://remote.example/users/opal/collections/featured"
+		noteURI  = "https://remote.example/notes/opal-1"
+	)
+	collection := `{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": "` + featured + `",
+	"type": ["OrderedCollection"],
+	"orderedItems": ["` + noteURI + `"]
+}`
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "opal", featured),
+		featured: collection,
+		noteURI:  featuredNote(noteURI, actorURI, "pinned"),
+	})
+
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	assert.Equal(t, []string{noteURI}, env.pinnedNoteURIs(t, user.ID))
+}
+
 // Collection でも OrderedCollection でもない文書は受け付けないこと。
 func TestUpdateFeatured_RejectsNonCollection(t *testing.T) {
 	const (

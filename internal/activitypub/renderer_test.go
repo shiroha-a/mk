@@ -56,9 +56,9 @@ func TestURLBuilder_ChatRoomURI(t *testing.T) {
 func TestRenderer_RenderChatRoom(t *testing.T) {
 	r := newRenderer()
 	g := r.RenderChatRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1", Description: "hello"})
-	assert.Equal(t, "Group", g.Type)
+	assert.Equal(t, "Group", g.Type.String())
 	assert.Equal(t, "https://example.com/chat/rooms/room1", g.ID)
-	assert.Equal(t, "General", g.Name)
+	assert.Equal(t, "General", g.Name.String())
 	assert.Equal(t, "hello", g.Summary)
 	assert.Equal(t, "https://example.com/users/owner1", g.AttributedTo)
 }
@@ -74,7 +74,7 @@ func TestRenderer_RenderInvite(t *testing.T) {
 	r := newRenderer()
 	group := r.RenderChatRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "owner1"})
 	inv := r.RenderInvite("owner1", group, "https://remote.example/users/bob")
-	assert.Equal(t, "Invite", inv.Type)
+	assert.Equal(t, "Invite", inv.Type.String())
 	assert.Equal(t, "https://example.com/users/owner1", inv.Actor)
 	assert.Equal(t, "https://remote.example/users/bob", inv.Target)
 	// id は addContext 互換で必ず入る (id 無し activity は受信側で弾かれる)。
@@ -93,7 +93,7 @@ func TestRenderer_RenderChatRoomInviteRef(t *testing.T) {
 		"General",
 		"https://example.com/users/bob",
 	)
-	assert.Equal(t, "Invite", ref.Type)
+	assert.Equal(t, "Invite", ref.Type.String())
 	assert.Equal(t, "https://remote.example/users/owner", ref.Actor)
 	assert.Equal(t, "https://example.com/users/bob", ref.Target)
 	// nested object なので id/@context は付けない。
@@ -111,7 +111,7 @@ func TestRenderer_RenderChatRoomRemove(t *testing.T) {
 		"https://example.com/users/carol",
 		"https://example.com/chat/rooms/room1",
 	)
-	assert.Equal(t, "Remove", rm.Type)
+	assert.Equal(t, "Remove", rm.Type.String())
 	// actor = object = 退室者、target = room。
 	assert.Equal(t, "https://example.com/users/carol", rm.Actor)
 	assert.Equal(t, "https://example.com/users/carol", rm.Object)
@@ -128,12 +128,12 @@ func TestRenderer_RenderChatRoomMessage(t *testing.T) {
 	members := []string{"https://example.com/users/alice", "https://remote.example/users/bob"}
 	c := r.RenderChatRoomMessage(msg, "https://example.com/users/alice", members,
 		"https://example.com/chat/rooms/room1", "2026-05-24T00:00:00Z")
-	assert.Equal(t, "Create", c.Type)
+	assert.Equal(t, "Create", c.Type.String())
 	assert.Equal(t, members, c.To)
 	note, ok := c.Object.(*Note)
 	require.True(t, ok)
-	assert.True(t, note.MisskeyTalk)
-	assert.Equal(t, members, note.To)
+	assert.True(t, note.MisskeyTalk.Bool())
+	assert.Equal(t, members, []string(note.To))
 	assert.Equal(t, "hello room", note.Content)
 	// note 階層の @context が room URI (CherryPick の room 識別子)。
 	assert.Equal(t, "https://example.com/chat/rooms/room1", note.Context)
@@ -157,18 +157,18 @@ func TestRenderer_RenderPerson(t *testing.T) {
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	assert.Equal(t, "https://example.com/users/u1", p.ID)
 	// url は id と区別し、人間向け profile ハンドル /@<username> を指す (#1869)。
-	assert.Equal(t, "https://example.com/@alice", p.URL)
-	assert.NotEqual(t, p.ID, p.URL, "actor url must differ from id")
+	assert.Equal(t, "https://example.com/@alice", p.URL.String())
+	assert.NotEqual(t, p.ID, p.URL.String(), "actor url must differ from id")
 	// featured は local actor に無条件出力される (#1876)。
-	assert.Equal(t, "https://example.com/users/u1/collections/featured", p.Featured)
-	assert.Equal(t, "Person", p.Type)
+	assert.Equal(t, "https://example.com/users/u1/collections/featured", p.Featured.String())
+	assert.Equal(t, "Person", p.Type.String())
 	assert.Equal(t, "alice", p.PreferredUsername)
-	assert.Equal(t, "Alice", p.Name)
-	assert.Equal(t, "PUBKEY", p.PublicKey.PublicKeyPEM)
-	assert.True(t, p.ManuallyApproves)
-	assert.True(t, p.Discoverable)
+	assert.Equal(t, "Alice", p.Name.String())
+	assert.Equal(t, "PUBKEY", p.PublicKey.PublicKeyPEM.String())
+	assert.True(t, p.ManuallyApproves.Bool())
+	assert.True(t, p.Discoverable.Bool())
 	require.NotNil(t, p.Icon)
-	assert.Equal(t, avatar, p.Icon.URL)
+	assert.Equal(t, avatar, p.Icon.URL.String())
 }
 
 // #2031: drive file 由来の actor avatar/banner には sensitive (file.isSensitive) /
@@ -263,10 +263,10 @@ func TestRenderer_RenderPerson_NoOptionalFields(t *testing.T) {
 	assert.Empty(t, p.Name)
 	// #1969: avatar 未設定でも upstream は identicon を icon に必ず付ける。
 	require.NotNil(t, p.Icon)
-	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL)
+	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL.String())
 	// 通常 user で banner 未設定なら image は付かない (upstream null)。
 	assert.Nil(t, p.Image)
-	assert.False(t, p.ManuallyApproves)
+	assert.False(t, p.ManuallyApproves.Bool())
 }
 
 // #1969: avatar 未設定でも全ローカル actor に icon=identicon が付く (upstream renderPerson)。
@@ -275,7 +275,7 @@ func TestRenderer_RenderPerson_IdenticonFallback(t *testing.T) {
 	u := &model.User{ID: "u1", Username: "alice"}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.NotNil(t, p.Icon)
-	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL)
+	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL.String())
 }
 
 // #1969: system actor は meta.iconUrl / bannerUrl を icon/image に使う。
@@ -288,15 +288,15 @@ func TestRenderer_RenderPerson_SystemActorUsesInstanceImages(t *testing.T) {
 	u := &model.User{ID: "u_sys", Username: "relay.actor"}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.NotNil(t, p.Icon)
-	assert.Equal(t, "https://example.com/files/icon.png", p.Icon.URL, "system actor の icon は meta.iconUrl")
+	assert.Equal(t, "https://example.com/files/icon.png", p.Icon.URL.String(), "system actor の icon は meta.iconUrl")
 	require.NotNil(t, p.Image)
-	assert.Equal(t, "https://example.com/files/banner.png", p.Image.URL, "system actor の image は meta.bannerUrl")
+	assert.Equal(t, "https://example.com/files/banner.png", p.Image.URL.String(), "system actor の image は meta.bannerUrl")
 
 	// instance image 未設定なら system でも icon=identicon、image は付かない。
 	r2 := newRenderer()
 	p2 := r2.RenderPerson(u, nil, "PUBKEY", nil)
 	require.NotNil(t, p2.Icon)
-	assert.Equal(t, "https://example.com/identicon/relay.actor", p2.Icon.URL)
+	assert.Equal(t, "https://example.com/identicon/relay.actor", p2.Icon.URL.String())
 	assert.Nil(t, p2.Image)
 }
 
@@ -310,7 +310,7 @@ func TestRenderer_RenderPerson_NormalUserDoesNotLeakInstanceImages(t *testing.T)
 	u := &model.User{ID: "u1", Username: "alice"} // 通常 user
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.NotNil(t, p.Icon)
-	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL, "通常 user は instance icon でなく identicon")
+	assert.Equal(t, "https://example.com/identicon/alice", p.Icon.URL.String(), "通常 user は instance icon でなく identicon")
 	assert.Nil(t, p.Image, "通常 user は banner 未設定で image 省略 (instance banner を漏らさない)")
 }
 
@@ -323,9 +323,9 @@ func TestRenderer_RenderPerson_AvatarBannerRaw(t *testing.T) {
 	u := &model.User{ID: "u1", Username: "relay.actor", AvatarURL: &avatar, BannerURL: &banner}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.NotNil(t, p.Icon)
-	assert.Equal(t, avatar, p.Icon.URL, "avatar 設定済みなら raw avatar (instance icon でない)")
+	assert.Equal(t, avatar, p.Icon.URL.String(), "avatar 設定済みなら raw avatar (instance icon でない)")
 	require.NotNil(t, p.Image)
-	assert.Equal(t, banner, p.Image.URL)
+	assert.Equal(t, banner, p.Image.URL.String())
 }
 
 // #1956: system actor (username に '.' を含む relay.actor / instance.actor /
@@ -337,7 +337,7 @@ func TestRenderer_RenderPerson_SystemActorIsApplication(t *testing.T) {
 	// Application が優先されること (isSystem > isBot) を確認する。
 	u := &model.User{ID: "u_relay", Username: "relay.actor", IsBot: true}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
-	assert.Equal(t, "Application", p.Type)
+	assert.Equal(t, "Application", p.Type.String())
 }
 
 // 通常の bot (username に '.' 無し) は Service のまま。
@@ -345,7 +345,7 @@ func TestRenderer_RenderPerson_BotIsService(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u_bot", Username: "botuser", IsBot: true}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
-	assert.Equal(t, "Service", p.Type)
+	assert.Equal(t, "Service", p.Type.String())
 }
 
 func TestRenderer_RenderPerson_AssertionMethodOmittedWhenNoEd25519(t *testing.T) {
@@ -354,7 +354,7 @@ func TestRenderer_RenderPerson_AssertionMethodOmittedWhenNoEd25519(t *testing.T)
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	// Ed25519 鍵を持たない user (= TS で signup された / backfill 未済) は
 	// AssertionMethod を出さず upstream actor JSON と shape を揃える。
-	assert.Empty(t, p.AssertionMethod)
+	assert.Empty(t, p.AssertionMethod.Keys)
 }
 
 // 32 byte 以外の "Ed25519" 鍵 (= 仕様違反) を渡した場合は EncodeEd25519Multikey
@@ -365,7 +365,7 @@ func TestRenderer_RenderPerson_InvalidEd25519KeySize_FailsSoft(t *testing.T) {
 	u := &model.User{ID: "u1", Username: "alice"}
 	short := ed25519.PublicKey(make([]byte, 16)) // 仕様違反
 	p := r.RenderPerson(u, nil, "PUBKEY", short)
-	assert.Empty(t, p.AssertionMethod)
+	assert.Empty(t, p.AssertionMethod.Keys)
 }
 
 func TestRenderer_RenderPerson_AssertionMethodWithEd25519(t *testing.T) {
@@ -376,10 +376,10 @@ func TestRenderer_RenderPerson_AssertionMethodWithEd25519(t *testing.T) {
 	require.NoError(t, err)
 	p := r.RenderPerson(u, nil, "PUBKEY", pub)
 
-	require.Len(t, p.AssertionMethod, 1)
-	am := p.AssertionMethod[0]
+	require.Len(t, p.AssertionMethod.Keys, 1)
+	am := p.AssertionMethod.Keys[0]
 	assert.Equal(t, "https://example.com/users/u1#ed25519-key", am.ID)
-	assert.Equal(t, MultikeyType, am.Type)
+	assert.Equal(t, MultikeyType, am.Type.String())
 	assert.Equal(t, "https://example.com/users/u1", am.Controller)
 	// publicKeyMultibase は z6Mk... prefix (Ed25519 Multikey 仕様)
 	assert.True(t, strings.HasPrefix(am.PublicKeyMultibase, "z6Mk"))
@@ -416,7 +416,7 @@ func TestRenderer_RenderPerson_MisskeyCanChat(t *testing.T) {
 			u := &model.User{ID: "u1", Username: "alice", ChatScope: tc.scope}
 			p := r.RenderPerson(u, nil, "PUBKEY", nil)
 			require.NotNil(t, p.MisskeyCanChat)
-			assert.Equal(t, tc.want, *p.MisskeyCanChat)
+			assert.Equal(t, tc.want, p.MisskeyCanChat.Bool())
 		})
 	}
 }
@@ -441,10 +441,10 @@ func TestRenderer_RenderNote_Public(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(n, idGen)
-	assert.Equal(t, "Note", out.Type)
+	assert.Equal(t, "Note", out.Type.String())
 	assert.Equal(t, "hello", out.Content)
-	assert.Equal(t, "warning", out.Summary)
-	assert.True(t, out.Sensitive)
+	assert.Equal(t, "warning", out.Summary.String())
+	assert.True(t, out.Sensitive.Bool())
 	assert.Contains(t, out.To, Public)
 	assert.Contains(t, out.CC, "https://example.com/users/author/followers")
 }
@@ -570,7 +570,7 @@ func TestRenderer_RenderNote_Reply(t *testing.T) {
 	}
 	out := r.RenderNote(n, idGen)
 	// noteResolver が未設定なので local URI にフォールバックする。
-	assert.Equal(t, "https://example.com/notes/parent", out.InReplyTo)
+	assert.Equal(t, "https://example.com/notes/parent", out.InReplyTo.String())
 }
 
 // リモート note への reply は note.URI を使い、ローカル URL にしない。
@@ -594,7 +594,7 @@ func TestRenderer_RenderNote_Reply_RemoteTarget(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(n, idGen)
-	assert.Equal(t, remoteURI, out.InReplyTo)
+	assert.Equal(t, remoteURI, out.InReplyTo.String())
 }
 
 func TestRenderer_RenderNote_InvalidIDFallback(t *testing.T) {
@@ -615,7 +615,7 @@ func TestRenderer_RenderCreate(t *testing.T) {
 	noteID := idGen.Generate(time.Now())
 	n := &model.Note{ID: noteID, UserID: "author", Visibility: model.NoteVisibilityPublic}
 	c := r.RenderCreate(n, idGen)
-	assert.Equal(t, "Create", c.Type)
+	assert.Equal(t, "Create", c.Type.String())
 	assert.Equal(t, "https://example.com/users/author", c.Actor)
 	assert.NotNil(t, c.Object)
 
@@ -633,7 +633,7 @@ func TestRenderer_RenderCreate(t *testing.T) {
 func TestRenderer_RenderFollow(t *testing.T) {
 	r := newRenderer()
 	f := r.RenderFollow("alice", "https://remote.example/users/bob")
-	assert.Equal(t, "Follow", f.Type)
+	assert.Equal(t, "Follow", f.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", f.Actor)
 	assert.Equal(t, "https://remote.example/users/bob", f.Object)
 	// IDはURI部分がハッシュ化されている
@@ -645,7 +645,7 @@ func TestRenderer_RenderAccept(t *testing.T) {
 	r := newRenderer()
 	inner := map[string]any{"type": "Follow"}
 	a := r.RenderAccept("alice", inner)
-	assert.Equal(t, "Accept", a.Type)
+	assert.Equal(t, "Accept", a.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", a.Actor)
 	assert.NotNil(t, a.Object)
 	// id は Misskey/CherryPick の InboxProcessorService が必須としている
@@ -666,7 +666,7 @@ func TestRenderer_RenderAcceptIDUnique(t *testing.T) {
 func TestRenderer_RenderFollowRelay(t *testing.T) {
 	r := newRenderer()
 	f := r.RenderFollowRelay("rel123", "relay-user-id")
-	assert.Equal(t, "Follow", f.Type)
+	assert.Equal(t, "Follow", f.Type.String())
 	assert.Equal(t, "https://example.com/users/relay-user-id", f.Actor)
 	// id は /activities/follow-relay/{relayID} 固定 (processor 側が regex で検出)
 	assert.Equal(t, "https://example.com/activities/follow-relay/rel123", f.ID)
@@ -689,7 +689,7 @@ func TestRenderer_RenderLike(t *testing.T) {
 	r := newRenderer()
 	reactor := &model.User{ID: "alice"}
 	l := r.RenderLike(reactor, "https://remote.example/notes/n1", "🎉", "https://example.com/likes/l1")
-	assert.Equal(t, "Like", l.Type)
+	assert.Equal(t, "Like", l.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", l.Actor)
 	assert.Equal(t, "https://remote.example/notes/n1", l.Object)
 	assert.Equal(t, "🎉", l.Content)
@@ -721,7 +721,7 @@ func TestRenderer_RenderLike_LocalCustomEmojiTag(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Emoji", et.Type)
 	assert.Equal(t, ":smile:", et.Name)
-	assert.Equal(t, "https://example.com/files/smile.webp", et.Icon.URL)
+	assert.Equal(t, "https://example.com/files/smile.webp", et.Icon.URL.String())
 }
 
 func TestRenderer_RenderLike_RemoteCustomEmojiTag(t *testing.T) {
@@ -735,7 +735,7 @@ func TestRenderer_RenderLike_RemoteCustomEmojiTag(t *testing.T) {
 	et, ok := l.Tag[0].(EmojiTag)
 	require.True(t, ok)
 	assert.Equal(t, ":foo:", et.Name)
-	assert.Equal(t, "https://remote.example/emojis/foo.webp", et.Icon.URL)
+	assert.Equal(t, "https://remote.example/emojis/foo.webp", et.Icon.URL.String())
 }
 
 func TestRenderer_RenderLike_LegacyLocalNoSuffix(t *testing.T) {
@@ -786,7 +786,7 @@ func TestRenderer_RenderUndoLike(t *testing.T) {
 	reactor := &model.User{ID: "alice"}
 	like := r.RenderLike(reactor, "https://remote.example/notes/n1", "🎉", "https://example.com/likes/l1")
 	u := r.RenderUndoLike(reactor, like)
-	assert.Equal(t, "Undo", u.Type)
+	assert.Equal(t, "Undo", u.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", u.Actor)
 	assert.Equal(t, "https://example.com/likes/l1/undo", u.ID)
 	require.NotNil(t, u.Object)
@@ -798,7 +798,7 @@ func TestRenderer_RenderAnnounce(t *testing.T) {
 	idGen := newIDGen(t)
 	renoteID := idGen.Generate(time.Now())
 	a := r.RenderAnnounce(renoter, renoteID, "https://remote.example/notes/orig", model.NoteVisibilityPublic, idGen)
-	assert.Equal(t, "Announce", a.Type)
+	assert.Equal(t, "Announce", a.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", a.Actor)
 	assert.Equal(t, "https://remote.example/notes/orig", a.Object)
 	assert.Equal(t, "https://example.com/notes/"+renoteID+"/activity", a.ID)
@@ -844,7 +844,7 @@ func TestRenderer_RenderUndoAnnounce(t *testing.T) {
 	renoter := &model.User{ID: "alice"}
 	announce := r.RenderAnnounce(renoter, "renote1", "https://remote.example/notes/orig", model.NoteVisibilityPublic, nil)
 	u := r.RenderUndoAnnounce(renoter, announce)
-	assert.Equal(t, "Undo", u.Type)
+	assert.Equal(t, "Undo", u.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", u.Actor)
 	assert.Equal(t, announce.ID+"/undo", u.ID)
 }
@@ -853,7 +853,7 @@ func TestRenderer_RenderDelete(t *testing.T) {
 	r := newRenderer()
 	author := &model.User{ID: "alice"}
 	d := r.RenderDelete(author, "https://example.com/notes/n1")
-	assert.Equal(t, "Delete", d.Type)
+	assert.Equal(t, "Delete", d.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", d.Actor)
 	assert.Equal(t, "https://example.com/notes/n1#Delete", d.ID)
 	tomb, ok := d.Object.(Tombstone)
@@ -868,7 +868,7 @@ func TestRenderer_RenderDeleteActor(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "alice", Username: "alice"}
 	d := r.RenderDeleteActor(u)
-	assert.Equal(t, "Delete", d.Type)
+	assert.Equal(t, "Delete", d.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", d.Actor)
 	assert.Equal(t, "https://example.com/users/alice#Delete", d.ID)
 	assert.Equal(t, "https://example.com/users/alice", d.Object)
@@ -881,12 +881,12 @@ func TestRenderer_RenderUndoDeleteActor(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "alice", Username: "alice"}
 	un := r.RenderUndoDeleteActor(u)
-	assert.Equal(t, "Undo", un.Type)
+	assert.Equal(t, "Undo", un.Type.String())
 	assert.Equal(t, "https://example.com/users/alice", un.Actor)
 	assert.NotEmpty(t, un.Context)
 	inner, ok := un.Object.(*Delete)
 	require.True(t, ok)
-	assert.Equal(t, "Delete", inner.Type)
+	assert.Equal(t, "Delete", inner.Type.String())
 	assert.Nil(t, inner.Context, "inner Delete must not carry @context")
 }
 
@@ -894,7 +894,7 @@ func TestRenderer_RenderPerson_Bot(t *testing.T) {
 	r := newRenderer()
 	u := &model.User{ID: "u1", Username: "bot", IsBot: true}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
-	assert.Equal(t, "Service", p.Type)
+	assert.Equal(t, "Service", p.Type.String())
 }
 
 func TestRenderer_RenderPerson_WithProfile(t *testing.T) {
@@ -917,12 +917,12 @@ func TestRenderer_RenderPerson_WithProfile(t *testing.T) {
 	assert.Contains(t, p.Summary, "<b>hello</b>")
 	// #2106 L50: _misskey_summary / _misskey_followedMessage は *string で常時出力される。
 	require.NotNil(t, p.MisskeySummary)
-	assert.Equal(t, desc, *p.MisskeySummary)
-	assert.Equal(t, "2000-01-01", p.VcardBday)
-	assert.Equal(t, "Tokyo", p.VcardAddress)
+	assert.Equal(t, desc, p.MisskeySummary.String())
+	assert.Equal(t, "2000-01-01", p.VcardBday.String())
+	assert.Equal(t, "Tokyo", p.VcardAddress.String())
 	require.NotNil(t, p.MisskeyFollowedMessage)
-	assert.Equal(t, "Thanks!", *p.MisskeyFollowedMessage)
-	assert.True(t, p.IsCat)
+	assert.Equal(t, "Thanks!", p.MisskeyFollowedMessage.String())
+	assert.True(t, p.IsCat.Bool())
 	require.Len(t, p.Attachment, 1)
 	pv, ok := p.Attachment[0].(PropertyValue)
 	require.True(t, ok)
@@ -948,10 +948,10 @@ func TestRenderer_RenderPerson_BannerAndMovedTo(t *testing.T) {
 	}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	require.NotNil(t, p.Image)
-	assert.Equal(t, banner, p.Image.URL)
-	assert.Equal(t, movedTo, p.MovedTo)
-	assert.Equal(t, APStringList{"https://other.example/users/alice", "https://third.example/users/a"}, p.AlsoKnownAs)
-	assert.Equal(t, featured, p.Featured)
+	assert.Equal(t, banner, p.Image.URL.String())
+	assert.Equal(t, movedTo, p.MovedTo.String())
+	assert.Equal(t, APIDList{"https://other.example/users/alice", "https://third.example/users/a"}, p.AlsoKnownAs)
+	assert.Equal(t, featured, p.Featured.String())
 }
 
 func TestRenderer_RenderPerson_MisskeyExtensionFields(t *testing.T) {
@@ -965,9 +965,9 @@ func TestRenderer_RenderPerson_MisskeyExtensionFields(t *testing.T) {
 		MakeNotesHiddenBefore:        nil,
 	}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
-	assert.True(t, p.MisskeyRequireSigninToViewContents)
+	assert.True(t, p.MisskeyRequireSigninToViewContents.Bool())
 	require.NotNil(t, p.MisskeyMakeNotesFollowersOnlyBefore)
-	assert.Equal(t, 30, *p.MisskeyMakeNotesFollowersOnlyBefore)
+	assert.Equal(t, 30, p.MisskeyMakeNotesFollowersOnlyBefore.Int())
 	assert.Nil(t, p.MisskeyMakeNotesHiddenBefore)
 }
 
@@ -976,7 +976,7 @@ func TestRenderer_RenderPerson_MisskeyExtensionFields_Defaults(t *testing.T) {
 	u := &model.User{ID: "u1", Username: "alice"}
 	p := r.RenderPerson(u, nil, "PUBKEY", nil)
 	// デフォルト (false / nil) は omitempty で出力されない
-	assert.False(t, p.MisskeyRequireSigninToViewContents)
+	assert.False(t, p.MisskeyRequireSigninToViewContents.Bool())
 	assert.Nil(t, p.MisskeyMakeNotesFollowersOnlyBefore)
 	assert.Nil(t, p.MisskeyMakeNotesHiddenBefore)
 }
@@ -1033,7 +1033,7 @@ func TestRenderer_RenderNote_WithAttachment(t *testing.T) {
 	assert.Equal(t, 0, doc1.Width)
 	assert.Equal(t, 0, doc1.Height)
 	// sensitive ファイルがあるのでNote自体もsensitiveになる
-	assert.True(t, out.Sensitive)
+	assert.True(t, out.Sensitive.Bool())
 }
 
 func TestRenderer_RenderNote_AttachmentError(t *testing.T) {
@@ -1066,7 +1066,7 @@ func TestRenderer_RenderNote_WithMFMContent(t *testing.T) {
 	assert.Contains(t, out.Content, "<b>bold</b>")
 	assert.Contains(t, out.Content, "<code>code</code>")
 	// MFMマークアップあり → _misskey_content / source が設定される
-	assert.Equal(t, text, out.MisskeyContent)
+	assert.Equal(t, text, out.MisskeyContent.String())
 	require.NotNil(t, out.Source)
 	assert.Equal(t, text, out.Source.Content)
 	assert.Equal(t, "text/x.misskeymarkdown", out.Source.MediaType)
@@ -1114,8 +1114,8 @@ func TestRenderer_RenderNote_QuoteRenote(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(n, idGen)
-	assert.Equal(t, remoteURI, out.MisskeyQuote)
-	assert.Equal(t, remoteURI, out.QuoteURL)
+	assert.Equal(t, remoteURI, out.MisskeyQuote.String())
+	assert.Equal(t, remoteURI, out.QuoteURL.String())
 }
 
 func TestRenderer_RenderNote_QuoteRenote_LocalFallback(t *testing.T) {
@@ -1133,7 +1133,7 @@ func TestRenderer_RenderNote_QuoteRenote_LocalFallback(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(n, idGen)
-	assert.Equal(t, "https://example.com/notes/local-note", out.MisskeyQuote)
+	assert.Equal(t, "https://example.com/notes/local-note", out.MisskeyQuote.String())
 }
 
 func TestRenderer_RenderNote_HashtagTag(t *testing.T) {
@@ -1189,7 +1189,7 @@ func TestRenderer_RenderNote_EmojiTag(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Emoji", et.Type)
 	assert.Equal(t, ":blobcat:", et.Name)
-	assert.Equal(t, "https://example.com/files/blobcat.webp", et.Icon.URL)
+	assert.Equal(t, "https://example.com/files/blobcat.webp", et.Icon.URL.String())
 	assert.Equal(t, emojiURI, et.ID)
 	// #731: license は upstream Misskey TS と同じく `_misskey_license` wrapper で
 	// federation 出力する。受信側 instance はこれを拾って emoji.license に取り込む。
@@ -1296,7 +1296,7 @@ func TestRenderer_RenderFlag(t *testing.T) {
 	r := newRenderer()
 	actor := &model.User{ID: "instance"}
 	flag := r.RenderFlag(actor, "https://remote.example/users/alice", "spam comment")
-	assert.Equal(t, "Flag", flag.Type)
+	assert.Equal(t, "Flag", flag.Type.String())
 	assert.Equal(t, "https://example.com/users/instance", flag.Actor)
 	assert.Equal(t, "https://remote.example/users/alice", flag.Object)
 	assert.Equal(t, "spam comment", flag.Content)
@@ -1342,11 +1342,11 @@ func TestRenderer_RenderNote_SingleChoicePoll(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(note, idGen)
-	assert.Equal(t, "Question", out.Type)
+	assert.Equal(t, "Question", out.Type.String())
 	require.Len(t, out.OneOf, 3)
 	assert.Empty(t, out.AnyOf)
 	assert.Equal(t, "A", out.OneOf[0].Name)
-	assert.Equal(t, 10, out.OneOf[0].Replies.TotalItems)
+	assert.Equal(t, 10, out.OneOf[0].Replies.TotalItems.Int())
 	assert.Equal(t, "B", out.OneOf[1].Name)
 	// #1779: 期限切れ poll は closed のみ (endTime は出さない、upstream asPoll の
 	// 排他キー)。
@@ -1372,7 +1372,7 @@ func TestRenderer_RenderNote_MultipleChoicePoll(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(note, idGen)
-	assert.Equal(t, "Question", out.Type)
+	assert.Equal(t, "Question", out.Type.String())
 	assert.Empty(t, out.OneOf)
 	require.Len(t, out.AnyOf, 2)
 	assert.Equal(t, "X", out.AnyOf[0].Name)
@@ -1396,7 +1396,7 @@ func TestRenderer_RenderNote_PollWithoutExpiry(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(note, idGen)
-	assert.Equal(t, "Question", out.Type)
+	assert.Equal(t, "Question", out.Type.String())
 	require.Len(t, out.OneOf, 2)
 	assert.Empty(t, out.EndTime)
 	assert.Empty(t, out.Closed)
@@ -1411,7 +1411,7 @@ func TestRenderer_RenderNote_NoPollResolver(t *testing.T) {
 		Visibility: model.NoteVisibilityPublic,
 	}
 	out := r.RenderNote(note, idGen)
-	assert.Equal(t, "Note", out.Type)
+	assert.Equal(t, "Note", out.Type.String())
 	assert.Empty(t, out.OneOf)
 }
 

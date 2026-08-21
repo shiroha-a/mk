@@ -3,8 +3,10 @@ package hashtag
 import (
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestExtract(t *testing.T) {
@@ -220,4 +222,73 @@ func TestExtractUserTags_Cap(t *testing.T) {
 	}
 	got := ExtractUserTags(strings.Join(parts, " "))
 	assert.Len(t, got, MaxUserTags)
+}
+
+// NFKC 正規化は合字を展開するので、Extract の 128 rune フィルタを通った tag が
+// ExtractUserTags の出力では膨らむ。`user.tags` は varchar(128)[] なので、
+// 超過値を渡すと INSERT ごと落ちて **その actor が 1 行も作られない** (#2662)。
+// note.tags も varchar(128)[]。user 側だけ直すと「actor は取り込めるのに
+// 同じハッシュタグを含む Note は丸ごと落ちる」非対称が残る (#2662)。
+func TestNormalizeNoteTags_DropsTagsThatGrowPastLimitAfterNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want int
+	}{
+		{"expands past limit", []string{strings.Repeat("\u337f", 100)}, 0},
+		{"expands within limit", []string{strings.Repeat("\u337f", 30)}, 1},
+		{"plain within limit", []string{strings.Repeat("a", 128)}, 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := NormalizeNoteTags(tc.in)
+			require.Len(t, got, tc.want)
+			for _, g := range got {
+				assert.LessOrEqual(t, utf8.RuneCountInString(g), MaxTagLength,
+					"varchar(128)[] に収まること")
+			}
+		})
+	}
+
+	// MFM 抽出経路も同じ (リモート Note / ローカル投稿の両方が通る)。
+	assert.Empty(t, ExtractNoteTags("#"+strings.Repeat("\u337f", 100)))
+}
+
+func TestExtractUserTags_DropsTagsThatGrowPastLimitAfterNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int
+	}{
+		// U+337F SQUARE CORPORATION は NFKC で 4 rune (株式会社) に展開する。
+		{"expands past limit", "#" + strings.Repeat("\u337f", 100), 0},
+		// 展開しても収まるものは残る。
+		{"expands within limit", "#" + strings.Repeat("\u337f", 30), 1},
+		{"plain within limit", "#" + strings.Repeat("a", 128), 1},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ExtractUserTags(tc.in)
+			require.Len(t, got, tc.want)
+			for _, g := range got {
+				assert.LessOrEqual(t, utf8.RuneCountInString(g), MaxTagLength,
+					"varchar(128)[] に収まること")
+			}
+		})
+	}
+}
+
+// NUL 入りの tag は落とす。`note.tags` / `user.tags` は varchar(128)[] で NUL を
+// 受け付けず、INSERT ごと落ちて **その actor / Note が 1 行も作られない** (#2662)。
+// 正規化 (NFKC) は NUL を除去しない。
+func TestTags_DropNUL(t *testing.T) {
+	withNUL := "ab" + "\u0000" + "cd"
+	// リモート actor の `tag` は `"#" + name` の形で渡される。
+	require.NotEmpty(t, ExtractUserTags("#ok"), "対照: NUL 無しなら拾う")
+	assert.Empty(t, ExtractUserTags("#"+withNUL), "user.tags")
+	assert.Empty(t, ExtractNoteTags("#"+withNUL), "MFM 抽出経路")
+
+	// NormalizeNoteTags は抽出済みの名前を受け取る (# は付かない)。
+	require.NotEmpty(t, NormalizeNoteTags([]string{"ok"}), "対照")
+	assert.Empty(t, NormalizeNoteTags([]string{withNUL}), "note.tags")
 }

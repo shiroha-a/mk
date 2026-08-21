@@ -455,8 +455,11 @@ func (p *Processor) handleCollection(act genericActivity, depth int, signer *mod
 		return nil // skip: nested collection beyond depth limit
 	}
 	var col struct {
-		Items        []json.RawMessage `json:"items"`
-		OrderedItems []json.RawMessage `json:"orderedItems"`
+		// APRawList は単一 object も 1 件として拾う。`[]json.RawMessage` 決め打ち
+		// だと、片方がスカラーなだけで**もう片方まで巻き添えで捨てられる**
+		// (featured.go と同型、#2662)。upstream は `toArray(...)` で展開する。
+		Items        activitypub.APRawList `json:"items"`
+		OrderedItems activitypub.APRawList `json:"orderedItems"`
 	}
 	if len(act.raw) > 0 {
 		_ = json.Unmarshal(act.raw, &col)
@@ -477,8 +480,11 @@ func (p *Processor) handleCollection(act genericActivity, depth int, signer *mod
 	}
 	for _, item := range items {
 		var itemAct genericActivity
-		if err := json.Unmarshal(item, &itemAct); err != nil {
-			// 文字列 URI 等の inline でない item は skip。
+		// 型エラーを握る (#2662)。握らないと `{"actor": {"id": ...}}` や
+		// 先行 field の型エラーがある item を丸ごと落とす。文字列 URI 等の
+		// inline でない item は握っても `itemAct.ID` が空のまま下の gate で
+		// skip される。
+		if err := unmarshalIgnoringTypeErrors(item, &itemAct); err != nil {
 			continue
 		}
 		itemAct.raw = item
@@ -519,11 +525,34 @@ func ExtractActorIRI(body []byte) string {
 		return ""
 	}
 	var act genericActivity
-	if err := json.Unmarshal(normalized, &act); err != nil {
+	// **型エラーで "" を返さない。** 呼び出し側 (inbox の authorizeActor) は
+	// `actor == ""` を「actor 欠落 = Process 側が弾く」と解釈して**ゲートを
+	// 素通しさせる**。`process()` は `_ = json.Unmarshal` + `normalizeActor` で
+	// 救済するので、`{"actor":{"id":...}}` や `"published": 12345` のような
+	// document は actor を読めてしまい、署名者 != actor の LD-Signature 検証・
+	// `activity.id` host ゲート・replay guard が全部飛ぶ (#2662)。
+	if err := unmarshalIgnoringTypeErrors(normalized, &act); err != nil {
 		return ""
 	}
 	act.normalizeActor(normalized)
 	return act.Actor
+}
+
+// unmarshalIgnoringTypeErrors decodes JSON, keeping whatever fields decoded and
+// swallowing `*json.UnmarshalTypeError` (構文エラーは返す)。
+//
+// `process()` が `_ = json.Unmarshal` で実質同じことをしているので、そこから
+// 値を読む helper も同じ寛容さでないと**ゲートと本処理で actor がずれる**。
+func unmarshalIgnoringTypeErrors(data []byte, v any) error {
+	err := json.Unmarshal(data, v)
+	if err == nil {
+		return nil
+	}
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return nil
+	}
+	return err
 }
 
 // ExtractActivityID returns the activity's top-level `id` after the same
@@ -540,7 +569,8 @@ func ExtractActivityID(body []byte) string {
 		return ""
 	}
 	var act genericActivity
-	if err := json.Unmarshal(normalized, &act); err != nil {
+	// ExtractActorIRI と同じ理由で型エラーを握る。
+	if err := unmarshalIgnoringTypeErrors(normalized, &act); err != nil {
 		return ""
 	}
 	return act.ID
@@ -754,7 +784,9 @@ func (p *Processor) handleFollow(act genericActivity) error {
 // handleUndo processes an Undo activity wrapping a Follow / Like / Announce.
 func (p *Processor) handleUndo(act genericActivity) error {
 	var inner genericActivity
-	if err := json.Unmarshal(act.Object, &inner); err != nil {
+	// 型エラーを握らないと、直後の normalizeActor (#999) が救うはずの
+	// `inner.actor` が embedded object のケースに**到達できない** (#2662)。
+	if err := unmarshalIgnoringTypeErrors(act.Object, &inner); err != nil {
 		return fmt.Errorf("invalid undo object: %w", err)
 	}
 	// inner.actor が embedded object のケースも救済する (#999 / upstream #17340)。
@@ -804,8 +836,13 @@ func (p *Processor) handleUndoAccept(act genericActivity, inner genericActivity)
 		return err
 	}
 	// inner.Object は元の Follow。その actor が local follower。
+	//
+	// 型エラーを握らないと、直後の normalizeActor (#999) が救うはずの
+	// `"actor": {"id": ...}` 形式で早期 return してしまい、Undo(Accept(Follow))
+	// が unfollow されない (#2662)。string URI は握っても ID / Actor が空のまま
+	// なので従来どおり skip に落ちる。
 	var follow genericActivity
-	if uerr := json.Unmarshal(inner.Object, &follow); uerr != nil {
+	if uerr := unmarshalIgnoringTypeErrors(inner.Object, &follow); uerr != nil {
 		// object が Follow の URI 文字列だけのケースは follower を特定できない。
 		// upstream は getUserFromApId(activity.object) で解決するが、mk-go では
 		// Follow URI から follower を逆引きする経路が無いので skip (ack)。
@@ -996,7 +1033,9 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 // RelayStatusMarker.MarkAccepted を呼び出す (upstream ApInboxService 互換)。
 func (p *Processor) handleAccept(act genericActivity) error {
 	var inner genericActivity
-	if err := json.Unmarshal(act.Object, &inner); err != nil {
+	// 型エラーを握らないと、直後の normalizeActor (#999) が救うはずの
+	// `inner.actor` が embedded object のケースに**到達できない** (#2662)。
+	if err := unmarshalIgnoringTypeErrors(act.Object, &inner); err != nil {
 		// objectが文字列（Follow IDのURI）の場合もあるが、現状はnilで許容
 		return nil
 	}
@@ -1110,14 +1149,17 @@ func mergeCreateAudience(act genericActivity) json.RawMessage {
 	return merged
 }
 
-// decodeAudience parses an AP audience field that may be a single string or a
-// []string into a []string. Reuses activitypub.APStringList so string / array
-// forms are handled uniformly. Empty / null input yields nil.
+// decodeAudience parses an AP audience field into a []string. The value may be
+// a single id, an object carrying `id`, or an array of either. Unreadable
+// elements are dropped. Empty / null input yields nil.
 func decodeAudience(raw json.RawMessage) []string {
 	if len(raw) == 0 {
 		return nil
 	}
-	var list activitypub.APStringList
+	// APIDList は upstream getApIds と同じく `{"id": ...}` 形式の要素も拾う。
+	// `[]string` 決め打ちだと object 要素で unmarshal ごと失敗し audience が丸ごと
+	// 落ちる (#2662)。
+	var list activitypub.APIDList
 	if err := json.Unmarshal(raw, &list); err != nil {
 		return nil
 	}
@@ -1400,7 +1442,7 @@ func (p *Processor) handleLike(act genericActivity) error {
 	// 乗せるため、content/_misskey_reaction が無ければ name を fallback に使う
 	// (#1948-21)。like.Name は埋め込み Object の name (AS activity の name)。
 	if reaction == "" {
-		reaction = like.Name
+		reaction = like.Name.String()
 	}
 	// reversi game session URI (`/games/{UUID}/{sessionID}`) は CherryPick
 	// 拡張の reaction 連合。純正 Misskey フロントは `reacted` を表示する UI を
@@ -1815,7 +1857,7 @@ func (p *Processor) handleUpdate(act genericActivity) error {
 		}
 		person.ID = uri
 	}
-	if person.Type != "" && !strings.EqualFold(person.Type, "person") {
+	if person.Type != "" && !strings.EqualFold(person.Type.String(), "person") {
 		// Note / Question / Game は上で dispatch 済。残り (Article 等) は未対応。
 		return nil
 	}
@@ -1863,15 +1905,16 @@ func objectAPID(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
+	// readObjectString と同じ理由で正規化する (#2662)。
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		return trimWHATWGURL(s)
 	}
 	var obj struct {
 		ID string `json:"id"`
 	}
 	if err := json.Unmarshal(raw, &obj); err == nil {
-		return obj.ID
+		return trimWHATWGURL(obj.ID)
 	}
 	return ""
 }
@@ -1892,7 +1935,9 @@ func isBearcapURI(raw json.RawMessage) bool {
 // RelayStatusMarker.MarkRejected を呼ぶ。
 func (p *Processor) handleReject(act genericActivity) error {
 	var inner genericActivity
-	if err := json.Unmarshal(act.Object, &inner); err != nil {
+	// 型エラーを握らないと、直後の normalizeActor (#999) が救うはずの
+	// `inner.actor` が embedded object のケースに**到達できない** (#2662)。
+	if err := unmarshalIgnoringTypeErrors(act.Object, &inner); err != nil {
 		return fmt.Errorf("invalid reject object: %w", err)
 	}
 	// inner.actor が embedded object のケースも救済する (#999 / upstream #17340)。
@@ -2014,15 +2059,13 @@ func (p *Processor) handleFlag(act genericActivity) error {
 	if err != nil {
 		return err
 	}
-	// objectからURI配列を取得（ユーザーやノートのURI）
-	var uris []string
+	// object から URI 配列を取得する (ユーザーや Note の URI)。upstream は
+	// `getApIds(activity.object)` なので、単一値・配列に加えて
+	// `{"id": "..."}` の object 形式も受ける (ApInboxService.ts:560)。旧実装は
+	// string と []string しか受けず、object 形式の Flag を落としていた。
+	var uris activitypub.APIDList
 	if err := json.Unmarshal(act.Object, &uris); err != nil {
-		// 単一URIの場合
-		var single string
-		if err2 := json.Unmarshal(act.Object, &single); err2 != nil {
-			return errors.New("flag: cannot parse object")
-		}
-		uris = []string{single}
+		return errors.New("flag: cannot parse object")
 	}
 	if len(uris) == 0 {
 		return errors.New("flag: empty object")
@@ -2221,13 +2264,22 @@ func (act *genericActivity) normalizeActor(raw json.RawMessage) {
 
 // readObjectString reads an activity Object field that is either a plain
 // string IRI or a nested object with an "id" field.
+//
+// **戻り値は `trimWHATWGURL` を通す。** 書き込み側 (`ingestNoteWithCreated` /
+// `fetchActor`) が正規化した値を `note.uri` / `user.uri` に入れているので、
+// 読み出し側が生値のままだと `FindByURI` が miss する。id に改行を付ける実装の
+// ノートが「取り込めるが Delete / Update / ピン留めが一切届かない」状態になる
+// (#2662)。upstream は書き込みも読み出しも生値なので対称。
 func readObjectString(raw json.RawMessage) (string, error) {
 	if len(raw) == 0 {
 		return "", errors.New("missing object")
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil && s != "" {
-		return s, nil
+		if s = trimWHATWGURL(s); s != "" {
+			return s, nil
+		}
+		return "", errors.New("object missing id")
 	}
 	var obj struct {
 		ID string `json:"id"`
@@ -2235,6 +2287,7 @@ func readObjectString(raw json.RawMessage) (string, error) {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return "", err
 	}
+	obj.ID = trimWHATWGURL(obj.ID)
 	if obj.ID == "" {
 		return "", errors.New("object missing id")
 	}

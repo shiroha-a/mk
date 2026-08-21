@@ -205,14 +205,24 @@ func canonicalKey(k string) (string, bool) {
 }
 
 // flattenType reduces a possibly-array AS type into a single string. 配列の
-// 場合は最初の文字列要素を採用する。文字列以外は空を返す。
+// 場合は**先頭要素**が文字列のときだけ採用する (先頭が非文字列なら空)。
+// 文字列でも配列でもない値は空を返す。
 func flattenType(v any) string {
 	switch x := v.(type) {
 	case string:
 		return x
 	case []any:
-		for _, item := range x {
-			if s, ok := item.(string); ok && s != "" {
+		// **先頭が string でなければ諦める。** upstream getApType と
+		// `activitypub.APType` に揃える。走査して最初の string を拾うと、
+		// upstream が型判定不能とする document を inbox 経由でだけ受け入れる
+		// ことになる (#2662)。
+		//
+		// **両経路が完全に一致するわけではない。** `normalizeValue` は
+		// `{"@id": ...}` を先に string へ潰すので、`[{"@id":"as:Person"}]` は
+		// inbox 経由なら `as:Person`、生 fetch なら空になる。揃えたのは
+		// 「先頭以外を走査するか」の一点。
+		if len(x) > 0 {
+			if s, ok := x[0].(string); ok {
 				return s
 			}
 		}

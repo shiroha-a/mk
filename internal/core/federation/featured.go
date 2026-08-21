@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -102,9 +103,15 @@ func (r *Resolver) fetchFeaturedItems(uri string) ([]json.RawMessage, bool) {
 		return nil, false
 	}
 	var col struct {
-		Type         string            `json:"type"`
-		Items        []json.RawMessage `json:"items"`
-		OrderedItems []json.RawMessage `json:"orderedItems"`
+		// APType は `"type": ["OrderedCollection"]` を受ける。string 決め打ちだと
+		// collection ごと unmarshal に失敗して featured の取り込みが丸ごと落ちる
+		// (この経路は Normalize を通らない生 fetch、#2662)。
+		Type activitypub.APType `json:"type"`
+		// APRawList は単一 object も 1 件として拾う。`[]json.RawMessage`
+		// 決め打ちだと、無関係な片方がスカラーなだけで **もう片方まで
+		// 巻き添えで捨てられる** (#2662)。
+		Items        activitypub.APRawList `json:"items"`
+		OrderedItems activitypub.APRawList `json:"orderedItems"`
 	}
 	if err := json.Unmarshal(body, &col); err != nil {
 		slog.Warn("federation: featured collection is not a JSON object", "uri", uri, "err", err)
@@ -113,13 +120,13 @@ func (r *Resolver) fetchFeaturedItems(uri string) ([]json.RawMessage, bool) {
 	// upstream は type に応じて片方だけ読む (Collection→items /
 	// OrderedCollection→orderedItems)。Collection / OrderedCollection 以外は
 	// 受け付けない。
-	switch strings.ToLower(col.Type) {
+	switch strings.ToLower(col.Type.String()) {
 	case "collection":
 		return col.Items, true
 	case "orderedcollection":
 		return col.OrderedItems, true
 	}
-	slog.Warn("federation: featured is not a collection", "uri", uri, "type", col.Type)
+	slog.Warn("federation: featured is not a collection", "uri", uri, "type", col.Type.String())
 	return nil, false
 }
 
@@ -190,13 +197,13 @@ func singleAPType(raw json.RawMessage) string {
 	if len(raw) == 0 {
 		return ""
 	}
-	var single string
-	if err := json.Unmarshal(raw, &single); err == nil {
-		return single
+	// **他の type 判定 (`activitypub.TypeOf` / `APType` / `apTypeOf` /
+	// `flattenType`) と同じく「先頭要素が string ならそれ」にする。**
+	// `[]string` への一括 unmarshal だと `["Note", 42]` で空になり、
+	// head 方式との差が生まれる (#2662)。
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return ""
 	}
-	var many []string
-	if err := json.Unmarshal(raw, &many); err == nil && len(many) > 0 {
-		return many[0]
-	}
-	return ""
+	return activitypub.TypeOf(v)
 }

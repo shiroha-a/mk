@@ -1,12 +1,14 @@
 package testutil
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // applyUserFieldsはmock内部関数だが、productionのresolver/move双方が
@@ -128,5 +130,107 @@ func TestApplyInstanceFields_SuspensionStateString(t *testing.T) {
 		got, err := repo.FindByHost(host)
 		require.NoError(t, err)
 		assert.Equal(t, model.SuspensionStateGoneSuspended, got.SuspensionState)
+	})
+}
+
+// mock の varchar guard 自体をゲートする。production の呼び出し元
+// (federation の refreshActor) は戻り値を捨てるので、guard が壊れても
+// resolver 側の test では気付けない (#2662)。
+func TestMockUserRepository_VarcharGuards(t *testing.T) {
+	long := strings.Repeat("a", 129)
+	nul := "al\x00ice"
+
+	t.Run("create rejects over-long name", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		require.Error(t, repo.Create(&model.User{ID: "u1", Username: "a", Name: &long}))
+		assert.NotContains(t, repo.Users, "u1", "実 DB と同じく行を作らない")
+	})
+	t.Run("create rejects NUL in username", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		require.Error(t, repo.Create(&model.User{ID: "u1", Username: nul, UsernameLower: nul}))
+	})
+	t.Run("create accepts 128 code points", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		ok := strings.Repeat("あ", 128)
+		require.NoError(t, repo.Create(&model.User{ID: "u1", Username: "a", Name: &ok}),
+			"varchar はコードポイントで数えるのでバイト数では弾かない")
+	})
+	t.Run("update rejects and leaves the row untouched", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		orig := "Alice"
+		require.NoError(t, repo.Create(&model.User{ID: "u1", Username: "a", Name: &orig}))
+		require.Error(t, repo.UpdateUser("u1", map[string]any{"name": &long}))
+		// 実 DB は UPDATE ごと落とすので 1 列も変わらない。
+		require.NotNil(t, repo.Users["u1"].Name)
+		assert.Equal(t, "Alice", *repo.Users["u1"].Name)
+	})
+
+	t.Run("profile create rejects over-long location", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		loc := strings.Repeat("b", 129)
+		require.Error(t, repo.CreateProfile(&model.UserProfile{UserID: "u1", Location: &loc}))
+		assert.NotContains(t, repo.Profiles, "u1")
+	})
+	t.Run("profile create rejects over-long description", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		desc := strings.Repeat("c", 2049)
+		require.Error(t, repo.CreateProfile(&model.UserProfile{UserID: "u1", Description: &desc}))
+	})
+	t.Run("profile update rejects and leaves the row untouched", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		orig := "Kyoto"
+		require.NoError(t, repo.CreateProfile(&model.UserProfile{UserID: "u1", Location: &orig}))
+		bad := strings.Repeat("b", 129)
+		require.Error(t, repo.UpdateProfile("u1", map[string]any{"location": &bad}))
+		require.NotNil(t, repo.Profiles["u1"].Location)
+		assert.Equal(t, "Kyoto", *repo.Profiles["u1"].Location)
+	})
+	t.Run("profile update rejects NUL in jsonb fields", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		require.NoError(t, repo.CreateProfile(&model.UserProfile{UserID: "u1"}))
+		err := repo.UpdateProfile("u1", map[string]any{"fields": "[{\"name\":\"a\\u0000b\"}]"})
+		require.Error(t, err, "jsonb は \\u0000 エスケープを SQLSTATE 22P05 で拒否する")
+	})
+	// CreateProfile 経路は applyProfileFields を通らないので、
+	// assertProfileColumns の jsonb 検査だけが頼り。
+	t.Run("profile create rejects NUL in jsonb fields", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		require.Error(t, repo.CreateProfile(&model.UserProfile{
+			UserID: "u1",
+			Fields: datatypes.JSON([]byte(`[{"name":"a\u0000b"}]`)),
+		}))
+		assert.NotContains(t, repo.Profiles, "u1")
+	})
+	t.Run("profile create rejects invalid JSON in jsonb fields", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		require.Error(t, repo.CreateProfile(&model.UserProfile{
+			UserID: "u1",
+			Fields: datatypes.JSON([]byte("{")),
+		}))
+	})
+	t.Run("profile create accepts valid fields", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		require.NoError(t, repo.CreateProfile(&model.UserProfile{
+			UserID: "u1",
+			Fields: datatypes.JSON([]byte(`[{"name":"a","value":"b"}]`)),
+		}))
+	})
+	t.Run("profile update rejects raw []byte for jsonb fields", func(t *testing.T) {
+		repo := NewMockUserRepository()
+		require.NoError(t, repo.CreateProfile(&model.UserProfile{UserID: "u1"}))
+		require.Error(t, repo.UpdateProfile("u1", map[string]any{"fields": []byte("[]")}))
+	})
+	t.Run("profile update applies nothing when a later field fails", func(t *testing.T) {
+		// 実 DB は UPDATE ごと落とすので、同じ書き込みに乗った他の列も残らない。
+		// map の反復順に依存せず決定的であること。
+		repo := NewMockUserRepository()
+		require.NoError(t, repo.CreateProfile(&model.UserProfile{UserID: "u1"}))
+		bad := strings.Repeat("b", 129)
+		desc := "new description"
+		require.Error(t, repo.UpdateProfile("u1", map[string]any{
+			"location":    &bad,
+			"description": &desc,
+		}))
+		assert.Nil(t, repo.Profiles["u1"].Description, "巻き添えの列も適用しない")
 	})
 }

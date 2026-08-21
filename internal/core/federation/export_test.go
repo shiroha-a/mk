@@ -51,3 +51,14 @@ func (r *Resolver) ResolveTextMentionUserIDs(mentions []corenote.Mention) []stri
 func (r *Resolver) ProcessRemoteMove(src *model.User, prevMovedAt *time.Time, visited map[string]bool) {
 	r.processRemoteMove(src, prevMovedAt, visited)
 }
+
+// KeyFetchFailureCount exposes the size of the key-refresh backoff map so tests
+// can assert that expired entries are pruned (they are otherwise unobservable).
+func (r *Resolver) KeyFetchFailureCount() int {
+	r.keysMu.RLock()
+	defer r.keysMu.RUnlock()
+	return len(r.keyFetchFailures)
+}
+
+// MarkKeyFetchFailed exposes markKeyFetchFailed for external tests.
+func (r *Resolver) MarkKeyFetchFailed(userID string) { r.markKeyFetchFailed(userID) }

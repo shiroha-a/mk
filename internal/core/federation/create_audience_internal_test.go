@@ -47,8 +47,8 @@ func TestMergeCreateAudience(t *testing.T) {
 
 		merged := mergeCreateAudience(act)
 		note := decodeMergedNote(t, merged)
-		assert.Equal(t, []string{followers}, note.To)
-		assert.Equal(t, []string{activitypub.Public}, note.CC)
+		assert.Equal(t, []string{followers}, []string(note.To))
+		assert.Equal(t, []string{activitypub.Public}, []string(note.CC))
 		// union された to/cc から home が導出される (followers in to + Public in cc)。
 		assert.Equal(t, "home", string(deriveVisibility(note.To, note.CC)))
 	})
@@ -70,11 +70,11 @@ func TestMergeCreateAudience(t *testing.T) {
 
 		note := decodeMergedNote(t, mergeCreateAudience(act))
 		// activity 側を先、object 側を後ろに連結し重複 (https://x/a) は 1 回のみ。
-		assert.Equal(t, []string{activitypub.Public, "https://x/a", "https://x/b"}, note.To)
+		assert.Equal(t, []string{activitypub.Public, "https://x/a", "https://x/b"}, []string(note.To))
 	})
 
 	t.Run("audience_as_single_string_is_accepted", func(t *testing.T) {
-		// to が array でなく単一 string でも APStringList 経由で拾う。
+		// to が array でなく単一 string でも APIDList 経由で拾う。
 		raw := []byte(`{
 			"type": "Create",
 			"actor": "` + actor + `",
@@ -89,8 +89,51 @@ func TestMergeCreateAudience(t *testing.T) {
 		_ = json.Unmarshal(raw, &act)
 
 		note := decodeMergedNote(t, mergeCreateAudience(act))
-		assert.Equal(t, []string{activitypub.Public}, note.To)
+		assert.Equal(t, []string{activitypub.Public}, []string(note.To))
 		assert.Equal(t, "public", string(deriveVisibility(note.To, note.CC)))
+	})
+
+	// upstream の parseAudience は getApIds -> getApId なので `{"id": ...}` 形式の
+	// audience も id として読む。`[]string` 決め打ちだと object 要素を落として
+	// **public のはずの note が followers になる** (#2662)。
+	t.Run("audience_as_id_object_is_accepted", func(t *testing.T) {
+		raw := []byte(`{
+			"type": "Create",
+			"actor": "` + actor + `",
+			"to": {"id": "` + activitypub.Public + `"},
+			"object": {
+				"type": "Note",
+				"id": "https://remote.example/notes/9",
+				"attributedTo": "` + actor + `",
+				"to": ["` + followers + `"]
+			}
+		}`)
+		var act genericActivity
+		_ = json.Unmarshal(raw, &act)
+
+		note := decodeMergedNote(t, mergeCreateAudience(act))
+		assert.Equal(t, []string{activitypub.Public, followers}, []string(note.To))
+		assert.Equal(t, "public", string(deriveVisibility(note.To, note.CC)))
+	})
+
+	// 読めない要素は落とす。upstream は getApId が throw して note ごと reject
+	// するが、mk-go は残りを活かす (可視性は狭い側に倒れる)。
+	t.Run("audience_with_unreadable_element_drops_it", func(t *testing.T) {
+		raw := []byte(`{
+			"type": "Create",
+			"actor": "` + actor + `",
+			"to": ["` + activitypub.Public + `", 42, {"type": "Note"}],
+			"object": {
+				"type": "Note",
+				"id": "https://remote.example/notes/10",
+				"attributedTo": "` + actor + `"
+			}
+		}`)
+		var act genericActivity
+		_ = json.Unmarshal(raw, &act)
+
+		note := decodeMergedNote(t, mergeCreateAudience(act))
+		assert.Equal(t, []string{activitypub.Public}, []string(note.To))
 	})
 
 	t.Run("missing_attributedTo_filled_from_actor", func(t *testing.T) {
@@ -107,7 +150,7 @@ func TestMergeCreateAudience(t *testing.T) {
 		_ = json.Unmarshal(raw, &act)
 
 		note := decodeMergedNote(t, mergeCreateAudience(act))
-		assert.Equal(t, actor, note.AttributedTo)
+		assert.Equal(t, actor, note.AttributedTo.String())
 	})
 
 	t.Run("present_attributedTo_not_overwritten", func(t *testing.T) {
@@ -125,7 +168,7 @@ func TestMergeCreateAudience(t *testing.T) {
 		_ = json.Unmarshal(raw, &act)
 
 		note := decodeMergedNote(t, mergeCreateAudience(act))
-		assert.Equal(t, "https://remote.example/users/bob", note.AttributedTo)
+		assert.Equal(t, "https://remote.example/users/bob", note.AttributedTo.String())
 	})
 
 	t.Run("no_audience_no_change_returns_original_object", func(t *testing.T) {

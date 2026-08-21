@@ -1849,3 +1849,31 @@ func TestNoteActivity_FederationDisabledIs403(t *testing.T) {
 	require.NoError(t, h.NoteActivity(c))
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// `type` が配列の remote Note も解決できること。string 決め打ちだと Note の
+// 分岐を外れ、fallback は actor 解決しか試さないので **400 NO_SUCH_OBJECT** に
+// なる。upstream は `getApType` 経由で先頭要素を採る (#2662)。
+func TestAPIShow_RemoteNote_ArrayType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+		want string
+	}{
+		{"array type", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/arr","type":["Note"],"content":"hi"}`, "Note"},
+		{"string type", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/arr","type":"Note","content":"hi"}`, "Note"},
+		{"array type Question", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/arr","type":["Question"],"content":"hi"}`, "Note"},
+		// upstream の validPost と同じ集合を受ける。落とすと PeerTube の
+		// Video や Mobilizon の Event の URL を貼ったときだけ 400 になる。
+		{"Video", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/arr","type":"Video","content":"hi"}`, "Note"},
+		{"Event", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/arr","type":"Event","content":"hi"}`, "Note"},
+		{"Page", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/arr","type":["Page"],"content":"hi"}`, "Note"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, _, _, _ := newHandler(t)
+			h.SetRemote(&mockFetcher{data: []byte(tc.body)}, nil)
+			rec := postJSON(h.APIShow, `{"uri":"https://remote.example/notes/arr"}`)
+			assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+			assert.Contains(t, rec.Body.String(), `"type":"`+tc.want+`"`)
+		})
+	}
+}

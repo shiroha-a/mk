@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
@@ -46,7 +47,143 @@ func NewMockUserRepository() *MockUserRepository {
 	}
 }
 
+// jsonContainsNUL reports whether any string inside a JSON document decodes to
+// a value containing a NUL character.
+//
+// **生の NUL だけを見ても足りない。** JSON の文字列に生 NUL は書けない
+// (`json.Valid` が先に落とす) ので、実際に飛んでくるのは `\u0000`
+// エスケープのほう。PostgreSQL の jsonb はこれを SQLSTATE 22P05 で拒否して
+// **UPDATE ごと**落とす。デコードしてから見ないと素通りする。
+//
+// 文字列そのものを `\u0000` で検索すると、データとして
+// バックスラッシュ + `u0000` を含むだけの値を誤検出するので採らない。
+func jsonContainsNUL(data []byte) bool {
+	// UseNumber を付けないと `1e999` のような値が float64 への変換で落ち、
+	// 同じ document の NUL を見逃す (guard としては向きが逆になる)。
+	//
+	// UseNumber を付けたあとは、呼び出し元が先に通す json.Valid と同じ
+	// scanner・同じ深さ制限を使うので decode が失敗する入力は実質残らない。
+	// 到達しない枝だが、直接呼ばれたときに panic しないよう false を返す。
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return false
+	}
+	return valueContainsNUL(v)
+}
+
+func valueContainsNUL(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return strings.ContainsRune(t, 0)
+	case []any:
+		for _, item := range t {
+			if valueContainsNUL(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		for k, item := range t {
+			if strings.ContainsRune(k, 0) || valueContainsNUL(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// assertVarchar mirrors the PostgreSQL constraints on a varchar column so
+// mock-backed tests fail the same way the real database does.
+//
+// **PostgreSQL と同じだけ厳しくする。** `user.name` / `username` /
+// `usernameLower` は varchar(128) で、超過値は SQLSTATE 22001、NUL 入りは 22021
+// (このハーネスは `PreferSimpleProtocol: true` なので 08P01) で
+// **INSERT / UPDATE ごと**落ちる。同じ書き込みの他の列も巻き添えになるので、
+// リモート actor の取り込みでは actor が 1 行も作られない。mock が素通しすると
+// 実 DB でしか出ない壊れ方を隠す (#2662 では作成経路だけ直して更新経路を
+// 落としたのを、この guard が無かったので test では捕まえられなかった)。
+//
+// varchar の長さは**コードポイント**で数える (バイト数ではない)。
+//
+// **panic ではなく error を返す。** 実 DB も制約違反は error であって panic では
+// ないため。panic だとテストバイナリごと死んで同じ run の後続 subtest が
+// 実行されず、回帰の広がりが見えなくなる。
+//
+// **ただし error を返すだけでは test のゲートにならない。** federation の
+// refreshActor は `_ = r.userRepo.UpdateUser(...)` / `_ = r.userRepo.UpdateProfile(...)`
+// と戻り値を捨てるので、更新経路でこの guard が発火しても test は緑のまま通る。
+// 更新経路の正規化漏れを捕まえているのは resolver 側の test が**正規化後の値**を
+// アサートしている点であって、この guard ではない
+// (`TestResolveActor_TTLRefreshNormalizesName`)。
+//
+// **mock の状態も完全には守れない。** refreshActor は `existing.Name = &name` と、
+// リポジトリが保持しているのと同じポインタを直接書き換えてから UpdateUser を
+// 呼ぶ。`UpdateUser` を経由せずに入った値はここでは止められない。
+//
+// 実際にゲートになっているのは `Create` だけ。`CreateProfile` の error は
+// resolver が slog.Warn で握り潰す (profile が作れなくても user 取り込みは
+// 成立させる方針) ので、profile 側の回帰は「行が無い → nil 参照で panic」
+// として表に出る。この guard そのものをゲートする test は
+// `TestMockUserRepository_VarcharGuards`。
+func assertVarchar(column, value string, max int) error {
+	if strings.ContainsRune(value, 0) {
+		return fmt.Errorf("mock: %s contains NUL; PostgreSQL rejects it with SQLSTATE 22021 "+
+			"(08P01 under simple protocol) and fails the whole write", column)
+	}
+	if n := len([]rune(value)); n > max {
+		return fmt.Errorf("mock: %s is %d code points, exceeding varchar(%d); "+
+			"PostgreSQL rejects it with SQLSTATE 22001 and fails the whole write", column, n, max)
+	}
+	return nil
+}
+
+// assertUserColumns validates the varchar columns that remote actor ingestion
+// writes: `username`, `usernameLower`, `name`, `avatarUrl`, `bannerUrl`.
+//
+// **これで全部ではない。** `"user"` には他にも長さ制約付きの列がある
+// (`host` 128 / `uri` / `inbox` / `sharedInbox` / `featured` / `movedToUri`
+// 512 / `chatScope` 128 など) が、いずれも未検証。ここを「全列を見ている」と
+// 誤解すると、実際に落ちたときに原因から遠ざかる。
+//
+// `tags` / `emojis` (`varchar(128)[]`) も未検証。`tags` は
+// `hashtag.ExtractUserTags` が件数 (`MaxUserTags` 32、upstream の
+// `.splice(0, 32)` と一致) と正規化後の長さの両方で絞るので通常は収まるが、
+// ここで見ているわけではない。`emojis` は `upsertEmojis` 経由で件数上限も
+// 長さ判定も無く、実 DB では `emoji.name varchar(128)` が先に落ちて
+// `continue` で除外されるという別機構に依存している (mock の emoji repo は
+// その制約を持たない)。
+func assertUserColumns(u *model.User) error {
+	if err := assertVarchar("user.username", u.Username, 128); err != nil {
+		return err
+	}
+	if err := assertVarchar("user.usernameLower", u.UsernameLower, 128); err != nil {
+		return err
+	}
+	if u.Name != nil {
+		if err := assertVarchar("user.name", *u.Name, 128); err != nil {
+			return err
+		}
+	}
+	// リモート actor の icon / image URL がそのまま入る列。長い CDN URL や
+	// presigned URL で現実的に超える (#2662)。
+	if u.AvatarURL != nil {
+		if err := assertVarchar("user.avatarUrl", *u.AvatarURL, 1024); err != nil {
+			return err
+		}
+	}
+	if u.BannerURL != nil {
+		if err := assertVarchar("user.bannerUrl", *u.BannerURL, 512); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (m *MockUserRepository) Create(u *model.User) error {
+	if err := assertUserColumns(u); err != nil {
+		return err
+	}
 	m.Users[u.ID] = u
 	return nil
 }
@@ -294,7 +431,16 @@ func (m *MockUserRepository) UpdateUser(userID string, fields map[string]any) er
 	if !ok {
 		return ErrNotFound
 	}
-	applyUserFields(u, fields)
+	// **検証してから適用する。** 実 DB は制約違反で UPDATE ごと落とすので 1 列も
+	// 変わらない。先に書き換えてから検証すると、呼び出し側が error を捨てている
+	// 経路 (federation の refreshActor など) で「DB は拒否したのに mock だけ
+	// 値が入っている」状態になり、実 DB との差が test を通してしまう。
+	next := *u
+	applyUserFields(&next, fields)
+	if err := assertUserColumns(&next); err != nil {
+		return err
+	}
+	*u = next
 	return nil
 }
 
@@ -304,7 +450,48 @@ func (m *MockUserRepository) HardDeleteUser(userID string) error {
 	return nil
 }
 
+// assertProfileColumns validates the varchar columns that remote actor
+// ingestion writes on `user_profile`: `location` and `description`.
+//
+// #2661 でリモートの location / description を取り込むようになった列。実 DB は
+// varchar(128) / varchar(2048) と NUL 拒否で **UPDATE ごと**落とすので、mock も
+// 同じだけ厳しくしないと「作成経路だけ直して更新経路を落とす」型の事故を
+// 検出できない (#2662)。`fields` (jsonb) は JSON の妥当性と NUL をここで見る
+// (CreateProfile 経路はここだけが頼り)。`[]byte` を渡されたときの拒否は
+// `applyProfileFields` 側 (UpdateProfile 経路のみ)。
+//
+// **これで全部ではない。** `followedMessage` (256) / `lang` (32) / `url` (512) /
+// `email` (128) / `moderationNote` (8192) 等は未検証。
+func assertProfileColumns(p *model.UserProfile) error {
+	if p.Location != nil {
+		if err := assertVarchar("user_profile.location", *p.Location, 128); err != nil {
+			return err
+		}
+	}
+	if p.Description != nil {
+		if err := assertVarchar("user_profile.description", *p.Description, 2048); err != nil {
+			return err
+		}
+	}
+	// `fields` は jsonb。`applyProfileFields` の "fields" case は UpdateProfile
+	// からしか通らないので、CreateProfile 経路はここで見ないと素通しになる。
+	if len(p.Fields) > 0 {
+		if !json.Valid(p.Fields) {
+			return fmt.Errorf("mock: user_profile.fields is not valid JSON (%q); "+
+				"the jsonb column rejects it with SQLSTATE 22P02", string(p.Fields))
+		}
+		if jsonContainsNUL(p.Fields) {
+			return fmt.Errorf("mock: user_profile.fields contains NUL; the jsonb column " +
+				"rejects it with SQLSTATE 22P05 and fails the whole write")
+		}
+	}
+	return nil
+}
+
 func (m *MockUserRepository) CreateProfile(profile *model.UserProfile) error {
+	if err := assertProfileColumns(profile); err != nil {
+		return err
+	}
 	m.Profiles[profile.UserID] = profile
 	return nil
 }
@@ -522,11 +709,21 @@ func (m *MockUserRepository) UpdateProfile(userID string, fields map[string]any)
 	}
 	p, ok := m.Profiles[userID]
 	if !ok {
-		// 既存プロフィールがなければ作成する(本物のDBではFK制約があるが、テストのモックでは緩い)
+		// 既存プロフィールがなければ作成する(本物のDBではFK制約があるが、テストのモックでは緩い)。
+		// **登録は検証を通ったあと。** 先に入れると、制約違反で失敗したときに
+		// 実 DB には生まれない空行が mock にだけ残る。
 		p = &model.UserProfile{UserID: userID}
-		m.Profiles[userID] = p
 	}
-	applyProfileFields(p, fields)
+	// UpdateUser と同じ理由で、検証を通してから元の行に書き戻す。
+	next := *p
+	if err := applyProfileFields(&next, fields); err != nil {
+		return err
+	}
+	if err := assertProfileColumns(&next); err != nil {
+		return err
+	}
+	*p = next
+	m.Profiles[userID] = p
 	return nil
 }
 
@@ -694,7 +891,7 @@ func applyUserFields(u *model.User, fields map[string]any) {
 	}
 }
 
-func applyProfileFields(p *model.UserProfile, fields map[string]any) {
+func applyProfileFields(p *model.UserProfile, fields map[string]any) error {
 	for k, v := range fields {
 		switch k {
 		case "description":
@@ -869,12 +1066,16 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			// 隠したままになっている。
 			val, ok := v.(string)
 			if !ok {
-				panic(fmt.Sprintf("mock: profile fields must be a string, got %T "+
-					"(the jsonb column rejects raw []byte and NULL)", v))
+				return fmt.Errorf("mock: profile fields must be a string, got %T "+
+					"(the jsonb column rejects raw []byte and NULL)", v)
 			}
 			if !json.Valid([]byte(val)) {
-				panic(fmt.Sprintf("mock: profile fields must be valid JSON, got %q "+
-					"(the jsonb column rejects it with SQLSTATE 22P02)", val))
+				return fmt.Errorf("mock: profile fields must be valid JSON, got %q "+
+					"(the jsonb column rejects it with SQLSTATE 22P02)", val)
+			}
+			if jsonContainsNUL([]byte(val)) {
+				return fmt.Errorf("mock: profile fields contains NUL; the jsonb column " +
+					"rejects it with SQLSTATE 22P05 and fails the whole write")
 			}
 			p.Fields = []byte(val)
 		case "clientData":
@@ -908,6 +1109,7 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) {
 			}
 		}
 	}
+	return nil
 }
 
 // MockNoteRepository is a test double for repository.NoteRepository.

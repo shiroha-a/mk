@@ -566,7 +566,9 @@ func TestInboxProcessor_ActorObjectFormMatches(t *testing.T) {
 	p := processors.NewInboxProcessor(stub)
 	p.SetSignatureVerifier(verifier)
 
-	body := []byte(`{"type":"Follow","actor":{"id":"https://remote.example/users/alice","type":"Person"}}`)
+	// `id` を持たせる。upstream も `typeof activity.id !== 'string'` で
+	// drop するので、無いと actor 形式に関係なく落ちてゲートを通らない。
+	body := []byte(`{"id":"https://remote.example/activities/1","type":"Follow","actor":{"id":"https://remote.example/users/alice","type":"Person"}}`)
 	payload := signedInboxPayload(t, key, body)
 	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
 		TypeName: queue.TaskTypeInbox,
@@ -951,4 +953,48 @@ func TestInboxProcessor_WorksWithoutReplayGuard(t *testing.T) {
 	require.NoError(t, p.Handle(context.Background(), task))
 	require.NoError(t, p.Handle(context.Background(), task))
 	assert.Len(t, stub.calls, 2, "guard 未配線では従来どおり両方処理する")
+}
+
+// **型エラーで actor を空にしてゲートを素通しさせない。** `ExtractActorIRI` が
+// 型エラーで "" を返すと `authorizeActor` は「actor 欠落 = Process 側が弾く」と
+// 解釈して素通しするが、`process()` は型エラーを握るので actor を読めてしまう。
+// 結果、署名者 != actor の LD-Signature 検証・`activity.id` host ゲート・
+// replay guard が全部飛ぶ (#2662)。
+func TestInboxProcessor_TypeErrorDoesNotBypassActorGate(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://evil.example/users/m#main-key", priv)
+	require.NoError(t, err)
+
+	host := "evil.example"
+	verifier := &multiActorVerifier{
+		pubKey: pub,
+		byURI: map[string]*model.User{
+			"https://evil.example/users/m": {ID: "m", Host: &host, URI: uptr("https://evil.example/users/m")},
+		},
+	}
+
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		// actor が embedded object。署名者は evil、actor は victim。
+		{"object form actor", `{"id":"https://evil.example/a/1","type":"Follow","actor":{"id":"https://victim.example/users/bob"}}`},
+		// 先行 field の型エラーで actor の decode 自体は成功するケース。
+		{"preceding type error", `{"id":"https://evil.example/a/1","type":"Follow","published":1704067200000,"actor":"https://victim.example/users/bob"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubFedProcessor{}
+			p := processors.NewInboxProcessor(stub)
+			p.SetSignatureVerifier(verifier)
+			payload := signedInboxPayload(t, key, []byte(tc.body))
+			// drop は Handle が nil を返して Process に渡らない形で観測する
+			// (retry させないため)。
+			require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+				TypeName: queue.TaskTypeInbox,
+				Body:     mustEncode(t, payload),
+			}))
+			assert.Empty(t, stub.calls, "署名者と異なる actor を Process へ渡さない")
+		})
+	}
 }

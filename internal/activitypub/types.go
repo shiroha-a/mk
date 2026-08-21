@@ -5,7 +5,13 @@ package activitypub
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
+	"math"
+	"net/url"
 	"slices"
+	"strconv"
+	"strings"
+	"time"
 )
 
 // jsonNullLiteral is the byte representation of the JSON null literal.
@@ -13,41 +19,577 @@ import (
 // allocation on every call (= avoids string(data) heap conversion).
 var jsonNullLiteral = []byte("null")
 
-// APStringList accepts JSON values that may be either a single string or a
-// []string, and exposes them uniformly as []string. ActivityPub spec で
-// 同一 field を string / array 両方の形で送ってくる実装がいる (例: alsoKnownAs
-// は upstream Misskey #17275 で array/string 両対応化済)。受信側は両形式を
-// 受け、JSON 送出時は []string と同じ array shape で emit する。
-type APStringList []string
+// TypeOf extracts the AS `type` from an already-decoded JSON value, mirroring
+// upstream's getApType (a bare string, or the first element of an array).
+//
+// 生 fetch した body を `map[string]any` で覗く経路 (`api/ap/show` など) 用。
+// struct 経由なら `APType` が同じことをする。
+func TypeOf(raw any) string {
+	switch t := raw.(type) {
+	case string:
+		return t
+	case []any:
+		if len(t) > 0 {
+			if s, ok := t[0].(string); ok {
+				return s
+			}
+		}
+	}
+	return ""
+}
 
-// UnmarshalJSON decodes either a JSON array of strings or a single string.
+// APType holds an ActivityStreams `type`, which may arrive as a string or as
+// an array of strings. It mirrors upstream's getApType.
+//
+// JSON-LD の `@type` は配列表現が正規で、compaction 後も配列で残る実装がある。
+// `string` 決め打ちだと `"type": ["Person"]` で **document ごと unmarshal に
+// 失敗し、その actor / Note がまったく取り込めない** (#2662)。同じ罠は
+// core/federation の apTypeOf が attachment 側で既に潰している。
+type APType string
+
+// UnmarshalJSON never fails; unreadable shapes yield the empty string.
+//
+// upstream getApType は `typeof value.type === 'string'` か
+// `Array.isArray(value.type) && typeof value.type[0] === 'string'` のときだけ
+// 値を返し、それ以外は null。**配列の先頭が string でなければ諦める**ので
+// ここも同じにする (走査して最初の string を拾うと upstream が型判定不能と
+// する document を受け入れてしまう)。型判定ができないときにエラーではなく
+// null を返す設計 (misskey-dev/misskey#14239) に合わせて空文字にし、
+// 下流の type 判定に委ねる。
+func (v *APType) UnmarshalJSON(data []byte) error {
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		*v = ""
+		return nil
+	}
+	switch t := raw.(type) {
+	case string:
+		*v = APType(t)
+	case []any:
+		// **先頭が string でなければ空。** 走査して「最初に見つかった string」を
+		// 採ると upstream より緩くなり、upstream が型判定不能として扱う
+		// document を mk-go だけが受け入れてしまう。
+		*v = ""
+		if len(t) > 0 {
+			if s, ok := t[0].(string); ok {
+				*v = APType(s)
+			}
+		}
+	default:
+		*v = ""
+	}
+	return nil
+}
+
+// String returns the value as a plain string.
+func (v APType) String() string { return string(v) }
+
+// ParseBoolish decodes a boolean-ish AP value, unwrapping JSON-LD expanded
+// forms, and reports whether the shape was recognised at all.
+//
+// **JS の truthy は真似しない。** upstream が `isLocked: person.manuallyApprovesFollowers`
+// のように生値を代入する field は、TypeORM が `@Column('boolean')` (型を文字列で
+// 指定) なので丸めが効かず **PostgreSQL の boolean 入力構文**でキャストされる。
+// つまり `"true"` は true だが `"false"` / `"0"` / `"no"` / `"off"` / `"f"` は
+// **false**。JS truthy で「空文字以外は true」にすると、これらが軒並み反転する
+// (#2662)。
+//
+// **読むのは完全形と PostgreSQL が挙げる 1 文字表記 (`t` / `f` / `y` / `n`) まで。**
+// PostgreSQL は `'tr'` / `'fals'` のような一意な接頭辞も受け付けるが、そこまでは
+// 追わない (`known=false` で呼び出し側の既定値に倒れる = 安全側)。曖昧で
+// PostgreSQL 自身も拒否する `'o'` は当然読まない。PostgreSQL が受け付けない形も同じ扱い — upstream ではその actor の
+// insert ごと落ちるので「取り込むが緩い状態にする」よりは既定値のほうが近い。
+func ParseBoolish(raw any) (value bool, known bool) {
+	switch t := raw.(type) {
+	case bool:
+		return t, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "true", "t", "yes", "y", "on", "1":
+			return true, true
+		case "false", "f", "no", "n", "off", "0":
+			return false, true
+		}
+		return false, false
+	case json.Number:
+		// **数値も PostgreSQL の入力構文で読む。** `node-postgres` は数値を
+		// `String(val)` で送るので、upstream にとって数値 `2` と文字列 `"2"` は
+		// 同じ (`'2'::boolean` は `invalid input syntax`)。受けるのは `1` / `0`
+		// だけ。レンジ外 (`1e999`) は Float64() が失敗する = JS では
+		// `Infinity` になり PostgreSQL が受けないので、同じく「読めない」。
+		f, err := t.Float64()
+		if err != nil {
+			return false, false
+		}
+		return numberBoolish(f)
+	case float64:
+		return numberBoolish(t)
+	case nil:
+		return false, true
+	case []any:
+		// 単一要素配列は JSON-LD の展開形。中身で判断する。
+		if len(t) == 1 {
+			return ParseBoolish(t[0])
+		}
+		// **空配列・複数要素は「読めない」。** upstream は boolean 列への
+		// キャストに失敗して insert ごと落ちるので、`false` と断定せず
+		// 呼び出し側の既定値 (= 安全側) に倒す。
+		//
+		// 一方 `null` は「値なし」として false にする (Go の zero value と
+		// 揃える)。単一要素配列は中身に再帰するので、`[null]` /
+		// `{"@value": null}` も同じく false になる。
+		return false, false
+	case map[string]any:
+		if val, ok := t["@value"]; ok {
+			return ParseBoolish(val)
+		}
+		return false, false
+	}
+	return false, false
+}
+
+// numberBoolish maps a JSON number through PostgreSQL's boolean input syntax.
+// Only `1` and `0` are accepted; anything else is unknown.
+func numberBoolish(f float64) (value bool, known bool) {
+	// `1.0` は JS の `String(1.0)` が "1" なので upstream では true。
+	// `-0` も同様に "0"。
+	switch f {
+	case 1:
+		return true, true
+	case 0:
+		return false, true
+	}
+	return false, false
+}
+
+// decodeBoolish decodes data into a boolean, using fallback when the shape is
+// not recognised.
+func decodeBoolish(data []byte, fallback bool) bool {
+	// **UseNumber を使う。** 素の decode は `1e999` のような float64 レンジ外の
+	// 値を型エラーにするので、構文上正当な JSON なのに fallback に倒れる。
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var raw any
+	if err := dec.Decode(&raw); err != nil {
+		return fallback
+	}
+	if v, known := ParseBoolish(raw); known {
+		return v
+	}
+	return fallback
+}
+
+// APTruthyBool decodes a boolean whose **unrecognised** shapes default to true.
+//
+// 使うのは「読めないときに false へ倒すと危険側になる」flag だけ:
+//
+//   - `Note.sensitive` — false にすると **送信側が sensitive と宣言したノートが
+//     CW 無しで表示される**。mk-go は `sensitive` が立った note に空 CW を付ける
+//     独自実装なので (upstream は CW を `summary` からしか作らない)、隠す側に倒す。
+//   - `manuallyApprovesFollowers` — false にすると **承認制の相手に即 Following が
+//     成立し「ローカルはフォロー済み・相手は承認待ち」の乖離**が黙って作られる。
+//     upstream は PostgreSQL のキャストに失敗して insert ごと落ちるので、
+//     「取り込むが緩い状態にする」よりは locked に倒すほうが近い。
+//
+// **`_misskey_canChat` はこれを使わない。** あちらは true = DM 許可なので、
+// 読めないときに true へ倒すと相手が拒否しているのに送ってしまう。
+type APTruthyBool bool
+
+// UnmarshalJSON never fails; unrecognised shapes yield true.
+func (v *APTruthyBool) UnmarshalJSON(data []byte) error {
+	*v = APTruthyBool(decodeBoolish(data, true))
+	return nil
+}
+
+// Bool returns the value as a plain bool.
+func (v APTruthyBool) Bool() bool { return bool(v) }
+
+// APLenientTimestamp holds an ActivityStreams `published` value.
+//
+// upstream は `new Date(object.published)` に投げるだけなので、JS の変換規則で
+// 単一要素配列 (`["2024-01-01T00:00:00Z"]`) や epoch ミリ秒の数値がそのまま
+// 通る。`string` 決め打ちだと **Note document ごと unmarshal に失敗する**
+// (#2662)。読めない形は空にして、呼び出し側の fallback に委ねる。
+type APLenientTimestamp string
+
+// UnmarshalJSON never fails; unreadable shapes yield the empty string.
+func (v *APLenientTimestamp) UnmarshalJSON(data []byte) error {
+	*v = ""
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil
+	}
+	*v = APLenientTimestamp(timestampValue(raw))
+	return nil
+}
+
+// String returns the value as a plain string.
+func (v APLenientTimestamp) String() string { return string(v) }
+
+// timestampValue unwraps JSON-LD wrappers and converts epoch milliseconds.
+func timestampValue(raw any) string {
+	switch t := raw.(type) {
+	case string:
+		return t
+	case float64:
+		// JS の `new Date(number)` は epoch ミリ秒として解釈する。
+		return time.UnixMilli(int64(t)).UTC().Format(time.RFC3339)
+	case []any:
+		// 単一要素配列は JSON-LD の展開形。JS でも `new Date([x])` は
+		// 文字列化されて x として解釈される。
+		if len(t) == 1 {
+			return timestampValue(t[0])
+		}
+	case map[string]any:
+		if val, ok := t["@value"]; ok {
+			return timestampValue(val)
+		}
+	}
+	return ""
+}
+
+// APLenientInt holds a JSON number that must not fail the surrounding document
+// when it arrives in another shape.
+//
+// JS には整数型が無いので `3.0` や `"3"` を送ってくる実装がある。`int` 決め打ち
+// だと **document ごと unmarshal に失敗する** (#2662)。読めない値は 0。
+type APLenientInt int
+
+// UnmarshalJSON never fails; unreadable shapes yield 0.
+func (v *APLenientInt) UnmarshalJSON(data []byte) error {
+	*v = 0
+	var num json.Number
+	if err := json.Unmarshal(data, &num); err == nil {
+		// **整数として先に読む。** float64 を経由すると
+		// `9223372036854775807` のような値が精度を失い、範囲外は
+		// 実装依存の値になる (Go 仕様上 panic はしないが負値に化ける)。
+		if n, err := num.Int64(); err == nil {
+			*v = APLenientInt(n)
+			return nil
+		}
+		// `3.0` のような小数表記も JS 由来では整数のつもりで来る。
+		// **上限だけ厳密不等号。** `f <= math.MaxInt64` と書くと定数が float64 に
+		// 丸め上がって `2^63` になり、`f == 2^63` がすり抜けて int64 変換が
+		// 実装依存値 (負値) に化ける。下限の `math.MinInt64` は float64 で
+		// 厳密に表現できるので `>=` でよい (`>` にすると -2^63 が読めなくなる)。
+		if f, err := num.Float64(); err == nil && f >= math.MinInt64 && f < math.MaxInt64 {
+			*v = APLenientInt(int64(f))
+		}
+		return nil
+	}
+	// **JSON number literal でない文字列**も受ける (JS の `Number()` と同じ扱い)。
+	// `"3"` / `"3.0"` は `encoding/json` が `json.Number` に入れるので上で
+	// 処理され、ここに来るのは `" 3 "` / `"+3"` / `"007"` のような形。
+	var str string
+	if err := json.Unmarshal(data, &str); err == nil {
+		str = strings.TrimSpace(str)
+		if n, err := strconv.ParseInt(str, 10, 64); err == nil {
+			*v = APLenientInt(n)
+			return nil
+		}
+		if f, err := strconv.ParseFloat(str, 64); err == nil && f >= math.MinInt64 && f < math.MaxInt64 {
+			*v = APLenientInt(int64(f))
+		}
+	}
+	return nil
+}
+
+// Int returns the value as a plain int.
+func (v APLenientInt) Int() int { return int(v) }
+
+// lenientIntPtr converts an optional int to the lenient wire type.
+func lenientIntPtr(v *int) *APLenientInt {
+	if v == nil {
+		return nil
+	}
+	out := APLenientInt(*v)
+	return &out
+}
+
+// lenientStringPtr converts an optional string to the lenient wire type.
+func lenientStringPtr(v *string) *APLenientString {
+	if v == nil {
+		return nil
+	}
+	out := APLenientString(*v)
+	return &out
+}
+
+// APLenientBool holds a JSON value that is expected to be a boolean but must
+// not fail the surrounding document when it is not.
+//
+// upstream は `isCat: (person as any).isCat === true` /
+// `isExplorable: person.discoverable` のように truthy 判定するだけなので、
+// `"true"` のような非 bool でも actor は作られる。`bool` 決め打ちだと
+// **actor / Note document ごと unmarshal に失敗する** (#2662)。
+type APLenientBool bool
+
+// UnmarshalJSON never fails; non-boolean shapes yield false.
+//
+// **読めない値は false に倒す。** JS の truthy をそのまま真似すると文字列
+// `"false"` が true になり、意味が反転する。
+//
+// **値の読み方は `APTruthyBool` と同じ** (`ParseBoolish` = PostgreSQL の
+// boolean 入力構文)。違うのは「読めない形」の既定値だけで、こちらは false。
+//
+// 使うのは **false に倒すほうが安全な flag**: `isCat` / `discoverable` /
+// `_misskey_*` (`_misskey_canChat` は true = DM 許可なので特に false 側)。
+// `sensitive` / `manuallyApprovesFollowers` は false が危険側なので
+// `APTruthyBool` を使う。
+//
+// なお upstream で `=== true` の厳密比較をしているのは `isCat` と
+// `requireSigninToViewContents` の 2 つで、`discoverable` は
+// `isExplorable: person.discoverable` の生値代入。それでも既定を false に
+// するのは、読めない値で explore に載せないため。
+func (v *APLenientBool) UnmarshalJSON(data []byte) error {
+	*v = APLenientBool(decodeBoolish(data, false))
+	return nil
+}
+
+// Bool returns the value as a plain bool.
+func (v APLenientBool) Bool() bool { return bool(v) }
+
+// APRawList accepts a JSON value that is either a single value or an array,
+// keeping the elements undecoded.
+//
+// `items` / `orderedItems` のように「要素を後段で個別に解釈する」場所で使う。
+// `[]json.RawMessage` 決め打ちだと、単一 object の collection で unmarshal ごと
+// 失敗し、**同じ document の別 field (orderedItems) まで巻き添えで捨てられる**
+// (#2662)。upstream は `toArray(...)` で 1 件として拾う。
+type APRawList []json.RawMessage
+
+// UnmarshalJSON never fails; unreadable shapes yield a nil slice.
+func (l *APRawList) UnmarshalJSON(data []byte) error {
+	*l = nil
+	if len(data) == 0 || bytes.Equal(data, jsonNullLiteral) {
+		return nil
+	}
+	if data[0] == '[' {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return nil
+		}
+		*l = arr
+		return nil
+	}
+	*l = []json.RawMessage{append([]byte(nil), data...)}
+	return nil
+}
+
+// APObjectList accepts a JSON value that is either a single object or an array,
+// and exposes it uniformly as []any.
+//
+// AP の `attachment` は **配列でも単一 object でもよい**。upstream は
+// `IObject | IObject[]` を受ける。`[]any` で決め打ちすると単一 object の
+// document で json.Unmarshal ごと失敗し、**その actor / note が一切取り込め
+// なくなる** (プロフィールだけでなくフォローもノートも通らない)。
+//
+// 単一 object は 1 要素のリストとして扱う。upstream の analyzeAttachments は
+// 非配列を `[]` に潰すが、捨てる理由が無いので拾う。JSON 送出時は []any と
+// 同じ array shape で emit する。
+type APObjectList []any
+
+// UnmarshalJSON decodes either a JSON array or a single value.
 // null / 空 input は nil slice として解釈する。
-func (l *APStringList) UnmarshalJSON(data []byte) error {
-	if len(data) == 0 || string(data) == "null" {
+func (l *APObjectList) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || bytes.Equal(data, jsonNullLiteral) {
 		*l = nil
 		return nil
 	}
-	// 先頭の whitespace を skip し、最初の non-space 文字が '[' なら array、
-	// それ以外なら single string として fall back。
-	for i := 0; i < len(data); i++ {
-		switch data[i] {
-		case ' ', '\t', '\n', '\r':
-			continue
-		case '[':
-			var arr []string
-			if err := json.Unmarshal(data, &arr); err != nil {
+	// encoding/json は Unmarshaler に**値の先頭バイトから**渡す (前置の空白は
+	// decodeState 側で読み飛ばされている) ので、data[0] を見れば配列か否かが
+	// 決まる (空白 skip のループは不要)。
+	if data[0] == '[' {
+		var arr []any
+		if err := json.Unmarshal(data, &arr); err != nil {
+			// **読めた要素は残す。** 1 要素が数値レンジ外 (`1e999`) なだけで
+			// 配列ごと捨てると、mention / emoji / hashtag が全滅する (#2662)。
+			var typeErr *json.UnmarshalTypeError
+			if !errors.As(err, &typeErr) {
 				return err
 			}
-			*l = arr
-			return nil
 		}
-		break
+		*l = arr
+		return nil
 	}
+	// 配列でないなら単一の値。1 件のリストとして扱う。
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		// **error を返さない。** field の UnmarshalJSON が error を返すと
+		// `encoding/json` は**親 struct の decode をその場で打ち切る**ので、
+		// actor は丸ごと落ち、Note は `tag` より後ろの `content` / `summary` /
+		// `to` を失って「本文なし・誰にも見えない」ノートになる。組み込み型の
+		// 型不一致 (`saveError`) が decode を継続するのとは挙動が違う (#2662)。
+		var typeErr *json.UnmarshalTypeError
+		if !errors.As(err, &typeErr) {
+			return err
+		}
+		*l = nil
+		return nil
+	}
+	*l = []any{v}
+	return nil
+}
+
+// APLenientString holds a JSON value that is expected to be a string but must
+// not fail the surrounding document when it is not.
+//
+// `vcard:bday` / `vcard:Address` を `string` で決め打ちすると、object や数値で
+// 送ってくる実装 (JSON-LD の展開形など) で **actor ごと reject される**。
+// これらは表示用の付加情報でしかないので、読めなければ空にして document は
+// 通す。
+//
+// **JSON-LD の展開形は剥がして値を拾う** (`{"@value": "x"}` / `["x"]` /
+// `[{"@value": "x"}]`)。`Normalize` は `{"@value": ...}` しか潰さないうえ
+// 生 fetch 経路は通らないので、ここで剥がさないと「読めたはずの値が黙って
+// 消える」(CW が付かない / 誕生日が入らない) ことになる (#2662)。
+type APLenientString string
+
+// UnmarshalJSON keeps a plain JSON string as-is and unwraps JSON-LD expanded
+// forms (`{"@value": "x"}` / `["x"]` / `[{"@value": "x"}]`). それ以外の形
+// (数値 / null / 複数要素の配列 / `@value` を持たない object) は空文字にして
+// **error を返さない**。
+func (v *APLenientString) UnmarshalJSON(data []byte) error {
 	var s string
-	if err := json.Unmarshal(data, &s); err != nil {
-		return err
+	if err := json.Unmarshal(data, &s); err == nil {
+		*v = APLenientString(s)
+		return nil
 	}
-	*l = []string{s}
+	// **JSON-LD の展開形は剥がして値を拾う。** `[{"@value": "x"}]` は
+	// compaction されなかったときの正規形で、捨てると「読めたはずの値が
+	// 黙って消える」(CW が付かない等) ことになる。`Normalize` は
+	// `{"@value": ...}` しか潰さないうえ、生 fetch 経路は通らない。
+	var raw any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		*v = ""
+		return nil
+	}
+	*v = APLenientString(unwrapLDString(raw))
+	return nil
+}
+
+// unwrapLDString pulls a string out of a JSON-LD expanded value.
+func unwrapLDString(raw any) string {
+	switch t := raw.(type) {
+	case string:
+		return t
+	case []any:
+		if len(t) == 1 {
+			return unwrapLDString(t[0])
+		}
+	case map[string]any:
+		if val, ok := t["@value"]; ok {
+			return unwrapLDString(val)
+		}
+	}
+	return ""
+}
+
+// String returns the value as a plain string.
+func (v APLenientString) String() string { return string(v) }
+
+// apFirstRef extracts one reference string from an ActivityStreams value.
+//
+// upstream の `getOneApId` / `getOneApHrefNullable` (type.ts) と同じ形を受ける:
+// 素の string、`key` を持つ object、そのどちらかの配列 (先頭のみ)。**配列を
+// 剥がすのは 1 段だけ**で、upstream もそうしている (`getApId` は配列を見ない)。
+//
+// 読めない形は空文字を返し、**エラーにしない**。ここでエラーにすると
+// document 全体の unmarshal が失敗し、その actor / note がまったく取り込め
+// なくなる (#2662)。必須かどうかは呼び出し側が空文字で判断する。
+func apFirstRef(data []byte, key string) string {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return ""
+	}
+	if arr, ok := v.([]any); ok {
+		if len(arr) == 0 {
+			return ""
+		}
+		v = arr[0]
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case map[string]any:
+		s, _ := t[key].(string)
+		return s
+	}
+	return ""
+}
+
+// APLenientID holds an ActivityStreams object reference that may arrive as a
+// bare id string, as an object carrying `id`, or as an array of either.
+// It mirrors upstream's getOneApId.
+type APLenientID string
+
+// UnmarshalJSON never fails; unreadable shapes yield the empty string.
+func (v *APLenientID) UnmarshalJSON(data []byte) error {
+	*v = APLenientID(apFirstRef(data, "id"))
+	return nil
+}
+
+// String returns the value as a plain string.
+func (v APLenientID) String() string { return string(v) }
+
+// APLenientHref holds a link that may arrive as a bare URL string, as an
+// object carrying `href`, or as an array of either. It mirrors upstream's
+// getOneApHrefNullable.
+type APLenientHref string
+
+// UnmarshalJSON never fails; unreadable shapes yield the empty string.
+func (v *APLenientHref) UnmarshalJSON(data []byte) error {
+	*v = APLenientHref(apFirstRef(data, "href"))
+	return nil
+}
+
+// String returns the value as a plain string.
+func (v APLenientHref) String() string { return string(v) }
+
+// APIDList holds a list of ActivityStreams object references, each of which
+// may be a bare id string or an object carrying `id`. It mirrors upstream's
+// getApIds.
+type APIDList []string
+
+// UnmarshalJSON decodes an array or a single value into a list of ids.
+//
+// **読めない要素は落とす。** upstream の `getApIds` は要素ごとに `getApId` を
+// 呼ぶので 1 つでも読めないと throw して note ごと reject するが、mk-go は
+// 残りを活かす。`to` / `cc` は可視性の計算に使うため、要素を落とすと
+// 「public のはずが home」のように**狭い側**に倒れる。document ごと捨てるより
+// 影響が小さい (#2662)。
+func (l *APIDList) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || bytes.Equal(data, jsonNullLiteral) {
+		*l = nil
+		return nil
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		// **読めた要素は残す。** `APObjectList` と同じ理由で、1 要素が数値
+		// レンジ外 (`1e999`) なだけで audience ごと捨てない。`Person` には
+		// Note のような catch-all が無いので、`alsoKnownAs` で actor が丸ごと
+		// 落ちる (#2662)。
+		var typeErr *json.UnmarshalTypeError
+		if !errors.As(err, &typeErr) {
+			return err
+		}
+	}
+	arr, ok := v.([]any)
+	if !ok {
+		arr = []any{v}
+	}
+	out := make([]string, 0, len(arr))
+	for _, item := range arr {
+		switch t := item.(type) {
+		case string:
+			out = append(out, t)
+		case map[string]any:
+			if s, ok := t["id"].(string); ok {
+				out = append(out, s)
+			}
+		}
+	}
+	*l = out
 	return nil
 }
 
@@ -98,8 +640,12 @@ const LDMimeType = `application/ld+json; profile="https://www.w3.org/ns/activity
 type Object struct {
 	Context any    `json:"@context,omitempty"`
 	ID      string `json:"id,omitempty"`
-	Type    string `json:"type,omitempty"`
-	Name    string `json:"name,omitempty"`
+	Type    APType `json:"type,omitempty"`
+	// upstream `validateActor` は `if (x.name)` の truthy ガードの内側で
+	// 非 string を throw するので、`name: 0` のような falsy な値は受理して
+	// name=null の actor を作る。string 決め打ちだと **mk-go だけが actor を
+	// 丸ごと落とす**。あわせて JSON-LD の展開形も拾う (#2662)。
+	Name APLenientString `json:"name,omitempty"`
 }
 
 // OrderedCollection is an AS OrderedCollection used for actor-advertised
@@ -132,9 +678,12 @@ type OrderedCollectionPage struct {
 
 // PublicKey is the embedded JSON-LD object describing a user's signing key.
 type PublicKey struct {
-	ID           string `json:"id"`
-	Owner        string `json:"owner"`
-	PublicKeyPEM string `json:"publicKeyPem"`
+	ID    string          `json:"id"`
+	Owner APLenientString `json:"owner"`
+	// upstream は非 string でも throw せず (JS の暗黙変換で文字列化される)
+	// actor を作る。string 決め打ちだと actor document ごと落ちて、その actor が
+	// 一切連合できなくなる (#2662)。PEM として不正なら後段の parse が弾く。
+	PublicKeyPEM APLenientString `json:"publicKeyPem"`
 }
 
 // Multikey represents a single FEP-521a Multikey entry expose-d via
@@ -146,8 +695,12 @@ type PublicKey struct {
 // PublicKeyMultibase encodes the raw key with the standard "z" + base58btc +
 // multicodec prefix format (see internal/activitypub/multikey.go).
 type Multikey struct {
-	ID                 string `json:"id"`
-	Type               string `json:"type"`
+	ID string `json:"id"`
+	// `"type": ["Multikey"]` を送る実装がある。string 決め打ちだと
+	// MultikeyList が Unreadable になり、**stale key の purge が恒久的に
+	// 止まる** (= ローテーション済みの鍵で署名した activity が verify を
+	// 通り続ける、#2662)。
+	Type               APType `json:"type"`
 	Controller         string `json:"controller"`
 	PublicKeyMultibase string `json:"publicKeyMultibase"`
 }
@@ -157,19 +710,47 @@ const MultikeyType = "Multikey"
 
 // Endpoints holds the endpoints sub-object for an Actor.
 type Endpoints struct {
-	SharedInbox string `json:"sharedInbox,omitempty"`
+	SharedInbox APLenientID `json:"sharedInbox,omitempty"`
+}
+
+// UnmarshalJSON tolerates a non-object `endpoints`.
+//
+// upstream は `x.endpoints ? x.endpoints.sharedInbox : undefined` なので、
+// `endpoints` が string でも undefined になるだけで actor は通る。struct
+// 決め打ちだと **actor document ごと unmarshal に失敗する** (#2662)。
+func (e *Endpoints) UnmarshalJSON(data []byte) error {
+	type endpointsAlias Endpoints
+	var v endpointsAlias
+	if err := json.Unmarshal(data, &v); err != nil {
+		*e = Endpoints{}
+		return nil
+	}
+	*e = Endpoints(v)
+	return nil
 }
 
 // Image is a generic ActivityStreams Image (used for icon/image fields).
 type Image struct {
-	Type string `json:"type"`
-	URL  string `json:"url"`
+	// upstream の isDocument は getApType 経由なので `"type": ["Image"]` を
+	// 受ける。`url` も ApImageService が `typeof image.url !== 'string'` を
+	// null で返すだけで actor は作る。string 決め打ちだと **actor document
+	// ごと unmarshal に失敗してその actor が一切連合できない** (#2662)。
+	Type APType        `json:"type"`
+	URL  APLenientHref `json:"url"`
 	// MediaType / Sensitive / Name は upstream renderImage / renderEmoji icon の
 	// 追加プロパティ (ApRendererService.ts:186-191,253-260)。omitempty なので
 	// 未設定時は従来どおり {type,url} のみ出力し後方互換を保つ (#1948-11)。
 	MediaType string `json:"mediaType,omitempty"`
 	Sensitive *bool  `json:"sensitive,omitempty"`
 	Name      string `json:"name,omitempty"`
+}
+
+// URLOrEmpty returns the image URL, tolerating a nil receiver.
+func (i *Image) URLOrEmpty() string {
+	if i == nil {
+		return ""
+	}
+	return i.URL.String()
 }
 
 // UnmarshalJSON accepts both forms allowed by ActivityStreams 2.0 for
@@ -187,10 +768,12 @@ type Image struct {
 // `ApPersonService.resolveAvatarAndBanner` は array 形式を `find(item =>
 // item.url)` で pick する semantics なので mk-go も同等に揃える。
 //
-// 不正な JSON (string / number 等) は単一 object として decode を試みた後の
-// error を返す (= 既存挙動を保つ defense)。null / 空 array / object with
-// 空 url は Image{} (zero value) を残し、呼び出し側 (`actor.Icon.URL != ""`
-// チェック) が「avatar 無し」として扱えるようにする。
+// **string / number 等でも error を返さない** (#2662)。bare string の `icon` は
+// AS2 で正当 (`icon` の range は `Image | Link` で Link は compaction で bare
+// IRI になる) で、ここで落とすと actor document ごと reject されてその actor が
+// 一切連合できなくなる。null / 空 array / object with 空 url も同じく Image{}
+// (zero value) を残し、呼び出し側 (`actor.Icon.URL != ""` チェック) が
+// 「avatar 無し」として扱えるようにする。
 func (i *Image) UnmarshalJSON(data []byte) error {
 	// "null" は親 decoder が *Image を nil pointer のままにするので
 	// 本関数は呼ばれないが、上位 field が値型 (`Image` 直、例: EmojiTag.Icon)
@@ -222,7 +805,25 @@ func (i *Image) UnmarshalJSON(data []byte) error {
 			type imageAlias Image
 			var alias imageAlias
 			if err := json.Unmarshal(data, &alias); err != nil {
-				return err
+				// **エラーを返さない。** `"icon": "https://e/a.png"` のような
+				// bare string は AS2 では正当 (icon の range は Image | Link で、
+				// Link は compaction で bare IRI になる)。ここで error を返すと
+				// actor document ごと落ちて、その actor がフォローもノートも
+				// 含めて一切連合できなくなる (#2662)。
+				//
+				// upstream は `createImage` が値を resolver で解決してから
+				// `typeof image.url !== 'string'` で null を返し、
+				// `resolveAvatarAndBanner` が `.catch(() => null)` で包む。
+				// **bare string は dereference されるので upstream は
+				// アバターを得ることがある**が、mk-go は取りに行かない
+				// (取得を増幅させないため)。actor が作られる点は同じ。
+				//
+				// **兄弟 field が 1 つ読めないだけで全部捨てない。**
+				// encoding/json は UnmarshalTypeError でも残りの field の
+				// decode を続けるので、この時点の alias には読めた値が
+				// 入っている。それをそのまま使う。
+				*i = Image(alias)
+				return nil
 			}
 			*i = Image(alias)
 			return nil
@@ -231,101 +832,220 @@ func (i *Image) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
+// MultikeyList accepts a FEP-521a `assertionMethod` value that may arrive as
+// an array, as a single object, or in a shape we cannot read.
+//
+// これは mk-go 独自の拡張で upstream は読まない。したがって読めない形でも
+// **actor document を落としてはいけない** (#2662)。
+//
+// **「無い」と「読めなかった」は区別する。** 呼び出し側 (cacheAssertionMethods)
+// は「actor が申告しなかった keyId を purge する」設計なので、読めなかったのに
+// 空リストを渡すと**キャッシュ済みの Ed25519 鍵を全部消す**。Ed25519 のみを
+// publish する相手では inbound の署名検証が恒久的に失敗する。Unreadable で
+// それを判別できるようにする。
+type MultikeyList struct {
+	Keys []Multikey
+	// Refs holds bare IRI entries. DID Core / FEP-521a の `assertionMethod` は
+	// `VerificationMethod | URI` なので、鍵素材を持たない参照形式も正当。
+	// 鍵は取り込めないが「actor がその keyId を申告している」ことは分かるので、
+	// purge の判定には使える。
+	Refs []string
+	// Unreadable is true when the value was present but could not be decoded.
+	Unreadable bool
+}
+
+// UnmarshalJSON never fails; unreadable shapes set Unreadable instead.
+//
+// 配列は**要素ごとに** decode する。1 件でも読めないものがあると全体を捨てる
+// 実装だと、正常な鍵が混ざっていても消えてしまう (呼び出し側は entry ごとに
+// warn + continue する設計なので、その手前で全滅させるのは矛盾)。
+func (l *MultikeyList) UnmarshalJSON(data []byte) error {
+	*l = MultikeyList{}
+	if len(data) == 0 || bytes.Equal(data, jsonNullLiteral) {
+		return nil
+	}
+	if data[0] == '[' {
+		var raw []json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			l.Unreadable = true
+			return nil
+		}
+		for _, item := range raw {
+			if ref, ok := apBareIRI(item); ok {
+				l.Refs = append(l.Refs, ref)
+				continue
+			}
+			var one Multikey
+			if err := json.Unmarshal(item, &one); err != nil {
+				l.Unreadable = true
+				continue
+			}
+			l.Keys = append(l.Keys, one)
+		}
+		return nil
+	}
+	if ref, ok := apBareIRI(data); ok {
+		l.Refs = []string{ref}
+		return nil
+	}
+	var one Multikey
+	if err := json.Unmarshal(data, &one); err != nil {
+		l.Unreadable = true
+		return nil
+	}
+	l.Keys = []Multikey{one}
+	return nil
+}
+
+// apBareIRI reports whether the raw JSON value is a plain string that looks
+// like an absolute IRI.
+//
+// **URL の形をしていない文字列は参照として扱わない。** 参照と見なすと、
+// 呼び出し側は「actor が申告した keyId の集合」を読めたことにして
+// stale key の purge を実行してしまう。ゴミ文字列は「申告を読めなかった」
+// (= purge しない) 側に倒すのが安全 (#2662)。
+func apBareIRI(data []byte) (string, bool) {
+	var str string
+	if err := json.Unmarshal(data, &str); err != nil || str == "" {
+		return "", false
+	}
+	u, err := url.Parse(str)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", false
+	}
+	return str, true
+}
+
+// MarshalJSON emits the plain array form so the wire shape is unchanged.
+func (l MultikeyList) MarshalJSON() ([]byte, error) { return json.Marshal(l.Keys) }
+
+// IsZero lets `omitzero` drop the key when there is nothing to publish.
+// struct 型なので `omitempty` は効かない (常に key が出て null になる)。
+func (l MultikeyList) IsZero() bool { return len(l.Keys) == 0 }
+
 // Person represents a user actor.
 type Person struct {
 	Object
-	Inbox             string `json:"inbox"`
-	Outbox            string `json:"outbox"`
-	Followers         string `json:"followers"`
-	Following         string `json:"following"`
-	PreferredUsername string `json:"preferredUsername"`
-	Summary           string `json:"summary,omitempty"`
-	URL               string `json:"url,omitempty"`
+	Inbox             string          `json:"inbox"`
+	Outbox            APLenientID     `json:"outbox"`
+	Followers         APLenientID     `json:"followers"`
+	Following         APLenientID     `json:"following"`
+	PreferredUsername string          `json:"preferredUsername"`
+	Summary           APLenientString `json:"summary,omitempty"`
+	URL               APLenientHref   `json:"url,omitempty"`
 	// SharedInbox は upstream renderPerson が endpoints.sharedInbox とは別に
 	// top-level にも出す (#1560、ApRendererService.ts:551)。古い実装/一部の
 	// 受信側は top-level を見るため両方出す。
-	SharedInbox string    `json:"sharedInbox,omitempty"`
-	Endpoints   Endpoints `json:"endpoints,omitzero"`
-	PublicKey   PublicKey `json:"publicKey"`
-	Icon        *Image    `json:"icon,omitempty"`
-	Image       *Image    `json:"image,omitempty"`
-	Attachment  []any     `json:"attachment,omitempty"`
-	Tag         []any     `json:"tag,omitempty"`
-	Featured    string    `json:"featured,omitempty"`
+	SharedInbox APLenientID  `json:"sharedInbox,omitempty"`
+	Endpoints   Endpoints    `json:"endpoints,omitzero"`
+	PublicKey   PublicKey    `json:"publicKey"`
+	Icon        *Image       `json:"icon,omitempty"`
+	Image       *Image       `json:"image,omitempty"`
+	Attachment  APObjectList `json:"attachment,omitempty"`
+	Tag         APObjectList `json:"tag,omitempty"`
+	Featured    APLenientID  `json:"featured,omitempty"`
 	// upstream renderPerson は manuallyApprovesFollowers/discoverable/isCat/
 	// _misskey_requireSigninToViewContents を常に boolean で出力する。omitempty だと
 	// false で key 自体が消えて wire-shape が乖離するため omitempty を外す (#1948-11)。
 	// 値は RenderPerson で user 状態から populate 済み。
-	ManuallyApproves bool   `json:"manuallyApprovesFollowers"`
-	Discoverable     bool   `json:"discoverable"`
-	IsCat            bool   `json:"isCat"`
-	VcardBday        string `json:"vcard:bday,omitempty"`
-	VcardAddress     string `json:"vcard:Address,omitempty"`
+	ManuallyApproves APTruthyBool    `json:"manuallyApprovesFollowers"`
+	Discoverable     APLenientBool   `json:"discoverable"`
+	IsCat            APLenientBool   `json:"isCat"`
+	VcardBday        APLenientString `json:"vcard:bday,omitempty"`
+	VcardAddress     APLenientString `json:"vcard:Address,omitempty"`
 	// #2106 L50: upstream renderPerson は _misskey_summary / _misskey_followedMessage を常時
 	// 出力する (description/followedMessage が null なら JSON null)。*string + omitempty 無しで
 	// nil→null を明示出力し wire-shape を揃える。
-	MisskeySummary                      *string `json:"_misskey_summary"`
-	MisskeyFollowedMessage              *string `json:"_misskey_followedMessage"`
-	MisskeyRequireSigninToViewContents  bool    `json:"_misskey_requireSigninToViewContents"`
-	MisskeyMakeNotesFollowersOnlyBefore *int    `json:"_misskey_makeNotesFollowersOnlyBefore,omitempty"`
-	MisskeyMakeNotesHiddenBefore        *int    `json:"_misskey_makeNotesHiddenBefore,omitempty"`
+	MisskeySummary                      *APLenientString `json:"_misskey_summary"`
+	MisskeyFollowedMessage              *APLenientString `json:"_misskey_followedMessage"`
+	MisskeyRequireSigninToViewContents  APLenientBool    `json:"_misskey_requireSigninToViewContents"`
+	MisskeyMakeNotesFollowersOnlyBefore *APLenientInt    `json:"_misskey_makeNotesFollowersOnlyBefore,omitempty"`
+	MisskeyMakeNotesHiddenBefore        *APLenientInt    `json:"_misskey_makeNotesHiddenBefore,omitempty"`
 	// MisskeyCanChat は CherryPick の chat 連合 capability flag (#692)。
 	// 受信側 instance が DM を受け付けるか (false なら拒絶) を表す boolean。
 	// pointer で持つことで「未指定 (= 旧実装 / 互換) → 許可」を区別する。
-	MisskeyCanChat *bool        `json:"_misskey_canChat,omitempty"`
-	MovedTo        string       `json:"movedTo,omitempty"`
-	AlsoKnownAs    APStringList `json:"alsoKnownAs,omitempty"`
+	MisskeyCanChat *APLenientBool `json:"_misskey_canChat,omitempty"`
+	MovedTo        APLenientID    `json:"movedTo,omitempty"`
+	AlsoKnownAs    APIDList       `json:"alsoKnownAs,omitempty"`
 	// AssertionMethod は FEP-521a Multikey 形式で expose する追加公開鍵リスト
-	// (mk-go では現状 Ed25519 のみ)。omitempty なので Ed25519 鍵を持たない
+	// (mk-go では現状 Ed25519 のみ)。omitzero (IsZero) なので Ed25519 鍵を持たない
 	// user / TS で signup した user では出力されず、drop-in 互換を維持する
 	// (#1067 / #1069)。
-	AssertionMethod []Multikey `json:"assertionMethod,omitempty"`
+	AssertionMethod MultikeyList `json:"assertionMethod,omitzero"`
 }
 
 // Note represents a note object (microblog post).
 type Note struct {
 	Object
-	AttributedTo   string   `json:"attributedTo"`
-	Content        string   `json:"content"`
-	Source         *Source  `json:"source,omitempty"`
-	Published      string   `json:"published"`
-	To             []string `json:"to"`
-	CC             []string `json:"cc,omitempty"`
-	InReplyTo      string   `json:"inReplyTo,omitempty"`
-	Summary        string   `json:"summary,omitempty"`
-	Sensitive      bool     `json:"sensitive,omitempty"`
-	Tag            []any    `json:"tag,omitempty"`
-	Attachment     []any    `json:"attachment,omitempty"`
-	MisskeyContent string   `json:"_misskey_content,omitempty"`
-	MisskeyQuote   string   `json:"_misskey_quote,omitempty"`
-	QuoteURL       string   `json:"quoteUrl,omitempty"`
+	AttributedTo APLenientID        `json:"attributedTo"`
+	Content      string             `json:"content"`
+	Source       *Source            `json:"source,omitempty"`
+	Published    APLenientTimestamp `json:"published"`
+	To           APIDList           `json:"to"`
+	CC           APIDList           `json:"cc,omitempty"`
+	InReplyTo    APLenientID        `json:"inReplyTo,omitempty"`
+	// CW は summary からしか作らない。読めずに空へ倒すと **CW 無しのノートが
+	// できる** ので、JSON-LD の展開形も剥がして拾う (#2662)。
+	Summary        APLenientString `json:"summary,omitempty"`
+	Sensitive      APTruthyBool    `json:"sensitive,omitempty"`
+	Tag            APObjectList    `json:"tag,omitempty"`
+	Attachment     APObjectList    `json:"attachment,omitempty"`
+	MisskeyContent APLenientString `json:"_misskey_content,omitempty"`
+	MisskeyQuote   APLenientID     `json:"_misskey_quote,omitempty"`
+	QuoteURL       APLenientID     `json:"quoteUrl,omitempty"`
 	// MisskeyTalk は CherryPick / レガシー Misskey のチャット連合 flag (#692)。
 	// `_misskey_talk: true` が立った Note は ApInboxService で chat message
 	// として処理される (notes テーブルではなく chat_messages テーブルに保存)。
-	MisskeyTalk bool `json:"_misskey_talk,omitempty"`
+	MisskeyTalk APLenientBool `json:"_misskey_talk,omitempty"`
 	// Name は AP poll vote (Question への投票) で choice 名を運ぶ field。
 	// Misskey TS の vote AP payload は `{type: "Note", name: "<choice>",
 	// inReplyTo: <poll URI>}` 形式で、ApNoteService が name + inReplyTo の
 	// 組合せで vote と判定する。通常の投稿には付かない (#690)。
-	Name string `json:"name,omitempty"`
+	// 読めずに空へ倒すと vote 判定を素通りして **本文空の reply note** に
+	// なるので、こちらも展開形を剥がす (#2662)。Person 側の `name` とは
+	// 別扱いにするため Object.Name を shadow する。
+	Name APLenientString `json:"name,omitempty"`
 	// Question (poll) fields — AP Question typeで使用
 	OneOf   []QuestionChoice `json:"oneOf,omitempty"`
 	AnyOf   []QuestionChoice `json:"anyOf,omitempty"`
-	EndTime string           `json:"endTime,omitempty"`
-	Closed  string           `json:"closed,omitempty"`
+	EndTime APLenientString  `json:"endTime,omitempty"`
+	Closed  APLenientString  `json:"closed,omitempty"`
 }
 
 // QuestionChoice represents a single choice in an AP Question (poll).
 type QuestionChoice struct {
-	Type    string                 `json:"type"` // "Note"
+	// upstream ApQuestionService は選択肢の `type` を一切見ない。string
+	// 決め打ちだと `"type": ["Note"]` で **Note ごと reject される** (#2662)。
+	Type    APType                 `json:"type"` // "Note"
 	Name    string                 `json:"name"`
 	Replies *QuestionChoiceReplies `json:"replies,omitempty"`
 }
 
 // QuestionChoiceReplies holds the vote count for a poll choice.
+//
+// AS2 では `replies` を IRI 参照にするのも正規の形。upstream は
+// `x.replies?.totalItems ?? x._misskey_votes ?? 0` と optional chaining で
+// 読むので、非 object でも**票数 0 でアンケートは作られる** (#2662)。
+//
+// `Source` と同じく、**catch-all では代替できない** (field の UnmarshalJSON が
+// error を返すと親の decode がその場で打ち切られる)。
 type QuestionChoiceReplies struct {
-	Type       string `json:"type"` // "Collection"
-	TotalItems int    `json:"totalItems"`
+	Type APType `json:"type"` // "Collection"
+	// JS には整数型が無いので `3.0` で送ってくる実装がある。`int` 決め打ちだと
+	// Note ごと reject される (#2662)。
+	TotalItems APLenientInt `json:"totalItems"`
+}
+
+// UnmarshalJSON tolerates a non-object `replies` (IRI reference etc.).
+func (q *QuestionChoiceReplies) UnmarshalJSON(data []byte) error {
+	type repliesAlias QuestionChoiceReplies
+	var v repliesAlias
+	if err := json.Unmarshal(data, &v); err != nil {
+		*q = QuestionChoiceReplies{}
+		return nil
+	}
+	*q = QuestionChoiceReplies(v)
+	return nil
 }
 
 // Mention is an ActivityStreams Mention tag used inside Note.tag to inform
@@ -345,10 +1065,68 @@ func NewMention(href, name string) Mention {
 	return Mention{Type: "Mention", Href: href, Name: name}
 }
 
+// UnmarshalJSON keeps a Note whose optional fields arrive in the wrong shape.
+//
+// upstream は JS なので型検査をほとんどしない。`content` は
+// `typeof note.content === 'string'` のガードを通って **text=null のノートが
+// 作られる**し、`oneOf` / `anyOf` / choice の `name` が読めなくても
+// `extractPollFromQuestion(...).catch(() => undefined)` で poll 無しのノートが
+// できる。mk-go は struct 決め打ちなので `json.Unmarshal` が失敗し、
+// **そのノートが丸ごと取り込めない** (#2662)。
+//
+// `encoding/json` は型不一致でも残りの field の decode を続け、最初の
+// `*json.UnmarshalTypeError` を保持して返す。読めた分をそのまま採用すれば、
+// field ごとに型を緩めなくても upstream と同じ「読めるものだけ使う」挙動に
+// なる。**構文エラー (壊れた JSON) は従来どおり弾く。**
+//
+// **`published` を特別扱いしない。** upstream は
+// `isSafeT(new Date(object.published).valueOf())` で malformed を reject するが、
+// mk-go は元々 `parseAPPublishedTime` が読めない値を受信時刻に fallback する
+// 設計で、published で Note を落とさない。ここだけ reject に倒すと、
+// **upstream が受理する形 (`["2024-01-01T00:00:00Z"]` / epoch ミリ秒 / `0`) まで
+// 巻き込んで落とす**うえ、`encoding/json` は最初の型エラーしか報告しないので
+// 先行する field のエラーで判定自体が飛ぶ。読める形は `APLenientTimestamp` が
+// 拾い、読めなければ従来どおり fallback する。
+func (n *Note) UnmarshalJSON(data []byte) error {
+	type noteAlias Note
+	var alias noteAlias
+	err := json.Unmarshal(data, &alias)
+	if err != nil {
+		var typeErr *json.UnmarshalTypeError
+		if !errors.As(err, &typeErr) {
+			return err
+		}
+	}
+	*n = Note(alias)
+	return nil
+}
+
 // Source represents the original markup of a note (Markdown / MFM).
 type Source struct {
 	Content   string `json:"content"`
 	MediaType string `json:"mediaType"`
+}
+
+// UnmarshalJSON tolerates a non-object `source`.
+//
+// upstream は `note.source?.mediaType === 'text/x.misskeymarkdown'` と optional
+// chaining で読むので、`"source": "raw text"` のような非 object でも **Note は
+// 通る** (#2662)。
+//
+// **`Note.UnmarshalJSON` の catch-all では代替できない。** field の
+// `UnmarshalJSON` が error を返すと `encoding/json` は**親 struct の decode を
+// その場で打ち切る**ので、`source` より後ろの `content` / `summary` / `to` が
+// 丸ごと消える (組み込み型の型不一致は `saveError` で継続するので catch-all が
+// 効くが、こちらは別経路)。
+func (s *Source) UnmarshalJSON(data []byte) error {
+	type sourceAlias Source
+	var v sourceAlias
+	if err := json.Unmarshal(data, &v); err != nil {
+		*s = Source{}
+		return nil
+	}
+	*s = Source(v)
+	return nil
 }
 
 // Document represents an attached file (image/video/audio/...) in a Note.
@@ -511,7 +1289,7 @@ type Like struct {
 	// Tag は Misskey/CherryPick がカスタム絵文字リアクションを連合させる
 	// 際に乗せる Emoji オブジェクト群。Note ingestion と同じ形なので
 	// federation.extractEmojiTags / upsertEmojis でそのまま処理できる。
-	Tag []any `json:"tag,omitempty"`
+	Tag APObjectList `json:"tag,omitempty"`
 }
 
 // Tombstone represents a deleted object placeholder used as the object of a

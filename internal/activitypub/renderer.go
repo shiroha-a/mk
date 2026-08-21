@@ -380,29 +380,29 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	p := &Person{
 		Object: Object{
 			ID:   uri,
-			Type: actorType,
-			Name: stringValue(u.Name),
+			Type: APType(actorType),
+			Name: APLenientString(stringValue(u.Name)),
 		},
 		Inbox:             r.urls.UserInbox(u.ID),
-		Outbox:            r.urls.UserOutbox(u.ID),
-		Followers:         r.urls.UserFollowers(u.ID),
-		Following:         r.urls.UserFollowing(u.ID),
+		Outbox:            APLenientID(r.urls.UserOutbox(u.ID)),
+		Followers:         APLenientID(r.urls.UserFollowers(u.ID)),
+		Following:         APLenientID(r.urls.UserFollowing(u.ID)),
 		PreferredUsername: u.Username,
 		// url は id (/users/<id>) と区別し、人間向け profile ページ /@<username> を
 		// 指す (#1869、upstream renderPerson)。連合向け caller は local user (Host==nil)
 		// のみ RenderPerson に渡す前提なので自ドメインの /@username で正しい
 		// (admin debug 経路 resolveLocal の host guard 欠落は #1873 で別途対応)。
-		URL:         r.urls.UserProfileURL(u.Username),
-		SharedInbox: r.urls.SharedInbox(), // top-level (#1560)
-		Endpoints:   Endpoints{SharedInbox: r.urls.SharedInbox()},
+		URL:         APLenientHref(r.urls.UserProfileURL(u.Username)),
+		SharedInbox: APLenientID(r.urls.SharedInbox()), // top-level (#1560)
+		Endpoints:   Endpoints{SharedInbox: APLenientID(r.urls.SharedInbox())},
 		PublicKey: PublicKey{
 			ID:           r.urls.UserKeyURI(u.ID),
-			Owner:        uri,
-			PublicKeyPEM: publicKeyPEM,
+			Owner:        APLenientString(uri),
+			PublicKeyPEM: APLenientString(publicKeyPEM),
 		},
-		ManuallyApproves: u.IsLocked,
-		Discoverable:     u.IsExplorable,
-		IsCat:            u.IsCat,
+		ManuallyApproves: APTruthyBool(u.IsLocked),
+		Discoverable:     APLenientBool(u.IsExplorable),
+		IsCat:            APLenientBool(u.IsCat),
 	}
 	// Ed25519 鍵を持つ user に対しては assertionMethod に Multikey として
 	// 追加 expose する。Fedibird など FEP-521a 対応サーバーが Ed25519 鍵で
@@ -413,12 +413,12 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	// silent omission を回避する。
 	if ed25519PublicKey != nil {
 		if mb, err := EncodeEd25519Multikey(ed25519PublicKey); err == nil {
-			p.AssertionMethod = []Multikey{{
+			p.AssertionMethod = MultikeyList{Keys: []Multikey{{
 				ID:                 uri + "#ed25519-key",
 				Type:               MultikeyType,
 				Controller:         uri,
 				PublicKeyMultibase: mb,
-			}}
+			}}}
 		} else {
 			slog.Warn("ed25519 multikey encode failed",
 				"userID", u.ID, "error", err)
@@ -436,41 +436,41 @@ func (r *Renderer) RenderPerson(u *model.User, profile *model.UserProfile, publi
 	isSystem := strings.Contains(u.Username, ".")
 	switch {
 	case u.AvatarURL != nil && *u.AvatarURL != "":
-		p.Icon = &Image{Type: "Image", URL: *u.AvatarURL}
+		p.Icon = &Image{Type: "Image", URL: APLenientHref(*u.AvatarURL)}
 		// drive file 由来の avatar には sensitive/name を付ける (#2031)。
 		r.applyDriveFileMeta(p.Icon, u.AvatarID)
 	case isSystem && instanceIcon != "":
-		p.Icon = &Image{Type: "Image", URL: instanceIcon}
+		p.Icon = &Image{Type: "Image", URL: APLenientHref(instanceIcon)}
 	default:
 		// identicon URL は mk-go の /identicon/<username> route 規則に合わせる
 		// (entity.IdenticonURL と同一 seed なので REST avatarUrl と同じ画像)。
-		p.Icon = &Image{Type: "Image", URL: r.urls.baseURL + "/identicon/" + u.Username}
+		p.Icon = &Image{Type: "Image", URL: APLenientHref(r.urls.baseURL + "/identicon/" + u.Username)}
 	}
 	switch {
 	case u.BannerURL != nil && *u.BannerURL != "":
-		p.Image = &Image{Type: "Image", URL: *u.BannerURL}
+		p.Image = &Image{Type: "Image", URL: APLenientHref(*u.BannerURL)}
 		r.applyDriveFileMeta(p.Image, u.BannerID)
 	case isSystem && instanceBanner != "":
-		p.Image = &Image{Type: "Image", URL: instanceBanner}
+		p.Image = &Image{Type: "Image", URL: APLenientHref(instanceBanner)}
 	}
 	if u.MovedToURI != nil && *u.MovedToURI != "" {
-		p.MovedTo = *u.MovedToURI
+		p.MovedTo = APLenientID(*u.MovedToURI)
 	}
 	if u.AlsoKnownAs != nil && *u.AlsoKnownAs != "" {
-		p.AlsoKnownAs = APStringList(strings.Split(*u.AlsoKnownAs, ","))
+		p.AlsoKnownAs = APIDList(strings.Split(*u.AlsoKnownAs, ","))
 	}
 	// upstream renderPerson は local actor に必ず featured: ${id}/collections/featured を
 	// 出力する。RenderPerson は local user 専用なので無条件に自ドメインの featured
 	// collection URI を入れる (pinned note を連合先へ公開する、#1876)。
-	p.Featured = r.urls.UserFeatured(u.ID)
-	p.MisskeyRequireSigninToViewContents = u.RequireSigninToViewContents
-	p.MisskeyMakeNotesFollowersOnlyBefore = u.MakeNotesFollowersOnlyBefore
-	p.MisskeyMakeNotesHiddenBefore = u.MakeNotesHiddenBefore
+	p.Featured = APLenientID(r.urls.UserFeatured(u.ID))
+	p.MisskeyRequireSigninToViewContents = APLenientBool(u.RequireSigninToViewContents)
+	p.MisskeyMakeNotesFollowersOnlyBefore = lenientIntPtr(u.MakeNotesFollowersOnlyBefore)
+	p.MisskeyMakeNotesHiddenBefore = lenientIntPtr(u.MakeNotesHiddenBefore)
 	// `_misskey_canChat` は CherryPick 互換の chat 連合 capability flag。
 	// chatScope == "none" 以外なら true (everyone/followers/following/mutual)
 	// と公開する。granular な scope は受信側で local 強制されるので AP には
 	// boolean だけ流す (#692)。
-	canChat := u.ChatScope != "none"
+	canChat := APLenientBool(u.ChatScope != "none")
 	p.MisskeyCanChat = &canChat
 
 	// profile から追加フィールドを埋める
@@ -510,18 +510,18 @@ func rewriteFieldURLValue(value string) string {
 func (r *Renderer) enrichPersonFromProfile(p *Person, profile *model.UserProfile) {
 	// #2106 L50: _misskey_summary / _misskey_followedMessage は raw 値を常時出力する (null/値)。
 	// pointer をそのまま渡し、空時も null として出す。Summary (AS2 HTML) は非空時のみ MFM 変換。
-	p.MisskeySummary = profile.Description
+	p.MisskeySummary = lenientStringPtr(profile.Description)
 	if profile.Description != nil && *profile.Description != "" {
 		nodes := mfm.Parse(*profile.Description)
-		p.Summary = mfm.ToHTML(nodes, r.host)
+		p.Summary = APLenientString(mfm.ToHTML(nodes, r.host))
 	}
 	if profile.Birthday != nil && *profile.Birthday != "" {
-		p.VcardBday = *profile.Birthday
+		p.VcardBday = APLenientString(*profile.Birthday)
 	}
 	if profile.Location != nil && *profile.Location != "" {
-		p.VcardAddress = *profile.Location
+		p.VcardAddress = APLenientString(*profile.Location)
 	}
-	p.MisskeyFollowedMessage = profile.FollowedMessage
+	p.MisskeyFollowedMessage = lenientStringPtr(profile.FollowedMessage)
 
 	// profile.Fields → PropertyValue attachment
 	if len(profile.Fields) > 0 {
@@ -558,9 +558,9 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 			ID:   r.urls.NoteURI(n.ID),
 			Type: "Note",
 		},
-		AttributedTo: r.urls.UserURI(n.UserID),
+		AttributedTo: APLenientID(r.urls.UserURI(n.UserID)),
 		Content:      htmlContent,
-		Published:    parseNoteTime(n.ID, idGen),
+		Published:    APLenientTimestamp(parseNoteTime(n.ID, idGen)),
 		// upstream は sensitive = (note.cw != null) || files.some(isSensitive)
 		// (#1560、ApRendererService.ts:489)。空文字 CW でも cw!=null なら
 		// sensitive=true。file 由来の flip は下の attachment ループで行う。
@@ -579,7 +579,7 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 	// _misskey_content を出す (受信 Misskey が raw markdown を失わないように、#1948-11)。
 	hasExtraHtml := quoteURI != ""
 	if text != "" && (hasExtraHtml || !mfm.IsSimple(nodes)) {
-		out.MisskeyContent = text
+		out.MisskeyContent = APLenientString(text)
 		out.Source = &Source{
 			Content:   text,
 			MediaType: "text/x.misskeymarkdown",
@@ -593,7 +593,7 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 		if *n.CW == "" {
 			out.Summary = "\u200b" // ZWSP (upstream String.fromCharCode(0x200B))
 		} else {
-			out.Summary = *n.CW
+			out.Summary = APLenientString(*n.CW)
 		}
 	}
 	if n.ReplyID != nil {
@@ -601,13 +601,13 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 		// 指すべき。mk-go の local URL (`https://<self>/notes/<id>`) に
 		// してしまうと連合先が `inReplyTo` を解決できず reply chain が切れる
 		// (drop-in #369 で発覚)。
-		out.InReplyTo = r.resolveNoteURI(*n.ReplyID)
+		out.InReplyTo = APLenientID(r.resolveNoteURI(*n.ReplyID))
 	}
 
 	// Quote renote: text付きrenoteは_misskey_quote + quoteUrlを付ける
 	if quoteURI != "" {
-		out.MisskeyQuote = quoteURI
-		out.QuoteURL = quoteURI
+		out.MisskeyQuote = APLenientID(quoteURI)
+		out.QuoteURL = APLenientID(quoteURI)
 		// 非 Misskey クライアント向けに content 末尾へ quote-inline span を
 		// 付ける (#1560、upstream ApRendererService.ts:436-441)。class名
 		// `quote-inline` は非 Misskey クライアントの quote 表示に使われる。
@@ -709,7 +709,7 @@ func (r *Renderer) applyPoll(out *Note, poll *model.Poll) {
 			Name: c,
 			Replies: &QuestionChoiceReplies{
 				Type:       "Collection",
-				TotalItems: count,
+				TotalItems: APLenientInt(count),
 			},
 		}
 	}
@@ -724,9 +724,9 @@ func (r *Renderer) applyPoll(out *Note, poll *model.Poll) {
 		// で endTime / closed を排他的に出す。期限切れは closed のみ、未期限は endTime
 		// のみ (両方は出さない、#1779)。
 		if poll.ExpiresAt.Before(time.Now()) {
-			out.Closed = ts
+			out.Closed = APLenientString(ts)
 		} else {
-			out.EndTime = ts
+			out.EndTime = APLenientString(ts)
 		}
 	}
 }
@@ -805,7 +805,7 @@ func (r *Renderer) resolveNoteURI(noteID string) string {
 }
 
 // addEmojiTags resolves custom emoji names and appends EmojiTag entries.
-func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) {
+func (r *Renderer) addEmojiTags(tags *APObjectList, emojiNames []string, host *string) {
 	if r.emojiResolver == nil || len(emojiNames) == 0 {
 		return
 	}
@@ -834,7 +834,7 @@ func (r *Renderer) addEmojiTags(tags *[]any, emojiNames []string, host *string) 
 		tag := EmojiTag{
 			Type: "Emoji",
 			Name: ":" + emoji.Name + ":",
-			Icon: Image{Type: "Image", MediaType: mediaType, URL: iconURL},
+			Icon: Image{Type: "Image", MediaType: mediaType, URL: APLenientHref(iconURL)},
 		}
 		// id: remote emoji は元 URI を保持、local emoji は自ドメインの
 		// /emojis/<name> (upstream renderEmoji は常に local URL を出すが、remote
@@ -959,7 +959,7 @@ func (r *Renderer) RenderCreate(n *model.Note, idGen id.Generator) *Create {
 				Type: "Create",
 			},
 			Actor:     r.urls.UserURI(n.UserID),
-			Published: note.Published,
+			Published: note.Published.String(),
 			To:        note.To,
 			CC:        note.CC,
 		},
@@ -1144,7 +1144,7 @@ func (r *Renderer) RenderChatRoom(room *model.ChatRoom) *ChatRoomGroup {
 		Object: Object{
 			ID:   r.urls.ChatRoomURI(room.ID),
 			Type: "Group",
-			Name: room.Name,
+			Name: APLenientString(room.Name),
 		},
 		AttributedTo: r.urls.UserURI(room.OwnerID),
 	}
@@ -1245,7 +1245,7 @@ func (r *Renderer) RenderChatRoomInviteRef(ownerURI, roomURI, roomName, targetUR
 			Actor:  ownerURI,
 		},
 		Object: &ChatRoomGroup{
-			Object:       Object{ID: roomURI, Type: "Group", Name: roomName},
+			Object:       Object{ID: roomURI, Type: "Group", Name: APLenientString(roomName)},
 			AttributedTo: ownerURI,
 		},
 		Target: targetURI,
@@ -1534,8 +1534,8 @@ func (r *Renderer) RenderChatMessage(msg *model.ChatMessage, senderURI, recipien
 			ID:   noteURI,
 			Type: "Note",
 		},
-		AttributedTo: senderURI,
-		Published:    published,
+		AttributedTo: APLenientID(senderURI),
+		Published:    APLenientTimestamp(published),
 		To:           []string{recipientURI},
 		MisskeyTalk:  true,
 	}
@@ -1574,8 +1574,8 @@ func (r *Renderer) RenderChatRoomMessage(msg *model.ChatMessage, senderURI strin
 			Type:    "Note",
 			Context: roomURI,
 		},
-		AttributedTo: senderURI,
-		Published:    published,
+		AttributedTo: APLenientID(senderURI),
+		Published:    APLenientTimestamp(published),
 		To:           memberURIs,
 		MisskeyTalk:  true,
 	}

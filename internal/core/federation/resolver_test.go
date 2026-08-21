@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
+	"sort"
 )
 
 // stubFetcher returns canned bytes/error for FetchObject.
@@ -33,6 +34,19 @@ type stubFetcher struct {
 
 func (s *stubFetcher) FetchObject(_ string) ([]byte, error) {
 	return s.body, s.err
+}
+
+// countingFetcher counts FetchObject calls so tests can assert that a refetch
+// loop is not amplifying (#2662).
+type countingFetcher struct {
+	body  []byte
+	err   error
+	calls int
+}
+
+func (c *countingFetcher) FetchObject(_ string) ([]byte, error) {
+	c.calls++
+	return c.body, c.err
 }
 
 // blockingFetcher counts FetchObject calls and blocks until gate is closed.
@@ -354,15 +368,40 @@ func TestResolveActor_BadJSON(t *testing.T) {
 	require.ErrorIs(t, err, federation.ErrInvalidActor)
 }
 
+// 必須 field ごとに、**それ単独が欠けたときに**弾くことを確かめる。
+// まとめて欠けた fixture 1 本では、どの検証が効いているのか固定できない。
+// id の host は request host と揃える (揃えないと request-host binding が先に
+// 弾いて ErrObjectHostMismatch になり、条件を見ていないテストになる)。
 func TestResolveActor_MissingFields(t *testing.T) {
-	r, _ := newResolver(t, `{"@context":"https://www.w3.org/ns/activitystreams","id":"x"}`, nil)
-	_, err := r.ResolveActor("https://remote.example/users/x")
-	require.ErrorIs(t, err, federation.ErrInvalidActor)
+	const uri = "https://remote.example/users/x"
+	tests := []struct {
+		name string
+		body string
+	}{
+		{"all missing", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/users/x"}`},
+		{"type only missing", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/users/x","preferredUsername":"x","inbox":"https://remote.example/users/x/inbox"}`},
+		{"username only missing", `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/users/x","type":"Person","inbox":"https://remote.example/users/x/inbox"}`},
+		{"@context missing", `{"id":"https://remote.example/users/x","type":"Person","preferredUsername":"x"}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			r, _ := newResolver(t, tc.body, nil)
+			_, err := r.ResolveActor(uri)
+			require.ErrorIs(t, err, federation.ErrInvalidActor)
+		})
+	}
+
+	// 全部揃っていれば通る (上の 4 ケースが「常に落ちる」だけの
+	// テストになっていないことの裏取り)。
+	r, _ := newResolver(t, `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/users/x","type":"Person","preferredUsername":"x","inbox":"https://remote.example/users/x/inbox","publicKey":{"publicKeyPem":"PEM"}}`, nil)
+	_, err := r.ResolveActor(uri)
+	require.NoError(t, err)
 }
 
 func TestResolveActor_BadHost(t *testing.T) {
-	// invalid URL with control char。request host (x.example) と id host が
+	// scheme も host も持たない id。request host (x.example) と id host が
 	// 一致しないため Strict request-host binding (#1828) が先に弾く。
+	// (制御文字は `trimWHATWGURL` が落とすので、それでは弾かれない)
 	body := `{
 		"@context": "https://www.w3.org/ns/activitystreams",
 		"id": "://invalid",
@@ -2037,6 +2076,250 @@ func TestResolveActor_TTLRefreshClearsRemovedProfileExtras(t *testing.T) {
 	assert.JSONEq(t, "[]", string(p.Fields))
 }
 
+// tag / attachment の要素も `"type": ["X"]` を受ける。document 全体は通るが、
+// 要素単位で落とすと**添付が消えたノート**や**通知が飛ばないメンション**に
+// なる (upstream は getApType / isDocument 経由なので全部通る、#2662)。
+func TestRemoteTagAndAttachment_ArrayTypeElements(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/uma"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/uma",
+		"type": ["Person"],
+		"preferredUsername": "uma",
+		"inbox": "https://mstdn.example/users/uma/inbox",
+		"tag": [
+			{"type": ["Hashtag"], "name": "#arraytag"},
+			{"type": ["PropertyValue"], "name": "Web", "value": "example.org"}
+		],
+		"attachment": [{"type": ["PropertyValue"], "name": "Pronoun", "value": "they/them"}],
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err)
+
+	assert.Contains(t, []string(user.Tags), "arraytag", "配列 type の Hashtag も user.tags に載る")
+
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(repo.Profiles[user.ID].Fields, &fields))
+	require.Len(t, fields, 1)
+	assert.Equal(t, "Pronoun", fields[0].Name)
+
+	// emoji tag と Note の添付も同じ罠を持つ。document は通るので
+	// 「絵文字が :name: のまま」「添付が消えたノート」として表に出る。
+	emojis := federation.ExtractEmojiTags([]any{
+		map[string]any{
+			"type": []any{"Emoji"},
+			"name": ":blobcat:",
+			"icon": map[string]any{"type": "Image", "url": "https://mstdn.example/e/blobcat.png"},
+		},
+	})
+	require.Len(t, emojis, 1, "配列 type の Emoji tag を拾うこと")
+	assert.Equal(t, "https://mstdn.example/e/blobcat.png", emojis[0].Icon.URL.String())
+
+	docs := federation.ExtractAttachments([]any{
+		map[string]any{"type": []any{"Document"}, "url": "https://mstdn.example/files/a.png"},
+	}, false)
+	require.Len(t, docs, 1, "配列 type の添付を拾うこと")
+	assert.Equal(t, "https://mstdn.example/files/a.png", docs[0].URL)
+
+	// upstream の validDocumentTypes は Page も含む (type.ts:263)。
+	pages := federation.ExtractAttachments([]any{
+		map[string]any{"type": "Page", "url": "https://mstdn.example/files/p.pdf"},
+	}, false)
+	require.Len(t, pages, 1, "Page 添付も取り込む")
+
+	// Mention を落とすと通知が飛ばない。
+	hrefs := federation.ExtractMentionTags([]any{
+		map[string]any{"type": []any{"Mention"}, "href": "https://mstdn.example/users/vic"},
+	})
+	assert.Equal(t, []string{"https://mstdn.example/users/vic"}, hrefs,
+		"配列 type の Mention を拾うこと")
+}
+
+// tag / url が単一 object でも actor が解決できる。attachment と同じ理由で
+// `[]any` / `string` 決め打ちだと unmarshal ごと失敗していた (#2662)。
+// JSON-LD compaction は @container: @set が無い term の単一要素配列を
+// 素の値に潰すので、この形は構造的に出てくる。
+func TestResolveActor_SingleObjectTagAndLinkURL(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/tess"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/tess",
+		"type": "Person",
+		"preferredUsername": "tess",
+		"inbox": "https://mstdn.example/users/tess/inbox",
+		"name": "Tess",
+		"tag": {"type":"Emoji","name":":wave:","icon":{"type":"Image","url":"https://mstdn.example/e/wave.png"}},
+		"url": {"type":"Link","href":"https://mstdn.example/@tess"},
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err, "actor 解決が通ること")
+	require.NotNil(t, user.Name)
+	assert.Equal(t, "Tess", *user.Name)
+}
+
+// 単一 object の attachment を持つ actor も解決できる。`[]any` 決め打ちだと
+// json.Unmarshal ごと失敗して **その actor が一切連合できなかった** (#2662)。
+func TestResolveActor_SingleObjectAttachment(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/pat"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/pat",
+		"type": "Person",
+		"preferredUsername": "pat",
+		"inbox": "https://mstdn.example/users/pat/inbox",
+		"attachment": {"type":"PropertyValue","name":"Web","value":"example.org"},
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err, "actor 解決が通ること")
+	require.NotNil(t, user)
+
+	// 単一 object も 1 件として拾う。
+	var fields []struct{ Name, Value string }
+	require.NoError(t, json.Unmarshal(repo.Profiles[user.ID].Fields, &fields))
+	require.Len(t, fields, 1)
+	assert.Equal(t, "Web", fields[0].Name)
+}
+
+// 非 string の vcard を持つ actor も解決できる (値は捨てる)。
+func TestResolveActor_NonStringVcard(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://mstdn.example/users/quinn"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://mstdn.example/users/quinn",
+		"type": "Person",
+		"preferredUsername": "quinn",
+		"inbox": "https://mstdn.example/users/quinn/inbox",
+		"summary": "bio",
+		"vcard:bday": {"@value": "1990-05-03"},
+		"vcard:Address": ["Tokyo"],
+		"_misskey_summary": {"a": 1},
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor(uri)
+	require.NoError(t, err, "actor 解決が通ること")
+
+	p := repo.Profiles[user.ID]
+	require.NotNil(t, p.Description, "読める field は取り込む")
+	// JSON-LD の展開形は剥がして拾う。捨てると「読めたはずの値が黙って消える」。
+	require.NotNil(t, p.Birthday)
+	assert.Equal(t, "1990-05-03", *p.Birthday)
+	require.NotNil(t, p.Location)
+	assert.Equal(t, "Tokyo", *p.Location)
+}
+
+// name は user.name (varchar(128))。upstream は truncate(person.name, 128) を
+// 必ず通す。素通しすると userRepo.Create ごと落ちて actor が作られない。
+func TestResolveActor_TruncatesDisplayName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		wantLen int
+		wantNil bool
+	}{
+		{"short", "Alice", 5, false},
+		{"exactly 128", strings.Repeat("a", 128), 128, false},
+		{"over limit", strings.Repeat("b", 200), 128, false},
+		{"multibyte over limit", strings.Repeat("日本", 200), 128, false},
+		{"empty", "", 0, true},
+		{"nul only", `\u0000`, 0, true},
+		{"nul embedded", `Al\u0000ice`, 5, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			uri := "https://mstdn.example/users/rene"
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://mstdn.example/users/rene",
+				"type": "Person",
+				"preferredUsername": "rene",
+				"inbox": "https://mstdn.example/users/rene/inbox",
+				"name": "` + tc.in + `",
+				"publicKey": {"publicKeyPem": "PEM"}
+			}`
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+			user, err := r.ResolveActor(uri)
+			require.NoError(t, err)
+			if tc.wantNil {
+				assert.Nil(t, user.Name)
+				return
+			}
+			require.NotNil(t, user.Name)
+			assert.Equal(t, tc.wantLen, len([]rune(*user.Name)))
+			assert.NotContains(t, *user.Name, "\u0000", "NUL は残さない")
+		})
+	}
+}
+
+// preferredUsername は user.username / usernameLower (varchar(128) NOT NULL) に
+// そのまま入る。upstream validateActor と同じ条件で弾く。素通しすると
+// userRepo.Create が落ちて actor がまったく作られない。
+func TestResolveActor_RejectsUnusableUsername(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   string
+		ok   bool
+	}{
+		{"simple", "alice", true},
+		{"with dash and dot", "a-b.c_d", true},
+		{"single char", "a", true},
+		{"digits", "user123", true},
+		{"empty", "", false},
+		{"too long", strings.Repeat("a", 129), false},
+		{"exactly 128", strings.Repeat("a", 128), true},
+		{"leading dash", "-alice", false},
+		{"trailing dot", "alice.", false},
+		{"space", "al ice", false},
+		{"at sign", "alice@example", false},
+		{"nul", `al\u0000ice`, false},
+		{"multibyte", "日本", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			uri := "https://mstdn.example/users/sam"
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://mstdn.example/users/sam",
+				"type": "Person",
+				"preferredUsername": "` + tc.in + `",
+				"inbox": "https://mstdn.example/users/sam/inbox",
+				"publicKey": {"publicKeyPem": "PEM"}
+			}`
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+			_, err := r.ResolveActor(uri)
+			if tc.ok {
+				assert.NoError(t, err)
+				return
+			}
+			// mock も制約違反で error を返すので、error が返ること自体では
+			// 「DB に触れる前に弾いた」と言えない。ErrInvalidActor で固定する。
+			assert.ErrorIs(t, err, federation.ErrInvalidActor)
+		})
+	}
+}
+
 // リモート actor の location / birthday / fields を取り込む (#2661)。送信側
 // (renderer) は vcard:Address / vcard:bday / PropertyValue を出していたのに、
 // 受信側が description しか読んでおらず、本番のリモートユーザー 28265 件が
@@ -2468,6 +2751,55 @@ func TestResolveActor_TTLRefreshUpdatesIsLocked(t *testing.T) {
 	user, err := r.ResolveActor(uri)
 	require.NoError(t, err)
 	assert.True(t, user.IsLocked, "IsLocked should flip to true on refresh when remote opts in")
+}
+
+// TTL refresh で降ってきた name も truncate / NUL 除去を通す。作成経路だけ
+// 直すと、既存ユーザーの refresh で **user.name の update が落ちて refresh
+// 全体が失敗する** (#2662)。
+//
+// truncate と NUL 除去は**別のケースで**確かめる。300 文字 + NUL を 1 つの
+// 入力にすると truncate が NUL ごと切り落とすので、NUL 除去を外しても
+// アサーションが通ってしまう (真空になる)。
+func TestResolveActor_TTLRefreshNormalizesName(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		in      string
+		wantLen int
+	}{
+		{"truncates", strings.Repeat("z", 300), 128},
+		{"strips NUL", "Al" + `\u0000` + "ice", 5},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			uri := "https://remote.example/users/alice"
+			old := time.Now().Add(-48 * time.Hour)
+			original := "Original"
+			repo.Users["existing"] = &model.User{
+				ID:            "existing",
+				Username:      "alice",
+				URI:           &uri,
+				Name:          &original,
+				LastFetchedAt: &old,
+			}
+			updated := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://remote.example/users/alice",
+				"type": "Person",
+				"preferredUsername": "alice",
+				"inbox": "https://remote.example/users/alice/inbox",
+				"name": "` + tc.in + `",
+				"publicKey": {"publicKeyPem": "REFRESHED"}
+			}`
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(updated)}, idGen)
+			user, err := r.ResolveActor(uri)
+			require.NoError(t, err)
+			require.NotNil(t, user.Name)
+			assert.Equal(t, tc.wantLen, len([]rune(*user.Name)))
+			assert.NotContains(t, *user.Name, "\u0000", "NUL は残さない")
+		})
+	}
 }
 
 func TestResolveActor_NoRefreshWhenFresh(t *testing.T) {
@@ -3142,7 +3474,7 @@ func TestExtractEmojiTags(t *testing.T) {
 		require.Len(t, got, 1)
 		assert.Equal(t, "Emoji", got[0].Type)
 		assert.Equal(t, ":blobcat:", got[0].Name)
-		assert.Equal(t, "https://remote.example/emojis/blobcat.webp", got[0].Icon.URL)
+		assert.Equal(t, "https://remote.example/emojis/blobcat.webp", got[0].Icon.URL.String())
 		assert.Equal(t, "https://remote.example/emojis/blobcat", got[0].ID)
 		assert.Equal(t, "2025-01-01T00:00:00Z", got[0].Updated)
 		// #731: AP tag に `_misskey_license` が無いケースは License = nil
@@ -3972,6 +4304,37 @@ func strPtr(s string) *string { return &s }
 
 // --- #378 attachment ingest --------------------------------------------------
 
+// 単一 object の attachment を持つ Note も添付を取り込める。Mastodon など
+// 1 件のときに配列で包まない実装があり、`[]any` 決め打ちだと **Note の
+// unmarshal ごと失敗して取り込めなかった** (#2662)。
+func TestNoteAttachment_SingleObject(t *testing.T) {
+	tests := []struct {
+		name     string
+		raw      string
+		expected int
+	}{
+		{"single object", `{"type":"Document","mediaType":"image/png","url":"https://r/a.png"}`, 1},
+		{"array", `[{"type":"Document","url":"https://r/a.png"},{"type":"Image","url":"https://r/b.jpg"}]`, 2},
+		{"absent", "", 0},
+		{"null", "null", 0},
+		{"unusable single object", `{"type":"Note","url":"https://r/x"}`, 0},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"type":"Note","id":"https://r/notes/1","content":"hi"`
+			if tc.raw != "" {
+				body += `,"attachment":` + tc.raw
+			}
+			body += "}"
+
+			var note activitypub.Note
+			require.NoError(t, json.Unmarshal([]byte(body), &note), "Note 全体が読めること")
+			assert.Equal(t, "hi", note.Content, "他の field を巻き込まない")
+			assert.Len(t, federation.ExtractAttachments(note.Attachment, false), tc.expected)
+		})
+	}
+}
+
 func TestExtractAttachments(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -4033,7 +4396,7 @@ func TestExtractAttachments(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := federation.ExtractAttachments(tt.raw)
+			got := federation.ExtractAttachments(tt.raw, false)
 			assert.Len(t, got, tt.expected)
 		})
 	}
@@ -4064,13 +4427,13 @@ func TestExtractAttachments_MetadataFields(t *testing.T) {
 			"url":  "https://r/no-meta.bin",
 		},
 	}
-	got := federation.ExtractAttachments(raw)
+	got := federation.ExtractAttachments(raw, false)
 	require.Len(t, got, 2)
 	assert.Equal(t, 640, got[0].Width)
 	assert.Equal(t, 480, got[0].Height)
 	assert.Equal(t, "L6PZfSi_.AyE_3t7t7R**0o#DgR4", got[0].Blurhash)
 	require.NotNil(t, got[0].Icon)
-	assert.Equal(t, "https://r/cat-thumb.png", got[0].Icon.URL)
+	assert.Equal(t, "https://r/cat-thumb.png", got[0].Icon.URL.String())
 	// 欠落側
 	assert.Equal(t, 0, got[1].Width)
 	assert.Equal(t, 0, got[1].Height)
@@ -5091,6 +5454,903 @@ func TestPublicKeyForKeyID_ActorScopedRejectsPlantedKey(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, pem, "ATTACKER", "他 actor 配下の植え込み鍵を返してはいけない")
 	assert.Contains(t, pem, "ALICE-RSA")
+}
+
+// **恒久的に不正な actor で fetch を増幅させない。** #2662 で
+// preferredUsername の検証を足したことで、検証前に取り込まれた既存行は
+// refresh のたびに ErrInvalidActor になる。lastFetchedAt を進めないと
+// shouldRefreshActor が永久に true で、inbound activity 1 件につき outbound
+// fetch が 1 回走り続ける (相手は同じ document を返すので自然回復しない)。
+func TestResolveActor_PermanentlyInvalidDocumentStopsRefetchLoop(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://remote.example/users/alice"
+	old := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing"] = &model.User{
+		ID:            "existing",
+		Username:      "alice",
+		URI:           &uri,
+		LastFetchedAt: &old,
+	}
+	// preferredUsername が新条件を満たさない actor (検証導入前の既存行を模す)。
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "-alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	counting := &countingFetcher{body: []byte(body)}
+	r := federation.NewResolver(repo, noteRepo, urls, counting, idGen)
+
+	for i := 0; i < 5; i++ {
+		_, err := r.ResolveActor(uri)
+		require.NoError(t, err, "既存行は返せること")
+	}
+	// 内訳: refreshActor (TTL 失効) 1 回 + refreshPublicKey の初回 1 回。
+	// 以降は lastFetchedAt が進んでいるので refreshActor は走らず、
+	// 鍵側は keyFetchBackoff が抑える。**回数が呼び出し数に比例しない**のが要点。
+	assert.Equal(t, 2, counting.calls, "解決のたびに fetch しない")
+	require.NotNil(t, repo.Users["existing"].LastFetchedAt)
+	assert.True(t, repo.Users["existing"].LastFetchedAt.After(old),
+		"lastFetchedAt が進んでいること")
+}
+
+// `user.avatarUrl` は varchar(1024)、`user.bannerUrl` は varchar(512)。
+// 超過値を渡すと INSERT が SQLSTATE 22001 で落ち、**その actor が 1 行も
+// 作られない**。URL は truncate すると壊れるだけなので落とす (#2662)。
+func TestResolveActor_DropsOversizedMediaURLs(t *testing.T) {
+	long := "https://remote.example/" + strings.Repeat("a", 1100)
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"icon": {"type": "Image", "url": "` + long + `"},
+		"image": {"type": "Image", "url": "` + long + `"},
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err, "actor 自体は作る")
+	assert.Nil(t, user.AvatarURL, "1024 超の avatarUrl は落とす")
+	assert.Nil(t, user.BannerURL, "512 超の bannerUrl は落とす")
+
+	// **境界ちょうどは通す。** `> max` を `>= max` にしても `> max+1` にしても
+	// 落ちるように、1024 / 512 ちょうどと +1 の両方を見る。
+	urlOfLen := func(n int) string {
+		const prefix = "https://remote.example/"
+		return prefix + strings.Repeat("c", n-len(prefix))
+	}
+	for _, tc := range []struct {
+		name       string
+		avatarLen  int
+		bannerLen  int
+		wantAvatar bool
+		wantBanner bool
+	}{
+		{"exactly at limit", 1024, 512, true, true},
+		{"one over limit", 1025, 513, false, false},
+		{"avatar fits banner does not", 1024, 513, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			avatar := urlOfLen(tc.avatarLen)
+			banner := urlOfLen(tc.bannerLen)
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://remote.example/users/carol",
+				"type": "Person",
+				"preferredUsername": "carol",
+				"inbox": "https://remote.example/users/carol/inbox",
+				"icon": {"type": "Image", "url": "` + avatar + `"},
+				"image": {"type": "Image", "url": "` + banner + `"},
+				"publicKey": {"publicKeyPem": "PEM"}
+			}`
+			repo := testutil.NewMockUserRepository()
+			r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls, &stubFetcher{body: []byte(body)}, idGen)
+			user, err := r.ResolveActor("https://remote.example/users/carol")
+			require.NoError(t, err)
+			assert.Equal(t, tc.wantAvatar, user.AvatarURL != nil, "avatarUrl")
+			assert.Equal(t, tc.wantBanner, user.BannerURL != nil, "bannerUrl")
+		})
+	}
+
+	// **NUL 入りの URL も落とす。** PostgreSQL の text は NUL を受け付けず、
+	// 長さ超過と同じく INSERT / UPDATE ごと落ちる。create 経路では actor が
+	// 1 行も作られず、refresh 経路では lastFetchedAt が進まないので fetch が
+	// 増幅する。
+	t.Run("nul in media url", func(t *testing.T) {
+		nulBody := `{ "@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/dave",
+			"type": "Person",
+			"preferredUsername": "dave",
+			"inbox": "https://remote.example/users/dave/inbox",
+			"icon": {"type": "Image", "url": "https://remote.example/a\u0000.png"},
+			"image": {"type": "Image", "url": "https://remote.example/b\u0000.png"},
+			"publicKey": {"publicKeyPem": "PEM"}
+		}`
+		repo := testutil.NewMockUserRepository()
+		r := federation.NewResolver(repo, testutil.NewMockNoteRepository(), urls, &stubFetcher{body: []byte(nulBody)}, idGen)
+		user, err := r.ResolveActor("https://remote.example/users/dave")
+		require.NoError(t, err, "actor 自体は作る")
+		assert.Nil(t, user.AvatarURL)
+		assert.Nil(t, user.BannerURL)
+	})
+
+	// 収まる長さは従来どおり入る。banner は 512 なので avatar より厳しい。
+	fits := "https://remote.example/" + strings.Repeat("b", 400)
+	body2 := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/bob",
+		"type": "Person",
+		"preferredUsername": "bob",
+		"inbox": "https://remote.example/users/bob/inbox",
+		"icon": {"type": "Image", "url": "` + fits + `"},
+		"image": {"type": "Image", "url": "` + fits + `"},
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	repo2 := testutil.NewMockUserRepository()
+	r2 := federation.NewResolver(repo2, testutil.NewMockNoteRepository(), urls, &stubFetcher{body: []byte(body2)}, idGen)
+	user2, err := r2.ResolveActor("https://remote.example/users/bob")
+	require.NoError(t, err)
+	require.NotNil(t, user2.AvatarURL)
+	assert.Equal(t, fits, *user2.AvatarURL)
+	require.NotNil(t, user2.BannerURL)
+}
+
+// **他 host の bare IRI 参照を「申告済み」と数えない。** 数えると、攻撃者
+// actor が victim ドメインの keyId を参照に載せるだけでその行を purge から
+// 守れてしまう (= ローテーション済みの鍵を延命できる)。行の作成側
+// (`am.ID`) も host 検証済みだが、検証導入前に入った行に対する多重防御
+// として参照側でも縛る (#2662)。
+func TestResolveActor_CrossHostAssertionMethodRefDoesNotProtect(t *testing.T) {
+	const crossHostKeyID = "https://evil.example/users/x#k1"
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"publicKeyPem": "PEM"},
+		"assertionMethod": ["` + crossHostKeyID + `"]
+	}`
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+
+	// 検証導入前に入りえた「他 host の keyId」の行を直接 seed する。
+	require.NoError(t, extra.Upsert(&model.UserPublickeyExtra{
+		UserID: user.ID, KeyID: crossHostKeyID, KeyPEM: "OLD",
+	}))
+
+	// もう一度 refresh させると、参照は host 不一致なので守られず purge される。
+	r.SetActorTTL(time.Nanosecond)
+	time.Sleep(2 * time.Nanosecond)
+	_, err = r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+
+	rows, _ := extra.ListByUserID(user.ID)
+	assert.Empty(t, rows, "他 host の参照は purge から守らない")
+}
+
+// 鍵が読めない actor で fetch を増幅させない。この経路 (TTL 内かつ in-memory
+// 鍵キャッシュが空) は解決のたびに走るので、「fetch は成功するが PEM が空」を
+// 成功扱いにすると inbound activity 1 件につき outbound fetch が 1 回走り
+// 続ける (#2662)。
+func TestResolveActor_EmptyPublicKeyDoesNotAmplifyFetches(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{"publicKeyPem unreadable", `{ "@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/alice",
+			"type": "Person",
+			"preferredUsername": "alice",
+			"inbox": "https://remote.example/users/alice/inbox",
+			"publicKey": {"id": "https://remote.example/users/alice#main-key", "publicKeyPem": {"a": 1}}
+		}`},
+		{"publicKey absent", `{ "@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/alice",
+			"type": "Person",
+			"preferredUsername": "alice",
+			"inbox": "https://remote.example/users/alice/inbox"
+		}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			counting := &countingFetcher{body: []byte(tc.body)}
+			r := federation.NewResolver(repo, noteRepo, urls, counting, idGen)
+
+			for i := 0; i < 10; i++ {
+				_, err := r.ResolveActor("https://remote.example/users/alice")
+				require.NoError(t, err)
+			}
+			// 内訳: 初回の actor fetch 1 回 + 鍵取り直しの初回 1 回。
+			// 以降は keyFetchBackoff が抑える。
+			assert.LessOrEqual(t, counting.calls, 2, "解決のたびに fetch しない")
+		})
+	}
+}
+
+// 鍵取得の backoff は「期限が切れたら再挑戦する」ものであって、恒久的に
+// 諦めるものではない。あわせて期限切れ entry が map に残り続けないことも
+// 見る (残ると単調増加する、#2662)。
+func TestResolveActor_KeyFetchBackoffExpires(t *testing.T) {
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"id": "https://remote.example/users/alice#main-key", "publicKeyPem": {"a": 1}}
+	}`
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	counting := &countingFetcher{body: []byte(body)}
+	r := federation.NewResolver(repo, noteRepo, urls, counting, idGen)
+
+	base := time.Now()
+	now := base
+	r.SetClock(func() time.Time { return now })
+
+	for i := 0; i < 5; i++ {
+		_, err := r.ResolveActor("https://remote.example/users/alice")
+		require.NoError(t, err)
+	}
+	first := counting.calls
+	require.LessOrEqual(t, first, 2, "backoff 中は再 fetch しない")
+
+	// backoff を超えたら 1 回だけ再挑戦する。
+	now = base.Add(10 * time.Minute)
+	for i := 0; i < 5; i++ {
+		_, err := r.ResolveActor("https://remote.example/users/alice")
+		require.NoError(t, err)
+	}
+	assert.Equal(t, first+1, counting.calls, "期限切れ後は 1 回だけ再挑戦する")
+}
+
+// 期限切れの backoff entry を残さない。map は外から観測できないので
+// テスト用に件数だけ露出している (残ると単調増加する、#2662)。
+func TestResolver_KeyFetchFailuresArePruned(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte("{}")}, idGen)
+
+	base := time.Now()
+	now := base
+	r.SetClock(func() time.Time { return now })
+
+	for i := 0; i < 5; i++ {
+		r.MarkKeyFetchFailed(fmt.Sprintf("u%d", i))
+	}
+	require.Equal(t, 5, r.KeyFetchFailureCount())
+
+	// backoff を過ぎたあとに 1 件足すと、古い 5 件は掃除される。
+	now = base.Add(10 * time.Minute)
+	r.MarkKeyFetchFailed("u-new")
+	assert.Equal(t, 1, r.KeyFetchFailureCount(), "期限切れ entry が残らないこと")
+}
+
+// actor が申告する値 (`publicKey.id` / `assertionMethod[].id`) の host 検証も
+// `www.` を同一視しない。同一視すると `www` サブドメインを名乗る actor が
+// 親ドメインの keyId を宣言でき、keyId 単位の global lookup を使う経路で
+// 別 actor を名乗れてしまう (#2662)。upstream も `punyHost` で比較する。
+func TestResolveActor_KeyIDHostBindingRejectsWWW(t *testing.T) {
+	newR := func(body string) *federation.Resolver {
+		repo := testutil.NewMockUserRepository()
+		noteRepo := testutil.NewMockNoteRepository()
+		urls := activitypub.NewURLBuilder("https://example.com")
+		idGen, _ := id.NewGenerator("aidx")
+		return federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	}
+	doc := func(keyID string) string {
+		return `{ "@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://www.remote.example/users/evil",
+			"type": "Person",
+			"preferredUsername": "evil",
+			"inbox": "https://www.remote.example/users/evil/inbox",
+			"publicKey": {"id": "` + keyID + `", "owner": "x", "publicKeyPem": "PEM"}
+		}`
+	}
+	const uri = "https://www.remote.example/users/evil"
+
+	t.Run("parent domain keyID is rejected", func(t *testing.T) {
+		r := newR(doc("https://remote.example/users/alice#main-key"))
+		_, err := r.ResolveActor(uri)
+		assert.ErrorIs(t, err, federation.ErrObjectHostMismatch)
+	})
+	t.Run("own host keyID is accepted", func(t *testing.T) {
+		r := newR(doc("https://www.remote.example/users/evil#main-key"))
+		_, err := r.ResolveActor(uri)
+		assert.NoError(t, err)
+	})
+	t.Run("default port is normalized", func(t *testing.T) {
+		r := newR(doc("https://www.remote.example:443/users/evil#main-key"))
+		_, err := r.ResolveActor(uri)
+		assert.NoError(t, err, "既定ポートは同一 host")
+	})
+}
+
+// **host 不一致でも fetch を増幅させない。** `ErrObjectHostMismatch` は
+// document の内容起因なので、相手が直さない限り何度取り直しても同じ。
+// `ErrInvalidActor` だけを抑止対象にすると、`publicKey.id` / `inbox` の host が
+// 合わない既存行で inbound activity 1 件につき outbound fetch が 1 回走り
+// 続ける (#2662)。
+func TestResolveActor_HostMismatchStopsRefetchLoop(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	uri := "https://www.remote.example/users/alice"
+	old := time.Now().Add(-48 * time.Hour)
+	repo.Users["existing"] = &model.User{
+		ID:            "existing",
+		Username:      "alice",
+		URI:           &uri,
+		LastFetchedAt: &old,
+	}
+	// publicKey.id が親ドメイン = sameDeliveryHost で弾かれる。
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://www.remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://www.remote.example/users/alice/inbox",
+		"publicKey": {"id": "https://remote.example/users/alice#main-key", "owner": "x", "publicKeyPem": "PEM"}
+	}`
+	counting := &countingFetcher{body: []byte(body)}
+	r := federation.NewResolver(repo, noteRepo, urls, counting, idGen)
+
+	for i := 0; i < 5; i++ {
+		_, err := r.ResolveActor(uri)
+		require.NoError(t, err, "既存行は返せること")
+	}
+	assert.LessOrEqual(t, counting.calls, 2, "解決のたびに fetch しない")
+	require.NotNil(t, repo.Users["existing"].LastFetchedAt)
+	assert.True(t, repo.Users["existing"].LastFetchedAt.After(old))
+}
+
+// **WHATWG URL が許す形は落とさない。** upstream の host 検証は `new URL()` で、
+// 前後の C0 制御文字 / 空白を除去し tab / CR / LF を全位置で除去する。Go の
+// `net/url.Parse` はこれらをエラーにするので、そのままだと「末尾に改行が付いた
+// inbox」を出す実装の actor が丸ごと reject される (#2662)。
+func TestResolveActor_InboxWithWhitespaceIsAccepted(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		inbox string
+		ok    bool
+	}{
+		{"trailing newline", "https://remote.example/users/alice/inbox\n", true},
+		{"leading space", " https://remote.example/users/alice/inbox", true},
+		{"embedded tab", "https://remote.example/users/al\tice/inbox", true},
+		{"embedded newline", "https://remote.example/users/al\nice/inbox", true},
+		// 末尾空白は parse は通るが path が `%20` に化けるので、正規化しないと
+		// 相手が 404 を返す。
+		{"trailing space", "https://remote.example/users/alice/inbox ", true},
+		// host が違うものは従来どおり弾く。
+		{"other host with newline", "https://evil.example/inbox\n", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://remote.example/users/alice",
+				"type": "Person",
+				"preferredUsername": "alice",
+				"inbox": ` + strconv.Quote(tc.inbox) + `,
+				"publicKey": {"publicKeyPem": "PEM"}
+			}`
+			repo := testutil.NewMockUserRepository()
+			r := federation.NewResolver(repo, testutil.NewMockNoteRepository(),
+				activitypub.NewURLBuilder("https://example.com"), &stubFetcher{body: []byte(body)}, mustIDGen(t))
+			user, err := r.ResolveActor("https://remote.example/users/alice")
+			if !tc.ok {
+				assert.ErrorIs(t, err, federation.ErrInvalidActor)
+				return
+			}
+			require.NoError(t, err)
+			// **保存値も正規化されていること。** 検査だけ緩めて生値を保存すると
+			// actor は取り込めるのに配送が永久に成立しない。
+			require.NotNil(t, user.Inbox)
+			assert.Equal(t, "https://remote.example/users/alice/inbox", *user.Inbox)
+			req, reqErr := http.NewRequest(http.MethodPost, *user.Inbox, nil)
+			require.NoError(t, reqErr, "配送に使える URL であること")
+			assert.Equal(t, "/users/alice/inbox", req.URL.Path, "%20 などに化けていないこと")
+		})
+	}
+}
+
+// **refresh 経路にも media URL のガードが要る。** create 経路だけ守ると、
+// 既存行の refresh で atomic UPDATE ごと落ちて `lastFetchedAt` が進まず、
+// inbound activity 1 件につき outbound fetch が 1 回走り続ける (#2662)。
+func TestResolveActor_TTLRefreshDropsOversizedMediaURLs(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		icon  string
+		image string
+	}{
+		{"oversized", "https://remote.example/" + strings.Repeat("c", 1100), "https://remote.example/" + strings.Repeat("c", 600)},
+		{"nul", "https://remote.example/a\u0000.png", "https://remote.example/b\u0000.png"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			uri := "https://remote.example/users/alice"
+			old := time.Now().Add(-48 * time.Hour)
+			okAvatar := "https://remote.example/ok-avatar.png"
+			okBanner := "https://remote.example/ok-banner.png"
+			repo.Users["existing"] = &model.User{
+				ID: "existing", Username: "alice", URI: &uri,
+				AvatarURL: &okAvatar, BannerURL: &okBanner, LastFetchedAt: &old,
+			}
+			body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://remote.example/users/alice",
+				"type": "Person",
+				"preferredUsername": "alice",
+				"inbox": "https://remote.example/users/alice/inbox",
+				"icon": {"type": "Image", "url": ` + strconv.Quote(tc.icon) + `},
+				"image": {"type": "Image", "url": ` + strconv.Quote(tc.image) + `},
+				"publicKey": {"publicKeyPem": "PEM"}
+			}`
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+			user, err := r.ResolveActor(uri)
+			require.NoError(t, err)
+			// 落とすだけで既存値は温存する (空値では上書きしない)。
+			require.NotNil(t, user.AvatarURL)
+			assert.Equal(t, okAvatar, *user.AvatarURL, "壊れた値で上書きしない")
+			require.NotNil(t, user.BannerURL)
+			assert.Equal(t, okBanner, *user.BannerURL)
+		})
+	}
+}
+
+// **配送先の正規化は inbox だけでは足りない。** `sharedInbox` は個別 inbox より
+// 優先して使われるので、壊れるとそのホスト宛の配送が全部止まる。`publicKey.id`
+// は `user_publickey.keyId` の一致キーになる (#2662)。
+func TestResolveActor_NormalizesAllDeliveryURLs(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox\n",
+		"sharedInbox": "https://remote.example/inbox\n",
+		"endpoints": {"sharedInbox": "https://remote.example/endpoints\n"},
+		"publicKey": {"id": "https://remote.example/users/alice#main-key\n", "publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	pkRepo := &stubPublickeyRepo{}
+	r.SetPublickeyRepo(pkRepo)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+
+	for name, got := range map[string]*string{"inbox": user.Inbox, "sharedInbox": user.SharedInbox} {
+		require.NotNil(t, got, name)
+		assert.NotContains(t, *got, "\n", name+" に制御文字が残っていないこと")
+		_, reqErr := http.NewRequest(http.MethodPost, *got, nil)
+		assert.NoError(t, reqErr, name+" が配送に使えること")
+	}
+	// sharedInbox は top-level が優先される。
+	assert.Equal(t, "https://remote.example/inbox", *user.SharedInbox)
+
+	row, err := pkRepo.FindByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "https://remote.example/users/alice#main-key", row.KeyID,
+		"keyId は HTTP ヘッダ由来の値と一致する形で保存する")
+
+	// **top-level が優先されるので、endpoints 側は別ケースで見る。**
+	// Mastodon / Misskey は `endpoints.sharedInbox` だけを publish するので、
+	// 実運用ではこちらのほうが通る割合が高い。
+	repo2 := testutil.NewMockUserRepository()
+	body2 := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/bob",
+		"type": "Person",
+		"preferredUsername": "bob",
+		"inbox": "https://remote.example/users/bob/inbox",
+		"endpoints": {"sharedInbox": "https://remote.example/endpoints\n"},
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r2 := federation.NewResolver(repo2, testutil.NewMockNoteRepository(), urls, &stubFetcher{body: []byte(body2)}, idGen)
+	user2, err := r2.ResolveActor("https://remote.example/users/bob")
+	require.NoError(t, err)
+	require.NotNil(t, user2.SharedInbox)
+	assert.Equal(t, "https://remote.example/endpoints", *user2.SharedInbox)
+	_, reqErr := http.NewRequest(http.MethodPost, *user2.SharedInbox, nil)
+	assert.NoError(t, reqErr, "endpoints.sharedInbox が配送に使えること")
+}
+
+// `assertionMethod` の keyId も保存前に正規化する。生値のままだと HTTP ヘッダ
+// 由来の keyId と一致しないゴミ行になり、しかも自分自身を purge から守る (#2662)。
+func TestResolveActor_NormalizesAssertionMethodKeyID(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	mb, err := activitypub.EncodeEd25519Multikey(pub)
+	require.NoError(t, err)
+
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	// 末尾スペースは url.Parse を通ってしまうので、正規化しないと保存される。
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"publicKeyPem": "PEM"},
+		"assertionMethod": [{"id": "https://remote.example/users/alice#ed25519-key ", "type": "Multikey", "controller": "x", "publicKeyMultibase": "` + mb + `"}]
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	extra := &stubPublickeyExtraRepo{}
+	r.SetPublickeyExtraRepo(extra)
+
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	rows, _ := extra.ListByUserID(user.ID)
+	require.Len(t, rows, 1)
+	assert.Equal(t, "https://remote.example/users/alice#ed25519-key", rows[0].KeyID,
+		"keyId に空白を残さない")
+}
+
+// upstream の `attach.sensitive ??= note.sensitive`。添付側に読める値が無ければ
+// note レベルを継ぐ。継がないと NSFW 宣言のノートの画像が非 NSFW で保存される。
+func TestExtractAttachments_InheritsNoteSensitive(t *testing.T) {
+	docs := federation.ExtractAttachments([]any{
+		map[string]any{"type": "Image", "url": "https://r/a.png"},
+		map[string]any{"type": "Image", "url": "https://r/b.png", "sensitive": false},
+		map[string]any{"type": "Image", "url": "https://r/c.png", "sensitive": "true"},
+		// `??=` は null / undefined のときだけ代入する。JSON の明示 null は
+		// 「値が無い」側なので note レベルを継ぐ。
+		map[string]any{"type": "Image", "url": "https://r/d.png", "sensitive": nil},
+	}, true)
+	require.Len(t, docs, 4)
+	assert.True(t, docs[0].Sensitive, "添付側に無ければ note レベルを継ぐ")
+	assert.False(t, docs[1].Sensitive, "添付側の明示 false が勝つ")
+	assert.True(t, docs[2].Sensitive, "文字列 true も PostgreSQL 準拠で読む")
+	assert.True(t, docs[3].Sensitive, "明示 null は値が無い扱いで note レベルを継ぐ")
+
+	docs2 := federation.ExtractAttachments([]any{
+		map[string]any{"type": "Image", "url": "https://r/a.png"},
+	}, false)
+	require.Len(t, docs2, 1)
+	assert.False(t, docs2[0].Sensitive)
+}
+
+// **`id` も正規化する。** upstream は `assertActivityMatchesUrl` が
+// `new URL(activity.id)` を通すので末尾改行でも通る。落とすとその actor / Note が
+// まったく取り込めない。`id` は全 field の中で最も必ず存在する URL なので、
+// inbox に改行を付ける実装は id にも付ける (#2662)。
+func TestResolveActor_NormalizesID(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice\n",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	user, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err, "actor を落とさない")
+	require.NotNil(t, user.URI)
+	assert.Equal(t, "https://remote.example/users/alice", *user.URI, "uri に制御文字を残さない")
+}
+
+// Note の `id` / `attributedTo` も同じ。`note.uri` にそのまま入るので、生値だと
+// 後続の FindByURI / host 検証 / 配送先解決が全部ずれる (#2662)。
+func TestIngestNote_NormalizesIDAndAttributedTo(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	actorURI := "https://remote.example/users/alice"
+	actorBody := `{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice",
+		"type": "Person",
+		"preferredUsername": "alice",
+		"inbox": "https://remote.example/users/alice/inbox",
+		"publicKey": {"publicKeyPem": "PEM"}
+	}`
+	r := federation.NewResolver(repo, noteRepo, urls, &docFetcher{docs: map[string]string{actorURI: actorBody}}, idGen)
+	noteBody := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/notes/1\n",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice\n",
+		"content": "hi",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`)
+	note, err := r.IngestNote(noteBody)
+	require.NoError(t, err, "Note を落とさない")
+	assert.Equal(t, "https://remote.example/notes/1", *note.URI, "uri に制御文字を残さない")
+}
+
+// **読めない publicKeyPem で既存の鍵を壊さない。** `publicKeyPem` を寛容に
+// 読むようにした (#2662) ことで、`{"@value": ...}` のような形の document が
+// 「通るが値は空」で到達するようになった。空を書くと in-memory も DB も空に
+// なり、**その actor からの inbound HTTP Signature が全て verify 失敗する**
+// (refresh のたびに同じ空が書き直されるので自然回復しない)。
+func TestResolveActor_UnreadablePublicKeyPemKeepsCachedKey(t *testing.T) {
+	const pem = "-----BEGIN PUBLIC KEY-----\nGOOD\n-----END PUBLIC KEY-----"
+	doc := func(pemField string) string {
+		body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/alice",
+			"type": "Person",
+			"preferredUsername": "alice",
+			"inbox": "https://remote.example/users/alice/inbox"`
+		if pemField != "" {
+			body += `, "publicKey": {"id": "https://remote.example/users/alice#main-key", "owner": "x", "publicKeyPem": ` + pemField + `}`
+		}
+		return body + "}"
+	}
+
+	for _, tc := range []struct {
+		name   string
+		second string
+	}{
+		// **JSON-LD の展開形は空にならない** (`APLenientString` が剥がして拾う)。
+		// `{"@value": ...}` / `[pem]` を fixture に使うと「再取得に成功しただけ」の
+		// 真空テストになるので、本当に読めない形だけを並べる。
+		{"unreadable object", `{"a": 1}`},
+		{"multi element array", "[" + strconv.Quote(pem) + ", " + strconv.Quote(pem) + "]"},
+		{"number", `42`},
+		{"bool", `true`},
+		// これだけは別経路 (keyID が空なので DB 永続化を skip する) を通る。
+		// 上の 4 つが空 PEM ガードをゲートしている。
+		{"publicKey removed", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			swappable := &swappableFetcher{body: doc(strconv.Quote(pem))}
+			r := federation.NewResolver(repo, noteRepo, urls, swappable, idGen)
+			pkRepo := &stubPublickeyRepo{}
+			r.SetPublickeyRepo(pkRepo)
+			r.SetActorTTL(time.Nanosecond)
+
+			user, err := r.ResolveActor("https://remote.example/users/alice")
+			require.NoError(t, err)
+			got, err := r.PublicKeyForActor(user.ID)
+			require.NoError(t, err)
+			require.Equal(t, pem, got, "1 回目で鍵が入る")
+
+			swappable.body = doc(tc.second)
+			time.Sleep(2 * time.Nanosecond)
+			_, err = r.ResolveActor("https://remote.example/users/alice")
+			require.NoError(t, err, "actor 自体は取り込めること")
+
+			got, err = r.PublicKeyForActor(user.ID)
+			require.NoError(t, err)
+			assert.Equal(t, pem, got, "鍵が空で上書きされていないこと")
+			// DB 側も壊れていないこと (in-memory だけ守っても TTL 超過で
+			// 空の DB 行に落ちる)。
+			row, err := pkRepo.FindByUserID(user.ID)
+			require.NoError(t, err)
+			assert.Equal(t, pem, row.KeyPEM)
+		})
+	}
+}
+
+// inbox / sharedInbox の host は actor に縛る。upstream validateActor と同型で、
+// inbox 不一致は Error、sharedInbox 不一致は破棄。ここを見ないと任意の
+// リモート actor が第三者ホストを配送先として宣言できる (deliver 側は
+// blocklist しか見ない)。#2662 で `endpoints` / `sharedInbox` の受理形を
+// 広げたので、あわせて縛りを入れる。
+func TestResolveActor_InboxHostBinding(t *testing.T) {
+	base := func(inbox, shared, endpoints string) string {
+		body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/alice",
+			"type": "Person",
+			"preferredUsername": "alice",
+			"publicKey": {"publicKeyPem": "PEM"},
+			"inbox": "` + inbox + `"`
+		if shared != "" {
+			body += `, "sharedInbox": "` + shared + `"`
+		}
+		if endpoints != "" {
+			body += `, "endpoints": {"sharedInbox": "` + endpoints + `"}`
+		}
+		return body + "}"
+	}
+	newR := func(body string) *federation.Resolver {
+		repo := testutil.NewMockUserRepository()
+		noteRepo := testutil.NewMockNoteRepository()
+		urls := activitypub.NewURLBuilder("https://example.com")
+		idGen, _ := id.NewGenerator("aidx")
+		return federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(body)}, idGen)
+	}
+	const uri = "https://remote.example/users/alice"
+
+	t.Run("inbox on another host is rejected", func(t *testing.T) {
+		r := newR(base("https://evil.example/inbox", "", ""))
+		_, err := r.ResolveActor(uri)
+		assert.ErrorIs(t, err, federation.ErrInvalidActor)
+	})
+	t.Run("missing inbox is rejected", func(t *testing.T) {
+		r := newR(base("", "", ""))
+		_, err := r.ResolveActor(uri)
+		assert.ErrorIs(t, err, federation.ErrInvalidActor)
+	})
+	t.Run("sharedInbox on another host is dropped", func(t *testing.T) {
+		r := newR(base("https://remote.example/users/alice/inbox", "https://evil.example/inbox", ""))
+		user, err := r.ResolveActor(uri)
+		require.NoError(t, err, "actor 自体は作る (upstream も破棄するだけ)")
+		assert.Nil(t, user.SharedInbox)
+	})
+	t.Run("top-level sharedInbox is used when endpoints is absent", func(t *testing.T) {
+		// upstream は `x.sharedInbox ?? x.endpoints?.sharedInbox` の順で見る。
+		// endpoints しか見ないと top-level のみ publish する実装で束ね配送が
+		// 効かない。
+		r := newR(base("https://remote.example/users/alice/inbox", "https://remote.example/inbox", ""))
+		user, err := r.ResolveActor(uri)
+		require.NoError(t, err)
+		require.NotNil(t, user.SharedInbox)
+		assert.Equal(t, "https://remote.example/inbox", *user.SharedInbox)
+	})
+	t.Run("endpoints.sharedInbox on another host is dropped", func(t *testing.T) {
+		r := newR(base("https://remote.example/users/alice/inbox", "", "https://evil.example/inbox"))
+		user, err := r.ResolveActor(uri)
+		require.NoError(t, err)
+		assert.Nil(t, user.SharedInbox)
+	})
+	// **`www.` は同一視しない。** `normalizeMatchHost` (object-host binding 用) は
+	// upstream の normalizeSynonymousSubdomain 相当で `www.` を剥がすが、
+	// upstream の inbox 検証は `punyHost` しか通さない。同一視すると `www`
+	// サブドメインが別管理下にある環境で outbound をそちらへ向けられる。
+	t.Run("www subdomain inbox is rejected", func(t *testing.T) {
+		r := newR(base("https://www.remote.example/users/alice/inbox", "", ""))
+		_, err := r.ResolveActor(uri)
+		assert.ErrorIs(t, err, federation.ErrInvalidActor)
+	})
+	t.Run("default port is normalized", func(t *testing.T) {
+		r := newR(base("https://remote.example:443/users/alice/inbox", "", ""))
+		_, err := r.ResolveActor(uri)
+		assert.NoError(t, err, "既定ポートは同一 host")
+	})
+
+	t.Run("top-level wins over endpoints", func(t *testing.T) {
+		// upstream は `x.sharedInbox ?? x.endpoints?.sharedInbox` の順。
+		// 両方が別値で存在する document でしか順序を固定できない。
+		r := newR(base("https://remote.example/users/alice/inbox",
+			"https://remote.example/top", "https://remote.example/endpoints"))
+		user, err := r.ResolveActor(uri)
+		require.NoError(t, err)
+		require.NotNil(t, user.SharedInbox)
+		assert.Equal(t, "https://remote.example/top", *user.SharedInbox)
+	})
+	t.Run("same host is kept", func(t *testing.T) {
+		r := newR(base("https://remote.example/users/alice/inbox", "", "https://remote.example/inbox"))
+		user, err := r.ResolveActor(uri)
+		require.NoError(t, err)
+		require.NotNil(t, user.SharedInbox)
+		assert.Equal(t, "https://remote.example/inbox", *user.SharedInbox)
+	})
+}
+
+// **読めない assertionMethod で既存の鍵を purge しない。** purge は「actor が
+// 申告しなかった keyId を消す」= rotation 追従なので、申告を正しく読めた場合に
+// しか成立しない。読めない形で空リストになったのを「申告ゼロ」と解釈すると
+// キャッシュ済みの Ed25519 鍵を全消しし、Ed25519 のみを publish する相手では
+// inbound の署名検証が恒久的に失敗する (相手は同じ形を返し続けるので自然
+// 回復しない、#2662)。
+//
+// 逆に、**読めた申告では purge が動かないと困る**。動かないと
+// ローテーション済みの鍵で署名した activity が verify を通り続ける。
+// そのため件数ではなく keyId をアサートし、初回に 2 本 seed して
+// 「purge が走ったか」を観測できるようにする。
+func TestResolveActor_UnreadableAssertionMethodKeepsCachedKeys(t *testing.T) {
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
+	mb, err := activitypub.EncodeEd25519Multikey(pub)
+	require.NoError(t, err)
+
+	const (
+		k1 = "https://remote.example/users/alice#k1"
+		k2 = "https://remote.example/users/alice#k2"
+		k3 = "https://remote.example/users/alice#k3"
+	)
+	key := func(id, typ string) string {
+		return `{"id": "` + id + `", "type": ` + typ + `, "controller": "x", "publicKeyMultibase": "` + mb + `"}`
+	}
+	doc := func(assertionMethod string) string {
+		body := `{ "@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/alice",
+			"type": "Person",
+			"preferredUsername": "alice",
+			"inbox": "https://remote.example/users/alice/inbox",
+			"publicKey": {"id": "https://remote.example/users/alice#main-key", "owner": "x", "publicKeyPem": "-----BEGIN PUBLIC KEY-----\nFAKE\n-----END PUBLIC KEY-----"}`
+		if assertionMethod != "" {
+			body += `, "assertionMethod": ` + assertionMethod
+		}
+		return body + "}"
+	}
+
+	seed := "[" + key(k1, `"Multikey"`) + ", " + key(k2, `"Multikey"`) + "]"
+
+	tests := []struct {
+		name       string
+		second     string
+		wantKeyIDs []string
+	}{
+		// 読めない形 → purge しない (2 本とも残る)。
+		{"string instead of array", `"nonsense"`, []string{k1, k2}},
+		{"number", `42`, []string{k1, k2}},
+		// 1 件でも読めれば拾う。読めない要素があるので purge はしない。
+		// 一括 decode に戻すと k3 が入らない。
+		{"one good one broken", "[" + key(k3, `"Multikey"`) + `, {"id": 123}]`, []string{k1, k2, k3}},
+		// bare IRI は参照形式として読める → purge が走り k2 が消える。
+		// 参照として扱わないと Unreadable になり k2 が残ってしまう。
+		{"array of bare IRIs", `["` + k1 + `"]`, []string{k1}},
+		// 末尾に空白がある bare IRI。WHATWG URL は落とすので upstream では
+		// 同じ keyId を指す。正規化せずに突き合わせると k1 も守れず全消しに
+		// なる (#2662)。
+		{"padded bare IRI", `["` + k1 + ` "]`, []string{k1}},
+
+		// `"type": ["Multikey"]` も正当な形。string 決め打ちだと Unreadable に
+		// なって k3 が入らず、k1 / k2 も purge されない。
+		{"array type multikey", "[" + key(k3, `["Multikey"]`) + "]", []string{k3}},
+		// 正しい rotation。
+		{"field removed", "", nil},
+		{"explicit empty array", `[]`, nil},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			swappable := &swappableFetcher{body: doc(seed)}
+			r := federation.NewResolver(repo, noteRepo, urls, swappable, idGen)
+			extra := &stubPublickeyExtraRepo{}
+			r.SetPublickeyExtraRepo(extra)
+			r.SetActorTTL(time.Nanosecond)
+
+			user, err := r.ResolveActor("https://remote.example/users/alice")
+			require.NoError(t, err)
+			rows, _ := extra.ListByUserID(user.ID)
+			require.Len(t, rows, 2, "1 回目で 2 本入る")
+
+			swappable.body = doc(tc.second)
+			time.Sleep(2 * time.Nanosecond)
+			_, err = r.ResolveActor("https://remote.example/users/alice")
+			require.NoError(t, err, "actor 自体は取り込めること")
+
+			rows, _ = extra.ListByUserID(user.ID)
+			got := make([]string, 0, len(rows))
+			for _, row := range rows {
+				got = append(got, row.KeyID)
+			}
+			sort.Strings(got)
+			if len(tc.wantKeyIDs) == 0 {
+				assert.Empty(t, got)
+			} else {
+				assert.Equal(t, tc.wantKeyIDs, got)
+			}
+		})
+	}
 }
 
 // 同じ actor を refresh する経路で stale keyId が削除されることを検証する。

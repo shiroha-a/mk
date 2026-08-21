@@ -586,6 +586,26 @@ func TestProcess_DeleteRemoteNote(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// Delete の object id に改行が付いていても届くこと。取り込み側は
+// `trimWHATWGURL` 後の値を `note.uri` に入れるので、読み出し側が生値のままだと
+// FindByURI が miss して「取り込めるが消せない」ノートになる (#2662)。
+func TestProcess_DeleteRemoteNote_PaddedObjectID(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	uri := "https://remote.example/notes/n1"
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice-id", URI: &uri}
+	aliceURI := "https://remote.example/users/alice"
+	env.userRepo.Users["alice-id"] = &model.User{ID: "alice-id", Username: "alice", URI: &aliceURI}
+
+	body := []byte(`{
+		"type": "Delete",
+		"actor": "https://remote.example/users/alice",
+		"object": {"id": "https://remote.example/notes/n1\n", "type": "Tombstone"}
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	_, err := env.noteRepo.FindByID("n1")
+	assert.Error(t, err, "改行付き id の Delete でも削除されること")
+}
+
 // Delete アクティビティで返信が消されたとき、親ノートの repliesCount が
 // デクリメントされることを end-to-end で確認する (issue #11, item 1)。
 func TestProcess_DeleteRemoteReply_DecrementsParent(t *testing.T) {
@@ -1798,6 +1818,43 @@ func TestProcess_CollectionSkipsHostMismatch(t *testing.T) {
 	}`)
 	require.NoError(t, env.processor.Process(body))
 	assert.Empty(t, env.reactionRepo.Reactions, "host 不一致 item は skip (#2023)")
+}
+
+// item に型エラーがあっても丸ごと落とさない (#2662)。`actor` が object 形式でも
+// item.actor は使わない (collection actor の権威で処理する) ので、認可は変わらない。
+// id host gate はそのまま効く。
+func TestProcess_CollectionItemTypeErrorStillDispatched(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	body := []byte(`{
+		"type": "Collection",
+		"actor": "https://remote.example/users/alice",
+		"items": [
+			{
+				"id": "https://remote.example/likes/l1",
+				"type": "Like",
+				"actor": {"id": "https://remote.example/users/alice"},
+				"object": "https://example.com/notes/n1",
+				"content": "⭐"
+			}
+		]
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	require.Len(t, env.reactionRepo.Reactions, 1, "型エラーのある item を落とさない")
+}
+
+// 文字列 URI だけの item は従来どおり skip する (id が無いので host gate に
+// 掛からず、そもそも dispatch できない)。
+func TestProcess_CollectionSkipsStringItem(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	body := []byte(`{
+		"type": "Collection",
+		"actor": "https://remote.example/users/alice",
+		"items": ["https://remote.example/likes/l1"]
+	}`)
+	require.NoError(t, env.processor.Process(body))
+	assert.Empty(t, env.reactionRepo.Reactions, "文字列 item は skip")
 }
 
 // #2023 (security): collection item が別 actor を詐称しても、collection の認証 actor の
