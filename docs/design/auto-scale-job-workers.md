@@ -292,7 +292,7 @@ runtime kill switch は **auto-scale が cluster を喰い尽くして restart �
 2. **enqueue 側 backpressure** (将来 issue) — queue depth > 閾値時に inbox HTTP が 503 Retry-After で送信側に押し戻す
 3. **host-level circuit breaker** (既存 #1067 系の拡張、将来 issue) — 落ちてる相手への retry が cluster を食わない
 4. **per-queue scope** — 1 queue spike が他 queue の budget を奪わない
-5. **panic switch** — `jobQueueAutoScale: false` 一発で controller off、roster は固定値運用に戻せる。**supervisor は autoscale と独立に動く**ので、隔離機構まで止めるには `queueStuckWorkerSeconds` に負値を入れる (§5.1.1)
+5. **panic switch** — `jobQueueAutoScale: false` 一発で controller off。ただし **supervisor は autoscale と独立に動く**ので、roster を完全に固定するには `queueStuckWorkerSeconds` と `queueHandlerDeadlineSeconds` の**両方**に負値が要る (§5.1.1)
 
 ## 5. multi-driver 整合 (mkq / asynq)
 
@@ -354,9 +354,10 @@ inbox で 4 本すべてがこの状態になり、`len(workers)` を返して�
    が返す prefetch をそのまま次の handler に渡すので、忙しいキューでは job と job
    の間の idle がマイクロ秒しかなく、supervisor の周期ではまず捉えられない。
    これを release 条件にすると、遅かっただけの健全な Worker が永久に隔離されたまま
-   枠を食い潰す。戻した Worker は **復帰時に握っていた job を必ず完走する**
+   枠を食い潰す。戻した Worker は復帰時に握っていた job を原則そのまま完走する
    (庇いが外れるのはその job を終えてから)。庇いは 1 件ぶんで、その後も余剰なら
-   通常の scale-down 対象に戻る — 「一度隔離されたら以後ずっと守られる」ではない
+   通常の scale-down 対象に戻る。**漏れの予算に当たっての縮小では庇い自体が
+   無視される**ので、そこは例外 (下の「漏れの予算」)
 3. **`WorkerCount` は生存数**: roster のうち閾値を超えていないものを数える。
    `Resize` も reconcile 経由なので勘定は一致する
 4. **scale-down の対象選択**: 末尾固定をやめ、idle を先に選ぶ。閾値超過の Worker は
@@ -394,7 +395,8 @@ inbox で 4 本すべてがこの状態になり、`len(workers)` を返して�
 `stopWorkerTimeout` = 30 秒だけ待たされたうえで goroutine を残して返る) し、
 遅かっただけなら止めるべきでもない。したがって代わりを立てた分だけ
 **実効の並列度は設定値を超える**。上限は
-`到達した最大 worker 数 + max(設定値, 4)` で、autoscale 無効なら
+`到達した最大 worker 数 + max(設定値, 4)` (隔離と放棄の合計に対して効く。
+「漏れの予算」を参照) で、autoscale 無効なら
 `設定値 + max(設定値, 4)`、有効なら `max(設定値, maxWorkers) + max(設定値, 4)`
 にあたる (peak は設定値から始まる単調非減少値なので、`maxWorkers` を設定値より
 小さくしても下がらない)。
@@ -420,12 +422,103 @@ Redis 接続を見込んでおかないと #2657 の引き金になった
 取れる Worker) の数で、隔離中の Worker はそこに含まれない。合計の上限は上の式で
 決まる。
 
+##### handler の実行期限 (#2658)
+
+隔離は **capacity** を守るが、**worker 自体は戻らない**。詰まった dispatcher は
+goroutine と Redis 接続を掴んだまま残る。そこで dispatcher 側にも期限を持たせる。
+
+handler は別 goroutine で走らせ、dispatcher は「完了」または「期限 + 猶予の
+満了」で返る。**親 ctx のキャンセルでは返らない** (上の lockDuration の節)。**期限を過ぎても handler は
+止まらない** — Go では goroutine を殺せないので、止まるのは待つ側だけ。放棄した
+handler はそのまま走り続け、job は失敗して retry に回る (放棄した実行と retry が
+重なりうる)。それでも 1 回の詰まりで dispatcher を永久に失うよりは軽い。
+
+deliver / inbox / relationship の processor は ctx を捨てているので、この 3 つでは
+猶予は実質働かず、期限だけが dispatcher を返す。詰まった worker を止めるのは
+`stopWorkerTimeout` (30 秒) 待ちのままで、そこは #2658 以前と変わらない。
+
+猶予を挟むのは、**ctx を見る handler を捨てないため**。cancel の直後に戻って
+くるので、少し待てば goroutine を放棄せずに済む。捨てることになるのは ctx を
+無視する経路だけ。
+
+2 段構えの役割分担:
+
+| | 発火 | 守るもの | 漏れるもの |
+|---|---|---|---|
+| 隔離 (#2657) | 30 分 | capacity (代わりを立てる) | worker 一式 (dispatcher + handler + 接続) |
+| 期限 (#2658) | 既定 1 時間 | worker 本体 | handler の goroutine だけ |
+
+期限が隔離より後なのは意図的で、隔離が即座に capacity を戻し、期限が後から
+worker を回収する。回収された worker は job を処理し始めるので、隔離側の
+`provenLive` が拾って roster に戻す。
+
+###### 漏れの予算
+
+**放棄した handler は隔離した Worker と同じ予算を食う。** 数えないと上限が
+機能しない: 放棄すると dispatcher が戻り、その worker が job を処理するので
+`provenLive` が隔離から roster に戻す = quarantine が空になる。隔離だけで
+測っていると「隔離 → 期限で放棄 → 復帰 → また隔離」が満員のまま回り続け、
+goroutine と DB 接続だけが際限なく増える (実測: 20 秒で 108 件)。
+
+予算に当たると roster を縮める。**このとき庇いは効かない** — 復帰した worker は
+prefetch ですぐ次の job を掴んで「庇われている かつ 処理中」になるため、庇いを
+尊重したままだと縮められず、上限が名目だけになる。予算超過は job 1 件より
+優先される。
+
+**キューが 0 本まで縮むことがある。** 漏れが `到達した最大 worker 数 +
+max(設定値, 4)` に達すると `mk_job_workers_active{queue}` が 0 になり、その
+キューは止まる。これは意図した動作で、goroutine と DB 接続 (既定 25、HTTP と
+共有) を食い潰してプロセス全体を巻き込むより、キュー 1 本を止めるほうがましと
+いう判断。Error ログが 5 分に 1 回出る。
+
+予算は**隔離の有無に関わらず効く**。maintenance / export / objectStorage は
+既定で隔離の対象外だが、期限は動くので放棄は起きる。期限そのものを切るなら
+`queueHandlerDeadlineSeconds` に負値を入れる (隔離を切る
+`queueStuckWorkerSeconds` とは別の設定)。
+
+**期限は task type ごと**に持つ。キュー単位では粗すぎる —
+`maintenance:deleteAccount` は maintenance ではなく **deliver** に載っているので、
+キュー単位だと `ap:deliver` (10 秒級) と同じ扱いになる。1 job が分単位で
+ページングするのが正常な task type (`export` / `import` /
+`objectStorage:cleanRemoteFiles` / `maintenance:deleteAccount` /
+`maintenance:cleanRemoteNotes` 等) は対象外にしてある。そこに期限を切ると job が失敗して retry に回り、
+**永久に完了しなくなる**。
+
+###### lockDuration との関係
+
+issue #2658 は「handler の期限が lock より長いと回収済みの job を処理し続ける」
+ことを懸念していた。整理すると:
+
+- **handler が動いている限り lock は切れない。** mkq の heartbeat が
+  `lockDuration/2` ごとに延長する。#2657 の本番例でも、28 時間掴まれた job の
+  lock TTL は 30 秒中 23-30 秒残っていた
+- lock が切れるのは heartbeat が失敗したときだけで、そのとき mkq は `jobCtx` を
+  キャンセルする
+
+**その `jobCtx` のキャンセルでは諦めない。** 諦めるのは期限を過ぎたときだけ。
+理由は mk-go 側の事情で、`jobCtx` のキャンセルには「lock を失った」と
+「scale-down / shutdown で止められた」の両方が混ざっており、**dispatcher からは
+区別できない**。deliver / inbox / relationship の processor は
+`Handle(_ context.Context, …)` で ctx を捨てているので、キャンセルで諦めると
+scale-down のたびに job が failed → retry に回る一方で元の実行は完走し、
+**配送が二重になる**。
+
+したがって懸念そのものは残る: lock を失ってから期限 (既定 1 時間) までの間、
+dispatcher は stalled-check が別 worker に渡した job を処理し続けうる。
+**二重配送を確実に起こす経路と、まれに起こる経路を比べて後者を選んだ**という
+トレードオフで、無くしたわけではない。handler 側が ctx を尊重すれば
+どちらも消えるので、そちらが本筋 (processor の ctx 対応は別課題)。
+
 ##### 検出できないもの
 
 dispatcher が handler の**外** (mkq 内部の Lua 呼び出しや BZPOPMIN) で wedge した
 場合は idle と区別できない。#2657 で観測した詰まりは handler 内だったので対象外と
 した。キュー深さと組み合わせた粗い検出は paused queue や rate limit で偽陽性が出る
-ため採らない。恒久的な答えは handler 側に期限を付けること (#2658)。
+ため採らない。handler の中で詰まる分は #2658 の期限が dispatcher を返す。**mkq 内部
+(moveToActive の Lua や BZPOPMIN) で wedge した場合はどちらも効かない** —
+`busySinceNanos` は handler に入るときにしか立たないので、その dispatcher は
+隔離からは idle に見え、`liveCountLocked` も生存として数える。期限にも入らない。
+現状これを検出する手立ては無い。
 
 #### trade-off
 
@@ -455,6 +548,8 @@ asynq library は `Concurrency` を Server 構築時に固定する設計で、�
 |---|---|---|---|
 | `mk_job_workers_active` | gauge | queue | 各 queue で**仕事を取れる** worker 数。goroutine 数ではない (mkq では隔離中の worker を除く、§5.1.1) |
 | `mk_job_workers_quarantined` | gauge | queue | 閾値超過で pool の外に退けてある worker 数 (mkq のみ、他は常に 0)。**0 でない状態が続いていたら handler がブロックしている** |
+| `mk_job_handlers_abandoned` | gauge | queue | dispatcher が待つのをやめた handler のうち、まだ戻ってきていない数 (mkq のみ)。**0 に戻らないなら goroutine が本当に残っている** |
+| `mk_job_handler_abandonments_total` | counter | queue | 同上の累計 |
 | `mk_job_queue_pending` | gauge | queue | Redis ZCARD 値 (pending job 数) |
 | `mk_job_dispatch_wait_seconds` | histogram | queue | enqueue → dispatch までの待ち時間 |
 | `mk_job_processing_seconds` | histogram | queue, status | job 処理時間 (success / failure) |
@@ -567,14 +662,17 @@ testcontainers-go で実 Redis 起動。
 jobQueueAutoScale: false      # この 1 行で固定値 fallback
 deliverJobConcurrency: <値>   # 障害発生前の固定値、または runtime.NumCPU() × 8 を目安
 inboxJobConcurrency:   <値>   # 同上 (inbox は I/O 比が低いので deliver の半分が目安)
-queueStuckWorkerSeconds: -1   # 詰まり検出まで止める場合のみ (§5.1.1)
+queueStuckWorkerSeconds: -1      # 隔離まで止める場合のみ (§5.1.1)
+queueHandlerDeadlineSeconds: -1  # worker 数を厳密に固定するには両方要る
 ```
 
 再起動で固定運用に戻る。controller goroutine も終了するため leak しない。
 
-**`jobQueueAutoScale: false` だけでは詰まり検出は止まらない。** supervisor は
-autoscale とは独立に動くので、worker 数を厳密に固定したいなら
-`queueStuckWorkerSeconds: -1` も要る (§5.1.1)。**経験則の目安値** (8-core 想定): `deliverJobConcurrency: 64` / `inboxJobConcurrency: 32`。実 workload で問題が出ない場合は default (`16`) のまま `jobQueueAutoScale: false` でも可。
+**`jobQueueAutoScale: false` だけでは worker 数は固定されない。** supervisor は
+autoscale とは独立に動き、隔離 (#2657) と期限 (#2658) の**どちらか一方でも
+有効なら起動して漏れの予算を適用する**ので、roster が縮むことがある。
+厳密に固定したいなら `queueStuckWorkerSeconds: -1` と
+`queueHandlerDeadlineSeconds: -1` の両方が要る (§5.1.1)。**経験則の目安値** (8-core 想定): `deliverJobConcurrency: 64` / `inboxJobConcurrency: 32`。実 workload で問題が出ない場合は default (`16`) のまま `jobQueueAutoScale: false` でも可。
 
 ## 10. open issues / 将来 work
 
