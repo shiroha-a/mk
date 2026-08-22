@@ -1967,14 +1967,13 @@ func TestGetUserPolicies_ChunkedUploadCapAboveDefaultKeepsDefault(t *testing.T) 
 	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
 }
 
-// meta が引けない場合は数値上限を推測せず、機能可否だけfail-closedに倒す。
-// meta の値が0なら、取得済みの明示的な「cap無効」として数値を制限しない。
+// meta が引けない / 値が 0 の構成では cap しない。ここで fail-closed に倒すと
+// transient DB error で全ユーザーの分割アップロードが止まる。
 func TestGetUserPolicies_ChunkedUploadCapDisabled(t *testing.T) {
 	svc, _, _, metaRepo := newTestService(t)
 
 	// meta 取得失敗 (Meta == nil → ErrNotFound)。
 	p := svc.GetUserPolicies("user1")
-	assert.Equal(t, false, p[role.PolicyCanUseChunkedUpload])
 	assert.Equal(t, 4, p[role.PolicyChunkedUploadMaxConcurrentSessions])
 	assert.Equal(t, 1024, p[role.PolicyChunkedUploadMaxPendingMb])
 
@@ -1988,8 +1987,7 @@ func TestGetUserPolicies_ChunkedUploadCapDisabled(t *testing.T) {
 
 // bool policy は OR 集約される。片方の role が許可していれば使える。
 func TestGetUserPolicies_CanUseChunkedUploadAggregation(t *testing.T) {
-	svc, roleRepo, assignRepo, metaRepo := newTestService(t)
-	metaRepo.Meta = &model.Meta{ID: "x"}
+	svc, roleRepo, assignRepo, _ := newTestService(t)
 	roleRepo.Roles["deny"] = &model.Role{
 		ID: "deny", Name: "Deny",
 		Policies: datatypes.JSON([]byte(`{"canUseChunkedUpload": {"useDefault": false, "priority": 0, "value": false}}`)),

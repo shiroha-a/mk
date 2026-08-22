@@ -395,6 +395,7 @@ cron の多重実行防止は **job option ではなく mkq の job ID 設計**�
 | `webpublicUrl` | drive entity の拡張 field (proxy 化済で IP leak なし) |
 | mention による reply filter escape | viewer が `note.mentions` に含まれれば withReplies 設定に関係なく reply gate を pass。streaming と fanout の両方に実装 |
 | streaming publish 時の suspended フィルタ | 凍結ユーザー (本人 / reply 先 / renote 先) の note を WebSocket publish から除外する (#2624)。**upstream は streaming に suspended フィルタを持たない** (`packages/backend/src/server/api/stream/` に `isSuspended` の参照が無い)。upstream で顕在化しないのは suspended ユーザーが投稿できないためで、mk-go では**凍結したリモートユーザーの note を対象にした inbound Announce が相手インスタンスから届き続ける**ため、取得経路にしかフィルタが無いと「リアルタイムには流れるがリロードで消える」という食い違いになっていた。gate は `internal/stream` の publish 1 箇所に置く (home / local / global / userList / channel / hashtag / roleTimeline / antenna が全て同じ publisher を通る)。**Redis の timeline list には従来どおり積む** — fanout 側で打ち切ると凍結を解除しても list に ID が無いままになり、取得は list が limit を満たす限り DB へ fallback しないため復活しなくなる。あわせて channel 一覧 (`ListByChannelID`) と hashtag 一覧 (`SearchByTag`) にも同じ 3 author の除外を追加した (これらは `applyTimelineFilter` を通らないため、publish だけ止めると逆向きの食い違いになる) |
+| effective-policy provider | build-time pluginがnative role解決へ動的に寄与するmk-go独自機構。成功結果は明示的invalidationまでLRUへ保持する。寄与はnative roleやDBへ永続化されないため、plugin停止・buildからの除外・Misskey TSへの切り戻しで消え、利用者の実効権限が変わる。特に制限方向の寄与は切り戻しで権限を緩めうる。停止後も維持すべき判定はnative roleとして永続化し、切り戻し前に`admin/server-plugins`の`effectivePolicies`宣言とnative fallbackを確認する |
 
 ---
 

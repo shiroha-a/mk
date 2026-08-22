@@ -2,6 +2,7 @@ package role
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -40,6 +41,47 @@ func TestPolicyProviderFlightIsCurrent(t *testing.T) {
 	assert.False(t, policyProviderFlightIsCurrent(runtime, "u1", &policyProviderFlight{userEpoch: 2, globalEpoch: 2}), "role invalidation rejects the old flight")
 }
 
+func TestResolvePolicyProviderCachedSupersedesStaleFlightWithoutWaiting(t *testing.T) {
+	runtime := newPolicyProviderRuntime(defaultEffectivePolicyProviderCacheEntries)
+	key := policyProviderCacheKey{userID: "u1"}
+	stale := &policyProviderFlight{done: make(chan struct{}), globalEpoch: 1}
+	runtime.globalEpoch = 2
+	runtime.flights[key] = stale
+	started := make(chan struct{})
+	provider := policyProvider{
+		reg: plugin.EffectivePolicyRegistration{
+			Keys: []string{"canSearchNotes"},
+			Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+				close(started)
+				return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+			},
+		},
+		runtime: runtime,
+	}
+	done := make(chan struct{})
+	go func() {
+		resolvePolicyProviderCached(provider, plugin.EffectivePolicyRequest{UserID: "u1"})
+		close(done)
+	}()
+
+	resolverStartedBeforeStaleCompletion := false
+	select {
+	case <-started:
+		resolverStartedBeforeStaleCompletion = true
+	case <-time.After(100 * time.Millisecond):
+	}
+	runtime.cacheMu.Lock()
+	delete(runtime.flights, key)
+	close(stale.done)
+	runtime.cacheMu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("provider resolution did not complete after releasing the stale flight")
+	}
+	assert.True(t, resolverStartedBeforeStaleCompletion, "a stale generation must not consume the current request's timeout budget")
+}
+
 func TestWaitPolicyProviderFlightRejectsStaleResult(t *testing.T) {
 	flight := &policyProviderFlight{
 		done:          make(chan struct{}),
@@ -68,6 +110,110 @@ func TestWaitPolicyProviderFlightReturnsCurrentResult(t *testing.T) {
 	assert.True(t, joined)
 	assert.True(t, ok)
 	assert.Equal(t, true, contributions[0].Value)
+}
+
+func TestAcquireEnabledPolicyProviderTokenReturnsTokenWhenDisabled(t *testing.T) {
+	runtime := newPolicyProviderRuntime(defaultEffectivePolicyProviderCacheEntries)
+	runtime.disabled.Store(true)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	assert.False(t, acquireEnabledPolicyProviderToken(ctx, runtime))
+	assert.Len(t, runtime.token, 1, "the acquired token must be returned when disable wins the wait race")
+}
+
+func TestResolvePolicyProviderCachedSupersededTokenWaiterSkipsResolver(t *testing.T) {
+	runtime := newPolicyProviderRuntime(defaultEffectivePolicyProviderCacheEntries)
+	<-runtime.token
+	var calls atomic.Int32
+	provider := policyProvider{
+		reg: plugin.EffectivePolicyRegistration{
+			Keys: []string{"canSearchNotes"},
+			Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+				calls.Add(1)
+				return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+			},
+		},
+		runtime: runtime,
+	}
+	key := policyProviderCacheKey{userID: "u1"}
+	done := make(chan struct{})
+	go func() {
+		resolvePolicyProviderCached(provider, plugin.EffectivePolicyRequest{UserID: "u1"})
+		close(done)
+	}()
+
+	var original *policyProviderFlight
+	deadline := time.After(time.Second)
+	for original == nil {
+		runtime.cacheMu.Lock()
+		original = runtime.flights[key]
+		runtime.cacheMu.Unlock()
+		select {
+		case <-deadline:
+			t.Fatal("original flight was not registered")
+		default:
+		}
+	}
+
+	runtime.cacheMu.Lock()
+	runtime.globalEpoch++
+	replacement := &policyProviderFlight{done: make(chan struct{}), globalEpoch: runtime.globalEpoch}
+	runtime.flights[key] = replacement
+	runtime.cacheMu.Unlock()
+	runtime.token <- struct{}{}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("superseded owner did not finish")
+	}
+	assert.Zero(t, calls.Load(), "an owner superseded while waiting for the token must not run its resolver")
+
+	runtime.cacheMu.Lock()
+	delete(runtime.flights, key)
+	close(replacement.done)
+	runtime.cacheMu.Unlock()
+}
+
+func TestReceivePolicyProviderResultRejectsCompletionAtOrAfterDeadline(t *testing.T) {
+	deadline := time.Now().Add(time.Hour)
+	ctx, cancel := context.WithDeadline(context.Background(), deadline)
+	defer cancel()
+	result := make(chan policyProviderResult, 1)
+	result <- policyProviderResult{ok: true, completedAt: deadline}
+
+	_, ok := receivePolicyProviderResult(ctx, result)
+	assert.False(t, ok)
+}
+
+func TestEncodePolicyProviderRoleIDsPreventsConcatenationCollision(t *testing.T) {
+	assert.NotEqual(t, encodePolicyProviderRoleIDs([]string{"a", "bc"}), encodePolicyProviderRoleIDs([]string{"ab", "c"}))
+}
+
+func TestResolvePolicyProviderCachedReclaimsUserEpochAfterLastFlight(t *testing.T) {
+	runtime := newPolicyProviderRuntime(defaultEffectivePolicyProviderCacheEntries)
+	runtime.userEpoch["u1"] = 7
+	provider := policyProvider{
+		reg: plugin.EffectivePolicyRegistration{
+			Keys: []string{"canSearchNotes"},
+			Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+				return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+			},
+		},
+		runtime: runtime,
+	}
+
+	_, ok := resolvePolicyProviderCached(provider, plugin.EffectivePolicyRequest{UserID: "u1"})
+	assert.True(t, ok)
+	assert.NotContains(t, runtime.userEpoch, "u1")
+}
+
+func TestClonePolicyContributionsScrubsIgnoredUseDefaultValue(t *testing.T) {
+	secret := &struct{ Value string }{Value: "provider-owned"}
+	cloned := clonePolicyContributions([]plugin.EffectivePolicyContribution{{Key: "canSearchNotes", UseDefault: true, Value: secret}})
+
+	assert.Nil(t, cloned[0].Value)
 }
 
 func TestPolicyProviderCacheLRUEvictsLeastRecentlyUsed(t *testing.T) {

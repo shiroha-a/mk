@@ -153,4 +153,8 @@ WARN 使われていないプラグインのデータが残っています schem
 
 ## TS へ切り戻した場合
 
-プラグインの機能は使えなくなる（mk-go 固有の仕組みのため）。`plugin_<name>` schema は未知のものとして DB に残るが、TypeORM は無視するので実害は無い。
+プラグインの機能は使えなくなる（mk-go固有の仕組みのため）。`plugin_<name>` schemaは未知のものとしてDBに残り、TypeORMは無視する。
+
+ただし、`EffectivePolicies`を宣言するプラグインがある場合、切り戻しはデータを壊さなくても**利用者の実効権限を変える**。providerの寄与はnative roleやDBへ永続化されず、プラグイン停止・除外・Misskey TSへの切り戻しと同時に消える。特に濫用対策など制限方向の寄与が消えると、切り戻した瞬間に権限が緩む。
+
+切り戻す前に`admin/server-plugins`の`effectivePolicies`を確認し、各providerが消えた後のnative policyだけで安全な状態になるか検証すること。停止後も維持すべき権限はproviderではなくnative roleとして永続化する。

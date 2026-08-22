@@ -256,6 +256,8 @@ handler 自体は止まらない** (Go では goroutine を殺せない) ので�
 
 `Definition.EffectivePolicies`で、native policyの解決に参加するproviderを宣言できる。有効なpluginは、全pluginのstorage/migration/provider登録が成功した後にだけ`Routes`と`Jobs`を有効化する。
 
+権限に関わる判定は、既存roleで表現できるなら`admin/roles/assign`などでnative roleとして永続化する方を優先する。providerの寄与はplugin停止・buildからの除外・Misskey TSへの切り戻しで即座に消えるため、停止後も維持すべき昇格・制限には向かない。`EffectivePolicies`はlevelに応じた連続値など、role付与だけでは表現できない解決時の寄与に限定する。`plugins/trustlevel`が引き続きrole付与を使うのは、切り戻し後も確定済みの昇格を残すためである。
+
 ```go
 func effectivePolicies(ctx plugin.Context, inv plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
 	return plugin.EffectivePolicyRegistration{
@@ -273,11 +275,13 @@ func effectivePolicies(ctx plugin.Context, inv plugin.EffectivePolicyInvalidator
 
 resolverの実行token取得待ちとresolver実行の期限はそれぞれ1秒。tokenを期限内に取得できないrequestはnative fallbackへ戻るが、providerは無効化されない。token取得後にresolver専用の新しい1秒deadlineが始まり、この実行期限を超えたproviderだけがprocess再起動まで無効化される。resolverへ渡されたcontextをStorage I/Oにも必ず渡すこと。contextを無視する処理はhostから強制終了できないが、hostは同じproviderの実行をcapacity 1に制限するため、timeout後に残留するresolver goroutineはproviderごと最大1本になる。
 
+resolverから本体のpolicy解決を呼び戻してはならない。自分が保持しているcapacity 1 tokenを再取得しようとして1秒待った後、native fallbackになる。
+
 contributionの`Priority`は`0..2`で、大きいpriorityのgroupだけをnative roleと同じ規則で集約する。同じprovider内では同じ`Key`と`Order`の組を重複できない。`UseDefault: true`では`Value`を無視し、そのkeyのnative defaultを同じpriorityへ参加させる。
 
 値はnative keyの型に一致させる。boolはOR、integer-native policyは最大値、`chatAvailability`は`available`、`readonly`、`unavailable`の順で寛容な値、`uploadableFileTypes`はtrim後のset unionを使う。integer-native policyは`int`、host `int`範囲内の`int64`、または有限かつhost `int`範囲内の`float64`を受理する。`float64`の小数部は拒否・切り捨てず、結果のpolicy mapでも小数として維持する。typed integerは`2^53`を超えても`float64`へ変換せず比較する。
 
-未宣言key、unknown key、priority範囲外、order重複、型不一致、NaN、infinity、範囲外整数、enum外の値、空または非文字列の配列要素が1件でもあればprovider全体を失敗として扱う。resolverのerrorやpanicも同様。失敗providerが宣言したkeyはnative結果へ戻し、同じkeyに対する他providerの貢献も破棄する。宣言していないkeyには成功providerの貢献を適用し続ける。成功値はproviderごとのLRUへ保存し、evictionまたはinvalidation後のresolver失敗はcacheせずnativeへ戻す。診断errorはplugin名、user/role/policy ID、provider output、panic値を含まない。
+未宣言key、unknown key、priority範囲外、order重複、型不一致、NaN、infinity、範囲外整数、enum外の値、空または非文字列の配列要素が1件でもあればprovider全体を失敗として扱う。resolverのerrorやpanicも同様。失敗providerが宣言したkeyはnative結果へ戻し、同じkeyに対する他providerの貢献も破棄する。宣言していないkeyには成功providerの貢献を適用し続ける。成功値はproviderごとのLRUへ保存し、evictionまたはinvalidation後のresolver失敗はcacheせずnativeへ戻す。fallbackはproviderごとの累積回数が1、2、4、8...回になった時だけ匿名warningとして記録し、恒常障害でrequestごとにlogを増やさない。診断errorとwarningはplugin名、user/role/policy ID、provider output、panic値を含まない。
 
 instance/server capはplugin集約の後に適用する。`maxFileSizeMb`、`chunkedUploadMaxConcurrentSessions`、`chunkedUploadMaxPendingMb`へ`0`以下の無制限値を返しても、positiveなcapが設定されていればcap値になる。
 

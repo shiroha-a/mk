@@ -27,8 +27,9 @@ const effectivePolicyProviderTimeout = time.Second
 const defaultEffectivePolicyProviderCacheEntries = 10_000
 
 type policyProviderRuntime struct {
-	token    chan struct{}
-	disabled atomic.Bool
+	token     chan struct{}
+	disabled  atomic.Bool
+	fallbacks atomic.Uint64
 
 	cacheMu      sync.Mutex
 	cache        map[policyProviderCacheKey]*list.Element
@@ -223,7 +224,7 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 	for i, p := range providers {
 		res, ok := resolved[i].contributions, resolved[i].ok
 		if !ok {
-			// provider の失敗は logging しない (identifier / 値を露出させない)。
+			recordPolicyProviderFallback(p.runtime)
 			for _, k := range p.reg.Keys {
 				failed[k] = true
 			}
@@ -257,6 +258,14 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 	return out, nil
 }
 
+func recordPolicyProviderFallback(runtime *policyProviderRuntime) {
+	failures := runtime.fallbacks.Add(1)
+	// 1, 2, 4, 8...回だけ記録し、恒常障害でもlog volumeを有界に近づける。
+	if failures&(failures-1) == 0 {
+		slog.Warn("effective policy provider fallback", "failures", failures)
+	}
+}
+
 func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, bool) {
 	if provider.runtime.disabled.Load() {
 		return nil, false
@@ -274,14 +283,10 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 			provider.runtime.cacheMu.Unlock()
 			return clonePolicyContributions(cached), true
 		}
-		if existing := provider.runtime.flights[key]; existing != nil {
-			join := policyProviderFlightIsCurrent(provider.runtime, req.UserID, existing)
+		if existing := provider.runtime.flights[key]; existing != nil && policyProviderFlightIsCurrent(provider.runtime, req.UserID, existing) {
 			provider.runtime.cacheMu.Unlock()
-			contributions, ok, joined := waitPolicyProviderFlight(existing, join)
-			if joined {
-				return contributions, ok
-			}
-			continue
+			contributions, ok, _ := waitPolicyProviderFlight(existing, true)
+			return contributions, ok
 		}
 		flight = &policyProviderFlight{
 			done:        make(chan struct{}),
@@ -293,7 +298,7 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 		break
 	}
 
-	contributions, ok := invokePolicyProvider(provider, req)
+	contributions, ok := invokePolicyProvider(provider, req, key, flight)
 	if ok {
 		ok = effectivepolicy.ValidateContributions(provider.reg.Keys, contributions)
 	}
@@ -327,6 +332,12 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 // invalidation generation. The caller must hold runtime.cacheMu.
 func policyProviderFlightIsCurrent(runtime *policyProviderRuntime, userID string, flight *policyProviderFlight) bool {
 	return runtime.globalEpoch == flight.globalEpoch && runtime.userEpoch[userID] == flight.userEpoch
+}
+
+func policyProviderFlightOwnsCurrent(runtime *policyProviderRuntime, key policyProviderCacheKey, userID string, flight *policyProviderFlight) bool {
+	runtime.cacheMu.Lock()
+	defer runtime.cacheMu.Unlock()
+	return runtime.flights[key] == flight && policyProviderFlightIsCurrent(runtime, userID, flight)
 }
 
 func waitPolicyProviderFlight(flight *policyProviderFlight, current bool) ([]plugin.EffectivePolicyContribution, bool, bool) {
@@ -432,18 +443,18 @@ type policyProviderResult struct {
 	completedAt   time.Time
 }
 
-func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, bool) {
+func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyRequest, key policyProviderCacheKey, flight *policyProviderFlight) ([]plugin.EffectivePolicyContribution, bool) {
 	if provider.runtime.disabled.Load() {
 		return nil, false
 	}
 
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), effectivePolicyProviderTimeout)
-	if !acquirePolicyProviderToken(waitCtx, provider.runtime) {
+	if !acquireEnabledPolicyProviderToken(waitCtx, provider.runtime) {
 		cancelWait()
 		return nil, false
 	}
 	cancelWait()
-	if provider.runtime.disabled.Load() {
+	if !policyProviderFlightOwnsCurrent(provider.runtime, key, req.UserID, flight) {
 		provider.runtime.token <- struct{}{}
 		return nil, false
 	}
@@ -470,6 +481,17 @@ func invokePolicyProvider(provider policyProvider, req plugin.EffectivePolicyReq
 		return nil, false
 	}
 	return out.contributions, out.ok
+}
+
+func acquireEnabledPolicyProviderToken(ctx context.Context, runtime *policyProviderRuntime) bool {
+	if !acquirePolicyProviderToken(ctx, runtime) {
+		return false
+	}
+	if runtime.disabled.Load() {
+		runtime.token <- struct{}{}
+		return false
+	}
+	return true
 }
 
 func finishPolicyProviderInvocation(ctx context.Context, runtime *policyProviderRuntime, result chan<- policyProviderResult, out policyProviderResult) {

@@ -9,13 +9,13 @@ effective-policy resolverがI/O待ちや実装不備で返らなくても、通�
 - providerの実行token取得待ちとresolver実行には、それぞれ独立した1秒の期限を適用する。この期限を変更する設定項目は追加しない。
 - tokenを1秒以内に取得できなかった場合は、そのrequestだけを既存のprovider failure経路へ合流させる。providerは無効化しない。
 - token取得後にresolver専用の新しい1秒deadline contextを作る。resolver自身が期限内に完了しなかった場合だけ、providerをprocess再起動まで無効化する。
-- token待ちとresolver実行を両方使い切ったrequestの最悪応答時間は約2秒になる。
+- token待ちとresolver実行を両方使い切ったrequestの最悪応答時間は約2秒になる。stale generationのflightは待たずに現世代のflightへ置き換えるため、invalidation回数に応じて待機時間を加算しない。
 - disabled providerはresolverを再実行せず、既存のprovider failure経路へ合流する。
 - 成功してvalidationを通過したprovider outputは`UserID`とsorted active `RoleIDs`の組ごとに、provider別LRUへcacheする。上限は`effectivePolicyProviderCacheEntries`（既定10000件）で、失敗結果はcacheしない。TTLは設けず、eviction時は同じ入力を再解決する。
 - 同じcache keyの同時missはsingle-flight化し、1回のresolver結果を共有する。異なるproviderのmissは並行解決し、provider数に比例してdeadlineを加算しない。
 - failed providerが宣言したkeyはplugin適用前のexact native policyへ戻し、同じkeyへの全plugin contributionを破棄する。
 - resolverへは実行専用deadlineを持つcontextを渡す。plugin.Storageなどcontext対応I/Oは協調的に停止できる。
-- resolver timeoutでproviderを無効化した事実は、識別子や値を含めない固定文面のwarningとして一度だけ記録する。panic、error、invalid outputは記録しない。
+- resolver timeoutでproviderを無効化した事実は、識別子や値を含めない固定文面のwarningとして一度だけ記録する。全fallback原因はproviderごとの累積回数が1、2、4、8...回になった時だけ匿名warningへ記録し、恒常障害でもlog量を抑えながら失敗回数を観測できるようにする。
 - timeout、panic、errorにはplugin名、user/role/policy ID、provider output、panic値、内部errorを含めない。
 
 ## 実行制御
@@ -30,10 +30,10 @@ provider runtimeは次の状態を持つ。
 
 1. disabledなら直ちにfailureを返す。
 2. `UserID`とlength-prefixで連結したsorted `RoleIDs`からcache keyを作る。hitならdeep cloneした成功結果を返す。
-3. 同じkeyのflightがあり、そのuser/global epochが現在値と一致すれば完了を待って結果を共有する。epochが古ければ完了だけを待ってlookupをやり直し、古い結果は返さない。flightが無ければepochを記録してownerになる。
+3. 同じkeyのflightがあり、そのuser/global epochが現在値と一致すれば完了を待って結果を共有する。epochが古ければmap上のflightを現世代の新しいflightへ置き換えてownerになり、古いflightの完了や結果を待たない。flightが無ければepochを記録してownerになる。置換前のresolverがtokenを保持している間は手順5の待機に入り、resolverを並行起動しない。
 4. token取得待ち専用の1秒deadline contextを作る。
 5. token取得を待つ。deadlineまでに取得できなければproviderをdisableせず、そのrequestだけfailureを返す。
-6. token取得後にdisabledを再確認する。別の呼び出しが待機中にdisableしていた場合はtokenを返し、resolverを開始せずfailureを返す。
+6. token取得後にdisabledとflight ownership/epochを再確認する。別の呼び出しが待機中にdisableしていた場合、またはinvalidation後のrequestがflightを置き換えていた場合はtokenを返し、resolverを開始せずfailureを返す。
 7. token待ちcontextを破棄し、resolver実行専用の新しい1秒deadline contextを作る。
 8. resolverを専用goroutineで実行し、完了時刻を記録してbuffered result channelへ結果を送る。完了時刻が実行deadline以後なら、tokenを返す前にdisabled flagを設定する。
 9. resolver完了ならtokenを返し、既存validationへ結果を渡す。成功時だけdeep cloneしてLRUへpublishし、上限超過分をleast-recently-used順にevictする。開始後にuser/role invalidationがepochを変更していればpublishしない。
@@ -68,10 +68,6 @@ providerを登録していないinstanceでは、plugin機構追加前のnative 
 
 同じplugin名のproviderは重複登録を拒否する。これによりplugin名順registryの一意性とdeterministic aggregationを保証する。登録済みproviderの置換やruntime再有効化は提供しない。
 
-## Arithmetic invariant
-
-internal/safemath.MulFloat64はNaNを0へ正規化する。有限値の通常乗算、fractional policy、小数切り捨て、正負overflow時の飽和は既存契約を維持する。
-
 ## テスト
 
 - deadline contextを尊重するresolverがtimeoutし、native fallbackになる。
@@ -80,9 +76,12 @@ internal/safemath.MulFloat64はNaNを0へ正規化する。有限値の通常乗
 - 同一user/RoleIDsのconcurrent missが1回のresolver実行を共有する。
 - user invalidationが対象userだけを、role invalidationが全provider outputを破棄する。
 - invalidation前のin-flight結果がcacheへ再publishされず、invalidation後に開始したrequestへも返らない。
+- stale generationのflightが現世代のresolver開始を妨げず、invalidation回数で待機時間を加算しない。
+- token待ち中に置き換えられたownerが、取得後にstale resolverを開始しない。
 - provider別LRUが設定上限を超えず、hitでrecencyを更新し、eviction後に再解決する。
 - 複数providerのtimeoutが直列加算されない。
 - timeout disableのwarningが一度だけ出て、plugin由来情報を含まない。
+- fallback warningが累積1、2、4、8...回だけ出て、plugin由来情報を含まない。
 - timeout後の呼び出しがresolverを再実行しない。
 - cooperative resolverがdeadline時にreturnしてtokenを返す競合でも、待機requestが新しいresolverを開始しない。
 - 正常な短時間resolverへtoken capacityを超えるconcurrent requestを送っても、token待ちtimeoutだけではproviderがdisableされない。
@@ -91,7 +90,6 @@ internal/safemath.MulFloat64はNaNを0へ正規化する。有限値の通常乗
 - provider未登録のanonymous、roleなし、roleあり経路が従来の早期returnとcopy範囲を維持する。
 - provider未登録のanonymous経路をmerge-baseと同じ条件でbenchmarkし、全key集約とdeep cloneのcostが残っていないことを確認する。
 - duplicate provider nameを登録時に拒否する。
-- MulFloat64(NaN, unit)が0を返す。
 - panic、error、invalid output、normal contributionの既存testを維持する。
 
 ## 対象外

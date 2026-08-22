@@ -722,6 +722,31 @@ func TestEffectivePolicy_TimeoutDisableWarnsOnceWithoutProviderData(t *testing.T
 	assert.NotContains(t, output, "canSearchNotes")
 }
 
+func TestEffectivePolicy_UncheckedFallbackWarningsAreCountedAndRateLimited(t *testing.T) {
+	var logs lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	svc, _, _, _ := newTestService(t)
+	registerProvider(t, svc, "secret-provider-name", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		return nil, errors.New("secret resolver detail")
+	})
+
+	for i := range 5 {
+		policies := svc.GetUserPolicies(fmt.Sprintf("secret-user-%d", i))
+		assert.False(t, policies["canSearchNotes"].(bool))
+	}
+
+	output := logs.String()
+	assert.Equal(t, 3, strings.Count(output, "effective policy provider fallback"), "counts 1, 2, and 4 are reported instead of logging every request")
+	assert.Contains(t, output, "failures=4")
+	assert.NotContains(t, output, "secret-provider-name")
+	assert.NotContains(t, output, "secret resolver detail")
+	assert.NotContains(t, output, "canSearchNotes")
+	assert.NotContains(t, output, "secret-user")
+}
+
 func TestEffectivePolicy_ResolverGetsFreshDeadlineAfterTokenWait(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	started := make(chan struct{})
@@ -1414,6 +1439,7 @@ func TestEffectivePolicy_ChunkedUploadLoadedMetaCapsProviderValues(t *testing.T)
 	svc, _, _, metaRepo := newTestService(t)
 	metaRepo.Meta = &model.Meta{
 		ID:                               "x",
+		ChunkedUploadEnabled:             true,
 		ChunkedUploadMaxSessionsPerUser:  3,
 		ChunkedUploadMaxPendingMbPerUser: 96,
 	}
