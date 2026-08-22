@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"maps"
+	"runtime/debug"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -84,9 +85,17 @@ type Server struct {
 
 	// stuckAfter / superviseInterval configure the wedged-worker
 	// supervisor (#2657). Zero applies the package defaults;
-	// stuckAfter < 0 disables the supervisor entirely.
+	// stuckAfter < 0 disables quarantine. **supervisor 自体は止まらない** —
+	// handlerDeadline が有効なら漏れの予算を適用するために起動する
+	// (startSupervisor)。
 	stuckAfter        time.Duration
 	superviseInterval time.Duration
+	// handlerDeadline bounds how long the dispatcher waits for one job's
+	// handler (#2658). Zero applies defaultHandlerDeadline; a negative
+	// value disables the bound. Task types in handlerDeadlines override it.
+	handlerDeadline time.Duration
+	// abandoned counts handlers the dispatcher gave up on, per queue.
+	abandoned abandonCounters
 	// nanos is the monotonic clock the pools use for liveness. nil means
 	// monotonicNanos.
 	nanos func() int64
@@ -215,6 +224,10 @@ type workerPool struct {
 	// peakDesired is the high-water mark of desired. The quarantine
 	// allowance is anchored to it — see allowedRosterLocked.
 	peakDesired int
+	// abandoned is the Server-owned counter of handlers the dispatcher gave
+	// up on for this queue (#2658). Those goroutines leak just like a
+	// quarantined Worker's, so they count against the same budget.
+	abandoned *abandonCounters
 	// seq numbers Workers for log attribution.
 	seq uint64
 	// capLogged / lastCapLogNanos throttle the over-budget Error log. The
@@ -419,12 +432,13 @@ func (s *Server) Start() error {
 
 		pool := &workerPool{
 			queue:           s.driver.queues[name],
-			handler:         newDispatchHandler(handlersSnapshot, name, s.observer),
+			handler:         newDispatchHandler(handlersSnapshot, name, s.observer, s.handlerDeadline, &s.abandoned),
 			optsBase:        optsBase,
 			name:            name,
 			stuckAfter:      s.resolvedStuckAfter(name),
 			nanos:           s.clock(),
 			baseConcurrency: concurrency,
+			abandoned:       &s.abandoned,
 		}
 		// `*Locked` 名 method の convention で pool.mu を保持。新規構築直後の
 		// pool で外部参照は無いため race は無いが、convention 一貫性のため。
@@ -501,11 +515,19 @@ func (s *Server) startSupervisor() {
 		close(done)
 		return
 	}
-	tracked := false
-	for _, p := range s.pools {
-		if p.stuckAfter > 0 {
-			tracked = true
-			break
+	// **期限が有効なら隔離が無効でも supervisor が要る。** 漏れの予算
+	// (allowedRosterLocked) を適用するのは reconcileLocked で、それを定期的に
+	// 回すのは supervisor だけ。隔離だけを条件にすると、隔離対象外のキュー
+	// (maintenance / export / objectStorage) や queueStuckWorkerSeconds: -1 で
+	// 放棄が積もっても誰も予算を見ず、漏れが無制限になる
+	// (実測: 12 秒で 58 件、頭打ちにならない)。
+	tracked := s.handlerDeadline >= 0
+	if !tracked {
+		for _, p := range s.pools {
+			if p.stuckAfter > 0 {
+				tracked = true
+				break
+			}
 		}
 	}
 	if !tracked {
@@ -780,10 +802,10 @@ func (p *workerPool) quarantineStuckLocked() {
 // 条件にすると、遅かっただけの健全な Worker が永久に隔離されたまま総数の
 // 枠を食い潰す。完了カウンタなら取りこぼさない。
 //
-// 戻すだけで停止しないのも意図的。**復帰時に握っていた job は必ず完走する**
-// (protected が外れるのはその job を終えてから)。ただし庇いは 1 件ぶんなので、
-// その後も余剰が残っていれば通常の scale-down 対象に戻る — 「隔離されたら
-// 以後ずっと守られる」ではない。
+// 戻すだけで停止しないのも意図的。復帰時に握っていた job は原則そのまま
+// 完走する (protected が外れるのはその job を終えてから)。庇いは 1 件ぶんなので
+// その後も余剰なら通常の scale-down 対象に戻るし、**漏れの予算に当たっての
+// 縮小では庇い自体が無視される** (adjustLocked)。
 func (p *workerPool) reinstateProvenLiveLocked() {
 	if len(p.quarantine) == 0 {
 		return
@@ -818,8 +840,9 @@ func (p *workerPool) reinstateProvenLiveLocked() {
 }
 
 // allowedRosterLocked returns the roster size the pool may actually run,
-// which is p.desired unless the quarantine has grown past the tolerated
-// headroom. Caller must hold pool.mu.
+// which is p.desired unless what the queue has leaked — quarantined Workers
+// plus abandoned handlers — has grown past the tolerated headroom. Caller
+// must hold pool.mu.
 //
 // **上限が要る。** 隔離した Worker の goroutine は止められない (handler が
 // 戻らない以上、Stop は stopWorkerTimeout だけ待たされたうえで goroutine を
@@ -843,20 +866,45 @@ func (p *workerPool) reinstateProvenLiveLocked() {
 // autoscale の反復は `allowed' = min(allowed + step, C)` となって **C まで
 // 上がって収束する**。単調なので autoscale の伸長を頭打ちにもしない。
 func (p *workerPool) allowedRosterLocked() int {
-	if p.stuckAfter <= 0 {
-		return p.desired
-	}
-	ceiling := p.peakDesired + quarantineHeadroomFor(p.baseConcurrency) - len(p.quarantine)
+	// **stuckAfter で早期 return しない。** 隔離を切っていても期限 (#2658) は
+	// 動くので、放棄だけが起きるキューがある — maintenance / export /
+	// objectStorage は既定で隔離の対象外だし、queueStuckWorkerSeconds: -1 でも
+	// そうなる。そこで早期 return すると放棄ぶんが予算に入らず、
+	// leakedLocked のコメントが言う「goroutine と DB 接続だけが際限なく
+	// 増える」状態がそのまま残る (実測: 6 秒で 28 件、頭打ちにならない)。
+	// 何も漏れていなければ ceiling は desired を上回るので、平常時の挙動は
+	// 早期 return と同じ。
+	ceiling := p.peakDesired + quarantineHeadroomFor(p.baseConcurrency) - p.leakedLocked()
 	if ceiling < 0 {
 		ceiling = 0
 	}
 	return min(p.desired, ceiling)
 }
 
-// quarantineHeadroomFor returns how many quarantined Workers a pool with
-// the given configured worker count tolerates before it starts winding
-// down. The argument is the configured count (workerPool.baseConcurrency),
-// not the current roster target.
+// leakedLocked counts everything this queue has leaked and cannot reclaim:
+// quarantined Workers plus handlers the dispatcher abandoned. Caller must
+// hold pool.mu.
+//
+// **放棄した handler も数える。** 数えないと上限が機能しない。放棄すると
+// dispatcher が戻り、その worker は job を処理するので #2658 の provenLive が
+// 隔離から roster に戻す = quarantine が空になる。quarantine だけで上限を
+// 測っていると、handler を確実に詰まらせる job がある限り「隔離 → 期限で
+// 放棄 → 復帰 → また隔離」を回り続け、**goroutine と DB 接続だけが際限なく
+// 増える**。DB pool を食い潰すとキューだけでなくプロセス全体が止まる。
+func (p *workerPool) leakedLocked() int {
+	// 隔離が無効なキューでは quarantine が常に空で、放棄ぶんだけが積まれる。
+	n := len(p.quarantine)
+	if p.abandoned != nil {
+		current, _ := p.abandoned.snapshot(p.name)
+		n += current
+	}
+	return n
+}
+
+// quarantineHeadroomFor returns how much leakage — quarantined Workers plus
+// abandoned handlers — a pool with the given configured worker count
+// tolerates before it starts winding down. The argument is the configured
+// count (workerPool.baseConcurrency), not the current roster target.
 func quarantineHeadroomFor(configured int) int {
 	return max(configured, quarantineHeadroom)
 }
@@ -876,11 +924,15 @@ func (p *workerPool) reportCapLocked(allowed int) {
 			oldest = d
 		}
 	}
+	abandonedNow := 0
+	if p.abandoned != nil {
+		abandonedNow, _ = p.abandoned.snapshot(p.name)
+	}
 	slog.Error("mkqdriver: too many workers are held outside the pool; it can no longer run the requested worker count",
 		"queue", p.name, "configured", p.baseConcurrency, "requested", p.desired, "running", allowed,
-		"quarantined", len(p.quarantine),
+		"quarantined", len(p.quarantine), "abandonedHandlers", abandonedNow,
 		"oldestQuarantinedFor", oldest.Truncate(time.Second).String(),
-		"hint", "a job handler is blocking for far longer than this queue's threshold; raise queueStuckWorkerSeconds or fix the handler")
+		"hint", "job handlers are not returning; check mk_job_workers_quarantined vs mk_job_handlers_abandoned to see which budget is consumed, then fix the handler (queueStuckWorkerSeconds / queueHandlerDeadlineSeconds only move the thresholds)")
 }
 
 // adjustLocked grows or shrinks the roster to the allowed size. Caller
@@ -889,9 +941,10 @@ func (p *workerPool) reportCapLocked(allowed int) {
 // concurrently (Stop = cancel in-flight, not wait for completion — see
 // Server type doc).
 //
-// **要求どおりの本数が止まるとは限らない。** splitForRemoval は job を
-// 持ったまま庇われている Worker を victim にしないので、縮小が次の
-// reconcile へ持ち越されることがある (splitForRemoval のコメント参照)。
+// **要求どおりの本数が止まるとは限らない。** autoscale 由来の縮小では、
+// job を持ったまま庇われている Worker を victim にしないので、次の reconcile へ
+// 持ち越されることがある。漏れの予算に当たっての縮小では庇いを無視するので
+// 要求どおり止まる (honourProtection)。
 func (p *workerPool) adjustLocked() error {
 	n := p.allowedRosterLocked()
 	if n < p.desired {
@@ -932,18 +985,29 @@ func (p *workerPool) adjustLocked() error {
 		p.workers = append(p.workers, spawned...)
 		return nil
 	default: // n < current
-		// 庇っている Worker のぶんは他の Worker から取り立てない。庇う対象を
-		// victim から外すだけだと、代わりに別の Worker の job が cancel される
-		// ので、隔離が job を殺さないという性質が結局崩れる。idle は費用ゼロ
-		// なので、そちらは上限に関係なく畳んでよい。
-		protectedBusy := 0
-		for _, h := range p.workers {
-			if h.protected && !h.idle() {
-				protectedBusy++
-			}
-		}
 		surplus := current - n
-		keep, toStop := splitForRemoval(p.workers, surplus, max(surplus-protectedBusy, 0))
+		// **上限に当たっての縮小では庇いを無視する。** 庇いは「復帰させた
+		// Worker の job を守る」ためのもので、予算超過はそれより優先される。
+		// 庇いを効かせたままだと、放棄した handler が積もって allowed=0 に
+		// なっても roster を縮められない (復帰 -> 庇われる -> victim 候補から
+		// 外れる、が回り続ける)。実測でその状態を確認している: allowed=0 の
+		// まま roster=4 が維持され、goroutine が deadline ごとに増え続けた。
+		honourProtection := n >= p.desired
+		maxBusy := surplus
+		if honourProtection {
+			// 庇っている Worker のぶんは他の Worker から取り立てない。庇う対象を
+			// victim から外すだけだと、代わりに別の Worker の job が cancel される
+			// ので、隔離が job を殺さないという性質が結局崩れる。idle は費用ゼロ
+			// なので、そちらは上限に関係なく畳んでよい。
+			protectedBusy := 0
+			for _, h := range p.workers {
+				if h.protected && !h.idle() {
+					protectedBusy++
+				}
+			}
+			maxBusy = max(surplus-protectedBusy, 0)
+		}
+		keep, toStop := splitForRemoval(p.workers, surplus, maxBusy, honourProtection)
 		p.workers = keep
 		stopHandles(toStop)
 		return nil
@@ -977,8 +1041,10 @@ func (p *workerPool) trackedHandler(h *workerHandle) mkq.Handler[framedPayload] 
 
 // splitForRemoval picks up to k scale-down victims out of ws and returns
 // (kept, removed). kept preserves the original order. At most maxBusy of
-// the victims hold a job, and Workers protected while holding a job are
-// never chosen at all, so fewer than k may be removed.
+// the victims hold a job. When honourProtection is set, Workers protected
+// while holding a job are never chosen at all, so fewer than k may be
+// removed; the caller clears it when the shrink is forced by the leak
+// budget rather than requested by autoscale.
 //
 // 優先順位:
 //
@@ -1001,7 +1067,7 @@ func (p *workerPool) trackedHandler(h *workerHandle) mkq.Handler[framedPayload] 
 //
 // 閾値超過の Worker はここには来ない。reconcileLocked が adjustLocked より
 // 先に quarantine へ退避しているので、roster に残っているのは生存分だけ。
-func splitForRemoval(ws []*workerHandle, k, maxBusy int) (kept, removed []*workerHandle) {
+func splitForRemoval(ws []*workerHandle, k, maxBusy int, honourProtection bool) (kept, removed []*workerHandle) {
 	if k <= 0 {
 		return ws, nil
 	}
@@ -1012,7 +1078,7 @@ func splitForRemoval(ws []*workerHandle, k, maxBusy int) (kept, removed []*worke
 	cands := make([]candidate, 0, len(ws))
 	for i, h := range ws {
 		busy := !h.idle()
-		if busy && h.protected {
+		if busy && h.protected && honourProtection {
 			continue
 		}
 		cands = append(cands, candidate{idx: i, busy: busy})
@@ -1130,6 +1196,91 @@ func stopHandles(hs []*workerHandle) {
 	wg.Wait()
 }
 
+// defaultHandlerDeadline bounds how long one job's handler may run before
+// the dispatcher stops waiting for it (#2658).
+//
+// **1 時間は「健全な job の上限」ではなく「これを超えたら worker を諦めさせない
+// ための線」。** inbox の理論上の worst case (resolver 256 段 x safehttp 10 秒 =
+// 43 分) を上回る値として選んだ。#2657 の隔離 (30 分) より後に発火するのは
+// 意図的で、隔離が先に capacity を戻し、こちらが後から worker 本体を回収する。
+const defaultHandlerDeadline = time.Hour
+
+// abandonGrace is how long the dispatcher waits after the deadline has
+// cancelled the handler's context before giving up on it and leaking its
+// goroutine. 親 ctx のキャンセルはここに入らない (runBounded 参照)。
+//
+// ctx を見る handler は cancel の直後に戻るので、この猶予があれば goroutine を
+// 捨てずに済む。捨てることになるのは ctx を無視する経路だけ。
+const abandonGrace = 5 * time.Second
+
+// graceFor caps the unwind grace at the deadline itself, so a short deadline
+// does not spend far longer waiting for the unwind than for the work.
+func graceFor(deadline time.Duration) time.Duration {
+	return min(abandonGrace, deadline)
+}
+
+// handlerDeadlines overrides defaultHandlerDeadline per task type. A zero
+// entry means "no deadline".
+//
+// **1 job が分単位〜時間単位かかるのが正常な batch 系は期限を持たない。**
+// ここで期限を切ると job が失敗して retry に回り、**永久に完了しなくなる**。
+// 具体的には objectStorage:cleanRemoteFiles が最大 10000 バッチ x 500ms
+// (それだけで 83 分)、maintenance:deleteAccount が 100 件ごとに 250ms 空ける
+// 設計、export / import は 1 job でアカウント全体をページングする。
+//
+// **その代わり、これらは何にも守られない。** #2657 の隔離が見るのは
+// defaultStuckAfterByQueue のキューだけで、ここに挙げた task type のうち
+// deliver に載る maintenance:deleteAccount 以外は export / objectStorage /
+// maintenance のいずれかに載っており、そちらは隔離の対象外。つまり
+// export の handler が戻らなくなったら、その worker は失われたままになる。
+// job 側に進捗を持たせて分割する以外に手が無いので、現時点では受け入れる。
+//
+// **task type ごとにするのはキュー単位では粗すぎるため。**
+// maintenance:deleteAccount は maintenance ではなく deliver キューに載って
+// いるので、キュー単位だと ap:deliver (10 秒級) と同じ扱いになってしまう。
+//
+// chart:resync / chart:clean はここに**入れない**。resync は chart:tick と
+// 同じ runTick を major=true で呼ぶだけで、tick 側は対象なのに resync だけ
+// 外すのは筋が通らない。clean も chart ごとに Clean を呼ぶだけ。
+//
+// **`internal/queue` の定数を import しない。** driver は queue の下位
+// パッケージなので、親を import すると親が driver を import できなくなる
+// (今は無いが、既定 driver を組み立てる関数を queue 側に置いた瞬間に循環する)。
+// 代わりに値を直書きし、定数との一致は internal test が固定している
+// (TestHandlerDeadlines_MatchTaskTypeConstants)。task type の値は BullMQ の
+// job name として wire に出るので、そもそも自由に変えられない。
+var handlerDeadlines = map[string]time.Duration{
+	"objectStorage:cleanRemoteFiles": 0,
+	"maintenance:cleanRemoteNotes":   0,
+	"maintenance:orphanUserCleanup":  0,
+	"maintenance:deleteAccount":      0,
+	"maintenance:clean":              0,
+	"maintenance:retentionAggregate": 0,
+	"export":                         0,
+	"import":                         0,
+	"importCustomEmojis":             0,
+}
+
+// handlerDeadlineFor returns the deadline for taskType, or 0 when the task
+// type is exempt.
+func handlerDeadlineFor(taskType string, configured time.Duration) time.Duration {
+	if configured < 0 {
+		return 0
+	}
+	if d, ok := handlerDeadlines[taskType]; ok {
+		return d
+	}
+	if configured > 0 {
+		return configured
+	}
+	return defaultHandlerDeadline
+}
+
+// ErrHandlerAbandoned is returned to mkq when the dispatcher gives up
+// waiting for a handler. The job fails and follows the normal retry path;
+// the handler's goroutine keeps running and is never reclaimed.
+var ErrHandlerAbandoned = errors.New("mkqdriver: handler did not return before its deadline; the dispatcher moved on and the handler's goroutine keeps running")
+
 // newDispatchHandler builds the mkq handler closure that demuxes
 // incoming jobs to the registered driver.HandlerFunc. The handlers
 // map is captured by reference; callers must guarantee it is not
@@ -1138,7 +1289,7 @@ func stopHandles(hs []*workerHandle) {
 //
 // driver.SkipRetry → mkq.ErrUnrecoverable conversion lives here so
 // processors can keep their existing %w-wrap idiom unchanged.
-func newDispatchHandler(handlers map[string]driver.HandlerFunc, queue string, obs driver.Observer) mkq.Handler[framedPayload] {
+func newDispatchHandler(handlers map[string]driver.HandlerFunc, qname string, obs driver.Observer, deadline time.Duration, ab abandonSink) mkq.Handler[framedPayload] {
 	return func(ctx context.Context, job *mkq.Job[framedPayload]) (any, error) {
 		taskType := job.Data.Type
 		h := handlers[taskType]
@@ -1147,9 +1298,15 @@ func newDispatchHandler(handlers map[string]driver.HandlerFunc, queue string, ob
 			// いないので無限ループになる)。
 			return nil, fmt.Errorf("mkqdriver: no handler for %q: %w", taskType, mkq.ErrUnrecoverable)
 		}
+		run := func(c context.Context) error {
+			d := handlerDeadlineFor(taskType, deadline)
+			return runBounded(c, h, mkqTask{taskType: taskType, payload: job.Data.Body},
+				d, graceFor(d),
+				abandonInfo{queue: qname, taskType: taskType, jobID: job.ID}, ab)
+		}
 		// observer 未配線なら clock も触らない (hot path、#2277)。
 		if obs == nil {
-			err := h(ctx, mkqTask{taskType: taskType, payload: job.Data.Body})
+			err := run(ctx)
 			if err != nil && errors.Is(err, driver.SkipRetry) {
 				return nil, fmt.Errorf("%w: %w", err, mkq.ErrUnrecoverable)
 			}
@@ -1161,16 +1318,142 @@ func newDispatchHandler(handlers map[string]driver.HandlerFunc, queue string, ob
 		// 見たいのは「enqueue された job がどれだけ待たされてから最初に拾われたか」
 		// = 混雑度なので、AttemptsMade == 0 に限定する。
 		if job.AttemptsMade == 0 && !job.Timestamp.IsZero() {
-			obs.ObserveDispatchWait(queue, time.Since(job.Timestamp))
+			obs.ObserveDispatchWait(qname, time.Since(job.Timestamp))
 		}
 		started := time.Now()
-		err := h(ctx, mkqTask{taskType: taskType, payload: job.Data.Body})
-		obs.ObserveProcessing(queue, time.Since(started), err != nil)
+		err := run(ctx)
+		obs.ObserveProcessing(qname, time.Since(started), err != nil)
 		if err != nil && errors.Is(err, driver.SkipRetry) {
 			return nil, fmt.Errorf("%w: %w", err, mkq.ErrUnrecoverable)
 		}
 		return nil, err
 	}
+}
+
+// abandonCounters tracks abandoned handlers per queue. The zero value is
+// ready to use; it is a field of Server so its lifetime matches the pools.
+type abandonCounters struct {
+	mu      sync.Mutex
+	total   map[string]uint64
+	current map[string]int
+}
+
+func (a *abandonCounters) handlerAbandoned(queue string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.total == nil {
+		a.total = map[string]uint64{}
+		a.current = map[string]int{}
+	}
+	a.total[queue]++
+	a.current[queue]++
+}
+
+func (a *abandonCounters) handlerReturnedLate(queue string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.current[queue] > 0 {
+		a.current[queue]--
+	}
+}
+
+// snapshot returns (currently abandoned, abandoned in total) for queue.
+func (a *abandonCounters) snapshot(queue string) (int, uint64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.current[queue], a.total[queue]
+}
+
+// AbandonedHandlerCount reports how many handlers for qname the dispatcher
+// gave up on and that have still not returned, plus the cumulative total.
+//
+// 診断用。current が増えたまま減らないなら、handler が本当に戻ってこない
+// 経路を踏んでいる (goroutine と DB 接続を掴んだまま)。#2658。
+func (s *Server) AbandonedHandlerCount(qname string) (current int, total uint64) {
+	return s.abandoned.snapshot(qname)
+}
+
+// abandonInfo identifies a job for the abandonment log.
+type abandonInfo struct {
+	queue    string
+	taskType string
+	jobID    string
+}
+
+// abandonSink counts handlers the dispatcher gave up on. nil is allowed.
+type abandonSink interface {
+	handlerAbandoned(queue string)
+	handlerReturnedLate(queue string)
+}
+
+// runBounded invokes h and gives up on it once its context is done and the
+// grace period has elapsed.
+//
+// **goroutine を別に切るのは、それ以外に dispatcher を返す方法が無いから。**
+// Go では goroutine を殺せないので、戻ってこない handler を「諦める」には
+// 呼び出し側が待つのをやめるしかない。放棄した goroutine はそのまま走り続け、
+// DB 接続などを掴んだままになる。それでも worker 一式を失うより軽い
+// (#2657 の隔離は dispatcher + handler + Redis 接続をまとめて失っていた)。
+//
+// deadline <= 0 なら従来どおり同期で呼ぶ。batch 系の task type と、
+// 期限を明示的に無効化した構成がこれに当たる。
+func runBounded(ctx context.Context, h driver.HandlerFunc, task driver.Task, deadline, grace time.Duration, info abandonInfo, ab abandonSink) error {
+	if deadline <= 0 {
+		return h(ctx, task)
+	}
+	hctx, cancel := context.WithTimeout(ctx, deadline)
+	defer cancel()
+
+	started := time.Now()
+	done := make(chan error, 1)
+	go func() {
+		// **ここで recover しないとプロセスが落ちる。** mkq の runHandler は
+		// handler の panic を recover して job を failed にするが、その defer は
+		// 別 goroutine の panic を拾えない。
+		defer func() {
+			if r := recover(); r != nil {
+				done <- fmt.Errorf("mkqdriver: handler panic: %v\n%s", r, debug.Stack())
+			}
+		}()
+		done <- h(hctx, task)
+	}()
+
+	// **諦めるのは期限を過ぎたときだけ。** 親 ctx のキャンセル (scale-down /
+	// shutdown / lock 喪失) では諦めない。mk-go の deliver / inbox /
+	// relationship processor は `Handle(_ context.Context, ...)` で ctx を
+	// 捨てており、cancel されても止まらない。そこで諦めると job は failed →
+	// retry に回る一方で元の実行は完走するので、**scale-down のたびに配送が
+	// 二重になる**。親キャンセルの側は mkq の Worker.Stop が
+	// stopWorkerTimeout で頭打ちにしており、そこは #2658 以前から変わらない。
+	//
+	// ctx を見る handler は cancel された時点で戻ってくるので、下の select が
+	// そのまま拾う (期限まで待たされることはない)。
+	t := time.NewTimer(deadline + grace)
+	defer t.Stop()
+	select {
+	case err := <-done:
+		return err
+	case <-t.C:
+	}
+
+	if ab != nil {
+		ab.handlerAbandoned(info.queue)
+		// 遅れて戻ってきたら現存数を戻す。放棄した goroutine が生き続けて
+		// いるのか、単に遅かっただけなのかを gauge で見分けられるようにする。
+		go func() {
+			<-done
+			ab.handlerReturnedLate(info.queue)
+		}()
+	}
+	// cause を見ないと「期限が短すぎる」と読み違える。縮小で止められた
+	// worker の handler が ctx を無視した場合も、同じ経路でここに来る。
+	slog.Warn("mkqdriver: giving up on a handler; its goroutine is abandoned and keeps running (see cause: a deadline means the job ran too long, a cancellation means the worker was being stopped)",
+		"queue", info.queue, "taskType", info.taskType, "jobID", info.jobID,
+		"elapsed", time.Since(started).Truncate(time.Millisecond).String(),
+		"deadline", deadline.String(), "grace", grace.String(),
+		"cause", context.Cause(hctx))
+	return fmt.Errorf("%w (task %s, job %s, %s)", ErrHandlerAbandoned, info.taskType, info.jobID,
+		time.Since(started).Truncate(time.Millisecond))
 }
 
 // SetObserver wires the per-job timing hook. Must be called before Start;

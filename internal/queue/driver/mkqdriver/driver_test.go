@@ -55,3 +55,10 @@ func TestQuarantineHeadroomFor_ExportedWrapper(t *testing.T) {
 	assert.Equal(t, quarantineHeadroom, QuarantineHeadroomFor(1), "floor applies to tiny pools")
 	assert.Equal(t, 16, QuarantineHeadroomFor(16))
 }
+
+func TestHandlerDeadlineFor_ExportedWrapper(t *testing.T) {
+	assert.Equal(t, defaultHandlerDeadline, HandlerDeadlineFor("ap:inbox", 0))
+	assert.Zero(t, HandlerDeadlineFor("export", 0), "batch task types are exempt")
+	assert.Equal(t, time.Minute, HandlerDeadlineFor("ap:inbox", time.Minute))
+	assert.Zero(t, HandlerDeadlineFor("ap:inbox", -1))
+}

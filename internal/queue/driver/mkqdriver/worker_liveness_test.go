@@ -89,7 +89,7 @@ func TestSplitForRemoval_IdleBeforeBusy(t *testing.T) {
 		handleBusyFor(1, clk, 0),
 		handleBusyFor(2, clk, 10*time.Second),
 	}
-	kept, removed := splitForRemoval(ws, 1, 1)
+	kept, removed := splitForRemoval(ws, 1, 1, true)
 	assert.Equal(t, []uint64{1}, seqs(removed),
 		"an idle worker is cheaper to stop than one holding a job")
 	assert.Equal(t, []uint64{0, 2}, seqs(kept))
@@ -103,7 +103,7 @@ func TestSplitForRemoval_TrailingFirstAmongEquals(t *testing.T) {
 		handleBusyFor(2, clk, time.Second),
 		handleBusyFor(3, clk, time.Second),
 	}
-	kept, removed := splitForRemoval(ws, 2, 2)
+	kept, removed := splitForRemoval(ws, 2, 2, true)
 	assert.Equal(t, []uint64{2, 3}, seqs(removed))
 	assert.Equal(t, []uint64{0, 1}, seqs(kept))
 }
@@ -112,15 +112,15 @@ func TestSplitForRemoval_Bounds(t *testing.T) {
 	clk := &fakeClock{n: int64(time.Hour)}
 	ws := []*workerHandle{handleBusyFor(0, clk, 0), handleBusyFor(1, clk, 0)}
 
-	kept, removed := splitForRemoval(ws, 0, 0)
+	kept, removed := splitForRemoval(ws, 0, 0, true)
 	assert.Equal(t, []uint64{0, 1}, seqs(kept))
 	assert.Empty(t, removed)
 
-	kept, removed = splitForRemoval(ws, 2, 2)
+	kept, removed = splitForRemoval(ws, 2, 2, true)
 	assert.Empty(t, kept)
 	assert.Equal(t, []uint64{0, 1}, seqs(removed))
 
-	kept, removed = splitForRemoval(ws, 9, 9)
+	kept, removed = splitForRemoval(ws, 9, 9, true)
 	assert.Empty(t, kept)
 	assert.Equal(t, []uint64{0, 1}, seqs(removed))
 }
@@ -247,8 +247,21 @@ func TestPool_AllowedRosterCapsAtPeakPlusHeadroom(t *testing.T) {
 	p.quarantine = quarantined(99, clk)
 	assert.Equal(t, 0, p.allowedRosterLocked(), "never negative")
 
+	// 隔離を切ると quarantine には何も入らないので、実質 desired に戻る。
 	p.stuckAfter = 0
-	assert.Equal(t, 4, p.allowedRosterLocked(), "no cap without liveness tracking")
+	p.quarantine = nil
+	assert.Equal(t, 4, p.allowedRosterLocked())
+
+	// **ただし放棄ぶんは隔離の有無に関わらず効く。** 期限 (#2658) は隔離とは
+	// 独立に動くので、maintenance / export のような隔離対象外のキューでも
+	// 放棄は起きる。ここで効かないと、そのキューの漏れが無制限になる。
+	var ab abandonCounters
+	p.abandoned = &ab
+	for range 6 {
+		ab.handlerAbandoned("inbox")
+	}
+	assert.Equal(t, 2, p.allowedRosterLocked(),
+		"abandoned handlers consume the budget even with quarantine disabled")
 }
 
 func TestPool_CapLogIsThrottled(t *testing.T) {
@@ -406,9 +419,23 @@ func TestServer_StartSupervisorSkipped(t *testing.T) {
 	s.startSupervisor()
 	assert.Nil(t, s.superviseCancel, "a negative interval opts out of the periodic check")
 
+	// 隔離も期限も無効なら supervisor は不要。
+	s = &Server{
+		handlerDeadline: -1,
+		pools:           map[string]*workerPool{"export": {stuckAfter: 0}},
+	}
+	s.startSupervisor()
+	assert.Nil(t, s.superviseCancel, "nothing to supervise: neither mechanism is on")
+	s.stopSupervisor()
+
+	// **期限だけ有効でも supervisor は要る。** 漏れの予算を適用するのは
+	// reconcileLocked で、それを回すのは supervisor だけ。隔離だけを条件に
+	// すると、隔離対象外のキューで放棄が無制限に積もる。
 	s = &Server{pools: map[string]*workerPool{"export": {stuckAfter: 0}}}
 	s.startSupervisor()
-	assert.Nil(t, s.superviseCancel, "no pool tracks liveness, so nothing to supervise")
+	assert.NotNil(t, s.superviseCancel,
+		"the deadline alone still needs the supervisor to apply the leak budget")
+	s.stopSupervisor()
 
 	// Shutdown が先に走った窓。pools が nil なら誰も止めない goroutine を
 	// 生やさない。
@@ -530,19 +557,19 @@ func TestSplitForRemoval_BusyBudget(t *testing.T) {
 	}
 
 	// 予算 0 では idle しか外さないので、要求 2 に対して 1 本しか返らない。
-	kept, removed := splitForRemoval(ws, 2, 0)
+	kept, removed := splitForRemoval(ws, 2, 0, true)
 	assert.Equal(t, []uint64{2}, seqs(removed))
 	assert.Equal(t, []uint64{0, 1}, seqs(kept))
 
 	// 予算があれば従来どおり要求数まで外す (idle 優先、次に末尾)。
-	kept, removed = splitForRemoval(ws, 2, 2)
+	kept, removed = splitForRemoval(ws, 2, 2, true)
 	assert.Equal(t, []uint64{1, 2}, seqs(removed))
 	assert.Equal(t, []uint64{0}, seqs(kept))
 
 	// 庇われている busy handle は予算があっても選ばれない。
 	// removed は選んだ順ではなく元の並び順で返る。
 	ws[1].protected = true
-	kept, removed = splitForRemoval(ws, 2, 2)
+	kept, removed = splitForRemoval(ws, 2, 2, true)
 	assert.Equal(t, []uint64{0, 2}, seqs(removed))
 	assert.Equal(t, []uint64{1}, seqs(kept))
 }

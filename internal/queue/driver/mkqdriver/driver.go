@@ -100,7 +100,11 @@ type Config struct {
 	// Worker stops counting towards the queue's worker budget and is
 	// replaced (#2657). Zero applies the per-queue table
 	// (defaultStuckAfterByQueue); a positive value overrides it for every
-	// queue; a negative value disables liveness tracking entirely.
+	// queue; a negative value disables quarantine (but not the supervisor —
+	// HandlerDeadline keeps it running to apply the leak budget).
+	//
+	// 隔離した Worker と放棄した handler (#2658) は**同じ枠**を食い、
+	// 枠に達するとそのキューの roster を 0 まで縮めて止める。
 	//
 	// 進行中の job は cancel されない。Worker を勘定から外して代わりを立てる
 	// だけで、元の Worker は job を完走でき、完走したら pool に戻る。ただし
@@ -111,6 +115,17 @@ type Config struct {
 	// 常時この閾値を超えるキューに短い値を当てると、その状態が定常化する。
 	// 既定でバッチ系のキューを対象外にしているのはそのため。
 	StuckWorkerAfter time.Duration
+
+	// HandlerDeadline bounds how long the dispatcher waits for one job's
+	// handler before giving up on it and moving on (#2658). Zero applies
+	// defaultHandlerDeadline; a negative value disables the bound.
+	//
+	// **超過しても handler は止まらない** (Go では goroutine を殺せない)。
+	// 止まるのは待つのをやめる側で、handler の goroutine はそのまま走り続ける。
+	// job は失敗して retry に回るので、放棄した job と retry が同時に走りうる。
+	// 1 job が分単位かかるのが正常な batch 系 task type は
+	// handlerDeadlines で対象外にしてある。
+	HandlerDeadline time.Duration
 
 	// SuperviseInterval is how often every pool is re-checked for wedged
 	// Workers. Zero applies defaultSuperviseInterval; a negative value
@@ -392,6 +407,13 @@ func StuckWorkerThreshold(qname string, stuckAfter time.Duration) time.Duration 
 	return stuckAfterForQueue(qname, stuckAfter)
 }
 
+// HandlerDeadlineFor exposes the effective per-task-type handler deadline
+// for diagnostics (#2658). configured is Config.HandlerDeadline; pass 0 for
+// the built-in default. A zero result means the task type is exempt.
+func HandlerDeadlineFor(taskType string, configured time.Duration) time.Duration {
+	return handlerDeadlineFor(taskType, configured)
+}
+
 // QuarantineHeadroomFor exposes how many workers a pool of the given size
 // may hold outside the roster before it stops replacing them (#2657), so
 // diagnostics can state the real worker ceiling.
@@ -445,6 +467,7 @@ func (d *Driver) Server() driver.Server {
 			perQueueConcurrent: resolveQueueConcurrency(queueNames, d.cfg.QueueConcurrency),
 			perQueueRate:       d.cfg.QueueRateLimits,
 			stuckAfter:         d.cfg.StuckWorkerAfter,
+			handlerDeadline:    d.cfg.HandlerDeadline,
 			superviseInterval:  d.cfg.SuperviseInterval,
 			handlers:           make(map[string]driver.HandlerFunc),
 		}
@@ -507,6 +530,19 @@ func (d *Driver) WorkerCount(qname string) int {
 		return 0
 	}
 	return srv.workerCount(qname)
+}
+
+// AbandonedHandlerCount reports how many handlers for qname the dispatcher
+// gave up on and that have still not returned, plus the cumulative total
+// (#2658). Returns zeroes before Server.Start.
+func (d *Driver) AbandonedHandlerCount(qname string) (current int, total uint64) {
+	d.mu.Lock()
+	srv := d.dServer
+	d.mu.Unlock()
+	if srv == nil {
+		return 0, 0
+	}
+	return srv.AbandonedHandlerCount(qname)
 }
 
 // QuarantinedWorkerCount reports how many Workers for qname are held

@@ -414,7 +414,7 @@ func TestDeriveJobState(t *testing.T) {
 }
 
 func TestNewDispatchHandler_NoHandler(t *testing.T) {
-	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{}, "deliver", nil)
+	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{}, "deliver", nil, -1, nil)
 	job := &mkq.Job[framedPayload]{Data: framedPayload{Type: "missing"}}
 	_, err := dispatch(context.Background(), job)
 	if err == nil || !errIs(err, mkq.ErrUnrecoverable) {
@@ -429,7 +429,7 @@ func TestNewDispatchHandler_SkipRetryConverts(t *testing.T) {
 			called++
 			return driver.SkipRetry
 		},
-	}, "deliver", nil)
+	}, "deliver", nil, -1, nil)
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{Data: framedPayload{Type: "x"}})
 	if err == nil || !errIs(err, mkq.ErrUnrecoverable) || !errIs(err, driver.SkipRetry) {
 		t.Fatalf("SkipRetry must wrap both driver.SkipRetry and mkq.ErrUnrecoverable, got %v", err)
@@ -452,7 +452,7 @@ func TestNewDispatchHandler_NormalReturn(t *testing.T) {
 			}
 			return nil
 		},
-	}, "deliver", nil)
+	}, "deliver", nil, -1, nil)
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{Data: framedPayload{Type: "x", Body: []byte("body")}})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -666,7 +666,7 @@ func TestDispatchHandler_ObservesTimings(t *testing.T) {
 			time.Sleep(2 * time.Millisecond)
 			return nil
 		},
-	}, "deliver", obs)
+	}, "deliver", obs, -1, nil)
 
 	job := &mkq.Job[framedPayload]{
 		Data:      framedPayload{Type: "t"},
@@ -688,7 +688,7 @@ func TestDispatchHandler_ObservesFailure(t *testing.T) {
 	obs := &recordingObserver{}
 	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
 		"t": func(ctx context.Context, task driver.Task) error { return errors.New("boom") },
-	}, "inbox", obs)
+	}, "inbox", obs, -1, nil)
 
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{
 		Data: framedPayload{Type: "t"}, Timestamp: time.Now(),
@@ -704,7 +704,7 @@ func TestDispatchHandler_SkipsWaitOnRetry(t *testing.T) {
 	obs := &recordingObserver{}
 	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
 		"t": func(ctx context.Context, task driver.Task) error { return nil },
-	}, "webhook", obs)
+	}, "webhook", obs, -1, nil)
 
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{
 		Data:         framedPayload{Type: "t"},
@@ -722,7 +722,7 @@ func TestDispatchHandler_SkipsWaitWithoutTimestamp(t *testing.T) {
 	obs := &recordingObserver{}
 	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
 		"t": func(ctx context.Context, task driver.Task) error { return nil },
-	}, "deliver", obs)
+	}, "deliver", obs, -1, nil)
 
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{Data: framedPayload{Type: "t"}})
 	require.NoError(t, err)
@@ -735,7 +735,7 @@ func TestDispatchHandler_NilObserver(t *testing.T) {
 	called := false
 	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
 		"t": func(ctx context.Context, task driver.Task) error { called = true; return nil },
-	}, "deliver", nil)
+	}, "deliver", nil, -1, nil)
 
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{
 		Data: framedPayload{Type: "t"}, Timestamp: time.Now(),
