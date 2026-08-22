@@ -632,6 +632,12 @@ func (h *Handler) SetQueueInspector(qi QueueInspector) {
 // currently has, the configured auto-scale bounds, recent latency quantiles
 // and the recent scale events.
 //
+// Workers は「仕事を取れる worker 数」であって goroutine 数ではない。mkq
+// driver では handler が閾値を超えて戻ってこない worker が除かれるので、
+// job を処理している最中でも minWorkers を下回ることがある (#2657)。
+// その状態が続いているかは `mk_job_workers_quarantined` で見る
+// (`enableMetrics: true` のときだけ expose される)。
+//
 // upstream Misskey は worker 数を静的な config でしか持たないので該当情報が
 // 無い。additive block なので純正 frontend は無視する。
 type QueueRuntimeProvider interface {

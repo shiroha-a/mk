@@ -15,7 +15,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
+	"github.com/shiroha-a/mk/internal/queue/driver/mkqdriver"
 )
 
 // fakeDriver is a minimal driver.Driver implementation that returns
@@ -332,4 +334,67 @@ func scrape(t *testing.T, r *prometheus.Registry) string {
 	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
 	return string(body)
+}
+
+// quarantineFakeDriver adds the optional quarantine surface to fakeDriver.
+type quarantineFakeDriver struct {
+	*fakeDriver
+	quarantined map[string]int
+}
+
+func (d *quarantineFakeDriver) QuarantinedWorkerCount(qname string) int {
+	return d.quarantined[qname]
+}
+
+// **mkqdriver.Driver がこの面を満たすことを固定する。** quarantineReporter は
+// 構造的インターフェースなので、Driver 側のメソッド名が変わっても型検査は
+// 通り、mk_job_workers_quarantined が黙って常時 0 になる (#2657 で足した
+// 監視が無言で死ぬ)。
+var _ quarantineReporter = (*mkqdriver.Driver)(nil)
+
+func TestCollect_QuarantinedGauge(t *testing.T) {
+	m := New()
+	m.BindDriver(&quarantineFakeDriver{
+		fakeDriver:  &fakeDriver{workers: map[string]int{"inbox": 4}, inspector: &fakeInspector{}},
+		quarantined: map[string]int{"inbox": 3},
+	})
+	r := prometheus.NewRegistry()
+	require.NoError(t, m.Register(r))
+
+	body := scrape(t, r)
+	assert.Contains(t, body, `mk_job_workers_quarantined{queue="inbox"} 3`)
+	assert.Contains(t, body, `mk_job_workers_quarantined{queue="deliver"} 0`)
+}
+
+func TestCollect_QuarantinedGaugeZeroWithoutSupport(t *testing.T) {
+	// asynq のように追跡しない driver では常に 0。scrape が落ちたり
+	// gauge ごと消えたりしないこと。
+	m := New()
+	m.BindDriver(&fakeDriver{workers: map[string]int{"inbox": 4}, inspector: &fakeInspector{}})
+	r := prometheus.NewRegistry()
+	require.NoError(t, m.Register(r))
+
+	body := scrape(t, r)
+	assert.Contains(t, body, `mk_job_workers_quarantined{queue="inbox"} 0`)
+}
+
+// TestStandardQueues_CoversEveryQueue pins the label set against the queue
+// constants. **ここから漏れたキューは /metrics に一切出ない**ので、
+// キューを足したときに監視だけ置き去りになるのを防ぐ。
+func TestStandardQueues_CoversEveryQueue(t *testing.T) {
+	want := []string{
+		queue.QueueName,
+		queue.InboxQueueName,
+		queue.RelationshipQueueName,
+		queue.ExportQueueName,
+		queue.PushQueueName,
+		queue.WebhookQueueName,
+		queue.ObjectStorageQueueName,
+		queue.MaintenanceQueueName,
+	}
+	assert.ElementsMatch(t, want, standardQueues)
+	// driver が実際に立てるキュー一覧と一致していること。片方だけ増えると
+	// 監視が置き去りになる。
+	assert.ElementsMatch(t, mkqdriver.QueueNames, standardQueues,
+		"every queue the driver spawns workers for must get a metrics series")
 }

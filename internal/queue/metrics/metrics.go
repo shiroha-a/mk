@@ -4,7 +4,13 @@
 // は #1122 の最小スコープ (controller / Resize 配線前) なので以下の役割分担:
 //
 //   - mk_job_workers_active{queue} (gauge): scrape 時に driver.WorkerCount を
-//     都度 read。auto-scale で動的変化する将来も追従できる。
+//     都度 read。auto-scale で動的変化する将来も追従できる。mkq driver では
+//     handler が閾値を超えて戻ってこない worker を除いた**生存数**を返す
+//     (#2657)。goroutine 数ではない。
+//   - mk_job_workers_quarantined{queue} (gauge): 閾値超過で pool の外に
+//     退けてある worker 数 (mkq driver のみ、他は常に 0)。**0 でない状態が
+//     続いていたら handler がブロックしている。** #2657 の本番障害はこれが
+//     可視化されておらず 1 日以上気付けなかった。
 //   - mk_job_queue_pending{queue} (gauge): scrape 時に Inspector.GetQueueInfo
 //     を呼ぶ。中身は Redis ZCARD 相当で軽量。
 //   - mk_job_dispatch_wait_seconds{queue} (histogram): declare のみ。
@@ -25,18 +31,30 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
 
-// Queue labels that get a zero-valued series at startup (Prometheus
+// standardQueues is the label set every pull-mode gauge is emitted for,
+// and the set that gets a zero-valued series at startup (Prometheus
 // convention: zero-init avoids "no data" gaps in graphs).
 //
-// **これは全 queue ではない。** mk-go は 8 queue ある (`queue.go` の 7 +
-// `scheduler.go` の maintenance) が、後から足した relationship (#2403) /
-// objectStorage (#2325) / maintenance はここに入っていないので、最初の
-// ジョブが流れるまで系列が出ない。**表示の問題だけ**で集計は正しい。
-// 揃えるなら metric の系列が増えるので、ダッシュボードの確認とセットで。
-var standardQueues = []string{"deliver", "inbox", "export", "push", "webhook"}
+// **`internal/queue` のキュー定数と揃える。** ここから漏れたキューは
+// /metrics に一切出ない。relationship (#2403) / objectStorage (#2325) /
+// maintenance は長く漏れていた。表示だけの問題に見えていたが、
+// relationship は詰まり検出の対象キューでもあるため
+// mk_job_workers_quarantined が出ず、#2657 で足した監視がそのキューだけ
+// 効かない状態になっていたので揃えた (系列が 3 つ増える)。
+var standardQueues = []string{
+	queue.QueueName,
+	queue.InboxQueueName,
+	queue.RelationshipQueueName,
+	queue.ExportQueueName,
+	queue.PushQueueName,
+	queue.WebhookQueueName,
+	queue.ObjectStorageQueueName,
+	queue.MaintenanceQueueName,
+}
 
 // Metrics bundles every Prometheus collector owned by the queue subsystem.
 // Construct with New, optionally call BindDriver to wire the pull-based
@@ -213,7 +231,12 @@ var (
 	// flag rather than being shoved into the Help text.
 	workersActiveDesc = prometheus.NewDesc(
 		"mk_job_workers_active",
-		"Number of active worker goroutines per queue (asynq backend reports pool-wide; see docs/configuration.md).",
+		"Number of workers per queue able to take work (asynq backend reports pool-wide; see docs/configuration.md).",
+		[]string{"queue"}, nil,
+	)
+	workersQuarantinedDesc = prometheus.NewDesc(
+		"mk_job_workers_quarantined",
+		"Number of workers per queue held outside the pool because their handler overran the stuck-worker threshold (mkq backend only; always 0 elsewhere).",
 		[]string{"queue"}, nil,
 	)
 	queuePendingDesc = prometheus.NewDesc(
@@ -230,8 +253,32 @@ var (
 
 func (c *driverCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- workersActiveDesc
+	ch <- workersQuarantinedDesc
 	ch <- queuePendingDesc
 	ch <- scrapeErrorsDesc
+}
+
+// quarantineReporter is the optional driver-side surface behind
+// mk_job_workers_quarantined. Only mkqdriver implements it; other drivers
+// have no such state and the gauge stays at 0.
+//
+// **driver.Driver に足さない。** asynq は動的な pool を持たないので実装
+// しても常に 0 を返すだけの stub になり、legacy driver に「対応した」ように
+// 見える面を増やしてしまう (#571 で削除予定)。
+type quarantineReporter interface {
+	QuarantinedWorkerCount(qname string) int
+}
+
+// quarantinedFor returns the driver's quarantined worker count for qname,
+// or 0 when the driver does not track it.
+//
+// **Driver 側だけを見る。** d.Server() は nil のとき Server を作る遅延
+// コンストラクタなので、scrape のたびに副作用を起こすことになる。
+func quarantinedFor(d driver.Driver, qname string) int {
+	if r, ok := d.(quarantineReporter); ok {
+		return r.QuarantinedWorkerCount(qname)
+	}
+	return 0
 }
 
 func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
@@ -240,6 +287,10 @@ func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			workersActiveDesc, prometheus.GaugeValue,
 			float64(c.driver.WorkerCount(q)), q,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			workersQuarantinedDesc, prometheus.GaugeValue,
+			float64(quarantinedFor(c.driver, q)), q,
 		)
 		var pending int
 		info, err := inspector.GetQueueInfo(q)
