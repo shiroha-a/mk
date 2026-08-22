@@ -56,7 +56,7 @@
 │   ├── migrate/            # マイグレーションCLIツール
 │   ├── backfill-note-tags/ # note.tags を NFKC 正規化し直す一回限りのバッチ
 │   └── dbgtimeline/        # home/global timeline の JSON encoder panic を再現するデバッグ用ツール
-├── internal/               # 全22パッケージ
+├── internal/               # 全23パッケージ
 │   ├── config/             # 設定ローダー（Misskey YAML互換）
 │   ├── db/                 # GORM の PostgreSQL 接続配線
 │   ├── server/             # HTTPサーバーのセットアップ、ルーティング、ミドルウェア
@@ -86,6 +86,7 @@
 │   ├── frontendutil/       # 同梱フロントエンドの資産配信ヘルパー
 │   ├── pgarray/            # database/sql 用の PostgreSQL 配列型
 │   ├── sentry/             # sentry-go の配線
+│   ├── redislog/           # go-redis の内部ロガーを slog へ流す配線
 │   ├── misc/               # ユーティリティ（ID生成 等。既定は`aidx`、Section 6 参照）
 │   └── testutil/           # テスト用ヘルパー（testcontainers、モック）
 ├── plugin/                 # プラグインが import する公開パッケージ（docs/plugins/）

@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/cache"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/redislog"
 	mksentry "github.com/shiroha-a/mk/internal/sentry"
 	"github.com/shiroha-a/mk/internal/server"
 )
@@ -65,6 +66,11 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(logOut, &slog.HandlerOptions{
 		Level: slog.LevelInfo,
 	})))
+
+	// go-redis は既定で stderr に直接書くので、接続失敗が構造化ログに
+	// 出ない (#2659)。slog に寄せる。slog.SetDefault の後、Redis を触る
+	// どの経路よりも前に呼ぶ必要がある。
+	redislog.UseSlog()
 
 	slog.Info("starting Misskey (Go)", "version", config.MisskeyVersion, "mkGoVersion", config.MkGoVersion)
 

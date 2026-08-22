@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/selfcheck"
+	"github.com/shiroha-a/mk/internal/redislog"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
@@ -41,7 +42,7 @@ func runDoctor(configPath string) int {
 
 	// go-redis は接続失敗を内部 logger で stderr に吐く。検査結果の表が
 	// 埋もれるので黙らせる (失敗は Result 側で報告する)。
-	redis.SetLogger(silentRedisLogger{})
+	redislog.UseSilent()
 
 	deps := selfcheck.LocalDeps{MigrationCount: countMigrations()}
 	db, dbErr := openDoctorDB(cfg)
@@ -63,11 +64,6 @@ func runDoctor(configPath string) int {
 	}
 	return 0
 }
-
-// silentRedisLogger discards go-redis internal logs during doctor runs.
-type silentRedisLogger struct{}
-
-func (silentRedisLogger) Printf(context.Context, string, ...any) {}
 
 // countMigrations counts the bundled up migrations. 数えられなければ 0 を返し、
 // 「適用漏れ」の比較だけを飛ばす (接続や dirty の判定は残る)。
