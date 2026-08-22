@@ -495,6 +495,39 @@ redis:
 	assert.Equal(t, -1, cfg.QueueStuckWorkerSeconds)
 }
 
+// queueHandlerDeadlineSeconds も 0 = 既定、負値 = 無効。queueStuckWorkerSeconds
+// と同じく負値を落とさない。
+func TestLoad_QueueHandlerDeadlineSeconds(t *testing.T) {
+	base := `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`
+	for name, tc := range map[string]struct {
+		line string
+		want int
+	}{
+		"未設定は 0 (driver 既定)": {"", 0},
+		"正の値はそのまま":           {"queueHandlerDeadlineSeconds: 120", 120},
+		"負値は無効化なので保つ":        {"queueHandlerDeadlineSeconds: -1", -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTestConfig(t, base+tc.line+"\n")
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.QueueHandlerDeadlineSeconds)
+		})
+	}
+}
+
 func TestLoad_CustomCountsAndThreshold(t *testing.T) {
 	yaml := `
 url: https://example.com

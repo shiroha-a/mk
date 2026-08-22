@@ -138,8 +138,15 @@ type Source struct {
 	// 未設定ならキューごとの既定 (deliver / inbox / relationship / push /
 	// webhook は 30 分、export などの batch 系は追跡しない)。正値を入れると全キューにその値が効き、負値で機能ごと無効に
 	// なる。mkq driver のみ有効。
-	QueueStuckWorkerSeconds *int  `mapstructure:"queueStuckWorkerSeconds"`
-	EnableIPRateLimit       *bool `mapstructure:"enableIpRateLimit"`
+	QueueStuckWorkerSeconds *int `mapstructure:"queueStuckWorkerSeconds"`
+	// QueueHandlerDeadlineSeconds は 1 件の job の handler を何秒待ってから
+	// 諦めて worker を返すか (#2658)。**超過しても handler は止まらない** —
+	// 待つのをやめるだけで、その goroutine は走り続ける。未設定なら 1 時間。
+	// 1 job が分単位かかるのが正常な batch 系 (export / cleanRemoteFiles /
+	// deleteAccount 等) は task type 側で対象外にしてあり、この値の影響を
+	// 受けない。負値で機能ごと無効。mkq driver のみ有効。
+	QueueHandlerDeadlineSeconds *int  `mapstructure:"queueHandlerDeadlineSeconds"`
+	EnableIPRateLimit           *bool `mapstructure:"enableIpRateLimit"`
 	// DisableEndpointRateLimits, when true, drops the per-endpoint rate
 	// limit table entirely. Intended for benchmarking parity with Misskey TS
 	// `NODE_ENV=development`. Never enable in production. Default false.
@@ -354,10 +361,12 @@ type Config struct {
 	// QueueIdlePollSeconds: 0 なら driver 既定。
 	QueueIdlePollSeconds int
 	// QueueStuckWorkerSeconds: 0 ならキューごとの既定、負値で無効。
-	QueueStuckWorkerSeconds   int
-	EnableIPRateLimit         bool
-	DisableEndpointRateLimits bool
-	SetupPassword             string
+	QueueStuckWorkerSeconds int
+	// QueueHandlerDeadlineSeconds: 0 なら driver 既定、負値で無効。
+	QueueHandlerDeadlineSeconds int
+	EnableIPRateLimit           bool
+	DisableEndpointRateLimits   bool
+	SetupPassword               string
 
 	DB             DBOptions
 	DBReplications bool
@@ -531,6 +540,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"noteHookConcurrency",
 		"queueIdlePollSeconds",
 		"queueStuckWorkerSeconds",
+		"queueHandlerDeadlineSeconds",
 		"crossOriginOpenerPolicy",
 		"enableIpRateLimit",
 		"disableEndpointRateLimits",
@@ -584,6 +594,11 @@ func resolve(src *Source) (*Config, error) {
 	queueStuckWorkerSeconds := 0
 	if src.QueueStuckWorkerSeconds != nil {
 		queueStuckWorkerSeconds = *src.QueueStuckWorkerSeconds
+	}
+	// こちらも負値が「無効化」なので素通しする。
+	queueHandlerDeadlineSeconds := 0
+	if src.QueueHandlerDeadlineSeconds != nil {
+		queueHandlerDeadlineSeconds = *src.QueueHandlerDeadlineSeconds
 	}
 
 	// 0 以下は「未設定」として実行時の既定に委ねる。**負値を素通しすると
@@ -664,14 +679,15 @@ func resolve(src *Source) (*Config, error) {
 		AuthURL:     fmt.Sprintf("%s://%s/auth", scheme, host),
 		DriveURL:    fmt.Sprintf("%s://%s/files", scheme, host),
 
-		DisableHSTS:               src.DisableHSTS,
-		BcryptCost:                bcryptCost,
-		NoteHookConcurrency:       noteHookConcurrency,
-		QueueIdlePollSeconds:      queueIdlePollSeconds,
-		QueueStuckWorkerSeconds:   queueStuckWorkerSeconds,
-		EnableIPRateLimit:         enableIPRateLimit,
-		DisableEndpointRateLimits: disableEndpointRateLimits,
-		SetupPassword:             src.SetupPassword,
+		DisableHSTS:                 src.DisableHSTS,
+		BcryptCost:                  bcryptCost,
+		NoteHookConcurrency:         noteHookConcurrency,
+		QueueIdlePollSeconds:        queueIdlePollSeconds,
+		QueueStuckWorkerSeconds:     queueStuckWorkerSeconds,
+		QueueHandlerDeadlineSeconds: queueHandlerDeadlineSeconds,
+		EnableIPRateLimit:           enableIPRateLimit,
+		DisableEndpointRateLimits:   disableEndpointRateLimits,
+		SetupPassword:               src.SetupPassword,
 
 		DB:             resolveDB(src.DB),
 		DBReplications: src.DBReplications,

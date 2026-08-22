@@ -70,8 +70,9 @@ func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, e
 //
 // **buildQueueDriver から切り出してある理由**: あちらは Redis へ実接続するので
 // テストから呼べず、config から driver へ値が渡っているかを確かめる手段が
-// 無くなる。`queueStuckWorkerSeconds` は #2657 の機構を止める唯一の手段
-// なので、配線が落ちたら気付けるようにしておく。
+// 無くなる。`queueStuckWorkerSeconds` (#2657) と
+// `queueHandlerDeadlineSeconds` (#2658) は機構を止める唯一の手段なので、
+// 配線が落ちたら気付けるようにしておく。
 func mkqConfig(cfg *config.Config, totalConcurrency int, queueConcurrency, queueRateLimits map[string]int) mkqdriver.Config {
 	return mkqdriver.Config{
 		Redis:            mkqdriver.BuildRedisOptions(cfg.RedisForJobQueue),
@@ -80,19 +81,34 @@ func mkqConfig(cfg *config.Config, totalConcurrency int, queueConcurrency, queue
 		QueueRateLimits:  queueRateLimits,
 		IdlePollInterval: time.Duration(cfg.QueueIdlePollSeconds) * time.Second,
 		StuckWorkerAfter: stuckWorkerAfter(cfg),
+		HandlerDeadline:  handlerDeadline(cfg),
 	}
 }
 
 // stuckWorkerAfter converts queueStuckWorkerSeconds into the driver's
 // duration form. 0 keeps the per-queue defaults; a negative value is
-// preserved as "disabled" rather than clamped, so operators can switch the
-// supervisor off by editing config and restarting, without waiting for a
+// preserved as "disabled" rather than clamped, so operators can switch
+// quarantine off by editing config and restarting, without waiting for a
 // patched binary (#2657). 設定の hot reload は無いので再起動は要る。
+//
+// **これだけでは supervisor は止まらない。** 期限 (#2658) が有効なら漏れの
+// 予算を適用するために起動し続ける。完全に止めるなら
+// queueHandlerDeadlineSeconds にも負値が要る。
 func stuckWorkerAfter(cfg *config.Config) time.Duration {
 	if cfg.QueueStuckWorkerSeconds < 0 {
 		return -1
 	}
 	return time.Duration(cfg.QueueStuckWorkerSeconds) * time.Second
+}
+
+// handlerDeadline converts queueHandlerDeadlineSeconds into the driver's
+// duration form. Negative is preserved as "disabled" rather than clamped,
+// for the same reason as stuckWorkerAfter (#2658).
+func handlerDeadline(cfg *config.Config) time.Duration {
+	if cfg.QueueHandlerDeadlineSeconds < 0 {
+		return -1
+	}
+	return time.Duration(cfg.QueueHandlerDeadlineSeconds) * time.Second
 }
 
 // perQueueConcurrencyFromConfig flattens the deliver/inbox/relationship

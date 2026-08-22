@@ -171,3 +171,53 @@ func TestBuildConfigDump_ClusterLimitIsMarkedNoOp(t *testing.T) {
 	}
 	assert.Contains(t, note, "no-op")
 }
+
+// TestBuildConfigDump_StuckAndDeadlineRows pins the diagnostic rows added for
+// #2657 / #2658. **上限は autoscale の有無で変わる** — 管理下のキューは
+// maxWorkers まで伸びるので、設定値で語ると過小申告になる。
+func TestBuildConfigDump_StuckAndDeadlineRows(t *testing.T) {
+	maxW := 128
+	minW := 4
+	cfg := &config.Config{
+		URL:               "https://example.com",
+		JobQueueDriver:    "mkq",
+		JobQueueAutoScale: true,
+		MaxWorkers:        &maxW,
+		MinWorkers:        &minW,
+	}
+	d := BuildConfigDump(cfg, config.RoleBoth)
+
+	find := func(key string) (string, string, bool) {
+		for _, e := range d.Effective {
+			if e.Key == key {
+				return e.Value, e.Note, true
+			}
+		}
+		return "", "", false
+	}
+
+	// 既定値は driver から取る (dump だけ嘘になるのを防ぐ)。
+	v, _, ok := find("handler 期限")
+	require.True(t, ok)
+	assert.Equal(t, "1h0m0s (既定)", v)
+
+	// inbox は隔離対象。autoscale 管理下なので上限は maxWorkers 基準。
+	v, note, ok := find("stuck 検出: inbox")
+	require.True(t, ok)
+	assert.Equal(t, "30m0s", v)
+	assert.Contains(t, note, "maxWorkers 基準")
+	assert.Contains(t, note, "144") // 128 + max(16,4)
+
+	// export は隔離対象外だが、放棄の予算は効く。こちらも autoscale 管理下。
+	v, note, ok = find("stuck 検出: export")
+	require.True(t, ok)
+	assert.Equal(t, "無効", v)
+	assert.Contains(t, note, "handler の期限による漏れ")
+	assert.Contains(t, note, "132") // 128 + max(2,4)
+
+	// maintenance は autoscale 管理外なので設定値基準。
+	_, note, ok = find("stuck 検出: maintenance")
+	require.True(t, ok)
+	assert.Contains(t, note, "6") // 2 + max(2,4)
+	assert.NotContains(t, note, "maxWorkers 基準")
+}

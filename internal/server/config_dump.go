@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver/mkqdriver"
 )
 
@@ -178,26 +179,49 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 	}
 	_, autoMax := resolveAutoScaleBounds(cfg)
 	for _, q := range queues {
-		th := mkqdriver.StuckWorkerThreshold(q, stuck)
-		if th <= 0 {
-			add(&d.Effective, "stuck 検出: "+q, "無効",
-				"長い batch job が正常なキュー、または queueStuckWorkerSeconds が負値")
-			continue
-		}
-		// 実 worker 数の上限は「到達した最大 worker 数 + 隔離の許容幅」。
+		// 実 worker 数の上限は「到達した最大 worker 数 + 漏れの許容幅」。
 		// autoscale 管理下なら到達しうる最大は maxWorkers なので、設定値で
-		// 語ると過小申告になる。
-		// peakDesired は起動時に設定値から始まり単調非減少なので、
-		// maxWorkers が設定値より小さい構成では設定値のほうが上限になる。
+		// 語ると過小申告になる。peakDesired は起動時に設定値から始まり単調
+		// 非減少なので、maxWorkers が設定値より小さい構成では設定値が上限。
+		//
+		// **隔離の有無で分岐させない。** 漏れの予算は放棄した handler にも
+		// 効くので、隔離が無効なキューでも同じ上限が要る (#2658)。
 		peak := conc[q]
-		note := "超過した worker は勘定から外して差し替える"
+		managedNote := ""
 		if managed[q] && autoMax > peak {
 			peak = autoMax
-			note += " (autoscale 管理下なので maxWorkers 基準)"
+			managedNote = " (autoscale 管理下なので maxWorkers 基準)"
 		}
+		ceiling := peak + mkqdriver.QuarantineHeadroomFor(conc[q])
+
+		th := mkqdriver.StuckWorkerThreshold(q, stuck)
+		if th <= 0 {
+			// **隔離が無効でも漏れの予算は効く** (#2658)。放棄した handler が
+			// 積もれば、このキューの worker も 0 まで縮んで止まる。
+			add(&d.Effective, "stuck 検出: "+q, "無効",
+				fmt.Sprintf("隔離は無効 (長い batch job が正常なキュー、または queueStuckWorkerSeconds が負値)。ただし handler の期限による漏れは最大 %d 本まで許容し、達すると worker を 0 にする%s",
+					ceiling, managedNote))
+			continue
+		}
+		note := "超過した worker は勘定から外して差し替える" + managedNote
 		add(&d.Effective, "stuck 検出: "+q, th.String(),
-			fmt.Sprintf("%s。実 worker 数は最大 %d 本",
-				note, peak+mkqdriver.QuarantineHeadroomFor(conc[q])))
+			fmt.Sprintf("%s。実 worker 数は最大 %d 本 (放棄した handler と共用の枠)", note, ceiling))
+	}
+
+	deadline := handlerDeadline(cfg)
+	switch {
+	case deadline < 0:
+		add(&d.Effective, "handler 期限", "無効",
+			"queueHandlerDeadlineSeconds が負値。戻らない handler は worker を永久に失う")
+	case deadline == 0:
+		// 既定値をここに直書きしない (driver 側を変えたときに dump だけ嘘になる)。
+		// 免除表に無い task type なら既定が返る。
+		add(&d.Effective, "handler 期限",
+			mkqdriver.HandlerDeadlineFor(queue.TaskTypeInbox, 0).String()+" (既定)",
+			"batch 系 task type (export / cleanRemoteFiles / deleteAccount 等) は対象外")
+	default:
+		add(&d.Effective, "handler 期限", deadline.String(),
+			"明示指定。batch 系 task type は対象外")
 	}
 
 	add(&d.Effective, "redis pool (job queue)",

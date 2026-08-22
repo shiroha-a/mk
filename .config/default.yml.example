@@ -151,6 +151,11 @@ port: 3000
 # configured count plus max(configured, 4) with autoscale off, and
 # max(configured, maxWorkers) plus max(configured, 4) with it on.
 #
+# That cap is SHARED with handlers abandoned by queueHandlerDeadlineSeconds
+# below. When the two together reach it, the queue is wound down to zero
+# workers and an error is logged — leaking goroutines and database
+# connections until the process dies is the worse outcome.
+#
 # Unset uses per-queue defaults: 30 minutes for deliver / inbox / relationship /
 # push / webhook, and disabled for export / objectStorage / maintenance, whose
 # jobs legitimately page for tens of minutes. A positive value applies to every
@@ -165,6 +170,35 @@ port: 3000
 # export / objectStorage / maintenance, whose jobs routinely run longer. The
 # value shown is the off switch.
 #queueStuckWorkerSeconds: -1
+
+# How long the dispatcher waits for one job's handler before giving up on it
+# and moving on to the next job (mkq driver only).
+#
+# **This does not stop the handler.** Go cannot kill a goroutine; all that
+# stops is the waiting. The abandoned handler keeps running and keeps whatever
+# it holds (database connections, in-flight writes), and the job fails and
+# follows the normal retry path — so the abandoned run and its retry can
+# overlap. What this buys is the worker: without it, one handler that never
+# returns costs a dispatcher permanently (#2657 lost all four inbox workers
+# that way).
+#
+# It is deliberately later than queueStuckWorkerSeconds. That one restores
+# capacity quickly by replacing the worker; this one reclaims the worker
+# itself afterwards.
+#
+# Task types whose jobs page for minutes by design (export, import,
+# objectStorage:cleanRemoteFiles, maintenance:deleteAccount,
+# maintenance:cleanRemoteNotes, ...)
+# are exempt and ignore this value — bounding them would fail the job and
+# retry it forever. Unset is 1 hour; a negative value disables the mechanism.
+#
+# Abandoned handlers share the leak budget described under
+# queueStuckWorkerSeconds above; reaching it winds the queue down to zero
+# workers. That budget applies even on queues where quarantine is disabled.
+#
+# As with queueStuckWorkerSeconds, the value shown is the off switch, not the
+# default — uncommenting it turns the protection off rather than on.
+#queueHandlerDeadlineSeconds: -1
 
 #   ┌──────────────────────────┐
 #───┘ PostgreSQL configuration └────────────────────────────────

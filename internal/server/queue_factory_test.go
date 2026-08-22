@@ -514,3 +514,22 @@ func TestMkqConfig_PassesStuckWorkerAfter(t *testing.T) {
 		})
 	}
 }
+
+// TestMkqConfig_PassesHandlerDeadline gates the config seam for #2658,
+// mirroring the stuck-worker knob.
+func TestMkqConfig_PassesHandlerDeadline(t *testing.T) {
+	for name, tc := range map[string]struct {
+		seconds int
+		want    time.Duration
+	}{
+		"無効化": {-1, -1},
+		"明示値": {120, 2 * time.Minute},
+		"未設定": {0, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{QueueHandlerDeadlineSeconds: tc.seconds}
+			got := mkqConfig(cfg, 16, nil, nil)
+			assert.Equal(t, tc.want, got.HandlerDeadline)
+		})
+	}
+}
