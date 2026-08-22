@@ -8,6 +8,7 @@ import (
 
 	"github.com/shiroha-a/mk/plugin"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAcquirePolicyProviderTokenRejectsExpiredContext(t *testing.T) {
@@ -80,6 +81,32 @@ func TestResolvePolicyProviderCachedSupersedesStaleFlightWithoutWaiting(t *testi
 		t.Fatal("provider resolution did not complete after releasing the stale flight")
 	}
 	assert.True(t, resolverStartedBeforeStaleCompletion, "a stale generation must not consume the current request's timeout budget")
+}
+
+func TestResolvePolicyProviderCachedSupersededFlightCannotRepublishAfterReplacement(t *testing.T) {
+	runtime := newPolicyProviderRuntime(defaultEffectivePolicyProviderCacheEntries)
+	userID := "u1"
+	key := policyProviderCacheKey{userID: userID}
+	stale := &policyProviderFlight{done: make(chan struct{}), userEpoch: 0}
+	replacement := &policyProviderFlight{done: make(chan struct{}), userEpoch: 1}
+	runtime.userEpoch[userID] = 1
+	runtime.userFlights[userID] = 2
+	runtime.flights[key] = replacement
+
+	finishPolicyProviderFlight(runtime, key, userID, replacement, []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Value: true}}, true)
+	assert.Equal(t, uint64(1), runtime.userFlights[userID])
+	assert.Equal(t, uint64(1), runtime.userEpoch[userID], "the replacement must retain the epoch while the superseded owner is alive")
+
+	finishPolicyProviderFlight(runtime, key, userID, stale, []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Value: false}}, true)
+
+	runtime.cacheMu.Lock()
+	cached, ok := runtime.cacheGet(key)
+	_, hasFlightCounter := runtime.userFlights[userID]
+	runtime.cacheMu.Unlock()
+	require.True(t, ok)
+	require.Len(t, cached, 1)
+	assert.Equal(t, true, cached[0].Value, "the superseded generation must not overwrite the replacement")
+	assert.False(t, hasFlightCounter, "the last completed flight must reclaim its user refcount")
 }
 
 func TestWaitPolicyProviderFlightRejectsStaleResult(t *testing.T) {

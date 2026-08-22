@@ -36,6 +36,7 @@ type policyProviderRuntime struct {
 	cacheLRU     list.List
 	cacheEntries int
 	flights      map[policyProviderCacheKey]*policyProviderFlight
+	userFlights  map[string]uint64
 	userEpoch    map[string]uint64
 	globalEpoch  uint64
 }
@@ -49,6 +50,7 @@ func newPolicyProviderRuntime(cacheEntries int) *policyProviderRuntime {
 		cache:        make(map[policyProviderCacheKey]*list.Element),
 		cacheEntries: cacheEntries,
 		flights:      make(map[policyProviderCacheKey]*policyProviderFlight),
+		userFlights:  make(map[string]uint64),
 		userEpoch:    make(map[string]uint64),
 	}
 	runtime.token <- struct{}{}
@@ -293,6 +295,7 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 			userEpoch:   provider.runtime.userEpoch[req.UserID],
 			globalEpoch: provider.runtime.globalEpoch,
 		}
+		provider.runtime.userFlights[req.UserID]++
 		provider.runtime.flights[key] = flight
 		provider.runtime.cacheMu.Unlock()
 		break
@@ -309,23 +312,30 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 		})
 	}
 
-	provider.runtime.cacheMu.Lock()
+	finishPolicyProviderFlight(provider.runtime, key, req.UserID, flight, contributions, ok)
+	return clonePolicyContributions(contributions), ok
+}
+
+func finishPolicyProviderFlight(runtime *policyProviderRuntime, key policyProviderCacheKey, userID string, flight *policyProviderFlight, contributions []plugin.EffectivePolicyContribution, ok bool) {
+	runtime.cacheMu.Lock()
+	defer runtime.cacheMu.Unlock()
 	flight.contributions = clonePolicyContributions(contributions)
 	flight.ok = ok
-	if ok && !provider.runtime.disabled.Load() &&
-		provider.runtime.globalEpoch == flight.globalEpoch &&
-		provider.runtime.userEpoch[req.UserID] == flight.userEpoch {
-		provider.runtime.cachePut(key, contributions)
+	if ok && !runtime.disabled.Load() &&
+		runtime.globalEpoch == flight.globalEpoch &&
+		runtime.userEpoch[userID] == flight.userEpoch {
+		runtime.cachePut(key, contributions)
 	}
-	if provider.runtime.flights[key] == flight {
-		delete(provider.runtime.flights, key)
+	if runtime.flights[key] == flight {
+		delete(runtime.flights, key)
 	}
-	if !policyProviderHasUserFlight(provider.runtime, req.UserID) {
-		delete(provider.runtime.userEpoch, req.UserID)
+	if runtime.userFlights[userID] <= 1 {
+		delete(runtime.userFlights, userID)
+		delete(runtime.userEpoch, userID)
+	} else {
+		runtime.userFlights[userID]--
 	}
 	close(flight.done)
-	provider.runtime.cacheMu.Unlock()
-	return clonePolicyContributions(contributions), ok
 }
 
 // policyProviderFlightIsCurrent reports whether flight belongs to the current
@@ -400,15 +410,6 @@ func (runtime *policyProviderRuntime) cacheDeleteUser(userID string) {
 func (runtime *policyProviderRuntime) cacheClear() {
 	clear(runtime.cache)
 	runtime.cacheLRU.Init()
-}
-
-func policyProviderHasUserFlight(runtime *policyProviderRuntime, userID string) bool {
-	for key := range runtime.flights {
-		if key.userID == userID {
-			return true
-		}
-	}
-	return false
 }
 
 func encodePolicyProviderRoleIDs(roleIDs []string) string {
@@ -620,7 +621,7 @@ func (s *Service) invalidateUserPolicyCaches(userID string) {
 	}
 	for _, provider := range s.snapshotPolicyProviders() {
 		provider.runtime.cacheMu.Lock()
-		if policyProviderHasUserFlight(provider.runtime, userID) {
+		if provider.runtime.userFlights[userID] > 0 {
 			provider.runtime.userEpoch[userID]++
 		} else {
 			delete(provider.runtime.userEpoch, userID)
