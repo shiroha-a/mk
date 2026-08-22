@@ -102,8 +102,15 @@ scale 判定の trigger:
 
 | direction | 条件 | 補足 |
 |---|---|---|
+| floor 復帰 | 現 worker 数 < `minWorkers` | depth を見ずに即 `minWorkers` へ。他の 2 つより先に判定する |
 | scale-up | queue depth > 現 worker 数 × 4 | 1 観測で即発火 (spike 対応優先) |
 | scale-down | queue depth == 0 が **5 cycle (= 5 秒)** 連続 | sustained idle 必須、transient な処理追いつきでは発火しない |
+
+floor 復帰を先頭に置くのは、**0 が吸収状態になるのを防ぐため** (#2657)。scale-up の
+判定は `現 worker 数 > 0` を前提にしており閾値も `現 worker 数 × 4` なので、0 だと
+分岐に入れない。queue depth != 0 なので sustained-idle 側も素通りし、永久に NoOp を
+返し続ける。mkq driver は handler から戻らない worker を生存数から外すので (§5.1.1)、
+0 は実際に起こりうる。`minWorkers: 0` (= 明示的に worker を置かない) では発火しない。
 
 scale-down に hysteresis を入れる理由: AIMD 文脈で「TCP packet loss」に相当する明確な signal が queue には無い。`queue depth < N×0.5` 等の閾値だと、worker が一瞬追いついた瞬間 (job 1 件処理完了直後) に発火して oscillation を起こしやすい。**sustained-idle** (= 5 cycle 連続で空) のみ発火に絞れば、worker が真に過剰なときだけ縮める。
 
@@ -127,7 +134,7 @@ global controller (driver 1 つで全 queue 統合) ではなく、**queue ご�
 
 各 queue の controller は `maxWorkers` (per-queue 上限、§2 で定義) までスケールする。`maxWorkersGlobal` (optional) が設定されている場合、全 queue worker 合計がこの値を超えるスケール要求は controller 側で reject する (= maxWorkersGlobal 達した時点でそれ以上スケールできない)。
 
-`maxWorkersGlobal` 未設定時は **per-queue 上限の総和まで** (= 7 queue × `maxWorkers=128` = 896 worker まで膨張可能。実際は spike が deliver に集中するため deliver 単独で 128 まで scale up、他 queue は概ね `minWorkers=4` 付近の floor で待機)。multi-pod 環境で cluster 全体の DB/Redis pool を守りたい operator のみ明示設定する。
+`maxWorkersGlobal` 未設定時は **per-queue 上限の総和まで** (= 7 queue × `maxWorkers=128` = roster 896 worker まで膨張可能。実際に走る worker はこれに隔離ぶんが乗る、§5.1.1。実際は spike が deliver に集中するため deliver 単独で 128 まで scale up、他 queue は概ね `minWorkers=4` 付近の floor で待機)。multi-pod 環境で cluster 全体の DB/Redis pool を守りたい operator のみ明示設定する。
 
 ### 3.3 scale unit: AI `+max(1, N×0.25)` / MD `N×0.5`
 
@@ -174,7 +181,7 @@ multi-pod 運用への現実的アドバイス:
         > controller (auto-scale)
 ```
 
-- `deliverJobConcurrency: N` が明示設定 → controller は当該 queue を **管理対象から外す**、N 固定で動作
+- `deliverJobConcurrency: N` が明示設定 → controller は当該 queue を **管理対象から外す**、roster は N 固定で動作 (handler が戻らない worker を隔離している間だけ実際に走る worker は N を超えうる。§5.1.1)
 - `maxWorkers: M` 設定 → controller の per-queue 上限として使う (§2)
 - 両方未設定 → `DefaultMaxWorkers` (§2 で定義、per-queue) を採用
 - `maxWorkersGlobal: G` (optional) → 全 queue worker 合計の hard cap (§3.2)
@@ -226,6 +233,7 @@ config struct での「未設定」表現は **`*int` ポインタ型 + `nil` = 
 │  ┌─────────────────────────────────────────────────────┐   │
 │  │  MetricCollector (Prometheus)                        │   │
 │  │  - mk_job_workers_active{queue}                     │   │
+│  │  - mk_job_workers_quarantined{queue}                │   │
 │  │  - mk_job_queue_pending{queue}                      │   │
 │  │  - mk_job_dispatch_wait_seconds{queue}              │   │
 │  │  - mk_job_scale_events_total{queue, direction}      │   │
@@ -250,7 +258,7 @@ Server 起動時:
 
 ticker (per controller, 1s):
   depth = Redis.ZCARD(queue)
-  current = driver.WorkerCount(queue)
+  current = driver.WorkerCount(queue)   // mkq では生存 Worker 数 (§5.1.1)
   action = controller.Observe(depth, current)
   if cfg.MaxWorkersGlobal != nil and globalSumWouldExceed(action, *cfg.MaxWorkersGlobal):
     action = NoOp  # global cap で reject
@@ -280,11 +288,11 @@ runtime kill switch は **auto-scale が cluster を喰い尽くして restart �
 
 連合 flood / retry storm / runaway webhook 等で controller が cluster を喰い尽くす事故を防ぐため、以下の **多層防御**:
 
-1. **`maxWorkers` hard cap** — controller は cap を超えてスケールしない
+1. **`maxWorkers` hard cap** — controller は cap を超えてスケールしない (cap が縛るのは roster。合計は §5.1.1 の式で決まる)
 2. **enqueue 側 backpressure** (将来 issue) — queue depth > 閾値時に inbox HTTP が 503 Retry-After で送信側に押し戻す
 3. **host-level circuit breaker** (既存 #1067 系の拡張、将来 issue) — 落ちてる相手への retry が cluster を食わない
 4. **per-queue scope** — 1 queue spike が他 queue の budget を奪わない
-5. **panic switch** — `jobQueueAutoScale: false` 一発で controller off、固定値運用に戻せる
+5. **panic switch** — `jobQueueAutoScale: false` 一発で controller off、roster は固定値運用に戻せる。**supervisor は autoscale と独立に動く**ので、隔離機構まで止めるには `queueStuckWorkerSeconds` に負値を入れる (§5.1.1)
 
 ## 5. multi-driver 整合 (mkq / asynq)
 
@@ -300,21 +308,124 @@ runtime kill switch は **auto-scale が cluster を喰い尽くして restart �
 
 ```
 mkqdriver.Server
- ├─ workerPools map[queue] *WorkerPool
- │   └─ WorkerPool
- │       ├─ workers []*mkq.Worker  (各 Worker は WithConcurrency(1) 固定で起動)
- │       ├─ activeCount int        (= 起動済 Worker 数 = 仮想的な総 concurrency)
+ ├─ pools map[queue] *workerPool
+ │   └─ workerPool
+ │       ├─ workers    []*workerHandle  (生存 roster。各 Worker は WithConcurrency(1) 固定)
+ │       ├─ quarantine []*workerHandle  (詰まって roster から外したもの、§5.1.1)
+ │       ├─ desired    int              (最後に要求された roster サイズ)
  │       └─ mu sync.Mutex
  │
- └─ Resize(queue, n) error:
-     - n > activeCount: 不足分の mkq.Worker を新規起動 (WithConcurrency(1))
-     - n < activeCount: 余剰 Worker に `Stop(ctx)` を呼ぶ。**in-flight job の完了は待たない** — ctx が切れて cancel され、next pickup で retry される (`TestServer_ResizeDown_CancelsInFlight`)
-     - n == activeCount: no-op
+ └─ Resize(queue, n) error:  (desired = n として reconcile)
+     - reconcile が先に走り、閾値超過の Worker を roster から quarantine へ移す (§5.1.1)
+     - n > roster: 不足分の mkq.Worker を新規起動 (WithConcurrency(1))
+     - n < roster: 余剰 Worker に `Stop(ctx)` を呼ぶ。**in-flight job の完了は待たない** — ctx が切れて cancel され、next pickup で retry される (`TestServer_ResizeDown_CancelsInFlight`)
+     - n == roster: no-op
 ```
 
 各 Worker を `WithConcurrency(1)` で起動して個別 Worker 単位で start / stop することで、library 側の API を変えずに **driver layer から動的 scale を実現** する (細粒度 control 重視、library への侵襲ゼロ)。
 
-`Server.Close` は workerPools 全 Worker の Close を sync.WaitGroup で待つ既存挙動と整合する (現状の close 経路を WorkerPool 単位に差し替えるだけ)。
+`Server.Shutdown` は全 pool の Worker (roster と quarantine の両方) の `Stop` を sync.WaitGroup で待つ。
+
+#### 5.1.1 handler から戻らない Worker の扱い (#2657)
+
+1 Worker = 1 dispatcher goroutine なので、**handler から戻らなくなった Worker は
+二度と `awaitMarker` に到達せず、キューの capacity を無言で 1 本削る**。本番の
+inbox で 4 本すべてがこの状態になり、`len(workers)` を返していた `WorkerCount` は
+「4 本健全」と報告し続けた。scale-down が末尾 (= 直前に autoscale が足した唯一
+健全な Worker) を落とす実装だったため、autoscale は健全な 1 本を作っては 6 秒で
+殺す病的サイクルに入った。
+
+詰まりが handler の中で起きていることは本番で確認した。`bull:inbox:active` に `ap:inbox` の job が 4 件、18-28 時間掴まれたまま残っており、
+各 job の lock TTL が 30 秒の `lockDuration` に対し 23-30 秒残っていた。mkq で
+`ExtendLock` を撃つのは heartbeat goroutine だけで、それは `runHandler` が戻った
+直後に (finalise より前に) 畳まれる。lock が延長され続けている = **handler の中に
+いる**。したがって handler の出入りを計測すれば足り、mkq 側に liveness API を足す必要は無い (v1.0.6 の `Worker` が
+公開しているのは `Stop` だけ)。
+
+対処は `reconcileLocked` に集約してある。
+
+1. **隔離 (quarantine)**: handler の実行が閾値を超えた Worker を roster から外し、
+   代わりを spawn する。**停止しない** — 閾値超過は詰まりの証明ではなく、`Stop`
+   すると in-flight job が cancel されて retry に回り、閾値より長い job が永久に
+   完了しなくなるため。**数を絞らずに必ず外す**のは、roster に残すと
+   `len(workers)` と生存数がずれ、「増やせと言ったのに縮む」が起きるから
+2. **復帰 (reinstate)**: 隔離後に **1 件でも job を完了した** Worker は生きている
+   ので roster に戻す。**「今 idle か」では判定しない** — mkq は `moveToFinished`
+   が返す prefetch をそのまま次の handler に渡すので、忙しいキューでは job と job
+   の間の idle がマイクロ秒しかなく、supervisor の周期ではまず捉えられない。
+   これを release 条件にすると、遅かっただけの健全な Worker が永久に隔離されたまま
+   枠を食い潰す。戻した Worker は **復帰時に握っていた job を必ず完走する**
+   (庇いが外れるのはその job を終えてから)。庇いは 1 件ぶんで、その後も余剰なら
+   通常の scale-down 対象に戻る — 「一度隔離されたら以後ずっと守られる」ではない
+3. **`WorkerCount` は生存数**: roster のうち閾値を超えていないものを数える。
+   `Resize` も reconcile 経由なので勘定は一致する
+4. **scale-down の対象選択**: 末尾固定をやめ、idle を先に選ぶ。閾値超過の Worker は
+   すでに roster にいないので、「詰まっているから停止する」判断はどこにも無い
+
+回収は **autoscale とは独立した supervisor goroutine** (既定 30 秒間隔) が回す。
+`jobQueueAutoScale` は opt-in で、無効なら `Resize` は一度も呼ばれない。詰まりの
+回収を `Resize` 経路にだけ置くと、既定構成では capacity が減ったまま二度と戻らない。
+
+##### 閾値はキューごと
+
+| キュー | 閾値 | 根拠 |
+|---|---|---|
+| deliver / inbox / relationship / push / webhook | 30 分 | 恒久的に戻ってこない Worker の回収が狙いなので、短くしても得るものが少ない。#2657 は 28 時間戻らなかった |
+| export / objectStorage / maintenance | 追跡しない | 1 job が分単位でページングするのが正常。`cleanRemoteFiles` は最大 10000 バッチ x 500ms (83 分) |
+| 上記以外 (既定一覧に無いキュー) | 追跡しない | job の長さを想定できないものに閾値を当てても誤検知しか生まない |
+
+`queueStuckWorkerSeconds` に正値を入れると全キューにその値が効き、負値で機能ごと
+無効になる。
+
+**追跡対象にも長い job は残る。** `deleteAccount` は maintenance ではなく
+**deliver** に載っており (`EnqueueDeleteAccount`)、100 件ごとに 250ms 空けるので
+70 万ノート規模で 30 分を超える。inbox も resolver の再帰で理論上 40 分を超えうる。
+どちらも隔離されるだけで job は cancel されないので実害は限定的だが、閾値を
+短くするとその状態が定常化する。
+
+##### 実効の並列度と上限
+
+**閾値は「健全な job の上限」ではない。** `safehttp` が切るのは 1 リクエスト
+10 秒であって 1 job ではなく、inbox の handler は resolver 経由で最大
+`resolveRecursionLimit` (256) 段の逐次 fetch を回しうるので、理論上の worst case は
+40 分を超える。job 単位の期限は #2658 で別途入れる。
+
+**隔離した Worker は動き続ける。** 止められない (handler が戻らない以上、`Stop` は
+`stopWorkerTimeout` = 30 秒だけ待たされたうえで goroutine を残して返る) し、
+遅かっただけなら止めるべきでもない。したがって代わりを立てた分だけ
+**実効の並列度は設定値を超える**。上限は
+`到達した最大 worker 数 + max(設定値, 4)` で、autoscale 無効なら
+`設定値 + max(設定値, 4)`、有効なら `max(設定値, maxWorkers) + max(設定値, 4)`
+にあたる (peak は設定値から始まる単調非減少値なので、`maxWorkers` を設定値より
+小さくしても下がらない)。
+これを超えると roster を縮めて Error を出す (5 分に 1 回まで)。
+
+**幅は `desired` ではなく設定値に紐づける。** `desired` は autoscale が動かす値で、
+しかも autoscale の入力はこの幅を通した生存数から来る。幅を `desired` から計算すると
+「隔離が増える → 生存数が減る → autoscale の目標が下がる → 幅が縮む → さらに減る」
+という帰還ループになり、**scale-up 要求のたびに roster が縮んで最終的に 0 になる**
+(`desired=16` / 隔離 20 で 3 tick、実測)。
+
+隔離された Worker は `awaitMarker` に戻って BZPopMin 接続を握り続けるので、その分の
+Redis 接続を見込んでおかないと #2657 の引き金になった
+`resource temporarily unavailable` を自分で再現することになる。**`redisForJobQueue.poolSize`
+を明示していない場合に限り** `workerPoolSize` が隔離ぶんを上乗せして自動確保する
+(go-redis の `PoolSize` は上限であって事前確保ではないので、広げても普段のコストは
+無い)。**明示している構成では上乗せされない** — §2 のように `poolSize` を書くなら、
+追跡対象キューについては `maxWorkers + max(<queue>JobConcurrency, 4)` を賄える値に
+すること。
+
+この上限があるので、`maxWorkers` / `maxWorkersGlobal` / 個別 knob は **「同時に
+走る Worker 数の hard cap」ではなくなった**。それらが縛るのは roster (= 仕事を
+取れる Worker) の数で、隔離中の Worker はそこに含まれない。合計の上限は上の式で
+決まる。
+
+##### 検出できないもの
+
+dispatcher が handler の**外** (mkq 内部の Lua 呼び出しや BZPOPMIN) で wedge した
+場合は idle と区別できない。#2657 で観測した詰まりは handler 内だったので対象外と
+した。キュー深さと組み合わせた粗い検出は paused queue や rate limit で偽陽性が出る
+ため採らない。恒久的な答えは handler 側に期限を付けること (#2658)。
 
 #### trade-off
 
@@ -342,7 +453,8 @@ asynq library は `Concurrency` を Server 構築時に固定する設計で、�
 
 | metric name | type | labels | 説明 |
 |---|---|---|---|
-| `mk_job_workers_active` | gauge | queue | 各 queue の active worker goroutine 数 |
+| `mk_job_workers_active` | gauge | queue | 各 queue で**仕事を取れる** worker 数。goroutine 数ではない (mkq では隔離中の worker を除く、§5.1.1) |
+| `mk_job_workers_quarantined` | gauge | queue | 閾値超過で pool の外に退けてある worker 数 (mkq のみ、他は常に 0)。**0 でない状態が続いていたら handler がブロックしている** |
 | `mk_job_queue_pending` | gauge | queue | Redis ZCARD 値 (pending job 数) |
 | `mk_job_dispatch_wait_seconds` | histogram | queue | enqueue → dispatch までの待ち時間 |
 | `mk_job_processing_seconds` | histogram | queue, status | job 処理時間 (success / failure) |
@@ -384,6 +496,7 @@ operator が「いつ何が起きたか」を grep で追えること。
 - cool-down 中の no-op (1 秒以内の連続発火を抑止、§3.4)
 - max bound 到達時の cap (`maxWorkers` を超えない)
 - min bound 到達時の floor (`minWorkers` 以下にならない)
+- floor 復帰 (`minWorkers` を下回ったら depth に関わらず戻す。`minWorkers: 0` では発火しない、§3.1)
 - `maxWorkersGlobal` 到達時の reject (controller 側で NoOp、§3.2)
 - time injection (fake Clock での deterministic test、§3.3)
 
@@ -396,6 +509,17 @@ operator が「いつ何が起きたか」を grep で追えること。
 - `TestServer_ResizeUp_ProcessesMoreInParallel` — Resize(2 → 8) で並列度が上がることを確認
 - `TestServer_ResizeDown_CancelsInFlight` — Resize(4 → 1) で **in-flight job は完了を待たず cancel される** ことを固定する (next pickup で retry される前提)。assert は「2 秒以内に返る / 3 件以上 cancel / 完了 0 / WorkerCount が 1」
 - `TestServer_ResizeRace` — 同時 multiple Resize 呼び出しで panic / leak しない
+- `TestSupervisor_ReplacesWedgedWorkerAndKeepsDraining` — 戻らない handler で Worker を
+  詰まらせても、差し替えられた Worker がキューを捌き続けることを固定する (§5.1.1)
+- `TestSupervisor_ReinstatesWorkerThatWasMerelySlow` — 隔離が in-flight job を
+  cancel しないこと (= 遅かっただけの job は完走し、Worker が pool に戻る) を固定する
+- `TestSupervisor_ReinstatesWorkerOnABusyQueue` — 常に仕事があるキューでも復帰
+  できることを固定する。idle の観測で判定していると、prefetch で job が連鎖する
+  ため永久に隔離されたままになる
+- `TestSupervisor_DoesNotTrackBatchQueues` — export のような batch 系キューでは
+  長い handler を隔離しないことを固定する (実効の並列度が上がり続けるのを防ぐ)
+- `TestResize_DoesNotEvictTheOnlyHealthyWorker` — 詰まった Worker がいる状態の
+  scale-down が健全な Worker を先に落とさないことを固定する
 
 testcontainers-go で実 Redis 起動。
 
@@ -443,9 +567,14 @@ testcontainers-go で実 Redis 起動。
 jobQueueAutoScale: false      # この 1 行で固定値 fallback
 deliverJobConcurrency: <値>   # 障害発生前の固定値、または runtime.NumCPU() × 8 を目安
 inboxJobConcurrency:   <値>   # 同上 (inbox は I/O 比が低いので deliver の半分が目安)
+queueStuckWorkerSeconds: -1   # 詰まり検出まで止める場合のみ (§5.1.1)
 ```
 
-再起動で固定運用に戻る。controller goroutine も終了するため leak しない。**経験則の目安値** (8-core 想定): `deliverJobConcurrency: 64` / `inboxJobConcurrency: 32`。実 workload で問題が出ない場合は default (`16`) のまま `jobQueueAutoScale: false` でも可。
+再起動で固定運用に戻る。controller goroutine も終了するため leak しない。
+
+**`jobQueueAutoScale: false` だけでは詰まり検出は止まらない。** supervisor は
+autoscale とは独立に動くので、worker 数を厳密に固定したいなら
+`queueStuckWorkerSeconds: -1` も要る (§5.1.1)。**経験則の目安値** (8-core 想定): `deliverJobConcurrency: 64` / `inboxJobConcurrency: 32`。実 workload で問題が出ない場合は default (`16`) のまま `jobQueueAutoScale: false` でも可。
 
 ## 10. open issues / 将来 work
 
