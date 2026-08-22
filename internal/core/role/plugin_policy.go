@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -95,7 +94,7 @@ func (s *Service) RegisterEffectivePolicyProvider(name string, reg plugin.Effect
 		return errors.New("role: effective policy provider の名前が空です")
 	}
 	// ロードベアリング: Validate を必ず呼んでから保存する。
-	if err := ValidateEffectivePolicyRegistration(reg); err != nil {
+	if err := plugin.ValidateEffectivePolicyRegistration(reg); err != nil {
 		return err
 	}
 	// 防御的コピー: caller の Keys slice と共有しない (登録後の外部変更が
@@ -118,21 +117,6 @@ func (s *Service) RegisterEffectivePolicyProvider(name string, reg plugin.Effect
 		return providers[i].name < providers[j].name
 	})
 	s.policyProviders = providers
-	return nil
-}
-
-// ValidateEffectivePolicyRegistration applies the host's startup validation
-// to an effective-policy registration.
-func ValidateEffectivePolicyRegistration(reg plugin.EffectivePolicyRegistration) error {
-	if err := reg.Validate(); err != nil {
-		return err
-	}
-	defaults := DefaultPolicies()
-	for _, key := range reg.Keys {
-		if _, ok := defaults[key]; !ok {
-			return fmt.Errorf("role: effective policy provider は既定外の policy key %q を宣言しています", key)
-		}
-	}
 	return nil
 }
 
@@ -230,7 +214,6 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 			resolved[i].contributions, resolved[i].ok = resolvePolicyProviderCached(
 				p,
 				plugin.EffectivePolicyRequest{UserID: userID, RoleIDs: providerRoleIDs},
-				base,
 			)
 		}()
 	}
@@ -273,7 +256,7 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 	return out, nil
 }
 
-func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePolicyRequest, base map[string]any) ([]plugin.EffectivePolicyContribution, bool) {
+func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, bool) {
 	if provider.runtime.disabled.Load() {
 		return nil, false
 	}
@@ -311,7 +294,7 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 
 	contributions, ok := invokePolicyProvider(provider, req)
 	if ok {
-		ok = ValidateEffectivePolicyContributions(provider.reg.Keys, base, contributions)
+		ok = plugin.ValidateEffectivePolicyContributions(provider.reg.Keys, contributions)
 	}
 	if ok {
 		contributions = clonePolicyContributions(contributions)
@@ -561,34 +544,6 @@ func policyProviderDeadlineExceeded(ctx context.Context) bool {
 	return ok && !time.Now().Before(deadline)
 }
 
-// ValidateEffectivePolicyContributions reports whether contributions satisfy
-// the same host schema enforced during production resolution.
-func ValidateEffectivePolicyContributions(keys []string, base map[string]any, contributions []plugin.EffectivePolicyContribution) bool {
-	type contributionTie struct {
-		key   string
-		order int
-	}
-	seen := make(map[contributionTie]struct{}, len(contributions))
-	for _, c := range contributions {
-		if !declaresKey(keys, c.Key) || c.Priority < 0 || c.Priority > 2 {
-			return false
-		}
-		baseVal, ok := base[c.Key]
-		if !ok {
-			return false
-		}
-		tie := contributionTie{key: c.Key, order: c.Order}
-		if _, duplicate := seen[tie]; duplicate {
-			return false
-		}
-		seen[tie] = struct{}{}
-		if !c.UseDefault && !policyValueValid(c.Key, baseVal, c.Value) {
-			return false
-		}
-	}
-	return true
-}
-
 func lessPolicyContribution(a, b plugin.EffectivePolicyContribution) bool {
 	if a.Order != b.Order {
 		return a.Order < b.Order
@@ -625,76 +580,6 @@ func activeRoleIDs(roles []*model.Role) []string {
 	}
 	sort.Strings(out)
 	return out
-}
-
-// declaresKey reports whether key is present in the provider's declared Keys.
-func declaresKey(keys []string, key string) bool {
-	for _, k := range keys {
-		if k == key {
-			return true
-		}
-	}
-	return false
-}
-
-// policyValueValid reports whether value is a valid provider value for key.
-func policyValueValid(key string, native, value any) bool {
-	switch native.(type) {
-	case bool:
-		_, ok := value.(bool)
-		return ok
-	case int:
-		return providerHostNumberValid(value)
-	case string:
-		v, ok := value.(string)
-		if !ok {
-			return false
-		}
-		if key == "chatAvailability" {
-			return v == "available" || v == "readonly" || v == "unavailable"
-		}
-		return true
-	case []string:
-		switch v := value.(type) {
-		case []string:
-			for _, item := range v {
-				if strings.TrimSpace(item) == "" {
-					return false
-				}
-			}
-			return true
-		case []any:
-			for _, item := range v {
-				s, ok := item.(string)
-				if !ok || strings.TrimSpace(s) == "" {
-					return false
-				}
-			}
-			return true
-		}
-		return false
-	default:
-		return false
-	}
-}
-
-func providerHostNumberValid(value any) bool {
-	switch v := value.(type) {
-	case int:
-		return true
-	case int64:
-		converted := int(v)
-		return int64(converted) == v
-	case float64:
-		if math.IsNaN(v) || math.IsInf(v, 0) {
-			return false
-		}
-		minInclusive := float64(math.MinInt)
-		maxExclusive := -minInclusive
-		return v >= minInclusive && v < maxExclusive
-	default:
-		return false
-	}
 }
 
 // InvalidateUser drops the cached policy inputs for a single user. Task 5's

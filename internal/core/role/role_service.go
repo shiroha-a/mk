@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/plugin"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -1454,7 +1455,7 @@ func (s *Service) Delete(id string) error {
 // avoid a per-request 39-entry map allocation — previously the single largest
 // allocation source (#1377, ~19% of all allocs in the HTTP bench), driving GC
 // pressure / tail latency.
-var defaultPoliciesCache = buildDefaultPolicies()
+var defaultPoliciesCache = plugin.EffectivePolicyDefaults()
 
 var mutableDefaultPolicyKeys = func() []string {
 	keys := make([]string, 0, 1)
@@ -1521,62 +1522,6 @@ func MergeMetaPolicies(rawPolicies []byte) map[string]any {
 		base[k] = coerceToBaseType(base[k], v)
 	}
 	return base
-}
-
-// buildDefaultPolicies constructs the default policy map. Called once to seed
-// defaultPoliciesCache; do not call per-request (use DefaultPolicies /
-// DefaultPoliciesClone).
-func buildDefaultPolicies() map[string]any {
-	return map[string]any{
-		"gtlAvailable":               true,
-		"ltlAvailable":               true,
-		"canPublicNote":              true,
-		"mentionLimit":               20,
-		"canInvite":                  false,
-		"inviteLimit":                0,
-		"inviteLimitCycle":           10080,
-		"inviteExpirationTime":       0,
-		"canManageCustomEmojis":      false,
-		"canManageAvatarDecorations": false,
-		"canSearchNotes":             false,
-		"canSearchUsers":             true,
-		"canUseTranslator":           true,
-		"canHideAds":                 false,
-		// upstream Misskey #17121 (= 2026.5.1 fix / triage #1012): channel 作成
-		// 権限の role policy。default true (= 全員許可)、admin が role 経由で
-		// 個別 user を false に絞れる。`/api/channels/create` で gate される。
-		PolicyCanCreateChannel:   true,
-		"driveCapacityMb":        100,
-		"maxFileSizeMb":          30,
-		"alwaysMarkNsfw":         false,
-		"canUpdateBioMedia":      true,
-		"pinLimit":               5,
-		"antennaLimit":           5,
-		"wordMuteLimit":          200,
-		"webhookLimit":           3,
-		"clipLimit":              10,
-		"noteEachClipsLimit":     200,
-		"userListLimit":          10,
-		"userEachUserListsLimit": 50,
-		"rateLimitFactor":        1,
-		"avatarDecorationLimit":  1,
-		"canImportAntennas":      false,
-		"canImportBlocking":      false,
-		"canImportFollowing":     false,
-		"canImportMuting":        false,
-		"canImportUserLists":     false,
-		"chatAvailability":       "available",
-		"uploadableFileTypes":    []string{"text/*", "application/json", "image/*", "video/*", "audio/*"},
-		"noteDraftLimit":         10,
-		"scheduledNoteLimit":     1,
-		"watermarkAvailable":     true,
-		// 分割アップロード (#2313)。mk-go 独自。既定で許可するが、インスタンス
-		// 側の `meta.chunkedUploadEnabled` が false なら機能ごと無効なので、
-		// この既定 true だけでは何も有効にならない。
-		PolicyCanUseChunkedUpload:                true,
-		PolicyChunkedUploadMaxConcurrentSessions: 4,
-		PolicyChunkedUploadMaxPendingMb:          1024,
-	}
 }
 
 // FindRole returns the role by id. アカウント移行のロール引き継ぎ (#2419) が
