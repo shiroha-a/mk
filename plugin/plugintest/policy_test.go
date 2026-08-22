@@ -47,6 +47,12 @@ func TestEffectivePoliciesCapture(t *testing.T) {
 	assert.Equal(t, []string{"user"}, recorder.users)
 }
 
+func TestEffectivePoliciesAbsent(t *testing.T) {
+	registration := plugintest.New(t).EffectivePolicies(plugin.Definition{})
+	assert.Empty(t, registration.Keys)
+	assert.Nil(t, registration.Resolve)
+}
+
 func TestEffectivePoliciesRejectsInvalidRegistration(t *testing.T) {
 	definition := plugin.Definition{
 		Name: "policy", APIVersion: plugin.APIVersion,

@@ -11,10 +11,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/effectivepolicy"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
-	"github.com/shiroha-a/mk/plugin"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -1455,7 +1455,7 @@ func (s *Service) Delete(id string) error {
 // avoid a per-request 39-entry map allocation — previously the single largest
 // allocation source (#1377, ~19% of all allocs in the HTTP bench), driving GC
 // pressure / tail latency.
-var defaultPoliciesCache = plugin.EffectivePolicyDefaults()
+var defaultPoliciesCache = effectivepolicy.Defaults()
 
 var mutableDefaultPolicyKeys = func() []string {
 	keys := make([]string, 0, 1)

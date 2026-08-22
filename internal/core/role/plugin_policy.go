@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/effectivepolicy"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/plugin"
 )
@@ -94,7 +95,7 @@ func (s *Service) RegisterEffectivePolicyProvider(name string, reg plugin.Effect
 		return errors.New("role: effective policy provider の名前が空です")
 	}
 	// ロードベアリング: Validate を必ず呼んでから保存する。
-	if err := plugin.ValidateEffectivePolicyRegistration(reg); err != nil {
+	if err := effectivepolicy.ValidateRegistration(reg); err != nil {
 		return err
 	}
 	// 防御的コピー: caller の Keys slice と共有しない (登録後の外部変更が
@@ -294,7 +295,7 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 
 	contributions, ok := invokePolicyProvider(provider, req)
 	if ok {
-		ok = plugin.ValidateEffectivePolicyContributions(provider.reg.Keys, contributions)
+		ok = effectivepolicy.ValidateContributions(provider.reg.Keys, contributions)
 	}
 	if ok {
 		contributions = clonePolicyContributions(contributions)
