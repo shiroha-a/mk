@@ -147,23 +147,39 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 		add(&d.Effective, "worker: "+q, fmt.Sprintf("%d", conc[q]), note)
 	}
 
-	// **ここが本機能の要点。** rate limit は worker ごとに適用されるので、
-	// 設定名から想像する「queue 全体の上限」にはならない
-	// (docs/configuration.md に記載済みの罠)。
+	// **リミッタは queue 単位で効く。worker 数を掛けない。**
+	//
+	// mkq はリミッタの実体が BullMQ 互換の `bull:<queue>:limiter` という
+	// queue ごとに 1 本の Redis キーで、pool 内の全 Worker がそれを INCR
+	// する。asynq も buildRateLimitMiddleware が queue ごとに
+	// rate.Limiter を 1 つ作って全 worker goroutine で共有する。
+	// どちらも合計は設定値のままで、worker 数には比例しない。
+	//
+	// ここには以前 `設定値 x worker 数` を「実際の上限」として出す実装と
+	// warning があったが**誤りだった** (#2669)。#2640 で server.go と
+	// docs は直っていたのに、この dump だけ古い理解が残っていた。
+	// 読んだ operator は狙ったレートを worker 数で割って設定し直すので、
+	// **配送が 1/N に絞られる**。
 	for _, q := range queues {
 		r, ok := rates[q]
 		if !ok || r <= 0 {
 			continue
 		}
-		total := r * conc[q]
-		add(&d.Effective, "rate: "+q,
-			fmt.Sprintf("%d jobs/sec", total),
-			fmt.Sprintf("設定値 %d × worker %d。rate limit は worker ごとに効く", r, conc[q]))
-		if conc[q] > 1 {
-			d.Warnings = append(d.Warnings, fmt.Sprintf(
-				"%sJobPerSec は設定値 %d だが、worker が %d なので実際の上限は %d jobs/sec になる",
-				q, r, conc[q], total))
+		note := "queue 全体の上限。worker 数を増やしても変わらない"
+		if cfg.JobQueueDriver == "asynq" {
+			// asynq のリミッタは Go のメモリ上の rate.Limiter なので
+			// **プロセス内**にしか効かない。queue プロセスを複数立てると
+			// 合計はその本数倍になる。mkq は Redis キーなのでプロセスを
+			// 跨いで効く。
+			//
+			// あわせて asynq は handler middleware の Wait で待たせるので、
+			// 制限中の queue が共有 worker pool を占有して他 queue が
+			// starve しうる (mkq は pull レイヤなので影響しない)。
+			note += "。ただし asynq では**プロセス内**の上限で " +
+				"(mkq は Redis キー共有なのでプロセスを跨いで効く)、" +
+				"待機が共有 worker pool を占有して他 queue が starve しうる"
 		}
+		add(&d.Effective, "rate: "+q, fmt.Sprintf("%d jobs/sec", r), note)
 	}
 
 	// 詰まり検出はキューごとに効いたり効かなかったりするうえ、効いている

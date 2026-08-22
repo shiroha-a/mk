@@ -69,9 +69,12 @@ func TestRedactURLUserinfo(t *testing.T) {
 	assert.NotEmpty(t, redactURLUserinfo("://bad"))
 }
 
-// **本機能の要点。** rate limit は worker ごとに効くので、設定名から想像する
-// 「queue 全体の上限」にはならない。実効値と警告の両方を出す。
-func TestBuildConfigDump_SurfacesRateTimesConcurrency(t *testing.T) {
+// **リミッタは queue 単位。worker 数を掛けない** (#2669)。
+//
+// 掛けた値を出していると、読んだ operator が狙ったレートを worker 数で
+// 割って設定し直し、配送が 1/N に絞られる。#2640 で server.go と docs は
+// 直ったのに dump だけ古い理解が残っていた。
+func TestBuildConfigDump_RateIsPerQueueNotPerWorker(t *testing.T) {
 	four, hundred := 4, 100
 	cfg := &config.Config{
 		URL: "https://example.com", Port: 3000,
@@ -80,28 +83,106 @@ func TestBuildConfigDump_SurfacesRateTimesConcurrency(t *testing.T) {
 	}
 	d := BuildConfigDump(cfg, config.RoleBoth)
 
-	var rate string
+	var rate, note string
 	for _, e := range d.Effective {
 		if e.Key == "rate: deliver" {
-			rate = e.Value
+			rate, note = e.Value, e.Note
 		}
 	}
-	assert.Equal(t, "400 jobs/sec", rate, "設定値 100 × worker 4")
+	assert.Equal(t, "100 jobs/sec", rate, "設定値そのままが queue 全体の上限")
+	assert.Contains(t, note, "worker 数を増やしても変わらない")
 
-	require.NotEmpty(t, d.Warnings)
-	assert.Contains(t, strings.Join(d.Warnings, "\n"), "400 jobs/sec")
+	// **worker 数を掛けた値がどこにも出ないこと。** value だけ見ていると、
+	// 同じ嘘を note や warning に移すだけで通ってしまう (実際に mutation で
+	// 両方すり抜けた)。3 つとも塞ぐ。
+	assert.NotContains(t, rate, "400")
+	assert.NotContains(t, note, "400", "note にも掛け算を書かない")
+	assert.Empty(t, d.Warnings, "worker 数由来の警告は出さない")
 }
 
-// worker が 1 なら設定値と実効値が一致するので警告しない (ノイズにしない)。
-func TestBuildConfigDump_NoWarningWhenSingleWorker(t *testing.T) {
-	one, fifty := 1, 50
-	cfg := &config.Config{
-		URL: "https://example.com", Port: 3000,
-		DeliverJobConcurrency: &one,
-		DeliverJobPerSec:      &fifty,
+// worker 数を変えても rate 行は動かない。
+func TestBuildConfigDump_RateUnaffectedByWorkerCount(t *testing.T) {
+	hundred := 100
+	rateFor := func(workers int) string {
+		cfg := &config.Config{
+			URL: "https://example.com", Port: 3000,
+			DeliverJobConcurrency: &workers,
+			DeliverJobPerSec:      &hundred,
+		}
+		for _, e := range BuildConfigDump(cfg, config.RoleBoth).Effective {
+			if e.Key == "rate: deliver" {
+				return e.Value
+			}
+		}
+		return ""
 	}
-	d := BuildConfigDump(cfg, config.RoleBoth)
-	assert.Empty(t, d.Warnings)
+	assert.Equal(t, rateFor(1), rateFor(16), "worker 数はリミッタに影響しない")
+	assert.Equal(t, "100 jobs/sec", rateFor(16))
+}
+
+// asynq だけ 2 つ余計な性質がある: リミッタが**プロセス内**にしか効かないことと、
+// Wait が共有 worker pool を占有して他 queue を枯らしうること。
+//
+// **値も driver ごとに固定する。** note だけ見ていると、asynq の分岐の中で
+// 値に worker 数を掛けても誰も気づかない (mutation で実際にすり抜けた)。
+// #2669 の完了条件が「asynq での見え方を確認し、必要なら出し分ける」なので、
+// この分岐は将来手が入る場所でもある。
+func TestBuildConfigDump_RateNoteIsDriverSpecific(t *testing.T) {
+	four, hundred := 4, 100
+	entry := func(driver string) ConfigEntry {
+		cfg := &config.Config{
+			URL: "https://example.com", Port: 3000,
+			JobQueueDriver:        driver,
+			DeliverJobConcurrency: &four,
+			DeliverJobPerSec:      &hundred,
+		}
+		for _, e := range BuildConfigDump(cfg, config.RoleBoth).Effective {
+			if e.Key == "rate: deliver" {
+				return e
+			}
+		}
+		return ConfigEntry{}
+	}
+
+	for _, driver := range []string{"", "mkq", "asynq"} {
+		e := entry(driver)
+		assert.Equal(t, "100 jobs/sec", e.Value,
+			"driver %q でも設定値そのまま (worker 数を掛けない)", driver)
+		assert.NotContains(t, e.Note, "400", "driver %q", driver)
+	}
+
+	// asynq のリミッタは Go のメモリ上なのでプロセスを跨がない。
+	//
+	// **どちらが per-process かまで固定する。** 「プロセス内」という語が
+	// 出ているかだけ見ても、note の中で driver 名が入れ替わった誤りを
+	// 素通りさせる (mutation で確認済み)。向きが逆だと、operator は queue
+	// プロセスを増やしても Redis キーで抑えられると誤解するので、実害は
+	// 語の有無より向きのほうにある。言い換えたらここも読み直すこと。
+	//
+	// **強調記号は縛らない** (dump は端末出力なので `**` はそのまま表示される
+	// 飾りでしかない)。逆に **どちらが per-process かは縛る**。
+	asynqNote := entry("asynq").Note
+	assert.Regexp(t, `asynq では\**プロセス内\**の上限`, asynqNote)
+	assert.Regexp(t, `mkq は Redis キー共有`, asynqNote)
+
+	// mkq 側で禁じるのは「プロセス内」という**誤った主張**だけ。
+	// 「Redis キーなのでプロセスを跨いで効く」は真なので、将来 base note に
+	// 足せるよう `プロセス` 全体を禁止語にはしない。
+	// 「プロセス内 / ごと / 単位 / あたり」はどれも同じ誤りなので、まとめて
+	// 禁じる。真である「プロセスを跨いで効く」は通す。
+	const perProcess = `プロセス(内|ごと|単位|あたり)`
+	assert.NotRegexp(t, perProcess, entry("mkq").Note)
+	// **asynq の note の中で mkq をそう説明するのも同じ誤り。** asynq note は
+	// mkq に言及するので、mkq 行だけ見ていても捕まらない。
+	assert.NotRegexp(t, `mkq[^。]*`+perProcess, asynqNote)
+
+	// starvation の注記が asynq 側にだけ付くこと。**`worker pool` は
+	// 文字列として縛っている**ので、日本語に言い換えるならここも直すこと。
+	assert.Contains(t, asynqNote, "worker pool")
+	assert.NotContains(t, entry("mkq").Note, "worker pool")
+
+	// 既定が mkq であることは、文言に依存せず行ごと比較して固定する。
+	assert.Equal(t, entry("mkq"), entry(""), "既定は mkq と同じ行になる")
 }
 
 // rate 未設定なら rate 行を出さない。
@@ -220,4 +301,90 @@ func TestBuildConfigDump_StuckAndDeadlineRows(t *testing.T) {
 	require.True(t, ok)
 	assert.Contains(t, note, "6") // 2 + max(2,4)
 	assert.NotContains(t, note, "maxWorkers 基準")
+}
+
+// TestBuildConfigDump_RateProductAppearsNowhere is the structural gate for
+// #2669.
+//
+// **積は dump のどこにも出ないし、rate 行は設定値そのものしか出さない。**
+// 行や field を 1 つずつ pin する方式では嘘の移設を追いきれなかった —
+// round 1 で note へ、round 2 で asynq の値へ、round 3 で worker 行 /
+// Warnings / 別 queue へ、round 4 で「特定の config 形でだけ掛ける」形へと、
+// 毎回別の場所に同じ主張が復活した。**出力全体**と**行の集合そのもの**を
+// 軸にする。
+//
+// config の形を表で回すのは、掛け算を「autoscale のときだけ」「concurrency を
+// 明示していないときだけ」のように条件付きで戻す変更を捕まえるため。すぐ下の
+// stuck 検出ループが実際に autoscale で分岐しているので、rate 側にも同じ分岐を
+// 足すのは十分ありうる変更。
+func TestBuildConfigDump_RateProductAppearsNowhere(t *testing.T) {
+	dConc, iConc, rConc := 4, 16, 4
+	// 積 404 / 1648 / 428 が他の設定値と衝突しない値を選ぶ。
+	dRate, iRate, rRate := 101, 103, 107
+	wantRows := map[string]string{
+		"rate: deliver":      "101 jobs/sec",
+		"rate: inbox":        "103 jobs/sec",
+		"rate: relationship": "107 jobs/sec",
+	}
+
+	shapes := map[string]func(*config.Config){
+		"concurrency 明示": func(c *config.Config) {
+			c.DeliverJobConcurrency, c.InboxJobConcurrency, c.RelationshipJobConcurrency = &dConc, &iConc, &rConc
+		},
+		"concurrency 未指定": func(*config.Config) {},
+		"autoscale 有効": func(c *config.Config) {
+			c.JobQueueAutoScale = true
+		},
+		"queue 専用ロール": func(c *config.Config) {
+			c.DeliverJobConcurrency = &dConc
+		},
+	}
+
+	for shape, apply := range shapes {
+		for _, driver := range []string{"", "mkq", "asynq"} {
+			t.Run(shape+"/"+driver, func(t *testing.T) {
+				cfg := &config.Config{
+					URL: "https://example.com", Port: 3000,
+					JobQueueDriver:        driver,
+					DeliverJobPerSec:      &dRate,
+					InboxJobPerSec:        &iRate,
+					RelationshipJobPerSec: &rRate,
+				}
+				apply(cfg)
+				role := config.RoleBoth
+				if shape == "queue 専用ロール" {
+					role = config.RoleQueue
+				}
+				d := BuildConfigDump(cfg, role)
+				rendered := RenderConfigDump(d)
+
+				// **rate 行の集合そのものを固定する。** substring では
+				// 「別名の行を足して積を載せる」「単位を変えて載せる」が
+				// すり抜ける。
+				got := map[string]string{}
+				for _, e := range d.Effective {
+					if strings.HasPrefix(e.Key, "rate: ") {
+						got[e.Key] = e.Value
+					}
+				}
+				assert.Equal(t, wantRows, got, "rate 行は設定値そのものだけ")
+
+				// 積が dump のどこにも出ないこと (Warnings も
+				// RenderConfigDump の出力に含まれる)。
+				for _, product := range []string{"404", "1648", "428"} {
+					assert.NotContains(t, rendered, product,
+						"worker 数を掛けた値 %s が出ている", product)
+				}
+				// 数字を出さない言い換えも塞ぐ。
+				for _, phrase := range []string{"worker ごと", "worker を増やせば", "本ぶんの枠"} {
+					assert.NotContains(t, rendered, phrase)
+				}
+				// warning で言い直すのも塞ぐ。数値を含む嘘は上の積チェックが
+				// 拾うので、ここは rate 設定名に言及する warning を禁じる。
+				for _, w := range d.Warnings {
+					assert.NotContains(t, w, "JobPerSec")
+				}
+			})
+		}
+	}
 }

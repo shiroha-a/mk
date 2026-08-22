@@ -303,21 +303,34 @@ make migrate-up
 ではないが実際に効く値) の 2 部構成。**後者が要点**で、設定ファイルを読んだだけでは
 分からないものを出す。
 
+実際の出力から抜粋 (`deliverJobConcurrency: 4` / `deliverJobPerSec: 100` の場合)。
+**値と説明文は実出力そのままだが、行は間引いて桁は詰めてある** — worker 行と
+stuck 検出行は全キュー分出るほか `frontend 配信元` / `maxFileSize` などもあり、
+実際の桁幅は一番長いキュー名に揃うので広い。
+
 ```
 実効値
   process role            both   (1 プロセスで HTTP とジョブの両方を担う)
   worker: deliver         4   (明示指定)
   worker: inbox           16   (既定値)
-  rate: deliver           400 jobs/sec   (設定値 100 × worker 4。rate limit は worker ごとに効く)
-  redis pool (job queue)  80   (poolSize 未指定時の自動サイジング結果)
-
-注意
-  - deliverJobPerSec は設定値 100 だが、worker が 4 なので実際の上限は 400 jobs/sec になる
+  rate: deliver           100 jobs/sec   (queue 全体の上限。worker 数を増やしても変わらない)
+  stuck 検出: export       無効   (隔離は無効 (長い batch job が正常なキュー、または queueStuckWorkerSeconds が負値)。ただし handler の期限による漏れは最大 6 本まで許容し、達すると worker を 0 にする)
+  stuck 検出: inbox        30m0s   (超過した worker は勘定から外して差し替える。実 worker 数は最大 32 本 (放棄した handler と共用の枠))
+  handler 期限            1h0m0s (既定)   (batch 系 task type (export / cleanRemoteFiles / deleteAccount 等) は対象外)
+  redis pool (job queue)  80   (poolSize 未指定時の自動サイジング結果 (stuck 検出の許容ぶんを含む))
 ```
 
-`*JobPerSec` が worker 数で倍化する件は
-[設定リファレンス](configuration.md)にも記載しているが、**自分のインスタンスで実際に
-いくつになっているか**はここでしか分からない。
+`redis pool` は「worker 総数 + 隔離の許容ぶん + 余裕」と `10 x GOMAXPROCS` の
+大きいほうになる。この構成では前者が 80 なので **8 コア以下ではどのコア数でも
+80** で、9 コア以上から `10 x GOMAXPROCS` 側が効く (実測: 9 コアで 90、
+16 コアで 160)。
+
+キューまわりは設定ファイルを読んだだけでは効く値が分からないものが多い。
+worker 数は既定値がキューごとに違い、`stuck 検出` は**キューごと**・
+`handler 期限` は**task type ごと**に対象外があり、実 worker 数の上限は隔離ぶんを含めて設定値を
+超えうる ([#2657](https://github.com/shiroha-a/mk/issues/2657) /
+[#2658](https://github.com/shiroha-a/mk/issues/2658))。**自分のインスタンスで
+実際にいくつになっているか**はここでしか分からない。
 
 パスワード・鍵・proxy の認証情報はマスクされる。設定の有無だけは分かるようにしてある
 (未設定と設定済みの区別は診断に要るため)。

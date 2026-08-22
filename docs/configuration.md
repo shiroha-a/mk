@@ -114,6 +114,7 @@ cp .config/docker.yml.example .config/docker.yml
 > **rate limit (`*JobPerSec`) の挙動差**:
 > - `asynq`: handler middleware で `golang.org/x/time/rate.Limiter.Wait` する設計。共有 worker pool で動くため、レート制限中の deliver タスクが多数 pending していると worker が `Wait` で寝てしまい、他 queue (push / export / webhook / maintenance) のタスクが starvation する可能性あり。これは asynq に per-queue pull-rate 制御 API が無いことに起因する根源的制約。
 > - `mkq`: `mkq.WithRateLimit` で **worker pull レイヤ** に制御が入るため、レート制限が他 queue の処理を阻害しない。
+> - **効く範囲も違う**: `asynq` のリミッタは Go のメモリ上の `rate.Limiter` なので **1 プロセス内**にしか効かず、queue プロセスを複数立てると合計はその本数倍になる。`mkq` は Redis キーなのでプロセスを跨いで効く。
 > - **本格的に rate limit を運用するなら `mkq` driver を推奨**。
 >
 > **`mkq` driver の rate limit は per-queue**:
