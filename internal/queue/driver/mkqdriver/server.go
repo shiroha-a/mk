@@ -8,6 +8,7 @@ import (
 	"maps"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/shiroha-a/mkq"
@@ -41,9 +42,14 @@ import (
 //     individual pool state).
 //   - Each pool owns its own pool.mu for the workers slice. Resize
 //     takes pool.mu and HOLDS IT across Worker.Stop calls. Stop is
-//     fast (ms-order cancellation, not job completion) so this is
-//     acceptable; different queues use independent pool.mu so
-//     cross-queue Resize is parallel.
+//     normally fast (ms-order cancellation, not job completion) so this
+//     is acceptable; different queues use independent pool.mu so
+//     cross-queue Resize is parallel. **ms で終わらない場合がある**:
+//     ctx を見ない handler を抱えた Worker への Stop は stopWorkerTimeout
+//     (30 秒) まで返らない。閾値未満の busy Worker を縮小で選んだとき、
+//     および Resize(q, 0) / Shutdown が quarantine (= 戻ってこないと
+//     分かっている Worker) を畳むときに起きる。その間そのキューの
+//     WorkerCount は待たされる (= Prometheus scrape も)。
 //   - workerPool.shutdown flag (set under pool.mu in shutdownLocked)
 //     guards against the Resize-after-Shutdown race: once Shutdown
 //     marks a pool, subsequent Resize calls on that captured pool
@@ -76,24 +82,104 @@ type Server struct {
 	// dispatch path で clock も触らない。
 	observer driver.Observer
 
+	// stuckAfter / superviseInterval configure the wedged-worker
+	// supervisor (#2657). Zero applies the package defaults;
+	// stuckAfter < 0 disables the supervisor entirely.
+	stuckAfter        time.Duration
+	superviseInterval time.Duration
+	// nanos is the monotonic clock the pools use for liveness. nil means
+	// monotonicNanos.
+	nanos func() int64
+
 	mu       sync.Mutex
 	handlers map[string]driver.HandlerFunc
 	pools    map[string]*workerPool
 	started  bool
+	// superviseCancel stops the supervisor goroutine; superviseDone is
+	// closed by that goroutine on exit. Both nil while not running.
+	superviseCancel context.CancelFunc
+	superviseDone   chan struct{}
 }
 
-// workerPool owns a slice of mkq.Worker instances for one queue. Each
-// Worker is started with WithConcurrency(1), so |workers| equals the
-// effective concurrency for the queue. Resize mutates the slice while
-// holding mu and issues Worker.Stop calls under the same mu (Stop is
-// ms-order cancellation, not job completion, so holding the lock is
-// acceptable).
+// defaultStuckAfter is the threshold applied to queues whose jobs have a
+// bounded duration.
+//
+// **これは「健全な job の上限」ではなく「これを超えたら勘定に入れない」。**
+// safehttp が切るのは 1 リクエスト 10 秒であって 1 job ではない。inbox の
+// handler は resolver 経由で最大 resolveRecursionLimit (256) 段の逐次 fetch を
+// 回しうるので、理論上の worst case は 40 分を超える。job 単位の期限は
+// #2658 で別途入れる。
+//
+// 30 分にしてあるのは、この機構の狙いが**恒久的に戻ってこない Worker の
+// 回収**だからで、短くしても得るものが少ないため。#2657 の本番障害は 28 時間
+// 戻ってこなかったので、30 分で気付けば十分に速い。逆に短くすると、たまたま
+// 遅い job のたびに Worker を差し替えることになり、実効の並列度が設定値を
+// 超えた状態が定常化する (allowedRosterLocked のコメント参照)。
+const defaultStuckAfter = 30 * time.Minute
+
+// defaultStuckAfterByQueue maps a queue to its stuck-worker threshold.
+// A zero entry (or an absent one) disables liveness tracking for that
+// queue.
+//
+// **バッチ系を外してあるのは、閾値超過が正常だから。** 隔離は job を殺さない
+// が、代わりの Worker を立てるので、常時閾値を超えるキューでは実効の並列度が
+// 設定値を超え続け、Redis 接続も余分に食う (allowedRosterLocked 参照)。
+// 具体的には:
+//
+//   - objectStorage の cleanRemoteFiles は 1 job で最大 10000 バッチ x 500ms の
+//     ページングを回す (それだけで 83 分)
+//   - export は 1 job でアカウント全体をページングして書き出す
+//   - maintenance は cron 由来の後始末をまとめて回す
+//
+// これらは「戻ってこない」のではなく「長い」ので、この機構の対象ではない。
+// 代わりに job 側へ期限を付ける話が #2658。
+//
+// **追跡対象にも長い job は残る。** deleteAccount は maintenance ではなく
+// deliver に載っており (queue.go の EnqueueDeleteAccount)、100 件ごとに 250ms
+// 空けるので 70 万ノート規模で 30 分を超える。inbox も resolver の再帰で
+// 理論上 40 分を超えうる。どちらも隔離されるだけで job は cancel されないため
+// 実害は「一時的に Worker が 1 本増える」に留まるが、閾値を短くすると
+// その状態が定常化する。
+//
+// 既定一覧に無いキューも追跡しない。job の長さを想定できない
+// ものに閾値を当てても誤検知しか生まない。必要なら
+// queueStuckWorkerSeconds で全キューに一律の値を入れられる。
+var defaultStuckAfterByQueue = map[string]time.Duration{
+	"inbox":        defaultStuckAfter,
+	"deliver":      defaultStuckAfter,
+	"relationship": defaultStuckAfter,
+	"push":         defaultStuckAfter,
+	"webhook":      defaultStuckAfter,
+}
+
+// defaultStuckAfterForQueue returns the built-in threshold for qname.
+func defaultStuckAfterForQueue(qname string) time.Duration {
+	return defaultStuckAfterByQueue[qname]
+}
+
+// defaultSuperviseInterval is how often the supervisor re-checks every
+// pool. 30 秒あたりで見れば十分で、Redis も一切触らない (handler 出入りの
+// atomic を読むだけ) ので間隔を詰める理由が無い。
+const defaultSuperviseInterval = 30 * time.Second
+
+// workerPool owns the mkq.Worker instances for one queue. Each Worker
+// is started with WithConcurrency(1), so |workers| equals the effective
+// concurrency for the queue. Resize mutates the slice while holding mu
+// and issues Worker.Stop calls under the same mu (Stop is ms-order
+// cancellation, not job completion, so holding the lock is acceptable).
 //
 // shutdown is set true under mu by shutdownLocked. Once set, all
 // subsequent resizeLocked calls return ErrResizeAfterShutdown so a
 // caller that captured the pool pointer before Server.Shutdown ran
 // cannot spawn leaked Workers on a pool that is no longer owned by
 // any Server.
+//
+// Roster と quarantine の 2 本立てにしている理由 (#2657): 1 Worker =
+// 1 dispatcher goroutine なので、handler から戻らなくなった Worker は
+// 二度と awaitMarker に到達せず、キューの capacity を無言で 1 本削る。
+// 本番で inbox の 4 本すべてがこの状態になり、autoscale は帳簿上の
+// len(workers) を見て「4 本健全」と誤認し続けた。詰まった Worker は
+// roster から quarantine へ退避して勘定から外し、代わりを spawn する。
 type workerPool struct {
 	queue   *mkq.Queue[framedPayload]
 	handler mkq.Handler[framedPayload]
@@ -101,11 +187,135 @@ type workerPool struct {
 	// pool (rate limit, job metrics, etc.). WithConcurrency(1) is added
 	// per-worker in Resize, not here.
 	optsBase []mkq.WorkerOption
+	// name is the queue name, used for log attribution only.
+	name string
+	// stuckAfter is how long a handler may run before its Worker stops
+	// counting towards the queue's worker budget. <= 0 disables liveness
+	// tracking for this pool.
+	stuckAfter time.Duration
+	// nanos is the monotonic clock, injectable for tests. Never nil after
+	// Start.
+	nanos func() int64
 
-	mu       sync.Mutex
-	workers  []*mkq.Worker
-	shutdown bool
+	mu sync.Mutex
+	// workers is the live roster: the Workers that count towards
+	// WorkerCount and that Resize grows / shrinks.
+	workers []*workerHandle
+	// quarantine holds Workers evicted from the roster because their
+	// handler overran stuckAfter. They are NOT stopped on eviction —
+	// see quarantineStuckLocked for why — and are dropped once they
+	// return to idle.
+	quarantine []*workerHandle
+	// desired is the roster size last requested via Resize / Start. The
+	// supervisor restores the roster to this size after evictions.
+	desired int
+	// baseConcurrency is the queue's configured worker count, fixed at
+	// Start. The quarantine headroom is sized from this.
+	baseConcurrency int
+	// peakDesired is the high-water mark of desired. The quarantine
+	// allowance is anchored to it — see allowedRosterLocked.
+	peakDesired int
+	// seq numbers Workers for log attribution.
+	seq uint64
+	// capLogged / lastCapLogNanos throttle the over-budget Error log. The
+	// bool is separate because 0 is a legal monotonic reading, so it cannot
+	// double as "never logged".
+	capLogged       bool
+	lastCapLogNanos int64
+	shutdown        bool
 }
+
+// reportCapEvery throttles the Error log emitted while the pool cannot
+// reach its configured worker count.
+const reportCapEvery = 5 * time.Minute
+
+// quarantineHeadroom is the floor for how many quarantined Workers a pool
+// tolerates beyond its configured count. See allowedRosterLocked; the
+// Redis connection budget for this allowance is reserved up front in
+// workerPoolSize.
+const quarantineHeadroom = 4
+
+// workerHandle pairs one mkq.Worker with the liveness bookkeeping the
+// pool needs to tell a live dispatcher from a wedged one.
+//
+// mkq exposes no "is this dispatcher running" API (checked against
+// v1.0.6), but the handler is ours: wrapping it per Worker is enough to
+// see whether a Worker is inside a job and for how long.
+//
+// **その計測で足りることは本番で確認した** (#2657、2026-08-22)。滞留中の
+// inbox は `bull:inbox:active` に 4 件を 18-28 時間掴んだままで、各 job の
+// lock TTL が 30 秒の lockDuration に対し 23-30 秒残っていた。mkq の
+// heartbeat goroutine は `processJob` の寿命に紐づくので、lock が延長され
+// 続けている = `processJob` から戻っていない = handler の中にいる。
+// mkq 内部でも Redis でもない。
+type workerHandle struct {
+	w *mkq.Worker
+	// busySinceNanos holds the monotonic reading of the moment the
+	// currently running handler was entered, or 0 while the Worker is
+	// idle. Workers are created with WithConcurrency(1) so at most one
+	// job is in flight per handle and a single word is exact.
+	//
+	// 壁時計ではなく単調時間を入れる。NTP が前方に飛ぶと壁時計差では
+	// 全 Worker が同時に閾値超過に見える。
+	busySinceNanos atomic.Int64
+	// completed counts handler returns. Monotonic, and the only reliable
+	// way to prove a quarantined Worker is alive: mkq chains jobs through
+	// the prefetch path (moveToFinished が次の job を返し、dispatchLoop が
+	// awaitMarker を経ずにそのまま handler へ渡す) ので、忙しいキューでは
+	// idle の窓がマイクロ秒しかなく、supervisor の 30 秒周期ではまず
+	// 捉えられない。「今 idle か」ではなく「隔離後に 1 件でも完了したか」で
+	// 見る。
+	completed atomic.Uint64
+
+	// 以下は pool.mu の下でのみ読み書きする。
+	// quarantinedAt is the monotonic reading of the eviction.
+	quarantinedAt int64
+	// completedAtQuarantine snapshots completed at eviction time.
+	completedAtQuarantine uint64
+	// protected marks a handle just returned from quarantine. It is not
+	// eligible as a scale-down victim while it holds a job, so proving a
+	// Worker alive never costs that Worker its next job.
+	protected bool
+	// completedAtReinstate snapshots completed when protection was granted.
+	completedAtReinstate uint64
+	// seq is a per-pool monotonic id for log attribution.
+	seq uint64
+}
+
+// busyFor reports how long the handle has been inside its handler, or 0
+// when it is idle.
+func (h *workerHandle) busyFor(nowNanos int64) time.Duration {
+	v := h.busySinceNanos.Load()
+	if v == 0 {
+		return 0
+	}
+	d := time.Duration(nowNanos - v)
+	if d < 0 {
+		return 0
+	}
+	return d
+}
+
+// idle reports whether the handle is currently between jobs.
+//
+// **「job を持っていない」ではない。** handler から戻った直後の dispatcher は
+// まだ finalise を回しており、次の job を moveToActive で掴んでから handler に
+// 入り直す。その窓でも idle と読める。停止判断をこれ単独で下さないこと。
+func (h *workerHandle) idle() bool { return h.busySinceNanos.Load() == 0 }
+
+// provenLive reports whether the handle completed at least one job since
+// it was quarantined, which proves the dispatcher is running.
+func (h *workerHandle) provenLive() bool {
+	return h.completed.Load() != h.completedAtQuarantine
+}
+
+// processStart anchors the monotonic clock used for liveness. time.Since
+// reads the monotonic clock, so elapsed values are immune to wall-clock
+// steps.
+var processStart = time.Now()
+
+// monotonicNanos is the default nanos source for a pool.
+func monotonicNanos() int64 { return int64(time.Since(processStart)) }
 
 // ErrResizeAfterShutdown is returned by Resize when the pool's owning
 // Server has already shut down. Callers (auto-scale controller) should
@@ -208,9 +418,13 @@ func (s *Server) Start() error {
 		}))
 
 		pool := &workerPool{
-			queue:    s.driver.queues[name],
-			handler:  newDispatchHandler(handlersSnapshot, name, s.observer),
-			optsBase: optsBase,
+			queue:           s.driver.queues[name],
+			handler:         newDispatchHandler(handlersSnapshot, name, s.observer),
+			optsBase:        optsBase,
+			name:            name,
+			stuckAfter:      s.resolvedStuckAfter(name),
+			nanos:           s.clock(),
+			baseConcurrency: concurrency,
 		}
 		// `*Locked` 名 method の convention で pool.mu を保持。新規構築直後の
 		// pool で外部参照は無いため race は無いが、convention 一貫性のため。
@@ -239,7 +453,124 @@ func (s *Server) Start() error {
 	s.mu.Lock()
 	s.pools = pools
 	s.mu.Unlock()
+	s.startSupervisor()
 	return nil
+}
+
+// clock returns the configured monotonic nanos source.
+func (s *Server) clock() func() int64 {
+	if s.nanos != nil {
+		return s.nanos
+	}
+	return monotonicNanos
+}
+
+// resolvedStuckAfter returns the stuck threshold for qname. A positive
+// Config.StuckWorkerAfter overrides every queue; a negative one disables
+// liveness tracking everywhere; zero falls back to the per-queue table.
+//
+// 判定は stuckAfterForQueue に集約する。Redis pool のサイズ計算
+// (workerPoolSize) が同じ規則で「どのキューが追跡対象か」を数えるので、
+// 二重実装にすると確保する接続数と実際の挙動がずれる。
+func (s *Server) resolvedStuckAfter(qname string) time.Duration {
+	return stuckAfterForQueue(qname, s.stuckAfter)
+}
+
+// startSupervisor launches the goroutine that periodically reconciles
+// every pool. Called at the end of Start.
+//
+// **autoscale とは独立に回す必要がある。** jobQueueAutoScale は opt-in で、
+// 無効なら Resize は一度も呼ばれない。詰まりの回収を Resize 経路にだけ
+// 置くと、既定構成では capacity が減ったまま二度と戻らない。
+func (s *Server) startSupervisor() {
+	interval := s.superviseInterval
+	if interval == 0 {
+		interval = defaultSuperviseInterval
+	}
+	if interval < 0 {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	s.mu.Lock()
+	// Shutdown が stopSupervisor を済ませた後にここへ来ると、誰も止めない
+	// goroutine が残る。Shutdown は pools を nil にするので、それを見て降りる。
+	if s.pools == nil {
+		s.mu.Unlock()
+		cancel()
+		close(done)
+		return
+	}
+	tracked := false
+	for _, p := range s.pools {
+		if p.stuckAfter > 0 {
+			tracked = true
+			break
+		}
+	}
+	if !tracked {
+		s.mu.Unlock()
+		cancel()
+		close(done)
+		return
+	}
+	s.superviseCancel = cancel
+	s.superviseDone = done
+	s.mu.Unlock()
+	go s.supervise(ctx, interval, done)
+}
+
+// supervise reconciles every pool on a fixed interval so wedged Workers
+// are evicted and replaced even when nothing calls Resize.
+func (s *Server) supervise(ctx context.Context, interval time.Duration, done chan struct{}) {
+	defer close(done)
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+		}
+		s.mu.Lock()
+		pools := make([]*workerPool, 0, len(s.pools))
+		for _, p := range s.pools {
+			pools = append(pools, p)
+		}
+		s.mu.Unlock()
+		for _, p := range pools {
+			// Shutdown は stopSupervisor の完了を待つ。pool 数だけ
+			// reconcile を回し切ってからでは待ちが積み上がるので、
+			// cancel されたら残りを捨てて降りる。
+			if ctx.Err() != nil {
+				return
+			}
+			p.mu.Lock()
+			err := p.reconcileLocked()
+			name := p.name
+			p.mu.Unlock()
+			// Shutdown と競合した pool は ErrResizeAfterShutdown を返す。
+			// 正常な停止手順なので黙って飛ばす。
+			if err != nil && !errors.Is(err, ErrResizeAfterShutdown) {
+				slog.Warn("mkqdriver: supervisor could not restore the worker pool",
+					"queue", name, "err", err)
+			}
+		}
+	}
+}
+
+// stopSupervisor cancels the supervisor goroutine and waits for it to
+// exit, so Shutdown cannot race a reconcile that spawns Workers.
+func (s *Server) stopSupervisor() {
+	s.mu.Lock()
+	cancel, done := s.superviseCancel, s.superviseDone
+	s.superviseCancel, s.superviseDone = nil, nil
+	s.mu.Unlock()
+	if cancel == nil {
+		return
+	}
+	cancel()
+	<-done
 }
 
 // Shutdown stops every worker in every pool. Calls after the first are
@@ -250,6 +581,12 @@ func (s *Server) Start() error {
 // pool shutdown is ms-order; the parallelism is mostly insurance
 // against pathological cases (many queues × many Workers each).
 func (s *Server) Shutdown() {
+	// supervisor を先に止める。止めずに畳むと、pools を外した直後に
+	// supervisor が捕捉済みの pool へ reconcile を走らせ、誰も所有して
+	// いない Worker を spawn しうる (shutdownLocked のガードで弾かれるが、
+	// 先に止めるほうが順序として明確)。
+	s.stopSupervisor()
+
 	s.mu.Lock()
 	toShutdown := s.pools
 	s.pools = nil
@@ -293,9 +630,15 @@ func (s *Server) Resize(qname string, n int) error {
 	return pool.resizeLocked(n)
 }
 
-// workerCount reports the current number of Worker instances for qname,
-// or 0 if no pool exists (Server not started, queue unknown). Called by
+// workerCount reports the number of **live** Workers for qname, or 0 if
+// no pool exists (Server not started, queue unknown). Called by
 // Driver.WorkerCount.
+//
+// 生存数であって帳簿上の本数ではない (#2657)。詰まった Worker は roster に
+// 残っていても除外され、quarantine 済みのものは roster にそもそもいない。
+// Resize は reconcileLocked 経由で必ず先に quarantine するので、
+// 「WorkerCount が 2 を返したので Resize(3) したら実は 4 本あって
+// scale-down された」という食い違いは起きない。
 func (s *Server) workerCount(qname string) int {
 	s.mu.Lock()
 	pool, ok := s.pools[qname]
@@ -305,14 +648,30 @@ func (s *Server) workerCount(qname string) int {
 	}
 	pool.mu.Lock()
 	defer pool.mu.Unlock()
-	return len(pool.workers)
+	return pool.liveCountLocked()
 }
 
-// resizeLocked is the workerPool's internal resize implementation.
-// Caller must hold pool.mu. On scale-up, new Workers are spawned via
-// mkq.Process. On scale-down, the trailing surplus Workers are removed
-// from the slice and stopped concurrently (Stop = cancel in-flight,
-// not wait for completion — see Server type doc).
+// QuarantinedWorkerCount reports how many Workers for qname are held in
+// quarantine — evicted from the roster because their handler overran
+// StuckWorkerAfter, and not yet observed returning from it.
+//
+// 診断用。0 でない状態が続いているなら handler がどこかでブロックして
+// いるので、その job type を疑う (#2657 の本番例は inbox の AP 処理が
+// ctx を見ずに止まっていた)。
+func (s *Server) QuarantinedWorkerCount(qname string) int {
+	s.mu.Lock()
+	pool, ok := s.pools[qname]
+	s.mu.Unlock()
+	if !ok {
+		return 0
+	}
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+	return len(pool.quarantine)
+}
+
+// resizeLocked records the requested roster size and reconciles the
+// pool. Caller must hold pool.mu.
 //
 // Post-Shutdown guard: returns ErrResizeAfterShutdown if shutdownLocked
 // has already run on this pool. Prevents the captured-pool race where
@@ -321,44 +680,408 @@ func (p *workerPool) resizeLocked(n int) error {
 	if p.shutdown {
 		return ErrResizeAfterShutdown
 	}
+	p.desired = n
+	if n > p.peakDesired {
+		p.peakDesired = n
+	}
+	return p.reconcileLocked()
+}
+
+// reconcileLocked restores the pool to its configured worker count.
+// Caller must hold pool.mu.
+//
+// 順序に意味がある:
+//
+//  1. 閾値を超えた Worker を roster から quarantine へ退避する。**無条件**。
+//     これで roster は常に「生存している Worker だけ」になり、
+//     len(p.workers) と WorkerCount の勘定が一致する
+//  2. quarantine のうち「隔離後に 1 件でも完了した」= 生きていると証明
+//     されたものを roster へ戻す
+//  3. roster を目標数に合わせる
+//
+// Resize / Start / supervisor はすべてここを通るので、勘定の一貫性は
+// この関数だけを読めば分かる。
+func (p *workerPool) reconcileLocked() error {
+	if p.shutdown {
+		return ErrResizeAfterShutdown
+	}
+	p.quarantineStuckLocked()
+	p.reinstateProvenLiveLocked()
+	p.clearProtectionLocked()
+	return p.adjustLocked()
+}
+
+// clearProtectionLocked drops the reinstatement grace once the handle has
+// finished the job it was holding when it came back. Caller must hold
+// pool.mu.
+//
+// **idle かどうかで判定しない。** それは reinstateProvenLiveLocked が退けた
+// のと同じ罠で、忙しいキューでは job と job の間の idle がマイクロ秒しか
+// 無いため supervisor の周期ではまず捉えられない。解除条件をそれにすると
+// 庇いが外れず、roster が目標を超えたまま何時間も張り付く (実測: 設定 16 /
+// maxWorkers 128 で roster 144 に固定)。完了カウンタなら job 1 件で外れる。
+func (p *workerPool) clearProtectionLocked() {
+	for _, h := range p.workers {
+		if h.protected && h.completed.Load() != h.completedAtReinstate {
+			h.protected = false
+		}
+	}
+}
+
+// quarantineStuckLocked moves every roster Worker whose handler has run
+// longer than stuckAfter into p.quarantine. Caller must hold pool.mu.
+//
+// **停止しない。** 閾値超過は詰まりの証明ではない。ここで Stop すると
+// in-flight job が cancel されて retry に回り、閾値より長い job は永久に
+// 完了しなくなる。隔離した Worker は job をそのまま完走でき、完走した
+// 事実は completed カウンタで観測できる (reinstateProvenLiveLocked)。
+//
+// **数を絞らない。** 絞ると詰まった Worker が roster に残り、
+// len(p.workers) と生存数がずれて「増やせと言ったのに縮む」が起きる。
+// 総数の上限は roster 側 (allowedRosterLocked) で掛ける。
+func (p *workerPool) quarantineStuckLocked() {
+	if p.stuckAfter <= 0 {
+		return
+	}
+	now := p.nanos()
+	var live, moved []*workerHandle
+	for _, h := range p.workers {
+		if h.busyFor(now) >= p.stuckAfter {
+			h.quarantinedAt = now
+			h.completedAtQuarantine = h.completed.Load()
+			moved = append(moved, h)
+			continue
+		}
+		live = append(live, h)
+	}
+	if len(moved) == 0 {
+		return
+	}
+	p.workers = live
+	p.quarantine = append(p.quarantine, moved...)
+	for _, h := range moved {
+		// 「詰まった」と断定しない。長い batch job (export の巨大アカウント、
+		// objectStorage の bulk cleanup) でも同じ閾値を踏みうる。
+		slog.Warn("mkqdriver: handler exceeded the stuck-worker threshold; the worker no longer counts towards the queue budget and has been replaced",
+			"queue", p.name, "worker", h.seq,
+			"busyFor", h.busyFor(now).Truncate(time.Millisecond).String(),
+			"threshold", p.stuckAfter.String(),
+			"quarantined", len(p.quarantine))
+	}
+}
+
+// reinstateProvenLiveLocked returns quarantined Workers that have
+// completed a job since eviction back to the roster. Caller must hold
+// pool.mu.
+//
+// **「今 idle か」で判定しない。** mkq は moveToFinished が返す prefetch を
+// そのまま次の handler に渡すので、忙しいキューでは job と job の間の idle が
+// マイクロ秒しかなく、supervisor の周期ではまず捉えられない。それを release
+// 条件にすると、遅かっただけの健全な Worker が永久に隔離されたまま総数の
+// 枠を食い潰す。完了カウンタなら取りこぼさない。
+//
+// 戻すだけで停止しないのも意図的。**復帰時に握っていた job は必ず完走する**
+// (protected が外れるのはその job を終えてから)。ただし庇いは 1 件ぶんなので、
+// その後も余剰が残っていれば通常の scale-down 対象に戻る — 「隔離されたら
+// 以後ずっと守られる」ではない。
+func (p *workerPool) reinstateProvenLiveLocked() {
+	if len(p.quarantine) == 0 {
+		return
+	}
+	now := p.nanos()
+	var stillWedged, back []*workerHandle
+	for _, h := range p.quarantine {
+		if h.provenLive() {
+			back = append(back, h)
+			continue
+		}
+		stillWedged = append(stillWedged, h)
+	}
+	if len(back) == 0 {
+		return
+	}
+	p.quarantine = stillWedged
+	for _, h := range back {
+		// 次の縮小で真っ先に殺されないよう庇う。roster の末尾に付くので、
+		// 庇わないと splitForRemoval の末尾優先で最初の victim になる。
+		// 庇いは「いま持っている job を 1 件終えるまで」(clearProtectionLocked)。
+		h.protected = true
+		h.completedAtReinstate = h.completed.Load()
+	}
+	p.workers = append(p.workers, back...)
+	for _, h := range back {
+		slog.Info("mkqdriver: worker finished the job that overran the threshold; returned to the pool",
+			"queue", p.name, "worker", h.seq,
+			"quarantinedFor", time.Duration(now-h.quarantinedAt).Truncate(time.Millisecond).String(),
+			"quarantined", len(p.quarantine))
+	}
+}
+
+// allowedRosterLocked returns the roster size the pool may actually run,
+// which is p.desired unless the quarantine has grown past the tolerated
+// headroom. Caller must hold pool.mu.
+//
+// **上限が要る。** 隔離した Worker の goroutine は止められない (handler が
+// 戻らない以上、Stop は stopWorkerTimeout だけ待たされたうえで goroutine を
+// 残して返る) ので、代わりを無制限に立てると handler を確実に詰まらせる job が
+// 1 種類あるだけで goroutine と Redis 接続が際限なく増える。それを食い潰すと
+// #2657 の引き金になった `resource temporarily unavailable` を自分で再現する
+// ことになる。
+//
+// **上限の基準を desired にしない。** desired は autoscale が動かす値で、
+// しかも autoscale の目標は「この関数が返した生存数 + step」から決まる。
+// 基準が desired に依存すると、
+//
+//	allowed = desired - (定数)  →  desired' = allowed + step
+//	→ step < 定数 のあいだ allowed が毎 tick 減り続ける
+//
+// という帰還ループになり、**scale-up 要求のたびに roster が縮む**。
+// desired=16 / 隔離 20 なら 3 tick で 0、隔離 42 なら 20 tick かけて 0 まで
+// 落ちるのを実測した。
+//
+// 基準を peakDesired (単調非減少) にすると上限 C が desired から独立するので、
+// autoscale の反復は `allowed' = min(allowed + step, C)` となって **C まで
+// 上がって収束する**。単調なので autoscale の伸長を頭打ちにもしない。
+func (p *workerPool) allowedRosterLocked() int {
+	if p.stuckAfter <= 0 {
+		return p.desired
+	}
+	ceiling := p.peakDesired + quarantineHeadroomFor(p.baseConcurrency) - len(p.quarantine)
+	if ceiling < 0 {
+		ceiling = 0
+	}
+	return min(p.desired, ceiling)
+}
+
+// quarantineHeadroomFor returns how many quarantined Workers a pool with
+// the given configured worker count tolerates before it starts winding
+// down. The argument is the configured count (workerPool.baseConcurrency),
+// not the current roster target.
+func quarantineHeadroomFor(configured int) int {
+	return max(configured, quarantineHeadroom)
+}
+
+// reportCapLocked logs, at most once per reportCapEvery, that the pool
+// cannot reach its configured worker count. Caller must hold pool.mu.
+func (p *workerPool) reportCapLocked(allowed int) {
+	now := p.nanos()
+	if p.capLogged && time.Duration(now-p.lastCapLogNanos) < reportCapEvery {
+		return
+	}
+	p.capLogged = true
+	p.lastCapLogNanos = now
+	oldest := time.Duration(0)
+	for _, h := range p.quarantine {
+		if d := time.Duration(now - h.quarantinedAt); d > oldest {
+			oldest = d
+		}
+	}
+	slog.Error("mkqdriver: too many workers are held outside the pool; it can no longer run the requested worker count",
+		"queue", p.name, "configured", p.baseConcurrency, "requested", p.desired, "running", allowed,
+		"quarantined", len(p.quarantine),
+		"oldestQuarantinedFor", oldest.Truncate(time.Second).String(),
+		"hint", "a job handler is blocking for far longer than this queue's threshold; raise queueStuckWorkerSeconds or fix the handler")
+}
+
+// adjustLocked grows or shrinks the roster to the allowed size. Caller
+// must hold pool.mu. On scale-up new Workers are spawned via mkq.Process;
+// on scale-down the victims picked by splitForRemoval are stopped
+// concurrently (Stop = cancel in-flight, not wait for completion — see
+// Server type doc).
+//
+// **要求どおりの本数が止まるとは限らない。** splitForRemoval は job を
+// 持ったまま庇われている Worker を victim にしないので、縮小が次の
+// reconcile へ持ち越されることがある (splitForRemoval のコメント参照)。
+func (p *workerPool) adjustLocked() error {
+	n := p.allowedRosterLocked()
+	if n < p.desired {
+		p.reportCapLocked(n)
+	}
+	if p.desired == 0 {
+		// 「このキューを止める」という明示の要求。隔離中の Worker も畳む。
+		// 本当に詰まっていれば Stop は stopWorkerTimeout まで返らないが、
+		// 止めろと言われている以上そこは待つ。roster と一緒に 1 回で止めて、
+		// pool.mu を握ったままの待ちが 2 本直列にならないようにする。
+		toStop := append(append([]*workerHandle(nil), p.workers...), p.quarantine...)
+		p.workers, p.quarantine = nil, nil
+		stopHandles(toStop)
+		return nil
+	}
 	current := len(p.workers)
 	switch {
-	case n == current:
-		return nil
-	case n > current:
+	case n >= current:
+		if n == current {
+			return nil
+		}
 		// scale-up: 不足分の Worker を新規 spawn
 		needed := n - current
-		spawned := make([]*mkq.Worker, 0, needed)
+		spawned := make([]*workerHandle, 0, needed)
 		for i := 0; i < needed; i++ {
 			opts := append([]mkq.WorkerOption{mkq.WithConcurrency(1)}, p.optsBase...)
-			w, err := mkq.Process(p.queue, p.handler, opts...)
+			h := &workerHandle{seq: p.seq}
+			w, err := mkq.Process(p.queue, p.trackedHandler(h), opts...)
 			if err != nil {
 				// 既に spawn した Worker は停止して回復
-				stopWorkers(spawned)
+				stopHandles(spawned)
 				return fmt.Errorf("mkqdriver: spawn worker: %w", err)
 			}
-			spawned = append(spawned, w)
+			h.w = w
+			p.seq++
+			spawned = append(spawned, h)
 		}
 		p.workers = append(p.workers, spawned...)
 		return nil
 	default: // n < current
-		// scale-down: 末尾から (current - n) 個を Stop。Worker 単位の
-		// cancel 経路 (mkq.Worker.Stop は in-flight job の ctx を即
-		// キャンセル、ms オーダーで return)。
-		toStop := p.workers[n:]
-		p.workers = p.workers[:n]
-		stopWorkers(toStop)
+		// 庇っている Worker のぶんは他の Worker から取り立てない。庇う対象を
+		// victim から外すだけだと、代わりに別の Worker の job が cancel される
+		// ので、隔離が job を殺さないという性質が結局崩れる。idle は費用ゼロ
+		// なので、そちらは上限に関係なく畳んでよい。
+		protectedBusy := 0
+		for _, h := range p.workers {
+			if h.protected && !h.idle() {
+				protectedBusy++
+			}
+		}
+		surplus := current - n
+		keep, toStop := splitForRemoval(p.workers, surplus, max(surplus-protectedBusy, 0))
+		p.workers = keep
+		stopHandles(toStop)
 		return nil
 	}
 }
 
-// shutdownLocked stops every Worker in the pool and marks the pool as
-// shut down (= subsequent Resize calls return ErrResizeAfterShutdown).
-// Caller must hold pool.mu. Used by Server.Shutdown.
+// trackedHandler wraps the pool's dispatch handler so entry and exit are
+// visible to the liveness bookkeeping. One wrapper per Worker — sharing
+// a single closure would make "which Worker is busy" unanswerable, which
+// is the whole point.
+func (p *workerPool) trackedHandler(h *workerHandle) mkq.Handler[framedPayload] {
+	base := p.handler
+	nanos := p.nanos
+	return func(ctx context.Context, job *mkq.Job[framedPayload]) (any, error) {
+		// 0 は idle を表す番兵なので、単調時間が 0 を返しても busy と
+		// 区別できるよう 1 に丸める (プロセス起動直後に起きうる)。
+		t := nanos()
+		if t == 0 {
+			t = 1
+		}
+		h.busySinceNanos.Store(t)
+		defer func() {
+			// 完了を先に数える。busy を落としてから数えると、その隙間で
+			// reconcile が走ったときに「idle だが完了は未計上」に見える。
+			h.completed.Add(1)
+			h.busySinceNanos.Store(0)
+		}()
+		return base(ctx, job)
+	}
+}
+
+// splitForRemoval picks up to k scale-down victims out of ws and returns
+// (kept, removed). kept preserves the original order. At most maxBusy of
+// the victims hold a job, and Workers protected while holding a job are
+// never chosen at all, so fewer than k may be removed.
+//
+// 優先順位:
+//
+//	0: idle (in-flight job が無いので停止しても何も失わない)
+//	1: 処理中 (停止すると job が cancel され retry になる)
+//	-: 処理中かつ庇われている = 選ばない
+//
+// 同 rank 内は末尾優先で、従来の scale-down 挙動を保つ。
+//
+// **末尾固定をやめた理由** (#2657): 末尾は「直前に autoscale が足した
+// Worker」で、詰まりが起きている最中はそこだけが健全という状態になる。
+// 本番の inbox で 4 本すべてが handler に入ったまま戻らなくなり、autoscale が
+// 作った 5 本目を毎回 6 秒で殺し続けた。
+//
+// **庇う対象を除く理由**: 隔離から戻したばかりの Worker は roster の末尾に
+// 付くので、庇わないと末尾優先でそれが最初の victim になる。「隔離は job を
+// 殺さない」という設計なのに、生きていると分かった直後にその job を
+// cancel することになる。忙しいキューでは roster に idle が 1 本も無いため、
+// 単に「今回は見送る」だけでは次の reconcile で同じことが起きる。
+//
+// 閾値超過の Worker はここには来ない。reconcileLocked が adjustLocked より
+// 先に quarantine へ退避しているので、roster に残っているのは生存分だけ。
+func splitForRemoval(ws []*workerHandle, k, maxBusy int) (kept, removed []*workerHandle) {
+	if k <= 0 {
+		return ws, nil
+	}
+	type candidate struct {
+		idx  int
+		busy bool
+	}
+	cands := make([]candidate, 0, len(ws))
+	for i, h := range ws {
+		busy := !h.idle()
+		if busy && h.protected {
+			continue
+		}
+		cands = append(cands, candidate{idx: i, busy: busy})
+	}
+	sort.SliceStable(cands, func(a, b int) bool {
+		if cands[a].busy != cands[b].busy {
+			return !cands[a].busy
+		}
+		// 同 rank は末尾優先 (従来の scale-down 挙動を保つ)。
+		return cands[a].idx > cands[b].idx
+	})
+	doomed := make(map[int]struct{}, k)
+	busyTaken := 0
+	for _, c := range cands {
+		if len(doomed) == k {
+			break
+		}
+		if c.busy {
+			if busyTaken >= maxBusy {
+				continue
+			}
+			busyTaken++
+		}
+		doomed[c.idx] = struct{}{}
+	}
+	kept = make([]*workerHandle, 0, len(ws)-len(doomed))
+	removed = make([]*workerHandle, 0, len(doomed))
+	for i, h := range ws {
+		if _, ok := doomed[i]; ok {
+			removed = append(removed, h)
+			continue
+		}
+		kept = append(kept, h)
+	}
+	return kept, removed
+}
+
+// liveCountLocked counts roster Workers that are not over the stuck
+// threshold. Caller must hold pool.mu.
+//
+// reconcileLocked を通った直後は roster にほぼ閾値超過の Worker はいない
+// (quarantine したあとに戻した分だけは再判定していないので残りうる)。
+// いずれにせよ WorkerCount が過大申告しないようここで数え直す。
+func (p *workerPool) liveCountLocked() int {
+	if p.stuckAfter <= 0 {
+		return len(p.workers)
+	}
+	now := p.nanos()
+	n := 0
+	for _, h := range p.workers {
+		if h.busyFor(now) < p.stuckAfter {
+			n++
+		}
+	}
+	return n
+}
+
+// shutdownLocked stops every Worker in the pool — roster and quarantine
+// alike — and marks the pool as shut down (= subsequent Resize calls
+// return ErrResizeAfterShutdown). Caller must hold pool.mu. Used by
+// Server.Shutdown.
 func (p *workerPool) shutdownLocked() {
 	p.shutdown = true
-	stopWorkers(p.workers)
+	// quarantine も止める。詰まったままの Worker への Stop は
+	// stopWorkerTimeout で頭打ちになるだけだが、閾値を超えただけで
+	// 実際には動いていた Worker はここで畳まれる。
+	stopHandles(append(append([]*workerHandle(nil), p.workers...), p.quarantine...))
 	p.workers = nil
+	p.quarantine = nil
 }
 
 // stopWorkerTimeout bounds how long stopWorker waits for one Worker.
@@ -385,19 +1108,24 @@ func stopWorker(w *mkq.Worker) {
 	}
 }
 
-// stopWorkers stops every Worker in ws concurrently.
+// stopHandles stops every Worker in hs concurrently.
 //
 // **逐次に止めない。** 1 本あたりの待ちは通常 ms だが、起こしを取りこぼすと
 // stopWorkerTimeout まで伸びる。逐次だとそれが本数分積み上がる (16 本なら
 // 最悪 8 分)。並列なら 1 回分で済む。
-func stopWorkers(ws []*mkq.Worker) {
+//
+// h.w が nil の handle は spawn 途中で mkq.Process が失敗した分なので飛ばす。
+func stopHandles(hs []*workerHandle) {
 	var wg sync.WaitGroup
-	for _, w := range ws {
+	for _, h := range hs {
+		if h == nil || h.w == nil {
+			continue
+		}
 		wg.Add(1)
 		go func(w *mkq.Worker) {
 			defer wg.Done()
 			stopWorker(w)
-		}(w)
+		}(h.w)
 	}
 	wg.Wait()
 }

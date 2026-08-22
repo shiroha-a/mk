@@ -166,23 +166,39 @@ type Driver interface {
 	Scheduler() Scheduler
 	Close() error
 
-	// WorkerCount returns the number of worker goroutines currently
-	// dedicated to qname. Drivers that share a single worker pool across
-	// queues (e.g. asynq) return the pool-wide Concurrency for every
-	// qname. Drivers that have not started their Server yet return 0.
+	// WorkerCount returns the number of workers currently **able to take
+	// work** for qname. Drivers that share a single worker
+	// pool across queues (e.g. asynq) return the pool-wide Concurrency for
+	// every qname. Drivers that have not started their Server yet return 0.
 	//
 	// Used by the Prometheus metrics layer (`mk_job_workers_active`) and
-	// later by the auto-scale controller (#1120 tracker) to read the
-	// current pool size when computing scale decisions.
+	// by the auto-scale controller (#1120 tracker) to read the current
+	// pool size when computing scale decisions.
+	//
+	// **mkq driver では帳簿上の本数ではない。** handler が閾値を超えて戻って
+	// こない worker を除外して数える (#2657)。詰まった worker を健全として
+	// 数えると autoscale の scale-up 閾値 (本数 x 4) だけが上がり、実際に
+	// 働ける worker が 0 本でも scale-up しない。asynq driver は動的な pool を
+	// 持たないので従来どおり静的な Concurrency を返す。
+	//
+	// mkq driver では Resize も同じ勘定で動くので、「WorkerCount が返した値
+	// + n」を Resize に渡すと n 本増える。ただし総数の上限に当たっている
+	// ときは増えない (その場合 Error ログが出る。5 分に 1 回まで間引かれる)。
+	// 縮める側も、隔離から戻したばかりで job を持っている worker は止めない
+	// ので要求より少なく止まることがある。いずれも次の tick で収束し、
+	// WorkerCount は常に実際の本数を返す。
 	WorkerCount(qname string) int
 
 	// Resize changes the worker pool size for qname to n at runtime.
 	// Returns ErrResizeNotSupported on backends without dynamic resize
 	// support (= asynq today). On supported backends:
 	//
-	//   - n > current: spawn (n - current) new worker goroutines.
-	//   - n < current: gracefully stop (current - n) workers, waiting
-	//     for any in-flight jobs they own to finish before returning.
+	//   - n > current: spawn up to (n - current) new worker goroutines.
+	//   - n < current: stop up to (current - n) workers. **In-flight jobs are
+	//     cancelled, not awaited** — the job's context fires and BullMQ
+	//     re-locks it for the next pickup, so scale-down cannot block for
+	//     minutes on a slow remote inbox
+	//     (`TestServer_ResizeDown_CancelsInFlight`).
 	//   - n == current: no-op, returns nil.
 	//
 	// Resize is intended for the auto-scale controller (#1120 tracker

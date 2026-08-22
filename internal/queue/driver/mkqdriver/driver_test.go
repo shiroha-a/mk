@@ -2,6 +2,7 @@ package mkqdriver
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -33,11 +34,24 @@ func TestResolveQueueConcurrency_ExportedWrapper(t *testing.T) {
 func TestWorkerPoolSize_ExportedWrapper(t *testing.T) {
 	queues := []string{"deliver", "inbox"}
 
-	base := WorkerPoolSize(queues, nil)
+	base := WorkerPoolSize(queues, nil, 0)
 	assert.Positive(t, base)
 
 	// worker を増やすと pool も追従する (worker 1 つにつき BZPopMin の接続を
 	// 1 つ保持するため)。
-	bigger := WorkerPoolSize(queues, map[string]int{"deliver": defaultQueueConcurrency["deliver"] + 64})
+	bigger := WorkerPoolSize(queues, map[string]int{"deliver": defaultQueueConcurrency["deliver"] + 64}, 0)
 	assert.Greater(t, bigger, base)
+}
+
+func TestStuckWorkerThreshold_ExportedWrapper(t *testing.T) {
+	assert.Equal(t, defaultStuckAfter, StuckWorkerThreshold("inbox", 0))
+	assert.Zero(t, StuckWorkerThreshold("export", 0), "batch queues are untracked")
+	assert.Equal(t, 30*time.Second, StuckWorkerThreshold("export", 30*time.Second),
+		"an explicit value applies everywhere")
+	assert.Zero(t, StuckWorkerThreshold("inbox", -1))
+}
+
+func TestQuarantineHeadroomFor_ExportedWrapper(t *testing.T) {
+	assert.Equal(t, quarantineHeadroom, QuarantineHeadroomFor(1), "floor applies to tiny pools")
+	assert.Equal(t, 16, QuarantineHeadroomFor(16))
 }

@@ -95,6 +95,27 @@ type Config struct {
 	// mkq.WithRateLimit. Zero / missing entries disable the limiter
 	// for that queue.
 	QueueRateLimits map[string]int
+
+	// StuckWorkerAfter is how long one job's handler may run before its
+	// Worker stops counting towards the queue's worker budget and is
+	// replaced (#2657). Zero applies the per-queue table
+	// (defaultStuckAfterByQueue); a positive value overrides it for every
+	// queue; a negative value disables liveness tracking entirely.
+	//
+	// 進行中の job は cancel されない。Worker を勘定から外して代わりを立てる
+	// だけで、元の Worker は job を完走でき、完走したら pool に戻る。ただし
+	// **代わりを立てる分だけ実効の並列度は上がる**
+	// (上限は「到達した最大 worker 数 + max(設定値, 4)」。autoscale が無効なら
+	// 設定値 + max(設定値, 4)、有効なら max(設定値, maxWorkers) + max(設定値, 4)。
+	// peak は設定値から始まる単調非減少値なので maxWorkers を下回らない)。
+	// 常時この閾値を超えるキューに短い値を当てると、その状態が定常化する。
+	// 既定でバッチ系のキューを対象外にしているのはそのため。
+	StuckWorkerAfter time.Duration
+
+	// SuperviseInterval is how often every pool is re-checked for wedged
+	// Workers. Zero applies defaultSuperviseInterval; a negative value
+	// disables the periodic check (Resize still reconciles).
+	SuperviseInterval time.Duration
 }
 
 // defaultMaxMetricsDataPoints mirrors BullMQ TS's
@@ -158,7 +179,7 @@ func New(ctx context.Context, cfg Config) (*Driver, error) {
 	// 尊重する。side-channel rdb は低頻度なので default pool のままにする。
 	workerRedis := cfg.Redis
 	if workerRedis.PoolSize == 0 {
-		workerRedis.PoolSize = workerPoolSize(names, cfg.QueueConcurrency)
+		workerRedis.PoolSize = workerPoolSize(names, cfg.QueueConcurrency, cfg.StuckWorkerAfter)
 	}
 
 	mkqCfg := mkq.Config{Redis: workerRedis, KeyPrefix: cfg.KeyPrefix}
@@ -279,13 +300,36 @@ const poolHeadroom = 8
 // worker, so the pool must cover every worker simultaneously or dispatch
 // stalls on connection acquisition. The headroom / floor policy lives in
 // poolSizeForWorkers; the floor is go-redis' own default (10 × GOMAXPROCS).
-func workerPoolSize(queues []string, override map[string]int) int {
+//
+// stuckAfter is Config.StuckWorkerAfter and decides which queues track
+// worker liveness. **追跡するキューは許容ぶんの接続を先に確保しておく。**
+// 隔離された Worker は awaitMarker に戻って BZPopMin 接続を握り続けるので、
+// 代わりを立てた分だけ実接続が増える。あとから足せない (pool サイズは
+// 起動時に決まる) ので、上限ぶんをここで見込む。go-redis の PoolSize は
+// 上限であって事前確保ではない (MinIdleConns=0) ため、広げても普段の
+// コストは無い。
+func workerPoolSize(queues []string, override map[string]int, stuckAfter time.Duration) int {
 	conc := resolveQueueConcurrency(queues, override)
 	sum := 0
-	for _, c := range conc {
+	for name, c := range conc {
 		sum += c
+		if stuckAfterForQueue(name, stuckAfter) > 0 {
+			sum += quarantineHeadroomFor(c)
+		}
 	}
 	return poolSizeForWorkers(sum, 10*runtime.GOMAXPROCS(0))
+}
+
+// stuckAfterForQueue resolves the effective liveness threshold for qname
+// from the driver-level setting, mirroring Server.resolvedStuckAfter.
+func stuckAfterForQueue(qname string, configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	if configured < 0 {
+		return 0
+	}
+	return defaultStuckAfterForQueue(qname)
 }
 
 // poolSizeForWorkers returns the Redis pool size for workerSum BZPopMin
@@ -340,9 +384,26 @@ func ResolveQueueConcurrency(queues []string, override map[string]int) map[strin
 	return resolveQueueConcurrency(queues, override)
 }
 
+// StuckWorkerThreshold exposes the effective per-queue stuck-worker
+// threshold for diagnostics (#2657). stuckAfter is
+// Config.StuckWorkerAfter; pass 0 for the built-in per-queue defaults.
+// A zero result means the queue is not tracked.
+func StuckWorkerThreshold(qname string, stuckAfter time.Duration) time.Duration {
+	return stuckAfterForQueue(qname, stuckAfter)
+}
+
+// QuarantineHeadroomFor exposes how many workers a pool of the given size
+// may hold outside the roster before it stops replacing them (#2657), so
+// diagnostics can state the real worker ceiling.
+func QuarantineHeadroomFor(desired int) int {
+	return quarantineHeadroomFor(desired)
+}
+
 // WorkerPoolSize exposes the auto-sized Redis pool for diagnostics (#2469).
-func WorkerPoolSize(queues []string, override map[string]int) int {
-	return workerPoolSize(queues, override)
+// stuckAfter is Config.StuckWorkerAfter; pass 0 for the built-in per-queue
+// defaults.
+func WorkerPoolSize(queues []string, override map[string]int, stuckAfter time.Duration) int {
+	return workerPoolSize(queues, override, stuckAfter)
 }
 
 // Server returns the lazily-constructed driver.Server.
@@ -383,6 +444,8 @@ func (d *Driver) Server() driver.Server {
 			idlePollInterval:   d.cfg.IdlePollInterval,
 			perQueueConcurrent: resolveQueueConcurrency(queueNames, d.cfg.QueueConcurrency),
 			perQueueRate:       d.cfg.QueueRateLimits,
+			stuckAfter:         d.cfg.StuckWorkerAfter,
+			superviseInterval:  d.cfg.SuperviseInterval,
 			handlers:           make(map[string]driver.HandlerFunc),
 		}
 	}
@@ -426,11 +489,12 @@ func (d *Driver) Resize(qname string, n int) error {
 	return srv.Resize(qname, n)
 }
 
-// WorkerCount returns the current per-queue worker pool size. Reads
-// the live pool state via Server.workerCount so it correctly reflects
-// runtime Resize operations (#1124). Before Server() has been called
-// or before Server.Start completes, the underlying pool map is nil
-// and we return 0.
+// WorkerCount returns the number of Workers for qname that can currently
+// take work. Reads the live pool state via Server.workerCount so it
+// reflects both runtime Resize operations (#1124) and Workers held
+// outside the pool because their handler overran the stuck threshold
+// (#2657). Before Server() has been called or before Server.Start
+// completes, the underlying pool map is nil and we return 0.
 //
 // Lock ordering: d.mu (this function) → s.mu (workerCount) → pool.mu
 // (workerCount inner). All acquisitions are short and the nested order
@@ -443,6 +507,23 @@ func (d *Driver) WorkerCount(qname string) int {
 		return 0
 	}
 	return srv.workerCount(qname)
+}
+
+// QuarantinedWorkerCount reports how many Workers for qname are held
+// outside the pool because their handler overran the stuck threshold
+// (#2657). Returns 0 before Server.Start.
+//
+// Backs the `mk_job_workers_quarantined` gauge. **0 でない状態が続いて
+// いたら handler がどこかでブロックしている。** 本番でこれが可視化されて
+// いなかったため、inbox の詰まりに 1 日以上気付けなかった。
+func (d *Driver) QuarantinedWorkerCount(qname string) int {
+	d.mu.Lock()
+	srv := d.dServer
+	d.mu.Unlock()
+	if srv == nil {
+		return 0
+	}
+	return srv.QuarantinedWorkerCount(qname)
 }
 
 // Close stops the worker (if started) and releases the underlying

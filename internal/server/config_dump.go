@@ -166,7 +166,7 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 	}
 
 	add(&d.Effective, "redis pool (job queue)",
-		fmt.Sprintf("%d", mkqdriver.WorkerPoolSize(queues, override)),
+		fmt.Sprintf("%d", mkqdriver.WorkerPoolSize(queues, override, 0)),
 		"poolSize 未指定時の自動サイジング結果")
 
 	addPluginSettings(&d.Effective, cfg)

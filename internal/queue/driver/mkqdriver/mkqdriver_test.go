@@ -524,15 +524,32 @@ func TestWorkerPoolSize(t *testing.T) {
 	queues := []string{"inbox", "deliver", "push", "export", "webhook", "maintenance"}
 	goDefault := 10 * runtime.GOMAXPROCS(0)
 
-	// default: 16+16+4+4+2+2 = 44, + poolHeadroom, floored at go-redis default.
-	if got, want := workerPoolSize(queues, nil), max(44+poolHeadroom, goDefault); got != want {
+	// worker 合計: 16+16+4+4+2+2 = 44。
+	// これに liveness を追跡するキュー (inbox / deliver / push / webhook) の
+	// 隔離許容ぶんが乗る: max(16,4)+max(16,4)+max(4,4)+max(4,4) = 40。
+	// export / maintenance は追跡対象外なので乗らない (#2657)。
+	const workers = 44
+	const quarantineAllowance = 16 + 16 + 4 + 4
+	if got, want := workerPoolSize(queues, nil, 0), max(workers+quarantineAllowance+poolHeadroom, goDefault); got != want {
 		t.Errorf("workerPoolSize(default) = %d, want %d", got, want)
 	}
 
 	// override は合計に反映され、pool もそれに追従する。
 	override := map[string]int{"deliver": 128}
-	if got, want := workerPoolSize(queues, override), max((16+128+4+4+2+2)+poolHeadroom, goDefault); got != want {
-		t.Errorf("workerPoolSize(deliver=128) = %d, want %d", got, want)
+	wantOverride := max((16+128+4+4+2+2)+(16+128+4+4)+poolHeadroom, goDefault)
+	if got := workerPoolSize(queues, override, 0); got != wantOverride {
+		t.Errorf("workerPoolSize(deliver=128) = %d, want %d", got, wantOverride)
+	}
+
+	// liveness を切ると隔離ぶんは不要になり、以前の計算に戻る。
+	if got, want := workerPoolSize(queues, nil, -1), max(workers+poolHeadroom, goDefault); got != want {
+		t.Errorf("workerPoolSize(tracking off) = %d, want %d", got, want)
+	}
+
+	// 明示値は全キューに効くので、export / maintenance のぶんも乗る。
+	allTracked := max(workers+(16+16+4+4+4+4)+poolHeadroom, goDefault)
+	if got := workerPoolSize(queues, nil, time.Minute); got != allTracked {
+		t.Errorf("workerPoolSize(all tracked) = %d, want %d", got, allTracked)
 	}
 
 	// pool は全 worker を同時に賄える (= 合計 worker 数以上) ことを保証する。
@@ -541,13 +558,28 @@ func TestWorkerPoolSize(t *testing.T) {
 	for _, c := range conc {
 		sum += c
 	}
-	if got := workerPoolSize(queues, nil); got < sum {
+	if got := workerPoolSize(queues, nil, 0); got < sum {
 		t.Errorf("workerPoolSize = %d, must be >= total workers %d", got, sum)
 	}
 
 	// go-redis default を下回らない (multi-core での pool 縮小退行を防ぐ)。
-	if got := workerPoolSize(queues, nil); got < goDefault {
+	if got := workerPoolSize(queues, nil, 0); got < goDefault {
 		t.Errorf("workerPoolSize = %d, must be >= go-redis default %d", got, goDefault)
+	}
+}
+
+func TestStuckAfterForQueue(t *testing.T) {
+	if got := stuckAfterForQueue("inbox", 0); got != defaultStuckAfter {
+		t.Errorf("stuckAfterForQueue(inbox, 0) = %v, want %v", got, defaultStuckAfter)
+	}
+	if got := stuckAfterForQueue("export", 0); got != 0 {
+		t.Errorf("stuckAfterForQueue(export, 0) = %v, want 0", got)
+	}
+	if got := stuckAfterForQueue("export", time.Minute); got != time.Minute {
+		t.Errorf("stuckAfterForQueue(export, 1m) = %v, want 1m", got)
+	}
+	if got := stuckAfterForQueue("inbox", -1); got != 0 {
+		t.Errorf("stuckAfterForQueue(inbox, -1) = %v, want 0", got)
 	}
 }
 
