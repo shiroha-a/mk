@@ -23,6 +23,12 @@ type Jobs interface {
 	Schedule(cron string, name string, payload any)
 }
 
-// JobHandler processes one job. Returning an error makes the queue retry
-// according to the instance's policy.
+// JobHandler processes one job. Returning an error fails the job; plugin
+// jobs are registered with no retries, so it is not retried.
+//
+// **ctx を尊重すること。** 1 回の実行には既定 1 時間の上限があり
+// (#2658、queueHandlerDeadlineSeconds)、超えると mk-go は待つのをやめる。
+// ctx を見ていればそこで正常終了できるが、無視していると goroutine が
+// 残り続ける (Go では goroutine を殺せない)。詳細は
+// docs/plugins/authoring.md。
 type JobHandler func(ctx context.Context, payload json.RawMessage) error

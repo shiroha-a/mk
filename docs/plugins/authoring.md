@@ -235,6 +235,17 @@ func jobs(ctx plugin.Context, j plugin.Jobs) error {
 
 task type は `plugin:<name>:<job>` として名前空間が付く。maintenance キューで動くので、遅い処理が連合の配送を止めることはない。
 
+**ただし 1 回の実行に上限がある。** mk-go は job の handler を既定 1 時間で
+打ち切る (#2658、`queueHandlerDeadlineSeconds`)。超えると job は失敗扱いになり、
+`plugin.Jobs` は retry しない設定なのでその回は捨てられる。**打ち切られても
+handler 自体は止まらない** (Go では goroutine を殺せない) ので、DB 接続を
+掴んだまま走り続ける。
+
+1 時間を超えうる処理は**分割して複数回に分ける**こと。この上限は全キュー共通の
+設定なので、プラグインのために延ばすと inbox / deliver の保護も一緒に緩む。
+`ctx` は必ず尊重すること — 尊重していれば打ち切り時に正常終了でき、goroutine が
+残らない。
+
 **任意のタイミングで enqueue する経路は無い。** プロセス内で完結する非同期処理は `ctx.Go()` を使う（recover 付き）。
 
 > **プラグインが素の `go` を書くとプロセスごと落ちる。** Go は他 goroutine の panic を回収できず、mk-go 側の recover では止められない。
