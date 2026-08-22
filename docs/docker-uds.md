@@ -159,6 +159,194 @@ mk-go 側の実装変更で `/healthz` のパスが変わっている可能性�
 
 `chmodSocket: "666"` が正しく反映されていません。`deploy/uds/config/default.yml` を確認してください。mk-go の起動ログは `starting Misskey server socket=<path> url=<url>` の形 (`[server] listening on unix:` という行は出ません)。実際のパーミッションは `ls -l` で直接見るのが確実です。
 
+### valkey への接続が `resource temporarily unavailable` で失敗する
+
+```
+time=... level=WARN msg="redis: connection pool: failed to dial after 5 attempts: dial unix /run/valkey/valkey.sock: connect: resource temporarily unavailable" source=go-redis
+```
+
+go-redis が内部ロガーに出すものを slog へ流している (#2659)。**`source=go-redis`
+で絞れる。**
+
+それ以前のビルドでは slog を通らず stderr に直接出る。形は
+`redis: <日付> <時刻> pool.go:617: redis: connection pool: ...` で、
+**prefix と `file:line` の間に日時が挟まる** (`log.LstdFlags|log.Lshortfile`)。
+`grep "redis: pool.go:"` では**一致しない**ので、古いログは
+`grep "failed to dial after"` のように本文で探すこと。
+
+EAGAIN で、**UDS の listen backlog が溢れている**ときに出る。TCP と挙動が違う
+点が 2 つある。
+
+- TCP の非ブロッキング connect は `EINPROGRESS` を返すので Go は epoll で
+  待てるが、**AF_UNIX は `EAGAIN` を返す**。Go の `fd.connect` はこれを
+  即エラーにする (`GOROOT/src/net/fd_unix.go` が待つのは
+  `EINPROGRESS` / `EALREADY` / `EINTR` だけ)。1 回の dial で待ってはくれない
+- ただし go-redis は既定で 5 回・100ms 間隔で dial し直す
+  (`DialerRetries` / `DialerRetryTimeout`)。**"failed to dial after 5 attempts"
+  が出たということは、accept キューが 0.5 秒前後ふさがり続けた**ということ
+  (失敗するたびに毎回 sleep するので 5 回で約 500ms)。瞬間的な溢れでは
+  このログにはならない
+- backlog 溢れはカーネル側で起きるので valkey からは見えない。
+  `rejected_connections` は maxclients による拒否のカウンタで、これは増えない。
+  AF_UNIX には TCP の `ListenOverflows` に相当するカウンタも無く、**事後に
+  確認する手段が無い**
+
+実効 backlog は `min(tcp-backlog, net.core.somaxconn)`。既定は
+`tcp-backlog 511` で、`deploy/uds/valkey/valkey.conf` では設定していない。
+
+```
+docker exec mk-valkey-1 valkey-cli -s /run/valkey/valkey.sock config get tcp-backlog
+docker exec mk-valkey-1 cat /proc/sys/net/core/somaxconn
+```
+
+`somaxconn` は **valkey が listen している netns のものが効く**ので、host 側で
+`cat` しない (`--sysctl net.core.somaxconn` を指定した構成だと値が食い違う)。
+
+本番の実測は `tcp-backlog` 511 / `somaxconn` 4096 なので、**実効 backlog は
+511 で、効いているのは `tcp-backlog` のほう**。valkey は要求した backlog が
+`somaxconn` に切り詰められると起動時に
+`WARNING: The TCP backlog setting of ... cannot be enforced` を出すが、本番の
+ログには 1 件も無い = 511 がそのまま通っている。**上げるなら `tcp-backlog`
+であって `somaxconn` ではない** (後者を上げても min は変わらない)。
+
+**2026-08 時点では上げないと判断した** (#2659)。理由は実効値ではなく**レート**で、
+接続レートが 9 日平均で 776 conn/hour (0.22/sec、`total_connections_received` /
+`uptime_in_seconds`) しかないため。slowlog の最遅コマンドも 25.1ms
+(08-23 時点の全 entry の最大値。`slowlog-max-len` は 128 で溢れておらず、
+**記録は valkey の起動 08-13 から続いている**ので 08-20 18:42 も窓の中) で、
+accept を長時間止めるコマンドは見当たらなかった。`MinIdleConns` で事前に張る案は #2648 / #2649 で
+減らした常駐リソースと逆行するので採らなかった。
+
+**ただし「溢れていない」ことを示せたわけではない。** 9 日平均はサブ秒の
+バーストを否定しないし、go-redis は `MinIdleConns: 0` なので負荷の立ち上がりで
+一斉に dial が走る。バースト深さ (valkey の netns で見た `ss -lx` の
+Recv-Q、または `total_connections_received` の秒単位の差分) は**測っていない**
+(netns の話は下の再発時の手順を参照)。
+
+**18:42 に何が起きたかは特定できていない。** ただし valkey 自身のログに
+近接した異常が残っている (コンテナは UTC なので JST に読み替えること):
+
+```
+1:M 20 Aug 2026 09:40:30.397 * Asynchronous AOF fsync is taking too long (disk is busy?).
+1:M 20 Aug 2026 09:40:32.669 * Asynchronous AOF fsync is taking too long (disk is busy?).
+1:M 20 Aug 2026 09:42:44.048 * 100 changes in 300 seconds. Saving...
+```
+
+**手がかりとして意味があるのは fsync のほうだけ。** この警告はログ全体で
+7 件しかなく、**うち 2 件がこの 2 分間に集中している**。AOF flush は valkey の
+メインスレッドを止めうるので、accept が止まれば backlog は積む。
+
+一方 **`Saving...` (RDB の fork) は異常ではない。** 5 分ごとの定期実行で、
+ログ全体に 23,000 件超・08-20 だけで 287 件ある
+(`docker logs mk-valkey-1 | grep -c "Saving\.\.\."` と、それを `20 Aug 2026`
+で絞ったもの)。18:42:44 のものが特別だと考える根拠は無い。並べて書くと同じ
+珍しさに見えるので注意。
+
+**fsync 遅延も fork も `slowlog` では見えない。** slowlog はコマンドの実行時間
+だけを測るので、AOF flush・fork・serverCron のようなコマンド外のイベントループ
+停止は原理的に載らない。再発時に見るべきものは順に:
+
+```
+# イベントループ停止。Saving... は定期実行なので fsync だけを見る
+docker logs mk-valkey-1 | grep -i "fsync is taking too long"
+docker exec mk-valkey-1 valkey-cli -s /run/valkey/valkey.sock info persistence \
+  | grep aof_delayed_fsync   # 再起動でリセットされるのでログの件数とは一致しない
+# fork の所要時間は persistence ではなく stats 側にある。ただし
+# latest_fork_usec は直近 1 回の値でしかない (valkey は最大値を持たない) ので、
+# 過去の fork が速かった証拠には使えない
+docker exec mk-valkey-1 valkey-cli -s /run/valkey/valkey.sock info stats \
+  | grep -E "latest_fork_usec|total_forks"
+docker exec mk-valkey-1 valkey-cli -s /run/valkey/valkey.sock slowlog get 128
+```
+
+未 accept の滞留 (Recv-Q) を見るには **valkey の netns に入る必要がある**。
+AF_UNIX の listen は netns に閉じているので host 側の `ss -lx` には**出ない**
+(空振りするだけでエラーにならないので「滞留していない」と誤読しやすい)。
+container には `ss` が入っていないので host のものを持ち込む:
+
+```
+sudo nsenter -t $(docker inspect -f '{{.State.Pid}}' mk-valkey-1) -n ss -lx \
+  | grep valkey.sock
+```
+
+#### この障害と #2657 (worker の詰まり) の関係
+
+**因果は示せていない。** #2657 は当初「この障害が引き金」と書いていたが、
+それを支える証拠は無く、逆に**この障害と無関係に同じ症状が全部出る**ことが
+確認できている。以下は 2026-08-23 時点の実測。
+
+**1. 同じ失敗が 18:42 より前から同じペースで出ていた。** 08-20 の 18:42 より
+前に、`stc=2` の stalled 失敗が 5 件ある。
+
+```
+11:43:28   13:25:43 (x2)   16:42:56   16:50:20      いずれも stc=2
+```
+
+7 時間で 5 件 = 約 0.7 件/時で、18:42 以降のペースと変わらない。当初の記録に
+あった「それ以前は 1 日 1 件程度」は誤りで、**この前後比較が「18:42 が引き金」
+という見立ての唯一の量的根拠だった**。
+
+(これらが blip を踏んだのと同一プロセスかは**確かめられない**。当時の
+container は既に削除されており (現行は 08-21 02:03 JST 作成)、job HASH にも
+worker を特定する情報が無い。ただし前後比較の反証に同一性は要らない。)
+
+**なお 18:45-18:58 のバースト自体も、blip では説明しにくい。** 失敗した 5 件の
+うち 3 件は **08-19 に作られた job** (11:26 / 19:17 / 19:39) で、23 時間ほど
+掴まれたままだった。長く掴まれていた active job がまとめて失敗するのは
+**プロセスの再起動が active を孤児にしたとき**の形で、記録にある
+「18:44:57 から Stop タイムアウトが始まっている」とも整合する。
+
+**2. valkey のエラーを一度も出していないプロセスで、症状が全部再現している。**
+現行 mk-mkgo-1 は 08-21 02:03 JST 起動で `resource temporarily unavailable` が
+0 件 (`docker logs mk-mkgo-1 | grep -c "resource temporarily unavailable"`)。
+その無傷のプロセスで:
+
+- `bull:inbox:active` に job が 4 件、31-41 時間掴まれたまま。**4 件とも
+  このプロセスの起動後に作られている**ので引き継ぎではない
+- 起動後に失敗した job が 27 件、うち **25 件**が
+  `job stalled more than allowable limit` (残り 2 件は inbox 処理中の外向き
+  取得が 530 / タイムアウトになったもので別件)
+- そのうち **8 件が 08-22 23:00-23:30 に集中**。08-20 の「13 分で 5 件」と
+  同じ形のバーストが、エラー無しで起きている
+
+数え方: `ZRANGEBYSCORE bull:inbox:failed <起点の epoch-ms> +inf` で対象を取り、
+各 job の `failedReason` を `HGET` して理由ごとに数えた。
+
+**3. そもそも一瞬のエラーでは failed にならない。** mkq が job を stalled 理由で
+failed にするのは lua の `stalledCount > maxStalledJobCount` を満たしたときだけ
+で、既定は `maxStalledCount = 1`。つまり **`stc` が 2 に達する = 30 秒
+(`stalledInterval`) 以上離れた回収が 2 回**必要になる。18:45-18:58 に失敗した
+5 件はすべて `stc=2` だった。1 回きりの EAGAIN では届かず、**継続的に lock を
+失わせる何か**が要る。
+
+**その「何か」の候補は分かっている。** 詰まった handler が worker を占有し、
+autoscale がそれを健全と数えて resize を繰り返し、`Stop` がタイムアウトして
+lock が切れる、というループ。このループだけで、バーストを含む症状全体が実際に
+再現している (上の 2)。
+
+```
+docker logs mk-mkgo-1 | grep -c "autoscale resized.*inbox"   # 08-23 時点で 3000 超
+docker logs mk-mkgo-1 | grep -c "worker stop error"          # 同 50 前後
+```
+
+どちらも稼働中ずっと増えるので、値そのものより桁を見ること。
+
+**示せた範囲の限界。** ここまでで言えるのは「valkey のエラーは症状の必要条件
+ではない」まで。**18:42 の blip が寄与した可能性そのものは否定できない**
+(1 回の `ExtendLock` 失敗が回収を 1 つ増やす経路は存在する)。ただし blip の
+前から同じ失敗が同じペースで出ている以上、**原因として blip を書くのは誤り**。
+
+補足を 2 つ。
+
+- 18:45-18:58 の失敗は **5 件**。#2657 の初期の記録にある「20 件」は当時の
+  failed セット全体の件数で、この時間帯の件数ではない。**しかもその 20 件も
+  全部が stalled ではなく 16 件** (残り 4 件は 500 x3 / pure renote x1)
+- `stc` 未設定を「lock が途切れていない」の証拠に使えるのは、**同じプロセスで
+  stalled-check が現に動いていた**から (同期間に 25 件を回収している)。checker
+  が止まっていれば `stc` が増えないのは当然なので、この前提は毎回確認すること
+
+詰まりの側は #2657 (隔離) と #2658 (handler の期限) で対処してある。
+
 ### valkey が `Creating Server TCP listening socket *:6379: bind` で起動しない
 
 `deploy/uds/valkey/valkey.conf` の `port 0` が効いていません。`command:` で正しく `valkey.conf` を読み込めているか、bind mount のパスを確認してください。

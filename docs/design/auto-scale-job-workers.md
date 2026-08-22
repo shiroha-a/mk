@@ -335,8 +335,12 @@ inbox で 4 本すべてがこの状態になり、`len(workers)` を返して�
 健全な Worker) を落とす実装だったため、autoscale は健全な 1 本を作っては 6 秒で
 殺す病的サイクルに入った。
 
-詰まりが handler の中で起きていることは本番で確認した。`bull:inbox:active` に `ap:inbox` の job が 4 件、18-28 時間掴まれたまま残っており、
-各 job の lock TTL が 30 秒の `lockDuration` に対し 23-30 秒残っていた。mkq で
+詰まりが handler の中で起きていることは本番で確認した。`bull:inbox:active` に
+`ap:inbox` の job が 4 件、掴まれたまま残っており (08-22 の観測で 18-28 時間、
+08-23 の再測で 31-41 時間)、各 job の `stc` (stalledCount) が **未設定**だった。
+`stc` は stalled-check が回収するたびに増えるので、未設定 = 一度も回収されて
+いない = lock が途切れていない、を意味する (同じプロセスで stalled-check は
+他の job を現に回収していたので、checker 自体が止まっていたわけではない)。mkq で
 `ExtendLock` を撃つのは heartbeat goroutine だけで、それは `runHandler` が戻った
 直後に (finalise より前に) 畳まれる。lock が延長され続けている = **handler の中に
 いる**。したがって handler の出入りを計測すれば足り、mkq 側に liveness API を足す必要は無い (v1.0.6 の `Worker` が
@@ -371,7 +375,7 @@ inbox で 4 本すべてがこの状態になり、`len(workers)` を返して�
 
 | キュー | 閾値 | 根拠 |
 |---|---|---|
-| deliver / inbox / relationship / push / webhook | 30 分 | 恒久的に戻ってこない Worker の回収が狙いなので、短くしても得るものが少ない。#2657 は 28 時間戻らなかった |
+| deliver / inbox / relationship / push / webhook | 30 分 | 恒久的に戻ってこない Worker の回収が狙いなので、短くしても得るものが少ない。#2657 は 1 日以上戻らなかった |
 | export / objectStorage / maintenance | 追跡しない | 1 job が分単位でページングするのが正常。`cleanRemoteFiles` は最大 10000 バッチ x 500ms (83 分) |
 | 上記以外 (既定一覧に無いキュー) | 追跡しない | job の長さを想定できないものに閾値を当てても誤検知しか生まない |
 
@@ -409,8 +413,11 @@ inbox で 4 本すべてがこの状態になり、`len(workers)` を返して�
 (`desired=16` / 隔離 20 で 3 tick、実測)。
 
 隔離された Worker は `awaitMarker` に戻って BZPopMin 接続を握り続けるので、その分の
-Redis 接続を見込んでおかないと #2657 の引き金になった
-`resource temporarily unavailable` を自分で再現することになる。**`redisForJobQueue.poolSize`
+Redis 接続を見込んでおかないと、接続が張れずに
+`resource temporarily unavailable` を踏む余地を自分で作ることになる
+(#2657 の直前にも同じエラーが出ていた。ただし **それが詰まりの原因だという
+証拠は無い** — valkey のエラーを一度も出していないプロセスで同じ症状が
+全部再現している。#2659 / docs/docker-uds.md)。**`redisForJobQueue.poolSize`
 を明示していない場合に限り** `workerPoolSize` が隔離ぶんを上乗せして自動確保する
 (go-redis の `PoolSize` は上限であって事前確保ではないので、広げても普段のコストは
 無い)。**明示している構成では上乗せされない** — §2 のように `poolSize` を書くなら、
@@ -490,8 +497,8 @@ issue #2658 は「handler の期限が lock より長いと回収済みの job �
 ことを懸念していた。整理すると:
 
 - **handler が動いている限り lock は切れない。** mkq の heartbeat が
-  `lockDuration/2` ごとに延長する。#2657 の本番例でも、28 時間掴まれた job の
-  lock TTL は 30 秒中 23-30 秒残っていた
+  `lockDuration/2` ごとに延長する。#2657 の本番例でも、31-41 時間掴まれた job は
+  `stc` が未設定のまま = 一度も回収されていなかった
 - lock が切れるのは heartbeat が失敗したときだけで、そのとき mkq は `jobCtx` を
   キャンセルする
 

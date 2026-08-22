@@ -120,7 +120,7 @@ type Server struct {
 // #2658 で別途入れる。
 //
 // 30 分にしてあるのは、この機構の狙いが**恒久的に戻ってこない Worker の
-// 回収**だからで、短くしても得るものが少ないため。#2657 の本番障害は 28 時間
+// 回収**だからで、短くしても得るものが少ないため。#2657 の本番障害は 1 日以上
 // 戻ってこなかったので、30 分で気付けば十分に速い。逆に短くすると、たまたま
 // 遅い job のたびに Worker を差し替えることになり、実効の並列度が設定値を
 // 超えた状態が定常化する (allowedRosterLocked のコメント参照)。
@@ -255,12 +255,18 @@ const quarantineHeadroom = 4
 // v1.0.6), but the handler is ours: wrapping it per Worker is enough to
 // see whether a Worker is inside a job and for how long.
 //
-// **その計測で足りることは本番で確認した** (#2657、2026-08-22)。滞留中の
-// inbox は `bull:inbox:active` に 4 件を 18-28 時間掴んだままで、各 job の
-// lock TTL が 30 秒の lockDuration に対し 23-30 秒残っていた。mkq の
-// heartbeat goroutine は `processJob` の寿命に紐づくので、lock が延長され
-// 続けている = `processJob` から戻っていない = handler の中にいる。
-// mkq 内部でも Redis でもない。
+// **その計測で足りることは本番で確認した** (#2657)。`bull:inbox:active` に
+// inbox の job が 4 件、掴まれたまま残っていた (08-22 の観測で 18-28 時間、
+// 08-23 の再測で 31-41 時間)。決め手は job HASH の `stc` (stalledCount) が
+// **未設定**だったこと — 一度も stalled-check に回収されていない、つまり
+// lock が途切れず延長され続けたということ (同じプロセスで stalled-check が
+// 現に他の job を回収していたので、checker が止まっていた可能性は無い)。mkq の heartbeat goroutine は
+// `processJob` の寿命に紐づくので、これは `processJob` から戻っていない
+// = handler の中にいる、を意味する。mkq 内部でも Redis でもない。
+//
+// (lock の PTTL でも同じ推論はできるが、heartbeat が lockDuration/2 ごとに
+// 張り直すので PTTL は 15-30 秒を巡回するだけで、スナップショット 1 点では
+// 継続を示せない。`stc` の方が直接的。)
 type workerHandle struct {
 	w *mkq.Worker
 	// busySinceNanos holds the monotonic reading of the moment the
@@ -848,8 +854,10 @@ func (p *workerPool) reinstateProvenLiveLocked() {
 // 戻らない以上、Stop は stopWorkerTimeout だけ待たされたうえで goroutine を
 // 残して返る) ので、代わりを無制限に立てると handler を確実に詰まらせる job が
 // 1 種類あるだけで goroutine と Redis 接続が際限なく増える。それを食い潰すと
-// #2657 の引き金になった `resource temporarily unavailable` を自分で再現する
-// ことになる。
+// `resource temporarily unavailable` を自分で再現することになる。#2657 の
+// 直前にも同じエラーが出ていたが、**それが詰まりの原因だという証拠は無い**
+// (valkey のエラーを一度も出していないプロセスで同じ症状が全部再現する。
+// #2659 / docs/docker-uds.md)。
 //
 // **上限の基準を desired にしない。** desired は autoscale が動かす値で、
 // しかも autoscale の目標は「この関数が返した生存数 + step」から決まる。
