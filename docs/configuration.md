@@ -45,6 +45,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `enablePprof` | bool | `false` | `/debug/pprof/*` ハンドラを公開。ローカルプロファイリング専用。**本番で絶対に使わない**。`MK_ENABLEPPROF`で上書き可。 |
 | `enableMetrics` | bool | `false` | Prometheus `/metrics` エンドポイントを公開。job queue 系 metric (`mk_job_workers_active` / `mk_job_workers_quarantined` / `mk_job_handlers_abandoned` / `mk_job_handler_abandonments_total` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` / `mk_job_processing_seconds` / `mk_job_scale_events_total` / `mk_job_scrape_errors_total`) を expose。認証無しで公開されるため、外部公開する場合は nginx / LB ACL で access 制限すること。詳細は `docs/design/auto-scale-job-workers.md` §6.1。`MK_ENABLEMETRICS`で上書き可。**注: `jobQueueDriver: asynq` 使用時、`mk_job_workers_active` は asynq の単一 pool 構造のため全 queue label が同値 (pool-wide concurrency) を返す。mkq driver は per-queue 実値を返す。** |
 | `jobQueueDriver` | string | `"mkq"` | ジョブキュー実装の選択。`mkq` (デフォルト、推奨) または `asynq` (legacy)。`mkq` は BullMQ wire-compatible で admin queue 画面が Misskey TS frontend 前提のまま動く + per-queue concurrency / rate-limit が効く。`asynq` は **将来削除予定** (mkq の安定性確保後) のため新規 deploy は `mkq` 推奨。`MK_JOBQUEUEDRIVER`で上書き可。 |
+| `effectivePolicyProviderCacheEntries` | int | `10000` | build-time pluginのeffective-policy providerごとに保持する成功結果LRUの最大件数。正の値だけを受理し、0以下は警告して既定へ戻す。TTLは無く、eviction時はresolverを再実行する。変更にはprocess再起動が必要。`MK_EFFECTIVEPOLICYPROVIDERCACHEENTRIES`で上書き可 |
 
 ### データベース (`db.*`)
 
@@ -238,13 +239,14 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | `MK_QUEUEIDLEPOLLSECONDS` | `queueIdlePollSeconds` |
 | `MK_QUEUESTUCKWORKERSECONDS` | `queueStuckWorkerSeconds` |
 | `MK_QUEUEHANDLERDEADLINESECONDS` | `queueHandlerDeadlineSeconds` |
+| `MK_EFFECTIVEPOLICYPROVIDERCACHEENTRIES` | `effectivePolicyProviderCacheEntries` |
 
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
 
-**上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **88 キー**を
+**上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **89 キー**を
 登録している。内訳は用途別 Redis 5 系統 (`redis` / `redisForPubsub` /
 `redisForJobQueue` / `redisForTimelines` / `redisForReactions`) が各 9、`db.*` が 9、
-`logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 30 が
+`logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 31 が
 トップレベル。全量はその関数を見ること。
 
 **登録の有無で「作れるか」だけが変わる。** Viper は `AutomaticEnv` を有効にしている

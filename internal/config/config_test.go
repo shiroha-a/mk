@@ -554,6 +554,44 @@ redis:
 	assert.Equal(t, 12345, cfg.DeactivateAntennaThreshold)
 }
 
+func TestLoad_EffectivePolicyProviderCacheEntries(t *testing.T) {
+	base := `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`
+
+	for name, tc := range map[string]struct {
+		line string
+		env  string
+		want int
+	}{
+		"default":      {want: 10_000},
+		"yaml":         {line: "effectivePolicyProviderCacheEntries: 321\n", want: 321},
+		"env only":     {env: "456", want: 456},
+		"zero default": {line: "effectivePolicyProviderCacheEntries: 0\n", want: 10_000},
+		"negative":     {line: "effectivePolicyProviderCacheEntries: -1\n", want: 10_000},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if tc.env != "" {
+				t.Setenv("MK_EFFECTIVEPOLICYPROVIDERCACHEENTRIES", tc.env)
+			}
+			path := writeTestConfig(t, base+tc.line)
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.EffectivePolicyProviderCacheEntries)
+		})
+	}
+}
+
 func TestLoad_InternalMediaProxy(t *testing.T) {
 	yaml := `
 url: https://example.com

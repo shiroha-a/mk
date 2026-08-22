@@ -20,13 +20,14 @@ type ServerPluginInfo struct {
 	// Enabled reflects the runtime config (plugins.<name>.enabled), not the
 	// build-time state. ビルドから外れたプラグインはそもそもこの一覧に出ない。
 	Enabled bool `json:"enabled"`
-	// Routes / Jobs reflect what the plugin declares, not what this process
-	// wired. ロール分割 (#2459) で片方しか動かないプロセスでも、プラグインの
-	// 構成としては同じものを見せる。
-	Routes     bool   `json:"routes"`
-	Jobs       bool   `json:"jobs"`
-	Migrations int    `json:"migrations"`
-	Schema     string `json:"schema"`
+	// Routes / Jobs / EffectivePolicies reflect what the plugin declares, not
+	// what this process wired. ロール分割 (#2459) で片方しか動かないプロセスでも、
+	// プラグインの構成としては同じものを見せる。
+	Routes            bool   `json:"routes"`
+	Jobs              bool   `json:"jobs"`
+	EffectivePolicies bool   `json:"effectivePolicies"`
+	Migrations        int    `json:"migrations"`
+	Schema            string `json:"schema"`
 	// ConfigKeys lists the setting keys only. **値は返さない** — どのキーが
 	// 秘密かを mk-go は判別できないので、-config-dump と同じく既定で全部
 	// マスクする方針に合わせる。

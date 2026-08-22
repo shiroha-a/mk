@@ -1174,6 +1174,9 @@ func TestServerPluginInfos_ReflectsDefinitionsAndConfig(t *testing.T) {
 		{
 			Name: "status", Version: "1.2.0", APIVersion: plugin.APIVersion,
 			Routes: routes, Jobs: jobs,
+			EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
+				return plugin.EffectivePolicyRegistration{}, nil
+			},
 			Migrations: []plugin.Migration{{Version: 1, SQL: "SELECT 1"}, {Version: 2, SQL: "SELECT 2"}},
 		},
 		{Name: "gameinfo", APIVersion: plugin.APIVersion, Routes: routes},
@@ -1195,6 +1198,7 @@ func TestServerPluginInfos_ReflectsDefinitionsAndConfig(t *testing.T) {
 	assert.False(t, infos[0].Enabled, "enabled: false を反映する")
 	assert.True(t, infos[0].Routes)
 	assert.True(t, infos[0].Jobs)
+	assert.True(t, infos[0].EffectivePolicies)
 	assert.Equal(t, 2, infos[0].Migrations)
 	assert.Equal(t, "plugin_status", infos[0].Schema)
 	// enabled は予約キーなので除外、残りはソート済みのキー名のみ (値は出さない)。
@@ -1204,6 +1208,7 @@ func TestServerPluginInfos_ReflectsDefinitionsAndConfig(t *testing.T) {
 	assert.True(t, infos[1].Enabled, "設定が無ければ既定で有効")
 	assert.True(t, infos[1].Routes)
 	assert.False(t, infos[1].Jobs)
+	assert.False(t, infos[1].EffectivePolicies)
 	assert.Equal(t, 0, infos[1].Migrations)
 	assert.Empty(t, infos[1].ConfigKeys)
 }

@@ -293,6 +293,9 @@ type Source struct {
 	// 中身の形はプラグインごとに違うので map のまま持つ。`enabled` だけは
 	// mk-go が解釈し (未設定は有効)、残りはプラグインへそのまま渡す。
 	Plugins map[string]map[string]any `mapstructure:"plugins"`
+	// EffectivePolicyProviderCacheEntries is the maximum number of successful
+	// policy results retained by each provider. Non-positive values use 10000.
+	EffectivePolicyProviderCacheEntries *int `mapstructure:"effectivePolicyProviderCacheEntries"`
 
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	// For local profiling only; must not be enabled in production.
@@ -449,6 +452,9 @@ type Config struct {
 
 	// Plugins holds per-plugin settings, keyed by plugin name (#2482).
 	Plugins map[string]map[string]any
+	// EffectivePolicyProviderCacheEntries limits successful cached results per
+	// provider. The resolved value is always positive.
+	EffectivePolicyProviderCacheEntries int
 
 	// EnablePprof registers net/http/pprof handlers at /debug/pprof/*.
 	EnablePprof bool
@@ -533,6 +539,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"mediaProxySecret",
 		"testMode",
 		"dev",
+		"effectivePolicyProviderCacheEntries",
 		// 運用/セキュリティ系: 既存ymlから環境変数オーバーライドできるようにする
 		"trustProxy",
 		"disableHsts",
@@ -645,6 +652,15 @@ func resolve(src *Source) (*Config, error) {
 	if src.DeactivateAntennaThreshold != nil {
 		deactivateAntennaThreshold = *src.DeactivateAntennaThreshold
 	}
+	effectivePolicyProviderCacheEntries := 10_000
+	if src.EffectivePolicyProviderCacheEntries != nil {
+		if *src.EffectivePolicyProviderCacheEntries > 0 {
+			effectivePolicyProviderCacheEntries = *src.EffectivePolicyProviderCacheEntries
+		} else {
+			slog.Warn("effectivePolicyProviderCacheEntries が正でないため既定値を使います",
+				"value", *src.EffectivePolicyProviderCacheEntries, "default", 10_000)
+		}
+	}
 
 	internalMediaProxy := fmt.Sprintf("%s://%s/proxy", scheme, host)
 	mediaProxy := internalMediaProxy
@@ -752,13 +768,14 @@ func resolve(src *Source) (*Config, error) {
 
 		TrustProxy: resolveTrustProxy(src.TrustProxy),
 
-		TestMode:                src.TestMode,
-		Dev:                     src.Dev,
-		Plugins:                 src.Plugins,
-		EnablePprof:             src.EnablePprof,
-		EnableTimelineCache:     src.EnableTimelineCache,
-		TimelineCacheTTLSeconds: src.TimelineCacheTTLSeconds,
-		EnableMetrics:           src.EnableMetrics,
+		TestMode:                            src.TestMode,
+		Dev:                                 src.Dev,
+		Plugins:                             src.Plugins,
+		EffectivePolicyProviderCacheEntries: effectivePolicyProviderCacheEntries,
+		EnablePprof:                         src.EnablePprof,
+		EnableTimelineCache:                 src.EnableTimelineCache,
+		TimelineCacheTTLSeconds:             src.TimelineCacheTTLSeconds,
+		EnableMetrics:                       src.EnableMetrics,
 
 		SentryForBackend:  src.SentryForBackend,
 		SentryForFrontend: src.SentryForFrontend,

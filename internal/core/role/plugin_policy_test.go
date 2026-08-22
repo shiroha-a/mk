@@ -337,6 +337,16 @@ func TestEffectivePolicy_FractionalIntNativePolicyIsPreserved(t *testing.T) {
 	assert.Equal(t, 0.5, policies["driveCapacityMb"])
 }
 
+func TestEffectivePolicy_DefaultPolicyNativeTypesAreCovered(t *testing.T) {
+	for key, value := range role.DefaultPolicies() {
+		switch value.(type) {
+		case bool, int, string, []string:
+		default:
+			t.Errorf("default policy %q has unsupported native type %T", key, value)
+		}
+	}
+}
+
 func TestEffectivePolicy_Int64BoundaryIsHostIntSized(t *testing.T) {
 	maxInt64 := int64(math.MaxInt64)
 	svc, _, _, _ := newTestService(t)
@@ -924,6 +934,70 @@ func TestEffectivePolicy_CachesSuccessUntilUserInvalidation(t *testing.T) {
 	assert.Equal(t, 2, calls)
 }
 
+func TestEffectivePolicy_ProviderCacheLimitEvictsLeastRecentlyUsed(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	svc.SetEffectivePolicyProviderCacheEntries(2)
+	var callsMu sync.Mutex
+	calls := map[string]int{}
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(_ context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		callsMu.Lock()
+		calls[req.UserID]++
+		callsMu.Unlock()
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+	})
+
+	for _, userID := range []string{"u1", "u2", "u1", "u3", "u2"} {
+		_, err := svc.GetUserPoliciesChecked(userID)
+		require.NoError(t, err)
+	}
+
+	callsMu.Lock()
+	defer callsMu.Unlock()
+	assert.Equal(t, map[string]int{"u1": 1, "u2": 2, "u3": 1}, calls)
+}
+
+func TestEffectivePolicy_ProviderFailuresAreNotCached(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	var calls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		calls.Add(1)
+		return nil, errors.New("test failure")
+	})
+
+	for range 2 {
+		_, err := svc.GetUserPoliciesChecked("u1")
+		require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	}
+	assert.Equal(t, int32(2), calls.Load())
+}
+
+func TestEffectivePolicy_ConcurrentResolutionAndInvalidationIsRaceFree(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+	})
+
+	var wg sync.WaitGroup
+	for worker := range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := range 50 {
+				_, _ = svc.GetUserPoliciesChecked(fmt.Sprintf("u%d-%d", worker, i%5))
+			}
+		}()
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := range 50 {
+			_ = svc.InvalidateUser(context.Background(), fmt.Sprintf("u%d-%d", i%4, i%5))
+			_ = svc.InvalidateRolePolicies(context.Background(), "r1")
+		}
+	}()
+	wg.Wait()
+}
+
 func TestEffectivePolicy_UserInvalidationPreservesOtherUserCache(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	var mu sync.Mutex
@@ -1074,6 +1148,65 @@ func TestEffectivePolicy_UserInvalidationRejectsInFlightCachePublication(t *test
 	second, err := svc.GetUserPoliciesChecked("u1")
 	require.NoError(t, err)
 	assert.True(t, second["canSearchNotes"].(bool), "the pre-invalidation result must not be published into the cache")
+	assert.Equal(t, int32(2), calls.Load())
+}
+
+func TestEffectivePolicy_UserInvalidationDoesNotReturnJoinedStaleFlight(t *testing.T) {
+	testEffectivePolicyInvalidationDoesNotReturnJoinedStaleFlight(t, func(svc *role.Service) error {
+		return svc.InvalidateUser(context.Background(), "u1")
+	})
+}
+
+func TestEffectivePolicy_RoleInvalidationDoesNotReturnJoinedStaleFlight(t *testing.T) {
+	testEffectivePolicyInvalidationDoesNotReturnJoinedStaleFlight(t, func(svc *role.Service) error {
+		return svc.InvalidateRolePolicies(context.Background(), "r1")
+	})
+}
+
+func testEffectivePolicyInvalidationDoesNotReturnJoinedStaleFlight(t *testing.T, invalidate func(*role.Service) error) {
+	t.Helper()
+	svc, _, _, _ := newTestService(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		call := calls.Add(1)
+		if call == 1 {
+			close(started)
+			<-release
+		}
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: call > 1}}, nil
+	})
+
+	firstResult := make(chan map[string]any, 1)
+	go func() {
+		policies, _ := svc.GetUserPoliciesChecked("u1")
+		firstResult <- policies
+	}()
+	<-started
+	require.NoError(t, invalidate(svc))
+
+	secondEntered := make(chan struct{})
+	secondResult := make(chan map[string]any, 1)
+	go func() {
+		close(secondEntered)
+		policies, _ := svc.GetUserPoliciesChecked("u1")
+		secondResult <- policies
+	}()
+	<-secondEntered
+	// Give the second request time to observe the existing flight while the
+	// first resolver remains blocked. The epoch assertion is deterministic in
+	// TestPolicyProviderFlightIsCurrent; this covers the full service path.
+	time.Sleep(20 * time.Millisecond)
+	close(release)
+
+	assert.False(t, (<-firstResult)["canSearchNotes"].(bool))
+	select {
+	case second := <-secondResult:
+		assert.True(t, second["canSearchNotes"].(bool), "a post-invalidation request must not receive the old flight result")
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-invalidation request did not complete")
+	}
 	assert.Equal(t, int32(2), calls.Load())
 }
 

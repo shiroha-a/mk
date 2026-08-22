@@ -66,7 +66,9 @@ type Server struct {
 	queueRuntimeStats *runtimestats.Recorder
 	// startedAt は admin/server-metrics が返す uptime の起点 (#2395)。
 	startedAt time.Time
-	// peerDepsはplugin間通信に必要な署名・解決・block判定をまとめる。
+	// peerDeps はプラグイン同士の通信 (#2537) に要る一式。setupRoutes が
+	// 署名・解決・ブロック判定を組み立ててから setupPlugins に渡す。
+	// 未配線 (nil) のときは peer を宣言したプラグインも受け口を張らない。
 	peerDeps *pluginPeerDeps
 	// role は「このプロセスが Web を担うか、ジョブキューを担うか」(#2459)。
 	// 既定 (RoleBoth) は env 未設定時の従来どおりの挙動。setupRoutes は
@@ -77,6 +79,7 @@ type Server struct {
 	queueOnlyServer *http.Server
 
 	// pluginRoles はプラグインのルートで権限を判定するための参照 (#2477)。
+	// setupRoutes で roleService を作った後に入る。
 	pluginRoles middleware.RoleChecker
 	// roleService は HTTP と queue が共有する process-local policy registry。
 	// 有効な plugin provider の登録は起動時だけ行い、enabled の変更には
@@ -125,26 +128,11 @@ func (s *Server) registerShutdownHook(fn func(context.Context)) {
 }
 
 func (s *Server) startConstructionWorker(run func(context.Context)) {
-	s.startConstructionWorkerWithDrain(run, false)
-}
-
-func (s *Server) startDrainedConstructionWorker(run func(context.Context)) {
-	s.startConstructionWorkerWithDrain(run, true)
-}
-
-func (s *Server) startConstructionWorkerWithDrain(run func(context.Context), drain bool) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	var once sync.Once
 	s.registerShutdownHook(func(shutdownCtx context.Context) {
 		once.Do(cancel)
-		if drain {
-			select {
-			case <-done:
-			case <-shutdownCtx.Done():
-			}
-			return
-		}
 		select {
 		case <-done:
 		case <-shutdownCtx.Done():
@@ -366,6 +354,8 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 		bcryptCost = password.DefaultCost
 	}
 	if err := password.SetCost(bcryptCost); err != nil {
+		// resolve を通っていれば到達しない。通っていない呼び出し元のために
+		// 既定へ落として続行する。
 		slog.Warn("bcrypt cost が不正なので既定値を使います", "value", bcryptCost, "err", err)
 		bcryptCost = password.DefaultCost
 		_ = password.SetCost(bcryptCost)

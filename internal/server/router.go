@@ -232,6 +232,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 
 	// Core services
 	roleService := corerole.NewService(roleRepo, roleAssignmentRepo, metaRepo, idGen)
+	roleService.SetEffectivePolicyProviderCacheEntries(s.config.EffectivePolicyProviderCacheEntries)
 	// server 全体の upload 上限 (MB) を role policy maxFileSizeMb の cap に使う (#2069/#17389)。
 	roleService.SetServerMaxFileSizeMb(int(s.config.MaxFileSize / (1024 * 1024)))
 	// drop-in 互換 (#785): Misskey TS は signup root user を user.isRoot=true で
@@ -969,7 +970,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 別タイミングで打つと重複排除をすり抜けて二重に積まれる。
 	if s.role.RunsQueue() {
 		if bufMeta, err := metaRepo.Fetch(); err == nil && bufMeta.EnableReactionsBuffering {
-			s.startDrainedConstructionWorker(func(ctx context.Context) {
+			s.startConstructionWorker(func(ctx context.Context) {
 				s.reactionFlushWorker(ctx, s.queueClient.EnqueueReactionFlush)
 			})
 		}

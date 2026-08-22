@@ -192,6 +192,9 @@ type Service struct {
 	// policyProviders は plugin name でソートされた不変の登録一覧。
 	// snapshotPolicyProviders が防御的コピーを返す (caller は書き換え不可)。
 	policyProviders []policyProvider
+	// effectivePolicyProviderCacheEntries はproviderごとの成功結果LRU上限。
+	// wire-timeに設定し、未設定または非正値なら既定値を使う。
+	effectivePolicyProviderCacheEntries int
 }
 
 // RoleAssignNotifier records a 'roleAssigned' notification on role assignment
@@ -214,13 +217,32 @@ func NewService(
 	idGen id.Generator,
 ) *Service {
 	return &Service{
-		roleRepo:        roleRepo,
-		assignmentRepo:  assignmentRepo,
-		metaRepo:        metaRepo,
-		idGen:           idGen,
-		userRoleCache:   make(map[string]*roleCacheEntry),
-		userRoleEpoch:   make(map[string]uint64),
-		userRoleFlights: make(map[string]int),
+		roleRepo:                            roleRepo,
+		assignmentRepo:                      assignmentRepo,
+		metaRepo:                            metaRepo,
+		idGen:                               idGen,
+		userRoleCache:                       make(map[string]*roleCacheEntry),
+		userRoleEpoch:                       make(map[string]uint64),
+		userRoleFlights:                     make(map[string]int),
+		effectivePolicyProviderCacheEntries: defaultEffectivePolicyProviderCacheEntries,
+	}
+}
+
+// SetEffectivePolicyProviderCacheEntries sets the successful-result LRU limit
+// for each effective-policy provider. It is intended for startup wiring.
+func (s *Service) SetEffectivePolicyProviderCacheEntries(entries int) {
+	if entries <= 0 {
+		entries = defaultEffectivePolicyProviderCacheEntries
+	}
+	s.policyProviderMu.Lock()
+	defer s.policyProviderMu.Unlock()
+	s.effectivePolicyProviderCacheEntries = entries
+	for i := range s.policyProviders {
+		runtime := s.policyProviders[i].runtime
+		runtime.cacheMu.Lock()
+		runtime.cacheEntries = entries
+		runtime.trimCache()
+		runtime.cacheMu.Unlock()
 	}
 }
 

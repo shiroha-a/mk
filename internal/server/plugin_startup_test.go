@@ -356,7 +356,7 @@ func TestServerShutdown_DeadlineBoundsReactionFlushDrain(t *testing.T) {
 			close(workerStopped)
 		},
 	}
-	s.startDrainedConstructionWorker(func(ctx context.Context) {
+	s.startConstructionWorker(func(ctx context.Context) {
 		s.reactionFlushWorker(ctx, func() error { return nil })
 	})
 	<-workerStarted

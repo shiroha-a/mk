@@ -6,12 +6,12 @@ effective-policy resolverがI/O待ちや実装不備で返らなくても、通�
 
 ## 契約
 
-- providerの実行token取得待ちとresolver実行には、それぞれ独立した1秒の期限を適用する。設定項目は追加しない。
+- providerの実行token取得待ちとresolver実行には、それぞれ独立した1秒の期限を適用する。この期限を変更する設定項目は追加しない。
 - tokenを1秒以内に取得できなかった場合は、そのrequestだけを既存のprovider failure経路へ合流させる。providerは無効化しない。
 - token取得後にresolver専用の新しい1秒deadline contextを作る。resolver自身が期限内に完了しなかった場合だけ、providerをprocess再起動まで無効化する。
 - token待ちとresolver実行を両方使い切ったrequestの最悪応答時間は約2秒になる。
 - disabled providerはresolverを再実行せず、既存のprovider failure経路へ合流する。
-- 成功してvalidationを通過したprovider outputは`UserID`とsorted active `RoleIDs`の組ごとに、明示的なuser/role invalidationまでcacheする。失敗結果はcacheしない。
+- 成功してvalidationを通過したprovider outputは`UserID`とsorted active `RoleIDs`の組ごとに、provider別LRUへcacheする。上限は`effectivePolicyProviderCacheEntries`（既定10000件）で、失敗結果はcacheしない。TTLは設けず、eviction時は同じ入力を再解決する。
 - 同じcache keyの同時missはsingle-flight化し、1回のresolver結果を共有する。異なるproviderのmissは並行解決し、provider数に比例してdeadlineを加算しない。
 - failed providerが宣言したkeyはplugin適用前のexact native policyへ戻し、同じkeyへの全plugin contributionを破棄する。
 - resolverへは実行専用deadlineを持つcontextを渡す。plugin.Storageなどcontext対応I/Oは協調的に停止できる。
@@ -24,19 +24,19 @@ provider runtimeは次の状態を持つ。
 
 - capacity 1の実行token
 - process lifetimeのatomic disabled flag
-- 成功結果cache、同一keyのsingle-flight、user別epoch、全体epoch
+- 上限付き成功結果LRU、同一keyのsingle-flight、user別epoch、全体epoch
 
 解決手順は次のとおり。
 
 1. disabledなら直ちにfailureを返す。
 2. `UserID`とlength-prefixで連結したsorted `RoleIDs`からcache keyを作る。hitならdeep cloneした成功結果を返す。
-3. 同じkeyのflightがあればその完了を待つ。無ければepochを記録してflight ownerになる。
+3. 同じkeyのflightがあり、そのuser/global epochが現在値と一致すれば完了を待って結果を共有する。epochが古ければ完了だけを待ってlookupをやり直し、古い結果は返さない。flightが無ければepochを記録してownerになる。
 4. token取得待ち専用の1秒deadline contextを作る。
 5. token取得を待つ。deadlineまでに取得できなければproviderをdisableせず、そのrequestだけfailureを返す。
 6. token取得後にdisabledを再確認する。別の呼び出しが待機中にdisableしていた場合はtokenを返し、resolverを開始せずfailureを返す。
 7. token待ちcontextを破棄し、resolver実行専用の新しい1秒deadline contextを作る。
 8. resolverを専用goroutineで実行し、完了時刻を記録してbuffered result channelへ結果を送る。完了時刻が実行deadline以後なら、tokenを返す前にdisabled flagを設定する。
-9. resolver完了ならtokenを返し、既存validationへ結果を渡す。成功時だけdeep cloneしてcacheへpublishする。開始後にuser/role invalidationがepochを変更していればpublishしない。
+9. resolver完了ならtokenを返し、既存validationへ結果を渡す。成功時だけdeep cloneしてLRUへpublishし、上限超過分をleast-recently-used順にevictする。開始後にuser/role invalidationがepochを変更していればpublishしない。
 10. resolver実行deadlineが先ならproviderをdisableし、cacheを破棄してfailureを返す。resolver goroutineは強制終了しない。
 
 tokenはresolver goroutineがreturnしたときだけ返す。contextを無視して永久にhangするresolverでも、同じproviderで残留するgoroutineは最大1本になる。timeout後は実行前とtoken取得後のdisabled checkで新しいgoroutineを作らない。deadline以後にresolverがreturnした場合はresolver goroutine自身がtoken返却前にdisableするため、timeoutを処理するcallerとのschedule順にかかわらず、待機callerが新しいresolverを開始できない。
@@ -44,6 +44,10 @@ tokenはresolver goroutineがreturnしたときだけ返す。contextを無視�
 resolver実行deadline直前の完了とtimeoutが競合した場合は、resolver goroutineが記録した完了時刻とdeadlineを比較する。deadline前に完了したresultだけを通常validationへ渡し、deadline以後のresultはproviderをdisableしてnative fallbackへ戻す。
 
 token取得待ちのtimeoutはproviderの健全性を示さない。同じruntimeを共有する正常なresolverがburstを直列処理しているだけでも発生するため、permanent disabled flagを変更してはならない。このrequestではpolicyがnative fallbackへ戻るが、後続requestはtoken取得とresolver実行を再試行できる。
+
+異なるcache keyのcold missもcapacity 1のtokenで直列化する。並列化すると、最初のtimeoutでdisableされる前にcontextを無視するresolver goroutineを複数起動でき、providerごとに残留goroutine最大1本という境界を破るためである。同じkeyだけはsingle-flightでresolver実行を共有する。
+
+resolverは明示的なinvalidationの間、`UserID`とsorted active `RoleIDs`だけで結果が決まる必要がある。LRU evictionは正しさの通知ではなく、同じ結果を再計算する契機にすぎない。匿名結果にはper-user invalidationが無く、匿名へ影響する変更はrole-wide invalidationで破棄する。
 
 providerは登録順のresult slotへ並行解決し、全slot完了後に登録順でaggregationする。これにより複数providerがhangしてもrequest時間は最も遅いproviderの約2秒を上限とし、goroutine schedulingでaggregation結果を変えない。
 
@@ -75,7 +79,8 @@ internal/safemath.MulFloat64はNaNを0へ正規化する。有限値の通常乗
 - concurrent resolutionでresolver実行数と残留goroutineがproviderごと最大1になる。
 - 同一user/RoleIDsのconcurrent missが1回のresolver実行を共有する。
 - user invalidationが対象userだけを、role invalidationが全provider outputを破棄する。
-- invalidation前のin-flight結果がcacheへ再publishされない。
+- invalidation前のin-flight結果がcacheへ再publishされず、invalidation後に開始したrequestへも返らない。
+- provider別LRUが設定上限を超えず、hitでrecencyを更新し、eviction後に再解決する。
 - 複数providerのtimeoutが直列加算されない。
 - timeout disableのwarningが一度だけ出て、plugin由来情報を含まない。
 - timeout後の呼び出しがresolverを再実行しない。

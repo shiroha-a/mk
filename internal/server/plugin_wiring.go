@@ -193,9 +193,9 @@ func (i *roleEffectivePolicyInvalidator) InvalidateRole(ctx context.Context, rol
 // serverPluginInfos builds the admin-facing snapshot of compiled-in plugins
 // (admin/server-plugins, #2497).
 //
-// Routes / Jobs は**宣言**を写す (このプロセスで配線されたかではない)。ロール
-// 分割 (#2459) でどのプロセスの管理画面から見ても、プラグインの構成としては
-// 同じものが出るようにする。
+// Routes / Jobs / EffectivePolicies は**宣言**を写す (このプロセスで配線されたか
+// ではない)。ロール分割 (#2459) でどのプロセスの管理画面から見ても、
+// プラグインの構成としては同じものが出るようにする。
 func serverPluginInfos(plugins []plugin.Definition, settings map[string]map[string]any) []apiadmin.ServerPluginInfo {
 	infos := make([]apiadmin.ServerPluginInfo, 0, len(plugins))
 	for _, def := range plugins {
@@ -214,15 +214,16 @@ func serverPluginInfos(plugins []plugin.Definition, settings map[string]map[stri
 
 		schema, _ := pluginstore.SchemaName(def.Name)
 		infos = append(infos, apiadmin.ServerPluginInfo{
-			Name:       def.Name,
-			Version:    def.Version,
-			APIVersion: def.APIVersion,
-			Enabled:    pluginEnabled(s),
-			Routes:     def.Routes != nil,
-			Jobs:       def.Jobs != nil,
-			Migrations: len(def.Migrations),
-			Schema:     schema,
-			ConfigKeys: keys,
+			Name:              def.Name,
+			Version:           def.Version,
+			APIVersion:        def.APIVersion,
+			Enabled:           pluginEnabled(s),
+			Routes:            def.Routes != nil,
+			Jobs:              def.Jobs != nil,
+			EffectivePolicies: def.EffectivePolicies != nil,
+			Migrations:        len(def.Migrations),
+			Schema:            schema,
+			ConfigKeys:        keys,
 		})
 	}
 	return infos

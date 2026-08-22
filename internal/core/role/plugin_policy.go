@@ -1,6 +1,7 @@
 package role
 
 import (
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
@@ -23,24 +24,31 @@ import (
 var ErrEffectivePolicyProvider = errors.New("effective policy provider failed")
 
 const effectivePolicyProviderTimeout = time.Second
+const defaultEffectivePolicyProviderCacheEntries = 10_000
 
 type policyProviderRuntime struct {
 	token    chan struct{}
 	disabled atomic.Bool
 
-	cacheMu     sync.Mutex
-	cache       map[policyProviderCacheKey][]plugin.EffectivePolicyContribution
-	flights     map[policyProviderCacheKey]*policyProviderFlight
-	userEpoch   map[string]uint64
-	globalEpoch uint64
+	cacheMu      sync.Mutex
+	cache        map[policyProviderCacheKey]*list.Element
+	cacheLRU     list.List
+	cacheEntries int
+	flights      map[policyProviderCacheKey]*policyProviderFlight
+	userEpoch    map[string]uint64
+	globalEpoch  uint64
 }
 
-func newPolicyProviderRuntime() *policyProviderRuntime {
+func newPolicyProviderRuntime(cacheEntries int) *policyProviderRuntime {
+	if cacheEntries <= 0 {
+		cacheEntries = defaultEffectivePolicyProviderCacheEntries
+	}
 	runtime := &policyProviderRuntime{
-		token:     make(chan struct{}, 1),
-		cache:     make(map[policyProviderCacheKey][]plugin.EffectivePolicyContribution),
-		flights:   make(map[policyProviderCacheKey]*policyProviderFlight),
-		userEpoch: make(map[string]uint64),
+		token:        make(chan struct{}, 1),
+		cache:        make(map[policyProviderCacheKey]*list.Element),
+		cacheEntries: cacheEntries,
+		flights:      make(map[policyProviderCacheKey]*policyProviderFlight),
+		userEpoch:    make(map[string]uint64),
 	}
 	runtime.token <- struct{}{}
 	return runtime
@@ -49,6 +57,11 @@ func newPolicyProviderRuntime() *policyProviderRuntime {
 type policyProviderCacheKey struct {
 	userID  string
 	roleIDs string
+}
+
+type policyProviderCacheEntry struct {
+	key           policyProviderCacheKey
+	contributions []plugin.EffectivePolicyContribution
 }
 
 type policyProviderFlight struct {
@@ -82,14 +95,8 @@ func (s *Service) RegisterEffectivePolicyProvider(name string, reg plugin.Effect
 		return errors.New("role: effective policy provider の名前が空です")
 	}
 	// ロードベアリング: Validate を必ず呼んでから保存する。
-	if err := reg.Validate(); err != nil {
+	if err := ValidateEffectivePolicyRegistration(reg); err != nil {
 		return err
-	}
-	defaults := DefaultPolicies()
-	for _, k := range reg.Keys {
-		if _, ok := defaults[k]; !ok {
-			return fmt.Errorf("role: effective policy provider %q は既定外の policy key %q を宣言しています", name, k)
-		}
 	}
 	// 防御的コピー: caller の Keys slice と共有しない (登録後の外部変更が
 	// 解決結果に漏れないようにする)。
@@ -106,11 +113,26 @@ func (s *Service) RegisterEffectivePolicyProvider(name string, reg plugin.Effect
 	}
 	providers := make([]policyProvider, 0, len(s.policyProviders)+1)
 	providers = append(providers, s.policyProviders...)
-	providers = append(providers, policyProvider{name: name, reg: reg, runtime: newPolicyProviderRuntime()})
+	providers = append(providers, policyProvider{name: name, reg: reg, runtime: newPolicyProviderRuntime(s.effectivePolicyProviderCacheEntries)})
 	sort.Slice(providers, func(i, j int) bool {
 		return providers[i].name < providers[j].name
 	})
 	s.policyProviders = providers
+	return nil
+}
+
+// ValidateEffectivePolicyRegistration applies the host's startup validation
+// to an effective-policy registration.
+func ValidateEffectivePolicyRegistration(reg plugin.EffectivePolicyRegistration) error {
+	if err := reg.Validate(); err != nil {
+		return err
+	}
+	defaults := DefaultPolicies()
+	for _, key := range reg.Keys {
+		if _, ok := defaults[key]; !ok {
+			return fmt.Errorf("role: effective policy provider は既定外の policy key %q を宣言しています", key)
+		}
+	}
 	return nil
 }
 
@@ -132,8 +154,9 @@ func (s *Service) snapshotPolicyProviders() []policyProvider {
 // way GetUserPolicies does, but also reports whether a registered provider
 // failed. On provider failure the returned map uses the native policy result
 // for every key declared by that provider, and the error is the fixed
-// ErrEffectivePolicyProvider. Successful provider output is cached until the
-// plugin explicitly invalidates the affected user or role inputs.
+// ErrEffectivePolicyProvider. Successful provider output is stored in a
+// bounded per-provider LRU; plugins must explicitly invalidate affected inputs
+// after committed state changes.
 func (s *Service) GetUserPoliciesChecked(userID string) (map[string]any, error) {
 	return s.resolvePolicies(userID)
 }
@@ -256,32 +279,39 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 	}
 	key := policyProviderCacheKey{userID: req.UserID, roleIDs: encodePolicyProviderRoleIDs(req.RoleIDs)}
 
-	provider.runtime.cacheMu.Lock()
-	if provider.runtime.disabled.Load() {
+	var flight *policyProviderFlight
+	for {
+		provider.runtime.cacheMu.Lock()
+		if provider.runtime.disabled.Load() {
+			provider.runtime.cacheMu.Unlock()
+			return nil, false
+		}
+		if cached, ok := provider.runtime.cacheGet(key); ok {
+			provider.runtime.cacheMu.Unlock()
+			return clonePolicyContributions(cached), true
+		}
+		if existing := provider.runtime.flights[key]; existing != nil {
+			join := policyProviderFlightIsCurrent(provider.runtime, req.UserID, existing)
+			provider.runtime.cacheMu.Unlock()
+			contributions, ok, joined := waitPolicyProviderFlight(existing, join)
+			if joined {
+				return contributions, ok
+			}
+			continue
+		}
+		flight = &policyProviderFlight{
+			done:        make(chan struct{}),
+			userEpoch:   provider.runtime.userEpoch[req.UserID],
+			globalEpoch: provider.runtime.globalEpoch,
+		}
+		provider.runtime.flights[key] = flight
 		provider.runtime.cacheMu.Unlock()
-		return nil, false
+		break
 	}
-	if cached, ok := provider.runtime.cache[key]; ok {
-		provider.runtime.cacheMu.Unlock()
-		return clonePolicyContributions(cached), true
-	}
-	if flight := provider.runtime.flights[key]; flight != nil {
-		done := flight.done
-		provider.runtime.cacheMu.Unlock()
-		<-done
-		return clonePolicyContributions(flight.contributions), flight.ok
-	}
-	flight := &policyProviderFlight{
-		done:        make(chan struct{}),
-		userEpoch:   provider.runtime.userEpoch[req.UserID],
-		globalEpoch: provider.runtime.globalEpoch,
-	}
-	provider.runtime.flights[key] = flight
-	provider.runtime.cacheMu.Unlock()
 
 	contributions, ok := invokePolicyProvider(provider, req)
 	if ok {
-		ok = validatePolicyContributions(provider.reg.Keys, base, contributions)
+		ok = ValidateEffectivePolicyContributions(provider.reg.Keys, base, contributions)
 	}
 	if ok {
 		contributions = clonePolicyContributions(contributions)
@@ -296,15 +326,85 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 	if ok && !provider.runtime.disabled.Load() &&
 		provider.runtime.globalEpoch == flight.globalEpoch &&
 		provider.runtime.userEpoch[req.UserID] == flight.userEpoch {
-		provider.runtime.cache[key] = clonePolicyContributions(contributions)
+		provider.runtime.cachePut(key, contributions)
 	}
-	delete(provider.runtime.flights, key)
+	if provider.runtime.flights[key] == flight {
+		delete(provider.runtime.flights, key)
+	}
 	if !policyProviderHasUserFlight(provider.runtime, req.UserID) {
 		delete(provider.runtime.userEpoch, req.UserID)
 	}
 	close(flight.done)
 	provider.runtime.cacheMu.Unlock()
 	return clonePolicyContributions(contributions), ok
+}
+
+// policyProviderFlightIsCurrent reports whether flight belongs to the current
+// invalidation generation. The caller must hold runtime.cacheMu.
+func policyProviderFlightIsCurrent(runtime *policyProviderRuntime, userID string, flight *policyProviderFlight) bool {
+	return runtime.globalEpoch == flight.globalEpoch && runtime.userEpoch[userID] == flight.userEpoch
+}
+
+func waitPolicyProviderFlight(flight *policyProviderFlight, current bool) ([]plugin.EffectivePolicyContribution, bool, bool) {
+	<-flight.done
+	if !current {
+		return nil, false, false
+	}
+	return clonePolicyContributions(flight.contributions), flight.ok, true
+}
+
+// cacheGet returns the immutable cached snapshot and updates recency. The
+// caller must hold runtime.cacheMu.
+func (runtime *policyProviderRuntime) cacheGet(key policyProviderCacheKey) ([]plugin.EffectivePolicyContribution, bool) {
+	element := runtime.cache[key]
+	if element == nil {
+		return nil, false
+	}
+	runtime.cacheLRU.MoveToFront(element)
+	return element.Value.(*policyProviderCacheEntry).contributions, true
+}
+
+// cachePut stores a cloned snapshot and enforces the configured LRU limit. The
+// caller must hold runtime.cacheMu.
+func (runtime *policyProviderRuntime) cachePut(key policyProviderCacheKey, contributions []plugin.EffectivePolicyContribution) {
+	cloned := clonePolicyContributions(contributions)
+	if element := runtime.cache[key]; element != nil {
+		entry := element.Value.(*policyProviderCacheEntry)
+		entry.contributions = cloned
+		runtime.cacheLRU.MoveToFront(element)
+		return
+	}
+	element := runtime.cacheLRU.PushFront(&policyProviderCacheEntry{key: key, contributions: cloned})
+	runtime.cache[key] = element
+	runtime.trimCache()
+}
+
+// trimCache evicts least-recently-used entries. The caller must hold cacheMu.
+func (runtime *policyProviderRuntime) trimCache() {
+	for runtime.cacheLRU.Len() > runtime.cacheEntries {
+		element := runtime.cacheLRU.Back()
+		entry := element.Value.(*policyProviderCacheEntry)
+		delete(runtime.cache, entry.key)
+		runtime.cacheLRU.Remove(element)
+	}
+}
+
+// cacheDeleteUser removes every role-input variant for userID. The caller must
+// hold runtime.cacheMu.
+func (runtime *policyProviderRuntime) cacheDeleteUser(userID string) {
+	for key, element := range runtime.cache {
+		if key.userID != userID {
+			continue
+		}
+		delete(runtime.cache, key)
+		runtime.cacheLRU.Remove(element)
+	}
+}
+
+// cacheClear resets both LRU indexes. The caller must hold runtime.cacheMu.
+func (runtime *policyProviderRuntime) cacheClear() {
+	clear(runtime.cache)
+	runtime.cacheLRU.Init()
 }
 
 func policyProviderHasUserFlight(runtime *policyProviderRuntime, userID string) bool {
@@ -402,7 +502,7 @@ func disablePolicyProvider(runtime *policyProviderRuntime) {
 	disabled := runtime.disabled.CompareAndSwap(false, true)
 	if disabled {
 		runtime.globalEpoch++
-		clear(runtime.cache)
+		runtime.cacheClear()
 	}
 	runtime.cacheMu.Unlock()
 	if disabled {
@@ -461,7 +561,9 @@ func policyProviderDeadlineExceeded(ctx context.Context) bool {
 	return ok && !time.Now().Before(deadline)
 }
 
-func validatePolicyContributions(keys []string, base map[string]any, contributions []plugin.EffectivePolicyContribution) bool {
+// ValidateEffectivePolicyContributions reports whether contributions satisfy
+// the same host schema enforced during production resolution.
+func ValidateEffectivePolicyContributions(keys []string, base map[string]any, contributions []plugin.EffectivePolicyContribution) bool {
 	type contributionTie struct {
 		key   string
 		order int
@@ -543,22 +645,6 @@ func policyValueValid(key string, native, value any) bool {
 		return ok
 	case int:
 		return providerHostNumberValid(value)
-	case int64:
-		switch v := value.(type) {
-		case int, int64:
-			return true
-		case float64:
-			return providerFloatInInt64Range(v)
-		}
-		return false
-	case float64:
-		switch v := value.(type) {
-		case int, int64:
-			return true
-		case float64:
-			return !math.IsNaN(v) && !math.IsInf(v, 0)
-		}
-		return false
 	case string:
 		v, ok := value.(string)
 		if !ok {
@@ -611,11 +697,6 @@ func providerHostNumberValid(value any) bool {
 	}
 }
 
-func providerFloatInInt64Range(value float64) bool {
-	return !math.IsNaN(value) && !math.IsInf(value, 0) &&
-		value >= float64(math.MinInt64) && value < -float64(math.MinInt64)
-}
-
 // InvalidateUser drops the cached policy inputs for a single user. Task 5's
 // adapter bridges InvalidateRole to InvalidateRolePolicies to satisfy
 // plugin.EffectivePolicyInvalidator without changing this service's API.
@@ -636,11 +717,7 @@ func (s *Service) invalidateUserPolicyCaches(userID string) {
 		} else {
 			delete(provider.runtime.userEpoch, userID)
 		}
-		for key := range provider.runtime.cache {
-			if key.userID == userID {
-				delete(provider.runtime.cache, key)
-			}
-		}
+		provider.runtime.cacheDeleteUser(userID)
 		provider.runtime.cacheMu.Unlock()
 	}
 }
@@ -661,7 +738,7 @@ func (s *Service) invalidateRolePolicyCaches(roleID string) {
 	for _, provider := range s.snapshotPolicyProviders() {
 		provider.runtime.cacheMu.Lock()
 		provider.runtime.globalEpoch++
-		clear(provider.runtime.cache)
+		provider.runtime.cacheClear()
 		clear(provider.runtime.userEpoch)
 		provider.runtime.cacheMu.Unlock()
 	}

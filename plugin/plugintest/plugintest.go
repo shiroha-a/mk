@@ -37,6 +37,7 @@ import (
 	"sync"
 	"testing"
 
+	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/pluginstore"
 	"github.com/shiroha-a/mk/plugin"
 )
@@ -262,15 +263,20 @@ func (h *Harness) EffectivePolicies(def plugin.Definition) plugin.EffectivePolic
 	if err != nil {
 		h.t.Fatalf("plugintest: EffectivePolicies に失敗しました: %v", err)
 	}
-	if err := registration.Validate(); err != nil {
-		h.t.Fatalf("plugintest: EffectivePolicies の登録が不正です: %v", err)
+	if err := corerole.ValidateEffectivePolicyRegistration(registration); err != nil {
+		h.t.Fatalf("plugintest: EffectivePolicies の登録が不正です")
 	}
 	registration.Keys = append([]string(nil), registration.Keys...)
 	resolver := registration.Resolve
 	if resolver != nil {
 		registration.Resolve = func(ctx context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
 			req.RoleIDs = append([]string(nil), req.RoleIDs...)
-			return resolver(ctx, req)
+			contributions, err := resolver(ctx, req)
+			if err == nil && !corerole.ValidateEffectivePolicyContributions(registration.Keys, corerole.DefaultPolicies(), contributions) {
+				h.t.Errorf("plugintest: EffectivePolicies の出力が不正です")
+				return nil, fmt.Errorf("plugintest: effective policy output is invalid")
+			}
+			return contributions, err
 		}
 	}
 	return registration

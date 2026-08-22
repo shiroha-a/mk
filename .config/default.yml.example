@@ -525,6 +525,10 @@ proxyBypassHosts:
 # the cluster. See docs/design/auto-scale-job-workers.md §6.1.
 #enableMetrics: false
 
+# Maximum successful effective-policy entries retained per provider.
+# Non-positive values use the default 10000. Changes require a restart.
+#effectivePolicyProviderCacheEntries: 10000
+
 #   ┌────────────────────────┐
 #───┘ Plugins (mk-go specific) └────────────────────────────────
 
