@@ -7,6 +7,11 @@
 //     都度 read。auto-scale で動的変化する将来も追従できる。mkq driver では
 //     handler が閾値を超えて戻ってこない worker を除いた**生存数**を返す
 //     (#2657)。goroutine 数ではない。
+//   - mk_job_handlers_abandoned{queue} (gauge) /
+//     mk_job_handler_abandonments_total{queue} (counter): dispatcher が
+//     待つのをやめた handler の数 (mkq driver のみ、他は常に 0)。**gauge が
+//     0 に戻らないなら handler が本当に戻ってこない経路を踏んでいる** —
+//     その goroutine は DB 接続などを掴んだまま残る (#2658)。
 //   - mk_job_workers_quarantined{queue} (gauge): 閾値超過で pool の外に
 //     退けてある worker 数 (mkq driver のみ、他は常に 0)。**0 でない状態が
 //     続いていたら handler がブロックしている。** #2657 の本番障害はこれが
@@ -234,6 +239,21 @@ var (
 		"Number of workers per queue able to take work (asynq backend reports pool-wide; see docs/configuration.md).",
 		[]string{"queue"}, nil,
 	)
+	handlersAbandonedDesc = prometheus.NewDesc(
+		"mk_job_handlers_abandoned",
+		"Number of job handlers per queue the dispatcher gave up on that have still not returned (mkq backend only; always 0 elsewhere).",
+		[]string{"queue"}, nil,
+	)
+	// **`mk_job_handlers_abandoned_total` にしない。** OpenMetrics encoder は
+	// counter の family 名から `_total` を落とすので、gauge の
+	// `mk_job_handlers_abandoned` と family 名が衝突し、同じ family に
+	// `# TYPE` が 2 行出る (spec 違反)。`/metrics` は
+	// `EnableOpenMetrics: true` なので実際に踏む。
+	handlerAbandonmentsTotalDesc = prometheus.NewDesc(
+		"mk_job_handler_abandonments_total",
+		"Cumulative number of job handlers per queue the dispatcher gave up on (mkq backend only; always 0 elsewhere).",
+		[]string{"queue"}, nil,
+	)
 	workersQuarantinedDesc = prometheus.NewDesc(
 		"mk_job_workers_quarantined",
 		"Number of workers per queue held outside the pool because their handler overran the stuck-worker threshold (mkq backend only; always 0 elsewhere).",
@@ -254,6 +274,8 @@ var (
 func (c *driverCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- workersActiveDesc
 	ch <- workersQuarantinedDesc
+	ch <- handlersAbandonedDesc
+	ch <- handlerAbandonmentsTotalDesc
 	ch <- queuePendingDesc
 	ch <- scrapeErrorsDesc
 }
@@ -267,6 +289,22 @@ func (c *driverCollector) Describe(ch chan<- *prometheus.Desc) {
 // 見える面を増やしてしまう (#571 で削除予定)。
 type quarantineReporter interface {
 	QuarantinedWorkerCount(qname string) int
+}
+
+// abandonReporter is the optional driver-side surface behind
+// mk_job_handlers_abandoned{,_total} (#2658). Same rationale as
+// quarantineReporter for keeping it off driver.Driver.
+type abandonReporter interface {
+	AbandonedHandlerCount(qname string) (int, uint64)
+}
+
+// abandonedFor returns the driver's abandoned-handler counts for qname, or
+// zeroes when the driver does not track them.
+func abandonedFor(d driver.Driver, qname string) (int, uint64) {
+	if r, ok := d.(abandonReporter); ok {
+		return r.AbandonedHandlerCount(qname)
+	}
+	return 0, 0
 }
 
 // quarantinedFor returns the driver's quarantined worker count for qname,
@@ -291,6 +329,13 @@ func (c *driverCollector) Collect(ch chan<- prometheus.Metric) {
 		ch <- prometheus.MustNewConstMetric(
 			workersQuarantinedDesc, prometheus.GaugeValue,
 			float64(quarantinedFor(c.driver, q)), q,
+		)
+		abandonedNow, abandonedTotal := abandonedFor(c.driver, q)
+		ch <- prometheus.MustNewConstMetric(
+			handlersAbandonedDesc, prometheus.GaugeValue, float64(abandonedNow), q,
+		)
+		ch <- prometheus.MustNewConstMetric(
+			handlerAbandonmentsTotalDesc, prometheus.CounterValue, float64(abandonedTotal), q,
 		)
 		var pending int
 		info, err := inspector.GetQueueInfo(q)

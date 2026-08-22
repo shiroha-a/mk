@@ -635,7 +635,9 @@ func (h *Handler) SetQueueInspector(qi QueueInspector) {
 // Workers は「仕事を取れる worker 数」であって goroutine 数ではない。mkq
 // driver では handler が閾値を超えて戻ってこない worker が除かれるので、
 // job を処理している最中でも minWorkers を下回ることがある (#2657)。
-// その状態が続いているかは `mk_job_workers_quarantined` で見る
+// 放棄した handler が予算を食って roster ごと縮んでいることもある (#2658)。
+// どちらなのかは `mk_job_workers_quarantined` と
+// `mk_job_handlers_abandoned` を見比べて判断する
 // (`enableMetrics: true` のときだけ expose される)。
 //
 // upstream Misskey は worker 数を静的な config でしか持たないので該当情報が

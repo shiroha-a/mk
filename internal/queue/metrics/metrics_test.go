@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -397,4 +398,89 @@ func TestStandardQueues_CoversEveryQueue(t *testing.T) {
 	// 監視が置き去りになる。
 	assert.ElementsMatch(t, mkqdriver.QueueNames, standardQueues,
 		"every queue the driver spawns workers for must get a metrics series")
+}
+
+// **mkqdriver.Driver がこの面を満たすことを固定する。** 構造的インターフェース
+// なのでメソッド名を変えても型検査は通り、gauge が黙って常時 0 になる (#2658)。
+var _ abandonReporter = (*mkqdriver.Driver)(nil)
+
+type abandonFakeDriver struct {
+	*fakeDriver
+	current map[string]int
+	total   map[string]uint64
+}
+
+func (d *abandonFakeDriver) AbandonedHandlerCount(qname string) (int, uint64) {
+	return d.current[qname], d.total[qname]
+}
+
+func TestCollect_AbandonedHandlerGauges(t *testing.T) {
+	m := New()
+	m.BindDriver(&abandonFakeDriver{
+		fakeDriver: &fakeDriver{workers: map[string]int{"inbox": 4}, inspector: &fakeInspector{}},
+		current:    map[string]int{"inbox": 2},
+		total:      map[string]uint64{"inbox": 7},
+	})
+	r := prometheus.NewRegistry()
+	require.NoError(t, m.Register(r))
+
+	body := scrape(t, r)
+	assert.Contains(t, body, `mk_job_handlers_abandoned{queue="inbox"} 2`)
+	assert.Contains(t, body, `mk_job_handler_abandonments_total{queue="inbox"} 7`)
+	assert.Contains(t, body, `mk_job_handlers_abandoned{queue="deliver"} 0`)
+}
+
+func TestCollect_AbandonedGaugesZeroWithoutSupport(t *testing.T) {
+	m := New()
+	m.BindDriver(&fakeDriver{workers: map[string]int{"inbox": 4}, inspector: &fakeInspector{}})
+	r := prometheus.NewRegistry()
+	require.NoError(t, m.Register(r))
+
+	body := scrape(t, r)
+	assert.Contains(t, body, `mk_job_handlers_abandoned{queue="inbox"} 0`)
+	assert.Contains(t, body, `mk_job_handler_abandonments_total{queue="inbox"} 0`)
+}
+
+// **gauge と counter が同じ family 名に潰れないことを固定する。**
+// OpenMetrics encoder は counter の family 名から `_total` を落とすので、
+// `mk_job_handlers_abandoned` + `..._total` の組は同じ family に `# TYPE` を
+// 2 行出してしまう (spec 違反)。`/metrics` は EnableOpenMetrics なので実害あり。
+func TestCollect_AbandonedMetricFamiliesDoNotCollide(t *testing.T) {
+	m := New()
+	m.BindDriver(&abandonFakeDriver{
+		fakeDriver: &fakeDriver{workers: map[string]int{"inbox": 1}, inspector: &fakeInspector{}},
+		current:    map[string]int{"inbox": 1},
+		total:      map[string]uint64{"inbox": 1},
+	})
+	r := prometheus.NewRegistry()
+	require.NoError(t, m.Register(r))
+
+	// **Gather() では検出できない。** family 名を落とすのは OpenMetrics の
+	// encoder なので、実際にその形式でレンダリングして `# TYPE` の重複を見る。
+	srv := httptest.NewServer(promhttp.HandlerFor(r, promhttp.HandlerOpts{
+		EnableOpenMetrics: true,
+	}))
+	defer srv.Close()
+	req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+	require.NoError(t, err)
+	req.Header.Set("Accept", "application/openmetrics-text;version=1.0.0")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+	raw, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+
+	types := map[string]int{}
+	for _, line := range strings.Split(string(raw), "\n") {
+		if !strings.HasPrefix(line, "# TYPE ") {
+			continue
+		}
+		types[strings.Fields(line)[2]]++
+	}
+	require.NotEmpty(t, types)
+	for name, n := range types {
+		assert.Equal(t, 1, n, "metric family %q must declare its type once", name)
+	}
+	assert.Contains(t, types, "mk_job_handlers_abandoned")
+	assert.Contains(t, types, "mk_job_handler_abandonments")
 }
