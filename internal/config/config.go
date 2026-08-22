@@ -132,8 +132,14 @@ type Source struct {
 	// QueueIdlePollSeconds はジョブが無いときに worker が marker を待つ秒数の
 	// 下限。空振りのたびに mkq が待ちを倍にし 30 秒で頭打ちにするので、
 	// これは初回の待ちにあたる。未設定なら mkq の既定。mkq driver のみ有効。
-	QueueIdlePollSeconds *int  `mapstructure:"queueIdlePollSeconds"`
-	EnableIPRateLimit    *bool `mapstructure:"enableIpRateLimit"`
+	QueueIdlePollSeconds *int `mapstructure:"queueIdlePollSeconds"`
+	// QueueStuckWorkerSeconds は 1 件の job の handler が何秒戻ってこなければ
+	// その worker を「キューの worker 数に数えない」扱いにするか (#2657)。
+	// 未設定ならキューごとの既定 (deliver / inbox / relationship / push /
+	// webhook は 30 分、export などの batch 系は追跡しない)。正値を入れると全キューにその値が効き、負値で機能ごと無効に
+	// なる。mkq driver のみ有効。
+	QueueStuckWorkerSeconds *int  `mapstructure:"queueStuckWorkerSeconds"`
+	EnableIPRateLimit       *bool `mapstructure:"enableIpRateLimit"`
 	// DisableEndpointRateLimits, when true, drops the per-endpoint rate
 	// limit table entirely. Intended for benchmarking parity with Misskey TS
 	// `NODE_ENV=development`. Never enable in production. Default false.
@@ -346,7 +352,9 @@ type Config struct {
 	// NoteHookConcurrency: 0 なら実行時に既定 (GOMAXPROCS x 2) を使う。
 	NoteHookConcurrency int
 	// QueueIdlePollSeconds: 0 なら driver 既定。
-	QueueIdlePollSeconds      int
+	QueueIdlePollSeconds int
+	// QueueStuckWorkerSeconds: 0 ならキューごとの既定、負値で無効。
+	QueueStuckWorkerSeconds   int
 	EnableIPRateLimit         bool
 	DisableEndpointRateLimits bool
 	SetupPassword             string
@@ -522,6 +530,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"bcryptCost",
 		"noteHookConcurrency",
 		"queueIdlePollSeconds",
+		"queueStuckWorkerSeconds",
 		"crossOriginOpenerPolicy",
 		"enableIpRateLimit",
 		"disableEndpointRateLimits",
@@ -569,6 +578,12 @@ func resolve(src *Source) (*Config, error) {
 	queueIdlePollSeconds := 0
 	if src.QueueIdlePollSeconds != nil && *src.QueueIdlePollSeconds > 0 {
 		queueIdlePollSeconds = *src.QueueIdlePollSeconds
+	}
+	// **こちらは負値を素通しする。** 負値が「無効化」という意味を持つ
+	// (queueIdlePollSeconds の 0 = 未設定とは扱いが違う)。
+	queueStuckWorkerSeconds := 0
+	if src.QueueStuckWorkerSeconds != nil {
+		queueStuckWorkerSeconds = *src.QueueStuckWorkerSeconds
 	}
 
 	// 0 以下は「未設定」として実行時の既定に委ねる。**負値を素通しすると
@@ -653,6 +668,7 @@ func resolve(src *Source) (*Config, error) {
 		BcryptCost:                bcryptCost,
 		NoteHookConcurrency:       noteHookConcurrency,
 		QueueIdlePollSeconds:      queueIdlePollSeconds,
+		QueueStuckWorkerSeconds:   queueStuckWorkerSeconds,
 		EnableIPRateLimit:         enableIPRateLimit,
 		DisableEndpointRateLimits: disableEndpointRateLimits,
 		SetupPassword:             src.SetupPassword,

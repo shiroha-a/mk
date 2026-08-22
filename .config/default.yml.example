@@ -138,6 +138,34 @@ port: 3000
 # workers, so stopping takes single-digit milliseconds at any interval.
 #queueIdlePollSeconds: 5
 
+# How long one job's handler may run before its worker stops counting towards
+# the queue's worker budget and gets replaced (mkq driver only).
+#
+# A worker is one dispatcher goroutine. If its handler never returns, the queue
+# silently loses that much capacity — this is what happened in #2657, where all
+# four inbox workers were held inside the ActivityPub handler for over a day.
+# The worker is set aside, NOT stopped, so a job that was merely slow still runs
+# to completion and its worker rejoins the pool afterwards. Replacing it does
+# raise effective concurrency while it is set aside, capped at the highest
+# worker count the queue has reached plus max(configured, 4) — so the
+# configured count plus max(configured, 4) with autoscale off, and
+# max(configured, maxWorkers) plus max(configured, 4) with it on.
+#
+# Unset uses per-queue defaults: 30 minutes for deliver / inbox / relationship /
+# push / webhook, and disabled for export / objectStorage / maintenance, whose
+# jobs legitimately page for tens of minutes. A positive value applies to every
+# queue; a negative value disables the mechanism entirely.
+#
+# The default is deliberately generous: the point is reclaiming workers that
+# never come back (the #2657 outage held jobs for 28 hours), not catching merely
+# slow ones. A short value makes the pool run above its configured concurrency
+# whenever jobs are legitimately slow.
+# Note that ANY value here overrides the per-queue table above, so setting it
+# to the tracked-queue default of 1800 is not a no-op: it also starts tracking
+# export / objectStorage / maintenance, whose jobs routinely run longer. The
+# value shown is the off switch.
+#queueStuckWorkerSeconds: -1
+
 #   ┌──────────────────────────┐
 #───┘ PostgreSQL configuration └────────────────────────────────
 

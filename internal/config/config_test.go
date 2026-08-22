@@ -435,6 +435,66 @@ redis:
 	}
 }
 
+// queueStuckWorkerSeconds は 0 = キューごとの既定、負値 = 機能ごと無効。
+//
+// **負値を素通しさせる。** 隣の noteHookConcurrency / queueIdlePollSeconds は
+// 負値を 0 に落とすが、こちらは負値が「無効化」という別の意味を持つ。0 に
+// 落とすと「既定に従う」に化けて、operator が止めたはずの機構が動き続ける
+// (#2657 の逃げ道が塞がる)。
+func TestLoad_QueueStuckWorkerSeconds(t *testing.T) {
+	base := `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`
+	for name, tc := range map[string]struct {
+		line string
+		want int
+	}{
+		"未設定は 0 (キューごとの既定)": {"", 0},
+		"正の値はそのまま":          {"queueStuckWorkerSeconds: 900", 900},
+		"0 はそのまま":           {"queueStuckWorkerSeconds: 0", 0},
+		"負値は無効化なので保つ":       {"queueStuckWorkerSeconds: -1", -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTestConfig(t, base+tc.line+"\n")
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.QueueStuckWorkerSeconds)
+		})
+	}
+}
+
+// bindEnvKeys に登録してあるので、設定ファイルに書かなくても環境変数だけで
+// 設定できる。運用中に止める唯一の手段なのでここを固定しておく。
+func TestLoad_QueueStuckWorkerSecondsFromEnv(t *testing.T) {
+	path := writeTestConfig(t, `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`)
+	t.Setenv("MK_QUEUESTUCKWORKERSECONDS", "-1")
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, -1, cfg.QueueStuckWorkerSeconds)
+}
+
 func TestLoad_CustomCountsAndThreshold(t *testing.T) {
 	yaml := `
 url: https://example.com

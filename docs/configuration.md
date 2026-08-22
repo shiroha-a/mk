@@ -43,7 +43,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `pidFile` | string | - | PIDファイルパス |
 | `testMode` | bool | `false` | テスト用エンドポイント(/api/reset-db)を有効化。**本番で絶対に使わない** |
 | `enablePprof` | bool | `false` | `/debug/pprof/*` ハンドラを公開。ローカルプロファイリング専用。**本番で絶対に使わない**。`MK_ENABLEPPROF`で上書き可。 |
-| `enableMetrics` | bool | `false` | Prometheus `/metrics` エンドポイントを公開。job queue 系 metric (`mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` / `mk_job_processing_seconds` / `mk_job_scale_events_total` / `mk_job_scrape_errors_total`) を expose。認証無しで公開されるため、外部公開する場合は nginx / LB ACL で access 制限すること。詳細は `docs/design/auto-scale-job-workers.md` §6.1。`MK_ENABLEMETRICS`で上書き可。**注: `jobQueueDriver: asynq` 使用時、`mk_job_workers_active` は asynq の単一 pool 構造のため全 queue label が同値 (pool-wide concurrency) を返す。mkq driver は per-queue 実値を返す。** |
+| `enableMetrics` | bool | `false` | Prometheus `/metrics` エンドポイントを公開。job queue 系 metric (`mk_job_workers_active` / `mk_job_workers_quarantined` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` / `mk_job_processing_seconds` / `mk_job_scale_events_total` / `mk_job_scrape_errors_total`) を expose。認証無しで公開されるため、外部公開する場合は nginx / LB ACL で access 制限すること。詳細は `docs/design/auto-scale-job-workers.md` §6.1。`MK_ENABLEMETRICS`で上書き可。**注: `jobQueueDriver: asynq` 使用時、`mk_job_workers_active` は asynq の単一 pool 構造のため全 queue label が同値 (pool-wide concurrency) を返す。mkq driver は per-queue 実値を返す。** |
 | `jobQueueDriver` | string | `"mkq"` | ジョブキュー実装の選択。`mkq` (デフォルト、推奨) または `asynq` (legacy)。`mkq` は BullMQ wire-compatible で admin queue 画面が Misskey TS frontend 前提のまま動く + per-queue concurrency / rate-limit が効く。`asynq` は **将来削除予定** (mkq の安定性確保後) のため新規 deploy は `mkq` 推奨。`MK_JOBQUEUEDRIVER`で上書き可。 |
 
 ### データベース (`db.*`)
@@ -92,6 +92,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `inboxJobConcurrency` | int | `16` | Inbox処理 worker 数 (#534 で非同期化済)。mkq driver では inbox queue 専用 worker (未指定時の default は 16)。asynq driver では**現状 no-op** (asynq の queue priority weight も静的 1 固定で wire していないため、共有 worker pool 内の inbox tasks は他 queue と equal-weight で競合する) |
 | `frontendContentSecurityPolicy` | string | `off` | SPA shell (frontend HTML) に付ける CSP。`off` / `report-only` / `enforce` (#2425)。**upstream Misskey には無い mk-go 独自の hardening** なので opt-in。`report-only` は何もブロックせず違反を報告するだけだが、違反があると全利用者のブラウザ console に出る。`off` 以外にすると `POST /csp-report` が生え、ブラウザからの違反報告を INFO ログに落とす。**公開インスタンスで有効にする場合は、前段の nginx / CDN で `/csp-report` にレート制限を掛けること** (認証不要の POST なので、無いとログ増幅に使える。mk-go 側は body 64KiB 上限のみ)。`useObjectStorage` が有効なら `objectStorageBaseUrl` の origin を、外部 `mediaProxy` 構成ならその origin を `img-src` / `media-src` / `connect-src` に自動で加える (drive のファイル配信と通知音の fetch が別オリジンになるため、#2501)。有効な captcha 業者 (hCaptcha / reCAPTCHA / Turnstile) の origin も `script-src` (hCaptcha は公式要求に従い `connect-src` / `style-src` も) に自動で加える (#2502。mcaptcha は iframe + バンドル済み glue のため不要) |
 | `queueIdlePollSeconds` | int | mkq 既定 | ジョブが無いとき worker が marker key を待つ秒数の**下限**。**mkq driver のみ**。mkq v1.0.4 以降、空振りのたびに待ちが倍になり 30 秒で頭打ちになる (ジョブを処理すると下限に戻る) ので、これは初回の待ちにあたる。アイドル時の Redis 負荷は放っておいても下がるため、**通常この値を設定する理由は無い**。**ジョブ取得は遅くならない** — Lua が marker を push するので worker はミリ秒で起きる (interval 30 秒でも取得 18.9ms を実測)。**停止も遅くならない** — Stop が marker を突いて待機中の worker を起こすので、interval に関わらずミリ秒台 (mkq v1.0.4 以前は発行済みの BZPOPMIN を中断できず、停止に最大 interval かかっていた) |
+| `queueStuckWorkerSeconds` | int | キューごと | 1 件の job の handler が何秒戻ってこなければ、その worker を**キューの worker 数に数えない**扱いにするか。**mkq driver のみ**。worker は 1 本が 1 dispatcher goroutine なので、handler から戻らなくなるとその分だけキューの処理能力が黙って減る (#2657 の本番障害では inbox の 4 本すべてが AP handler の中で 1 日以上戻らなかった)。該当 worker は**停止せず**脇に退ける + 代わりを立てるので、単に遅かっただけの job はそのまま完走し、完走後に pool へ戻る。**退けている間は実効の並列度が上がる** (上限は「到達した最大 worker 数 + max(設定値, 4)」。autoscale 無効なら設定値 + max(設定値, 4)、有効なら max(設定値, `maxWorkers`) + max(設定値, 4))。未設定はキューごとの既定 = deliver / inbox / relationship / push / webhook は 30 分、export / objectStorage / maintenance は**追跡しない** (分単位のページング処理が正常なため)。**既定が長いのは意図的**で、狙いは「恒久的に戻ってこない worker の回収」(#2657 は 28 時間戻らなかった) であって遅い job の検出ではない。短くすると、正当に遅い job のたびに worker を差し替えて実効の並列度が設定値を超えた状態が定常化する。正値は全キューに適用、負値で機能ごと無効 |
 | `relationshipJobConcurrency` | int | `4` | follow / unfollow / block / unblock の worker 数。mkq driver では relationship queue 専用 worker (#2403)。asynq driver では **no-op** (per-queue concurrency 非対応。起動時に warning を出す)。既定を upstream の 16 でなく 4 にしているのは、relationship job が DB bound で `db.maxOpenConns` (既定 25) を HTTP 経路と共有するため |
 | `deliverJobPerSec` | int | - | AP配信レート上限 (tasks/sec)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
 | `inboxJobPerSec` | int | - | Inbox処理レート上限 (tasks/sec) (#534)。設定すると asynq middleware / mkq.WithRateLimit で worker dispatch が back-pressure される |
@@ -106,7 +107,7 @@ cp .config/docker.yml.example .config/docker.yml
 
 > **driver 間の差分**:
 > - `asynq` driver は worker pool が共有なので `deliverJobConcurrency` は **総 concurrency** として扱われる。queue 間の priority weight は全 queue 静的 1 で固定 (deliver / inbox / push / export / webhook / maintenance すべて equal-weight)。
-> - `mkq` driver は queue ごとに worker を分けているので `deliverJobConcurrency` / `inboxJobConcurrency` / `relationshipJobConcurrency` はそれぞれの queue 専用 worker 数として扱われる。明示指定の無い queue は hot queue 優先の per-queue 既定値 (inbox=16 / deliver=16 / relationship=4 / objectStorage=4 / webhook=4 / push=4 / export=2 / maintenance=2) を使う。旧来の `総budget / len(queues)` 均等割りだと inbox が starve していた (#1374) ため hot-tuned default に変更。worker 数 ≒ Redis 接続数 (worker 毎に BZPopMin で接続を保持) なので、`redisForJobQueue.poolSize` 未設定時は mkq driver が worker 総数 + 余裕に自動サイジングする (`<queue>JobConcurrency` を上げると pool も追従)。明示設定した場合はその値が尊重される。
+> - `mkq` driver は queue ごとに worker を分けているので `deliverJobConcurrency` / `inboxJobConcurrency` / `relationshipJobConcurrency` はそれぞれの queue 専用 worker 数として扱われる。明示指定の無い queue は hot queue 優先の per-queue 既定値 (inbox=16 / deliver=16 / relationship=4 / objectStorage=4 / webhook=4 / push=4 / export=2 / maintenance=2) を使う。旧来の `総budget / len(queues)` 均等割りだと inbox が starve していた (#1374) ため hot-tuned default に変更。worker 数 ≒ Redis 接続数 (worker 毎に BZPopMin で接続を保持) なので、`redisForJobQueue.poolSize` 未設定時は mkq driver が worker 総数 + 隔離許容ぶん (`queueStuckWorkerSeconds` 参照) + 余裕に自動サイジングする (`<queue>JobConcurrency` を上げると pool も追従)。明示設定した場合はその値が尊重される。**自動サイジングが効くのは `poolSize` 未指定のときだけで、`jobQueueAutoScale` による増加は見込んでいない。** autoscale を有効にするなら、追跡対象キューでは worker が最大 `max(<queue>JobConcurrency, maxWorkers) + max(<queue>JobConcurrency, 4)` 本走りうる (`queueStuckWorkerSeconds` 参照) ので、おおむね `maxWorkers` の 2 倍を賄える値を明示すること (隔離の許容幅は autoscale ではなく**設定値**に紐づくので、`maxWorkers + max(<queue>JobConcurrency, 4)` が正確な上限)。
 > - **per-queue concurrency tuning は `mkq` driver でしか効かない**。asynq で inbox / deliver を独立に絞りたい場合は `mkq` 推奨。
 >
 > **rate limit (`*JobPerSec`) の挙動差**:
@@ -233,13 +234,14 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | `MK_CROSSORIGINOPENERPOLICY` | `crossOriginOpenerPolicy` |
 | `MK_NOTEHOOKCONCURRENCY` | `noteHookConcurrency` |
 | `MK_QUEUEIDLEPOLLSECONDS` | `queueIdlePollSeconds` |
+| `MK_QUEUESTUCKWORKERSECONDS` | `queueStuckWorkerSeconds` |
 
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
 
-**上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **86 キー**を
+**上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **87 キー**を
 登録している。内訳は用途別 Redis 5 系統 (`redis` / `redisForPubsub` /
 `redisForJobQueue` / `redisForTimelines` / `redisForReactions`) が各 9、`db.*` が 9、
-`logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 28 が
+`logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 29 が
 トップレベル。全量はその関数を見ること。
 
 **登録の有無で「作れるか」だけが変わる。** Viper は `AutomaticEnv` を有効にしている

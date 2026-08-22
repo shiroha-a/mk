@@ -165,9 +165,44 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 		}
 	}
 
+	// 詰まり検出はキューごとに効いたり効かなかったりするうえ、効いている
+	// キューでは worker が設定値を超えて走りうる (#2657)。設定ファイルを
+	// 読んだだけでは分からないので出す。
+	stuck := stuckWorkerAfter(cfg)
+	managed := map[string]bool{}
+	if cfg.JobQueueAutoScale {
+		names, _ := autoScaledQueues(cfg)
+		for _, q := range names {
+			managed[q] = true
+		}
+	}
+	_, autoMax := resolveAutoScaleBounds(cfg)
+	for _, q := range queues {
+		th := mkqdriver.StuckWorkerThreshold(q, stuck)
+		if th <= 0 {
+			add(&d.Effective, "stuck 検出: "+q, "無効",
+				"長い batch job が正常なキュー、または queueStuckWorkerSeconds が負値")
+			continue
+		}
+		// 実 worker 数の上限は「到達した最大 worker 数 + 隔離の許容幅」。
+		// autoscale 管理下なら到達しうる最大は maxWorkers なので、設定値で
+		// 語ると過小申告になる。
+		// peakDesired は起動時に設定値から始まり単調非減少なので、
+		// maxWorkers が設定値より小さい構成では設定値のほうが上限になる。
+		peak := conc[q]
+		note := "超過した worker は勘定から外して差し替える"
+		if managed[q] && autoMax > peak {
+			peak = autoMax
+			note += " (autoscale 管理下なので maxWorkers 基準)"
+		}
+		add(&d.Effective, "stuck 検出: "+q, th.String(),
+			fmt.Sprintf("%s。実 worker 数は最大 %d 本",
+				note, peak+mkqdriver.QuarantineHeadroomFor(conc[q])))
+	}
+
 	add(&d.Effective, "redis pool (job queue)",
-		fmt.Sprintf("%d", mkqdriver.WorkerPoolSize(queues, override, 0)),
-		"poolSize 未指定時の自動サイジング結果")
+		fmt.Sprintf("%d", mkqdriver.WorkerPoolSize(queues, override, stuck)),
+		"poolSize 未指定時の自動サイジング結果 (stuck 検出の許容ぶんを含む)")
 
 	addPluginSettings(&d.Effective, cfg)
 

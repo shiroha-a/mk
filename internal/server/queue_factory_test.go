@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/queue/driver/asynqdriver"
+	"github.com/shiroha-a/mk/internal/queue/driver/mkqdriver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -461,4 +462,55 @@ func TestAutoScaledQueues_Relationship(t *testing.T) {
 	// 0 は「未設定」と同じ扱い (他 queue の分岐と揃える)。
 	managed, _ = autoScaledQueues(&config.Config{RelationshipJobConcurrency: intp(0)})
 	assert.Contains(t, managed, queue.RelationshipQueueName)
+}
+
+// stuckWorkerAfter は符号だけが意味を持つ (0 = キューごとの既定、正 = 全キューに
+// その値、負 = 無効)。負値を秒数に掛けて -N 秒にすると driver 側の
+// 「負なら無効」判定は通るが、値そのものが意味を持つ将来の変更で壊れるので
+// -1 に正規化していることを固定する。
+func TestStuckWorkerAfter(t *testing.T) {
+	for name, tc := range map[string]struct {
+		seconds int
+		want    time.Duration
+	}{
+		"未設定はキューごとの既定": {0, 0},
+		"正の値は秒に変換":     {900, 15 * time.Minute},
+		"負値は -1 に正規化":  {-5, -1},
+	} {
+		t.Run(name, func(t *testing.T) {
+			got := stuckWorkerAfter(&config.Config{QueueStuckWorkerSeconds: tc.seconds})
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+// TestMkqConfig_PassesStuckWorkerAfter gates the config seam for the only
+// documented kill switch (`queueStuckWorkerSeconds: -1`).
+//
+// **配線を落としても他のテストは緑のまま**で、しかも config_dump は閾値を
+// 表示し続けるので、止めたつもりが止まっていないことに気付けない (#2657)。
+func TestMkqConfig_PassesStuckWorkerAfter(t *testing.T) {
+	for name, tc := range map[string]struct {
+		seconds int
+		want    time.Duration
+	}{
+		"無効化": {-1, -1},
+		"明示値": {900, 15 * time.Minute},
+		"未設定": {0, 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := &config.Config{QueueStuckWorkerSeconds: tc.seconds}
+			got := mkqConfig(cfg, 16, nil, nil)
+			assert.Equal(t, tc.want, got.StuckWorkerAfter)
+
+			// driver 側の解決規則まで通して、export (既定では追跡しない) が
+			// 意図どおりに切り替わることを見る。
+			eff := mkqdriver.StuckWorkerThreshold("export", got.StuckWorkerAfter)
+			if tc.seconds > 0 {
+				assert.Equal(t, tc.want, eff, "explicit value applies to every queue")
+			} else {
+				assert.Zero(t, eff)
+			}
+		})
+	}
 }

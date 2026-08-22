@@ -664,10 +664,10 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 | `MK_REDIS_PASS` | `redis.pass` |
 | `MK_ID` | `id` (デフォルト`aidx`) |
 
-**これは一部で、`bindEnvKeys()` は 86 キーを登録している。** 内訳は用途別 Redis 5 系統
+**これは一部で、`bindEnvKeys()` は 87 キーを登録している。** 内訳は用途別 Redis 5 系統
 (`redis` / `redisForPubsub` / `redisForJobQueue` / `redisForTimelines` /
 `redisForReactions`) が各 9、`db.*` が 9、`logging.sql.*` が 2、
-`sentryForBackend.options.{dsn,environment}` が 2、残り 28 がトップレベル
+`sentryForBackend.options.{dsn,environment}` が 2、残り 29 がトップレベル
 (`jobQueueDriver` / `jobQueueAutoScale` / `maxWorkers` / `minWorkers` /
 `maxWorkersGlobal` / `enableMetrics` / `trustProxy` など)。全量は
 `internal/config/config.go` の `bindEnvKeys()` を見ること。運用向けの説明は
