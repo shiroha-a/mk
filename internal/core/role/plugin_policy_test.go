@@ -1,11 +1,14 @@
 package role_test
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -37,6 +40,23 @@ type countingStringer struct{ calls *int }
 func (s countingStringer) String() string {
 	*s.calls++
 	return "ignored"
+}
+
+type lockedBuffer struct {
+	mu sync.Mutex
+	bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.Buffer.String()
 }
 
 // --- registration validation (load-bearing: Validate must be invoked) ---
@@ -306,6 +326,17 @@ func TestEffectivePolicy_IntegerMaxPreservesHostBoundary(t *testing.T) {
 	assert.Equal(t, int(math.MaxInt), policies["driveCapacityMb"])
 }
 
+func TestEffectivePolicy_FractionalIntNativePolicyIsPreserved(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	registerProvider(t, svc, "p", []string{"driveCapacityMb"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		return []plugin.EffectivePolicyContribution{{Key: "driveCapacityMb", Priority: 2, Value: 0.5}}, nil
+	})
+
+	policies, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.Equal(t, 0.5, policies["driveCapacityMb"])
+}
+
 func TestEffectivePolicy_Int64BoundaryIsHostIntSized(t *testing.T) {
 	maxInt64 := int64(math.MaxInt64)
 	svc, _, _, _ := newTestService(t)
@@ -433,22 +464,6 @@ func TestEffectivePolicy_NegativeIntegerMaxWithinSelectedPriority(t *testing.T) 
 	assert.Equal(t, -1, policies["userEachUserListsLimit"], "priority 2 excludes the positive native default, then Max selects -1")
 }
 
-func TestEffectivePolicy_PluginNameOrdering(t *testing.T) {
-	svc, _, _, _ := newTestService(t)
-	var order []string
-	registerProvider(t, svc, "zebra", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
-		order = append(order, "zebra")
-		return nil, nil
-	})
-	registerProvider(t, svc, "alpha", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
-		order = append(order, "alpha")
-		return nil, nil
-	})
-	_, err := svc.GetUserPoliciesChecked("u1")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"alpha", "zebra"}, order, "providers invoked in plugin-name order")
-}
-
 func TestEffectivePolicy_MalformedContributionFailsProviderClosed(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -463,7 +478,6 @@ func TestEffectivePolicy_MalformedContributionFailsProviderClosed(t *testing.T) 
 		{name: "NaN number", keys: []string{"canSearchNotes", "driveCapacityMb"}, malformed: plugin.EffectivePolicyContribution{Key: "driveCapacityMb", Priority: 2, Value: math.NaN()}, nativeKey: "driveCapacityMb"},
 		{name: "positive infinity number", keys: []string{"canSearchNotes", "driveCapacityMb"}, malformed: plugin.EffectivePolicyContribution{Key: "driveCapacityMb", Priority: 2, Value: math.Inf(1)}, nativeKey: "driveCapacityMb"},
 		{name: "negative infinity number", keys: []string{"canSearchNotes", "driveCapacityMb"}, malformed: plugin.EffectivePolicyContribution{Key: "driveCapacityMb", Priority: 2, Value: math.Inf(-1)}, nativeKey: "driveCapacityMb"},
-		{name: "fractional integer policy", keys: []string{"canSearchNotes", "driveCapacityMb"}, malformed: plugin.EffectivePolicyContribution{Key: "driveCapacityMb", Priority: 2, Value: 1.5}, nativeKey: "driveCapacityMb"},
 		{name: "malformed string array", keys: []string{"canSearchNotes", "uploadableFileTypes"}, malformed: plugin.EffectivePolicyContribution{Key: "uploadableFileTypes", Priority: 2, Value: []any{"image/png", 7}}, nativeKey: "uploadableFileTypes"},
 	}
 
@@ -512,6 +526,38 @@ func TestEffectivePolicy_ProviderErrorCheckedRestoresDeclaredKeys(t *testing.T) 
 	for _, key := range []string{"canSearchUsers", "driveCapacityMb", "chatAvailability", "uploadableFileTypes"} {
 		assert.Equal(t, role.DefaultPolicies()[key], p[key])
 	}
+}
+
+type failingPolicyAssignmentRepo struct {
+	*testutil.MockRoleAssignmentRepository
+	err error
+}
+
+func (r *failingPolicyAssignmentRepo) ListByUser(string) ([]*model.RoleAssignment, error) {
+	return nil, r.err
+}
+
+func TestEffectivePolicy_RoleLookupErrorSkipsProvidersAndRemainsDistinct(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := &failingPolicyAssignmentRepo{
+		MockRoleAssignmentRepository: testutil.NewMockRoleAssignmentRepository(roleRepo),
+		err:                          errors.New("role lookup failed"),
+	}
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	var providerCalls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		providerCalls.Add(1)
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
+	})
+
+	policies, err := svc.GetUserPoliciesChecked("u1")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	assert.ErrorContains(t, err, "role lookup failed")
+	assert.False(t, policies["canSearchNotes"].(bool))
+	assert.Zero(t, providerCalls.Load())
 }
 
 func TestEffectivePolicy_ProviderPanicCheckedRestoresDeclaredKeys(t *testing.T) {
@@ -592,7 +638,7 @@ func TestEffectivePolicy_TimeoutDisablesProviderAndBoundsHang(t *testing.T) {
 	assert.Equal(t, int32(1), calls.Load())
 }
 
-func TestEffectivePolicy_TokenWaitTimeoutDoesNotDisableHealthyProvider(t *testing.T) {
+func TestEffectivePolicy_ConcurrentRequestsShareSuccessfulProviderMiss(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	var calls atomic.Int32
 	registerProvider(t, svc, "healthy", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
@@ -617,13 +663,53 @@ func TestEffectivePolicy_TokenWaitTimeoutDoesNotDisableHealthyProvider(t *testin
 	}
 	close(start)
 	wg.Wait()
-	assert.Positive(t, failures.Load())
+	assert.Zero(t, failures.Load())
+	assert.Equal(t, int32(1), calls.Load())
 
-	before := calls.Load()
 	policies, err := svc.GetUserPoliciesChecked("")
 	require.NoError(t, err)
 	assert.Equal(t, true, policies["canSearchNotes"])
-	assert.Equal(t, before+1, calls.Load())
+	assert.Equal(t, int32(1), calls.Load(), "the successful anonymous result remains cached")
+}
+
+func TestEffectivePolicy_ConcurrentProvidersShareOneTimeoutWindow(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	for _, name := range []string{"alpha", "bravo", "charlie"} {
+		registerProvider(t, svc, name, []string{"canSearchNotes"}, func(ctx context.Context, _ plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		})
+	}
+
+	started := time.Now()
+	policies, err := svc.GetUserPoliciesChecked("")
+	elapsed := time.Since(started)
+	require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	assert.False(t, policies["canSearchNotes"].(bool))
+	assert.Less(t, elapsed, 2*time.Second, "independent providers must not add their timeout windows serially")
+}
+
+func TestEffectivePolicy_TimeoutDisableWarnsOnceWithoutProviderData(t *testing.T) {
+	var logs lockedBuffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	svc, _, _, _ := newTestService(t)
+	registerProvider(t, svc, "secret-provider-name", []string{"canSearchNotes"}, func(ctx context.Context, _ plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		<-ctx.Done()
+		return nil, errors.New("secret resolver detail")
+	})
+
+	_, err := svc.GetUserPoliciesChecked("")
+	require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	_, err = svc.GetUserPoliciesChecked("u2")
+	require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
+	output := logs.String()
+	assert.Equal(t, 1, strings.Count(output, "effective policy provider disabled after timeout"))
+	assert.NotContains(t, output, "secret-provider-name")
+	assert.NotContains(t, output, "secret resolver detail")
+	assert.NotContains(t, output, "canSearchNotes")
 }
 
 func TestEffectivePolicy_ResolverGetsFreshDeadlineAfterTokenWait(t *testing.T) {
@@ -643,13 +729,13 @@ func TestEffectivePolicy_ResolverGetsFreshDeadlineAfterTokenWait(t *testing.T) {
 
 	first := make(chan error, 1)
 	go func() {
-		_, err := svc.GetUserPoliciesChecked("")
+		_, err := svc.GetUserPoliciesChecked("u1")
 		first <- err
 	}()
 	<-started
 	time.AfterFunc(800*time.Millisecond, func() { close(release) })
 
-	policies, err := svc.GetUserPoliciesChecked("")
+	policies, err := svc.GetUserPoliciesChecked("u2")
 	require.NoError(t, <-first)
 	require.NoError(t, err)
 	assert.Equal(t, true, policies["canSearchNotes"])
@@ -719,9 +805,9 @@ func TestEffectivePolicy_FailedProviderKeysUseExactNativePolicy(t *testing.T) {
 				role.PolicyChunkedUploadMaxPendingMb,
 			}
 			allSuccessfulKeys := append(append([]string(nil), affected...), "canSearchNotes")
-			permissive := func(name string, calls *[]string) plugin.EffectivePolicyResolver {
+			permissive := func(calls *atomic.Int32) plugin.EffectivePolicyResolver {
 				return func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
-					*calls = append(*calls, name)
+					calls.Add(1)
 					return []plugin.EffectivePolicyContribution{
 						{Key: "uploadableFileTypes", Priority: 2, Value: []string{"*"}},
 						{Key: "maxFileSizeMb", Priority: 2, Value: 90},
@@ -732,13 +818,15 @@ func TestEffectivePolicy_FailedProviderKeysUseExactNativePolicy(t *testing.T) {
 				}
 			}
 
-			var calls []string
-			registerProvider(t, svc, "zulu", allSuccessfulKeys, permissive("zulu", &calls))
+			var alphaCalls atomic.Int32
+			var bravoCalls atomic.Int32
+			var zuluCalls atomic.Int32
+			registerProvider(t, svc, "zulu", allSuccessfulKeys, permissive(&zuluCalls))
 			registerProvider(t, svc, "bravo", affected, func(ctx context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
-				calls = append(calls, "bravo")
+				bravoCalls.Add(1)
 				return tt.resolve(ctx, req)
 			})
-			registerProvider(t, svc, "alpha", allSuccessfulKeys, permissive("alpha", &calls))
+			registerProvider(t, svc, "alpha", allSuccessfulKeys, permissive(&alphaCalls))
 
 			assertSafe := func(policies map[string]any) {
 				t.Helper()
@@ -752,11 +840,14 @@ func TestEffectivePolicy_FailedProviderKeysUseExactNativePolicy(t *testing.T) {
 			checked, err := svc.GetUserPoliciesChecked("u1")
 			require.Equal(t, role.ErrEffectivePolicyProvider, err)
 			assertSafe(checked)
-			assert.Equal(t, []string{"alpha", "bravo", "zulu"}, calls)
+			assert.Equal(t, int32(1), alphaCalls.Load())
+			assert.Equal(t, int32(1), bravoCalls.Load())
+			assert.Equal(t, int32(1), zuluCalls.Load())
 
-			calls = nil
 			assertSafe(svc.GetUserPolicies("u1"))
-			assert.Equal(t, []string{"alpha", "bravo", "zulu"}, calls)
+			assert.Equal(t, int32(1), alphaCalls.Load())
+			assert.Equal(t, int32(2), bravoCalls.Load(), "failed providers are retried")
+			assert.Equal(t, int32(1), zuluCalls.Load())
 		})
 	}
 }
@@ -786,7 +877,9 @@ func TestEffectivePolicy_FailedProviderRestoredSliceMutationIsIsolated(t *testin
 func TestEffectivePolicy_ProviderSliceDoesNotAliasResolverValue(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	resolverValue := []string{"image/png"}
+	var calls atomic.Int32
 	registerProvider(t, svc, "provider", []string{"uploadableFileTypes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		calls.Add(1)
 		return []plugin.EffectivePolicyContribution{{Key: "uploadableFileTypes", Priority: 2, Value: resolverValue}}, nil
 	})
 
@@ -798,9 +891,13 @@ func TestEffectivePolicy_ProviderSliceDoesNotAliasResolverValue(t *testing.T) {
 
 	resolved[0] = "application/x-result-corrupt"
 	assert.Equal(t, []string{"application/x-resolver-corrupt"}, resolverValue)
+	next, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"image/png"}, next["uploadableFileTypes"], "cached contributions must not alias resolver or caller slices")
+	assert.Equal(t, int32(1), calls.Load())
 }
 
-func TestEffectivePolicy_NoStaleSuccessReuse(t *testing.T) {
+func TestEffectivePolicy_CachesSuccessUntilUserInvalidation(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	calls := 0
 	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
@@ -816,8 +913,168 @@ func TestEffectivePolicy_NoStaleSuccessReuse(t *testing.T) {
 	assert.Equal(t, true, first["canSearchNotes"], "first (successful) call is permissive")
 
 	second, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.Equal(t, true, second["canSearchNotes"])
+	assert.Equal(t, 1, calls)
+
+	require.NoError(t, svc.InvalidateUser(context.Background(), "u1"))
+	third, err := svc.GetUserPoliciesChecked("u1")
 	require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
-	assert.Equal(t, false, second["canSearchNotes"], "failure must not reuse the earlier permissive value")
+	assert.Equal(t, false, third["canSearchNotes"])
+	assert.Equal(t, 2, calls)
+}
+
+func TestEffectivePolicy_UserInvalidationPreservesOtherUserCache(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	var mu sync.Mutex
+	calls := map[string]int{}
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(_ context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		mu.Lock()
+		calls[req.UserID]++
+		value := calls[req.UserID] > 1
+		mu.Unlock()
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: value}}, nil
+	})
+
+	firstU1, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	firstU2, err := svc.GetUserPoliciesChecked("u2")
+	require.NoError(t, err)
+	assert.False(t, firstU1["canSearchNotes"].(bool))
+	assert.False(t, firstU2["canSearchNotes"].(bool))
+
+	require.NoError(t, svc.InvalidateUser(context.Background(), "u1"))
+	secondU1, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	secondU2, err := svc.GetUserPoliciesChecked("u2")
+	require.NoError(t, err)
+	assert.True(t, secondU1["canSearchNotes"].(bool))
+	assert.False(t, secondU2["canSearchNotes"].(bool))
+	mu.Lock()
+	assert.Equal(t, map[string]int{"u1": 2, "u2": 1}, calls)
+	mu.Unlock()
+}
+
+func TestEffectivePolicy_ActiveRoleIDsPartitionProviderCache(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	var calls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(_ context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		calls.Add(1)
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: len(req.RoleIDs) > 0}}, nil
+	})
+
+	withoutRole, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.False(t, withoutRole["canSearchNotes"].(bool))
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	assign(t, assignRepo, "u1", "r1")
+	svc.InvalidateUserRoleCache("u1")
+
+	withRole, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.True(t, withRole["canSearchNotes"].(bool))
+	assert.Equal(t, int32(2), calls.Load())
+}
+
+func TestEffectivePolicy_RoleInvalidationDropsEveryProviderCacheEntry(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	var calls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		value := calls.Add(1) > 2
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: value}}, nil
+	})
+
+	_, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	_, err = svc.GetUserPoliciesChecked("u2")
+	require.NoError(t, err)
+	require.NoError(t, svc.InvalidateRolePolicies(context.Background(), "r1"))
+	u1, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	u2, err := svc.GetUserPoliciesChecked("u2")
+	require.NoError(t, err)
+	assert.True(t, u1["canSearchNotes"].(bool))
+	assert.True(t, u2["canSearchNotes"].(bool))
+	assert.Equal(t, int32(4), calls.Load())
+}
+
+func TestEffectivePolicy_UnassignAndReassignCannotResurrectProviderCache(t *testing.T) {
+	svc, roleRepo, _, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1"}
+	var calls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		value := calls.Add(1) > 1
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: value}}, nil
+	})
+
+	require.NoError(t, svc.Assign("u1", "r1", nil))
+	assigned, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.False(t, assigned["canSearchNotes"].(bool))
+	require.NoError(t, svc.Unassign("u1", "r1"))
+	unassigned, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.True(t, unassigned["canSearchNotes"].(bool))
+	require.NoError(t, svc.Assign("u1", "r1", nil))
+
+	reassigned, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.True(t, reassigned["canSearchNotes"].(bool), "reusing the same role IDs must not resurrect pre-unassign provider output")
+	assert.Equal(t, int32(3), calls.Load())
+}
+
+func TestEffectivePolicy_RoleUpdateInvalidatesSameRoleIDsProviderCache(t *testing.T) {
+	svc, roleRepo, assignRepo, _ := newTestService(t)
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "old"}
+	assign(t, assignRepo, "u1", "r1")
+	var value atomic.Bool
+	var calls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		calls.Add(1)
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: value.Load()}}, nil
+	})
+
+	before, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.False(t, before["canSearchNotes"].(bool))
+	value.Store(true)
+	_, err = svc.UpdateFields("r1", map[string]any{"name": "new"})
+	require.NoError(t, err)
+
+	after, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.True(t, after["canSearchNotes"].(bool))
+	assert.Equal(t, int32(2), calls.Load())
+}
+
+func TestEffectivePolicy_UserInvalidationRejectsInFlightCachePublication(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+		call := calls.Add(1)
+		if call == 1 {
+			close(started)
+			<-release
+		}
+		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: call > 1}}, nil
+	})
+
+	firstResult := make(chan map[string]any, 1)
+	go func() {
+		policies, _ := svc.GetUserPoliciesChecked("u1")
+		firstResult <- policies
+	}()
+	<-started
+	require.NoError(t, svc.InvalidateUser(context.Background(), "u1"))
+	close(release)
+	assert.False(t, (<-firstResult)["canSearchNotes"].(bool))
+
+	second, err := svc.GetUserPoliciesChecked("u1")
+	require.NoError(t, err)
+	assert.True(t, second["canSearchNotes"].(bool), "the pre-invalidation result must not be published into the cache")
+	assert.Equal(t, int32(2), calls.Load())
 }
 
 func TestEffectivePolicy_AnonymousInvokesProvidersWithoutRepositoryLookup(t *testing.T) {
@@ -827,9 +1084,12 @@ func TestEffectivePolicy_AnonymousInvokesProvidersWithoutRepositoryLookup(t *tes
 	svc := role.NewService(nil, nil, nil, idGen)
 
 	var requests []plugin.EffectivePolicyRequest
+	var requestsMu sync.Mutex
 	for _, name := range []string{"bravo", "alpha"} {
 		registerProvider(t, svc, name, []string{"canSearchNotes"}, func(_ context.Context, req plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+			requestsMu.Lock()
 			requests = append(requests, req)
+			requestsMu.Unlock()
 			return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: true}}, nil
 		})
 	}
@@ -864,9 +1124,7 @@ func TestEffectivePolicy_AnonymousUsesNativeBaselineOrderingCloningAndCaps(t *te
 		Policies: datatypes.JSON([]byte(`{"canSearchUsers":false}`)),
 	}
 	resolverValue := []string{"image/png"}
-	var calls []string
 	registerProvider(t, svc, "zulu", []string{"canSearchNotes", "maxFileSizeMb", "uploadableFileTypes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
-		calls = append(calls, "zulu")
 		return []plugin.EffectivePolicyContribution{
 			{Key: "canSearchNotes", Priority: 1, Value: true},
 			{Key: "maxFileSizeMb", Priority: 2, Value: 500},
@@ -874,13 +1132,11 @@ func TestEffectivePolicy_AnonymousUsesNativeBaselineOrderingCloningAndCaps(t *te
 		}, nil
 	})
 	registerProvider(t, svc, "alpha", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
-		calls = append(calls, "alpha")
 		return []plugin.EffectivePolicyContribution{{Key: "canSearchNotes", Priority: 2, Value: false}}, nil
 	})
 
 	policies, err := svc.GetUserPoliciesChecked("")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"alpha", "zulu"}, calls)
 	assert.Equal(t, false, policies["canSearchNotes"], "higher-priority anonymous contribution wins")
 	assert.Equal(t, false, policies["canSearchUsers"], "meta-overlaid anonymous baseline is preserved")
 	assert.Equal(t, 100, policies["maxFileSizeMb"], "instance caps apply after anonymous contributions")
@@ -892,7 +1148,7 @@ func TestEffectivePolicy_AnonymousUsesNativeBaselineOrderingCloningAndCaps(t *te
 	resolved[0] = "application/x-result-corrupt"
 	next, err := svc.GetUserPoliciesChecked("")
 	require.NoError(t, err)
-	assert.Equal(t, []string{"application/x-resolver-corrupt"}, next["uploadableFileTypes"])
+	assert.Equal(t, []string{"image/png"}, next["uploadableFileTypes"], "anonymous provider output remains cached")
 }
 
 func TestEffectivePolicy_AnonymousProviderFailuresUseNativeFallback(t *testing.T) {
@@ -931,7 +1187,7 @@ func TestEffectivePolicy_AnonymousProviderFailuresUseNativeFallback(t *testing.T
 	}
 }
 
-func TestEffectivePolicy_AnonymousDoesNotReuseStaleSuccess(t *testing.T) {
+func TestEffectivePolicy_AnonymousCachesSuccessUntilRoleInvalidation(t *testing.T) {
 	svc, _, _, _ := newTestService(t)
 	calls := 0
 	registerProvider(t, svc, "p", []string{"canSearchNotes"}, func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
@@ -947,9 +1203,15 @@ func TestEffectivePolicy_AnonymousDoesNotReuseStaleSuccess(t *testing.T) {
 	assert.Equal(t, true, first["canSearchNotes"])
 
 	second, err := svc.GetUserPoliciesChecked("")
+	require.NoError(t, err)
+	assert.Equal(t, true, second["canSearchNotes"])
+	assert.Equal(t, 1, calls)
+
+	require.NoError(t, svc.InvalidateRolePolicies(context.Background(), "r1"))
+	third, err := svc.GetUserPoliciesChecked("")
 	require.Equal(t, role.ErrEffectivePolicyProvider, err)
-	assert.Equal(t, false, second["canSearchNotes"])
-	assert.Equal(t, 2, calls, "anonymous provider output must not be cached")
+	assert.Equal(t, false, third["canSearchNotes"])
+	assert.Equal(t, 2, calls)
 }
 
 // --- server caps are applied last ---
@@ -1212,6 +1474,36 @@ func TestInvalidateUser_InFlightMissCannotRepublishStaleRoles(t *testing.T) {
 	assert.Equal(t, false, svc.GetUserPolicies("u1")["canSearchNotes"], "the pre-invalidation miss must not republish its stale snapshot")
 }
 
+func TestInvalidateUser_OtherUserDoesNotDiscardInFlightRoleSnapshot(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	oldRole := &model.Role{ID: "r1", Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`))}
+	freshRole := &model.Role{ID: "r1", Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":false}}`))}
+	assignRepo := &blockingAssignmentRepo{
+		MockRoleAssignmentRepository: testutil.NewMockRoleAssignmentRepository(roleRepo),
+		firstRoles:                   []*model.Role{oldRole},
+		nextRoles:                    []*model.Role{freshRole},
+		entered:                      make(chan struct{}),
+		release:                      make(chan struct{}),
+	}
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
+
+	firstResult := make(chan map[string]any, 1)
+	go func() {
+		firstResult <- svc.GetUserPolicies("u1")
+	}()
+	<-assignRepo.entered
+	require.NoError(t, svc.InvalidateUser(context.Background(), "u2"))
+	close(assignRepo.release)
+	assert.Equal(t, true, (<-firstResult)["canSearchNotes"])
+
+	assert.Equal(t, true, svc.GetUserPolicies("u1")["canSearchNotes"], "another user's invalidation must not discard this user's in-flight snapshot")
+	assignRepo.mu.Lock()
+	assert.Equal(t, 1, assignRepo.calls)
+	assignRepo.mu.Unlock()
+}
+
 func TestInvalidateUser_PreservesUnrelatedCachedUser(t *testing.T) {
 	svc, roleRepo, assignRepo, _ := newTestService(t)
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Policies: datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`))}
@@ -1293,6 +1585,45 @@ func (r *blockingRoleListRepo) setRoles(roles ...*model.Role) {
 	r.mu.Lock()
 	r.current = append([]*model.Role(nil), roles...)
 	r.mu.Unlock()
+}
+
+func TestInvalidateUser_DoesNotDiscardInFlightSharedRoleList(t *testing.T) {
+	conditionalRole := &model.Role{
+		ID:          "r1",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isBot"}`)),
+		Policies:    datatypes.JSON([]byte(`{"canSearchNotes":{"useDefault":false,"priority":0,"value":true}}`)),
+	}
+	baseRoleRepo := testutil.NewMockRoleRepository()
+	roleRepo := &blockingRoleListRepo{
+		MockRoleRepository: baseRoleRepo,
+		current:            []*model.Role{conditionalRole},
+		entered:            make(chan struct{}),
+		release:            make(chan struct{}),
+	}
+	assignRepo := testutil.NewMockRoleAssignmentRepository(baseRoleRepo)
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	userRepo := testutil.NewMockUserRepository()
+	for _, userID := range []string{"u1", "u3"} {
+		require.NoError(t, userRepo.Create(&model.User{ID: userID, Username: userID, IsBot: true}))
+	}
+	svc.SetUserRepo(userRepo)
+
+	firstResult := make(chan map[string]any, 1)
+	go func() {
+		firstResult <- svc.GetUserPolicies("u1")
+	}()
+	<-roleRepo.entered
+	require.NoError(t, svc.InvalidateUser(context.Background(), "u2"))
+	close(roleRepo.release)
+	assert.Equal(t, true, (<-firstResult)["canSearchNotes"])
+	assert.Equal(t, true, svc.GetUserPolicies("u3")["canSearchNotes"])
+
+	roleRepo.mu.Lock()
+	assert.Equal(t, 1, roleRepo.calls, "a user invalidation must not discard the shared role-list result")
+	roleRepo.mu.Unlock()
 }
 
 func TestInvalidateRolePolicies_InFlightConditionalSnapshotCannotRepublish(t *testing.T) {

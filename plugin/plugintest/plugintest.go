@@ -262,6 +262,9 @@ func (h *Harness) EffectivePolicies(def plugin.Definition) plugin.EffectivePolic
 	if err != nil {
 		h.t.Fatalf("plugintest: EffectivePolicies に失敗しました: %v", err)
 	}
+	if err := registration.Validate(); err != nil {
+		h.t.Fatalf("plugintest: EffectivePolicies の登録が不正です: %v", err)
+	}
 	registration.Keys = append([]string(nil), registration.Keys...)
 	resolver := registration.Resolve
 	if resolver != nil {

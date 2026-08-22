@@ -1,12 +1,15 @@
 package role
 
 import (
+	"context"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
+	"github.com/shiroha-a/mk/plugin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -28,9 +31,11 @@ func TestGetUserRoles_CacheExpiryCappedAtAssignmentExpiry(t *testing.T) {
 	}
 	_, err := svc.GetUserRoles("user1")
 	require.NoError(t, err)
-	v, ok := svc.userRoleCache.Load("user1")
+	svc.userRoleCacheMu.RLock()
+	v, ok := svc.userRoleCache["user1"]
+	svc.userRoleCacheMu.RUnlock()
 	require.True(t, ok)
-	assert.False(t, v.(*roleCacheEntry).expiresAt.After(soon),
+	assert.False(t, v.expiresAt.After(soon),
 		"cache entry must expire by the assignment expiresAt, not the 5min TTL")
 
 	// 期限なし assignment は従来通り full TTL (~5min)。
@@ -39,9 +44,11 @@ func TestGetUserRoles_CacheExpiryCappedAtAssignmentExpiry(t *testing.T) {
 	}
 	_, err = svc.GetUserRoles("user2")
 	require.NoError(t, err)
-	v2, ok := svc.userRoleCache.Load("user2")
+	svc.userRoleCacheMu.RLock()
+	v2, ok := svc.userRoleCache["user2"]
+	svc.userRoleCacheMu.RUnlock()
 	require.True(t, ok)
-	assert.True(t, v2.(*roleCacheEntry).expiresAt.After(time.Now().Add(4*time.Minute)),
+	assert.True(t, v2.expiresAt.After(time.Now().Add(4*time.Minute)),
 		"non-expiring assignment keeps the full TTL")
 }
 
@@ -57,11 +64,13 @@ func TestGetUserRoles_ExpiredEntryPublishesAndReturnsIndependentSnapshot(t *test
 
 	_, err := svc.GetUserRoles("u1")
 	require.NoError(t, err)
-	v, ok := svc.userRoleCache.Load("u1")
+	svc.userRoleCacheMu.RLock()
+	v, ok := svc.userRoleCache["u1"]
+	svc.userRoleCacheMu.RUnlock()
 	require.True(t, ok)
-	svc.roleCacheMu.Lock()
-	v.(*roleCacheEntry).expiresAt = time.Now().Add(-time.Second)
-	svc.roleCacheMu.Unlock()
+	svc.userRoleCacheMu.Lock()
+	v.expiresAt = time.Now().Add(-time.Second)
+	svc.userRoleCacheMu.Unlock()
 	replacement := &model.Role{ID: "r1", Name: "New"}
 	roleRepo.Roles["r1"] = replacement
 
@@ -75,4 +84,32 @@ func TestGetUserRoles_ExpiredEntryPublishesAndReturnsIndependentSnapshot(t *test
 	cached, err := svc.GetUserRoles("u1")
 	require.NoError(t, err)
 	assert.Equal(t, "New", cached[0].Name)
+}
+
+func TestUserInvalidationDoesNotRetainInactiveEpochState(t *testing.T) {
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := NewService(roleRepo, assignRepo, metaRepo, idGen)
+	require.NoError(t, svc.RegisterEffectivePolicyProvider("p", plugin.EffectivePolicyRegistration{
+		Keys: []string{"canSearchNotes"},
+		Resolve: func(context.Context, plugin.EffectivePolicyRequest) ([]plugin.EffectivePolicyContribution, error) {
+			return nil, nil
+		},
+	}))
+
+	for i := range 1000 {
+		require.NoError(t, svc.InvalidateUser(context.Background(), fmt.Sprintf("u%d", i)))
+	}
+
+	svc.userRoleCacheMu.RLock()
+	assert.Empty(t, svc.userRoleEpoch)
+	svc.userRoleCacheMu.RUnlock()
+	svc.policyProviderMu.RLock()
+	runtime := svc.policyProviders[0].runtime
+	svc.policyProviderMu.RUnlock()
+	runtime.cacheMu.Lock()
+	assert.Empty(t, runtime.userEpoch)
+	runtime.cacheMu.Unlock()
 }

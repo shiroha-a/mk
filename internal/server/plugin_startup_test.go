@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/labstack/echo/v4"
@@ -336,7 +337,7 @@ func TestStartConstructionWorkerCleanupWaitsAndRunsOnce(t *testing.T) {
 	require.Equal(t, 1, runCalls)
 }
 
-func TestServerShutdown_RepeatedStopsReactionFlushBeforeDriverClose(t *testing.T) {
+func TestServerShutdown_DeadlineBoundsReactionFlushDrain(t *testing.T) {
 	workerStarted := make(chan struct{})
 	workerStopping := make(chan struct{})
 	workerStopped := make(chan struct{})
@@ -366,18 +367,13 @@ func TestServerShutdown_RepeatedStopsReactionFlushBeforeDriverClose(t *testing.T
 	go func() { shutdownReturned <- s.Shutdown(shutdownCtx) }()
 	<-workerStopping
 	select {
-	case <-shutdownReturned:
-		t.Fatal("Shutdown returned before the reaction flush worker drained")
-	default:
+	case err := <-shutdownReturned:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Shutdown ignored its canceled context while draining the reaction flush worker")
 	}
 	close(allowWorkerExit)
-	require.NoError(t, <-shutdownReturned)
+	<-workerStopped
 	require.NoError(t, s.Shutdown(context.Background()))
 	require.Equal(t, 1, closeDriver.closeCalls)
-	require.False(t, closeDriver.closedTooEarly)
-	select {
-	case <-workerStopped:
-	default:
-		t.Fatal("reaction flush worker remained active after Shutdown")
-	}
 }

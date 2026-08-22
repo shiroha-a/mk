@@ -161,11 +161,11 @@ type Service struct {
 	// 当該 userID を、Delete (role 削除) で全 entry を invalidate する。
 	// admin/roles/update が roleRepo を直接叩く経路は TTL でしかカバー
 	// できないが、roleCacheTTL = 5 min で staleness は bounded (#300 3-5)。
-	userRoleCache sync.Map // userID -> *roleCacheEntry
-	// roleCacheMuはcacheのload/store/deleteとepochを同期する。repository呼び出し中は
-	// 保持せず、invalidation後に古いmiss結果がpublishされることだけを防ぐ。
-	roleCacheMu    sync.Mutex
-	roleCacheEpoch uint64
+	userRoleCacheMu  sync.RWMutex
+	userRoleCache    map[string]*roleCacheEntry
+	userRoleEpoch    map[string]uint64
+	userRoleFlights  map[string]int
+	allUserRoleEpoch uint64
 
 	// rolesListCache は roleRepo.List() 結果の TTL キャッシュ (#1030)。
 	// evaluateConditionalRoles から呼ばれて全 role を fetch する経路で、cache
@@ -175,6 +175,8 @@ type Service struct {
 	// fire するのは cache miss / TTL 失効 / conditional role 評価が要る user
 	// に限られる。Create / UpdateFields / Delete で flush する。
 	//
+	rolesListMu        sync.RWMutex
+	rolesListEpoch     uint64
 	rolesListCache     []*model.Role
 	rolesListExpiresAt time.Time
 	rolesListFlight    *roleListFlight
@@ -212,10 +214,13 @@ func NewService(
 	idGen id.Generator,
 ) *Service {
 	return &Service{
-		roleRepo:       roleRepo,
-		assignmentRepo: assignmentRepo,
-		metaRepo:       metaRepo,
-		idGen:          idGen,
+		roleRepo:        roleRepo,
+		assignmentRepo:  assignmentRepo,
+		metaRepo:        metaRepo,
+		idGen:           idGen,
+		userRoleCache:   make(map[string]*roleCacheEntry),
+		userRoleEpoch:   make(map[string]uint64),
+		userRoleFlights: make(map[string]int),
 	}
 }
 
@@ -236,10 +241,14 @@ func (s *Service) InvalidateUserRoleCache(userID string) {
 	if userID == "" {
 		return
 	}
-	s.roleCacheMu.Lock()
-	defer s.roleCacheMu.Unlock()
-	s.roleCacheEpoch++
-	s.userRoleCache.Delete(userID)
+	s.userRoleCacheMu.Lock()
+	defer s.userRoleCacheMu.Unlock()
+	if s.userRoleFlights[userID] > 0 {
+		s.userRoleEpoch[userID]++
+	} else {
+		delete(s.userRoleEpoch, userID)
+	}
+	delete(s.userRoleCache, userID)
 }
 
 // InvalidateAllRoleCaches drops every cached entry. Used when a role is
@@ -247,13 +256,15 @@ func (s *Service) InvalidateUserRoleCache(userID string) {
 // so the simplest safe action is to flush the whole cache). 全 user role
 // cache に加え roleRepo.List() cache (#1030) も flush する。
 func (s *Service) InvalidateAllRoleCaches() {
-	s.roleCacheMu.Lock()
-	defer s.roleCacheMu.Unlock()
-	s.roleCacheEpoch++
-	s.userRoleCache.Range(func(k, _ any) bool {
-		s.userRoleCache.Delete(k)
-		return true
-	})
+	s.userRoleCacheMu.Lock()
+	s.allUserRoleEpoch++
+	clear(s.userRoleCache)
+	clear(s.userRoleEpoch)
+	s.userRoleCacheMu.Unlock()
+
+	s.rolesListMu.Lock()
+	defer s.rolesListMu.Unlock()
+	s.rolesListEpoch++
 	s.rolesListCache = nil
 	s.rolesListExpiresAt = time.Time{}
 }
@@ -271,28 +282,36 @@ func (s *Service) InvalidateAllRoleCaches() {
 // publication and every return receives a separate deep clone.
 func (s *Service) listRolesCached() ([]*model.Role, error) {
 	for {
-		s.roleCacheMu.Lock()
+		s.rolesListMu.RLock()
 		if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
 			roles := s.rolesListCache
-			s.roleCacheMu.Unlock()
+			s.rolesListMu.RUnlock()
 			return cloneRoles(roles), nil
 		}
-		epoch := s.roleCacheEpoch
+		s.rolesListMu.RUnlock()
+
+		s.rolesListMu.Lock()
+		if s.rolesListCache != nil && time.Now().Before(s.rolesListExpiresAt) {
+			roles := s.rolesListCache
+			s.rolesListMu.Unlock()
+			return cloneRoles(roles), nil
+		}
+		epoch := s.rolesListEpoch
 		if flight := s.rolesListFlight; flight != nil && flight.epoch == epoch {
 			done := flight.done
-			s.roleCacheMu.Unlock()
+			s.rolesListMu.Unlock()
 			<-done
 			continue
 		}
 		flight := &roleListFlight{epoch: epoch, done: make(chan struct{})}
 		s.rolesListFlight = flight
-		s.roleCacheMu.Unlock()
+		s.rolesListMu.Unlock()
 
 		roles, err := s.roleRepo.List()
 		snapshot := cloneRoles(roles)
 
-		s.roleCacheMu.Lock()
-		if err == nil && s.roleCacheEpoch == epoch {
+		s.rolesListMu.Lock()
+		if err == nil && s.rolesListEpoch == epoch {
 			s.rolesListCache = snapshot
 			s.rolesListExpiresAt = time.Now().Add(roleCacheTTL)
 		}
@@ -300,7 +319,7 @@ func (s *Service) listRolesCached() ([]*model.Role, error) {
 			s.rolesListFlight = nil
 		}
 		close(flight.done)
-		s.roleCacheMu.Unlock()
+		s.rolesListMu.Unlock()
 		return cloneRoles(snapshot), err
 	}
 }
@@ -320,17 +339,19 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 	if userID == "" {
 		return nil, nil
 	}
-	s.roleCacheMu.Lock()
-	if v, ok := s.userRoleCache.Load(userID); ok {
-		if entry, ok := v.(*roleCacheEntry); ok && time.Now().Before(entry.expiresAt) {
-			roles := entry.roles
-			s.roleCacheMu.Unlock()
-			return cloneRoles(roles), nil
-		}
-		s.userRoleCache.Delete(userID)
+	s.userRoleCacheMu.RLock()
+	if entry := s.userRoleCache[userID]; entry != nil && time.Now().Before(entry.expiresAt) {
+		roles := entry.roles
+		s.userRoleCacheMu.RUnlock()
+		return cloneRoles(roles), nil
 	}
-	epoch := s.roleCacheEpoch
-	s.roleCacheMu.Unlock()
+	s.userRoleCacheMu.RUnlock()
+	s.userRoleCacheMu.Lock()
+	allEpoch := s.allUserRoleEpoch
+	userEpoch := s.userRoleEpoch[userID]
+	s.userRoleFlights[userID]++
+	s.userRoleCacheMu.Unlock()
+	defer s.finishUserRoleFlight(userID)
 
 	assignments, err := s.assignmentRepo.ListByUser(userID)
 	if err != nil {
@@ -365,15 +386,25 @@ func (s *Service) GetUserRoles(userID string) ([]*model.Role, error) {
 		}
 	}
 	snapshot := cloneRoles(roles)
-	s.roleCacheMu.Lock()
-	if s.roleCacheEpoch == epoch {
-		s.userRoleCache.Store(userID, &roleCacheEntry{
+	s.userRoleCacheMu.Lock()
+	if s.allUserRoleEpoch == allEpoch && s.userRoleEpoch[userID] == userEpoch {
+		s.userRoleCache[userID] = &roleCacheEntry{
 			roles:     snapshot,
 			expiresAt: cacheExpiry,
-		})
+		}
 	}
-	s.roleCacheMu.Unlock()
+	s.userRoleCacheMu.Unlock()
 	return cloneRoles(snapshot), nil
+}
+
+func (s *Service) finishUserRoleFlight(userID string) {
+	s.userRoleCacheMu.Lock()
+	defer s.userRoleCacheMu.Unlock()
+	s.userRoleFlights[userID]--
+	if s.userRoleFlights[userID] == 0 {
+		delete(s.userRoleFlights, userID)
+		delete(s.userRoleEpoch, userID)
+	}
 }
 
 // GetUserAssigns returns the user's currently active role assignments.
@@ -1179,7 +1210,7 @@ func (s *Service) Assign(userID, roleID string, expiresAt *time.Time) error {
 	if err := s.roleRepo.UpdateFields(roleID, map[string]any{"lastUsedAt": time.Now()}); err != nil {
 		slog.Warn("role assign: lastUsedAt update failed", "role", roleID, "err", err)
 	}
-	s.InvalidateUserRoleCache(userID)
+	s.invalidateUserPolicyCaches(userID)
 	// public role の割当のみ通知する (upstream RoleService.assign の
 	// `if (role.isPublic && user.host === null)`)。local 判定は notifier 側の
 	// notifyLocalUser が host==nil で担保するので、ここでは isPublic だけ見る。
@@ -1205,7 +1236,7 @@ func (s *Service) Unassign(userID, roleID string) error {
 	if err := s.roleRepo.UpdateFields(roleID, map[string]any{"lastUsedAt": time.Now()}); err != nil {
 		slog.Warn("role unassign: lastUsedAt update failed", "role", roleID, "err", err)
 	}
-	s.InvalidateUserRoleCache(userID)
+	s.invalidateUserPolicyCaches(userID)
 	return nil
 }
 
@@ -1248,7 +1279,7 @@ func (s *Service) Create(name, description string, opts CreateOptions) (*model.R
 	//      Cache に影響が出る (= 既存 user が新規 role に hit するかも)。
 	//  (b) opts から「conditional or not」を判別して flush 範囲を絞ることも
 	//      可能だが、admin role 作成は超低頻度 (~週 1) なので最適化価値が低い。
-	s.InvalidateAllRoleCaches()
+	s.invalidateRolePolicyCaches(role.ID)
 	return role, nil
 }
 
@@ -1376,7 +1407,7 @@ func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, e
 	// 「policy 反映されない」となる (PR #1102 で塞ぐ user 報告経路)。
 	// admin 経由 update は頻度が低いので、field 差分判定せず常に全 cache を
 	// flush する保守的選択を取る。
-	s.InvalidateAllRoleCaches()
+	s.invalidateRolePolicyCaches(id)
 	return s.roleRepo.FindByID(id)
 }
 
@@ -1391,7 +1422,7 @@ func (s *Service) Delete(id string) error {
 	// 削除した role を assigned していた user 集合は分からないので、
 	// 全 cache を flush する。admin 操作で頻度が低いので O(N) flush の
 	// コストは許容範囲。
-	s.InvalidateAllRoleCaches()
+	s.invalidateRolePolicyCaches(id)
 	return nil
 }
 

@@ -2,6 +2,8 @@ package plugintest_test
 
 import (
 	"context"
+	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/shiroha-a/mk/plugin"
@@ -45,14 +47,21 @@ func TestEffectivePoliciesCapture(t *testing.T) {
 	assert.Equal(t, []string{"user"}, recorder.users)
 }
 
-func TestEffectivePoliciesPreservesNilResolver(t *testing.T) {
+func TestEffectivePoliciesRejectsInvalidRegistration(t *testing.T) {
 	definition := plugin.Definition{
 		Name: "policy", APIVersion: plugin.APIVersion,
 		EffectivePolicies: func(plugin.Context, plugin.EffectivePolicyInvalidator) (plugin.EffectivePolicyRegistration, error) {
 			return plugin.EffectivePolicyRegistration{Keys: []string{"canSearchNotes"}}, nil
 		},
 	}
-	registration := plugintest.New(t).EffectivePolicies(definition)
-	assert.Nil(t, registration.Resolve)
-	require.Error(t, registration.Validate())
+	if os.Getenv("MK_PLUGINTEST_INVALID_REGISTRATION_CHILD") == "1" {
+		plugintest.New(t).EffectivePolicies(definition)
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestEffectivePoliciesRejectsInvalidRegistration$")
+	cmd.Env = append(os.Environ(), "MK_PLUGINTEST_INVALID_REGISTRATION_CHILD=1")
+	output, err := cmd.CombinedOutput()
+	require.Error(t, err, "an invalid registration must fail the harness test process")
+	assert.Contains(t, string(output), "EffectivePolicies の登録が不正です")
 }

@@ -139,7 +139,10 @@ func (s *Server) startConstructionWorkerWithDrain(run func(context.Context), dra
 	s.registerShutdownHook(func(shutdownCtx context.Context) {
 		once.Do(cancel)
 		if drain {
-			<-done
+			select {
+			case <-done:
+			case <-shutdownCtx.Done():
+			}
 			return
 		}
 		select {
@@ -353,6 +356,11 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	}
 	logDevModeBanner(cfg)
 
+	// パスワードのハッシュ強度をプロセス全体に反映する。
+	//
+	// **ゼロ値は「未設定」として扱う。** config.resolve を通れば必ず範囲内の値が
+	// 入るが、Config を構造体リテラルで組む呼び出し元 (テスト / ツール) では 0 の
+	// まま来る。そこで起動を失敗させると、この項目を知らない呼び出し元が全部壊れる。
 	bcryptCost := cfg.BcryptCost
 	if bcryptCost == 0 {
 		bcryptCost = password.DefaultCost
@@ -366,6 +374,9 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 		slog.Info("bcrypt cost overridden", "cost", bcryptCost, "default", password.DefaultCost)
 	}
 
+	// 投稿後のベストエフォートフックの同時実行数。**絞らないと応答のテールが
+	// 伸びる** (負荷時に数百 goroutine が GOMAXPROCS 個の P を奪い合い、応答を
+	// 返す goroutine もその列に並ぶ)。0 なら core/note 側の既定が入る。
 	corenote.SetHookConcurrency(cfg.NoteHookConcurrency)
 	if cfg.NoteHookConcurrency > 0 {
 		slog.Info("note hook concurrency overridden", "perKind", cfg.NoteHookConcurrency)
@@ -442,7 +453,12 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	// 外部リンク遷移で閲覧中の URL が path ごと漏れるのを防ぐ (#2404)。
 	// upstream には無い mk-go 独自の hardening。
 	e.Use(middleware.ReferrerPolicy())
+	// upstream ServerService と同じ HSTS。**disableHsts を設定として読んで
+	// いたのに header を出していなかった**ので、TS から切り替えると黙って
+	// 消えていた。https でない構成では付けない。
 	e.Use(middleware.HSTS(cfg.URL, cfg.DisableHSTS))
+	// Cross-Origin-Opener-Policy (既定 off)。**不正な値は黙って無視されるので、
+	// ここで気づけるようにする** — 設定したつもりで効いていない状態が一番厄介。
 	if !middleware.ValidCOOPMode(cfg.CrossOriginOpenerPolicy) {
 		slog.Warn("crossOriginOpenerPolicy が不正なので無視します",
 			"value", cfg.CrossOriginOpenerPolicy,

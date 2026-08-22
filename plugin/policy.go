@@ -20,7 +20,10 @@ type EffectivePolicyContribution struct {
 	Priority   int
 	UseDefault bool
 	Value      any
-	Order      int
+	// Order distinguishes multiple contributions for the same key and controls
+	// their deterministic provider-local order. Each (Key, Order) pair must be
+	// unique within one resolver result.
+	Order int
 }
 
 // EffectivePolicyResolver computes effective policy contributions for a user.
@@ -53,8 +56,8 @@ func (r EffectivePolicyRegistration) Validate() error {
 	return nil
 }
 
-// EffectivePolicyInvalidator drops cached policy inputs after committed state
-// changes.
+// EffectivePolicyInvalidator drops cached policy inputs and successful
+// provider output after committed state changes.
 type EffectivePolicyInvalidator interface {
 	InvalidateUser(context.Context, string) error
 	// InvalidateRole is intentionally broader than one role because conditional

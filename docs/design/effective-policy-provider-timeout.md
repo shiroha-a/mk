@@ -1,4 +1,4 @@
-# Effective-policy provider timeout
+# Effective-policy provider timeout and cache
 
 ## 目的
 
@@ -11,8 +11,11 @@ effective-policy resolverがI/O待ちや実装不備で返らなくても、通�
 - token取得後にresolver専用の新しい1秒deadline contextを作る。resolver自身が期限内に完了しなかった場合だけ、providerをprocess再起動まで無効化する。
 - token待ちとresolver実行を両方使い切ったrequestの最悪応答時間は約2秒になる。
 - disabled providerはresolverを再実行せず、既存のprovider failure経路へ合流する。
+- 成功してvalidationを通過したprovider outputは`UserID`とsorted active `RoleIDs`の組ごとに、明示的なuser/role invalidationまでcacheする。失敗結果はcacheしない。
+- 同じcache keyの同時missはsingle-flight化し、1回のresolver結果を共有する。異なるproviderのmissは並行解決し、provider数に比例してdeadlineを加算しない。
 - failed providerが宣言したkeyはplugin適用前のexact native policyへ戻し、同じkeyへの全plugin contributionを破棄する。
 - resolverへは実行専用deadlineを持つcontextを渡す。plugin.Storageなどcontext対応I/Oは協調的に停止できる。
+- resolver timeoutでproviderを無効化した事実は、識別子や値を含めない固定文面のwarningとして一度だけ記録する。panic、error、invalid outputは記録しない。
 - timeout、panic、errorにはplugin名、user/role/policy ID、provider output、panic値、内部errorを含めない。
 
 ## 実行制御
@@ -21,23 +24,28 @@ provider runtimeは次の状態を持つ。
 
 - capacity 1の実行token
 - process lifetimeのatomic disabled flag
+- 成功結果cache、同一keyのsingle-flight、user別epoch、全体epoch
 
 解決手順は次のとおり。
 
 1. disabledなら直ちにfailureを返す。
-2. token取得待ち専用の1秒deadline contextを作る。
-3. token取得を待つ。deadlineまでに取得できなければproviderをdisableせず、そのrequestだけfailureを返す。
-4. token取得後にdisabledを再確認する。別の呼び出しが待機中にdisableしていた場合はtokenを返し、resolverを開始せずfailureを返す。
-5. token待ちcontextを破棄し、resolver実行専用の新しい1秒deadline contextを作る。
-6. resolverを専用goroutineで実行し、完了時刻を記録してbuffered result channelへ結果を送る。完了時刻が実行deadline以後なら、tokenを返す前にdisabled flagを設定する。
-7. resolver完了ならtokenを返し、既存validationへ結果を渡す。
-8. resolver実行deadlineが先ならproviderをdisableし、failureを返す。resolver goroutineは強制終了しない。
+2. `UserID`とlength-prefixで連結したsorted `RoleIDs`からcache keyを作る。hitならdeep cloneした成功結果を返す。
+3. 同じkeyのflightがあればその完了を待つ。無ければepochを記録してflight ownerになる。
+4. token取得待ち専用の1秒deadline contextを作る。
+5. token取得を待つ。deadlineまでに取得できなければproviderをdisableせず、そのrequestだけfailureを返す。
+6. token取得後にdisabledを再確認する。別の呼び出しが待機中にdisableしていた場合はtokenを返し、resolverを開始せずfailureを返す。
+7. token待ちcontextを破棄し、resolver実行専用の新しい1秒deadline contextを作る。
+8. resolverを専用goroutineで実行し、完了時刻を記録してbuffered result channelへ結果を送る。完了時刻が実行deadline以後なら、tokenを返す前にdisabled flagを設定する。
+9. resolver完了ならtokenを返し、既存validationへ結果を渡す。成功時だけdeep cloneしてcacheへpublishする。開始後にuser/role invalidationがepochを変更していればpublishしない。
+10. resolver実行deadlineが先ならproviderをdisableし、cacheを破棄してfailureを返す。resolver goroutineは強制終了しない。
 
 tokenはresolver goroutineがreturnしたときだけ返す。contextを無視して永久にhangするresolverでも、同じproviderで残留するgoroutineは最大1本になる。timeout後は実行前とtoken取得後のdisabled checkで新しいgoroutineを作らない。deadline以後にresolverがreturnした場合はresolver goroutine自身がtoken返却前にdisableするため、timeoutを処理するcallerとのschedule順にかかわらず、待機callerが新しいresolverを開始できない。
 
 resolver実行deadline直前の完了とtimeoutが競合した場合は、resolver goroutineが記録した完了時刻とdeadlineを比較する。deadline前に完了したresultだけを通常validationへ渡し、deadline以後のresultはproviderをdisableしてnative fallbackへ戻す。
 
 token取得待ちのtimeoutはproviderの健全性を示さない。同じruntimeを共有する正常なresolverがburstを直列処理しているだけでも発生するため、permanent disabled flagを変更してはならない。このrequestではpolicyがnative fallbackへ戻るが、後続requestはtoken取得とresolver実行を再試行できる。
+
+providerは登録順のresult slotへ並行解決し、全slot完了後に登録順でaggregationする。これにより複数providerがhangしてもrequest時間は最も遅いproviderの約2秒を上限とし、goroutine schedulingでaggregation結果を変えない。
 
 ## Provider未登録時のfast path
 
@@ -50,7 +58,7 @@ providerを登録していないinstanceでは、plugin機構追加前のnative 
 - active roleがありprovider未登録の場合は従来どおりnative role aggregationを行うが、provider failure用のexact native deep cloneは作らない。
 - provider登録時だけ全keyのnative aggregationとfailure fallback用snapshotを作成する。
 
-この分岐はproviderの有無だけで決まり、provider登録後に出力cacheや別のpolicy semanticsを導入しない。
+この分岐はproviderの有無だけで決まる。provider登録時は上記の成功結果cacheを使うが、provider未登録instanceはcache lockやgoroutine作成のcostを払わない。
 
 ## Registry invariant
 
@@ -65,6 +73,11 @@ internal/safemath.MulFloat64はNaNを0へ正規化する。有限値の通常乗
 - deadline contextを尊重するresolverがtimeoutし、native fallbackになる。
 - contextを無視するresolverでも呼び出し元が1秒付近で戻る。
 - concurrent resolutionでresolver実行数と残留goroutineがproviderごと最大1になる。
+- 同一user/RoleIDsのconcurrent missが1回のresolver実行を共有する。
+- user invalidationが対象userだけを、role invalidationが全provider outputを破棄する。
+- invalidation前のin-flight結果がcacheへ再publishされない。
+- 複数providerのtimeoutが直列加算されない。
+- timeout disableのwarningが一度だけ出て、plugin由来情報を含まない。
 - timeout後の呼び出しがresolverを再実行しない。
 - cooperative resolverがdeadline時にreturnしてtokenを返す競合でも、待機requestが新しいresolverを開始しない。
 - 正常な短時間resolverへtoken capacityを超えるconcurrent requestを送っても、token待ちtimeoutだけではproviderがdisableされない。
@@ -82,5 +95,4 @@ internal/safemath.MulFloat64はNaNを0へ正規化する。有限値の通常乗
 - resolver実行timeout後の自動retryや一時circuit breaker
 - runtimeでのprovider再有効化
 - timeout値のoperator設定
-- provider output cache
 - token待ちtimeout時のprovider disable
