@@ -100,6 +100,10 @@ factorが0以下の場合は両関数とも既存どおり`base`を返す。NaN�
 
 DB、repository、API errorの分類は変更しない。内部数値や入力値を新たにlogまたはclient responseへ出さない。
 
+## Plugin向け文書
+
+`docs/plugins/authoring.md`へ、pluginが返すpolicy数値はconsumer固有の固定幅表現へ変換する時点で飽和することを記録する。providerの公開型、policy集約規則、通常範囲の値は変更しない。
+
 ## Test戦略
 
 実装はTDDで進める。各consumerで、既存native role policyだけから問題へ到達するtestを先に追加し、旧実装で期待した理由により失敗することを確認する。providerはsetupにも使用しない。
