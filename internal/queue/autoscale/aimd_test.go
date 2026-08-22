@@ -298,19 +298,54 @@ func TestObserve_CooldownDoesNotAdvanceIdleCounter(t *testing.T) {
 		"idle counter should not advance during cool-down")
 }
 
-// TestObserve_ZeroCurrentWorkersIsNoOp verifies that a controller with
-// no workers running yet does not try to scale up (depth > 0 × N = 0
-// would always be true). Real-world: Server not yet Start()ed, driver
-// returns 0 from WorkerCount.
-func TestObserve_ZeroCurrentWorkersIsNoOp(t *testing.T) {
+// TestObserve_ZeroCurrentWorkersRestoresTheFloor pins the fix for the
+// absorbing state (#2657).
+//
+// **以前はここが NoOp だった。** depth ベースの scale-up は
+// `CurrentWorkers > 0` を前提にしており、閾値も `CurrentWorkers × 4` なので
+// 0 だと分岐に入れず、QueueDepth != 0 なので sustained-idle 側も素通りして
+// 永久に NoOp を返し続ける。mkq driver は handler から戻らない worker を
+// 生存数から外すようになったので、0 は実際に起こりうる状態になった。
+// そこで動けなくなると、詰まったキューが二度と回復しない。
+func TestObserve_ZeroCurrentWorkersRestoresTheFloor(t *testing.T) {
 	clock := newFakeClock(time.Unix(0, 0))
 	cfg := validConfig(clock)
 	ctrl, err := NewAIMDController(cfg)
 	require.NoError(t, err)
 
 	action := ctrl.Observe(ObservedMetric{QueueDepth: 1000, CurrentWorkers: 0})
+	assert.Equal(t, ActionScaleUp, action.Kind)
+	assert.Equal(t, cfg.MinWorkers, action.TargetWorkers,
+		"restore the floor rather than the depth-derived step")
+}
+
+// TestObserve_BelowFloorRestoresIt covers the same gate for a partially
+// depleted pool, and with an empty queue (the floor is not conditional on
+// there being work).
+func TestObserve_BelowFloorRestoresIt(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	cfg := validConfig(clock)
+	ctrl, err := NewAIMDController(cfg)
+	require.NoError(t, err)
+
+	action := ctrl.Observe(ObservedMetric{QueueDepth: 0, CurrentWorkers: 1})
+	assert.Equal(t, ActionScaleUp, action.Kind)
+	assert.Equal(t, cfg.MinWorkers, action.TargetWorkers)
+	assert.Equal(t, 0, ctrl.idleCycleCount, "the idle counter is reset, not advanced")
+}
+
+// TestObserve_ZeroWorkersWithZeroFloorStaysNoOp verifies that "the
+// operator asked for no workers" is not overridden.
+func TestObserve_ZeroWorkersWithZeroFloorStaysNoOp(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	cfg := validConfig(clock)
+	cfg.MinWorkers = 0
+	ctrl, err := NewAIMDController(cfg)
+	require.NoError(t, err)
+
+	action := ctrl.Observe(ObservedMetric{QueueDepth: 1000, CurrentWorkers: 0})
 	assert.Equal(t, ActionNoOp, action.Kind,
-		"no scale-up when CurrentWorkers == 0 (= driver not started)")
+		"MinWorkers == 0 is an explicit choice, not a depleted pool")
 }
 
 // TestObserve_BelowUpThreshold verifies the canonical NoOp case
@@ -372,4 +407,24 @@ func BenchmarkObserve(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_ = ctrl.Observe(metric)
 	}
+}
+
+// TestObserve_FloorGatePrecedesDepthGate pins the ordering of the two
+// scale-up paths.
+//
+// **depth gate より先に判定しないと意味が無い。** 下に置くと
+// `CurrentWorkers × 4` の閾値で先に scale-up が決まってしまい、floor まで
+// 一気に戻らない。ここでは depth 100 / current 1 / min 4 で、depth 由来の
+// 目標 (1 + max(1/4,1) = 2) ではなく floor の 4 になることを見る。
+func TestObserve_FloorGatePrecedesDepthGate(t *testing.T) {
+	clock := newFakeClock(time.Unix(0, 0))
+	cfg := validConfig(clock)
+	cfg.MinWorkers = 4
+	ctrl, err := NewAIMDController(cfg)
+	require.NoError(t, err)
+
+	action := ctrl.Observe(ObservedMetric{QueueDepth: 100, CurrentWorkers: 1})
+	assert.Equal(t, ActionScaleUp, action.Kind)
+	assert.Equal(t, 4, action.TargetWorkers,
+		"the floor wins over the depth-derived step of 2")
 }

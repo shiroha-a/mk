@@ -36,6 +36,8 @@ type scriptableDriver struct {
 	// PendingCount を使うべき (#2605)。
 	queueInfoCalls    atomic.Int64
 	pendingCountCalls atomic.Int64
+	// resizeCeiling caps what Resize actually applies (0 = uncapped).
+	resizeCeiling int
 }
 
 func newScriptableDriver(initial map[string]int) *scriptableDriver {
@@ -73,6 +75,11 @@ func (d *scriptableDriver) Resize(qname string, n int) error {
 		return d.resizeErr
 	}
 	d.mu.Lock()
+	// mkq driver は総 worker 数の上限に当たると要求より少ない本数しか
+	// 立てずに nil を返す (#2657)。その挙動を再現できるようにしておく。
+	if d.resizeCeiling > 0 && n > d.resizeCeiling {
+		n = d.resizeCeiling
+	}
 	d.workers[qname] = n
 	d.mu.Unlock()
 	return nil
@@ -531,4 +538,59 @@ func TestStartAutoScale_UsesPendingCountNotQueueInfo(t *testing.T) {
 
 	assert.Zerof(t, d.queueInfoCalls.Load(),
 		"GetQueueInfo が %d 回呼ばれている。集計 API を毎秒引いている", d.queueInfoCalls.Load())
+}
+
+// TestStartAutoScale_CappedResizeCommitsTheAppliedCount pins the read-back
+// after Resize (#2657).
+//
+// mkq driver は総 worker 数の上限に当たると要求より少ない本数しか立てずに
+// nil を返す。target を台帳に書いたまま抜けると、達成できなかった値で
+// maxWorkersGlobal の合計を見積もり、他 queue の scale-up を無期限に
+// 詰まらせる。ログにも「0 -> 4 に resize した」と毎秒書き続けることになる。
+func TestStartAutoScale_CappedResizeCommitsTheAppliedCount(t *testing.T) {
+	minWorkers := 2
+	maxW := 64
+	cooldown := 1
+	cfg := &config.Config{
+		JobQueueAutoScale:        true,
+		MinWorkers:               &minWorkers,
+		MaxWorkers:               &maxW,
+		AutoScaleCooldownSeconds: &cooldown,
+	}
+	d := newScriptableDriver(nil)
+	d.resizeCeiling = 2 // 何を要求されても 2 本しか立たない
+	m := queuemetrics.New()
+
+	runner, err := startAutoScale(context.Background(), cfg, d, m, nil)
+	require.NoError(t, err)
+	require.NotNil(t, runner)
+	t.Cleanup(func() { runner.Stop(context.Background()) })
+
+	// **起動時の Resize を数えない。** startAutoScale は probe 1 回 +
+	// 管理キューぶんの初期化で既に 8 回呼んでいるので、単純な下限で待つと
+	// tick が 1 度も回らないうちに先へ進んでしまう。
+	afterStartup := d.resizes.Load()
+	require.Positive(t, afterStartup)
+
+	d.setPending("deliver", 100) // 2 x 4 = 8 を超えるので scale-up が走る
+
+	// tick 由来の Resize が実際に走るまで待つ。
+	deadline := time.After(5 * time.Second)
+	for d.resizes.Load() < afterStartup+2 {
+		select {
+		case <-deadline:
+			t.Fatalf("ticker never issued a resize (resizes=%d, afterStartup=%d)",
+				d.resizes.Load(), afterStartup)
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	runner.mu.Lock()
+	ledger := runner.workerCounts["deliver"]
+	runner.mu.Unlock()
+	assert.Equal(t, 2, ledger,
+		"the ledger must hold what was applied, not the unachieved target")
+	assert.Equal(t, 0.0,
+		testutil.ToFloat64(m.ScaleEventsTotal.WithLabelValues("deliver", "up")),
+		"a resize that changed nothing is not a scale event")
 }

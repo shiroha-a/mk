@@ -14,9 +14,14 @@ type ObservedMetric struct {
 	// (Redis ZCARD相当). Must be >= 0.
 	QueueDepth int
 
-	// CurrentWorkers is the number of worker goroutines currently
-	// running for the queue. Must be >= 0. The Controller uses this to
-	// compute the proposed delta (= TargetWorkers - CurrentWorkers).
+	// CurrentWorkers is the number of workers currently able to take work
+	// for the queue. Must be >= 0. The Controller uses this to compute the
+	// proposed delta (= TargetWorkers - CurrentWorkers).
+	//
+	// **goroutine 数ではない。** mkq driver は handler から戻ってこない
+	// worker を除いて数えるので (#2657)、実際に走っている goroutine より
+	// 小さくなりうるし、0 にもなりうる。Observe の floor 復帰 gate は
+	// その 0 が吸収状態になるのを防ぐためにある。
 	CurrentWorkers int
 }
 

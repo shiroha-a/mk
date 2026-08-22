@@ -258,6 +258,20 @@ func (r *autoscaleRunner) tick(
 			continue
 		}
 
+		// **実際に変わった本数を見る。** target を書いて済ませると、
+		// driver 側が総数の上限に当たって増やせなかったときに
+		// 「0 -> 4 に resize した」と毎秒書き続けることになる (#2657)。
+		//
+		// 予約の commit は early return より**前**に置く。上で
+		// reserveIfWithinCap が target を台帳に積んでいるので、達成できな
+		// かった値のまま抜けると maxWorkersGlobal の合計を過大に見積もり、
+		// 他 queue の scale-up を無期限に詰まらせる。
+		applied := drv.WorkerCount(qname)
+		r.setWorkerCount(qname, applied)
+		if applied == current {
+			continue
+		}
+
 		direction := "down"
 		if action.Kind == autoscale.ActionScaleUp {
 			direction = "up"
@@ -266,11 +280,11 @@ func (r *autoscaleRunner) tick(
 		// admin UI 用の短期履歴 (#2277)。Prometheus counter は「何回起きたか」
 		// しか持たないので、いつ何本から何本へ動いたかはここで保持する。
 		if r.stats != nil {
-			r.stats.RecordScale(qname, direction, current, action.TargetWorkers)
+			r.stats.RecordScale(qname, direction, current, applied)
 		}
 		slog.Info("server: autoscale resized",
 			"queue", qname, "direction", direction,
-			"from", current, "to", action.TargetWorkers, "depth", depth)
+			"from", current, "to", applied, "depth", depth)
 	}
 }
 

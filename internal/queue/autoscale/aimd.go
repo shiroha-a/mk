@@ -107,16 +107,21 @@ func NewAIMDController(cfg AIMDConfig) (*AIMDController, error) {
 }
 
 // Observe consumes one tick of queue metrics and returns the scale
-// decision. The implementation has 3 stages:
+// decision. The implementation has 4 stages:
 //
 //  1. cool-down gate: if less than CooldownDuration has elapsed since
 //     the last scale event, return NoOp regardless of signal.
-//  2. scale-up gate: if QueueDepth > CurrentWorkers × UpThresholdMultiplier,
+//  2. floor gate: if CurrentWorkers < MinWorkers, propose scale-up back to
+//     MinWorkers regardless of depth. Without this, CurrentWorkers == 0 is
+//     an absorbing state — the depth gate below is guarded on
+//     CurrentWorkers > 0 and its threshold is CurrentWorkers × 4, so a
+//     pool reported as empty could never grow again.
+//  3. scale-up gate: if QueueDepth > CurrentWorkers × UpThresholdMultiplier,
 //     propose additive-increase to min(CurrentWorkers + max(1, ⌈N×0.25⌉),
 //     MaxWorkers). Resets the idle counter unconditionally (the load
 //     surge is the canonical "definitely not idle" signal, regardless of
 //     whether the controller is at-max).
-//  3. sustained-idle gate: if QueueDepth == 0 AND CurrentWorkers >
+//  4. sustained-idle gate: if QueueDepth == 0 AND CurrentWorkers >
 //     MinWorkers, increment the idle counter; once it reaches
 //     SustainedIdleCycles, propose multiplicative-decrease to
 //     max(⌊CurrentWorkers × 0.5⌋, MinWorkers). Any non-zero observation
@@ -137,6 +142,24 @@ func (c *AIMDController) Observe(metric ObservedMetric) ControlAction {
 	// 観測値は idle 判定にも寄与しない (= cool-down 明けで再カウント開始)。
 	if !c.lastScaleAt.IsZero() && now.Sub(c.lastScaleAt) < c.cfg.CooldownDuration {
 		return ControlAction{Kind: ActionNoOp}
+	}
+
+	// floor 復帰: 何らかの理由で worker 数が MinWorkers を下回ったら、
+	// depth を見る前に戻す。
+	//
+	// **これが無いと 0 が吸収状態になる。** 下の scale-up 判定は
+	// `CurrentWorkers > 0` が前提で、閾値も `CurrentWorkers × 4` なので
+	// 0 だと閾値が 0 になり分岐に入れない。QueueDepth != 0 なので
+	// sustained-idle 側も素通りし、永久に NoOp を返し続ける。mkq driver は
+	// handler が戻らなくなった worker を生存数から外すので (#2657)、
+	// CurrentWorkers == 0 は実際に起こりうる。
+	//
+	// MinWorkers == 0 (= 明示的に「worker を置かない」) の構成では発火
+	// しない。意図した停止を勝手に覆さない。
+	if metric.CurrentWorkers < c.cfg.MinWorkers {
+		c.idleCycleCount = 0
+		c.lastScaleAt = now
+		return ControlAction{Kind: ActionScaleUp, TargetWorkers: c.cfg.MinWorkers}
 	}
 
 	// scale-up trigger: queue が「現 worker 数 × 4」を超えて backed up。
