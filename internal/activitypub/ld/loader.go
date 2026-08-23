@@ -33,6 +33,15 @@ var preloadedContextSources = map[string]string{
 	"https://www.w3.org/ns/activitystreams": "contexts/activitystreams.json",
 }
 
+// isPreloadedContext reports whether the IRI is served from the embedded
+// context set, i.e. resolving it never touches the network.
+//
+// freeze の判定から除外するために使う。詳細は loadDocument のコメント (#2680)。
+func isPreloadedContext(iri string) bool {
+	_, ok := preloadedContextSources[iri]
+	return ok
+}
+
 // PreloadedLoader is a JSON-LD DocumentLoader that returns the embedded
 // context documents only. Any URL not in the preload set returns an error so
 // that LD-Signature verify never silently fetches remote documents (= upstream
@@ -48,6 +57,12 @@ type PreloadedLoader struct {
 
 // NewPreloadedLoader constructs a DocumentLoader that serves the embedded
 // preload context set and refuses any other URL.
+//
+// **loader を共有しないこと。** 返す document は json-gold が `@import` の
+// マージ先として **in-place で書き換える** (json-gold の context.go)。Processor
+// ごとに embed.FS から読み直しているおかげで汚染が 1 リクエストに閉じており、
+// singleton 化すると跨いで残る。「毎回 3 つ JSON を parse するのは無駄」に
+// 見えるが、この再 parse は load-bearing (#2680)。
 func NewPreloadedLoader() *PreloadedLoader {
 	return &PreloadedLoader{}
 }

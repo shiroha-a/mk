@@ -107,9 +107,17 @@ func (v *LDSignatureVerifier) VerifyAndCreator(rawBody []byte) (string, bool, er
 	// #2106 L49 (documented limitation): upstream は verify 前に compact して任意の @context を
 	// 標準形へ畳んでから URDNA2015 normalize するが、mk-go は compact を省く。3 つの preload
 	// context (AS2.0 / security v1 / identity v1) 外の custom context を参照する activity は
-	// normalize 段で ErrContextNotPreloaded になり、HTTP 署名の無い forwarded/relay 経路
-	// (LD-Signature が唯一の authenticator) で reject されうる。標準 context のみの一般的な
-	// Misskey/Mastodon activity では問題にならない。compact 導入は LD-Signature 経路の
+	// normalize 段で **ErrCacheFrozen** になり、HTTP 署名の無い forwarded/relay 経路
+	// (LD-Signature が唯一の authenticator) で reject されうる。
+	//
+	// **エラーは ErrContextNotPreloaded ではない。** 下の Freeze() が verify より先に走るため
+	// loadDocument は frozen 分岐で止まり、PreloadedLoader まで到達しない。この記述が
+	// 誤っていたせいで、#2680 (preload まで freeze で塞いでいた不具合) の調査が遠回りになった
+	// — ログに出る文言と doc の文言が一致せず、別の問題に見えた。
+	//
+	// 標準 context のみの一般的な Misskey/Mastodon activity では問題にならない
+	// (どちらも AS2 + security/v1 + インライン拡張オブジェクトを送るため、
+	// preload だけで解決できる)。compact 導入は LD-Signature 経路の
 	// security-sensitive な変更のため、現状は documented limitation として維持する。
 	proc := ld.NewProcessor()
 	if err := proc.CheckForForbiddenDirectives(act); err != nil {

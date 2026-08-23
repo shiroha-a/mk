@@ -53,9 +53,17 @@ func (p *Processor) LoadDocument(u string) (*ld.RemoteDocument, error) {
 // loadDocument is the DocumentLoader callback the Processor uses internally.
 // Implements:
 //   - cache hit → 即返す (HTTP 経路無し)
-//   - cache miss + frozen → ErrCacheFrozen
+//   - cache miss + frozen + preload 外 → ErrCacheFrozen
 //   - cache miss → PreloadedLoader に委譲、結果を cache に格納
 //   - cache size > cacheCap → ErrCacheOverflow
+//
+// **freeze は preload 済み context を塞がない。** upstream も
+// `PRELOADED_CONTEXTS` を frozen 判定より先に見る (JsonLdService.ts getLoader)。
+// freeze が塞ぎたいのは remote fetch (SSRF / TOCTOU) で、go:embed 済みの
+// context はネットワークに出ないため塞ぐ理由が無い。ここを塞ぐと、verify が
+// 後から差し込む `@context: w3id.org/identity/v1` (verify.go) を解決できず、
+// **LD-Signature の検証が常に失敗する** (#2680)。verifier は空 cache のまま
+// Freeze してから verify するので、cache 経由で救われることもない。
 //
 // 戻り値 RemoteDocument の DocumentURL / Document は piprate/json-gold が
 // JsonLdProcessor の compact / normalize で参照する。
@@ -65,7 +73,7 @@ func (p *Processor) loadDocument(u string) (*ld.RemoteDocument, error) {
 		p.mu.Unlock()
 		return d, nil
 	}
-	if p.frozen {
+	if p.frozen && !isPreloadedContext(u) {
 		p.mu.Unlock()
 		return nil, ErrCacheFrozen
 	}
