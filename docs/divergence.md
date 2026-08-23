@@ -3,7 +3,7 @@
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
 - 基準: **mk-go 1.2.1** ⇔ Misskey TS `2026.7.0`
-- 最終更新: 2026-08-19
+- 最終更新: 2026-08-23
 
 > ベースラインを固定したのは 1.0.0 (= Misskey TS `2026.7.0` 追従完了時点)。以降の 1.1.x は
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもの。したがって
@@ -482,6 +482,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 
 | 項目 | upstream | mk-go |
 |---|---|---|
+| AID/AIDXの上限外timestamp | AIDは8桁を超えて固定長を外れ、AIDXは下位8桁へwrapする | **base36 8桁の最大値へ飽和する。** 固定長を維持し、時系列順序の逆転を防ぐ安全側乖離 (#2672) |
 | リモート actor の `movedTo` 消滅 | `movedToUri: person.movedTo ?? null` で null に戻す | **既存値を温存する** (削除は追わない)。一時的な欠落でクリアすると、次の取得が「無→有」の遷移に見えて `movedAt` が打ち直され、移行の時間窓 (2h / 14 日) の基準が壊れるため。移行の取り消しに追従できない代わりに基準が安定する (#2412) |
 | リモート actor の `vcard:Address` の長さ | truncate せずそのまま保存 | **128 文字 (rune) で切る**。`user_profile.location` は varchar(128) で、超過値を渡すと insert / update ごと失敗し、同じ書き込みに乗っている `description` まで巻き添えになる (create 経路では profile 行が 1 行も作られず、以後の refresh も同じ失敗を繰り返す)。description の 2048 文字 truncate と同じ扱い (#2661) |
 | リモート actor の profile `fields` の件数 | `analyzeAttachments` に上限なし | **16 件で打ち切る**。ローカルの `i/update` が `maxItems: 16` なので揃える。上限が無いと任意件数を送り込める (#2661) |

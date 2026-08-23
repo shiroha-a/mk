@@ -244,12 +244,11 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 	// こちらは remote / local を問わず適用する: 分割アップロードは申告値を
 	// 信用して受け入れ枠を確保する経路なので、gate が外れる分岐を作らない。
 	//
-	// **値の読み取りは policyNumber に通す。** policy の数値は小数を取りうる
-	// (role_service.go の maxNumber が「小数はそのまま float64 で返す」と明記)。
-	// 素の `.(int)` だと float64 で型アサーションに失敗し、上限違反で弾くのでは
-	// なく**上限そのものが消える**。Upload 側は最初からこれを通しているので、
-	// int だけで読むと同じ policy が経路によって効いたり効かなかったりする
-	// (#2611)。
+	// **値の読み取りはpolicyMegabytesに通す。** このhelperはpolicyNumberを介して
+	// int/float64を正規化してからbyte数へ飽和変換する。素の `.(int)` だと
+	// float64で型アサーションに失敗し、上限違反で弾くのではなく**上限そのものが
+	// 消える**。Upload側も同じhelperを通すため、同じpolicyが経路によって効いたり
+	// 効かなかったりしない (#2611)。
 	if maxBytes, ok := policyMegabytes(policies["maxFileSizeMb"]); ok {
 		if in.Size > maxBytes {
 			return nil, ErrMaxFileSizeExceeded

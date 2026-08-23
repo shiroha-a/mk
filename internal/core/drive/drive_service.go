@@ -79,6 +79,8 @@ var (
 // 参照できるようにしてある。契約と理由はそちらの doc を参照。
 func policyNumber(v any) (float64, bool) { return role.PolicyNumber(v) }
 
+// policyMegabytesは数値policyを飽和byte数へ変換する。boolは値の存在ではなく、
+// gateに使える正の上限であることを表す。
 func policyMegabytes(v any) (int64, bool) {
 	mb, ok := policyNumber(v)
 	if !ok {

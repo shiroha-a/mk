@@ -291,9 +291,9 @@ func (rl *RateLimiter) userFactor(userID string) float64 {
 
 // scaledMax divides the base Max by factor, mirroring upstream
 // RateLimiterService.limit() の `max: limitation.max / factor` (#2106 N28)。
-// rateLimitFactor は除数で、値が大きいほど実効 max が小さくなる
+// rateLimitFactor は**除数**で、値が大きいほど実効 max が小さくなる
 // (= role policy で締める) — 例 factor=3(300%) で 1/3 に厳格化、factor=0.3(30%) で
-// 約 3.3x に緩和。factor=1.0 / 不正値 (<=0) は base そのまま。結果は最低 1 に
+// 約 3.3x に緩和。factor=1.0 / 不正値 (<=0またはNaN) は base そのまま。結果は最低 1 に
 // クランプ (factor 過大の事故で全 user が瞬時に 429 を食らうのを防ぐ)。
 func scaledMax(base int, factor float64) int {
 	if factor <= 0 || factor == 1.0 || math.IsNaN(factor) {

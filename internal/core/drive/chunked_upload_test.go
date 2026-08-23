@@ -236,7 +236,7 @@ func TestStartChunkedUpload_MaxPoliciesRemainPositive(t *testing.T) {
 func TestStartChunkedUpload_DriveCapacitySumCannotOverflow(t *testing.T) {
 	f := newChunkedFixture(t)
 	uid := "u1"
-	require.NoError(t, f.files.Create(&model.DriveFile{ID: "f1", UserID: &uid, Size: math.MaxInt64}))
+	require.NoError(t, f.files.Create(&model.DriveFile{ID: "f1", UserID: &uid, Size: math.MaxInt}))
 	f.roles.policies["u1"]["maxFileSizeMb"] = 0
 	f.roles.policies["u1"]["driveCapacityMb"] = 1
 	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{

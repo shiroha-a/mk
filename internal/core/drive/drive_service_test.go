@@ -482,7 +482,7 @@ func TestUpload_NoFreeSpace(t *testing.T) {
 func TestUpload_UsageAdditionCannotOverflowCapacityGate(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	owner := "u1"
-	fileRepo.Files["existing"] = &model.DriveFile{ID: "existing", UserID: &owner, Size: math.MaxInt64}
+	fileRepo.Files["existing"] = &model.DriveFile{ID: "existing", UserID: &owner, Size: math.MaxInt}
 	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
 		"u1": {"driveCapacityMb": 1},
 	}})

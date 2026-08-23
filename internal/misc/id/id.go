@@ -14,6 +14,9 @@ import (
 )
 
 const (
+	// time2000 is the epoch used by AID/AIDX (2000-01-01T00:00:00Z in milliseconds).
+	// AID/AIDXはbase36 8桁、ObjectIDはunsigned 32-bit秒、ULIDは48-bit
+	// millisecondのtimestamp fieldを持つため、各定数をwire上限として使う。
 	time2000              int64 = 946684800000
 	aidMaxTimeMillis      int64 = time2000 + 36*36*36*36*36*36*36*36 - 1
 	meidMinTimeMillis     int64 = -(1 << 47)
@@ -149,6 +152,9 @@ type meidGen struct{}
 
 func newMEID() *meidGen { return &meidGen{} }
 
+// MEIDはsigned millisecondをoffset付き12桁hexとしてencodeする。upstreamは負の
+// 時刻を0へclampするが、mk-goは既存のsigned round tripを維持し、encode可能な
+// 上下限でのみclampする。
 const meidOffset int64 = 0x800000000000
 
 func (g *meidGen) Generate(t time.Time) string {
@@ -230,6 +236,8 @@ func (g *ulidGen) ParseTime(id string) (time.Time, error) {
 
 // --- Helpers ---
 
+// 極端なtime.TimeでUnixMilli/Unixを先に呼ぶとint64 overflowでclamp方向を
+// 判定できないため、変換前のtime.Time同士で表現可能範囲を比較する。
 func clampUnixMillis(t time.Time, min, max int64) int64 {
 	if t.Before(time.UnixMilli(min)) {
 		return min
