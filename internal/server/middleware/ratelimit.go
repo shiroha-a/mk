@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"log/slog"
+	"math"
 	"math/big"
 	"net"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/safemath"
 )
 
 // EndpointLimit defines rate limit parameters for an API endpoint.
@@ -289,15 +291,15 @@ func (rl *RateLimiter) userFactor(userID string) float64 {
 
 // scaledMax divides the base Max by factor, mirroring upstream
 // RateLimiterService.limit() の `max: limitation.max / factor` (#2106 N28)。
-// rateLimitFactor は **除数** で、値が大きいほど実効 max が小さくなる
+// rateLimitFactor は除数で、値が大きいほど実効 max が小さくなる
 // (= role policy で締める) — 例 factor=3(300%) で 1/3 に厳格化、factor=0.3(30%) で
 // 約 3.3x に緩和。factor=1.0 / 不正値 (<=0) は base そのまま。結果は最低 1 に
 // クランプ (factor 過大の事故で全 user が瞬時に 429 を食らうのを防ぐ)。
 func scaledMax(base int, factor float64) int {
-	if factor <= 0 || factor == 1.0 {
+	if factor <= 0 || factor == 1.0 || math.IsNaN(factor) {
 		return base
 	}
-	scaled := int(float64(base) / factor)
+	scaled := safemath.Float64ToInt(float64(base) / factor)
 	if scaled < 1 {
 		return 1
 	}
@@ -306,17 +308,17 @@ func scaledMax(base int, factor float64) int {
 
 // scaledMinInterval multiplies the base minInterval window by factor, mirroring
 // upstream RateLimiterService の `duration: limitation.minInterval * factor`
-// (#2106 N28)。max と同じく factor が大きいほど window が長くなり (= 連投間隔が
-// 厳しくなる)、小さいほど緩む。factor=1.0 / 不正値は base そのまま。
+// (#2106 N28)。rateLimitFactor は乗数で、factor が大きいほど window が長くなり
+// (= 連投間隔が厳しくなる)、小さいほど緩む。factor=1.0 / 不正値は base そのまま。
+// 正方向の duration overflow は実質的な無期限拒否を避けるため base へ戻す。
 func scaledMinInterval(base time.Duration, factor float64) time.Duration {
-	if factor <= 0 || factor == 1.0 {
+	if factor <= 0 || factor == 1.0 || math.IsNaN(factor) {
 		return base
 	}
-	scaled := time.Duration(float64(base) * factor)
-	if scaled < 0 {
+	if factor >= float64(math.MaxInt64)/float64(base) {
 		return base
 	}
-	return scaled
+	return time.Duration(float64(base) * factor)
 }
 
 // rejectRequest returns a 429 response with appropriate headers. limit may

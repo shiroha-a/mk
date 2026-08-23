@@ -281,6 +281,8 @@ contributionの`Priority`は`0..2`で、大きいpriorityのgroupだけをnative
 
 値はnative keyの型に一致させる。boolはOR、integer-native policyは最大値、`chatAvailability`は`available`、`readonly`、`unavailable`の順で寛容な値、`uploadableFileTypes`はtrim後のset unionを使う。integer-native policyは`int`、host `int`範囲内の`int64`、または有限かつhost `int`範囲内の`float64`を受理する。`float64`の小数部は拒否・切り捨てず、結果のpolicy mapでも小数として維持する。typed integerは`2^53`を超えても`float64`へ変換せず比較する。
 
+受理されたinteger-native policyはpolicy map内ではhost `int`の精度を維持する。consumerが分・MBなどを`time.Duration`、byte数、件数などの固定幅表現へ変換するときにだけ、consumer固有の境界処理を行う。容量・件数などは表現可能範囲へ飽和し、rate limitの最小間隔が正方向overflowする場合は実質的な無期限拒否を避けるため元の間隔へ戻す。大きな正数がwrapして負数・無制限扱いになることはなく、通常範囲の値・単位・instance/server capの優先順位は変わらない。
+
 未宣言key、unknown key、priority範囲外、order重複、型不一致、NaN、infinity、範囲外整数、enum外の値、空または非文字列の配列要素が1件でもあればprovider全体を失敗として扱う。resolverのerrorやpanicも同様。失敗providerが宣言したkeyはnative結果へ戻し、同じkeyに対する他providerの貢献も破棄する。宣言していないkeyには成功providerの貢献を適用し続ける。成功値はproviderごとのLRUへ保存し、evictionまたはinvalidation後のresolver失敗はcacheせずnativeへ戻す。fallbackはproviderごとの累積回数が1、2、4、8...回になった時だけ匿名warningとして記録し、恒常障害でrequestごとにlogを増やさない。診断errorとwarningはplugin名、user/role/policy ID、provider output、panic値を含まない。
 
 instance/server capはplugin集約の後に適用する。`maxFileSizeMb`、`chunkedUploadMaxConcurrentSessions`、`chunkedUploadMaxPendingMb`へ`0`以下の無制限値を返しても、positiveなcapが設定されていればcap値になる。
