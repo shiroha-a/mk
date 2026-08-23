@@ -217,3 +217,39 @@ func plainNoteDoc(noteID, authorURI string) string {
 		`","type":"Note","attributedTo":"` + authorURI +
 		`","content":"<p>hi</p>","to":["https://www.w3.org/ns/activitystreams#Public"]}`
 }
+
+// inbox 直送の in-flight guard に当たっても、既に行があれば拾うこと (#2686)。
+//
+// **ReplaceByUser は delete-then-insert なので、ここで落とすと集合ごと
+// 書き直して生きているピンが消える。** ingesting の窓では通常まだ行が無い
+// (Store は Create より前) が、第三の経路が先に作る競合はありうる。消えるのは
+// 黙って起きる不可逆な損失なので、resolvingNotes 側と同じく確実に潰す。
+//
+// 台帳を直接触るのは、この競合を fetch や DB の遅延で再現しようとすると
+// 本質的に flaky になるため。
+func TestResolveFeaturedNotes_UsesExistingRowWhenIngesting(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/leo"
+		noteURI  = "https://remote.example/notes/l1"
+	)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	// fetch してはいけない経路なので、fetcher は必ず失敗する。
+	r := NewResolver(userRepo, noteRepo, urls, emptyDocFetcher{}, idGen)
+
+	host := "remote.example"
+	uri := actorURI
+	user := &model.User{ID: "9leouser000000000000", Username: "leo", Host: &host, URI: &uri}
+	require.NoError(t, userRepo.Create(user))
+	nURI := noteURI
+	require.NoError(t, noteRepo.Create(&model.Note{ID: "9leonote000000000000", UserID: user.ID, URI: &nURI}))
+
+	items := []json.RawMessage{json.RawMessage(`"` + noteURI + `"`)}
+
+	r.ingesting.Store(noteURI, struct{}{})
+	assert.Equal(t, []string{"9leonote000000000000"}, r.resolveFeaturedNotes(user, items),
+		"ingest 中でも既存行があれば拾うこと (skip すると生きたピンが消える)")
+}

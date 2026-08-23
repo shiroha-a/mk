@@ -1999,6 +1999,17 @@ func (r *Resolver) noteResolveInFlight(uri string, allowCrossHost, ephemeral boo
 	return docID, true
 }
 
+// noteIngestInFlight reports whether a note with this document id is being
+// ingested right now.
+//
+// resolvingNotes と違い、**inbox 直送 (IngestNoteWithCreated) でも立つ**。
+// そちらは resolveNoteOnce を通らないので singleflight の鍵は載らない
+// (#2686)。鍵は正規化後の document id (`apNote.ID`)。
+func (r *Resolver) noteIngestInFlight(uri string) bool {
+	_, ok := r.ingesting.Load(uri)
+	return ok
+}
+
 // noteByAnyURI returns the stored row for uri, falling back to docID when the
 // fetch URI and the document id differ (alias URLs).
 func (r *Resolver) noteByAnyURI(uri, docID string) *model.Note {

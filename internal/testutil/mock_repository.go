@@ -3,6 +3,7 @@ package testutil
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"regexp"
 	"sort"
@@ -1138,7 +1139,25 @@ func NewMockNoteRepository() *MockNoteRepository {
 	}
 }
 
+// Create inserts a note, enforcing the production partial UNIQUE index on
+// `note.uri` (migration/000057_note_uri_unique_index).
+//
+// **制約を模さないと「同じ URI を二重に取り込む」形の欠陥がテストを素通りする。**
+// 実際 #2686 は、inbox 直送でピン留め投稿を取り込むと同じ note を二度作りに行き、
+// 外側の Create が UNIQUE に当たって created=false になる (= 通知が落ちる) という
+// ものだったが、素の map 書き込みでは 2 行できるだけで誰も気付けなかった。
+//
+// 全パッケージで壊れるテストは無いことを確認済み。
 func (m *MockNoteRepository) Create(note *model.Note) error {
+	// `IDX_note_uri` の WHERE は `uri IS NOT NULL` なので、**空文字も index
+	// 対象**。本番なら衝突する値をここで通すと、制約を模した意味が薄れる。
+	if note.URI != nil {
+		for _, existing := range m.Notes {
+			if existing.ID != note.ID && existing.URI != nil && *existing.URI == *note.URI {
+				return errors.New("mock: duplicate note.uri; PostgreSQL rejects it with SQLSTATE 23505 (UNIQUE IDX_note_uri)")
+			}
+		}
+	}
 	m.Notes[note.ID] = note
 	return nil
 }

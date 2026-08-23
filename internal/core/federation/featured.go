@@ -164,8 +164,11 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 		// 自分で待つ**状態になって永久に止まる (#2684)。quote 側は同じ形の
 		// guard を既に持っている (resolveQuoteURI、#1527)。
 		//
-		// **判定は singleflight の鍵で行う。** ingesting (document id 側) だけを
-		// 見ると、取得 URI と id が食い違う別名 URL を取りこぼす。
+		// **2 つの台帳を両方見る。** どちらか片方では取りこぼす:
+		//   - resolvingNotes は singleflight の鍵 (取得 URI)。resolveNoteOnce で
+		//     しか書かれないので、**inbox 直送では空**
+		//   - ingesting は正規化後の document id。inbox 直送でも立つが、
+		//     **取得 URI と id が食い違う別名 URL では引けない** (#2686)
 		//
 		// **skip する前に既存行を引く。** ReplaceByUser は delete-then-insert
 		// なので、ここで落とすと集合ごと書き直して**生きているピンが消える**。
@@ -194,13 +197,31 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 		//     resolveNoteAuthor が ephemeral を resolveActorEphemeral
 		//     (skipFeatured=true) へ回し、resolveActorOnceWithID 側も
 		//     !ephemeral で守っている。鍵が別という以前に経路が無い
-		//   - ap/show の cross-host 鍵 (`xhost\0…`): 別鍵なので自己待ちには
-		//     ならないが、**note の HTTP fetch が 2 回走る**。行は
-		//     unique index 側で 1 本に収まる (重複時は既存行を読み直す) ので
-		//     壊れないが、ただではない。相手はピン留めするだけでこの倍化を
-		//     起こせる。深さ 1 で skipFeatured になるため 2 倍で止まる
+		//   - ap/show の cross-host 鍵 (`xhost\0…`): resolvingNotes では引けない
+		//     (鍵の形が違う) が、**ingesting 側で引ける**ので二重 fetch は起きない
+		//     (#2686 で 2 回 → 1 回になった)。代わりにそのピンはこの回では入らず、
+		//     次の actor 更新まで遅れる
+		//   - inbox 直送 (`IngestNoteWithCreated`) は resolveNoteOnce を通らない
+		//     ので resolvingNotes に載らない。そちらは ingesting (document id 側)
+		//     で見る。見落とすと**同じ note をもう一度 fetch して内側の ingest が
+		//     先に行を作り**、外側の Create が UNIQUE に当たって dedup 経路へ落ち、
+		//     created=false になる。呼び出し側はそれで通知とチャートのフックを
+		//     飛ばすので、**言及・返信の通知が黙って消える** (#2686)。
+		//
+		// **別名 URL では inbox 直送側を取りこぼす。** featured が
+		// `/@user/x` を載せていて document の id が `/notes/x` のとき、
+		// ingesting は id 側の鍵なので引けない。ここで docID を得るには
+		// fetch するしかなく、それは呼び出し順を変える話になるので分けた
+		// (#2695)。実測では正規形が created=false → true に直り、別名は
+		// created=false のまま。
 		var note *model.Note
-		if docID, inflight := r.noteResolveInFlight(uri, false, false); inflight {
+		if inflight := r.noteIngestInFlight(uri); inflight {
+			// ingesting は document id 側の鍵なので、引くのも同じ URI でよい。
+			note = r.noteByAnyURI(uri, uri)
+			if note == nil {
+				continue
+			}
+		} else if docID, inflight := r.noteResolveInFlight(uri, false, false); inflight {
 			note = r.noteByAnyURI(uri, docID)
 			if note == nil {
 				continue
