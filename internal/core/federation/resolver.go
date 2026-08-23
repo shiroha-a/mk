@@ -377,6 +377,17 @@ type Resolver struct {
 	// resolution can break cycles (A が B を quote し B が A を quote する等)。
 	// quote target が in-flight なら fetch を skip する (#1527)。
 	ingesting sync.Map
+	// resolvingNotes tracks the resolveNoteGroup keys held while a note is
+	// being ingested, so a nested resolve can tell that waiting would mean
+	// waiting on itself.
+	//
+	// **ingesting とは鍵が違う。** ingesting は正規化後の document id
+	// (`apNote.ID`) だが、デッドロックするのは singleflight の鍵
+	// (`noteGroupKey` = 取得 URI) が一致したとき。resolveNoteOnce は取得 URI と
+	// document id に**host の一致しか要求しない**ので、別名 URL
+	// (`/@user/xxx` と `/notes/xxx`、末尾スラッシュ違い等) では両者がずれる。
+	// ずれると ingesting を見ても取りこぼす (#2684 review HIGH-1)。
+	resolvingNotes sync.Map
 }
 
 // NewResolver constructs a Resolver.
@@ -1962,6 +1973,46 @@ func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost, ephem
 	return v.(*model.Note), nil
 }
 
+// noteResolveInFlight reports whether a note is currently being ingested under
+// the singleflight key this URI would join, and the document id it is being
+// stored under.
+//
+// 入れ子の解決から呼ぶ。true なら **待ってはいけない**。同一 goroutine の
+// 祖先が握っている場合は解けない (#2684)。
+//
+// **別 goroutine が握っている場合も待てない。** 台帳はプロセス全体で 1 つで、
+// 「自分の祖先が握っている」と「無関係な goroutine が握っている」を区別
+// できないため。upstream の Resolver.history は activity ごとに作られる
+// Set なので、この区別が構造的に付く。区別を付けるには解決チェーンに集合を
+// 通す必要があり、actor 側の signature 数本に及ぶので別途扱う (#2685)。
+// 待てない分の劣化は呼び出し側で受ける: featured は既存行に落とし、quote は
+// その回の renoteId を諦める。
+//
+// 戻り値の docID は取り込み中の document id。取得 URI と食い違う別名 URL で
+// 既存行を引き当てるのに要る。
+func (r *Resolver) noteResolveInFlight(uri string, allowCrossHost, ephemeral bool) (string, bool) {
+	v, ok := r.resolvingNotes.Load(noteGroupKey(uri, allowCrossHost, ephemeral))
+	if !ok {
+		return "", false
+	}
+	docID, _ := v.(string)
+	return docID, true
+}
+
+// noteByAnyURI returns the stored row for uri, falling back to docID when the
+// fetch URI and the document id differ (alias URLs).
+func (r *Resolver) noteByAnyURI(uri, docID string) *model.Note {
+	if n, err := r.noteRepo.FindByURI(uri); err == nil && n != nil {
+		return n
+	}
+	if docID != "" && docID != uri {
+		if n, err := r.noteRepo.FindByURI(docID); err == nil && n != nil {
+			return n
+		}
+	}
+	return nil
+}
+
 // resolveNoteOnce is the body of resolveNoteDepth, invoked once per URI by
 // singleflight.Do. depth は quote chain の現在の深さ。allowCrossHost は
 // user-initiated ap/show 経路でのみ true。
@@ -2041,6 +2092,24 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	}
 	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
 	// quote chain の depth を引き継いで再帰上限を効かせる。
+	//
+	// **入場した singleflight の鍵を、この区間だけ台帳に載せる** (#2684)。
+	// singleflight は「この鍵が in-flight か」を外から問い合わせられないので、
+	// 入れ子の解決が「待つと自分を待つことになる」を判定できない。
+	//
+	// **区間を ingest に限る。** ここより手前 (FindByURI / ephemeral 逆引き /
+	// HTTP fetch / host 検査) から resolveNoteDepth や updateFeatured へ
+	// 到達する経路は無いので、載せても再入は防げず**他の goroutine を
+	// 取りこぼさせるだけ**になる。実際、singleflight 本体全体を覆うと
+	// (1) 別 worker が同じ引用先を待てずに renoteId を落とし、
+	// (2) 取り込み済みのピンが FindByURI 中に skip されて
+	// ReplaceByUser に消される (#2684 review HIGH-1 / HIGH-2)。
+	// **値に document id を持たせる。** 呼び出し側は取得 URI しか知らないが、
+	// note 行は document id で保存される。別名 URL では両者が食い違うので、
+	// 取得 URI だけで既存行を引くと**必ず空振りする** (#2684 review MED-1)。
+	key := noteGroupKey(uri, allowCrossHost, ephemeral)
+	r.resolvingNotes.Store(key, idProbe.ID)
+	defer r.resolvingNotes.Delete(key)
 	note, _, err := r.ingestNoteWithCreated(body, "", depth, ephemeral)
 	return note, err
 }
@@ -2101,6 +2170,22 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool) *model
 	// (ancestor chain) は already-resolved として skip し quote cycle を防ぐ
 	// (#1527、本家 0dc86cf6 guard 相当)。depth+1 で再帰上限も効かせる。
 	if _, inflight := r.ingesting.Load(uri); inflight {
+		return nil
+	}
+	// ingesting は document id 側の鍵なので、別名 URL では上を素通りする。
+	// singleflight の鍵でも見る (#2684 review HIGH-1)。
+	if docID, inflight := r.noteResolveInFlight(uri, false, ephemeral); inflight {
+		// 別名 URL で既に取り込み済みなら、その行で引用を繋げる。
+		// (2. の FindByURI は取得 URI でしか引いていない)
+		if n := r.noteByAnyURI(uri, docID); n != nil {
+			return n
+		}
+		// ephemeral 側も同じ理由で document id で引き直す (2.5 は取得 URI だけ)。
+		if ephemeral && docID != "" && docID != uri {
+			if n := r.ephemeralNoteByURI(docID); n != nil {
+				return n
+			}
+		}
 		return nil
 	}
 	// quote 解決は federation-loop 扱いで Strict (request host binding 有効)。

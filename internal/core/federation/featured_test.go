@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
@@ -707,4 +708,185 @@ func TestUpdateFeatured_RejectsNonObjectDocument(t *testing.T) {
 	user, err := env.resolver.ResolveActor(actorURI)
 	require.NoError(t, err)
 	assert.Empty(t, env.pinnedNoteURIs(t, user.ID))
+}
+
+// 著者が「いま取り込んでいる投稿」をピン留めしていると、note の singleflight が
+// **自分が握っている in-flight entry を自分で待つ**状態になり、永久に止まる
+// (#2684)。本番の inbox キューで job が active に居座り続ける原因。
+//
+// 経路は ResolveNote(A) → ingestNoteWithCreated → resolveNoteAuthor →
+// resolveActor → refreshActor → updateFeatured → resolveFeaturedNotes →
+// resolveNoteDepth(A)。外側と内側で noteGroupKey が一致する。
+//
+// **タイムアウト付きで待つ。** 素直に呼ぶと go test のパッケージ timeout
+// (10 分) まで待たされ、失敗の理由も分からなくなる。
+func TestResolveNote_AuthorPinsTheNoteBeingIngested(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/dave"
+		featured = "https://remote.example/users/dave/collections/featured"
+		pinned   = "https://remote.example/notes/d1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "dave", featured),
+		featured: featuredCollection(featured, "OrderedCollection", pinned),
+		pinned:   featuredNote(pinned, actorURI, "pinned by its own author"),
+	})
+
+	type result struct {
+		note *model.Note
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		n, err := env.resolver.ResolveNote(pinned)
+		done <- result{n, err}
+	}()
+
+	var note *model.Note
+	select {
+	case got := <-done:
+		require.NoError(t, got.err)
+		require.NotNil(t, got.note)
+		require.NotNil(t, got.note.URI)
+		assert.Equal(t, pinned, *got.note.URI)
+		note = got.note
+	case <-time.After(15 * time.Second):
+		t.Fatal("ResolveNote が返らない: featured 経路が自分の in-flight entry を待っている (#2684)")
+	}
+
+	// **このピンはこの回では取りこぼす。** 取り込み中の note を再解決しに行けない
+	// 以上、外側の ingest が終わってから追加する手立てが無い。既知の欠落として
+	// 固定しておく (黙って直すと下の回復側の意味が消える)。
+	assert.Empty(t, env.pinnedNoteURIs(t, note.UserID),
+		"取り込み中だった自分のピンはこの回では入らない")
+
+	// 次の actor 更新で拾い直されること。ここが通らないとピンが永久に欠ける。
+	require.NoError(t, env.users.UpdateUser(note.UserID, map[string]any{"lastFetchedAt": (*time.Time)(nil)}))
+	user, err := env.resolver.ResolveActor(actorURI)
+	require.NoError(t, err)
+	require.Equal(t, note.UserID, user.ID)
+	assert.Equal(t, []string{pinned}, env.pinnedNoteURIs(t, user.ID),
+		"次回の actor 更新でピンが入ること")
+}
+
+// 取得 URI と document の id が食い違う形 (別名 URL) でも止まらないこと
+// (#2684 review HIGH-1)。
+//
+// resolveNoteOnce は取得 URI と id に **host の一致しか要求しない**ので、
+// `/@user/xxx` と `/notes/xxx`、末尾スラッシュの有無などで両者はずれる。
+// in-flight の判定を document id 側 (ingesting) で行うとここを取りこぼし、
+// 正規形と同じデッドロックが残る。
+func TestResolveNote_AuthorPinsTheNoteUnderAnAliasURI(t *testing.T) {
+	cases := []struct {
+		name     string
+		user     string
+		fetchURI string
+		docID    string
+	}{
+		{"alias path", "erin", "https://remote.example/@erin/e1", "https://remote.example/notes/e1"},
+		{"trailing slash", "frank", "https://remote.example/notes/f1/", "https://remote.example/notes/f1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			actorURI := "https://remote.example/users/" + tc.user
+			featured := actorURI + "/collections/featured"
+			env := newFeaturedEnv(t, map[string]string{
+				actorURI:    featuredActor("remote.example", tc.user, featured),
+				featured:    featuredCollection(featured, "OrderedCollection", tc.fetchURI),
+				tc.fetchURI: featuredNote(tc.docID, actorURI, "pinned under an alias"),
+			})
+
+			done := make(chan error, 1)
+			go func() {
+				_, err := env.resolver.ResolveNote(tc.fetchURI)
+				done <- err
+			}()
+			select {
+			case err := <-done:
+				require.NoError(t, err)
+			case <-time.After(15 * time.Second):
+				t.Fatal("ResolveNote が返らない: 別名 URI で in-flight 判定を取りこぼしている (#2684)")
+			}
+		})
+	}
+}
+
+// quoteNote builds a Note document that quotes another URI.
+func quoteNote(noteID, authorURI, quoted string) string {
+	return fmt.Sprintf(`{
+	"@context": "https://www.w3.org/ns/activitystreams",
+	"id": %q,
+	"type": "Note",
+	"attributedTo": %q,
+	"content": "<p>quoting</p>",
+	"_misskey_quote": %q,
+	"to": ["https://www.w3.org/ns/activitystreams#Public"]
+}`, noteID, authorURI, quoted)
+}
+
+// 引用が自分自身を指す形でも止まらないこと (#2684 review)。
+//
+// quote 側の cycle guard は ingesting (document id) しか見ていなかったので、
+// 取得 URI と id が食い違う別名 URL では素通りし、featured と同じ
+// 自己デッドロックになる。resolveQuoteURI 側の singleflight 鍵判定を
+// 固定する (この分岐はレビュー時点でカバレッジ 0% だった)。
+func TestResolveNote_SelfQuoteUnderAnAliasURI(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/gina"
+		aliasURI = "https://remote.example/@gina/g1"
+		canonURI = "https://remote.example/notes/g1"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "gina", ""),
+		aliasURI: quoteNote(canonURI, actorURI, aliasURI),
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.resolver.ResolveNote(aliasURI)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("ResolveNote が返らない: quote 側が別名 URI で in-flight 判定を取りこぼしている (#2684)")
+	}
+}
+
+// 1 件が解決できなくても残りは取り込むこと。upstream は Promise.all の
+// reject で全件を捨てる (all-or-nothing) が、mk-go は取り込める分を取り込む
+// (docs/divergence.md)。ピン留めされた自分の投稿があるとその 1 件が skip
+// されるので、この差が実際に効く。
+func TestUpdateFeatured_ImportsTheRestWhenOneItemIsSkipped(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/hana"
+		featured = "https://remote.example/users/hana/collections/featured"
+		selfPin  = "https://remote.example/notes/h1"
+		other    = "https://remote.example/notes/h2"
+	)
+	env := newFeaturedEnv(t, map[string]string{
+		actorURI: featuredActor("remote.example", "hana", featured),
+		featured: featuredCollection(featured, "OrderedCollection", selfPin, other),
+		selfPin:  featuredNote(selfPin, actorURI, "the note being ingested"),
+		other:    featuredNote(other, actorURI, "another pin"),
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := env.resolver.ResolveNote(selfPin)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(15 * time.Second):
+		t.Fatal("ResolveNote が返らない (#2684)")
+	}
+
+	user, err := env.users.FindByURI(actorURI)
+	require.NoError(t, err)
+	// 取り込み中だった selfPin は落ちるが、other は入る。
+	assert.Equal(t, []string{other}, env.pinnedNoteURIs(t, user.ID),
+		"1 件 skip しても残りは取り込むこと")
 }

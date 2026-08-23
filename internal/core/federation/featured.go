@@ -158,9 +158,59 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 		if err := assertRequestHostMatches(actorURI, uri); err != nil {
 			continue
 		}
-		note, err := r.resolveNoteDepth(uri, featuredNoteResolveDepth, false, false)
-		if err != nil || note == nil {
-			continue
+		// **いま取り込み中の note は解決しに行かない。** 著者が自分の投稿を
+		// ピン留めしていると、ここが ResolveNote(A) の内側から同じ A を要求する
+		// 形になり、note の singleflight が**自分が握っている in-flight entry を
+		// 自分で待つ**状態になって永久に止まる (#2684)。quote 側は同じ形の
+		// guard を既に持っている (resolveQuoteURI、#1527)。
+		//
+		// **判定は singleflight の鍵で行う。** ingesting (document id 側) だけを
+		// 見ると、取得 URI と id が食い違う別名 URL を取りこぼす。
+		//
+		// **skip する前に既存行を引く。** ReplaceByUser は delete-then-insert
+		// なので、ここで落とすと集合ごと書き直して**生きているピンが消える**。
+		// 引くのは取得 URI と document id の両方 — 行は document id で保存
+		// されるので、別名 URL では取得 URI だけでは必ず空振りする
+		// (#2684 review MED-1)。行が現れる経路は、取り込み中の Create が
+		// 台帳の区間内で走る場合と、inbox 直送の IngestNoteWithCreated
+		// (台帳を触らない) が別 goroutine で先に作る場合。
+		//
+		// 既存行が無ければこの回のピンは取りこぼす。外側の ingest が終わってから
+		// 追加する手立てが無いため。次の actor 更新で拾い直される (テスト済み)。
+		// ただし actor TTL は既定 24 時間なので、その間は欠けたままになる。
+		//
+		// **upstream とは挙動が違う。** upstream は Promise.all で全件を
+		// まとめて解決し、Resolver.history に当たった 1 件が throw すると
+		// updateFeatured ごと reject して既存のピン集合をそのまま残す
+		// (all-or-nothing)。mk-go は 1 件だけ落として残りを反映する。
+		// 取り込める分を取り込むほうが実害が小さいのでこちらを維持する
+		// (docs/divergence.md)。
+		//
+		// 鍵の flag を (false, false) に固定しているのは、**すぐ下の
+		// resolveNoteDepth に同じ値を渡している**から (`featuredNoteResolveDepth`
+		// は深さであって flag ではない)。他の鍵形は次のとおり:
+		//
+		//   - ephemeral 鍵 (`eph\0…`): **updateFeatured に到達しない**。
+		//     resolveNoteAuthor が ephemeral を resolveActorEphemeral
+		//     (skipFeatured=true) へ回し、resolveActorOnceWithID 側も
+		//     !ephemeral で守っている。鍵が別という以前に経路が無い
+		//   - ap/show の cross-host 鍵 (`xhost\0…`): 別鍵なので自己待ちには
+		//     ならないが、**note の HTTP fetch が 2 回走る**。行は
+		//     unique index 側で 1 本に収まる (重複時は既存行を読み直す) ので
+		//     壊れないが、ただではない。相手はピン留めするだけでこの倍化を
+		//     起こせる。深さ 1 で skipFeatured になるため 2 倍で止まる
+		var note *model.Note
+		if docID, inflight := r.noteResolveInFlight(uri, false, false); inflight {
+			note = r.noteByAnyURI(uri, docID)
+			if note == nil {
+				continue
+			}
+		} else {
+			resolved, err := r.resolveNoteDepth(uri, featuredNoteResolveDepth, false, false)
+			if err != nil || resolved == nil {
+				continue
+			}
+			note = resolved
 		}
 		// **ピン留めできるのは自分の投稿だけ** (upstream の i/pin も同じ)。
 		// これを見ないと、他人の投稿を自分のプロフィールに並べられる。
