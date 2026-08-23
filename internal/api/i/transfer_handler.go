@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safemath"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -246,7 +247,7 @@ func (h *Handler) antennaImportWouldExceedLimit(userID, fileID string) bool {
 	if err != nil {
 		return false
 	}
-	return float64(current+int64(len(entries))) >= limit
+	return float64(safemath.AddInt64(current, int64(len(entries)))) >= limit
 }
 
 // Export handler factory methods — one per endpoint for router binding.

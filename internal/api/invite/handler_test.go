@@ -3,6 +3,8 @@ package invite
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -27,6 +30,32 @@ type stubInvitePolicy struct {
 }
 
 func (s *stubInvitePolicy) GetUserPolicies(_ string) map[string]any { return s.policies }
+
+type recordingCountRepo struct {
+	*testutil.MockRegistrationTicketRepository
+	count     int64
+	creatorID string
+	sinceID   string
+}
+
+func (r *recordingCountRepo) CountByCreatorSince(creatorID, sinceID string) (int64, error) {
+	r.creatorID = creatorID
+	r.sinceID = sinceID
+	return r.count, nil
+}
+
+type recordingIDGenerator struct {
+	generated []time.Time
+}
+
+func (g *recordingIDGenerator) Generate(at time.Time) string {
+	g.generated = append(g.generated, at)
+	return fmt.Sprintf("generated-%d", len(g.generated)-1)
+}
+
+func (g *recordingIDGenerator) ParseTime(string) (time.Time, error) {
+	return time.Time{}, errors.New("not parsed")
+}
 
 func newTestHandler(t *testing.T) (*Handler, *testutil.MockRegistrationTicketRepository) {
 	t.Helper()
@@ -90,6 +119,30 @@ func TestCreate_LimitPassesUnderLimit(t *testing.T) {
 	}})
 	rec := post(h.Create, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code, "limit 内なら通常成功")
+}
+
+func TestCreate_MinInt64InviteCycleUsesSaturatingCutoff(t *testing.T) {
+	cycleMinutes := float64(math.MinInt64) / float64(time.Minute)
+	cycle, ok := role.PolicyMinutes(cycleMinutes)
+	require.True(t, ok)
+	require.Equal(t, time.Duration(math.MinInt64), cycle)
+
+	repo := &recordingCountRepo{
+		MockRegistrationTicketRepository: testutil.NewMockRegistrationTicketRepository(),
+	}
+	idGen := &recordingIDGenerator{}
+	h := NewHandler(repo, idGen)
+	h.SetRolePolicyProvider(&stubInvitePolicy{policies: map[string]any{
+		"inviteLimit":      1,
+		"inviteLimitCycle": cycleMinutes,
+	}})
+
+	rec := post(h.Create, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "u1", repo.creatorID)
+	assert.Equal(t, "generated-0", repo.sinceID)
+	require.Len(t, idGen.generated, 2)
+	assert.Equal(t, time.Duration(math.MaxInt64), idGen.generated[0].Sub(idGen.generated[1]))
 }
 
 func TestCreate_LimitZeroOrUnsetIsUnlimited(t *testing.T) {
@@ -332,6 +385,73 @@ func TestLimit_ReturnsRemaining(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	// json.Unmarshal は int を float64 にする
 	assert.Equal(t, float64(7), out["remaining"], "10 - 3 = 7")
+}
+
+func TestLimit_MinInt64InviteCycleUsesSaturatingCutoff(t *testing.T) {
+	cycleMinutes := float64(math.MinInt64) / float64(time.Minute)
+	cycle, ok := role.PolicyMinutes(cycleMinutes)
+	require.True(t, ok)
+	require.Equal(t, time.Duration(math.MinInt64), cycle)
+
+	repo := &recordingCountRepo{
+		MockRegistrationTicketRepository: testutil.NewMockRegistrationTicketRepository(),
+	}
+	idGen := &recordingIDGenerator{}
+	h := NewHandler(repo, idGen)
+	h.SetRolePolicyProvider(&stubInvitePolicy{policies: map[string]any{
+		"inviteLimit":      1,
+		"inviteLimitCycle": cycleMinutes,
+	}})
+
+	before := time.Now()
+	rec := post(h.Limit, `{}`, &model.User{ID: "u1"})
+	after := time.Now()
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "u1", repo.creatorID)
+	assert.Equal(t, "generated-0", repo.sinceID)
+	require.Len(t, idGen.generated, 1)
+	base := idGen.generated[0].Add(-time.Duration(math.MaxInt64))
+	assert.False(t, base.Before(before))
+	assert.False(t, base.After(after))
+	var out struct {
+		Remaining *int64 `json:"remaining"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.NotNil(t, out.Remaining)
+	assert.Equal(t, int64(1), *out.Remaining)
+}
+
+func inviteRemaining(t *testing.T, limit float64, count int64) int64 {
+	t.Helper()
+	repo := &recordingCountRepo{
+		MockRegistrationTicketRepository: testutil.NewMockRegistrationTicketRepository(),
+		count:                            count,
+	}
+	idGen := &recordingIDGenerator{}
+	h := NewHandler(repo, idGen)
+	h.SetRolePolicyProvider(&stubInvitePolicy{policies: map[string]any{
+		"inviteLimit": limit,
+	}})
+	rec := post(h.Limit, `{}`, &model.User{ID: "u1"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out struct {
+		Remaining *int64 `json:"remaining"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.NotNil(t, out.Remaining)
+	return *out.Remaining
+}
+
+func TestLimit_InviteLimitSaturatesAtInt64Max(t *testing.T) {
+	assert.Equal(t, int64(math.MaxInt64), inviteRemaining(t, float64(math.MaxInt64), 0))
+}
+
+func TestLimit_MaxLimitMinusMaxCountIsZero(t *testing.T) {
+	assert.Equal(t, int64(0), inviteRemaining(t, float64(math.MaxInt64), math.MaxInt64))
+}
+
+func TestLimit_MinInt64CountUsesSaturatingNegation(t *testing.T) {
+	assert.Equal(t, int64(math.MaxInt64), inviteRemaining(t, 1, math.MinInt64))
 }
 
 func TestLimit_RemainingClampedToZero(t *testing.T) {

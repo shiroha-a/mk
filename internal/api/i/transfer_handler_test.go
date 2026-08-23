@@ -2,6 +2,7 @@ package i
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"testing"
 
@@ -360,6 +361,20 @@ func TestImportAntennas_TooMany(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "TOO_MANY_ANTENNAS")
 	assert.Contains(t, rec.Body.String(), "600917d4-a4cb-4cc5-8ba8-7ac8ea3c7779")
+	assert.Empty(t, enq.importCalls)
+}
+
+func TestImportAntennas_MaxCountCannotWrapBelowLimit(t *testing.T) {
+	h, enq, driveRepo := newTransferHandlerWithDrive()
+	uid := ownerID
+	driveRepo.Files["ant"] = &model.DriveFile{ID: "ant", UserID: &uid, Size: 100}
+	h.SetImportDriveReader(&stubImportFileReader{body: []byte(`[{"name":"a"}]`)})
+	h.SetAntennaCounter(&stubAntennaCounter{count: math.MaxInt64})
+	h.SetRoleProvider(&stubRoleProvider{policies: map[string]any{"antennaLimit": math.MaxInt}})
+
+	rec := post(h.ImportAntennas, `{"fileId":"ant"}`, &model.User{ID: ownerID})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "TOO_MANY_ANTENNAS")
 	assert.Empty(t, enq.importCalls)
 }
 
