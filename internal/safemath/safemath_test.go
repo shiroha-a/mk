@@ -7,34 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMulInt64(t *testing.T) {
-	tests := []struct {
-		name        string
-		value, unit int64
-		want        int64
-	}{
-		{"zero", 0, -3, 0},
-		{"positive exact", math.MaxInt64 / 2, 2, math.MaxInt64 - 1},
-		{"positive overflow", math.MaxInt64/2 + 1, 2, math.MaxInt64},
-		{"negative overflow", math.MinInt64/2 - 1, 2, math.MinInt64},
-		{"positive negative overflow", math.MaxInt64, -2, math.MinInt64},
-		{"negative positive overflow", math.MinInt64, 2, math.MinInt64},
-		{"negative negative overflow", math.MinInt64, -1, math.MaxInt64},
-		{"negative negative exact", -7, -6, 42},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, MulInt64(tt.value, tt.unit))
-		})
-	}
-}
-
-func TestMulInt(t *testing.T) {
-	assert.Equal(t, int64(42), MulInt(7, 6))
-	assert.Equal(t, int64(-42), MulInt(7, -6))
-	assert.Equal(t, MulInt64(int64(math.MaxInt), 2), MulInt(math.MaxInt, 2))
-}
-
 func TestFloat64ToInt64(t *testing.T) {
 	assert.Equal(t, int64(42), Float64ToInt64(42.9))
 	assert.Equal(t, int64(-42), Float64ToInt64(-42.9))

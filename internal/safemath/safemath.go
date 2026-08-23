@@ -1,33 +1,11 @@
+// Package safemath provides saturating arithmetic and conversion helpers for
+// values crossing fixed-width representation boundaries.
 package safemath
 
 import "math"
 
-func MulInt(value int, unit int64) int64 {
-	return MulInt64(int64(value), unit)
-}
-
-func MulInt64(value, unit int64) int64 {
-	if value == 0 || unit == 0 {
-		return 0
-	}
-	if value > 0 {
-		if unit > 0 && value > math.MaxInt64/unit {
-			return math.MaxInt64
-		}
-		if unit < 0 && unit < math.MinInt64/value {
-			return math.MinInt64
-		}
-	} else {
-		if unit > 0 && value < math.MinInt64/unit {
-			return math.MinInt64
-		}
-		if unit < 0 && value < math.MaxInt64/unit {
-			return math.MaxInt64
-		}
-	}
-	return value * unit
-}
-
+// Float64ToInt converts value to int by truncating toward zero. It saturates
+// values outside the int range and converts NaN to zero.
 func Float64ToInt(value float64) int {
 	if math.IsNaN(value) {
 		return 0
@@ -41,6 +19,8 @@ func Float64ToInt(value float64) int {
 	return int(value)
 }
 
+// Float64ToInt64 converts value to int64 by truncating toward zero. It
+// saturates values outside the int64 range and converts NaN to zero.
 func Float64ToInt64(value float64) int64 {
 	if math.IsNaN(value) {
 		return 0
@@ -54,10 +34,14 @@ func Float64ToInt64(value float64) int64 {
 	return int64(value)
 }
 
+// MulFloat64 multiplies value by unit and converts the product using
+// Float64ToInt64's saturation and NaN semantics.
 func MulFloat64(value float64, unit int64) int64 {
 	return Float64ToInt64(value * float64(unit))
 }
 
+// NegateInt64 returns the additive inverse of value. It saturates MinInt64 to
+// MaxInt64 because the positive inverse is not representable.
 func NegateInt64(value int64) int64 {
 	if value == math.MinInt64 {
 		return math.MaxInt64
@@ -65,6 +49,8 @@ func NegateInt64(value int64) int64 {
 	return -value
 }
 
+// AddInt64 adds values in order and saturates at the first overflow to
+// MinInt64 or MaxInt64.
 func AddInt64(values ...int64) int64 {
 	var sum int64
 	for _, value := range values {
@@ -79,6 +65,9 @@ func AddInt64(values ...int64) int64 {
 	return sum
 }
 
+// SumExceedsInt64 reports whether the sum of values exceeds limit. It accepts
+// only non-negative limits and values; it returns true for any negative input
+// or when addition would exceed the limit, including through overflow.
 func SumExceedsInt64(limit int64, values ...int64) bool {
 	if limit < 0 {
 		return true
