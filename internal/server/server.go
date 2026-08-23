@@ -91,8 +91,15 @@ type Server struct {
 	// 伝播させる。**起動は必ず失敗させる**: 登録できなかったプラグインを
 	// 黙って無効のまま動かすと、機能が消えた原因が分からない。
 	pluginSetupErr error
-	autoscale      *autoscaleRunner
-	chartMgmt      *chart.ManagementService
+	// wiringErr は「未配線でも動いてしまう」依存の検査結果を New まで運ぶ (#2682)。
+	// wiringChecked は検査が実際に走ったかどうか。**ゼロ値が「未実行」= 起動
+	// 失敗になるようにしてある。** 別に種を撒く方式だと、その 1 行を消すだけで
+	// 検査を無効化できてしまい、しかもテストは緑のままだった
+	// (#2682 review L-A)。
+	wiringChecked bool
+	wiringErr     error
+	autoscale     *autoscaleRunner
+	chartMgmt     *chart.ManagementService
 	// mediaProxySecret は internal media proxy URL の HMAC 鍵。config に
 	// 明示設定が無ければ DB (instance_secret) の生成値を使うため、New() で
 	// 一度だけ解決して保持する。
@@ -532,9 +539,9 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 		openStorage = s.dbBackedStorage()
 	}
 	s.setupRoutes(plugins, openStorage)
-	if s.pluginSetupErr != nil {
+	if err := s.constructionError(); err != nil {
 		s.cleanupConstruction()
-		return nil, s.pluginSetupErr
+		return nil, err
 	}
 
 	// setupRoutesの後にfallibleな初期化は置かない。pluginの保留workは完成した

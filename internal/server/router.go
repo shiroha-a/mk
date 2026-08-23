@@ -3868,6 +3868,57 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	}
 
 	s.echo.GET("/*", frontend)
+
+	// #2682: 未配線でも動いてしまい、かつ**認証や一回性の保証が無効になる**
+	// 依存だけを起動時に検査する。消費側は fallback を残したまま (テストが
+	// 未配線で大量に組み立てるため)、本番で fallback が発火する状態を
+	// リクエスト時の無言の劣化ではなく起動時の失敗にする。棚卸しは #2674。
+	//
+	// **意図的に載せていないもの** (再監査で漏れと読まれないように):
+	//   - admin.configSetupPassword: 空が正当な既定値なので `!= ""` では
+	//     大半の構成で起動できなくなる。検査するなら s.config との値一致に
+	//     なり、他と shape が違う (#2682 review L-6)
+	//   - inbox の hostBlockChecker (processor 側と handler 側の 2 つ):
+	//     連合ブロックは moderation の tier で #2683。ただし同じ checker が
+	//     allowlist 運用と FederationDisabled も担うので、未配線だと閉じた
+	//     構成が黙って開く。#2683 では優先して扱う
+	//   - captcha (signup / signin): 配線が起動時の metaRepo.Fetch() 1 回に
+	//     依存しており、**一時的な DB エラーでプロセス生存中ずっと captcha
+	//     無しになる**。ここに載せないのは、captcha を使わない構成では nil が
+	//     正当な状態で、単純な `!= nil` では大半の instance が起動しなく
+	//     なるため。meta 側で provider が有効なときだけ要求する形にする必要が
+	//     あり、他と検査の shape が違う (#2682 review M-D、別 issue)
+	//   - pluginPeerDeps.selfHost: struct literal 経由の 2 つ目の消費者。
+	//     config.resolve が空 host を弾くので実際には空にならない
+	//     (#2682 review L-5)
+	s.recordCriticalWiring([]criticalWiring{
+		{"inbox.signatureVerifier", inboxProcessor.HasSignatureVerifier(),
+			"HTTP 署名検証・連合ブロック・actor 一致・replay 判定が同時に飛ぶ"},
+		{"signup.ticketConsumption", signupService.HasTicketConsumption(),
+			"招待 ticket の行ロックが飛び、1 枚から複数アカウントを作る窓が開く"},
+		{"signin.totpReplayGuard", signinHandler.HasTOTPReplayGuard(),
+			"有効な TOTP コードを window 内で再利用できる"},
+		{"inbox.expectedHost", inboxHandler.HasExpectedHost(),
+			"署名対象の host ヘッダ検査と自ホスト一致検査が飛ぶ"},
+		{"inbox.enqueuer", inboxHandler.HasEnqueuer(),
+			"同期 fallback へ落ち、actor 一致検査・LD-Signature 検証・replay guard を通らない"},
+		{"i.totpReplayGuard", iHandler.HasTOTPReplayGuard(),
+			"verify2FAToken 経由の 8 endpoint と i/2fa/done で有効な TOTP コードを再利用できる"},
+		{"i.authInvalidator", iHandler.HasAuthInvalidator(),
+			"revoke-token / regenerate-token / delete-account / update の後も古い token が auth cache の TTL のあいだ通る"},
+		{"admin.userTokenInvalidator", adminHandler.HasUserTokenInvalidator(),
+			"凍結・削除した利用者の session が auth cache の TTL のあいだ生き残る"},
+		{"i.accessTokenRepo", iHandler.HasAccessTokenRepo(),
+			"i/revoke-token が成功と同じ 204 を返したまま token を消さない (恒久)"},
+		{"oauth.authInvalidator", oauthHandler.HasAuthInvalidator(),
+			"authorization code 再利用を検出して失効させた token が TTL のあいだ通る"},
+		{"signup.applicationSettlement", signupService.HasApplicationSettlement(),
+			"承認済み申請の行ロックが飛び、1 承認から複数アカウントを作る窓が開く"},
+		{"inbox.replayGuard", inboxProcessor.HasInboxReplayGuard(),
+			"処理済み activity の再投函を検出できない (isReplay が常に false)"},
+		{"postScheduledNote.lock", postScheduledNoteProcessor.HasLock(),
+			"job が二度 fire したとき予約投稿が 2 回 publish される"},
+	})
 }
 
 // selfCheckAdapter runs the federation / dependency self-checks for the
