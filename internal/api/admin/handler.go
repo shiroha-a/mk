@@ -2115,7 +2115,10 @@ func (h *Handler) RolesShow(c echo.Context) error {
 	}
 	r, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3"))
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3"))
+		}
+		return apierr.JSONInternalError(c)
 	}
 	return c.JSON(http.StatusOK, h.packRole(r))
 }
@@ -2168,7 +2171,10 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	}
 	before, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
+		}
+		return apierr.JSONInternalError(c)
 	}
 	fields := map[string]any{}
 	if req.Name != nil {
@@ -2259,10 +2265,10 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 	}
 	after, err := h.roleService.UpdateFields(req.RoleID, fields)
 	if err != nil {
-		if err == role.ErrRoleNotFound {
+		if errors.Is(err, role.ErrRoleNotFound) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
 		}
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		return apierr.JSONInternalError(c)
 	}
 	h.logModeration(c, moderationlog.LogUpdateRole, map[string]any{
 		"roleId": req.RoleID,
@@ -2283,7 +2289,10 @@ func (h *Handler) RolesDelete(c echo.Context) error {
 	// 削除直後だと role 情報を取れないので事前に snapshot を取って log info に含める
 	snapshot, _ := h.roleService.Show(req.RoleID)
 	if err := h.roleService.Delete(req.RoleID); err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "de0d6ecd-8e0a-4253-88ff-74bc89ae3d45"))
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "de0d6ecd-8e0a-4253-88ff-74bc89ae3d45"))
+		}
+		return apierr.JSONInternalError(c)
 	}
 	h.logModeration(c, moderationlog.LogDeleteRole, map[string]any{
 		"roleId": req.RoleID,
@@ -2331,13 +2340,13 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 		expiresAt = &t
 	}
 	if err := h.roleService.Assign(req.UserID, req.RoleID, expiresAt); err != nil {
-		if err == role.ErrRoleNotFound {
+		if errors.Is(err, role.ErrRoleNotFound) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "6503c040-6af4-4ed9-bf07-f2dd16678eab"))
 		}
 		if err == role.ErrAlreadyAssigned {
 			return c.JSON(http.StatusConflict, apierr.Error("ALREADY_ASSIGNED", "Role already assigned.", "67d8689c-25c6-435f-8eed-6ea68e5e53e9"))
 		}
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		return apierr.JSONInternalError(c)
 	}
 	h.logRoleAssignment(c, moderationlog.LogAssignRole, req.UserID, req.RoleID)
 	return c.NoContent(http.StatusNoContent)
@@ -2428,10 +2437,10 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 
 	assignments, err := h.roleService.ListByRole(req.RoleID, untilID, sinceID, limit)
 	if err != nil {
-		if err == role.ErrRoleNotFound {
+		if errors.Is(err, role.ErrRoleNotFound) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "224eff5e-2488-4b18-b3e7-f50d94421648"))
 		}
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		return apierr.JSONInternalError(c)
 	}
 
 	// Profile を per-row 引いていた N+1 を 1 batch query に集約 (#503 と同じ動機)。

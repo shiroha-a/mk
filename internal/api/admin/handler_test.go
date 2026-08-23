@@ -2,6 +2,7 @@ package admin_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -19,12 +20,220 @@ import (
 	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
 )
+
+const adminInternalErrorJSON = `{"error":{"message":"Internal error.","code":"INTERNAL_ERROR","id":"5d37dbcb-891e-41ca-a3d6-e690c97775ac","kind":"server"}}`
+
+var adminNoSuchRoleJSON = map[string]string{
+	"show":   `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"07dc7d34-c0d8-49b7-96c6-db3ce64ee0b3","kind":"client"}}`,
+	"update": `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"cd23ef55-09ad-428a-ac61-95a45e124b32","kind":"client"}}`,
+	"delete": `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"de0d6ecd-8e0a-4253-88ff-74bc89ae3d45","kind":"client"}}`,
+	"assign": `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"6503c040-6af4-4ed9-bf07-f2dd16678eab","kind":"client"}}`,
+	"users":  `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"224eff5e-2488-4b18-b3e7-f50d94421648","kind":"client"}}`,
+}
+
+type adminRoleLookup struct {
+	role *model.Role
+	err  error
+}
+
+type adminRoleRepository struct {
+	repository.RoleRepository
+	lookups   []adminRoleLookup
+	findCalls int
+	updateErr error
+	deleteErr error
+}
+
+func (r *adminRoleRepository) FindByID(string) (*model.Role, error) {
+	result := r.lookups[min(r.findCalls, len(r.lookups)-1)]
+	r.findCalls++
+	return result.role, result.err
+}
+
+func (r *adminRoleRepository) UpdateFields(id string, fields map[string]any) error {
+	if r.updateErr != nil {
+		return r.updateErr
+	}
+	return r.RoleRepository.UpdateFields(id, fields)
+}
+
+func (r *adminRoleRepository) Delete(id string) error {
+	if r.deleteErr != nil {
+		return r.deleteErr
+	}
+	return r.RoleRepository.Delete(id)
+}
+
+func adminHandlerWithRoleRepository(t *testing.T, roleRepo repository.RoleRepository, base *testutil.MockRoleRepository) (*apiadmin.Handler, *testutil.MockUserRepository, *testutil.MockRoleAssignmentRepository) {
+	t.Helper()
+	users := testutil.NewMockUserRepository()
+	assignments := testutil.NewMockRoleAssignmentRepository(base)
+	return assignmentAdminHandler(t, roleRepo, users, assignments), users, assignments
+}
+
+func assertAdminInternalError(t *testing.T, rec *httptest.ResponseRecorder, rawError, roleID string) {
+	t.Helper()
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.JSONEq(t, adminInternalErrorJSON, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), rawError)
+	assert.NotContains(t, rec.Body.String(), roleID)
+}
+
+func TestRolesShow_RolePersistenceFailure(t *testing.T) {
+	wantErr := errors.New("show role SELECT failed")
+	base := testutil.NewMockRoleRepository()
+	repo := &adminRoleRepository{RoleRepository: base, lookups: []adminRoleLookup{{err: wantErr}}}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesShow, `{"roleId":"secret-role-id"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+}
+
+func TestRolesUpdate_PrelookupPersistenceFailure(t *testing.T) {
+	wantErr := errors.New("update role SELECT failed")
+	base := testutil.NewMockRoleRepository()
+	repo := &adminRoleRepository{RoleRepository: base, lookups: []adminRoleLookup{{err: wantErr}}}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesUpdate, `{"roleId":"secret-role-id","name":"new"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+}
+
+func TestRolesUpdate_InternalLookupFailure(t *testing.T) {
+	wantErr := errors.New("update existence SELECT failed")
+	existing := &model.Role{ID: "secret-role-id", Name: "old"}
+	base := testutil.NewMockRoleRepository()
+	base.Roles[existing.ID] = existing
+	repo := &adminRoleRepository{
+		RoleRepository: base,
+		lookups:        []adminRoleLookup{{role: existing}, {err: wantErr}},
+	}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesUpdate, `{"roleId":"secret-role-id","name":"new"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+}
+
+func TestRolesUpdate_OperationFailure(t *testing.T) {
+	wantErr := errors.New("role UPDATE failed")
+	existing := &model.Role{ID: "secret-role-id", Name: "old"}
+	base := testutil.NewMockRoleRepository()
+	base.Roles[existing.ID] = existing
+	repo := &adminRoleRepository{RoleRepository: base, lookups: []adminRoleLookup{{role: existing}}, updateErr: wantErr}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesUpdate, `{"roleId":"secret-role-id","name":"new"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+}
+
+func TestRolesDelete_LookupFailure(t *testing.T) {
+	wantErr := errors.New("delete role SELECT failed")
+	base := testutil.NewMockRoleRepository()
+	repo := &adminRoleRepository{RoleRepository: base, lookups: []adminRoleLookup{{err: wantErr}}}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesDelete, `{"roleId":"secret-role-id"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+}
+
+func TestRolesDelete_OperationFailure(t *testing.T) {
+	wantErr := errors.New("role DELETE failed")
+	existing := &model.Role{ID: "secret-role-id"}
+	base := testutil.NewMockRoleRepository()
+	base.Roles[existing.ID] = existing
+	repo := &adminRoleRepository{RoleRepository: base, lookups: []adminRoleLookup{{role: existing}}, deleteErr: wantErr}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesDelete, `{"roleId":"secret-role-id"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+}
+
+func TestRolesDelete_BestEffortSnapshot(t *testing.T) {
+	existing := &model.Role{ID: "secret-role-id"}
+	base := testutil.NewMockRoleRepository()
+	base.Roles[existing.ID] = existing
+	repo := &adminRoleRepository{
+		RoleRepository: base,
+		lookups: []adminRoleLookup{
+			{err: errors.New("snapshot failed")},
+			{role: existing},
+		},
+	}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesDelete, `{"roleId":"secret-role-id"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestRolesAssign_SecondLookupFailure(t *testing.T) {
+	wantErr := errors.New("assign role SELECT failed")
+	existing := &model.Role{ID: "secret-role-id", CanEditMembersByModerator: true}
+	base := testutil.NewMockRoleRepository()
+	base.Roles[existing.ID] = existing
+	repo := &adminRoleRepository{
+		RoleRepository: base,
+		lookups:        []adminRoleLookup{{role: existing}, {err: wantErr}},
+	}
+	h, users, assignments := adminHandlerWithRoleRepository(t, repo, base)
+	users.Users["target-user"] = &model.User{ID: "target-user"}
+	rec := doPost(h.RolesAssign, `{"userId":"target-user","roleId":"secret-role-id"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+	exists, err := assignments.Exists("target-user", "secret-role-id")
+	require.NoError(t, err)
+	assert.False(t, exists)
+}
+
+func TestRolesUsers_RolePersistenceFailure(t *testing.T) {
+	wantErr := errors.New("users role SELECT failed")
+	base := testutil.NewMockRoleRepository()
+	repo := &adminRoleRepository{RoleRepository: base, lookups: []adminRoleLookup{{err: wantErr}}}
+	h, _, _ := adminHandlerWithRoleRepository(t, repo, base)
+	rec := doPost(h.RolesUsers, `{"roleId":"secret-role-id"}`, nil)
+	assertAdminInternalError(t, rec, wantErr.Error(), "secret-role-id")
+}
+
+func TestRolesHandlers_WrappedRoleNotFound(t *testing.T) {
+	wrappedNotFound := fmt.Errorf("classified role: %w", role.ErrRoleNotFound)
+	existing := &model.Role{ID: "secret-role-id", CanEditMembersByModerator: true}
+	tests := []struct {
+		name     string
+		lookups  []adminRoleLookup
+		call     func(*apiadmin.Handler) *httptest.ResponseRecorder
+		response string
+	}{
+		{"show", []adminRoleLookup{{err: wrappedNotFound}}, func(h *apiadmin.Handler) *httptest.ResponseRecorder {
+			return doPost(h.RolesShow, `{"roleId":"secret-role-id"}`, nil)
+		}, adminNoSuchRoleJSON["show"]},
+		{"update prelookup", []adminRoleLookup{{err: wrappedNotFound}}, func(h *apiadmin.Handler) *httptest.ResponseRecorder {
+			return doPost(h.RolesUpdate, `{"roleId":"secret-role-id","name":"new"}`, nil)
+		}, adminNoSuchRoleJSON["update"]},
+		{"update internal lookup", []adminRoleLookup{{role: existing}, {err: wrappedNotFound}}, func(h *apiadmin.Handler) *httptest.ResponseRecorder {
+			return doPost(h.RolesUpdate, `{"roleId":"secret-role-id","name":"new"}`, nil)
+		}, adminNoSuchRoleJSON["update"]},
+		{"delete", []adminRoleLookup{{role: existing}, {err: wrappedNotFound}}, func(h *apiadmin.Handler) *httptest.ResponseRecorder {
+			return doPost(h.RolesDelete, `{"roleId":"secret-role-id"}`, nil)
+		}, adminNoSuchRoleJSON["delete"]},
+		{"assign", []adminRoleLookup{{role: existing}, {err: wrappedNotFound}}, func(h *apiadmin.Handler) *httptest.ResponseRecorder {
+			return doPost(h.RolesAssign, `{"userId":"target-user","roleId":"secret-role-id"}`, nil)
+		}, adminNoSuchRoleJSON["assign"]},
+		{"users", []adminRoleLookup{{err: wrappedNotFound}}, func(h *apiadmin.Handler) *httptest.ResponseRecorder {
+			return doPost(h.RolesUsers, `{"roleId":"secret-role-id"}`, nil)
+		}, adminNoSuchRoleJSON["users"]},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := testutil.NewMockRoleRepository()
+			base.Roles[existing.ID] = existing
+			repo := &adminRoleRepository{RoleRepository: base, lookups: tt.lookups}
+			h, users, _ := adminHandlerWithRoleRepository(t, repo, base)
+			users.Users["target-user"] = &model.User{ID: "target-user"}
+			rec := tt.call(h)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.JSONEq(t, tt.response, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "secret-role-id")
+		})
+	}
+}
 
 func newTestHandler(t *testing.T) (*apiadmin.Handler, *testutil.MockUserRepository, *testutil.MockMetaRepository, *testutil.MockRoleRepository) {
 	t.Helper()
@@ -1368,6 +1577,7 @@ func TestRolesShow_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesShow, `{"roleId":"ghost"}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, adminNoSuchRoleJSON["show"], rec.Body.String())
 }
 
 func TestRolesShow_InvalidParam(t *testing.T) {
@@ -1550,6 +1760,7 @@ func TestRolesUpdate_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesUpdate, `{"roleId":"ghost"}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, adminNoSuchRoleJSON["update"], rec.Body.String())
 }
 
 func TestRolesUpdate_InvalidParam(t *testing.T) {
@@ -1569,6 +1780,7 @@ func TestRolesDelete_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesDelete, `{"roleId":"ghost"}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, adminNoSuchRoleJSON["delete"], rec.Body.String())
 }
 
 func TestRolesDelete_InvalidParam(t *testing.T) {
@@ -1618,6 +1830,7 @@ func TestRolesAssign_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesAssign, `{"userId":"u1","roleId":"ghost"}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, adminNoSuchRoleJSON["assign"], rec.Body.String())
 }
 
 func TestRolesAssign_AlreadyAssigned(t *testing.T) {
@@ -1925,6 +2138,7 @@ func TestRolesUsers_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesUsers, `{"roleId":"ghost"}`, nil)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, adminNoSuchRoleJSON["users"], rec.Body.String())
 }
 
 func TestRolesUsers_InvalidParam(t *testing.T) {
