@@ -10,6 +10,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"testing"
@@ -245,6 +246,14 @@ func TestCapacity_FromPolicy(t *testing.T) {
 	assert.Equal(t, int64(1.5*1024*1024), svc.Capacity("u1"))
 }
 
+func TestCapacity_MaxPolicySaturatesPositive(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"driveCapacityMb": math.MaxFloat64},
+	}})
+	assert.Equal(t, int64(math.MaxInt64), svc.Capacity("u1"))
+}
+
 func TestShow_ModeratorBypass(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
 	other := "other"
@@ -441,6 +450,17 @@ func TestUpload_MaxFileSizeExceeded(t *testing.T) {
 	require.ErrorIs(t, err, drive.ErrMaxFileSizeExceeded)
 }
 
+func TestUpload_MaxFileSizePolicySaturatesPositive(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": math.MaxFloat64},
+	}})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: []byte("x"), Name: "x.txt",
+	})
+	require.NoError(t, err)
+}
+
 // driveCapacityMb 超過 (= 既存 usage + 新 file > capacity) は ErrNoFreeSpace。
 func TestUpload_NoFreeSpace(t *testing.T) {
 	svc, fileRepo, _ := newSvc(t)
@@ -455,6 +475,19 @@ func TestUpload_NoFreeSpace(t *testing.T) {
 	user := &model.User{ID: "u1"}
 	_, err := svc.Upload(context.Background(), drive.UploadInput{
 		User: user, Body: []byte("hello world data text"), Name: "x.txt",
+	})
+	require.ErrorIs(t, err, drive.ErrNoFreeSpace)
+}
+
+func TestUpload_UsageAdditionCannotOverflowCapacityGate(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	owner := "u1"
+	fileRepo.Files["existing"] = &model.DriveFile{ID: "existing", UserID: &owner, Size: math.MaxInt64}
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"driveCapacityMb": 1},
+	}})
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: []byte("x"), Name: "x.txt",
 	})
 	require.ErrorIs(t, err, drive.ErrNoFreeSpace)
 }

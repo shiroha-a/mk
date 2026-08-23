@@ -3,6 +3,7 @@ package drive_test
 import (
 	"context"
 	"errors"
+	"math"
 	"testing"
 	"time"
 
@@ -207,6 +208,56 @@ func TestStartChunkedUpload_RejectsTooManyParts(t *testing.T) {
 		User: f.user, Size: int64(drive.MaxMultipartParts)*testChunkSize + 1,
 	})
 	assert.ErrorIs(t, err, drive.ErrInvalidUploadSize)
+}
+
+func TestStartChunkedUpload_MaxInt64SizeCannotOverflowPartCount(t *testing.T) {
+	f := newChunkedFixture(t)
+	f.roles.policies["u1"]["maxFileSizeMb"] = 0
+	f.roles.policies["u1"]["driveCapacityMb"] = 0
+	f.roles.policies["u1"][role.PolicyChunkedUploadMaxPendingMb] = 0
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: math.MaxInt64,
+	})
+	assert.ErrorIs(t, err, drive.ErrInvalidUploadSize)
+}
+
+func TestStartChunkedUpload_MaxPoliciesRemainPositive(t *testing.T) {
+	f := newChunkedFixture(t)
+	f.roles.policies["u1"]["maxFileSizeMb"] = math.MaxFloat64
+	f.roles.policies["u1"]["driveCapacityMb"] = math.MaxFloat64
+	f.roles.policies["u1"][role.PolicyChunkedUploadMaxPendingMb] = math.MaxFloat64
+	f.settings.MaxPendingBytesPerUser = 0
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: testChunkSize,
+	})
+	require.NoError(t, err)
+}
+
+func TestStartChunkedUpload_DriveCapacitySumCannotOverflow(t *testing.T) {
+	f := newChunkedFixture(t)
+	uid := "u1"
+	require.NoError(t, f.files.Create(&model.DriveFile{ID: "f1", UserID: &uid, Size: math.MaxInt64}))
+	f.roles.policies["u1"]["maxFileSizeMb"] = 0
+	f.roles.policies["u1"]["driveCapacityMb"] = 1
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: 1,
+	})
+	assert.ErrorIs(t, err, drive.ErrNoFreeSpace)
+}
+
+func TestStartChunkedUpload_PendingSumCannotOverflow(t *testing.T) {
+	f := newChunkedFixture(t)
+	f.roles.policies["u1"]["maxFileSizeMb"] = 0
+	f.roles.policies["u1"]["driveCapacityMb"] = 0
+	f.roles.policies["u1"][role.PolicyChunkedUploadMaxPendingMb] = 1
+	f.settings.MaxPendingBytesPerUser = 0
+	require.NoError(t, f.sessions.Create(&model.ChunkedUploadSession{
+		ID: "pending", UserID: "u1", TotalSize: math.MaxInt64, ExpiresAt: time.Now().Add(time.Hour),
+	}))
+	_, err := f.svc.StartChunkedUpload(context.Background(), drive.StartChunkedUploadInput{
+		User: f.user, Size: 1,
+	})
+	assert.ErrorIs(t, err, drive.ErrPendingUploadLimitExceeded)
 }
 
 // policy が引けない構成では fail-closed。gate が効かない状態で素通しにしない。

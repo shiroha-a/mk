@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safemath"
 	"gorm.io/datatypes"
 )
 
@@ -214,7 +215,11 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 	}
 	// パート数上限。ここを超えると CompleteMultipartUpload が通らないので、
 	// 受け取り始める前に弾く。
-	if (in.Size+settings.ChunkSize-1)/settings.ChunkSize > MaxMultipartParts {
+	parts := in.Size / settings.ChunkSize
+	if in.Size%settings.ChunkSize != 0 {
+		parts++
+	}
+	if parts > MaxMultipartParts {
 		return nil, ErrInvalidUploadSize
 	}
 
@@ -245,8 +250,8 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 	// なく**上限そのものが消える**。Upload 側は最初からこれを通しているので、
 	// int だけで読むと同じ policy が経路によって効いたり効かなかったりする
 	// (#2611)。
-	if mb, ok := policyNumber(policies["maxFileSizeMb"]); ok && mb > 0 {
-		if in.Size > int64(mb*1024*1024) {
+	if maxBytes, ok := policyMegabytes(policies["maxFileSizeMb"]); ok {
+		if in.Size > maxBytes {
 			return nil, ErrMaxFileSizeExceeded
 		}
 	}
@@ -255,7 +260,7 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 	if err != nil {
 		return nil, fmt.Errorf("count pending chunked uploads: %w", err)
 	}
-	if mb, ok := policyNumber(policies["driveCapacityMb"]); ok && mb > 0 {
+	if capacityBytes, ok := policyMegabytes(policies["driveCapacityMb"]); ok {
 		usage, err := s.fileRepo.UsageByUser(in.User.ID)
 		if err != nil {
 			// Upload と同じ理由で握り潰さない。usage=0 として素通しにすると
@@ -264,17 +269,16 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 		}
 		// 未完了セッションの申告分も加算する。これが無いと「残容量ぎりぎりの
 		// セッションを複数開く」で driveCapacityMb を丸ごと迂回できる。
-		if usage+pending+in.Size > int64(mb*1024*1024) {
+		if safemath.SumExceedsInt64(capacityBytes, usage, pending, in.Size) {
 			return nil, ErrNoFreeSpace
 		}
 	}
 
-	if limit, ok := policyNumber(policies[role.PolicyChunkedUploadMaxPendingMb]); ok && limit > 0 {
-		maxPending := int64(limit * 1024 * 1024)
+	if maxPending, ok := policyMegabytes(policies[role.PolicyChunkedUploadMaxPendingMb]); ok {
 		if settings.MaxPendingBytesPerUser > 0 && maxPending > settings.MaxPendingBytesPerUser {
 			maxPending = settings.MaxPendingBytesPerUser
 		}
-		if pending+in.Size > maxPending {
+		if safemath.SumExceedsInt64(maxPending, pending, in.Size) {
 			return nil, ErrPendingUploadLimitExceeded
 		}
 	}

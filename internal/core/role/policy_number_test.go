@@ -1,6 +1,7 @@
 package role_test
 
 import (
+	"math"
 	"testing"
 	"time"
 
@@ -48,6 +49,14 @@ func TestPolicyMinutes(t *testing.T) {
 	got, ok = role.PolicyMinutes(3)
 	assert.True(t, ok)
 	assert.Equal(t, 3*time.Minute, got)
+
+	got, ok = role.PolicyMinutes(math.MaxFloat64)
+	assert.True(t, ok)
+	assert.Equal(t, time.Duration(math.MaxInt64), got)
+
+	got, ok = role.PolicyMinutes(-math.MaxFloat64)
+	assert.True(t, ok)
+	assert.Equal(t, time.Duration(math.MinInt64), got)
 
 	_, ok = role.PolicyMinutes("3")
 	assert.False(t, ok)

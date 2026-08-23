@@ -1,6 +1,10 @@
 package role
 
-import "time"
+import (
+	"time"
+
+	"github.com/shiroha-a/mk/internal/safemath"
+)
 
 // PolicyNumber normalizes a numeric policy value into a float.
 //
@@ -37,5 +41,5 @@ func PolicyMinutes(v any) (time.Duration, bool) {
 	if !ok {
 		return 0, false
 	}
-	return time.Duration(f * float64(time.Minute)), true
+	return time.Duration(safemath.MulFloat64(f, int64(time.Minute))), true
 }

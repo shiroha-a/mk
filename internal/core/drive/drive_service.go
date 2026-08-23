@@ -18,6 +18,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safemath"
 	"gorm.io/datatypes"
 
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -77,6 +78,14 @@ var (
 // policyNumber は [role.PolicyNumber] の別名。呼び出し箇所が多いので短く
 // 参照できるようにしてある。契約と理由はそちらの doc を参照。
 func policyNumber(v any) (float64, bool) { return role.PolicyNumber(v) }
+
+func policyMegabytes(v any) (int64, bool) {
+	mb, ok := policyNumber(v)
+	if !ok {
+		return 0, false
+	}
+	return safemath.MulFloat64(mb, 1024*1024), mb > 0
+}
 
 // ValidateFileName mirrors upstream DriveFileEntityService.validateFileName:
 // the trimmed name must be non-empty, at most 200 characters, and must not
@@ -441,14 +450,12 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		// gate すべき容量そのものが発生しない (link 行は `size=0`)。expireOldFile
 		// 相当を足さないのも同じ理由で、意図的な差分 (docs/divergence.md §5.5)。
 		if in.User.IsLocal() && policies != nil {
-			if mb, ok := policyNumber(policies["maxFileSizeMb"]); ok && mb > 0 {
-				maxBytes := int64(mb * 1024 * 1024)
+			if maxBytes, ok := policyMegabytes(policies["maxFileSizeMb"]); ok {
 				if int64(len(info.Body)) > maxBytes {
 					return nil, ErrMaxFileSizeExceeded
 				}
 			}
-			if mb, ok := policyNumber(policies["driveCapacityMb"]); ok && mb > 0 {
-				capBytes := int64(mb * 1024 * 1024)
+			if capacityBytes, ok := policyMegabytes(policies["driveCapacityMb"]); ok {
 				// UsageByUser の DB error を握り潰すと usage=0 として gate を
 				// pass してしまい driveCapacityMb 制限が事実上効かなくなる。
 				// production の transient DB error 時に黙って upload を許可する
@@ -457,7 +464,7 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 				if err != nil {
 					return nil, fmt.Errorf("calc drive usage: %w", err)
 				}
-				if usage+int64(len(info.Body)) > capBytes {
+				if safemath.SumExceedsInt64(capacityBytes, usage, int64(len(info.Body))) {
 					return nil, ErrNoFreeSpace
 				}
 			}
@@ -892,7 +899,7 @@ func (s *Service) Capacity(userID string) int64 {
 			mb = v
 		}
 	}
-	return int64(1024 * 1024 * mb)
+	return safemath.MulFloat64(mb, 1024*1024)
 }
 
 // UpdateInput holds the editable fields of a drive file.
