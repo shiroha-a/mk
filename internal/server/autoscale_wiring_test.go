@@ -141,6 +141,10 @@ func (i *scriptableInspector) ListRetryTasks(qname string, page, pageSize int) (
 func (i *scriptableInspector) GetTaskInfo(qname, taskID string) (*driver.TaskSummary, error) {
 	return nil, nil
 }
+func (i *scriptableInspector) GetTaskLogs(string, string, int64, int64) ([]string, int64, error) {
+	return nil, 0, nil
+}
+
 func (i *scriptableInspector) QueueMetrics(qname, kind string) (*driver.MetricsResult, error) {
 	return nil, nil
 }

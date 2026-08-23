@@ -2,6 +2,7 @@ package driver
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 )
 
@@ -40,6 +41,11 @@ type InspectorInfo struct {
 	// IsPaused reports whether the queue is paused (BullMQ meta.paused)。
 	// upstream admin/queue は queueInfo.isPaused でボタンを切り替える (#17436)。
 	IsPaused bool
+	// QualifiedName is BullMQ's `<keyPrefix>:<name>` (queue-keys.js の
+	// getQueueQualifiedName)。admin UI がそのまま表示する。prefix は driver の
+	// 設定なのでここで組む — 上位が "bull" を決め打ちすると、prefix を変えた
+	// 構成で嘘を表示する (#2689)。持たない driver は空でよい。
+	QualifiedName string
 }
 
 // MetricsResult is the BullMQ-compatible per-minute history of
@@ -87,6 +93,23 @@ type TaskSummary struct {
 	// drivers without the concept (asynq). Surfaced as the upstream
 	// optional QueueJob.processedBy field.
 	ProcessedBy string
+
+	// 以下は BullMQ の job HASH をそのまま運ぶ (#2689)。admin の job 詳細は
+	// upstream の packJobData と同じく **保存されている値をそのまま出す**のが
+	// 正しく、driver 側で組み立て直すと知らない key が黙って消える。
+	// 持たない driver は空のまま。
+
+	// Opts is the raw BullMQ `opts` JSON (attempts / backoff /
+	// removeOnComplete / removeOnFail / priority など)。
+	Opts json.RawMessage
+	// Delay is the BullMQ `delay` HASH field in milliseconds.
+	Delay int64
+	// Stacktrace is the BullMQ `stacktrace` array. 試行ごとに 1 要素積まれる。
+	Stacktrace []string
+	// ReturnValue is the raw BullMQ `returnvalue` JSON. 完了していない job は空。
+	ReturnValue json.RawMessage
+	// Progress is the raw BullMQ `progress` JSON (数値 / 文字列 / object)。
+	Progress json.RawMessage
 }
 
 // Inspector exposes admin-level queue introspection used by the
@@ -132,6 +155,14 @@ type Inspector interface {
 	ListFailedTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 
 	GetTaskInfo(qname, taskID string) (*TaskSummary, error)
+
+	// GetTaskLogs returns the log lines recorded against a job, oldest
+	// first, and the total number stored.
+	//
+	// upstream の admin/queue/show-job-logs は `queue.getJobLogs(jobId).logs`
+	// をそのまま返す。持たない driver は空を返してよい (存在しない job と
+	// log 0 件の job は BullMQ も区別しない)。
+	GetTaskLogs(qname, taskID string, start, end int64) ([]string, int64, error)
 
 	// QueueMetrics returns the BullMQ-spec per-minute history for the
 	// given queue. kind must be MetricsKindCompleted or

@@ -100,6 +100,10 @@ func (i *fakeInspector) ListRetryTasks(qname string, page, pageSize int) ([]*dri
 func (i *fakeInspector) GetTaskInfo(qname, taskID string) (*driver.TaskSummary, error) {
 	return nil, nil
 }
+func (i *fakeInspector) GetTaskLogs(string, string, int64, int64) ([]string, int64, error) {
+	return nil, 0, nil
+}
+
 func (i *fakeInspector) QueueMetrics(qname, kind string) (*driver.MetricsResult, error) {
 	return nil, nil
 }

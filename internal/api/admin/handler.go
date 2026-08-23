@@ -527,6 +527,10 @@ type QueueInspector interface {
 	ListCompletedTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListFailedTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	GetTaskInfo(qname, taskID string) (*QueueTaskSummary, error)
+	// GetTaskLogs returns the job's log lines (oldest first) and the total
+	// number stored. upstream の show-job-logs は queue.getJobLogs(jobId).logs
+	// をそのまま返す (#2689)。
+	GetTaskLogs(qname, taskID string, start, end int64) ([]string, int64, error)
 	QueueMetrics(qname, kind string) (*QueueMetricsResult, error)
 }
 
@@ -550,6 +554,8 @@ type QueueInfoResult struct {
 	Scheduled int
 	Retry     int
 	IsPaused  bool
+	// QualifiedName is BullMQ's `<keyPrefix>:<name>`。空なら Queue で代替する。
+	QualifiedName string
 }
 
 // QueueTaskSummary mirrors queue.TaskSummary for handler responses without
@@ -571,6 +577,15 @@ type QueueTaskSummary struct {
 	// ProcessedBy is the worker name that last dequeued the job (BullMQ
 	// job.processedBy). Output as the upstream optional QueueJob.processedBy.
 	ProcessedBy string
+
+	// 以下は BullMQ の job HASH をそのまま運ぶ (#2689)。upstream の
+	// packJobData と同じく**保存されている値をそのまま出す**。持たない
+	// driver は空のまま。
+	Opts        json.RawMessage
+	Delay       int64
+	Stacktrace  []string
+	ReturnValue json.RawMessage
+	Progress    json.RawMessage
 }
 
 // SetDriveFileRepo attaches a DriveFileRepository for admin drive operations.

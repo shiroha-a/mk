@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -69,6 +70,7 @@ type stubQueueInspector struct {
 	completed     map[string][]*apiadmin.QueueTaskSummary
 	failed        map[string][]*apiadmin.QueueTaskSummary
 	task          map[string]*apiadmin.QueueTaskSummary
+	logs          map[string][]string
 	metrics       map[string]map[string]*apiadmin.QueueMetricsResult // [queue][kind]
 	deleted       []string
 	runCalls      []string
@@ -169,6 +171,16 @@ func (s *stubQueueInspector) GetTaskInfo(_, id string) (*apiadmin.QueueTaskSumma
 	}
 	return nil, errors.New("not found")
 }
+
+// GetTaskLogs は既定で空。log を返すケースは個別テストが Logs を差し替える。
+func (s *stubQueueInspector) GetTaskLogs(_, taskID string, _, _ int64) ([]string, int64, error) {
+	if s.logs == nil {
+		return []string{}, 0, nil
+	}
+	lines := s.logs[taskID]
+	return lines, int64(len(lines)), nil
+}
+
 func (s *stubQueueInspector) QueueMetrics(q, kind string) (*apiadmin.QueueMetricsResult, error) {
 	if perKind, ok := s.metrics[q]; ok {
 		if m, ok := perKind[kind]; ok {
@@ -245,13 +257,19 @@ func TestQueueShowJob_Found(t *testing.T) {
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, "tid1", got["id"])
-	// golden QueueJob: progress/returnValue は object、failedReason は string で
-	// 常に present (#1304)。
-	shapetest.Assert(t, "QueueJob", got) // L3 (#1304)
-	assert.IsType(t, map[string]any{}, got["progress"])
-	assert.IsType(t, map[string]any{}, got["returnValue"])
+	// **failedReason / returnValue は成功した job には出さない (#2689)。**
+	// golden (upstream の宣言 schema 由来) は required としているが、upstream の
+	// 実装は Bull の undefined をそのまま返すので JSON からは消える。frontend は
+	// `v-if="job.failedReason != null"` / `job.returnValue != null` で出し分ける
+	// ので、空文字や {} を常に出すと**成功した job にも赤い警告アイコン付きの
+	// 空の "Failed reason" 行と空の "Return value" タブ**が出る。
+	shapetest.AssertExcept(t, "QueueJob", got, "failedReason", "returnValue")
 	_, hasFailedReason := got["failedReason"]
-	assert.True(t, hasFailedReason, "failedReason must always be present (golden required)")
+	assert.False(t, hasFailedReason, "失敗していない job に failedReason を出さない")
+	_, hasReturnValue := got["returnValue"]
+	assert.False(t, hasReturnValue, "戻り値が無い job に returnValue を出さない")
+	// progress は Bull だと既定 0 (数値)。frontend は数値のときだけ % を出す。
+	assert.EqualValues(t, 0, got["progress"])
 }
 
 // TestQueueShowJob_ProcessedBy は upstream QueueJob.processedBy (optional) を、
@@ -269,7 +287,7 @@ func TestQueueShowJob_ProcessedBy(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var got map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-	shapetest.Assert(t, "QueueJob", got)
+	shapetest.AssertExcept(t, "QueueJob", got, "failedReason", "returnValue")
 	assert.Equal(t, "worker-host-1", got["processedBy"], "non-empty ProcessedBy must be output")
 
 	rec2 := doPost(h.QueueShowJob, `{"queue":"deliver","id":"nopb"}`, adminUser)
@@ -1269,4 +1287,201 @@ func TestQueueQueues_OmitsRuntimeForUnknownQueue(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	_, hasRuntime := rows[0]["runtime"]
 	assert.False(t, hasRuntime)
+}
+
+// job 詳細が BullMQ の保存値をそのまま返すこと (#2689)。
+//
+// **判定は upstream の JSON schema ではなく frontend の条件に合わせる。**
+// 以前は schema (`optional: false`) に寄せて failedReason に空文字、
+// opts / progress / returnValue に組み立てた値を常に出していた。その結果:
+//
+//   - 成功した job にも赤い警告アイコン付きの空の "Failed reason" 行が出る
+//     (`v-if="job.failedReason != null"` は空文字でも真)
+//   - Options タブが `{attempts:0,delay:0,repeat:null}` になり、実際の
+//     backoff / removeOnComplete / removeOnFail が消える
+//   - `opts.attempts` が 0 なので Attempts 行もヘッダの n/m バッジも出ない
+//   - 戻り値の無い job に空の "Return value" タブが出る
+func TestQueueShowJob_PassesThroughBullFields(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	opts := `{"attempts":8,"backoff":{"type":"custom","delay":0},"removeOnComplete":{"count":30,"age":604800}}`
+	h.SetQueueInspector(&stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"failed": {
+				ID: "failed", Queue: "inbox", Type: "ap:inbox", State: "failed",
+				LastErr:     "process inbox activity: unexpected status: 500",
+				Stacktrace:  []string{"first attempt", "", "second attempt"},
+				Opts:        json.RawMessage(opts),
+				Delay:       1500,
+				Progress:    json.RawMessage(`42`),
+				ReturnValue: json.RawMessage(`{"ok":true}`),
+			},
+		},
+	})
+
+	rec := doPost(h.QueueShowJob, `{"queue":"inbox","id":"failed"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	shapetest.Assert(t, "QueueJob", got)
+
+	// opts は保存された JSON がそのまま出ること。組み立て直すと
+	// mk-go が知らない key が黙って消える。
+	gotOpts, ok := got["opts"].(map[string]any)
+	require.True(t, ok, "opts は object であること")
+	assert.EqualValues(t, 8, gotOpts["attempts"], "Attempts 行はこの値で出し分けられる")
+	assert.NotNil(t, gotOpts["backoff"], "backoff が消えないこと")
+	assert.NotNil(t, gotOpts["removeOnComplete"], "removeOnComplete が消えないこと")
+
+	assert.EqualValues(t, 1500, got["delay"], "delay は保存値")
+	assert.EqualValues(t, 42, got["progress"], "progress は保存値")
+	assert.Equal(t, map[string]any{"ok": true}, got["returnValue"])
+	assert.Equal(t, "process inbox activity: unexpected status: 500", got["failedReason"])
+
+	// upstream packJobData は空要素を落として逆順にする (新しい試行が先)。
+	assert.Equal(t, []any{"second attempt", "first attempt"}, got["stacktrace"])
+	assert.Equal(t, true, got["isFailed"])
+}
+
+// stacktrace があれば failedReason が無くても失敗扱いにすること。
+// upstream: isFailed = !!failedReason || stacktrace.length > 0。
+func TestQueueShowJob_IsFailedFromStacktraceAlone(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"st": {ID: "st", Queue: "inbox", Type: "ap:inbox", State: "failed", Stacktrace: []string{"boom"}},
+		},
+	})
+	rec := doPost(h.QueueShowJob, `{"queue":"inbox","id":"st"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, true, got["isFailed"])
+	_, hasFailedReason := got["failedReason"]
+	assert.False(t, hasFailedReason, "failedReason が無いなら出さない")
+}
+
+// Data タブに framing の type が残ること (#2689)。以前は body だけを返して
+// いたので、どの task type の job かが詳細画面から分からなかった。
+func TestQueueShowJob_DataKeepsTaskType(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"d": {ID: "d", Queue: "inbox", Type: "ap:inbox", State: "wait", Payload: []byte(`{"path":"/inbox"}`)},
+		},
+	})
+	rec := doPost(h.QueueShowJob, `{"queue":"inbox","id":"d"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	data, ok := got["data"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "ap:inbox", data["type"])
+	assert.Equal(t, map[string]any{"path": "/inbox"}, data["body"])
+}
+
+// show-job-logs が driver の実データを返すこと (#2689)。以前は常に空配列。
+func TestQueueShowJobLogs_ReturnsDriverLogs(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		logs: map[string][]string{"j1": {"line one", "line two"}},
+	})
+	rec := doPost(h.QueueShowJobLogs, `{"queue":"inbox","jobId":"j1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []string
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, []string{"line one", "line two"}, got)
+
+	// log の無い job は空配列 (null にしない — 配列を期待する UI が壊れる)。
+	rec2 := doPost(h.QueueShowJobLogs, `{"queue":"inbox","jobId":"none"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	assert.Equal(t, "[]", strings.TrimSpace(rec2.Body.String()))
+}
+
+// **本番で実際に通るのは「JSON の null」の経路** (#2689 review MED-1)。
+// mk-go の processor は戻り値を持たないので、mkq は完了した job すべての
+// `returnvalue` に**リテラル `null`** を書く。field が空 (未完了) の経路だけ
+// テストしても、Return value タブを隠している判定は検証できない。
+func TestQueueShowJob_ReturnValueNullIsOmitted(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			// 完了済みで returnvalue = null (mk-go の processor の既定)。
+			"done": {ID: "done", Queue: "inbox", Type: "ap:inbox", State: "completed",
+				ReturnValue: json.RawMessage(`null`), Progress: json.RawMessage(`null`)},
+			// 壊れた JSON は fallback へ倒す (admin 画面を壊さない)。
+			"broken": {ID: "broken", Queue: "inbox", Type: "ap:inbox", State: "completed",
+				ReturnValue: json.RawMessage(`{not json`), Opts: json.RawMessage(`{not json`)},
+		},
+	})
+
+	rec := doPost(h.QueueShowJob, `{"queue":"inbox","id":"done"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	_, has := got["returnValue"]
+	assert.False(t, has, "returnvalue が null の job に Return value タブを出さない")
+	assert.EqualValues(t, 0, got["progress"], "progress が null なら Bull 既定の 0 に倒す")
+
+	rec2 := doPost(h.QueueShowJobLogs, `{"queue":"inbox","jobId":"broken"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	rec3 := doPost(h.QueueShowJob, `{"queue":"inbox","id":"broken"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec3.Code)
+	var got3 map[string]any
+	require.NoError(t, json.Unmarshal(rec3.Body.Bytes(), &got3))
+	_, hasRV := got3["returnValue"]
+	assert.False(t, hasRV, "壊れた JSON も出さない")
+	// opts は object 必須なので、壊れていても {} に倒して frontend の
+	// `job.opts.attempts` 参照が TypeError にならないようにする。
+	assert.Equal(t, map[string]any{}, got3["opts"])
+}
+
+// maxRetry を opts.attempts から拾うこと (#2689 review LOW-4)。mkq driver は
+// TaskSummary.MaxRetry を埋めないので、0 のまま出すと「リトライしない設定」に見える。
+func TestQueueShowJob_MaxRetryFromOpts(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"a": {ID: "a", Queue: "inbox", Type: "ap:inbox", State: "wait", Opts: json.RawMessage(`{"attempts":8}`)},
+			// asynq driver は MaxRetry を埋める。そちらを優先する。
+			"b": {ID: "b", Queue: "inbox", Type: "ap:inbox", State: "wait", MaxRetry: 3},
+		},
+	})
+	for id, want := range map[string]int{"a": 8, "b": 3} {
+		rec := doPost(h.QueueShowJob, `{"queue":"inbox","id":"`+id+`"}`, adminUser)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var got map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+		assert.EqualValues(t, want, got["maxRetry"], "job %s", id)
+	}
+}
+
+// qualifiedName は driver が組んだ BullMQ の `<prefix>:<name>` を出すこと
+// (#2689 review MED-2)。上位で "bull" を決め打ちすると prefix を変えた構成で
+// 嘘を表示する。
+func TestQueueQueueStats_QualifiedName(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		info: map[string]*apiadmin.QueueInfoResult{
+			"inbox": {Queue: "inbox", QualifiedName: "mkprefix:inbox"},
+		},
+	})
+	rec := doPost(h.QueueQueueStats, `{"queue":"inbox"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "mkprefix:inbox", got["qualifiedName"])
+	assert.Equal(t, "inbox", got["name"])
+}
+
+// driver が報告しない場合は queue 名で代替すること。
+func TestQueueQueueStats_QualifiedNameFallback(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		info: map[string]*apiadmin.QueueInfoResult{"inbox": {Queue: "inbox"}},
+	})
+	rec := doPost(h.QueueQueueStats, `{"queue":"inbox"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, "inbox", got["qualifiedName"])
 }

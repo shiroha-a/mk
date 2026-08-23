@@ -202,7 +202,9 @@ L0/L2/L3がdriftを出しても、**修正の前に現misskey-ts実装を確認�
 
 ## gateの盲点と補い方
 
-- **`Record<string, never>`等は`"other"`型**になり、`ValidateValue`の型検査をskipする(`QueueJob.progress`/`data`等)。ただし**required欄の欠落**と**non-null欄のnull**は型に関係なく検出されるので、`failedReason`欠落・`returnValue` null は捕まえられる。`progress`がnumberかobjectかのような「otherの中身」はtest側で明示assertして補う。
+- **`Record<string, never>`等は`"other"`型**になり、`ValidateValue`の型検査をskipする(`QueueJob.progress`/`data`等)。ただし**required欄の欠落**と**non-null欄のnull**は型に関係なく検出される。`progress`がnumberかobjectかのような「otherの中身」はtest側で明示assertして補う。
+
+  ただし**goldenがupstreamの実装と食い違う場合は、goldenの方に従わない**。`QueueJob.failedReason`/`returnValue`はschema上required だが、Bullのjobは失敗するまで`failedReason`を持たないのでupstreamの`packJobData`は`undefined`を返し、JSONから消える。frontendは`v-if="job.failedReason != null"`で行の有無を決めるため、goldenに寄せて空文字を常に出すと**成功したjobにも赤い警告アイコン付きの空行**が出た(#2689)。goldenは生成物なので直さず、`shapetest.AssertExcept`で理由付きに例外化する。
 - **lite/detail等のfield partition**は集合演算で体系的に差分を取る: goldenの該当schema(`MetaLite`/`MetaDetailedOnly`)のtop-level fieldをparserで抽出し、handlerの応答キーと突き合わせて「必須なのに欠落」「detail専用なのにleak」を算出する(`/api/meta`の`#1306`で使用)。
 
 ## 既知の修正済みドリフト(本ゲートで検出)
@@ -217,7 +219,7 @@ L3拡大の過程で検出・修正した実ドリフトの代表例(いずれ�
 | `chat/messages/create` | `fromUser`未attach | embed漏れ |
 | `admin/abuse-report/notification-recipient` | `updatedAt`列欠落、`userId`/`systemWebhookId`がnull | schema gap + null |
 | `v2/admin/emoji/list` | `roleIds`が`string[]`(golden `{id,name}[]`) | array要素型 |
-| `admin/queue/show-job` | `progress`/`returnValue`/`failedReason`/`data` | 型 + null + 欠落 |
+| `admin/queue/show-job` | `progress`/`data` | 型 + 欠落 |
 | `/api/meta` (lite) | MetaLite必須5欄をomit、MetaDetailedOnly 3欄をleak | partition |
 
 ## Error-id drift gate（error.id の per-endpoint 整合）

@@ -435,10 +435,10 @@ var apiCompatOnlyRe = regexp.MustCompile(`^- mk-go only \(TS spec 外\): \*\*(\d
 
 // forkTagSummaryRe matches the summary row
 // `| fork frontend の独自変更 | 23 tag (`-mk.0` ～ `-mk.22`) | — | — |`.
-var forkTagSummaryRe = regexp.MustCompile("^\\| fork frontend の独自変更 \\| (\\d+) tag \\(`-mk\\.(\\d+)` ～ `-mk\\.(\\d+)`\\)")
+var forkTagSummaryRe = regexp.MustCompile("^\\| fork frontend の独自変更 \\| (\\d+) tag \\(`-mk\\.(\\d+[a-z]*)` ～ `-mk\\.(\\d+[a-z]*)`\\)")
 
 // forkTagRowRe matches a §4-2 table row `| `2026.7.0-mk.12` | ... |`.
-var forkTagRowRe = regexp.MustCompile("^\\| `[0-9.]+-mk\\.(\\d+)` \\|")
+var forkTagRowRe = regexp.MustCompile("^\\| `[0-9.]+-mk\\.(\\d+[a-z]*)` \\|")
 
 // TestDivergenceDoc_EndpointCountMatchesAPICompat ties §1-1 to the generated
 // matrix. TestDivergenceDoc_EndpointCountMatchesTable only checks that the
@@ -489,11 +489,12 @@ func TestDivergenceDoc_EndpointCountMatchesAPICompat(t *testing.T) {
 func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
 	lines := readDivergenceDoc(t)
 
-	var declared, lo, hi int
+	var declared int
+	var lo, hi string
 	found := false
 	for _, line := range lines {
 		if m := forkTagSummaryRe.FindStringSubmatch(line); m != nil {
-			declared, lo, hi = atoi(t, m[1]), atoi(t, m[2]), atoi(t, m[3])
+			declared, lo, hi = atoi(t, m[1]), m[2], m[3]
 			found = true
 			break
 		}
@@ -504,10 +505,10 @@ func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
 	}
 
 	start, _ := findDivergenceHeading(t, lines, "4-2")
-	var tags []int
+	var tags []string
 	for _, line := range sectionLines(lines, start) {
 		if m := forkTagRowRe.FindStringSubmatch(line); m != nil {
-			tags = append(tags, atoi(t, m[1]))
+			tags = append(tags, m[1])
 		}
 	}
 	if len(tags) == 0 {
@@ -519,18 +520,64 @@ func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
 
 tag を足したら**サマリの件数と範囲、§4-2 の表の両方**を直すこと。`, declared, len(tags))
 	}
-	sort.Ints(tags)
 	if tags[0] != lo || tags[len(tags)-1] != hi {
-		t.Errorf(`docs/divergence.md のサマリの範囲は -mk.%d ～ -mk.%d だが、§4-2 の表は -mk.%d ～ -mk.%d。`,
+		t.Errorf(`docs/divergence.md のサマリの範囲は -mk.%s ～ -mk.%s だが、§4-2 の表は -mk.%s ～ -mk.%s。`,
 			lo, hi, tags[0], tags[len(tags)-1])
 	}
-	for i, n := range tags {
-		if n != tags[0]+i {
-			t.Errorf(`docs/divergence.md §4-2 の tag が連番になっていない (-mk.%d の次が -mk.%d)。
-抜けているなら「載せない」判断の根拠を書くか、行を足すこと。`, tags[0]+i-1, n)
-			break
+	assertForkTagSequence(t, tags)
+}
+
+// assertForkTagSequence checks that §4-2's rows step through the tag scheme
+// without gaps.
+//
+// **機能追加は N を進め、バグ修正はその N に英字を足す** (`-mk.22` の修正が
+// `-mk.22a`、次が `-mk.22b`)。したがって数字は重複しうるので、単純な連番検査は
+// 使えない。数字は 1 ずつ、同じ数字の中の英字は a から 1 文字ずつ進むこと
+// (#2689)。
+func assertForkTagSequence(t *testing.T, tags []string) {
+	t.Helper()
+	prevNum, prevLetter := -1, ""
+	for _, tag := range tags {
+		num, letter := splitForkTag(t, tag)
+		switch {
+		case num == prevNum+1 && letter == "":
+			// 次の機能追加。
+		case num == prevNum && letter == nextForkLetter(prevLetter):
+			// 同じ数字へのバグ修正。
+		default:
+			want := fmt.Sprintf("-mk.%d", prevNum+1)
+			if letter != "" || prevLetter != "" {
+				want += fmt.Sprintf(" か -mk.%d%s", prevNum, nextForkLetter(prevLetter))
+			}
+			t.Errorf(`docs/divergence.md §4-2 の tag が順に並んでいない (-mk.%d%s の次が -mk.%s、期待は %s)。
+抜けているなら「載せない」判断の根拠を書くか、行を足すこと。`, prevNum, prevLetter, tag, want)
+			return
 		}
+		prevNum, prevLetter = num, letter
 	}
+}
+
+// splitForkTag splits "22a" into (22, "a").
+func splitForkTag(t *testing.T, tag string) (int, string) {
+	t.Helper()
+	i := strings.IndexFunc(tag, func(r rune) bool { return r < '0' || r > '9' })
+	if i < 0 {
+		return atoi(t, tag), ""
+	}
+	return atoi(t, tag[:i]), tag[i:]
+}
+
+// nextForkLetter returns the letter that follows prev ("" → "a", "a" → "b").
+// 2 文字以上は想定しない (1 つの機能 tag に 26 回もバグ修正を積む前に、
+// 機能側を進めるべき)。
+func nextForkLetter(prev string) string {
+	if prev == "" {
+		return "a"
+	}
+	if len(prev) != 1 || prev[0] >= 'z' {
+		return "?"
+	}
+	return string(prev[0] + 1)
 }
 
 // findDivergenceHeading is findDivergenceSection without the count requirement:

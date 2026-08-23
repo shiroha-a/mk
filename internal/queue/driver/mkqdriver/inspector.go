@@ -111,6 +111,9 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 		Scheduled: scheduledCount + int(repeatCount),
 		Retry:     retryCount,
 		IsPaused:  paused,
+		// BullMQ の Queue.qualifiedName。prefix は driver の設定なので、
+		// 上位が "bull" を決め打ちしないようここで組む (#2689)。
+		QualifiedName: i.driver.keyPrefix + ":" + qname,
 	}, nil
 }
 
@@ -478,6 +481,14 @@ func jobToSummary(queue, state string, job *mkq.Job[framedPayload], st *mkq.JobS
 		ProcessedBy: job.ProcessedBy,
 	}
 	if st != nil {
+		// **BullMQ の HASH をそのまま運ぶ (#2689)。** admin の job 詳細は
+		// 保存されている値を出すのが正しく、driver 側で組み立て直すと
+		// 知らない key が黙って消える。
+		s.Opts = st.Opts
+		s.Delay = st.Delay
+		s.Stacktrace = st.Stacktrace
+		s.ReturnValue = st.ReturnValue
+		s.Progress = st.Progress
 		// CompletedAt は asynq driver と揃えて「成功完了したジョブ」
 		// のみセット。failed (FailedReason != "") の場合は LastFailedAt
 		// 側に出すので、ここでは触らない。admin UI が completedAt 列を
@@ -508,4 +519,21 @@ func jobToSummary(queue, state string, job *mkq.Job[framedPayload], st *mkq.JobS
 // closure to the caller.
 func inspectorCtx() context.Context {
 	return context.Background()
+}
+
+// GetTaskLogs returns the job's log lines (BullMQ `<job>:logs`).
+//
+// mk-go 自身は現状 log を書かないが、**drop-in で TS が書いた job**や、
+// 将来 processor が Job.Log を使った場合にそのまま読める。空の job と
+// 存在しない job は BullMQ 同様に区別しない。
+func (i *Inspector) GetTaskLogs(qname, taskID string, start, end int64) ([]string, int64, error) {
+	q := i.driver.queueFor(qname)
+	if q == nil {
+		return nil, 0, fmt.Errorf("mkqdriver: unknown queue %q", qname)
+	}
+	got, err := q.GetJobLogs(inspectorCtx(), taskID, start, end)
+	if err != nil {
+		return nil, 0, fmt.Errorf("mkqdriver: get job logs %q: %w", taskID, err)
+	}
+	return got.Logs, got.Count, nil
 }

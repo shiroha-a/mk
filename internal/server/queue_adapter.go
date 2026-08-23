@@ -57,15 +57,16 @@ func (a *queueInspectorAdapter) GetQueueInfo(qname string) (*apiadmin.QueueInfoR
 		return nil, err
 	}
 	return &apiadmin.QueueInfoResult{
-		Queue:     info.Queue,
-		Size:      info.Size,
-		Active:    info.Active,
-		Pending:   info.Pending,
-		Completed: info.Completed,
-		Failed:    info.Failed,
-		Scheduled: info.Scheduled,
-		Retry:     info.Retry,
-		IsPaused:  info.IsPaused,
+		Queue:         info.Queue,
+		Size:          info.Size,
+		Active:        info.Active,
+		Pending:       info.Pending,
+		Completed:     info.Completed,
+		Failed:        info.Failed,
+		Scheduled:     info.Scheduled,
+		Retry:         info.Retry,
+		IsPaused:      info.IsPaused,
+		QualifiedName: info.QualifiedName,
 	}, nil
 }
 
@@ -127,6 +128,10 @@ func (a *queueInspectorAdapter) GetTaskInfo(qname, taskID string) (*apiadmin.Que
 	return taskSummaryToAdmin(t), nil
 }
 
+func (a *queueInspectorAdapter) GetTaskLogs(qname, taskID string, start, end int64) ([]string, int64, error) {
+	return a.inner.GetTaskLogs(qname, taskID, start, end)
+}
+
 func (a *queueInspectorAdapter) QueueMetrics(qname, kind string) (*apiadmin.QueueMetricsResult, error) {
 	m, err := a.inner.QueueMetrics(qname, kind)
 	if err != nil {
@@ -165,5 +170,10 @@ func taskSummaryToAdmin(t *queue.TaskSummary) *apiadmin.QueueTaskSummary {
 		ProcessedAt:   t.ProcessedAt,
 		CompletedAt:   t.CompletedAt,
 		ProcessedBy:   t.ProcessedBy,
+		Opts:          t.Opts,
+		Delay:         t.Delay,
+		Stacktrace:    t.Stacktrace,
+		ReturnValue:   t.ReturnValue,
+		Progress:      t.Progress,
 	}
 }

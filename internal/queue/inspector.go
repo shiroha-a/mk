@@ -109,6 +109,12 @@ func (i *Inspector) GetTaskInfo(qname, taskID string) (*TaskSummary, error) {
 	return i.inner.GetTaskInfo(qname, taskID)
 }
 
+// GetTaskLogs returns the log lines recorded against a task.
+// See driver.Inspector.GetTaskLogs.
+func (i *Inspector) GetTaskLogs(qname, taskID string, start, end int64) ([]string, int64, error) {
+	return i.inner.GetTaskLogs(qname, taskID, start, end)
+}
+
 // QueueMetrics returns BullMQ-spec per-minute completed / failed
 // history for the given queue. See driver.Inspector.QueueMetrics.
 func (i *Inspector) QueueMetrics(qname, kind string) (*MetricsResult, error) {

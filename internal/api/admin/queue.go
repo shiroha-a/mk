@@ -564,8 +564,12 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 	failedData, failedCount := metricsToFrontend(failed, int64(info.Failed))
 
 	out := map[string]any{
-		"name":          info.Queue,
-		"qualifiedName": info.Queue,
+		"name": info.Queue,
+		// BullMQ の Queue.qualifiedName は `<prefix>:<name>` (queue-keys.js の
+		// getQueueQualifiedName)。frontend は job-queue.vue の caption に
+		// そのまま出すので、名前だけ返すと upstream と表示が変わる (#2689)。
+		// prefix は driver 設定なので driver に組ませる。
+		"qualifiedName": qualifiedQueueName(info),
 		"isPaused":      info.IsPaused,
 		"counts": map[string]any{
 			"active":    info.Active,
@@ -593,6 +597,15 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 		out["runtime"] = runtime
 	}
 	return out
+}
+
+// qualifiedQueueName returns the driver-reported BullMQ qualified name,
+// falling back to the bare queue name for drivers that do not report one.
+func qualifiedQueueName(info *QueueInfoResult) string {
+	if info.QualifiedName != "" {
+		return info.QualifiedName
+	}
+	return info.Queue
 }
 
 // queueMetricObject builds the upstream QueueMetrics shape ({meta, data, count}).
@@ -779,79 +792,110 @@ func (h *Handler) QueueShowJob(c echo.Context) error {
 }
 
 // QueueShowJobLogs handles POST /api/admin/queue/show-job-logs.
-// mkq / asynq does not persist per-task log output, so this always returns an
-// empty array (upstream returns queue.getJobLogs(jobId).logs). queue + jobId
-// は upstream 同様 required として検証する。
+//
+// upstream は `queue.getJobLogs(jobId).logs` をそのまま返す。mk-go 自身は
+// 現状 log を書かないが、**drop-in で TS が書いた job** や、将来 processor が
+// Job.Log を使った場合にそのまま読める (#2689)。持たない driver (asynq) は
+// 空を返す。存在しない job と log 0 件の job は BullMQ 同様に区別しない。
 func (h *Handler) QueueShowJobLogs(c echo.Context) error {
-	if _, _, ok := bindQueueJobReq(c); !ok {
+	queue, id, ok := bindQueueJobReq(c)
+	if !ok {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue and jobId are required."))
 	}
-	return c.JSON(http.StatusOK, []any{})
+	if h.queueInspector == nil {
+		return c.JSON(http.StatusOK, []string{})
+	}
+	logs, _, err := h.queueInspector.GetTaskLogs(queue, id, 0, -1)
+	if err != nil {
+		// **エラーでも 200 で空を返す。** upstream は log の有無で job 詳細を
+		// 落とさない。ここで 500 にすると log タブを開いただけで画面が壊れる。
+		// ただし**握り潰さない** — 未知 queue (fork のタブには mk-go が回して
+		// いない queue も並ぶ) や Redis 障害が、無言の空リストになるため。
+		slog.Warn("admin: failed to read job logs", "queue", queue, "jobId", id, "err", err)
+		return c.JSON(http.StatusOK, []string{})
+	}
+	if logs == nil {
+		return c.JSON(http.StatusOK, []string{})
+	}
+	return c.JSON(http.StatusOK, logs)
 }
 
-// packTaskSummary normalizes a QueueTaskSummary into the Misskey Bull-shaped
-// JSON expected by admin/job-queue.vue and job-queue.job.vue. frontend は
-// `job.stacktrace.length` / `job.opts.attempts` / `job.opts.repeat` などを
-// 直接参照するので、未設定フィールドは undefined ではなく空配列 / 0 / nil
-// で埋めて render crash を防ぐ。
+// packTaskSummary renders a QueueTaskSummary as the JSON that upstream's
+// QueueService.packJobData produces, so admin/job-queue.vue and
+// job-queue.job.vue behave the same against mk-go.
 //
-// asynqにしか無い field (state / queue / payload raw 等) は残しつつ、
-// Bull 互換 field を追加する形で出力する (両方を見るadmin toolへの配慮)。
+// **保存されている値をそのまま出す (#2689)。** 以前はここで opts / stacktrace /
+// returnValue / progress / delay を組み立て直していたが、それをやると
+// mk-go が知らない key が黙って消える。実際、BullMQ が持つ
+// `{"backoff":…,"removeOnComplete":…,"removeOnFail":…,"attempts":8}` が
+// `{attempts:0,delay:0,repeat:null}` に化けて Options タブが空になり、
+// `opts.attempts` が 0 なので Attempts 行も出なくなっていた。
+//
+// **json schema ではなく frontend の条件に合わせる。** upstream の
+// packedQueueJobSchema は failedReason / returnValue / progress を
+// `optional: false` と書いているが、**upstream の実装自身がそれを満たして
+// いない** (Bull の job は失敗するまで failedReason を持たないので undefined に
+// なる)。schema に寄せて空文字を常に出すと、`v-if="job.failedReason != null"` が
+// 空文字でも真になり、**成功した job にも赤い警告アイコン付きの空行**が出る。
+// 出さないほうが upstream と同じ描画になる。
 func packTaskSummary(t *QueueTaskSummary) map[string]any {
 	if t == nil {
 		return nil
 	}
-	isFailed := t.LastErr != ""
-	// golden QueueJob.data は Record (object) 必須。空 payload を null で返すと
-	// frontend の job detail が型エラーになるため {} に coalesce する (#1304)。
-	data := rawJSONOrString(t.Payload)
-	if data == nil {
-		data = map[string]any{}
+	// upstream は stacktrace を「空要素を除いて逆順」にする (新しい試行が先)。
+	stacktrace := make([]string, 0, len(t.Stacktrace))
+	for i := len(t.Stacktrace) - 1; i >= 0; i-- {
+		if t.Stacktrace[i] != "" {
+			stacktrace = append(stacktrace, t.Stacktrace[i])
+		}
 	}
+	// upstream: isFailed = !!failedReason || stacktrace.length > 0。
+	isFailed := t.LastErr != "" || len(stacktrace) > 0
+
 	pack := map[string]any{
-		// Bull 互換 field (frontend 必須)
 		"id":   t.ID,
 		"name": t.Type,
 		// timestamp = job 作成時刻 (Bull job.timestamp)。常に present。
-		"timestamp": formatUnixMillisOrZero(t.EnqueuedAt),
-		// golden QueueJob は progress / returnValue を Record (object) 必須、
-		// failedReason を string 必須とする。Bull の job は failure 時のみ理由を
-		// 持つが、schema 上は常に present (無 failure 時は空文字) なので常に出す。
-		// progress / returnValue は asynq に相当概念が無いため空 object で埋める
-		// (旧実装は number 0 / null で golden と乖離していた、#1304)。
-		"progress":     map[string]any{},
-		"attempts":     t.Retried,
+		"timestamp":  formatUnixMillisOrZero(t.EnqueuedAt),
+		"attempts":   t.Retried,
+		"isFailed":   isFailed,
+		"delay":      t.Delay,
+		"stacktrace": stacktrace,
+		"data":       packJobData(t),
+		"opts":       rawJSONOrObject(t.Opts),
+		// progress は Bull だと既定 0 (数値)。frontend は数値のときだけ
+		// パーセント表示する。
+		"progress": rawJSONOr(t.Progress, float64(0)),
+		// asynq-native field (既存 admin tool 互換のために残す)。
+		"queue":   t.Queue,
+		"type":    t.Type,
+		"state":   t.State,
+		"payload": string(t.Payload),
+		"retried": t.Retried,
+		// maxRetry は asynq 由来の独自 field。mkq driver は TaskSummary.MaxRetry を
+		// 埋めないので、opts.attempts から拾えるならそちらを使う (0 のまま出すと
+		// 「リトライしない設定」に見える、#2689 review)。
+		"maxRetry":     maxRetryFor(t),
 		"attemptsMade": t.Retried,
-		"isFailed":     isFailed,
-		"delay":        0,
-		"returnValue":  map[string]any{},
-		"failedReason": t.LastErr,
-		"stacktrace":   stacktraceFrom(t.LastErr),
-		"data":         data,
-		"opts": map[string]any{
-			"attempts": t.MaxRetry,
-			"delay":    0,
-			"repeat":   nil,
-		},
-		// asynq-native field (既存 admin tool 互換のために残す)
-		"queue":    t.Queue,
-		"type":     t.Type,
-		"state":    t.State,
-		"payload":  string(t.Payload),
-		"retried":  t.Retried,
-		"maxRetry": t.MaxRetry,
 	}
-	// processedOn / finishedOn は golden で optional:true (number)。値があるときだけ
-	// number で出す。未処理 / 未完了は key 省略 → frontend の `job.processedOn !=
-	// null` で "Processed at"/"Finished at" 行が非表示になる (Bull 互換、#1398)。
+	// **失敗していない job には出さない。** 空文字を出すと frontend の
+	// `!= null` 判定を通ってしまう (上の doc 参照)。
+	if t.LastErr != "" {
+		pack["failedReason"] = t.LastErr
+		pack["lastErr"] = t.LastErr
+	}
+	// returnValue も同じ。値が無いときに {} を出すと "Return value" タブが
+	// 常に表示される。upstream は Bull の null をそのまま渡してタブを消す。
+	if v := rawJSONOr(t.ReturnValue, nil); v != nil {
+		pack["returnValue"] = v
+	}
+	// processedOn / finishedOn は値があるときだけ number で出す。未処理 /
+	// 未完了は key 省略 → frontend の `!= null` で行が非表示になる (#1398)。
 	if !t.ProcessedAt.IsZero() {
 		ms := t.ProcessedAt.UnixMilli()
 		pack["processedOn"] = ms
 		pack["processedAt"] = ms
 	}
-	// processedBy は golden QueueJob で optional:true,string (Bull job.processedBy =
-	// 処理した worker 名)。upstream packJobData は値があるときだけ present になるので、
-	// 非空のときだけ key を出す (未処理 job は省略)。
 	if t.ProcessedBy != "" {
 		pack["processedBy"] = t.ProcessedBy
 	}
@@ -860,9 +904,6 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 		pack["finishedOn"] = finished.UnixMilli()
 	} else if !t.LastFailedAt.IsZero() {
 		pack["finishedOn"] = t.LastFailedAt.UnixMilli()
-	}
-	if t.LastErr != "" {
-		pack["lastErr"] = t.LastErr
 	}
 	if !t.LastFailedAt.IsZero() {
 		pack["lastFailedAt"] = t.LastFailedAt.UTC().Format(time.RFC3339Nano)
@@ -876,6 +917,68 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 	return pack
 }
 
+// packJobData renders the job payload for the admin Data tab.
+//
+// **upstream と 1 点だけ意図的に違う。** upstream は Bull の `job.data` を
+// そのまま返すが、mk-go は payload を `{"type": …, "body": <base64>}` で包んで
+// 保存しているので、そのまま返すと Data タブが base64 の塊になって読めない。
+// 包みの形は保ったまま body だけ decode して返す (docs/divergence.md)。
+//
+// 以前は body だけを返していたため **type が落ちていた** (#2689)。
+func packJobData(t *QueueTaskSummary) map[string]any {
+	body := rawJSONOrString(t.Payload)
+	if body == nil {
+		body = map[string]any{}
+	}
+	// Type が空になることは無い。mkq driver は framing が無ければ BullMQ の
+	// job.name に落とし、その既定は queue 名。asynq も TaskInfo.Type を必ず持つ。
+	return map[string]any{"type": t.Type, "body": body}
+}
+
+// maxRetryFor reports the job's configured attempt limit, preferring the
+// BullMQ opts value over the driver-reported one.
+//
+// asynq は TaskSummary.MaxRetry を埋めるが mkq driver は埋めない (attempts は
+// opts 側にある)。どちらの driver でも意味のある値になるようにする。
+func maxRetryFor(t *QueueTaskSummary) int {
+	if t.MaxRetry > 0 {
+		return t.MaxRetry
+	}
+	opts, ok := rawJSONOr(t.Opts, nil).(map[string]any)
+	if !ok {
+		return t.MaxRetry
+	}
+	if n, ok := opts["attempts"].(float64); ok {
+		return int(n)
+	}
+	return t.MaxRetry
+}
+
+// rawJSONOrObject decodes raw as JSON, falling back to an empty object.
+// golden QueueJob.opts は object 必須なので null にはしない。
+func rawJSONOrObject(raw json.RawMessage) any {
+	if v := rawJSONOr(raw, nil); v != nil {
+		return v
+	}
+	return map[string]any{}
+}
+
+// rawJSONOr decodes raw as JSON, returning fallback when raw is empty or
+// undecodable.
+func rawJSONOr(raw json.RawMessage, fallback any) any {
+	if len(raw) == 0 {
+		return fallback
+	}
+	var decoded any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		return fallback
+	}
+	if decoded == nil {
+		return fallback
+	}
+	return decoded
+}
+
 // formatUnixMillisOrZero returns the unix-ms representation of t, or 0 when
 // t is the zero time. Bull's timestamps are unix milliseconds.
 func formatUnixMillisOrZero(t time.Time) int64 {
@@ -883,16 +986,6 @@ func formatUnixMillisOrZero(t time.Time) int64 {
 		return 0
 	}
 	return t.UnixMilli()
-}
-
-// stacktraceFrom returns a single-element stacktrace array when lastErr is
-// non-empty, otherwise an empty array. frontend は `job.stacktrace.length`
-// を見るため undefined では TypeError で crash する。
-func stacktraceFrom(lastErr string) []string {
-	if lastErr == "" {
-		return []string{}
-	}
-	return []string{lastErr}
 }
 
 // rawJSONOrString attempts to decode payload as JSON so the admin UI can

@@ -192,3 +192,10 @@ func taskInfoToSummary(t *asynq.TaskInfo) *driver.TaskSummary {
 		CompletedAt:   t.CompletedAt,
 	}
 }
+
+// GetTaskLogs reports no logs. asynq has no per-task log concept, so
+// there is nothing to read; upstream's show-job-logs then renders an
+// empty list. asynq driver は legacy (#571) なので追いかけない。
+func (i *Inspector) GetTaskLogs(string, string, int64, int64) ([]string, int64, error) {
+	return []string{}, 0, nil
+}
