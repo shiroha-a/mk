@@ -35,6 +35,8 @@ roleが存在しない場合と、DB接続障害などrole lookup自体が失敗
 
 これにより公開service契約を「role不在だけsentinel、その他のpersistence errorは透過」に揃える。
 
+`UpdateFields`では事前lookup後に行が消えた場合、readbackが`ErrRoleNotFound`となり、`admin/roles/update`はHTTP 400 `NO_SUCH_ROLE`を返す。
+
 ## Handler分類
 
 対象handlerはservice errorを次の2系統に分類する。
@@ -117,7 +119,7 @@ raw repository error、SQL、role ID、その他のidentifierをresponseへ含�
 
 ## 対象外
 
-- `UpdateFields` / `Delete`の事前lookup後に行が消える競合
+- `Delete`の事前lookup後に行が消える競合
 - repository `RowsAffected == 0`のdomain error化
 - transaction境界の変更
 - repository interface変更
