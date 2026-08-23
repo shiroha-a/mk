@@ -1,6 +1,7 @@
 package roles
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -158,7 +159,13 @@ func (h *Handler) Show(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roleId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	r, err := h.roleService.Show(req.RoleID)
-	if err != nil || !r.IsPublic {
+	if err != nil {
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "de5502bf-009a-4639-86c1-fec349e46dcb"))
+		}
+		return apierr.JSONInternalError(c)
+	}
+	if !r.IsPublic {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "de5502bf-009a-4639-86c1-fec349e46dcb"))
 	}
 	return c.JSON(http.StatusOK, h.packRole(r))
@@ -182,7 +189,13 @@ func (h *Handler) Users(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roleId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	r, err := h.roleService.Show(req.RoleID)
-	if err != nil || !r.IsPublic || !r.IsExplorable {
+	if err != nil {
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "30aaaee3-4792-48dc-ab0d-cf501a575ac5"))
+		}
+		return apierr.JSONInternalError(c)
+	}
+	if !r.IsPublic || !r.IsExplorable {
 		// upstream は findOneBy({id, isPublic:true, isExplorable:true}) が null
 		// なら NO_SUCH_ROLE。!isPublic / !isExplorable も同じ扱い。
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "30aaaee3-4792-48dc-ab0d-cf501a575ac5"))
@@ -199,7 +212,10 @@ func (h *Handler) Users(c echo.Context) error {
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	assigns, err := h.roleService.ListByRole(req.RoleID, untilID, sinceID, limit)
 	if err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "30aaaee3-4792-48dc-ab0d-cf501a575ac5"))
+		}
+		return apierr.JSONInternalError(c)
 	}
 
 	// reporter/assignee と同様に user_profile を 1 batch で解決して UserDetailed を
@@ -275,7 +291,10 @@ func (h *Handler) Notes(c echo.Context) error {
 
 	r, err := h.roleService.Show(req.RoleID)
 	if err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))
+		if errors.Is(err, role.ErrRoleNotFound) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))
+		}
+		return apierr.JSONInternalError(c)
 	}
 	if !r.IsPublic {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "eb70323a-df61-4dd4-ad90-89c83c7cf26e"))

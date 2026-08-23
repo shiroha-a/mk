@@ -3,6 +3,8 @@ package roles_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,11 +18,126 @@ import (
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const publicInternalErrorJSON = `{"error":{"message":"Internal error.","code":"INTERNAL_ERROR","id":"5d37dbcb-891e-41ca-a3d6-e690c97775ac","kind":"server"}}`
+const showNoSuchRoleJSON = `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"de5502bf-009a-4639-86c1-fec349e46dcb","kind":"client"}}`
+const usersNoSuchRoleJSON = `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"30aaaee3-4792-48dc-ab0d-cf501a575ac5","kind":"client"}}`
+const notesNoSuchRoleJSON = `{"error":{"message":"No such role.","code":"NO_SUCH_ROLE","id":"eb70323a-df61-4dd4-ad90-89c83c7cf26e","kind":"client"}}`
+
+type publicRoleLookupResult struct {
+	role *model.Role
+	err  error
+}
+
+type publicSequenceRoleRepository struct {
+	repository.RoleRepository
+	results []publicRoleLookupResult
+	calls   int
+}
+
+func (r *publicSequenceRoleRepository) FindByID(string) (*model.Role, error) {
+	result := r.results[min(r.calls, len(r.results)-1)]
+	r.calls++
+	return result.role, result.err
+}
+
+func publicHandlerWithRepository(t *testing.T, roleRepo repository.RoleRepository, base *testutil.MockRoleRepository) *roles.Handler {
+	t.Helper()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(base)
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	return roles.NewHandler(corerole.NewService(roleRepo, assignRepo, metaRepo, idGen), idGen)
+}
+
+func publicRoleEndpoints() []struct {
+	name         string
+	call         func(*roles.Handler, string) *httptest.ResponseRecorder
+	notFoundJSON string
+} {
+	return []struct {
+		name         string
+		call         func(*roles.Handler, string) *httptest.ResponseRecorder
+		notFoundJSON string
+	}{
+		{"show", func(h *roles.Handler, body string) *httptest.ResponseRecorder { return doPost(h.Show, body) }, showNoSuchRoleJSON},
+		{"users", func(h *roles.Handler, body string) *httptest.ResponseRecorder { return doPost(h.Users, body) }, usersNoSuchRoleJSON},
+		{"notes", func(h *roles.Handler, body string) *httptest.ResponseRecorder { return doPost(h.Notes, body) }, notesNoSuchRoleJSON},
+	}
+}
+
+func TestPublicRolePersistenceFailures(t *testing.T) {
+	for _, tt := range publicRoleEndpoints() {
+		t.Run(tt.name, func(t *testing.T) {
+			wantErr := errors.New("role SELECT failed")
+			base := testutil.NewMockRoleRepository()
+			repo := &publicSequenceRoleRepository{
+				RoleRepository: base,
+				results:        []publicRoleLookupResult{{err: wantErr}},
+			}
+			rec := tt.call(publicHandlerWithRepository(t, repo, base), `{"roleId":"secret-role-id"}`)
+			require.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.JSONEq(t, publicInternalErrorJSON, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), wantErr.Error())
+			assert.NotContains(t, rec.Body.String(), "secret-role-id")
+		})
+	}
+}
+
+func TestPublicRoleWrappedNotFound(t *testing.T) {
+	for _, tt := range publicRoleEndpoints() {
+		t.Run(tt.name, func(t *testing.T) {
+			base := testutil.NewMockRoleRepository()
+			repo := &publicSequenceRoleRepository{
+				RoleRepository: base,
+				results:        []publicRoleLookupResult{{err: fmt.Errorf("classified role: %w", corerole.ErrRoleNotFound)}},
+			}
+			rec := tt.call(publicHandlerWithRepository(t, repo, base), `{"roleId":"secret-role-id"}`)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.JSONEq(t, tt.notFoundJSON, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "secret-role-id")
+		})
+	}
+}
+
+func TestUsersSecondLookupErrors(t *testing.T) {
+	tests := []struct {
+		name      string
+		secondErr error
+		status    int
+		response  string
+	}{
+		{"repository not found", testutil.ErrNotFound, http.StatusBadRequest, usersNoSuchRoleJSON},
+		{"wrapped role not found", fmt.Errorf("classified role: %w", corerole.ErrRoleNotFound), http.StatusBadRequest, usersNoSuchRoleJSON},
+		{"persistence", errors.New("assignment role lookup failed"), http.StatusInternalServerError, publicInternalErrorJSON},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			base := testutil.NewMockRoleRepository()
+			repo := &publicSequenceRoleRepository{
+				RoleRepository: base,
+				results: []publicRoleLookupResult{
+					{role: &model.Role{ID: "secret-role-id", IsPublic: true, IsExplorable: true}},
+					{err: tt.secondErr},
+				},
+			}
+			rec := doPost(publicHandlerWithRepository(t, repo, base).Users, `{"roleId":"secret-role-id"}`)
+			require.Equal(t, tt.status, rec.Code)
+			assert.JSONEq(t, tt.response, rec.Body.String())
+			assert.NotContains(t, rec.Body.String(), "secret-role-id")
+			if tt.status == http.StatusInternalServerError {
+				assert.NotContains(t, rec.Body.String(), tt.secondErr.Error())
+			}
+		})
+	}
+}
 
 // mockRoleNotesQuery is a test double for roles.RoleNotesQuery.
 type mockRoleNotesQuery struct {
@@ -192,6 +309,7 @@ func TestShow_NotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Show, `{"roleId":"ghost"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, showNoSuchRoleJSON, rec.Body.String())
 }
 
 func TestShow_InvalidParam(t *testing.T) {
@@ -347,6 +465,7 @@ func TestUsers_NotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Users, `{"roleId":"ghost"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, usersNoSuchRoleJSON, rec.Body.String())
 }
 
 func TestUsers_InvalidParam(t *testing.T) {
@@ -388,6 +507,7 @@ func TestNotes_RoleNotFound(t *testing.T) {
 	h, _ := newTestHandler(t)
 	rec := doPost(h.Notes, `{"roleId":"ghost"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.JSONEq(t, notesNoSuchRoleJSON, rec.Body.String())
 }
 
 func TestNotes_NotPublic(t *testing.T) {
