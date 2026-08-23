@@ -76,7 +76,7 @@ func TestManager_AcceptViaHTTPTestServer(t *testing.T) {
 		if err != nil {
 			return
 		}
-		go m.Accept(conn, &model.User{ID: "alice"})
+		go m.Accept(conn, &model.User{ID: "alice"}, nil)
 	}))
 	defer srv.Close()
 
@@ -124,7 +124,7 @@ func TestManager_AcceptInvokesMuteBlockLookup(t *testing.T) {
 		if err != nil {
 			return
 		}
-		go m.Accept(conn, &model.User{ID: "alice"})
+		go m.Accept(conn, &model.User{ID: "alice"}, nil)
 	}))
 	defer srv.Close()
 
@@ -166,7 +166,7 @@ func TestManager_AcceptInvokesPolicyProvider(t *testing.T) {
 		if err != nil {
 			return
 		}
-		go m.Accept(conn, &model.User{ID: "alice"})
+		go m.Accept(conn, &model.User{ID: "alice"}, nil)
 	}))
 	defer srv.Close()
 
@@ -199,7 +199,7 @@ func TestManager_AcceptDispatchesConnectMessages(t *testing.T) {
 		if err != nil {
 			return
 		}
-		go m.Accept(conn, &model.User{ID: "alice"})
+		go m.Accept(conn, &model.User{ID: "alice"}, nil)
 	}))
 	defer srv.Close()
 
@@ -264,4 +264,80 @@ func TestManager_TrackLastActiveNoopCases(t *testing.T) {
 	anon.SetLastActiveRecorder(rec)
 	anon.trackLastActive(nil)()
 	assert.Empty(t, rec.calls(), "匿名接続は記録しない")
+}
+
+// Accept が実際に scope を Connection へ載せること。**Accept を通す**のが要点で、
+// connectionScopes と SetPermissions を別々に検査しても、その間の配線が
+// 抜けていることは分からない (この bug がまさにその形で本番に入っていた)。
+func TestManagerAccept_AttachesScopesThroughAcceptPath(t *testing.T) {
+	cases := []struct {
+		name     string
+		scopes   []string
+		wantChat bool
+	}{
+		{name: "limited app token cannot read chat", scopes: []string{"read:account"}, wantChat: false},
+		{name: "app token with chat can", scopes: []string{"read:account", "read:chat"}, wantChat: true},
+		{name: "no scopes cannot", scopes: []string{}, wantChat: false},
+		{name: "unrestricted can", scopes: nil, wantChat: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := NewManager(nil, nil)
+			upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := upgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				go m.Accept(conn, &model.User{ID: "alice"}, tc.scopes)
+			}))
+			defer srv.Close()
+
+			dialer := websocket.Dialer{HandshakeTimeout: time.Second}
+			client, _, err := dialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+			require.NoError(t, err)
+			defer func() { _ = client.Close() }()
+
+			require.Eventually(t, func() bool { return m.Count() == 1 }, time.Second, 10*time.Millisecond)
+
+			m.mu.RLock()
+			var got *Connection
+			for _, c := range m.conns {
+				got = c
+			}
+			m.mu.RUnlock()
+			require.NotNil(t, got)
+
+			assert.Equal(t, tc.wantChat, got.HasPermission("read:chat"),
+				"Accept が scope を Connection へ載せていない")
+		})
+	}
+}
+
+// Connection 単体での判定。上の Accept 経路と合わせて、両端と配線の 3 点を押さえる。
+func TestConnection_HasPermission(t *testing.T) {
+	cases := []struct {
+		name        string
+		scopes      []string
+		wantChat    bool
+		wantAccount bool
+	}{
+		// app token: read:chat を持たないので chat channel は拒否される。
+		{name: "limited app token", scopes: []string{"read:account"}, wantChat: false, wantAccount: true},
+		{name: "app token with chat", scopes: []string{"read:account", "read:chat"}, wantChat: true, wantAccount: true},
+		{name: "app token with no scopes", scopes: []string{}, wantChat: false, wantAccount: false},
+		// nil = native login token / 匿名。従来どおり全許可。
+		{name: "unrestricted", scopes: nil, wantChat: true, wantAccount: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewConnection("1", &model.User{ID: "alice"}, nil)
+			if tc.scopes != nil {
+				c.SetPermissions(tc.scopes)
+			}
+			assert.Equal(t, tc.wantChat, c.HasPermission("read:chat"),
+				"read:chat の判定が想定と違う")
+			assert.Equal(t, tc.wantAccount, c.HasPermission("read:account"))
+		})
+	}
 }

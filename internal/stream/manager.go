@@ -152,9 +152,15 @@ func (m *Manager) SetPolicyProvider(p RolePolicyProvider) {
 
 // Accept implements api/streaming.ConnectionAcceptor. *websocket.Conn から
 // Connection を組み立て、Dispatcher 経由で channel framework に橋渡しする。
-func (m *Manager) Accept(ws *websocket.Conn, user *model.User) {
+func (m *Manager) Accept(ws *websocket.Conn, user *model.User, scopes []string) {
 	id := m.allocateID()
 	c := NewConnection(id, user, ws)
+	// scope 制限のある接続 (app access_token) だけ attach する。nil のままだと
+	// HasPermission が全許可になるので、**channel の RequiredPermission が
+	// 効くのはここを通ったときだけ**。
+	if scopes != nil {
+		c.SetPermissions(scopes)
+	}
 	if m.hardMute != nil && user != nil {
 		// 接続後、最初の channel publish より前に rules を attach。fetch 失敗は
 		// nil 返却で degrade — streaming は filter 無しで動き続ける (#787)。

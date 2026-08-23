@@ -13,11 +13,33 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
-// ConnectionAcceptor receives an upgraded WebSocket connection and an optional
-// authenticated user. パッケージ間の循環依存を避けるため interface で受け取る
+// ConnectionAcceptor receives an upgraded WebSocket connection, an optional
+// authenticated user, and the OAuth2 scopes the connection is limited to.
+// パッケージ間の循環依存を避けるため interface で受け取る
 // (実装は internal/stream の Manager)。
+//
+// scopes は **app access_token のときだけ non-nil**。nil は「スコープによる
+// 制限が無い」を意味し、native login token (フロントエンドが使う) と
+// 匿名接続がそちらに当たる。mk-go は cookie 認証を持たない。空の non-nil slice は「スコープを 1 つも持たない app token」で、
+// nil とは区別する。
 type ConnectionAcceptor interface {
-	Accept(conn *websocket.Conn, user *model.User)
+	Accept(conn *websocket.Conn, user *model.User, scopes []string)
+}
+
+// connectionScopes returns the scope list to enforce for this connection, or
+// nil when the caller is not scope-limited.
+//
+// native login token (IsApp=false) は upstream でも scope の概念を持たないので
+// nil を返し、従来どおり全 channel を許可する。app token は
+// scope が空でも non-nil を返し、「何も許可されていない」を表現する。
+func connectionScopes(scope *middleware.AuthScope) []string {
+	if scope == nil || !scope.IsApp {
+		return nil
+	}
+	if scope.Scopes == nil {
+		return []string{}
+	}
+	return scope.Scopes
 }
 
 // Handler upgrades incoming HTTP requests to a WebSocket and hands the
@@ -65,10 +87,14 @@ func (h *Handler) Stream(c echo.Context) error {
 		return nil
 	}
 	user := middleware.GetUser(c)
+	// channel ごとの scope 判定 (read:chat 等) に使う。ここで渡さないと
+	// stream 側は permissions=nil のままになり、HasPermission が常に true を
+	// 返して RequiredPermission が実質無効になる。
+	scopes := connectionScopes(middleware.GetAuthScope(c))
 	if h.acceptor == nil {
 		_ = conn.Close()
 		return nil
 	}
-	h.acceptor.Accept(conn, user)
+	h.acceptor.Accept(conn, user, scopes)
 	return nil
 }
