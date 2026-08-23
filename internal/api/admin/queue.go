@@ -470,13 +470,36 @@ func (h *Handler) QueuePromoteJobs(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{"promoted": promoted})
 }
 
-// queuePauseResumeTypes mirrors upstream QueueService.QUEUE_TYPES (admin/queue/
-// pause・resume の param enum、#17436)。enum 外の queue は invalidParam で弾く。
-var queuePauseResumeTypes = map[string]struct{}{
-	"system": {}, "endedPollNotification": {}, "postScheduledNote": {}, "deliver": {},
-	"inbox": {}, "db": {}, "relationship": {}, "objectStorage": {},
-	"userWebhookDeliver": {}, "systemWebhookDeliver": {},
+// upstreamQueueTypes is upstream QueueService.QUEUE_TYPES (admin/queue/
+// pause・resume の param enum、#17436)。
+//
+// **drop-in で純正 frontend が来る場合のために残す。** 純正はこの 10 種の
+// タブを出すので、mk-go に無い名前でも 400 ではなく no-op 204 で返したい
+// (下の queueIsManaged)。
+var upstreamQueueTypes = []string{
+	"system", "endedPollNotification", "postScheduledNote", "deliver",
+	"inbox", "db", "relationship", "objectStorage",
+	"userWebhookDeliver", "systemWebhookDeliver",
 }
+
+// queuePauseResumeTypes is the accepted `queue` param for pause / resume:
+// mk-go が実際に持つ queue と upstream の enum の和集合。
+//
+// **mk-go 側は queue.AllQueueNames() から引く (#2690)。** 以前は upstream の
+// 10 種を手書きしていただけだったので、重なるのは deliver / inbox /
+// objectStorage / relationship の 4 つだけ。fork frontend は mk-go の 8 種の
+// タブを出すため、**push / export / webhook / maintenance では一時停止・再開が
+// 400 で失敗していた**。
+var queuePauseResumeTypes = func() map[string]struct{} {
+	m := make(map[string]struct{}, len(upstreamQueueTypes)+len(queue.AllQueueNames()))
+	for _, q := range upstreamQueueTypes {
+		m[q] = struct{}{}
+	}
+	for _, q := range queue.AllQueueNames() {
+		m[q] = struct{}{}
+	}
+	return m
+}()
 
 // QueuePause handles POST /api/admin/queue/pause (upstream #17436)。
 func (h *Handler) QueuePause(c echo.Context) error { return h.queuePauseResume(c, true) }

@@ -1485,3 +1485,47 @@ func TestQueueQueueStats_QualifiedNameFallback(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
 	assert.Equal(t, "inbox", got["qualifiedName"])
 }
+
+// mk-go が実際に持つ全 queue で pause / resume が通ること (#2690)。
+//
+// 以前は upstream の QUEUE_TYPES を手書きで持っていただけだったので、重なるのは
+// deliver / inbox / objectStorage / relationship の 4 つだけ。fork frontend は
+// mk-go の 8 種のタブを出すため、**push / export / webhook / maintenance では
+// 一時停止・再開が 400 で失敗していた**。
+func TestQueuePauseResume_AcceptsEveryManagedQueue(t *testing.T) {
+	all := queue.AllQueueNames()
+	require.NotEmpty(t, all)
+
+	info := map[string]*apiadmin.QueueInfoResult{}
+	for _, q := range all {
+		info[q] = &apiadmin.QueueInfoResult{Queue: q}
+	}
+	for _, qname := range all {
+		t.Run(qname, func(t *testing.T) {
+			h, _, _, _ := newTestHandler(t)
+			h.SetQueueInspector(&stubQueueInspector{queues: all, info: info})
+			body := `{"queue":"` + qname + `"}`
+			assert.Equal(t, http.StatusNoContent, doPost(h.QueuePause, body, adminUser).Code,
+				"pause が通ること")
+			assert.Equal(t, http.StatusNoContent, doPost(h.QueueResume, body, adminUser).Code,
+				"resume が通ること")
+		})
+	}
+}
+
+// 純正 frontend が出す upstream の queue 名は、mk-go に無くても 400 にしない
+// (drop-in 互換。運用していない queue は no-op 204)。知らない名前は 400。
+func TestQueuePauseResume_UpstreamNamesAndUnknown(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{queues: queue.AllQueueNames()})
+
+	// mk-go に無い upstream の名前。
+	assert.Equal(t, http.StatusNoContent,
+		doPost(h.QueuePause, `{"queue":"endedPollNotification"}`, adminUser).Code,
+		"upstream の enum は 400 にしない (drop-in)")
+	// どちらにも無い名前。
+	assert.Equal(t, http.StatusBadRequest,
+		doPost(h.QueuePause, `{"queue":"nosuchqueue"}`, adminUser).Code)
+	assert.Equal(t, http.StatusBadRequest,
+		doPost(h.QueueResume, `{"queue":"nosuchqueue"}`, adminUser).Code)
+}

@@ -64,6 +64,28 @@ const InboxQueueName = "inbox"
 // back-pressure できるよう分離した。
 const RelationshipQueueName = "relationship"
 
+// AllQueueNames returns every queue mk-go operates, in the order the admin
+// UI lists them.
+//
+// **queue 名を手で並べ直す場所を増やさない (#2690)。** admin の
+// pause / resume は upstream の QUEUE_TYPES を手書きで持っていたため、
+// mk-go が queue を足しても追従せず、push / export / webhook / maintenance の
+// タブで一時停止が 400 になっていた。名前の一覧が要る側はここを引くこと。
+//
+// maintenance は scheduler 側の定数なので明示的に含める (同じパッケージ)。
+func AllQueueNames() []string {
+	return []string{
+		QueueName,
+		InboxQueueName,
+		PushQueueName,
+		ExportQueueName,
+		WebhookQueueName,
+		MaintenanceQueueName,
+		ObjectStorageQueueName,
+		RelationshipQueueName,
+	}
+}
+
 // Enqueuer abstracts task enqueueing for callers (DeliverService,
 // admin handlers, etc.). The interface is driver-neutral so callers
 // can be unit-tested with mocks.
