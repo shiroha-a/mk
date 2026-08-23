@@ -183,8 +183,14 @@ func (p *InboxProcessor) SetInboxReplayGuard(g InboxReplayGuard) {
 }
 
 // SetSignatureVerifier wires a verifier used to re-verify the inbound
-// HTTP signature in the worker. Without it, payloads carrying Headers
-// are dropped (handler should not have produced them).
+// HTTP signature in the worker.
+//
+// **未配線でも payload は落ちない。** Handle の
+// `if len(payload.Headers) > 0 && p.verifier != nil` が偽になり、
+// 署名検証・連合ブロック・actor 一致 (authorizeActor)・replay 判定を
+// **まとめて飛ばしたまま dispatch へ進む**。以前ここには "payloads carrying
+// Headers are dropped" と書いてあったが誤りで、fail-closed に読める分だけ
+// 危険だった (#2682)。起動時の配線検査は HasSignatureVerifier を見る。
 func (p *InboxProcessor) SetSignatureVerifier(v SignatureVerifier) {
 	p.verifier = v
 }
@@ -670,3 +676,32 @@ func (p *InboxProcessor) resolveLDCreator(uri string, signer *model.User) (*mode
 	}
 	return p.verifier.ResolveActor(uri)
 }
+
+// HasSignatureVerifier reports whether the inbound signature verifier is wired.
+//
+// 未配線だと Handle の `len(payload.Headers) > 0 && p.verifier != nil` が偽になり、
+// **署名検証・連合ブロック・actor 一致 (authorizeActor)・replay 判定が
+// まとめて飛ぶ**。本番では必ず配線されるので、起動時にここを検査する (#2682)。
+//
+// **この検査が見るのは「4 つがまとめて飛ぶ」場合だけ。** 連合ブロック・replay・
+// LD-Signature は `SetHostBlockChecker` / `SetInboxReplayGuard` /
+// `SetLDSignatureVerifier` という独立の setter も持っており、そちらだけを
+// 消すと本検査は通ったまま個別に無効化できる。replay 側は
+// [InboxProcessor.HasInboxReplayGuard] で個別に検査する。連合ブロック側は
+// moderation の tier なので #2683。LD-Signature は大半が fail-closed
+// (signer != actor で error) だが、JSON-LD の term 再定義検査
+// (CheckForbiddenDirectivesIfPresent) と Headers 無し経路の検証が黙って
+// 飛ぶ (#2682 review L-E)。
+func (p *InboxProcessor) HasSignatureVerifier() bool { return p.verifier != nil }
+
+// HasInboxReplayGuard reports whether the inbound activity replay guard is
+// wired.
+//
+// 未配線だと isReplay が常に false を返す (fail-open)。**一度処理した
+// activity を何度でも再投函できる**。各 activity handler は冪等な前提で
+// 書かれているので単純な二重適用にはならないが、冪等性は handler ごとの
+// 性質であって保証ではなく、Date skew の窓の内側で好きなだけ再送できる
+// 状態は一回性の tier そのもの。signin / i の TOTP guard を検査しながら
+// inbox の replay guard だけ外すのは筋が通らないので載せる
+// (#2682 review M-4)。
+func (p *InboxProcessor) HasInboxReplayGuard() bool { return p.replayGuard != nil }

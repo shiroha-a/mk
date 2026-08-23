@@ -378,3 +378,19 @@ func bodyHasActor(body []byte) bool {
 	actor, ok := probe["actor"]
 	return ok && len(actor) > 0 && string(actor) != "null"
 }
+
+// HasExpectedHost reports whether the expected Host value is wired.
+//
+// 空文字だと VerifyInboxAdmission の host 検査が丸ごと skip され、**host ヘッダが
+// 署名対象に含まれているかの確認と、自ホストとの一致確認の 2 つが飛ぶ**。
+// 本番では router が config.Host を必ず配線する (#2682)。
+func (h *Handler) HasExpectedHost() bool { return h.expectedHost != "" }
+
+// HasEnqueuer reports whether the async inbox enqueuer is wired.
+//
+// 未配線だと Handle が legacy な同期経路へ落ちる。その経路は worker 側の
+// **actor-authorization gate (署名者 != activity.actor のなりすまし検出)・
+// LD-Signature 検証・inbox replay guard を通らない**。同ファイルのコメントが
+// 「production が async 一択である前提のため許容している」と書いているとおり、
+// production では必ず配線される (#2682)。
+func (h *Handler) HasEnqueuer() bool { return h.enqueuer != nil }

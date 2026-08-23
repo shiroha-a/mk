@@ -956,3 +956,33 @@ func isReservedUsername(lower string, reserved []string) bool {
 func IsReservedUsername(lower string, reserved []string) bool {
 	return isReservedUsername(lower, reserved)
 }
+
+// HasTicketConsumption reports whether the transactional promote path is wired.
+//
+// 未配線だと promotePending が `promotePendingNoTx` を選ぶ。**失われるのは
+// 消費そのものではなく直列化**: handler 側が非 tx 経路を検知して
+// best-effort に MarkUsed するので (`internal/api/signup/handler.go`)、
+// ticket は最終的に消費される。落ちるのは tx 内の `SELECT FOR UPDATE` と
+// usedById の再確認 (#604) で、その結果 promote 前に作られた複数の pending が
+// 全て通る TOCTOU の窓が開く。ErrInvitationAlreadyUsed も返らなくなる。
+// 本番では必ず配線される (#2682 review M-B)。
+//
+// **承認制 (#2571) の申請とは別の話**。こちらが見るのは
+// registration_ticket で、申請側は appRepo が要る
+// ([Service.HasApplicationSettlement])。片方が配線されていても
+// もう片方は保証されない (#2682 review M-3)。
+func (s *Service) HasTicketConsumption() bool { return s.db != nil && s.ticketRepo != nil }
+
+// HasApplicationSettlement reports whether approved signup applications are
+// settled in the same transaction as user creation.
+//
+// 未配線だと 2 経路が同時に緩む。PromotePending は申請行の
+// `FOR UPDATE` を飛ばし、SignupForApplication は通常の Signup へ落ちて
+// トランザクションの主張ごと捨てる。どちらも**承認 1 件から複数
+// アカウント**を作れる窓が開く (コードのコメントは
+// promotePendingTx / SignupForApplication の両方にある)。
+//
+// handler 側の事後 MarkCompleted が残るので不可逆な取り放題ではなく
+// TOCTOU に留まるが、承認制は「1 承認 = 1 アカウント」を売りにする機能
+// なので一回性の tier として検査する (#2682 review M-3)。
+func (s *Service) HasApplicationSettlement() bool { return s.db != nil && s.appRepo != nil }

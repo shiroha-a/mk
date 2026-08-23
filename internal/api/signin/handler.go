@@ -567,3 +567,10 @@ func (h *Handler) maybeRehashPassword(userID, storedHash, plain string) {
 		slog.Warn("signin: failed to store rehashed password", "userId", userID, "err", err)
 	}
 }
+
+// HasTOTPReplayGuard reports whether the TOTP one-time-use guard is wired.
+//
+// 未配線だと ValidateWithReplay が guard 無しで true を返し、**有効な TOTP
+// コードを window 内で再利用できる** (コード自体の検証は残る)。本番では必ず
+// 配線される (#2682)。
+func (h *Handler) HasTOTPReplayGuard() bool { return h.totpReplayGuard != nil }

@@ -3596,3 +3596,10 @@ func validateSignupApplicationForm(fields map[string]any) error {
 	fields["signupApplicationForm"] = datatypes.JSON(normalized)
 	return nil
 }
+
+// HasUserTokenInvalidator reports whether the auth cache invalidator is wired.
+//
+// 未配線だと admin/suspend-user や admin/accounts/delete の後も、対象の
+// session が auth cache の TTL のあいだ生き残る。router 側のコメントも
+// これを security regression と呼んでいる (#2682)。
+func (h *Handler) HasUserTokenInvalidator() bool { return h.userTokenInvalidator != nil }

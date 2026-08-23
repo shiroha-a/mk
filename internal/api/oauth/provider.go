@@ -80,6 +80,14 @@ func (h *Handler) SetAuthInvalidator(inv TokenInvalidator) {
 	h.authInvalidator = inv
 }
 
+// HasAuthInvalidator reports whether the auth cache invalidator is wired.
+//
+// **これが引かれるのは攻撃を検出した瞬間**。RFC 6749 4.1.2 の
+// authorization code 再利用を見つけて token を失効させる経路なので、
+// 未配線だとコードを盗んで再利用した相手の access token が、サーバーが
+// 失効を決めた後も auth cache の TTL (30s) のあいだ通り続ける (#2682)。
+func (h *Handler) HasAuthInvalidator() bool { return h.authInvalidator != nil }
+
 // NewHandler constructs the OAuth provider handler. httpClient must be
 // SSRF-guarded (it fetches attacker-suppliable client_id URLs). allowHTTP
 // permits http client_id schemes (tests only). renderConsent serves the

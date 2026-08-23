@@ -2148,3 +2148,40 @@ func (h *Handler) fillPinnedFields(ctx context.Context, u *model.User, profile *
 		}
 	}
 }
+
+// HasTOTPReplayGuard reports whether the TOTP one-time-use guard is wired.
+//
+// signin と /api/i の 2 経路が**同じ guard を共有する**。こちらが未配線だと
+// 一度観測された有効な TOTP コードを window 内で再利用できる (#2682)。
+//
+// 対象は 9 endpoint。verify2FAToken を通る 8 つ (i/update-email /
+// i/2fa/register / i/2fa/unregister / i/2fa/register-key / i/2fa/key-done /
+// i/2fa/remove-key / i/change-password / i/delete-account) と、guard を
+// 直接引く i/2fa/done (handler_2fa.go)。
+func (h *Handler) HasTOTPReplayGuard() bool { return h.totpReplayGuard != nil }
+
+// HasAuthInvalidator reports whether the auth cache invalidator is wired.
+//
+// 未配線だと失効させたはずの token が**auth cache の TTL のあいだ認証を
+// 通り続ける**。router 側のコメントもこれを security regression と呼んで
+// いる (#2682)。
+//
+// 引くのは 4 箇所: i/regenerate-token / i/revoke-token (apps.go) /
+// i/delete-account (handler_extra.go) / invalidateRequestTokenCache。
+// **失効の主経路である i/revoke-token を含む**ので、これだけを
+// regenerate-token の話と読まないこと。
+func (h *Handler) HasAuthInvalidator() bool { return h.authInvalidator != nil }
+
+// HasAccessTokenRepo reports whether the access_token repo is wired.
+//
+// **未配線を 204 と区別できない。** RevokeToken は repo が nil だと即
+// `204 No Content` を返すが、これは失効に成功したときの応答と同じ
+// (apps.go)。つまり i/revoke-token が「成功した」と言いながら何も消さず、
+// 同時に i/apps と i/authorized-apps が空配列を返すので、利用者からは
+// 「アプリは無い」と見えて食い違いにも気付けない。
+//
+// **HasAuthInvalidator では代替できない。** invalidator を引くのは repo の
+// early return より後なので、cache 側の検査が通っていても revoke 自体は
+// 起きていない。しかも失効漏れは cache TTL の 30 秒ではなく**恒久**
+// (#2682 review H-1)。
+func (h *Handler) HasAccessTokenRepo() bool { return h.accessTokenRepo != nil }

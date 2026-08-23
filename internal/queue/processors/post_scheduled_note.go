@@ -91,6 +91,15 @@ func NewPostScheduledNoteProcessor(drafts ScheduledNoteDraftRepo, users Schedule
 // SetLock wires an app-level idempotency lock. nil disables (= Phase 1 互換)。
 // production では Redis-backed 実装を配線して重複 publish を防止する
 // (#1045 Phase 2-A)。
+// HasLock reports whether the idempotency lock is wired.
+//
+// 未配線だと Handle が lock 取得を飛ばして**常に publish する**。queue は
+// at-least-once なので、同じ job が二度 fire したときに予約投稿が 2 回
+// 出て scheduledNotePosted も 2 回飛ぶ。冪等性を handler 側の性質に
+// 頼らず保証するための lock なので、inbox の replay guard と同じ
+// 一回性の tier として起動時に検査する (#2682 review M-C)。
+func (p *PostScheduledNoteProcessor) HasLock() bool { return p.lock != nil }
+
 func (p *PostScheduledNoteProcessor) SetLock(l ScheduledNoteLock) {
 	p.lock = l
 }
