@@ -285,7 +285,7 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 	}
 
 	h.fireSigninSideEffects(c, result.User.ID)
-	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Profile, result.Token, h.idGen))
+	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Profile, result.Token, h.idGen, h.signupPolicies(result.User.ID)))
 }
 
 // registerViaEmailConfirmation stages the approved signup as a pending row and

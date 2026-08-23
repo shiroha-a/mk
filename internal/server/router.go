@@ -1467,6 +1467,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	signupTicketRepo := repository.NewRegistrationTicketRepository(s.db)
 	signupService.SetTicketRepo(signupTicketRepo)
 	signupHandler := apisignup.NewHandler(signupService, metaRepo, idGen)
+	// #2673: signup も upstream と同じく実効 policy を返す (meta の base override /
+	// role 集約 / server cap 込み)。素の default を返すと /api/i と食い違う。
+	signupHandler.SetUserPolicyResolver(roleService)
 	if captchaSvc != nil {
 		signupHandler.SetCaptcha(captchaSvc)
 	}

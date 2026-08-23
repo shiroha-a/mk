@@ -14,6 +14,7 @@ import (
 	"github.com/labstack/echo/v4"
 	apisignup "github.com/shiroha-a/mk/internal/api/signup"
 	"github.com/shiroha-a/mk/internal/core/captcha"
+	"github.com/shiroha-a/mk/internal/core/role"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
@@ -21,6 +22,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 // mockTicketStore is a test double for signup.TicketStore.
@@ -830,4 +832,103 @@ func TestSignup_EmailRequired_TicketResendWindow(t *testing.T) {
 	store.tickets["code1"].UsedAt = &old
 	rec3 := doPost(h.Signup, `{"username":"carol","password":"pass1234","emailAddress":"c@example.com","invitationCode":"code1"}`)
 	assert.Equal(t, http.StatusNoContent, rec3.Code, "30分経過後は再送可能")
+}
+
+// #2673: signup が返す policies は**実効値**でなければならない。素の default を
+// 返していたため、meta の base policy override も server cap も反映されず、
+// 作成直後の利用者に対して signup と /api/i が違う値を答えていた。
+//
+// upstream は SignupApiService が MeDetailed を pack し、UserEntityService が
+// `policies: roleService.getUserPolicies(user.id)` を埋める。
+//
+// **meta override を必ず入れること。** これを空にすると、素の default を返す
+// 実装でもテストが通ってしまい、検出したい乖離そのものを見逃す。
+func TestSignup_PoliciesAreEffectiveNotRawDefaults(t *testing.T) {
+	cases := []struct {
+		name          string
+		metaPolicies  string
+		serverMaxFile int
+		wantMaxFileMb int
+	}{
+		{
+			name:          "meta base override is reflected",
+			metaPolicies:  `{"maxFileSizeMb": 20}`,
+			wantMaxFileMb: 20,
+		},
+		{
+			name:          "server cap lowers the meta override",
+			metaPolicies:  `{"maxFileSizeMb": 500}`,
+			serverMaxFile: 10,
+			wantMaxFileMb: 10,
+		},
+		{
+			name:          "no override, no cap keeps the default",
+			wantMaxFileMb: role.DefaultPolicies()["maxFileSizeMb"].(int),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h, userRepo, metaRepo := newTestHandler(t)
+			if tc.metaPolicies != "" {
+				metaRepo.Meta.Policies = []byte(tc.metaPolicies)
+			}
+
+			roleRepo := testutil.NewMockRoleRepository()
+			// 条件ロールを 1 つ置く。作成直後の利用者はロールを持たないので、
+			// これが無いと GetUserPolicies("") と GetUserPolicies(userID) が
+			// 同じ値になり、**user ID を渡していない実装でもテストが通る**。
+			roleRepo.Roles["cond"] = &model.Role{
+				ID:          "cond",
+				Name:        "local",
+				Target:      model.RoleTargetConditional,
+				CondFormula: datatypes.JSON([]byte(`{"type":"isLocal"}`)),
+				Policies:    datatypes.JSON([]byte(`{"pinLimit":{"useDefault":false,"priority":0,"value":99}}`)),
+			}
+			roleSvc := role.NewService(roleRepo, testutil.NewMockRoleAssignmentRepository(roleRepo), metaRepo, mustIDGen(t))
+			roleSvc.SetUserRepo(userRepo)
+			if tc.serverMaxFile > 0 {
+				roleSvc.SetServerMaxFileSizeMb(tc.serverMaxFile)
+			}
+			h.SetUserPolicyResolver(roleSvc)
+
+			rec := doPost(h.Signup, `{"username":"effective","password":"password123"}`)
+			require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			policies, _ := resp["policies"].(map[string]any)
+			assert.EqualValues(t, tc.wantMaxFileMb, policies["maxFileSizeMb"],
+				"signup の policies が実効値になっていない")
+
+			// 条件ロールが効いていること = user ID が実際に渡されていること。
+			assert.EqualValues(t, 99, policies["pinLimit"],
+				"signup が user ID を渡していない (条件ロールが効いていない)")
+			// 手書きの期待値だけでなく、live な service の解決結果とも突き合わせる
+			// (oracle を 2 系統持つ)。/api/i ハンドラ自体は経由していない。
+			id, ok := resp["id"].(string)
+			require.True(t, ok, "signup のレスポンスに id が無い")
+			assert.EqualValues(t, roleSvc.GetUserPolicies(id)["maxFileSizeMb"], policies["maxFileSizeMb"],
+				"signup と GetUserPolicies が食い違う")
+		})
+	}
+}
+
+// 未配線なら従来どおり素の default (既存の配線を壊さない)。
+func TestSignup_PoliciesFallBackWhenResolverUnwired(t *testing.T) {
+	h, _, _ := newTestHandler(t)
+
+	rec := doPost(h.Signup, `{"username":"unwired","password":"password123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	policies, _ := resp["policies"].(map[string]any)
+	assert.EqualValues(t, role.DefaultPolicies()["maxFileSizeMb"], policies["maxFileSizeMb"])
+}
+
+func mustIDGen(t *testing.T) id.Generator {
+	t.Helper()
+	g, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	return g
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	apisignup "github.com/shiroha-a/mk/internal/api/signup"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -16,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
 
@@ -126,4 +128,52 @@ func TestApplicationRegister_ImmediateResponseShape(t *testing.T) {
 	// MeDetailed そのものを返す契約。profile 由来の field が欠けていないこと。
 	assert.Contains(t, resp, "injectFeaturedNote")
 	assert.Contains(t, resp, "autoAcceptFollowed")
+}
+
+// #2673: 承認制の登録経路も実効 policy を返す。signup と register の 2 経路が
+// あり、片方だけ直すのがこの種の修正で最もありがちな取りこぼしなので、
+// register 側も独立に固定する。
+func TestApplicationRegister_PoliciesAreEffective(t *testing.T) {
+	h, db, _ := newApprovalHandlerWithDB(t)
+
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{
+		ID:                        "x",
+		ApprovalRequiredForSignup: true,
+		Policies:                  []byte(`{"maxFileSizeMb": 20}`),
+	}
+	idGen, _ := id.NewGenerator("aidx")
+	roleRepo := repository.NewRoleRepository(db)
+	roleSvc := corerole.NewService(roleRepo, repository.NewRoleAssignmentRepository(db), metaRepo, idGen)
+	h.SetUserPolicyResolver(roleSvc)
+
+	// 条件ロールを 1 つ置く。これが無いと、作成直後の利用者はロールを持たないので
+	// GetUserPolicies("") と GetUserPolicies(userID) が同じ値になり、**user ID を
+	// 渡していない実装でもテストが通ってしまう**。isLocal は新規ローカル
+	// アカウントに一致するので、ID が実際に使われているかを分離できる。
+	// ID は helper の cleanup 規約 (itapi 接頭辞) に合わせる。合わせないと
+	// 行が残り、次回以降が重複キーで落ちる。
+	// 前回が異常終了して行が残っていても落ちないように、作る前にも消す。
+	// 残っていると重複キーで落ち、policy の regression に見える red が出る。
+	db.Exec(`DELETE FROM "role" WHERE id LIKE 'itapi%'`)
+	t.Cleanup(func() { db.Exec(`DELETE FROM "role" WHERE id LIKE 'itapi%'`) })
+	require.NoError(t, db.Create(&model.Role{
+		ID:          "itapi-cond-local",
+		Name:        "local",
+		Target:      model.RoleTargetConditional,
+		CondFormula: datatypes.JSON([]byte(`{"type":"isLocal"}`)),
+		Policies:    datatypes.JSON([]byte(`{"pinLimit":{"useDefault":false,"priority":0,"value":99}}`)),
+	}).Error)
+	roleSvc.SetUserRepo(repository.NewUserRepository(db))
+
+	rec := doPost(h.ApplicationRegister,
+		`{"claimCode":"itapi-code","username":"itapieff","password":"hunter22"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	resp := parseResp(t, rec)
+	policies, _ := resp["policies"].(map[string]any)
+	assert.EqualValues(t, 20, policies["maxFileSizeMb"],
+		"register 経路が meta の base override を反映していない")
+	assert.EqualValues(t, 99, policies["pinLimit"],
+		"register 経路が user ID を渡していない (条件ロールが効いていない)")
 }

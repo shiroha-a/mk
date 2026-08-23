@@ -64,6 +64,9 @@ type Handler struct {
 	// main publish) を発火する。upstream SignupApiService が signinService.signin を
 	// 呼ぶのに相当 (#1804)。未配線なら副作用なし。
 	signinRecorder SigninRecorder
+	// userPolicies は作成直後の利用者の**実効** policy を返す (#2673)。
+	// 未配線なら従来どおり素の default にフォールバックする。
+	userPolicies UserPolicyResolver
 	// applications は承認制の登録 (#2569)。未配線なら該当 endpoint は 503。
 	// ticketStore は承認済み申請の登録でも使う (内部で招待を発行して即消費する)。
 	applications SignupApplications
@@ -314,7 +317,7 @@ func (h *Handler) Signup(c echo.Context) error {
 	// 足して返すだけ。ここで signin を通すと login 通知が 1 件生まれ、作りたての
 	// アカウントの hasUnreadNotification / unreadNotificationsCount が upstream と
 	// 食い違う (#1804 の適用範囲を signup-pending に限定)。
-	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Profile, result.Token, h.idGen))
+	return c.JSON(http.StatusOK, packSignupResponse(result.User, result.Profile, result.Token, h.idGen, h.signupPolicies(result.User.ID)))
 }
 
 // SignupPending handles POST /api/signup-pending. Misskey TS 互換: code を
@@ -466,6 +469,29 @@ func (h *Handler) validateInvitationCode(code string, emailRequired bool) (*mode
 	return ticket, nil
 }
 
+// UserPolicyResolver resolves a user's effective role policies. Implemented by
+// role.Service.
+type UserPolicyResolver interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// SetUserPolicyResolver wires the effective-policy source for the signup
+// response.
+func (h *Handler) SetUserPolicyResolver(r UserPolicyResolver) { h.userPolicies = r }
+
+// signupPolicies returns the policies advertised in the signup response.
+//
+// **実効値を返すこと。** upstream の SignupApiService は MeDetailed を pack し、
+// UserEntityService が `policies: roleService.getUserPolicies(user.id)` を埋める。
+// ここで素の default を返すと、meta の base policy override も server cap も
+// 反映されず、作成直後の利用者に対して signup と /api/i が違う値を答える (#2673)。
+func (h *Handler) signupPolicies(userID string) map[string]any {
+	if h.userPolicies == nil {
+		return role.DefaultPolicies()
+	}
+	return h.userPolicies.GetUserPolicies(userID)
+}
+
 // packSignupResponse builds a MeDetailed + token response for a newly created user.
 //
 // upstream SignupApiService は `pack(account, account, {schema: 'MeDetailed',
@@ -473,9 +499,9 @@ func (h *Handler) validateInvitationCode(code string, emailRequired bool) (*mode
 // mk-go も同じ packer を通し、MeDetailed struct に無い /api/i 固有 field
 // (pinnedPage / clientData / room / securityKeysList 等) だけを新規ユーザーの
 // 既定値で補う。個別に map を組み立てていた頃は 24 個の field が欠けていた。
-func packSignupResponse(u *model.User, profile *model.UserProfile, token string, idGen id.Generator) map[string]any {
+func packSignupResponse(u *model.User, profile *model.UserProfile, token string, idGen id.Generator, policies map[string]any) map[string]any {
 	me := entity.PackMeDetailed(u, profile, idGen)
-	me.Policies = role.DefaultPolicies()
+	me.Policies = policies
 	b, _ := json.Marshal(me)
 	resp := map[string]any{}
 	_ = json.Unmarshal(b, &resp)
