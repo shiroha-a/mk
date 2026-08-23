@@ -4,7 +4,7 @@ Issue: #2672
 
 ## 目的
 
-native role policyから受け取った数値を`time.Duration`、byte数、件数、ID timestampなどの固定幅表現へ変換するとき、overflowによる符号反転、上限checkの迂回、実質的な無期限拒否、ID生成panicを防ぐ。
+native role policyから受け取った数値を`time.Duration`、byte数、件数、ID timestampなどの固定幅表現へ変換するとき、overflowによる符号反転、上限checkの迂回、表現範囲外factorの実質的な無期限拒否化、ID生成panicを防ぐ。
 
 policy集約時のhost `int`精度、小数値、通常範囲の単位と結果は変更しない。effective-policy provider、`chunkedUploadEnabled`、policyを返す3経路のserver cap整合は本設計の対象外とする。
 
@@ -25,10 +25,6 @@ policy集約時のhost `int`精度、小数値、通常範囲の単位と結果�
 これにより、native role policyの比較精度と型は既存契約のまま保ち、consumer固有の表現限界だけを局所化する。
 
 ## safemath API
-
-### 整数乗算
-
-`MulInt`と`MulInt64`は全符号組合せを受理する。数学的な積が表現範囲を超えた場合、正方向は`MaxInt64`、負方向は`MinInt64`へ飽和する。zeroと負の乗数を含め、wrapした値は返さない。
 
 ### float変換と乗算
 
@@ -62,6 +58,8 @@ multipart partsは`(size + chunkSize - 1) / chunkSize`を使わない。商を�
 
 invite cycleを現在時刻から引く処理は、すべて`NegateInt64`を経由して同じ表現に統一する。
 
+負の`inviteLimitCycle`はupstream互換のまま許容し、未来のcutoffになる。0へのclampは通常の負値に対する既存挙動とupstream互換性を変えるため、本設計では行わない。
+
 招待上限の`float64`から`int64`への変換は`Float64ToInt64`を使う。`MulFloat64(value, 1)`を変換APIとして流用しない。上限から既存件数を引く処理は、件数の符号反転と`AddInt64`を使い、overflow後に残数が増えないようにする。最終結果の0下限は維持する。
 
 ### Import件数
@@ -81,11 +79,15 @@ invite cycleを現在時刻から引く処理は、すべて`NegateInt64`を経�
 
 範囲外入力でも固定桁を維持し、末尾切り捨て、符号化wrap、`ulid.MustNew`のtimestamp panicを起こさない。範囲内のID形式とparse結果は変更しない。
 
+AID/AIDXの上限超過を最大値へ飽和する挙動は、安全側の意図的なupstream乖離とする。upstream AIDは固定長を超え、AIDXはtimestamp下位8桁へwrapするため、mk-goは固定長と時系列順序の維持を優先する。MEIDはupstreamの負時刻0 clampではなく、既存mk-goのsigned-offset round-tripを維持し、その12桁timestamp fieldの表現限界で飽和する。
+
 ### Rate limit
 
 `scaledMax(base, factor)`は`base / factor`を`Float64ToInt`で変換する。極小のpositive factorで結果がhost `int`を超える場合は`MaxInt`へ飽和し、factorが小さいほど緩和される除数semanticsを維持する。計算結果が1未満なら既存どおり1へclampする。
 
-`scaledMinInterval(base, factor)`は正方向overflowを`MaxInt64` durationへ変えない。乗算前に表現可能性を確認し、表現範囲を超える場合は`base`へ戻す。これにより約292年の実質永久拒否を作らない。
+`scaledMinInterval(base, factor)`は正方向overflowを`MaxInt64` durationへ変えない。乗算前に表現可能性を確認し、表現範囲を超える場合は`base`へ戻す。これは表現範囲外factorがoverflowまたは`MaxInt64` durationへの飽和によって実質永久拒否へ変わる経路を防ぐ。
+
+一方、`base=1s`、`factor=9223372036`のように表現可能範囲内で約292年になるintervalは、このguardの対象外である。運用上許容する最大windowは既存endpointの`limit.Duration`との関係を含む別の契約決定が必要なため、follow-up Issue #2679で上限を定義する。
 
 factorが0以下の場合は両関数とも既存どおり`base`を返す。NaNも不正値として`base`へ戻す。通常のpositive finite factorでは既存の除算・乗算結果を維持する。
 
@@ -113,8 +115,6 @@ DB、repository、API errorの分類は変更しない。内部数値や入力�
 table-driven testで次を固定する。
 
 - `MinInt64`、`MaxInt64`と境界直前
-- 乗算の正×正、正×負、負×正、負×負、zero
-- `MinInt64 * -1`
 - NaN、正負infinity、floatのhost int / int64境界
 - 加算の正負overflowと通常値
 - 非負sumのoverflow、limit一致、負値防御
@@ -131,12 +131,26 @@ table-driven testで次を固定する。
 
 mutationとして、飽和を通常演算へ戻す、`MinInt64`特例を削る、rate limit overflowを`MaxInt64`へ変える、ID clampを削る変更が対応testで失敗することを確認する。
 
+## Review対応
+
+PR #2675のreviewではproduction behaviorを追加変更せず、公開面、説明、portabilityを設計どおりに揃える。
+
+- callerのない`MulInt`と`MulInt64`および専用testを削除する
+- `internal/safemath`へpackage commentと、残るexported関数6個の英語GoDocを追加する
+- `internal/misc/id`へwire timestamp幅、変換前に`time.Time`で比較する理由、MEIDのsigned-offset維持理由を記録する
+- AID/AIDXの上限飽和を`docs/divergence.md`の安全側乖離へ追加する
+- `DriveFile.Size`へ入れるtest fixtureはhost幅の`math.MaxInt`を使い、`GOARCH=386`でもcompileできるようにする
+- `policyMegabytes`のboolが有効な正の上限を表すことを説明し、chunked uploadの古い`policyNumber`参照を直す
+- `scaledMax`のコメントへNaNを含め、同じhunkで外した既存の強調表記を戻す
+
+これらは通常範囲、境界値、client-facing error、upstream互換の挙動を変えない。
+
 ## Verification
 
 - affected packagesのLinux race testとcoverage
 - repository-wide Linux buildとvet
 - repository-wide gofmt
-- `GOARCH=386`の`safemath`、role、ID test
+- `GOARCH=386`の`safemath`、role、drive、ID test
 - repository gates
 - 各commitのLinux build
 
