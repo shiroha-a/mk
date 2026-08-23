@@ -479,6 +479,11 @@ server {
     proxy_read_timeout 1d;
     proxy_send_timeout 1d;
 
+    # 診断用の /debug/pprof を外に出さない (下記の注意点を参照)。
+    location /debug {
+        return 404;
+    }
+
     location / {
         proxy_pass http://mkgo;
         proxy_http_version 1.1;
@@ -497,6 +502,11 @@ server {
 - `client_max_body_size`はmk-goの`maxFileSize`設定 (デフォルト250MB) 以上に設定する
 - `proxy_read_timeout 1d`はWebSocket (`/streaming`)のために必要
 - `Upgrade`/`Connection`ヘッダーはWebSocketパススルーに必要
+- `location /debug`の404は**`location /`が全部を委譲する構成だから**要る。mk-goは
+  `enablePprof: true`のときだけ`/debug/pprof/*`を生やすが、有効化は運用者が診断のために
+  行う判断であって公開してよいという意味ではない。ここで落としておかないと、
+  一時的に有効化した瞬間に外からruntime内部 (goroutine / heap / 実行中のコマンドライン)
+  が読める。診断はUDSへ直接 (`curl --unix-socket`) 行う
 
 ### 上限を上げられない場合 (分割アップロード)
 
