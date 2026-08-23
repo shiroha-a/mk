@@ -54,3 +54,33 @@ func TestAssertExcept_OnlySkipsNamedFields(t *testing.T) {
 		t.Error("例外を渡さなければ欠落を報告すること")
 	}
 }
+
+// Assert は例外なしの AssertExcept と同じであること。
+//
+// **このパッケージにテストが無かったので CI の coverage 対象外だった**
+// (対象は `_test.go` を持つパッケージだけ)。AssertExcept を足したときに
+// 初めて対象になったので、Assert 側も固定しておく。
+func TestAssert_ReportsDriftAndPassesCleanResponse(t *testing.T) {
+	full := map[string]any{
+		"id": "1", "name": "ap:inbox", "timestamp": float64(1), "attempts": float64(0),
+		"delay": float64(0), "isFailed": false, "stacktrace": []any{},
+		"data": map[string]any{}, "opts": map[string]any{}, "progress": float64(0),
+		"failedReason": "", "returnValue": map[string]any{},
+	}
+	r := &recorder{TB: t}
+	shapetest.Assert(r, "QueueJob", full)
+	if r.errs != 0 {
+		t.Errorf("golden を満たす応答は報告しないこと: %d 件", r.errs)
+	}
+
+	partial := map[string]any{}
+	for k, v := range full {
+		partial[k] = v
+	}
+	delete(partial, "failedReason")
+	r2 := &recorder{TB: t}
+	shapetest.Assert(r2, "QueueJob", partial)
+	if r2.errs == 0 {
+		t.Error("required 欄の欠落を報告すること")
+	}
+}
