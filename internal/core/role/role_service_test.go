@@ -2,6 +2,8 @@ package role_test
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -9,10 +11,12 @@ import (
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+	"gorm.io/gorm"
 )
 
 func newTestService(t *testing.T) (*role.Service, *testutil.MockRoleRepository, *testutil.MockRoleAssignmentRepository, *testutil.MockMetaRepository) {
@@ -23,6 +27,126 @@ func newTestService(t *testing.T) (*role.Service, *testutil.MockRoleRepository, 
 	idGen, _ := id.NewGenerator("aidx")
 	svc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
 	return svc, roleRepo, assignRepo, metaRepo
+}
+
+type roleLookupResult struct {
+	role *model.Role
+	err  error
+}
+
+type sequenceRoleRepository struct {
+	repository.RoleRepository
+	results []roleLookupResult
+	calls   int
+}
+
+func (r *sequenceRoleRepository) FindByID(string) (*model.Role, error) {
+	result := r.results[min(r.calls, len(r.results)-1)]
+	r.calls++
+	return result.role, result.err
+}
+
+func newServiceWithRoleRepository(t *testing.T, roleRepo repository.RoleRepository, base *testutil.MockRoleRepository) *role.Service {
+	t.Helper()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(base)
+	metaRepo := testutil.NewMockMetaRepository()
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	return role.NewService(roleRepo, assignRepo, metaRepo, idGen)
+}
+
+func roleLookupCalls() []struct {
+	name string
+	call func(*role.Service) error
+} {
+	return []struct {
+		name string
+		call func(*role.Service) error
+	}{
+		{"assign", func(s *role.Service) error { return s.Assign("user", "role", nil) }},
+		{"show", func(s *role.Service) error { _, err := s.Show("role"); return err }},
+		{"list by role", func(s *role.Service) error { _, err := s.ListByRole("role", "", "", 10); return err }},
+		{"update fields", func(s *role.Service) error {
+			_, err := s.UpdateFields("role", map[string]any{"name": "new"})
+			return err
+		}},
+		{"delete", func(s *role.Service) error { return s.Delete("role") }},
+		{"find role", func(s *role.Service) error { _, err := s.FindRole("role"); return err }},
+	}
+}
+
+func TestRoleLookupsPreservePersistenceErrors(t *testing.T) {
+	wantErr := errors.New("role SELECT failed")
+	for _, tt := range roleLookupCalls() {
+		t.Run(tt.name, func(t *testing.T) {
+			base := testutil.NewMockRoleRepository()
+			repo := &sequenceRoleRepository{RoleRepository: base, results: []roleLookupResult{{err: wantErr}}}
+			err := tt.call(newServiceWithRoleRepository(t, repo, base))
+			assert.ErrorIs(t, err, wantErr)
+			assert.NotErrorIs(t, err, role.ErrRoleNotFound)
+		})
+	}
+}
+
+func TestRoleLookupsClassifyWrappedNotFound(t *testing.T) {
+	for _, tt := range roleLookupCalls() {
+		t.Run(tt.name, func(t *testing.T) {
+			base := testutil.NewMockRoleRepository()
+			repo := &sequenceRoleRepository{
+				RoleRepository: base,
+				results:        []roleLookupResult{{err: fmt.Errorf("lookup role: %w", gorm.ErrRecordNotFound)}},
+			}
+			err := tt.call(newServiceWithRoleRepository(t, repo, base))
+			assert.ErrorIs(t, err, role.ErrRoleNotFound)
+			assert.NotErrorIs(t, err, gorm.ErrRecordNotFound)
+		})
+	}
+}
+
+func TestFindRoleEmptyIDSkipsRepository(t *testing.T) {
+	base := testutil.NewMockRoleRepository()
+	repo := &sequenceRoleRepository{RoleRepository: base, results: []roleLookupResult{{err: errors.New("must not run")}}}
+	svc := newServiceWithRoleRepository(t, repo, base)
+	_, err := svc.FindRole("")
+	assert.ErrorIs(t, err, role.ErrRoleNotFound)
+	assert.Zero(t, repo.calls)
+}
+
+func TestUpdateFieldsPreservesReadbackFailures(t *testing.T) {
+	wantErr := errors.New("role readback failed")
+	for _, fields := range []map[string]any{nil, {"name": "new"}} {
+		base := testutil.NewMockRoleRepository()
+		base.Roles["role"] = &model.Role{ID: "role", Name: "old"}
+		repo := &sequenceRoleRepository{
+			RoleRepository: base,
+			results: []roleLookupResult{
+				{role: base.Roles["role"]},
+				{err: wantErr},
+			},
+		}
+		_, err := newServiceWithRoleRepository(t, repo, base).UpdateFields("role", fields)
+		assert.ErrorIs(t, err, wantErr)
+		assert.NotErrorIs(t, err, role.ErrRoleNotFound)
+		assert.Equal(t, 2, repo.calls)
+	}
+}
+
+func TestUpdateFieldsClassifiesReadbackNotFound(t *testing.T) {
+	for _, fields := range []map[string]any{nil, {"name": "new"}} {
+		base := testutil.NewMockRoleRepository()
+		base.Roles["role"] = &model.Role{ID: "role", Name: "old"}
+		repo := &sequenceRoleRepository{
+			RoleRepository: base,
+			results: []roleLookupResult{
+				{role: base.Roles["role"]},
+				{err: fmt.Errorf("read back role: %w", gorm.ErrRecordNotFound)},
+			},
+		}
+		_, err := newServiceWithRoleRepository(t, repo, base).UpdateFields("role", fields)
+		assert.ErrorIs(t, err, role.ErrRoleNotFound)
+		assert.NotErrorIs(t, err, gorm.ErrRecordNotFound)
+		assert.Equal(t, 2, repo.calls)
+	}
 }
 
 // FilterExistingRoleIDs は existing に含まれる id だけを順序保持で返し、

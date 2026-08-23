@@ -1207,9 +1207,9 @@ func aggregateChatAvailability(values []any) any {
 
 // Assign assigns a role to a user with an optional expiration.
 func (s *Service) Assign(userID, roleID string, expiresAt *time.Time) error {
-	role, err := s.roleRepo.FindByID(roleID)
+	assignedRole, err := s.findRoleByID(roleID)
 	if err != nil {
-		return ErrRoleNotFound
+		return err
 	}
 	exists, err := s.assignmentRepo.Exists(userID, roleID)
 	if err != nil {
@@ -1237,10 +1237,24 @@ func (s *Service) Assign(userID, roleID string, expiresAt *time.Time) error {
 	// public role の割当のみ通知する (upstream RoleService.assign の
 	// `if (role.isPublic && user.host === null)`)。local 判定は notifier 側の
 	// notifyLocalUser が host==nil で担保するので、ここでは isPublic だけ見る。
-	if role != nil && role.IsPublic && s.roleAssignNotifier != nil {
+	if assignedRole != nil && assignedRole.IsPublic && s.roleAssignNotifier != nil {
 		s.roleAssignNotifier.OnRoleAssigned(userID, roleID)
 	}
 	return nil
+}
+
+func (s *Service) findRoleByID(id string) (*model.Role, error) {
+	if id == "" {
+		return nil, ErrRoleNotFound
+	}
+	role, err := s.roleRepo.FindByID(id)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, ErrRoleNotFound
+		}
+		return nil, err
+	}
+	return role, nil
 }
 
 // Unassign removes a role from a user.
@@ -1329,14 +1343,7 @@ type CreateOptions struct {
 
 // Show returns a role by ID.
 func (s *Service) Show(id string) (*model.Role, error) {
-	r, err := s.roleRepo.FindByID(id)
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, ErrRoleNotFound
-		}
-		return nil, err
-	}
-	return r, nil
+	return s.findRoleByID(id)
 }
 
 // List returns all roles.
@@ -1384,8 +1391,8 @@ func FilterExistingRoleIDs(ids []string, existing map[string]bool) []string {
 // admin/roles/users 互換 envelope ({id, createdAt, user}) を組み立てるため
 // User だけでなく RoleAssignment 自体を返す。
 func (s *Service) ListByRole(roleID, untilID, sinceID string, limit int) ([]*model.RoleAssignment, error) {
-	if _, err := s.roleRepo.FindByID(roleID); err != nil {
-		return nil, ErrRoleNotFound
+	if _, err := s.findRoleByID(roleID); err != nil {
+		return nil, err
 	}
 	return s.assignmentRepo.ListByRole(roleID, untilID, sinceID, limit)
 }
@@ -1413,11 +1420,11 @@ func (s *Service) CountAssignedUsers(roleID string) int {
 // reads it back to render before/after diffs. We mirror that flow so
 // the moderation log can include both snapshots.
 func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, error) {
-	if _, err := s.roleRepo.FindByID(id); err != nil {
-		return nil, ErrRoleNotFound
+	if _, err := s.findRoleByID(id); err != nil {
+		return nil, err
 	}
 	if len(fields) == 0 {
-		return s.roleRepo.FindByID(id)
+		return s.findRoleByID(id)
 	}
 	if err := s.roleRepo.UpdateFields(id, fields); err != nil {
 		return nil, err
@@ -1431,13 +1438,13 @@ func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, e
 	// admin 経由 update は頻度が低いので、field 差分判定せず常に全 cache を
 	// flush する保守的選択を取る。
 	s.invalidateRolePolicyCaches(id)
-	return s.roleRepo.FindByID(id)
+	return s.findRoleByID(id)
 }
 
 // Delete removes a role.
 func (s *Service) Delete(id string) error {
-	if _, err := s.roleRepo.FindByID(id); err != nil {
-		return ErrRoleNotFound
+	if _, err := s.findRoleByID(id); err != nil {
+		return err
 	}
 	if err := s.roleRepo.Delete(id); err != nil {
 		return err
@@ -1529,10 +1536,7 @@ func MergeMetaPolicies(rawPolicies []byte) map[string]any {
 // 全件取ってから find するが、移行 1 回あたりの assignment 数は少ないので
 // id 引きで足りる。
 func (s *Service) FindRole(roleID string) (*model.Role, error) {
-	if roleID == "" {
-		return nil, ErrRoleNotFound
-	}
-	return s.roleRepo.FindByID(roleID)
+	return s.findRoleByID(roleID)
 }
 
 // IsAlreadyAssigned reports whether err means the user already has the role.
