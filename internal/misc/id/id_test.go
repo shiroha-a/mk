@@ -8,6 +8,76 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const testAIDMaxOffsetMillis int64 = 36*36*36*36*36*36*36*36 - 1
+
+var testAIDEpoch = time.Date(2000, 1, 1, 0, 0, 0, 0, time.UTC)
+
+func TestGenerators_ClampUpperTimestampWithoutChangingFormat(t *testing.T) {
+	tests := []struct {
+		method string
+		max    time.Time
+		step   time.Duration
+		length int
+		prefix string
+	}{
+		{"aid", testAIDEpoch.Add(time.Duration(testAIDMaxOffsetMillis) * time.Millisecond), time.Millisecond, 10, "zzzzzzzz"},
+		{"aidx", testAIDEpoch.Add(time.Duration(testAIDMaxOffsetMillis) * time.Millisecond), time.Millisecond, 16, "zzzzzzzz"},
+		{"meid", time.UnixMilli((1 << 47) - 1), time.Millisecond, 24, "ffffffffffff"},
+		{"objectid", time.Unix((1<<32)-1, 0), time.Second, 24, "ffffffff"},
+		{"ulid", time.UnixMilli((1 << 48) - 1), time.Millisecond, 26, "7ZZZZZZZZZ"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method, func(t *testing.T) {
+			generator, err := NewGenerator(tc.method)
+			require.NoError(t, err)
+			inside := generator.Generate(tc.max.Add(-tc.step))
+			atMax := generator.Generate(tc.max)
+			var beyond string
+			require.NotPanics(t, func() { beyond = generator.Generate(tc.max.Add(tc.step)) })
+			assert.Len(t, beyond, tc.length)
+			assert.Less(t, inside[:len(tc.prefix)], tc.prefix)
+			assert.Equal(t, tc.prefix, atMax[:len(tc.prefix)])
+			assert.Equal(t, tc.prefix, beyond[:len(tc.prefix)])
+			parsed, err := generator.ParseTime(beyond)
+			require.NoError(t, err)
+			assert.Equal(t, tc.max.UTC(), parsed.UTC())
+		})
+	}
+}
+
+func TestGenerators_ClampLowerTimestampWithoutChangingFormat(t *testing.T) {
+	tests := []struct {
+		method string
+		min    time.Time
+		step   time.Duration
+		length int
+		prefix string
+	}{
+		{"aid", testAIDEpoch, time.Millisecond, 10, "00000000"},
+		{"aidx", testAIDEpoch, time.Millisecond, 16, "00000000"},
+		{"meid", time.UnixMilli(-(1 << 47)), time.Millisecond, 24, "000000000000"},
+		{"objectid", time.Unix(0, 0), time.Second, 24, "00000000"},
+		{"ulid", time.UnixMilli(0), time.Millisecond, 26, "0000000000"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.method, func(t *testing.T) {
+			generator, err := NewGenerator(tc.method)
+			require.NoError(t, err)
+			atMin := generator.Generate(tc.min)
+			inside := generator.Generate(tc.min.Add(tc.step))
+			var before string
+			require.NotPanics(t, func() { before = generator.Generate(tc.min.Add(-tc.step)) })
+			assert.Len(t, before, tc.length)
+			assert.Equal(t, tc.prefix, atMin[:len(tc.prefix)])
+			assert.Equal(t, tc.prefix, before[:len(tc.prefix)])
+			assert.Greater(t, inside[:len(tc.prefix)], tc.prefix)
+			parsed, err := generator.ParseTime(before)
+			require.NoError(t, err)
+			assert.Equal(t, tc.min.UTC(), parsed.UTC())
+		})
+	}
+}
+
 func TestNewGenerator(t *testing.T) {
 	methods := []string{"aid", "aidx", "meid", "objectid", "ulid"}
 	for _, m := range methods {

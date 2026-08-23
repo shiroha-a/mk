@@ -13,8 +13,14 @@ import (
 	"github.com/oklog/ulid/v2"
 )
 
-// time2000 is the epoch used by AID/AIDX (2000-01-01T00:00:00Z in milliseconds).
-const time2000 int64 = 946684800000
+const (
+	time2000              int64 = 946684800000
+	aidMaxTimeMillis      int64 = time2000 + 36*36*36*36*36*36*36*36 - 1
+	meidMinTimeMillis     int64 = -(1 << 47)
+	meidMaxTimeMillis     int64 = (1 << 47) - 1
+	objectIDMaxTimeSecond int64 = (1 << 32) - 1
+	ulidMaxTimeMillis     int64 = (1 << 48) - 1
+)
 
 // AidxCutoffPrefix builds the smallest aidx-style ID at the given time
 // for use as a `WHERE id > ?` cutoff in note range scans (mk-go の note
@@ -26,14 +32,8 @@ const time2000 int64 = 946684800000
 // 使い、aidx 規約と齟齬が出ないよう time2000 / base36 padding は本
 // パッケージの実装と必ず一致させる。
 func AidxCutoffPrefix(t time.Time) string {
-	ms := t.UnixMilli() - time2000
-	if ms < 0 {
-		ms = 0
-	}
+	ms := clampUnixMillis(t, time2000, aidMaxTimeMillis) - time2000
 	timePart := fmt.Sprintf("%08s", strconv.FormatInt(ms, 36))
-	if len(timePart) > 8 {
-		timePart = timePart[len(timePart)-8:]
-	}
 	return timePart + "00000000"
 }
 
@@ -78,7 +78,7 @@ func newAID() *aidGen {
 }
 
 func (g *aidGen) Generate(t time.Time) string {
-	ms := t.UnixMilli() - time2000
+	ms := clampUnixMillis(t, time2000, aidMaxTimeMillis) - time2000
 	timePart := padLeft(strconv.FormatInt(ms, 36), 8, '0')
 
 	g.mu.Lock()
@@ -118,9 +118,8 @@ func newAIDX() *aidxGen {
 }
 
 func (g *aidxGen) Generate(t time.Time) string {
-	ms := t.UnixMilli() - time2000
+	ms := clampUnixMillis(t, time2000, aidMaxTimeMillis) - time2000
 	timePart := padLeft(strconv.FormatInt(ms, 36), 8, '0')
-	timePart = timePart[len(timePart)-8:]
 
 	g.mu.Lock()
 	g.counter++
@@ -153,7 +152,7 @@ func newMEID() *meidGen { return &meidGen{} }
 const meidOffset int64 = 0x800000000000
 
 func (g *meidGen) Generate(t time.Time) string {
-	ms := t.UnixMilli()
+	ms := clampUnixMillis(t, meidMinTimeMillis, meidMaxTimeMillis)
 	timePart := padLeft(strconv.FormatInt(ms+meidOffset, 16), 12, '0')
 	return timePart + randomHex(12)
 }
@@ -176,7 +175,7 @@ type objectIDGen struct{}
 func newObjectID() *objectIDGen { return &objectIDGen{} }
 
 func (g *objectIDGen) Generate(t time.Time) string {
-	sec := t.Unix()
+	sec := clampUnixSeconds(t, 0, objectIDMaxTimeSecond)
 	timePart := padLeft(strconv.FormatInt(sec, 16), 8, '0')
 	return timePart + randomHex(16)
 }
@@ -214,7 +213,8 @@ func newULID() *ulidGen {
 func (g *ulidGen) Generate(t time.Time) string {
 	// MustNewはentropyオーバーフロー時にpanicするが、80bit entropyが
 	// 同一ms内で使い切られるのは実用上起こらないので許容する。
-	return ulid.MustNew(ulid.Timestamp(t), g.entropy).String()
+	ms := clampUnixMillis(t, 0, ulidMaxTimeMillis)
+	return ulid.MustNew(uint64(ms), g.entropy).String()
 }
 
 func (g *ulidGen) ParseTime(id string) (time.Time, error) {
@@ -229,6 +229,26 @@ func (g *ulidGen) ParseTime(id string) (time.Time, error) {
 }
 
 // --- Helpers ---
+
+func clampUnixMillis(t time.Time, min, max int64) int64 {
+	if t.Before(time.UnixMilli(min)) {
+		return min
+	}
+	if t.After(time.UnixMilli(max)) {
+		return max
+	}
+	return t.UnixMilli()
+}
+
+func clampUnixSeconds(t time.Time, min, max int64) int64 {
+	if t.Before(time.Unix(min, 0)) {
+		return min
+	}
+	if t.After(time.Unix(max, 0)) {
+		return max
+	}
+	return t.Unix()
+}
 
 func padLeft(s string, length int, pad byte) string {
 	for len(s) < length {

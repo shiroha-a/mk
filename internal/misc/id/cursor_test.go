@@ -2,9 +2,16 @@ package id
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func TestAidxCutoffPrefix_ClampsUpperTimestamp(t *testing.T) {
+	max := time.UnixMilli(time2000 + testAIDMaxOffsetMillis)
+	assert.Equal(t, "zzzzzzzz00000000", AidxCutoffPrefix(max))
+	assert.Equal(t, AidxCutoffPrefix(max), AidxCutoffPrefix(max.Add(time.Millisecond)))
+}
 
 func TestNormalizeCursor_BothEmptyReturnsEmpty(t *testing.T) {
 	s, u := NormalizeCursor("", "", nil, nil)
