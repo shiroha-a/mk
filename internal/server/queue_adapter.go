@@ -175,5 +175,6 @@ func taskSummaryToAdmin(t *queue.TaskSummary) *apiadmin.QueueTaskSummary {
 		Stacktrace:    t.Stacktrace,
 		ReturnValue:   t.ReturnValue,
 		Progress:      t.Progress,
+		AttemptsAt:    t.AttemptsAt,
 	}
 }

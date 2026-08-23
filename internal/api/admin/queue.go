@@ -889,6 +889,12 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 		// progress は Bull だと既定 0 (数値)。frontend は数値のときだけ
 		// パーセント表示する。
 		"progress": rawJSONOr(t.Progress, float64(0)),
+		// attemptsAt は upstream に無い mk-go 独自 field (#2692)。job 詳細の
+		// Timeline が再試行を実時刻で並べるのに使う。BullMQ は per-attempt の
+		// 時刻を残さないので upstream の frontend は試行を `at ?` と出している。
+		// **記録が無い job では空配列**になる (mkq v1.0.8 より前に失敗したもの、
+		// TS が書いたもの)。frontend はその場合に従来どおり折りたたむ。
+		"attemptsAt": attemptsAtOrEmpty(t.AttemptsAt),
 		// asynq-native field (既存 admin tool 互換のために残す)。
 		"queue":   t.Queue,
 		"type":    t.Type,
@@ -956,6 +962,17 @@ func packJobData(t *QueueTaskSummary) map[string]any {
 	// Type が空になることは無い。mkq driver は framing が無ければ BullMQ の
 	// job.name に落とし、その既定は queue 名。asynq も TaskInfo.Type を必ず持つ。
 	return map[string]any{"type": t.Type, "body": body}
+}
+
+// attemptsAtOrEmpty normalises the attempt-start list for JSON.
+//
+// **nil を出さない。** null にすると配列を期待する frontend が
+// `job.attemptsAt.length` で落ちる。
+func attemptsAtOrEmpty(v []int64) []int64 {
+	if v == nil {
+		return []int64{}
+	}
+	return v
 }
 
 // maxRetryFor reports the job's configured attempt limit, preferring the

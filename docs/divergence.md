@@ -34,7 +34,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 24 tag (`-mk.0` ～ `-mk.22a`) | — | — |
+| fork frontend の独自変更 | 25 tag (`-mk.0` ～ `-mk.22b`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -71,6 +71,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `admin/federation/inbox-health` | endpoint 全体 | `delivery-health` の受信側 (#2471)。upstream は受信結果を一切残さないため対応物が無い。inbox processor が活動を捨てる 5 分岐 (署名検証失敗 / ブロック済みホスト / actor 認可失敗 / LD-Signature 検証失敗 / 未対応 activity) を分類して集計する。**ブロック済みホストは元の実装がログすら出さない**ので、ここが唯一の観測点になる。受信側は accepted と unsupported を「受理」に数える (unsupported は相手が正しく送っておりこちらが未対応なだけ)。集約基盤は送信側と共有し、Redis のキー空間だけを分ける |
 | `admin/federation/delivery-health` | endpoint 全体 | 配送先ホストごとの成功/失敗の内訳・レイテンシ分布 (p50 / p95 の近似)・直近エラーを返す mk-go 独自 endpoint (#2461)。upstream は配送結果を `instance.isNotResponding` の真偽値にしか残さないため対応物が無い。deliver processor が既に撃ち分けている 6 分類 (success / gone / rateLimited / clientError / serverError / transport) をそのまま集計する。**観測のみで配送を止める判断は含まない**。scope は `read:admin:server-info` を再利用する (`internal/misc/permissions` は upstream misskey-js と完全一致させる契約で mk-go 固有 scope を足せないため、同じく独自 endpoint の `admin/server-metrics` に倣う) |
 | `admin/queue/queues` / `admin/queue/queue-stats` | `runtime` | worker 現在数 / auto-scale 範囲・有効性 / dispatch wait・processing の分位数 / 直近失敗数 / scale 履歴。upstream は worker 数を静的 config でしか持たず該当情報が無い。provider 未配線・未知 queue では block ごと省く (#2277) |
+| `admin/queue/show-job` / `admin/queue/jobs` | `attemptsAt` | 試行ごとの開始時刻 (unix ミリ秒、古い順)。**BullMQ は per-attempt の時刻を残さない**ので upstream には対応物が無く、job 詳細の Timeline は試行を `at ?` と表示している。mkq が `mkqAttemptsAt` HASH field に記録する (mkq v1.0.8)。未知 field は BullMQ / bull-board が無視するので wire 互換は保たれる。**記録が入る前に失敗した job には無い** (遡って埋められない) ので、その場合は空配列 (#2692) |
 | `admin/queue/show-job` / `admin/queue/jobs` | `data` | mk-go は payload を `{"type": …, "body": <base64>}` で包んで保存するので、upstream のように Bull の `job.data` をそのまま返すと Data タブが base64 の塊になって読めない。**包みの形は保ったまま `body` だけ decode して返す** (#2689)。upstream の job data はそのまま読める形なので、この包みは mk-go 固有 |
 | `admin/queue/show-job` / `admin/queue/jobs` | `failedReason` / `returnValue` | **golden (upstream の宣言 schema) は required だが、upstream の実装自身が満たしていない。** Bull の job は失敗するまで `failedReason` を持たないので upstream の `packJobData` は `undefined` を返し、JSON からは消える。frontend は `v-if="job.failedReason != null"` / `job.returnValue != null` で出し分けるため、schema に寄せて空文字や `{}` を常に出すと**成功した job にも赤い警告アイコン付きの空の Failed reason 行と空の Return value タブ**が出る。upstream の**実装**に合わせて値が無ければ出さない (#2689)。golden は生成物なので直さず、テストは `shapetest.AssertExcept` で理由付きに例外化する |
 | `/api/meta` (+ SSR 埋め込み meta) | `mkGoVersion` | mk-go の実装バージョン。`version` は drop-in 互換のため**互換 Misskey バージョン**を返す契約 (第三者クライアントの feature detection / frontend `_error_.vue` の版ずれ検出が依存) なので別 field にした (#2274) |
@@ -296,6 +297,7 @@ submodule bump の PR で人が見る。
 | `2026.7.0-mk.21` | 申請の登録で返りうるエラーコードを表示する |
 | `2026.7.0-mk.22` | 承認済みの登録をメール確認に対応させる |
 | `2026.7.0-mk.22a` | ジョブキューの Timeline から架空の試行時刻を消す (#2689)。バグ修正はこれ以降 `mk.<N><英字>` で刻む |
+| `2026.7.0-mk.22b` | ジョブキューの Timeline に再試行を実時刻で並べる (#2692)。`mk.22a` で行ごと消してしまい再試行が見えなくなっていたのを、mkq が記録するようになった実時刻で戻す |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -338,7 +340,7 @@ submodule bump の PR で人が見る。
 | 箇所 | 変更 |
 |---|---|
 | `pages/admin/job-queue.vue` | queue 一覧カードに Workers 行、Overview に auto-scale 状態 / dispatch wait / processing の p50・p95 / 直近失敗数 / scale 履歴を追加 |
-| `pages/admin/job-queue.job.vue` | Timeline から試行ごとのイベントを削除し、試行回数を Processed 行に添える。upstream は `timestamp + i` という架空の時刻 (作成 i ミリ秒後) でイベントを作り表示だけ `at ?` にしていたが、Bull は attempt ごとの時刻を保存しないので**並べるための時刻がそもそも無い**。全試行が「作成直後」に固まって時系列として嘘になり `(+delta)` も無意味だった (#2689) |
+| `pages/admin/job-queue.job.vue` | Timeline の試行を `attemptsAt` の実時刻で並べる。upstream は `timestamp + i` という架空の時刻 (作成 i ミリ秒後) でイベントを作り表示だけ `at ?` にしていたが、Bull は attempt ごとの時刻を保存しないので**並べるための時刻がそもそも無い**。全試行が「作成直後」に固まって時系列として嘘になり `(+delta)` も無意味だった (#2689)。mkq が記録するようになったので実時刻で出す (#2692)。記録が無い job は回数だけを Processed 行に添える (架空の時刻には戻さない) |
 
 `runtime` block が無い応答 (純正 backend) では該当 UI を出さない。
 

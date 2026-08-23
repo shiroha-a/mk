@@ -1529,3 +1529,32 @@ func TestQueuePauseResume_UpstreamNamesAndUnknown(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest,
 		doPost(h.QueueResume, `{"queue":"nosuchqueue"}`, adminUser).Code)
 }
+
+// 試行ごとの開始時刻を応答に載せること (#2692)。BullMQ は per-attempt の時刻を
+// 残さないので、mkq の拡張として記録したものをそのまま出す。Timeline はこれで
+// 再試行を実時刻に並べる。
+func TestQueueShowJob_AttemptsAt(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&stubQueueInspector{
+		task: map[string]*apiadmin.QueueTaskSummary{
+			"retried": {ID: "retried", Queue: "inbox", Type: "ap:inbox", State: "failed",
+				AttemptsAt: []int64{1000, 2000, 3000}},
+			// mkq v1.0.8 より前に失敗した job / TS が書いた job。
+			"legacy": {ID: "legacy", Queue: "inbox", Type: "ap:inbox", State: "failed"},
+		},
+	})
+
+	rec := doPost(h.QueueShowJob, `{"queue":"inbox","id":"retried"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	assert.Equal(t, []any{float64(1000), float64(2000), float64(3000)}, got["attemptsAt"])
+
+	// **記録が無くても null にしない。** 配列を期待する frontend が
+	// `job.attemptsAt.length` で落ちる。
+	rec2 := doPost(h.QueueShowJob, `{"queue":"inbox","id":"legacy"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec2.Code)
+	var got2 map[string]any
+	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &got2))
+	assert.Equal(t, []any{}, got2["attemptsAt"])
+}

@@ -489,6 +489,7 @@ func jobToSummary(queue, state string, job *mkq.Job[framedPayload], st *mkq.JobS
 		s.Stacktrace = st.Stacktrace
 		s.ReturnValue = st.ReturnValue
 		s.Progress = st.Progress
+		s.AttemptsAt = st.AttemptsAt
 		// CompletedAt は asynq driver と揃えて「成功完了したジョブ」
 		// のみセット。failed (FailedReason != "") の場合は LastFailedAt
 		// 側に出すので、ここでは触らない。admin UI が completedAt 列を

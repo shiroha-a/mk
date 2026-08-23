@@ -110,6 +110,15 @@ type TaskSummary struct {
 	ReturnValue json.RawMessage
 	// Progress is the raw BullMQ `progress` JSON (数値 / 文字列 / object)。
 	Progress json.RawMessage
+	// AttemptsAt holds the start time of every failed attempt, oldest first,
+	// in unix milliseconds.
+	//
+	// **BullMQ には無い。** BullMQ は per-attempt の時刻を残さないので、
+	// 再試行を時系列に並べたい admin UI は置く時刻を持てない (upstream
+	// Misskey の job 詳細が試行を `at ?` と出しているのはこれが理由)。
+	// mkq が拡張として記録する (#2692)。持たない driver / 記録前に失敗した
+	// job では空。
+	AttemptsAt []int64
 }
 
 // Inspector exposes admin-level queue introspection used by the

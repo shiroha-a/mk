@@ -586,6 +586,9 @@ type QueueTaskSummary struct {
 	Stacktrace  []string
 	ReturnValue json.RawMessage
 	Progress    json.RawMessage
+	// AttemptsAt は試行ごとの開始時刻 (unix ミリ秒、古い順)。mkq の拡張で、
+	// upstream には対応物が無い (#2692)。
+	AttemptsAt []int64
 }
 
 // SetDriveFileRepo attaches a DriveFileRepository for admin drive operations.
