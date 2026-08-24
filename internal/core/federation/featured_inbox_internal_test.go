@@ -1,6 +1,7 @@
 package federation
 
 import (
+	"runtime"
 	"testing"
 	"time"
 
@@ -139,13 +140,16 @@ func newAliasEnv(t *testing.T, actorURI, name, aliasURI, noteURI string) (*Resol
 	return r, noteRepo
 }
 
-// 取得後の判定は **best-effort な枝だけ**に効くこと (#2695)。
+// 取得後の判定は **featured の取り込みから入った呼び出しだけ**に効くこと (#2695)。
 //
 // featured のピンをこの回だけ落とすのは、次の actor 更新で拾い直せるから許せる。
 // 同じことを引用経路でやると `renoteId` が nil のまま保存され、再取り込みは
 // resolveNoteOnce も ingestNoteWithCreated も FindByURI で早期 return するので
-// **恒久的に失われる** (#2684 review R2 HIGH-1 と同じ型)。直そうとしたバグより
-// 実害が大きくなるため、`!chain.mayWait()` の限定を外してはいけない。
+// **恒久的に失われる** (#2684 review R2 HIGH-1 と同じ型)。
+//
+// 引用経路が本当に守られているかは、`resolveNoteOnce` を直接呼んでも分からない
+// (入口の情報が引数にしか無い)。実経路での固定は
+// TestIngestNote_PinnedNoteQuotingTheIngestedNoteKeepsRenoteID が行う。
 func TestResolveNoteOnce_AncestorIngestingGateIsBestEffortOnly(t *testing.T) {
 	const (
 		actorURI = "https://remote.example/users/mira"
@@ -157,9 +161,11 @@ func TestResolveNoteOnce_AncestorIngestingGateIsBestEffortOnly(t *testing.T) {
 		return (&resolveChain{}).with(noteURI, noteURI).ensureTree()
 	}
 
+	// **best-effort な印を持つチェーンでも、入口が featured でなければ効かない。**
+	// 印は枝ごと引き継がれるので、featured の内側で走る引用解決もこの形になる。
 	t.Run("quote path ingests anyway", func(t *testing.T) {
 		r, noteRepo := newAliasEnv(t, actorURI, "mira", aliasURI, noteURI)
-		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, ancestor())
+		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, false, ancestor().asBestEffort())
 		require.NoError(t, err, "引用経路で諦めている (renoteId を恒久的に落とす)")
 		require.NotNil(t, note)
 		assert.Len(t, noteRepo.Notes, 1)
@@ -167,7 +173,7 @@ func TestResolveNoteOnce_AncestorIngestingGateIsBestEffortOnly(t *testing.T) {
 
 	t.Run("featured path gives up", func(t *testing.T) {
 		r, noteRepo := newAliasEnv(t, actorURI, "mira", aliasURI, noteURI)
-		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, ancestor().asBestEffort())
+		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, true, ancestor())
 		require.ErrorIs(t, err, ErrNoteAncestorIngesting)
 		assert.Nil(t, note)
 		assert.Empty(t, noteRepo.Notes, "祖先の取り込みを横取りしないこと")
@@ -182,7 +188,7 @@ func TestResolveNoteOnce_AncestorIngestingGateIsBestEffortOnly(t *testing.T) {
 		uri := noteURI
 		require.NoError(t, noteRepo.Create(&model.Note{ID: "9mira0000000000000000", UserID: user.ID, URI: &uri}))
 
-		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, ancestor().asBestEffort())
+		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, true, ancestor())
 		require.NoError(t, err)
 		require.NotNil(t, note)
 		assert.Equal(t, "9mira0000000000000000", note.ID)
@@ -222,8 +228,19 @@ func TestJoinResolveOpt_JoinerRedoesAChainLocalGiveUp(t *testing.T) {
 				return "resolved", nil
 			})
 	}()
-	// 追従側が先頭にぶら下がってから先頭を返す。
-	time.Sleep(50 * time.Millisecond)
+	// **sleep で待たない。** 追従側が 50ms 以内にスケジュールされないと先頭が先に
+	// 返り、追従側は自分が先頭になるだけでやり直し経路を通らない。それでも全ての
+	// assert は成立するので、**落ちる flaky ではなく黙って検査をやめる flaky**に
+	// なる (#2710 review MEDIUM-3)。group に登録されたことを直接見る。
+	for {
+		g.mu.Lock()
+		joined := g.m["k"] != nil && len(g.m["k"].waiters) == 1
+		g.mu.Unlock()
+		if joined {
+			break
+		}
+		runtime.Gosched()
+	}
 	close(leaderGo)
 
 	select {
@@ -234,4 +251,49 @@ func TestJoinResolveOpt_JoinerRedoesAChainLocalGiveUp(t *testing.T) {
 	require.NoError(t, gotErr, "先頭のチェーン固有の判定を追従側が受け取っている (#2695)")
 	assert.Equal(t, "resolved", got)
 	assert.Equal(t, 1, joinerRan, "追従側は 1 度だけやり直すこと")
+}
+
+// featured のピンが「いま取り込んでいる投稿」を**別名 URL で引用**していても、
+// その引用を落とさないこと (#2710 review HIGH-1)。
+//
+// best-effort の印は枝ごと引き継がれるので、featured の取り込みの**内側**で走る
+// 引用解決も `chain.mayWait()==false` になる。取得後の判定を chain の印で行うと
+// ここに効いてしまい、ピン P が `renoteId=nil` のまま保存される。再取り込みは
+// FindByURI で早期 return するので**恒久的に失われる**。
+//
+// 入口が featured かどうかは resolveNoteDepthOpt の mayWait しか知らないので、
+// 判定はそれを引数で受け取る。
+func TestIngestNote_PinnedNoteQuotingTheIngestedNoteKeepsRenoteID(t *testing.T) {
+	const (
+		actorURI = "https://remote.example/users/nova"
+		featured = "https://remote.example/users/nova/collections/featured"
+		noteN    = "https://remote.example/notes/n1"
+		aliasN   = "https://remote.example/@nova/n1"
+		noteP    = "https://remote.example/notes/p1"
+	)
+	noteRepo := testutil.NewMockNoteRepository()
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	fetcher := &countingFetcher{docs: map[string]string{
+		actorURI: featuredActorDoc("remote.example", "nova", featured),
+		featured: `{"@context":"https://www.w3.org/ns/activitystreams","id":"` + featured +
+			`","type":"OrderedCollection","orderedItems":["` + noteP + `"]}`,
+		noteP: quoteNoteDoc(noteP, actorURI, aliasN),
+		// 引用先は N の別名。document の id は canonical なので、チェーンに載って
+		// いる N の id と**取得後に**一致する。
+		aliasN: plainNoteDoc(noteN, actorURI),
+	}}
+	r := NewResolver(testutil.NewMockUserRepository(), noteRepo,
+		activitypub.NewURLBuilder("https://example.com"), fetcher, idGen)
+	r.SetPinningRepo(testutil.NewMockUserNotePiningRepository(), idGen)
+
+	_, _, err = r.IngestNoteWithCreated([]byte(plainNoteDoc(noteN, actorURI)), actorURI)
+	require.NoError(t, err)
+
+	pin, err := noteRepo.FindByURI(noteP)
+	require.NoError(t, err)
+	require.NotNil(t, pin, "ピンが取り込まれていない (前提が崩れている)")
+	require.NotNil(t, pin.RenoteID,
+		"ピンの引用先が落ちている: 取得後の判定が引用経路へ波及している (#2710 review HIGH-1)")
+	assert.NotEmpty(t, *pin.RenoteID)
 }

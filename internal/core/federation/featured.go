@@ -215,9 +215,14 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 				// **諦める前に既存行を引く。** in-flight 枝と同じ理由で、
 				// ここで落とすと ReplaceByUser が集合ごと書き直して
 				// **生きているピンが消える** (#2685 review MEDIUM-1)。
-				// 別名 URL のときは resolveNoteOnce 側が document id でも
-				// 引いて返すので、ここまで来て nil ならその回は諦めてよい
-				// (#2695)。
+				// **別名 URL で引けるのは resolveNoteOnce が probe まで
+				// 到達した場合だけ。** 待ちを断った枝 (ErrResolveWouldBlock /
+				// ErrResolveWouldDeadlock / ErrResolveJoinTimeout) や fetch 失敗
+				// では document id が判らないので、ここは取得 URI でしか引けず
+				// 空振りする。その結果この回のピンが 0 件になると ReplaceByUser
+				// (delete-then-insert) が**生きているピンを消す** — #2685 review
+				// MEDIUM-1 が潰した損失が、別名 URL では残っている
+				// (#2710 review MEDIUM-2)。
 				if note = r.noteByAnyURI(uri, ""); note == nil {
 					continue
 				}

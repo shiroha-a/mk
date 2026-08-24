@@ -155,9 +155,16 @@ func (r *Resolver) joinResolveOpt(g *resolveGroup, chain *resolveChain, waitKey,
 	// 先頭が**自分のチェーンの都合**で降りた。こちらには当てはまらないので
 	// やり直す。先頭は既に鍵を手放しているので、今度は自分が先頭になる。
 	//
-	// **やり直しは 1 度だけ。** 2 度目も同じものを引くには、別の best-effort な
-	// チェーンが同じ瞬間に同じ鍵の先頭になっている必要がある。回数を増やすより、
-	// 上限を固定して呼び出し側にエラーを返すほうが挙動を読みやすい。
+	// **やり直しは 1 度だけ** (ループではなく 2 回目の呼び出しで打ち切る)。2 度目も
+	// 同じものを引くには、別の best-effort なチェーンが同じ瞬間に同じ鍵の先頭に
+	// なっている必要がある。回数を増やすより、上限を固定して呼び出し側にエラーを
+	// 返すほうが挙動を読みやすい。**この上限はテストで固定できていない** —
+	// 2 度目の呼び出しでは追従側が必ず先頭になるため、回数を増やす変異が観測
+	// できない (#2710 review LOW-2)。
+	//
+	// **やり直しは fn の再実行**なので、note 経路では HTTP fetch が 1 回増える
+	// (#2710 review LOW-3)。発火条件が「best-effort な先頭がチェーン固有の理由で
+	// 降りた」に限られ上限も 1 なので、相手方データで増幅はできない。
 	slog.Debug("federation: redoing a resolve the leader dropped for chain-local reasons", "key", key)
 	v, err, _ = r.joinResolveOnce(g, chain, waitKey, key, mayWait, fn)
 	return v, err

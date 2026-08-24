@@ -144,6 +144,9 @@ func (c *resolveChain) chargeWait(d time.Duration) {
 // 同じ鍵に見える。祖先が載せたものは `chainAfterProbe` / `ingestNoteWithCreated`
 // の `with(id, id)` なので値が入っている。値の有無でその 2 つを分ける (#2695)。
 func (c *resolveChain) ingestedDocID(docID string) (string, bool) {
+	// **届かない防御。** with は空の鍵を弾くので ids に空鍵は入らず、この分岐を
+	// 消しても挙動は変わらない (#2710 review LOW-1)。lookup の実装が変わったとき
+	// に「空鍵が全件に一致する」形へ倒れないよう残してある。
 	if docID == "" {
 		return "", false
 	}

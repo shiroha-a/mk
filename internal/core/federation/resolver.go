@@ -108,9 +108,12 @@ var (
 	// 循環検出の**保険**。検出はモデル化した待ちしか見ないので、載っていない
 	// 待ちが増えれば見逃す。見逃しても永久には止まらないようにする。
 	ErrResolveJoinTimeout = errors.New("resolving timed out waiting for an in-flight resolve")
-	// ErrNoteAncestorIngesting is returned to a best-effort caller when the
+	// ErrNoteAncestorIngesting is what a best-effort resolve returns when the
 	// document it fetched is already being ingested by an ancestor of the same
 	// resolve chain, and no row exists yet to fall back to (#2695).
+	//
+	// **相乗りした別チェーンにも届きうる** (group は先頭の返り値を配る)。それは
+	// 受け取った側の話ではないので、下記の印を見て 1 度だけやり直させる。
 	//
 	// **取り込みを横取りしない**ためのもの。横取りすると外側の `Create` が
 	// UNIQUE に当たって `created=false` になり、呼び出し側が通知とチャートの
@@ -2050,7 +2053,7 @@ func (r *Resolver) resolveNoteDepthOpt(uri string, depth int, allowCrossHost, ep
 	// inner が nil のことがある。木の識別子はここで確定させる。
 	inner = inner.ensureTree()
 	v, err := r.joinResolveOpt(&r.resolveNoteGroup, inner, noteWaitKey(key), key, mayWait, func() (any, error) {
-		return r.resolveNoteOnce(uri, depth, allowCrossHost, ephemeral, inner)
+		return r.resolveNoteOnce(uri, depth, allowCrossHost, ephemeral, !mayWait, inner)
 	})
 	if err != nil {
 		return nil, err
@@ -2127,7 +2130,7 @@ func (r *Resolver) noteByAnyURI(uri, docID string) *model.Note {
 // resolveNoteOnce is the body of resolveNoteDepth, invoked once per URI by
 // resolveGroup. depth は quote chain の現在の深さ。allowCrossHost は
 // user-initiated ap/show 経路でのみ true。
-func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, ephemeral bool, chain *resolveChain) (*model.Note, error) {
+func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, ephemeral, bestEffortEntry bool, chain *resolveChain) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
 	}
@@ -2225,12 +2228,17 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	// (`https://h/@user/x` を取りに行って document の id が `https://h/notes/x`)。
 	// id はここまで来ないと分からない。
 	//
-	// **best-effort な枝 (featured の取り込み) に限る。** ここで諦めると
-	// 呼び出し側は「そのピンを 1 件落とす」だけで、次の actor 更新で拾い直せる。
-	// 一方 quote 経路で諦めると `renoteId` が nil のまま保存され、再取り込みは
-	// FindByURI で早期 return するので**恒久的に失われる** (#2684 review R2
-	// HIGH-1 と同じ型)。直そうとしたバグより実害が大きくなるので広げない。
-	if !chain.mayWait() {
+	// **featured の取り込みから入った呼び出しに限る。** ここで諦めると呼び出し側は
+	// 「そのピンを 1 件落とす」だけで、次の actor 更新で拾い直せる。一方 quote 経路で
+	// 諦めると `renoteId` が nil のまま保存され、再取り込みは FindByURI で早期
+	// return するので**恒久的に失われる** (#2684 review R2 HIGH-1 と同じ型)。
+	//
+	// **判定に chain.mayWait() を使わない。** best-effort の印は枝ごと引き継がれる
+	// ので、featured の取り込みの**内側**で走る引用解決も印を持ってしまい、
+	// 上の「限定」が効かない。実測で、取り込み中の note を featured のピンが別名
+	// URL で引用しているだけで renoteId が落ちた (#2710 review HIGH-1)。入口が
+	// 何だったかは resolveNoteDepthOpt の mayWait が持っているので、それを渡す。
+	if bestEffortEntry {
 		if ancestorID, ingesting := chain.ingestedDocID(idProbe.ID); ingesting {
 			// 既に行があるならそれで足りる (取り込み済みのピンを落とさない)。
 			if n := r.noteByAnyURI(uri, ancestorID); n != nil {
