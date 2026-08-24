@@ -17,7 +17,6 @@ import (
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
-	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -54,8 +53,9 @@ func postExtra(h func(echo.Context) error, body string, user *model.User) *httpt
 	return rec
 }
 
-func setupUserWithPassword(repo *testutil.MockUserRepository, uid, plain string) *model.User {
-	hashStr, _ := password.Hash(plain)
+func setupUserWithPassword(repo *testutil.MockUserRepository, uid, password string) *model.User {
+	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	hashStr := string(hash)
 	token := "tok12345678901234"
 	user := &model.User{ID: uid, Username: uid, Token: &token}
 	repo.Users[uid] = user
