@@ -969,3 +969,9 @@ func acctOf(u *model.User) string {
 	}
 	return acct
 }
+
+// HasRolePolicyProvider reports whether the role policy provider was wired.
+//
+// 未配線だと `antennaLimit` が効かず、アンテナを無制限に作れる。起動時検査に
+// 使う (#2683)。
+func (s *Service) HasRolePolicyProvider() bool { return s.rolePolicyProvider != nil }

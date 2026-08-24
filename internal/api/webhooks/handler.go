@@ -347,3 +347,9 @@ func dummyWebhookBody(eventType string) map[string]any {
 		return map[string]any{"note": dummyNote}
 	}
 }
+
+// HasRolePolicyProvider reports whether the role policy provider was wired.
+//
+// 未配線だと `webhookLimit` が効かず、webhook を無制限に作れる。起動時検査に
+// 使う (#2683)。
+func (h *Handler) HasRolePolicyProvider() bool { return h.rolePolicyProvider != nil }

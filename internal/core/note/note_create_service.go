@@ -1455,3 +1455,10 @@ func (s *CreateService) HasMetaRepo() bool { return s.metaRepo != nil }
 
 // HasSilencingProvider reports whether the silencing provider was wired.
 func (s *CreateService) HasSilencingProvider() bool { return s.silencingProvider != nil }
+
+// HasDriveFileRepo reports whether the drive file repository was wired.
+//
+// 未配線だと `checkFileIDs` が素通しになり、**他人の drive file ID を
+// `notes/create` の `fileIds` に指定して自分の note に貼れる** (IDOR)。
+// page の eyecatch (#2683 の `pages.driveFileRepo`) より経路が広い。
+func (s *CreateService) HasDriveFileRepo() bool { return s.driveFileRepo != nil }

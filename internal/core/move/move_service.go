@@ -711,5 +711,9 @@ func (s *Service) lookupByURI(uri string) *model.User {
 // 移行そのものは成立するので、利用者からは「引き継がれなかった」ことしか
 // 見えない。起動時検査に使う (#2683)。
 func (s *Service) HasCarryOverRepos() bool {
-	return s.blockingRepo != nil && s.mutingRepo != nil && s.userListRepo != nil && s.idGen != nil
+	// **blockQueue も含める。** ブロックの引き継ぎは `blockingRepo == nil ||
+	// blockQueue == nil` の**両方**で止まるので、queue だけ消えても検査が
+	// 通ってしまうと effect に書いたブロック引き継ぎが黙って止まる。
+	return s.blockingRepo != nil && s.mutingRepo != nil && s.userListRepo != nil &&
+		s.idGen != nil && s.blockQueue != nil
 }

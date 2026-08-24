@@ -381,3 +381,9 @@ func (s *Service) materializeIfMissing(noteID string, lookupErr error) bool {
 	_, err := s.materializer.EnsureNote(context.Background(), noteID)
 	return err == nil
 }
+
+// HasRolePolicyProvider reports whether the role policy provider was wired.
+//
+// 未配線だと `clipLimit` と `noteEachClipsLimit` が両方とも効かない。
+// 起動時検査に使う (#2683)。
+func (s *Service) HasRolePolicyProvider() bool { return s.rolePolicyProvider != nil }

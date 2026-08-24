@@ -58,3 +58,16 @@ func TestPostScheduledNoteProcessor_HasLock(t *testing.T) {
 type stubScheduledNoteLock struct{}
 
 func (stubScheduledNoteLock) TryAcquire(context.Context, string) (bool, error) { return true, nil }
+
+// #2683: host block checker も同じ扱い。未配線だと `isBlocked` が常に false に
+// なり、ブロック済み host / 許可外 host からの activity を受け入れる。
+// 署名検査・replay guard の述語では代替できない (それぞれ独立に消せる)。
+func TestInboxProcessor_HasHostBlockChecker(t *testing.T) {
+	assert.False(t, (&InboxProcessor{}).HasHostBlockChecker(),
+		"未配線なら false を返すこと (常に true だと検査が無意味になる)")
+
+	onlyVerifier := &InboxProcessor{}
+	onlyVerifier.SetSignatureVerifier(stubSignatureVerifier{})
+	assert.False(t, onlyVerifier.HasHostBlockChecker(),
+		"HasSignatureVerifier は host block checker の有無を保証しない")
+}

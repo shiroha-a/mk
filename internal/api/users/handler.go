@@ -1442,3 +1442,9 @@ func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.U
 		}
 	}
 }
+
+// HasRolePolicyProvider reports whether the role policy provider was wired.
+//
+// 未配線だと `users/lists/create-from-public` の `userListLimit` /
+// `userEachUserListsLimit` が効かない。起動時検査に使う (#2683)。
+func (h *Handler) HasRolePolicyProvider() bool { return h.rolePolicyProvider != nil }

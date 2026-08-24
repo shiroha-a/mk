@@ -29,3 +29,10 @@ func TestHandler_HasEnqueuer(t *testing.T) {
 type stubInboxEnqueuer struct{}
 
 func (stubInboxEnqueuer) EnqueueInbox(context.Context, queue.InboxPayload) error { return nil }
+
+// #2683: host block checker も同じ扱い。未配線だと `federation: none` 設定でも
+// inbox が受け付ける。
+func TestHandler_HasHostBlockChecker(t *testing.T) {
+	assert.False(t, (&Handler{}).HasHostBlockChecker(),
+		"未配線なら false を返すこと (常に true だと検査が無意味になる)")
+}

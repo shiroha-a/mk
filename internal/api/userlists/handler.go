@@ -429,3 +429,9 @@ func (h *Handler) Delete(c echo.Context) error {
 	}
 	return c.NoContent(http.StatusNoContent)
 }
+
+// HasRolePolicyProvider reports whether the role policy provider was wired.
+//
+// 未配線だと `userListLimit` と `userEachUserListsLimit` が両方とも効かない。
+// 起動時検査に使う (#2683)。
+func (h *Handler) HasRolePolicyProvider() bool { return h.rolePolicyProvider != nil }

@@ -305,19 +305,20 @@ func formatID(n uint64) string {
 	return string(buf[i:])
 }
 
-// HasHardMuteLookup / HasMuteBlockSnapshotLookup / HasFollowingSnapshotLookup /
-// HasPolicyProvider report whether the per-publish filters were wired.
+// HasHardMuteLookup / HasMuteBlockSnapshotLookup / HasPolicyProvider report
+// whether the per-publish filters were wired.
 //
-// **どれも未配線だと fail-open**。ハードミュート、ミュート/ブロック、フォロー
-// 関係の reply gate、ltl/gtl の可視性 gate が黙って素通しになる。起動時検査に
-// 使う (#2683)。`SetNoteVisibilityChecker` は未配線で fail-closed なので対象外。
+// **この 3 つは未配線だと fail-open**。ハードミュート、ミュート/ブロック、
+// ltl/gtl の可視性 gate が黙って素通しになる。起動時検査に使う (#2683)。
+//
+// **`SetFollowingSnapshotLookup` と `SetNoteVisibilityChecker` は対象外。**
+// どちらも未配線だと fail-closed に倒れる (前者は `channels/note_filter.go` の
+// `snap == nil` が `return false`、後者は全 subNote を拒否)。起動時検査に
+// 載せるのは「未配線でも動いてしまう」ものだけ。
 func (m *Manager) HasHardMuteLookup() bool { return m.hardMute != nil }
 
 // HasMuteBlockSnapshotLookup reports whether the mute/block snapshot lookup was wired.
 func (m *Manager) HasMuteBlockSnapshotLookup() bool { return m.muteBlockLookup != nil }
-
-// HasFollowingSnapshotLookup reports whether the followee snapshot lookup was wired.
-func (m *Manager) HasFollowingSnapshotLookup() bool { return m.followingLookup != nil }
 
 // HasPolicyProvider reports whether the role policy provider was wired.
 func (m *Manager) HasPolicyProvider() bool { return m.policyProvider != nil }

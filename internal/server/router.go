@@ -3923,7 +3923,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		// ここから可視性・権限・上限 (#2683)。認証ほど鋭くはないが、いずれも
 		// 利用者から見えない形で制限が外れる。
 		{"notes.policyProvider", notesHandler.HasPolicyProvider(),
-			"timeline の可視性 gate (ltlAvailable / gtlAvailable) が丸ごと素通しになる"},
+			"timeline の可視性 gate (ltlAvailable / gtlAvailable) に加え canSearchNotes・canUseTranslator・noteDraftLimit が同時に素通しになる"},
 		{"pages.driveFileRepo", pagesHandler.HasDriveFileRepo(),
 			"eyecatching image の所有者チェックが素通しになり、他人の drive ファイルを貼れる (IDOR)"},
 		{"invite.rolePolicyProvider", inviteHandler.HasRolePolicyProvider(),
@@ -3937,7 +3937,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		{"move.carryOverRepos", accountMover.HasCarryOverRepos(),
 			"移行先アカウントにブロック / ミュート / リストが引き継がれない"},
 		{"note.blockingRepo", noteCreateService.HasBlockingRepo(),
-			"ブロックしている相手への返信・引用が通る"},
+			"自分をブロックしている相手への返信・引用が通る"},
 		{"note.metaRepo", noteCreateService.HasMetaRepo(),
 			"meta のセンシティブワードと禁止ワードが両方とも効かない"},
 		{"note.silencingProvider", noteCreateService.HasSilencingProvider(),
@@ -3946,8 +3946,6 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"配信ごとのハードミュート filter が無効になる"},
 		{"stream.muteBlockLookup", streamManager.HasMuteBlockSnapshotLookup(),
 			"配信ごとのミュート / ブロック filter が無効になる (fail-open)"},
-		{"stream.followingLookup", streamManager.HasFollowingSnapshotLookup(),
-			"timeline channel の followee reply gate が無効になる"},
 		{"stream.policyProvider", streamManager.HasPolicyProvider(),
 			"streaming の ltlAvailable / gtlAvailable gate が無効になる (fail-open)"},
 		{"inboxProcessor.hostBlockChecker", inboxProcessor.HasHostBlockChecker(),
@@ -3960,6 +3958,18 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"federation 設定を無視してリモートを解決する"},
 		{"streamChannels.chatRoom.service", chatRoomFactory.HasService(),
 			"chatRoom channel の購読でメンバーシップ検査が skip され、誰でも任意の room を購読できる"},
+		{"note.driveFileRepo", noteCreateService.HasDriveFileRepo(),
+			"他人の drive file ID を notes/create の fileIds に指定して自分の note に貼れる (IDOR)"},
+		{"antenna.rolePolicyProvider", antennaService.HasRolePolicyProvider(),
+			"antennaLimit が効かずアンテナを無制限に作れる"},
+		{"clip.rolePolicyProvider", clipService.HasRolePolicyProvider(),
+			"clipLimit と noteEachClipsLimit が両方とも効かない"},
+		{"webhooks.rolePolicyProvider", webhookHandler.HasRolePolicyProvider(),
+			"webhookLimit が効かず webhook を無制限に作れる"},
+		{"userlists.rolePolicyProvider", userListHandler.HasRolePolicyProvider(),
+			"userListLimit と userEachUserListsLimit が両方とも効かない"},
+		{"users.rolePolicyProvider", usersHandler.HasRolePolicyProvider(),
+			"users/lists/create-from-public の userListLimit / userEachUserListsLimit が効かない"},
 	})
 }
 
