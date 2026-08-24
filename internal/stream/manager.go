@@ -317,9 +317,9 @@ func formatID(n uint64) string {
 // fail-closed (`dispatcher.go` の `if d.noteVisibility == nil { return }`)。
 //
 // `SetFollowingSnapshotLookup` は**支配的には fail-closed**
-// (`channels/note_filter.go` の `followsFromSnap` / `userListVisibilityShouldEmit` /
-// `renotedReplyVisibleTo` / `streamNoteVisibleForViewer` はいずれも
-// `snap == nil` で落とす) だが、**1 経路だけ緩む**: `replyShouldEmit` の
+// (`channels/note_filter.go` の `followsFromSnap` / `renotedReplyVisibleTo` /
+// `streamNoteVisibleForViewer`、`channels/user_list.go` の
+// `userListVisibilityShouldEmit` はいずれも `snap == nil` で落とす) だが、**1 経路だけ緩む**: `replyShouldEmit` の
 // home / hybrid では `followee.withReplies` が false 扱いになる結果、
 // mention hatch (#1195) を通って 1 通余分に流れうる。reply embed 自体は
 // `hideEmbeds` が別 gate で blank 化するので実害は軽微と判断して対象外にした

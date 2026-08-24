@@ -41,6 +41,46 @@ func TestService_HasCarryOverRepos(t *testing.T) {
 			"SetBlockQueue が消えるとブロックの引き継ぎが止まるので false であること")
 	})
 
+	// **conjunct を 1 つずつ固定する。** 4 つは `SetCarryOverRepos` の単一呼び出しで
+	// 入るので「router.go の 1 行を消す」事故なら 4 つ同時に nil になるが、
+	// 述語から conjunct を落とす変異はそれでは捕まらない (#2683 review round 3
+	// LOW-2)。コメントが「1 つでも欠ければ false」と謳っている以上、実際に固定する。
+	for _, tc := range []struct {
+		name  string
+		build func() *Service
+	}{
+		{"blockingRepo 欠け", func() *Service {
+			s := &Service{}
+			s.SetCarryOverRepos(nil, testutil.NewMockMutingRepository(),
+				testutil.NewMockUserListRepository(), idGen)
+			return s
+		}},
+		{"mutingRepo 欠け", func() *Service {
+			s := &Service{}
+			s.SetCarryOverRepos(testutil.NewMockBlockingRepository(), nil,
+				testutil.NewMockUserListRepository(), idGen)
+			return s
+		}},
+		{"userListRepo 欠け", func() *Service {
+			s := &Service{}
+			s.SetCarryOverRepos(testutil.NewMockBlockingRepository(),
+				testutil.NewMockMutingRepository(), nil, idGen)
+			return s
+		}},
+		{"idGen 欠け", func() *Service {
+			s := &Service{}
+			s.SetCarryOverRepos(testutil.NewMockBlockingRepository(),
+				testutil.NewMockMutingRepository(), testutil.NewMockUserListRepository(), nil)
+			return s
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := tc.build()
+			s.SetBlockQueue(stubBlockEnqueuer{})
+			assert.False(t, s.HasCarryOverRepos(), "1 つでも欠ければ false であること")
+		})
+	}
+
 	t.Run("全て揃えば true", func(t *testing.T) {
 		s := &Service{}
 		s.SetCarryOverRepos(testutil.NewMockBlockingRepository(),
