@@ -5,6 +5,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/gorm"
 )
@@ -143,7 +144,12 @@ func (r *userRepository) FindByUsernameLower(username string, host *string) (*mo
 	var user model.User
 	q := r.db.Where("\"usernameLower\" = lower(?)", username)
 	if host != nil {
-		q = q.Where("host = ?", *host)
+		// **host 列は punycode。** 呼び出し側は Unicode IDN で来ることがある
+		// (フロントの mention リンクは toUnicode(host) で URL を組み、投稿本文の
+		// mention は書き手が打ったままの形になる)。生の完全一致だと IDN ホストの
+		// ユーザーが引けない (#2704)。upstream も DB を引く前に toPuny を掛ける
+		// (RemoteUserResolveService.resolveUser)。
+		q = q.Where("host = ?", idnhost.Puny(*host))
 	} else {
 		q = q.Where("host IS NULL")
 	}
@@ -168,7 +174,10 @@ func (r *userRepository) FindManyByUsernamesAndHost(usernames []string, host *st
 	}
 	q := r.db.Where(`"usernameLower" IN ?`, lowered)
 	if host != nil {
-		q = q.Where("host = ?", *host)
+		// FindByUsernameLower と同じ理由で punycode に揃える (#2704)。ここは
+		// 投稿本文の mention 解決に使うので、Unicode で書かれた mention が
+		// **解決されず通知も飛ばない**という形で出る。
+		q = q.Where("host = ?", idnhost.Puny(*host))
 	} else {
 		q = q.Where("host IS NULL")
 	}

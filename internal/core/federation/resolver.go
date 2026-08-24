@@ -22,9 +22,9 @@ import (
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
-	"golang.org/x/net/idna"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -3370,13 +3370,7 @@ func hostFromURI(uri string) (string, error) {
 //
 // なお Go の idna は ideographic/fullwidth dot (U+3002 等) を `.` に畳まない
 // (Node の domainToASCII と異なるが、別 authority を同一視しない安全側)。
-func punyHost(host string) string {
-	lower := strings.ToLower(host)
-	if ascii, err := idna.ToASCII(lower); err == nil {
-		return ascii
-	}
-	return lower
-}
+func punyHost(host string) string { return idnhost.Puny(host) }
 
 // finalURLFetcher は redirect 後の最終 URL も返せる fetcher。本番 APFetcher が
 // 実装し、resolver が fetch 元 host と object id host の一致検証に使う (#1820)。

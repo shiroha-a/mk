@@ -1627,3 +1627,72 @@ func TestUserRepository_SearchByUsernameAndHost_FindsNeverPostedUser(t *testing.
 	}
 	assert.True(t, found, "未フォロー・未投稿の user も検索に出ること (upstream は出さない)")
 }
+
+// **IDN ホストのユーザーを Unicode 形の host で引けること** (#2704)。
+//
+// `user.host` は punycode で保存されるが、引く側は Unicode で来ることがある。
+// フロントの mention リンクは `toUnicode(host)` で URL を組むので、メンションから
+// ユーザーページを開くとこの形になる。生の完全一致で引いていた頃は、そこだけが
+// NO_SUCH_USER になって「通知からは開けるのにメンションからは開けない」という
+// 形で出ていた。
+func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	const puny = "xn--eckve.example"
+	uri := "https://" + puny + "/users/idn1"
+	host := puny
+	require.NoError(t, testDB.Create(&model.User{
+		ID: "idnuser0000000000001", Username: "IdnUser", UsernameLower: "idnuser",
+		Host: &host, URI: &uri, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}).Error)
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "user" WHERE id = ?`, "idnuser0000000000001") })
+
+	for _, tc := range []struct {
+		name string
+		host string
+	}{
+		{"punycode", puny},
+		{"unicode", "パイ.example"},
+		{"unicode uppercase ascii tail", "パイ.EXAMPLE"},
+		{"punycode uppercase", "XN--ECKVE.EXAMPLE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := tc.host
+			got, err := repo.FindByUsernameLower("idnuser", &h)
+			require.NoError(t, err, "host=%q で引けること", tc.host)
+			assert.Equal(t, "idnuser0000000000001", got.ID)
+		})
+	}
+
+	t.Run("別の host は引かない", func(t *testing.T) {
+		h := "other.example"
+		_, err := repo.FindByUsernameLower("idnuser", &h)
+		assert.Error(t, err)
+	})
+
+	t.Run("host nil はローカル扱いのまま", func(t *testing.T) {
+		_, err := repo.FindByUsernameLower("idnuser", nil)
+		assert.Error(t, err, "リモート行を host なしで引き当てないこと")
+	})
+}
+
+// メンション解決の一括引きも同じ (#2704)。ここが空振りすると、Unicode で書かれた
+// メンションが **解決されず通知も飛ばない**。
+func TestUserRepository_FindManyByUsernamesAndHost_IDNHost(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	const puny = "xn--eckve.example"
+	uri := "https://" + puny + "/users/idn2"
+	host := puny
+	require.NoError(t, testDB.Create(&model.User{
+		ID: "idnuser0000000000002", Username: "IdnMention", UsernameLower: "idnmention",
+		Host: &host, URI: &uri, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}).Error)
+	t.Cleanup(func() { testDB.Exec(`DELETE FROM "user" WHERE id = ?`, "idnuser0000000000002") })
+
+	for _, h := range []string{puny, "パイ.example"} {
+		hh := h
+		got, err := repo.FindManyByUsernamesAndHost([]string{"IdnMention"}, &hh)
+		require.NoError(t, err)
+		require.Len(t, got, 1, "host=%q で引けること", h)
+		assert.Equal(t, "idnuser0000000000002", got[0].ID)
+	}
+}

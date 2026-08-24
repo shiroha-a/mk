@@ -1310,3 +1310,75 @@ func TestService_ShowByUsernameDB_FindsCachedRemote(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "u1", got.User.ID)
 }
+
+// recordingResolver captures what host the remote fallback was asked for.
+type recordingResolver struct {
+	calls []string
+	user  *model.User
+	err   error
+}
+
+func (r *recordingResolver) ResolveByUsernameHost(username, host string) (*model.User, error) {
+	r.calls = append(r.calls, username+"@"+host)
+	return r.user, r.err
+}
+
+// **IDN ホストの acct 解決** (#2704)。
+//
+// `user.host` は punycode で保存されるが、引く側は Unicode で来ることがある
+// (フロントの mention リンクは `toUnicode(host)` で URL を組む)。正規化しないと
+// 「通知からは開けるのにメンションからは開けない」という形で出る。
+func TestShowByUsername_IDNHost(t *testing.T) {
+	const puny = "xn--eckve.example"
+
+	newSvc := func() (*user.Service, *recordingResolver) {
+		repo := testutil.NewMockUserRepository()
+		host := puny
+		uri := "https://" + puny + "/users/idn"
+		repo.Users["idn1"] = &model.User{
+			ID: "idn1", Username: "IdnUser", UsernameLower: "idnuser", Host: &host, URI: &uri,
+		}
+		svc := user.NewService(repo, nil, nil, nil)
+		res := &recordingResolver{}
+		svc.SetRemoteUserResolver(res)
+		return svc, res
+	}
+
+	for _, tc := range []struct {
+		name string
+		host string
+	}{
+		{"punycode", puny},
+		{"unicode", "パイ.example"},
+		{"unicode uppercase ascii tail", "パイ.EXAMPLE"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, res := newSvc()
+			h := tc.host
+			got, err := svc.ShowByUsername("idnuser", &h)
+			require.NoError(t, err, "host=%q で引けること", tc.host)
+			assert.Equal(t, "idn1", got.User.ID)
+			// **存在するユーザーで WebFinger へ落ちないこと。** 落ちると
+			// ページを開くたびに outbound の名前解決 + actor fetch が走る。
+			assert.Empty(t, res.calls, "DB に居るのにリモート解決へ落ちないこと")
+		})
+	}
+
+	t.Run("未知の acct は punycode でリモートに問い合わせる", func(t *testing.T) {
+		svc, res := newSvc()
+		res.err = errors.New("not found")
+		h := "パイ.example"
+		_, err := svc.ShowByUsername("nobody", &h)
+		require.Error(t, err)
+		require.Len(t, res.calls, 1)
+		assert.Equal(t, "nobody@"+puny, res.calls[0],
+			"WebFinger の宛先も punycode へ揃えること")
+	})
+
+	t.Run("引数を書き換えないこと", func(t *testing.T) {
+		svc, _ := newSvc()
+		h := "パイ.example"
+		_, _ = svc.ShowByUsername("idnuser", &h)
+		assert.Equal(t, "パイ.example", h)
+	})
+}

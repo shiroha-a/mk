@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -223,7 +224,10 @@ func (m *MockUserRepository) FindByUsernameLower(username string, host *string) 
 			if host == nil && u.Host == nil {
 				return u, nil
 			}
-			if host != nil && u.Host != nil && *host == *u.Host {
+			// **本番の repository と同じく punycode に揃えて比較する** (#2704)。
+			// 揃えないと、mock を使うテストだけが Unicode IDN の host で
+			// 引けてしまい、本番との差が隠れる。
+			if host != nil && u.Host != nil && idnhost.Puny(*host) == idnhost.Puny(*u.Host) {
 				return u, nil
 			}
 		}
@@ -248,7 +252,8 @@ func (m *MockUserRepository) FindManyByUsernamesAndHost(usernames []string, host
 		}
 		if host == nil && u.Host == nil {
 			out = append(out, u)
-		} else if host != nil && u.Host != nil && *host == *u.Host {
+		} else if host != nil && u.Host != nil && idnhost.Puny(*host) == idnhost.Puny(*u.Host) {
+			// FindByUsernameLower と同じ理由で punycode に揃える (#2704)。
 			out = append(out, u)
 		}
 	}

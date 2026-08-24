@@ -11,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 
@@ -258,6 +259,11 @@ func (s *Service) ShowManyByIDs(ids []string) ([]*UserWithProfile, error) {
 // resolver 未設定の場合は ErrUserNotFound を返し (後方互換)、設定済みで解決
 // に失敗した場合は ErrFailedToResolveRemoteUser を返す。
 func (s *Service) ShowByUsername(username string, host *string) (*UserWithProfile, error) {
+	// **DB を引く前に punycode へ揃える** (#2704)。DB 比較そのものは repository
+	// 側でも正規化しているが、ここで揃えないと miss したときの WebFinger を
+	// **Unicode 形の host へ**投げることになる。upstream も同じ位置で toPuny を
+	// 掛ける (RemoteUserResolveService.resolveUser)。
+	host = idnhost.PunyPtr(host)
 	u, err := s.userRepo.FindByUsernameLower(username, host)
 	if err == nil {
 		profile, _ := s.userRepo.FindProfileByUserID(u.ID)
