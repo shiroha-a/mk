@@ -584,3 +584,13 @@ func (h *Handler) PackForEmbed(cl *model.Clip) map[string]any {
 // 未配線だと blocked-host の note が post-fetch 経路で漏れる。起動時検査に
 // 使う (#2708)。
 func (h *Handler) HasMetaRepo() bool { return h.metaRepo != nil }
+
+// HasMuteBlockRepos reports whether both mute/block repositories were wired.
+//
+// channelMuting は `LoadMuteBlockSets` へ意図的に nil を渡している
+// (clips に channel 次元が無い) ので対象外。残る 2 つは nil が**空集合として
+// 素通し**されるため、欠けるとその次元の filter が黙って消える。起動時検査に
+// 使う (#2709 review)。
+func (h *Handler) HasMuteBlockRepos() bool {
+	return h.mutingRepo != nil && h.blockingRepo != nil
+}

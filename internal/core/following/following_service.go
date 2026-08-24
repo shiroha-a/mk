@@ -710,5 +710,7 @@ func hasMoved(userRepo repository.UserRepository, userID string) bool {
 
 // HasBlockingChecker reports whether the blocking checker was wired.
 //
-// 未配線だとブロックしている相手をフォローできる。起動時検査に使う (#2708)。
+// 未配線だとブロック関係を無視してフォローが成立する。gate は
+// `IsBlocked(followerID, followeeID)` と `IsBlocked(followeeID, followerID)` の
+// **双方向**で、後者は inbound の AP Follow も通す。起動時検査に使う (#2708)。
 func (s *Service) HasBlockingChecker() bool { return s.blockingChecker != nil }

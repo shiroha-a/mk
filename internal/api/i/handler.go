@@ -2188,7 +2188,11 @@ func (h *Handler) HasAccessTokenRepo() bool { return h.accessTokenRepo != nil }
 
 // HasRoleProvider reports whether the role provider was wired.
 //
-// **1 つの nil で 3 つの gate が外れる**: alwaysMarkNsfw の自己解除防止
+// **1 つの nil で 4 つの gate が外れる**: alwaysMarkNsfw の自己解除防止
 // (`i/update`)、`wordMuteLimit`、`canUpdateBioMedia` (未配線を明示的に許可側へ
-// OR している)。起動時検査に使う (#2708)。
+// OR している)、`i/import-antennas` の `antennaLimit`
+// (`antennaImportWouldExceedLimit` が nil で false を返す)。加えて
+// `avatarDecorationLimit` が policy を読めず 1 固定になる (policy が 1 より
+// 大きい role には厳しく、0 の role には緩い側へ倒れる)。起動時検査に使う
+// (#2708)。
 func (h *Handler) HasRoleProvider() bool { return h.roleProvider != nil }

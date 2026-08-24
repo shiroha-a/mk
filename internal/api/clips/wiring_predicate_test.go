@@ -21,3 +21,28 @@ func TestHandler_HasMetaRepo(t *testing.T) {
 	h.SetMetaRepo(testutil.NewMockMetaRepository())
 	assert.True(t, h.HasMetaRepo(), "配線したら true")
 }
+
+// #2709 review: mute/block の 2 repo をまとめて見る述語。**conjunct を両方固定する。**
+//
+// channelMuting は `LoadMuteBlockSets` へ意図的に nil を渡しているので対象外。
+func TestHandler_HasMuteBlockRepos(t *testing.T) {
+	assert.False(t, (&Handler{}).HasMuteBlockRepos(), "未配線なら false")
+
+	both := &Handler{}
+	both.SetMuteBlockRepos(testutil.NewMockMutingRepository(), testutil.NewMockBlockingRepository())
+	assert.True(t, both.HasMuteBlockRepos(), "2 つとも配線したら true")
+
+	onlyMuting := &Handler{}
+	onlyMuting.SetMuteBlockRepos(testutil.NewMockMutingRepository(), nil)
+	assert.False(t, onlyMuting.HasMuteBlockRepos(), "blocking が欠けたら false")
+
+	onlyBlocking := &Handler{}
+	onlyBlocking.SetMuteBlockRepos(nil, testutil.NewMockBlockingRepository())
+	assert.False(t, onlyBlocking.HasMuteBlockRepos(), "muting が欠けたら false")
+
+	// 述語どうしの独立性 (#2709 review L-5)。
+	other := &Handler{}
+	other.SetMetaRepo(testutil.NewMockMetaRepository())
+	assert.False(t, other.HasMuteBlockRepos())
+	assert.False(t, both.HasMetaRepo(), "他の述語は満たされないこと")
+}

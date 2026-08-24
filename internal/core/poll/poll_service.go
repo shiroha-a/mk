@@ -257,6 +257,7 @@ func (s *Service) materializeIfMissing(noteID string, lookupErr error) bool {
 
 // HasBlockingChecker reports whether the blocking checker was wired.
 //
-// 未配線だとブロックしている相手のアンケートに投票できる。起動時検査に
+// 未配線だと**自分をブロックしている**相手のアンケートに投票できる。gate は
+// `IsBlocked(target.UserID, user.ID)` (blocker が note 著者)。起動時検査に
 // 使う (#2708)。
 func (s *Service) HasBlockingChecker() bool { return s.blockingChecker != nil }

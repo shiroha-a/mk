@@ -536,3 +536,13 @@ func jsonArrayOrEmpty(b []byte) any {
 // 未配線だと blocked-host の note が post-fetch 経路で漏れる。起動時検査に
 // 使う (#2708)。
 func (h *Handler) HasMetaRepo() bool { return h.metaRepo != nil }
+
+// HasMuteBlockRepos reports whether all three mute/block repositories were wired.
+//
+// **3 つを 1 つの述語で見る。** 呼び出しは `LoadMuteBlockSets` への直渡しで、
+// 各 repo は nil を**空集合として素通し**するため、1 つ欠けるだけでその次元の
+// filter が黙って消える。notes 側と違い呼び出し元の gate も無い。起動時検査に
+// 使う (#2709 review)。
+func (h *Handler) HasMuteBlockRepos() bool {
+	return h.mutingRepo != nil && h.blockingRepo != nil && h.channelMutingRepo != nil
+}

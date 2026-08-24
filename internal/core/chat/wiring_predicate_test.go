@@ -20,4 +20,14 @@ func TestService_HasBlockingRepo(t *testing.T) {
 	s := &Service{}
 	s.SetBlockingRepo(testutil.NewMockBlockingRepository())
 	assert.True(t, s.HasBlockingRepo(), "配線したら true")
+
+	// **別の依存だけを配線しても false のままであること。** 述語を
+	// `A != nil || B != nil` のように**広げる**変異は、上の 2 つでは捕まらない
+	// (未配線なら false / 配線したら true をどちらも満たしてしまう)。述語が
+	// 1 つしか無いパッケージには独立性の検査が無いので、ここで代わりに置く
+	// (#2709 review L-5)。
+	other := &Service{}
+	other.SetEmojiRepo(testutil.NewMockEmojiRepository())
+	assert.False(t, other.HasBlockingRepo(),
+		"blockingRepo 以外を配線しても false のままであること")
 }

@@ -767,13 +767,15 @@ func isPureRenote(n *model.Note) bool {
 // 起動時検査に使う (#2683)。
 func (s *Service) HasUserRolesProvider() bool { return s.userRoles != nil }
 
-// HasMediaSilenceChecker / HasBlockingChecker report whether the reaction gates
-// were wired (#2708).
+// HasMediaSilenceChecker reports whether the media-silence checker was wired.
 //
-// 未配線時にそれぞれ: media-silenced な host からのカスタム絵文字リアクションが
-// そのまま出る (フォールバックの ❤ にならない)、ブロックしている相手の投稿にも
-// リアクションできる。
+// 未配線だと media-silenced な host からのカスタム絵文字リアクションがそのまま
+// 出る (フォールバックの ❤ にならない)。起動時検査に使う (#2708)。
 func (s *Service) HasMediaSilenceChecker() bool { return s.mediaSilence != nil }
 
 // HasBlockingChecker reports whether the blocking checker was wired.
+//
+// 未配線だと**自分をブロックしている**相手の投稿にリアクションできる。gate は
+// `IsBlocked(target.UserID, user.ID)` (blocker が note 著者) なので、自分が
+// ブロックした相手への操作はそもそもここを通らない。起動時検査に使う (#2708)。
 func (s *Service) HasBlockingChecker() bool { return s.blockingChecker != nil }

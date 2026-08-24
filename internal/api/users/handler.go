@@ -1449,6 +1449,22 @@ func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.U
 // `userEachUserListsLimit` が効かない。起動時検査に使う (#2683)。
 func (h *Handler) HasRolePolicyProvider() bool { return h.rolePolicyProvider != nil }
 
+// HasChannelMutingRepo / HasMutingRepo / HasBlockingRepo report whether the
+// users/notes mute/block gates were wired (#2709 review).
+//
+// 未配線時にそれぞれ: `users/notes` (withChannelNotes) の post-fetch filter で
+// チャンネルミュートが効かない、同 filter のミュート集合が空になる、
+// `isBlockedByTarget` が常に false を返して**被ブロック中の相手の
+// users/notes・reactions・featured-notes が読める**。いずれも
+// `LoadMuteBlockSets` が nil を空集合として素通しするための fail-open。
+func (h *Handler) HasChannelMutingRepo() bool { return h.channelMutingRepo != nil }
+
+// HasMutingRepo reports whether the muting repository was wired.
+func (h *Handler) HasMutingRepo() bool { return h.mutingRepo != nil }
+
+// HasBlockingRepo reports whether the blocking repository was wired.
+func (h *Handler) HasBlockingRepo() bool { return h.blockingRepo != nil }
+
 // HasUGCVisibility reports whether the visitor content visibility policy was set.
 //
 // 未配線だと匿名 visitor への remote profile 露出を

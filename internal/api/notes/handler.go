@@ -730,11 +730,14 @@ func (h *Handler) serveList(c echo.Context, noSuchNoteID string, fn func(*model.
 // applyMuteBlock filters out notes the viewer should not see per the mute/block
 // dimensions of upstream generateBaseNoteFilteringQuery: muted-user / 被block /
 // muted-instance (note/reply/renote の author いずれか一致で除外)。
-// channel-mute は upstream の generateBaseNoteFilteringQuery には含まれず
-// timeline 系のみで適用されるため、ここでは channelMutingRepo に nil を渡して
-// 適用しない (children/replies/renotes parity、#1554)。blocked-host / suspended
-// は別 follow-up。blockingRepo 未配線 / viewer nil なら no-op。fail-closed:
-// lookup / filter エラーは呼び出し側で 500 にする。
+// **channel-mute も適用する。upstream より厳しい側への意図的な乖離。**
+// upstream の generateBaseNoteFilteringQuery (QueryService.ts:93-112) は
+// blocked-host / suspended / muted-user / blocked-user だけで、channel-mute は
+// timeline 系にしか無い。mk-go はミュートしたチャンネルの投稿が
+// children/replies/renotes から出てくるほうを問題とみなして渡している。
+// **以前この GoDoc は「nil を渡して適用しない」と書いていたが実装と逆だった。**
+// blocked-host / suspended は別 follow-up。blockingRepo 未配線 / viewer nil なら
+// no-op。fail-closed: lookup / filter エラーは呼び出し側で 500 にする。
 func (h *Handler) applyMuteBlock(viewer *model.User, notes []*model.Note) ([]*model.Note, error) {
 	// muted-user / blocked-user / muted-channel / muted-instances は viewer 視点
 	// なので anonymous では対象外。
@@ -1146,12 +1149,27 @@ func (h *Handler) HasPolicyProvider() bool { return h.policyProvider != nil }
 // HasChannelMutingRepo / HasUserFollowingRepo / HasUGCVisibility report whether
 // the visibility gates were wired (#2708).
 //
-// 未配線時にそれぞれ: 下書きの添付で他人の drive ファイルを指定できる (IDOR)、
-// blocked-host の note が post-fetch 経路で漏れる、ブロック / ミュート /
-// チャンネルミュートの post-fetch filter が丸ごと skip される
-// (`applyMuteBlock` は `blockingRepo != nil` で全体を gate している)、
-// followers 限定投稿への返信が非フォロワーの HTL / STL に出る、匿名 visitor への
-// 露出を `ugcVisibilityForVisitor` で gate できない。
+// 未配線時にそれぞれ:
+//
+//   - driveFileRepo: 下書きの添付で他人の drive ファイル ID を指定でき
+//     (`handler_drafts.go` の所有権検査が nil で true を返す)、加えて
+//     `fieldResolver()` が drive を引けなくなるので **全 note の files が
+//     空配列**になる。下書きから note への昇格は `note.driveFileRepo` の
+//     checkFileIDs を通るので、他人のファイルの実体までは出ない
+//   - metaRepo: blocked-host の note が post-fetch 経路で漏れる
+//   - blockingRepo: ブロック / ミュート / チャンネルミュートの post-fetch
+//     filter が丸ごと skip される (`applyMuteBlock` は `blockingRepo != nil`
+//     で全体を gate している)
+//   - mutingRepo: post-fetch filter のミュート集合と、
+//     `notes/polls/recommendation` が SQL へ渡す除外集合が空になる。timeline の
+//     SQL 側は `UseMutingSubquery` が別に効くので残る
+//   - channelMutingRepo: チャンネルミュートが**一切**効かない。別ソースが
+//     無いので in-memory・SQL (`TimelineFilter.MutedChannelIDs`)・user-list
+//     timeline・HTL の followed-channel 差し引き の全経路が死ぬ
+//   - userFollowingRepo: followers 限定投稿への返信が非フォロワーの HTL / STL
+//     に出る
+//   - ugcVisibility: 匿名 visitor への露出を `ugcVisibilityForVisitor` で
+//     gate できない
 func (h *Handler) HasDriveFileRepo() bool { return h.driveFileRepo != nil }
 
 // HasMetaRepo reports whether the meta repository was wired.
@@ -1165,6 +1183,12 @@ func (h *Handler) HasMutingRepo() bool { return h.mutingRepo != nil }
 
 // HasChannelMutingRepo reports whether the channel muting repository was wired.
 func (h *Handler) HasChannelMutingRepo() bool { return h.channelMutingRepo != nil }
+
+// HasRenoteMutingRepo reports whether the renote muting repository was wired.
+//
+// 未配線だと `loadRenoteMutedUserIDs` が nil を返し、renote ミュートが read 時に
+// 一切効かない (#2709 review)。
+func (h *Handler) HasRenoteMutingRepo() bool { return h.renoteMutingRepo != nil }
 
 // HasUserFollowingRepo reports whether the following repository was wired.
 func (h *Handler) HasUserFollowingRepo() bool { return h.userFollowingRepo != nil }

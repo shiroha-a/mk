@@ -20,4 +20,14 @@ func TestHandler_HasDriveFileRepo(t *testing.T) {
 	h := &Handler{}
 	h.SetDriveFileRepo(testutil.NewMockDriveFileRepository())
 	assert.True(t, h.HasDriveFileRepo(), "配線したら true")
+
+	// **別の依存だけを配線しても false のままであること。** 述語を
+	// `A != nil || B != nil` のように**広げる**変異は、上の 2 つでは捕まらない
+	// (未配線なら false / 配線したら true をどちらも満たしてしまう)。述語が
+	// 1 つしか無いパッケージには独立性の検査が無いので、ここで代わりに置く
+	// (#2709 review L-5)。
+	other := &Handler{}
+	other.SetUserRepo(testutil.NewMockUserRepository())
+	assert.False(t, other.HasDriveFileRepo(),
+		"driveFileRepo 以外を配線しても false のままであること")
 }

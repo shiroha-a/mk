@@ -30,7 +30,7 @@ type stubWiringPolicyProvider struct{}
 
 func (stubWiringPolicyProvider) GetUserPolicies(string) map[string]any { return nil }
 
-// #2708: notes handler の可視性 gate は 7 つ。**1 つずつ配線して独立性を固定する**
+// #2708 / #2709 review: notes handler の可視性 gate は 8 つ。**1 つずつ配線して独立性を固定する**
 // (まとめて配線すると別の field を読む typo が素通りする)。
 func TestHandler_WiringPredicates2708(t *testing.T) {
 	empty := &Handler{}
@@ -40,6 +40,7 @@ func TestHandler_WiringPredicates2708(t *testing.T) {
 	assert.False(t, empty.HasMutingRepo(), "未配線なら false")
 	assert.False(t, empty.HasChannelMutingRepo(), "未配線なら false")
 	assert.False(t, empty.HasUserFollowingRepo(), "未配線なら false")
+	assert.False(t, empty.HasRenoteMutingRepo(), "未配線なら false")
 	assert.False(t, empty.HasUGCVisibility(), "未設定なら false")
 
 	// 述語 -> その 1 つだけを配線する関数。
@@ -50,6 +51,7 @@ func TestHandler_WiringPredicates2708(t *testing.T) {
 		"mutingRepo":        func(h *Handler) { h.SetMutingRepo(testutil.NewMockMutingRepository()) },
 		"channelMutingRepo": func(h *Handler) { h.SetChannelMutingRepo(testutil.NewMockChannelMutingRepository()) },
 		"userFollowingRepo": func(h *Handler) { h.SetUserFollowingRepo(testutil.NewMockFollowingRepository()) },
+		"renoteMutingRepo":  func(h *Handler) { h.SetRenoteMutingRepo(testutil.NewMockRenoteMutingRepository()) },
 		"ugcVisibility":     func(h *Handler) { h.SetUGCVisibility("local") },
 	}
 	check := map[string]func(*Handler) bool{
@@ -59,6 +61,7 @@ func TestHandler_WiringPredicates2708(t *testing.T) {
 		"mutingRepo":        (*Handler).HasMutingRepo,
 		"channelMutingRepo": (*Handler).HasChannelMutingRepo,
 		"userFollowingRepo": (*Handler).HasUserFollowingRepo,
+		"renoteMutingRepo":  (*Handler).HasRenoteMutingRepo,
 		"ugcVisibility":     (*Handler).HasUGCVisibility,
 	}
 	for name, set := range wire {
