@@ -37,9 +37,15 @@ jobs:
       # (gitignore 済み) なので、手元で同じ検査を回すと自前プラグインを拾って
       # 誤検知する。生成物を書く副作用もあり、`make plugin-dev` の配線を巻き戻す。
       #
-      # **残る穴**: 2 つ目の YAML ドキュメントに `disabled: true` を置くと grep は
-      # 通るが parser は読まない。塞ぐには `pluginbuild` に副作用の無い check mode を
-      # 足すことになるので、意図的に行わないと踏めない形として許容している。
+      # **残る穴**: 行ベースの判定なので、**parser がキーとして読まない位置**に
+      # 同じ行があると通る (2 つ目の YAML ドキュメント、flow collection の中など。
+      # どちらも実測)。塞ぐには `pluginbuild` に副作用の無い check mode を足す
+      # ことになるので、意図的に行わないと踏めない形として許容している。
+      #
+      # **逆に、正規表現を緩めないこと。** `disabled: True` / `yes` / 行末コメント
+      # 付きは parser では disabled と読まれるがここでは落ちる。安全側に倒れて
+      # いるだけなので実害は無い。「誤検知」と見て緩めると、parser とのズレが
+      # 今度は**危険側**に開く。
       - name: Check bundled plugins are disabled by default
         run: |
           files=$(git ls-files 'plugins/*/mk-plugin.yml')

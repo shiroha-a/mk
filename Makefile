@@ -184,15 +184,8 @@ test: ## 全テストを実行
 plugin-doc-check: ## authoring.md の Go スニペットがコンパイルできるか検査
 	./tests/plugin-doc/check-snippets.sh
 
-plugin-vet: ## 同梱プラグインを go vet + 既定無効を検査 (CI の build job の 2 step 相当)
+plugin-vet: ## 同梱プラグインの既定無効を検査 + go vet (CI の build job の 2 step 相当)
 	@set -e; \
-	mods=$$(git ls-files 'plugins/*/go.mod'); \
-	if [ -z "$$mods" ]; then echo "同梱プラグインが見つかりません (列挙が壊れています)"; exit 1; fi; \
-	for mod in $$mods; do \
-		dir=$$(dirname "$$mod"); \
-		echo "==> $$dir"; \
-		(cd "$$dir" && GOWORK=off go vet ./...); \
-	done; \
 	markers=$$(git ls-files 'plugins/*/mk-plugin.yml'); \
 	if [ -z "$$markers" ]; then echo "同梱プラグインの mk-plugin.yml が見つかりません (列挙が壊れています)"; exit 1; fi; \
 	fail=0; \
@@ -201,7 +194,14 @@ plugin-vet: ## 同梱プラグインを go vet + 既定無効を検査 (CI の b
 		else echo "FAIL $$f — 'disabled: true' の行 (完全一致) がありません。disabled を含む行:"; \
 			grep -n disabled "$$f" || echo "  (無し)"; fail=1; fi; \
 	done; \
-	[ "$$fail" -eq 0 ]
+	[ "$$fail" -eq 0 ]; \
+	mods=$$(git ls-files 'plugins/*/go.mod'); \
+	if [ -z "$$mods" ]; then echo "同梱プラグインが見つかりません (列挙が壊れています)"; exit 1; fi; \
+	for mod in $$mods; do \
+		dir=$$(dirname "$$mod"); \
+		echo "==> $$dir"; \
+		(cd "$$dir" && GOWORK=off go vet ./...); \
+	done
 
 plugin-test: ## 同梱プラグインのテストを実行 (PostgreSQL が要る)
 	@set -e; \
