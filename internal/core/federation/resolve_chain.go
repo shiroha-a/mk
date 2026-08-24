@@ -136,6 +136,23 @@ func (c *resolveChain) chargeWait(d time.Duration) {
 	c.budget.spent.Add(int64(d))
 }
 
+// ingestedDocID reports whether an **ancestor** of this chain has already
+// probed or ingested the given document id, and the id it recorded.
+//
+// **値が空でないことを条件にする。** `resolveNoteDepth` は fetch 前に
+// 「鍵 → ""」で入るので、正規形 (取得 URI == document id) では自分自身の entry が
+// 同じ鍵に見える。祖先が載せたものは `chainAfterProbe` / `ingestNoteWithCreated`
+// の `with(id, id)` なので値が入っている。値の有無でその 2 つを分ける (#2695)。
+func (c *resolveChain) ingestedDocID(docID string) (string, bool) {
+	if docID == "" {
+		return "", false
+	}
+	if v, ok := c.lookup(docID); ok && v != "" {
+		return v, true
+	}
+	return "", false
+}
+
 // mayWait reports whether this chain is allowed to block on another chain.
 func (c *resolveChain) mayWait() bool {
 	return c == nil || !c.bestEffort

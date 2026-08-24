@@ -1,10 +1,21 @@
 package federation
 
 import (
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
 )
+
+// errChainLocalVerdict marks a leader failure that was decided from the
+// leader's own resolveChain state, not from the document.
+//
+// **group は先頭の返り値を追従側にも配る。** チェーン固有の判定をそのまま
+// 配ると、相乗りしただけの別チェーンが身に覚えのない理由で解決を落とす
+// (引用経路なら renoteId が nil のまま保存され、再取り込みは FindByURI で
+// 早期 return するので**恒久的に失われる**)。この印が付いた失敗を受け取った
+// 追従側は、諦めずに 1 度だけ自分でやり直す (#2695)。
+var errChainLocalVerdict = errors.New("resolve gave up for a reason local to the leader's chain")
 
 // resolveGroup collapses concurrent resolves of the same key, in place of
 // singleflight.Group, with two differences that this package needs.
@@ -137,6 +148,24 @@ func (r *Resolver) joinResolve(g *resolveGroup, chain *resolveChain, waitKey, ke
 // 張らないので、その呼び出しのせいで**本命の解決**が循環の犠牲に選ばれることも、
 // 上限が件数分積み上がることも無い (#2685 review HIGH-2 / MEDIUM-2)。
 func (r *Resolver) joinResolveOpt(g *resolveGroup, chain *resolveChain, waitKey, key string, mayWait bool, fn func() (any, error)) (any, error) {
+	v, err, leader := r.joinResolveOnce(g, chain, waitKey, key, mayWait, fn)
+	if leader || !errors.Is(err, errChainLocalVerdict) {
+		return v, err
+	}
+	// 先頭が**自分のチェーンの都合**で降りた。こちらには当てはまらないので
+	// やり直す。先頭は既に鍵を手放しているので、今度は自分が先頭になる。
+	//
+	// **やり直しは 1 度だけ。** 2 度目も同じものを引くには、別の best-effort な
+	// チェーンが同じ瞬間に同じ鍵の先頭になっている必要がある。回数を増やすより、
+	// 上限を固定して呼び出し側にエラーを返すほうが挙動を読みやすい。
+	slog.Debug("federation: redoing a resolve the leader dropped for chain-local reasons", "key", key)
+	v, err, _ = r.joinResolveOnce(g, chain, waitKey, key, mayWait, fn)
+	return v, err
+}
+
+// joinResolveOnce is one attempt of joinResolveOpt. leader reports whether this
+// call ran fn itself, which decides whether a chain-local failure is its own.
+func (r *Resolver) joinResolveOnce(g *resolveGroup, chain *resolveChain, waitKey, key string, mayWait bool, fn func() (any, error)) (any, error, bool) {
 	chainID := chain.treeID()
 	refused := ErrResolveWouldDeadlock
 	// **best-effort の枝は木ごと待たない。** 相乗りする瞬間だけ待たない形に
@@ -156,7 +185,7 @@ func (r *Resolver) joinResolveOpt(g *resolveGroup, chain *resolveChain, waitKey,
 		// 相互に引用し合う投稿を並べるだけで発生させられるので、Warn だと
 		// ログを埋められる。実際に止まったときに出るのは下の Warn の方。
 		slog.Debug("federation: not joining an in-flight resolve", "key", key, "reason", refused)
-		return nil, refused
+		return nil, refused, false
 	}
 	if leader {
 		release := func(waiters map[uint64]struct{}) {
@@ -176,7 +205,7 @@ func (r *Resolver) joinResolveOpt(g *resolveGroup, chain *resolveChain, waitKey,
 		val, err := fn()
 		done = true
 		g.finish(key, call, val, err, release)
-		return val, err
+		return val, err, true
 	}
 	// 上限に達して自分から降りた場合は finish が起こしてくれないので、印と
 	// 登録を自分で落とす。
@@ -194,9 +223,9 @@ func (r *Resolver) joinResolveOpt(g *resolveGroup, chain *resolveChain, waitKey,
 		// 既に尽きていて 0ms でここへ来た場合でも「5 分待った」と読めてしまう。
 		slog.Warn("federation: gave up waiting for an in-flight resolve",
 			"key", key, "waited", time.Since(start), "budget", resolveJoinTimeout)
-		return nil, ErrResolveJoinTimeout
+		return nil, ErrResolveJoinTimeout, false
 	}
-	return val, err
+	return val, err, false
 }
 
 // dropWaiter deregisters a chain that stopped waiting on its own.

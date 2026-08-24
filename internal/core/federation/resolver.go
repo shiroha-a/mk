@@ -108,6 +108,18 @@ var (
 	// 循環検出の**保険**。検出はモデル化した待ちしか見ないので、載っていない
 	// 待ちが増えれば見逃す。見逃しても永久には止まらないようにする。
 	ErrResolveJoinTimeout = errors.New("resolving timed out waiting for an in-flight resolve")
+	// ErrNoteAncestorIngesting is returned to a best-effort caller when the
+	// document it fetched is already being ingested by an ancestor of the same
+	// resolve chain, and no row exists yet to fall back to (#2695).
+	//
+	// **取り込みを横取りしない**ためのもの。横取りすると外側の `Create` が
+	// UNIQUE に当たって `created=false` になり、呼び出し側が通知とチャートの
+	// フックを飛ばす (#2686 と同じ形)。
+	//
+	// **`errChainLocalVerdict` を包んである。** これは先頭のチェーンの状態から
+	// 出した答えで、相乗りしただけの別チェーンには当てはまらない。素で返すと
+	// group がそれを追従側へ配り、**引用の renoteId を恒久的に落とす**。
+	ErrNoteAncestorIngesting = fmt.Errorf("note is already being ingested by an ancestor of this resolve chain: %w", errChainLocalVerdict)
 	// ErrResolveWouldBlock is returned to a best-effort caller that would have
 	// had to wait for another chain's in-flight resolve. 待たずに既存行へ落とす。
 	ErrResolveWouldBlock = errors.New("resolving would block on another in-flight resolve")
@@ -2208,6 +2220,25 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	// 取得 URI だけで既存行を引くと**必ず空振りする** (#2684 review MED-1)。
 	// fetch して id が確定したので、鍵にも id を紐づけ直す。別名 URL では
 	// 取得 URI と食い違うので、両方から既存行を引けるようにしておく。
+	// **fetch 後にもう一度 in-flight を見る** (#2695)。手前の判定は取得 URI で
+	// 引くので、featured collection が**別名 URL** を載せていると空振りする
+	// (`https://h/@user/x` を取りに行って document の id が `https://h/notes/x`)。
+	// id はここまで来ないと分からない。
+	//
+	// **best-effort な枝 (featured の取り込み) に限る。** ここで諦めると
+	// 呼び出し側は「そのピンを 1 件落とす」だけで、次の actor 更新で拾い直せる。
+	// 一方 quote 経路で諦めると `renoteId` が nil のまま保存され、再取り込みは
+	// FindByURI で早期 return するので**恒久的に失われる** (#2684 review R2
+	// HIGH-1 と同じ型)。直そうとしたバグより実害が大きくなるので広げない。
+	if !chain.mayWait() {
+		if ancestorID, ingesting := chain.ingestedDocID(idProbe.ID); ingesting {
+			// 既に行があるならそれで足りる (取り込み済みのピンを落とさない)。
+			if n := r.noteByAnyURI(uri, ancestorID); n != nil {
+				return n, nil
+			}
+			return nil, ErrNoteAncestorIngesting
+		}
+	}
 	resolved := chainAfterProbe(chain, uri, allowCrossHost, ephemeral, idProbe.ID)
 	note, _, err := r.ingestNoteWithCreated(body, "", depth, ephemeral, resolved)
 	return note, err

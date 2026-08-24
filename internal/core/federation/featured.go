@@ -188,10 +188,11 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 		// (all-or-nothing)。mk-go は 1 件だけ落として残りを反映する
 		// (docs/divergence.md)。
 		//
-		// **別名 URL では取りこぼす。** featured が `/@user/x` を載せていて
-		// document の id が `/notes/x` のとき、チェーンに載っているのは id 側
-		// なので引けない。ここで docID を得るには fetch するしかなく、呼び出し順を
-		// 変える話になるので分けた (#2695)。
+		// **ここで引けるのは取得 URI から判る分だけ。** featured が `/@user/x` を
+		// 載せていて document の id が `/notes/x` のとき、チェーンに載っているのは
+		// id 側なので空振りする。id は fetch しないと判らないので、その場合は
+		// 下の resolveNoteBestEffort が**取得したあとに**同じ判定をやり直す
+		// (`resolveNoteOnce`、#2695)。ここを通り抜けても横取りは起きない。
 		//
 		// 鍵の flag を (false, false) に固定しているのは、**すぐ下の
 		// resolveNoteBestEffort に同じ値を渡している**から
@@ -214,8 +215,9 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 				// **諦める前に既存行を引く。** in-flight 枝と同じ理由で、
 				// ここで落とすと ReplaceByUser が集合ごと書き直して
 				// **生きているピンが消える** (#2685 review MEDIUM-1)。
-				// 引けるのは取得 URI がそのまま行の URI になっている場合まで
-				// (別名 URL は上と同じ理由で取りこぼす、#2695)。
+				// 別名 URL のときは resolveNoteOnce 側が document id でも
+				// 引いて返すので、ここまで来て nil ならその回は諦めてよい
+				// (#2695)。
 				if note = r.noteByAnyURI(uri, ""); note == nil {
 					continue
 				}
