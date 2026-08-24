@@ -1414,3 +1414,32 @@ func TestShowByUsername_LocalHostShortCircuit(t *testing.T) {
 		})
 	}
 }
+
+// **非正規化で保存された行が主経路 (users/show) から引けること** (#2704 review
+// HIGH-1)。
+//
+// 保存側は正規化していない (`hostFromURI` は `url.Parse(uri).Host` をそのまま
+// 入れる) ので、`https://Mixed.Example/users/x` を出すサーバーの行は大文字
+// 混じりで入る。DB を引く前に正規化すると repository の両当たりが死んで、
+// この経路から引けなくなる。upstream が読み取り側で toPuny を掛けられるのは
+// **保存側で正規化しているから** (`ApPersonService.ts:307`)。
+func TestShowByUsername_NonNormalizedStoredHost(t *testing.T) {
+	for _, stored := range []string{"Mixed.Example", "XN--ECKVE.EXAMPLE"} {
+		t.Run(stored, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			h := stored
+			repo.Users["u1"] = &model.User{
+				ID: "u1", Username: "Alice", UsernameLower: "alice", Host: &h,
+			}
+			svc := user.NewService(repo, nil, nil, nil)
+			res := &recordingResolver{err: errors.New("must not be called")}
+			svc.SetRemoteUserResolver(res)
+
+			q := stored
+			got, err := svc.ShowByUsername("alice", &q)
+			require.NoError(t, err, "保存されている文字列そのもので引けること")
+			assert.Equal(t, "u1", got.User.ID)
+			assert.Empty(t, res.calls, "DB に居るのにリモート解決へ落ちないこと")
+		})
+	}
+}

@@ -259,11 +259,12 @@ func (s *Service) ShowManyByIDs(ids []string) ([]*UserWithProfile, error) {
 // resolver 未設定の場合は ErrUserNotFound を返し (後方互換)、設定済みで解決
 // に失敗した場合は ErrFailedToResolveRemoteUser を返す。
 func (s *Service) ShowByUsername(username string, host *string) (*UserWithProfile, error) {
-	// **DB を引く前に punycode へ揃える** (#2704)。DB 比較そのものは repository
-	// 側でも正規化しているが、ここで揃えないと miss したときの WebFinger を
-	// **Unicode 形の host へ**投げることになる。upstream も同じ位置で toPuny を
-	// 掛ける (RemoteUserResolveService.resolveUser)。
-	host = idnhost.PunyPtr(host)
+	// **ここで正規化しない。** repository の `hostMatch` は正規化形と生の両方に
+	// 当てるが、先に正規化してしまうと生の腕が死に、非正規化で保存された行が
+	// この経路から引けなくなる (#2704 review HIGH-1)。upstream が読み取り側で
+	// toPuny を掛けられるのは、**保存側で正規化しているから**
+	// (`ApPersonService.ts:307`)。mk-go の保存側は生なので、揃えるのは
+	// リモートへ問い合わせる直前だけにする。
 	u, err := s.userRepo.FindByUsernameLower(username, host)
 	if err == nil {
 		profile, _ := s.userRepo.FindProfileByUserID(u.ID)
@@ -274,7 +275,9 @@ func (s *Service) ShowByUsername(username string, host *string) (*UserWithProfil
 	if host == nil || *host == "" || s.remoteResolver == nil {
 		return nil, ErrUserNotFound
 	}
-	resolved, resolveErr := s.remoteResolver.ResolveByUsernameHost(username, *host)
+	// WebFinger の宛先は punycode へ揃える (upstream RemoteUserResolveService の
+	// `:57` と同じ)。Unicode 形のまま投げると名前解決に失敗する。
+	resolved, resolveErr := s.remoteResolver.ResolveByUsernameHost(username, idnhost.Puny(*host))
 	if resolveErr != nil || resolved == nil {
 		return nil, ErrFailedToResolveRemoteUser
 	}

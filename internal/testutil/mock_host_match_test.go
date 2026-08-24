@@ -33,6 +33,11 @@ func TestMockUserRepository_HostMatchesProduction(t *testing.T) {
 		{"大文字 ASCII で引く", "remote.example", "Remote.Example", true},
 		{"非正規化で保存された行は保存された形で引ける", "Mixed.Example", "Mixed.Example", true},
 		{"別ホストは引かない", "remote.example", "other.example", false},
+		// **ここが無いと「mock だけ緩い」変異を捕まえられない。** 両辺を
+		// 正規化して比べる実装 (= 保存側も正規化する前提) にすると、下の 2 つが
+		// true になってしまい本番と食い違う。
+		{"unicode で保存された行は punycode では引けない", "パイ.example", "xn--eckve.example", false},
+		{"非正規化で保存された行は正規化形では引けない", "Mixed.Example", "mixed.example", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

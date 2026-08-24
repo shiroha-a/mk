@@ -142,16 +142,24 @@ func (r *userRepository) FindByToken(token string) (*model.User, error) {
 
 func (r *userRepository) FindByUsernameLower(username string, host *string) (*model.User, error) {
 	var user model.User
-	q := r.db.Where("\"usernameLower\" = lower(?)", username)
-	if host != nil {
-		q = hostMatch(q, *host)
-	} else {
-		q = q.Where("host IS NULL")
+	if host == nil {
+		if err := r.db.Where("\"usernameLower\" = lower(?)", username).
+			Where("host IS NULL").First(&user).Error; err != nil {
+			return nil, err
+		}
+		return &user, nil
 	}
-	if err := q.First(&user).Error; err != nil {
-		return nil, err
+	// 完全一致 → 正規化形の順に引く。1 つ目で当たれば 2 回目は投げない。
+	var lastErr error
+	for _, h := range hostCandidates(*host) {
+		err := r.db.Where("\"usernameLower\" = lower(?)", username).
+			Where("host = ?", h).First(&user).Error
+		if err == nil {
+			return &user, nil
+		}
+		lastErr = err
 	}
-	return &user, nil
+	return nil, lastErr
 }
 
 // hostMatch scopes a user query to one host, matching both the normalized
@@ -174,6 +182,20 @@ func hostMatch(q *gorm.DB, host string) *gorm.DB {
 		return q.Where("host IN ?", []string{p, host})
 	}
 	return q.Where("host = ?", host)
+}
+
+// hostCandidates lists the host values to try, exact match first.
+//
+// **順序は SQL に任せない。** `First` は自前で primary key 昇順を付けるので、
+// `Order` を足しても完全一致が先に来る保証がない。同じリモートが actor URI の
+// host 表記を変えると `IDX_user_usernameLower_host_unique` は表記違いを別行として
+// 許すため、`Mixed.Example` と `mixed.example` が共存しうる (#2704 review
+// MEDIUM-2)。候補を明示して順に引く。
+func hostCandidates(host string) []string {
+	if p := idnhost.Puny(host); p != host {
+		return []string{host, p}
+	}
+	return []string{host}
 }
 
 // FindManyByUsernamesAndHost batches the case-insensitive username lookup
@@ -199,7 +221,31 @@ func (r *userRepository) FindManyByUsernamesAndHost(usernames []string, host *st
 	if err := q.Find(&users).Error; err != nil {
 		return nil, err
 	}
-	return users, nil
+	if host == nil {
+		return users, nil
+	}
+	// **username ごとに 1 行へ畳む。** hostMatch は host 表記の違う 2 行に
+	// 当たりうるので、そのまま返すと呼び出し側 (mention 解決) が
+	// `m[usernameLower] = id` で後勝ちに潰し、通知先が DB の行順で決まる。
+	// FindByUsernameLower と同じ行が選ばれるよう、完全一致を優先する。
+	best := make(map[string]*model.User, len(users))
+	for _, u := range users {
+		cur, ok := best[u.UsernameLower]
+		if !ok {
+			best[u.UsernameLower] = u
+			continue
+		}
+		if u.Host != nil && *u.Host == *host && (cur.Host == nil || *cur.Host != *host) {
+			best[u.UsernameLower] = u
+		}
+	}
+	out := users[:0]
+	for _, u := range users {
+		if best[u.UsernameLower] == u {
+			out = append(out, u)
+		}
+	}
+	return out, nil
 }
 
 func (r *userRepository) FindProfileByUserID(userID string) (*model.UserProfile, error) {

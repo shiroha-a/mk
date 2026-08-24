@@ -1715,3 +1715,31 @@ func TestUserRepository_FindManyByUsernamesAndHost_IDNHost(t *testing.T) {
 		assert.Equal(t, "idnuser0000000000002", got[0].ID)
 	}
 }
+
+// **host 表記の違う行が共存するとき、完全一致の行を返すこと** (#2704 review
+// MEDIUM-2)。
+//
+// `IDX_user_usernameLower_host_unique` は host 表記の違いを別行として許すので、
+// 同じリモートが actor URI の host 表記を変えると 2 行になりうる。順序を付けないと
+// `First` が primary key 順で選ぶので、完全一致があっても負けることがある。
+// 一括引きも username ごとに 1 行へ畳む (呼び出し側が後勝ちで潰すと通知先が
+// DB の行順で決まる)。
+func TestUserRepository_HostMatch_PrefersExactRow(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	// 非完全一致の行を先に (= primary key が小さい側に) 入れる。
+	insertRemoteTestUser(t, "idndup000000000000a1", "dupuser", "mixed.example")
+	insertRemoteTestUser(t, "idndup000000000000a2", "dupuser", "Mixed.Example")
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "user" WHERE id IN (?, ?)`, "idndup000000000000a1", "idndup000000000000a2")
+	})
+
+	h := "Mixed.Example"
+	got, err := repo.FindByUsernameLower("dupuser", &h)
+	require.NoError(t, err)
+	assert.Equal(t, "idndup000000000000a2", got.ID, "完全一致の行を返すこと")
+
+	many, err := repo.FindManyByUsernamesAndHost([]string{"dupuser"}, &h)
+	require.NoError(t, err)
+	require.Len(t, many, 1, "username ごとに 1 行へ畳むこと")
+	assert.Equal(t, "idndup000000000000a2", many[0].ID)
+}

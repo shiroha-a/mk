@@ -219,17 +219,32 @@ func (m *MockUserRepository) FindByUsernameLower(username string, host *string) 
 	if m.FindByUsernameLowerFn != nil {
 		return m.FindByUsernameLowerFn(username, host)
 	}
+	// **本番の repository と同じ意味論にする** (#2704)。揃えないと、mock を使う
+	// テストだけが通って本番との差が隠れる。完全一致を優先するのも同じ理由
+	// (host 表記の違う 2 行が共存しうる)。
+	var fallback *model.User
 	for _, u := range m.Users {
-		if u.UsernameLower == username {
-			if host == nil && u.Host == nil {
-				return u, nil
-			}
-			// **本番の repository (hostMatch) と同じ意味論にする** (#2704)。
-			// 揃えないと、mock を使うテストだけが通って本番との差が隠れる。
-			if host != nil && u.Host != nil && hostMatches(*host, *u.Host) {
-				return u, nil
-			}
+		if u.UsernameLower != username {
+			continue
 		}
+		if host == nil {
+			if u.Host == nil {
+				return u, nil
+			}
+			continue
+		}
+		if u.Host == nil {
+			continue
+		}
+		if *u.Host == *host {
+			return u, nil
+		}
+		if fallback == nil && hostMatches(*host, *u.Host) {
+			fallback = u
+		}
+	}
+	if fallback != nil {
+		return fallback, nil
 	}
 	return nil, ErrNotFound
 }
