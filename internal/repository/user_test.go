@@ -1638,12 +1638,7 @@ func TestUserRepository_SearchByUsernameAndHost_FindsNeverPostedUser(t *testing.
 func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	const puny = "xn--eckve.example"
-	uri := "https://" + puny + "/users/idn1"
-	host := puny
-	require.NoError(t, testDB.Create(&model.User{
-		ID: "idnuser0000000000001", Username: "IdnUser", UsernameLower: "idnuser",
-		Host: &host, URI: &uri, AvatarDecorations: datatypes.JSON([]byte("[]")),
-	}).Error)
+	insertRemoteTestUser(t, "idnuser0000000000001", "idnuser", puny)
 	t.Cleanup(func() { testDB.Exec(`DELETE FROM "user" WHERE id = ?`, "idnuser0000000000001") })
 
 	for _, tc := range []struct {
@@ -1675,17 +1670,41 @@ func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
 	})
 }
 
+// **非正規化で保存された行が引けなくなっていないこと** (#2704 review MEDIUM-1)。
+//
+// 保存側は正規化していない (`hostFromURI` は `url.Parse(uri).Host` をそのまま
+// 入れる) ので、`https://Mixed.Example/users/x` のような actor URI を出す
+// サーバーの行は大文字混じりで入る。正規化形だけを引くと、そういう行が
+// **どの acct 経路からも引けなくなる**。
+func TestUserRepository_FindByUsernameLower_NonNormalizedStoredHost(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	insertRemoteTestUser(t, "idnstored00000000001", "storedmixed", "Mixed.Example")
+	insertRemoteTestUser(t, "idnstored00000000002", "storedpunyup", "XN--ECKVE.EXAMPLE")
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "user" WHERE id IN (?, ?)`, "idnstored00000000001", "idnstored00000000002")
+	})
+
+	for _, tc := range []struct{ id, username, stored string }{
+		{"idnstored00000000001", "storedmixed", "Mixed.Example"},
+		{"idnstored00000000002", "storedpunyup", "XN--ECKVE.EXAMPLE"},
+	} {
+		h := tc.stored
+		got, err := repo.FindByUsernameLower(tc.username, &h)
+		require.NoError(t, err, "保存されている文字列そのもので引けること (stored=%q)", tc.stored)
+		assert.Equal(t, tc.id, got.ID)
+
+		many, err := repo.FindManyByUsernamesAndHost([]string{tc.username}, &h)
+		require.NoError(t, err)
+		assert.Len(t, many, 1, "一括引きでも同じ (stored=%q)", tc.stored)
+	}
+}
+
 // メンション解決の一括引きも同じ (#2704)。ここが空振りすると、Unicode で書かれた
 // メンションが **解決されず通知も飛ばない**。
 func TestUserRepository_FindManyByUsernamesAndHost_IDNHost(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	const puny = "xn--eckve.example"
-	uri := "https://" + puny + "/users/idn2"
-	host := puny
-	require.NoError(t, testDB.Create(&model.User{
-		ID: "idnuser0000000000002", Username: "IdnMention", UsernameLower: "idnmention",
-		Host: &host, URI: &uri, AvatarDecorations: datatypes.JSON([]byte("[]")),
-	}).Error)
+	insertRemoteTestUser(t, "idnuser0000000000002", "idnmention", puny)
 	t.Cleanup(func() { testDB.Exec(`DELETE FROM "user" WHERE id = ?`, "idnuser0000000000002") })
 
 	for _, h := range []string{puny, "パイ.example"} {

@@ -10,11 +10,15 @@ import (
 // Puny normalizes a host for comparison the way upstream
 // UtilityService.toPuny does (idna.ToASCII(lowercase), UTS#46)。
 //
-// **保存されている host は punycode。** リモートの `user.host` も `instance.host`
-// も actor URI の host から作られるので ASCII に閉じている。一方、比較に使う側は
-// Unicode IDN で来ることがある (フロントの mention リンクは `toUnicode(host)` で
-// URL を組むし、投稿本文の mention は書き手が打ったままの形になる)。両辺に
-// 掛けて `パイ.example` と `xn--eckve.example` を同一視する。
+// **比較専用。** 比較に使う側は正規化されていない形で来ることがある
+// (フロントの mention リンクは `toUnicode(host)` で URL を組むし、投稿本文の
+// mention は書き手が打ったまま)。両辺に掛けて `パイ.example` と
+// `xn--eckve.example`、`Remote.Example` と `remote.example` を同一視する。
+//
+// **保存側は正規化していない。** `hostFromURI` は `url.Parse(uri).Host` を
+// そのまま入れるので、`user.host` / `instance.host` には非正規化の行がありうる。
+// これを揃えるには既存行の backfill migration が要るので別スコープ
+// (`internal/repository` の `hostMatch` は、そのため両方の形に当てている)。
 //
 // idna が失敗する不正入力のみ小文字化で返す (Go default の lenient UTS#46
 // profile では port 付き host も成功し ASCII tail はそのまま残るため、fallback は

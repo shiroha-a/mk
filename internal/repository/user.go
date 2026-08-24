@@ -144,12 +144,7 @@ func (r *userRepository) FindByUsernameLower(username string, host *string) (*mo
 	var user model.User
 	q := r.db.Where("\"usernameLower\" = lower(?)", username)
 	if host != nil {
-		// **host 列は punycode。** 呼び出し側は Unicode IDN で来ることがある
-		// (フロントの mention リンクは toUnicode(host) で URL を組み、投稿本文の
-		// mention は書き手が打ったままの形になる)。生の完全一致だと IDN ホストの
-		// ユーザーが引けない (#2704)。upstream も DB を引く前に toPuny を掛ける
-		// (RemoteUserResolveService.resolveUser)。
-		q = q.Where("host = ?", idnhost.Puny(*host))
+		q = hostMatch(q, *host)
 	} else {
 		q = q.Where("host IS NULL")
 	}
@@ -157,6 +152,28 @@ func (r *userRepository) FindByUsernameLower(username string, host *string) (*mo
 		return nil, err
 	}
 	return &user, nil
+}
+
+// hostMatch scopes a user query to one host, matching both the normalized
+// (punycode, lowercase) form and the string as given.
+//
+// **正規化形だけに当てると回帰する。** 呼び出し側は正規化されていない形で来る
+// ことがある (フロントの mention リンクは `toUnicode(host)` で URL を組むし、
+// 投稿本文の mention は書き手が打ったまま) ので、upstream と同じく引く前に
+// punycode へ揃える必要がある (#2704)。一方 **保存側は正規化していない** —
+// `hostFromURI` は `url.Parse(uri).Host` をそのまま入れるので、`Mixed.Example`
+// のような actor URI を出すサーバーの行は非正規化で入る。正規化形だけを引くと
+// そういう行が**どの acct 経路からも引けなくなる**ので、両方に当てる。
+//
+// `IN` にしてあるのは `(usernameLower, host)` の index を効かせたままにするため。
+// `lower(host) = ?` のような式にすると index が使えない。
+//
+// **保存側の正規化はこの範囲外。** 揃えるなら既存行の backfill migration が要る。
+func hostMatch(q *gorm.DB, host string) *gorm.DB {
+	if p := idnhost.Puny(host); p != host {
+		return q.Where("host IN ?", []string{p, host})
+	}
+	return q.Where("host = ?", host)
 }
 
 // FindManyByUsernamesAndHost batches the case-insensitive username lookup
@@ -174,10 +191,7 @@ func (r *userRepository) FindManyByUsernamesAndHost(usernames []string, host *st
 	}
 	q := r.db.Where(`"usernameLower" IN ?`, lowered)
 	if host != nil {
-		// FindByUsernameLower と同じ理由で punycode に揃える (#2704)。ここは
-		// 投稿本文の mention 解決に使うので、Unicode で書かれた mention が
-		// **解決されず通知も飛ばない**という形で出る。
-		q = q.Where("host = ?", idnhost.Puny(*host))
+		q = hostMatch(q, *host)
 	} else {
 		q = q.Where("host IS NULL")
 	}

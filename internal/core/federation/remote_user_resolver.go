@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -53,7 +54,11 @@ func (r *RemoteUserResolver) ResolveByUsernameHost(username, host string) (*mode
 	}
 	// ホストがローカルなら webfinger を踏まず user table の local 行を引く。
 	// ここに来るのは host 正規化を怠った呼び出し側へのセーフティネット。
-	if r.localHost != "" && strings.EqualFold(host, r.localHost) {
+	// **両辺を正規化する。** upstream も toPuny を掛けた host を
+	// `toPuny(config.host)` と比べる (RemoteUserResolveService.ts:59)。片側だけ
+	// だと、`url` を Unicode IDN で書いた instance で自ホスト短絡が効かなくなり、
+	// 自分自身への WebFinger 往復を誘発する (#2704 review)。
+	if r.localHost != "" && strings.EqualFold(idnhost.Puny(host), idnhost.Puny(r.localHost)) {
 		if r.userRepo == nil {
 			return nil, errors.New("remote user resolver: local host without userRepo")
 		}

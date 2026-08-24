@@ -224,15 +224,23 @@ func (m *MockUserRepository) FindByUsernameLower(username string, host *string) 
 			if host == nil && u.Host == nil {
 				return u, nil
 			}
-			// **本番の repository と同じく punycode に揃えて比較する** (#2704)。
-			// 揃えないと、mock を使うテストだけが Unicode IDN の host で
-			// 引けてしまい、本番との差が隠れる。
-			if host != nil && u.Host != nil && idnhost.Puny(*host) == idnhost.Puny(*u.Host) {
+			// **本番の repository (hostMatch) と同じ意味論にする** (#2704)。
+			// 揃えないと、mock を使うテストだけが通って本番との差が隠れる。
+			if host != nil && u.Host != nil && hostMatches(*host, *u.Host) {
 				return u, nil
 			}
 		}
 	}
 	return nil, ErrNotFound
+}
+
+// hostMatches mirrors repository.hostMatch: the stored value matches either the
+// normalized form of the query or the query as given.
+//
+// **保存側は正規化していない**ので、正規化形だけで比べると非正規化で保存された
+// 行が引けなくなる。本番と同じ両当たりにしておく (#2704 review)。
+func hostMatches(query, stored string) bool {
+	return stored == query || stored == idnhost.Puny(query)
 }
 
 // FindManyByUsernamesAndHost mirrors the production repo: case-insensitive
@@ -252,8 +260,8 @@ func (m *MockUserRepository) FindManyByUsernamesAndHost(usernames []string, host
 		}
 		if host == nil && u.Host == nil {
 			out = append(out, u)
-		} else if host != nil && u.Host != nil && idnhost.Puny(*host) == idnhost.Puny(*u.Host) {
-			// FindByUsernameLower と同じ理由で punycode に揃える (#2704)。
+		} else if host != nil && u.Host != nil && hostMatches(*host, *u.Host) {
+			// FindByUsernameLower と同じ (#2704)。
 			out = append(out, u)
 		}
 	}

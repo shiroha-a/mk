@@ -11,12 +11,17 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 )
 
-// **Unicode で書かれた IDN ホストのメンションが解決されること** (#2704)。
+// **メンションの host が大文字混じりでも解決されること** (#2704)。
 //
-// `user.host` は punycode で保存されるが、メンションの host は**書き手が打った
-// まま**なので Unicode で来る。正規化しないと mention が解決されず、
-// `note.mentions` に載らないので**通知も飛ばない**。ユーザーページが開けない
-// のと違って、こちらは黙って落ちるので気付きにくい。
+// メンションの host は書き手が打ったままなので、`@user@Remote.Example` のように
+// 大文字混じりで来る。生の完全一致だと解決されず `note.mentions` に載らないので、
+// **通知も飛ばない**。ユーザーページが開けないのと違ってエラーが出ないため
+// 気付きにくい。
+//
+// **Unicode 形はここには来ない。** `mentionRegex` の host 部が
+// `[A-Za-z0-9.\-]+` で ASCII 限定なので、`@user@パイ.example` は host が落ちて
+// ローカル `@user` として parse される (upstream の mfm-js も同じ)。効くのは
+// 大文字混じり ASCII と大文字 punycode。
 func TestResolveMentionUserIDs_IDNHost(t *testing.T) {
 	const puny = "xn--eckve.example"
 	repo := testutil.NewMockUserRepository()
@@ -34,7 +39,7 @@ func TestResolveMentionUserIDs_IDNHost(t *testing.T) {
 		host string
 	}{
 		{"punycode", puny},
-		{"unicode", "パイ.example"},
+		{"punycode uppercase", "XN--ECKVE.EXAMPLE"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := svc.ResolveMentionUserIDsForTest([]corenote.Mention{

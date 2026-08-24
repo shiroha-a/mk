@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/core/federation"
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -1381,4 +1382,35 @@ func TestShowByUsername_IDNHost(t *testing.T) {
 		_, _ = svc.ShowByUsername("idnuser", &h)
 		assert.Equal(t, "パイ.example", h)
 	})
+}
+
+// **自ホストの acct は WebFinger を踏まずローカル行へ短絡すること** (#2704 review
+// MEDIUM-2)。upstream も toPuny を掛けた host を `toPuny(config.host)` と比べる
+// (RemoteUserResolveService.ts:59)。片側だけだと、`url` を Unicode IDN で書いた
+// instance で短絡が効かなくなり、自分自身への WebFinger 往復を誘発する。
+func TestShowByUsername_LocalHostShortCircuit(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		localHost string
+		asked     string
+	}{
+		{"ascii", "local.example", "local.example"},
+		{"ascii uppercase", "local.example", "LOCAL.EXAMPLE"},
+		{"unicode local host, unicode ask", "パイ.example", "パイ.example"},
+		{"unicode local host, punycode ask", "パイ.example", "xn--eckve.example"},
+		{"punycode local host, unicode ask", "xn--eckve.example", "パイ.example"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			repo.Users["me"] = &model.User{ID: "me", Username: "Alice", UsernameLower: "alice"}
+			svc := user.NewService(repo, nil, nil, nil)
+			// resolver は「呼ばれたら失敗する」ので、短絡できないと error になる。
+			svc.SetRemoteUserResolver(federation.NewRemoteUserResolver(nil, nil, repo, tc.localHost))
+
+			h := tc.asked
+			got, err := svc.ShowByUsername("alice", &h)
+			require.NoError(t, err, "localHost=%q に対し host=%q が短絡すること", tc.localHost, tc.asked)
+			assert.Equal(t, "me", got.User.ID)
+		})
+	}
 }
