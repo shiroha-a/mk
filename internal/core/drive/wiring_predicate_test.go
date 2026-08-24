@@ -14,4 +14,17 @@ import (
 func TestService_HasRoleChecker(t *testing.T) {
 	assert.False(t, (&Service{}).HasRoleChecker(),
 		"未配線なら false を返すこと (常に true だと検査が無意味になる)")
+
+	// **配線したら true も固定する。** false 側だけだと、述語が別の field を
+	// 読む typo (copy-paste の付け替え漏れ) が単体・e2e とも素通りする
+	// (#2683 review LOW-1)。
+	s := &Service{}
+	s.SetRoleChecker(stubWiringRoleChecker{})
+	assert.True(t, s.HasRoleChecker(), "配線したら true")
+
 }
+
+type stubWiringRoleChecker struct{}
+
+func (stubWiringRoleChecker) IsModerator(string) bool               { return false }
+func (stubWiringRoleChecker) GetUserPolicies(string) map[string]any { return nil }

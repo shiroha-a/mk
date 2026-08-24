@@ -70,4 +70,15 @@ func TestInboxProcessor_HasHostBlockChecker(t *testing.T) {
 	onlyVerifier.SetSignatureVerifier(stubSignatureVerifier{})
 	assert.False(t, onlyVerifier.HasHostBlockChecker(),
 		"HasSignatureVerifier は host block checker の有無を保証しない")
+
+	// **配線したら true も固定する** (#2683 review LOW-1)。
+	p2 := &InboxProcessor{}
+	p2.SetHostBlockChecker(stubProcHostBlock{})
+	assert.True(t, p2.HasHostBlockChecker(), "配線したら true")
 }
+
+type stubProcHostBlock struct{}
+
+func (stubProcHostBlock) IsBlocked(string) bool    { return false }
+func (stubProcHostBlock) IsAllowed(string) bool    { return true }
+func (stubProcHostBlock) FederationDisabled() bool { return false }

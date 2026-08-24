@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	corechat "github.com/shiroha-a/mk/internal/core/chat"
 )
 
 // #2683: 起動時の配線検査が見る述語。**false を返す側を必ず固定する。**
@@ -14,4 +16,11 @@ import (
 func TestChatRoomFactory_HasService(t *testing.T) {
 	assert.False(t, NewChatRoomFactory(nil).HasService(),
 		"未配線なら false を返すこと (常に true だと検査が無意味になる)")
+
+	// **配線したら true も固定する。** false 側だけだと、述語が別の field を
+	// 読む typo (copy-paste の付け替え漏れ) が単体・e2e とも素通りする
+	// (#2683 review LOW-1)。
+	// 配線したら true。svc は *corechat.Service なので、空の値で足りる。
+	assert.True(t, NewChatRoomFactory(&corechat.Service{}).HasService(), "配線したら true")
+
 }

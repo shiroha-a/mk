@@ -35,4 +35,15 @@ func (stubInboxEnqueuer) EnqueueInbox(context.Context, queue.InboxPayload) error
 func TestHandler_HasHostBlockChecker(t *testing.T) {
 	assert.False(t, (&Handler{}).HasHostBlockChecker(),
 		"未配線なら false を返すこと (常に true だと検査が無意味になる)")
+
+	// **配線したら true も固定する** (#2683 review LOW-1)。
+	h := &Handler{}
+	h.SetHostBlockChecker(stubInboxHostBlock{})
+	assert.True(t, h.HasHostBlockChecker(), "配線したら true")
 }
+
+type stubInboxHostBlock struct{}
+
+func (stubInboxHostBlock) IsBlocked(string) bool    { return false }
+func (stubInboxHostBlock) IsAllowed(string) bool    { return true }
+func (stubInboxHostBlock) FederationDisabled() bool { return false }

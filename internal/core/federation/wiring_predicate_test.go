@@ -17,4 +17,22 @@ import (
 func TestFederation_WiringPredicates(t *testing.T) {
 	assert.False(t, (&Resolver{}).HasHostBlockChecker(), "resolver: 未配線なら false")
 	assert.False(t, (&DeliverService{}).HasHostBlockChecker(), "deliver: 未配線なら false")
+
+	// **配線したら true も固定する。** false 側だけだと、述語が別の field を
+	// 読む typo (copy-paste の付け替え漏れ) が単体・e2e とも素通りする
+	// (#2683 review LOW-1)。
+	r := &Resolver{}
+	r.SetHostBlockChecker(stubWiringHostBlock{})
+	assert.True(t, r.HasHostBlockChecker(), "resolver: 配線したら true")
+
+	d := &DeliverService{}
+	d.SetHostBlockChecker(stubWiringHostBlock{})
+	assert.True(t, d.HasHostBlockChecker(), "deliver: 配線したら true")
+
 }
+
+type stubWiringHostBlock struct{}
+
+func (stubWiringHostBlock) IsBlocked(string) bool    { return false }
+func (stubWiringHostBlock) IsAllowed(string) bool    { return true }
+func (stubWiringHostBlock) FederationDisabled() bool { return false }

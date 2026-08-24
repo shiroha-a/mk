@@ -14,4 +14,15 @@ import (
 func TestHandler_HasUserPolicyResolver(t *testing.T) {
 	assert.False(t, (&Handler{}).HasUserPolicyResolver(),
 		"未配線なら false を返すこと (常に true だと検査が無意味になる)")
+
+	// **配線したら true も固定する。** false 側だけだと、述語が別の field を
+	// 読む typo (copy-paste の付け替え漏れ) が単体・e2e とも素通りする
+	// (#2683 review LOW-1)。
+	x := &Handler{}
+	x.SetUserPolicyResolver(stubWiringPolicyProvider{})
+	assert.True(t, x.HasUserPolicyResolver(), "配線したら true")
 }
+
+type stubWiringPolicyProvider struct{}
+
+func (stubWiringPolicyProvider) GetUserPolicies(string) map[string]any { return nil }

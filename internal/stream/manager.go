@@ -312,9 +312,18 @@ func formatID(n uint64) string {
 // ltl/gtl の可視性 gate が黙って素通しになる。起動時検査に使う (#2683)。
 //
 // **`SetFollowingSnapshotLookup` と `SetNoteVisibilityChecker` は対象外。**
-// どちらも未配線だと fail-closed に倒れる (前者は `channels/note_filter.go` の
-// `snap == nil` が `return false`、後者は全 subNote を拒否)。起動時検査に
-// 載せるのは「未配線でも動いてしまう」ものだけ。
+//
+// `SetNoteVisibilityChecker` は未配線で全 subNote を拒否する = 素直に
+// fail-closed (`dispatcher.go` の `if d.noteVisibility == nil { return }`)。
+//
+// `SetFollowingSnapshotLookup` は**支配的には fail-closed**
+// (`channels/note_filter.go` の `followsFromSnap` / `userListVisibilityShouldEmit` /
+// `renotedReplyVisibleTo` / `streamNoteVisibleForViewer` はいずれも
+// `snap == nil` で落とす) だが、**1 経路だけ緩む**: `replyShouldEmit` の
+// home / hybrid では `followee.withReplies` が false 扱いになる結果、
+// mention hatch (#1195) を通って 1 通余分に流れうる。reply embed 自体は
+// `hideEmbeds` が別 gate で blank 化するので実害は軽微と判断して対象外にした
+// (#2683 review M-1 / round 2 M-2)。**この判断を変えるならここも直すこと。**
 func (m *Manager) HasHardMuteLookup() bool { return m.hardMute != nil }
 
 // HasMuteBlockSnapshotLookup reports whether the mute/block snapshot lookup was wired.

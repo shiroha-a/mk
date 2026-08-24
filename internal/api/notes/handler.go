@@ -1136,6 +1136,8 @@ func (h *Handler) PackForEmbed(ctx context.Context, n *model.Note) entity.NoteEn
 
 // HasPolicyProvider reports whether the role policy provider was wired.
 //
-// 未配線だと timeline の可視性 gate (`timelineAvailable`) が丸ごと素通しになる。
-// 起動時検査に使う (#2683)。
+// 未配線だと timeline の可視性 gate (`timelineAvailable`) に加え、
+// `canSearchNotes` (`handler.go`)・`canUseTranslator` (`handler_extra.go`)・
+// `noteDraftLimit` (`handler_drafts.go`) も同時に素通しになる。**1 つの nil で
+// 4 箇所**。起動時検査に使う (#2683)。
 func (h *Handler) HasPolicyProvider() bool { return h.policyProvider != nil }

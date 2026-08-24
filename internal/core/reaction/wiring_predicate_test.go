@@ -4,6 +4,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+
+	"github.com/shiroha-a/mk/internal/model"
 )
 
 // #2683: 起動時の配線検査が見る述語。**false を返す側を必ず固定する。**
@@ -14,4 +16,16 @@ import (
 func TestService_HasUserRolesProvider(t *testing.T) {
 	assert.False(t, (&Service{}).HasUserRolesProvider(),
 		"未配線なら false を返すこと (常に true だと検査が無意味になる)")
+
+	// **配線したら true も固定する。** false 側だけだと、述語が別の field を
+	// 読む typo (copy-paste の付け替え漏れ) が単体・e2e とも素通りする
+	// (#2683 review LOW-1)。
+	s := &Service{}
+	s.SetUserRolesProvider(stubWiringUserRoles{})
+	assert.True(t, s.HasUserRolesProvider(), "配線したら true")
+
 }
+
+type stubWiringUserRoles struct{}
+
+func (stubWiringUserRoles) GetUserRoles(string) ([]*model.Role, error) { return nil, nil }

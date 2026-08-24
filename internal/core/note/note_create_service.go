@@ -1445,9 +1445,11 @@ func (s *CreateService) materializeIfMissing(noteID string, lookupErr error) boo
 // HasBlockingRepo / HasMetaRepo / HasSilencingProvider report whether the
 // note-creation gates were wired.
 //
-// 未配線時にそれぞれ: ブロックしている相手への返信・引用が通る、meta の
-// センシティブワードと禁止ワードの両方が効かない、silenced な利用者の public
-// 投稿が home へ降格されない。起動時検査に使う (#2683)。
+// 未配線時にそれぞれ: **自分をブロックしている**相手への返信・引用が通る
+// (gate は `checkBlocked(t.UserID, in.User.ID)` = 返信先の著者が自分を
+// ブロックしているか)、meta のセンシティブワードと禁止ワードの両方が効かない、
+// silenced な利用者の public 投稿が home へ降格されない。起動時検査に使う
+// (#2683)。
 func (s *CreateService) HasBlockingRepo() bool { return s.blockingRepo != nil }
 
 // HasMetaRepo reports whether the meta repository was wired.

@@ -20,4 +20,43 @@ func TestManager_WiringPredicates(t *testing.T) {
 	assert.False(t, m.HasHardMuteLookup(), "未配線なら false")
 	assert.False(t, m.HasMuteBlockSnapshotLookup(), "未配線なら false")
 	assert.False(t, m.HasPolicyProvider(), "未配線なら false")
+
+	// **配線したら true も固定する。** false 側だけだと、述語が別の field を
+	// 読む typo (copy-paste の付け替え漏れ) が単体・e2e とも素通りする
+	// (#2683 review LOW-1)。
+	// **1 つずつ配線して独立性を固定する** (#2683 review LOW-1)。
+	t.Run("hardMute だけ配線", func(t *testing.T) {
+		w := &Manager{}
+		w.SetHardMuteLookup(stubWiringHardMute{})
+		assert.True(t, w.HasHardMuteLookup(), "配線したら true")
+		assert.False(t, w.HasMuteBlockSnapshotLookup(), "他の述語は満たされないこと")
+		assert.False(t, w.HasPolicyProvider(), "他の述語は満たされないこと")
+	})
+	t.Run("muteBlock だけ配線", func(t *testing.T) {
+		w := &Manager{}
+		w.SetMuteBlockSnapshotLookup(stubWiringMuteBlock{})
+		assert.True(t, w.HasMuteBlockSnapshotLookup(), "配線したら true")
+		assert.False(t, w.HasHardMuteLookup(), "他の述語は満たされないこと")
+		assert.False(t, w.HasPolicyProvider(), "他の述語は満たされないこと")
+	})
+	t.Run("policyProvider だけ配線", func(t *testing.T) {
+		w := &Manager{}
+		w.SetPolicyProvider(stubWiringStreamPolicy{})
+		assert.True(t, w.HasPolicyProvider(), "配線したら true")
+		assert.False(t, w.HasHardMuteLookup(), "他の述語は満たされないこと")
+		assert.False(t, w.HasMuteBlockSnapshotLookup(), "他の述語は満たされないこと")
+	})
+
 }
+
+type stubWiringHardMute struct{}
+
+func (stubWiringHardMute) HardMutedWordsForUser(string) []byte { return nil }
+
+type stubWiringMuteBlock struct{}
+
+func (stubWiringMuteBlock) MuteBlockSnapshotForUser(string) *MuteBlockSnapshot { return nil }
+
+type stubWiringStreamPolicy struct{}
+
+func (stubWiringStreamPolicy) GetUserPolicies(string) map[string]any { return nil }
