@@ -68,6 +68,9 @@ type UserRepository interface {
 	SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error)
 	UpdateUser(userID string, fields map[string]any) error
 	UpdateProfile(userID string, fields map[string]any) error
+	// UpdatePasswordIfCurrent replaces a profile password only when the stored
+	// hash still equals currentHash. The bool reports whether one row changed.
+	UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error)
 	CreateProfile(profile *model.UserProfile) error
 	ListUsers(filter model.UserListFilter) ([]*model.User, error)
 	ListRemoteInboxes() ([]model.RemoteInbox, error)
@@ -525,6 +528,16 @@ func (r *userRepository) UpdateProfile(userID string, fields map[string]any) err
 		return nil
 	}
 	return r.db.Model(&model.UserProfile{}).Where("\"userId\" = ?", userID).Updates(fields).Error
+}
+
+func (r *userRepository) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {
+	tx := r.db.Model(&model.UserProfile{}).
+		Where(`"userId" = ? AND "password" = ?`, userID, currentHash).
+		Update("password", newHash)
+	if tx.Error != nil {
+		return false, tx.Error
+	}
+	return tx.RowsAffected == 1, nil
 }
 
 // CreateProfile inserts a new user_profile row.

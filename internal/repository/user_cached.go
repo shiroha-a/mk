@@ -463,6 +463,15 @@ func (c *CachedUserRepository) UpdateProfile(userID string, fields map[string]an
 	return nil
 }
 
+func (c *CachedUserRepository) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {
+	updated, err := c.UserRepository.UpdatePasswordIfCurrent(userID, currentHash, newHash)
+	if err != nil || !updated {
+		return updated, err
+	}
+	c.invalidate(userID)
+	return true, nil
+}
+
 func (c *CachedUserRepository) CreateProfile(profile *model.UserProfile) error {
 	if err := c.UserRepository.CreateProfile(profile); err != nil {
 		return err

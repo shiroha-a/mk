@@ -26,13 +26,16 @@ type countingUserRepo struct {
 	findProfileByUserIDCalls atomic.Int64
 	findByURICalls           atomic.Int64
 
-	updateUserErr      error
-	updateProfileErr   error
-	createProfileErr   error
-	incFollowingErr    error
-	incFollowersErr    error
-	updateUserCalls    atomic.Int64
-	updateProfileCalls atomic.Int64
+	updateUserErr        error
+	updateProfileErr     error
+	createProfileErr     error
+	incFollowingErr      error
+	incFollowersErr      error
+	updateUserCalls      atomic.Int64
+	updateProfileCalls   atomic.Int64
+	updatePasswordCalls  atomic.Int64
+	updatePasswordResult bool
+	updatePasswordErr    error
 }
 
 func newCountingUserRepo() *countingUserRepo {
@@ -84,6 +87,22 @@ func (c *countingUserRepo) UpdateUser(userID string, _ map[string]any) error {
 func (c *countingUserRepo) UpdateProfile(userID string, _ map[string]any) error {
 	c.updateProfileCalls.Add(1)
 	return c.updateProfileErr
+}
+
+func (c *countingUserRepo) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {
+	c.updatePasswordCalls.Add(1)
+	if c.updatePasswordErr != nil {
+		return false, c.updatePasswordErr
+	}
+	if !c.updatePasswordResult {
+		return false, nil
+	}
+	p := c.profiles[userID]
+	if p == nil || p.Password == nil || *p.Password != currentHash {
+		return false, nil
+	}
+	p.Password = &newHash
+	return true, nil
 }
 
 func (c *countingUserRepo) CreateProfile(p *model.UserProfile) error {
@@ -154,6 +173,38 @@ func TestCachedUserRepository_FindProfileByUserIDHitsInnerOnce(t *testing.T) {
 		assert.Equal(t, "hi", *got.Description)
 	}
 	assert.Equal(t, int64(1), inner.findProfileByUserIDCalls.Load())
+}
+
+func TestCachedUserRepository_UpdatePasswordIfCurrentInvalidatesOnlyOnChange(t *testing.T) {
+	inner := newCountingUserRepo()
+	oldHash := "old"
+	inner.profiles["u1"] = &model.UserProfile{UserID: "u1", Password: &oldHash}
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+	_, err := cached.FindProfileByUserID("u1")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), inner.findProfileByUserIDCalls.Load())
+
+	inner.updatePasswordResult = false
+	updated, err := cached.UpdatePasswordIfCurrent("u1", "old", "new")
+	require.NoError(t, err)
+	assert.False(t, updated)
+	_, _ = cached.FindProfileByUserID("u1")
+	assert.Equal(t, int64(1), inner.findProfileByUserIDCalls.Load())
+
+	inner.updatePasswordErr = assert.AnError
+	updated, err = cached.UpdatePasswordIfCurrent("u1", "old", "new")
+	assert.ErrorIs(t, err, assert.AnError)
+	assert.False(t, updated)
+	_, _ = cached.FindProfileByUserID("u1")
+	assert.Equal(t, int64(1), inner.findProfileByUserIDCalls.Load())
+	inner.updatePasswordErr = nil
+
+	inner.updatePasswordResult = true
+	updated, err = cached.UpdatePasswordIfCurrent("u1", "old", "new")
+	require.NoError(t, err)
+	assert.True(t, updated)
+	_, _ = cached.FindProfileByUserID("u1")
+	assert.Equal(t, int64(2), inner.findProfileByUserIDCalls.Load())
 }
 
 func TestCachedUserRepository_FindByURIHitsInnerOnce(t *testing.T) {

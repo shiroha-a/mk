@@ -23,10 +23,11 @@ var mockLocalUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
 
 // MockUserRepository is a test double for repository.UserRepository.
 type MockUserRepository struct {
-	Users                 map[string]*model.User        // keyed by ID
-	Tokens                map[string]*model.User        // keyed by token
-	Profiles              map[string]*model.UserProfile // keyed by userID
-	FindByUsernameLowerFn func(username string, host *string) (*model.User, error)
+	Users                     map[string]*model.User        // keyed by ID
+	Tokens                    map[string]*model.User        // keyed by token
+	Profiles                  map[string]*model.UserProfile // keyed by userID
+	FindByUsernameLowerFn     func(username string, host *string) (*model.User, error)
+	UpdatePasswordIfCurrentFn func(userID, currentHash, newHash string) (bool, error)
 	// RecommendationFollowing maps viewerID -> list of followeeIDs to exclude
 	// from ListUserRecommendations. Set by tests to emulate the "already
 	// following" filter.
@@ -797,6 +798,22 @@ func (m *MockUserRepository) UpdateProfile(userID string, fields map[string]any)
 	*p = next
 	m.Profiles[userID] = p
 	return nil
+}
+
+func (m *MockUserRepository) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {
+	if m.UpdatePasswordIfCurrentFn != nil {
+		return m.UpdatePasswordIfCurrentFn(userID, currentHash, newHash)
+	}
+	if m.UpdateProfileErr != nil {
+		return false, m.UpdateProfileErr
+	}
+	p, ok := m.Profiles[userID]
+	if !ok || p.Password == nil || *p.Password != currentHash {
+		return false, nil
+	}
+	next := newHash
+	p.Password = &next
+	return true, nil
 }
 
 // applyUserFields は単純な型の代表例にだけ対応する。新しいフィールドを使う場合はここに追加する。

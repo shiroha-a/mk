@@ -123,6 +123,15 @@ func (m *mockUserRepo) UpdateProfile(userID string, fields map[string]any) error
 	return nil
 }
 
+func (m *mockUserRepo) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {
+	p, ok := m.profiles[userID]
+	if !ok || p.Password == nil || *p.Password != currentHash {
+		return false, nil
+	}
+	p.Password = &newHash
+	return true, nil
+}
+
 // **not-found を模す。** 汎用 error だと #2792 の「DB 障害は 500」に引っかかる。
 // repository は GORM の error をそのまま返すので、テストもそれに揃える。
 var errMock = repository.ErrNotFound

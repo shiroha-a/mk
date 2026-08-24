@@ -800,6 +800,42 @@ func TestUserRepository_UpdateProfile(t *testing.T) {
 	require.NoError(t, repo.UpdateProfile(user.ID, map[string]any{}))
 }
 
+func TestUserRepository_UpdatePasswordIfCurrent(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	user := insertTestUser(t, "pw_cas_1", "pwcas1")
+	defer cleanupUser(t, user.ID)
+	oldHash := "$argon2id$old"
+	profile := &model.UserProfile{UserID: user.ID, Password: &oldHash, Fields: datatypes.JSON([]byte("[]"))}
+	require.NoError(t, testDB.Create(profile).Error)
+
+	updated, err := repo.UpdatePasswordIfCurrent(user.ID, oldHash, "$2a$10$new")
+	require.NoError(t, err)
+	assert.True(t, updated)
+	found, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	require.NotNil(t, found.Password)
+	assert.Equal(t, "$2a$10$new", *found.Password)
+
+	updated, err = repo.UpdatePasswordIfCurrent(user.ID, oldHash, "$2a$10$stale")
+	require.NoError(t, err)
+	assert.False(t, updated)
+	found, err = repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "$2a$10$new", *found.Password)
+}
+
+func TestUserRepository_UpdatePasswordIfCurrentMissingAndDBError(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	updated, err := repo.UpdatePasswordIfCurrent("missing", "old", "new")
+	require.NoError(t, err)
+	assert.False(t, updated)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err = NewUserRepository(testDB.WithContext(ctx)).UpdatePasswordIfCurrent("missing", "old", "new")
+	assert.Error(t, err)
+}
+
 func TestUserRepository_CreateProfile(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	user := insertTestUser(t, "cp_u1", "cpuser")
