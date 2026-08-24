@@ -20,6 +20,8 @@ make build     # plugins/ を走査してビルドに取り込む
 
 `plugins/` に置いても**既定では無効**。`mk-plugin.yml` に `disabled: true` があり `make build` の対象から外れる (同梱サンプルなので、clone しただけの人のビルドに勝手に入らないようにしてある)。有効にするには `disabled: true` を消す。
 
+**手元で動かすだけなら `make plugin-dev PLUGIN=plugins/status`。** tracked ファイル (`mk-plugin.yml`) を編集せずに済む。`disabled: true` を消して push すると、同梱サンプルが既定無効であることを見る CI (`build` job の `Check bundled plugins are disabled by default`) が落ちる。
+
 ```yaml
 # .config/default.yml — 変えたいときだけ
 plugins:

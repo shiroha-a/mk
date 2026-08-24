@@ -251,7 +251,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 `main`と`develop`へのpush/PRで実行される。branch protectionのrequired checksは`build` / `test` / `lint`の3つ。
 
 #### buildジョブ
-`go build ./...`で全パッケージのビルド確認。
+`go build ./...`で全パッケージのビルド確認。あわせて同梱プラグインを`go vet`し、同梱サンプルが`mk-plugin.yml`で既定無効のままかを検査する（#2701)。**required jobなので、コンパイル以外の理由でも赤くなる**。
 
 #### test-shardsジョブ + testジョブ
 - `shard: [1,2,3,4]`の4-way matrixで並列実行。各shardが独立したPostgreSQL 18 / Redis 7のサービスコンテナを持つ

@@ -92,9 +92,19 @@ go run ./tools/pluginspec -write
 
 `plugins/status/` と `plugins/trustlevel/` を**リポジトリに同梱**してある。
 
-別リポジトリに置くと、`plugin/` を変えたときに壊れても CI で気付けない。同梱していれば公開面を壊した時点でビルドが落ちる。**サンプルの一番の価値は「常に動くこと」**。
+別リポジトリに置くと、`plugin/` を変えたときに壊れても CI で気付けない。同梱していれば公開面を壊した時点で CI が落ちる。**サンプルの一番の価値は「常に動くこと」**。
 
-`plugins/*` は gitignore されているが、`!plugins/status/` と `!plugins/trustlevel/` (#2586) で例外指定してある。**`trustlevel` は `disabled` を持たない**ので、clone して `make build` すると組み込まれて有効になり、起動時に `plugin_trustlevel` schema も作られる。
+ただし**素の `make build` では落ちない** — 既定無効なので取り込まれないため。落とすのは次の 3 つ。
+
+| job | 見るもの | required |
+|---|---|---|
+| `build` の `Vet bundled plugins` | 各プラグインを `go vet` (テストファイルも含めてコンパイル) | ○ |
+| `plugin-tests` | 各プラグインのテストを実行 (`replace` で本体の公開面に対してコンパイルされる) | × |
+| `frontend-check` | `make plugins-all` (`-include-disabled`) → 統合バイナリのビルド → `vue-tsc` | × |
+
+required なのは `build` だけ (`docs/ci.md` の required check は `build` / `test` / `lint` の 3 つ)。`plugin-tests` / `frontend-check` だけが落ちる壊れ方はマージをブロックしない。
+
+`plugins/*` は gitignore されているが、`!plugins/status/` と `!plugins/trustlevel/` (#2586) で例外指定してある。**どちらも `mk-plugin.yml` で既定無効**なので、clone して `make build` してもバイナリにもフロントにも入らない。`status` は #2495 から。`trustlevel` は #2586 で `disabled: true` 付きで同梱したあと、#2585 の実測を採るために一度外し、実測が終わって #2701 で戻している。既定無効であることは `build` job の `Check bundled plugins are disabled by default` が見る。
 
 ## 変更時のチェック
 

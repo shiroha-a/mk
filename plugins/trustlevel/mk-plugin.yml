@@ -1,2 +1,12 @@
 name: trustlevel
 apiVersion: 1
+# 同梱サンプルなので既定ではビルドに含めない (plugins/status と同じ)。使う場合は
+# 下の `disabled: true` の行を消して再ビルドする。既定無効でもサンプルが壊れれば
+# CI は落ちる (build job の Vet bundled plugins と plugin-tests job)。
+#
+# **有効なままだと、設定していない運営者にも副作用がある。** 同梱プラグインは
+# ビルドに含まれているだけで有効になり、plugin_wiring.go は Routes / Jobs の
+# 登録より先に専用 schema を開いて migration を適用する。trustlevel は未設定なら
+# 何も登録しないが、schema と subjects / runs テーブルはできる。schema を開けない
+# 環境では起動そのものが失敗する。
+disabled: true

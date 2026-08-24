@@ -102,8 +102,11 @@ disabled: true
 
 同梱しているのは`plugins/status/`と`plugins/trustlevel/`の2つ。
 
-- `status`はこの仕組みで**既定無効**。動かしたい場合は`plugins/status/mk-plugin.yml`から`disabled: true`の行を消して再ビルドする
-- **`trustlevel`は`disabled`を持たないので既定で有効**。clone して`make build`すると組み込まれ、起動時に`plugin_trustlevel` schemaも作られる。入れたくない場合は`mk-plugin.yml`に`disabled: true`を足す
+**どちらもこの仕組みで既定無効**。動かしたい場合は該当する`mk-plugin.yml`から`disabled: true`の行を消して再ビルドする。
+
+既定無効なのは、同梱プラグインが**ビルドに含まれているだけで有効になる**ため。`plugin_wiring.go`はRoutes/Jobsの登録より先に専用schemaを開いてmigrationを適用するので、設定していなくても`plugin_<name>` schemaとテーブルができる。schemaを開けない環境では起動そのものが失敗する。cloneしただけで全運営者のバイナリ・フロント・DBに入る状態にしない。
+
+**この既定は`build` jobの`Check bundled plugins are disabled by default`が見ている**（#2701）。検証のために一時的に外して戻し忘れるのを止めるため。手元で動かすだけなら`make plugin-dev PLUGIN=plugins/<name>`を使うとtrackedファイルを触らずに済む。
 
 ## 入っているものを確認する
 

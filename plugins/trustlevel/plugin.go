@@ -85,9 +85,9 @@ type config struct {
 
 // errUnconfigured means the operator has not set the plugin up yet.
 //
-// 同梱プラグインは「ビルドに含まれている」だけで有効になる (runtime の enabled は
-// 既定 true)。未設定で起動を止めると、config を書いていないインスタンスが
-// 全断するので、この場合だけは何も登録せずに見送る。
+// ビルドに取り込んだ時点で有効になる (runtime の enabled は既定 true)。未設定で
+// 起動を止めると、`disabled: true` を消しただけで config を書いていない
+// インスタンスが全断するので、この場合だけは何も登録せずに見送る。
 var errUnconfigured = errors.New("trustlevel: 未設定")
 
 func loadConfig(ctx plugin.Context) (config, error) {

@@ -16,6 +16,63 @@ jobs:
         with:
           go-version-file: go.mod
 
+      # 同梱サンプルは **既定無効** (#2495)。clone しただけの運営者のバイナリ・
+      # フロント・DB に勝手に入らないようにするため。有効なままだと、設定して
+      # いなくても plugin_wiring.go が Routes / Jobs の登録より先に専用 schema を
+      # 開いて migration を適用する (schema を作れない環境では起動が落ちる)。
+      #
+      # **一時的に外して戻し忘れるのを止めるための gate。** trustlevel は #2586 で
+      # `disabled: true` 付きで同梱したあと、#2585 の実測を採るために e2ca1fde で
+      # 意図的に外し、実測が終わって #2585 が close されても戻っていなかった
+      # (#2701)。恒久的に有効にする方針にするならこの step を変える。手元で
+      # 動かすだけなら `make plugin-dev PLUGIN=plugins/<name>` を使う
+      # (tracked ファイルを触らずに済む。docs/plugins/development.md)。
+      - name: Check bundled plugins are disabled by default
+        run: |
+          files=$(git ls-files 'plugins/*/mk-plugin.yml')
+          # **空でも緑にしない。** `plugins/` の移動や marker 名の変更で列挙が
+          # 空振りすると、検査していないのに通ってしまう (plugin-tests job の
+          # 同型ステップと同じ guard)。
+          if [ -z "$files" ]; then
+            echo "同梱プラグインの mk-plugin.yml が 1 つも見つかりません (列挙が壊れています)"
+            exit 1
+          fi
+          fail=0
+          for f in $files; do
+            if grep -qE '^disabled:[[:space:]]*true[[:space:]]*$' "$f"; then
+              echo "ok   $f"
+            else
+              echo "FAIL $f — 'disabled: true' の行 (完全一致) がありません。disabled を含む行:"
+              grep -n disabled "$f" || echo "  (無し)"
+              fail=1
+            fi
+          done
+          [ "$fail" -eq 0 ] || exit 1
+          # grep は行の形しか見ない。**実際に使う parser でも確かめる** —
+          # 2 つ目の YAML ドキュメントに書くなど、行としては通るのに
+          # pluginbuild が読まない書き方を塞ぐ。0 件なら生成物は作られない。
+          #
+          # **exit code より先に生成物を見る。** この job は submodule を取らない
+          # ので、frontend を持つプラグイン (同梱の 2 つはどちらもそう) が有効に
+          # なっていると pluginbuild は「submodule を init しろ」で落ちる。
+          # そのまま伝えると原因と無関係な方向を指すので、生成物の有無を先に
+          # 判定してから exit code を扱う。
+          set +e
+          out=$(GOWORK=off go run ./tools/pluginbuild 2>&1); rc=$?
+          set -e
+          echo "$out"
+          if [ -e cmd/misskey/plugins_generated.go ]; then
+            echo "FAIL 既定のビルドに同梱プラグインが入っています"
+            cat cmd/misskey/plugins_generated.go
+            exit 1
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "FAIL pluginbuild が失敗しました。frontend を持つ同梱プラグインが"
+            echo "     有効になっていると、この job は submodule を取らないので"
+            echo "     ここで落ちます (mk-plugin.yml の disabled: true を確認)"
+            exit 1
+          fi
+
       - name: Build
         run: go build ./...
 
