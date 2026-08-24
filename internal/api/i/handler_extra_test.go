@@ -2,8 +2,10 @@ package i
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -15,12 +17,14 @@ import (
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/datatypes"
 )
@@ -50,13 +54,25 @@ func postExtra(h func(echo.Context) error, body string, user *model.User) *httpt
 	return rec
 }
 
-func setupUserWithPassword(repo *testutil.MockUserRepository, uid, password string) *model.User {
-	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
-	hashStr := string(hash)
+func setupUserWithPassword(repo *testutil.MockUserRepository, uid, plain string) *model.User {
+	hashStr, _ := password.Hash(plain)
 	token := "tok12345678901234"
 	user := &model.User{ID: uid, Username: uid, Token: &token}
 	repo.Users[uid] = user
 	repo.Profiles[uid] = &model.UserProfile{UserID: uid, Password: &hashStr}
+	return user
+}
+
+func setupUserWithArgon2Password(repo *testutil.MockUserRepository, uid, plain string) *model.User {
+	salt := []byte("0123456789abcdef")
+	digest := argon2.IDKey([]byte(plain), salt, 3, 64*1024, 4, 32)
+	hash := fmt.Sprintf("$argon2id$v=19$m=65536,t=3,p=4$%s$%s",
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(digest))
+	token := "tok12345678901234"
+	user := &model.User{ID: uid, Username: uid, Token: &token}
+	repo.Users[uid] = user
+	repo.Profiles[uid] = &model.UserProfile{UserID: uid, Password: &hash}
 	return user
 }
 
@@ -79,6 +95,25 @@ func TestChangePassword_Success(t *testing.T) {
 	user := setupUserWithPassword(repo, "u1", "oldpass")
 	rec := postExtra(h.ChangePassword, `{"currentPassword":"oldpass","newPassword":"newpass"}`, user)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestChangePassword_AcceptsArgon2AndStoresBcrypt(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithArgon2Password(repo, "u1", "oldpass")
+	rec := postExtra(h.ChangePassword, `{"currentPassword":"oldpass","newPassword":"newpass"}`, user)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	stored := *repo.Profiles["u1"].Password
+	assert.True(t, strings.HasPrefix(stored, "$2"))
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(stored), []byte("newpass")))
+}
+
+func TestChangePassword_RejectsWrongArgon2PasswordWithoutRewrite(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithArgon2Password(repo, "u1", "oldpass")
+	before := *repo.Profiles["u1"].Password
+	rec := postExtra(h.ChangePassword, `{"currentPassword":"wrong","newPassword":"newpass"}`, user)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, before, *repo.Profiles["u1"].Password)
 }
 
 func TestChangePassword_WrongPassword(t *testing.T) {

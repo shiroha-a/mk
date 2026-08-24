@@ -58,7 +58,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	// upstream Misskey TS は raw `throw new Error('authentication failed')` を
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
 	// に揃える (旧 mk-go は 403 を返していた)。
-	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.CurrentPassword)); err != nil {
+	if _, ok := password.Verify(*profile.Password, req.CurrentPassword); !ok {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
