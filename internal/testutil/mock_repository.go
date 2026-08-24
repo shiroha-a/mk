@@ -280,7 +280,26 @@ func (m *MockUserRepository) FindManyByUsernamesAndHost(usernames []string, host
 			out = append(out, u)
 		}
 	}
-	return out, nil
+	if host == nil {
+		return out, nil
+	}
+	// **本番と同じく username ごとに 1 行へ畳む** (#2704)。畳まないと、呼び出し側
+	// (mention 解決) が `m[usernameLower] = id` で後勝ちに潰すので、mock 経由の
+	// テストが map の反復順に依存して非決定になる。完全一致を優先するのも本番と同じ。
+	best := make(map[string]*model.User, len(out))
+	for _, u := range out {
+		cur, ok := best[u.UsernameLower]
+		if !ok || (*u.Host == *host && *cur.Host != *host) {
+			best[u.UsernameLower] = u
+		}
+	}
+	folded := out[:0]
+	for _, u := range out {
+		if best[u.UsernameLower] == u {
+			folded = append(folded, u)
+		}
+	}
+	return folded, nil
 }
 
 func (m *MockUserRepository) FindProfileByUserID(userID string) (*model.UserProfile, error) {

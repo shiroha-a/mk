@@ -6,7 +6,8 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// **保存されている host は punycode なので、比較の両辺をそこへ揃える** (#2704)。
+// **比較の両辺を揃えるための正規化** (#2704)。保存側は正規化していない
+// (`idnhost.go` のコメント参照) ので、これは比較専用。
 func TestPuny(t *testing.T) {
 	cases := []struct {
 		name string
@@ -45,14 +46,4 @@ func TestPuny(t *testing.T) {
 		// 安全側なので、この挙動を固定しておく。
 		assert.NotEqual(t, "xn--eckve.example", Puny("パイ。example"))
 	})
-}
-
-func TestPunyPtr(t *testing.T) {
-	assert.Nil(t, PunyPtr(nil), "nil はローカル指定なのでそのまま")
-
-	in := "パイ.example"
-	got := PunyPtr(&in)
-	assert.NotNil(t, got)
-	assert.Equal(t, "xn--eckve.example", *got)
-	assert.Equal(t, "パイ.example", in, "引数を書き換えないこと")
 }

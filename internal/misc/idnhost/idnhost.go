@@ -33,12 +33,3 @@ func Puny(host string) string {
 	}
 	return lower
 }
-
-// PunyPtr is Puny for optional hosts. nil はローカル指定なのでそのまま返す。
-func PunyPtr(host *string) *string {
-	if host == nil {
-		return nil
-	}
-	p := Puny(*host)
-	return &p
-}

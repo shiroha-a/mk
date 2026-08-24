@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"errors"
 	"regexp"
 	"strings"
 	"time"
@@ -141,21 +142,34 @@ func (r *userRepository) FindByToken(token string) (*model.User, error) {
 }
 
 func (r *userRepository) FindByUsernameLower(username string, host *string) (*model.User, error) {
-	var user model.User
 	if host == nil {
+		var user model.User
 		if err := r.db.Where("\"usernameLower\" = lower(?)", username).
 			Where("host IS NULL").First(&user).Error; err != nil {
 			return nil, err
 		}
 		return &user, nil
 	}
-	// 完全一致 → 正規化形の順に引く。1 つ目で当たれば 2 回目は投げない。
+	// 完全一致 → 正規化形の順に引く。1 つ目で当たれば 2 回目は投げないが、
+	// **miss のときは候補の数だけ投げる** (正規化形が生と違うときだけ 2 回)。
 	var lastErr error
 	for _, h := range hostCandidates(*host) {
+		// **dest はループごとに作る。** GORM の `First` は dest の primary key が
+		// 非ゼロだとそれを条件に足すので、使い回すと 2 回目が 1 回目の行の id に
+		// 縛られる。今は 1 回目が not-found ならゼロのままだが、候補が増えたり
+		// 部分 scan する変更で発火する。
+		var user model.User
 		err := r.db.Where("\"usernameLower\" = lower(?)", username).
 			Where("host = ?", h).First(&user).Error
 		if err == nil {
 			return &user, nil
+		}
+		// **not-found 以外は次を試さない。** 接続断などを次の試行の結果で
+		// 上書きすると、呼び出し側には record-not-found に見える。
+		// `ShowByUsername` はそれを DB miss と解釈して WebFinger へ落ちるので、
+		// DB の一過性障害が outbound 増幅に化ける。
+		if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, err
 		}
 		lastErr = err
 	}
@@ -178,10 +192,8 @@ func (r *userRepository) FindByUsernameLower(username string, host *string) (*mo
 //
 // **保存側の正規化はこの範囲外。** 揃えるなら既存行の backfill migration が要る。
 func hostMatch(q *gorm.DB, host string) *gorm.DB {
-	if p := idnhost.Puny(host); p != host {
-		return q.Where("host IN ?", []string{p, host})
-	}
-	return q.Where("host = ?", host)
+	// 候補集合は hostCandidates に一本化する。2 箇所で組むと片方だけ直す事故になる。
+	return q.Where("host IN ?", hostCandidates(host))
 }
 
 // hostCandidates lists the host values to try, exact match first.

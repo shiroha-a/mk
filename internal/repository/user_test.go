@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"errors"
+	"gorm.io/gorm"
 	"strings"
 	"testing"
 	"time"
@@ -1630,11 +1632,11 @@ func TestUserRepository_SearchByUsernameAndHost_FindsNeverPostedUser(t *testing.
 
 // **IDN ホストのユーザーを Unicode 形の host で引けること** (#2704)。
 //
-// `user.host` は punycode で保存されるが、引く側は Unicode で来ることがある。
-// フロントの mention リンクは `toUnicode(host)` で URL を組むので、メンションから
-// ユーザーページを開くとこの形になる。生の完全一致で引いていた頃は、そこだけが
-// NO_SUCH_USER になって「通知からは開けるのにメンションからは開けない」という
-// 形で出ていた。
+// 引く側は Unicode で来ることがある。フロントの mention リンクは
+// `toUnicode(host)` で URL を組むので、メンションからユーザーページを開くと
+// この形になる。生の完全一致で引いていた頃は、そこだけが NO_SUCH_USER になって
+// 「通知からは開けるのにメンションからは開けない」という形で出ていた。
+// **保存側は正規化していない**ので、正規化形と生の両方に当てる。
 func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	const puny = "xn--eckve.example"
@@ -1742,4 +1744,32 @@ func TestUserRepository_HostMatch_PrefersExactRow(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, many, 1, "username ごとに 1 行へ畳むこと")
 	assert.Equal(t, "idndup000000000000a2", many[0].ID)
+}
+
+// **not-found 以外のエラーは次の候補を試さず、そのまま返すこと** (#2704 review)。
+//
+// 候補を順に引く形にしたので、接続断などを次の試行の結果で上書きすると、
+// 呼び出し側には record-not-found に見える。`ShowByUsername` はそれを DB miss と
+// 解釈して WebFinger へ落ちるので、DB の一過性障害が outbound 増幅に化ける。
+func TestUserRepository_FindByUsernameLower_NonNotFoundErrorIsNotSwallowed(t *testing.T) {
+	boom := errors.New("boom: connection reset")
+	// 1 回目の Query だけ失敗させる。候補が 2 つある host を使う。
+	session := testDB.Session(&gorm.Session{NewDB: true})
+	calls := 0
+	require.NoError(t, session.Callback().Query().Before("gorm:query").
+		Register("zz_fail_first", func(tx *gorm.DB) {
+			calls++
+			if calls == 1 {
+				tx.AddError(boom)
+			}
+		}))
+	t.Cleanup(func() { _ = session.Callback().Query().Remove("zz_fail_first") })
+
+	repo := NewUserRepository(session)
+	h := "パイ.example"
+	_, err := repo.FindByUsernameLower("whoever", &h)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, boom, "1 回目のエラーをそのまま返すこと")
+	assert.False(t, errors.Is(err, gorm.ErrRecordNotFound), "record-not-found に化けないこと")
+	assert.Equal(t, 1, calls, "not-found 以外なら 2 回目を投げないこと")
 }

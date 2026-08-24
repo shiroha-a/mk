@@ -66,3 +66,38 @@ func TestMockUserRepository_HostMatchesProduction(t *testing.T) {
 		assert.Equal(t, "local", got.ID)
 	})
 }
+
+// **host 表記の違う 2 行があるとき、本番と同じ行を選ぶこと** (#2704 review)。
+//
+// 1 行しか入れないケースでは「どちらを返すか」を観測できないので、完全一致優先を
+// 外す変異が素通りしてしまう。畳み込みも本番と揃っていないと、mention 解決を
+// mock で書いたテストが map の反復順に依存して非決定になる。
+func TestMockUserRepository_PrefersExactRowLikeProduction(t *testing.T) {
+	newRepo := func() *MockUserRepository {
+		repo := NewMockUserRepository()
+		a, b := "mixed.example", "Mixed.Example"
+		repo.Users["ua"] = &model.User{ID: "ua", Username: "Alice", UsernameLower: "alice", Host: &a}
+		repo.Users["ub"] = &model.User{ID: "ub", Username: "Alice", UsernameLower: "alice", Host: &b}
+		return repo
+	}
+
+	t.Run("完全一致の行を返す", func(t *testing.T) {
+		// map の反復順に依存しないよう繰り返す。
+		for i := 0; i < 50; i++ {
+			q := "Mixed.Example"
+			got, err := newRepo().FindByUsernameLower("alice", &q)
+			require.NoError(t, err)
+			require.Equal(t, "ub", got.ID)
+		}
+	})
+
+	t.Run("一括引きは username ごとに 1 行へ畳む", func(t *testing.T) {
+		for i := 0; i < 50; i++ {
+			q := "Mixed.Example"
+			many, err := newRepo().FindManyByUsernamesAndHost([]string{"Alice"}, &q)
+			require.NoError(t, err)
+			require.Len(t, many, 1)
+			require.Equal(t, "ub", many[0].ID)
+		}
+	})
+}

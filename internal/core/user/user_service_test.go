@@ -1326,9 +1326,10 @@ func (r *recordingResolver) ResolveByUsernameHost(username, host string) (*model
 
 // **IDN ホストの acct 解決** (#2704)。
 //
-// `user.host` は punycode で保存されるが、引く側は Unicode で来ることがある
-// (フロントの mention リンクは `toUnicode(host)` で URL を組む)。正規化しないと
-// 「通知からは開けるのにメンションからは開けない」という形で出る。
+// 引く側は Unicode で来ることがある (フロントの mention リンクは
+// `toUnicode(host)` で URL を組む)。正規化しないと「通知からは開けるのに
+// メンションからは開けない」という形で出る。**保存側は正規化していない**ので、
+// 正規化形と生の両方に当てる (repository の hostCandidates)。
 func TestShowByUsername_IDNHost(t *testing.T) {
 	const puny = "xn--eckve.example"
 
