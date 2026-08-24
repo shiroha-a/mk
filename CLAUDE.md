@@ -205,7 +205,7 @@ make frontend-check          # fork frontend の型チェック (vue-tsc --noEmi
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 110 target を出す。一覧と説明は
+**上記は全体ではない。** `make help` が全 111 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -456,11 +456,12 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 
 - `go build ./...`で全パッケージのビルド確認。
 - **`Check bundled plugins are disabled by default` step** で、tracked な
-  `plugins/*/mk-plugin.yml` が全て `disabled: true` を持つことと、既定の
-  `pluginbuild` が生成物を作らないことを見る (#2701)。**検証のために一時的に
-  外して戻し忘れる**のを止めるため (trustlevel が実際にそうなっていた)。
-  2 段目は `pluginbuild` を走らせるので `plugin/` のコンパイルが要る。
-  `Build` の後ろに置いてあるのはそのため。手元の再現は `make plugin-vet`。
+  `plugins/*/mk-plugin.yml` が全て `disabled: true` を持つことを見る (#2701)。
+  **検証のために一時的に外して戻し忘れる**のを止めるため (trustlevel が実際に
+  そうなっていた)。判定は `git ls-files` + grep だけで完結させてある —
+  `pluginbuild` に読ませるほうが parser 一致で厳密だが、`pluginbuild` は git では
+  なく**ディレクトリ**を走査するので、`plugins/` に自前プラグインを置いている
+  手元では誤検知する。手元の再現は `make plugin-vet`。
 - **`Vet bundled plugins` step** で同梱プラグインを `go vet` する。`go build` ではなく
   `vet` なのは、テストファイルもコンパイルされるので**公開面を変えて本体だけ直した**
   ときに検出できるため (#2588)。列挙は `git ls-files` なので、新しく同梱した

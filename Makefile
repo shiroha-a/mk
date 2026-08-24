@@ -184,7 +184,7 @@ test: ## 全テストを実行
 plugin-doc-check: ## authoring.md の Go スニペットがコンパイルできるか検査
 	./tests/plugin-doc/check-snippets.sh
 
-plugin-vet: ## 同梱プラグインを go vet + 既定無効を検査 (CI の build job と同じ)
+plugin-vet: ## 同梱プラグインを go vet + 既定無効を検査 (CI の build job の 2 step 相当)
 	@set -e; \
 	mods=$$(git ls-files 'plugins/*/go.mod'); \
 	if [ -z "$$mods" ]; then echo "同梱プラグインが見つかりません (列挙が壊れています)"; exit 1; fi; \
@@ -198,13 +198,10 @@ plugin-vet: ## 同梱プラグインを go vet + 既定無効を検査 (CI の b
 	fail=0; \
 	for f in $$markers; do \
 		if grep -qE '^disabled:[[:space:]]*true[[:space:]]*$$' "$$f"; then echo "ok   $$f"; \
-		else echo "FAIL $$f — 'disabled: true' の行 (完全一致) がありません"; fail=1; fi; \
+		else echo "FAIL $$f — 'disabled: true' の行 (完全一致) がありません。disabled を含む行:"; \
+			grep -n disabled "$$f" || echo "  (無し)"; fail=1; fi; \
 	done; \
-	[ "$$fail" -eq 0 ]; \
-	GOWORK=off go run ./tools/pluginbuild; \
-	if [ -e cmd/misskey/plugins_generated.go ]; then \
-		echo "FAIL 既定のビルドに同梱プラグインが入っています"; exit 1; \
-	fi
+	[ "$$fail" -eq 0 ]
 
 plugin-test: ## 同梱プラグインのテストを実行 (PostgreSQL が要る)
 	@set -e; \

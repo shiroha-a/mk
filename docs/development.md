@@ -118,6 +118,7 @@ cd mk && docker compose up -d
 | `make fmt` | `gofmt -s -w .` |
 | `make lint` | `go vet ./...` |
 | `make test` | `go test ./... -v` (PostgreSQL が要る → [testing.md](testing.md)) |
+| `make plugin-vet` | 同梱プラグインを`go vet` + 既定無効を検査（CIの`build` jobの2 step相当） |
 | `make plugin-test` | 同梱プラグインのテスト (別 module なので `./...` に含まれない) |
 | `make plugin-doc-check` | `docs/plugins/authoring.md` の Go スニペットが実際にコンパイルできるか |
 | `make plugin-dev` | プラグインを編集しながら動かす (`PLUGIN=plugins/status`) |

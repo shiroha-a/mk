@@ -31,10 +31,15 @@ jobs:
       # 動かすだけなら `make plugin-dev PLUGIN=plugins/<name>` を使う
       # (`mk-plugin.yml` を触らずに済む。docs/plugins/development.md)。
       #
-      # **1 段目は git と grep だけだが、2 段目は `plugin/` のコンパイルが要る**
-      # (pluginbuild が import する)。`Build` の後ろに置いてあるのはそのため —
-      # 前に置くと、`plugin/` の素のコンパイルエラーがこの step 名で落ちて
-      # 原因が読めなくなる。手元の再現は `make plugin-vet`。
+      # **判定は git ls-files + grep だけで完結させる。** `pluginbuild` に読ませる
+      # ほうが parser 一致で厳密だが、`pluginbuild` は git ではなく**ディレクトリ**を
+      # 走査する (main.go:277)。`plugins/*` は運営者が自前プラグインを置く場所
+      # (gitignore 済み) なので、手元で同じ検査を回すと自前プラグインを拾って
+      # 誤検知する。生成物を書く副作用もあり、`make plugin-dev` の配線を巻き戻す。
+      #
+      # **残る穴**: 2 つ目の YAML ドキュメントに `disabled: true` を置くと grep は
+      # 通るが parser は読まない。塞ぐには `pluginbuild` に副作用の無い check mode を
+      # 足すことになるので、意図的に行わないと踏めない形として許容している。
       - name: Check bundled plugins are disabled by default
         run: |
           files=$(git ls-files 'plugins/*/mk-plugin.yml')
@@ -56,45 +61,7 @@ jobs:
             fi
           done
           [ "$fail" -eq 0 ] || exit 1
-          # grep は行の形しか見ない。**実際に使う parser でも確かめる** —
-          # 2 つ目の YAML ドキュメントに書くなど、行としては通るのに
-          # pluginbuild が読まない書き方を塞ぐ。0 件なら生成物は作られない。
-          #
-          # **exit code より先に生成物を見る。** この job は submodule を取らない
-          # ので、frontend を持つプラグイン (同梱の 2 つはどちらもそう) が有効に
-          # なっていると pluginbuild は「submodule を init しろ」で落ちる。
-          # そのまま伝えると原因と無関係な方向を指すので、生成物の有無を先に
-          # 判定してから exit code を扱う。
-          set +e
-          out=$(GOWORK=off go run ./tools/pluginbuild 2>&1); rc=$?
-          set -e
-          echo "$out"
-          if [ -e cmd/misskey/plugins_generated.go ]; then
-            echo "FAIL 既定のビルドに同梱プラグインが入っています"
-            cat cmd/misskey/plugins_generated.go
-            exit 1
-          fi
-          # **ここで原因を名指ししない。** pluginbuild は生成物を書いてから
-          # frontend を書くので、「有効なプラグインがある + submodule 不在」は
-          # 必ず上の分岐で捕まる。ここに来るのは生成物すら作られなかった失敗
-          # (plugin/ のコンパイルエラー、marker の parse 失敗など) で、
-          # disabled とは無関係なことが多い。
-          if [ "$rc" -ne 0 ]; then
-            echo "FAIL pluginbuild が失敗しました (原因は上の出力)"
-            exit "$rc"
-          fi
 
-      # 同梱サンプルは別 module なので `./...` に含まれない。plugin/ の公開面を
-      # 壊したときにここで落ちる — **同梱している理由がこれ** (別リポジトリだと
-      # 壊れても気付けない)。
-      #
-      # frontend の生成は submodule が要るので、ここでは backend だけを見る
-      # (TS 側は frontend-check が見る)。
-      # `go vet` にしているのは、build と違って**テストファイルもコンパイルする**
-      # から。plugin/ の公開面を変えたとき、本体だけ直してプラグインのテストが
-      # 置き去りになるのを検出する。
-      #
-      # テストの実行そのものは `plugin-tests` job が行う (PostgreSQL が要るため)。
       - name: Vet bundled plugins
         run: |
           # 列挙は git に任せる。ディレクトリを書き並べると、新しく同梱した
