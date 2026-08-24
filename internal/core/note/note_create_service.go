@@ -1441,3 +1441,17 @@ func (s *CreateService) materializeIfMissing(noteID string, lookupErr error) boo
 	_, err := s.materializer.EnsureNote(context.Background(), noteID)
 	return err == nil
 }
+
+// HasBlockingRepo / HasMetaRepo / HasSilencingProvider report whether the
+// note-creation gates were wired.
+//
+// 未配線時にそれぞれ: ブロックしている相手への返信・引用が通る、meta の
+// センシティブワードと禁止ワードの両方が効かない、silenced な利用者の public
+// 投稿が home へ降格されない。起動時検査に使う (#2683)。
+func (s *CreateService) HasBlockingRepo() bool { return s.blockingRepo != nil }
+
+// HasMetaRepo reports whether the meta repository was wired.
+func (s *CreateService) HasMetaRepo() bool { return s.metaRepo != nil }
+
+// HasSilencingProvider reports whether the silencing provider was wired.
+func (s *CreateService) HasSilencingProvider() bool { return s.silencingProvider != nil }

@@ -2812,7 +2812,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	chatService.SetEmojiRepo(emojiRepo)
 	// 1-on-1 DM の chatApproval bypass + 送信後 approval 挿入に使う (#1748)。
 	chatService.SetApprovalRepo(repository.NewChatApprovalRepository(s.db))
-	streamRegistry.RegisterCredentialed("chatRoom", channels.NewChatRoomFactory(chatService).New)
+	chatRoomFactory := channels.NewChatRoomFactory(chatService)
+	streamRegistry.RegisterCredentialed("chatRoom", chatRoomFactory.New)
 	streamRegistry.RegisterCredentialed("chatUser", channels.NewChatUserFactory(chatService).New)
 	// Phase 9.7: federation processor / reversi handler に reversi 依存を注入。
 	// FederationIDCache は本家 Misskey DB スキーマ互換のため DB カラムを持たず
@@ -3918,6 +3919,47 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"処理済み activity の再投函を検出できない (isReplay が常に false)"},
 		{"postScheduledNote.lock", postScheduledNoteProcessor.HasLock(),
 			"job が二度 fire したとき予約投稿が 2 回 publish される"},
+
+		// ここから可視性・権限・上限 (#2683)。認証ほど鋭くはないが、いずれも
+		// 利用者から見えない形で制限が外れる。
+		{"notes.policyProvider", notesHandler.HasPolicyProvider(),
+			"timeline の可視性 gate (ltlAvailable / gtlAvailable) が丸ごと素通しになる"},
+		{"pages.driveFileRepo", pagesHandler.HasDriveFileRepo(),
+			"eyecatching image の所有者チェックが素通しになり、他人の drive ファイルを貼れる (IDOR)"},
+		{"invite.rolePolicyProvider", inviteHandler.HasRolePolicyProvider(),
+			"policy が空になり招待の上限が無制限になる"},
+		{"signup.userPolicies", signupHandler.HasUserPolicyResolver(),
+			"素の default policy を返すので、meta の base policy override も server cap も反映されない"},
+		{"reaction.userRolesProvider", reactionService.HasUserRolesProvider(),
+			"ロール限定カスタム絵文字を誰でも使える"},
+		{"drive.roleChecker", driveService.HasRoleChecker(),
+			"MIME 許可リスト・NSFW 強制・ファイルサイズ上限・容量上限が同時に無効になる"},
+		{"move.carryOverRepos", accountMover.HasCarryOverRepos(),
+			"移行先アカウントにブロック / ミュート / リストが引き継がれない"},
+		{"note.blockingRepo", noteCreateService.HasBlockingRepo(),
+			"ブロックしている相手への返信・引用が通る"},
+		{"note.metaRepo", noteCreateService.HasMetaRepo(),
+			"meta のセンシティブワードと禁止ワードが両方とも効かない"},
+		{"note.silencingProvider", noteCreateService.HasSilencingProvider(),
+			"silenced な利用者の public 投稿が home へ降格されない"},
+		{"stream.hardMuteLookup", streamManager.HasHardMuteLookup(),
+			"配信ごとのハードミュート filter が無効になる"},
+		{"stream.muteBlockLookup", streamManager.HasMuteBlockSnapshotLookup(),
+			"配信ごとのミュート / ブロック filter が無効になる (fail-open)"},
+		{"stream.followingLookup", streamManager.HasFollowingSnapshotLookup(),
+			"timeline channel の followee reply gate が無効になる"},
+		{"stream.policyProvider", streamManager.HasPolicyProvider(),
+			"streaming の ltlAvailable / gtlAvailable gate が無効になる (fail-open)"},
+		{"inboxProcessor.hostBlockChecker", inboxProcessor.HasHostBlockChecker(),
+			"ブロック済み host / 許可外 host からの activity を受け入れる"},
+		{"inbox.hostBlockChecker", inboxHandler.HasHostBlockChecker(),
+			"federation: none 設定でも inbox が受け付ける"},
+		{"deliver.hostBlockChecker", deliverService.HasHostBlockChecker(),
+			"ブロック済み host へも配送する (outbound の defederation が効かない)"},
+		{"resolver.hostBlockChecker", federationResolver.HasHostBlockChecker(),
+			"federation 設定を無視してリモートを解決する"},
+		{"streamChannels.chatRoom.service", chatRoomFactory.HasService(),
+			"chatRoom channel の購読でメンバーシップ検査が skip され、誰でも任意の room を購読できる"},
 	})
 }
 

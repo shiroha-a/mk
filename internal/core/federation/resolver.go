@@ -3812,3 +3812,9 @@ type RemoteMoveProcessor interface {
 // SetMoveProcessor wires the handler invoked when a remote account is observed
 // to have moved.
 func (r *Resolver) SetMoveProcessor(p RemoteMoveProcessor) { r.moveProcessor = p }
+
+// HasHostBlockChecker reports whether the host block checker was wired.
+//
+// 未配線だと federation 設定 (none / specified / blockedHosts) を無視して
+// リモートを解決する。起動時検査に使う (#2683)。
+func (r *Resolver) HasHostBlockChecker() bool { return r.hostBlocker != nil }

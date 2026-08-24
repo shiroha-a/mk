@@ -24,7 +24,7 @@ var errWiringCheckSkipped = errors.New("critical wiring check did not run: setup
 
 // criticalWiringCount is the number of entries setupRoutes is expected to
 // register. Guards against an entry being dropped from the table.
-const criticalWiringCount = 13
+const criticalWiringCount = 32
 
 // criticalWiring names one dependency whose absence degrades behaviour
 // silently instead of failing visibly.
@@ -57,8 +57,9 @@ type criticalWiring struct {
 // 大量に組み立てているため (notes は 341 本中 327 本が未配線経路に依存する)。
 // fallback を消す代わりに、**本番で発火しうる状態を起動時に落とす**。
 //
-// 現在は認証・一回性の保証に関わるものだけを載せている (#2682)。可視性・権限の
-// 分は #2683 で足す。
+// 載せているのは認証・一回性の保証に関わるもの (#2682) と、可視性・権限・上限に
+// 関わるもの (#2683)。後者は前者ほど鋭くないが、いずれも**利用者から見えない形で
+// 制限が外れる**。
 func verifyCriticalWiring(deps []criticalWiring) error {
 	// **件数の下限を持つ。** entry を 1 つ消しても他のテストは緑のままなので、
 	// 数そのものを縛らないと「表から抜く」形の劣化を検出できない。

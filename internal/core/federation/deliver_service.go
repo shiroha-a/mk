@@ -403,3 +403,9 @@ func preferredInbox(u *model.User) string {
 	}
 	return ""
 }
+
+// HasHostBlockChecker reports whether the host block checker was wired.
+//
+// 未配線だと `isBlockedInbox` が常に false になり、ブロック済み host へも
+// 配送する (outbound の defederation が効かない)。起動時検査に使う (#2683)。
+func (s *DeliverService) HasHostBlockChecker() bool { return s.hostBlocker != nil }

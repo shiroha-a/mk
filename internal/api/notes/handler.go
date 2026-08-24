@@ -1133,3 +1133,9 @@ func nilOrChannel(r repository.ChannelRepository) entity.ChannelLookup {
 func (h *Handler) PackForEmbed(ctx context.Context, n *model.Note) entity.NoteEntity {
 	return h.packReferencedNote(ctx, n, nil, true)
 }
+
+// HasPolicyProvider reports whether the role policy provider was wired.
+//
+// 未配線だと timeline の可視性 gate (`timelineAvailable`) が丸ごと素通しになる。
+// 起動時検査に使う (#2683)。
+func (h *Handler) HasPolicyProvider() bool { return h.policyProvider != nil }

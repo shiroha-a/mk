@@ -760,3 +760,9 @@ func isPureRenote(n *model.Note) bool {
 	}
 	return true
 }
+
+// HasUserRolesProvider reports whether the user roles provider was wired.
+//
+// 未配線だとロール限定カスタム絵文字の gate が素通しになり、誰でも使える。
+// 起動時検査に使う (#2683)。
+func (s *Service) HasUserRolesProvider() bool { return s.userRoles != nil }

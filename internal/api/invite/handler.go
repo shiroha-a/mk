@@ -283,3 +283,9 @@ func generateInviteCode() string {
 	}
 	return string(b)
 }
+
+// HasRolePolicyProvider reports whether the role policy provider was wired.
+//
+// 未配線だと policy が空 map になり、招待の上限が無制限になる。起動時検査に
+// 使う (#2683)。
+func (h *Handler) HasRolePolicyProvider() bool { return h.rolePolicyProvider != nil }

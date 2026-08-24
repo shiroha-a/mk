@@ -599,3 +599,9 @@ func (h *Handler) pageToMapWithOwner(p *model.Page, owner *model.User, isLiked *
 		IsLiked:          isLiked,
 	})
 }
+
+// HasDriveFileRepo reports whether the drive file repository was wired.
+//
+// 未配線だと eyecatching image の所有者チェックが素通しになり、他人の drive
+// ファイルを自分の page に貼れる (IDOR)。起動時検査に使う (#2683)。
+func (h *Handler) HasDriveFileRepo() bool { return h.driveFileRepo != nil }

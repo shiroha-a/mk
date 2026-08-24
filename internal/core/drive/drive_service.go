@@ -1278,3 +1278,9 @@ func normalizeMimePatterns(raw any) []string {
 		return nil
 	}
 }
+
+// HasRoleChecker reports whether the role checker was wired.
+//
+// **1 つの nil で 4 つの制限が同時に外れる** — MIME 許可リスト、NSFW 強制、
+// ファイルサイズ上限、容量上限。起動時検査に使う (#2683)。
+func (s *Service) HasRoleChecker() bool { return s.roleChecker != nil }

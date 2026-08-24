@@ -394,3 +394,9 @@ func (h *Handler) HasExpectedHost() bool { return h.expectedHost != "" }
 // 「production が async 一択である前提のため許容している」と書いているとおり、
 // production では必ず配線される (#2682)。
 func (h *Handler) HasEnqueuer() bool { return h.enqueuer != nil }
+
+// HasHostBlockChecker reports whether the host block checker was wired.
+//
+// 未配線だと `federation: none` 設定でも inbox が受け付ける。起動時検査に
+// 使う (#2683)。
+func (h *Handler) HasHostBlockChecker() bool { return h.hostBlocker != nil }

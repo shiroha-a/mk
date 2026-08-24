@@ -109,3 +109,10 @@ func (c *ChatRoomChannel) Dispose() {
 		c.ctx.Unsubscribe(c.topic)
 	}
 }
+
+// HasService reports whether the chat service was wired into the factory.
+//
+// 未配線だと `chatRoom` channel の購読でメンバーシップ検査 (moderator を含む
+// `CanViewRoomTimeline`) が丸ごと skip され、**誰でも任意の room の timeline を
+// 購読できる**。起動時検査に使う (#2683)。
+func (f *ChatRoomFactory) HasService() bool { return f.svc != nil }

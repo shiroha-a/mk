@@ -705,3 +705,9 @@ func (p *InboxProcessor) HasSignatureVerifier() bool { return p.verifier != nil 
 // inbox の replay guard だけ外すのは筋が通らないので載せる
 // (#2682 review M-4)。
 func (p *InboxProcessor) HasInboxReplayGuard() bool { return p.replayGuard != nil }
+
+// HasHostBlockChecker reports whether the host block checker was wired.
+//
+// 未配線だと `isBlocked` が常に false になり、ブロック済み host / 許可外 host
+// からの activity を受け入れる。起動時検査に使う (#2683)。
+func (p *InboxProcessor) HasHostBlockChecker() bool { return p.hostBlocker != nil }

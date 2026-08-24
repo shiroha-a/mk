@@ -524,3 +524,10 @@ func packSignupResponse(u *model.User, profile *model.UserProfile, token string,
 
 // defaultPolicies returns the Misskey default policies for a new user.
 var errInvalidCode = errors.New("invalid invitation code")
+
+// HasUserPolicyResolver reports whether the effective-policy resolver was wired.
+//
+// 未配線だと素の default policy を返すので、meta の base policy override も
+// server cap も反映されず、signup と /api/i が違う値を答える (#2673)。
+// 起動時検査に使う (#2683)。
+func (h *Handler) HasUserPolicyResolver() bool { return h.userPolicies != nil }

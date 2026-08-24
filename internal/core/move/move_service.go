@@ -703,3 +703,13 @@ func (s *Service) lookupByURI(uri string) *model.User {
 	}
 	return nil
 }
+
+// HasCarryOverRepos reports whether the post-move carry-over repositories were
+// wired.
+//
+// 未配線だと移行先アカウントにブロック / ミュート / リストが引き継がれない。
+// 移行そのものは成立するので、利用者からは「引き継がれなかった」ことしか
+// 見えない。起動時検査に使う (#2683)。
+func (s *Service) HasCarryOverRepos() bool {
+	return s.blockingRepo != nil && s.mutingRepo != nil && s.userListRepo != nil && s.idGen != nil
+}
