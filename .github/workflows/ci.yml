@@ -66,11 +66,14 @@ jobs:
             cat cmd/misskey/plugins_generated.go
             exit 1
           fi
+          # **ここで原因を名指ししない。** pluginbuild は生成物を書いてから
+          # frontend を書くので、「有効なプラグインがある + submodule 不在」は
+          # 必ず上の分岐で捕まる。ここに来るのは生成物すら作られなかった失敗
+          # (plugin/ のコンパイルエラー、marker の parse 失敗など) で、
+          # disabled とは無関係なことが多い。
           if [ "$rc" -ne 0 ]; then
-            echo "FAIL pluginbuild が失敗しました。frontend を持つ同梱プラグインが"
-            echo "     有効になっていると、この job は submodule を取らないので"
-            echo "     ここで落ちます (mk-plugin.yml の disabled: true を確認)"
-            exit 1
+            echo "FAIL pluginbuild が失敗しました (原因は上の出力)"
+            exit "$rc"
           fi
 
       - name: Build
@@ -89,8 +92,15 @@ jobs:
       # テストの実行そのものは `plugin-tests` job が行う (PostgreSQL が要るため)。
       - name: Vet bundled plugins
         run: |
-          set -o pipefail
-          for dir in plugins/status plugins/trustlevel; do
+          # 列挙は git に任せる。ディレクトリを書き並べると、新しく同梱した
+          # ものが黙って検査対象から漏れる。
+          mods=$(git ls-files 'plugins/*/go.mod')
+          if [ -z "$mods" ]; then
+            echo "同梱プラグインが 1 つも見つかりません (列挙が壊れています)"
+            exit 1
+          fi
+          for mod in $mods; do
+            dir=$(dirname "$mod")
             echo "==> $dir"
             (cd "$dir" && GOWORK=off go vet ./...)
           done

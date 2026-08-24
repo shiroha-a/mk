@@ -452,15 +452,16 @@ rebase and mergeでは**PRの各コミットがそのまま`develop`の履歴に
 
 ### `build`ジョブ
 
-- `go build ./...`で全パッケージのビルド確認。
-- **`Vet bundled plugins` step** で同梱プラグインを `go vet` する。`go build` ではなく
-  `vet` なのは、テストファイルもコンパイルされるので**公開面を変えて本体だけ直した**
-  ときに検出できるため (#2588)。
+step は実行順に 3 つ。**required job なので、コンパイル以外の理由でも赤くなる。**
+
 - **`Check bundled plugins are disabled by default` step** で、tracked な
   `plugins/*/mk-plugin.yml` が全て `disabled: true` を持つことと、既定の
   `pluginbuild` が生成物を作らないことを見る (#2701)。**検証のために一時的に
   外して戻し忘れる**のを止めるため (trustlevel が実際にそうなっていた)。
-  required job なので、コンパイル以外の理由でも `build` が赤くなる。
+- `go build ./...`で全パッケージのビルド確認。
+- **`Vet bundled plugins` step** で同梱プラグインを `go vet` する。`go build` ではなく
+  `vet` なのは、テストファイルもコンパイルされるので**公開面を変えて本体だけ直した**
+  ときに検出できるため (#2588)。
 
 ### `test-shards`ジョブ + `test` aggregator
 

@@ -1,6 +1,6 @@
 name: status
 apiVersion: 1
 # 同梱サンプルなので既定ではビルドに含めない。使う場合は下の `disabled: true`
-# の行を消して再ビルドする。CI は -include-disabled で検証を続けるので、この既定値で
-# サンプルが壊れても検出される。
+# の行を消して再ビルドする。既定無効でもサンプルが壊れれば CI は落ちる
+# (build job の Vet bundled plugins と plugin-tests job)。
 disabled: true
