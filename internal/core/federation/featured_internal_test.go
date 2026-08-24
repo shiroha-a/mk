@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -11,7 +12,6 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
-	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
 
@@ -126,8 +126,9 @@ func TestResolveFeaturedNotes_UsesExistingRowWhenTheKeyIsInFlight(t *testing.T) 
 
 			// 台帳に載っている状態でも既存行を拾うこと。**ここで skip すると
 			// ReplaceByUser が集合ごと書き直して生きたピンを消す。**
-			r.resolvingNotes.Store(noteGroupKey(tc.listed, false, false), tc.storedAs)
-			assert.Equal(t, []string{"9irisnote00000000000"}, r.resolveFeaturedNotes(user, items),
+			// resolveNoteOnce が fetch 後に鍵へ document id を紐づけた状態。
+			chain := (&resolveChain{}).with(noteGroupKey(tc.listed, false, false), tc.storedAs)
+			assert.Equal(t, []string{"9irisnote00000000000"}, r.resolveFeaturedNotes(user, items, chain),
 				"in-flight でも既存行があれば拾うこと (skip すると生きたピンが消える)")
 		})
 	}
@@ -139,55 +140,6 @@ type emptyDocFetcher struct{}
 
 func (emptyDocFetcher) FetchObject(string) ([]byte, error) {
 	return nil, errors.New("fetch must not happen in this test")
-}
-
-// ledgerProbeNoteRepo records the in-flight ledger contents on every FindByURI
-// so a test can observe what resolveNoteOnce stored while ingesting.
-type ledgerProbeNoteRepo struct {
-	repository.NoteRepository
-	r    *Resolver
-	seen map[string]any
-}
-
-func (p *ledgerProbeNoteRepo) FindByURI(uri string) (*model.Note, error) {
-	p.r.resolvingNotes.Range(func(k, v any) bool {
-		p.seen[k.(string)] = v
-		return true
-	})
-	return p.NoteRepository.FindByURI(uri)
-}
-
-// 台帳には document id を載せること (#2684 review MED-1)。
-//
-// 値が空だと、別名 URL のとき featured / quote の fallback が既存行を
-// 引き当てられない (行は document id で保存されるため)。呼び出し側の
-// fallback だけをテストしても、**値を載せる側の配線が消えたことは
-// 検出できない**ので、本番経路を通して中身を見る。
-func TestResolveNoteOnce_LedgerCarriesTheDocumentID(t *testing.T) {
-	const (
-		actorURI = "https://remote.example/users/jun"
-		aliasURI = "https://remote.example/@jun/j1"
-		canonURI = "https://remote.example/notes/j1"
-	)
-	userRepo := testutil.NewMockUserRepository()
-	base := testutil.NewMockNoteRepository()
-	urls := activitypub.NewURLBuilder("https://example.com")
-	idGen, err := id.NewGenerator("aidx")
-	require.NoError(t, err)
-	probe := &ledgerProbeNoteRepo{NoteRepository: base, seen: map[string]any{}}
-	r := NewResolver(userRepo, probe, urls, fixtureDocFetcher{docs: map[string]string{
-		actorURI: featuredActorDoc("remote.example", "jun", ""),
-		aliasURI: plainNoteDoc(canonURI, actorURI),
-	}}, idGen)
-	probe.r = r
-
-	_, err = r.ResolveNote(aliasURI)
-	require.NoError(t, err)
-
-	// 鍵は取得 URI、値は document id。
-	got, ok := probe.seen[noteGroupKey(aliasURI, false, false)]
-	require.True(t, ok, "ingest 中に台帳へ載っていること")
-	assert.Equal(t, canonURI, got, "台帳の値は document id であること")
 }
 
 // fixtureDocFetcher serves canned documents by URI.
@@ -223,7 +175,7 @@ func plainNoteDoc(noteID, authorURI string) string {
 // **ReplaceByUser は delete-then-insert なので、ここで落とすと集合ごと
 // 書き直して生きているピンが消える。** ingesting の窓では通常まだ行が無い
 // (Store は Create より前) が、第三の経路が先に作る競合はありうる。消えるのは
-// 黙って起きる不可逆な損失なので、resolvingNotes 側と同じく確実に潰す。
+// 黙って起きる不可逆な損失なので、singleflight 鍵側と同じく確実に潰す。
 //
 // 台帳を直接触るのは、この競合を fetch や DB の遅延で再現しようとすると
 // 本質的に flaky になるため。
@@ -249,7 +201,147 @@ func TestResolveFeaturedNotes_UsesExistingRowWhenIngesting(t *testing.T) {
 
 	items := []json.RawMessage{json.RawMessage(`"` + noteURI + `"`)}
 
-	r.ingesting.Store(noteURI, struct{}{})
-	assert.Equal(t, []string{"9leonote000000000000"}, r.resolveFeaturedNotes(user, items),
+	// document id 側の鍵だけを持つチェーン (inbox 直送で立つ形)。
+	chain := (&resolveChain{}).with(noteURI, "")
+	assert.Equal(t, []string{"9leonote000000000000"}, r.resolveFeaturedNotes(user, items, chain),
 		"ingest 中でも既存行があれば拾うこと (skip すると生きたピンが消える)")
+}
+
+// **別のチェーンが同じ note を解決中でも待たない。** featured の取り込みは
+// best-effort なので、待つと actor の鍵を握ったまま件数分の上限を積み上げ、
+// その待ちが循環に見えたときに本命の note の解決が代わりに弾かれる
+// (#2685 review HIGH-2 / MEDIUM-2)。
+//
+// **落とす前に既存行を引く。** ReplaceByUser は delete-then-insert なので、
+// ここで落とすと集合ごと書き直して生きているピンが消える
+// (#2685 review MEDIUM-1)。
+func TestResolveFeaturedNotes_DoesNotWaitForAnotherChain(t *testing.T) {
+	const actorURI = "https://remote.example/users/wren"
+	const noteURI = "https://remote.example/notes/w1"
+
+	// 上限が効いてしまう回帰が入ったとき、5 分ハングせず落ちるように縮める。
+	prev := resolveJoinTimeout
+	resolveJoinTimeout = 3 * time.Second
+	defer func() { resolveJoinTimeout = prev }()
+
+	cases := []struct {
+		name      string
+		storeNote bool
+		wantPins  []string
+	}{
+		{"既存行があれば拾う", true, []string{"9wrennote0000000000"}},
+		{"既存行が無ければ落とす", false, []string{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			userRepo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, err := id.NewGenerator("aidx")
+			require.NoError(t, err)
+			// 待たない経路なので fetch は起きてはいけない。
+			r := NewResolver(userRepo, noteRepo, urls, emptyDocFetcher{}, idGen)
+
+			host := "remote.example"
+			uri := actorURI
+			user := &model.User{ID: "9wrenuser0000000000", Username: "wren", Host: &host, URI: &uri}
+			require.NoError(t, userRepo.Create(user))
+			if tc.storeNote {
+				nURI := noteURI
+				require.NoError(t, noteRepo.Create(&model.Note{
+					ID: "9wrennote0000000000", UserID: user.ID, URI: &nURI,
+				}))
+			}
+
+			// 別のチェーンが note の鍵を握ったまま返らない状態を作る。
+			key := noteGroupKey(noteURI, false, false)
+			held := make(chan struct{})
+			blocker := make(chan struct{})
+			leaderDone := make(chan struct{})
+			go func() {
+				defer close(leaderDone)
+				_, _ = r.joinResolve(&r.resolveNoteGroup, chainWithID(9999), noteWaitKey(key), key,
+					func() (any, error) {
+						close(held)
+						<-blocker
+						return nil, nil
+					})
+			}()
+			<-held
+			defer func() {
+				close(blocker)
+				<-leaderDone
+			}()
+
+			items := []json.RawMessage{json.RawMessage(`"` + noteURI + `"`)}
+			done := make(chan []string, 1)
+			go func() {
+				done <- r.resolveFeaturedNotes(user, items, (&resolveChain{}).with("unrelated", "unrelated"))
+			}()
+			select {
+			case got := <-done:
+				assert.Equal(t, tc.wantPins, got)
+			case <-time.After(2 * time.Second):
+				t.Fatal("featured の解決が別チェーンの in-flight を待っている")
+			}
+		})
+	}
+}
+
+// **待たないのは枝ごと。** 相乗りする瞬間だけ待たない形にすると、自分が先頭に
+// なったときに内側 (取り込む投稿の著者 actor の解決) で待ってしまい、その間
+// actor の鍵を握り続ける (#2685 review round 4)。
+func TestResolveFeaturedNotes_DoesNotWaitInNestedResolves(t *testing.T) {
+	const actorURI = "https://remote.example/users/f1"
+	const noteURI = "https://remote.example/notes/f1n"
+
+	prev := resolveJoinTimeout
+	resolveJoinTimeout = 1200 * time.Millisecond
+	defer func() { resolveJoinTimeout = prev }()
+
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	r := NewResolver(userRepo, noteRepo, urls,
+		fixtureDocFetcher{docs: map[string]string{noteURI: plainNoteDoc(noteURI, actorURI)}}, idGen)
+
+	host := "remote.example"
+	uri := actorURI
+	user := &model.User{ID: "9f1user00000000000000", Username: "f1", Host: &host, URI: &uri}
+	require.NoError(t, userRepo.Create(user))
+
+	// 著者 actor の鍵 (featured の内側なので skipFeatured=true) を別チェーンが
+	// 握ったまま返らない状態にする。
+	akey := actorGroupKey(actorURI, false, true)
+	held := make(chan struct{})
+	blocker := make(chan struct{})
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		_, _ = r.joinResolve(&r.resolveActorGroup, chainWithID(7777), actorWaitKey(akey), akey,
+			func() (any, error) {
+				close(held)
+				<-blocker
+				return nil, nil
+			})
+	}()
+	<-held
+	defer func() { close(blocker); <-leaderDone }()
+
+	items := []json.RawMessage{json.RawMessage(`"` + noteURI + `"`)}
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		_ = r.resolveFeaturedNotes(user, items, (&resolveChain{}).with("unrelated", "unrelated"))
+		done <- time.Since(start)
+	}()
+	select {
+	case elapsed := <-done:
+		assert.Less(t, elapsed, 500*time.Millisecond,
+			"featured の取り込みが内側の actor 解決で待っている (実測 %s)", elapsed)
+	case <-time.After(5 * time.Second):
+		t.Fatal("featured の取り込みが内側の actor 解決でブロックしている")
+	}
 }

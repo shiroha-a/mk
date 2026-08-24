@@ -40,7 +40,7 @@ const featuredNoteResolveDepth = 1
 //
 // **best-effort。** ここでの失敗が actor の取得そのものを巻き戻すことは無い
 // (upstream も `.catch()` でログのみ)。
-func (r *Resolver) updateFeatured(user *model.User) {
+func (r *Resolver) updateFeatured(user *model.User, chain *resolveChain) {
 	if r.pinningRepo == nil || r.pinningIDGen == nil {
 		return
 	}
@@ -72,7 +72,7 @@ func (r *Resolver) updateFeatured(user *model.User) {
 		return
 	}
 
-	noteIDs := r.resolveFeaturedNotes(user, items)
+	noteIDs := r.resolveFeaturedNotes(user, items, chain)
 	pins := make([]*model.UserNotePining, 0, len(noteIDs))
 	now := r.clock()
 	for i, noteID := range noteIDs {
@@ -133,7 +133,7 @@ func (r *Resolver) fetchFeaturedItems(uri string) ([]json.RawMessage, bool) {
 }
 
 // resolveFeaturedNotes turns collection entries into local note IDs, in order.
-func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessage) []string {
+func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessage, chain *resolveChain) []string {
 	actorURI := *user.URI
 	noteIDs := make([]string, 0, featuredPinLimit)
 	seen := make(map[string]bool, featuredPinLimit)
@@ -158,25 +158,25 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 		if err := assertRequestHostMatches(actorURI, uri); err != nil {
 			continue
 		}
-		// **いま取り込み中の note は解決しに行かない。** 著者が自分の投稿を
-		// ピン留めしていると、ここが ResolveNote(A) の内側から同じ A を要求する
-		// 形になり、note の singleflight が**自分が握っている in-flight entry を
-		// 自分で待つ**状態になって永久に止まる (#2684)。quote 側は同じ形の
-		// guard を既に持っている (resolveQuoteURI、#1527)。
+		// **いま解決中 / 取り込み中の note は解決しに行かない。** 著者が自分の
+		// 投稿をピン留めしていると、featured の解決がその投稿自身を要求する形に
+		// なる。**入口によって壊れ方が違う**:
 		//
-		// **2 つの台帳を両方見る。** どちらか片方では取りこぼす:
-		//   - resolvingNotes は singleflight の鍵 (取得 URI)。resolveNoteOnce で
-		//     しか書かれないので、**inbox 直送では空**
-		//   - ingesting は正規化後の document id。inbox 直送でも立つが、
-		//     **取得 URI と id が食い違う別名 URL では引けない** (#2686)
+		//   - ResolveNote(A) 経由: note の group が**自分が握っている in-flight
+		//     entry を自分で待つ**状態になり永久に止まっていた (#2684。いまは
+		//     待ちの循環を検出して即エラーにするが、ピンは落ちるので判定は要る)
+		//   - inbox 直送 (IngestNoteWithCreated) 経由: 同じ note をもう一度
+		//     fetch して内側の ingest が先に行を作り、外側の Create が UNIQUE に
+		//     当たって created=false になる。呼び出し側がそれで通知とチャートの
+		//     フックを飛ばすので**言及・返信の通知が黙って消える** (#2686)
+		//
+		// 判定は resolveChain に閉じている (#2685)。**無関係な goroutine が同じ
+		// note を扱っている最中は巻き込まない** — プロセス全体の台帳だった頃は
+		// そちらも諦めていたので、別の worker が同じ引用先を取り込んでいる最中に
+		// 引用元が来ると renoteId を恒久的に落としていた。
 		//
 		// **skip する前に既存行を引く。** ReplaceByUser は delete-then-insert
 		// なので、ここで落とすと集合ごと書き直して**生きているピンが消える**。
-		// 引くのは取得 URI と document id の両方 — 行は document id で保存
-		// されるので、別名 URL では取得 URI だけでは必ず空振りする
-		// (#2684 review MED-1)。行が現れる経路は、取り込み中の Create が
-		// 台帳の区間内で走る場合と、inbox 直送の IngestNoteWithCreated
-		// (台帳を触らない) が別 goroutine で先に作る場合。
 		//
 		// 既存行が無ければこの回のピンは取りこぼす。外側の ingest が終わってから
 		// 追加する手立てが無いため。次の actor 更新で拾い直される (テスト済み)。
@@ -185,53 +185,43 @@ func (r *Resolver) resolveFeaturedNotes(user *model.User, items []json.RawMessag
 		// **upstream とは挙動が違う。** upstream は Promise.all で全件を
 		// まとめて解決し、Resolver.history に当たった 1 件が throw すると
 		// updateFeatured ごと reject して既存のピン集合をそのまま残す
-		// (all-or-nothing)。mk-go は 1 件だけ落として残りを反映する。
-		// 取り込める分を取り込むほうが実害が小さいのでこちらを維持する
+		// (all-or-nothing)。mk-go は 1 件だけ落として残りを反映する
 		// (docs/divergence.md)。
 		//
+		// **別名 URL では取りこぼす。** featured が `/@user/x` を載せていて
+		// document の id が `/notes/x` のとき、チェーンに載っているのは id 側
+		// なので引けない。ここで docID を得るには fetch するしかなく、呼び出し順を
+		// 変える話になるので分けた (#2695)。
+		//
 		// 鍵の flag を (false, false) に固定しているのは、**すぐ下の
-		// resolveNoteDepth に同じ値を渡している**から (`featuredNoteResolveDepth`
-		// は深さであって flag ではない)。他の鍵形は次のとおり:
-		//
-		//   - ephemeral 鍵 (`eph\0…`): **updateFeatured に到達しない**。
-		//     resolveNoteAuthor が ephemeral を resolveActorEphemeral
-		//     (skipFeatured=true) へ回し、resolveActorOnceWithID 側も
-		//     !ephemeral で守っている。鍵が別という以前に経路が無い
-		//   - ap/show の cross-host 鍵 (`xhost\0…`): resolvingNotes では引けない
-		//     (鍵の形が違う) が、**ingesting 側で引ける**ので二重 fetch は起きない
-		//     (#2686 で 2 回 → 1 回になった)。代わりにそのピンはこの回では入らず、
-		//     次の actor 更新まで遅れる
-		//   - inbox 直送 (`IngestNoteWithCreated`) は resolveNoteOnce を通らない
-		//     ので resolvingNotes に載らない。そちらは ingesting (document id 側)
-		//     で見る。見落とすと**同じ note をもう一度 fetch して内側の ingest が
-		//     先に行を作り**、外側の Create が UNIQUE に当たって dedup 経路へ落ち、
-		//     created=false になる。呼び出し側はそれで通知とチャートのフックを
-		//     飛ばすので、**言及・返信の通知が黙って消える** (#2686)。
-		//
-		// **別名 URL では inbox 直送側を取りこぼす。** featured が
-		// `/@user/x` を載せていて document の id が `/notes/x` のとき、
-		// ingesting は id 側の鍵なので引けない。ここで docID を得るには
-		// fetch するしかなく、それは呼び出し順を変える話になるので分けた
-		// (#2695)。実測では正規形が created=false → true に直り、別名は
-		// created=false のまま。
+		// resolveNoteBestEffort に同じ値を渡している**から
+		// (`featuredNoteResolveDepth` は深さであって flag ではない)。ap/show の
+		// cross-host 鍵は形が違うので group 側では引けないが、document id 側で
+		// 引ける。
 		var note *model.Note
-		if inflight := r.noteIngestInFlight(uri); inflight {
-			// ingesting は document id 側の鍵なので、引くのも同じ URI でよい。
-			note = r.noteByAnyURI(uri, uri)
-			if note == nil {
-				continue
-			}
-		} else if docID, inflight := r.noteResolveInFlight(uri, false, false); inflight {
+		if docID, inflight := r.noteInFlightInChain(chain, uri, false, false); inflight {
 			note = r.noteByAnyURI(uri, docID)
 			if note == nil {
 				continue
 			}
 		} else {
-			resolved, err := r.resolveNoteDepth(uri, featuredNoteResolveDepth, false, false)
+			// **待たない。** 他のチェーンが同じ note を解決中なら諦める。
+			// ここは best-effort なので、待つと actor の鍵を握ったまま
+			// 件数分の上限を積み上げるうえ、その待ちが循環に見えたときに
+			// **本命の note の解決**が代わりに弾かれる (#2685 review HIGH-2)。
+			resolved, err := r.resolveNoteBestEffort(uri, featuredNoteResolveDepth, chain)
 			if err != nil || resolved == nil {
-				continue
+				// **諦める前に既存行を引く。** in-flight 枝と同じ理由で、
+				// ここで落とすと ReplaceByUser が集合ごと書き直して
+				// **生きているピンが消える** (#2685 review MEDIUM-1)。
+				// 引けるのは取得 URI がそのまま行の URI になっている場合まで
+				// (別名 URL は上と同じ理由で取りこぼす、#2695)。
+				if note = r.noteByAnyURI(uri, ""); note == nil {
+					continue
+				}
+			} else {
+				note = resolved
 			}
-			note = resolved
 		}
 		// **ピン留めできるのは自分の投稿だけ** (upstream の i/pin も同じ)。
 		// これを見ないと、他人の投稿を自分のプロフィールに並べられる。

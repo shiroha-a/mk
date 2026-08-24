@@ -49,7 +49,7 @@ func (r *Resolver) ResolveTextMentionUserIDs(mentions []corenote.Mention) []stri
 // tests (#2414)。refreshActor 経由では届かないゲート (クールダウン / 連鎖上限 /
 // URI 不一致) を直接突くために公開する。
 func (r *Resolver) ProcessRemoteMove(src *model.User, prevMovedAt *time.Time, visited map[string]bool) {
-	r.processRemoteMove(src, prevMovedAt, visited)
+	r.processRemoteMove(src, prevMovedAt, visited, nil)
 }
 
 // KeyFetchFailureCount exposes the size of the key-refresh backoff map so tests

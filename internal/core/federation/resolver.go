@@ -25,7 +25,6 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/net/idna"
-	"golang.org/x/sync/singleflight"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -99,7 +98,41 @@ var (
 	// chain exceeds resolveRecursionLimit, mirroring upstream Resolver の
 	// d592da9f guard。悪意ある quote チェーンによる無限再帰・amplification を防ぐ。
 	ErrRecursionLimit = errors.New("hit recursion limit")
+	// ErrResolveWouldDeadlock is returned when joining an in-flight resolve
+	// would close a wait cycle across goroutines. 呼び出し側は既存行に落とすか、
+	// その回の解決を諦める (#2685 review HIGH-1)。
+	ErrResolveWouldDeadlock = errors.New("resolving would deadlock: wait cycle")
+	// ErrResolveJoinTimeout is returned when this resolve tree used up its
+	// total wait budget (resolveJoinTimeout) waiting on other chains.
+	//
+	// 循環検出の**保険**。検出はモデル化した待ちしか見ないので、載っていない
+	// 待ちが増えれば見逃す。見逃しても永久には止まらないようにする。
+	ErrResolveJoinTimeout = errors.New("resolving timed out waiting for an in-flight resolve")
+	// ErrResolveWouldBlock is returned to a best-effort caller that would have
+	// had to wait for another chain's in-flight resolve. 待たずに既存行へ落とす。
+	ErrResolveWouldBlock = errors.New("resolving would block on another in-flight resolve")
+	// errResolveAborted wakes followers when the leader unwound without a
+	// result (panic 等)。起こさないと鍵が残り、以降の追従側が上限まで待たされる。
+	errResolveAborted = errors.New("in-flight resolve aborted")
 )
+
+// resolveJoinTimeout bounds how long **one resolve tree** may spend waiting for
+// other chains' in-flight resolves, in total. 先頭側には掛けない (自分の HTTP
+// timeout で終わる)。
+//
+// **join ごとではなく木ごと。** 1 回の解決は著者・返信・引用と何度も待ちうるし、
+// 引用チェーンは resolveRecursionLimit まで入れ子になれるので、join ごとに
+// 掛けると回数分積み上がる (#2685 review HIGH-2)。予算は木の根で作って枝が
+// 共有する (resolveChain.budget)。**時刻の期限ではなく、待ちに費やした時間で
+// 減らす** — 理由は resolveChain.budget のコメント。
+//
+// AP fetch は 1 本 30s で、先頭は著者・返信・引用を順に引くので分単位まで
+// 伸びうる。短くすると #2685 が直した「別 worker が取り込み中の引用先を待てずに
+// renoteId を落とす」が戻るため、実際の解決より十分長い側に倒してある。ここに
+// 掛かるのは循環検出の見落としか、相手方が極端に遅い場合。
+//
+// var なのはテストから縮めるため。実行時に書き換える経路は無い。
+var resolveJoinTimeout = 5 * time.Minute
 
 // resolveRecursionLimit bounds how deep a single resolve operation may recurse
 // through note quote chains, matching upstream Resolver.recursionLimit (256)。
@@ -218,14 +251,14 @@ func (r *Resolver) dropSupersededEphemeral(uri, visibility string, author *model
 //     これが無いと投稿ごとに別 ID を採番して同一人物が別人として並ぶ
 //  3. どちらにも無ければ通常の ResolveActor で解決する。DB 行は作られるが、
 //     ephemeral な著者を作る経路は Phase 2 (materialize) で扱う
-func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool, depth int) (*model.User, error) {
+func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool, depth int, chain *resolveChain) (*model.User, error) {
 	if !ephemeral || r.ephemeralSink == nil {
 		// depth > 0 は「既にノート解決の内側に居る」ことを意味する。ここで
 		// featured を引くと、ピン留め → 引用先 → その著者 → その featured …
 		// と入れ子になり、1 段ごとに 5 分岐する取得の連鎖になる (#2552)。
 		// 入口が depth 0 なので、通常の配送で著者を初めて観測する経路は
 		// これまでどおり featured を引く。
-		return r.resolveActor(uri, false, depth > 0)
+		return r.resolveActor(uri, false, depth > 0, chain)
 	}
 	if existing, err := r.userRepo.FindByURI(uri); err == nil && existing != nil {
 		return existing, nil
@@ -241,7 +274,7 @@ func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool, depth int) (*mo
 	// ここを ResolveActor に任せると、ノートを Redis に逃がしても著者だけが
 	// DB に積み上がる。実測でリレー購読後は note と user がほぼ 1:1 で増える
 	// ため、著者を止めないと肥大化を抑える目的が半分しか達成できない。
-	return r.resolveActorEphemeral(uri)
+	return r.resolveActorEphemeral(uri, chain)
 }
 
 // resolveActorEphemeral fetches an actor and builds the row **without
@@ -249,10 +282,12 @@ func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool, depth int) (*mo
 //
 // singleflight key を通常経路と分けるのは、同一 URI に対する DB 経路の解決と
 // 混ざると片方が意図しない層へ書かれるため (note 側と同じ理由)。
-func (r *Resolver) resolveActorEphemeral(uri string) (*model.User, error) {
-	v, err, _ := r.resolveActorGroup.Do("eph\x00"+crossHostKey(uri, false), func() (any, error) {
+func (r *Resolver) resolveActorEphemeral(uri string, chain *resolveChain) (*model.User, error) {
+	key := "eph\x00" + crossHostKey(uri, false)
+	chain = chain.ensureTree()
+	v, err := r.joinResolve(&r.resolveActorGroup, chain, actorWaitKey(key), key, func() (any, error) {
 		// ephemeral な行は DB に載らないので featured の取り込み対象外。
-		return r.resolveActorOnceWithID(uri, false, "", true, false, true)
+		return r.resolveActorOnceWithID(uri, false, "", true, false, true, chain)
 	})
 	if err != nil {
 		return nil, err
@@ -371,23 +406,16 @@ type Resolver struct {
 	// ResolveNote 呼び出しを 1 度の DB lookup + HTTP fetch に collapse する
 	// (#300 3-7)。inbox 受信時に同じ remote actor / note を参照する activity
 	// が連続して届く現実的なケースで thundering herd を抑える。
-	resolveActorGroup singleflight.Group
-	resolveNoteGroup  singleflight.Group
-	// ingesting tracks note URIs currently being ingested (key: AP id) so quote
-	// resolution can break cycles (A が B を quote し B が A を quote する等)。
-	// quote target が in-flight なら fetch を skip する (#1527)。
-	ingesting sync.Map
-	// resolvingNotes tracks the resolveNoteGroup keys held while a note is
-	// being ingested, so a nested resolve can tell that waiting would mean
-	// waiting on itself.
-	//
-	// **ingesting とは鍵が違う。** ingesting は正規化後の document id
-	// (`apNote.ID`) だが、デッドロックするのは singleflight の鍵
-	// (`noteGroupKey` = 取得 URI) が一致したとき。resolveNoteOnce は取得 URI と
-	// document id に**host の一致しか要求しない**ので、別名 URL
-	// (`/@user/xxx` と `/notes/xxx`、末尾スラッシュ違い等) では両者がずれる。
-	// ずれると ingesting を見ても取りこぼす (#2684 review HIGH-1)。
-	resolvingNotes sync.Map
+	resolveActorGroup resolveGroup
+	resolveNoteGroup  resolveGroup
+	// waits は cross-goroutine の待ち循環を検出する (#2685 review HIGH-1)。
+	// チェーンローカルの判定は自分の祖先しか見ないので、これが無いと相互引用で
+	// worker が永久に止まる。
+	waits resolveWaits
+	// 解決の in-flight は resolveChain が持つ (#2685)。以前は Resolver に
+	// sync.Map を 2 つ (ingesting / resolvingNotes) 置いていたが、プロセス全体で
+	// 共有されるため「自分の祖先が握っている」と「無関係な goroutine が握って
+	// いる」を区別できなかった。
 }
 
 // NewResolver constructs a Resolver.
@@ -601,7 +629,7 @@ func (r *Resolver) PublicKeyForActor(actorID string) (string, error) {
 // が actorTTL を超えていたら fetch しなおして name / inbox / sharedInbox /
 // publicKey を更新する。fetch 失敗時はベストエフォートで既存値を返す。
 func (r *Resolver) ResolveActor(uri string) (*model.User, error) {
-	return r.resolveActor(uri, false, false)
+	return r.resolveActor(uri, false, false, nil)
 }
 
 // ResolveActorAllowCrossHost is ResolveActor for user-initiated lookups
@@ -610,7 +638,7 @@ func (r *Resolver) ResolveActor(uri string) (*model.User, error) {
 // attacker 制御でないため cross-host redirect を許容する。finalURL ↔ id binding は
 // 引き続き適用される。
 func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
-	return r.resolveActor(uri, true, false)
+	return r.resolveActor(uri, true, false, nil)
 }
 
 // resolveActor is ResolveActor carrying the cross-host-allowed flag (#1828)。
@@ -622,8 +650,10 @@ func (r *Resolver) ResolveActorAllowCrossHost(uri string) (*model.User, error) {
 // 変わり、Redis に残っている既存ノートが古い ID を指したままになる。結果と
 // して **ミュートしたのにタイムラインから消えない** 状態が TTL 切れまで続く。
 func (r *Resolver) resolveActorWithID(uri, preassignedID string) (*model.User, error) {
-	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, preassignedID, false, false, false)
+	key := crossHostKey(uri, false)
+	chain := (*resolveChain)(nil).ensureTree()
+	v, err := r.joinResolve(&r.resolveActorGroup, chain, actorWaitKey(key), key, func() (any, error) {
+		return r.resolveActorOnceWithID(uri, false, preassignedID, false, false, false, chain)
 	})
 	if err != nil {
 		return nil, err
@@ -634,13 +664,15 @@ func (r *Resolver) resolveActorWithID(uri, preassignedID string) (*model.User, e
 	return v.(*model.User), nil
 }
 
-func (r *Resolver) resolveActor(uri string, allowCrossHost, skipFeatured bool) (*model.User, error) {
+func (r *Resolver) resolveActor(uri string, allowCrossHost, skipFeatured bool, chain *resolveChain) (*model.User, error) {
 	// 同一 URI への並行呼び出しは singleflight で 1 つに collapse する
 	// (#300 3-7)。cache hit 経路は微秒なので serialize の影響は無視でき、
 	// cold な fetch + Create で発生する HTTP fan-out + UNIQUE 衝突を抑える
 	// 効果が大きい。
-	v, err, _ := r.resolveActorGroup.Do(actorGroupKey(uri, allowCrossHost, skipFeatured), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, allowCrossHost, "", false, false, skipFeatured)
+	key := actorGroupKey(uri, allowCrossHost, skipFeatured)
+	chain = chain.ensureTree()
+	v, err := r.joinResolve(&r.resolveActorGroup, chain, actorWaitKey(key), key, func() (any, error) {
+		return r.resolveActorOnceWithID(uri, allowCrossHost, "", false, false, skipFeatured, chain)
 	})
 	if err != nil {
 		return nil, err
@@ -652,8 +684,8 @@ func (r *Resolver) resolveActor(uri string, allowCrossHost, skipFeatured bool) (
 }
 
 // resolveActorOnce is the body of resolveActor, invoked once per URI by
-// singleflight.Do.
-func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string, ephemeral, viaRelay, skipFeatured bool) (*model.User, error) {
+// resolveGroup.
+func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preassignedID string, ephemeral, viaRelay, skipFeatured bool, chain *resolveChain) (*model.User, error) {
 	// fragment 付き URL は HTTP(S) で fragment が送られず正しく解決できないため
 	// 拒否する (本家 Resolver の b94fd5b1 guard、#1828)。keyId fragment は
 	// ResolveActorByKeyID -> ResolveKeyURL で除去済みなのでここには来ない。
@@ -662,7 +694,7 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	}
 	if existing, err := r.userRepo.FindByURI(uri); err == nil {
 		if r.shouldRefreshActor(existing) {
-			r.refreshActor(existing, uri, skipFeatured)
+			r.refreshActor(existing, uri, skipFeatured, chain)
 		} else {
 			r.keysMu.RLock()
 			_, cached := r.keys[existing.ID]
@@ -818,7 +850,7 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	// Add はピン留めされた瞬間にしか飛んで来ないので、これが無いと観測より前の
 	// ピン留めは永久に拾えない。
 	if !skipFeatured && !ephemeral {
-		r.updateFeatured(user)
+		r.updateFeatured(user, chain)
 	}
 	return user, nil
 }
@@ -1125,7 +1157,7 @@ func extractRemoteDescription(actor *activitypub.Person) *string {
 // bypassing the TTL cache. Move activityなどプロフィール更新が確実に必要な場合に使う。
 func (r *Resolver) ForceResolveActor(uri string) (*model.User, error) {
 	if existing, err := r.userRepo.FindByURI(uri); err == nil {
-		r.refreshActor(existing, uri, false)
+		r.refreshActor(existing, uri, false, nil)
 		return existing, nil
 	}
 	return r.ResolveActor(uri)
@@ -1152,7 +1184,7 @@ func (r *Resolver) shouldRefreshActor(u *model.User) bool {
 // refreshActor refetches the remote actor document and updates mutable fields
 // on the local user row. 失敗してもエラーは返さず (呼び出し側はベストエフォート
 // で既存値を使う)、ログは呼び出し元側で残す。
-func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured bool) {
+func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured bool, chain *resolveChain) {
 	// background refresh は federation-loop 扱いで Strict (request host binding 有効)。
 	actor, err := r.fetchActor(uri, false)
 	if err != nil {
@@ -1335,12 +1367,12 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	// 移行を検知したらフォロワー等の引き継ぎを起動する。DB 更新の後に置くのは、
 	// 引き継ぎ処理が movedToUri の永続化済みを前提にするため。
 	if movedThisRefresh {
-		r.processRemoteMove(existing, prevMovedAt, nil)
+		r.processRemoteMove(existing, prevMovedAt, nil, chain)
 	}
 	// 既に観測済みのユーザーはここでピン留めが埋まる (#2552)。actor の TTL が
 	// 切れるたびに引き直すので、featured を後から公開した相手にも追従する。
 	if !skipFeatured {
-		r.updateFeatured(existing)
+		r.updateFeatured(existing, chain)
 	}
 }
 
@@ -1364,7 +1396,7 @@ const maxRemoteMoveChain = 10
 //
 // **best-effort。** 移行の検知は actor 更新の副作用なので、ここでの失敗が
 // プロフィール更新そのものを巻き戻すことは無い。
-func (r *Resolver) processRemoteMove(src *model.User, prevMovedAt *time.Time, visited map[string]bool) {
+func (r *Resolver) processRemoteMove(src *model.User, prevMovedAt *time.Time, visited map[string]bool, chain *resolveChain) {
 	if r.moveProcessor == nil || src == nil {
 		return
 	}
@@ -1427,7 +1459,15 @@ func (r *Resolver) processRemoteMove(src *model.User, prevMovedAt *time.Time, vi
 				"srcURI", srcURI, "dstURI", dstURI)
 			return
 		}
-		dst, err = r.ResolveActor(dstURI)
+		// **チェーンを引き継ぐ。** 落とすと移行先の featured 解決が、この
+		// goroutine が既に握っている鍵を「他人のもの」と見なす。いまは待たずに
+		// 諦めるのでピンを 1 件落とすだけで済むが、以前は待って止まっていた
+		// (#2684 と同じ形)。
+		//
+		// **この待ちがあるので actor 側もグラフに載せている。** 互いを movedTo に
+		// 指す 2 つの actor を 2 worker が同時に取得すると、ここで actor どうしの
+		// 循環になる。
+		dst, err = r.resolveActor(dstURI, false, false, chain)
 		if err != nil || dst == nil {
 			slog.Warn("federation: resolve remote move destination failed",
 				"srcURI", srcURI, "dstURI", dstURI, "err", err)
@@ -1885,7 +1925,7 @@ func (r *Resolver) ResolveActorByKeyID(keyID string) (*model.User, error) {
 //   - リモート URI で既に取り込み済みなら noteRepo.FindByURI で返す
 //   - 未知のリモート URI なら fetcher で取得して IngestNote で永続化
 func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
-	return r.resolveNoteDepth(uri, 0, false, false)
+	return r.resolveNoteDepth(uri, 0, false, false, nil)
 }
 
 // ResolveNoteEphemeral is ResolveNote for relay-delivered notes: the note and
@@ -1897,9 +1937,9 @@ func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
 // 構築経路を書くと検証が二重管理になり、リレー経由が検証を迂回する穴になる。
 func (r *Resolver) ResolveNoteEphemeral(uri string) (*model.Note, error) {
 	if r.ephemeralSink == nil || !r.ephemeralSink.Enabled() {
-		return r.resolveNoteDepth(uri, 0, false, false)
+		return r.resolveNoteDepth(uri, 0, false, false, nil)
 	}
-	return r.resolveNoteDepth(uri, 0, false, true)
+	return r.resolveNoteDepth(uri, 0, false, true, nil)
 }
 
 // ResolveActorViaRelay resolves an actor and marks it as relay-derived when the
@@ -1912,8 +1952,10 @@ func (r *Resolver) ResolveNoteEphemeral(uri string) (*model.Note, error) {
 // 既に DB に在る行には印を付けない。リレー購読前から居る行や、プロフィール閲覧・
 // スレッド遡りで解決された行を巻き込まないため。
 func (r *Resolver) ResolveActorViaRelay(uri string) (*model.User, error) {
-	v, err, _ := r.resolveActorGroup.Do(crossHostKey(uri, false), func() (any, error) {
-		return r.resolveActorOnceWithID(uri, false, "", false, true, false)
+	key := crossHostKey(uri, false)
+	chain := (*resolveChain)(nil).ensureTree()
+	v, err := r.joinResolve(&r.resolveActorGroup, chain, actorWaitKey(key), key, func() (any, error) {
+		return r.resolveActorOnceWithID(uri, false, "", false, true, false, chain)
 	})
 	if err != nil {
 		return nil, err
@@ -1930,7 +1972,7 @@ func (r *Resolver) ResolveActorEphemeral(uri string) (*model.User, error) {
 	if r.ephemeralSink == nil || !r.ephemeralSink.Enabled() {
 		return r.ResolveActor(uri)
 	}
-	return r.resolveNoteAuthor(uri, true, 0)
+	return r.resolveNoteAuthor(uri, true, 0, nil)
 }
 
 // IngestNoteEphemeral is IngestNoteWithCreated for relay-forwarded Create
@@ -1940,7 +1982,7 @@ func (r *Resolver) IngestNoteEphemeral(body []byte, deliveringActorURI string) (
 	if r.ephemeralSink == nil || !r.ephemeralSink.Enabled() {
 		return r.IngestNoteWithCreated(body, deliveringActorURI)
 	}
-	return r.ingestNoteWithCreated(body, deliveringActorURI, 0, true)
+	return r.ingestNoteWithCreated(body, deliveringActorURI, 0, true, nil)
 }
 
 // ResolveNoteAllowCrossHost is ResolveNote for user-initiated lookups
@@ -1948,21 +1990,55 @@ func (r *Resolver) IngestNoteEphemeral(body []byte, deliveringActorURI string) (
 // CrossOrigin softfail (#1828)。entry URI が attacker 制御でないため cross-host
 // redirect を許容する。finalURL ↔ id binding は引き続き適用される。
 func (r *Resolver) ResolveNoteAllowCrossHost(uri string) (*model.Note, error) {
-	return r.resolveNoteDepth(uri, 0, true, false)
+	return r.resolveNoteDepth(uri, 0, true, false, nil)
 }
 
 // resolveNoteDepth is ResolveNote carrying the current recursion depth so the
 // note/quote chain can be bounded (#1828)。quote 解決経路 (resolveQuoteURI) が
 // depth+1 で再入する。allowCrossHost は user-initiated ap/show 経路でのみ true。
-func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost, ephemeral bool) (*model.Note, error) {
+func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost, ephemeral bool, chain *resolveChain) (*model.Note, error) {
+	return r.resolveNoteDepthOpt(uri, depth, allowCrossHost, ephemeral, true, chain)
+}
+
+// resolveNoteBestEffort is resolveNoteDepth for callers that must not block on
+// another chain's in-flight resolve of the same note.
+//
+// **best-effort の経路が待ちの辺を張ると、犠牲者の選ばれ方が壊れる。**
+// featured の取り込みは失敗しても投稿本体には影響しないが、待つと (1) その間
+// actor の鍵を握り続け、(2) その待ちが循環に見えたときに**本命の note の解決**が
+// 代わりに弾かれる (#2685 review HIGH-2 / MEDIUM-2)。待たずに既存行へ落とせば、
+// プロセス全体台帳だった頃と同じ挙動になる。
+func (r *Resolver) resolveNoteBestEffort(uri string, depth int, chain *resolveChain) (*model.Note, error) {
+	// **印は枝ごと引き継ぐ。** 相乗りする瞬間だけ待たない形にすると、自分が
+	// 先頭になったときに内側 (著者 actor の解決) で待ってしまい、その間 actor の
+	// 鍵を握り続ける (#2685 review round 4 で実測 1.2s)。
+	return r.resolveNoteDepthOpt(uri, depth, false, false, false, chain.asBestEffort())
+}
+
+// resolveNoteDepthOpt is the body of both. mayWait=false makes the caller give
+// up with ErrResolveWouldBlock instead of joining another chain's call.
+func (r *Resolver) resolveNoteDepthOpt(uri string, depth int, allowCrossHost, ephemeral, mayWait bool, chain *resolveChain) (*model.Note, error) {
 	// 同一 URI への並行呼び出しは singleflight で collapse (#300 3-7)。
 	// ResolveActor と同じく cold path の HTTP fetch + IngestNote を重複
 	// 実行しないことが目的。
 	//
 	// ephemeral かどうかで書き込み先が変わるため singleflight key も分ける。
 	// 混ざると片方の呼び出しが意図しない層へ書かれる。
-	v, err, _ := r.resolveNoteGroup.Do(noteGroupKey(uri, allowCrossHost, ephemeral), func() (any, error) {
-		return r.resolveNoteOnce(uri, depth, allowCrossHost, ephemeral)
+	// **入った鍵をチェーンへ足す。** 入れ子の解決が「待つと自分を待つことに
+	// なる」を判定できるようにする (#2684)。チェーンに閉じているので、
+	// 無関係な goroutine が同じ鍵を握っていても巻き込まない (#2685)。
+	key := noteGroupKey(uri, allowCrossHost, ephemeral)
+	inner := chain.with(key, "")
+	// **待つと循環する場合は諦める。** チェーンローカルの判定は自分の祖先しか
+	// 見ないので、cross-goroutine の待ちの循環 (相互に引用し合う 2 投稿を
+	// 2 worker が同時に解決する等) を防げない。待ちに上限が無いと循環した
+	// 両方が永久に止まる (#2685 review HIGH-1)。
+	//
+	// uri が空だと key も空になり with が受け取ったものをそのまま返すので、
+	// inner が nil のことがある。木の識別子はここで確定させる。
+	inner = inner.ensureTree()
+	v, err := r.joinResolveOpt(&r.resolveNoteGroup, inner, noteWaitKey(key), key, mayWait, func() (any, error) {
+		return r.resolveNoteOnce(uri, depth, allowCrossHost, ephemeral, inner)
 	})
 	if err != nil {
 		return nil, err
@@ -1973,41 +2049,53 @@ func (r *Resolver) resolveNoteDepth(uri string, depth int, allowCrossHost, ephem
 	return v.(*model.Note), nil
 }
 
-// noteResolveInFlight reports whether a note is currently being ingested under
-// the singleflight key this URI would join, and the document id it is being
-// stored under.
+// chainAfterProbe records the resolved document identity on the chain, under
+// both the key the caller entered with (the fetch URI) and the document id
+// itself, so a nested resolve can find the row by either.
 //
-// 入れ子の解決から呼ぶ。true なら **待ってはいけない**。同一 goroutine の
-// 祖先が握っている場合は解けない (#2684)。
-//
-// **別 goroutine が握っている場合も待てない。** 台帳はプロセス全体で 1 つで、
-// 「自分の祖先が握っている」と「無関係な goroutine が握っている」を区別
-// できないため。upstream の Resolver.history は activity ごとに作られる
-// Set なので、この区別が構造的に付く。区別を付けるには解決チェーンに集合を
-// 通す必要があり、actor 側の signature 数本に及ぶので別途扱う (#2685)。
-// 待てない分の劣化は呼び出し側で受ける: featured は既存行に落とし、quote は
-// その回の renoteId を諦める。
-//
-// 戻り値の docID は取り込み中の document id。取得 URI と食い違う別名 URL で
-// 既存行を引き当てるのに要る。
-func (r *Resolver) noteResolveInFlight(uri string, allowCrossHost, ephemeral bool) (string, bool) {
-	v, ok := r.resolvingNotes.Load(noteGroupKey(uri, allowCrossHost, ephemeral))
-	if !ok {
-		return "", false
-	}
-	docID, _ := v.(string)
-	return docID, true
+// **値は取得 URI ではなく document id。** 呼び出し側は取得 URI しか知らないが、
+// note 行は document id で保存されるので、別名 URL では取得 URI で引くと必ず
+// 空振りする (#2684 review MED-1)。
+func chainAfterProbe(chain *resolveChain, uri string, allowCrossHost, ephemeral bool, docID string) *resolveChain {
+	return chain.with(noteGroupKey(uri, allowCrossHost, ephemeral), docID).with(docID, docID)
 }
 
-// noteIngestInFlight reports whether a note with this document id is being
-// ingested right now.
+// noteInFlightInChain reports whether the current resolve chain is already
+// resolving or ingesting this note, and returns the document id it is being
+// stored under when known.
 //
-// resolvingNotes と違い、**inbox 直送 (IngestNoteWithCreated) でも立つ**。
-// そちらは resolveNoteOnce を通らないので singleflight の鍵は載らない
-// (#2686)。鍵は正規化後の document id (`apNote.ID`)。
-func (r *Resolver) noteIngestInFlight(uri string) bool {
-	_, ok := r.ingesting.Load(uri)
-	return ok
+// **待ってはいけないのは「自分の祖先が握っている」ときだけ。** チェーンに
+// 閉じているので、無関係な goroutine が同じ note を扱っていても巻き込まない
+// (#2685)。プロセス全体の台帳だった頃は後者も諦めていたため、別の worker が
+// 同じ引用先を取り込んでいる最中に引用元が来ると renoteId を恒久的に
+// 落としていた。
+//
+// 鍵は 2 種類ある。呼び出し側は取得 URI しか知らないことも、document id しか
+// 知らないこともあるので両方を見る:
+//
+//   - singleflight の鍵 (`noteGroupKey` = 取得 URI)。resolveNoteDepth が入場時に足す
+//   - 正規化後の document id (`apNote.ID`)。resolveNoteOnce と
+//     ingestNoteWithCreated が足す。**inbox 直送でも立つ** (#2686)
+//
+// 別名 URL では取得 URI と document id が食い違うので、片方だけでは取りこぼす
+// (#2684 review HIGH-1)。戻り値の docID は既存行を引き当てるのに使う。
+func (r *Resolver) noteInFlightInChain(chain *resolveChain, uri string, allowCrossHost, ephemeral bool) (string, bool) {
+	if docID, ok := chain.lookup(noteGroupKey(uri, allowCrossHost, ephemeral)); ok {
+		if docID == "" {
+			// fetch 前なので id が未確定。取得 URI で引くしかない。
+			docID = uri
+		}
+		return docID, true
+	}
+	if docID, ok := chain.lookup(uri); ok {
+		// document id 側で当たった。載せた側は id→id で入れるので値は uri と
+		// 同じはずだが、写像の値をそのまま返すほうが取り違えない。
+		if docID == "" {
+			docID = uri
+		}
+		return docID, true
+	}
+	return "", false
 }
 
 // noteByAnyURI returns the stored row for uri, falling back to docID when the
@@ -2025,9 +2113,9 @@ func (r *Resolver) noteByAnyURI(uri, docID string) *model.Note {
 }
 
 // resolveNoteOnce is the body of resolveNoteDepth, invoked once per URI by
-// singleflight.Do. depth は quote chain の現在の深さ。allowCrossHost は
+// resolveGroup. depth は quote chain の現在の深さ。allowCrossHost は
 // user-initiated ap/show 経路でのみ true。
-func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, ephemeral bool) (*model.Note, error) {
+func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, ephemeral bool, chain *resolveChain) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
 	}
@@ -2118,10 +2206,10 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	// **値に document id を持たせる。** 呼び出し側は取得 URI しか知らないが、
 	// note 行は document id で保存される。別名 URL では両者が食い違うので、
 	// 取得 URI だけで既存行を引くと**必ず空振りする** (#2684 review MED-1)。
-	key := noteGroupKey(uri, allowCrossHost, ephemeral)
-	r.resolvingNotes.Store(key, idProbe.ID)
-	defer r.resolvingNotes.Delete(key)
-	note, _, err := r.ingestNoteWithCreated(body, "", depth, ephemeral)
+	// fetch して id が確定したので、鍵にも id を紐づけ直す。別名 URL では
+	// 取得 URI と食い違うので、両方から既存行を引けるようにしておく。
+	resolved := chainAfterProbe(chain, uri, allowCrossHost, ephemeral, idProbe.ID)
+	note, _, err := r.ingestNoteWithCreated(body, "", depth, ephemeral, resolved)
 	return note, err
 }
 
@@ -2134,18 +2222,18 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 // 既知 note (local ID / 取り込み済み URI) を fetch 無しで優先的に引く。未知 URI は
 // ResolveNote で fetch するが、その URI が現在 ingest 中 (quote cycle) の場合は
 // fetch を skip して無限再帰を防ぐ (#1527)。
-func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string, depth int, ephemeral bool) *model.Note {
+func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string, depth int, ephemeral bool, chain *resolveChain) *model.Note {
 	if r.noteRepo == nil {
 		return nil
 	}
 	// upstream ApNoteService は `[_misskey_quote, quoteUrl]` を順に解決し、最初に
 	// 成功した note を採用する (`.at(0)`)。通常は両者同値だが、片方しか解決できない
 	// ケースで取りこぼさないよう順に試す。
-	if n := r.resolveQuoteURI(misskeyQuote, depth, ephemeral); n != nil {
+	if n := r.resolveQuoteURI(misskeyQuote, depth, ephemeral, chain); n != nil {
 		return n
 	}
 	if quoteURL != misskeyQuote {
-		if n := r.resolveQuoteURI(quoteURL, depth, ephemeral); n != nil {
+		if n := r.resolveQuoteURI(quoteURL, depth, ephemeral, chain); n != nil {
 			return n
 		}
 	}
@@ -2155,7 +2243,7 @@ func (r *Resolver) resolveQuoteTarget(misskeyQuote, quoteURL string, depth int, 
 // resolveQuoteURI resolves a single quote URI to a local note row. 既知 note
 // (local ID / 取り込み済み URI) は fetch 無しで引き、未知 URI は cycle でなければ
 // ResolveNote で fetch する。空 URI / 解決不能は nil。
-func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool) *model.Note {
+func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool, chain *resolveChain) *model.Note {
 	if uri == "" {
 		return nil
 	}
@@ -2177,17 +2265,14 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool) *model
 			return n
 		}
 	}
-	// 3. 未知 URI: cycle でなければ fetch して取り込む (本家同様)。in-flight URI
-	// (ancestor chain) は already-resolved として skip し quote cycle を防ぐ
-	// (#1527、本家 0dc86cf6 guard 相当)。depth+1 で再帰上限も効かせる。
-	if _, inflight := r.ingesting.Load(uri); inflight {
-		return nil
-	}
-	// ingesting は document id 側の鍵なので、別名 URL では上を素通りする。
-	// singleflight の鍵でも見る (#2684 review HIGH-1)。
-	if docID, inflight := r.noteResolveInFlight(uri, false, ephemeral); inflight {
+	// 3. 未知 URI: cycle でなければ fetch して取り込む (本家同様)。**自分の
+	// 祖先が既に扱っている URI** は already-resolved として skip し quote cycle を
+	// 防ぐ (#1527、本家 0dc86cf6 guard 相当)。depth+1 で再帰上限も効かせる。
+	//
+	// 判定はチェーンに閉じているので、無関係な goroutine が同じ引用先を
+	// 取り込んでいる最中は**待って引ける** (#2685)。
+	if docID, inflight := r.noteInFlightInChain(chain, uri, false, ephemeral); inflight {
 		// 別名 URL で既に取り込み済みなら、その行で引用を繋げる。
-		// (2. の FindByURI は取得 URI でしか引いていない)
 		if n := r.noteByAnyURI(uri, docID); n != nil {
 			return n
 		}
@@ -2201,7 +2286,7 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool) *model
 	}
 	// quote 解決は federation-loop 扱いで Strict (request host binding 有効)。
 	// ephemeral は親から引き継ぐ (引用先だけ DB に落ちるのを防ぐ)。
-	if n, err := r.resolveNoteDepth(uri, depth+1, false, ephemeral); err == nil {
+	if n, err := r.resolveNoteDepth(uri, depth+1, false, ephemeral, chain); err == nil {
 		return n
 	}
 	return nil
@@ -2216,7 +2301,7 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool) *model
 func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
 	// id host == attributedTo host 検証は IngestNoteWithCreated 側で常に行う。
-	note, _, err := r.ingestNoteWithCreated(body, "", 0, false)
+	note, _, err := r.ingestNoteWithCreated(body, "", 0, false, nil)
 	return note, err
 }
 
@@ -2244,12 +2329,12 @@ func (r *Resolver) IngestNote(body []byte) (*model.Note, error) {
 // validateNote が actor 未指定時に attribution==actor を skip するのと同じ)。
 func (r *Resolver) IngestNoteWithCreated(body []byte, deliveringActorURI string) (*model.Note, bool, error) {
 	// inbound delivery 起点は quote chain depth 0。
-	return r.ingestNoteWithCreated(body, deliveringActorURI, 0, false)
+	return r.ingestNoteWithCreated(body, deliveringActorURI, 0, false, nil)
 }
 
 // ingestNoteWithCreated is the body of IngestNoteWithCreated carrying the
 // current note/quote-chain recursion depth (#1828)。
-func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string, depth int, ephemeral bool) (*model.Note, bool, error) {
+func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string, depth int, ephemeral bool, chain *resolveChain) (*model.Note, bool, error) {
 	if r.noteRepo == nil {
 		return nil, false, ErrInvalidNote
 	}
@@ -2291,11 +2376,11 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		slog.Warn("federation: note attribution does not match delivering actor", "attributedTo", apNote.AttributedTo, "actor", deliveringActorURI)
 		return nil, false, ErrNoteAttributionMismatch
 	}
-	// quote cycle 遮断用に、この note URI を ingest 中として mark する (#1527)。
-	// quote 解決が fetch するネストした ingest から、この URI への再 fetch を
-	// 検出できる。
-	r.ingesting.Store(apNote.ID, struct{}{})
-	defer r.ingesting.Delete(apNote.ID)
+	// quote cycle 遮断と featured の自己参照遮断は resolveChain が担う (#2685)。
+	// ここで chain へ足しておくと、**inbox 直送 (resolveNoteOnce を通らない経路)
+	// でも立つ** (#2686)。resolveNoteOnce から来た場合は既に入っているので
+	// 二重には増えない。
+	chain = chain.with(apNote.ID, apNote.ID)
 	// federation policy gate: 直接 handleCreate から受け取った body や、
 	// 中継経由で attributedTo が allowlist 外の host を指している payload を
 	// DB 永続化させない。既存 row hit (上の FindByURI) は素通しで legacy
@@ -2303,7 +2388,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if !r.hostAllowedForURI(apNote.AttributedTo.String()) {
 		return nil, false, ErrHostNotAllowed
 	}
-	actor, err := r.resolveNoteAuthor(apNote.AttributedTo.String(), ephemeral, depth)
+	actor, err := r.resolveNoteAuthor(apNote.AttributedTo.String(), ephemeral, depth, chain)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2507,7 +2592,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// 「本文だけ」で引用元が表示されない。解決失敗は best-effort で quote 無し扱い。
 	// AP vote の早期 return より後 (= 実際に note を作る経路) で解決し、vote object に
 	// quote field が乗っていても無駄な fetch をしない。renoteCount の増分は Create 後。
-	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote.String(), apNote.QuoteURL.String(), depth, ephemeral)
+	quoted := r.resolveQuoteTarget(apNote.MisskeyQuote.String(), apNote.QuoteURL.String(), depth, ephemeral, chain)
 	// 引用先が followers / specified(DM) の場合は紐付けない。本家
 	// NoteCreateService.ts:346-352 は他人の followers note と全 specified note を
 	// renote 対象から reject するため、連合の正規 quote がこれらを指すことはない。
@@ -3404,8 +3489,7 @@ func pickID(preassigned string, gen id.Generator, now time.Time) string {
 
 // actorGroupKey extends crossHostKey with the skip-featured flag.
 //
-// **キーに混ぜないと再帰の抑止が破れる。** singleflight は同じキーの呼び出しを
-// 1 つに畳むので、featured を引く呼び出しと引かない呼び出しが合流すると、
+// **キーに混ぜないと再帰の抑止が破れる。** 同じキーの呼び出しは 1 つに畳まれるので、featured を引く呼び出しと引かない呼び出しが合流すると、
 // ノート解決の内側から featured の取り込みが走りうる (#2552)。
 func actorGroupKey(uri string, allowCrossHost, skipFeatured bool) string {
 	if skipFeatured {
