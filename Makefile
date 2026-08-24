@@ -2,7 +2,7 @@
 	update docker-update uds-update \
 	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint plugin-doc-check migrate-up migrate-down migrate-create \
-	plugins plugins-all plugin-dev \
+	plugins plugins-all plugin-dev plugin-vet \
 	federation-misskey-build federation-misskey-up federation-misskey-test \
 	federation-misskey-e2e \
 	federation-misskey-down federation-misskey-logs \
@@ -183,6 +183,28 @@ test: ## 全テストを実行
 
 plugin-doc-check: ## authoring.md の Go スニペットがコンパイルできるか検査
 	./tests/plugin-doc/check-snippets.sh
+
+plugin-vet: ## 同梱プラグインを go vet + 既定無効を検査 (CI の build job と同じ)
+	@set -e; \
+	mods=$$(git ls-files 'plugins/*/go.mod'); \
+	if [ -z "$$mods" ]; then echo "同梱プラグインが見つかりません (列挙が壊れています)"; exit 1; fi; \
+	for mod in $$mods; do \
+		dir=$$(dirname "$$mod"); \
+		echo "==> $$dir"; \
+		(cd "$$dir" && GOWORK=off go vet ./...); \
+	done; \
+	markers=$$(git ls-files 'plugins/*/mk-plugin.yml'); \
+	if [ -z "$$markers" ]; then echo "同梱プラグインの mk-plugin.yml が見つかりません (列挙が壊れています)"; exit 1; fi; \
+	fail=0; \
+	for f in $$markers; do \
+		if grep -qE '^disabled:[[:space:]]*true[[:space:]]*$$' "$$f"; then echo "ok   $$f"; \
+		else echo "FAIL $$f — 'disabled: true' の行 (完全一致) がありません"; fail=1; fi; \
+	done; \
+	[ "$$fail" -eq 0 ]; \
+	GOWORK=off go run ./tools/pluginbuild; \
+	if [ -e cmd/misskey/plugins_generated.go ]; then \
+		echo "FAIL 既定のビルドに同梱プラグインが入っています"; exit 1; \
+	fi
 
 plugin-test: ## 同梱プラグインのテストを実行 (PostgreSQL が要る)
 	@set -e; \

@@ -16,6 +16,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Build
+        run: go build ./...
+
       # 同梱サンプルは **既定無効** (#2495)。clone しただけの運営者のバイナリ・
       # フロント・DB に勝手に入らないようにするため。有効なままだと、設定して
       # いなくても plugin_wiring.go が Routes / Jobs の登録より先に専用 schema を
@@ -26,7 +29,12 @@ jobs:
       # 意図的に外し、実測が終わって #2585 が close されても戻っていなかった
       # (#2701)。恒久的に有効にする方針にするならこの step を変える。手元で
       # 動かすだけなら `make plugin-dev PLUGIN=plugins/<name>` を使う
-      # (tracked ファイルを触らずに済む。docs/plugins/development.md)。
+      # (`mk-plugin.yml` を触らずに済む。docs/plugins/development.md)。
+      #
+      # **1 段目は git と grep だけだが、2 段目は `plugin/` のコンパイルが要る**
+      # (pluginbuild が import する)。`Build` の後ろに置いてあるのはそのため —
+      # 前に置くと、`plugin/` の素のコンパイルエラーがこの step 名で落ちて
+      # 原因が読めなくなる。手元の再現は `make plugin-vet`。
       - name: Check bundled plugins are disabled by default
         run: |
           files=$(git ls-files 'plugins/*/mk-plugin.yml')
@@ -75,9 +83,6 @@ jobs:
             echo "FAIL pluginbuild が失敗しました (原因は上の出力)"
             exit "$rc"
           fi
-
-      - name: Build
-        run: go build ./...
 
       # 同梱サンプルは別 module なので `./...` に含まれない。plugin/ の公開面を
       # 壊したときにここで落ちる — **同梱している理由がこれ** (別リポジトリだと
@@ -420,8 +425,8 @@ jobs:
         run: make plugins-all
 
       # 生成した glue (plugins_generated.go) を含む統合バイナリのコンパイルも
-      # 見る。build job の standalone build (plugins/status 単体) では、Register
-      # の配線や workspace の依存解決の崩れは検出できない。サンプルが既定無効に
+      # 見る。build job の `Vet bundled plugins` は各プラグインを単体で vet する
+      # だけなので、Register の配線や workspace の依存解決の崩れは検出できない。サンプルが既定無効に
       # なったことで `make build` を経由する他の workflow からもこの経路が
       # 消えたため、ここで担保する (#2495)。生成された go.work を使うので
       # GOWORK は無効化しない。

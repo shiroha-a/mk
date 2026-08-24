@@ -17,7 +17,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 
 | check | workflow | 見ているもの | 手元での再現 |
 |---|---|---|---|
-| `build` | CI | 全パッケージがコンパイルできるか + 同梱プラグインの `go vet` + 同梱サンプルが既定無効か | `go build ./...` / `(cd plugins/status && GOWORK=off go vet ./...)` / `make plugins && ! test -e cmd/misskey/plugins_generated.go` |
+| `build` | CI | 全パッケージがコンパイルできるか + 同梱プラグインの `go vet` + 同梱サンプルが既定無効か | `go build ./...` / `make plugin-vet` |
 | `lint` | CI | `go vet` + `gofmt -s -d` の差分 + 重複 fixture ID | `make lint` / `make fmt` |
 | `test` | CI | 4-way shard の集約。どれか 1 つでも落ちれば赤 | `make test` |
 
