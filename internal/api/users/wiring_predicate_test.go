@@ -26,3 +26,17 @@ func TestHandler_HasRolePolicyProvider(t *testing.T) {
 type stubWiringPolicyProvider struct{}
 
 func (stubWiringPolicyProvider) GetUserPolicies(string) map[string]any { return nil }
+
+// #2708: 匿名 visitor への remote profile 露出 gate。**空文字は gate 無効**と
+// 同義なので、未設定を false として扱う。
+func TestHandler_HasUGCVisibility(t *testing.T) {
+	assert.False(t, (&Handler{}).HasUGCVisibility(), "未設定なら false")
+
+	h := &Handler{}
+	h.SetUGCVisibility("local")
+	assert.True(t, h.HasUGCVisibility(), "設定したら true")
+
+	h2 := &Handler{}
+	h2.SetUGCVisibility("")
+	assert.False(t, h2.HasUGCVisibility(), "空文字は gate 無効なので false")
+}

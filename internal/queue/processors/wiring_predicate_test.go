@@ -82,3 +82,18 @@ type stubProcHostBlock struct{}
 func (stubProcHostBlock) IsBlocked(string) bool    { return false }
 func (stubProcHostBlock) IsAllowed(string) bool    { return true }
 func (stubProcHostBlock) FederationDisabled() bool { return false }
+
+// #2708: dispatch 時の配送 gate。enqueue 時チェックを通り抜けたジョブ
+// (ブロック前に積まれた / retry-backoff 中) を弾く第 2 の関門なので、
+// deliver.hostBlockChecker では代替できない。
+func TestDeliverProcessor_HasDeliveryGate(t *testing.T) {
+	assert.False(t, (&DeliverProcessor{}).HasDeliveryGate(), "未配線なら false")
+
+	p := &DeliverProcessor{}
+	p.SetDeliveryGate(stubWiringDeliveryGate{})
+	assert.True(t, p.HasDeliveryGate(), "配線したら true")
+}
+
+type stubWiringDeliveryGate struct{}
+
+func (stubWiringDeliveryGate) ShouldSkipDelivery(string) bool { return false }

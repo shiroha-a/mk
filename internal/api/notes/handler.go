@@ -1141,3 +1141,36 @@ func (h *Handler) PackForEmbed(ctx context.Context, n *model.Note) entity.NoteEn
 // `noteDraftLimit` (`handler_drafts.go`) も同時に素通しになる。**1 つの nil で
 // 4 箇所**。起動時検査に使う (#2683)。
 func (h *Handler) HasPolicyProvider() bool { return h.policyProvider != nil }
+
+// HasDriveFileRepo / HasMetaRepo / HasBlockingRepo / HasMutingRepo /
+// HasChannelMutingRepo / HasUserFollowingRepo / HasUGCVisibility report whether
+// the visibility gates were wired (#2708).
+//
+// 未配線時にそれぞれ: 下書きの添付で他人の drive ファイルを指定できる (IDOR)、
+// blocked-host の note が post-fetch 経路で漏れる、ブロック / ミュート /
+// チャンネルミュートの post-fetch filter が丸ごと skip される
+// (`applyMuteBlock` は `blockingRepo != nil` で全体を gate している)、
+// followers 限定投稿への返信が非フォロワーの HTL / STL に出る、匿名 visitor への
+// 露出を `ugcVisibilityForVisitor` で gate できない。
+func (h *Handler) HasDriveFileRepo() bool { return h.driveFileRepo != nil }
+
+// HasMetaRepo reports whether the meta repository was wired.
+func (h *Handler) HasMetaRepo() bool { return h.metaRepo != nil }
+
+// HasBlockingRepo reports whether the blocking repository was wired.
+func (h *Handler) HasBlockingRepo() bool { return h.blockingRepo != nil }
+
+// HasMutingRepo reports whether the muting repository was wired.
+func (h *Handler) HasMutingRepo() bool { return h.mutingRepo != nil }
+
+// HasChannelMutingRepo reports whether the channel muting repository was wired.
+func (h *Handler) HasChannelMutingRepo() bool { return h.channelMutingRepo != nil }
+
+// HasUserFollowingRepo reports whether the following repository was wired.
+func (h *Handler) HasUserFollowingRepo() bool { return h.userFollowingRepo != nil }
+
+// HasUGCVisibility reports whether the visitor content visibility policy was set.
+//
+// **空文字は gate 無効**と同義 (`"none"` でも `"local"` でもないので素通し)。
+// 列は `NOT NULL DEFAULT 'local'` なので、空になるのは配線が漏れたときだけ。
+func (h *Handler) HasUGCVisibility() bool { return h.ugcVisibility != "" }

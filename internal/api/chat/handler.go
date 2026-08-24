@@ -1663,3 +1663,9 @@ func (h *Handler) UnreadCount(c echo.Context) error {
 	count, _ := h.repo.CountUnread(user.ID)
 	return c.JSON(http.StatusOK, map[string]any{"count": count})
 }
+
+// HasDriveFileRepo reports whether the drive file repository was wired.
+//
+// 未配線だと NO_SUCH_FILE の所有者チェックが素通しになり、他人の drive ファイルを
+// チャットに添付できる (IDOR)。起動時検査に使う (#2708)。
+func (h *Handler) HasDriveFileRepo() bool { return h.fileRepo != nil }

@@ -1653,8 +1653,13 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 対しては GetUserPolicies("") が base policies を返すので、admin が
 	// meta.policies で全 user に対して TL を無効化できる。
 	notesHandler.SetPolicyProvider(roleService)
+	// **無条件に配線する。** 以前は Fetch 成功時だけ設定していたので、起動時に
+	// DB が一時的に応答しないと空文字のままになり、`ugcVisibilityForVisitor` の
+	// gate が**丸ごと消えていた** (空文字は "none" でも "local" でもないので
+	// 素通し)。列は NOT NULL DEFAULT 'local' なので、失敗時も制限側の既定へ
+	// 倒す (#2708)。
+	notesHandler.SetUGCVisibility(metaUGCVisibility(metaRepo))
 	if m, err := metaRepo.Fetch(); err == nil {
-		notesHandler.SetUGCVisibility(m.UgcVisibilityForVisitor)
 		if m.DeeplAuthKey != nil && *m.DeeplAuthKey != "" {
 			notesHandler.SetTranslator(coretranslate.NewDeepL(*m.DeeplAuthKey, m.DeeplIsPro, s.outboundClient(10*time.Second)))
 		}
@@ -1734,9 +1739,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// users/notes (withChannelNotes) の post-fetch filter でチャンネルミュートを効かせる。
 	usersHandler.SetChannelMutingRepo(channelMutingRepo)
 	// #2106 S3: 匿名 visitor への remote profile 露出を ugcVisibilityForVisitor で gate。
-	if ugcMeta, err := metaRepo.Fetch(); err == nil {
-		usersHandler.SetUGCVisibility(ugcMeta.UgcVisibilityForVisitor)
-	}
+	// notes 側と同じ理由で無条件に配線する (#2708)。
+	usersHandler.SetUGCVisibility(metaUGCVisibility(metaRepo))
 	usersHandler.SetFeaturedRanking(featuredService) // #1687: users/featured-notes ランキング
 	usersHandler.SetPiningRepo(piningRepo)
 	usersHandler.SetFollowingRepo(followingRepo)
@@ -3970,6 +3974,49 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"userListLimit と userEachUserListsLimit が両方とも効かない"},
 		{"users.rolePolicyProvider", usersHandler.HasRolePolicyProvider(),
 			"users/lists/create-from-public の userListLimit / userEachUserListsLimit が効かない"},
+
+		// ここから #2708。#2683 で「既存 entry と基準上区別できない」まで取り込み、
+		// 残していた同クラスの依存。
+		{"notes.driveFileRepo", notesHandler.HasDriveFileRepo(),
+			"下書きの添付で他人の drive ファイルを指定できる (IDOR)"},
+		{"chat.driveFileRepo", chatHandler.HasDriveFileRepo(),
+			"他人の drive ファイルをチャットに添付できる (IDOR)"},
+		{"ap.hostBlockChecker", apHandler.HasHostBlockChecker(),
+			"federation: none でも Person を AP serve し、ap/show の FEDERATION_NOT_ALLOWED gate も skip される"},
+		{"deliverProcessor.deliveryGate", deliverProcessor.HasDeliveryGate(),
+			"ブロック前に積まれた / retry 中の配送ジョブを dispatch 時に弾けない (enqueue 時チェックの第 2 の関門)"},
+		{"notes.metaRepo", notesHandler.HasMetaRepo(),
+			"blocked-host の note が post-fetch 経路で漏れる"},
+		{"antennas.metaRepo", antennasHandler.HasMetaRepo(),
+			"blocked-host の note が antenna で漏れる"},
+		{"clips.metaRepo", clipsHandler.HasMetaRepo(),
+			"blocked-host の note が clip で漏れる"},
+		{"reaction.mediaSilenceChecker", reactionService.HasMediaSilenceChecker(),
+			"media-silenced な host からのカスタム絵文字リアクションがそのまま出る"},
+		{"resolver.silencedHostChecker", federationResolver.HasSilencedHostChecker(),
+			"silenced instance の remote public note が home へ降格されず public timeline に出る"},
+		{"following.blockingChecker", followingService.HasBlockingChecker(),
+			"ブロックしている相手をフォローできる"},
+		{"reaction.blockingChecker", reactionService.HasBlockingChecker(),
+			"ブロックしている相手の投稿にリアクションできる"},
+		{"poll.blockingChecker", pollService.HasBlockingChecker(),
+			"ブロックしている相手のアンケートに投票できる"},
+		{"chat.blockingRepo", chatService.HasBlockingRepo(),
+			"ブロックしている相手へ DM を送れる"},
+		{"notes.blockingRepo", notesHandler.HasBlockingRepo(),
+			"ブロック / ミュート / チャンネルミュートの post-fetch filter が丸ごと skip される"},
+		{"notes.mutingRepo", notesHandler.HasMutingRepo(),
+			"post-fetch filter のミュート集合が空になる"},
+		{"notes.channelMutingRepo", notesHandler.HasChannelMutingRepo(),
+			"チャンネルミュートが post-fetch 側で一切効かない"},
+		{"notes.userFollowingRepo", notesHandler.HasUserFollowingRepo(),
+			"followers 限定投稿への返信が非フォロワーの HTL / STL に出る"},
+		{"i.roleProvider", iHandler.HasRoleProvider(),
+			"alwaysMarkNsfw の自己解除防止・wordMuteLimit・canUpdateBioMedia が同時に外れる"},
+		{"notes.ugcVisibility", notesHandler.HasUGCVisibility(),
+			"匿名 visitor への note 露出を ugcVisibilityForVisitor で gate できない"},
+		{"users.ugcVisibility", usersHandler.HasUGCVisibility(),
+			"匿名 visitor への remote profile 露出を ugcVisibilityForVisitor で gate できない"},
 	})
 }
 

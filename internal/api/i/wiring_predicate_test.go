@@ -6,6 +6,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"github.com/shiroha-a/mk/internal/model"
+
 	"github.com/shiroha-a/mk/internal/testutil"
 )
 
@@ -49,3 +51,24 @@ type stubReplayGuard struct{}
 func (stubReplayGuard) MarkUsed(context.Context, string, string) (bool, error) {
 	return true, nil
 }
+
+// #2708: 1 つの nil で 3 つの gate が外れる (alwaysMarkNsfw の自己解除防止 /
+// wordMuteLimit / canUpdateBioMedia)。
+func TestHandler_HasRoleProvider(t *testing.T) {
+	assert.False(t, (&Handler{}).HasRoleProvider(), "未配線なら false")
+
+	h := &Handler{}
+	h.SetRoleProvider(stubWiringRoleProvider{})
+	assert.True(t, h.HasRoleProvider(), "配線したら true")
+}
+
+type stubWiringRoleProvider struct{}
+
+func (stubWiringRoleProvider) IsAdministrator(string) bool { return false }
+func (stubWiringRoleProvider) IsModerator(string) bool     { return false }
+func (stubWiringRoleProvider) IsSilenced(string) bool      { return false }
+func (stubWiringRoleProvider) GetUserRoles(string) ([]*model.Role, error) {
+	return nil, nil
+}
+func (stubWiringRoleProvider) GetUserPolicies(string) map[string]any { return nil }
+func (stubWiringRoleProvider) HasRolePolicy(string, string) bool     { return true }

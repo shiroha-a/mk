@@ -578,3 +578,9 @@ func (h *Handler) materializeIfMissing(noteID string, lookupErr error) bool {
 func (h *Handler) PackForEmbed(cl *model.Clip) map[string]any {
 	return h.clipToMap(cl, nil)
 }
+
+// HasMetaRepo reports whether the meta repository was wired.
+//
+// 未配線だと blocked-host の note が post-fetch 経路で漏れる。起動時検査に
+// 使う (#2708)。
+func (h *Handler) HasMetaRepo() bool { return h.metaRepo != nil }

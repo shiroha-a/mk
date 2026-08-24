@@ -1083,3 +1083,10 @@ func (h *Handler) renoteTargetURI(targetID string) string {
 	}
 	return ""
 }
+
+// HasHostBlockChecker reports whether the federation gate was wired.
+//
+// 未配線だと `FederationDisabled` が常に false になり `federation: none` でも
+// Person を AP serve するうえ、`ap/show` の FEDERATION_NOT_ALLOWED gate ごと
+// skip される。起動時検査に使う (#2708)。
+func (h *Handler) HasHostBlockChecker() bool { return h.hostBlocker != nil }

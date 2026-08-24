@@ -36,3 +36,18 @@ type stubWiringHostBlock struct{}
 func (stubWiringHostBlock) IsBlocked(string) bool    { return false }
 func (stubWiringHostBlock) IsAllowed(string) bool    { return true }
 func (stubWiringHostBlock) FederationDisabled() bool { return false }
+
+// #2708: silenced instance の remote public note を home へ降格する gate。
+// hostBlockChecker とは独立に消せるので別に固定する。
+func TestResolver_HasSilencedHostChecker(t *testing.T) {
+	assert.False(t, (&Resolver{}).HasSilencedHostChecker(), "未配線なら false")
+
+	r := &Resolver{}
+	r.SetSilencedHostChecker(stubWiringSilencedHost{})
+	assert.True(t, r.HasSilencedHostChecker(), "配線したら true")
+	assert.False(t, r.HasHostBlockChecker(), "他の述語は満たされないこと")
+}
+
+type stubWiringSilencedHost struct{}
+
+func (stubWiringSilencedHost) IsSilenced(string) bool { return false }

@@ -507,3 +507,13 @@ func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 boo
 	}
 	return resp, false, nil
 }
+
+// HasDeliveryGate reports whether the dispatch-time delivery gate was wired.
+//
+// **enqueue 時のチェックを通り抜けたジョブを弾く第 2 の関門**なので、
+// `deliver.hostBlockChecker` では代替できない。ブロック前に積まれたジョブや
+// retry-backoff 中のジョブが該当する (#1404)。起動時検査に使う (#2708)。
+//
+// `SetSuspendedChecker` は operator が `deliverSuspendedSoftware` を設定した
+// ときだけ配線されるので対象外。
+func (p *DeliverProcessor) HasDeliveryGate() bool { return p.deliveryGate != nil }

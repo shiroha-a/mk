@@ -254,3 +254,9 @@ func (s *Service) materializeIfMissing(noteID string, lookupErr error) bool {
 	_, err := s.materializer.EnsureNote(context.Background(), noteID)
 	return err == nil
 }
+
+// HasBlockingChecker reports whether the blocking checker was wired.
+//
+// 未配線だとブロックしている相手のアンケートに投票できる。起動時検査に
+// 使う (#2708)。
+func (s *Service) HasBlockingChecker() bool { return s.blockingChecker != nil }

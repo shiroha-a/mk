@@ -707,3 +707,8 @@ func hasMoved(userRepo repository.UserRepository, userID string) bool {
 	}
 	return u.MovedToURI != nil && *u.MovedToURI != ""
 }
+
+// HasBlockingChecker reports whether the blocking checker was wired.
+//
+// 未配線だとブロックしている相手をフォローできる。起動時検査に使う (#2708)。
+func (s *Service) HasBlockingChecker() bool { return s.blockingChecker != nil }

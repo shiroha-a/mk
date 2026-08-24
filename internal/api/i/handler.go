@@ -2185,3 +2185,10 @@ func (h *Handler) HasAuthInvalidator() bool { return h.authInvalidator != nil }
 // 起きていない。しかも失効漏れは cache TTL の 30 秒ではなく**恒久**
 // (#2682 review H-1)。
 func (h *Handler) HasAccessTokenRepo() bool { return h.accessTokenRepo != nil }
+
+// HasRoleProvider reports whether the role provider was wired.
+//
+// **1 つの nil で 3 つの gate が外れる**: alwaysMarkNsfw の自己解除防止
+// (`i/update`)、`wordMuteLimit`、`canUpdateBioMedia` (未配線を明示的に許可側へ
+// OR している)。起動時検査に使う (#2708)。
+func (h *Handler) HasRoleProvider() bool { return h.roleProvider != nil }

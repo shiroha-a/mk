@@ -1347,3 +1347,8 @@ func packUserStream(u *model.User) map[string]any {
 		"isCat":          u.IsCat,
 	}
 }
+
+// HasBlockingRepo reports whether the blocking repository was wired.
+//
+// 未配線だとブロックしている相手へ DM を送れる。起動時検査に使う (#2708)。
+func (s *Service) HasBlockingRepo() bool { return s.blockingRepo != nil }

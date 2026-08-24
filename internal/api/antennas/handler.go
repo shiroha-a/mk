@@ -530,3 +530,9 @@ func jsonArrayOrEmpty(b []byte) any {
 	}
 	return json.RawMessage(b)
 }
+
+// HasMetaRepo reports whether the meta repository was wired.
+//
+// 未配線だと blocked-host の note が post-fetch 経路で漏れる。起動時検査に
+// 使う (#2708)。
+func (h *Handler) HasMetaRepo() bool { return h.metaRepo != nil }

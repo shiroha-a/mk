@@ -3818,3 +3818,9 @@ func (r *Resolver) SetMoveProcessor(p RemoteMoveProcessor) { r.moveProcessor = p
 // 未配線だと federation 設定 (none / specified / blockedHosts) を無視して
 // リモートを解決する。起動時検査に使う (#2683)。
 func (r *Resolver) HasHostBlockChecker() bool { return r.hostBlocker != nil }
+
+// HasSilencedHostChecker reports whether the silenced-host checker was wired.
+//
+// 未配線だと silenced instance の remote public note が home へ降格されず、
+// public timeline と連合 broadcast に出る。起動時検査に使う (#2708)。
+func (r *Resolver) HasSilencedHostChecker() bool { return r.silencedChecker != nil }

@@ -1448,3 +1448,10 @@ func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.U
 // 未配線だと `users/lists/create-from-public` の `userListLimit` /
 // `userEachUserListsLimit` が効かない。起動時検査に使う (#2683)。
 func (h *Handler) HasRolePolicyProvider() bool { return h.rolePolicyProvider != nil }
+
+// HasUGCVisibility reports whether the visitor content visibility policy was set.
+//
+// 未配線だと匿名 visitor への remote profile 露出を
+// `ugcVisibilityForVisitor` で gate できない。**空文字は gate 無効**と同義
+// (`"none"` でも `"local"` でもないので素通し)。起動時検査に使う (#2708)。
+func (h *Handler) HasUGCVisibility() bool { return h.ugcVisibility != "" }

@@ -29,3 +29,34 @@ func TestService_HasUserRolesProvider(t *testing.T) {
 type stubWiringUserRoles struct{}
 
 func (stubWiringUserRoles) GetUserRoles(string) ([]*model.Role, error) { return nil, nil }
+
+// #2708: reaction の gate は 3 つ (userRoles / mediaSilence / blockingChecker)。
+// **1 つずつ配線して独立性を固定する。**
+func TestService_WiringPredicates2708(t *testing.T) {
+	empty := &Service{}
+	assert.False(t, empty.HasMediaSilenceChecker(), "未配線なら false")
+	assert.False(t, empty.HasBlockingChecker(), "未配線なら false")
+
+	t.Run("mediaSilence だけ配線", func(t *testing.T) {
+		s := &Service{}
+		s.SetMediaSilenceChecker(stubWiringMediaSilence{})
+		assert.True(t, s.HasMediaSilenceChecker(), "配線したら true")
+		assert.False(t, s.HasBlockingChecker(), "他の述語は満たされないこと")
+		assert.False(t, s.HasUserRolesProvider(), "他の述語は満たされないこと")
+	})
+	t.Run("blockingChecker だけ配線", func(t *testing.T) {
+		s := &Service{}
+		s.SetBlockingChecker(stubWiringReactionBlocking{})
+		assert.True(t, s.HasBlockingChecker(), "配線したら true")
+		assert.False(t, s.HasMediaSilenceChecker(), "他の述語は満たされないこと")
+		assert.False(t, s.HasUserRolesProvider(), "他の述語は満たされないこと")
+	})
+}
+
+type stubWiringMediaSilence struct{}
+
+func (stubWiringMediaSilence) IsMediaSilenced(string) bool { return false }
+
+type stubWiringReactionBlocking struct{}
+
+func (stubWiringReactionBlocking) IsBlocked(string, string) (bool, error) { return false, nil }

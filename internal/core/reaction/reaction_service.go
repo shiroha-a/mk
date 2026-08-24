@@ -766,3 +766,14 @@ func isPureRenote(n *model.Note) bool {
 // 未配線だとロール限定カスタム絵文字の gate が素通しになり、誰でも使える。
 // 起動時検査に使う (#2683)。
 func (s *Service) HasUserRolesProvider() bool { return s.userRoles != nil }
+
+// HasMediaSilenceChecker / HasBlockingChecker report whether the reaction gates
+// were wired (#2708).
+//
+// 未配線時にそれぞれ: media-silenced な host からのカスタム絵文字リアクションが
+// そのまま出る (フォールバックの ❤ にならない)、ブロックしている相手の投稿にも
+// リアクションできる。
+func (s *Service) HasMediaSilenceChecker() bool { return s.mediaSilence != nil }
+
+// HasBlockingChecker reports whether the blocking checker was wired.
+func (s *Service) HasBlockingChecker() bool { return s.blockingChecker != nil }
