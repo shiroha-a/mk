@@ -17,6 +17,8 @@ import (
 
 	"log/slog"
 
+	"github.com/jackc/pgx/v5/pgconn"
+
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
@@ -3752,6 +3754,30 @@ func numberAsInt(v any) int {
 // driveFileRepo が未設定なら空 (model.StringArray{}) を返す (旧挙動)。userID は
 // リモート user の ID (note.UserID 相当)、host はリモート host (nil =
 // ローカル、attachment 文脈ではほぼ常に non-nil)。
+// drive_file の列の上限 (migration/000001_initial.up.sql)。
+const (
+	driveFileNameMaxRunes    = 256
+	driveFileCommentMaxRunes = 512
+)
+
+// truncateRunes clips s to at most max runes. byte 単位で切ると壊れた UTF-8 を
+// 書くので rune で数える (extractRemoteDescription と同じ方針)。
+func truncateRunes(s string, max int) string {
+	if runes := []rune(s); len(runes) > max {
+		return string(runes[:max])
+	}
+	return s
+}
+
+// isForeignKeyViolation reports whether err is a PostgreSQL foreign_key_violation.
+func isForeignKeyViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code == "23503"
+	}
+	return errors.Is(err, gorm.ErrForeignKeyViolated)
+}
+
 func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *string) model.StringArray {
 	if r.driveFileRepo == nil || len(docs) == 0 {
 		return model.StringArray{}
@@ -3768,13 +3794,17 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		if mediaType == "" {
 			mediaType = "application/octet-stream"
 		}
-		name := doc.Name
+		// **列の上限で切る。** Mastodon は `name` に**代替テキスト**を入れてくる
+		// ので、説明が長い添付は varchar(256) に入らず 22001 で落ち、**その添付が
+		// 丸ごと保存されない** (#2717)。rune 単位で切る — byte で切ると壊れた
+		// UTF-8 を書く。
+		name := truncateRunes(doc.Name, driveFileNameMaxRunes)
 		if name == "" {
 			name = "file" // NOT NULL カラムへのフォールバック
 		}
 		var comment *string
 		if doc.Name != "" {
-			cn := doc.Name
+			cn := truncateRunes(doc.Name, driveFileCommentMaxRunes)
 			comment = &cn
 		}
 		uri := doc.URL
@@ -3838,6 +3868,22 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 			f.Blurhash = &bh
 		}
 		if err := r.driveFileRepo.Create(f); err != nil {
+			// **著者が materialize されていない場合は owner 無しで作り直す。**
+			// リレー由来の投稿は著者の user 行を作らない (#2332) ので、
+			// `drive_file.userId` の FK に当たる。ここで諦めると**その添付が
+			// 表示されなくなる** — 添付は pack 時に DB から引くため、ephemeral
+			// note でも行が要る。`userId` は NULL 可 (`ON DELETE SET NULL`) で、
+			// 所有者不明の行はスキーマ上も想定済み。`userHost` は残すので
+			// instance 単位の purge は効く (#2717)。
+			if f.UserID != nil && isForeignKeyViolation(err) {
+				f.UserID = nil
+				retryErr := r.driveFileRepo.Create(f)
+				if retryErr == nil {
+					ids = append(ids, f.ID)
+					continue
+				}
+				err = retryErr
+			}
 			slog.Warn("upsertAttachments: create failed",
 				"url", doc.URL, "err", err)
 			continue
