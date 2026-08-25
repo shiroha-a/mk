@@ -316,6 +316,18 @@ func TestFollowingRepository_ListFollowers_ListFollowing(t *testing.T) {
 	followingsOfA, err := repo.ListFollowing(a.ID, 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, followingsOfA, 2)
+
+	// **offset 版に clamp を掛けないこと。** cursor 版と body を共有しているので、
+	// 共有側へ clamp を移すと fanout (200) / CSV export (500) / stream snapshot
+	// (200) が 100 に切り詰められ、いずれも `len(rows) < pageSize` でループを
+	// 抜ける形なので**静かに取りこぼす** (#2712 review round 2 MEDIUM-1)。
+	// limit=0 が判別子になる (clamp 無し = LIMIT 0 = 0 件 / clamp 有り = 既定 10)。
+	zero, err := repo.ListFollowers(b.ID, 0, 0)
+	require.NoError(t, err)
+	assert.Empty(t, zero, "offset 版は limit をそのまま渡す (LIMIT 0)")
+	zeroSent, err := repo.ListFollowing(a.ID, 0, 0)
+	require.NoError(t, err)
+	assert.Empty(t, zeroSent)
 }
 
 // ListFollowersWithCursor / ListFollowingWithCursor は sinceId / untilId を
@@ -324,16 +336,20 @@ func TestFollowingRepository_ListWithCursor(t *testing.T) {
 	repo := NewFollowingRepository(testDB)
 	target := insertTestUser(t, "u_cur_t", "curtarget")
 	defer cleanupUser(t, target.ID)
-	// **id をリテラルで書く。** CI の `Check duplicate test fixture IDs` は
-	// `insertTestUser(t, "` の grep なので、fmt.Sprintf で組むと検査から漏れる
-	// (#2712 review LOW-4)。
-	users := []struct{ id, name string }{
-		{"u_cur_0", "curuser0"}, {"u_cur_1", "curuser1"}, {"u_cur_2", "curuser2"},
-		{"u_cur_3", "curuser3"}, {"u_cur_4", "curuser4"},
+	// **呼び出し側に id をリテラルで書く。** CI の重複 fixture 検査は
+	// 挿入ヘルパの直後にダブルクォートが来る形しか grep しないので、変数や
+	// fmt.Sprintf を挟むと検査から漏れる。id を別スライスへ出すだけでは
+	// 足りない (#2712 review LOW-4 / round 2 MEDIUM-2)。
+	followers := []*model.User{
+		insertTestUser(t, "u_cur_0", "curuser0"),
+		insertTestUser(t, "u_cur_1", "curuser1"),
+		insertTestUser(t, "u_cur_2", "curuser2"),
+		insertTestUser(t, "u_cur_3", "curuser3"),
+		insertTestUser(t, "u_cur_4", "curuser4"),
 	}
 	ids := []string{"cur_1", "cur_2", "cur_3", "cur_4", "cur_5"}
 	for i, fid := range ids {
-		u := insertTestUser(t, users[i].id, users[i].name)
+		u := followers[i]
 		defer cleanupUser(t, u.ID)
 		// followers 側と following 側の両方を同じ id で作る。
 		insertFollowing(t, fid, u.ID, target.ID)
@@ -376,6 +392,7 @@ func TestFollowingRepository_ListWithCursor(t *testing.T) {
 	// makePaginationQuery の第 1 分岐、#2712 review LOW-5)。
 	both, err := repo.ListFollowersWithCursor(target.ID, "cur_1", "cur_5", 10, 0)
 	require.NoError(t, err)
+	require.Len(t, both, 3)
 	assert.Equal(t, []string{"cur_4", "cur_3", "cur_2"},
 		[]string{both[0].ID, both[1].ID, both[2].ID})
 

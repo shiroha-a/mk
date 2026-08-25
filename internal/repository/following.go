@@ -241,6 +241,10 @@ func (r *followingRepository) listRelationPage(cond, anchorID, sinceID, untilID 
 	// cursor 指定時は offset 無視 (本家 makePaginationQuery と同じ)。この package の
 	// 他 10 ファイル (clip / flash / page / gallery / announcement 等) と揃える。
 	// 併用を許すと同じ入力でここだけ結果が変わる (#2712 review MEDIUM-3)。
+	//
+	// **同 package に反例がある** — emoji.go の ListWithFilter / ListRemoteWithFilter
+	// は cursor 併用時も offset を掛ける。そちらは admin の絞り込み一覧で、
+	// upstream に対応する paramDef が無い (#2712 review round 2 LOW-4)。
 	if sinceID == "" && untilID == "" && offset > 0 {
 		q = q.Offset(offset)
 	}
