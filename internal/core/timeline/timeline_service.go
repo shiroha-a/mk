@@ -442,7 +442,9 @@ func missingIDs(ids []string, notes []*model.Note) []string {
 	for _, n := range notes {
 		found[n.ID] = struct{}{}
 	}
-	out := make([]string, 0, len(ids)-len(notes))
+	// cap は計算しない。len(notes) > len(ids) は現状到達しないが、cap が負だと
+	// panic するので、証明に依存しない形にしておく (#2718 review LOW-1)。
+	var out []string
 	for _, id := range ids {
 		if _, ok := found[id]; !ok {
 			out = append(out, id)
@@ -457,8 +459,15 @@ func (s *Service) pruneDangling(ctx context.Context, names []Name, dangling []st
 	if s.fanout == nil || len(names) == 0 || len(dangling) == 0 {
 		return
 	}
-	slog.InfoContext(ctx, "timeline: pruning unresolvable ids", "count", len(dangling))
-	s.fanout.RemoveMany(ctx, names, dangling)
+	// **リクエストの ctx を持ち込まない。** クライアントが切断すると ctx が
+	// キャンセルされ、pipeline が落ちて自己修復が空振りする。**症状が出るのは
+	// リロード時 = 前のリクエストを中断する操作**なので、直したい場面ほど
+	// 空振りしやすい (#2718 review MEDIUM-4)。
+	ctx = context.WithoutCancel(ctx)
+	slog.DebugContext(ctx, "timeline: pruning unresolvable ids", "count", len(dangling))
+	if err := s.fanout.RemoveMany(ctx, names, dangling); err != nil {
+		slog.WarnContext(ctx, "timeline: pruning unresolvable ids failed", "err", err)
+	}
 }
 
 // mergeIDs flattens multiple ID slices, deduplicates, sorts id desc and caps.

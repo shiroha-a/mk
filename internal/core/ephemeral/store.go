@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -202,10 +203,25 @@ func (s *Store) getNotesShallow(ctx context.Context, ids []string) ([]*model.Not
 	for _, cmd := range cmds {
 		raw, err := cmd.Bytes()
 		if err != nil {
-			continue
+			// **届かない防御。** 上の `pipe.Exec` が redis.Nil 以外の error を
+			// そのまま返して early return するので、ここへ来る error は実質
+			// redis.Nil だけ (WRONGTYPE を混ぜて実測。Exec が返して到達しない)。
+			//
+			// それでも分岐を残すのは、呼び出し側 (timeline) が**解決できない ID を
+			// list から取り除く**ようになったため。一時障害を「消えた」と扱うと
+			// 生きている note の ID を消してしまう。Exec の扱いが変わったときに
+			// 破壊側へ倒れないよう、ここでも「無い」を redis.Nil に限る
+			// (#2718 review LOW-3)。
+			if err == redis.Nil {
+				continue
+			}
+			return nil, err
 		}
 		var n model.Note
 		if err := json.Unmarshal(raw, &n); err != nil {
+			// payload が壊れている。materialize 経路でも使えないので「無い」
+			// 扱いでよいが、消える前に気付けるようログには残す。
+			slog.WarnContext(ctx, "ephemeral: dropping unreadable note payload", "err", err)
 			continue
 		}
 		authors[n.UserID] = nil

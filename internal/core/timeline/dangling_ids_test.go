@@ -28,6 +28,19 @@ func TestResolve_ReportsDanglingIDs(t *testing.T) {
 		assert.Equal(t, []string{"a"}, dangling)
 	})
 
+	// **本番相当の分岐。** router は必ず SetEphemeralLookup するので、TTL が全件
+	// 切れると Store.GetNotes は空を返す。ここに assert が無いと、PR が直したと
+	// 主張している状況そのものが未検証になる (#2718 review MEDIUM-1)。
+	t.Run("ephemeral wired but everything expired", func(t *testing.T) {
+		svc, _ := newMergeService(t, []string{"b"})
+		svc.SetEphemeralLookup(&stubEphemeral{notes: map[string]*model.Note{}})
+
+		notes, dangling, err := svc.resolve(context.Background(), []string{"c", "b", "a"})
+		require.NoError(t, err)
+		assert.Len(t, notes, 1)
+		assert.Equal(t, []string{"c", "a"}, dangling)
+	})
+
 	t.Run("no ephemeral store: a DB miss is dangling", func(t *testing.T) {
 		svc, _ := newMergeService(t, []string{"b"})
 
@@ -190,4 +203,130 @@ func TestRemoveMany_DropsEveryOccurrence(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, got, dup, "重複した ID が残っている")
 	assert.Contains(t, got, keep)
+}
+
+// prune が home 以外の 3 経路でも走り、**複数キーすべて**から消すこと
+// (#2718 review MEDIUM-2)。
+//
+// home だけを検査していると、local / global / hybrid の配線を外しても緑のまま
+// 通る。hybrid は 3 キーを渡すので、先頭キーだけ消す実装も素通りする。
+func TestTimelines_PruneDanglingOnEveryPath(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	ctx := context.Background()
+	viewer := &model.User{ID: "lu"}
+
+	cases := []struct {
+		name  string
+		keys  []Name
+		read  func(*Service, string) error
+		seedO bool // 宙吊り ID を全キーに積むか
+	}{
+		{
+			name: "global",
+			keys: []Name{GlobalTimeline},
+			read: func(s *Service, _ string) error {
+				_, err := s.GlobalTimeline(ctx, viewer, "", "", 20, TimelineFilter{})
+				return err
+			},
+		},
+		{
+			name: "local",
+			keys: []Name{LocalTimeline, LocalTimelineWithReplyToName(viewer.ID)},
+			read: func(s *Service, _ string) error {
+				_, err := s.LocalTimeline(ctx, viewer, "", "", 20, TimelineFilter{})
+				return err
+			},
+		},
+		{
+			name: "hybrid",
+			keys: []Name{HomeTimelineName(viewer.ID), LocalTimeline, LocalTimelineWithReplyToName(viewer.ID)},
+			read: func(s *Service, _ string) error {
+				_, err := s.HybridTimeline(ctx, viewer, "", "", 20, TimelineFilter{})
+				return err
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			testRedis.FlushAll(ctx)
+			fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+			fanout.randFn = func() float64 { return 1.0 }
+			svc := NewService(fanout, testutil.NewMockNoteRepository(), testutil.NewMockFollowingRepository())
+
+			dangling := idGen.Generate(time.Now())
+			for _, k := range tc.keys {
+				require.NoError(t, fanout.Push(ctx, k, dangling, 100))
+			}
+			require.NoError(t, tc.read(svc, dangling))
+
+			for _, k := range tc.keys {
+				got, err := fanout.Get(ctx, k, "", "", 10)
+				require.NoError(t, err)
+				assert.NotContains(t, got, dangling, "prune されていないキー: "+string(k))
+			}
+		})
+	}
+}
+
+// **境界は ApplyFilter の前の resolved から取る** (#2718 review MEDIUM-3)。
+//
+// filter 後の notes から取ると境界が**新しい側へ動く**ので、DB fallback が
+// in-memory で落とした範囲を引き直し、**落としたはずの note が復活する**。
+// 落ちる note を resolved の**最古**に置かないと差が出ない (両者の境界が同じに
+// なる) ので、その形で組む。
+func TestHomeTimeline_BoundaryComesFromResolvedNotFiltered(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	ctx := context.Background()
+	testRedis.FlushAll(ctx)
+
+	repo := testutil.NewMockNoteRepository()
+	// Redis に載る 2 件。**古い方**が filter で落ちる。
+	newer := &model.Note{ID: idGen.Generate(time.Now()), UserID: "lu", Visibility: model.NoteVisibilityPublic}
+	mutedOld := &model.Note{ID: idGen.Generate(time.Now().Add(-time.Minute)), UserID: "mu", Visibility: model.NoteVisibilityPublic}
+	repo.Notes[newer.ID] = newer
+	repo.Notes[mutedOld.ID] = mutedOld
+
+	fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	fanout.randFn = func() float64 { return 1.0 }
+	svc := NewService(fanout, repo, testutil.NewMockFollowingRepository())
+
+	viewer := &model.User{ID: "lu"}
+	name := HomeTimelineName(viewer.ID)
+	require.NoError(t, fanout.Push(ctx, name, mutedOld.ID, 100))
+	require.NoError(t, fanout.Push(ctx, name, newer.ID, 100))
+
+	notes, err := svc.HomeTimeline(ctx, viewer, "", "", 20, TimelineFilter{
+		MutedUserIDs: []string{"mu"},
+	})
+	require.NoError(t, err)
+
+	for _, n := range notes {
+		assert.NotEqual(t, mutedOld.ID, n.ID,
+			"filter で落とした note が DB fallback で復活している (境界が filter 後から取られている)")
+	}
+}
+
+// prune はリクエストの ctx がキャンセルされていても走ること (#2718 review MEDIUM-4)。
+//
+// **症状が出るのはリロード時 = 前のリクエストを中断する操作**なので、ctx の
+// キャンセルを持ち込むと直したい場面ほど自己修復が空振りする。
+func TestPruneDangling_RunsWithCancelledContext(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	testRedis.FlushAll(context.Background())
+
+	fanout := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	fanout.randFn = func() float64 { return 1.0 }
+	svc := NewService(fanout, testutil.NewMockNoteRepository(), testutil.NewMockFollowingRepository())
+
+	name := GlobalTimeline
+	id := idGen.Generate(time.Now())
+	require.NoError(t, fanout.Push(context.Background(), name, id, 100))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	svc.pruneDangling(ctx, []Name{name}, []string{id})
+
+	got, err := fanout.Get(context.Background(), name, "", "", 10)
+	require.NoError(t, err)
+	assert.NotContains(t, got, id, "キャンセル済みの ctx で prune が空振りしている")
 }
