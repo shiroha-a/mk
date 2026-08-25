@@ -35,8 +35,8 @@ func TestProcess_Announce_RejectsOversizedURI(t *testing.T) {
 	}`)
 	err := env.processor.Process(body)
 	require.Error(t, err, "列に入らない id の Announce を受理している")
-	// error は上位に surface する (inbox job は retry を使い切って dead になる)。
-	// ここで確かめるのは renote を作らないことまで。
+	// error は上位に surface する (トップレベル配送ならその inbox job は retry を
+	// 使い切って dead になる)。ここで確かめるのは renote を作らないことまで。
 	assert.ErrorIs(t, err, federation.ErrInvalidNote)
 	assert.Len(t, env.noteRepo.Notes, before, "renote が作られている")
 }

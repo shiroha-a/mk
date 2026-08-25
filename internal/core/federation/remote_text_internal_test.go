@@ -66,8 +66,8 @@ func quoteJSON(s string) string {
 //
 // `note.cw` は varchar(512)。CW は**相手が自由に決められる値**で、長さの制限は
 // 送信側の実装次第。切らずに入れると Create ごと 22001 で落ち、ingest が error を
-// 返して **その inbox job が retry を使い切って dead になる** — 添付 1 枚が消える
-// より重い。
+// 返す (トップレベル配送ならその inbox job は retry を使い切って dead になる) —
+// 添付 1 枚が消えるより重い。
 func TestIngestNote_TruncatesLongCW(t *testing.T) {
 	r, noteRepo := ingestCWEnv(t)
 	// 先頭と末尾を別の文字にする (末尾から切る実装を見逃さないため)。
@@ -113,7 +113,7 @@ func TestIngestNote_StripsNULFromTextAndCW(t *testing.T) {
 // Update 経路も同じく切り、NUL を落とすこと (#2723)。
 //
 // create だけ直しても、`Update(Note)` で長い CW が来ると UpdateFields ごと落ちて
-// その job が retry を使い切って dead になる (create 側と同じ結末)。
+// ingest が error を返す (create 側と同じ結末)。
 func TestUpdateRemoteNote_TruncatesCWAndStripsNUL(t *testing.T) {
 	r, noteRepo := ingestCWEnv(t)
 	nul := string(rune(0))

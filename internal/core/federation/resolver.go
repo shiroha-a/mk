@@ -2441,9 +2441,13 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	//     featured のピン (`resolveNoteBestEffort`) のように best-effort な解決
 	//   - **inbox job ですらない** — REST の `ap/show` は取り込みに失敗すると生の AP
 	//     JSON を 200 で返す
+	//   - **上のどれであっても、Collection に包まれて配送されたら ack** —
+	//     `handleCollection` が item の error をログに出して握る
 	//
-	// 数え直すなら `ResolveNote` / `IngestNote*` の呼び出し元を全部辿ること。**この
-	// リストを他所にコピーしないこと** — 4 箇所に散らした結果、毎回どこかがずれた。
+	// 数え直すなら `ResolveNote` / `IngestNote*` の呼び出し元を全部辿ること。**ただし
+	// 最後の 1 つは呼び出し元一覧には出ない** — Collection 化は `dispatchActivity` 側の
+	// 性質なので、`handleCollection` を別途見ること。**このリストを他所にコピー
+	// しないこと** — 4 箇所に散らした結果、毎回どこかがずれた。
 	//
 	// いずれにせよこの document は保存できないので結末としては正しい。gate の利得は
 	// 原因が 22001 ではなく明示的な拒否として残ること。
@@ -3953,8 +3957,10 @@ func isForeignKeyViolation(err error) bool {
 // pathname と同じく percent-encoding は解かない (解くと `%2F` が `/` になり、
 // upstream が弾く名前を作ってしまう)。
 //
-// **NUL の除去はしない。** `url.Parse` は制御文字を含む URL を parse error に
-// するので、ここまで NUL は来ない (重ねると届かない検査が増えるだけになる)。
+// **NUL の除去はしない。** `url.Parse` は制御文字を弾き、**唯一の例外である
+// fragment は `EscapedPath()` に入らない**ので、basename に NUL は来ない。加えて
+// 呼び出し元が `fitsColumn(doc.URL, ...)` で先に弾く。重ねると届かない検査が増える
+// だけになる。
 func attachmentFileName(rawURL string) string {
 	const fallback = "untitled"
 	u, err := url.Parse(rawURL)

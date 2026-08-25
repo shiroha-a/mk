@@ -106,8 +106,9 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// nodeinfo まで失う** — 下のガードの目的が同じ関数の中で破られる (#2723)。
 	// 値は攻撃者 (リモートインスタンス) が自由に決められる。
 	//
-	// text 列は切って NUL を落とす。**URL 列は NUL を見ない** — `url.Parse` が
-	// 制御文字を含む URL を parse error にするのでここまで来ない (fetchIcons)。
+	// text 列は切って NUL を落とす。**URL 列は NUL を見ない** — `url.Parse` が制御
+	// 文字を弾き、唯一通る fragment の NUL も `url.URL.String()` が `%00` に escape
+	// するので、生の NUL はここまで来ない (fetchIcons。実測で確認)。
 	if v := clampInstanceText(doc.Software.Name, maxInstanceSoftwareNameLen); v != "" {
 		fields["softwareName"] = &v
 	}

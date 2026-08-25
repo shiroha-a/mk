@@ -1632,8 +1632,10 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 		// なので、対象 note の fetch と永続化は既に済んでいる。得られるのは、原因が
 		// 22001 ではなく明示的な拒否として残ること。
 		//
-		// (NUL の方は本番経路には届かない — `authorizeActor` が `activity.id` の host を
-		// 要求し、`url.Parse` が制御文字を弾く。長さの方は届く。)
+		// **NUL も届く。** `url.Parse` は制御文字を弾くが、**fragment だけは例外**で
+		// `https://h/a#<NUL>` は parse を通る (実測)。`authorizeActor` の host 検査も
+		// `Hostname()` を見るだけなので抜ける。「NUL は来ないから長さだけ見ればいい」に
+		// 縮めないこと。
 		if !fitsColumn(act.ID, noteURIMaxRunes) {
 			slog.Warn("federation: rejecting Announce whose id does not fit note.uri",
 				"id", truncateRunes(act.ID, noteURIMaxRunes))
