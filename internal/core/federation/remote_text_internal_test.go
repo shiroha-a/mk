@@ -146,3 +146,57 @@ func TestUpdateRemoteNote_TruncatesCWAndStripsNUL(t *testing.T) {
 	require.NotNil(t, stored.CW)
 	assert.Equal(t, 512, len([]rune(*stored.CW)))
 }
+
+// 列に入らない id の Note は取り込まないこと (#2723)。
+//
+// `note.uri` は varchar(512)。**切ると別の note を指す URI になる**うえ、dedup
+// (`FindByURI`) の鍵でもある。切らずに拒否して、permanent error として ack する。
+func TestIngestNote_RejectsOversizedURI(t *testing.T) {
+	r, noteRepo := ingestCWEnv(t)
+	longID := "https://remote.example/notes/" + strings.Repeat("n", 512)
+	doc := `{"@context":"https://www.w3.org/ns/activitystreams","id":` + quoteJSON(longID) + `,` +
+		`"type":"Note","attributedTo":"https://remote.example/users/cw","content":"<p>hi</p>",` +
+		`"to":["https://www.w3.org/ns/activitystreams#Public"]}`
+
+	_, err := r.IngestNote([]byte(doc))
+	require.Error(t, err, "列に入らない id の Note を受理している")
+	// **permanent 扱いであること。** transient だと 8 回 retry してから dead に
+	// なるだけで、同じ document を取り直し続ける。
+	assert.ErrorIs(t, err, ErrInvalidNote)
+	assert.True(t, isPermanentSkipError(err), "retry キューに戻る分類になっている")
+	assert.Empty(t, noteRepo.Notes)
+}
+
+// NUL を含む id も同じ扱い (#2723)。
+//
+// **DB を引く前に弾くこと。** `FindByURI` に NUL を渡すと SELECT 自体が 22021 で
+// 落ちる。
+func TestIngestNote_RejectsURIWithNUL(t *testing.T) {
+	r, noteRepo := ingestCWEnv(t)
+	doc := `{"@context":"https://www.w3.org/ns/activitystreams",` +
+		`"id":` + quoteJSON("https://remote.example/notes/a\x00b") + `,` +
+		`"type":"Note","attributedTo":"https://remote.example/users/cw","content":"<p>hi</p>",` +
+		`"to":["https://www.w3.org/ns/activitystreams#Public"]}`
+
+	_, err := r.IngestNote([]byte(doc))
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidNote)
+	assert.Empty(t, noteRepo.Notes)
+}
+
+// ちょうど列に収まる id は受理すること (境界を 1 つずらす実装を弾く)。
+func TestIngestNote_AcceptsURIAtColumnLimit(t *testing.T) {
+	r, noteRepo := ingestCWEnv(t)
+	prefix := "https://remote.example/notes/"
+	// 512 は migration の列長そのもの。定数を参照すると両側が一緒に動く。
+	id := prefix + strings.Repeat("n", 512-len(prefix))
+	require.Len(t, []rune(id), 512)
+	doc := `{"@context":"https://www.w3.org/ns/activitystreams","id":` + quoteJSON(id) + `,` +
+		`"type":"Note","attributedTo":"https://remote.example/users/cw","content":"<p>hi</p>",` +
+		`"to":["https://www.w3.org/ns/activitystreams#Public"]}`
+
+	note, err := r.IngestNote([]byte(doc))
+	require.NoError(t, err)
+	require.NotNil(t, note)
+	assert.Len(t, noteRepo.Notes, 1)
+}

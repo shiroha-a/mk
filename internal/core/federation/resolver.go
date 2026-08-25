@@ -803,8 +803,7 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		user.MovedToURI = &movedTo
 		user.MovedAt = &now
 	}
-	if len(actor.AlsoKnownAs) > 0 {
-		aka := strings.Join(actor.AlsoKnownAs, ",")
+	if aka := remoteURIList(actor.ID, "user.alsoKnownAs", actor.AlsoKnownAs); aka != "" {
 		user.AlsoKnownAs = &aka
 	}
 	// actor.icon / actor.image はそれぞれアバター / バナー画像。空 URL や
@@ -1313,8 +1312,7 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	// 欠いた actor JSON を返しただけでクリアすると、次の取得が「無→有」の
 	// 遷移に見えて movedAt が打ち直され、上の修正が骨抜きになるため。
 	// 移行の取り消しに追従できない代わりに、時間窓の基準を安定させる。
-	if len(actor.AlsoKnownAs) > 0 {
-		akaStr := strings.Join(actor.AlsoKnownAs, ",")
+	if akaStr := remoteURIList(actor.ID, "user.alsoKnownAs", actor.AlsoKnownAs); akaStr != "" {
 		fields["alsoKnownAs"] = &akaStr
 		existing.AlsoKnownAs = &akaStr
 	}
@@ -2424,6 +2422,16 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if apNote.ID == "" || apNote.AttributedTo == "" {
 		return nil, false, ErrInvalidNote
 	}
+	// `note.uri` は varchar(512)。**身元そのものなので切らない** — 切ると別の
+	// note を指す URI になり、dedup (`FindByURI`) の鍵も壊れる。収まらなければ
+	// document ごと拒否する (#2723)。NUL も同じ扱い (22021 で落ちる)。
+	//
+	// **DB を引く前に見る。** NUL 入りの値は `FindByURI` の SELECT 自体が落ちる。
+	if !fitsColumn(apNote.ID, noteURIMaxRunes) {
+		slog.Warn("federation: rejecting note whose id does not fit note.uri",
+			"id", truncateRunes(apNote.ID, noteURIMaxRunes))
+		return nil, false, ErrInvalidNote
+	}
 	if existing, err := r.noteRepo.FindByURI(apNote.ID); err == nil {
 		return existing, false, nil
 	}
@@ -2496,11 +2504,16 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		// `note.text` は無制限の text 列なので長さは切らないが、**NUL は落とす**。
 		// `content` 経路は mfm.FromHTML が落とすが、source / _misskey_content は
 		// FromHTML を通らない (#2723)。
-		text := remoteText(apNote.Source.Content, 0)
-		note.Text = &text
+		// **空になったら nil のままにする** (NUL だけの content が来ると空になる)。
+		// `content` 経路が `if text != ""` で nil を保つので、揃えないと REST の
+		// `text` が同じ入力で `null` と `""` に分かれる。
+		if text := remoteText(apNote.Source.Content, 0); text != "" {
+			note.Text = &text
+		}
 	} else if apNote.MisskeyContent != "" {
-		text := remoteText(apNote.MisskeyContent.String(), 0)
-		note.Text = &text
+		if text := remoteText(apNote.MisskeyContent.String(), 0); text != "" {
+			note.Text = &text
+		}
 	} else if apNote.Content != "" {
 		text := mfm.FromHTML(apNote.Content)
 		if text != "" {
@@ -2510,7 +2523,8 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if apNote.Summary != "" {
 		// **列の上限で切り、NUL を落とす。** CW は利用者が自由に書くので長文が
 		// 普通に来る。溢れると Create ごと落ちて ingest が error を返し、
-		// **inbox job が恒久 retry になる** (#2723)。
+		// **inbox job が retry を使い切って dead になる** (既定 8 回。その note は
+		// 二度と取り込まれない) (#2723)。
 		summary := remoteText(apNote.Summary.String(), noteCWMaxRunes)
 		note.CW = &summary
 	}
@@ -3773,12 +3787,19 @@ func numberAsInt(v any) int {
 // リモート由来の値を書く列の上限 (migration/000001_initial.up.sql)。
 //
 // **溢れると行ごと落ちる。** PostgreSQL は varchar の超過を 22001 で拒否するので、
-// INSERT / UPDATE がまるごと失敗する。note なら ingest が error を返して inbox job が
-// **恒久 retry** になり、actor なら 1 行も作られない (#2723)。
+// INSERT / UPDATE がまるごと失敗する。失われる範囲は書き込みの単位ごとに違う:
+// note なら ingest が error を返して inbox job が retry を使い切って dead になり
+// (既定 8 回、`internal/queue/policy.go`)、actor なら 1 行も作られない。添付は
+// 1 件ずつ Create するので**その添付だけ**消える (#2723)。
 const (
 	driveFileNameMaxRunes    = 256
 	driveFileCommentMaxRunes = 512
+	driveFileTypeMaxRunes    = 128
+	driveFileURLMaxRunes     = 1024
+	driveFileThumbMaxRunes   = 512
+	driveFileBlurhashMaxRune = 128
 	noteCWMaxRunes           = 512
+	noteURIMaxRunes          = 512
 )
 
 // user 側のリモート値を書く列の上限 (migration/000001_initial.up.sql)。
@@ -3793,6 +3814,25 @@ const (
 // 長さに関わらず 22021 で弾かれる。
 func fitsColumn(s string, max int) bool {
 	return !strings.ContainsRune(s, 0) && len([]rune(s)) <= max
+}
+
+// remoteURIList joins remote-supplied URIs for a comma-separated column,
+// dropping entries that cannot be stored.
+//
+// `user.alsoKnownAs` は text 列なので長さは効かないが、**NUL は 22021 で弾かれる**。
+// 同じ INSERT / UPDATE に載っている他の列まで巻き添えになるので、ここで落とす。
+// 値は URI なので truncate せず**要素ごと捨てる** (#2723)。
+func remoteURIList(actorURI, column string, values []string) string {
+	kept := make([]string, 0, len(values))
+	for _, v := range values {
+		if strings.ContainsRune(v, 0) {
+			slog.Warn("federation: dropping remote value that cannot be stored",
+				"actor", truncateRunes(actorURI, userURIMaxRunes), "column", column)
+			continue
+		}
+		kept = append(kept, v)
+	}
+	return strings.Join(kept, ",")
 }
 
 // remoteURIValue returns raw when it fits a varchar(512) URI column, or "" when
@@ -3865,11 +3905,14 @@ func isForeignKeyViolation(err error) bool {
 // `validateFileName` の不合格は `untitled`)。
 //
 // **upstream は実体を download して名前を決める** (Content-Disposition があれば
-// それを優先する) が、mk-go はリモートメディアを取りに行かない
-// (docs/divergence.md 5.5) ので URL の basename だけを使う。Mastodon 系は
-// Content-Disposition を返さないので、実際に選ばれる名前は upstream と一致する
-// ことが多い。**拡張子の補完はしない** — upstream が付けるのは実体を sniff した
-// 型であって、相手の申告した mediaType ではないため。
+// それを優先する) が、mk-go は実体を保存しない (docs/divergence.md 5.5) ので
+// URL の basename だけを使う。**拡張子の補完もしない** — upstream が付けるのは
+// 実体を sniff した型であって、相手の申告した mediaType ではないため。
+//
+// 結果が upstream とずれるのは主に 2 つ: Content-Disposition で filename を返す
+// 配信元 (S3 の response-content-disposition 等) と、**拡張子を持たない URL**
+// (Misskey / mk-go 自身の内部ストレージは `/files/<uuid>` 形式なので常にずれる)。
+// Mastodon 系はどちらにも当たらないので一致する。
 //
 // pathname と同じく percent-encoding は解かない (解くと `%2F` が `/` になり、
 // upstream が弾く名前を作ってしまう)。
@@ -3906,18 +3949,28 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 			ids = append(ids, existing.ID)
 			continue
 		}
+		// **URL が列に入らないなら添付ごと諦める。** `drive_file.url` は
+		// varchar(1024) NOT NULL で、この添付の実体そのもの。切ると別の場所を
+		// 指すし、捨てると表示できない (#2723)。`uri` も同じ値を入れる。
+		if !fitsColumn(doc.URL, driveFileURLMaxRunes) {
+			slog.Warn("federation: skipping attachment whose url does not fit drive_file.url",
+				"url", truncateRunes(doc.URL, driveFileURLMaxRunes))
+			continue
+		}
 		now := r.clock()
+		// `drive_file.type` は varchar(128)。**切ると別の MIME type になる**ので、
+		// 収まらなければ既定値に倒す (#2723)。
 		mediaType := doc.MediaType
-		if mediaType == "" {
+		if mediaType == "" || !fitsColumn(mediaType, driveFileTypeMaxRunes) {
 			mediaType = "application/octet-stream"
 		}
-		// AP の `name` は**代替テキスト**なので `comment` に入れる。`name` (列は
-		// varchar(256)) は URL から作る — upstream の `uploadFromUrl` と同じ
-		// 置き場にする (#2723)。
+		// AP の `name` は**代替テキスト**なので `comment` (varchar(512)) に入れる。
+		// `name` (varchar(256)) は URL から作る — upstream の `uploadFromUrl` と
+		// 同じ置き場にする (#2723)。
 		//
-		// **列の上限で切る。** 説明が長い添付は varchar(256) に入らず 22001 で
-		// 落ち、**その添付が丸ごと保存されない** (#2717)。rune 単位で切る —
-		// byte で切ると壊れた UTF-8 を書く。
+		// **comment は列の上限で切る。** 説明が長い添付は入らず 22001 で落ち、
+		// **その添付が丸ごと保存されない** (#2717)。rune 単位で切る — byte で
+		// 切ると壊れた UTF-8 を書く。
 		// **NUL も落とす。** 長さだけ直しても、制御文字が混じると 22021 で
 		// 同じく添付が丸ごと落ちる (#2721 review MEDIUM-1)。
 		safeName := sanitizeRemoteText(doc.Name)
@@ -3948,9 +4001,12 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		// (#460 thumbnail / #461 properties)。link-format なので実体
 		// 画像解析はしないが、remote 側が宣言している width/height/
 		// icon/blurhash を信頼してそのまま保存する。
+		// thumbnail / blurhash は**表示の補助でしかない**ので、列
+		// (varchar(512) / varchar(128)) に入らなければ値ごと捨てて添付は残す。
 		if doc.Icon != nil && doc.Icon.URL != "" {
-			thumb := doc.Icon.URL.String()
-			f.ThumbnailURL = &thumb
+			if thumb := doc.Icon.URL.String(); fitsColumn(thumb, driveFileThumbMaxRunes) {
+				f.ThumbnailURL = &thumb
+			}
 		}
 		width := doc.Width
 		height := doc.Height
@@ -3983,7 +4039,7 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 				f.Properties = encoded
 			}
 		}
-		if doc.Blurhash != "" {
+		if doc.Blurhash != "" && fitsColumn(doc.Blurhash, driveFileBlurhashMaxRune) {
 			bh := doc.Blurhash
 			f.Blurhash = &bh
 		}

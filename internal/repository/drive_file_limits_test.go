@@ -10,6 +10,36 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 )
 
+// driveFileColumns は resolver が AP の添付から書く列と、その上限。
+// migration/000001_initial.up.sql と一致させる。
+var driveFileColumns = []struct {
+	column string
+	max    int
+}{
+	{"name", 256},
+	{"comment", 512},
+	{"type", 128},
+	{"url", 1024},
+	{"uri", 1024},
+	{"thumbnailUrl", 512},
+	{"blurhash", 128},
+}
+
+// 列の上限そのものを schema から固定する (#2723)。
+//
+// resolver 側の定数と独立に同じ数値が書かれているだけだと、揃って動かせば全部
+// 緑になる。列が変わったらここが落ちる。
+func TestDriveFile_ColumnLimits(t *testing.T) {
+	for _, tc := range driveFileColumns {
+		var n int
+		require.NoError(t, testDB.Raw(`SELECT character_maximum_length FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = 'drive_file' AND column_name = ?`,
+			tc.column).Scan(&n).Error)
+		assert.Equal(t, tc.max, n,
+			"drive_file.%s の列長が変わっている (internal/core/federation/resolver.go の定数も直すこと)", tc.column)
+	}
+}
+
 // resolver が切っている長さで、実際の列制約を通ること (#2717)。
 //
 // mock は列制約を持たないので、resolver 側のテストだけでは
@@ -20,7 +50,8 @@ func TestDriveFile_ColumnLimitsAcceptTruncatedValues(t *testing.T) {
 	id := "dfl_limits_0000000000000000000a"
 	t.Cleanup(func() { testDB.Exec(`DELETE FROM "drive_file" WHERE id = ?`, id) })
 
-	// resolver の driveFileNameMaxRunes / driveFileCommentMaxRunes と同じ値。
+	// resolver が通す最大長。`name` は URL の basename から作るので 256 まで
+	// 伸びることは無いが、列の上限は 256 なのでそこで確かめる (#2723)。
 	// **全角で埋める** — byte で切る実装だと 3 倍になって入らない。
 	name := strings.Repeat("あ", 256)
 	comment := strings.Repeat("あ", 512)

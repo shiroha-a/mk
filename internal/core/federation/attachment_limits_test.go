@@ -36,9 +36,10 @@ func (c *fkOnceDriveRepo) Create(f *model.DriveFile) error {
 
 // 代替テキストが長い添付が保存されること (#2717)。
 //
-// Mastodon は AP の `attachment[].name` に**代替テキスト**を入れてくる。
-// `drive_file.name` は varchar(256) なので、切らずに入れると 22001 で落ちて
-// **その添付が丸ごと保存されない**。
+// Mastodon は AP の `attachment[].name` に**代替テキスト**を入れてくる。入る先は
+// `drive_file.comment` (varchar(512))、切らずに入れると 22001 で落ちて**その添付が
+// 丸ごと保存されない**。`name` は URL の basename から作るので、この経路では
+// 代替テキストの長さに影響されない (#2723)。
 func TestUpsertAttachments_TruncatesLongAltText(t *testing.T) {
 	drive := testutil.NewMockDriveFileRepository()
 	idGen, err := id.NewGenerator("aidx")
@@ -160,4 +161,58 @@ func TestUpsertAttachments_StripsNULFromAltText(t *testing.T) {
 	assert.NotContains(t, f.Name, "\x00", "NUL が残っている")
 	require.NotNil(t, f.Comment)
 	assert.NotContains(t, *f.Comment, "\x00")
+}
+
+// 添付の他の列も溢れさせないこと (#2723)。
+//
+// #2717 で `name` を直したが、**同じ INSERT に載る他の列**が無検査だと同じ症状
+// (その添付が丸ごと消える) が残る。列ごとに扱いが違う:
+//   - `url` (varchar(1024) NOT NULL) — 実体そのもの。入らなければ添付ごと諦める
+//   - `type` (varchar(128)) — 切ると別の MIME type になるので既定値に倒す
+//   - `thumbnailUrl` (512) / `blurhash` (128) — 表示の補助なので値ごと捨てる
+func TestUpsertAttachments_DropsOversizedColumns(t *testing.T) {
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	newResolver := func(drive *testutil.MockDriveFileRepository) *federation.Resolver {
+		r := federation.NewResolver(testutil.NewMockUserRepository(), testutil.NewMockNoteRepository(),
+			activitypub.NewURLBuilder("https://example.com"), &stubFetcher{}, idGen)
+		r.SetDriveFileRepo(drive)
+		return r
+	}
+	userID, host := "ru", "remote.example"
+
+	t.Run("url over 1024 は添付ごと落とす", func(t *testing.T) {
+		drive := testutil.NewMockDriveFileRepository()
+		longURL := "https://media.example/f/" + strings.Repeat("a", 1024)
+		ids := newResolver(drive).UpsertAttachments([]activitypub.Document{{
+			URL: longURL, MediaType: "image/png",
+		}}, &userID, &host)
+		assert.Empty(t, ids, "列に入らない url の添付を保存している")
+		assert.Empty(t, drive.Files)
+	})
+
+	t.Run("type over 128 は既定値に倒す", func(t *testing.T) {
+		drive := testutil.NewMockDriveFileRepository()
+		ids := newResolver(drive).UpsertAttachments([]activitypub.Document{{
+			URL: "https://media.example/f/a.png", MediaType: "image/" + strings.Repeat("x", 200),
+		}}, &userID, &host)
+		require.Len(t, ids, 1, "長い mediaType で添付が落ちている")
+		// **切った値を入れない。** 切ると存在しない MIME type になる。
+		assert.Equal(t, "application/octet-stream", drive.Files[ids[0]].Type)
+	})
+
+	t.Run("thumbnailUrl / blurhash は値ごと捨てる", func(t *testing.T) {
+		drive := testutil.NewMockDriveFileRepository()
+		thumb := "https://media.example/t/" + strings.Repeat("a", 512)
+		ids := newResolver(drive).UpsertAttachments([]activitypub.Document{{
+			URL:       "https://media.example/f/b.png",
+			MediaType: "image/png",
+			Icon:      &activitypub.Image{URL: activitypub.APLenientHref(thumb)},
+			Blurhash:  strings.Repeat("b", 200),
+		}}, &userID, &host)
+		require.Len(t, ids, 1, "長い thumbnail / blurhash で添付が落ちている")
+		f := drive.Files[ids[0]]
+		assert.Nil(t, f.ThumbnailURL, "列に入らない thumbnailUrl を保存している")
+		assert.Nil(t, f.Blurhash, "列に入らない blurhash を保存している")
+	})
 }

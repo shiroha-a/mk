@@ -141,12 +141,13 @@ func assertVarchar(column, value string, max int) error {
 }
 
 // assertUserColumns validates the varchar columns that remote actor ingestion
-// writes: `username`, `usernameLower`, `name`, `avatarUrl`, `bannerUrl`.
+// writes: `username`, `usernameLower`, `name`, `avatarUrl`, `bannerUrl`,
+// `uri`, `host`, `inbox`, `sharedInbox`, `featured`, `movedToUri`。
+// `alsoKnownAs` は text 列なので長さは見ないが NUL は見る (#2723)。
 //
 // **これで全部ではない。** `"user"` には他にも長さ制約付きの列がある
-// (`host` 128 / `uri` / `inbox` / `sharedInbox` / `featured` / `movedToUri`
-// 512 / `chatScope` 128 など) が、いずれも未検証。ここを「全列を見ている」と
-// 誤解すると、実際に落ちたときに原因から遠ざかる。
+// (`chatScope` 128 など) が未検証。ここを「全列を見ている」と誤解すると、
+// 実際に落ちたときに原因から遠ざかる。
 //
 // `tags` / `emojis` (`varchar(128)[]`) も未検証。`tags` は
 // `hashtag.ExtractUserTags` が件数 (`MaxUserTags` 32、upstream の
@@ -178,6 +179,32 @@ func assertUserColumns(u *model.User) error {
 		if err := assertVarchar("user.bannerUrl", *u.BannerURL, 512); err != nil {
 			return err
 		}
+	}
+	// 身元と配送先。リモートが決める値がそのまま入るので、ここが緩いと
+	// 「実 DB なら 1 行も作られない」入力を mock が通してしまう (#2723)。
+	for _, c := range []struct {
+		column string
+		value  *string
+		max    int
+	}{
+		{"user.uri", u.URI, 512},
+		{"user.host", u.Host, 128},
+		{"user.inbox", u.Inbox, 512},
+		{"user.sharedInbox", u.SharedInbox, 512},
+		{"user.featured", u.Featured, 512},
+		{"user.movedToUri", u.MovedToURI, 512},
+	} {
+		if c.value == nil {
+			continue
+		}
+		if err := assertVarchar(c.column, *c.value, c.max); err != nil {
+			return err
+		}
+	}
+	// `alsoKnownAs` は text 列なので長さは効かないが、NUL は 22021 で落ちる。
+	if u.AlsoKnownAs != nil && strings.ContainsRune(*u.AlsoKnownAs, 0) {
+		return fmt.Errorf("mock: user.alsoKnownAs contains NUL; PostgreSQL rejects it " +
+			"with SQLSTATE 22021 and fails the whole write")
 	}
 	return nil
 }

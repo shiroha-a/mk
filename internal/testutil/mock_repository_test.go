@@ -234,3 +234,51 @@ func TestMockUserRepository_VarcharGuards(t *testing.T) {
 		assert.Nil(t, repo.Profiles["u1"].Description, "巻き添えの列も適用しない")
 	})
 }
+
+// mock の列検査が本番の列と揃っていること (#2723)。
+//
+// この検査は「resolver 側のテストが素通りしないための網」なので、**それ自体を
+// 固定しないと黙って緩む**。列長は migration が持っているので、値はそこから
+// 写した実数を書く (定数を参照すると両側が一緒に動く)。
+func TestAssertUserColumns_RejectsOversizedIdentity(t *testing.T) {
+	base := func() *model.User {
+		return &model.User{ID: "u1", Username: "u", UsernameLower: "u"}
+	}
+	ptr := func(s string) *string { return &s }
+
+	for _, tc := range []struct {
+		name  string
+		max   int
+		apply func(*model.User, *string)
+	}{
+		{"uri", 512, func(u *model.User, v *string) { u.URI = v }},
+		{"host", 128, func(u *model.User, v *string) { u.Host = v }},
+		{"inbox", 512, func(u *model.User, v *string) { u.Inbox = v }},
+		{"sharedInbox", 512, func(u *model.User, v *string) { u.SharedInbox = v }},
+		{"featured", 512, func(u *model.User, v *string) { u.Featured = v }},
+		{"movedToUri", 512, func(u *model.User, v *string) { u.MovedToURI = v }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fit := base()
+			// **全角で埋める** — byte で数える実装だとここで落ちる。
+			tc.apply(fit, ptr(strings.Repeat("あ", tc.max)))
+			require.NoError(t, assertUserColumns(fit), "列に収まる値を拒否している")
+
+			over := base()
+			tc.apply(over, ptr(strings.Repeat("あ", tc.max+1)))
+			assert.Error(t, assertUserColumns(over), "列を超える値を通している")
+
+			nul := base()
+			tc.apply(nul, ptr("a\x00b"))
+			assert.Error(t, assertUserColumns(nul), "NUL を通している")
+		})
+	}
+
+	// alsoKnownAs は text 列なので長さは効かないが NUL は落ちる。
+	long := base()
+	long.AlsoKnownAs = ptr(strings.Repeat("a", 5000))
+	assert.NoError(t, assertUserColumns(long), "text 列を長さで拒否している")
+	nul := base()
+	nul.AlsoKnownAs = ptr("https://a/\x00")
+	assert.Error(t, assertUserColumns(nul), "alsoKnownAs の NUL を通している")
+}

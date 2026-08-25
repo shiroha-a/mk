@@ -1649,6 +1649,13 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 		Visibility: renoteVisibility,
 	}
 	if act.ID != "" {
+		// `note.uri` は varchar(512)。**Announce の id は renote の身元**で、
+		// Undo(Announce) の逆引きにも使うので切らずに拒否する (#2723)。
+		if !fitsColumn(act.ID, noteURIMaxRunes) {
+			slog.Warn("federation: rejecting Announce whose id does not fit note.uri",
+				"id", truncateRunes(act.ID, noteURIMaxRunes))
+			return ErrInvalidNote
+		}
 		uri := act.ID
 		renote.URI = &uri
 	}
