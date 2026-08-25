@@ -96,6 +96,7 @@ func TestIngestNote_PinnedNoteViaInboxKeepsCreated_AliasURI(t *testing.T) {
 	)
 	userRepo := testutil.NewMockUserRepository()
 	noteRepo := testutil.NewMockNoteRepository()
+	pins := testutil.NewMockUserNotePiningRepository()
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, err := id.NewGenerator("aidx")
 	require.NoError(t, err)
@@ -109,7 +110,7 @@ func TestIngestNote_PinnedNoteViaInboxKeepsCreated_AliasURI(t *testing.T) {
 	}}
 	r := NewResolver(userRepo, noteRepo, urls, fetcher, idGen)
 	// pinningRepo が無いと updateFeatured が即 return してテストが素通りする。
-	r.SetPinningRepo(testutil.NewMockUserNotePiningRepository(), idGen)
+	r.SetPinningRepo(pins, idGen)
 
 	note, created, err := r.IngestNoteWithCreated([]byte(plainNoteDoc(noteURI, actorURI)), actorURI)
 	require.NoError(t, err)
@@ -122,6 +123,22 @@ func TestIngestNote_PinnedNoteViaInboxKeepsCreated_AliasURI(t *testing.T) {
 	// 2 度目が出るなら判定が効いていない。
 	assert.Equal(t, 1, fetcher.count(aliasURI), "別名の取得は 1 度だけ")
 	assert.Equal(t, 0, fetcher.count(noteURI), "既に手元にある note を再取得しないこと")
+
+	// **ピンの結末も固定する。** 正規形の対 (TestResolveNote_AuthorPinsTheNote-
+	// BeingIngested) と同じく、この回は落ちて次の actor 更新で入る。ここが無いと
+	// 回復が壊れても気付けない (#2710 review LOW-2)。
+	pinned, err := pins.ListByUser(note.UserID)
+	require.NoError(t, err)
+	assert.Empty(t, pinned, "取り込み中だった自分のピンはこの回では入らない")
+
+	require.NoError(t, userRepo.UpdateUser(note.UserID, map[string]any{"lastFetchedAt": (*time.Time)(nil)}))
+	user, err := r.ResolveActor(actorURI)
+	require.NoError(t, err)
+	require.Equal(t, note.UserID, user.ID)
+	pinned, err = pins.ListByUser(user.ID)
+	require.NoError(t, err)
+	require.Len(t, pinned, 1, "次回の actor 更新でピンが入ること")
+	assert.Equal(t, note.ID, pinned[0].NoteID)
 }
 
 // newAliasEnv builds a resolver whose alias URI serves a document with a
@@ -232,12 +249,21 @@ func TestJoinResolveOpt_JoinerRedoesAChainLocalGiveUp(t *testing.T) {
 	// 返り、追従側は自分が先頭になるだけでやり直し経路を通らない。それでも全ての
 	// assert は成立するので、**落ちる flaky ではなく黙って検査をやめる flaky**に
 	// なる (#2710 review MEDIUM-3)。group に登録されたことを直接見る。
+	// **期限を付ける。** 上限が無いと、登録に至らない壊れ方をしたときに
+	// パッケージ全体の testing binary が timeout で panic し、他のテストの結果も
+	// 巻き添えで失われる (#2710 review LOW-1)。
+	deadline := time.After(5 * time.Second)
 	for {
 		g.mu.Lock()
 		joined := g.m["k"] != nil && len(g.m["k"].waiters) == 1
 		g.mu.Unlock()
 		if joined {
 			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("追従側が group に登録されない")
+		default:
 		}
 		runtime.Gosched()
 	}
@@ -263,7 +289,12 @@ func TestJoinResolveOpt_JoinerRedoesAChainLocalGiveUp(t *testing.T) {
 //
 // 入口が featured かどうかは resolveNoteDepthOpt の mayWait しか知らないので、
 // 判定はそれを引数で受け取る。
-func TestIngestNote_PinnedNoteQuotingTheIngestedNoteKeepsRenoteID(t *testing.T) {
+//
+// **別名 URL に限った不変条件。** 同じ形でもピンが取り込み中の投稿を**正規 URI で**
+// 引用している場合は、`resolveQuoteURI` の in-flight 判定が当たって既存行を引けず、
+// renoteId は nil のまま保存される (develop でも同じ既存挙動)。ここを一般則と
+// 読まないこと (#2710 review MEDIUM-2)。
+func TestIngestNote_PinnedNoteQuotingTheIngestedNoteUnderAnAliasKeepsRenoteID(t *testing.T) {
 	const (
 		actorURI = "https://remote.example/users/nova"
 		featured = "https://remote.example/users/nova/collections/featured"
@@ -296,4 +327,43 @@ func TestIngestNote_PinnedNoteQuotingTheIngestedNoteKeepsRenoteID(t *testing.T) 
 	require.NotNil(t, pin.RenoteID,
 		"ピンの引用先が落ちている: 取得後の判定が引用経路へ波及している (#2710 review HIGH-1)")
 	assert.NotEmpty(t, *pin.RenoteID)
+}
+
+// noteInFlightInChain の**2 つ目の lookup** (document id 側) が効くこと。
+//
+// 既定の flag では `noteGroupKey(uri, false, false) == uri` なので 1 つ目と同じ鍵に
+// なり、この分岐は featured 経路からは到達しない。到達するのは鍵の形が変わる
+// ap/show (cross-host) と ephemeral で、そこにテストが無かった (#2710 review LOW-4)。
+func TestNoteInFlightInChain_FallsBackToTheDocumentID(t *testing.T) {
+	const (
+		uri   = "https://remote.example/@ora/o1"
+		docID = "https://remote.example/notes/o1"
+	)
+	r := &Resolver{}
+	// 祖先が document id で載せた状態 (chainAfterProbe / ingestNoteWithCreated)。
+	chain := (&resolveChain{}).with(docID, docID).with(uri, docID)
+
+	cases := []struct {
+		name           string
+		lookup         string
+		allowCrossHost bool
+		ephemeral      bool
+	}{
+		// group 鍵 (`xhost\x00...` / `eph\x00...`) では引けず、取得 URI 側で当たる。
+		{"cross-host key misses, uri hits", uri, true, false},
+		{"ephemeral key misses, uri hits", uri, false, true},
+		// document id そのもので引く場合も同じ経路を通る。
+		{"document id hits", docID, true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, inflight := r.noteInFlightInChain(chain, tc.lookup, tc.allowCrossHost, tc.ephemeral)
+			require.True(t, inflight, "2 つ目の lookup が効いていない")
+			assert.Equal(t, docID, got, "既存行を引くための id は document id")
+		})
+	}
+
+	// 載っていない URI では当たらないこと (どちらの lookup も素通しにしない)。
+	_, inflight := r.noteInFlightInChain(chain, "https://remote.example/notes/zz", true, false)
+	assert.False(t, inflight)
 }

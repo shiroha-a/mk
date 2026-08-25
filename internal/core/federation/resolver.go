@@ -2032,6 +2032,11 @@ func (r *Resolver) resolveNoteBestEffort(uri string, depth int, chain *resolveCh
 
 // resolveNoteDepthOpt is the body of both. mayWait=false makes the caller give
 // up with ErrResolveWouldBlock instead of joining another chain's call.
+//
+// **mayWait=false を渡してよいのは featured の取り込みだけ。** この値は
+// 「待たない」と「入口が featured」を兼ねており、resolveNoteOnce の取得後判定
+// (#2695) をどこに効かせるかもこれで決まる。別の best-effort な呼び出し元を
+// 足すなら、判定の入口を bool から分けること (#2710 review LOW-3)。
 func (r *Resolver) resolveNoteDepthOpt(uri string, depth int, allowCrossHost, ephemeral, mayWait bool, chain *resolveChain) (*model.Note, error) {
 	// 同一 URI への並行呼び出しは singleflight で collapse (#300 3-7)。
 	// ResolveActor と同じく cold path の HTTP fetch + IngestNote を重複
@@ -2238,6 +2243,12 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	// 上の「限定」が効かない。実測で、取り込み中の note を featured のピンが別名
 	// URL で引用しているだけで renoteId が落ちた (#2710 review HIGH-1)。入口が
 	// 何だったかは resolveNoteDepthOpt の mayWait が持っているので、それを渡す。
+	//
+	// **代償は created。** ピンが取り込み中の投稿を別名 URL で**引用**している形
+	// (featured には正規 URI で載っている) では、その引用解決がここを素通りして
+	// 内側で先に行を作るので、外側の Create は UNIQUE に当たり created=false の
+	// まま。#2686 の通知欠落はその形では残る。renoteId の恒久的な欠落のほうが
+	// 重いので、意図してそちらを取っている (#2710 review MEDIUM-1)。
 	if bestEffortEntry {
 		if ancestorID, ingesting := chain.ingestedDocID(idProbe.ID); ingesting {
 			// 既に行があるならそれで足りる (取り込み済みのピンを落とさない)。
