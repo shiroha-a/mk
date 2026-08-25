@@ -203,6 +203,12 @@ func hostMatch(q *gorm.DB, host string) *gorm.DB {
 // host 表記を変えると `IDX_user_usernameLower_host_unique` は表記違いを別行として
 // 許すため、`Mixed.Example` と `mixed.example` が共存しうる (#2704 review
 // MEDIUM-2)。候補を明示して順に引く。
+//
+// **これは backfill 前の行のための互換経路** (#2706)。保存側 (`hostFromURI`) は
+// 正規化済みなので、新しく入る行は正規化形しか持たない。撤去してよいのは
+// **`cmd/backfill-remote-host` を流し終えた環境だけ**で、流していない環境で外すと
+// 非正規化で保存された行が引けなくなる。migration は自動で流れるがバッチは手動な
+// ので、撤去は別 PR にしてある。
 func hostCandidates(host string) []string {
 	if p := idnhost.Puny(host); p != host {
 		return []string{host, p}

@@ -257,8 +257,10 @@ func (h *Handler) EmojiListRemote(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// upstream list-remote.ts:69 は host を toPuny (lowercase + IDN punycode) して
-	// から equality 突合する。host は punycode 正規化して保存されているため、IDN /
-	// 大文字混在の host param を正規化しないと match しない (#1948-13)。
+	// から equality 突合する。保存側も #2706 で同じ正規化を掛けるようになったので、
+	// IDN / 大文字混在の host param を正規化しないと match しない (#1948-13)。
+	// **backfill 前の行はここでは救えない** — 完全一致なので、非正規化で保存された
+	// emoji は `cmd/backfill-remote-host` を流すまで引けない。
 	host := req.Host
 	if host != "" {
 		host = toPunyHost(host)

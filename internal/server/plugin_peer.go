@@ -420,7 +420,8 @@ func (p *pluginPeer) verify(req *http.Request, body []byte) (string, error) {
 
 // peerHostPattern is the shape a peer host must have: LDH labels, optional port.
 //
-// IDN は Misskey と同じく punycode で保存されるので ASCII に閉じてよい。
+// IDN は Misskey と同じく punycode で保存される (mk-go も #2706 で保存側を揃えた)
+// ので ASCII に閉じてよい。
 var peerHostPattern = regexp.MustCompile(
 	`^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$`)
 

@@ -3404,6 +3404,15 @@ func hasPublicAudience(list []string) bool {
 }
 
 // hostFromURI extracts the host portion from an actor URI.
+// **正規化して返す。** ここが host を作る唯一の入口で、`user.host` /
+// `instance.host` / `emoji.host` / `note.userHost` / `following.*Host` などは
+// すべてこの値の写し。`url.Parse` は小文字化も punycode 化もしないので、
+// `https://Mixed.Example/users/x` のような actor URI を出すサーバーの行が
+// 非正規化で入り、acct 解決が空振りする (#2704 / #2706)。upstream も保存時に
+// `punyHost` を掛けている (ApPersonService.ts)。
+//
+// 比較専用の punyHost とは役割が違う。あちらは**読み取り側で両辺を揃える**もので、
+// backfill 前の非正規化行が残っているあいだは併存する。
 func hostFromURI(uri string) (string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
@@ -3412,7 +3421,7 @@ func hostFromURI(uri string) (string, error) {
 	if u.Host == "" {
 		return "", fmt.Errorf("missing host in %q", uri)
 	}
-	return u.Host, nil
+	return idnhost.Puny(u.Host), nil
 }
 
 // punyHost normalizes a host for comparison the way upstream
@@ -3421,8 +3430,9 @@ func hostFromURI(uri string) (string, error) {
 // するため host 一致比較の両辺に適用する (#1850)。idna が失敗する不正入力のみ
 // 小文字化で返す (Go default の lenient UTS#46 profile では port 付き host も
 // 成功し ASCII tail はそのまま残るため、fallback は実質ほぼ発生しない)。これは
-// 比較専用で、保存側 host (resolveActorOnce / hostAllowedForURI /
-// RegisterFromHost) の正規化統一は別スコープ。
+// 保存側 (`hostFromURI`) も #2706 で同じ正規化を掛けるようになったので、両者は
+// 同じ値を作る。punyHost が今も要るのは、**backfill 前に非正規化で保存された行**と
+// 外から渡ってくる acct の host を突き合わせるため。
 //
 // なお Go の idna は ideographic/fullwidth dot (U+3002 等) を `.` に畳まない
 // (Node の domainToASCII と異なるが、別 authority を同一視しない安全側)。

@@ -55,6 +55,7 @@
 │   ├── misskey/            # メインバイナリのエントリポイント
 │   ├── migrate/            # マイグレーションCLIツール
 │   ├── backfill-note-tags/ # note.tags を NFKC 正規化し直す一回限りのバッチ
+│   ├── backfill-remote-host/ # 保存済みリモート host を punycode 正規化し直すバッチ
 │   └── dbgtimeline/        # home/global timeline の JSON encoder panic を再現するデバッグ用ツール
 ├── internal/               # 全23パッケージ
 │   ├── config/             # 設定ローダー（Misskey YAML互換）
