@@ -3,6 +3,7 @@ package federation_test
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,4 +62,38 @@ func TestProcess_Announce_AcceptsURIAtColumnLimit(t *testing.T) {
 	}`)
 	require.NoError(t, env.processor.Process(body))
 	assert.Len(t, env.noteRepo.Notes, before+1, "renote が作られていない")
+}
+
+// 列に入らない id の note を対象にした Like は ack すること (#2723)。
+//
+// **拒否の結末は経路で違う。** `handleCreate` は `ErrInvalidNote` を surface して
+// inbox job を dead にするが、Like / Announce / Undo(Like) / Undo(Announce) は
+// `ResolveNote` の失敗を `isPermanentSkipError` に通して ack する。transient に
+// 落ちると、同じ document を取り直す activity が retry のたびに走る。
+func TestProcess_Like_AcksOversizedTargetURI(t *testing.T) {
+	longURI := "https://remote.example/notes/" + strings.Repeat("n", 512)
+	// fetcher は常にこの Note document を返す。actor は先に repo へ入れておく
+	// (fetch させると同じ body が返って actor 解決で落ちる)。
+	noteDoc := `{"@context":"https://www.w3.org/ns/activitystreams","id":"` + longURI + `",` +
+		`"type":"Note","attributedTo":"https://remote.example/users/alice","content":"hi",` +
+		`"to":["https://www.w3.org/ns/activitystreams#Public"]}`
+	env := newFullProcessor(t, noteDoc)
+	uri := "https://remote.example/users/alice"
+	host := "remote.example"
+	now := time.Now()
+	env.userRepo.Users["u_alice"] = &model.User{
+		ID: "u_alice", Username: "alice", UsernameLower: "alice",
+		URI: &uri, Host: &host, LastFetchedAt: &now,
+	}
+
+	body := []byte(`{
+		"type": "Like",
+		"id": "https://remote.example/likes/1",
+		"actor": "` + uri + `",
+		"object": "` + longURI + `",
+		"content": "👍"
+	}`)
+	// **ack すること** (error を返すと retry に乗る)。
+	require.NoError(t, env.processor.Process(body), "取り込めない note への Like で retry に乗せている")
+	assert.Empty(t, env.reactionRepo.Reactions, "reaction を作っている")
 }

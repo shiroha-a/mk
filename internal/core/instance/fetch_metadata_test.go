@@ -420,9 +420,11 @@ func TestFetch_OmitsFieldsThatBecomeEmpty(t *testing.T) {
 // icon URL の長さは rune で数えること (#2723)。
 //
 // **非 ASCII で測る。** ASCII だけの fixture では byte 判定でも rune 判定でも同じ
-// 結果になるので、実装を byte に戻しても検出できない。`resolveAgainstBase` は
-// `url.URL.String()` を返し、Go は query と host の非 ASCII を素通しするので、
-// この形は実際に来る。
+// 結果になるので、実装を byte に戻しても検出できない。
+//
+// **query に置く。** `resolveAgainstBase` が返す `url.URL.String()` は host と path
+// の非 ASCII を percent-encode する (= rune 数と byte 数が一致してしまう) が、
+// **query はそのまま残す**ので、この形なら差が出る。実際に来る形でもある。
 func TestFetch_IconURLLengthIsCountedInRunes(t *testing.T) {
 	// 200 rune / 600 byte。byte で見ると 256 を超えて落ちる。
 	query := strings.Repeat("あ", 200)

@@ -151,7 +151,7 @@ func TestUpdateRemoteNote_TruncatesCWAndStripsNUL(t *testing.T) {
 // 列に入らない id の Note は取り込まないこと (#2723)。
 //
 // `note.uri` は varchar(512)。**切ると別の note を指す URI になる**うえ、dedup
-// (`FindByURI`) の鍵でもある。切らずに拒否して、permanent error として ack する。
+// (`FindByURI`) の鍵でもある。切らずに拒否する。
 func TestIngestNote_RejectsOversizedURI(t *testing.T) {
 	r, noteRepo := ingestCWEnv(t)
 	longID := "https://remote.example/notes/" + strings.Repeat("n", 512)
@@ -162,10 +162,15 @@ func TestIngestNote_RejectsOversizedURI(t *testing.T) {
 	_, err := r.IngestNote([]byte(doc))
 	require.Error(t, err, "列に入らない id の Note を受理している")
 	assert.ErrorIs(t, err, ErrInvalidNote)
-	// **job の結末までは変わらない。** `handleCreate` はこの error を surface する
-	// ので inbox job は retry を使い切って dead になる。ここで確かめるのは
-	// 「DB を触らずに拒否すること」まで。`isPermanentSkipError` の分類は
-	// この経路では誰も参照しないので assert しない。
+	// **permanent 分類であること。** この関数は `ResolveNote` からも来るので、
+	// Like / Announce / Undo(Like) / Undo(Announce) はこの分類を見て ack する
+	// (`isPermanentSkipError`)。transient に落ちると、同じ document を取り直す
+	// activity が retry のたびに走る。
+	//
+	// **ただし ack されるのはその 4 経路だけ**で、`handleCreate` はこの error を
+	// surface するので inbox job は retry を使い切って dead になる。どちらにも
+	// 一般化しないこと。
+	assert.True(t, isPermanentSkipError(err), "permanent 分類から外れている")
 	assert.Empty(t, noteRepo.Notes)
 }
 

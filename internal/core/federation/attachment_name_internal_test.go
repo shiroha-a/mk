@@ -46,8 +46,12 @@ func TestAttachmentFileName(t *testing.T) {
 // 実際には超えないが、上限の出どころを 1 つにしてある。
 func TestAttachmentFileName_FitsColumn(t *testing.T) {
 	for _, raw := range []string{
+		// ValidateFileName を通る最長 (200 rune)。**percent-encoding 後の長さで
+		// 数える**ので、非 ASCII は 1 文字 9 rune (%E3%81%82) に膨らむ。
+		"https://m.example/" + strings.Repeat("a", 200),
+		// 通らない側 (fallback に落ちる)。
+		"https://m.example/" + strings.Repeat("a", 201),
 		"https://m.example/" + strings.Repeat("あ", 199) + ".png",
-		"https://m.example/" + strings.Repeat("a", 500),
 		"https://m.example/",
 	} {
 		got := attachmentFileName(raw)

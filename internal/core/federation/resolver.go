@@ -2428,16 +2428,20 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	//
 	// **DB を引く前に見る。** NUL 入りの値は `FindByURI` の SELECT 自体が落ちる。
 	//
-	// **job の結末は変わらない。** `handleCreate` は `ErrInvalidNote` を surface
-	// するので (`isPermanentSkipError` はハンドラが**下位の**失敗を握る用で、
-	// ハンドラ自身の戻り値には効かない)、inbox job は retry を使い切って dead に
-	// なる (既定 8 回)。この document はそもそも保存できないので結末としては正しく、
-	// 変わるのは 1 回あたりのコスト (DB を叩かない) と、原因が 22001 ではなく
-	// 明示的な拒否として残ること。
+	// **job の結末は経路で違う。** この関数は `handleCreate` からも `ResolveNote`
+	// からも来る。`handleCreate` は `ErrInvalidNote` を surface するので inbox job は
+	// retry を使い切って dead になる (既定 8 回) が、Like / Announce / Undo(Like) /
+	// Undo(Announce) は `ResolveNote` の失敗を `isPermanentSkipError` に通すので
+	// **ack して drop する**。「permanent 分類だから常に ack」でも「常に dead」でも
+	// ないので、どちらにも一般化しないこと。
+	//
+	// いずれにせよこの document は保存できないので結末としては正しい。gate の利得は
+	// 原因が 22001 ではなく明示的な拒否として残ること。
 	//
 	// **ephemeral (リレー) 経路にも効かせる。** Redis に置く分には列幅は無関係だが、
-	// ephemeral note は後で materialize されうる (`MaterializeActor` 経由) ので、
-	// そのとき同じ 22001 で落ちる。先に弾くほうが原因に近い。
+	// ephemeral note は後で materialize されうる (`ephemeral.Materializer.EnsureNote`
+	// → `NoteWriter.Create`) ので、そのとき同じ 22001 で落ちる。先に弾くほうが
+	// 原因に近い。
 	if !fitsColumn(apNote.ID, noteURIMaxRunes) {
 		slog.Warn("federation: rejecting note whose id does not fit note.uri",
 			"id", truncateRunes(apNote.ID, noteURIMaxRunes))
@@ -3859,7 +3863,7 @@ func remoteURIValue(actorURI, column, raw string) string {
 	}
 	if !fitsColumn(raw, userURIMaxRunes) {
 		slog.Warn("federation: dropping remote uri that does not fit its column",
-			"uri", truncateRunes(actorURI, userURIMaxRunes), "column", column)
+			"actor", truncateRunes(actorURI, userURIMaxRunes), "column", column)
 		return ""
 	}
 	return raw
@@ -3913,6 +3917,7 @@ func isForeignKeyViolation(err error) bool {
 // driveFileRepo が未設定なら空 (model.StringArray{}) を返す (旧挙動)。userID は
 // リモート user の ID (note.UserID 相当)、host はリモート host (nil =
 // ローカル、attachment 文脈ではほぼ常に non-nil)。
+
 // attachmentFileName derives the drive file name from the attachment URL, the
 // way upstream's uploadFromUrl does (`urlObj.pathname.split('/').pop()`, then
 // `validateFileName` の不合格は `untitled`)。
@@ -3922,10 +3927,14 @@ func isForeignKeyViolation(err error) bool {
 // URL の basename だけを使う。**拡張子の補完もしない** — upstream が付けるのは
 // 実体を sniff した型であって、相手の申告した mediaType ではないため。
 //
-// 結果が upstream とずれるのは主に 2 つ: Content-Disposition で filename を返す
-// 配信元 (S3 の response-content-disposition 等) と、**拡張子を持たない URL**
-// (Misskey / mk-go 自身の内部ストレージは `/files/<uuid>` 形式なので常にずれる)。
-// Mastodon 系はどちらにも当たらないので一致する。
+// 結果が upstream とずれるのは 4 つ。(1) Content-Disposition で filename を返す
+// 配信元。**Misskey 同士ではここでずれる** — upstream は自分が配信するファイルに
+// `Content-Disposition: inline; filename=...` を付ける (object storage / 自 host
+// 配信のどちらも) ので、upstream 側は原ファイル名を採る。(2) 拡張子の補完。
+// (3) Go の `net/url` は WHATWG URL の正規化をしないので `/a/%2e%2e` (upstream は
+// 畳んで `untitled`) と `/a\b.png` (upstream は `\` を区切り扱いにして `b.png`) が
+// ずれる。(4) upstream は `name === comment` のとき comment を落とすが mk-go は
+// 残す。Mastodon 系はいずれにも当たらないので一致する。
 //
 // pathname と同じく percent-encoding は解かない (解くと `%2F` が `/` になり、
 // upstream が弾く名前を作ってしまう)。
@@ -3963,6 +3972,10 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		//
 		// **DB を引く前に見る。** NUL 入りの値は下の `FindByURI` の SELECT 自体が
 		// 22021 で落ちる (機能は壊れないが、添付ごとに DB エラーが出る)。
+		//
+		// **順序を保てるのは `drive_file.uri` も 1024 だから。** dedup に当たりうる
+		// 値は必ずこの gate を通る。`driveFileURLMaxRunes` を下げるか `uri` を広げる
+		// なら、gate を dedup の後ろに戻すこと (でないと DB に在る添付を捨てる)。
 		if !fitsColumn(doc.URL, driveFileURLMaxRunes) {
 			slog.Warn("federation: skipping attachment whose url does not fit drive_file.url",
 				"url", truncateRunes(doc.URL, driveFileURLMaxRunes))

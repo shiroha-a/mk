@@ -1624,10 +1624,14 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 		// **DB を引く前に見る。** NUL 入りの値は `FindByURI` の SELECT 自体が
 		// 22021 で落ちる。
 		//
-		// **job の結末は変わらない** — この error は `dispatchActivity` がそのまま
-		// 返すので inbox job は retry を使い切って dead になる (既定 8 回)。
-		// そもそも保存できない activity なので正しい結末で、変わるのは 1 回あたりの
-		// コストと、原因が 22001 ではなく明示的な拒否として残ること。
+		// **この error は上位に surface する** — `dispatchActivity` がそのまま返すので
+		// inbox job は retry を使い切って dead になる (既定 8 回)。そもそも保存
+		// できない activity なので結末としては正しい。
+		//
+		// **ここでの利得は「早く落とす」ことではない。** gate は `ResolveNote` の後
+		// なので、対象 note の fetch と永続化は既に済んでいる。得られるのは、原因が
+		// 22001 ではなく明示的な拒否として残ることと、NUL 入力で下の `FindByURI` が
+		// 落ちなくなること。
 		if !fitsColumn(act.ID, noteURIMaxRunes) {
 			slog.Warn("federation: rejecting Announce whose id does not fit note.uri",
 				"id", truncateRunes(act.ID, noteURIMaxRunes))
