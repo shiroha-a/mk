@@ -486,28 +486,6 @@ mk-go は意味的に正確な 404 / 403 を返していたが、upstream から
 status で分岐するクライアントが壊れるため、drop-in 互換を優先して 400 に揃えた
 (本家 e2e を mk-go に向けて回した際に検出、44 種 / 230 箇所)。
 
-### リモート由来の文字列を列に入れるときの規則
-
-**値の性質で分ける。一律に truncate しない** (#2723)。以下は個別の判断ではなく、
-新しく列を足すときにも同じ結論になるための規則。
-
-| 種類 | 扱い | 理由 |
-|---|---|---|
-| **本文系** (`cw` / `text` / `description` / `name` / `location` / nodeinfo の `description` 等) | rune 単位で **truncate** | 切っても意味が残る。列はコードポイントで数えるので byte で切らない |
-| **URL / ID 系** (`uri` / `inbox` / `sharedInbox` / `featured` / `movedToUri` / `avatarUrl` / `keyId` 等) | 収まらなければ**値ごと捨てて親の行は作る** | 切った URL は別物で、取りに行っても無駄なうえ壊れた参照が残る |
-| **身元そのもの** (`uri` / `host` / `preferredUsername`) | 収まらなければ **document ごと拒否** | 切ると別人になり、捨てると lookup の鍵が無くなる |
-| **NUL** | 種類を問わず**除去**。ただし URL / ID 系は上の規則どおり値ごと捨てる | PostgreSQL は varchar / text に NUL を入れると 22021 で落ちる |
-
-**「同じ書き込みに載っている他の列を巻き添えにしない」が目的**なので、判断の単位は
-列ではなく **INSERT / UPDATE 1 回**になる。1 列でも溢れれば、その書き込みに乗っている
-全部が失われる。
-
-列長の出どころは `migration/000001_initial.up.sql` の 1 箇所だけ。コード側の定数と
-独立に同じ数値を書くことになるので、**実 DB の列長を読んで突き合わせる回帰テスト**を
-必ず置く (`TestNote_CWColumnLimitIs512` / `TestUser_IdentityColumnLimits` /
-`TestInstance_NodeinfoColumnLimits`)。mock repository は列制約を持たないため、
-resolver 側のテストだけでは「本当に入る長さか」を確かめられない。
-
 | 項目 | upstream | mk-go |
 |---|---|---|
 | AID/AIDXの上限外timestamp | AIDは8桁を超えて固定長を外れ、AIDXは下位8桁へwrapする | **base36 8桁の最大値へ飽和する。** 固定長を維持し、時系列順序の逆転を防ぐ安全側乖離 (#2672) |
@@ -517,11 +495,14 @@ resolver 側のテストだけでは「本当に入る長さか」を確かめ�
 | リモート actor の `vcard:Address` / profile `fields` の空白 | trim も空排除もせず保存 | **trim して空なら NULL / entry ごと落とす**。ローカルの `i/update` と同形の正規化 (#2661) |
 | リモート actor の profile 由来文字列に含まれる NUL | **未処理** (upstream も同じ理由で書き込みが失敗する) | **除去する**。PostgreSQL の text は NUL を受け付けず (SQLSTATE 22021 `invalid byte sequence for encoding "UTF8": 0x00`)、jsonb も拒否する (22P05)。**SQLSTATE は protocol mode で変わる** — 本番の `internal/db` は pgx の extended protocol なので 22021、`internal/testutil` は `PreferSimpleProtocol: true` なので同じ入力が 08P01 (`invalid message format`) になる。運用ログを grep するときは 22021 の方。同じ書き込みに乗っている他の列まで巻き添えになり、create 経路では `user_profile` 行が 1 行も作られない (以後の refresh も同じ失敗を繰り返す)。対象は `vcard:Address` / profile `fields` の name・value / `description` (`_misskey_summary` は `mfm.FromHTML` を通らない)。`user.name` も同様に除去する。`user.avatarUrl` / `user.bannerUrl` は**除去せず値ごと捨てる** (NUL を抜いた URL は別物なので取りに行っても無駄)。`user.tags` / `note.tags` は**正規化後に NUL を含む tag を落とす** (varchar(128)[] は NUL を受け付けない)。`user.emojis` は未処理。**長さ超過**なら `emoji.name varchar(128)` への insert が落ちて `upsertEmojis` が `continue` し 1 件だけ除外されるが、**NUL の場合は先に batch SELECT (`FindManyByNamesAndHost`) が 22021 で落ちて `return` する**ので、その actor / Note の絵文字が全滅する (actor 自体は作られる) (#2662)。`preferredUsername` は NUL を含む時点で不正なので除去ではなく actor ごと reject する (#2662) (#2661) |
 | リモート actor の `name` の長さ | `truncate(person.name, 128)` (`stringz.substring`) | **128 rune で切る**。切らないと `user.name` (varchar(128)) への書き込みが SQLSTATE 22001 で落ち、actor がまったく作られない。upstream は書記素クラスタ単位の `stringz` なので境界がずれうるが、PostgreSQL の varchar はコードポイントで数えるため rune 単位のほうが上限に忠実 (#2662) |
-| リモート Note の `cw` / `text` の長さ | truncate せずそのまま保存 | **512 rune で切る** (`note.cw` は varchar(512))。Mastodon の CW は利用者が自由に書くので長文が普通に来る。溢れると `noteRepo.Create` / Update 経路の `UpdateFields` ごと落ちて `ingestNoteWithCreated` が error を返し、**inbox job が恒久 retry になる**。`text` は列が text 型なので長さは効かないが、NUL の除去は同じ経路で行う (#2723) |
-| リモート actor の `uri` / `host` の長さ | 検証なし | **収まらなければ actor ごと拒否する** (`uri` は varchar(512)、`host` は varchar(128))。身元そのものなので切ると別人になり、捨てると lookup の鍵が無くなる。upstream は `uri` に `person.id` をそのまま入れるので同じ 22001 で失敗しうるが、**mk-go は拒否した時点で `lastFetchedAt` を進める**ので取得の増幅は起きない (#2723) |
+| リモート Note の `cw` / `text` の長さ | truncate せずそのまま保存 | **512 rune で切る** (`note.cw` は varchar(512))。Mastodon の CW は利用者が自由に書くので長文が普通に来る。溢れると `noteRepo.Create` / Update 経路の `UpdateFields` ごと落ちて `ingestNoteWithCreated` が error を返し、**inbox job が retry を使い切って dead になる** (既定 8 回、`internal/queue/policy.go`。その note は二度と取り込まれない)。`text` は列が text 型なので長さは効かないが、NUL の除去は同じ経路で行う (#2723) |
+| リモート actor の `uri` / `host` の長さ | 検証なし | **収まらなければ actor ごと拒否する** (`uri` は varchar(512)、`host` は varchar(128))。身元そのものなので切ると別人になり、捨てると lookup の鍵が無くなる。upstream は `uri` に `person.id` をそのまま入れるので同じ 22001 で失敗しうる。**gate は create 経路にしかない** (`refreshActor` は既存行専用で `uri` / `host` を書かない)。拒否は `ErrInvalidActor` = permanent 扱いなので inbox job は retry せずに ack するが、**その actor から activity が来るたびに 1 回 fetch する状態は続く** (行が作られない以上 `lastFetchedAt` を進める先が無い) (#2723) |
 | リモート actor の `inbox` / `sharedInbox` / `featured` / `movedToUri` の長さ | 検証なし | **収まらなければ値ごと捨てて actor は取り込む** (いずれも varchar(512))。icon / banner URL (#2662) と同じ判断。`inbox` を捨てるとその actor への配送はできなくなるが、表示や mention の解決は生きる。**create 側が落ちれば actor が 1 行も作られず、refresh 側が落ちれば `lastFetchedAt` を含む UPDATE ごと失敗して inbound activity 1 件につき outbound fetch が 1 回走り続ける** (#2723) |
-| リモートインスタンスの nodeinfo の text field | `softwareName` / `softwareVersion` / `name` / `description` / `themeColor` を無検査で保存 | **各列の上限 (64 / 64 / 256 / 4096 / 64) で切り、NUL を除去する**。mk-go は元から `iconUrl` / `faviconUrl` だけ長さを見ていたが、**同じ `fields` map に載る**これらが無検査だと 1 列溢れただけで UPDATE 全体が落ち、当のガードの目的が同じ関数の中で破られる (#2723) |
-| リモート添付の `name` の作り方 | `uploadFromUrl` が**実体を download** し、`pathname.split('/').pop()` (Content-Disposition があればそちら) を `validateFileName` に通し、不合格なら `untitled`。さらに `correctFilename` が**sniff した実型**の拡張子を補う | **置き場は upstream と同じにした** (#2723)。代替テキスト (AP の `name`) は `comment` にだけ入れ、`drive_file.name` は URL の basename から作る。差分は 2 つ: (1) mk-go はリモートメディアを取りに行かない (5.5) ので **Content-Disposition を見られない** — Mastodon 系は返さないので実際の結果は一致することが多い、(2) **拡張子の補完をしない** (upstream が付けるのは sniff した実型で、相手の申告した `mediaType` ではないため)。`comment` の 512 は upstream と一致 (`DB_MAX_IMAGE_COMMENT_LENGTH`、upstream の `truncate` もコードポイント単位)。**この変更より前に取り込んだ行は直らない** — 添付は URI で dedup するので `name` に代替テキストが入ったまま残る。**連合出力は元から無事** (renderer は upstream と同じく `Name: stringValue(f.Comment)` で comment を使う) |
+| リモート Note / Announce の `id` の長さ | 検証なし (`uri` に生値を入れる) | **収まらなければ document ごと拒否する** (`note.uri` は varchar(512))。切ると別の note を指す URI になり、dedup (`FindByURI`) と Undo(Announce) の逆引きの鍵も壊れる。`ErrInvalidNote` = permanent 扱いなので、retry せずに ack する (#2723) |
+| リモート actor の `alsoKnownAs` に含まれる NUL | 未処理 (upstream も同じ理由で書き込みが失敗する) | **要素ごと落とす** (`user.alsoKnownAs` は text 列なので長さは効かないが NUL は 22021)。1 要素混ざっただけで actor の INSERT / refresh の UPDATE がまるごと失われる。切らずに捨てるのは、切った URI が移行の認可 (`alsoKnownAsContains`) の一致判定に使えないため (#2723) |
+| リモート添付の `type` / `thumbnailUrl` / `blurhash` / `url` の長さ | `uploadFromUrl` が download 時に決めるので AP の申告値は入らない | **列に合わせて扱いを分ける** (#2723)。`url` (varchar(1024) NOT NULL) は実体そのものなので**入らなければその添付を諦める**、`type` (128) は切ると別の MIME type になるので `application/octet-stream` に倒す、`thumbnailUrl` (512) / `blurhash` (128) は表示の補助なので値ごと捨てる。upstream は添付 1 件の失敗で Note ごと落とす (`ApNoteService`) ので、mk-go は元から安全側 |
+| リモートインスタンスの nodeinfo の text field | 長さは無検査。ただし値そのものは正規化する — `softwareName` は `.toLowerCase()` (string でなければ `'?'`)、`themeColor` は `tinycolor` で検証して `#rrggbb` に正規化 (不正なら `null`) | **各列の上限 (64 / 64 / 256 / 4096 / 64) で切り、NUL を除去する**。mk-go は元から `iconUrl` / `faviconUrl` だけ長さを見ていたが、**同じ `fields` map に載る**これらが無検査だと 1 列溢れただけで UPDATE 全体が落ち、当のガードの目的が同じ関数の中で破られる。**値の正規化は upstream に揃えていない** — `softwareName` を lowercase せず、`themeColor` も色として検証しないので任意文字列が入る (`themeColor` は upstream だと正規化の結果として列を溢れることが構造的に無い)。software block の判定 (`MatchSuspendedSoftware`) は case-insensitive なので回避には使えないが、`federation/instances` が返す値は upstream と変わる (#2723) |
+| リモート添付の `name` の作り方 | `uploadFromUrl` が**実体を download** し、`pathname.split('/').pop()` (Content-Disposition があればそちら) を `validateFileName` に通し、不合格なら `untitled`。さらに `correctFilename` が**sniff した実型**の拡張子を補う | **置き場は upstream と同じにした** (#2723)。代替テキスト (AP の `name`) は `comment` にだけ入れ、`drive_file.name` は URL の basename から作る。差分は 2 つ: (1) mk-go はリモートメディアの**実体を保存しない** (5.5) ので **Content-Disposition を見ない** (寸法の復元で GET すること自体はある)、(2) **拡張子の補完をしない** (upstream が付けるのは sniff した実型で、相手の申告した `mediaType` ではないため)。**Misskey / mk-go 同士では常にずれる** — 内部ストレージの URL が `/files/<uuid>` で拡張子を持たないため。Mastodon 系はどちらにも当たらないので一致する。細かい差として、upstream は `name === comment` のとき comment を落とすが mk-go は残す。`comment` の 512 は upstream と同じ値 (`DB_MAX_IMAGE_COMMENT_LENGTH`) だが、**数え方は違う** — upstream の `truncate` は `stringz.substring` = 書記素クラスタ単位なので、ZWJ 絵文字を含む alt text では 512 クラスタ = コードポイントでは 512 超になり upstream 側が列を溢れさせる。mk-go は rune 単位で切るので列に忠実 (`user.name` の 128 と同じ扱い)。**この変更より前に取り込んだ行は直らない** — 添付は URI で dedup するので `name` に代替テキストが入ったまま残る。**連合出力は元から無事** (renderer は upstream と同じく `Name: stringValue(f.Comment)` で comment を使う) |
 | リモートメディアのキャッシュ | `cacheRemoteFiles` が真なら実体を自 Drive へ保存 | **保存しない** (相手の削除の権利 / 違法コンテンツ保持のリスク回避)。詳細と弱点は §5.5 |
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
@@ -544,6 +525,39 @@ resolver 側のテストだけでは「本当に入る長さか」を確かめ�
 | `MK_ONLY_SERVER` / `MK_ONLY_QUEUE` の値 | `if (process.env[...])` の truthy 判定。**`=false` と書いても有効になる** (無効化するには変数ごと消すしかない) | `1/true/yes/on` を真、`0/false/no/off/空` を偽として解釈する。未知の値は起動時エラー。`=1` を使う既存構成は影響を受けず、`=false` と書いた運用者だけが意図どおりに動く (#2459) |
 | 同上を両方指定したとき | `onlyServer` を優先して黙って続行 | **起動エラー**。矛盾した設定は運用ミスで、起動してから「配送が動かない」と気付く方が高くつく (#2459) |
 | `MK_ONLY_QUEUE` ノードの listener | 一切 listen しない | `/healthz` (と `enableMetrics` 時の `/metrics`) だけを持つ最小 mux を listen する。upstream 相当だと `-healthcheck` が必ず失敗し、**コンテナのヘルスチェックを外さないと運用できないノード**になるため。API 面は生えない (`s.echo` を流用せず別 mux を立てる、#2459) |
+
+### リモート由来の文字列を列に入れるときの規則
+
+**値の性質で分ける。一律に truncate しない** (#2723)。以下は個別の判断ではなく、
+新しく列を足すときにも同じ結論になるための規則。
+
+| 種類 | 扱い | 理由 |
+|---|---|---|
+| **本文系** (`cw` / `text` / `description` / `name` / `location` / nodeinfo の `description` 等) | rune 単位で **truncate** | 切っても意味が残る。列はコードポイントで数えるので byte で切らない |
+| **URL / ID 系** (`inbox` / `sharedInbox` / `featured` / `movedToUri` / `avatarUrl` / `thumbnailUrl` / `alsoKnownAs` の要素 等) | 収まらなければ**値ごと捨てて親の行は作る** | 切った URL は別物で、取りに行っても無駄なうえ壊れた参照が残る |
+| **身元そのもの** (`user.uri` / `user.host` / `preferredUsername` / `note.uri` / `drive_file.url`) | 収まらなければ **document ごと拒否** (添付は 1 件ずつなのでその添付だけ) | 切ると別のものを指し、捨てると lookup / dedup の鍵が無くなる |
+| **NUL** | 種類を問わず**除去**。ただし URL / ID 系は上の規則どおり値ごと捨てる | PostgreSQL は varchar / text に NUL を入れると 22021 で落ちる |
+
+**「同じ書き込みに載っている他の列を巻き添えにしない」が目的**なので、判断の単位は
+列ではなく **INSERT / UPDATE 1 回**になる。1 列でも溢れれば、その書き込みに乗っている
+全部が失われる。失われる範囲も書き込みの単位で決まる: note なら inbox job が retry を
+使い切って dead になり (既定 8 回、`internal/queue/policy.go`) **その note は二度と
+取り込まれない**、actor なら 1 行も作られない、添付は 1 件ずつ Create するので
+**その添付だけ**消える。
+
+**まだ規則を適用していない列がある。** `user_publickey.keyId` (256) /
+`note_reaction.reaction` (260) / `poll.choices` (varchar(256)[]) / chat 系
+(`chat_room.name` 256 / `chat_room.id` 32 / `chat_message.text` 4096) /
+`abuse_user_report.comment` (2048) は無検査のまま (#2726)。
+
+列長の出どころは `migration/` の SQL (多くは `000001_initial.up.sql`、後から足した
+テーブルは個別のファイル)。コード側の定数と独立に同じ数値を書くことになるので、
+**実 DB の列長を `information_schema` から読んで突き合わせる回帰テスト**を必ず置く
+(`TestNote_CWColumnLimitIs512` / `TestNote_URIColumnLimitIs512` /
+`TestUser_IdentityColumnLimits` / `TestDriveFile_ColumnLimits` /
+`TestInstance_NodeinfoColumnLimits`)。mock repository は列制約を持たないため、
+呼び出し側のテストだけでは「本当に入る長さか」を確かめられない
+(`internal/testutil` の `assertUserColumns` は `"user"` の主な列だけ本番に揃えてある)。
 
 ## 8. 逆方向 divergence (mk-go 独自 error を upstream に合わせて廃止したもの)
 
