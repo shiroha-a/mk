@@ -331,8 +331,19 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		// body actor を認証している場合のみ許可する。LD-Signature の hardening
 		// (forbidden directive 等) も本 gate に集約する。
 		if err := p.authorizeActor(payload.Body, actor); err != nil {
+			// **payload.Host を出さない。** これは常に空 (リクエストの Host
+			// ヘッダはこちらのホスト名なので送信元を表さず、handler も設定
+			// しない)。署名の keyId から導いた host は既に上で計算済みなので
+			// そちらを出す (#2716)。
+			//
+			// signer (HTTP 署名の actor) と actor (body の actor) は転送活動で
+			// 食い違う。捨てた理由を追うにはどちらも要る。
 			slog.Warn("inbox: actor authorization failed, dropping activity",
-				"host", payload.Host, "err", err)
+				"host", host,
+				"signer", signerURIOf(actor),
+				"actor", federation.ExtractActorIRI(payload.Body),
+				"activityType", federation.ExtractActivityType(payload.Body),
+				"err", err)
 			p.recordInboxTelemetry(host, deliveryhealth.ClassActorUnauthorized, started, err.Error())
 			return nil
 		}
@@ -514,7 +525,11 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 	}
 	// 鍵が DB に載った状態で LD-Signature 本体を検証する。
 	if _, present, err := p.ldVerifier.VerifyAndCreator(body); err != nil {
-		return fmt.Errorf("ld-signature verify failed: %w", err)
+		// **相手を載せる。** 他の分岐は signer / actor を入れているのに、ここだけ
+		// 原因文字列だけだった。activity を捨てる経路なので、誤って落としていた
+		// 場合に気付く手段がこのログしか無い (#2716)。
+		return fmt.Errorf("ld-signature verify failed (signer=%q actor=%q creator=%q): %w",
+			signerURI, bodyActor, creatorKeyID, err)
 	} else if !present {
 		return fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
 	}
@@ -711,3 +726,13 @@ func (p *InboxProcessor) HasInboxReplayGuard() bool { return p.replayGuard != ni
 // 未配線だと `isBlocked` が常に false になり、ブロック済み host / 許可外 host
 // からの activity を受け入れる。起動時検査に使う (#2683)。
 func (p *InboxProcessor) HasHostBlockChecker() bool { return p.hostBlocker != nil }
+
+// signerURIOf returns the signer's actor URI, or "" when unresolved.
+//
+// 破棄ログ用。nil / URI 未設定でも空文字にするだけで、判定には使わない (#2716)。
+func signerURIOf(signer *model.User) string {
+	if signer == nil || signer.URI == nil {
+		return ""
+	}
+	return *signer.URI
+}

@@ -577,6 +577,27 @@ func ExtractActivityID(body []byte) string {
 	return act.ID
 }
 
+// ExtractActivityType reads the activity's `type` through the same
+// unwrap+Normalize the inbox gate uses.
+//
+// **ログ専用。** どの activity を捨てたのかを追えるようにするためのもので
+// (#2716)、判定には使わない。取得不能 / 欠落時は "" を返す。
+func ExtractActivityType(body []byte) string {
+	if unwrapped, ok := tryUnwrapSingletonArray(body); ok {
+		body = unwrapped
+	}
+	normalized, err := activitypub.Normalize(body)
+	if err != nil {
+		return ""
+	}
+	var act genericActivity
+	// ExtractActorIRI と同じ理由で型エラーを握る。
+	if err := unmarshalIgnoringTypeErrors(normalized, &act); err != nil {
+		return ""
+	}
+	return act.Type
+}
+
 // SetBlockingService wires the blocking service for Block/Undo Block activities.
 func (p *Processor) SetBlockingService(svc *coreblocking.Service) {
 	p.blockingService = svc
