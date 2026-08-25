@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/net/html"
 )
@@ -161,16 +162,7 @@ const (
 // (切った URL は別物で取りに行っても無駄) が、表示用のテキストは切っても意味が
 // 残るので切る。
 func clampInstanceText(raw string, max int) string {
-	out := strings.Map(func(r rune) rune {
-		if r == 0 {
-			return -1
-		}
-		return r
-	}, raw)
-	if runes := []rune(out); len(runes) > max {
-		out = string(runes[:max])
-	}
-	return out
+	return colfit.Text(raw, max)
 }
 
 // maxInstanceURLLen は instance.iconUrl / faviconUrl カラムの varchar(256)
@@ -184,8 +176,11 @@ const maxInstanceURLLen = 256
 // **rune で数える。** PostgreSQL の varchar はコードポイント数で数えるので、
 // byte 長で見ると非 ASCII を含む URL を必要以上に落とす。URL は切ると別物に
 // なるので、収まらなければ値ごと捨てる (clampInstanceText と扱いが違う)。
+//
+// colfit.Fits は NUL も見る。**ここへ生の NUL は届かない** (上の Fetch のコメント
+// 参照) ので余計な判定だが、数え方を 1 箇所に集めるほうを採る (#2726)。
 func fitsInstanceColumn(v string, max int) bool {
-	return v != "" && len([]rune(v)) <= max
+	return v != "" && colfit.Fits(v, max)
 }
 
 // fetchIcons extracts iconUrl (high-res, used by detailed instance views)

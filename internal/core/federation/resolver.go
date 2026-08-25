@@ -23,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/idnhost"
@@ -963,11 +964,7 @@ const maxRemoteUsernameLen = 128
 
 // remoteDisplayName normalises a remote actor's display name for `user.name`.
 func remoteDisplayName(name string) string {
-	name = sanitizeRemoteText(name)
-	if runes := []rune(name); len(runes) > maxRemoteNameLen {
-		name = string(runes[:maxRemoteNameLen])
-	}
-	return name
+	return colfit.Text(name, maxRemoteNameLen)
 }
 
 // usernamePattern mirrors upstream validateActor's preferredUsername check
@@ -1028,15 +1025,7 @@ const (
 // description は mfm.FromHTML が NUL を落とすが、**_misskey_summary は
 // FromHTML を通らない** ので description も対象に含める。
 func sanitizeRemoteText(s string) string {
-	if !strings.ContainsRune(s, 0) {
-		return s
-	}
-	return strings.Map(func(r rune) rune {
-		if r == 0 {
-			return -1
-		}
-		return r
-	}, s)
+	return colfit.StripNUL(s)
 }
 
 // apTypeOf returns an AP object's `type`, tolerating the array form.
@@ -3848,7 +3837,7 @@ const (
 // PostgreSQL の varchar はコードポイント数で数えるので rune で見る。NUL は
 // 長さに関わらず 22021 で弾かれる。
 func fitsColumn(s string, max int) bool {
-	return !strings.ContainsRune(s, 0) && len([]rune(s)) <= max
+	return colfit.Fits(s, max)
 }
 
 // remoteURIList joins remote-supplied URIs for a comma-separated column,
@@ -3902,20 +3891,13 @@ func inboxPtr(inbox string) *string {
 // 壊れた参照を保存することになる。そちらは `remoteMediaURL` と同じく**値ごと捨てる**
 // (#2723)。
 func remoteText(raw string, max int) string {
-	out := sanitizeRemoteText(raw)
-	if max > 0 {
-		out = truncateRunes(out, max)
-	}
-	return out
+	return colfit.Text(raw, max)
 }
 
 // truncateRunes clips s to at most max runes. byte 単位で切ると壊れた UTF-8 を
 // 書くので rune で数える (extractRemoteDescription と同じ方針)。
 func truncateRunes(s string, max int) string {
-	if runes := []rune(s); len(runes) > max {
-		return string(runes[:max])
-	}
-	return s
+	return colfit.TruncateRunes(s, max)
 }
 
 // isForeignKeyViolation reports whether err is a PostgreSQL foreign_key_violation.
