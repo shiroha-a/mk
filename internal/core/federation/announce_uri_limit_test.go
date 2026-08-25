@@ -1,6 +1,8 @@
 package federation_test
 
 import (
+	"encoding/json"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -96,4 +98,46 @@ func TestProcess_Like_AcksOversizedTargetURI(t *testing.T) {
 	// **ack すること** (error を返すと retry に乗る)。
 	require.NoError(t, env.processor.Process(body), "取り込めない note への Like で retry に乗せている")
 	assert.Empty(t, env.reactionRepo.Reactions, "reaction を作っている")
+}
+
+// fragment に NUL を持つ Announce の id も拒否すること (#2723)。
+//
+// **この経路は生きている。** `url.Parse` は制御文字を弾くが **fragment だけは例外**
+// で、`https://h/a#\x00` は parse を通る。`authorizeActor` の host 検査も
+// `Hostname()` を見るだけなので抜ける。素通しすると `FindByURI` の SELECT 自体が
+// 22021 で落ちる。
+func TestProcess_Announce_RejectsURIWithNULInFragment(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	env.noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+	}
+	env.userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	before := len(env.noteRepo.Notes)
+
+	// 前提: この URI は url.Parse を通る (通らないなら gate 以前に落ちてしまい、
+	// このテストは gate を検査していないことになる)。
+	raw := "https://remote.example/announces/1#\x00"
+	u, err := url.Parse(raw)
+	require.NoError(t, err, "前提: fragment の NUL は parse を通る")
+	require.Equal(t, "remote.example", u.Hostname())
+
+	body := []byte(`{
+		"type": "Announce",
+		"id": ` + quoteJSONStr(raw) + `,
+		"actor": "https://remote.example/users/alice",
+		"object": "https://example.com/notes/n1"
+	}`)
+	err = env.processor.Process(body)
+	require.Error(t, err, "NUL を含む id の Announce を受理している")
+	assert.ErrorIs(t, err, federation.ErrInvalidNote)
+	assert.Len(t, env.noteRepo.Notes, before, "renote が作られている")
+}
+
+// quoteJSONStr renders s as a JSON string literal.
+func quoteJSONStr(s string) string {
+	b, err := json.Marshal(s)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }
