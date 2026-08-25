@@ -163,8 +163,10 @@ func (r *Resolver) joinResolveOpt(g *resolveGroup, chain *resolveChain, waitKey,
 	// できない (#2710 review LOW-2)。
 	//
 	// **やり直しは fn の再実行**なので、note 経路では HTTP fetch が 1 回増える
-	// (#2710 review LOW-3)。発火条件が「best-effort な先頭がチェーン固有の理由で
-	// 降りた」に限られ上限も 1 なので、相手方データで増幅はできない。
+	// (#2710 review LOW-3)。上限 1 は**追従側ごと**で、同じ鍵に K 個ぶら下がって
+	// いれば K 回になる (その回だけ collapse が効かない、#2710 review round 3
+	// LOW-6)。K は同時 worker 数で頭打ちなうえ、発火条件が「best-effort な先頭が
+	// チェーン固有の理由で降りた」に限られるので、相手方データで増幅はできない。
 	slog.Debug("federation: redoing a resolve the leader dropped for chain-local reasons", "key", key)
 	v, err, _ = r.joinResolveOnce(g, chain, waitKey, key, mayWait, fn)
 	return v, err

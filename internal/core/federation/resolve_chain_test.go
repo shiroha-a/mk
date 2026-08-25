@@ -202,11 +202,17 @@ func TestEnsureTree(t *testing.T) {
 	})
 }
 
-// ingestedDocID は「祖先が載せた entry」だけを拾うこと (#2695)。
+// ingestedDocID は「祖先が**自分の document として**載せた entry」だけを拾うこと
+// (#2695)。チェーンには 3 種類の entry が載るので、鍵と値の一致で選り分ける。
 //
-// resolveNoteDepth は fetch する**前**に「鍵 → ""」を入れる。正規形では
-// その鍵が document id と一致するので、値を見ないと自分の前置きを祖先の
-// 取り込みと取り違え、あらゆる正規の解決が諦めに落ちる。
+//   - `with(id, id)`: 祖先の取り込み中 (これだけが対象)
+//   - `with(鍵, "")`: resolveNoteDepth の fetch 前の前置き。正規形ではその鍵が
+//     document id と一致するので、値を見ないと自分の前置きを祖先と取り違え、
+//     あらゆる正規の解決が諦めに落ちる
+//   - `with(取得 URI, document id)`: chainAfterProbe。**値は空ではない**ので、
+//     「値が空でない」で判定すると、featured の item の document id がたまたま
+//     祖先の取得 URI と一致したときに誤爆して**別の note の行**を返す
+//     (#2710 review round 3 MEDIUM-1)
 func TestResolveChain_IngestedDocID(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -217,7 +223,11 @@ func TestResolveChain_IngestedDocID(t *testing.T) {
 	}{
 		{"祖先が取り込み中", (&resolveChain{}).with("https://h/notes/x", "https://h/notes/x"), "https://h/notes/x", "https://h/notes/x", true},
 		{"自分の前置き (値が空)", (&resolveChain{}).with("https://h/notes/x", ""), "https://h/notes/x", "", false},
-		{"別名で載っている", (&resolveChain{}).with("https://h/@u/x", "https://h/notes/x"), "https://h/@u/x", "https://h/notes/x", true},
+		// 取得 URI 側の entry。値は非空だが鍵と一致しないので対象外。
+		// ここを true にすると、別 note の id を「祖先が取り込み中」と誤認する。
+		{"祖先の取得 URI に一致 (別 note)", (&resolveChain{}).with("https://h/@u/x", "https://h/notes/x"), "https://h/@u/x", "", false},
+		// 同じ chainAfterProbe が入れるもう 1 つの entry。こちらは鍵 == 値。
+		{"祖先の document id に一致", (&resolveChain{}).with("https://h/@u/x", "https://h/notes/x").with("https://h/notes/x", "https://h/notes/x"), "https://h/notes/x", "https://h/notes/x", true},
 		{"載っていない", (&resolveChain{}).with("https://h/notes/y", "https://h/notes/y"), "https://h/notes/x", "", false},
 		{"docID が空", (&resolveChain{}).with("", ""), "", "", false},
 		{"チェーンが nil", nil, "https://h/notes/x", "", false},

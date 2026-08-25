@@ -332,38 +332,51 @@ func TestIngestNote_PinnedNoteQuotingTheIngestedNoteUnderAnAliasKeepsRenoteID(t 
 // noteInFlightInChain の**2 つ目の lookup** (document id 側) が効くこと。
 //
 // 既定の flag では `noteGroupKey(uri, false, false) == uri` なので 1 つ目と同じ鍵に
-// なり、この分岐は featured 経路からは到達しない。到達するのは鍵の形が変わる
-// ap/show (cross-host) と ephemeral で、そこにテストが無かった (#2710 review LOW-4)。
+// なり、featured 経路 (`featured.go` の `(false, false)`) からは到達しない。
+// **到達するのは ephemeral 経路**で、祖先が別名 URI から入って
+// `chainAfterProbe` が `eph\x00<別名>` と `<document id>` の 2 つを載せたあと、
+// 引用解決が document id を引く形になる (#2710 review LOW-4 / round 3 MEDIUM-2)。
+//
+// `allowCrossHost=true` で呼ぶ本番経路は無い (`noteInFlightInChain` の呼び出しは
+// 2 箇所とも false 固定。ap/show の cross-host は根の 1 回だけで、入れ子の
+// `resolveQuoteURI` は常に false)。写像としては引けるので契約だけ固定しておく。
 func TestNoteInFlightInChain_FallsBackToTheDocumentID(t *testing.T) {
 	const (
-		uri   = "https://remote.example/@ora/o1"
+		alias = "https://remote.example/@ora/o1"
 		docID = "https://remote.example/notes/o1"
 	)
 	r := &Resolver{}
-	// 祖先が document id で載せた状態 (chainAfterProbe / ingestNoteWithCreated)。
-	chain := (&resolveChain{}).with(docID, docID).with(uri, docID)
+	// ephemeral な祖先が別名から入ったあとのチェーン (chainAfterProbe と同じ形)。
+	ephChain := chainAfterProbe((&resolveChain{}), alias, false, true, docID)
+	// 非 ephemeral 版。こちらは 1 つ目の鍵が docID と一致するので 2 つ目は使わない。
+	plainChain := chainAfterProbe((&resolveChain{}), alias, false, false, docID)
 
 	cases := []struct {
 		name           string
+		chain          *resolveChain
 		lookup         string
 		allowCrossHost bool
 		ephemeral      bool
 	}{
-		// group 鍵 (`xhost\x00...` / `eph\x00...`) では引けず、取得 URI 側で当たる。
-		{"cross-host key misses, uri hits", uri, true, false},
-		{"ephemeral key misses, uri hits", uri, false, true},
-		// document id そのもので引く場合も同じ経路を通る。
-		{"document id hits", docID, true, false},
+		// 本番で 2 つ目の lookup に落ちる形。
+		{"ephemeral chain, document id", ephChain, docID, false, true},
+		// 本番には無いが写像としては引ける (cross-host 鍵は 1 つ目で必ず外れる)。
+		{"cross-host key misses, uri hits", plainChain, alias, true, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, inflight := r.noteInFlightInChain(chain, tc.lookup, tc.allowCrossHost, tc.ephemeral)
+			got, inflight := r.noteInFlightInChain(tc.chain, tc.lookup, tc.allowCrossHost, tc.ephemeral)
 			require.True(t, inflight, "2 つ目の lookup が効いていない")
 			assert.Equal(t, docID, got, "既存行を引くための id は document id")
 		})
 	}
 
+	// 1 つ目の鍵で当たる形 (2 つ目に落ちない) も一応固定しておく。
+	got, inflight := r.noteInFlightInChain(plainChain, docID, false, false)
+	require.True(t, inflight)
+	assert.Equal(t, docID, got)
+
 	// 載っていない URI では当たらないこと (どちらの lookup も素通しにしない)。
-	_, inflight := r.noteInFlightInChain(chain, "https://remote.example/notes/zz", true, false)
+	_, inflight = r.noteInFlightInChain(ephChain, "https://remote.example/notes/zz", false, true)
 	assert.False(t, inflight)
 }

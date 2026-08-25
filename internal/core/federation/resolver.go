@@ -2212,22 +2212,6 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
 	// quote chain の depth を引き継いで再帰上限を効かせる。
 	//
-	// **入場した singleflight の鍵を、この区間だけ台帳に載せる** (#2684)。
-	// singleflight は「この鍵が in-flight か」を外から問い合わせられないので、
-	// 入れ子の解決が「待つと自分を待つことになる」を判定できない。
-	//
-	// **区間を ingest に限る。** ここより手前 (FindByURI / ephemeral 逆引き /
-	// HTTP fetch / host 検査) から resolveNoteDepth や updateFeatured へ
-	// 到達する経路は無いので、載せても再入は防げず**他の goroutine を
-	// 取りこぼさせるだけ**になる。実際、singleflight 本体全体を覆うと
-	// (1) 別 worker が同じ引用先を待てずに renoteId を落とし、
-	// (2) 取り込み済みのピンが FindByURI 中に skip されて
-	// ReplaceByUser に消される (#2684 review HIGH-1 / HIGH-2)。
-	// **値に document id を持たせる。** 呼び出し側は取得 URI しか知らないが、
-	// note 行は document id で保存される。別名 URL では両者が食い違うので、
-	// 取得 URI だけで既存行を引くと**必ず空振りする** (#2684 review MED-1)。
-	// fetch して id が確定したので、鍵にも id を紐づけ直す。別名 URL では
-	// 取得 URI と食い違うので、両方から既存行を引けるようにしておく。
 	// **fetch 後にもう一度 in-flight を見る** (#2695)。手前の判定は取得 URI で
 	// 引くので、featured collection が**別名 URL** を載せていると空振りする
 	// (`https://h/@user/x` を取りに行って document の id が `https://h/notes/x`)。
@@ -2258,6 +2242,22 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 			return nil, ErrNoteAncestorIngesting
 		}
 	}
+	// **入場した singleflight の鍵を、この区間だけ台帳に載せる** (#2684)。
+	// singleflight は「この鍵が in-flight か」を外から問い合わせられないので、
+	// 入れ子の解決が「待つと自分を待つことになる」を判定できない。
+	//
+	// **区間を ingest に限る。** ここより手前 (FindByURI / ephemeral 逆引き /
+	// HTTP fetch / host 検査) から resolveNoteDepth や updateFeatured へ
+	// 到達する経路は無いので、載せても再入は防げず**他の goroutine を
+	// 取りこぼさせるだけ**になる。実際、singleflight 本体全体を覆うと
+	// (1) 別 worker が同じ引用先を待てずに renoteId を落とし、
+	// (2) 取り込み済みのピンが FindByURI 中に skip されて
+	// ReplaceByUser に消される (#2684 review HIGH-1 / HIGH-2)。
+	// **値に document id を持たせる。** 呼び出し側は取得 URI しか知らないが、
+	// note 行は document id で保存される。別名 URL では両者が食い違うので、
+	// 取得 URI だけで既存行を引くと**必ず空振りする** (#2684 review MED-1)。
+	// fetch して id が確定したので、鍵にも id を紐づけ直す。別名 URL では
+	// 取得 URI と食い違うので、両方から既存行を引けるようにしておく。
 	resolved := chainAfterProbe(chain, uri, allowCrossHost, ephemeral, idProbe.ID)
 	note, _, err := r.ingestNoteWithCreated(body, "", depth, ephemeral, resolved)
 	return note, err

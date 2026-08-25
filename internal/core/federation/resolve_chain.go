@@ -136,13 +136,19 @@ func (c *resolveChain) chargeWait(d time.Duration) {
 	c.budget.spent.Add(int64(d))
 }
 
-// ingestedDocID reports whether an **ancestor** of this chain has already
-// probed or ingested the given document id, and the id it recorded.
+// ingestedDocID returns the id an **ancestor** of this chain recorded for the
+// given document, and whether such an entry exists.
 //
-// **値が空でないことを条件にする。** `resolveNoteDepth` は fetch 前に
-// 「鍵 → ""」で入るので、正規形 (取得 URI == document id) では自分自身の entry が
-// 同じ鍵に見える。祖先が載せたものは `chainAfterProbe` / `ingestNoteWithCreated`
-// の `with(id, id)` なので値が入っている。値の有無でその 2 つを分ける (#2695)。
+// **鍵と値が一致する entry だけを見る。** 祖先が「自分が取り込んでいる document」
+// として載せるのは `chainAfterProbe` / `ingestNoteWithCreated` の `with(id, id)`
+// だけで、そこは必ず鍵 == 値になる。分けたい相手は 2 つある (#2695)。
+//
+//   - `resolveNoteDepth` が fetch 前に入れる「鍵 → ""」。正規形
+//     (取得 URI == document id) では自分自身の entry が同じ鍵に見える
+//   - `chainAfterProbe` が入れる「取得 URI → document id」。**値は空ではない**
+//     ので、値の有無で分けると、featured の item の document id がたまたま祖先の
+//     取得 URI と一致したときに誤爆し、**別の note の行**を返す。実測で
+//     develop なら入っていたピンが落ちた (#2710 review round 3 MEDIUM-1)
 func (c *resolveChain) ingestedDocID(docID string) (string, bool) {
 	// **届かない防御。** with は空の鍵を弾くので ids に空鍵は入らず、この分岐を
 	// 消しても挙動は変わらない (#2710 review LOW-1)。lookup の実装が変わったとき
@@ -150,7 +156,7 @@ func (c *resolveChain) ingestedDocID(docID string) (string, bool) {
 	if docID == "" {
 		return "", false
 	}
-	if v, ok := c.lookup(docID); ok && v != "" {
+	if v, ok := c.lookup(docID); ok && v == docID {
 		return v, true
 	}
 	return "", false
