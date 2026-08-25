@@ -101,10 +101,13 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	fields := map[string]any{
 		"infoUpdatedAt": &now,
 	}
-	// **全部の列で長さと NUL を見る。** icon / favicon だけ守っても、同じ
-	// `fields` map に載る他の列が 1 つでも溢れれば **UPDATE 全体が落ちて
+	// **この map に載せる値は全部、列に入ることを確かめてから入れる。** icon /
+	// favicon だけ守っても、他の列が 1 つでも溢れれば **UPDATE 全体が落ちて
 	// nodeinfo まで失う** — 下のガードの目的が同じ関数の中で破られる (#2723)。
 	// 値は攻撃者 (リモートインスタンス) が自由に決められる。
+	//
+	// text 列は切って NUL を落とす。**URL 列は NUL を見ない** — `url.Parse` が
+	// 制御文字を含む URL を parse error にするのでここまで来ない (fetchIcons)。
 	if v := clampInstanceText(doc.Software.Name, maxInstanceSoftwareNameLen); v != "" {
 		fields["softwareName"] = &v
 	}
@@ -128,11 +131,12 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// 抽出する。取得失敗は致命ではない (nodeinfo 情報のpersistは継続する)。
 	// DB側 varchar(256) 制約に引っかかるとUPDATE全体が失敗してnodeinfoまで
 	// 失うため長さチェックを必ずかける (攻撃者制御の長いCDN URLを想定)。
+	// **切らずに捨てる** — 切った URL は別物なので取りに行っても無駄。
 	iconURL, faviconURL := s.fetchIcons(host)
-	if iconURL != "" && len(iconURL) <= maxInstanceURLLen {
+	if fitsInstanceColumn(iconURL, maxInstanceURLLen) {
 		fields["iconUrl"] = &iconURL
 	}
-	if faviconURL != "" && len(faviconURL) <= maxInstanceURLLen {
+	if fitsInstanceColumn(faviconURL, maxInstanceURLLen) {
 		fields["faviconUrl"] = &faviconURL
 	}
 
@@ -173,6 +177,16 @@ func clampInstanceText(raw string, max int) string {
 // 失わないため)。
 const maxInstanceURLLen = 256
 
+// fitsInstanceColumn reports whether a non-empty URL can be stored in a
+// varchar(max) column.
+//
+// **rune で数える。** PostgreSQL の varchar はコードポイント数で数えるので、
+// byte 長で見ると非 ASCII を含む URL を必要以上に落とす。URL は切ると別物に
+// なるので、収まらなければ値ごと捨てる (clampInstanceText と扱いが違う)。
+func fitsInstanceColumn(v string, max int) bool {
+	return v != "" && len([]rune(v)) <= max
+}
+
 // fetchIcons extracts iconUrl (high-res, used by detailed instance views)
 // and faviconUrl (small, used by InstanceTicker) from the remote root HTML.
 //
@@ -207,7 +221,7 @@ func (s *FetchMetadataService) fetchIcons(host string) (iconURL, faviconURL stri
 	// 256 文字超の icon URL は DB 制約で書けないので、その場合も
 	// hardcode フォールバックに落とす。
 	defaultFavicon := "https://" + host + "/favicon.ico"
-	if icon != "" && len(icon) <= maxInstanceURLLen {
+	if fitsInstanceColumn(icon, maxInstanceURLLen) {
 		faviconURL = icon
 	} else {
 		faviconURL = defaultFavicon
