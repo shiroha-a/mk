@@ -658,14 +658,14 @@ func (s *Service) ListSentRequests(userID string, limit int, sinceID, untilID st
 
 // ListReceivedFollowing returns followings where userID is the followee.
 // 「userIDをフォローしているユーザー」(=followers) を返す。
-func (s *Service) ListReceivedFollowing(userID string, limit, offset int) ([]*model.Following, error) {
-	return s.followingRepo.ListFollowers(userID, limit, offset)
+func (s *Service) ListReceivedFollowing(userID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
+	return s.followingRepo.ListFollowersWithCursor(userID, sinceID, untilID, limit, offset)
 }
 
 // ListSentFollowing returns followings where userID is the follower.
 // 「userIDがフォローしているユーザー」を返す。
-func (s *Service) ListSentFollowing(userID string, limit, offset int) ([]*model.Following, error) {
-	return s.followingRepo.ListFollowing(userID, limit, offset)
+func (s *Service) ListSentFollowing(userID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
+	return s.followingRepo.ListFollowingWithCursor(userID, sinceID, untilID, limit, offset)
 }
 
 // ListFollowingForList wraps repository.ListFollowingForList for /api/following/list

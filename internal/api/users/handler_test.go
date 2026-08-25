@@ -1964,6 +1964,17 @@ func (f *failingFollowingRepo) ListFollowing(_ string, _, _ int) ([]*model.Follo
 	return nil, assertErr
 }
 
+// **カーソル版も落とす。** users/followers と users/following はこちらを呼ぶので、
+// offset 版だけ override しても embed した mock が成功を返し、500 経路の
+// テストが黙って素通りする (#2711)。
+func (f *failingFollowingRepo) ListFollowersWithCursor(_, _, _ string, _, _ int) ([]*model.Following, error) {
+	return nil, assertErr
+}
+
+func (f *failingFollowingRepo) ListFollowingWithCursor(_, _, _ string, _, _ int) ([]*model.Following, error) {
+	return nil, assertErr
+}
+
 var assertErr = &simpleErr{"stub"}
 
 type simpleErr struct{ msg string }

@@ -23,6 +23,13 @@ type FollowingRepository interface {
 	// compute `isFollowed` across a user list (#1144).
 	FilterFollowingsToAnchor(anchorID string, candidateIDs []string) ([]string, error)
 	ListFollowers(userID string, limit, offset int) ([]*model.Following, error)
+
+	// ListFollowersWithCursor is ListFollowers paginated by sinceId/untilId
+	// instead of offset alone (users/followers)。
+	//
+	// **offset 版と分けてある。** fanout / CSV export / admin は全件を順に舐める
+	// ので offset のままでよく、カーソルを足すと呼び出しが空文字だらけになる。
+	ListFollowersWithCursor(followeeID, sinceID, untilID string, limit, offset int) ([]*model.Following, error)
 	// ListFollowersToNotify returns Following rows where followeeId matches and
 	// notify='normal'. Used by note.CreateService to fan out 'note'
 	// notifications to followers who opted into post notifications (upstream
@@ -39,6 +46,11 @@ type FollowingRepository interface {
 	// proxy account の除外は caller 側で行う。
 	ListLocalFollowerIDs(followeeID string) ([]string, error)
 	ListFollowing(userID string, limit, offset int) ([]*model.Following, error)
+
+	// ListFollowingWithCursor is ListFollowing paginated by sinceId/untilId
+	// instead of offset alone (users/following)。詳細は
+	// ListFollowersWithCursor と対称。
+	ListFollowingWithCursor(followerID, sinceID, untilID string, limit, offset int) ([]*model.Following, error)
 	// ListFolloweeIDs returns every user id the given user follows.
 	// HTL の「返信先が followers 限定の投稿」ガードで集合として使うため、
 	// ページングせず全件返す。
@@ -179,6 +191,40 @@ func (r *followingRepository) ListFolloweeIDs(followerID string) ([]string, erro
 		return nil, err
 	}
 	return ids, nil
+}
+
+// ListFollowersWithCursor returns followers paginated by sinceId/untilId.
+//
+// **カーソルは SQL に掛ける。** LIMIT を掛けたあとに捨てると、2 ページ目の要求で
+// DB が 1 ページ目と同じ行を返し、それを全部落とすので**空になる**。一覧が 1 ページ
+// 分で止まり、プロフィールの followersCount と食い違って見える (#2711)。
+func (r *followingRepository) ListFollowersWithCursor(followeeID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
+	return r.listRelationPage(`"followeeId" = ?`, followeeID, sinceID, untilID, limit, offset)
+}
+
+// ListFollowingWithCursor is ListFollowersWithCursor for the follower side.
+func (r *followingRepository) ListFollowingWithCursor(followerID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
+	return r.listRelationPage(`"followerId" = ?`, followerID, sinceID, untilID, limit, offset)
+}
+
+// listRelationPage is the shared body of the two cursor-paginated lookups.
+// 並び順は following/list (ListFollowingForList) と同じ paginationOrder に揃える。
+func (r *followingRepository) listRelationPage(cond, anchorID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
+	q := r.db.Where(cond, anchorID)
+	if sinceID != "" {
+		q = q.Where(`id > ?`, sinceID)
+	}
+	if untilID != "" {
+		q = q.Where(`id < ?`, untilID)
+	}
+	var rows []*model.Following
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).
+		Limit(limit).
+		Offset(offset).
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	return rows, nil
 }
 
 func (r *followingRepository) ListFollowers(userID string, limit, offset int) ([]*model.Following, error) {

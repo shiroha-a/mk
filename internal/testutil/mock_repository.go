@@ -5772,13 +5772,63 @@ func (m *MockFollowingRepository) FilterFollowingsToAnchor(anchorID string, cand
 }
 
 func (m *MockFollowingRepository) ListFollowers(userID string, limit, offset int) ([]*model.Following, error) {
+	return paginate(sortFollowingsByIDDesc(m.followingsWhere(userID, true)), limit, offset), nil
+}
+
+// ListFollowersWithCursor mirrors the production repository: followeeId match,
+// sinceId/untilId in the query, paginationOrder.
+//
+// **本番と揃える。** 揃っていないと、カーソルを SQL に渡さない実装 (#2711) を
+// テストが見逃す。実際、旧 mock は**ソートせず挿入順**だったので本番より軽い
+// 症状しか再現しなかった。
+func (m *MockFollowingRepository) ListFollowersWithCursor(followeeID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
+	return paginateFollowings(m.followingsWhere(followeeID, true), sinceID, untilID, limit, offset), nil
+}
+
+// ListFollowingWithCursor is ListFollowersWithCursor for the follower side.
+func (m *MockFollowingRepository) ListFollowingWithCursor(followerID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
+	return paginateFollowings(m.followingsWhere(followerID, false), sinceID, untilID, limit, offset), nil
+}
+
+// followingsWhere collects rows anchored on the followee (byFollowee=true) or
+// the follower side.
+func (m *MockFollowingRepository) followingsWhere(anchorID string, byFollowee bool) []*model.Following {
 	var rows []*model.Following
 	for _, f := range m.Followings {
-		if f.FolloweeID == userID {
+		if (byFollowee && f.FolloweeID == anchorID) || (!byFollowee && f.FollowerID == anchorID) {
 			rows = append(rows, f)
 		}
 	}
-	return paginate(rows, limit, offset), nil
+	return rows
+}
+
+// sortFollowingsByIDDesc mirrors the production `ORDER BY id DESC`.
+func sortFollowingsByIDDesc(rows []*model.Following) []*model.Following {
+	sort.Slice(rows, func(i, j int) bool { return rows[i].ID > rows[j].ID })
+	return rows
+}
+
+// paginateFollowings mirrors listRelationPage: cursor in the query, then
+// paginationOrder, then LIMIT/OFFSET.
+func paginateFollowings(rows []*model.Following, sinceID, untilID string, limit, offset int) []*model.Following {
+	kept := make([]*model.Following, 0, len(rows))
+	for _, f := range rows {
+		if sinceID != "" && f.ID <= sinceID {
+			continue
+		}
+		if untilID != "" && f.ID >= untilID {
+			continue
+		}
+		kept = append(kept, f)
+	}
+	asc := sinceID != "" && untilID == ""
+	sort.Slice(kept, func(i, j int) bool {
+		if asc {
+			return kept[i].ID < kept[j].ID
+		}
+		return kept[i].ID > kept[j].ID
+	})
+	return paginate(kept, limit, offset)
 }
 
 // ListFolloweeIDs returns every followee id without pagination.
@@ -5793,13 +5843,7 @@ func (m *MockFollowingRepository) ListFolloweeIDs(followerID string) ([]string, 
 }
 
 func (m *MockFollowingRepository) ListFollowing(userID string, limit, offset int) ([]*model.Following, error) {
-	var rows []*model.Following
-	for _, f := range m.Followings {
-		if f.FollowerID == userID {
-			rows = append(rows, f)
-		}
-	}
-	return paginate(rows, limit, offset), nil
+	return paginate(sortFollowingsByIDDesc(m.followingsWhere(userID, false)), limit, offset), nil
 }
 
 // ListFollowersToNotify mirrors the production repo: followeeId match +

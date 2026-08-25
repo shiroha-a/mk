@@ -318,6 +318,48 @@ func TestFollowingRepository_ListFollowers_ListFollowing(t *testing.T) {
 	assert.Len(t, followingsOfA, 2)
 }
 
+// ListFollowersWithCursor / ListFollowingWithCursor は sinceId / untilId を
+// **SQL 側**で掛ける (#2711)。LIMIT のあとに捨てると 2 ページ目が空になる。
+func TestFollowingRepository_ListWithCursor(t *testing.T) {
+	repo := NewFollowingRepository(testDB)
+	target := insertTestUser(t, "u_cur_t", "curtarget")
+	defer cleanupUser(t, target.ID)
+	ids := []string{"cur_1", "cur_2", "cur_3", "cur_4", "cur_5"}
+	for i, fid := range ids {
+		u := insertTestUser(t, fmt.Sprintf("u_cur_%d", i), fmt.Sprintf("curuser%d", i))
+		defer cleanupUser(t, u.ID)
+		// followers 側と following 側の両方を同じ id で作る。
+		insertFollowing(t, fid, u.ID, target.ID)
+		defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, fid)
+		sent := fid + "_s"
+		insertFollowing(t, sent, target.ID, u.ID)
+		defer testDB.Exec(`DELETE FROM "following" WHERE id = ?`, sent)
+	}
+
+	// untilId: 新しい順に 2 件ずつ、重複なく最後まで辿れること。
+	page1, err := repo.ListFollowersWithCursor(target.ID, "", "", 2, 0)
+	require.NoError(t, err)
+	require.Len(t, page1, 2)
+	assert.Equal(t, []string{"cur_5", "cur_4"}, []string{page1[0].ID, page1[1].ID})
+
+	page2, err := repo.ListFollowersWithCursor(target.ID, "", page1[1].ID, 2, 0)
+	require.NoError(t, err)
+	require.Len(t, page2, 2, "2 ページ目が空: cursor が SQL に渡っていない")
+	assert.Equal(t, []string{"cur_3", "cur_2"}, []string{page2[0].ID, page2[1].ID})
+
+	// sinceId: 昇順で、指定より新しい側を古い方から返す。
+	asc, err := repo.ListFollowersWithCursor(target.ID, "cur_2", "", 2, 0)
+	require.NoError(t, err)
+	require.Len(t, asc, 2)
+	assert.Equal(t, []string{"cur_3", "cur_4"}, []string{asc[0].ID, asc[1].ID})
+
+	// following 側も同じ形。
+	sentPage, err := repo.ListFollowingWithCursor(target.ID, "", "cur_4_s", 2, 0)
+	require.NoError(t, err)
+	require.Len(t, sentPage, 2)
+	assert.Equal(t, []string{"cur_3_s", "cur_2_s"}, []string{sentPage[0].ID, sentPage[1].ID})
+}
+
 // ListFollowersBefore / ListFollowingBefore は id DESC で cursor (id <) ページング
 // する (AP followers/following collection の page 用, #1877)。
 func TestFollowingRepository_ListFollowersBefore_ListFollowingBefore(t *testing.T) {

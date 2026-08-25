@@ -699,7 +699,7 @@ func TestListReceivedFollowing(t *testing.T) {
 	_, _ = svc.Follow("bob", "alice", following.FollowOptions{})
 	_, _ = svc.Follow("carol", "alice", following.FollowOptions{})
 
-	rows, err := svc.ListReceivedFollowing("alice", 10, 0)
+	rows, err := svc.ListReceivedFollowing("alice", "", "", 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 }
@@ -712,7 +712,7 @@ func TestListSentFollowing(t *testing.T) {
 	_, _ = svc.Follow("alice", "bob", following.FollowOptions{})
 	_, _ = svc.Follow("alice", "carol", following.FollowOptions{})
 
-	rows, err := svc.ListSentFollowing("alice", 10, 0)
+	rows, err := svc.ListSentFollowing("alice", "", "", 10, 0)
 	require.NoError(t, err)
 	assert.Len(t, rows, 2)
 }

@@ -1049,7 +1049,7 @@ type relationItem struct {
 }
 
 func (h *Handler) collectFollowers(ctx context.Context, req FollowersRequest, viewer *model.User) ([]relationItem, error) {
-	rows, err := h.followingService.ListReceivedFollowing(req.UserID, *req.Limit, req.Offset)
+	rows, err := h.followingService.ListReceivedFollowing(req.UserID, req.SinceID, req.UntilID, *req.Limit, req.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1057,7 +1057,7 @@ func (h *Handler) collectFollowers(ctx context.Context, req FollowersRequest, vi
 }
 
 func (h *Handler) collectFollowing(ctx context.Context, req FollowersRequest, viewer *model.User) ([]relationItem, error) {
-	rows, err := h.followingService.ListSentFollowing(req.UserID, *req.Limit, req.Offset)
+	rows, err := h.followingService.ListSentFollowing(req.UserID, req.SinceID, req.UntilID, *req.Limit, req.Offset)
 	if err != nil {
 		return nil, err
 	}
@@ -1084,15 +1084,11 @@ func (h *Handler) packRelationItems(
 	followers bool,
 	viewer *model.User,
 ) []relationItem {
+	// **ここで cursor を掛けない。** collect 側が SQL に渡しているので二重になる
+	// うえ、LIMIT のあとに絞る形に戻すと 2 ページ目が空になる (#2711)。
 	filtered := make([]*model.Following, 0, len(rows))
 	idSet := make(map[string]struct{}, len(rows))
 	for _, f := range rows {
-		if req.SinceID != "" && f.ID <= req.SinceID {
-			continue
-		}
-		if req.UntilID != "" && f.ID >= req.UntilID {
-			continue
-		}
 		filtered = append(filtered, f)
 		var target string
 		if followers {
