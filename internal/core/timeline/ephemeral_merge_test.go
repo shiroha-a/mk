@@ -58,7 +58,7 @@ func TestResolve_MergesEphemeralNotes(t *testing.T) {
 	eph := &stubEphemeral{notes: map[string]*model.Note{"a": ephNote("a"), "c": ephNote("c")}}
 	svc.SetEphemeralLookup(eph)
 
-	got, err := svc.resolve(context.Background(), []string{"c", "b", "a"})
+	got, _, err := svc.resolve(context.Background(), []string{"c", "b", "a"})
 	require.NoError(t, err)
 	require.Len(t, got, 3)
 	// id 降順に並ぶこと (timeline の並び順)。
@@ -70,7 +70,7 @@ func TestResolve_MergesEphemeralNotes(t *testing.T) {
 func TestResolve_NoEphemeralLookupWired(t *testing.T) {
 	svc, _ := newMergeService(t, []string{"b"})
 
-	got, err := svc.resolve(context.Background(), []string{"a", "b"})
+	got, _, err := svc.resolve(context.Background(), []string{"a", "b"})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID)
@@ -82,7 +82,7 @@ func TestResolve_SkipsLookupWhenAllFound(t *testing.T) {
 	eph := &stubEphemeral{notes: map[string]*model.Note{}}
 	svc.SetEphemeralLookup(eph)
 
-	got, err := svc.resolve(context.Background(), []string{"a", "b"})
+	got, _, err := svc.resolve(context.Background(), []string{"a", "b"})
 	require.NoError(t, err)
 	assert.Len(t, got, 2)
 	assert.Empty(t, eph.askedFor, "DB で揃っていれば Redis を引かない")
@@ -93,7 +93,7 @@ func TestResolve_EphemeralErrorDegradesToDB(t *testing.T) {
 	svc, _ := newMergeService(t, []string{"b"})
 	svc.SetEphemeralLookup(&stubEphemeral{err: errors.New("redis down")})
 
-	got, err := svc.resolve(context.Background(), []string{"a", "b"})
+	got, _, err := svc.resolve(context.Background(), []string{"a", "b"})
 	require.NoError(t, err, "Redis 障害は error にせず縮退する")
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID)
@@ -104,7 +104,7 @@ func TestResolve_MissingEverywhere(t *testing.T) {
 	svc, _ := newMergeService(t, []string{"b"})
 	svc.SetEphemeralLookup(&stubEphemeral{notes: map[string]*model.Note{}})
 
-	got, err := svc.resolve(context.Background(), []string{"a", "b"})
+	got, _, err := svc.resolve(context.Background(), []string{"a", "b"})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 	assert.Equal(t, "b", got[0].ID)
@@ -114,7 +114,7 @@ func TestResolve_EmptyIDs(t *testing.T) {
 	svc, _ := newMergeService(t, nil)
 	svc.SetEphemeralLookup(&stubEphemeral{})
 
-	got, err := svc.resolve(context.Background(), nil)
+	got, _, err := svc.resolve(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Empty(t, got)
 }
@@ -124,7 +124,7 @@ func TestResolve_EphemeralNotesGoThroughFilter(t *testing.T) {
 	svc, _ := newMergeService(t, nil)
 	svc.SetEphemeralLookup(&stubEphemeral{notes: map[string]*model.Note{"a": ephNote("a")}})
 
-	got, err := svc.resolve(context.Background(), []string{"a"})
+	got, _, err := svc.resolve(context.Background(), []string{"a"})
 	require.NoError(t, err)
 	require.Len(t, got, 1)
 

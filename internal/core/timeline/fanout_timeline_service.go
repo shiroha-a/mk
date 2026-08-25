@@ -10,6 +10,7 @@ package timeline
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"sort"
 	"time"
@@ -239,6 +240,31 @@ func (s *FanoutTimelineService) Purge(ctx context.Context, name Name) error {
 // ならず削除件数 0 が返るだけなので呼び出し側で気にする必要はない。
 func (s *FanoutTimelineService) Remove(ctx context.Context, name Name, noteID string) error {
 	return s.client.LRem(ctx, s.key(name), 0, noteID).Err()
+}
+
+// RemoveMany drops every occurrence of each noteID from the named timelines in
+// one round trip per call (#2715)。
+//
+// **読み取り経路から呼ぶので pipeline にする。** 解決できない ID は 1 つの list に
+// 数百単位で溜まりうる (実測: home timeline の ID の約半分)。1 件ずつ Remove すると
+// その数だけ往復するので、timeline の応答時間に直接乗る。
+//
+// **失敗を握り潰す。** これは自己修復であって読み取りの成否ではない。Redis が
+// 一時的に落ちていても timeline の応答は返すべきなので、error は返さない。
+func (s *FanoutTimelineService) RemoveMany(ctx context.Context, names []Name, noteIDs []string) {
+	if s == nil || s.client == nil || len(names) == 0 || len(noteIDs) == 0 {
+		return
+	}
+	pipe := s.client.Pipeline()
+	for _, name := range names {
+		key := s.key(name)
+		for _, id := range noteIDs {
+			pipe.LRem(ctx, key, 0, id)
+		}
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		slog.WarnContext(ctx, "timeline: pruning unresolvable ids failed", "err", err)
+	}
 }
 
 // filterAndSort applies the since/until filter to a slice of IDs and returns

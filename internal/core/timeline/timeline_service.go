@@ -79,7 +79,7 @@ func (s *Service) fanoutEnabled() bool {
 }
 
 // fallbackRange narrows the database fallback to the range *beyond* what was
-// already read from Redis, so the fan-out result is topped up instead of being
+// already **resolved**, so the fan-out result is topped up instead of being
 // thrown away.
 //
 // upstream FanoutTimelineEndpointService は Redis から取れた分を残したまま、
@@ -91,11 +91,18 @@ func (s *Service) fanoutEnabled() bool {
 //
 // sinceID のみ指定された昇順ページングでは境界が逆になるので、返す since/until
 // を入れ替える。
-func fallbackRange(ids []string, sinceID, untilID string) (fbSince, fbUntil string) {
-	if len(ids) == 0 {
+//
+// **境界は「Redis から取れた ID」ではなく「実際に解決できた note」から取る**
+// (#2715)。ephemeral の TTL が切れると note の実体だけが消えて ID が list に残る。
+// その ID を境界にすると、**解決できない古い ID より新しい投稿が DB にあっても
+// 返らなくなる** — 実測で home timeline の ID の約半分が解決できない状態になって
+// おり、リレー由来でない投稿まで出てこなくなっていた。解決 0 件なら境界を使わず、
+// 呼び出し側の since/until をそのまま渡す (= 最新から返す)。
+func fallbackRange(notes []*model.Note, sinceID, untilID string) (fbSince, fbUntil string) {
+	if len(notes) == 0 {
 		return sinceID, untilID
 	}
-	boundary := ids[len(ids)-1]
+	boundary := notes[len(notes)-1].ID
 	if sinceID != "" && untilID == "" {
 		return boundary, untilID
 	}
@@ -124,13 +131,16 @@ func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID,
 		return nil, err
 	}
 	if len(ids) > 0 {
-		notes, err := s.resolve(ctx, ids)
+		resolved, dangling, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
 		}
-		notes = ApplyFilter(notes, viewer.ID, filter)
+		s.pruneDangling(ctx, []Name{HomeTimelineName(viewer.ID)}, dangling)
+		notes := ApplyFilter(resolved, viewer.ID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			fbSince, fbUntil := fallbackRange(ids, sinceID, untilID)
+			// **境界は filter 前の resolved から取る。** filter で落ちた note も
+			// 「解決はできている」ので、DB fallback で引き直す必要は無い。
+			fbSince, fbUntil := fallbackRange(resolved, sinceID, untilID)
 			rest, err := s.noteRepo.ListHomeTimeline(viewer.ID, limit-len(notes), fbSince, fbUntil, dbFilter)
 			if err != nil {
 				return nil, err
@@ -178,13 +188,14 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 		return nil, err
 	}
 	if len(ids) > 0 {
-		notes, err := s.resolve(ctx, ids)
+		resolved, dangling, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
 		}
-		notes = ApplyFilter(notes, viewerID, filter)
+		s.pruneDangling(ctx, keys, dangling)
+		notes := ApplyFilter(resolved, viewerID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			fbSince, fbUntil := fallbackRange(ids, sinceID, untilID)
+			fbSince, fbUntil := fallbackRange(resolved, sinceID, untilID)
 			rest, err := s.noteRepo.ListLocalTimeline(limit-len(notes), fbSince, fbUntil, dbFilter)
 			if err != nil {
 				return nil, err
@@ -213,13 +224,14 @@ func (s *Service) GlobalTimeline(ctx context.Context, viewer *model.User, untilI
 		return nil, err
 	}
 	if len(ids) > 0 {
-		notes, err := s.resolve(ctx, ids)
+		resolved, dangling, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
 		}
-		notes = ApplyFilter(notes, viewerID, filter)
+		s.pruneDangling(ctx, []Name{GlobalTimeline}, dangling)
+		notes := ApplyFilter(resolved, viewerID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			fbSince, fbUntil := fallbackRange(ids, sinceID, untilID)
+			fbSince, fbUntil := fallbackRange(resolved, sinceID, untilID)
 			rest, err := s.noteRepo.ListGlobalTimeline(limit-len(notes), fbSince, fbUntil, toDBFilter(filter, viewerID))
 			if err != nil {
 				return nil, err
@@ -257,13 +269,14 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 	}
 	merged := mergeIDs(multi, limit)
 	if len(merged) > 0 {
-		notes, err := s.resolve(ctx, merged)
+		resolved, dangling, err := s.resolve(ctx, merged)
 		if err != nil {
 			return nil, err
 		}
-		notes = ApplyFilter(notes, viewer.ID, filter)
+		s.pruneDangling(ctx, stlKeys, dangling)
+		notes := ApplyFilter(resolved, viewer.ID, filter)
 		if !filter.AllowPartial && len(notes) < limit {
-			fbSince, fbUntil := fallbackRange(merged, sinceID, untilID)
+			fbSince, fbUntil := fallbackRange(resolved, sinceID, untilID)
 			rest, err := s.hybridDBFallback(viewer, fbUntil, fbSince, limit-len(notes), filter)
 			if err != nil {
 				return nil, err
@@ -364,17 +377,30 @@ func toDBFilter(f TimelineFilter, viewerID string) model.TimelineDBFilter {
 	}
 }
 
-// resolve fetches notes from the repository preserving id ordering.
-func (s *Service) resolve(ctx context.Context, ids []string) ([]*model.Note, error) {
+// resolve fetches notes from the repository preserving id ordering, and reports
+// which ids resolved to nothing at all.
+//
+// **dangling を返すのは、呼び出し側が list から消せるようにするため** (#2715)。
+// ephemeral の TTL が切れると note の実体だけが消えて ID が list に残り、以後
+// 永久に解決できない。黙って落とすだけだと汚染が溜まり続ける。
+//
+// **確実に消えていると判った ID だけを返す。** ephemeral の lookup が失敗した
+// ときは何も返さない — Redis の一時障害で生きている note の ID を消すと、
+// 取り返しがつかない。
+func (s *Service) resolve(ctx context.Context, ids []string) (notes []*model.Note, dangling []string, err error) {
 	if len(ids) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
-	notes, err := s.noteRepo.FindManyByIDsWithUser(ids)
+	notes, err = s.noteRepo.FindManyByIDsWithUser(ids)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if s.ephemeral == nil || len(notes) == len(ids) {
-		return notes, nil
+	if len(notes) == len(ids) {
+		return notes, nil, nil
+	}
+	if s.ephemeral == nil {
+		// ephemeral を使わない構成では、DB に無い = 消えている。
+		return notes, missingIDs(ids, notes), nil
 	}
 
 	// DB に無かった ID は ephemeral (リレー由来で未 materialize) かもしれない。
@@ -392,17 +418,47 @@ func (s *Service) resolve(ctx context.Context, ids []string) ([]*model.Note, err
 	eph, err := s.ephemeral.GetNotes(ctx, missing)
 	if err != nil {
 		// Redis 障害で timeline 全体を落とさない。DB 分だけ返せば、呼び出し側の
-		// 件数不足判定が DB fallback に倒してくれる。
+		// 件数不足判定が DB fallback に倒してくれる。**dangling は返さない** —
+		// 生きている note の ID を消しかねない。
 		slog.WarnContext(ctx, "timeline: ephemeral lookup failed", "err", err)
-		return notes, nil
+		return notes, nil, nil
 	}
 	if len(eph) == 0 {
-		return notes, nil
+		return notes, missing, nil
 	}
 
 	merged := append(notes, eph...)
 	sort.Slice(merged, func(i, j int) bool { return merged[i].ID > merged[j].ID })
-	return merged, nil
+	return merged, missingIDs(ids, merged), nil
+}
+
+// missingIDs returns the ids that have no corresponding note, preserving the
+// input order.
+func missingIDs(ids []string, notes []*model.Note) []string {
+	if len(notes) == 0 {
+		return append([]string(nil), ids...)
+	}
+	found := make(map[string]struct{}, len(notes))
+	for _, n := range notes {
+		found[n.ID] = struct{}{}
+	}
+	out := make([]string, 0, len(ids)-len(notes))
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// pruneDangling removes ids that resolve to nothing from the timelines they
+// came from (#2715)。best-effort で、失敗しても読み取りには影響しない。
+func (s *Service) pruneDangling(ctx context.Context, names []Name, dangling []string) {
+	if s.fanout == nil || len(names) == 0 || len(dangling) == 0 {
+		return
+	}
+	slog.InfoContext(ctx, "timeline: pruning unresolvable ids", "count", len(dangling))
+	s.fanout.RemoveMany(ctx, names, dangling)
 }
 
 // mergeIDs flattens multiple ID slices, deduplicates, sorts id desc and caps.

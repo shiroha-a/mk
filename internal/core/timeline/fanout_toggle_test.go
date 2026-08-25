@@ -141,9 +141,21 @@ func TestFallbackRange(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotSince, gotUntil := fallbackRange(tt.ids, tt.sinceID, tt.untilID)
+			gotSince, gotUntil := fallbackRange(notesWithIDs(tt.ids), tt.sinceID, tt.untilID)
 			assert.Equal(t, tt.wantSince, gotSince)
 			assert.Equal(t, tt.wantTo, gotUntil)
 		})
 	}
+}
+
+// notesWithIDs builds the minimal notes fallbackRange looks at (id only)。
+func notesWithIDs(ids []string) []*model.Note {
+	if len(ids) == 0 {
+		return nil
+	}
+	out := make([]*model.Note, 0, len(ids))
+	for _, id := range ids {
+		out = append(out, &model.Note{ID: id})
+	}
+	return out
 }
