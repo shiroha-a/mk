@@ -63,7 +63,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOWORK=off go run ./tools/pluginbuild \
  && go build -trimpath -ldflags="-s -w" -o /app/built/misskey ./cmd/misskey \
- && go build -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate
+ && go build -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate \
+ && go build -trimpath -ldflags="-s -w" -o /app/built/backfill-remote-host ./cmd/backfill-remote-host
 
 FROM alpine:3.21
 
@@ -79,6 +80,8 @@ WORKDIR /app
 
 COPY --from=builder --chown=65532:65532 /app/built/misskey /app/misskey
 COPY --from=builder --chown=65532:65532 /app/built/migrate /app/migrate
+# 後始末バッチ。entrypoint を差し替えた使い捨てコンテナで流す (#2706)。
+COPY --from=builder --chown=65532:65532 /app/built/backfill-remote-host /app/backfill-remote-host
 COPY --from=builder --chown=65532:65532 /app/migration /app/migration
 
 # 本家のpackages/backend/assets (favicon / icons / apple-touch-icon / robots.txtなど)

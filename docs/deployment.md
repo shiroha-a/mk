@@ -626,6 +626,46 @@ sudo systemctl restart misskey    # systemd の場合
 
 Misskey TS へ戻す場合は[TS版からの移行](migration-from-ts.md)を参照。
 
+## 後始末バッチ
+
+SQL migration として書けない一回限りの正規化は、独立したバイナリで流す。**migration と
+違って自動では走らない**ので、運用者が明示的に実行する必要がある。
+
+runtime image は distroless で shell を持たないため、`exec` ではなく **entrypoint を
+差し替えた使い捨てコンテナ**で流す。
+
+### `backfill-remote-host` — 保存済みリモート host の punycode 正規化 (#2706)
+
+`hostFromURI` は #2706 から保存時に `idna.ToASCII(lowercase)` を掛けるが、それ以前に
+取り込んだ行は `Mixed.Example` のような生の表記のまま残る。acct 解決は読み取り側の
+両当たりで救っているが、**連合ゲート (blocked / silenced host) と timeline の
+instance-mute は完全一致なので取りこぼす**。
+
+`lower()` だけでは `パイ.example` → `xn--eckve.example` を作れず、PostgreSQL に IDNA
+変換が無いので SQL migration では書けない。
+
+```bash
+# まず件数を見積もる (書き込まない)
+docker compose run --rm --entrypoint /app/backfill-remote-host app \
+  -config /app/.config/default.yml -dry-run
+
+# 実行。負荷を絞りたければ -batch / -sleep-ms
+docker compose run --rm --entrypoint /app/backfill-remote-host app \
+  -config /app/.config/default.yml -batch 1000 -sleep-ms 200
+```
+
+UDS 構成ではサービス名が異なるので `docker compose -f ... run --rm --entrypoint
+/app/backfill-remote-host mkgo ...` の形になる。バイナリ直接実行なら
+`go run ./cmd/backfill-remote-host -config .config/default.yml -dry-run`。
+
+冪等なので、途中で失敗しても再実行して安全。`-table` / `-column` で 1 組だけ流せる。
+
+**`conflicts` が出たら手当てが要る。** 同じリモートが表記違いで 2 行に増えている場合、
+正規化すると一意制約 (`user` の `(usernameLower, host)` / `instance` の `host` /
+`emoji` の `(name, host)`) に当たる。1 行に畳むには `note` / `following` / `drive_file`
+など多数の FK を張り替える必要があるため、**このバッチはマージしない**。件数と対象を
+見て個別に判断すること。
+
 ## 運用上の注意
 
 ### admin/overview の federation pie chart が一時的にずれる場合

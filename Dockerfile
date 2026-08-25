@@ -65,7 +65,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOWORK=off go run ./tools/pluginbuild && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/misskey ./cmd/misskey && \
-    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate && \
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-remote-host ./cmd/backfill-remote-host
 
 # Stage 2: Runtime
 #
@@ -84,6 +85,10 @@ WORKDIR /app
 
 COPY --from=builder /app/built/misskey /app/misskey
 COPY --from=builder /app/built/migrate /app/migrate
+# 後始末バッチ。runtime は distroless で shell が無いので、entrypoint を差し替えた
+# 使い捨てコンテナで流す (#2706)。
+#   docker compose run --rm --entrypoint /app/backfill-remote-host app -dry-run
+COPY --from=builder /app/built/backfill-remote-host /app/backfill-remote-host
 COPY --from=builder /app/migration /app/migration
 
 # 本家のpackages/backend/assets (favicon / icons等) をimageに焼き込む。
