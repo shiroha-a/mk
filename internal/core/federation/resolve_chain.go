@@ -147,8 +147,13 @@ func (c *resolveChain) chargeWait(d time.Duration) {
 //     (取得 URI == document id) では自分自身の entry が同じ鍵に見える
 //   - `chainAfterProbe` が入れる「取得 URI → document id」。**値は空ではない**
 //     ので、値の有無で分けると、featured の item の document id がたまたま祖先の
-//     取得 URI と一致したときに誤爆し、**別の note の行**を返す。実測で
-//     develop なら入っていたピンが落ちた (#2710 review round 3 MEDIUM-1)
+//     取得 URI と一致したときに誤爆する。祖先の行は quote / 著者の解決より後に
+//     作られるのでこの時点では通常まだ無く、**そのピンが落ちる** (実測。
+//     他の goroutine が窓の中で行を作っていれば、既存行 fallback が**別の note の
+//     行**を返す) (#2710 review round 3 MEDIUM-1)
+//
+// 戻り値の id は条件から**常に引数と同じ**。呼び出し側で「祖先が記録した id」と
+// 読めるように返しているだけで、別の値を持つ経路は無い (#2710 review round 4 LOW-3)。
 func (c *resolveChain) ingestedDocID(docID string) (string, bool) {
 	// **届かない防御。** with は空の鍵を弾くので ids に空鍵は入らず、この分岐を
 	// 消しても挙動は変わらない (#2710 review LOW-1)。lookup の実装が変わったとき

@@ -333,9 +333,13 @@ func TestIngestNote_PinnedNoteQuotingTheIngestedNoteUnderAnAliasKeepsRenoteID(t 
 //
 // 既定の flag では `noteGroupKey(uri, false, false) == uri` なので 1 つ目と同じ鍵に
 // なり、featured 経路 (`featured.go` の `(false, false)`) からは到達しない。
-// **到達するのは ephemeral 経路**で、祖先が別名 URI から入って
-// `chainAfterProbe` が `eph\x00<別名>` と `<document id>` の 2 つを載せたあと、
-// 引用解決が document id を引く形になる (#2710 review LOW-4 / round 3 MEDIUM-2)。
+// **到達するのは ephemeral 経路**。祖先の載せ方が 2 通りある
+// (#2710 review LOW-4 / round 3 MEDIUM-2 / round 4 LOW-6):
+//
+//   - `chainAfterProbe` が別名 URI から入った場合。`eph\x00<別名>` と
+//     `<document id>` が載るので、引用解決が document id を引くと 1 つ目が外れる
+//   - inbox 直送の ephemeral (`ingestNoteWithCreated`)。`with(id, id)` しか載せず
+//     `eph\x00` 鍵を作らないので、内側の引用解決は**別名でなくても**常に外れる
 //
 // `allowCrossHost=true` で呼ぶ本番経路は無い (`noteInFlightInChain` の呼び出しは
 // 2 箇所とも false 固定。ap/show の cross-host は根の 1 回だけで、入れ子の
@@ -379,4 +383,52 @@ func TestNoteInFlightInChain_FallsBackToTheDocumentID(t *testing.T) {
 	// 載っていない URI では当たらないこと (どちらの lookup も素通しにしない)。
 	_, inflight = r.noteInFlightInChain(ephChain, "https://remote.example/notes/zz", false, true)
 	assert.False(t, inflight)
+}
+
+// featured の item の document id が、祖先の**取得 URI** とたまたま一致するだけの
+// 別 note でも、ピンを落とさないこと (#2710 review round 3 MEDIUM-1 の回帰)。
+//
+// `chainAfterProbe` はチェーンに 2 つ載せる: `取得 URI → document id` と
+// `document id → document id`。前者は**値が非空**なので、「値が空でない」で祖先を
+// 判定すると、この形が「祖先が取り込み中」に見えて誤爆する。既存行はまだ無い
+// (祖先の Create は quote / author の解決より後) ので、そのままピンが落ちる。
+//
+// 述語の単体テストだけだと、そこを skip した瞬間に検出できなくなる。挙動側でも
+// 固定しておく (#2710 review round 4 MEDIUM-3)。
+func TestUpdateFeatured_PinWhoseIDEqualsAncestorFetchURI(t *testing.T) {
+	const (
+		actorURI  = "https://remote.example/users/zed"
+		featured  = "https://remote.example/users/zed/collections/featured"
+		outerURI  = "https://remote.example/@zed/x" // 祖先の取得 URI
+		outerDoc  = "https://remote.example/notes/x"
+		pinFetch  = "https://remote.example/pin/1"
+		pinDocURI = outerURI // ピンの document id が祖先の取得 URI と一致する
+	)
+	noteRepo := testutil.NewMockNoteRepository()
+	pins := testutil.NewMockUserNotePiningRepository()
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	fetcher := &countingFetcher{docs: map[string]string{
+		actorURI: featuredActorDoc("remote.example", "zed", featured),
+		featured: `{"@context":"https://www.w3.org/ns/activitystreams","id":"` + featured +
+			`","type":"OrderedCollection","orderedItems":["` + pinFetch + `"]}`,
+		outerURI: plainNoteDoc(outerDoc, actorURI),
+		pinFetch: plainNoteDoc(pinDocURI, actorURI),
+	}}
+	r := NewResolver(testutil.NewMockUserRepository(), noteRepo,
+		activitypub.NewURLBuilder("https://example.com"), fetcher, idGen)
+	r.SetPinningRepo(pins, idGen)
+
+	note, err := r.ResolveNote(outerURI)
+	require.NoError(t, err)
+	require.NotNil(t, note)
+
+	pinned, err := pins.ListByUser(note.UserID)
+	require.NoError(t, err)
+	require.Len(t, pinned, 1,
+		"祖先の取得 URI と id が一致するだけの別 note のピンが落ちている (#2710 review round 3 MEDIUM-1)")
+	row, err := noteRepo.FindByID(pinned[0].NoteID)
+	require.NoError(t, err)
+	require.NotNil(t, row.URI)
+	assert.Equal(t, pinDocURI, *row.URI)
 }

@@ -2110,6 +2110,11 @@ func (r *Resolver) noteInFlightInChain(chain *resolveChain, uri string, allowCro
 	if docID, ok := chain.lookup(uri); ok {
 		// document id 側で当たった。載せた側は id→id で入れるので値は uri と
 		// 同じはずだが、写像の値をそのまま返すほうが取り違えない。
+		//
+		// **届かない防御。** ここに空値が入るには「祖先が非 ephemeral で
+		// `uri → ""` を載せ、子孫が同じ uri を ephemeral で問い合わせる」が要るが、
+		// ephemeral は親から引き継がれるだけで false から true へ転じず、
+		// allowCrossHost は根でしか true にならない (#2710 review round 4 LOW-7)。
 		if docID == "" {
 			docID = uri
 		}
@@ -2209,9 +2214,6 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 			return nil, err
 		}
 	}
-	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
-	// quote chain の depth を引き継いで再帰上限を効かせる。
-	//
 	// **fetch 後にもう一度 in-flight を見る** (#2695)。手前の判定は取得 URI で
 	// 引くので、featured collection が**別名 URL** を載せていると空振りする
 	// (`https://h/@user/x` を取りに行って document の id が `https://h/notes/x`)。
@@ -2246,8 +2248,12 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	// singleflight は「この鍵が in-flight か」を外から問い合わせられないので、
 	// 入れ子の解決が「待つと自分を待つことになる」を判定できない。
 	//
+	// fetch 経由は配送 actor が無いので attribution==actor 検証は skip ("")。
+	// quote chain の depth を引き継いで再帰上限を効かせる。
+	//
 	// **区間を ingest に限る。** ここより手前 (FindByURI / ephemeral 逆引き /
-	// HTTP fetch / host 検査) から resolveNoteDepth や updateFeatured へ
+	// HTTP fetch / host 検査 / 取得後の in-flight 判定) から resolveNoteDepth や
+	// updateFeatured へ
 	// 到達する経路は無いので、載せても再入は防げず**他の goroutine を
 	// 取りこぼさせるだけ**になる。実際、singleflight 本体全体を覆うと
 	// (1) 別 worker が同じ引用先を待てずに renoteId を落とし、

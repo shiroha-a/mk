@@ -159,13 +159,14 @@ func (r *Resolver) joinResolveOpt(g *resolveGroup, chain *resolveChain, waitKey,
 	// 同じものを引くには、別の best-effort なチェーンが同じ瞬間に同じ鍵の先頭に
 	// なっている必要がある。回数を増やすより、上限を固定して呼び出し側にエラーを
 	// 返すほうが挙動を読みやすい。**この上限はテストで固定できていない** —
-	// 2 度目の呼び出しでは追従側が必ず先頭になるため、回数を増やす変異が観測
-	// できない (#2710 review LOW-2)。
+	// 回数を増やす変異が観測できる形を作れないため (#2710 review LOW-2)。
 	//
-	// **やり直しは fn の再実行**なので、note 経路では HTTP fetch が 1 回増える
-	// (#2710 review LOW-3)。上限 1 は**追従側ごと**で、同じ鍵に K 個ぶら下がって
-	// いれば K 回になる (その回だけ collapse が効かない、#2710 review round 3
-	// LOW-6)。K は同時 worker 数で頭打ちなうえ、発火条件が「best-effort な先頭が
+	// **やり直しは fn の再実行**なので、note 経路では HTTP fetch が増えうる
+	// (#2710 review LOW-3)。上限 1 は**追従側ごと**なので同じ鍵に K 個ぶら下がって
+	// いれば最悪 K 回だが、**やり直しも同じ group を通る**ので通常は最初の 1 人が
+	// 先頭になり残りはそこへ合流して 1 回で済む (実測、#2710 review round 3 LOW-6 /
+	// round 4 LOW-1)。K 回になるのは、新しい先頭が他の追従側の begin より先に
+	// 終えて鍵を retire する競合が続いた場合だけ。発火条件も「best-effort な先頭が
 	// チェーン固有の理由で降りた」に限られるので、相手方データで増幅はできない。
 	slog.Debug("federation: redoing a resolve the leader dropped for chain-local reasons", "key", key)
 	v, err, _ = r.joinResolveOnce(g, chain, waitKey, key, mayWait, fn)
