@@ -64,9 +64,10 @@ func quoteJSON(s string) string {
 
 // 長い CW でも取り込みが失敗しないこと (#2723)。
 //
-// `note.cw` は varchar(512)。CW は利用者が自由に書くので長文が普通に来る。
-// 切らずに入れると Create ごと 22001 で落ち、ingest が error を返して
-// **inbox job が恒久 retry になる** — 添付 1 枚が消えるより重い。
+// `note.cw` は varchar(512)。CW は**相手が自由に決められる値**で、長さの制限は
+// 送信側の実装次第。切らずに入れると Create ごと 22001 で落ち、ingest が error を
+// 返して **その inbox job が retry を使い切って dead になる** — 添付 1 枚が消える
+// より重い。
 func TestIngestNote_TruncatesLongCW(t *testing.T) {
 	r, noteRepo := ingestCWEnv(t)
 	// 先頭と末尾を別の文字にする (末尾から切る実装を見逃さないため)。
@@ -112,7 +113,7 @@ func TestIngestNote_StripsNULFromTextAndCW(t *testing.T) {
 // Update 経路も同じく切り、NUL を落とすこと (#2723)。
 //
 // create だけ直しても、`Update(Note)` で長い CW が来ると UpdateFields ごと落ちて
-// 同じ恒久 retry になる。
+// その job が retry を使い切って dead になる (create 側と同じ結末)。
 func TestUpdateRemoteNote_TruncatesCWAndStripsNUL(t *testing.T) {
 	r, noteRepo := ingestCWEnv(t)
 	nul := string(rune(0))
@@ -160,10 +161,11 @@ func TestIngestNote_RejectsOversizedURI(t *testing.T) {
 
 	_, err := r.IngestNote([]byte(doc))
 	require.Error(t, err, "列に入らない id の Note を受理している")
-	// **permanent 扱いであること。** transient だと 8 回 retry してから dead に
-	// なるだけで、同じ document を取り直し続ける。
 	assert.ErrorIs(t, err, ErrInvalidNote)
-	assert.True(t, isPermanentSkipError(err), "retry キューに戻る分類になっている")
+	// **job の結末までは変わらない。** `handleCreate` はこの error を surface する
+	// ので inbox job は retry を使い切って dead になる。ここで確かめるのは
+	// 「DB を触らずに拒否すること」まで。`isPermanentSkipError` の分類は
+	// この経路では誰も参照しないので assert しない。
 	assert.Empty(t, noteRepo.Notes)
 }
 

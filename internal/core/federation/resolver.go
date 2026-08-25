@@ -2427,6 +2427,17 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// document ごと拒否する (#2723)。NUL も同じ扱い (22021 で落ちる)。
 	//
 	// **DB を引く前に見る。** NUL 入りの値は `FindByURI` の SELECT 自体が落ちる。
+	//
+	// **job の結末は変わらない。** `handleCreate` は `ErrInvalidNote` を surface
+	// するので (`isPermanentSkipError` はハンドラが**下位の**失敗を握る用で、
+	// ハンドラ自身の戻り値には効かない)、inbox job は retry を使い切って dead に
+	// なる (既定 8 回)。この document はそもそも保存できないので結末としては正しく、
+	// 変わるのは 1 回あたりのコスト (DB を叩かない) と、原因が 22001 ではなく
+	// 明示的な拒否として残ること。
+	//
+	// **ephemeral (リレー) 経路にも効かせる。** Redis に置く分には列幅は無関係だが、
+	// ephemeral note は後で materialize されうる (`MaterializeActor` 経由) ので、
+	// そのとき同じ 22001 で落ちる。先に弾くほうが原因に近い。
 	if !fitsColumn(apNote.ID, noteURIMaxRunes) {
 		slog.Warn("federation: rejecting note whose id does not fit note.uri",
 			"id", truncateRunes(apNote.ID, noteURIMaxRunes))
@@ -2521,10 +2532,11 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		}
 	}
 	if apNote.Summary != "" {
-		// **列の上限で切り、NUL を落とす。** CW は利用者が自由に書くので長文が
-		// 普通に来る。溢れると Create ごと落ちて ingest が error を返し、
-		// **inbox job が retry を使い切って dead になる** (既定 8 回。その note は
-		// 二度と取り込まれない) (#2723)。
+		// **列の上限で切り、NUL を落とす。** CW は**相手が自由に決められる値**で、
+		// 長さの制限は送信側の実装次第 (upstream Misskey 自身は投稿時に 100 で
+		// 弾くが、AP でそれを強制する仕組みは無い)。溢れると Create ごと落ちて
+		// ingest が error を返し、**その inbox job が retry を使い切って dead に
+		// なる** (既定 8 回) (#2723)。
 		summary := remoteText(apNote.Summary.String(), noteCWMaxRunes)
 		note.CW = &summary
 	}
@@ -3789,7 +3801,8 @@ func numberAsInt(v any) int {
 // **溢れると行ごと落ちる。** PostgreSQL は varchar の超過を 22001 で拒否するので、
 // INSERT / UPDATE がまるごと失敗する。失われる範囲は書き込みの単位ごとに違う:
 // note なら ingest が error を返して inbox job が retry を使い切って dead になり
-// (既定 8 回、`internal/queue/policy.go`)、actor なら 1 行も作られない。添付は
+// (既定 8 回。`defaultInboxJobMaxAttempts`、`internal/server/queue_factory.go`)、
+// actor なら 1 行も作られない。添付は
 // 1 件ずつ Create するので**その添付だけ**消える (#2723)。
 const (
 	driveFileNameMaxRunes    = 256
@@ -3944,17 +3957,20 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 	}
 	ids := make(model.StringArray, 0, len(docs))
 	for _, doc := range docs {
-		// URI ベースで dedup。既存ならその ID を再利用する。
-		if existing, err := r.driveFileRepo.FindByURI(doc.URL); err == nil && existing != nil {
-			ids = append(ids, existing.ID)
-			continue
-		}
 		// **URL が列に入らないなら添付ごと諦める。** `drive_file.url` は
 		// varchar(1024) NOT NULL で、この添付の実体そのもの。切ると別の場所を
 		// 指すし、捨てると表示できない (#2723)。`uri` も同じ値を入れる。
+		//
+		// **DB を引く前に見る。** NUL 入りの値は下の `FindByURI` の SELECT 自体が
+		// 22021 で落ちる (機能は壊れないが、添付ごとに DB エラーが出る)。
 		if !fitsColumn(doc.URL, driveFileURLMaxRunes) {
 			slog.Warn("federation: skipping attachment whose url does not fit drive_file.url",
 				"url", truncateRunes(doc.URL, driveFileURLMaxRunes))
+			continue
+		}
+		// URI ベースで dedup。既存ならその ID を再利用する。
+		if existing, err := r.driveFileRepo.FindByURI(doc.URL); err == nil && existing != nil {
+			ids = append(ids, existing.ID)
 			continue
 		}
 		now := r.clock()

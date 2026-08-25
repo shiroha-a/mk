@@ -1617,6 +1617,22 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	// (mk-go pod 複数台 load balance) を採用する場合は別途 Redis lock 化を検討
 	// (= triage #1009 / upstream #17356 close)。
 	if act.ID != "" {
+		// `note.uri` は varchar(512)。**Announce の id は renote の身元**で、
+		// 下の dedup (`FindByURI`) の鍵でもあるので切らずに拒否する (#2723)。
+		// 切ると別の行と衝突する。
+		//
+		// **DB を引く前に見る。** NUL 入りの値は `FindByURI` の SELECT 自体が
+		// 22021 で落ちる。
+		//
+		// **job の結末は変わらない** — この error は `dispatchActivity` がそのまま
+		// 返すので inbox job は retry を使い切って dead になる (既定 8 回)。
+		// そもそも保存できない activity なので正しい結末で、変わるのは 1 回あたりの
+		// コストと、原因が 22001 ではなく明示的な拒否として残ること。
+		if !fitsColumn(act.ID, noteURIMaxRunes) {
+			slog.Warn("federation: rejecting Announce whose id does not fit note.uri",
+				"id", truncateRunes(act.ID, noteURIMaxRunes))
+			return ErrInvalidNote
+		}
 		if _, err := p.noteRepo.FindByURI(act.ID); err == nil {
 			return nil
 		}
@@ -1649,13 +1665,7 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 		Visibility: renoteVisibility,
 	}
 	if act.ID != "" {
-		// `note.uri` は varchar(512)。**Announce の id は renote の身元**で、
-		// Undo(Announce) の逆引きにも使うので切らずに拒否する (#2723)。
-		if !fitsColumn(act.ID, noteURIMaxRunes) {
-			slog.Warn("federation: rejecting Announce whose id does not fit note.uri",
-				"id", truncateRunes(act.ID, noteURIMaxRunes))
-			return ErrInvalidNote
-		}
+		// 上の gate で列に入ることを確かめてある。
 		uri := act.ID
 		renote.URI = &uri
 	}

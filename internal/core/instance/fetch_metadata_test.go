@@ -416,3 +416,28 @@ func TestFetch_OmitsFieldsThatBecomeEmpty(t *testing.T) {
 	assert.Equal(t, "keep-me", *got.SoftwareName)
 	assert.Nil(t, got.SoftwareVersion)
 }
+
+// icon URL の長さは rune で数えること (#2723)。
+//
+// **非 ASCII で測る。** ASCII だけの fixture では byte 判定でも rune 判定でも同じ
+// 結果になるので、実装を byte に戻しても検出できない。`resolveAgainstBase` は
+// `url.URL.String()` を返し、Go は query と host の非 ASCII を素通しするので、
+// この形は実際に来る。
+func TestFetch_IconURLLengthIsCountedInRunes(t *testing.T) {
+	// 200 rune / 600 byte。byte で見ると 256 を超えて落ちる。
+	query := strings.Repeat("あ", 200)
+	htmlBody := `<html><head><link rel="icon" href="https://cdn.example/i.png?q=` + query + `"></head></html>`
+	repo := testutil.NewMockInstanceRepository()
+	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
+	fetcher := &scriptedFetcher{
+		bodies:   [][]byte{[]byte(discoveryBody), []byte(documentBody)},
+		htmlBody: []byte(htmlBody),
+	}
+	svc := instance.NewFetchMetadataService(repo, fetcher)
+	require.NoError(t, svc.Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.IconURL, "列に収まる icon URL を byte 長で落としている")
+	assert.LessOrEqual(t, len([]rune(*got.IconURL)), 256)
+	assert.Greater(t, len(*got.IconURL), 256, "前提: byte 長では列を超える")
+}

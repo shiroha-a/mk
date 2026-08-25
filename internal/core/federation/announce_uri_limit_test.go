@@ -13,8 +13,11 @@ import (
 
 // 列に入らない id の Announce は renote を作らないこと (#2723)。
 //
-// `note.uri` は varchar(512)。Announce の id は renote の身元で、Undo(Announce) の
-// 逆引きにも使うので**切らずに拒否する**。切ると Undo が別の行を指す。
+// `note.uri` は varchar(512)。Announce の id は renote の身元で、**同じ activity の
+// 重複検出 (`FindByURI`) の鍵**でもあるので切らずに拒否する。切ると別の行と衝突する。
+//
+// (Undo(Announce) はこの URI を引かない — `ListRenotesOf` で announcer の renote を
+// 探す。)
 func TestProcess_Announce_RejectsOversizedURI(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
 	env.noteRepo.Notes["n1"] = &model.Note{
@@ -31,7 +34,8 @@ func TestProcess_Announce_RejectsOversizedURI(t *testing.T) {
 	}`)
 	err := env.processor.Process(body)
 	require.Error(t, err, "列に入らない id の Announce を受理している")
-	// permanent 扱い (retry しても同じ document が来る)。
+	// error は上位に surface する (inbox job は retry を使い切って dead になる)。
+	// ここで確かめるのは renote を作らないことまで。
 	assert.ErrorIs(t, err, federation.ErrInvalidNote)
 	assert.Len(t, env.noteRepo.Notes, before, "renote が作られている")
 }
