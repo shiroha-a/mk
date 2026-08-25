@@ -734,6 +734,19 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	if err != nil {
 		return nil, ErrInvalidActor
 	}
+	// **必須の値が列に入らないなら actor ごと拒否する** (#2723)。`uri` / `host` は
+	// 身元そのもので、切ると別人になるし捨てるわけにもいかない (lookup の鍵)。
+	// ここで弾かないと `Create` が 22001 / 22021 で落ち、**actor が 1 行も
+	// 作られない**まま refresh が同じ失敗を繰り返す。
+	//
+	// `username` はここで見ない。`validRemoteUsername` が fetchActor の時点で
+	// byte 長 128 で弾いており (列は 128 コードポイントなので常に厳しい側)、
+	// 重ねると届かない検査が増えるだけ。
+	if !fitsColumn(actor.ID, userURIMaxRunes) || !fitsColumn(host, userHostMaxRunes) {
+		slog.Warn("federation: rejecting actor whose identity does not fit its columns",
+			"uri", truncateRunes(actor.ID, userURIMaxRunes), "host", host)
+		return nil, ErrInvalidActor
+	}
 
 	now := r.clock()
 	user := &model.User{
@@ -744,8 +757,10 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		UsernameLower: strings.ToLower(actor.PreferredUsername),
 		Host:          &host,
 		URI:           &actor.ID,
-		Inbox:         &actor.Inbox,
-		IsBot:         activitypub.IsBotActorType(actor.Type.String()),
+		// inbox は配送先。収まらないなら捨てる (行は作る) — 配送はできなく
+		// なるが、表示や mention の解決は生きる (#2723)。
+		Inbox: inboxPtr(remoteURIValue(actor.ID, "user.inbox", actor.Inbox)),
+		IsBot: activitypub.IsBotActorType(actor.Type.String()),
 		// AP actorの manuallyApprovesFollowers を IsLocked (承認制) として
 		// 取り込む。これが false だとリモートの承認制ユーザに対するフォロー
 		// が非 locked として処理されて即 Following が成立し、ボタン挙動と
@@ -774,15 +789,16 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	} else {
 		user.ChatScope = "everyone"
 	}
-	if shared := remoteSharedInbox(actor); shared != "" {
+	// **任意の URI は「収まらないなら値ごと捨てる」。** 切った URI は別物で、
+	// 取りに行っても無駄なうえ壊れた参照を保存することになる。avatarUrl /
+	// bannerUrl を守っている `remoteMediaURL` と同じ扱いに揃える (#2723)。
+	if shared := remoteURIValue(actor.ID, "user.sharedInbox", remoteSharedInbox(actor)); shared != "" {
 		user.SharedInbox = &shared
 	}
-	if actor.Featured != "" {
-		featured := actor.Featured.String()
+	if featured := remoteURIValue(actor.ID, "user.featured", actor.Featured.String()); featured != "" {
 		user.Featured = &featured
 	}
-	if actor.MovedTo != "" {
-		movedTo := actor.MovedTo.String()
+	if movedTo := remoteURIValue(actor.ID, "user.movedToUri", actor.MovedTo.String()); movedTo != "" {
 		user.MovedToURI = &movedTo
 		user.MovedAt = &now
 	}
@@ -1249,17 +1265,15 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 		fields["name"] = &name
 		existing.Name = &name
 	}
-	if actor.Inbox != "" {
-		inbox := actor.Inbox
+	if inbox := remoteURIValue(actor.ID, "user.inbox", actor.Inbox); inbox != "" {
 		fields["inbox"] = &inbox
 		existing.Inbox = &inbox
 	}
-	if shared := remoteSharedInbox(actor); shared != "" {
+	if shared := remoteURIValue(actor.ID, "user.sharedInbox", remoteSharedInbox(actor)); shared != "" {
 		fields["sharedInbox"] = &shared
 		existing.SharedInbox = &shared
 	}
-	if actor.Featured != "" {
-		featured := actor.Featured.String()
+	if featured := remoteURIValue(actor.ID, "user.featured", actor.Featured.String()); featured != "" {
 		fields["featured"] = &featured
 		existing.Featured = &featured
 	}
@@ -1277,8 +1291,10 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	// 書き換わるので、判定に必要な値をここで退避する。
 	prevMovedAt := existing.MovedAt
 	movedThisRefresh := false
-	if actor.MovedTo != "" {
-		movedTo := actor.MovedTo.String()
+	// create 経路と同じく、収まらない URI は値ごと捨てる (#2723)。捨てないと
+	// **atomic UPDATE ごと失敗して `lastFetchedAt` が進まず**、inbound activity
+	// 1 件につき outbound fetch が 1 回走り続ける。
+	if movedTo := remoteURIValue(actor.ID, "user.movedToUri", actor.MovedTo.String()); movedTo != "" {
 		moving := existing.MovedToURI == nil || *existing.MovedToURI != movedTo
 		fields["movedToUri"] = &movedTo
 		existing.MovedToURI = &movedTo
@@ -3763,6 +3779,45 @@ const (
 	driveFileCommentMaxRunes = 512
 	noteCWMaxRunes           = 512
 )
+
+// user 側のリモート値を書く列の上限 (migration/000001_initial.up.sql)。
+const (
+	userURIMaxRunes  = 512
+	userHostMaxRunes = 128
+)
+
+// fitsColumn reports whether s fits a varchar(max) column and carries no NUL.
+//
+// PostgreSQL の varchar はコードポイント数で数えるので rune で見る。NUL は
+// 長さに関わらず 22021 で弾かれる。
+func fitsColumn(s string, max int) bool {
+	return !strings.ContainsRune(s, 0) && len([]rune(s)) <= max
+}
+
+// remoteURIValue returns raw when it fits a varchar(512) URI column, or "" when
+// it must be dropped.
+//
+// **切らない。** 途中で切った URI は別物で、取りに行っても無駄なうえ壊れた参照を
+// 保存することになる。`remoteMediaURL` と同じ判断 (#2662 / #2723)。
+func remoteURIValue(actorURI, column, raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if !fitsColumn(raw, userURIMaxRunes) {
+		slog.Warn("federation: dropping remote uri that does not fit its column",
+			"uri", truncateRunes(actorURI, userURIMaxRunes), "column", column)
+		return ""
+	}
+	return raw
+}
+
+// inboxPtr returns nil for an empty inbox so the column stays NULL.
+func inboxPtr(inbox string) *string {
+	if inbox == "" {
+		return nil
+	}
+	return &inbox
+}
 
 // remoteText prepares a remote-supplied **body** string for a column: NUL を落とし、
 // max rune で切る。max <= 0 なら切らない (`note.text` のような無制限の列用)。
