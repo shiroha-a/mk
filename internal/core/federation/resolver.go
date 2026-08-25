@@ -2476,10 +2476,13 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if apNote.Source != nil &&
 		apNote.Source.MediaType == "text/x.misskeymarkdown" &&
 		apNote.Source.Content != "" {
-		text := apNote.Source.Content
+		// `note.text` は無制限の text 列なので長さは切らないが、**NUL は落とす**。
+		// `content` 経路は mfm.FromHTML が落とすが、source / _misskey_content は
+		// FromHTML を通らない (#2723)。
+		text := remoteText(apNote.Source.Content, 0)
 		note.Text = &text
 	} else if apNote.MisskeyContent != "" {
-		text := apNote.MisskeyContent.String()
+		text := remoteText(apNote.MisskeyContent.String(), 0)
 		note.Text = &text
 	} else if apNote.Content != "" {
 		text := mfm.FromHTML(apNote.Content)
@@ -2488,7 +2491,10 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		}
 	}
 	if apNote.Summary != "" {
-		summary := apNote.Summary.String()
+		// **列の上限で切り、NUL を落とす。** CW は利用者が自由に書くので長文が
+		// 普通に来る。溢れると Create ごと落ちて ingest が error を返し、
+		// **inbox job が恒久 retry になる** (#2723)。
+		summary := remoteText(apNote.Summary.String(), noteCWMaxRunes)
 		note.CW = &summary
 	}
 	if apNote.Sensitive && note.CW == nil {
@@ -2885,9 +2891,10 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	if apNote.Source != nil &&
 		apNote.Source.MediaType == "text/x.misskeymarkdown" &&
 		apNote.Source.Content != "" {
-		newText = apNote.Source.Content
+		// create 経路と同じく NUL を落とす (#2723)。
+		newText = remoteText(apNote.Source.Content, 0)
 	} else if apNote.MisskeyContent != "" {
-		newText = apNote.MisskeyContent.String()
+		newText = remoteText(apNote.MisskeyContent.String(), 0)
 	} else if apNote.Content != "" {
 		newText = mfm.FromHTML(apNote.Content)
 	}
@@ -2912,7 +2919,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 		existing.Mentions = mentions
 	}
 	if apNote.Summary != "" {
-		summary := apNote.Summary.String()
+		summary := remoteText(apNote.Summary.String(), noteCWMaxRunes)
 		fields["cw"] = &summary
 		existing.CW = &summary
 	} else if apNote.Sensitive {
@@ -3746,11 +3753,30 @@ func numberAsInt(v any) int {
 	}
 }
 
-// drive_file の列の上限 (migration/000001_initial.up.sql)。
+// リモート由来の値を書く列の上限 (migration/000001_initial.up.sql)。
+//
+// **溢れると行ごと落ちる。** PostgreSQL は varchar の超過を 22001 で拒否するので、
+// INSERT / UPDATE がまるごと失敗する。note なら ingest が error を返して inbox job が
+// **恒久 retry** になり、actor なら 1 行も作られない (#2723)。
 const (
 	driveFileNameMaxRunes    = 256
 	driveFileCommentMaxRunes = 512
+	noteCWMaxRunes           = 512
 )
+
+// remoteText prepares a remote-supplied **body** string for a column: NUL を落とし、
+// max rune で切る。max <= 0 なら切らない (`note.text` のような無制限の列用)。
+//
+// **URL / ID には使わない。** 途中で切った URL は別物で、取りに行っても無駄なうえ
+// 壊れた参照を保存することになる。そちらは `remoteMediaURL` と同じく**値ごと捨てる**
+// (#2723)。
+func remoteText(raw string, max int) string {
+	out := sanitizeRemoteText(raw)
+	if max > 0 {
+		out = truncateRunes(out, max)
+	}
+	return out
+}
 
 // truncateRunes clips s to at most max runes. byte 単位で切ると壊れた UTF-8 を
 // 書くので rune で数える (extractRemoteDescription と同じ方針)。
