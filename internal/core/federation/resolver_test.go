@@ -4465,7 +4465,9 @@ func TestUpsertAttachments(t *testing.T) {
 		require.NoError(t, err)
 		assert.True(t, f1.IsLink, "remote attachment は link 形式")
 		assert.Equal(t, "image/png", f1.Type)
-		assert.Equal(t, "cat", f1.Name)
+		// name は URL の basename (upstream 一致)。AP の `name` は代替テキストなので
+		// comment 側に入る (#2723)。
+		assert.Equal(t, "cat.png", f1.Name)
 		require.NotNil(t, f1.Comment)
 		assert.Equal(t, "cat", *f1.Comment)
 		require.NotNil(t, f1.UserHost)
@@ -4522,7 +4524,7 @@ func TestUpsertAttachments(t *testing.T) {
 		f, err := drive.FindByURI("https://r/no-meta.bin")
 		require.NoError(t, err)
 		assert.Equal(t, "application/octet-stream", f.Type)
-		assert.Equal(t, "file", f.Name)
+		assert.Equal(t, "no-meta.bin", f.Name)
 		assert.Nil(t, f.Comment, "AP name 空のとき comment は nil")
 	})
 

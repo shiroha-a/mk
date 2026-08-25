@@ -21,6 +21,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/activitypub/mfm"
+	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -3859,6 +3860,41 @@ func isForeignKeyViolation(err error) bool {
 // driveFileRepo が未設定なら空 (model.StringArray{}) を返す (旧挙動)。userID は
 // リモート user の ID (note.UserID 相当)、host はリモート host (nil =
 // ローカル、attachment 文脈ではほぼ常に non-nil)。
+// attachmentFileName derives the drive file name from the attachment URL, the
+// way upstream's uploadFromUrl does (`urlObj.pathname.split('/').pop()`, then
+// `validateFileName` の不合格は `untitled`)。
+//
+// **upstream は実体を download して名前を決める** (Content-Disposition があれば
+// それを優先する) が、mk-go はリモートメディアを取りに行かない
+// (docs/divergence.md 5.5) ので URL の basename だけを使う。Mastodon 系は
+// Content-Disposition を返さないので、実際に選ばれる名前は upstream と一致する
+// ことが多い。**拡張子の補完はしない** — upstream が付けるのは実体を sniff した
+// 型であって、相手の申告した mediaType ではないため。
+//
+// pathname と同じく percent-encoding は解かない (解くと `%2F` が `/` になり、
+// upstream が弾く名前を作ってしまう)。
+//
+// **NUL の除去はしない。** `url.Parse` は制御文字を含む URL を parse error に
+// するので、ここまで NUL は来ない (重ねると届かない検査が増えるだけになる)。
+func attachmentFileName(rawURL string) string {
+	const fallback = "untitled"
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return fallback
+	}
+	// **`path.Base` は使わない。** 空文字に "."、末尾スラッシュに手前の segment を
+	// 返すので、upstream が `untitled` にする入力で名前を作ってしまう。
+	segs := strings.Split(u.EscapedPath(), "/")
+	base := segs[len(segs)-1]
+	if !coredrive.ValidateFileName(base) {
+		return fallback
+	}
+	// ここで truncate はしない。`ValidateFileName` が 200 rune で止めるので列
+	// (varchar(256)) には必ず入る。重ねると届かない検査が増えるだけになるので、
+	// 収まることは `TestAttachmentFileName_FitsColumn` で固定する。
+	return base
+}
+
 func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *string) model.StringArray {
 	if r.driveFileRepo == nil || len(docs) == 0 {
 		return model.StringArray{}
@@ -3875,17 +3911,17 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		if mediaType == "" {
 			mediaType = "application/octet-stream"
 		}
-		// **列の上限で切る。** Mastodon は `name` に**代替テキスト**を入れてくる
-		// ので、説明が長い添付は varchar(256) に入らず 22001 で落ち、**その添付が
-		// 丸ごと保存されない** (#2717)。rune 単位で切る — byte で切ると壊れた
-		// UTF-8 を書く。
+		// AP の `name` は**代替テキスト**なので `comment` に入れる。`name` (列は
+		// varchar(256)) は URL から作る — upstream の `uploadFromUrl` と同じ
+		// 置き場にする (#2723)。
+		//
+		// **列の上限で切る。** 説明が長い添付は varchar(256) に入らず 22001 で
+		// 落ち、**その添付が丸ごと保存されない** (#2717)。rune 単位で切る —
+		// byte で切ると壊れた UTF-8 を書く。
 		// **NUL も落とす。** 長さだけ直しても、制御文字が混じると 22021 で
 		// 同じく添付が丸ごと落ちる (#2721 review MEDIUM-1)。
 		safeName := sanitizeRemoteText(doc.Name)
-		name := truncateRunes(safeName, driveFileNameMaxRunes)
-		if name == "" {
-			name = "file" // NOT NULL カラムへのフォールバック
-		}
+		name := attachmentFileName(doc.URL)
 		var comment *string
 		if safeName != "" {
 			cn := truncateRunes(safeName, driveFileCommentMaxRunes)

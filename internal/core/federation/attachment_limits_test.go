@@ -59,15 +59,16 @@ func TestUpsertAttachments_TruncatesLongAltText(t *testing.T) {
 	require.Len(t, ids, 1, "長い alt text で添付が落ちている")
 	f := drive.Files[ids[0]]
 	require.NotNil(t, f)
-	assert.Equal(t, 256, len([]rune(f.Name)), "name が列の上限 (rune) で切られていない")
-	assert.True(t, strings.HasPrefix(f.Name, "さき"), "先頭が落ちている")
-	assert.True(t, utf8.ValidString(f.Name), "rune 境界で切れていない")
+	// name は代替テキストではなく URL の basename (#2723)。長い alt text で
+	// 列が溢れる経路そのものが無くなっている。
+	assert.Equal(t, "long.mp4", f.Name)
+	require.NotNil(t, f.Comment)
+	assert.Equal(t, 512, len([]rune(*f.Comment)), "comment が列の上限 (rune) で切られていない")
+	assert.True(t, strings.HasPrefix(*f.Comment, "さき"), "先頭が落ちている")
+	assert.True(t, utf8.ValidString(*f.Comment), "rune 境界で切れていない")
 	// **先頭一致も見る。** 長さと UTF-8 妥当性だけだと「末尾から切る」実装を
 	// 見逃す (#2721 review LOW-2)。
-	assert.True(t, strings.HasPrefix(alt, f.Name), "先頭から切っていない")
-	assert.True(t, strings.HasPrefix(alt, *f.Comment), "comment も先頭から切っていない")
-	require.NotNil(t, f.Comment)
-	assert.Equal(t, 512, len([]rune(*f.Comment)), "comment が列の上限で切られていない")
+	assert.True(t, strings.HasPrefix(alt, *f.Comment), "comment を先頭から切っていない")
 }
 
 // 著者が materialize されていない (= user 行が無い) 添付でも保存されること
