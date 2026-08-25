@@ -5782,12 +5782,23 @@ func (m *MockFollowingRepository) ListFollowers(userID string, limit, offset int
 // テストが見逃す。実際、旧 mock は**ソートせず挿入順**だったので本番より軽い
 // 症状しか再現しなかった。
 func (m *MockFollowingRepository) ListFollowersWithCursor(followeeID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
-	return paginateFollowings(m.followingsWhere(followeeID, true), sinceID, untilID, limit, offset), nil
+	return paginateFollowings(m.followingsWhere(followeeID, true), sinceID, untilID, clampRelationLimit(limit), offset), nil
 }
 
 // ListFollowingWithCursor is ListFollowersWithCursor for the follower side.
 func (m *MockFollowingRepository) ListFollowingWithCursor(followerID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
-	return paginateFollowings(m.followingsWhere(followerID, false), sinceID, untilID, limit, offset), nil
+	return paginateFollowings(m.followingsWhere(followerID, false), sinceID, untilID, clampRelationLimit(limit), offset), nil
+}
+
+// clampRelationLimit mirrors repository.clampRelationLimit (cursor 版のみ)。
+func clampRelationLimit(limit int) int {
+	if limit <= 0 {
+		return 10
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
 }
 
 // followingsWhere collects rows anchored on the followee (byFollowee=true) or
@@ -5828,6 +5839,10 @@ func paginateFollowings(rows []*model.Following, sinceID, untilID string, limit,
 		}
 		return kept[i].ID > kept[j].ID
 	})
+	// cursor 指定時は offset 無視 (本番 listRelationPage と同じ)。
+	if sinceID != "" || untilID != "" {
+		offset = 0
+	}
 	return paginate(kept, limit, offset)
 }
 

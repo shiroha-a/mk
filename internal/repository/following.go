@@ -27,8 +27,11 @@ type FollowingRepository interface {
 	// ListFollowersWithCursor is ListFollowers paginated by sinceId/untilId
 	// instead of offset alone (users/followers)。
 	//
-	// **offset 版と分けてある。** fanout / CSV export / admin は全件を順に舐める
-	// ので offset のままでよく、カーソルを足すと呼び出しが空文字だらけになる。
+	// **offset 版と分けてある。** fanout (`core/timeline`) / CSV export
+	// (`core/transfer`) / admin (`api/admin`) / stream の followee snapshot
+	// (`server/router.go`) は全件を順に舐めるので offset のままでよく、カーソルを
+	// 足すと呼び出しが空文字だらけになる。**上限も違う** (fanout 200 / CSV 500)
+	// ので、cursor 版の clamp を共有 body に置いてはいけない。
 	ListFollowersWithCursor(followeeID, sinceID, untilID string, limit, offset int) ([]*model.Following, error)
 	// ListFollowersToNotify returns Following rows where followeeId matches and
 	// notify='normal'. Used by note.CreateService to fan out 'note'
@@ -199,15 +202,32 @@ func (r *followingRepository) ListFolloweeIDs(followerID string) ([]string, erro
 // DB が 1 ページ目と同じ行を返し、それを全部落とすので**空になる**。一覧が 1 ページ
 // 分で止まり、プロフィールの followersCount と食い違って見える (#2711)。
 func (r *followingRepository) ListFollowersWithCursor(followeeID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
-	return r.listRelationPage(`"followeeId" = ?`, followeeID, sinceID, untilID, limit, offset)
+	return r.listRelationPage(`"followeeId" = ?`, followeeID, sinceID, untilID, clampRelationLimit(limit), offset)
 }
 
 // ListFollowingWithCursor is ListFollowersWithCursor for the follower side.
 func (r *followingRepository) ListFollowingWithCursor(followerID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
-	return r.listRelationPage(`"followerId" = ?`, followerID, sinceID, untilID, limit, offset)
+	return r.listRelationPage(`"followerId" = ?`, followerID, sinceID, untilID, clampRelationLimit(limit), offset)
 }
 
-// listRelationPage is the shared body of the two cursor-paginated lookups.
+// clampRelationLimit mirrors ListFollowingForList's bounds.
+//
+// **cursor 版にだけ掛ける。** 共有 body に置くと offset 版の呼び出し元
+// (fanout 200 / CSV export 500) が 100 に切り詰められて取りこぼす。
+// いまの唯一の呼び出し元は pagination.ResolveLimit が 1..100 を保証しているが、
+// interface に生えた public method なので、limit=0 で 0 件・負値で LIMIT 句ごと
+// 消えて全件、という壊れ方を塞いでおく (#2712 review LOW-3)。
+func clampRelationLimit(limit int) int {
+	if limit <= 0 {
+		return 10
+	}
+	if limit > 100 {
+		return 100
+	}
+	return limit
+}
+
+// listRelationPage is the shared body of the relation lookups.
 // 並び順は following/list (ListFollowingForList) と同じ paginationOrder に揃える。
 func (r *followingRepository) listRelationPage(cond, anchorID, sinceID, untilID string, limit, offset int) ([]*model.Following, error) {
 	q := r.db.Where(cond, anchorID)
@@ -217,26 +237,24 @@ func (r *followingRepository) listRelationPage(cond, anchorID, sinceID, untilID 
 	if untilID != "" {
 		q = q.Where(`id < ?`, untilID)
 	}
+	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
+	// cursor 指定時は offset 無視 (本家 makePaginationQuery と同じ)。この package の
+	// 他 10 ファイル (clip / flash / page / gallery / announcement 等) と揃える。
+	// 併用を許すと同じ入力でここだけ結果が変わる (#2712 review MEDIUM-3)。
+	if sinceID == "" && untilID == "" && offset > 0 {
+		q = q.Offset(offset)
+	}
 	var rows []*model.Following
-	if err := q.Order(paginationOrder(sinceID, untilID, "id")).
-		Limit(limit).
-		Offset(offset).
-		Find(&rows).Error; err != nil {
+	if err := q.Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil
 }
 
+// ListFollowers returns followers by offset. cursor 版と同じ body に委譲する
+// (`paginationOrder("", "", "id")` == `id DESC` なので生成 SQL は変わらない)。
 func (r *followingRepository) ListFollowers(userID string, limit, offset int) ([]*model.Following, error) {
-	var rows []*model.Following
-	if err := r.db.Where("\"followeeId\" = ?", userID).
-		Order("id DESC").
-		Limit(limit).
-		Offset(offset).
-		Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rows, nil
+	return r.listRelationPage(`"followeeId" = ?`, userID, "", "", limit, offset)
 }
 
 // ListFollowersToNotify returns Following rows where followeeId matches and
@@ -263,16 +281,9 @@ func (r *followingRepository) ListLocalFollowerIDs(followeeID string) ([]string,
 	return ids, nil
 }
 
+// ListFollowing is ListFollowers for the follower side.
 func (r *followingRepository) ListFollowing(userID string, limit, offset int) ([]*model.Following, error) {
-	var rows []*model.Following
-	if err := r.db.Where("\"followerId\" = ?", userID).
-		Order("id DESC").
-		Limit(limit).
-		Offset(offset).
-		Find(&rows).Error; err != nil {
-		return nil, err
-	}
-	return rows, nil
+	return r.listRelationPage(`"followerId" = ?`, userID, "", "", limit, offset)
 }
 
 // ListFollowingForList implements the cursor + notification-filter variant

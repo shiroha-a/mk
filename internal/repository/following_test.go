@@ -324,9 +324,16 @@ func TestFollowingRepository_ListWithCursor(t *testing.T) {
 	repo := NewFollowingRepository(testDB)
 	target := insertTestUser(t, "u_cur_t", "curtarget")
 	defer cleanupUser(t, target.ID)
+	// **id をリテラルで書く。** CI の `Check duplicate test fixture IDs` は
+	// `insertTestUser(t, "` の grep なので、fmt.Sprintf で組むと検査から漏れる
+	// (#2712 review LOW-4)。
+	users := []struct{ id, name string }{
+		{"u_cur_0", "curuser0"}, {"u_cur_1", "curuser1"}, {"u_cur_2", "curuser2"},
+		{"u_cur_3", "curuser3"}, {"u_cur_4", "curuser4"},
+	}
 	ids := []string{"cur_1", "cur_2", "cur_3", "cur_4", "cur_5"}
 	for i, fid := range ids {
-		u := insertTestUser(t, fmt.Sprintf("u_cur_%d", i), fmt.Sprintf("curuser%d", i))
+		u := insertTestUser(t, users[i].id, users[i].name)
 		defer cleanupUser(t, u.ID)
 		// followers 側と following 側の両方を同じ id で作る。
 		insertFollowing(t, fid, u.ID, target.ID)
@@ -353,11 +360,46 @@ func TestFollowingRepository_ListWithCursor(t *testing.T) {
 	require.Len(t, asc, 2)
 	assert.Equal(t, []string{"cur_3", "cur_4"}, []string{asc[0].ID, asc[1].ID})
 
-	// following 側も同じ形。
+	// following 側も同じ形。**両方向を見る** — 片側だけだと、#2711 と同じ形が
+	// 反対側で再発しても検出できない (#2712 review MEDIUM-1)。
 	sentPage, err := repo.ListFollowingWithCursor(target.ID, "", "cur_4_s", 2, 0)
 	require.NoError(t, err)
 	require.Len(t, sentPage, 2)
 	assert.Equal(t, []string{"cur_3_s", "cur_2_s"}, []string{sentPage[0].ID, sentPage[1].ID})
+
+	sentAsc, err := repo.ListFollowingWithCursor(target.ID, "cur_2_s", "", 2, 0)
+	require.NoError(t, err)
+	require.Len(t, sentAsc, 2)
+	assert.Equal(t, []string{"cur_3_s", "cur_4_s"}, []string{sentAsc[0].ID, sentAsc[1].ID})
+
+	// sinceId と untilId の同時指定は両方 exclusive で DESC (upstream
+	// makePaginationQuery の第 1 分岐、#2712 review LOW-5)。
+	both, err := repo.ListFollowersWithCursor(target.ID, "cur_1", "cur_5", 10, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"cur_4", "cur_3", "cur_2"},
+		[]string{both[0].ID, both[1].ID, both[2].ID})
+
+	// **cursor 指定時は offset を無視する** (本家 makePaginationQuery と同じ。
+	// この package の他 10 ファイルと揃える、#2712 review MEDIUM-3)。
+	withOffset, err := repo.ListFollowersWithCursor(target.ID, "", "cur_5", 2, 1)
+	require.NoError(t, err)
+	require.Len(t, withOffset, 2)
+	assert.Equal(t, []string{"cur_4", "cur_3"}, []string{withOffset[0].ID, withOffset[1].ID},
+		"cursor と併用した offset が効いている")
+
+	// cursor 未指定なら offset は効く (offset 版の呼び出し元が依存している)。
+	offsetOnly, err := repo.ListFollowersWithCursor(target.ID, "", "", 2, 1)
+	require.NoError(t, err)
+	require.Len(t, offsetOnly, 2)
+	assert.Equal(t, []string{"cur_4", "cur_3"}, []string{offsetOnly[0].ID, offsetOnly[1].ID})
+
+	// limit の clamp は cursor 版だけ。0 で 0 件・負値で全件にならないこと。
+	clamped, err := repo.ListFollowersWithCursor(target.ID, "", "", 0, 0)
+	require.NoError(t, err)
+	assert.Len(t, clamped, 5, "limit=0 が LIMIT 0 になっている")
+	clamped, err = repo.ListFollowersWithCursor(target.ID, "", "", -1, 0)
+	require.NoError(t, err)
+	assert.Len(t, clamped, 5)
 }
 
 // ListFollowersBefore / ListFollowingBefore は id DESC で cursor (id <) ページング
@@ -852,3 +894,29 @@ func TestFollowingRepository_UpdateAllByFollower(t *testing.T) {
 }
 
 var _ = context.Background // import guard (used elsewhere in file)
+
+// clampRelationLimit は cursor 版の public method 用の境界。
+//
+// **offset 版には掛けない** — fanout (200) / CSV export (500) が切り詰められる。
+// いまの唯一の呼び出し元は pagination.ResolveLimit が 1..100 を保証しているが、
+// interface に生えているので limit=0 で 0 件・負値で LIMIT 句ごと消えて全件、
+// という壊れ方を塞ぐ (#2712 review LOW-3)。
+func TestClampRelationLimit(t *testing.T) {
+	cases := []struct {
+		name  string
+		limit int
+		want  int
+	}{
+		{"zero falls back to the default", 0, 10},
+		{"negative falls back to the default", -1, 10},
+		{"one is kept", 1, 1},
+		{"upper bound is kept", 100, 100},
+		{"above the upper bound is capped", 101, 100},
+		{"far above the upper bound is capped", 100000, 100},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, clampRelationLimit(tc.limit))
+		})
+	}
+}

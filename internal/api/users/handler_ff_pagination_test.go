@@ -105,17 +105,57 @@ func TestRelationList_PaginatesWithUntilID(t *testing.T) {
 //
 // 降順のまま LIMIT を掛けると、sinceId の**直後**ではなく最新側から返してしまい、
 // 古い方向の続きが永久に取れない。
+//
+// **followers / following の両方を見る。** 片側だけだと、#2711 と同じ形が反対側で
+// 再発しても検出できない (#2712 review MEDIUM-1)。
 func TestRelationList_SinceIDReturnsAscending(t *testing.T) {
+	cases := []struct {
+		name string
+		fn   func(*Handler) func(echo.Context) error
+	}{
+		{"followers", func(h *Handler) func(echo.Context) error { return h.Followers }},
+		{"following", func(h *Handler) func(echo.Context) error { return h.Following }},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := setupRelationPageFixture(t, 5)
+			ep := tc.fn(h)
+			all := relationPage(t, ep, `{"userId":"user1","limit":100}`)
+			require.Len(t, all, 5)
+			oldest := all[len(all)-1]
+
+			page := relationPage(t, ep, fmt.Sprintf(`{"userId":"user1","limit":2,"sinceId":%q}`, oldest))
+			require.Len(t, page, 2)
+			for i := 1; i < len(page); i++ {
+				assert.Greater(t, page[i], page[i-1], "sinceId 指定時は昇順")
+			}
+			// oldest の 1 つ上と 2 つ上が返ること (最新側 2 件ではない)。
+			assert.Equal(t, []string{all[len(all)-2], all[len(all)-3]}, page)
+		})
+	}
+}
+
+// cursor と offset を併用しても offset は無視されること (#2712 review MEDIUM-3)。
+//
+// upstream `makePaginationQuery` と同じで、この package の他 10 ファイル
+// (clip / flash / page / gallery / announcement 等) も同じ規約。frontend の
+// `Paginator` は offset と untilId を排他で送るので実害は無いが、mock と本番の
+// 両方で固定しておかないと次の変更で黙ってズレる。
+func TestRelationList_CursorIgnoresOffset(t *testing.T) {
 	h := setupRelationPageFixture(t, 5)
+	page1 := relationPage(t, h.Followers, `{"userId":"user1","limit":2}`)
+	require.Len(t, page1, 2)
+	until := page1[len(page1)-1]
+
+	noOffset := relationPage(t, h.Followers, fmt.Sprintf(`{"userId":"user1","limit":2,"untilId":%q}`, until))
+	withOffset := relationPage(t, h.Followers, fmt.Sprintf(`{"userId":"user1","limit":2,"untilId":%q,"offset":1}`, until))
+	require.Len(t, withOffset, 2)
+	assert.Equal(t, noOffset, withOffset, "cursor と併用した offset が効いている")
+
+	// cursor 未指定なら offset は効く (offset 版の呼び出し元が依存している挙動)。
 	all := relationPage(t, h.Followers, `{"userId":"user1","limit":100}`)
 	require.Len(t, all, 5)
-	oldest := all[len(all)-1]
-
-	page := relationPage(t, h.Followers, fmt.Sprintf(`{"userId":"user1","limit":2,"sinceId":%q}`, oldest))
-	require.Len(t, page, 2)
-	for i := 1; i < len(page); i++ {
-		assert.Greater(t, page[i], page[i-1], "sinceId 指定時は昇順")
-	}
-	// oldest の 1 つ上と 2 つ上が返ること (最新側 2 件ではない)。
-	assert.Equal(t, []string{all[len(all)-2], all[len(all)-3]}, page)
+	shifted := relationPage(t, h.Followers, `{"userId":"user1","limit":2,"offset":1}`)
+	require.Len(t, shifted, 2)
+	assert.Equal(t, []string{all[1], all[2]}, shifted)
 }

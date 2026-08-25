@@ -1053,7 +1053,7 @@ func (h *Handler) collectFollowers(ctx context.Context, req FollowersRequest, vi
 	if err != nil {
 		return nil, err
 	}
-	return h.packRelationItems(ctx, rows, req, true, viewer), nil
+	return h.packRelationItems(ctx, rows, true, viewer), nil
 }
 
 func (h *Handler) collectFollowing(ctx context.Context, req FollowersRequest, viewer *model.User) ([]relationItem, error) {
@@ -1061,15 +1061,18 @@ func (h *Handler) collectFollowing(ctx context.Context, req FollowersRequest, vi
 	if err != nil {
 		return nil, err
 	}
-	return h.packRelationItems(ctx, rows, req, false, viewer), nil
+	return h.packRelationItems(ctx, rows, false, viewer), nil
 }
 
 // packRelationItems builds the response slice for users/followers and
 // users/following. followers=true means embed the follower side, false means
-// embed the followee side. cursor (sinceId/untilId) で filter したあとに
-// ShowManyByIDs (#503) で 1 batch query にまとめ、map で O(1) 解決して
-// 旧 ShowByID per-row N+1 を解消する (#300 2-3)。instance は引き続き
-// batch 1 回で resolve する (#277)。
+// embed the followee side. ShowManyByIDs (#503) で 1 batch query にまとめ、
+// map で O(1) 解決して旧 ShowByID per-row N+1 を解消する (#300 2-3)。instance は
+// 引き続き batch 1 回で resolve する (#277)。
+//
+// **cursor (sinceId/untilId) はここでは見ない。** collect 側が SQL に渡している。
+// ここで掛ける形に戻すと、LIMIT のあとに捨てることになり 2 ページ目が空になる
+// (#2711)。
 //
 // viewer が non-nil なら follow relation flag (isFollowing / isFollowed) を
 // `FilterFollowing` / `FilterFollowedBy` の 2 batch query で埋める (#1144、
@@ -1080,16 +1083,11 @@ func (h *Handler) collectFollowing(ctx context.Context, req FollowersRequest, vi
 func (h *Handler) packRelationItems(
 	ctx context.Context,
 	rows []*model.Following,
-	req FollowersRequest,
 	followers bool,
 	viewer *model.User,
 ) []relationItem {
-	// **ここで cursor を掛けない。** collect 側が SQL に渡しているので二重になる
-	// うえ、LIMIT のあとに絞る形に戻すと 2 ページ目が空になる (#2711)。
-	filtered := make([]*model.Following, 0, len(rows))
 	idSet := make(map[string]struct{}, len(rows))
 	for _, f := range rows {
-		filtered = append(filtered, f)
 		var target string
 		if followers {
 			target = f.FollowerID
@@ -1142,8 +1140,8 @@ func (h *Handler) packRelationItems(
 	// count visibility gate (#1558) 用。moderator viewer は全 count を見られる。
 	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 
-	out := make([]relationItem, 0, len(filtered))
-	for _, f := range filtered {
+	out := make([]relationItem, 0, len(rows))
+	for _, f := range rows {
 		item := relationItem{ID: f.ID, FollowerID: f.FollowerID, FolloweeID: f.FolloweeID}
 		if t, err := h.idGen.ParseTime(f.ID); err == nil {
 			item.CreatedAt = t.UTC().Format("2006-01-02T15:04:05.000Z")
