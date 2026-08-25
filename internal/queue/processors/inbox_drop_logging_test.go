@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -11,8 +12,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/shiroha-a/mk/internal/core/federation"
+	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/queue/processors"
 )
 
@@ -20,6 +23,9 @@ import (
 //
 // **JSON で取る。** text 形式だと `err` の中の `signer=...` と属性としての
 // `signer=...` を区別できず、専用の属性を落とす変異を見逃す (#2716)。
+//
+// `slog.SetDefault` はプロセス global なので、このパッケージで `t.Parallel()` を
+// 使わない前提に乗っている (現状 0 件)。
 func captureLogs(t *testing.T) *bytes.Buffer {
 	t.Helper()
 	var buf bytes.Buffer
@@ -48,53 +54,97 @@ func findLogRecord(t *testing.T, buf *bytes.Buffer, want string) map[string]any 
 	return nil
 }
 
+// forwardedDropFixture builds the **production** shape: signer != body actor,
+// LD verifier wired (router 側は必ず配線する)、LD-Signature の検証が失敗する。
+//
+// 実運用のログ 27/27 がこの分岐 (`ld-signature verify failed`) だった。
+func forwardedDropFixture(t *testing.T, ldErr error) (*processors.InboxProcessor, *stubFedProcessor, queue.InboxPayload) {
+	t.Helper()
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://relay.example/actor#main-key", priv)
+	require.NoError(t, err)
+
+	relayHost := "relay.example"
+	originHost := "origin.example"
+	verifier := &multiActorVerifier{
+		pubKey: pub,
+		byURI: map[string]*model.User{
+			"https://relay.example/actor":      {ID: "relay", Host: &relayHost, URI: uptr("https://relay.example/actor")},
+			"https://origin.example/users/mal": {ID: "mal", Host: &originHost, URI: uptr("https://origin.example/users/mal")},
+		},
+	}
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+	p.SetLDSignatureVerifier(&stubLDVerifier{present: true, err: ldErr})
+
+	body := []byte(`{"id":"https://origin.example/notes/1/activity","type":"Create","actor":"https://origin.example/users/mal","signature":{"type":"RsaSignature2017","creator":"https://origin.example/users/mal#main-key"},"object":{"id":"https://origin.example/notes/1","type":"Note"}}`)
+	return p, stub, signedInboxPayload(t, key, body)
+}
+
 // activity を捨てたときに**相手が判る**こと (#2716)。
 //
 // 実運用では 24 時間の警告の半分がこの破棄で、しかも `host=""` で相手が一切
 // 残っていなかった。activity を捨てる経路なので、誤って落としていた場合に
 // 気付く手段がこのログしか無い。
+//
+// **本番と同じ分岐を通す。** LD verifier を配線しないと
+// `actor mismatch and no LD verifier` に落ちるが、router は必ず配線するので
+// その分岐は本番に存在しない (#2724 review HIGH-1)。
 func TestInboxProcessor_DropLogIdentifiesTheSender(t *testing.T) {
-	// 署名者 (alice) と body の actor (mallory) を食い違わせる = 転送活動扱い。
-	// LD-Signature が無いので破棄される。
-	body := []byte(`{"id":"https://other.example/notes/1/activity","type":"Create","actor":"https://other.example/users/mallory","object":{"id":"https://other.example/notes/1","type":"Note"}}`)
-	v, payload := signedReplayFixture(t, body)
-
 	buf := captureLogs(t)
-	stub := &stubFedProcessor{}
-	p := processors.NewInboxProcessor(stub)
-	p.SetSignatureVerifier(v)
+	p, stub, payload := forwardedDropFixture(t, errors.New("ld-sig: signature verification failed: crypto/rsa: verification error"))
 	require.NoError(t, p.Handle(context.Background(), queue.NewInboxTask(payload)))
 
-	// **判定は変えていない。** 転送活動で LD-Signature が無ければ従来どおり捨てる。
+	// **判定は変えていない。** 検証に失敗した転送活動は従来どおり捨てる。
 	assert.Empty(t, stub.calls, "捨てるはずの activity が処理されている")
 
-	// **属性ごとに見る。** `err` にも signer / actor が入っているので、
-	// 文字列の含有だけでは専用の属性を落とす変異を見逃す。
 	rec := findLogRecord(t, buf, "dropping activity")
-	assert.Equal(t, "remote.example", rec["host"], "署名者の host が出ていない")
-	assert.Equal(t, "https://remote.example/users/alice", rec["signer"], "signer が出ていない")
-	assert.Equal(t, "https://other.example/users/mallory", rec["actor"], "body の actor が出ていない")
+	assert.Equal(t, "relay.example", rec["host"], "署名者の host が出ていない")
+	assert.Equal(t, "https://relay.example/actor", rec["signer"], "signer が出ていない")
+	assert.Equal(t, "https://origin.example/users/mal", rec["actor"], "body の actor が出ていない")
 	assert.Equal(t, "Create", rec["activityType"], "activity の type が出ていない")
+
+	// **原因が切り落とされないこと。** `LastError.Message` は 200 rune で切られる
+	// ので、signer / actor を error にも重ねると原因が落ちる (#2724 review MEDIUM-1)。
+	errMsg, _ := rec["err"].(string)
+	require.Contains(t, errMsg, "ld-signature verify failed")
+	assert.Contains(t, errMsg, "crypto/rsa: verification error", "原因が error から落ちている")
+	assert.Contains(t, errMsg, `creator="https://origin.example/users/mal#main-key"`)
+	assert.LessOrEqual(t, len([]rune(errMsg)), 200,
+		"LastError.Message の切り詰め (200 rune) で原因が落ちる長さになっている")
 }
 
-// ExtractActivityType は inbox gate と同じ unwrap+Normalize を通ること (#2716)。
+// 署名検証に失敗した破棄でも host が空にならないこと (#2724 review MEDIUM-3)。
 //
-// 生 body を直接見ると、配列 wrap や `as:type` で type が読めずログが空になる。
-func TestExtractActivityType(t *testing.T) {
-	cases := []struct {
-		name string
-		body string
-		want string
-	}{
-		{"plain", `{"type":"Create","actor":"https://h/u"}`, "Create"},
-		{"singleton array wrap", `[{"type":"Announce","actor":"https://h/u"}]`, "Announce"},
-		{"array type takes the first", `{"type":["Create","Public"],"actor":"https://h/u"}`, "Create"},
-		{"missing", `{"actor":"https://h/u"}`, ""},
-		{"broken json", `{`, ""},
+// 同じ関数の中に `payload.Host` を出す破棄ログが 3 つ残っていた。
+func TestInboxProcessor_SignatureFailureLogHasHost(t *testing.T) {
+	buf := captureLogs(t)
+	priv, _, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://relay.example/actor#main-key", priv)
+	require.NoError(t, err)
+
+	// 別の鍵ペアで検証させて失敗させる。
+	_, otherPub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	relayHost := "relay.example"
+	verifier := &multiActorVerifier{
+		pubKey: otherPub,
+		byURI: map[string]*model.User{
+			"https://relay.example/actor": {ID: "relay", Host: &relayHost, URI: uptr("https://relay.example/actor")},
+		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, federation.ExtractActivityType([]byte(tc.body)))
-		})
-	}
+	p := processors.NewInboxProcessor(&stubFedProcessor{})
+	p.SetSignatureVerifier(verifier)
+
+	body := []byte(`{"id":"https://relay.example/a/1","type":"Follow","actor":"https://relay.example/actor"}`)
+	payload := signedInboxPayload(t, key, body)
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox, Body: mustEncode(t, payload),
+	}))
+
+	rec := findLogRecord(t, buf, "signature verification failed in worker")
+	assert.Equal(t, "relay.example", rec["host"], "host が空のまま出ている")
 }

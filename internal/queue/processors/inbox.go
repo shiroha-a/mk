@@ -286,11 +286,15 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		// **本番の inbox handler は payload.Host を設定していない。**
 		// リクエストの Host header は「こちらのホスト名」なので送信元を表さず、
 		// 埋めようが無いため空のまま流れてくる (既存の
-		// `slog.Warn(..., "host", payload.Host)` も空文字を出している)。
+		// 以前は破棄ログもこの空文字を出していた (#2716 で導出済みの host に
+		// 差し替えた)。
 		//
 		// テレメトリは送信元ごとに集計するので、署名の keyId から導く (#2471)。
 		// **認可には使わない** — 署名検証を通る前の値なので信用できない。
 		// 集計の宛先を決めるためだけに使う。
+		//
+		// **keyId 由来なので port 付き / 大文字混在になりうる。** 署名者が
+		// 解決できたら下で `*actor.Host` (DB 正規化済み) に差し替わる。
 		host = hostFromSignatureKeyID(payload.Headers["Signature"])
 	}
 	// 受信結果の記録起点 (#2471)。host は署名者が解決できたら実 host に
@@ -306,7 +310,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		actor, keyType, err := p.verifyPayload(payload)
 		if err != nil {
 			slog.Warn("inbox: signature verification failed in worker",
-				"host", payload.Host, "err", err)
+				"host", host, "err", err)
 			p.recordInboxTelemetry(host, deliveryhealth.ClassSignatureFailed, started, err.Error())
 			return nil
 		}
@@ -330,7 +334,7 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		// (actor spoofing 対策)。一致しない場合は転送活動とみなし LD-Signature が
 		// body actor を認証している場合のみ許可する。LD-Signature の hardening
 		// (forbidden directive 等) も本 gate に集約する。
-		if err := p.authorizeActor(payload.Body, actor); err != nil {
+		if fields, err := p.authorizeActor(payload.Body, actor); err != nil {
 			// **payload.Host を出さない。** これは常に空 (リクエストの Host
 			// ヘッダはこちらのホスト名なので送信元を表さず、handler も設定
 			// しない)。署名の keyId から導いた host は既に上で計算済みなので
@@ -341,8 +345,8 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 			slog.Warn("inbox: actor authorization failed, dropping activity",
 				"host", host,
 				"signer", signerURIOf(actor),
-				"actor", federation.ExtractActorIRI(payload.Body),
-				"activityType", federation.ExtractActivityType(payload.Body),
+				"actor", fields.Actor,
+				"activityType", fields.Type,
 				"err", err)
 			p.recordInboxTelemetry(host, deliveryhealth.ClassActorUnauthorized, started, err.Error())
 			return nil
@@ -369,14 +373,14 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		// hardening を効かせる (#1164 Phase D)。fail なら drop。
 		if err := p.ldVerifier.VerifyIfPresent(payload.Body); err != nil {
 			slog.Warn("inbox: LD-Signature verification failed, dropping activity",
-				"host", payload.Host, "err", err)
+				"host", host, "err", err)
 			p.recordInboxTelemetry(host, deliveryhealth.ClassLDSignatureFailed, started, err.Error())
 			return nil
 		}
 	}
 	if err := p.dispatch(payload.Body, signer); err != nil {
 		if errors.Is(err, federation.ErrUnsupportedActivity) {
-			slog.Debug("inbox: unsupported activity, dropped", "host", payload.Host)
+			slog.Debug("inbox: unsupported activity, dropped", "host", host)
 			// 異常ではない (相手は正しく送っており、こちらが対応していない
 			// だけ)。受理側に数える。
 			p.recordInboxTelemetry(host, deliveryhealth.ClassUnsupported, started, "")
@@ -466,33 +470,38 @@ func (p *InboxProcessor) verifyPayload(payload queue.InboxPayload) (*model.User,
 //     authenticates the activity actor: the LD-Signature must be present, must
 //     verify, and its creator key must belong to a user whose URI equals
 //     activity.actor. Otherwise drop (return error) to block actor spoofing.
-func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
+//
+// authorizeActor gates the activity and returns the identity fields it read,
+// so the caller can log **who** was dropped without re-parsing the body
+// (#2716 / #2724 review MEDIUM-4)。
+func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) (federation.ActivityFields, error) {
 	// gate は Process と同じ unwrap+Normalize を経た actor を見る必要がある。
 	// raw body を直接 parse すると `as:actor` / `{"@id":...}` / 配列 wrap で
 	// gate を空 actor にすり抜けさせ、Process だけが本当の actor で動く
 	// なりすまし経路が残る (#parity review AUTH-1)。
-	bodyActor := federation.ExtractActorIRI(body)
+	//
+	// actor / id / type を **1 パス**で読む。個別に取ると同じ body を normalize
+	// し直すことになる。
+	fields := federation.ExtractActivityFields(body)
+	bodyActor := fields.Actor
 	if bodyActor == "" {
 		// actor 欠落は Process 側 ("activity missing actor") が弾く。ここでは
 		// 判定不能なので素通しし、なりすまし対象が無い状態にする。
-		return nil
+		return fields, nil
 	}
 	// activity.id host gate (upstream InboxProcessorService): activity.id は文字列
 	// 必須で、その host は actor の host と一致しなければならない。これが無いと、
 	// 署名検証を通った actor が他 host の id を持つ activity を stamp でき、Announce
 	// dedup の FindByURI(act.ID) / renote.URI=act.ID 等で foreign-host id を注入できる
 	// (#1779)。署名検証後 (= 認証済み actor) に評価する。
-	activityID := federation.ExtractActivityID(body)
+	activityID := fields.ID
 	if activityID == "" {
-		return fmt.Errorf("activity id is not a string")
+		return fields, fmt.Errorf("activity id is not a string")
 	}
 	if idHost, actorHost := uriHost(activityID), uriHost(bodyActor); idHost == "" || idHost != actorHost {
-		return fmt.Errorf("signerHost != activity.id host: actor=%q id=%q", bodyActor, activityID)
+		return fields, fmt.Errorf("signerHost != activity.id host: actor=%q id=%q", bodyActor, activityID)
 	}
-	signerURI := ""
-	if signer != nil && signer.URI != nil {
-		signerURI = *signer.URI
-	}
+	signerURI := signerURIOf(signer)
 
 	if signerURI != "" && signerURI == bodyActor {
 		// #2106 N26: 署名者 == actor かつ HTTP 署名検証済みの通常経路では、upstream
@@ -501,19 +510,19 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 		// 失敗 (creator 鍵未解決 / legacy LD-sig / normalize 差異) で HTTP 署名済の正規
 		// activity を drop しないようにする。
 		if p.ldVerifier != nil {
-			return p.ldVerifier.CheckForbiddenDirectivesIfPresent(body)
+			return fields, p.ldVerifier.CheckForbiddenDirectivesIfPresent(body)
 		}
-		return nil
+		return fields, nil
 	}
 
 	// 署名者 != actor: 転送活動の可能性。LD-Signature による actor 認証が必須。
 	if p.ldVerifier == nil {
-		return fmt.Errorf("actor mismatch and no LD verifier: signer=%q actor=%q", signerURI, bodyActor)
+		return fields, fmt.Errorf("actor mismatch and no LD verifier: signer=%q actor=%q", signerURI, bodyActor)
 	}
 	// LD-Signature の creator (鍵 URI) を body から読む。
 	creatorKeyID := extractLDCreator(body)
 	if creatorKeyID == "" {
-		return fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
+		return fields, fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
 	}
 	// 検証より先に creator actor を解決して鍵を取得/永続化する。VerifyAndCreator
 	// は FindByKeyID の純粋 DB read で、先に解決しておかないと未知 origin actor
@@ -521,17 +530,17 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 	// getAuthUserFromKeyId は未知 actor を fetch する挙動と整合)。
 	ldUser, err := p.resolveLDCreator(activitypub.ResolveKeyURL(creatorKeyID), signer)
 	if err != nil {
-		return fmt.Errorf("resolve ld-signature creator %q: %w", creatorKeyID, err)
+		return fields, fmt.Errorf("resolve ld-signature creator %q: %w", creatorKeyID, err)
 	}
 	// 鍵が DB に載った状態で LD-Signature 本体を検証する。
 	if _, present, err := p.ldVerifier.VerifyAndCreator(body); err != nil {
-		// **相手を載せる。** 他の分岐は signer / actor を入れているのに、ここだけ
-		// 原因文字列だけだった。activity を捨てる経路なので、誤って落としていた
-		// 場合に気付く手段がこのログしか無い (#2716)。
-		return fmt.Errorf("ld-signature verify failed (signer=%q actor=%q creator=%q): %w",
-			signerURI, bodyActor, creatorKeyID, err)
+		// **creator だけ載せる。** signer / actor は破棄ログの専用属性になったので
+		// 重ねる必要が無い。重ねると `LastError.Message` の 200 rune 切り詰めで
+		// **原因 (crypto/rsa: verification error) が落ちる** — 診断のための PR が
+		// 別の診断面を下げることになる (#2724 review MEDIUM-1)。
+		return fields, fmt.Errorf("ld-signature verify failed (creator=%q): %w", creatorKeyID, err)
 	} else if !present {
-		return fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
+		return fields, fmt.Errorf("actor mismatch and no LD-signature: signer=%q actor=%q", signerURI, bodyActor)
 	}
 	// LD-Signature の creator (鍵) の owner URI が activity.actor と一致するか
 	// 確認する。一致しなければ「自分の鍵で署名したが他人を actor に詐称」した
@@ -541,9 +550,9 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) error {
 		ldURI = *ldUser.URI
 	}
 	if ldURI == "" || ldURI != bodyActor {
-		return fmt.Errorf("ld-signature signer %q != activity.actor %q", ldURI, bodyActor)
+		return fields, fmt.Errorf("ld-signature signer %q != activity.actor %q", ldURI, bodyActor)
 	}
-	return nil
+	return fields, nil
 }
 
 // uriHost returns the lowercased hostname of a URI, or "" when the URI is

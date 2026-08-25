@@ -577,25 +577,38 @@ func ExtractActivityID(body []byte) string {
 	return act.ID
 }
 
-// ExtractActivityType reads the activity's `type` through the same
-// unwrap+Normalize the inbox gate uses.
+// ActivityFields are the identity fields the inbox gate needs from a body.
+type ActivityFields struct {
+	Actor string // activity.actor (IRI)
+	ID    string // activity.id
+	Type  string // activity.type
+}
+
+// ExtractActivityFields reads actor / id / type in **one** unwrap+Normalize pass.
 //
-// **ログ専用。** どの activity を捨てたのかを追えるようにするためのもので
-// (#2716)、判定には使わない。取得不能 / 欠落時は "" を返す。
-func ExtractActivityType(body []byte) string {
+// **1 回で済ませる。** 個別に取ると同じ body を JSON-LD normalize し直すことに
+// なる。破棄の判定と破棄ログはどちらもこの経路を通り、しかも「解決できる actor で
+// HTTP 署名が通る」だけで到達できるので、パス数がそのまま攻撃者に押せる CPU に
+// なる (#2724 review MEDIUM-4。60KB の body で 1 パス約 1ms を実測)。
+//
+// 前処理は ExtractActorIRI / ExtractActivityID と同一にする。生 body を直接見ると
+// 配列 wrap や `as:type` で読めず、gate が見ているものとずれる。
+// 取得不能 / 欠落の field は "" になる。
+func ExtractActivityFields(body []byte) ActivityFields {
 	if unwrapped, ok := tryUnwrapSingletonArray(body); ok {
 		body = unwrapped
 	}
 	normalized, err := activitypub.Normalize(body)
 	if err != nil {
-		return ""
+		return ActivityFields{}
 	}
 	var act genericActivity
 	// ExtractActorIRI と同じ理由で型エラーを握る。
 	if err := unmarshalIgnoringTypeErrors(normalized, &act); err != nil {
-		return ""
+		return ActivityFields{}
 	}
-	return act.Type
+	act.normalizeActor(normalized)
+	return ActivityFields{Actor: act.Actor, ID: act.ID, Type: act.Type}
 }
 
 // SetBlockingService wires the blocking service for Block/Undo Block activities.
