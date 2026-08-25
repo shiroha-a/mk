@@ -61,3 +61,46 @@ func TestDriveFile_AcceptsNullOwner(t *testing.T) {
 	require.NotNil(t, got.UserHost)
 	assert.Equal(t, host, *got.UserHost)
 }
+
+// owner を落としたリモート添付が「孤児掃除」で消えないこと (#2721 review HIGH-1)。
+//
+// 著者が materialize されていない添付は owner 無しで作る (#2717) が、それらは
+// **表示中の note が参照している**。`userId IS NULL` だけを孤児の条件にすると、
+// admin の drive cleanup 1 回で消えて画像が黙って消える。ephemeral note は DB に
+// 行が無いので「note から参照されているか」でも守れない。
+func TestDriveFile_OrphanCleanupKeepsUnownedRemoteFiles(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	remote := "dfl_orphan_remote_00000000000a"
+	local := "dfl_orphan_local_000000000000a"
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "drive_file" WHERE id IN (?, ?)`, remote, local)
+	})
+
+	host := "remote.example"
+	require.NoError(t, repo.Create(&model.DriveFile{
+		ID: remote, Name: "file", Type: "image/webp",
+		URL: "https://media.example/files/keep.webp", UserHost: &host, IsLink: true,
+	}))
+	// local な owner 無し (emoji copy / import zip 相当) は従来どおり掃除対象。
+	require.NoError(t, repo.Create(&model.DriveFile{
+		ID: local, Name: "file", Type: "image/webp",
+		URL: "https://example.com/files/sweep.webp",
+	}))
+
+	orphans, err := repo.ListOrphans(100)
+	require.NoError(t, err)
+	ids := make([]string, 0, len(orphans))
+	for _, o := range orphans {
+		ids = append(ids, o.ID)
+	}
+	assert.NotContains(t, ids, remote, "リモートの添付が孤児と判定されている")
+	assert.Contains(t, ids, local, "local の owner 無しは従来どおり掃除対象")
+
+	_, err = repo.DeleteOrphans()
+	require.NoError(t, err)
+	got, err := repo.FindByID(remote)
+	require.NoError(t, err, "リモートの添付が孤児掃除で消えている")
+	require.NotNil(t, got)
+	_, err = repo.FindByID(local)
+	assert.Error(t, err, "local の owner 無しが消えていない")
+}

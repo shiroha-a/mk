@@ -48,7 +48,9 @@ func TestUpsertAttachments_TruncatesLongAltText(t *testing.T) {
 	r.SetDriveFileRepo(drive)
 
 	// 全角で 700 文字。byte で切ると壊れた UTF-8 になる形にしておく。
-	alt := strings.Repeat("あ", 700)
+	// **先頭と末尾を別の文字にする。** 同じ文字の繰り返しだと「末尾から切る」
+	// 実装でも prefix 判定が通ってしまう (#2721 review LOW-2)。
+	alt := "さき" + strings.Repeat("あ", 700) + "おわり"
 	userID, host := "ru", "remote.example"
 	ids := r.UpsertAttachments([]activitypub.Document{{
 		URL: "https://media.example/files/long.mp4", MediaType: "video/mp4", Name: alt,
@@ -58,7 +60,12 @@ func TestUpsertAttachments_TruncatesLongAltText(t *testing.T) {
 	f := drive.Files[ids[0]]
 	require.NotNil(t, f)
 	assert.Equal(t, 256, len([]rune(f.Name)), "name が列の上限 (rune) で切られていない")
+	assert.True(t, strings.HasPrefix(f.Name, "さき"), "先頭が落ちている")
 	assert.True(t, utf8.ValidString(f.Name), "rune 境界で切れていない")
+	// **先頭一致も見る。** 長さと UTF-8 妥当性だけだと「末尾から切る」実装を
+	// 見逃す (#2721 review LOW-2)。
+	assert.True(t, strings.HasPrefix(alt, f.Name), "先頭から切っていない")
+	assert.True(t, strings.HasPrefix(alt, *f.Comment), "comment も先頭から切っていない")
 	require.NotNil(t, f.Comment)
 	assert.Equal(t, 512, len([]rune(*f.Comment)), "comment が列の上限で切られていない")
 }
@@ -127,4 +134,29 @@ func TestUpsertAttachments_OtherErrorsDoNotDropOwner(t *testing.T) {
 
 	assert.Empty(t, ids, "FK 違反でないのに owner を落として作り直している")
 	assert.Equal(t, 1, drive.attempts, "retry してはいけない")
+}
+
+// NUL を含む alt text でも添付が落ちないこと (#2721 review MEDIUM-1)。
+//
+// 長さだけ直しても、制御文字が混じると PostgreSQL が 22021 で弾いて同じく
+// 添付が丸ごと消える。
+func TestUpsertAttachments_StripsNULFromAltText(t *testing.T) {
+	drive := testutil.NewMockDriveFileRepository()
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	r := federation.NewResolver(testutil.NewMockUserRepository(), testutil.NewMockNoteRepository(),
+		activitypub.NewURLBuilder("https://example.com"), &stubFetcher{}, idGen)
+	r.SetDriveFileRepo(drive)
+
+	userID, host := "ru", "remote.example"
+	ids := r.UpsertAttachments([]activitypub.Document{{
+		URL: "https://media.example/files/nul.webp", MediaType: "image/webp", Name: "al\x00t",
+	}}, &userID, &host)
+
+	require.Len(t, ids, 1)
+	f := drive.Files[ids[0]]
+	require.NotNil(t, f)
+	assert.NotContains(t, f.Name, "\x00", "NUL が残っている")
+	require.NotNil(t, f.Comment)
+	assert.NotContains(t, *f.Comment, "\x00")
 }

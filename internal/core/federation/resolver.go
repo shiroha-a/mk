@@ -3746,14 +3746,6 @@ func numberAsInt(v any) int {
 	}
 }
 
-// upsertAttachments persists each AP Document as a drive_file row (link
-// 形式、isLink=true、実 fetch なし) and returns the resulting drive_file IDs
-// in original order. URI による dedup を行うので、同じ remote attachment が
-// 複数の note に紐付いても drive_file は 1 行のみ。
-//
-// driveFileRepo が未設定なら空 (model.StringArray{}) を返す (旧挙動)。userID は
-// リモート user の ID (note.UserID 相当)、host はリモート host (nil =
-// ローカル、attachment 文脈ではほぼ常に non-nil)。
 // drive_file の列の上限 (migration/000001_initial.up.sql)。
 const (
 	driveFileNameMaxRunes    = 256
@@ -3778,6 +3770,14 @@ func isForeignKeyViolation(err error) bool {
 	return errors.Is(err, gorm.ErrForeignKeyViolated)
 }
 
+// upsertAttachments persists each AP Document as a drive_file row (link
+// 形式、isLink=true、実 fetch なし) and returns the resulting drive_file IDs
+// in original order. URI による dedup を行うので、同じ remote attachment が
+// 複数の note に紐付いても drive_file は 1 行のみ。
+//
+// driveFileRepo が未設定なら空 (model.StringArray{}) を返す (旧挙動)。userID は
+// リモート user の ID (note.UserID 相当)、host はリモート host (nil =
+// ローカル、attachment 文脈ではほぼ常に non-nil)。
 func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *string) model.StringArray {
 	if r.driveFileRepo == nil || len(docs) == 0 {
 		return model.StringArray{}
@@ -3798,13 +3798,16 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		// ので、説明が長い添付は varchar(256) に入らず 22001 で落ち、**その添付が
 		// 丸ごと保存されない** (#2717)。rune 単位で切る — byte で切ると壊れた
 		// UTF-8 を書く。
-		name := truncateRunes(doc.Name, driveFileNameMaxRunes)
+		// **NUL も落とす。** 長さだけ直しても、制御文字が混じると 22021 で
+		// 同じく添付が丸ごと落ちる (#2721 review MEDIUM-1)。
+		safeName := sanitizeRemoteText(doc.Name)
+		name := truncateRunes(safeName, driveFileNameMaxRunes)
 		if name == "" {
 			name = "file" // NOT NULL カラムへのフォールバック
 		}
 		var comment *string
-		if doc.Name != "" {
-			cn := truncateRunes(doc.Name, driveFileCommentMaxRunes)
+		if safeName != "" {
+			cn := truncateRunes(safeName, driveFileCommentMaxRunes)
 			comment = &cn
 		}
 		uri := doc.URL

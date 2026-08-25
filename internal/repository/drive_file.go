@@ -448,9 +448,19 @@ func (r *driveFileRepository) DeleteOrphans() (int64, error) {
 	return tx.RowsAffected, tx.Error
 }
 
-// orphanWhere は orphan file (userId IS NULL かつ emoji 非参照) を選ぶ条件。
-// DeleteOrphans / ListOrphans で同一 guard を共有する (#1724)。
-const orphanWhere = `"userId" IS NULL AND NOT EXISTS (
+// orphanWhere は orphan file (userId IS NULL かつ local かつ emoji 非参照) を
+// 選ぶ条件。DeleteOrphans / ListOrphans で同一 guard を共有する (#1724)。
+//
+// **`userHost IS NULL` が要る。** リモートの添付は、著者が materialize されて
+// いないと owner 無しで作られる (#2717)。それらは**表示中の note が参照している**
+// のに、`userId IS NULL` だけだとこの掃除で消える。しかも ephemeral note は DB に
+// 行が無いので「note から参照されているか」でも守れない。link-only の行なので
+// 実体ストレージは消費せず、残しても DB 行のぶんだけ。
+//
+// 副作用として、`DeleteOrphanRemoteUsers` (#2340) が親 user を消して
+// `ON DELETE SET NULL` になったリモートの行もここでは消えなくなる。owner 無しの
+// リモート添付の寿命は #2722 で別途決める。
+const orphanWhere = `"userId" IS NULL AND "userHost" IS NULL AND NOT EXISTS (
 	SELECT 1 FROM "emoji" e
 	WHERE e."originalUrl" = "drive_file"."url"
 	   OR e."publicUrl"   = "drive_file"."url"
