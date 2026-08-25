@@ -915,12 +915,13 @@ func remoteMediaURL(actorURI, column, raw string, max int) string {
 	// 除去ではなく破棄する。NUL を抜いた URL は別物で、取りに行っても無駄。
 	if strings.ContainsRune(raw, 0) {
 		slog.Warn("federation: dropping media url containing NUL",
-			"uri", actorURI, "column", column)
+			"actor", truncateRunes(actorURI, userURIMaxRunes), "column", column)
 		return ""
 	}
 	if len([]rune(raw)) > max {
 		slog.Warn("federation: dropping oversized media url",
-			"uri", actorURI, "column", column, "len", len([]rune(raw)), "max", max)
+			"actor", truncateRunes(actorURI, userURIMaxRunes), "column", column,
+			"len", len([]rune(raw)), "max", max)
 		return ""
 	}
 	return raw
@@ -2428,12 +2429,16 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	//
 	// **DB を引く前に見る。** NUL 入りの値は `FindByURI` の SELECT 自体が落ちる。
 	//
-	// **job の結末は経路で違う。** この関数は `handleCreate` からも `ResolveNote`
-	// からも来る。`handleCreate` は `ErrInvalidNote` を surface するので inbox job は
-	// retry を使い切って dead になる (既定 8 回) が、Like / Announce / Undo(Like) /
-	// Undo(Announce) は `ResolveNote` の失敗を `isPermanentSkipError` に通すので
-	// **ack して drop する**。「permanent 分類だから常に ack」でも「常に dead」でも
-	// ないので、どちらにも一般化しないこと。
+	// **job の結末は呼び出し元で違う。**「permanent 分類だから常に ack」でも
+	// 「常に dead」でもないので、どちらにも一般化しないこと。
+	//
+	//   - `isPermanentSkipError` を通す 4 ハンドラ (`handleLike` / `handleAnnounce` /
+	//     `handleUndoLike` / `handleUndoAnnounce`) が `ResolveNote` 越しに踏んだ場合
+	//     → **ack して drop**
+	//   - `handleCreate` の object、`handleAdd` のピン留め対象 → error を surface する
+	//     ので inbox job は retry を使い切って dead になる (既定 8 回)
+	//   - **Collection に包まれて配送された場合は常に ack** — `handleCollection` が
+	//     item の error をログに出して握る
 	//
 	// いずれにせよこの document は保存できないので結末としては正しい。gate の利得は
 	// 原因が 22001 ではなく明示的な拒否として残ること。
@@ -3973,9 +3978,10 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		// **DB を引く前に見る。** NUL 入りの値は下の `FindByURI` の SELECT 自体が
 		// 22021 で落ちる (機能は壊れないが、添付ごとに DB エラーが出る)。
 		//
-		// **順序を保てるのは `drive_file.uri` も 1024 だから。** dedup に当たりうる
-		// 値は必ずこの gate を通る。`driveFileURLMaxRunes` を下げるか `uri` を広げる
-		// なら、gate を dedup の後ろに戻すこと (でないと DB に在る添付を捨てる)。
+		// **長さ検査をここに置けるのは `drive_file.uri` も 1024 だから。** dedup に
+		// 当たりうる値は必ずこの長さに収まる。`driveFileURLMaxRunes` を下げるか
+		// `uri` を広げるなら、**長さ検査だけ** dedup の後ろへ移すこと (でないと DB に
+		// 在る添付を捨てる)。NUL 検査はここに残す — 後ろに回すと上の 22021 が戻る。
 		if !fitsColumn(doc.URL, driveFileURLMaxRunes) {
 			slog.Warn("federation: skipping attachment whose url does not fit drive_file.url",
 				"url", truncateRunes(doc.URL, driveFileURLMaxRunes))

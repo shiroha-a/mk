@@ -163,12 +163,13 @@ func TestIngestNote_RejectsOversizedURI(t *testing.T) {
 	require.Error(t, err, "列に入らない id の Note を受理している")
 	assert.ErrorIs(t, err, ErrInvalidNote)
 	// **permanent 分類であること。** この関数は `ResolveNote` からも来るので、
-	// Like / Announce / Undo(Like) / Undo(Announce) はこの分類を見て ack する
-	// (`isPermanentSkipError`)。transient に落ちると、同じ document を取り直す
-	// activity が retry のたびに走る。
+	// `isPermanentSkipError` を通す 4 ハンドラ (`handleLike` / `handleAnnounce` /
+	// `handleUndoLike` / `handleUndoAnnounce`) はこの分類を見て ack する。transient に
+	// 落ちると、同じ document を取り直す activity が retry のたびに走る。
 	//
-	// **ただし ack されるのはその 4 経路だけ**で、`handleCreate` はこの error を
-	// surface するので inbox job は retry を使い切って dead になる。どちらにも
+	// **ただし ack されるのはその 4 つだけ**で、`handleCreate` / `handleAdd` は
+	// この error を surface するので inbox job は retry を使い切って dead になる
+	// (Collection に包まれていれば `handleCollection` が握るのでまた別)。どちらにも
 	// 一般化しないこと。
 	assert.True(t, isPermanentSkipError(err), "permanent 分類から外れている")
 	assert.Empty(t, noteRepo.Notes)
