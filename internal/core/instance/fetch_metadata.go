@@ -101,27 +101,26 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	fields := map[string]any{
 		"infoUpdatedAt": &now,
 	}
-	if doc.Software.Name != "" {
-		v := doc.Software.Name
+	// **全部の列で長さと NUL を見る。** icon / favicon だけ守っても、同じ
+	// `fields` map に載る他の列が 1 つでも溢れれば **UPDATE 全体が落ちて
+	// nodeinfo まで失う** — 下のガードの目的が同じ関数の中で破られる (#2723)。
+	// 値は攻撃者 (リモートインスタンス) が自由に決められる。
+	if v := clampInstanceText(doc.Software.Name, maxInstanceSoftwareNameLen); v != "" {
 		fields["softwareName"] = &v
 	}
-	if doc.Software.Version != "" {
-		v := doc.Software.Version
+	if v := clampInstanceText(doc.Software.Version, maxInstanceSoftwareVersionLen); v != "" {
 		fields["softwareVersion"] = &v
 	}
 	if doc.OpenRegistrations != nil {
 		fields["openRegistrations"] = doc.OpenRegistrations
 	}
-	if doc.Metadata.NodeName != "" {
-		v := doc.Metadata.NodeName
+	if v := clampInstanceText(doc.Metadata.NodeName, maxInstanceNameLen); v != "" {
 		fields["name"] = &v
 	}
-	if doc.Metadata.NodeDescription != "" {
-		v := doc.Metadata.NodeDescription
+	if v := clampInstanceText(doc.Metadata.NodeDescription, maxInstanceDescriptionLen); v != "" {
 		fields["description"] = &v
 	}
-	if doc.Metadata.ThemeColor != "" {
-		v := doc.Metadata.ThemeColor
+	if v := clampInstanceText(doc.Metadata.ThemeColor, maxInstanceThemeColorLen); v != "" {
 		fields["themeColor"] = &v
 	}
 
@@ -138,6 +137,35 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	}
 
 	return s.repo.UpdateFields(host, fields)
+}
+
+// instance の列の上限 (migration/000001_initial.up.sql)。溢れると UPDATE 全体が
+// 落ちて nodeinfo まで失うので、書く前に必ず通す (#2723)。
+const (
+	maxInstanceSoftwareNameLen    = 64
+	maxInstanceSoftwareVersionLen = 64
+	maxInstanceNameLen            = 256
+	maxInstanceDescriptionLen     = 4096
+	maxInstanceThemeColorLen      = 64
+)
+
+// clampInstanceText prepares a remote-supplied text value for its column: NUL を
+// 落とし、max rune で切る。
+//
+// **URL とは扱いが違う。** icon / favicon は「収まらなければ値ごと捨てる」
+// (切った URL は別物で取りに行っても無駄) が、表示用のテキストは切っても意味が
+// 残るので切る。
+func clampInstanceText(raw string, max int) string {
+	out := strings.Map(func(r rune) rune {
+		if r == 0 {
+			return -1
+		}
+		return r
+	}, raw)
+	if runes := []rune(out); len(runes) > max {
+		out = string(runes[:max])
+	}
+	return out
 }
 
 // maxInstanceURLLen は instance.iconUrl / faviconUrl カラムの varchar(256)

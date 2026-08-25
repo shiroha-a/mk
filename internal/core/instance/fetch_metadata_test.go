@@ -311,3 +311,108 @@ func TestFetch_SetClock(t *testing.T) {
 	require.NotNil(t, repo.Instances["remote.example"].InfoUpdatedAt)
 	assert.Equal(t, fixed, *repo.Instances["remote.example"].InfoUpdatedAt)
 }
+
+// oversizedNodeinfoBody builds a nodeinfo document whose text fields all exceed
+// their columns. 先頭と末尾に別の目印を置く — 同じ文字で埋めると、末尾から切る
+// 実装でも prefix 検査が通ってしまう。
+func oversizedNodeinfoBody(t *testing.T) string {
+	t.Helper()
+	// 全角で埋める。byte で切る実装だと切りすぎるので、rune 数で見ていることを
+	// 検出できる。
+	pad := func(n int) string { return "さき" + strings.Repeat("あ", n) + "おわり" }
+	return `{
+		"software": {"name": "` + pad(200) + `", "version": "` + pad(200) + `"},
+		"openRegistrations": true,
+		"metadata": {
+			"nodeName": "` + pad(400) + `",
+			"nodeDescription": "` + pad(5000) + `",
+			"themeColor": "` + pad(200) + `"
+		}
+	}`
+}
+
+// nodeinfo の text field も列に収める (#2723)。
+//
+// icon / favicon だけ守っても、同じ UpdateFields に載る他の列が溢れれば UPDATE
+// 全体が落ちて nodeinfo ごと失う。
+func TestFetch_TruncatesOversizedNodeinfoFields(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
+	fetcher := &scriptedFetcher{
+		bodies: [][]byte{[]byte(discoveryBody), []byte(oversizedNodeinfoBody(t))},
+	}
+	svc := instance.NewFetchMetadataService(repo, fetcher)
+	require.NoError(t, svc.Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	// 期待値は migration の列長そのもの。定数を参照すると、定数を動かしたときに
+	// 両側が一緒に動いて緑のままになる。
+	for _, tc := range []struct {
+		name string
+		got  *string
+		max  int
+	}{
+		{"softwareName", got.SoftwareName, 64},
+		{"softwareVersion", got.SoftwareVersion, 64},
+		{"name", got.Name, 256},
+		{"description", got.Description, 4096},
+		{"themeColor", got.ThemeColor, 64},
+	} {
+		require.NotNil(t, tc.got, "%s が落ちている", tc.name)
+		assert.Equal(t, tc.max, len([]rune(*tc.got)), "%s の rune 数", tc.name)
+		// 頭から残していること (末尾から切っていない)。
+		assert.True(t, strings.HasPrefix(*tc.got, "さき"), "%s の先頭が失われている", tc.name)
+	}
+	// 他の field は巻き添えにならない。
+	require.NotNil(t, got.OpenRegistrations)
+	assert.True(t, *got.OpenRegistrations)
+}
+
+// NUL は長さに関わらず落とす。PostgreSQL の varchar は 22021 で落ちる (#2723)。
+func TestFetch_StripsNULFromNodeinfoFields(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
+	// JSON の \u0000 は decode 後に NUL になる。リモートが自由に送れる。
+	body := `{
+		"software": {"name": "miss\u0000key", "version": "13\u0000.14"},
+		"metadata": {
+			"nodeName": "Re\u0000mote",
+			"nodeDescription": "de\u0000sc",
+			"themeColor": "#ab\u0000cdef"
+		}
+	}`
+	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(discoveryBody), []byte(body)}}
+	svc := instance.NewFetchMetadataService(repo, fetcher)
+	require.NoError(t, svc.Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	for name, v := range map[string]*string{
+		"softwareName":    got.SoftwareName,
+		"softwareVersion": got.SoftwareVersion,
+		"name":            got.Name,
+		"description":     got.Description,
+		"themeColor":      got.ThemeColor,
+	} {
+		require.NotNil(t, v, "%s が落ちている", name)
+		assert.NotContains(t, *v, "\x00", "%s に NUL が残っている", name)
+	}
+	assert.Equal(t, "misskey", *got.SoftwareName)
+}
+
+// 落とした結果が空になる値は field ごと出さない。書くと意味のない上書きになる。
+func TestFetch_OmitsFieldsThatBecomeEmpty(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	existing := "keep-me"
+	repo.Instances["remote.example"] = &model.Instance{
+		ID: "i1", Host: "remote.example", SoftwareName: &existing,
+	}
+	body := `{"software": {"name": "\u0000", "version": ""}, "metadata": {}}`
+	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(discoveryBody), []byte(body)}}
+	svc := instance.NewFetchMetadataService(repo, fetcher)
+	require.NoError(t, svc.Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.SoftwareName)
+	assert.Equal(t, "keep-me", *got.SoftwareName)
+	assert.Nil(t, got.SoftwareVersion)
+}
