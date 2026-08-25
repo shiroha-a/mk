@@ -53,3 +53,10 @@ func TestHostFromURI_MatchesPunyHost(t *testing.T) {
 		assert.Equal(t, punyHost(got), got, uri)
 	}
 }
+
+// port だけで host が無い URI は弾くこと。`u.Host` を見ていると `":8443"` が
+// 通ってしまう (#2714 review LOW-9)。
+func TestHostFromURI_RejectsPortWithoutHost(t *testing.T) {
+	_, err := hostFromURI("https://:8443/users/x")
+	assert.Error(t, err)
+}

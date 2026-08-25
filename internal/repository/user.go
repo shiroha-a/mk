@@ -182,15 +182,16 @@ func (r *userRepository) FindByUsernameLower(username string, host *string) (*mo
 // **正規化形だけに当てると回帰する。** 呼び出し側は正規化されていない形で来る
 // ことがある (フロントの mention リンクは `toUnicode(host)` で URL を組むし、
 // 投稿本文の mention は書き手が打ったまま) ので、upstream と同じく引く前に
-// punycode へ揃える必要がある (#2704)。一方 **保存側は正規化していない** —
-// `hostFromURI` は `url.Parse(uri).Host` をそのまま入れるので、`Mixed.Example`
-// のような actor URI を出すサーバーの行は非正規化で入る。正規化形だけを引くと
-// そういう行が**どの acct 経路からも引けなくなる**ので、両方に当てる。
+// punycode へ揃える必要がある (#2704)。**保存側も #2706 で正規化するようになった**
+// が、それ以前に取り込んだ行は `Mixed.Example` のような非正規化の形で残っている。
+// 正規化形だけを引くとそういう行が**どの acct 経路からも引けなくなる**ので、
+// 両方に当てる。
 //
 // `IN` にしてあるのは `(usernameLower, host)` の index を効かせたままにするため。
 // `lower(host) = ?` のような式にすると index が使えない。
 //
-// **保存側の正規化はこの範囲外。** 揃えるなら既存行の backfill migration が要る。
+// **この両当たりは backfill 前の行のための互換経路** (#2706)。撤去してよいのは
+// `cmd/backfill-remote-host` を流し終えた環境だけ。詳細は hostCandidates の doc。
 func hostMatch(q *gorm.DB, host string) *gorm.DB {
 	// 候補集合は hostCandidates に一本化する。2 箇所で組むと片方だけ直す事故になる。
 	return q.Where("host IN ?", hostCandidates(host))

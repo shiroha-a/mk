@@ -631,8 +631,8 @@ Misskey TS へ戻す場合は[TS版からの移行](migration-from-ts.md)を参�
 SQL migration として書けない一回限りの正規化は、独立したバイナリで流す。**migration と
 違って自動では走らない**ので、運用者が明示的に実行する必要がある。
 
-runtime image は distroless で shell を持たないため、`exec` ではなく **entrypoint を
-差し替えた使い捨てコンテナ**で流す。
+**稼働中の本体プロセスに影響しない使い捨てコンテナ**で流す。entrypoint を差し替えるのは
+`docker-compose.yml` の `migrate` サービスと同じ手法。
 
 ### `backfill-remote-host` — 保存済みリモート host の punycode 正規化 (#2706)
 
@@ -646,13 +646,23 @@ instance-mute は完全一致なので取りこぼす**。
 
 ```bash
 # まず件数を見積もる (書き込まない)
-docker compose run --rm --entrypoint /app/backfill-remote-host app \
+docker compose run --rm --no-deps --entrypoint /app/backfill-remote-host app \
   -config /app/.config/default.yml -dry-run
 
 # 実行。負荷を絞りたければ -batch / -sleep-ms
-docker compose run --rm --entrypoint /app/backfill-remote-host app \
+docker compose run --rm --no-deps --entrypoint /app/backfill-remote-host app \
   -config /app/.config/default.yml -batch 1000 -sleep-ms 200
 ```
+
+**`--no-deps` を付ける。** `app` は `db` / `redis` / `migrate` に `depends_on` している
+ので、stack を落とした状態で叩くと**読み取りだけのつもりで migration まで走る**。
+
+**`--dry-run` では `conflicts` を数えられない** (UPDATE を撃たないため、常に 0)。
+衝突は本実行で初めて分かる。
+
+`note` / `drive_file` は行数が多く、`"userHost" IS NOT NULL` に対応する index は
+`ORDER BY id` に効かないため、ローカル note が支配的なインスタンスでは batch あたりの
+走査行数が膨らむ。`-batch` / `-sleep-ms` で絞ること。
 
 UDS 構成ではサービス名が異なるので `docker compose -f ... run --rm --entrypoint
 /app/backfill-remote-host mkgo ...` の形になる。バイナリ直接実行なら
@@ -663,8 +673,16 @@ UDS 構成ではサービス名が異なるので `docker compose -f ... run --r
 **`conflicts` が出たら手当てが要る。** 同じリモートが表記違いで 2 行に増えている場合、
 正規化すると一意制約 (`user` の `(usernameLower, host)` / `instance` の `host` /
 `emoji` の `(name, host)`) に当たる。1 行に畳むには `note` / `following` / `drive_file`
-など多数の FK を張り替える必要があるため、**このバッチはマージしない**。件数と対象を
-見て個別に判断すること。
+など多数の FK を張り替える必要があるため、**このバッチはマージしない**。衝突した行は
+`conflict <table>.<column> <key>=... host=... -> ...` の形でログに出るので、それを見て
+個別に判断すること。なお衝突で据え置かれた行は、**他テーブルの写しだけが正規化される**
+(`user.host` が残っても `note.userHost` は寄る) ので、突合が必要なら合わせて確認する。
+
+**Unicode IDN 表記で `blockedHosts` / `silencedHosts` / `mediaSilencedHosts` /
+`mutedInstances` を登録している場合は punycode へ書き換えること。** これらは運用者が
+入力する一覧なのでバッチの対象外で、突合側は lowercase 比較しかしない (upstream も
+同じ)。保存形が punycode に揃うと、Unicode 表記で登録したブロック / ミュートが効かなく
+なる。
 
 ## 運用上の注意
 

@@ -3418,7 +3418,12 @@ func hostFromURI(uri string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if u.Host == "" {
+	// **Hostname() で見る。** `u.Host` は port を含むので、`https://:8443/x` のような
+	// host 不在の URI が `":8443"` として通ってしまう。同ファイルの binding 検査
+	// (assertResponseHostMatches 等) は元から `u.Hostname()` を見ており、保存の
+	// 入口になった今は揃えないと「binding では弾かれるのに保存はされる」形が残る
+	// (#2714 review LOW-9)。返す値は port 込みのまま (`user.host` は port を持つ)。
+	if u.Hostname() == "" {
 		return "", fmt.Errorf("missing host in %q", uri)
 	}
 	return idnhost.Puny(u.Host), nil

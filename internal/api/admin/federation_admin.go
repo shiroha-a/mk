@@ -3,13 +3,12 @@ package admin
 import (
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/labstack/echo/v4"
-	"golang.org/x/net/idna"
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 )
@@ -19,18 +18,14 @@ import (
 // default (非 transitional) profile がこれに最も近い。idna.ToASCII が失敗する不正
 // host は小文字化のみで返し、後段の FindByHost に「見つからない」と判定させる。
 //
-// 注意: mk-go の取り込み側 (resolver.hostFromURI / RegisterFromHost) は host を
-// 生のまま保存し punycode 正規化していない。canonical な AP actor URI は authority
-// を punycode 小文字で持つため大半のリモート instance は本 lookup と一致するが、
-// 生 Unicode の IDN host で保存された行は形式が食い違い得る。保存側の正規化統一は
-// 別スコープ (federation 層) の課題として残す。
-func toPunyHost(host string) string {
-	lower := strings.ToLower(host)
-	if ascii, err := idna.ToASCII(lower); err == nil {
-		return ascii
-	}
-	return lower
-}
+// 取り込み側 (`resolver.hostFromURI`) も #2706 で同じ正規化を掛けるので、保存形と
+// 引き当ては同じ値になる。**backfill 前に非正規化で保存された行はここでは救えない**
+// — この lookup は完全一致なので、`cmd/backfill-remote-host` を流すまで引けない。
+//
+// **実装は `idnhost.Puny` へ委譲する。** 手写しを 3 つ目に増やすと、保存形が
+// `idnhost.Puny` に固定された今、drift したときに保存形と引き当てがずれる
+// (#2714 review LOW-10)。
+func toPunyHost(host string) string { return idnhost.Puny(host) }
 
 // FederationDeleteAllFiles handles POST /api/admin/federation/delete-all-files.
 //

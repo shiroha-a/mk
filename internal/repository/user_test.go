@@ -1636,7 +1636,7 @@ func TestUserRepository_SearchByUsernameAndHost_FindsNeverPostedUser(t *testing.
 // `toUnicode(host)` で URL を組むので、メンションからユーザーページを開くと
 // この形になる。生の完全一致で引いていた頃は、そこだけが NO_SUCH_USER になって
 // 「通知からは開けるのにメンションからは開けない」という形で出ていた。
-// **保存側は正規化していない**ので、正規化形と生の両方に当てる。
+// **backfill 前の行は非正規化のまま**なので、正規化形と生の両方に当てる。
 func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	const puny = "xn--eckve.example"
@@ -1674,7 +1674,7 @@ func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
 
 // **非正規化で保存された行が引けなくなっていないこと** (#2704 review MEDIUM-1)。
 //
-// 保存側は正規化していない (`hostFromURI` は `url.Parse(uri).Host` をそのまま
+// backfill 前の行は非正規化のまま (#2706 以前の `hostFromURI` は `url.Parse(uri).Host` をそのまま
 // 入れる) ので、`https://Mixed.Example/users/x` のような actor URI を出す
 // サーバーの行は大文字混じりで入る。正規化形だけを引くと、そういう行が
 // **どの acct 経路からも引けなくなる**。

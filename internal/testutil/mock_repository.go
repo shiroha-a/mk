@@ -252,7 +252,7 @@ func (m *MockUserRepository) FindByUsernameLower(username string, host *string) 
 // hostMatches mirrors repository.hostMatch: the stored value matches either the
 // normalized form of the query or the query as given.
 //
-// **保存側は正規化していない**ので、正規化形だけで比べると非正規化で保存された
+// **backfill 前の行は非正規化のまま**なので、正規化形だけで比べると非正規化で保存された
 // 行が引けなくなる。本番と同じ両当たりにしておく (#2704 review)。
 func hostMatches(query, stored string) bool {
 	return stored == query || stored == idnhost.Puny(query)

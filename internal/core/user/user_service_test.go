@@ -1328,7 +1328,7 @@ func (r *recordingResolver) ResolveByUsernameHost(username, host string) (*model
 //
 // 引く側は Unicode で来ることがある (フロントの mention リンクは
 // `toUnicode(host)` で URL を組む)。正規化しないと「通知からは開けるのに
-// メンションからは開けない」という形で出る。**保存側は正規化していない**ので、
+// メンションからは開けない」という形で出る。**backfill 前の行は非正規化のまま**なので、
 // 正規化形と生の両方に当てる (repository の hostCandidates)。
 func TestShowByUsername_IDNHost(t *testing.T) {
 	const puny = "xn--eckve.example"
@@ -1419,7 +1419,7 @@ func TestShowByUsername_LocalHostShortCircuit(t *testing.T) {
 // **非正規化で保存された行が主経路 (users/show) から引けること** (#2704 review
 // HIGH-1)。
 //
-// 保存側は正規化していない (`hostFromURI` は `url.Parse(uri).Host` をそのまま
+// backfill 前の行は非正規化のまま (#2706 以前の `hostFromURI` は `url.Parse(uri).Host` をそのまま
 // 入れる) ので、`https://Mixed.Example/users/x` を出すサーバーの行は大文字
 // 混じりで入る。DB を引く前に正規化すると repository の両当たりが死んで、
 // この経路から引けなくなる。upstream が読み取り側で toPuny を掛けられるのは

@@ -3,6 +3,7 @@ package maintenance
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
@@ -21,11 +22,26 @@ type HostColumn struct {
 	Column       string
 }
 
-// HostColumns lists every column that stores a remote host.
+// HostColumns lists every per-row column that stores a remote host.
 //
-// **全部 WHERE 句で host 検索に使われている** (`note.userHost` は timeline の
-// instance-mute、`following.*Host` は配送先の列挙、`emoji.host` は (name, host) の
-// 逆引き、など)。1 つ漏らすとそこだけ非正規化のまま残り、同じ症状が別の場所で出る。
+// **1 つ漏らすとそこだけ非正規化のまま残り、同じ症状が別の場所で出る。**
+// `note.replyUserHost` / `renoteUserHost` は実際に落としていて、
+// **backfill の動機に挙げた 2 つのフィルタが読む列**だった
+// (instance-mute の SQL は `repository/note.go` で 3 列を並べて見るし、
+// blocked-host filter は `notesfilter/blockedhost.go` で 3 列を or で見る)。
+// 網羅性は `TestHostColumns_CoversSchema` が schema 側から固定する
+// (#2714 review HIGH-1)。
+//
+// **現時点で host 完全一致に使われていない列も入れる** (`poll.userHost` /
+// `follow_request.*Host` / `abuse_user_report.*Host` は今は `IS NULL` 判定だけ)。
+// どれも `user.host` の写しで、正規化は冪等な no-op なので入れて損が無い。逆に
+// 外すと「今は使われていない」という前提が変わった瞬間に穴になる。
+//
+// **`meta` の host 列は対象外** — `blockedHosts` / `silencedHosts` /
+// `mediaSilencedHosts` / `federationHosts` は運用者が入力する一覧で、リモートから
+// 受け取った値ではない。`smtpHost` はそもそもリモートインスタンスではない。
+// upstream も同じ扱い (`update-meta.ts` は lowercase しかしない)。Unicode IDN 表記で
+// 登録している場合の注意は docs/deployment.md に書いてある。
 //
 // 順序は依存関係ではなく、影響の大きい順 (acct 解決 → 連合ゲート → 表示)。
 var HostColumns = []HostColumn{
@@ -35,17 +51,44 @@ var HostColumns = []HostColumn{
 	{Table: "emoji", KeysetColumn: "id", Column: "host"},
 	{Table: "following", KeysetColumn: "id", Column: "followerHost"},
 	{Table: "following", KeysetColumn: "id", Column: "followeeHost"},
+	{Table: "follow_request", KeysetColumn: "id", Column: "followerHost"},
+	{Table: "follow_request", KeysetColumn: "id", Column: "followeeHost"},
 	{Table: "note", KeysetColumn: "id", Column: "userHost"},
+	{Table: "note", KeysetColumn: "id", Column: "replyUserHost"},
+	{Table: "note", KeysetColumn: "id", Column: "renoteUserHost"},
+	{Table: "poll", KeysetColumn: "noteId", Column: "userHost"},
 	{Table: "drive_file", KeysetColumn: "id", Column: "userHost"},
 	{Table: "user_profile", KeysetColumn: "userId", Column: "userHost"},
+	{Table: "abuse_user_report", KeysetColumn: "id", Column: "targetUserHost"},
+	{Table: "abuse_user_report", KeysetColumn: "id", Column: "reporterHost"},
+}
+
+// metaHostColumns are the host-ish columns deliberately left out of HostColumns.
+// TestHostColumns_CoversSchema はこの 2 つの集合で schema を覆えることを見る。
+var metaHostColumns = []HostColumn{
+	{Table: "meta", KeysetColumn: "id", Column: "blockedHosts"},
+	{Table: "meta", KeysetColumn: "id", Column: "silencedHosts"},
+	{Table: "meta", KeysetColumn: "id", Column: "mediaSilencedHosts"},
+	{Table: "meta", KeysetColumn: "id", Column: "federationHosts"},
+	{Table: "meta", KeysetColumn: "id", Column: "smtpHost"},
 }
 
 // HostBackfillResult reports the outcome of one keyset batch.
 type HostBackfillResult struct {
 	Scanned   int    // rows inspected this batch
-	Updated   int    // rows whose host changed (0 when dryRun)
+	Updated   int    // rows whose host changed (dryRun では更新見込みの件数)
 	Conflicts int    // rows skipped because the normalized value already exists
 	LastKey   string // greatest keyset value seen; "" when no rows remained
+	// ConflictKeys は衝突した行。**件数だけだと運用者が対象を特定できない**ので、
+	// 呼び出し側がログに出せるように返す (#2714 review MEDIUM-2)。
+	ConflictKeys []HostConflict
+}
+
+// HostConflict identifies one row whose normalized host collided.
+type HostConflict struct {
+	Key        string // keyset column value
+	Host       string // the value still stored
+	Normalized string // what it would have become
 }
 
 // BackfillHostColumnBatch normalizes one keyset batch of a remote-host column
@@ -65,8 +108,17 @@ type HostBackfillResult struct {
 // など多数の FK を張り替える必要があり、バッチでやるには危険すぎる。運用者が
 // Conflicts の件数を見て手当てを判断する。
 //
-// 戻り値の LastKey を次回の fromKey に渡せば再開できる。冪等なので、途中で失敗しても
-// 再実行して安全。dryRun は UPDATE をせず件数だけ数える。
+// 戻り値の LastKey を次回の fromKey に渡せば再開できる。**LastKey は skip した行でも
+// 進める** — 進めないと、batch の末尾が既に正規化済みの行だったときに cursor が動かず、
+// 呼び出し側が同じ batch を読み直して止まらない (#2714 review MEDIUM-3)。
+//
+// 冪等なので、途中で失敗しても再実行して安全。**dryRun は UPDATE を撃たないので
+// Conflicts を数えられない** (常に 0)。衝突は本実行で初めて分かる
+// (#2714 review MEDIUM-1)。
+//
+// **transaction を渡さないこと。** 23505 が起きると PostgreSQL の transaction は
+// abort し、以降の文が 25P02 になるので衝突 skip が機能しない
+// (#2714 review LOW-3)。
 func BackfillHostColumnBatch(db *gorm.DB, col HostColumn, fromKey string, batchSize int, dryRun bool) (HostBackfillResult, error) {
 	if batchSize <= 0 {
 		batchSize = 1000
@@ -109,6 +161,8 @@ func BackfillHostColumnBatch(db *gorm.DB, col HostColumn, fromKey string, batchS
 		if err != nil {
 			if isUniqueViolation(err) {
 				res.Conflicts++
+				res.ConflictKeys = append(res.ConflictKeys,
+					HostConflict{Key: r.Key, Host: r.Host, Normalized: normalized})
 				continue
 			}
 			return res, err
@@ -130,8 +184,10 @@ func (c HostColumn) validate() error {
 }
 
 // quoteIdent quotes a SQL identifier. 入力は HostColumns の固定値だけなので
-// エスケープの必要は無いが、`user` のような予約語を含むので quote は要る。
-func quoteIdent(name string) string { return `"` + name + `"` }
+// エスケープは届かない防御だが、`user` のような予約語を含むので quote 自体は要る。
+func quoteIdent(name string) string {
+	return `"` + strings.ReplaceAll(name, `"`, `""`) + `"`
+}
 
 // isUniqueViolation reports whether err is a PostgreSQL unique_violation.
 //

@@ -3,6 +3,7 @@ package maintenance
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -163,6 +164,10 @@ func TestBackfillHostColumnBatch_SelectError(t *testing.T) {
 	// 一覧に載っている組だが、テーブルが解決できない search_path で引く。
 	// **SET LOCAL はトランザクション内でしか効かない** (外で撃つと黙って無視され、
 	// 検査が空振りする)。
+	//
+	// ここで tx を渡しているのは SELECT を失敗させるためだけ。本番は
+	// non-transactional な *gorm.DB を渡す — 23505 で tx が abort すると以降が
+	// 25P02 になり、衝突 skip が機能しない (#2714 review LOW-3)。
 	err := testDB.Transaction(func(tx *gorm.DB) error {
 		if e := tx.Exec(`SET LOCAL search_path TO nonexistent_schema_2706`).Error; e != nil {
 			return e
@@ -200,4 +205,122 @@ func TestIsUniqueViolation(t *testing.T) {
 	assert.True(t, isUniqueViolation(gorm.ErrDuplicatedKey))
 	assert.False(t, isUniqueViolation(errors.New("boom")))
 	assert.False(t, isUniqueViolation(nil))
+}
+
+// **schema 側から網羅性を固定する。** `TestHostColumns_AllExist` は「列挙したものが
+// 実在するか」しか見ないので、**列を落としても緑のまま**だった。実際
+// `note.replyUserHost` / `renoteUserHost` を落としており、それは backfill の動機に
+// 挙げた 2 つのフィルタが読む列だった (#2714 review HIGH-1)。
+//
+// 逆方向 — schema にある host 系の列が、対象一覧か明示的な除外一覧の**どちらかに
+// 必ず入っている**ことを見る。新しい列が増えたらここが落ちる。
+func TestHostColumns_CoversSchema(t *testing.T) {
+	type col struct{ TableName, ColumnName string }
+	var found []col
+	require.NoError(t, testDB.Raw(`SELECT table_name, column_name FROM information_schema.columns
+		WHERE table_schema = current_schema() AND column_name ILIKE '%host%'
+		ORDER BY table_name, column_name`).Scan(&found).Error)
+	require.NotEmpty(t, found, "host 系の列が 1 つも見つからない (schema が未適用?)")
+
+	covered := map[col]string{}
+	for _, c := range HostColumns {
+		covered[col{c.Table, c.Column}] = "backfill 対象"
+	}
+	for _, c := range metaHostColumns {
+		covered[col{c.Table, c.Column}] = "意図的に除外"
+	}
+	for _, c := range found {
+		assert.Contains(t, covered, c,
+			"schema にある host 列が HostColumns にも除外一覧にも無い: "+c.TableName+"."+c.ColumnName)
+	}
+	// 逆に、実在しない列を一覧に残していないこと (TestHostColumns_AllExist が
+	// HostColumns 側を見るので、ここでは除外一覧を見る)。
+	inSchema := map[col]bool{}
+	for _, c := range found {
+		inSchema[c] = true
+	}
+	for _, c := range metaHostColumns {
+		assert.True(t, inSchema[col{c.Table, c.Column}],
+			"除外一覧に実在しない列がある: "+c.Table+"."+c.Column)
+	}
+}
+
+// **LastKey は skip 判定より前に進める。** 後ろに置くと、batch の末尾が「既に
+// 正規化済み」の行だったときに cursor が進まず、CLI は Scanned==0 でしか break
+// しないので**同じ batch を読み直して止まらない** (#2714 review MEDIUM-3)。
+func TestBackfillHostColumnBatch_LastKeyAdvancesPastSkippedRows(t *testing.T) {
+	testDB.Exec(`DELETE FROM "user" WHERE id LIKE 'hk_%'`)
+	seedHostUser(t, "hk_1", "hkone", "Mixed.Example")
+	seedHostUser(t, "hk_2", "hktwo", "already.example") // 末尾が no-op
+
+	res, err := BackfillHostColumnBatch(testDB, userHostColumn, "hk_", 100, false)
+	require.NoError(t, err)
+	require.Equal(t, 2, res.Scanned)
+	assert.Equal(t, "hk_2", res.LastKey, "skip した行でも cursor を進めること")
+
+	// 進んでいれば次は空になる。進んでいないと同じ行を読み直して止まらない。
+	res, err = BackfillHostColumnBatch(testDB, userHostColumn, res.LastKey, 100, false)
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.Scanned)
+}
+
+// dry-run では conflicts を数えられないこと (UPDATE を撃たないため) を semantics と
+// して固定する。運用者が dry-run の conflicts=0 を「衝突なし」と読まないよう、
+// GoDoc と docs にも明記してある (#2714 review MEDIUM-1)。
+func TestBackfillHostColumnBatch_DryRunCannotCountConflicts(t *testing.T) {
+	testDB.Exec(`DELETE FROM "user" WHERE id LIKE 'hq_%'`)
+	seedHostUser(t, "hq_1", "hqdup", "dup.example")
+	seedHostUser(t, "hq_2", "hqdup", "Dup.Example")
+
+	res, err := BackfillHostColumnBatch(testDB, userHostColumn, "hq_", 100, true)
+	require.NoError(t, err)
+	assert.Equal(t, 1, res.Updated, "本実行なら衝突する行も dry-run では更新見込みに数える")
+	assert.Equal(t, 0, res.Conflicts, "dry-run は UPDATE を撃たないので衝突を検出できない")
+}
+
+// 衝突した行を呼び出し側へ渡すこと。件数だけだと「対象を見て判断する」ができない
+// (#2714 review MEDIUM-2)。
+func TestBackfillHostColumnBatch_ReportsConflictKeys(t *testing.T) {
+	testDB.Exec(`DELETE FROM "user" WHERE id LIKE 'hj_%'`)
+	seedHostUser(t, "hj_1", "hjdup", "dup.example")
+	seedHostUser(t, "hj_2", "hjdup", "Dup.Example")
+
+	res, err := BackfillHostColumnBatch(testDB, userHostColumn, "hj_", 100, false)
+	require.NoError(t, err)
+	require.Equal(t, 1, res.Conflicts)
+	require.Len(t, res.ConflictKeys, 1)
+	assert.Equal(t, "hj_2", res.ConflictKeys[0].Key)
+	assert.Equal(t, "Dup.Example", res.ConflictKeys[0].Host)
+	assert.Equal(t, "dup.example", res.ConflictKeys[0].Normalized)
+}
+
+// SELECT と UPDATE のあいだに host が変わった行を上書きしないこと。
+// 稼働中に流す前提のバッチなので、WHERE から現在値の一致を落としてはいけない
+// (#2714 review LOW-4)。
+//
+// **実経路を通す。** UPDATE 文を手で書いて確かめると実装の写経になり、バッチ側の
+// WHERE を緩める変異を検出できない。GORM の callback で SELECT と UPDATE のあいだに
+// 割り込んで、行を書き換える。
+func TestBackfillHostColumnBatch_DoesNotOverwriteChangedRows(t *testing.T) {
+	testDB.Exec(`DELETE FROM "user" WHERE id LIKE 'hw_%'`)
+	seedHostUser(t, "hw_1", "hwone", "Mixed.Example")
+
+	sess := testDB.Session(&gorm.Session{NewDB: true})
+	fired := false
+	require.NoError(t, sess.Callback().Raw().Before("gorm:raw").Register("2706_race", func(tx *gorm.DB) {
+		if fired || !strings.HasPrefix(tx.Statement.SQL.String(), "UPDATE") {
+			return
+		}
+		fired = true
+		// バッチが読んだ値と食い違わせる (別経路が refresh した状況)。
+		testDB.Exec(`UPDATE "user" SET host = 'changed.example' WHERE id = 'hw_1'`)
+	}))
+
+	res, err := BackfillHostColumnBatch(sess, userHostColumn, "hw_", 100, false)
+	require.NoError(t, err)
+	require.True(t, fired, "UPDATE の callback が発火していない (前提が崩れている)")
+	assert.Equal(t, "changed.example", userHost(t, "hw_1"),
+		"読んだ時点の値と食い違う行を上書きしている")
+	assert.Equal(t, 1, res.Updated,
+		"戻り値は「撃った」件数。実際に当たったかは上の assert で見る")
 }

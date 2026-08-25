@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// **比較の両辺を揃えるための正規化** (#2704)。保存側は正規化していない
+// **比較の両辺を揃えるための正規化** (#2704)。保存側も #2706 で揃えたが、それ以前の行は非正規化のまま
 // (`idnhost.go` のコメント参照) ので、これは比較専用。
 func TestPuny(t *testing.T) {
 	cases := []struct {

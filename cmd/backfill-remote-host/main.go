@@ -10,11 +10,13 @@
 // 同じ理由)。
 //
 // 冪等なので途中で失敗しても再実行して安全。まず --dry-run で件数を見積もること。
+// **--dry-run では conflicts を数えられない** (UPDATE を撃たないため。常に 0 が出る)。
+// 衝突は本実行で初めて分かる。
 // --table / --column で 1 組だけ流すこともできる (中断したところから再開する用途)。
 //
 // **conflicts が出たら手当てが要る。** 同じリモートが表記違いで 2 行に増えている
 // 場合、正規化すると一意制約に当たる。マージは FK の張り替えが要るのでこのバッチでは
-// やらない。件数と対象を見て個別に判断すること。
+// やらない。衝突した行は key / host を個別にログへ出すので、それを見て判断すること。
 //
 //	backfill-remote-host -config .config/default.yml -dry-run
 //	backfill-remote-host -config .config/default.yml -batch 1000 -sleep-ms 200
@@ -74,10 +76,21 @@ func main() {
 			if res.Scanned == 0 {
 				break
 			}
+			// **カーソルが進まなければ止める。** 進まないまま回すと同じ batch を
+			// 読み直して終わらない。hang より即死のほうが原因に近い
+			// (#2714 review MEDIUM-3)。
+			if res.LastKey <= cursor {
+				log.Fatalf("backfill %s.%s: cursor が進まない (cursor=%q lastKey=%q)",
+					col.Table, col.Column, cursor, res.LastKey)
+			}
 			cursor = res.LastKey
 			scanned += res.Scanned
 			updated += res.Updated
 			conflicts += res.Conflicts
+			for _, c := range res.ConflictKeys {
+				log.Printf("conflict %s.%s %s=%q host=%q -> %q (正規化すると一意制約に当たるので据え置き)",
+					col.Table, col.Column, col.KeysetColumn, c.Key, c.Host, c.Normalized)
+			}
 			log.Printf("%s.%s scanned=%d updated=%d conflicts=%d cursor=%s",
 				col.Table, col.Column, scanned, updated, conflicts, cursor)
 			if *sleepMs > 0 {

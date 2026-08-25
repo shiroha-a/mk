@@ -15,10 +15,10 @@ import (
 // mention は書き手が打ったまま)。両辺に掛けて `パイ.example` と
 // `xn--eckve.example`、`Remote.Example` と `remote.example` を同一視する。
 //
-// **保存側は正規化していない。** `hostFromURI` は `url.Parse(uri).Host` を
-// そのまま入れるので、`user.host` / `instance.host` には非正規化の行がありうる。
-// これを揃えるには既存行の backfill migration が要るので別スコープ
-// (`internal/repository` の `hostMatch` は、そのため両方の形に当てている)。
+// **保存側も #2706 で同じ正規化を掛ける。** `hostFromURI` が `Puny` に通すので、
+// 新しく入る行は正規化形しか持たない。`internal/repository` の `hostMatch` が今も
+// 両方の形に当てているのは、**backfill 前に非正規化で保存された行**を引くため
+// (`cmd/backfill-remote-host` を流し終えた環境では外せる)。
 //
 // idna が失敗する不正入力のみ小文字化で返す (Go default の lenient UTS#46
 // profile では port 付き host も成功し ASCII tail はそのまま残るため、fallback は
