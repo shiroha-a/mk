@@ -163,14 +163,11 @@ func TestIngestNote_RejectsOversizedURI(t *testing.T) {
 	require.Error(t, err, "列に入らない id の Note を受理している")
 	assert.ErrorIs(t, err, ErrInvalidNote)
 	// **permanent 分類であること。** この関数は `ResolveNote` からも来るので、
-	// `isPermanentSkipError` を通す 4 ハンドラ (`handleLike` / `handleAnnounce` /
-	// `handleUndoLike` / `handleUndoAnnounce`) はこの分類を見て ack する。transient に
+	// `isPermanentSkipError` を通すハンドラはこの分類を見て ack する。transient に
 	// 落ちると、同じ document を取り直す activity が retry のたびに走る。
 	//
-	// **ただし ack されるのはその 4 つだけ**で、`handleCreate` / `handleAdd` は
-	// この error を surface するので inbox job は retry を使い切って dead になる
-	// (Collection に包まれていれば `handleCollection` が握るのでまた別)。どちらにも
-	// 一般化しないこと。
+	// **ack はそれらの経路だけ**で、結末は呼び出し元によって 4 種類に分かれる
+	// (一覧は `ingestNoteWithCreated` の gate のコメント)。どちらにも一般化しないこと。
 	assert.True(t, isPermanentSkipError(err), "permanent 分類から外れている")
 	assert.Empty(t, noteRepo.Notes)
 }
@@ -207,4 +204,39 @@ func TestIngestNote_AcceptsURIAtColumnLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, note)
 	assert.Len(t, noteRepo.Notes, 1)
+}
+
+// NUL だけの summary で CW を付けないこと (#2723)。
+//
+// `cw = ""` は Misskey では「ラベル無しの CW」= 本文を折りたたむ指示になる。
+// NUL を落とした結果が空になっただけで折りたたむのは、送信側の意図と違う。
+// `text` 側は同じ書き分けをしているので、揃えないと非対称になる。
+func TestIngestNote_DoesNotSetEmptyCWFromNULOnlySummary(t *testing.T) {
+	r, noteRepo := ingestCWEnv(t)
+	doc := `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/nulcw",` +
+		`"type":"Note","attributedTo":"https://remote.example/users/cw","content":"<p>hi</p>",` +
+		`"summary":` + quoteJSON("\x00\x00") + `,"to":["https://www.w3.org/ns/activitystreams#Public"]}`
+
+	note, err := r.IngestNote([]byte(doc))
+	require.NoError(t, err)
+	require.NotNil(t, note)
+	assert.Nil(t, note.CW, "空になった CW を付けている (本文が折りたたまれる)")
+	assert.Len(t, noteRepo.Notes, 1)
+}
+
+// sensitive なら空 CW を付ける既存の挙動は変えないこと。
+//
+// 上の書き分けで `note.CW == nil` のまま来るので、sensitive の分岐がそのまま効く。
+func TestIngestNote_SensitiveStillGetsEmptyCW(t *testing.T) {
+	r, _ := ingestCWEnv(t)
+	doc := `{"@context":"https://www.w3.org/ns/activitystreams","id":"https://remote.example/notes/nulcw2",` +
+		`"type":"Note","attributedTo":"https://remote.example/users/cw","content":"<p>hi</p>",` +
+		`"summary":` + quoteJSON("\x00") + `,"sensitive":true,` +
+		`"to":["https://www.w3.org/ns/activitystreams#Public"]}`
+
+	note, err := r.IngestNote([]byte(doc))
+	require.NoError(t, err)
+	require.NotNil(t, note)
+	require.NotNil(t, note.CW, "sensitive の空 CW が落ちている")
+	assert.Equal(t, "", *note.CW)
 }

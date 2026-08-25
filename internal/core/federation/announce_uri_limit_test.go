@@ -66,11 +66,10 @@ func TestProcess_Announce_AcceptsURIAtColumnLimit(t *testing.T) {
 
 // 列に入らない id の note を対象にした Like は ack すること (#2723)。
 //
-// **拒否の結末はハンドラで違う。** `handleCreate` / `handleAnnounce` 自身の id /
-// `handleAdd` は surface して inbox job を dead にするが、`isPermanentSkipError` を
-// 通す 4 つ (`handleLike` / `handleAnnounce` / `handleUndoLike` /
-// `handleUndoAnnounce`) が対象 note を解決して踏んだ場合は ack する。transient に
-// 落ちると、同じ document を取り直す activity が retry のたびに走る。
+// **拒否の結末は呼び出し元で違う** (一覧は `ingestNoteWithCreated` の gate の
+// コメント)。ここで見るのは Like 経路 — `ResolveNote` の失敗を
+// `isPermanentSkipError` に通すので ack する。transient に落ちると、同じ document を
+// 取り直す activity が retry のたびに走る。
 func TestProcess_Like_AcksOversizedTargetURI(t *testing.T) {
 	longURI := "https://remote.example/notes/" + strings.Repeat("n", 512)
 	// fetcher は常にこの Note document を返す。actor は先に repo へ入れておく

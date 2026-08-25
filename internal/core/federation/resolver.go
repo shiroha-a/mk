@@ -745,7 +745,7 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	// 重ねると届かない検査が増えるだけ。
 	if !fitsColumn(actor.ID, userURIMaxRunes) || !fitsColumn(host, userHostMaxRunes) {
 		slog.Warn("federation: rejecting actor whose identity does not fit its columns",
-			"uri", truncateRunes(actor.ID, userURIMaxRunes), "host", host)
+			"actor", truncateRunes(actor.ID, userURIMaxRunes), "host", host)
 		return nil, ErrInvalidActor
 	}
 
@@ -2429,16 +2429,21 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	//
 	// **DB を引く前に見る。** NUL 入りの値は `FindByURI` の SELECT 自体が落ちる。
 	//
-	// **job の結末は呼び出し元で違う。**「permanent 分類だから常に ack」でも
-	// 「常に dead」でもないので、どちらにも一般化しないこと。
+	// **この error が上でどう扱われるかは呼び出し元で決まる。** 一般化しないこと
+	// (「permanent 分類だから常に ack」「常に dead」はどちらも誤り。#2723 では 5 周に
+	// わたってこの記述を間違えた)。実際に起きる結末は少なくとも 4 種類ある:
 	//
-	//   - `isPermanentSkipError` を通す 4 ハンドラ (`handleLike` / `handleAnnounce` /
-	//     `handleUndoLike` / `handleUndoAnnounce`) が `ResolveNote` 越しに踏んだ場合
-	//     → **ack して drop**
-	//   - `handleCreate` の object、`handleAdd` のピン留め対象 → error を surface する
-	//     ので inbox job は retry を使い切って dead になる (既定 8 回)
-	//   - **Collection に包まれて配送された場合は常に ack** — `handleCollection` が
-	//     item の error をログに出して握る
+	//   - **ack して drop** — `isPermanentSkipError` を通すハンドラ (Like / Announce /
+	//     Undo(Like) / Undo(Announce)) が対象 note を解決して踏んだ場合
+	//   - **inbox job が retry を使い切って dead** — `handleCreate` の object や
+	//     `handleAdd` のピン留め対象のように、error をそのまま返すハンドラ
+	//   - **その値だけ黙って落ちて activity は成功** — 引用先 (`resolveQuoteTarget`) や
+	//     featured のピン (`resolveNoteBestEffort`) のように best-effort な解決
+	//   - **inbox job ですらない** — REST の `ap/show` は取り込みに失敗すると生の AP
+	//     JSON を 200 で返す
+	//
+	// 数え直すなら `ResolveNote` / `IngestNote*` の呼び出し元を全部辿ること。**この
+	// リストを他所にコピーしないこと** — 4 箇所に散らした結果、毎回どこかがずれた。
 	//
 	// いずれにせよこの document は保存できないので結末としては正しい。gate の利得は
 	// 原因が 22001 ではなく明示的な拒否として残ること。
@@ -2544,10 +2549,15 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		// **列の上限で切り、NUL を落とす。** CW は**相手が自由に決められる値**で、
 		// 長さの制限は送信側の実装次第 (upstream Misskey 自身は投稿時に 100 で
 		// 弾くが、AP でそれを強制する仕組みは無い)。溢れると Create ごと落ちて
-		// ingest が error を返し、**その inbox job が retry を使い切って dead に
-		// なる** (既定 8 回) (#2723)。
-		summary := remoteText(apNote.Summary.String(), noteCWMaxRunes)
-		note.CW = &summary
+		// ingest が error を返す。生の DB error なので `isPermanentSkipError` に
+		// 当たらず、**トップレベル配送ならどのハンドラでも inbox job が dead になる**
+		// (既定 8 回) (#2723)。
+		// **空になったら CW を付けない。** NUL だけの summary をそのまま入れると
+		// `cw = ""` になり、Misskey は「ラベル無しの CW」として本文を折りたたむ。
+		// `text` 側と同じ書き分け (#2723)。
+		if summary := remoteText(apNote.Summary.String(), noteCWMaxRunes); summary != "" {
+			note.CW = &summary
+		}
 	}
 	if apNote.Sensitive && note.CW == nil {
 		// Sensitive かつ Summary が無いケース: 空文字 CW を設定して NSFW を表現
@@ -2970,8 +2980,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 		fields["mentions"] = mentions
 		existing.Mentions = mentions
 	}
-	if apNote.Summary != "" {
-		summary := remoteText(apNote.Summary.String(), noteCWMaxRunes)
+	if summary := remoteText(apNote.Summary.String(), noteCWMaxRunes); summary != "" {
 		fields["cw"] = &summary
 		existing.CW = &summary
 	} else if apNote.Sensitive {
@@ -3809,9 +3818,9 @@ func numberAsInt(v any) int {
 //
 // **溢れると行ごと落ちる。** PostgreSQL は varchar の超過を 22001 で拒否するので、
 // INSERT / UPDATE がまるごと失敗する。失われる範囲は書き込みの単位ごとに違う:
-// note なら ingest が error を返して inbox job が retry を使い切って dead になり
-// (既定 8 回。`defaultInboxJobMaxAttempts`、`internal/server/queue_factory.go`)、
-// actor なら 1 行も作られない。添付は
+// note なら ingest が error を返し (トップレベル配送ならその inbox job が retry を
+// 使い切って dead になる。既定 8 回、`defaultInboxJobMaxAttempts` in
+// `internal/server/queue_factory.go`)、actor なら 1 行も作られない。添付は
 // 1 件ずつ Create するので**その添付だけ**消える (#2723)。
 const (
 	driveFileNameMaxRunes    = 256
