@@ -597,8 +597,9 @@ mk-go は note ごと残す」方向**。
 
 **上の 2 行は scheme に由来する差の全量**で、これ以外に scheme の綴りで受理が
 分かれる形は無い (`strings.ToLower` が ASCII の `h/t/p/s/:/ /` に落ちる非 ASCII の
-符号位置は全 Unicode を走査して 0 件)。**逆向き — upstream が保存して mk-go が
-捨てる — は空文字の行**。
+符号位置は全 Unicode を走査して 0 件)。**scheme に由来する差はすべて mk-go が
+余計に受ける方向**で、逆向き — upstream が保存して mk-go が捨てる — になるのは
+空文字の行。**JSON-LD の展開形にも逆向きの形がある** (後述の表の 2 行目)。
 
 **scheme とは別に、JSON-LD の展開形による経路依存の差がある。** `Normalize` は
 `{"@value": ...}` を**その中身へ**置き換え (中身が object ならその object が残る)、
@@ -630,6 +631,15 @@ fetch 経路では潰れないため、**同じ note でも入口によって結
 
 inbound `Update(Note)` でも追従するが、**捨てられた値では上書きしない** — 読めない
 `url` が来ただけで、取り込み時に保存した正しい permalink を消さないため。
+
+**#2729 より前に取り込んだ note は直らない。** `ingestNoteWithCreated` は
+`FindByURI` が当たった時点で早期 return するので取り込み直しが起きず、actor の
+`refreshActor` にあたる note の再取得経路も無い。したがって既存行の `url` は
+NULL のままで、埋まるのは相手が `Update(Note)` を送ってきたときだけ。actor 側で
+同じことを書いてある箇所と対称。backfill は用意していない — **packer は fallback
+しない** (`url: note.url ?? undefined`) が、リンクを開く側が `note.url ?? note.uri`
+で代替するので (frontend の `pages/note.vue` / `get-note-menu.ts`)、行き先を失う
+わけではない。対象を埋めるには全リモート note を再 fetch することになる。
 
 **`url` が無い note では key ごと落ちる。** `NoteEntity.URL` は
 `json:"url,omitempty"` で、upstream も `url: note.url ?? undefined` なので同じ形。
@@ -675,6 +685,7 @@ NUL の扱いが分かれる土壌になっていたので中身を委譲した�
 テーブルは個別のファイル)。コード側の定数と独立に同じ数値を書くことになるので、
 **実 DB の列長を `information_schema` から読んで突き合わせる回帰テスト**を必ず置く
 (`TestNote_CWColumnLimitIs512` / `TestNote_URIColumnLimitIs512` /
+`TestNote_URLColumnLimitIs512` /
 `TestUser_IdentityColumnLimits` / `TestDriveFile_ColumnLimits` /
 `TestInstance_NodeinfoColumnLimits` / `TestChat_RemoteColumnLimits` /
 `TestUserPublickey_ColumnLimits` / `TestEmoji_RemoteColumnLimits` /
