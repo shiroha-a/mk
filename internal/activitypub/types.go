@@ -500,8 +500,15 @@ func (v APLenientString) String() string { return string(v) }
 // document 全体の unmarshal が失敗し、その actor / note がまったく取り込め
 // なくなる (#2662)。必須かどうかは呼び出し側が空文字で判断する。
 func apFirstRef(data []byte, key string) string {
+	// **数値は `json.Number` で受ける。** 素の `any` へ decode すると数値が
+	// float64 になり、`{"href":"https://a","id":1e999}` のような**壊れていない
+	// JSON** で `cannot unmarshal number` になって参照ごと落ちる。読むのは
+	// string だけなのに、兄弟 field にレンジ外の数値が 1 つあるだけで inbox も
+	// featured も url も空になる (#2730 で nodeinfo に入れたのと同じ対処)。
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	var v any
-	if err := json.Unmarshal(data, &v); err != nil {
+	if err := dec.Decode(&v); err != nil {
 		return ""
 	}
 	if arr, ok := v.([]any); ok {
@@ -993,14 +1000,13 @@ type Note struct {
 	Tag        APObjectList    `json:"tag,omitempty"`
 	Attachment APObjectList    `json:"attachment,omitempty"`
 	// URL は HTML 版の permalink。**`id` とは別物**で、Mastodon 系では
-	// `id` が AP object、`url` が Web ページを指す。upstream の
-	// `getOneApHrefNullable` は「配列なら先頭 → string ならそれ / object なら
-	// `href`」で 1 件に畳むので、生のまま受けて federation 側で読む (#2729)。
-	// **`id` は見ない** — `getApHrefNullable` は `href` だけを読む。
+	// `id` が AP object、`url` が Web ページを指す (#2729)。読み方は
+	// upstream の `getOneApHrefNullable` = `APLenientHref` (配列なら先頭 →
+	// string ならそれ / object なら `href`)。**`id` は見ない**。
 	//
 	// upstream の `renderNote` は note に `url` を出さないので、outbound には
 	// 影響しない (omitempty で消える)。
-	URL            json.RawMessage `json:"url,omitempty"`
+	URL            APLenientHref   `json:"url,omitempty"`
 	MisskeyContent APLenientString `json:"_misskey_content,omitempty"`
 	MisskeyQuote   APLenientID     `json:"_misskey_quote,omitempty"`
 	QuoteURL       APLenientID     `json:"quoteUrl,omitempty"`

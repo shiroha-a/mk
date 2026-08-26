@@ -577,6 +577,7 @@ note の応答から `url` が丸ごと落ちていた。
 | `HTTPS://…` (大文字) | **note ごと reject** (`startsWith` は case-sensitive、実測) | **保存** |
 | `http://…` | production は **note ごと reject**、それ以外なら保存 (実測) | **保存** |
 | `javascript:` / `ftp:` / 相対 URL 等 | **note ごと reject** | **値だけ捨てて note は作る** |
+| `""` (空文字) | **保存する** (`if (url && !checkHttps(url))` は falsy を素通りし、`if (data.url != null)` で `""` が入る) | **捨てる** (空の permalink はどこも指さない) |
 | varchar(512) を超える | 検証なし (22001 で note ごと失う) | **値だけ捨てて note は作る** |
 | NUL 入り | 検証なし (22021 で note ごと失う) | **値だけ捨てて note は作る** |
 
@@ -591,6 +592,8 @@ XSS になりうるので、**捨てるのは upstream より安全側**。
 case-sensitive なので、`HTTPS://` は mk-go だけが受ける。`http://` も mk-go は
 production かどうかに関わらず保存する。**どちらも「upstream が note ごと落とす値を
 mk-go は note ごと残す」方向**で、mk-go が余計に保存するのはこの 2 つだけ。
+**逆向きは空文字の 1 行だけ** — そこは upstream が `"url": ""` を返すのに対し
+mk-go は key ごと落とす。
 
 inbound `Update(Note)` でも追従するが、**捨てられた値では上書きしない** — 読めない
 `url` が来ただけで、取り込み時に保存した正しい permalink を消さないため。
@@ -601,12 +604,18 @@ inbound `Update(Note)` でも追従するが、**捨てられた値では上書�
 null when the note is local」)、そちらは一致する。
 
 `entity/note.go` の `firstNonNil(n.URL, n.URI)` は **`name` 付き note の本文整形
-専用**で、pack される `url` field には効かない (`URL: n.URL` のまま)。**#2729 でも
-この整形は変わらない** — mk-go は `model.Note.Name` を**どこにも書かない**ので、
-`n.Name != nil && *n.Name != ""` の gate が真になるのは drop-in で Misskey TS が
-書いた行だけで、その行は TS が `url` も書いているので元から `url` を使っている。
+専用**で、pack される `url` field には効かない (`URL: n.URL` のまま)。**mk-go が
+取り込んだ note ではこの整形が起きない** — `model.Note.Name` を書く production
+code が 1 つも無いので `n.Name != nil && *n.Name != ""` の gate が真にならない
 (`note.name` を保存しないこと自体が upstream との別の乖離。upstream は
-`ApNoteService` が `name: note.name` を渡す。)
+`ApNoteService` が `name: note.name` を渡し、`NoteCreateService` は `name` を
+**無条件に**、`url` は `data.url != null` のときだけ入れる)。
+
+**gate が真になるのは drop-in で Misskey TS が書いた行だけ**で、そこには
+`name` はあるが `url` が NULL の行もありうる (上のとおり `url` は条件付き)。
+その行に inbound `Update(Note)` が来ると #2729 で `url` が入るので、**本文末尾の
+リンクが `uri` から `url` へ変わる**。upstream も `note.url ?? note.uri` なので
+同じ方向。
 
 数え方と NUL の扱いは `internal/misc/colfit` に集約してある。以前は federation と
 instance に **7 つのヘルパーが散っていた** (federation の `fitsColumn` /

@@ -1202,6 +1202,14 @@ type MockNoteRepository struct {
 	// noteRepo.UserListMembers[listID] = []*model.UserListMembership{...} の
 	// shape で直接 seed する。空 / nil の listID は member 不在として空結果。
 	UserListMembers map[string][]*model.UserListMembership
+	// UpdateFieldsCalls は UpdateFields に渡された field map を順に記録する。
+	//
+	// **in-memory の値を見るだけでは「fields への載せ忘れ」を検出できない** —
+	// 呼び出し側が持つ `*model.Note` は `Notes[id]` と同じ pointer なので、
+	// `existing.X = v` だけしても mock 上は反映されて見える。実 DB では
+	// `fields` に載っていない列は UPDATE 文に出ないので、**stream には新しい値が
+	// 出て DB は古いまま**という壊れ方になる (#2729)。
+	UpdateFieldsCalls []map[string]any
 }
 
 func NewMockNoteRepository() *MockNoteRepository {
@@ -1302,6 +1310,7 @@ func (m *MockNoteRepository) UpdateFields(noteID string, fields map[string]any) 
 	if !ok {
 		return ErrNotFound
 	}
+	m.UpdateFieldsCalls = append(m.UpdateFieldsCalls, fields)
 	for k, v := range fields {
 		switch k {
 		case "text":
@@ -1315,6 +1324,10 @@ func (m *MockNoteRepository) UpdateFields(noteID string, fields map[string]any) 
 		case "mentions":
 			if a, ok := v.([]string); ok {
 				n.Mentions = a
+			}
+		case "url":
+			if s, ok := v.(*string); ok {
+				n.URL = s
 			}
 		}
 	}

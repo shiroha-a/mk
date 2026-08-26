@@ -2530,7 +2530,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	}
 	// HTML 版の permalink。Mastodon 系では `id` (AP object) と `url` (Web ページ)
 	// が別なので、保存しないとクライアントが原文ページへ辿れない (#2729)。
-	if u := remoteNoteURL(apNote.URL); u != "" {
+	if u := remoteNoteURL(apNote.URL.String()); u != "" {
 		note.URL = &u
 	}
 	// #2106 N14: silenced instance (meta.silencedHosts) の remote public note は home に
@@ -3038,7 +3038,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	}
 	// permalink も追従する (#2729)。**捨てられた値では上書きしない** — 読めない
 	// `url` が来ただけで、取り込み時に保存した正しい permalink を消してしまう。
-	if u := remoteNoteURL(apNote.URL); u != "" && (existing.URL == nil || *existing.URL != u) {
+	if u := remoteNoteURL(apNote.URL.String()); u != "" && (existing.URL == nil || *existing.URL != u) {
 		fields["url"] = &u
 		existing.URL = &u
 	}
@@ -4005,12 +4005,12 @@ func remoteURIValue(actorURI, column, raw string) string {
 // noteURLMaxRunes は `note.url` の varchar(512) (migration/000001_initial.up.sql)。
 const noteURLMaxRunes = 512
 
-// remoteNoteURL reads an AP object's `url` and returns the value to store in
-// `note.url`, or "" when it must be dropped.
+// remoteNoteURL validates an AP object's already-decoded `url` and returns the
+// value to store in `note.url`, or "" when it must be dropped.
 //
-// 読み方は upstream の `getOneApHrefNullable` と同じ — **配列なら先頭要素**、
-// string ならそれ、object なら `href`。**`id` は見ない** (`getApHrefNullable` は
-// `href` だけを読む)。
+// 読み方 (配列なら先頭 / string / object の `href`) は `APLenientHref` が持つ。
+// **同じ upstream ヘルパー (`getOneApHrefNullable`) の写しを 2 つ作らない** —
+// #2726 で `colfit` に集約したのと同じ理由で、数え方や受理する形が分かれる。
 //
 // **収まらない / scheme が http(s) でない値は捨てて、note は作る** (#2729)。
 // `note.url` は表示用の permalink で、身元は `uri` のほうなので #2723 の
@@ -4022,8 +4022,7 @@ const noteURLMaxRunes = 512
 //
 // scheme は case-insensitive に見る (RFC 3986)。`internal/core/urlpreview` の
 // `isHTTPScheme` と同じ方針。
-func remoteNoteURL(raw json.RawMessage) string {
-	href := readOneAPHref(raw)
+func remoteNoteURL(href string) string {
 	if href == "" {
 		return ""
 	}
@@ -4035,22 +4034,6 @@ func remoteNoteURL(raw json.RawMessage) string {
 		return ""
 	}
 	return href
-}
-
-// readOneAPHref mirrors upstream's `getOneApHrefNullable`: 配列なら先頭要素を、
-// string ならそれ自身を、object なら `href` を返す。
-func readOneAPHref(raw json.RawMessage) string {
-	if len(raw) == 0 {
-		return ""
-	}
-	var arr []json.RawMessage
-	if json.Unmarshal(raw, &arr) == nil {
-		if len(arr) == 0 {
-			return ""
-		}
-		return readApHref(arr[0])
-	}
-	return readApHref(raw)
 }
 
 // inboxPtr returns nil for an empty inbox so the column stays NULL.

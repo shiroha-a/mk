@@ -64,6 +64,10 @@ func TestIngest_NoteURLShapes(t *testing.T) {
 		"数値は捨てる":                 {`123`, ""},
 		"null は捨てる":              {`null`, ""},
 		"href が string でなければ捨てる": {`{"href":123}`, ""},
+		// **upstream は空文字を保存する** (`if (url && !checkHttps(url))` は
+		// falsy を素通りし、`if (data.url != null)` で `""` が入る)。mk-go は
+		// 捨てる — 空の permalink はどこも指さない (#2729)。
+		"空文字は捨てる": {`""`, ""},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -123,15 +127,20 @@ func TestIngest_KeepsHTTPAndUppercaseSchemeNoteURL(t *testing.T) {
 // `note.url` は varchar(512)。**切ると別の URL になる**ので値ごと捨てて note は
 // 作る (#2723 の「URL / ID 系」の規則)。
 func TestIngest_DropsOversizedNoteURL(t *testing.T) {
-	long := "https://remote.example/" + strings.Repeat("a", 500)
+	// **全角で埋める。** ASCII だけだと byte で数える実装でも同じ結果になり、
+	// rune 判定が守られていることを確かめられない (#2729 のレビュー 2 周目)。
+	// permalink に非 ASCII が入る形 (`https://host/@ユーザー/…`) は実在する。
+	long := "https://remote.example/" + strings.Repeat("あ", 500)
 	require.Greater(t, len([]rune(long)), 512)
 	got := ingestNoteWithURL(t, `"`+long+`"`)
 	assert.Nil(t, got.URL)
 	require.NotNil(t, got.URI)
 
-	// 上限ちょうどは通す。
-	fit := "https://remote.example/" + strings.Repeat("a", 512-23)
+	// 上限ちょうどは通す。**byte では 1500 を超えるので、byte で数える実装なら
+	// ここで落ちる。**
+	fit := "https://remote.example/" + strings.Repeat("あ", 512-23)
 	require.Equal(t, 512, len([]rune(fit)))
+	require.Greater(t, len(fit), 512)
 	got = ingestNoteWithURL(t, `"`+fit+`"`)
 	require.NotNil(t, got.URL)
 	assert.Equal(t, fit, *got.URL)
@@ -164,6 +173,13 @@ func TestUpdateRemoteNote_UpdatesURL(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, got.URL)
 	assert.Equal(t, "https://remote.example/@alice/new", *got.URL)
+	// **`fields` に載ったことまで見る。** 返り値 (`existing`) は `Notes["n1"]` と
+	// 同じ pointer なので、in-memory の値を見ても「載せ忘れ」を検出できない。
+	// 実 DB では `fields` に無い列は UPDATE 文に出ず、**stream には新しい url が
+	// 出て DB は古いまま**になる (#2729 のレビュー 2 周目)。
+	require.Len(t, noteRepo.UpdateFieldsCalls, 1)
+	assert.Equal(t, "https://remote.example/@alice/new",
+		*noteRepo.UpdateFieldsCalls[0]["url"].(*string))
 }
 
 // **捨てられた値では上書きしない。** 読めない `url` が来ただけで、取り込み時に
@@ -190,6 +206,11 @@ func TestUpdateRemoteNote_KeepsURLWhenNewOneIsDropped(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, got.URL)
 			assert.Equal(t, stored, *got.URL)
+			// `fields` に url を載せない (= UPDATE 文に出さない) ことまで見る。
+			for _, f := range noteRepo.UpdateFieldsCalls {
+				_, ok := f["url"]
+				assert.False(t, ok, "捨てた値を UPDATE に載せない")
+			}
 		})
 	}
 }
