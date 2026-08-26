@@ -136,14 +136,21 @@ func TestIngest_DropsOversizedNoteURL(t *testing.T) {
 	assert.Nil(t, got.URL)
 	require.NotNil(t, got.URI)
 
-	// 上限ちょうどは通す。**byte では 1500 を超えるので、byte で数える実装なら
-	// ここで落ちる。**
+	// **境界ちょうどと +1 の両方を見る。** ちょうどだけだと `> max` を
+	// `>= max` にしても max を 513 にしても落ちない (resolver_test.go の
+	// 既存の境界テストと同じ規約、#2729 のレビュー 4 周目)。
 	fit := "https://remote.example/" + strings.Repeat("あ", 512-23)
 	require.Equal(t, 512, len([]rune(fit)))
+	// byte では 1500 を超えるので、byte で数える実装ならここで落ちる。
 	require.Greater(t, len(fit), 512)
 	got = ingestNoteWithURL(t, `"`+fit+`"`)
 	require.NotNil(t, got.URL)
 	assert.Equal(t, fit, *got.URL)
+
+	over := fit + "あ"
+	require.Equal(t, 513, len([]rune(over)))
+	got = ingestNoteWithURL(t, `"`+over+`"`)
+	assert.Nil(t, got.URL, "1 rune でも溢れたら捨てる (列は 512)")
 }
 
 // NUL 入りは列に入らないので捨てる (`fitsColumn`)。
@@ -175,8 +182,8 @@ func TestUpdateRemoteNote_UpdatesURL(t *testing.T) {
 	assert.Equal(t, "https://remote.example/@alice/new", *got.URL)
 	// **`fields` に載ったことまで見る。** 返り値 (`existing`) は `Notes["n1"]` と
 	// 同じ pointer なので、in-memory の値を見ても「載せ忘れ」を検出できない。
-	// 実 DB では `fields` に無い列は UPDATE 文に出ず、**stream には新しい url が
-	// 出て DB は古いまま**になる (#2729 のレビュー 2 周目)。
+	// 実 DB では `fields` に無い列は UPDATE 文に出ないので、**呼び出し側から
+	// 見えている値と DB の値が食い違う** (#2729 のレビュー 2 周目)。
 	require.Len(t, noteRepo.UpdateFieldsCalls, 1)
 	// **型アサーションを裸で書かない。** 載っていないときに panic すると
 	// testing がバイナリごと止まり、同じパッケージの残りが実行されない。

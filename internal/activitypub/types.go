@@ -505,11 +505,14 @@ func apFirstRef(data []byte, key string) string {
 	// JSON** で `cannot unmarshal number` になって参照ごと落ちる。読むのは
 	// string だけなのに、兄弟 field にレンジ外の数値が 1 つあるだけで
 	// `attributedTo` も `featured` も `url` も空になる。**`attributedTo` が空に
-	// なると note ごと落ちる** (host 照合が失敗する) ので、リモートが 1 トークン
-	// 置くだけで取り込みを止められた (#2730 で nodeinfo に入れたのと同じ対処)。
+	// なると note ごと落ちる** (`ingestNoteWithCreated` の明示 gate) ので、
+	// リモートが 1 トークン置くだけで取り込みを止められた (#2730 で nodeinfo に
+	// 入れたのと同じ対処)。
 	//
-	// **`inbox` はこの型を通らない** (`Person.Inbox` は string 決め打ち) ので、
-	// object 形式の `inbox` はこの修正の前後とも空のまま。
+	// **`inbox` はこの型を通らない** (`Person.Inbox` は string 決め打ち)。
+	// object 形式の `inbox` は **actor ごと落ちる** — `Person` には `Note` の
+	// ような catch-all `UnmarshalJSON` が無く、`fetchActor` が unmarshal の
+	// error を全部 `ErrInvalidActor` に潰すため。**この修正では救われない。**
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any

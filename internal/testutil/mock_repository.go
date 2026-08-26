@@ -1207,8 +1207,12 @@ type MockNoteRepository struct {
 	// **in-memory の値を見るだけでは「fields への載せ忘れ」を検出できない** —
 	// 呼び出し側が持つ `*model.Note` は `Notes[id]` と同じ pointer なので、
 	// `existing.X = v` だけしても mock 上は反映されて見える。実 DB では
-	// `fields` に載っていない列は UPDATE 文に出ないので、**stream には新しい値が
-	// 出て DB は古いまま**という壊れ方になる (#2729)。
+	// `fields` に載っていない列は UPDATE 文に出ないので、**呼び出し側から見えて
+	// いる値と DB の値が食い違う** (#2729)。
+	//
+	// 同じ理由で、**上の switch に列を足すときは慎重に。** 足すと
+	// 「`fields` に載せた」と「呼び出し側が in-memory を書き換えた」を
+	// 区別できなくなり、片方だけを消す変異が両方のテストをすり抜ける。
 	UpdateFieldsCalls []map[string]any
 }
 
@@ -1324,10 +1328,6 @@ func (m *MockNoteRepository) UpdateFields(noteID string, fields map[string]any) 
 		case "mentions":
 			if a, ok := v.([]string); ok {
 				n.Mentions = a
-			}
-		case "url":
-			if s, ok := v.(*string); ok {
-				n.URL = s
 			}
 		}
 	}
