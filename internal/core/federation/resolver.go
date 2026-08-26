@@ -2599,9 +2599,12 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// through する (legacy 互換)。
 	if replyTarget != nil && replyTarget.HasPoll && apNote.Name != "" && r.pollRepo != nil && r.pollVoter != nil {
 		if poll, err := r.pollRepo.FindByNoteID(replyTarget.ID); err == nil && poll != nil {
+			// 保存側と同じ正規化を通して照合する。切った選択肢に対する投票は
+			// 生値では一致しない (#2726)。
+			want := remotePollChoice(apNote.Name.String())
 			idx := -1
 			for i, c := range poll.Choices {
-				if c == apNote.Name.String() {
+				if c == want {
 					idx = i
 					break
 				}
@@ -2794,7 +2797,7 @@ func (r *Resolver) createPollFromQuestion(note *model.Note, apNote *activitypub.
 	choiceNames := make([]string, len(choices))
 	votes := make([]int64, len(choices))
 	for i, c := range choices {
-		choiceNames[i] = c.Name
+		choiceNames[i] = remotePollChoice(c.Name)
 		if c.Replies != nil {
 			votes[i] = int64(c.Replies.TotalItems)
 		}
@@ -2818,7 +2821,30 @@ func (r *Resolver) createPollFromQuestion(note *model.Note, apNote *activitypub.
 			poll.ExpiresAt = &t
 		}
 	}
-	_ = r.pollRepo.Create(poll)
+	// **エラーを捨てない。** 捨てると note が hasPoll=true のまま poll 行だけ
+	// 無い状態になり、REST では選択肢の無い投票として出る。ここで error を上へ
+	// 返しても直らない (note は既に Create 済みで、retry は FindByURI の dedup
+	// hit で早期 return するため poll 作成へ再到達しない) ので、結末は
+	// 「ログに残す」が正しい (#2726)。
+	if err := r.pollRepo.Create(poll); err != nil {
+		slog.Warn("federation: failed to persist remote poll",
+			"noteId", note.ID, "uri", truncateRunes(apNote.ID, noteURIMaxRunes), "err", err)
+	}
+}
+
+// remotePollChoice prepares an AP Question choice for `poll.choices`
+// (`varchar(256)[]`).
+//
+// 選択肢は表示される本文なので切って NUL を落とす。1 つでも溢れると
+// `poll` の INSERT ごと落ちて、**note は hasPoll=true のまま poll 行が無い**
+// 状態になる (#2726)。
+//
+// **upstream は切らない** (`ApQuestionService.extractPollFromQuestion` は
+// `x.name` をそのまま渡す)。upstream は poll を note と同じ transaction で
+// 入れるので、同じ入力では note ごと落ちる。mk-go は note を残して選択肢を
+// 切る = 安全側 (docs/divergence.md)。
+func remotePollChoice(name string) string {
+	return remoteText(name, pollChoiceMaxRunes)
 }
 
 // UpdateRemoteQuestion applies an inbound Update(Question) to an existing remote
@@ -2879,7 +2905,8 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 	counts := make(map[string]int64, len(apChoices))
 	for _, c := range apChoices {
 		if c.Replies != nil && c.Replies.TotalItems >= 0 {
-			counts[c.Name] = int64(c.Replies.TotalItems)
+			// 保存側と同じ正規化を通す (#2726)。切った選択肢は生値では引けない。
+			counts[remotePollChoice(c.Name)] = int64(c.Replies.TotalItems)
 		}
 	}
 	newVotes := make([]int64, len(poll.Choices))
@@ -3824,6 +3851,8 @@ const (
 	driveFileBlurhashMaxRune = 128
 	noteCWMaxRunes           = 512
 	noteURIMaxRunes          = 512
+	// poll.choices は varchar(256)[] (migration/000001_initial.up.sql)。
+	pollChoiceMaxRunes = 256
 )
 
 // user 側のリモート値を書く列の上限 (migration/000001_initial.up.sql)。
