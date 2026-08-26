@@ -71,7 +71,7 @@ func Normalize(s string) (hex string, ok bool) {
 // parse mirrors tinycolor's stringInputToObject + inputToRGB for string input.
 // 戻り値は 0-255 の実数 (丸めは呼び出し側)。
 func parse(s string) (r, g, b float64, ok bool) {
-	color := strings.ToLower(strings.TrimSpace(s))
+	color := strings.ToLower(trimJSSpace(s))
 	if hex, named := names[color]; named {
 		color = hex
 	} else if color == "transparent" {
@@ -132,6 +132,27 @@ func round255(v float64) int {
 	return int(math.Round(v))
 }
 
+// jsSpace reports whether r is whitespace for JS `\s` (= WhiteSpace +
+// LineTerminator)。
+//
+// **Go の `unicode.IsSpace` とは 2 つずれる。** JS は ZWNBSP (U+FEFF) を空白に
+// 数えるが Go は数えず、Go は NEL (U+0085) を数えるが JS は数えない。tinycolor は
+// 入力を `/^\s+/` / `/\s+$/` で trim するので、`strings.TrimSpace` を使うと
+// `"\uFEFFred"` を落とし `"\u0085red"` を通してしまう (実測、#2726)。
+func jsSpace(r rune) bool {
+	switch r {
+	case '\t', '\n', '\v', '\f', '\r', ' ',
+		0x00a0, 0x1680, 0x2028, 0x2029, 0x202f, 0x205f, 0x3000, 0xfeff:
+		return true
+	}
+	return r >= 0x2000 && r <= 0x200a
+}
+
+// trimJSSpace trims JS `\s` from both ends.
+func trimJSSpace(s string) string {
+	return strings.TrimFunc(s, jsSpace)
+}
+
 // parseFloatJS mirrors JS parseFloat: 先頭から読める分だけ読む ("50%" → 50)。
 // 数字が 1 つも無ければ NaN。
 //
@@ -139,11 +160,17 @@ func round255(v float64) int {
 // (400 桁) が実際に届きうる。JS の parseFloat は Infinity を返し、tinycolor は
 // それを 255 に clamp して `#ff0000` にする (実測)。ここで NaN にすると以降の
 // 演算がすべて NaN になり、丸めの結果が未定義になる。
+//
+// **指数部も読む。** CSS unit の正規表現は `e` を通さないが、
+// `convertToPercentage` が作る文字列 (`String(1e-7) + "%"`) が bound01 へ渡る
+// ので、そこで `"1e-7%"` を 1 と読むと結果がずれる (#2726)。
 func parseFloatJS(s string) float64 {
 	end := 0
 	seenDigit := false
 	seenDot := false
-	for i, c := range s {
+	i := 0
+	for ; i < len(s); i++ {
+		c := s[i]
 		if i == 0 && (c == '+' || c == '-') {
 			end = i + 1
 			continue
@@ -163,9 +190,102 @@ func parseFloatJS(s string) float64 {
 	if !seenDigit {
 		return math.NaN()
 	}
+	// 指数部は「`e` の直後に (符号+) 数字が 1 つ以上」あるときだけ取り込む。
+	// 揃わなければ小数部までで打ち切る (JS の parseFloat と同じ)。
+	if i < len(s) && (s[i] == 'e' || s[i] == 'E') {
+		j := i + 1
+		if j < len(s) && (s[j] == '+' || s[j] == '-') {
+			j++
+		}
+		k := j
+		for k < len(s) && s[k] >= '0' && s[k] <= '9' {
+			k++
+		}
+		if k > j {
+			end = k
+		}
+	}
 	// err は範囲外 (= ±Inf) でのみ返る。値はそのまま使う (上のコメント参照)。
 	v, _ := strconv.ParseFloat(s[:end], 64)
 	return v
+}
+
+// parseIntJS mirrors JS `parseInt(s, 10)`: 空白を飛ばし、符号と 10 進数字だけを
+// 読む。数字が無ければ NaN。
+//
+// **`e` で止まるのが要点。** `parseInt(1e-7)` が 1 になるのは、JS が数値を先に
+// 文字列化して `"1e-7"` の先頭 1 桁だけを読むため。`math.Trunc` で代用すると 0 に
+// なってずれる (#2726)。
+func parseIntJS(s string) float64 {
+	s = trimJSSpace(s)
+	i := 0
+	neg := false
+	if i < len(s) && (s[i] == '+' || s[i] == '-') {
+		neg = s[i] == '-'
+		i++
+	}
+	start := i
+	for i < len(s) && s[i] >= '0' && s[i] <= '9' {
+		i++
+	}
+	if i == start {
+		return math.NaN()
+	}
+	v, _ := strconv.ParseFloat(s[start:i], 64)
+	if neg {
+		return -v
+	}
+	return v
+}
+
+// jsNumberToString mirrors ECMAScript の Number::toString (radix 10) for finite
+// values.
+//
+// **`strconv.FormatFloat(v, 'g', -1, 64)` では代用できない。** Go の `g` は
+// 指数表記へ切り替わる境界が 1e-4 付近だが、JS は 1e-6 まで固定小数のままで、
+// 上は 1e21 で切り替わる。`convertToPercentage` の戻り値がこの形で
+// `bound01` へ渡るので、境界がずれると小さい s / l / v を持つ hsl / hsv の
+// 結果が変わる (#2726)。
+func jsNumberToString(v float64) string {
+	if v == 0 {
+		return "0"
+	}
+	if v < 0 {
+		return "-" + jsNumberToString(-v)
+	}
+	if math.IsInf(v, 1) {
+		return "Infinity"
+	}
+	if math.IsNaN(v) {
+		return "NaN"
+	}
+	// 最短往復表現から仮数の桁列 (digits) と 10 の指数 (exp) を取り出す。
+	e := strconv.FormatFloat(v, 'e', -1, 64) // "d.ddde±dd"
+	mant, expPart, _ := strings.Cut(e, "e")
+	exp, _ := strconv.Atoi(expPart)
+	digits := strings.Replace(mant, ".", "", 1)
+	k := len(digits)
+	n := exp + 1 // 小数点の位置 (spec の n)
+
+	switch {
+	case k <= n && n <= 21:
+		return digits + strings.Repeat("0", n-k)
+	case 0 < n && n <= 21:
+		return digits[:n] + "." + digits[n:]
+	case -6 < n && n <= 0:
+		return "0." + strings.Repeat("0", -n) + digits
+	}
+	// 指数表記。JS は指数の符号を必ず出す。
+	sign := "+"
+	ex := n - 1
+	if ex < 0 {
+		sign = "-"
+		ex = -ex
+	}
+	if k == 1 {
+		return digits + "e" + sign + strconv.Itoa(ex)
+	}
+	return digits[:1] + "." + digits[1:] + "e" + sign + strconv.Itoa(ex)
 }
 
 // bound01 mirrors tinycolor's bound01: 入力を 0..1 に畳む。
@@ -185,8 +305,9 @@ func bound01(n string, max float64) float64 {
 
 	v := math.Min(max, math.Max(0, parseFloatJS(value)))
 	if processPercent {
-		// JS の `parseInt(n * max, 10)` は小数を切り捨てる (0 方向)。
-		v = math.Trunc(v*max) / 100
+		// JS の `parseInt(n * max, 10)` は**数値を文字列にしてから**読むので、
+		// `math.Trunc` とは小さい値で結果が分かれる (`parseInt(1e-7) === 1`)。
+		v = parseIntJS(jsNumberToString(v*max)) / 100
 	}
 	if math.Abs(v-max) < 0.000001 {
 		return 1
@@ -200,20 +321,14 @@ func bound01(n string, max float64) float64 {
 // JS は文字列を数値へ暗黙変換して比較するので、"100%" のような数値化できない
 // 文字列は NaN <= 1 = false になり、そのまま返る。
 func convertToPercentage(n string) string {
-	v, err := strconv.ParseFloat(strings.TrimSpace(n), 64)
+	v, err := strconv.ParseFloat(trimJSSpace(n), 64)
 	if err != nil || math.IsNaN(v) {
 		return n
 	}
 	if v <= 1 {
-		return jsNumberString(v*100) + "%"
+		return jsNumberToString(v*100) + "%"
 	}
 	return n
-}
-
-// jsNumberString formats a float the way JS `String(number)` does for the
-// values convertToPercentage produces (整数なら小数点を出さない)。
-func jsNumberString(v float64) string {
-	return strconv.FormatFloat(v, 'g', -1, 64)
 }
 
 // hslToRGB mirrors tinycolor's hslToRgb. 戻り値は 0-255 の実数。

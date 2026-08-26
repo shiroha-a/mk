@@ -12,6 +12,21 @@
 const fs = require('fs');
 const path = require('path');
 
+// Go の文字列リテラルとして安全に出す。**JSON.stringify は使えない** — U+FEFF を
+// そのまま埋めると Go が「illegal byte order mark」で弾く。
+function goString(s) {
+	let out = '"';
+	for (const ch of s) {
+		const cp = ch.codePointAt(0);
+		if (ch === '"') out += '\\"';
+		else if (ch === '\\') out += '\\\\';
+		else if (cp >= 0x20 && cp < 0x7f) out += ch;
+		else if (cp <= 0xffff) out += '\\u' + cp.toString(16).padStart(4, '0');
+		else out += '\\U' + cp.toString(16).padStart(8, '0');
+	}
+	return out + '"';
+}
+
 const repo = process.argv[2];
 if (!repo) {
 	console.error('usage: node gen.js <repo-root>');
@@ -74,9 +89,17 @@ const inputs = [
 	'hsl(359.9,99.9%,49.9%)', 'hsl(30,33.3%,66.6%)', 'hsva(10,20,30,40)', 'rgba(10%,20%,30%,40%)',
 ];
 
+// **1e-6 より小さい値を必ず入れる。** JS の `String(number)` は 1e-6 まで固定
+// 小数のままで、そこから指数表記へ切り替わる。`convertToPercentage` の戻り値が
+// この境界をまたぐと `bound01` の読み方が変わるので、ここに小さい値が無いと
+// 生成した vector は境界の実装差を素通しする (#2726 のレビュー指摘)。
 const nums = () => pick([
 	'0', '1', '2', '7', '15', '64', '127', '128', '180', '255', '256', '300', '359', '360', '720',
 	'-1', '-60', '0.5', '1.0', '1.5', '33.3', '99.9', '0%', '1%', '50%', '99%', '100%', '150%', '-10%', '.5', '+7',
+	'0.001', '0.0001', '0.00001', '0.000001', '0.0000009', '0.0000001', '0.000000001',
+	'.0000001', '.000000001', '-0.0000001', '0.0000001%', '0.000000001%', '0.000001%',
+	'0.00000000000001', '0.5000001', '0.9999999', '1.0000001', '255.0000001', '99.9999999',
+	'100.0000001', '1.0000000000000002', '0.30000000000000004',
 ]);
 const fns = ['rgb', 'rgba', 'hsl', 'hsla', 'hsv', 'hsva'];
 const seps = [',', ', ', ' ', '  ,'];
@@ -96,6 +119,20 @@ for (let i = 0; i < 120; i++) {
 	inputs.push(s);
 }
 for (let i = 0; i < 40; i++) inputs.push(pick(nameKeys));
+
+// 空白の trim。**JS の `\s` と Go の `unicode.IsSpace` は 2 つずれる**
+// (U+FEFF は JS だけ、U+0085 は Go だけ) ので、両方を必ず corpus に入れる。
+const ws = [
+	'\uFEFF', '\u0085', '\u180E', '\u200B', '\u00A0', '\u1680', '\u2000', '\u2009',
+	'\u200A', '\u2028', '\u2029', '\u202F', '\u205F', '\u3000', '\t', '\n', '\v', '\f', '\r', ' ',
+];
+for (const w of ws) {
+	for (const base of ['red', '#f00', 'rgb(1,2,3)']) {
+		inputs.push(w + base);
+		inputs.push(base + w);
+		inputs.push(w + base + w);
+	}
+}
 
 const seen = new Set();
 const out = [];
@@ -117,7 +154,7 @@ go += '//\n';
 go += '// **桁溢れ (400 桁の数値) はここに入れない** — 1 行が読めなくなるので\n';
 go += '// csscolor_test.go の TestNormalize_HugeNumbers に手で置いてある。\n';
 go += 'var tinycolorVectors = []struct {\n\tin  string\n\tok  bool\n\thex string\n}{\n';
-for (const v of out) go += '\t{' + JSON.stringify(v.in) + ', ' + v.ok + ', ' + JSON.stringify(v.hex) + '},\n';
+for (const v of out) go += '\t{' + goString(v.in) + ', ' + v.ok + ', ' + goString(v.hex) + '},\n';
 go += '}\n';
 fs.writeFileSync(path.join(outDir, 'vectors_test.go'), go);
 
