@@ -70,7 +70,9 @@ type nodeinfoDocument struct {
 	// なければ '?' を入れる (`FetchInstanceMetadataService`)。case は
 	// `.toLowerCase()` で潰す — software block の判定は元から case-insensitive
 	// なので回避には使えないが、`federation/instances` が返す値が upstream に
-	// 近づく。**JSON の `null` は object ではない**ので空のまま (下記)。
+	// 近づく。**JSON の `null` は JS で falsy** なので空のまま (下記)。
+	// **「object ではないから」ではない** — `[]` / `123` も object ではないが、
+	// truthy なので `'?'` が入る。
 	//
 	// **「揃う」ではなく「近づく」。** Go の `strings.ToLower` は simple case
 	// mapping なので JS の `toLowerCase()` とはずれる。go1.26.6

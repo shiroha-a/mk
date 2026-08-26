@@ -90,9 +90,12 @@ func TestFetch_MalformedJSONStillFails(t *testing.T) {
 	assert.Error(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
 }
 
-// JSON の `null` は object ではない。upstream は `if (info)` で囲っているので
+// JSON の `null` は **JS で falsy**。upstream は `if (info)` で囲っているので
 // nodeinfo が null なら software 系の列に一切触れない。`'?'` を書くと、壊れた
 // nodeinfo を返す相手の softwareName を毎回上書きしてしまう。
+//
+// **「object ではないから」ではない** — `[]` / `123` も object ではないが、
+// truthy なので `'?'` が入る (`TestFetch_NonObjectNodeinfoStoresPlaceholder`)。
 func TestFetch_NullDocumentDoesNotOverwriteSoftwareName(t *testing.T) {
 	repo := testutil.NewMockInstanceRepository()
 	existing := "misskey"
