@@ -601,17 +601,28 @@ mk-go は note ごと残す」方向**。
 捨てる — は空文字の行**。
 
 **scheme とは別に、JSON-LD の展開形による経路依存の差がある。** `Normalize` は
-`{"@value": ...}` をスカラーへ、**単一キーの** `{"@id": ...}` を string へ潰し、
-full IRI のキー (`https://www.w3.org/ns/activitystreams#href`) を `href` へ畳む。
-潰れた結果が string / `href` 付き object なら `APLenientHref` が読むので、
-**upstream が `href` を持たないとして捨てる形を mk-go の inbox 経路は保存する**。
-`Normalize` を通らない生 fetch 経路では潰れないため、**同じ note でも入口によって
-`url` が入ったり入らなかったりする**。AS2 の `@context` は `url` を
-`{"@id":"as:url","@type":"@id"}` と定義していて展開形は正規の表現なので、実在しうる差。
+`{"@value": ...}` を**その中身へ**置き換え (中身が object ならその object が残る)、
+**単一キーの** `{"@id": ...}` を string へ潰し、full IRI のキー
+(`https://www.w3.org/ns/activitystreams#href`) を `href` へ畳む。置き換えた結果が
+string / `href` 付き object なら `APLenientHref` が読むので、**upstream が `href` を
+持たないとして捨てる形を mk-go の inbox 経路は読める**。`Normalize` を通らない生
+fetch 経路では潰れないため、**同じ note でも入口によって結末が変わる**。AS2 の
+`@context` は `url` を `{"@id":"as:url","@type":"@id"}` と定義していて展開形は正規の
+表現なので、実在しうる差。
 
-**向きは一方向ではない。** `@value` の潰しは `@id` と違って**兄弟キーを見ない**ので、
-`{"href":"https://…","@value":"x"}` は inbox 経路だけ `"x"` に潰れて http(s) の
-判定で捨てられる (upstream と生 fetch 経路は `href` を読んで保存する)。
+**結末は「入る / 入らない」の 2 通りではない。** `@value` の置き換えは `@id` と違って
+**兄弟キーを見ない** (`len(x) == 1` のガードが無い) ので、`href` を持つ object でも
+`@value` があればそちらが勝つ。
+
+| 例 | upstream / 生 fetch 経路 | inbox 経路 |
+|---|---|---|
+| `{"@id":"https://x/1"}` | 捨てる | `https://x/1` を保存 (**余計に入る**) |
+| `{"href":"https://x/1","@value":"x"}` | `https://x/1` を保存 | 捨てる (**入るはずが入らない**) |
+| `{"href":"https://x/1","@value":"https://y/2"}` | `https://x/1` を保存 | **`https://y/2` を保存** (**別の URL に差し替わる**) |
+
+**3 つ目が最も気付きにくい** — 欠けた permalink は目に見えるが、入っている別の URL は
+見えない。どちらの値も同じリモート送信者の管理下にあり `attributedTo` の gate も
+通っているので権限境界は跨がないが、クライアントが開くリンク先は変わる。
 
 **この形の全量は数えていない。** `Normalize` の変換規則と `APLenientHref` の
 読み方の組み合わせで決まるので、形を列挙しても片方が変われば腐る。揃えるなら

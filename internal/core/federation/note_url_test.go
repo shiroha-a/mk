@@ -337,4 +337,16 @@ func TestNoteURL_JSONLDExpandedFormsArePathDependent(t *testing.T) {
 	got = ingestNoteURLByRawFetch(t, hrefWithValue)
 	require.NotNil(t, got.URL)
 	assert.Equal(t, "https://remote.example/@a/1", *got.URL)
+
+	// **結末は「入る / 入らない」の 2 通りではない。** `@value` 側も http(s) なら
+	// inbox 経路は `href` を捨ててそちらを permalink として保存する = **別の URL
+	// に差し替わる**。欠けた permalink と違って表示上は正常に見えるので、こちらの
+	// ほうが気付きにくい (#2729 のレビュー 9 周目)。
+	const hrefWithURLValue = `{"href":"https://remote.example/@a/1","@value":"https://other.example/@b/2"}`
+	got = ingestNoteWithURL(t, hrefWithURLValue)
+	require.NotNil(t, got.URL)
+	assert.Equal(t, "https://other.example/@b/2", *got.URL)
+	got = ingestNoteURLByRawFetch(t, hrefWithURLValue)
+	require.NotNil(t, got.URL)
+	assert.Equal(t, "https://remote.example/@a/1", *got.URL)
 }
