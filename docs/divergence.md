@@ -558,35 +558,55 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 `note_reaction.reaction` / `abuse_user_report.comment` にも適用した。**
 個々の判断は上の表に 1 行ずつある。
 
-**`note.url` は書く経路が無い** ので #2726 の対象外。列 (varchar(512)) はあるが、
-resolver はリモート note の `uri` しか保存せず、production code に `note.url` へ
-代入する箇所が 1 つも無いので溢れようがない。
+**`note.url` はリモート note でも保存する** (#2729)。列は varchar(512)。
+`uri` (AP object の `id`) とは別 field で、Mastodon 系では `url` が HTML の
+permalink を指す。#2726 の時点では**書く経路が 1 つも無く**、mk-go が取り込んだ
+note の応答から `url` が丸ごと落ちていた。
 
-**ただしこれは upstream との乖離でもある** (列の話ではないので上の表には入れて
-いない)。upstream の `ApNoteService` は `getOneApHrefNullable(note.url)` を
-`MiNote.url` に入れ (https でなければ note ごと reject する)、
-`NoteEntityService` が `url: note.url ?? undefined` で返す。**AP の `id` と HTML の
-permalink が別な実装 (Mastodon 等) では upstream の応答に
-`"url": "<permalink>"` が載るのに対し、mk-go が取り込んだ note では
-`url` が出ない。**
+読み方は upstream の `getOneApHrefNullable` と同じ — **配列なら先頭要素**、string
+ならそれ、object なら `href`。**`id` は見ない** (`getApHrefNullable` は `href` だけ
+を読む)。
 
-書き方に 3 つ注意がある。
+**受理する値の集合が upstream と違う。** upstream の判定は
+`checkHttps` = 生文字列の `startsWith('https://')`、または `startsWith('http://')`
+かつ `NODE_ENV !== 'production'` で、**false なら note ごと throw する**。
 
-- **`null` を返すのではなく key ごと落ちる。** `NoteEntity.URL` は
-  `json:"url,omitempty"` (実測)。upstream も `?? undefined` なので同じ形になる。
-  **揃えるなら `"url": null` を足すのではなく取り込みを直す** — 前者は
-  entitycompat の shape drift (golden は `nullable: false, optional: true`) を
-  余計に作る
-- **key が落ちること自体は乖離ではない。** `url` はローカル note では upstream も
-  null で (`MiNote.url` の列コメント「it will be null when the note is local」)、
-  そちらは key ごと落ちる形まで一致する。乖離になるのは**取り込んだリモート
-  note** だけ
-- **drop-in では話が変わる。** `model.Note.URL` は既存の `url` 列を読むので、
-  Misskey TS が書いた行では mk-go も permalink を返す
+| 値 | upstream | mk-go |
+|---|---|---|
+| `https://…` | 保存 | 保存 |
+| `HTTPS://…` (大文字) | **note ごと reject** (`startsWith` は case-sensitive、実測) | **保存** |
+| `http://…` | production は **note ごと reject**、それ以外なら保存 (実測) | **保存** |
+| `javascript:` / `ftp:` / 相対 URL 等 | **note ごと reject** | **値だけ捨てて note は作る** |
+| varchar(512) を超える | 検証なし (22001 で note ごと失う) | **値だけ捨てて note は作る** |
+| NUL 入り | 検証なし (22021 で note ごと失う) | **値だけ捨てて note は作る** |
+
+**mk-go は note を落とさない。** 理由は 3 つ。(1) `note.url` は表示用で、身元は
+`uri` のほうなので上の規則では **URL / ID 系** = 「収まらなければ値ごと捨てて親の
+行は作る」に当たる。(2) permalink の scheme が変なだけで**本文ごと失う**ほうが害が
+大きい。(3) `javascript:` を保存すると `note.url` を `href` に流すクライアントで
+XSS になりうるので、**捨てるのは upstream より安全側**。
+
+**scheme は case-insensitive に見る** (RFC 3986 上 scheme は case-insensitive。
+`internal/core/urlpreview` の `isHTTPScheme` と同じ方針)。upstream は
+case-sensitive なので、`HTTPS://` は mk-go だけが受ける。`http://` も mk-go は
+production かどうかに関わらず保存する。**どちらも「upstream が note ごと落とす値を
+mk-go は note ごと残す」方向**で、mk-go が余計に保存するのはこの 2 つだけ。
+
+inbound `Update(Note)` でも追従するが、**捨てられた値では上書きしない** — 読めない
+`url` が来ただけで、取り込み時に保存した正しい permalink を消さないため。
+
+**`url` が無い note では key ごと落ちる。** `NoteEntity.URL` は
+`json:"url,omitempty"` で、upstream も `url: note.url ?? undefined` なので同じ形。
+ローカル note では upstream も null なので (`MiNote.url` の列コメント「it will be
+null when the note is local」)、そちらは一致する。
 
 `entity/note.go` の `firstNonNil(n.URL, n.URI)` は **`name` 付き note の本文整形
-専用**で、pack される `url` field には効かない (`URL: n.URL` のまま)。取り込みの
-実装は別途 (#2726 のレビューで判明)。
+専用**で、pack される `url` field には効かない (`URL: n.URL` のまま)。**#2729 でも
+この整形は変わらない** — mk-go は `model.Note.Name` を**どこにも書かない**ので、
+`n.Name != nil && *n.Name != ""` の gate が真になるのは drop-in で Misskey TS が
+書いた行だけで、その行は TS が `url` も書いているので元から `url` を使っている。
+(`note.name` を保存しないこと自体が upstream との別の乖離。upstream は
+`ApNoteService` が `name: note.name` を渡す。)
 
 数え方と NUL の扱いは `internal/misc/colfit` に集約してある。以前は federation と
 instance に **7 つのヘルパーが散っていた** (federation の `fitsColumn` /

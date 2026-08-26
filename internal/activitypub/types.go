@@ -988,10 +988,19 @@ type Note struct {
 	InReplyTo    APLenientID        `json:"inReplyTo,omitempty"`
 	// CW は summary からしか作らない。読めずに空へ倒すと **CW 無しのノートが
 	// できる** ので、JSON-LD の展開形も剥がして拾う (#2662)。
-	Summary        APLenientString `json:"summary,omitempty"`
-	Sensitive      APTruthyBool    `json:"sensitive,omitempty"`
-	Tag            APObjectList    `json:"tag,omitempty"`
-	Attachment     APObjectList    `json:"attachment,omitempty"`
+	Summary    APLenientString `json:"summary,omitempty"`
+	Sensitive  APTruthyBool    `json:"sensitive,omitempty"`
+	Tag        APObjectList    `json:"tag,omitempty"`
+	Attachment APObjectList    `json:"attachment,omitempty"`
+	// URL は HTML 版の permalink。**`id` とは別物**で、Mastodon 系では
+	// `id` が AP object、`url` が Web ページを指す。upstream の
+	// `getOneApHrefNullable` は「配列なら先頭 → string ならそれ / object なら
+	// `href`」で 1 件に畳むので、生のまま受けて federation 側で読む (#2729)。
+	// **`id` は見ない** — `getApHrefNullable` は `href` だけを読む。
+	//
+	// upstream の `renderNote` は note に `url` を出さないので、outbound には
+	// 影響しない (omitempty で消える)。
+	URL            json.RawMessage `json:"url,omitempty"`
 	MisskeyContent APLenientString `json:"_misskey_content,omitempty"`
 	MisskeyQuote   APLenientID     `json:"_misskey_quote,omitempty"`
 	QuoteURL       APLenientID     `json:"quoteUrl,omitempty"`

@@ -2528,6 +2528,11 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		URI:        &noteURI,
 		Visibility: deriveVisibility(apNote.To, apNote.CC),
 	}
+	// HTML 版の permalink。Mastodon 系では `id` (AP object) と `url` (Web ページ)
+	// が別なので、保存しないとクライアントが原文ページへ辿れない (#2729)。
+	if u := remoteNoteURL(apNote.URL); u != "" {
+		note.URL = &u
+	}
 	// #2106 N14: silenced instance (meta.silencedHosts) の remote public note は home に
 	// 降格する (upstream NoteCreateService.ts:491-495 の inSilencedInstance 降格)。public
 	// timeline / 連合 broadcast から外す admin moderation 機能。silencedChecker 未配線時は
@@ -3030,6 +3035,12 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 		empty := ""
 		fields["cw"] = &empty
 		existing.CW = &empty
+	}
+	// permalink も追従する (#2729)。**捨てられた値では上書きしない** — 読めない
+	// `url` が来ただけで、取り込み時に保存した正しい permalink を消してしまう。
+	if u := remoteNoteURL(apNote.URL); u != "" && (existing.URL == nil || *existing.URL != u) {
+		fields["url"] = &u
+		existing.URL = &u
 	}
 	// AP Note Tag配列からカスタム絵文字を抽出してDBにupsert
 	// 既存値と比較して変化があった場合のみfieldsに含める
@@ -3989,6 +4000,57 @@ func remoteURIValue(actorURI, column, raw string) string {
 		return ""
 	}
 	return raw
+}
+
+// noteURLMaxRunes は `note.url` の varchar(512) (migration/000001_initial.up.sql)。
+const noteURLMaxRunes = 512
+
+// remoteNoteURL reads an AP object's `url` and returns the value to store in
+// `note.url`, or "" when it must be dropped.
+//
+// 読み方は upstream の `getOneApHrefNullable` と同じ — **配列なら先頭要素**、
+// string ならそれ、object なら `href`。**`id` は見ない** (`getApHrefNullable` は
+// `href` だけを読む)。
+//
+// **収まらない / scheme が http(s) でない値は捨てて、note は作る** (#2729)。
+// `note.url` は表示用の permalink で、身元は `uri` のほうなので #2723 の
+// 「URL / ID 系」の規則に当たる。**upstream は非 https なら note ごと reject する**
+// (`checkHttps`、production では `http://` も不可) ので mk-go のほうが寛容だが、
+// permalink の scheme が変なだけで本文ごと失うほうが害が大きい。`javascript:` の
+// ような値を保存すると `note.url` を `href` に流すクライアントで XSS になりうる
+// ので、**捨てるのは upstream より安全側**でもある。
+//
+// scheme は case-insensitive に見る (RFC 3986)。`internal/core/urlpreview` の
+// `isHTTPScheme` と同じ方針。
+func remoteNoteURL(raw json.RawMessage) string {
+	href := readOneAPHref(raw)
+	if href == "" {
+		return ""
+	}
+	lower := strings.ToLower(href)
+	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		return ""
+	}
+	if !fitsColumn(href, noteURLMaxRunes) {
+		return ""
+	}
+	return href
+}
+
+// readOneAPHref mirrors upstream's `getOneApHrefNullable`: 配列なら先頭要素を、
+// string ならそれ自身を、object なら `href` を返す。
+func readOneAPHref(raw json.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var arr []json.RawMessage
+	if json.Unmarshal(raw, &arr) == nil {
+		if len(arr) == 0 {
+			return ""
+		}
+		return readApHref(arr[0])
+	}
+	return readApHref(raw)
 }
 
 // inboxPtr returns nil for an empty inbox so the column stays NULL.
