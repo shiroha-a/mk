@@ -2988,7 +2988,10 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 		return existing, nil
 	}
 	// attribution: Update の actor は note 著者と一致必須。別 remote 著者の note URI を
-	// 指定した改ざん (text/cw/sensitive/mentions 上書き) を拒否する。inbox 層の
+	// 指定した改ざん (**上の GoDoc が挙げる列の上書き**。列の一覧をここにも書くと
+	// 片方だけ古くなるので繰り返さない — 実際 `url` を足すまで両方が
+	// `text/cw/sensitive/mentions` のまま陳腐化していた。`url` が入ったことで
+	// クライアントが開く permalink も差し替え対象になった) を拒否する。inbox 層の
 	// authorizeActor は signer==activity.actor と activity.id host の整合しか保証
 	// しないため、ここで対象 note の著者まで照合する (#1819、UpdateRemoteQuestion と対称)。
 	if actorURI != "" && r.userRepo != nil {
