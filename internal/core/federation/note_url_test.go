@@ -1,6 +1,8 @@
 package federation_test
 
 import (
+	"bytes"
+	"log/slog"
 	"strings"
 	"testing"
 
@@ -349,4 +351,33 @@ func TestNoteURL_JSONLDExpandedFormsArePathDependent(t *testing.T) {
 	got = ingestNoteURLByRawFetch(t, hrefWithURLValue)
 	require.NotNil(t, got.URL)
 	assert.Equal(t, "https://remote.example/@a/1", *got.URL)
+}
+
+// **`url` を持たない note でログを出さない** (#2729 のレビュー 18 周目)。
+//
+// `remoteNoteURL` は取り込む全 note で呼ばれる。Misskey どうしの連合では `url` は
+// 常に無いので、空文字の早期 return を落とすと**取り込み 1 件ごとに warn が出る**。
+// 保存される値は変わらない (空文字は scheme 判定でも落ちる) ため、この表明が無いと
+// 早期 return を消す変異がどのテストにも掛からない。
+func TestIngest_NoteWithoutURLDoesNotWarn(t *testing.T) {
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	p, _, _, noteRepo := newProcessor(t, aliceActor)
+	require.NoError(t, p.Process([]byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Note",
+			"id": "https://remote.example/users/alice/statuses/1",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "hello",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}
+	}`)))
+	require.Len(t, noteRepo.Notes, 1)
+	assert.NotContains(t, buf.String(), "dropping remote note url",
+		"url を持たない note で warn が出ている (remoteNoteURL の空文字 early return を確認)")
 }

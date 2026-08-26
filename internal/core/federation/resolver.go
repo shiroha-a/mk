@@ -4038,9 +4038,9 @@ const noteURLMaxRunes = 512
 //
 // **`javascript:` を保存しない点は upstream と同等**で、mk-go の優位ではない
 // (upstream は throw するので結果として保存されない)。**この検査を通した後でも
-// 受理する scheme は mk-go のほうが広い** (`HTTPS://` / production の `http://`)
-// ので parity には戻らない。この検査が担うのは「upstream がどの経路でも保存しない
-// 値を mk-go だけが保存する」のを防ぐところまで。
+// 受理する scheme は mk-go のほうが広い** — `HTTPS://` / `HTTP://` / production の
+// `http://` はどれも upstream が reject して mk-go は保存する。parity には戻らない。
+// **この検査が担うのは http(s) 以外の scheme だけ。**
 //
 // scheme は case-insensitive に見る (RFC 3986)。`internal/core/urlpreview` の
 // `isHTTPScheme` と同じ方針。
