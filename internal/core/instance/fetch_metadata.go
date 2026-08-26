@@ -53,18 +53,92 @@ type nodeinfoDiscovery struct {
 	} `json:"links"`
 }
 
-// nodeinfoDocument is the JSON shape of nodeinfo 2.0/2.1.
+// nodeinfoDocument holds the nodeinfo 2.0/2.1 fields mk-go stores.
+//
+// **struct へ直接 decode しない。** `{"software":{"name":123}}` のように 1 つでも
+// 型が違うと `json.Unmarshal` が error を返し、**他の値も 1 つも保存されない**
+// (`Fetch` が中断する)。upstream は `typeof ... === 'string'` で個別に見るので、
+// 型が違うフィールドだけ落として残りを保存する。値はリモートが自由に決められる
+// ので、こちらも 1 フィールドで全部を失わない形にする (#2726)。
 type nodeinfoDocument struct {
-	Software struct {
-		Name    string `json:"name"`
-		Version string `json:"version"`
-	} `json:"software"`
-	OpenRegistrations *bool `json:"openRegistrations"`
-	Metadata          struct {
-		NodeName        string `json:"nodeName"`
-		NodeDescription string `json:"nodeDescription"`
-		ThemeColor      string `json:"themeColor"`
-	} `json:"metadata"`
+	// SoftwareName は必ず入る。upstream は string でなければ '?' を入れる
+	// (`FetchInstanceMetadataService`)。case は `.toLowerCase()` で潰す —
+	// software block の判定は元から case-insensitive なので回避には使えないが、
+	// `federation/instances` が返す値が upstream と揃う。
+	SoftwareName      string
+	SoftwareVersion   string
+	OpenRegistrations *bool
+	NodeName          string
+	NodeDescription   string
+	ThemeColor        string
+}
+
+// parseNodeinfoDocument decodes a nodeinfo document leniently: fields whose JSON
+// type does not match are dropped instead of failing the whole document.
+func parseNodeinfoDocument(body []byte) (*nodeinfoDocument, error) {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return nil, err
+	}
+	doc := &nodeinfoDocument{SoftwareName: unknownSoftwareName}
+	if sw := jsonObject(top["software"]); sw != nil {
+		if name, ok := jsonString(sw["name"]); ok {
+			doc.SoftwareName = strings.ToLower(name)
+		}
+		doc.SoftwareVersion, _ = jsonString(sw["version"])
+	}
+	if v, ok := jsonBool(top["openRegistrations"]); ok {
+		doc.OpenRegistrations = &v
+	}
+	if meta := jsonObject(top["metadata"]); meta != nil {
+		doc.NodeName, _ = jsonString(meta["nodeName"])
+		doc.NodeDescription, _ = jsonString(meta["nodeDescription"])
+		doc.ThemeColor, _ = jsonString(meta["themeColor"])
+	}
+	return doc, nil
+}
+
+// unknownSoftwareName mirrors upstream's `'?'` placeholder for a nodeinfo whose
+// `software.name` is missing or not a string.
+const unknownSoftwareName = "?"
+
+// jsonObject decodes raw as a JSON object, or returns nil when it is absent or
+// not an object.
+func jsonObject(raw json.RawMessage) map[string]json.RawMessage {
+	if len(raw) == 0 {
+		return nil
+	}
+	var m map[string]json.RawMessage
+	if json.Unmarshal(raw, &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// jsonString decodes raw as a JSON string. ok is false when it is absent or of
+// another type.
+func jsonString(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var s string
+	if json.Unmarshal(raw, &s) != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// jsonBool decodes raw as a JSON boolean. ok is false when it is absent or of
+// another type.
+func jsonBool(raw json.RawMessage) (bool, bool) {
+	if len(raw) == 0 {
+		return false, false
+	}
+	var b bool
+	if json.Unmarshal(raw, &b) != nil {
+		return false, false
+	}
+	return b, true
 }
 
 // preferredRels lists the nodeinfo schema versions in order of preference.
@@ -110,22 +184,26 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// text 列は切って NUL を落とす。**URL 列は NUL を見ない** — `url.Parse` が制御
 	// 文字を弾き、唯一通る fragment の NUL も `url.URL.String()` が `%00` に escape
 	// するので、生の NUL はここまで来ない (fetchIcons。実測で確認)。
-	if v := clampInstanceText(doc.Software.Name, maxInstanceSoftwareNameLen); v != "" {
+	// `software.name` が string でなければ upstream と同じ '?' が入っている
+	// (parseNodeinfoDocument)。**空になった値は書かない**のは #2723 のまま —
+	// upstream は `""` をそのまま書くが、`"\u0000"` のような値では update ごと
+	// 落として**何も書かない**ので、既存値を残すほうが upstream の結末に近い。
+	if v := clampInstanceText(doc.SoftwareName, maxInstanceSoftwareNameLen); v != "" {
 		fields["softwareName"] = &v
 	}
-	if v := clampInstanceText(doc.Software.Version, maxInstanceSoftwareVersionLen); v != "" {
+	if v := clampInstanceText(doc.SoftwareVersion, maxInstanceSoftwareVersionLen); v != "" {
 		fields["softwareVersion"] = &v
 	}
 	if doc.OpenRegistrations != nil {
 		fields["openRegistrations"] = doc.OpenRegistrations
 	}
-	if v := clampInstanceText(doc.Metadata.NodeName, maxInstanceNameLen); v != "" {
+	if v := clampInstanceText(doc.NodeName, maxInstanceNameLen); v != "" {
 		fields["name"] = &v
 	}
-	if v := clampInstanceText(doc.Metadata.NodeDescription, maxInstanceDescriptionLen); v != "" {
+	if v := clampInstanceText(doc.NodeDescription, maxInstanceDescriptionLen); v != "" {
 		fields["description"] = &v
 	}
-	if v := clampInstanceText(doc.Metadata.ThemeColor, maxInstanceThemeColorLen); v != "" {
+	if v := clampInstanceText(doc.ThemeColor, maxInstanceThemeColorLen); v != "" {
 		fields["themeColor"] = &v
 	}
 
@@ -316,11 +394,7 @@ func (s *FetchMetadataService) fetchDocument(href string) (*nodeinfoDocument, er
 	if err != nil {
 		return nil, err
 	}
-	var doc nodeinfoDocument
-	if err := json.Unmarshal(body, &doc); err != nil {
-		return nil, err
-	}
-	return &doc, nil
+	return parseNodeinfoDocument(body)
 }
 
 // selectNodeinfoHref picks the highest-priority schema URL from the discovery
