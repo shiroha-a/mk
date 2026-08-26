@@ -583,11 +583,16 @@ note の応答から `url` が丸ごと落ちていた。
 | varchar(512) を超える | 検証なし (22001 で note ごと失う) | **値だけ捨てて note は作る** |
 | NUL 入り | 検証なし (22021 で note ごと失う) | **値だけ捨てて note は作る** |
 
-**mk-go は note を落とさない。** 理由は 3 つ。(1) `note.url` は表示用で、身元は
+**mk-go は note を落とさない。** 理由は 2 つ。(1) `note.url` は表示用で、身元は
 `uri` のほうなので上の規則では **URL / ID 系** = 「収まらなければ値ごと捨てて親の
 行は作る」に当たる。(2) permalink の scheme が変なだけで**本文ごと失う**ほうが害が
-大きい。(3) `javascript:` を保存すると `note.url` を `href` に流すクライアントで
-XSS になりうるので、**捨てるのは upstream より安全側**。
+大きい。
+
+**`javascript:` を保存しない点は upstream と同等**で、mk-go の優位ではない。
+upstream は `checkHttps` が false なら note ごと throw するので、結果として
+`note.url` に入る値は `https://…` (と dev の `http://…`) か空文字だけになる。
+**受理する scheme はむしろ mk-go のほうが広い** (上の表の 2 行)。捨てる判断が
+安全側なのは「値を保存する」案に対してであって、upstream に対してではない。
 
 **scheme は case-insensitive に見る** (RFC 3986 上 scheme は case-insensitive。
 `internal/core/urlpreview` の `isHTTPScheme` と同じ方針)。upstream は

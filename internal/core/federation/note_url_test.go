@@ -86,8 +86,8 @@ func TestIngest_NoteURLShapes(t *testing.T) {
 
 // **http(s) 以外は値だけ捨てて note は作る** (#2729)。upstream は note ごと
 // reject するが、permalink の scheme が変なだけで本文ごと失うほうが害が大きい。
-// `javascript:` を保存すると `note.url` を href に流すクライアントで XSS に
-// なりうるので、捨てるのは upstream より安全側でもある。
+// **`javascript:` を保存しない点は upstream と同等** — upstream は throw するので
+// 結果として保存されない。この検査が無いと mk-go だけが保存してしまうので要る。
 func TestIngest_DropsNonHTTPNoteURL(t *testing.T) {
 	for _, raw := range []string{
 		`"javascript:alert(1)"`,

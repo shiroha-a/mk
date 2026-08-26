@@ -2965,8 +2965,9 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 //     emojis / tags / fileIds / attachedFileTypes を更新する。**`sensitive` は
 //     note の列としては書かない**が、cw の決定と**添付の NSFW 判定**に読む
 //     (`upsertAttachments` が**新規に作る** `drive_file` の `isSensitive` /
-//     `maybeSensitive` に書く。既知 URL の添付は URI で dedup して早期 return
-//     するので、**保存済みの添付の NSFW は Update では変わらない**)
+//     `maybeSensitive` に書く。既知 URL の添付は URI で dedup して `continue`
+//     する (関数から抜けるのではなく次の添付へ進む) ので、**保存済みの添付の
+//     NSFW は Update では変わらない**)
 //   - **書き込みは note の列だけではない。** 同じ呼び出しで `drive_file` /
 //     `emoji` / hashtag の行が作られ、**`emoji` と hashtag は既存行も書き換わる**
 //     — `upsertEmojis` は同名 + 同 host の行の `originalUrl` / `publicUrl` /
@@ -4033,9 +4034,11 @@ const noteURLMaxRunes = 512
 // `note.url` は表示用の permalink で、身元は `uri` のほうなので #2723 の
 // 「URL / ID 系」の規則に当たる。**upstream は非 https なら note ごと reject する**
 // (`checkHttps`、production では `http://` も不可) ので mk-go のほうが寛容だが、
-// permalink の scheme が変なだけで本文ごと失うほうが害が大きい。`javascript:` の
-// ような値を保存すると `note.url` を `href` に流すクライアントで XSS になりうる
-// ので、**捨てるのは upstream より安全側**でもある。
+// permalink の scheme が変なだけで本文ごと失うほうが害が大きい。
+//
+// **`javascript:` を保存しない点は upstream と同等**で、mk-go の優位ではない
+// (upstream は throw するので結果として保存されない)。受理する scheme はむしろ
+// mk-go のほうが広いので、この検査はその分を打ち消して parity に戻しているだけ。
 //
 // scheme は case-insensitive に見る (RFC 3986)。`internal/core/urlpreview` の
 // `isHTTPScheme` と同じ方針。
