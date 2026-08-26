@@ -565,8 +565,8 @@ note の応答から `url` が丸ごと落ちていた。
 
 読み方は upstream の `getOneApHrefNullable` と同じ — **配列なら先頭要素**、string
 ならそれ、object なら `href`。**`id` は見ない** (`getApHrefNullable` は `href` だけ
-を読む)。ただし JSON-LD の展開形 `{"@id": ...}` は inbox 経路だと手前で string に
-潰れるので別扱いになる (後述)。
+を読む)。ただし **単一キーの** `{"@id": ...}` は inbox 経路だと手前で string に
+潰れるので別扱いになる (2 キーあると潰れない。後述)。
 
 **受理する値の集合が upstream と違う。** upstream の判定は
 `checkHttps` = 生文字列の `startsWith('https://')`、または `startsWith('http://')`

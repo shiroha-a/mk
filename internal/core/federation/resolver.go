@@ -2961,7 +2961,9 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 //   - 見つかったが著者がローカルなら何もしない (ローカルノートは変更不可)
 //   - Update activity の actor (actorURI) が note 著者と一致しなければ無視
 //     (別 remote 著者の note URI を狙った改ざんを拒否、UpdateRemoteQuestion と対称、#1819)
-//   - 著者がリモートで actor が一致すれば text/cw/sensitive/mentions を更新
+//   - 著者がリモートで actor が一致すれば text / mentions / cw / url / emojis /
+//     tags / fileIds / attachedFileTypes を更新 (`sensitive` は cw を決めるのに
+//     読むだけで、列としては書かない)
 func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
