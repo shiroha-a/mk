@@ -62,10 +62,11 @@ type nodeinfoDiscovery struct {
 // 型が違うフィールドだけ落として残りを保存する。値はリモートが自由に決められる
 // ので、こちらも 1 フィールドで全部を失わない形にする (#2726)。
 type nodeinfoDocument struct {
-	// SoftwareName は必ず入る。upstream は string でなければ '?' を入れる
-	// (`FetchInstanceMetadataService`)。case は `.toLowerCase()` で潰す —
-	// software block の判定は元から case-insensitive なので回避には使えないが、
-	// `federation/instances` が返す値が upstream と揃う。
+	// SoftwareName は document が object なら必ず入る。upstream は string で
+	// なければ '?' を入れる (`FetchInstanceMetadataService`)。case は
+	// `.toLowerCase()` で潰す — software block の判定は元から case-insensitive
+	// なので回避には使えないが、`federation/instances` が返す値が upstream と
+	// 揃う。**JSON の `null` は object ではない**ので空のまま (下記)。
 	SoftwareName      string
 	SoftwareVersion   string
 	OpenRegistrations *bool
@@ -80,6 +81,14 @@ func parseNodeinfoDocument(body []byte) (*nodeinfoDocument, error) {
 	var top map[string]json.RawMessage
 	if err := json.Unmarshal(body, &top); err != nil {
 		return nil, err
+	}
+	// **`null` の body で `'?'` を書かない。** `json.Unmarshal("null", &map)` は
+	// error にならず nil map を返す。upstream は `if (info)` で囲っているので
+	// nodeinfo が null なら software 系の列に一切触れない。ここで placeholder を
+	// 入れると、**壊れた nodeinfo を返す相手の softwareName を毎回 `?` で
+	// 上書きする**。
+	if top == nil {
+		return &nodeinfoDocument{}, nil
 	}
 	doc := &nodeinfoDocument{SoftwareName: unknownSoftwareName}
 	if sw := jsonObject(top["software"]); sw != nil {

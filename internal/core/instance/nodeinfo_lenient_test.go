@@ -88,3 +88,24 @@ func TestFetch_MalformedJSONStillFails(t *testing.T) {
 	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(discoveryBody), []byte(`{"software":`)}}
 	assert.Error(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
 }
+
+// JSON の `null` は object ではない。upstream は `if (info)` で囲っているので
+// nodeinfo が null なら software 系の列に一切触れない。`'?'` を書くと、壊れた
+// nodeinfo を返す相手の softwareName を毎回上書きしてしまう。
+func TestFetch_NullDocumentDoesNotOverwriteSoftwareName(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	existing := "misskey"
+	repo.Instances["remote.example"] = &model.Instance{
+		ID: "i1", Host: "remote.example", SoftwareName: &existing,
+	}
+	fetcher := &scriptedFetcher{bodies: [][]byte{[]byte(discoveryBody), []byte(`null`)}}
+	require.NoError(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.SoftwareName)
+	assert.Equal(t, "misskey", *got.SoftwareName)
+	// 一方、`{}` は object なので upstream と同じく '?' が入る。
+	fetcher2 := &scriptedFetcher{bodies: [][]byte{[]byte(discoveryBody), []byte(`{}`)}}
+	require.NoError(t, instance.NewFetchMetadataService(repo, fetcher2).Fetch("remote.example"))
+	assert.Equal(t, "?", *repo.Instances["remote.example"].SoftwareName)
+}
