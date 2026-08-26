@@ -509,6 +509,12 @@ func apFirstRef(data []byte, key string) string {
 	// リモートが 1 トークン置くだけで取り込みを止められた (#2730 で nodeinfo に
 	// 入れたのと同じ対処)。
 	//
+	// **救われるのは fetch 経路だけ** (`fetchActor` / 返信・引用・Announce target の
+	// `ResolveNote` / `featured`)。inbox 経路は手前の `jsonld.Normalize` が素の
+	// `any` へ decode するので、同じ 1 トークンで activity ごと
+	// `invalid activity json` になる (`processor.go` の `Process` 入口)。
+	// **この class 自体は閉じていない。**
+	//
 	// **`inbox` はこの型を通らない** (`Person.Inbox` は string 決め打ち)。
 	// object 形式の `inbox` は **actor ごと落ちる** — `Person` には `Note` の
 	// ような catch-all `UnmarshalJSON` が無く、`fetchActor` が unmarshal の
