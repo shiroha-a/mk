@@ -49,8 +49,9 @@ func TestIngest_StoresNoteURL(t *testing.T) {
 }
 
 // 読み方は upstream の `getOneApHrefNullable` と同じ — 配列なら先頭、object なら
-// `href`。**`APLenientHref` は `id` を見ない** (JSON-LD の `{"@id": ...}` は
-// inbox 経路だと手前で string に潰れるので別扱い。`TestNoteURL_JSONLDExpandedFormsArePathDependent`)。
+// `href`。**`APLenientHref` は `id` を見ない** (**単一キーの** `{"@id": ...}` は
+// inbox 経路だと手前で string に潰れるので別扱い。2 キーあると潰れない。
+// `TestNoteURL_JSONLDExpandedFormsArePathDependent`)。
 func TestIngest_NoteURLShapes(t *testing.T) {
 	cases := map[string]struct {
 		in   string
@@ -289,10 +290,9 @@ func ingestNoteURLByRawFetch(t *testing.T, urlJSON string) *model.Note {
 // `Normalize` が先に剥がすため `APLenientHref` に読める形で届く。
 //
 // `Normalize` を通らない生 fetch 経路では剥がれないので、**同じ note でも入口に
-// よって `url` が入ったり入らなかったりする**。**向きは一方向ではない** —
-// `@value` の潰しは兄弟キーを見ないので、`href` を持つ object でも inbox 経路
-// だけが値を失う形がある。揃えるなら `Normalize` 側の話になるので、ここでは差を
-// 固定するに留める。
+// よって結末が変わる**。結末は 3 通りある — 余計に入る / 入るはずが入らない /
+// **別の URL に差し替わる** (`@value` の置き換えが兄弟キーを見ないため)。
+// 揃えるなら `Normalize` 側の話になるので、ここでは差を固定するに留める。
 func TestNoteURL_JSONLDExpandedFormsArePathDependent(t *testing.T) {
 	const atID = `{"@id":"https://remote.example/@a/1"}`
 
