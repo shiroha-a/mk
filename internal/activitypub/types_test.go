@@ -457,6 +457,10 @@ func TestAPLenientID_UnmarshalJSON(t *testing.T) {
 		{"number", `42`, ""},
 		{"null", `null`, ""},
 		{"nested array is not unwrapped twice", `[["https://e/n1"]]`, ""},
+		// 読まない兄弟 field のレンジ外数値で参照ごと落とさない (#2729)。
+		// `attributedTo` が空になると note ごと落ちる (host 照合が失敗する)。
+		{"huge number in sibling field", `{"id":"https://e/n1","x":1e999}`, "https://e/n1"},
+		{"huge number later in array", `["https://e/n1",1e999]`, "https://e/n1"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -480,6 +484,12 @@ func TestAPLenientHref_UnmarshalJSON(t *testing.T) {
 		{"object with id but no href", `{"id":"https://e/@a"}`, ""},
 		{"empty array", `[]`, ""},
 		{"null", `null`, ""},
+		// **読まない兄弟 field のレンジ外数値で参照ごと落とさない** (#2729)。
+		// 素の `any` へ decode すると数値が float64 になり、`1e999` で
+		// `cannot unmarshal number` になっていた。読むのは string だけなのに、
+		// リモートが 1 トークン置くだけで permalink も featured も空にできた。
+		{"huge number in sibling field", `{"href":"https://e/@a","x":1e999}`, "https://e/@a"},
+		{"huge number later in array", `["https://e/@a",1e999]`, "https://e/@a"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -503,8 +503,13 @@ func apFirstRef(data []byte, key string) string {
 	// **数値は `json.Number` で受ける。** 素の `any` へ decode すると数値が
 	// float64 になり、`{"href":"https://a","id":1e999}` のような**壊れていない
 	// JSON** で `cannot unmarshal number` になって参照ごと落ちる。読むのは
-	// string だけなのに、兄弟 field にレンジ外の数値が 1 つあるだけで inbox も
-	// featured も url も空になる (#2730 で nodeinfo に入れたのと同じ対処)。
+	// string だけなのに、兄弟 field にレンジ外の数値が 1 つあるだけで
+	// `attributedTo` も `featured` も `url` も空になる。**`attributedTo` が空に
+	// なると note ごと落ちる** (host 照合が失敗する) ので、リモートが 1 トークン
+	// 置くだけで取り込みを止められた (#2730 で nodeinfo に入れたのと同じ対処)。
+	//
+	// **`inbox` はこの型を通らない** (`Person.Inbox` は string 決め打ち) ので、
+	// object 形式の `inbox` はこの修正の前後とも空のまま。
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
 	var v any

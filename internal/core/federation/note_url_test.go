@@ -178,8 +178,42 @@ func TestUpdateRemoteNote_UpdatesURL(t *testing.T) {
 	// 実 DB では `fields` に無い列は UPDATE 文に出ず、**stream には新しい url が
 	// 出て DB は古いまま**になる (#2729 のレビュー 2 周目)。
 	require.Len(t, noteRepo.UpdateFieldsCalls, 1)
-	assert.Equal(t, "https://remote.example/@alice/new",
-		*noteRepo.UpdateFieldsCalls[0]["url"].(*string))
+	// **型アサーションを裸で書かない。** 載っていないときに panic すると
+	// testing がバイナリごと止まり、同じパッケージの残りが実行されない。
+	v, ok := noteRepo.UpdateFieldsCalls[0]["url"].(*string)
+	require.True(t, ok, "UPDATE に url が載っていない")
+	assert.Equal(t, "https://remote.example/@alice/new", *v)
+}
+
+// **同じ値では UPDATE に載せない** (#2729)。載せると、他に変化が無い
+// `Update(Note)` でも毎回 UPDATE を撃つことになる。
+func TestUpdateRemoteNote_SameURLIsNotWrittenAgain(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	uri := "https://remote.example/notes/n1"
+	host := "remote.example"
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", URI: &uri, UserID: "alice-id", UserHost: &host,
+	}
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+
+	body := []byte(`{"id":"https://remote.example/notes/n1","type":"Note",
+		"attributedTo":"https://remote.example/users/alice","content":"x",
+		"url":"https://remote.example/@alice/1"}`)
+	_, err := r.UpdateRemoteNote(body, "")
+	require.NoError(t, err)
+	require.Len(t, noteRepo.UpdateFieldsCalls, 1)
+	_, ok := noteRepo.UpdateFieldsCalls[0]["url"]
+	require.True(t, ok, "1 回目は載る")
+
+	// 2 回目は url が同じなので載らない。
+	_, err = r.UpdateRemoteNote(body, "")
+	require.NoError(t, err)
+	require.Len(t, noteRepo.UpdateFieldsCalls, 2)
+	_, ok = noteRepo.UpdateFieldsCalls[1]["url"]
+	assert.False(t, ok, "同じ値では UPDATE に載せない")
 }
 
 // **捨てられた値では上書きしない。** 読めない `url` が来ただけで、取り込み時に
