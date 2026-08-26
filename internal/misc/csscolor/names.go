@@ -1,5 +1,5 @@
 // Code generated from tinycolor2 (packages/backend/node_modules/tinycolor2).
-// DO NOT EDIT by hand: 再生成は docs/divergence.md の themeColor の項を見ること。
+// DO NOT EDIT by hand: 再生成の手順は csscolor.go の package コメント。
 
 package csscolor
 

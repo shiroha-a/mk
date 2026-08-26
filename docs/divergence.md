@@ -493,7 +493,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | リモート actor の `vcard:Address` の長さ | truncate せずそのまま保存 | **128 文字 (rune) で切る**。`user_profile.location` は varchar(128) で、超過値を渡すと insert / update ごと失敗し、同じ書き込みに乗っている `description` まで巻き添えになる (create 経路では profile 行が 1 行も作られず、以後の refresh も同じ失敗を繰り返す)。description の 2048 文字 truncate と同じ扱い (#2661) |
 | リモート actor の profile `fields` の件数 | `analyzeAttachments` に上限なし | **16 件で打ち切る**。ローカルの `i/update` が `maxItems: 16` なので揃える。上限が無いと任意件数を送り込める (#2661) |
 | リモート actor の `vcard:Address` / profile `fields` の空白 | trim も空排除もせず保存 | **trim して空なら NULL / entry ごと落とす**。ローカルの `i/update` と同形の正規化 (#2661) |
-| リモート actor の profile 由来文字列に含まれる NUL | **未処理** (upstream も同じ理由で書き込みが失敗する) | **除去する**。PostgreSQL の text は NUL を受け付けず (SQLSTATE 22021 `invalid byte sequence for encoding "UTF8": 0x00`)、jsonb も拒否する (22P05)。**SQLSTATE は protocol mode で変わる** — 本番の `internal/db` は pgx の extended protocol なので 22021、`internal/testutil` は `PreferSimpleProtocol: true` なので同じ入力が 08P01 (`invalid message format`) になる。運用ログを grep するときは 22021 の方。同じ書き込みに乗っている他の列まで巻き添えになり、create 経路では `user_profile` 行が 1 行も作られない (以後の refresh も同じ失敗を繰り返す)。対象は `vcard:Address` / profile `fields` の name・value / `description` (`_misskey_summary` は `mfm.FromHTML` を通らない)。`user.name` も同様に除去する。`user.avatarUrl` / `user.bannerUrl` は**除去せず値ごと捨てる** (NUL を抜いた URL は別物なので取りに行っても無駄)。`user.tags` / `note.tags` は**正規化後に NUL を含む tag を落とす** (varchar(128)[] は NUL を受け付けない)。`user.emojis` は未処理。**長さ超過**なら `emoji.name varchar(128)` への insert が落ちて `upsertEmojis` が `continue` し 1 件だけ除外されるが、**NUL の場合は先に batch SELECT (`FindManyByNamesAndHost`) が 22021 で落ちて `return` する**ので、その actor / Note の絵文字が全滅する (actor 自体は作られる) (#2662)。`preferredUsername` は NUL を含む時点で不正なので除去ではなく actor ごと reject する (#2662) (#2661) |
+| リモート actor の profile 由来文字列に含まれる NUL | **未処理** (upstream も同じ理由で書き込みが失敗する) | **除去する**。PostgreSQL の text は NUL を受け付けず (SQLSTATE 22021 `invalid byte sequence for encoding "UTF8": 0x00`)、jsonb も拒否する (22P05)。**SQLSTATE は protocol mode で変わる** — 本番の `internal/db` は pgx の extended protocol なので 22021、`internal/testutil` は `PreferSimpleProtocol: true` なので同じ入力が 08P01 (`invalid message format`) になる。運用ログを grep するときは 22021 の方。同じ書き込みに乗っている他の列まで巻き添えになり、create 経路では `user_profile` 行が 1 行も作られない (以後の refresh も同じ失敗を繰り返す)。対象は `vcard:Address` / profile `fields` の name・value / `description` (`_misskey_summary` は `mfm.FromHTML` を通らない)。`user.name` も同様に除去する。`user.avatarUrl` / `user.bannerUrl` は**除去せず値ごと捨てる** (NUL を抜いた URL は別物なので取りに行っても無駄)。`user.tags` / `note.tags` は**正規化後に NUL を含む tag を落とす** (varchar(128)[] は NUL を受け付けない)。`user.emojis` / `note.emojis` は **#2726 で `upsertEmojis` が `emoji.name` を見るようにして塞いだ** — 判定は batch SELECT (`FindManyByNamesAndHost`) の**前**にあり、長すぎる / NUL 入りの名前はその tag だけ落ちる。それ以前は、長さ超過なら insert が落ちて 1 件除外で済むのに対し、**NUL の場合は batch SELECT が先に 22021 で落ちて `return` する**ので、その actor / Note の絵文字が全滅していた (actor 自体は作られる) (#2662)。`preferredUsername` は NUL を含む時点で不正なので除去ではなく actor ごと reject する (#2662) (#2661) |
 | リモート actor の `name` の長さ | `truncate(person.name, 128)` (`stringz.substring`) | **128 rune で切る**。切らないと `user.name` (varchar(128)) への書き込みが SQLSTATE 22001 で落ち、actor がまったく作られない。upstream は書記素クラスタ単位の `stringz` なので境界がずれうるが、PostgreSQL の varchar はコードポイントで数えるため rune 単位のほうが上限に忠実 (#2662) |
 | リモート Note の `cw` / `text` の長さ | truncate せずそのまま保存 | **512 rune で切る** (`note.cw` は varchar(512))。CW は**相手が自由に決められる値**で、長さの制限は送信側の実装次第 (upstream Misskey 自身は投稿時に 100 で弾くが、AP でそれを強制する仕組みは無い)。溢れると `noteRepo.Create` / Update 経路の `UpdateFields` ごと落ちて `ingestNoteWithCreated` が error を返す。生の DB error なので `isPermanentSkipError` に当たらず、トップレベル配送なら**どのハンドラでも inbox job が retry を使い切って dead になる** (既定 8 回。`defaultInboxJobMaxAttempts`、`internal/server/queue_factory.go`。Collection に包まれていれば `handleCollection` が握るので ack)。`text` は列が text 型なので長さは効かないが、NUL の除去は同じ経路で行う (#2723) |
 | リモート actor の `uri` / `host` の長さ | 検証なし | **収まらなければ actor ごと拒否する** (`uri` は varchar(512)、`host` は varchar(128))。身元そのものなので切ると別人になり、捨てると lookup の鍵が無くなる。upstream は `uri` に `person.id` をそのまま入れるので同じ 22001 で失敗しうる。**gate は create 経路にしかない** (`refreshActor` は既存行専用で `uri` / `host` を書かない)。**拒否は多くの場合、署名検証の時点で起きる** — worker は `verifyPayload` で署名者を `ResolveActor` するので、署名者本人が該当するならその inbox job はそこで ack される (ハンドラまで届かない)。署名者以外 (第三者著者の note、引用先、featured のピン先など) を解決して踏んだ場合の結末は呼び出し元次第で、多くは**その値だけ黙って落ちて activity は成功する**。いずれにせよ**その actor から activity が来るたびに 1 回 fetch する状態は続く** (行が作られない以上 `lastFetchedAt` を進める先が無い) (#2723) |
@@ -501,8 +501,14 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | リモート Note / Announce の `id` の長さ | 検証なし (`uri` に生値を入れる) | **収まらなければ document ごと拒否する** (`note.uri` は varchar(512))。切ると別の note を指す URI になり、**同じ activity の重複検出** (`FindByURI`) の鍵も壊れる (Undo(Announce) はこの URI を引かない — `ListRenotesOf` で announcer の renote を探す)。**拒否したあとの結末は呼び出し元で決まる**。ack して drop されるものも、inbox job が dead になるものも、その値だけ黙って落ちて activity 自体は成功するものもある。**一般化しないこと** — 一覧は `ingestNoteWithCreated` の gate のコメントに 1 箇所だけ置いてある (ここに再掲すると片側が古くなる。実際 #2723 では 5 周にわたってどこかがずれた)。gate の利得は原因が 22001 ではなく明示的な拒否として残ること (#2723) |
 | リモート actor の `alsoKnownAs` に含まれる NUL | 未処理 (upstream も同じ理由で書き込みが失敗する) | **要素ごと落とす** (`user.alsoKnownAs` は text 列なので長さは効かないが NUL は 22021)。1 要素混ざっただけで actor の INSERT / refresh の UPDATE がまるごと失われる。切らずに捨てるのは、切った URI が移行の認可 (`alsoKnownAsContains`) の一致判定に使えないため (#2723) |
 | リモート添付の `type` / `thumbnailUrl` / `blurhash` / `url` の長さ | `type` (sniff) / `thumbnailUrl` / `blurhash` はローカルで決まるので AP の申告値は入らない。**`url` / `uri` は違う** — `cacheRemoteFiles` off (既定) の isLink 経路では `image.url` を生で入れており、列も同じ varchar(1024) なので **upstream も同じ 22001 に晒される** | **列に合わせて扱いを分ける** (#2723)。`url` (varchar(1024) NOT NULL) は実体そのものなので**入らなければその添付を諦める**、`type` (128) は切ると別の MIME type になるので `application/octet-stream` に倒す、`thumbnailUrl` (512) / `blurhash` (128) は表示の補助なので値ごと捨てる。upstream は添付 1 件の失敗で Note ごと落とす (`ApNoteService`) ので、mk-go は元から安全側 |
-| リモートインスタンスの nodeinfo の text field | 長さは無検査。ただし値そのものは正規化する — `softwareName` は `.toLowerCase()` (string でなければ `'?'`)、`themeColor` は `tinycolor` で検証して `#rrggbb` に正規化 (不正なら `null`) | **各列の上限 (`softwareName` 64 / `softwareVersion` 64 / `name` 256 / `description` 4096 / `themeColor` 64) で切り、NUL を除去する**。mk-go は元から `iconUrl` / `faviconUrl` だけ長さを見ていたが、**同じ `fields` map に載る**これらが無検査だと 1 列溢れただけで UPDATE 全体が落ち、当のガードの目的が同じ関数の中で破られる。**値の正規化は upstream に揃えていない** — `softwareName` を lowercase せず、`themeColor` も色として検証しないので任意文字列が入る (`themeColor` は upstream だと正規化の結果として列を溢れることが構造的に無い)。software block の判定 (`MatchSuspendedSoftware`) は case-insensitive なので回避には使えないが、`federation/instances` が返す値は upstream と変わる (#2723) |
+| リモートインスタンスの nodeinfo の text field | 長さは無検査。ただし値そのものは正規化する — `softwareName` は `.toLowerCase()` (string でなければ `'?'`)、`themeColor` は `tinycolor` で検証して `#rrggbb` に正規化 (不正なら `null`) | **各列の上限 (`softwareName` 64 / `softwareVersion` 64 / `name` 256 / `description` 4096) で切り、NUL を除去する**。mk-go は元から `iconUrl` / `faviconUrl` だけ長さを見ていたが、**同じ `fields` map に載る**これらが無検査だと 1 列溢れただけで UPDATE 全体が落ち、当のガードの目的が同じ関数の中で破られる (#2723)。**値の正規化は #2726 で upstream に揃えた** — `softwareName` は lowercase + `'?'`、`themeColor` は tinycolor 互換の parser (`internal/misc/csscolor`) で検証して `#rrggbb` に正規化し、不正なら書かない。`themeColor` だけ clamp を通さないのは、正規化を通った値が必ず 7 文字で列 (varchar(64)) に収まるため。残る差は 1 つだけ: **切った結果が空になる値は書かない** (upstream は空文字を書くが、NUL だけの値では UPDATE ごと落として何も書かないので、既存値を残すほうが upstream の結末に近い) |
 | リモート添付の `name` の作り方 | `uploadFromUrl` が**実体を download** し、`pathname.split('/').pop()` (Content-Disposition があればそちら) を `validateFileName` に通し、不合格なら `untitled`。さらに `correctFilename` が**sniff した実型**の拡張子を補う | **置き場は upstream と同じにした** (#2723)。代替テキスト (AP の `name`) は `comment` にだけ入れ、`drive_file.name` は URL の basename から作る。差分は 4 つ。(1) mk-go はリモートメディアの**実体を保存しない** (5.5) ので **Content-Disposition を見ない** (寸法の復元で GET すること自体はある)。**Misskey 同士ではここでずれる** — upstream は自分が配信するファイルに `Content-Disposition: inline; filename=...` を付けるので、upstream 側は原ファイル名を採る。(2) **拡張子の補完をしない** (upstream が付けるのは sniff した実型で、相手の申告した `mediaType` ではないため)。(3) Go の `net/url` は WHATWG URL の正規化をしないので、`/a/%2e%2e` (upstream は畳んで `untitled`) と `/a\b.png` (upstream は `\` を区切り扱いにして `b.png`) がずれる。(4) upstream は `name === comment` のとき comment を落とすが mk-go は残す。Mastodon 系はいずれにも当たらないので一致する。`comment` の 512 は upstream と同じ値 (`DB_MAX_IMAGE_COMMENT_LENGTH`) だが、**数え方は違う** — upstream の `truncate` は `stringz.substring` = 書記素クラスタ単位なので、ZWJ 絵文字を含む alt text では 512 クラスタ = コードポイントでは 512 超になり upstream 側が列を溢れさせる。mk-go は rune 単位で切るので列に忠実 (`user.name` の 128 と同じ扱い)。**この変更より前に取り込んだ行は直らない** — 添付は URI で dedup するので `name` に代替テキストが入ったまま残る。**連合出力は元から無事** (renderer は upstream と同じく `Name: stringValue(f.Comment)` で comment を使う) |
+| リモート chat room の `id` / `name` / `summary` と message の `text` / `uri` | CherryPick 由来の拡張なので upstream には無い | **列で扱いを分ける** (#2726)。`chat_room.name` (256) / `description` (2048) / `chat_message.text` (4096) は本文なので切って NUL を落とす。`chat_room.id` (32) は PK かつ membership / invitation の FK なので切らず、**収まらなければ room として認識しない** (`extractChatRoomID` が空を返す)。`chat_message.uri` (512) は dedup の鍵なので**収まらなければ message ごと拒否する** — 捨てて行だけ作ると AP retry のたびに同じ message が増える。拒否はいずれも `ErrUnsupportedActivity` に落として retry させない (溢れたまま Create すると `%w` で包まれて retryable になり、その inbox job が retry を使い切って dead になっていた) |
+| リモート Question の `oneOf` / `anyOf` の `name` の長さ | 切らない。ただし poll を note と同じ transaction で入れるので、同じ入力では **note ごと落ちる** | **256 rune で切って note は残す** (`poll.choices` は varchar(256)[]、#2726)。あわせて `pollRepo.Create` の**エラー握り潰しをやめた** — 捨てると note が `hasPoll = true` のまま poll 行だけ無い状態が黙って残る。error を上へ返しても直らない (note は既に Create 済みで、retry は `FindByURI` の dedup hit で早期 return するため poll 作成へ再到達しない) ので、結末は warn に残すのが正しい。AP vote と `Update(Question)` の choice 照合も同じ正規化を通す (生値で引くと切った選択肢に当たらない) |
+| リモート actor の `publicKey.id` / `publicKeyPem` / `assertionMethod[].id` の長さ | 検証なし (列は mk-go と同じ `keyId` 256 / `keyPem` 4096) | **収まらなければその鍵を保存しない** (#2726)。行の身元なので切ると別の鍵を指す。`assertionMethod` の entry は他の不正 entry と同じく warn + skip (fail-soft、actor 自体は取り込む)。**in-memory cache は残す** — `PublicKeyForActor` の高速路で、再起動後は actor を引き直して同じ値が入るので永続化の有無で挙動は分かれない。消すと `refreshPublicKey` の backoff が効かず inbound 1 件につき outbound fetch が 1 回走る |
+| AP tag 由来の emoji の列 | `Promise.all` の 1 件失敗で **その note の emoji を全部落とす** (`extractEmojis(...).catch(() => [])`) | **1 件だけ落とす**。列ごとに扱いを分ける (#2726): `name` (128) は行の身元 (UNIQUE は name+host) でそのまま `note.emojis` / `user.emojis` (varchar(128)[]) にも載るので、収まらない tag は丸ごと落とす。icon URL (`originalUrl` / `publicUrl` 各 512 NOT NULL) は新規なら tag ごと落とし (空の行は壊れた画像になる。未解決の `:name:` がそのまま出るほうが読める)、**既存行では古い URL を残す**。`uri` (512) は値だけ捨てて行は作る。`license` (1024) は本文なので切って NUL を落とす (wrapper があって `freeText` が null のケースは「明示的に未設定」なので nil のまま) |
+| Like の reaction 文字列の長さ | `normalize` が `emojiRegex.exec()` の**先頭 1 つだけ**を採るので溢れない | **収まらなければ ❤ (FallbackReaction) に倒す** (`note_reaction.reaction` は varchar(260)、#2726)。mk-go は「全部が絵文字なら生値を保存」なので**絵文字 300 個の Like** が gate を通って 22001 で落ちていた (Like 配送が retry を使い切って dead)。切ると grapheme が壊れるうえ別の reaction になるので倒す。**複数絵文字の reaction を丸ごと保存する点は元から upstream と違う** (upstream は先頭 1 つ) |
+| Flag (通報) の `content` の長さ | 切らない (列は mk-go と同じ varchar(2048)) | **2048 rune で切って NUL を落とす** (#2726)。`content + "\n" + URI 一覧` を無検査で入れており、溢れると Create が落ちて **通報そのものが届かない** (inbox job が retry を使い切る)。並び (content → uris) は upstream のまま — 切るのは末尾なので、URI を先に置くと本文が長いときに趣旨が消える |
 | リモートメディアのキャッシュ | `cacheRemoteFiles` が真なら実体を自 Drive へ保存 | **保存しない** (相手の削除の権利 / 違法コンテンツ保持のリスク回避)。詳細と弱点は §5.5 |
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
@@ -548,19 +554,37 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 **「dead になる」= その配送が失われるだけ**で、同じ note が返信の解決や Announce
 経由の `ResolveNote` で後から取り込まれることはある (原因が直っていれば)。
 
-**まだ規則を適用していない列がある。** chat 系 / `poll.choices` / 鍵の `keyId` /
-AP tag 由来の emoji の URL 列などが無検査のまま。**一覧は #2726** — #2723 の
-レビューで横断調査して見つかった分で、全量ではない (ここに再掲すると片側だけ
-古くなるので、列挙は issue に一本化する)。
+**#2726 で chat 系 / `poll.choices` / 鍵の `keyId` / AP tag 由来の emoji /
+`note_reaction.reaction` / `abuse_user_report.comment` にも適用した。**
+個々の判断は上の表に 1 行ずつある。
+
+**`note.url` は書いていない。** リモート note では `uri` だけを保存し、
+読み側 (`entity/note.go`) が `url ?? uri` で fallback する。列は varchar(512)
+だが、書く経路が無いので溢れない (#2726)。
+
+数え方と NUL の扱いは `internal/misc/colfit` に集約してある。以前は federation と
+instance に同型の実装が 4 つ散っており (`sanitizeRemoteText` / `truncateRunes` /
+`remoteDisplayName` / `clampInstanceText`)、rune / byte の数え方と NUL の扱いが
+分かれる土壌になっていた。各パッケージの名前付きヘルパーは「その列固有の判断と
+ログ」を持つので残し、中身だけ委譲している (#2726)。
 
 列長の出どころは `migration/` の SQL (多くは `000001_initial.up.sql`、後から足した
 テーブルは個別のファイル)。コード側の定数と独立に同じ数値を書くことになるので、
 **実 DB の列長を `information_schema` から読んで突き合わせる回帰テスト**を必ず置く
 (`TestNote_CWColumnLimitIs512` / `TestNote_URIColumnLimitIs512` /
 `TestUser_IdentityColumnLimits` / `TestDriveFile_ColumnLimits` /
-`TestInstance_NodeinfoColumnLimits`)。mock repository は列制約を持たないため、
-呼び出し側のテストだけでは「本当に入る長さか」を確かめられない
-(`internal/testutil` の `assertUserColumns` は `"user"` の主な列だけ本番に揃えてある)。
+`TestInstance_NodeinfoColumnLimits` / `TestChat_RemoteColumnLimits` /
+`TestUserPublickey_ColumnLimits` / `TestEmoji_RemoteColumnLimits` /
+`TestRemoteTextColumnLimits` / `TestRemoteArrayColumnLimits`)。mock repository は
+列制約を持たないため、呼び出し側のテストだけでは「本当に入る長さか」を確かめ
+られない (`internal/testutil` の `assertUserColumns` は `"user"` の主な列だけ
+本番に揃えてある)。
+
+**配列列 (`poll.choices` / `note.emojis` / `user.emojis`) は `information_schema`
+では読めない。** `columns.character_maximum_length` は NULL で、`element_types` も
+要素の typmod を持たない (実測)。`pg_catalog` の
+`format_type(atttypid, atttypmod)` だけが `character varying(256)[]` を返すので、
+そちらで固定する (`TestRemoteArrayColumnLimits`)。
 
 ## 8. 逆方向 divergence (mk-go 独自 error を upstream に合わせて廃止したもの)
 

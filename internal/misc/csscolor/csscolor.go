@@ -7,9 +7,18 @@
 //
 // **tinycolor の挙動をそのまま写している。** 受理する形も、範囲外の値の丸め方も
 // 独自判断を入れない。`rgb(300,0,0)` が `#ff0000` に、`rgb(-5,0,0)` が
-// `#000000` になるのは tinycolor がそう畳むからで、CSS の仕様ではない。
-// テストベクタは実物の tinycolor2 から生成して突き合わせてある
-// (csscolor_vectors_test.go)。
+// `#000000` に、`hsl(-60,...)` が (CSS の 300 度ではなく) `#ff0000` になるのは
+// tinycolor がそう畳むからで、CSS の仕様ではない。
+//
+// `names.go` と `vectors_test.go` は**実物の tinycolor2 から生成したもの**で、
+// 手で書き足さない。submodule の tinycolor2 を上げたときは
+// `internal/misc/csscolor/gen/gen.js` を実行して作り直す:
+//
+//	cd third_party/misskey/packages/backend/node_modules/tinycolor2
+//	node /path/to/mk/internal/misc/csscolor/gen/gen.js /path/to/mk
+//
+// 生成しなおしたら `go test ./internal/misc/csscolor/` を回す。差分が出たら
+// 本 package を tinycolor の新しい挙動に合わせること。
 package csscolor
 
 import (
