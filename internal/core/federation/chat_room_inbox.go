@@ -34,9 +34,25 @@ func (p *Processor) SetChatRoomReceiver(r ChatRoomReceiver) {
 // (`https://host/chat/rooms/{id}`). The id is alphanumeric (aidx/ULID).
 var chatRoomURIRe = regexp.MustCompile(`/chat/rooms/([a-zA-Z0-9]+)$`)
 
+// chatRoomIDMaxRunes は `chat_room.id` / `chat_room_membership.roomId` /
+// `chat_room_invitation.roomId` の varchar(32) (migration/000022_chat.up.sql)。
+//
+// **相手が自由に決められる値**で、正規表現は長さを縛らない。溢れると
+// `CreateRoom` が SQLSTATE 22001 で落ち、呼び出し側が `%w` で包んで返すため
+// **その inbox job が retry を使い切って dead になる** (#2726)。room id は行の
+// 身元 (PK かつ FK) なので切れない — 収まらなければ room として認識しない。
+const chatRoomIDMaxRunes = 32
+
+// extractChatRoomID returns the room id embedded in uri, or "" when uri is not
+// a chat room URI or the id cannot be stored.
+//
+// 正規表現が ASCII 英数字だけを通すので NUL は入らない。長さだけ見る。
 func extractChatRoomID(uri string) string {
 	m := chatRoomURIRe.FindStringSubmatch(uri)
 	if len(m) != 2 {
+		return ""
+	}
+	if !fitsColumn(m[1], chatRoomIDMaxRunes) {
 		return ""
 	}
 	return m[1]
@@ -118,6 +134,12 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 			slog.Warn("chat room invite: room id collides with an unrelated local room", "roomID", roomID)
 			return ErrUnsupportedActivity
 		}
+		// 列に収まらない room id も恒久的な条件なので retry させない (#2726)。
+		// parseGroupObject が先に落とすので通常はここまで来ない。
+		if errors.Is(err, corechat.ErrInvalidTarget) {
+			slog.Warn("chat room invite: room id cannot be stored", "actor", act.Actor)
+			return ErrUnsupportedActivity
+		}
 		return fmt.Errorf("chat room invite: ensure room: %w", err)
 	}
 	if err := p.chatRoomReceiver.CreateInvitationViaAP(roomID, invitee.ID); err != nil {
@@ -165,17 +187,26 @@ func (p *Processor) handleChatRoomReject(act, inner genericActivity) error {
 // chatRoomIDFromContext extracts the room id from a group chat message note's
 // `@context`. CherryPick group messages set the note-level `@context` to the
 // room URI (a JSON string); a normal note carries the standard JSON-LD context
-// (an array) which yields "". Returns "" for non-room messages.
-func chatRoomIDFromContext(raw json.RawMessage) string {
+// (an array), which is not a room.
+//
+// isRoom reports whether the `@context` is a chat room URI **at all**, and is
+// true even when roomID comes back empty because the id does not fit
+// `chat_room.id`. 呼び出し側はこれで「room だが受け取れない」と「そもそも
+// room ではない (= 1-on-1 DM)」を区別する。混ぜると、保存できない id の
+// group message が DM 経路へ落ちて別の理由で dead になる (#2726)。
+func chatRoomIDFromContext(raw json.RawMessage) (roomID string, isRoom bool) {
 	if len(raw) == 0 {
-		return ""
+		return "", false
 	}
 	var ctx string
 	if json.Unmarshal(raw, &ctx) != nil {
 		// 配列形式 (標準 JSON-LD context) は room ではない。
-		return ""
+		return "", false
 	}
-	return extractChatRoomID(ctx)
+	if !chatRoomURIRe.MatchString(ctx) {
+		return "", false
+	}
+	return extractChatRoomID(ctx), true
 }
 
 // handleChatRoomMessageCreate persists an inbound group chat message into a
@@ -183,6 +214,12 @@ func chatRoomIDFromContext(raw json.RawMessage) string {
 // be a member (enforced by the chat service): unknown room or non-member is a
 // permanent condition, so it is reported as ErrUnsupportedActivity (no retry).
 func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, content, roomID string) error {
+	// roomID が空 = `@context` は room URI だが id が `chat_room.id` に収まらない
+	// (chatRoomIDFromContext)。retry では解決しないので drop する (#2726)。
+	if roomID == "" {
+		slog.Warn("chat room message: room id does not fit its column", "sender", sender.ID)
+		return ErrUnsupportedActivity
+	}
 	// note id 欠落 / sender が local (loopback) は retry しても解決しない恒久的
 	// 条件なので、同関数内の room 不在・非メンバーと同じく ErrUnsupportedActivity
 	// (non-retry) に揃える。
@@ -198,7 +235,8 @@ func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, con
 		return ErrUnsupportedActivity
 	}
 	if err := p.chatRoomReceiver.CreateRoomMessageViaAP(noteURI, sender, roomID, content); err != nil {
-		// 未関与の room / 非メンバー送信は retry しても解決しないので drop。
+		// 未関与の room / 非メンバー送信、および列に収まらない uri は retry しても
+		// 解決しないので drop (後者は ErrInvalidTarget、#2726)。
 		if errors.Is(err, corechat.ErrNotFound) ||
 			errors.Is(err, corechat.ErrForbidden) ||
 			errors.Is(err, corechat.ErrInvalidTarget) {

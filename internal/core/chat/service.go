@@ -20,9 +20,24 @@ import (
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+)
+
+// AP 由来の値を書く chat 列の上限 (migration/000022_chat.up.sql)。溢れると
+// INSERT ごと落ちて、その配送が retry を使い切って dead になる (#2726)。
+//
+// 判断は docs/divergence.md の「リモート由来の文字列を列に入れるときの規則」
+// どおり: 本文 (name / description / text) は切る、身元 (id / uri) は
+// document ごと拒否する。
+const (
+	chatRoomIDMaxRunes          = 32
+	chatRoomNameMaxRunes        = 256
+	chatRoomDescriptionMaxRunes = 2048
+	chatMessageTextMaxRunes     = 4096
+	chatMessageURIMaxRunes      = 512
 )
 
 // Errors returned by Service.
@@ -522,14 +537,24 @@ func (s *Service) EnsureRoomViaAP(roomID, name, summary, ownerUserID string) err
 	if roomID == "" || ownerUserID == "" {
 		return ErrInvalidTarget
 	}
+	// room id は行の身元 (PK かつ membership / invitation の FK)。切ると別の room を
+	// 指すので、収まらなければ受け取らない。呼び出し側の extractChatRoomID が既に
+	// 同じ上限で落としているが、判断を書き込みの隣にも置く (#2726)。
+	if !colfit.Fits(roomID, chatRoomIDMaxRunes) {
+		return ErrInvalidTarget
+	}
 	if existing, err := s.repo.FindRoomByID(roomID); err == nil && existing != nil {
 		if existing.OwnerID != ownerUserID {
 			return fmt.Errorf("%w: room %s", ErrRoomOwnerMismatch, roomID)
 		}
 		return nil
 	}
+	// name / description は表示用の本文なので切って NUL を落とす。
 	return s.repo.CreateRoom(&model.ChatRoom{
-		ID: roomID, Name: name, Description: summary, OwnerID: ownerUserID,
+		ID:          roomID,
+		Name:        colfit.Text(name, chatRoomNameMaxRunes),
+		Description: colfit.Text(summary, chatRoomDescriptionMaxRunes),
+		OwnerID:     ownerUserID,
 	})
 }
 
@@ -669,6 +694,11 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 	if fromUser == nil || toUserID == "" {
 		return nil, ErrInvalidTarget
 	}
+	// uri は dedup の鍵なので、収まらなければ message ごと拒否する
+	// (CreateRoomMessageViaAP と同じ判断、#2726)。
+	if !colfit.Fits(uri, chatMessageURIMaxRunes) {
+		return nil, ErrInvalidTarget
+	}
 	// AP retry による重複メッセージ作成を防ぐ
 	if uri != "" {
 		if existing, err := s.repo.FindMessageByURI(uri); err == nil {
@@ -707,7 +737,8 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 		FromUserID: fromUser.ID,
 		ToUserID:   &toUserID,
 	}
-	if text != "" {
+	// text は本文なので切って NUL を落とす (CreateRoomMessageViaAP と同じ)。
+	if text = colfit.Text(text, chatMessageTextMaxRunes); text != "" {
 		msg.Text = &text
 	}
 	if uri != "" {
@@ -946,6 +977,12 @@ func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID,
 	if sender == nil || roomID == "" {
 		return ErrInvalidTarget
 	}
+	// uri は dedup の鍵。捨てて行だけ作ると **AP retry のたびに同じ message が
+	// 増える**ので、収まらなければ message ごと拒否する (note.uri と同じ判断)。
+	// ErrInvalidTarget は呼び出し側で non-retry に落ちる (#2726)。
+	if !colfit.Fits(uri, chatMessageURIMaxRunes) {
+		return ErrInvalidTarget
+	}
 	if uri != "" {
 		if existing, err := s.repo.FindMessageByURI(uri); err == nil && existing != nil {
 			return nil
@@ -967,7 +1004,9 @@ func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID,
 		FromUserID: sender.ID,
 		ToRoomID:   &roomID,
 	}
-	if text != "" {
+	// text は本文なので切って NUL を落とす。空になったら列を NULL のままにする
+	// (生値が空だったときと同じ形にする)。
+	if text = colfit.Text(text, chatMessageTextMaxRunes); text != "" {
 		msg.Text = &text
 	}
 	if uri != "" {

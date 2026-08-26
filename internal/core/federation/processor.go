@@ -1303,7 +1303,7 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 		if err := json.Unmarshal(act.Object, &probe); err == nil && probe.MisskeyTalk && probe.Type == "Note" {
 			// note の @context が room URI なら group chat message (#1209)。
 			// それ以外は従来の 1-on-1 DM。
-			if roomID := chatRoomIDFromContext(probe.Context); roomID != "" {
+			if roomID, isRoom := chatRoomIDFromContext(probe.Context); isRoom {
 				return p.handleChatRoomMessageCreate(actor, probe.ID, probe.Content, roomID)
 			}
 			return p.handleChatCreate(actor, probe.ID, probe.Content, probe.To)
@@ -2434,6 +2434,11 @@ func (p *Processor) handleChatCreate(sender *model.User, noteURI, content string
 		return fmt.Errorf("chat create: recipient %s is not local", to)
 	}
 	_, err = p.chatService.CreateMessageViaAP(context.Background(), noteURI, sender, recipient.ID, content)
+	// 列に収まらない uri は retry しても解決しないので drop する (#2726)。
+	if errors.Is(err, corechat.ErrInvalidTarget) {
+		slog.Warn("chat create: message cannot be stored", "actor", sender.ID)
+		return ErrUnsupportedActivity
+	}
 	return err
 }
 
@@ -2506,5 +2511,10 @@ func (p *Processor) handleChatMessage(act genericActivity) error {
 		return fmt.Errorf("chat message: recipient %s is not local", raw.To)
 	}
 	_, err = p.chatService.CreateMessageViaAP(context.Background(), act.ID, sender, recipient.ID, raw.Content)
+	// handleChatCreate と同じ理由で non-retry に落とす (#2726)。
+	if errors.Is(err, corechat.ErrInvalidTarget) {
+		slog.Warn("chat message: message cannot be stored", "actor", act.Actor)
+		return ErrUnsupportedActivity
+	}
 	return err
 }
