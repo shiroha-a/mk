@@ -17,8 +17,10 @@
 //	cd third_party/misskey/packages/backend/node_modules/tinycolor2
 //	node /path/to/mk/internal/misc/csscolor/gen/gen.js /path/to/mk
 //
-// 生成しなおしたら `go test ./internal/misc/csscolor/` を回す。差分が出たら
-// 本 package を tinycolor の新しい挙動に合わせること。
+// 生成しなおしたら **`gofmt -w internal/misc/csscolor/` を掛けてから**
+// `go test ./internal/misc/csscolor/` を回す (生成器は map の値を整列しないので、
+// そのまま commit すると CI の `lint` が落ちる)。差分が出たら本 package を
+// tinycolor の新しい挙動に合わせること。
 package csscolor
 
 import (
@@ -37,8 +39,17 @@ const (
 	cssInteger = `[-\+]?\d+%?`
 	cssUnit    = `(?:` + cssNumber + `)|(?:` + cssInteger + `)`
 
-	permissiveMatch3 = `[\s|\(]+(` + cssUnit + `)[,|\s]+(` + cssUnit + `)[,|\s]+(` + cssUnit + `)\s*\)?`
-	permissiveMatch4 = `[\s|\(]+(` + cssUnit + `)[,|\s]+(` + cssUnit + `)[,|\s]+(` + cssUnit + `)[,|\s]+(` + cssUnit + `)\s*\)?`
+	// **`\s` を素で書かない。** Go の regexp の `\s` は `[\t\n\f\r ]` だけで、
+	// `\v` も Unicode 空白も含まない。JS の `\s` (WhiteSpace + LineTerminator) は
+	// それらを含むので、素で書くと `rgb(1,\u30002,3)` (全角スペース区切り) を
+	// mk-go だけが reject する — upstream なら色が入るところが NULL になる
+	// (#2726 のレビュー 2 周目で実測)。jsSpace と同じ集合を明示する。
+	jsWS = `\t\n\v\f\r \x{00a0}\x{1680}\x{2000}-\x{200a}\x{2028}\x{2029}\x{202f}\x{205f}\x{3000}\x{feff}`
+
+	permissiveMatch3 = `[` + jsWS + `|\(]+(` + cssUnit + `)[,|` + jsWS + `]+(` + cssUnit +
+		`)[,|` + jsWS + `]+(` + cssUnit + `)[` + jsWS + `]*\)?`
+	permissiveMatch4 = `[` + jsWS + `|\(]+(` + cssUnit + `)[,|` + jsWS + `]+(` + cssUnit +
+		`)[,|` + jsWS + `]+(` + cssUnit + `)[,|` + jsWS + `]+(` + cssUnit + `)[` + jsWS + `]*\)?`
 )
 
 var (
@@ -71,7 +82,7 @@ func Normalize(s string) (hex string, ok bool) {
 // parse mirrors tinycolor's stringInputToObject + inputToRGB for string input.
 // 戻り値は 0-255 の実数 (丸めは呼び出し側)。
 func parse(s string) (r, g, b float64, ok bool) {
-	color := strings.ToLower(trimJSSpace(s))
+	color := jsToLower(trimJSSpace(s))
 	if hex, named := names[color]; named {
 		color = hex
 	} else if color == "transparent" {
@@ -133,7 +144,8 @@ func round255(v float64) int {
 }
 
 // jsSpace reports whether r is whitespace for JS `\s` (= WhiteSpace +
-// LineTerminator)。
+// LineTerminator)。**上の jsWS と同じ集合**でなければならない
+// (TestJSSpaceMatchesRegexpClass が突き合わせる)。
 //
 // **Go の `unicode.IsSpace` とは 2 つずれる。** JS は ZWNBSP (U+FEFF) を空白に
 // 数えるが Go は数えず、Go は NEL (U+0085) を数えるが JS は数えない。tinycolor は
@@ -151,6 +163,21 @@ func jsSpace(r rune) bool {
 // trimJSSpace trims JS `\s` from both ends.
 func trimJSSpace(s string) string {
 	return strings.TrimFunc(s, jsSpace)
+}
+
+// jsToLower lowercases the way JS `String.prototype.toLowerCase()` does.
+//
+// **Go の `strings.ToLower` は simple case mapping** なので、full mapping を
+// 使う JS と結果が分かれる符号位置がある。全 Unicode を突き合わせた実測では
+// **ASCII に落ちる差は U+0130 (İ) だけ** — Go は `"i"`、JS は `"i" + U+0307`。
+// この 1 文字のせいで `"İvory"` を mk-go だけが色名として受理していた
+// (upstream は不正扱いで NULL を保存する)。残りの差 (U+A7CB など) は Unicode
+// 版差で、色名にも hex にも当たらない (#2726 のレビュー 2 周目で実測)。
+func jsToLower(s string) string {
+	if strings.ContainsRune(s, 0x0130) {
+		s = strings.ReplaceAll(s, "\u0130", "i\u0307")
+	}
+	return strings.ToLower(s)
 }
 
 // parseFloatJS mirrors JS parseFloat: 先頭から読める分だけ読む ("50%" → 50)。

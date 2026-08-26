@@ -102,7 +102,14 @@ const nums = () => pick([
 	'100.0000001', '1.0000000000000002', '0.30000000000000004',
 ]);
 const fns = ['rgb', 'rgba', 'hsl', 'hsla', 'hsv', 'hsva'];
-const seps = [',', ', ', ' ', '  ,'];
+// **区切り位置の空白も corpus に入れる。** JS の `\s` と Go の regexp の `\s` は
+// 別物 (Go は `\v` も Unicode 空白も含まない) なので、区切りに Unicode 空白を
+// 置く入力が無いと matcher 側の実装差を素通しする (#2726 のレビュー 2 周目)。
+const seps = [
+	',', ', ', ' ', '  ,',
+	',\u00A0', '\u3000', ',\u3000', '\u000B', ',\u000B', '\u2028', ',\uFEFF',
+	'\u2009', ',\u202F', '\u1680', ',\u2029', '\u205F',
+];
 for (let i = 0; i < 400; i++) {
 	const f = pick(fns);
 	const n = f.endsWith('a') ? 4 : 3;
@@ -119,6 +126,10 @@ for (let i = 0; i < 120; i++) {
 	inputs.push(s);
 }
 for (let i = 0; i < 40; i++) inputs.push(pick(nameKeys));
+
+// `toLowerCase()` の差。Go の simple case mapping で ASCII に落ちるのは
+// U+0130 (İ) だけ (全 Unicode を突き合わせた実測)。
+for (const base of ['\u0130vory', '\u0130NDIANRED', 'RED\u0130', '\u0130']) inputs.push(base);
 
 // 空白の trim。**JS の `\s` と Go の `unicode.IsSpace` は 2 つずれる**
 // (U+FEFF は JS だけ、U+0085 は Go だけ) ので、両方を必ず corpus に入れる。
