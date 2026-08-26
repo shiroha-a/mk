@@ -125,7 +125,8 @@ func TestFetch_PrefersNewerSchemaOverNodeinfo10(t *testing.T) {
 }
 
 // object でない JSON は upstream と同じく `'?'` になる (#2730)。error にすると
-// infoUpdatedAt が書けず starvation の原因になる。
+// **upstream が `'?'` を書くところで mk-go だけが softwareName を記録できない**
+// (`infoUpdatedAt` 自体は失敗しても書くので starvation にはならない)。
 func TestFetch_NonObjectNodeinfoStoresPlaceholder(t *testing.T) {
 	for _, body := range []string{`[]`, `123`, `"x"`, `true`} {
 		t.Run(body, func(t *testing.T) {

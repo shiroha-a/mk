@@ -71,8 +71,9 @@ type nodeinfoDocument struct {
 	// `.toLowerCase()` で潰す — software block の判定は元から case-insensitive
 	// なので回避には使えないが、`federation/instances` が返す値が upstream に
 	// 近づく。**JSON の `null` は JS で falsy** なので空のまま (下記)。
-	// **「object ではないから」ではない** — `[]` / `123` も object ではないが、
-	// truthy なので `'?'` が入る。
+	// **「object ではないから」ではない** — `[]` / `123` は JSON の型としては
+	// array / number で object ではないが、truthy なので `'?'` が入る
+	// (JS の `typeof` では `[]` も object なので、そちらの語彙で読まないこと)。
 	//
 	// **「揃う」ではなく「近づく」。** Go の `strings.ToLower` は simple case
 	// mapping なので JS の `toLowerCase()` とはずれる。go1.26.6
@@ -103,8 +104,10 @@ type nodeinfoDocument struct {
 // **object でない body も error にしない。** upstream は `if (info)` の
 // **JS の truthiness** で分岐するので、`[]` / `123` / `"x"` / `true` は
 // 「document はあるが `software.name` が string でない」= `'?'` になる。
-// error にすると `Fetch` が `infoUpdatedAt` を書けず starvation の原因になる
-// (#2730)。falsy な `null` / `false` / `0` / `""` は upstream と同じく
+// error にすると **upstream が `'?'` を書くところで mk-go だけが softwareName を
+// 記録できない** (#2730)。**starvation にはならない** — `infoUpdatedAt` は
+// `Fetch` が失敗しても書くようになったので (下の `preferredRels` のコメントと
+// 同じ話)。falsy な `null` / `false` / `0` / `""` は upstream と同じく
 // 何も入れない (placeholder も書かない — 壊れた nodeinfo を返す相手の
 // softwareName を毎回 `?` で上書きしてしまう)。
 //

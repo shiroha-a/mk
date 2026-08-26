@@ -94,8 +94,9 @@ func TestFetch_MalformedJSONStillFails(t *testing.T) {
 // nodeinfo が null なら software 系の列に一切触れない。`'?'` を書くと、壊れた
 // nodeinfo を返す相手の softwareName を毎回上書きしてしまう。
 //
-// **「object ではないから」ではない** — `[]` / `123` も object ではないが、
-// truthy なので `'?'` が入る (`TestFetch_NonObjectNodeinfoStoresPlaceholder`)。
+// **「object ではないから」ではない** — `[]` / `123` は JSON の型としては
+// array / number で object ではないが、truthy なので `'?'` が入る
+// (`TestFetch_NonObjectNodeinfoStoresPlaceholder`)。
 func TestFetch_NullDocumentDoesNotOverwriteSoftwareName(t *testing.T) {
 	repo := testutil.NewMockInstanceRepository()
 	existing := "misskey"
@@ -108,7 +109,7 @@ func TestFetch_NullDocumentDoesNotOverwriteSoftwareName(t *testing.T) {
 	got := repo.Instances["remote.example"]
 	require.NotNil(t, got.SoftwareName)
 	assert.Equal(t, "misskey", *got.SoftwareName)
-	// 一方、`{}` は object なので upstream と同じく '?' が入る。
+	// 一方、`{}` は truthy なので upstream と同じく '?' が入る。
 	fetcher2 := &scriptedFetcher{bodies: [][]byte{[]byte(discoveryBody), []byte(`{}`)}}
 	require.NoError(t, instance.NewFetchMetadataService(repo, fetcher2).Fetch("remote.example"))
 	assert.Equal(t, "?", *repo.Instances["remote.example"].SoftwareName)
