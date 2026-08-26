@@ -2,6 +2,7 @@ package instance_test
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/core/instance"
@@ -228,4 +229,71 @@ func TestFetch_NullSoftwareNameStoresPlaceholder(t *testing.T) {
 	assert.Equal(t, "?", *got.SoftwareName)
 	require.NotNil(t, got.SoftwareVersion)
 	assert.Equal(t, "1.0", *got.SoftwareVersion)
+}
+
+// 決め打ちに落ちる経路は 3 つある (#2730)。**HTML が取れた場合も 2 つある** —
+// `<link rel="icon">` が無い場合と、あっても列に収まらない場合。どちらも
+// 「推測」なので既存値を壊してはいけない。
+func TestFetch_GuessedFaviconFromHTMLDoesNotOverwriteStoredOne(t *testing.T) {
+	stored := "https://remote.example/files/good-icon.png"
+	cases := map[string][]byte{
+		"link タグが無い": []byte(`<html><head><title>x</title></head></html>`),
+		"link が列に収まらない": []byte(`<html><head><link rel="icon" href="/` +
+			strings.Repeat("a", 300) + `.png"></head></html>`),
+	}
+	for name, htmlBody := range cases {
+		t.Run(name, func(t *testing.T) {
+			repo := testutil.NewMockInstanceRepository()
+			s := stored
+			repo.Instances["remote.example"] = &model.Instance{
+				ID: "i1", Host: "remote.example", FaviconURL: &s,
+			}
+			fetcher := &scriptedFetcher{
+				bodies:   [][]byte{[]byte(discoveryBody), []byte(documentBody)},
+				htmlBody: htmlBody,
+			}
+			require.NoError(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+			got := repo.Instances["remote.example"]
+			require.NotNil(t, got.FaviconURL)
+			assert.Equal(t, stored, *got.FaviconURL)
+		})
+	}
+}
+
+// **読まない field の数値で document 全体を失わない** (#2730)。
+//
+// 素の `any` へ decode すると数値が float64 になり、float64 の範囲を超える値で
+// `cannot unmarshal number` になる。`usage.users.total` は mk-go が読まない field
+// なのに、リモートが 1 トークン置くだけで softwareName も description も
+// 記録できなくなっていた。upstream の `JSON.parse` は `Infinity` にして通す。
+func TestFetch_HugeNumberInUnreadFieldDoesNotLoseDocument(t *testing.T) {
+	got := fetchNodeinfo(t, `{
+		"software": {"name": "misskey", "version": "2026.7.0"},
+		"usage": {"users": {"total": 1e400}},
+		"metadata": {"nodeName": "Remote"}
+	}`)
+	require.NotNil(t, got.SoftwareName)
+	assert.Equal(t, "misskey", *got.SoftwareName)
+	require.NotNil(t, got.Name)
+	assert.Equal(t, "Remote", *got.Name)
+}
+
+// 数値の truthiness も JS に揃える。`1e400` は `Infinity` なので truthy。
+func TestFetch_HugeNumberDocumentIsTruthy(t *testing.T) {
+	got := fetchNodeinfo(t, `1e400`)
+	require.NotNil(t, got.SoftwareName)
+	assert.Equal(t, "?", *got.SoftwareName)
+}
+
+// 値の後ろにゴミが続く body は error のまま (`res.json()` も throw する)。
+// `json.Decoder` は値を 1 つ読んだら止まるので、明示的に見ないと見逃す。
+func TestFetch_TrailingDataAfterDocumentFails(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
+	fetcher := &scriptedFetcher{bodies: [][]byte{
+		[]byte(discoveryBody), []byte(`{"software":{"name":"misskey"}} garbage`),
+	}}
+	require.Error(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+	assert.Nil(t, repo.Instances["remote.example"].SoftwareName)
+	assert.NotNil(t, repo.Instances["remote.example"].InfoUpdatedAt)
 }

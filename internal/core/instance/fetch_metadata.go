@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -103,10 +105,25 @@ type nodeinfoDocument struct {
 // softwareName を毎回 `?` で上書きしてしまう)。
 //
 // **壊れた JSON は error のまま。** upstream の `getJson` も throw する。
+//
+// **数値は `json.Number` で受ける。** 素の `any` へ decode すると数値が float64 に
+// なり、`{"usage":{"users":{"total":1e400}}}` のような**壊れていない JSON** で
+// `cannot unmarshal number into float64` になって document 全体を失う。読む値は
+// 1 つも数値ではないのに、リモートが 1 トークン置くだけで softwareName も
+// description も永久に記録できなくなる (upstream の `JSON.parse` は `Infinity` を
+// 返して通す、#2730)。
 func parseNodeinfoDocument(body []byte) (*nodeinfoDocument, error) {
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
 	var raw any
-	if err := json.Unmarshal(body, &raw); err != nil {
+	if err := dec.Decode(&raw); err != nil {
 		return nil, err
+	}
+	// `Decode` は値を 1 つ読んだら止まるので、`json.Unmarshal` と違って末尾の
+	// ゴミを見逃す。`res.json()` は throw するので合わせる。
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		return nil, errors.New("unexpected data after nodeinfo document")
 	}
 	if !jsTruthy(raw) {
 		return &nodeinfoDocument{}, nil
@@ -144,12 +161,20 @@ const unknownSoftwareName = "?"
 //
 // JSON から作れる falsy な値は `null` / `false` / `0` / `""` の 4 つだけ
 // (`[]` と `{}` は JS では truthy)。`-0` も falsy だが Go の `== 0` で拾える。
+//
+// 数値は `UseNumber` により `json.Number` で届く。float64 の範囲を超える値
+// (`1e400`) は `ParseFloat` が `±Inf` を返すので truthy になる — JS の
+// `JSON.parse` も `Infinity` にして truthy に扱う。
 func jsTruthy(v any) bool {
 	switch t := v.(type) {
 	case nil:
 		return false
 	case bool:
 		return t
+	case json.Number:
+		// err は範囲外 (= ±Inf) でのみ返る。値はそのまま使う。
+		f, _ := strconv.ParseFloat(t.String(), 64)
+		return f != 0
 	case float64:
 		return t != 0
 	case string:
@@ -217,6 +242,19 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// upstream も `fetchNodeinfo(...).catch(() => null)` で握って `infoUpdatedAt` を
 	// 必ず書く。**error 自体は最後に返す** — `instance_refresh.go` の warn を
 	// 残さないと、壊れた host が見えなくなる。
+	// icon の抽出は nodeinfo と**並行**に走らせる (upstream の
+	// `Promise.all([fetchNodeinfo, fetchDom, fetchManifest])` と同じ形)。
+	// **直列にすると応答を返さない host での待ち時間が 2 倍になる** — この経路は
+	// `RegisterFromHost` → `notifyInstance` から **actor 解決の中で同期に**呼ばれ、
+	// `/api/ap/show` のような HTTP リクエストにも乗る (outbound の timeout は 30s、
+	// `internal/server/router.go`)。#2730 で nodeinfo の成否に関わらず HTML も
+	// 取るようにしたので、直列のままだと最悪 30s → 60s になっていた。
+	icons := make(chan iconResult, 1)
+	go func() {
+		iconURL, faviconURL, guessed := s.fetchIcons(host)
+		icons <- iconResult{iconURL: iconURL, faviconURL: faviconURL, guessed: guessed}
+	}()
+
 	doc, nodeinfoErr := s.fetchNodeinfo(host)
 
 	now := s.clock()
@@ -279,7 +317,8 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// DB側 varchar(256) 制約に引っかかるとUPDATE全体が失敗してnodeinfoまで
 	// 失うため長さチェックを必ずかける (攻撃者制御の長いCDN URLを想定)。
 	// **切らずに捨てる** — 切った URL は別物なので取りに行っても無駄。
-	iconURL, faviconURL, faviconGuessed := s.fetchIcons(host)
+	ic := <-icons
+	iconURL, faviconURL, faviconGuessed := ic.iconURL, ic.faviconURL, ic.guessed
 	if fitsInstanceColumn(iconURL, maxInstanceURLLen) {
 		fields["iconUrl"] = &iconURL
 	}
@@ -298,6 +337,13 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	}
 	// 書き込みは済ませたうえで nodeinfo の失敗を返す (上のコメント参照)。
 	return nodeinfoErr
+}
+
+// iconResult carries fetchIcons' output back from the goroutine Fetch spawns.
+type iconResult struct {
+	iconURL    string
+	faviconURL string
+	guessed    bool
 }
 
 // instance の列の上限 (migration/000001_initial.up.sql)。溢れると UPDATE 全体が
