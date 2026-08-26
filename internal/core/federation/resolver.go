@@ -2530,7 +2530,7 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	}
 	// HTML 版の permalink。Mastodon 系では `id` (AP object) と `url` (Web ページ)
 	// が別なので、保存しないとクライアントが原文ページへ辿れない (#2729)。
-	if u := remoteNoteURL(apNote.URL.String()); u != "" {
+	if u := remoteNoteURL(noteURI, apNote.URL.String()); u != "" {
 		note.URL = &u
 	}
 	// #2106 N14: silenced instance (meta.silencedHosts) の remote public note は home に
@@ -3038,7 +3038,7 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	}
 	// permalink も追従する (#2729)。**捨てられた値では上書きしない** — 読めない
 	// `url` が来ただけで、取り込み時に保存した正しい permalink を消してしまう。
-	if u := remoteNoteURL(apNote.URL.String()); u != "" && (existing.URL == nil || *existing.URL != u) {
+	if u := remoteNoteURL(apNote.ID, apNote.URL.String()); u != "" && (existing.URL == nil || *existing.URL != u) {
 		fields["url"] = &u
 		existing.URL = &u
 	}
@@ -4022,15 +4022,24 @@ const noteURLMaxRunes = 512
 //
 // scheme は case-insensitive に見る (RFC 3986)。`internal/core/urlpreview` の
 // `isHTTPScheme` と同じ方針。
-func remoteNoteURL(href string) string {
+func remoteNoteURL(noteURI, href string) string {
 	if href == "" {
 		return ""
 	}
 	lower := strings.ToLower(href)
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
+		slog.Warn("federation: dropping remote note url with a non-http scheme",
+			"note", truncateRunes(noteURI, noteURLMaxRunes))
 		return ""
 	}
 	if !fitsColumn(href, noteURLMaxRunes) {
+		// `nul` を出す。`fitsColumn` は長さと NUL の両方を見るので、これが無いと
+		// NUL 入りの値を落としたときに `len` < `max` のログだけが残って読めない
+		// (`remoteMediaURL` は 2 つの判定に分けて別々のログを出している)。
+		slog.Warn("federation: dropping remote note url that does not fit its column",
+			"note", truncateRunes(noteURI, noteURLMaxRunes),
+			"len", len([]rune(href)), "max", noteURLMaxRunes,
+			"nul", strings.ContainsRune(href, 0))
 		return ""
 	}
 	return href

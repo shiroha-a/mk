@@ -1212,7 +1212,9 @@ type MockNoteRepository struct {
 	//
 	// 同じ理由で、**`UpdateFields` の switch に列を足すときは慎重に。** 足すと
 	// 「`fields` に載せた」と「呼び出し側が in-memory を書き換えた」を
-	// 区別できなくなり、片方だけを消す変異が両方のテストをすり抜ける。
+	// 区別できなくなる。実際 `case "url"` を足すと、呼び出し側の
+	// `existing.URL = &u` を消す変異がどのテストにも掛からなくなる
+	// (`fields["url"]` 側を消す変異はこの記録が捕まえるので落ちる)。
 	UpdateFieldsCalls []map[string]any
 }
 
