@@ -1760,6 +1760,19 @@ func (r *Resolver) cachePublicKey(userID, keyID, pem string) {
 	r.keys[userID] = publicKeyEntry{pem: pem, fetchedAt: r.clock()}
 	r.keysMu.Unlock()
 	if r.publickeyRepo != nil && keyID != "" {
+		// **keyId / keyPem は行の身元。切ると別の鍵を指す**ので、収まらなければ
+		// 行を作らない (#2726)。upsert に投げても 22001 / 22021 で落ちるだけで、
+		// 結末は同じだが原因が DB error として残る。
+		//
+		// **in-memory cache は残す。** 上で入れた値は `PublicKeyForActor` の
+		// 高速路で、再起動後は actor を引き直して同じ値が入る (= 永続化の有無で
+		// 挙動が分かれない)。ここで消すと `refreshPublicKey` の backoff が
+		// 効かず、inbound 1 件ごとに outbound fetch が走る。
+		if !fitsColumn(keyID, publicKeyKeyIDMaxRunes) || !fitsColumn(pem, publicKeyPEMMaxRunes) {
+			slog.Warn("federation: public key does not fit user_publickey; not persisted",
+				"userID", userID, "keyID", truncateRunes(keyID, publicKeyKeyIDMaxRunes))
+			return
+		}
 		if err := r.publickeyRepo.Upsert(&model.UserPublickey{
 			UserID: userID,
 			KeyID:  keyID,
@@ -1845,6 +1858,15 @@ func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams activitypu
 		if !sameDeliveryHost(am.ID, actorURI) {
 			slog.Warn("assertionMethod keyId host mismatch",
 				"userID", userID, "actorURI", actorURI, "keyID", am.ID)
+			continue
+		}
+		// keyId は `user_publickey_extra.keyId` (varchar(256)) の PK 構成要素。
+		// 切ると別の鍵を指すので、収まらない entry は他の不正 entry と同じく
+		// warn + skip する (fail-soft、actor 自体は取り込む、#2726)。
+		// keyPem は Ed25519 の固定長 PEM なので溢れない。
+		if !fitsColumn(am.ID, publicKeyKeyIDMaxRunes) {
+			slog.Warn("assertionMethod keyId does not fit its column",
+				"userID", userID, "actorURI", actorURI)
 			continue
 		}
 		pub, err := activitypub.DecodeEd25519Multikey(am.PublicKeyMultibase)
@@ -3859,6 +3881,14 @@ const (
 const (
 	userURIMaxRunes  = 512
 	userHostMaxRunes = 128
+)
+
+// 鍵を書く列の上限 (migration/000031_user_publickey.up.sql /
+// 000050_user_publickey_extra.up.sql)。upstream の MiUserPublickey も同じ
+// 256 / 4096 なので、収まらない鍵は upstream でも連合できない。
+const (
+	publicKeyKeyIDMaxRunes = 256
+	publicKeyPEMMaxRunes   = 4096
 )
 
 // fitsColumn reports whether s fits a varchar(max) column and carries no NUL.
