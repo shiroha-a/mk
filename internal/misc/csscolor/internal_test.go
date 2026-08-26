@@ -9,9 +9,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-// parseFloatJS は JS の parseFloat をなぞる。**regexp が通した CSS unit しか
-// 渡らない**ので実運用では digit 無しにならないが、JS の意味をそのまま持たせて
-// おく (将来の呼び出しで暗黙に 0 として扱われないように)。
+// parseFloatJS は JS の parseFloat をなぞる。
+//
+// **渡ってくるのは CSS unit だけではない** — `convertToPercentage` は
+// `String(1e-9 * 100) + "%"` を返すので `"1.0000000000000001e-7%"` のような
+// **regexp が通し得ない文字列**も届く (指数部を読む分岐がある理由)。ただし
+// どちらの経路も必ず数字を含むので digit 無しにはならない。JS の意味は
+// そのまま持たせておく (将来の呼び出しで暗黙に 0 として扱われないように)。
 func TestParseFloatJS(t *testing.T) {
 	assert.Equal(t, 50.0, parseFloatJS("50%"))
 	assert.Equal(t, -60.0, parseFloatJS("-60"))

@@ -501,10 +501,10 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | リモート Note / Announce の `id` の長さ | 検証なし (`uri` に生値を入れる) | **収まらなければ document ごと拒否する** (`note.uri` は varchar(512))。切ると別の note を指す URI になり、**同じ activity の重複検出** (`FindByURI`) の鍵も壊れる (Undo(Announce) はこの URI を引かない — `ListRenotesOf` で announcer の renote を探す)。**拒否したあとの結末は呼び出し元で決まる**。ack して drop されるものも、inbox job が dead になるものも、その値だけ黙って落ちて activity 自体は成功するものもある。**一般化しないこと** — 一覧は `ingestNoteWithCreated` の gate のコメントに 1 箇所だけ置いてある (ここに再掲すると片側が古くなる。実際 #2723 では 5 周にわたってどこかがずれた)。gate の利得は原因が 22001 ではなく明示的な拒否として残ること (#2723) |
 | リモート actor の `alsoKnownAs` に含まれる NUL | 未処理 (upstream も同じ理由で書き込みが失敗する) | **要素ごと落とす** (`user.alsoKnownAs` は text 列なので長さは効かないが NUL は 22021)。1 要素混ざっただけで actor の INSERT / refresh の UPDATE がまるごと失われる。切らずに捨てるのは、切った URI が移行の認可 (`alsoKnownAsContains`) の一致判定に使えないため (#2723) |
 | リモート添付の `type` / `thumbnailUrl` / `blurhash` / `url` の長さ | `type` (sniff) / `thumbnailUrl` / `blurhash` はローカルで決まるので AP の申告値は入らない。**`url` / `uri` は違う** — `cacheRemoteFiles` off (既定) の isLink 経路では `image.url` を生で入れており、列も同じ varchar(1024) なので **upstream も同じ 22001 に晒される** | **列に合わせて扱いを分ける** (#2723)。`url` (varchar(1024) NOT NULL) は実体そのものなので**入らなければその添付を諦める**、`type` (128) は切ると別の MIME type になるので `application/octet-stream` に倒す、`thumbnailUrl` (512) / `blurhash` (128) は表示の補助なので値ごと捨てる。upstream は添付 1 件の失敗で Note ごと落とす (`ApNoteService`) ので、mk-go は元から安全側 |
-| リモートインスタンスの nodeinfo の text field | 長さは無検査。ただし値そのものは正規化する — `softwareName` は `.toLowerCase()` (string でなければ `'?'`)、`themeColor` は `tinycolor` で検証して `#rrggbb` に正規化 (不正なら `null`) | **各列の上限 (`softwareName` 64 / `softwareVersion` 64 / `name` 256 / `description` 4096) で切り、NUL を除去する**。mk-go は元から `iconUrl` / `faviconUrl` だけ長さを見ていたが、**同じ `fields` map に載る**これらが無検査だと 1 列溢れただけで UPDATE 全体が落ち、当のガードの目的が同じ関数の中で破られる (#2723)。**`softwareName` / `themeColor` の値の正規化は #2726 で upstream に揃えた** — `softwareName` は lowercase + `'?'` (**JSON の `null` は object ではないので `'?'` も書かない**。upstream の `if (info)` と同じ)、`themeColor` は tinycolor 互換の parser (`internal/misc/csscolor`) で検証して `#rrggbb` に正規化し、不正なら書かない。`themeColor` だけ clamp を通さないのは、正規化を通った値が必ず 7 文字で列 (varchar(64)) に収まるため。**まだ揃っていない差は 3 つ** (いずれも #2726 の範囲外。列を溢れさせる話ではなく、値の出どころの話)。(1) **fallback 元が少ない** — upstream の `getSiteName` / `getDescription` は `metadata.nodeName` / `nodeDescription` が string でなければ `metadata.name` / `metadata.description` を見て、さらに remote HTML の `og:title` / `<meta name="description">` と web app manifest まで辿る。`getThemeColor` も `<meta name="theme-color">` / `manifest.theme_color` を見る。mk-go は nodeinfo の `nodeName` / `nodeDescription` / `themeColor` だけを読む (HTML は icon の抽出にしか使っていない)。(2) **`maintainerName` / `maintainerEmail` を書いていない** — 列はある (`migration/000001_initial.up.sql`) が `metadata.maintainer` を読む経路が無い。(3) **切った結果が空になる値は書かない** — upstream は `softwareName` / `softwareVersion` に空文字を書くが、NUL だけの値では UPDATE ごと落として何も書かないので、既存値を残すほうが upstream の結末に近い (`name` / `description` は upstream 側も `if (name)` で空を弾くので差は無い) |
+| リモートインスタンスの nodeinfo の text field | 長さは無検査。ただし値そのものは正規化する — `softwareName` は `.toLowerCase()` (string でなければ `'?'`)、`themeColor` は `tinycolor` で検証して `#rrggbb` に正規化 (不正なら `null`) | **各列の上限 (`softwareName` 64 / `softwareVersion` 64 / `name` 256 / `description` 4096) で切り、NUL を除去する**。mk-go は元から `iconUrl` / `faviconUrl` だけ長さを見ていたが、**同じ `fields` map に載る**これらが無検査だと 1 列溢れただけで UPDATE 全体が落ち、当のガードの目的が同じ関数の中で破られる (#2723)。**`softwareName` / `themeColor` の値の正規化は #2726 で upstream に揃えた** — `softwareName` は lowercase + `'?'` (**JSON の `null` は object ではないので `'?'` も書かない**。upstream の `if (info)` と同じ。ただし **`strings.ToLower` は JS の `toLowerCase()` と完全には一致しない**。go1.26.6 (`unicode.Version` 15.0.0) と node 22 (Unicode 17.0) で全符号位置を突き合わせた実測では 3 系統: (i) `İ` (U+0130) は両方小文字化するが結果が違う (Go `i` / JS `i` + U+0307)。**ASCII に落ちる差はこれだけ**、(ii) Unicode 版差 55 符号位置 (`Ɤ` U+A7CB など) は JS だけが小文字化する (Go の table が上がれば消える)、(iii) 文脈依存の final sigma は符号位置ごとの比較では見えない (`MISSKEΣ` → Go `misskeσ` / JS `misskeς`)。いずれも software name には現実に出ず、software block の判定 (`MatchSuspendedSoftware`) も両側を lowercase して比べるので回避には使えない)、`themeColor` は tinycolor 互換の parser (`internal/misc/csscolor`) で検証して `#rrggbb` に正規化し、不正なら書かない。`themeColor` だけ clamp を通さないのは、正規化を通った値が必ず 7 文字で列 (varchar(64)) に収まるため。**値の出どころは upstream に揃っていない** (#2726 の範囲外。列を溢れさせる話ではない)。**全量は数えていない** — nodeinfo が読めなかったときの結末まで含めると HTML / manifest 由来の経路にも及ぶので、ここは**この行を読むときに効くものだけ**を挙げる。(a) **型を見るか** — upstream が `typeof === 'string'` を掛けるのは `software.name` だけで、`version` も `openRegistrations` も素通し。`openRegistrations` は boolean 列なので `"yes"` は PostgreSQL が true に変換するが、boolean として読めない文字列は **22P02 で UPDATE ごと落ちて upstream は全列を失う** (この行が扱う失敗モードそのもの)。mk-go は型が違えば**既存値を残す** (`TestFetch_WrongTypesAreDropped`)。(b) **切った結果が空になる値は書かない** — upstream は `softwareName` / `softwareVersion` に空文字を書くが、NUL だけの値では UPDATE ごと落として何も書かないので、既存値を残すほうが upstream の結末に近い (`name` / `description` は upstream 側も `if (name)` で空を弾くので差は無い)。(c) **fallback 元が少ない** — upstream の `getSiteName` / `getDescription` は `metadata.name` / `metadata.description` → remote HTML の `og:title` / `<meta name="description">` / `og:description` → web app manifest まで辿り、`getThemeColor` も `<meta name="theme-color">` / `manifest.theme_color` を見る。mk-go は nodeinfo の `nodeName` / `nodeDescription` / `themeColor` だけ (HTML は icon の抽出にしか使っていない)。(d) **`maintainerName` / `maintainerEmail` を書いていない** — 列はある (`migration/000001_initial.up.sql`) が `metadata.maintainer` を読む経路が無い。(e) **nodeinfo が取れない / 読めないと何も書かない** — discovery が 404、`links` が空、body が壊れた JSON のいずれでも `Fetch` が error を返し、`iconUrl` も `infoUpdatedAt` も書かない。upstream は `fetchNodeinfo(...).catch(() => null)` なので `info = null` のまま `infoUpdatedAt` と dom / manifest 由来の値を書く。**`infoUpdatedAt` が入らない host は `ListForRefresh` の `ORDER BY "infoUpdatedAt" ASC NULLS FIRST` で毎回先頭を占め続ける**ので、結末は「その host のメタ情報が古いまま」より重い。(f) **さらに、upstream 側は成功するのに mk-go だけが (e) に落ちる入力が 2 つある** — **1.0 の link しか無い** host (upstream の `fetchNodeinfo` は `link2_1 ?? link2_0 ?? link1_0` で 1.0 を拾い、version を検証せずそのまま使う。mk-go の `preferredRels` は 2.1 / 2.0 だけ) と、**object でない JSON** (`[]` / `123` / `"x"` / `true`。upstream は `info` が truthy なので `if (info)` を通り、`software?.name` が undefined なので `'?'` を書く)。この 2 つでは **upstream は更新に成功する**のに対し mk-go は 1 列も書かない (「全列」ではない — 非 object JSON では `softwareVersion` / `openRegistrations` が `undefined` になり、TypeORM が SET 句から落とすので既存値が残る。1.0 の link しか無い場合は実際の document が返るのでほぼ全列) ((c)(e)(f) とも #2723 以前からの挙動) |
 | リモート添付の `name` の作り方 | `uploadFromUrl` が**実体を download** し、`pathname.split('/').pop()` (Content-Disposition があればそちら) を `validateFileName` に通し、不合格なら `untitled`。さらに `correctFilename` が**sniff した実型**の拡張子を補う | **置き場は upstream と同じにした** (#2723)。代替テキスト (AP の `name`) は `comment` にだけ入れ、`drive_file.name` は URL の basename から作る。差分は 4 つ。(1) mk-go はリモートメディアの**実体を保存しない** (5.5) ので **Content-Disposition を見ない** (寸法の復元で GET すること自体はある)。**Misskey 同士ではここでずれる** — upstream は自分が配信するファイルに `Content-Disposition: inline; filename=...` を付けるので、upstream 側は原ファイル名を採る。(2) **拡張子の補完をしない** (upstream が付けるのは sniff した実型で、相手の申告した `mediaType` ではないため)。(3) Go の `net/url` は WHATWG URL の正規化をしないので、`/a/%2e%2e` (upstream は畳んで `untitled`) と `/a\b.png` (upstream は `\` を区切り扱いにして `b.png`) がずれる。(4) upstream は `name === comment` のとき comment を落とすが mk-go は残す。Mastodon 系はいずれにも当たらないので一致する。`comment` の 512 は upstream と同じ値 (`DB_MAX_IMAGE_COMMENT_LENGTH`) だが、**数え方は違う** — upstream の `truncate` は `stringz.substring` = 書記素クラスタ単位なので、ZWJ 絵文字を含む alt text では 512 クラスタ = コードポイントでは 512 超になり upstream 側が列を溢れさせる。mk-go は rune 単位で切るので列に忠実 (`user.name` の 128 と同じ扱い)。**この変更より前に取り込んだ行は直らない** — 添付は URI で dedup するので `name` に代替テキストが入ったまま残る。**連合出力は元から無事** (renderer は upstream と同じく `Name: stringValue(f.Comment)` で comment を使う) |
-| リモート chat room の `id` / `name` / `summary` と message の `text` / `uri` | CherryPick 由来の拡張なので upstream には無い | **列で扱いを分ける** (#2726)。`chat_room.name` (256) / `description` (2048) / `chat_message.text` (4096) は本文なので切って NUL を落とす。`chat_room.id` (32) は PK かつ membership / invitation の FK なので切らず、**収まらなければ room として認識しない** (`extractChatRoomID` が空を返す)。`chat_message.uri` (512) は dedup の鍵なので**収まらなければ message ごと拒否する** — 捨てて行だけ作ると AP retry のたびに同じ message が増える。拒否はいずれも `ErrUnsupportedActivity` に落として retry させない (溢れたまま Create すると `%w` で包まれて retryable になり、その inbox job が retry を使い切って dead になっていた) |
-| リモート Question の `oneOf` / `anyOf` の `name` の長さ | 切らない。ただし poll を note と同じ transaction で入れるので、同じ入力では **note ごと落ちる** | **256 rune で切って note は残す** (`poll.choices` は varchar(256)[]、#2726)。**切ることで生まれる mk-go 固有の穴が 1 つある**: 先頭 256 rune が同じ 2 つの選択肢は同じ文字列に潰れ、`Update(Question)` の集計 (name → totalItems の map) では片方の値が両方に入り、AP vote の照合は先頭一致なので 2 つ目への投票が 1 つ目に記録される。upstream は同じ入力で note ごと落とすので踏まない。選択肢を丸ごと捨てるより表示できるほうが害が小さいと判断して許容する。あわせて `pollRepo.Create` の**エラー握り潰しをやめた** — 捨てると note が `hasPoll = true` のまま poll 行だけ無い状態が黙って残る。error を上へ返しても直らない (note は既に Create 済みで、retry は `FindByURI` の dedup hit で早期 return するため poll 作成へ再到達しない) ので、結末は warn に残すのが正しい。AP vote と `Update(Question)` の choice 照合も同じ正規化を通す (生値で引くと切った選択肢に当たらない) |
+| リモート chat room の `id` / `name` / `summary` と message の `text` / `uri` | **列は upstream にも同じ幅である** (`chat_room.id` 32 / `name` 256 / `description` 2048、`chat_message.text` 4096 / `uri` 512)。`uri` は `ChatService` の insert に載ってはいるが、**呼び出し元 (`chat/messages/create-to-user` / `create-to-room`) が `text` と `file` しか渡さないので upstream では常に NULL**。無いのは **AP で chat を受け取る経路**のほうで、`src/core/activitypub/` に chat の扱いが 1 つも無い (CherryPick 由来の拡張)。したがってリモートが決めた値がこれらの列に入ることが無く、upstream はこの問題に晒されない | **列で扱いを分ける** (#2726)。`chat_room.name` (256) / `description` (2048) / `chat_message.text` (4096) は本文なので切って NUL を落とす。`chat_room.id` (32) は PK かつ membership / invitation の FK なので切らず、**収まらなければ room として認識しない** (`extractChatRoomID` が空を返す)。`chat_message.uri` (512) は dedup の鍵なので**収まらなければ message ごと拒否する** — 捨てて行だけ作ると AP retry のたびに同じ message が増える。拒否はいずれも `ErrUnsupportedActivity` に落として retry させない (溢れたまま Create すると `%w` で包まれて retryable になり、その inbox job が retry を使い切って dead になっていた) |
+| リモート Question の `oneOf` / `anyOf` の `name` の長さ | 切らない (列は mk-go と同じ `varchar(256)[]`)。ただし poll を note と同じ transaction で入れるので、同じ入力では **note ごと落ちる** | **256 rune で切って note は残す** (`poll.choices` は varchar(256)[]、#2726)。**切ることで生まれる mk-go 固有の穴が 1 つある**: 先頭 256 rune が同じ 2 つの選択肢は同じ文字列に潰れ、`Update(Question)` の集計 (name → totalItems の map) では片方の値が両方に入り、AP vote の照合は切ったあとの完全一致で最初に見つかった index を採るので 2 つ目への投票が 1 つ目に記録される。upstream は同じ入力で note ごと落とすので踏まない。選択肢を丸ごと捨てるより表示できるほうが害が小さいと判断して許容する。あわせて `pollRepo.Create` の**エラー握り潰しをやめた** — 捨てると note が `hasPoll = true` のまま poll 行だけ無い状態が黙って残る。error を上へ返しても直らない (note は既に Create 済みで、retry は `FindByURI` の dedup hit で早期 return するため poll 作成へ再到達しない) ので、結末は warn に残すのが正しい。AP vote と `Update(Question)` の choice 照合も同じ正規化を通す (生値で引くと切った選択肢に当たらない) |
 | リモート actor の `publicKey.id` / `publicKeyPem` / `assertionMethod[].id` の長さ | 検証なし (列は mk-go と同じ `keyId` 256 / `keyPem` 4096) | **収まらなければその鍵を保存しない** (#2726)。行の身元なので切ると別の鍵を指す。`assertionMethod` の entry は他の不正 entry と同じく warn + skip (fail-soft、actor 自体は取り込む)。**in-memory cache は残す** — `PublicKeyForActor` の高速路で、再起動後は actor を引き直して同じ値が入るので永続化の有無で挙動は分かれない。消すと `refreshPublicKey` の backoff が効かず inbound 1 件につき outbound fetch が 1 回走る |
 | AP tag 由来の emoji の列 | `Promise.all` の 1 件失敗で **その note の emoji を全部落とす** (`extractEmojis(...).catch(() => [])`) | **1 件だけ落とす**。列ごとに扱いを分ける (#2726): `name` (128) は行の身元 (UNIQUE は name+host) でそのまま `note.emojis` / `user.emojis` (varchar(128)[]) にも載るので、収まらない tag は丸ごと落とす。icon URL (`originalUrl` / `publicUrl` 各 512 NOT NULL) は新規なら tag ごと落とし (空の行は壊れた画像になる。未解決の `:name:` がそのまま出るほうが読める)、**既存行では古い URL を残す**。`uri` (512) は値だけ捨てて行は作る。`license` (1024) は本文なので切って NUL を落とす (wrapper があって `freeText` が null のケースは「明示的に未設定」なので nil のまま) |
 | Like の reaction 文字列の長さ | `normalize` が `emojiRegex.exec()` の**先頭 1 つだけ**を採るので溢れない | **収まらなければ ❤ (FallbackReaction) に倒す** (`note_reaction.reaction` は varchar(260)、#2726)。mk-go は「全部が絵文字なら生値を保存」なので**絵文字 300 個の Like** が gate を通って 22001 で落ちていた (Like 配送が retry を使い切って dead)。切ると grapheme が壊れるうえ別の reaction になるので倒す。**複数絵文字の reaction を丸ごと保存する点は元から upstream と違う** (upstream は先頭 1 つ) |
@@ -558,15 +558,56 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 `note_reaction.reaction` / `abuse_user_report.comment` にも適用した。**
 個々の判断は上の表に 1 行ずつある。
 
-**`note.url` は書いていない。** リモート note では `uri` だけを保存し、
-読み側 (`entity/note.go`) が `url ?? uri` で fallback する。列は varchar(512)
-だが、書く経路が無いので溢れない (#2726)。
+**`note.url` は書く経路が無い** ので #2726 の対象外。列 (varchar(512)) はあるが、
+resolver はリモート note の `uri` しか保存せず、production code に `note.url` へ
+代入する箇所が 1 つも無いので溢れようがない。
+
+**ただしこれは upstream との乖離でもある** (列の話ではないので上の表には入れて
+いない)。upstream の `ApNoteService` は `getOneApHrefNullable(note.url)` を
+`MiNote.url` に入れ (https でなければ note ごと reject する)、
+`NoteEntityService` が `url: note.url ?? undefined` で返す。**AP の `id` と HTML の
+permalink が別な実装 (Mastodon 等) では upstream の応答に
+`"url": "<permalink>"` が載るのに対し、mk-go が取り込んだ note では
+`url` が出ない。**
+
+書き方に 3 つ注意がある。
+
+- **`null` を返すのではなく key ごと落ちる。** `NoteEntity.URL` は
+  `json:"url,omitempty"` (実測)。upstream も `?? undefined` なので同じ形になる。
+  **揃えるなら `"url": null` を足すのではなく取り込みを直す** — 前者は
+  entitycompat の shape drift (golden は `nullable: false, optional: true`) を
+  余計に作る
+- **key が落ちること自体は乖離ではない。** `url` はローカル note では upstream も
+  null で (`MiNote.url` の列コメント「it will be null when the note is local」)、
+  そちらは key ごと落ちる形まで一致する。乖離になるのは**取り込んだリモート
+  note** だけ
+- **drop-in では話が変わる。** `model.Note.URL` は既存の `url` 列を読むので、
+  Misskey TS が書いた行では mk-go も permalink を返す
+
+`entity/note.go` の `firstNonNil(n.URL, n.URI)` は **`name` 付き note の本文整形
+専用**で、pack される `url` field には効かない (`URL: n.URL` のまま)。取り込みの
+実装は別途 (#2726 のレビューで判明)。
 
 数え方と NUL の扱いは `internal/misc/colfit` に集約してある。以前は federation と
-instance に同型の実装が 4 つ散っており (`sanitizeRemoteText` / `truncateRunes` /
-`remoteDisplayName` / `clampInstanceText`)、rune / byte の数え方と NUL の扱いが
-分かれる土壌になっていた。各パッケージの名前付きヘルパーは「その列固有の判断と
-ログ」を持つので残し、中身だけ委譲している (#2726)。
+instance に **7 つのヘルパーが散っていた** (federation の `fitsColumn` /
+`truncateRunes` / `remoteText` / `sanitizeRemoteText` / `remoteDisplayName`、
+instance の `clampInstanceText` / `fitsInstanceColumn`)。rune / byte の数え方と
+NUL の扱いが分かれる土壌になっていたので中身を委譲した。**名前付きヘルパーは
+7 つとも残してある** — 「その列固有の判断とログ」を持つので (#2726)。
+
+**畳めるように見えて畳めない対がある。**
+
+- `remoteText` と `clampInstanceText` は `max > 0` の呼び出しでは同じ結果になるが、
+  それ以外で分かれていた。`max == 0` は前者が切らず後者は空にし、**`max < 0` は
+  後者が panic する** (`string(runes[:max])`、実測)。`colfit.Text` は前者を採った
+  ので、**`clampInstanceText` は `max <= 0` の挙動が変わっている**。instance の
+  呼び出しは 64 / 64 / 256 / 4096 の定数だけなので影響は無い
+- `fitsColumn` と `fitsInstanceColumn` は 2 点で違っていた。**NUL を見るかは委譲で
+  揃った** (`fitsInstanceColumn` は元々見ていなかったが、`colfit.Fits` が見る。
+  URL 列に生の NUL は届かないので空振りする)。**残るのは空文字の扱い** —
+  `fitsInstanceColumn` は `v != ""` で空を弾く。この `v != ""` は飾りではなく、
+  `iconUrl` / `faviconUrl` を**書くかどうか**を決めている。空を fit 扱いにすると
+  既存の icon URL を空文字で上書きするので、ここは畳めない
 
 列長の出どころは `migration/` の SQL (多くは `000001_initial.up.sql`、後から足した
 テーブルは個別のファイル)。コード側の定数と独立に同じ数値を書くことになるので、

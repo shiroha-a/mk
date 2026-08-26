@@ -32,8 +32,12 @@ import (
 )
 
 // tinycolor の matchers (tinycolor.js の `matchers`) をそのまま移したもの。
-// **anchor しない。** tinycolor も `new RegExp("rgb" + PERMISSIVE_MATCH3)` を
-// そのまま exec するので、`xx rgb(1,2,3)` のような前後のゴミを許す。
+//
+// **anchor しないのは関数形式 (rgb / hsl / hsv) だけ。** tinycolor も
+// `new RegExp("rgb" + PERMISSIVE_MATCH3)` をそのまま exec するので、
+// `xx rgb(1,2,3)` のような前後のゴミを許す。hex は下の `reHex*` のとおり
+// `^#?...$` で anchor されていて、色名は `names` の完全一致なので、
+// そちらは位置にも長さにも敏感 (`xxxred` は不正)。
 const (
 	cssNumber  = `[-\+]?\d*\.\d+%?`
 	cssInteger = `[-\+]?\d+%?`
@@ -113,8 +117,9 @@ func parse(s string) (r, g, b float64, ok bool) {
 		r, g, b := hsvToRGB(m[1], convertToPercentage(m[2]), convertToPercentage(m[3]))
 		return r, g, b, true
 	}
-	// hex は長い順。`#abcd` を hex8 より先に hex4 で拾うと `#aabbcc` が
-	// `#aabbccdd` に化ける、といった取り違えを防ぐ順序 (tinycolor と同じ)。
+	// hex は tinycolor と同じ hex8 → hex6 → hex4 → hex3 の順。**結果には効かない**
+	// (4 本とも `^#?...$` で桁数が固定なので言語が互いに素) が、上流と読み比べる
+	// ときに揃っているほうがよい。
 	if m := reHex8.FindStringSubmatch(color); m != nil {
 		return hexPair(m[1]), hexPair(m[2]), hexPair(m[3]), true
 	}
@@ -171,8 +176,14 @@ func trimJSSpace(s string) string {
 // 使う JS と結果が分かれる符号位置がある。全 Unicode を突き合わせた実測では
 // **ASCII に落ちる差は U+0130 (İ) だけ** — Go は `"i"`、JS は `"i" + U+0307`。
 // この 1 文字のせいで `"İvory"` を mk-go だけが色名として受理していた
-// (upstream は不正扱いで NULL を保存する)。残りの差 (U+A7CB など) は Unicode
-// 版差で、色名にも hex にも当たらない (#2726 のレビュー 2 周目で実測)。
+// (upstream は不正扱いで NULL を保存する)。
+//
+// 残る差は 2 系統で、どちらも合わせ込んでいない: Unicode 版差の 55 符号位置
+// (`Ɤ` U+A7CB など。Go の table が上がれば消える) と、文脈依存の final sigma
+// (`"ΑΣ"` → Go `ασ` / JS `ας`。符号位置ごとの比較では見えない)。**色名は
+// ASCII、hex も ASCII、関数形式のキーワードも ASCII** なので、どちらも受理の
+// 判定には届かない (Σ / ς を corpus に入れた差分 fuzz でも 0 件不一致、
+// #2726 のレビュー 2 周目 / 5 周目で実測)。
 func jsToLower(s string) string {
 	if strings.ContainsRune(s, 0x0130) {
 		s = strings.ReplaceAll(s, "\u0130", "i\u0307")
@@ -189,8 +200,9 @@ func jsToLower(s string) string {
 // 演算がすべて NaN になり、丸めの結果が未定義になる。
 //
 // **指数部も読む。** CSS unit の正規表現は `e` を通さないが、
-// `convertToPercentage` が作る文字列 (`String(1e-7) + "%"`) が bound01 へ渡る
-// ので、そこで `"1e-7%"` を 1 と読むと結果がずれる (#2726)。
+// `convertToPercentage` が作る文字列が bound01 へ渡る。`.000000003` は
+// `String(3e-9 * 100) + "%"` = `"3e-7%"` になるので、そこで `3` と読むと
+// 結果がずれる (#2726)。
 func parseFloatJS(s string) float64 {
 	end := 0
 	seenDigit := false

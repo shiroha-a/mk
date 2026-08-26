@@ -1,6 +1,7 @@
 package instance_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,7 +26,12 @@ func TestFetch_NormalizesThemeColor(t *testing.T) {
 		{"rgb() も受ける", `"rgb(0, 255, 0)"`, strp("#00ff00")},
 		{"alpha は捨てる", `"rgba(0,0,255,0.5)"`, strp("#0000ff")},
 		{"色として読めない値は書かない", `"not-a-color"`, nil},
-		{"NUL 入りは書かない", `"#ab\u0000cdef"`, nil},
+		// hex 形は NUL が混ざると一致しないので落ちる。**関数形式は違う** —
+		// matcher が anchor していないので `rgb(1,2,3)` + NUL は valid のまま
+		// 通る。NUL が列に届かないのは、書く値が `#rrggbb` に組み直されている
+		// から (#2726)。
+		{"hex に NUL が混ざれば書かない", `"#ab\u0000cdef"`, nil},
+		{"関数形式の後ろの NUL は通るが列には届かない", `"rgb(1,2,3)\u0000"`, strp("#010203")},
 		{"空文字は書かない", `""`, nil},
 		{"string でなければ書かない", `123`, nil},
 	}
@@ -43,3 +49,16 @@ func TestFetch_NormalizesThemeColor(t *testing.T) {
 }
 
 func strp(s string) *string { return &s }
+
+// **列が安全なのは入力の長さや可読性ではなく、書く値を組み直しているから。**
+// 関数形式 (rgb / hsl / hsv) の matcher は anchor していないので、5000 文字の
+// 前置ゴミが付いた `rgb(1,2,3)` は tinycolor でも mk-go でも valid で、保存
+// されるのは組み直した 7 文字になる (hex と色名は完全一致なので落ちる)。
+// 「長い値は落ちるから安全」と読むと、実際には成り立たない不変条件を信じることに
+// なる (#2726)。
+func TestFetch_ThemeColorLengthDoesNotMatter(t *testing.T) {
+	long := strings.Repeat("あ", 5000) + "rgb(1,2,3)"
+	got := fetchNodeinfo(t, `{"software":{"name":"misskey"},"metadata":{"themeColor":"`+long+`"}}`)
+	require.NotNil(t, got.ThemeColor)
+	assert.Equal(t, "#010203", *got.ThemeColor)
+}

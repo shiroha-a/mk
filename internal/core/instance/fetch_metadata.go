@@ -65,8 +65,24 @@ type nodeinfoDocument struct {
 	// SoftwareName は document が object なら必ず入る。upstream は string で
 	// なければ '?' を入れる (`FetchInstanceMetadataService`)。case は
 	// `.toLowerCase()` で潰す — software block の判定は元から case-insensitive
-	// なので回避には使えないが、`federation/instances` が返す値が upstream と
-	// 揃う。**JSON の `null` は object ではない**ので空のまま (下記)。
+	// なので回避には使えないが、`federation/instances` が返す値が upstream に
+	// 近づく。**JSON の `null` は object ではない**ので空のまま (下記)。
+	//
+	// **「揃う」ではなく「近づく」。** Go の `strings.ToLower` は simple case
+	// mapping なので JS の `toLowerCase()` とはずれる。go1.26.6
+	// (`unicode.Version` 15.0.0) と node 22 (Unicode 17.0) で全符号位置を
+	// 突き合わせた実測では 3 系統:
+	//
+	//   - `İ` (U+0130) — 両方小文字化するが結果が違う (Go `i` / JS `i`+U+0307)。
+	//     **ASCII に落ちる差はこれだけ**
+	//   - Unicode 版差 55 符号位置 (`Ɤ` U+A7CB など) — JS だけが小文字化する。
+	//     Go の unicode table が上がれば消える
+	//   - 文脈依存の final sigma — 符号位置ごとの比較では見えない
+	//     (`MISSKEΣ` → Go `misskeσ` / JS `misskeς`)
+	//
+	// software name にこれらが出ることは現実には無く、
+	// `MatchSuspendedSoftware` は両側を lowercase して比べるので判定にも
+	// 効かないため、ここでは合わせ込まない (#2726)。
 	SoftwareName      string
 	SoftwareVersion   string
 	OpenRegistrations *bool
@@ -152,7 +168,11 @@ func jsonBool(raw json.RawMessage) (bool, bool) {
 }
 
 // preferredRels lists the nodeinfo schema versions in order of preference.
-// 2.1 → 2.0 → 1.0 の順で fallback する。
+//
+// **2.1 → 2.0 だけ。1.0 へは fallback しない。** upstream は
+// `link2_1 ?? link2_0 ?? link1_0` なので、1.0 しか出さない実装の nodeinfo は
+// mk-go だけが取りこぼす (docs/divergence.md、#2723 以前からの挙動)。
+// コメントは「1.0 も見る」と書いてあったが一覧に無く、実装と食い違っていた。
 var preferredRels = []string{
 	"http://nodeinfo.diaspora.software/ns/schema/2.1",
 	"http://nodeinfo.diaspora.software/ns/schema/2.0",
@@ -191,9 +211,11 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// nodeinfo まで失う** — 下のガードの目的が同じ関数の中で破られる (#2723)。
 	// 値は攻撃者 (リモートインスタンス) が自由に決められる。
 	//
-	// text 列は切って NUL を落とす。**URL 列は NUL を見ない** — `url.Parse` が制御
-	// 文字を弾き、唯一通る fragment の NUL も `url.URL.String()` が `%00` に escape
-	// するので、生の NUL はここまで来ない (fetchIcons。実測で確認)。
+	// text 列は切って NUL を落とす。**URL 列に生の NUL は届かない** — `url.Parse` が
+	// 制御文字を弾き、唯一通る fragment の NUL も `url.URL.String()` が `%00` に
+	// escape するので、ここまで来ない (fetchIcons。実測で確認)。判定側
+	// (`fitsInstanceColumn` → `colfit.Fits`) は NUL も見るが、この経路では
+	// 空振りする (#2726 で委譲したときに見るようになった)。
 	// `software.name` が string でなければ upstream と同じ '?' が入っている
 	// (parseNodeinfoDocument)。**空になった値は書かない**のは #2723 のまま —
 	// upstream は `""` をそのまま書くが、`"\u0000"` のような値では update ごと
@@ -216,9 +238,14 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// themeColor は upstream と同じく tinycolor で検証して `#rrggbb` に正規化
 	// する。不正な値は書かない (upstream は null にする、#2726)。
 	//
-	// **他の text 列と違って clamp しない。** 正規化を通った値は必ず `#rrggbb`
-	// の 7 文字で、列 (varchar(64)) には必ず収まる。NUL も同じ理由でここには
-	// 来ない (hex にも関数形式にも一致しないので不正扱いで落ちる)。
+	// **他の text 列と違って clamp しない。** 書くのは `csscolor.Normalize` が
+	// 組み直した `#rrggbb` の 7 文字だけで、入力の文字は 1 つも持ち越さない。
+	// 列 (varchar(64)) に収まり、NUL も届かない。
+	//
+	// **「NUL は色として読めないから落ちる」ではない。** anchor されていないのは
+	// 関数形式 (rgb / hsl / hsv) の matcher で、`"rgb(1,2,3)\u0000"` は valid な
+	// まま通る (実測)。効いているのは出力を組み直していることのほう。
+	// hex と色名は完全一致なので、そちらは位置にも長さにも敏感。
 	if v, ok := csscolor.Normalize(doc.ThemeColor); ok {
 		fields["themeColor"] = &v
 	}

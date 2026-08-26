@@ -60,7 +60,8 @@ func TestFetch_MissingSoftwareStoresPlaceholder(t *testing.T) {
 
 // softwareName は upstream と同じく lowercase で保存する。software block の
 // 判定は元から case-insensitive なので回避には使えないが、federation/instances
-// が返す値が upstream と揃う。
+// が返す値が upstream に近づく (**「揃う」ではない** — `strings.ToLower` と JS の
+// `toLowerCase()` の残差は fetch_metadata.go の nodeinfoDocument のコメント)。
 func TestFetch_SoftwareNameIsLowercased(t *testing.T) {
 	got := fetchNodeinfo(t, `{"software": {"name": "MisSkey", "version": "1"}}`)
 	require.NotNil(t, got.SoftwareName)

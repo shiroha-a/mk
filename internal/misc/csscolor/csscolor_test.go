@@ -52,7 +52,8 @@ func TestNormalize_HugeNumbers(t *testing.T) {
 		{"rgb(" + big + "%,0,0)", true, "#8c0000"},
 		{"hsv(" + big + "," + big + "," + big + ")", true, "#ff0000"},
 		{"rgba(" + big + "," + big + "," + big + "," + big + ")", true, "#ffffff"},
-		// 指数表記は parseFloat が `e` で止まるので CSS unit として通らない。
+		// 指数表記は **CSS unit の正規表現が `e` を通さない**ので matcher に
+		// 一致しない (`parseFloatJS` 自体は `1e5` を 100000 と読む)。
 		{"rgb(1e5,0,0)", false, ""},
 	}
 	for _, tc := range cases {

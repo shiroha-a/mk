@@ -362,8 +362,14 @@ func TestFetch_TruncatesOversizedNodeinfoFields(t *testing.T) {
 		// 頭から残していること (末尾から切っていない)。
 		assert.True(t, strings.HasPrefix(*tc.got, "さき"), "%s の先頭が失われている", tc.name)
 	}
-	// themeColor は**切らない**。色として読めない値は書かないので、長い文字列は
-	// そのまま落ちる (#2726)。他の列を巻き添えにしないことがここの主張。
+	// themeColor は**切らない**。この fixture の値が落ちるのは長いからではなく
+	// **色として読めないから**。列が安全なのも長さではなく、書く値を `#rrggbb` に
+	// 組み直しているから (`TestFetch_ThemeColorLengthDoesNotMatter`: 5000 文字の
+	// 前置ゴミが付いた `rgb(1,2,3)` は通り、7 文字が保存される)。
+	// **anchor されていないのは関数形式 (rgb / hsl / hsv) だけ** — hex は
+	// `^#?...$`、色名は完全一致 lookup なので、そちらは位置にも長さにも敏感
+	// (`#1234567` も `xxxred` も落ちる)。他の列を巻き添えにしないことが
+	// ここの主張 (#2726)。
 	assert.Nil(t, got.ThemeColor)
 	// 他の field は巻き添えにならない。
 	require.NotNil(t, got.OpenRegistrations)
@@ -398,8 +404,9 @@ func TestFetch_StripsNULFromNodeinfoFields(t *testing.T) {
 		assert.NotContains(t, *v, "\x00", "%s に NUL が残っている", name)
 	}
 	assert.Equal(t, "misskey", *got.SoftwareName)
-	// themeColor は NUL を落として通すのではなく、**色として読めないので
-	// 書かない** (#2726)。列に NUL が届く経路自体が無くなる。
+	// themeColor は NUL を落として通すのではなく、**書く値が `#rrggbb` に
+	// 組み直される**ので列に NUL が届かない (#2726)。ここの入力は hex 形に
+	// NUL が混ざっていて色として読めないので、そもそも書かれない。
 	assert.Nil(t, got.ThemeColor)
 }
 

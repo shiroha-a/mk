@@ -52,7 +52,12 @@ func TestText(t *testing.T) {
 	assert.Equal(t, "ab", colfit.Text("a\x00b", 8))
 	// NUL を落としてから数えるので、NUL の分で切り詰まらない。
 	assert.Equal(t, "abc", colfit.Text("a\x00bc", 3))
-	assert.Equal(t, "ábc", colfit.Text("ábcd", 4))
+	// **合成済みの 1 rune で書く。** 結合文字 (a + U+0301) だと見た目 4 文字でも
+	// 5 rune になり、「4 rune を 4 で切る」つもりのケースが「5 rune を 4 で切る」
+	// ケースにすり替わる。列はコードポイントで数えるのでどちらも有効な入力だが、
+	// テストの意図と一致させる。
+	assert.Equal(t, "ábcd", colfit.Text("ábcd", 4))
+	assert.Equal(t, "ábcd", colfit.Text("ábcde", 4))
 	assert.Equal(t, "ab", colfit.Text("a\x00b", 0))
 	assert.Equal(t, "", colfit.Text("\x00", 4))
 }
