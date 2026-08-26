@@ -2115,6 +2115,10 @@ func (p *Processor) handleUndoBlock(act genericActivity, inner genericActivity) 
 	return nil
 }
 
+// abuseReportCommentMaxRunes は `abuse_user_report.comment` の varchar(2048)
+// (migration/000013_abuse_report.up.sql)。
+const abuseReportCommentMaxRunes = 2048
+
 // handleFlag processes an inbound Flag (abuse report) activity. リモートインスタンスからの
 // 通報を保存する。
 func (p *Processor) handleFlag(act genericActivity) error {
@@ -2169,7 +2173,16 @@ func (p *Processor) handleFlag(act genericActivity) error {
 	}
 	_ = json.Unmarshal(act.raw, &content)
 	urisJSON, _ := json.Marshal(uris)
-	comment := content.Content + "\n" + string(urisJSON)
+	// `abuse_user_report.comment` は varchar(2048) (upstream の MiAbuseUserReport
+	// も同じ)。**通報本文も URI 一覧も相手が自由に決められる**ので、溢れると
+	// Create が 22001 で落ちて error を返し、**その inbox job が retry を
+	// 使い切って dead になる = 通報が届かない**。通報本文は読むための文字列
+	// なので切って NUL を落とす (#2726)。
+	//
+	// **URI 一覧を先に置かない。** 切るのは末尾なので、本文が長いと URI が
+	// 落ちる。upstream の並び (content → uris) を保ったまま切ると、少なくとも
+	// 通報の趣旨は残る。
+	comment := remoteText(content.Content+"\n"+string(urisJSON), abuseReportCommentMaxRunes)
 	report := &model.AbuseUserReport{
 		ID:             p.abuseIDGen.Generate(nowFn()),
 		TargetUserID:   targetUserID,

@@ -12,6 +12,7 @@ import (
 
 	"github.com/forPelevin/gomoji"
 	"github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/reactionlegacy"
 	"github.com/shiroha-a/mk/internal/model"
@@ -28,6 +29,10 @@ const (
 // FallbackReaction is the default reaction used when no reaction is provided.
 // 本家Misskeyは Heart "❤" を fallback にしている。
 const FallbackReaction = "\u2764"
+
+// reactionMaxRunes は `note_reaction.reaction` の varchar(260)
+// (migration/000001_initial.up.sql)。
+const reactionMaxRunes = 260
 
 // reactionAcceptance values a note may carry (upstream Misskey).
 const (
@@ -543,6 +548,23 @@ func (s *Service) normalizeReactionForFilter(raw string) string {
 // back). Create uses the emoji for reactionAcceptance gating (#1538) so it does
 // not re-query the emoji table.
 func (s *Service) resolveReaction(raw string, actorHost *string) (string, *model.Emoji) {
+	reaction, emoji := s.resolveReactionValue(raw, actorHost)
+	// `note_reaction.reaction` は varchar(260)。**絵文字だけで構成された長い
+	// 文字列**は下の gomoji gate を通ってしまうので、ここで列に収まるかを見る
+	// (絵文字 300 個の Like は 22001 で Create ごと落ち、Like 配送が retry を
+	// 使い切って dead になる、#2726)。
+	//
+	// 切ると grapheme が壊れるうえ別の reaction になるので、収まらなければ
+	// **❤ に倒す**。upstream の normalize は `emojiRegex.exec()` の**先頭 1 つ
+	// だけ**を採るので同じ入力でも溢れない (mk-go は全体を保存する点で乖離)。
+	if !colfit.Fits(reaction, reactionMaxRunes) {
+		return FallbackReaction, nil
+	}
+	return reaction, emoji
+}
+
+// resolveReactionValue is resolveReaction without the storage-fit check.
+func (s *Service) resolveReactionValue(raw string, actorHost *string) (string, *model.Emoji) {
 	if raw == "" {
 		return FallbackReaction, nil
 	}
