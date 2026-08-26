@@ -50,7 +50,7 @@ func TestIngest_StoresNoteURL(t *testing.T) {
 
 // 読み方は upstream の `getOneApHrefNullable` と同じ — 配列なら先頭、object なら
 // `href`。**`APLenientHref` は `id` を見ない** (JSON-LD の `{"@id": ...}` は
-// inbox 経路だと手前で string に潰れるので別扱い。`TestNoteURL_JSONLDIDIsPathDependent`)。
+// inbox 経路だと手前で string に潰れるので別扱い。`TestNoteURL_JSONLDExpandedFormsArePathDependent`)。
 func TestIngest_NoteURLShapes(t *testing.T) {
 	cases := map[string]struct {
 		in   string
@@ -281,18 +281,19 @@ func ingestNoteURLByRawFetch(t *testing.T, urlJSON string) *model.Note {
 	return got
 }
 
-// **JSON-LD の `{"@id": ...}` を `url` に置くと、経路によって結果が違う** (#2729)。
+// **JSON-LD の展開形を `url` に置くと、経路によって結果が違う** (#2729)。
 //
 // AS2 の `@context` は `url` を `{"@id":"as:url","@type":"@id"}` と定義しているので
-// 展開形 `[{"@id": ...}]` は正規の表現で、架空の形ではない。upstream の
-// `getApHrefNullable` は `href` しか見ないのでどちらも `undefined` = 保存しないが、
-// mk-go の inbox 経路は `Normalize` が**単一キーの** `{"@id": ...}` を先に string へ
-// 潰すため、`APLenientHref` には string として届いて保存される。
+// 展開形は正規の表現で、架空の形ではない。upstream の `getApHrefNullable` は `href`
+// しか見ないので展開形は `undefined` = 保存しないが、mk-go の inbox 経路は
+// `Normalize` が先に剥がすため `APLenientHref` に読める形で届く。
 //
-// `Normalize` を通らない生 fetch 経路 (返信・引用・Announce target の解決) では
-// 潰れないので、**同じ note でも入口によって `url` が入ったり入らなかったりする**。
-// 揃えるなら `Normalize` 側の話になるので、ここでは差を固定するに留める。
-func TestNoteURL_JSONLDIDIsPathDependent(t *testing.T) {
+// `Normalize` を通らない生 fetch 経路では剥がれないので、**同じ note でも入口に
+// よって `url` が入ったり入らなかったりする**。**向きは一方向ではない** —
+// `@value` の潰しは兄弟キーを見ないので、`href` を持つ object でも inbox 経路
+// だけが値を失う形がある。揃えるなら `Normalize` 側の話になるので、ここでは差を
+// 固定するに留める。
+func TestNoteURL_JSONLDExpandedFormsArePathDependent(t *testing.T) {
 	const atID = `{"@id":"https://remote.example/@a/1"}`
 
 	// inbox 経路: 単一キーなら潰れて保存される。
@@ -316,6 +317,24 @@ func TestNoteURL_JSONLDIDIsPathDependent(t *testing.T) {
 	// 同じ入口で `href` 形式なら保存されるので、経路そのものが url を捨てて
 	// いるわけではない (この対比が無いと上の Nil が何も証明しない)。
 	got = ingestNoteURLByRawFetch(t, `{"type":"Link","href":"https://remote.example/@a/1"}`)
+	require.NotNil(t, got.URL)
+	assert.Equal(t, "https://remote.example/@a/1", *got.URL)
+
+	// **`@value` の潰しは `@id` と違って兄弟キーを見ない** (`jsonld.go` の
+	// `x["@value"]` に `len(x) == 1` のガードが無い)。`@language` が付いても
+	// 潰れるので、「2 キーなら潰れない」は `@id` 限定の規則 (#2729 のレビュー
+	// 8 周目)。
+	got = ingestNoteWithURL(t, `{"@value":"https://remote.example/@a/1","@language":"en"}`)
+	require.NotNil(t, got.URL)
+	assert.Equal(t, "https://remote.example/@a/1", *got.URL)
+
+	// **差の向きは一方向ではない。** 兄弟キーを見ないので、`href` を持つ object
+	// でも `@value` があると inbox 経路だけが値を失う (`"x"` は http(s) でない)。
+	// upstream と生 fetch 経路は `href` を読んで保存する。
+	const hrefWithValue = `{"href":"https://remote.example/@a/1","@value":"x"}`
+	got = ingestNoteWithURL(t, hrefWithValue)
+	assert.Nil(t, got.URL)
+	got = ingestNoteURLByRawFetch(t, hrefWithValue)
 	require.NotNil(t, got.URL)
 	assert.Equal(t, "https://remote.example/@a/1", *got.URL)
 }

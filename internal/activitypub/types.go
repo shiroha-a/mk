@@ -1015,7 +1015,9 @@ type Note struct {
 	// URL は HTML 版の permalink。**`id` とは別物**で、Mastodon 系では
 	// `id` が AP object、`url` が Web ページを指す (#2729)。読み方は
 	// upstream の `getOneApHrefNullable` = `APLenientHref` (配列なら先頭 →
-	// string ならそれ / object なら `href`)。**`id` は見ない**。
+	// string ならそれ / object なら `href`)。**`id` は見ない**。ただし inbox
+	// 経路では手前の `Normalize` が JSON-LD の展開形を剥がすので、`{"@id": ...}`
+	// のような形は string になって届く (`docs/divergence.md` の `note.url` の節)。
 	//
 	// upstream の `renderNote` は note に `url` を出さないので、outbound には
 	// 影響しない (omitempty で消える)。

@@ -4029,7 +4029,7 @@ func remoteNoteURL(noteURI, href string) string {
 	lower := strings.ToLower(href)
 	if !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
 		slog.Warn("federation: dropping remote note url with a non-http scheme",
-			"note", truncateRunes(noteURI, noteURLMaxRunes))
+			"uri", truncateRunes(noteURI, noteURIMaxRunes))
 		return ""
 	}
 	if !fitsColumn(href, noteURLMaxRunes) {
@@ -4037,7 +4037,7 @@ func remoteNoteURL(noteURI, href string) string {
 		// NUL 入りの値を落としたときに `len` < `max` のログだけが残って読めない
 		// (`remoteMediaURL` は 2 つの判定に分けて別々のログを出している)。
 		slog.Warn("federation: dropping remote note url that does not fit its column",
-			"note", truncateRunes(noteURI, noteURLMaxRunes),
+			"uri", truncateRunes(noteURI, noteURIMaxRunes),
 			"len", len([]rune(href)), "max", noteURLMaxRunes,
 			"nul", strings.ContainsRune(href, 0))
 		return ""

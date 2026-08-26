@@ -578,7 +578,7 @@ note の応答から `url` が丸ごと落ちていた。
 | `HTTPS://…` (大文字) | **note ごと reject** (`startsWith` は case-sensitive、実測) | **保存** |
 | `http://…` | production は **note ごと reject**、それ以外なら保存 (実測) | **保存** |
 | `javascript:` / `ftp:` / 相対 URL 等 | **note ごと reject** | **値だけ捨てて note は作る** |
-| `{"@id":"https://…"}` (JSON-LD 展開形) | **捨てる** (`getApHrefNullable` は `href` だけを読む) | **inbox 経路だけ保存**、生 fetch 経路では捨てる (後述) |
+| JSON-LD の展開形 (`{"@id": …}` / `{"@value": …}` / full IRI のキー) | **捨てる** (`getApHrefNullable` は `href` だけを読む) | **経路依存** (後述) |
 | `""` (空文字) | **保存する** (`if (url && !checkHttps(url))` は falsy を素通りし、`if (data.url != null)` で `""` が入る) | **捨てる** (空の permalink はどこも指さない) |
 | varchar(512) を超える | 検証なし (22001 で note ごと失う) | **値だけ捨てて note は作る** |
 | NUL 入り | 検証なし (22021 で note ごと失う) | **値だけ捨てて note は作る** |
@@ -595,18 +595,27 @@ case-sensitive なので、`HTTPS://` は mk-go だけが受ける。`http://` �
 production かどうかに関わらず保存する。**どちらも「upstream が note ごと落とす値を
 mk-go は note ごと残す」方向**。
 
-**余計に保存する形はもう 1 つあり、そちらは経路に依存する。** JSON-LD の展開形
-`{"@id": ...}` は upstream なら `href` が無いので捨てるが、mk-go の **inbox 経路**は
-`activitypub.Normalize` が**単一キーの** `{"@id": ...}` を先に string へ潰すため、
-`APLenientHref` には string として届いて保存される。`@type` が付いて 2 キーになると
-潰れないので捨てる。**生 fetch 経路 (返信・引用・Announce target・featured の解決) は
-`Normalize` を通らない**ので潰れず、同じ note でも**入口によって `url` が入ったり
-入らなかったりする**。AS2 の `@context` は `url` を `{"@id":"as:url","@type":"@id"}` と
-定義していて展開形は正規の表現なので、実在しうる差。揃えるなら `Normalize` 側の
-判断になる。
+**上の 2 行は scheme に由来する差の全量**で、これ以外に scheme の綴りで受理が
+分かれる形は無い (`strings.ToLower` が ASCII の `h/t/p/s/:/ /` に落ちる非 ASCII の
+符号位置は全 Unicode を走査して 0 件)。**逆向き — upstream が保存して mk-go が
+捨てる — は空文字の行**。
 
-**逆向きは空文字の 1 行だけ** — そこは upstream が `"url": ""` を返すのに対し
-mk-go は key ごと落とす。
+**scheme とは別に、JSON-LD の展開形による経路依存の差がある。** `Normalize` は
+`{"@value": ...}` をスカラーへ、**単一キーの** `{"@id": ...}` を string へ潰し、
+full IRI のキー (`https://www.w3.org/ns/activitystreams#href`) を `href` へ畳む。
+潰れた結果が string / `href` 付き object なら `APLenientHref` が読むので、
+**upstream が `href` を持たないとして捨てる形を mk-go の inbox 経路は保存する**。
+`Normalize` を通らない生 fetch 経路では潰れないため、**同じ note でも入口によって
+`url` が入ったり入らなかったりする**。AS2 の `@context` は `url` を
+`{"@id":"as:url","@type":"@id"}` と定義していて展開形は正規の表現なので、実在しうる差。
+
+**向きは一方向ではない。** `@value` の潰しは `@id` と違って**兄弟キーを見ない**ので、
+`{"href":"https://…","@value":"x"}` は inbox 経路だけ `"x"` に潰れて http(s) の
+判定で捨てられる (upstream と生 fetch 経路は `href` を読んで保存する)。
+
+**この形の全量は数えていない。** `Normalize` の変換規則と `APLenientHref` の
+読み方の組み合わせで決まるので、形を列挙しても片方が変われば腐る。揃えるなら
+`Normalize` 側の判断になる。
 
 inbound `Update(Note)` でも追従するが、**捨てられた値では上書きしない** — 読めない
 `url` が来ただけで、取り込み時に保存した正しい permalink を消さないため。
