@@ -3,7 +3,10 @@ package instance_test
 import (
 	"errors"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/model"
@@ -296,4 +299,124 @@ func TestFetch_TrailingDataAfterDocumentFails(t *testing.T) {
 	require.Error(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
 	assert.Nil(t, repo.Instances["remote.example"].SoftwareName)
 	assert.NotNil(t, repo.Instances["remote.example"].InfoUpdatedAt)
+}
+
+// panicFetcher は FetchHTML で panic する。
+type panicFetcher struct{ bodies [][]byte }
+
+func (f *panicFetcher) FetchJSON(_ string) ([]byte, error) {
+	if len(f.bodies) == 0 {
+		return nil, errors.New("no more bodies")
+	}
+	b := f.bodies[0]
+	f.bodies = f.bodies[1:]
+	return b, nil
+}
+
+func (f *panicFetcher) FetchHTML(_ string) ([]byte, error) { panic("boom in FetchHTML") }
+
+// icon 取得の panic でプロセスを落とさない (#2730)。
+//
+// **別 goroutine の panic は呼び出し元の defer では拾えない** ので、echo の
+// `Recover` も mkq の `runHandler` も効かない。`fetchIcons` はリモートが決める
+// HTML を `html.Parse` に通す経路なので、ここだけ裸で spawn すると落とせる。
+func TestFetch_IconFetchPanicDoesNotCrash(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
+	fetcher := &panicFetcher{bodies: [][]byte{[]byte(discoveryBody), []byte(documentBody)}}
+
+	require.NoError(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	// nodeinfo 側は生きているので保存される。
+	require.NotNil(t, got.SoftwareName)
+	assert.Equal(t, "misskey", *got.SoftwareName)
+	assert.NotNil(t, got.InfoUpdatedAt)
+	// icon は 1 つも書かれない (panic 時は空の結果を返す)。
+	assert.Nil(t, got.IconURL)
+	assert.Nil(t, got.FaviconURL)
+}
+
+// handshakeFetcher は「相手が始まるまで進まない」ことで**並行に走っているか**を
+// 判定する。壁時計を見ないので負荷に左右されない。直列だと片方が待ちきれず
+// error になる。
+type handshakeFetcher struct {
+	jsonOnce, htmlOnce sync.Once
+	jsonStarted        chan struct{}
+	htmlStarted        chan struct{}
+	serial             atomic.Bool
+
+	mu     sync.Mutex
+	bodies [][]byte
+	html   []byte
+}
+
+func newHandshakeFetcher(bodies [][]byte, html []byte) *handshakeFetcher {
+	return &handshakeFetcher{
+		jsonStarted: make(chan struct{}),
+		htmlStarted: make(chan struct{}),
+		bodies:      bodies,
+		html:        html,
+	}
+}
+
+// handshakeTimeout は「相手が始まらない」と判定するまでの待ち時間。並行なら
+// 待たないので、正しい実装ではこの値は所要時間に出てこない。
+const handshakeTimeout = 2 * time.Second
+
+func (f *handshakeFetcher) FetchJSON(_ string) ([]byte, error) {
+	f.jsonOnce.Do(func() {
+		close(f.jsonStarted)
+		select {
+		case <-f.htmlStarted:
+		case <-time.After(handshakeTimeout):
+			f.serial.Store(true)
+		}
+	})
+	if f.serial.Load() {
+		return nil, errors.New("FetchHTML did not start concurrently")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.bodies) == 0 {
+		return nil, errors.New("no more bodies")
+	}
+	b := f.bodies[0]
+	f.bodies = f.bodies[1:]
+	return b, nil
+}
+
+func (f *handshakeFetcher) FetchHTML(_ string) ([]byte, error) {
+	f.htmlOnce.Do(func() {
+		close(f.htmlStarted)
+		select {
+		case <-f.jsonStarted:
+		case <-time.After(handshakeTimeout):
+			f.serial.Store(true)
+		}
+	})
+	if f.serial.Load() {
+		return nil, errors.New("FetchJSON did not start concurrently")
+	}
+	return f.html, nil
+}
+
+// icon の抽出は nodeinfo と**並行**に走る (#2730)。
+//
+// 直列に戻すと、応答を返さない host での待ち時間が 2 倍になる。この経路は actor
+// 解決の中で同期に呼ばれ HTTP リクエストにも乗るので、実測できる形で固定する。
+func TestFetch_FetchesIconsConcurrentlyWithNodeinfo(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
+	fetcher := newHandshakeFetcher(
+		[][]byte{[]byte(discoveryBody), []byte(documentBody)},
+		[]byte(`<html><head><link rel="icon" href="/favicon.png"></head></html>`),
+	)
+
+	require.NoError(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.SoftwareName, "nodeinfo 側が読めている")
+	require.NotNil(t, got.FaviconURL, "icon 側も読めている")
+	assert.Equal(t, "https://remote.example/favicon.png", *got.FaviconURL)
 }

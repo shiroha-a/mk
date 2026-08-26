@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"time"
@@ -173,10 +175,10 @@ func jsTruthy(v any) bool {
 		return t
 	case json.Number:
 		// err は範囲外 (= ±Inf) でのみ返る。値はそのまま使う。
+		// **`float64` の case は要らない** — `UseNumber` を通すので数値は必ず
+		// `json.Number` で届く。
 		f, _ := strconv.ParseFloat(t.String(), 64)
 		return f != 0
-	case float64:
-		return t != 0
 	case string:
 		return t != ""
 	}
@@ -245,14 +247,41 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// icon の抽出は nodeinfo と**並行**に走らせる (upstream の
 	// `Promise.all([fetchNodeinfo, fetchDom, fetchManifest])` と同じ形)。
 	// **直列にすると応答を返さない host での待ち時間が 2 倍になる** — この経路は
-	// `RegisterFromHost` → `notifyInstance` から **actor 解決の中で同期に**呼ばれ、
+	// `notifyInstance` → `RegisterFromHost` から **actor 解決の中で同期に**呼ばれ、
 	// `/api/ap/show` のような HTTP リクエストにも乗る (outbound の timeout は 30s、
 	// `internal/server/router.go`)。#2730 で nodeinfo の成否に関わらず HTML も
 	// 取るようにしたので、直列のままだと最悪 30s → 60s になっていた。
+	//
+	// **並行にしても増える分は残る。** nodeinfo が速く失敗して `/` だけが hang する
+	// host では、develop の「即 return」に対して最大 30s 待つ。`RegisterFromHost` は
+	// **行を新規作成したときしか `Fetch` を呼ばない**ので host あたり 1 回きり
+	// (upstream はこの呼び出しを 4 箇所とも fire-and-forget にしている)。
 	icons := make(chan iconResult, 1)
 	go func() {
+		// **recover を付ける。** `fetchIcons` はリモートが決める HTML を
+		// `html.Parse` に通し、外向き HTTP も叩く。**別 goroutine の panic は
+		// 呼び出し元の defer では拾えない** ので、echo の `Recover` も mkq の
+		// `runHandler` も効かずプロセスごと落ちる (同じ注意書きが
+		// `internal/queue/driver/mkqdriver/server.go` にある)。
+		//
+		// **送信は defer 側で行う。** panic 時に送らないと下の `<-icons` で
+		// deadlock する。
+		// **panic したら `res` はゼロ値のまま送る** (代入は fetchIcons が正常
+		// return した後にしかないので、明示的に潰す必要は無い)。空の URL は
+		// `fitsInstanceColumn` が弾くので 1 列も書かれない。
+		var res iconResult
+		defer func() {
+			if r := recover(); r != nil {
+				// **スタックまで残す。** リモートが決める HTML を html.Parse に
+				// 通した先の panic は、値だけでは発生箇所が分からない
+				// (mkqdriver の recover も debug.Stack を付けている)。
+				slog.Error("instance metadata: panic while fetching icons",
+					"host", host, "panic", r, "stack", string(debug.Stack()))
+			}
+			icons <- res
+		}()
 		iconURL, faviconURL, guessed := s.fetchIcons(host)
-		icons <- iconResult{iconURL: iconURL, faviconURL: faviconURL, guessed: guessed}
+		res = iconResult{iconURL: iconURL, faviconURL: faviconURL, guessed: guessed}
 	}()
 
 	doc, nodeinfoErr := s.fetchNodeinfo(host)
