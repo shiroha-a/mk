@@ -136,12 +136,13 @@ func TestIngest_DropsOversizedNoteURL(t *testing.T) {
 	assert.Nil(t, got.URL)
 	require.NotNil(t, got.URI)
 
-	// **境界ちょうどと +1 の両方を見る。** ちょうどだけだと `> max` を
-	// `>= max` にしても max を 513 にしても落ちない (resolver_test.go の
-	// 既存の境界テストと同じ規約、#2729 のレビュー 4 周目)。
+	// **境界ちょうどと +1 の両方を見る** (resolver_test.go の既存の境界テストと
+	// 同じ規約)。ちょうど (512) は `> max` を `>= max` にする変異を殺し、
+	// +1 (513) は上限そのものを 513 に広げる変異を殺す。**片方だけでは
+	// もう片方が生き残る** (#2729 のレビュー 4 / 5 周目で実測)。
 	fit := "https://remote.example/" + strings.Repeat("あ", 512-23)
 	require.Equal(t, 512, len([]rune(fit)))
-	// byte では 1500 を超えるので、byte で数える実装ならここで落ちる。
+	// 512 rune / 1490 byte。byte で数える実装ならここで落ちる。
 	require.Greater(t, len(fit), 512)
 	got = ingestNoteWithURL(t, `"`+fit+`"`)
 	require.NotNil(t, got.URL)

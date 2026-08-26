@@ -458,7 +458,8 @@ func TestAPLenientID_UnmarshalJSON(t *testing.T) {
 		{"null", `null`, ""},
 		{"nested array is not unwrapped twice", `[["https://e/n1"]]`, ""},
 		// 読まない兄弟 field のレンジ外数値で参照ごと落とさない (#2729)。
-		// `attributedTo` が空になると note ごと落ちる (host 照合が失敗する)。
+		// `attributedTo` が空になると note ごと落ちる
+		// (`ingestNoteWithCreated` の明示 gate。host 照合より前)。
 		{"huge number in sibling field", `{"id":"https://e/n1","x":1e999}`, "https://e/n1"},
 		{"huge number later in array", `["https://e/n1",1e999]`, "https://e/n1"},
 	}
@@ -543,6 +544,12 @@ func TestLenientTypes_MarshalUnchanged(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotContains(t, string(empty), "inReplyTo")
 	assert.NotContains(t, string(empty), `"cc"`)
+	// **`url` を送らないことを固定する。** #2729 で inbound 用に足した field で、
+	// 「outbound には影響しない」の根拠は `omitempty` 一点。落とすと送信する
+	// すべての Note に `"url":""` が乗り、**受信側 Misskey は `""` を falsy と
+	// して素通しして保存する**ので (`NoteCreateService`)、相手側の permalink が
+	// 壊れる。upstream の `renderNote` も `url` を出さない。
+	assert.NotContains(t, string(empty), `"url"`)
 	assert.Contains(t, string(empty), `"to":null`, "to は omitempty 無しなので null で出る")
 }
 

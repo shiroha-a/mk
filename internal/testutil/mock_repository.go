@@ -1210,7 +1210,7 @@ type MockNoteRepository struct {
 	// `fields` に載っていない列は UPDATE 文に出ないので、**呼び出し側から見えて
 	// いる値と DB の値が食い違う** (#2729)。
 	//
-	// 同じ理由で、**上の switch に列を足すときは慎重に。** 足すと
+	// 同じ理由で、**`UpdateFields` の switch に列を足すときは慎重に。** 足すと
 	// 「`fields` に載せた」と「呼び出し側が in-memory を書き換えた」を
 	// 区別できなくなり、片方だけを消す変異が両方のテストをすり抜ける。
 	UpdateFieldsCalls []map[string]any
