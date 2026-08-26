@@ -186,9 +186,9 @@ func jsonBool(v any) (bool, bool) {
 // `metadata` を持つので、読む側は版を区別しなくてよい (upstream も版を検証せず
 // `return info as NodeInfo` で通す)。
 //
-// **1.0 を落とすと starvation になる。** 1.0 しか出さない host は nodeinfo を
-// 一度も取れず `infoUpdatedAt` が NULL のまま残り、`ListForRefresh` の先頭を
-// 占め続ける (Fetch のコメント参照)。
+// **1.0 が無いと、その host のメタ情報を一度も取れない。** `infoUpdatedAt` は
+// 失敗しても進むので starvation にはならない (Fetch のコメント参照) が、
+// softwareName も description も永久に空のままになる。
 var preferredRels = []string{
 	"http://nodeinfo.diaspora.software/ns/schema/2.1",
 	"http://nodeinfo.diaspora.software/ns/schema/2.0",
@@ -201,7 +201,8 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	if host == "" {
 		return errors.New("host is required")
 	}
-	if _, err := s.repo.FindByHost(host); err != nil {
+	inst, err := s.repo.FindByHost(host)
+	if err != nil {
 		return ErrInstanceNotFound
 	}
 
@@ -278,11 +279,17 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// DB側 varchar(256) 制約に引っかかるとUPDATE全体が失敗してnodeinfoまで
 	// 失うため長さチェックを必ずかける (攻撃者制御の長いCDN URLを想定)。
 	// **切らずに捨てる** — 切った URL は別物なので取りに行っても無駄。
-	iconURL, faviconURL := s.fetchIcons(host)
+	iconURL, faviconURL, faviconGuessed := s.fetchIcons(host)
 	if fitsInstanceColumn(iconURL, maxInstanceURLLen) {
 		fields["iconUrl"] = &iconURL
 	}
-	if fitsInstanceColumn(faviconURL, maxInstanceURLLen) {
+	// **決め打ちの `/favicon.ico` で既存値を上書きしない** (#2730)。#2730 より前は
+	// nodeinfo が成功した host しかここへ来なかったので実害が小さかったが、今は
+	// **落ちた host も毎回通る**ため、生きていた頃に `<link rel="icon">` から取った
+	// 正しい URL を推測で壊してしまう。upstream は決め打ちを使う前に HEAD で
+	// 存在を確かめ、無ければ `null` を返して既存値を残す (`fetchFaviconUrl`)。
+	if fitsInstanceColumn(faviconURL, maxInstanceURLLen) &&
+		!(faviconGuessed && inst.FaviconURL != nil && *inst.FaviconURL != "") {
 		fields["faviconUrl"] = &faviconURL
 	}
 
@@ -344,14 +351,22 @@ func fitsInstanceColumn(v string, max int) bool {
 // 404 in the InstanceTicker — frontend shows broken / empty image (#474).
 // Following the link tag fixes the icon for any non-Misskey-TS upstream
 // that uses a non-`.ico` favicon convention.
-func (s *FetchMetadataService) fetchIcons(host string) (iconURL, faviconURL string) {
+//
+// faviconGuessed は faviconURL が HTML 由来ではなく `/favicon.ico` の決め打ちで
+// あることを表す。**呼び出し側はこれで既存値の上書きを止める** — #2730 で
+// nodeinfo の成否に関わらずここを通るようになり、落ちた host (nodeinfo も HTML も
+// 取れない) で「生きていた頃に `<link rel="icon">` から取った正しい URL」を
+// 決め打ちで壊すようになったため。upstream は決め打ちを使う前に `/favicon.ico` へ
+// HEAD を投げ、応答が無ければ `null` を返して既存値を残す
+// (`fetchFaviconUrl`)。mk-go は HEAD を持たないので「上書きしない」で代える。
+func (s *FetchMetadataService) fetchIcons(host string) (iconURL, faviconURL string, faviconGuessed bool) {
 	rootURL := "https://" + host + "/"
 
 	body, err := s.fetcher.FetchHTML(rootURL)
 	if err != nil {
 		// HTML 取得失敗 → 古い挙動 (`/favicon.ico` 決め打ち) でフォールバック。
 		// frontend は 404 時に非表示にするだけで害は小さい。
-		return "", "https://" + host + "/favicon.ico"
+		return "", "https://" + host + "/favicon.ico", true
 	}
 
 	icon, appleTouchIcon := parseIconLinks(body, rootURL)
@@ -365,11 +380,9 @@ func (s *FetchMetadataService) fetchIcons(host string) (iconURL, faviconURL stri
 	// hardcode フォールバックに落とす。
 	defaultFavicon := "https://" + host + "/favicon.ico"
 	if fitsInstanceColumn(icon, maxInstanceURLLen) {
-		faviconURL = icon
-	} else {
-		faviconURL = defaultFavicon
+		return iconURL, icon, false
 	}
-	return iconURL, faviconURL
+	return iconURL, defaultFavicon, true
 }
 
 // parseIconLinks walks the HTML document and returns absolute URLs for

@@ -152,3 +152,80 @@ func TestFetch_FalsyNodeinfoWritesNoSoftwareName(t *testing.T) {
 		})
 	}
 }
+
+// **決め打ちの `/favicon.ico` で既存値を上書きしない** (#2730)。
+//
+// #2730 より前は nodeinfo が成功した host しか `fetchIcons` に来なかったので
+// 実害が小さかったが、今は落ちた host も毎回通る。生きていた頃に
+// `<link rel="icon">` から取った正しい URL を推測で壊すと、`federation/instances`
+// が返す `faviconUrl` が 404 する URL になる。
+func TestFetch_GuessedFaviconDoesNotOverwriteStoredOne(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	stored := "https://remote.example/files/good-icon.png"
+	repo.Instances["remote.example"] = &model.Instance{
+		ID: "i1", Host: "remote.example", FaviconURL: &stored,
+	}
+	// nodeinfo も HTML も取れない = 落ちた host。
+	fetcher := &scriptedFetcher{
+		bodies:  [][]byte{nil},
+		errs:    []error{errors.New("conn refused")},
+		htmlErr: errors.New("conn refused"),
+	}
+	require.Error(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.FaviconURL)
+	assert.Equal(t, stored, *got.FaviconURL, "決め打ちで既存値を壊さない")
+	assert.NotNil(t, got.InfoUpdatedAt, "それでも infoUpdatedAt は進む")
+}
+
+// HTML から取れた favicon は既存値があっても上書きする (推測ではないため)。
+func TestFetch_HTMLFaviconOverwritesStoredOne(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	stored := "https://remote.example/files/old-icon.png"
+	repo.Instances["remote.example"] = &model.Instance{
+		ID: "i1", Host: "remote.example", FaviconURL: &stored,
+	}
+	fetcher := &scriptedFetcher{
+		bodies:   [][]byte{[]byte(discoveryBody), []byte(documentBody)},
+		htmlBody: []byte(`<html><head><link rel="icon" href="/new-icon.png"></head></html>`),
+	}
+	require.NoError(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.FaviconURL)
+	assert.Equal(t, "https://remote.example/new-icon.png", *got.FaviconURL)
+}
+
+// field 単位の `null` は「その型ではない」として扱い、既存値を残す (#2730)。
+//
+// `json.RawMessage` ベースだった頃は `json.Unmarshal("null", &bool)` が
+// error にならず、**既存の `true` を `false` で上書きしていた**。upstream は
+// `updates.openRegistrations = null` で列を NULL にするのでどちらとも違うが、
+// mk-go は「型が違えば既存値を残す」に揃える (docs/divergence.md (a))。
+func TestFetch_NullOpenRegistrationsKeepsStoredValue(t *testing.T) {
+	repo := testutil.NewMockInstanceRepository()
+	open := true
+	repo.Instances["remote.example"] = &model.Instance{
+		ID: "i1", Host: "remote.example", OpenRegistrations: &open,
+	}
+	fetcher := &scriptedFetcher{bodies: [][]byte{
+		[]byte(discoveryBody),
+		[]byte(`{"software":{"name":"misskey"},"openRegistrations":null}`),
+	}}
+	require.NoError(t, instance.NewFetchMetadataService(repo, fetcher).Fetch("remote.example"))
+
+	got := repo.Instances["remote.example"]
+	require.NotNil(t, got.OpenRegistrations)
+	assert.True(t, *got.OpenRegistrations)
+}
+
+// `software.name: null` は upstream と同じく `'?'`。`typeof null === 'object'`
+// なので string ではない (#2730)。
+func TestFetch_NullSoftwareNameStoresPlaceholder(t *testing.T) {
+	got := fetchNodeinfo(t, `{"software":{"name":null,"version":"1.0"}}`)
+	require.NotNil(t, got.SoftwareName)
+	assert.Equal(t, "?", *got.SoftwareName)
+	require.NotNil(t, got.SoftwareVersion)
+	assert.Equal(t, "1.0", *got.SoftwareVersion)
+}
