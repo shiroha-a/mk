@@ -356,13 +356,15 @@ func TestFetch_TruncatesOversizedNodeinfoFields(t *testing.T) {
 		{"softwareVersion", got.SoftwareVersion, 64},
 		{"name", got.Name, 256},
 		{"description", got.Description, 4096},
-		{"themeColor", got.ThemeColor, 64},
 	} {
 		require.NotNil(t, tc.got, "%s が落ちている", tc.name)
 		assert.Equal(t, tc.max, len([]rune(*tc.got)), "%s の rune 数", tc.name)
 		// 頭から残していること (末尾から切っていない)。
 		assert.True(t, strings.HasPrefix(*tc.got, "さき"), "%s の先頭が失われている", tc.name)
 	}
+	// themeColor は**切らない**。色として読めない値は書かないので、長い文字列は
+	// そのまま落ちる (#2726)。他の列を巻き添えにしないことがここの主張。
+	assert.Nil(t, got.ThemeColor)
 	// 他の field は巻き添えにならない。
 	require.NotNil(t, got.OpenRegistrations)
 	assert.True(t, *got.OpenRegistrations)
@@ -391,12 +393,14 @@ func TestFetch_StripsNULFromNodeinfoFields(t *testing.T) {
 		"softwareVersion": got.SoftwareVersion,
 		"name":            got.Name,
 		"description":     got.Description,
-		"themeColor":      got.ThemeColor,
 	} {
 		require.NotNil(t, v, "%s が落ちている", name)
 		assert.NotContains(t, *v, "\x00", "%s に NUL が残っている", name)
 	}
 	assert.Equal(t, "misskey", *got.SoftwareName)
+	// themeColor は NUL を落として通すのではなく、**色として読めないので
+	// 書かない** (#2726)。列に NUL が届く経路自体が無くなる。
+	assert.Nil(t, got.ThemeColor)
 }
 
 // 落とした結果が空になる値は field ごと出さない。書くと意味のない上書きになる。

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/misc/colfit"
+	"github.com/shiroha-a/mk/internal/misc/csscolor"
 	"github.com/shiroha-a/mk/internal/repository"
 	"golang.org/x/net/html"
 )
@@ -203,7 +204,13 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	if v := clampInstanceText(doc.NodeDescription, maxInstanceDescriptionLen); v != "" {
 		fields["description"] = &v
 	}
-	if v := clampInstanceText(doc.ThemeColor, maxInstanceThemeColorLen); v != "" {
+	// themeColor は upstream と同じく tinycolor で検証して `#rrggbb` に正規化
+	// する。不正な値は書かない (upstream は null にする、#2726)。
+	//
+	// **他の text 列と違って clamp しない。** 正規化を通った値は必ず `#rrggbb`
+	// の 7 文字で、列 (varchar(64)) には必ず収まる。NUL も同じ理由でここには
+	// 来ない (hex にも関数形式にも一致しないので不正扱いで落ちる)。
+	if v, ok := csscolor.Normalize(doc.ThemeColor); ok {
 		fields["themeColor"] = &v
 	}
 
@@ -230,7 +237,6 @@ const (
 	maxInstanceSoftwareVersionLen = 64
 	maxInstanceNameLen            = 256
 	maxInstanceDescriptionLen     = 4096
-	maxInstanceThemeColorLen      = 64
 )
 
 // clampInstanceText prepares a remote-supplied text value for its column: NUL を
