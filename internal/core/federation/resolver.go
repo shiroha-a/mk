@@ -4037,8 +4037,10 @@ const noteURLMaxRunes = 512
 // permalink の scheme が変なだけで本文ごと失うほうが害が大きい。
 //
 // **`javascript:` を保存しない点は upstream と同等**で、mk-go の優位ではない
-// (upstream は throw するので結果として保存されない)。受理する scheme はむしろ
-// mk-go のほうが広いので、この検査はその分を打ち消して parity に戻しているだけ。
+// (upstream は throw するので結果として保存されない)。**この検査を通した後でも
+// 受理する scheme は mk-go のほうが広い** (`HTTPS://` / production の `http://`)
+// ので parity には戻らない。この検査が担うのは「upstream がどの経路でも保存しない
+// 値を mk-go だけが保存する」のを防ぐところまで。
 //
 // scheme は case-insensitive に見る (RFC 3986)。`internal/core/urlpreview` の
 // `isHTTPScheme` と同じ方針。
