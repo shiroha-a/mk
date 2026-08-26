@@ -3377,6 +3377,18 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.
 		if name == "" {
 			continue
 		}
+		// **name は行の身元** (`emoji` の UNIQUE は name+host) で、そのまま
+		// `note.emojis` / `user.emojis` (varchar(128)[]) にも載る。つまり
+		// ここ 1 箇所の判定で 3 列を守る。切ると別の絵文字を指すので、
+		// 収まらない tag は丸ごと落とす (#2726)。
+		//
+		// **下の FindManyByNamesAndHost より前で落とす。** NUL 入りの name を
+		// query に渡すと 22021 でバッチ取得ごと落ち、その note の絵文字が
+		// 全部消える。
+		if !fitsColumn(name, emojiNameMaxRunes) {
+			slog.Warn("upsertEmojis: emoji name does not fit its column", "host", host)
+			continue
+		}
 		if _, ok := tagByName[name]; ok {
 			continue
 		}
@@ -3399,14 +3411,27 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.
 	names := make(model.StringArray, 0, len(order))
 	for _, name := range order {
 		tag := tagByName[name]
+		iconURL := tag.Icon.URL.String()
+		// icon URL は `originalUrl` / `publicUrl` (varchar(512) NOT NULL)。
+		// 切った URL は別物なので**値ごと捨てる** (#2726)。
+		iconFits := fitsColumn(iconURL, emojiURLMaxRunes)
 		if existing, ok := existingByName[name]; ok {
 			// 既存絵文字: URL/URIが変わっていればまとめてupdate
 			updates := map[string]any{}
-			if existing.OriginalURL != tag.Icon.URL.String() {
-				updates["originalUrl"] = tag.Icon.URL.String()
-				updates["publicUrl"] = tag.Icon.URL.String()
+			// 収まらない URL では**既存の値を残す**。行は既にあるので、
+			// 壊れた URL で上書きするより古い URL のほうが役に立つ。
+			if iconFits && existing.OriginalURL != iconURL {
+				updates["originalUrl"] = iconURL
+				updates["publicUrl"] = iconURL
 			}
-			if tag.ID != "" && (existing.URI == nil || *existing.URI != tag.ID) {
+			if !iconFits {
+				slog.Warn("upsertEmojis: keeping stored url; new url does not fit its column",
+					"name", name, "host", host)
+			}
+			// uri は URL なので切らない。収まらなければ**値だけ捨てて**行は残す
+			// (dedup / 更新判定に使うだけで、無くても絵文字は表示できる、#2726)。
+			if tag.ID != "" && fitsColumn(tag.ID, emojiURLMaxRunes) &&
+				(existing.URI == nil || *existing.URI != tag.ID) {
 				updates["uri"] = &tag.ID
 			}
 			// AP `_misskey_license.freeText` の差分も追従する (#731)。
@@ -3414,7 +3439,7 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.
 			// (連合先が一時的に license export を停止した場合に上書きしない)。
 			// FreeText nil 内部 = wrapper はあるが空 → 明示的に空 license で上書き。
 			if tag.License != nil {
-				newLicense := tag.License.FreeText
+				newLicense := remoteEmojiLicense(tag.License.FreeText)
 				existingLicense := existing.License
 				if !pointerStringsEqual(newLicense, existingLicense) {
 					updates["license"] = newLicense
@@ -3431,22 +3456,32 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.
 			continue
 		}
 		// 新規絵文字: create
+		//
+		// URL が収まらないなら**この tag を丸ごと落とす**。`originalUrl` は
+		// NOT NULL で、空の行を作っても壊れた画像になるだけ。名前だけ
+		// `note.emojis` に載るほうが悪い (クライアントは未解決の絵文字を
+		// `:name:` のまま出すので、そちらのほうが読める、#2726)。
+		if !iconFits {
+			slog.Warn("upsertEmojis: emoji url does not fit its column",
+				"name", name, "host", host)
+			continue
+		}
 		now := r.clock()
 		uri := tag.ID
 		emoji := &model.Emoji{
 			ID:          r.idGen.Generate(now),
 			Name:        name,
 			Host:        &host,
-			OriginalURL: tag.Icon.URL.String(),
-			PublicURL:   tag.Icon.URL.String(),
+			OriginalURL: iconURL,
+			PublicURL:   iconURL,
 		}
 		// #731: AP `_misskey_license` 経由で federation 直後に保存。
 		// wrapper があれば FreeText (nil 含む) を取り込む、wrapper 自体が
 		// nil なら model.Emoji.License は nil のまま。
 		if tag.License != nil {
-			emoji.License = tag.License.FreeText
+			emoji.License = remoteEmojiLicense(tag.License.FreeText)
 		}
-		if uri != "" {
+		if uri != "" && fitsColumn(uri, emojiURLMaxRunes) {
 			emoji.URI = &uri
 		}
 		if err := r.emojiRepo.Create(emoji); err != nil {
@@ -3460,6 +3495,27 @@ func (r *Resolver) upsertEmojis(tags []activitypub.EmojiTag, host string) model.
 		names = append(names, name)
 	}
 	return names
+}
+
+// AP tag 由来の emoji が入る列の上限 (migration/000001_initial.up.sql)。
+const (
+	emojiNameMaxRunes    = 128
+	emojiURLMaxRunes     = 512
+	emojiLicenseMaxRunes = 1024
+)
+
+// remoteEmojiLicense prepares `_misskey_license.freeText` for `emoji.license`
+// (`varchar(1024)`).
+//
+// license は表示される本文なので切って NUL を落とす。nil (= wrapper はあるが
+// 未設定) はそのまま nil を返す — 「明示的に未設定」を空文字に潰すと、
+// 既存の license を空で上書きしたのか未設定なのかが区別できなくなる (#2726)。
+func remoteEmojiLicense(v *string) *string {
+	if v == nil {
+		return nil
+	}
+	out := remoteText(*v, emojiLicenseMaxRunes)
+	return &out
 }
 
 // deriveVisibility maps an AS to/cc audience pair to a Misskey visibility,
