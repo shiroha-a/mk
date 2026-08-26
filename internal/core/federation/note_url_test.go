@@ -359,6 +359,14 @@ func TestNoteURL_JSONLDExpandedFormsArePathDependent(t *testing.T) {
 // 常に無いので、空文字の早期 return を落とすと**取り込み 1 件ごとに warn が出る**。
 // 保存される値は変わらない (空文字は scheme 判定でも落ちる) ため、この表明が無いと
 // 早期 return を消す変異がどのテストにも掛からない。
+//
+// **出る側も見る。** 「出ない」だけだと、ログを別 logger に移したり文言を変えたり
+// した時点でテストが緑のまま無検証になる (このファイルの `href` 形式の対比と同じ
+// 規約。#2729 のレビュー 19 周目)。
+//
+// `slog.SetDefault` はプロセス global なので、このパッケージで `t.Parallel()` を
+// 使わない前提に乗っている (現状 0 件。`internal/queue/processors` の
+// `inbox_drop_logging_test.go` と同じ)。
 func TestIngest_NoteWithoutURLDoesNotWarn(t *testing.T) {
 	var buf bytes.Buffer
 	prev := slog.Default()
@@ -380,4 +388,9 @@ func TestIngest_NoteWithoutURLDoesNotWarn(t *testing.T) {
 	require.Len(t, noteRepo.Notes, 1)
 	assert.NotContains(t, buf.String(), "dropping remote note url",
 		"url を持たない note で warn が出ている (remoteNoteURL の空文字 early return を確認)")
+
+	// positive control: 捨てる値なら同じ buf に載る。
+	_ = ingestNoteWithURL(t, `"javascript:alert(1)"`)
+	assert.Contains(t, buf.String(), "dropping remote note url",
+		"捨てた url の warn が出ていない (この表明が無いと上の NotContains が空振りする)")
 }

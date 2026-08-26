@@ -4040,7 +4040,9 @@ const noteURLMaxRunes = 512
 // (upstream は throw するので結果として保存されない)。**この検査を通した後でも
 // 受理する scheme は mk-go のほうが広い** — `HTTPS://` / `HTTP://` / production の
 // `http://` はどれも upstream が reject して mk-go は保存する。parity には戻らない。
-// **この検査が担うのは http(s) 以外の scheme だけ。**
+// **この scheme 判定が担うのは http(s) 以外の scheme だけ** (長さと NUL は下の
+// `fitsColumn` が別に見る。そちらは upstream が 22001 / 22021 で note ごと失う
+// 値なので、mk-go だけが保存する形にはならない)。
 //
 // scheme は case-insensitive に見る (RFC 3986)。`internal/core/urlpreview` の
 // `isHTTPScheme` と同じ方針。
