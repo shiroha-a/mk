@@ -2964,11 +2964,15 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 //   - 著者がリモートで actor が一致すれば note の text / mentions / cw / url /
 //     emojis / tags / fileIds / attachedFileTypes を更新する。**`sensitive` は
 //     note の列としては書かない**が、cw の決定と**添付の NSFW 判定**に読む
-//     (`upsertAttachments` が `drive_file` の `isSensitive` / `maybeSensitive`
-//     に書く)
+//     (`upsertAttachments` が**新規に作る** `drive_file` の `isSensitive` /
+//     `maybeSensitive` に書く。既知 URL の添付は URI で dedup して早期 return
+//     するので、**保存済みの添付の NSFW は Update では変わらない**)
 //   - **書き込みは note の列だけではない。** 同じ呼び出しで `drive_file` /
-//     `emoji` / hashtag の行も作られる (`upsertAttachments` / `upsertEmojis` /
-//     `hashtagHook.OnNoteCreated`)
+//     `emoji` / hashtag の行が作られ、**`emoji` と hashtag は既存行も書き換わる**
+//     — `upsertEmojis` は同名 + 同 host の行の `originalUrl` / `publicUrl` /
+//     `uri` / `license` を上書きし、`hashtagHook.OnNoteCreated` は
+//     `mentionedUserIds` への append と count++ を撃つ。`drive_file` だけは
+//     URI で dedup するので新規作成のみ
 func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
@@ -2996,7 +3000,10 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	// 指定した改ざん (**上の GoDoc が挙げる書き込み**。一覧をここにも書くと片方だけ
 	// 古くなるので繰り返さない — 実際 `url` を足すまで両方が
 	// `text/cw/sensitive/mentions` のまま陳腐化していた。`url` が入ったことで
-	// クライアントが開く permalink も差し替え対象になった) を拒否する。inbox 層の
+	// クライアントが開く permalink も差し替え対象になった) を拒否する。**note の
+	// 列だけの話ではない** — `upsertEmojis` に渡す host は**対象 note の著者**の
+	// ものなので、この検査が無ければ他人の host の同名カスタム絵文字の画像 URL を
+	// 攻撃者の URL に差し替えられる。inbox 層の
 	// authorizeActor は signer==activity.actor と activity.id host の整合しか保証
 	// しないため、ここで対象 note の著者まで照合する (#1819、UpdateRemoteQuestion と対称)。
 	if actorURI != "" && r.userRepo != nil {
