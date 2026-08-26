@@ -93,18 +93,30 @@ type nodeinfoDocument struct {
 
 // parseNodeinfoDocument decodes a nodeinfo document leniently: fields whose JSON
 // type does not match are dropped instead of failing the whole document.
+//
+// **object でない body も error にしない。** upstream は `if (info)` の
+// **JS の truthiness** で分岐するので、`[]` / `123` / `"x"` / `true` は
+// 「document はあるが `software.name` が string でない」= `'?'` になる。
+// error にすると `Fetch` が `infoUpdatedAt` を書けず starvation の原因になる
+// (#2730)。falsy な `null` / `false` / `0` / `""` は upstream と同じく
+// 何も入れない (placeholder も書かない — 壊れた nodeinfo を返す相手の
+// softwareName を毎回 `?` で上書きしてしまう)。
+//
+// **壊れた JSON は error のまま。** upstream の `getJson` も throw する。
 func parseNodeinfoDocument(body []byte) (*nodeinfoDocument, error) {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(body, &top); err != nil {
+	var raw any
+	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
-	// **`null` の body で `'?'` を書かない。** `json.Unmarshal("null", &map)` は
-	// error にならず nil map を返す。upstream は `if (info)` で囲っているので
-	// nodeinfo が null なら software 系の列に一切触れない。ここで placeholder を
-	// 入れると、**壊れた nodeinfo を返す相手の softwareName を毎回 `?` で
-	// 上書きする**。
-	if top == nil {
+	if !jsTruthy(raw) {
 		return &nodeinfoDocument{}, nil
+	}
+	top, _ := raw.(map[string]any)
+	if top == nil {
+		// truthy だが object ではない。読める field が 1 つも無いので、
+		// upstream の `typeof info.software?.name === 'string' ? … : '?'` と
+		// 同じ結果になる。
+		return &nodeinfoDocument{SoftwareName: unknownSoftwareName}, nil
 	}
 	doc := &nodeinfoDocument{SoftwareName: unknownSoftwareName}
 	if sw := jsonObject(top["software"]); sw != nil {
@@ -128,54 +140,59 @@ func parseNodeinfoDocument(body []byte) (*nodeinfoDocument, error) {
 // `software.name` is missing or not a string.
 const unknownSoftwareName = "?"
 
-// jsonObject decodes raw as a JSON object, or returns nil when it is absent or
-// not an object.
-func jsonObject(raw json.RawMessage) map[string]json.RawMessage {
-	if len(raw) == 0 {
-		return nil
+// jsTruthy mirrors the JS truthiness test upstream applies with `if (info)`.
+//
+// JSON から作れる falsy な値は `null` / `false` / `0` / `""` の 4 つだけ
+// (`[]` と `{}` は JS では truthy)。`-0` も falsy だが Go の `== 0` で拾える。
+func jsTruthy(v any) bool {
+	switch t := v.(type) {
+	case nil:
+		return false
+	case bool:
+		return t
+	case float64:
+		return t != 0
+	case string:
+		return t != ""
 	}
-	var m map[string]json.RawMessage
-	if json.Unmarshal(raw, &m) != nil {
-		return nil
-	}
+	return true
+}
+
+// jsonObject returns v as a JSON object, or nil when it is absent or not an
+// object.
+func jsonObject(v any) map[string]any {
+	m, _ := v.(map[string]any)
 	return m
 }
 
-// jsonString decodes raw as a JSON string. ok is false when it is absent or of
+// jsonString returns v as a JSON string. ok is false when it is absent or of
 // another type.
-func jsonString(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 {
-		return "", false
-	}
-	var s string
-	if json.Unmarshal(raw, &s) != nil {
-		return "", false
-	}
-	return s, true
+func jsonString(v any) (string, bool) {
+	s, ok := v.(string)
+	return s, ok
 }
 
-// jsonBool decodes raw as a JSON boolean. ok is false when it is absent or of
+// jsonBool returns v as a JSON boolean. ok is false when it is absent or of
 // another type.
-func jsonBool(raw json.RawMessage) (bool, bool) {
-	if len(raw) == 0 {
-		return false, false
-	}
-	var b bool
-	if json.Unmarshal(raw, &b) != nil {
-		return false, false
-	}
-	return b, true
+func jsonBool(v any) (bool, bool) {
+	b, ok := v.(bool)
+	return b, ok
 }
 
 // preferredRels lists the nodeinfo schema versions in order of preference.
 //
-// **2.1 → 2.0 だけ。1.0 へは fallback しない。** upstream は
-// `link2_1 ?? link2_0 ?? link1_0` なので、1.0 しか出さない実装の nodeinfo は
-// mk-go だけが取りこぼす (docs/divergence.md、#2723 以前からの挙動)。
-// コメントは「1.0 も見る」と書いてあったが一覧に無く、実装と食い違っていた。
+// **2.1 → 2.0 → 1.0。** upstream の `link2_1 ?? link2_0 ?? link1_0` と同じ
+// (#2730)。1.0 も `software.name` / `software.version` / `openRegistrations` /
+// `metadata` を持つので、読む側は版を区別しなくてよい (upstream も版を検証せず
+// `return info as NodeInfo` で通す)。
+//
+// **1.0 を落とすと starvation になる。** 1.0 しか出さない host は nodeinfo を
+// 一度も取れず `infoUpdatedAt` が NULL のまま残り、`ListForRefresh` の先頭を
+// 占め続ける (Fetch のコメント参照)。
 var preferredRels = []string{
 	"http://nodeinfo.diaspora.software/ns/schema/2.1",
 	"http://nodeinfo.diaspora.software/ns/schema/2.0",
+	"http://nodeinfo.diaspora.software/ns/schema/1.0",
 }
 
 // Fetch retrieves nodeinfo for the given host and applies the parsed metadata
@@ -188,19 +205,18 @@ func (s *FetchMetadataService) Fetch(host string) error {
 		return ErrInstanceNotFound
 	}
 
-	disc, err := s.fetchDiscovery(host)
-	if err != nil {
-		return err
-	}
-	href := selectNodeinfoHref(disc)
-	if href == "" {
-		return errors.New("no supported nodeinfo schema")
-	}
-
-	doc, err := s.fetchDocument(href)
-	if err != nil {
-		return err
-	}
+	// **nodeinfo の失敗で早期 return しない。** ここで返すと `infoUpdatedAt` が
+	// NULL のまま残り、その host が `ListForRefresh` の
+	// `ORDER BY "infoUpdatedAt" ASC NULLS FIRST` の先頭を占め続ける
+	// (`BatchLimit` 既定 100 を食い潰す)。**候補から抜ける経路が事実上無い host が
+	// いる** — `isNotResponding` は AP 配送の失敗でしか立たず、`MarkRequestReceived`
+	// が inbound で false に戻すので、「活動は送ってくるが nodeinfo を返さない
+	// peer」は永久に居座る (#2730)。
+	//
+	// upstream も `fetchNodeinfo(...).catch(() => null)` で握って `infoUpdatedAt` を
+	// 必ず書く。**error 自体は最後に返す** — `instance_refresh.go` の warn を
+	// 残さないと、壊れた host が見えなくなる。
+	doc, nodeinfoErr := s.fetchNodeinfo(host)
 
 	now := s.clock()
 	fields := map[string]any{
@@ -220,20 +236,22 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// (parseNodeinfoDocument)。**空になった値は書かない**のは #2723 のまま —
 	// upstream は `""` をそのまま書くが、`"\u0000"` のような値では update ごと
 	// 落として**何も書かない**ので、既存値を残すほうが upstream の結末に近い。
-	if v := clampInstanceText(doc.SoftwareName, maxInstanceSoftwareNameLen); v != "" {
-		fields["softwareName"] = &v
-	}
-	if v := clampInstanceText(doc.SoftwareVersion, maxInstanceSoftwareVersionLen); v != "" {
-		fields["softwareVersion"] = &v
-	}
-	if doc.OpenRegistrations != nil {
-		fields["openRegistrations"] = doc.OpenRegistrations
-	}
-	if v := clampInstanceText(doc.NodeName, maxInstanceNameLen); v != "" {
-		fields["name"] = &v
-	}
-	if v := clampInstanceText(doc.NodeDescription, maxInstanceDescriptionLen); v != "" {
-		fields["description"] = &v
+	if doc != nil {
+		if v := clampInstanceText(doc.SoftwareName, maxInstanceSoftwareNameLen); v != "" {
+			fields["softwareName"] = &v
+		}
+		if v := clampInstanceText(doc.SoftwareVersion, maxInstanceSoftwareVersionLen); v != "" {
+			fields["softwareVersion"] = &v
+		}
+		if doc.OpenRegistrations != nil {
+			fields["openRegistrations"] = doc.OpenRegistrations
+		}
+		if v := clampInstanceText(doc.NodeName, maxInstanceNameLen); v != "" {
+			fields["name"] = &v
+		}
+		if v := clampInstanceText(doc.NodeDescription, maxInstanceDescriptionLen); v != "" {
+			fields["description"] = &v
+		}
 	}
 	// themeColor は upstream と同じく tinycolor で検証して `#rrggbb` に正規化
 	// する。不正な値は書かない (upstream は null にする、#2726)。
@@ -246,12 +264,17 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	// 関数形式 (rgb / hsl / hsv) の matcher で、`"rgb(1,2,3)\u0000"` は valid な
 	// まま通る (実測)。効いているのは出力を組み直していることのほう。
 	// hex と色名は完全一致なので、そちらは位置にも長さにも敏感。
-	if v, ok := csscolor.Normalize(doc.ThemeColor); ok {
-		fields["themeColor"] = &v
+	if doc != nil {
+		if v, ok := csscolor.Normalize(doc.ThemeColor); ok {
+			fields["themeColor"] = &v
+		}
 	}
 
 	// nodeinfoはicon/faviconを含まないため、リモートトップページHTMLから
 	// 抽出する。取得失敗は致命ではない (nodeinfo 情報のpersistは継続する)。
+	// **nodeinfo の成否とは独立に走らせる** — upstream も
+	// `Promise.all([fetchNodeinfo, fetchDom, fetchManifest])` で並べており、
+	// nodeinfo を返さない host からも icon は取れる (#2730)。
 	// DB側 varchar(256) 制約に引っかかるとUPDATE全体が失敗してnodeinfoまで
 	// 失うため長さチェックを必ずかける (攻撃者制御の長いCDN URLを想定)。
 	// **切らずに捨てる** — 切った URL は別物なので取りに行っても無駄。
@@ -263,7 +286,11 @@ func (s *FetchMetadataService) Fetch(host string) error {
 		fields["faviconUrl"] = &faviconURL
 	}
 
-	return s.repo.UpdateFields(host, fields)
+	if err := s.repo.UpdateFields(host, fields); err != nil {
+		return err
+	}
+	// 書き込みは済ませたうえで nodeinfo の失敗を返す (上のコメント参照)。
+	return nodeinfoErr
 }
 
 // instance の列の上限 (migration/000001_initial.up.sql)。溢れると UPDATE 全体が
@@ -415,6 +442,23 @@ func firstNonEmptyStr(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+// fetchNodeinfo resolves and decodes the host's nodeinfo document.
+//
+// 呼び出し側は error でも書き込みを続けるので、**部分的な結果は返さない** —
+// 成功なら non-nil doc + nil error、失敗なら nil doc + error。upstream の
+// `fetchNodeinfo(...).catch(() => null)` と同じ粒度 (#2730)。
+func (s *FetchMetadataService) fetchNodeinfo(host string) (*nodeinfoDocument, error) {
+	disc, err := s.fetchDiscovery(host)
+	if err != nil {
+		return nil, err
+	}
+	href := selectNodeinfoHref(disc)
+	if href == "" {
+		return nil, errors.New("no supported nodeinfo schema")
+	}
+	return s.fetchDocument(href)
 }
 
 // fetchDiscovery fetches /.well-known/nodeinfo and decodes the link list.

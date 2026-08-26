@@ -26,9 +26,14 @@ type scriptedFetcher struct {
 	// (nodeinfo テストを icon logic の追加で壊さないため)。
 	htmlBody []byte
 	htmlErr  error
+
+	// jsonURLs は FetchJSON に渡された URL を順に記録する。どの schema の href が
+	// 選ばれたかを見るテスト用 (#2730)。
+	jsonURLs []string
 }
 
-func (s *scriptedFetcher) FetchJSON(_ string) ([]byte, error) {
+func (s *scriptedFetcher) FetchJSON(url string) ([]byte, error) {
+	s.jsonURLs = append(s.jsonURLs, url)
 	if s.idx >= len(s.bodies) {
 		return nil, errors.New("no more bodies")
 	}
