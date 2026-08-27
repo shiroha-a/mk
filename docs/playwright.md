@@ -97,13 +97,14 @@ find tests/playwright -name '*.js' \
 |---|---|
 | `find` (上記) | 除外を書かないと生成物を拾う。**ディレクトリ単位では畳まれない**ので件数が増える |
 | `ls .../specs/**/*.js` | 既定シェルは globstar が無効で深い階層に届かない (`specs/upstream/api/admin/` の `.js` が出ない) |
-| `git status --ignored --short \| grep '\.js$'` | 中身が全部 ignore のディレクトリは 1 行に畳まれるので落とす (`.js` だけの `dist/` など)。逆に `playwright-report/` も 1 行に畳むので**生成物では静か** |
-| `git clean -fd` | ignore 済みなので**その `.js` は消えない** (untracked かつ非 ignore の書きかけ spec は消えるので、掃除のつもりで打つと逆に困る)。`-x` を足しても container が root で作る `.auth/` / `test-results/` は `Permission denied` で残り、その巻き添えで掃除が中途半端に終わる (`-n` の出力は消える予定を出すだけで実挙動ではない) |
+| `git status --ignored --short \| grep '\.js$'` | 既定 (`-unormal`) では中身が全部 ignore のディレクトリを 1 行に畳むので落とす (`.js` だけの `dist/` など)。**`-uall` を足せば直る**が、そのぶん `playwright-report/` や `node_modules/` の中身も全部出る。**`-uall` でも消えない穴が 2 つ**: tracked かつ未変更の `.js` (`git add -f` した場合) と、空白を含むファイル名 (`!! "has space.js"` とクォートされて `grep '\.js$'` に掛からない) |
+| `git clean -fd` | ignore 済みなので**その `.js` は消えない** (untracked かつ非 ignore の書きかけ spec は消えるので、掃除のつもりで打つと逆に困る)。`-x` を足すと消えるが、**消えすぎる** — `node_modules/` (再 `npm ci`) と `.auth/` (再 globalSetup) と書きかけ spec ごと持っていく。権限で消せないものがあっても warning を出して**残りは完走する**ので「中途半端に終わるから安全」ではない (`-n` の出力は消える予定を出すだけで実挙動ではない) |
 
-**除外を書いた `find` が上位互換。** `git status --ignored` が拾う実物は全部拾い、
-畳まれたディレクトリの中も拾う (実測: `find` 3 件 / `git status | grep` 2 件で、
-落ちたのは `.js` だけのディレクトリ)。2 者の弱点は同種ではなく、**find は偽陽性
-(除外を書き忘れたときだけ)、`git status` は偽陰性 (常に)**。
+**除外を書いた `find` が上位互換。** 実測で反例が見つからなかった (`git status` 側が
+拾って `find` が落とすケース)。ただし理由は「畳み込み」ではない — それは `-uall` で
+直る。**`-uall` でも残るのは上の 2 つ** (tracked な `.js` / 空白入りの名前) で、
+`find` はどちらも拾う。両者の弱点は向きが違うだけで、**find は偽陽性
+(除外を書き忘れたときだけ)、`git status` は偽陰性 (上の 2 条件のとき)**。
 
 この節の 3 件はどれも実際に踏んだもの。
 
