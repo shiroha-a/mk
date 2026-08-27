@@ -72,8 +72,9 @@ vite の hash class を selector に使わない (`[class*="_button_"]` 等)。p
 
 **`.ts` の隣に `.js` を残さない。** import は拡張子なし
 (`from '../../../../fixtures/rate_limit'`) で、同名の `.js` があると playwright は
-そちらを先に解決する。**症状は「`.ts` を直したのに効かない」だけ**で、エラーは
-出ない。`tsc` を手で走らせた残骸が典型。
+そちらを先に解決する。`tsc` を手で走らせた残骸が典型で、**その場合は export が
+揃っているので症状は「`.ts` を直したのに効かない」だけ**になる (`.js` が古くて
+export が足りなければ `TypeError` が出るので、そちらは気付ける)。
 
 `tests/playwright/.gitignore` の `*.js` が止めるのは commit までで、**手元の
 shadowing は止まらない** (生成された時点で `.ts` は読まれていない)。container 実行
@@ -89,8 +90,9 @@ find tests/playwright -name '*.js' \
 `git status --ignored | grep '\.js$'` でも同じ 1 件に届く。丸ごと ignore の
 ディレクトリは畳まれて `.js` で終わらず、shadowing する `.js` は必ず `.ts` の隣に
 いるので個別に出る (`-uall` を足すと逆に `node_modules/` ごと出て使えない)。
-ただし **tracked な `.js` と、git がクォートする名前 (空白・非 ASCII) は落とす**
-ので `find` のほうが確実。`git clean -fd` は ignore 済みなので消してくれない。
+ただし **tracked な `.js` と、git がクォートする名前 (非 ASCII など) は落とす**
+ので `find` のほうが確実。`--short` / `--porcelain` を付けると空白入りの名前も
+引用符で囲まれて落ちる。`git clean -fd` は ignore 済みなので消してくれない。
 
 3 件とも実際に踏んだ罠。
 
