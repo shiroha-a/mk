@@ -24,8 +24,9 @@ results.json
 #
 # **代償は 2 つ。** この `.js` に気付けたのは git が untracked として報告して
 # いたからで、その経路をここで塞いでいる。(1) `git status` に出ない。
-# (2) `git clean -fd` でも消えない (`-x` を足しても root 所有の node_modules/
-# .auth/ test-results/ は Permission denied で残るので代替にならない)。
+# (2) `git clean -fd` でも消えない (`-x` を足しても container が root で作る
+# .auth/ test-results/ が Permission denied で残るうえ、untracked な書きかけ
+# spec を巻き込むので代替にならない)。
 # 残る症状は「`.ts` を直したのに効かない」だけ。
 #
 # **探し方と消し方は docs/playwright.md の「spec を書くときの注意」に置いてある。**

@@ -98,10 +98,12 @@ find tests/playwright -name '*.js' \
 | `find` (上記) | 除外を書かないと生成物を拾う。**ディレクトリ単位では畳まれない**ので件数が増える |
 | `ls .../specs/**/*.js` | 既定シェルは globstar が無効で深い階層に届かない (`specs/upstream/api/admin/` の `.js` が出ない) |
 | `git status --ignored --short \| grep '\.js$'` | 中身が全部 ignore のディレクトリは 1 行に畳まれるので落とす (`.js` だけの `dist/` など)。逆に `playwright-report/` も 1 行に畳むので**生成物では静か** |
-| `git clean -fd` | ignore 済みなので**何も消えない**。`-x` を足しても root 所有の `node_modules/` / `.auth/` / `test-results/` は `Permission denied` で残る (`-n` の出力は消える予定を出すだけで実挙動ではない) |
+| `git clean -fd` | ignore 済みなので**その `.js` は消えない** (untracked かつ非 ignore の書きかけ spec は消えるので、掃除のつもりで打つと逆に困る)。`-x` を足しても container が root で作る `.auth/` / `test-results/` は `Permission denied` で残り、その巻き添えで掃除が中途半端に終わる (`-n` の出力は消える予定を出すだけで実挙動ではない) |
 
-`find` と `git status --ignored` は**取りこぼしの向きが逆**なので、片方だけを
-上位互換とは言えない。迷ったら両方見る。
+**除外を書いた `find` が上位互換。** `git status --ignored` が拾う実物は全部拾い、
+畳まれたディレクトリの中も拾う (実測: `find` 3 件 / `git status | grep` 2 件で、
+落ちたのは `.js` だけのディレクトリ)。2 者の弱点は同種ではなく、**find は偽陽性
+(除外を書き忘れたときだけ)、`git status` は偽陰性 (常に)**。
 
 この節の 3 件はどれも実際に踏んだもの。
 
