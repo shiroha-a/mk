@@ -12,3 +12,15 @@ playwright-report/
 results.json
 # globalSetup が root credentials を書き出す fixture ディレクトリ (#744 PR-2)。
 .auth/
+# tsc の出力。**`.ts` の隣に `.js` があると `.ts` が読まれなくなる。**
+# spec / fixture の import は拡張子なし (`from './fixtures/rate_limit'`) で、
+# playwright 1.62.1 は同名の `.js` を先に解決する (両方置いて実測: `.js` 側が
+# 採られた)。commit してしまうと CI でも `.ts` の編集が無視され、直したはずの
+# fixture が効かないという気付きにくい壊れ方をする。
+#
+# **ignore しても shadowing 自体は防げない** — 生成された時点で既に `.ts` は
+# 読まれていない。container 実行 (`make playwright-check`) も spec を
+# `./tests/playwright:/work` で bind mount するので同じ。`fixtures/*.js` が
+# 見えたら消すこと。ここで止められるのは「commit して全員に配る」ところまで。
+# tracked な `.js` は現在 0 件なので、必要になったら `git add -f` か例外行で。
+*.js
