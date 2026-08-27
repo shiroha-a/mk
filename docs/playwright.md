@@ -72,13 +72,9 @@ vite の hash class を selector に使わない (`[class*="_button_"]` 等)。p
 
 **`.ts` の隣に `.js` を残さない。** import は拡張子なし
 (`from '../../../../fixtures/rate_limit'`) で、同名の `.js` があると playwright は
-そちらを先に解決する。`tsc` を手で走らせた残骸が典型で、**その場合は export が
-揃っているので症状は「`.ts` を直したのに効かない」だけ**になる。
-
-**エラーの有無で切り分けない。** `.js` が古くて export が欠けている場合、結末は
-使われ方で変わる — `if (isTsBackend)` なら `undefined` が falsy なので**緑のまま
-逆の枝に入り**、`toBe(NOT_FOUND_STATUS)` なら `Expected: undefined` で落ちる
-(どちらも `fixtures/backend.ts` の値 export)。赤くても shadowing を候補から外さない。
+そちらを先に解決する。`tsc` を手で走らせた残骸が典型。**エラーの有無で切り分けない**
+— 症状が「`.ts` を直したのに効かない」だけのこともあれば、欠けた export が
+`undefined` として流れて無関係に見える場所で落ちることもある。
 
 `tests/playwright/.gitignore` の `*.js` が止めるのは commit までで、**手元の
 shadowing は止まらない** (生成された時点で `.ts` は読まれていない)。container 実行
@@ -89,14 +85,9 @@ find tests/playwright -name '*.js' \
   -not -path '*/node_modules/*' -not -path '*/playwright-report/*'
 ```
 
-**除外は要る** — `playwright-report/trace/` に viewer の資産が 7 本入る。
-
-`git status --ignored | grep '\.js$'` でも同じ 1 件に届く。丸ごと ignore の
-ディレクトリは畳まれて `.js` で終わらず、shadowing する `.js` は必ず `.ts` の隣に
-いるので個別に出る (`-uall` を足すと逆に `node_modules/` ごと出て使えない)。
-ただし **tracked な `.js` と、git がクォートする名前 (非 ASCII など) は落とす**
-ので `find` のほうが確実。`--short` / `--porcelain` を付けると空白入りの名前も
-引用符で囲まれて落ちる。`git clean -fd` は ignore 済みなので消してくれない。
+素の `git status` には出ず (`--ignored` が要る)、`git clean -fd` も消してくれない。
+`playwright-report/` は `--reporter=html` を手で渡したときだけ生成されるが、その
+viewer 資産で `.js` が 7 本出るので除外に入れてある。
 
 3 件とも実際に踏んだ罠。
 
