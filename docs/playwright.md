@@ -70,7 +70,25 @@ compose logs を `playwright-results-<backend>-<shard>` /
 vite の hash class を selector に使わない (`[class*="_button_"]` 等)。production
 ビルドで hash が変わると落ちる。`data-testid` か role / text で取る。
 
-どちらも実際に踏んだ罠。
+**`.ts` の隣に `.js` を残さない。** import は拡張子なし
+(`from '../../fixtures/rate_limit'`) で、同名の `.js` があると playwright は
+そちらを先に解決する。**症状は「`.ts` を直したのに効かない」だけ**で、エラーは
+出ない。`tsc` を手で走らせた残骸が典型。
+
+`tests/playwright/.gitignore` の `*.js` が**止めるのは commit までで、手元の
+shadowing は止まらない** (生成された時点で `.ts` は読まれていない)。container 実行
+(`make playwright-check`) も spec を bind mount するので同じ。ignore した副作用として
+`git status` にも出なくなるので、疑ったら直接見る:
+
+```bash
+find tests/playwright -name '*.js' -not -path '*/node_modules/*'
+git -C tests/playwright status --ignored --short . | grep '\.js$'
+```
+
+`ls .../specs/**/*.js` は使わない。既定シェルは globstar が無効で、深い階層を
+取りこぼす (実測: `specs/upstream/api/admin/` に置いた `.js` がヒットしない)。
+
+3 つとも実際に踏んだ罠。
 
 ## 関連
 

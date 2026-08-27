@@ -18,9 +18,18 @@ results.json
 # 採られた)。commit してしまうと CI でも `.ts` の編集が無視され、直したはずの
 # fixture が効かないという気付きにくい壊れ方をする。
 #
-# **ignore しても shadowing 自体は防げない** — 生成された時点で既に `.ts` は
-# 読まれていない。container 実行 (`make playwright-check`) も spec を
-# `./tests/playwright:/work` で bind mount するので同じ。`fixtures/*.js` が
-# 見えたら消すこと。ここで止められるのは「commit して全員に配る」ところまで。
+# **止められるのは「commit して全員に配る」ところまで。** 生成された時点で手元の
+# `.ts` は既に読まれておらず、container 実行 (`make playwright-check`) も spec を
+# `./tests/playwright:/work` で bind mount するので同じ。
+#
+# **代償として `git status` に出なくなる。** この `.js` に気付けたのは git が
+# untracked として報告していたからで、その経路をここで塞いでいる。残る症状は
+# 「`.ts` を直したのに効かない」だけなので、疑ったら直接見ること:
+#   find . -name '*.js' -not -path './node_modules/*'
+#   git status --ignored --short . | grep '\.js$'
+# (`ls fixtures/*.js specs/**/*.js` は既定シェルだと globstar が無効で
+# specs/ の深い階層を取りこぼす。実測で確認済み)
+# 導線は docs/playwright.md の「spec を書くときの注意」にも置いてある。
+#
 # tracked な `.js` は現在 0 件なので、必要になったら `git add -f` か例外行で。
 *.js
