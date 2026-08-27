@@ -77,16 +77,22 @@ vite の hash class を selector に使わない (`[class*="_button_"]` 等)。p
 
 `tests/playwright/.gitignore` の `*.js` が**止めるのは commit までで、手元の
 shadowing は止まらない** (生成された時点で `.ts` は読まれていない)。container 実行
-(`make playwright-check`) も spec を bind mount するので同じ。ignore した副作用として
-`git status` にも出なくなるので、疑ったら直接見る:
+(`make playwright-check`) も spec を bind mount するので同じ。
+
+**ignore の代償で `git status` にも `git clean -fd` にも出てこない**ので、疑ったら
+直接探して `rm` する:
 
 ```bash
 find tests/playwright -name '*.js' -not -path '*/node_modules/*'
-git -C tests/playwright status --ignored --short . | grep '\.js$'
 ```
 
-`ls .../specs/**/*.js` は使わない。既定シェルは globstar が無効で、深い階層を
-取りこぼす (実測: `specs/upstream/api/admin/` に置いた `.js` がヒットしない)。
+**`find` を使う。** 他の 3 つは条件付きで取りこぼす (すべて実測):
+
+| 手 | 取りこぼし |
+|---|---|
+| `ls .../specs/**/*.js` | 既定シェルは globstar が無効で深い階層に届かない (`specs/upstream/api/admin/` の `.js` が出ない) |
+| `git status --ignored --short` | 中身が全部 ignore のディレクトリは 1 行に畳まれるので `grep '\.js$'` が落とす (`.js` だけの `dist/` など) |
+| `git clean -fd` | ignore 済みなので**何も消えない**。`-x` は消えるが root 所有の `node_modules/` ごと巻き込む |
 
 3 つとも実際に踏んだ罠。
 

@@ -22,14 +22,14 @@ results.json
 # `.ts` は既に読まれておらず、container 実行 (`make playwright-check`) も spec を
 # `./tests/playwright:/work` で bind mount するので同じ。
 #
-# **代償として `git status` に出なくなる。** この `.js` に気付けたのは git が
-# untracked として報告していたからで、その経路をここで塞いでいる。残る症状は
-# 「`.ts` を直したのに効かない」だけなので、疑ったら直接見ること:
-#   find . -name '*.js' -not -path './node_modules/*'
-#   git status --ignored --short . | grep '\.js$'
-# (`ls fixtures/*.js specs/**/*.js` は既定シェルだと globstar が無効で
-# specs/ の深い階層を取りこぼす。実測で確認済み)
-# 導線は docs/playwright.md の「spec を書くときの注意」にも置いてある。
+# **代償は 2 つ。** この `.js` に気付けたのは git が untracked として報告して
+# いたからで、その経路をここで塞いでいる。(1) `git status` に出ない。
+# (2) `git clean -fd` でも消えない (`-x` は root 所有の node_modules ごと
+# 巻き込むので代替にならない)。残る症状は「`.ts` を直したのに効かない」だけ。
+#
+# **探し方と消し方は docs/playwright.md の「spec を書くときの注意」に置いてある。**
+# ここには書かない — 同じ手順を 2 箇所に持つと片方が腐る (実際 1 周目に書いた
+# `ls specs/**/*.js` は globstar 無効で深い階層を取りこぼしていた)。
 #
 # tracked な `.js` は現在 0 件なので、必要になったら `git add -f` か例外行で。
 *.js
