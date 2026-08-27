@@ -338,13 +338,132 @@ func TestMain_BareNotificationDroppedByInstanceMute(t *testing.T) {
 	assert.Empty(t, ctx.sentType, "bare notification from a muted instance must be dropped")
 }
 
-func TestMain_NonNoteEnvelopeVerbatim(t *testing.T) {
+// unreadNotification envelope の body は packed notification そのものなので、
+// bare notification topic と同じ hide ゲートを通す必要がある。#1568 はこの
+// envelope を覆っておらず、非可視 embed の内容が「未読バッジ用」イベント経由で
+// そのまま届いていた。
+func TestMain_UnreadNotificationEnvelopeEmbedHidden(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
+	ctx.followingSnap = map[string]bool{} // follows nobody
 	ch := NewMain(ctx)
 	ch.Init(nil)
-	ch.OnRedisEvent([]byte(`{"type":"follow","body":{"id":"u2","username":"bob"}}`))
+
+	emb := embed("followers", "renoteauthor", nil)
+	emb.FileIDs = []string{"f2"}
+	emb.Files = []any{map[string]any{"id": "f2", "url": "https://example.com/secret.png"}}
+	note := tlStream("base", "noteauthor", "public", "2026-01-02T03:04:05.000Z", entity.UserLite{})
+	note.Renote = &emb
+	ch.OnRedisEvent(mustJSON(t, map[string]any{
+		"type": "unreadNotification",
+		"body": map[string]any{"id": "n1", "type": "renote", "noteId": "base", "note": note},
+	}))
+
 	require.Len(t, ctx.sentType, 1)
-	assert.Equal(t, "follow", ctx.sentType[0])
-	assert.JSONEq(t, `{"id":"u2","username":"bob"}`, string(sentBytes(t, ctx, 0)),
-		"non-note envelope (follow) body must be forwarded unchanged")
+	assert.Equal(t, "unreadNotification", ctx.sentType[0])
+	r := notifNoteRenote(t, sentBytes(t, ctx, 0))
+	require.NotNil(t, r)
+	assert.True(t, r.IsHidden, "unreadNotification の非可視 embed は blank されること")
+	assert.Nil(t, r.Text)
+	assert.Empty(t, r.Files, "非可視 embed の添付ファイル URL を送らないこと")
+}
+
+// positive control: 見える embed なら unreadNotification でも添付ごとそのまま届く
+// (ゲートが「常に空にする」で通っているだけではないことを固定する)。
+func TestMain_UnreadNotificationEnvelopeVisibleEmbedKeepsFiles(t *testing.T) {
+	ctx := newCtx(&model.User{ID: "viewer"})
+	ctx.followingSnap = map[string]bool{"renoteauthor": true}
+	ch := NewMain(ctx)
+	ch.Init(nil)
+
+	emb := embed("followers", "renoteauthor", nil)
+	emb.FileIDs = []string{"f2"}
+	emb.Files = []any{map[string]any{"id": "f2", "url": "https://example.com/ok.png"}}
+	note := tlStream("base", "noteauthor", "public", "2026-01-02T03:04:05.000Z", entity.UserLite{})
+	note.Renote = &emb
+	payload := mustJSON(t, map[string]any{
+		"type": "unreadNotification",
+		"body": map[string]any{"id": "n1", "type": "renote", "noteId": "base", "note": note},
+	})
+	ch.OnRedisEvent(payload)
+
+	require.Len(t, ctx.sentType, 1)
+	r := notifNoteRenote(t, sentBytes(t, ctx, 0))
+	require.NotNil(t, r)
+	assert.False(t, r.IsHidden)
+	require.Len(t, r.Files, 1)
+}
+
+// note を持たない main envelope はゲートに掛けても **byte 単位で** verbatim で
+// 通ること。ゲートを type 列挙ではなく全 envelope に掛けているので、無関係な
+// イベントを壊していないことを固定する。
+//
+// **JSONEq ではなく byte 比較にしてある。** ゲートが body を map[string]any 経由で
+// re-marshal してしまうと、key 順が並び替わり、2^53 超の整数が float64 で丸まり、
+// `<` `&` が \u003c \u0026 にエスケープされる。JSONEq はこれを全て「同値」と
+// 見なすので、劣化を素通りさせる。fixture にその 3 つを仕込んである。
+//
+// **note を持つ envelope は verbatim にならない。** hide が実際に何かを blank した
+// ときは hideNotificationNote が map[string]any 経由で組み直すので、上記の変質が
+// 起きる。bare notification topic では #1568 以来の挙動で、unreadNotification に
+// 及ぶのは新しい。packed notification の top-level に 2^53 超の整数を置く field は
+// 現状無い (id 系は文字列、choice は選択肢 index)。
+//
+// 一覧は `main:<id>` topic に流れる実在の envelope 全 20 種のうち、この else 分岐に
+// 来て**かつ note を持たない** 16 種。数え方: `grep -rn "PublishMainEvent(" internal/
+// --include='*.go'` から interface 宣言・メソッド定義本体 (stream/main_publisher.go)・
+// _test.go を除き、第 2 引数のリテラルを uniq
+// した 20 種から、note envelope (reply / renote / mention = isNoteEnvelope 側) と
+// unreadNotification (note を**持ちうる**ので verbatim とは限らない。gate の効きは
+// TestMain_UnreadNotificationEnvelopeEmbedHidden で見る) を引いた残り。
+//
+// **これは else 分岐に来るものの全量ではない。** MainChannel は `notifications:<id>`
+// topic も購読しており、bare 通知のうち `app` 型は Extra の `body` が top-level に
+// merge されるせいで envelope と誤検出されて else 分岐に来る (#2738、本 diff 以前
+// からの既存バグ)。その body は文字列なので hideNotificationNote は unmarshal に
+// 失敗して verbatim を返す = gate は素通しで、劣化はしない。
+//
+// **固定できるのは「この 16 種の body を gate が壊さない」ことまで。** gate を type
+// 列挙にしなかった判断は「この 16 種はどれも top-level に `note` を持たない」という
+// 事実に寄りかかっているが、payload は手書きなので producer 側と連動しない。将来
+// どれかの body に `note` が生えても、この一覧は黙って古びるだけで落ちない。
+func TestMain_NonNoteEnvelopeUnaffectedByNotificationGate(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{"readAllNotifications", `{"type":"readAllNotifications","body":null}`},
+		{"notificationFlushed", `{"type":"notificationFlushed","body":null}`},
+		{"myTokenRegenerated", `{"type":"myTokenRegenerated","body":null}`},
+		// registryUpdated の value は任意のユーザー JSON。2^53 超の整数と HTML 文字を
+		// 含めて、re-marshal による丸めとエスケープを検出させる。value の中に "note" を
+		// 置いても top-level probe は見ないので影響しないことも同時に固定する。
+		{"registryUpdated", `{"type":"registryUpdated","body":{"scope":["client"],"key":"k","value":{"bigint":9007199254740993,"html":"a<b>&c","note":{"id":"not-a-note"}}}}`},
+		{"meUpdated", `{"type":"meUpdated","body":{"id":"viewer","name":"me","avatarDecorations":[{"angle":0.25}]}}`},
+		{"driveFileCreated", `{"type":"driveFileCreated","body":{"id":"f1","url":"https://example.com/f1"}}`},
+		{"announcementCreated", `{"type":"announcementCreated","body":{"announcement":{"id":"a1","text":"x & y"}}}`},
+		{"newChatMessage", `{"type":"newChatMessage","body":{"id":"m1","text":"hi","fromUserId":"bob"}}`},
+		{"signin", `{"type":"signin","body":{"id":"s1","ip":"127.0.0.1","success":true}}`},
+		{"urlUploadFinished", `{"type":"urlUploadFinished","body":{"marker":"m","file":{"id":"f1"}}}`},
+		{"pageEvent", `{"type":"pageEvent","body":{"pageId":"p1","event":"e","var":{"n":1}}}`},
+		{"readAllAnnouncements", `{"type":"readAllAnnouncements","body":null}`},
+		{"follow", `{"type":"follow","body":{"id":"bob","username":"bob"}}`},
+		{"followed", `{"type":"followed","body":{"id":"bob","username":"bob"}}`},
+		{"unfollow", `{"type":"unfollow","body":{"id":"bob","username":"bob"}}`},
+		{"receiveFollowRequest", `{"type":"receiveFollowRequest","body":{"id":"bob","username":"bob"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newCtx(&model.User{ID: "viewer"})
+			ch := NewMain(ctx)
+			ch.Init(nil)
+			ch.OnRedisEvent([]byte(tc.payload))
+			require.Len(t, ctx.sentType, 1)
+			assert.Equal(t, tc.name, ctx.sentType[0], "envelope の type がそのまま転送されること")
+			var env struct {
+				Body json.RawMessage `json:"body"`
+			}
+			require.NoError(t, json.Unmarshal([]byte(tc.payload), &env))
+			assert.Equal(t, string(env.Body), string(sentBytes(t, ctx, 0)),
+				"note を持たない body は byte 単位で verbatim であること")
+		})
+	}
 }

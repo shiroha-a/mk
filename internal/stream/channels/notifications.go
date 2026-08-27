@@ -132,6 +132,28 @@ func (c *MainChannel) OnRedisEvent(payload []byte) {
 		// top-level 著者設定 + depth-2 embed を hide する (#1568)。
 		if isNoteEnvelope(env.Type) {
 			body = json.RawMessage(hideEmbedsForViewer(env.Body, viewerUserFromCtx(c.ctx), c.ctx.FollowingSnapshot(), time.Now().UnixMilli()))
+		} else {
+			// note を内包する envelope にも bare notification と同じ **hide gate** を
+			// 通す。unreadNotification は packed notification を body にそのまま
+			// 載せるので、これが無いと非可視 embed の内容が「未読バッジ用」イベント
+			// 経由でそのまま届く。
+			//
+			// bare 経路がその前に掛けている instance-mute drop
+			// (notificationFromMutedInstance) はここでは掛けない。upstream main.ts も
+			// gate するのは notification / mention だけで unreadNotification は素通し
+			// なので、そちらは parity 側に合わせてある。
+			//
+			// **type を列挙しないのは、列挙こそが漏れた原因だから。** #1568 は
+			// bare notification topic と reply/renote/mention envelope だけを塞ぎ、
+			// 同じ packed body を運ぶ unreadNotification を見落としていた。
+			// hideNotificationNote は `note` を持たない body (readAllNotifications の
+			// null、meUpdated、driveFileCreated 等) を verbatim で返すので、通知と
+			// 無関係な envelope には作用しない。**ただしコストは掛かる** — probe struct
+			// が 1 field でも json.Unmarshal は body 全体を走査するので、任意サイズの
+			// body を運ぶ型 (registryUpdated / pageEvent) にも 1 回分乗る。probe struct は
+			// 1 field なので追加コストは Unmarshal 1 回分に留まる (FollowingSnapshot は
+			// note を検出してからしか触らない)。
+			body = json.RawMessage(hideNotificationNote(c.ctx, env.Body))
 		}
 		_ = c.ctx.Send(env.Type, body)
 		return
