@@ -524,6 +524,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | home / hybrid / local channel の reply gate | `withReplies` 系の条件を満たさない返信は流さない | 加えて **viewer が mentions に含まれる返信は流す** escape hatch を持つ (#1195)。ただし specified note の宛先 (`visibleUserIds`) は本文で mention されたわけではないので除外する |
 | webhook の note embed gate | note/reply/renote で skipHide | 全イベントで gate、viewer/repo nil は fail-closed |
 | streaming / 通知の未知 visibility | — | fail-closed (誤配信しない) |
+| 通知一覧の不可視 note | `NoteEntityService.packMany` は入力と 1:1 で null を返さず、可視性は `hideNote` が `text` / `files` 等を blank して `isHidden: true` を立てるだけ。**通知行は残る** (`NotificationEntityService` が note を理由に落とすのは、削除済で `packedNotes` に載らなかった行だけ。notifier 不在 / role 削除済などの理由では別途落ちる) | **通知行ごと落とす**。`collectNotifications` の `FilterVisible` が不可視 note を `noteByID` に載せず、note-required 通知はその行ごと除外される (#1444 / #1953)。通知が来た事実そのものを伏せる分だけ安全側。`noteId` だけの行を返さない点は upstream と同じ。**stream (`#1471`) と Web Push (`#1572`) は行を残して note detail だけ落とす** — 通知イベント自体を落とすと未読が食い違い、push は届かなくなるため。REST に揃えないこと |
 | URL preview の scheme 判定 | 生文字列の case-sensitive `startsWith` | case-insensitive (RFC 3986 準拠)。非 http(s) の thumbnail / icon は値を落とす |
 | `cleanRemoteNotes` のクリップ保持 | `note.clippedCount = 0` で判定 | 加えて `clip_note` を直接 `NOT EXISTS` で見る。mk-go はクリップ件数の非正規化カウンタを維持せず `clip_note` を数える設計 (#2243) なので `clippedCount` は常に 0 で、upstream の条件をそのまま移植するとクリップ済みノートを保護できない (#2329)。`clippedCount` / `pageCount` の比較自体は TS から切り戻したインスタンスのために残してある |
 | `securityKeysAvailable` | unset-mfa で触らない (`securityKeys` を毎回 count するため陳腐化しない) | 全鍵削除に合わせ false にする (mk-go は列をキャッシュとして読むため) |

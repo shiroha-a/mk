@@ -12,8 +12,13 @@ import (
 )
 
 // NoteRepoPacker adapts (NoteRepository + id.Generator) into the
-// notification.NotePacker interface. The adapter re-uses entity.PackNote so
-// that the Web Push payload matches the shape returned by /api/i/notifications.
+// notification.NotePacker interface, re-using entity.PackNote for the note shape.
+//
+// **REST /api/i/notifications と同一の内容にはならない。** REST と streaming は
+// entity.NoteFieldResolver を通して files / channel / myReaction / poll の isVoted を
+// 埋めるが (#2735)、ここは通していないので files は空配列のままになる。結果として
+// push 本文の要約から `(📎N)` が落ちる (notesummary.Get が note["files"] を見るため、
+// 本文が無く画像だけの通知は空文字になる)。#2737 で扱う。
 type NoteRepoPacker struct {
 	repo          repository.NoteRepository
 	idGen         id.Generator
@@ -28,13 +33,15 @@ func NewNoteRepoPacker(repo repository.NoteRepository, idGen id.Generator, follo
 }
 
 // PackNoteByID implements notification.NotePacker. viewerID is the push
-// recipient (notifiee); the note is gated by their visibility before packing,
-// mirroring REST i/notifications (FilterVisible, #1444) and the stream
-// notification path (noteVisibleToNotifiee, #1471): when the recipient cannot
-// see the note, return (nil, false) so the caller omits the note detail (the
-// notification keeps its noteId). Web Push previously packed the note with no
-// gate at all (#1572 IDOR). followingRepo unwired / blank viewerID fails closed
-// for followers / specified notes; public / home always pass.
+// recipient (notifiee); the note is gated by their visibility before packing
+// (CanSeeNote)。見えない場合は (nil, false) を返し、呼び出し元が note detail を
+// 省く (通知自体は noteId を持ったまま届く)。Web Push previously packed the note
+// with no gate at all (#1572 IDOR). followingRepo unwired / blank viewerID fails
+// closed for followers / specified notes; public / home always pass.
+//
+// **REST i/notifications とは shape が違う。** あちらは #1953 以降 note-required
+// 通知を行ごと落とすが、push で通知自体を落とすと届かなくなるので揃えない。
+// stream 通知 (noteVisibleToNotifiee、#1471) と同じ「行は残して detail を落とす」形。
 func (p *NoteRepoPacker) PackNoteByID(noteID, viewerID string) (map[string]any, bool) {
 	if p == nil || p.repo == nil {
 		return nil, false

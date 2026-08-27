@@ -1,7 +1,7 @@
 # Playwright e2e
 
 mk-go のフロントエンド / API を実ブラウザから検証する e2e。spec は
-`tests/playwright/specs/` にあり、現在 289 ファイル / 438 テスト
+`tests/playwright/specs/` にあり、現在 290 ファイル / 439 テスト
 (`npx playwright test --list` で数えられる)。
 
 Cypress からの移行完了に伴い、frontend e2e はこちらに一本化した (#2437)。本家も
@@ -46,7 +46,7 @@ bump したときに回す (`docs/upstream-catch-up.md`)。
 **4 シャード並列** (`--shard=i/4`、`fail-fast: false`)。check 名は
 `spec (mk-go 1/4)` 〜 `4/4`。
 
-**1 スタックあたりは直列でしか回せない。** 289 spec のうち 173 が共有の root (alice) で
+**1 スタックあたりは直列でしか回せない。** 290 spec のうち 173 が共有の root (alice) で
 サインインし、instance meta は全 spec が共有する。Playwright はファイル単位で並列化する
 ので `workers` を上げると `profile_iscat_toggle` と `profile_isbot_toggle` が同じ
 アカウントを、`admin_branding_save` と `about_page_render` が同じ meta を取り合う。

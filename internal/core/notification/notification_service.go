@@ -300,7 +300,9 @@ func (s *Service) createWithPush(ctx context.Context, in CreateInput, pushFn fun
 	// publisher / main の両方で packed body を共有する(Devin #314 #1)。
 	// notifieeID を渡して Pack 側で note embed の visibility check (#1471)
 	// を効かせる; followers / specified note を非閲覧 notifiee の stream に
-	// 流さない (REST i/notifications #1444 と対称な doctrine)。
+	// 流さない。**REST i/notifications とは shape が違う** — あちらは #1953 以降
+	// note-required 通知を行ごと落とすが、stream は通知イベント自体を落とすと
+	// 未読が食い違うので行は残して note detail だけ落とす。
 	var packed any = n
 	if s.packer != nil {
 		packed = s.packer.Pack(in.NotifieeID, n)

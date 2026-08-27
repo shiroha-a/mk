@@ -670,9 +670,11 @@ func (h *Hook) buildPushBody(n *Notification, notifieeID string) map[string]any 
 	}
 	if n.NoteID != "" {
 		body["noteId"] = n.NoteID
-		// note embed は受信者 (notifiee) 可視性で gate する。REST i/notifications
-		// (#1444) / stream 通知 (#1471) と同じく、見えない note は detail を載せず
-		// noteId だけ残す (#1572)。packer 未配線時は note 省略。
+		// note embed は受信者 (notifiee) 可視性で gate する。stream 通知 (#1471) と
+		// 同じく、見えない note は detail を載せず noteId だけ残す (#1572)。
+		// REST i/notifications は #1953 以降そういう行を**丸ごと**落とすので、
+		// そちらに揃えないこと (push を落とすと通知自体が届かなくなる)。
+		// packer 未配線時は note 省略。
 		if h.notePacker != nil {
 			if packed, ok := h.notePacker.PackNoteByID(n.NoteID, notifieeID); ok {
 				body["note"] = packed

@@ -32,7 +32,7 @@ self-signed cert で TLS を終端する (spec 側は `ignoreHTTPSErrors` で受
 specs/
 ├── upstream/       # upstream Misskey にも存在する機能の検証
 │   ├── ui/         # ブラウザを駆動する (194 spec)
-│   └── api/        # API の shape / 挙動 (95 spec)
+│   └── api/        # API の shape / 挙動 (96 spec)
 └── mkgo/           # mk-go 独自機能の検証 (現時点で空、.gitkeep のみ)
 ```
 
@@ -67,7 +67,7 @@ shape や挙動を検証する spec。
 この境界は「どちらが上等か」ではない。API の shape 検証は drop-in 互換の regression
 検出に不可欠で、UI 操作より速く安定する。両方を別々に育てる。
 
-**現在の 289 spec はすべて `upstream/`。** 分割時に全 spec を確認したが、mk-go 独自
+**現在の 290 spec はすべて `upstream/`。** 分割時に全 spec を確認したが、mk-go 独自
 機能 (cherrypick 由来の chat 拡張、`mkGoVersion` 等の additive field) を検証するものは
 1 件も無かった。むしろ `i/profile_extra.spec.ts` のように **mk-go 拡張を明示的に scope
 外としている** spec もある。
@@ -112,7 +112,7 @@ tests/playwright/
 ├── nginx/                      # self-signed TLS を終端する reverse proxy
 ├── specs/
 │   ├── upstream/ui/            # ブラウザを駆動する (194 spec)
-│   ├── upstream/api/           # API の shape / 挙動 (95 spec)
+│   ├── upstream/api/           # API の shape / 挙動 (96 spec)
 │   └── mkgo/                   # mk-go 独自 (現時点で空)
 └── fixtures/                   # 13 ファイル
     ├── api.ts                  # POST /api/<endpoint> ラッパ
@@ -124,7 +124,7 @@ tests/playwright/
 
 ## 並列度
 
-**1 スタックに対しては直列で回すしかない** (`workers: 1`)。289 spec のうち 173 が
+**1 スタックに対しては直列で回すしかない** (`workers: 1`)。290 spec のうち 173 が
 共有の root (alice) でサインインし、instance meta は全 spec が共有する。Playwright は
 ファイル単位で並列化するので、`workers` を上げると `profile_iscat_toggle` と
 `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
