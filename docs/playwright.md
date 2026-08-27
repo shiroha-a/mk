@@ -85,9 +85,12 @@ find tests/playwright -name '*.js' \
 ```
 
 **除外は要る** — `playwright-report/trace/` に viewer の資産が 7 本入る。
-`git status` / `git clean -fd` は ignore したぶん当てにならない (`--ignored` を
-足しても、既定はディレクトリを畳み、`-uall` にすると `node_modules/` ごと出て、
-tracked な `.js` と git がクォートする名前は落ちる)。
+
+`git status --ignored | grep '\.js$'` でも同じ 1 件に届く。丸ごと ignore の
+ディレクトリは畳まれて `.js` で終わらず、shadowing する `.js` は必ず `.ts` の隣に
+いるので個別に出る (`-uall` を足すと逆に `node_modules/` ごと出て使えない)。
+ただし **tracked な `.js` と、git がクォートする名前 (空白・非 ASCII) は落とす**
+ので `find` のほうが確実。`git clean -fd` は ignore 済みなので消してくれない。
 
 3 件とも実際に踏んだ罠。
 
