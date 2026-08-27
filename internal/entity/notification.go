@@ -45,6 +45,10 @@ type packOptions struct {
 	// viewer は invitation pack の視点 (= notifiee)。chatRoomInvitationReceived
 	// の room.isMuted / invitationExists を viewer 視点で算出するために渡す。
 	viewer string
+	// noteResolver は埋め込み note の後段 field (files / channel / myReaction /
+	// poll の isVoted) を埋める。nil なら files が空配列のままになる (#2735)。
+	// viewer は上の `viewer` を共用する (notifiee は 1 人しかいない)。
+	noteResolver *NoteFieldResolver
 }
 
 // NotificationOption configures optional notification packing behavior.
@@ -66,6 +70,22 @@ func WithChatInvitationLookup(fn ChatInvitationLookup) NotificationOption {
 // as the chat invitation's room flags (#1559)。
 func WithViewer(viewerID string) NotificationOption {
 	return func(o *packOptions) { o.viewer = viewerID }
+}
+
+// WithNoteFieldResolver supplies the NoteFieldResolver used to populate the
+// embedded note's post-pack fields: `files` above all, plus channel, myReaction
+// and the poll's isVoted (#2735)。
+//
+// packNoteAtDepth は Files を空スライスで初期化するだけなので、これを渡さない
+// 限り通知の note は添付メディアを持たない。upstream NotificationEntityService は
+// note を `noteEntityService.pack(noteId, { id: meId }, { detail: true })` で
+// pack するので、viewer 依存 field まで含めて解決するのが parity 側。
+//
+// viewer は WithViewer で渡した notifiee ID をそのまま使う。**resolver が viewer
+// から読むのは ID だけ** (ResolveViewerFields) なので、pack のためだけに user 行を
+// 引き直さない。この前提は TestResolveViewerFields_UsesViewerIDOnly が固定する。
+func WithNoteFieldResolver(r *NoteFieldResolver) NotificationOption {
+	return func(o *packOptions) { o.noteResolver = r }
 }
 
 func buildPackOptions(opts []NotificationOption) *packOptions {
@@ -159,7 +179,43 @@ func PackNotifications(items []NotificationItem, idGen id.Generator, instLookup 
 			out = append(out, packed)
 		}
 	}
+	resolveNoteFields(out, packOpts)
 	return out
+}
+
+// resolveNoteFields runs the NoteFieldResolver over every embedded `note` of the
+// packed batch in a SINGLE pass, so a 20-item notification page costs one
+// drive_file / channel / reaction lookup rather than one per notification.
+//
+// Apply は []NoteEntity の要素を `&notes[i]` 経由で mutate するため、map から値を
+// 取り出した slice に対して走らせて書き戻す (notehide.hideNotificationNotesAt と
+// 同型)。Renote / Reply は pointer なので embed 側の解決はそのまま反映される。
+func resolveNoteFields(packed []map[string]any, opts *packOptions) {
+	if opts == nil || opts.noteResolver == nil || len(packed) == 0 {
+		return
+	}
+	notes := make([]NoteEntity, 0, len(packed))
+	idx := make([]int, 0, len(packed))
+	for i := range packed {
+		n, ok := packed[i]["note"].(NoteEntity)
+		if !ok {
+			continue
+		}
+		notes = append(notes, n)
+		idx = append(idx, i)
+	}
+	if len(notes) == 0 {
+		return
+	}
+	// viewer は notifiee (= WithViewer)。空なら viewer 非依存の field だけ解決する。
+	var viewer *model.User
+	if opts.viewer != "" {
+		viewer = &model.User{ID: opts.viewer}
+	}
+	opts.noteResolver.Apply(notes, viewer)
+	for j, i := range idx {
+		packed[i]["note"] = notes[j]
+	}
 }
 
 // packNotificationCore is the resolver-aware body shared by the single-item

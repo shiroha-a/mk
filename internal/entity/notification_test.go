@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/datatypes"
 )
 
 func TestPackNotification_NilInput(t *testing.T) {
@@ -338,4 +339,181 @@ func TestPackNotification_ChatRoomInvitation_DroppedWhenLookupUnset(t *testing.T
 		Extra:     map[string]any{"invitationId": "inv1"},
 	}
 	assert.Nil(t, PackNotification(n, nil, nil, idGen, nil, nil))
+}
+
+// #2735: 通知の note embed に files が入ること。packNoteAtDepth は Files を空
+// スライスで初期化するだけなので、resolver を渡さない限り添付メディアは返らない。
+func TestPackNotification_ResolvesNoteFiles(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	files := &stubDriveFileLookup{files: map[string]*model.DriveFile{
+		"f1": {ID: "f1", Name: "a.png", Type: "image/png", URL: "https://example.com/f1"},
+	}}
+	r := NewNoteFieldResolver(files, nil, nil, nil, nil, idGen)
+
+	n := &notification.Notification{
+		ID: idGen.Generate(time.Now()), CreatedAt: time.Now(),
+		Type: notification.TypeMention, NotifierID: "u_bob", NoteID: "n1",
+	}
+	note := &model.Note{ID: "n1", UserID: "u_bob", FileIDs: model.StringArray{"f1"}}
+
+	out := PackNotification(n, nil, note, idGen, nil, nil, WithNoteFieldResolver(r))
+	packed, ok := out["note"].(NoteEntity)
+	require.True(t, ok)
+	require.Len(t, packed.Files, 1)
+}
+
+// resolver 未配線 (nil) でも panic せず、従来どおり files が空配列で返ること。
+// pin しているのは外形的な契約で、guard は resolveNoteFields と
+// NoteFieldResolver.Apply の nil receiver の 2 段どちらでも成立する。
+func TestPackNotification_NilNoteFieldResolverIsNoOp(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	n := &notification.Notification{
+		ID: idGen.Generate(time.Now()), CreatedAt: time.Now(),
+		Type: notification.TypeMention, NotifierID: "u_bob", NoteID: "n1",
+	}
+	note := &model.Note{ID: "n1", UserID: "u_bob", FileIDs: model.StringArray{"f1"}}
+
+	out := PackNotification(n, nil, note, idGen, nil, nil, WithNoteFieldResolver(nil))
+	packed, ok := out["note"].(NoteEntity)
+	require.True(t, ok)
+	assert.Empty(t, packed.Files)
+}
+
+// ページ全体を 1 バッチで解決すること。1 通知ごとに Apply を呼ぶと drive_file
+// lookup が件数分に増えるので、既存の Instance / Emoji resolver と同じく
+// lookup 呼び出しは 1 回に畳む。
+func TestPackNotifications_BatchesNoteFileLookup(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	files := &stubDriveFileLookup{files: map[string]*model.DriveFile{
+		"f1": {ID: "f1", Name: "a.png", Type: "image/png", URL: "https://example.com/f1"},
+		"f2": {ID: "f2", Name: "b.png", Type: "image/png", URL: "https://example.com/f2"},
+	}}
+	r := NewNoteFieldResolver(files, nil, nil, nil, nil, idGen)
+
+	items := make([]NotificationItem, 0, 2)
+	for i, spec := range []struct{ noteID, fileID string }{{"n1", "f1"}, {"n2", "f2"}} {
+		items = append(items, NotificationItem{
+			N: &notification.Notification{
+				ID: idGen.Generate(time.Now().Add(time.Duration(i) * time.Second)), CreatedAt: time.Now(),
+				Type: notification.TypeMention, NotifierID: "u_bob", NoteID: spec.noteID,
+			},
+			Note: &model.Note{ID: spec.noteID, UserID: "u_bob", FileIDs: model.StringArray{spec.fileID}},
+		})
+	}
+
+	out := PackNotifications(items, idGen, nil, nil, WithNoteFieldResolver(r))
+	require.Len(t, out, 2)
+	// **どの通知行にどの note が戻ったか**まで見る。resolveNoteFields は値型 slice に
+	// 抜き出して書き戻すので、対応付けを取り違えると通知 A の行に通知 B の note が
+	// 載る。件数だけ見ると (どちらも 1 件なので) 取りこぼす。
+	for i, want := range []string{"f1", "f2"} {
+		packed, ok := out[i]["note"].(NoteEntity)
+		require.True(t, ok)
+		require.Len(t, packed.Files, 1)
+		df, ok := packed.Files[0].(DriveFileEntity)
+		require.True(t, ok)
+		assert.Equal(t, want, df.ID, "out[%d] には対応する note が戻ること", i)
+	}
+	assert.Equal(t, 1, files.calls)
+}
+
+// note を持つ通知と持たない通知が混ざったページで、note が正しい行に戻ること。
+// resolveNoteFields は note を持つ行だけを抜き出して idx で戻すので、その間接参照を
+// 落とすと follow 通知の行に mention の note が生え、mention 側は未解決のままになる
+// (全件 note ありのバッチだけを見ていると取りこぼす失敗モード)。
+func TestPackNotifications_MixedNoteAndNoteLessRows(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	files := &stubDriveFileLookup{files: map[string]*model.DriveFile{
+		"f1": {ID: "f1", Name: "a.png", Type: "image/png", URL: "https://example.com/f1"},
+	}}
+	r := NewNoteFieldResolver(files, nil, nil, nil, nil, idGen)
+
+	base := time.Now()
+	items := []NotificationItem{
+		{N: &notification.Notification{
+			ID: idGen.Generate(base), CreatedAt: base,
+			Type: notification.TypeFollow, NotifierID: "u_bob",
+		}},
+		{
+			N: &notification.Notification{
+				ID: idGen.Generate(base.Add(time.Second)), CreatedAt: base,
+				Type: notification.TypeMention, NotifierID: "u_bob", NoteID: "n1",
+			},
+			Note: &model.Note{ID: "n1", UserID: "u_bob", FileIDs: model.StringArray{"f1"}},
+		},
+	}
+
+	out := PackNotifications(items, idGen, nil, nil, WithNoteFieldResolver(r))
+	require.Len(t, out, 2)
+	_, hasNote := out[0]["note"]
+	assert.False(t, hasNote, "note を持たない通知の行に note が生えないこと")
+	packed, ok := out[1]["note"].(NoteEntity)
+	require.True(t, ok)
+	require.Len(t, packed.Files, 1, "note を持つ側の files が解決されること")
+}
+
+// note を伴わない通知 (follow 等) しかない場合は drive_file lookup を呼ばない。
+// pin しているのは外形的な契約で、guard は resolveNoteFields の `len(notes) == 0` と
+// ResolveFiles の `len(allIDs) == 0` の 2 段どちらでも成立する。
+func TestPackNotifications_NoNoteSkipsFileLookup(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	files := &stubDriveFileLookup{files: map[string]*model.DriveFile{}}
+	r := NewNoteFieldResolver(files, nil, nil, nil, nil, idGen)
+
+	out := PackNotifications([]NotificationItem{{
+		N: &notification.Notification{
+			ID: idGen.Generate(time.Now()), CreatedAt: time.Now(),
+			Type: notification.TypeFollow, NotifierID: "u_bob",
+		},
+	}}, idGen, nil, nil, WithNoteFieldResolver(r))
+	require.Len(t, out, 1)
+	assert.Equal(t, 0, files.calls)
+}
+
+// #2735: viewer 依存 field も notifiee 視点で解決されること。viewer は
+// WithViewer で渡した notifiee ID から組み立てる。
+func TestPackNotification_ResolvesViewerFieldsForNotifiee(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	reactions := &stubNoteReactionLookup{rows: map[string]*model.NoteReaction{
+		"n1": {NoteID: "n1", Reaction: "👍"},
+	}}
+	r := NewNoteFieldResolver(nil, nil, nil, reactions, nil, idGen)
+
+	n := &notification.Notification{
+		ID: idGen.Generate(time.Now()), CreatedAt: time.Now(),
+		Type: notification.TypeReaction, NotifierID: "u_bob", NoteID: "n1", Reaction: "👍",
+	}
+	note := &model.Note{
+		ID: "n1", UserID: "u_alice",
+		Reactions: datatypes.JSON([]byte(`{"👍":1}`)),
+	}
+
+	out := PackNotification(n, nil, note, idGen, nil, nil,
+		WithViewer("u_alice"), WithNoteFieldResolver(r))
+	packed, ok := out["note"].(NoteEntity)
+	require.True(t, ok)
+	require.NotNil(t, packed.MyReaction)
+	assert.Equal(t, "👍", *packed.MyReaction)
+}
+
+// WithViewer が空 (= notifiee 不明) なら viewer 依存 field は解決しない。
+// 空 ID で note_reaction を引きに行かないことの guard。
+func TestPackNotification_EmptyViewerSkipsViewerFields(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	reactions := &countingReactionLookup{rows: map[string]*model.NoteReaction{
+		"n1": {NoteID: "n1", Reaction: "👍"},
+	}}
+	r := NewNoteFieldResolver(nil, nil, nil, reactions, nil, idGen)
+
+	n := &notification.Notification{
+		ID: idGen.Generate(time.Now()), CreatedAt: time.Now(),
+		Type: notification.TypeReaction, NoteID: "n1",
+	}
+	note := &model.Note{ID: "n1", UserID: "u_alice", Reactions: datatypes.JSON([]byte(`{"👍":1}`))}
+
+	out := PackNotification(n, nil, note, idGen, nil, nil, WithNoteFieldResolver(r))
+	packed, ok := out["note"].(NoteEntity)
+	require.True(t, ok)
+	assert.Nil(t, packed.MyReaction)
+	assert.Empty(t, reactions.queriedID, "viewer 不明のまま note_reaction を引かないこと")
 }

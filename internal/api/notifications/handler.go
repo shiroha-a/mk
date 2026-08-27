@@ -38,6 +38,10 @@ type Handler struct {
 	testNotifier         TestNotifier
 	roleLookup           entity.RoleLookup
 	chatInvitationLookup entity.ChatInvitationLookup
+	// noteFieldResolver は通知に埋め込む note の後段 field (files / channel /
+	// myReaction / poll の isVoted) を埋める (#2735)。packer は Files を空スライスで
+	// 初期化するだけなので、未配線だと添付メディアが一切返らない。
+	noteFieldResolver *entity.NoteFieldResolver
 	// accessTokenRepo は notifications/create の 'app' 通知で、リクエストに使われた
 	// access token を raw token から再解決し、header/icon の fallback (token.name /
 	// token.iconUrl) + appAccessTokenId を埋めるために使う (#1557)。未配線なら
@@ -61,13 +65,26 @@ func (h *Handler) SetChatInvitationLookup(fn entity.ChatInvitationLookup) {
 	h.chatInvitationLookup = fn
 }
 
+// SetNoteFieldResolver wires the resolver that populates the embedded note's
+// `files` (and channel / myReaction / poll isVoted) on notification payloads
+// (#2735)。未配線なら従来どおり files は空配列のまま。
+func (h *Handler) SetNoteFieldResolver(r *entity.NoteFieldResolver) {
+	h.noteFieldResolver = r
+}
+
 // notificationOptions returns the per-call packing options (role / chat
-// invitation lookups, viewer) for the given viewer (= notifiee)。
+// invitation lookups, viewer, note field resolver) for the given viewer
+// (= notifiee)。
+//
+// viewer は note の後段 field 解決にも使われる。upstream NotificationEntityService は
+// note を `noteEntityService.pack(noteId, { id: meId }, { detail: true })` で
+// pack するので、myReaction / poll の isVoted も notifiee 視点で埋まる。
 func (h *Handler) notificationOptions(viewerID string) []entity.NotificationOption {
 	return []entity.NotificationOption{
 		entity.WithRoleLookup(h.roleLookup),
 		entity.WithChatInvitationLookup(h.chatInvitationLookup),
 		entity.WithViewer(viewerID),
+		entity.WithNoteFieldResolver(h.noteFieldResolver),
 	}
 }
 
@@ -160,7 +177,8 @@ type ListRequest struct {
 }
 
 // Show handles POST /api/i/notifications - returns the authenticated user's
-// notification timeline ordered newest first.
+// notification timeline. 既定は降順だが、sinceId 単独のページだけは昇順になる
+// (upstream と同じ。Service.List の ascending)。
 func (h *Handler) Show(c echo.Context) error {
 	user := middleware.GetUser(c)
 	req, ok := h.bindListRequest(c)
@@ -247,10 +265,12 @@ func (h *Handler) bindListRequest(c echo.Context) (ListRequest, bool) {
 
 // collectNotifications runs the shared fetch + filter + batched user/note
 // resolution path used by both Show and Grouped. It returns the post-filter
-// notification slice (newest first) plus the resolved notifier-user and
-// viewer-visible note maps. The note map is gated by CanSeeNote (#1444 IDOR):
-// followers / specified notes the viewer cannot see are dropped so noteId
-// stays but the embedded detail does not leak.
+// notification slice, in Service.List's own order, plus the resolved notifier-user and
+// viewer-visible note maps. The note map is gated by CanSeeNote (#1444 IDOR).
+//
+// #1953 以降、note-required 通知でその note が map に無いものは**行ごと**落ちる
+// (noteId だけの行を返さない)。#1444 当初の「行は残して detail だけ落とす」形では
+// ないので、他経路をここに揃えにいくときは注意すること。
 func (h *Handler) collectNotifications(c echo.Context, user *model.User, req ListRequest) ([]*notification.Notification, map[string]*model.User, map[string]*model.Note, error) {
 	// upstream notifications.ts: 明示的な includeTypes:[] は空配列を返す
 	// (= 何も含めない)。omit (nil) は全 type を通す。Go の []string は
@@ -262,8 +282,9 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	}
 	// svc.List が upstream NotificationService.getNotifications 相当に cursor
 	// (sinceId/untilId)・向き (sinceId-only は昇順)・type filter・limit を適用して
-	// 返す (#1953)。ここではその後段で upstream packMany 側の drop (解決済み follow
-	// request / invalid notifier / 不可視 note) を適用する。
+	// 返す (#1953)。ここではその後段の drop (解決済み follow request / invalid
+	// notifier / 削除済 note) を適用する。**不可視 note の drop は mk-go 独自**で、
+	// upstream は hideNote で blank するだけで行を残す (下の #1953 ブロック参照)。
 	rows, err := h.svc.List(c.Request().Context(), user.ID, req.SinceID, req.UntilID, (*req.Limit), req.IncludeTypes, req.ExcludeTypes)
 	if err != nil {
 		return nil, nil, nil, err
@@ -363,12 +384,19 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 		}
 	}
 
-	// upstream packMany は note-required 通知 (noteId を持つ type) の note が削除済
-	// または viewer に不可視で pack できない場合、通知行ごと drop する
+	// upstream packMany は note-required 通知 (noteId を持つ type) の note が**削除済**
+	// で pack できない場合、通知行ごと drop する
 	// (`validNotifications.filter(x => !('noteId' in x) || packedNotes.has(x.noteId))`、
 	// #1953)。以前は note embed だけ nil 化して行を残していたが、upstream は noteId
-	// だけの通知を返さない。noteByID は可視性 filter 済なので NoteID があるのに
-	// noteByID に無い行を落とす。repo / queryService 配線済のときだけ適用する
+	// だけの通知を返さない。
+	//
+	// **不可視 note の扱いは upstream と違う。** 上の packMany は
+	// NotificationEntityService のほうで、note を引くのは NoteEntityService.packMany。
+	// そちらは入力と 1:1 で null を返さず、可視性は hideNote が blank するだけなので
+	// 行は残る。mk-go は noteByID が FilterVisible 済で、不可視 note の行もここで
+	// 落ちる。行の存在自体を伏せる分こちらが安全側なので維持する (#1444 の方針)。
+	//
+	// noteByID に無い NoteID を持つ行を落とす。repo / queryService 配線済のときだけ適用する
 	// (未配線の partial test では note 解決自体が走らず、全 note-required 通知を
 	// 誤って落とさないため)。
 	if h.noteRepo != nil && h.queryService != nil {
@@ -400,10 +428,17 @@ func (h *Handler) SetMutingRepo(r repository.MutingRepository) {
 //   - notifier.isSuspended
 //
 // Notifications without a notifierId (system notifications) always pass.
-// Unlike upstream, a notification whose notifier could not be resolved is kept
-// (not dropped): mk-go resolves notifiers best-effort and a transient
-// FindManyByIDs failure must not mass-drop the whole list; the packer renders a
-// missing notifier gracefully.
+//
+// **この関数は notifier を解決できなかった通知を落とさない。** 落とすのは
+// 呼び出し元で、notifier の fetch に成功したときだけ (notifierFetchOK、#2106 N6)。
+//
+// **fail-open が 3 箇所ある。** notifier の FindManyByIDs (呼び出し元)、mute 一覧の
+// ListMuteeIDs、instance-mute の FindProfileByUserID。どれも失敗を握り潰して
+// 「その filter は無かったこと」にするので、**3 つすべてが成功したページでだけ**
+// endpoint として upstream と同じになる。upstream は該当 fetch を await して
+// そのまま throw する (= 500 で行を返さない) 側。一覧を全滅させるより残すほうが
+// 害が小さいと判断している。notifier fetch の成否を知っているのは呼び出し元だけ
+// なので、その判定だけそちらに置く。
 func (h *Handler) filterValidNotifiers(viewerID string, rows []*notification.Notification, notifierByID map[string]*model.User) []*notification.Notification {
 	muted := map[string]bool{}
 	if h.mutingRepo != nil {

@@ -16,9 +16,13 @@ import (
 
 type stubDriveFileLookup struct {
 	files map[string]*model.DriveFile
+	// calls は FindByIDs の呼び出し回数。バッチ化 (ページ全体で 1 回) と、
+	// 対象が無いときに引かないことを固定するテストが読む。
+	calls int
 }
 
 func (s *stubDriveFileLookup) FindByIDs(ids []string) ([]*model.DriveFile, error) {
+	s.calls++
 	out := make([]*model.DriveFile, 0, len(ids))
 	for _, id := range ids {
 		if f, ok := s.files[id]; ok {
@@ -490,4 +494,72 @@ func TestNoteFieldResolver_MyReaction_SkipsZeroReactionNotes(t *testing.T) {
 	assert.Equal(t, []string{"hot"}, reactions.queriedID)
 	require.NotNil(t, notes[0].MyReaction)
 	assert.Nil(t, notes[1].MyReaction, "zero-reaction note must not get myReaction")
+}
+
+// #2735: resolver が viewer から読むのは ID だけであることを固定する。
+// entity.WithNoteFieldResolver は notifiee ID から `&model.User{ID: ...}` を
+// 組み立てて渡す (pack のためだけに user 行を引き直さない) ので、resolver が
+// ID 以外のフィールドを見るようになるとその前提が黙って壊れる。
+func TestResolveViewerFields_UsesViewerIDOnly(t *testing.T) {
+	newNotes := func() []NoteEntity {
+		return []NoteEntity{{
+			ID: "n1", ReactionCount: 1,
+			Poll: &PollEntity{Choices: []PollChoice{{Text: "a"}, {Text: "b"}}},
+		}}
+	}
+	reactions := &recordingReactionLookup{rows: map[string]*model.NoteReaction{
+		"n1": {NoteID: "n1", Reaction: "👍"},
+	}}
+	votes := &recordingPollVoteLookup{votes: map[string][]int{"n1": {1}}}
+	r := NewNoteFieldResolver(nil, nil, nil, reactions, nil, makeIDGen(t))
+	r.SetPollVoteLookup(votes)
+
+	// ID だけを持つ stub と、同じ ID で他フィールドが埋まった user の出力が
+	// 一致すること。
+	stub := newNotes()
+	r.ResolveViewerFields(stub, &model.User{ID: "viewer"})
+
+	// full 側は **ID 以外の値を ID と別物にしておく**。同じ文字列だと、resolver が
+	// Username を lookup key に使い始めても検出できない。
+	full := newNotes()
+	r.ResolveViewerFields(full, &model.User{
+		ID: "viewer", Username: "viewer_name", UsernameLower: "viewer_name",
+		IsBot: true,
+	})
+
+	// **lookup key が ID であること自体を見る。** 出力の一致だけだと、resolver が
+	// viewer.Username を key に使い始めても (stub が userID を無視するので) 検出できない。
+	assert.Equal(t, "viewer", reactions.gotUserID, "note_reaction は viewer.ID で引くこと")
+	assert.Equal(t, "viewer", votes.gotUserID, "poll_vote は viewer.ID で引くこと")
+
+	require.NotNil(t, stub[0].MyReaction, "positive control: myReaction が解決されていること")
+	assert.Equal(t, full[0].MyReaction, stub[0].MyReaction)
+	require.NotNil(t, stub[0].Poll)
+	require.Len(t, stub[0].Poll.Choices, 2)
+	assert.True(t, stub[0].Poll.Choices[1].IsVoted, "positive control: isVoted が解決されていること")
+	assert.Equal(t, full[0].Poll.Choices, stub[0].Poll.Choices)
+}
+
+// recordingReactionLookup records the userID it was queried with so tests can
+// assert that the resolver keys the lookup on viewer.ID.
+type recordingReactionLookup struct {
+	rows      map[string]*model.NoteReaction
+	gotUserID string
+}
+
+func (r *recordingReactionLookup) FindByUserAndNoteIDs(userID string, _ []string) (map[string]*model.NoteReaction, error) {
+	r.gotUserID = userID
+	return r.rows, nil
+}
+
+// recordingPollVoteLookup is the PollVoteLookup counterpart of
+// recordingReactionLookup.
+type recordingPollVoteLookup struct {
+	votes     map[string][]int
+	gotUserID string
+}
+
+func (r *recordingPollVoteLookup) FindByUserAndNoteIDs(userID string, _ []string) (map[string][]int, error) {
+	r.gotUserID = userID
+	return r.votes, nil
 }

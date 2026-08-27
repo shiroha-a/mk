@@ -268,6 +268,10 @@ type NotificationPublisher struct {
 	emojiLookup          entity.EmojiLookup
 	roleLookup           entity.RoleLookup
 	chatInvitationLookup entity.ChatInvitationLookup
+	// fieldResolver は埋め込み note の Files / Channel / MyReaction を埋める
+	// (#2735)。未配線だと通知 payload の files が空配列のままになり、通知ページの
+	// reply / mention / quote (MkNote で全体描画される) から添付メディアが消える。
+	fieldResolver *entity.NoteFieldResolver
 }
 
 // NewNotificationPublisher constructs a NotificationPublisher.
@@ -319,6 +323,27 @@ func (p *NotificationPublisher) SetChatInvitationLookup(fn entity.ChatInvitation
 	p.chatInvitationLookup = fn
 }
 
+// SetFieldResolver attaches a NoteFieldResolver so notification streaming
+// payloads carry the embedded note's Files / Channel / MyReaction / poll
+// isVoted, matching the REST i/notifications path (#2735)。
+//
+// NotePublisher の viewer=nil とは事情が違う。あちらは 1 本の payload を多数の
+// subscriber に fanout するので viewer が原理的に決まらないが、通知は
+// `notifications:<notifieeID>` / `main:<notifieeID>` の per-viewer topic なので
+// viewer は確定している。upstream も streaming 経路で notifiee を渡す
+// (NotificationService.ts → NotificationEntityService.pack(n, notifieeId))。
+//
+// **コストは通知 1 件ごとに乗る。** REST は 1 ページ分をまとめて 1 バッチで解決できるが、
+// Pack は notifiee ごとに呼ばれるので畳めない。内訳は条件ごとに 1 本ずつ:
+// note_reaction (reactionCount>0)、poll_vote (poll あり = pollEnded 通知では常に)、
+// drive_file (添付あり)、drive_folder (フォルダに入った添付あり)、user (owner を持つ
+// 添付あり。CachedUserRepository.FindManyByIDs は cache を読まず必ず委譲するので
+// 毎回 1 本)、channel (channelId あり)。
+// どれにも当たらない note では 0 件。
+func (p *NotificationPublisher) SetFieldResolver(r *entity.NoteFieldResolver) {
+	p.fieldResolver = r
+}
+
 // Pack implements core/notification.Packer. Returns the packed map shape
 // when repos are wired, otherwise the raw Notification so callers can
 // fall back to prior behaviour.
@@ -326,10 +351,14 @@ func (p *NotificationPublisher) SetChatInvitationLookup(fn entity.ChatInvitation
 // notifieeID は packed body を受け取る viewer。followers / specified
 // visibility の note は notifiee が CanSeeNote 相当の判定を満たさない
 // 場合 note field を nil にして本文 leak を防ぐ (#1471 IDOR fix)。
-// REST `i/notifications` の #1444 fix と対称: notification 行自体は残す
-// が note detail を落とすことで非可視 viewer に「通知は来た / 本文は隠す」
-// shape を実現する。notifieeID が空 (= Pack の呼び出し元が context を
-// 渡し損ねた) ときも fail-closed で followers / specified note を落とす。
+// notifieeID が空 (= Pack の呼び出し元が context を渡し損ねた) ときも
+// fail-closed で followers / specified note を落とす。
+//
+// **REST とは shape が違う。** stream は通知イベント自体を落とすと未読が
+// 食い違うので「行は残して note detail を落とす」形を採るが、REST
+// i/notifications は #1953 以降 note-required 通知を**行ごと**落とす
+// (noteId だけの行を返さない)。#1471 で stream にゲートを入れた当初は両者とも
+// 行を残していた (#1444 の時点では stream にゲート自体が無い)。
 func (p *NotificationPublisher) Pack(notifieeID string, n *corenotification.Notification) any {
 	if n == nil {
 		return nil
@@ -359,7 +388,8 @@ func (p *NotificationPublisher) Pack(notifieeID string, n *corenotification.Noti
 	packed := entity.PackNotification(n, user, note, p.idGen, p.instanceLookup, p.emojiLookup,
 		entity.WithRoleLookup(p.roleLookup),
 		entity.WithChatInvitationLookup(p.chatInvitationLookup),
-		entity.WithViewer(notifieeID))
+		entity.WithViewer(notifieeID),
+		entity.WithNoteFieldResolver(p.fieldResolver))
 	if packed == nil {
 		// packer が通知を drop した (例: roleAssigned で role 削除済)。nil map を
 		// any に box すると非 nil interface になり、downstream の nil guard を

@@ -2032,6 +2032,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationsHandler.SetMutingRepo(mutingRepo)
 	notificationsHandler.SetTestNotifier(notificationHook)
 	notificationsHandler.SetRoleLookup(roleNotifLookup)
+	// 通知に埋め込む note の files / channel / myReaction を埋める (#2735)。
+	notificationsHandler.SetNoteFieldResolver(noteFieldResolver)
 	// notifications/create の 'app' 通知で header/icon を token.name/iconUrl に
 	// fallback するため access token repo を配線 (#1557)。
 	notificationsHandler.SetAccessTokenRepo(repository.NewAccessTokenRepository(s.db))
@@ -2723,6 +2725,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// followers note を本人以外に embed しない (= fail-closed)。
 	notificationPublisher.SetFollowingChecker(followingRepo)
 	notificationPublisher.SetRoleLookup(roleNotifLookup)
+	// streaming の通知 payload にも note の files / channel を載せる (#2735)。
+	notificationPublisher.SetFieldResolver(noteFieldResolver)
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
 	reversiPublisher := stream.NewReversiGamePublisher(streamPubSub)
 	mainStreamPublisher := stream.NewMainStreamPublisher(streamPubSub)

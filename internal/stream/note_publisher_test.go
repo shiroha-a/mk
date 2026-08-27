@@ -920,3 +920,121 @@ func TestNotePublisher_NoReactionsSkipsPairReader(t *testing.T) {
 	np.PublishNote("homeTimeline:u1", n, &model.User{ID: "u1", Username: "alice"})
 	assert.Empty(t, reader.calls, "reaction 無しの renote では reader を引かない")
 }
+
+// #2735: NotificationPublisher 側にも FieldResolver を配線すると、通知の
+// streaming payload の note に Files が乗る。未配線だと通知ページの realtime
+// 追加分だけ添付メディアが消え、リロードするまで出てこない。
+func TestNotificationPublisher_FieldResolverPopulatesNoteFiles(t *testing.T) {
+	pub := &stubPublisher{}
+	np := NewNotificationPublisher(pub)
+	idGen, _ := id.NewGenerator("aidx")
+
+	driveRepo := testutil.NewMockDriveFileRepository()
+	fileID := idGen.Generate(time.Now())
+	driveRepo.Files[fileID] = &model.DriveFile{
+		ID: fileID, Name: "a.png", Type: "image/png", URL: "https://r/a.png",
+	}
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "u2", Username: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID: "note1", UserID: "u2", Visibility: model.NoteVisibilityPublic,
+			FileIDs: []string{fileID},
+		}},
+		idGen,
+	)
+	np.SetFieldResolver(entity.NewNoteFieldResolver(driveRepo, nil, nil, nil, nil, idGen))
+
+	np.PublishNotification("alice", &corenotification.Notification{
+		ID:         idGen.Generate(time.Now()),
+		Type:       corenotification.TypeReply,
+		NotifierID: "u2",
+		NoteID:     "note1",
+	})
+
+	require.Len(t, pub.payloads, 1)
+	raw := pub.payloads[0].(json.RawMessage)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+	note := body["note"].(map[string]any)
+	files, ok := note["files"].([]any)
+	require.True(t, ok, "note.files must be present on the notification payload")
+	require.Len(t, files, 1)
+	assert.Equal(t, fileID, files[0].(map[string]any)["id"])
+}
+
+// #2735: streaming の通知は per-viewer topic (notifications:<notifieeID>) なので
+// viewer が確定している。upstream も notifiee を渡して pack するため、
+// myReaction のような viewer 依存 field も解決されること。
+func TestNotificationPublisher_ResolvesViewerFieldsForNotifiee(t *testing.T) {
+	pub := &stubPublisher{}
+	np := NewNotificationPublisher(pub)
+	idGen, _ := id.NewGenerator("aidx")
+
+	reactionRepo := &stubStreamReactionLookup{rows: map[string]*model.NoteReaction{
+		"note1": {NoteID: "note1", Reaction: "👍"},
+	}}
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "u2", Username: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID: "note1", UserID: "alice", Visibility: model.NoteVisibilityPublic,
+			Reactions: datatypes.JSON([]byte(`{"👍":1}`)),
+		}},
+		idGen,
+	)
+	np.SetFieldResolver(entity.NewNoteFieldResolver(nil, nil, nil, reactionRepo, nil, idGen))
+
+	np.PublishNotification("alice", &corenotification.Notification{
+		ID:         idGen.Generate(time.Now()),
+		Type:       corenotification.TypeReaction,
+		NotifierID: "u2",
+		NoteID:     "note1",
+		Reaction:   "👍",
+	})
+
+	require.Len(t, pub.payloads, 1)
+	raw := pub.payloads[0].(json.RawMessage)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+	note := body["note"].(map[string]any)
+	assert.Equal(t, "👍", note["myReaction"], "notifiee 視点の myReaction が入ること")
+	assert.Equal(t, "alice", reactionRepo.viewerID, "notifiee を viewer として引くこと")
+}
+
+type stubStreamReactionLookup struct {
+	rows     map[string]*model.NoteReaction
+	viewerID string
+}
+
+func (s *stubStreamReactionLookup) FindByUserAndNoteIDs(userID string, _ []string) (map[string]*model.NoteReaction, error) {
+	s.viewerID = userID
+	return s.rows, nil
+}
+
+// 未配線 (nil resolver) では従来どおり files が空配列で、panic もしないこと。
+func TestNotificationPublisher_NoFieldResolverKeepsFilesEmpty(t *testing.T) {
+	pub := &stubPublisher{}
+	np := NewNotificationPublisher(pub)
+	idGen, _ := id.NewGenerator("aidx")
+	np.SetRepos(
+		&stubNotifUserRepo{user: &model.User{ID: "u2", Username: "bob"}},
+		&stubNotifNoteRepo{note: &model.Note{
+			ID: "note1", UserID: "u2", Visibility: model.NoteVisibilityPublic,
+			FileIDs: []string{"f1"},
+		}},
+		idGen,
+	)
+
+	np.PublishNotification("alice", &corenotification.Notification{
+		ID:         idGen.Generate(time.Now()),
+		Type:       corenotification.TypeReply,
+		NotifierID: "u2",
+		NoteID:     "note1",
+	})
+
+	require.Len(t, pub.payloads, 1)
+	raw := pub.payloads[0].(json.RawMessage)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(raw, &body))
+	note := body["note"].(map[string]any)
+	assert.Empty(t, note["files"])
+}

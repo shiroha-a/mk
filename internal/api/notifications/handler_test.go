@@ -20,6 +20,7 @@ import (
 
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notification"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -799,12 +800,10 @@ func TestShow_BatchFetchesNotifierAndNote(t *testing.T) {
 }
 
 // #1444 IDOR: B が followers note で A に reply した時、A (= B を follow して
-// いない recipient) の通知一覧で note embed が CanSeeNote で gate され、
-// 通知行は残るが `note` field が落ちることを確認する (本家
-// NotificationEntityService と同じ shape)。`noteId` は echo されるので
-// frontend が note id だけ拾って後段 API で 404 を貰うことは可能だが、
-// 全文 / author / visibleUserIds などの leak は止まる。
-func TestShow_FollowersReply_NonFollower_NoteHidden(t *testing.T) {
+// いない recipient) の通知一覧に**その通知行自体が出ない**ことを確認する。
+// note embed が CanSeeNote で gate され、note を pack できない note-required
+// 通知は #1953 で行ごと落とす扱いになった (それ以前は noteId だけの行を残していた)。
+func TestShow_FollowersReply_NonFollower_RowDropped(t *testing.T) {
 	h, svc := newTestHandler(t)
 	userRepo := testutil.NewMockUserRepository()
 	noteRepo := testutil.NewMockNoteRepository()
@@ -831,10 +830,14 @@ func TestShow_FollowersReply_NonFollower_NoteHidden(t *testing.T) {
 
 	var resp []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	// upstream packMany は note が不可視/削除済で pack できない note-required 通知を
-	// 行ごと drop する (`!('noteId' in x) || packedNotes.has(x.noteId)`、#1953)。以前は
-	// embed のみ nil 化して noteId だけの行を残していたが upstream 非互換だった。
-	// 非フォロワーには followers note への reply 通知自体が出ない (#1444 IDOR も更に強化)。
+	// note-required 通知はその note が pack できないと行ごと落ちる
+	// (`!('noteId' in x) || packedNotes.has(x.noteId)`、#1953)。以前は embed のみ
+	// nil 化して noteId だけの行を残していたが upstream 非互換だった。
+	//
+	// **不可視 note まで落とすのは mk-go 独自。** upstream の
+	// NoteEntityService.packMany は入力と 1:1 で null を返さず、可視性は hideNote が
+	// blank するだけなので行は残る。mk-go は行の存在自体を伏せる分だけ安全側に
+	// 倒している (#1444 IDOR)。
 	require.Len(t, resp, 0, "不可視 note の note-required 通知は行ごと drop される (#1953 / #1444)")
 }
 
@@ -966,4 +969,168 @@ func TestShow_UnresolvedNotifierDropped(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	require.Len(t, resp, 1, "bob (解決不能 notifier) の follow 通知は drop、carol のみ残る")
 	assert.Equal(t, "carol", resp[0]["userId"])
+}
+
+// #2735: 通知に埋め込む note の `files` が解決されること。packer は Files を空
+// スライスで初期化するだけなので、resolver 未配線だと fileIds はあるのに files が
+// 空のまま返り、通知ページの MkNote から添付メディアが消える。
+func TestShow_ResolvesNoteFiles(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	driveRepo := testutil.NewMockDriveFileRepository()
+	driveRepo.Files["f1"] = &model.DriveFile{
+		ID: "f1", UserID: strPtr("bob"), Name: "a.png", Type: "image/png",
+		URL: "https://example.com/f1",
+	}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: "public",
+		FileIDs: model.StringArray{"f1"},
+		User:    &model.User{ID: "bob", Username: "bobuser"},
+	}
+	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository()))
+	h.SetNoteFieldResolver(entity.NewNoteFieldResolver(driveRepo, nil, nil, nil, nil, idGen))
+
+	_, err := svc.Create(context.Background(), notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeMention, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	note := resp[0]["note"].(map[string]any)
+	files := note["files"].([]any)
+	require.Len(t, files, 1)
+	assert.Equal(t, "f1", files[0].(map[string]any)["id"])
+}
+
+// #1570 との関係: hide された embed には添付が乗らず、同じレスポンス内の可視な
+// top-level には乗ること (= gate が「常に空にする」で通っているのではないこと)。
+//
+// **順序 (resolve → hide) はここでは固定できない。** entity.HideNoteEntity は Files
+// だけでなく FileIDs も空にするので、仮に hide の後に resolver を走らせても拾う ID が
+// 0 件で、添付が書き戻ることは無い。順序に意味があるのは hide が消さない側の field
+// (channel / myReaction) で、そちらは upstream hideNote も消さないので現行順序が parity。
+func TestShow_HiddenEmbedKeepsFilesEmpty(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	driveRepo := testutil.NewMockDriveFileRepository()
+	driveRepo.Files["f1"] = &model.DriveFile{
+		ID: "f1", UserID: strPtr("bob"), Name: "visible.png", Type: "image/png",
+		URL: "https://example.com/f1",
+	}
+	driveRepo.Files["f2"] = &model.DriveFile{
+		ID: "f2", UserID: strPtr("carol"), Name: "secret.png", Type: "image/png",
+		URL: "https://example.com/f2",
+	}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
+	// carol の followers note を bob が renote し、それが alice への mention 通知の
+	// note になる。alice は carol を follow していないので embed は hide される。
+	renoteID := "n2"
+	noteRepo.Notes["n2"] = &model.Note{
+		ID: "n2", UserID: "carol", Visibility: model.NoteVisibilityFollowers,
+		FileIDs: model.StringArray{"f2"},
+		User:    &model.User{ID: "carol", Username: "carol"},
+	}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: "public",
+		FileIDs:  model.StringArray{"f1"},
+		RenoteID: &renoteID,
+		Renote:   noteRepo.Notes["n2"],
+		User:     &model.User{ID: "bob", Username: "bobuser"},
+	}
+	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository()))
+	h.SetNoteFieldResolver(entity.NewNoteFieldResolver(driveRepo, nil, nil, nil, nil, idGen))
+
+	_, err := svc.Create(context.Background(), notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeMention, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	note := resp[0]["note"].(map[string]any)
+	require.Len(t, note["files"].([]any), 1, "可視な top-level の添付は返る")
+	renote, ok := note["renote"].(map[string]any)
+	require.True(t, ok, "renote embed が返ること")
+	assert.Equal(t, true, renote["isHidden"])
+	assert.Empty(t, renote["files"], "hide された embed に添付が書き戻されないこと")
+}
+
+// #2735 の positive control: **embed 側にも** files が乗ること。hide 側のテスト
+// (TestShow_HiddenEmbedKeepsFilesEmpty) は embed が空であることしか見ないので、
+// resolver が embed へ再帰しなくなっても気付けない。
+//
+// resolver の再帰そのものは entity 側の
+// TestNoteFieldResolver_ResolveFiles_EmbedsRenoteAndReply も守っている。ここの固有の
+// 価値は**通知経路の hide gate が可視 embed まで潰していない**ことの確認。
+func TestShow_VisibleEmbedCarriesFiles(t *testing.T) {
+	h, svc := newTestHandler(t)
+	userRepo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	driveRepo := testutil.NewMockDriveFileRepository()
+	driveRepo.Files["f1"] = &model.DriveFile{
+		ID: "f1", UserID: strPtr("bob"), Name: "top.png", Type: "image/png",
+		URL: "https://example.com/f1",
+	}
+	driveRepo.Files["f2"] = &model.DriveFile{
+		ID: "f2", UserID: strPtr("carol"), Name: "embed.png", Type: "image/png",
+		URL: "https://example.com/f2",
+	}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bobuser"}
+	renoteID := "n2"
+	noteRepo.Notes["n2"] = &model.Note{
+		ID: "n2", UserID: "carol", Visibility: "public",
+		FileIDs: model.StringArray{"f2"},
+		User:    &model.User{ID: "carol", Username: "carol"},
+	}
+	noteRepo.Notes["n1"] = &model.Note{
+		ID: "n1", UserID: "bob", Visibility: "public",
+		FileIDs:  model.StringArray{"f1"},
+		RenoteID: &renoteID,
+		Renote:   noteRepo.Notes["n2"],
+		User:     &model.User{ID: "bob", Username: "bobuser"},
+	}
+	h.SetRepos(userRepo, noteRepo)
+	h.SetQueryService(corenote.NewQueryService(noteRepo, testutil.NewMockFollowingRepository()))
+	h.SetNoteFieldResolver(entity.NewNoteFieldResolver(driveRepo, nil, nil, nil, nil, idGen))
+
+	_, err := svc.Create(context.Background(), notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeMention, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	note := resp[0]["note"].(map[string]any)
+	require.Len(t, note["files"].([]any), 1)
+	renote, ok := note["renote"].(map[string]any)
+	require.True(t, ok, "renote embed が返ること")
+	files, ok := renote["files"].([]any)
+	require.True(t, ok)
+	require.Len(t, files, 1, "可視な embed にも添付が乗ること")
+	df := files[0].(map[string]any)
+	assert.Equal(t, "f2", df["id"])
 }
