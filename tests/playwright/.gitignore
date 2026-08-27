@@ -24,12 +24,14 @@ results.json
 #
 # **代償は 2 つ。** この `.js` に気付けたのは git が untracked として報告して
 # いたからで、その経路をここで塞いでいる。(1) `git status` に出ない。
-# (2) `git clean -fd` でも消えない (`-x` は root 所有の node_modules ごと
-# 巻き込むので代替にならない)。残る症状は「`.ts` を直したのに効かない」だけ。
+# (2) `git clean -fd` でも消えない (`-x` を足しても root 所有の node_modules/
+# .auth/ test-results/ は Permission denied で残るので代替にならない)。
+# 残る症状は「`.ts` を直したのに効かない」だけ。
 #
 # **探し方と消し方は docs/playwright.md の「spec を書くときの注意」に置いてある。**
-# ここには書かない — 同じ手順を 2 箇所に持つと片方が腐る (実際 1 周目に書いた
-# `ls specs/**/*.js` は globstar 無効で深い階層を取りこぼしていた)。
+# ここには書かない — 同じ手順を 2 箇所に持つと片方が腐る (実際、手順を両方に
+# 書いていた間に `-not -path './node_modules/*'` と `'*/node_modules/*'` で
+# 食い違っていた)。
 #
 # tracked な `.js` は現在 0 件なので、必要になったら `git add -f` か例外行で。
 *.js

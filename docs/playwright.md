@@ -71,7 +71,7 @@ vite の hash class を selector に使わない (`[class*="_button_"]` 等)。p
 ビルドで hash が変わると落ちる。`data-testid` か role / text で取る。
 
 **`.ts` の隣に `.js` を残さない。** import は拡張子なし
-(`from '../../fixtures/rate_limit'`) で、同名の `.js` があると playwright は
+(`from '../../../../fixtures/rate_limit'`) で、同名の `.js` があると playwright は
 そちらを先に解決する。**症状は「`.ts` を直したのに効かない」だけ**で、エラーは
 出ない。`tsc` を手で走らせた残骸が典型。
 
@@ -83,18 +83,27 @@ shadowing は止まらない** (生成された時点で `.ts` は読まれて�
 直接探して `rm` する:
 
 ```bash
-find tests/playwright -name '*.js' -not -path '*/node_modules/*'
+find tests/playwright -name '*.js' \
+  -not -path '*/node_modules/*' -not -path '*/playwright-report/*'
 ```
 
-**`find` を使う。** 他の 3 つは条件付きで取りこぼす (すべて実測):
+**除外を落とさないこと。** `playwright-report/trace/` は trace 付きの run を
+`--reporter=html` で見た時点で生成され、**viewer の資産だけで `.js` が 7 本出る**
+(実測)。焦って全部消す事故のほうが起きやすい。
 
-| 手 | 取りこぼし |
+手の選び方 (すべて実測):
+
+| 手 | 弱点 |
 |---|---|
+| `find` (上記) | 除外を書かないと生成物を拾う。**ディレクトリ単位では畳まれない**ので件数が増える |
 | `ls .../specs/**/*.js` | 既定シェルは globstar が無効で深い階層に届かない (`specs/upstream/api/admin/` の `.js` が出ない) |
-| `git status --ignored --short` | 中身が全部 ignore のディレクトリは 1 行に畳まれるので `grep '\.js$'` が落とす (`.js` だけの `dist/` など) |
-| `git clean -fd` | ignore 済みなので**何も消えない**。`-x` は消えるが root 所有の `node_modules/` ごと巻き込む |
+| `git status --ignored --short \| grep '\.js$'` | 中身が全部 ignore のディレクトリは 1 行に畳まれるので落とす (`.js` だけの `dist/` など)。逆に `playwright-report/` も 1 行に畳むので**生成物では静か** |
+| `git clean -fd` | ignore 済みなので**何も消えない**。`-x` を足しても root 所有の `node_modules/` / `.auth/` / `test-results/` は `Permission denied` で残る (`-n` の出力は消える予定を出すだけで実挙動ではない) |
 
-3 つとも実際に踏んだ罠。
+`find` と `git status --ignored` は**取りこぼしの向きが逆**なので、片方だけを
+上位互換とは言えない。迷ったら両方見る。
+
+この節の 3 件はどれも実際に踏んだもの。
 
 ## 関連
 
