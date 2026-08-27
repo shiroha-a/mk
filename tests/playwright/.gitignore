@@ -19,7 +19,8 @@ results.json
 # fixture が効かないという気付きにくい壊れ方をする。
 #
 # **止められるのは「commit して全員に配る」ところまで。** 生成された時点で手元の
-# `.ts` は既に読まれておらず、container 実行 (`make playwright-check`) も spec を
+# import 先の `.ts` は既に読まれておらず (spec 本体の `.js` は shadow ではなく
+# 二重に走る。docs 参照)、container 実行 (`make playwright-check`) も spec を
 # `./tests/playwright:/work` で bind mount するので同じ。
 #
 # **代償として `git status` からも消える。** この `.js` に気付けたのは git が
