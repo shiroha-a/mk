@@ -73,11 +73,12 @@ vite の hash class を selector に使わない (`[class*="_button_"]` 等)。p
 **`.ts` の隣に `.js` を残さない。** import は拡張子なし
 (`from '../../../../fixtures/rate_limit'`) で、同名の `.js` があると playwright は
 そちらを先に解決する。`tsc` を手で走らせた残骸が典型で、**その場合は export が
-揃っているので症状は「`.ts` を直したのに効かない」だけ**になる。**エラーの有無で
-切り分けない** — `.js` が古くて export が欠けていても、欠けたものを関数として
-呼べば `TypeError` になるが、値として使っているだけなら `undefined` が流れて
-テストは緑のまま通る (`fixtures/backend.ts` の `isTsBackend` のような値 export だと、
-黙って逆の枝に入る)。
+揃っているので症状は「`.ts` を直したのに効かない」だけ**になる。
+
+**エラーの有無で切り分けない。** `.js` が古くて export が欠けている場合、結末は
+使われ方で変わる — `if (isTsBackend)` なら `undefined` が falsy なので**緑のまま
+逆の枝に入り**、`toBe(NOT_FOUND_STATUS)` なら `Expected: undefined` で落ちる
+(どちらも `fixtures/backend.ts` の値 export)。赤くても shadowing を候補から外さない。
 
 `tests/playwright/.gitignore` の `*.js` が止めるのは commit までで、**手元の
 shadowing は止まらない** (生成された時点で `.ts` は読まれていない)。container 実行
