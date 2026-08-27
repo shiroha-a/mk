@@ -72,12 +72,14 @@ vite の hash class を selector に使わない (`[class*="_button_"]` 等)。p
 
 **`.ts` の隣に `.js` を残さない。** import は拡張子なし
 (`from '../../../../fixtures/rate_limit'`) で、同名の `.js` があると playwright は
-そちらを先に解決する。`tsc` を手で走らせた残骸が典型。**エラーの有無で切り分けない**
+そちらを先に解決する。`tsc` を手で走らせた残骸が典型で、import 先だけでなく
+**spec 本体の `.js` も出る** — そちらは shadow されず `.ts` と両方走る (既定の
+`testMatch` が `.js` も拾う)。**エラーの有無で切り分けない**
 — 症状が「`.ts` を直したのに効かない」だけのこともあれば、欠けた export が
 `undefined` として流れて無関係に見える場所で落ちることもある。
 
 `tests/playwright/.gitignore` の `*.js` が止めるのは commit までで、**手元の
-shadowing は止まらない** (生成された時点で `.ts` は読まれていない)。container 実行
+shadowing は止まらない** (生成された時点で import 先の `.ts` は読まれていない)。container 実行
 (`make playwright-check`) も spec を bind mount するので同じ。疑ったら探して `rm`:
 
 ```bash
