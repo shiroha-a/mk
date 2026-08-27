@@ -75,38 +75,21 @@ vite の hash class を selector に使わない (`[class*="_button_"]` 等)。p
 そちらを先に解決する。**症状は「`.ts` を直したのに効かない」だけ**で、エラーは
 出ない。`tsc` を手で走らせた残骸が典型。
 
-`tests/playwright/.gitignore` の `*.js` が**止めるのは commit までで、手元の
+`tests/playwright/.gitignore` の `*.js` が止めるのは commit までで、**手元の
 shadowing は止まらない** (生成された時点で `.ts` は読まれていない)。container 実行
-(`make playwright-check`) も spec を bind mount するので同じ。
-
-**ignore の代償で `git status` にも `git clean -fd` にも出てこない**ので、疑ったら
-直接探して `rm` する:
+(`make playwright-check`) も spec を bind mount するので同じ。疑ったら探して `rm`:
 
 ```bash
 find tests/playwright -name '*.js' \
   -not -path '*/node_modules/*' -not -path '*/playwright-report/*'
 ```
 
-**除外を落とさないこと。** `playwright-report/trace/` は trace 付きの run を
-`--reporter=html` で見た時点で生成され、**viewer の資産だけで `.js` が 7 本出る**
-(実測)。焦って全部消す事故のほうが起きやすい。
+**除外は要る** — `playwright-report/trace/` に viewer の資産が 7 本入る。
+`git status` / `git clean -fd` は ignore したぶん当てにならない (`--ignored` を
+足しても、既定はディレクトリを畳み、`-uall` にすると `node_modules/` ごと出て、
+tracked な `.js` と git がクォートする名前は落ちる)。
 
-手の選び方 (すべて実測):
-
-| 手 | 弱点 |
-|---|---|
-| `find` (上記) | 除外を書かないと生成物を拾う。**ディレクトリ単位では畳まれない**ので件数が増える |
-| `ls .../specs/**/*.js` | 既定シェルは globstar が無効で深い階層に届かない (`specs/upstream/api/admin/` の `.js` が出ない) |
-| `git status --ignored --short \| grep '\.js$'` | 既定 (`-unormal`) では中身が全部 ignore のディレクトリを 1 行に畳むので落とす (`.js` だけの `dist/` など)。**`-uall` を足せば直る**が、そのぶん `playwright-report/` や `node_modules/` の中身も全部出る。**`-uall` でも消えない穴が 2 つ**: tracked かつ未変更の `.js` (`git add -f` した場合) と、空白を含むファイル名 (`!! "has space.js"` とクォートされて `grep '\.js$'` に掛からない) |
-| `git clean -fd` | ignore 済みなので**その `.js` は消えない** (untracked かつ非 ignore の書きかけ spec は消えるので、掃除のつもりで打つと逆に困る)。`-x` を足すと消えるが、**消えすぎる** — `node_modules/` (再 `npm ci`) と `.auth/` (再 globalSetup) と書きかけ spec ごと持っていく。権限で消せないものがあっても warning を出して**残りは完走する**ので「中途半端に終わるから安全」ではない (`-n` の出力は消える予定を出すだけで実挙動ではない) |
-
-**除外を書いた `find` が上位互換。** 実測で反例が見つからなかった (`git status` 側が
-拾って `find` が落とすケース)。ただし理由は「畳み込み」ではない — それは `-uall` で
-直る。**`-uall` でも残るのは上の 2 つ** (tracked な `.js` / 空白入りの名前) で、
-`find` はどちらも拾う。両者の弱点は向きが違うだけで、**find は偽陽性
-(除外を書き忘れたときだけ)、`git status` は偽陰性 (上の 2 条件のとき)**。
-
-この節の 3 件はどれも実際に踏んだもの。
+3 件とも実際に踏んだ罠。
 
 ## 関連
 
