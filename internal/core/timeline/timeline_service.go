@@ -453,8 +453,53 @@ func missingIDs(ids []string, notes []*model.Note) []string {
 	return out
 }
 
+// confirmMissingOnPrimary narrows candidates to those the primary DB also lacks.
+//
+// 問い合わせが失敗したときは空を返す (= prune しない)。生きている note の ID を
+// list から消すと戻せないので、疑わしければ何もしない側に倒す。
+//
+// `noteRepo` の nil 検査はしない。呼び出し元は必ず resolve() を先に通り、
+// そこで `noteRepo.FindManyByIDsWithUser` を無条件に呼ぶ。dangling が空でない
+// なら ids も空でないので、nil ならここへ来る前に panic する。
+//
+// #2719 の antenna 側にも同じ目的の関数がある。**共有していない理由は
+// `missingIDs` と同じで、antenna 側の doc に書いてある** (両方に書くと
+// 片側だけ古くなるため、片方に寄せている)。
+func (s *Service) confirmMissingOnPrimary(ctx context.Context, candidates []string) []string {
+	existing, err := s.noteRepo.ExistingNoteIDsOnPrimary(candidates)
+	if err != nil {
+		slog.WarnContext(ctx, "timeline: primary existence check failed, skipping prune", "err", err)
+		return nil
+	}
+	if len(existing) == 0 {
+		return candidates
+	}
+	alive := make(map[string]struct{}, len(existing))
+	for _, id := range existing {
+		alive[id] = struct{}{}
+	}
+	var out []string
+	for _, id := range candidates {
+		if _, ok := alive[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 // pruneDangling removes ids that resolve to nothing from the timelines they
 // came from (#2715)。best-effort で、失敗しても読み取りには影響しない。
+//
+// **消す前に primary で存在を確かめる (#2757)。** mk-go はリードレプリカを
+// 対応しており (`dbReplications`、既定 `false`)、`FindManyByIDsWithUser` は
+// レプリカに振られる。
+// fanout は primary への commit 直後に走るので、複製が追いつく前に読むと
+// 「生きているのに引けない」。そこで prune すると **その note は list から
+// 消え、戻す経路が無い**。
+//
+// DB fallback があるから安全、とは言えない。4 経路とも fallback は
+// `!filter.AllowPartial` でゲートされていてクライアントが無効化でき、しかも
+// 一度 list から消えた ID を戻す経路が無い。
 func (s *Service) pruneDangling(ctx context.Context, names []Name, dangling []string) {
 	if s.fanout == nil || len(names) == 0 || len(dangling) == 0 {
 		return
@@ -463,7 +508,15 @@ func (s *Service) pruneDangling(ctx context.Context, names []Name, dangling []st
 	// キャンセルされ、pipeline が落ちて自己修復が空振りする。**症状が出るのは
 	// リロード時 = 前のリクエストを中断する操作**なので、直したい場面ほど
 	// 空振りしやすい (#2718 review MEDIUM-4)。
+	//
+	// **primary 確認より前で切り離す。** 今の ExistingNoteIDsOnPrimary は ctx を
+	// 取らないので実害は無いが、将来取るようになったとき、切断で確認が失敗して
+	// fail-safe が働き自己修復が恒久的に空振りする。
 	ctx = context.WithoutCancel(ctx)
+	dangling = s.confirmMissingOnPrimary(ctx, dangling)
+	if len(dangling) == 0 {
+		return
+	}
 	slog.DebugContext(ctx, "timeline: pruning unresolvable ids", "count", len(dangling))
 	if err := s.fanout.RemoveMany(ctx, names, dangling); err != nil {
 		slog.WarnContext(ctx, "timeline: pruning unresolvable ids failed", "err", err)

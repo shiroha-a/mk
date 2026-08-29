@@ -119,8 +119,9 @@ type NoteRepository interface {
 	// from the primary DB even when read replicas are configured.
 	//
 	// レプリカ構成では通常の SELECT が複製前の行を取りこぼす。「行が無い」を
-	// 根拠に破壊的な操作をする経路 (antenna の宙吊り ID 除去、#2719) は
-	// レプリカを見てはいけないので、primary を明示する。
+	// 根拠に破壊的な操作をする経路はレプリカを見てはいけないので、primary を
+	// 明示する。現在の利用者は antenna (#2719) と timeline (#2757) の宙吊り
+	// ID 除去。
 	ExistingNoteIDsOnPrimary(ids []string) ([]string, error)
 	// ListRenotesOf / ListRepliesOf / ListChildrenOf は viewerID 視点の可視性を
 	// LIMIT 前に SQL push-down する (#1500)。viewerID="" は匿名 (public/home のみ)。
