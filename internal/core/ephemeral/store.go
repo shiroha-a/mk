@@ -33,6 +33,14 @@ const (
 	userPrefix    = "ephUser:"
 	noteURIPrefix = "ephNoteURI:"
 	userURIPrefix = "ephUserURI:"
+	// filePrefix marks a drive_file row as referenced by a live ephemeral note.
+	//
+	// **添付の掃除 (#2722) はこの印だけを見る。** owner 無しのリモート添付は
+	// note が Redis にしか無いので、DB を見ても「参照されていない」ようにしか
+	// 見えない。行の作成時刻から猶予を測る方式では、dedup (upsertAttachments の
+	// FindByURI) が古い行を新しい ephemeral note に結び直した瞬間に破綻する
+	// (その晩の掃除で表示中の添付が消える)。
+	filePrefix = "ephFile:"
 )
 
 // userTTLFactor extends the author TTL relative to the note TTL.
@@ -152,6 +160,18 @@ func (s *Store) PutNote(ctx context.Context, n *model.Note, author *model.User) 
 	pipe.Set(ctx, s.key(userPrefix, author.ID), userJSON, ttl*userTTLFactor)
 	if author.URI != nil && *author.URI != "" {
 		pipe.Set(ctx, s.key(userURIPrefix, *author.URI), author.ID, ttl*userTTLFactor)
+	}
+	// 添付の印は note と同じ TTL。DropNote で消さない — 同じ添付を別の
+	// ephemeral note が参照していることがあるので、TTL に任せる。
+	//
+	// **印を作れるのはここだけ** (`Touch` は `Expire` なので既存の印しか
+	// 延ばせない)。したがって機能を有効にした直後は、既に Redis に居る
+	// ephemeral note に印が無い状態が 1 TTL ぶん続く。
+	for _, fileID := range n.FileIDs {
+		if fileID == "" {
+			continue
+		}
+		pipe.Set(ctx, s.key(filePrefix, fileID), "1", ttl)
 	}
 	_, err = pipe.Exec(ctx)
 	return err
@@ -415,6 +435,50 @@ func (s *Store) Touch(ctx context.Context, n *model.Note) error {
 	if n.UserID != "" {
 		pipe.Expire(ctx, s.key(userPrefix, n.UserID), ttl*userTTLFactor)
 	}
+	// **添付の印も一緒に打ち直す。** Touch は TTL をスライドさせるので、
+	// note だけ延ばして印を放置すると、`/api/notes/show` で開かれ続けている
+	// ノートの添付が掃除の対象になる。`Set` ではなく `Expire` なので、印が既に失効して
+	// いれば何も起きない (掃除済みの行を復活させない)。
+	for _, fileID := range n.FileIDs {
+		if fileID == "" {
+			continue
+		}
+		pipe.Expire(ctx, s.key(filePrefix, fileID), ttl)
+	}
 	_, err := pipe.Exec(ctx)
 	return err
+}
+
+// LiveFileIDs returns the subset of ids that a live ephemeral note still
+// references.
+//
+// 掃除 (#2722) はこれを見てから消す。**引けなかったときは error を返すだけで、
+// 「印が無い」と答えない。** 呼び出し側は error を受けたら 1 件も消さずに中断
+// する責務を持つ (処理を続けると、Redis が一時的に落ちている間の実行で表示中の
+// 添付を全部消すことになる)。
+func (s *Store) LiveFileIDs(ctx context.Context, ids []string) (map[string]bool, error) {
+	live := make(map[string]bool, len(ids))
+	if len(ids) == 0 {
+		return live, nil
+	}
+	if s == nil || s.client == nil {
+		// **未配線は「印が無い」ではなく error。** 空の map を返すと呼び出し側
+		// (掃除) は候補を全部ゴミと見なす。配線が外れた瞬間に表示中の添付を
+		// 全消しするより、掃除が止まるほうが安全側。
+		return nil, fmt.Errorf("ephemeral: store is not wired")
+	}
+	keys := make([]string, 0, len(ids))
+	for _, id := range ids {
+		keys = append(keys, s.key(filePrefix, id))
+	}
+	vals, err := s.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, fmt.Errorf("ephemeral: mget file marks: %w", err)
+	}
+	for i, v := range vals {
+		if v != nil && i < len(ids) {
+			live[ids[i]] = true
+		}
+	}
+	return live, nil
 }

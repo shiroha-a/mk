@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/redis/go-redis/v9"
+
 	"github.com/shiroha-a/mk/internal/core/ephemeral"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -388,4 +390,114 @@ func TestStore_Enabled_NilReceiverAndClient(t *testing.T) {
 	assert.False(t, ephemeral.NewStore(nil, "", func() ephemeral.Settings {
 		return ephemeral.Settings{Enabled: true}
 	}).Enabled(), "client 未配線なら有効化されていても false")
+}
+
+// 添付の印は #2722 の掃除が唯一頼りにする生存判定。note と同じ TTL で立ち、
+// Touch で打ち直され、切れたら消える。
+func TestStore_LiveFileIDs(t *testing.T) {
+	s := newStore(t, time.Minute)
+	ctx := context.Background()
+
+	n := sampleNote("n_file", "https://remote.example/notes/file", "u_file")
+	n.FileIDs = model.StringArray{"f1", "f2"}
+	require.NoError(t, s.PutNote(ctx, n, sampleUser("u_file", "https://remote.example/users/alice")))
+
+	live, err := s.LiveFileIDs(ctx, []string{"f1", "f2", "f3"})
+	require.NoError(t, err)
+	assert.True(t, live["f1"])
+	assert.True(t, live["f2"])
+	assert.False(t, live["f3"], "他のノートの添付は印が立たない")
+
+	empty, err := s.LiveFileIDs(ctx, nil)
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}
+
+// **Touch は TTL をスライドさせる。** note だけ延ばして印を放置すると、
+// 閲覧され続けているノートの添付が掃除の対象になる。
+func TestStore_TouchExtendsFileMarks(t *testing.T) {
+	s := newStore(t, 2*time.Second)
+	ctx := context.Background()
+
+	n := sampleNote("n_touch_file", "https://remote.example/notes/touchfile", "u_touch_file")
+	n.FileIDs = model.StringArray{"tf1"}
+	require.NoError(t, s.PutNote(ctx, n, sampleUser("u_touch_file", "https://remote.example/users/alice")))
+
+	before := testRedis.Client.TTL(ctx, "example.com:ephFile:tf1").Val()
+	require.Greater(t, before, time.Duration(0))
+
+	time.Sleep(1100 * time.Millisecond)
+	// 打ち直す前は必ず減っている (この時点で 2 秒に戻っていたら以下の assert が
+	// 無意味になる)。
+	require.Less(t, testRedis.Client.TTL(ctx, "example.com:ephFile:tf1").Val(), 2*time.Second)
+
+	require.NoError(t, s.Touch(ctx, n))
+
+	// **相対比較 (after > before-1s) にしない。** Redis の TTL は秒粒度なので
+	// sleep のブレで変異版でも通ってしまう。打ち直し後の絶対値で見る。
+	after := testRedis.Client.TTL(ctx, "example.com:ephFile:tf1").Val()
+	assert.Equal(t, 2*time.Second, after, "Touch で印の TTL も打ち直される")
+}
+
+// 印が切れたら生存扱いしない (掃除が永久に空振りしないこと)。
+func TestStore_LiveFileIDs_ExpiredMarkIsNotLive(t *testing.T) {
+	s := newStore(t, time.Second)
+	ctx := context.Background()
+
+	n := sampleNote("n_exp_file", "https://remote.example/notes/expfile", "u_exp_file")
+	n.FileIDs = model.StringArray{"xf1"}
+	require.NoError(t, s.PutNote(ctx, n, sampleUser("u_exp_file", "https://remote.example/users/alice")))
+
+	time.Sleep(1200 * time.Millisecond)
+	live, err := s.LiveFileIDs(ctx, []string{"xf1"})
+	require.NoError(t, err)
+	assert.False(t, live["xf1"])
+}
+
+// **Touch は失効した印を復活させない。** Set で打ち直すと、掃除済みの行に
+// 対して「生きている」と嘘をつく印が立つ。
+func TestStore_TouchDoesNotResurrectExpiredMark(t *testing.T) {
+	s := newStore(t, time.Second)
+	ctx := context.Background()
+
+	n := sampleNote("n_res_file", "https://remote.example/notes/resfile", "u_res_file")
+	n.FileIDs = model.StringArray{"rf1"}
+	require.NoError(t, s.PutNote(ctx, n, sampleUser("u_res_file", "https://remote.example/users/alice")))
+
+	time.Sleep(1200 * time.Millisecond)
+	require.NoError(t, s.Touch(ctx, n))
+
+	live, err := s.LiveFileIDs(ctx, []string{"rf1"})
+	require.NoError(t, err)
+	assert.False(t, live["rf1"])
+}
+
+// **未配線は error。** 空の live map を返すと、掃除側が候補を全部ゴミと
+// 見なして表示中の添付を消す。fail-closed であることを固定する。
+func TestStore_LiveFileIDs_NilStore(t *testing.T) {
+	var s *ephemeral.Store
+	live, err := s.LiveFileIDs(context.Background(), []string{"f1"})
+	assert.Error(t, err)
+	assert.Nil(t, live)
+
+	// 入力が空でも同じ (呼び出し側が「0 件なら安全」と誤解しないように、
+	// 早期 return は未配線判定より前に置かない)。
+	live, err = s.LiveFileIDs(context.Background(), nil)
+	assert.NoError(t, err, "問い合わせる ID が無いなら Redis を引く必要も無い")
+	assert.Empty(t, live)
+}
+
+// Redis を引けないときは error を返し、「印が無い」と答えない (#2722)。
+// ここが空 map を返すと、Redis 障害中の実行で表示中の添付を全消しする。
+func TestStore_LiveFileIDs_RedisFailureIsError(t *testing.T) {
+	// 誰も listen していないアドレスへ向けて MGet を失敗させる。
+	client := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", DialTimeout: 200 * time.Millisecond})
+	defer client.Close()
+	s := ephemeral.NewStore(client, "example.com:", func() ephemeral.Settings {
+		return ephemeral.Settings{Enabled: true, TTL: time.Minute}
+	})
+
+	live, err := s.LiveFileIDs(context.Background(), []string{"f1"})
+	assert.Error(t, err)
+	assert.Nil(t, live, "失敗時に「印が無い」と答えない")
 }
