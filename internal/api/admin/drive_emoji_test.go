@@ -129,7 +129,9 @@ func TestDriveFiles_FiltersByTypePrefix(t *testing.T) {
 		&model.DriveFile{ID: "d2", UserID: &u, Type: "video/mp4"},
 	)
 
-	rec := doPost(h.DriveFiles, `{"type":"image/","limit":10}`, adminUser)
+	// `image/*` が prefix filter の形 (#1772)。`/*` を落とすと production では
+	// 完全一致になり 0 件になる。
+	rec := doPost(h.DriveFiles, `{"type":"image/*","limit":10}`, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
@@ -176,7 +178,7 @@ func TestDriveFiles_SystemTokenWithTypeFilter(t *testing.T) {
 		&model.DriveFile{ID: "d_sys_zip", UserID: nil, Type: "application/zip"},
 	)
 
-	body := fmt.Sprintf(`{"userId":%q,"type":"image/","limit":10}`, apiadmin.SystemUserIDToken)
+	body := fmt.Sprintf(`{"userId":%q,"type":"image/*","limit":10}`, apiadmin.SystemUserIDToken)
 	rec := doPost(h.DriveFiles, body, adminUser)
 	assert.Equal(t, http.StatusOK, rec.Code)
 	var rows []map[string]any

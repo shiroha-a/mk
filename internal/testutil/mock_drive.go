@@ -93,26 +93,41 @@ func (m *MockDriveFileRepository) FindAllByMD5(userID, md5 string) ([]*model.Dri
 }
 
 func (m *MockDriveFileRepository) FindByAnyURL(url string) (*model.DriveFile, error) {
+	if url == "" {
+		return nil, ErrNotFound
+	}
+	var match *model.DriveFile
 	for _, f := range m.Files {
 		if f.URL == url ||
 			(f.WebpublicURL != nil && *f.WebpublicURL == url) ||
 			(f.ThumbnailURL != nil && *f.ThumbnailURL == url) {
-			return f, nil
+			if match == nil || f.ID < match.ID {
+				match = f
+			}
 		}
 	}
-	return nil, ErrNotFound
+	if match == nil {
+		return nil, ErrNotFound
+	}
+	return match, nil
 }
 
 func (m *MockDriveFileRepository) FindByURI(uri string) (*model.DriveFile, error) {
 	if uri == "" {
 		return nil, ErrNotFound
 	}
+	var match *model.DriveFile
 	for _, f := range m.Files {
 		if f.URI != nil && *f.URI == uri {
-			return f, nil
+			if match == nil || f.ID < match.ID {
+				match = f
+			}
 		}
 	}
-	return nil, ErrNotFound
+	if match == nil {
+		return nil, ErrNotFound
+	}
+	return match, nil
 }
 
 func (m *MockDriveFileRepository) FindByAccessKey(accessKey string) (*model.DriveFile, error) {
@@ -123,18 +138,28 @@ func (m *MockDriveFileRepository) FindByAccessKey(accessKey string) (*model.Driv
 		if f.AccessKey != nil && *f.AccessKey == accessKey {
 			return f, nil
 		}
-		if f.ThumbnailAccessKey != nil && *f.ThumbnailAccessKey == accessKey {
-			return f, nil
-		}
-		if f.WebpublicAccessKey != nil && *f.WebpublicAccessKey == accessKey {
-			return f, nil
-		}
 	}
 	return nil, ErrNotFound
 }
 
 func (m *MockDriveFileRepository) FindByAnyAccessKey(accessKey string) (*model.DriveFile, error) {
-	return m.FindByAccessKey(accessKey)
+	if accessKey == "" {
+		return nil, ErrNotFound
+	}
+	var match *model.DriveFile
+	for _, f := range m.Files {
+		if (f.AccessKey != nil && *f.AccessKey == accessKey) ||
+			(f.ThumbnailAccessKey != nil && *f.ThumbnailAccessKey == accessKey) ||
+			(f.WebpublicAccessKey != nil && *f.WebpublicAccessKey == accessKey) {
+			if match == nil || f.ID < match.ID {
+				match = f
+			}
+		}
+	}
+	if match == nil {
+		return nil, ErrNotFound
+	}
+	return match, nil
 }
 
 func (m *MockDriveFileRepository) Update(id string, fields map[string]any) error {
@@ -146,12 +171,16 @@ func (m *MockDriveFileRepository) Update(id string, fields map[string]any) error
 	return nil
 }
 
-func (m *MockDriveFileRepository) FindByName(userID, name string, _ *string) ([]*model.DriveFile, error) {
+func (m *MockDriveFileRepository) FindByName(userID, name string, folderID *string) ([]*model.DriveFile, error) {
 	var result []*model.DriveFile
 	for _, f := range m.Files {
-		if f.UserID != nil && *f.UserID == userID && f.Name == name {
-			result = append(result, f)
+		if f.UserID == nil || *f.UserID != userID || f.Name != name {
+			continue
 		}
+		if !matchesDriveFolder(f.FolderID, folderID) {
+			continue
+		}
+		result = append(result, f)
 	}
 	return result, nil
 }
@@ -204,31 +233,45 @@ func (m *MockDriveFileRepository) Delete(f *model.DriveFile) error {
 	return nil
 }
 
+// matchesDriveFileType mirrors the production fileType predicate: a `/*`
+// suffix means prefix match, anything else is an exact match (#1772).
+//
+// 無条件 prefix にすると `image/*` がどこにも当たらず (`image/*` で始まる
+// MIME は存在しない)、逆に完全一致のつもりの `image/heic` が
+// `image/heic-sequence` まで拾う。production
+// (internal/repository/drive_file.go の ListByUser / ListForAdmin /
+// ListSystemFiles) は 3 経路ともこの形。
+func matchesDriveFileType(actual, fileType string) bool {
+	if fileType == "" {
+		return true
+	}
+	if strings.HasSuffix(fileType, "/*") {
+		return strings.HasPrefix(actual, strings.TrimSuffix(fileType, "*"))
+	}
+	return actual == fileType
+}
+
+// matchesDriveFolder mirrors the production folder predicate used by both
+// drive_file."folderId" and drive_folder."parentId": a nil want means
+// `IS NULL`, not "any folder".
+func matchesDriveFolder(actual, want *string) bool {
+	if want == nil {
+		return actual == nil
+	}
+	return actual != nil && *actual == *want
+}
+
 func (m *MockDriveFileRepository) ListByUser(userID string, folderID *string, anyFolder bool, fileType, sort, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
 	var rows []*model.DriveFile
 	for _, f := range m.Files {
 		if f.UserID == nil || *f.UserID != userID {
 			continue
 		}
-		if !anyFolder {
-			if folderID == nil {
-				if f.FolderID != nil {
-					continue
-				}
-			} else {
-				if f.FolderID == nil || *f.FolderID != *folderID {
-					continue
-				}
-			}
+		if !anyFolder && !matchesDriveFolder(f.FolderID, folderID) {
+			continue
 		}
-		if fileType != "" {
-			if strings.HasSuffix(fileType, "/*") {
-				if !strings.HasPrefix(f.Type, strings.TrimSuffix(fileType, "*")) {
-					continue
-				}
-			} else if f.Type != fileType {
-				continue
-			}
+		if !matchesDriveFileType(f.Type, fileType) {
+			continue
 		}
 		if untilID != "" && f.ID >= untilID {
 			continue
@@ -352,14 +395,8 @@ func (m *MockDriveFolderRepository) ListByUser(userID string, parentID *string, 
 		if f.UserID == nil || *f.UserID != userID {
 			continue
 		}
-		if parentID == nil {
-			if f.ParentID != nil {
-				continue
-			}
-		} else {
-			if f.ParentID == nil || *f.ParentID != *parentID {
-				continue
-			}
+		if !matchesDriveFolder(f.ParentID, parentID) {
+			continue
 		}
 		if untilID != "" && f.ID >= untilID {
 			continue
@@ -382,12 +419,18 @@ func (m *MockDriveFolderRepository) ListByUser(userID string, parentID *string, 
 	return rows, nil
 }
 
-func (m *MockDriveFolderRepository) FindByName(userID, name string, _ *string) ([]*model.DriveFolder, error) {
+func (m *MockDriveFolderRepository) FindByName(userID, name string, parentID *string) ([]*model.DriveFolder, error) {
 	var result []*model.DriveFolder
 	for _, f := range m.Folders {
-		if f.UserID != nil && *f.UserID == userID && f.Name == name {
-			result = append(result, f)
+		if f.UserID == nil || *f.UserID != userID || f.Name != name {
+			continue
 		}
+		// production は parentID が nil なら `"parentId" IS NULL`。file 側の
+		// FindByName と同形 (#2747)。
+		if !matchesDriveFolder(f.ParentID, parentID) {
+			continue
+		}
+		result = append(result, f)
 	}
 	return result, nil
 }
@@ -442,7 +485,7 @@ func (m *MockDriveFileRepository) ListForAdmin(userID, origin, host, fileType, u
 				}
 			}
 		}
-		if fileType != "" && !strings.HasPrefix(f.Type, fileType) {
+		if !matchesDriveFileType(f.Type, fileType) {
 			continue
 		}
 		if untilID != "" && f.ID >= untilID {
@@ -453,7 +496,10 @@ func (m *MockDriveFileRepository) ListForAdmin(userID, origin, host, fileType, u
 		}
 		rows = append(rows, f)
 	}
-	// id DESC
+	// id DESC 固定。production は paginationOrder で sinceID 単独指定時のみ
+	// ASC になるが、mock では省略している (#2747 で対象外とした)。順序だけで
+	// なく limit 打ち切りで残る行が変わるので、sinceID を使う paging を
+	// mock で検証しないこと。
 	for i := 0; i < len(rows); i++ {
 		for j := i + 1; j < len(rows); j++ {
 			if rows[i].ID < rows[j].ID {
@@ -476,7 +522,7 @@ func (m *MockDriveFileRepository) ListSystemFiles(fileType, untilID, sinceID str
 		if f.UserID != nil {
 			continue
 		}
-		if fileType != "" && !strings.HasPrefix(f.Type, fileType) {
+		if !matchesDriveFileType(f.Type, fileType) {
 			continue
 		}
 		if untilID != "" && f.ID >= untilID {
@@ -487,7 +533,10 @@ func (m *MockDriveFileRepository) ListSystemFiles(fileType, untilID, sinceID str
 		}
 		rows = append(rows, f)
 	}
-	// id DESC
+	// id DESC 固定。production は paginationOrder で sinceID 単独指定時のみ
+	// ASC になるが、mock では省略している (#2747 で対象外とした)。順序だけで
+	// なく limit 打ち切りで残る行が変わるので、sinceID を使う paging を
+	// mock で検証しないこと。
 	for i := 0; i < len(rows); i++ {
 		for j := i + 1; j < len(rows); j++ {
 			if rows[i].ID < rows[j].ID {
