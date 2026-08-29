@@ -61,7 +61,8 @@ func TestResolve_MergesEphemeralNotes(t *testing.T) {
 	got, _, err := svc.resolve(context.Background(), []string{"c", "b", "a"})
 	require.NoError(t, err)
 	require.Len(t, got, 3)
-	// id 降順に並ぶこと (timeline の並び順)。
+	// **入力 ids の順序を保つこと。** resolve は ID でソートし直さない (#2720)。
+	// ここでは入力が降順なので結果も降順になる。
 	assert.Equal(t, []string{"c", "b", "a"}, []string{got[0].ID, got[1].ID, got[2].ID})
 	// DB で見つかった分は Redis に問い合わせない。
 	assert.ElementsMatch(t, []string{"a", "c"}, eph.askedFor)

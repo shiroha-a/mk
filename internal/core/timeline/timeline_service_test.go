@@ -340,11 +340,19 @@ func (f *failingFindManyRepo) FindManyByIDsWithUser(_ []string) ([]*model.Note, 
 }
 
 func TestMergeIDs_LimitClamping(t *testing.T) {
-	out := mergeIDs([][]string{{"a", "b"}, {"c", "d"}}, 2)
+	out := mergeIDs([][]string{{"a", "b"}, {"c", "d"}}, 2, false)
 	assert.Len(t, out, 2)
 	// 文字列降順
 	assert.Equal(t, "d", out[0])
 	assert.Equal(t, "c", out[1])
+}
+
+// TestMergeIDs_Ascending は昇順ページング (sinceId 単独) で**最古 N 件**を
+// 切り出すことを固定する (#2720)。降順に並べてから truncate すると、
+// cursor の直後ではなく最新 N 件が返る。
+func TestMergeIDs_Ascending(t *testing.T) {
+	out := mergeIDs([][]string{{"a", "b"}, {"c", "d"}}, 2, true)
+	assert.Equal(t, []string{"a", "b"}, out)
 }
 
 // toDBFilter は viewerID が non-empty のとき UseMutingSubquery=true を set

@@ -78,6 +78,54 @@ func (s *Service) fanoutEnabled() bool {
 	return s.fanoutToggle.FanoutTimelineEnabled()
 }
 
+// shouldFallbackToDB reports whether the Redis result must be discarded and the
+// whole page served from the DB.
+//
+// upstream FanoutTimelineEndpointService の
+// `shouldFallbackToDb = noteIds.length === 0 || (sinceId != null && sinceId < oldestNoteId)`
+// と同じ判定 (#2720)。
+//
+// **sinceId が Redis の持つ最古 ID より古いなら、その間の範囲を Redis は
+// 持っていない。** そのまま Redis の結果を返すと cursor 直後の note を飛ばして
+// 先のページを返すことになる。DB へ丸ごと倒せば連続したページになる。
+//
+// **実際には sinceId が非空なら常に true になる。** Get / GetMulti が
+// `id > sinceId` で絞るので、返る ID は必ず sinceId より新しい。upstream の
+// 条件も `ps.sinceId != null && ps.sinceId < oldestNoteId` で untilId の有無を
+// 見ないので、同じく常に true。つまり **sinceId を含むページングは、
+// sinceId 単独か sinceId + untilId かに関わらず必ず DB が処理する**。
+//
+// これは #2720 以前からの挙動ではない。以前は sinceId + untilId も Redis
+// 経路を通っていた (順序も継ぎ足しも正しかった)。upstream に揃えた結果として
+// DB へ寄る。
+//
+// **負荷はここに乗る。** frontend の paginator は fetchNewer で sinceId を
+// 投げるので、その経路が全て PostgreSQL に落ちる。timeline の JSON キャッシュ
+// (internal/api/notes) は cursor 無しのみが対象なので緩和されない。
+//
+// その帰結として、filterAndSort / mergeIDs / GetMerged の昇順分岐と
+// fallbackRange の sinceId 側スワップは **endpoint 経路からは到達しない**
+// (resolve は昇順分岐を持たず、入力順を保つだけ)。upstream の FanoutTimelineService.get も
+// sinceId 単独で ASC を返すので実装としては揃えてあり、ユニットテストで
+// 個別に固定してある。判定を緩めるとそれらが一斉に効き始めるので、
+// 順序が正しいことが前提になる。
+//
+// ids は filterAndSort / mergeIDs が向きを決めて返したもの。昇順なら先頭、
+// 降順なら末尾が最古。
+func shouldFallbackToDB(ids []string, sinceID, untilID string) bool {
+	if len(ids) == 0 {
+		return true
+	}
+	if sinceID == "" {
+		return false
+	}
+	oldest := ids[len(ids)-1]
+	if isAscending(sinceID, untilID) {
+		oldest = ids[0]
+	}
+	return sinceID < oldest
+}
+
 // fallbackRange narrows the database fallback to the range *beyond* what was
 // already **resolved**, so the fan-out result is topped up instead of being
 // thrown away.
@@ -130,7 +178,7 @@ func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID,
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) > 0 {
+	if !shouldFallbackToDB(ids, sinceID, untilID) {
 		resolved, dangling, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
@@ -187,7 +235,7 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) > 0 {
+	if !shouldFallbackToDB(ids, sinceID, untilID) {
 		resolved, dangling, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
@@ -223,7 +271,7 @@ func (s *Service) GlobalTimeline(ctx context.Context, viewer *model.User, untilI
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) > 0 {
+	if !shouldFallbackToDB(ids, sinceID, untilID) {
 		resolved, dangling, err := s.resolve(ctx, ids)
 		if err != nil {
 			return nil, err
@@ -267,8 +315,8 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 	if err != nil {
 		return nil, err
 	}
-	merged := mergeIDs(multi, limit)
-	if len(merged) > 0 {
+	merged := mergeIDs(multi, limit, isAscending(sinceID, untilID))
+	if !shouldFallbackToDB(merged, sinceID, untilID) {
 		resolved, dangling, err := s.resolve(ctx, merged)
 		if err != nil {
 			return nil, err
@@ -295,7 +343,7 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 // 旧実装は ListHomeTimeline のみを呼んでおり、follow 関係が無い viewer に
 // とって local public note (= 同 instance の他 user の public) が落ちていた
 // (#819 で Playwright spec が detect)。本 helper は両 query 結果を ID 単位で
-// dedup → ID 降順 sort → limit 截断する。pagination (sinceID/untilID) は両
+// dedup → cursor の向きで sort → limit 截断する。pagination (sinceID/untilID) は両
 // query に同じ値を渡すので merged 結果の boundary は upstream と一致する。
 //
 // 各 query は単独で limit 件まで返すので merged 後の最大件数は 2*limit、
@@ -333,9 +381,25 @@ func (s *Service) hybridDBFallback(viewer *model.User, untilID, sinceID string, 
 		seen[n.ID] = struct{}{}
 		out = append(out, n)
 	}
-	// ID 降順 sort (= upstream と同じ keyset 順)。aidx は時系列で単調増加
-	// するので ID 文字列の lexicographic 比較で十分。
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	// 向きは cursor に従う (#2720)。aidx は時系列で単調増加するので ID 文字列の
+	// lexicographic 比較で十分。
+	//
+	// **無条件 DESC にしてはいけない。** 昇順ページング (sinceId 単独) で
+	// 降順に並べてから truncate すると、cursor の直後ではなく**最新 N 件**を
+	// 返す。upstream の hybrid は単一クエリ + makePaginationQuery なので
+	// 最古 N 件が返る。ここは home / local の 2 クエリを Go 側でマージする
+	// mk-go 固有の形なので、向きを自分で持つ必要がある。
+	//
+	// 取りこぼしは順序だけでは済まない。frontend の paginator は fetchNewer で
+	// sinceId に手持ちの最新 ID を渡すので、最新側から返すと間の note が
+	// **二度と取得されない**。
+	ascending := isAscending(sinceID, untilID)
+	sort.Slice(out, func(i, j int) bool {
+		if ascending {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].ID > out[j].ID
+	})
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -427,8 +491,24 @@ func (s *Service) resolve(ctx context.Context, ids []string) (notes []*model.Not
 		return notes, missing, nil
 	}
 
+	// **入力 ids の順序を復元する。** 無条件に DESC で並べると、昇順ページング
+	// (sinceId 単独) で Redis が ASC で渡してきた順序を壊す (#2720)。ids は
+	// filterAndSort が向きを決めて返したものなので、それに従う。
+	pos := make(map[string]int, len(ids))
+	for i, id := range ids {
+		pos[id] = i
+	}
+	// ids に無い ID は末尾へ回す。map の zero value (0) をそのまま使うと
+	// **先頭**に来てしまう。現状 notes / eph は ids からしか作られないので
+	// 到達しないが、順序の全順序性を実装内で閉じさせておく。
+	rank := func(id string) int {
+		if i, ok := pos[id]; ok {
+			return i
+		}
+		return len(ids)
+	}
 	merged := append(notes, eph...)
-	sort.Slice(merged, func(i, j int) bool { return merged[i].ID > merged[j].ID })
+	sort.Slice(merged, func(i, j int) bool { return rank(merged[i].ID) < rank(merged[j].ID) })
 	return merged, missingIDs(ids, merged), nil
 }
 
@@ -523,8 +603,9 @@ func (s *Service) pruneDangling(ctx context.Context, names []Name, dangling []st
 	}
 }
 
-// mergeIDs flattens multiple ID slices, deduplicates, sorts id desc and caps.
-func mergeIDs(slices [][]string, limit int) []string {
+// mergeIDs flattens multiple ID slices, deduplicates, sorts by the cursor
+// direction and caps.
+func mergeIDs(slices [][]string, limit int, ascending bool) []string {
 	seen := make(map[string]struct{})
 	var all []string
 	for _, s := range slices {
@@ -536,14 +617,14 @@ func mergeIDs(slices [][]string, limit int) []string {
 			all = append(all, id)
 		}
 	}
-	// id降順
-	for i := 0; i < len(all); i++ {
-		for j := i + 1; j < len(all); j++ {
-			if all[i] < all[j] {
-				all[i], all[j] = all[j], all[i]
-			}
+	// 向きは呼び出し側の cursor に従う。昇順ページング (sinceId 単独) で
+	// 降順に並べると、最古 N 件ではなく最新 N 件を切り出してしまう (#2720)。
+	sort.Slice(all, func(i, j int) bool {
+		if ascending {
+			return all[i] < all[j]
 		}
-	}
+		return all[i] > all[j]
+	})
 	if limit > 0 && len(all) > limit {
 		all = all[:limit]
 	}

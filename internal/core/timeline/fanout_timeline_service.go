@@ -156,7 +156,7 @@ func (s *FanoutTimelineService) Push(ctx context.Context, name Name, noteID stri
 }
 
 // Get returns IDs from the timeline filtered by the given since/until window.
-// 結果は新しいID順 (id降順)。limit<=0 のときは全件返す。
+// 結果の向きは cursor に従う (sinceId 単独なら ASC、それ以外は id 降順)。limit<=0 のときは全件返す。
 func (s *FanoutTimelineService) Get(ctx context.Context, name Name, untilID, sinceID string, limit int) ([]string, error) {
 	ids, err := s.client.LRange(ctx, s.key(name), 0, -1).Result()
 	if err != nil {
@@ -166,7 +166,7 @@ func (s *FanoutTimelineService) Get(ctx context.Context, name Name, untilID, sin
 }
 
 // GetMerged retrieves IDs from multiple timelines and merges them into one
-// descending-ordered, de-duplicated list.
+// de-duplicated list, ordered by the cursor direction.
 //
 // upstream FanoutTimelineEndpointService は redisTimelines に複数キーを渡し、
 // 取得結果をマージして 1 本の timeline として返す。LTL の返信振り分け
@@ -193,8 +193,15 @@ func (s *FanoutTimelineService) GetMerged(ctx context.Context, names []Name, unt
 			merged = append(merged, id)
 		}
 	}
-	// ID は時系列順なので、降順に並べ直してから limit で切る。
-	sort.Sort(sort.Reverse(sort.StringSlice(merged)))
+	// 向きは cursor に従う (#2720)。Get / GetMulti が per-key で ASC を返しても、
+	// ここで降順に並べ直すと昇順ページングで最新 N 件を切り出してしまう。
+	// LocalTimeline はログイン中だとキーが 2 本になるので、この分岐を落とすと
+	// **ログインの有無で向きが変わる**。
+	if isAscending(sinceID, untilID) {
+		sort.Strings(merged)
+	} else {
+		sort.Sort(sort.Reverse(sort.StringSlice(merged)))
+	}
 	if len(merged) > limit {
 		merged = merged[:limit]
 	}
@@ -267,7 +274,7 @@ func (s *FanoutTimelineService) RemoveMany(ctx context.Context, names []Name, no
 }
 
 // filterAndSort applies the since/until filter to a slice of IDs and returns
-// them sorted in id-descending order, capped to limit if positive.
+// them sorted by the cursor direction (ascending for a sinceId-only cursor), capped to limit if positive.
 func filterAndSort(ids []string, untilID, sinceID string, limit int) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
@@ -279,9 +286,32 @@ func filterAndSort(ids []string, untilID, sinceID string, limit int) []string {
 		}
 		out = append(out, id)
 	}
-	sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	// **sinceId 単独指定は昇順ページング** (#2720)。upstream
+	// FanoutTimelineEndpointService の `ascending = ps.sinceId && !ps.untilId`
+	// と同じ規則で、ASC に並べて**最古 N 件**を返す。
+	//
+	// 以前は常に DESC で先頭 limit 件を返していたため、cursor の直後ではなく
+	// **最新 N 件**が返っていた。
+	//
+	// **ただし endpoint 経路からこの昇順分岐には到達しない。** timeline service の
+	// shouldFallbackToDB が sinceId 付きを全て DB へ倒すため (upstream も同じ)。
+	// それでも upstream の get と同じ形にしてあるのは、判定を緩めたときに
+	// ここが正しくないと一斉に壊れるため。ユニットテストで固定してある。
+	if isAscending(sinceID, untilID) {
+		sort.Strings(out)
+	} else {
+		sort.Sort(sort.Reverse(sort.StringSlice(out)))
+	}
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}
 	return out
+}
+
+// isAscending reports whether the cursor pair means ascending pagination.
+//
+// upstream `makePaginationQuery` / FanoutTimelineEndpointService と同じ規則で、
+// **sinceId があって untilId が無いときだけ**昇順。
+func isAscending(sinceID, untilID string) bool {
+	return sinceID != "" && untilID == ""
 }

@@ -84,10 +84,22 @@ func TestFanoutTimelineService_GetWithUntilSince(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{id2, id1}, out)
 
-	// sinceID で id1 を除外
+	// sinceID 単独は**昇順ページング** (#2720)。upstream
+	// FanoutTimelineEndpointService の `ascending = sinceId && !untilId` と
+	// 同じ規則で ASC に並べて最古 N 件を返す。以前は常に DESC だったため、
+	// cursor の直後ではなく最新 N 件が返っていた。
 	out, err = svc.Get(ctx, LocalTimeline, "", id1, 10)
 	require.NoError(t, err)
-	assert.Equal(t, []string{id3, id2}, out)
+	assert.Equal(t, []string{id2, id3}, out)
+
+	// sinceID + untilID は降順のまま (昇順になるのは sinceId 単独のときだけ)。
+	// **窓に 2 件以上入れる。** 1 件だと ASC でも DESC でも同じ結果になり、
+	// 向きを検出できない。
+	id4 := idGen.Generate(time.Now().Add(1 * time.Minute))
+	require.NoError(t, svc.Push(ctx, LocalTimeline, id4, 100))
+	out, err = svc.Get(ctx, LocalTimeline, id4, id1, 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{id3, id2}, out, "sinceId + untilId は降順のまま")
 
 	// limit
 	out, err = svc.Get(ctx, LocalTimeline, "", "", 2)
@@ -390,4 +402,40 @@ func TestFanoutTimelineService_PushOldNoteWithTrim(t *testing.T) {
 	ctx := context.Background()
 	noteID := idGen.Generate(time.Now())
 	require.NoError(t, svc.Push(ctx, LocalTimeline, noteID, 5))
+}
+
+// TestFanoutTimelineService_GetMergedDirection は GetMerged の向きを固定する。
+//
+// **endpoint 経路からは到達しない** — shouldFallbackToDB が sinceId 付きを
+// 全て DB へ倒すため。それでもユニットとして固定するのは、Get / GetMulti が
+// per-key で ASC を返したものをここで降順に並べ直すと、LocalTimeline が
+// ログインの有無でキー数を変える (1 本 or 2 本) ぶん**向きが変わる**ため。
+func TestFanoutTimelineService_GetMergedDirection(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	ctx := context.Background()
+	testRedis.FlushAll(ctx)
+
+	svc := NewFanoutTimelineService(testRedis.Client, idGen, "")
+	svc.randFn = func() float64 { return 1.0 }
+	now := time.Now()
+	ids := make([]string, 4)
+	for i := range ids {
+		ids[i] = idGen.Generate(now.Add(time.Duration(i) * time.Millisecond))
+	}
+	// 2 キーに分けて積む (1 キーだと Get に委譲されて GetMerged を通らない)。
+	require.NoError(t, svc.Push(ctx, LocalTimeline, ids[1], 100))
+	require.NoError(t, svc.Push(ctx, LocalTimeline, ids[3], 100))
+	require.NoError(t, svc.Push(ctx, GlobalTimeline, ids[2], 100))
+
+	keys := []Name{LocalTimeline, GlobalTimeline}
+
+	// sinceId 単独 → ASC で最古 2 件。
+	out, err := svc.GetMerged(ctx, keys, "", ids[0], 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{ids[1], ids[2]}, out, "昇順は最古 N 件")
+
+	// untilId 単独 → 従来どおり DESC。
+	out, err = svc.GetMerged(ctx, keys, ids[3], "", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{ids[2], ids[1]}, out, "降順は最新 N 件")
 }
