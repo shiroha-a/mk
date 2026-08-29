@@ -1,6 +1,9 @@
 // Package antenna provides the user-facing antenna CRUD service plus a
-// per-antenna Redis-stream timeline of matching notes. Misskey 互換の
-// ローカル限定機能で、ActivityPub 連携は持たない。
+// per-antenna Redis-stream timeline of matching notes.
+//
+// #2743 以降は inbound Create / Announce からも呼ばれるのでローカル限定では
+// ない (リレー経由だけ除外している。理由は internal/core/federation の
+// AntennaHook の doc を参照)。
 package antenna
 
 import (

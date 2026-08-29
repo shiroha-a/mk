@@ -2867,6 +2867,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// ephemeral 側が拾われ二重表示になる。
 	federationResolver.SetEphemeralTimelineRemover(timelineFanoutHook)
 	federationProcessor.SetFanoutHook(timelineFanoutHook)
+	// リモートの投稿を antenna に載せる (#2743)。リレー経由は processor 側で
+	// 除外している。
+	federationProcessor.SetAntennaHook(coreantenna.NewNoteCreateHook(antennaService))
 	federationProcessor.SetNotificationHook(notificationHook)
 
 	// 5. /streaming エンドポイント配線

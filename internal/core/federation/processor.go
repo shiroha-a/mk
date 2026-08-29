@@ -101,6 +101,9 @@ type Processor struct {
 	// noteCreateService経由でfanoutされるが、リモートノートはIngestNote/
 	// handleAnnounce経由でDB直挿入されるためここで明示的にfanoutする。
 	fanoutHook TimelineFanoutHook
+	// Antenna hook for inbound Create / Announce (#2743)。リレー経由では
+	// 発火させない (AntennaHook の doc を参照)。
+	antennaHook AntennaHook
 
 	// Notification hook for inbound Create / Announce (#415)。fanoutHook と
 	// 同じ位置で呼び出して reply / renote / quote / mention 通知を生成する。
@@ -208,6 +211,34 @@ type ChatMessageReceiver interface {
 // note / author は read-only。詳細は本ファイル上部の "Hook mutation contract"。
 type TimelineFanoutHook interface {
 	OnNoteCreated(note *model.Note, author *model.User)
+}
+
+// AntennaHook is invoked after an inbound Create / Announce so that remote
+// notes reach their subscribers' antennas (#2743). ローカル作成と同じ
+// interface を使う (実装は core/antenna.NoteCreateHook)。
+//
+// **リレー経由の note では発火させない。**
+//
+// `enableEphemeralRelayNotes` (既定 false) が有効なとき、リレー投稿は Redis に
+// TTL 付きで置かれ DB に行が無い。antenna_note_unread は FK を満たせず
+// `Create` が失敗するが、antenna service は**あえて materialize しない**方針
+// なので (#2332、antenna_service.go の OnNoteCreated 参照) DB が膨らむことは
+// ない。実害は別で、`pushNote` は先に走るため **DB から引けない ID が
+// antenna の ZSET (上限 200) を埋める**。読み取り側 (api/antennas) は DB しか
+// 見ないので、幽霊 ID のぶんだけ本来載る note が押し出される。
+//
+// 既定構成 (ephemeral 無効) ではリレー投稿も DB に入るので上記は起きない。
+// それでも外すのは量で、OnNoteCreated は note 1 件ごとに ListAllActive() を
+// 引く (#2743 で対象外とした。upstream は同じ位置にキャッシュを持つ)。
+//
+// note / author は read-only。詳細は本ファイル上部の "Hook mutation contract"。
+type AntennaHook interface {
+	OnNoteCreated(note *model.Note, author *model.User)
+	// IsAntennaHook は TimelineFanoutHook との取り違えを型で防ぐためだけの
+	// marker。両者はメソッドセットが同一で、Go の interface は structural
+	// なので marker が無いと SetFanoutHook / SetAntennaHook を入れ替えても
+	// コンパイルが通り、テストも全部緑になる (#2683 と同型の配線事故)。
+	IsAntennaHook()
 }
 
 // NotificationHook is invoked after an inbound Create / Announce so that
@@ -397,7 +428,7 @@ func (p *Processor) dispatchActivity(act genericActivity, depth int, signer *mod
 	case "like":
 		return p.handleLike(act)
 	case "announce":
-		return p.handleAnnounce(act)
+		return p.handleAnnounce(act, signer)
 	case "delete":
 		return p.handleDelete(act)
 	case "update":
@@ -667,6 +698,17 @@ func (p *Processor) SetChatService(svc ChatMessageReceiver) {
 // subscribers (#330).
 func (p *Processor) SetFanoutHook(h TimelineFanoutHook) {
 	p.fanoutHook = h
+}
+
+// SetAntennaHook wires an AntennaHook so that remote notes ingested via
+// handleCreate / handleAnnounce are matched against antennas (#2743).
+// 配線しないと**リモートの投稿が antenna に一切入らない** — upstream は
+// ApNoteService が noteCreateService.create を通すので入る。
+//
+// publishRelayDeliveredNote (リレー経由) からは呼ばない。理由は AntennaHook
+// の doc を参照。
+func (p *Processor) SetAntennaHook(h AntennaHook) {
+	p.antennaHook = h
 }
 
 // SetNotificationHook wires a NotificationHook so that inbound Create /
@@ -1377,6 +1419,20 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 		if p.fanoutHook != nil {
 			safeGoFedHook(func() { p.fanoutHook.OnNoteCreated(hydrated, actor) })
 		}
+		// **リレー経由では発火させない (#2743)。** Mastodon 系リレーは元の
+		// Create をそのまま転送して署名だけがリレーのものになるので、
+		// ingestCreateNote と同じ viaRelay で判定する。これを見落とすと
+		// ephemeral 有効時に DB に行が無い note が antenna の ZSET に積まれ、
+		// 上限 200 を幽霊 ID が埋める。
+		// **`created` では gate しない。** notification / chart hook は dedup hit を
+		// 除くが、antenna で同じことをすると「リレーや Announce の target 解決が
+		// 先に DB へ入れた note は、その後の直接配送でも antenna に入らない」に
+		// なる (ephemeral 無効時、リレー経由でも DB 行はできる)。リレーを購読
+		// している構成では取りこぼしが恒常化する。再配送での WS 重複は
+		// fanoutHook も同じく許している側で、こちらのほうが軽い。
+		if p.antennaHook != nil && !viaRelay {
+			safeGoFedHook(func() { p.antennaHook.OnNoteCreated(hydrated, actor) })
+		}
 		// 通知フックは dedup hit では発火させない。**通知は冪等ではない** —
 		// 呼ぶたびに新しい id で 1 件積まれるので、同じ Create(Note) が再配送
 		// されると受信者の通知一覧に同じメンション / DM が 2 件並ぶ。実運用の
@@ -1535,7 +1591,10 @@ func (p *Processor) handleLike(act genericActivity) error {
 }
 
 // handleAnnounce creates a renote pointing at the announced note.
-func (p *Processor) handleAnnounce(act genericActivity) error {
+// signer は antenna hook の relay 判定にのみ使う。既存の viaRelay
+// (announcer が relay actor 本人か) は renote 抑止の判定で、そちらの意味は
+// 変えない — Mastodon 系リレーが転送した Announce は従来どおり renote を作る。
+func (p *Processor) handleAnnounce(act genericActivity, signer *model.User) error {
 	// bearcaps (bear:) object URI は未対応として skip (#1560、upstream
 	// ApInboxService.announce の 'skip: bearcaps url not supported')。
 	if isBearcapURI(act.Object) {
@@ -1699,6 +1758,22 @@ func (p *Processor) handleAnnounce(act genericActivity) error {
 	if p.fanoutHook != nil {
 		safeGoFedHook(func() { p.fanoutHook.OnNoteCreated(hydrated, announcer) })
 	}
+	// **リレー経由では発火させない (#2743)。** Misskey 系リレー (announcer が
+	// relay actor 本人) は上の `if viaRelay` で publishRelayDeliveredNote へ
+	// 抜けるので、ここの `!viaRelay` は実質常に true — early return を将来
+	// 消したときの保険として残してある。実際にここで止めているのは Mastodon
+	// 系リレーが他人の Announce を転送する形で、それは signer 側で判定する。
+	//
+	// **signer が nil のときは素通しする** (isRelayDelivery の fail-safe)。
+	// production の inbox は必ず signer を積むので到達しない。
+	//
+	// **渡すのは renote 行で、ブースト対象 (target) ではない。** renote は
+	// text を持たないので、キーワード指定のある antenna は inbound Announce
+	// では原理的にマッチしない (upstream は resolveNote(target) 経由で target
+	// 自体を antenna に通すので載る)。この差は docs/divergence.md に記載。
+	if p.antennaHook != nil && !viaRelay && !p.isRelayDelivery(signer) {
+		safeGoFedHook(func() { p.antennaHook.OnNoteCreated(hydrated, announcer) })
+	}
 	if p.notificationHook != nil {
 		// remote user が local note を renote した時に元投稿者へ通知を出す
 		// (#415)。target が renoteTarget。reply 通知は Announce では発生
@@ -1754,6 +1829,9 @@ func (p *Processor) publishRelayDeliveredNote(target *model.Note, targetURI, rel
 	if p.fanoutHook != nil {
 		safeGoFedHook(func() { p.fanoutHook.OnNoteCreated(hydrated, author) })
 	}
+	// **antennaHook はここでは発火させない (#2743)。** 理由は AntennaHook の
+	// doc を参照。handleCreate / handleAnnounce との差はこの 1 点だけなので、
+	// 「揃っていない」と見て足さないこと。
 	slog.Debug("federation: relay-delivered note published",
 		"relay", relayActor, "noteURI", targetURI, "authorId", author.ID)
 	return nil

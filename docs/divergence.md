@@ -171,6 +171,56 @@ mk-go の migration は TS 製の既存 DB にも流れるため、`CREATE TABLE
 
 ## 3. ActivityPub
 
+### 3-4. リモート note と antenna
+
+**upstream は載せる。** `ApInboxService` の Announce 経路は `fromRelay` 分岐で
+renote を作らずに publish するが、その手前で `apNoteService.resolveNote(target)`
+を呼ぶため `ApNoteService.createNote` -> `noteCreateService.create` ->
+`addNoteToAntennas` (無条件) を通る。Create 転送型のリレーも同じく
+`NoteCreateService` を通る。ただし `fetchNote(uri)` で既知なら早期 return する
+ので、載るのは初回観測時だけ。
+
+**mk-go はリレー経由だけ外す** (#2743)。直接配送の inbound Create / Announce は
+載せる。判定は 2 系統あり、どちらか一方でもリレーなら発火させない。
+
+| 形態 | 判定 |
+|---|---|
+| Misskey 系リレー (リレー actor 自身が Announce) | `handleAnnounce` の `viaRelay` (announcer が relay actor か) |
+| Mastodon 系リレー (元の Create / Announce を転送、署名だけリレー) | `isRelayDelivery(signer)` |
+
+外す理由は 2 つ。
+
+1. **`enableEphemeralRelayNotes` が有効なとき、リレー投稿は DB に行を持たない**
+   (Redis に TTL 付きで置く、#2332)。antenna service は ephemeral note を
+   **あえて materialize しない**方針なので DB が膨らむことはないが、
+   `pushNote` は先に走るため **DB から引けない ID が antenna の ZSET (上限
+   200) を埋める**。読み取り側は DB しか見ないので、幽霊 ID のぶんだけ本来
+   載る note が押し出される (#2719 と同じ構造)。**この設定は既定 `false`**
+2. 量が最も多いのがこの経路で、`antenna.Service.OnNoteCreated` は note 1 件ごとに
+   `ListAllActive()` を引く。リレーの firehose 全量に載せるとコストが読めない
+
+したがって既定構成では 2 番目だけが理由になる。**リレー投稿を antenna で拾いたい
+運用がある場合は、この判断を見直す余地がある。**
+
+`docs/divergence.md` に書いておくべき制限がもう 1 つある。**inbound Announce で
+antenna に渡すのは renote 行で、ブースト対象 (target) ではない。** renote は
+text を持たないので、`matchKeywords` はキーワード指定のある antenna では必ず
+false を返す (`internal/core/antenna/antenna_service.go`)。つまり
+
+- キーワード指定のある antenna は、**inbound Announce では 1 件もマッチしない**
+- upstream は `resolveNote(target)` 経由で target 自体を `NoteCreateService` に
+  通すので、target が antenna に載る
+
+target にも hook を通すには「新規に取り込んだときだけ」の gate が要る
+(再ブーストのたびに古い note が antenna に湧くため)。本 PR では入れていない。
+
+なお inbound Create / Announce **以外**の取り込み経路 (featured collection、
+reply / quote target の解決、`/api/ap/show`) でも antenna に載せない。これは
+fanout hook と同じ扱いで、過去の note が突然 antenna に湧くのを避けるため。
+
+Mastodon 系リレーが転送した Announce は、**従来どおり renote を作って timeline
+には流れる**。antenna に載せないだけで、renote 抑止の判定は変えていない。
+
 ### 3-1. reversi / chat の連合まわり
 
 cherrypick 由来の拡張が中心。比較のため関連する upstream 標準機能も併記する。

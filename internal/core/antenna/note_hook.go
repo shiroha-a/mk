@@ -18,3 +18,7 @@ func NewNoteCreateHook(svc *Service) *NoteCreateHook {
 func (h *NoteCreateHook) OnNoteCreated(n *model.Note, author *model.User) {
 	h.svc.OnNoteCreated(n, author)
 }
+
+// IsAntennaHook implements federation.AntennaHook の marker。TimelineFanoutHook
+// との取り違えを型で防ぐためだけに存在する (#2743)。
+func (h *NoteCreateHook) IsAntennaHook() {}
