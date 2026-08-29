@@ -67,12 +67,17 @@ type DriveFileRepository interface {
 	// files they do not own (IDOR): upstream drive/files/move-bulk only ever
 	// touches the caller's own rows.
 	UpdateBulkFolder(userID string, fileIDs []string, folderID *string) error
-	// DeleteOrphans removes rows whose userId is NULL. Returns affected count.
+	// DeleteOrphans removes rows that are unowned (userId IS NULL), not
+	// attributed to a remote host (userHost IS NULL) and not referenced by
+	// any custom emoji. Returns affected count. See the orphanWhere const in
+	// this file for why unowned remote rows are kept.
 	DeleteOrphans() (int64, error)
 	// ListOrphans returns up to limit rows DeleteOrphans would delete (userId
-	// IS NULL, not referenced by any emoji) so the caller can delete each
-	// orphan's object-storage bytes before the DB rows (admin/drive/cleanup,
-	// #1724)。Order is unspecified; mirrors ListRemoteCache's batched shape.
+	// IS NULL, userHost IS NULL, not referenced by any custom emoji) so the
+	// caller can delete each orphan's object-storage bytes before the DB rows
+	// (admin/drive/cleanup, #1724). Order is unspecified; mirrors
+	// ListRemoteCache's batched shape. See the orphanWhere const in this file
+	// for why unowned remote rows are kept.
 	ListOrphans(limit int) ([]*model.DriveFile, error)
 	// DeleteRemoteCache removes cached remote files (isLink=false with host set)
 	// — the rows whose actual bytes are cached locally / in object storage.
@@ -434,22 +439,24 @@ func (r *driveFileRepository) ListSystemFiles(fileType, untilID, sinceID string,
 	return rows, nil
 }
 
-// DeleteOrphans removes drive_file rows whose userId is NULL **and** are not
-// referenced by any custom emoji. Pure orphan files (例: 取り込み中断で残った
-// 中間 zip) は削除対象だが、#670 で導入された system 所有 emoji 画像 file
-// (emoji.originalUrl = drive_file.url で結ばれている) は cleanup で巻き込ま
-// れないように除外する (#722)。
+// DeleteOrphans deletes the rows selected by orphanWhere. Returns affected
+// count.
 //
-// upstream Misskey TS の cleanup は単純に userId NULL を全消ししており、
-// 同様に emoji 画像も巻き込む構造的バグを内包しているが、mk-go では本
-// guard で local emoji asset を保護する。
+// 対象になる userId NULL の行の例: 取り込み中断で残った中間 zip。
+// 一方 system 所有の emoji 画像 file (emoji.originalUrl / publicUrl が
+// drive_file.url と結ばれている。mk-go では #670 の emoji copy / import zip が
+// 保管先を作る)
+// は巻き込まないよう emoji 非参照の guard で除外する (#722)。upstream
+// Misskey TS の cleanup は単純に userId NULL を全消しするので、この guard を
+// 持たない。
 func (r *driveFileRepository) DeleteOrphans() (int64, error) {
 	tx := r.db.Where(orphanWhere).Delete(&model.DriveFile{})
 	return tx.RowsAffected, tx.Error
 }
 
-// orphanWhere は orphan file (userId IS NULL かつ local かつ emoji 非参照) を
-// 選ぶ条件。DeleteOrphans / ListOrphans で同一 guard を共有する (#1724)。
+// orphanWhere は cleanup 対象の行を選ぶ条件。orphan (userId IS NULL) のうち、
+// remote host に帰属する行 (userHost 非 NULL) と emoji 参照のある行を除外する。
+// DeleteOrphans / ListOrphans で同一 guard を共有する (#1724)。
 //
 // **`userHost IS NULL` が要る。** リモートの添付は、著者が materialize されて
 // いないと owner 無しで作られる (#2717)。それらは**表示中の note が参照している**

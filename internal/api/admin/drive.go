@@ -137,14 +137,17 @@ func (h *Handler) deleteFileStorageObjects(c echo.Context, f *model.DriveFile) {
 // upstream の cleanup は orphan file (userId IS NULL) を 1 件ずつ
 // driveService.deleteFile で消すので object storage の実体も削除される。
 // storage backend が配線されていれば list→object storage 削除→DB 行削除を
-// バッチで回す。未配線時は DB 行のみ削除する (DeleteOrphans、emoji 参照 guard
-// 付き)。DriveCleanRemoteFiles と同じ二系統構造 (#1724)。
+// バッチで回す。未配線時は DB 行のみ削除する。DriveCleanRemoteFiles と同じ
+// 二系統構造 (#1724)。
+//
+// **対象行の選び方は両経路で同じ。** どちらも DriveFileRepository の
+// DeleteOrphans / ListOrphans が返す集合で、選択条件は同 interface の doc を
+// 参照。
 func (h *Handler) DriveCleanup(c echo.Context) error {
 	if h.driveFileRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if h.storageDeleter == nil {
-		// storage 未配線: DB 行のみ削除 (emoji 参照は guard で除外)。
 		_, _ = h.driveFileRepo.DeleteOrphans()
 		return c.NoContent(http.StatusNoContent)
 	}

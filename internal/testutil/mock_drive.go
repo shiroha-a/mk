@@ -518,7 +518,6 @@ func (m *MockDriveFileRepository) DeleteOrphans() (int64, error) {
 		if f.UserID != nil {
 			continue
 		}
-		// userHost 条件は #2721。理由は上の doc を参照。
 		if f.UserHost != nil {
 			continue
 		}
@@ -544,7 +543,7 @@ func (m *MockDriveFileRepository) ListOrphans(limit int) ([]*model.DriveFile, er
 		if f.UserID != nil {
 			continue
 		}
-		// userHost 条件は #2721。理由は DeleteOrphans の doc を参照。
+		// userHost 条件は #2721。理由は repository の orphanWhere の doc を参照。
 		if f.UserHost != nil {
 			continue
 		}

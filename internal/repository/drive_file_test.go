@@ -613,9 +613,11 @@ func TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced(t *testing.T
 	assert.NoError(t, err, "emoji.publicUrl 参照の system file は保持される")
 }
 
-// TestDriveFileRepository_ListOrphans は ListOrphans が DeleteOrphans と同じ
-// 選択条件 (userId NULL かつ emoji 非参照) で行を返し、limit を尊重し、削除は
-// 行わないことを検証する (#1724 admin/drive/cleanup の storage 削除経路)。
+// TestDriveFileRepository_ListOrphans は ListOrphans が orphanWhere どおりに
+// 行を返すことを、userId / emoji の 2 次元と limit / 非破壊性について検証する
+// (#1724 admin/drive/cleanup の storage 削除経路)。
+// 選択条件の残り 1 次元 (userHost) は drive_file_limits_test.go の
+// TestDriveFile_OrphanCleanupKeepsUnownedRemoteFiles が張る。
 func TestDriveFileRepository_ListOrphans(t *testing.T) {
 	repo := NewDriveFileRepository(testDB)
 	emojiRepo := NewEmojiRepository(testDB)
