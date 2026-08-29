@@ -47,6 +47,17 @@ func TestScheduler_RegisterMaintenanceJobs_NoErr(t *testing.T) {
 	require.NoError(t, s.RegisterCheckModeratorsActivityJob())
 }
 
+// TestScheduler_RegisterOrphanCleanupJobs_NoErr は孤児掃除 2 本の cron 式と
+// queue オプションが driver に受理されることを見る (#2340 / #2722)。
+//
+// **登録失敗は起動時に warn ログを出すだけ** (`server.go` の jobs ループ) なので、
+// cron 式のタイポは静かに「そのジョブだけ走らない」状態になる。ここで弾く。
+func TestScheduler_RegisterOrphanCleanupJobs_NoErr(t *testing.T) {
+	s := newSchedulerForTest(t)
+	require.NoError(t, s.RegisterOrphanUserCleanupJob())
+	require.NoError(t, s.RegisterOrphanAttachmentCleanupJob())
+}
+
 func TestMaintenanceQueueName_Const(t *testing.T) {
 	// 既存定数と被らないこと (ベタ書きの同期ミスを防ぐ smoke)
 	assert.Equal(t, "maintenance", MaintenanceQueueName)

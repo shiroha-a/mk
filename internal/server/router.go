@@ -879,7 +879,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	s.queueServer.Handle(queue.TaskTypeInbox, inboxProcessor.Handle)
 
 	// Remote notes cleaning (issue #46): enqueue 契機は scheduler の cron
-	// (RegisterCleanRemoteNotesJob, 毎日 04:00 UTC, TS 'cleanRemoteNotes' 相当,
+	// (RegisterCleanRemoteNotesJob, 毎日 04:00, TS 'cleanRemoteNotes' 相当,
 	// #1563)。旧実装は 6h time.Ticker だった。Handle は常に登録し、processor が
 	// cfg.Enabled で gate する (起動時 meta から構築)。
 	cleanCfg := processors.CleanRemoteNotesConfig{}
@@ -908,6 +908,38 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			}
 		})
 	s.queueServer.Handle(queue.TaskTypeOrphanUserCleanup, orphanUserProcessor.Handle)
+
+	// owner 無しのリモート添付の掃除 (#2722)。著者が materialize されていない
+	// 添付は owner 無しで保存され (#2717)、ephemeral note が Redis の TTL で
+	// 消えても drive_file の行は残り続ける。orphanUserCleanup が親 user を
+	// 消して SET NULL になった行も同じ形。
+	//
+	// **gate は 2 つの meta の OR。** どちらの機能もこの形の行を作るので、
+	// 片方だけ有効な構成で掃除が回らないと元の問題がそのまま残る。
+	// 猶予と cutoff の組み立ては processor 側 (ID 生成方式は設定依存なので
+	// generator をそのまま渡す)。
+	//
+	// cutoff 用の generator は**専用に作る**。`ulid` の monotonic reader は
+	// 過去時刻で呼ぶと内部の基準時刻を巻き戻すので、採番と共有すると直後の
+	// 単調性が 1 回崩れる。未知の方式なら主 idGen (:140) と同じく aidx へ
+	// 倒す — **採番と cutoff で別の方式に分かれるほうが危険**で、その場合は
+	// 「常に対象外」か「年齢を無視して対象」のどちらかに倒れる。
+	cutoffGen, cutoffErr := id.NewGenerator(s.config.ID)
+	if cutoffErr != nil {
+		cutoffGen, _ = id.NewGenerator("aidx")
+	}
+	orphanAttachmentProcessor := processors.NewOrphanAttachmentCleanupProcessor(driveFileRepo, ephemeralStore,
+		func() processors.OrphanAttachmentCleanerConfig {
+			m, err := metaRepo.Fetch()
+			if err != nil || m == nil {
+				return processors.OrphanAttachmentCleanerConfig{}
+			}
+			return processors.OrphanAttachmentCleanerConfig{
+				Enabled:      m.EnableEphemeralRelayNotes || m.EnableRelayOrphanUserCleanup,
+				EphemeralTTL: time.Duration(m.EphemeralRelayNoteTTLMinutes) * time.Minute,
+			}
+		}, cutoffGen.Generate)
+	s.queueServer.Handle(queue.TaskTypeOrphanAttachmentCleanup, orphanAttachmentProcessor.Handle)
 
 	// Expired-mute prune (#1563 / #1603): scheduler の cron (*/5) が enqueue する。
 	// user mute と channel mute の両方の期限切れ行を prune する。
@@ -1120,7 +1152,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	retentionProc := processors.NewRetentionAggregateProcessor(retentionSvc)
 	s.queueServer.Handle(queue.TaskTypeRetentionAggregate, retentionProc.Handle)
 
-	// 起動時にも 1 回 aggregation を発火する。cron (0 0 * * * UTC) を待つと
+	// 起動時にも 1 回 aggregation を発火する。cron (0 0 * * *) を待つと
 	// 新規デプロイ後最大 24h は heatmap が空のままになるので、その日の
 	// cohort 行を即座に作って描画を始められるようにする (#421)。同じ
 	// dateKey で 2 回目を Insert しても repository.ErrDuplicateKey で

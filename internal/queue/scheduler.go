@@ -19,6 +19,12 @@ type Scheduler struct {
 	inner driver.Scheduler
 }
 
+// **cron の時刻はどの TZ でも UTC ではない。** Register は cron 式をそのまま
+// driver へ渡し、TZ を指定していない。mkq (既定) は `time.Local` で解釈する
+// ので**プロセスの TZ** に従い (`docker-compose.yml` は `TZ: Asia/Tokyo` を
+// 設定しているので既定構成では JST)、legacy の asynq は UTC で解釈する。
+// 以下の各 job のコメントに書いてある時刻は「その TZ での時刻」を指す。
+//
 // NewScheduler wraps the driver's scheduler.
 func NewScheduler(d driver.Driver) *Scheduler {
 	return &Scheduler{inner: d.Scheduler()}
@@ -27,8 +33,8 @@ func NewScheduler(d driver.Driver) *Scheduler {
 // RegisterChartJobs registers the 3 chart-related cron jobs.
 //
 //   - tickCharts : 毎時 55 分 (TS Misskey と同一 cron pattern)
-//   - resyncCharts: 毎日 00:00 UTC
-//   - cleanCharts : 毎日 00:00 UTC
+//   - resyncCharts: 毎日 00:00
+//   - cleanCharts : 毎日 00:00
 //
 // 重複 enqueue 防止のため Unique TTL を cron 周期と合わせる。前回の
 // 同種ジョブが処理中のまま次回 cron が発火しても、TTL 内であれば
@@ -56,7 +62,7 @@ func (s *Scheduler) RegisterChartJobs() error {
 }
 
 // RegisterInstanceRefreshJob registers the daily remote-instance metadata
-// refresh cron (#393) at 03:00 UTC. The actual walk + fetch is implemented
+// refresh cron (#393) at 03:00. The actual walk + fetch is implemented
 // by processors.InstanceRefreshProcessor.
 func (s *Scheduler) RegisterInstanceRefreshJob() error {
 	return s.inner.Register("0 3 * * *", TaskTypeInstanceRefresh, nil,
@@ -67,7 +73,7 @@ func (s *Scheduler) RegisterInstanceRefreshJob() error {
 }
 
 // RegisterRetentionJob registers the daily retention aggregation cron
-// (#421) at 00:00 UTC. The actual computation is implemented by
+// (#421) at 00:00. The actual computation is implemented by
 // processors.RetentionAggregateProcessor.
 func (s *Scheduler) RegisterRetentionJob() error {
 	return s.inner.Register("0 0 * * *", TaskTypeRetentionAggregate, nil,
@@ -88,8 +94,8 @@ func (s *Scheduler) RegisterCheckExpiredMutingsJob() error {
 	)
 }
 
-// RegisterCleanJob registers the daily generic clean cron (#1563) at 00:00
-// UTC, mirroring upstream `clean`. user_ip 90 日 prune / 期限切れ
+// RegisterCleanJob registers the daily generic clean cron (#1563) at 00:00,
+// mirroring upstream `clean`. user_ip 90 日 prune / 期限切れ
 // role_assignment 削除 / reversi outdated game 削除を processors.CleanProcessor
 // が行う。
 func (s *Scheduler) RegisterCleanJob() error {
@@ -129,7 +135,7 @@ func (s *Scheduler) RegisterPluginJob(cron string, taskType string, payload []by
 }
 
 // RegisterOrphanUserCleanupJob registers the daily cleanup of relay-derived
-// orphan remote users (#2340) at 05:00 UTC.
+// orphan remote users (#2340) at 05:00.
 //
 // cleanRemoteNotes (04:00) の後に置くのは、ノートが先に消えた方が「ノート 0 件」
 // の条件に合致する行が増えるため。enable gate は processor 側で meta を見るので
@@ -142,8 +148,26 @@ func (s *Scheduler) RegisterOrphanUserCleanupJob() error {
 	)
 }
 
+// RegisterOrphanAttachmentCleanupJob registers the daily cleanup of owner-less
+// remote link attachments (#2722) at 05:30.
+//
+// orphanUserCleanup (05:00) の後に置く。あちらが親 user を消すと
+// ON DELETE SET NULL で owner 無しの行が増えるため。**ただし同じ日のうちに
+// 回収される保証は無い** — orphanUserCleanup も 200 行 x 最大 1000 バッチ x
+// 500ms pause の構成なので、backlog があれば 30 分では終わらない。その場合
+// 回収は翌日に回る (どちらも冪等なので問題は無い)。
+//
+// enable gate は processor 側で meta を見るので cron は無条件登録する。
+func (s *Scheduler) RegisterOrphanAttachmentCleanupJob() error {
+	return s.inner.Register("30 5 * * *", TaskTypeOrphanAttachmentCleanup, nil,
+		driver.WithQueue(MaintenanceQueueName),
+		driver.WithMaxRetry(0),
+		driver.WithUnique(24*time.Hour),
+	)
+}
+
 // RegisterCleanRemoteNotesJob registers the daily remote-note cleanup cron
-// (#1563) at 04:00 UTC, mirroring upstream `cleanRemoteNotes`. 旧実装は
+// (#1563) at 04:00, mirroring upstream `cleanRemoteNotes`. 旧実装は
 // router.go の 6h time.Ticker だったが、TS の systemQueue cron に揃える。
 // enable gate は processor 側で meta を見るので cron は無条件登録する。
 func (s *Scheduler) RegisterCleanRemoteNotesJob() error {

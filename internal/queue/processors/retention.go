@@ -34,7 +34,7 @@ func (p *RetentionAggregateProcessor) Handle(ctx context.Context, _ driver.Task)
 	if err := p.svc.Aggregate(ctx); err != nil {
 		// 失敗時も nil を返してジョブを success 扱いにする。MaxRetry(0) で
 		// driver に retry させない方針なので err を返すと dead queue が肥大
-		// するだけで利点が無い。次回 cron (翌日 0:00 UTC) を待てば自然に
+		// するだけで利点が無い。次回 cron (翌日 0:00) を待てば自然に
 		// 再アグリゲートされる。
 		slog.Warn("retention aggregate: failed", "err", err)
 		return nil

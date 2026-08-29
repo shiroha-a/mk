@@ -1258,15 +1258,16 @@ func graceFor(deadline time.Duration) time.Duration {
 // (TestHandlerDeadlines_MatchTaskTypeConstants)。task type の値は BullMQ の
 // job name として wire に出るので、そもそも自由に変えられない。
 var handlerDeadlines = map[string]time.Duration{
-	"objectStorage:cleanRemoteFiles": 0,
-	"maintenance:cleanRemoteNotes":   0,
-	"maintenance:orphanUserCleanup":  0,
-	"maintenance:deleteAccount":      0,
-	"maintenance:clean":              0,
-	"maintenance:retentionAggregate": 0,
-	"export":                         0,
-	"import":                         0,
-	"importCustomEmojis":             0,
+	"objectStorage:cleanRemoteFiles":      0,
+	"maintenance:cleanRemoteNotes":        0,
+	"maintenance:orphanUserCleanup":       0,
+	"maintenance:orphanAttachmentCleanup": 0,
+	"maintenance:deleteAccount":           0,
+	"maintenance:clean":                   0,
+	"maintenance:retentionAggregate":      0,
+	"export":                              0,
+	"import":                              0,
+	"importCustomEmojis":                  0,
 }
 
 // handlerDeadlineFor returns the deadline for taskType, or 0 when the task

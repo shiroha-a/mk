@@ -100,7 +100,7 @@ mkq.Process(DeliverQueue, func(ctx context.Context, job *mkq.Job[DeliverPayload]
 
 ```go
 mkq.Schedule(DeliverQueue, DeliverPayload{...},
-    mkq.WithCron("0 0 * * *"),         // 毎日 00:00 UTC
+    mkq.WithCron("0 0 * * *"),         // 毎日 00:00 (mkq は time.Local で解釈)
     mkq.WithJobID("daily-digest"),     // unique ID で重複 enqueue 抑止
 )
 ```

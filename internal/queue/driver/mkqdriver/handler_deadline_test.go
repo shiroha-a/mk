@@ -417,15 +417,16 @@ func TestPool_QuarantineThenAbandonThenReinstate(t *testing.T) {
 // ので、ここで縛るのが一番安い。
 func TestHandlerDeadlines_MatchTaskTypeConstants(t *testing.T) {
 	want := map[string]time.Duration{
-		queue.TaskTypeCleanRemoteFiles:   0,
-		queue.TaskTypeCleanRemoteNotes:   0,
-		queue.TaskTypeOrphanUserCleanup:  0,
-		queue.TaskTypeDeleteAccount:      0,
-		queue.TaskTypeClean:              0,
-		queue.TaskTypeRetentionAggregate: 0,
-		queue.TaskTypeExport:             0,
-		queue.TaskTypeImport:             0,
-		queue.TaskTypeImportCustomEmojis: 0,
+		queue.TaskTypeCleanRemoteFiles:        0,
+		queue.TaskTypeCleanRemoteNotes:        0,
+		queue.TaskTypeOrphanUserCleanup:       0,
+		queue.TaskTypeOrphanAttachmentCleanup: 0,
+		queue.TaskTypeDeleteAccount:           0,
+		queue.TaskTypeClean:                   0,
+		queue.TaskTypeRetentionAggregate:      0,
+		queue.TaskTypeExport:                  0,
+		queue.TaskTypeImport:                  0,
+		queue.TaskTypeImportCustomEmojis:      0,
 	}
 	assert.Equal(t, want, handlerDeadlines,
 		"the hard-coded keys must stay in step with the task type constants")

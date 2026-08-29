@@ -127,7 +127,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `user_pending` | `invitationTicketId` | mk-go 独自 | 1 招待で複数アカウントを作れる gap を塞ぐ |
 | `user_pending` | `signupApplicationId` | mk-go 独自 | 承認制 (#2571) でメール確認を挟むときの申請 ID。確認完了まではアカウントが無いので申請を `completed` にできず、**紐付けが無いと申請が `approved` のまま残って 1 つの承認から複数アカウントを作れる**。`/api/signup-pending` が `PromotePending` の戻り値からこれを読んで申請を完了させる。TS は未知の列を無視するので drop-in の復路は壊れない |
 | `meta` | `signupApplicationForm` | mk-go 独自 | 承認制の申請フォームの定義 (#2570)。管理者が項目を決める jsonb 配列。上限は 10 項目 / ラベル 100 文字 / 回答 2000 文字で、**上限を置かないと管理者が自分で壊せる** (項目無制限で申請ページが使えなくなる、最大長無制限で 1 件の申請が DB を膨らませる)。壊れた JSON は空フォーム扱いにして申請ページを 500 で潰さない |
-| `meta` | `enableEphemeralRelayNotes` / `ephemeralRelayNoteTtlMinutes` | mk-go 独自 | リレー経由投稿の揮発化 (#2332)。リレーでしか観測しない投稿は Redis に TTL 付きで置き、ローカルユーザーが触ったときだけ DB へ materialize する。既定 false は既存インスタンスの挙動を変えないため — 有効にするとグローバルタイムラインは FTT の窓より過去に遡れなくなる |
+| `meta` | `enableEphemeralRelayNotes` / `ephemeralRelayNoteTtlMinutes` | mk-go 独自 | リレー経由投稿の揮発化 (#2332)。リレーでしか観測しない投稿は Redis に TTL 付きで置き、ローカルユーザーが触ったときだけ DB へ materialize する。既定 false は既存インスタンスの挙動を変えないため — 有効にするとグローバルタイムラインは FTT の窓より過去に遡れなくなる。**どちらかのフラグ (これか `enableRelayOrphanUserCleanup`) が有効なら、owner 無しのリモート添付を掃除する日次ジョブ (`maintenance:orphanAttachmentCleanup`、05:30) も回る** (#2722)。著者が materialize されていないリモート添付は owner 無しで保存され、ephemeral note が TTL で消えても `drive_file` の行は残るため。消すのは **(a) どの DB 上の note からも参照されておらず、(b) 生きている ephemeral note の印も無く、(c) 猶予より古い** link-only の行だけ。**TTL は寿命の上限ではない** (`Touch` が閲覧のたびに打ち直す) ので、猶予だけでは表示中の添付を守れない。生存判定は Redis の印が担い、猶予は「行を作ってから印を打つまでの窓」を覆うだけ。**Redis を `maxmemory` + `allkeys-lru` で運用する場合は注意**: タイムラインの hydrate は note (`ephNote:*`) だけを読み、印 (`ephFile:*`) には触れないので、印だけが先に evict される側に偏り (`/api/notes/show` の `Touch` は印にも `EXPIRE` を打つため LRU の idle time も更新される。偏るのは hydrate しか通らないノート)、その状態で古い行が再利用されていると表示中の添付が消えうる (`volatile-ttl` なら TTL 順なのでこの偏りは出ない)。**この機能を有効にした直後の 1 TTL ぶん**も、既存の ephemeral note には印が無い (`Touch` は `Expire` なので印を作らない)。cron の時刻は TZ 未指定で、mkq (既定) はプロセスの TZ、legacy の asynq は UTC で解釈する |
 | `meta` | `enableRelayOrphanUserCleanup` / `relayOrphanUserGraceDays` | mk-go 独自 | リレー由来の孤児 user の掃除 (#2340)。対象の限定には `relay_observed_user` を使う |
 | `meta` | `chunkedUploadEnabled` / `chunkedUploadChunkSizeMb` / `chunkedUploadSessionTtlMinutes` / `chunkedUploadMaxSessionsPerUser` / `chunkedUploadMaxPendingMbPerUser` | mk-go 独自 | 分割アップロード (#2313) の設定。既存の `objectStorage*` と同じくコントロールパネルから編集する。TS は未知の列を無視するので drop-in の復路は壊れない |
 
@@ -404,7 +404,7 @@ upstream は用途ごとに **10 queue** に分けるが、mk-go は **8 queue**
 |---|---|
 | `deliver` | `deliver` |
 | `inbox` | `inbox` |
-| `system` | `maintenance` (cron 群: chart tick/resync/clean, checkExpiredMutings, clean, cleanRemoteNotes, checkModeratorsActivity, instanceRefresh, retentionAggregate, chunkedUploadGc) |
+| `system` | `maintenance` (cron 群: chart tick/resync/clean, checkExpiredMutings, clean, cleanRemoteNotes, checkModeratorsActivity, instanceRefresh, retentionAggregate, chunkedUploadGc, orphanUserCleanup, orphanAttachmentCleanup) |
 | `endedPollNotification` | **queue ではなく常駐 goroutine** (`corepoll.ExpiryWorker`、60 秒間隔) |
 | `postScheduledNote` | `deliver` の `note:postScheduled` |
 | `db` | `export` の `export` / `import` / `importCustomEmojis`、`deliver` の `maintenance:deleteAccount` |

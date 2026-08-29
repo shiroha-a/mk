@@ -52,6 +52,11 @@ type ObjectStorageDeleteFilePayload struct {
 // users that nothing references (#2340). ペイロードなし (meta から設定を読む)。
 const TaskTypeOrphanUserCleanup = "maintenance:orphanUserCleanup"
 
+// TaskTypeOrphanAttachmentCleanup is the task type for deleting owner-less
+// remote link attachments that no note references (#2722). ペイロードなし
+// (meta から設定を読む)。
+const TaskTypeOrphanAttachmentCleanup = "maintenance:orphanAttachmentCleanup"
+
 // TaskTypeCleanRemoteNotes is the task type for the periodic remote
 // notes cleaning job. ペイロードなし (meta から設定を読む)。
 const TaskTypeCleanRemoteNotes = "maintenance:cleanRemoteNotes"
@@ -105,13 +110,14 @@ const TaskTypeDeleteAccount = "maintenance:deleteAccount"
 
 // TaskTypeInstanceRefresh is the task type for the periodic
 // remote-instance metadata refresh (#393). Registered by
-// `Scheduler.RegisterInstanceRefreshJob` at `0 3 * * *` UTC and handled by
+// `Scheduler.RegisterInstanceRefreshJob` at `0 3 * * *` (TZ は Scheduler の
+// doc を参照。UTC ではない) and handled by
 // `processors.InstanceRefreshProcessor`.
 const TaskTypeInstanceRefresh = "maintenance:instanceRefresh"
 
 // TaskTypeRetentionAggregate is the task type for the daily retention
 // aggregation (#421). Registered by `Scheduler.RegisterRetentionJob`
-// at `0 0 * * *` UTC and handled by
+// at `0 0 * * *` (TZ は Scheduler の doc を参照。UTC ではない) and handled by
 // `processors.RetentionAggregateProcessor`.
 const TaskTypeRetentionAggregate = "maintenance:retentionAggregate"
 
