@@ -21,6 +21,12 @@ type MockDriveFileRepository struct {
 	// emoji 参照が無くても残る (#2721)。
 	EmojiReferencedURLs map[string]bool
 
+	// NoteReferencedFileIDs は ListOrphanRemoteAttachmentCandidates の guard を
+	// mock するための「いずれかの note.fileIds に載っている drive_file.id 集合」
+	// (#2722)。production の SQL は
+	// `NOT EXISTS (SELECT 1 FROM note WHERE "fileIds" @> ARRAY[id])`。
+	NoteReferencedFileIDs map[string]bool
+
 	// BulkFolderUserID / BulkFolderFileIDs record the last UpdateBulkFolder
 	// call so handler tests can assert the owning user is scoped (IDOR guard).
 	BulkFolderUserID  string
@@ -575,6 +581,43 @@ func (m *MockDriveFileRepository) DeleteOrphans() (int64, error) {
 		n++
 	}
 	return n, nil
+}
+
+// ListOrphanRemoteAttachmentCandidates mirrors the production candidate query
+// for owner-less remote link attachments (#2722).
+//
+// **参照チェックは NoteReferencedFileIDs で模倣する。** production は
+// `note.fileIds @> ARRAY[id]` で「どの note からも参照されていない」ことを
+// 確かめており、この述語が materialize 済み / dedup 再利用された添付を守る。
+// 空にすると「参照されている行も候補に出る」という production では起きない
+// 挙動を通してしまう。
+func (m *MockDriveFileRepository) ListOrphanRemoteAttachmentCandidates(cutoffID, afterID string, limit int) ([]string, error) {
+	if cutoffID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	ids := make([]string, 0, len(m.Files))
+	for id, f := range m.Files {
+		if f.UserID != nil || f.UserHost == nil || !f.IsLink {
+			continue
+		}
+		if id >= cutoffID || id <= afterID {
+			continue
+		}
+		if m.NoteReferencedFileIDs[id] {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	// production は `ORDER BY id LIMIT ?` で切る。map 走査のままだと keyset
+	// cursor が飛び飛びになり、取りこぼした行が二度と候補にならない。
+	sortpkg.Strings(ids)
+	if len(ids) > limit {
+		ids = ids[:limit]
+	}
+	return ids, nil
 }
 
 // ListOrphans mirrors DeleteOrphans's selection without deleting (#1724).

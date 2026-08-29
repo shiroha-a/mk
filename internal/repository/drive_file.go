@@ -84,6 +84,13 @@ type DriveFileRepository interface {
 	// ListRemoteCache's batched shape. See the orphanWhere const in this file
 	// for why unowned remote rows are kept.
 	ListOrphans(limit int) ([]*model.DriveFile, error)
+	// ListOrphanRemoteAttachmentCandidates returns up to limit IDs of link-only
+	// remote attachments that no note references and whose ID predates
+	// cutoffID, in ascending ID order starting after afterID. The caller must
+	// still exclude the ones a live ephemeral note references before deleting
+	// (see orphanRemoteAttachmentWhere). afterID は keyset cursor で、空なら
+	// 先頭から。
+	ListOrphanRemoteAttachmentCandidates(cutoffID, afterID string, limit int) ([]string, error)
 	// DeleteRemoteCache removes cached remote files (isLink=false with host set)
 	// — the rows whose actual bytes are cached locally / in object storage.
 	// Returns affected count. Used as the DB-only fallback for
@@ -485,8 +492,12 @@ func (r *driveFileRepository) DeleteOrphans() (int64, error) {
 // 実体ストレージは消費せず、残しても DB 行のぶんだけ。
 //
 // 副作用として、`DeleteOrphanRemoteUsers` (#2340) が親 user を消して
-// `ON DELETE SET NULL` になったリモートの行もここでは消えなくなる。owner 無しの
-// リモート添付の寿命は #2722 で別途決める。
+// `ON DELETE SET NULL` になったリモートの行もここでは消えない。**それらを
+// 回収するのは `ListOrphanRemoteAttachmentCandidates` (#2722) から始まる掃除**
+// で、猶予・「どの note からも参照されていない」こと・「生きている ephemeral
+// note の印が無い」ことを条件に消す。こちらの条件を
+// リモートへ広げてはいけない (admin から任意のタイミングで走るので、TTL 内の
+// ephemeral 添付を巻き込む)。
 const orphanWhere = `"userId" IS NULL AND "userHost" IS NULL AND NOT EXISTS (
 	SELECT 1 FROM "emoji" e
 	WHERE e."originalUrl" = "drive_file"."url"
@@ -502,6 +513,95 @@ func (r *driveFileRepository) ListOrphans(limit int) ([]*model.DriveFile, error)
 		return nil, err
 	}
 	return rows, nil
+}
+
+// orphanRemoteAttachmentWhere は #2722 の掃除対象を選ぶ条件。
+//
+// **`userId IS NULL` のリモート行に寿命を与えるのがこの掃除の目的。** 著者が
+// materialize されていないリモート添付は owner 無しで保存され (#2717)、
+// ephemeral note 自体は Redis の TTL で消えるのに drive_file の行は永久に残る。
+// `DeleteOrphanRemoteUsers` (#2340) が親 user を消して ON DELETE SET NULL に
+// なった行も同じ形になる。
+//
+// **`NOT EXISTS (note が参照)` を外さないこと。** ephemeral note は
+// `Materializer.EnsureNote` で永続化されうるが、**materialize は
+// drive_file.userId を backfill しない**。さらに `upsertAttachments` の dedup
+// (`FindByURI`) は既存行を再利用するので、owner 有りの note が owner 無しの行を
+// 掴む経路もある。つまり「owner 無し = 参照されていない」は成り立たない。
+// この述語だけが表示中の添付を守っている。`note.fileIds` には GIN index
+// (`IDX_note_fileIds`、migration 000055。TS 由来の DB では migration 000068 が
+// この名前を落として upstream の hash 名が残るが、index 自体はある) があるので
+// index が効く。ただし GIN の pending list を flush する前は効かない — 実測で
+// 同じクエリが VACUUM 前 4.9 秒 / VACUUM 後 1.5 ミリ秒だった。
+//
+// **cutoffID は「印を打つまでの窓」を覆うだけで、ephemeral note の寿命を覆う
+// ものではない。** 行を作る upsertAttachments と、印を打つ
+// `ephemeral.Store.PutNote` は別の処理なので、その隙間に掃除が走ると印の無い
+// 行を消してしまう。それ以上の生存判定は呼び出し側 (processor) が Redis の印
+// (`LiveFileIDs`) で行う — `Touch` が TTL を打ち直すので、猶予をいくら伸ばして
+// も「TTL より長ければ安全」にはならない。
+//
+// **`isLink = true` に限る。** link-only の行は実体を持たないので DB 行を消す
+// だけで完結する。mk-go は remote の実体をキャッシュしない (upsertAttachments は
+// 常に `IsLink: true`) ので、実運用でこの条件から漏れるリモート孤児は無い。
+// TS 製 DB 由来の `isLink = false` 行は object storage の実体を持つため、
+// storage を先に消す `DeleteRemoteCache` / `ListRemoteCache` の経路で扱う。
+//
+// note 以外から `drive_file` を指すのは `note_draft.fileIds` /
+// `gallery_post.fileIds` / `chat_message.fileId` と、`user.avatarId` /
+// `user.bannerId` (この 2 本だけが実 FK。ON DELETE SET NULL)。**どれも
+// 見ていないが、いずれも呼び出しユーザー所有の file しか受け付けない**ので
+// owner 無しのリモート添付が載る経路が無い (drafts / gallery は
+// `ownedFileIDs`、chat は所有チェック、avatar / banner は `/api/i/update` の
+// 所有者検証を通る。リモートのアバターは `avatarUrl` で持ち drive_file を
+// 作らない)。
+//
+// **TOCTOU の窓は残る。** 候補に挙げてから削除するまでの間に、進行中の
+// 取り込みが `FindByURI` で同じ行を掴むことがある。ephemeral 経路なら印が
+// 立つので次の実行では守られるが、その 1 回の実行では消えうる (結果は
+// note の fileIds に残る dangling ID = 添付 1 件が表示されない)。窓は
+// 秒単位で、猶予より古い行に限られる。
+const orphanRemoteAttachmentWhere = `"userId" IS NULL
+	AND "userHost" IS NOT NULL
+	AND "isLink" = true
+	AND id < ?
+	AND NOT EXISTS (
+		SELECT 1 FROM "note" n
+		WHERE n."fileIds" @> ARRAY["drive_file".id]::varchar[]
+	)`
+
+func (r *driveFileRepository) ListOrphanRemoteAttachmentCandidates(cutoffID, afterID string, limit int) ([]string, error) {
+	// **これは防御であって、現状の唯一の歯止めではない。** 空文字を渡しても
+	// SQL 側の `id < ''` はどの ID にも一致しないので結果は変わらない (= この
+	// 分岐を外しても振る舞いは同じで、テストでも差が出ない)。cutoff の比較を
+	// いじったときに「全件対象」へ化けるのを止めるために残す。
+	if cutoffID == "" {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	// **keyset cursor で進めること。** 消さずに残る行 (参照されているもの、
+	// ephemeral が生きているもの) は条件に合致し続けるので、毎回先頭から
+	// 引くと同じ行を延々と読み直す。afterID で切ると 1 回の実行あたり実質
+	// 1 パスになる。
+	//
+	// 実測 (PostgreSQL 18 / drive_file 50 万行・うち owner 無し 2 万・参照
+	// 済み 1.9 万 / note 40 万件 / VACUUM 済み): cursor 無しの形が 1 バッチ
+	// 200 万 buffer なのに対し、深い位置の cursor 付きは 2.6 千 buffer。
+	// 所要時間はキャッシュ状態で 20 倍変わる (cold で 17.6 秒、warm +
+	// parallel worker 2 で 0.9 秒) ので buffer 数で比べている。
+	var ids []string
+	err := r.db.Raw(`
+		SELECT id FROM "drive_file"
+		WHERE `+orphanRemoteAttachmentWhere+`
+		  AND id > ?
+		ORDER BY id
+		LIMIT ?`, cutoffID, afterID, limit).Scan(&ids).Error
+	if err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 func (r *driveFileRepository) DeleteRemoteCache() (int64, error) {

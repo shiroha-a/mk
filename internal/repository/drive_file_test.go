@@ -908,3 +908,126 @@ func TestDriveFileRepository_CleanupHelpers(t *testing.T) {
 	_, err = repo.FindByID(local.ID)
 	assert.NoError(t, err, "指定外の local は残る")
 }
+
+// TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates は #2722 の
+// 候補条件を固定する。
+//
+// **守るべきは「参照されている行を候補に出さない」ほう。** owner 無しの
+// リモート添付は materialize (ephemeral.Materializer) で永続化された note からも、
+// dedup (upsertAttachments の FindByURI) で再利用されて owner 有りの note からも
+// 参照されうる。「owner 無し = ゴミ」は成り立たない。
+func TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	host := "orphanatt.example"
+	author := insertTestUser(t, "u_oa_author", "oaauthor")
+	defer cleanupUser(t, author.ID)
+
+	mk := func(id string, mutate func(*model.DriveFile)) *model.DriveFile {
+		f := newTestDriveFile(id, author.ID, "md5"+id, nil)
+		f.UserID = nil
+		f.UserHost = &host
+		f.IsLink = true
+		f.StoredInternal = false
+		if mutate != nil {
+			mutate(f)
+		}
+		require.NoError(t, repo.Create(f))
+		t.Cleanup(func() { cleanupDriveFile(t, f.ID) })
+		return f
+	}
+
+	// cutoff より古い = 候補になりうる行。
+	garbage := mk("oa_old_garbage", nil)
+	referenced := mk("oa_old_referenced", nil)
+	mk("oa_old_owned", func(f *model.DriveFile) { f.UserID = &author.ID })
+	mk("oa_old_local", func(f *model.DriveFile) { f.UserHost = nil })
+	mk("oa_old_cached", func(f *model.DriveFile) { f.IsLink = false })
+	// cutoff より新しい = 猶予の内側にある行。
+	mk("oa_zz_fresh", nil)
+
+	// referenced だけを note.fileIds に載せる。
+	text := "ref"
+	note := &model.Note{
+		ID: "n_oa_ref", UserID: author.ID, Text: &text,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+		FileIDs:    model.StringArray{referenced.ID},
+	}
+	require.NoError(t, testDB.Create(note).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, note.ID)
+
+	ids, err := repo.ListOrphanRemoteAttachmentCandidates("oa_zz", "", 100)
+	require.NoError(t, err)
+	assert.Equal(t, []string{garbage.ID}, ids,
+		"候補は参照が無く cutoff より古い owner 無しリモート添付だけ")
+}
+
+// TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates_Cursor は
+// keyset cursor と limit の境界を固定する。
+//
+// **cursor が効かないと実行が終わらない。** 消さずに残る行 (参照されている /
+// ephemeral が生きている) は条件に合致し続けるので、毎回先頭から引くと同じ
+// 行を読み直す。実測で 50 万行に対し 1 バッチ 17.6 秒かかり、それがバッチ数
+// だけ繰り返された。
+func TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates_Cursor(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	host := "orphanattc.example"
+	author := insertTestUser(t, "u_oac", "oacauthor")
+	defer cleanupUser(t, author.ID)
+
+	for _, id := range []string{"oac_1", "oac_2", "oac_3"} {
+		f := newTestDriveFile(id, author.ID, "md5"+id, nil)
+		f.UserID = nil
+		f.UserHost = &host
+		f.IsLink = true
+		require.NoError(t, repo.Create(f))
+		defer cleanupDriveFile(t, f.ID)
+	}
+
+	first, err := repo.ListOrphanRemoteAttachmentCandidates("oac_z", "", 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"oac_1", "oac_2"}, first, "id 昇順で limit ぶん返る")
+
+	next, err := repo.ListOrphanRemoteAttachmentCandidates("oac_z", first[len(first)-1], 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"oac_3"}, next, "cursor の続きから返る")
+
+	last, err := repo.ListOrphanRemoteAttachmentCandidates("oac_z", "oac_3", 2)
+	require.NoError(t, err)
+	assert.Empty(t, last, "末尾まで進んだら空")
+
+	// cutoff は排他。境界の行そのものは候補にしない。
+	boundary, err := repo.ListOrphanRemoteAttachmentCandidates("oac_1", "", 10)
+	require.NoError(t, err)
+	assert.Empty(t, boundary, "cutoff と同じ id は含めない")
+}
+
+// TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates_Guards は、
+// 掃除が暴走する形の入力で何も返さないことを固定する。
+//
+// **空 cutoff のケースは早期 return を守っていない。** SQL 側の `id < ”` も
+// どの ID にも一致しないので、関数冒頭の分岐を外しても結果は変わらない
+// (変異させても落ちない)。ここで固定しているのは「空 cutoff は何も返さない」
+// という**振る舞い**であって、その実現手段ではない。
+func TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates_Guards(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	host := "orphanattg.example"
+	author := insertTestUser(t, "u_oag", "oagauthor")
+	defer cleanupUser(t, author.ID)
+
+	f := newTestDriveFile("oag_1", author.ID, "md5oag", nil)
+	f.UserID = nil
+	f.UserHost = &host
+	f.IsLink = true
+	require.NoError(t, repo.Create(f))
+	defer cleanupDriveFile(t, f.ID)
+
+	ids, err := repo.ListOrphanRemoteAttachmentCandidates("", "", 100)
+	require.NoError(t, err)
+	assert.Empty(t, ids, "cutoff 未指定は何も返さない")
+
+	// limit <= 0 は既定値に倒す (0 件で返さない)。
+	ids, err = repo.ListOrphanRemoteAttachmentCandidates("oag_z", "", 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"oag_1"}, ids)
+}

@@ -181,3 +181,68 @@ func TestMockRegistrationTicketRepository_SinceOnlyIsAscending(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"t1", "t2"}, pageIDs(rows, func(t *model.RegistrationTicket) string { return t.ID }))
 }
+
+// mock の owner 無しリモート添付の候補抽出が production と同じ意味であること
+// (#2722)。
+//
+// **この mock を使うテストがまだ無くても要る。** 添付の掃除は「表示中の添付を
+// 消さない」ことが唯一の要件で、guard を 1 つでも落とすと即データ消失になる。
+// mock 側が緩いと、後からこの mock でハンドラを書いた人が production では
+// 起きない前提でテストを書ける。
+func TestMockDriveFileRepository_OrphanRemoteAttachmentCandidates(t *testing.T) {
+	owner := "u1"
+	host := "remote.example"
+	m := NewMockDriveFileRepository()
+	add := func(id string, mutate func(*model.DriveFile)) {
+		f := &model.DriveFile{ID: id, UserHost: &host, IsLink: true}
+		if mutate != nil {
+			mutate(f)
+		}
+		m.Files[id] = f
+	}
+	add("a_garbage", nil)
+	add("b_referenced", nil)
+	add("c_owned", func(f *model.DriveFile) { f.UserID = &owner })
+	add("d_local", func(f *model.DriveFile) { f.UserHost = nil })
+	add("e_cached", func(f *model.DriveFile) { f.IsLink = false })
+	add("z_fresh", nil)
+	m.NoteReferencedFileIDs = map[string]bool{"b_referenced": true}
+
+	ids, err := m.ListOrphanRemoteAttachmentCandidates("z", "", 100)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a_garbage"}, ids)
+
+	t.Run("cursor and limit", func(t *testing.T) {
+		for _, id := range []string{"a2", "a3"} {
+			add(id, nil)
+		}
+		first, err := m.ListOrphanRemoteAttachmentCandidates("z", "", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a2", "a3"}, first, "id 昇順で limit ぶん")
+
+		next, err := m.ListOrphanRemoteAttachmentCandidates("z", "a3", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"a_garbage"}, next, "cursor の続きから")
+	})
+
+	t.Run("cutoff is exclusive", func(t *testing.T) {
+		// production 側 (repository) も cutoff と同じ id は候補にしない。
+		// mock だけ緩いと「境界の行は消えない」前提のテストが書ける。
+		// 他の subtest が m.Files に足した行と混ざらないよう作り直す。
+		only := NewMockDriveFileRepository()
+		only.Files["k1"] = &model.DriveFile{ID: "k1", UserHost: &host, IsLink: true}
+		ids, err := only.ListOrphanRemoteAttachmentCandidates("k1", "", 100)
+		require.NoError(t, err)
+		assert.Empty(t, ids, "cutoff と同じ id は含めない")
+
+		ids, err = only.ListOrphanRemoteAttachmentCandidates("k2", "", 100)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"k1"}, ids)
+	})
+
+	t.Run("empty cutoff is a no-op", func(t *testing.T) {
+		ids, err := m.ListOrphanRemoteAttachmentCandidates("", "", 100)
+		require.NoError(t, err)
+		assert.Empty(t, ids)
+	})
+}
