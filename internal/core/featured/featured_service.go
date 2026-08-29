@@ -113,17 +113,6 @@ func (s *Service) getRankingOf(ctx context.Context, name string, windowRange tim
 	return order, nil
 }
 
-// removeFromRanking drops element from both the current and previous window
-// (upstream removeFromRanking)。note 削除時に呼ぶ。
-func (s *Service) removeFromRanking(ctx context.Context, name string, windowRange time.Duration, element string) error {
-	cur := s.currentWindow(windowRange)
-	pipe := s.redis.Pipeline()
-	pipe.ZRem(ctx, windowKey(name, cur), element)
-	pipe.ZRem(ctx, windowKey(name, cur-1), element)
-	_, err := pipe.Exec(ctx)
-	return err
-}
-
 // UpdateGlobalNotesRanking adds score to noteID in the global notes ranking.
 func (s *Service) UpdateGlobalNotesRanking(ctx context.Context, noteID string, score float64) error {
 	return s.updateRankingOf(ctx, globalNotesRankingName, globalNotesRankingWindow, noteID, score)
@@ -152,21 +141,6 @@ func (s *Service) GetInChannelNotesRanking(ctx context.Context, channelID string
 // GetPerUserNotesRanking returns the top-threshold ranked note IDs by userID.
 func (s *Service) GetPerUserNotesRanking(ctx context.Context, userID string, threshold int) ([]string, error) {
 	return s.getRankingOf(ctx, perUserNotesRankingName+":"+userID, perUserNotesRankingWindow, threshold)
-}
-
-// RemoveGlobalNotesRanking removes noteID from the global ranking windows.
-func (s *Service) RemoveGlobalNotesRanking(ctx context.Context, noteID string) error {
-	return s.removeFromRanking(ctx, globalNotesRankingName, globalNotesRankingWindow, noteID)
-}
-
-// RemoveInChannelNotesRanking removes noteID from channelID's ranking windows.
-func (s *Service) RemoveInChannelNotesRanking(ctx context.Context, channelID, noteID string) error {
-	return s.removeFromRanking(ctx, inChannelNotesRankingName+":"+channelID, globalNotesRankingWindow, noteID)
-}
-
-// RemovePerUserNotesRanking removes noteID from userID's per-user ranking windows.
-func (s *Service) RemovePerUserNotesRanking(ctx context.Context, userID, noteID string) error {
-	return s.removeFromRanking(ctx, perUserNotesRankingName+":"+userID, perUserNotesRankingWindow, noteID)
 }
 
 // UpdateGalleryPostsRanking adds score to postID in the gallery posts ranking

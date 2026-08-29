@@ -87,22 +87,6 @@ func TestService_Threshold(t *testing.T) {
 	assert.Equal(t, []string{"d", "c"}, ids)
 }
 
-func TestService_Remove(t *testing.T) {
-	ctx := context.Background()
-	w0 := featuredEpoch.Add(30 * globalNotesRankingWindow)
-	s := newSvc(t, w0)
-	require.NoError(t, s.UpdateGlobalNotesRanking(ctx, "keep", 3))
-	require.NoError(t, s.UpdateGlobalNotesRanking(ctx, "gone", 5))
-	// 前 window にも gone を入れて、remove が両 window を掃除することを確認。
-	s.now = func() time.Time { return w0.Add(globalNotesRankingWindow) }
-	require.NoError(t, s.UpdateGlobalNotesRanking(ctx, "gone", 2))
-
-	require.NoError(t, s.RemoveGlobalNotesRanking(ctx, "gone"))
-	ids, err := s.GetGlobalNotesRanking(ctx, 100)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"keep"}, ids)
-}
-
 func TestService_InChannelAndPerUserAreSeparate(t *testing.T) {
 	ctx := context.Background()
 	now := featuredEpoch.Add(40 * globalNotesRankingWindow)
@@ -128,23 +112,6 @@ func TestService_InChannelAndPerUserAreSeparate(t *testing.T) {
 	other, err := s.GetInChannelNotesRanking(ctx, "ch2", 100)
 	require.NoError(t, err)
 	assert.Empty(t, other)
-}
-
-func TestService_RemoveInChannelAndPerUser(t *testing.T) {
-	ctx := context.Background()
-	now := featuredEpoch.Add(41 * globalNotesRankingWindow)
-	s := newSvc(t, now)
-	require.NoError(t, s.UpdateInChannelNotesRanking(ctx, "ch1", "c1", 1))
-	require.NoError(t, s.UpdatePerUserNotesRanking(ctx, "u1", "p1", 1))
-	require.NoError(t, s.RemoveInChannelNotesRanking(ctx, "ch1", "c1"))
-	require.NoError(t, s.RemovePerUserNotesRanking(ctx, "u1", "p1"))
-
-	cids, err := s.GetInChannelNotesRanking(ctx, "ch1", 100)
-	require.NoError(t, err)
-	assert.Empty(t, cids)
-	pids, err := s.GetPerUserNotesRanking(ctx, "u1", 100)
-	require.NoError(t, err)
-	assert.Empty(t, pids)
 }
 
 func TestService_EmptyRanking(t *testing.T) {
