@@ -49,9 +49,14 @@ type DriveFileRepository interface {
 	// origin is "local" / "remote" / "combined" ("combined" is the
 	// default). Empty host / type are no-ops.
 	ListForAdmin(userID, origin, host, fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error)
-	// ListSystemFiles returns drive files that are not owned by any user
-	// (userId IS NULL). #670 で導入した emoji copy / import zip の保管先
-	// system file を admin UI から可視化するための一覧 API (#686)。
+	// ListSystemFiles returns local drive files that are not owned by any user
+	// (userId IS NULL AND userHost IS NULL). #670 で導入した emoji copy /
+	// import zip の保管先 system file を admin UI から可視化するための一覧
+	// API (#686)。
+	//
+	// **リモートの owner 無し行は含めない (#2753)。** 表示中の note が参照して
+	// いる添付が「emoji copy / import zip の保管先」として並ぶため。
+	// それらは ListForAdmin に origin=remote を渡せば出る。
 	// fileType は MIME prefix match (空なら無制約)、ID 範囲は他の admin
 	// listing と同一の semantics。
 	ListSystemFiles(fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error)
@@ -410,7 +415,22 @@ func (r *driveFileRepository) ListForAdmin(userID, origin, host, fileType, until
 }
 
 func (r *driveFileRepository) ListSystemFiles(fileType, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
-	q := r.db.Model(&model.DriveFile{}).Where(`"userId" IS NULL`)
+	// `"userHost" IS NULL` が要る (#2753)。`userId IS NULL` の集合は、もはや
+	// local な system 資産だけではない — 著者が materialize されていない
+	// リモート添付は owner 無しで保存され (#2717)、DeleteOrphanRemoteUsers
+	// (#2340) が親 user を消した行も ON DELETE SET NULL で NULL になる。
+	//
+	// **問題はラベルであって削除経路ではない。** owner 無しの行は誰も個別削除
+	// できない (drive_service.go の findOwnedFile が userId nil を無条件で弾き、
+	// admin/drive/* に per-file の削除 endpoint が無い)。ただし
+	// 「emoji copy / import zip の保管先」という説明のまま**表示中の note が
+	// 参照している添付**を並べるので、運用判断の材料として誤っている。
+	//
+	// 除外してもリモート行が admin から見えなくなるわけではない。
+	// ListForAdmin に origin=remote を渡せば userHost で絞られて出る
+	// (host が表示され、操作者に文脈がある側)。host 単独では出ない —
+	// handler が origin 未指定を local に倒すため (#1545)。
+	q := r.db.Model(&model.DriveFile{}).Where(`"userId" IS NULL AND "userHost" IS NULL`)
 	if fileType != "" {
 		// upstream files.ts と同じく `/*` 終端は prefix LIKE、それ以外は完全一致
 		// (#1772、ListForAdmin と semantics 統一)。

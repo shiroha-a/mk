@@ -140,9 +140,9 @@ func TestDriveFiles_FiltersByTypePrefix(t *testing.T) {
 }
 
 func TestDriveFiles_FiltersBySystemToken(t *testing.T) {
-	// #686: userId="@system" 指定時は system 所有 (UserID IS NULL) の drive
-	// file のみを返す。emoji copy / import zip 経路で蓄積される system file
-	// を admin UI から可視化するための経路。
+	// #686: userId="@system" 指定時は local な system 所有 (userId IS NULL
+	// かつ userHost IS NULL) の drive file のみを返す。emoji copy / import
+	// zip 経路で蓄積される system file を admin UI から可視化するための経路。
 	u := "u1"
 	remoteUser := "u_remote"
 	host := "remote.example"

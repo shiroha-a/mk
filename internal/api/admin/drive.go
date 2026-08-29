@@ -158,10 +158,13 @@ func (h *Handler) DriveCleanup(c echo.Context) error {
 }
 
 // SystemUserIDToken は `/api/admin/drive/files` の `userId` パラメータで
-// 「system 所有 (UserID IS NULL) の drive file」を一覧する特殊値。custom
-// emoji の copy / import zip 経路で蓄積される system file (#670 で導入)
-// を admin UI から可視化する経路 (#686)。`@` 接頭辞は実 user ID と衝突
-// しない (aidx ID は英数字のみ) ため安全。
+// 「local な system 所有 (userId IS NULL かつ userHost IS NULL) の drive
+// file」を一覧する特殊値。custom emoji の copy / import zip 経路で蓄積される
+// system file (#670 で導入) を admin UI から可視化する経路 (#686)。
+// `@` 接頭辞は実 user ID と衝突しない (aidx ID は英数字のみ) ため安全。
+//
+// **リモートの owner 無し行は含まない (#2753)。** それらは origin=remote を
+// 渡せば通常の一覧に出る。
 const SystemUserIDToken = "@system"
 
 // DriveFiles handles POST /api/admin/drive/files.
@@ -189,8 +192,10 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
 	// userId に @system が指定されたら system file 専用 listing を返す。
-	// origin / host filter は意味を持たない (system file はユーザーに紐付か
-	// ないので) ので、type と pagination のみを取り回す。
+	// origin / host filter は**無視する** (upstream も userId 指定時は読まない)。
+	// この一覧は local (userHost IS NULL) に限定してあるので、origin=remote を
+	// 渡しても local 行が返る点に注意 (#2753)。type と pagination のみを
+	// 取り回す。
 	if req.UserID == SystemUserIDToken {
 		files, err := h.driveFileRepo.ListSystemFiles(req.Type, untilID, sinceID, limit)
 		if err != nil {

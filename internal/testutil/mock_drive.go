@@ -522,6 +522,10 @@ func (m *MockDriveFileRepository) ListSystemFiles(fileType, untilID, sinceID str
 		if f.UserID != nil {
 			continue
 		}
+		// production は userHost IS NULL も見る (#2753)。
+		if f.UserHost != nil {
+			continue
+		}
 		if !matchesDriveFileType(f.Type, fileType) {
 			continue
 		}

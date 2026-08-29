@@ -338,9 +338,18 @@ func TestDriveFileRepository_ListForAdmin(t *testing.T) {
 	remoteFile.Type = "image/png"
 	videoFile := newTestDriveFile("adl_video", user.ID, "md5video", nil)
 	videoFile.Type = "video/mp4"
+	// **owner 無しのリモート添付** (#2717 / #2340 由来)。#2753 で @system 一覧
+	// から外したので、こちらに出ることが「消せないし見えない」を防ぐ唯一の
+	// 保証になる。origin=remote は userHost で絞るので出る。
+	remoteUnowned := newTestDriveFile("adl_ru", user.ID, "md5adlru", nil)
+	remoteUnowned.UserID = nil
+	remoteUnowned.UserHost = &remoteHost
+	remoteUnowned.Type = "image/png"
 	require.NoError(t, repo.Create(localFile))
 	require.NoError(t, repo.Create(remoteFile))
 	require.NoError(t, repo.Create(videoFile))
+	require.NoError(t, repo.Create(remoteUnowned))
+	defer cleanupDriveFile(t, remoteUnowned.ID)
 	defer cleanupDriveFile(t, localFile.ID)
 	defer cleanupDriveFile(t, remoteFile.ID)
 	defer cleanupDriveFile(t, videoFile.ID)
@@ -354,6 +363,8 @@ func TestDriveFileRepository_ListForAdmin(t *testing.T) {
 	}
 	assert.True(t, ids[remoteFile.ID])
 	assert.False(t, ids[localFile.ID])
+	assert.True(t, ids[remoteUnowned.ID],
+		"owner 無しのリモート添付も origin=remote には出る (#2753 で @system から外した分の受け皿)")
 
 	// #1772: type=image/* は prefix LIKE → image/png にマッチ。
 	rows, err = repo.ListForAdmin("", "", "", "image/*", "", "", 10)
@@ -417,9 +428,10 @@ func TestDriveFileRepository_ListForAdmin(t *testing.T) {
 }
 
 func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
-	// #686: UserID IS NULL の system file (custom emoji copy / import zip 経路で
-	// 蓄積される) を一覧する経路。type prefix と pagination が効くこと、
-	// user 所有 / remote 所有のファイルが混ざらないことを保証する。
+	// #686: local な system file (userId IS NULL かつ userHost IS NULL。custom
+	// emoji copy / import zip 経路で蓄積される) を一覧する経路。type prefix と
+	// pagination が効くこと、user 所有 / remote 所有 / **owner 無しのリモート**
+	// (#2753) のいずれも混ざらないことを保証する。
 	repo := NewDriveFileRepository(testDB)
 	user := insertTestUser(t, "u_sys_lst", "syslst")
 	defer cleanupUser(t, user.ID)
@@ -437,10 +449,18 @@ func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
 	remoteFile := newTestDriveFile("u_sys_rf", user.ID, "md5remote", nil)
 	remoteFile.UserHost = &remoteHost
 	remoteFile.Type = "image/png"
+	// **owner 無しのリモート添付** (#2717 / #2340 由来)。userId IS NULL だけで
+	// 絞ると混ざり、admin UI から「system file」として消せてしまう (#2753)。
+	remoteUnowned := newTestDriveFile("u_sys_ru", user.ID, "md5remoteunowned", nil)
+	remoteUnowned.UserID = nil
+	remoteUnowned.UserHost = &remoteHost
+	remoteUnowned.Type = "image/png"
 	require.NoError(t, repo.Create(sysImg))
 	require.NoError(t, repo.Create(sysZip))
 	require.NoError(t, repo.Create(userFile))
 	require.NoError(t, repo.Create(remoteFile))
+	require.NoError(t, repo.Create(remoteUnowned))
+	defer cleanupDriveFile(t, remoteUnowned.ID)
 	defer cleanupDriveFile(t, sysImg.ID)
 	defer cleanupDriveFile(t, sysZip.ID)
 	defer cleanupDriveFile(t, userFile.ID)
@@ -457,6 +477,8 @@ func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
 	assert.True(t, ids[sysZip.ID])
 	assert.False(t, ids[userFile.ID], "user-owned file must not appear")
 	assert.False(t, ids[remoteFile.ID], "remote-owned file must not appear")
+	assert.False(t, ids[remoteUnowned.ID],
+		"owner 無しのリモート添付は system file として出さない (#2753)")
 
 	// #1772: type=image/* (wildcard) で絞り込み: 本 test の fixture では sysImg のみ
 	// image/* に該当。他 test が UserID=NULL + Type=image/* な system file 行を残しても
@@ -471,6 +493,8 @@ func TestDriveFileRepository_ListSystemFiles(t *testing.T) {
 	assert.False(t, ids[sysZip.ID], "sysZip (application/zip) must not appear")
 	assert.False(t, ids[userFile.ID], "user-owned file must not appear")
 	assert.False(t, ids[remoteFile.ID], "remote-owned file must not appear")
+	assert.False(t, ids[remoteUnowned.ID],
+		"owner 無しのリモート添付は wildcard 経路でも出さない (#2753)")
 
 	// limit 範囲外 (0 / 過大) でも error にならず default / clamp が効く
 	_, err = repo.ListSystemFiles("", "", "", 0)
