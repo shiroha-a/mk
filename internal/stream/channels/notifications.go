@@ -101,18 +101,13 @@ func (c *MainChannel) Init(_ json.RawMessage) error {
 // 旧実装は payload 全体に対して `type` だけを見て分岐していたため、bare
 // 通知 body 内の `type:"mention"` を envelope の type として誤って扱い、
 // 存在しない `mention` イベントを送出して通知 timeline のライブ更新を
-// 落としていた (#420 follow-up)。`type` と `body` の両方が揃っている時だけ
-// envelope として扱うことで誤検出を防ぐ。
+// 落としていた (#420 follow-up)。判定は mainStreamEnvelope に集約してある。
 func (c *MainChannel) OnRedisEvent(payload []byte) {
-	var env struct {
-		Type string          `json:"type"`
-		Body json.RawMessage `json:"body"`
-	}
-	if err := json.Unmarshal(payload, &env); err == nil && env.Type != "" && len(env.Body) > 0 {
+	if envType, envBody, ok := mainStreamEnvelope(payload); ok {
 		// maybeRefreshFollowing は元 body (follow/unfollow の user) を見るので
 		// note-hide ゲートより前に元の body で実行する。
-		c.maybeRefreshFollowing(env.Type, env.Body)
-		body := env.Body
+		c.maybeRefreshFollowing(envType, envBody)
+		body := envBody
 		// mention envelope は upstream main.ts と同じく isNoteVisibleForMe +
 		// isNoteMutedOrBlocked (instance-mute / user-mute / block / renote-mute /
 		// channel-mute) を適用してから送る (#1711)。reply / renote は upstream
@@ -120,18 +115,18 @@ func (c *MainChannel) OnRedisEvent(payload []byte) {
 		// そのまま転送する。可視性は publish 段の CanSeeNote でも gate 済だが、
 		// mention recipient は mentions/visibleUserIds に含まれるため再評価しても
 		// 誤 drop しない (defense-in-depth)。
-		if env.Type == "mention" {
-			if !streamNoteVisibleForViewer(env.Body, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {
+		if envType == "mention" {
+			if !streamNoteVisibleForViewer(envBody, viewerIDFromCtx(c.ctx), c.ctx.FollowingSnapshot()) {
 				return
 			}
-			if noteMutedOrBlocked(env.Body, c.ctx.MuteBlockSnapshot()) {
+			if noteMutedOrBlocked(envBody, c.ctx.MuteBlockSnapshot()) {
 				return
 			}
 		}
 		// reply/renote/mention envelope の body は packed note。viewer 可視性で
 		// top-level 著者設定 + depth-2 embed を hide する (#1568)。
-		if isNoteEnvelope(env.Type) {
-			body = json.RawMessage(hideEmbedsForViewer(env.Body, viewerUserFromCtx(c.ctx), c.ctx.FollowingSnapshot(), time.Now().UnixMilli()))
+		if isNoteEnvelope(envType) {
+			body = json.RawMessage(hideEmbedsForViewer(envBody, viewerUserFromCtx(c.ctx), c.ctx.FollowingSnapshot(), time.Now().UnixMilli()))
 		} else {
 			// note を内包する envelope にも bare notification と同じ **hide gate** を
 			// 通す。unreadNotification は packed notification を body にそのまま
@@ -153,9 +148,9 @@ func (c *MainChannel) OnRedisEvent(payload []byte) {
 			// body を運ぶ型 (registryUpdated / pageEvent) にも 1 回分乗る。probe struct は
 			// 1 field なので追加コストは Unmarshal 1 回分に留まる (FollowingSnapshot は
 			// note を検出してからしか触らない)。
-			body = json.RawMessage(hideNotificationNote(c.ctx, env.Body))
+			body = json.RawMessage(hideNotificationNote(c.ctx, envBody))
 		}
-		_ = c.ctx.Send(env.Type, body)
+		_ = c.ctx.Send(envType, body)
 		return
 	}
 	// bare notification (notifications: topic) も muted instance 由来なら drop
@@ -165,6 +160,58 @@ func (c *MainChannel) OnRedisEvent(payload []byte) {
 	}
 	payload = hideNotificationNote(c.ctx, payload)
 	_ = c.ctx.Send("notification", json.RawMessage(payload))
+}
+
+// mainStreamEnvelope reports whether payload is a `{type, body}` envelope from
+// MainStreamPublisher (the `main:<userID>` topic) and returns its type and raw
+// body. Payloads that are not envelopes come from the `notifications:<userID>`
+// topic, which the same channel also subscribes to, and carry a bare packed
+// Notification.
+//
+// 判定は「`type` と `body` が揃っていて、**かつ packed notification の署名
+// (`id` と `createdAt`) を持たない**」。entity の packNotificationCore は
+// この 3 つを必ず出力し、Extra の merge は core key と衝突するキーを skip する
+// ので id / createdAt / type は潰せない。envelope 側 (PublishMainEvent が出す
+// `map[string]any{"type":..,"body":..}`) は top-level に id / createdAt を
+// 持たない。
+//
+// **`type` と `body` の存在だけでは足りない** (#2738)。`app` 通知は Extra の
+// `body` / `header` / `icon` が top-level に merge されるので
+// `{"id":..,"type":"app","createdAt":..,"body":"hello",..}` になり、存在だけを
+// 見る判定では envelope と誤検出されて、イベント名 `app` / body は文字列
+// `"hello"` として送られていた。期待は `notification` イベント + 通知オブジェクト
+// 全体。
+//
+// **body が JSON object かどうかで切るのは不可。** envelope 側にも
+// `{"type":"readAllNotifications","body":null}` のように object でない body が
+// あり、bare 側の `app` body は文字列にも object にもなりうるので、どちら向きにも
+// 誤る。
+//
+// **「top-level のキーがちょうど 2 つ」でも切れるが、採らない。** 現状の
+// PublishMainEvent は 2 キーしか出さないので判定としては成立するが、envelope に
+// キーが 1 つ増えた瞬間に **20 種ある main イベント全部**が bare 側へ落ちる。
+// packed notification の署名を見る側は、誤ると落ちるのが notification 経路だけで
+// 済むうえ、署名は packer の契約として固定されている。
+//
+// #420 の回帰も同時に防ぐ。bare 通知の `type:"mention"` は id / createdAt を
+// 伴うのでここに来ない。
+func mainStreamEnvelope(payload []byte) (string, json.RawMessage, bool) {
+	var probe struct {
+		Type      string          `json:"type"`
+		Body      json.RawMessage `json:"body"`
+		ID        json.RawMessage `json:"id"`
+		CreatedAt json.RawMessage `json:"createdAt"`
+	}
+	if err := json.Unmarshal(payload, &probe); err != nil {
+		return "", nil, false
+	}
+	if probe.Type == "" || len(probe.Body) == 0 {
+		return "", nil, false
+	}
+	if len(probe.ID) > 0 || len(probe.CreatedAt) > 0 {
+		return "", nil, false
+	}
+	return probe.Type, probe.Body, true
 }
 
 // hideNotificationNote applies the per-viewer hideNote gate to the note embedded

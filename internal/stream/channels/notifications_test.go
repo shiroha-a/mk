@@ -416,11 +416,11 @@ func TestMain_UnreadNotificationEnvelopeVisibleEmbedKeepsFiles(t *testing.T) {
 // unreadNotification (note を**持ちうる**ので verbatim とは限らない。gate の効きは
 // TestMain_UnreadNotificationEnvelopeEmbedHidden で見る) を引いた残り。
 //
-// **これは else 分岐に来るものの全量ではない。** MainChannel は `notifications:<id>`
-// topic も購読しており、bare 通知のうち `app` 型は Extra の `body` が top-level に
-// merge されるせいで envelope と誤検出されて else 分岐に来る (#2738、本 diff 以前
-// からの既存バグ)。その body は文字列なので hideNotificationNote は unmarshal に
-// 失敗して verbatim を返す = gate は素通しで、劣化はしない。
+// **これは else 分岐に来るものの全量。** MainChannel は `notifications:<id>` topic も
+// 購読しているが、bare 通知は mainStreamEnvelope が packed notification の署名
+// (id / createdAt) を見て弾くので envelope 側に来ない。以前は `app` 型が Extra の `body` の top-level merge で誤検出され
+// else 分岐に来ていた (#2738、修正済。ガードは
+// TestMain_AppNotificationForwardedAsNotification)。
 //
 // **固定できるのは「この 16 種の body を gate が壊さない」ことまで。** gate を type
 // 列挙にしなかった判断は「この 16 種はどれも top-level に `note` を持たない」という
@@ -464,6 +464,123 @@ func TestMain_NonNoteEnvelopeUnaffectedByNotificationGate(t *testing.T) {
 			require.NoError(t, json.Unmarshal([]byte(tc.payload), &env))
 			assert.Equal(t, string(env.Body), string(sentBytes(t, ctx, 0)),
 				"note を持たない body は byte 単位で verbatim であること")
+		})
+	}
+}
+
+// #2738: `app` 通知 (notifications/create) は Extra の body / header / icon が
+// packer で top-level に merge されるので、packed body が
+// `{"id":..,"type":"app","createdAt":..,"body":"hello",..}` になる。`type` と
+// `body` が揃っていることだけを見ていた旧判定では、これを main envelope と
+// 誤検出してイベント名 `app` / body は文字列 `"hello"` として送っていた。
+// 期待は `notification` イベント + 通知オブジェクト全体。
+//
+// body が JSON object のケースも並べてある。**body の型で切る判定を採らない**
+// ことを固定するため — envelope 側にも `body:null` があり、bare 側にも文字列と
+// object の両方があるので、body の形では両方向に誤る。
+func TestMain_AppNotificationForwardedAsNotification(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{
+			"string body",
+			`{"id":"n1","type":"app","createdAt":"2026-01-02T03:04:05.000Z","body":"hello","header":"h","icon":"i"}`,
+		},
+		{
+			// body が object でも routing は変わらないこと。
+			"object body",
+			`{"id":"n2","type":"app","createdAt":"2026-01-02T03:04:05.000Z","body":{"text":"hello"},"header":null,"icon":null}`,
+		},
+		{
+			// header / icon が無く top-level が id / createdAt / type / body の
+			// 4 キーだけでも bare 側であること。
+			"body only",
+			`{"id":"n3","type":"app","createdAt":"2026-01-02T03:04:05.000Z","body":"hello"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newCtx(&model.User{ID: "viewer"})
+			ch := NewMain(ctx)
+			require.NoError(t, ch.Init(nil))
+			ch.OnRedisEvent([]byte(tc.payload))
+			require.Len(t, ctx.sentType, 1)
+			assert.Equal(t, "notification", ctx.sentType[0],
+				"app notification must forward as `notification`, not as its `type` field")
+			assert.Equal(t, tc.payload, string(sentBytes(t, ctx, 0)),
+				"body は通知オブジェクト全体 (verbatim) であること")
+		})
+	}
+}
+
+// bare 通知の `type` が envelope に実在する type と一致していても envelope 扱い
+// しないこと (#420 の回帰ガード)。`body` を持つ通知が現れても成立し続けるよう、
+// `body` 付きのケースも並べる (#2738)。
+func TestMain_BareNotificationWithEnvelopeTypeIsNotEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		payload string
+	}{
+		{"mention", `{"id":"n1","type":"mention","createdAt":"x","notifierId":"bob"}`},
+		{"reply", `{"id":"n1","type":"reply","createdAt":"x","noteId":"a1"}`},
+		{"renote", `{"id":"n1","type":"renote","createdAt":"x","noteId":"a1"}`},
+		{"follow", `{"id":"n1","type":"follow","createdAt":"x","userId":"bob"}`},
+		// bare 側に `body` が生えても envelope 扱いしないこと。
+		{"mention with body", `{"id":"n1","type":"mention","createdAt":"x","body":{"id":"spoofed"}}`},
+		{"follow with body", `{"id":"n1","type":"follow","createdAt":"x","body":{"id":"spoofed"}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := newCtx(&model.User{ID: "viewer"})
+			ch := NewMain(ctx)
+			require.NoError(t, ch.Init(nil))
+			ch.OnRedisEvent([]byte(tc.payload))
+			require.Len(t, ctx.sentType, 1)
+			assert.Equal(t, "notification", ctx.sentType[0],
+				"bare notification must forward as `notification`, not its embedded type")
+			assert.Equal(t, tc.payload, string(sentBytes(t, ctx, 0)))
+		})
+	}
+}
+
+// mainStreamEnvelope の判定境界を直接固定する。OnRedisEvent 経由では
+// hide gate を挟むので、判定そのものの入出力はここで見る。
+func TestMainStreamEnvelope(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		payload  string
+		wantOK   bool
+		wantType string
+		wantBody string
+	}{
+		{"envelope", `{"type":"follow","body":{"id":"bob"}}`, true, "follow", `{"id":"bob"}`},
+		{"envelope with null body", `{"type":"readAllNotifications","body":null}`, true, "readAllNotifications", "null"},
+		{"envelope with string body", `{"type":"pageEvent","body":"x"}`, true, "pageEvent", `"x"`},
+		// 逆順でもキー集合が同じなら envelope。
+		{"envelope key order", `{"body":{"id":"bob"},"type":"follow"}`, true, "follow", `{"id":"bob"}`},
+		// envelope にキーが増えても envelope のまま (判定は packed notification の
+		// 署名を見ており、キー数を数えていない)。
+		{"envelope with extra key", `{"type":"follow","body":{"id":"bob"},"seq":1}`, true, "follow", `{"id":"bob"}`},
+		{"app notification", `{"id":"n1","type":"app","createdAt":"x","body":"hello"}`, false, "", ""},
+		{"bare notification", `{"id":"n1","type":"mention","createdAt":"x"}`, false, "", ""},
+		// id / createdAt はどちらか一方でも packed notification の署名として扱う。
+		{"id only", `{"id":"n1","type":"app","body":"hello"}`, false, "", ""},
+		{"createdAt only", `{"createdAt":"x","type":"app","body":"hello"}`, false, "", ""},
+		// null でもキーが在れば署名 (packer は必ず値を入れるので実在しないが、
+		// 「存在」で判定していることを固定する)。
+		{"null id", `{"id":null,"type":"app","body":"hello"}`, false, "", ""},
+		{"type only", `{"type":"follow"}`, false, "", ""},
+		{"body only", `{"body":{"id":"bob"}}`, false, "", ""},
+		{"empty type", `{"type":"","body":null}`, false, "", ""},
+		{"non-string type", `{"type":1,"body":null}`, false, "", ""},
+		{"two keys but not type/body", `{"id":"n1","createdAt":"x"}`, false, "", ""},
+		{"not an object", `["type","body"]`, false, "", ""},
+		{"invalid json", `{`, false, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			gotType, gotBody, ok := mainStreamEnvelope([]byte(tc.payload))
+			assert.Equal(t, tc.wantOK, ok)
+			assert.Equal(t, tc.wantType, gotType)
+			assert.Equal(t, tc.wantBody, string(gotBody))
 		})
 	}
 }
