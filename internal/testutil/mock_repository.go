@@ -628,11 +628,8 @@ func (m *MockUserRepository) ListUsers(filter model.UserListFilter) ([]*model.Us
 			}
 			filtered = append(filtered, u)
 		}
-		if filter.SinceID != "" && filter.UntilID == "" {
-			sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
-		} else {
-			sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].ID > filtered[j].ID })
-		}
+		// production (repository.userRepository.ListUsers) と同じ規則。
+		SortMockPage(filtered, filter.SinceID, filter.UntilID, func(u *model.User) string { return u.ID })
 		if len(filtered) > limit {
 			filtered = filtered[:limit]
 		}
@@ -6947,7 +6944,7 @@ func (m *MockAbuseReportRepository) List(resolved *bool, reporterOrigin, targetU
 				continue
 			}
 		}
-		// keyset cursor: id DESC 順に通すための prefilter。
+		// keyset cursor の prefilter。並び順は下の SortMockPage が決める。
 		if untilID != "" && r.ID >= untilID {
 			continue
 		}
@@ -6956,8 +6953,8 @@ func (m *MockAbuseReportRepository) List(resolved *bool, reporterOrigin, targetU
 		}
 		result = append(result, r)
 	}
-	// 並び順は production repo と合わせて id DESC。
-	sort.Slice(result, func(i, j int) bool { return result[i].ID > result[j].ID })
+	// 並び順は production repo の paginationOrder と合わせる (#2713)。
+	SortMockPage(result, sinceID, untilID, func(r *model.AbuseUserReport) string { return r.ID })
 	if limit <= 0 {
 		limit = 10
 	}
@@ -7083,6 +7080,10 @@ func (m *MockModerationLogRepository) List(filter model.ModerationLogFilter) ([]
 		}
 		out = append(out, l)
 	}
+	// production は paginationOrder で order する。mock は挿入順のまま
+	// limit を切っていたので、cursor を渡すテストが production と別の行を
+	// 見ていた (#2713)。
+	SortMockPage(out, filter.SinceID, filter.UntilID, func(l *model.ModerationLog) string { return l.ID })
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -7333,21 +7334,8 @@ func (m *MockRoleAssignmentRepository) ListByRole(roleID string, untilID, sinceI
 		}
 		result = append(result, a)
 	}
-	// sinceID 指定時は ASC、それ以外は DESC (Misskey TS 互換 keyset)
-	asc := sinceID != "" && untilID == ""
-	for i := 0; i < len(result); i++ {
-		for j := i + 1; j < len(result); j++ {
-			swap := false
-			if asc {
-				swap = result[i].ID > result[j].ID
-			} else {
-				swap = result[i].ID < result[j].ID
-			}
-			if swap {
-				result[i], result[j] = result[j], result[i]
-			}
-		}
-	}
+	// production (repository.roleAssignmentRepository.ListByRole) と同じ規則。
+	SortMockPage(result, sinceID, untilID, func(a *model.RoleAssignment) string { return a.ID })
 	if limit > 0 && len(result) > limit {
 		result = result[:limit]
 	}
@@ -8696,14 +8684,7 @@ func (m *MockRegistrationTicketRepository) ListByCreator(creatorID, sinceID, unt
 		}
 		rows = append(rows, t)
 	}
-	// id DESC sort
-	for i := 0; i < len(rows); i++ {
-		for j := i + 1; j < len(rows); j++ {
-			if rows[i].ID < rows[j].ID {
-				rows[i], rows[j] = rows[j], rows[i]
-			}
-		}
-	}
+	SortMockPage(rows, sinceID, untilID, func(t *model.RegistrationTicket) string { return t.ID })
 	if len(rows) > limit {
 		rows = rows[:limit]
 	}

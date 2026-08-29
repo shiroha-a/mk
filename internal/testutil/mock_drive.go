@@ -406,13 +406,7 @@ func (m *MockDriveFolderRepository) ListByUser(userID string, parentID *string, 
 		}
 		rows = append(rows, f)
 	}
-	for i := 0; i < len(rows); i++ {
-		for j := i + 1; j < len(rows); j++ {
-			if rows[i].ID < rows[j].ID {
-				rows[i], rows[j] = rows[j], rows[i]
-			}
-		}
-	}
+	SortMockPage(rows, sinceID, untilID, func(f *model.DriveFolder) string { return f.ID })
 	if limit > 0 && len(rows) > limit {
 		rows = rows[:limit]
 	}

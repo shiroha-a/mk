@@ -129,7 +129,7 @@ func (m *MockChatRepository) ListRoomsByOwner(ownerID, sinceID, untilID string, 
 			out = append(out, r)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	SortMockPage(out, sinceID, untilID, func(r *model.ChatRoom) string { return r.ID })
 	return capRooms(out, clampMockLimit(limit, 30)), nil
 }
 
@@ -144,7 +144,7 @@ func (m *MockChatRepository) ListJoinedRooms(userID, sinceID, untilID string, li
 			}
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	SortMockPage(out, sinceID, untilID, func(r *model.ChatRoom) string { return r.ID })
 	return capRooms(out, clampMockLimit(limit, 30)), nil
 }
 
@@ -221,6 +221,7 @@ func (m *MockChatRepository) ListMessagesByRoom(roomID, sinceID, untilID string,
 			out = append(out, &cp)
 		}
 	}
+	SortMockPage(out, sinceID, untilID, func(x *model.ChatMessage) string { return x.ID })
 	return capMessages(out, clampMockLimit(limit, 20)), nil
 }
 
@@ -236,11 +237,13 @@ func (m *MockChatRepository) ListMessagesByUser(userID, otherUserID, sinceID, un
 			out = append(out, &cp)
 		}
 	}
+	SortMockPage(out, sinceID, untilID, func(x *model.ChatMessage) string { return x.ID })
 	return capMessages(out, clampMockLimit(limit, 20)), nil
 }
 
+// capMessages truncates to limit. Callers must sort with SortMockPage first:
+// the cursor decides the direction, so sorting here would hide it.
 func capMessages(msgs []*model.ChatMessage, limit int) []*model.ChatMessage {
-	sort.Slice(msgs, func(i, j int) bool { return msgs[i].ID > msgs[j].ID })
 	if len(msgs) > limit {
 		return msgs[:limit]
 	}
@@ -266,7 +269,7 @@ func (m *MockChatRepository) ListMessagesByFileID(fileID, untilID, sinceID strin
 		}
 		out = append(out, msg)
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	SortMockPage(out, sinceID, untilID, func(x *model.ChatMessage) string { return x.ID })
 	if len(out) > limit {
 		out = out[:limit]
 	}
@@ -371,7 +374,7 @@ func (m *MockChatRepository) ListMembersByRoomPaged(roomID, sinceID, untilID str
 			out = append(out, mem)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	SortMockPage(out, sinceID, untilID, func(x *model.ChatRoomMembership) string { return x.ID })
 	return capMemberships(out, clampMockLimit(limit, 30)), nil
 }
 
@@ -391,8 +394,9 @@ func (m *MockChatRepository) ListMembershipsByUser(userID, sinceID, untilID stri
 			out = append(out, &cp)
 		}
 	}
-	// upstream getMyMemberships は membership id 降順で返す。
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	// upstream getMyMemberships は makePaginationQuery を通すので、
+	// sinceId 単独指定のときだけ membership id 昇順になる。
+	SortMockPage(out, sinceID, untilID, func(x *model.ChatRoomMembership) string { return x.ID })
 	return capMemberships(out, clampMockLimit(limit, 30)), nil
 }
 
@@ -462,7 +466,7 @@ func (m *MockChatRepository) ListInvitationsByRoom(roomID, sinceID, untilID stri
 			rows = append(rows, inv)
 		}
 	}
-	sort.Slice(rows, func(i, j int) bool { return rows[i].ID > rows[j].ID })
+	SortMockPage(rows, sinceID, untilID, func(x *model.ChatRoomInvitation) string { return x.ID })
 	if l := clampMockLimit(limit, 30); len(rows) > l {
 		rows = rows[:l]
 	}
