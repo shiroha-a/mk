@@ -1,5 +1,5 @@
 // Package antenna provides the user-facing antenna CRUD service plus a
-// per-antenna Redis-stream timeline of matching notes.
+// per-antenna Redis ZSET timeline of matching notes (#2465 で Stream から移行).
 //
 // #2743 以降は inbound Create / Announce からも呼ばれるのでローカル限定では
 // ない (リレー経由だけ除外している。理由は internal/core/federation の
@@ -71,7 +71,8 @@ func (s *Service) validateUserList(ownerID string, userListID *string) error {
 }
 
 // MaxNotesPerAntenna caps how many notes are kept per antenna in the Redis
-// stream. 古いものから XADD MAXLEN ~ で削除される。
+// zset. pushNote が毎回 ZRemRangeByRank で古い側を落とす (#2465 で Stream から
+// ZSET へ移行したので XADD MAXLEN ~ ではない)。
 const MaxNotesPerAntenna = 200
 
 // streamKey returns the Redis key for an antenna's note timeline.
@@ -125,11 +126,26 @@ type Service struct {
 	// nil 時は gate skip (旧挙動互換)。
 	rolePolicyProvider RolePolicyProvider
 	// publisher は match した note を pubsub topic へ publish する (#1573)。
-	// nil 時は Redis Stream への XAdd のみ行い realtime 配信は skip (旧挙動)。
+	// nil 時は ZSET への追加のみ行い realtime 配信は skip (旧挙動)。
 	publisher StreamingPublisher
 	// sensitiveChannels は excludeNotesInSensitiveChannel の判定に使う。
 	// nil なら判定を skip する (= 除外しない)。
 	sensitiveChannels SensitiveChannelLookup
+	// primaryNotes は PruneDangling が「本当に DB に無いか」を primary で
+	// 確かめるために使う。nil なら prune しない (fail-safe)。
+	primaryNotes PrimaryNoteExistence
+}
+
+// PrimaryNoteExistence confirms which note ids exist, reading from the primary
+// DB even when read replicas are configured.
+type PrimaryNoteExistence interface {
+	ExistingNoteIDsOnPrimary(ids []string) ([]string, error)
+}
+
+// SetPrimaryNoteExistence wires the primary-pinned existence check used by
+// PruneDangling. 配線しないと prune は一切走らない (#2719)。
+func (s *Service) SetPrimaryNoteExistence(p PrimaryNoteExistence) {
+	s.primaryNotes = p
 }
 
 // SensitiveChannelLookup reports whether a channel is flagged sensitive.
@@ -196,8 +212,8 @@ func (s *Service) SetUnreadRepo(r repository.AntennaNoteUnreadRepository) {
 }
 
 // SetStreamingPublisher attaches a StreamingPublisher invoked alongside the
-// Redis stream XAdd in OnNoteCreated so that live `antenna` channel subscribers
-// receive a push (#1573). Without it the per-antenna Redis Stream is still
+// ZSET write in OnNoteCreated so that live `antenna` channel subscribers
+// receive a push (#1573). Without it the per-antenna ZSET is still
 // written (so REST `antennas/notes` works) but no pub/sub publish happens and
 // realtime delivery is silently disabled. nil-safe: unset disables only the
 // pub/sub publish.
@@ -414,7 +430,7 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 	return s.repo.FindByID(antennaID)
 }
 
-// Delete removes an antenna owned by ownerID. Redis stream も併せて削除する。
+// Delete removes an antenna owned by ownerID. Redis の ZSET も併せて削除する。
 func (s *Service) Delete(ownerID, antennaID string) error {
 	a, err := s.repo.FindByID(antennaID)
 	if err != nil {
@@ -428,6 +444,155 @@ func (s *Service) Delete(ownerID, antennaID string) error {
 	}
 	_ = s.client.Del(context.Background(), streamKey(antennaID)).Err()
 	return nil
+}
+
+// missingIDs returns the ids that resolved to nothing, preserving input order.
+//
+// #2718 が internal/core/timeline に持つものと同じ。**共有していない。**
+//
+// この関数自体は Redis の型にもキー形式にも依存しない純関数なので、
+// notesfilter あたりに置けば共有できる。そうしないのは **#2718 が変異テストで
+// 固定したばかりの timeline パッケージに今は触りたくない**ため
+// で、関数の性質が理由ではない。3 経路目が出たら切り出すこと。
+func missingIDs(ids []string, notes []*model.Note) []string {
+	if len(notes) == 0 {
+		return append([]string(nil), ids...)
+	}
+	found := make(map[string]struct{}, len(notes))
+	for _, n := range notes {
+		found[n.ID] = struct{}{}
+	}
+	// cap は計算しない。len(notes) > len(ids) は現状到達しないが、cap が負だと
+	// panic するので証明に依存しない形にしておく (#2718 review LOW-1)。
+	var out []string
+	for _, id := range ids {
+		if _, ok := found[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
+// confirmMissingOnPrimary narrows candidates to those the primary also lacks.
+//
+// 未配線 / 問い合わせ失敗のときは空を返す (= prune しない)。生きている note の
+// ID を消すと戻せないので、疑わしければ何もしない側に倒す。
+func (s *Service) confirmMissingOnPrimary(candidates []string) ([]string, error) {
+	if s.primaryNotes == nil {
+		// **配線漏れを黙って飲み込まない (#2719)。** 未配線だと prune が丸ごと
+		// no-op になるが、それを検出するテストは書けない (fail-safe なので
+		// 何も起きないのが正常系と同じに見える)。ここで警告を出すことだけが、
+		// SetPrimaryNoteExistence を消したときに気付く手掛かりになる。
+		slog.Warn("antenna: prune skipped, primary note existence check is not wired",
+			"candidates", len(candidates))
+		return nil, nil
+	}
+	existing, err := s.primaryNotes.ExistingNoteIDsOnPrimary(candidates)
+	if err != nil {
+		return nil, err
+	}
+	if len(existing) == 0 {
+		return candidates, nil
+	}
+	alive := make(map[string]struct{}, len(existing))
+	for _, id := range existing {
+		alive[id] = struct{}{}
+	}
+	var out []string
+	for _, id := range candidates {
+		if _, ok := alive[id]; !ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
+}
+
+// PruneDangling removes ids that resolve to nothing from the antenna's zset
+// (#2719). Best-effort: 失敗しても読み取りには影響しない。
+//
+// **antenna には TTL が無く、押し出しは新規 push に依存する。** pushNote は
+// 毎回 ZRemRangeByRank で上限 200 を維持するので、マッチが続いている antenna
+// なら宙吊り ID は 200 件ぶんの新着で流れる。逆に**マッチが止まった antenna
+// では残り続ける** (キーワードが狭いものほど効く)。
+//
+// timeline との本当の非対称は押し出しではなく **DB fallback の有無**。
+// timeline は件数不足時に hybridDBFallback で DB から拾い直せるが、antenna は
+// 読み取りが Redis の ID だけで完結する。しかも読み取りは overFetch = limit*2
+// の範囲しか見ないので、その窓が全部宙吊りだとページが空で返り、クライアントは
+// 次の untilId を得られず**行き止まり**になる。
+//
+// **解消は 1 リクエストあたり overFetch 件ずつ。** 窓の外は見ないので、
+// 200 件すべてが宙吊りなら復帰まで複数回のフェッチが要る。
+//
+// 呼び出し側は **filter を掛ける前の ids と notes** を渡すこと。visibility /
+// mute / block で落ちた note は生きているので、filter 後の集合から差分を
+// 取ると消してはいけない ID を消す (#2718 と同じ不変条件)。
+//
+// **消す前に primary で確かめる。** mk-go はリードレプリカを対応しており
+// (`dbReplications`、既定 false)、`FindManyByIDsWithUser` はレプリカに振られる。
+// antenna への fan-out は primary への commit 直後に走るので、複製が追いつく
+// 前に読むと「生きているのに引けない」。そこで prune すると **その note は
+// zset から恒久的に消え、戻す経路が無い**。
+//
+// ID に埋め込まれた時刻での猶予判定は**使えない**。リモート note の ID は
+// AP の `published` から発番される (`federation/resolver.go` が ID を作り、
+// 許容範囲は `federation/published_time.go` の publishedPastFloor) ので、
+// 「たった今 INSERT されたが ID の時刻は数時間前」が普通に起きる。しかも
+// リモート note が antenna に入るのは #2743 からで、守るべきクラスと一致する。
+//
+// primaryNotes が未配線、または問い合わせが失敗したときは prune しない。
+//
+// **notification / gallery / featured には同じ自己修復を入れていない (#2719)。**
+// notification は Redis Stream の `MAXLEN 300` で常時押し出しがあり、featured /
+// gallery は window ごとの別キー + TTL (window x3) で読むのは 2 窓だけなので、
+// 宙吊りは 6-14 日で自然に消える。恒久的に枠を占めるのは TTL も押し出しの
+// 契機も無い antenna だけ。
+//
+// **timeline (#2715 / PR #2718) 側には同じ確認が無い。** 向こうも `resolve()` →
+// `pruneDangling()` で同じ経路を持つので、レプリカ構成では同じ穴が開いている。
+// DB fallback があるから安全、とは言えない — fallback は Hybrid 以外では
+// 別メソッド (`ListHomeTimeline` 等) で、いずれも `AllowPartial` で
+// クライアントが無効化でき、しかも Redis list から消えた ID は戻らない。
+// **既知のリスクとして #2757 に切り出してある** (本 issue のスコープ外)。
+//
+// **antenna は ephemeral store を読まない。** timeline 側 (#2718) は ephemeral
+// の lookup 失敗時に何も返さない段を持つが、antenna の zset に ephemeral ID が
+// 入る経路が無い (リレー由来は #2743 で hook ごと外してある) ため持っていない。
+// hydration に ephemeral reader を足すならこの前提が崩れる。
+// (リレー経路からは入らない、という意味。#2743 の hook が !viaRelay で gate する)
+//
+// 所有権は呼び出し元 (Notes) が確認済みなので、ここでは検査しない。
+func (s *Service) PruneDangling(ctx context.Context, antennaID string, ids []string, notes []*model.Note) {
+	if s.client == nil || antennaID == "" {
+		return
+	}
+	dangling := missingIDs(ids, notes)
+	if len(dangling) == 0 {
+		return
+	}
+	confirmed, err := s.confirmMissingOnPrimary(dangling)
+	if err != nil || len(confirmed) == 0 {
+		return
+	}
+	dangling = confirmed
+	// **リクエストの ctx を持ち込まない。** クライアントが切断すると ctx が
+	// キャンセルされ、自己修復が空振りする。症状が出るのはリロード時 = 前の
+	// リクエストを中断する操作なので、直したい場面ほど空振りする (#2718
+	// review MEDIUM-4 と同じ)。
+	ctx = context.WithoutCancel(ctx)
+	members := make([]any, 0, len(dangling))
+	for _, id := range dangling {
+		members = append(members, id)
+	}
+	slog.DebugContext(ctx, "antenna: pruning unresolvable ids", "antennaId", antennaID, "count", len(dangling))
+	err = s.client.ZRem(ctx, streamKey(antennaID), members...).Err()
+	if isWrongType(err) {
+		// 旧 Stream。次の push で張り替わるので消す対象が無いのと同じ扱い。
+		return
+	}
+	if err != nil {
+		slog.WarnContext(ctx, "antenna: pruning unresolvable ids failed", "antennaId", antennaID, "err", err)
+	}
 }
 
 // RemoveNote removes a specific note from an antenna's timeline (upstream
@@ -463,10 +628,9 @@ func (s *Service) ListByUser(userID string) ([]*model.Antenna, error) {
 // or `sinceID` (strict lower bound — return notes strictly newer)。
 // limit <= 0 ならデフォルト 10、上限 100。
 //
-// Redis Stream の entry id は `<unix_ms>-<seq>` 形式で、pushNote が note の
-// 作成時刻 (= idGen.ParseTime で取れる) から派生させて発番している。よって
-// untilID / sinceID で渡された noteID を ParseTime → unix_ms に変換し、Redis
-// Stream の exclusive range syntax (`(<id>`) で上限/下限を指定できる。
+// ZSET は score を 0 に揃えてあるので、範囲指定は member (= note id) の
+// 辞書順に対する `ZRangeByLex` で行う。aidx は時刻順に単調増加するため、
+// untilID / sinceID をそのまま排他境界 (`(<id>`) に使える (#2465)。
 //
 // untilID / sinceID が空なら全 range を見て最新 N 件を返す (旧挙動互換)。
 // パース失敗時は安全側に bound を緩める (= 全 range)。
@@ -548,7 +712,7 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 }
 
 // OnNoteCreated walks every active antenna, evaluates matchNote, and pushes
-// matching notes to the per-antenna Redis stream. Best-effort: list / push の
+// matching notes to the per-antenna Redis ZSET. Best-effort: list / push の
 // 失敗はログだけで上には伝搬しない (呼び出し元はノート作成成功の prerequisite を
 // 既に満たしているため)。
 func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
@@ -570,9 +734,9 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 			continue
 		}
 		_ = s.pushNote(context.Background(), a.ID, n.ID, now)
-		// realtime 配信 (#1573): Redis Stream への XAdd (= REST `antennas/notes`
+		// realtime 配信 (#1573): ZSET への追加 (= REST `antennas/notes`
 		// 用) とは別に、pubsub topic "antennaTimeline:<id>" へ packed note を
-		// publish する。Stream と Pub/Sub は別プリミティブで、AntennaChannel は
+		// publish する。ZSET と Pub/Sub は別プリミティブで、AntennaChannel は
 		// 後者を Subscribe しているため、これが無いと WS antenna channel に
 		// live note が1件も届かない。本家 AntennaService.addNoteToAntenna が
 		// redisForTimelines.xadd と globalEventService.publishAntennaStream の
@@ -586,14 +750,17 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 		// Self-authored note は未読扱いしない (TS本家の挙動に合わせる)。
 		//
 		// ここでは ephemeral note の materialize を **あえて行わない** (#2332)。
-		// antenna_note_unread.noteId は note への外部キーなので、リレー由来で
-		// DB に無いノートでは Upsert が失敗して未読が付かない。それでも
-		// materialize しないのは、広い条件の antenna を 1 つ作るだけで全ての
-		// リレー投稿が DB に落ち、機能そのものが無効化されてしまうため。
+		// antenna_note_unread.noteId は note への外部キーなので、DB に行が無い
+		// ノートでは Upsert が失敗して未読が付かない。それでも materialize
+		// しないのは、広い条件の antenna を 1 つ作るだけで全リレー投稿が DB に
+		// 落ち、ephemeral の目的が消えるため。
 		//
-		// antenna のタイムライン自体は Redis の fanout で成立するので、欠ける
-		// のは未読バッジの件数だけ。ユーザーが実際に触れば (リアクション等)
-		// そこで materialize される。
+		// **ただし #2743 以降、リレー由来の note はそもそもここに来ない。**
+		// federation 側の antenna hook はリレー配送を除外している
+		// (processor.go の handleCreate / handleAnnounce が viaRelay /
+		// isRelayDelivery で gate し、publishRelayDeliveredNote では発火しない)。
+		// この分岐が効くのは、将来リレー以外の経路で ephemeral note が
+		// antenna に載るようになった場合の保険。
 		if s.unreadRepo != nil && a.UserID != author.ID {
 			_ = s.unreadRepo.Create(&model.AntennaNoteUnread{
 				ID:        s.idGen.Generate(now),
@@ -605,14 +772,12 @@ func (s *Service) OnNoteCreated(n *model.Note, author *model.User) {
 	}
 }
 
-// pushNote appends a note id to the antenna's Redis stream with MAXLEN trim.
+// pushNote appends a note id to the antenna's Redis ZSET and trims the oldest
+// entries back to MaxNotesPerAntenna.
 //
-// Stream entry id は `<unix_ms>-*` 形式で発番する: ms 部分は note の作成時刻
-// から派生させて時系列順序を保ち、seq 部分は Redis に auto-increment させる。
-// 旧実装の `<unix_ms>-0` 固定だと同一 ms に同じアンテナへ複数 note を push
-// した際に Redis Stream の monotonic 制約に違反して XADD が失敗していた
-// (#693 PR review #1)。`*` を使うと同 ms 内で seq=0,1,2,... と自動採番されて
-// 衝突しない。
+// score は全 entry で 0 に揃え、順序は member (= note id) の辞書順に委ねる。
+// aidx は時刻順に単調増加するので、これで時系列順になる (#2465)。
+// 旧 Stream が残っている場合は一度捨てて張り替える。
 func (s *Service) pushNote(ctx context.Context, antennaID, noteID string, _ time.Time) error {
 	key := streamKey(antennaID)
 	if err := s.zaddNote(ctx, key, noteID); err != nil {

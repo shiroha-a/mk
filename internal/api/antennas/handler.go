@@ -393,9 +393,9 @@ func (h *Handler) Notes(c echo.Context) error {
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
-	// over-fetch: stream に滞留した followers/specified entry や hardMute hit が
+	// over-fetch: zset に滞留した followers/specified entry や hardMute hit が
 	// handler 側 filter で削られると、返却件数が limit を下回り得る。安全側に
-	// limit の 2 倍 (上限 MaxNotesPerAntenna) で stream から拾い、filter 後に
+	// limit の 2 倍 (上限 MaxNotesPerAntenna) で zset から拾い、filter 後に
 	// limit へトリミングする (#1467 review)。FE は最後の note id を untilId
 	// に渡してくるため、トリミングしてもページング境界は保たれる。
 	overFetch := limit * 2
@@ -416,9 +416,20 @@ func (h *Handler) Notes(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	// 解決できなかった ID を zset から除く (#2719)。**filter を掛ける前の
+	// notes で判定する。** 下の visibility / mute / block で落ちた note は
+	// 生きているので、filter 後の集合で差分を取ると消してはいけない ID を
+	// 消す (#2718 と同じ不変条件)。
+	//
+	// FindManyByIDsWithUser は素の `WHERE id IN ?` で soft-delete 条件も
+	// 持たないので、単一 primary なら「ids に有って戻りに無い = DB 行が無い」
+	// が言える。**リードレプリカ構成では言えない** — 複製前の行が引けない
+	// ので、service 側が消す前に primary で存在を確かめる。
+	// err のときは prune しない (上で早期 return 済み)。
+	h.svc.PruneDangling(c.Request().Context(), req.AntennaID, ids, notes)
 	// visibility filter (defense-in-depth, #1464): push 段 (core/antenna
 	// matchNote) で followers/specified note は antenna owner 視点で gate されて
-	// いるが、過去に stream に滞留した entry や設定ミスに対するフォールバック
+	// いるが、過去に zset に滞留した entry や設定ミスに対するフォールバック
 	// として handler でも 1 段 filter する (`notes/user-list-timeline`
 	// (`internal/api/notes/handler_extra.go:UserListTimeline`) と同じパターン。
 	// なお `channels/timeline` は service/repo 層で SQL push-down する別パターン

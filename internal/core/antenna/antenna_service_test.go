@@ -1248,7 +1248,7 @@ func (p *stubStreamingPublisher) PublishNote(topic string, n *model.Note, author
 
 // TestOnNoteCreated_PublishesMatchedNote covers #1573 課題1: a matched note is
 // published to the antennaTimeline:<id> pub/sub topic (= streamKey) alongside
-// the Redis stream XAdd, so the WS antenna channel receives live notes.
+// the ZSET write, so the WS antenna channel receives live notes.
 func TestOnNoteCreated_PublishesMatchedNote(t *testing.T) {
 	svc, repo := newSvc(t)
 	repo.Antennas["a1"] = makeAntenna(t, "a1", "u1", [][]string{{"misskey"}})

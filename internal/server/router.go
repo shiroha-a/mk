@@ -351,6 +351,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	antennaService.SetRolePolicyProvider(roleService) // #1029: antennaLimit
 	// excludeNotesInSensitiveChannel の判定 (upstream AntennaService:117)。
 	antennaService.SetSensitiveChannelLookup(&sensitiveChannelLookup{repo: channelRepo})
+	// 宙吊り ID の除去は「本当に DB に無いか」を primary で確かめてから行う
+	// (#2719)。レプリカを見ると複製前の行を消してしまう。
+	antennaService.SetPrimaryNoteExistence(noteRepo)
 	// Phase 7-2 follow-up (#271): antenna 着信時に所有者の unread row を
 	// 作成して /api/i の hasUnreadAntenna に反映する。
 	antennaNoteUnreadRepo := repository.NewAntennaNoteUnreadRepository(s.db)
