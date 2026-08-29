@@ -10,11 +10,15 @@ import (
 // MockDriveFileRepository is a test double for repository.DriveFileRepository.
 type MockDriveFileRepository struct {
 	Files map[string]*model.DriveFile // keyed by ID
-	// EmojiReferencedURLs は DeleteOrphans の guard を mock するための「emoji
-	// が参照している drive_file.url 集合」。production の SQL では
-	// `NOT EXISTS (SELECT 1 FROM emoji WHERE originalUrl = drive_file.url)`
-	// で判定する経路を test 用に模倣する (#722)。空なら guard 無効 (= 旧来の
-	// userId NULL 全削除) で既存テスト互換。
+	// EmojiReferencedURLs は DeleteOrphans / ListOrphans の guard を mock する
+	// ための「emoji が参照している drive_file.url 集合」。production の SQL は
+	// `NOT EXISTS (SELECT 1 FROM emoji WHERE originalUrl = url OR publicUrl = url)`
+	// で、**2 列のどちらか**が一致すれば除外する (#722)。本フィールドはその
+	// 和集合を表すので、片方の列だけを模倣しているわけではない。
+	//
+	// 空なら emoji guard は効かない。ただしそれは「userId NULL を全削除」を
+	// 意味しない — userHost 条件が別にあるため、リモートの owner 無し行は
+	// emoji 参照が無くても残る (#2721)。
 	EmojiReferencedURLs map[string]bool
 
 	// BulkFolderUserID / BulkFolderFileIDs record the last UpdateBulkFolder
@@ -501,13 +505,21 @@ func (m *MockDriveFileRepository) ListSystemFiles(fileType, untilID, sinceID str
 }
 
 // DeleteOrphans の mock は production SQL の semantics を model 化する:
-// userId NULL かつ EmojiReferencedURLs に URL が含まれない drive file を
-// 削除する。`EmojiReferencedURLs` を空のままにすると元来の挙動 (userId
-// NULL を全削除) と等価になるので、既存テストは無改修で通る (#722)。
+// userId NULL かつ userHost NULL かつ EmojiReferencedURLs に URL が
+// 含まれない drive file を削除する (#722 / #2721)。
+//
+// `userHost` を見る条件は後から入ったもので、mock 側が追随していない間は
+// 「リモートの owner 無し行が消える」という production では起きない挙動を
+// 通していた。production の条件は internal/repository/drive_file.go の
+// orphanWhere を参照。
 func (m *MockDriveFileRepository) DeleteOrphans() (int64, error) {
 	n := int64(0)
 	for id, f := range m.Files {
 		if f.UserID != nil {
+			continue
+		}
+		// userHost 条件は #2721。理由は上の doc を参照。
+		if f.UserHost != nil {
 			continue
 		}
 		if m.EmojiReferencedURLs[f.URL] {
@@ -530,6 +542,10 @@ func (m *MockDriveFileRepository) ListOrphans(limit int) ([]*model.DriveFile, er
 	var out []*model.DriveFile
 	for _, f := range m.Files {
 		if f.UserID != nil {
+			continue
+		}
+		// userHost 条件は #2721。理由は DeleteOrphans の doc を参照。
+		if f.UserHost != nil {
 			continue
 		}
 		if m.EmojiReferencedURLs[f.URL] {
