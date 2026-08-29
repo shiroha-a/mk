@@ -25,7 +25,8 @@ type ReversiRepository interface {
 	MarkStarted(game *model.ReversiGame) (bool, error)
 	ListByUser(userID string, limit int) ([]*model.ReversiGame, error)
 	// ListByUserCursor returns user's games (User1 or User2) with keyset
-	// pagination via sinceID / untilID。limit は上限 (0 → 10)。id DESC 順。
+	// pagination via sinceID / untilID。limit は上限 (0 → 10)。並び順は
+	// paginationOrder に従う (sinceID 単独指定のみ id 昇順)。
 	ListByUserCursor(userID, sinceID, untilID string, limit int) ([]*model.ReversiGame, error)
 	ListActive() ([]*model.ReversiGame, error)
 	// ListStartedCursor returns only started games with keyset pagination。
@@ -156,7 +157,8 @@ func (r *reversiRepository) ListByUserCursor(userID, sinceID, untilID string, li
 		q = q.Where(`"id" < ?`, untilID)
 	}
 	var games []*model.ReversiGame
-	if err := q.Order(`"id" DESC`).Limit(limit).Find(&games).Error; err != nil {
+	// upstream reversi/games.ts は makePaginationQuery を使う (#2713)。
+	if err := q.Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit).Find(&games).Error; err != nil {
 		return nil, err
 	}
 	return games, nil
@@ -174,7 +176,8 @@ func (r *reversiRepository) ListStartedCursor(sinceID, untilID string, limit int
 		q = q.Where(`"id" < ?`, untilID)
 	}
 	var games []*model.ReversiGame
-	if err := q.Order(`"id" DESC`).Limit(limit).Find(&games).Error; err != nil {
+	// upstream reversi/games.ts は makePaginationQuery を使う (#2713)。
+	if err := q.Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit).Find(&games).Error; err != nil {
 		return nil, err
 	}
 	return games, nil

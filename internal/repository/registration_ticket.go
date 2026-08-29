@@ -201,7 +201,6 @@ func (r *registrationTicketRepository) ListByCreator(creatorID, sinceID, untilID
 	}
 	q := r.db.Model(&model.RegistrationTicket{}).
 		Where(`"createdById" = ?`, creatorID).
-		Order(`"id" DESC`).
 		Limit(limit)
 	if sinceID != "" {
 		q = q.Where(`"id" > ?`, sinceID)
@@ -210,7 +209,8 @@ func (r *registrationTicketRepository) ListByCreator(creatorID, sinceID, untilID
 		q = q.Where(`"id" < ?`, untilID)
 	}
 	var rows []*model.RegistrationTicket
-	if err := q.Find(&rows).Error; err != nil {
+	// upstream invite/list.ts は makePaginationQuery を使う (#2713)。
+	if err := q.Order(paginationOrder(sinceID, untilID, `"id"`)).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

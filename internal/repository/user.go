@@ -706,11 +706,7 @@ func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, 
 	}
 	if cursor {
 		// sinceId のみ指定時は ASC、それ以外は DESC (Misskey keyset 互換)。
-		if filter.SinceID != "" && filter.UntilID == "" {
-			q = q.Order("id ASC")
-		} else {
-			q = q.Order("id DESC")
-		}
+		q = q.Order(paginationOrder(filter.SinceID, filter.UntilID, "id"))
 	}
 
 	limit := filter.Limit

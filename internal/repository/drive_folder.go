@@ -82,7 +82,8 @@ func (r *driveFolderRepository) ListByUser(userID string, parentID *string, unti
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}
-	if err := q.Order("id DESC").Limit(limit).Find(&rows).Error; err != nil {
+	// upstream drive/folders.ts は makePaginationQuery を使う (#2713)。
+	if err := q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit).Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	return rows, nil

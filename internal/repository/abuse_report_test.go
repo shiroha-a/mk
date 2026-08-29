@@ -62,7 +62,8 @@ func TestAbuseReportRepository_List_Pagination(t *testing.T) {
 	createTestUser(t, "ar_p_t")
 	createTestUser(t, "ar_p_r")
 
-	// id DESC 順なので "ar_p2" → "ar_p1" の順で返る。
+	// 以下の呼び出しはどれも sinceID を単独指定しないので paginationOrder は
+	// DESC を返す。よって "ar_p2" → "ar_p1" の順になる。
 	r1 := &model.AbuseUserReport{ID: "ar_p1", TargetUserID: "ar_p_t", ReporterID: "ar_p_r"}
 	r2 := &model.AbuseUserReport{ID: "ar_p2", TargetUserID: "ar_p_t", ReporterID: "ar_p_r"}
 	require.NoError(t, repo.Create(r1))
@@ -70,8 +71,8 @@ func TestAbuseReportRepository_List_Pagination(t *testing.T) {
 	defer cleanupAbuseReport(t, r1.ID)
 	defer cleanupAbuseReport(t, r2.ID)
 
-	// limit=1 で 1 件だけ返り、かつ id DESC 順なので新しい方 (ar_p2) が来る。
-	// 単なる len 1 ではなく id まで assert することで Order("id DESC") の
+	// cursor 無しなので paginationOrder は DESC を返す。limit=1 で新しい方
+	// (ar_p2) が来る。単なる len 1 ではなく id まで assert することで order の
 	// regression を guard する (= 旧 mock 修正時の sort 忘れを catch する系)。
 	reports, err := repo.List(nil, "", "", "", "", 1)
 	require.NoError(t, err)

@@ -10,7 +10,8 @@ type AbuseReportRepository interface {
 	Create(r *model.AbuseUserReport) error
 	FindByID(id string) (*model.AbuseUserReport, error)
 	// List returns abuse reports filtered by state and reporter/target user
-	// origin, paginated via cursor (sinceID / untilID) ordered by id DESC.
+	// origin, paginated via cursor (sinceID / untilID). Ordering follows
+	// paginationOrder, so a sinceID-only page comes back oldest-first.
 	// reporterOrigin / targetUserOrigin accept "local" / "remote" /
 	// "combined" (or empty = combined). origin filter は対応する Host 列の
 	// IS NULL / IS NOT NULL で判定する (= upstream Misskey TS と同じ pattern)。
@@ -40,8 +41,7 @@ func (r *abuseReportRepository) FindByID(id string) (*model.AbuseUserReport, err
 }
 
 func (r *abuseReportRepository) List(resolved *bool, reporterOrigin, targetUserOrigin, sinceID, untilID string, limit int) ([]*model.AbuseUserReport, error) {
-	q := r.db.Preload("TargetUser").Preload("Reporter").Preload("Assignee").
-		Order("id DESC")
+	q := r.db.Preload("TargetUser").Preload("Reporter").Preload("Assignee")
 	if resolved != nil {
 		q = q.Where("resolved = ?", *resolved)
 	}
@@ -61,9 +61,13 @@ func (r *abuseReportRepository) List(resolved *bool, reporterOrigin, targetUserO
 	case "remote":
 		q = q.Where(`"targetUserHost" IS NOT NULL`)
 	}
-	// cursor pagination (keyset): id DESC 順なので untilID は「より古い id」、
-	// sinceID は「より新しい id」を取り出す方向。frontend MkPagination の
-	// untilId 経路がメインの fix 対象 (#1114)。
+	// cursor pagination (keyset)。untilID は「より古い id」、sinceID は
+	// 「より新しい id」を取り出す方向。frontend MkPagination の untilId 経路が
+	// メインの fix 対象 (#1114)。
+	//
+	// 並び順は paginationOrder に従う (#2713)。upstream
+	// admin/abuse-user-reports.ts は makePaginationQuery を使い、その後
+	// order を上書きしないので、**sinceId 単独では ASC** になる。
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
@@ -76,7 +80,7 @@ func (r *abuseReportRepository) List(resolved *bool, reporterOrigin, targetUserO
 	if limit > 100 {
 		limit = 100
 	}
-	q = q.Limit(limit)
+	q = q.Order(paginationOrder(sinceID, untilID, "id")).Limit(limit)
 	var reports []*model.AbuseUserReport
 	if err := q.Find(&reports).Error; err != nil {
 		return nil, err
@@ -144,7 +148,8 @@ func (r *moderationLogRepository) List(filter model.ModerationLogFilter) ([]*mod
 	if filter.SinceID != "" {
 		q = q.Where("id > ?", filter.SinceID)
 	}
-	q = q.Order("id DESC").Limit(limit)
+	// upstream admin/show-moderation-logs.ts は makePaginationQuery を使う (#2713)。
+	q = q.Order(paginationOrder(filter.SinceID, filter.UntilID, "id")).Limit(limit)
 	var logs []*model.ModerationLog
 	if err := q.Find(&logs).Error; err != nil {
 		return nil, err

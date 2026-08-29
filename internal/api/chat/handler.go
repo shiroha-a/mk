@@ -503,8 +503,11 @@ func packUser(u *model.User) map[string]any {
 }
 
 // AttachedChatMessages handles POST /api/drive/files/attached-chat-messages.
-// 指定 drive file を添付した chat message を newest-first で返す。upstream
-// (read:drive) と同じく file は owner-scope で引く (moderator は任意 file 可)。
+// 指定 drive file を添付した chat message を id cursor で返す。並び順は
+// repository の paginationOrder に従うので、sinceId 単独指定のページだけは
+// 古い順になる (#2713)。
+// upstream (read:drive) と同じく file は owner-scope で引く
+// (moderator は任意 file 可)。
 // 連合互換: res は ChatMessage の配列 (packMessageDetailed)。
 func (h *Handler) AttachedChatMessages(c echo.Context) error {
 	user := middleware.GetUser(c)

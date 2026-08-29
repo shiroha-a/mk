@@ -164,6 +164,14 @@ func (r *emojiRepository) FindManyByNamesAndHost(names []string, host *string) (
 }
 
 func (r *emojiRepository) ListRemoteWithFilter(query, host, sinceID, untilID string, limit, offset int) ([]*model.Emoji, error) {
+	// **paginationOrder を使わないのは意図的** (#2713)。upstream
+	// admin/emoji/list-remote.ts:62,75 は makePaginationQuery の**後に**
+	// `.orderBy('emoji.id', 'DESC')` を呼ぶ。TypeORM の orderBy は既存の
+	// ORDER BY を上書きするので、upstream は sinceId 単独でも DESC のまま。
+	// ここを paginationOrder に寄せると逆に乖離する。
+	//
+	// 兄弟の ListWithFilter (local) は upstream が上書きしないので
+	// paginationOrder を使っており、非対称なのはそのため。
 	q := r.db.Where("host IS NOT NULL").Order("id DESC")
 	if query != "" {
 		// upstream list-remote.ts:72 は `name LIKE :query` (Postgres LIKE は

@@ -13,7 +13,8 @@ type NoteDraftRepository interface {
 	// Used by internal worker paths (= scheduled note processor) that act on
 	// behalf of the draft owner stored in the row (#1040)。
 	FindByID(id string) (*model.NoteDraft, error)
-	// ListByUser lists a user's drafts newest-first with keyset pagination.
+	// ListByUser lists a user's drafts with keyset pagination. Ordering follows
+	// paginationOrder, so a sinceID-only page comes back oldest-first.
 	// sinceID/untilID page on the draft id (aidx, time-ordered) mirroring
 	// upstream makePaginationQuery; scheduled, when non-nil, filters on
 	// isActuallyScheduled. mk-go は他 repo と同様 id-based keyset のみで、
@@ -70,7 +71,8 @@ func (r *noteDraftRepository) ListByUser(userID, sinceID, untilID string, schedu
 		q = q.Where(`"isActuallyScheduled" = ?`, *scheduled)
 	}
 	var drafts []*model.NoteDraft
-	if err := q.Order(`"id" DESC`).Limit(limit).Find(&drafts).Error; err != nil {
+	// upstream notes/drafts/list.ts は makePaginationQuery を使う (#2713)。
+	if err := q.Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit).Find(&drafts).Error; err != nil {
 		return nil, err
 	}
 	return drafts, nil

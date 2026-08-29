@@ -26,7 +26,8 @@ type ChatRepository interface {
 	ListMessagesByRoom(roomID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error)
 	ListMessagesByUser(userID, otherUserID, sinceID, untilID string, limit int) ([]*model.ChatMessage, error)
 	// ListMessagesByFileID returns chat messages that attached the given drive
-	// file, newest-first, with id-cursor pagination. Used by
+	// file with id-cursor pagination. Ordering follows paginationOrder, so a
+	// sinceID-only page comes back oldest-first. Used by
 	// drive/files/attached-chat-messages.
 	ListMessagesByFileID(fileID, untilID, sinceID string, limit int) ([]*model.ChatMessage, error)
 	SearchMessages(meID, query string, limit int, userID, roomID string) ([]*model.ChatMessage, error)
@@ -119,8 +120,10 @@ func NewChatRepository(db *gorm.DB) ChatRepository {
 // paramDef maximum:100)。
 const maxChatPageLimit = 100
 
-// applyIDCursor appends id-cursor (sinceID / untilID) + DESC ordering + limit to
-// a chat list query, mirroring upstream makePaginationQuery. idCol must be the
+// applyIDCursor appends id-cursor (sinceID / untilID) + paginationOrder
+// ordering + limit to a chat list query, mirroring upstream
+// makePaginationQuery: a sinceID-only page is ASC, everything else is DESC.
+// idCol must be the
 // (optionally table-qualified) primary-key column to paginate on. limit<=0 falls
 // back to defaultLimit and is clamped to maxChatPageLimit (#1747)。
 func applyIDCursor(q *gorm.DB, idCol, sinceID, untilID string, limit, defaultLimit int) *gorm.DB {
@@ -136,7 +139,18 @@ func applyIDCursor(q *gorm.DB, idCol, sinceID, untilID string, limit, defaultLim
 	if limit > maxChatPageLimit {
 		limit = maxChatPageLimit
 	}
-	return q.Order(idCol + " DESC").Limit(limit)
+	// upstream ChatService.ts で makePaginationQuery を使うのは 7 メソッド
+	// (:392 / :416 / :701 / :711 / :721 / :791 / :972) で、いずれも後段で
+	// order を上書きしない (#2713)。cursor を取らない userHistory /
+	// roomHistory / searchMessages (:438 / :491 / :853) だけは直接 id DESC で、
+	// mk-go でも対応する ListHistory / ListUserHistory / ListRoomHistory /
+	// SearchMessages はこの helper を通していない。
+	//
+	// この helper を通る repository メソッドは 8 つ (grep applyIDCursor の
+	// 呼び出し site 数)。うち ListJoinedRooms だけは upstream に対応 endpoint が
+	// 無い mk-go 独自のもので、近縁の joining.ts が membership.id で cursor を
+	// 切るのに対しこちらは room.id で切る。追従先が無いので同じ規則に揃えた。
+	return q.Order(paginationOrder(sinceID, untilID, idCol)).Limit(limit)
 }
 
 func (r *chatRepository) CreateRoom(room *model.ChatRoom) error {
@@ -230,7 +244,10 @@ func (r *chatRepository) ListMessagesByFileID(fileID, untilID, sinceID string, l
 		q = q.Where(`"id" > ?`, sinceID)
 	}
 	var msgs []*model.ChatMessage
-	if err := q.Order(`"id" DESC`).Limit(limit).Find(&msgs).Error; err != nil {
+	// upstream drive/files/attached-chat-messages.ts は makePaginationQuery を
+	// 使う (#2713)。cursor ページングする chat 一覧のうち、applyIDCursor を
+	// 通らない唯一のもの (SearchMessages / List*History は cursor を取らない)。
+	if err := q.Order(paginationOrder(sinceID, untilID, `"id"`)).Limit(limit).Find(&msgs).Error; err != nil {
 		return nil, err
 	}
 	return msgs, nil

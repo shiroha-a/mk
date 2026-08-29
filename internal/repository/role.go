@@ -148,12 +148,9 @@ func (r *roleAssignmentRepository) ListByRole(roleID string, untilID, sinceID st
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)
 	}
-	// sinceID 指定時は ASC で keyset cursor を進ませる Misskey TS 互換
-	if sinceID != "" && untilID == "" {
-		q = q.Order("id ASC")
-	} else {
-		q = q.Order("id DESC")
-	}
+	// sinceID 単独指定時は ASC で keyset cursor を進ませる Misskey TS 互換。
+	// 規則をここで手書きすると片側だけ直す事故になるので helper を呼ぶ (#2713)。
+	q = q.Order(paginationOrder(sinceID, untilID, "id"))
 	if limit > 0 {
 		q = q.Limit(limit)
 	}
