@@ -450,10 +450,15 @@ func (s *Service) Delete(ownerID, antennaID string) error {
 //
 // #2718 が internal/core/timeline に持つものと同じ。**共有していない。**
 //
-// この関数自体は Redis の型にもキー形式にも依存しない純関数なので、
-// notesfilter あたりに置けば共有できる。そうしないのは **#2718 が変異テストで
-// 固定したばかりの timeline パッケージに今は触りたくない**ため
-// で、関数の性質が理由ではない。3 経路目が出たら切り出すこと。
+// この関数自体は Redis の型にもキー形式にも依存しない純関数なので共有できる。
+// **切り出さないのは方針判断で、技術的な障害があるからではない。**
+//
+// 既存の置き場所候補 `internal/core/notesfilter` は core/note /
+// core/notification / entity に依存するため timeline には 12 パッケージ増える
+// (antenna は 2 つで済む。両者で重さが違う)。`internal/model` しか要らない
+// 新パッケージを作る手もあるが、20 行に満たない関数のために 1 パッケージを
+// 増やす判断は
+// 2 経路では取らない。3 経路目が出たらそちらへ切り出すこと。
 func missingIDs(ids []string, notes []*model.Note) []string {
 	if len(notes) == 0 {
 		return append([]string(nil), ids...)
@@ -477,18 +482,20 @@ func missingIDs(ids []string, notes []*model.Note) []string {
 //
 // 未配線 / 問い合わせ失敗のときは空を返す (= prune しない)。生きている note の
 // ID を消すと戻せないので、疑わしければ何もしない側に倒す。
-func (s *Service) confirmMissingOnPrimary(candidates []string) ([]string, error) {
+func (s *Service) confirmMissingOnPrimary(ctx context.Context, candidates []string) ([]string, error) {
 	if s.primaryNotes == nil {
 		// **配線漏れを黙って飲み込まない (#2719)。** 未配線だと prune が丸ごと
 		// no-op になるが、それを検出するテストは書けない (fail-safe なので
 		// 何も起きないのが正常系と同じに見える)。ここで警告を出すことだけが、
 		// SetPrimaryNoteExistence を消したときに気付く手掛かりになる。
-		slog.Warn("antenna: prune skipped, primary note existence check is not wired",
+		slog.WarnContext(ctx, "antenna: prune skipped, primary note existence check is not wired",
 			"candidates", len(candidates))
 		return nil, nil
 	}
 	existing, err := s.primaryNotes.ExistingNoteIDsOnPrimary(candidates)
 	if err != nil {
+		// 呼び出し元は err を握り潰すので、理由はここで残す。
+		slog.WarnContext(ctx, "antenna: primary existence check failed, skipping prune", "err", err)
 		return nil, err
 	}
 	if len(existing) == 0 {
@@ -548,12 +555,11 @@ func (s *Service) confirmMissingOnPrimary(candidates []string) ([]string, error)
 // 宙吊りは 6-14 日で自然に消える。恒久的に枠を占めるのは TTL も押し出しの
 // 契機も無い antenna だけ。
 //
-// **timeline (#2715 / PR #2718) 側には同じ確認が無い。** 向こうも `resolve()` →
-// `pruneDangling()` で同じ経路を持つので、レプリカ構成では同じ穴が開いている。
-// DB fallback があるから安全、とは言えない — fallback は Hybrid 以外では
-// 別メソッド (`ListHomeTimeline` 等) で、いずれも `AllowPartial` で
+// **timeline (#2715 / PR #2718) 側も同じ確認を通す** (#2757)。向こうも
+// `resolve()` → `pruneDangling()` で同じ経路を持ち、レプリカ構成では同じ穴が
+// 開いていた。DB fallback があるから安全、とは言えない — fallback は Hybrid
+// 以外では別メソッド (`ListHomeTimeline` 等) で、いずれも `AllowPartial` で
 // クライアントが無効化でき、しかも Redis list から消えた ID は戻らない。
-// **既知のリスクとして #2757 に切り出してある** (本 issue のスコープ外)。
 //
 // **antenna は ephemeral store を読まない。** timeline 側 (#2718) は ephemeral
 // の lookup 失敗時に何も返さない段を持つが、antenna の zset に ephemeral ID が
@@ -570,16 +576,15 @@ func (s *Service) PruneDangling(ctx context.Context, antennaID string, ids []str
 	if len(dangling) == 0 {
 		return
 	}
-	confirmed, err := s.confirmMissingOnPrimary(dangling)
+	// **primary 確認より前で ctx を切り離す。** 今の ExistingNoteIDsOnPrimary は
+	// ctx を取らないので実害は無いが、将来取るようになったとき、切断で確認が
+	// 失敗して fail-safe が働き自己修復が恒久的に空振りする (timeline 側と同じ)。
+	ctx = context.WithoutCancel(ctx)
+	confirmed, err := s.confirmMissingOnPrimary(ctx, dangling)
 	if err != nil || len(confirmed) == 0 {
 		return
 	}
 	dangling = confirmed
-	// **リクエストの ctx を持ち込まない。** クライアントが切断すると ctx が
-	// キャンセルされ、自己修復が空振りする。症状が出るのはリロード時 = 前の
-	// リクエストを中断する操作なので、直したい場面ほど空振りする (#2718
-	// review MEDIUM-4 と同じ)。
-	ctx = context.WithoutCancel(ctx)
 	members := make([]any, 0, len(dangling))
 	for _, id := range dangling {
 		members = append(members, id)

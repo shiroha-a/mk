@@ -148,9 +148,19 @@ func TestPruneDangling_FailSafe(t *testing.T) {
 		require.NoError(t, client.ZAdd(context.Background(), key, redisZ("n1")).Err())
 		s.SetPrimaryNoteExistence(&fakePrimary{err: assert.AnError})
 
+		// **理由が warn に出ることまで固定する。** PruneDangling は
+		// confirmMissingOnPrimary の error を握り潰すので、ログが唯一の
+		// 手掛かりになる。ここを固定しないと warn を消しても誰も気付かない。
+		var buf bytes.Buffer
+		prev := slog.Default()
+		slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+		t.Cleanup(func() { slog.SetDefault(prev) })
+
 		s.PruneDangling(context.Background(), "a1", []string{"n1"}, nil)
 
 		ids, _ := client.ZRange(context.Background(), key, 0, -1).Result()
 		assert.Equal(t, []string{"n1"}, ids)
+		assert.Contains(t, buf.String(), "primary existence check failed",
+			"確認の失敗が warn に出る")
 	})
 }
