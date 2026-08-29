@@ -8,10 +8,12 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/federation"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 )
@@ -208,8 +210,19 @@ func (h *Handler) Inbox(c echo.Context) error {
 	// host 署名+一致・digest 署名・digest 値 (sha256(body)) を検証する。RSA は
 	// 走らない O(body) の安価なチェックで、fast write / legacy 両 path 共通。
 	// Signature ヘッダ欠落/malformed もここで 401 になる (#1949 body integrity)。
-	if err := h.admitInbox(c.Request(), body); err != nil {
-		slog.Warn("inbox admission rejected", "err", err)
+	parsed, err := h.admitInbox(c.Request(), body)
+	if err != nil {
+		// **相手を出す。** activity を捨てる経路なので、誤って落としていた場合に
+		// 気付く手段がこのログしか無い (#2725。worker 側の同じ盲点は #2716)。
+		//
+		// 出せるのは keyId 由来の値だけ。ここは署名検証を通る前で actor は
+		// 解決していないし、**body は読まない** — この経路は無認証で誰でも
+		// 到達できるので、parse 回数がそのまま攻撃者に押せる CPU になる。
+		//
+		// worker 側 (#2716) の `signer` は解決済み actor の URI なので、同じ名前は
+		// 使わない。ここで出せるのは相手の申告した keyId でしかない。
+		slog.Warn("inbox admission rejected",
+			"host", signerHostOf(parsed), "keyId", signerKeyIDOf(parsed), "err", err)
 		return c.NoContent(http.StatusUnauthorized)
 	}
 
@@ -217,7 +230,10 @@ func (h *Handler) Inbox(c echo.Context) error {
 	// authenticate 不能なので enqueue せず 400 で弾く。mk-go は actor 欠落で worker 側が
 	// drop する (crash はしない) が、無駄な enqueue/retry を避けるため早期 reject する。
 	if !bodyHasActor(body) {
-		slog.Warn("inbox rejected: activity has no actor")
+		// admitInbox を通っているので parsed は非 nil。body の actor は読めない
+		// から捨てているので出しようが無く、相手を示せるのは署名側だけ (#2725)。
+		slog.Warn("inbox rejected: activity has no actor",
+			"host", signerHostOf(parsed), "keyId", signerKeyIDOf(parsed))
 		return c.NoContent(http.StatusBadRequest)
 	}
 
@@ -283,13 +299,54 @@ func (h *Handler) processSynchronously(c echo.Context, body []byte) error {
 // configured host, the Digest header must be signed, and its SHA-256 value must
 // equal the body hash. Returns an error to reject with 401 (#1949). The Signature
 // header must parse; a missing/malformed Signature also fails here.
-func (h *Handler) admitInbox(req *http.Request, body []byte) error {
+//
+// 破棄ログに相手を出すため、parse できた ParsedSignature は admission が失敗した
+// ときも返す (#2725)。nil になるのは Signature ヘッダ自体が欠落 / malformed の
+// ときだけ。**認可には使わない** — 署名検証を通る前の申告値でしかない。
+func (h *Handler) admitInbox(req *http.Request, body []byte) (*activitypub.ParsedSignature, error) {
 	parsed, err := activitypub.ParseSignatureHeader(req.Header.Get("Signature"))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	return activitypub.VerifyInboxAdmission(parsed, req.Host, h.expectedHost,
+	return parsed, activitypub.VerifyInboxAdmission(parsed, req.Host, h.expectedHost,
 		activitypub.InboxDateHeader(req.Header), req.Header.Get("Digest"), body)
+}
+
+// maxLoggedSignerLen bounds the attacker-controlled strings the discard logs
+// emit.
+//
+// keyId は署名検証の前に読む申告値で、ヘッダ上限 (internal/server の
+// serverMaxHeaderBytes = 1MiB) まで長くできる。そのまま出すとリクエスト 1 本で
+// ログを膨らませられる。実在の keyId は URL なのでこの長さに収まる。
+//
+// colfit からは**数え方 (rune 単位の切り詰め) だけ**を借りている。列に入れる値の
+// 規則 (URL は切らずに値ごと捨てる) はここには当てはまらない — ログは表示先で、
+// 切れた keyId を保存も参照もしない。
+const maxLoggedSignerLen = 200
+
+// signerHostOf returns the host the request's keyId claims to belong to.
+//
+// **認可には使わない。** 署名検証を通る前の値なので信用できず、破棄したときに
+// 相手を示すためだけに使う (worker 側 hostFromSignatureKeyID と同じ位置づけ)。
+// parsed が nil (Signature ヘッダ欠落 / malformed) なら空文字を返す。
+func signerHostOf(parsed *activitypub.ParsedSignature) string {
+	if parsed == nil {
+		return ""
+	}
+	u, err := url.Parse(parsed.KeyID)
+	if err != nil {
+		return ""
+	}
+	return colfit.TruncateRunes(u.Host, maxLoggedSignerLen)
+}
+
+// signerKeyIDOf returns the keyId the request signed with, bounded for logging.
+// parsed が nil なら空文字。
+func signerKeyIDOf(parsed *activitypub.ParsedSignature) string {
+	if parsed == nil {
+		return ""
+	}
+	return colfit.TruncateRunes(parsed.KeyID, maxLoggedSignerLen)
 }
 
 // verifySignature parses the Signature header, resolves the actor, and
