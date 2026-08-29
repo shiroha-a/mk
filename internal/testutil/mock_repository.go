@@ -1191,6 +1191,9 @@ func applyProfileFields(p *model.UserProfile, fields map[string]any) error {
 type MockNoteRepository struct {
 	Notes          map[string]*model.Note
 	ReactionCounts map[string]map[string]int // noteID -> reaction -> count
+	// ExistingOnPrimaryErr, when set, is returned by ExistingNoteIDsOnPrimary
+	// so callers can exercise the fail-safe path (#2719).
+	ExistingOnPrimaryErr error
 	// Following は ListByUserIDFiltered の visibility push-down (followers note
 	// の follow 判定) に使う followerID -> followeeIDs map。未設定なら follow
 	// なし扱い (= 非 follower viewer)。testutil は core/note を import すると
@@ -1574,6 +1577,23 @@ func (m *MockNoteRepository) ListByUserIDFiltered(userID, viewerID, untilID, sin
 // the shared noteVisibleToViewer helper.
 func (m *MockNoteRepository) canViewerSeeNote(viewerID string, n *model.Note) bool {
 	return noteVisibleToViewer(viewerID, n, m.Following)
+}
+
+// ExistingNoteIDsOnPrimary implements repository.NoteRepository (#2719).
+//
+// mock は単一ストアなのでレプリカ遅延を模さない。production は primary に
+// 固定した SELECT で、ここでは Notes に有るかどうかをそのまま返す。
+func (m *MockNoteRepository) ExistingNoteIDsOnPrimary(ids []string) ([]string, error) {
+	if m.ExistingOnPrimaryErr != nil {
+		return nil, m.ExistingOnPrimaryErr
+	}
+	var out []string
+	for _, id := range ids {
+		if _, ok := m.Notes[id]; ok {
+			out = append(out, id)
+		}
+	}
+	return out, nil
 }
 
 func (m *MockNoteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, error) {

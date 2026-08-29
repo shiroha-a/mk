@@ -1105,3 +1105,8 @@ func TestBulkShow_PublicTimeline(t *testing.T) {
 	require.Len(t, out, 1)
 	assert.Equal(t, "np1", out[0]["id"])
 }
+
+// ExistingNoteIDsOnPrimary implements repository.NoteRepository (#2719).
+func (f *failingNoteRepo) ExistingNoteIDsOnPrimary(_ []string) ([]string, error) {
+	return nil, nil
+}

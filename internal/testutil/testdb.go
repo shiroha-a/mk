@@ -51,6 +51,11 @@ func OpenSharedTestDB() (*gorm.DB, error) {
 	return openDSN(testDSN(""))
 }
 
+// TestDSNForSchema exposes the test DSN builder so tests that need to open a
+// second connection (e.g. registering a replica for dbresolver) can reuse the
+// same credentials. An empty schema leaves search_path at its default.
+func TestDSNForSchema(schema string) string { return testDSN(schema) }
+
 // testDSN builds the connection string, optionally pinning the search_path.
 //
 // pgx は未知の keyword を runtime parameter として送るので、search_path は DSN に

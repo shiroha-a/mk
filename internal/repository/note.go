@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"gorm.io/plugin/dbresolver"
 	"sort"
 	"strconv"
 	"strings"
@@ -114,6 +115,13 @@ type NoteRepository interface {
 	// 取り込む形に統合した (#1439 / #1441 と同じパターン)。
 	ListByChannelID(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
 	FindManyByIDsWithUser(ids []string) ([]*model.Note, error)
+	// ExistingNoteIDsOnPrimary returns the subset of ids that exist, reading
+	// from the primary DB even when read replicas are configured.
+	//
+	// レプリカ構成では通常の SELECT が複製前の行を取りこぼす。「行が無い」を
+	// 根拠に破壊的な操作をする経路 (antenna の宙吊り ID 除去、#2719) は
+	// レプリカを見てはいけないので、primary を明示する。
+	ExistingNoteIDsOnPrimary(ids []string) ([]string, error)
 	// ListRenotesOf / ListRepliesOf / ListChildrenOf は viewerID 視点の可視性を
 	// LIMIT 前に SQL push-down する (#1500)。viewerID="" は匿名 (public/home のみ)。
 	// 条件は core/note.CanSeeNote 完全版 (specified 込み): スレッドの reply/renote は
@@ -653,6 +661,24 @@ func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note
 		return nil, err
 	}
 	return notes, nil
+}
+
+// ExistingNoteIDsOnPrimary implements NoteRepository.
+//
+// `dbresolver.Write` で primary に固定する。dbresolver は既定で SELECT を
+// Replicas へ振るので、これを付けないと複製遅延の窓で「行が無い」と誤判定する。
+func (r *noteRepository) ExistingNoteIDsOnPrimary(ids []string) ([]string, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	var found []string
+	if err := r.db.Clauses(dbresolver.Write).
+		Model(&model.Note{}).
+		Where("id IN ?", ids).
+		Pluck("id", &found).Error; err != nil {
+		return nil, err
+	}
+	return found, nil
 }
 
 // FindManyByIDsWithUser returns the requested notes preserving the order of `ids`.
