@@ -16,6 +16,14 @@ import (
 
 func insertTestUser(t *testing.T, id, username string) *model.User {
 	t.Helper()
+	return insertTestUserOn(t, testDB, id, username)
+}
+
+// insertTestUserOn is insertTestUser against an explicit handle.
+// TS 形状の兄弟 schema (dropin_ts_schema_test.go) は testDB を見られないので、
+// 同じ行を 2 箇所で組み立てないようこちらに寄せる。
+func insertTestUserOn(t *testing.T, db *gorm.DB, id, username string) *model.User {
+	t.Helper()
 	token := "tok_" + id
 	user := &model.User{
 		ID:                id,
@@ -24,7 +32,7 @@ func insertTestUser(t *testing.T, id, username string) *model.User {
 		Token:             &token,
 		AvatarDecorations: datatypes.JSON([]byte("[]")),
 	}
-	require.NoError(t, testDB.Create(user).Error)
+	require.NoError(t, db.Create(user).Error)
 	return user
 }
 

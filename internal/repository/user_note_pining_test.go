@@ -7,16 +7,24 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gorm.io/gorm"
 )
 
 func insertTestNote(t *testing.T, id, userID string) *model.Note {
+	t.Helper()
+	return insertTestNoteOn(t, testDB, id, userID)
+}
+
+// insertTestNoteOn is insertTestNote against an explicit handle (兄弟 schema 用。
+// insertTestUserOn と同じ理由、user_test.go を参照)。
+func insertTestNoteOn(t *testing.T, db *gorm.DB, id, userID string) *model.Note {
 	t.Helper()
 	n := &model.Note{
 		ID:         id,
 		UserID:     userID,
 		Visibility: model.NoteVisibilityPublic,
 	}
-	require.NoError(t, testDB.Create(n).Error)
+	require.NoError(t, db.Create(n).Error)
 	return n
 }
 
