@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -264,5 +265,225 @@ func TestMockDriveFileRepository_MultiMatchIsDeterministic(t *testing.T) {
 			require.NoError(t, err)
 			require.Equal(t, "a", got.ID, "最小 ID を返す (production の ORDER BY id)")
 		}
+	})
+}
+
+// TestMockDriveFileRepository_RemainingDivergences は #2755 で解消した乖離を
+// 固定する。issue が挙げた 4 件と、実装中に見つかった folder 側の同型
+// (FindByIDs の重複) が対象。いずれも #2747 のテーマ (述語と多重一致時の
+// 決定性) と独立していたため別 issue にしたもの。
+func TestMockDriveFileRepository_RemainingDivergences(t *testing.T) {
+	ptr := func(s string) *string { return &s }
+
+	// production の `id IN ?` は重複した id を渡しても行を 1 度しか返さない。
+	// **到達可能な乖離だった** — AP renderer の addAttachments は戻り行をその
+	// まま `attachment` に並べるので、重複 id で Document が二重になる。
+	// (entity の pack は `n.FileIDs` 駆動なので、そちらは production でも
+	// 重複する。#2755 の issue 本文にあった「pack が二重になる」は誤り。)
+	t.Run("FindByIDs deduplicates the input", func(t *testing.T) {
+		m := NewMockDriveFileRepository()
+		m.Files["f1"] = &model.DriveFile{ID: "f1"}
+		m.Files["f2"] = &model.DriveFile{ID: "f2"}
+
+		got, err := m.FindByIDs([]string{"f1", "f1", "f2", "f1"})
+		require.NoError(t, err)
+		require.Len(t, got, 2, "重複した id でも行は 1 度だけ")
+		// **順序は assert しない。** production の `Find` に ORDER BY は無く
+		// 戻り順は不定 (federation/resolver.go も「戻り順は不定なので map で
+		// 再整列する」と書いている)。ここで入力順を固定すると、mock でしか
+		// 成り立たない前提をテストが承認することになる。
+		assert.ElementsMatch(t, []string{"f1", "f2"}, []string{got[0].ID, got[1].ID})
+
+		// 存在しない id は黙って落ちる (production の IN も同じ)。
+		got, err = m.FindByIDs([]string{"missing", "missing"})
+		require.NoError(t, err)
+		assert.Empty(t, got)
+
+		// **folder 側も同じ。** doc が「IN を模す」と言っている以上、片方だけ
+		// 重複を返すと主張が偽になる (production の drive_folder も `id IN ?`)。
+		mf := NewMockDriveFolderRepository()
+		mf.Folders["d1"] = &model.DriveFolder{ID: "d1"}
+		mf.Folders["d2"] = &model.DriveFolder{ID: "d2"}
+		folders, err := mf.FindByIDs([]string{"d1", "d1", "d2", "d1"})
+		require.NoError(t, err)
+		require.Len(t, folders, 2, "folder 側も重複した id で行は 1 度だけ")
+		assert.ElementsMatch(t, []string{"d1", "d2"}, []string{folders[0].ID, folders[1].ID})
+	})
+
+	// production は limit > 100 を 100 に丸める。handler は
+	// pagination.ResolveLimit が 100 超を **400 で弾く** (丸めない) ので
+	// endpoint 経由では repo に届かないが、mock を直に叩くテストが production
+	// では返らない件数を受け取れてしまう。
+	t.Run("admin list limits are clamped at 100", func(t *testing.T) {
+		m := NewMockDriveFileRepository()
+		host := "remote.example"
+		for i := 0; i < 150; i++ {
+			id := "f" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+			m.Files[id] = &model.DriveFile{ID: id, UserHost: &host}
+		}
+		rows, err := m.ListForAdmin("", "remote", "", "", "", "", 999)
+		require.NoError(t, err)
+		assert.Len(t, rows, 100, "ListForAdmin は 100 で頭打ち")
+
+		m2 := NewMockDriveFileRepository()
+		for i := 0; i < 150; i++ {
+			id := "s" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+			m2.Files[id] = &model.DriveFile{ID: id}
+		}
+		rows, err = m2.ListSystemFiles("", "", "", 999)
+		require.NoError(t, err)
+		assert.Len(t, rows, 100, "ListSystemFiles は 100 で頭打ち")
+	})
+
+	// production は folderId を実際に更新する。記録するだけだと「移動後に
+	// 読み直す」テストが書けない。**userID の絞り込みが IDOR guard の本体**で、
+	// 記録 (BulkFolderUserID) はその補助にすぎない。
+	t.Run("UpdateBulkFolder applies the move, scoped to the owner", func(t *testing.T) {
+		m := NewMockDriveFileRepository()
+		m.Files["mine"] = &model.DriveFile{ID: "mine", UserID: ptr("u1")}
+		m.Files["theirs"] = &model.DriveFile{ID: "theirs", UserID: ptr("u2")}
+		m.Files["orphan"] = &model.DriveFile{ID: "orphan"}
+
+		// **mock は folder の実在を見ない。** production の `drive_file.folderId`
+		// は `drive_folder` への FK なので、実在しない id では FK 違反になる。
+		// endpoint 経由では handler が所有権付きで存在確認するので到達しない。
+		require.NoError(t, m.UpdateBulkFolder("u1", []string{"mine", "theirs", "orphan"}, ptr("fold1")))
+
+		require.NotNil(t, m.Files["mine"].FolderID)
+		assert.Equal(t, "fold1", *m.Files["mine"].FolderID, "自分の file は移動する")
+		assert.Nil(t, m.Files["theirs"].FolderID, "他人の file は動かない (IDOR guard)")
+		assert.Nil(t, m.Files["orphan"].FolderID, "owner 無しの行も動かない")
+
+		// nil folderId (= ルートへ戻す) も通ること。
+		require.NoError(t, m.UpdateBulkFolder("u1", []string{"mine"}, nil))
+		assert.Nil(t, m.Files["mine"].FolderID)
+	})
+
+	// map 反復 + unstable sort だと同値行の並びが run ごとに変わる。
+	// **production は同値行の順序を保証しない**ので、これは再現性のための
+	// 決定化であって「この順序が正しい」という主張ではない。
+	t.Run("equal sort keys are ordered deterministically", func(t *testing.T) {
+		build := func() *MockDriveFileRepository {
+			m := NewMockDriveFileRepository()
+			for _, id := range []string{"f1", "f2", "f3", "f4", "f5"} {
+				m.Files[id] = &model.DriveFile{ID: id, UserID: ptr("u1"), Name: "same", Size: 10}
+			}
+			return m
+		}
+		ids := func(rows []*model.DriveFile) []string {
+			out := make([]string, 0, len(rows))
+			for _, r := range rows {
+				out = append(out, r.ID)
+			}
+			return out
+		}
+		// **limit は実値を渡す。** mock の `limit <= 0` は「無制限」だが
+		// production は `limit == 0` のとき `LIMIT 0` = 0 行になる
+		// (mock_drive.go の ListByUser の doc 参照)。0 で呼ぶと、その乖離を
+		// 将来揃えた瞬間にこのテストが空の slice 同士を比べる空振りに化ける。
+		for _, sortKey := range []string{"+name", "-name", "+size", "-size"} {
+			var first []string
+			for i := 0; i < 20; i++ {
+				rows, err := build().ListByUser("u1", nil, true, "", sortKey, "", "", 10)
+				require.NoError(t, err)
+				require.Len(t, rows, 5, "5 件すべて返ること (空同士の比較で空振りしない)")
+				got := ids(rows)
+				if first == nil {
+					first = got
+					continue
+				}
+				require.Equal(t, first, got, "sort=%s で同値行の並びが run ごとに変わる", sortKey)
+			}
+		}
+	})
+
+	// **sort 方向は production の order 句と 1 対 1 で突き合わせる。** 同値行
+	// だけの fixture では分岐は通るが比較結果が観測されないので、値を散らす。
+	// production: +createdAt→id DESC / -createdAt→id ASC / +name→name DESC /
+	// -name→name ASC / +size→size DESC / -size→size ASC。
+	t.Run("sort directions match production", func(t *testing.T) {
+		// **name と size を逆相関にしないこと。** name 昇順 = size 降順の
+		// fixture だと `-name` と `+size` が同じ期待値になり、**ソートキーの
+		// 取り違えを観測できない** (方向の反転は殺せるので気付きにくい)。
+		m := NewMockDriveFileRepository()
+		m.Files["f1"] = &model.DriveFile{ID: "f1", UserID: ptr("u1"), Name: "a", Size: 10}
+		m.Files["f2"] = &model.DriveFile{ID: "f2", UserID: ptr("u1"), Name: "b", Size: 30}
+		m.Files["f3"] = &model.DriveFile{ID: "f3", UserID: ptr("u1"), Name: "c", Size: 20}
+		ids := func(rows []*model.DriveFile) []string {
+			out := make([]string, 0, len(rows))
+			for _, r := range rows {
+				out = append(out, r.ID)
+			}
+			return out
+		}
+		cases := map[string][]string{
+			"+createdAt": {"f3", "f2", "f1"}, // id DESC
+			"-createdAt": {"f1", "f2", "f3"}, // id ASC
+			"+name":      {"f3", "f2", "f1"}, // name DESC
+			"-name":      {"f1", "f2", "f3"}, // name ASC
+			"+size":      {"f2", "f3", "f1"}, // size DESC (30, 20, 10)
+			"-size":      {"f1", "f3", "f2"}, // size ASC
+			"":           {"f3", "f2", "f1"}, // 未指定は id DESC
+		}
+		for sortKey, want := range cases {
+			rows, err := m.ListByUser("u1", nil, true, "", sortKey, "", "", 10)
+			require.NoError(t, err)
+			assert.Equal(t, want, ids(rows), "sort=%q", sortKey)
+		}
+	})
+
+	// tie は id 昇順に落ちること (安定ソートであることの mock 内部契約)。
+	// **production はこの順序を保証しない**ので、他のテストがこれに依存しては
+	// いけない。ここで固定するのは mock の再現性そのもの。
+	t.Run("ties fall back to id ascending", func(t *testing.T) {
+		// **tie グループを 2 つ以上、13 件以上置く。** 全部同名 (= tie が 1 group)
+		// だと比較関数が常に false を返し、pdqsort が挿入ソート経路で順序を
+		// 保つので、安定ソートを外す変異を殺せない (40 件まで試して素通りした)。
+		// 2 group × 13 件で実際に崩れることを確認済み。
+		m := NewMockDriveFileRepository()
+		var wantN1, wantN0 []string
+		for i := 0; i < 13; i++ {
+			id := fmt.Sprintf("f%02d", i)
+			name := fmt.Sprintf("n%d", i%2)
+			m.Files[id] = &model.DriveFile{ID: id, UserID: ptr("u1"), Name: name, Size: 1}
+			if i%2 == 1 {
+				wantN1 = append(wantN1, id) // name="n1" が先 (+name は name DESC)
+			} else {
+				wantN0 = append(wantN0, id)
+			}
+		}
+		rows, err := m.ListByUser("u1", nil, true, "", "+name", "", "", 20)
+		require.NoError(t, err)
+		require.Len(t, rows, 13)
+		got := make([]string, 0, len(rows))
+		for _, r := range rows {
+			got = append(got, r.ID)
+		}
+		assert.Equal(t, append(append([]string{}, wantN1...), wantN0...), got,
+			"name グループ内は id 昇順 (= 安定ソート)")
+	})
+
+	// limit 未指定 (<= 0) の既定値は production と同じ 30。
+	// **30 は repo 層の既定。** endpoint の既定は 10 (`ResolveLimit(req.Limit,
+	// 10, 100)`) なので、handler 経由でこの分岐には入らない。
+	t.Run("admin list default limit is 30", func(t *testing.T) {
+		m := NewMockDriveFileRepository()
+		for i := 0; i < 40; i++ {
+			id := "d" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+			m.Files[id] = &model.DriveFile{ID: id}
+		}
+		rows, err := m.ListSystemFiles("", "", "", 0)
+		require.NoError(t, err)
+		assert.Len(t, rows, 30, "limit <= 0 は 30 に倒す")
+
+		host := "remote.example"
+		m2 := NewMockDriveFileRepository()
+		for i := 0; i < 40; i++ {
+			id := "e" + string(rune('a'+i%26)) + string(rune('a'+i/26))
+			m2.Files[id] = &model.DriveFile{ID: id, UserHost: &host}
+		}
+		rows, err = m2.ListForAdmin("", "remote", "", "", "", "", 0)
+		require.NoError(t, err)
+		assert.Len(t, rows, 30)
 	})
 }

@@ -60,9 +60,23 @@ func (m *MockDriveFileRepository) FindByID(id string) (*model.DriveFile, error) 
 	return f, nil
 }
 
+// FindByIDs mirrors production's `id IN ?`: **重複した id を渡しても行は 1 度
+// しか返らない** (#2755)。
+//
+// 旧実装は入力の重複をそのまま重複行で返していた。漏れる先は **AP renderer の
+// `addAttachments`** で、あそこは戻り行をそのまま `attachment` に並べるので
+// 重複 id で Document が二重になる。到達可能な乖離だったので production に揃える。
+//
+// (entity の pack は `n.FileIDs` を回すので、`note.fileIds` の重複は production
+// でも二重に pack される。#2755 の issue 本文にあった「pack が二重になる」は誤り。)
 func (m *MockDriveFileRepository) FindByIDs(ids []string) ([]*model.DriveFile, error) {
 	var result []*model.DriveFile
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		if f, ok := m.Files[id]; ok {
 			result = append(result, f)
 		}
@@ -228,9 +242,25 @@ func (m *MockDriveFileRepository) UsageByUser(userID string) (int64, error) {
 	return total, nil
 }
 
-func (m *MockDriveFileRepository) UpdateBulkFolder(userID string, fileIDs []string, _ *string) error {
+// UpdateBulkFolder records the call **and applies it** (#2755)。
+//
+// 旧実装は呼び出しを記録するだけで Files を変更しなかったため、「移動後に読み
+// 直す」テストが書けなかった。production と同じく **userID で絞る** ので、
+// 他人の file を指定しても動かない。
+//
+// **記録 (BulkFolderUserID) は今も要る。** handler が自分の user.ID を渡して
+// いるかを確かめられるのは記録だけで、この述語は production の guard を
+// 模しているだけ。層が違う。
+func (m *MockDriveFileRepository) UpdateBulkFolder(userID string, fileIDs []string, folderID *string) error {
 	m.BulkFolderUserID = userID
 	m.BulkFolderFileIDs = fileIDs
+	for _, id := range fileIDs {
+		f, ok := m.Files[id]
+		if !ok || f.UserID == nil || *f.UserID != userID {
+			continue
+		}
+		f.FolderID = folderID
+	}
 	return nil
 }
 
@@ -267,6 +297,21 @@ func matchesDriveFolder(actual, want *string) bool {
 	return actual != nil && *actual == *want
 }
 
+// ListByUser mirrors the production predicates and ordering. caller が知って
+// おくべき差は 4 つで、うち 2 つは**意図的な簡略化**:
+//
+//   - `limit <= 0` を「無制限」として扱う。**乖離するのは `limit == 0` だけ** —
+//     production は生の値を GORM に渡し、GORM は負値では LIMIT 句自体を出さない
+//     ので `limit < 0` は production も無制限になる (#2755 のレビューで発見)。
+//     handler は `pagination.ResolveLimit` が 1 未満を 400 で弾くので endpoint
+//     経由では到達しない。**mock を直に叩くときは実値を渡すこと**
+//   - sinceID 単独指定時の ASC (paginationOrder) を実装していない。#2766 は
+//     `ListForAdmin` / `ListSystemFiles` の手書き bubble sort を SortMockPage に
+//     置き換える issue で、**こちらは sort キー分岐があるので単純置換できない**。
+//     #2766 が終わっても残る
+//
+// 残り 2 つは関数本体のコメントにある: name 比較の collation 差と、tie が
+// id 昇順に落ちること (production は tie 順を保証しない)。
 func (m *MockDriveFileRepository) ListByUser(userID string, folderID *string, anyFolder bool, fileType, sort, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
 	var rows []*model.DriveFile
 	for _, f := range m.Files {
@@ -287,7 +332,26 @@ func (m *MockDriveFileRepository) ListByUser(userID string, folderID *string, an
 		}
 		rows = append(rows, f)
 	}
-	sortpkg.Slice(rows, func(i, j int) bool {
+	// **name の比較は Go のバイト順で、production は DB の collation に従う。**
+	// テスト DB (en_US.UTF-8) では `'B' < 'a'` が偽なので、大小文字が混ざる
+	// name では**別の順序になる** (逆順ではない。実測で PostgreSQL は
+	// `[a a b b B c C]`、Go のバイト順は `[B C a a b b c]`)。collation は配備
+	// 依存なので揃えない — 大小文字混在の name で順序を assert しないこと。
+	//
+	// **入力順を固定してから安定ソートする** (#2755)。map 反復は毎回順序が
+	// 違うので、unstable sort と組むと同値行 (同名 / 同サイズ) の並びが run ごとに
+	// 変わり、テストの flake 源になる。
+	//
+	// **production は同値行の順序を保証しない** — upstream files.ts と同じく
+	// sort 指定時は `name` / `size` だけで order するので tiebreak が無い。
+	// mock を決定的にするのは再現性のためで、**同値行の相対順序に依存する
+	// アサーションを書いてよいという意味ではない**。
+	// pre-sort で入力順を固定し、安定ソートで tie を id 昇順に落とす。
+	// **どちらも要る** — pre-sort だけだと map 反復の非決定は消えるが、
+	// unstable sort は tie グループが 2 つ以上あると並びを崩す (13 件から
+	// 実測で差が出る)。
+	sortpkg.Slice(rows, func(i, j int) bool { return rows[i].ID < rows[j].ID })
+	sortpkg.SliceStable(rows, func(i, j int) bool {
 		switch sort {
 		case "-createdAt":
 			return rows[i].ID < rows[j].ID
@@ -360,9 +424,18 @@ func (m *MockDriveFolderRepository) FindByID(id string) (*model.DriveFolder, err
 
 // FindByIDs returns the folders present in the mock for the given ID set
 // (missing IDs are skipped, mirroring an IN query).
+//
+// file 側と同じく**重複した id は 1 度しか返さない** (#2755)。production の
+// `Where("id IN ?")` (repository/drive_folder.go) がそうで、doc も「IN を模す」と
+// 言っている以上ここだけ違うと主張が偽になる。
 func (m *MockDriveFolderRepository) FindByIDs(ids []string) ([]*model.DriveFolder, error) {
 	out := make([]*model.DriveFolder, 0, len(ids))
+	seen := make(map[string]struct{}, len(ids))
 	for _, id := range ids {
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
 		if f, ok := m.Folders[id]; ok {
 			out = append(out, f)
 		}
@@ -510,6 +583,13 @@ func (m *MockDriveFileRepository) ListForAdmin(userID, origin, host, fileType, u
 	if limit <= 0 {
 		limit = 30
 	}
+	// production は 100 で頭打ちにする (#2755)。handler は
+	// pagination.ResolveLimit が 100 超を **400 で弾く** (丸めない) ので
+	// endpoint 経由では repo に届かないが、mock を直に叩くテストが production
+	// では返らない件数を受け取れてしまう。
+	if limit > 100 {
+		limit = 100
+	}
 	if limit > len(rows) {
 		limit = len(rows)
 	}
@@ -550,6 +630,10 @@ func (m *MockDriveFileRepository) ListSystemFiles(fileType, untilID, sinceID str
 	}
 	if limit <= 0 {
 		limit = 30
+	}
+	// 100 clamp の理由は ListForAdmin 側のコメントを参照 (#2755)。
+	if limit > 100 {
+		limit = 100
 	}
 	if limit > len(rows) {
 		limit = len(rows)
