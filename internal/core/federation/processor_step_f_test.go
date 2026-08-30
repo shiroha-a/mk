@@ -33,6 +33,18 @@ type fullProcessorEnv struct {
 
 func newFullProcessor(t *testing.T, fetcherBody string) *fullProcessorEnv {
 	t.Helper()
+	return newFullProcessorFetcher(t, &stubFetcher{body: []byte(fetcherBody)})
+}
+
+// newFullProcessorDocs is newFullProcessor with a per-URI fetcher, for tests
+// that need both an actor document and a note document (#2751)。
+func newFullProcessorDocs(t *testing.T, docs map[string]string) *fullProcessorEnv {
+	t.Helper()
+	return newFullProcessorFetcher(t, &docFetcher{docs: docs})
+}
+
+func newFullProcessorFetcher(t *testing.T, fetcher federation.HTTPFetcher) *fullProcessorEnv {
+	t.Helper()
 	userRepo := testutil.NewMockUserRepository()
 	noteRepo := testutil.NewMockNoteRepository()
 	reactionRepo := testutil.NewMockNoteReactionRepository()
@@ -40,7 +52,7 @@ func newFullProcessor(t *testing.T, fetcherBody string) *fullProcessorEnv {
 	followingRepo := testutil.NewMockFollowingRepository()
 	urls := activitypub.NewURLBuilder("https://example.com")
 	idGen, _ := id.NewGenerator("aidx")
-	resolver := federation.NewResolver(userRepo, noteRepo, urls, &stubFetcher{body: []byte(fetcherBody)}, idGen)
+	resolver := federation.NewResolver(userRepo, noteRepo, urls, fetcher, idGen)
 	resolver.SetEmojiRepo(emojiRepo)
 	followingSvc := corefollowing.NewService(userRepo, followingRepo, testutil.NewMockFollowRequestRepository(), idGen)
 	reactionSvc := corereaction.NewService(noteRepo, reactionRepo, emojiRepo, followingRepo, idGen)

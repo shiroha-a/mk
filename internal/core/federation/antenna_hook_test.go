@@ -26,11 +26,19 @@ import (
 // だったため、以前は取り違えてもテストが全部緑になった。marker メソッドを
 // 足して型で分けてある (#2743)。
 type recordingAntennaHook struct {
-	calls chan recordingFanoutCall
+	calls chan recordingAntennaCall
+}
+
+// recordingAntennaCall は fanout の記録と違い **本文も持つ**。#2751 の主題は
+// 「キーワードが当たる行が渡るか」なので、noteID だけでは検証にならない。
+type recordingAntennaCall struct {
+	noteID string
+	author string
+	text   string
 }
 
 func newRecordingAntennaHook() *recordingAntennaHook {
-	return &recordingAntennaHook{calls: make(chan recordingFanoutCall, 16)}
+	return &recordingAntennaHook{calls: make(chan recordingAntennaCall, 16)}
 }
 
 func (h *recordingAntennaHook) OnNoteCreated(note *model.Note, author *model.User) {
@@ -38,11 +46,14 @@ func (h *recordingAntennaHook) OnNoteCreated(note *model.Note, author *model.Use
 	if author != nil {
 		authorID = author.ID
 	}
-	noteID := ""
+	noteID, text := "", ""
 	if note != nil {
 		noteID = note.ID
+		if note.Text != nil {
+			text = *note.Text
+		}
 	}
-	h.calls <- recordingFanoutCall{noteID: noteID, author: authorID}
+	h.calls <- recordingAntennaCall{noteID: noteID, author: authorID, text: text}
 }
 
 func (h *recordingAntennaHook) IsAntennaHook() {}
@@ -95,7 +106,9 @@ func TestProcess_Announce_FiresAntennaHook(t *testing.T) {
 
 	select {
 	case call := <-hook.calls:
-		assert.NotEqual(t, "n1", call.noteID, "渡るのは target ではなく renote 行")
+		// ローカル target なので target 側の hook は出ない (#2751)。渡るのは
+		// renote 行だけ。
+		assert.NotEqual(t, "n1", call.noteID, "ローカル target は渡らない")
 		assert.NotEmpty(t, call.noteID)
 	case <-time.After(2 * time.Second):
 		t.Fatal("Announce で antennaHook が呼ばれなかった (#2743)")
@@ -308,4 +321,235 @@ func TestProcess_RelayForwardedAnnounce_DoesNotFireAntennaHook(t *testing.T) {
 	want := findIngestedRemoteNote(t, env.noteRepo, sentinelURI)
 
 	assertOnlySentinelFired(t, hook, want.ID, "リレーが転送した Announce")
+}
+
+// newAnnounceTargetEnv builds a processor whose fetcher serves both the
+// announcer / author actors and the boosted note, so an Announce of a **remote**
+// target can actually ingest it (#2751)。
+//
+// docs には別名 URL (`/@bob/boosted`) も同じ document を載せてある。Announce の
+// object が canonical id と違う URL でも同じ note に解決されることを使って、
+// 「取得 URI で既存行を引く」実装が空振りすることを検出する。
+func newAnnounceTargetEnv(t *testing.T) (*fullProcessorEnv, string, string) {
+	t.Helper()
+	const targetURI = "https://remote.example/notes/boosted"
+	const aliasURI = "https://remote.example/@bob/boosted"
+	noteDoc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + targetURI + `",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/bob",
+		"content": "猫がかわいい",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	docs := map[string]string{
+		"https://remote.example/users/alice": aliceActor,
+		"https://remote.example/users/bob": `{
+			"@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/bob",
+			"type": "Person",
+			"preferredUsername": "bob",
+			"inbox": "https://remote.example/users/bob/inbox",
+			"publicKey": {"publicKeyPem": "PEM"}
+		}`,
+		targetURI: noteDoc,
+		aliasURI:  noteDoc,
+	}
+	return newFullProcessorDocs(t, docs), targetURI, aliasURI
+}
+
+func announceBody(id, targetURI string) []byte {
+	return []byte(`{
+		"type": "Announce",
+		"id": "` + id + `",
+		"actor": "https://remote.example/users/alice",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"],
+		"object": "` + targetURI + `"
+	}`)
+}
+
+// #2751: inbound Announce で hook に渡る renote 行は Text / CW を持たないので、
+// キーワード指定または withFile の antenna は原理的に 1 件もマッチしない。
+// ブースト対象 (target) 自体も antenna に載せる。
+//
+// **本文を持つ行が渡ったことまで見る。** noteID の一致だけだと、issue の主題
+// (「キーワードが当たる行が渡るか」) を検証したことにならない。
+func TestProcess_Announce_FiresAntennaHookForTarget(t *testing.T) {
+	env, targetURI, _ := newAnnounceTargetEnv(t)
+	hook := newRecordingAntennaHook()
+	env.processor.SetAntennaHook(hook)
+
+	require.NoError(t, env.processor.Process(announceBody("https://remote.example/announces/t1", targetURI)))
+
+	target := findIngestedRemoteNote(t, env.noteRepo, targetURI)
+	call := waitAntennaCallFor(t, hook, target.ID,
+		"ブースト対象そのものが antenna に渡ること (renote 行だけではキーワードが当たらない)")
+	assert.Equal(t, target.UserID, call.author, "target の author を渡すこと (announcer ではない)")
+	assert.Contains(t, call.text, "猫", "本文を持つ行が渡ること")
+}
+
+// #2751: **再ブーストで古い note が湧かないこと。** 無条件に発火させると、
+// 何年も前の投稿がブーストされるたびに antenna の先頭に現れる。
+func TestProcess_Announce_KnownTargetDoesNotFireAntennaHookForTarget(t *testing.T) {
+	env, targetURI, _ := newAnnounceTargetEnv(t)
+	require.NoError(t, env.processor.Process(announceBody("https://remote.example/announces/t1", targetURI)))
+	target := findIngestedRemoteNote(t, env.noteRepo, targetURI)
+
+	hook := newRecordingAntennaHook()
+	env.processor.SetAntennaHook(hook)
+	require.NoError(t, env.processor.Process(announceBody("https://remote.example/announces/t2", targetURI)))
+
+	assertAntennaTargetNotFired(t, env, hook, target.ID, "既に取り込み済みの target")
+}
+
+// #2751: **別名 URL でも同じ。** note 行は document id で保存されるので、取得
+// URI で既存行を引く実装だと何度取り込んでも「新規」に見え、既知の note を
+// 繰り返し antenna へ押し込める。
+func TestProcess_Announce_AliasURITargetDoesNotFireAntennaHookForTarget(t *testing.T) {
+	env, targetURI, aliasURI := newAnnounceTargetEnv(t)
+	require.NoError(t, env.processor.Process(announceBody("https://remote.example/announces/t1", targetURI)))
+	target := findIngestedRemoteNote(t, env.noteRepo, targetURI)
+
+	hook := newRecordingAntennaHook()
+	env.processor.SetAntennaHook(hook)
+	// object は canonical id と別の URL。解決すると同じ note になる。
+	require.NoError(t, env.processor.Process(announceBody("https://remote.example/announces/t2", aliasURI)))
+
+	assertAntennaTargetNotFired(t, env, hook, target.ID, "別名 URL で再ブーストされた target")
+}
+
+// #2751: ローカル note のブーストでは target を載せない (作成時に通っている)。
+func TestProcess_Announce_LocalTargetDoesNotFireAntennaHookForTarget(t *testing.T) {
+	env := newFullProcessor(t, aliceActor)
+	hook := newRecordingAntennaHook()
+	env.processor.SetAntennaHook(hook)
+
+	env.noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+	env.userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+
+	require.NoError(t, env.processor.Process(announceBody("https://remote.example/announces/local", "https://example.com/notes/n1")))
+
+	assertAntennaTargetNotFired(t, env, hook, "n1", "ローカル target")
+}
+
+// #2751: リレーが転送した Announce では target も載せない (#2743 の方針)。
+func TestProcess_RelayForwardedAnnounce_DoesNotFireAntennaHookForTarget(t *testing.T) {
+	env, targetURI, _ := newAnnounceTargetEnv(t)
+	env.processor.SetRelayActorChecker(&stubRelayActorChecker{
+		relayActorURI: "https://relay.example/actor",
+	})
+	hook := newRecordingAntennaHook()
+	env.processor.SetAntennaHook(hook)
+
+	relayURI := "https://relay.example/actor"
+	signer := &model.User{ID: "relay1", Username: "relay", URI: &relayURI}
+	require.NoError(t, env.processor.ProcessWithSigner(announceBody("https://remote.example/announces/relay", targetURI), signer))
+
+	target := findIngestedRemoteNote(t, env.noteRepo, targetURI)
+	assertAntennaTargetNotFired(t, env, hook, target.ID, "リレーが転送した Announce の target")
+}
+
+// #2751: 非公開 target は載せない。mk-go の antenna 可視性判定
+// (corenote.CanSeeNote) は upstream の checkHitAntenna より緩く、followers note
+// でも viewer が mention されていれば通してしまうので、hook を可視性 gate より
+// 手前に置くと crafted Announce が入口になる。
+//
+// **target は seed せず fetch させること。** DB に置いてしまうと
+// `targetCreated=false` になり、可視性 gate に届く前の gate で止まる。それでは
+// 「gate の位置」を固定できず、gate を手前に戻す変異が素通りする (実測)。
+func TestProcess_Announce_NonPublicTargetDoesNotFireAntennaHookForTarget(t *testing.T) {
+	const secretURI = "https://remote.example/notes/secret"
+	docs := map[string]string{
+		"https://remote.example/users/alice": aliceActor,
+		"https://remote.example/users/bob": `{
+			"@context": "https://www.w3.org/ns/activitystreams",
+			"id": "https://remote.example/users/bob",
+			"type": "Person",
+			"preferredUsername": "bob",
+			"followers": "https://remote.example/users/bob/followers",
+			"inbox": "https://remote.example/users/bob/inbox",
+			"publicKey": {"publicKeyPem": "PEM"}
+		}`,
+		secretURI: `{
+			"@context": "https://www.w3.org/ns/activitystreams",
+			"id": "` + secretURI + `",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/bob",
+			"content": "猫は秘密",
+			"to": ["https://remote.example/users/bob/followers"]
+		}`,
+	}
+	env := newFullProcessorDocs(t, docs)
+	hook := newRecordingAntennaHook()
+	env.processor.SetAntennaHook(hook)
+
+	require.NoError(t, env.processor.Process(announceBody("https://remote.example/announces/secret", secretURI)))
+
+	// 前提の確認: target は**新規に取り込まれ** followers 可視性であること。
+	// ここが崩れると、可視性 gate ではなく手前の gate で止まっているだけになる。
+	target := findIngestedRemoteNote(t, env.noteRepo, secretURI)
+	require.Equal(t, model.NoteVisibilityFollowers, target.Visibility,
+		"followers の target を fetch させていること (テストの前提)")
+
+	assertAntennaTargetNotFired(t, env, hook, target.ID, "非公開 target")
+}
+
+// waitAntennaCallFor waits for a hook call carrying noteID.
+func waitAntennaCallFor(t *testing.T, hook *recordingAntennaHook, noteID, what string) recordingAntennaCall {
+	t.Helper()
+	deadline := time.After(3 * time.Second)
+	for {
+		select {
+		case call := <-hook.calls:
+			if call.noteID == noteID {
+				return call
+			}
+		case <-deadline:
+			t.Fatalf("%s: noteID=%s の antenna 発火が来なかった", what, noteID)
+		}
+	}
+}
+
+// assertAntennaTargetNotFired checks that `noteID` never reaches the antenna
+// hook, using the sentinel technique the file documents.
+//
+// **壁時計待ちだけに頼らない。** 「一定時間来なかった」判定は hook goroutine が
+// 遅れるだけで通ってしまう (このファイルの assertOnlySentinelFired 参照。実測で
+// 素通りした)。直接配送の sentinel を後から流し、それが**先に**届くこと、その後
+// 対象が来ないことの 2 段で見る。
+func assertAntennaTargetNotFired(t *testing.T, env *fullProcessorEnv, hook *recordingAntennaHook, noteID, what string) {
+	t.Helper()
+	sentinelURI := "https://remote.example/notes/sentinel-" + noteID
+	sentinel := []byte(`{
+		"type": "Create",
+		"actor": "https://remote.example/users/alice",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"],
+		"object": {
+			"type": "Note",
+			"id": "` + sentinelURI + `",
+			"attributedTo": "https://remote.example/users/alice",
+			"content": "sentinel"
+		}
+	}`)
+	require.NoError(t, env.processor.Process(sentinel))
+	want := findIngestedRemoteNote(t, env.noteRepo, sentinelURI)
+
+	seenSentinel := false
+	deadline := time.After(3 * time.Second)
+	for !seenSentinel {
+		select {
+		case call := <-hook.calls:
+			assert.NotEqual(t, noteID, call.noteID, "%s が antenna に載った", what)
+			if call.noteID == want.ID {
+				seenSentinel = true
+			}
+		case <-deadline:
+			t.Fatalf("sentinel の antenna 発火が来なかった (%s)", what)
+		}
+	}
+	select {
+	case call := <-hook.calls:
+		assert.NotEqual(t, noteID, call.noteID, "%s が antenna に載った (遅れて届いた)", what)
+	case <-time.After(1500 * time.Millisecond):
+	}
 }

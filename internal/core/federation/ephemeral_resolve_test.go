@@ -740,3 +740,43 @@ func TestResolveNoteEphemeral_PaddedNoteIDPassesHostGate(t *testing.T) {
 	assert.Equal(t, "https://remote.example/notes/1", *note.URI, "保存値も正規化済みであること")
 	assert.Len(t, sink.notes, 1)
 }
+
+// #2751: note を作らずに終わる経路 (AP poll vote) が ResolveNote から
+// `(nil, nil)` で出ていた。戻り値を nil check せず `note.ID` を読む呼び出し側が
+// panic しうるので、ErrInvalidNote に倒す。
+func TestResolveNote_PollVoteReturnsError(t *testing.T) {
+	const pollURI = "https://remote.example/notes/poll"
+	const voteURI = "https://remote.example/notes/vote"
+	docs := map[string]string{
+		"https://remote.example/users/alice": ephActorDoc,
+		voteURI: `{
+			"@context": "https://www.w3.org/ns/activitystreams",
+			"id": "` + voteURI + `",
+			"type": "Note",
+			"attributedTo": "https://remote.example/users/alice",
+			"inReplyTo": "` + pollURI + `",
+			"name": "A",
+			"to": ["https://www.w3.org/ns/activitystreams#Public"]
+		}`,
+	}
+	r, _, noteRepo, userRepo := ephResolverDocs(t, docs)
+
+	// 投票先の poll note を local に用意する。
+	userRepo.Users["author"] = &model.User{ID: "author", Username: "author"}
+	uri := pollURI
+	require.NoError(t, noteRepo.Create(&model.Note{
+		ID: "pollnote", UserID: "author", URI: &uri,
+		Visibility: model.NoteVisibilityPublic, HasPoll: true,
+	}))
+	pollRepo := testutil.NewMockPollRepository()
+	require.NoError(t, pollRepo.Create(&model.Poll{
+		NoteID: "pollnote", Choices: []string{"A", "B"}, Votes: []int64{0, 0},
+	}))
+	r.SetPollRepo(pollRepo)
+	r.SetPollVoter(&stubPollVoter{})
+
+	note, created, err := r.ResolveNoteWithCreated(voteURI)
+	assert.Nil(t, note)
+	assert.False(t, created)
+	assert.Error(t, err, "note を作らない経路は (nil, nil) ではなく error にする")
+}

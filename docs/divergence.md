@@ -202,17 +202,36 @@ renote を作らずに publish するが、その手前で `apNoteService.resolv
 したがって既定構成では 2 番目だけが理由になる。**リレー投稿を antenna で拾いたい
 運用がある場合は、この判断を見直す余地がある。**
 
-`docs/divergence.md` に書いておくべき制限がもう 1 つある。**inbound Announce で
-antenna に渡すのは renote 行で、ブースト対象 (target) ではない。** renote は
-text を持たないので、`matchKeywords` はキーワード指定のある antenna では必ず
-false を返す (`internal/core/antenna/antenna_service.go`)。つまり
+inbound Announce では **renote 行に加えてブースト対象 (target) も** antenna に
+渡す (#2751)。renote は text を持たないので、target を渡さないとキーワード指定
+または `withFile` の antenna は 1 件もマッチしない。upstream も
+`ApInboxService.ts:329` が `resolveNote(target)` 経由で target を
+`NoteCreateService` に通すので同じ。
 
-- キーワード指定のある antenna は、**inbound Announce では 1 件もマッチしない**
-- upstream は `resolveNote(target)` 経由で target 自体を `NoteCreateService` に
-  通すので、target が antenna に載る
+target 側には**新規に取り込んだときだけ**という gate がある (upstream も既知の
+note では `createNote` を通らない)。無条件だと再ブーストのたびに古い note が
+antenna に湧く。あわせてローカル note は対象外にする (作成時に既に通っている)。
 
-target にも hook を通すには「新規に取り込んだときだけ」の gate が要る
-(再ブーストのたびに古い note が antenna に湧くため)。本 PR では入れていない。
+**この gate は「他の経路で先に DB へ入った note」を全部落とす。** upstream では
+それらの経路も `resolveNote` → `createNote` → `NoteCreateService.create` を通り、
+`addNoteToAntennas` は `silent` の外にあるので**その時点で antenna に載っている**。
+mk-go で載らないまま残るのは、次の経路で先に取り込まれた note がブーストされた
+場合:
+
+- リレー配送 (上記の方針で antenna に載せていない)
+- featured collection の取り込み
+- 他 note の reply / quote target としての解決
+- `Add` (pin) の対象解決 — upstream も `resolveNote` なので同型
+- `/api/ap/show` などの手動解決
+- **`Like` / `Undo(Like)` / `Undo(Announce)` の対象解決** — ここは mk-go 固有。
+  upstream は Like で未知 note を DB に作らない (`fetchNote`) ので、後続の
+  Announce が `resolveNote` → `createNote` → antenna を通る。mk-go は Like の
+  時点で行ができるため、後続の Announce では `created=false` になり載らない。
+  Like は Announce より高頻度なので、実効の取りこぼしは他の入口より大きい
+
+数え方は「`ResolveNote` が既存行を返しうる入口」= `grep 'ResolveNote(' internal/`
+の非テスト call site。リレー以外は upstream でも antenna に載る経路なので、
+**差は「その入口で載せていない」ことと掛け算になる**。
 
 なお inbound Create / Announce **以外**の取り込み経路 (featured collection、
 reply / quote target の解決、`/api/ap/show`) でも antenna に載せない。これは

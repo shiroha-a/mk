@@ -1625,12 +1625,17 @@ func (p *Processor) handleAnnounce(act genericActivity, signer *model.User) erro
 	viaRelay := p.relayActorChecker != nil && p.relayActorChecker.IsRelayActor(announcer)
 
 	var target *model.Note
+	targetCreated := false
 	if viaRelay {
 		// リレー経由でしか観測しない投稿は Redis に置く。ephemeral store が
 		// 未配線 / 機能無効なら ResolveNoteEphemeral が通常経路に倒れる。
 		target, err = p.resolver.ResolveNoteEphemeral(targetURI)
 	} else {
-		target, err = p.resolver.ResolveNote(targetURI)
+		// **新規取り込みかどうかは resolver から受け取る** (#2751)。取得 URI で
+		// 既存行を引く方式では、Announce の object が document id と別名の URL
+		// (`https://h/@user/1` に対し id は `https://h/notes/1`) のときに何度
+		// 取り込んでも「新規」に見え、既知の note を繰り返し antenna へ押し込める。
+		target, targetCreated, err = p.resolver.ResolveNoteWithCreated(targetURI)
 	}
 	if err != nil {
 		// permanent な target resolve 失敗 (削除済 note / followers-only) は
@@ -1660,9 +1665,50 @@ func (p *Processor) handleAnnounce(act genericActivity, signer *model.User) erro
 		slog.Info("federation: skipping Announce of non-public note", "object", targetURI, "actor", act.Actor, "visibility", target.Visibility)
 		return nil
 	}
+	// **ブースト対象そのものを antenna に載せる** (#2751)。hook に渡る renote 行は
+	// Text / CW を持たないので、キーワード指定または withFile の antenna は
+	// inbound Announce では原理的に 1 件もマッチしない (upstream は
+	// ApInboxService.ts:329 の resolveNote(target) 経由で target 自体を
+	// NoteCreateService へ通すので載る)。
+	//
+	// **upstream より後ろ、可視性 gate の直後に置く。** upstream は resolveNote の
+	// 時点で載せるが、mk-go の antenna 可視性判定 (corenote.CanSeeNote) は
+	// upstream の checkHitAntenna より緩く、followers note でも「viewer が
+	// mention されている / reply 先が viewer」なら通す (#2106 N27 の意図的緩和)。
+	// resolveNote の位置に置くと、crafted Announce を投げるだけで**配送されて
+	// いない followers-only note を対象ユーザーの antenna に載せられる**入口が
+	// できる。public/home に絞った後なら、その入口は開かない。
+	//
+	// **新規に取り込んだときだけ発火させる。** 無条件だと再ブーストのたびに古い
+	// note が antenna に湧く。upstream も既知の note では createNote を通らない
+	// ので載らない。
+	//
+	// **ローカル note は対象外。** 作成時に既に antenna を通っている。
+	// **canonical なローカル URI は `targetCreated` が既に弾く** —
+	// `extractLocalNoteID` (urls.NoteURI の前方一致) → `FindByID` hit で
+	// created=false になるため。その範囲では UserHost の条件は二重で、片方を
+	// 外してもテストは落ちない (等価変異)。ただし前方一致から外れるローカル URL
+	// は remote 扱いで fetch されうるので、条件としては残す。
+	//
+	// **リレー経由は #2743 の方針どおり外す。** 取りこぼしの範囲は
+	// docs/divergence.md に記載。`!viaRelay` はここに到達する時点で常に真
+	// (上の early return を通る) で、renote 側の hook と同じく将来 early return
+	// を消したときの保険。実際に止めているのは signer 側の判定。
+	if p.antennaHook != nil && targetCreated && !viaRelay && !p.isRelayDelivery(signer) &&
+		target.UserHost != nil && *target.UserHost != "" {
+		hydratedTarget, author := p.hydrateWithAuthor(target)
+		if author == nil {
+			// replica 遅延などで直前に入れた行の author を引けないことがある。
+			// 黙って落とすと「antenna に載らない」だけが残るのでログに出す。
+			slog.Warn("federation: announced target has no resolvable author, skipping antenna",
+				"noteURI", targetURI, "userId", target.UserID)
+		} else {
+			safeGoFedHook(func() { p.antennaHook.OnNoteCreated(hydratedTarget, author) })
+		}
+	}
 	if act.Published != "" {
 		if published, perr := time.Parse(time.RFC3339, act.Published); perr == nil {
-			if targetCreated, terr := p.resolver.idGen.ParseTime(target.ID); terr == nil && published.Before(targetCreated) {
+			if targetCreatedAt, terr := p.resolver.idGen.ParseTime(target.ID); terr == nil && published.Before(targetCreatedAt) {
 				slog.Info("federation: skipping Announce with malformed createdAt (published before target)",
 					"object", targetURI, "actor", act.Actor)
 				return nil
@@ -1767,10 +1813,9 @@ func (p *Processor) handleAnnounce(act genericActivity, signer *model.User) erro
 	// **signer が nil のときは素通しする** (isRelayDelivery の fail-safe)。
 	// production の inbox は必ず signer を積むので到達しない。
 	//
-	// **渡すのは renote 行で、ブースト対象 (target) ではない。** renote は
-	// text を持たないので、キーワード指定のある antenna は inbound Announce
-	// では原理的にマッチしない (upstream は resolveNote(target) 経由で target
-	// 自体を antenna に通すので載る)。この差は docs/divergence.md に記載。
+	// **ここで渡すのは renote 行。** renote は text を持たないので、キーワード
+	// 指定のある antenna はこの行では当たらない。ブースト対象そのものは上の
+	// #2751 の block が別途渡している (新規取り込み時のみ)。
 	if p.antennaHook != nil && !viaRelay && !p.isRelayDelivery(signer) {
 		safeGoFedHook(func() { p.antennaHook.OnNoteCreated(hydrated, announcer) })
 	}
@@ -1814,13 +1859,7 @@ func (p *Processor) handleAnnounce(act genericActivity, signer *model.User) erro
 // 上流 / 他 instance から直接届く Create で通知済みの可能性が高いため二重通知
 // 回避)。
 func (p *Processor) publishRelayDeliveredNote(target *model.Note, targetURI, relayActor string) error {
-	hydrated := hydrateNoteForFanout(p.noteRepo, target)
-	author := hydrated.User
-	if author == nil && p.userRepo != nil && target.UserID != "" {
-		if u, err := p.userRepo.FindByID(target.UserID); err == nil {
-			author = u
-		}
-	}
+	hydrated, author := p.hydrateWithAuthor(target)
 	if author == nil {
 		slog.Warn("federation: relay-delivered note has no resolvable author, skipping fanout",
 			"relay", relayActor, "noteURI", targetURI, "userId", target.UserID)
@@ -1835,6 +1874,21 @@ func (p *Processor) publishRelayDeliveredNote(target *model.Note, targetURI, rel
 	slog.Debug("federation: relay-delivered note published",
 		"relay", relayActor, "noteURI", targetURI, "authorId", author.ID)
 	return nil
+}
+
+// hydrateWithAuthor pre-loads a note's relations for hook delivery and resolves
+// its author, falling back to userRepo when the User relation is empty.
+// author が解決できない (broken state) 場合は nil を返すので、呼び出し側は
+// hook を呼ばずに戻ること。
+func (p *Processor) hydrateWithAuthor(n *model.Note) (*model.Note, *model.User) {
+	hydrated := hydrateNoteForFanout(p.noteRepo, n)
+	author := hydrated.User
+	if author == nil && p.userRepo != nil && n.UserID != "" {
+		if u, err := p.userRepo.FindByID(n.UserID); err == nil {
+			author = u
+		}
+	}
+	return hydrated, author
 }
 
 // isRelayDelivery reports whether the activity was forwarded by a subscribed

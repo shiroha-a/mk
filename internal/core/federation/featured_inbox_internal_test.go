@@ -182,9 +182,12 @@ func TestResolveNoteOnce_AncestorIngestingGateIsBestEffortOnly(t *testing.T) {
 	// 印は枝ごと引き継がれるので、featured の内側で走る引用解決もこの形になる。
 	t.Run("quote path ingests anyway", func(t *testing.T) {
 		r, noteRepo := newAliasEnv(t, actorURI, "mira", aliasURI, noteURI)
-		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, false, ancestor().asBestEffort())
+		resolved, err := r.resolveNoteOnce(aliasURI, 0, false, false, false, ancestor().asBestEffort())
 		require.NoError(t, err, "引用経路で諦めている (renoteId を恒久的に落とす)")
-		require.NotNil(t, note)
+		require.NotNil(t, resolved)
+		// **wrapper ではなく note を見る。** wrapper は err==nil なら必ず非 nil
+		// なので、そこだけ見ると常に真になる (#2751 の型変更で空振り化した)。
+		require.NotNil(t, resolved.note)
 		assert.Len(t, noteRepo.Notes, 1)
 	})
 
@@ -205,10 +208,12 @@ func TestResolveNoteOnce_AncestorIngestingGateIsBestEffortOnly(t *testing.T) {
 		uri := noteURI
 		require.NoError(t, noteRepo.Create(&model.Note{ID: "9mira0000000000000000", UserID: user.ID, URI: &uri}))
 
-		note, err := r.resolveNoteOnce(aliasURI, 0, false, false, true, ancestor())
+		resolved, err := r.resolveNoteOnce(aliasURI, 0, false, false, true, ancestor())
 		require.NoError(t, err)
-		require.NotNil(t, note)
-		assert.Equal(t, "9mira0000000000000000", note.ID)
+		require.NotNil(t, resolved)
+		require.NotNil(t, resolved.note)
+		assert.Equal(t, "9mira0000000000000000", resolved.note.ID)
+		assert.False(t, resolved.created, "既存行を返した経路は created にしない (#2751)")
 	})
 }
 

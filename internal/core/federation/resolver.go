@@ -1969,7 +1969,32 @@ func (r *Resolver) ResolveActorByKeyID(keyID string) (*model.User, error) {
 //   - リモート URI で既に取り込み済みなら noteRepo.FindByURI で返す
 //   - 未知のリモート URI なら fetcher で取得して IngestNote で永続化
 func (r *Resolver) ResolveNote(uri string) (*model.Note, error) {
-	return r.resolveNoteDepth(uri, 0, false, false, nil)
+	note, _, err := r.ResolveNoteWithCreated(uri)
+	return note, err
+}
+
+// ResolveNoteWithCreated is ResolveNote plus whether this call ingested the
+// note (= the row did not exist yet).
+//
+// **取得 URI で既存行を引いて判定してはいけない** (#2751)。note 行は document
+// id で保存されるが、Announce の object などは同じ host の**別名 URL**でありうる
+// (`https://h/@user/1` に対し id は `https://h/notes/1`)。取得 URI で引くと何度
+// 取り込んでも空振りし、「新規のときだけ」の判定が成立しない。
+//
+// **singleflight に相乗りした呼び出しも created=true を受け取る。** 実際に
+// 作ったのは 1 つでも、同じ note を同時に解決した全員が「新規」と見る。
+// antenna の押し込み (`pushNote` の ZAdd / `antenna_note_unread` の UNIQUE) は
+// 冪等なので重複しても行は増えないが、**`PublishNote` だけは冪等でない** ので
+// WS の antenna channel に同じ note が二重に流れる。
+//
+// **note を作らずに終わる経路は error になる。** AP poll vote (reply note では
+// なく投票として処理する形) は `ingestNoteWithCreated` が (nil, false, nil) を
+// 返すが、ここでは ErrInvalidNote に倒す。以前は `(nil, nil)` がそのまま
+// ResolveNote から出ており、戻り値を nil check せず `note.ID` を読む呼び出し側
+// (handleAdd) が panic しうる形だった。ErrInvalidNote は isPermanentSkipError
+// なので、Like / Announce は ack + skip になる。
+func (r *Resolver) ResolveNoteWithCreated(uri string) (*model.Note, bool, error) {
+	return r.resolveNoteDepthOptCreated(uri, 0, false, false, true, nil)
 }
 
 // ResolveNoteEphemeral is ResolveNote for relay-delivered notes: the note and
@@ -2067,6 +2092,19 @@ func (r *Resolver) resolveNoteBestEffort(uri string, depth int, chain *resolveCh
 // (#2695) をどこに効かせるかもこれで決まる。別の best-effort な呼び出し元を
 // 足すなら、判定の入口を bool から分けること (#2710 review LOW-3)。
 func (r *Resolver) resolveNoteDepthOpt(uri string, depth int, allowCrossHost, ephemeral, mayWait bool, chain *resolveChain) (*model.Note, error) {
+	note, _, err := r.resolveNoteDepthOptCreated(uri, depth, allowCrossHost, ephemeral, mayWait, chain)
+	return note, err
+}
+
+// resolvedNote carries the singleflight result so callers can tell an ingest
+// from a cache hit (#2751)。
+type resolvedNote struct {
+	note    *model.Note
+	created bool
+}
+
+// resolveNoteDepthOptCreated is the body of resolveNoteDepthOpt.
+func (r *Resolver) resolveNoteDepthOptCreated(uri string, depth int, allowCrossHost, ephemeral, mayWait bool, chain *resolveChain) (*model.Note, bool, error) {
 	// 同一 URI への並行呼び出しは singleflight で collapse (#300 3-7)。
 	// ResolveActor と同じく cold path の HTTP fetch + IngestNote を重複
 	// 実行しないことが目的。
@@ -2090,12 +2128,16 @@ func (r *Resolver) resolveNoteDepthOpt(uri string, depth int, allowCrossHost, ep
 		return r.resolveNoteOnce(uri, depth, allowCrossHost, ephemeral, !mayWait, inner)
 	})
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if v == nil {
-		return nil, ErrInvalidNote
+		return nil, false, ErrInvalidNote
 	}
-	return v.(*model.Note), nil
+	rn, ok := v.(*resolvedNote)
+	if !ok || rn == nil || rn.note == nil {
+		return nil, false, ErrInvalidNote
+	}
+	return rn.note, rn.created, nil
 }
 
 // chainAfterProbe records the resolved document identity on the chain, under
@@ -2169,7 +2211,7 @@ func (r *Resolver) noteByAnyURI(uri, docID string) *model.Note {
 // resolveNoteOnce is the body of resolveNoteDepth, invoked once per URI by
 // resolveGroup. depth は quote chain の現在の深さ。allowCrossHost は
 // user-initiated ap/show 経路でのみ true。
-func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, ephemeral, bestEffortEntry bool, chain *resolveChain) (*model.Note, error) {
+func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, ephemeral, bestEffortEntry bool, chain *resolveChain) (*resolvedNote, error) {
 	if r.noteRepo == nil {
 		return nil, ErrInvalidNote
 	}
@@ -2184,19 +2226,19 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	}
 	if id := r.extractLocalNoteID(uri); id != "" {
 		if existing, err := r.noteRepo.FindByID(id); err == nil {
-			return existing, nil
+			return &resolvedNote{note: existing}, nil
 		}
 		// ローカル URI なのにDBに無ければ、これ以上 fetch しても意味がない
 		return nil, ErrInvalidNote
 	}
 	if existing, err := r.noteRepo.FindByURI(uri); err == nil {
-		return existing, nil
+		return &resolvedNote{note: existing}, nil
 	}
 	// ephemeral 経路の URI 逆引き (#2397)。ingestNoteWithCreated と同じ理由で、
 	// これが無いと Announce 等の解決経路から同じ投稿が別 ID で再取り込みされる。
 	if ephemeral {
 		if existing := r.ephemeralNoteByURI(uri); existing != nil {
-			return existing, nil
+			return &resolvedNote{note: existing}, nil
 		}
 	}
 	// federation policy gate: ホワイトリスト外 / blocked な host の note は
@@ -2268,7 +2310,7 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 		if ancestorID, ingesting := chain.ingestedDocID(idProbe.ID); ingesting {
 			// 既に行があるならそれで足りる (取り込み済みのピンを落とさない)。
 			if n := r.noteByAnyURI(uri, ancestorID); n != nil {
-				return n, nil
+				return &resolvedNote{note: n}, nil
 			}
 			return nil, ErrNoteAncestorIngesting
 		}
@@ -2294,8 +2336,11 @@ func (r *Resolver) resolveNoteOnce(uri string, depth int, allowCrossHost, epheme
 	// fetch して id が確定したので、鍵にも id を紐づけ直す。別名 URL では
 	// 取得 URI と食い違うので、両方から既存行を引けるようにしておく。
 	resolved := chainAfterProbe(chain, uri, allowCrossHost, ephemeral, idProbe.ID)
-	note, _, err := r.ingestNoteWithCreated(body, "", depth, ephemeral, resolved)
-	return note, err
+	note, created, err := r.ingestNoteWithCreated(body, "", depth, ephemeral, resolved)
+	if err != nil {
+		return nil, err
+	}
+	return &resolvedNote{note: note, created: created}, nil
 }
 
 // resolveQuoteTarget resolves the quote target of an inbound note from its
