@@ -21,13 +21,15 @@ import (
 // **これは drift detector ではない。** 本 test は mock しか触らないので、
 // production 側の orphanWhere に 4 つ目の述語が入っても緑のまま通る。
 //
-// userHost guard を削る変異は、実測ではツリー全体で本 test だけが捕まえる
-// (既存 test は orphan fixture に userHost を設定していない)。emoji guard の
-// ほうは internal/api/admin の DriveCleanup 系 test も捕まえる。
+// **mock 側の** userHost guard を削る変異は、本 test だけが捕まえる。
+// **production 側の** 同じ guard (orphanWhere) を削る変異を捕まえるのは、DB を
+// 使う internal/repository/drive_file_limits_test.go の
+// TestDriveFile_OrphanCleanupKeepsUnownedRemoteFiles で、こちらは orphan fixture
+// に userHost を設定している。両者は別の guard を見ているので、**片方が緑でも
+// もう片方は守られない** (#2754)。
 //
-// production 側の対応する固定は DB を使う
-// internal/repository/drive_file_limits_test.go の
-// TestDriveFile_OrphanCleanupKeepsUnownedRemoteFiles。
+// emoji guard のほうは、mock 側を削ると internal/api/admin の DriveCleanup 系
+// test も一緒に落ちる (あちらが mock を使うため)。
 func TestMockDriveFileRepository_OrphanSelection(t *testing.T) {
 	host := "remote.example"
 	owner := "user1"
