@@ -21,7 +21,6 @@ import (
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 )
@@ -172,10 +171,14 @@ func (h *Handler) Signin(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(*req.Password)); err != nil {
+	storedPassword := *profile.Password
+	scheme, passwordOK := password.Verify(storedPassword, *req.Password)
+	if !passwordOK {
 		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
 	}
-	h.maybeRehashPassword(user.ID, *profile.Password, *req.Password)
+	if scheme == password.SchemeBcrypt {
+		h.maybeRehashPassword(user.ID, storedPassword, *req.Password)
+	}
 
 	// #2106 H2 (CRITICAL): 2FA 有効ユーザーには password のみで token を発行しない。
 	// レガシー /api/signin は 2 要素を完遂できない (req に token/credential が無い)
@@ -271,9 +274,10 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
-	passwordOK := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(*req.Password)) == nil
-	if passwordOK {
-		h.maybeRehashPassword(user.ID, *profile.Password, *req.Password)
+	storedPassword := *profile.Password
+	scheme, passwordOK := password.Verify(storedPassword, *req.Password)
+	if passwordOK && scheme == password.SchemeBcrypt {
+		h.maybeRehashPassword(user.ID, storedPassword, *req.Password)
 	}
 
 	// CAPTCHA 検証 (password step 完了後、2FA 無しの場合のみ)。

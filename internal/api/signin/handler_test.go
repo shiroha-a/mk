@@ -1,7 +1,9 @@
 package signin_test
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -19,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -51,6 +54,10 @@ func doPost(h func(echo.Context) error, body string) *httptest.ResponseRecorder 
 
 func createTestUser(repo *testutil.MockUserRepository, username, password string) *model.User {
 	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+	return createTestUserWithStoredPassword(repo, username, string(hash))
+}
+
+func createTestUserWithStoredPassword(repo *testutil.MockUserRepository, username, stored string) *model.User {
 	token := "testtoken1234567"
 	user := &model.User{
 		ID:            "u1",
@@ -59,12 +66,19 @@ func createTestUser(repo *testutil.MockUserRepository, username, password string
 		Token:         &token,
 	}
 	repo.Users["u1"] = user
-	hashStr := string(hash)
 	repo.Profiles["u1"] = &model.UserProfile{
 		UserID:   "u1",
-		Password: &hashStr,
+		Password: &stored,
 	}
 	return user
+}
+
+func signinArgon2Fixture(plain string) string {
+	salt := []byte("0123456789abcdef")
+	digest := argon2.IDKey([]byte(plain), salt, 3, 64*1024, 4, 32)
+	return fmt.Sprintf("$argon2id$v=19$m=65536,t=3,p=4$%s$%s",
+		base64.RawStdEncoding.EncodeToString(salt),
+		base64.RawStdEncoding.EncodeToString(digest))
 }
 
 func TestSignin_Step1_NoPassword(t *testing.T) {
@@ -92,6 +106,25 @@ func TestSignin_Step2_Success(t *testing.T) {
 	assert.Equal(t, true, resp["finished"])
 	assert.Equal(t, "u1", resp["id"])
 	assert.Equal(t, "testtoken1234567", resp["i"])
+}
+
+func TestSignin_AcceptsCherryPickArgon2(t *testing.T) {
+	h, repo := newTestHandler(t)
+	stored := signinArgon2Fixture("pass123")
+	createTestUserWithStoredPassword(repo, "admin", stored)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, stored, *repo.Profiles["u1"].Password, "verification task must not migrate before complete migration task")
+}
+
+func TestSignin_RejectsMalformedArgon2WithExistingShape(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", "$argon2id$v=19$m=999999999,t=3,p=4$bad$bad")
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.JSONEq(t, `{"error":{"id":"932c904e-9460-45b7-9ce6-7ed33be7eb2c"}}`, rec.Body.String())
 }
 
 // chanLoginNotifier captures OnLogin asynchronously (#1559)。
@@ -225,6 +258,16 @@ func TestSigninFlow_Step2_Success(t *testing.T) {
 	assert.Equal(t, true, resp["finished"])
 	assert.Equal(t, "u1", resp["id"])
 	assert.NotEmpty(t, resp["i"])
+}
+
+func TestSigninFlow_AcceptsCherryPickArgon2(t *testing.T) {
+	h, repo := newTestHandler(t)
+	stored := signinArgon2Fixture("pass123")
+	createTestUserWithStoredPassword(repo, "admin", stored)
+
+	rec := doPost(h.SigninFlow, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, stored, *repo.Profiles["u1"].Password, "verification task must not migrate before complete migration task")
 }
 
 func TestSigninFlow_WrongPassword(t *testing.T) {
