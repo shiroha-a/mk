@@ -29,16 +29,23 @@ func (h *Handler) Grouped(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
-	filtered, notifierByID, noteByID, err := h.collectNotifications(c, user, req)
+	// **drop 前の全列を受け取る** (#2739)。grouping は全列で行い、drop 済みは
+	// グループの中身から外す。drop 済みを列から抜いてから畳むと、挟まった通知が
+	// 区切りとして働かず両隣が 1 グループになる。
+	all, dropped, notifierByID, noteByID, err := h.collectNotificationsWithDropped(c, user, req, true)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
+	filtered := survivors(all, dropped)
 
 	// 各通知を単体 pack して packed map を得る。packed の各要素には note / user /
 	// reaction が既に埋まっている (#1444 の可視性ゲート適用済み) ので、grouping では
 	// それらを再利用するだけで良い。
 	//
-	// **packed は filtered と 1:1 とは限らない。** PackNotifications は roleAssigned
+	// **pack するのは survivor だけ。** 全列を pack すると mute した相手の user が
+	// 引かれて packed に載り、grouping 後の subtract をすり抜ける。
+	//
+	// **packed は filtered と 1:1 とも限らない。** PackNotifications は roleAssigned
 	// (role 削除済) / chatRoomInvitationReceived (invitation 削除済) を通知ごと drop
 	// する。突き合わせは groupNotifications 側で id を使って行う (#2736)。
 	items := make([]entity.NotificationItem, 0, len(filtered))
@@ -56,7 +63,7 @@ func (h *Handler) Grouped(c echo.Context) error {
 	// 非可視 embed 本文が漏れる (#1546 で混入しかけた IDOR を塞ぐ)。
 	notehide.HideNotificationNotes(user, packed)
 
-	grouped := groupNotifications(filtered, packed, noteByID)
+	grouped := groupNotifications(all, packed, noteByID)
 	// 本家 i/notifications-grouped.ts:153 と同じく grouping 後に limit で slice する。
 	// **現状は到達しない** — collectNotifications が svc.List に limit を渡して既に
 	// 切っており、grouping は件数を増やさないため。upstream と同じ位置に置くことで、
@@ -77,106 +84,145 @@ func (h *Handler) Grouped(c echo.Context) error {
 //   - 連続する renote で同一 target note (= renote note の RenoteID) なら
 //     `renote:grouped` に畳み込み、users[] に notifier user を push する。
 //
-// それ以外は単体 packed map をそのまま残す。グループの id は本家同様グループ内
-// 最後に畳んだ通知の id を採用する。一覧は既定で降順なので通常は「最も古い」だが、
-// sinceId 単独のページは昇順になる (Service.List の ascending) ので断定はできない。
+// それ以外は単体 packed map をそのまま残す。
 //
-// filtered と packed はどちらも collectNotifications の出力順だが **長さは一致する
-// とは限らない**。noteByID は renote notification の target note 判定 (RenoteID) に使う。
-func groupNotifications(filtered []*notification.Notification, packed []map[string]any, noteByID map[string]*model.Note) []map[string]any {
-	// packed は pack 時に drop された通知の分だけ短い (roleAssigned で role 削除済 /
-	// chatRoomInvitationReceived で invitation 削除済)。filtered の index で packed を
-	// 引くと drop が 1 件でもあれば範囲外に出て panic → 500 になっていた (#2736)。
-	// id で引き直す。
-	//
-	// **pack 段の drop は「行は出さないが区切りとしては残る」。** upstream は raw 列で
-	// grouping してから packGroupedMany → null を落とす順なので、drop を挟んだ 2 件は
-	// 畳まれない。drop 済みを列から抜いてから grouping すると跨いで畳んでしまう。
-	//
-	// **ただし collectNotifications 段の drop は区切りにならない。** upstream は
-	// notifier 不在 / mute / suspended、削除済 note、解決済み receiveFollowRequest も
-	// grouping の**後**に落とすが、mk-go はこれらを grouping より前に filtered から
-	// 抜いている。そこは upstream と挙動が違う (本 fix 以前からの乖離、#2739)。
-	//
-	// **不可視 note はさらに種類が違う。** upstream は hideNote で blank するだけで
-	// 行は残すが、mk-go は行ごと落とす (#1444 / #1953)。順序ではなく drop か blank かの
-	// 違いなので、走査位置を揃えても一致しない。
-	out := make([]map[string]any, 0, len(packed))
+// **all は drop 前の全列** (#2739)。upstream は raw 列に対して grouping してから
+// pack で null を落とすので、grouping 条件に当たらない通知 (mute した相手の
+// follow など) を挟んだ 2 件は畳まれない。drop 済みの列を渡すと挟まった通知が
+// 区切りとして働かず、両隣が 1 グループになる。
+//
+// **畳んでから中身を引く。** upstream は grouping 条件に当たる通知を畳んだうえ
+// で pack させるため、`reaction:grouped` が notifierId を持たないことを利用して
+// mute した相手の reaction が reactions[] に残る (`#validateNotifier` の
+// `if (!('notifierId' in notification)) return true`)。mk-go はグループを作った
+// あとで drop 済みメンバーを中身から外すので、そこは漏らさない。
+//
+// **生き残りが 1 件だけになったグループは単体行として出す。これは upstream との
+// 意図的な差。** upstream は grouping 段では 1 件のグループを作らないが、pack 段で
+// メンバーが落ちた結果 1 件になったグループはそのまま返す (`#packInternal` が
+// null にするのは `reactions.length === 0` / `users.length === 0` のときだけ)。
+// mk-go は mute / suspended でもメンバーを外すので該当頻度がはるかに高く、
+// 1 件の `reaction:grouped` を返し続けるより単体 shape のほうが素直。
+//
+// packed は survivor だけを pack したもので、id で引く。pack 段の drop
+// (roleAssigned で role 削除済 / chatRoomInvitationReceived で invitation 削除済、
+// #2736) も同じ扱いになる — グループの中身から外れ、単独なら行ごと消えて区切り
+// として働く。
+//
+// **id / createdAt / note は生存メンバーから採る。これも意図的な差。** upstream は
+// raw 列基準 (`id` は最後のメンバー、reaction の `createdAt` は先頭、renote は
+// 2 番目、`noteId` は先頭) で drop の有無を見ないので、先頭や末尾が drop された
+// グループでは値がずれる。
+//
+// 生存基準にするのは**落とした通知の id / 時刻を出さないため**。id は aidx で
+// 生成時刻を含むので、mute した相手がいつ reaction したかが漏れる。
+// ページングが壊れるからではない — `untilId` は行の lookup ではなく
+// `n.ID >= untilID` の辞書順フィルタ (notification_service.go) なので、
+// drop 済みの id を渡しても境界として機能する。
+//
+// **不可視 note の drop は種類が違う。** upstream は hideNote で blank するだけで
+// 行を残すが、mk-go は行ごと落とす (#1444 / #1953)。reaction grouping は通知が持つ
+// NoteID だけで判定するので畳み方は upstream と一致する。renote grouping は target
+// note を noteByID から引くので、**note を解決できない行だけ**は畳めず区切りになる
+// (mute / suspended などで drop された行の note は collectNotifications が全列ぶん
+// 引いているので解決できる。#2739)。
+func groupNotifications(all []*notification.Notification, packed []map[string]any, noteByID map[string]*model.Note) []map[string]any {
 	byID := make(map[string]map[string]any, len(packed))
 	for _, p := range packed {
 		byID[asString(p["id"])] = p
 	}
-	for i, cur := range filtered {
-		curPacked := byID[cur.ID]
-		if curPacked == nil {
-			// pack で drop された通知。行は出さないが、次の周回で prev として
-			// grouping 条件に評価されることで区切りとして働く。
-			continue
-		}
-		// len(out) > 0 も prevPacked != nil と同様、外しても落ちるテストは無い
-		// (先頭行が drop される fixture が無い)。両方外すと out[-1] で落ちる。
-		if i > 0 && len(out) > 0 {
-			prev := filtered[i-1]
-			// prevPacked が nil になるのは prev が drop 済みのとき = grouping 対象外の
-			// 型のときだけなので、この判定は現状の結果を変えない。防御として置く
-			// (詳細は groupInto の doc)。
-			if prevPacked := byID[prev.ID]; prevPacked != nil &&
-				groupInto(out, prev, prevPacked, cur, curPacked, noteByID) {
-				continue
+
+	out := make([]map[string]any, 0, len(packed))
+	for _, g := range buildGroups(all, noteByID) {
+		// **drop 済みメンバーはここで外す。** グループを作る段では外さない
+		// (外すと区切りとして働いてしまう)。
+		kept := make([]*notification.Notification, 0, len(g.members))
+		for _, n := range g.members {
+			if byID[n.ID] != nil {
+				kept = append(kept, n)
 			}
 		}
-		out = append(out, curPacked)
+		switch {
+		case len(kept) == 0:
+			// 全員 drop。行は出さないが、グループが分かれていた分だけ
+			// 両隣は別行のままになる (= 区切りとして働く)。
+		case len(kept) == 1:
+			out = append(out, byID[kept[0].ID])
+		case g.kind == notification.TypeReaction:
+			out = append(out, buildReactionGroup(kept, byID))
+		default:
+			out = append(out, buildRenoteGroup(kept, byID))
+		}
 	}
 	return out
 }
 
-// groupInto folds `cur` into the last output row when it continues a reaction /
-// renote group seeded by `prev`. Returns true when folded, in which case the
-// caller must not append `cur` as its own row.
-//
-// out[len(out)-1] が prev の行 (または prev を含むグループ) であることを前提にする。
-// prev が pack されていれば直前の周回で append か fold されているので成立する。
-//
-// 呼び出し元の `prevPacked != nil` 判定は**到達するが結果を変えない** — prev が
-// drop 済みなのは roleAssigned / chatRoomInvitationReceived のときだけで、その 2 型は
-// grouping 条件のどちらにも当たらないため。外しても落ちるテストは無いが、grouping
-// 対象の型が増えるか、reaction / renote を drop する条件が入ると前提を保つ唯一の
-// 砦になるので残す。
-func groupInto(out []map[string]any, prev *notification.Notification, prevPacked map[string]any, cur *notification.Notification, curPacked map[string]any, noteByID map[string]*model.Note) bool {
-	last := out[len(out)-1]
+// notificationGroup is a run of consecutive notifications that upstream would
+// fold into one row. kind is the notification type that seeded the run
+// (single-member runs keep the member's own type).
+type notificationGroup struct {
+	kind    notification.Type
+	members []*notification.Notification
+}
 
-	// reaction grouping: prev/cur 両方 reaction かつ同一 NoteID。
-	if prev.Type == notification.TypeReaction && cur.Type == notification.TypeReaction &&
-		prev.NoteID != "" && prev.NoteID == cur.NoteID {
-		if asString(last["type"]) != "reaction:grouped" {
-			last = newReactionGroup(prev, prevPacked)
-			out[len(out)-1] = last
+// buildGroups partitions all into runs using the same pair predicate upstream
+// applies, **without** looking at whether a row survives packing.
+func buildGroups(all []*notification.Notification, noteByID map[string]*model.Note) []notificationGroup {
+	groups := make([]notificationGroup, 0, len(all))
+	for i, cur := range all {
+		if i > 0 && continuesGroup(all[i-1], cur, noteByID) {
+			last := &groups[len(groups)-1]
+			last.members = append(last.members, cur)
+			continue
 		}
-		appendReaction(last, cur, curPacked)
-		last["id"] = cur.ID
-		return true
+		groups = append(groups, notificationGroup{kind: cur.Type, members: []*notification.Notification{cur}})
 	}
+	return groups
+}
 
-	// renote grouping: prev/cur 両方 renote かつ同一 target note。
-	// mk-go の renote 通知は NoteID に renote note 自体を持ち、target note は
-	// その RenoteID。noteByID から各 renote note を引いて RenoteID を比較する。
+// continuesGroup reports whether cur folds into the run seeded by prev.
+// upstream i/notifications-grouped.ts:107-155 と同じ pair 述語。
+func continuesGroup(prev, cur *notification.Notification, noteByID map[string]*model.Note) bool {
+	if prev.Type == notification.TypeReaction && cur.Type == notification.TypeReaction {
+		// `prev.NoteID != ""` は upstream に無い防御。NoteID 空の reaction 通知は
+		// 作られないので外してもテストは落ちないが、空キー同士が畳まれるのを
+		// 防ぐ (fail-closed)。
+		return prev.NoteID != "" && prev.NoteID == cur.NoteID
+	}
 	if prev.Type == notification.TypeRenote && cur.Type == notification.TypeRenote {
-		if pt, ct := renoteTargetID(prev, noteByID), renoteTargetID(cur, noteByID); pt != "" && pt == ct {
-			if asString(last["type"]) != "renote:grouped" {
-				last = newRenoteGroup(prev, prevPacked)
-				// #2106 L23: upstream i/notifications-grouped は renote group seed の createdAt に
-				// cur (= 一覧の並びで 1 つ後。降順ページなら古い方) 通知の時刻を採る
-				// (reaction group は prev で一致)。newRenoteGroup は prev の createdAt を
-				// 入れるので cur で上書きする。
-				last["createdAt"] = curPacked["createdAt"]
-				out[len(out)-1] = last
-			}
-			appendRenoteUser(last, curPacked)
-			last["id"] = cur.ID
-			return true
-		}
+		// `pt != ""` も同じく防御。target を解決できない行は note-missing で
+		// drop されるので、production 配線下では観測差が出ない。
+		pt, ct := renoteTargetID(prev, noteByID), renoteTargetID(cur, noteByID)
+		return pt != "" && pt == ct
 	}
 	return false
+}
+
+// buildReactionGroup materializes a reaction:grouped row from the surviving
+// members. id は最後のメンバー、createdAt は先頭のメンバーのものを採る。
+func buildReactionGroup(kept []*notification.Notification, byID map[string]map[string]any) map[string]any {
+	g := newReactionGroup(kept[0], byID[kept[0].ID])
+	for _, n := range kept[1:] {
+		appendReaction(g, n, byID[n.ID])
+	}
+	g["id"] = kept[len(kept)-1].ID
+	return g
+}
+
+// buildRenoteGroup materializes a renote:grouped row from the surviving
+// members.
+//
+// #2106 L23: upstream の renote group は seed の createdAt に**2 番目**の通知
+// (一覧の並びで 1 つ後。降順ページなら古い方) の時刻を採る (reaction group は
+// 先頭で一致)。
+func buildRenoteGroup(kept []*notification.Notification, byID map[string]map[string]any) map[string]any {
+	g := newRenoteGroup(kept[0], byID[kept[0].ID])
+	g["createdAt"] = byID[kept[1].ID]["createdAt"]
+	for _, n := range kept[1:] {
+		appendRenoteUser(g, byID[n.ID])
+	}
+	g["id"] = kept[len(kept)-1].ID
+	return g
 }
 
 // renoteTargetID returns the target note id of a renote notification (= the

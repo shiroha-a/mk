@@ -272,13 +272,50 @@ func (h *Handler) bindListRequest(c echo.Context) (ListRequest, bool) {
 // (noteId だけの行を返さない)。#1444 当初の「行は残して detail だけ落とす」形では
 // ないので、他経路をここに揃えにいくときは注意すること。
 func (h *Handler) collectNotifications(c echo.Context, user *model.User, req ListRequest) ([]*notification.Notification, map[string]*model.User, map[string]*model.Note, error) {
+	all, dropped, notifierByID, noteByID, err := h.collectNotificationsWithDropped(c, user, req, false)
+	if err != nil {
+		return nil, nil, nil, err
+	}
+	return survivors(all, dropped), notifierByID, noteByID, nil
+}
+
+// survivors returns the rows of all that are not in dropped, preserving order.
+//
+// **id で引くので、位置ベースだった旧実装とは縮退の仕方が違う。** 同じ id の行が
+// 2 つあって片方だけ drop されると両方消える (fail-closed 側)。逆に id が空の行を
+// drop すると、id が空の行がすべて消える。通知 id は aidx で採番されるので実データ
+// では起きないが、id を持たない通知を作れるようにするなら位置ベースに戻すこと。
+func survivors(all []*notification.Notification, dropped map[string]struct{}) []*notification.Notification {
+	out := make([]*notification.Notification, 0, len(all))
+	for _, n := range all {
+		if _, ok := dropped[n.ID]; ok {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
+}
+
+// collectNotificationsWithDropped is collectNotifications without applying the
+// drops: it returns **every** row Service.List produced plus the id set of the
+// ones that must not be rendered.
+//
+// **grouped は drop 済みの列では正しく畳めない** (#2739)。upstream は raw 列で
+// grouping してから pack で落とすので、grouping 条件に当たらない通知 (mute した
+// 相手の follow など) を挟んだ 2 件は畳まれない。drop 済みの列を渡すと挟まった
+// 通知が区切りとして働かず、両隣が 1 グループになる。
+//
+// **id 集合だけでは足りない。** 区切りになるかは両隣との pair 述語 (type /
+// noteId / renote の target) で決まるので、落とした通知の中身そのものが要る。
+// resolveAllNotes は drop 済み行の note まで引くかどうか。grouped だけが true。
+func (h *Handler) collectNotificationsWithDropped(c echo.Context, user *model.User, req ListRequest, resolveAllNotes bool) ([]*notification.Notification, map[string]struct{}, map[string]*model.User, map[string]*model.Note, error) {
 	// upstream notifications.ts: 明示的な includeTypes:[] は空配列を返す
 	// (= 何も含めない)。omit (nil) は全 type を通す。Go の []string は
 	// absent→nil / []→non-nil(len 0) で区別できるので、ここで早期 return する
 	// (#1546)。excludeTypes 全指定の空返却は下の per-row exclude filter で既に
 	// 成立するため特別扱い不要。
 	if req.IncludeTypes != nil && len(req.IncludeTypes) == 0 {
-		return nil, map[string]*model.User{}, map[string]*model.Note{}, nil
+		return nil, map[string]struct{}{}, map[string]*model.User{}, map[string]*model.Note{}, nil
 	}
 	// svc.List が upstream NotificationService.getNotifications 相当に cursor
 	// (sinceId/untilId)・向き (sinceId-only は昇順)・type filter・limit を適用して
@@ -287,8 +324,11 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	// upstream は hideNote で blank するだけで行を残す (下の #1953 ブロック参照)。
 	rows, err := h.svc.List(c.Request().Context(), user.ID, req.SinceID, req.UntilID, (*req.Limit), req.IncludeTypes, req.ExcludeTypes)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
+	// **drop は列から抜かずに id 集合へ記録する** (#2739)。grouped は全列を
+	// 走査して畳んでから、この集合でグループの中身を引く。
+	dropped := make(map[string]struct{})
 
 	// 2-pass で組み立てる:
 	//   pass 1: followReq filter を通して残った rows と notifierID を集約
@@ -304,6 +344,7 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 		// 除外する (#349 コメント対応、本家 NotificationEntityService 互換)。
 		if n.Type == notification.TypeReceiveFollowReq && h.followReqRepo != nil && n.NotifierID != "" {
 			if exists, err := h.followReqRepo.Exists(n.NotifierID, user.ID); err == nil && !exists {
+				dropped[n.ID] = struct{}{}
 				continue
 			}
 		}
@@ -334,9 +375,8 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	// #1775: read-time valid-notifier filter。create 時 mute だけでなく read 時に
 	// も notifier が (a) いま viewer に mute されている / (b) viewer の mutedInstances
 	// host / (c) suspended のいずれかなら通知を落とす (upstream
-	// NotificationEntityService #filterValidNotifier)。noteIDSet は survivor から
-	// 組み立てる (落とした通知の note を無駄に引かない)。
-	filtered = h.filterValidNotifiers(user.ID, filtered, notifierByID)
+	// NotificationEntityService #filterValidNotifier)。
+	filtered = markDropped(dropped, filtered, h.filterValidNotifiers(user.ID, filtered, notifierByID))
 
 	// #2106 N6: notifier user が解決できなかった notifier-required 通知を drop する
 	// (upstream NotificationEntityService #packInternal の `needsUser && !userIfNeed →
@@ -345,10 +385,11 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	// client が当該ページ decode で crash する。transient な fetch 失敗では mass-drop
 	// しないよう、fetch 成功時のみ適用する。
 	if notifierFetchOK {
-		kept := filtered[:0]
+		kept := make([]*notification.Notification, 0, len(filtered))
 		for _, n := range filtered {
 			if n.NotifierID != "" {
 				if _, ok := notifierByID[n.NotifierID]; !ok {
+					dropped[n.ID] = struct{}{}
 					continue
 				}
 			}
@@ -357,8 +398,29 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 		filtered = kept
 	}
 
+	// **grouped は survivor ではなく全列から集める** (#2739)。drop された通知も
+	// 含めて畳むが、renote grouping の判定 (target note = renote note の RenoteID)
+	// は noteByID からしか導けない。survivor だけを引くと、drop された renote の
+	// target が解決できず `renoteTargetID` が "" を返し、**grouping 条件に当たる
+	// のに区切りとして働いてしまう** (reaction は通知が持つ NoteID だけで判定
+	// するので影響を受けず、renote だけが非対称に壊れる)。
+	//
+	// upstream は通知自体が `targetNoteId` を持つので note を引かずに判定できる
+	// (models/Notification.ts:44)。mk-go は持たないため、この余分な fetch で
+	// 代替する。件数は 1 ページぶん (最大 100) に収まる。
+	//
+	// **Show では引かない。** あちらは drop 済み行の note を一切使わないうえ、
+	// FilterVisible が followers note ごとに follow 判定を 1 クエリ出すので、
+	// grouped のためのコストを hot path に載せない。
+	//
+	// **これは性能のための分岐で、応答は変わらない** (Show に true を渡しても
+	// テストは落ちない)。逆向き — grouped に false を渡す — は挙動が変わる。
+	noteSource := filtered
+	if resolveAllNotes {
+		noteSource = rows
+	}
 	noteIDSet := make(map[string]struct{})
-	for _, n := range filtered {
+	for _, n := range noteSource {
 		if n.NoteID != "" {
 			noteIDSet[n.NoteID] = struct{}{}
 		}
@@ -400,10 +462,11 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 	// (未配線の partial test では note 解決自体が走らず、全 note-required 通知を
 	// 誤って落とさないため)。
 	if h.noteRepo != nil && h.queryService != nil {
-		kept := filtered[:0]
+		kept := make([]*notification.Notification, 0, len(filtered))
 		for _, n := range filtered {
 			if n.NoteID != "" {
 				if _, ok := noteByID[n.NoteID]; !ok {
+					dropped[n.ID] = struct{}{}
 					continue
 				}
 			}
@@ -411,7 +474,23 @@ func (h *Handler) collectNotifications(c echo.Context, user *model.User, req Lis
 		}
 		filtered = kept
 	}
-	return filtered, notifierByID, noteByID, nil
+	return rows, dropped, notifierByID, noteByID, nil
+}
+
+// markDropped records the rows of before that are missing from after into
+// dropped, and returns after. filterValidNotifiers は survivor 列を返すので、
+// 差分を取って drop 集合へ反映する。
+func markDropped(dropped map[string]struct{}, before, after []*notification.Notification) []*notification.Notification {
+	kept := make(map[string]struct{}, len(after))
+	for _, n := range after {
+		kept[n.ID] = struct{}{}
+	}
+	for _, n := range before {
+		if _, ok := kept[n.ID]; !ok {
+			dropped[n.ID] = struct{}{}
+		}
+	}
+	return after
 }
 
 // SetMutingRepo wires the muting repository used by the read-time
