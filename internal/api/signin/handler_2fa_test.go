@@ -118,7 +118,39 @@ func Test2FA_TOTP_AcceptsArgon2Password(t *testing.T) {
 
 	rec := doPost(h.SigninFlow, `{"username":"alice","password":"argon-pass","token":"`+token+`"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, stored, *repo.Profiles[user.ID].Password, "verification task must not migrate before complete migration task")
+}
+
+func Test2FA_Argon2MigrationWaitsForTOTP(t *testing.T) {
+	h, repo := newTestHandler(t)
+	secret := "JBSWY3DPEHPK3PXP"
+	user := newTestUserWithTOTP(repo, "alice", "unused", secret, []string{"backup1"})
+	stored := signinArgon2Fixture("argon-pass")
+	repo.Profiles[user.ID].Password = &stored
+
+	step2 := doPost(h.SigninFlow, `{"username":"alice","password":"argon-pass"}`)
+	require.Equal(t, http.StatusOK, step2.Code)
+	assert.Equal(t, stored, *repo.Profiles[user.ID].Password)
+
+	bad := doPost(h.SigninFlow, `{"username":"alice","password":"argon-pass","token":"000000"}`)
+	require.Equal(t, http.StatusForbidden, bad.Code)
+	assert.Equal(t, stored, *repo.Profiles[user.ID].Password)
+
+	token, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	good := doPost(h.SigninFlow, `{"username":"alice","password":"argon-pass","token":"`+token+`"}`)
+	require.Equal(t, http.StatusOK, good.Code, good.Body.String())
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(*repo.Profiles[user.ID].Password), []byte("argon-pass")))
+}
+
+func Test2FA_Argon2MigrationAfterBackupCode(t *testing.T) {
+	h, repo := newTestHandler(t)
+	user := newTestUserWithTOTP(repo, "alice", "unused", "JBSWY3DPEHPK3PXP", []string{"backup1"})
+	stored := signinArgon2Fixture("argon-pass")
+	repo.Profiles[user.ID].Password = &stored
+
+	rec := doPost(h.SigninFlow, `{"username":"alice","password":"argon-pass","token":"backup1"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(*repo.Profiles[user.ID].Password), []byte("argon-pass")))
 }
 
 func Test2FA_TOTP_InvalidToken(t *testing.T) {

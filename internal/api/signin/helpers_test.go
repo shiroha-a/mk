@@ -237,6 +237,20 @@ func TestFinishPasskeySignin_Success(t *testing.T) {
 	assert.Equal(t, "Tk-1", signinResp["i"])
 }
 
+func TestFinishPasskeySignin_DoesNotMigrateArgon2(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	tok := "Tk-1"
+	stored := "$argon2id$v=19$m=65536,t=3,p=4$unchanged$unchanged"
+	repo.Users["u1"] = &model.User{ID: "u1", Token: &tok}
+	repo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Password: &stored, UsePasswordLessLogin: true}
+	h := NewHandler(repo)
+	c := newCtx()
+	user := &model.User{ID: "u1", Token: &tok}
+
+	require.NoError(t, h.finishPasskeySignin(c, user, nil))
+	assert.Equal(t, stored, *repo.Profiles["u1"].Password)
+}
+
 // recordSignin は signinRepo.Create が err を返しても panic しないこと
 // (slog warn して return)。mainStreamPublisher が nil なのでそのまま終わる。
 type errSigninRepo struct{}

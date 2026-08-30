@@ -115,7 +115,62 @@ func TestSignin_AcceptsCherryPickArgon2(t *testing.T) {
 
 	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, stored, *repo.Profiles["u1"].Password, "verification task must not migrate before complete migration task")
+}
+
+func TestSignin_MigratesArgon2AfterSuccess(t *testing.T) {
+	h, repo := newTestHandler(t)
+	stored := signinArgon2Fixture("pass123")
+	createTestUserWithStoredPassword(repo, "admin", stored)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	after := *repo.Profiles["u1"].Password
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(after), []byte("pass123")))
+	afterCost, err := bcrypt.Cost([]byte(after))
+	require.NoError(t, err)
+	assert.Equal(t, password.Cost(), afterCost)
+}
+
+func TestSignin_Argon2PasswordOver72BytesStaysArgon2(t *testing.T) {
+	h, repo := newTestHandler(t)
+	plain := strings.Repeat("a", 73)
+	stored := signinArgon2Fixture(plain)
+	createTestUserWithStoredPassword(repo, "admin", stored)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"`+plain+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, stored, *repo.Profiles["u1"].Password)
+}
+
+func TestSignin_Argon2CASConflictDoesNotOverwriteNewPassword(t *testing.T) {
+	h, repo := newTestHandler(t)
+	stored := signinArgon2Fixture("pass123")
+	createTestUserWithStoredPassword(repo, "admin", stored)
+	newer, err := password.Hash("newer")
+	require.NoError(t, err)
+	repo.UpdatePasswordIfCurrentFn = func(userID, currentHash, newHash string) (bool, error) {
+		assert.Equal(t, "u1", userID)
+		assert.Equal(t, stored, currentHash)
+		assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(newHash), []byte("pass123")))
+		repo.Profiles["u1"].Password = &newer
+		return false, nil
+	}
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Equal(t, newer, *repo.Profiles["u1"].Password)
+}
+
+func TestSignin_Argon2MigrationErrorDoesNotFailSignin(t *testing.T) {
+	h, repo := newTestHandler(t)
+	stored := signinArgon2Fixture("pass123")
+	createTestUserWithStoredPassword(repo, "admin", stored)
+	repo.UpdatePasswordIfCurrentFn = func(_, _, _ string) (bool, error) { return false, assert.AnError }
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"finished":true,"id":"u1","i":"testtoken1234567"}`, rec.Body.String())
+	assert.Equal(t, stored, *repo.Profiles["u1"].Password)
 }
 
 func TestSignin_RejectsMalformedArgon2WithExistingShape(t *testing.T) {
@@ -267,7 +322,6 @@ func TestSigninFlow_AcceptsCherryPickArgon2(t *testing.T) {
 
 	rec := doPost(h.SigninFlow, `{"username":"admin","password":"pass123"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Equal(t, stored, *repo.Profiles["u1"].Password, "verification task must not migrate before complete migration task")
 }
 
 func TestSigninFlow_WrongPassword(t *testing.T) {
@@ -356,6 +410,28 @@ func TestSigninFlow_CaptchaBlocksMissingToken(t *testing.T) {
 	// ため、mk-go も #810 で同 Fastify shape に揃える。
 	rec := doPost(h.SigninFlow, `{"username":"capuser2","password":"pass"}`)
 	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "CAPTCHA_FAILED")
+}
+
+func TestSigninFlow_DoesNotMigrateArgon2WhenCaptchaFails(t *testing.T) {
+	h, repo := newTestHandler(t)
+	stored := signinArgon2Fixture("pass123")
+	createTestUserWithStoredPassword(repo, "admin", stored)
+	h.SetCaptcha(captcha.NewService(&model.Meta{EnableTestcaptcha: true}))
+
+	rec := doPost(h.SigninFlow, `{"username":"admin","password":"pass123"}`)
+	testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "CAPTCHA_FAILED")
+	assert.Equal(t, stored, *repo.Profiles["u1"].Password)
+}
+
+func TestSigninFlow_MigratesArgon2AfterCaptchaSuccess(t *testing.T) {
+	h, repo := newTestHandler(t)
+	stored := signinArgon2Fixture("pass123")
+	createTestUserWithStoredPassword(repo, "admin", stored)
+	h.SetCaptcha(captcha.NewService(&model.Meta{EnableTestcaptcha: true}))
+
+	rec := doPost(h.SigninFlow, `{"username":"admin","password":"pass123","testcaptcha-response":"testcaptcha-passed"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(*repo.Profiles["u1"].Password), []byte("pass123")))
 }
 
 func TestSigninFlow_CaptchaSkippedFor2FAUsers(t *testing.T) {
