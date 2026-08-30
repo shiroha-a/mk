@@ -65,7 +65,7 @@ make diff-down    # stop + volume ごと破棄
 | `tests/diff/diff_core.py` | JSON 値 diff の中核。ignore-list 付き再帰比較。**stdlib のみ**で unit-test 可能 |
 | `tests/diff/test_diff_core.py` | diff-core の unit test (`python3 tests/diff/test_diff_core.py` で単体実行) |
 | `tests/diff/conftest.py` | `mkgo` / `ts` fixture (Client) + health 待ち。env URL から接続 |
-| `tests/diff/test_endpoints.py` | endpoint 別の差分テスト (30 件) |
+| `tests/diff/test_endpoints.py` | endpoint 別の差分テスト (35 件) |
 | `tests/diff/{mkgo,ts}.yml` | 各 instance の config |
 | `tests/diff/Dockerfile.runner` | pytest + requests の runner image |
 | `docker-compose.diff.yml` | 2 backend + DB/Redis + runner |
@@ -104,20 +104,69 @@ make diff-test     # スタックが既に上がっている場合
 
 ## カバレッジ
 
-pytest の総数は 43 で、内訳は:
+pytest の総数は 48 で、内訳は:
 
-- **endpoint 比較 30 件** (`test_endpoints.py`) — mk-go と TS に同じリクエストを
+- **endpoint 比較 35 件** (`test_endpoints.py`) — mk-go と TS に同じリクエストを
   投げて値を突き合わせるもの
 - diff-core の unit test 13 件 (`test_diff_core.py`) — 差分の取り方そのものの検証。
   stdlib のみなので `python3 tests/diff/test_diff_core.py` で単体実行できる
 
-**「43 比較」ではない。** 実際に 2 backend を突き合わせているのは 30 件。
+**「48 比較」ではない。** 実際に 2 backend を突き合わせているのは 35 件。
 
 比較対象は meta / user (packing / rich profile / relation) / `i/me` /
 note (packing / reaction / reply / renote / hashtag / state / poll) / clip / user list /
 channel / antenna / drive file / drive folder / OAuth app / page / announcement /
 emoji / flash / favorites / mute list / timeline (home / local / user notes /
-followee) / locked follow request。
+followee) / locked follow request / **sinceId 単独指定のページング** (home
+timeline / users/notes / drive folders / drive files / admin announcements)。
+
+### sinceId 単独指定のページング (#2765)
+
+cursor ページングはフロントの「もっと新しいものを読む」(`fetchNewer`) の中核で、
+upstream の `makePaginationQuery` は **`sinceId` / `sinceDate` 単独のときだけ ASC**
+で返す。mk-go は `internal/repository/pagination.go` の `paginationOrder` で同じ
+規則を持つ (#2713 / PR #2764。数え方で 9 とも 12 とも書かれるが、**実際に
+向きが変わったのは repository 関数 9 つ**で、残りは据え置き 1
+(`emoji.go ListRemoteWithFilter` は upstream 自体が DESC) と挙動不変の helper
+集約 2)。向きを逆にすると
+「2 ページ目がおかしい」という形で利用者に出る。
+
+**元から無防備だったわけではない。** 本家 backend e2e の
+`third_party/misskey/packages/backend/test/e2e/timelines.ts` が `users/notes` の
+`sinceId` 単独 (ASC) と `sinceId` + `untilId` (DESC) を `deepStrictEqual` で
+リテラル配列に固定しており、これは mk-go に対しても実行されている (vitest の
+exclude にも `known-divergences.json` にも入っていない。`describe.each` の
+FTT on/off で計 4 実行)。
+
+**ただし守られていたのは `users/notes` だけ。** `clips.ts` も `users/clips` /
+`clips/notes` に `sinceId` を投げるが、3 箇所とも
+`res.sort(compareBy(s => s.id))` で**両辺を並べ替えてから**比較しており、
+集合しか見ていない (順序回帰は落ちない)。
+
+無かったのは **mk-go 側で管理するゲート**で、`tests/` / `test/` を横断して
+`sinceId` を grep すると 0 件だった。しかも **#2713 が実際に直した経路
+(drive folder / note draft / abuse report / chat / invite / reversi) は
+1 つも入っていなかった**。
+
+選んだ 5 経路と理由:
+
+| endpoint | repository | 選んだ理由 |
+|---|---|---|
+| `notes/timeline` | `note.go ListHomeTimeline` | fanout 経由 (`sinceId` 付きは #2720 で必ず DB へ倒れる)。実利用が最も多い。**`meta.enableFanoutTimelineDbFallback` が off だと空が返る** (#2762、§5.6 参照) ので、そのときは `got=[]` で落ちる |
+| `users/notes` | `note.go ListByUserIDFiltered` | fanout を通らない直行経路。本家 e2e も見ているが、あちらは mk-go 単体の assert で値の突き合わせはしない |
+| `drive/folders` | `drive_folder.go ListByUser` | **#2764 が実際に直した経路**。note 系は元から ASC だったので、そこだけ見ても #2713 の回帰は捕まらない (mock 側は #2764 で `SortMockPage` に揃っているので、こちらは単体テストでも見える) |
+| `drive/files` | `drive_file.go ListByUser` | **mock からは順序回帰が見えない** — `MockDriveFileRepository.ListByUser` は sort キー分岐を持つため sinceID 単独の ASC を実装しておらず、doc コメント自身が「#2766 が終わっても残る」と書いている (`ListForAdmin` / `ListSystemFiles` も同様、#2766 で追跡中)。frontend の MkDrive が `sinceId: '0'` で読む。**`sort` は渡さない** — production も upstream も sort 指定時は `paginationOrder` を通らず固定 order を使い、MkDrive も `-createdAt` のとき sort を送らない |
+| `admin/announcements/list` | `announcement.go ListForAdmin` | note / drive 以外の repository |
+
+**候補行数 > limit で読む。** 候補 <= limit だと `ORDER BY id ASC` と
+`ORDER BY id DESC` が同じ行を返してしまい、「SQL は DESC のまま Go 側で slice を
+reverse する」実装を素通しする。それは順序は合うが**返す行の集合が違う**
+(最古 n 件ではなく最新 n 件) ので、ページに穴が空く。実運用のリクエストも
+この形で、paginator の `fetchNewer` は limit 30 を投げる。
+
+各テストは diff (mk-go と TS が一致するか) に加えて**向きそのものを直接
+assert する**。diff だけだと「両方 DESC」でも通ってしまい、TS 側の実装に
+依存してしまうため。
 
 `test_meta_value_parity` の `META_IGNORE` は instance state (mediaProxy host /
 proxyAccountName) のノイズを吸収するためのもの。version-gap 由来の除外は TS image を

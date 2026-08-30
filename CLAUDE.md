@@ -623,7 +623,7 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 ### `diff-e2e` workflow (PR トリガー)
 
 - `.github/workflows/diff-e2e.yml` が `make diff-check` を実行し、mk-go と Misskey TS に
-  同一リクエストを投げて**レスポンスを値レベルで diff** する (#2078 / #2368、endpoint 比較 30 件)。
+  同一リクエストを投げて**レスポンスを値レベルで diff** する (#2078 / #2368、endpoint 比較 35 件)。
 - 守備範囲が他のゲートと違う。本家 backend e2e は「本家のテストが通るか」、shape drift は
   「フィールドの有無・型」、diff-e2e は「**同じ入力に対する値そのもの**」を見る。shape が
   合っていても値が違う類のバグはこれでしか捕まらない。
