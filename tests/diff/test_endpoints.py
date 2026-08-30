@@ -1,7 +1,7 @@
 """Differential endpoint tests (#2089): call the same endpoint on mk-go and TS,
 diff the JSON responses, fail on value-level deviations.
 
-Currently 30 endpoint comparisons (see docs/diff-e2e.md). Extend with more endpoints as
+Currently 35 endpoint comparisons (see docs/diff-e2e.md). Extend with more endpoints as
 the harness matures; each confirmed deviation should become a #2078 sub-issue.
 
 Run via the diff-runner container: `make diff-test`.
@@ -238,10 +238,15 @@ _PNG_1x1 = base64.b64decode(
 )
 
 
-def _upload(c, name="probe.png"):
+def _upload(c, name="probe.png", *, payload: bytes | None = None):
+    """Upload one file, optionally with distinct bytes.
+
+    Drive は md5 で dedup するので、同じ内容を上げ直しても行は増えない。
+    cursor ページングを試すときは payload を変えること (#2765)。
+    """
     resp = c.session.post(
         f"{c.base}/api/drive/files/create",
-        files={"file": (name, _PNG_1x1, "image/png")},
+        files={"file": (name, payload if payload is not None else _PNG_1x1, "image/png")},
         data={"i": c.token},
         timeout=30,
     )
@@ -457,4 +462,150 @@ def test_note_with_poll_parity(mkgo, ts):
     # compare just the packed poll object (the rest is covered by note packing).
     note_ignore = DEFAULT_IGNORE_KEYS | {"userId", "user", "renoteId", "replyId"}
     diffs = diff_json(mk_show.get("poll"), ts_show.get("poll"), ignore_keys=note_ignore, path="$.poll")
+    assert not diffs, format_diffs(diffs)
+
+
+# --- sinceId 単独指定のページング (#2765) ---
+#
+# **upstream の `makePaginationQuery` は sinceId / sinceDate 単独のときだけ ASC で
+# 返す** (`sinceId && !untilId` の分岐)。mk-go は `paginationOrder` で同じ規則を持つ
+# (#2713)。frontend の paginator は「もっと新しいものを読む」(`fetchNewer`) でこの形を
+# 投げるので、向きが逆だとページが飛ぶ。
+#
+# **本家 backend e2e には既に 2 本ある** —
+# `third_party/misskey/packages/backend/test/e2e/timelines.ts` が `users/notes` の
+# sinceId 単独 (ASC) と sinceId+untilId (DESC) を `deepStrictEqual` でリテラル配列に
+# 固定していて、これは mk-go に対しても実行されている (exclude にも
+# known-divergences にも入っていない。`describe.each` の FTT on/off で計 4 実行)。
+#
+# **守られていたのは `users/notes` だけ。** `clips.ts` も `users/clips` /
+# `clips/notes` に sinceId を投げるが、3 箇所とも `res.sort(compareBy(s => s.id))`
+# で**両辺を並べ替えてから**比較しており、集合しか見ていない (順序回帰は落ちない)。
+#
+# **無かったのは mk-go 側で管理するゲート**で、`tests/` / `test/` には 1 本も無い。
+#
+# 各テストは diff (mk-go と TS が一致するか) に加えて **向きそのものを直接
+# assert する**。diff だけだと「両方 DESC」でも通ってしまい、TS 側の実装に
+# 依存してしまうため。
+
+
+def _seed_notes(c, prefix: str, count: int) -> list[str]:
+    """Create `count` public notes in order and return their ids (oldest first).
+
+    count は必須。既定値を持たせると「候補 <= limit」の呼び出しを書きやすくなり、
+    そこでは ASC と DESC が同じ行を返してしまう (下の各テストのコメントを参照)。
+    """
+    ids = []
+    for i in range(count):
+        note = c.json("notes/create", {"text": f"{prefix} {i}", "visibility": "public"})["createdNote"]
+        ids.append(note["id"])
+    return ids
+
+
+def _assert_page(rows, key: str, want: list[str], label: str) -> None:
+    """Assert the page is exactly `want`, in that order."""
+    got = [r[key] for r in rows]
+    assert got == want, f"{label}: sinceId 単独は昇順で最古から返すこと (got={got}, want={want})"
+
+
+def test_home_timeline_since_id_parity(mkgo, ts):
+    # notes/timeline に sinceId を投げると、Redis に ID が揃っていても DB へ
+    # 倒れる (upstream の shouldFallbackToDb が sinceId 非空で常に真、#2720)。
+    # つまりこの経路は、**DB fallback が有効な限り** FTT の有無に関わらず SQL の
+    # 並び順で決まる。`meta.enableFanoutTimelineDbFallback` を off にすると
+    # 空が返る (#2762、docs/divergence.md §5.6)。既定は on なのでこのテストは
+    # 通るが、off の環境では `got=[]` で落ちる (silent pass にはならない)。
+    #
+    # **候補 4 件に対して limit 2 で読む。** 候補 <= limit だと `ORDER BY id ASC`
+    # と `ORDER BY id DESC` が同じ行を返してしまい、「SQL は DESC のまま Go 側で
+    # slice を reverse する」実装を素通ししてしまう。それは順序は合うが**返す行の
+    # 集合が違う** (最古 n 件ではなく最新 n 件) ので、ページに穴が空く。
+    # 実運用のリクエストもこの形で、paginator の fetchNewer は limit 30 を投げる。
+    prefix = "since home probe"
+    pages = {}
+    for c, label in ((mkgo, "mk-go"), (ts, "TS")):
+        ids = _seed_notes(c, prefix, 5)
+        page = c.json("notes/timeline", {"sinceId": ids[0], "limit": 2})
+        _assert_page(page, "text", [f"{prefix} 1", f"{prefix} 2"], f"{label} notes/timeline")
+        pages[label] = page
+
+    diffs = diff_json(pages["mk-go"], pages["TS"], ignore_keys=TIMELINE_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_user_notes_since_id_parity(mkgo, ts):
+    # users/notes は fanout を通らず ListByUserIDFiltered に直行する。
+    # timeline 系とは別の SQL 経路。本家 e2e の timelines.ts も同じ endpoint を
+    # 見ているが、あちらは mk-go 単体の assert で値レベルの突き合わせはしない。
+    prefix = "since usernotes probe"
+    pages = {}
+    for c, label in ((mkgo, "mk-go"), (ts, "TS")):
+        ids = _seed_notes(c, prefix, 5)
+        page = c.json("users/notes", {"userId": c.json("i", {})["id"], "sinceId": ids[0], "limit": 2})
+        _assert_page(page, "text", [f"{prefix} 1", f"{prefix} 2"], f"{label} users/notes")
+        pages[label] = page
+
+    diffs = diff_json(pages["mk-go"], pages["TS"], ignore_keys=TIMELINE_IGNORE)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_drive_folders_since_id_parity(mkgo, ts):
+    # #2713 / PR #2764 が実際に直した経路 (internal/repository/drive_folder.go の
+    # ListByUser)。note 系は元から ASC だったので、そこだけ見ても #2713 の回帰は
+    # 捕まらない。
+    names = [f"since folder probe {i}" for i in range(5)]
+    pages = {}
+    for c, label in ((mkgo, "mk-go"), (ts, "TS")):
+        ids = [c.json("drive/folders/create", {"name": n})["id"] for n in names]
+        page = c.json("drive/folders", {"sinceId": ids[0], "limit": 2})
+        _assert_page(page, "name", names[1:3], f"{label} drive/folders")
+        pages[label] = page
+
+    diffs = diff_json(pages["mk-go"], pages["TS"], ignore_keys=DEFAULT_IGNORE_KEYS | {"parentId"})
+    assert not diffs, format_diffs(diffs)
+
+
+def test_drive_files_since_id_parity(mkgo, ts):
+    # drive/files は **mock からは順序回帰が見えない** 経路。
+    # `internal/testutil/mock_drive.go` の `MockDriveFileRepository.ListByUser` は
+    # sort キーの分岐を持つため sinceID 単独の ASC を実装しておらず、同関数の doc
+    # コメント自身が「**#2766 が終わっても残る**」と書いている。`ListForAdmin` /
+    # `ListSystemFiles` も同様 (#2766 で追跡中)。
+    # **同じファイルの `MockDriveFolderRepository.ListByUser` は #2764 で
+    # SortMockPage に揃っている**ので、drive/folders 側は mock でも見える。
+    #
+    # `sort` を渡さないのは意図的。production も upstream も sort 指定時は
+    # paginationOrder を通らず固定 order を使う (`drive_file.go` の switch)。
+    # frontend の MkDrive も `-createdAt` のとき sort を送らないので実利用と一致する。
+    # **中身を 1 バイトずつ変える。** drive は md5 で dedup するので
+    # (`internal/core/drive/drive_service.go` の Force=false 経路。upstream も同じ)、
+    # 同じ内容を何度上げても行は 1 つしか増えず、cursor が効かない
+    # (実測: ids が全部同じになり sinceId で 0 件になった)。PNG は IEND 以降の
+    # バイトを無視するので、末尾に足せば画像としては有効なまま md5 が変わる。
+    names = [f"since-file-{i}.png" for i in range(4)]
+    pages = {}
+    for c, label in ((mkgo, "mk-go"), (ts, "TS")):
+        ids = [_upload(c, n, payload=_PNG_1x1 + bytes([i])) for i, n in enumerate(names)]
+        ids = [f["id"] for f in ids]
+        page = c.json("drive/files", {"sinceId": ids[0], "limit": 2})
+        _assert_page(page, "name", names[1:3], f"{label} drive/files")
+        pages[label] = page
+
+    file_ignore = DEFAULT_IGNORE_KEYS | {"userId", "user", "folderId", "folder", "blurhash", "properties"}
+    diffs = diff_json(pages["mk-go"], pages["TS"], ignore_keys=file_ignore)
+    assert not diffs, format_diffs(diffs)
+
+
+def test_admin_announcements_since_id_parity(mkgo, ts):
+    # note / drive 以外の repository (internal/repository/announcement.go)。
+    titles = [f"since ann probe {i}" for i in range(5)]
+    pages = {}
+    for c, label in ((mkgo, "mk-go"), (ts, "TS")):
+        ids = [c.json("admin/announcements/create",
+                      {"title": t, "text": "body", "imageUrl": None})["id"] for t in titles]
+        page = c.json("admin/announcements/list", {"sinceId": ids[0], "limit": 2})
+        _assert_page(page, "title", titles[1:3], f"{label} admin/announcements/list")
+        pages[label] = page
+
+    diffs = diff_json(pages["mk-go"], pages["TS"], ignore_keys=DEFAULT_IGNORE_KEYS)
     assert not diffs, format_diffs(diffs)

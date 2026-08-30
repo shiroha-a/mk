@@ -5,7 +5,7 @@ The entitycompat golden gate covers error code/id/status and field *presence*
 ordering, conditional branches). This module compares two API responses
 field-by-field, ignoring instance-specific keys (ids, timestamps, host/uri/url,
 tokens, etc.) so the remaining diffs are value-level parity candidates between
-mk-go (2026.6.0) and Misskey TS (2026.5.4).
+mk-go and Misskey TS.
 
 Pure stdlib so it is unit-testable without the running stack
 (`python3 tests/diff/test_diff_core.py`).

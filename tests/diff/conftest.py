@@ -1,7 +1,7 @@
 """Fixtures for the mk-go <-> Misskey-TS differential e2e harness (#2089).
 
 Two independent instances are reached via env URLs (set by docker-compose.diff.yml):
-  MKGO_URL (mk-go 2026.6.0)  /  TS_URL (misskey/misskey:2026.5.4)
+  MKGO_URL (mk-go)  /  TS_URL (misskey/misskey)。版数は docker-compose.diff.yml が持つ
 
 Each test seeds equivalent state on both, calls the same endpoint, and asserts
 the JSON responses match modulo instance noise (see diff_core).
