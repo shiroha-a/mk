@@ -523,7 +523,8 @@ func (s *Service) confirmMissingOnPrimary(ctx context.Context, candidates []stri
 // では残り続ける** (キーワードが狭いものほど効く)。
 //
 // timeline との本当の非対称は押し出しではなく **DB fallback の有無**。
-// timeline は件数不足時に hybridDBFallback で DB から拾い直せるが、antenna は
+// timeline は件数不足時に hybridDBFallback で DB から拾い直せるが (ただし
+// `meta.enableFanoutTimelineDbFallback` を off にすると止まる、#2762)、antenna は
 // 読み取りが Redis の ID だけで完結する。しかも読み取りは overFetch = limit*2
 // の範囲しか見ないので、その窓が全部宙吊りだとページが空で返り、クライアントは
 // 次の untilId を得られず**行き止まり**になる。
@@ -559,7 +560,9 @@ func (s *Service) confirmMissingOnPrimary(ctx context.Context, candidates []stri
 // `resolve()` → `pruneDangling()` で同じ経路を持ち、レプリカ構成では同じ穴が
 // 開いていた。DB fallback があるから安全、とは言えない — fallback は Hybrid
 // 以外では別メソッド (`ListHomeTimeline` 等) で、いずれも `AllowPartial` で
-// クライアントが無効化でき、しかも Redis list から消えた ID は戻らない。
+// クライアントが無効化でき、global を除く 3 経路は
+// `meta.enableFanoutTimelineDbFallback` を off にすれば運用側でも止まり、
+// しかも Redis list から消えた ID は戻らない。
 //
 // **antenna は ephemeral store を読まない。** timeline 側 (#2718) は ephemeral
 // の lookup 失敗時に何も返さない段を持つが、antenna の zset に ephemeral ID が

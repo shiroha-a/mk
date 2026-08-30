@@ -3,7 +3,7 @@
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
 - 基準: **mk-go 1.2.1** ⇔ Misskey TS `2026.7.0`
-- 最終更新: 2026-08-23
+- 最終更新: 2026-08-31
 
 > ベースラインを固定したのは 1.0.0 (= Misskey TS `2026.7.0` 追従完了時点)。以降の 1.1.x は
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもの。したがって
@@ -455,7 +455,7 @@ cron の多重実行防止は **job option ではなく mkq の job ID 設計**�
 
 | 項目 | 内容 |
 |---|---|
-| Redis timeline / antenna の宙吊り ID 除去 | 読み取り時に解決できなかった ID を Redis から取り除く (timeline は #2715 / PR #2718、antenna は #2719)。**upstream は取り除かない** — timeline (`FanoutTimelineEndpointService`) も antenna (`server/api/endpoints/antennas/notes.ts`、こちらは `FanoutTimelineEndpointService` を通らず生の `note.id IN (...)`) も、Redis から取った ID を hydrate して引けなかったぶんを黙って落とすだけ。`FanoutTimelineService.remove` の呼び出し元は `antennas/remove-note` (ユーザー操作) しか無い。**antenna で効く理由は DB fallback が無いこと。** timeline は件数不足時に DB へ fallback するが、antenna の読み取りは Redis の ID だけで完結する。押し出し自体は両方にある (antenna は `pushNote` が毎回 `ZRemRangeByRank`、timeline は 10% 確率の `LTrim`) が、**マッチが止まった antenna では新着が積まれないので宙吊り ID が残り続ける**。読み取り窓 (`limit*2`) が全部宙吊りだとページが空で返り、クライアントは次の `untilId` を得られず行き止まりになる。解消は 1 リクエストあたり窓 1 つぶん。**除去は filter を掛ける前の集合で判定する** — visibility / mute / block で落ちた note は生きているため。**消す前に primary で存在を確かめる** (`ExistingNoteIDsOnPrimary`、`dbresolver.Write` で primary 固定) — mk-go はリードレプリカを対応しており (`dbReplications`、既定 `false`)、複製前の行は通常の SELECT で引けない。ID に埋め込まれた時刻での猶予判定は使えない: リモート note の ID は AP の `published` から発番されるため「たった今 INSERT されたが ID の時刻は数時間前」が普通に起きる。**timeline 側も同じ確認を通す** (#2757)。DB fallback があるから安全とは言えない — fallback は Hybrid 以外では別メソッドで、`allowPartial: true` を渡すクライアントには走らず、Redis list から消えた ID は戻らない |
+| Redis timeline / antenna の宙吊り ID 除去 | 読み取り時に解決できなかった ID を Redis から取り除く (timeline は #2715 / PR #2718、antenna は #2719)。**upstream は取り除かない** — timeline (`FanoutTimelineEndpointService`) も antenna (`server/api/endpoints/antennas/notes.ts`、こちらは `FanoutTimelineEndpointService` を通らず生の `note.id IN (...)`) も、Redis から取った ID を hydrate して引けなかったぶんを黙って落とすだけ。`FanoutTimelineService.remove` の呼び出し元は `antennas/remove-note` (ユーザー操作) しか無い。**antenna で効く理由は DB fallback が無いこと。** timeline は件数不足時に DB へ fallback するが (`meta.enableFanoutTimelineDbFallback` を off にすると止まる、§5.6)、antenna の読み取りは Redis の ID だけで完結する。押し出し自体は両方にある (antenna は `pushNote` が毎回 `ZRemRangeByRank`、timeline は 10% 確率の `LTrim`) が、**マッチが止まった antenna では新着が積まれないので宙吊り ID が残り続ける**。読み取り窓 (`limit*2`) が全部宙吊りだとページが空で返り、クライアントは次の `untilId` を得られず行き止まりになる。解消は 1 リクエストあたり窓 1 つぶん。**除去は filter を掛ける前の集合で判定する** — visibility / mute / block で落ちた note は生きているため。**消す前に primary で存在を確かめる** (`ExistingNoteIDsOnPrimary`、`dbresolver.Write` で primary 固定) — mk-go はリードレプリカを対応しており (`dbReplications`、既定 `false`)、複製前の行は通常の SELECT で引けない。ID に埋め込まれた時刻での猶予判定は使えない: リモート note の ID は AP の `published` から発番されるため「たった今 INSERT されたが ID の時刻は数時間前」が普通に起きる。**timeline 側も同じ確認を通す** (#2757)。DB fallback があるから安全とは言えない — fallback は Hybrid 以外では別メソッドで、`allowPartial: true` を渡すクライアントには走らず、`enableFanoutTimelineDbFallback` を off にすれば運用側でも止まり (global を除く、§5.6)、Redis list から消えた ID は戻らない |
 | inbox verify-in-worker 化 | HTTP handler は body + signature header を payload 化して即 202、署名 verify / host block / instance touch は worker 側。HTTP 受信 rps が **TS の 2.6〜2.8 倍** |
 | mkq queue driver | BullMQ wire 互換の Go 実装。queue-bench で BullMQ / asynq / mkq を 3-way 比較 (送信 rps は mkq 優位、drain time は asynq 優位。詳細は [queue-bench.md](queue-bench.md)) |
 | AIMD auto-scale worker | per-queue の動的 Resize + Prometheus metrics。worker 現在数 / 範囲 / scale 履歴は admin UI にも出す (#2277) |
@@ -523,6 +523,117 @@ Drive へ保存する。**mk-go はこれを実装しない。** 未実装では
     存在しない。実装しかけたが、キャッシュしない以上 dead code になるため破棄した
   - remote user への `driveCapacityMb` gate — 同様に意味を持たない。`size=0` の link 行は
     使用量に乗らない
+
+## 5.6. timeline の DB fallback を止めるつまみ
+
+`meta.enableFanoutTimelineDbFallback` (admin から切り替え、既定 **on**) は
+**FTT を止めずに、タイムライン取得の DB fallback だけを止める**つまみ。#2762 まで
+mk-go は列を持つだけで読み取り経路から参照しておらず、off にしても何も起きなかった。
+
+`enableFanoutTimeline` とは別物。あちらは push (fanout) と read の両方を止めて
+DB 直行にする。**両方 off でも DB は引く** — upstream も
+`if (!enableFanoutTimeline) return getFromDb()` を endpoint 側に持ち、そこでは
+`useDbFallback` を見ない。
+
+**off は珍しい状態ではない。** 同梱 frontend のセットアップウィザード
+(`MkServerSetupWizard.vue`) は用途に「1 人用」以外を選ぶと
+`enableFanoutTimelineDbFallback: false` を送る (`q_use === 'single'` が条件)。
+**group / open で立てたインスタンスは、誰も設定を触っていなくても off**。
+
+### off にすると何が起きるか
+
+upstream の `FanoutTimelineEndpointService` は `useDbFallback` が偽のとき
+`ps.dbFallback` を `() => Promise.resolve([])` に差し替える。mk-go も同じで、
+`limit` に満たなくてもそのまま返す。
+
+| 状況 | on (既定) | off |
+|---|---|---|
+| Redis に `limit` 以上ある | Redis から返す | 同じ |
+| Redis の持ち分が `limit` 未満 | 足りない分を DB で継ぎ足す | **Redis の分だけ返す** |
+| Redis が空 | 全ページを DB から返す | **空を返す** |
+| `sinceId` を含むページング | 全ページを DB が処理する | **空を返す** |
+
+最後の行が実際に効く。`sinceId` を含むページングは Redis に十分な ID があっても
+必ず DB へ倒れる (`shouldFallbackToDb` が常に真、#2720 で upstream に合わせた)。
+frontend の paginator は `fetchNewer` で `sinceId` を投げる
+(`packages/frontend/src/utility/paginator.ts`) ので、**off にすると「新しい投稿を
+読み込む」操作が空を返す**。timeline JSON cache は cursor 無しのページだけが
+対象なので、この経路には効かない。
+
+実際に効くのは **`realtimeMode` を off にした利用者**。
+`MkStreamingNotesTimeline.vue` は非 realtime のとき `useInterval` と
+`notePosted` イベントから `fetchNewer` を呼ぶので、これが毎回空になり
+**新着 (自分の投稿を含む) が一切追加されなくなる**。既定は
+`realtimeMode: true` (`packages/frontend/src/store.ts`) で、そちらは streaming が
+前置きするため影響は小さい。
+
+負荷を落とすためのつまみであって、無害な最適化ではない。**DB の負荷が実際に
+問題になっているときだけ切ること。**
+
+### 「DB を触らなくなる」わけではない
+
+止まるのは fallback クエリだけ。経路によって残るものが違う。
+
+| 経路 | off でも走る DB アクセス |
+|---|---|
+| 継ぎ足し (Redis に持ち分があり `limit` 未満) | Redis の ID を note に引き直す hydrate (`FindManyByIDsWithUser`) と、解決できなかった ID の primary 確認 (`ExistingNoteIDsOnPrimary`、§5 の宙吊り ID 除去) |
+| 全ページ (Redis 空 / `sinceId` 付き) | timeline service は DB を引かない |
+
+ただし**どちらの経路でも handler 側の loader は毎リクエスト走る**。
+`internal/api/notes/timeline_handler.go` は service を呼ぶ前に mute / block /
+following / channel を読み、いずれもキャッシュを挟んでいない。数え方は
+「handler が発行する repository 呼び出しの本数」:
+
+- home / hybrid: **7 本** (フォロー中チャンネルがあれば `loadFollowedChannelIDs`
+  が内部で `loadMutedChannelIDs` を呼び直すので 8 本)
+- local / global: **5 本**
+- service から戻ったあと `applyMuteBlock` → `notesfilter.LoadMuteBlockSets` が
+  muting / blocking / channelMuting / user_profile を**もう一度** 4 本読む
+
+いずれもログイン時の数。匿名 viewer では各 loader が nil を返して 0 本になる。
+cursor 付きのページは JSON cache も効かないので、off にしても「timeline が DB を
+触らなくなる」とは言えない。
+
+### 件数の埋め方が upstream と違う (off で顕在化する)
+
+upstream は Redis list を `lrange 0 -1` で**丸ごと**取り (`FanoutTimelineService.getMulti`)、
+`limit` 件が埋まるまで**窓の奥へ読み進めながら** hydrate を繰り返す
+(`FanoutTimelineEndpointService.getMiNotes` の while ループ)。mute や解決不能で
+落ちたぶんは、その先の ID を追加で読んで埋める。**この再読み込みは
+`useDbFallback` では止まらない。**
+
+mk-go にこのループは無い。`filterAndSort` が窓を `limit` 件に切り、hydrate と
+filter を 1 回通すだけ (4 経路とも `Get` / `GetMerged` / `GetMulti` から共通で
+呼ばれる)。足りなければ DB へ継ぎ足す設計になっている。
+
+on のときは差が見えない (どちらも `limit` 件を返す)。**off にすると upstream の
+ほうが件数が揃いやすい** — 窓に生きた ID が残っていれば upstream は埋めるが、
+mk-go は先頭 `limit` 件から落ちたぶんをそのまま返す。#2762 でこのつまみが
+効くようになったことで観測可能になった差で、つまみ自体が作ったものではない。
+
+### 対象になる timeline
+
+| timeline | upstream | mk-go |
+|---|---|---|
+| home (`notes/timeline`) | 対象 | 対象 |
+| `local-timeline` | 対象 | 対象 |
+| `hybrid-timeline` | 対象 | 対象 |
+| `global-timeline` | 対象外 (fanout を使わず常に DB) | **対象外** (下記) |
+| `user-list-timeline` | 対象 | 対象外 (常に DB) |
+| `channels/timeline` / `users/notes` / AP outbox | 対象外 (`useDbFallback: true` 固定) | 対象外 (Service を通らない) |
+| `antennas/notes` / `roles/notes` | 対象外 (`FanoutTimelineEndpointService` を通らない) | 対象外 |
+
+`user-list-timeline` だけが逆向きの差。mk-go は list メンバーの visibility を
+SQL に push-down している (#1452) ため、Redis の ID から組み立てる経路を持たない。
+
+**`global-timeline` は mk-go では fanout 経路だが、意図的に gate していない**
+(#2762)。mk-go が GTL を fanout に載せているのは性能上の拡張であって、upstream
+由来のつまみの意味論を変える理由にはならない。gate すると、上記のとおり group /
+open で立てた**既定 off のインスタンス**で、誰も設定を触っていないのに GTL が
+Redis list の窓 (global は `MaxTimelineLength` 固定の 200 件で、meta では変えられ
+ない) を超えて遡れなくなる — `untilId` で窓の外を要求した
+時点で Redis が空になり、fallback も止まるため。upstream の同設定のインスタンスは
+GTL が無傷なので、この食い違いは mk-go 側の退行として出る。
 
 ## 6. セキュリティ関連の差分
 

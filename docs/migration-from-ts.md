@@ -279,6 +279,11 @@ Playwright spec (#744) を **290 ファイル / 39 directory** に育て、PR �
 
 - これは期待通りの挙動。新規ノートは即時にタイムラインへ反映される
 - 既存ノートは初回のDBフォールバッククエリ実行後に表示される
+- **`enableFanoutTimelineDbFallback` が off だと表示されない** (global timeline
+  を除く。あちらは対象外)**。** セットアップ
+  ウィザードで「1 人用」以外を選んだインスタンスは既定で off になっている。
+  Redis の timeline list が空の状態 (= 移行直後) で最も影響が大きい。詳細は
+  [divergence.md §5.6](divergence.md#56-timeline-の-db-fallback-を止めるつまみ)
 
 ### ファイルアップロードが `CREDENTIAL_REQUIRED` で失敗する
 
