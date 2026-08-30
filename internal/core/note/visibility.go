@@ -14,6 +14,32 @@ import (
 // relationship check; pass nil to skip the check (in which case "followers"
 // notes are treated as invisible to non-author viewers).
 func CanSeeNote(viewer *model.User, n *model.Note, followingChecker repository.FollowingRepository) bool {
+	return CanSeeNoteFunc(viewer, n, followsFunc(followingChecker))
+}
+
+// followsFunc adapts a FollowingRepository into the follow predicate
+// CanSeeNoteFunc takes. nil repo yields nil (= 判定不能 = fail-closed)。
+func followsFunc(followingChecker repository.FollowingRepository) func(viewerID, authorID string) bool {
+	if followingChecker == nil {
+		return nil
+	}
+	return func(viewerID, authorID string) bool {
+		ok, err := followingChecker.Exists(viewerID, authorID)
+		return err == nil && ok
+	}
+}
+
+// CanSeeNoteFunc is CanSeeNote with the follow lookup supplied as a function so
+// callers that already know the answer can avoid the query.
+//
+// **判定そのものは 1 実装に閉じる** (#2752)。antenna の fan-out は note 1 件を
+// アクティブ antenna 全件に対して評価するので、repo を渡すと followers note で
+// antenna 数ぶんの `Exists` が逐次で飛ぶ。呼び出し側が memo 済みの述語を渡せる
+// ようにするための入口で、可視性のルールをここ以外に書かないための形。
+//
+// follows が nil なら follow 判定は不能 = followers note は投稿者本人以外に
+// 見せない (従来の followingChecker == nil と同じ fail-closed)。
+func CanSeeNoteFunc(viewer *model.User, n *model.Note, follows func(viewerID, authorID string) bool) bool {
 	if n == nil {
 		return false
 	}
@@ -40,14 +66,10 @@ func CanSeeNote(viewer *model.User, n *model.Note, followingChecker repository.F
 		if slices.Contains(n.Mentions, viewer.ID) {
 			return true
 		}
-		if followingChecker == nil {
+		if follows == nil {
 			return false
 		}
-		ok, err := followingChecker.Exists(viewer.ID, n.UserID)
-		if err != nil {
-			return false
-		}
-		return ok
+		return follows(viewer.ID, n.UserID)
 	case model.NoteVisibilitySpecified:
 		// upstream shouldHideNote / isVisibleForMe は specified で visibleUserIds
 		// だけを見る。mentions は判定材料にしない (本文で @ された だけの相手に

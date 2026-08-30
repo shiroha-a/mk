@@ -160,3 +160,20 @@ func TestClampVisibilityForReply(t *testing.T) {
 		})
 	}
 }
+
+// **エラー時に true を返す repo で見ること。** 既存の
+// TestCanSeeNote_FollowersErrorTreatedAsHidden の stub は `(false, err)` を
+// 返すので、`err == nil && ok` を `ok` に縮める変異を区別できない (#2752 で
+// CanSeeNoteFunc へ切り出した際にここを畳んだ)。DB エラー時に followers note
+// が漏れる形を固定する。
+type trueWithErrorFollowingRepo struct{ repository.FollowingRepository }
+
+func (trueWithErrorFollowingRepo) Exists(_, _ string) (bool, error) {
+	return true, errors.New("db down")
+}
+
+func TestCanSeeNote_FollowLookupErrorFailsClosed(t *testing.T) {
+	n := &model.Note{UserID: "author", Visibility: model.NoteVisibilityFollowers}
+	assert.False(t, note.CanSeeNote(&model.User{ID: "viewer"}, n, trueWithErrorFollowingRepo{}),
+		"follow 判定が失敗したら followers note は見せない")
+}

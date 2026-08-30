@@ -196,8 +196,10 @@ renote を作らずに publish するが、その手前で `apNoteService.resolv
    `pushNote` は先に走るため **DB から引けない ID が antenna の ZSET (上限
    200) を埋める**。読み取り側は DB しか見ないので、幽霊 ID のぶんだけ本来
    載る note が押し出される (#2719 と同じ構造)。**この設定は既定 `false`**
-2. 量が最も多いのがこの経路で、`antenna.Service.OnNoteCreated` は note 1 件ごとに
-   `ListAllActive()` を引く。リレーの firehose 全量に載せるとコストが読めない
+2. 量が最も多いのがこの経路。`ListAllActive` は #2752 でキャッシュしたので DB
+   クエリは消えたが、`matchNote` はアクティブ antenna 全件に対して評価され、
+   ヒットすれば Redis への push が走る。リレーの firehose 全量に載せると
+   コストが読めない
 
 したがって既定構成では 2 番目だけが理由になる。**リレー投稿を antenna で拾いたい
 運用がある場合は、この判断を見直す余地がある。**

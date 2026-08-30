@@ -228,8 +228,9 @@ type TimelineFanoutHook interface {
 // 見ないので、幽霊 ID のぶんだけ本来載る note が押し出される。
 //
 // 既定構成 (ephemeral 無効) ではリレー投稿も DB に入るので上記は起きない。
-// それでも外すのは量で、OnNoteCreated は note 1 件ごとに ListAllActive() を
-// 引く (#2743 で対象外とした。upstream は同じ位置にキャッシュを持つ)。
+// それでも外すのは量。#2752 で ListAllActive はキャッシュしたので DB クエリは
+// 消えたが、`matchNote` はアクティブ antenna 全件に対して評価され、ヒットすれば
+// Redis への push が走る。リレーの firehose 全量をこれに通すコストは読めない。
 //
 // note / author は read-only。詳細は本ファイル上部の "Hook mutation contract"。
 type AntennaHook interface {

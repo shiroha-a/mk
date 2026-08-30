@@ -640,17 +640,27 @@ func (s *Service) ListByUser(userID string) ([]*model.Antenna, error) {
 // untilID / sinceID が空なら全 range を見て最新 N 件を返す (旧挙動互換)。
 // パース失敗時は安全側に bound を緩める (= 全 range)。
 func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit int, sinceID, untilID string) ([]string, error) {
-	if _, err := s.Show(ownerID, antennaID); err != nil {
-		return nil, err
+	a, showErr := s.Show(ownerID, antennaID)
+	if showErr != nil {
+		return nil, showErr
 	}
 	// 本家 antennas/notes.ts は notes 取得のたびに isActive=true + lastUsedAt=now
 	// を bump し、使用中の antenna が clean cron (#1604) で deactivate されないよう
 	// にする。非アクティブだった antenna はここで再活性化される。best-effort write
 	// で、失敗しても timeline 取得は続行する (この file の他の best-effort write と
-	// 同様)。OnNoteCreated は毎回 ListAllActive を読むため、再活性化は次の note 配信
-	// から即座に反映され、本家の antennaUpdated 内部イベントに相当する cache 無効化
-	// は不要。
-	_ = s.repo.UpdateFields(antennaID, map[string]any{"isActive": true, "lastUsedAt": s.clock()})
+	// 同様)。
+	//
+	// **isActive は非アクティブだったときだけ書く** (#2752)。書き込みは
+	// CachedAntennaRepository の invalidate を撃つので、無条件に書くと
+	// **antenna タイムラインを開くたびに全 worker の cache が落ちる**。それは
+	// 「antenna が実際に使われている構成」= cache が最も要る構成でこそ効く。
+	// upstream も同じ理由で `needPublishEvent = !antenna.isActive` の条件付きで
+	// しか `antennaUpdated` を publish しない (antennas/notes.ts:89-98)。
+	fields := map[string]any{"lastUsedAt": s.clock()}
+	if !a.IsActive {
+		fields["isActive"] = true
+	}
+	_ = s.repo.UpdateFields(antennaID, fields)
 	// この antenna を読んだので未読行を消す (#2406)。
 	//
 	// **これが無いと `hasUnreadAntenna` が一度 true になると永久に true のまま**
@@ -833,8 +843,13 @@ func (s *Service) matchNote(a *model.Antenna, n *model.Note, author *model.User,
 	// visibility gate: antenna owner を viewer とみなして CanSeeNote 判定する。
 	// followingRepo 未配線時は CanSeeNote の semantics 通り `followers` を
 	// 投稿者本人以外には見せない fail-closed (= matchSource `home` と同じ方針)。
+	//
+	// **follow 判定は memo 経由で渡す** (#2752)。repo を直接渡すと、followers
+	// 可視の note では**アクティブ antenna 数ぶんの `Exists` が逐次で飛ぶ**
+	// (memo が効くのは下の matchSource 側だけだった)。同じ note の fan-out 中は
+	// owner ごとに 1 回に畳む。
 	owner := &model.User{ID: a.UserID}
-	if !corenote.CanSeeNote(owner, n, s.followingRepo) {
+	if !corenote.CanSeeNoteFunc(owner, n, memo.followsFunc(s)) {
 		return false
 	}
 	// followers visibility かつ owner != author で CanSeeNote を通った場合、
@@ -883,6 +898,24 @@ func newMatchMemo() *matchMemo {
 	return &matchMemo{follows: map[string]bool{}, lists: map[string]map[string]struct{}{}}
 }
 
+// followsFunc exposes ownerFollows as the predicate CanSeeNoteFunc takes.
+//
+// followingRepo 未配線なら nil を返す。CanSeeNoteFunc 側はそれを「判定不能」と
+// して followers note を fail-closed にするので、repo を直接渡していたときと
+// 同じ挙動になる。
+//
+// **この nil 分岐は二重の防御で、外しても挙動は変わらない** (等価変異)。
+// ownerFollows 自身が followingRepo 未配線で false を返すため。契約を明示する
+// ために残している。
+func (m *matchMemo) followsFunc(s *Service) func(ownerID, authorID string) bool {
+	if s.followingRepo == nil {
+		return nil
+	}
+	return func(ownerID, authorID string) bool {
+		return m.ownerFollows(s, ownerID, authorID)
+	}
+}
+
 // ownerFollows reports whether ownerID follows authorID, caching the answer for
 // the lifetime of one note fan-out.
 func (m *matchMemo) ownerFollows(s *Service, ownerID, authorID string) bool {
@@ -893,12 +926,18 @@ func (m *matchMemo) ownerFollows(s *Service, ownerID, authorID string) bool {
 		ok, err := s.followingRepo.Exists(ownerID, authorID)
 		return err == nil && ok
 	}
-	if v, hit := m.follows[ownerID]; hit {
+	// **キーは (owner, author) の対にする** (#2752)。以前は ownerID だけで
+	// 足りていたが、それは唯一の呼び出し元 (matchSource) が常に author.ID を
+	// 渡していたため。可視性 gate から `n.UserID` を渡すようになったので、
+	// **同じキーに 2 種類の質問が載る**形になった。今はどの呼び出し元でも
+	// `author.ID == n.UserID` だが、そこは型で守られていない。
+	key := ownerID + "\x00" + authorID
+	if v, hit := m.follows[key]; hit {
 		return v
 	}
 	ok, err := s.followingRepo.Exists(ownerID, authorID)
 	v := err == nil && ok
-	m.follows[ownerID] = v
+	m.follows[key] = v
 	return v
 }
 
@@ -1106,6 +1145,11 @@ func (s *Service) OnMoveAccount(src, dst *model.User) {
 	if src == nil || dst == nil || s.repo == nil {
 		return
 	}
+	// #2752 でキャッシュを挟んだが、**通常経路では取りこぼさない**。antenna の
+	// 作成・更新・削除はすべて invalidate + cross-worker publish を通るので、
+	// 直前に作られた antenna もローカルでは確実に、他 worker でも publish 伝播後
+	// には見える。古いスナップショットを見るのは pubsub を落としたときと FK
+	// cascade 経由の削除だけで、そこは TTL (1 分) が上界になる。
 	antennas, err := s.repo.ListAllActive()
 	if err != nil {
 		slog.Warn("antenna: list for move failed", "srcID", src.ID, "dstID", dst.ID, "err", err)

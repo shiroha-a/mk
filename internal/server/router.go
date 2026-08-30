@@ -202,7 +202,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	}
 	channelRepo := repository.NewChannelRepository(s.db)
 	channelFollowingRepo := repository.NewChannelFollowingRepository(s.db)
-	antennaRepo := repository.NewAntennaRepository(s.db)
+	// antenna は inbound note 1 件ごとに ListAllActive が引かれる (#2752)。
+	// プロセス内キャッシュを挟み、書き込みで invalidate する。cross-worker の
+	// 伝播は下の internal:antennaUpdated (meta と同じ形)。
+	cachedAntenna := repository.NewCachedAntennaRepository(repository.NewAntennaRepository(s.db))
+	var antennaRepo repository.AntennaRepository = cachedAntenna
 	clipRepo := repository.NewClipRepository(s.db)
 	clipNoteRepo := repository.NewClipNoteRepository(s.db)
 	pageRepo := repository.NewPageRepository(s.db)
@@ -2633,6 +2637,30 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	internalPubSub.Subscribe(context.Background(), "metaUpdated", func([]byte) {
 		cachedMeta.Invalidate()
 		metaHandler.InvalidateResponseCache()
+	})
+
+	// #2752: antenna の cross-worker cache invalidation。書き込んだ worker が
+	// internal:antennaUpdated を publish し、各 worker が自プロセスの
+	// CachedAntennaRepository を invalidate する。upstream の
+	// `antennaCreated` / `antennaUpdated` / `antennaDeleted` 内部イベントに相当
+	// (upstream は 3 種に分けているが、mk-go の cache は「active な全件」しか
+	// 持たないのでどれも全体 invalidate になる。分ける利得が無い)。
+	//
+	// **publish 側は書き込んだ worker 自身も invalidate 済み。** hook は
+	// CachedAntennaRepository.afterWrite が invalidate してから呼ぶ。
+	//
+	// **この配線自体はテストが無い** (internal/server は CI カバレッジ 0% 例外で、
+	// e2e にも antennaUpdated を見るものが無い)。channel 名の typo / hook の
+	// 呼び忘れ / Subscribe の抜けは「他 worker に最大 1 分反映されない」形にしか
+	// ならず、TTL が症状を覆い隠す。直上の metaUpdated も同じ posture なので
+	// 既存パターンからの逸脱ではないが、**TTL を伸ばすならここを先に検証すること**。
+	cachedAntenna.SetInvalidationHook(func() {
+		if err := internalPubSub.Publish(context.Background(), "antennaUpdated", struct{}{}); err != nil {
+			slog.Warn("antenna: publish antennaUpdated failed", "err", err)
+		}
+	})
+	internalPubSub.Subscribe(context.Background(), "antennaUpdated", func([]byte) {
+		cachedAntenna.Invalidate()
 	})
 
 	// pollVoted / reacted / unreacted / deleted を noteStream:<id> に publish

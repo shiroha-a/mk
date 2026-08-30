@@ -92,9 +92,11 @@ func (r *antennaRepository) DeactivateUnusedSince(cutoff time.Time) (int64, erro
 	return res.RowsAffected, res.Error
 }
 
-// ListAllActive returns every antenna with isActive=true. NoteCreate イベント
-// ごとに走査するため、antenna 数が膨大な場合は将来 page 単位での走査に切り替え
-// ることになる。Phase 4.3 ではシンプルに all を返す。
+// ListAllActive returns every antenna with isActive=true.
+//
+// **この層は毎回 DB を引く。** note ごとの呼び出しは #2752 で
+// CachedAntennaRepository が吸収するので、ここに直接叩く経路を足すときは
+// キャッシュを迂回することになる点に注意する (router は wrapper を配線する)。
 func (r *antennaRepository) ListAllActive() ([]*model.Antenna, error) {
 	var rows []*model.Antenna
 	if err := r.db.Where("\"isActive\" = ?", true).

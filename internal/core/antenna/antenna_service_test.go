@@ -356,6 +356,44 @@ func TestNotes_BumpsLastUsedAtAndReactivates(t *testing.T) {
 	assert.Equal(t, fixed, repo.Antennas["a1"].LastUsedAt, "notes 取得で lastUsedAt が now に bump")
 }
 
+// #2752: **すでにアクティブな antenna では `isActive` を書かない。**
+//
+// 書き込みは CachedAntennaRepository の invalidate を撃つので、無条件に書くと
+// antenna タイムラインを開くたびに全 worker の cache が落ちる (= cache が最も
+// 要る構成でこそ効かない)。upstream も `needPublishEvent = !antenna.isActive` の
+// 条件付きでしか antennaUpdated を publish しない (antennas/notes.ts:90,96-98)。
+//
+// **lastUsedAt は毎回書く。** 書かないと #1604 の clean cron が使用中の antenna
+// を deactivate する。
+func TestNotes_ActiveAntennaBumpsOnlyLastUsedAt(t *testing.T) {
+	svc, repo := newSvc(t)
+	fixed := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	svc.SetClock(func() time.Time { return fixed })
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1", IsActive: true, LastUsedAt: old}
+
+	_, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+
+	require.NotNil(t, repo.LastUpdates, "lastUsedAt は毎回 bump する (clean cron 対策)")
+	assert.Equal(t, fixed, repo.Antennas["a1"].LastUsedAt)
+	_, hasIsActive := repo.LastUpdates["isActive"]
+	assert.False(t, hasIsActive, "既にアクティブなら isActive は書かない (cache を落とさない)")
+	assert.Len(t, repo.LastUpdates, 1, "書くのは lastUsedAt だけ")
+}
+
+// 非アクティブだったときは isActive も書く (= cache を落とす経路)。
+func TestNotes_InactiveAntennaAlsoWritesIsActive(t *testing.T) {
+	svc, repo := newSvc(t)
+	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1", IsActive: false}
+
+	_, err := svc.Notes(context.Background(), "u1", "a1", 10, "", "")
+	require.NoError(t, err)
+
+	require.NotNil(t, repo.LastUpdates)
+	assert.Equal(t, true, repo.LastUpdates["isActive"], "再活性化は isActive を書いて cache を落とす")
+}
+
 func TestNotes_LimitClamping(t *testing.T) {
 	svc, repo := newSvc(t)
 	repo.Antennas["a1"] = &model.Antenna{ID: "a1", UserID: "u1"}
