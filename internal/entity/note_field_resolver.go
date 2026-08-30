@@ -102,25 +102,85 @@ func (r *NoteFieldResolver) ResolveFiles(notes []NoteEntity) {
 	if r == nil || r.driveFile == nil {
 		return
 	}
-	var allIDs []string
-	for i := range notes {
-		allIDs = appendNoteFileIDs(allIDs, &notes[i])
-	}
-	if len(allIDs) == 0 {
+	fileMap, ok := r.fetchNoteFiles(notes)
+	if !ok {
 		return
 	}
-	files, err := r.driveFile.FindByIDs(allIDs)
-	if err != nil || len(files) == 0 {
-		return
-	}
-	fileMap := make(map[string]*model.DriveFile, len(files))
-	for _, f := range files {
-		fileMap[f.ID] = f
+	files := make([]*model.DriveFile, 0, len(fileMap))
+	for _, f := range fileMap {
+		files = append(files, f)
 	}
 	folderCache, userCache := r.resolveFileOwners(files)
 	for i := range notes {
 		r.populateNoteFiles(&notes[i], fileMap, folderCache, userCache)
 	}
+}
+
+// ResolveFilesShallow is ResolveFiles without the folder / owner embeds: it
+// packs each file with PackDriveFile, leaving `folder` / `user` as null.
+//
+// **Web Push 用** (#2737)。upstream の push payload は
+// `driveFileEntityService.packManyByIds` (オプション無し) を通り、folder / user を
+// embed しない。**その 1 点で揃える**もので、shape 全体が upstream と同じに
+// なるわけではない — upstream は `withUser` falsy のとき `userId` も null に
+// するし、`webpublicUrl` は mk-go 拡張 (entity/drive.go の doc 参照)。
+//
+// 加えて payload が小さい。実測 (現実的な長さの URL / blurhash / 代替テキストを
+// 持つ画像) で 16 ファイルぶんの files 配列が 13.1 KB / 18.1 KB
+// (shallow / relations 込み)。note 全体はどちらも同額の overhead が乗るだけ
+// (この fixture では +569 B) なので、差は files 配列の差そのもの。Web Push の
+// 実質上限 (約 4 KB) に対してはどちらも超えるが、超えるまでの余裕が違う。
+// folder / owner の追加クエリ 2 本も省ける。
+func (r *NoteFieldResolver) ResolveFilesShallow(notes []NoteEntity) {
+	if r == nil || r.driveFile == nil {
+		return
+	}
+	fileMap, ok := r.fetchNoteFiles(notes)
+	if !ok {
+		return
+	}
+	for i := range notes {
+		r.populateNoteFilesShallow(&notes[i], fileMap)
+	}
+}
+
+// fetchNoteFiles collects the file IDs of the slice (including embeds) and
+// batch-fetches the rows. ok=false means there is nothing to populate.
+func (r *NoteFieldResolver) fetchNoteFiles(notes []NoteEntity) (map[string]*model.DriveFile, bool) {
+	var allIDs []string
+	for i := range notes {
+		allIDs = appendNoteFileIDs(allIDs, &notes[i])
+	}
+	if len(allIDs) == 0 {
+		return nil, false
+	}
+	files, err := r.driveFile.FindByIDs(allIDs)
+	if err != nil || len(files) == 0 {
+		return nil, false
+	}
+	fileMap := make(map[string]*model.DriveFile, len(files))
+	for _, f := range files {
+		fileMap[f.ID] = f
+	}
+	return fileMap, true
+}
+
+// populateNoteFilesShallow mirrors populateNoteFiles without folder / owner.
+func (r *NoteFieldResolver) populateNoteFilesShallow(n *NoteEntity, fileMap map[string]*model.DriveFile) {
+	if n == nil {
+		return
+	}
+	packed := make([]any, 0, len(n.FileIDs))
+	for _, fid := range n.FileIDs {
+		f, ok := fileMap[fid]
+		if !ok {
+			continue
+		}
+		packed = append(packed, PackDriveFile(f, r.idGen))
+	}
+	n.Files = packed
+	r.populateNoteFilesShallow(n.Renote, fileMap)
+	r.populateNoteFilesShallow(n.Reply, fileMap)
 }
 
 // ResolveViewerFields fills MyReaction (when viewer != nil) and Channel on

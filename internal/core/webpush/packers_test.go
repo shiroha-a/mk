@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestUserRepoPacker_Found(t *testing.T) {
@@ -48,7 +49,7 @@ func TestNoteRepoPacker_NilReceiver(t *testing.T) {
 
 func TestNoteRepoPacker_NilRepo(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
-	p := webpush.NewNoteRepoPacker(nil, idGen, nil)
+	p := webpush.NewNoteRepoPacker(nil, idGen, nil, nil)
 	_, ok := p.PackNoteByID("x", "viewer")
 	assert.False(t, ok)
 }
@@ -66,7 +67,7 @@ func TestNoteRepoPacker_Found(t *testing.T) {
 	n.Text = &text
 	repo.Notes[n.ID] = n
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, nil)
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, nil)
 	out, ok := p.PackNoteByID(n.ID, "viewer") // public -> visible to any viewer
 	assert.True(t, ok)
 	assert.Equal(t, n.ID, out["id"])
@@ -76,7 +77,7 @@ func TestNoteRepoPacker_Found(t *testing.T) {
 func TestNoteRepoPacker_NotFound(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	repo := testutil.NewMockNoteRepository()
-	p := webpush.NewNoteRepoPacker(repo, idGen, nil)
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, nil)
 	_, ok := p.PackNoteByID("missing", "viewer")
 	assert.False(t, ok)
 }
@@ -107,7 +108,7 @@ func TestNoteRepoPacker_FollowersHiddenFromNonFollower(t *testing.T) {
 	follow := testutil.NewMockFollowingRepository()
 	n := seedNote(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	_, ok := p.PackNoteByID(n.ID, "stranger") // does not follow author, not author
 	assert.False(t, ok, "followers note must be dropped from a non-follower recipient")
 }
@@ -119,7 +120,7 @@ func TestNoteRepoPacker_FollowersVisibleToFollower(t *testing.T) {
 	n := seedNote(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 	seedFollow(follow, "viewer", "author")
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	_, ok := p.PackNoteByID(n.ID, "viewer")
 	assert.True(t, ok, "followers note must be visible to a follower recipient")
 }
@@ -130,7 +131,7 @@ func TestNoteRepoPacker_FollowersVisibleToAuthor(t *testing.T) {
 	follow := testutil.NewMockFollowingRepository()
 	n := seedNote(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	// self-notification (reaction / pollEnded etc.): author must see their own note.
 	_, ok := p.PackNoteByID(n.ID, "author")
 	assert.True(t, ok, "author recipient must always see their own note")
@@ -141,7 +142,7 @@ func TestNoteRepoPacker_SpecifiedMembership(t *testing.T) {
 	repo := testutil.NewMockNoteRepository()
 	n := seedNote(repo, idGen, "author", model.NoteVisibilitySpecified, []string{"viewer"})
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, nil)
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, nil)
 	_, ok := p.PackNoteByID(n.ID, "viewer")
 	assert.True(t, ok, "specified note must be visible to a listed recipient")
 	_, ok = p.PackNoteByID(n.ID, "stranger")
@@ -153,7 +154,7 @@ func TestNoteRepoPacker_NilFollowingRepoFailClosed(t *testing.T) {
 	repo := testutil.NewMockNoteRepository()
 	n := seedNote(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, nil) // followingRepo unwired
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, nil) // followingRepo unwired
 	_, ok := p.PackNoteByID(n.ID, "viewer")
 	assert.False(t, ok, "nil followingRepo must fail closed for followers notes")
 }
@@ -164,7 +165,7 @@ func TestNoteRepoPacker_BlankViewerFailClosed(t *testing.T) {
 	follow := testutil.NewMockFollowingRepository()
 	n := seedNote(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	_, ok := p.PackNoteByID(n.ID, "") // blank notifiee
 	assert.False(t, ok, "blank viewerID must fail closed for followers notes")
 }
@@ -220,7 +221,7 @@ func TestNoteRepoPacker_EmbedRenoteHiddenFromNonFollower(t *testing.T) {
 	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "stranger") // can see public top, not author, not follower
 	assert.True(t, ok, "public top-level note must be delivered")
 	embed := embedOf(out, "renote")
@@ -236,7 +237,7 @@ func TestNoteRepoPacker_EmbedRenoteVisibleToFollower(t *testing.T) {
 	top := seedRenoteOf(repo, idGen, target)
 	seedFollow(follow, "viewer", "author")
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "viewer")
 	assert.True(t, ok)
 	embed := embedOf(out, "renote")
@@ -251,7 +252,7 @@ func TestNoteRepoPacker_EmbedRenoteVisibleToEmbedAuthor(t *testing.T) {
 	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	// recipient == embed author: own-note short-circuit keeps it visible.
 	out, ok := p.PackNoteByID(top.ID, "author")
 	assert.True(t, ok)
@@ -266,7 +267,7 @@ func TestNoteRepoPacker_EmbedSpecifiedMembership(t *testing.T) {
 	top := seedRenoteOf(repo, idGen, target)
 
 	// nil followingRepo: specified needs no follow query.
-	p := webpush.NewNoteRepoPacker(repo, idGen, nil)
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, nil)
 	out, ok := p.PackNoteByID(top.ID, "viewer")
 	assert.True(t, ok)
 	assert.NotEqual(t, true, embedOf(out, "renote")["isHidden"], "specified embed visible to a listed recipient")
@@ -283,7 +284,7 @@ func TestNoteRepoPacker_EmbedReplyHidden(t *testing.T) {
 	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 	top := seedReplyOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "stranger")
 	assert.True(t, ok)
 	assert.Equal(t, true, embedOf(out, "reply")["isHidden"], "followers reply embed must be blanked for a non-follower recipient")
@@ -295,7 +296,7 @@ func TestNoteRepoPacker_EmbedNilFollowingRepoFailClosed(t *testing.T) {
 	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, nil) // followingRepo unwired
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, nil) // followingRepo unwired
 	out, ok := p.PackNoteByID(top.ID, "viewer")
 	assert.True(t, ok, "public top-level note still delivered")
 	assert.Equal(t, true, embedOf(out, "renote")["isHidden"], "nil followingRepo must fail closed for the followers embed")
@@ -308,7 +309,7 @@ func TestNoteRepoPacker_EmbedBlankViewerFailClosed(t *testing.T) {
 	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	// blank notifiee: CanSeeNote still passes (public top), but the embed
 	// gate has no viewer so the followers embed is blanked.
 	out, ok := p.PackNoteByID(top.ID, "")
@@ -323,7 +324,7 @@ func TestNoteRepoPacker_EmbedPublicNotHidden(t *testing.T) {
 	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityPublic, nil)
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "stranger")
 	assert.True(t, ok)
 	embed := embedOf(out, "renote")
@@ -343,7 +344,7 @@ func TestNoteRepoPacker_EmbedRenoteRenoteHiddenFromNonFollower(t *testing.T) {
 	quote := seedRenoteOf(repo, idGen, target)                                            // depth-1 public quote (quote.Renote=target)
 	top := seedRenoteOf(repo, idGen, quote)                                               // depth-0 public boost (top.Renote=quote)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "stranger") // public top, not author, not follower
 	assert.True(t, ok, "public top-level note must be delivered")
 	renote := embedOf(out, "renote")
@@ -363,7 +364,7 @@ func TestNoteRepoPacker_EmbedRenoteRenoteVisibleToFollower(t *testing.T) {
 	top := seedRenoteOf(repo, idGen, quote)
 	seedFollow(follow, "viewer", "author")
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "viewer")
 	assert.True(t, ok)
 	rr := embedOf(embedOf(out, "renote"), "renote")
@@ -383,7 +384,7 @@ func TestNoteRepoPacker_EmbedFollowersOnlyBeforeDowngrade(t *testing.T) {
 	target.User.MakeNotesFollowersOnlyBefore = &window
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "stranger")
 	assert.True(t, ok)
 	assert.Equal(t, true, embedOf(out, "renote")["isHidden"], "downgraded public embed must be blanked for a non-follower")
@@ -412,7 +413,7 @@ func TestNoteRepoPacker_EmbedFollowQueryErrorFailClosed(t *testing.T) {
 	target := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityFollowers, nil)
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "viewer")
 	assert.True(t, ok, "public top-level note still delivered")
 	assert.Equal(t, true, embedOf(out, "renote")["isHidden"], "follow query error must fail closed for the followers embed")
@@ -428,7 +429,7 @@ func TestNoteRepoPacker_EmbedRequireSigninHiddenFromAnon(t *testing.T) {
 	target.User.RequireSigninToViewContents = true
 	top := seedRenoteOf(repo, idGen, target)
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(top.ID, "") // anonymous notifiee
 	assert.True(t, ok)
 	assert.Equal(t, true, embedOf(out, "renote")["isHidden"], "requireSigninToViewContents embed must be blanked for an anonymous recipient")
@@ -446,9 +447,141 @@ func TestNoteRepoPacker_NoEmbedNoQuery(t *testing.T) {
 	}
 	repo.Notes[n.ID] = n
 
-	p := webpush.NewNoteRepoPacker(repo, idGen, follow)
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
 	out, ok := p.PackNoteByID(n.ID, "viewer")
 	assert.True(t, ok)
 	_, hasRenote := out["renote"]
 	assert.False(t, hasRenote, "note without an embed must not gain a renote key")
+}
+
+// #2737: 本文が無く画像だけの note は、push 本文の要約が空文字になっていた。
+// 要約 (notesummary.Get) は note["files"] の件数を見て `(📎N)` を足すので、
+// packer が files を埋めないと upstream の `(📎1)` に対して空文字になる。
+func TestNoteRepoPacker_ResolvesFilesForSummary(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	drive := testutil.NewMockDriveFileRepository()
+
+	n := &model.Note{
+		ID:         idGen.Generate(time.Now()),
+		UserID:     "u1",
+		Visibility: model.NoteVisibilityPublic,
+		FileIDs:    model.StringArray{"f1"},
+	}
+	repo.Notes[n.ID] = n
+	owner := "u1"
+	drive.Files["f1"] = &model.DriveFile{
+		ID: "f1", UserID: &owner, Name: "a.png", Type: "image/png",
+		URL: "https://example.com/a.png",
+	}
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, drive)
+	out, ok := p.PackNoteByID(n.ID, "viewer")
+	require.True(t, ok)
+
+	files, _ := out["files"].([]any)
+	require.Len(t, files, 1, "files が埋まっていないと要約から (📎N) が落ちる")
+
+	// 実際に push 本文になる形まで通して確認する。
+	body := webpush.TruncateBody(webpush.TypeNotification, map[string]any{
+		"type": "mention", "note": out,
+	})
+	note, _ := body["note"].(map[string]any)
+	// 要約は upstream 同様 trim されるので、先頭の空白は残らない。
+	assert.Equal(t, "(\U0001F4CE1)", note["text"], "upstream は `(📎1)` を出す")
+}
+
+// files の packing は upstream の packManyByIds (オプション無し) と同じく
+// folder / user を埋めない。埋めると 1 件あたり約 300 B 増え、上限 (約 4 KB)
+// に近づくだけで push payload では使われない。
+//
+// **ここで固定できるのは結果の shape だけ。** packer は folder / owner の
+// lookup を渡していないので、深い方の ResolveFiles に変えても同じ結果になる
+// (等価変異)。両者の差は entity 側の
+// TestNoteFieldResolver_ResolveFilesShallow_OmitsFolderAndOwner が
+// lookup を配線した状態で固定している。
+func TestNoteRepoPacker_FilesOmitFolderAndOwnerEmbeds(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	drive := testutil.NewMockDriveFileRepository()
+
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1",
+		Visibility: model.NoteVisibilityPublic, FileIDs: model.StringArray{"f1"},
+	}
+	repo.Notes[n.ID] = n
+	owner, folder := "u1", "folder1"
+	drive.Files["f1"] = &model.DriveFile{
+		ID: "f1", UserID: &owner, FolderID: &folder,
+		Name: "a.png", Type: "image/png", URL: "https://example.com/a.png",
+	}
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, drive)
+	out, _ := p.PackNoteByID(n.ID, "viewer")
+	files, _ := out["files"].([]any)
+	require.Len(t, files, 1)
+	f, _ := files[0].(map[string]any)
+	assert.Nil(t, f["folder"], "folder embed は載せない")
+	assert.Nil(t, f["user"], "owner embed は載せない")
+	assert.Equal(t, "folder1", f["folderId"], "ID 自体は upstream と同じく出す")
+}
+
+// drive lookup が未配線でも panic せず、files は空配列のまま。
+func TestNoteRepoPacker_NilDriveLookup(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	n := &model.Note{
+		ID: idGen.Generate(time.Now()), UserID: "u1",
+		Visibility: model.NoteVisibilityPublic, FileIDs: model.StringArray{"f1"},
+	}
+	repo.Notes[n.ID] = n
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, nil)
+	out, ok := p.PackNoteByID(n.ID, "viewer")
+	require.True(t, ok)
+	files, _ := out["files"].([]any)
+	assert.Empty(t, files)
+}
+
+// 受信者に見えない embed には添付が載らないこと (#1572 / #1575 の gate)。
+//
+// **これは解決順序を固定するテストではない。** HideNoteEntity は FileIDs と
+// Files の両方を空にするので、hide と files 解決を入れ替えても結果は同じで、
+// この assert は落ちない。守っているのは「hidden embed に files が無い」という
+// 結果のほうで、それを担保しているのは HideNoteEntity 側の Files クリア。
+func TestNoteRepoPacker_HiddenEmbedKeepsNoFiles(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	drive := testutil.NewMockDriveFileRepository()
+
+	now := time.Now()
+	// renote 先は followers 限定で、viewer はフォローしていない (followingRepo 未配線
+	// なので fail-closed で hide される)。
+	target := &model.Note{
+		ID: idGen.Generate(now.Add(-time.Minute)), UserID: "author",
+		Visibility: model.NoteVisibilityFollowers, FileIDs: model.StringArray{"secret"},
+		User: &model.User{ID: "author"},
+	}
+	renoteID := target.ID
+	n := &model.Note{
+		ID: idGen.Generate(now), UserID: "u1", Visibility: model.NoteVisibilityPublic,
+		RenoteID: &renoteID, Renote: target,
+	}
+	repo.Notes[n.ID] = n
+	repo.Notes[target.ID] = target
+	owner := "author"
+	drive.Files["secret"] = &model.DriveFile{
+		ID: "secret", UserID: &owner, Name: "secret.png", Type: "image/png",
+		URL: "https://example.com/secret.png",
+	}
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, nil, drive)
+	out, ok := p.PackNoteByID(n.ID, "viewer")
+	require.True(t, ok)
+
+	renote, _ := out["renote"].(map[string]any)
+	require.NotNil(t, renote)
+	assert.Equal(t, true, renote["isHidden"])
+	files, _ := renote["files"].([]any)
+	assert.Empty(t, files, "隠した embed に files を埋め直さない")
 }

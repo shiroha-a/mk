@@ -15,21 +15,32 @@ import (
 // notification.NotePacker interface, re-using entity.PackNote for the note shape.
 //
 // **REST /api/i/notifications と同一の内容にはならない。** REST と streaming は
-// entity.NoteFieldResolver を通して files / channel / myReaction / poll の isVoted を
-// 埋めるが (#2735)、ここは通していないので files は空配列のままになる。結果として
-// push 本文の要約から `(📎N)` が落ちる (notesummary.Get が note["files"] を見るため、
-// 本文が無く画像だけの通知は空文字になる)。#2737 で扱う。
+// files に加えて channel / myReaction / poll の isVoted も埋めるが (#2735)、push は
+// files だけを埋める。残りは push payload では使われず、上限 (約 4 KB) を圧迫する
+// だけのため。
+//
+// **files は要約に要る** (#2737)。`notesummary.Get` が `note["files"]` の件数を見て
+// `(📎N)` を足すので、埋めないと本文が無く画像だけの通知が空文字になる。
 type NoteRepoPacker struct {
 	repo          repository.NoteRepository
 	idGen         id.Generator
 	followingRepo repository.FollowingRepository
+	files         *entity.NoteFieldResolver
 }
 
 // NewNoteRepoPacker constructs a NoteRepoPacker. followingRepo is used to gate
 // the embedded note by the push recipient's visibility (#1572); a nil repo
 // fails closed (followers notes hidden from non-author recipients).
-func NewNoteRepoPacker(repo repository.NoteRepository, idGen id.Generator, followingRepo repository.FollowingRepository) *NoteRepoPacker {
-	return &NoteRepoPacker{repo: repo, idGen: idGen, followingRepo: followingRepo}
+// driveFile は要約の `(📎N)` を出すための batch lookup。nil なら files は空配列
+// のままになる (#2737)。
+func NewNoteRepoPacker(repo repository.NoteRepository, idGen id.Generator, followingRepo repository.FollowingRepository, driveFile entity.DriveFileLookup) *NoteRepoPacker {
+	p := &NoteRepoPacker{repo: repo, idGen: idGen, followingRepo: followingRepo}
+	if driveFile != nil {
+		// folder / owner の lookup は渡さない。push payload では使われず、
+		// 1 ファイルあたり 312-367 B 増えるだけで上限に近づく (#2737)。
+		p.files = entity.NewNoteFieldResolver(driveFile, nil, nil, nil, nil, idGen)
+	}
+	return p
 }
 
 // PackNoteByID implements notification.NotePacker. viewerID is the push
@@ -64,6 +75,20 @@ func (p *NoteRepoPacker) PackNoteByID(noteID, viewerID string) (map[string]any, 
 	// api/notehide を import できないため corenote.HideEmbedDecision +
 	// entity.HideNoteEntity を直接使う。
 	p.hideEmbeds(viewer, &packed)
+	// hide の後に解決するのは**クエリを減らすため**。HideNoteEntity は
+	// FileIDs を空にするので、隠した embed のファイル行は SELECT にも載らない。
+	//
+	// **順序は安全性の要ではない。** HideNoteEntity は Files も空にするので、
+	// 逆順にしても hide が上書きして漏れない。ここを安全性の境界だと思って
+	// HideNoteEntity から Files のクリアを外すと、そのとき初めて漏れる。
+	if p.files != nil {
+		// **スライス経由で受け取り直すこと。** resolver は要素を書き換えるので、
+		// リテラルを渡すとコピーだけが埋まり top-level の files が空のままになる
+		// (embed は pointer なので気付きにくい)。
+		notes := []entity.NoteEntity{packed}
+		p.files.ResolveFilesShallow(notes)
+		packed = notes[0]
+	}
 	return toMap(packed)
 }
 

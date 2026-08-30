@@ -563,3 +563,72 @@ func (r *recordingPollVoteLookup) FindByUserAndNoteIDs(userID string, _ []string
 	r.gotUserID = userID
 	return r.votes, nil
 }
+
+// ResolveFilesShallow は folder / owner の lookup が配線されていても embed しない
+// (#2737)。Web Push の payload は約 4 KB が上限で、embed は 1 件あたり 312-367 B を
+// 積み増すだけで使われないため。upstream の packManyByIds (オプション無し) が
+// folder / user を embed しないのと揃える (shape 全体が同じという意味ではない)。
+//
+// **folder / owner lookup を配線して比べること。** 配線しない状態では
+// ResolveFiles も folder / user を nil にするので、両者の差が出ない。
+func TestNoteFieldResolver_ResolveFilesShallow_OmitsFolderAndOwner(t *testing.T) {
+	folderID := "folder-1"
+	owner := "user-1"
+	newFiles := func() *stubDriveFileLookup {
+		return &stubDriveFileLookup{files: map[string]*model.DriveFile{
+			"f1": {ID: "f1", FolderID: &folderID, UserID: &owner, Name: "x.png", Type: "image/png", URL: "https://example.com/f1"},
+		}}
+	}
+	folders := &stubFolderLookup{folders: map[string]*model.DriveFolder{folderID: {ID: folderID, Name: "media"}}}
+	owners := &stubFileOwnerLookup{users: map[string]*model.User{owner: {ID: owner, Username: "alice"}}}
+
+	deep := NewNoteFieldResolver(newFiles(), folders, owners, nil, nil, makeIDGen(t))
+	deepNotes := []NoteEntity{{ID: "n1", FileIDs: model.StringArray{"f1"}}}
+	deep.ResolveFiles(deepNotes)
+	require.Len(t, deepNotes[0].Files, 1)
+	deepFile := deepNotes[0].Files[0].(DriveFileEntity)
+	require.NotNil(t, deepFile.Folder, "ResolveFiles は folder を embed する")
+	require.NotNil(t, deepFile.User, "ResolveFiles は owner を embed する")
+
+	shallow := NewNoteFieldResolver(newFiles(), folders, owners, nil, nil, makeIDGen(t))
+	notes := []NoteEntity{{ID: "n1", FileIDs: model.StringArray{"f1"}}}
+	shallow.ResolveFilesShallow(notes)
+	require.Len(t, notes[0].Files, 1)
+	f := notes[0].Files[0].(DriveFileEntity)
+	assert.Nil(t, f.Folder, "shallow は folder を embed しない")
+	assert.Nil(t, f.User, "shallow は owner を embed しない")
+	require.NotNil(t, f.FolderID)
+	assert.Equal(t, folderID, *f.FolderID, "ID 自体は upstream と同じく出す")
+}
+
+// shallow でも embed (renote / reply) の files を埋める。push 本文の要約は
+// renote 通知で renote 側を、reply では "RE: ..." を見るため。
+func TestNoteFieldResolver_ResolveFilesShallow_EmbedsRenoteAndReply(t *testing.T) {
+	files := &stubDriveFileLookup{files: map[string]*model.DriveFile{
+		"f1": {ID: "f1", Name: "a.png", Type: "image/png", URL: "https://example.com/f1"},
+		"f2": {ID: "f2", Name: "b.png", Type: "image/png", URL: "https://example.com/f2"},
+		"f3": {ID: "f3", Name: "c.png", Type: "image/png", URL: "https://example.com/f3"},
+	}}
+	r := NewNoteFieldResolver(files, nil, nil, nil, nil, makeIDGen(t))
+	notes := []NoteEntity{{
+		ID:      "n1",
+		FileIDs: model.StringArray{"f1"},
+		Renote:  &NoteEntity{ID: "n2", FileIDs: model.StringArray{"f2"}},
+		Reply:   &NoteEntity{ID: "n3", FileIDs: model.StringArray{"f3"}},
+	}}
+	r.ResolveFilesShallow(notes)
+	assert.Len(t, notes[0].Files, 1)
+	assert.Len(t, notes[0].Renote.Files, 1)
+	assert.Len(t, notes[0].Reply.Files, 1)
+}
+
+// lookup 未配線 / nil レシーバは no-op。
+func TestNoteFieldResolver_ResolveFilesShallow_NoOp(t *testing.T) {
+	var nilResolver *NoteFieldResolver
+	nilResolver.ResolveFilesShallow([]NoteEntity{{ID: "n1"}})
+
+	r := NewNoteFieldResolver(nil, nil, nil, nil, nil, makeIDGen(t))
+	notes := []NoteEntity{{ID: "n1", FileIDs: model.StringArray{"f1"}}}
+	r.ResolveFilesShallow(notes)
+	assert.Empty(t, notes[0].Files)
+}
