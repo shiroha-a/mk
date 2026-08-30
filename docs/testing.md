@@ -83,6 +83,28 @@ CIではパッケージごとにカバレッジを計測し、閾値未達のパ
 
 migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL` を使う。`pg_type WHERE typname = ...` は **schema を見ない**ため、別 schema に同名の型があるだけで作成を飛ばし、直後の `CREATE TABLE` が落ちる。
 
+### 列枠を食う操作を書かない (#2756)
+
+PostgreSQL は `DROP COLUMN` した列も **1 テーブル 1600 列**の上限に数える。手元の schema は実行をまたいで残るので、テストのたびに列を落とす形にすると枠が減り続け、最後は `tables can have at most 1600 columns (SQLSTATE 54011)` で落ちる。CI は毎回クリーンな DB を立てるので**手元で繰り返す開発者だけが踏む** (実際に `clip` / `auth_session` / `app` が 1593 列まで到達した)。
+
+- `ApplyMigrations` は適用済みの migration を skip する (`testutil_applied_migrations` 台帳。**ファイル名 + 内容の sha256** で持つので、migration を書き換えれば流し直す。失敗したものは記録しないので次回また流す)
+- schema の形を変えて試すテストは `testutil.OpenTestDBSchema("<suffix>")` で**専用の兄弟 schema** を作り、そこを一度だけその形にして使い回す (`internal/repository/dropin_ts_schema_test.go` が例)
+
+**復旧は schema を作り直すしかない** (`ALTER TABLE ... ADD COLUMN` では枠は戻らない)。**兄弟 schema も一緒に消すこと。** 次の実行が作り直す (全 migration の適用は実測 1-3.5 秒)。
+
+```bash
+# 接続先は既定値。変えているなら .env.test / TEST_DB_* に合わせる。
+# 落とすのは「そのテストが使う schema」。名前はパッケージパスの `/` を `_` に
+# したもので、兄弟 schema は `<package>_<suffix>` になる。
+PGPASSWORD=mk psql -h localhost -U mk -d misskey_test \
+  -c 'DROP SCHEMA IF EXISTS "internal_repository" CASCADE' \
+  -c 'DROP SCHEMA IF EXISTS "internal_repository_ts" CASCADE'
+```
+
+**テストが途中で死んで schema が壊れたときも同じ手順**。`internal/core/fsck` (schema は `internal_core_fsck`) にはテーブルを一時的に rename したり制約を落として `t.Cleanup` で戻すテストがあり、プロセスが殺されると戻らない (`relation "drive_file" does not exist` 等になる)。
+
+**これは台帳を入れる前から直らない。** `drive_file` や `note_userId_fkey` を作る `000001_initial` は既存 schema への再適用が必ず失敗する (制約重複) ので、以前から流し直しても戻らなかった。台帳で新たに直らなくなったのは、**単独で成功する migration が作るオブジェクト** (`000008` 以降の大半) だけ。いずれにせよ手で消す。
+
 ## testcontainers
 
 `internal/testutil/containers.go` が testcontainers-go で PostgreSQL 18 / Redis 7 のコンテナを起動するヘルパー (`SetupPostgres` / `SetupRedis` / `SkipIfNoDocker`) を提供する。
