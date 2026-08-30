@@ -1,6 +1,7 @@
 package testutil
 
 import (
+	"crypto/sha256"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -39,6 +40,55 @@ import (
 // `MustOpenTestDB` を呼んでも自動で隔離されるので、この問題を再び持ち込めない。
 func OpenTestDB() (*gorm.DB, error) {
 	return openTestDBForPackage(callerPackage(2))
+}
+
+// OpenTestDBSchema connects to a **sibling schema** of the calling package's
+// one, named `<package>_<suffix>`, creating it on first use.
+//
+// **shared な schema を実行中に作り変えるテスト向け** (#2756)。列を DROP して
+// 戻すような操作は、PostgreSQL が DROP した列も 1600 の上限に数えるため実行の
+// たびに枠を食う。専用 schema を一度だけその形に作って使い回せば、繰り返し
+// 回しても増えない。同じパッケージの他のテストと状態を共有しない利点もある。
+//
+// migration は呼び出し側が ApplyMigrations で流すこと (台帳があるので 2 回目
+// 以降は skip される)。
+func OpenTestDBSchema(suffix string) (*gorm.DB, error) {
+	pkg := callerPackage(2)
+	if pkg == "" || suffix == "" {
+		return nil, fmt.Errorf("open test schema: empty package or suffix")
+	}
+	return openTestDBForPackage(schemaName(pkg + "_" + suffix))
+}
+
+// schemaName normalizes an arbitrary string into a schema identifier: `[a-z0-9_]`
+// only, truncated from the front to the identifier limit.
+//
+// **正規化はここ 1 箇所に閉じる。** `ensureSchema` は identifier をプレース
+// ホルダに出来ず自前で組むので、「呼び出し元が正規化済みである」ことに寄りかかって
+// いる。切り詰めだけにすると、`OpenTestDBSchema` に任意の suffix を渡した経路で
+// その前提が破れる (実際にレビューで schema 注入を実演された)。
+//
+// 切り詰めは**先頭を捨てる**。パッケージパス由来の名前では末端のパッケージ名が
+// 残って区別が付くため。`OpenTestDBSchema` の `<package>_<suffix>` では逆に
+// パッケージ名の側から削れるので、63 文字に近づく長さの組み合わせは避けること
+// (現状の名前は最長でも 30 文字前後)。
+func schemaName(name string) string {
+	var b strings.Builder
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r + ('a' - 'A'))
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := b.String()
+	if len(out) > maxPackageSuffixLen {
+		out = out[len(out)-maxPackageSuffixLen:]
+	}
+	return out
 }
 
 // OpenSharedTestDB connects to the shared `public` schema without creating a
@@ -179,22 +229,7 @@ func callerPackage(skip int) string {
 	if err != nil || strings.HasPrefix(rel, "..") {
 		rel = dir
 	}
-	var b strings.Builder
-	for _, r := range filepath.ToSlash(rel) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			b.WriteRune(r)
-		case r >= 'A' && r <= 'Z':
-			b.WriteRune(r + ('a' - 'A'))
-		default:
-			b.WriteByte('_')
-		}
-	}
-	name := b.String()
-	if len(name) > maxPackageSuffixLen {
-		name = name[len(name)-maxPackageSuffixLen:]
-	}
-	return name
+	return schemaName(filepath.ToSlash(rel))
 }
 
 // maxPackageSuffixLen is PostgreSQL's identifier limit. 超えると silent に
@@ -211,23 +246,90 @@ func projectRoot() string {
 	return filepath.Clean(filepath.Join(filepath.Dir(file), "..", ".."))
 }
 
-// ApplyMigrations applies all up migration SQL files to the database.
-// 冪等な操作 (IF NOT EXISTS) なので複数回呼んでも安全。
+// migrationLedgerTable records which migration files have been applied to the
+// current schema.
+//
+// **これが無いと dropped column が実行のたびに増える** (#2756)。手元の schema は
+// 実行をまたいで残るので、migration が毎回流れて列枠を食う。PostgreSQL は DROP
+// した列も 1 テーブル 1600 列の上限に数えるため、繰り返すと最後は
+// `tables can have at most 1600 columns` で落ちる。
+//
+// **再適用で実際に枠を食うのは `note` だけ** (実測。migration が作る 112 テーブル
+// 中 1 つ。`internal_repository` を数えると 113 だが、その 1 つはこの台帳自身)。
+// `000033` が `ADD COLUMN IF NOT EXISTS` で足し `000036` が落とすため。`DROP
+// COLUMN` を含む migration は他に 3 本あるが、落とす列は `CREATE TABLE` 由来で
+// 再適用時は `IF NOT EXISTS` の no-op になるので枠を食わない。
+const migrationLedgerTable = "testutil_applied_migrations"
+
+// ApplyMigrations applies the up migration SQL files that this schema has not
+// seen yet.
+//
+// 台帳は **ファイル名 + 内容のハッシュ**で持つ。名前だけだと、migration を書き
+// 換えながら開発しているときに反映されなくなる。
+//
+// **記録するのは成功したときだけ。** 失敗したものを「適用済み」にすると、
+// 一過性の失敗 (並行 DDL / lock timeout / 新しい migration の実バグ) が恒久的に
+// 隠れる。
+//
+// 既存 schema への再適用でエラーになるのは実測で **81 本中 2 本だけ**
+// (`000001_initial` の制約重複と `000075_signup_application`)。どちらも
+// 1 ファイル = 1 つの暗黙トランザクションなので丸ごとロールバックし、列枠を
+// 食わない。**列枠を食う `000033` (ADD) / `000036` (DROP) は成功する側**なので、
+// 成功時のみの記録でも #2756 は解消する。
 func ApplyMigrations(db *gorm.DB) {
 	files, err := findMigrationFiles()
 	if err != nil {
 		panic("failed to find migration files: " + err.Error())
 	}
+	applied := loadAppliedMigrations(db)
 	for _, path := range files {
 		sql, err := os.ReadFile(path)
 		if err != nil {
 			panic("failed to read migration file: " + err.Error())
 		}
-		if err := db.Exec(string(sql)).Error; err != nil {
-			// 冪等なDDLのエラーは無視 (既にテーブルが存在する場合等)
-			_ = err
+		key := filepath.Base(path)
+		sum := fmt.Sprintf("%x", sha256.Sum256(sql))
+		if applied[key] == sum {
+			continue
 		}
+		if err := db.Exec(string(sql)).Error; err != nil {
+			// 冪等なDDLのエラーは無視 (既にテーブルが存在する場合等)。
+			// 記録しないので、次回また流して自己修復の余地を残す。
+			continue
+		}
+		recordAppliedMigration(db, key, sum)
 	}
+}
+
+// loadAppliedMigrations returns name → content hash for this schema. 台帳が
+// 作れない / 読めないときは空を返す = 全部流す (今までの挙動)。
+func loadAppliedMigrations(db *gorm.DB) map[string]string {
+	out := map[string]string{}
+	stmt := `CREATE TABLE IF NOT EXISTS "` + migrationLedgerTable + `" (
+		name text PRIMARY KEY,
+		sha  text NOT NULL
+	)`
+	if err := db.Exec(stmt).Error; err != nil {
+		return out
+	}
+	var rows []struct {
+		Name string
+		Sha  string
+	}
+	if err := db.Raw(`SELECT name, sha FROM "` + migrationLedgerTable + `"`).Scan(&rows).Error; err != nil {
+		return out
+	}
+	for _, r := range rows {
+		out[r.Name] = r.Sha
+	}
+	return out
+}
+
+// recordAppliedMigration marks one migration as applied. 同じパッケージが並行に
+// 開くことがあるので upsert にする。
+func recordAppliedMigration(db *gorm.DB, name, sum string) {
+	_ = db.Exec(`INSERT INTO "`+migrationLedgerTable+`" (name, sha) VALUES (?, ?)
+		ON CONFLICT (name) DO UPDATE SET sha = EXCLUDED.sha`, name, sum).Error
 }
 
 func findMigrationFiles() ([]string, error) {
