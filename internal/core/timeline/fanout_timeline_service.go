@@ -302,6 +302,14 @@ func filterAndSort(ids []string, untilID, sinceID string, limit int) []string {
 	} else {
 		sort.Sort(sort.Reverse(sort.StringSlice(out)))
 	}
+	// **upstream は窓を切らない。** `FanoutTimelineService.getMulti` が
+	// `lrange 0 -1` で list 全体を返し、`FanoutTimelineEndpointService` 側の
+	// while ループが「limit 件が埋まるまで窓の奥へ読み進めながら hydrate する」
+	// 形になっている。mk-go はここで limit 件に切り、足りない分は DB で継ぎ足す。
+	//
+	// 既定では差が出ない (どちらも limit 件を返す) が、
+	// `meta.enableFanoutTimelineDbFallback` を off にすると upstream のほうが
+	// 件数が揃いやすい (#2762。詳細は docs/divergence.md §5.6)。
 	if limit > 0 && len(out) > limit {
 		out = out[:limit]
 	}

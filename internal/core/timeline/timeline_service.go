@@ -38,6 +38,19 @@ type Service struct {
 	ephemeral EphemeralNoteLookup
 	// fanoutToggle は meta.enableFanoutTimeline。nil なら常に有効扱い。
 	fanoutToggle FanoutToggleProvider
+	// dbFallbackToggle は meta.enableFanoutTimelineDbFallback。nil なら常に有効扱い。
+	dbFallbackToggle DbFallbackToggleProvider
+}
+
+// DbFallbackToggleProvider reports whether meta.enableFanoutTimelineDbFallback
+// is currently on.
+//
+// FanoutToggleProvider と分けてあるのは、**効く相手が違う**ため。
+// `enableFanoutTimeline` は push (fanout hook) と read の両方を止めるが、
+// こちらは read 側の DB fallback だけを止める。push 側は無関係なので、
+// FanoutHook に実装義務を持たせない。
+type DbFallbackToggleProvider interface {
+	FanoutTimelineDbFallbackEnabled() bool
 }
 
 // EphemeralNoteLookup resolves notes that live only in Redis (#2332).
@@ -78,6 +91,44 @@ func (s *Service) fanoutEnabled() bool {
 	return s.fanoutToggle.FanoutTimelineEnabled()
 }
 
+// SetDbFallbackToggle attaches meta.enableFanoutTimelineDbFallback so that the
+// database fallback can be switched off while FTT itself stays on
+// (upstream FanoutTimelineEndpointService の
+// `if (!ps.useDbFallback) ps.dbFallback = () => Promise.resolve([])` 相当)。
+//
+// **これは負荷を止めるためのつまみ。** #2720 で sinceId を含むページングが
+// 必ず DB へ倒れるようになり、frontend の paginator は fetchNewer で sinceId を
+// 投げるので、その経路が全て PostgreSQL に落ちる。timeline の JSON キャッシュは
+// cursor 無しのみが対象なので緩和されない。upstream が用意している逃げ道が
+// これしかない。
+func (s *Service) SetDbFallbackToggle(p DbFallbackToggleProvider) {
+	s.dbFallbackToggle = p
+}
+
+// dbFallbackEnabled reports whether the database fallback may run.
+// Provider 未配線なら有効扱い (既定値 true と揃える)。
+//
+// **off にすると件数は揃わない。** Redis が持っている分だけを返し、足りない分は
+// 埋めない。Redis が空 (または sinceId が Redis の窓より古い) なら空を返す。
+// upstream も同じで、`dbFallback` を空配列に差し替えるだけなので呼び出し側から
+// 見ると「取れなかった」ことと区別が付かない。
+func (s *Service) dbFallbackEnabled() bool {
+	if s.dbFallbackToggle == nil {
+		return true
+	}
+	return s.dbFallbackToggle.FanoutTimelineDbFallbackEnabled()
+}
+
+// noDBFallback is what home / local / hybrid return in place of a database
+// query while the fallback is off. **global は gate していない**ので到達しない
+// (GlobalTimeline の doc を参照)。
+//
+// **非 nil の空 slice を返す。** 現状の呼び出し元 (internal/api/notes の
+// handler) は `entity.PackNotes` を通り、そこが `make([]NoteEntity, 0, ...)` で
+// 受けるので nil でも JSON は `[]` になる。それに寄りかからないという契約。
+// nil を返す実装は「取得できなかった」と区別が付かない。
+func noDBFallback() []*model.Note { return []*model.Note{} }
+
 // shouldFallbackToDB reports whether the Redis result must be discarded and the
 // whole page served from the DB.
 //
@@ -102,6 +153,10 @@ func (s *Service) fanoutEnabled() bool {
 // **負荷はここに乗る。** frontend の paginator は fetchNewer で sinceId を
 // 投げるので、その経路が全て PostgreSQL に落ちる。timeline の JSON キャッシュ
 // (internal/api/notes) は cursor 無しのみが対象なので緩和されない。
+//
+// これを止めるつまみが `meta.enableFanoutTimelineDbFallback` (#2762)。off に
+// すると、この判定が真になった経路は **DB を引かずに空を返す** —
+// ただし global timeline は gate から外してある (GlobalTimeline の doc を参照)。
 //
 // その帰結として、filterAndSort / mergeIDs / GetMerged の昇順分岐と
 // fallbackRange の sinceId 側スワップは **endpoint 経路からは到達しない**
@@ -185,7 +240,7 @@ func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID,
 		}
 		s.pruneDangling(ctx, []Name{HomeTimelineName(viewer.ID)}, dangling)
 		notes := ApplyFilter(resolved, viewer.ID, filter)
-		if !filter.AllowPartial && len(notes) < limit {
+		if !filter.AllowPartial && len(notes) < limit && s.dbFallbackEnabled() {
 			// **境界は filter 前の resolved から取る。** filter で落ちた note も
 			// 「解決はできている」ので、DB fallback で引き直す必要は無い。
 			fbSince, fbUntil := fallbackRange(resolved, sinceID, untilID)
@@ -196,6 +251,9 @@ func (s *Service) HomeTimeline(ctx context.Context, viewer *model.User, untilID,
 			return append(notes, rest...), nil
 		}
 		return notes, nil
+	}
+	if !s.dbFallbackEnabled() {
+		return noDBFallback(), nil
 	}
 	return s.noteRepo.ListHomeTimeline(viewer.ID, limit, sinceID, untilID, dbFilter)
 }
@@ -242,7 +300,7 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 		}
 		s.pruneDangling(ctx, keys, dangling)
 		notes := ApplyFilter(resolved, viewerID, filter)
-		if !filter.AllowPartial && len(notes) < limit {
+		if !filter.AllowPartial && len(notes) < limit && s.dbFallbackEnabled() {
 			fbSince, fbUntil := fallbackRange(resolved, sinceID, untilID)
 			rest, err := s.noteRepo.ListLocalTimeline(limit-len(notes), fbSince, fbUntil, dbFilter)
 			if err != nil {
@@ -252,10 +310,25 @@ func (s *Service) LocalTimeline(ctx context.Context, viewer *model.User, untilID
 		}
 		return notes, nil
 	}
+	if !s.dbFallbackEnabled() {
+		return noDBFallback(), nil
+	}
 	return s.noteRepo.ListLocalTimeline(limit, sinceID, untilID, dbFilter)
 }
 
 // GlobalTimeline returns all public notes including federated remotes.
+//
+// **ここだけ `enableFanoutTimelineDbFallback` で gate しない** (#2762)。upstream の
+// `global-timeline` は `FanoutTimelineEndpointService` を通らず常に SQL を引くので、
+// このつまみの対象外になっている。mk-go が GTL を fanout 経路にしているのは性能上の
+// 拡張であって、つまみの意味論を変える理由にはならない。
+//
+// gate すると実害がある。同梱 frontend のセットアップウィザードは
+// `enableFanoutTimelineDbFallback: q_use === 'single'` を送るので、**group / open で
+// 立てたインスタンスは既定 off**。そこで GTL を gate すると、誰も設定を触っていない
+// のに Redis list の窓 (`MaxTimelineLength` 固定の 200 件。local / global は
+// 専用の meta 列を持たないので変えられない) を超えて遡れなくなる。upstream で同じ設定に
+// したインスタンスの GTL は無傷なので、食い違いは mk-go 側の退行として出る。
 func (s *Service) GlobalTimeline(ctx context.Context, viewer *model.User, untilID, sinceID string, limit int, filter TimelineFilter) ([]*model.Note, error) {
 	if limit <= 0 {
 		limit = 20
@@ -323,7 +396,7 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 		}
 		s.pruneDangling(ctx, stlKeys, dangling)
 		notes := ApplyFilter(resolved, viewer.ID, filter)
-		if !filter.AllowPartial && len(notes) < limit {
+		if !filter.AllowPartial && len(notes) < limit && s.dbFallbackEnabled() {
 			fbSince, fbUntil := fallbackRange(resolved, sinceID, untilID)
 			rest, err := s.hybridDBFallback(viewer, fbUntil, fbSince, limit-len(notes), filter)
 			if err != nil {
@@ -332,6 +405,9 @@ func (s *Service) HybridTimeline(ctx context.Context, viewer *model.User, untilI
 			return append(notes, rest...), nil
 		}
 		return notes, nil
+	}
+	if !s.dbFallbackEnabled() {
+		return noDBFallback(), nil
 	}
 	return s.hybridDBFallback(viewer, untilID, sinceID, limit, filter)
 }
@@ -482,7 +558,9 @@ func (s *Service) resolve(ctx context.Context, ids []string) (notes []*model.Not
 	eph, err := s.ephemeral.GetNotes(ctx, missing)
 	if err != nil {
 		// Redis 障害で timeline 全体を落とさない。DB 分だけ返せば、呼び出し側の
-		// 件数不足判定が DB fallback に倒してくれる。**dangling は返さない** —
+		// 件数不足判定が DB fallback に倒してくれる (ただし
+		// `meta.enableFanoutTimelineDbFallback` が off なら倒れず、件数は
+		// 足りないまま返る、#2762)。**dangling は返さない** —
 		// 生きている note の ID を消しかねない。
 		slog.WarnContext(ctx, "timeline: ephemeral lookup failed", "err", err)
 		return notes, nil, nil
@@ -578,8 +656,9 @@ func (s *Service) confirmMissingOnPrimary(ctx context.Context, candidates []stri
 // 消え、戻す経路が無い**。
 //
 // DB fallback があるから安全、とは言えない。4 経路とも fallback は
-// `!filter.AllowPartial` でゲートされていてクライアントが無効化でき、しかも
-// 一度 list から消えた ID を戻す経路が無い。
+// `!filter.AllowPartial` でゲートされていてクライアントが無効化でき、
+// global を除く 3 経路は `meta.enableFanoutTimelineDbFallback` を off に
+// すれば運用側でも止まり (#2762)、しかも一度 list から消えた ID を戻す経路が無い。
 func (s *Service) pruneDangling(ctx context.Context, names []Name, dangling []string) {
 	if s.fanout == nil || len(names) == 0 || len(dangling) == 0 {
 		return
