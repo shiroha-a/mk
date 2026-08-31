@@ -32,6 +32,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/clips"
 	"github.com/shiroha-a/mk/internal/api/drive"
 	apiemojis "github.com/shiroha-a/mk/internal/api/emojis"
+	"github.com/shiroha-a/mk/internal/api/endpoints"
 	apifederation "github.com/shiroha-a/mk/internal/api/federation"
 	apifetchexternal "github.com/shiroha-a/mk/internal/api/fetchexternal"
 	apifetchrss "github.com/shiroha-a/mk/internal/api/fetchrss"
@@ -58,6 +59,7 @@ import (
 	apiroles "github.com/shiroha-a/mk/internal/api/roles"
 	apisignin "github.com/shiroha-a/mk/internal/api/signin"
 	apisignup "github.com/shiroha-a/mk/internal/api/signup"
+	"github.com/shiroha-a/mk/internal/api/stats"
 	"github.com/shiroha-a/mk/internal/api/streaming"
 	apisw "github.com/shiroha-a/mk/internal/api/sw"
 	apitest "github.com/shiroha-a/mk/internal/api/test"
@@ -1344,46 +1346,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// Stats endpoint (public) — チャートの集計済み値から取得
 	notesChart := chartCharts.Notes
 	usersChart := chartCharts.Users
-	api.POST("/stats", func(c echo.Context) error {
-		ctx := c.Request().Context()
-		var notesCount, originalNotesCount, usersCount, originalUsersCount int64
-
-		if res, err := notesChart.GetChart(ctx, chart.SpanHour, 1, nil, ""); err == nil {
-			if v, ok := res["local.total"]; ok && len(v) > 0 {
-				originalNotesCount = v[0]
-			}
-			if v, ok := res["remote.total"]; ok && len(v) > 0 {
-				notesCount = originalNotesCount + v[0]
-			}
-		}
-		if res, err := usersChart.GetChart(ctx, chart.SpanHour, 1, nil, ""); err == nil {
-			if v, ok := res["local.total"]; ok && len(v) > 0 {
-				originalUsersCount = v[0]
-			}
-			if v, ok := res["remote.total"]; ok && len(v) > 0 {
-				usersCount = originalUsersCount + v[0]
-			}
-		}
-
-		var instancesCount int64
-		s.db.Model(&model.Instance{}).Count(&instancesCount)
-
-		// upstream stats.ts は reactionsCount を noteReactionsRepository.count() で
-		// 返す。mk-go は 0 固定だったので note_reaction の総数を集計する (#1777)。
-		var reactionsCount int64
-		s.db.Model(&model.NoteReaction{}).Count(&reactionsCount)
-
-		return c.JSON(http.StatusOK, map[string]any{
-			"notesCount":         notesCount,
-			"originalNotesCount": originalNotesCount,
-			"usersCount":         usersCount,
-			"originalUsersCount": originalUsersCount,
-			"instances":          instancesCount,
-			"driveUsageLocal":    0,
-			"driveUsageRemote":   0,
-			"reactionsCount":     reactionsCount,
-		})
-	})
+	statsHandler := stats.NewHandler(s.db, notesChart, usersChart)
+	api.POST("/stats", statsHandler.Stats)
 
 	// listRelationRepos は embed user に viewer 視点の relation block を付与する
 	// 共有 Repos。/users・/pinned-users の inline handler と mute/renote-mute/
@@ -2948,6 +2912,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// GET が `api.Any("/*")` の catchall (= 200 + 空オブジェクト) に落ちて、
 	// 受信側で `chart.pubActive[0]` 等が `undefined` 例外を起こす (#421)。
 	chartsHandler := apicharts.NewHandler(chartCharts)
+	// /retention は chart engine ではなく集計済みテーブルを読む (#2791 で
+	// router.go の inline closure から移設)。
+	chartsHandler.SetRetentionRepo(retentionRepo)
 	chartMethods := []string{http.MethodGet, http.MethodPost}
 	api.Match(chartMethods, "/charts/notes", chartsHandler.Notes)
 	api.Match(chartMethods, "/charts/users", chartsHandler.Users)
@@ -3500,9 +3467,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.GET("/server-info", serverInfoHandler)
 
 	// endpoints — 登録済みAPIエンドポイント一覧
-	api.POST("/endpoints", func(c echo.Context) error {
-		return c.JSON(http.StatusOK, apiEndpointNames(s.echo))
-	})
+	// **Lister は closure で遅延評価する。** ここでの登録時点ではまだ全ルートが
+	// 生えていないので、呼ばれたときに数える必要がある。
+	endpointsHandler := endpoints.NewHandler(func() []string { return apiEndpointNames(s.echo) })
+	api.POST("/endpoints", endpointsHandler.Endpoints)
 
 	// endpoint — 指定 endpoint の情報を返す (#1695)。upstream endpoint.ts は
 	// 未知 endpoint で null、既知なら { params: [{name,type}, ...] } を返す。
@@ -3512,36 +3480,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// と未知 endpoint の null だけ upstream に揃える。params 内容の導出は
 	// endpoint registry の新設が必要で本 endpoint の用途 (API introspection) に
 	// 対して費用対効果が低いため非対応 (#1695 に明記)。
-	api.POST("/endpoint", func(c echo.Context) error {
-		var req struct {
-			Endpoint string `json:"endpoint"`
-		}
-		if err := c.Bind(&req); err != nil || req.Endpoint == "" {
-			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-		}
-		// 未知 endpoint は null (upstream: ep == null → return null)。
-		if !isRegisteredAPIEndpoint(s.echo, req.Endpoint) {
-			return c.JSON(http.StatusOK, nil)
-		}
-		return c.JSON(http.StatusOK, map[string]any{"params": []any{}})
-	})
+	api.POST("/endpoint", endpointsHandler.Endpoint)
 
 	// retention — リテンション統計
-	api.POST("/retention", func(c echo.Context) error {
-		records, err := retentionRepo.ListRecent(30)
-		if err != nil {
-			return c.JSON(http.StatusOK, []any{})
-		}
-		out := make([]map[string]any, 0, len(records))
-		for _, r := range records {
-			out = append(out, map[string]any{
-				"createdAt": r.CreatedAt,
-				"users":     r.UsersCount,
-				"data":      r.Data,
-			})
-		}
-		return c.JSON(http.StatusOK, out)
-	})
+	api.POST("/retention", chartsHandler.Retention)
 
 	// get-avatar-decorations — アバターデコレーション全件取得
 	api.POST("/get-avatar-decorations", func(c echo.Context) error {
@@ -3729,47 +3671,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	//   - `id` は format:'misskey:id' なので空文字は 400
 	//   - default 付きの param はキー省略時のみ既定値。`nullableDefault: null`
 	//     は明示 null として通す (default で潰さない)
-	api.POST("/test", func(c echo.Context) error {
-		var req struct {
-			Required        *bool           `json:"required"`
-			String          *string         `json:"string"`
-			Default         *string         `json:"default"`
-			NullableDefault json.RawMessage `json:"nullableDefault"`
-			ID              *string         `json:"id"`
-		}
-		if err := c.Bind(&req); err != nil || req.Required == nil {
-			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-		}
-		// format:'misskey:id' は空文字を許さない。
-		if req.ID != nil && *req.ID == "" {
-			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-		}
-		out := map[string]any{"required": *req.Required}
-		if req.String != nil {
-			out["string"] = *req.String
-		}
-		out["default"] = "hello"
-		if req.Default != nil {
-			out["default"] = *req.Default
-		}
-		// キー省略なら default、`null` ならそのまま null。
-		out["nullableDefault"] = "hello"
-		if len(req.NullableDefault) > 0 {
-			if string(req.NullableDefault) == "null" {
-				out["nullableDefault"] = nil
-			} else {
-				var v string
-				if err := json.Unmarshal(req.NullableDefault, &v); err != nil {
-					return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-				}
-				out["nullableDefault"] = v
-			}
-		}
-		if req.ID != nil {
-			out["id"] = *req.ID
-		}
-		return c.JSON(http.StatusOK, out)
-	})
+	echoTestHandler := apitest.NewEchoHandler()
+	api.POST("/test", echoTestHandler.Test)
 
 	// プラグインのルート (#2478)。catchall より前に登録する。
 	// Echo の radix tree は静的パスを wildcard より優先するので順序に依存

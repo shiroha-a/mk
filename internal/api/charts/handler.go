@@ -15,6 +15,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/chart"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -42,6 +43,9 @@ type Charts struct {
 // crashing the server.
 type Handler struct {
 	c Charts
+	// retentionRepo は POST /api/retention 用。chart engine ではなく
+	// 集計済みテーブルを読むだけなので Charts バンドルとは別に持つ。
+	retentionRepo repository.RetentionAggregationRepository
 }
 
 // NewHandler constructs a handler from a Charts bundle.
