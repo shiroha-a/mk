@@ -3,6 +3,9 @@ package server
 import (
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
@@ -10,6 +13,10 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/frontendutil"
+	"github.com/shiroha-a/mk/internal/testutil"
 )
 
 func cspHeadersFor(t *testing.T, mode string) http.Header {
@@ -103,18 +110,43 @@ func TestFrontendCSP_Policy(t *testing.T) {
 	})
 }
 
-// 現段階では SSR shell の inline script / SVG の inline style 属性が残っている
-// ため 'unsafe-inline' が要る。**nonce / hash 化は別段階**で、先にそれ以外の
-// 違反を観測したい。ここを外すのは shell を書き換えてからにする。
-func TestFrontendCSP_InlineStillAllowed(t *testing.T) {
+// script と style で扱いが違う (#2786)。
+//
+//   - **script は `'unsafe-inline'` を外した。** SPA shell の inline script は
+//     内容が起動時に固定なので hash で通す。ここに戻すと XSS で注入された
+//     `<script>` がそのまま実行されるようになる
+//   - **style は残す。** Vue の `:style` が DOM の inline `style` 属性になり、
+//     属性は `style-src-attr` の管轄で hash では救えない。外すと UI が広範に壊れる
+func TestFrontendCSP_InlineScriptIsHashedNotUnsafe(t *testing.T) {
 	policy := buildFrontendCSP(false, cspExtras{})
 	for _, d := range strings.Split(policy, "; ") {
 		switch {
-		case strings.HasPrefix(d, "script-src"), strings.HasPrefix(d, "style-src"):
+		case strings.HasPrefix(d, "script-src"):
+			assert.NotContainsf(t, d, "'unsafe-inline'",
+				"%s: inline script は hash で通す。ここを戻すと注入された script が実行される", d)
+		case strings.HasPrefix(d, "style-src"):
 			assert.Containsf(t, d, "'unsafe-inline'",
-				"%s: SSR shell の inline を許すまで外せない", d)
+				"%s: Vue の :style が inline style 属性になるので外せない", d)
 		}
 	}
+}
+
+// hash は呼び出し側が渡した文字列そのものから導く。
+func TestCSPScriptHashes(t *testing.T) {
+	// 空は飛ばす (loader が外部参照のとき inline script は存在しない)。
+	assert.Empty(t, cspScriptHashes("", ""))
+
+	// RFC 4648 の base64 で `'sha256-` に包む。期待値は独立に計算した
+	// (`printf 'x' | openssl dgst -sha256 -binary | openssl base64`)。
+	got := cspScriptHashes("x")
+	assert.Equal(t, []string{"'sha256-LXEWQrcmsEQBYnyp+6wy9chTD7GQPMTbAiWHF5IaSIE='"}, got)
+
+	// **内容が 1 文字変われば hash も変わる。** ここが固定だと、HTML を変えたのに
+	// CSP が古いままという状態を検出できない。
+	assert.NotEqual(t, cspScriptHashes("const A = 1;"), cspScriptHashes("const A = 2;"))
+
+	// 複数渡すと順に並ぶ。
+	assert.Len(t, cspScriptHashes("a", "b"), 2)
 }
 
 func postCSPReport(t *testing.T, body string) *httptest.ResponseRecorder {
@@ -376,3 +408,65 @@ func TestFrontendCSP_ExternalOriginsAreLimited(t *testing.T) {
 		}
 	})
 }
+
+// **HTML に実際に出た inline script の hash が CSP に載っていること** (#2786)。
+//
+// これが今回の要。`'unsafe-inline'` を外した以上、HTML 側を変えたのに hash が
+// 追従しないと **CSP を有効にしている運用者の画面が真っ白になる**。ここは
+// レンダリング結果から script を取り出して突き合わせるので、片方だけ変えれば
+// 落ちる。
+func TestFrontendCSP_HashesCoverRenderedInlineScripts(t *testing.T) {
+	// **loader を inline させる。** built assets が無いと `loader.JS` が空になり、
+	// HTML に出る inline script は bootGlobals だけになる。実運用でいちばん大きい
+	// inline script (loader) の hash 経路がテストの外に出てしまうので、fixture を
+	// 置いて 2 つとも通す (`TestFrontendHTML_InlinesLoaderAssets` と同じ形)。
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "boot.js"),
+		[]byte("window.__markerBootJs = 1;"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
+	frontendutil.ResetLoaderCacheForTest()
+	// cache は sync.Once なので、戻さないと fixture の loader がプロセス全体に
+	// 残る。同 package に shell を描画するテストが他にもある。
+	t.Cleanup(frontendutil.ResetLoaderCacheForTest)
+
+	cfg := &config.Config{
+		URL:                           "https://example.test",
+		Version:                       "0.0.1-test",
+		FrontendContentSecurityPolicy: CSPModeEnforce,
+	}
+	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	require.NoError(t, handler(c))
+
+	policy := rec.Header().Get("Content-Security-Policy")
+	require.NotEmpty(t, policy, "enforce なので header が出るはず")
+	// **directive を切り出して見る。** 部分文字列だと `script-src 'self'
+	// https://esm.sh 'unsafe-inline'` のように順を変えられると通る。
+	for _, d := range strings.Split(policy, "; ") {
+		if strings.HasPrefix(d, "script-src") {
+			require.NotContainsf(t, d, "'unsafe-inline'", "script-src に unsafe-inline が戻っている: %s", d)
+		}
+	}
+
+	// レンダリング結果から属性なしの <script> の中身を取り出す。
+	// `type="application/json"` の meta ブロックは属性付きなので拾わない
+	// (実行されないので script-src の対象外)。
+	bodies := inlineScriptRe.FindAllStringSubmatch(rec.Body.String(), -1)
+	// bootGlobals と loader の 2 つ。**件数を固定する** — NotEmpty だと片方が
+	// 消えても通り、loader の hash 経路が無検証に戻る。
+	require.Len(t, bodies, 2, "inline script は bootGlobals と loader の 2 つ")
+
+	for _, m := range bodies {
+		hash := cspScriptHashes(m[1])
+		require.Len(t, hash, 1)
+		assert.Containsf(t, policy, hash[0],
+			"HTML に出た inline script の hash が CSP に無い。script: %.60s...", m[1])
+	}
+}
+
+// `<script>` に属性が付かないものだけを拾う (`type="application/json"` を除外)。
+var inlineScriptRe = regexp.MustCompile(`(?s)<script>(.*?)</script>`)

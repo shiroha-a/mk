@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"net/url"
 	"slices"
 	"strings"
@@ -30,10 +32,10 @@ const CSPReportPath = "/csp-report"
 // **緩すぎると違反が出ず観測の意味が無い**ので、最終的に enforce したい形から
 // 始めている。report-only の間に出た違反を潰してから enforce へ切り替える。
 //
-// `'unsafe-inline'` を script/style に入れているのは、SSR shell が inline script
-// (`VERSION` / `CLIENT_ENTRY` の定義) と SVG の inline style 属性を持つため。
-// **これらを nonce / hash へ移すのは別段階**で、先にそれ以外の違反を見たい。
-// 最初から nonce 化すると、shell 由来の違反ばかりが出て他が埋もれる。
+// **script 側の `'unsafe-inline'` は #2786 で外した。** SPA shell の inline script
+// (`VERSION` / `CLIENT_ENTRY` の定義と bootloader) は内容が起動時に固定なので、
+// SHA-256 hash を `script-src` に足して通す。style 側は Vue の `:style` が
+// 属性として出るため残している (下の style-src のコメントを参照)。
 //
 // `frame-ancestors` は**入れない**。`X-Frame-Options: DENY` を
 // `middleware/frameguard.go` が既に付けており、そちらは `/embed/` を除外する
@@ -64,7 +66,14 @@ var frontendCSPDirectives = []string{
 	// esm.sh に渡り、CDN 側の可用性と完全性に依存する。
 	//
 	// 言語を絞ってバンドルすれば両立できる可能性はある (未検証)。
-	"script-src 'self' 'unsafe-inline' https://esm.sh",
+	// **`'unsafe-inline'` は入れない** (#2786)。SPA shell の inline script は
+	// `cspScriptHashes` が出す `'sha256-...'` で通す。hash は HTML に埋める
+	// 文字列そのものから導くので、片方だけ変えて壊れることはない。
+	"script-src 'self' https://esm.sh",
+	// **style 側の `'unsafe-inline'` は残す** (#2786)。Vue の `:style` バインディングが
+	// 146 箇所あり、DOM の inline `style` 属性になる。属性は `style-src-attr` の
+	// 管轄で hash では救えず (`'unsafe-hashes'` が要る)、外すと UI が広範に壊れる。
+	// splash の `<style>:root{--splash-color:...}</style>` も meta 由来で動的。
 	"style-src 'self' 'unsafe-inline'",
 	// 画像は media proxy 経由で来る。**internal proxy なら同一オリジン**で、
 	// 外部 media proxy 構成ではその origin を extraMediaOrigins で足す (#2501)。
@@ -139,6 +148,30 @@ func buildFrontendCSP(withReport bool, extras cspExtras) string {
 	return strings.Join(d, "; ")
 }
 
+// cspScriptHashes returns `'sha256-<base64>'` for each non-empty inline script.
+//
+// **呼び出し側は HTML に埋める文字列そのものを渡すこと。** 同じ内容を 2 箇所で
+// 組み立てると、片方だけ変えたときに CSP を有効にしているインスタンスで
+// script が丸ごとブロックされ、画面が真っ白になる (#2786)。
+//
+// 空文字は飛ばす。loader は外部参照になることがあり (`inlineOrLinkJS`)、その
+// ときは inline script が存在しないので hash も要らない。
+//
+// CSP の hash は **script 要素の中身をそのまま** (前後の空白も含めて) 取る。
+// `<script>` タグの属性や改行の入れ方を変えると一致しなくなるので、HTML 側の
+// 埋め込みは `<script>%s</script>` の形を保つこと。
+func cspScriptHashes(scripts ...string) []string {
+	out := make([]string, 0, len(scripts))
+	for _, s := range scripts {
+		if s == "" {
+			continue
+		}
+		sum := sha256.Sum256([]byte(s))
+		out = append(out, "'sha256-"+base64.StdEncoding.EncodeToString(sum[:])+"'")
+	}
+	return out
+}
+
 // appendExtras adds the configuration-dependent origins to a directive.
 func appendExtras(directive string, ex cspExtras) string {
 	name, _, ok := strings.Cut(directive, " ")
@@ -187,7 +220,10 @@ func captchaCSPExtras(hcaptcha, recaptcha, turnstile bool) cspExtras {
 		// www.gstatic.com/recaptcha/ から読む。公式推奨は path 付きだが、CSP の
 		// path source は redirect 後に無視される仕様で保証にならないため、
 		// objectStorageOrigin と同じく origin 単位で書く。gstatic 全体に script
-		// 実行を許す広さは 'unsafe-inline' が残る現状では実質差が無い。
+		// 実行を許す広さは、CSP の path source が redirect 後に無視される以上
+		// 避けられない。**#2786 で script-src から 'unsafe-inline' を外したので、
+		// これは reCAPTCHA を有効にした instance でだけ script-src を広げる**
+		// (以前は unsafe-inline があるので実質差が無かった)。
 		ex.Script = append(ex.Script, "https://www.recaptcha.net", "https://www.gstatic.com")
 	}
 	if turnstile {

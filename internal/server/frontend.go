@@ -316,6 +316,15 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	loaderCSSTag := inlineOrLinkCSS(loader.CSS, "/vite/loader/style.css")
 	loaderJSTag := inlineOrLinkJS(loader.JS, "/vite/loader/boot.js")
 
+	// **inline script は変数に切り出す。** CSP の hash はこの値から導くので、
+	// HTML 側と hash 側で別々に文字列を持つと、片方だけ変えたときに CSP を
+	// 有効にしている運用者の画面が真っ白になる (#2786)。
+	bootGlobals := fmt.Sprintf(
+		`const VERSION = '%s'; const CLIENT_ENTRY = %s; const LANGS = ["ja-JP","en-US"];`,
+		cfg.Version, clientEntryJS)
+	// loader は inline のときだけ hash が要る (外部参照なら 'self' で通る)。
+	cspExtra.Script = append(cspExtra.Script, cspScriptHashes(bootGlobals, loader.JS)...)
+
 	html := fmt.Sprintf(`<!DOCTYPE html>
 <html><head>
 <meta charset="UTF-8">
@@ -336,7 +345,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 %s
 %s
 %s<style>:root{--splash-color:%s}</style>
-<script>const VERSION = '%s'; const CLIENT_ENTRY = %s; const LANGS = ["ja-JP","en-US"];</script>
+<script>%s</script>
 <script type="application/json" id="misskey_meta" data-generated-at="%d">%s</script>
 %s
 </head><body>
@@ -351,7 +360,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		pageTitleEsc, noindexTag, stdhtml.EscapeString(faviconURL), stdhtml.EscapeString(appleTouchIconURL),
 		pageTitleEsc, baseURLEsc,
 		prefetchTags, ov.OG+ov.Head, viteClientTag, cssLinkTags,
-		loaderCSSTag, splashColor(themeColor), cfg.Version, clientEntryJS,
+		loaderCSSTag, splashColor(themeColor), bootGlobals,
 		time.Now().UnixMilli(), metaJSON, loaderJSTag,
 		stdhtml.EscapeString(splashIconURL), splashSpinnerSVG)
 
