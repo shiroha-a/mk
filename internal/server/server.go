@@ -450,6 +450,12 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	// 外部リンク遷移で閲覧中の URL が path ごと漏れるのを防ぐ (#2404)。
 	// upstream には無い mk-go 独自の hardening。
 	e.Use(middleware.ReferrerPolicy())
+	// MIME sniffing を止める (#2782)。**drive とプラグイン proxy にしか付いて
+	// いなかった** ので SPA shell も API も素通しだった。これも upstream には無い。
+	e.Use(middleware.NoSniff())
+	// 使わないブラウザ機能 (カメラ / マイク / 位置情報 / 支払い) を落とす (#2782)。
+	// 同じく upstream には無い。fullscreen は動画プレイヤーが使うので落とさない。
+	e.Use(middleware.PermissionsPolicy())
 	// upstream ServerService と同じ HSTS。**disableHsts を設定として読んで
 	// いたのに header を出していなかった**ので、TS から切り替えると黙って
 	// 消えていた。https でない構成では付けない。

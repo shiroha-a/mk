@@ -99,9 +99,13 @@ func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) ech
 		// する + サイズが切れる」現象を起こす。`immutable` で長期 cache 化、
 		// `no-transform` で binary 1:1 配信を契約する。
 		c.Response().Header().Set("Cache-Control", "max-age=31536000, immutable, no-transform")
-		// #2106 H3: upstream FileServerService と同じ防御 header。CSP で file origin
-		// からの script/object 実行を封じ、nosniff で MIME sniffing を止め、
-		// Content-Disposition: inline で download 名を制御する (octet-stream と多層防御)。
+		// #2106 H3: file origin からの script/object 実行を封じる。CSP は upstream
+		// FileServerService と同じ値。`Content-Disposition: inline` も upstream 相当
+		// (ただし upstream は `contentDisposition('inline', filename)` で filename も
+		// 載せる)。**この 3 つのうち mk-go 独自なのは nosniff だけ** — upstream の
+		// backend が明示的に付ける箇所は無い (直上の `Cache-Control` の
+		// `no-transform` も独自だが、そちらは 1 つ上のコメントで説明済み)。#2782 で global にも付くようになったが、
+		// ここは file 配信固有の多層防御として残す。
 		c.Response().Header().Set("Content-Security-Policy", "default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'")
 		c.Response().Header().Set("X-Content-Type-Options", "nosniff")
 		c.Response().Header().Set("Content-Disposition", "inline")
