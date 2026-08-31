@@ -20,6 +20,11 @@ import (
 //
 // mock 経由のケースは cursor の後ろに 5 件置き limit=2 で取る。1 件しか
 // 置かないと ASC でも DESC でも同じ結果になり、向きを検出できない。
+//
+// **向きは両方固定する。** ASC (sinceID 単独) だけだと「常に ASC」に戻す変異が
+// 通る。#2766 で足した drive_file の 3 メソッドは両方向を見ているが、それ以外は
+// ASC 片側のまま。
+//
 // 例外は 2 つ: ModerationLog は slice なので 3 件、ListMessagesByRoom は
 // fixture の都合で 1 件 (向きは見ない。当該サブテストに理由を書いてある)。
 // `TestSortMockPage_MatchesPaginationOrder` は helper を直接叩くので、
@@ -60,12 +65,14 @@ func TestMockChatRepository_SinceOnlyIsAscending(t *testing.T) {
 	// 候補は cursor の後ろに 5 件。ここで守れる強さは変異の種類で違う (実測):
 	//
 	//   - SortMockPage の向きを間違える → 50/50 で落ちる (決定的)
-	//   - SortMockPage の呼び出しごと消す → 25/50。mock は map 走査で並びが
-	//     非決定になるため確率的にしか落ちない
+	//   - SortMockPage の呼び出しごと消す → 25/50 (確率的)
 	//
-	// **一様シャッフルではない** (Go の map は小さいうちは挿入順の相対順序が
-	// かなり残る) ので、候補を増やしても順列の数ほどは下がらない。候補 3 件
-	// から 5 件への増加で見逃しは 3/4 から 1/2 になった程度。
+	// **後者が確率的なのは fixture の挿入順の artifact で、map 走査そのものの
+	// 性質ではない。** Go の小さい map の反復は挿入順の回転なので、昇順に入れた
+	// 候補を ASC のケースで読むと開始オフセットの半分で偶然一致する。候補を
+	// 増やしても順列の数ほどは下がらない (3 件 → 5 件で見逃しが 3/4 → 1/2)。
+	// **決定化したいなら候補数ではなく seed の向きで対処する** — 詳細は
+	// TestMockDriveFileRepository_PaginationOrder の注記。
 	for i := 0; i < 6; i++ {
 		rid := fmt.Sprintf("r%d", i)
 		m.Rooms[rid] = &model.ChatRoom{ID: rid, OwnerID: "owner"}
@@ -145,6 +152,100 @@ func TestMockDriveFolderRepository_SinceOnlyIsAscending(t *testing.T) {
 	rows, err := m.ListByUser(owner, nil, "", "d0", 2)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"d1", "d2"}, pageIDs(rows, func(f *model.DriveFolder) string { return f.ID }))
+}
+
+// drive_file の 3 メソッド (#2766)。#2713 で他の mock を揃えたときに
+// `ListForAdmin` / `ListSystemFiles` は手書き bubble sort のまま残り、
+// `ListByUser` は sort キー分岐があるとして見送られていた。
+//
+// **両方向を見る。** ASC (sinceID 単独) だけを固定すると「常に ASC」に
+// 戻す変異が通ってしまう。DESC 側 (untilID 単独 / cursor 無し) は admin の
+// ドライブ一覧の既定経路でもある。
+//
+// **fixture は id の降順に入れる。** Go の小さい map (6 要素 = 単一 group、
+// slot は 8) の反復は挿入順の回転なので、昇順に入れると開始オフセット 8 通りの
+// うち 4 通りで先頭 2 件が偶然 `f1,f2` になり、並べ替えを消す変異が ASC の
+// ケースでは確率的にしか落ちない。降順に入れると ASC 側はどの回転でも一致
+// しなくなる。
+//
+// **向きは打ち消し合う。** 降順 seed だと今度は DESC のケースが約半数で偶然
+// 一致する (実測 40 回中 22 回素通り)。それでも全 call site が決定的なのは、
+// 殺しているアサーションが違うため:
+//
+//   - ListForAdmin / ListSystemFiles: **ASC 側**が殺す。pre-sort が無いので
+//     降順 seed の効果がそのまま出る (実測 40/40)
+//   - ListByUser の既定枝: **DESC 側**が殺す。switch の手前の pre-sort
+//     (id 昇順) で ASC は素通りするが、DESC は必ず外れる
+//
+// `SortMockPage` の呼び出しを消す変異の実測 (各 20 回):
+//
+//   - 昇順 seed で ASC のケースだけだったとき:
+//     ListForAdmin 13/20 / ListSystemFiles 11/20 / ListByUser 0/20
+//   - 降順 seed + 両方向のケース (現在): 3 つとも 20/20
+//
+// **次にケースを足すときは向きに注意する。** DESC 単独のケースを決定的に
+// したいなら seed は**昇順**にする。
+func TestMockDriveFileRepository_PaginationOrder(t *testing.T) {
+	owner := "u"
+	newMock := func(userID *string) *MockDriveFileRepository {
+		m := NewMockDriveFileRepository()
+		for i := 5; i >= 0; i-- {
+			id := fmt.Sprintf("f%d", i)
+			m.Files[id] = &model.DriveFile{ID: id, UserID: userID}
+		}
+		return m
+	}
+	ids := func(rows []*model.DriveFile) []string {
+		return pageIDs(rows, func(f *model.DriveFile) string { return f.ID })
+	}
+
+	t.Run("ListForAdmin", func(t *testing.T) {
+		rows, err := newMock(&owner).ListForAdmin("", "", "", "", "", "f0", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f1", "f2"}, ids(rows), "sinceID 単独は ASC")
+
+		rows, err = newMock(&owner).ListForAdmin("", "", "", "", "f5", "", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f4", "f3"}, ids(rows), "untilID 単独は DESC")
+	})
+
+	t.Run("ListSystemFiles", func(t *testing.T) {
+		// system file = userId / userHost がともに NULL。
+		rows, err := newMock(nil).ListSystemFiles("", "", "f0", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f1", "f2"}, ids(rows), "sinceID 単独は ASC")
+
+		rows, err = newMock(nil).ListSystemFiles("", "f5", "", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f4", "f3"}, ids(rows), "untilID 単独は DESC")
+	})
+
+	t.Run("ListByUser", func(t *testing.T) {
+		rows, err := newMock(&owner).ListByUser(owner, nil, true, "", "", "", "f0", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f1", "f2"}, ids(rows), "sinceID 単独は ASC")
+
+		rows, err = newMock(&owner).ListByUser(owner, nil, true, "", "", "f5", "", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f4", "f3"}, ids(rows), "untilID 単独は DESC")
+	})
+
+	// **sort を渡すと paginationOrder は効かない。** production も upstream も
+	// sort 指定時は order を上書きするので、mock がここまで cursor の向きに
+	// 従うと逆に乖離する。
+	t.Run("ListByUser with sort keeps its own order", func(t *testing.T) {
+		rows, err := newMock(&owner).ListByUser(owner, nil, true, "", "+createdAt", "", "f0", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f5", "f4"}, ids(rows), "+createdAt は sinceId があっても id DESC")
+	})
+
+	// 未知の sort 値は production の switch でも default に落ちて
+	// paginationOrder になる (handler が弾くので endpoint 経由では来ない)。
+	t.Run("ListByUser with unknown sort falls back to the cursor order", func(t *testing.T) {
+		rows, err := newMock(&owner).ListByUser(owner, nil, true, "", "bogus", "", "f0", 2)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"f1", "f2"}, ids(rows))
+	})
 }
 
 func TestMockAbuseReportRepository_SinceOnlyIsAscending(t *testing.T) {
