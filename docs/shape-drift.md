@@ -239,7 +239,13 @@ Misskeyのエラーは`{code, message, id}`形式で、クライアントは`cod
 
 echo wrapperはhandlerの最頻送出経路なので外すとgateが大半のrouteを素通しする(実例: これを足すと解決数が577→652に増え、未検出だったdrift 25件が露出した)。
 
+**加えて`internal/server/router.go`にインラインで書かれたendpoint** (`api.POST("/promo/read", func(c echo.Context) error {...})`) も`go/parser`で本体を切り出し、同じ4経路で走査する (#2784)。抽出単位がmethodではなくclosureなので、`func`宣言で本体を切り分ける通常の走査をそのまま使うと**黙って0件を返す**。
+
 `router.go`の`path→handler`登録(import alias→pkg、`xxx := pkg.NewHandler()`のvar→pkg、ルート登録)を解決して各methodをendpointへ対応づけ、`(endpoint, code)`をgoldenの値と突合する。regexベースの抽出が空振りした場合の **silent-zero** を防ぐため、解決できたemissionが下限(400)を下回ったらgateを失敗させる。
+
+インライン側には**別の下限**を置く。数えるのは抽出できた総数ではなく**goldenと突合できた数**で、実測1件 (インライン10 emissionのうちgoldenにエントリがあるのは`promo/read`の`NO_SUCH_NOTE`だけ)。総数で数えると、emissionをrouter.go内のhelper関数へ切り出す・`api.Group("/promo")`経由に変えるといった**ごく自然なリファクタで唯一の検査対象が黙って消える** (実測で素通りした)。
+
+なお`internal/server/router.go`のインライン対応は **id gateのみ**。status / kind gateは`internal/api`だけを見る。
 
 ### golden
 

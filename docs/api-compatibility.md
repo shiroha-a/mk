@@ -328,7 +328,8 @@ drop-in テスト (#367) で発見した補完カラム:
   additive に足している。upstream のクライアントから見て欠けているものは無い
 - **search backend** — `fulltextSearch.provider` で挙動切替: 既定の `sqlLike` (= `lower(text) LIKE` による部分一致。**ILIKE ではない** — pg_bigm の GIN index `gin (lower(text) gin_bigm_ops)` は LIKE しか加速せず、ILIKE だと拡張を入れても index が効かないため。Meilisearch 不要、軽量 deploy 向け) / `meilisearch` (要 host 設定) / `sqlPgroonga` (要 PGroonga 拡張) / `none` (= upstream TS strict-mode 互換、400 UNAVAILABLE で reject、#877)
 - **promo は作成・既読化できるが表示されない (#2781)** — `admin/promo/create` と
-  `promo/read` は upstream と同じパスで実装済みで、DB 行も正しく増える。しかし
+  `promo/read` は upstream と同じパス・同じ error id で実装済みで (#2784)、
+  DB 行も正しく増える。しかし
   **`promo_note` を読んで利用者へ提示する経路が upstream にも無い**
   (2026.7.0 の backend で `promoNote` / `promoRead` を参照するのは endpoint 2 本と
   DI / model 定義だけ。`grep -rlni` で 8 ファイル、内訳は
