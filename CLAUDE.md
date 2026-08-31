@@ -596,7 +596,7 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   PR トリガーへ移行済み (#2291)。
 - **4 シャード並列** (`--shard=i/4`)。`fail-fast: false` で 1 つが落ちても
   他は完走する。
-- **1 スタックあたりは直列でしか回せない。** 290 spec ファイル中 173 が共有の
+- **1 スタックあたりは直列でしか回せない。** 292 spec ファイル中 173 が共有の
   root (alice) でサインインし、instance meta も全 spec が共有する。Playwright は
   ファイル単位で並列化するので、`workers` を上げると `profile_iscat_toggle` と
   `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
