@@ -119,7 +119,8 @@ func TestOpen_SearchPathIsPinned(t *testing.T) {
 
 	var schema string
 	require.NoError(t, s.DB().QueryRow(
-		`SELECT table_schema FROM information_schema.tables WHERE table_name = 't'`).Scan(&schema))
+		`SELECT table_schema FROM information_schema.tables -- unscoped: どの schema に作られたかを調べる箇所
+		 WHERE table_name = 't'`).Scan(&schema))
 	assert.Equal(t, s.Schema(), schema, "本体の public ではなく自分の schema に作られる")
 }
 
