@@ -117,7 +117,6 @@ func TestErrorIDDrift(t *testing.T) {
 	// closure が丸ごと gate の外にあった。golden が正しい id を持っているのに
 	// 検出されない状態だった (`promo/read` の NO_SUCH_NOTE で実際に起きていた)。
 	inline := scanInlineRoutes(t, filepath.Join(root, "internal/server/router.go"))
-	inlineGated := 0
 	for ep, bodies := range inline {
 		if excludedEndpoint(ep) {
 			continue
@@ -135,41 +134,34 @@ func TestErrorIDDrift(t *testing.T) {
 			if !ok || !validUUID.MatchString(want) {
 				continue
 			}
-			// **golden と突合できたものだけを数える。** 下記の guard を参照。
-			inlineGated++
 			if em.uuid != want {
 				drifts = append(drifts, drift{ep, em.code, em.uuid, want})
 			}
 		}
 	}
 
-	// **インライン endpoint は 0 件が正常** (#2791 で全 12 件を `internal/api` へ
+	// **インライン endpoint は 0 件が正常** (#2791 で全 14 件を `internal/api` へ
 	// 移設した)。上の api walk が拾い直すので、gate のカバレッジはむしろ上がった。
 	//
 	// **向きを反転させてある。** 以前は「golden と突合できた数が 1 件未満なら
 	// 落とす」下限だったが、対象が無くなった今それは常に落ちる。代わりに
 	// **インラインが復活したら落とす**形にする — 新しく書かれた closure は
-	// `internal/api` の walk からも scanInlineRoutes からも漏れやすく、
+	// `internal/api` の walk からも `scanInlineRoutes` からも漏れやすく、
 	// 「golden が正しい id を持っているのに検出されない」状態 (`promo/read` の
 	// `NO_SUCH_NOTE` で実際に起きていた) に戻る。
 	//
-	// scanInlineRoutes / scanBodyEmissions は**消さずに残す**。これが動いて
-	// いないと、この guard 自体が空振りして復活を見逃す。
-	if len(inline) > 0 {
-		paths := make([]string, 0, len(inline))
-		for ep := range inline {
-			paths = append(paths, ep)
-		}
-		sort.Strings(paths)
+	// **数えるのは `countInlineHandlers`** (レシーバを問わない)。`scanInlineRoutes`
+	// は endpoint パスを復元するために `api` ident に限るので、
+	// `promoGroup := api.Group("/promo")` のような整理をしただけで素通りする。
+	if inlineHandlers := countInlineHandlers(t, filepath.Join(root, "internal/server/router.go")); len(inlineHandlers) > 0 {
 		t.Errorf("router.go に inline endpoint が復活している (%d 件): %v\n"+
 			"  handler は internal/api 配下のパッケージに置くこと。router.go の\n"+
 			"  closure は error id gate から漏れやすく、golden が正しい値を持って\n"+
 			"  いても drift を検出できない (#2784 / #2791)。\n"+
-			"  やむを得ず inline にするなら、この guard を「突合できた数の下限」へ\n"+
-			"  戻したうえで golden にエントリを足すこと。",
-			len(inline), paths)
+			"  移設先では **ハンドラを変数に代入してから渡す** こと — gate は\n"+
+			"  `handlerVar.Method` の形しか解決しない。",
+			len(inlineHandlers), inlineHandlers)
 	}
-	_ = inlineGated
 
 	// silent-zero guard: regex ベースの抽出/解決が upstream フォーマット変更や
 	// リファクタで空振りすると、emission が 0 件になり gate が無意味に PASS して
@@ -425,7 +417,8 @@ func parseRoutes(t *testing.T, path string) map[string][]string {
 // **group 経由は拾えない。** `promoGroup := api.Group("/promo")` でも
 // `api.Group("/promo").POST(...)` のチェーンでも、レシーバが `api` ident では
 // なくなるので**ルートごと収集対象から外れる** (key が `read` になるのではない)。
-// 呼び出し側の `inlineGated` guard がその状態を検出する。
+// endpoint パスを復元できないので drift 検出には使えないが、**「closure が
+// 書かれた」ことだけは `countInlineHandlers` がレシーバを問わず数える。**
 func scanInlineRoutes(t *testing.T, path string) map[string][]string {
 	t.Helper()
 	src, err := os.ReadFile(path)
@@ -446,7 +439,7 @@ func scanInlineRoutes(t *testing.T, path string) map[string][]string {
 	// 前に書かれるとは限らないので、走査を 2 段に分ける。
 	//
 	// **スコープは見ない (同名は最後の束縛が勝つ)。** `var x = func(...)` の
-	// ValueSpec も拾わない。現状 router.go の closure 束縛は 8 個すべて一意で
+	// ValueSpec も拾わない。現状 router.go の closure 束縛は 5 個すべて一意で
 	// package-level の `var = func` は 0 件なので実害は無いが、増えたらここを直す。
 	lits := map[string]*ast.FuncLit{}
 	ast.Inspect(f, func(n ast.Node) bool {
@@ -503,6 +496,120 @@ func scanInlineRoutes(t *testing.T, path string) map[string][]string {
 		}
 		return true
 	})
+	return out
+}
+
+// countInlineHandlers counts route registrations under the /api group whose
+// handler argument is an inline closure.
+//
+// `scanInlineRoutes` は endpoint パスを復元するためにレシーバを `api` ident に
+// 限るが、**guard の目的は「router.go に closure を書かせない」こと**なので
+// こちらは `api` から派生した group も辿る。`promoGroup := api.Group("/promo")`
+// のようなごく自然な整理をしただけで guard を素通りするのを防ぐ。
+//
+// **`/api` 配下に限る。** レシーバを一切問わないと `s.echo.GET("/healthz", ...)`
+// や frontend の catchall まで拾ってしまう。あれらは error id gate の対象では
+// ないし、`internal/api` に移すものでもない。
+//
+// 第 2 引数が closure literal のもの、および ident 束縛
+// (`x := func(...)`; `api.GET("/p", x)`) を数える。
+func countInlineHandlers(t *testing.T, path string) []string {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read router: %v", err)
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		t.Fatalf("parse router: %v", err)
+	}
+
+	// closure 束縛と、`api` から派生した group 変数を集める。
+	//
+	// group は `x := api.Group(...)` の形で作られ、そこから更に派生しうるので
+	// 変化が無くなるまで回す (宣言順に依存しない)。
+	lits := map[string]bool{}
+	apiGroups := map[string]bool{"api": true}
+	assigns := [][2]ast.Expr{}
+	ast.Inspect(f, func(n ast.Node) bool {
+		as, ok := n.(*ast.AssignStmt)
+		if !ok || len(as.Lhs) != 1 || len(as.Rhs) != 1 {
+			return true
+		}
+		id, ok := as.Lhs[0].(*ast.Ident)
+		if !ok {
+			return true
+		}
+		if _, ok := as.Rhs[0].(*ast.FuncLit); ok {
+			lits[id.Name] = true
+			return true
+		}
+		assigns = append(assigns, [2]ast.Expr{as.Lhs[0], as.Rhs[0]})
+		return true
+	})
+	for changed := true; changed; {
+		changed = false
+		for _, a := range assigns {
+			id := a[0].(*ast.Ident)
+			if apiGroups[id.Name] {
+				continue
+			}
+			call, ok := a[1].(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Group" {
+				continue
+			}
+			recv, ok := sel.X.(*ast.Ident)
+			if !ok || !apiGroups[recv.Name] {
+				continue
+			}
+			apiGroups[id.Name] = true
+			changed = true
+		}
+	}
+
+	var out []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "GET", "POST", "PUT", "DELETE":
+		default:
+			return true
+		}
+		recv, ok := sel.X.(*ast.Ident)
+		if !ok || !apiGroups[recv.Name] {
+			return true
+		}
+		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		ep, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			return true
+		}
+		switch arg := call.Args[1].(type) {
+		case *ast.FuncLit:
+			out = append(out, ep)
+		case *ast.Ident:
+			if lits[arg.Name] {
+				out = append(out, ep)
+			}
+		}
+		return true
+	})
+	sort.Strings(out)
 	return out
 }
 
