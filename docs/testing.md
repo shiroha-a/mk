@@ -79,6 +79,8 @@ CIではパッケージごとにカバレッジを計測し、閾値未達のパ
 
 - **DB を読み書きするテストで `OpenSharedTestDB` を使わない。** これは `internal/db` のように接続処理そのものを試すテスト専用
 - schema が分かれているので `DELETE FROM "user"` のような無条件の削除は書いてよい。ただし**それは自分の schema に閉じている前提**に依存するので、`search_path` を跨ぐ生 SQL (`public.` 明示など) を書かない
+- **システムカタログも `search_path` に従わない (#2777)。** 参照は `pg_catalog` で解決されるが、**返る行は全 schema 分**。必ず自分の schema に絞る: `pg_indexes` は `schemaname = current_schema()`、`information_schema.columns` / `.tables` は `table_schema = current_schema()` (このリポジトリで最も多いのはこちら)、`pg_class` は `pg_namespace` を join して `n.nspname = current_schema()` (`pg_class` は schema を oid で持ち `schemaname` 列が無い。`pg_attribute` は relation の oid しか持たないので `pg_class` 経由の 2 段 join になる)。**`information_schema.schemata` は対象外** — schema の一覧そのものなので絞る概念が無い。絞らないと 2 つ壊れる — (a) 他 schema の同名オブジェクトを自分のものと取り違えて regression guard が空振りし、(b) 他パッケージの `ApplyMigrations` が DDL 中だと `could not open relation with OID (SQLSTATE XX000)` で落ちる。**CI でも起きる** — shard は PostgreSQL を 1 つしか立てないので手元と同じ条件が揃い、required check の `test` が不定期に赤くなる
+- **複数行が返りうるクエリを `Scan(&string)` で受けない (#2777)。** GORM は `*string` に対し**全行を走査して dest を上書きし続ける**ので、複数行が返ると**最後の 1 行**が残る。実測では `pg_indexes` の絞りを外すと 17 件中 17 番目 (`internal_repository_ts`) の定義が返り、**それでもテストが緑のまま通っていた** — 上の (a) の実例。slice で受けて件数と schema 名を確かめる (`internal/repository/index_lookup_test.go` の `indexDef` が例)
 - 行の投入は**戻り値を検査する** (`require.NoError(t, db.Create(x).Error)`)。捨てると FK 違反が黙って流れ、「200 のはずが 400」のような原因から遠い症状に化ける
 
 migration で enum を作るときは `EXCEPTION WHEN duplicate_object THEN NULL` を使う。`pg_type WHERE typname = ...` は **schema を見ない**ため、別 schema に同名の型があるだけで作成を飛ばし、直後の `CREATE TABLE` が落ちる。
@@ -98,7 +100,7 @@ PostgreSQL は `DROP COLUMN` した列も **1 テーブル 1600 列**の上限�
 # したもので、兄弟 schema は `<package>_<suffix>` になる。
 PGPASSWORD=mk psql -h localhost -U mk -d misskey_test \
   -c 'DROP SCHEMA IF EXISTS "internal_repository" CASCADE' \
-  -c 'DROP SCHEMA IF EXISTS "internal_repository_ts" CASCADE'
+  -c 'DROP SCHEMA IF EXISTS "internal_repository_ts" CASCADE''
 ```
 
 **テストが途中で死んで schema が壊れたときも同じ手順**。`internal/core/fsck` (schema は `internal_core_fsck`) にはテーブルを一時的に rename したり制約を落として `t.Cleanup` で戻すテストがあり、プロセスが殺されると戻らない (`relation "drive_file" does not exist` 等になる)。

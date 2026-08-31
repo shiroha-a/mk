@@ -60,7 +60,7 @@ make dev
 | ターゲット | 内容 |
 |---|---|
 | `make check` | `fmt` → `lint` → `test`。コミット前に必須 |
-| `make gates` | 静的 parity ゲート 4 種を一括実行 |
+| `make gates` | 静的 parity ゲートを一括実行 (内訳は下の「静的 parity ゲート」表) |
 | `make version` | mk-go / 互換 Misskey / submodule のバージョンを表示 |
 | `make frontend-check` | 同梱フロントエンドを型チェック (`vue-tsc --noEmit`) **だけ**。ビルド成果物を作らないので安全。CI の同名 job はこれに加えて `make plugins-all` と統合バイナリの build を別 step で走らせる |
 | `make diff-check` | 差分比較ハーネスを作り直して実行 (クリーン DB 前提のため) |
@@ -167,6 +167,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | `make limitspec-check` | ページネーションの default / max の drift |
 | `make perm-check` | router middleware の権限が Misskey 本家より緩くないか |
 | `make wiring-check` | router で配線しないと効かない設定 (FTT のトグル等) の配線が外れていないか |
+| `make catalog-check` | `pg_indexes` 等のシステムカタログのクエリが `schemaname` で絞られているか (#2777) |
 | `make apicompat` | [API 互換性マトリクス](api-compat.md)を生成。内部で `make apicompat-routes` (route dump、stack 起動が必要) と `make apicompat-render` を実行する |
 
 ### e2e・互換性検証

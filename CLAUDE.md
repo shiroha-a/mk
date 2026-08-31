@@ -143,7 +143,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -206,7 +206,7 @@ make frontend-check          # fork frontend の型チェック (vue-tsc --noEmi
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 112 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 113 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -278,6 +278,26 @@ PostgreSQL を 1 つしか立てないため、共有すると一方の後片付
 - schema が分かれているので `DELETE FROM "user"` のような無条件の削除は書いてよい。
   ただし**それは自分の schema に閉じている前提**に依存するので、
   `search_path` を跨ぐ生 SQL (`public.` 明示など) を書かない
+- **システムカタログも `search_path` に従わない (#2777)。** 参照は `pg_catalog` で
+  解決されるが、**返る行は全 schema 分**。必ず自分の schema に絞る:
+  `pg_indexes` は `schemaname = current_schema()`、`information_schema.columns` /
+  `.tables` は `table_schema = current_schema()` (このリポジトリで最も多いのは
+  こちら)、`pg_class` は `pg_namespace` を join して `n.nspname = current_schema()`
+  (`pg_class` は schema を oid で持ち `schemaname` 列が無い。`pg_attribute` は
+  relation の oid しか持たないので `pg_class` 経由の 2 段 join になる)。
+  **`information_schema.schemata` は対象外** — schema の一覧そのものなので絞る
+  概念が無い。絞らないと 2 つ壊れる — (a) 他 schema の同名
+  オブジェクトを自分のものと取り違えて regression guard が空振りし、(b) 他
+  パッケージの `ApplyMigrations` が DDL 中だと
+  `could not open relation with OID (SQLSTATE XX000)` で落ちる。**CI でも起きる** —
+  shard は PostgreSQL を 1 つしか立てないので手元と同じ条件が揃い、required check の
+  `test` が不定期に赤くなる。
+- **複数行が返りうるクエリを `Scan(&string)` で受けない (#2777)。** GORM は `*string` に対し**全行を走査して
+  dest を上書きし続ける**ので、複数行が返ると**最後の 1 行**が残る。実測では
+  `pg_indexes` の絞りを外すと 17 件中 17 番目 (`internal_repository_ts`) の定義が
+  返り、**それでもテストが緑のまま通っていた** — 上の (a) の実例。slice で受けて
+  件数と schema 名を確かめる (`internal/repository/index_lookup_test.go` の
+  `indexDef` が例)
 - 行の投入は**戻り値を検査する** (`require.NoError(t, db.Create(x).Error)`)。
   捨てると FK 違反が黙って流れ、「200 のはずが 400」のような原因から遠い症状に化ける
 
@@ -775,6 +795,7 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-08-31**: Section 4 の「DB を使うテストの分離」に、システムカタログを schema で絞る規則と `Scan(&string)` の罠を追記 (#2777)。あわせて `make catalog-check` を新設し `make gates` に入れた (`make help` の target は 112 → 113)。doc だけだと再発する — schema が 17-19 ある条件は残ったままなので。`pg_indexes` を schema 非限定で引くテストが 3 本あり、**required check の `test` を不定期に落としていた** (PR #2778 の `test-shards (1)` が実際に赤くなった)。#2450 で schema を分けた結果、同名テーブルが 17-19 schema に同時に存在し、他パッケージの `ApplyMigrations` が DDL 中だと `could not open relation with OID (SQLSTATE XX000)` になる。**害はそれだけではない** — 絞らないと他 schema の同名 index を自分のものと取り違えるので、migration が適用されていなくても regression guard が緑になる。実測で `internal_repository_ts` の定義が返っており、3 本とも空振りしていた。`Scan(&string)` は複数行でも**最後の 1 行**を黙って取る (GORM は `*string` に対し全行を走査して dest を上書きする) ので、この取り違えは値が正しく見えて気付けない。
 - **2026-08-31**: Section 3 に `make wiring-check` を追加 (#2762)。`make gates` の一括対象も 1 つ増えて `make help` の target は 111 → 112。router で配線しないと効かない設定 (今回は `meta.enableFanoutTimelineDbFallback`) が、**配線を消しても build もテストも通ってしまう**ため。`internal/server` は CI のカバレッジ対象外で router を組み立てるテストも無く、#2762 の穴 (列と admin 公開はあるが読み取り経路に配線されていない) がまさにこれだった。判定は router.go をソースとして読む文字列一致だが、**コメント行は数えない** (コメントアウトして残すのは消すのと同じ)。同 package の既存 gate が生ソースを見ているのに合わせてある。
 - **2026-08-30**: Section 4 の「DB を使うテストの分離」に列枠の話を追記 (#2756)。PostgreSQL は `DROP COLUMN` した列も 1600 の上限に数えるので、実行のたびに列を落とすテスト構造だと手元でだけ枠が減り続け、最後に落ちる (実測で `clip` / `auth_session` / `app` が 1593 列まで到達した)。原因は 2 つで、`ApplyMigrations` が毎回全 migration を流し直すこと (再適用で実際に枠を食うのは migration が作る 112 テーブル中 `note` の 1 つだけ — `000033` が ADD し `000036` が DROP するため) と、TS 形状を作るテストが列を落として戻していたこと。前者は適用済みを skip する台帳、後者は専用の兄弟 schema を一度だけその形に作る方式で解消した。復旧手順も併記。
 - **2026-08-24**: Section 8 の `build` ジョブに `Check bundled plugins are disabled by default` step を追記 (#2701)。同梱サンプルは #2495 で既定無効にする方針にしたが、trustlevel は #2586 で `disabled: true` 付きで同梱したあと **#2585 の実測を採るために意図的に外され、実測が終わっても戻っていなかった**。起きたのは「新しく同梱したものに既定を付け忘れた」ではなく「**検証のために一時的に外して戻し忘れた**」なので、gate はそちらを主対象にしてある。判定は **`git ls-files` + grep だけ**で完結させてある — tracked な `plugins/*/mk-plugin.yml` に `disabled: true` の行があること (列挙が空なら「検査していないのに緑」になるので落とす)。`pluginbuild` に読ませるほうが parser 一致で厳密だが、`pluginbuild` の `discover` は git ではなく**ディレクトリ**を走査するので、`plugins/` に自前プラグインを置いている手元では誤検知するうえ、生成物を書いて `make plugin-dev` の配線を巻き戻す。**残る穴は許容している** — 行ベースの判定なので parser がキーとして読まない位置 (2 つ目の YAML ドキュメント、flow collection の中) に同じ行があると通る。意図的に行わないと踏めない形。手元の再現は `make plugin-vet` (#2701 で新設。`make help` の target は 110 → 111)。
