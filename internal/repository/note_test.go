@@ -3246,11 +3246,7 @@ func TestNoteRepository_MentionsFileIdsGINIndexes(t *testing.T) {
 	// 1. index が存在し GIN 型であること (CONCURRENTLY migration が適用された
 	//    ことの確認も兼ねる)。
 	for _, idx := range []string{"IDX_note_mentions", "IDX_note_fileIds"} {
-		var indexdef string
-		err := testDB.Raw(
-			`SELECT indexdef FROM pg_indexes WHERE tablename = 'note' AND indexname = ?`, idx,
-		).Scan(&indexdef).Error
-		require.NoError(t, err)
+		indexdef := indexDef(t, "note", idx)
 		require.NotEmpty(t, indexdef, "GIN index %s must exist (migration applied)", idx)
 		assert.Contains(t, indexdef, "USING gin", "%s must be a GIN index", idx)
 	}

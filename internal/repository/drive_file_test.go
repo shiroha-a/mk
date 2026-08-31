@@ -246,11 +246,7 @@ func TestDriveFileRepository_URLIndexes(t *testing.T) {
 		{"IDX_drive_file_webpublicUrl", true},
 		{"IDX_drive_file_thumbnailUrl", true},
 	} {
-		var indexdef string
-		err := testDB.Raw(
-			`SELECT indexdef FROM pg_indexes WHERE tablename = 'drive_file' AND indexname = ?`, tc.index,
-		).Scan(&indexdef).Error
-		require.NoError(t, err)
+		indexdef := indexDef(t, "drive_file", tc.index)
 		require.NotEmpty(t, indexdef, "index %s must exist (migration applied)", tc.index)
 		if tc.partial {
 			assert.Contains(t, indexdef, "IS NOT NULL", "%s must be a partial index", tc.index)

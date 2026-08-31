@@ -110,12 +110,7 @@ func TestClipFavoriteRepository_CountByClip(t *testing.T) {
 // 000059-000061 の TestDriveFileRepository_URLIndexes と同じ regression guard。
 func TestClipFavoriteRepository_ClipIDIndex(t *testing.T) {
 	// 1. index が存在すること (CONCURRENTLY migration が適用されたことの確認)
-	var indexdef string
-	err := testDB.Raw(
-		`SELECT indexdef FROM pg_indexes WHERE tablename = 'clip_favorite' AND indexname = ?`,
-		"IDX_clip_favorite_clipId",
-	).Scan(&indexdef).Error
-	require.NoError(t, err)
+	indexdef := indexDef(t, "clip_favorite", "IDX_clip_favorite_clipId")
 	require.NotEmpty(t, indexdef, "IDX_clip_favorite_clipId must exist (migration 000062 applied)")
 
 	// 2. planner が CountByClip の equality に index を選べること。小さな test
