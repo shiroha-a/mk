@@ -10,10 +10,12 @@ import (
 	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 )
 
 func newTestService(t *testing.T) (*signup.Service, *testutil.MockUserRepository, *testutil.MockMetaRepository) {
@@ -37,8 +39,12 @@ func TestSignup_Success(t *testing.T) {
 
 	// パスワードがハッシュ化されている
 	profile := userRepo.Profiles[result.User.ID]
-	assert.NotNil(t, profile.Password)
-	assert.NotEqual(t, "password123", *profile.Password)
+	require.NotNil(t, profile.Password)
+	assert.True(t, strings.HasPrefix(*profile.Password, "$2"))
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte("password123")))
+	cost, err := bcrypt.Cost([]byte(*profile.Password))
+	require.NoError(t, err)
+	assert.Equal(t, password.Cost(), cost)
 }
 
 func TestSignup_InitialSetup_SetsRootUser(t *testing.T) {
@@ -352,7 +358,11 @@ func TestCreatePending_Success(t *testing.T) {
 	assert.Equal(t, "alice@example.com", row.Email)
 	assert.NotEmpty(t, row.Code)
 	// Password は bcrypt hash 済 (再 hash 防止)。
-	assert.NotEqual(t, "secret123", row.Password)
+	assert.True(t, strings.HasPrefix(row.Password, "$2"))
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(row.Password), []byte("secret123")))
+	cost, err := bcrypt.Cost([]byte(row.Password))
+	require.NoError(t, err)
+	assert.Equal(t, password.Cost(), cost)
 	assert.Len(t, pendingRepo.Rows, 1)
 }
 

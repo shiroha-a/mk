@@ -13,6 +13,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -295,7 +296,11 @@ func TestReset_Success(t *testing.T) {
 
 	// パスワードが更新されている
 	newPw := *userRepo.profiles["u1"].Password
+	assert.True(t, strings.HasPrefix(newPw, "$2"))
 	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(newPw), []byte("newpassword")))
+	cost, err := bcrypt.Cost([]byte(newPw))
+	require.NoError(t, err)
+	assert.Equal(t, password.Cost(), cost)
 
 	// トークンが削除されている
 	assert.Len(t, resetRepo.requests, 0)

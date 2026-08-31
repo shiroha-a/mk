@@ -4,16 +4,19 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // attachModLog wires a fresh moderation log service backed by the
@@ -59,6 +62,13 @@ func TestResetPasswordAdmin_Success(t *testing.T) {
 		assert.Contains(t, misc.AlphanumericChars, string(c),
 			"password chars must be alphanumeric (LU_CHARS)")
 	}
+	profile := userRepo.Profiles["u1"]
+	require.NotNil(t, profile.Password)
+	assert.True(t, strings.HasPrefix(*profile.Password, "$2"))
+	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(resp.Password)))
+	cost, err := bcrypt.Cost([]byte(*profile.Password))
+	require.NoError(t, err)
+	assert.Equal(t, password.Cost(), cost)
 }
 
 // password 永続化に失敗したら 500 を返し、ハッシュ未保存のまま password を
