@@ -166,7 +166,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | `make errorid-check` | error id / HTTP status / kind の drift |
 | `make limitspec-check` | ページネーションの default / max の drift |
 | `make perm-check` | router middleware の権限が Misskey 本家より緩くないか |
-| `make wiring-check` | router で配線しないと効かない設定 (FTT のトグル等) の配線が外れていないか |
+| `make wiring-check` | router / server で配線しないと効かないもの (FTT のトグル、global な security header) の配線が外れていないか |
 | `make catalog-check` | `pg_indexes` 等のシステムカタログのクエリが `schemaname` で絞られているか (#2777) |
 | `make apicompat` | [API 互換性マトリクス](api-compat.md)を生成。内部で `make apicompat-routes` (route dump、stack 起動が必要) と `make apicompat-render` を実行する |
 
