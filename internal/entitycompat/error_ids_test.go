@@ -143,28 +143,33 @@ func TestErrorIDDrift(t *testing.T) {
 		}
 	}
 
-	// **インライン分にも下限を置く。数えるのは「golden と突合できた数」。**
+	// **インライン endpoint は 0 件が正常** (#2791 で全 12 件を `internal/api` へ
+	// 移設した)。上の api walk が拾い直すので、gate のカバレッジはむしろ上がった。
 	//
-	// 抽出できた emission の総数 (実測 10 件) で数えると、gate が実質何も検査
-	// しなくなる変更を通してしまう。インライン 10 件のうち golden にエントリが
-	// あるのは `promo/read` の `NO_SUCH_NOTE` **1 件だけ**で、残り 9 件は
-	// `INVALID_PARAM` (8) と `INTERNAL_ERROR` (1) で golden に無く素通しされる。
-	// 総数で見ると、次のどちらも下限 (旧 `< 5`) を通過して唯一の検査対象が
-	// 黙って消えた (実測):
+	// **向きを反転させてある。** 以前は「golden と突合できた数が 1 件未満なら
+	// 落とす」下限だったが、対象が無くなった今それは常に落ちる。代わりに
+	// **インラインが復活したら落とす**形にする — 新しく書かれた closure は
+	// `internal/api` の walk からも scanInlineRoutes からも漏れやすく、
+	// 「golden が正しい id を持っているのに検出されない」状態 (`promo/read` の
+	// `NO_SUCH_NOTE` で実際に起きていた) に戻る。
 	//
-	//   - emission を router.go 内の helper 関数へ切り出す → 総数 10 → 9
-	//   - `api.Group("/promo")` 経由に変える → レシーバが `api` ident でなくなり
-	//     ルートごと収集対象から外れる。総数 10 → 7
-	//
-	// **実測 1 件。0 になったら gate は空振りしている。**
-	if inlineGated < 1 {
-		t.Fatal("router.go のインライン endpoint で golden と突合できた emission が 0 件。\n" +
-			"  抽出 (scanInlineRoutes) / body の走査 (scanBodyEmissions) / endpoint key の\n" +
-			"  いずれかが壊れて、gate が空振りしている可能性がある。\n" +
-			"  **ただし `promo/read` を `internal/api` へ移設した場合は正常**: 上の api walk が\n" +
-			"  拾い直すのでカバレッジはむしろ上がる。その場合はこの guard を消し、\n" +
-			"  api walk 側で promo/read が gate されていることを確認すること")
+	// scanInlineRoutes / scanBodyEmissions は**消さずに残す**。これが動いて
+	// いないと、この guard 自体が空振りして復活を見逃す。
+	if len(inline) > 0 {
+		paths := make([]string, 0, len(inline))
+		for ep := range inline {
+			paths = append(paths, ep)
+		}
+		sort.Strings(paths)
+		t.Errorf("router.go に inline endpoint が復活している (%d 件): %v\n"+
+			"  handler は internal/api 配下のパッケージに置くこと。router.go の\n"+
+			"  closure は error id gate から漏れやすく、golden が正しい値を持って\n"+
+			"  いても drift を検出できない (#2784 / #2791)。\n"+
+			"  やむを得ず inline にするなら、この guard を「突合できた数の下限」へ\n"+
+			"  戻したうえで golden にエントリを足すこと。",
+			len(inline), paths)
 	}
+	_ = inlineGated
 
 	// silent-zero guard: regex ベースの抽出/解決が upstream フォーマット変更や
 	// リファクタで空振りすると、emission が 0 件になり gate が無意味に PASS して

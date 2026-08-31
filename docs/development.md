@@ -163,7 +163,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | ターゲット | 検出対象 |
 |---|---|
 | `make shapecheck` | レスポンス形状の drift。`make shapecheck-gen` で golden snapshot を再生成、`make shapecheck-report` でレポート出力 |
-| `make errorid-check` | error id / HTTP status / kind の drift。**id gate だけ** `internal/api` の handler に加えて router.go のインライン endpoint も見る (#2784)。status / kind gate は `internal/api` のみ |
+| `make errorid-check` | error id / HTTP status / kind の drift。id gate は **router.go に inline endpoint が復活したら落とす** (#2791 で全 14 件を `internal/api` へ移設済み。closure は gate から漏れる) |
 | `make limitspec-check` | ページネーションの default / max の drift |
 | `make perm-check` | router middleware の権限が Misskey 本家より緩くないか |
 | `make wiring-check` | router / server で配線しないと効かないもの (FTT のトグル、global な security header) の配線が外れていないか |

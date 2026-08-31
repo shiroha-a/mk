@@ -24,6 +24,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	apiapp "github.com/shiroha-a/mk/internal/api/app"
 	apiauth "github.com/shiroha-a/mk/internal/api/auth"
+	"github.com/shiroha-a/mk/internal/api/avatardecorations"
 	"github.com/shiroha-a/mk/internal/api/blocking"
 	apibubblegame "github.com/shiroha-a/mk/internal/api/bubblegame"
 	apichannels "github.com/shiroha-a/mk/internal/api/channels"
@@ -52,6 +53,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/notifications"
 	"github.com/shiroha-a/mk/internal/api/oauth"
 	"github.com/shiroha-a/mk/internal/api/pages"
+	"github.com/shiroha-a/mk/internal/api/promo"
 	apiproxy "github.com/shiroha-a/mk/internal/api/proxy"
 	"github.com/shiroha-a/mk/internal/api/renotemute"
 	apiresetpassword "github.com/shiroha-a/mk/internal/api/resetpassword"
@@ -83,7 +85,6 @@ import (
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
 	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
-	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
 	coreephemeral "github.com/shiroha-a/mk/internal/core/ephemeral"
 	"github.com/shiroha-a/mk/internal/core/event"
@@ -110,7 +111,6 @@ import (
 	corerole "github.com/shiroha-a/mk/internal/core/role"
 	coresearch "github.com/shiroha-a/mk/internal/core/search"
 	"github.com/shiroha-a/mk/internal/core/selfcheck"
-	"github.com/shiroha-a/mk/internal/core/serverstats"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
 	coresystemaccount "github.com/shiroha-a/mk/internal/core/systemaccount"
@@ -1363,95 +1363,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	}
 
 	// Users endpoint (public) — ユーザー一覧
-	api.POST("/users", func(c echo.Context) error {
-		var req struct {
-			Limit    int    `json:"limit"`
-			Offset   int    `json:"offset"`
-			Sort     string `json:"sort"`
-			State    string `json:"state"`
-			Origin   string `json:"origin"`
-			Hostname string `json:"hostname"`
-		}
-		if err := c.Bind(&req); err != nil {
-			return c.JSON(http.StatusOK, []any{})
-		}
-		// upstream users.ts:35 の state enum は ['all','alive'] (default 'all')。
-		// 範囲外 (moderator/admin 等の role state) は ajv が 400 で reject するので、
-		// public /users でも同じく弾く (ListUsers の role filter に到達させない、#1996)。
-		if !users.ValidListState(req.State) {
-			return apierr.JSONInvalidParam(c)
-		}
-		if req.Limit <= 0 {
-			req.Limit = 10
-		}
-		if req.Origin == "" {
-			req.Origin = "local"
-		}
-		viewer := middleware.GetUser(c)
-		viewerID := ""
-		if viewer != nil {
-			viewerID = viewer.ID
-		}
-		// upstream users.ts: base filter isExplorable=TRUE AND isSuspended=FALSE、
-		// hostname 絞り込み、認証時は mute/block 除外 (#1957-b)。
-		users, err := userRepo.ListUsers(model.UserListFilter{
-			State: req.State, Origin: req.Origin, Sort: req.Sort,
-			Limit: req.Limit, Offset: req.Offset,
-			Hostname:             req.Hostname,
-			ExplorableOnly:       true,
-			ExcludeRelatedTo:     viewerID,
-			UpdatedAtSortNonNull: true, // #1975: public /users は updatedAt sort で NULL updatedAt を除外
-		})
-		if err != nil {
-			return c.JSON(http.StatusOK, []any{})
-		}
-		ctx := c.Request().Context()
-		result := make([]any, 0, len(users))
-		for _, u := range users {
-			profile, _ := userRepo.FindProfileByUserID(u.ID)
-			// idGen を渡して createdAt を有効にする。未配線だと createdAt="" で
-			// misskey_dart の DateTimeConverter が FormatException で落ちる (#1251)。
-			d := entity.PackUserDetailed(u, profile, idGen)
-			// 認証 caller には viewer->user の relation block を付与 (#1957-a)。
-			listRelationRepos.Apply(&d, viewerID, u, profile)
-			// upstream の pack は isDetailed && isMe で MeDetailed を返す。
-			result = append(result, meself.Pack(ctx, d, u, profile, viewer))
-		}
-		return c.JSON(http.StatusOK, result)
-	})
 
 	// Pinned users (public)
 	//
 	// upstream pinned-users.ts は res が UserDetailed 配列で、各 pinnedUsers の
 	// acct を Acct.parse して host?? IsNull() で local/remote 両方を検索する
 	// (#1551)。mk-go も acct の host 部分を解決し UserDetailed で返す。
-	api.POST("/pinned-users", func(c echo.Context) error {
-		m, err := metaRepo.Fetch()
-		if err != nil || len(m.PinnedUsers) == 0 {
-			return c.JSON(http.StatusOK, []any{})
-		}
-		pinnedViewerID := ""
-		if v := middleware.GetUser(c); v != nil {
-			pinnedViewerID = v.ID
-		}
-		result := make([]entity.UserDetailed, 0, len(m.PinnedUsers))
-		for _, acct := range m.PinnedUsers {
-			username, host := parseAcct(acct, localHost)
-			if username == "" {
-				continue
-			}
-			u, err := userRepo.FindByUsernameLower(strings.ToLower(username), host)
-			if err != nil {
-				continue
-			}
-			profile, _ := userRepo.FindProfileByUserID(u.ID)
-			d := entity.PackUserDetailed(u, profile, idGen)
-			// 認証 caller には viewer->user の relation block を付与 (#1957-a)。
-			listRelationRepos.Apply(&d, pinnedViewerID, u, profile)
-			result = append(result, d)
-		}
-		return c.JSON(http.StatusOK, result)
-	})
 
 	// CAPTCHA service — meta から有効な provider を選択して構築する。
 	// meta 取得失敗時は captcha 無効として動作する (ログイン不能を避けるため)。
@@ -1515,31 +1432,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 弾かれるため INVALID_PARAM を返す。
 	usedUsernameRepo := repository.NewUsedUsernameRepository(s.db)
 	signupService.SetUsedUsernameRepo(usedUsernameRepo) // #2080: 削除済 username 再利用を弾く
-	api.POST("/username/available", func(c echo.Context) error {
-		var req struct {
-			Username string `json:"username"`
-		}
-		if err := c.Bind(&req); err != nil {
-			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-		}
-		// format 検証 (upstream localUsernameSchema、paramDef レベル拒否相当)。
-		if !coresignup.ValidUsernameFormat(req.Username) {
-			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-		}
-		lower := strings.ToLower(req.Username)
-		// (1) 既存 local user
-		_, userErr := userRepo.FindByUsernameLower(lower, nil)
-		existsUser := userErr == nil
-		// (2) used_usernames (過去に使われ解放された username)
-		usedExists, _ := usedUsernameRepo.Exists(lower)
-		// (3) preservedUsernames (予約 username)
-		preserved := false
-		if m, err := metaRepo.Fetch(); err == nil && m != nil {
-			preserved = coresignup.IsReservedUsername(lower, m.PreservedUsernames)
-		}
-		available := !existsUser && !usedExists && !preserved
-		return c.JSON(http.StatusOK, map[string]any{"available": available})
-	})
+	signupHandler.SetUsernameLookups(userRepo, usedUsernameRepo)
+	api.POST("/username/available", signupHandler.UsernameAvailable)
 
 	// Signin (Phase 6)
 	signinHandler := apisignin.NewHandler(userRepo)
@@ -1595,6 +1489,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 
 	// Emojis endpoints (public)
 	emojisHandler := apiemojis.NewHandler(emojiRepo)
+	emojisHandler.SetExportEnqueuer(s.queueClient)
 	api.POST("/emojis", emojisHandler.Emojis)
 	api.GET("/emojis", emojisHandler.Emojis)
 	api.POST("/emoji", emojisHandler.Emoji)
@@ -1741,6 +1636,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 
 	// Users endpoints
 	usersHandler := users.NewHandler(userService, followingService, noteRepo, idGen)
+	// /pinned-users は meta.pinnedUsers の acct を解決する (#2791 で router.go の
+	// inline closure から移設)。
+	usersHandler.SetMetaRepo(metaRepo)
+	usersHandler.SetLocalHost(localHost)
 	usersHandler.SetChartHook(chartHooks)
 	// users/notes (withChannelNotes) の post-fetch filter でチャンネルミュートを効かせる。
 	usersHandler.SetChannelMutingRepo(channelMutingRepo)
@@ -1773,6 +1672,16 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	usersHandler.SetRemoteStatsFetcher(&remoteStatsFetcherAdapter{
 		fetcher: corefederation.NewRemoteStatsFetcher(s.config.AllowedPrivateNetworks, s.config.UserAgent, s.outboundOpts()...),
 	})
+	// Users endpoint (public) — ユーザー一覧
+	api.POST("/users", usersHandler.List)
+
+	// Pinned users (public)
+	//
+	// upstream pinned-users.ts は res が UserDetailed 配列で、各 pinnedUsers の
+	// acct を Acct.parse して host?? IsNull() で local/remote 両方を検索する
+	// (#1551)。mk-go も acct の host 部分を解決し UserDetailed で返す。
+	api.POST("/pinned-users", usersHandler.PinnedUsers)
+
 	api.POST("/users/show", usersHandler.Show)
 	// upstream search.ts:15-16 は requireCredential:false + requiredRolePolicy:
 	// canSearchUsers。canSearchUsers の base default は true なので匿名も検索でき、
@@ -3445,26 +3354,14 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// `misskeyApiGet` で GET 呼び出ししても catchall に落ちないよう
 	// 両メソッドを受ける (#421)。POST のみだと `count` が undefined になり
 	// admin overview の「NaN 人」表示の原因になっていた。
-	onlineUsersHandler := func(c echo.Context) error {
-		count, _ := userRepo.CountOnlineUsers()
-		return c.JSON(http.StatusOK, map[string]any{"count": count})
-	}
-	api.GET("/get-online-users-count", onlineUsersHandler)
-	api.POST("/get-online-users-count", onlineUsersHandler)
+	api.GET("/get-online-users-count", usersHandler.OnlineCount)
+	api.POST("/get-online-users-count", usersHandler.OnlineCount)
 
 	// server-info (公開版) — サーバー情報
 	// frontend の server-metric widget は `misskeyApiGet` で GET 呼び出し、
 	// それ以外の MkVisitorDashboard 等は POST で呼ぶため両メソッドを登録。
-	serverInfoHandler := func(c echo.Context) error {
-		// 公開エンドポイントは machine/cpu/mem/fs のみを返す (upstream public
-		// server-info.ts)。os/node/psql/redis/net は admin 専用で未認証には出さない。
-		if m, err := metaRepo.Fetch(); err == nil && m.EnableServerMachineStats {
-			return c.JSON(http.StatusOK, serverstats.CollectPublic())
-		}
-		return c.JSON(http.StatusOK, serverstats.EmptyPublic())
-	}
-	api.POST("/server-info", serverInfoHandler)
-	api.GET("/server-info", serverInfoHandler)
+	api.POST("/server-info", metaHandler.ServerInfo)
+	api.GET("/server-info", metaHandler.ServerInfo)
 
 	// endpoints — 登録済みAPIエンドポイント一覧
 	// **Lister は closure で遅延評価する。** ここでの登録時点ではまだ全ルートが
@@ -3486,36 +3383,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/retention", chartsHandler.Retention)
 
 	// get-avatar-decorations — アバターデコレーション全件取得
-	api.POST("/get-avatar-decorations", func(c echo.Context) error {
-		var decorations []model.AvatarDecoration
-		if err := s.db.Find(&decorations).Error; err != nil {
-			return c.JSON(http.StatusOK, []any{})
-		}
-		// upstream get-avatar-decorations.ts は roleIdsThatCanBeUsedThisDecoration を
-		// 現存ロールのみに filter して削除済ロール ID を除去する (#1543)。meta は
-		// 1 度だけ引いて使い回す。取得失敗時は空集合 (= 全 roleId を除去) ではなく
-		// nil 扱いで filter すると全件落ちるため、エラー時は filter を skip して
-		// 旧挙動 (verbatim) にフォールバックする。
-		existingRoles, roleErr := roleService.ExistingRoleIDSet()
-		out := make([]map[string]any, 0, len(decorations))
-		for _, d := range decorations {
-			roleIDs := []string(d.RoleIDs)
-			if roleErr == nil {
-				roleIDs = corerole.FilterExistingRoleIDs(roleIDs, existingRoles)
-			}
-			out = append(out, map[string]any{
-				"id":                                 d.ID,
-				"name":                               d.Name,
-				"description":                        d.Description,
-				"url":                                d.URL,
-				"roleIdsThatCanBeUsedThisDecoration": roleIDs,
-				// upstream Misskey #17034 (= 2026.5.0) で追加された category field
-				// もここで返す。nullable なので null のままも許容。
-				"category": d.Category,
-			})
-		}
-		return c.JSON(http.StatusOK, out)
-	})
+	avatarDecorationsHandler := avatardecorations.NewHandler(s.db, roleService.ExistingRoleIDSet)
+	api.POST("/get-avatar-decorations", avatarDecorationsHandler.Get)
 
 	// email-address/available — メールアドレスの利用可否チェック (public)
 	//
@@ -3525,79 +3394,13 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// で返す (#1551)。mk-go は外部依存の active validation (mx/smtp/disposable) は
 	// 行わず、format → used (emailVerified=true 一致) → banned の順で判定する
 	// (upstream の enableActiveEmailValidation=false 相当)。
-	api.POST("/email-address/available", func(c echo.Context) error {
-		var req struct {
-			EmailAddress string `json:"emailAddress"`
-		}
-		if err := c.Bind(&req); err != nil {
-			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-		}
-		// upstream paramDef は emailAddress に minLength を持たないため、空文字は
-		// 400 ではなく format 不正として available:false / reason:"format" を返す。
-		available := true
-		var reason *string
-		setReason := func(r string) {
-			available = false
-			reason = &r
-		}
-		switch {
-		case !coreemail.ValidateFormat(req.EmailAddress):
-			setReason("format")
-		default:
-			// emailVerified=true の profile とだけ照合する (upstream は
-			// countBy({emailVerified:true, email}))。未認証 email は重複扱いしない。
-			var count int64
-			s.db.Model(&model.UserProfile{}).
-				Where(`"email" = ? AND "emailVerified" = ?`, req.EmailAddress, true).
-				Count(&count)
-			if count > 0 {
-				setReason("used")
-			} else {
-				domain := ""
-				if at := strings.IndexByte(req.EmailAddress, '@'); at >= 0 {
-					domain = strings.ToLower(req.EmailAddress[at+1:])
-				}
-				if m, err := metaRepo.Fetch(); err == nil && m != nil && coreemail.IsBannedDomain(domain, m.BannedEmailDomains) {
-					setReason("banned")
-				}
-			}
-		}
-		return c.JSON(http.StatusOK, map[string]any{
-			"available": available,
-			"reason":    reason,
-		})
-	})
+	signupHandler.SetEmailAvailabilityDB(s.db)
+	api.POST("/email-address/available", signupHandler.EmailAvailable)
 
 	// promo/read — プロモノートの既読マーク (認証必須)
-	api.POST("/promo/read", func(c echo.Context) error {
-		user := middleware.GetUser(c)
-		var req struct {
-			NoteID string `json:"noteId"`
-		}
-		if err := c.Bind(&req); err != nil || req.NoteID == "" {
-			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
-		}
-		if _, err := noteRepo.FindByID(req.NoteID); err != nil {
-			// upstream promo/read.ts の endpoint 固有 id を返す。汎用の
-			// JSONNoSuchNote が返すのは **upstream `notes/show` の id** で、
-			// error.id で分岐する drop-in クライアントが誤分類する (#2784)。
-			return c.JSON(http.StatusBadRequest,
-				apierr.Error("NO_SUCH_NOTE", "No such note.", apierr.UUIDNoSuchNotePromoRead))
-		}
-		// **エラーを捨てない** (#2784)。upstream は `insert` を await するので
-		// 真の DB エラーは 500 になる。重複は `OnConflict{DoNothing}` が握るので、
-		// ここに来るのは本物の障害だけ。捨てると「既読にならないのに 204」という
-		// 気付けない壊れ方をする。
-		if err := promoReadRepo.MarkRead(&model.PromoRead{
-			ID:     idGen.Generate(time.Now()),
-			UserID: user.ID,
-			NoteID: req.NoteID,
-		}); err != nil {
-			slog.Error("promo/read: failed to mark read", "userId", user.ID, "noteId", req.NoteID, "err", err)
-			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
-		}
-		return c.NoContent(http.StatusNoContent)
-	}, middleware.RequireAuth(), middleware.RequireScope("write:account"))
+	promoHandler := promo.NewHandler(noteRepo, promoReadRepo, idGen)
+	api.POST("/promo/read", promoHandler.Read,
+		middleware.RequireAuth(), middleware.RequireScope("write:account"))
 
 	// invite/* — 招待コード user-scope 4 endpoint。canInvite role policy gate
 	// (#1020) + inviteLimit / inviteLimitCycle / inviteExpirationTime (#1029
@@ -3630,19 +3433,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// export-custom-emojis — 全 local custom emoji を zip (画像 + meta.json) に
 	// export する非同期ジョブを enqueue する (#1217)。upstream 同様 endpoint は
 	// 即 204 を返し、生成完了後に exportCompleted 通知 + drive file で受け取る。
-	api.POST("/export-custom-emojis", func(c echo.Context) error {
-		user := middleware.GetUser(c)
-		if user == nil {
-			return c.NoContent(http.StatusNoContent)
-		}
-		if err := s.queueClient.EnqueueExport(queue.ExportPayload{
-			UserID: user.ID,
-			Type:   coretransfer.ExportCustomEmojis,
-		}); err != nil {
-			slog.Warn("export-custom-emojis: enqueue failed", "user", user.ID, "err", err)
-		}
-		return c.NoContent(http.StatusNoContent)
-	}, middleware.RequireAuth(), middleware.RequireSecure())
+	api.POST("/export-custom-emojis", emojisHandler.ExportCustomEmojis,
+		middleware.RequireAuth(), middleware.RequireSecure())
 
 	// fetch-external-resources — external JSON resource を hash 検証付きで取得
 	// (#1222)。外部 theme/plugin 等を integrity-check して返す。SSRF-safe client
