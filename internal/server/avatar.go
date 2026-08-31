@@ -44,7 +44,6 @@ type avatarUserLookup interface {
 // Sets Cache-Control: public, max-age=86400 so browsers do not run
 // the DB lookup for every mention chip (matches upstream).
 func avatarHandler(userRepo avatarUserLookup, localHost string) echo.HandlerFunc {
-	localHost = strings.ToLower(localHost)
 	return func(c echo.Context) error {
 		// 304 / cache-hit でも返したい header なので Redirect 前に書く。
 		c.Response().Header().Set(echo.HeaderCacheControl, "public, max-age=86400")

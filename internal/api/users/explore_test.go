@@ -171,6 +171,28 @@ func TestParseAcct(t *testing.T) {
 	}
 }
 
+// **localHost 側も小文字化する。** `url.Parse(config.URL).Host` は host を
+// 正規化しないので、`config.url` に大文字が混ざる構成では経路ごとに local /
+// remote の判定が食い違う。実際 avatar 側だけが小文字化していて、
+// pinned-users から `@user@Own.Example` が黙って消えていた (#2791)。
+func TestParseAcct_MixedCaseLocalHost(t *testing.T) {
+	// **localHost に大文字を入れる。** 呼び出し側が既に小文字化した値を渡す
+	// ケースだけだと、この正規化を外す変異が生き残る (実際に生き残った)。
+	for _, local := range []string{"Own.Example", "OWN.EXAMPLE"} {
+		t.Run(local, func(t *testing.T) {
+			user, host := ParseAcct("@alice@own.example", local)
+			assert.Equal(t, "alice", user)
+			assert.Nil(t, host, "自ホストなのに remote 判定になっている")
+		})
+	}
+
+	// 別ホストは大文字小文字を問わず remote のまま。
+	user, host := ParseAcct("@alice@remote.example", "Own.Example")
+	assert.Equal(t, "alice", user)
+	require.NotNil(t, host)
+	assert.Equal(t, "remote.example", *host)
+}
+
 func strptr(s string) *string { return &s }
 
 // countingOnlineRepo returns a fixed online count.

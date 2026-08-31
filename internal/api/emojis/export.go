@@ -17,6 +17,10 @@ type ExportEnqueuer interface {
 }
 
 // SetExportEnqueuer wires the queue used by POST /api/export-custom-emojis.
+//
+// **typed-nil は弾けない。** `*queue.Client` の nil を interface に入れると
+// `h.exportQueue != nil` は真になり、下の guard を素通りして呼び出しで panic
+// する。呼び出し側が非 nil を渡す前提 (`server.go` が起動時に必ず構築する)。
 func (h *Handler) SetExportEnqueuer(q ExportEnqueuer) { h.exportQueue = q }
 
 // ExportCustomEmojis queues a custom-emoji export for the caller.
@@ -31,6 +35,8 @@ func (h *Handler) ExportCustomEmojis(c echo.Context) error {
 	if user == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// 未配線 (interface ごと nil) のときだけ効く。typed-nil は上の
+	// SetExportEnqueuer のコメントを参照。
 	if h.exportQueue == nil {
 		slog.Warn("export-custom-emojis: queue not wired", "user", user.ID)
 		return c.NoContent(http.StatusNoContent)

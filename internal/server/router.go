@@ -1350,9 +1350,13 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/stats", statsHandler.Stats)
 
 	// listRelationRepos は embed user に viewer 視点の relation block を付与する
-	// 共有 Repos。/users・/pinned-users の inline handler と mute/renote-mute/
-	// following/federation/hashtags handler が共有する (#1957-a)。Apply は
-	// 匿名 / self / 未配線で no-op。
+	// 共有 Repos。mute/renote-mute/following/federation/hashtags handler が
+	// 共有する (#1957-a)。Apply は匿名 / self / 未配線で no-op。
+	//
+	// **`/users` / `/pinned-users` はこれを使わない** (#2791 で移設した先の
+	// `usersHandler.viewerRelationRepos()` が同じ 6 つを組み立てる)。
+	// `userrelation.Repos` にフィールドを足すときは**両方に配線が要る** —
+	// 片方だけ更新すると explore と pinned-users から黙って欠ける。
 	listRelationRepos := userrelation.Repos{
 		Following:     followingRepo,
 		Blocking:      blockingRepo,
@@ -1361,14 +1365,6 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		FollowRequest: followRequestRepo,
 		Memo:          repository.NewUserMemoRepository(s.db),
 	}
-
-	// Users endpoint (public) — ユーザー一覧
-
-	// Pinned users (public)
-	//
-	// upstream pinned-users.ts は res が UserDetailed 配列で、各 pinnedUsers の
-	// acct を Acct.parse して host?? IsNull() で local/remote 両方を検索する
-	// (#1551)。mk-go も acct の host 部分を解決し UserDetailed で返す。
 
 	// CAPTCHA service — meta から有効な provider を選択して構築する。
 	// meta 取得失敗時は captcha 無効として動作する (ログイン不能を避けるため)。
@@ -1639,10 +1635,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// /pinned-users は meta.pinnedUsers の acct を解決する (#2791 で router.go の
 	// inline closure から移設)。
 	usersHandler.SetMetaRepo(metaRepo)
-	// **小文字化して渡す。** `url.Parse(config.URL).Host` は host を正規化しないので、
-	// config.url に大文字が混ざると `@user@Own.Example` が remote 判定になり
-	// pinned-users から黙って消える。avatar 経路は元から小文字化していた (#2791)。
-	usersHandler.SetLocalHost(strings.ToLower(localHost))
+	usersHandler.SetLocalHost(localHost)
 	usersHandler.SetChartHook(chartHooks)
 	// users/notes (withChannelNotes) の post-fetch filter でチャンネルミュートを効かせる。
 	usersHandler.SetChannelMutingRepo(channelMutingRepo)
@@ -3678,7 +3671,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	//   - pluginPeerDeps.selfHost: struct literal 経由の 2 つ目の消費者。
 	//     config.resolve が空 host を弾くので実際には空にならない
 	//     (#2682 review L-5)
-	//   - #2791 で router.go から移設した endpoint の setter 7 本
+	//   - #2791 で router.go から移設した endpoint の setter 6 本
 	//     (SetUsernameLookups / SetEmailAvailabilityDB / SetMetaRepo /
 	//     SetLocalHost / SetRetentionRepo / SetExportEnqueuer): 移設前は
 	//     closure の字句捕捉だったので落とすとコンパイルエラーだったが、今は

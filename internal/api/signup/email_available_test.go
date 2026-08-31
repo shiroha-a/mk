@@ -10,6 +10,7 @@ import (
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
 
+	apisignup "github.com/shiroha-a/mk/internal/api/signup"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
@@ -30,7 +31,7 @@ func TestEmailAvailable(t *testing.T) {
 		Available bool    `json:"available"`
 		Reason    *string `json:"reason"`
 	}
-	call := func(t *testing.T, h handlerWithLookups, body string) result {
+	call := func(t *testing.T, h *apisignup.Handler, body string) result {
 		t.Helper()
 		rec := doPost(h.EmailAvailable, body)
 		require.Equal(t, http.StatusOK, rec.Code)

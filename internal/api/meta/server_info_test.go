@@ -35,7 +35,7 @@ func TestServerInfo(t *testing.T) {
 	// redis / net は admin 専用で、ここに出ると未認証に環境情報が漏れる。
 	adminOnly := []string{"os", "node", "psql", "redis", "net"}
 
-	// `EmptyPublic()` は machine="?" / cpu.cores=0 固定。**キーの有無だけを
+	// `EmptyPublic()` は machine="?" / cpu.model="?" 固定。**キーの有無だけを
 	// 見ると `CollectPublic()` と区別できない** — どちらも同じ 4 キーを返すので、
 	// 条件を反転させる変異が素通りする (実際に空振りしていた)。値で判定する。
 	requireEmpty := func(t *testing.T, got map[string]any) {

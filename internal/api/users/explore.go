@@ -135,7 +135,13 @@ func (h *Handler) PinnedUsers(c echo.Context) error {
 //
 // host は**自インスタンスなら nil** を返す (local user は host 列が NULL)。
 // 先頭の `@` は付いていてもいなくてもよい。
+//
+// **localHost はここで小文字化する。** `url.Parse(config.URL).Host` は host を
+// 正規化しないので、呼び出し側に任せると `config.url` に大文字が混ざる構成で
+// 経路ごとに local / remote の判定が食い違う (実際 avatar 側だけが小文字化
+// していて、pinned-users から `@user@Own.Example` が黙って消えていた、#2791)。
 func ParseAcct(acct, localHost string) (username string, host *string) {
+	localHost = strings.ToLower(localHost)
 	acct = strings.TrimSpace(acct)
 	acct = strings.TrimPrefix(acct, "@")
 	if acct == "" {

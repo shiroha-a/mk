@@ -14,11 +14,8 @@ import (
 	"github.com/shiroha-a/mk/internal/testutil"
 )
 
-// handlerWithLookups is the subset of *apisignup.Handler this file drives.
-type handlerWithLookups = *apisignup.Handler
-
 func TestUsernameAvailable(t *testing.T) {
-	setup := func(t *testing.T) (h handlerWithLookups, users *testutil.MockUserRepository, used *testutil.MockUsedUsernameRepository, meta *testutil.MockMetaRepository) {
+	setup := func(t *testing.T) (h *apisignup.Handler, users *testutil.MockUserRepository, used *testutil.MockUsedUsernameRepository, meta *testutil.MockMetaRepository) {
 		t.Helper()
 		hh, users, meta := newTestHandler(t)
 		used = testutil.NewMockUsedUsernameRepository()
@@ -26,7 +23,7 @@ func TestUsernameAvailable(t *testing.T) {
 		return hh, users, used, meta
 	}
 
-	available := func(t *testing.T, h handlerWithLookups, body string) bool {
+	available := func(t *testing.T, h *apisignup.Handler, body string) bool {
 		t.Helper()
 		rec := doPost(h.UsernameAvailable, body)
 		require.Equal(t, http.StatusOK, rec.Code)
