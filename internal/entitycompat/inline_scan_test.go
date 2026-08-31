@@ -78,6 +78,44 @@ func TestCountInlineHandlers(t *testing.T) {
 		assert.Empty(t, countInlineHandlers(t, path))
 	})
 
+	t.Run("follows chained group calls", func(t *testing.T) {
+		// `promoGroup := api.Group("/promo")` だけでなく、変数に置かない
+		// チェーン呼び出しも辿る。ここが漏れると `api.Group("/x").POST(...)` と
+		// 書くだけで guard を素通りする。
+		path := writeRouter(t, `
+	api := s.echo.Group("/api")
+	api.Group("/chain").POST("/read", func(c echo.Context) error { return nil })
+	api.Group("/a").Group("/b").PUT("/deep", func(c echo.Context) error { return nil })
+`)
+		assert.Equal(t, []string{"/deep", "/read"}, countInlineHandlers(t, path))
+	})
+
+	t.Run("covers Match and Any", func(t *testing.T) {
+		// `/server-info` や `/get-online-users-count` のような GET+POST 登録は
+		// `api.Match` でも書ける。パス引数の位置が第 2 になる点に注意。
+		path := writeRouter(t, `
+	api := s.echo.Group("/api")
+	api.Match([]string{http.MethodGet, http.MethodPost}, "/matched", func(c echo.Context) error { return nil })
+	api.Match([]string{http.MethodGet}, "/resolved", h.Method)
+	api.Any("/anything", func(c echo.Context) error { return nil })
+	api.Any("/*", func(c echo.Context) error { return nil })
+`)
+		// catchall は endpoint ではないので数えない。
+		assert.Equal(t, []string{"/anything", "/matched"}, countInlineHandlers(t, path))
+	})
+
+	t.Run("flags constructor-inlined handlers", func(t *testing.T) {
+		// `pkg.NewHandler(a).Read` は closure ではないが、parseRoutes の
+		// `handlerVar.Method` 解決からも外れるので **error id が丸ごと無検査**に
+		// なる。closure と同じく落とす。
+		path := writeRouter(t, `
+	api := s.echo.Group("/api")
+	api.POST("/ctor", promo.NewHandler(a, b, c).Read)
+	api.POST("/ok", promoHandler.Read)
+`)
+		assert.Equal(t, []string{"/ctor"}, countInlineHandlers(t, path))
+	})
+
 	t.Run("follows ident-bound closures", func(t *testing.T) {
 		path := writeRouter(t, `
 	api := s.echo.Group("/api")

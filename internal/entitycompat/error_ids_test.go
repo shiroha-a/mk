@@ -500,19 +500,24 @@ func scanInlineRoutes(t *testing.T, path string) map[string][]string {
 }
 
 // countInlineHandlers counts route registrations under the /api group whose
-// handler argument is an inline closure.
+// handler argument is not a resolvable method reference.
 //
 // `scanInlineRoutes` は endpoint パスを復元するためにレシーバを `api` ident に
 // 限るが、**guard の目的は「router.go に closure を書かせない」こと**なので
-// こちらは `api` から派生した group も辿る。`promoGroup := api.Group("/promo")`
-// のようなごく自然な整理をしただけで guard を素通りするのを防ぐ。
+// こちらは広く取る:
+//
+//   - `api` から派生した group を推移的に辿る (`promoGroup := api.Group("/promo")`)
+//   - **チェーン呼び出しも辿る** (`api.Group("/promo").POST(...)`)
+//   - `Match` / `Any` / `Add` も対象 (`/server-info` のような GET+POST 登録で
+//     使われうる)
+//   - closure literal と ident 束縛に加え、**コンストラクタ直渡し**
+//     (`api.POST("/x", pkg.NewHandler(a).Read)`) も数える。あの形は
+//     `parseRoutes` の `handlerVar.Method` 解決から外れるので、closure と同じく
+//     error id が丸ごと無検査になる
 //
 // **`/api` 配下に限る。** レシーバを一切問わないと `s.echo.GET("/healthz", ...)`
 // や frontend の catchall まで拾ってしまう。あれらは error id gate の対象では
 // ないし、`internal/api` に移すものでもない。
-//
-// 第 2 引数が closure literal のもの、および ident 束縛
-// (`x := func(...)`; `api.GET("/p", x)`) を数える。
 func countInlineHandlers(t *testing.T, path string) []string {
 	t.Helper()
 	src, err := os.ReadFile(path)
@@ -548,6 +553,25 @@ func countInlineHandlers(t *testing.T, path string) []string {
 		assigns = append(assigns, [2]ast.Expr{as.Lhs[0], as.Rhs[0]})
 		return true
 	})
+
+	// isAPIRecv reports whether an expression evaluates to the /api group or a
+	// group derived from it. **チェーン呼び出しのために再帰する** —
+	// `api.Group("/a").Group("/b").POST(...)` でもレシーバを辿れる。
+	var isAPIRecv func(ast.Expr) bool
+	isAPIRecv = func(x ast.Expr) bool {
+		switch v := x.(type) {
+		case *ast.Ident:
+			return apiGroups[v.Name]
+		case *ast.CallExpr:
+			sel, ok := v.Fun.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Group" {
+				return false
+			}
+			return isAPIRecv(sel.X)
+		}
+		return false
+	}
+
 	for changed := true; changed; {
 		changed = false
 		for _, a := range assigns {
@@ -563,13 +587,27 @@ func countInlineHandlers(t *testing.T, path string) []string {
 			if !ok || sel.Sel.Name != "Group" {
 				continue
 			}
-			recv, ok := sel.X.(*ast.Ident)
-			if !ok || !apiGroups[recv.Name] {
+			if !isAPIRecv(sel.X) {
 				continue
 			}
 			apiGroups[id.Name] = true
 			changed = true
 		}
+	}
+
+	// resolvableMethod reports whether the handler argument is the
+	// `handlerVar.Method` form that `parseRoutes` can resolve.
+	//
+	// **レシーバが ident であることまで見る。** `pkg.NewHandler(a).Read` も
+	// SelectorExpr だが、`parseRoutes` の正規表現 (`(\w+)\.(\w+)`) は
+	// 解決できないので gate から漏れる。
+	resolvableMethod := func(x ast.Expr) bool {
+		sel, ok := x.(*ast.SelectorExpr)
+		if !ok {
+			return false
+		}
+		_, ok = sel.X.(*ast.Ident)
+		return ok
 	}
 
 	var out []string
@@ -582,16 +620,23 @@ func countInlineHandlers(t *testing.T, path string) []string {
 		if !ok {
 			return true
 		}
+		// パス引数の位置がメソッドで違う。`Match` / `Add` は第 1 引数が
+		// メソッド (集合 / 文字列) で、パスは第 2 引数。
+		pathIdx, handlerIdx := 0, 1
 		switch sel.Sel.Name {
-		case "GET", "POST", "PUT", "DELETE":
+		case "GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "Any":
+		case "Match", "Add":
+			pathIdx, handlerIdx = 1, 2
 		default:
 			return true
 		}
-		recv, ok := sel.X.(*ast.Ident)
-		if !ok || !apiGroups[recv.Name] {
+		if len(call.Args) <= handlerIdx {
 			return true
 		}
-		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !isAPIRecv(sel.X) {
+			return true
+		}
+		lit, ok := call.Args[pathIdx].(*ast.BasicLit)
 		if !ok || lit.Kind != token.STRING {
 			return true
 		}
@@ -599,11 +644,19 @@ func countInlineHandlers(t *testing.T, path string) []string {
 		if err != nil {
 			return true
 		}
-		switch arg := call.Args[1].(type) {
+		// catchall は endpoint ではない。
+		if ep == "/*" || ep == "*" {
+			return true
+		}
+		switch arg := call.Args[handlerIdx].(type) {
 		case *ast.FuncLit:
 			out = append(out, ep)
 		case *ast.Ident:
 			if lits[arg.Name] {
+				out = append(out, ep)
+			}
+		default:
+			if !resolvableMethod(arg) {
 				out = append(out, ep)
 			}
 		}

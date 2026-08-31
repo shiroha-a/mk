@@ -241,9 +241,17 @@ echo wrapperはhandlerの最頻送出経路なので外すとgateが大半のrou
 
 **`internal/server/router.go`のインラインendpointは0件**。#2791で全14件を`internal/api`配下へ移設したので、上のapi walkがそのまま拾う。
 
-抽出 (`scanInlineRoutes`) と走査 (`scanBodyEmissions`) は**消さずに残してある**。gateは「golden と突合できた数の下限」から**「インラインが復活したら落とす」向きに反転**させた。新しく書かれたclosureは`internal/api`のwalkからも漏れるので、golden が正しい id を持っているのに検出されない状態 (`promo/read`の`NO_SUCH_NOTE`で実際に起きていた) に戻る。抽出を消すとこのguard自体が空振りして復活を見逃す。
+gateは「golden と突合できた数の下限」から**「inlineが復活したら落とす」向きに反転**させた。判定に使うのは`countInlineHandlers`で、`/api` group tree配下のroute登録のうち**`handlerVar.Method`で解決できない形**を数える:
 
-移設先を書くときは**ハンドラを変数に代入してから渡す**。gateは`handlerVar.Method`の形しか解決しないので、`api.POST("/test", pkg.NewHandler(...).Test)`と書くと対象から外れる。
+- closure直書き (`api.POST("/x", func(c echo.Context) error {...})`)
+- ident束縛のclosure (`h := func(...); api.GET("/x", h)`)
+- **コンストラクタ直渡し** (`api.POST("/x", pkg.NewHandler(a).Read)`)。closureではないが`parseRoutes`の解決からも外れるので、error idが丸ごと無検査になる
+
+レシーバは`api`から派生したgroupを推移的に辿り、**チェーン呼び出し** (`api.Group("/x").POST(...)`) も見る。メソッドは`Match` / `Any` / `Add`も対象 (GET+POSTの両登録に使われうる)。**`/api`配下に限る** — レシーバを一切問わないと`/healthz`やpprof、frontendのcatchallまで拾い、あれらは移設対象ではない。
+
+`scanInlineRoutes` / `scanBodyEmissions`は**inlineが復活したときのdrift突合用**に残してある (現在の寄与は0件)。復活の検出そのものは`countInlineHandlers`が担う。抽出器自体は`inline_scan_test.go`でテストしてある — guardが「0件ならPASS」の向きなので、**抽出が壊れると空振りする**。
+
+移設先を書くときは**ハンドラを変数に代入してから渡す**。gateは`handlerVar.Method`の形しか解決しない。
 
 なお上の**インライン復活の検出は id gateだけ**が持つ。status / kind gateは`internal/api`のみを見る。
 
