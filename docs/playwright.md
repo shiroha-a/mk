@@ -141,6 +141,21 @@ spec が `/about-misskey` を 2 回開くため。
 既定値であって本番設定ではない)。将来の注意点ではなく、**現行の既知の不具合**として
 #2700 まで残る。
 
+### embed も enforce の対象
+
+`/embed/` にも同じ CSP が付く (#2789)。既存の `specs/upstream/ui/embed/embed.spec.ts`
+が **iframe を張って投稿本文が読めること**まで見るので、CSP で bundle や inline
+script が block されればそこで落ちる。実測: embed の inline script を hash 計算から
+外すと「iframe 内で描画され本文が読める」が `element(s) not found` で落ちた。
+
+embed 経由の violation は **0 件** (数え方:
+`docker logs mk-playwright-mkgo-1 2>&1 | grep msg=csp-report | grep -oE 'documentUri=\S+' | grep /embed/`)。
+
+**ただし spec が開くのは本文だけのローカル投稿の embed 2 ページ。** メディア添付・
+引用・カスタム絵文字を含む embed は未検証で、object storage 構成の
+`img-src` / `media-src` / `connect-src` も実ブラウザでは踏んでいない
+(Go 側の `TestEmbedShell_CSP` が header の値だけを固定している)。
+
 ### ゲートの守備範囲
 
 `csp_enforce.spec.ts` が見るのは **未サインインの `/` が mount を終えた時点**まで。
