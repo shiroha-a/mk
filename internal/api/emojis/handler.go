@@ -12,6 +12,9 @@ import (
 // Handler handles emoji-related API endpoints.
 type Handler struct {
 	emojiRepo repository.EmojiRepository
+	// exportQueue は export-custom-emojis 用 (#2791 で router.go の inline
+	// closure から移設)。
+	exportQueue ExportEnqueuer
 }
 
 // NewHandler creates a new emojis Handler.

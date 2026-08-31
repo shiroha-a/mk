@@ -72,6 +72,10 @@ type Handler struct {
 	pageRepo     repository.PageRepository
 	piningRepo   repository.UserNotePiningRepository
 	fieldRes     *entity.NoteFieldResolver
+	// metaRepo / localHost は pinned-users 用 (#2791 で router.go の inline
+	// closure から移設)。
+	metaRepo  repository.MetaRepository
+	localHost string
 	// userRepo は users/notes / users/search-by-username-and-host 経由で
 	// 表示する note list の hardMutedWords filter (#787) に使う。
 	userRepo repository.UserRepository

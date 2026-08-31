@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"gorm.io/gorm"
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/captcha"
@@ -67,6 +68,13 @@ type Handler struct {
 	// userPolicies は作成直後の利用者の**実効** policy を返す (#2673)。
 	// 未配線なら従来どおり素の default にフォールバックする。
 	userPolicies UserPolicyResolver
+	// emailDB は email-address/available の重複判定用 (#2791 で router.go の
+	// inline closure から移設)。
+	emailDB *gorm.DB
+	// userRepo / usedUsernameRepo は username/available 用 (#2791 で router.go の
+	// inline closure から移設)。
+	userRepo         repository.UserRepository
+	usedUsernameRepo repository.UsedUsernameRepository
 	// applications は承認制の登録 (#2569)。未配線なら該当 endpoint は 503。
 	// ticketStore は承認済み申請の登録でも使う (内部で招待を発行して即消費する)。
 	applications SignupApplications
