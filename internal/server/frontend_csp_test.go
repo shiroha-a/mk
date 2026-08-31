@@ -16,6 +16,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/frontendutil"
+	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
 
@@ -470,3 +471,87 @@ func TestFrontendCSP_HashesCoverRenderedInlineScripts(t *testing.T) {
 
 // `<script>` に属性が付かないものだけを拾う (`type="application/json"` を除外)。
 var inlineScriptRe = regexp.MustCompile(`(?s)<script>(.*?)</script>`)
+
+// cspMediaExtras は SPA shell と embed で共有する (#2789)。両方の CSP header の
+// 値がここで決まるので、順序と条件を固定する。
+func TestCSPMediaExtras(t *testing.T) {
+	const osBase = "https://s3.example.test/bucket"
+	osBaseCopy := osBase
+
+	tests := []struct {
+		name string
+		cfg  *config.Config
+		meta *model.Meta
+		want []string
+	}{
+		{
+			name: "no object storage and no external proxy adds nothing",
+			cfg:  &config.Config{},
+			meta: &model.Meta{},
+			want: nil,
+		},
+		{
+			// useObjectStorage を切っても baseUrl は meta に残ることがある。
+			// 使っていない host を CSP に載せる理由が無い。
+			name: "base url without useObjectStorage is ignored",
+			cfg:  &config.Config{},
+			meta: &model.Meta{UseObjectStorage: false, ObjectStorageBaseURL: &osBaseCopy},
+			want: nil,
+		},
+		{
+			name: "object storage origin is added when enabled",
+			cfg:  &config.Config{},
+			meta: &model.Meta{UseObjectStorage: true, ObjectStorageBaseURL: &osBaseCopy},
+			want: []string{"https://s3.example.test"},
+		},
+		{
+			// 有効なのに baseUrl が未設定。nil 参照で落ちてはならない。
+			name: "enabled without a base url adds nothing",
+			cfg:  &config.Config{},
+			meta: &model.Meta{UseObjectStorage: true, ObjectStorageBaseURL: nil},
+			want: nil,
+		},
+		{
+			// cfg が無い経路。呼び出し元は必ず渡すが、ガードを外すと panic する。
+			name: "nil cfg is tolerated",
+			cfg:  nil,
+			meta: &model.Meta{UseObjectStorage: true, ObjectStorageBaseURL: &osBaseCopy},
+			want: []string{"https://s3.example.test"},
+		},
+		{
+			name: "external media proxy origin is added",
+			cfg:  &config.Config{ExternalMediaProxyEnabled: true, MediaProxy: "https://proxy.example.test/proxy"},
+			meta: &model.Meta{},
+			want: []string{"https://proxy.example.test"},
+		},
+		{
+			// internal proxy ('self') は何も足さない (#2501)。
+			name: "internal media proxy adds nothing",
+			cfg:  &config.Config{ExternalMediaProxyEnabled: false, MediaProxy: "https://proxy.example.test/proxy"},
+			meta: &model.Meta{},
+			want: nil,
+		},
+		{
+			// **順序は object storage → media proxy で固定する。** header の
+			// 文字列がこの順序で決まるので、入れ替えると値だけ変わって差分が
+			// ノイズになる。
+			name: "object storage comes before the media proxy",
+			cfg:  &config.Config{ExternalMediaProxyEnabled: true, MediaProxy: "https://proxy.example.test/proxy"},
+			meta: &model.Meta{UseObjectStorage: true, ObjectStorageBaseURL: &osBaseCopy},
+			want: []string{"https://s3.example.test", "https://proxy.example.test"},
+		},
+		{
+			// meta の取得に失敗した経路。cfg だけで決まる分は足す必要がある。
+			name: "nil meta still adds the external proxy",
+			cfg:  &config.Config{ExternalMediaProxyEnabled: true, MediaProxy: "https://proxy.example.test/proxy"},
+			meta: nil,
+			want: []string{"https://proxy.example.test"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, cspMediaExtras(tt.cfg, tt.meta))
+		})
+	}
+}

@@ -167,7 +167,12 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// object storage から直接配信されるので、`'self'` だけだと enforce 時に
 	// 画像・動画・音声が丸ごと表示できなくなる。
 	var cspExtra cspExtras
+	// **meta を取れたかどうかを外に持ち出す。** CSP の media origin は
+	// object storage (meta 依存) と外部 media proxy (cfg のみで決まる) の
+	// 両方から来るので、meta の取得に失敗しても後者は足す必要がある。
+	var cspMeta *model.Meta
 	if m, err := metaRepo.Fetch(); err == nil {
+		cspMeta = m
 		if m.Name != nil && *m.Name != "" {
 			instanceName = *m.Name
 		}
@@ -206,14 +211,6 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 			prefetchTags += fmt.Sprintf(`<link rel="prefetch" as="image" href="%s">`, stdhtml.EscapeString(*u)) + "\n"
 		}
 		metaJSON = buildMetaJSON(cfg, m, proxyAccountResolver, chunkedUpload)
-		// useObjectStorage が false でも baseUrl が残っていることがあるので、
-		// **両方が揃っているときだけ**許可する。使っていない host を CSP に
-		// 載せる必要は無い。
-		if m.UseObjectStorage && m.ObjectStorageBaseURL != nil {
-			if origin := objectStorageOrigin(*m.ObjectStorageBaseURL); origin != "" {
-				cspExtra.Media = append(cspExtra.Media, origin)
-			}
-		}
 		// 有効な captcha 業者の origin (#2502)。無いと enforce で captcha の
 		// script が読めずサインアップが壊れる。
 		captchaEx := captchaCSPExtras(m.EnableHcaptcha, m.EnableRecaptcha, m.EnableTurnstile)
@@ -221,14 +218,7 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		cspExtra.Connect = captchaEx.Connect
 		cspExtra.Style = captchaEx.Style
 	}
-	// 外部 media proxy 構成では、リモート画像もカスタム絵文字も proxy の origin
-	// から配信される (server-side pack とクライアント側の meta.mediaProxy の両方)。
-	// internal proxy ('self') なら何も足さない (#2501)。
-	if cfg.ExternalMediaProxyEnabled {
-		if origin := objectStorageOrigin(cfg.MediaProxy); origin != "" {
-			cspExtra.Media = append(cspExtra.Media, origin)
-		}
-	}
+	cspExtra.Media = cspMediaExtras(cfg, cspMeta)
 
 	// CLIENT_ENTRYの設定
 	clientEntryJS := "null"
@@ -364,9 +354,12 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		time.Now().UnixMilli(), metaJSON, loaderJSTag,
 		stdhtml.EscapeString(splashIconURL), splashSpinnerSVG)
 
-	// SPA shell にだけ CSP を付ける (#2425)。shell を返す経路は catch-all と
-	// AP の non-AP fallback の 2 つで、どちらもこの関数を通るので path 判定が
+	// **shell を返す経路でだけ CSP を付ける** (#2425)。ここを通るのは catch-all と
+	// AP の non-AP fallback の 2 つで、どちらもこの関数を経由するので path 判定が
 	// 要らない。API / アセットに誤って付くこともない。
+	//
+	// `/embed/` は別の shell (`embed.go` の `render`) なので、そちらで同じ policy を
+	// 付ける (#2789)。
 	applyFrontendCSP(c, cfg.FrontendContentSecurityPolicy, cspExtra)
 
 	cacheControl := ov.CacheControl

@@ -8,6 +8,9 @@ import (
 	"strings"
 
 	"github.com/labstack/echo/v4"
+
+	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/model"
 )
 
 // CSP modes accepted by the `frontendContentSecurityPolicy` config key.
@@ -27,7 +30,7 @@ const (
 // API 用に組んであり、認証不要で外から叩かれるこの endpoint とは要件が違う。
 const CSPReportPath = "/csp-report"
 
-// frontendCSPDirectives is the policy applied to the SPA shell.
+// frontendCSPDirectives is the policy shared by the SPA shell and the embed shell.
 //
 // **緩すぎると違反が出ず観測の意味が無い**ので、最終的に enforce したい形から
 // 始めている。report-only の間に出た違反を潰してから enforce へ切り替える。
@@ -39,8 +42,13 @@ const CSPReportPath = "/csp-report"
 //
 // `frame-ancestors` は**入れない**。`X-Frame-Options: DENY` を
 // `middleware/frameguard.go` が既に付けており、そちらは `/embed/` を除外する
-// 仕組みを持つ。CSP に重ねると除外を二重管理することになるので、embed の配線が
-// 入るときに一緒に設計する。
+// 仕組みを持つ。CSP に重ねると除外を二重管理することになり、片方だけ更新して
+// 埋め込みが死ぬ。**#2789 で `/embed/` にもこの policy を適用したが、そのときも
+// `frame-ancestors` は入れず除外は frameguard の 1 箇所に残した。**
+//
+// **embed との差は cspExtras 側だけ。** captcha の origin は SPA shell にしか
+// 足さない (embed はサインアップ経路を持たない)。media origin (object storage /
+// 外部 media proxy) と inline script の hash は両方に足す。
 var frontendCSPDirectives = []string{
 	"default-src 'self'",
 	"base-uri 'self'",
@@ -260,7 +268,9 @@ func objectStorageOrigin(baseURL string) string {
 	return u.Scheme + "://" + u.Host
 }
 
-// applyFrontendCSP sets the CSP header on an SPA shell response.
+// applyFrontendCSP sets the CSP header on a shell response.
+//
+// 呼び出し元は SPA shell (`frontend.go`) と embed shell (`embed.go`) の 2 つ。
 //
 // mode が未知 / off なら何もしない。**判定できない値で enforce に倒さない**の
 // が要点で、設定ミスでフロントが動かなくなるより無効の方が安全。
@@ -275,4 +285,33 @@ func applyFrontendCSP(c echo.Context, mode string, extras cspExtras) {
 		c.Response().Header().Set("Content-Security-Policy",
 			buildFrontendCSP(true, extras))
 	}
+}
+
+// cspMediaExtras returns the media origins that depend on instance settings.
+//
+// SPA shell (`frontend.go`) と embed (`embed.go`) で共通。drive のファイルが
+// object storage から直接配信される構成と、外部 media proxy 構成では `'self'`
+// だけでは足りず、enforce 時に画像・動画・音声が丸ごと表示できなくなる
+// (#2425 / #2501)。embed も同じ経路でリモート画像を出すので同じものが要る (#2789)。
+//
+// **順序は object storage → media proxy で固定する。** header の文字列がこの
+// 順序で決まるので、入れ替えると値だけ変わって差分がノイズになる。
+func cspMediaExtras(cfg *config.Config, m *model.Meta) []string {
+	var out []string
+	// useObjectStorage が false でも baseUrl が残っていることがあるので、
+	// **両方が揃っているときだけ**許可する。使っていない host を CSP に
+	// 載せる必要は無い。
+	if m != nil && m.UseObjectStorage && m.ObjectStorageBaseURL != nil {
+		if origin := objectStorageOrigin(*m.ObjectStorageBaseURL); origin != "" {
+			out = append(out, origin)
+		}
+	}
+	// 外部 media proxy 構成では、リモート画像もカスタム絵文字も proxy の origin
+	// から配信される。internal proxy ('self') なら何も足さない (#2501)。
+	if cfg != nil && cfg.ExternalMediaProxyEnabled {
+		if origin := objectStorageOrigin(cfg.MediaProxy); origin != "" {
+			out = append(out, origin)
+		}
+	}
+	return out
 }
