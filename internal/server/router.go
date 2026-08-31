@@ -3636,13 +3636,24 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			return c.JSON(http.StatusBadRequest, apierr.InvalidParam())
 		}
 		if _, err := noteRepo.FindByID(req.NoteID); err != nil {
-			return apierr.JSONNoSuchNote(c)
+			// upstream promo/read.ts の endpoint 固有 id を返す。汎用の
+			// JSONNoSuchNote が返すのは **upstream `notes/show` の id** で、
+			// error.id で分岐する drop-in クライアントが誤分類する (#2784)。
+			return c.JSON(http.StatusBadRequest,
+				apierr.Error("NO_SUCH_NOTE", "No such note.", apierr.UUIDNoSuchNotePromoRead))
 		}
-		_ = promoReadRepo.MarkRead(&model.PromoRead{
+		// **エラーを捨てない** (#2784)。upstream は `insert` を await するので
+		// 真の DB エラーは 500 になる。重複は `OnConflict{DoNothing}` が握るので、
+		// ここに来るのは本物の障害だけ。捨てると「既読にならないのに 204」という
+		// 気付けない壊れ方をする。
+		if err := promoReadRepo.MarkRead(&model.PromoRead{
 			ID:     idGen.Generate(time.Now()),
 			UserID: user.ID,
 			NoteID: req.NoteID,
-		})
+		}); err != nil {
+			slog.Error("promo/read: failed to mark read", "userId", user.ID, "noteId", req.NoteID, "err", err)
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		return c.NoContent(http.StatusNoContent)
 	}, middleware.RequireAuth(), middleware.RequireScope("write:account"))
 

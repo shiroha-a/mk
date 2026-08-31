@@ -196,6 +196,16 @@ const (
 	// code は upstream に合わせて `NO_SUCH_NOTE_DRAFT` を使う (#688 / #673
 	// Phase B)。
 	UUIDNoSuchNoteDraft = "49cd6b9d-848e-41ee-b0b9-adaca711a6b1"
+
+	// UUIDNoSuchNotePromoRead は upstream `promo/read.ts` の `noSuchNote` UUID。
+	//
+	// **汎用の UUIDNoSuchNote は upstream `notes/show` の id** を全 endpoint で
+	// 使い回したもの。upstream は `NO_SUCH_NOTE` を定義する 21 endpoint すべてに
+	// 別 id を割り当てるので、`promo/read` では endpoint 固有の値を返す (#2784)。
+	// error.id で分岐する drop-in クライアントが誤分類するため。
+	//
+	// **`promo/read` 専用。** 他 endpoint から使わないこと。
+	UUIDNoSuchNotePromoRead = "d785b897-fcd3-4fe9-8fc3-b85c26e6c932"
 )
 
 // InvalidParam returns a 400 INVALID_PARAM error response. The optional
