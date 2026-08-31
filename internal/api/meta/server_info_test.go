@@ -35,27 +35,45 @@ func TestServerInfo(t *testing.T) {
 	// redis / net は admin 専用で、ここに出ると未認証に環境情報が漏れる。
 	adminOnly := []string{"os", "node", "psql", "redis", "net"}
 
-	t.Run("stats enabled returns the public shape only", func(t *testing.T) {
+	// `EmptyPublic()` は machine="?" / cpu.cores=0 固定。**キーの有無だけを
+	// 見ると `CollectPublic()` と区別できない** — どちらも同じ 4 キーを返すので、
+	// 条件を反転させる変異が素通りする (実際に空振りしていた)。値で判定する。
+	requireEmpty := func(t *testing.T, got map[string]any) {
+		t.Helper()
+		assert.Equal(t, "?", got["machine"])
+		cpu, ok := got["cpu"].(map[string]any)
+		require.True(t, ok, "cpu が object でない: %v", got["cpu"])
+		assert.Equal(t, "?", cpu["model"])
+	}
+	requireCollected := func(t *testing.T, got map[string]any) {
+		t.Helper()
+		assert.NotEqual(t, "?", got["machine"], "実測値が返っていない")
+	}
+
+	t.Run("stats enabled returns real values", func(t *testing.T) {
 		repo := testutil.NewMockMetaRepository()
 		repo.Meta = &model.Meta{ID: "x", EnableServerMachineStats: true}
 		got := callServerInfo(t, NewHandler(&config.Config{}, repo))
 
-		assert.Contains(t, got, "machine")
-		assert.Contains(t, got, "cpu")
+		requireCollected(t, got)
 		for _, k := range adminOnly {
 			assert.NotContains(t, got, k)
 		}
 	})
 
-	t.Run("stats disabled still returns the full shape", func(t *testing.T) {
-		// **フィールドごと落とさない。** frontend の server-metric widget は
-		// 各キーを直接読む。
+	t.Run("stats disabled returns the empty shape, not real values", func(t *testing.T) {
+		// **ここが公開エンドポイントの情報露出ゲート。** 条件が落ちると、
+		// 無効にしている運用者のホスト名 / CPU モデル / メモリ量が未認証に出る。
 		repo := testutil.NewMockMetaRepository()
 		repo.Meta = &model.Meta{ID: "x", EnableServerMachineStats: false}
 		got := callServerInfo(t, NewHandler(&config.Config{}, repo))
 
-		assert.Contains(t, got, "machine")
+		requireEmpty(t, got)
+		// **フィールドごと落とさない。** frontend の server-metric widget は
+		// 各キーを直接読む。
 		assert.Contains(t, got, "cpu")
+		assert.Contains(t, got, "mem")
+		assert.Contains(t, got, "fs")
 		for _, k := range adminOnly {
 			assert.NotContains(t, got, k)
 		}
@@ -63,13 +81,10 @@ func TestServerInfo(t *testing.T) {
 
 	t.Run("meta fetch failure falls back to the empty shape", func(t *testing.T) {
 		repo := testutil.NewMockMetaRepository() // Meta が nil = ErrNotFound
-		got := callServerInfo(t, NewHandler(&config.Config{}, repo))
-
-		assert.Contains(t, got, "machine")
+		requireEmpty(t, callServerInfo(t, NewHandler(&config.Config{}, repo)))
 	})
 
-	t.Run("unwired meta repo does not panic", func(t *testing.T) {
-		got := callServerInfo(t, NewHandler(&config.Config{}, nil))
-		assert.Contains(t, got, "machine")
+	t.Run("unwired meta repo falls back to the empty shape", func(t *testing.T) {
+		requireEmpty(t, callServerInfo(t, NewHandler(&config.Config{}, nil)))
 	})
 }

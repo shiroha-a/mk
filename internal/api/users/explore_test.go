@@ -2,6 +2,7 @@ package users
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 
@@ -172,19 +173,46 @@ func TestParseAcct(t *testing.T) {
 
 func strptr(s string) *string { return &s }
 
+// countingOnlineRepo returns a fixed online count.
+//
+// **MockUserRepository の CountOnlineUsers は 0 固定**なので、そのままだと
+// 「repo を呼ばず 0 を返す」実装でもテストが通る (実際に空振りしていた)。
+type countingOnlineRepo struct {
+	*testutil.MockUserRepository
+	n    int64
+	err  error
+	call int
+}
+
+func (r *countingOnlineRepo) CountOnlineUsers() (int64, error) {
+	r.call++
+	return r.n, r.err
+}
+
 func TestOnlineCount(t *testing.T) {
 	t.Run("returns the repo count", func(t *testing.T) {
 		h, repo := newTestHandler(t)
-		h.SetUserRepo(repo)
-		// MockUserRepository は登録済みユーザー数を返す。
-		addExplorable(repo, "u1", "alice", nil)
+		online := &countingOnlineRepo{MockUserRepository: repo, n: 42}
+		h.SetUserRepo(online)
 
 		rec := postStub(h.OnlineCount, `{}`, nil)
 		require.Equal(t, http.StatusOK, rec.Code)
 
-		var got map[string]any
-		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
-		assert.Contains(t, got, "count")
+		assert.JSONEq(t, `{"count":42}`, rec.Body.String())
+		assert.Equal(t, 1, online.call, "repo を呼んでいない")
+	})
+
+	t.Run("repo failure still returns 200 with whatever came back", func(t *testing.T) {
+		// **エラーを握って 200 を返す** (元の `count, _ :=` と同じ)。ここで 500 に
+		// すると admin overview 全体が開かなくなる。値は repo が返したものを
+		// そのまま使う — GORM の Count は失敗時に 0 のままなので実害は無い。
+		h, repo := newTestHandler(t)
+		online := &countingOnlineRepo{MockUserRepository: repo, n: 7, err: errors.New("boom")}
+		h.SetUserRepo(online)
+
+		rec := postStub(h.OnlineCount, `{}`, nil)
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.JSONEq(t, `{"count":7}`, rec.Body.String())
 	})
 
 	t.Run("unwired repo reports zero, not an error", func(t *testing.T) {
