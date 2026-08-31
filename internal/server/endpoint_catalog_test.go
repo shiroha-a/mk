@@ -36,13 +36,17 @@ func TestAPIEndpointNames(t *testing.T) {
 	assert.Equal(t, 1, count, "duplicate routes are deduped")
 }
 
-func TestIsRegisteredAPIEndpoint(t *testing.T) {
+// `/api/endpoint` の既知 / 未知の判定は `internal/api/endpoints` へ移った
+// (#2791)。ここでは判定の材料になる一覧の中身を固定する。
+func TestAPIEndpointNames_MembershipMaterial(t *testing.T) {
 	e := echo.New()
 	e.POST("/api/notes/create", noopHandler)
 	e.GET("/api/users/show", noopHandler)
 
-	assert.True(t, isRegisteredAPIEndpoint(e, "notes/create"))
-	assert.False(t, isRegisteredAPIEndpoint(e, "users/show"), "GET-only route is not a POST endpoint")
-	assert.False(t, isRegisteredAPIEndpoint(e, "nonexistent"))
-	assert.False(t, isRegisteredAPIEndpoint(e, ""))
+	names := apiEndpointNames(e)
+
+	assert.Contains(t, names, "notes/create")
+	assert.NotContains(t, names, "users/show", "GET-only route is not a POST endpoint")
+	assert.NotContains(t, names, "nonexistent")
+	assert.NotContains(t, names, "")
 }

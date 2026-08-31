@@ -148,32 +148,6 @@ func TestAvatarHandler_EmptyAcctFallback(t *testing.T) {
 	assert.Equal(t, avatarStaticFallback, rec.Header().Get(echo.HeaderLocation))
 }
 
-func TestParseAcct(t *testing.T) {
-	cases := []struct {
-		input     string
-		localHost string
-		username  string
-		host      *string
-	}{
-		{"alice", "go.example", "alice", nil},
-		{"@alice", "go.example", "alice", nil},
-		{"alice@remote.example", "go.example", "alice", strPtr("remote.example")},
-		{"alice@GO.EXAMPLE", "go.example", "alice", nil}, // 大文字小文字無視
-		{"alice@", "go.example", "alice", nil},
-		{"@", "go.example", "", nil},
-		{"", "go.example", "", nil},
-		{"@bob@cherry.example", "go.example", "bob", strPtr("cherry.example")},
-	}
-	for _, tc := range cases {
-		t.Run(tc.input, func(t *testing.T) {
-			gotName, gotHost := parseAcct(tc.input, tc.localHost)
-			assert.Equal(t, tc.username, gotName)
-			if tc.host == nil {
-				assert.Nil(t, gotHost)
-			} else {
-				require.NotNil(t, gotHost)
-				assert.Equal(t, *tc.host, *gotHost)
-			}
-		})
-	}
-}
+// `parseAcct` は `users.ParseAcct` に一本化したので、テストも
+// `internal/api/users/explore_test.go` の `TestParseAcct` に集約した (#2791)。
+// avatar 経路は構築時に localHost を小文字化して渡す (avatar.go)。

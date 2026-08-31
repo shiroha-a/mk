@@ -8,8 +8,9 @@ import (
 )
 
 // apiEndpointNames returns the deduped names of every registered POST /api/*
-// route — the endpoint catalog. `/api/endpoints` lists them, and `/api/endpoint`
-// (#1695) uses it to distinguish known endpoints from unknown ones. Names are
+// route — the endpoint catalog. `internal/api/endpoints` の Handler に
+// `Lister` として注入され、`/api/endpoints` の一覧と `/api/endpoint` (#1695) の
+// 既知 / 未知の判定の両方に使われる。 Names are
 // the route path with the leading "/api/" stripped (e.g. "notes/create").
 // GET-only routes, the no-prefix routes, and the "*" catchall are excluded.
 func apiEndpointNames(e *echo.Echo) []string {
@@ -30,14 +31,4 @@ func apiEndpointNames(e *echo.Echo) []string {
 		names = append(names, name)
 	}
 	return names
-}
-
-// isRegisteredAPIEndpoint reports whether name is a registered POST /api/* route.
-func isRegisteredAPIEndpoint(e *echo.Echo, name string) bool {
-	for _, n := range apiEndpointNames(e) {
-		if n == name {
-			return true
-		}
-	}
-	return false
 }

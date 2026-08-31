@@ -1639,7 +1639,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// /pinned-users は meta.pinnedUsers の acct を解決する (#2791 で router.go の
 	// inline closure から移設)。
 	usersHandler.SetMetaRepo(metaRepo)
-	usersHandler.SetLocalHost(localHost)
+	// **小文字化して渡す。** `url.Parse(config.URL).Host` は host を正規化しないので、
+	// config.url に大文字が混ざると `@user@Own.Example` が remote 判定になり
+	// pinned-users から黙って消える。avatar 経路は元から小文字化していた (#2791)。
+	usersHandler.SetLocalHost(strings.ToLower(localHost))
 	usersHandler.SetChartHook(chartHooks)
 	// users/notes (withChannelNotes) の post-fetch filter でチャンネルミュートを効かせる。
 	usersHandler.SetChannelMutingRepo(channelMutingRepo)
@@ -3675,6 +3678,17 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	//   - pluginPeerDeps.selfHost: struct literal 経由の 2 つ目の消費者。
 	//     config.resolve が空 host を弾くので実際には空にならない
 	//     (#2682 review L-5)
+	//   - #2791 で router.go から移設した endpoint の setter 7 本
+	//     (SetUsernameLookups / SetEmailAvailabilityDB / SetMetaRepo /
+	//     SetLocalHost / SetRetentionRepo / SetExportEnqueuer): 移設前は
+	//     closure の字句捕捉だったので落とすとコンパイルエラーだったが、今は
+	//     消してもビルドが通る。**ここに載せないのは、いずれも「認証や一回性の
+	//     保証」ではないため** — 未配線で起きるのは空配列 / 0 / 「使えない」で、
+	//     いちばん重いのが SetEmailAvailabilityDB の「登録済みアドレスを
+	//     available:true と答える」。ただし `user_profile.email` に unique
+	//     制約は無く、重複チェックはこの endpoint だけが持つので、劣化しても
+	//     防げるのは事前の案内だけという点で他の項目と tier が違う。
+	//     移設で新しく生まれた面なので、棚卸し (#2674) の対象には入れる
 	s.recordCriticalWiring([]criticalWiring{
 		{"inbox.signatureVerifier", inboxProcessor.HasSignatureVerifier(),
 			"HTTP 署名検証・連合ブロック・actor 一致・replay 判定が同時に飛ぶ"},

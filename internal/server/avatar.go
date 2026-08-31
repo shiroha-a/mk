@@ -7,6 +7,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 
+	apiusers "github.com/shiroha-a/mk/internal/api/users"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -49,7 +50,9 @@ func avatarHandler(userRepo avatarUserLookup, localHost string) echo.HandlerFunc
 		c.Response().Header().Set(echo.HeaderCacheControl, "public, max-age=86400")
 
 		acct := c.Param("acct")
-		username, host := parseAcct(acct, localHost)
+		// **実装は users.ParseAcct に一本化してある** (#2791)。
+		// pinned-users も同じ形で acct を解く。
+		username, host := apiusers.ParseAcct(acct, localHost)
 		if username == "" {
 			return c.Redirect(http.StatusFound, avatarStaticFallback)
 		}
@@ -81,36 +84,6 @@ func avatarHandler(userRepo avatarUserLookup, localHost string) echo.HandlerFunc
 		// 同一オリジン・相対 URL (identicon fallback を含む) は wrap されない。
 		return c.Redirect(http.StatusFound, entity.ProxyAvatarURLString(*target))
 	}
-}
-
-// parseAcct decomposes an acct parameter ("username" or
-// "username@host") into the username and (optional) host pointer.
-// localHost is the running instance's canonical host (lowercased);
-// if the acct's host part matches it, host is treated as local
-// (returned nil) to align with upstream Misskey storing local users
-// with host=NULL.
-//
-// Empty input or pathological forms like "@" return ("", nil) so the
-// caller can short-circuit to the static fallback redirect.
-func parseAcct(acct, localHost string) (username string, host *string) {
-	acct = strings.TrimSpace(acct)
-	acct = strings.TrimPrefix(acct, "@")
-	if acct == "" {
-		return "", nil
-	}
-	at := strings.IndexByte(acct, '@')
-	if at < 0 {
-		return acct, nil
-	}
-	name := acct[:at]
-	h := strings.ToLower(acct[at+1:])
-	if name == "" {
-		return "", nil
-	}
-	if h == "" || h == localHost {
-		return name, nil
-	}
-	return name, &h
 }
 
 func strPtr(s string) *string { return &s }
