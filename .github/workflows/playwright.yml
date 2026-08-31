@@ -193,6 +193,14 @@ jobs:
       # pnpm-lock.yaml hash をキーに使うので、Misskey upstream を pin し
       # 直さない限り cache hit で pnpm install + build をまるごと skip
       # (5-10 min → 数秒に短縮)。
+      # **cache key は submodule の commit SHA で取る。** `pnpm-lock.yaml` の
+      # hash だと、submodule のソースを変えても lock が動かない限り cache hit に
+      # なり、**古い `built/` が使われる** (#2786 で実際に踏んだ。fork の
+      # `boot.js` を直したのに CI では反映されず spec が落ちた)。
+      - name: Resolve misskey submodule SHA
+        id: misskey-sha
+        run: echo "sha=$(git rev-parse HEAD:third_party/misskey)" >> "$GITHUB_OUTPUT"
+
       - name: Cache misskey workspace (built + node_modules)
         id: cache-misskey
         if: matrix.backend == 'mk-go'
@@ -204,7 +212,7 @@ jobs:
             third_party/misskey/node_modules
             third_party/misskey/packages/*/node_modules
             third_party/misskey/built
-          key: misskey-workspace-${{ runner.os }}-${{ hashFiles('third_party/misskey/pnpm-lock.yaml') }}
+          key: misskey-workspace-${{ runner.os }}-${{ steps.misskey-sha.outputs.sha }}
 
       - name: Set up Node.js
         if: matrix.backend == 'mk-go' && steps.cache-misskey.outputs.cache-hit != 'true'
