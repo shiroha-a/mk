@@ -44,6 +44,22 @@ jobQueueDriver: mkq
 disableEndpointRateLimits: true
 enableIpRateLimit: false
 
+# CSP を enforce で回して、**実ブラウザでしか分からない CSP 回帰**を spec の
+# ゲートにする (#2788)。ここが off だと、`script-src` に hash 無しの inline
+# script が入っても playwright 側では何も block されず素通りする。**真っ白に
+# なるのは enforce で動いている本番のほう**で、Go 側の
+# `TestFrontendCSP_HashesCoverRenderedInlineScripts` は HTML と header の
+# 突き合わせなので、そこでも捕まらない。inline event handler が hash では
+# 通らない (#2786 の High) のように、ブラウザに実行させないと分からない
+# 挙動がある。
+#
+# **report-only では駄目**。あちらは違反を報告するだけで script は動くので、
+# spec は壊れた状態でも緑になる。
+#
+# `frontendContentSecurityPolicy` は mk-go 独自キーで、TS image
+# (docker-compose.playwright.ts.yml overlay) 側は黙って無視する。
+frontendContentSecurityPolicy: enforce
+
 # 注: 本 config は mk-go binary (docker-compose.playwright.yml) と TS image
 # (docker-compose.playwright.ts.yml overlay) の **両方で共有** する。差分が
 # 発生したら別 file に分けるが、現状 db/redis hostname も同じなので 1 file

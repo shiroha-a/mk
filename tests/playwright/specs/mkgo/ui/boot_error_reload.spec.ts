@@ -22,9 +22,15 @@ import { expect, test } from '@playwright/test';
 // `app.mount()` 後に `window.onerror = null` する) が、それはこの画面が出る条件
 // そのもの。
 //
-// **CSP を off にしていても意味がある。** `onclick` 属性に戻すと `#mkBootReload`
-// が消えるので、セレクタで落ちる (実測: 戻すと 15s タイムアウトで失敗)。
-// CSP を enforce にした環境ではさらに violation の有無も見る。
+// **主たるゲートはセレクタ側。** `onclick` 属性に戻すと `#mkBootReload` という
+// id ごと消えるので、下の violation の assertion に届く前に 15s タイムアウトで
+// 落ちる (実測)。upstream の boot.js は id を持たず `onclick` だけなので、
+// 「id を残して `onclick` に戻す」は現実には起きない形。
+//
+// violation の assertion は**別の inline handler が混入したとき**に反応する。
+// pass する run では空配列同士の比較のままだが、CSP が off だった頃と違って
+// **原理的に落ちうる** (#2788 で enforce にした)。この spec が守っている主体は
+// `#mkBootReload` が押せることそのもの。
 test('boot error screen reload button is clickable', async ({ page }) => {
 	const violations: string[] = [];
 	page.on('console', (msg) => {
@@ -44,8 +50,7 @@ test('boot error screen reload button is clickable', async ({ page }) => {
 	await btn.click();
 	await nav;
 
-	// CSP enforce の環境では inline handler の violation が出ないこと。
-	// off の環境では violations 自体が空になる。
+	// inline handler が CSP で block されていないこと (#2788 で enforce にした)。
 	const handlerViolations = violations.filter((v) => v.includes('event handler'));
 	expect(handlerViolations, `inline event handler が block された: ${handlerViolations.join(' / ')}`).toHaveLength(0);
 });
