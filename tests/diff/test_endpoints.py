@@ -566,13 +566,10 @@ def test_drive_folders_since_id_parity(mkgo, ts):
 
 
 def test_drive_files_since_id_parity(mkgo, ts):
-    # drive/files は **mock からは順序回帰が見えない** 経路。
-    # `internal/testutil/mock_drive.go` の `MockDriveFileRepository.ListByUser` は
-    # sort キーの分岐を持つため sinceID 単独の ASC を実装しておらず、同関数の doc
-    # コメント自身が「**#2766 が終わっても残る**」と書いている。`ListForAdmin` /
-    # `ListSystemFiles` も同様 (#2766 で追跡中)。
-    # **同じファイルの `MockDriveFolderRepository.ListByUser` は #2764 で
-    # SortMockPage に揃っている**ので、drive/folders 側は mock でも見える。
+    # drive/files は、このテストを足した時点では **mock からは順序回帰が
+    # 見えなかった** 経路 (`MockDriveFileRepository.ListByUser` が sinceID 単独の
+    # ASC を実装していなかった)。#2766 で揃えたので今は mock でも見えるが、
+    # mock は production の SQL を実行しないので実 API 側のゲートは残す。
     #
     # `sort` を渡さないのは意図的。production も upstream も sort 指定時は
     # paginationOrder を通らず固定 order を使う (`drive_file.go` の switch)。

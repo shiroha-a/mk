@@ -155,7 +155,7 @@ FTT on/off で計 4 実行)。
 | `notes/timeline` | `note.go ListHomeTimeline` | fanout 経由 (`sinceId` 付きは #2720 で必ず DB へ倒れる)。実利用が最も多い。**`meta.enableFanoutTimelineDbFallback` が off だと空が返る** (#2762、§5.6 参照) ので、そのときは `got=[]` で落ちる |
 | `users/notes` | `note.go ListByUserIDFiltered` | fanout を通らない直行経路。本家 e2e も見ているが、あちらは mk-go 単体の assert で値の突き合わせはしない |
 | `drive/folders` | `drive_folder.go ListByUser` | **#2764 が実際に直した経路**。note 系は元から ASC だったので、そこだけ見ても #2713 の回帰は捕まらない (mock 側は #2764 で `SortMockPage` に揃っているので、こちらは単体テストでも見える) |
-| `drive/files` | `drive_file.go ListByUser` | **mock からは順序回帰が見えない** — `MockDriveFileRepository.ListByUser` は sort キー分岐を持つため sinceID 単独の ASC を実装しておらず、doc コメント自身が「#2766 が終わっても残る」と書いている (`ListForAdmin` / `ListSystemFiles` も同様、#2766 で追跡中)。frontend の MkDrive が `sinceId: '0'` で読む。**`sort` は渡さない** — production も upstream も sort 指定時は `paginationOrder` を通らず固定 order を使い、MkDrive も `-createdAt` のとき sort を送らない |
+| `drive/files` | `drive_file.go ListByUser` | 追加時点では **mock (`MockDriveFileRepository.ListByUser`) が sinceID 単独の ASC を実装しておらず**、単体テストからは順序回帰が見えなかった。#2766 で揃えたので今は mock でも見えるが、mock は production の SQL を実行しないので実 API 側のゲートは残す。frontend の MkDrive が `sinceId: '0'` で読む。**`sort` は渡さない** — production も upstream も sort 指定時は `paginationOrder` を通らず固定 order を使い、MkDrive も `-createdAt` のとき sort を送らない |
 | `admin/announcements/list` | `announcement.go ListForAdmin` | note / drive 以外の repository |
 
 **候補行数 > limit で読む。** 候補 <= limit だと `ORDER BY id ASC` と
