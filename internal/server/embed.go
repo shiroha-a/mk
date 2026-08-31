@@ -157,7 +157,12 @@ func (h *embedHandlers) render(c echo.Context, ctx *embedContext) error {
 	themeColor := "#86b300"
 	metaJSON := "{}"
 
+	// CSP の media origin は object storage (meta 依存) から来るので、
+	// meta を取れたかどうかを外に持ち出す (#2789)。
+	var cspMeta *model.Meta
+
 	if m, err := h.metaRepo.Fetch(); err == nil && m != nil {
+		cspMeta = m
 		if m.Name != nil && *m.Name != "" {
 			instanceName = *m.Name
 		}
@@ -180,12 +185,40 @@ func (h *embedHandlers) render(c echo.Context, ctx *embedContext) error {
 		}
 	}
 
+	// **変数名に html を使わない。** 標準の `html` パッケージを shadow して、
+	// 以降で html.EscapeString が呼べなくなる。
+	shell, inlineScripts := h.buildHTML(instanceName, iconURL, appleTouchIconURL, themeColor, metaJSON, embedCtxJSON)
+
+	// embed にも SPA shell と同じ CSP を付ける (#2789)。**embed は
+	// `X-Frame-Options` の除外対象** = 第三者のページに iframe で埋め込まれる
+	// 唯一の経路なので、ここで script が注入されると埋め込み先ではなく
+	// **こちらの origin** で動く。
+	//
+	// `frame-ancestors` は入れない。`middleware/frameguard.go` が
+	// `X-Frame-Options` 側で `/embed/` の除外を持っており、CSP に重ねると
+	// 除外を二重管理することになる (`frontendCSPDirectives` のコメントも参照)。
+	//
+	// captcha の origin は足さない。embed はサインアップ経路を持たないので、
+	// 使っていない host を CSP に載せる理由が無い。
+	cspExtra := cspExtras{
+		Media:  cspMediaExtras(h.cfg, cspMeta),
+		Script: cspScriptHashes(inlineScripts...),
+	}
+	applyFrontendCSP(c, h.cfg.FrontendContentSecurityPolicy, cspExtra)
+
 	c.Response().Header().Set(echo.HeaderCacheControl, embedCacheControl)
-	return c.HTML(http.StatusOK, h.buildHTML(instanceName, iconURL, appleTouchIconURL, themeColor, metaJSON, embedCtxJSON))
+	return c.HTML(http.StatusOK, shell)
 }
 
 // buildHTML assembles the embed shell, mirroring upstream views/base-embed.tsx.
-func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, themeColor, metaJSON, embedCtxJSON string) string {
+//
+// The second return value lists the inline scripts embedded in the shell, so the
+// caller can derive their CSP hashes.
+//
+// **hash の材料は HTML に入れる文字列そのものを返す。** 別々に組み立てると、
+// 片方だけ変えたときに CSP を有効にしている運用者の画面が真っ白になる
+// (#2786 で SPA shell 側が踏みかけた形)。
+func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, themeColor, metaJSON, embedCtxJSON string) (string, []string) {
 	var head strings.Builder
 	// ビルド済み bundle が無い場合 (dev) は vite client を読ませる。upstream の
 	// `frontendEmbedViteFiles == null` 分岐と同じ。
@@ -239,6 +272,13 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, them
 	loaderCSSTag := inlineOrLinkCSS(loader.CSS, "/embed_vite/loader/style.css")
 	loaderJSTag := inlineOrLinkJS(loader.JS, "/embed_vite/loader/boot.js")
 
+	bootGlobals := fmt.Sprintf(
+		"\nconst VERSION = \"%s\";\nconst CLIENT_ENTRY = %s;\nconst LANGS = [\"ja-JP\",\"en-US\"];\n",
+		html.EscapeString(h.cfg.Version), clientEntry)
+
+	// loader は inline のときだけ hash が要る (外部参照なら 'self' で通る)。
+	inlineScripts := []string{bootGlobals, loader.JS}
+
 	return fmt.Sprintf(`<!DOCTYPE html>
 <html>
 <head>
@@ -255,11 +295,7 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, them
 <link rel="icon" href="%s">
 <link rel="apple-touch-icon" href="%s">
 <title>%s</title>
-%s%s<script>
-const VERSION = "%s";
-const CLIENT_ENTRY = %s;
-const LANGS = ["ja-JP","en-US"];
-</script>
+%s%s<script>%s</script>
 %s
 %s
 %s
@@ -276,12 +312,11 @@ const LANGS = ["ja-JP","en-US"];
 		html.EscapeString(instanceName),
 		head.String(),
 		loaderCSSTag,
-		html.EscapeString(h.cfg.Version),
-		clientEntry,
+		bootGlobals,
 		metaBlock,
 		ctxBlock,
 		loaderJSTag,
-	)
+	), inlineScripts
 }
 
 // escapeJSONForScript neutralises sequences that would terminate the enclosing

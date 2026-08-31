@@ -15,8 +15,10 @@ import (
 //     FileServerService は X-Frame-Options を付けておらず、PDF を iframe で
 //     開く利用を壊さないためにも合わせる
 //
-// mk-go には現時点で /embed/ の配線が無いが、先に除外を書いておく。後から
-// embed を足す人がここに気付かないと、埋め込みが動かない理由を探すことになる。
+// /embed/ は `router.go` で配線済み (#2389)。**除外はここ 1 箇所で管理する** —
+// frontend CSP に `frame-ancestors` を入れると同じ除外を 2 箇所で持つことになり、
+// 片方だけ更新して埋め込みが死ぬ (#2789 で embed に CSP を付けたときも
+// `frame-ancestors` は入れていない)。
 var frameGuardSkipPrefixes = []string{
 	"/embed/",
 	"/files/",

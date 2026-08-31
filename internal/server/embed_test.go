@@ -1,6 +1,8 @@
 package server
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -206,4 +208,160 @@ func TestEmbedShell_FallsBackToLoaderReferences(t *testing.T) {
 	body := rec.Body.String()
 	assert.Contains(t, body, `<link rel="stylesheet" href="/embed_vite/loader/style.css">`)
 	assert.Contains(t, body, `<script src="/embed_vite/loader/boot.js"></script>`)
+}
+
+// embed にも SPA shell と同じ CSP を付ける (#2789)。embed は
+// `X-Frame-Options` の除外対象 = 第三者ページに iframe で埋め込まれる唯一の
+// 経路なので、script が注入されると埋め込み先ではなく**こちらの origin** で動く。
+func TestEmbedShell_CSP(t *testing.T) {
+	// **loader を inline させる。** built assets が無いと `loader.JS` が空になり、
+	// HTML に出る inline script は bootGlobals だけになる。実運用でいちばん大きい
+	// inline script (loader) の hash 経路がテストの外に出るので、fixture を置いて
+	// 2 つとも通す (SPA 側の `TestFrontendCSP_HashesCoverRenderedInlineScripts`
+	// と同じ形)。
+	dir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "loader"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "loader", "boot.js"),
+		[]byte("window.__markerEmbedBootJs = 1;"), 0o644))
+	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", dir)
+	frontendutil.ResetLoaderCacheForTest()
+	// cache は sync.Once なので、戻さないと fixture の loader がプロセス全体に
+	// 残る。同 package に embed shell を描画するテストが他にもある。
+	t.Cleanup(frontendutil.ResetLoaderCacheForTest)
+
+	render := func(t *testing.T, cfg *config.Config, m *model.Meta) *httptest.ResponseRecorder {
+		t.Helper()
+		repo := testutil.NewMockMetaRepository()
+		if m != nil {
+			repo.Meta = m
+		}
+		h := &embedHandlers{cfg: cfg, metaRepo: repo}
+
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/embed/notes/x", nil), rec)
+		require.NoError(t, h.render(c, nil))
+		return rec
+	}
+
+	base := func() *config.Config {
+		return &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	}
+
+	t.Run("off sends no header", func(t *testing.T) {
+		cfg := base()
+		cfg.FrontendContentSecurityPolicy = CSPModeOff
+		rec := render(t, cfg, nil)
+
+		assert.Empty(t, rec.Header().Get("Content-Security-Policy"))
+		assert.Empty(t, rec.Header().Get("Content-Security-Policy-Report-Only"))
+	})
+
+	t.Run("report-only sends the report-only header", func(t *testing.T) {
+		cfg := base()
+		cfg.FrontendContentSecurityPolicy = CSPModeReportOnly
+		rec := render(t, cfg, nil)
+
+		assert.Empty(t, rec.Header().Get("Content-Security-Policy"))
+		assert.NotEmpty(t, rec.Header().Get("Content-Security-Policy-Report-Only"))
+	})
+
+	t.Run("enforce covers the shell's own inline script", func(t *testing.T) {
+		cfg := base()
+		cfg.FrontendContentSecurityPolicy = CSPModeEnforce
+		rec := render(t, cfg, nil)
+
+		csp := rec.Header().Get("Content-Security-Policy")
+		require.NotEmpty(t, csp)
+
+		// **HTML に実際に入っている script の hash が載っていること。** 別々に
+		// 組み立てると、片方だけ変えたときに埋め込みが白紙になる (#2786)。
+		body := rec.Body.String()
+		for _, script := range inlineScriptBodies(t, body) {
+			sum := sha256.Sum256([]byte(script))
+			want := "'sha256-" + base64.StdEncoding.EncodeToString(sum[:]) + "'"
+			assert.Contains(t, csp, want,
+				"inline script の hash が CSP に無い: %q", script)
+		}
+
+		// #2786 で外したものが embed 側から復活していないこと。
+		scriptSrc := cspDirective(t, csp, "script-src")
+		assert.NotContains(t, scriptSrc, "'unsafe-inline'")
+		assert.Contains(t, scriptSrc, "'sha256-")
+
+		// `frame-ancestors` は入れない。X-Frame-Options 側が /embed/ の除外を
+		// 持っており、CSP に重ねると除外が二重管理になる。
+		assert.NotContains(t, csp, "frame-ancestors")
+	})
+
+	t.Run("object storage origin is allowed for media", func(t *testing.T) {
+		cfg := base()
+		cfg.FrontendContentSecurityPolicy = CSPModeEnforce
+		baseURL := "https://s3.example.test/bucket"
+		rec := render(t, cfg, &model.Meta{
+			ID: "x", UseObjectStorage: true, ObjectStorageBaseURL: &baseURL,
+		})
+
+		// drive のファイルが object storage から直接配信される構成では、
+		// これが無いと埋め込んだ投稿の画像・動画が丸ごと出ない。
+		csp := rec.Header().Get("Content-Security-Policy")
+		assert.Contains(t, cspDirective(t, csp, "img-src"), "https://s3.example.test")
+		assert.Contains(t, cspDirective(t, csp, "media-src"), "https://s3.example.test")
+		// connect-src も mediaDirectives に含まれる。ここが欠けると「通知音
+		// だけ鳴らない」類の気付きにくい壊れ方をする (frontend_csp.go)。
+		assert.Contains(t, cspDirective(t, csp, "connect-src"), "https://s3.example.test")
+	})
+
+	t.Run("captcha origins are not added", func(t *testing.T) {
+		cfg := base()
+		cfg.FrontendContentSecurityPolicy = CSPModeEnforce
+		rec := render(t, cfg, &model.Meta{ID: "x", EnableHcaptcha: true, EnableRecaptcha: true})
+
+		// embed はサインアップ経路を持たない。使っていない host を CSP に
+		// 載せる理由が無い。
+		csp := rec.Header().Get("Content-Security-Policy")
+		// **captchaCSPExtras が実際に出す origin を見る。** `google.com` は
+		// どの分岐でも生成されないので、書いても常に通る。
+		assert.NotContains(t, csp, "hcaptcha.com")
+		assert.NotContains(t, csp, "recaptcha.net")
+		assert.NotContains(t, csp, "gstatic.com")
+		assert.NotContains(t, csp, "challenges.cloudflare.com")
+	})
+}
+
+// inlineScriptBodies extracts the bodies of `<script>` elements that carry no
+// `src` and no `type` attribute (= the ones a CSP hash must cover).
+func inlineScriptBodies(t *testing.T, body string) []string {
+	t.Helper()
+	var out []string
+	rest := body
+	for {
+		i := strings.Index(rest, "<script>")
+		if i < 0 {
+			break
+		}
+		rest = rest[i+len("<script>"):]
+		j := strings.Index(rest, "</script>")
+		require.GreaterOrEqual(t, j, 0, "閉じていない <script> がある")
+		out = append(out, rest[:j])
+		rest = rest[j:]
+	}
+	// **件数を固定する。** NotEmpty だと片方が消えても通り、loader の hash 経路が
+	// 無検証に戻る (実際、この形にする前は `inlineScripts` から loader を落とす
+	// 変異が生き残った)。
+	require.Len(t, out, 2, "inline script は bootGlobals と loader の 2 つ")
+	return out
+}
+
+// cspDirective returns one directive from a CSP header value.
+func cspDirective(t *testing.T, csp, name string) string {
+	t.Helper()
+	for _, d := range strings.Split(csp, ";") {
+		d = strings.TrimSpace(d)
+		if d == name || strings.HasPrefix(d, name+" ") {
+			return d
+		}
+	}
+	t.Fatalf("directive %q が CSP に無い: %s", name, csp)
+	return ""
 }
