@@ -196,6 +196,54 @@ TypeORM の decorator から正規形を再現できないため **実 DB から
 
 落ちたら doc の件数・内訳・冒頭サマリ・表の行をまとめて直す。gate は 4 箇所すべてを見るので、どれか 1 つを直し忘れると通らない (#2634)。
 
+### submodule bump 後に必須: promo の表示経路が upstream に入っていないか見る
+
+**promo (`admin/promo/create` / `promo/read`)** は upstream にも mk-go にも
+**表示経路が無い** — 作成と既読化はできて DB 行も増えるが、`promo_note` を読んで
+利用者へ提示するものがどこにも無い (#2781)。mk-go はこの状態を忠実に再現している。
+
+**upstream は一度実装して外している。** 2020-02 に
+`server/api/common/inject-promo.ts` で timeline へ直挿しする実装が入ったが
+(`a54de07260`)、2021-03 に「クライアントサイドで実装したいため」無効化され
+(`73df95c42d`)、2022-09 にファイルごと削除された (`786f1d8be8`)。frontend の
+menu も 2024-09 の #14554 で消えている。**再実装される見込みは低いが、endpoint は
+残っているので bump ごとに一応見る。**
+
+bump 後に確認する:
+
+```bash
+grep -rlni "promonote\|promoread" third_party/misskey/packages/backend/src/
+```
+
+期待は **8 件** (case-insensitive にしてあるのは型名 `MiPromoNote` や
+repository 名 `PromoNotesRepository` を拾うため):
+
+```
+di-symbols.ts / postgres.ts
+models/_.ts / models/RepositoryModule.ts / models/PromoNote.ts / models/PromoRead.ts
+server/api/endpoints/promo/read.ts
+server/api/endpoints/admin/promo/create.ts     ← 表示経路はここに無い
+```
+
+**件数ではなくリストが一致するかを見る** (加減が相殺すると件数だけでは素通りする)。
+違っていたら中身を見て、`docs/api-compatibility.md` の「既知の制限」と
+`docs/divergence.md` §7 の promo 行を更新する。増えていれば表示経路が入った可能性、
+減っていれば endpoint が削除された可能性。
+
+**0 件や `No such file or directory` が出たら、まず submodule の checkout を疑う**
+(`git submodule update --init`)。checkout 済みで 0 件なら、upstream 側でパス構成が
+変わっている。
+
+**CI の Go テストでは検出できない。** submodule を checkout する job は 8 つある
+(`ci.yml` の `frontend-check`、diff-e2e の `diff`、docker の `build-and-push`、
+dropin-e2e の `dropin`、dropin-frontend-e2e の `frontend-e2e`、playwright の `spec`、
+queue-bench-smoke の `smoke`、upstream-backend-e2e の `e2e`) が、**いずれも Go
+テストを実行する step を持たない**。Go テストが走る `test-shards` / `plugin-tests`
+の checkout に `submodules` 指定は無いので、submodule を読むテストは CI では常に
+skip され gate にならない。ローカルの tripwire として書くなら
+`internal/misc/achievement/types_test.go` の `TestTypes_MatchUpstream` が同型
+(submodule を読み、不在なら `t.Skipf`)。
+
 ### submodule bump 後に必須: 比較対象の TS image を全部揃える
 
 mk-go と Misskey TS を並べて比較するハーネスは、**比較対象の image tag を

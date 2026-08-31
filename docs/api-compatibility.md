@@ -327,6 +327,23 @@ drop-in テスト (#367) で発見した補完カラム:
   (`chat/messages/create` / `chat/rooms/joined` / `chat/rooms/members/ban` 等) を
   additive に足している。upstream のクライアントから見て欠けているものは無い
 - **search backend** — `fulltextSearch.provider` で挙動切替: 既定の `sqlLike` (= `lower(text) LIKE` による部分一致。**ILIKE ではない** — pg_bigm の GIN index `gin (lower(text) gin_bigm_ops)` は LIKE しか加速せず、ILIKE だと拡張を入れても index が効かないため。Meilisearch 不要、軽量 deploy 向け) / `meilisearch` (要 host 設定) / `sqlPgroonga` (要 PGroonga 拡張) / `none` (= upstream TS strict-mode 互換、400 UNAVAILABLE で reject、#877)
+- **promo は作成・既読化できるが表示されない (#2781)** — `admin/promo/create` と
+  `promo/read` は upstream と同じパスで実装済みで、DB 行も正しく増える。しかし
+  **`promo_note` を読んで利用者へ提示する経路が upstream にも無い**
+  (2026.7.0 の backend で `promoNote` / `promoRead` を参照するのは endpoint 2 本と
+  DI / model 定義だけ。`grep -rlni` で 8 ファイル、内訳は
+  [`upstream-catch-up.md`](upstream-catch-up.md) の「submodule bump 後に必須」)。
+  **frontend の menu 項目も無い** — `_promote()` 関数
+  (`packages/frontend/src/utility/get-note-menu.ts:279`) と `promote` locale
+  (`locales/*.yml:559`) は残っているが、どちらも参照ゼロ。menu 項目は upstream
+  #14554 (2024-09) でコメントアウトごと削除済み。到達するのは API を
+  直接叩く場合とサードパーティクライアントだけで、そこでは 204 が返るので
+  **成功したように見えて誰にも表示されない**。
+  mk-go はこの状態を忠実に再現している (endpoint を消すと 444/444 の
+  カバレッジが崩れ、drop-in 切替でも挙動が変わるため)。表示経路を足すなら
+  upstream に無い additive 拡張になる。
+  ただし入力側だけは mk-go に意図的乖離がある — `admin/promo/create` は public
+  以外の note を reject する (`docs/divergence.md` §7)
 - **upstream 2026.7.0 まで追従済** — `#947` (2026.3.2 → 2026.5.1) / `#1164` (2026.5.1 → 2026.5.4、LD-Signature 初期実装 + 2026.5.4 hardening 含む) を経て 2026.6.0 → 2026.7.0 まで完了。各 release 差分は [`docs/update/`](update/) を参照 (`<yyyymm><nn>diff.md`。`nn` は**対象 upstream release の patch 番号**で日付ではない。backend に変更が無い release は doc を作らないので番号は飛ぶ。同じディレクトリに `<yyyymmdd>-<issue>-triage.md` 形式の triage note も同居する)
 
 詳細は[TS版からの移行ガイド](migration-from-ts.md)の「既知の制限」セクションも参照。

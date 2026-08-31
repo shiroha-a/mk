@@ -695,7 +695,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | リモートメディアのキャッシュ | `cacheRemoteFiles` が真なら実体を自 Drive へ保存 | **保存しない** (相手の削除の権利 / 違法コンテンツ保持のリスク回避)。詳細と弱点は §5.5 |
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
-| `admin/promo/create` | visibility check なし | public 以外を reject (将来の IDOR 先回り) |
+| `admin/promo/create` | visibility check なし | public 以外を reject。**upstream にも mk-go にも promo の表示経路が無い**ので現時点では latent だが (#2781、`docs/api-compatibility.md` の「既知の制限」)、表示が入った瞬間に followers / specified / home note の本文が全 viewer に漏れる IDOR になる。**推測ではない** — upstream が 2022-09 に削除した `inject-promo.ts` は `Notes.findOneByOrFail({ id })` の結果を timeline へ `splice` するだけで、visibility を一切見ていなかった。create 段で先回りして塞いである |
 | `/embed/clips/:clip` | clip の存在だけを見る (非公開 clip も埋め込める) | `isPublic` も見る。埋め込みは無認証で誰でも読める経路なので、本人だけが見えるはずの clip を配らない (#2389) |
 | `federation/stats` の moderationNote | moderator には見せる | 公開 endpoint なので常に隠す |
 | moderator inactive 判定 | 空集合で登録を無効化しうる | lastActiveDate 保持者 0 人なら何もしない |

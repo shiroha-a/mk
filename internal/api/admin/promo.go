@@ -38,7 +38,7 @@ func (h *Handler) PromoCreate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "ee449fbe-af2a-453b-9cae-cf2fe7c895fc"))
 	}
 	// 公開範囲が public 以外の note は promote できない (#1466)。upstream
-	// Misskey TS の `admin/promo/create.ts` (pinned 2026.5.4) には visibility
+	// Misskey TS の `admin/promo/create.ts` (pinned 2026.7.0) には visibility
 	// check 自体が存在しないため、本実装は mk-go 独自の forward defense
 	// (= 意図的な divergence) として加える。実害観点では upstream / mk-go
 	// どちらも promo を表示する endpoint が未実装で latent な穴に留まるが、
