@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // stubEmojiLookup is a focused mock — we don't need the full
@@ -30,7 +31,9 @@ func (s *stubEmojiLookup) FindByNameAndHost(name string, host *string) (*model.E
 	}
 	e, ok := s.emojis[key]
 	if !ok {
-		return nil, errors.New("not found")
+		// **repository の sentinel を返す。** 汎用 error だと #2792 の
+		// 「DB 障害は 500」に引っかかる。
+		return nil, repository.ErrNotFound
 	}
 	return e, nil
 }
@@ -158,8 +161,25 @@ func TestEmojiRedirectHandler_BadAtChunks_400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-func TestEmojiRedirectHandler_RepoErrorTreatedAsNotFound(t *testing.T) {
+// **DB 障害は 404 ではなく 500** (#2792)。以前はここが
+// `TestEmojiRedirectHandler_RepoErrorTreatedAsNotFound` で「db down でも 404」を
+// 固定していたが、それだと接続断が「そんな絵文字は無い」に化けたまま気付けない。
+func TestEmojiRedirectHandler_DBFailureIs500(t *testing.T) {
 	repo := &stubEmojiLookup{err: errors.New("db down")}
+	h := emojiRedirectHandler(repo)
+
+	c, _ := newEmojiTestContext(t, "smile.webp", "")
+	err := h(c)
+	// echo.NewHTTPError は handler の戻り値として返るので、recorder ではなく
+	// error 側を見る。
+	var he *echo.HTTPError
+	require.True(t, errors.As(err, &he), "HTTPError が返っていない: %v", err)
+	assert.Equal(t, http.StatusInternalServerError, he.Code)
+}
+
+// not-found は従来どおり 404。
+func TestEmojiRedirectHandler_NotFoundIs404(t *testing.T) {
+	repo := &stubEmojiLookup{err: repository.ErrNotFound}
 	h := emojiRedirectHandler(repo)
 
 	c, rec := newEmojiTestContext(t, "smile.webp", "")

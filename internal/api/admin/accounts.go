@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // AccountsDelete handles POST /api/admin/accounts/delete.
@@ -48,10 +49,18 @@ func (h *Handler) AccountsFindByEmail(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "email is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	profile, err := h.userRepo.FindProfileByEmail(req.Email)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("USER_NOT_FOUND", "User not found.", "cb865949-8af5-4062-a88c-ef55e8786d1d"))
 	}
 	user, err := h.userRepo.FindByID(profile.UserID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("USER_NOT_FOUND", "User not found.", "cb865949-8af5-4062-a88c-ef55e8786d1d"))
 	}

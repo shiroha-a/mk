@@ -10,6 +10,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // SigninWithPasskey handles POST /api/signin-with-passkey.
@@ -112,6 +113,11 @@ func (h *Handler) finishPasskeySignin(c echo.Context, user *model.User, cred *we
 	}
 
 	profile, err := h.userRepo.FindProfileByUserID(user.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。このファイルは
+		// signin 固有の errBody を使うので 500 も同じ形で返す。
+		return c.JSON(http.StatusInternalServerError, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+	}
 	if err != nil || profile == nil {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}

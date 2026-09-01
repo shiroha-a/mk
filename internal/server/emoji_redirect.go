@@ -82,6 +82,11 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		}
 
 		emoji, err := repo.FindByNameAndHost(name, hostPtr)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。このファイルは
+			// apierr を使わないので echo の HTTPError で返す。
+			return echo.NewHTTPError(http.StatusInternalServerError)
+		}
 		if err != nil || emoji == nil {
 			if _, hasFallback := c.QueryParams()["fallback"]; hasFallback {
 				return c.Redirect(http.StatusFound, emojiRedirectFallback)

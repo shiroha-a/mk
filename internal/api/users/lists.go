@@ -60,6 +60,10 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 	src, err := h.userListRepo.FindByID(req.ListID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil || !src.IsPublic {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "9292f798-6175-4f7d-93f4-b6742279667d"))
 	}
@@ -105,6 +109,10 @@ func (h *Handler) ListsCreateFromPublic(c echo.Context) error {
 		if h.userRepo != nil {
 			var uerr error
 			target, uerr = h.userRepo.FindByID(m.UserID)
+			if uerr != nil && !repository.IsNotFound(uerr) {
+				// **DB 障害を not-found に丸めない** (#2792)。
+				return apierr.JSONInternalError(c)
+			}
 			if uerr != nil {
 				return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "13c457db-a8cb-4d88-b70a-211ceeeabb5f"))
 			}
@@ -171,6 +179,10 @@ func (h *Handler) ListsFavorite(c echo.Context) error {
 	// (production は router が必ず wire)。
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		if err != nil || !list.IsPublic {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "7dbaf3cf-7b42-4b8f-b431-b3919e580dbe"))
 		}
@@ -211,6 +223,10 @@ func (h *Handler) ListsUnfavorite(c echo.Context) error {
 	// 未配線の test 経路ではこの gate を skip する (production は router が必ず wire)。
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		if err != nil || !list.IsPublic {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER_LIST", "No such user list.", "baedb33e-76b8-4b0c-86a8-9375c0a7b94b"))
 		}
@@ -250,6 +266,10 @@ func (h *Handler) ListsUpdate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	list, err := h.userListRepo.FindByID(req.ListID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "796666fe-3dff-4d39-becb-8a5932c1d5b7"))
 	}
@@ -310,6 +330,10 @@ func (h *Handler) ListsUpdateMembership(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	list, err := h.userListRepo.FindByID(req.ListID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "7f44670e-ab16-43b8-b4c1-ccd2ee89cc02"))
 	}
@@ -372,6 +396,10 @@ func (h *Handler) ListsGetMemberships(c echo.Context) error {
 
 	const noSuchList = "7bc05c21-1d7a-41ae-88f1-66820f4dc686"
 	list, err := h.userListRepo.FindByID(req.ListID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
 	}

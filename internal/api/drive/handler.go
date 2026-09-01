@@ -902,6 +902,10 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 	// (svc.IsModerator) に一本化し、wiring を二重化しない。
 	f, err := h.fileRepo.FindByID(req.FileID)
 	viewerIsOwner := err == nil && f.UserID != nil && *f.UserID == viewer.ID
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil || (!viewerIsOwner && !h.svc.IsModerator(viewer.ID)) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "c118ece3-2e4b-4296-99d1-51756e32d232"))
 	}
@@ -1015,6 +1019,10 @@ func (h *Handler) FilesMoveBulk(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
 		}
 		folder, err := h.folderRepo.FindByID(*req.FolderID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		if err != nil || folder.UserID == nil || *folder.UserID != user.ID {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FOLDER", "No such folder.", "d77545ec-1283-4b73-bbe1-e90e1da6a4e7"))
 		}

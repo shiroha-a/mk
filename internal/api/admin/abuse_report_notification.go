@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // packedRecipient mirrors the upstream AbuseReportNotificationRecipient schema:
@@ -60,6 +61,11 @@ func (h *Handler) validateEmailAddress(userID *string) (int, map[string]any) {
 		return 0, nil
 	}
 	profile, err := h.userRepo.FindProfileByUserID(*userID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。この関数は
+		// (status, body) を返すので 500 も同じ形で返す。
+		return http.StatusInternalServerError, apierr.InternalError()
+	}
 	if err != nil || profile == nil {
 		return http.StatusBadRequest, apierr.Error("CORRELATION_CHECK_EMAIL", "If \"method\" is email, \"userId\" must be set.", "348bb8ae-575a-6fe9-4327-5811999def8f")
 	}
@@ -216,6 +222,10 @@ func (h *Handler) AbuseReportNotificationRecipientShow(c echo.Context) error {
 	}
 	_ = c.Bind(&req)
 	r, err := h.recipientRepo.FindByID(req.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
@@ -253,6 +263,10 @@ func (h *Handler) AbuseReportNotificationRecipientUpdate(c echo.Context) error {
 	// に揃えて、admin UI / CLI が ID typo を確実に 404 として受け取れる
 	// ようにする (sweep follow-up)。
 	before, err := h.recipientRepo.FindByID(req.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
@@ -332,6 +346,10 @@ func (h *Handler) AbuseReportNotificationRecipientUpdate(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	r, err := h.recipientRepo.FindByID(req.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}

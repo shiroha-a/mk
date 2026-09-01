@@ -11,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"gorm.io/datatypes"
 )
@@ -269,6 +270,10 @@ func (h *Handler) DriveShowFile(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	if req.FileID != "" {
 		file, err := h.driveFileRepo.FindByID(req.FileID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "caf3ca38-c6e5-472e-a30c-b05377dcc240"))
 		}

@@ -2,6 +2,7 @@ package resetpassword
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/crypto/bcrypt"
@@ -121,7 +123,9 @@ func (m *mockUserRepo) UpdateProfile(userID string, fields map[string]any) error
 	return nil
 }
 
-var errMock = assert.AnError
+// **not-found を模す。** 汎用 error だと #2792 の「DB 障害は 500」に引っかかる。
+// repository は GORM の error をそのまま返すので、テストもそれに揃える。
+var errMock = repository.ErrNotFound
 
 type mockResetRepo struct {
 	requests map[string]*model.PasswordResetRequest
@@ -347,3 +351,28 @@ func (m *mockUserRepo) HardDeleteUser(string) error { return nil }
 
 // DeleteOrphanRemoteUsers implements repository.UserRepository (#2340).
 func (m *mockUserRepo) DeleteOrphanRemoteUsers(_, _ int) (int64, error) { return 0, nil }
+
+// failingResetRepo makes every token lookup look like a database failure.
+type failingResetRepo struct {
+	*mockResetRepo
+	err error
+}
+
+func (r *failingResetRepo) FindByToken(string) (*model.PasswordResetRequest, error) {
+	return nil, r.err
+}
+
+// **DB 障害を「そんなトークンは無い」にしない** (#2792)。
+//
+// パスワードリセットは利用者がアカウントを取り戻す最後の経路なので、障害を
+// 400 で返すと「リンクが切れた」と判断して問い合わせが来る。
+func TestReset_DBFailureIsNot4xx(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(newMockUserRepo(), &failingResetRepo{
+		mockResetRepo: newMockResetRepo(),
+		err:           errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+	}, idGen)
+
+	rec := post(h.Reset, `{"token":"t","password":"newpassword"}`)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}

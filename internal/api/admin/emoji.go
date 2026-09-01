@@ -13,6 +13,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -81,10 +82,21 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	src, err := h.emojiRepo.FindByID(req.EmojiID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "e2785b66-dca3-4087-9cac-b93c541cc425"))
 	}
-	if existing, err := h.emojiRepo.FindByNameAndHost(src.Name, nil); err == nil && existing != nil {
+	// **重複チェックを DB 障害で skip しない** (#2792)。`err == nil` だけを見ると、
+	// 接続断のときに「重複していない」と判断して同名の絵文字を作ってしまう。
+	// not-found のときだけ「重複なし」と扱う。
+	existing, dupErr := h.emojiRepo.FindByNameAndHost(src.Name, nil)
+	if dupErr != nil && !repository.IsNotFound(dupErr) {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	if dupErr == nil && existing != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("DUPLICATE_NAME", "Duplicate name.", "f7a3462c-4e6e-4069-8421-b9bd4f4c3975"))
 	}
 	copied := *src

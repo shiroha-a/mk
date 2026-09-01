@@ -181,6 +181,10 @@ func (h *Handler) ReportAbuse(c echo.Context) error {
 	var target *model.User
 	if h.userRepo != nil {
 		t, err := h.userRepo.FindByID(req.UserID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		if err != nil || t == nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "1acefcb5-0959-43fd-9685-b48305736cb5"))
 		}
@@ -364,6 +368,10 @@ func (h *Handler) Reactions(c echo.Context) error {
 	// fall-through する (= test compat、production 影響なし)。
 	if !iAmModerator && h.userRepo != nil {
 		target, err := h.userRepo.FindByID(req.UserID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		if err != nil || target == nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "27e494ba-2ac2-48e8-893b-10d4d8c2387b"))
 		}

@@ -8,6 +8,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // UnsetUserAvatar handles POST /api/admin/unset-user-avatar.
@@ -114,6 +115,10 @@ func (h *Handler) UpdateAbuseUserReport(c echo.Context) error {
 		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662", apierr.KindServer))
 	}
 	before, err := h.abuseRepo.FindByID(req.ReportID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil || before == nil {
 		return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "15f51cf5-46d1-4b1d-a618-b35bcbed0662", apierr.KindServer))
 	}

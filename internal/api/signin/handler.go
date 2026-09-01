@@ -142,6 +142,10 @@ func (h *Handler) Signin(c echo.Context) error {
 
 	// ユーザー検索
 	user, err := h.userRepo.FindByUsernameLower(req.Username, nil)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, errBody("6cc579cc-885d-43d8-95c2-b8c7fc963280"))
 	}
@@ -160,6 +164,10 @@ func (h *Handler) Signin(c echo.Context) error {
 
 	// Step 2: パスワード検証
 	profile, err := h.userRepo.FindProfileByUserID(user.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil || profile.Password == nil {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
@@ -224,6 +232,10 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 
 	// ユーザー検索 (小文字で検索)
 	user, err := h.userRepo.FindByUsernameLower(req.Username, nil)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, errBody("6cc579cc-885d-43d8-95c2-b8c7fc963280"))
 	}
@@ -251,6 +263,10 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 
 	// Step 2: パスワード検証
 	profile, err := h.userRepo.FindProfileByUserID(user.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil || profile.Password == nil {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}

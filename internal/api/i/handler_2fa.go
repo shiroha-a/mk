@@ -15,6 +15,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -517,6 +518,10 @@ func (h *Handler) TwoFAUpdateKey(c echo.Context) error {
 	// = kind 'client' default = 400 (#1767)。code/id は一致させつつ status を
 	// 400 に揃える (以前は 404 / 403 を返していた)。
 	key, err := h.securityKeyRepo.FindByID(req.CredentialID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil || key == nil {
 		return c.JSON(http.StatusBadRequest, apierr.NoSuchKey())
 	}

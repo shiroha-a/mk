@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -21,7 +22,9 @@ import (
 	"gorm.io/datatypes"
 )
 
-var errMock = assert.AnError
+// **not-found を模す。** 汎用 error だと #2792 の「DB 障害は 500」に引っかかる。
+// repository は GORM の error をそのまま返すので、テストもそれに揃える。
+var errMock = repository.ErrNotFound
 
 type mockReversiRepo struct {
 	games     map[string]*model.ReversiGame

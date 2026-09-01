@@ -45,6 +45,10 @@ func (h *Handler) Read(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
+		if !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		// upstream promo/read.ts の endpoint 固有 id を返す。汎用の
 		// UUIDNoSuchNote は **upstream `notes/show` の id** で、error.id で
 		// 分岐する drop-in クライアントが誤分類する (#2784)。

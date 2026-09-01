@@ -1,8 +1,12 @@
 package i
 
 import (
+	"errors"
 	"net/http"
 	"testing"
+
+	coreuser "github.com/shiroha-a/mk/internal/core/user"
+	"github.com/shiroha-a/mk/internal/misc/id"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -128,4 +132,57 @@ func TestVerifyEmail_PublishesMeUpdated(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.True(t, repo.Profiles["u1"].EmailVerified)
 	requireMeUpdated(t, pub, "u1")
+}
+
+// failingVerifyCodeRepo makes every verify-code lookup look like a database
+// failure rather than a missing row.
+type failingVerifyCodeRepo struct {
+	*testutil.MockUserRepository
+	err error
+}
+
+func (r *failingVerifyCodeRepo) FindProfileByVerifyCode(string) (*model.UserProfile, error) {
+	return nil, r.err
+}
+
+// **DB 障害を「そんなコードは無い」にしない** (#2792)。
+//
+// メール確認は登録フローの最後で、障害を 400 にすると利用者は「リンクが切れた」
+// と判断してやり直す。監視でも 5xx が立たない。
+func TestVerifyEmail_DBFailureIsNot4xx(t *testing.T) {
+	userRepo := &failingVerifyCodeRepo{
+		MockUserRepository: testutil.NewMockUserRepository(),
+		err:                errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+	}
+	noteRepo := testutil.NewMockNoteRepository()
+	piningRepo := testutil.NewMockUserNotePiningRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(coreuser.NewService(userRepo, noteRepo, piningRepo, idGen), idGen)
+
+	assert.Equal(t, http.StatusInternalServerError,
+		postExtra(h.VerifyEmail, `{"code":"abc"}`, stubUser).Code)
+}
+
+// failingPageRepo makes every page lookup look like a database failure.
+type failingPageRepo struct {
+	*testutil.MockPageRepository
+	err error
+}
+
+func (r *failingPageRepo) FindByID(string) (*model.Page, error) { return nil, r.err }
+
+// **DB 障害を「そんなページは無い」にしない** (#2792)。
+//
+// i/update の pinnedPageId は所有権を確かめてから設定する。障害を 400 で返すと
+// 「ページが消えた」と読めてしまう。
+func TestUpdate_PinnedPage_DBFailureIsNot4xx(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	repo.Profiles[stubUser.ID] = &model.UserProfile{UserID: stubUser.ID}
+	h.SetPageRepo(&failingPageRepo{
+		MockPageRepository: testutil.NewMockPageRepository(),
+		err:                errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+	})
+
+	assert.Equal(t, http.StatusInternalServerError,
+		postExtra(h.Update, `{"pinnedPageId":"p1"}`, stubUser).Code)
 }

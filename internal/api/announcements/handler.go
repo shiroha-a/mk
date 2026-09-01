@@ -364,6 +364,10 @@ func (h *Handler) AdminUpdate(c echo.Context) error {
 	}
 	// before snapshot for moderation log + global/user 分岐判定
 	before, err := h.repo.FindByID(req.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ANNOUNCEMENT", "No such announcement.", "d3aae5a7-6372-4cb4-b61c-f511ffc2d7cc"))
 	}

@@ -253,6 +253,11 @@ func (h *feedHandler) serve(c echo.Context, username string, render func(*feedDa
 		return echo.NewHTTPError(http.StatusNotFound)
 	}
 	u, err := h.users.FindLocalByUsername(username)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。このファイルは
+		// apierr を使わないので echo の HTTPError で返す。
+		return echo.NewHTTPError(http.StatusInternalServerError)
+	}
 	if err != nil || u == nil {
 		return echo.NewHTTPError(http.StatusNotFound)
 	}

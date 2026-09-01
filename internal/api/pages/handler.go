@@ -471,6 +471,12 @@ func (h *Handler) PagePush(c echo.Context) error {
 	// 使って合わせる。見つからなければ404に丸め、存在するIDだけに
 	// emitする。
 	p, err := h.svc.FindByID(req.PageID)
+	// **service の sentinel を見る。** page.Service は not-found を
+	// ErrPageNotFound に置き換えるので、repository.IsNotFound では判定できない。
+	if err != nil && !errors.Is(err, corepage.ErrPageNotFound) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "4a13ad31-6729-46b4-b9af-e86b265c2e74"))
 	}

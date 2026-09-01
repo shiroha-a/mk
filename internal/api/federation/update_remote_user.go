@@ -5,6 +5,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // UpdateRemoteUser handles POST /api/federation/update-remote-user.
@@ -21,6 +22,10 @@ func (h *Handler) UpdateRemoteUser(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	user, err := h.userRepo.FindByID(req.UserID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		// #2106 L29: upstream は GetterService の IdentifiableError(15348ddd) を
 		// ApiCallService が INTERNAL_ERROR(500) に包む。mk-go は意図的に明快な

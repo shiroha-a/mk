@@ -112,6 +112,10 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 
 	a, err := h.repo.FindAppByID(req.AppID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_APP", "No such app.", "dce83913-2dc6-4093-8a7b-71dbb11718a3"))
 	}

@@ -320,6 +320,10 @@ func (h *Handler) ShowGame(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "gameId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	game, err := h.repo.FindByID(req.GameID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		// show-game の noSuchGame は upstream で endpoint 固有 UUID
 		// (show-game.ts:19)。surrender / verify とは別値なので使い回さない。
@@ -608,6 +612,10 @@ func (h *Handler) Surrender(c echo.Context) error {
 	// service.Surrender は repo 越しに game を読むが、federation session の
 	// lookup は handler のタイミングで必要なので preload する。
 	game, err := h.repo.FindByID(req.GameID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_GAME", "No such game.", "ace0b11f-e0a6-4076-a30d-e8284c81b2df"))
 	}
@@ -683,6 +691,10 @@ func (h *Handler) Verify(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "gameId and crc32 are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 	game, err := h.repo.FindByID(req.GameID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		// verify の noSuchGame は upstream verify.ts:17 の endpoint 固有 UUID。
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_GAME", "No such game.", "8fb05624-b525-43dd-90f7-511852bdfeee"))

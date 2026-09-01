@@ -2359,6 +2359,10 @@ func (h *Handler) RolesAssign(c echo.Context) error {
 	// upstream assign.ts:77-81: 対象 user 不在なら NO_SUCH_USER (#1542)。
 	if h.userRepo != nil {
 		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
+			if !repository.IsNotFound(err) {
+				// **DB 障害を not-found に丸めない** (#2792)。
+				return apierr.JSONInternalError(c)
+			}
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "558ea170-f653-4700-94d0-5a818371d0df"))
 		}
 	}
@@ -2435,6 +2439,10 @@ func (h *Handler) RolesUnassign(c echo.Context) error {
 	// upstream unassign.ts:80-84: 対象 user 不在なら NO_SUCH_USER (#1542)。
 	if h.userRepo != nil {
 		if _, err := h.userRepo.FindByID(req.UserID); err != nil {
+			if !repository.IsNotFound(err) {
+				// **DB 障害を not-found に丸めない** (#2792)。
+				return apierr.JSONInternalError(c)
+			}
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
 		}
 	}
@@ -2661,6 +2669,10 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	url := req.URL
 	if url == "" && req.FileID != "" && h.driveFileRepo != nil {
 		f, err := h.driveFileRepo.FindByID(req.FileID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
 		}
@@ -2670,7 +2682,12 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "url or fileId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// 同名のローカル emoji が既に存在する場合は DUPLICATE_NAME (upstream 互換)。
-	if existing, err := h.emojiRepo.FindByNameAndHost(req.Name, nil); err == nil && existing != nil {
+	// **重複チェックを DB 障害で skip しない** (#2792)。
+	existing, dupErr := h.emojiRepo.FindByNameAndHost(req.Name, nil)
+	if dupErr != nil && !repository.IsNotFound(dupErr) {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	if dupErr == nil && existing != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("DUPLICATE_NAME", "Duplicate name.", "f7a3462c-4e6e-4069-8421-b9bd4f4c3975"))
 	}
 	// drive 画像なら MIME を allowlist で検証し、webpublic variant を優先して
@@ -2803,6 +2820,10 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 		}
 		f, ferr := h.driveFileRepo.FindByID(*req.FileID)
+		if ferr != nil && !repository.IsNotFound(ferr) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		if ferr != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "14fb9fd9-0731-4e2f-aeb9-f09e4740333d"))
 		}
@@ -2837,7 +2858,12 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	if req.Name != nil {
 		// リネーム時は同名 local emoji の重複を弾く (SAME_NAME_EMOJI_EXISTS)。
 		if *req.Name != before.Name {
-			if dup, derr := h.emojiRepo.FindByNameAndHost(*req.Name, nil); derr == nil && dup != nil && dup.ID != req.ID {
+			// **重複チェックを DB 障害で skip しない** (#2792)。
+			dup, derr := h.emojiRepo.FindByNameAndHost(*req.Name, nil)
+			if derr != nil && !repository.IsNotFound(derr) {
+				return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+			}
+			if derr == nil && dup != nil && dup.ID != req.ID {
 				return c.JSON(http.StatusBadRequest, apierr.Error("SAME_NAME_EMOJI_EXISTS", "Emoji with the same name already exists.", "7180fe9d-1ee3-bff9-647d-fe9896d2ffb8"))
 			}
 		}
@@ -2940,6 +2966,10 @@ func (h *Handler) EmojiDelete(c echo.Context) error {
 	}
 	// log info に snapshot を含めるため削除前に取得。取得失敗は NO_SUCH_EMOJI。
 	snapshot, err := h.emojiRepo.FindByID(req.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "be83669b-773a-44b7-b1f8-e5e5170ac3c2"))
 	}

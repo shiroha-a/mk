@@ -184,6 +184,10 @@ func (h *Handler) Show(c echo.Context) error {
 	}
 
 	w, err := h.repo.FindByIDAndUserID(req.WebhookID, user.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_WEBHOOK", "No such webhook.", "50f614d9-3047-4f7e-90d8-ad6b2d5fb098"))
 	}
@@ -210,6 +214,10 @@ func (h *Handler) Update(c echo.Context) error {
 	}
 
 	w, err := h.repo.FindByIDAndUserID(req.WebhookID, user.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_WEBHOOK", "No such webhook.", "fb0fea69-da18-45b1-828d-bd4fd1612518"))
 	}
@@ -257,6 +265,10 @@ func (h *Handler) Delete(c echo.Context) error {
 	}
 
 	if _, err := h.repo.FindByIDAndUserID(req.WebhookID, user.ID); err != nil {
+		if !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_WEBHOOK", "No such webhook.", "bae73e5a-5522-4965-ae19-3a8688e71d82"))
 	}
 
@@ -294,6 +306,10 @@ func (h *Handler) Test(c echo.Context) error {
 	}
 
 	webhook, err := h.repo.FindByIDAndUserID(req.WebhookID, user.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_WEBHOOK", "No such webhook.", "0c52149c-e913-18f8-5dc7-74870bfe0cf9"))
 	}

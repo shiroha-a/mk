@@ -175,6 +175,12 @@ func (h *Handler) validateImportRequest(c echo.Context, importType string) (*mod
 		return nil, nil, false, false
 	}
 	file, err := h.driveFileRepo.FindByID(req.FileID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。この関数は
+		// (user, file, ok, ok) を返すので、応答は自分で書いて false を返す。
+		_ = c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		return nil, nil, false, false
+	}
 	if err != nil || file == nil || file.UserID == nil || *file.UserID != u.ID {
 		_ = c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", importNoSuchFileID(importType)))
 		return nil, nil, false, false

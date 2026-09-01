@@ -96,6 +96,10 @@ func (h *Handler) FavoritesDelete(c echo.Context) error {
 	// 操作するので visibility gate は不要 (可視性を絞られた後でも un-favorite
 	// できるべき)、存在確認のみ行う。
 	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
+		if !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "80848a2c-398f-4343-baa9-df1d57696c56"))
 	}
 	if exists, _ := h.favoriteRepo.Exists(user.ID, req.NoteID); !exists {
@@ -228,6 +232,10 @@ func (h *Handler) Unrenote(c echo.Context) error {
 	}
 	// renoteId が指定ノートの自分のノートを探して削除
 	renote, err := h.noteRepo.FindRenoteByUser(user.ID, req.NoteID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "efd4a259-2442-496b-8dd7-b255aa1a160f"))
 	}
@@ -308,6 +316,10 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	// リスト所有権チェック (TS互換: 自分のリストのみ閲覧可)
 	if h.userListRepo != nil {
 		list, err := h.userListRepo.FindByID(req.ListID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", "8fb1fbd5-e476-4c37-9fb0-43d55b63a2ff"))
 		}
@@ -456,6 +468,10 @@ func (h *Handler) Clips(c echo.Context) error {
 	}
 	// note 存在確認 (upstream getterService.getNote)。可視性は問わず存在のみ。
 	if _, err := h.noteRepo.FindByID(req.NoteID); err != nil {
+		if !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "47db1a1c-b0af-458d-8fb4-986e4efafe1e"))
 	}
 	clipIDs, err := h.clipNoteRepo.ListClipIDsByNote(req.NoteID)
@@ -527,6 +543,10 @@ func (h *Handler) Translate(c echo.Context) error {
 	// note/text check より前に置くと、null-text note が upstream の 204 ではなく
 	// UNAVAILABLE を返してしまうため後ろに移動する。
 	n, err := h.noteRepo.FindByID(req.NoteID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "bea9b03f-36e0-49c5-a4db-627a029f8971"))
 	}

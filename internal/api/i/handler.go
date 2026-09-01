@@ -1709,6 +1709,10 @@ func (h *Handler) Update(c echo.Context) error {
 				// 所有権検証: 自分の page でなければ NO_SUCH_PAGE。
 				if h.pageRepo != nil {
 					p, perr := h.pageRepo.FindByID(pid)
+					if perr != nil && !repository.IsNotFound(perr) {
+						// **DB 障害を not-found に丸めない** (#2792)。
+						return apierr.JSONInternalError(c)
+					}
 					if perr != nil || p == nil || p.UserID != me.ID {
 						return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_PAGE", "No such page.", "8e01b590-7eb9-431b-a239-860e086c408e"))
 					}
@@ -1881,6 +1885,11 @@ func (h *Handler) normalizeAvatarDecorations(userID string, in []AvatarDecoratio
 		}
 		if h.avatarDecorationRepo != nil {
 			deco, err := h.avatarDecorationRepo.FindByID(d.ID)
+			if err != nil && !repository.IsNotFound(err) {
+				// **DB 障害を not-found に丸めない** (#2792)。この関数は
+				// 専用の error 型を返すので、呼び出し側が 500 に変換する。
+				return nil, &avatarDecorationAPIError{status: http.StatusInternalServerError, body: apierr.InternalError()}
+			}
 			if err != nil || deco == nil {
 				return nil, &avatarDecorationAPIError{
 					status: http.StatusBadRequest,

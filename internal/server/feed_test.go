@@ -9,6 +9,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -18,7 +19,9 @@ type stubFeedUsers struct{ users map[string]*model.User }
 func (s stubFeedUsers) FindLocalByUsername(username string) (*model.User, error) {
 	u, ok := s.users[username]
 	if !ok {
-		return nil, echo.ErrNotFound
+		// **repository の sentinel を返す。** `echo.ErrNotFound` は HTTP の
+		// error で、`repository.IsNotFound` では判定できない (#2792)。
+		return nil, repository.ErrNotFound
 	}
 	return u, nil
 }

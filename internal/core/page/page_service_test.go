@@ -546,3 +546,38 @@ func TestSetClock(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, p.ID)
 }
+
+// failingPageRepo makes every page lookup look like a database failure.
+type failingPageRepo struct {
+	*testutil.MockPageRepository
+	err error
+}
+
+func (r *failingPageRepo) FindByID(string) (*model.Page, error) { return nil, r.err }
+
+// **DB 障害を ErrPageNotFound に丸めないこと** (#2792)。
+//
+// 全部 ErrPageNotFound にすると、呼び出し側は 4xx を返すしかなくなり、接続断が
+// 「そんなページは無い」として返る。監視でも 5xx が立たない。
+func TestFindByID_DBFailureIsNotPageNotFound(t *testing.T) {
+	dbErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
+	idGen, _ := id.NewGenerator("aidx")
+	svc := page.NewService(&failingPageRepo{
+		MockPageRepository: testutil.NewMockPageRepository(),
+		err:                dbErr,
+	}, testutil.NewMockPageLikeRepository(), idGen)
+
+	_, err := svc.FindByID("p1")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, page.ErrPageNotFound),
+		"DB 障害が not-found に丸められている")
+	assert.ErrorIs(t, err, dbErr, "元の error がそのまま返るべき")
+}
+
+// not-found は従来どおり ErrPageNotFound。
+func TestFindByID_MissingRowIsPageNotFound(t *testing.T) {
+	svc, _, _ := newSvc(t)
+
+	_, err := svc.FindByID("ghost")
+	assert.ErrorIs(t, err, page.ErrPageNotFound)
+}

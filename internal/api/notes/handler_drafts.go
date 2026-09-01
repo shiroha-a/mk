@@ -253,6 +253,10 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), apierr.UUIDInvalidParam))
 	}
 	draft, err := h.draftRepo.FindByIDAndUser(req.DraftID, user.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NoSuchNoteDraft())
 	}
@@ -391,6 +395,11 @@ func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID
 	}
 	if renoteID != nil {
 		t, err := h.noteRepo.FindByIDWithUser(*renoteID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。この関数は
+			// (status, body) を返すので 500 も同じ形で返す。
+			return http.StatusInternalServerError, apierr.InternalError()
+		}
 		if err != nil || t == nil {
 			return http.StatusBadRequest, errs.noSuchRenote
 		}
@@ -414,6 +423,11 @@ func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID
 	}
 	if replyID != nil {
 		t, err := h.noteRepo.FindByIDWithUser(*replyID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。この関数は
+			// (status, body) を返すので 500 も同じ形で返す。
+			return http.StatusInternalServerError, apierr.InternalError()
+		}
 		if err != nil || t == nil {
 			return http.StatusBadRequest, errs.noSuchReply
 		}
@@ -439,6 +453,11 @@ func (h *Handler) validateDraftReplyRenote(viewer *model.User, replyID, renoteID
 	// draft 自身の channelId が指定されていれば存在 (非 archived) 確認 (#2039)。
 	if channelID != nil && *channelID != "" && h.channelRepo != nil {
 		ch, err := h.channelRepo.FindByID(*channelID)
+		if err != nil && !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。この関数は
+			// (status, body) を返すので 500 も同じ形で返す。
+			return http.StatusInternalServerError, apierr.InternalError()
+		}
 		if err != nil || ch == nil || ch.IsArchived {
 			return http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "b1653923-5453-4edc-b786-7c4f39bb0bbb")
 		}
@@ -468,6 +487,11 @@ func (h *Handler) validateRenoteChannel(renoteChannelID, draftChannelID *string)
 		return 0, nil // 同一 channel への renote は対象外
 	}
 	ch, err := h.channelRepo.FindByID(*renoteChannelID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。この関数は
+		// (status, body) を返すので 500 も同じ形で返す。
+		return http.StatusInternalServerError, apierr.InternalError()
+	}
 	if err != nil || ch == nil {
 		return http.StatusBadRequest, apierr.Error("NO_SUCH_CHANNEL", "No such channel.", "b1653923-5453-4edc-b786-7c4f39bb0bbb")
 	}
@@ -612,6 +636,10 @@ func (h *Handler) ThreadMutingCreate(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	note, err := h.noteRepo.FindByID(req.NoteID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil || note == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "5ff67ada-ed3b-2e71-8e87-a1a421e177d2"))
 	}
@@ -642,6 +670,10 @@ func (h *Handler) ThreadMutingDelete(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	note, err := h.noteRepo.FindByID(req.NoteID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil || note == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "bddd57ac-ceb3-b29d-4334-86ea5fae481a"))
 	}

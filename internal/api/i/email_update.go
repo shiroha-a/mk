@@ -9,6 +9,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -137,6 +138,10 @@ func (h *Handler) VerifyEmail(c echo.Context) error {
 	}
 
 	profile, err := h.userService.FindProfileByVerifyCode(req.Code)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_CODE", "No such code.", "97c1f576-e4b8-4b8a-a6dc-9cb65e7f6f85"))
 	}

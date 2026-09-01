@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // packSystemWebhook serializes a SystemWebhook into the upstream
@@ -178,6 +179,10 @@ func (h *Handler) SystemWebhookShow(c echo.Context) error {
 	}
 	_ = c.Bind(&req)
 	sw, err := h.systemWebhookRepo.FindByID(req.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
@@ -205,6 +210,10 @@ func (h *Handler) SystemWebhookTest(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	sw, err := h.systemWebhookRepo.FindByID(req.WebhookID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_WEBHOOK", "No such webhook.", "0c52149c-e913-18f8-5dc7-74870bfe0cf9"))
 	}
@@ -246,6 +255,10 @@ func (h *Handler) SystemWebhookUpdate(c echo.Context) error {
 	// ため drop-in 互換に影響せず、partial 対応は mk-go の追加の柔軟性。
 	// 存在確認 (GORM Updates(map) は 0 行影響でも nil を返すため)
 	before, err := h.systemWebhookRepo.FindByID(req.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -41,7 +42,7 @@ func (m *mockAuthSessionRepo) FindAppBySecret(secret string) (*model.App, error)
 			return a, nil
 		}
 	}
-	return nil, assert.AnError
+	return nil, repository.ErrNotFound
 }
 func (m *mockAuthSessionRepo) CreateApp(app *model.App) error {
 	if m.createErr != nil {
@@ -65,7 +66,7 @@ func (m *mockAuthSessionRepo) FindAccessTokenByAppAndUser(appID, userID string) 
 			return t, nil
 		}
 	}
-	return nil, assert.AnError
+	return nil, repository.ErrNotFound
 }
 func (m *mockAuthSessionRepo) CreateAccessToken(t *model.AccessToken) error {
 	m.accessTokens[t.ID] = t
@@ -78,7 +79,7 @@ func (m *mockAuthSessionRepo) FindAccessTokenBySession(session string) (*model.A
 			return t, nil
 		}
 	}
-	return nil, assert.AnError
+	return nil, repository.ErrNotFound
 }
 
 func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) (bool, error) {
@@ -92,7 +93,7 @@ func (m *mockAuthSessionRepo) MarkAccessTokenFetched(id string) (bool, error) {
 func (m *mockAuthSessionRepo) FindAppByID(id string) (*model.App, error) {
 	a, ok := m.apps[id]
 	if !ok {
-		return nil, assert.AnError
+		return nil, repository.ErrNotFound
 	}
 	return a, nil
 }

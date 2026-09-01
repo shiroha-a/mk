@@ -115,6 +115,10 @@ func (h *Handler) Reset(c echo.Context) error {
 	}
 
 	resetReq, err := h.resetRepo.FindByToken(req.Token)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid token.", "6382759e-0a0d-4e32-893e-0e1e66cec4d5"))
 	}

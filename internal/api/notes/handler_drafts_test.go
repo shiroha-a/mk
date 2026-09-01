@@ -19,6 +19,7 @@ import (
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -46,7 +47,9 @@ func newDraftHandler() *Handler {
 
 // --- Mock DraftRepo ---
 
-var errDraftMock = assert.AnError
+// **not-found を模す。** 汎用 error だと #2792 の「DB 障害は 500」に引っかかる。
+// repository は GORM の error をそのまま返すので、テストもそれに揃える。
+var errDraftMock = repository.ErrNotFound
 
 type mockDraftRepo struct {
 	drafts    map[string]*model.NoteDraft

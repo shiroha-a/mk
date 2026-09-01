@@ -152,7 +152,12 @@ func (s *Service) Create(in CreateInput) (*model.Page, error) {
 func (s *Service) FindByID(pageID string) (*model.Page, error) {
 	p, err := s.repo.FindByID(pageID)
 	if err != nil {
-		return nil, ErrPageNotFound
+		// **DB 障害を not-found に丸めない** (#2792)。全部 ErrPageNotFound に
+		// すると、接続断が「そんなページは無い」として 4xx で返る。
+		if repository.IsNotFound(err) {
+			return nil, ErrPageNotFound
+		}
+		return nil, err
 	}
 	return p, nil
 }

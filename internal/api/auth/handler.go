@@ -62,6 +62,10 @@ func (h *Handler) SessionGenerate(c echo.Context) error {
 	}
 
 	app, err := h.repo.FindAppBySecret(req.AppSecret)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_APP", "No such app.", "92f93e63-428e-4f2f-a5a4-39e1407fe998"))
 	}
@@ -92,6 +96,10 @@ func (h *Handler) SessionShow(c echo.Context) error {
 	}
 
 	session, err := h.repo.FindSessionByToken(req.Token)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_SESSION", "No such session.", "bd72c97d-eba7-4adb-a467-f171b8847250"))
 	}
@@ -119,6 +127,10 @@ func (h *Handler) Accept(c echo.Context) error {
 	}
 
 	session, err := h.repo.FindSessionByToken(req.Token)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_SESSION", "No such session.", "9c72d8de-391a-43c1-9d06-08d29efde8df"))
 	}
@@ -163,11 +175,19 @@ func (h *Handler) SessionUserkey(c echo.Context) error {
 	}
 
 	app, err := h.repo.FindAppBySecret(req.AppSecret)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_APP", "No such app.", "fcab192a-2c5a-43b7-8ad8-9b7054d8d40d"))
 	}
 
 	session, err := h.repo.FindSessionByTokenAndAppID(req.Token, app.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_SESSION", "No such session.", "5b5a1503-8bc8-4bd0-8054-dc189e8cdcb3"))
 	}
