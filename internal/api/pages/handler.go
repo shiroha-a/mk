@@ -206,6 +206,11 @@ func (h *Handler) Show(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	if err != nil {
+		// **DB 障害は 500** (#2792)。service は not-found と access denied だけを
+		// 専用の error にするので、それ以外はここで 500 に落とす。
+		if !errors.Is(err, corepage.ErrPageNotFound) && !errors.Is(err, corepage.ErrAccessDenied) {
+			return apierr.JSONInternalError(c)
+		}
 		// 非 public page を非許可 viewer が引いた場合 (ErrAccessDenied) も存在ごと
 		// 隠して NO_SUCH_PAGE (404) を返す。upstream TS pages/show は可視性ゲートを
 		// 持たず noSuchPage のみ返すため shape が一致し、private page の存在を 403 で

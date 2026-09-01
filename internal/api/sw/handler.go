@@ -52,6 +52,12 @@ func (h *Handler) Register(c echo.Context) error {
 	// 2-tuple (userId, endpoint) match だと stale キーのまま already-subscribed を
 	// 返して Web Push 配信が無言で壊れていた (#1775)。
 	existing, err := h.repo.FindByUserEndpointAuthKey(user.ID, req.Endpoint, req.Auth, req.PublicKey)
+	// **DB 障害で重複チェックを skip しない** (#2792)。`err == nil` だけを見ると、
+	// 接続断のときに下の新規登録へ落ちる。`sw_subscription` に unique index は
+	// 無いので**重複行が恒久的に残り、その端末へ web push が二重配信される**。
+	if err != nil && !repository.IsNotFound(err) {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err == nil && existing != nil {
 		return c.JSON(http.StatusOK, map[string]any{
 			"state":           "already-subscribed",

@@ -168,6 +168,12 @@ func (s *Service) FindByID(pageID string) (*model.Page, error) {
 func (s *Service) Show(requesterID, pageID string) (*model.Page, error) {
 	p, err := s.repo.FindByID(pageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。呼び出し側は
+		// ErrPageNotFound を 4xx にするので、ここで潰すと接続断が
+		// 「そんなページは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrPageNotFound
 	}
 	if p.Visibility != model.PageVisibilityPublic && p.UserID != requesterID {
@@ -181,6 +187,12 @@ func (s *Service) Show(requesterID, pageID string) (*model.Page, error) {
 func (s *Service) ShowByName(requesterID, ownerID, name string) (*model.Page, error) {
 	p, err := s.repo.FindByUserAndName(ownerID, name)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。呼び出し側は
+		// ErrPageNotFound を 4xx にするので、ここで潰すと接続断が
+		// 「そんなページは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrPageNotFound
 	}
 	if p.Visibility != model.PageVisibilityPublic && p.UserID != requesterID {
@@ -208,6 +220,12 @@ type UpdateInput struct {
 func (s *Service) Update(ownerID, pageID string, in UpdateInput) (*model.Page, error) {
 	p, err := s.repo.FindByID(pageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。呼び出し側は
+		// ErrPageNotFound を 4xx にするので、ここで潰すと接続断が
+		// 「そんなページは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrPageNotFound
 	}
 	if p.UserID != ownerID {
@@ -273,6 +291,12 @@ func (s *Service) Update(ownerID, pageID string, in UpdateInput) (*model.Page, e
 func (s *Service) Delete(ownerID, pageID string) error {
 	p, err := s.repo.FindByID(pageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。呼び出し側は
+		// ErrPageNotFound を 4xx にするので、ここで潰すと接続断が
+		// 「そんなページは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrPageNotFound
 	}
 	if p.UserID != ownerID {
@@ -302,6 +326,12 @@ func (s *Service) Like(userID, pageID string) error {
 	}
 	p, err := s.repo.FindByID(pageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。呼び出し側は
+		// ErrPageNotFound を 4xx にするので、ここで潰すと接続断が
+		// 「そんなページは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrPageNotFound
 	}
 	if p.Visibility != model.PageVisibilityPublic && p.UserID != userID {
@@ -338,10 +368,20 @@ func (s *Service) Unlike(userID, pageID string) error {
 		return errors.New("userId is required")
 	}
 	if _, err := s.repo.FindByID(pageID); err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。呼び出し側は
+		// ErrPageNotFound を 4xx にするので、ここで潰すと接続断が
+		// 「そんなページは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrPageNotFound
 	}
 	pl, err := s.likeRepo.FindByPair(userID, pageID)
 	if err != nil {
+		// **DB 障害を「like していない」にしない** (#2792)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotLiked
 	}
 	if err := s.likeRepo.Delete(pl); err != nil {
