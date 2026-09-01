@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -32,10 +33,16 @@ func TestChat_DBFailureIsNot4xx(t *testing.T) {
 	dbErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
 	me := &model.User{ID: "u1"}
 
+	// **本番と同じ配線にする。** `router.go` は `SetService` を無条件に呼ぶので、
+	// service を張らないと `h.svc == nil` の legacy 枝だけを検証してしまう
+	// (実際、messages/update と delete はその枝しか見ておらず、本番は 400 の
+	// ままだった)。
 	newFailing := func() *Handler {
 		repo := &failingChatRepo{MockChatRepository: testutil.NewMockChatRepository(), err: dbErr}
 		idGen, _ := id.NewGenerator("aidx")
-		return NewHandler(repo, idGen)
+		h := NewHandler(repo, idGen)
+		h.SetService(corechat.NewService(repo, idGen))
+		return h
 	}
 
 	for _, tt := range []struct {

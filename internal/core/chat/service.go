@@ -772,6 +772,12 @@ func (s *Service) CreateMessageToRoom(ctx context.Context, fromUserID, roomID, t
 	// 取得した room は後段の emitRoomNewChatMessage にも渡し、重複 fetch を避ける。
 	room, err := s.repo.FindRoomByID(roomID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。handler の mapChatErr は
+		// ErrNotFound を 400 にするので、ここで潰すと接続断が
+		// 「そんなメッセージは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrNotFound
 	}
 	isMember, err := s.isRoomMemberWith(room, fromUserID, roomID)
@@ -989,6 +995,10 @@ func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID,
 		}
 	}
 	room, err := s.repo.FindRoomByID(roomID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return err
+	}
 	if err != nil || room == nil {
 		return ErrNotFound
 	}
@@ -1071,6 +1081,12 @@ func (s *Service) emitRoomNewChatMessage(room *model.ChatRoom, fromUserID string
 func (s *Service) DeleteMessage(ctx context.Context, userID, messageID string) error {
 	msg, err := s.repo.FindMessageByID(messageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。handler の mapChatErr は
+		// ErrNotFound を 400 にするので、ここで潰すと接続断が
+		// 「そんなメッセージは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotFound
 	}
 	if msg.FromUserID != userID {
@@ -1094,6 +1110,12 @@ func (s *Service) DeleteMessage(ctx context.Context, userID, messageID string) e
 func (s *Service) UpdateMessage(ctx context.Context, userID, messageID, text string) (*model.ChatMessage, error) {
 	msg, err := s.repo.FindMessageByID(messageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。handler の mapChatErr は
+		// ErrNotFound を 400 にするので、ここで潰すと接続断が
+		// 「そんなメッセージは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrNotFound
 	}
 	if msg.FromUserID != userID {
@@ -1120,6 +1142,12 @@ func (s *Service) UpdateMessage(ctx context.Context, userID, messageID, text str
 func (s *Service) MarkReadByMessageID(ctx context.Context, userID, messageID string) error {
 	msg, err := s.repo.FindMessageByID(messageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。handler の mapChatErr は
+		// ErrNotFound を 400 にするので、ここで潰すと接続断が
+		// 「そんなメッセージは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotFound
 	}
 	if err := s.repo.MarkRead(userID, messageID); err != nil {
@@ -1150,6 +1178,12 @@ func (s *Service) React(ctx context.Context, messageID string, reactor *model.Us
 	}
 	msg, err := s.repo.FindMessageByID(messageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。handler の mapChatErr は
+		// ErrNotFound を 400 にするので、ここで潰すと接続断が
+		// 「そんなメッセージは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotFound
 	}
 	// 自分のメッセージには react できない。
@@ -1171,6 +1205,10 @@ func (s *Service) React(ctx context.Context, messageID string, reactor *model.Us
 	if msg.ToRoomID != nil && *msg.ToRoomID != "" {
 		room, err := s.repo.FindRoomByID(*msg.ToRoomID)
 		if err != nil {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			if !repository.IsNotFound(err) {
+				return err
+			}
 			return ErrNotFound
 		}
 		isMember, err := s.isRoomMemberWith(room, reactor.ID, *msg.ToRoomID)
@@ -1229,6 +1267,12 @@ func (s *Service) Unreact(ctx context.Context, messageID string, reactor *model.
 	reaction := normalizeChatReactionForm(emoji)
 	msg, err := s.repo.FindMessageByID(messageID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2792)。handler の mapChatErr は
+		// ErrNotFound を 400 にするので、ここで潰すと接続断が
+		// 「そんなメッセージは無い」として返る。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotFound
 	}
 	if err := s.repo.RemoveReaction(messageID, reactor.ID+"/"+reaction); err != nil {
