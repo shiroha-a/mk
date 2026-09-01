@@ -1,12 +1,12 @@
 package admin
 
 import (
-	"net/http"
-	"time"
-
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
+	"net/http"
+	"time"
 )
 
 // PromoCreate handles POST /api/admin/promo/create.
@@ -34,6 +34,10 @@ func (h *Handler) PromoCreate(c echo.Context) error {
 	}
 	// 対象 note の存在確認 → 公開範囲確認 → 既に promote 済みでないか確認
 	note, err := h.noteFinder.FindByID(req.NoteID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を「そんなノートは無い」にしない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "ee449fbe-af2a-453b-9cae-cf2fe7c895fc"))
 	}

@@ -925,6 +925,11 @@ func (h *Handler) ShowUser(c echo.Context) error {
 
 	user, err := h.userRepo.FindByID(req.UserID)
 	if err != nil {
+		// **DB 障害を「そんな利用者は居ない」にしない** (#2792)。障害を 404 で
+		// 返すと「対象が消えた」と読めてしまい、監視でも 5xx が立たない。
+		if !repository.IsNotFound(err) {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
 	}
 
@@ -1164,6 +1169,11 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 
 	user, err := h.userRepo.FindByID(req.UserID)
 	if err != nil {
+		// **DB 障害を「そんな利用者は居ない」にしない** (#2792)。障害を 404 で
+		// 返すと「対象が消えた」と読めてしまい、監視でも 5xx が立たない。
+		if !repository.IsNotFound(err) {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
 	}
 
@@ -1202,6 +1212,11 @@ func (h *Handler) UnsuspendUser(c echo.Context) error {
 
 	user, err := h.userRepo.FindByID(req.UserID)
 	if err != nil {
+		// **DB 障害を「そんな利用者は居ない」にしない** (#2792)。障害を 404 で
+		// 返すと「対象が消えた」と読めてしまい、監視でも 5xx が立たない。
+		if !repository.IsNotFound(err) {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", "2b730f78-1179-461b-88ad-d24c9af1a5ce"))
 	}
 

@@ -1,14 +1,14 @@
 package admin
 
 import (
-	"log/slog"
-	"net/http"
-
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"log/slog"
+	"net/http"
 )
 
 // UnsetMfa handles POST /api/admin/unset-mfa (upstream 2026.7.0 #17614).
@@ -28,6 +28,11 @@ func (h *Handler) UnsetMfa(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	user, err := h.userRepo.FindByID(req.UserID)
+	// **DB 障害を not-found に丸めない** (#2792)。障害を 4xx で返すと
+	// クライアントから区別できず、監視でも 5xx が立たない。
+	if err != nil && !repository.IsNotFound(err) {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
 	if err != nil || user == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
 	}

@@ -1,12 +1,12 @@
 package admin
 
 import (
-	"net/http"
-
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
+	"net/http"
 )
 
 // ForwardAbuseUserReport handles POST /api/admin/forward-abuse-user-report.
@@ -28,6 +28,10 @@ func (h *Handler) ForwardAbuseUserReport(c echo.Context) error {
 	var snapshot *model.AbuseUserReport
 	if h.abuseRepo != nil {
 		s, err := h.abuseRepo.FindByID(req.ReportID)
+		// **DB 障害を not-found に丸めない** (#2792)。
+		if err != nil && !repository.IsNotFound(err) {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		if err != nil || s == nil {
 			return c.JSON(http.StatusNotFound, apierr.ErrorWithKind("NO_SUCH_ABUSE_REPORT", "No such abuse report.", "8763e21b-d9bc-40be-acf6-54c1a6986493", apierr.KindServer))
 		}

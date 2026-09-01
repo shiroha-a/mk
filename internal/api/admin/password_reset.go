@@ -1,15 +1,15 @@
 package admin
 
 import (
-	"net/http"
-
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/misc"
 	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"net/http"
 )
 
 // ResetPassword handles POST /api/admin/reset-password.
@@ -38,6 +38,12 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 	var target *model.User
 	if h.userRepo != nil {
 		user, err := h.userRepo.FindByID(req.UserID)
+		// **DB 障害を not-found に丸めない** (#2792)。管理者によるパスワード
+		// リセットで障害を 400 にすると、対象が居ないのか DB が落ちているのか
+		// 区別できない。
+		if err != nil && !repository.IsNotFound(err) {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 		if err != nil || user == nil {
 			// #2106 L2: upstream reset-password.ts:26 固有の UUID に揃える。
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
