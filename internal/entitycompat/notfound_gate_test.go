@@ -22,14 +22,20 @@ import (
 // `Create` / `Update` / `Delete` は対象外 — 失敗をそもそも 4xx にしないので、
 // 数えると偽陽性になる。`List` / `Count` 系も複数行なので除く。
 func isRepoLookupMethod(name string) bool {
-	// **`Get` プレフィックスは採らない。** `middleware.GetUser(c)` が 176 件
-	// 引っかかり、検出の 6 割が偽陽性になった。あれは context から読むだけで
-	// DB を触らない。
-	if !strings.HasPrefix(name, "Find") {
+	// **`Get` は完全一致だけ採る。** プレフィックスにすると
+	// `middleware.GetUser(c)` が 176 件引っかかり、検出の 6 割が偽陽性になる
+	// (あれは context から読むだけで DB を触らない)。一方
+	// `registryRepo.Get(...)` は本物の lookup で、実際に 2 件取りこぼしていた。
+	if !strings.HasPrefix(name, "Find") && name != "Get" {
 		return false
 	}
 	// 複数件を返すものは「無い」が正常なので対象外。
-	for _, p := range []string{"List", "All", "Many", "Recent", "Search"} {
+	//
+	// **`String` / `Submatch` / `Index` も除く。** `regexp` の
+	// `FindStringSubmatch` / `FindString` が DB の lookup として扱われ、
+	// 正規表現でパラメータを検証して 400 を返す handler が誤検出される
+	// (実際に検出された。`internal/api/app/handler.go:30` に前例がある)。
+	for _, p := range []string{"List", "All", "Many", "Recent", "Search", "String", "Submatch", "Index"} {
 		if strings.Contains(name, p) {
 			return false
 		}
@@ -249,21 +255,30 @@ func scanCollapsedLookups(t *testing.T, root, path string) []string {
 			continue
 		}
 		name := fn.Name.Name
-		report := func(as *ast.AssignStmt, ifs *ast.IfStmt) {
-			// **条件と body の両方で not-found 判定を探す。** 正しい直し方は
-			//
-			//	if err != nil {
-			//		if !repository.IsNotFound(err) { return 500 }
-			//		return 404
-			//	}
-			//
-			// で、判定は body の中にある。条件だけ見ると**直したものを検出し
-			// 続ける** (実際に検出し続けた)。
-			if !condMentionsErr(ifs.Cond, as) || checksNotFound(ifs) || !bodyReturns4xx(ifs.Body) {
-				return
+		// report records one collapsed lookup. guarded が true なら、その
+		// lookup は手前で既に not-found 判定を通っている。
+		//
+		// **正しい直し方は 2 形ある。** 入れ子形
+		//
+		//	if err != nil {
+		//		if !repository.IsNotFound(err) { return 500 }
+		//		return 404
+		//	}
+		//
+		// と、前段 guard 形
+		//
+		//	if err != nil && !repository.IsNotFound(err) { return 500 }
+		//	if err != nil || x == nil { return 404 }
+		//
+		// で、前者は判定が body の中、後者は**別の if** にある。片方しか見ないと
+		// もう一方を検出し続ける (どちらも実際に検出し続けた)。
+		report := func(as *ast.AssignStmt, ifs *ast.IfStmt, guarded bool) bool {
+			if !condMentionsErr(ifs.Cond, as) || guarded || checksNotFound(ifs) || !bodyReturns4xx(ifs.Body) {
+				return false
 			}
 			out = append(out, fmt.Sprintf("%s:%s\t%s (line %d)",
 				rel, name, lookupMethodName(as), fset.Position(as.Pos()).Line))
+			return true
 		}
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			// **`if x, err := repo.Find(...); err != nil` の形も見る。**
@@ -271,7 +286,7 @@ func scanCollapsedLookups(t *testing.T, root, path string) []string {
 			// 素通りする (実際に素通りした)。
 			if ifs, ok := n.(*ast.IfStmt); ok && ifs.Init != nil {
 				if as, ok := ifs.Init.(*ast.AssignStmt); ok && isRepoLookup(as) {
-					report(as, ifs)
+					report(as, ifs, false)
 				}
 			}
 			blk, ok := n.(*ast.BlockStmt)
@@ -289,10 +304,20 @@ func scanCollapsedLookups(t *testing.T, root, path string) []string {
 				if !ok || !isRepoLookup(as) {
 					continue
 				}
+				guarded := false
 				for j := i + 1; j < len(blk.List) && j <= i+lookupIfLookahead; j++ {
 					if ifs, ok := blk.List[j].(*ast.IfStmt); ok {
-						report(as, ifs)
-						break
+						// **報告できたときだけ打ち切る。** 無条件に break すると、
+						// `if h.repo == nil { ... }` のような nil-wiring guard が
+						// 1 つ挟まっただけで err の判定を見逃す。
+						if report(as, ifs, guarded) {
+							break
+						}
+						// 前段 guard を通ったら、以降の if は判定済みとみなす。
+						if condMentionsErr(ifs.Cond, as) && checksNotFound(ifs) {
+							guarded = true
+						}
+						continue
 					}
 					if next, ok := blk.List[j].(*ast.AssignStmt); ok && assignsErr(next) {
 						break
@@ -340,10 +365,28 @@ func lookupMethodName(as *ast.AssignStmt) string {
 	if !ok {
 		return ""
 	}
-	if isRepoLookupMethod(sel.Sel.Name) {
-		return sel.Sel.Name
+	if !isRepoLookupMethod(sel.Sel.Name) {
+		return ""
 	}
-	return ""
+	// **レシーバが repo らしくないものを除く。** `Get` を採ると
+	// `c.Request().Header.Get("User-Agent")` まで拾う。DB を触らないので
+	// not-found の概念が無い。
+	if sel.Sel.Name == "Get" && !looksLikeRepoReceiver(sel.X) {
+		return ""
+	}
+	return sel.Sel.Name
+}
+
+// looksLikeRepoReceiver reports whether an expression looks like a repository
+// or store rather than an HTTP header / map / config object.
+func looksLikeRepoReceiver(x ast.Expr) bool {
+	sel, ok := x.(*ast.SelectorExpr)
+	if !ok {
+		return false
+	}
+	n := sel.Sel.Name
+	return strings.HasSuffix(n, "Repo") || strings.HasSuffix(n, "Repository") ||
+		strings.HasSuffix(n, "Store") || strings.HasSuffix(n, "Cache")
 }
 
 // condMentionsErr reports whether the condition reads the error variable that
@@ -354,15 +397,19 @@ func lookupMethodName(as *ast.AssignStmt) string {
 // 1 文字名が漏れる (どちらも実際に素通りした)。lookup が何に書いたかは
 // AST から分かるので、そちらを正とする。
 func condMentionsErr(cond ast.Expr, as *ast.AssignStmt) bool {
-	names := map[string]bool{}
-	for _, lhs := range as.Lhs {
-		if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" {
-			names[id.Name] = true
-		}
+	// **最後の左辺だけを見る。** Go の慣習で error は最後に返る。左辺すべてを
+	// 見ると値側の変数 (`ticket, err := ...` の `ticket`) を err と誤認し、
+	// **err を一切見ていない権限チェックの if を拾う** (実際に拾った)。
+	if len(as.Lhs) == 0 {
+		return false
+	}
+	errID, ok := as.Lhs[len(as.Lhs)-1].(*ast.Ident)
+	if !ok || errID.Name == "_" {
+		return false
 	}
 	found := false
 	ast.Inspect(cond, func(n ast.Node) bool {
-		if id, ok := n.(*ast.Ident); ok && names[id.Name] {
+		if id, ok := n.(*ast.Ident); ok && id.Name == errID.Name {
 			found = true
 		}
 		return !found
