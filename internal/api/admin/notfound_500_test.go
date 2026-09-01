@@ -31,6 +31,34 @@ func (r *failingUserRepo) FindProfileByEmail(string) (*model.UserProfile, error)
 	return nil, r.err
 }
 
+// profileOnlyRepo resolves the profile but fails the user lookup, so the second
+// guard in AccountsFindByEmail is reachable.
+type profileOnlyRepo struct {
+	*testutil.MockUserRepository
+	err error
+}
+
+func (r *profileOnlyRepo) FindProfileByEmail(string) (*model.UserProfile, error) {
+	return &model.UserProfile{UserID: "u1"}, nil
+}
+
+func (r *profileOnlyRepo) FindByID(string) (*model.User, error) { return nil, r.err }
+
+func handlerWithFailingUserLookupOnly(t *testing.T, err error) *apiadmin.Handler {
+	t.Helper()
+	userRepo := &profileOnlyRepo{MockUserRepository: testutil.NewMockUserRepository(), err: err}
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	idGen, _ := id.NewGenerator("aidx")
+	return apiadmin.NewHandler(
+		signup.NewService(userRepo, metaRepo, idGen),
+		role.NewService(roleRepo, assignRepo, metaRepo, idGen),
+		metaRepo, userRepo, idGen,
+	)
+}
+
 // handlerWithFailingUserRepo builds an admin handler whose user lookups fail
 // with a database error.
 func handlerWithFailingUserRepo(t *testing.T, err error) *apiadmin.Handler {
@@ -92,6 +120,12 @@ func TestAdmin_DBFailureIsNot4xx(t *testing.T) {
 		}},
 		{"admin/accounts/find-by-email", func() int {
 			return doPost(h.AccountsFindByEmail, `{"email":"a@example.test"}`, adminUser).Code
+		}},
+		// **2 つ目の guard も通す。** profile が引けたあと user を引くので、
+		// profile だけ成功させないと `FindByID` 側の guard に到達しない。
+		{"admin/accounts/find-by-email (user lookup)", func() int {
+			ph := handlerWithFailingUserLookupOnly(t, dbErr)
+			return doPost(ph.AccountsFindByEmail, `{"email":"a@example.test"}`, adminUser).Code
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

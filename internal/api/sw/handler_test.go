@@ -15,6 +15,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -333,4 +334,32 @@ func TestUnregister_InvalidParam(t *testing.T) {
 	h, _ := newTestHandler()
 	rec := post(h.Unregister, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// failingSWRepo makes every subscription lookup look like a database failure.
+type failingSWRepo struct {
+	repository.SwSubscriptionRepository
+	err error
+}
+
+func (r *failingSWRepo) FindByUserEndpointAuthKey(_, _, _, _ string) (*model.SwSubscription, error) {
+	return nil, r.err
+}
+
+// **DB 障害で重複チェックを skip しない** (#2792)。
+//
+// `sw_subscription` に unique index は無いので、skip すると**重複行が恒久的に
+// 残り、その端末へ web push が二重配信される**。
+func TestRegister_DBFailureIsNot2xx(t *testing.T) {
+	swKey := "test-sw-key"
+	metaRepo := &mockMetaRepo{meta: &model.Meta{SwPublicKey: &swKey}}
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(&failingSWRepo{
+		SwSubscriptionRepository: newMockSwRepo(),
+		err:                      errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+	}, metaRepo, idGen)
+
+	rec := post(h.Register, `{"endpoint":"https://push.example/e","auth":"a","publickey":"k"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"DB 障害で重複チェックが skip されている (#2792)")
 }

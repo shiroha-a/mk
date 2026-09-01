@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -118,7 +119,10 @@ func (h *Handler) finishPasskeySignin(c echo.Context, user *model.User, cred *we
 		// (932c904e) ではなく INTERNAL_ERROR のもの**を使う — 前者は upstream が
 		// 403 でしか出さないので、500 と組み合わせると error.id で分岐する
 		// drop-in クライアントが「パスワードが違います」を表示する。
-		return c.JSON(http.StatusInternalServerError, errBody("5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		// **body の形を同 package の他の 500 に揃える** — `signin/handler.go` は
+		// `apierr.InternalError()` を返す。`errBody` は `{error:{id}}` だけで
+		// code / message / kind を持たない。
+		return apierr.JSONInternalError(c)
 	}
 	if err != nil || profile == nil {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))

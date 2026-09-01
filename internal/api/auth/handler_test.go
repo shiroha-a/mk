@@ -660,7 +660,8 @@ func TestMiAuthCheck_LosesFetchRace(t *testing.T) {
 	rec := postMiAuthCheck(h, sess, nil)
 	var out map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
-	// 遷移に負けた (または DB エラー) リクエストは token を払い出さない。
+	// 遷移に負けたリクエストは token を払い出さない。**DB エラー側は見ていない** —
+	// この stub は not-found を返す (#2792 で sentinel を分けた)。
 	assert.Equal(t, false, out["ok"])
 	_, hasToken := out["token"]
 	assert.False(t, hasToken)
