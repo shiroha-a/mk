@@ -584,6 +584,12 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	// reply → renote。
 	if in.ReplyID != nil {
 		if replyFetchErr != nil {
+			// **DB 障害を not-found に丸めない** (#2799)。lookup が上の
+			// goroutine に hoist されているので gate の射程外 — ここは
+			// テストが唯一の回帰検知になる。
+			if !repository.IsNotFound(replyFetchErr) {
+				return nil, replyFetchErr
+			}
 			return nil, ErrReplyTargetNotFound
 		}
 		t := replyTarget
@@ -617,6 +623,10 @@ func (s *CreateService) Create(in CreateInput) (*model.Note, error) {
 	}
 	if in.RenoteID != nil {
 		if renoteFetchErr != nil {
+			// **DB 障害を not-found に丸めない** (#2799、reply 側と同じ)。
+			if !repository.IsNotFound(renoteFetchErr) {
+				return nil, renoteFetchErr
+			}
 			return nil, ErrRenoteTargetNotFound
 		}
 		t := renoteTarget
@@ -1436,6 +1446,11 @@ func (s *CreateService) SetNoteMaterializer(m NoteMaterializer) {
 // 通常のノートでは Redis を一切引かないので、ホットパスに追加コストが無い。
 func (s *CreateService) materializeIfMissing(noteID string, lookupErr error) bool {
 	if lookupErr == nil || s.materializer == nil {
+		return false
+	}
+	// **DB 障害では materialize しない** (#2799)。not-found でない error は
+	// materialize しても直らないのに、ephemeral store の引きが 1 回余分に走る。
+	if !repository.IsNotFound(lookupErr) {
 		return false
 	}
 	_, err := s.materializer.EnsureNote(context.Background(), noteID)

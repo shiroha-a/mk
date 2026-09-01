@@ -47,7 +47,11 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	profile := h.userService.GetProfile(user.ID)
+	profile, perr := h.userService.GetProfileErr(user.ID)
+	// **DB 障害を「パスワード未設定」にしない** (#2799)。
+	if perr != nil && !repository.IsNotFound(perr) {
+		return apierr.JSONInternalError(c)
+	}
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
@@ -116,7 +120,10 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "token is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
 
-	profile := h.userService.GetProfile(user.ID)
+	profile, perr := h.userService.GetProfileErr(user.ID)
+	if perr != nil && !repository.IsNotFound(perr) {
+		return apierr.JSONInternalError(c)
+	}
 	if profile == nil || profile.TwoFactorTempSecret == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "2FA registration not started.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
@@ -171,7 +178,11 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.Password == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 	}
-	profile := h.userService.GetProfile(user.ID)
+	profile, perr := h.userService.GetProfileErr(user.ID)
+	// **DB 障害を「パスワード未設定」にしない** (#2799)。
+	if perr != nil && !repository.IsNotFound(perr) {
+		return apierr.JSONInternalError(c)
+	}
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
@@ -222,7 +233,13 @@ func (h *Handler) requireWebAuthn(c echo.Context, password, incorrectPwID string
 		_ = c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		return nil, nil, false
 	}
-	profile := h.userService.GetProfile(user.ID)
+	profile, perr := h.userService.GetProfileErr(user.ID)
+	// **DB 障害を「パスワード未設定」にしない** (#2799)。この関数は
+	// (user, profile, ok) を返すので、応答は自分で書いて false を返す。
+	if perr != nil && !repository.IsNotFound(perr) {
+		_ = apierr.JSONInternalError(c)
+		return nil, nil, false
+	}
 	if profile == nil || profile.Password == nil {
 		_ = c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		return nil, nil, false
@@ -452,7 +469,11 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	if user == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
-	profile := h.userService.GetProfile(user.ID)
+	profile, perr := h.userService.GetProfileErr(user.ID)
+	// **DB 障害を「パスワード未設定」にしない** (#2799)。
+	if perr != nil && !repository.IsNotFound(perr) {
+		return apierr.JSONInternalError(c)
+	}
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}

@@ -136,6 +136,10 @@ func (s *Service) Create(in CreateInput) (*model.Clip, error) {
 func (s *Service) Show(requesterID, clipID string) (*model.Clip, error) {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrClipNotFound
 	}
 	if !c.IsPublic && c.UserID != requesterID {
@@ -165,6 +169,10 @@ func (s *Service) Exists(clipID string) (bool, error) {
 func (s *Service) Get(clipID string) (*model.Clip, error) {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrClipNotFound
 	}
 	return c, nil
@@ -183,6 +191,10 @@ type UpdateInput struct {
 func (s *Service) Update(ownerID, clipID string, in UpdateInput) (*model.Clip, error) {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrClipNotFound
 	}
 	if c.UserID != ownerID {
@@ -212,6 +224,10 @@ func (s *Service) Update(ownerID, clipID string, in UpdateInput) (*model.Clip, e
 func (s *Service) Delete(ownerID, clipID string) error {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrClipNotFound
 	}
 	if c.UserID != ownerID {
@@ -231,6 +247,10 @@ func (s *Service) ListByUser(userID, sinceID, untilID string, limit, offset int)
 func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrClipNotFound
 	}
 	if c.UserID != ownerID {
@@ -241,9 +261,20 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 		_, nerr = s.notes.FindByID(noteID)
 	}
 	if nerr != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。materialize の再試行後も
+		// 種別は残るので、ここで分ける。
+		if !repository.IsNotFound(nerr) {
+			return nerr
+		}
 		return ErrNoteNotFound
 	}
-	if _, err := s.noteRepo.FindByPair(clipID, noteID); err == nil {
+	// **DB 障害で重複チェックを skip しない** (#2799)。`err == nil` だけを見ると、
+	// 接続断のときに「まだ clip していない」と判断して二重に足す。
+	dup, derr := s.noteRepo.FindByPair(clipID, noteID)
+	if derr != nil && !repository.IsNotFound(derr) {
+		return derr
+	}
+	if derr == nil && dup != nil {
 		return ErrAlreadyClipped
 	}
 	// noteEachClipsLimit role policy gate (#1029)。clip 内 note 数の上限を
@@ -282,6 +313,10 @@ func (s *Service) AddNote(ownerID, clipID, noteID string) error {
 func (s *Service) RemoveNote(ownerID, clipID, noteID string) error {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrClipNotFound
 	}
 	if c.UserID != ownerID {
@@ -290,10 +325,20 @@ func (s *Service) RemoveNote(ownerID, clipID, noteID string) error {
 	// upstream removeNote は note の存在を notesRepository で確認し、無ければ
 	// NoSuchNote を投げる (#1768)。
 	if _, err := s.notes.FindByID(noteID); err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNoteNotFound
 	}
 	cn, err := s.noteRepo.FindByPair(clipID, noteID)
 	if err != nil {
+		// **DB 障害を「もう入っていない」にしない** (#2799)。全 error を silent
+		// success にすると、接続断中の remove-note が 204 を返すのに note は
+		// clip に残り、クライアントは成功として UI から消す。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		// upstream clipNotesRepository.delete は idempotent で、clip に含まれない
 		// note の削除は silent success (NOT_CLIPPED error は upstream に無い、#1768)。
 		return nil
@@ -332,6 +377,10 @@ func (s *Service) CountNotes(clipID string) (int, error) {
 func (s *Service) Notes(requesterID, clipID, untilID, sinceID string, limit int, search string) ([]*model.Note, error) {
 	c, err := s.repo.FindByID(clipID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrClipNotFound
 	}
 	if !c.IsPublic && c.UserID != requesterID {

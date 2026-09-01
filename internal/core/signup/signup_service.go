@@ -526,6 +526,10 @@ func (s *Service) CreatePendingForApplication(username, email, password string, 
 func (s *Service) PromotePending(code string) (*SignupResult, error) {
 	pending, err := s.pendingRepo.FindByCode(code)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrPendingNotFound
 	}
 	// ID (ULID) から作成時刻を引き、TTL を過ぎていれば拒否。row 自体は

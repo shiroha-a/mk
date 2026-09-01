@@ -8,6 +8,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/move"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -58,7 +59,11 @@ func (h *Handler) Move(c echo.Context) error {
 	}
 	// password は任意。指定された場合のみ照合する (#1546)。
 	if req.Password != "" {
-		profile := h.userService.GetProfile(me.ID)
+		profile, perr := h.userService.GetProfileErr(me.ID)
+		// **DB 障害を「パスワード未設定」にしない** (#2799)。
+		if perr != nil && !repository.IsNotFound(perr) {
+			return apierr.JSONInternalError(c)
+		}
 		if profile == nil || profile.Password == nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error(
 				"ACCESS_DENIED", "No password set.",

@@ -682,6 +682,10 @@ func (s *Service) Suspend(host string, state model.SuspensionState) error {
 		return errors.New("host is required")
 	}
 	if _, err := s.repo.FindByHost(host); err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrInstanceNotFound
 	}
 	if err := s.repo.UpdateFields(host, map[string]any{
@@ -700,6 +704,10 @@ func (s *Service) UpdateModerationNote(host, note string) error {
 		return errors.New("host is required")
 	}
 	if _, err := s.repo.FindByHost(host); err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrInstanceNotFound
 	}
 	return s.repo.UpdateFields(host, map[string]any{

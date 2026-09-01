@@ -79,6 +79,10 @@ func (s *QueryService) SetThreadMutingRepo(r repository.NoteThreadMutingReposito
 func (s *QueryService) Show(viewer *model.User, noteID string) (*model.Note, error) {
 	n, err := s.noteRepo.FindByIDWithRelations(noteID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrNoteNotFound
 	}
 	if !CanSeeNote(viewer, n, s.followingRepo) {
@@ -127,6 +131,10 @@ func (s *QueryService) RequireVisible(viewer *model.User, noteID string) (*model
 func (s *QueryService) requireVisible(viewer *model.User, noteID string) (*model.Note, error) {
 	n, err := s.noteRepo.FindByIDWithUser(noteID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrNoteNotFound
 	}
 	if !CanSeeNote(viewer, n, s.followingRepo) {

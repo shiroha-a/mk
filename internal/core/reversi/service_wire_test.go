@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
@@ -46,7 +47,9 @@ func (r *fakeRepo) FindByID(id string) (*model.ReversiGame, error) {
 		clone := *g
 		return &clone, nil
 	}
-	return nil, errors.New("not found")
+	// **repository の sentinel を返す。** 汎用 error だと #2799 の
+	// 「DB 障害は raw error のまま」に引っかかる。
+	return nil, repository.ErrNotFound
 }
 
 func (r *fakeRepo) Update(g *model.ReversiGame) error {

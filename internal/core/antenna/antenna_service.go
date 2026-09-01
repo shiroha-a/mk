@@ -64,6 +64,10 @@ func (s *Service) validateUserList(ownerID string, userListID *string) error {
 		return nil
 	}
 	list, err := s.userListRepo.FindByID(*userListID)
+	// **DB 障害を not-found に丸めない** (#2799)。
+	if err != nil && !repository.IsNotFound(err) {
+		return err
+	}
 	if err != nil || list == nil || list.UserID != ownerID {
 		return ErrNoSuchUserList
 	}
@@ -313,6 +317,10 @@ func (s *Service) Create(in CreateInput) (*model.Antenna, error) {
 func (s *Service) Show(ownerID, antennaID string) (*model.Antenna, error) {
 	a, err := s.repo.FindByID(antennaID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrAntennaNotFound
 	}
 	if a.UserID != ownerID {
@@ -343,6 +351,10 @@ type UpdateInput struct {
 func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Antenna, error) {
 	a, err := s.repo.FindByID(antennaID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrAntennaNotFound
 	}
 	if a.UserID != ownerID {
@@ -434,6 +446,10 @@ func (s *Service) Update(ownerID, antennaID string, in UpdateInput) (*model.Ante
 func (s *Service) Delete(ownerID, antennaID string) error {
 	a, err := s.repo.FindByID(antennaID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrAntennaNotFound
 	}
 	if a.UserID != ownerID {
@@ -613,6 +629,10 @@ func (s *Service) PruneDangling(ctx context.Context, antennaID string, ids []str
 func (s *Service) RemoveNote(ownerID, antennaID, noteID string) error {
 	a, err := s.repo.FindByID(antennaID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrAntennaNotFound
 	}
 	if a.UserID != ownerID {

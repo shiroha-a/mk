@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
@@ -75,6 +76,77 @@ func TestUserLists_DBFailureIsNot4xx(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, http.StatusInternalServerError, tt.run(newFailing(t)),
 				"DB 障害が 4xx に化けている (#2792)")
+		})
+	}
+}
+
+// dbFailingProfileRepo makes every profile lookup look like a database failure.
+type dbFailingProfileRepo struct {
+	*testutil.MockUserRepository
+	err error
+}
+
+func (r *dbFailingProfileRepo) FindProfileByUserID(string) (*model.UserProfile, error) {
+	return nil, r.err
+}
+
+// **DB 障害を「リアクションは公開」に倒さない** (#2799)。
+//
+// `GetProfile` が err を捨てて nil を返していたので、接続断のあいだ
+// `publicReactions = false` の利用者のリアクションが読めていた。not-found を
+// 4xx に潰す形と根は同じだが、こちらは**倒れる先が公開側**なので害が重い。
+func TestReactions_ProfileDBFailureIsNot200(t *testing.T) {
+	h, repo := newTestHandler(t)
+	target := &model.User{ID: "target", Username: "t", UsernameLower: "t"}
+	if err := repo.Create(target); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	h.SetUserRepo(repo)
+	h.userService = coreuser.NewService(
+		&dbFailingProfileRepo{
+			MockUserRepository: repo,
+			err:                errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+		},
+		testutil.NewMockNoteRepository(), testutil.NewMockUserNotePiningRepository(), h.idGen)
+
+	rec := postStub(h.Reactions, `{"userId":"target"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"DB 障害でリアクションが公開扱いになっている (#2799)")
+}
+
+// **DB 障害でフォロワー一覧を公開側に倒さない** (#2799)。
+//
+// `followersVisibility: private` の利用者に対し、`user_profile` の読みが
+// 落ちているあいだ誰でも一覧を読めていた。同 function の
+// `followingRepo.Exists` は既に fail-closed なので向きが揃っていなかった。
+func TestRelationVisibility_ProfileDBFailureIsNot200(t *testing.T) {
+	for _, ep := range []struct {
+		name string
+		run  func(*Handler) int
+	}{
+		{"users/followers", func(h *Handler) int {
+			return postStub(h.Followers, `{"userId":"target"}`, &model.User{ID: "viewer"}).Code
+		}},
+		{"users/following", func(h *Handler) int {
+			return postStub(h.Following, `{"userId":"target"}`, &model.User{ID: "viewer"}).Code
+		}},
+	} {
+		t.Run(ep.name, func(t *testing.T) {
+			h, repo := newTestHandler(t)
+			target := &model.User{ID: "target", Username: "t", UsernameLower: "t"}
+			if err := repo.Create(target); err != nil {
+				t.Fatalf("create: %v", err)
+			}
+			h.SetUserRepo(repo)
+			h.userService = coreuser.NewService(
+				&dbFailingProfileRepo{
+					MockUserRepository: repo,
+					err:                errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+				},
+				testutil.NewMockNoteRepository(), testutil.NewMockUserNotePiningRepository(), h.idGen)
+
+			assert.Equal(t, http.StatusInternalServerError, ep.run(h),
+				"DB 障害でフォロワー一覧が公開扱いになっている (#2799)")
 		})
 	}
 }

@@ -337,6 +337,10 @@ func (s *Service) deliverUndoInviteToOpponent(ctx context.Context, game *model.R
 func (s *Service) Get(_ context.Context, gameID string) (*model.ReversiGame, error) {
 	game, err := s.repo.FindByID(gameID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrGameNotFound
 	}
 	return game, nil

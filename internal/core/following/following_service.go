@@ -270,10 +270,18 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 
 	followee, err := s.userRepo.FindByID(followeeID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFolloweeNotFound
 	}
 	follower, err := s.userRepo.FindByID(followerID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFolloweeNotFound
 	}
 
@@ -431,6 +439,10 @@ func (s *Service) unfollow(followerID, followeeID string, deliver bool) error {
 
 	f, err := s.followingRepo.FindByPair(followerID, followeeID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotFollowing
 	}
 	if err := s.followingRepo.Delete(f); err != nil {
@@ -490,6 +502,10 @@ func (s *Service) unfollow(followerID, followeeID string, deliver bool) error {
 func (s *Service) AcceptRequest(followeeID, followerID string) error {
 	req, err := s.followRequestRepo.FindByPair(followerID, followeeID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrRequestNotFound
 	}
 	if err := s.followRequestRepo.Delete(req); err != nil {
@@ -557,6 +573,10 @@ func (s *Service) AcceptRequest(followeeID, followerID string) error {
 func (s *Service) RejectRequest(followeeID, followerID string) error {
 	req, err := s.followRequestRepo.FindByPair(followerID, followeeID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrRequestNotFound
 	}
 	if err := s.followRequestRepo.Delete(req); err != nil {
@@ -598,6 +618,10 @@ func (s *Service) RejectRequest(followeeID, followerID string) error {
 func (s *Service) CancelRequest(followerID, followeeID string) error {
 	req, err := s.followRequestRepo.FindByPair(followerID, followeeID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrRequestNotFound
 	}
 	if err := s.followRequestRepo.Delete(req); err != nil {

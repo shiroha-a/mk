@@ -299,10 +299,23 @@ func (s *Service) Create(user *model.User, noteID, rawReaction string) (string, 
 	// FindByIDWithUser を使うと webhook 受信側が note.renote / reply の
 	// 欠落で Misskey TS 互換が崩れる。
 	target, err := s.noteRepo.FindByIDWithRelations(noteID)
+	// **materialize の前に分ける** (#2799)。not-found でない error は
+	// materialize しても直らないのに、EnsureUser / EnsureNote が ephemeral
+	// store の引きを 1 回余分に走らせる。ヒットすればそのまま WebFinger +
+	// actor fetch まで進むので、DB 断中は 1 リクエストごとに outbound HTTP が
+	// 出うる。
+	if err != nil && !repository.IsNotFound(err) {
+		return "", err
+	}
 	if s.materializeIfMissing(noteID, err) {
 		target, err = s.noteRepo.FindByIDWithRelations(noteID)
 	}
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。materialize の再試行後も
+		// 種別は残るので、ここで分ける。
+		if !repository.IsNotFound(err) {
+			return "", err
+		}
 		return "", ErrNoteNotFound
 	}
 	if !note.CanSeeNote(user, target, s.followingRepo) {
@@ -444,10 +457,18 @@ func (s *Service) Delete(user *model.User, noteID string) error {
 	}
 	target, err := s.noteRepo.FindByID(noteID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNoteNotFound
 	}
 	existing, err := s.reactionRepo.FindByPair(user.ID, target.ID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrReactionNotFound
 	}
 	affected, err := s.reactionRepo.Delete(existing)
@@ -475,6 +496,10 @@ func (s *Service) Delete(user *model.User, noteID string) error {
 func (s *Service) List(user *model.User, noteID, untilID, sinceID string, limit int, reaction string) ([]*model.NoteReaction, error) {
 	target, err := s.noteRepo.FindByIDWithUser(noteID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrNoteNotFound
 	}
 	// #2106 L37 (意図的 divergence): upstream notes/reactions は requireCredential:false で

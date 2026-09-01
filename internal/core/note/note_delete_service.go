@@ -139,6 +139,10 @@ func (s *DeleteService) DeleteAs(actor *model.User, isModerator bool, noteID str
 
 	note, err := s.noteRepo.FindByID(noteID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNoteNotFound
 	}
 

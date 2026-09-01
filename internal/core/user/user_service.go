@@ -200,6 +200,10 @@ func (s *Service) FindManyByIDs(ids []string) ([]*model.User, error) {
 func (s *Service) ShowByID(id string) (*UserWithProfile, error) {
 	u, err := s.userRepo.FindByID(id)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrUserNotFound
 	}
 	// Profileの取得失敗は致命ではないので無視する
@@ -295,6 +299,10 @@ func (s *Service) ShowByUsername(username string, host *string) (*UserWithProfil
 func (s *Service) ShowByUsernameDB(username string, host *string) (*UserWithProfile, error) {
 	u, err := s.userRepo.FindByUsernameLower(username, host)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrUserNotFound
 	}
 	profile, _ := s.userRepo.FindProfileByUserID(u.ID)
@@ -303,11 +311,24 @@ func (s *Service) ShowByUsernameDB(username string, host *string) (*UserWithProf
 
 // GetProfile returns the profile for the given user ID, or nil if not found.
 func (s *Service) GetProfile(userID string) *model.UserProfile {
+	profile, _ := s.GetProfileErr(userID)
+	return profile
+}
+
+// GetProfileErr returns the profile and the lookup error.
+//
+// **DB 障害と not-found を分ける必要がある呼び出し元はこちらを使う** (#2799)。
+// `GetProfile` は err を捨てるので、パスワードの有無を見る経路が接続断中に
+// 「パスワードが設定されていません」を返していた。
+//
+// プロフィールが無くても続行するのが正しい用途 (achievement / ap /
+// recommendation) は `GetProfile` のままでよい。
+func (s *Service) GetProfileErr(userID string) (*model.UserProfile, error) {
 	profile, err := s.userRepo.FindProfileByUserID(userID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	return profile
+	return profile, nil
 }
 
 // GetProfilesByUserIDs returns a userID → profile map for the given IDs in
@@ -504,6 +525,10 @@ type FieldItem struct {
 func (s *Service) UpdateProfile(userID string, in UpdateInput) (*UserWithProfile, error) {
 	existing, err := s.userRepo.FindByID(userID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrUserNotFound
 	}
 
@@ -746,6 +771,12 @@ func (s *Service) applyMediaUpdate(userID string, idPtr *string, prefix string, 
 		return nil
 	}
 	file, err := s.driveFileRepo.FindByID(*idPtr)
+	// **DB 障害を not-found に丸めない** (#2799)。呼び出し元は
+	// `ErrAvatarNotFound` / `ErrBannerNotFound` を渡し handler が 4xx にするので、
+	// 丸めると接続断が「そのアバターは存在しない」になる。
+	if err != nil && !repository.IsNotFound(err) {
+		return err
+	}
 	if err != nil || file == nil {
 		return notFoundErr
 	}
@@ -825,6 +856,10 @@ func (s *Service) emitMeUpdatedForUser(userID, contextLabel string) {
 func (s *Service) PinNote(userID, noteID string) error {
 	note, err := s.noteRepo.FindByID(noteID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNoteNotFound
 	}
 	if note.UserID != userID {
@@ -872,6 +907,10 @@ func (s *Service) PinNote(userID, noteID string) error {
 func (s *Service) UnpinNote(userID, noteID string) error {
 	p, err := s.piningRepo.FindByPair(userID, noteID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrPinNotFound
 	}
 	if err := s.piningRepo.Delete(p); err != nil {

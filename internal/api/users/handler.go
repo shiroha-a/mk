@@ -1000,7 +1000,15 @@ func (h *Handler) gateRelationVisibility(c echo.Context, targetID string, viewer
 	}
 
 	vis := model.FollowingVisibilityPublic
-	if profile := h.userService.GetProfile(targetID); profile != nil {
+	// **DB 障害を「公開」に倒さない。** err を捨てて nil で fall-through すると、
+	// `followersVisibility: private` の利用者のフォロワー一覧が接続断のあいだ
+	// 誰にでも読める (#2799)。同 function の `followingRepo.Exists` は既に
+	// fail-closed なので、ここだけ向きが違っていた。
+	profile, perr := h.userService.GetProfileErr(targetID)
+	if perr != nil && !repository.IsNotFound(perr) {
+		return true, apierr.JSONInternalError(c)
+	}
+	if profile != nil {
 		if followers {
 			vis = profile.FollowersVisibility
 		} else {

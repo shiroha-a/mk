@@ -73,10 +73,23 @@ func (s *Service) Mute(muterID, muteeID string, expiresAt *time.Time) (*model.Mu
 		return nil, ErrSelfMute
 	}
 	_, uerr := s.userRepo.FindByID(muteeID)
+	// **materialize の前に分ける** (#2799)。not-found でない error は
+	// materialize しても直らないのに、EnsureUser / EnsureNote が ephemeral
+	// store の引きを 1 回余分に走らせる。ヒットすればそのまま WebFinger +
+	// actor fetch まで進むので、DB 断中は 1 リクエストごとに outbound HTTP が
+	// 出うる。
+	if uerr != nil && !repository.IsNotFound(uerr) {
+		return nil, uerr
+	}
 	if s.materializeUserIfMissing(muteeID, uerr) {
 		_, uerr = s.userRepo.FindByID(muteeID)
 	}
 	if uerr != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。materialize の再試行後も
+		// 種別は残るので、ここで分ける。
+		if !repository.IsNotFound(uerr) {
+			return nil, uerr
+		}
 		return nil, ErrMuteeNotFound
 	}
 
@@ -115,6 +128,10 @@ func (s *Service) Unmute(muterID, muteeID string) error {
 	}
 	rec, err := s.mutingRepo.FindByPair(muterID, muteeID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotMuting
 	}
 	if err := s.mutingRepo.Delete(rec); err != nil {
@@ -176,6 +193,10 @@ func (s *RenoteService) Mute(muterID, muteeID string) (*model.RenoteMuting, erro
 		return nil, ErrSelfMute
 	}
 	if _, err := s.userRepo.FindByID(muteeID); err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrMuteeNotFound
 	}
 	if exists, err := s.renoteMutingRepo.Exists(muterID, muteeID); err != nil {
@@ -203,6 +224,10 @@ func (s *RenoteService) Unmute(muterID, muteeID string) error {
 	}
 	rec, err := s.renoteMutingRepo.FindByPair(muterID, muteeID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotMuting
 	}
 	if err := s.renoteMutingRepo.Delete(rec); err != nil {

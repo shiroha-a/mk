@@ -906,7 +906,11 @@ func (h *Handler) State(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	st, err := h.queryService.State(viewer, req.NoteID)
 	if err != nil {
-		// 現状QueryService.StateはErrNoteNotFound以外を返さない
+		// **DB 障害を not-found に丸めない** (#2799)。`State` は #2799 で
+		// raw DB error も返すようになったので、sentinel かどうかで分ける。
+		if !errors.Is(err, note.ErrNoteNotFound) {
+			return apierr.JSONInternalError(c)
+		}
 		return apierr.JSONNoSuchNote(c)
 	}
 	return c.JSON(http.StatusOK, st)
@@ -936,7 +940,11 @@ func (h *Handler) Conversation(c echo.Context) error {
 	viewer := middleware.GetUser(c)
 	notes, err := h.queryService.Conversation(viewer, req.NoteID, limit, req.Offset)
 	if err != nil {
-		// 現状QueryService.ConversationはErrNoteNotFound以外を返さない
+		// **DB 障害を not-found に丸めない** (#2799)。`Conversation` は #2799 で
+		// raw DB error も返すようになったので、sentinel かどうかで分ける。
+		if !errors.Is(err, note.ErrNoteNotFound) {
+			return apierr.JSONInternalError(c)
+		}
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "e1035875-9551-45ec-afa8-1ded1fcb53c8"))
 	}
 	// Conversation は非可視な祖先も raw に返すので、ここで CanSee 判定して

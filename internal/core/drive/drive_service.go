@@ -487,6 +487,10 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	if in.User != nil && in.FolderID != nil {
 		folder, err := s.folderRepo.FindByID(*in.FolderID)
 		if err != nil {
+			// **DB 障害を not-found に丸めない** (#2799)。
+			if !repository.IsNotFound(err) {
+				return nil, err
+			}
 			return nil, ErrFolderNotFound
 		}
 		if folder.UserID == nil || *folder.UserID != in.User.ID {
@@ -820,6 +824,10 @@ func (s *Service) Show(user *model.User, id string) (*model.DriveFile, error) {
 	}
 	f, err := s.fileRepo.FindByID(id)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFileNotFound
 	}
 	return s.authorizeFileRead(user, f)
@@ -834,6 +842,10 @@ func (s *Service) ShowByURL(user *model.User, url string) (*model.DriveFile, err
 	}
 	f, err := s.fileRepo.FindByAnyURL(url)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFileNotFound
 	}
 	return s.authorizeFileRead(user, f)
@@ -869,6 +881,10 @@ func (s *Service) findOwnedFile(user *model.User, id string) (*model.DriveFile, 
 	}
 	f, err := s.fileRepo.FindByID(id)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFileNotFound
 	}
 	if f.UserID == nil || *f.UserID != user.ID {
@@ -947,6 +963,10 @@ func (s *Service) Update(user *model.User, id string, in UpdateInput) (*model.Dr
 		if *in.FolderID != nil {
 			folder, err := s.folderRepo.FindByID(**in.FolderID)
 			if err != nil {
+				// **DB 障害を not-found に丸めない** (#2799)。
+				if !repository.IsNotFound(err) {
+					return nil, err
+				}
 				return nil, ErrFolderNotFound
 			}
 			if folder.UserID == nil || *folder.UserID != user.ID {
@@ -1046,6 +1066,10 @@ func (s *Service) CreateFolder(user *model.User, name string, parentID *string) 
 	if parentID != nil {
 		parent, err := s.folderRepo.FindByID(*parentID)
 		if err != nil {
+			// **DB 障害を not-found に丸めない** (#2799)。
+			if !repository.IsNotFound(err) {
+				return nil, err
+			}
 			return nil, ErrFolderNotFound
 		}
 		// upstream folders/create は parent を findOneBy({id, userId: me.id}) で
@@ -1077,6 +1101,10 @@ func (s *Service) ShowFolder(user *model.User, id string) (*model.DriveFolder, e
 	}
 	f, err := s.folderRepo.FindByID(id)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFolderNotFound
 	}
 	// upstream folders/{show,update,delete} は findOneBy({id, userId: me.id}) で
@@ -1114,6 +1142,10 @@ func (s *Service) UpdateFolder(user *model.User, id string, in UpdateFolderInput
 			}
 			parent, err := s.folderRepo.FindByID(**in.ParentID)
 			if err != nil {
+				// **DB 障害を not-found に丸めない** (#2799)。
+				if !repository.IsNotFound(err) {
+					return nil, err
+				}
 				// folders/update では parent が未存在のときに upstream は
 				// NO_SUCH_PARENT_FOLDER (#977) を返すので、target 不在の
 				// ErrFolderNotFound と区別する。

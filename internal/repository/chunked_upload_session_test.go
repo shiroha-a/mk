@@ -50,7 +50,7 @@ func TestChunkedUploadSessionRepository_CreateAndFind(t *testing.T) {
 	assert.False(t, got.Finishing)
 
 	_, err = repo.FindByID("nope")
-	assert.True(t, IsChunkedUploadSessionNotFound(err))
+	assert.True(t, IsNotFound(err))
 	assert.ErrorIs(t, err, gorm.ErrRecordNotFound)
 }
 
@@ -211,7 +211,7 @@ func TestChunkedUploadSessionRepository_Delete(t *testing.T) {
 
 	require.NoError(t, repo.Delete(s.ID))
 	_, err := repo.FindByID(s.ID)
-	assert.True(t, IsChunkedUploadSessionNotFound(err))
+	assert.True(t, IsNotFound(err))
 	// 冪等: 既に消えていてもエラーにしない。
 	assert.NoError(t, repo.Delete(s.ID))
 }

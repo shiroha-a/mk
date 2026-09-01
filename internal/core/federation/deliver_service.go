@@ -386,6 +386,13 @@ func (s *DeliverService) signerCredentials(userID string) (string, string, error
 	}
 	kp, err := s.keypairRepo.FindByUserID(userID)
 	if err != nil {
+		// **DB 障害を「鍵が無い」にしない** (#2799)。この経路は enqueue の
+		// 前 (producer 側) なので job のリトライ判定は変わらないが、呼び出し元は
+		// これを `slog.Warn` で握り潰すため、**接続断が「署名鍵が無い」として
+		// ログに残る**。原因から遠い症状になるので種別は保つ。
+		if !repository.IsNotFound(err) {
+			return "", "", err
+		}
 		return "", "", ErrSignerKeyMissing
 	}
 	keyID := s.urls.UserKeyURI(userID)

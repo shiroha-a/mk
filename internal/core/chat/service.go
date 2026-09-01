@@ -1237,6 +1237,10 @@ func (s *Service) normalizeChatReaction(raw string) (string, error) {
 		name := m[1]
 		if s.emojiRepo != nil {
 			if _, err := s.emojiRepo.FindByNameAndHost(name, nil); err != nil {
+				// **DB 障害を not-found に丸めない** (#2799)。
+				if !repository.IsNotFound(err) {
+					return "", err
+				}
 				return "", ErrNoSuchEmoji
 			}
 		}

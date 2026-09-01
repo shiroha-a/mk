@@ -2,6 +2,7 @@ package notes
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreachievement "github.com/shiroha-a/mk/internal/core/achievement"
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -642,6 +644,13 @@ func (h *Handler) SetNoteMaterializer(m NoteMaterializer) {
 // failed. 通常のノートでは Redis を一切引かない。
 func (h *Handler) materializeIfMissing(noteID string, lookupErr error) bool {
 	if lookupErr == nil || h.materializer == nil {
+		return false
+	}
+	// **DB 障害では materialize しない** (#2799)。`RequireVisible` は not-found と
+	// 非可視を `ErrNoteNotFound` に集約し、接続断だけ raw error を返す。種別を
+	// 見ずに走らせると、DB 断のあいだ 1 リクエストごとに outbound の
+	// remote-note fetch が 1 発出る。
+	if !errors.Is(lookupErr, corenote.ErrNoteNotFound) {
 		return false
 	}
 	_, err := h.materializer.EnsureNote(context.Background(), noteID)

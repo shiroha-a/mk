@@ -133,10 +133,23 @@ func (s *Service) Vote(user *model.User, noteID string, choice int) error {
 	}
 
 	target, err := s.noteRepo.FindByIDWithUser(noteID)
+	// **materialize の前に分ける** (#2799)。not-found でない error は
+	// materialize しても直らないのに、EnsureUser / EnsureNote が ephemeral
+	// store の引きを 1 回余分に走らせる。ヒットすればそのまま WebFinger +
+	// actor fetch まで進むので、DB 断中は 1 リクエストごとに outbound HTTP が
+	// 出うる。
+	if err != nil && !repository.IsNotFound(err) {
+		return err
+	}
 	if s.materializeIfMissing(noteID, err) {
 		target, err = s.noteRepo.FindByIDWithUser(noteID)
 	}
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。materialize の再試行後も
+		// 種別は残るので、ここで分ける。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNoteNotFound
 	}
 	if !note.CanSeeNote(user, target, s.followingRepo) {
@@ -159,6 +172,10 @@ func (s *Service) Vote(user *model.User, noteID string, choice int) error {
 
 	p, err := s.pollRepo.FindByNoteID(target.ID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNoPoll
 	}
 

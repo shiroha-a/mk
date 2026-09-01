@@ -797,4 +797,4 @@ catalog-check: ## システムカタログのクエリが schema で絞られて
 
 .PHONY: notfound-check
 notfound-check: ## repository の lookup error を種別を見ずに 4xx にしていないか検査
-	go test ./internal/entitycompat/... -run 'TestRepoErrorsAreNotCollapsed' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestRepoErrorsAreNotCollapsed|TestScanCollapsedLookups|TestBodyReturnsNotFoundSentinel|TestNotFoundGateWalks' -count=1 -v

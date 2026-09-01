@@ -20,6 +20,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -36,7 +37,11 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "currentPassword and newPassword are required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	profile := h.userService.GetProfile(u.ID)
+	profile, perr := h.userService.GetProfileErr(u.ID)
+	// **DB 障害を「パスワード未設定」にしない** (#2799)。
+	if perr != nil && !repository.IsNotFound(perr) {
+		return apierr.JSONInternalError(c)
+	}
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
@@ -85,7 +90,11 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	profile := h.userService.GetProfile(u.ID)
+	profile, perr := h.userService.GetProfileErr(u.ID)
+	// **DB 障害を「パスワード未設定」にしない** (#2799)。
+	if perr != nil && !repository.IsNotFound(perr) {
+		return apierr.JSONInternalError(c)
+	}
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
@@ -282,7 +291,11 @@ func (h *Handler) RegenerateToken(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "password is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 
-	profile := h.userService.GetProfile(u.ID)
+	profile, perr := h.userService.GetProfileErr(u.ID)
+	// **DB 障害を「パスワード未設定」にしない** (#2799)。
+	if perr != nil && !repository.IsNotFound(perr) {
+		return apierr.JSONInternalError(c)
+	}
 	if profile == nil || profile.Password == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}

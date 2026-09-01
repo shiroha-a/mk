@@ -235,6 +235,10 @@ func (s *FetchMetadataService) Fetch(host string) error {
 	}
 	inst, err := s.repo.FindByHost(host)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrInstanceNotFound
 	}
 

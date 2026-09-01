@@ -302,6 +302,10 @@ func (s *Service) StartChunkedUpload(_ context.Context, in StartChunkedUploadInp
 	if in.FolderID != nil {
 		folder, err := s.folderRepo.FindByID(*in.FolderID)
 		if err != nil {
+			// **DB 障害を not-found に丸めない** (#2799)。
+			if !repository.IsNotFound(err) {
+				return nil, err
+			}
 			return nil, ErrFolderNotFound
 		}
 		if folder.UserID == nil || *folder.UserID != in.User.ID {
@@ -722,10 +726,11 @@ func (s *Service) loadOwnedSession(user *model.User, sessionID string, now time.
 	}
 	sess, err := s.chunkedRepo.FindByID(sessionID)
 	if err != nil {
-		if repository.IsChunkedUploadSessionNotFound(err) {
-			return nil, ErrUploadSessionNotFound
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
 		}
-		return nil, err
+		return nil, ErrUploadSessionNotFound
 	}
 	if sess.UserID != user.ID {
 		return nil, ErrUploadSessionNotFound

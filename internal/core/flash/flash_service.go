@@ -110,6 +110,10 @@ func (s *Service) Create(in CreateInput) (*model.Flash, error) {
 func (s *Service) Show(_, flashID string) (*model.Flash, error) {
 	f, err := s.repo.FindByID(flashID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFlashNotFound
 	}
 	return f, nil
@@ -128,6 +132,10 @@ type UpdateInput struct {
 func (s *Service) Update(ownerID, flashID string, in UpdateInput) (*model.Flash, error) {
 	f, err := s.repo.FindByID(flashID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrFlashNotFound
 	}
 	if f.UserID != ownerID {
@@ -167,6 +175,10 @@ func (s *Service) Update(ownerID, flashID string, in UpdateInput) (*model.Flash,
 func (s *Service) Delete(ownerID, flashID string) error {
 	f, err := s.repo.FindByID(flashID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrFlashNotFound
 	}
 	if f.UserID != ownerID {
@@ -182,6 +194,10 @@ func (s *Service) Delete(ownerID, flashID string) error {
 func (s *Service) DeleteByID(flashID string) error {
 	f, err := s.repo.FindByID(flashID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrFlashNotFound
 	}
 	return s.repo.Delete(f)
@@ -211,6 +227,10 @@ func (s *Service) Like(userID, flashID string) error {
 	}
 	f, err := s.repo.FindByID(flashID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrFlashNotFound
 	}
 	// 自分の flash は like できない (upstream flash/like の yourFlash, #1548)。
@@ -243,10 +263,18 @@ func (s *Service) Unlike(userID, flashID string) error {
 		return errors.New("userId is required")
 	}
 	if _, err := s.repo.FindByID(flashID); err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrFlashNotFound
 	}
 	fl, err := s.likeRepo.FindByPair(userID, flashID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotLiked
 	}
 	if err := s.likeRepo.Delete(fl); err != nil {

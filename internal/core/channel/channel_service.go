@@ -138,6 +138,10 @@ func (s *Service) Create(in CreateInput) (*model.Channel, error) {
 func (s *Service) Show(channelID string) (*model.Channel, error) {
 	c, err := s.repo.FindByID(channelID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrChannelNotFound
 	}
 	return c, nil
@@ -164,6 +168,10 @@ type UpdateInput struct {
 func (s *Service) Update(userID, channelID string, in UpdateInput) (*model.Channel, error) {
 	c, err := s.repo.FindByID(channelID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrChannelNotFound
 	}
 	// owner でなくても moderator なら編集を許可する (upstream parity)。
@@ -223,6 +231,10 @@ func (s *Service) Update(userID, channelID string, in UpdateInput) (*model.Chann
 // Follow records that user follows the channel.
 func (s *Service) Follow(userID, channelID string) error {
 	if _, err := s.repo.FindByID(channelID); err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrChannelNotFound
 	}
 	if exists, err := s.followingRepo.Exists(userID, channelID); err != nil {
@@ -246,6 +258,10 @@ func (s *Service) Follow(userID, channelID string) error {
 func (s *Service) Unfollow(userID, channelID string) error {
 	f, err := s.followingRepo.FindByPair(userID, channelID)
 	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return err
+		}
 		return ErrNotFollowing
 	}
 	if err := s.followingRepo.Delete(f); err != nil {
@@ -347,6 +363,10 @@ func (s *Service) Search(query, searchType, sinceID, untilID string, limit, offs
 // 非フォロワーへ流出する (#1440)。
 func (s *Service) Timeline(channelID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error) {
 	if _, err := s.repo.FindByID(channelID); err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
 		return nil, ErrChannelNotFound
 	}
 	return s.noteRepo.ListByChannelID(channelID, viewerID, untilID, sinceID, limit)

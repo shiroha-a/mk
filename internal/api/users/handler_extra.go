@@ -385,7 +385,12 @@ func (h *Handler) Reactions(c echo.Context) error {
 		// profile 行が無い (= nil) 場合は DB 列 default の `true` 扱いで
 		// fall-through する (upstream TS の getUserPolicies と同 semantics)。
 		if viewer == nil || viewer.ID != req.UserID {
-			profile := h.userService.GetProfile(req.UserID)
+			// **DB 障害を「公開」に倒さない。** nil で fall-through すると
+			// 接続断のあいだ非公開リアクションが読めてしまう (#2799)。
+			profile, perr := h.userService.GetProfileErr(req.UserID)
+			if perr != nil && !repository.IsNotFound(perr) {
+				return apierr.JSONInternalError(c)
+			}
 			if profile != nil && !profile.PublicReactions {
 				return c.JSON(http.StatusBadRequest, apierr.Error("REACTIONS_NOT_PUBLIC", "Reactions of the user is not public.", "673a7dd2-6924-1093-e0c0-e68456ceae5c"))
 			}

@@ -12,6 +12,18 @@ import (
 	"testing"
 )
 
+// notFoundGateDirs are the trees this gate walks.
+//
+// **`internal/core` も見る** (#2799)。service 層で同じ潰し方をしていると、
+// handler の lookup を service へ移すだけで gate を回避できる。判定は
+// `bodyReturnsCollapse` が層ごとに切り替える (api / server は 4xx、core は
+// domain sentinel)。
+//
+// **変数にしてあるのはテストから固定するため。** allowlist が空になった今、
+// gate は「検出 0 件なら PASS」の向きなので、walk 対象を減らす変更は検出数を
+// 0 にするだけで黙って通る。
+var notFoundGateDirs = []string{"internal/api", "internal/server", "internal/core"}
+
 // isRepoLookupMethod reports whether a method name looks like a single-row
 // lookup whose error can mean either "no such row" or "the database is broken".
 //
@@ -82,7 +94,7 @@ func TestRepoErrorsAreNotCollapsed(t *testing.T) {
 	root := repoRoot(t)
 	var found []string
 
-	for _, dir := range []string{"internal/api", "internal/server"} {
+	for _, dir := range notFoundGateDirs {
 		err := filepath.Walk(filepath.Join(root, dir), func(path string, info os.FileInfo, err error) error {
 			if err != nil {
 				return err
@@ -139,8 +151,11 @@ func TestRepoErrorsAreNotCollapsed(t *testing.T) {
 
 	// silent-zero guard: 抽出が壊れると found が 0 件になり、gate が無意味に
 	// PASS する。lookup 呼び出し自体は必ず存在するので下限を置く。
-	if n := countRepoLookups(t, root); n < 80 {
-		t.Fatalf("repository lookup の呼び出しを %d 件しか見つけられなかった (期待 >=80)。抽出が壊れている", n)
+	// **下限は実測に対して近く取る。** 検出 0 件は PASS と区別が付かないので、
+	// 抽出器が黙って空振りしたことに気付く必要がある。実測 334 件に対して
+	// 80 だと、述語を 4 分の 1 まで壊しても通ってしまう (#2799)。
+	if n := countRepoLookups(t, root); n < 300 {
+		t.Fatalf("repository lookup の呼び出しを %d 件しか見つけられなかった (期待 >=300)。抽出が壊れている", n)
 	}
 }
 
@@ -161,6 +176,9 @@ func scanCollapsedLookups(t *testing.T, root, path string) []string {
 	if err != nil {
 		rel = path
 	}
+	// `internal/core` は HTTP status を持たないので、判定を domain sentinel に
+	// 切り替える (#2799)。
+	isCore := strings.HasPrefix(filepath.ToSlash(rel), "internal/core/")
 
 	var out []string
 	for _, decl := range f.Decls {
@@ -187,7 +205,8 @@ func scanCollapsedLookups(t *testing.T, root, path string) []string {
 		// で、前者は判定が body の中、後者は**別の if** にある。片方しか見ないと
 		// もう一方を検出し続ける (どちらも実際に検出し続けた)。
 		report := func(as *ast.AssignStmt, ifs *ast.IfStmt, guarded bool) bool {
-			if !condMentionsErr(ifs.Cond, as) || guarded || checksNotFound(ifs) || !bodyReturns4xx(ifs.Body) {
+			if !condChecksErrNonNil(ifs.Cond, as) || guarded || checksNotFound(ifs) ||
+				!bodyReturnsCollapse(ifs.Body, isCore, assignedErrName(as)) {
 				return false
 			}
 			out = append(out, fmt.Sprintf("%s:%s\t%s (line %d)",
@@ -303,6 +322,52 @@ func looksLikeRepoReceiver(x ast.Expr) bool {
 		strings.HasSuffix(n, "Store") || strings.HasSuffix(n, "Cache")
 }
 
+// condChecksErrNonNil reports whether the condition tests the lookup's error
+// for being non-nil.
+//
+// **`err == nil` の枝は潰しではない。** `if x, err := repo.Find(...); err == nil
+// && x != nil` は成功したときの分岐なので、そこで別の error を返していても
+// lookup error の潰しではない (実際に `chat.EnsureRoomViaAP` の
+// `ErrRoomOwnerMismatch` を誤検出した)。
+func condChecksErrNonNil(cond ast.Expr, as *ast.AssignStmt) bool {
+	if !condMentionsErr(cond, as) {
+		return false
+	}
+	name := assignedErrName(as)
+	if name == "" {
+		return false
+	}
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		bin, ok := n.(*ast.BinaryExpr)
+		if !ok || bin.Op != token.NEQ {
+			return true
+		}
+		x, okX := bin.X.(*ast.Ident)
+		y, okY := bin.Y.(*ast.Ident)
+		if okX && x.Name == name && okY && y.Name == "nil" {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// assignedErrName returns the name the lookup assigned its error to.
+//
+// Go の慣習で error は最後に返るので、最後の左辺を採る (`condMentionsErr` と
+// 同じ規則)。`_` や非 ident のときは空文字。
+func assignedErrName(as *ast.AssignStmt) string {
+	if len(as.Lhs) == 0 {
+		return ""
+	}
+	id, ok := as.Lhs[len(as.Lhs)-1].(*ast.Ident)
+	if !ok || id.Name == "_" {
+		return ""
+	}
+	return id.Name
+}
+
 // condMentionsErr reports whether the condition reads the error variable that
 // the lookup assigned.
 //
@@ -357,6 +422,131 @@ func mentionsNotFoundPredicate(n ast.Node) bool {
 	return found
 }
 
+// bodyReturnsCollapse reports whether the block collapses the error.
+//
+// api / server 層は 4xx を返す形、core 層は **domain sentinel を返す**形。
+// core には HTTP status が無いので、同じ述語では検出できない (#2799)。
+func bodyReturnsCollapse(b *ast.BlockStmt, isCore bool, errName string) bool {
+	if isCore {
+		return bodyReturnsNotFoundSentinel(b, errName)
+	}
+	return bodyReturns4xx(b)
+}
+
+// bodyReturnsNotFoundSentinel reports whether the block returns a not-found
+// style sentinel instead of the original error.
+//
+// **命名の列挙ではなく「not-found を意味するか」で見る。** suffix を並べる形に
+// したところ `ErrNotFollowing` / `ErrNotBlocking` / `ErrNotMuting` / `ErrNoPoll`
+// が漏れ、実在する 8 サイトを見逃した (#2799 のレビューで発覚)。
+//
+// **`fmt.Errorf("%w: ...", ErrXxxNotFound)` も見る。** ident と selector だけを
+// 見ると包んだ形を落とす。`emojiimport` が実際にこの形で、DB 瞬断中のジョブが
+// `SkipRetry` で恒久破棄されていた。
+//
+// **`Err` で始まらない名前も拾う。** `notFoundErr` のような引数名で渡される
+// 形がある (`user_service.go` の `applyMediaUpdate`)。
+func bodyReturnsNotFoundSentinel(b *ast.BlockStmt, errName string) bool {
+	found := false
+	ast.Inspect(b, func(n ast.Node) bool {
+		ret, ok := n.(*ast.ReturnStmt)
+		if !ok {
+			return true
+		}
+		for _, r := range ret.Results {
+			// 包んだ形も辿る (`fmt.Errorf("%w", ErrXxx)`)。
+			ast.Inspect(r, func(x ast.Node) bool {
+				// **呼び出す関数の名前は sentinel ではない。**
+				// `fmt.Errorf(...)` の `Errorf` を拾うと、raw error をラップして
+				// 返す正しい形が sentinel に見える。引数だけ辿る。
+				if call, ok := x.(*ast.CallExpr); ok {
+					for _, a := range call.Args {
+						ast.Inspect(a, func(y ast.Node) bool {
+							return sentinelWalk(y, errName, &found)
+						})
+					}
+					return false
+				}
+				return sentinelWalk(x, errName, &found)
+			})
+		}
+		return !found
+	})
+	return found
+}
+
+// sentinelWalk is the per-node test used by bodyReturnsNotFoundSentinel.
+func sentinelWalk(x ast.Node, errName string, found *bool) bool {
+	if *found {
+		return false
+	}
+	if call, ok := x.(*ast.CallExpr); ok {
+		for _, a := range call.Args {
+			ast.Inspect(a, func(y ast.Node) bool { return sentinelWalk(y, errName, found) })
+		}
+		return false
+	}
+	name := ""
+	switch v := x.(type) {
+	case *ast.Ident:
+		name = v.Name
+	case *ast.SelectorExpr:
+		// **`X` 側は辿らない。** `errors.New(...)` の `errors` を拾うと、
+		// raw error を組み立てて返す正しい形が全部 sentinel に見える
+		// (実測で 28 件の偽陽性)。
+		name = v.Sel.Name
+	}
+	// **lookup が代入した err をそのまま (or ラップして) 返す形は潰しではない。**
+	// `return fmt.Errorf("...: %w", err)` は種別を保つので、これを検出すると
+	// 正しい形を落とし続ける。
+	if name == "" || name == errName {
+		return false
+	}
+	if looksLikeNotFoundSentinel(name) {
+		*found = true
+	}
+	return false
+}
+
+// looksLikeNotFoundSentinel reports whether an identifier names a "the row is
+// not there" error.
+//
+// **列挙を反転させてある。** 「not-found を意味する語」を並べる形にすると、
+// 新しい sentinel が別の名前 (`ErrThingMissing` / `ErrThingGone` など) で
+// 入ったときに黙って素通りする — gate の目的そのものが果たせない。実際、
+// 語の列挙にしていた版は 8 件を取りこぼしていた。
+//
+// lookup の err を受けた直後に返す error は、**not-found でない理由の方が
+// 例外的**なので、そちらを除外語として持つ。除外に足すときは「その名前が
+// lookup 失敗と無関係か」で判断すること。
+func looksLikeNotFoundSentinel(name string) bool {
+	lower := strings.ToLower(name)
+	// **sentinel は package-level の `Err*` か、not-found を名前で言っているもの。**
+	// 「err を含む」だけにすると `cerr` / `perr` / `kerr` のようなローカルの
+	// error 変数を返す形が全部 sentinel に見える (実測で 4 件の偽陽性)。
+	if !strings.HasPrefix(name, "Err") &&
+		!strings.Contains(lower, "notfound") && !strings.Contains(lower, "nosuch") {
+		return false
+	}
+	// lookup の失敗と無関係な error。ここに挙げたものは潰しとみなさない。
+	//
+	// **除外リストとして持つのが要点。** not-found を意味する語を並べる形に
+	// すると、新しい sentinel が別の名前 (`ErrThingMissing` / `ErrThingGone`
+	// など) で入ったときに黙って素通りする — gate の目的そのものが果たせない。
+	// 実際、語の列挙にしていた版は 8 件を取りこぼしていた。
+	for _, kw := range []string{
+		"accessdenied", "forbidden", "permission", "unauthorized", "denied",
+		"invalid", "malformed", "already", "duplicate", "conflict",
+		"limit", "toomany", "ratelimit", "expired", "timeout", "canceled",
+		"unsupported", "notimplemented", "internal", "unavailable",
+	} {
+		if strings.Contains(lower, kw) {
+			return false
+		}
+	}
+	return true
+}
+
 // bodyReturns4xx reports whether the block returns a 4xx response.
 //
 // **`apierr.JSON*` ヘルパーも見る。** このリポジトリの慣用形は
@@ -389,7 +579,7 @@ func bodyReturns4xx(b *ast.BlockStmt) bool {
 func countRepoLookups(t *testing.T, root string) int {
 	t.Helper()
 	n := 0
-	for _, dir := range []string{"internal/api", "internal/server"} {
+	for _, dir := range notFoundGateDirs {
 		_ = filepath.Walk(filepath.Join(root, dir), func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
