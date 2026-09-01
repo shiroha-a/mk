@@ -15,7 +15,7 @@
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check \
+	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check \
 	diff-up diff-test diff-down diff-logs \
 	upstream-e2e upstream-e2e-deps upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
 
