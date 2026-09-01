@@ -114,9 +114,11 @@ func (h *Handler) finishPasskeySignin(c echo.Context, user *model.User, cred *we
 
 	profile, err := h.userRepo.FindProfileByUserID(user.ID)
 	if err != nil && !repository.IsNotFound(err) {
-		// **DB 障害を not-found に丸めない** (#2792)。このファイルは
-		// signin 固有の errBody を使うので 500 も同じ形で返す。
-		return c.JSON(http.StatusInternalServerError, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+		// **DB 障害を not-found に丸めない** (#2792)。**id は認証失敗のもの
+		// (932c904e) ではなく INTERNAL_ERROR のもの**を使う — 前者は upstream が
+		// 403 でしか出さないので、500 と組み合わせると error.id で分岐する
+		// drop-in クライアントが「パスワードが違います」を表示する。
+		return c.JSON(http.StatusInternalServerError, errBody("5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	if err != nil || profile == nil {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))

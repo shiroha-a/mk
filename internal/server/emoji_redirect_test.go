@@ -168,13 +168,19 @@ func TestEmojiRedirectHandler_DBFailureIs500(t *testing.T) {
 	repo := &stubEmojiLookup{err: errors.New("db down")}
 	h := emojiRedirectHandler(repo)
 
-	c, _ := newEmojiTestContext(t, "smile.webp", "")
-	err := h(c)
-	// echo.NewHTTPError は handler の戻り値として返るので、recorder ではなく
-	// error 側を見る。
-	var he *echo.HTTPError
-	require.True(t, errors.As(err, &he), "HTTPError が返っていない: %v", err)
-	assert.Equal(t, http.StatusInternalServerError, he.Code)
+	// **`e.ServeHTTP` を通す。** handler の戻り値だけを見ると、echo が実際に
+	// 書き出す status と header が確かめられない。ここでは 500 に 1 日の
+	// キャッシュが載らないことまで固定したい。
+	e := echo.New()
+	e.GET("/emoji/:path", h)
+	req := httptest.NewRequest(http.MethodGet, "/emoji/smile.webp", nil)
+	rec := httptest.NewRecorder()
+	e.ServeHTTP(rec, req)
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	// **500 をキャッシュさせない** (#2792)。上流で `public, max-age=86400` を
+	// 張っているので、打ち消さないと復旧後もその絵文字だけ壊れて見える。
+	assert.Equal(t, "no-store", rec.Header().Get(echo.HeaderCacheControl))
 }
 
 // not-found は従来どおり 404。

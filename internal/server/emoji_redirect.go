@@ -85,6 +85,12 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		if err != nil && !repository.IsNotFound(err) {
 			// **DB 障害を not-found に丸めない** (#2792)。このファイルは
 			// apierr を使わないので echo の HTTPError で返す。
+			//
+			// **キャッシュを打ち消す。** 上で `public, max-age=86400` を張って
+			// いるので、そのままだとブラウザや共有キャッシュが 500 を最大 1 日
+			// 保持しうる (RFC 9111 は明示的な max-age があれば 5xx も保存できる)。
+			// DB が復旧してもその絵文字だけ壊れて見える。
+			c.Response().Header().Set(echo.HeaderCacheControl, "no-store")
 			return echo.NewHTTPError(http.StatusInternalServerError)
 		}
 		if err != nil || emoji == nil {
