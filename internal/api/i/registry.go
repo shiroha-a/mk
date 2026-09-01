@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -77,6 +78,12 @@ func (h *Handler) RegistryGetDetail(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, registryEffectiveDomain(c, req.Domain))
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を「そんなキーは無い」にしない** (#2792)。registry は
+		// クライアントの設定同期に使うので、障害を 400 で返すと「消えた」と
+		// 判断して既定値で上書きしうる。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_KEY", "No such key.", "97a1e8e7-c0f7-47d2-957a-92e61256e01a"))
 	}

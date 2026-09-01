@@ -699,6 +699,12 @@ func (h *Handler) RegistryGet(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, registryEffectiveDomain(c, req.Domain))
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を「そんなキーは無い」にしない** (#2792)。registry は
+		// クライアントの設定同期に使うので、障害を 400 で返すと「消えた」と
+		// 判断して既定値で上書きしうる。
+		return apierr.JSONInternalError(c)
+	}
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_KEY", "No such key.", "ac3ed68a-62f0-422b-a7bc-d5e09e8f6a6a"))
 	}

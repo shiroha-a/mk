@@ -2,6 +2,7 @@ package i
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -259,4 +260,53 @@ func TestRegistryScopesWithDomain_ReturnsDistinctPairs(t *testing.T) {
 	require.Len(t, got, 1)
 	assert.Nil(t, got[0].Domain)
 	assert.Len(t, got[0].Scopes, 2)
+}
+
+// failingRegistryRepo makes every Get look like a database failure.
+type failingRegistryRepo struct {
+	*testutil.MockRegistryRepository
+	err error
+}
+
+func (r *failingRegistryRepo) Get(string, string, []string, *string) (*model.RegistryItem, error) {
+	return nil, r.err
+}
+
+// **DB 障害を「そんなキーは無い」にしない** (#2792)。
+//
+// registry はクライアントの設定同期に使うので、障害を 400 で返すと「消えた」と
+// 判断して既定値で上書きしうる。not-found だけが 400。
+func TestRegistryGet_DBFailureIsNot4xx(t *testing.T) {
+	dbErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
+
+	for _, tt := range []struct {
+		name string
+		call func(*Handler) func(echo.Context) error
+	}{
+		{"i/registry/get", func(h *Handler) func(echo.Context) error { return h.RegistryGet }},
+		{"i/registry/get-detail", func(h *Handler) func(echo.Context) error { return h.RegistryGetDetail }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _ := newExtraHandler(t)
+			h.SetRegistryRepo(&failingRegistryRepo{
+				MockRegistryRepository: testutil.NewMockRegistryRepository(),
+				err:                    dbErr,
+			})
+
+			rec := postRegistryWithScope(tt.call(h),
+				`{"key":"theme","scope":["client"]}`, stubUser, nil)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code,
+				"DB 障害が 4xx に化けている (#2792)")
+		})
+	}
+
+	t.Run("not-found は 400 のまま", func(t *testing.T) {
+		h, _ := newExtraHandler(t)
+		h.SetRegistryRepo(testutil.NewMockRegistryRepository()) // 空 = ErrNotFound
+
+		rec := postRegistryWithScope(h.RegistryGet,
+			`{"key":"missing","scope":["client"]}`, stubUser, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "NO_SUCH_KEY")
+	})
 }
