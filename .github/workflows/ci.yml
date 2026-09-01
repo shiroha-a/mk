@@ -154,12 +154,36 @@ jobs:
 
       # pipefailを明示的に立てないと`go test ... | tee`が失敗を握りつぶす
       # (teeのexit 0がパイプライン全体の結果になる) ため設定する。
+      #
+      # -shuffle は固定seedで回す (#2795)。テストの実行順に依存する実装
+      # (プロセス共有の状態を張り替えて戻さない等) をここで落とす。
+      #
+      # `on` (毎回ランダム) にしない: 失敗を手元で再現できず、required checkの
+      # `test`が不定期に赤くなる。
+      #
+      # **shard番号をseedにしない**: shard配属は`NR % 4`なので、テスト
+      # パッケージが1つ増えるだけで既存パッケージのseedが変わり、順序が丸ごと
+      # 入れ替わる。**無関係なPRが未実行の順序を引いて赤くなる**ため、
+      # ランダムseedと同じ問題を別経路で持ち込む。
+      #
+      # 全shard共通の固定値なら順序はshard配属に依存しない。1パッケージが
+      # 試す順序は1通りなので、`-shuffle`だけで全ての順序依存が見つかるわけでは
+      # ない。
+      #
+      # **seedは実測で選ぶこと。** 覚えやすい値 (issue番号など) を置くと、
+      # 検出力を持たない値を引く。#2795で実測したところ、restoreを無効化した
+      # 変異が落ちるseedは12個中7個だけだった (2795自身は落ちない側)。
+      # 3は最も強く6テストが落ちる。変えるときは
+      # `internal/server/global_state_test.go`のrestoreProcessGlobalsの
+      # cleanup本体を`if true { return }`で潰し、その状態で落ちることを
+      # 確認してから差し替える。
       - name: Run tests with coverage
         run: |
           set -o pipefail
           go test ${{ steps.shard.outputs.pkgs }} \
             -race \
             -count=1 \
+            -shuffle=3 \
             -timeout 10m \
             -coverprofile=coverage-shard-${SHARD_INDEX}.out \
             -covermode=atomic 2>&1 | tee test_output.txt

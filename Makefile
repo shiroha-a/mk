@@ -178,8 +178,10 @@ clean: ## ビルド成果物を削除
 tidy: ## go mod tidy
 	go mod tidy
 
-test: ## 全テストを実行
-	go test ./... -v
+test: ## 全テストを実行 (CI と同じ -shuffle seed)
+	# -shuffle は CI (.github/workflows/ci.yml) と同じ固定 seed。
+	# 揃えないと `make check` を通した変更が CI でだけ順序依存で落ちる (#2795)。
+	go test ./... -v -shuffle=3
 
 plugin-doc-check: ## authoring.md の Go スニペットがコンパイルできるか検査
 	./tests/plugin-doc/check-snippets.sh

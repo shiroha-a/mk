@@ -126,6 +126,8 @@ func TestNew_QueueOnlyRegistersEffectivePolicyBeforePluginJobs(t *testing.T) {
 	}
 
 	cleanupCalls := 0
+	// **`newServer` はプロセス共有の状態を張り替える** (#2795)。
+	restoreProcessGlobals(t)
 	srv, err := newServer(cfg, db, redisClients, []plugin.Definition{def}, noopStorage, func(s *Server) {
 		s.pluginGoStarter = func(fn func()) { fn() }
 		s.beforePluginGoRelease = func() { finalized = true }
@@ -250,6 +252,8 @@ func TestNew_PluginSetupFailureRollsBackConstructionResources(t *testing.T) {
 			workerStopped := make(chan struct{})
 			var failedServer *Server
 			var closeDriver *constructionCloseDriver
+			// **`newServer` はプロセス共有の状態を張り替える** (#2795)。
+			restoreProcessGlobals(t)
 			srv, err := newServer(cfg, db, redisClients, plugins, nil, func(s *Server) {
 				failedServer = s
 				s.pluginGoStarter = func(fn func()) { fn() }

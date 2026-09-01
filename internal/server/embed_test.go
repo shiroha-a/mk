@@ -177,6 +177,7 @@ func TestEmbedShell_InlinesLoaderAssets(t *testing.T) {
 		[]byte("window.__markerEmbedJs = 1;"), 0o644))
 	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", dir)
 	frontendutil.ResetLoaderCacheForTest()
+	t.Cleanup(frontendutil.ResetLoaderCacheForTest)
 
 	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
 	h := &embedHandlers{cfg: cfg, metaRepo: testutil.NewMockMetaRepository()}
@@ -196,6 +197,7 @@ func TestEmbedShell_InlinesLoaderAssets(t *testing.T) {
 func TestEmbedShell_FallsBackToLoaderReferences(t *testing.T) {
 	t.Setenv("MISSKEY_FRONTEND_EMBED_DIR", t.TempDir())
 	frontendutil.ResetLoaderCacheForTest()
+	t.Cleanup(frontendutil.ResetLoaderCacheForTest)
 
 	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
 	h := &embedHandlers{cfg: cfg, metaRepo: testutil.NewMockMetaRepository()}

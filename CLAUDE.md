@@ -138,7 +138,7 @@ make lint                   # go vet ./...
 make check                  # fmt → lint → test。コミット前に必須
 
 # テスト
-make test                   # go test ./... -v
+make test                   # go test ./... -v -shuffle=3 (CI と同じ seed)
 make plugin-test            # 同梱プラグインのテスト (別 module なので ./... に含まれない)
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
@@ -238,7 +238,7 @@ make test
 go test ./internal/api/notes/...
 
 # レース検出 + カバレッジ（CIと同じ条件）
-go test -race -count=1 -timeout 10m \
+go test -race -count=1 -shuffle=3 -timeout 10m \
   -coverprofile=coverage.out -covermode=atomic ./...
 
 # カバレッジ閲覧
@@ -514,7 +514,16 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 - テスト対象は`go list`で絞り込み（テストファイルがあるパッケージのみ）した上で
   `awk 'NF'`で空行除外→ImportPath順にソート→`NR % 4`で各shardに均等割り当て。
   新規パッケージ追加でshard内の構成が変わっても、決定的な分配により再現性は保たれる。
-- 実行条件: `-race -count=1 -timeout 10m -coverprofile=coverage-shard-N.out -covermode=atomic`
+- 実行条件: `-race -count=1 -shuffle=2795 -timeout 10m -coverprofile=coverage-shard-N.out -covermode=atomic`
+- **`-shuffle` の seed は全 shard 共通の固定値にする (#2795)。** `on` (毎回ランダム) は
+  失敗を手元で再現できず、required check の `test` が不定期に赤くなる。**shard 番号も
+  使わない** — shard 配属は `NR % 4` なので、テストパッケージが 1 つ増えるだけで既存
+  パッケージの seed が変わり、順序が丸ごと入れ替わる (無関係な PR が未実行の順序を
+  引いて赤くなる)。1 パッケージが試す順序は 1 通りなので、`-shuffle` だけで全ての
+  順序依存が見つかるわけではない。
+  **プロセス共有の状態を張り替えて戻さないテストがここで落ちる** — `internal/server` は
+  `newServer` / `New` がグローバルを 12 個差し替えており、戻さないまま後続の
+  `avatar` / `emoji_redirect` が署名付きプロキシ URL を受け取って落ちていた。
 - **カバレッジ閾値チェック** (各shard内で実行)：
   - `internal/api/admin`配下: 80%以上（SMTP/queue/DB集計等の外部依存で90%未到達のため暫定緩和）
   - `e2e`配下: 0%
@@ -794,6 +803,11 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-09-01**: Section 8 の `test-shards` に `-shuffle` を追加 (#2795)。**`internal/server` は `-shuffle` を有効にすると 5 seed すべてで落ちていた** (落ちるテストは seed ごとに違う)。原因は 2 系統で、どちらも**プロセス共有の状態を張り替えて戻していない**もの。(a) `newServer` / `New` が起動時にグローバルを **12 個** 差し替えるが、テストは同じプロセスで何度も呼ぶので、後続の `avatar` / `emoji_redirect` が素の URL ではなく署名付きプロキシURLを受け取る。(b) `frontendutil` の loader キャッシュはプロセスに 1 つで、fixture は `t.TempDir()` に置くため**ディレクトリが消えた後も内容がキャッシュに残る**。
+  seed は **全 shard 共通の固定値**にした。`on` (毎回ランダム) は失敗を手元で再現できず、required check が不定期に赤くなる。**shard 番号も使わない** — shard 配属は `NR % 4` なので、テストパッケージが 1 つ増えるだけで既存パッケージの seed が変わり順序が丸ごと入れ替わる (無関係な PR が未実行の順序を引いて赤くなり、ランダム seed と同じ問題を別経路で持ち込む)。
+  **seed は実測で選ぶこと。** 覚えやすい値 (issue 番号など) を置くと検出力を持たない値を引く — 実際 `2795` を置いたが、restore を無効化した変異で落ちる seed は 12 個中 7 個だけで、`2795` は落ちない側だった (= 直したバグを CI が検出しない)。採用した `3` は 6 テストが落ちる。
+  **cleanup の登録も一覧も、手で書くと変異検証が効かない形になる。** `TestFrontendHTML_SplashColor` の `<style>` 抽出を splash 名指しに直した時点で、loader cleanup を全部外しても 40 seed で落ちなくなった。restore の一覧も初版は `entity` の 7 つだけで 5 つ落としていた。どちらも AST の gate で形を強制してある (`internal/server/global_state_test.go`)。
 
 - **2026-09-01**: Section 3 に `make notfound-check` を追加し `make gates` の一括対象に入れた (#2792)。`make help` の target は 113 → 114。**repository の lookup error を種別を見ずに 4xx へ潰している箇所が 107 件**あり (`internal/api` + `internal/server` の非テスト Go を AST で走査し、`Find` で始まるか `Get` の 単行 lookup の直後 3 文以内にある `if` が、not-found 述語を通さずに 4xx を返す形を数えた。issue 本文の「135 のうち 61」は `FindByID` に限った別の数え方)、DB 接続断が「そんなノートは無い」に化けていた。クライアントからは区別できず、監視でも 5xx が立たない。upstream は `.findOneBy` の結果が `null` かで判定するので障害は例外として 500 になる。一括変換はできない — `if err != nil || !list.IsPublic {` のように not-found 判定と権限判定が同じ条件に混ざる形があるため。gate で**新規流入を止めてから段階的に潰す**方針を採り、107 件すべてを潰して allowlist は空になった。**allowlist を件数で持つのが要点** — key は `<file>:<func>` なので、理由の文字列だけを持つ形だと**その関数に 1 つでも残っていれば何個足しても素通りする** (実測)。判定は条件と body の両方で not-found 述語を探す (正しい直し方は body の中で分けるので、条件だけ見ると**直したものを検出し続ける**)。err 変数は名前のパターンではなく**代入の左辺と突き合わせる** (`err2` を拾うために部分一致にすると `n, e :=` が漏れ、逆もまた然り)。
 - **2026-08-31**: Section 4 の「DB を使うテストの分離」に、システムカタログを schema で絞る規則と `Scan(&string)` の罠を追記 (#2777)。あわせて `make catalog-check` を新設し `make gates` に入れた (`make help` の target は 112 → 113)。doc だけだと再発する — schema が 17-19 ある条件は残ったままなので。`pg_indexes` を schema 非限定で引くテストが 3 本あり、**required check の `test` を不定期に落としていた** (PR #2778 の `test-shards (1)` が実際に赤くなった)。#2450 で schema を分けた結果、同名テーブルが 17-19 schema に同時に存在し、他パッケージの `ApplyMigrations` が DDL 中だと `could not open relation with OID (SQLSTATE XX000)` になる。**害はそれだけではない** — 絞らないと他 schema の同名 index を自分のものと取り違えるので、migration が適用されていなくても regression guard が緑になる。実測で `internal_repository_ts` の定義が返っており、3 本とも空振りしていた。`Scan(&string)` は複数行でも**最後の 1 行**を黙って取る (GORM は `*string` に対し全行を走査して dest を上書きする) ので、この取り違えは値が正しく見えて気付けない。

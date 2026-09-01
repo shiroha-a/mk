@@ -36,7 +36,7 @@
 ```bash
 make fmt    # gofmt -s -w .
 make lint   # go vet ./...
-make test   # go test ./... -v
+make test   # go test ./... -v -shuffle=3 (CI と同じ seed)
 ```
 
 CIで`gofmt`差分チェック、`go vet`、カバレッジ閾値チェックが走る。

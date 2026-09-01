@@ -850,7 +850,11 @@ func TestFrontendHTML_SplashColor(t *testing.T) {
 
 		// `<meta name="theme-color">` 側には属性 escape された値がそのまま
 		// 出る (そちらは属性値なので正しい)。見るのは style ブロックだけ。
-		style := regexp.MustCompile(`<style>[^<]*</style>`).FindString(rec.Body.String())
+		// **最初の `<style>` を取らない。** loader の CSS を inline する
+		// テストが先に走ると、そちらを掴んで別物を比較する (#2795)。splash を
+		// 名指しで取れば、fixture が残っていても意味のある比較になる。
+		style := regexp.MustCompile(`<style>:root\{--splash-color:[^<]*</style>`).
+			FindString(rec.Body.String())
 		require.NotEmpty(t, style, "splash color style block not found")
 		assert.Equal(t, `<style>:root{--splash-color:#86b300}</style>`, style)
 	})
@@ -869,6 +873,7 @@ func TestFrontendHTML_InlinesLoaderAssets(t *testing.T) {
 		[]byte("window.__markerInlinedJs = 1;"), 0o644))
 	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
 	frontendutil.ResetLoaderCacheForTest()
+	t.Cleanup(frontendutil.ResetLoaderCacheForTest)
 
 	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
 	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
@@ -891,6 +896,7 @@ func TestFrontendHTML_InlinesLoaderAssets(t *testing.T) {
 func TestFrontendHTML_FallsBackToLoaderReferences(t *testing.T) {
 	t.Setenv("MISSKEY_FRONTEND_DIR", t.TempDir())
 	frontendutil.ResetLoaderCacheForTest()
+	t.Cleanup(frontendutil.ResetLoaderCacheForTest)
 
 	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
 	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
@@ -914,6 +920,7 @@ func TestFrontendHTML_DevModeKeepsReferences(t *testing.T) {
 		[]byte("#splash{--marker:stale}"), 0o644))
 	t.Setenv("MISSKEY_FRONTEND_DIR", dir)
 	frontendutil.ResetLoaderCacheForTest()
+	t.Cleanup(frontendutil.ResetLoaderCacheForTest)
 
 	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test", Dev: true}
 	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
