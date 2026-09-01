@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -794,3 +794,7 @@ wiring-check: ## router で配線が必要なものが外れていないか検�
 .PHONY: catalog-check
 catalog-check: ## システムカタログのクエリが schema で絞られているか検査
 	go test ./internal/entitycompat/... -run 'TestCatalogQueriesAreSchemaScoped|TestCatalogQueryGate_Predicates' -count=1 -v
+
+.PHONY: notfound-check
+notfound-check: ## repository の lookup error を種別を見ずに 4xx にしていないか検査
+	go test ./internal/entitycompat/... -run 'TestRepoErrorsAreNotCollapsed' -count=1 -v

@@ -1,0 +1,353 @@
+package entitycompat
+
+import (
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+	"testing"
+)
+
+// repoLookupMethods are the repository methods whose error can mean either
+// "no such row" or "the database is broken".
+//
+// **`Find` 系だけを見る。** `Create` / `Update` / `Delete` の失敗はそもそも
+// 4xx にしないので、ここで数えると偽陽性になる。
+var repoLookupMethods = []string{
+	"FindByID", "FindByIDWithUser", "FindByIDWithRelations",
+	"FindByUsernameLower", "FindByURI", "FindProfileByUserID",
+}
+
+// notFoundGateAllowlist counts call sites that still collapse every repository
+// error into a 4xx, keyed by "<path>:<func>".
+//
+// **#2792 の移行中の一覧。** 新規の流入をここで止めつつ、既存は段階的に潰す。
+//
+// **値は件数。** key を `<file>:<func>` にしているので、同じ関数に新しい
+// collapse を足しても key は変わらない。件数で持たないと**その関数に 1 つでも
+// 残っていれば何個足しても素通りする** (実際に素通りした)。
+//
+// 件数が増えたら落ちる (新規流入)。減っても落ちる (陳腐化 — 直したら数を
+// 減らし、0 になったら行ごと消す)。
+//
+// **エントリを増やさないこと。** 足すのは、その endpoint で「DB 障害が 4xx に
+// 化ける」ことを意図的に受け入れる場合だけで、そのときは理由をコメントで書く。
+//
+// key は行番号を含めない。無関係な編集で動いてしまうため。
+var notFoundGateAllowlist = map[string]int{
+	"internal/api/admin/abuse_report_notification.go:AbuseReportNotificationRecipientShow":   1,
+	"internal/api/admin/abuse_report_notification.go:AbuseReportNotificationRecipientUpdate": 2,
+	"internal/api/admin/abuse_report_notification.go:validateEmailAddress":                   1,
+	"internal/api/admin/accounts.go:AccountsFindByEmail":                                     1,
+	"internal/api/admin/ad.go:AdUpdate":                                                      1,
+	"internal/api/admin/avatar_decorations.go:AvatarDecorationsUpdate":                       1,
+	"internal/api/admin/drive.go:DriveShowFile":                                              1,
+	"internal/api/admin/emoji.go:EmojiCopy":                                                  1,
+	"internal/api/admin/handler.go:EmojiAdd":                                                 1,
+	"internal/api/admin/handler.go:EmojiDelete":                                              1,
+	"internal/api/admin/handler.go:EmojiUpdate":                                              1,
+	"internal/api/admin/handler.go:RolesAssign":                                              1,
+	"internal/api/admin/handler.go:RolesUnassign":                                            1,
+	"internal/api/admin/moderation.go:UpdateAbuseUserReport":                                 1,
+	"internal/api/admin/system_webhook.go:SystemWebhookShow":                                 1,
+	"internal/api/admin/system_webhook.go:SystemWebhookTest":                                 1,
+	"internal/api/admin/system_webhook.go:SystemWebhookUpdate":                               1,
+	"internal/api/announcements/handler.go:AdminDelete":                                      1,
+	"internal/api/announcements/handler.go:AdminUpdate":                                      1,
+	"internal/api/announcements/handler_show.go:Show":                                        1,
+	"internal/api/chat/handler.go:AttachedChatMessages":                                      1,
+	"internal/api/chat/handler.go:MessagesCreate":                                            2,
+	"internal/api/chat/handler.go:UserTimeline":                                              1,
+	"internal/api/drive/handler.go:FilesMoveBulk":                                            1,
+	"internal/api/federation/update_remote_user.go:UpdateRemoteUser":                         1,
+	"internal/api/i/handler_2fa.go:TwoFAUpdateKey":                                           1,
+	"internal/api/i/handler.go:normalizeAvatarDecorations":                                   1,
+	"internal/api/i/handler.go:Update":                                                       1,
+	"internal/api/i/transfer_handler.go:validateImportRequest":                               1,
+	"internal/api/notes/handler_drafts.go:ThreadMutingCreate":                                1,
+	"internal/api/notes/handler_drafts.go:ThreadMutingDelete":                                1,
+	"internal/api/notes/handler_drafts.go:validateDraftReplyRenote":                          3,
+	"internal/api/notes/handler_drafts.go:validateRenoteChannel":                             1,
+	"internal/api/notes/handler_extra.go:Clips":                                              1,
+	"internal/api/notes/handler_extra.go:FavoritesDelete":                                    1,
+	"internal/api/notes/handler_extra.go:Translate":                                          1,
+	"internal/api/notes/handler_extra.go:UserListTimeline":                                   1,
+	"internal/api/pages/handler.go:PagePush":                                                 1,
+	"internal/api/promo/handler.go:Read":                                                     1,
+	"internal/api/reversi/handler.go:ShowGame":                                               1,
+	"internal/api/reversi/handler.go:Surrender":                                              1,
+	"internal/api/reversi/handler.go:Verify":                                                 1,
+	"internal/api/signin/handler.go:Signin":                                                  2,
+	"internal/api/signin/handler.go:SigninFlow":                                              2,
+	"internal/api/signin/passkey.go:finishPasskeySignin":                                     1,
+	"internal/api/userlists/handler.go:Delete":                                               1,
+	"internal/api/userlists/handler.go:List":                                                 1,
+	"internal/api/userlists/handler.go:Pull":                                                 2,
+	"internal/api/userlists/handler.go:Push":                                                 2,
+	"internal/api/userlists/handler.go:Show":                                                 1,
+	"internal/api/users/handler_extra.go:Reactions":                                          1,
+	"internal/api/users/handler_extra.go:ReportAbuse":                                        1,
+	"internal/api/users/lists.go:ListsCreateFromPublic":                                      2,
+	"internal/api/users/lists.go:ListsFavorite":                                              1,
+	"internal/api/users/lists.go:ListsGetMemberships":                                        1,
+	"internal/api/users/lists.go:ListsUnfavorite":                                            1,
+	"internal/api/users/lists.go:ListsUpdate":                                                1,
+	"internal/api/users/lists.go:ListsUpdateMembership":                                      1,
+}
+
+// TestRepoErrorsAreNotCollapsed fails when a handler turns every repository
+// lookup error into a 4xx response.
+//
+// upstream は `.findOneBy` の結果が `null` かどうかで not-found を判定するので、
+// DB 障害は例外として 500 になる。mk-go は repository が GORM の error をその
+// まま返すため、`err != nil` をまとめて not-found 扱いにすると**接続断や syntax
+// error まで「そんなノートは無い」になる**。クライアントからは区別できず、
+// 監視でも 5xx が立たない (#2792)。
+//
+// 判定は「lookup の直後の `if` が err を見て 4xx を返し、その条件が
+// `repository.IsNotFound` / `errors.Is` を通っていない」こと。
+func TestRepoErrorsAreNotCollapsed(t *testing.T) {
+	root := repoRoot(t)
+	var found []string
+
+	for _, dir := range []string{"internal/api", "internal/server"} {
+		err := filepath.Walk(filepath.Join(root, dir), func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			found = append(found, scanCollapsedLookups(t, root, path)...)
+			return nil
+		})
+		if err != nil {
+			t.Fatalf("walk %s: %v", dir, err)
+		}
+	}
+
+	sort.Strings(found)
+
+	// key ごとの件数で突き合わせる。
+	got := map[string]int{}
+	detail := map[string][]string{}
+	for _, f := range found {
+		parts := strings.SplitN(f, "\t", 2)
+		got[parts[0]]++
+		detail[parts[0]] = append(detail[parts[0]], f)
+	}
+
+	var over, under []string
+	for k, n := range got {
+		if allowed := notFoundGateAllowlist[k]; n > allowed {
+			over = append(over, fmt.Sprintf("%s: %d 件 (allowlist は %d)\n    %s",
+				k, n, allowed, strings.Join(detail[k], "\n    ")))
+		}
+	}
+	for k, allowed := range notFoundGateAllowlist {
+		if got[k] < allowed {
+			under = append(under, fmt.Sprintf("%s: %d 件 (allowlist は %d)", k, got[k], allowed))
+		}
+	}
+	sort.Strings(over)
+	sort.Strings(under)
+
+	if len(over) > 0 {
+		t.Errorf("repository の lookup error を種別を見ずに 4xx にしている箇所が増えている:\n%s\n\n"+
+			"  `repository.IsNotFound(err)` で分岐し、それ以外は 500 を返すこと。\n"+
+			"  DB 障害が 4xx に化けると、クライアントから区別できず監視でも 5xx が立たない (#2792)。",
+			strings.Join(over, "\n"))
+	}
+	// **陳腐化も落とす。** 直したのに件数が残ると、次に同じ関数へ足したときに
+	// 素通りする。
+	if len(under) > 0 {
+		t.Errorf("notFoundGateAllowlist の件数が実態より多い (直したなら減らすこと):\n%s",
+			strings.Join(under, "\n"))
+	}
+
+	// silent-zero guard: 抽出が壊れると found が 0 件になり、gate が無意味に
+	// PASS する。lookup 呼び出し自体は必ず存在するので下限を置く。
+	if n := countRepoLookups(t, root); n < 80 {
+		t.Fatalf("repository lookup の呼び出しを %d 件しか見つけられなかった (期待 >=80)。抽出が壊れている", n)
+	}
+}
+
+// scanCollapsedLookups returns "<relpath>:<func>\t<detail>" for each lookup
+// whose error is collapsed into a 4xx.
+func scanCollapsedLookups(t *testing.T, root, path string) []string {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		t.Fatalf("parse %s: %v", path, err)
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil {
+		rel = path
+	}
+
+	var out []string
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Body == nil {
+			continue
+		}
+		name := fn.Name.Name
+		report := func(as *ast.AssignStmt, ifs *ast.IfStmt) {
+			// **条件と body の両方で not-found 判定を探す。** 正しい直し方は
+			//
+			//	if err != nil {
+			//		if !repository.IsNotFound(err) { return 500 }
+			//		return 404
+			//	}
+			//
+			// で、判定は body の中にある。条件だけ見ると**直したものを検出し
+			// 続ける** (実際に検出し続けた)。
+			if !condMentionsErr(ifs.Cond) || checksNotFound(ifs) || !bodyReturns4xx(ifs.Body) {
+				return
+			}
+			out = append(out, fmt.Sprintf("%s:%s\t%s (line %d)",
+				rel, name, lookupMethodName(as), fset.Position(as.Pos()).Line))
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			// **`if x, err := repo.Find(...); err != nil` の形も見る。**
+			// init 部分での代入を落とすと、この書き方に切り替えるだけで gate を
+			// 素通りする (実際に素通りした)。
+			if ifs, ok := n.(*ast.IfStmt); ok && ifs.Init != nil {
+				if as, ok := ifs.Init.(*ast.AssignStmt); ok && isRepoLookup(as) {
+					report(as, ifs)
+				}
+			}
+			blk, ok := n.(*ast.BlockStmt)
+			if !ok {
+				return true
+			}
+			// `x, err := repo.Find(...)` の**次の文**が if の形。
+			for i := 0; i < len(blk.List)-1; i++ {
+				as, ok := blk.List[i].(*ast.AssignStmt)
+				if !ok || !isRepoLookup(as) {
+					continue
+				}
+				ifs, ok := blk.List[i+1].(*ast.IfStmt)
+				if !ok {
+					continue
+				}
+				report(as, ifs)
+			}
+			return true
+		})
+	}
+	return out
+}
+
+// isRepoLookup reports whether an assignment calls one of repoLookupMethods.
+func isRepoLookup(as *ast.AssignStmt) bool { return lookupMethodName(as) != "" }
+
+func lookupMethodName(as *ast.AssignStmt) string {
+	if len(as.Rhs) != 1 {
+		return ""
+	}
+	call, ok := as.Rhs[0].(*ast.CallExpr)
+	if !ok {
+		return ""
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok {
+		return ""
+	}
+	for _, m := range repoLookupMethods {
+		if sel.Sel.Name == m {
+			return m
+		}
+	}
+	return ""
+}
+
+// condMentionsErr reports whether the condition reads an error identifier.
+//
+// **接尾辞ではなく部分一致で見る。** `err2` / `errFind` のような命名は
+// `HasSuffix("err")` に掛からず、変数名を変えるだけで gate を素通りする
+// (実際に素通りした)。
+func condMentionsErr(cond ast.Expr) bool {
+	found := false
+	ast.Inspect(cond, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok && strings.Contains(strings.ToLower(id.Name), "err") {
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// checksNotFound reports whether the branch routes through a not-found
+// predicate rather than treating every error the same.
+//
+// 条件と body の**両方**を見る。正しい直し方は body の先頭で
+// `if !repository.IsNotFound(err) { return 500 }` と分けるので、条件だけを
+// 見ると直したものを検出し続ける。
+func checksNotFound(ifs *ast.IfStmt) bool {
+	return mentionsNotFoundPredicate(ifs.Cond) || mentionsNotFoundPredicate(ifs.Body)
+}
+
+func mentionsNotFoundPredicate(n ast.Node) bool {
+	found := false
+	ast.Inspect(n, func(x ast.Node) bool {
+		sel, ok := x.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "IsNotFound", "Is", "As":
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// bodyReturns4xx reports whether the block returns a 4xx JSON response.
+func bodyReturns4xx(b *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(b, func(n ast.Node) bool {
+		sel, ok := n.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "StatusBadRequest", "StatusNotFound", "StatusForbidden", "StatusUnauthorized":
+			found = true
+		}
+		return !found
+	})
+	return found
+}
+
+// countRepoLookups counts every repoLookupMethods call under the gated dirs.
+func countRepoLookups(t *testing.T, root string) int {
+	t.Helper()
+	n := 0
+	for _, dir := range []string{"internal/api", "internal/server"} {
+		_ = filepath.Walk(filepath.Join(root, dir), func(path string, info os.FileInfo, err error) error {
+			if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+				return nil
+			}
+			src, err := os.ReadFile(path)
+			if err != nil {
+				return nil
+			}
+			for _, m := range repoLookupMethods {
+				n += strings.Count(string(src), "."+m+"(")
+			}
+			return nil
+		})
+	}
+	return n
+}
