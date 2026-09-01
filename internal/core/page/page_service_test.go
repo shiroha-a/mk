@@ -555,6 +555,18 @@ type failingPageRepo struct {
 
 func (r *failingPageRepo) FindByID(string) (*model.Page, error) { return nil, r.err }
 
+func (r *failingPageRepo) FindByUserAndName(string, string) (*model.Page, error) {
+	return nil, r.err
+}
+
+// failingLikeRepo makes every like lookup look like a database failure.
+type failingLikeRepo struct {
+	*testutil.MockPageLikeRepository
+	err error
+}
+
+func (r *failingLikeRepo) FindByPair(string, string) (*model.PageLike, error) { return nil, r.err }
+
 // **DB 障害を ErrPageNotFound に丸めないこと** (#2792)。
 //
 // 全部 ErrPageNotFound にすると、呼び出し側は 4xx を返すしかなくなり、接続断が
@@ -580,4 +592,57 @@ func TestFindByID_MissingRowIsPageNotFound(t *testing.T) {
 
 	_, err := svc.FindByID("ghost")
 	assert.ErrorIs(t, err, page.ErrPageNotFound)
+}
+
+// **兄弟メソッドも同じ扱いにすること** (#2792)。
+//
+// `FindByID` だけ直して他を放置していた期間があり、DB 障害中は全ページが
+// 「そんなページは無い」の 400 で返っていた。**gate は `internal/core` を
+// walk しないので、ここが唯一の回帰検知**。
+func TestPageService_DBFailureIsNotPageNotFound(t *testing.T) {
+	dbErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
+	idGen, _ := id.NewGenerator("aidx")
+
+	newFailing := func() *page.Service {
+		return page.NewService(
+			&failingPageRepo{MockPageRepository: testutil.NewMockPageRepository(), err: dbErr},
+			testutil.NewMockPageLikeRepository(), idGen)
+	}
+
+	for _, tt := range []struct {
+		name string
+		run  func(*page.Service) error
+	}{
+		{"Show", func(s *page.Service) error { _, err := s.Show("u1", "p1"); return err }},
+		{"ShowByName", func(s *page.Service) error { _, err := s.ShowByName("u1", "o1", "n"); return err }},
+		{"Update", func(s *page.Service) error { _, err := s.Update("u1", "p1", page.UpdateInput{}); return err }},
+		{"Delete", func(s *page.Service) error { return s.Delete("u1", "p1") }},
+		{"Like", func(s *page.Service) error { return s.Like("u1", "p1") }},
+		{"Unlike", func(s *page.Service) error { return s.Unlike("u1", "p1") }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.run(newFailing())
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, page.ErrPageNotFound),
+				"DB 障害が not-found に丸められている")
+			assert.ErrorIs(t, err, dbErr, "元の error がそのまま返るべき")
+		})
+	}
+}
+
+// Unlike の like lookup も同じ (#2792)。ここを潰すと「like していない」に化ける。
+func TestUnlike_LikeLookupDBFailureIsNotNotLiked(t *testing.T) {
+	dbErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockPageRepository()
+	require.NoError(t, repo.Create(&model.Page{
+		ID: "p1", UserID: "other", Name: "n", Visibility: model.PageVisibilityPublic,
+	}))
+	svc := page.NewService(repo, &failingLikeRepo{
+		MockPageLikeRepository: testutil.NewMockPageLikeRepository(), err: dbErr,
+	}, idGen)
+
+	err := svc.Unlike("u1", "p1")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, page.ErrNotLiked), "DB 障害が「like していない」に化けている")
 }

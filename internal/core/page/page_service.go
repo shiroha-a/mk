@@ -247,7 +247,13 @@ func (s *Service) Update(ownerID, pageID string, in UpdateInput) (*model.Page, e
 		}
 		// 名前変更時は (userId, name) 一意制約と衝突しないことを確認する。
 		if *in.Name != p.Name {
-			if _, err := s.repo.FindByUserAndName(ownerID, *in.Name); err == nil {
+			// **DB 障害で重複チェックを skip しない** (#2792)。`err == nil` だけを見ると、
+			// 接続断のときに「重複なし」と判断して先へ進む。`IDX_page_userId_name` が
+			// UNIQUE なので重複行は残らないが、`NAME_ALREADY_EXISTS` を返すべき場面で
+			// insert が落ちて 500 になる。
+			if dup, err := s.repo.FindByUserAndName(ownerID, *in.Name); err != nil && !repository.IsNotFound(err) {
+				return nil, err
+			} else if err == nil && dup != nil {
 				return nil, ErrPageNameConflict
 			}
 		}
