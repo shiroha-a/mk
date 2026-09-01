@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -183,6 +184,11 @@ func (m *mockAuthSessionRepo) findAppByID(appID string) *model.App {
 // repository は GORM の error をそのまま返すので、テストもそれに揃える。
 var errNotFound = repository.ErrNotFound
 
+// errBoom is a generic failure for write paths. **not-found とは分けること** —
+// 同じ値を使い回すと、将来 write path に `IsNotFound` の分岐が入ったときに
+// これらのテストが黙って別の枝を通る (#2792)。
+var errBoom = errors.New("db down")
+
 func newTestHandler() (*Handler, *mockAuthSessionRepo) {
 	repo := newMockRepo()
 	cfg := &config.Config{URL: "http://localhost:3000"}
@@ -234,7 +240,7 @@ func TestSessionGenerate_InvalidParam(t *testing.T) {
 func TestSessionGenerate_CreateError(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1"}
-	repo.createErr = errNotFound
+	repo.createErr = errBoom
 	rec := post(h.SessionGenerate, `{"appSecret":"s1"}`, nil)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
@@ -311,7 +317,7 @@ type failUpdateRepo struct {
 	*mockAuthSessionRepo
 }
 
-func (f *failUpdateRepo) UpdateSessionUserID(_, _ string) error { return errNotFound }
+func (f *failUpdateRepo) UpdateSessionUserID(_, _ string) error { return errBoom }
 
 func TestAccept_UpdateSessionError(t *testing.T) {
 	base := newMockRepo()
@@ -332,7 +338,7 @@ func TestAccept_CreateTokenError(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.apps["s1"] = &model.App{ID: "a1", Secret: "s1", Permission: model.StringArray{}}
 	repo.sessions["tok1"] = &model.AuthSession{ID: "sess1", Token: "tok1", AppID: "a1"}
-	repo.createErr = errNotFound
+	repo.createErr = errBoom
 
 	rec := post(h.Accept, `{"token":"tok1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -563,7 +569,7 @@ func TestGenToken_MissingPermission(t *testing.T) {
 
 func TestGenToken_CreateError(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.createErr = errNotFound
+	repo.createErr = errBoom
 	user := &model.User{ID: "u1", Username: "testuser"}
 
 	rec := post(h.GenToken, `{"permission":["read:account"]}`, user)

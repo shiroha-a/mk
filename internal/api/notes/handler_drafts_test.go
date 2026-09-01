@@ -51,6 +51,11 @@ func newDraftHandler() *Handler {
 // repository は GORM の error をそのまま返すので、テストもそれに揃える。
 var errDraftMock = repository.ErrNotFound
 
+// errBoom is a generic failure for write paths. **not-found とは分けること** —
+// 同じ値を使い回すと、将来 write path に `IsNotFound` の分岐が入ったときに
+// これらのテストが黙って別の枝を通る (#2792)。
+var errBoom = errors.New("db down")
+
 type mockDraftRepo struct {
 	drafts    map[string]*model.NoteDraft
 	createErr error
@@ -521,7 +526,7 @@ func TestDraftsCreate_InvalidJSON(t *testing.T) {
 
 func TestDraftsCreate_Error(t *testing.T) {
 	h, repo := newDraftHandlerWithRepo()
-	repo.createErr = errDraftMock
+	repo.createErr = errBoom
 	rec := postDraft(h.DraftsCreate, `{"text":"x"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }

@@ -25,6 +25,12 @@ type failingUserRepo struct {
 
 func (r *failingUserRepo) FindByID(string) (*model.User, error) { return nil, r.err }
 
+// FindProfileByEmail も落とす。`admin/accounts/find-by-email` は profile を先に
+// 引くので、FindByID だけ落としても手前で 400 に落ちる。
+func (r *failingUserRepo) FindProfileByEmail(string) (*model.UserProfile, error) {
+	return nil, r.err
+}
+
 // handlerWithFailingUserRepo builds an admin handler whose user lookups fail
 // with a database error.
 func handlerWithFailingUserRepo(t *testing.T, err error) *apiadmin.Handler {
@@ -33,6 +39,10 @@ func handlerWithFailingUserRepo(t *testing.T, err error) *apiadmin.Handler {
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}
 	roleRepo := testutil.NewMockRoleRepository()
+	// **role を seed する。** roles/assign と roles/unassign は user を引く前に
+	// role の編集権限を見るので、role が無いと手前で NO_SUCH_ROLE の 400 になり
+	// user lookup に到達しない。
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Target: model.RoleTargetManual, CanEditMembersByModerator: true}
 	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
 	idGen, _ := id.NewGenerator("aidx")
 	return apiadmin.NewHandler(
@@ -73,6 +83,15 @@ func TestAdmin_DBFailureIsNot4xx(t *testing.T) {
 		}},
 		{"admin/unset-mfa", func() int {
 			return doPost(h.UnsetMfa, `{"userId":"u1"}`, adminUser).Code
+		}},
+		{"admin/roles/assign", func() int {
+			return doPost(h.RolesAssign, `{"userId":"u1","roleId":"r1"}`, adminUser).Code
+		}},
+		{"admin/roles/unassign", func() int {
+			return doPost(h.RolesUnassign, `{"userId":"u1","roleId":"r1"}`, adminUser).Code
+		}},
+		{"admin/accounts/find-by-email", func() int {
+			return doPost(h.AccountsFindByEmail, `{"email":"a@example.test"}`, adminUser).Code
 		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

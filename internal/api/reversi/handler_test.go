@@ -3,6 +3,7 @@ package reversi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -25,6 +26,11 @@ import (
 // **not-found を模す。** 汎用 error だと #2792 の「DB 障害は 500」に引っかかる。
 // repository は GORM の error をそのまま返すので、テストもそれに揃える。
 var errMock = repository.ErrNotFound
+
+// errBoom is a generic failure for write paths. **not-found とは分けること** —
+// 同じ値を使い回すと、将来 write path に `IsNotFound` の分岐が入ったときに
+// これらのテストが黙って別の枝を通る (#2792)。
+var errBoom = errors.New("db down")
 
 type mockReversiRepo struct {
 	games     map[string]*model.ReversiGame
@@ -356,7 +362,7 @@ func TestMatch_AcctSelfTarget(t *testing.T) {
 
 func TestMatch_CreateError(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.createErr = errMock
+	repo.createErr = errBoom
 	rec := post(h.Match, `{"userId":"u2"}`, u1)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
@@ -859,7 +865,7 @@ func TestSurrender_WithRemoteUser(t *testing.T) {
 
 func TestMatch_CreateErrorWithRemote(t *testing.T) {
 	h, repo := newTestHandler()
-	repo.createErr = errMock
+	repo.createErr = errBoom
 	d := &mockDeliverer{}
 	userRepo := testutil.NewMockUserRepository()
 	host := "remote.example"
