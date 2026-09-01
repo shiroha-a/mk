@@ -1,12 +1,14 @@
 package admin
 
 import (
+	"net/http"
+	"time"
+
 	"github.com/labstack/echo/v4"
+
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
-	"net/http"
-	"time"
 )
 
 // PromoCreate handles POST /api/admin/promo/create.

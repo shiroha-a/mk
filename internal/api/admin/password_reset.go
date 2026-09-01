@@ -1,7 +1,10 @@
 package admin
 
 import (
+	"net/http"
+
 	"github.com/labstack/echo/v4"
+
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/misc"
@@ -9,7 +12,6 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
-	"net/http"
 )
 
 // ResetPassword handles POST /api/admin/reset-password.

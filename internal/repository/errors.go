@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"database/sql"
 	"errors"
 
 	"gorm.io/gorm"
@@ -23,5 +24,9 @@ var ErrNotFound = gorm.ErrRecordNotFound
 // upstream は `.findOneBy` の結果が `null` かどうかで判定するので、DB 障害は
 // 例外として 500 に化ける。こちらもそれに合わせる。
 func IsNotFound(err error) bool {
-	return errors.Is(err, ErrNotFound)
+	// **`sql.ErrNoRows` も見る。** 現状 production code の repository はすべて
+	// GORM 経由だが、どこかが `database/sql` / pgx 直叩きに変わったとき
+	// `IsNotFound` が黙って false を返すと、**本物の not-found が 500 になる**。
+	// 4xx → 500 の向きに倒したぶん、この誤りは表に出やすい。
+	return errors.Is(err, ErrNotFound) || errors.Is(err, sql.ErrNoRows)
 }

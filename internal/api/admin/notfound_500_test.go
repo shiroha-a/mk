@@ -12,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
 
@@ -56,22 +57,21 @@ func TestAdmin_DBFailureIsNot4xx(t *testing.T) {
 
 	for _, tt := range []struct {
 		name string
-		body string
 		run  func() int
 	}{
-		{"admin/show-user", `{"userId":"u1"}`, func() int {
+		{"admin/show-user", func() int {
 			return doPost(h.ShowUser, `{"userId":"u1"}`, adminUser).Code
 		}},
-		{"admin/suspend-user", `{"userId":"u1"}`, func() int {
+		{"admin/suspend-user", func() int {
 			return doPost(h.SuspendUser, `{"userId":"u1"}`, adminUser).Code
 		}},
-		{"admin/unsuspend-user", `{"userId":"u1"}`, func() int {
+		{"admin/unsuspend-user", func() int {
 			return doPost(h.UnsuspendUser, `{"userId":"u1"}`, adminUser).Code
 		}},
-		{"admin/reset-password", `{"userId":"u1"}`, func() int {
+		{"admin/reset-password", func() int {
 			return doPost(h.ResetPassword, `{"userId":"u1"}`, adminUser).Code
 		}},
-		{"admin/unset-mfa", `{"userId":"u1"}`, func() int {
+		{"admin/unset-mfa", func() int {
 			return doPost(h.UnsetMfa, `{"userId":"u1"}`, adminUser).Code
 		}},
 	} {
@@ -80,6 +80,17 @@ func TestAdmin_DBFailureIsNot4xx(t *testing.T) {
 				"DB 障害が 4xx に化けている (#2792)")
 		})
 	}
+
+	// forward-abuse-user-report は abuse report を引く。**別の repo なので上の
+	// failingUserRepo では守れない** (実際、guard を外す変異が生き残った)。
+	t.Run("admin/forward-abuse-user-report", func(t *testing.T) {
+		fh, _, _, _ := newTestHandler(t)
+		fh.SetAbuseRepo(&failingAbuseRepo{err: dbErr})
+
+		rec := doPost(fh.ForwardAbuseUserReport, `{"reportId":"r1"}`, adminUser)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"DB 障害が 4xx に化けている (#2792)")
+	})
 
 	// promo/create は user ではなく note を引く。**別の repo なので上の
 	// failingUserRepo では守れない** (実際、guard を外す変異が生き残った)。
@@ -98,3 +109,11 @@ func TestAdmin_DBFailureIsNot4xx(t *testing.T) {
 type failingNoteFinder struct{ err error }
 
 func (f failingNoteFinder) FindByID(string) (*model.Note, error) { return nil, f.err }
+
+// failingAbuseRepo makes every abuse-report lookup look like a database failure.
+type failingAbuseRepo struct {
+	repository.AbuseReportRepository
+	err error
+}
+
+func (r *failingAbuseRepo) FindByID(string) (*model.AbuseUserReport, error) { return nil, r.err }

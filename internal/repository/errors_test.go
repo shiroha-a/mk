@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"testing"
@@ -25,6 +26,9 @@ func TestIsNotFound(t *testing.T) {
 		// 接続断が「そんなノートは無い」に化ける (#2792)。
 		{"connection failure", errors.New("dial tcp: connection refused"), false},
 		{"invalid syntax", gorm.ErrInvalidField, false},
+		// GORM 以外の経路に変わっても not-found を取りこぼさない保険。
+		{"database/sql sentinel", sql.ErrNoRows, true},
+		{"wrapped sql sentinel", fmt.Errorf("scan: %w", sql.ErrNoRows), true},
 		{"duplicated key", gorm.ErrDuplicatedKey, false},
 	}
 
