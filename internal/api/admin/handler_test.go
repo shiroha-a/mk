@@ -3952,18 +3952,24 @@ func TestAdminMeta_ApprovalRequiredForSignup(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), `"approvalRequiredForSignup":true`)
 }
 
-// 登録可否の組み合わせ (#2565)。
+// 登録可否の組み合わせ (#2565 / #2803)。
 //
-// 唯一の制約は「承認制とメール必須は排他」。承認制それ自体が /api/signup を 403 で
-// 塞ぐので、登録開放は安全性の条件ではなく表示上の整合にすぎない。**「先に開放して
-// から承認制を入れる」手順を強制すると、その間に素通しで登録される窓ができる**ため、
-// 承認制を入れる更新では同じ更新で開放する。
+// 承認制それ自体が /api/signup を 403 で塞ぐので、登録開放は安全性の条件ではなく
+// 表示上の整合にすぎない。**「先に開放してから承認制を入れる」手順を強制すると、
+// その間に素通しで登録される窓ができる**ため、承認制を入れる更新では同じ更新で
+// 開放する。
+//
+// **外す更新では逆に閉じる (#2803)。** 開放は承認制がゲートとして立っていることが
+// 前提の整合なので、ゲートが消える更新で維持すると、招待制 → 承認制 ON → 承認制 OFF
+// の 3 操作で無警告の全開状態が残る。閉じる側は明示指定を尊重し (開ける側は #2565 の
+// 整合の強制として上書きする)、承認制の状態が変わらない更新では触らない。
 func TestUpdateMeta_SignupConditions(t *testing.T) {
 	tests := []struct {
-		name         string
-		current      *model.Meta
-		body         string
-		wantRejected bool
+		name    string
+		current *model.Meta
+		body    string
+		// 400 を期待するときだけ設定する。レスポンスに含まれるべき文言。
+		wantRejectedMessage string
 		// 更新後に期待する各値。nil なら検証しない。
 		wantDisableRegistration *bool
 		wantEmailRequired       *bool
@@ -3992,6 +3998,106 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 			name:                    "承認制を切る更新では開放しない",
 			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: true},
 			body:                    `{"approvalRequiredForSignup":false}`,
+			wantDisableRegistration: boolPtr(true),
+		},
+		{
+			// #2803 の本体。承認制で開いた登録は、承認制を外す更新で閉じ直す。
+			// 維持すると、招待制 → 承認制 ON → 承認制 OFF でゲートが 1 つも
+			// 無い全開状態になる。
+			name:                    "承認制を切る更新では登録も閉じる",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":false}`,
+			wantApprovalRequired:    boolPtr(false),
+			wantDisableRegistration: boolPtr(true),
+		},
+		{
+			// 明示指定があれば尊重する。両方送るクライアント (モデレーション
+			// 画面) が「開けたままにする」を選べなくなると意味が無い。
+			name:                    "承認制を切る更新で開放を明示すれば尊重する",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":false,"disableRegistration":false}`,
+			wantApprovalRequired:    boolPtr(false),
+			wantDisableRegistration: boolPtr(false),
+		},
+		{
+			name:                    "承認制を切る更新で閉鎖を明示すれば尊重する",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":false,"disableRegistration":true}`,
+			wantDisableRegistration: boolPtr(true),
+		},
+		{
+			// 元から閉じているサーバーで開放を明示するのも尊重する。既定の
+			// 補完が「閉じ直す」向きなので、こちらは上書きされうる形。
+			name:                    "元が招待制でも承認制を切る更新の開放明示は尊重する",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: true},
+			body:                    `{"approvalRequiredForSignup":false,"disableRegistration":false}`,
+			wantDisableRegistration: boolPtr(false),
+		},
+		{
+			// **型を推測しない (#2803)。** GORM は map の値をそのまま driver へ渡す
+			// ので、string でも PostgreSQL の boolean 入力構文に当たれば列は更新
+			// される。正規化は bool しか見ないため、弾かないと「承認制は外れたのに
+			// 登録は全開のまま」が作れる。
+			//
+			// `disableRegistration` を bool で添えるのは、**弾いたのに書いている
+			// 回帰をこのケース単独でも検出するため**。mock の Update は bool 以外を
+			// 無視するので、string の列だけでは書き込みが起きても差が出ない。
+			name:                "承認制の値が bool でなければ弾く",
+			current:             &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: false},
+			body:                `{"approvalRequiredForSignup":"false","disableRegistration":true}`,
+			wantRejectedMessage: "approvalRequiredForSignup must be a boolean",
+		},
+		{
+			// 逆向き。string で送れると #2565 が防ぐ「承認制 + 招待制」が作れる。
+			name:                "disableRegistration の値が bool でなければ弾く",
+			current:             &model.Meta{ID: "x", ApprovalRequiredForSignup: false, DisableRegistration: false},
+			body:                `{"approvalRequiredForSignup":true,"disableRegistration":"true"}`,
+			wantRejectedMessage: "disableRegistration must be a boolean",
+		},
+		{
+			// **null は弾かず落とす。** upstream の paramDef は `nullable: true` で、
+			// 実装も `typeof === 'boolean'` でしか読まない (= 無指定と同じ)。
+			// misskey-js の生成型も `boolean | null` なので、400 にすると型どおりに
+			// 送るクライアントを壊す。無指定なので閉じる既定が効く。
+			name:                    "disableRegistration が null なら無指定として扱う",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":false,"disableRegistration":null}`,
+			wantApprovalRequired:    boolPtr(false),
+			wantDisableRegistration: boolPtr(true),
+		},
+		{
+			// 承認制側の null も同じ。無指定なので遷移が無く、何も触らない。
+			name:                    "approvalRequiredForSignup が null なら何も触らない",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":null}`,
+			wantApprovalRequired:    boolPtr(true),
+			wantDisableRegistration: boolPtr(false),
+		},
+		{
+			// **開ける側は明示より整合を優先する (#2565)。** 承認制と招待制を
+			// 重ねると二重のゲートになるので、同じ更新で両方来ても開く。
+			// 閉じる側と非対称なのは意図的。
+			name:                    "承認制を入れる更新では閉鎖の明示より整合を優先する",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: false, DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":true,"disableRegistration":true}`,
+			wantApprovalRequired:    boolPtr(true),
+			wantDisableRegistration: boolPtr(false),
+		},
+		{
+			// **承認制が元から無効な更新で閉じてはいけない。** 管理者が開いた
+			// 操作を黙って巻き戻すことになる。
+			name:                    "承認制が元から無効なまま false を送っても閉じない",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: false, DisableRegistration: false},
+			body:                    `{"approvalRequiredForSignup":false}`,
+			wantApprovalRequired:    boolPtr(false),
+			wantDisableRegistration: boolPtr(false),
+		},
+		{
+			// 逆向きも同じ。承認制が元から有効なだけの更新では開放しない。
+			name:                    "承認制が元から有効なまま true を送っても開放しない",
+			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: true, DisableRegistration: true},
+			body:                    `{"approvalRequiredForSignup":true}`,
+			wantApprovalRequired:    boolPtr(true),
 			wantDisableRegistration: boolPtr(true),
 		},
 		{
@@ -4030,11 +4136,24 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			h, _, metaRepo, _ := newTestHandler(t)
 			metaRepo.Meta = tt.current
+			// **呼び出し前に値でコピーを取る。** mock は metaRepo.Meta の
+			// フィールドを書き換えるので、tt.current と比べても同じポインタを
+			// 両辺に置くだけになり、書き込みが起きても絶対に落ちない。
+			var before model.Meta
+			if tt.current != nil {
+				before = *tt.current
+			}
 
 			rec := doPost(h.UpdateMeta, tt.body, adminUser)
-			if tt.wantRejected {
+			if tt.wantRejectedMessage != "" {
 				assert.Equal(t, http.StatusBadRequest, rec.Code)
-				assert.Contains(t, rec.Body.String(), "INVALID_SIGNUP_CONDITIONS")
+				assert.Contains(t, rec.Body.String(), tt.wantRejectedMessage)
+				// **弾いたなら列も動いていないこと。** 400 を返しつつ書き込んで
+				// いたら、型検査を入れた意味が無い。
+				if tt.current != nil {
+					assert.Equal(t, before.DisableRegistration, metaRepo.Meta.DisableRegistration)
+					assert.Equal(t, before.ApprovalRequiredForSignup, metaRepo.Meta.ApprovalRequiredForSignup)
+				}
 				return
 			}
 			require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
@@ -4052,6 +4171,23 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 }
 
 func boolPtr(b bool) *bool { return &b }
+
+// meta が引けないときは何も書かない (#2803)。
+//
+// normalizeSignupConditions は current == nil だと遷移を判定できず、承認制を切る
+// 更新でも登録を閉じる補正を掛けられない。**それが fail-open にならないのは、
+// 後段の maybeAutoGenerateVAPID が同じ Fetch の error を返して Update まで
+// 到達しないから。** その前提をここで固定しておかないと、VAPID 側を meta 欠損に
+// 寛容にした瞬間に「承認制は外れたのに登録は開いたまま」が書き込まれる。
+func TestUpdateMeta_MetaUnavailable(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta = nil
+
+	rec := doPost(h.UpdateMeta, `{"approvalRequiredForSignup":false}`, adminUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	// Update が呼ばれていれば mock が Meta を作る。作られていない = 書いていない。
+	assert.Nil(t, metaRepo.Meta)
+}
 
 // 申請フォームの定義を検証する (#2570)。
 //

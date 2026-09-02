@@ -1450,6 +1450,12 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	if err := validateUpdateMetaNumericRanges(fields); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// 登録ゲートの型を揃える (#2803)。**normalizeSignupConditions より前に置く** —
+	// 正規化は bool しか見ないのに、後段の UPDATE は bool 以外でも列を書き換える
+	// ので、順番が逆だと「ゲートは外れたのに補正は走らない」組み合わせが残る。
+	if err := normalizeSignupGateBools(fields); err != nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", err.Error(), "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
 	// 登録可否の組み合わせ検証 (#2565)。**更新後の状態**で判定するので、
 	// 既存 meta とマージしてから見る。meta が引けないときは検証を諦めて
 	// 素通しする (ここで 500 にすると、meta が壊れているときに設定を直す
@@ -1571,6 +1577,22 @@ func metaBoolAfterUpdate(fields map[string]any, key string, current bool) bool {
 		}
 	}
 	return current
+}
+
+// metaBoolExplicit reports whether the update carries a usable bool for key.
+//
+// bool 以外は「明示した」と扱わない。update-meta の経路では
+// normalizeSignupGateBools が先に null を落とし残りを 400 で弾くので、ここへ来るのは
+// bool だけだが、
+// **presence だけの判定にすると、その検査を緩めたときに壊れた値を明示扱いして
+// 補正を飛ばす** (= 登録が開いたまま残る) 側に倒れる。閉じる側の既定へ倒す。
+func metaBoolExplicit(fields map[string]any, key string) bool {
+	v, ok := fields[key]
+	if !ok {
+		return false
+	}
+	_, isBool := v.(bool)
+	return isBool
 }
 
 // metaStringAfterUpdate returns the effective string value of key after the
@@ -3594,15 +3616,80 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 // 食い違わなくなったため。**クレームコードは常に必須のまま**で、本人性の担保は
 // コードが持つ。メールは独立した任意設定。
 
-// normalizeSignupConditions opens registration when approval is being turned on.
+// signupGateBoolFields are the registration gates that must arrive as booleans.
+var signupGateBoolFields = []string{"approvalRequiredForSignup", "disableRegistration"}
+
+// normalizeSignupGateBools drops JSON null and rejects other non-bool values
+// for the registration gates.
+//
+// **型が違うと「列は変わるのに正規化は走らない」状態が作れる (#2803)。** GORM は
+// map の値をそのまま driver へ渡すので、`"false"` のような文字列でも PostgreSQL の
+// boolean 入力構文に当たれば列は更新される。一方 normalizeSignupConditions は bool
+// しか見ないので、値を string にして送るクライアント (Echo の Bind は
+// form-urlencoded を string にする) は**承認制を外しつつ登録を全開のまま残せる**。
+// 逆向きも同じで、`disableRegistration` を string で送ると #2565 が防ぐはずの
+// 「承認制 + 招待制」が作れる。upstream は ajv の `type: 'boolean'` で string を
+// 400 にするので、弾くほうが互換でもある。
+//
+// **null だけは弾かずに落とす。** upstream の paramDef は `nullable: true` で、
+// 実装も `typeof ps.disableRegistration === 'boolean'` でしか読まない (= null は
+// 無指定と同じ)。misskey-js の生成型も `boolean | null` なので、型どおりに送る
+// クライアントを 400 にすると互換が壊れる。落とさないと NOT NULL 制約違反で
+// 500 になる (この分岐を入れる前の mk-go の挙動)。
+//
+// **対象はこの 2 つに絞る** — 他の bool 列は型を間違えても正規化の判断を
+// すり抜けさせる働きが無く、update-meta の全 bool 列を一括で弾くと既存クライアント
+// への影響範囲が読めない。
+func normalizeSignupGateBools(fields map[string]any) error {
+	for _, key := range signupGateBoolFields {
+		v, ok := fields[key]
+		if !ok {
+			continue
+		}
+		if v == nil {
+			delete(fields, key)
+			continue
+		}
+		if _, isBool := v.(bool); !isBool {
+			return fmt.Errorf("%s must be a boolean", key)
+		}
+	}
+	return nil
+}
+
+// normalizeSignupConditions keeps registration in step with the approval gate.
 //
 // **拒否ではなく同じ更新で開けるのが要点。** 「先に開放してから承認制を入れる」
 // 手順を強制すると、開放してから承認制が入るまでの間に素通しで登録される窓が
 // できる。承認制それ自体が `/api/signup` を 403 で塞ぐので、この開放は安全性
 // ではなく表示上の整合のため (訪問者に「招待制」と出さない)。
 //
-// 承認制を切る更新や、承認制が元から有効なだけの更新では触らない。**無条件に
-// 開けると、管理者が登録を閉じた操作を黙って巻き戻すことになる。**
+// **承認制を外す更新では逆に閉じる (#2803)。** 開放は「承認制がゲートとして立って
+// いる」ことが前提の整合なので、ゲートが消える更新でそれを維持する理由が無い。
+// 維持すると、招待制 → 承認制 ON → 承認制 OFF の 3 操作でゲートが 1 つも無い全開
+// 状態が残り、しかも `enableRegistration` の ON にある確認ダイアログを通らないので
+// 無警告で起きる。**倒す先は閉じる側にする** — 元が開放だったサーバーが承認制を
+// やめると招待制になるが、それは次に管理画面を開けばトグルに出るので気づける。
+// 逆 (全開のまま残る) は開いていることが正常に見えるので気づけない。
+//
+// 承認制の状態が変わらない更新では触らない。**無条件に開け閉めすると、管理者が
+// 登録を開いた / 閉じた操作を黙って巻き戻すことになる。**
+//
+// **meta が引けない (current == nil) ときは閉じる補正も走らない。** 呼び出し側が
+// Fetch の error を握り潰して素通しする判断 (#2565) の帰結で、遷移かどうかを
+// 判定できないため。ここで「承認制 OFF と言っている以上は閉じる」と決め打つと、
+// 承認制が元から無効なサーバーへの冗長な更新が登録を閉じてしまう。
+//
+// meta が引けない状態が続いていれば列は書かれない。後段の maybeAutoGenerateVAPID が
+// 自分の Fetch の error をそのまま返し、UpdateMeta は Update を呼ばずに 500 で終わる
+// (TestUpdateMeta_MetaUnavailable が固定している)。**ただし Fetch は 2 回別々に
+// 呼ばれる**ので、1 回目だけが一過性に失敗すると 2 回目は通り、補正の走らない更新が
+// 書かれる。VAPID 側を meta 欠損に寛容にすると、この窓が窓でなくなる。
+//
+// 明示指定の扱いは向きで非対称。**閉じる側は明示を尊重し、開ける側は上書きする。**
+// 開ける側の上書きは #2565 の「承認制と招待制を重ねると二重のゲートに意味が無い」
+// という整合の強制そのもので、今回はそこには触らない。閉じる側は逆に、既定を
+// 補うだけで運用者の意思を上書きする理由が無い (両方送るクライアントを壊さない)。
 //
 // 送っていない列を書き換える形なので「検証のみにして両方を送らせる」案もあるが、
 // 残す (#2571 で判断)。**結合はサーバー側の都合** — 承認制それ自体はゲートとして
@@ -3610,16 +3697,24 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 // クライアントが「承認制を入れる」だけの自然な 1 リクエストで 400 を食うのは筋が
 // 悪い。モデレーション画面は既に両方を送るので、ここは二重の保険として効く。
 func normalizeSignupConditions(fields map[string]any, current *model.Meta) {
-	turningOn, ok := fields["approvalRequiredForSignup"].(bool)
-	if !ok || !turningOn {
+	next, ok := fields["approvalRequiredForSignup"].(bool)
+	if !ok {
 		return
 	}
-	if current != nil && current.ApprovalRequiredForSignup {
-		return // 既に有効。今回の更新で入れたわけではない。
+	was := current != nil && current.ApprovalRequiredForSignup
+	if next == was {
+		return // 今回の更新で切り替えたわけではない。
 	}
-	if disabled := metaBoolAfterUpdate(fields, "disableRegistration", current != nil && current.DisableRegistration); disabled {
-		fields["disableRegistration"] = false
+	if next {
+		if disabled := metaBoolAfterUpdate(fields, "disableRegistration", current != nil && current.DisableRegistration); disabled {
+			fields["disableRegistration"] = false
+		}
+		return
 	}
+	if metaBoolExplicit(fields, "disableRegistration") {
+		return // 明示指定がある。既定を補う必要は無い。
+	}
+	fields["disableRegistration"] = true
 }
 
 // validateSignupApplicationForm checks an incoming application form definition.
