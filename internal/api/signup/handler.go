@@ -359,8 +359,10 @@ func (h *Handler) SignupPending(c echo.Context) error {
 		case coresignup.ErrInvitationAlreadyUsed:
 			return apierr.FastifyReply(c, http.StatusBadRequest, "INVITATION_ALREADY_USED")
 		case coresignup.ErrApplicationNotApproved:
-			// 承認が既に使われている / 期限切れ。**アカウントは作られていない**
-			// (同じ tx で巻き戻る、#2576)。
+			// 承認が既に使われている / 期限切れ / 不在 (#2576)、または承認制が
+			// 有効なのに申請に紐付いていない (#2804)。**どちらもアカウントは
+			// 作られていない** — 前者は同じ tx で巻き戻り、後者は tx に入る前に
+			// 返る。
 			return apierr.FastifyReply(c, http.StatusBadRequest, "NOT_APPROVED")
 		case coresignup.ErrInvitationRevoked:
 			// admin が ticket を削除した状態 (#610 item 2)。AlreadyUsed と区別。

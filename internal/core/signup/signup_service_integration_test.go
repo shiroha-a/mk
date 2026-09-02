@@ -470,6 +470,68 @@ func TestPromotePending_WithoutApplicationUnaffected(t *testing.T) {
 	assert.False(t, res.SignupApplicationCompleted)
 }
 
+// 承認制が有効なら、申請に紐付かない pending は昇格させない (#2804)。実 DB 経路。
+//
+// `PendingSignupTTL` は 24h なので、承認制へ切り替える直前 24 時間に発行された確認
+// メールがここに来る。申請 ID を持たないので settleApplicationTx (#2576) を通らず、
+// ゲートが無いと**承認を経ていないローカルアカウント**ができる。
+//
+// ゲートは tx に入る前に返るので**巻き戻すものは無い**。それでも user 行を数えるのは、
+// ゲートを消したり後ろへ動かしたりすると行ができることを検出するため。
+func TestPromotePending_ApprovalRequiredRejectsUnappliedPendingTx(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itgate_"
+	defer cleanupSignupRows(t, db, prefix)
+
+	// meta は pointer で渡るので、pending を作った後にフラグを立てられる。
+	meta := &model.Meta{ID: "x"}
+	svc := newTxServiceWithMeta(t, db, meta)
+
+	// 切り替え前に発行された確認メールを再現する (承認制 OFF のうちに作る)。
+	pending, err := svc.CreatePending(prefix+"late", "gate-late@example.com", "hunter22", nil)
+	require.NoError(t, err)
+
+	meta.ApprovalRequiredForSignup = true
+
+	_, err = svc.PromotePending(pending.Code)
+	require.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" = ?`, prefix+"late").Count(&count).Error)
+	assert.Equal(t, int64(0), count, "承認を経ないアカウントを作らない")
+
+	// pending は残す。承認制を戻した運用者が状況を追えるようにする。
+	var pendingCount int64
+	require.NoError(t, db.Model(&model.UserPending{}).
+		Where("id = ?", pending.ID).Count(&pendingCount).Error)
+	assert.Equal(t, int64(1), pendingCount)
+}
+
+// 承認制が有効でも、承認済みの申請に紐付く pending は従来どおり通る (#2804)。
+func TestPromotePending_ApprovalRequiredStillAllowsApprovedApplication(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itgateok_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxServiceWithMeta(t, db, &model.Meta{ID: "x", ApprovalRequiredForSignup: true})
+
+	app := insertApprovedApplication(t, db, prefix+"app1")
+	appID := app.ID
+	pending, err := svc.CreatePendingForApplication(prefix+"ok", "gate-ok@example.com", "hunter22", nil, &appID)
+	require.NoError(t, err)
+
+	res, err := svc.PromotePending(pending.Code)
+	require.NoError(t, err)
+	assert.True(t, res.SignupApplicationCompleted)
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" = ?`, prefix+"ok").Count(&count).Error)
+	assert.Equal(t, int64(1), count)
+}
+
 // 申請行が消えていたら通さない。**「見つからない = 承認されていない」に倒す** —
 // 承認の裏付けが無いままアカウントを作らない。
 func TestPromotePending_MissingApplicationIsRejected(t *testing.T) {

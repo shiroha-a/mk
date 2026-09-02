@@ -410,6 +410,67 @@ func TestPromotePending_Success(t *testing.T) {
 	assert.Equal(t, row.Password, *prof.Password)
 }
 
+// 承認制が有効なら、申請に紐付かない pending は昇格させない (#2804)。
+//
+// **`PendingSignupTTL` は 24h。** 承認制へ切り替える直前 24 時間に発行された確認
+// メールは、申請 ID を持たないので #2576 の確定処理を通らず、ゲートが無いと承認を
+// 経ずにアカウントになる。
+func TestPromotePending_ApprovalRequiredRejectsUnappliedPending(t *testing.T) {
+	svc, userRepo, metaRepo := newTestService(t)
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	svc.SetUserPendingRepo(pendingRepo)
+
+	// 切り替え前に発行された確認メールを再現する (承認制 OFF のうちに作る)。
+	row, err := svc.CreatePending("late", "late@example.com", "pw123", nil)
+	require.NoError(t, err)
+
+	metaRepo.Meta.ApprovalRequiredForSignup = true
+
+	_, err = svc.PromotePending(row.Code)
+	require.ErrorIs(t, err, signup.ErrApplicationNotApproved)
+	assert.Empty(t, userRepo.Users, "アカウントを作らない")
+	// pending は残す。承認制を戻した運用者が状況を追えるようにする。
+	assert.Len(t, pendingRepo.Rows, 1)
+}
+
+// 承認制が有効でも、申請に紐付く pending は従来どおり通る (#2804)。
+func TestPromotePending_ApprovalRequiredAllowsAppliedPending(t *testing.T) {
+	svc, userRepo, metaRepo := newTestService(t)
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	svc.SetUserPendingRepo(pendingRepo)
+	metaRepo.Meta.ApprovalRequiredForSignup = true
+
+	appID := "app1"
+	row, err := svc.CreatePendingForApplication("applied", "a@example.com", "pw123", nil, &appID)
+	require.NoError(t, err)
+
+	result, err := svc.PromotePending(row.Code)
+	require.NoError(t, err)
+	assert.Equal(t, "applied", result.User.Username)
+	assert.Len(t, userRepo.Users, 1)
+}
+
+// meta が読めないときは通さない (#2804)。
+//
+// **DB 障害を承認の迂回路にしない。** ただし ErrApplicationNotApproved にも
+// 丸めない — 障害をドメインの答えに化けさせると、運用側からは「承認されていない」
+// としか見えなくなる (#2799 と同じ)。
+func TestPromotePending_ApprovalGateFailsClosedWhenMetaUnavailable(t *testing.T) {
+	svc, userRepo, metaRepo := newTestService(t)
+	pendingRepo := testutil.NewMockUserPendingRepository()
+	svc.SetUserPendingRepo(pendingRepo)
+
+	row, err := svc.CreatePending("nometa", "n@example.com", "pw123", nil)
+	require.NoError(t, err)
+
+	metaRepo.Meta = nil // Fetch が error を返す
+
+	_, err = svc.PromotePending(row.Code)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, signup.ErrApplicationNotApproved)
+	assert.Empty(t, userRepo.Users, "アカウントを作らない")
+}
+
 func TestPromotePending_NotFound(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	pendingRepo := testutil.NewMockUserPendingRepository()

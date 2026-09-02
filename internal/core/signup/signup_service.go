@@ -72,11 +72,17 @@ var (
 	// ErrPendingExpired is returned when the pending signup is past its TTL.
 	// TTL は ID (ULID) 由来 timestamp から算出する (createdAt カラム不在のため)。
 	ErrPendingExpired = errors.New("pending signup expired")
-	// ErrApplicationNotApproved is returned when the approval application a
-	// pending signup belongs to is no longer usable (#2576).
+	// ErrApplicationNotApproved is returned when a pending signup cannot show
+	// an approval that is still usable. 生産者は 2 系統ある。
 	//
-	// **アカウント作成と同じトランザクションで判定する。** 別々にすると、確認と
-	// 再送が重なったときに 1 つの承認から 2 アカウント作れる。
+	//  1. settleApplicationTx (#2576) — 紐付く申請が使用済み / 期限切れ / 不在。
+	//     **アカウント作成と同じトランザクションで判定する。** 別々にすると、
+	//     確認と再送が重なったときに 1 つの承認から 2 アカウント作れる。
+	//  2. checkApprovalGate (#2804) — 承認制が有効なのに申請に紐付いていない。
+	//     こちらは tx に入る前に返る (tx で巻き戻すものが無い)。
+	//
+	// **どちらもアカウントは作られていない**が、その理由は同じではない。
+	// 「この error なら tx で巻き戻っている」という形で依存しないこと。
 	ErrApplicationNotApproved = errors.New("signup application is not approved")
 	// ErrInvitationAlreadyUsed is returned when the invitation ticket linked to
 	// a pending signup has already been consumed by another user. transaction
@@ -519,10 +525,13 @@ func (s *Service) CreatePendingForApplication(username, email, password string, 
 // db 未配線時は repo-based 非 tx パスに fallback (mock テスト互換)。
 //
 // 失敗パターン:
-//   - ErrPendingNotFound: code が無い / DB error
+//   - ErrPendingNotFound: code が無い (**DB 障害はこれに丸めず生の error を返す**、#2799)
 //   - ErrPendingExpired: ID (ULID) timestamp が PendingSignupTTL を超過
 //   - ErrUsernameAlreadyExists: 確認 link 待ちの間に同名 user が登録されたケース
 //   - ErrInvitationAlreadyUsed: tx 経路で ticket がすでに別 user に消費済 (#604)
+//   - ErrInvitationRevoked: tx 経路で ticket が admin に削除済 (#610 item 2)
+//   - ErrApplicationNotApproved: 承認制が有効なのに申請に紐付いていない (#2804)、
+//     または紐付く申請が使用済み / 期限切れ / 不在 (#2576)
 func (s *Service) PromotePending(code string) (*SignupResult, error) {
 	pending, err := s.pendingRepo.FindByCode(code)
 	if err != nil {
@@ -539,11 +548,58 @@ func (s *Service) PromotePending(code string) (*SignupResult, error) {
 			return nil, ErrPendingExpired
 		}
 	}
+	if err := s.checkApprovalGate(pending); err != nil {
+		return nil, err
+	}
 
 	if s.db != nil && s.ticketRepo != nil {
 		return s.promotePendingTx(pending)
 	}
 	return s.promotePendingNoTx(pending)
+}
+
+// checkApprovalGate rejects a pending signup that carries no approval
+// application while approval-based signup is enabled (#2804).
+//
+// 見るのは**申請 ID を持つかどうか**だけで、その申請が承認済みかは見ない。
+// そちらは settleApplicationTx (#2576) の担当。
+//
+// **承認制は「承認を経ていないローカルアカウントは存在しない」ことの主張。**
+// 申請に紐付かない `user_pending` は #2576 の確定処理を通らないので、ゲートが
+// 無いと承認を経ずにアカウントになる。`PendingSignupTTL` は 24h なので、承認制へ
+// 切り替える直前 24 時間に発行された確認メールがそのまま通っていた。窓が開くのは
+// 切り替え**前**に `emailRequiredForSignup` が ON だった構成だけ (OFF なら
+// `/api/signup` が即座にアカウントを作るので待ち行列が無い)。
+//
+// **入口に置く。** `promotePendingTx` / `promotePendingNoTx` はここからしか
+// 呼ばれないので、1 箇所で両経路が塞がる。tx の中に置くと mirror を保つ箇所が
+// 増えるうえ (#610 item 3)、`MetaRepository` は tx を受けないので tx が接続を
+// 掴んだまま別の接続を取ることになる。本番配線は TTL 5 分のキャッシュ付きなので
+// tx 内で読んでも原子性は得られず、得られるのは「ユーザーを作る前に弾く」ことだけで、
+// それは入口でも成立する。
+//
+// **meta が読めなければ通さない。** 既存の username 検査は読めなければ素通しするが、
+// ゲートで同じ形にすると DB 障害が承認の迂回路になる。error はそのまま返して
+// ErrApplicationNotApproved に丸めない — DB 障害をドメインの答えに化けさせない
+// (#2799)。確認コードは 24 時間有効なままなので復旧後にやり直せる。
+func (s *Service) checkApprovalGate(pending *model.UserPending) error {
+	if pending.SignupApplicationID != nil {
+		// 本番経路 (promotePendingTx) は settleApplicationTx で申請を確定させる
+		// (#2576)。noTx 経路は申請に触らないが、これは db 未配線の mock 用で、
+		// 本番では router の配線検査 (signup.applicationSettlement) が通ることを
+		// 保証している。
+		return nil
+	}
+	meta, err := s.metaRepo.Fetch()
+	if err != nil {
+		return fmt.Errorf("signup: fetch meta for approval gate: %w", err)
+	}
+	if meta.ApprovalRequiredForSignup {
+		slog.Warn("promote pending: rejected unapproved pending signup",
+			"pendingId", pending.ID)
+		return ErrApplicationNotApproved
+	}
+	return nil
 }
 
 // promotePendingTx は db.Transaction 内で user 作成 / ticket 消費 / pending
