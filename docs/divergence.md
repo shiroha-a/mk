@@ -34,7 +34,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 27 tag (`-mk.0` ～ `-mk.22d`) | — | — |
+| fork frontend の独自変更 | 28 tag (`-mk.0` ～ `-mk.22e`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -371,6 +371,7 @@ submodule bump の PR で人が見る。
 | `2026.7.0-mk.22b` | ジョブキューの Timeline に再試行を実時刻で並べる (#2692)。`mk.22a` で行ごと消してしまい再試行が見えなくなっていたのを、mkq が記録するようになった実時刻で戻す |
 | `2026.7.0-mk.22c` | boot エラー画面の Reload を `addEventListener` にする (#2786)。**inline event handler は CSP の hash では通らない** (`'unsafe-hashes'` が要る) ので、`script-src` から `'unsafe-inline'` を外すと `onclick="location.reload(true);"` が block され、「Failed to initialize Misskey」画面の唯一の復旧手段が押しても反応しなくなる。SPA shell が読む `packages/frontend` 側の inline handler はここ 1 箇所だけ。`packages/frontend-embed/public/loader/boot.js` にも同じ形が残っていたが、`/embed/` に CSP を広げた #2789 で `mk.22d` として直した |
 | `2026.7.0-mk.22d` | embed の boot エラー画面の Reload を `addEventListener` にする (#2789)。`mk.22c` の embed 版。`/embed/` にも CSP を付けたので、`onclick` のままだと**埋め込み先の利用者が取れる唯一の復旧手段**が押しても反応しなくなる。これで `packages/frontend` / `packages/frontend-embed` の src と public から inline event handler は消えた |
+| `2026.7.0-mk.22e` | 承認制を切るときにアカウント作成をどうするか聞く (#2803)。承認制を入れる更新はアカウント作成を同じ更新で開放するので、外す更新でその開放が残ると**ゲートが 1 つも無い全開状態**になる。アカウント作成のトグル自体を入れるときは確認ダイアログを挟むのに、この経路は素通りするので無警告で起きていた。OFF 側で 3 択 (閉じる / 開けたまま / やめる) を出し、`disableRegistration` を必ず明示して送る — 省略するとサーバー側が閉じる側の既定を補うため「開けたままにする」が選べない。あわせて API 失敗時に ref を戻す (楽観更新のままだと画面だけ招待制になり、実際には申請を受け付け続ける) |
 
 `2026.7.0-mk.1` の内訳:
 
