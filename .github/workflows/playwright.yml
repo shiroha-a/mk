@@ -242,7 +242,7 @@ jobs:
 
       - name: Run Playwright
         # spec は 1 スタックあたり直列でしか回せない。共有の root アカウント
-        # (292 ファイル中 173 がサインインする) と instance meta を全 spec が
+        # (293 ファイル中 174 がサインインする) と instance meta を全 spec が
         # 共有しており、Playwright のファイル並列だと `profile_iscat_toggle`
         # と `profile_isbot_toggle` が同じ alice を、`admin_branding_save` と
         # `about_page_render` が同じ meta を取り合う。並列度はスタックごと

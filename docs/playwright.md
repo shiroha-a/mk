@@ -1,7 +1,7 @@
 # Playwright e2e
 
 mk-go のフロントエンド / API を実ブラウザから検証する e2e。spec は
-`tests/playwright/specs/` にあり、現在 292 ファイル / 442 テスト
+`tests/playwright/specs/` にあり、現在 293 ファイル / 445 テスト
 (`npx playwright test --list` で数えられる)。
 
 Cypress からの移行完了に伴い、frontend e2e はこちらに一本化した (#2437)。本家も
@@ -46,7 +46,7 @@ bump したときに回す (`docs/upstream-catch-up.md`)。
 **4 シャード並列** (`--shard=i/4`、`fail-fast: false`)。check 名は
 `spec (mk-go 1/4)` 〜 `4/4`。
 
-**1 スタックあたりは直列でしか回せない。** 292 spec のうち 173 が共有の root (alice) で
+**1 スタックあたりは直列でしか回せない。** 293 spec のうち 174 が共有の root (alice) で
 サインインし、instance meta は全 spec が共有する。Playwright はファイル単位で並列化する
 ので `workers` を上げると `profile_iscat_toggle` と `profile_isbot_toggle` が同じ
 アカウントを、`admin_branding_save` と `about_page_render` が同じ meta を取り合う。
@@ -99,7 +99,7 @@ throw されて assertion に届かず、失敗メッセージが
 
 ### img-src の違反は既知
 
-全 292 spec を enforce で回すと `img-src` の violation が 360 件出る。**`script-src` /
+全 spec を enforce で回すと `img-src` の violation が 360 件出る (292 spec 時点の実測。以降は再測定していない)。**`script-src` /
 `default-src` / `worker-src` はゼロ。** 数え方:
 
 ```bash

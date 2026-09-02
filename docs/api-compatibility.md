@@ -19,7 +19,7 @@
 
 - **upstream catch-up**: **2026.7.0 まで追従完了**。2026.3.2 → 2026.5.1 → 2026.5.4 → 2026.6.0 → 2026.7.0 と段階的に追従した。各 release 差分は [`docs/update/`](update/) を参照 (`<yyyymm><nn>diff.md`。`nn` は**対象 upstream release の patch 番号**で日付ではない。backend に変更が無い release は doc を作らないので番号は飛ぶ。同じディレクトリに `<yyyymmdd>-<issue>-triage.md` 形式の triage note も同居する)
 - **本家 backend e2e**: Misskey 本家の `test/e2e/**` をテスト本体無改変で mk-go に向けて実行する基盤を整備し、**25 ファイル 1245 テストが全通過**。PR ごとに CI で回る。『通らないことが正しい』23 件は根拠付きで expected-failure として登録している ([`upstream-backend-e2e.md`](upstream-backend-e2e.md))
-- **Playwright e2e**: 292 spec ファイルを PR ごとに実行。Misskey TS backend に対しては upstream 追従時に実行し、spec が mk-go の挙動に引きずられていないかを検証する
+- **Playwright e2e**: 293 spec ファイルを PR ごとに実行。Misskey TS backend に対しては upstream 追従時に実行し、spec が mk-go の挙動に引きずられていないかを検証する
 - **drift backlog**: Phase 1-4 の spec 整備中に発見した 40+ 件の drop-in 互換 drift は fix 済
 
 ## エンドポイントカバー率 (Playwright Phase 1-4 時点)

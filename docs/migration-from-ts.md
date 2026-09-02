@@ -219,7 +219,7 @@ Misskey-TSに戻す場合の手順:
 
 ## drop-in 互換性の現状 (2026-05-09 時点)
 
-Playwright spec (#744) を **292 ファイル / 40 directory** (directory は spec を直接含むもの。`find tests/playwright/specs -name '*.spec.ts' -printf '%h\n' | sort -u | wc -l`) に育て、PR ごとに mk-go backend
+Playwright spec (#744) を **293 ファイル / 40 directory** (directory は spec を直接含むもの。`find tests/playwright/specs -name '*.spec.ts' -printf '%h\n' | sort -u | wc -l`) に育て、PR ごとに mk-go backend
 へ投げている。Misskey TS backend に対しては upstream 追従のタイミングで回し、spec の
 期待値が mk-go の挙動に引きずられていないかを検証する。発見した drop-in 互換 drift は
 40+ 件すべて解消済 (詳細: [api-compatibility.md](api-compatibility.md))。
