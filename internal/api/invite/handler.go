@@ -32,12 +32,24 @@ type RolePolicyProvider interface {
 	GetUserPolicies(userID string) map[string]any
 }
 
+// ModeratorChecker reports whether a user holds a moderator (or administrator)
+// role. Delete uses it to reproduce upstream's moderator bypass (#2812).
+//
+// 未配線なら「モデレーターではない」に倒れる。**緩む側ではなく厳しい側**なので、
+// `recordCriticalWiring` (= 起動を止める配線検査) の対象にはしない。代わりに
+// `TestInviteModeratorCheckerIsWired` が router のソースを読んで固定する — 配線を
+// 消してもこのパッケージのテストは checker を自分で注入するので緑のまま通る。
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+}
+
 // Handler exposes /api/invite/* handler methods.
 type Handler struct {
 	repo               repository.RegistrationTicketRepository
 	idGen              id.Generator
 	rolePolicyProvider RolePolicyProvider
 	userRepo           repository.UserRepository
+	moderatorChecker   ModeratorChecker
 }
 
 // NewHandler returns a Handler wired with the given repository + id generator.
@@ -56,6 +68,14 @@ func (h *Handler) SetRolePolicyProvider(p RolePolicyProvider) {
 // (createdBy は middleware user から常に解決できる)。
 func (h *Handler) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
+}
+
+// SetModeratorChecker wires the moderator lookup used by Delete (#2812).
+//
+// 未配線なら bypass が効かないだけ (= 作成者の未使用の招待しか消せない)。
+// **#2812 以前と同じではない** — あちらは作成者なら使用済みでも消せた。
+func (h *Handler) SetModeratorChecker(c ModeratorChecker) {
+	h.moderatorChecker = c
 }
 
 // Create implements POST /api/invite/create. Upstream Misskey TS
@@ -106,7 +126,7 @@ func (h *Handler) Create(c echo.Context) error {
 	resp := map[string]any{
 		"id":   ticket.ID,
 		"code": ticket.Code,
-		// upstream InviteCodeEntityService.ts:47 は expiresAt ? toISOString() : null (#1948-10)。
+		// upstream InviteCodeEntityService.ts:50 は expiresAt ? toISOString() : null (#1948-10)。
 		"expiresAt": entity.ISOMillisPtr(ticket.ExpiresAt),
 		"createdBy": entity.PackUserLite(user),
 		"usedBy":    nil,
@@ -147,7 +167,7 @@ func (h *Handler) List(c echo.Context) error {
 	}
 	// upstream invite/list は createdBy / usedBy を UserLite で埋める
 	// (InviteCodeEntityService.pack)。list は createdById=me で絞っているので
-	// createdBy は常に呼び出し元自身。usedBy は使用済 ticket の利用者を batch 解決する
+	// createdBy は常に呼び出し元自身。usedBy は `usedById` を持つ ticket の利用者を batch 解決する
 	// (#1776)。frontend MkInviteCode.vue が createdBy/usedBy の avatar/username を
 	// 描画するため、ここを null 固定にすると招待管理画面の詳細表示が空になる。
 	createdByLite := entity.PackUserLite(user)
@@ -185,12 +205,21 @@ func (h *Handler) List(c echo.Context) error {
 		entry := map[string]any{
 			"id":   t.ID,
 			"code": t.Code,
-			// upstream InviteCodeEntityService.ts:47,51 は expiresAt/usedAt ? toISOString() : null (#1948-10)。
+			// upstream InviteCodeEntityService.ts:50,54 は expiresAt/usedAt ? toISOString() : null (#1948-10)。
 			"expiresAt": entity.ISOMillisPtr(t.ExpiresAt),
 			"createdBy": createdByLite,
 			"usedBy":    usedBy,
 			"usedAt":    entity.ISOMillisPtr(t.UsedAt),
-			"used":      t.UsedByID != nil,
+			// **`usedById` ではなく `usedAt` で見る (#2812)。** upstream は
+			// `used: !!target.usedAt` (InviteCodeEntityService.ts:55)、mk-go の
+			// `admin/invite/list` も `UsedAt != nil` で、ここだけが違っていた。
+			//
+			// 差が出るのは**確認メール待ちの ticket** — `MarkPending` は `usedAt`
+			// だけ立てて `usedById` は nil のまま残す。`used: false` と答えると、
+			// 画面は削除ボタンを出すのに `invite/delete` は使用済みとして 400 を
+			// 返す (#2812 で使用済みの保護を入れたので、この食い違いが利用者から
+			// 見えるようになる)。
+			"used": t.UsedAt != nil,
 		}
 		if ts, err := h.idGen.ParseTime(t.ID); err == nil {
 			entry["createdAt"] = ts.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -200,8 +229,11 @@ func (h *Handler) List(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-// Delete implements POST /api/invite/delete. Only the original creator can
-// delete their own ticket (= upstream `invite/delete.ts` access check)。
+// Delete implements POST /api/invite/delete.
+//
+// 消せるのは**自分が作った未使用の招待**だけ。モデレーターはどちらの判定も
+// bypass する (#2812)。upstream `invite/delete.ts` の
+// `createdById !== me.id && !isModerator` / `usedAt && !isModerator` と同じ。
 func (h *Handler) Delete(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req struct {
@@ -212,12 +244,35 @@ func (h *Handler) Delete(c echo.Context) error {
 	}
 	ticket, err := h.repo.FindByID(req.InviteID)
 	if err != nil {
-		// 既に削除済 / 存在しない場合は upstream と同様に 204 を返す (= idempotent)。
+		// **DB 障害を「削除成功」に化けさせない (#2812)。** 取り消し系で 204 を
+		// 返すと、モデレーターは消えたと思って戻り、ticket は生きている。
+		// 種別を見ずに潰さないのは #2799 と同じ理由。
+		if !repository.IsNotFound(err) {
+			return apierr.JSONInternalError(c)
+		}
+		// 既に削除済 / 存在しない場合は 204 を返す (= idempotent)。**upstream は
+		// NO_SUCH_INVITE_CODE を投げるので、ここは意図的な乖離** (#2812 で記述を
+		// 是正。それ以前のコメントは「upstream と同様に」と誤って書いていた)。
 		return c.NoContent(http.StatusNoContent)
 	}
-	if ticket.CreatedByID == nil || *ticket.CreatedByID != user.ID {
-		// invite/delete は汎用 ACCESS_DENIED ではなく endpoint 固有 id を使う
-		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "5eb8d909-2540-4970-90b8-dd6f86088121"))
+	// モデレーターは所有者でなくても消せる (#2812)。upstream の
+	// `ticket.createdById !== me.id && !isModerator` と同じ形。**mk-go はこの
+	// bypass を持っておらず、管理画面の招待一覧から他人の招待を消せなかった。**
+	// #2805 で承認由来の ticket が `createdById` NULL になったので、消せない行の
+	// 割合が増えていた。
+	isModerator := h.moderatorChecker != nil && h.moderatorChecker.IsModerator(user.ID)
+	if !isModerator {
+		if ticket.CreatedByID == nil || *ticket.CreatedByID != user.ID {
+			// invite/delete は汎用 ACCESS_DENIED ではなく endpoint 固有 id を使う
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "5eb8d909-2540-4970-90b8-dd6f86088121"))
+		}
+		// 使用済みの招待は所有者でも消せない (upstream の `ticket.usedAt &&
+		// !isModerator`)。**消せると、誰の招待から入ったアカウントなのかを
+		// 招待した本人が消せてしまう。** 順序も upstream に合わせる — 所有者
+		// 判定を先にしないと、第三者に「その招待は使用済み」と教えることになる。
+		if ticket.UsedAt != nil {
+			return c.JSON(http.StatusBadRequest, apierr.Error("CAN_NOT_DELETE_INVITE_CODE", "You can't delete this invite code.", "ff17af39-000c-4d4e-abdf-848fa30fc1ce"))
+		}
 	}
 	if err := h.repo.Delete(req.InviteID); err != nil {
 		return apierr.JSONInternalError(c)

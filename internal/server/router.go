@@ -3426,6 +3426,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	inviteHandler.SetRolePolicyProvider(roleService)
 	// invite/list が createdBy / usedBy を UserLite で解決するため (#1776)。
 	inviteHandler.SetUserRepo(userRepo)
+	// モデレーターが他人の / createdById が NULL の招待を消せるようにする (#2812)。
+	// 未配線なら bypass が効かないだけなので `recordCriticalWiring` には載せない
+	// (緩む側ではなく厳しい側に倒れる)。この行が消えていないことは
+	// `TestInviteModeratorCheckerIsWired` が見る。
+	inviteHandler.SetModeratorChecker(roleService)
 	api.POST("/invite/create", inviteHandler.Create,
 		middleware.RequireAuth(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanInvite), middleware.RequireScope("write:invite-codes"))

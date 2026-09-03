@@ -228,7 +228,10 @@ func TestList_ResolvesCreatedByAndUsedBy(t *testing.T) {
 	me := "u1"
 	usedBy := "u2"
 	repo.Tickets["t1"] = &model.RegistrationTicket{ID: "z_a1", Code: "code-a1", CreatedByID: &me}
-	repo.Tickets["t2"] = &model.RegistrationTicket{ID: "z_a2", Code: "code-a2", CreatedByID: &me, UsedByID: &usedBy}
+	// 実運用では MarkUsed が usedById と usedAt を両方立てる。片方だけの
+	// fixture にすると `used` の由来 (#2812) を取り違える。
+	usedAt := time.Now()
+	repo.Tickets["t2"] = &model.RegistrationTicket{ID: "z_a2", Code: "code-a2", CreatedByID: &me, UsedByID: &usedBy, UsedAt: &usedAt}
 
 	userRepo := testutil.NewMockUserRepository()
 	userRepo.Users[me] = &model.User{ID: me, Username: "alice", UsernameLower: "alice"}
@@ -328,6 +331,153 @@ func TestDelete_AccessDeniedWhenNotCreator(t *testing.T) {
 	rec := post(h.Delete, `{"inviteId":"t1"}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+}
+
+// --- Delete: モデレーターの bypass と使用済みの保護 (#2812) ---
+
+// stubModerator は指定した user だけをモデレーターとして返す。
+type stubModerator struct{ ids map[string]bool }
+
+func (s *stubModerator) IsModerator(userID string) bool { return s.ids[userID] }
+
+func moderatorOf(ids ...string) *stubModerator {
+	m := &stubModerator{ids: map[string]bool{}}
+	for _, userID := range ids {
+		m.ids[userID] = true
+	}
+	return m
+}
+
+// upstream の `ticket.createdById !== me.id && !isModerator` を再現する。
+// **mk-go はこの bypass を持っておらず、管理画面の招待一覧から他人の招待を
+// 消せなかった。** #2805 で承認由来の ticket が createdById NULL になったので、
+// 消せない行の割合が増えていた。
+func TestDelete_ModeratorBypass(t *testing.T) {
+	used := time.Now()
+	owner := "u2"
+	mod := "mod1"
+	tests := []struct {
+		name       string
+		ticket     *model.RegistrationTicket
+		actor      string
+		moderators *stubModerator
+		wantCode   int
+		wantBody   string
+		wantGone   bool
+	}{
+		{
+			name:       "モデレーターは他人の招待を消せる",
+			ticket:     &model.RegistrationTicket{ID: "t1", CreatedByID: &owner},
+			actor:      "mod1",
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusNoContent,
+			wantGone:   true,
+		},
+		{
+			// #2805 で承認由来の ticket は createdById NULL になった。
+			name:       "モデレーターは createdById が NULL の招待を消せる",
+			ticket:     &model.RegistrationTicket{ID: "t1"},
+			actor:      "mod1",
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusNoContent,
+			wantGone:   true,
+		},
+		{
+			name:       "モデレーターは使用済みの招待も消せる",
+			ticket:     &model.RegistrationTicket{ID: "t1", CreatedByID: &owner, UsedAt: &used},
+			actor:      "mod1",
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusNoContent,
+			wantGone:   true,
+		},
+		{
+			name:       "モデレーターは自分の使用済み招待も消せる",
+			ticket:     &model.RegistrationTicket{ID: "t1", CreatedByID: &mod, UsedAt: &used},
+			actor:      "mod1",
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusNoContent,
+			wantGone:   true,
+		},
+		{
+			name:       "非モデレーターは他人の招待を消せない",
+			ticket:     &model.RegistrationTicket{ID: "t1", CreatedByID: &owner},
+			actor:      "u1",
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusBadRequest,
+			wantBody:   "ACCESS_DENIED",
+		},
+		{
+			name:       "非モデレーターは createdById が NULL の招待を消せない",
+			ticket:     &model.RegistrationTicket{ID: "t1"},
+			actor:      "u1",
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusBadRequest,
+			wantBody:   "ACCESS_DENIED",
+		},
+		{
+			// **消せると、誰の招待から入ったアカウントなのかを招待した本人が
+			// 消せてしまう。**
+			name:       "作成者でも使用済みの招待は消せない",
+			ticket:     &model.RegistrationTicket{ID: "t1", CreatedByID: &owner, UsedAt: &used},
+			actor:      owner,
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusBadRequest,
+			wantBody:   "CAN_NOT_DELETE_INVITE_CODE",
+		},
+		{
+			name:       "作成者は未使用の招待を消せる",
+			ticket:     &model.RegistrationTicket{ID: "t1", CreatedByID: &owner},
+			actor:      owner,
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusNoContent,
+			wantGone:   true,
+		},
+		{
+			// **第三者に「その招待は使用済み」と教えない。** 所有者判定を
+			// 先にする upstream の順序をここで固定する。
+			name:       "第三者には使用済みかどうかを教えない",
+			ticket:     &model.RegistrationTicket{ID: "t1", CreatedByID: &owner, UsedAt: &used},
+			actor:      "u1",
+			moderators: moderatorOf("mod1"),
+			wantCode:   http.StatusBadRequest,
+			wantBody:   "ACCESS_DENIED",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h, repo := newTestHandler(t)
+			h.SetModeratorChecker(tt.moderators)
+			repo.Tickets["t1"] = tt.ticket
+
+			rec := post(h.Delete, `{"inviteId":"t1"}`, &model.User{ID: tt.actor})
+			require.Equal(t, tt.wantCode, rec.Code, rec.Body.String())
+			if tt.wantBody != "" {
+				assert.Contains(t, rec.Body.String(), tt.wantBody)
+			}
+			if tt.wantGone {
+				assert.NotContains(t, repo.Tickets, "t1", "消えていること")
+			} else {
+				assert.Contains(t, repo.Tickets, "t1", "消えていないこと")
+			}
+		})
+	}
+}
+
+// checker 未配線なら bypass は効かない。**緩む側ではなく厳しい側**に倒れる。
+//
+// 作成者本人 + 使用済みで見る。他人の招待で見ると
+// TestDelete_AccessDeniedWhenNotCreator と同じ経路になり、未配線かどうかを
+// 区別できない (nil deref を守るだけのテストになる)。
+func TestDelete_UnwiredModeratorCheckerDeniesBypass(t *testing.T) {
+	h, repo := newTestHandler(t)
+	owner := "u2"
+	usedAt := time.Now()
+	repo.Tickets["t1"] = &model.RegistrationTicket{ID: "t1", CreatedByID: &owner, UsedAt: &usedAt}
+
+	rec := post(h.Delete, `{"inviteId":"t1"}`, &model.User{ID: owner})
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CAN_NOT_DELETE_INVITE_CODE")
+	assert.Contains(t, repo.Tickets, "t1")
 }
 
 // failDeleteRepo は Delete だけ error を返す stub。
@@ -523,4 +673,52 @@ func TestCreate_InviteLimitFractional(t *testing.T) {
 	// 2 件目で弾かれ、素の `.(int)` だとゲートごと消えて 3 件目も通る。
 	assert.NotEqual(t, http.StatusOK, post(h.Create, `{}`, &model.User{ID: "u1"}).Code,
 		"上限 1.5 に対し 3 件目が通っている。ゲートが消えている")
+}
+
+// `used` は `usedAt` 由来 (#2812)。**`usedById` で見ると確認メール待ちの ticket が
+// 未使用に見える** — `MarkPending` は `usedAt` だけ立てて `usedById` は nil のまま
+// 残すので、画面は削除ボタンを出すのに `invite/delete` は使用済みとして 400 を返す。
+// upstream は `used: !!target.usedAt`、mk-go の `admin/invite/list` も `UsedAt` 由来で、
+// この endpoint だけが違っていた。
+func TestList_UsedComesFromUsedAt(t *testing.T) {
+	h, repo := newTestHandler(t)
+	me := "u1"
+	usedBy := "u2"
+	usedAt := time.Now()
+	// 確認メール待ち (MarkPending 済み): usedAt だけ立っている。
+	repo.Tickets["t1"] = &model.RegistrationTicket{ID: "z_b1", Code: "c1", CreatedByID: &me, UsedAt: &usedAt}
+	// 消費済み: 両方立っている。
+	repo.Tickets["t2"] = &model.RegistrationTicket{ID: "z_b2", Code: "c2", CreatedByID: &me, UsedByID: &usedBy, UsedAt: &usedAt}
+	// 未使用。
+	repo.Tickets["t3"] = &model.RegistrationTicket{ID: "z_b3", Code: "c3", CreatedByID: &me}
+
+	rec := post(h.List, `{"limit":50}`, &model.User{ID: me})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	require.Len(t, out, 3)
+	byID := map[string]map[string]any{}
+	for _, e := range out {
+		byID[e["id"].(string)] = e
+	}
+	assert.Equal(t, true, byID["z_b1"]["used"], "確認メール待ちも使用済みとして出す")
+	assert.Equal(t, true, byID["z_b2"]["used"])
+	assert.Equal(t, false, byID["z_b3"]["used"])
+}
+
+// findErrRepo は FindByID だけ not-found 以外の error を返す stub。
+type findErrRepo struct {
+	*testutil.MockRegistrationTicketRepository
+}
+
+func (r *findErrRepo) FindByID(_ string) (*model.RegistrationTicket, error) { return nil, errStub }
+
+// **DB 障害を「削除成功」に化けさせない (#2812)。** 取り消し系で 204 を返すと、
+// モデレーターは消えたと思って戻り、ticket は生きている。not-found は従来どおり
+// idempotent に 204 (TestDelete_NotFoundReturnsNoContent)。
+func TestDelete_LookupFailureIsNot204(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	h := NewHandler(&findErrRepo{testutil.NewMockRegistrationTicketRepository()}, idGen)
+	rec := post(h.Delete, `{"inviteId":"t1"}`, &model.User{ID: "u1"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "DB 障害を 204 に潰さない")
 }

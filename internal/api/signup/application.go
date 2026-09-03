@@ -494,9 +494,10 @@ func (h *Handler) applicationForClaimCode(c echo.Context) (*model.SignupApplicat
 // その消え方の引き金が 1 つ減る。
 //
 // `admin/invite/list` は `createdById` で絞らないので従来どおり出る (`createdBy` は
-// null で pack される)。**利用者向けの `invite/delete` は `createdById == nil` を
-// 拒否するので、この ticket は API からは消せない** (upstream にあるモデレーターの
-// bypass を mk-go は持たない)。詳細は docs/divergence.md。
+// null で pack される)。**消せるのは `invite/delete` に届くモデレーターだけ** —
+// 所有者判定は `createdById == nil` を拒否し、モデレーターがそれを bypass する
+// (#2812)。endpoint 自体が `canInvite` の後段なので、実際に届くのは既定では
+// administrator / root に限られる。詳細は docs/divergence.md。
 //
 // ticketStore 未配線なら nil を返し、招待を介さずに進む (テスト構成)。
 func (h *Handler) mintApprovalTicket() (*model.RegistrationTicket, error) {
