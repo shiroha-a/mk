@@ -110,7 +110,14 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 
 		// peer 経路。**宣言していないプラグインにも非 nil を渡す** (呼ぶと
 		// エラーになる実装)。nil を返すと nil チェック漏れが panic になる。
-		peer := &pluginPeer{name: def.Name, peered: def.Peered, deps: s.peerDeps, logger: pctx.logger}
+		peerLimit, _ := peerBodyLimit(def, settings)
+		peer := &pluginPeer{
+			name:    def.Name,
+			peered:  def.Peered,
+			deps:    s.peerDeps,
+			logger:  pctx.logger,
+			maxBody: peerLimit,
+		}
 		pctx.peer = peer
 
 		if def.EffectivePolicies != nil {
@@ -396,7 +403,7 @@ func pluginEnabled(settings map[string]any) bool {
 func pluginConfig(settings map[string]any) plugin.Config {
 	rest := make(map[string]any, len(settings))
 	for k, v := range settings {
-		if k == enabledKey {
+		if k == enabledKey || k == peerMaxBodyKey {
 			continue
 		}
 		rest[k] = v

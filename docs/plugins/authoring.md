@@ -490,7 +490,7 @@ mk-go が面倒を見るもの:
 |---|---|
 | 宛先 | ブロック / 連合の許可設定 / SSRF / 自分自身への送信を弾く |
 | 送信元 | HTTP Signature で確定する。`from` は名乗りではない |
-| 大きさ | 要求も応答も 1 MiB まで |
+| 大きさ | 要求も応答も `Definition.PeerMaxBody` まで (既定 64 KiB) |
 | 再送 | 数回まで自動で試す |
 | 相手の確認 | nodeinfo に同じプラグインの宣言が無ければ送らない |
 
@@ -616,6 +616,7 @@ type Definition struct
   Version    string
   APIVersion int
   Peered     bool
+  PeerMaxBody int64
   Migrations []Migration
   Routes     func(Context, Router) error
   Jobs       func(Context, Jobs) error

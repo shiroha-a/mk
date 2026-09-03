@@ -443,7 +443,7 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	// body size 制限は auth.Authenticate より前に置く: auth は token 抽出のため
 	// body を io.ReadAll するので、後に置くと巨大 body が auth で先に読まれて
 	// bypass される (#1958 / #2075)。/api → 1MiB / inbox → 64KiB / multipart 除外。
-	e.Use(middleware.BodyLimitByPath(cfg.MaxFileSize))
+	e.Use(middleware.BodyLimitByPath(cfg.MaxFileSize, peerBodyLimitsByPath(plugins, cfg.Plugins)))
 	// クリックジャッキング防止。upstream が ClientServerService の
 	// onRequest hook で付けている X-Frame-Options: DENY に相当する。
 	e.Use(middleware.FrameGuard())

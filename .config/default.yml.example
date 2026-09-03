@@ -550,8 +550,12 @@ proxyBypassHosts:
 # apply env vars to known keys, and plugin keys cannot be enumerated in
 # advance. A plugin that needs env-provided secrets should read them
 # itself.
+# Reserved keys: `enabled` (run the plugin) and `peerMaxBody` (bytes the
+# plugin's peer endpoint accepts; default 64KiB, max 1MiB). Everything else is
+# handed to the plugin as-is.
 #plugins:
 #  gameinfo:
 #    enabled: true
+#    peerMaxBody: 524288
 #    apiKey: "..."
 #    endpoint: https://api.example-game.com

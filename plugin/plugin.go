@@ -80,6 +80,23 @@ type Definition struct {
 	// 同じ枝で張るので、Routes が nil だと宣言だけして受け取れない (#2822)。
 	Peered bool
 
+	// PeerMaxBody caps the peer request and reply body this plugin accepts,
+	// in bytes. 0 uses the host default.
+	//
+	// **上限はプラグインごとに決める。** 小さな値をやりとりするプラグインの
+	// ために、インスタンス全体で大きな本文を受けられる状態にしておく理由が
+	// 無い。ここで宣言した値が「読む前」の上限になるので、宣言を小さくした
+	// 分だけ外から押し込める量が減る。
+	//
+	// **本文はエンベロープ込みで測る。** payload に使えるのはこの値から
+	// 相関 ID の分 (aidx なら 36 バイト) を引いた残り。
+	//
+	// **単独で広げられるのは既定値まで。** それより大きい宣言は、運営者が
+	// 設定で許可したときだけ有効になる (許可が無ければ既定値に丸めて warn を
+	// 出す)。プラグインを 1 つ足しただけでインスタンスの露出が広がる形に
+	// しないため。詳細は docs/plugin-peer-protocol.md。
+	PeerMaxBody int64
+
 	// EffectivePolicies declares effective-policy contributions. The host calls
 	// it after Migrations and before any Routes or Jobs callback.
 	EffectivePolicies func(Context, EffectivePolicyInvalidator) (EffectivePolicyRegistration, error)
@@ -96,6 +113,14 @@ func (d Definition) Validate() error {
 	if d.APIVersion != APIVersion {
 		return fmt.Errorf("plugin %q: APIVersion %d はこの mk-go (APIVersion %d) と互換がありません",
 			d.Name, d.APIVersion, APIVersion)
+	}
+	if d.PeerMaxBody < 0 {
+		return fmt.Errorf("plugin %q: PeerMaxBody が負の値です", d.Name)
+	}
+	if d.PeerMaxBody > 0 && !d.Peered {
+		// 宣言しても効かない組み合わせ。黙って無視すると「上限を設定した
+		// つもり」で通ってしまう。
+		return fmt.Errorf("plugin %q: PeerMaxBody を指定するなら Peered も立てること", d.Name)
 	}
 	if d.Routes == nil && d.Jobs == nil && d.EffectivePolicies == nil {
 		return fmt.Errorf("plugin %q: Routes も Jobs も EffectivePolicies も設定されていません", d.Name)

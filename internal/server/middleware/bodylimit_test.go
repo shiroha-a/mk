@@ -18,7 +18,7 @@ func TestBodyLimitByPath(t *testing.T) {
 	// テスト内で扱いやすいよう小さめの maxFileSize を渡す。実際の既定は 250MB。
 	const testMaxFileSize int64 = 4 * 1024 * 1024
 	e := echo.New()
-	e.Use(BodyLimitByPath(testMaxFileSize))
+	e.Use(BodyLimitByPath(testMaxFileSize, nil))
 	// body を読む handler。chunked 超過時に limitedReader の 413 を伝播する。
 	h := func(c echo.Context) error {
 		if _, err := io.ReadAll(c.Request().Body); err != nil {
@@ -120,7 +120,7 @@ func TestUploadBodyLimit(t *testing.T) {
 // 使い忘れても気付けない。
 func TestBodyLimitByPathUploadIsNeverUnlimited(t *testing.T) {
 	e := echo.New()
-	e.Use(BodyLimitByPath(0))
+	e.Use(BodyLimitByPath(0, nil))
 	e.POST("/api/drive/files/create", func(c echo.Context) error {
 		if _, err := io.ReadAll(c.Request().Body); err != nil {
 			var he *echo.HTTPError
@@ -142,4 +142,44 @@ func TestBodyLimitByPathUploadIsNeverUnlimited(t *testing.T) {
 	e.ServeHTTP(rec, req)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code,
 		"maxFileSize 未設定でも upload route は無制限にならない")
+}
+
+// プラグイン peer の受け口はプラグインごとの上限で cap される。**/api の 1MiB に
+// 吸われない**ことがこのテストの主眼で、吸われると宣言が無意味になる。
+func TestBodyLimitByPath_PluginPeer(t *testing.T) {
+	const small int64 = 4 * 1024
+	e := echo.New()
+	e.Use(BodyLimitByPath(0, map[string]int64{
+		"/api/plugin/small/_peer": small,
+	}))
+	h := func(c echo.Context) error {
+		if _, err := io.ReadAll(c.Request().Body); err != nil {
+			var he *echo.HTTPError
+			if errors.As(err, &he) {
+				return he
+			}
+			return c.NoContent(http.StatusBadRequest)
+		}
+		return c.NoContent(http.StatusOK)
+	}
+	e.POST("/api/plugin/small/_peer", h)
+	e.POST("/api/plugin/other/_peer", h)
+
+	post := func(path string, n int, chunked bool) int {
+		req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(bytes.Repeat([]byte("a"), n)))
+		req.Header.Set(echo.HeaderContentType, "application/json")
+		if chunked {
+			req.ContentLength = -1
+		}
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	assert.Equal(t, http.StatusOK, post("/api/plugin/small/_peer", int(small), false), "上限ちょうどは許容")
+	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/api/plugin/small/_peer", int(small)+1, false), "+1 は 413")
+	// ContentLength を伏せても limitedReader 側で落ちる (偽装で抜けられない)。
+	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/api/plugin/small/_peer", int(small)+1, true), "chunked でも 413")
+	// 表に無いプラグインは /api の 1MiB のまま。
+	assert.Equal(t, http.StatusOK, post("/api/plugin/other/_peer", int(small)+1, false), "表に無いパスは /api の上限")
 }

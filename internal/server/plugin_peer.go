@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -42,11 +43,9 @@ const peerPath = "/_peer"
 // SPA catchall に落ちて 405 が返り、「相手が受け取らない」という形で出る。
 const peerAPIPrefix = "/api" + pluginRoutePrefix
 
-// peerMaxBody bounds one request and one reply.
-//
-// 相手は同じプラグインを持っているだけで善良とは限らない。**受信側にも
-// 上限を置く** (送信側の自制に頼らない)。
-const peerMaxBody = 1 << 20
+// 本文の上限はプラグインごとに決まる (plugin_peer_limit.go)。相手は同じ
+// プラグインを持っているだけで善良とは限らないので、**受信側にも置く**
+// (送信側の自制に頼らない)。
 
 // peerTimeout bounds one delivery attempt.
 const peerTimeout = 15 * time.Second
@@ -109,6 +108,10 @@ type pluginPeer struct {
 	peered bool
 	deps   *pluginPeerDeps
 	logger *slog.Logger
+	// maxBody はこのプラグインの本文上限 (エンベロープ込み)。受け口側の
+	// 実効的な上限は global の BodyLimitByPath が同じ値で掛けており、ここは
+	// 送信側と応答の読み取りに効く。
+	maxBody int64
 
 	mu      sync.RWMutex
 	handler plugin.PeerHandler
@@ -199,14 +202,17 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 	if err != nil {
 		return "", fmt.Errorf("plugin peer: payload を JSON 化できません: %w", err)
 	}
-	if len(body) > peerMaxBody {
-		return "", fmt.Errorf("plugin peer: payload が大きすぎます (%d bytes)", len(body))
-	}
 
 	sendID := p.deps.idGen.Generate(time.Now())
 	envelope, err := json.Marshal(peerEnvelope{ID: sendID, Payload: json.RawMessage(body)})
 	if err != nil {
 		return "", err
+	}
+	// **エンベロープで測る。** 受信側は本文全体に上限を掛けるので、送信側が
+	// payload だけで測ると相関 ID の分 (aidx なら 36 バイト) だけ境界がずれ、
+	// 上限ちょうどの payload がここを通って相手で 413 になる。
+	if int64(len(envelope)) > p.maxBody {
+		return "", fmt.Errorf("plugin peer: 本文が大きすぎます (%d bytes, 上限 %d)", len(envelope), p.maxBody)
 	}
 
 	// **呼び出し元の ctx を引き継がない。** HTTP リクエストの ctx はハンドラが
@@ -303,9 +309,14 @@ func (p *pluginPeer) post(url string, body []byte) (json.RawMessage, error) {
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
 		return nil, fmt.Errorf("status %d", res.StatusCode)
 	}
-	reply, err := io.ReadAll(io.LimitReader(res.Body, peerMaxBody))
+	// **切り詰めない。** LimitReader で黙って先頭だけ返すと、OnReply に途中で
+	// 切れた JSON が渡る。1 バイト多く読んで超過を検出し、エラーにする。
+	reply, err := io.ReadAll(io.LimitReader(res.Body, p.maxBody+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(reply)) > p.maxBody {
+		return nil, fmt.Errorf("応答が大きすぎます (上限 %d bytes)", p.maxBody)
 	}
 	if len(reply) == 0 {
 		return nil, nil
@@ -333,11 +344,19 @@ func (p *pluginPeer) echoHandler() echo.HandlerFunc {
 	return func(c echo.Context) error {
 		req := c.Request()
 
-		body, err := io.ReadAll(io.LimitReader(req.Body, peerMaxBody+1))
+		// 実効的な上限は global の BodyLimitByPath が同じ値で掛けている
+		// (署名検証より前に body が読まれるため、handler で判定しても消費は
+		// 止まらない)。ここは middleware を通らない経路への保険。
+		body, err := io.ReadAll(io.LimitReader(req.Body, p.maxBody+1))
 		if err != nil {
+			var he *echo.HTTPError
+			if errors.As(err, &he) {
+				// BodyLimitByPath が wrap した limitedReader の 413 を潰さない。
+				return he
+			}
 			return peerError(c, http.StatusBadRequest, "リクエストを読めません")
 		}
-		if len(body) > peerMaxBody {
+		if int64(len(body)) > p.maxBody {
 			return peerError(c, http.StatusRequestEntityTooLarge, "リクエストが大きすぎます")
 		}
 

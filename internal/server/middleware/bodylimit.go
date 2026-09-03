@@ -15,6 +15,7 @@ import (
 //   - /inbox, /users/:id/inbox → 64KiB (upstream ActivityPubServerService の bodyLimit: 1024*64)
 //   - /api/drive/files/create → maxFileSize + multipart framing の余白
 //   - /api/drive/files/create-chunked/append → 33MiB
+//   - /api/plugin/<name>/_peer → pluginPeerLimits が持つプラグインごとの値
 //   - その他 → 制限なし
 //
 // これは **auth.Authenticate より前** (global pre-auth) に登録する必要がある。
@@ -46,7 +47,11 @@ import (
 // 無いが、@fastify/multipart を `limits: { fileSize: config.maxFileSize, files: 1 }`
 // で登録しており、パーサ自身が maxFileSize で打ち切る (ApiServerService.ts)。
 // mk-go 側は body 全体に掛けるので、framing の余白を足した値にする。
-func BodyLimitByPath(maxFileSize int64) echo.MiddlewareFunc {
+// pluginPeerLimits はプラグイン同士の通信 (#2537) の受け口に掛ける、パスごとの
+// 上限。**ここに置くしかない。** 受け口は署名を検証する前に body を読み終えて
+// いる (global な auth.Authenticate が token 抽出で読む) ので、handler 側で
+// 判定しても消費は止まらない。nil / 空なら /api の 1MiB に倒れる。
+func BodyLimitByPath(maxFileSize int64, pluginPeerLimits map[string]int64) echo.MiddlewareFunc {
 	apiBL := emiddleware.BodyLimit("1MiB")    // = 1024*1024 = 1048576
 	inboxBL := emiddleware.BodyLimit("64KiB") // = 1024*64   = 65536
 	// upstream の limits.fileSize は **ファイル本体**に掛かるが、こちらは body
@@ -73,8 +78,16 @@ func BodyLimitByPath(maxFileSize int64) echo.MiddlewareFunc {
 		inboxNext := inboxBL(next)
 		chunkNext := chunkBL(next)
 		uploadNext := uploadBL(next)
+		peerNext := make(map[string]echo.HandlerFunc, len(pluginPeerLimits))
+		for path, limit := range pluginPeerLimits {
+			peerNext[path] = emiddleware.BodyLimit(strconv.FormatInt(limit, 10))(next)
+		}
 		return func(c echo.Context) error {
 			p := c.Request().URL.Path
+			// **/api の分岐より先に見る。** 後ろに置くと 1MiB 側に吸われる。
+			if h, ok := peerNext[p]; ok {
+				return h(c)
+			}
 			switch {
 			case p == driveUploadPath:
 				// 唯一の multipart upload endpoint。auth より前に上限を掛ける

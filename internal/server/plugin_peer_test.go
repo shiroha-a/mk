@@ -81,14 +81,14 @@ func testPeer(t *testing.T, deps *pluginPeerDeps) *pluginPeer {
 	if deps.selfHost == "" {
 		deps.selfHost = "self.example"
 	}
-	return &pluginPeer{name: "demo", peered: true, deps: deps, logger: testLogger()}
+	return &pluginPeer{name: "demo", peered: true, deps: deps, logger: testLogger(), maxBody: peerDefaultMaxBody}
 }
 
 // --- Send のガード ---
 
 // 宣言していないプラグインは経路そのものを使えない。
 func TestPluginPeer_RequiresDeclaration(t *testing.T) {
-	p := &pluginPeer{name: "demo", peered: false, deps: &pluginPeerDeps{}, logger: testLogger()}
+	p := &pluginPeer{name: "demo", peered: false, deps: &pluginPeerDeps{}, logger: testLogger(), maxBody: peerDefaultMaxBody}
 
 	_, err := p.Send(context.Background(), "other.example", map[string]any{})
 	assert.ErrorIs(t, err, errNotPeered)
@@ -241,7 +241,7 @@ func TestPluginPeer_ServeRejectsOversizedBody(t *testing.T) {
 	p := testPeer(t, &pluginPeerDeps{keyCache: activitypub.NewPublicKeyCache(4)})
 	p.Handle(func(context.Context, string, json.RawMessage) (any, error) { return nil, nil })
 
-	c, rec := peerRequest(t, []byte(strings.Repeat("a", peerMaxBody+10)), nil)
+	c, rec := peerRequest(t, []byte(strings.Repeat("a", int(peerDefaultMaxBody)+10)), nil)
 	require.NoError(t, p.echoHandler()(c))
 	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
 }
