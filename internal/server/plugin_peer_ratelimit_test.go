@@ -164,3 +164,63 @@ func TestPluginPeer_ServeBoundsHandlerContext(t *testing.T) {
 	assert.Greater(t, remaining, peerHandlerTimeout-time.Second)
 	assert.Less(t, peerHandlerTimeout, peerTimeout, "送信側の 1 試行より短いこと")
 }
+
+// 時計が巻き戻っても bucket を触らない。
+//
+// **残高で見ても区別が付かない。** 経過を符号なしで足す実装 (elapsed != 0) でも
+// 巻き戻しは残高を減らす方向なので、拒否されること自体は同じ。違うのは
+// **残高が大きな負の値になり、last もそこへ動く**ところで、時計が直った後の
+// 挙動が変わる。状態そのものを見る。
+func TestPeerRateLimiter_ClockRewindLeavesBucketAlone(t *testing.T) {
+	now := time.Unix(1700000000, 0)
+	l := newPeerRateLimiter()
+	l.now = func() time.Time { return now }
+
+	for i := 0; i < int(peerRateBurst); i++ {
+		require.True(t, l.allow("host:a.example"))
+	}
+	require.False(t, l.allow("host:a.example"))
+
+	l.mu.Lock()
+	before := *l.buckets["host:a.example"]
+	l.mu.Unlock()
+
+	now = now.Add(-time.Hour)
+	assert.False(t, l.allow("host:a.example"), "巻き戻しで枠が戻ってはいけない")
+
+	l.mu.Lock()
+	after := *l.buckets["host:a.example"]
+	l.mu.Unlock()
+	assert.Equal(t, before.tokens, after.tokens, "巻き戻しで残高を動かさない")
+	assert.Equal(t, before.last, after.last, "巻き戻しで last を動かさない")
+}
+
+// key は本体の rate limiter と同じ丸め方にする。生のアドレスだと IPv6 では
+// /64 の中でアドレスを回すだけで無限に枠を取れる。
+func TestPluginPeer_ServeThrottlesIPv6Prefix(t *testing.T) {
+	limiter := newPeerRateLimiter()
+	limiter.burst = 2
+	limiter.rate = 0
+
+	p := testPeer(t, &pluginPeerDeps{
+		keyCache: activitypub.NewPublicKeyCache(4),
+		limiter:  limiter,
+	})
+
+	serve := func(ip string) int {
+		req := httptest.NewRequest(http.MethodPost, "https://self.example/api/plugin/demo/_peer",
+			strings.NewReader(`{"id":"x","payload":{}}`))
+		req.Host = "self.example"
+		req.RemoteAddr = "[" + ip + "]:1234"
+		rec := httptest.NewRecorder()
+		require.NoError(t, p.echoHandler()(echo.New().NewContext(req, rec)))
+		return rec.Code
+	}
+
+	// 同じ /64 の中で別アドレスを使っても同じ枠。
+	assert.Equal(t, http.StatusUnauthorized, serve("2001:db8:1:1::1"))
+	assert.Equal(t, http.StatusUnauthorized, serve("2001:db8:1:1::2"))
+	assert.Equal(t, http.StatusTooManyRequests, serve("2001:db8:1:1::3"))
+	// 別の /64 は別の枠。
+	assert.Equal(t, http.StatusUnauthorized, serve("2001:db8:1:2::1"))
+}

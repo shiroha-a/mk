@@ -40,6 +40,12 @@ const peerMinMaxBody int64 = 1 << 10
 
 // peerMaxBodyKey is the reserved per-plugin setting an operator uses to raise
 // (or lower) the cap.
+//
+// **完全一致で引いてはいけない。** viper は設定ファイル由来の map キーを
+// 小文字化するので、`.config/default.yml` に camelCase で書いた値は
+// `peermaxbody` で届く (`docs/plugins/operating.md` の -config-dump の例が
+// `status.maxlength` になっているのはこのため)。一致しないと運営者の設定が
+// 一度も効かず、**絞る方向の設定も黙って無視される**。
 const peerMaxBodyKey = "peerMaxBody"
 
 // peerBodyLimit resolves the effective cap for one plugin.
@@ -74,7 +80,7 @@ func peerBodyLimit(def plugin.Definition, settings map[string]any) (int64, bool)
 // 値が読めないときは override 無しとして扱う (設定の書き間違いで上限が
 // 消えるより、宣言側の既定に倒れる方が安全側)。
 func peerMaxBodyOverride(settings map[string]any) (int64, bool) {
-	v, ok := settings[peerMaxBodyKey]
+	v, ok := pluginSetting(settings, peerMaxBodyKey)
 	if !ok {
 		return 0, false
 	}

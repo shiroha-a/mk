@@ -212,7 +212,7 @@ func serverPluginInfos(plugins []plugin.Definition, settings map[string]map[stri
 		// -config-dump と同じく値は既定で全部マスクする方針に合わせる。
 		keys := make([]string, 0, len(s))
 		for k := range s {
-			if k == enabledKey {
+			if isReservedPluginKey(k) {
 				continue
 			}
 			keys = append(keys, k)
@@ -388,7 +388,7 @@ const enabledKey = "enabled"
 // bool 以外が書かれていた場合も有効として扱う。設定の書き間違いで機能が黙って
 // 消える方が、無効化が効かないより厄介なため。
 func pluginEnabled(settings map[string]any) bool {
-	v, ok := settings[enabledKey]
+	v, ok := pluginSetting(settings, enabledKey)
 	if !ok {
 		return true
 	}
@@ -399,11 +399,33 @@ func pluginEnabled(settings map[string]any) bool {
 	return b
 }
 
-// pluginConfig wraps the plugin's settings, minus the reserved key.
+// pluginSetting looks a reserved key up without caring about case.
+//
+// **viper が小文字化する。** 設定ファイルに camelCase で書いた `peerMaxBody` は
+// `peermaxbody` で届くので、完全一致で引くと予約キーが素通りする (実測)。
+// `enabled` が動いていたのは元から小文字だったからで、規則ではない。
+func pluginSetting(settings map[string]any, key string) (any, bool) {
+	if v, ok := settings[key]; ok {
+		return v, true
+	}
+	for k, v := range settings {
+		if strings.EqualFold(k, key) {
+			return v, true
+		}
+	}
+	return nil, false
+}
+
+// isReservedPluginKey reports whether k is consumed by mk-go itself.
+func isReservedPluginKey(k string) bool {
+	return strings.EqualFold(k, enabledKey) || strings.EqualFold(k, peerMaxBodyKey)
+}
+
+// pluginConfig wraps the plugin's settings, minus the reserved keys.
 func pluginConfig(settings map[string]any) plugin.Config {
 	rest := make(map[string]any, len(settings))
 	for k, v := range settings {
-		if k == enabledKey || k == peerMaxBodyKey {
+		if isReservedPluginKey(k) {
 			continue
 		}
 		rest[k] = v

@@ -8,14 +8,19 @@ import (
 /*
  * peer の受け口に掛けるレート制限 (#2537 の硬化)。
  *
- * **本体の per-endpoint テーブルは効かない。** RateLimiter は
- * `rl.limits[endpoint]` に無いパスを素通しするうえ、仮に載せても
- * `resolveActors` は未認証かつ `enableIPRateLimit=false` (既定) では nil を
- * 返すので、peer のような「Misskey の token を持たない相手」には掛からない。
+ * **本体の per-endpoint テーブルには載せない。** 理由は 3 つ:
  *
- * したがって専用に持つ。**プロセス内にしか無い**ので、mk-go を複数プロセスで
- * 動かすと実効的な上限はプロセス数倍になる。それでも「無制限」との差は大きい
- * ので初版はここまでにする。
+ *   - `DefaultEndpointLimits` は upstream の endpoint を写した静的な表で、
+ *     プラグインのパスは配線時にしか分からない
+ *   - あの経路は運営者が丸ごと消せる (`disableEndpointRateLimits`、
+ *     `enableIPRateLimit: false`、TestMode)。**連合から到達できる受け口の
+ *     防壁を、利用者向け API の緩和ノブに繋げない**
+ *   - 署名を検証した後の意味のある key は**確定した送信元ホスト**だが、
+ *     `resolveActors` は利用者 ID と IP しか表現できない
+ *
+ * key の丸め方 (IPv6 は /64) は本体と揃える。**プロセス内にしか無い**ので、
+ * mk-go を複数プロセスで動かすと実効的な上限はプロセス数倍になる。それでも
+ * 「無制限」との差は大きいので初版はここまでにする。
  */
 
 // peerRateLimit is the sustained rate (requests per second) one key gets.

@@ -339,6 +339,13 @@ func (rl *RateLimiter) rejectRequest(c echo.Context, info LimitInfo, limit *Endp
 
 // ipHash computes a rate-limit key for an IP address.
 // TS版 getIpHash 互換: IPv6は/64マスク、IPv4はフルアドレスをハッシュ。
+// IPHash exposes the bucket key derivation to callers outside this package.
+//
+// **同じ丸め方を使うため。** プラグインの peer 経路 (#2537) も IP を key に
+// するが、生のアドレスを使うと IPv6 では /64 の中でアドレスを回すだけで
+// いくらでも新しい枠が取れる。
+func IPHash(ipStr string) string { return ipHash(ipStr) }
+
 func ipHash(ipStr string) string {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {

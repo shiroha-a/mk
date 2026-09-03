@@ -19,6 +19,7 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/plugin"
 )
 
@@ -36,12 +37,19 @@ import (
 // peerPath is the reserved endpoint every peered plugin exposes.
 const peerPath = "/_peer"
 
+// apiGroupPrefix is the echo group every API route (plugins included) hangs off.
+//
+// **1 つの定数から作る。** ここと peerAPIPrefix が別々のリテラルだと、片方を
+// 変えたときに BodyLimitByPath の表だけが外れて、上限が黙って /api の既定に
+// 戻る (配線の gate は文字列一致なので緑のまま)。
+const apiGroupPrefix = "/api"
+
 // peerAPIPrefix is where plugin routes actually live.
 //
 // **`pluginRoutePrefix` だけでは足りない。** ルートは `/api` グループの下に
 // 張られるので、送信先の URL を組むときは `/api` から始める。ここを間違えると
 // SPA catchall に落ちて 405 が返り、「相手が受け取らない」という形で出る。
-const peerAPIPrefix = "/api" + pluginRoutePrefix
+const peerAPIPrefix = apiGroupPrefix + pluginRoutePrefix
 
 // 本文の上限はプラグインごとに決まる (plugin_peer_limit.go)。相手は同じ
 // プラグインを持っているだけで善良とは限らないので、**受信側にも置く**
@@ -360,7 +368,15 @@ func (p *pluginPeer) echoHandler() echo.HandlerFunc {
 		// **署名検証の前に IP で見る。** 検証は actor 解決 (未知の keyId なら
 		// 外向きの取得) と公開鍵検証を伴うので、ここを通してしまうと相手は
 		// 署名を持たないまま高い処理を無制限に起こせる。
-		if !p.deps.limiter.allow("ip:" + c.RealIP()) {
+		//
+		// **key は middleware.IPHash を通す。** 生のアドレスだと IPv6 では
+		// /64 の中でアドレスを回すだけで無限に枠を取れる (利用者に /64 が
+		// 丸ごと割り当たるのは普通)。本体の rate limiter と同じ丸め方にする。
+		//
+		// ここより手前で global な auth.Authenticate が本文を読み終えている
+		// ので、**本文の読み取りは止まらない** (それは BodyLimitByPath の
+		// 仕事)。ここが止めるのは署名検証から先。
+		if !p.deps.limiter.allow("ip:" + middleware.IPHash(c.RealIP())) {
 			return peerTooManyRequests(c)
 		}
 

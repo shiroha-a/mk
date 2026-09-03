@@ -142,12 +142,14 @@ func TestNodeInfoPeerLister_BoundsHosts(t *testing.T) {
 		_, _ = w.Write([]byte(`{"metadata":{"mkGoPlugins":["demo"]}}`))
 	}, "demo")
 
+	// **毎回見る。** ループの後で 1 回だけ数えると、`<` / `<=` の取り違えが
+	// 回数の偶奇で当たり外れになる (実測で `<=` への変異が生き残った)。
 	for i := 0; i < peerLookupMaxHosts+64; i++ {
 		_, err := l.Plugins(context.Background(), fmt.Sprintf("h%d.example", i))
 		require.NoError(t, err)
+		l.mu.Lock()
+		n := len(l.cache)
+		l.mu.Unlock()
+		require.LessOrEqual(t, n, peerLookupMaxHosts, "i=%d", i)
 	}
-	l.mu.Lock()
-	n := len(l.cache)
-	l.mu.Unlock()
-	assert.LessOrEqual(t, n, peerLookupMaxHosts)
 }

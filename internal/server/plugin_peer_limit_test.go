@@ -6,6 +6,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -13,6 +16,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/plugin"
 )
@@ -61,6 +65,18 @@ func TestPeerBodyLimit(t *testing.T) {
 		{
 			name:     "float override (viper YAML) is accepted",
 			settings: map[string]any{peerMaxBodyKey: float64(8 << 10)},
+			want:     8 << 10,
+		},
+		{
+			name:     "int64 override is accepted",
+			settings: map[string]any{peerMaxBodyKey: int64(8 << 10)},
+			want:     8 << 10,
+		},
+		{
+			// viper は設定ファイル由来のキーを小文字化する。完全一致で引くと
+			// 運営者の設定が一度も効かない。
+			name:     "lowercased key (as viper delivers it) is accepted",
+			settings: map[string]any{"peermaxbody": 8 << 10},
 			want:     8 << 10,
 		},
 		{
@@ -186,4 +202,58 @@ func mustGenerator(t *testing.T) id.Generator {
 	g, err := id.NewGenerator("aidx")
 	require.NoError(t, err)
 	return g
+}
+
+// **設定ファイルを実際に読ませて確かめる。** map を手で組むテストだけだと
+// viper を通らないので、「キーが小文字化されて一度も効かない」形の不具合を
+// 素通りさせる (実際にそうなっていた)。
+func TestPeerBodyLimit_ThroughConfigLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "test.yml")
+	require.NoError(t, os.WriteFile(path, []byte(`url: https://example.test
+port: 3000
+db: {host: h, port: 5432, db: d, user: u, pass: p}
+redis: {host: h, port: 6379}
+plugins:
+  demo:
+    enabled: true
+    peerMaxBody: 200000
+  small:
+    peerMaxBody: 4096
+`), 0o600))
+
+	cfg, err := config.Load(path)
+	require.NoError(t, err)
+
+	// 宣言は既定値どまりだが、設定で許可されているので通る。
+	got, clamped := peerBodyLimit(plugin.Definition{Name: "demo", Peered: true, PeerMaxBody: 512 << 10}, cfg.Plugins["demo"])
+	assert.Equal(t, int64(200000), got, "運営者の設定が効く")
+	assert.False(t, clamped)
+
+	// 絞る方向にも効く。
+	got, _ = peerBodyLimit(plugin.Definition{Name: "small", Peered: true}, cfg.Plugins["small"])
+	assert.Equal(t, int64(4096), got, "既定より小さい設定も効く")
+
+	// 予約キーはプラグインの config に渡さない。
+	var rest map[string]any
+	require.NoError(t, pluginConfig(cfg.Plugins["demo"]).Unmarshal(&rest))
+	assert.NotContains(t, rest, "peerMaxBody")
+	assert.NotContains(t, rest, "peermaxbody")
+	assert.NotContains(t, rest, "enabled")
+}
+
+// peer の URL と BodyLimitByPath の表は `apiGroupPrefix` から組み立てるが、
+// router 側は `s.echo.Group("/api")` のリテラルを使う (既存の
+// `TestAPICompatDoc_MatchesRouter` がその形を固定しているため)。**別々の
+// リテラルなので、片方を変えると表だけが外れて上限が黙って /api の既定に戻る。**
+// 配線の gate は文字列一致なので緑のままになる。
+func TestAPIGroupPrefixMatchesRouter(t *testing.T) {
+	src, err := os.ReadFile(filepath.Join("router.go"))
+	require.NoError(t, err)
+	// **`api :=` まで含めて照合する。** router には pprof など別の group も
+	// あるので、Group( だけを拾うと最初の 1 件を取って空振りする。
+	m := regexp.MustCompile(`(?m)^\s*api := s\.echo\.Group\("([^"]+)"\)`).FindSubmatch(src)
+	require.NotNil(t, m, "router.go に `api := s.echo.Group(\"...\")` が無い。書き方を変えたならこの gate も直すこと")
+	assert.Equal(t, apiGroupPrefix, string(m[1]),
+		"router の API グループと apiGroupPrefix がずれている。peer の受け口の本文上限が効かなくなる")
 }
