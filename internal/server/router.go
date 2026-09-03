@@ -3175,7 +3175,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/invite/create", adminHandler.InviteCreate, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:invite-codes"))
 	api.POST("/admin/invite/list", adminHandler.InviteList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:invite-codes"))
 	// 承認制の登録の審査 (#2555)。mk-go 独自。scope は invite-codes を再利用する
-	// — 承認は最終的に registration_ticket の発行につながるので管轄が同じで、
+	// — 承認はメール確認の経路で registration_ticket の発行につながるので管轄が同じで、
 	// internal/misc/permissions は upstream misskey-js と完全一致させる契約が
 	// あり mk-go 固有 scope を足せない。
 	api.POST("/admin/signup-application/list", adminHandler.SignupApplicationList, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:invite-codes"))

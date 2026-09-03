@@ -178,27 +178,21 @@ func TestApplicationRegister_PoliciesAreEffective(t *testing.T) {
 		"register 経路が user ID を渡していない (条件ロールが効いていない)")
 }
 
-// 承認で内部発行する ticket は、審査した管理者の招待枠を消費しない (#2805)。
+// 即時作成では `registration_ticket` を 1 行も作らない (#2813)。
 //
-// `createdById` に審査した管理者を入れると、承認された申請から登録が行われるたびに
-// 1 枚その管理者名義の招待が増え、`invite/create` / `invite/limit` の上限
-// (`CountByCreatorSince`) を食い、利用者の `invite/list` (`ListByCreator`) にも出る。
-// **効いている構成では承認するほど自分の招待枠が減る。** どちらの query も
-// `WHERE "createdById" = ?` なので、NULL なら両方から外れる。
+// **発行しても誰も参照しない。** 一回性は settleApplicationTx の行ロックが担保して
+// おり (#2580)、ticket は `signup_application.ticketId` に記録されるだけだった。
+// 残すと承認のたびに 1 行増え、`createdById` を入れない (#2805) ので管理画面には
+// `system` として出る。
 //
-// **審査した管理者の user 行を必ず作る。** `registration_ticket.createdById` には
-// FK があるので、実在しない ID を入れる形にすると変異させたときに ticket の作成
-// 自体が FK 違反で落ち、**上限のアサーションまで到達しないまま緑/赤が決まる**
-// (= quota の検証が空振りする)。
-func TestApplicationRegister_ApprovalTicketDoesNotConsumeModeratorQuota(t *testing.T) {
+// **実 repo で確かめる。** 手書きの fake だと「行が増えない」ことしか見えず、
+// handler が repo を経由しなくなった場合との区別が付かない。
+func TestApplicationRegister_ImmediateCreatesNoTicket(t *testing.T) {
 	h, db, app := newApprovalHandlerWithDB(t)
-	ticketRepo := repository.NewRegistrationTicketRepository(db)
-	h.SetTicketStore(ticketRepo)
+	h.SetTicketStore(repository.NewRegistrationTicketRepository(db))
 
 	const moderator = "itapi_mod1"
-	// 前回が異常終了して行が残っていても落ちないように、作る前にも消す
-	// (同ファイルの role fixture と同じ規約)。残っていると重複キーで落ち、
-	// #2805 の regression に見える red が出る。
+	// 前回が異常終了して行が残っていても落ちないように、作る前にも消す。
 	db.Exec(`DELETE FROM "user" WHERE id = ?`, moderator)
 	require.NoError(t, db.Create(&model.User{
 		ID: moderator, Username: "itapimod1", UsernameLower: "itapimod1",
@@ -207,10 +201,9 @@ func TestApplicationRegister_ApprovalTicketDoesNotConsumeModeratorQuota(t *testi
 	require.NoError(t, db.Model(&model.SignupApplication{}).
 		Where("id = ?", app.ID).Update("processedById", moderator).Error)
 
-	// 正常系では base の cleanup で消える (`usedById` の FK が
-	// ON DELETE CASCADE なので、申請者を消せば ticket も連鎖して消える)。
-	// **ここは異常系の保険。** mint 済みで消費前に落ちると `usedById` が NULL の
-	// まま誰にも紐付かず残り、次の実行の `preexisting` に入って永久に居座る。
+	// 回帰したとき (と変異検証のとき) に孤児 ticket を残さない。**base の cleanup は
+	// user を消すだけ**で、`usedById` が NULL の行はどの CASCADE にも掛からず、
+	// 次の実行の基準値に混ざって居座る。
 	var preexisting []string
 	require.NoError(t, db.Model(&model.RegistrationTicket{}).Pluck("id", &preexisting).Error)
 	t.Cleanup(func() {
@@ -221,46 +214,27 @@ func TestApplicationRegister_ApprovalTicketDoesNotConsumeModeratorQuota(t *testi
 		db.Exec(`DELETE FROM "registration_ticket" WHERE id NOT IN ?`, preexisting)
 	})
 
+	before := int64(len(preexisting))
+
 	rec := doPost(h.ApplicationRegister,
 		`{"claimCode":"itapi-code","username":"itapiq1","password":"hunter22"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	// 上限カウントにも利用者の一覧にも出ない。sinceID は空文字なので
-	// `"id" > ''` が全行に当たる = 期間を問わず 0 件であることを見ている。
-	count, err := ticketRepo.CountByCreatorSince(moderator, "")
-	require.NoError(t, err)
-	assert.Equal(t, int64(0), count, "承認は審査した管理者の招待枠を消費しない")
+	var after int64
+	require.NoError(t, db.Model(&model.RegistrationTicket{}).Count(&after).Error)
+	assert.Equal(t, before, after, "即時作成では ticket を 1 行も作らない")
 
-	owned, err := ticketRepo.ListByCreator(moderator, "", "", 100)
-	require.NoError(t, err)
-	assert.Empty(t, owned, "利用者の invite/list に出ない")
-
-	// **監査の連鎖は createdById 抜きで繋がる。** 申請から ticket を辿るので、
-	// 残留行を拾って実装のバグに見せかけることも無い。
+	// **監査は申請だけで辿れる。** この表には FK が 1 つも無いので、user を消しても
+	// 審査した管理者と登録者は残る (ticket 行は CASCADE で消える、#2805)。
 	var stored model.SignupApplication
 	require.NoError(t, db.Where("id = ?", app.ID).First(&stored).Error)
 	assert.Equal(t, model.SignupApplicationCompleted, stored.Status)
 	require.NotNil(t, stored.ProcessedByID)
 	assert.Equal(t, moderator, *stored.ProcessedByID, "審査した管理者は申請から辿る")
-	require.NotNil(t, stored.TicketID, "ticket との対応は申請から辿る")
-
-	minted, err := ticketRepo.FindByID(*stored.TicketID)
-	require.NoError(t, err)
-	assert.Nil(t, minted.CreatedByID, "管理者名義にしない")
+	require.NotNil(t, stored.UsedByID)
+	assert.Nil(t, stored.TicketID, "ticketId は記録しない")
 
 	var user model.User
 	require.NoError(t, db.Where(`"usernameLower" = ?`, "itapiq1").First(&user).Error)
-	require.NotNil(t, minted.UsedByID)
-	assert.Equal(t, user.ID, *minted.UsedByID, "登録者は ticket から辿る")
-
-	// admin/invite/list は createdById で絞らないので従来どおり出る。
-	rows, err := ticketRepo.ListSorted("", "", 100, 0, time.Now())
-	require.NoError(t, err)
-	found := false
-	for _, r := range rows {
-		if r.ID == minted.ID {
-			found = true
-		}
-	}
-	assert.True(t, found, "admin 側の一覧には出ること")
+	assert.Equal(t, user.ID, *stored.UsedByID, "登録者は申請から辿る")
 }

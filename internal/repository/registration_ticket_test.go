@@ -175,6 +175,43 @@ func TestRegistrationTicketRepository_CountByCreatorSince(t *testing.T) {
 	assert.Equal(t, int64(1), count)
 }
 
+// `createdById` が NULL の行は creator 系のどの query にも出ない (#2805 / #2813)。
+//
+// **これは SQL の性質そのものを見るテスト。** 承認由来の ticket は `createdById` を
+// 入れないので、審査した管理者の `invite/create` 上限 (`CountByCreatorSince`) も
+// 個人の `invite/list` (`ListByCreator`) も食わない。`WHERE "createdById" = ?` は
+// NULL に当たらない、という一点に全部が乗っている。**手書きの fake では再現でき
+// ない**ので実 DB で押さえる。`admin/invite/list` が使う `ListSorted` には出る。
+func TestRegistrationTicketRepository_NullCreatorIsExcludedFromCreatorQueries(t *testing.T) {
+	repo := NewRegistrationTicketRepository(testDB)
+	cleanupInvite(t, "rt_nc_owned", "rt_nc_null")
+	defer cleanupInvite(t, "rt_nc_owned", "rt_nc_null")
+	u := insertTestUser(t, "rt_nc_u", "rtncu")
+	defer cleanupUser(t, u.ID)
+
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_nc_owned", Code: "nc-owned", CreatedByID: &u.ID}))
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_nc_null", Code: "nc-null"}))
+
+	count, err := repo.CountByCreatorSince(u.ID, "")
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), count, "NULL の行は上限に数えない")
+
+	owned, err := repo.ListByCreator(u.ID, "", "", 100)
+	require.NoError(t, err)
+	require.Len(t, owned, 1, "NULL の行は個人の一覧に出ない")
+	assert.Equal(t, "rt_nc_owned", owned[0].ID)
+
+	rows, err := repo.ListSorted("", "", 100, 0, time.Now())
+	require.NoError(t, err)
+	found := false
+	for _, r := range rows {
+		if r.ID == "rt_nc_null" {
+			found = true
+		}
+	}
+	assert.True(t, found, "admin 側の一覧には出る")
+}
+
 // cancelled context で error 経路を通すことで coverage を担保する。
 func TestRegistrationTicketRepository_CountByCreatorSince_Error(t *testing.T) {
 	repo := NewRegistrationTicketRepository(cancelledDB(t))

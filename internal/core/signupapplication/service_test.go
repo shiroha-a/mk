@@ -128,7 +128,7 @@ func TestApprove(t *testing.T) {
 	assert.Equal(t, model.SignupApplicationApproved, stored.Status)
 	require.NotNil(t, stored.ProcessedByID)
 	assert.Equal(t, "mod1", *stored.ProcessedByID)
-	// 承認時点ではチケットを発行しない (登録経路で発行して即消費する)。
+	// 承認時点ではチケットを発行しない (発行するのはメール確認の経路だけ、#2813)。
 	assert.Nil(t, stored.TicketID)
 
 	t.Run("cannot approve twice", func(t *testing.T) {

@@ -4075,7 +4075,7 @@ func TestUpdateMeta_SignupConditions(t *testing.T) {
 		},
 		{
 			// **開ける側は明示より整合を優先する (#2565)。** 承認制と招待制を
-			// 重ねると二重のゲートになるので、同じ更新で両方来ても開く。
+			// 重ねると登録手段がゼロになるので、同じ更新で両方来ても開く。
 			// 閉じる側と非対称なのは意図的。
 			name:                    "承認制を入れる更新では閉鎖の明示より整合を優先する",
 			current:                 &model.Meta{ID: "x", ApprovalRequiredForSignup: false, DisableRegistration: false},

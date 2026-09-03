@@ -17,8 +17,15 @@ import (
 
 // approvalTicketTTL bounds how long the internally minted invite stays usable.
 //
-// **短くてよい。** 発行するのは登録の直前で、そのまま同じリクエスト内で消費する。
-// 長くすると、利用者に渡していない credential が DB に残る時間が伸びるだけ。
+// 発行するのはメール確認の経路だけ (#2813)。**この期限は承認経路では効かない** —
+// `promotePendingTx` は `expiresAt` を検査せず、確認リンクの期限は `user_pending` 側の
+// `PendingSignupTTL` (24h) が持つ。
+//
+// **効くのは別の経路。** `validateInvitationCode` (`/api/signup`) がここを見る。
+// 承認制が有効な間は `/api/signup` が 403 で閉じるので届かないが、**承認制を切って
+// 招待制に戻したあとは届く** — 承認由来の ticket の `code` は `admin/invite/list` が
+// 平文で返すので、残骸を招待コードとして使う経路が実在し、それを塞いでいるのが
+// この期限。短く保つこと。**伸ばすとその窓が開く。**
 const approvalTicketTTL = 5 * time.Minute
 
 // SignupApplications is the applicant-side surface of the state machine.
@@ -193,8 +200,9 @@ func (h *Handler) ApplicationStatus(c echo.Context) error {
 
 // ApplicationRegister handles POST /api/signup-application/register.
 //
-// 承認済みの申請に対して、実際にアカウントを作る。**招待コードは利用者に渡さない**
-// — ここで発行し、同じ流れで消費する。
+// 承認済みの申請に対して、実際にアカウントを作る。**即時作成では招待を発行しない**
+// (#2813)。メール確認を挟む構成でだけ内部で発行し、確認リンクを踏んだ時点で消費する
+// — コードは利用者に渡らない。
 func (h *Handler) ApplicationRegister(c echo.Context) error {
 	meta, ok, err := h.approvalOpen(c)
 	if !ok {
@@ -245,28 +253,39 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 			apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
 	}
 
-	ticket, err := h.mintApprovalTicket()
-	if err != nil {
-		return c.JSON(http.StatusInternalServerError,
-			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-	}
-
 	if emailRequired {
+		// **ticket を発行するのはこの経路だけ (#2813)。** 担っているのは
+		// **前回試行の失効**で、置き換えた古い ticket を消すと確認リンクが
+		// `ErrInvitationRevoked` になり、最新の試行だけが通る。
+		//
+		// 再試行の直列化は ticket ではなく `MarkTicket` が取る申請行のロック。
+		// `/api/signup` にある 30 分の再送防止窓 (`validateInvitationCode`) は
+		// **この経路を通らない** — 承認経路は試行のたびに新しい ticket を出すので
+		// `usedAt` が必ず nil で、そもそも発火しない。
+		ticket, terr := h.mintApprovalTicket()
+		if terr != nil {
+			return c.JSON(http.StatusInternalServerError,
+				apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
 		return h.registerViaEmailConfirmation(c, meta, app, ticket, req.Username, req.EmailAddress, req.Password)
 	}
 
-	ticketID := ""
-	if ticket != nil {
-		ticketID = ticket.ID
-	}
+	// **即時作成では ticket を発行しない (#2813)。** 発行しても誰も参照しない —
+	// 一回性は settleApplicationTx の行ロックが担保しており (#2580)、ticket は
+	// `signup_application.ticketId` に記録されるだけだった。**残すと承認された
+	// 申請から登録が行われるたびに `registration_ticket` が 1 行増える**うえ、
+	// `createdById` を入れない (#2805) ので管理画面には `system` として出る。
+	//
+	// 監査は `signup_application` の `processedById` / `usedById` で辿る。
+	// **この表には FK が 1 つも無い** ので user を消しても残り、ticket 行より
+	// 壊れにくい (ticket は `createdById` / `usedById` がどちらも
+	// `ON DELETE CASCADE`)。失われるのは ticket の `code` / `usedAt` だけ。
+	//
 	// **申請の確定とアカウント作成を同じ tx に入れる (#2580)。** 分けると、承認済みの
 	// 申請者が別々の username で同時に登録したときに両方が「承認済み」を読んで
 	// 両方アカウントを作れる。負けた側はユーザー作成ごと巻き戻る。
-	result, err := h.signupService.SignupForApplication(req.Username, req.Password, app.ID, ticketID)
+	result, err := h.signupService.SignupForApplication(req.Username, req.Password, app.ID, "")
 	if err != nil {
-		// 失敗したチケットは残さない。**残すと、次の試行で「使用済み」に
-		// 見えないまま浮いた招待が積み上がる。**
-		h.discardApprovalTicket(ticket)
 		if errors.Is(err, coresignup.ErrApplicationNotApproved) {
 			return c.JSON(http.StatusBadRequest,
 				apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
@@ -274,26 +293,24 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 		return h.signupServiceError(c, err)
 	}
 
-	if ticket != nil && h.ticketStore != nil {
-		if merr := h.ticketStore.MarkUsed(ticket.ID, result.User.ID); merr != nil {
-			// 消費の記録に失敗してもアカウントは作られている。ここで 500 を
-			// 返すと、利用者には「失敗したのに登録されている」状態になる。
-			c.Logger().Warnf("signup application: mark ticket used failed: %v", merr)
-		}
-	}
 	completed := result.SignupApplicationCompleted
 	if !completed {
 		// db / 申請 repo が未配線の構成 (テスト等)。従来どおり後追いで記録する。
-		if cerr := h.applications.MarkCompleted(app.ID, result.User.ID, ticketID); cerr != nil {
+		if cerr := h.applications.MarkCompleted(app.ID, result.User.ID, ""); cerr != nil {
 			c.Logger().Warnf("signup application: mark completed failed: %v", cerr)
 		} else {
 			completed = true
 		}
 	}
-	if completed && app.TicketID != nil && *app.TicketID != "" && *app.TicketID != ticketID {
+	if completed && app.TicketID != nil && *app.TicketID != "" {
 		// メール必須を切る前に始まっていた確認待ちの残骸。**完了が通ってから
 		// 破棄する** — 通ったということは、確認が先に走って ticket を消費した
 		// わけではない (その場合 MarkCompleted が ErrNotApproved で落ちる)。
+		//
+		// **列は消さない。** `ticketId` は残ったまま消えた ticket を指すが、
+		// これは #2805 で既に起きうる状態 (ticket は user 削除で CASCADE 消滅
+		// する)。列を消すには共有の transition を「空文字なら NULL」に変える
+		// 必要があり、メール確認の経路まで巻き込む。
 		h.discardApprovalTicket(&model.RegistrationTicket{ID: *app.TicketID})
 	}
 
@@ -472,7 +489,11 @@ func (h *Handler) applicationForClaimCode(c echo.Context) (*model.SignupApplicat
 	return app, true, nil
 }
 
-// mintApprovalTicket issues the short-lived invite consumed by this signup.
+// mintApprovalTicket issues the short-lived invite used by the
+// email-confirmation path of an approved signup.
+//
+// **即時作成では呼ばない (#2813)。** あちらは ticket を参照しないので、発行しても
+// `registration_ticket` の行が 1 つ増えるだけだった。
 //
 // **createdById は入れない (#2805)。** 審査した管理者を入れると、承認された申請から
 // 登録が行われるたびに 1 枚その管理者名義の招待が増え、`invite/create` と

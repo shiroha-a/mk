@@ -707,7 +707,12 @@ func TestSignupForApplication_RejectsUnusableApplication(t *testing.T) {
 	assert.Equal(t, int64(0), count)
 }
 
-// ticket を渡すと申請に記録される (即時作成でも監査が追える)。
+// ticket を渡すと申請に記録される。
+//
+// **#2813 以降、この引数に非空を渡す本番の呼び出しは無い** (唯一の呼び出し元である
+// 即時作成が `""` を渡す)。メール確認の経路は `SignupForApplication` を通らず、
+// `promotePendingTx` → `settleApplicationTx` が `lockedTicketID` で同じ記録をする。
+// 引数の意味自体は生きているのでここで固定しておく。
 func TestSignupForApplication_RecordsTicket(t *testing.T) {
 	db := integrationDB(t)
 	const prefix = "itimmtkt_"

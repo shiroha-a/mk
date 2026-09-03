@@ -35,9 +35,12 @@ type Meta struct {
 	CacheRemoteSensitiveFiles bool `gorm:"column:cacheRemoteSensitiveFiles;default:true" json:"cacheRemoteSensitiveFiles"`
 	EmailRequiredForSignup    bool `gorm:"column:emailRequiredForSignup;default:false" json:"emailRequiredForSignup"`
 	// ApprovalRequiredForSignup turns on approval-based registration (#2554)。
-	// mk-go 独自。**単体では登録を止めない** — 実際のゲートは
-	// disableRegistration + 招待コードで、承認は内部で registration_ticket を
-	// 発行して通す。両方を設定する運用が前提。
+	// mk-go 独自。**これ自体がゲート** (#2557) — 有効時は `/api/signup` を 403 で
+	// 閉じ、申請と承認を経た `/api/signup-application/register` だけを入口にする
+	// (メール必須の構成では、実際にアカウントができるのは確認リンクを踏んだ
+	// `/api/signup-pending`)。
+	// `disableRegistration` と重ねると承認制の入口まで閉じる (`approvalOpen` が
+	// 503) ので、有効にする更新では同じ更新で登録を開放する (#2565 / #2803)。
 	ApprovalRequiredForSignup bool `gorm:"column:approvalRequiredForSignup;default:false" json:"approvalRequiredForSignup"`
 	// SignupApplicationForm is the admin-defined application form (#2570)。
 	// 要素の配列で、各要素は {label, type, required, maxLength}。

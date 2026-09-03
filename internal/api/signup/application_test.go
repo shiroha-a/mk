@@ -81,9 +81,7 @@ type stubTicketStore struct {
 	created   []*model.RegistrationTicket
 	deleted   []string
 	usedTkt   string
-	usedUsr   string
 	createErr error
-	markErr   error
 
 	pendingTkt     string
 	pendingRow     string
@@ -95,8 +93,8 @@ func (s *stubTicketStore) FindByCode(string) (*model.RegistrationTicket, error) 
 }
 
 func (s *stubTicketStore) MarkUsed(ticketID, userID string) error {
-	s.usedTkt, s.usedUsr = ticketID, userID
-	return s.markErr
+	s.usedTkt = ticketID
+	return nil
 }
 
 func (s *stubTicketStore) MarkPending(ticketID, pendingID string) error {
@@ -340,14 +338,13 @@ func TestApplicationRegister_LookupFailure(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-// **招待コードは利用者に渡さない。** ここで発行し、同じ流れで消費する。
-func TestApplicationRegister_MintsAndConsumesTicket(t *testing.T) {
+// **即時作成では ticket を発行しない (#2813)。** 発行しても誰も参照しない —
+// 一回性は settleApplicationTx の行ロックが担保しており (#2580)、ticket は
+// `signup_application.ticketId` に記録されるだけだった。
+func TestApplicationRegister_ImmediateDoesNotMintTicket(t *testing.T) {
 	env := newApprovalEnv(t, true)
 	tickets := &stubTicketStore{}
 	env.handler.SetTicketStore(tickets)
-	// 審査した管理者は申請に入れておく。**それが ticket に漏れないこと**を
-	// 下で見る (#2805)。監査の連鎖が実 DB で繋がることは
-	// TestApplicationRegister_ApprovalTicketDoesNotConsumeModeratorQuota が見る。
 	moderator := "mod-1"
 	app := approvedApplication()
 	app.ProcessedByID = &moderator
@@ -357,29 +354,71 @@ func TestApplicationRegister_MintsAndConsumesTicket(t *testing.T) {
 		`{"claimCode":"c","username":"newbie","password":"hunter22"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
-	require.Len(t, tickets.created, 1)
-	issued := tickets.created[0]
-	assert.NotEmpty(t, issued.Code)
-	require.NotNil(t, issued.ExpiresAt, "期限を切ること")
-	assert.True(t, issued.ExpiresAt.Before(time.Now().Add(time.Hour)),
-		"渡していない credential を長く残さない")
-	// **createdById は入れない (#2805)。** 入れると、承認するたびに審査した管理者
-	// 名義の招待が 1 枚増え、`invite/create` の上限を食い `invite/list` にも出る。
-	// どちらの query も `WHERE "createdById" = ?` なので NULL なら両方から外れる。
-	assert.Nil(t, issued.CreatedByID,
-		"承認は審査した管理者の招待枠を消費しない")
-
-	assert.Equal(t, issued.ID, tickets.usedTkt, "同じ流れで消費すること")
-	assert.Equal(t, issued.ID, env.apps.completedTkt, "ticket との対応は申請に残る")
-	assert.NotEmpty(t, tickets.usedUsr, "登録者は ticket に残る")
+	assert.Empty(t, tickets.created, "即時作成では発行しない")
+	assert.Empty(t, tickets.usedTkt)
 	assert.Empty(t, tickets.deleted)
-	// レスポンスにコードが漏れていないこと。
-	assert.NotContains(t, rec.Body.String(), issued.Code)
+	assert.Empty(t, env.apps.completedTkt, "ticketId は記録しない")
+
+	// **監査は申請だけで辿れる。** 登録者は申請に残る。審査した管理者
+	// (processedById) を DB から読み直して確かめるのは統合テスト側
+	// (TestApplicationRegister_ImmediateCreatesNoTicket) — ここで
+	// `env.apps.app` を読み直しても、テスト自身が入れた値を見るだけになる。
+	assert.NotEmpty(t, env.apps.completedUsr, "登録者は申請に残る")
 }
 
-// **登録に失敗したチケットは残さない。** 残すと、使用済みに見えないまま浮いた
-// 招待が積み上がる。
-func TestApplicationRegister_DiscardsTicketOnFailure(t *testing.T) {
+// **メール経路では発行の失敗を 500 にする。** ここを素通しにすると ticket が nil に
+// なり、registerViaEmailConfirmation は MarkTicket を丸ごと飛ばす — 行ロック付きの
+// 申請状態の再確認 (#2571 / #2576) を通らないまま確認メールが飛ぶ。
+func TestApplicationRegister_EmailRequired_TicketIssueFailure(t *testing.T) {
+	env, pendingRepo, _, sent := newApprovalEnvWithEmail(t)
+	env.handler.SetTicketStore(&stubTicketStore{createErr: errors.New("boom")})
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22","emailAddress":"newbie@example.com"}`)
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	// **ここまで来ていないこと**を見る。ステータスだけだと、pending を作って
+	// メールを飛ばしてから 500 を返す形でも緑になる。
+	assert.Empty(t, pendingRepo.Rows, "pending を作らない")
+	// **待たずに select すると空振りする。** 送信は goroutine なので、
+	// `default:` だとスケジュールされる前に通り抜ける (実測で 30 回中 0 回検出)。
+	select {
+	case to := <-sent:
+		t.Fatalf("確認メールを送ってはいけない (to=%s)", to)
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// ticketStore が発行に失敗しても、即時作成は ticket を使わないので通る (#2813)。
+func TestApplicationRegister_ImmediateIgnoresTicketStoreFailure(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	env.handler.SetTicketStore(&stubTicketStore{createErr: errors.New("boom")})
+	env.apps.app = approvedApplication()
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22"}`)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// **メール必須を切る前に始まっていた確認待ちの残骸は破棄する。** 残すと、
+// 届いた確認リンクが後から踏めてしまう。
+func TestApplicationRegister_ImmediateDiscardsLeftoverTicket(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	tickets := &stubTicketStore{}
+	env.handler.SetTicketStore(tickets)
+	app := approvedApplication()
+	leftover := "old-ticket"
+	app.TicketID = &leftover
+	env.apps.app = app
+
+	rec := doPost(env.handler.ApplicationRegister,
+		`{"claimCode":"c","username":"newbie","password":"hunter22"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Empty(t, tickets.created, "新しくは発行しない")
+	assert.Equal(t, []string{leftover}, tickets.deleted)
+}
+
+// 登録に失敗したら申請を完了扱いにしない。
+func TestApplicationRegister_ImmediateFailureDoesNotCompleteApplication(t *testing.T) {
 	env := newApprovalEnv(t, true)
 	tickets := &stubTicketStore{}
 	env.handler.SetTicketStore(tickets)
@@ -388,27 +427,14 @@ func TestApplicationRegister_DiscardsTicketOnFailure(t *testing.T) {
 	rec := doPost(env.handler.ApplicationRegister,
 		`{"claimCode":"c","username":"!!!invalid!!!","password":"hunter22"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
-
-	require.Len(t, tickets.created, 1)
-	assert.Equal(t, []string{tickets.created[0].ID}, tickets.deleted)
+	assert.Empty(t, tickets.created)
 	assert.Empty(t, env.apps.completedApp, "失敗したら申請は完了扱いにしない")
 }
 
-func TestApplicationRegister_TicketIssueFailure(t *testing.T) {
-	env := newApprovalEnv(t, true)
-	env.handler.SetTicketStore(&stubTicketStore{createErr: errors.New("boom")})
-	env.apps.app = approvedApplication()
-
-	rec := doPost(env.handler.ApplicationRegister,
-		`{"claimCode":"c","username":"newbie","password":"hunter22"}`)
-	assert.Equal(t, http.StatusInternalServerError, rec.Code)
-}
-
-// 消費や完了記録に失敗してもアカウントは作られている。**ここで 500 を返すと、
+// 完了記録に失敗してもアカウントは作られている。**ここで 500 を返すと、
 // 利用者には「失敗したのに登録されている」状態になる。**
 func TestApplicationRegister_BookkeepingFailuresDoNotFailSignup(t *testing.T) {
 	env := newApprovalEnv(t, true)
-	env.handler.SetTicketStore(&stubTicketStore{markErr: errors.New("boom")})
 	env.apps.app = approvedApplication()
 	env.apps.markErr = errors.New("boom")
 
@@ -492,7 +518,12 @@ func newApprovalEnvWithEmail(t *testing.T) (*approvalEnv, *testutil.MockUserPend
 	svc.SetUserPendingRepo(pendingRepo)
 	h := apisignup.NewHandler(svc, metaRepo, idGen)
 
-	apps := &stubApplications{app: approvedApplication()}
+	// **審査した管理者を入れておく。** 入れないと「ticket に漏れない」(#2805) の
+	// アサートが空振りする — 元が nil なら何をしても nil になる。
+	app := approvedApplication()
+	moderator := "mod-1"
+	app.ProcessedByID = &moderator
+	apps := &stubApplications{app: app}
 	h.SetSignupApplications(apps)
 	tickets := &stubTicketStore{}
 	h.SetTicketStore(tickets)
@@ -526,6 +557,19 @@ func TestApplicationRegister_EmailRequired_CreatesPendingAndSendsEmail(t *testin
 	// 発行した ticket は pending に結び付き、まだ消費されていない。
 	require.Len(t, tickets.created, 1)
 	issued := tickets.created[0]
+	assert.NotEmpty(t, issued.Code)
+	require.NotNil(t, issued.ExpiresAt, "期限を切ること")
+	assert.True(t, issued.ExpiresAt.Before(time.Now().Add(time.Hour)),
+		"渡していない credential を長く残さない")
+	// **createdById は入れない (#2805)。** 入れると、承認するたびに審査した管理者
+	// 名義の招待が 1 枚増え、`invite/create` の上限を食い `invite/list` にも出る。
+	// どちらの query も `WHERE "createdById" = ?` なので NULL なら両方から外れる。
+	// #2813 で即時作成が ticket を発行しなくなったので、**この保証が効くのは
+	// この経路だけ**になった。
+	assert.Nil(t, issued.CreatedByID, "承認は審査した管理者の招待枠を消費しない")
+	// レスポンスにコードが漏れていないこと。
+	assert.NotContains(t, rec.Body.String(), issued.Code)
+
 	require.NotNil(t, row.InvitationTicketID)
 	assert.Equal(t, issued.ID, *row.InvitationTicketID)
 	assert.Equal(t, issued.ID, tickets.pendingTkt)

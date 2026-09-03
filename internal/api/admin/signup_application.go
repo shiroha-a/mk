@@ -55,7 +55,7 @@ func packSignupApplication(a *model.SignupApplication) map[string]any {
 // SignupApplicationList handles POST /api/admin/signup-application/list.
 //
 // **mk-go 独自 endpoint** (#2555)。upstream に承認制が無いため対応物は無い。
-// scope は `read:admin:invite-codes` を再利用する — 承認は最終的に
+// scope は `read:admin:invite-codes` を再利用する — 承認はメール確認の経路で
 // registration_ticket の発行につながるので管轄が同じで、`internal/misc/permissions`
 // は upstream misskey-js と完全一致させる契約があり mk-go 固有 scope を足せない
 // (admin/federation/delivery-health が `read:admin:server-info` を再利用するのと

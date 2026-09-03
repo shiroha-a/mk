@@ -168,7 +168,8 @@ func (s *Service) ByClaimCode(code string) (*model.SignupApplication, error) {
 //
 // **ここでは registration_ticket を発行しない。** 発行を承認時にすると、登録
 // までの数日間、利用者に渡していない bearer 相当の credential が DB に置き
-// っぱなしになる。チケットは登録経路 (#2556) で発行して即消費する。
+// っぱなしになる。チケットは登録経路のうち**メール確認を挟むときだけ**
+// (#2556 / #2813) 発行する。
 func (s *Service) Approve(applicationID, moderatorID string) error {
 	return s.review(applicationID, moderatorID, true)
 }

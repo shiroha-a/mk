@@ -48,8 +48,12 @@ type SignupApplication struct {
 	// どの設問への答えだったか分かる。
 	Answers datatypes.JSON `gorm:"column:answers;type:jsonb;not null;default:'[]'" json:"answers"`
 
-	// TicketID is the registration_ticket minted on registration. コードは
-	// 利用者に渡さず、登録時にサーバー内部で消費する。
+	// TicketID is the registration_ticket minted for the email-confirmation
+	// path of an approved signup (#2813). コードは利用者に渡さず、確認リンクを
+	// 踏んだ時点でサーバー内部で消費する。
+	//
+	// **即時作成では set しない。** メール必須を切る前に始まっていた確認待ちの
+	// 残骸だけが、ticket を破棄したあとも値として残りうる (dangling)。
 	TicketID *string `gorm:"column:ticketId;type:varchar(32)" json:"ticketId"`
 
 	CreatedAt time.Time `gorm:"column:createdAt;type:timestamp with time zone;not null" json:"createdAt"`

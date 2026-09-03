@@ -77,7 +77,9 @@ type Handler struct {
 	userRepo         repository.UserRepository
 	usedUsernameRepo repository.UsedUsernameRepository
 	// applications は承認制の登録 (#2569)。未配線なら該当 endpoint は 503。
-	// ticketStore は承認済み申請の登録でも使う (内部で招待を発行して即消費する)。
+	// ticketStore は承認済み申請でも使う。**発行するのはメール確認の経路だけ**
+	// (#2813) で、確認リンクを踏んだ時点で消費する。即時作成は発行しないが、
+	// メール必須を切る前に始まっていた確認待ちの残骸を破棄するのに触る。
 	applications SignupApplications
 	// formTokens は captcha の実 provider が 1 つも無いときに
 	// signup-application/apply を守る署名付きフォームトークン (#2806)。
