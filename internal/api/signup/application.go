@@ -232,7 +232,7 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 			apierr.Error("NOT_APPROVED", "This application is not approved.", "3a4b5c6d-7e8f-4a9b-0c1d-2e3f4a5b6c7d"))
 	}
 
-	ticket, err := h.mintApprovalTicket(app)
+	ticket, err := h.mintApprovalTicket()
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError,
 			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -380,10 +380,32 @@ func (h *Handler) applicationForClaimCode(c echo.Context) (*model.SignupApplicat
 
 // mintApprovalTicket issues the short-lived invite consumed by this signup.
 //
-// createdById には審査した管理者を入れる。招待一覧から「誰の承認で作られたか」を
-// 辿れるようにするため。ticketStore 未配線なら nil を返し、招待を介さずに進む
-// (テスト構成)。
-func (h *Handler) mintApprovalTicket(app *model.SignupApplication) (*model.RegistrationTicket, error) {
+// **createdById は入れない (#2805)。** 審査した管理者を入れると、承認された申請から
+// 登録が行われるたびに 1 枚その管理者名義の招待が増え、`invite/create` と
+// `invite/limit` の上限 (`CountByCreatorSince`) を食い、利用者の `invite/list`
+// (`ListByCreator`) にも出る。どちらの query も `WHERE "createdById" = ?` なので、
+// NULL なら両方から外れる。`inviteLimit` が効いている構成では **承認するほど自分の
+// 招待枠が減る**という副作用になる (この policy はロール由来とは限らず、
+// `meta.policies` のベースポリシーからも来る)。
+//
+// **監査は失われない。** 審査した管理者は `signup_application.processedById`、
+// 登録者は `signup_application.usedById` で辿れる。**`signup_application` には FK が
+// 1 つも無い** ので (migration 000075 の判断)、user を消してもこの 2 つは残る。
+// `createdById` はこの記録と重複していただけで、片方が上限カウントという副作用を
+// 持っていた。
+//
+// ticket 行そのものは `createdById` / `usedById` の FK がどちらも
+// `ON DELETE CASCADE` なので、**審査した管理者か登録者のどちらかを消すと消える**
+// (`signup_application.ticketId` は dangling になる)。`createdById` を入れないと、
+// その消え方の引き金が 1 つ減る。
+//
+// `admin/invite/list` は `createdById` で絞らないので従来どおり出る (`createdBy` は
+// null で pack される)。**利用者向けの `invite/delete` は `createdById == nil` を
+// 拒否するので、この ticket は API からは消せない** (upstream にあるモデレーターの
+// bypass を mk-go は持たない)。詳細は docs/divergence.md。
+//
+// ticketStore 未配線なら nil を返し、招待を介さずに進む (テスト構成)。
+func (h *Handler) mintApprovalTicket() (*model.RegistrationTicket, error) {
 	if h.ticketStore == nil {
 		return nil, nil
 	}
@@ -398,10 +420,10 @@ func (h *Handler) mintApprovalTicket(app *model.SignupApplication) (*model.Regis
 	now := time.Now()
 	expires := now.Add(approvalTicketTTL)
 	ticket := &model.RegistrationTicket{
-		ID:          h.idGen.Generate(now),
-		Code:        code,
-		ExpiresAt:   &expires,
-		CreatedByID: app.ProcessedByID,
+		ID:        h.idGen.Generate(now),
+		Code:      code,
+		ExpiresAt: &expires,
+		// CreatedByID は入れない。上の doc コメント参照 (#2805)。
 	}
 	if err := creator.Create(ticket); err != nil {
 		return nil, err

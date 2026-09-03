@@ -341,6 +341,9 @@ func TestApplicationRegister_MintsAndConsumesTicket(t *testing.T) {
 	env := newApprovalEnv(t, true)
 	tickets := &stubTicketStore{}
 	env.handler.SetTicketStore(tickets)
+	// 審査した管理者は申請に入れておく。**それが ticket に漏れないこと**を
+	// 下で見る (#2805)。監査の連鎖が実 DB で繋がることは
+	// TestApplicationRegister_ApprovalTicketDoesNotConsumeModeratorQuota が見る。
 	moderator := "mod-1"
 	app := approvedApplication()
 	app.ProcessedByID = &moderator
@@ -356,12 +359,15 @@ func TestApplicationRegister_MintsAndConsumesTicket(t *testing.T) {
 	require.NotNil(t, issued.ExpiresAt, "期限を切ること")
 	assert.True(t, issued.ExpiresAt.Before(time.Now().Add(time.Hour)),
 		"渡していない credential を長く残さない")
-	// 招待一覧から「誰の承認で作られたか」を辿れるようにする。
-	require.NotNil(t, issued.CreatedByID)
-	assert.Equal(t, moderator, *issued.CreatedByID)
+	// **createdById は入れない (#2805)。** 入れると、承認するたびに審査した管理者
+	// 名義の招待が 1 枚増え、`invite/create` の上限を食い `invite/list` にも出る。
+	// どちらの query も `WHERE "createdById" = ?` なので NULL なら両方から外れる。
+	assert.Nil(t, issued.CreatedByID,
+		"承認は審査した管理者の招待枠を消費しない")
 
 	assert.Equal(t, issued.ID, tickets.usedTkt, "同じ流れで消費すること")
-	assert.Equal(t, issued.ID, env.apps.completedTkt)
+	assert.Equal(t, issued.ID, env.apps.completedTkt, "ticket との対応は申請に残る")
+	assert.NotEmpty(t, tickets.usedUsr, "登録者は ticket に残る")
 	assert.Empty(t, tickets.deleted)
 	// レスポンスにコードが漏れていないこと。
 	assert.NotContains(t, rec.Body.String(), issued.Code)
