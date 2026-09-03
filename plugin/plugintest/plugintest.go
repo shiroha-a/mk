@@ -63,6 +63,9 @@ type Harness struct {
 	// キュー (#2818) の記録。**実際には積まない**ので、テストが Redis を
 	// 要求しない。ハンドラは JobSet.Run から直接叩く。
 	enqueued []Enqueued
+	// hasJobs は Definition.Jobs を宣言しているか。**本番と同じ理由で
+	// Enqueue を拒否する**ため、Routes / Jobs を呼んだ時点で記録する。
+	hasJobs bool
 }
 
 // New starts a harness. The plugin name defaults to "test".
@@ -122,6 +125,14 @@ type PeerSend struct {
 	ID   string
 	// Payload is what the plugin passed, as JSON.
 	Payload json.RawMessage
+}
+
+// noteJobs records whether the definition declares background work, so
+// [plugin.Queue.Enqueue] can refuse the same cases mk-go refuses.
+func (h *Harness) noteJobs(def plugin.Definition) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.hasJobs = def.Jobs != nil
 }
 
 // Enqueued is one recorded [plugin.Queue.Enqueue].
@@ -246,6 +257,7 @@ func (h *Harness) Context() plugin.Context {
 func (h *Harness) Routes(def plugin.Definition) Handlers {
 	h.t.Helper()
 	h.applyMigrations(def)
+	h.noteJobs(def)
 
 	r := &fakeRouter{handlers: Handlers{}}
 	if def.Routes == nil {
@@ -261,6 +273,7 @@ func (h *Harness) Routes(def plugin.Definition) Handlers {
 func (h *Harness) Jobs(def plugin.Definition) *JobSet {
 	h.t.Helper()
 	h.applyMigrations(def)
+	h.noteJobs(def)
 
 	j := &fakeJobs{set: &JobSet{Handlers: map[string]plugin.JobHandler{}}}
 	if def.Jobs == nil {
@@ -443,6 +456,15 @@ func (c *fakeContext) Queue() plugin.Queue { return &fakeQueue{h: c.h} }
 type fakeQueue struct{ h *Harness }
 
 func (q *fakeQueue) Enqueue(_ context.Context, name string, payload any, opts ...plugin.EnqueueOption) error {
+	q.h.mu.Lock()
+	hasJobs := q.h.hasJobs
+	q.h.mu.Unlock()
+	// **本番と同じ理由で落とす。** mk-go は Jobs を宣言していないプラグインの
+	// キューを作らないので、積めても誰も処理しない。ここで通すと、本番では
+	// 通らない経路をテストが緑で通してしまう (fakePeer.Send と同じ方針)。
+	if !hasJobs {
+		return fmt.Errorf("plugintest: Definition.Jobs を宣言していないため積めません")
+	}
 	if name == "" {
 		return fmt.Errorf("plugintest: ジョブ名が空です")
 	}

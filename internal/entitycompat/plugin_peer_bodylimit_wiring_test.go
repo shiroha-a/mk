@@ -96,3 +96,33 @@ func TestAPICatchallIsWired(t *testing.T) {
 			"peer の受け口が無いプラグインへの POST が 200 + {} に戻る", wiring)
 	}
 }
+
+// プラグイン専用キューの名前は driver へ渡さないと worker が見ない (#2818)。
+//
+// **第 3 引数を nil にしても build もテストも通る。** mkqConfig を直接叩く
+// テストはあるが、newServer がその結果を渡すことは誰も見ていない。落とすと
+// mkq が Define しないので、**enqueue が `unknown queue` で全部落ちる** —
+// 機能が丸ごと死ぬのに緑になる。
+func TestPluginJobQueuesAreWired(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "internal/server/server.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	var live []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if trimmed := strings.TrimSpace(line); !strings.HasPrefix(trimmed, "//") {
+			live = append(live, trimmed)
+		}
+	}
+	joined := squeezeSpaces(strings.Join(live, "\n"))
+	for _, wiring := range []string{
+		"pluginQueues := pluginJobQueueNames(plugins, cfg.Plugins)",
+		"buildQueueDriver(context.Background(), cfg, pluginQueues)",
+	} {
+		if !strings.Contains(joined, wiring) {
+			t.Errorf("internal/server/server.go に %q が無い (コメントは数えない)。"+
+				"プラグインのキューが driver に登録されず、enqueue が unknown queue で落ちる", wiring)
+		}
+	}
+}

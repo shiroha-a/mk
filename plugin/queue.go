@@ -36,6 +36,9 @@ type Queue interface {
 	//
 	// payload は JSON にできること。ハンドラには [JobHandler] の
 	// json.RawMessage として渡る。
+	//
+	// name は英数字とハイフン・アンダースコアのみ (先頭は英数字)。task type の
+	// 名前空間を保つため、空白や `:` は受け付けない。
 	Enqueue(ctx context.Context, name string, payload any, opts ...EnqueueOption) error
 }
 
@@ -65,6 +68,9 @@ func WithDelay(d time.Duration) EnqueueOption {
 //
 // **既定は再試行しない。** 再試行はハンドラが冪等であることを前提にするので、
 // 黙って有効にはしない。
+//
+// 頼むと**指数バックオフが自動で付く** (10 秒起点)。付けないと、落ちている
+// 取得先を遅延 0 で連打したうえ delayed bucket にも滞在しない。
 func WithMaxAttempts(n int) EnqueueOption {
 	return func(o *EnqueueOptions) { o.MaxAttempts = n }
 }
@@ -72,6 +78,9 @@ func WithMaxAttempts(n int) EnqueueOption {
 // WithDedup suppresses an identical job enqueued within ttl.
 //
 // 判定は「同じジョブ名 + 同じペイロード」。取り寄せの二重起動を防ぐ用途。
+//
+// **抑制されたときも Enqueue は nil を返す。** 積めたかどうかは区別できない
+// ので、結果が要るなら payload に自前の ID を入れて状態を別に持つこと。
 func WithDedup(ttl time.Duration) EnqueueOption {
 	return func(o *EnqueueOptions) { o.DedupTTL = ttl }
 }

@@ -120,7 +120,12 @@ func (s *Scheduler) RegisterChunkedUploadGCJob() error {
 
 // RegisterPluginJob registers a plugin's cron entry (#2478).
 //
-// maintenance キューに載せるのは、プラグインの定期処理が配送 (deliver) の
+// **プラグイン専用のキュー (`plugin:<名前>`) に載せる (#2818)。** 以前は
+// maintenance に相乗りしていたが、1 つのプラグインの cron が詰まると本体の
+// 定期処理まで止まる。以下は maintenance に載せていた頃の理由で、配送
+// (deliver) のレイテンシに影響させないという目的はそのまま専用キューが果たす。
+//
+// 旧: maintenance キューに載せるのは、プラグインの定期処理が配送 (deliver) の
 // レイテンシに影響しないようにするため。プラグインの処理時間は mk-go 側から
 // 見積もれないので、遅い処理が来ても連合が詰まらない側に置く。
 //

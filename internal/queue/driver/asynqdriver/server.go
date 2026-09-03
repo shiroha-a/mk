@@ -45,31 +45,7 @@ func NewServer(redisOpt asynq.RedisClientOpt, cfg ServerConfig) *Server {
 	if concurrency <= 0 {
 		concurrency = 16
 	}
-	queues := cfg.Queues
-	if len(queues) == 0 {
-		// Misskey-go の従来 wiring と同じ queue set を埋め直す。
-		// 新しい queue を増やすときはここと queue.QueueName 等の
-		// 定数追加を同時に行う。
-		queues = map[string]int{
-			"deliver":       1,
-			"inbox":         1,
-			"push":          1,
-			"export":        1,
-			"webhook":       1,
-			"maintenance":   1,
-			"objectStorage": 1,
-		}
-	}
-	// プラグイン専用のキュー (#2818)。既定の集合を書き換えず足すだけにする
-	// (ここを列挙し直すと、本体のキューを増やしたときに片側更新になる)。
-	for _, name := range cfg.PluginQueues {
-		if name == "" {
-			continue
-		}
-		if _, ok := queues[name]; !ok {
-			queues[name] = 1
-		}
-	}
+	queues := resolveQueues(cfg)
 	inner := asynq.NewServer(redisOpt, asynq.Config{
 		Concurrency: concurrency,
 		Queues:      queues,
@@ -150,3 +126,36 @@ func (s *Server) Start() error { return s.inner.Start(s.mux) }
 // Shutdown gracefully stops the worker, waiting for in-flight jobs
 // to finish.
 func (s *Server) Shutdown() { s.inner.Shutdown() }
+
+// resolveQueues builds the queue → weight map the asynq server consumes.
+//
+// **buildQueueDriver から切り出してあるのと同じ理由**: NewServer は Redis を
+// 掴むのでテストから呼べず、既定の集合を壊していないかを確かめる手段が要る。
+func resolveQueues(cfg ServerConfig) map[string]int {
+	queues := cfg.Queues
+	if len(queues) == 0 {
+		// Misskey-go の従来 wiring と同じ queue set を埋め直す。
+		// 新しい queue を増やすときはここと queue.QueueName 等の
+		// 定数追加を同時に行う。
+		queues = map[string]int{
+			"deliver":       1,
+			"inbox":         1,
+			"push":          1,
+			"export":        1,
+			"webhook":       1,
+			"maintenance":   1,
+			"objectStorage": 1,
+		}
+	}
+	// プラグイン専用のキュー (#2818)。既定の集合を書き換えず足すだけにする
+	// (ここを列挙し直すと、本体のキューを増やしたときに片側更新になる)。
+	for _, name := range cfg.PluginQueues {
+		if name == "" {
+			continue
+		}
+		if _, ok := queues[name]; !ok {
+			queues[name] = 1
+		}
+	}
+	return queues
+}

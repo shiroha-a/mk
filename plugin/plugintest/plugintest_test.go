@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"testing"
+	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/assert"
@@ -473,4 +474,32 @@ func TestPeer_SendRejectsUnmarshalablePayload(t *testing.T) {
 	_, err := routes.Call(t, "POST /send", plugintest.Request{})
 	assert.Error(t, err)
 	assert.Empty(t, h.PeerSends(), "失敗した Send は記録しない")
+}
+
+// Enqueue は **本番と同じ理由で** Jobs 未宣言を拒否する。ここで通すと、
+// 本番では通らない経路をテストが緑で通してしまう。
+func TestHarness_EnqueueRequiresJobs(t *testing.T) {
+	h := plugintest.New(t)
+
+	routesOnly := plugin.Definition{
+		Name: "demo", APIVersion: plugin.APIVersion,
+		Routes: func(plugin.Context, plugin.Router) error { return nil },
+	}
+	h.Routes(routesOnly)
+	err := h.Context().Queue().Enqueue(context.Background(), "prune", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Definition.Jobs")
+	assert.Empty(t, h.Enqueues())
+
+	withJobs := routesOnly
+	withJobs.Jobs = func(plugin.Context, plugin.Jobs) error { return nil }
+	h.Routes(withJobs)
+	require.NoError(t, h.Context().Queue().Enqueue(context.Background(), "prune",
+		map[string]int{"a": 1}, plugin.WithDelay(time.Minute)))
+
+	got := h.Enqueues()
+	require.Len(t, got, 1)
+	assert.Equal(t, "prune", got[0].Name)
+	assert.JSONEq(t, `{"a":1}`, string(got[0].Payload))
+	assert.Equal(t, time.Minute, got[0].Options.Delay)
 }

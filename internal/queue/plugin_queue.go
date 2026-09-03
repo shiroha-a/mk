@@ -25,12 +25,23 @@ import (
 // (plugin.validName) ので、この接頭辞を持つ名前は本体のキューと衝突しない。
 const PluginQueuePrefix = "plugin:"
 
-// pluginNamePattern mirrors plugin.validName.
+// pluginNamePattern bounds what may become part of a queue key.
 //
 // **キュー名は Redis のキーになる**ので、ここでも形を確かめる。plugin 側の
-// 検証を通っていれば必ず一致するが、本パッケージは plugin を import しない
-// (レイヤが逆になる) ため独立して持つ。
+// 検証 (plugin.validName) を通ったものは必ずここも通るが、本パッケージは
+// plugin を import しない (レイヤが逆になる) ため独立して持つ。
+//
+// **一致はしない。真の上位集合。** validName は末尾ハイフンと 32 文字超も
+// 弾くが、こちらは通す。取りこぼしはあっても誤って拒否はしない側なので、
+// この向きの緩さは意図的 — 厳しくすると plugin 側の規則を 2 箇所で保つ
+// ことになり、片方だけ変えたときに正当なプラグインが黙って積めなくなる。
 var pluginNamePattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// pluginJobNamePattern bounds a job name so the task type stays parseable.
+//
+// プラグイン名より緩い (大文字とアンダースコアを許す) のは、ジョブ名は
+// Redis のキーにならず、プラグイン作者が自分の都合で付けるものだから。
+var pluginJobNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]*$`)
 
 // **AllQueueNames には入れない。** あちらは mk-go が常に持つキューの一覧で、
 // プラグインのキューは構成で変わる。名前が要る側は driver の Inspector
@@ -61,8 +72,9 @@ func PluginQueueNames(plugins []string) []string {
 		out = append(out, PluginQueueName(p))
 	}
 	if len(out) == 0 {
-		// **空 slice を返さない。** driver の Config は len(QueueNames)==0 を
-		// 「既定の一覧を使う」と読むので、空でも非 nil だと意味が変わる。
+		// **nil を返す。** driver は len(QueueNames)==0 で判定するので空 slice
+		// でも動くが、呼び出し側が `!= nil` で「プラグインがある」と読むのを
+		// 防ぐ (実際 pluginJobQueueNames のテストがそう書いている)。
 		return nil
 	}
 	return out
@@ -76,8 +88,10 @@ func (c *Client) EnqueuePlugin(ctx context.Context, plugin, job string, body []b
 	if !pluginNamePattern.MatchString(plugin) {
 		return fmt.Errorf("queue: プラグイン名 %q が不正です", plugin)
 	}
-	if job == "" {
-		return fmt.Errorf("queue: ジョブ名が空です")
+	if !pluginJobNamePattern.MatchString(job) {
+		// **task type の名前空間を保つ。** 空白や `:` を通すと、別のジョブや
+		// 本体の task type と見分けが付かない文字列になる。
+		return fmt.Errorf("queue: ジョブ名 %q が不正です (使えるのは英数字とハイフン・アンダースコアのみ)", job)
 	}
 	all := append([]driver.EnqueueOption{
 		driver.WithQueue(PluginQueueName(plugin)),

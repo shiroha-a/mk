@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/hibiken/asynq"
+	"github.com/stretchr/testify/assert"
 
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -286,4 +287,25 @@ func TestAsynqTask_Wrapper(t *testing.T) {
 	if string(w.Payload()) != "bar" {
 		t.Fatalf("Payload: got %q", string(w.Payload()))
 	}
+}
+
+// プラグイン専用のキューを既定の集合に足すこと (#2818)。**足さないと worker が
+// 見ないので、積めるのに誰も処理しない。**
+func TestNewServer_MergesPluginQueues(t *testing.T) {
+	got := resolveQueues(ServerConfig{PluginQueues: []string{"plugin:demo", "plugin:other", ""}})
+	assert.Equal(t, 1, got["plugin:demo"])
+	assert.Equal(t, 1, got["plugin:other"])
+	assert.NotContains(t, got, "", "空の名前は足さない")
+	// **既定の集合を落とさないこと。** 上書きすると deliver / inbox が消える。
+	for _, want := range []string{"deliver", "inbox", "push", "export", "webhook", "maintenance", "objectStorage"} {
+		assert.Containsf(t, got, want, "本体の %q が消えている", want)
+	}
+
+	// 明示指定があるときも足す。
+	got = resolveQueues(ServerConfig{
+		Queues:       map[string]int{"deliver": 5},
+		PluginQueues: []string{"plugin:demo"},
+	})
+	assert.Equal(t, 5, got["deliver"], "明示指定の重みを壊さない")
+	assert.Equal(t, 1, got["plugin:demo"])
 }

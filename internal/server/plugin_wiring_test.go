@@ -1383,3 +1383,49 @@ func (s *fakeQueueScheduler) Register(cron, taskType string, payload []byte, opt
 	s.calls = append(s.calls, fakeQueueCall{cron: cron, taskType: taskType, payload: payload, opts: opts})
 	return nil
 }
+
+// 配線が `def.Jobs != nil` を渡していること。**pluginQueue を直接組み立てる
+// テストだけだと、この行を消しても緑になる。**
+func TestSetupPlugins_QueueRefusesWithoutJobsDeclaration(t *testing.T) {
+	s, api := newPluginTestServer(config.RoleServer)
+	s.queueClient = queue.NewClient(newFakeQueueDriver())
+
+	var routesOnly, withJobs plugin.Queue
+	defs := []plugin.Definition{
+		{
+			Name: "routesonly", APIVersion: plugin.APIVersion,
+			Routes: func(ctx plugin.Context, _ plugin.Router) error { routesOnly = ctx.Queue(); return nil },
+		},
+		{
+			Name: "withjobs", APIVersion: plugin.APIVersion,
+			Jobs:   func(plugin.Context, plugin.Jobs) error { return nil },
+			Routes: func(ctx plugin.Context, _ plugin.Router) error { withJobs = ctx.Queue(); return nil },
+		},
+	}
+	require.NoError(t, s.setupPlugins(api, defs, noopStorage))
+
+	require.NotNil(t, routesOnly)
+	err := routesOnly.Enqueue(context.Background(), "prune", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Definition.Jobs")
+
+	require.NotNil(t, withJobs)
+	require.NoError(t, withJobs.Enqueue(context.Background(), "prune", nil))
+}
+
+// 再試行を頼まれたら **backoff も必ず付ける**。未設定の mkq は遅延 0 で
+// 再投入するので、落ちている取得先を連打する。
+func TestPluginQueue_RetryHasBackoff(t *testing.T) {
+	d := newFakeQueueDriver()
+	q := &pluginQueue{name: "demo", client: queue.NewClient(d), hasJobs: true}
+
+	require.NoError(t, q.Enqueue(context.Background(), "refresh", nil, plugin.WithMaxAttempts(3)))
+	o := driver.ApplyEnqueueOptions(d.client.calls[0].opts)
+	assert.Equal(t, driver.BackoffExponential, o.BackoffType)
+	assert.Equal(t, pluginRetryBackoffBase, o.BackoffDelay)
+
+	// 再試行を頼まなければ付けない (積んだ直後に走ってほしいので)。
+	require.NoError(t, q.Enqueue(context.Background(), "refresh", nil))
+	o = driver.ApplyEnqueueOptions(d.client.calls[1].opts)
+	assert.Empty(t, o.BackoffType)
+}

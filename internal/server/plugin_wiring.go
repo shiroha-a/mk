@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/labstack/echo/v4"
 
@@ -338,6 +339,15 @@ func (c *pluginContext) Peer() plugin.Peer { return c.peer }
 // 実装を渡す (Peer と同じ理由)。
 func (c *pluginContext) Queue() plugin.Queue { return c.queue }
 
+// pluginRetryBackoffBase is the exponential backoff base applied whenever a
+// plugin asks for retries.
+//
+// **プラグインの主な用途はリモートからの取り寄せ** (#2818 の動機) なので、
+// 相手が落ちているときに連打しない間隔にする。deliver / inbox の
+// httpRelatedBackoff (1 分起点、8 時間上限) ほど長くはしない — あちらは連合の
+// 配送で、こちらは利用者の画面に出る取得。
+const pluginRetryBackoffBase = 10 * time.Second
+
 // pluginQueue implements plugin.Queue for one plugin.
 type pluginQueue struct {
 	name    string
@@ -376,6 +386,11 @@ func (q *pluginQueue) Enqueue(ctx context.Context, name string, payload any, opt
 	if o.MaxAttempts > 1 {
 		// driver の MaxRetry は「初回を除く回数」。
 		dopts = append(dopts, driver.WithMaxRetry(o.MaxAttempts-1))
+		// **backoff を必ず付ける。** 未設定の mkq は遅延 0 で再投入するので、
+		// 落ちている取得先を連打したうえ delayed bucket にも滞在しない
+		// (driver/option.go の BackoffType が名指ししている罠)。公開面に
+		// ノブが無い以上、プラグイン側では回避できない。
+		dopts = append(dopts, driver.WithBackoff(driver.BackoffExponential, pluginRetryBackoffBase))
 	}
 	if o.DedupTTL > 0 {
 		dopts = append(dopts, driver.WithUnique(o.DedupTTL))

@@ -456,6 +456,8 @@ cron の多重実行防止は **job option ではなく mkq の job ID 設計**�
 
 **管理画面のタブはこの構成に合わせて fork 側で書き換えている** (`misskey-js` の `queueTypes`、`2026.7.0-mk.8`)。upstream のタブは API 応答ではなくこの定数から生成されるため、書き換えないと mk-go に存在しないタブが常時ゼロ表示になり、実在する `push` / `export` / `webhook` / `maintenance` / `objectStorage` が画面から見えなくなる (#2323)。**mk-go の queue を増減したら fork の `queueTypes` も合わせること。**
 
+**プラグイン専用の `plugin:<名前>` キュー (#2818) は意図的にこの規則の外**。名前が構成で変わるので静的な定数には載せられず、**タブとしては出ない**。概要タブのカード (`admin/queue/queues` = 実際に worker が見ているキュー) から辿る。一時停止・再開は API 側が接頭辞で受け付けるので動く。
+
 ## 5. 運用・性能機能 (mk-go 独自)
 
 | 項目 | 内容 |

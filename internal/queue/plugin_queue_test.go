@@ -41,6 +41,10 @@ func TestClient_EnqueuePlugin(t *testing.T) {
 	assert.JSONEq(t, `{"a":1}`, string(got.payload))
 	o := driver.ApplyEnqueueOptions(got.opts)
 	assert.Equal(t, "plugin:demo", o.Queue)
+	// **MaxRetrySet を見る。** MaxRetry の 0 はゼロ値なので、オプションを
+	// 渡していなくても通ってしまう (asynq は未設定だと既定 25 を使うので、
+	// 実際に意味が変わる)。
+	assert.True(t, o.MaxRetrySet, "再試行の設定を明示していること")
 	assert.Equal(t, 0, o.MaxRetry, "既定は再試行しない")
 }
 
@@ -53,16 +57,29 @@ func TestClient_EnqueuePlugin_OptionsOverrideDefaults(t *testing.T) {
 		driver.WithMaxRetry(3), driver.WithProcessIn(90*time.Second)))
 
 	o := driver.ApplyEnqueueOptions(d.client.calls[0].opts)
-	assert.Equal(t, "plugin:demo", o.Queue, "キューは呼び出し側から変えられない値ではないが、既定は専用キュー")
+	assert.Equal(t, "plugin:demo", o.Queue, "キューは既定のまま")
 	assert.Equal(t, 3, o.MaxRetry)
 	assert.Equal(t, 90*time.Second, o.ProcessIn)
 }
 
 func TestClient_EnqueuePlugin_RejectsBadNames(t *testing.T) {
 	c := queue.NewClient(newFakeDriver())
-	assert.Error(t, c.EnqueuePlugin(context.Background(), "", "refresh", nil))
-	assert.Error(t, c.EnqueuePlugin(context.Background(), "Bad Name", "refresh", nil))
-	assert.Error(t, c.EnqueuePlugin(context.Background(), "demo", "", nil))
+	for _, tt := range []struct{ plugin, job string }{
+		{"", "refresh"},
+		{"Bad Name", "refresh"},
+		{"demo", ""},
+		// **task type の名前空間を壊す形。** `:` や空白を通すと、別のジョブや
+		// 本体の task type と見分けが付かない文字列になる。
+		{"demo", "a:b"},
+		{"demo", "a b"},
+		{"demo", "a\nb"},
+		{"demo", "-lead"},
+	} {
+		assert.Errorf(t, c.EnqueuePlugin(context.Background(), tt.plugin, tt.job, nil),
+			"plugin=%q job=%q", tt.plugin, tt.job)
+	}
+	// 通る形。
+	require.NoError(t, c.EnqueuePlugin(context.Background(), "demo", "refresh_v2-1", nil))
 }
 
 // fakeDriver は enqueue の引数だけを見るための最小実装。

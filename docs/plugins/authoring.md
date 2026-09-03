@@ -235,7 +235,7 @@ func jobs(ctx plugin.Context, j plugin.Jobs) error {
 
 task type は `plugin:<name>:<job>` として名前空間が付き、**プラグインごとの専用キュー
 `plugin:<name>`** で動く。遅い処理が連合の配送を止めることはないし、他のプラグインの
-巻き添えにもならない。admin/queue から per-queue に一時停止・再開もできる。
+巻き添えにもならない。admin/queue から per-queue に一時停止・再開もできる (名前が動的なのでヘッダのタブには出ない。概要タブのカードから辿る)。
 
 ### 任意のタイミングで積む
 
@@ -252,6 +252,7 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 		)
 		return nil, err
 	})
+	return nil
 }
 ```
 
@@ -259,7 +260,8 @@ func routes(ctx plugin.Context, r plugin.Router) error {
 |---|---|
 | 名前 | `Jobs.Handle` に登録したものと同じもの。登録が無い名前で積むと処理者なしとして失敗する (再試行はしない) |
 | `Definition.Jobs` | **宣言していないと積めない** (エラーになる)。専用キューを作らないので、積めても誰も処理しないため |
-| 再試行 | **既定は無し。** 冪等かどうかはプラグインしか知らないので、`WithMaxAttempts` で明示する |
+| 再試行 | **既定は無し。** 冪等かどうかはプラグインしか知らないので、`WithMaxAttempts` で明示する。頼むと指数バックオフ (10 秒起点) が自動で付く — 付けないと落ちている取得先を遅延 0 で連打する |
+| 重複排除 | `WithDedup` で抑制されたときも `Enqueue` は `nil` を返す。**積めたかどうかは区別できない** |
 | ロール | 積むのはどのプロセスからでもできる。処理するのは queue ロールのプロセスだけ |
 
 worker の起動・停止時の待ち合わせ・実行時間の上限は mk-go が持つ。**プラグインが自分で
@@ -267,9 +269,9 @@ worker を起こす経路は用意しない** — プラグインの数だけ同
 
 **ただし 1 回の実行に上限がある。** mk-go は job の handler を既定 1 時間で
 打ち切る (#2658、`queueHandlerDeadlineSeconds`)。超えると job は失敗扱いになり、
-`plugin.Jobs` は retry しない設定なのでその回は捨てられる。**打ち切られても
+cron と `WithMaxAttempts` を付けていない enqueue はそこで捨てられる。**打ち切られても
 handler 自体は止まらない** (Go では goroutine を殺せない) ので、DB 接続を
-掴んだまま走り続ける。
+掴んだまま走り続ける — 再試行を頼んでいると、**止まらない実行が重なる**ことになる。
 
 1 時間を超えうる処理は**分割して複数回に分ける**こと。この上限は全キュー共通の
 設定なので、プラグインのために延ばすと inbox / deliver の保護も一緒に緩む。

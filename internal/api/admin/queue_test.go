@@ -1558,3 +1558,29 @@ func TestQueueShowJob_AttemptsAt(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &got2))
 	assert.Equal(t, []any{}, got2["attemptsAt"])
 }
+
+// プラグイン専用のキュー (#2818) は名前が動的なので、静的な一覧では判定
+// できない。**接頭辞で通したうえで、実在するかは Inspector に確かめさせる。**
+func TestQueuePauseResume_PluginQueue(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{queues: []string{"deliver", "plugin:demo"}}
+	h.SetQueueInspector(insp)
+
+	rec := doPost(h.QueuePause, `{"queue":"plugin:demo"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"plugin:demo"}, insp.pauseCalls, "静的な一覧に無くても通ること")
+
+	rec = doPost(h.QueueResume, `{"queue":"plugin:demo"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, []string{"plugin:demo"}, insp.resumeCalls)
+
+	// 入れていないプラグインの名前は、接頭辞は通るが managed でないので
+	// no-op 204 (未運用 queue と同じ扱い)。
+	insp.pauseCalls = nil
+	rec = doPost(h.QueuePause, `{"queue":"plugin:notinstalled"}`, adminUser)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Empty(t, insp.pauseCalls)
+
+	// 接頭辞が無ければ従来どおり 400。
+	assert.Equal(t, http.StatusBadRequest, doPost(h.QueuePause, `{"queue":"demo"}`, adminUser).Code)
+}
