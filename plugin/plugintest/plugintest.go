@@ -270,6 +270,24 @@ func (h *Harness) Routes(def plugin.Definition) Handlers {
 }
 
 // Jobs runs def.Jobs and returns the registered job handlers and schedules.
+// Peer runs the definition's [plugin.Definition.Peer] callback.
+//
+// **本番はロールに関係なくこれを呼ぶ (#2819)。** 送信の POST は queue ロールで
+// 走るので、Handle / OnReply を Routes の中で登録するとロールを分割した構成で
+// 応答が届かない。DeliverPeer / DeliverPeerReply の前にこれを呼ぶこと。
+func (h *Harness) Peer(def plugin.Definition) {
+	h.t.Helper()
+	h.applyMigrations(def)
+	h.noteJobs(def)
+
+	if def.Peer == nil {
+		return
+	}
+	if err := def.Peer(h.Context(), &fakePeer{h: h}); err != nil {
+		h.t.Fatalf("plugintest: Peer が失敗しました: %v", err)
+	}
+}
+
 func (h *Harness) Jobs(def plugin.Definition) *JobSet {
 	h.t.Helper()
 	h.applyMigrations(def)

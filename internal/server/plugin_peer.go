@@ -248,7 +248,7 @@ func (p *pluginPeer) Has(ctx context.Context, host string) (bool, error) {
 
 // Send posts a payload to the same plugin on host.
 //
-// **検査はここで済ませ、goroutine に逃がすのは通る見込みのものだけ。** 送ってから
+// **検査はここで済ませ、積むのは通る見込みのものだけ。** 送ってから
 // 失敗を知る形にすると、ブロックしている相手にも一度は接続してしまう。
 func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string, error) {
 	if !p.peered {
@@ -289,9 +289,9 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 		return "", fmt.Errorf("plugin peer: 本文が大きすぎます (%d bytes, 上限 %d)", len(envelope), p.maxBody)
 	}
 
-	// **呼び出し元の ctx を引き継がない。** HTTP リクエストの ctx はハンドラが
-	// 返ると切れるので、そのまま渡すと送信前に必ず中断される。
-	p.deliver(host, sendID, envelope)
+	if err := p.deliver(ctx, host, sendID, envelope); err != nil {
+		return "", err
+	}
 	return sendID, nil
 }
 
@@ -326,23 +326,25 @@ type peerJob struct {
 // **プロセス内で完結させない (#2819)。** time.Sleep のループだと再起動を
 // またげず、デプロイのたびに送信中のものが消える。再送の回数と間隔はキューが
 // 持つので、ここは 1 回積むだけ。
-func (p *pluginPeer) deliver(host, sendID string, envelope []byte) {
+//
+// **失敗は呼び出し元へ返す。** 積むのは Send の中で同期に終わるので、
+// 失敗はその場で分かる。捨てると「Send が id を返したのに何も送られていない」
+// 状態になり、`再起動をまたぐ` という約束がこの経路でだけ嘘になる。
+func (p *pluginPeer) deliver(ctx context.Context, host, sendID string, envelope []byte) error {
 	if p.deps.enqueuer == nil {
-		// **黙って捨てない。** 配線が落ちていることに運営者が気付ける経路を残す。
-		p.logger.Warn("peer を積めません (queue client が未配線)", "host", host, "id", sendID)
-		return
+		return fmt.Errorf("plugin peer: 送信を積めません (queue client が未配線です)")
 	}
 	body, err := json.Marshal(peerJob{Host: host, SendID: sendID, Envelope: envelope})
 	if err != nil {
-		p.logger.Error("peer のジョブを JSON 化できません", "host", host, "id", sendID, "err", err)
-		return
+		return fmt.Errorf("plugin peer: ジョブを JSON 化できません: %w", err)
 	}
-	if err := p.deps.enqueuer.EnqueuePluginPeer(context.Background(), p.name, body,
+	if err := p.deps.enqueuer.EnqueuePluginPeer(ctx, p.name, body,
 		driver.WithMaxRetry(peerMaxRetry),
 		driver.WithBackoff(driver.BackoffExponential, peerRetryBase),
 	); err != nil {
-		p.logger.Warn("peer を積めませんでした", "host", host, "id", sendID, "err", err)
+		return fmt.Errorf("plugin peer: 送信を積めません: %w", err)
 	}
+	return nil
 }
 
 // deliverOnce performs one attempt and reports whether it may be retried.
@@ -350,6 +352,15 @@ func (p *pluginPeer) deliver(host, sendID string, envelope []byte) {
 // **恒久的な失敗では再試行させない。** 送り直しても同じ答えになるものは
 // driver.SkipRetry を包んで返す。
 func (p *pluginPeer) deliverOnce(job peerJob) error {
+	// **dispatch 時にもブロックを見る。** 積んでから実際に飛ぶまでには
+	// バックオフ 60 秒・queue の一時停止・再起動が挟まる。その間にブロック
+	// しても、積み済みのジョブは署名付きで飛んでしまう (AP の deliver が
+	// #1404 で同じ穴を塞いでいる)。
+	if p.blocked(job.Host) {
+		p.logger.Warn("peer の送信を取りやめました (ブロック済み)", "host", job.Host, "id", job.SendID)
+		return fmt.Errorf("%w: %s はブロックされています", driver.SkipRetry, job.Host)
+	}
+
 	reply, err := p.post(p.deps.peerURL(job.Host, p.name), job.Envelope)
 	if err == nil {
 		p.dispatchReply(job.Host, job.SendID, reply)
@@ -439,6 +450,15 @@ func (p *pluginPeer) post(url string, body []byte) (json.RawMessage, error) {
 }
 
 func (p *pluginPeer) dispatchReply(host, sendID string, reply json.RawMessage) {
+	// **panic を回収する。** ここを抜けるとキューがジョブを失敗として
+	// 積み直し、**POST が成功しているのに同じ要求をもう一度送る**。
+	// goroutine で回していた頃は goSafe が受けていたので、同じ位置に置く。
+	defer func() {
+		if r := recover(); r != nil {
+			p.logger.Error("peer の応答処理で panic しました", "host", host, "id", sendID, "panic", r)
+		}
+	}()
+
 	fn := p.replyFn()
 	if fn == nil || len(reply) == 0 {
 		return
@@ -533,7 +553,7 @@ func (p *pluginPeer) echoHandler() echo.HandlerFunc {
 
 // peerTooManyRequests answers a throttled caller.
 //
-// **Retry-After を付ける。** 送信側は失敗を 2 秒 / 10 秒 / 60 秒で再送するので、
+// **Retry-After を付ける。** 送信側は失敗を 15 秒 / 30 秒 / 60 秒で再送するので、
 // 目安が無いと同じ勢いで戻ってくる。
 func peerTooManyRequests(c echo.Context) error {
 	c.Response().Header().Set("Retry-After", "60")

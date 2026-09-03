@@ -117,7 +117,12 @@ func TestPluginPeer_DeliverOnceDoesNotRetryPermanentFailures(t *testing.T) {
 func TestPluginPeer_DeliverOnceRetriesTransientFailures(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
+			// **POST の回数を数える。** 数えないと、deliverOnce の中に
+			// time.Sleep の再送ループを戻す変異を検出できない (実測で
+			// 217 秒かかったのに全部緑だった)。
+			var posts atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				posts.Add(1)
 				w.WriteHeader(status)
 			}))
 			defer srv.Close()
@@ -134,6 +139,8 @@ func TestPluginPeer_DeliverOnceRetriesTransientFailures(t *testing.T) {
 				Envelope: []byte(`{"id":"id1","payload":1}`)})
 			require.Error(t, err)
 			assert.NotErrorIs(t, err, driver.SkipRetry, "キューに積み直させる")
+			// **1 回だけ。** 再送はキューの仕事なので、ここでは回さない。
+			assert.Equal(t, int32(1), posts.Load(), "deliverOnce の中で再送しない")
 		})
 	}
 }
@@ -170,9 +177,15 @@ func TestPluginPeer_SendEnqueues(t *testing.T) {
 	assert.True(t, o.MaxRetrySet)
 	assert.Equal(t, driver.BackoffExponential, o.BackoffType)
 	assert.Equal(t, peerRetryBase, o.BackoffDelay)
+	// **値そのものを固定する。** 下限だけだと 5 分に変えても通ってしまい、
+	// 仕様書の表 (15 / 30 / 60 秒) と黙って乖離する。
 	assert.Equal(t, 3, peerMaxRetry, "従来の 3 回と同じ")
-	assert.GreaterOrEqual(t, peerRetryBase, 2*time.Second, "1 回目の間隔が従来以上")
-	assert.GreaterOrEqual(t, peerRetryBase*4, 60*time.Second, "3 回目の間隔が従来以上")
+	assert.Equal(t, 15*time.Second, peerRetryBase)
+	// 指数バックオフは base * 2^(n-1) なので 15 / 30 / 60 秒。従来は 2 / 10 / 60 秒。
+	for i, want := range []time.Duration{2 * time.Second, 10 * time.Second, 60 * time.Second} {
+		got := peerRetryBase * (1 << i)
+		assert.GreaterOrEqualf(t, got, want, "%d 回目の間隔が従来以上", i+1)
+	}
 }
 
 // キューのジョブから 1 回分を実行する。読めないものは積み直させない。
@@ -227,4 +240,83 @@ type fakePeerEnqueuer struct{ calls []peerEnqueueCall }
 func (e *fakePeerEnqueuer) EnqueuePluginPeer(_ context.Context, plugin string, body []byte, opts ...driver.EnqueueOption) error {
 	e.calls = append(e.calls, peerEnqueueCall{plugin: plugin, body: body, opts: opts})
 	return nil
+}
+
+// **積めなかったら Send がエラーを返す (#2819)。** 積むのは Send の中で同期に
+// 終わるので失敗はその場で分かる。捨てると「id を返したのに何も送られていない」
+// 状態になり、`再起動をまたぐ` という約束がこの経路でだけ嘘になる。
+func TestPluginPeer_SendReportsEnqueueFailure(t *testing.T) {
+	p := testPeer(t, &pluginPeerDeps{
+		remote:   &fakePeerLister{byHost: map[string][]string{"other.example": {"demo"}}},
+		idGen:    mustGenerator(t),
+		enqueuer: &failingPeerEnqueuer{},
+	})
+
+	id, err := p.Send(context.Background(), "other.example", map[string]int{"a": 1})
+	require.Error(t, err)
+	assert.Empty(t, id, "積めていないのに id を返さない")
+
+	// enqueuer 未配線も同じ扱い。
+	p2 := testPeer(t, &pluginPeerDeps{
+		remote: &fakePeerLister{byHost: map[string][]string{"other.example": {"demo"}}},
+		idGen:  mustGenerator(t),
+	})
+	_, err = p2.Send(context.Background(), "other.example", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "未配線")
+}
+
+// **積んでから飛ぶまでにブロックされることがある。** バックオフ 60 秒・queue の
+// 一時停止・再起動が挟まるので、enqueue 時の判定だけでは足りない (AP の deliver が
+// #1404 で同じ穴を塞いでいる)。
+func TestPluginPeer_DeliverOnceRechecksBlock(t *testing.T) {
+	var posts atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		posts.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	key, _ := testPeerKeypair(t)
+	p := testPeer(t, &pluginPeerDeps{
+		client:  srv.Client(),
+		signer:  &fakePeerSigner{key: key},
+		blocker: &fakePeerBlocker{blocked: map[string]bool{"other.example": true}},
+		urlFor:  func(_, plugin string) string { return srv.URL + peerAPIPrefix + plugin + peerPath },
+	})
+
+	err := p.deliverOnce(peerJob{Host: "other.example", SendID: "id1",
+		Envelope: []byte(`{"id":"id1","payload":1}`)})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.Equal(t, int32(0), posts.Load(), "ブロック済みなら接続もしない")
+}
+
+// **OnReply の panic を回収する。** 抜けるとキューがジョブを失敗として積み直し、
+// POST が成功しているのに同じ要求をもう一度送ることになる。
+func TestPluginPeer_DispatchReplyRecoversPanic(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	key, _ := testPeerKeypair(t)
+	p := testPeer(t, &pluginPeerDeps{
+		client: srv.Client(),
+		signer: &fakePeerSigner{key: key},
+		urlFor: func(_, plugin string) string { return srv.URL + peerAPIPrefix + plugin + peerPath },
+	})
+	p.OnReply(func(context.Context, string, string, json.RawMessage) error {
+		panic("プラグインのバグ")
+	})
+
+	err := p.deliverOnce(peerJob{Host: "other.example", SendID: "id1",
+		Envelope: []byte(`{"id":"id1","payload":1}`)})
+	assert.NoError(t, err, "POST は成功しているので、キューに積み直させない")
+}
+
+type failingPeerEnqueuer struct{}
+
+func (*failingPeerEnqueuer) EnqueuePluginPeer(context.Context, string, []byte, ...driver.EnqueueOption) error {
+	return assertAnError{}
 }

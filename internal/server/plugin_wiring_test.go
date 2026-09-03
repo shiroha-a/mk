@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -1517,4 +1518,100 @@ func TestPluginJobQueueNames_IncludesPeered(t *testing.T) {
 		{Name: "plain", Routes: func(plugin.Context, plugin.Router) error { return nil }},
 	}, nil)
 	assert.Equal(t, []string{"plugin:peeronly"}, got)
+}
+
+// 登録漏れを運営者に知らせる唯一の経路 (#2819)。**症状は相手側にしか出ない**
+// ので、こちらのログが無いと気付けない。
+func TestSetupPlugins_WarnsOnMissingPeerHandlers(t *testing.T) {
+	tests := []struct {
+		name       string
+		role       config.ProcessRole
+		register   func(plugin.Peer)
+		wantSubstr []string
+		wantNone   bool
+	}{
+		{
+			name: "server role without Handle",
+			role: config.RoleServer,
+			register: func(p plugin.Peer) {
+				p.OnReply(func(context.Context, string, string, json.RawMessage) error { return nil })
+			},
+			wantSubstr: []string{"受信ハンドラ"},
+		},
+		{
+			name: "queue role without OnReply",
+			role: config.RoleQueue,
+			register: func(p plugin.Peer) {
+				p.Handle(func(context.Context, string, json.RawMessage) (any, error) { return nil, nil })
+			},
+			wantSubstr: []string{"応答ハンドラ"},
+		},
+		{
+			name:       "both roles with nothing registered",
+			role:       config.RoleBoth,
+			register:   func(plugin.Peer) {},
+			wantSubstr: []string{"受信ハンドラ", "応答ハンドラ"},
+		},
+		{
+			name: "both registered",
+			role: config.RoleBoth,
+			register: func(p plugin.Peer) {
+				p.Handle(func(context.Context, string, json.RawMessage) (any, error) { return nil, nil })
+				p.OnReply(func(context.Context, string, string, json.RawMessage) error { return nil })
+			},
+			wantNone: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			restore := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+			defer slog.SetDefault(restore)
+
+			s, api := newPluginTestServer(tt.role)
+			s.peerDeps = &pluginPeerDeps{selfHost: "self.example"}
+			s.queueServer = queue.NewServer(newFakeQueueDriver())
+
+			def := plugin.Definition{
+				Name: "demo", APIVersion: plugin.APIVersion, Peered: true,
+				Peer: func(_ plugin.Context, p plugin.Peer) error { tt.register(p); return nil },
+			}
+			require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+
+			got := buf.String()
+			if tt.wantNone {
+				assert.NotContains(t, got, "plugin peer:", "登録済みなら黙っていること")
+				return
+			}
+			for _, want := range tt.wantSubstr {
+				assert.Containsf(t, got, want, "%q を含む warn が出ること", want)
+			}
+		})
+	}
+}
+
+// **既存プラグイン (Routes の中で登録) が RoleBoth で warn を出さないこと。**
+// 出ると全員が毎回 warn を見ることになる。
+func TestSetupPlugins_NoPeerWarnForLegacyRoutesRegistration(t *testing.T) {
+	var buf bytes.Buffer
+	restore := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	defer slog.SetDefault(restore)
+
+	s, api := newPluginTestServer(config.RoleBoth)
+	s.peerDeps = &pluginPeerDeps{selfHost: "self.example"}
+	s.queueServer = queue.NewServer(newFakeQueueDriver())
+
+	def := plugin.Definition{
+		Name: "demo", APIVersion: plugin.APIVersion, Peered: true,
+		Routes: func(ctx plugin.Context, _ plugin.Router) error {
+			p := ctx.Peer()
+			p.Handle(func(context.Context, string, json.RawMessage) (any, error) { return nil, nil })
+			p.OnReply(func(context.Context, string, string, json.RawMessage) error { return nil })
+			return nil
+		},
+	}
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+	assert.NotContains(t, buf.String(), "plugin peer:")
 }

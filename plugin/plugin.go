@@ -88,7 +88,8 @@ type Definition struct {
 	// 登録していると、ロールを分割した構成で応答が届かない。[Peer.Handle] も
 	// 同じ理由でここへ置く。
 	//
-	// 呼ばれる順は Migrations の後、Routes / Jobs より前。
+	// 呼ばれる順は Migrations の後、EffectivePolicies / Routes / Jobs より前。
+	// Routes / Jobs とは別の (ロールを見ない) 段階で呼ばれる。
 	Peer func(Context, Peer) error
 
 	// PeerMaxBody caps the peer request and reply body this plugin accepts,

@@ -214,14 +214,19 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		// 症状は「応答が来ない」「相手に 501」で、どちらもこちら側には出ない。
 		if def.Peered {
 			if s.role.RunsServer() && peer.handlerFn() == nil {
-				slog.Warn("plugin declares Peered but registered no inbound handler on this role",
+				// **このロールでは Routes も既に走っている**ので、ここに
+				// 来るのは「どこにも Handle を登録していない」場合だけ。
+				// 相手には 501 が返る。
+				slog.Warn("plugin peer: 受信ハンドラが登録されていません",
 					"name", def.Name, "role", s.role,
-					"hint", "Definition.Peer の中で Peer.Handle を呼ぶこと (Routes の中だと queue ロールで登録されない)")
+					"hint", "Peer.Handle をどこかで呼ぶこと (推奨は Definition.Peer)")
 			}
 			if s.role.RunsQueue() && peer.replyFn() == nil {
-				slog.Warn("plugin declares Peered but registered no reply handler on this role",
+				// 送信の POST は queue ロールで走るので、OnReply を Routes の
+				// 中で登録しているとここで無い状態になる。応答が届かない。
+				slog.Warn("plugin peer: このロールに応答ハンドラが登録されていません",
 					"name", def.Name, "role", s.role,
-					"hint", "Definition.Peer の中で Peer.OnReply を呼ぶこと (送信の POST は queue ロールで走る)")
+					"hint", "Peer.OnReply を Definition.Peer の中で呼ぶこと (Routes の中だと queue ロールで登録されない)")
 			}
 		}
 

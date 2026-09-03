@@ -24,6 +24,7 @@ plugin/plugintest: func (*Harness) DeliverPeerReply(string, string, any) error
 plugin/plugintest: func (*Harness) EffectivePolicies(plugin.Definition) plugin.EffectivePolicyRegistration
 plugin/plugintest: func (*Harness) Enqueues() []Enqueued
 plugin/plugintest: func (*Harness) Jobs(plugin.Definition) *JobSet
+plugin/plugintest: func (*Harness) Peer(plugin.Definition)
 plugin/plugintest: func (*Harness) PeerSends() []PeerSend
 plugin/plugintest: func (*Harness) Routes(plugin.Definition) Handlers
 plugin/plugintest: func (*Harness) WithAPI(plugin.API) *Harness

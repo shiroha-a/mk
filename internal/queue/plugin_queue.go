@@ -97,8 +97,11 @@ func (c *Client) EnqueuePluginPeer(ctx context.Context, plugin string, body []by
 	if !pluginNamePattern.MatchString(plugin) {
 		return fmt.Errorf("queue: プラグイン名 %q が不正です", plugin)
 	}
+	// **再試行の既定を明示する。** 渡し忘れると mkq は 0 回・asynq は 25 回と
+	// driver で挙動が割れる (EnqueuePlugin と同じ理由)。
 	all := append([]driver.EnqueueOption{
 		driver.WithQueue(PluginQueueName(plugin)),
+		driver.WithMaxRetry(0),
 	}, opts...)
 	return c.inner.Enqueue(ctx, PluginPeerTaskType(plugin), body, all...)
 }

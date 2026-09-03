@@ -503,3 +503,43 @@ func TestHarness_EnqueueRequiresJobs(t *testing.T) {
 	assert.JSONEq(t, `{"a":1}`, string(got[0].Payload))
 	assert.Equal(t, time.Minute, got[0].Options.Delay)
 }
+
+// **Definition.Peer で登録したものが DeliverPeer から叩けること (#2819)。**
+// doc は登録を Peer へ移すよう指示しているので、ハーネスが同じ形を実行できないと
+// 「移したらテストが落ちる」ことになる。
+func TestHarness_PeerCallback(t *testing.T) {
+	var gotFrom string
+	var gotReply string
+	def := plugin.Definition{
+		Name: "demo", APIVersion: plugin.APIVersion, Peered: true,
+		Peer: func(_ plugin.Context, p plugin.Peer) error {
+			p.Handle(func(_ context.Context, from string, payload json.RawMessage) (any, error) {
+				gotFrom = from
+				return map[string]any{"echo": json.RawMessage(payload)}, nil
+			})
+			p.OnReply(func(_ context.Context, _, _ string, reply json.RawMessage) error {
+				gotReply = string(reply)
+				return nil
+			})
+			return nil
+		},
+	}
+
+	h := plugintest.New(t)
+	h.Peer(def)
+
+	res, err := h.DeliverPeer("other.example", map[string]int{"a": 1})
+	require.NoError(t, err)
+	assert.Equal(t, "other.example", gotFrom)
+	assert.NotNil(t, res)
+
+	require.NoError(t, h.DeliverPeerReply("other.example", "id1", map[string]int{"b": 2}))
+	assert.JSONEq(t, `{"b":2}`, gotReply)
+}
+
+// Peer が nil でも落ちない (宣言していないプラグインもハーネスに通せる)。
+func TestHarness_PeerCallbackNil(t *testing.T) {
+	h := plugintest.New(t)
+	h.Peer(plugin.Definition{Name: "demo", APIVersion: plugin.APIVersion})
+	assert.Empty(t, h.PeerSends())
+}

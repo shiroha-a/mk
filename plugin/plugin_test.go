@@ -281,3 +281,21 @@ func TestAPIError(t *testing.T) {
 	// プラグイン側で原因の切り分けができない。
 	assert.Contains(t, msg, "NO_SUCH_NOTE")
 }
+
+// Peer は Peered とセットでないと効かない。宣言しても無視されると
+// 「設定したつもり」で通ってしまう。
+func TestDefinition_Validate_PeerRequiresPeered(t *testing.T) {
+	base := Definition{Name: "demo", APIVersion: APIVersion}
+
+	withPeer := base
+	withPeer.Peer = func(Context, Peer) error { return nil }
+	err := withPeer.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Peered")
+
+	withPeer.Peered = true
+	assert.NoError(t, withPeer.Validate(), "Peer だけでも成立する (受信専用のプラグイン)")
+
+	// Routes / Jobs / EffectivePolicies / Peer のいずれも無ければエラー。
+	assert.Error(t, base.Validate())
+}

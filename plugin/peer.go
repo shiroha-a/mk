@@ -67,6 +67,9 @@ type Peer interface {
 	// 上限に達した / 相手がプラグインを外した場合は呼ばれない。mk-go は
 	// 「いつか必ず届く」を約束しないので、取り直しはプラグイン側が期限を
 	// 持って行うこと。
+	//
+	// **複数回呼ばれることがある。** 送信はキューに載るので、worker が途中で
+	// 落ちれば同じ交換が積み直される。加算や追記はそのままでは二重になる。
 	OnReply(fn PeerReplyHandler)
 
 	// Has reports whether host runs this plugin.
