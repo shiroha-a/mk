@@ -15,8 +15,23 @@
 # nginx の 80 番だけ。`ss -tlnp | grep -E ':(5432|6379|3000)'` が空なら
 # TCP を閉じきれている証拠になる。
 
+# ログの上限 (#2828)。
+#
+# **既定の json-file はローテーションしない。** 指定しないとコンテナが動いている
+# あいだログが増え続け、ディスクを埋める。50 MiB x 3 は「直近の障害を追える量」と
+# 「1 サービスあたり最大 150 MiB」の折り合いで、`docker logs` が実用的に読める幅。
+#
+# **既存のコンテナには効かない。** この設定は生成時に固定されるので、
+# `docker compose up -d` で作り直すまで反映されない。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   postgres:
+    logging: *default-logging
     # pg_bigm (LIKE 部分一致を加速する GIN index 拡張) 入りの PostgreSQL 18
     # (#2514)。CREATE EXTENSION するまでは素の postgres:18-alpine と同じ挙動
     # なので、使わない場合もこのままでよい。有効化手順は docs/deployment.md。
@@ -51,6 +66,7 @@ services:
     restart: unless-stopped
 
   valkey:
+    logging: *default-logging
     image: valkey/valkey:8-alpine
     command: ["valkey-server", "/etc/valkey/valkey.conf"]
     volumes:
@@ -94,6 +110,7 @@ services:
   #  restart: unless-stopped
 
   mkgo:
+    logging: *default-logging
     build:
       context: .
       dockerfile: deploy/uds/Dockerfile.mkgo
@@ -141,6 +158,7 @@ services:
     restart: unless-stopped
 
   nginx:
+    logging: *default-logging
     image: nginx:1.27-alpine
     depends_on:
       mkgo:

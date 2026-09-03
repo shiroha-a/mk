@@ -21,8 +21,23 @@
 # 名になり、同名で動く本番を recreate しうる。
 name: mk-image
 
+# ログの上限 (#2828)。
+#
+# **既定の json-file はローテーションしない。** 指定しないとコンテナが動いている
+# あいだログが増え続け、ディスクを埋める。50 MiB x 3 は「直近の障害を追える量」と
+# 「1 サービスあたり最大 150 MiB」の折り合いで、`docker logs` が実用的に読める幅。
+#
+# **既存のコンテナには効かない。** この設定は生成時に固定されるので、
+# `docker compose up -d` で作り直すまで反映されない。
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "50m"
+    max-file: "3"
+
 services:
   app:
+    logging: *default-logging
     # MK_IMAGE で上書きできる。手元でビルドした image を試すときに使う。
     image: ${MK_IMAGE:-ghcr.io/shiroha-a/mk:bundled}
     ports:
@@ -53,6 +68,7 @@ services:
   # マイグレーションを適用する one-shot サービス。app は完走を待って起動する。
   # golang-migrate が適用済みバージョンを管理するので何度流しても冪等。
   migrate:
+    logging: *default-logging
     image: ${MK_IMAGE:-ghcr.io/shiroha-a/mk:bundled}
     entrypoint: ["/app/migrate"]
     command: ["-config", ".config/default.yml", "-direction", "up"]
@@ -68,6 +84,7 @@ services:
     restart: "no"
 
   db:
+    logging: *default-logging
     image: postgres:18-alpine
     environment:
       POSTGRES_DB: misskey
@@ -83,6 +100,7 @@ services:
     restart: unless-stopped
 
   redis:
+    logging: *default-logging
     image: redis:7-alpine
     volumes:
       - redis-data:/data

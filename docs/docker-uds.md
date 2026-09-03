@@ -115,6 +115,24 @@ docker compose -f compose.uds.yaml logs -f mkgo
 docker compose -f compose.uds.yaml logs -f nginx
 ```
 
+### ログの上限
+
+`compose.uds.yaml.example` は全サービスに **50 MiB × 3 世代**の上限を掛けている
+(`x-logging` アンカー)。Docker 既定の `json-file` はローテーションしないので、
+指定しないとディスクが埋まる。
+
+**既存のコンテナには効かない。** ログの設定は生成時に固定されるので、
+`docker compose -f compose.uds.yaml up -d` で作り直すまで反映されない。
+
+```sh
+docker inspect mk-mkgo-1 --format '{{.HostConfig.LogConfig.Config}}'
+# → map[max-file:3 max-size:50m]   効いている
+# → map[]                          効いていない
+```
+
+自分の `compose.uds.yaml` は gitignore されているので、`.example` を更新しても
+**自動では反映されない**。差分を手で取り込むこと。
+
 ## トラブルシューティング
 
 ### `third_party/misskey` 自体が空 (submodule 未初期化)

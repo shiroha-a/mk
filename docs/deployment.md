@@ -224,6 +224,27 @@ curl -i http://localhost/
 
 詳細は[UDSデプロイ](docker-uds.md)を参照。
 
+## コンテナログの上限
+
+配布する compose 3 つは、全サービスに **50 MiB × 3 世代**の上限を掛けている
+(`x-logging` アンカー)。1 サービスあたり最大 150 MiB。
+
+**Docker 既定の `json-file` はローテーションしない。** 指定しないとコンテナが
+動いているあいだログが増え続け、ディスクを埋める。
+
+```bash
+# 効いているか確認する
+docker inspect <コンテナ名> --format '{{.HostConfig.LogConfig.Config}}'
+# → map[max-file:3 max-size:50m]   効いている
+# → map[]                          効いていない (作り直しが要る)
+```
+
+**既存のコンテナには効かない。** ログの設定はコンテナ生成時に固定されるので、
+`docker compose up -d` で作り直すまで反映されない。上限を変えるときも同じ。
+
+値を変えるなら compose の `x-logging` を書き換える。ホスト全体に掛けたいなら
+`/etc/docker/daemon.json` の `log-opts` でもよいが、**compose 側の指定が優先される**。
+
 ## バイナリ直接実行
 
 ```bash
