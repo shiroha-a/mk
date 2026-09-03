@@ -113,6 +113,15 @@ func (l *nodeInfoPeerLister) Plugins(ctx context.Context, host string) ([]string
 	return kept, nil
 }
 
+// Forget drops the cached answer for host.
+//
+// 受け口が無いと分かったときに送信側が呼ぶ。次の問い合わせで引き直す。
+func (l *nodeInfoPeerLister) Forget(host string) {
+	l.mu.Lock()
+	delete(l.cache, host)
+	l.mu.Unlock()
+}
+
 // keepLocal drops names this instance does not run.
 func (l *nodeInfoPeerLister) keepLocal(names []string) []string {
 	var kept []string

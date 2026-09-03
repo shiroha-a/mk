@@ -71,6 +71,9 @@ const peerHandlerTimeout = 10 * time.Second
 
 // peerRetryDelays are the waits between delivery attempts.
 //
+// **恒久的な失敗では使わない。** 4xx (429 を除く) は送り直しても同じ答えに
+// なるので 1 回で止める (deliver 参照)。
+//
 // **プロセス内で完結させる (初版)。** キューに載せれば再起動をまたげるが、
 // queue.Client への公開と専用プロセッサが要る。プラグイン側は「応答が
 // 届かないこともある」前提で期限を持つ設計なので、まずはここまでにする。
@@ -116,6 +119,24 @@ type peerSigner interface {
 // peerPluginLister reports which plugins a remote host declares in nodeinfo.
 type peerPluginLister interface {
 	Plugins(ctx context.Context, host string) ([]string, error)
+	// Forget drops the cached answer for host.
+	//
+	// 受け口が無いと分かった (404) ときに呼ぶ。肯定キャッシュは 6 時間なので、
+	// 捨てないと相手がプラグインを外してからその間ずっと送り続ける。
+	Forget(host string)
+}
+
+// peerStatusError is a non-2xx response from the peer.
+type peerStatusError struct{ status int }
+
+func (e *peerStatusError) Error() string { return fmt.Sprintf("status %d", e.status) }
+
+// permanent reports whether retrying the same request cannot help.
+//
+// **429 と 5xx は時間で解ける。** それ以外の 4xx (受け口が無い / 署名が通らない /
+// ブロックされている / 大きすぎる) は、同じものを送り直しても同じ答えになる。
+func (e *peerStatusError) permanent() bool {
+	return e.status >= 400 && e.status < 500 && e.status != http.StatusTooManyRequests
 }
 
 // pluginPeerDeps is what the peer channel needs from the server.
@@ -150,6 +171,10 @@ type pluginPeer struct {
 	peered bool
 	deps   *pluginPeerDeps
 	logger *slog.Logger
+	// retryDelays は再送の待ち時間。nil なら peerRetryDelays。**テストが
+	// package 変数を差し替えないようにするためのもの** — 差し替えると、
+	// 別のテストが起こした goroutine と競合する。
+	retryDelays []time.Duration
 	// maxBody はこのプラグインの本文上限 (エンベロープ込み)。受け口側の
 	// 実効的な上限は global の BodyLimitByPath が同じ値で掛けており、ここは
 	// 送信側と応答の読み取りに効く。
@@ -299,6 +324,11 @@ type peerEnvelope struct {
 func (p *pluginPeer) deliver(host, sendID string, envelope []byte) {
 	url := p.deps.peerURL(host, p.name)
 
+	delays := p.retryDelays
+	if delays == nil {
+		delays = peerRetryDelays
+	}
+
 	var lastErr error
 	for attempt := 0; ; attempt++ {
 		reply, err := p.post(url, envelope)
@@ -307,10 +337,26 @@ func (p *pluginPeer) deliver(host, sendID string, envelope []byte) {
 			return
 		}
 		lastErr = err
-		if attempt >= len(peerRetryDelays) {
+
+		var se *peerStatusError
+		if errors.As(err, &se) {
+			if se.status == http.StatusNotFound && p.deps.remote != nil {
+				// **肯定キャッシュを捨てる。** 受け口が無いと分かったのに
+				// 覚えたままだと、6 時間のあいだ送り続ける。次の Send が
+				// nodeinfo を引き直して止まる。
+				p.deps.remote.Forget(host)
+			}
+			if se.permanent() {
+				// 送り直しても同じ答えになる。**無関係なインスタンスに
+				// こちらの都合でリクエストを重ねない** (この層の設計原則)。
+				break
+			}
+		}
+
+		if attempt >= len(delays) {
 			break
 		}
-		time.Sleep(peerRetryDelays[attempt])
+		time.Sleep(delays[attempt])
 	}
 	// **握りつぶさずログに出す。** 届かなかったことはプラグインには通知
 	// されないので (OnReply が呼ばれないだけ)、運営者が追える経路を残す。
@@ -349,7 +395,7 @@ func (p *pluginPeer) post(url string, body []byte) (json.RawMessage, error) {
 	defer res.Body.Close() //nolint:errcheck // 読み捨て
 
 	if res.StatusCode < 200 || res.StatusCode >= 300 {
-		return nil, fmt.Errorf("status %d", res.StatusCode)
+		return nil, &peerStatusError{status: res.StatusCode}
 	}
 	// **切り詰めない。** LimitReader で黙って先頭だけ返すと、OnReply に途中で
 	// 切れた JSON が渡る。1 バイト多く読んで超過を検出し、エラーにする。

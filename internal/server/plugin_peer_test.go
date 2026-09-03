@@ -55,8 +55,9 @@ func (b *fakePeerBlocker) IsAllowed(host string) bool {
 }
 
 type fakePeerLister struct {
-	byHost map[string][]string
-	err    error
+	forgotten map[string]int
+	byHost    map[string][]string
+	err       error
 }
 
 func (l *fakePeerLister) Plugins(_ context.Context, host string) ([]string, error) {
@@ -64,6 +65,14 @@ func (l *fakePeerLister) Plugins(_ context.Context, host string) ([]string, erro
 		return nil, l.err
 	}
 	return l.byHost[host], nil
+}
+
+// forgotten records Forget calls so tests can assert the cache is dropped.
+func (l *fakePeerLister) Forget(host string) {
+	if l.forgotten == nil {
+		l.forgotten = map[string]int{}
+	}
+	l.forgotten[host]++
 }
 
 func testIDGenerator(t *testing.T) id.Generator {

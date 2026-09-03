@@ -58,7 +58,11 @@ smoke 範囲外 (WebSocket / 複雑 mutation / federation delivery / cron / push
 未実装エンドポイントの応答は **method で分かれる**。GET は
 `404 UNKNOWN_API_ENDPOINT`、それ以外は `200 {}`。後者を 404 にしないのは、
 Misskey 公式フロントの一部ページが未登録エンドポイントの 404 で例外を投げる
-ため。いずれも warn ログ (`unimplemented API endpoint`) が出る。なお **upstream endpoint の未実装は現在ゼロ (coverage 100.0%、444/444)**。
+ため。**例外はプラグイン同士の通信の受け口** (`/api/plugin/<名前>/_peer`) で、
+method に関わらず 404 を返す (#2822。200 だと送信側が「受け口が無い」と
+「プラグインが空の応答を返した」を区別できない。詳細は
+[peer プロトコル](plugin-peer-protocol.md))。いずれも warn ログ
+(`unimplemented API endpoint`) が出る。なお **upstream endpoint の未実装は現在ゼロ (coverage 100.0%、444/444)**。
 
 ## 対応済みの互換性修正
 

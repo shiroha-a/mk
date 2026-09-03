@@ -59,8 +59,9 @@ type Peer interface {
 	// OnReply registers the receiver for replies to [Peer.Send].
 	//
 	// **届かないことがある。** 相手が落ちている / 応答しない / リトライの
-	// 上限に達した場合は呼ばれない。mk-go は「いつか必ず届く」を約束しない
-	// ので、取り直しはプラグイン側が期限を持って行うこと。
+	// 上限に達した / 相手がプラグインを外した場合は呼ばれない。mk-go は
+	// 「いつか必ず届く」を約束しないので、取り直しはプラグイン側が期限を
+	// 持って行うこと。
 	OnReply(fn PeerReplyHandler)
 
 	// Has reports whether host runs this plugin.

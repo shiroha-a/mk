@@ -189,6 +189,7 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		slog.Info("plugin loaded",
 			"name", def.Name, "version", def.Version,
 			"routes", def.Routes != nil && s.role.RunsServer(),
+			"peer", needsPeer,
 			"jobs", def.Jobs != nil && s.role.RunsQueue(),
 			"migrations", len(def.Migrations),
 			"schema", schema)
