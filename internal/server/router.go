@@ -21,7 +21,6 @@ import (
 	apiannouncements "github.com/shiroha-a/mk/internal/api/announcements"
 	"github.com/shiroha-a/mk/internal/api/antennas"
 	"github.com/shiroha-a/mk/internal/api/ap"
-	"github.com/shiroha-a/mk/internal/api/apierr"
 	apiapp "github.com/shiroha-a/mk/internal/api/app"
 	apiauth "github.com/shiroha-a/mk/internal/api/auth"
 	"github.com/shiroha-a/mk/internal/api/avatardecorations"
@@ -3536,17 +3535,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// GET 以外は意図的に 200 + 空オブジェクトのまま。未登録エンドポイントへの
 	// 404 は Misskey 公式フロントの一部ページで例外を投げてしまうため、
 	// 実装が出揃うまで pass-through にしている。実装漏れは warn ログで検知する。
-	api.Any("/*", func(c echo.Context) error {
-		slog.Warn("unimplemented API endpoint", "method", c.Request().Method, "path", c.Request().URL.Path)
-		if c.Request().Method == http.MethodGet {
-			return c.JSON(http.StatusNotFound, apierr.Error(
-				"UNKNOWN_API_ENDPOINT",
-				"Unknown API endpoint.",
-				"2ca3b769-540a-4f08-9dd5-b5a825b6d0f1",
-			))
-		}
-		return c.JSON(http.StatusOK, map[string]any{})
-	})
+	api.Any("/*", apiCatchall)
 
 	// フロントエンドアセット配信
 	// ビルド済みアセットがあれば静的配信、なければVite dev serverプロキシ

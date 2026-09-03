@@ -71,3 +71,28 @@ func TestPluginPeerRateLimiterIsWired(t *testing.T) {
 func squeezeSpaces(s string) string {
 	return regexp.MustCompile(` +`).ReplaceAllString(s, " ")
 }
+
+// catchall は名前付き関数を router から参照していないと効かない。
+//
+// **無名関数に戻しても build もテストも通る。** `apiCatchall` は package-level
+// なので使われなくなっても go vet は咎めず、直接呼ぶテストは緑のまま。落ちるのは
+// 「受け口の無いプラグインへの POST が 200 + {} に戻る」ところで、症状は
+// 相手側にしか出ない (#2822)。
+func TestAPICatchallIsWired(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "internal/server/router.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	var live []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if trimmed := strings.TrimSpace(line); !strings.HasPrefix(trimmed, "//") {
+			live = append(live, trimmed)
+		}
+	}
+	const wiring = `api.Any("/*", apiCatchall)`
+	if !strings.Contains(squeezeSpaces(strings.Join(live, "\n")), wiring) {
+		t.Errorf("internal/server/router.go に %q が無い (コメントは数えない)。"+
+			"peer の受け口が無いプラグインへの POST が 200 + {} に戻る", wiring)
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -74,6 +75,26 @@ const peerHandlerTimeout = 10 * time.Second
 // queue.Client への公開と専用プロセッサが要る。プラグイン側は「応答が
 // 届かないこともある」前提で期限を持つ設計なので、まずはここまでにする。
 var peerRetryDelays = []time.Duration{2 * time.Second, 10 * time.Second, 60 * time.Second}
+
+// isPluginPeerPath reports whether p addresses a plugin's reserved peer endpoint.
+//
+// **catchall で 404 を返す対象を絞るためのもの (#2822)。** プラグインの通常の
+// ルートまで 404 にすると、設定で無効化したプラグインのフロントエンドが
+// 200 + {} ではなく例外を受け取るようになる。peer の受け口は mk-go 同士でしか
+// 使わず `_` 予約なので、ここだけ切り替えれば UI の挙動は変わらない。
+func isPluginPeerPath(p string) bool {
+	// **長さを先に見る。** `/api/plugin/_peer` のように接頭辞と接尾辞が重なる
+	// 値があり、確かめずに切ると slice の範囲外で panic する (実測)。
+	if len(p) < len(peerAPIPrefix)+len(peerPath) {
+		return false
+	}
+	if !strings.HasPrefix(p, peerAPIPrefix) || !strings.HasSuffix(p, peerPath) {
+		return false
+	}
+	name := p[len(peerAPIPrefix) : len(p)-len(peerPath)]
+	// プラグイン名は 1 セグメント。空も弾く。
+	return name != "" && !strings.Contains(name, "/")
+}
 
 // peerActorResolver resolves the sender of an incoming request.
 type peerActorResolver interface {
@@ -516,4 +537,35 @@ func normalizePeerHost(host string) string {
 		return ""
 	}
 	return host
+}
+
+// apiCatchall answers requests to /api paths that no route claimed.
+//
+// **無名関数のままにしない。** router を組み立てるには DB / Redis が要るので、
+// ここに置いて直接呼べる形にしておかないと挙動をテストで固定できない
+// (実際 #2822 まで catchall のテストは 1 つも無かった)。
+func apiCatchall(c echo.Context) error {
+	path := c.Request().URL.Path
+	slog.Warn("unimplemented API endpoint", "method", c.Request().Method, "path", path)
+	// GET は upstream ApiServerService の `fastify.get('/*')` と同じく 404
+	// UNKNOWN_API_ENDPOINT。200 を返すと SPA catchall と区別が付かず、
+	// 「/api 配下なのに HTML が返る」状態をクライアントが検出できない。
+	//
+	// **プラグイン同士の通信の受け口も、GET 以外で 404 を返す (#2822)。**
+	// 200 + {} だと送信側から「受け口が無い」と「プラグインが空の応答を
+	// 返した」が区別できず、OnReply が偽の応答で呼ばれる。この経路は mk-go
+	// 同士でしか使わないので、公式フロント向けの pass-through とは事情が違う。
+	//
+	// それ以外の GET 以外は意図的に 200 + 空オブジェクトのまま。未登録
+	// エンドポイントへの 404 は Misskey 公式フロントの一部ページで例外を
+	// 投げてしまうため、実装が出揃うまで pass-through にしている。実装漏れは
+	// warn ログで検知する。
+	if c.Request().Method == http.MethodGet || isPluginPeerPath(path) {
+		return c.JSON(http.StatusNotFound, apierr.Error(
+			"UNKNOWN_API_ENDPOINT",
+			"Unknown API endpoint.",
+			"2ca3b769-540a-4f08-9dd5-b5a825b6d0f1",
+		))
+	}
+	return c.JSON(http.StatusOK, map[string]any{})
 }
