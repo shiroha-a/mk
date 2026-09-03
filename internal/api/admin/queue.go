@@ -517,7 +517,10 @@ func (h *Handler) queuePauseResume(c echo.Context, pause bool) error {
 	if err := c.Bind(&req); err != nil || req.Queue == "" {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("queue is required."))
 	}
-	if _, ok := queuePauseResumeTypes[req.Queue]; !ok {
+	// プラグイン専用のキュー (#2818) は名前が動的なので、静的な一覧では
+	// 判定できない。**接頭辞で通したうえで queueIsManaged に実在を確かめ
+	// させる** — 未運用の名前はその先で no-op 204 になる。
+	if _, ok := queuePauseResumeTypes[req.Queue]; !ok && !strings.HasPrefix(req.Queue, queue.PluginQueuePrefix) {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("invalid queue."))
 	}
 	if h.queueInspector == nil {

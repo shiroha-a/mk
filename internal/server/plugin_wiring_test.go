@@ -1245,3 +1245,141 @@ func TestSetupPlugins_NoPeerEndpointWithoutPeered(t *testing.T) {
 	s.echo.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/plugin/plain/_peer", nil))
 	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
+
+// プラグインのキューは **ジョブを宣言していて、かつ有効なもの**だけ。
+//
+// キューを 1 つ足すと worker が増える (mkqdriver の unknownQueueConcurrency)
+// ので、処理者を持たないプラグインのために枠を取らない。
+func TestPluginJobQueueNames(t *testing.T) {
+	jobs := func(plugin.Context, plugin.Jobs) error { return nil }
+	defs := []plugin.Definition{
+		{Name: "withjobs", Jobs: jobs},
+		{Name: "routesonly", Routes: func(plugin.Context, plugin.Router) error { return nil }},
+		{Name: "disabled", Jobs: jobs},
+		{Name: "another", Jobs: jobs},
+	}
+	got := pluginJobQueueNames(defs, map[string]map[string]any{
+		"disabled": {enabledKey: false},
+	})
+	assert.Equal(t, []string{"plugin:withjobs", "plugin:another"}, got)
+	assert.Nil(t, pluginJobQueueNames(nil, nil))
+}
+
+// enqueue は **ロールに関係なく**使える。worker を持たない web 専用プロセス
+// からでも積めないと、HTTP ハンドラから後回しにできない。
+func TestPluginContext_QueueIsAvailableOnServerRole(t *testing.T) {
+	s, api := newPluginTestServer(config.RoleServer)
+	s.queueClient = queue.NewClient(newFakeQueueDriver())
+
+	var got plugin.Queue
+	def := plugin.Definition{
+		Name: "demo", APIVersion: plugin.APIVersion,
+		Jobs: func(plugin.Context, plugin.Jobs) error { return nil },
+		Routes: func(ctx plugin.Context, _ plugin.Router) error {
+			got = ctx.Queue()
+			return nil
+		},
+	}
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+
+	require.NotNil(t, got, "Queue は Routes からも取れる")
+	require.NoError(t, got.Enqueue(context.Background(), "refresh", map[string]int{"a": 1}))
+}
+
+// enqueue のオプションが driver のオプションへ写ること。
+func TestPluginQueue_EnqueueOptions(t *testing.T) {
+	d := newFakeQueueDriver()
+	q := &pluginQueue{name: "demo", client: queue.NewClient(d), hasJobs: true}
+
+	require.NoError(t, q.Enqueue(context.Background(), "refresh", map[string]int{"a": 1},
+		plugin.WithDelay(30*time.Second),
+		plugin.WithMaxAttempts(3),
+		plugin.WithDedup(5*time.Minute),
+	))
+
+	require.Len(t, d.client.calls, 1)
+	call := d.client.calls[0]
+	assert.Equal(t, "plugin:demo:refresh", call.taskType)
+	assert.JSONEq(t, `{"a":1}`, string(call.payload))
+	o := driver.ApplyEnqueueOptions(call.opts)
+	assert.Equal(t, "plugin:demo", o.Queue)
+	assert.Equal(t, 30*time.Second, o.ProcessIn)
+	// **MaxAttempts は「初回を含む回数」、driver の MaxRetry は「初回を除く回数」。**
+	assert.Equal(t, 2, o.MaxRetry)
+	assert.Equal(t, 5*time.Minute, o.UniqueTTL)
+}
+
+// ジョブを宣言していないプラグインには積ませない。専用キューを作らないので、
+// 積めても誰も処理せず黙って溜まる。
+func TestPluginQueue_RefusesWithoutJobs(t *testing.T) {
+	q := &pluginQueue{name: "demo", client: queue.NewClient(newFakeQueueDriver()), hasJobs: false}
+	err := q.Enqueue(context.Background(), "refresh", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Definition.Jobs")
+}
+
+func TestPluginQueue_RejectsEmptyName(t *testing.T) {
+	q := &pluginQueue{name: "demo", client: queue.NewClient(newFakeQueueDriver()), hasJobs: true}
+	assert.Error(t, q.Enqueue(context.Background(), "", nil))
+}
+
+// cron も **プラグイン専用のキュー**へ入る。maintenance に相乗りしていると、
+// 1 つのプラグインが詰まったときに本体の定期処理まで止まる。
+func TestPluginJobs_ScheduleUsesPluginQueue(t *testing.T) {
+	d := newFakeQueueDriver()
+	j := &pluginJobs{name: "demo", scheduler: queue.NewScheduler(d)}
+	j.Schedule("0 * * * *", "refresh", map[string]int{"a": 1})
+	require.NoError(t, j.err)
+
+	require.Len(t, d.scheduler.calls, 1)
+	call := d.scheduler.calls[0]
+	assert.Equal(t, "plugin:demo:refresh", call.taskType)
+	assert.Equal(t, "0 * * * *", call.cron)
+	assert.Equal(t, "plugin:demo", driver.ApplyEnqueueOptions(call.opts).Queue)
+}
+
+// enqueue 側と handler 側が同じ task type を使うこと。**別々に組み立てると、
+// 片方を変えたときにジョブが「処理者なし」で捨てられる。**
+func TestPluginJobs_TaskTypeMatchesEnqueue(t *testing.T) {
+	j := &pluginJobs{name: "demo"}
+	assert.Equal(t, queue.PluginTaskType("demo", "refresh"), j.taskType("refresh"))
+}
+
+type fakeQueueDriver struct {
+	driver.Driver
+	client    *fakeQueueClient
+	scheduler *fakeQueueScheduler
+}
+
+func newFakeQueueDriver() *fakeQueueDriver {
+	return &fakeQueueDriver{client: &fakeQueueClient{}, scheduler: &fakeQueueScheduler{}}
+}
+
+func (d *fakeQueueDriver) Client() driver.Client       { return d.client }
+func (d *fakeQueueDriver) Inspector() driver.Inspector { return nil }
+func (d *fakeQueueDriver) Scheduler() driver.Scheduler { return d.scheduler }
+
+type fakeQueueCall struct {
+	taskType string
+	payload  []byte
+	opts     []driver.EnqueueOption
+	cron     string
+}
+
+type fakeQueueClient struct{ calls []fakeQueueCall }
+
+func (c *fakeQueueClient) Enqueue(_ context.Context, taskType string, payload []byte, opts ...driver.EnqueueOption) error {
+	c.calls = append(c.calls, fakeQueueCall{taskType: taskType, payload: payload, opts: opts})
+	return nil
+}
+func (c *fakeQueueClient) Close() error { return nil }
+
+type fakeQueueScheduler struct {
+	driver.Scheduler
+	calls []fakeQueueCall
+}
+
+func (s *fakeQueueScheduler) Register(cron, taskType string, payload []byte, opts ...driver.EnqueueOption) error {
+	s.calls = append(s.calls, fakeQueueCall{cron: cron, taskType: taskType, payload: payload, opts: opts})
+	return nil
+}

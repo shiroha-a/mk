@@ -8,7 +8,11 @@ import (
 // Jobs registers a plugin's background work.
 //
 // ジョブ名は `plugin:<プラグイン名>:<ジョブ名>` として queue 上の task type に
-// なる。本体の task type と衝突しないよう、名前空間は mk-go 側で付ける。
+// なり、`plugin:<プラグイン名>` という専用のキューで動く。本体の task type と
+// 衝突しないよう、名前空間は mk-go 側で付ける。
+//
+// 任意のタイミングで積むには [Context.Queue] を使う。**Routes からも呼べる**
+// ので、HTTP ハンドラの中で重い処理を後回しにできる。
 type Jobs interface {
 	// Handle registers the handler for a named job.
 	Handle(name string, h JobHandler)
@@ -16,18 +20,19 @@ type Jobs interface {
 	// Schedule runs the named job on a cron expression (5-field, UTC).
 	// The job must also be registered with Handle.
 	//
-	// 定期取得のような用途が主目的。**任意のタイミングで enqueue する経路は
-	// 用意していない** — retry / 重複排除 / 優先度といった queue の意味論を
-	// 公開すると、それ自体が契約になって内部を変えられなくなる。
-	// プロセス内で完結する非同期処理は [Context.Go] で足りる。
+	// 定期取得のような用途。任意のタイミングで積むなら [Context.Queue]、
+	// プロセス内で完結してよい非同期処理なら [Context.Go]。
 	Schedule(cron string, name string, payload any)
 }
 
-// JobHandler processes one job. Returning an error fails the job; plugin
-// jobs are registered with no retries, so it is not retried.
+// JobHandler processes one job. Returning an error fails the job.
+//
+// 再試行は既定で無し。[Queue.Enqueue] に [WithMaxAttempts] を渡したものだけが
+// 再試行される (cron は常に再試行しない)。
 //
 // **ctx を尊重すること。** 1 回の実行には既定 1 時間の上限があり
-// (#2658、queueHandlerDeadlineSeconds)、超えると mk-go は待つのをやめる。
+// (#2658、queueHandlerDeadlineSeconds。プラグインのジョブにも同じ値が効く)、
+// 超えると mk-go は待つのをやめる。
 // ctx を見ていればそこで正常終了できるが、無視していると goroutine が
 // 残り続ける (Go では goroutine を殺せない)。詳細は
 // docs/plugins/authoring.md。

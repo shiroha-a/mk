@@ -233,7 +233,37 @@ func jobs(ctx plugin.Context, j plugin.Jobs) error {
 }
 ```
 
-task type は `plugin:<name>:<job>` として名前空間が付く。maintenance キューで動くので、遅い処理が連合の配送を止めることはない。
+task type は `plugin:<name>:<job>` として名前空間が付き、**プラグインごとの専用キュー
+`plugin:<name>`** で動く。遅い処理が連合の配送を止めることはないし、他のプラグインの
+巻き添えにもならない。admin/queue から per-queue に一時停止・再開もできる。
+
+### 任意のタイミングで積む
+
+`ctx.Queue()` から積める。**`Routes` からも `Jobs` からも呼べる**ので、HTTP ハンドラの
+中で重い処理を後回しにできる。
+
+```go
+func routes(ctx plugin.Context, r plugin.Router) error {
+	r.POST("/refresh", func(req plugin.Request) (any, error) {
+		err := ctx.Queue().Enqueue(req.Context(), "prune", map[string]string{"uid": req.UserID()},
+			plugin.WithDedup(5*time.Minute),  // 同じ中身の二重起動を抑える
+			plugin.WithDelay(10*time.Second), // すぐには走らせない
+			plugin.WithMaxAttempts(3),        // 初回を含む回数
+		)
+		return nil, err
+	})
+}
+```
+
+| | |
+|---|---|
+| 名前 | `Jobs.Handle` に登録したものと同じもの。登録が無い名前で積むと処理者なしとして失敗する (再試行はしない) |
+| `Definition.Jobs` | **宣言していないと積めない** (エラーになる)。専用キューを作らないので、積めても誰も処理しないため |
+| 再試行 | **既定は無し。** 冪等かどうかはプラグインしか知らないので、`WithMaxAttempts` で明示する |
+| ロール | 積むのはどのプロセスからでもできる。処理するのは queue ロールのプロセスだけ |
+
+worker の起動・停止時の待ち合わせ・実行時間の上限は mk-go が持つ。**プラグインが自分で
+worker を起こす経路は用意しない** — プラグインの数だけ同じバグを書くことになる。
 
 **ただし 1 回の実行に上限がある。** mk-go は job の handler を既定 1 時間で
 打ち切る (#2658、`queueHandlerDeadlineSeconds`)。超えると job は失敗扱いになり、
@@ -246,7 +276,7 @@ handler 自体は止まらない** (Go では goroutine を殺せない) ので�
 `ctx` は必ず尊重すること — 尊重していれば打ち切り時に正常終了でき、goroutine が
 残らない。
 
-**任意のタイミングで enqueue する経路は無い。** プロセス内で完結する非同期処理は `ctx.Go()` を使う（recover 付き）。
+キューに載せるほどでもない、プロセス内で完結する非同期処理は `ctx.Go()` を使う（recover 付き）。**再起動をまたがない**ので、跨いでほしい処理はキューへ。
 
 起動中に呼んだ`ctx.Go()`は、全pluginのstorage、migration、`EffectivePolicies`、`Routes`、`Jobs`とhost側のroute配線が成功するまで開始されない。起動に失敗した場合は保留した処理を破棄する。起動成功後の呼び出しは直ちに開始する。cancelやdrainは提供しないため、正常終了時の停止が必要な処理はplugin側で終了条件を持つこと。
 
@@ -655,6 +685,7 @@ type Context interface
   Storage() Storage
   Config() Config
   Peer() Peer
+  Queue() Queue
   Go(func())
 
 type Peer interface
@@ -665,6 +696,20 @@ type Peer interface
 
 type PeerHandler func(context.Context, string, json.RawMessage) (any, error)
 type PeerReplyHandler func(context.Context, string, string, json.RawMessage) error
+
+type Queue interface
+  Enqueue(context.Context, string, any, ...EnqueueOption) error
+
+type EnqueueOptions struct
+  Delay time.Duration
+  MaxAttempts int
+  DedupTTL time.Duration
+
+type EnqueueOption func(*EnqueueOptions)
+
+func WithDelay(time.Duration) EnqueueOption
+func WithMaxAttempts(int) EnqueueOption
+func WithDedup(time.Duration) EnqueueOption
 
 type Router interface
   GET(string, Handler)

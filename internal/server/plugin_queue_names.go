@@ -1,0 +1,24 @@
+package server
+
+import (
+	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/plugin"
+)
+
+// pluginJobQueueNames returns the queues the worker must consume for the
+// installed plugins (#2818).
+//
+// **ジョブを宣言したものだけ。** キューを 1 つ足すと worker が 2 本増える
+// (mkqdriver の unknownQueueConcurrency) ので、処理者を持たないプラグインの
+// ために枠を取らない。無効化したプラグインも対象外 — ハンドラが登録されない
+// ので、積んでも誰も処理しない。
+func pluginJobQueueNames(plugins []plugin.Definition, settings map[string]map[string]any) []string {
+	var names []string
+	for _, def := range plugins {
+		if def.Jobs == nil || !pluginEnabled(settings[def.Name]) {
+			continue
+		}
+		names = append(names, def.Name)
+	}
+	return queue.PluginQueueNames(names)
+}

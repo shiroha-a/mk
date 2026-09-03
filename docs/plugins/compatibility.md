@@ -28,6 +28,14 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 
 `Definition.EffectivePolicies`と関連型の追加はこのadditive契約に従い、`Validate`もRoutes、Jobs、EffectivePoliciesのいずれかを要求する形へ緩和するだけなので、`APIVersion`は1のまま維持する。
 
+`Context.Queue()`と`plugin.Queue` / `EnqueueOption`の追加も同じ扱い。`Context`はmk-goが実装してプラグインは受け取るだけなので、メソッドが増えてもプラグインは壊れない（プラグイン側が`Context`を自前で実装している場合はこの限りではないが、それはサポート対象外）。
+
+### キューの実装との関係
+
+**`plugin.Queue`はmkqを再公開しない。** 本体のworkerはペイロードを`{type, body}`で包んで`type`でdispatchするので、素のmkqハンドルから積んだジョブは処理者が見つからない。包み方は本体のenqueueとworkerの間の契約であって、プラグインに晒す面ではない（`internal/queue/driver/mkqdriver`）。
+
+したがって**`plugin.APIVersion`はmkqのメジャー版に連動しない**。mkqを差し替えても`plugin.Queue`の形が変わらなければ、プラグインは再ビルドだけで動く。逆に`EnqueueOptions`のフィールドの意味を変えるときは、mkqが同じままでも破壊的変更になる。
+
 ### 破壊的変更（メジャー）
 
 既存のシグネチャ変更、削除、意味の変更。

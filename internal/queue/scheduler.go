@@ -127,9 +127,11 @@ func (s *Scheduler) RegisterChunkedUploadGCJob() error {
 // Unique TTL を設けないのは cron 周期が任意だから。周期より長い TTL を勝手に
 // 決めると発火を落とすことになる。重複が困る処理はプラグイン側で冪等に書く
 // (トランザクションを跨げない制約と同じ理由で、いずれにせよ冪等性は要る)。
-func (s *Scheduler) RegisterPluginJob(cron string, taskType string, payload []byte) error {
-	return s.inner.Register(cron, taskType, payload,
-		driver.WithQueue(MaintenanceQueueName),
+func (s *Scheduler) RegisterPluginJob(cron string, plugin, job string, payload []byte) error {
+	// **maintenance ではなくプラグイン専用のキューへ (#2818)。** 相乗りだと、
+	// 1 つのプラグインの cron が詰まったときに本体の定期処理まで止まる。
+	return s.inner.Register(cron, PluginTaskType(plugin, job), payload,
+		driver.WithQueue(PluginQueueName(plugin)),
 		driver.WithMaxRetry(0),
 	)
 }

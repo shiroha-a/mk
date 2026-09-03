@@ -534,3 +534,20 @@ func TestDriver_AbandonedHandlerCountBeforeStart(t *testing.T) {
 	assert.Zero(t, cur)
 	assert.Zero(t, total)
 }
+
+// プラグインのジョブにも queueHandlerDeadlineSeconds が効くこと (#2818)。
+//
+// **個別の上限を持たないから既定へ落ちる**という形なので、handlerDeadlines に
+// 名前を足すのを忘れた、という失敗の仕方をしない。
+func TestHandlerDeadlineFor_PluginTaskType(t *testing.T) {
+	const configured = 90 * time.Second
+	assert.Equal(t, configured, handlerDeadlineFor("plugin:demo:refresh", configured))
+	// 未設定 (0) なら driver の既定。
+	assert.Equal(t, defaultHandlerDeadline, handlerDeadlineFor("plugin:demo:refresh", 0))
+	// 負値は「無効」。
+	assert.Equal(t, time.Duration(0), handlerDeadlineFor("plugin:demo:refresh", -1))
+	// **本体の個別上限を持つ task type に化けていないこと。**
+	for taskType := range handlerDeadlines {
+		assert.NotContains(t, taskType, "plugin:")
+	}
+}

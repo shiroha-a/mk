@@ -26,7 +26,7 @@ import (
 // 系の config は queue_factory が driver Config に流して runtime に反映
 // する。deliver / inbox / relationship の 3 queue に対して有効
 // (#495 / #534 / #2403)。
-func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, error) {
+func buildQueueDriver(ctx context.Context, cfg *config.Config, pluginQueues []string) (driver.Driver, error) {
 	totalConcurrency := 16
 	if cfg.DeliverJobConcurrency != nil && *cfg.DeliverJobConcurrency > 0 {
 		totalConcurrency = *cfg.DeliverJobConcurrency
@@ -43,7 +43,7 @@ func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, e
 	case "mkq", "":
 		dialCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
-		return mkqdriver.New(dialCtx, mkqConfig(cfg, totalConcurrency, queueConcurrency, queueRateLimits))
+		return mkqdriver.New(dialCtx, mkqConfig(cfg, totalConcurrency, queueConcurrency, queueRateLimits, pluginQueues))
 	case "asynq":
 		// asynq は per-queue concurrency を持たず、Concurrency (総 worker pool)
 		// に fallback する。jobQueueAutoScale (autoscale_wiring.go) は「有効化
@@ -57,8 +57,9 @@ func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, e
 		return asynqdriver.New(
 			asynqdriver.BuildRedisOpt(cfg.RedisForJobQueue),
 			asynqdriver.ServerConfig{
-				Concurrency: totalConcurrency,
-				RateLimits:  queueRateLimits,
+				Concurrency:  totalConcurrency,
+				RateLimits:   queueRateLimits,
+				PluginQueues: pluginQueues,
 			},
 		), nil
 	default:
@@ -73,9 +74,16 @@ func buildQueueDriver(ctx context.Context, cfg *config.Config) (driver.Driver, e
 // 無くなる。`queueStuckWorkerSeconds` (#2657) と
 // `queueHandlerDeadlineSeconds` (#2658) は機構を止める唯一の手段なので、
 // 配線が落ちたら気付けるようにしておく。
-func mkqConfig(cfg *config.Config, totalConcurrency int, queueConcurrency, queueRateLimits map[string]int) mkqdriver.Config {
+func mkqConfig(cfg *config.Config, totalConcurrency int, queueConcurrency, queueRateLimits map[string]int, pluginQueues []string) mkqdriver.Config {
+	// **既定の一覧を書き換えず足すだけにする。** ここで本体のキューを
+	// 列挙し直すと、キューを増やしたときに片側更新になる。
+	var names []string
+	if len(pluginQueues) > 0 {
+		names = append(append(names, mkqdriver.QueueNames...), pluginQueues...)
+	}
 	return mkqdriver.Config{
 		Redis:            mkqdriver.BuildRedisOptions(cfg.RedisForJobQueue),
+		QueueNames:       names,
 		Concurrency:      totalConcurrency,
 		QueueConcurrency: queueConcurrency,
 		QueueRateLimits:  queueRateLimits,

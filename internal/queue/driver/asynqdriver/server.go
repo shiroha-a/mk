@@ -21,6 +21,9 @@ type ServerConfig struct {
 	// fills in the queue list expected by mk-go (deliver / push /
 	// export / webhook / maintenance).
 	Queues map[string]int
+	// PluginQueues are the `plugin:<name>` queues installed plugins own
+	// (#2818). Merged into Queues with weight 1 so the worker consumes them.
+	PluginQueues []string
 	// RateLimits maps queue name → tasks/sec cap. Entries with
 	// value <= 0 are ignored. Implemented as a token-bucket
 	// middleware that wraps asynq's dispatch — handlers block on
@@ -55,6 +58,16 @@ func NewServer(redisOpt asynq.RedisClientOpt, cfg ServerConfig) *Server {
 			"webhook":       1,
 			"maintenance":   1,
 			"objectStorage": 1,
+		}
+	}
+	// プラグイン専用のキュー (#2818)。既定の集合を書き換えず足すだけにする
+	// (ここを列挙し直すと、本体のキューを増やしたときに片側更新になる)。
+	for _, name := range cfg.PluginQueues {
+		if name == "" {
+			continue
+		}
+		if _, ok := queues[name]; !ok {
+			queues[name] = 1
 		}
 	}
 	inner := asynq.NewServer(redisOpt, asynq.Config{

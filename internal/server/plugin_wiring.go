@@ -111,6 +111,11 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		// peer 経路。**宣言していないプラグインにも非 nil を渡す** (呼ぶと
 		// エラーになる実装)。nil を返すと nil チェック漏れが panic になる。
 		peerLimit, _ := peerBodyLimit(def, settings)
+		// **ジョブを宣言していないプラグインには積ませない。** 専用キューを
+		// 作らない (plugin_queue_names.go) ので、積めても誰も処理しない。
+		// 呼んだ時点でエラーにして、黙って溜まる形にしない。
+		pctx.queue = &pluginQueue{name: def.Name, client: s.queueClient, hasJobs: def.Jobs != nil}
+
 		peer := &pluginPeer{
 			name:    def.Name,
 			peered:  def.Peered,
@@ -313,6 +318,7 @@ type pluginContext struct {
 	storage plugin.Storage
 	config  plugin.Config
 	peer    plugin.Peer
+	queue   plugin.Queue
 	goGate  *pluginGoGate
 	goStart func(func())
 }
@@ -327,6 +333,55 @@ func (c *pluginContext) Config() plugin.Config   { return c.config }
 // 呼ぶとエラーになる実装を渡す — nil を返すと、プラグイン側の nil チェック
 // 漏れがそのまま panic になる。
 func (c *pluginContext) Peer() plugin.Peer { return c.peer }
+
+// Queue も **常に非 nil**。queue client が未配線のときは呼ぶとエラーになる
+// 実装を渡す (Peer と同じ理由)。
+func (c *pluginContext) Queue() plugin.Queue { return c.queue }
+
+// pluginQueue implements plugin.Queue for one plugin.
+type pluginQueue struct {
+	name    string
+	client  *queue.Client
+	hasJobs bool
+}
+
+// Enqueue adds a job to this plugin's queue.
+//
+// **ロールを問わず使える。** worker を持たない web 専用プロセスからでも積める
+// (処理するのは queue ロールのプロセス)。ハンドラの登録は Jobs callback 側で、
+// そちらは RunsQueue() のときしか走らない。
+func (q *pluginQueue) Enqueue(ctx context.Context, name string, payload any, opts ...plugin.EnqueueOption) error {
+	if !q.hasJobs {
+		return fmt.Errorf("plugin queue: Definition.Jobs を宣言していないため積めません")
+	}
+	if q.client == nil {
+		return fmt.Errorf("plugin queue: queue client が未配線です")
+	}
+	if name == "" {
+		return fmt.Errorf("plugin queue: ジョブ名が空です")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("plugin queue: payload を JSON 化できません: %w", err)
+	}
+
+	var o plugin.EnqueueOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+	var dopts []driver.EnqueueOption
+	if o.Delay > 0 {
+		dopts = append(dopts, driver.WithProcessIn(o.Delay))
+	}
+	if o.MaxAttempts > 1 {
+		// driver の MaxRetry は「初回を除く回数」。
+		dopts = append(dopts, driver.WithMaxRetry(o.MaxAttempts-1))
+	}
+	if o.DedupTTL > 0 {
+		dopts = append(dopts, driver.WithUnique(o.DedupTTL))
+	}
+	return q.client.EnqueuePlugin(ctx, q.name, name, body, dopts...)
+}
 
 type pluginGoGate struct {
 	mu      sync.Mutex
@@ -795,8 +850,11 @@ type pluginJobs struct {
 }
 
 // taskType namespaces a plugin job so it cannot collide with mk-go's own types.
+//
+// **enqueue 側と同じものを使う** (queue.PluginTaskType)。別々に組み立てると、
+// 片方を変えたときにジョブが「処理者なし」で捨てられる。
 func (j *pluginJobs) taskType(name string) string {
-	return "plugin:" + j.name + ":" + name
+	return queue.PluginTaskType(j.name, name)
 }
 
 func (j *pluginJobs) Handle(name string, h plugin.JobHandler) {
@@ -829,7 +887,7 @@ func (j *pluginJobs) Schedule(cron string, name string, payload any) {
 		j.err = fmt.Errorf("ジョブ %q のペイロードを JSON 化できません: %w", name, err)
 		return
 	}
-	if err := j.scheduler.RegisterPluginJob(cron, j.taskType(name), body); err != nil {
+	if err := j.scheduler.RegisterPluginJob(cron, j.name, name, body); err != nil {
 		j.err = fmt.Errorf("ジョブ %q をスケジュールできません: %w", name, err)
 	}
 }

@@ -203,6 +203,12 @@ type Context interface {
 	// Config returns this plugin's settings from the instance configuration.
 	Config() Config
 
+	// Queue enqueues jobs onto this plugin's own queue.
+	//
+	// [Jobs.Handle] で登録した名前を使う。**Routes からも Jobs からも呼べる**
+	// ので、HTTP ハンドラの中で重い処理を後回しにできる。
+	Queue() Queue
+
 	// Peer returns the channel to the same plugin on other mk-go instances.
 	//
 	// [Definition.Peered] を立てていない場合、呼び出しはエラーを返す

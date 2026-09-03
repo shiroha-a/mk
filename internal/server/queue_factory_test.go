@@ -500,7 +500,7 @@ func TestMkqConfig_PassesStuckWorkerAfter(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := &config.Config{QueueStuckWorkerSeconds: tc.seconds}
-			got := mkqConfig(cfg, 16, nil, nil)
+			got := mkqConfig(cfg, 16, nil, nil, nil)
 			assert.Equal(t, tc.want, got.StuckWorkerAfter)
 
 			// driver 側の解決規則まで通して、export (既定では追跡しない) が
@@ -528,8 +528,26 @@ func TestMkqConfig_PassesHandlerDeadline(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			cfg := &config.Config{QueueHandlerDeadlineSeconds: tc.seconds}
-			got := mkqConfig(cfg, 16, nil, nil)
+			got := mkqConfig(cfg, 16, nil, nil, nil)
 			assert.Equal(t, tc.want, got.HandlerDeadline)
 		})
+	}
+}
+
+// プラグイン専用のキューを driver へ渡すこと (#2818)。**worker が見るキューの
+// 一覧は構築時に固定される**ので、渡さないとジョブが誰にも処理されない。
+func TestMkqConfig_PluginQueues(t *testing.T) {
+	cfg := &config.Config{}
+
+	got := mkqConfig(cfg, 16, nil, nil, nil)
+	assert.Nil(t, got.QueueNames, "プラグインが無ければ driver の既定に任せる")
+
+	got = mkqConfig(cfg, 16, nil, nil, []string{"plugin:demo"})
+	require.NotEmpty(t, got.QueueNames)
+	assert.Contains(t, got.QueueNames, "plugin:demo")
+	// **本体のキューを落とさないこと。** 上書きすると deliver / inbox が
+	// 消えて連合が止まる。
+	for _, want := range mkqdriver.QueueNames {
+		assert.Containsf(t, got.QueueNames, want, "本体の %q が消えている", want)
 	}
 }

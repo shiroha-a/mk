@@ -481,7 +481,10 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	// queue driver セットアップ: jobQueueDriver config で asynq / mkq を
 	// 選択。Host が UNIX domain socket パス ("/" 始まり) のときは driver
 	// 内部で Network を unix に切り替える。
-	queueDriver, err := buildQueueDriver(context.Background(), cfg)
+	// プラグイン専用のキュー (#2818)。**driver を作る前に決める** — worker が
+	// 見るキューの一覧は構築時に固定される。
+	pluginQueues := pluginJobQueueNames(plugins, cfg.Plugins)
+	queueDriver, err := buildQueueDriver(context.Background(), cfg, pluginQueues)
 	if err != nil {
 		return nil, fmt.Errorf("server: build queue driver: %w", err)
 	}

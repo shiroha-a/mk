@@ -59,6 +59,10 @@ type Harness struct {
 	peerSends   []PeerSend
 	peerHandler plugin.PeerHandler
 	peerReply   plugin.PeerReplyHandler
+
+	// キュー (#2818) の記録。**実際には積まない**ので、テストが Redis を
+	// 要求しない。ハンドラは JobSet.Run から直接叩く。
+	enqueued []Enqueued
 }
 
 // New starts a harness. The plugin name defaults to "test".
@@ -118,6 +122,26 @@ type PeerSend struct {
 	ID   string
 	// Payload is what the plugin passed, as JSON.
 	Payload json.RawMessage
+}
+
+// Enqueued is one recorded [plugin.Queue.Enqueue].
+type Enqueued struct {
+	Name string
+	// Payload is what the plugin passed, as JSON.
+	Payload json.RawMessage
+	Options plugin.EnqueueOptions
+}
+
+// Enqueues returns the jobs the plugin enqueued so far, in order.
+//
+// **実際には積まない。** ハンドラを走らせたいなら [Harness.Jobs] から
+// JobSet.Run を使うこと。
+func (h *Harness) Enqueues() []Enqueued {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	out := make([]Enqueued, len(h.enqueued))
+	copy(out, h.enqueued)
+	return out
 }
 
 // PeerSends returns the sends recorded so far, in order.
@@ -413,7 +437,28 @@ func (c *fakeContext) Storage() plugin.Storage {
 	return &fakeStorage{db: c.h.db}
 }
 
-func (c *fakeContext) Peer() plugin.Peer { return &fakePeer{h: c.h} }
+func (c *fakeContext) Peer() plugin.Peer   { return &fakePeer{h: c.h} }
+func (c *fakeContext) Queue() plugin.Queue { return &fakeQueue{h: c.h} }
+
+type fakeQueue struct{ h *Harness }
+
+func (q *fakeQueue) Enqueue(_ context.Context, name string, payload any, opts ...plugin.EnqueueOption) error {
+	if name == "" {
+		return fmt.Errorf("plugintest: ジョブ名が空です")
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("plugintest: payload を JSON 化できません: %w", err)
+	}
+	var o plugin.EnqueueOptions
+	for _, fn := range opts {
+		fn(&o)
+	}
+	q.h.mu.Lock()
+	defer q.h.mu.Unlock()
+	q.h.enqueued = append(q.h.enqueued, Enqueued{Name: name, Payload: body, Options: o})
+	return nil
+}
 
 // Go runs fn synchronously. テストで非同期にすると、検証の前に終わっていない
 // 競合が入る。
