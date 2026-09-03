@@ -3502,6 +3502,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		signer:   newInstanceActorSigner(sysAcctSvc, keypairRepo, apURLs),
 		remote:   newNodeInfoPeerLister(s.outboundClient(peerLookupTimeout)),
 		idGen:    idGen,
+		limiter:  newPeerRateLimiter(),
 	}
 	// nodeinfo に載せるのは **宣言したものだけ**。
 	var peered []string

@@ -37,3 +37,28 @@ func TestPluginPeerBodyLimitIsWired(t *testing.T) {
 			"プラグインごとの peer 本文上限が /api の 1 MiB に戻る", wiring)
 	}
 }
+
+// peer のレート制限は deps に limiter が入っていないと丸ごと効かない。
+//
+// **nil は「全部通す」。** テストが組み立てる deps は limiter を持たないので
+// nil 許容にしてあり、落としても build もテストも通る。落ちるのは
+// 「認証を通った相手 (と署名を持たない相手) が受け口を無制限に叩ける」状態で、
+// 症状が出るのは攻撃を受けたときだけ。
+func TestPluginPeerRateLimiterIsWired(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "internal/server/router.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	var live []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if trimmed := strings.TrimSpace(line); !strings.HasPrefix(trimmed, "//") {
+			live = append(live, trimmed)
+		}
+	}
+	const wiring = "limiter:  newPeerRateLimiter(),"
+	if !strings.Contains(strings.Join(live, "\n"), wiring) {
+		t.Errorf("internal/server/router.go の pluginPeerDeps に %q が無い (コメントは数えない)。"+
+			"peer の受け口が無制限になる", wiring)
+	}
+}

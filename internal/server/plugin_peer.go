@@ -89,6 +89,9 @@ type pluginPeerDeps struct {
 	signer   peerSigner
 	remote   peerPluginLister
 	idGen    id.Generator
+	// limiter は受け口のレート制限。**全プラグインで 1 つを共有する**
+	// (プラグインごとに持つと、相手は受け口の数だけ枠を得る)。
+	limiter *peerRateLimiter
 	// urlFor builds the peer endpoint URL. テストから http の httptest
 	// サーバーへ向けられるように関数にしてある。nil なら既定 (https)。
 	urlFor func(host, plugin string) string
@@ -344,6 +347,13 @@ func (p *pluginPeer) echoHandler() echo.HandlerFunc {
 	return func(c echo.Context) error {
 		req := c.Request()
 
+		// **署名検証の前に IP で見る。** 検証は actor 解決 (未知の keyId なら
+		// 外向きの取得) と公開鍵検証を伴うので、ここを通してしまうと相手は
+		// 署名を持たないまま高い処理を無制限に起こせる。
+		if !p.deps.limiter.allow("ip:" + c.RealIP()) {
+			return peerTooManyRequests(c)
+		}
+
 		// 実効的な上限は global の BodyLimitByPath が同じ値で掛けている
 		// (署名検証より前に body が読まれるため、handler で判定しても消費は
 		// 止まらない)。ここは middleware を通らない経路への保険。
@@ -367,6 +377,11 @@ func (p *pluginPeer) echoHandler() echo.HandlerFunc {
 		}
 		if p.blocked(from) {
 			return peerError(c, http.StatusForbidden, "ブロックされています")
+		}
+		// **確定したホストでも見る。** IP は共有されうる (前段のプロキシ、
+		// 同居インスタンス) ので、認証を通った相手ごとの枠を別に持つ。
+		if !p.deps.limiter.allow("host:" + from) {
+			return peerTooManyRequests(c)
 		}
 
 		var env peerEnvelope
@@ -393,6 +408,15 @@ func (p *pluginPeer) echoHandler() echo.HandlerFunc {
 		}
 		return c.JSON(http.StatusOK, res)
 	}
+}
+
+// peerTooManyRequests answers a throttled caller.
+//
+// **Retry-After を付ける。** 送信側は失敗を 2 秒 / 10 秒 / 60 秒で再送するので、
+// 目安が無いと同じ勢いで戻ってくる。
+func peerTooManyRequests(c echo.Context) error {
+	c.Response().Header().Set("Retry-After", "60")
+	return peerError(c, http.StatusTooManyRequests, "リクエストが多すぎます")
 }
 
 func peerError(c echo.Context, status int, msg string) error {
