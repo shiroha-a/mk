@@ -19,8 +19,11 @@ import (
  * 閉じるので、壊れても他実装には届かない。代わりに、相手も同じプラグインを
  * 持っていることが前提になる。
  *
- * 宛先・署名・ブロック・SSRF・大きさ・レート制限は mk-go 側で担保する。
- * プラグインが面倒を見るのは payload の中身だけ。
+ * 宛先・署名・ブロック・SSRF・大きさは mk-go 側で担保する。**レート制限は
+ * 掛からない** ([Router] と同じで、本体の per-endpoint テーブルはプラグインの
+ * パスを持たない)。プラグインが面倒を見るのは payload の中身と、必要なら間隔。
+ *
+ * wire の仕様は docs/plugin-peer-protocol.md。
  */
 
 // Peer is a private channel to the same plugin on other mk-go instances.
@@ -29,14 +32,17 @@ import (
 // 出て、相手から「このインスタンスは同じプラグインを持っている」と分かる。
 // 立てていないプラグインでこれを呼ぶとエラーになる。
 type Peer interface {
-	// Send queues a payload for the same plugin on host and returns the id
+	// Send posts a payload to the same plugin on host and returns the id
 	// that identifies this exchange.
 	//
-	// **即座に返る。** 実際の送信は mk-go のキューが行うので、相手が遅くても
-	// こちらのリクエストは詰まらない。応答は [Peer.OnReply] に届く。
+	// **POST は別の goroutine で走る**ので、相手が遅くてもこちらのリクエストは
+	// 詰まらない。応答は [Peer.OnReply] に届く。ただし**即座に返るとは限らない** —
+	// 相手の nodeinfo がキャッシュに無いと、ここで取得を待つ (最大 10 秒)。
+	//
+	// **プロセス内で完結する。** 再起動をまたいで再送はされない。
 	//
 	// 相手が同じプラグインを持たない / ブロックしている / 宛先が不正な場合は
-	// ここでエラーになる (キューに積まれない)。
+	// ここでエラーになり、送信そのものが起きない。
 	Send(ctx context.Context, host string, payload any) (id string, err error)
 
 	// Handle registers the receiver for payloads from other instances.

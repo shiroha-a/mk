@@ -75,6 +75,9 @@ type Definition struct {
 	// **宣言したものだけが nodeinfo に出る。** 入れているプラグインを全部
 	// 晒すと、運営者がどんな拡張を使っているかが攻撃面の情報になる。
 	// 連合しないプラグインは名前も出さない。
+	//
+	// **現状は [Definition.Routes] も要る。** 受信の受け口は Routes の登録と
+	// 同じ枝で張るので、Routes が nil だと宣言だけして受け取れない (#2822)。
 	Peered bool
 
 	// EffectivePolicies declares effective-policy contributions. The host calls

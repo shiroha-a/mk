@@ -169,9 +169,9 @@ func (p *pluginPeer) Has(ctx context.Context, host string) (bool, error) {
 	return false, nil
 }
 
-// Send queues a payload for the same plugin on host.
+// Send posts a payload to the same plugin on host.
 //
-// **検査はここで済ませ、キューに積むのは通る見込みのものだけ。** 送ってから
+// **検査はここで済ませ、goroutine に逃がすのは通る見込みのものだけ。** 送ってから
 // 失敗を知る形にすると、ブロックしている相手にも一度は接続してしまう。
 func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string, error) {
 	if !p.peered {

@@ -177,6 +177,7 @@ go test -race -count=1 -timeout 10m \
 | [シェイプドリフト検出](docs/shape-drift.md) | レスポンス形状・エラーID・権限のドリフトを検出する静的ゲート |
 | [本家 backend e2e](docs/upstream-backend-e2e.md) | Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて実行する |
 | [プラグイン](docs/plugins/) | ビルド時組み込みプラグインの書き方・運用 |
+| [プラグイン peer プロトコル](docs/plugin-peer-protocol.md) | mk-go 同士でだけ通じる署名付き HTTP チャネルの wire 仕様 |
 | [UDSデプロイ](docs/docker-uds.md) | UNIXドメインソケット構成 |
 | [queue-bench](docs/queue-bench.md) | BullMQ / asynq / mkq の 3-way 比較 (#563) |
 | [ベンチプロファイリング](docs/bench-pprof.md) | k6負荷時のpprof取得と解析 |

@@ -10,6 +10,7 @@
 | プラグインを**書く** | [作者向け](authoring.md) — 手順とリファレンス |
 | プラグインを**開発する** | [開発環境](development.md) — `make plugin-dev` と HMR |
 | mk-go 本体を**変える** | [互換性ポリシー](compatibility.md) — 公開面を広げてよい条件 |
+| peer の **wire を変える** | [peer プロトコル](../plugin-peer-protocol.md) — エンベロープ / 署名 / 上限 / 適用範囲 |
 
 プラグインができるのは、
 
