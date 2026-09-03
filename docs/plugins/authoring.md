@@ -556,8 +556,8 @@ mk-go が面倒を見るもの:
 ### 取り寄せた結果をキャッシュする
 
 リモート利用者のプロフィールにプラグインの情報を出すなら、**非同期取り寄せ + TTL +
-空振りの記憶 + 初回は空**という型が要る。`Send` は積んでから数分かけて `OnReply` に
-返るので、描画にそのままは使えない。
+空振りの記憶 + 初回は空**という型が要る。`Send` は応答が返るまで待てず、失敗すると最大 105 秒かけて再送するので、描画に
+そのままは使えない。
 
 `plugin/peercache` がこの型を持っている。**キャッシュはプラグイン自身の schema に
 置く**ので、プラグインを消せばデータも消える。
@@ -583,14 +583,18 @@ _ = profile
 
 | | |
 |---|---|
-| テーブル | `Migrations(n)` が返す DDL を自分の migration に混ぜる。`peer_cache` / `peer_cache_pending` は予約 |
+| テーブル | `Migrations(n)` が返す DDL を自分の migration に混ぜる。**消費する version は常に 1 つ**で、`peer_cache` / `peer_cache_pending` / `peer_cache_ask` が予約 |
 | 読む | `Lookup(ctx, host, key)`。**初回は nil**、取り寄せは裏で走る。期限切れでも古いものは返る |
 | 書く | `OnReply` から `Store(ctx, id, payload, found)`。`found` が false なら否定 TTL で覚える |
 | 掃除 | cron から `Sweep(ctx)` |
 
 **空振りを覚えるのが要点。** 覚えないと、そのプラグインを使っていない利用者の
-プロフィールを開くたびに相手へ問い合わせることになる。応答が届く前に大勢が同じ
-プロフィールを開いても、問い合わせは 1 分に 1 回までに抑えられる。
+プロフィールを開くたびに相手へ問い合わせることになる。
+
+応答が届く前に大勢が同じプロフィールを開いても、問い合わせは **1 分に 1 回**まで。
+判定は 1 文の `INSERT ... ON CONFLICT ... WHERE ... RETURNING` で取るので、同時に
+走っても勝つのは 1 つだけ。**取り寄せに失敗しても印は残る**ので、相手が落ちて
+いる場合も繰り返し接続しない。
 
 `plugintest` からは `h.Peer(def)` で登録し、`h.PeerSends()` で出た問い合わせを、
 `h.DeliverPeerReply(host, id, ...)` で応答を試せる。
@@ -690,7 +694,11 @@ require.NoError(t, jobs.Run(t, "prune", ""))
 
 以下が「壊さないと約束する範囲」のすべて。`plugin` パッケージの分は**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` の `plugin:` 行と突き合わせる gate が CI で回る** (`TestPluginDoc_*`)。見るのは識別子の有無・宣言の有無・interface の method の署名・トップレベル func / const の行・struct のフィールドの型。**`type X func(...)` の署名だけは対象外** — golden が `type Handler func` としか出さず、照合する相手が無いため。
 
-`plugin/plugintest` の分はこの一覧に入れていない (テストの書き方は[テスト](#テスト)の節)。**gate の対象外**なので、そちらは golden の diff をレビューで見ること。
+`plugin/plugintest` の分はこの一覧に入れていない (テストの書き方は[テスト](#テスト)の節)。
+
+**gate が照合するのは `plugin` パッケージの分だけ。** `plugin/peercache` と
+`plugin/plugintest` は golden (`TestPluginSurfaceDrift`) の対象ではあるが、doc との
+突き合わせは行われない — この 2 つは **golden の diff をレビューで見ること**。
 
 ### Go (`github.com/shiroha-a/mk/plugin/peercache`)
 

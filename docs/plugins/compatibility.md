@@ -6,7 +6,7 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 
 | | 場所 |
 |---|---|
-| Go | `plugin/` と `plugin/plugintest/` |
+| Go | `plugin/` と `plugin/peercache/` と `plugin/plugintest/` |
 | TypeScript | `third_party/misskey/packages/frontend/src/plugin-api.ts` |
 | HTTP | `/api/plugin/<name>/` の名前空間 |
 | ページ | `/plugin/<name>/` と `/admin/plugin/<name>/` の名前空間 |
@@ -96,7 +96,7 @@ go run ./tools/pluginspec -write
 
 **golden の差分は必ずレビューで意図を確認すること。** これが「うっかり公開面が広がる」ことを防ぐ唯一の仕組み。
 
-対象は `plugin/` と `plugin/plugintest/` の両方。テスト用だからと外すと、そこだけ黙って育つ。
+対象は `plugin/` と `plugin/peercache/` と `plugin/plugintest/` の 3 つ。テスト用だからと外すと、そこだけ黙って育つ。
 
 ## サンプルプラグイン
 

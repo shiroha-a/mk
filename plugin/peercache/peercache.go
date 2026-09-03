@@ -7,7 +7,8 @@
 // answer a view-time read without waiting for the network.
 //
 // **peer の応答は同期の描画には間に合わない (#2820)。** [plugin.Peer.Send] は
-// 積んでから最大 4 回・数分かけて [plugin.Peer.OnReply] に返るので、プロフィール
+// 積んでから (成功なら秒、失敗を繰り返すと最大 4 回・105 秒かけて)
+// [plugin.Peer.OnReply] に返るので、プロフィール
 // を開いた瞬間に答えは出ない。「初回は空で返し、届いた分を次から出す」という型が
 // 要る。
 //
@@ -15,7 +16,8 @@
 // プロフィールを開くたびに相手へ問い合わせることになる。
 //
 // キャッシュはプラグイン自身の schema に置く ([plugin.Storage] の DB)。本体には
-// 持たせない — プラグインを消したらデータも一緒に消えるべきなので。
+// 持たせない — プラグインを外したときに、消し忘れが本体側に残らないようにする
+// (mk-go は外した schema を自動では消さず、孤児として運営者に知らせる)。
 package peercache
 
 import (
@@ -53,7 +55,14 @@ type Options struct {
 	DB *sql.DB
 	// Request builds the peer payload for one key. Required.
 	Request func(key string) any
+	//
+	// host と key は**渡された文字列のまま** PK になる。大文字小文字を含めて
+	// 揺れると別のエントリになるので、呼び出し側で揃えること (mk-go の Peer は
+	// 正規化済みの host を扱うので、そこから取った値ならそのままでよい)。
 	// TTL is how long a positive answer is reused. 0 は DefaultTTL。
+	//
+	// **秒未満は切り捨てで 0 になる** (SQL に秒で渡すため)。1 秒未満を渡すと
+	// 常に期限切れとして扱われる。
 	TTL time.Duration
 	// NegativeTTL is how long "the other side has nothing" is remembered.
 	// 0 は DefaultNegativeTTL。
@@ -99,8 +108,12 @@ func New(o Options) (*Cache, error) {
 // Migrations returns the schema this cache needs, numbered from `from`.
 //
 // **番号はプラグインが決める。** プラグイン自身の migration と衝突しないよう、
-// 空いている番号を渡すこと。テーブル名 (`peer_cache` / `peer_cache_pending`) は
-// このパッケージの予約。
+// 空いている番号を渡すこと。テーブル名 (`peer_cache` / `peer_cache_pending` /
+// `peer_cache_ask`) はこのパッケージの予約。
+//
+// **消費するのは常に 1 つ。** 返る要素は 1 個で、version は `from` ちょうど。
+// 次に使えるのは `from+1`。ここが増えると、後ろに自前の migration を置いた
+// プラグインが version の重複で起動しなくなるので、増やさない。
 func Migrations(from int) []plugin.Migration {
 	return []plugin.Migration{{
 		Version: from,
@@ -119,7 +132,12 @@ func Migrations(from int) []plugin.Migration {
 				key        text NOT NULL,
 				created_at timestamptz NOT NULL DEFAULT now()
 			);
-			CREATE INDEX peer_cache_pending_target ON peer_cache_pending (host, key, created_at DESC);
+			CREATE TABLE peer_cache_ask (
+				host     text NOT NULL,
+				key      text NOT NULL,
+				asked_at timestamptz NOT NULL DEFAULT now(),
+				PRIMARY KEY (host, key)
+			);
 		`,
 	}}
 }
@@ -158,18 +176,19 @@ func (c *Cache) Store(ctx context.Context, sendID string, payload any, found boo
 		return nil
 	}
 
-	ttl := c.ttl
+	// **中身が無ければ否定として覚える。** 相手が「持っている」と答えつつ
+	// payload が空のことがあるので、found だけでは決めない。
+	ttl := c.negativeTTL
 	body := json.RawMessage(`null`)
 	if found {
 		encoded, err := json.Marshal(payload)
 		if err != nil {
 			return fmt.Errorf("peercache: payload を JSON 化できません: %w", err)
 		}
-		body = encoded
-	}
-	if !found || len(body) == 0 || string(body) == "null" {
-		ttl = c.negativeTTL
-		body = json.RawMessage(`null`)
+		if string(encoded) != "null" {
+			ttl = c.ttl
+			body = encoded
+		}
 	}
 
 	_, err = c.db.ExecContext(ctx, `
@@ -192,10 +211,16 @@ func (c *Cache) Sweep(ctx context.Context) error {
 		`DELETE FROM peer_cache WHERE fetched_at < now() - interval '7 days'`); err != nil {
 		return fmt.Errorf("peercache: 掃除できません: %w", err)
 	}
-	// 応答が来なかった pending。**残すと問い合わせの抑止が効き続ける**ので、
-	// askInterval よりずっと長い所で切る。
+	// 応答が来なかった pending。**遅れて届いた応答の相関に要る**ので、すぐには
+	// 消さない。表が伸び続けるのを止めるためだけの掃除なので 1 日で切る
+	// (問い合わせの抑止は peer_cache_ask 側の仕事で、こちらとは無関係)。
 	if _, err := c.db.ExecContext(ctx,
 		`DELETE FROM peer_cache_pending WHERE created_at < now() - interval '1 day'`); err != nil {
+		return fmt.Errorf("peercache: 掃除できません: %w", err)
+	}
+	// 抑止の印。askInterval を過ぎたものは判定に影響しないので落としてよい。
+	if _, err := c.db.ExecContext(ctx,
+		`DELETE FROM peer_cache_ask WHERE asked_at < now() - interval '1 day'`); err != nil {
 		return fmt.Errorf("peercache: 掃除できません: %w", err)
 	}
 	return nil
@@ -235,13 +260,19 @@ func (c *Cache) askAsync(host, key string) {
 }
 
 func (c *Cache) ask(ctx context.Context, host, key string) {
-	fresh, err := c.hasFreshPending(ctx, host, key)
+	// **1 文で取る。** 判定と記録を分けると、その間に Has (最大 10 秒) と Send が
+	// 入るので、同時に開いた view の数だけ問い合わせが並ぶ (実測で 20 件中 20 件が
+	// 通った)。ON CONFLICT ... WHERE は行を書き換えられた側にだけ RETURNING が
+	// 返るので、勝った 1 つだけが先へ進む。
+	//
+	// **失敗しても印は残る。** ここで取ってから Has / Send を試すので、相手が
+	// 落ちていて毎回失敗する場合も view のたびには飛ばない。
+	won, err := c.claimAsk(ctx, host, key)
 	if err != nil {
-		c.ctx.Logger().Warn("peercache: 問い合わせ中の記録を読めません", "host", host, "err", err)
+		c.ctx.Logger().Warn("peercache: 問い合わせの権利を取れません", "host", host, "err", err)
 		return
 	}
-	if fresh {
-		// 誰かが既に問い合わせている。応答は 1 つで足りる。
+	if !won {
 		return
 	}
 
@@ -264,18 +295,26 @@ func (c *Cache) ask(ctx context.Context, host, key string) {
 	}
 }
 
-func (c *Cache) hasFreshPending(ctx context.Context, host, key string) (bool, error) {
-	var exists bool
+// claimAsk reserves the right to ask for host/key, reporting whether it won.
+//
+// **1 文で完結させる。** ON CONFLICT の WHERE が偽なら行は書き換わらず、
+// RETURNING も返らない = 負け。真なら asked_at が進んで勝ち。**同時に走っても
+// 勝つのは 1 つだけ。**
+func (c *Cache) claimAsk(ctx context.Context, host, key string) (bool, error) {
+	var claimed int
 	err := c.db.QueryRowContext(ctx, `
-		SELECT EXISTS (
-			SELECT 1 FROM peer_cache_pending
-			WHERE host = $1 AND key = $2 AND created_at > now() - make_interval(secs => $3)
-		)
-	`, host, key, int(askInterval.Seconds())).Scan(&exists)
+		INSERT INTO peer_cache_ask (host, key, asked_at) VALUES ($1, $2, now())
+		ON CONFLICT (host, key) DO UPDATE SET asked_at = now()
+		WHERE peer_cache_ask.asked_at <= now() - make_interval(secs => $3)
+		RETURNING 1
+	`, host, key, int(askInterval.Seconds())).Scan(&claimed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, err
 	}
-	return exists, nil
+	return true, nil
 }
 
 // takePending consumes the pending row for sendID.
