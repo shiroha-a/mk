@@ -113,6 +113,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/selfcheck"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
+	"github.com/shiroha-a/mk/internal/core/signupform"
 	coresystemaccount "github.com/shiroha-a/mk/internal/core/systemaccount"
 	coretimeline "github.com/shiroha-a/mk/internal/core/timeline"
 	coretransfer "github.com/shiroha-a/mk/internal/core/transfer"
@@ -1412,9 +1413,28 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// closure 内で毎回 meta を読み直すことで admin UI の SMTP 設定変更が
 	// 再起動なしに反映される (#1112)。smtpSecure も meta 経由で反映 (#1111)。
 	signupHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
+	// captcha の実 provider が 1 つも無いときに申請 endpoint を守る署名付き
+	// フォームトークン (#2806)。**captcha の代替ではない** — 位置づけは
+	// core/signupform の doc を見ること。
+	//
+	// 鍵は instance_secret から取る (config 項目を増やさず、再起動とワーカー
+	// 跨ぎで一貫させる)。**取れなかったら配線しない** — 弱い鍵に fallback する
+	// と署名が意味を失うので、未配線として起動時に検出させるほうがよい。
+	//
+	// **nonce store は具象型のまま nil を見る。** interface に入れてから判定すると
+	// typed-nil で必ず非 nil になり、「未配線」を検出できない。
+	if nonces := signupform.NewRedisNonceStore(s.redis.Default); nonces == nil {
+		slog.Error("signup form token: redis unavailable, form tokens disabled")
+	} else if secret, err := repository.NewInstanceSecretRepository(s.db).
+		GetOrCreate(repository.SignupFormTokenKey); err != nil {
+		slog.Error("signup form token: secret unavailable, form tokens disabled", "err", err)
+	} else {
+		signupHandler.SetFormTokenIssuer(signupform.NewIssuer(secret, nonces))
+	}
 	api.POST("/signup", signupHandler.Signup)
 	// 承認制の登録 (#2554 / #2556)。認証は不要 — 本人確認は MiAuth が担う。
 	// 有効になっていない構成では 503 を返す。
+	api.POST("/signup-application/form-token", signupHandler.ApplicationFormToken)
 	api.POST("/signup-application/apply", signupHandler.ApplicationApply)
 	api.POST("/signup-application/status", signupHandler.ApplicationStatus)
 	api.POST("/signup-application/register", signupHandler.ApplicationRegister)
@@ -3705,6 +3725,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"authorization code 再利用を検出して失効させた token が TTL のあいだ通る"},
 		{"signup.applicationSettlement", signupService.HasApplicationSettlement(),
 			"承認済み申請の行ロックが飛び、1 承認から複数アカウントを作る窓が開く"},
+		{"signup.formTokens", signupHandler.HasFormTokens(),
+			"captcha を 1 つも設定していないインスタンスで、申請 endpoint の唯一の簡易チェックが素通しになる"},
 		{"inbox.replayGuard", inboxProcessor.HasInboxReplayGuard(),
 			"処理済み activity の再投函を検出できない (isReplay が常に false)"},
 		{"postScheduledNote.lock", postScheduledNoteProcessor.HasLock(),

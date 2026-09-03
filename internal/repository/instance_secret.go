@@ -14,6 +14,12 @@ import (
 // signing key.
 const MediaProxySecretKey = "mediaProxySecret"
 
+// SignupFormTokenKey is the instance_secret key holding the HMAC signing key
+// for the approval-based signup form tokens (#2806).
+//
+// config 項目を増やさずに、初回自動生成 / 再起動とワーカー跨ぎで一貫させる。
+const SignupFormTokenKey = "signupFormTokenSecret"
+
 // generatedSecretBytes is the entropy of a generated secret. 32 bytes matches
 // the HMAC-SHA256 block usage and is stored hex-encoded.
 const generatedSecretBytes = 32

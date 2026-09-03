@@ -2,6 +2,7 @@ package signup
 
 import (
 	"errors"
+	"math"
 	"net/http"
 	"time"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
+	"github.com/shiroha-a/mk/internal/core/signupform"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -121,6 +123,9 @@ func (h *Handler) ApplicationApply(c echo.Context) error {
 		TurnstileResponse   string `json:"turnstile-response"`
 		McaptchaResponse    string `json:"m-captcha-response"`
 		TestcaptchaResponse string `json:"testcaptcha-response"`
+		// FormToken は captcha の実 provider が 1 つも無いときだけ要求する
+		// 署名付きトークン (#2806)。signup-application/form-token で発行する。
+		FormToken string `json:"formToken"`
 	}
 	_ = c.Bind(&req)
 
@@ -153,6 +158,14 @@ func (h *Handler) ApplicationApply(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest,
 				apierr.Error("FORM_CHANGED", "The application form has changed. Reload and try again.", "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f"))
 		}
+	}
+
+	// **フォームトークンの検証は行を作る直前に置く (#2806)。** captcha の隣に
+	// 置くと、回答の検証で落ちたときにも nonce を焼いてしまい、直して送り直した
+	// 利用者が「フォームを開き直せ」と言われる。回答の検証は DB を触らないので、
+	// 先に通しても bot に与える余地は増えない。
+	if ok, err := h.verifyFormToken(c, req.FormToken); !ok {
+		return err
 	}
 
 	app, code, err := h.applications.Apply(answers)
@@ -349,6 +362,87 @@ func (h *Handler) registerViaEmailConfirmation(
 	h.sendSignupConfirmation(meta, email, pending.Code)
 	// TS の signup と同じく本体は返さない (frontend は確認メールを待つ)。
 	return c.NoContent(http.StatusNoContent)
+}
+
+// ApplicationFormToken handles POST /api/signup-application/form-token.
+//
+// captcha の実 provider が 1 つも無いときに `signup-application/apply` を守る
+// 署名付きトークンを発行する (#2806)。**captcha の代替ではない** — 位置づけは
+// core/signupform の doc を見ること。
+//
+// 実 provider が有効なときも 200 で返す。**二重の負担は課さない** (apply 側が
+// 要求しない) が、endpoint 自体を 404 / 503 にすると、画面がどちらの構成かを
+// 別経路で判定しないといけなくなる。
+func (h *Handler) ApplicationFormToken(c echo.Context) error {
+	if _, ok, err := h.approvalOpen(c); !ok {
+		return err
+	}
+	if !h.formTokenRequired() {
+		// 要求しない構成では発行もしない。**空文字を返して 200 にする** —
+		// 画面は「トークンが空なら送信を抑えない」だけで済む。
+		return c.JSON(http.StatusOK, map[string]any{"token": "", "minWaitSeconds": 0})
+	}
+	token, err := h.formTokens.Issue(signupform.PurposeApply)
+	if err != nil {
+		return c.JSON(http.StatusInternalServerError,
+			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"token": token,
+		// **切り上げる。** 切り捨てにすると、非整数秒にした瞬間に画面のほうが
+		// 短く待ち、正規の利用者が FORM_TOKEN_TOO_SOON を見る。
+		"minWaitSeconds": int(math.Ceil(h.formTokens.MinWait().Seconds())),
+	})
+}
+
+// formTokenRequired reports whether apply must carry a signed form token.
+//
+// **発動条件は「実 provider が 1 つも有効でないとき」で、新しい meta 列は作らない。**
+// 既存の meta フラグから両側 (サーバー / 画面) が導出できるので、drop-in の復路で
+// fail-open する列が増えない。testcaptcha は実 provider として数えない
+// (captcha.Service.HasRealProvider)。
+func (h *Handler) formTokenRequired() bool {
+	if h.testMode || h.formTokens == nil {
+		// testMode は既存 captcha と同じ扱い。**捨てる根拠は「captcha と扱いを
+		// 分ける理由が無い」で足りる** — この endpoint を叩く e2e は Playwright にも
+		// 本家 backend e2e にも無い (mk-go 独自なので upstream のテストは持たない)。
+		// **未配線で素通しになるのは router の recordCriticalWiring が起動時に
+		// 止める** (signup.formTokens)。
+		return false
+	}
+	return !h.captchaSvc.HasRealProvider()
+}
+
+// verifyFormToken enforces the signed form token when it is required.
+//
+// **戻り値に ok を持たせるのは、`c.JSON` が成功時に nil を返すため。** error の
+// 非 nil だけで「応答を書いた」を表そうとすると、書いた直後に呼び出し側が素通り
+// して申請行を作ってしまう (approvalReady と同じ規約に揃えてある)。
+func (h *Handler) verifyFormToken(c echo.Context, token string) (bool, error) {
+	if !h.formTokenRequired() {
+		return true, nil
+	}
+	err := h.formTokens.Verify(c.Request().Context(), signupform.PurposeApply, token)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, signupform.ErrTokenTooSoon):
+		// **nonce は焼かれていない**ので、待ってやり直せば同じトークンで通る。
+		return false, c.JSON(http.StatusBadRequest,
+			apierr.Error("FORM_TOKEN_TOO_SOON", "The form was submitted too quickly.", "04354c61-0b35-466f-a7b0-83ff9a5f32df"))
+	case errors.Is(err, signupform.ErrTokenInvalid),
+		errors.Is(err, signupform.ErrTokenExpired),
+		errors.Is(err, signupform.ErrTokenUsed):
+		// 3 つを 1 つのコードに畳む。**どれだったかを教えても利用者の行動は
+		// 同じ (フォームを開き直す) で、区別できると総当たりの手掛かりになる。**
+		return false, c.JSON(http.StatusBadRequest,
+			apierr.Error("FORM_TOKEN_INVALID", "Reload the form and try again.", "a2262c21-9681-4ec9-8c4b-110c51eb9252"))
+	default:
+		// Redis 障害などはここに来る。**素通しにしない** — captcha 未設定の
+		// インスタンスで防波堤が 1 つも無い状態に戻る。
+		return false, c.JSON(http.StatusInternalServerError,
+			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
 }
 
 // applicationForClaimCode resolves the caller's claim code, writing the error

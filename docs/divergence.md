@@ -28,13 +28,13 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 6 + exact assignment lookup 2 + admin 観測 5 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 7 + exact assignment lookup 2 + admin 観測 5 | chat 15 | **0** |
 | API レスポンスの additive field | 5 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup` / `signupApplicationForm`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 10 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 28 tag (`-mk.0` ～ `-mk.22e`) | — | — |
+| fork frontend の独自変更 | 29 tag (`-mk.0` ～ `-mk.22f`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -44,14 +44,14 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (58)
+### 1-1. mk-go にしかない (59)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
 | GET variant 追加 | 23 | `charts/*` 12 件、`emoji` / `emojis` / `federation/instances` / `federation/stats` / `fetch-rss` / `get-online-users-count` / `hashtags/trend` / `notes/featured` / `notes/reactions` / `server-info` / `bubble-game/ranking`。**対応する POST は両側にある**。ブラウザから直接叩く利便目的 |
 | cherrypick chat 拡張 | 15 | `chat/messages` / `chat/messages/create` / `read` / `update` / `reactions/create` / `reactions/delete`、`chat/rooms/joined` / `unmute` / `transfer-ownership` / `members/ban` / `members/update-membership` / `invitations/accept` / `delete` / `reject`、`chat/unread-count` |
 | 分割アップロード | 4 | `drive/files/create-chunked/start` / `append` / `finish` / `abort` (#2313 / #2314)。upstream に分割アップロードが無いため対応物なし。S3 の multipart upload を包むもので、`UploadId` は `chunked_upload_session` に閉じてクライアントへ出さない。能力は `/api/meta` の `chunkedUpload` で告知し、**未対応構成では field ごと出さない**ので純正クライアントは単発アップロードに倒れる |
-| 承認制の登録の申請 | 3 | `signup-application/apply` / `status` / `register` (#2569)。upstream に承認制が無いため対応物なし。認証不要で、本人性は申請時に発行するクレームコードが担保する (hash で保存し、平文は申請直後に 1 度だけ返す)。**外部サーバーには一切依存しない** — 当初は MiAuth を使っていたが、相手サーバーに消せない access_token 行と通知を残すため廃止した (#2568)。承認制が有効でない構成では 503 |
+| 承認制の登録の申請 | 4 | `signup-application/apply` / `status` / `register` / `form-token` (#2569 / #2806)。upstream に承認制が無いため対応物なし。認証不要で、本人性は申請時に発行するクレームコードが担保する (hash で保存し、平文は申請直後に 1 度だけ返す)。**外部サーバーには一切依存しない** — 当初は MiAuth を使っていたが、相手サーバーに消せない access_token 行と通知を残すため廃止した (#2568)。承認制が有効でない構成では 503。`form-token` は captcha の実 provider が 1 つも無いときに `apply` を守る署名付きトークンを発行する (#2806) — 発動条件は既存の meta フラグから両側が導出でき、**新しい meta 列は作らない** (drop-in の復路で fail-open する列を増やさない)。`testcaptcha` は実 provider として数えない (中身は文字列一致で、数えると「マジック文字列だけが効いてトークンは要求されない」最悪の組み合わせになる)。トークンは HMAC 署名 + 最短滞在時間 + Redis の nonce で使い捨て。鍵は `instance_secret` から取るので config 項目は増えない。**これは captcha の代替ではない** — 止まるのは「フォームを取得せずに endpoint を直接叩く」bot だけで、発行 endpoint を並列で叩き 1 回だけ待って一斉に送るスクリプトには**リクエスト数が約 2 倍になる負担しか課さない**。IP を回す攻撃者には大差ない。したがって captcha 未設定時の管理画面の警告・申請の一括却下・生きている申請の総数上限は引き続き必要 |
 | 承認制の登録の審査 | 3 | `admin/signup-application/list` / `approve` / `reject` (#2555)。upstream に承認制が無いため対応物なし。scope は `read:admin:invite-codes` / `write:admin:invite-codes` を再利用する (承認は最終的に `registration_ticket` の発行につながり管轄が同じ。`internal/misc/permissions` は upstream misskey-js と完全一致させる契約があり mk-go 固有 scope を足せない) |
 | role assignment exact lookup | 2 | `roles/assignment-show` / `admin/roles/assignment-show` (#2607)。member一覧を走査せず、指定したuser/roleのactive assignmentだけを確認するbuild-time plugin向けhost API。self側は本人、admin側はmoderator以上に限定し、admin側は既存`admin/roles/users`と同じ`read:admin:roles` scopeを使う。**見るのは`role_assignment`行だけなので`target=conditional`のroleでは常に`assigned:false`**になる (行を持たずcondFormulaのread時評価で決まるため)。判別用に`role.target`を返す。既存の`admin/roles/users`も`ListByRole`で同じテーブルを引くので挙動は揃っている。effective判定は#2608側の担当 (#2633) |
 | admin の観測系 | 5 | `admin/server-plugins` (組み込みプラグインの一覧、`read:admin:meta`)、`admin/server-metrics` / `admin/self-check` / `admin/federation/delivery-health` / `admin/federation/inbox-health` (いずれも `read:admin:server-info`)。upstream に対応物が無い。**mk-go は連合の配送 / 受信の健全性を Redis に host 単位で記録している** (`internal/core/deliveryhealth`) ので、それを admin 画面から読むための endpoint。Redis 上のカウンタなので flush で消え、drop-in の引き継ぎ対象でもない |
@@ -372,6 +372,7 @@ submodule bump の PR で人が見る。
 | `2026.7.0-mk.22c` | boot エラー画面の Reload を `addEventListener` にする (#2786)。**inline event handler は CSP の hash では通らない** (`'unsafe-hashes'` が要る) ので、`script-src` から `'unsafe-inline'` を外すと `onclick="location.reload(true);"` が block され、「Failed to initialize Misskey」画面の唯一の復旧手段が押しても反応しなくなる。SPA shell が読む `packages/frontend` 側の inline handler はここ 1 箇所だけ。`packages/frontend-embed/public/loader/boot.js` にも同じ形が残っていたが、`/embed/` に CSP を広げた #2789 で `mk.22d` として直した |
 | `2026.7.0-mk.22d` | embed の boot エラー画面の Reload を `addEventListener` にする (#2789)。`mk.22c` の embed 版。`/embed/` にも CSP を付けたので、`onclick` のままだと**埋め込み先の利用者が取れる唯一の復旧手段**が押しても反応しなくなる。これで `packages/frontend` / `packages/frontend-embed` の src と public から inline event handler は消えた |
 | `2026.7.0-mk.22e` | 承認制を切るときにアカウント作成をどうするか聞く (#2803)。承認制を入れる更新はアカウント作成を同じ更新で開放するので、外す更新でその開放が残ると**ゲートが 1 つも無い全開状態**になる。アカウント作成のトグル自体を入れるときは確認ダイアログを挟むのに、この経路は素通りするので無警告で起きていた。OFF 側で 3 択 (閉じる / 開けたまま / やめる) を出し、`disableRegistration` を必ず明示して送る — 省略するとサーバー側が閉じる側の既定を補うため「開けたままにする」が選べない。あわせて API 失敗時に ref を戻す (楽観更新のままだと画面だけ招待制になり、実際には申請を受け付け続ける) |
+| `2026.7.0-mk.22f` | 申請フォームに署名付きトークンを載せる (#2806)。captcha が 1 つも設定されていないとき、承認制の申請 endpoint には IP レート制限以外の防波堤が無い (既定構成がそれ)。サーバーが `signup-application/form-token` で発行するトークンを受け取り、最短滞在時間が明けるまで送信を抑えて送る。**captcha の代替ではない** — 止まるのは「フォームを取得せずに endpoint を直接叩く」bot だけ。取得前・取得失敗時の扱いは「詰まらせない」側に倒してある (失敗時は説明文と再読み込みを出すが送信は塞がない) |
 
 `2026.7.0-mk.1` の内訳:
 

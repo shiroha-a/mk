@@ -90,6 +90,20 @@ func (s *Service) IsEnabled() bool {
 	return s.hcaptcha != nil || s.recaptcha != nil || s.turnstile != nil || s.mcaptcha != nil || s.testcap != nil
 }
 
+// HasRealProvider reports whether a provider other than testcaptcha is
+// configured.
+//
+// **testcaptcha は実 provider として数えない (#2806)。** 中身は
+// `"testcaptcha-passed"` との文字列一致で、開発 / E2E 専用でセキュリティは無い。
+// 数えてしまうと「マジック文字列一致だけが効いていて、フォームトークンは要求
+// されない」という最悪の組み合わせになる。
+func (s *Service) HasRealProvider() bool {
+	if s == nil {
+		return false
+	}
+	return s.hcaptcha != nil || s.recaptcha != nil || s.turnstile != nil || s.mcaptcha != nil
+}
+
 // Verify checks the token matching the first enabled provider. Returns nil
 // if no provider is enabled (captcha disabled).
 func (s *Service) Verify(ctx context.Context, tokens CaptchaTokens) error {

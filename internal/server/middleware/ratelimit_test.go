@@ -568,6 +568,9 @@ func TestDefaultEndpointLimits_KnownEndpoints(t *testing.T) {
 		{"signup-application/apply", 5},
 		{"signup-application/register", 5},
 		{"signup-application/status", 30},
+		// apply を守るトークンの発行 (#2806)。読み込み直しは正常な操作なので
+		// apply より緩いが、無制限にはしない。
+		{"signup-application/form-token", 30},
 		// 初回セットアップの窓は credential 無しで通るので setupPassword の
 		// 試行に上限が要る。
 		{"admin/accounts/create", 30},
@@ -605,6 +608,9 @@ func TestDefaultEndpointLimits_UnauthenticatedEntryPoints(t *testing.T) {
 		"/api/signup-application/apply",
 		"/api/signup-application/register",
 		"/api/signup-application/status",
+		// 発行 endpoint も未認証で叩ける (#2806)。apply を守るトークンを配る
+		// 側なので、ここが無制限だと gate の前段が無制限になる。
+		"/api/signup-application/form-token",
 		"/api/signin",
 		"/api/signin-flow",
 		"/api/request-reset-password",

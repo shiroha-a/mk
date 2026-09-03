@@ -135,6 +135,11 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	//
 	// apply は signup と同格。申請行と審査キューが無制限に積まれるのを防ぐ。
 	"signup-application/apply": {Duration: time.Hour, Max: 5},
+	// form-token は apply を守る署名付きトークンの発行 (#2806)。フォームの
+	// 読み込み直しは正常な操作なので apply より緩くするが、**無制限にはしない** —
+	// 未登録の endpoint は上限が引けず素通しになる (ratelimit.go の lookup)。
+	// status と同格の 1h 30 にしてある。
+	"signup-application/form-token": {Duration: time.Hour, Max: 30},
 	// register は承認済みの申請から確認メールを出す経路なので、同じく signup
 	// と同格にする (signup の 1h 5 が「確認メール乱発」対策なのと同じ理由)。
 	"signup-application/register": {Duration: time.Hour, Max: 5},

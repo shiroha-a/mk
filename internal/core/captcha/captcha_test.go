@@ -295,3 +295,41 @@ func TestTurnstile_ResponseTooLarge(t *testing.T) {
 	// と揃える、Devin #404 指摘)。
 	assert.ErrorIs(t, err, captcha.ErrRequestFailed)
 }
+
+// testcaptcha は実 provider として数えない (#2806)。数えると「マジック文字列
+// 一致だけが効いていて、フォームトークンは要求されない」という最悪の組み合わせに
+// なる。
+func TestService_HasRealProvider(t *testing.T) {
+	secret := "s"
+	url := "https://mcaptcha.example"
+	tests := []struct {
+		name string
+		meta *model.Meta
+		want bool
+	}{
+		{name: "none", meta: &model.Meta{}, want: false},
+		{name: "testcaptcha only", meta: &model.Meta{EnableTestcaptcha: true}, want: false},
+		{name: "hcaptcha", meta: &model.Meta{EnableHcaptcha: true, HcaptchaSecretKey: &secret}, want: true},
+		{name: "recaptcha", meta: &model.Meta{EnableRecaptcha: true, RecaptchaSecretKey: &secret}, want: true},
+		{name: "turnstile", meta: &model.Meta{EnableTurnstile: true, TurnstileSecretKey: &secret}, want: true},
+		{name: "mcaptcha", meta: &model.Meta{EnableMcaptcha: true, McaptchaSecretKey: &secret, McaptchaInstanceURL: &url}, want: true},
+		{
+			name: "hcaptcha + testcaptcha",
+			meta: &model.Meta{EnableHcaptcha: true, HcaptchaSecretKey: &secret, EnableTestcaptcha: true},
+			want: true,
+		},
+		{
+			// 有効フラグだけで secret が無いものは provider が組み立たない。
+			name: "hcaptcha without secret",
+			meta: &model.Meta{EnableHcaptcha: true},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, captcha.NewService(tt.meta).HasRealProvider())
+		})
+	}
+	var nilSvc *captcha.Service
+	assert.False(t, nilSvc.HasRealProvider())
+}

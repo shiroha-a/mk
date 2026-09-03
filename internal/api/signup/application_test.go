@@ -1,15 +1,19 @@
 package signup_test
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	apisignup "github.com/shiroha-a/mk/internal/api/signup"
+	"github.com/shiroha-a/mk/internal/core/captcha"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
+	"github.com/shiroha-a/mk/internal/core/signupform"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
 	"github.com/shiroha-a/mk/internal/model"
@@ -708,4 +712,242 @@ func TestSignupPending_WithoutApplicationLeavesApplicationsAlone(t *testing.T) {
 	rec = doPost(env.handler.SignupPending, `{"code":"`+row.Code+`"}`)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	assert.Empty(t, env.apps.completedApp)
+}
+
+// --- 署名付きフォームトークン (#2806) ---
+//
+// **captcha の代替ではない。** 止まるのは「フォームを取得せずに endpoint を直接
+// 叩く」bot だけで、待って送るスクリプトには 2 倍のリクエストしか課さない。
+// 位置づけの全文は core/signupform の doc にある。
+
+type fakeFormNonces struct {
+	burnt map[string]bool
+	// err は nonce store の障害 (Redis 断など) を注入する。
+	err error
+}
+
+func (f *fakeFormNonces) Burn(_ context.Context, nonce string, _ time.Duration) (bool, error) {
+	if f.err != nil {
+		return false, f.err
+	}
+	if f.burnt == nil {
+		f.burnt = map[string]bool{}
+	}
+	if f.burnt[nonce] {
+		return false, nil
+	}
+	f.burnt[nonce] = true
+	return true, nil
+}
+
+// withFormTokens wires an issuer with no minimum dwell time. 滞在時間そのものは
+// core/signupform の単体テストが押さえるので、ここでは要求の有無を見る。
+func withFormTokens(t *testing.T, env *approvalEnv, minAge time.Duration) *signupform.Issuer {
+	t.Helper()
+	issuer, _ := withFormTokenNonces(t, env, minAge)
+	return issuer
+}
+
+func withFormTokenNonces(t *testing.T, env *approvalEnv, minAge time.Duration) (*signupform.Issuer, *fakeFormNonces) {
+	t.Helper()
+	nonces := &fakeFormNonces{}
+	issuer := signupform.NewIssuerWithTimings([]byte("test-key"), nonces, minAge, time.Minute)
+	require.NotNil(t, issuer)
+	env.handler.SetFormTokenIssuer(issuer)
+	return issuer, nonces
+}
+
+func applyBody(t *testing.T, token string) string {
+	t.Helper()
+	return `{"answers":["理由"],"formToken":` + strconvQuote(token) + `}`
+}
+
+func strconvQuote(s string) string { return `"` + s + `"` }
+
+// captcha の実 provider が 1 つも無いときは、フォームトークンが要る。
+func TestApplicationApply_RequiresFormTokenWithoutRealCaptcha(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	issuer := withFormTokens(t, env, 0)
+
+	rec := doPost(env.handler.ApplicationApply, `{"answers":["理由"]}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "FORM_TOKEN_INVALID")
+	// **応答を書くだけでは足りない。** `c.JSON` は成功時に nil を返すので、
+	// 呼び出し側が error だけを見ると素通りして申請行を作ってしまう。
+	assert.Nil(t, env.apps.appliedAnswers, "弾いたら申請行を作らない")
+
+	token, err := issuer.Issue(signupform.PurposeApply)
+	require.NoError(t, err)
+	rec = doPost(env.handler.ApplicationApply, applyBody(t, token))
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// **使い捨てにしないと 1 枚を無限に使い回される。**
+func TestApplicationApply_FormTokenIsSingleUse(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	issuer := withFormTokens(t, env, 0)
+	token, err := issuer.Issue(signupform.PurposeApply)
+	require.NoError(t, err)
+
+	require.Equal(t, http.StatusOK, doPost(env.handler.ApplicationApply, applyBody(t, token)).Code)
+	rec := doPost(env.handler.ApplicationApply, applyBody(t, token))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "FORM_TOKEN_INVALID")
+}
+
+// 早すぎる送信は専用のコードで返す。**nonce は焼かれていない**ので、待てば通る。
+func TestApplicationApply_FormTokenTooSoon(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	issuer := withFormTokens(t, env, time.Hour)
+	token, err := issuer.Issue(signupform.PurposeApply)
+	require.NoError(t, err)
+
+	rec := doPost(env.handler.ApplicationApply, applyBody(t, token))
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "FORM_TOKEN_TOO_SOON")
+	assert.Nil(t, env.apps.appliedAnswers, "弾いたら申請行を作らない")
+}
+
+// **testcaptcha は実 provider として数えない。** 数えると「マジック文字列一致
+// だけが効いていて、フォームトークンは要求されない」という最悪の組み合わせになる。
+func TestApplicationApply_TestcaptchaStillRequiresFormToken(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	env.meta.EnableTestcaptcha = true
+	env.handler.SetCaptcha(captcha.NewService(env.meta))
+	withFormTokens(t, env, 0)
+
+	rec := doPost(env.handler.ApplicationApply,
+		`{"answers":["理由"],"testcaptcha-response":"testcaptcha-passed"}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "FORM_TOKEN_INVALID")
+	assert.Nil(t, env.apps.appliedAnswers, "弾いたら申請行を作らない")
+}
+
+// 実 provider が有効なときは要求しない (二重の負担を課さない)。
+func TestApplicationApply_RealCaptchaSkipsFormToken(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"valid":true}`))
+	}))
+	defer srv.Close()
+	secret, instanceURL := "s", srv.URL
+	env.meta.EnableMcaptcha = true
+	env.meta.McaptchaSecretKey = &secret
+	env.meta.McaptchaInstanceURL = &instanceURL
+	env.handler.SetCaptcha(captcha.NewServiceWithClient(env.meta, srv.Client()))
+	withFormTokens(t, env, 0)
+
+	rec := doPost(env.handler.ApplicationApply,
+		`{"answers":["理由"],"m-captcha-response":"ok"}`)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}
+
+// testMode は既存 captcha と同じ扱い。**この endpoint を叩く e2e は Playwright にも
+// 本家 backend e2e にも無い** (mk-go 独自なので upstream のテストは持たない) ので、
+// 根拠は「captcha と扱いを分ける理由が無い」で足りる。
+func TestApplicationApply_TestModeSkipsFormToken(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	withFormTokens(t, env, 0)
+	env.handler.SetTestMode(true)
+
+	assert.Equal(t, http.StatusOK, doPost(env.handler.ApplicationApply, `{"answers":["理由"]}`).Code)
+}
+
+// 未配線なら要求しない (fail-open)。**router の recordCriticalWiring が起動時に
+// 止める**ので、本番でこの状態にはならない。
+func TestApplicationApply_UnwiredIssuerDoesNotRequireToken(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	assert.False(t, env.handler.HasFormTokens())
+	assert.Equal(t, http.StatusOK, doPost(env.handler.ApplicationApply, `{"answers":["理由"]}`).Code)
+}
+
+func TestApplicationFormToken_IssuesUsableToken(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	withFormTokens(t, env, 0)
+
+	rec := doPost(env.handler.ApplicationFormToken, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		Token          string `json:"token"`
+		MinWaitSeconds int    `json:"minWaitSeconds"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.Token)
+	assert.Equal(t, 0, resp.MinWaitSeconds)
+
+	// 発行したものがそのまま apply で通ること。
+	assert.Equal(t, http.StatusOK, doPost(env.handler.ApplicationApply, applyBody(t, resp.Token)).Code)
+}
+
+// **minWaitSeconds は切り上げる。** 切り捨てにすると、非整数秒にした瞬間に画面の
+// ほうが短く待ち、正規の利用者が FORM_TOKEN_TOO_SOON を見る。
+func TestApplicationFormToken_MinWaitSecondsRoundsUp(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	withFormTokens(t, env, 1500*time.Millisecond)
+
+	rec := doPost(env.handler.ApplicationFormToken, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var resp struct {
+		MinWaitSeconds int `json:"minWaitSeconds"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, 2, resp.MinWaitSeconds, "画面はサーバーより短く待ってはいけない")
+}
+
+// 実 provider が有効なら空文字を返す。画面は「空なら送信を抑えない」だけで済む。
+func TestApplicationFormToken_EmptyWhenRealCaptcha(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	secret, instanceURL := "s", "https://mcaptcha.example"
+	env.meta.EnableMcaptcha = true
+	env.meta.McaptchaSecretKey = &secret
+	env.meta.McaptchaInstanceURL = &instanceURL
+	env.handler.SetCaptcha(captcha.NewService(env.meta))
+	withFormTokens(t, env, 0)
+
+	rec := doPost(env.handler.ApplicationFormToken, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"token":""`)
+}
+
+// 承認制が無効なら発行もしない。
+func TestApplicationFormToken_DisabledReturns503(t *testing.T) {
+	env := newApprovalEnv(t, false)
+	withFormTokens(t, env, 0)
+	assert.Equal(t, http.StatusServiceUnavailable,
+		doPost(env.handler.ApplicationFormToken, `{}`).Code)
+}
+
+// **回答の検証で落ちても nonce を焼かない (#2806)。** 焼くと、入力を直して
+// 送り直した利用者が「フォームを開き直せ」と言われる。
+func TestApplicationApply_ValidationFailureKeepsFormToken(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	issuer := withFormTokens(t, env, 0)
+	token, err := issuer.Issue(signupform.PurposeApply)
+	require.NoError(t, err)
+
+	// 必須項目が空 → ANSWER_REQUIRED。
+	rec := doPost(env.handler.ApplicationApply, `{"answers":[""],"formToken":`+strconvQuote(token)+`}`)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "ANSWER_REQUIRED")
+
+	// 同じ token で通ること (焼かれていない)。
+	assert.Equal(t, http.StatusOK, doPost(env.handler.ApplicationApply, applyBody(t, token)).Code)
+}
+
+// **nonce store が落ちても素通しにしない (#2806)。** 素通しにすると、captcha を
+// 設定していないインスタンスで防波堤が 1 つも無い状態に戻る。`NOT_APPROVED` の
+// ように利用者向けの答えへ丸めず 500 にするのは、障害をドメインの答えに化け
+// させないため (#2799 と同じ)。
+func TestApplicationApply_NonceStoreFailureIsNotFailOpen(t *testing.T) {
+	env := newApprovalEnv(t, true)
+	issuer, nonces := withFormTokenNonces(t, env, 0)
+	token, err := issuer.Issue(signupform.PurposeApply)
+	require.NoError(t, err)
+
+	nonces.err = errors.New("redis down")
+	rec := doPost(env.handler.ApplicationApply, applyBody(t, token))
+	require.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.NotContains(t, rec.Body.String(), "FORM_TOKEN")
+	assert.Nil(t, env.apps.appliedAnswers, "申請行を作らない")
 }

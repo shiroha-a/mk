@@ -17,6 +17,7 @@ import (
 	coreemail "github.com/shiroha-a/mk/internal/core/email"
 	"github.com/shiroha-a/mk/internal/core/role"
 	coresignup "github.com/shiroha-a/mk/internal/core/signup"
+	"github.com/shiroha-a/mk/internal/core/signupform"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
@@ -78,7 +79,24 @@ type Handler struct {
 	// applications は承認制の登録 (#2569)。未配線なら該当 endpoint は 503。
 	// ticketStore は承認済み申請の登録でも使う (内部で招待を発行して即消費する)。
 	applications SignupApplications
+	// formTokens は captcha の実 provider が 1 つも無いときに
+	// signup-application/apply を守る署名付きフォームトークン (#2806)。
+	// **captcha の代替ではない** — 位置づけは core/signupform の doc を見ること。
+	formTokens *signupform.Issuer
 }
+
+// SetFormTokenIssuer wires the signed form tokens used when no real captcha
+// provider is configured (#2806).
+func (h *Handler) SetFormTokenIssuer(i *signupform.Issuer) {
+	h.formTokens = i
+}
+
+// HasFormTokens reports whether the signup form token issuer is wired.
+//
+// 未配線だと、captcha が 1 つも設定されていないインスタンスで申請 endpoint の
+// 唯一の簡易チェックが素通しになる。router のコメントも同じ理由で critical
+// wiring に載せている。
+func (h *Handler) HasFormTokens() bool { return h.formTokens != nil }
 
 // SetSigninRecorder wires the recorder used to fire login side-effects after
 // account creation (#1804)。
