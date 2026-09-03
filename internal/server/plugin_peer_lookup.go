@@ -35,12 +35,25 @@ const peerLookupTimeout = 10 * time.Second
 // peerLookupMaxBody bounds a nodeinfo document.
 const peerLookupMaxBody = 256 << 10
 
+// peerLookupMaxHosts bounds the cache.
+//
+// **期限切れの entry は消えない実装だった。** 読むときに時刻を比べるだけなので、
+// 引いた host の数だけ表が伸び続ける。引く相手を決めるのはプラグインだが、
+// リモート利用者のホストを使う作り (authoring.md が勧めている形) だと**外から
+// 増やせる**。
+const peerLookupMaxHosts = 2048
+
 // nodeInfoPeerLister resolves which plugins a remote host declares.
 type nodeInfoPeerLister struct {
 	client *http.Client
 	// urlFor builds the nodeinfo URL for a host. テストから http の
 	// httptest サーバーへ向けられるように関数にしてある。
 	urlFor func(host string) string
+
+	// local はこちらが持っている peered プラグイン名。**これに無い名前は
+	// 覚えない。** 相手の nodeinfo は相手が書いた値なので、そのまま持つと
+	// 1 host あたりの大きさを外から膨らませられる。
+	local map[string]struct{}
 
 	mu    sync.Mutex
 	cache map[string]peerLookupEntry
@@ -51,9 +64,14 @@ type peerLookupEntry struct {
 	expiresAt time.Time
 }
 
-func newNodeInfoPeerLister(client *http.Client) *nodeInfoPeerLister {
+func newNodeInfoPeerLister(client *http.Client, local []string) *nodeInfoPeerLister {
+	set := make(map[string]struct{}, len(local))
+	for _, n := range local {
+		set[n] = struct{}{}
+	}
 	return &nodeInfoPeerLister{
 		client: client,
+		local:  set,
 		// well-known を辿らず 2.1 を直接見る。mk-go 同士でしか使わない経路
 		// なので相手の nodeinfo の場所は分かっている。**相手が mk-go でなければ
 		// mkGoPlugins が無いだけ**で、誤って送ることはない。
@@ -78,14 +96,60 @@ func (l *nodeInfoPeerLister) Plugins(ctx context.Context, host string) ([]string
 		return nil, err
 	}
 
+	// **TTL は取得した一覧そのもので決める。** 絞った後で決めると、相手が
+	// 別の peered プラグインだけを持っている場合に 30 分ごとに引き直すことに
+	// なり、こちらの都合で相手に負荷をかける。
 	ttl := peerLookupTTL
 	if len(names) == 0 {
 		ttl = peerLookupNegativeTTL
 	}
+	kept := l.keepLocal(names)
+
+	now := time.Now()
 	l.mu.Lock()
-	l.cache[host] = peerLookupEntry{plugins: names, expiresAt: time.Now().Add(ttl)}
+	l.evictLocked(now)
+	l.cache[host] = peerLookupEntry{plugins: kept, expiresAt: now.Add(ttl)}
 	l.mu.Unlock()
-	return names, nil
+	return kept, nil
+}
+
+// keepLocal drops names this instance does not run.
+func (l *nodeInfoPeerLister) keepLocal(names []string) []string {
+	var kept []string
+	for _, n := range names {
+		if _, ok := l.local[n]; ok {
+			kept = append(kept, n)
+		}
+	}
+	return kept
+}
+
+// evictLocked makes room for a new host.
+//
+// 期限切れを先に落とす。それでも埋まっているときだけ、期限が近い順に捨てる
+// (取り直せば済むので、失うのは 1 回分の外向きリクエスト)。
+func (l *nodeInfoPeerLister) evictLocked(now time.Time) {
+	if len(l.cache) < peerLookupMaxHosts {
+		return
+	}
+	for h, e := range l.cache {
+		if !now.Before(e.expiresAt) {
+			delete(l.cache, h)
+		}
+	}
+	for len(l.cache) >= peerLookupMaxHosts {
+		var oldestHost string
+		var oldest time.Time
+		for h, e := range l.cache {
+			if oldestHost == "" || e.expiresAt.Before(oldest) {
+				oldestHost, oldest = h, e.expiresAt
+			}
+		}
+		if oldestHost == "" {
+			return
+		}
+		delete(l.cache, oldestHost)
+	}
 }
 
 func (l *nodeInfoPeerLister) fetch(ctx context.Context, host string) ([]string, error) {

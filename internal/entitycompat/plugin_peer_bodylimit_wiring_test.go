@@ -3,6 +3,7 @@ package entitycompat
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -56,9 +57,17 @@ func TestPluginPeerRateLimiterIsWired(t *testing.T) {
 			live = append(live, trimmed)
 		}
 	}
-	const wiring = "limiter:  newPeerRateLimiter(),"
-	if !strings.Contains(strings.Join(live, "\n"), wiring) {
+	// **空白は詰めて比べる。** struct literal のフィールド名は gofmt が揃えるので、
+	// 隣の行を足しただけで空白の数が変わる (実際に変わって落ちた)。
+	const wiring = "limiter: newPeerRateLimiter(),"
+	if !strings.Contains(squeezeSpaces(strings.Join(live, "\n")), wiring) {
 		t.Errorf("internal/server/router.go の pluginPeerDeps に %q が無い (コメントは数えない)。"+
 			"peer の受け口が無制限になる", wiring)
 	}
+}
+
+// squeezeSpaces collapses runs of spaces so gofmt's struct alignment does not
+// change what these gates match.
+func squeezeSpaces(s string) string {
+	return regexp.MustCompile(` +`).ReplaceAllString(s, " ")
 }
