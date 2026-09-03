@@ -146,18 +146,30 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		def := p.def
 		pctx := p.ctx
 		peer := p.peer
-		if def.Routes != nil && s.role.RunsServer() {
+		// **peer の受け口を Routes の有無に依存させない (#2822)。** nodeinfo の
+		// 広告は Routes を見ないので、`Peered: true` + `Routes: nil` は宣言だけ
+		// して受け取れないインスタンスになる。相手からは catchall の 200 + {} が
+		// 返り、「プラグインが空の応答を返した」と区別が付かない。
+		//
+		// **group を作るのは 1 箇所に保つ。** `api.Group(` の数は
+		// `TestAPICompatDoc_MatchesRouter` が固定している (サブグループ配下の
+		// 登録は生成物との照合から見えないため)。
+		needsRoutes := def.Routes != nil
+		needsPeer := def.Peered && s.peerDeps != nil
+		if s.role.RunsServer() && (needsRoutes || needsPeer) {
 			group := api.Group(pluginRoutePrefix + def.Name)
-			r := &pluginRouter{group: group, roles: s.pluginRoles}
-			if err := def.Routes(pctx, r); err != nil {
-				return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
-			}
-			if err := r.err; err != nil {
-				return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
+			if needsRoutes {
+				r := &pluginRouter{group: group, roles: s.pluginRoles}
+				if err := def.Routes(pctx, r); err != nil {
+					return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
+				}
+				if err := r.err; err != nil {
+					return fmt.Errorf("plugin %q: ルート登録に失敗しました: %w", def.Name, err)
+				}
 			}
 			// 予約パスは **プラグインの登録より後**に張る。先に張ると
 			// プラグインが同じパスを登録できてしまい、受け口を奪える。
-			if def.Peered && s.peerDeps != nil {
+			if needsPeer {
 				group.POST(peerPath, peer.echoHandler())
 			}
 		}

@@ -76,8 +76,8 @@ type Definition struct {
 	// 晒すと、運営者がどんな拡張を使っているかが攻撃面の情報になる。
 	// 連合しないプラグインは名前も出さない。
 	//
-	// **現状は [Definition.Routes] も要る。** 受信の受け口は Routes の登録と
-	// 同じ枝で張るので、Routes が nil だと宣言だけして受け取れない (#2822)。
+	// **[Definition.Routes] は要らない。** 受信の受け口は Peered だけで張る
+	// ので、ジョブしか持たないプラグインでも受け取れる (#2822)。
 	Peered bool
 
 	// PeerMaxBody caps the peer request and reply body this plugin accepts,

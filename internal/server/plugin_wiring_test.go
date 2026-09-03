@@ -1216,3 +1216,32 @@ func TestServerPluginInfos_ReflectsDefinitionsAndConfig(t *testing.T) {
 func TestServerPluginInfos_EmptyIsEmpty(t *testing.T) {
 	assert.Empty(t, serverPluginInfos(nil, nil))
 }
+
+// `Peered: true` なら **Routes を持たなくても**受け口を張る。nodeinfo の広告は
+// Routes を見ないので、張らないと「宣言はするのに受け取れない」になる (#2822)。
+func TestSetupPlugins_PeerEndpointWithoutRoutes(t *testing.T) {
+	s, api := newPluginTestServer(config.RoleServer)
+	s.peerDeps = &pluginPeerDeps{selfHost: "self.example"}
+
+	def := plugin.Definition{Name: "jobsonly", APIVersion: plugin.APIVersion, Peered: true}
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/plugin/jobsonly/_peer", nil))
+	// 署名が無いので 401。**404 なら受け口そのものが張られていない。**
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+// Peered を立てていなければ受け口は張らない (入れている拡張を晒さない)。
+func TestSetupPlugins_NoPeerEndpointWithoutPeered(t *testing.T) {
+	s, api := newPluginTestServer(config.RoleServer)
+	s.peerDeps = &pluginPeerDeps{selfHost: "self.example"}
+
+	def := plugin.Definition{Name: "plain", APIVersion: plugin.APIVersion,
+		Routes: func(plugin.Context, plugin.Router) error { return nil }}
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+
+	rec := httptest.NewRecorder()
+	s.echo.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/plugin/plain/_peer", nil))
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
