@@ -50,6 +50,16 @@ const peerAPIPrefix = "/api" + pluginRoutePrefix
 // peerTimeout bounds one delivery attempt.
 const peerTimeout = 15 * time.Second
 
+// peerHandlerTimeout bounds one inbound handler run.
+//
+// **送信側の 1 試行 (peerTimeout) より短くする。** 長いと、相手が諦めて再送に
+// 移った後もこちらは走り続け、同じ交換の処理が重なる。
+//
+// プラグインのハンドラは**リクエストの中で同期に動く** (AP inbox のように
+// キューへ逃がしていない)。ctx を見ないハンドラは打ち切れないので、これは
+// 「DB 呼び出し等 ctx を見る処理が止まる」ところまでしか効かない。
+const peerHandlerTimeout = 10 * time.Second
+
 // peerRetryDelays are the waits between delivery attempts.
 //
 // **プロセス内で完結させる (初版)。** キューに載せれば再起動をまたげるが、
@@ -396,7 +406,9 @@ func (p *pluginPeer) echoHandler() echo.HandlerFunc {
 			return peerError(c, http.StatusNotImplemented, "受信ハンドラが登録されていません")
 		}
 
-		res, err := fn(req.Context(), from, env.Payload)
+		ctx, cancel := context.WithTimeout(req.Context(), peerHandlerTimeout)
+		defer cancel()
+		res, err := fn(ctx, from, env.Payload)
 		if err != nil {
 			// **プラグインのエラー文面は返さない。** 内部事情 (DB のエラー等)
 			// が相手のサーバーに漏れる。ログにだけ残す。

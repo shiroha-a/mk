@@ -133,3 +133,34 @@ func TestPluginPeer_ServeRateLimitsVerifiedHost(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, serve("192.0.2.2"))
 	assert.Equal(t, 1, calls, "落とした分はプラグインのハンドラまで届かない")
 }
+
+// ハンドラは**リクエストの中で同期に動く**ので、期限を渡さないと相手が
+// こちらの goroutine を握り続けられる。
+func TestPluginPeer_ServeBoundsHandlerContext(t *testing.T) {
+	key, pem := testPeerKeypair(t)
+	p := testPeer(t, &pluginPeerDeps{
+		keyCache: activitypub.NewPublicKeyCache(4),
+		resolver: &fakePeerResolver{host: "sender.example", pem: pem},
+	})
+
+	var hasDeadline bool
+	var remaining time.Duration
+	p.Handle(func(ctx context.Context, _ string, _ json.RawMessage) (any, error) {
+		dl, ok := ctx.Deadline()
+		hasDeadline = ok
+		if ok {
+			remaining = time.Until(dl)
+		}
+		return map[string]any{"ok": true}, nil
+	})
+
+	body, _ := json.Marshal(peerEnvelope{ID: "x", Payload: json.RawMessage(`{"a":1}`)})
+	c, rec := peerRequest(t, body, func(r *http.Request) { signPeerRequest(t, r, key, body) })
+	require.NoError(t, p.echoHandler()(c))
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.True(t, hasDeadline, "ハンドラの ctx に期限が無い")
+	assert.LessOrEqual(t, remaining, peerHandlerTimeout)
+	assert.Greater(t, remaining, peerHandlerTimeout-time.Second)
+	assert.Less(t, peerHandlerTimeout, peerTimeout, "送信側の 1 試行より短いこと")
+}
