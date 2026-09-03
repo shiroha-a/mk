@@ -121,3 +121,10 @@ func TestSurfaceAll_PropagatesError(t *testing.T) {
 	_, err := SurfaceAll("../..", []string{"absent-package"})
 	require.Error(t, err)
 }
+
+// peercache も公開パッケージなので golden の対象にする (#2820)。
+//
+// **外すとそこだけ黙って育つ。** plugintest を入れているのと同じ理由。
+func TestTrackedDirs_IncludesPeercache(t *testing.T) {
+	assert.Contains(t, TrackedDirs, "plugin/peercache")
+}

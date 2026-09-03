@@ -553,6 +553,48 @@ mk-go が面倒を見るもの:
 返ってくるわけではないので、相手が `Send` を呼び返す必要は無い。status やエラーの
 形など wire の詳細は[peer プロトコル](../plugin-peer-protocol.md)。
 
+### 取り寄せた結果をキャッシュする
+
+リモート利用者のプロフィールにプラグインの情報を出すなら、**非同期取り寄せ + TTL +
+空振りの記憶 + 初回は空**という型が要る。`Send` は積んでから数分かけて `OnReply` に
+返るので、描画にそのままは使えない。
+
+`plugin/peercache` がこの型を持っている。**キャッシュはプラグイン自身の schema に
+置く**ので、プラグインを消せばデータも消える。
+
+```go
+cache, err := peercache.New(peercache.Options{
+    Context: ctx,
+    DB:      ctx.Storage().DB(),
+    Request: func(key string) any { return map[string]string{"username": key} },
+    // 省略すると DefaultTTL / DefaultNegativeTTL。
+})
+if err != nil {
+    return nil, err
+}
+
+// 初回は nil。取り寄せは裏で走り、次の表示から出る。
+profile, err := cache.Lookup(req.Context(), "other.example", "alice")
+if err != nil {
+    return nil, err
+}
+_ = profile
+```
+
+| | |
+|---|---|
+| テーブル | `Migrations(n)` が返す DDL を自分の migration に混ぜる。`peer_cache` / `peer_cache_pending` は予約 |
+| 読む | `Lookup(ctx, host, key)`。**初回は nil**、取り寄せは裏で走る。期限切れでも古いものは返る |
+| 書く | `OnReply` から `Store(ctx, id, payload, found)`。`found` が false なら否定 TTL で覚える |
+| 掃除 | cron から `Sweep(ctx)` |
+
+**空振りを覚えるのが要点。** 覚えないと、そのプラグインを使っていない利用者の
+プロフィールを開くたびに相手へ問い合わせることになる。応答が届く前に大勢が同じ
+プロフィールを開いても、問い合わせは 1 分に 1 回までに抑えられる。
+
+`plugintest` からは `h.Peer(def)` で登録し、`h.PeerSends()` で出た問い合わせを、
+`h.DeliverPeerReply(host, id, ...)` で応答を試せる。
+
 ### リモート利用者を引くときは `AsUser` で
 
 **踏みやすい。** 相手のホストを知るために `users/show` を呼ぶことになるが、
@@ -649,6 +691,28 @@ require.NoError(t, jobs.Run(t, "prune", ""))
 以下が「壊さないと約束する範囲」のすべて。`plugin` パッケージの分は**手で書いているが、`internal/entitycompat/testdata/golden_plugin_surface.txt` の `plugin:` 行と突き合わせる gate が CI で回る** (`TestPluginDoc_*`)。見るのは識別子の有無・宣言の有無・interface の method の署名・トップレベル func / const の行・struct のフィールドの型。**`type X func(...)` の署名だけは対象外** — golden が `type Handler func` としか出さず、照合する相手が無いため。
 
 `plugin/plugintest` の分はこの一覧に入れていない (テストの書き方は[テスト](#テスト)の節)。**gate の対象外**なので、そちらは golden の diff をレビューで見ること。
+
+### Go (`github.com/shiroha-a/mk/plugin/peercache`)
+
+```
+const DefaultTTL
+const DefaultNegativeTTL
+
+type Options struct
+  Context plugin.Context
+  DB *sql.DB
+  Request func(key string) any
+  TTL time.Duration
+  NegativeTTL time.Duration
+
+type Cache struct
+
+func New(Options) (*Cache, error)
+func Migrations(int) []plugin.Migration
+func (*Cache) Lookup(context.Context, string, string) (json.RawMessage, error)
+func (*Cache) Store(context.Context, string, any, bool) error
+func (*Cache) Sweep(context.Context) error
+```
 
 ### Go (`github.com/shiroha-a/mk/plugin`)
 

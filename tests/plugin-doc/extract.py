@@ -17,6 +17,7 @@ HEADER = '''import (
 \t"testing"
 
 \t"github.com/shiroha-a/mk/plugin"
+\t"github.com/shiroha-a/mk/plugin/peercache"
 \t"github.com/shiroha-a/mk/plugin/plugintest"
 \t"github.com/stretchr/testify/assert"
 \t"github.com/stretchr/testify/require"
@@ -31,7 +32,7 @@ var (
 \traw                             json.RawMessage
 )
 
-var _, _, _, _, _, _ = context.Background, json.Marshal, http.StatusOK, plugintest.New, require.NoError, assert.Equal
+var _, _, _, _, _, _, _ = context.Background, json.Marshal, http.StatusOK, plugintest.New, require.NoError, assert.Equal, peercache.DefaultTTL
 '''
 
 # **断片ごとに置かれる文脈が違う** — top-level 宣言、`(any, error)` を返すハンドラの

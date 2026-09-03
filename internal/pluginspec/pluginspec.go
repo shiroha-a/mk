@@ -26,7 +26,7 @@ const DefaultDir = "plugin"
 //
 // **plugintest も対象にする。** 公開パッケージである以上、export が増えれば
 // semver の対象になる。テスト用だからと外すと、そこだけ黙って育つ。
-var TrackedDirs = []string{"plugin", "plugin/plugintest"}
+var TrackedDirs = []string{"plugin", "plugin/peercache", "plugin/plugintest"}
 
 // DefaultGolden is where the snapshot lives.
 const DefaultGolden = "internal/entitycompat/testdata/golden_plugin_surface.txt"
