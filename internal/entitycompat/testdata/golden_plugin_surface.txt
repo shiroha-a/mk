@@ -53,6 +53,7 @@ plugin:   field Definition.EffectivePolicies func(Context, EffectivePolicyInvali
 plugin:   field Definition.Jobs func(Context, Jobs) error
 plugin:   field Definition.Migrations []Migration
 plugin:   field Definition.Name string
+plugin:   field Definition.Peer func(Context, Peer) error
 plugin:   field Definition.PeerMaxBody int64
 plugin:   field Definition.Peered bool
 plugin:   field Definition.Routes func(Context, Router) error

@@ -3513,6 +3513,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		remote:  newNodeInfoPeerLister(s.outboundClient(peerLookupTimeout), peered),
 		idGen:   idGen,
 		limiter: newPeerRateLimiter(),
+		// 送信はキューに積む (#2819)。**プロセス内の time.Sleep だと再起動を
+		// またげず、デプロイのたびに送信中のものが消える。**
+		enqueuer: s.queueClient,
 	}
 
 	if err := s.setupPlugins(api, registeredPlugins, openPluginStorage); err != nil {

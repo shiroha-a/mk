@@ -80,6 +80,17 @@ type Definition struct {
 	// ので、ジョブしか持たないプラグインでも受け取れる (#2822)。
 	Peered bool
 
+	// Peer registers the plugin's peer handlers. Called in every process,
+	// regardless of role. May be nil.
+	//
+	// **ここで登録する (#2819)。** 送信の再送はキューに載るので、実際に POST
+	// するのは queue ロールのプロセスになる。[Peer.OnReply] を Routes の中で
+	// 登録していると、ロールを分割した構成で応答が届かない。[Peer.Handle] も
+	// 同じ理由でここへ置く。
+	//
+	// 呼ばれる順は Migrations の後、Routes / Jobs より前。
+	Peer func(Context, Peer) error
+
 	// PeerMaxBody caps the peer request and reply body this plugin accepts,
 	// in bytes. 0 uses the host default.
 	//
@@ -122,8 +133,11 @@ func (d Definition) Validate() error {
 		// つもり」で通ってしまう。
 		return fmt.Errorf("plugin %q: PeerMaxBody を指定するなら Peered も立てること", d.Name)
 	}
-	if d.Routes == nil && d.Jobs == nil && d.EffectivePolicies == nil {
-		return fmt.Errorf("plugin %q: Routes も Jobs も EffectivePolicies も設定されていません", d.Name)
+	if d.Peer != nil && !d.Peered {
+		return fmt.Errorf("plugin %q: Peer を指定するなら Peered も立てること", d.Name)
+	}
+	if d.Routes == nil && d.Jobs == nil && d.EffectivePolicies == nil && d.Peer == nil {
+		return fmt.Errorf("plugin %q: Routes も Jobs も EffectivePolicies も Peer も設定されていません", d.Name)
 	}
 	return nil
 }

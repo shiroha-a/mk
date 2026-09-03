@@ -32,15 +32,20 @@ import (
 // 使うには [Definition.Peered] を立てる。立てると nodeinfo にプラグイン名が
 // 出て、相手から「このインスタンスは同じプラグインを持っている」と分かる。
 // 立てていないプラグインでこれを呼ぶとエラーになる。
+//
+// **[Handle] と [OnReply] は [Definition.Peer] の中で登録する。** Routes の中で
+// 登録すると、ロールを分割した構成 (MK_ONLY_SERVER / MK_ONLY_QUEUE) で片方に
+// しか登録されない — 送信の POST は queue ロールで走るので、OnReply が
+// server ロールにしか無いと応答が届かない (#2819)。
 type Peer interface {
 	// Send posts a payload to the same plugin on host and returns the id
 	// that identifies this exchange.
 	//
-	// **POST は別の goroutine で走る**ので、相手が遅くてもこちらのリクエストは
-	// 詰まらない。応答は [Peer.OnReply] に届く。ただし**即座に返るとは限らない** —
-	// 相手の nodeinfo がキャッシュに無いと、ここで取得を待つ (最大 10 秒)。
+	// **POST はキューが行う**ので、相手が遅くてもこちらのリクエストは詰まらない。
+	// 応答は [Peer.OnReply] に届く。ただし**即座に返るとは限らない** — 相手の
+	// nodeinfo がキャッシュに無いと、ここで取得を待つ (最大 10 秒)。
 	//
-	// **プロセス内で完結する。** 再起動をまたいで再送はされない。
+	// **再起動をまたぐ (#2819)。** 送信中のものはデプロイで消えない。
 	//
 	// 相手が同じプラグインを持たない / ブロックしている / 宛先が不正な場合は
 	// ここでエラーになり、送信そのものが起きない。

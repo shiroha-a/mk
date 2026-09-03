@@ -1,6 +1,9 @@
 package server
 
 import (
+	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -10,6 +13,8 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/shiroha-a/mk/internal/queue/driver"
 )
 
 func TestIsPluginPeerPath(t *testing.T) {
@@ -63,22 +68,21 @@ func TestAPICatchall_PeerPathIsNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, code)
 }
 
-// 恒久的な失敗 (受け口が無い / 署名が通らない / ブロック) は再送しない。
+// 恒久的な失敗 (受け口が無い / 署名が通らない / ブロック) はキューに再送させない。
 //
-// **#2822 で 404 を返すようにした結果、再送すると送信量が 1 → 4 に増える。**
-// この層は「持っていない相手に接続しない」を設計原則にしているので、
-// 送り直しても同じ答えになるものは 1 回で止める。
-func TestPluginPeer_DeliverDoesNotRetryPermanentFailures(t *testing.T) {
+// **404 を返すようにした結果 (#2822)、再送すると送信量が増える。** この層は
+// 「持っていない相手に接続しない」を設計原則にしているので、送り直しても同じ
+// 答えになるものは SkipRetry を返して 1 回で止める。
+func TestPluginPeer_DeliverOnceDoesNotRetryPermanentFailures(t *testing.T) {
 	tests := []struct {
 		name          string
 		status        int
-		wantPosts     int32
 		wantForgotten bool
 	}{
-		{name: "404 stops immediately and drops the cache", status: http.StatusNotFound, wantPosts: 1, wantForgotten: true},
-		{name: "401 stops immediately", status: http.StatusUnauthorized, wantPosts: 1},
-		{name: "403 stops immediately", status: http.StatusForbidden, wantPosts: 1},
-		{name: "413 stops immediately", status: http.StatusRequestEntityTooLarge, wantPosts: 1},
+		{name: "404 stops immediately and drops the cache", status: http.StatusNotFound, wantForgotten: true},
+		{name: "401 stops immediately", status: http.StatusUnauthorized},
+		{name: "403 stops immediately", status: http.StatusForbidden},
+		{name: "413 stops immediately", status: http.StatusRequestEntityTooLarge},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -98,25 +102,22 @@ func TestPluginPeer_DeliverDoesNotRetryPermanentFailures(t *testing.T) {
 				urlFor: func(_, plugin string) string { return srv.URL + peerAPIPrefix + plugin + peerPath },
 			})
 
-			// **待ち時間を潰しておく。** 実装が壊れて再送に回ったとき、
-			// 既定の 2 秒 / 10 秒 / 60 秒で待つとテストが落ちる前に固まる。
-			p.retryDelays = []time.Duration{0, 0, 0}
+			err := p.deliverOnce(peerJob{Host: "other.example", SendID: "id1",
+				Envelope: []byte(`{"id":"id1","payload":1}`)})
 
-			p.deliver("other.example", "id1", []byte(`{"id":"id1","payload":1}`))
-
-			assert.Equal(t, tt.wantPosts, posts.Load(), "再送しない")
+			require.Error(t, err)
+			assert.ErrorIs(t, err, driver.SkipRetry, "キューに積み直させない")
+			assert.Equal(t, int32(1), posts.Load())
 			assert.Equal(t, tt.wantForgotten, lister.forgotten["other.example"] > 0, "nodeinfo キャッシュの破棄")
 		})
 	}
 }
 
-// 一時的な失敗 (429 / 5xx) は従来どおり再送する。
-func TestPluginPeer_DeliverRetriesTransientFailures(t *testing.T) {
+// 一時的な失敗 (429 / 5xx) はキューに積み直させる。
+func TestPluginPeer_DeliverOnceRetriesTransientFailures(t *testing.T) {
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusBadGateway} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
-			var posts atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				posts.Add(1)
 				w.WriteHeader(status)
 			}))
 			defer srv.Close()
@@ -128,13 +129,102 @@ func TestPluginPeer_DeliverRetriesTransientFailures(t *testing.T) {
 				remote: &fakePeerLister{},
 				urlFor: func(_, plugin string) string { return srv.URL + peerAPIPrefix + plugin + peerPath },
 			})
-			// 待ち時間を潰す。**package 変数は触らない** (差し替えると別の
-			// テストが起こした goroutine と競合する)。
-			p.retryDelays = []time.Duration{0, 0, 0}
 
-			p.deliver("other.example", "id1", []byte(`{"id":"id1","payload":1}`))
-			assert.Equal(t, int32(len(p.retryDelays)+1), posts.Load(), "初回 + 再送の回数")
-			assert.Len(t, peerRetryDelays, 3, "本番の既定は 3 段")
+			err := p.deliverOnce(peerJob{Host: "other.example", SendID: "id1",
+				Envelope: []byte(`{"id":"id1","payload":1}`)})
+			require.Error(t, err)
+			assert.NotErrorIs(t, err, driver.SkipRetry, "キューに積み直させる")
 		})
 	}
+}
+
+// **送信はキューに積む (#2819)。** プロセス内の time.Sleep だと再起動をまたげず、
+// デプロイのたびに送信中のものが消える。
+func TestPluginPeer_SendEnqueues(t *testing.T) {
+	enq := &fakePeerEnqueuer{}
+	p := testPeer(t, &pluginPeerDeps{
+		remote:   &fakePeerLister{byHost: map[string][]string{"other.example": {"demo"}}},
+		idGen:    mustGenerator(t),
+		enqueuer: enq,
+	})
+
+	sendID, err := p.Send(context.Background(), "other.example", map[string]int{"a": 1})
+	require.NoError(t, err)
+	require.NotEmpty(t, sendID)
+
+	require.Len(t, enq.calls, 1, "積むのは 1 回。再送はキューが持つ")
+	call := enq.calls[0]
+	assert.Equal(t, "demo", call.plugin)
+
+	var job peerJob
+	require.NoError(t, json.Unmarshal(call.body, &job))
+	assert.Equal(t, "other.example", job.Host)
+	assert.Equal(t, sendID, job.SendID)
+	assert.JSONEq(t, `{"id":"`+sendID+`","payload":{"a":1}}`, string(job.Envelope))
+
+	// **再送の回数と間隔はキューへ渡す。** 従来 (初回 + 2 / 10 / 60 秒) と
+	// 回数は同じで、各間隔は以上。
+	// キューの割り当ては queue.Client.EnqueuePluginPeer の仕事 (そちらで見る)。
+	o := driver.ApplyEnqueueOptions(call.opts)
+	assert.Equal(t, peerMaxRetry, o.MaxRetry)
+	assert.True(t, o.MaxRetrySet)
+	assert.Equal(t, driver.BackoffExponential, o.BackoffType)
+	assert.Equal(t, peerRetryBase, o.BackoffDelay)
+	assert.Equal(t, 3, peerMaxRetry, "従来の 3 回と同じ")
+	assert.GreaterOrEqual(t, peerRetryBase, 2*time.Second, "1 回目の間隔が従来以上")
+	assert.GreaterOrEqual(t, peerRetryBase*4, 60*time.Second, "3 回目の間隔が従来以上")
+}
+
+// キューのジョブから 1 回分を実行する。読めないものは積み直させない。
+func TestPluginPeer_PeerJobHandler(t *testing.T) {
+	var got []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, _ = io.ReadAll(r.Body)
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	key, _ := testPeerKeypair(t)
+	p := testPeer(t, &pluginPeerDeps{
+		client: srv.Client(),
+		signer: &fakePeerSigner{key: key},
+		urlFor: func(_, plugin string) string { return srv.URL + peerAPIPrefix + plugin + peerPath },
+	})
+	replies := make(chan json.RawMessage, 1)
+	p.OnReply(func(_ context.Context, _, _ string, reply json.RawMessage) error {
+		replies <- reply
+		return nil
+	})
+
+	job, err := json.Marshal(peerJob{Host: "other.example", SendID: "id1",
+		Envelope: []byte(`{"id":"id1","payload":1}`)})
+	require.NoError(t, err)
+	require.NoError(t, p.peerJobHandler()(context.Background(),
+		driver.RawTask{TypeName: "plugin:demo:_peer", Body: job}))
+
+	assert.JSONEq(t, `{"id":"id1","payload":1}`, string(got))
+	select {
+	case reply := <-replies:
+		assert.JSONEq(t, `{"ok":true}`, string(reply))
+	default:
+		t.Fatal("OnReply が呼ばれていない")
+	}
+
+	err = p.peerJobHandler()(context.Background(),
+		driver.RawTask{TypeName: "plugin:demo:_peer", Body: []byte(`not json`)})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, driver.SkipRetry, "読めないものを積み直しても同じ")
+}
+
+type peerEnqueueCall struct {
+	plugin string
+	body   []byte
+	opts   []driver.EnqueueOption
+}
+
+type fakePeerEnqueuer struct{ calls []peerEnqueueCall }
+
+func (e *fakePeerEnqueuer) EnqueuePluginPeer(_ context.Context, plugin string, body []byte, opts ...driver.EnqueueOption) error {
+	e.calls = append(e.calls, peerEnqueueCall{plugin: plugin, body: body, opts: opts})
+	return nil
 }

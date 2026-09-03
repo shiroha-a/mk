@@ -126,3 +126,27 @@ func TestPluginJobQueuesAreWired(t *testing.T) {
 		}
 	}
 }
+
+// peer の送信は queue client を配線しないと積めない (#2819)。
+//
+// **落としても build もテストも通る。** pluginPeer は enqueuer が nil のとき
+// warn を出して捨てるので、落ちるのは「送信が全部消える」ところ。相手側にしか
+// 症状が出ないうえ、こちらのログを見ないと気付けない。
+func TestPluginPeerEnqueuerIsWired(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "internal/server/router.go")
+	src, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	var live []string
+	for _, line := range strings.Split(string(src), "\n") {
+		if trimmed := strings.TrimSpace(line); !strings.HasPrefix(trimmed, "//") {
+			live = append(live, trimmed)
+		}
+	}
+	const wiring = "enqueuer: s.queueClient,"
+	if !strings.Contains(squeezeSpaces(strings.Join(live, "\n")), wiring) {
+		t.Errorf("internal/server/router.go の pluginPeerDeps に %q が無い (コメントは数えない)。"+
+			"peer の送信が積まれず、全部捨てられる", wiring)
+	}
+}

@@ -417,10 +417,10 @@ func TestPluginPeer_DeliverURLAndRoundTrip(t *testing.T) {
 		return nil
 	})
 
-	// deliver は Send のガードを通さず直接叩く (宛先の検査は別テスト)。
+	// deliverOnce は Send のガードを通さず直接叩く (宛先の検査は別テスト)。
 	envelope, err := json.Marshal(peerEnvelope{ID: "id1", Payload: json.RawMessage(`{"user":"alice"}`)})
 	require.NoError(t, err)
-	p.deliver("other.example", "id1", envelope)
+	require.NoError(t, p.deliverOnce(peerJob{Host: "other.example", SendID: "id1", Envelope: envelope}))
 
 	assert.Equal(t, "/api/plugin/demo/_peer", gotPath, "/api を含む正しいパスへ送る")
 	assert.NotEmpty(t, gotSig, "署名を付ける")

@@ -3,14 +3,12 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -128,25 +126,12 @@ func TestPeerBodyLimitsByPath(t *testing.T) {
 func TestPluginPeer_SendMeasuresEnvelope(t *testing.T) {
 	const limit int64 = 1 << 10
 
-	// **atomic で持つ。** 書くのは httptest のハンドラ goroutine、読むのは
-	// Eventually のポーリング goroutine なので、素の変数だと -race が落とす
-	// (CI でだけ落ちた。make test は -race を付けない)。
-	var got atomic.Int64
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		got.Store(int64(len(b)))
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer srv.Close()
-
-	key, _ := testPeerKeypair(t)
+	enq := &fakePeerEnqueuer{}
 	gen := mustGenerator(t)
 	p := testPeer(t, &pluginPeerDeps{
-		client: srv.Client(),
-		signer: &fakePeerSigner{key: key},
-		remote: &fakePeerLister{byHost: map[string][]string{"other.example": {"demo"}}},
-		idGen:  gen,
-		urlFor: func(_, plugin string) string { return srv.URL + peerAPIPrefix + plugin + peerPath },
+		remote:   &fakePeerLister{byHost: map[string][]string{"other.example": {"demo"}}},
+		idGen:    gen,
+		enqueuer: enq,
 	})
 	p.maxBody = limit
 
@@ -158,13 +143,16 @@ func TestPluginPeer_SendMeasuresEnvelope(t *testing.T) {
 	_, err := p.Send(context.Background(), "other.example", body+"xx")
 	require.Error(t, err, "上限を 2 バイト超えると送らない")
 	assert.Contains(t, err.Error(), "大きすぎます")
+	assert.Empty(t, enq.calls, "積みもしない")
 
 	sendID, err := p.Send(context.Background(), "other.example", body)
 	require.NoError(t, err, "上限ちょうどは通る (境界を見ていることの確認)")
 	require.NotEmpty(t, sendID)
 
-	require.Eventually(t, func() bool { return got.Load() != 0 }, 2*time.Second, 10*time.Millisecond)
-	assert.Equal(t, limit, got.Load(), "実際に飛んだ本文が上限ちょうど")
+	require.Len(t, enq.calls, 1)
+	var job peerJob
+	require.NoError(t, json.Unmarshal(enq.calls[0].body, &job))
+	assert.Equal(t, limit, int64(len(job.Envelope)), "積んだ本文が上限ちょうど")
 }
 
 // 上限を超える応答は **切り詰めずにエラーにする**。黙って先頭だけ渡すと

@@ -80,6 +80,29 @@ func PluginQueueNames(plugins []string) []string {
 	return out
 }
 
+// PluginPeerJobName is the reserved job name the host uses for peer delivery.
+//
+// **`_` 始まりはプラグインが名乗れない** (pluginJobNamePattern が弾く) ので、
+// プラグインのジョブと衝突しない。peer のパスが `_peer` 予約なのと同じ考え方。
+const PluginPeerJobName = "_peer"
+
+// PluginPeerTaskType is the task type for one peer delivery attempt (#2819).
+func PluginPeerTaskType(plugin string) string { return PluginTaskType(plugin, PluginPeerJobName) }
+
+// EnqueuePluginPeer schedules one peer delivery.
+//
+// **再送はキューに任せる (#2819)。** プロセス内の time.Sleep だと再起動を
+// またげず、デプロイのたびに送信中のものが消える。
+func (c *Client) EnqueuePluginPeer(ctx context.Context, plugin string, body []byte, opts ...driver.EnqueueOption) error {
+	if !pluginNamePattern.MatchString(plugin) {
+		return fmt.Errorf("queue: プラグイン名 %q が不正です", plugin)
+	}
+	all := append([]driver.EnqueueOption{
+		driver.WithQueue(PluginQueueName(plugin)),
+	}, opts...)
+	return c.inner.Enqueue(ctx, PluginPeerTaskType(plugin), body, all...)
+}
+
 // EnqueuePlugin adds a job to a plugin's own queue.
 //
 // **再試行は既定で無し。** 冪等かどうかはプラグインしか知らないので、黙って

@@ -110,3 +110,30 @@ func (c *fakeClient) Enqueue(_ context.Context, taskType string, payload []byte,
 }
 
 func (c *fakeClient) Close() error { return nil }
+
+// peer の送信は **プラグイン専用のキュー**へ積む (#2819)。予約名なので、
+// プラグイン自身のジョブと衝突しない。
+func TestClient_EnqueuePluginPeer(t *testing.T) {
+	d := newFakeDriver()
+	c := queue.NewClient(d)
+
+	require.NoError(t, c.EnqueuePluginPeer(context.Background(), "demo", []byte(`{"host":"x"}`),
+		driver.WithMaxRetry(3)))
+
+	require.Len(t, d.client.calls, 1)
+	got := d.client.calls[0]
+	assert.Equal(t, "plugin:demo:_peer", got.taskType)
+	o := driver.ApplyEnqueueOptions(got.opts)
+	assert.Equal(t, "plugin:demo", o.Queue)
+	assert.Equal(t, 3, o.MaxRetry)
+
+	assert.Error(t, c.EnqueuePluginPeer(context.Background(), "Bad Name", nil))
+}
+
+// **プラグインは `_peer` を名乗れない。** 名乗れると本体の送信ジョブと
+// 区別が付かなくなる。
+func TestPluginJobName_CannotClaimPeerSlot(t *testing.T) {
+	c := queue.NewClient(newFakeDriver())
+	assert.Error(t, c.EnqueuePlugin(context.Background(), "demo", queue.PluginPeerJobName, nil))
+	assert.Equal(t, queue.PluginTaskType("demo", queue.PluginPeerJobName), queue.PluginPeerTaskType("demo"))
+}

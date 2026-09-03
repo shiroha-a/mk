@@ -20,6 +20,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/plugin"
 )
@@ -69,15 +70,18 @@ const peerTimeout = 15 * time.Second
 // 「DB 呼び出し等 ctx を見る処理が止まる」ところまでしか効かない。
 const peerHandlerTimeout = 10 * time.Second
 
-// peerRetryDelays are the waits between delivery attempts.
+// peerMaxRetry / peerRetryBase are the queue-side retry policy (#2819).
+//
+// **従来と同等以上。** プロセス内で回していた頃は初回 + 2 秒 / 10 秒 / 60 秒の
+// 計 4 回だった。指数バックオフの 15 秒起点は 15 / 30 / 60 秒になり、回数は
+// 同じで各間隔は従来以上。**キューに載るので再起動をまたぐ。**
 //
 // **恒久的な失敗では使わない。** 4xx (429 を除く) は送り直しても同じ答えに
-// なるので 1 回で止める (deliver 参照)。
-//
-// **プロセス内で完結させる (初版)。** キューに載せれば再起動をまたげるが、
-// queue.Client への公開と専用プロセッサが要る。プラグイン側は「応答が
-// 届かないこともある」前提で期限を持つ設計なので、まずはここまでにする。
-var peerRetryDelays = []time.Duration{2 * time.Second, 10 * time.Second, 60 * time.Second}
+// なるので、deliverOnce が driver.SkipRetry を返して 1 回で止める。
+const (
+	peerMaxRetry  = 3
+	peerRetryBase = 15 * time.Second
+)
 
 // isPluginPeerPath reports whether p addresses a plugin's reserved peer endpoint.
 //
@@ -116,6 +120,11 @@ type peerSigner interface {
 	Signer() (*activitypub.PrivateKey, error)
 }
 
+// peerEnqueuer schedules one peer delivery attempt.
+type peerEnqueuer interface {
+	EnqueuePluginPeer(ctx context.Context, plugin string, body []byte, opts ...driver.EnqueueOption) error
+}
+
 // peerPluginLister reports which plugins a remote host declares in nodeinfo.
 type peerPluginLister interface {
 	Plugins(ctx context.Context, host string) ([]string, error)
@@ -152,6 +161,8 @@ type pluginPeerDeps struct {
 	// limiter は受け口のレート制限。**全プラグインで 1 つを共有する**
 	// (プラグインごとに持つと、相手は受け口の数だけ枠を得る)。
 	limiter *peerRateLimiter
+	// enqueuer は送信を積む先 (#2819)。nil なら積めない (テスト等)。
+	enqueuer peerEnqueuer
 	// urlFor builds the peer endpoint URL. テストから http の httptest
 	// サーバーへ向けられるように関数にしてある。nil なら既定 (https)。
 	urlFor func(host, plugin string) string
@@ -171,10 +182,6 @@ type pluginPeer struct {
 	peered bool
 	deps   *pluginPeerDeps
 	logger *slog.Logger
-	// retryDelays は再送の待ち時間。nil なら peerRetryDelays。**テストが
-	// package 変数を差し替えないようにするためのもの** — 差し替えると、
-	// 別のテストが起こした goroutine と競合する。
-	retryDelays []time.Duration
 	// maxBody はこのプラグインの本文上限 (エンベロープ込み)。受け口側の
 	// 実効的な上限は global の BodyLimitByPath が同じ値で掛けており、ここは
 	// 送信側と応答の読み取りに効く。
@@ -284,23 +291,8 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 
 	// **呼び出し元の ctx を引き継がない。** HTTP リクエストの ctx はハンドラが
 	// 返ると切れるので、そのまま渡すと送信前に必ず中断される。
-	p.goSafe(func() { p.deliver(host, sendID, envelope) })
+	p.deliver(host, sendID, envelope)
 	return sendID, nil
-}
-
-// goSafe runs fn in a goroutine, recovering panics.
-//
-// **プロセスごと落とさない。** Go は他の goroutine の panic を回収できないので、
-// ここで必ず受ける (pluginContext.Go と同じ理由)。
-func (p *pluginPeer) goSafe(fn func()) {
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				p.logger.Error("peer の配送で panic しました", "panic", r)
-			}
-		}()
-		fn()
-	}()
 }
 
 func (p *pluginPeer) blocked(host string) bool {
@@ -319,48 +311,82 @@ type peerEnvelope struct {
 	Payload json.RawMessage `json:"payload"`
 }
 
-// deliver posts the envelope, retrying a few times, then hands the reply to
-// the plugin.
+// peerJob is what one delivery attempt needs, as stored in the queue.
+//
+// **エンベロープをそのまま持つ。** 積み直すたびに署名し直すので、鍵や宛先の
+// 形は保存しない (保存すると、鍵を差し替えた後の再送が古い鍵で飛ぶ)。
+type peerJob struct {
+	Host     string          `json:"host"`
+	SendID   string          `json:"sendId"`
+	Envelope json.RawMessage `json:"envelope"`
+}
+
+// deliver hands one delivery to the queue.
+//
+// **プロセス内で完結させない (#2819)。** time.Sleep のループだと再起動を
+// またげず、デプロイのたびに送信中のものが消える。再送の回数と間隔はキューが
+// 持つので、ここは 1 回積むだけ。
 func (p *pluginPeer) deliver(host, sendID string, envelope []byte) {
-	url := p.deps.peerURL(host, p.name)
+	if p.deps.enqueuer == nil {
+		// **黙って捨てない。** 配線が落ちていることに運営者が気付ける経路を残す。
+		p.logger.Warn("peer を積めません (queue client が未配線)", "host", host, "id", sendID)
+		return
+	}
+	body, err := json.Marshal(peerJob{Host: host, SendID: sendID, Envelope: envelope})
+	if err != nil {
+		p.logger.Error("peer のジョブを JSON 化できません", "host", host, "id", sendID, "err", err)
+		return
+	}
+	if err := p.deps.enqueuer.EnqueuePluginPeer(context.Background(), p.name, body,
+		driver.WithMaxRetry(peerMaxRetry),
+		driver.WithBackoff(driver.BackoffExponential, peerRetryBase),
+	); err != nil {
+		p.logger.Warn("peer を積めませんでした", "host", host, "id", sendID, "err", err)
+	}
+}
 
-	delays := p.retryDelays
-	if delays == nil {
-		delays = peerRetryDelays
+// deliverOnce performs one attempt and reports whether it may be retried.
+//
+// **恒久的な失敗では再試行させない。** 送り直しても同じ答えになるものは
+// driver.SkipRetry を包んで返す。
+func (p *pluginPeer) deliverOnce(job peerJob) error {
+	reply, err := p.post(p.deps.peerURL(job.Host, p.name), job.Envelope)
+	if err == nil {
+		p.dispatchReply(job.Host, job.SendID, reply)
+		return nil
 	}
 
-	var lastErr error
-	for attempt := 0; ; attempt++ {
-		reply, err := p.post(url, envelope)
-		if err == nil {
-			p.dispatchReply(host, sendID, reply)
-			return
+	var se *peerStatusError
+	if errors.As(err, &se) {
+		if se.status == http.StatusNotFound && p.deps.remote != nil {
+			// **肯定キャッシュを捨てる。** 受け口が無いと分かったのに覚えた
+			// ままだと、6 時間のあいだ送り続ける。次の Send が引き直して止まる。
+			p.deps.remote.Forget(job.Host)
 		}
-		lastErr = err
-
-		var se *peerStatusError
-		if errors.As(err, &se) {
-			if se.status == http.StatusNotFound && p.deps.remote != nil {
-				// **肯定キャッシュを捨てる。** 受け口が無いと分かったのに
-				// 覚えたままだと、6 時間のあいだ送り続ける。次の Send が
-				// nodeinfo を引き直して止まる。
-				p.deps.remote.Forget(host)
-			}
-			if se.permanent() {
-				// 送り直しても同じ答えになる。**無関係なインスタンスに
-				// こちらの都合でリクエストを重ねない** (この層の設計原則)。
-				break
-			}
+		if se.permanent() {
+			// **無関係なインスタンスにこちらの都合でリクエストを重ねない。**
+			// 届かなかったことはプラグインには通知されない (OnReply が呼ばれ
+			// ないだけ) ので、運営者が追える経路を残す。
+			p.logger.Warn("peer への送信に失敗しました (再送しません)",
+				"host", job.Host, "id", job.SendID, "err", err)
+			return fmt.Errorf("%w: %w", driver.SkipRetry, err)
 		}
-
-		if attempt >= len(delays) {
-			break
-		}
-		time.Sleep(delays[attempt])
 	}
-	// **握りつぶさずログに出す。** 届かなかったことはプラグインには通知
-	// されないので (OnReply が呼ばれないだけ)、運営者が追える経路を残す。
-	p.logger.Warn("peer への送信に失敗しました", "host", host, "id", sendID, "err", lastErr)
+	// 一時的な失敗。キューが間隔を置いて積み直す。
+	p.logger.Warn("peer への送信に失敗しました", "host", job.Host, "id", job.SendID, "err", err)
+	return err
+}
+
+// peerJobHandler adapts deliverOnce to the queue.
+func (p *pluginPeer) peerJobHandler() driver.HandlerFunc {
+	return func(_ context.Context, t driver.Task) error {
+		var job peerJob
+		if err := json.Unmarshal(t.Payload(), &job); err != nil {
+			// 読めないものを積み直しても同じ。
+			return fmt.Errorf("%w: peer のジョブを読めません: %w", driver.SkipRetry, err)
+		}
+		return p.deliverOnce(job)
+	}
 }
 
 func (p *pluginPeer) post(url string, body []byte) (json.RawMessage, error) {

@@ -1349,15 +1349,28 @@ type fakeQueueDriver struct {
 	driver.Driver
 	client    *fakeQueueClient
 	scheduler *fakeQueueScheduler
+	server    *fakeQueueServer
 }
 
 func newFakeQueueDriver() *fakeQueueDriver {
-	return &fakeQueueDriver{client: &fakeQueueClient{}, scheduler: &fakeQueueScheduler{}}
+	return &fakeQueueDriver{
+		client:    &fakeQueueClient{},
+		scheduler: &fakeQueueScheduler{},
+		server:    &fakeQueueServer{handlers: map[string]driver.HandlerFunc{}},
+	}
 }
 
 func (d *fakeQueueDriver) Client() driver.Client       { return d.client }
 func (d *fakeQueueDriver) Inspector() driver.Inspector { return nil }
 func (d *fakeQueueDriver) Scheduler() driver.Scheduler { return d.scheduler }
+func (d *fakeQueueDriver) Server() driver.Server       { return d.server }
+
+type fakeQueueServer struct {
+	driver.Server
+	handlers map[string]driver.HandlerFunc
+}
+
+func (s *fakeQueueServer) Handle(taskType string, h driver.HandlerFunc) { s.handlers[taskType] = h }
 
 type fakeQueueCall struct {
 	taskType string
@@ -1428,4 +1441,80 @@ func TestPluginQueue_RetryHasBackoff(t *testing.T) {
 	require.NoError(t, q.Enqueue(context.Background(), "refresh", nil))
 	o = driver.ApplyEnqueueOptions(d.client.calls[1].opts)
 	assert.Empty(t, o.BackoffType)
+}
+
+// peer の登録は **ロールに関係なく**呼ばれる (#2819)。送信の POST は queue
+// ロールで走るので、OnReply を Routes の中で登録していると分割構成で応答が
+// 届かない。
+func TestSetupPlugins_PeerCallbackRunsOnEveryRole(t *testing.T) {
+	for _, role := range []config.ProcessRole{config.RoleBoth, config.RoleServer, config.RoleQueue} {
+		t.Run(string(role), func(t *testing.T) {
+			s, api := newPluginTestServer(role)
+			s.peerDeps = &pluginPeerDeps{selfHost: "self.example"}
+			s.queueServer = queue.NewServer(newFakeQueueDriver())
+
+			var called int
+			def := plugin.Definition{
+				Name: "demo", APIVersion: plugin.APIVersion, Peered: true,
+				Peer: func(_ plugin.Context, p plugin.Peer) error {
+					called++
+					p.OnReply(func(context.Context, string, string, json.RawMessage) error { return nil })
+					return nil
+				},
+			}
+			require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+			assert.Equal(t, 1, called, "%s でも呼ばれる", role)
+		})
+	}
+}
+
+// Peer の登録が失敗したら起動を失敗させる (黙って無効のまま動かさない)。
+func TestSetupPlugins_PropagatesPeerError(t *testing.T) {
+	s, api := newPluginTestServer(config.RoleServer)
+	s.peerDeps = &pluginPeerDeps{selfHost: "self.example"}
+
+	def := plugin.Definition{
+		Name: "demo", APIVersion: plugin.APIVersion, Peered: true,
+		Peer: func(plugin.Context, plugin.Peer) error { return errors.New("だめ") },
+	}
+	err := s.setupPlugins(api, []plugin.Definition{def}, noopStorage)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "peer の登録")
+}
+
+// 送信の処理は **queue ロールでだけ**登録する。Jobs を持たなくても登録すること
+// (Peered なら送信はするため)。
+func TestSetupPlugins_PeerJobHandlerIsRoleGated(t *testing.T) {
+	tests := []struct {
+		role config.ProcessRole
+		want bool
+	}{
+		{config.RoleBoth, true},
+		{config.RoleQueue, true},
+		{config.RoleServer, false},
+	}
+	for _, tt := range tests {
+		t.Run(string(tt.role), func(t *testing.T) {
+			s, api := newPluginTestServer(tt.role)
+			s.peerDeps = &pluginPeerDeps{selfHost: "self.example"}
+			d := newFakeQueueDriver()
+			s.queueServer = queue.NewServer(d)
+
+			def := plugin.Definition{Name: "demo", APIVersion: plugin.APIVersion, Peered: true,
+				Peer: func(plugin.Context, plugin.Peer) error { return nil }}
+			require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+
+			_, ok := d.server.handlers["plugin:demo:_peer"]
+			assert.Equal(t, tt.want, ok)
+		})
+	}
+}
+
+// peer だけのプラグインにもキューが要る (送信がそこに載る)。
+func TestPluginJobQueueNames_IncludesPeered(t *testing.T) {
+	got := pluginJobQueueNames([]plugin.Definition{
+		{Name: "peeronly", Peered: true},
+		{Name: "plain", Routes: func(plugin.Context, plugin.Router) error { return nil }},
+	}, nil)
+	assert.Equal(t, []string{"plugin:peeronly"}, got)
 }

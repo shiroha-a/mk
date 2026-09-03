@@ -28,7 +28,9 @@ mk-go 本体を変更する人向け。**公開面を広げてよい条件**と�
 
 `Definition.EffectivePolicies`と関連型の追加はこのadditive契約に従い、`Validate`もRoutes、Jobs、EffectivePoliciesのいずれかを要求する形へ緩和するだけなので、`APIVersion`は1のまま維持する。
 
-`Context.Queue()`と`plugin.Queue` / `EnqueueOption`の追加も同じ扱い。`Context`はmk-goが実装してプラグインは受け取るだけなので、メソッドが増えてもプラグインは壊れない（プラグイン側が`Context`を自前で実装している場合はこの限りではないが、それはサポート対象外）。
+`Definition.Peer`（#2819）と`Context.Queue()`、`plugin.Queue` / `EnqueueOption`の追加も同じ扱い。`Definition.Peer`は既存プラグインが`Routes`の中でpeerを登録していても壊さない（`RoleBoth`ならそのまま動く）が、**ロールを分割した構成では応答が届かない**ので、移すこと。登録が無いロールでは起動時にwarnが出る。
+
+`Context`はmk-goが実装してプラグインは受け取るだけなので、メソッドが増えてもプラグインは壊れない（プラグイン側が`Context`を自前で実装している場合はこの限りではないが、それはサポート対象外）。
 
 ### キューの実装との関係
 

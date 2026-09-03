@@ -126,6 +126,15 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		}
 		pctx.peer = peer
 
+		// **ロールに関係なく呼ぶ (#2819)。** 送信の再送はキューに載るので、
+		// 実際に POST するのは queue ロールのプロセスになる。OnReply を
+		// Routes の中で登録していると、ロールを分割した構成で応答が届かない。
+		if def.Peer != nil {
+			if err := def.Peer(pctx, peer); err != nil {
+				return fmt.Errorf("plugin %q: peer の登録に失敗しました: %w", def.Name, err)
+			}
+		}
+
 		if def.EffectivePolicies != nil {
 			if s.roleService == nil {
 				return errPluginEffectivePolicySetup
@@ -179,6 +188,14 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 				group.POST(peerPath, peer.echoHandler())
 			}
 		}
+		// peer の送信を処理するのは queue ロール (#2819)。**Peered だけで
+		// 登録する** — Jobs を持たないプラグインでも送信はするため。
+		if def.Peered && s.peerDeps != nil && s.role.RunsQueue() {
+			if s.queueServer == nil {
+				return fmt.Errorf("plugin %q: peer の処理を登録できません (queue server が未配線です)", def.Name)
+			}
+			s.queueServer.Handle(queue.PluginPeerTaskType(def.Name), peer.peerJobHandler())
+		}
 		if def.Jobs != nil && s.role.RunsQueue() {
 			j := &pluginJobs{name: def.Name, server: s.queueServer, scheduler: s.queueScheduler}
 			if err := def.Jobs(pctx, j); err != nil {
@@ -192,6 +209,22 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 		// schema も出す。プラグインのデータがどこにあるかを、運営者が
 		// ログだけで辿れるようにする (消したあとの残存データの説明に要る)。
 		schema, _ := pluginstore.SchemaName(def.Name)
+		// **登録漏れを知らせる (#2819)。** peer の登録を Routes の中に置いたまま
+		// ロールを分割すると、そのロールでは Handle も OnReply も無いまま動く。
+		// 症状は「応答が来ない」「相手に 501」で、どちらもこちら側には出ない。
+		if def.Peered {
+			if s.role.RunsServer() && peer.handlerFn() == nil {
+				slog.Warn("plugin declares Peered but registered no inbound handler on this role",
+					"name", def.Name, "role", s.role,
+					"hint", "Definition.Peer の中で Peer.Handle を呼ぶこと (Routes の中だと queue ロールで登録されない)")
+			}
+			if s.role.RunsQueue() && peer.replyFn() == nil {
+				slog.Warn("plugin declares Peered but registered no reply handler on this role",
+					"name", def.Name, "role", s.role,
+					"hint", "Definition.Peer の中で Peer.OnReply を呼ぶこと (送信の POST は queue ロールで走る)")
+			}
+		}
+
 		slog.Info("plugin loaded",
 			"name", def.Name, "version", def.Version,
 			"routes", def.Routes != nil && s.role.RunsServer(),

@@ -483,9 +483,9 @@ var Plugin = plugin.Definition{
     Version:    "1.0.0",
     APIVersion: plugin.APIVersion,
     Peered:     true,   // ← 宣言したものだけが使える
-    Routes: func(ctx plugin.Context, r plugin.Router) error {
-        peer := ctx.Peer()
 
+    // **登録は Peer の中で。** ロールに関係なく呼ばれる。
+    Peer: func(ctx plugin.Context, peer plugin.Peer) error {
         // 相手から届いたとき。from は署名で確定したホスト。
         peer.Handle(func(c context.Context, from string, payload json.RawMessage) (any, error) {
             var req struct{ User string `json:"user"` }
@@ -499,9 +499,12 @@ var Plugin = plugin.Definition{
         peer.OnReply(func(c context.Context, from, id string, reply json.RawMessage) error {
             return save(from, reply)
         })
+        return nil
+    },
 
+    Routes: func(ctx plugin.Context, r plugin.Router) error {
         r.POST("/ask", func(req plugin.Request) (any, error) {
-            id, err := peer.Send(req.Context(), "other.example", map[string]any{"user": "alice"})
+            id, err := ctx.Peer().Send(req.Context(), "other.example", map[string]any{"user": "alice"})
             if err != nil {
                 return nil, err
             }
@@ -511,6 +514,11 @@ var Plugin = plugin.Definition{
     },
 }
 ```
+
+**`Handle` と `OnReply` を `Routes` の中で登録しない (#2819)。** `Routes` は server
+ロールでしか走らないのに、送信の POST は queue ロールで走る。ロールを分割した構成
+(`MK_ONLY_SERVER` / `MK_ONLY_QUEUE`) では応答が届かなくなる。登録が無いロールでは
+起動時に warn が出る。
 
 **ActivityPub には出ない。** AP に載せると不具合の症状が他人のサーバー側に出るうえ、
 一度公開した形は後から塞げないため、mk-go 専用の経路に閉じてある。相手が Misskey や
@@ -523,7 +531,7 @@ mk-go が面倒を見るもの:
 | 宛先 | ブロック / 連合の許可設定 / SSRF / 自分自身への送信を弾く |
 | 送信元 | HTTP Signature で確定する。`from` は名乗りではない |
 | 大きさ | 要求も応答も `Definition.PeerMaxBody` まで (既定 64 KiB) |
-| 再送 | 数回まで自動で試す (`429` / 5xx / 接続エラーのみ。それ以外の 4xx は 1 回で止める) |
+| 再送 | 数回まで自動で試す (`429` / 5xx / 接続エラーのみ。それ以外の 4xx は 1 回で止める)。**キューに載るので再起動をまたぐ** |
 | 回数 | 受け口は毎秒 6 / バースト 60 で throttle する (超過は `429`)。**全 peered プラグインで 1 つの表を共有**し、IP 側の枠も同時に消える |
 | 相手の確認 | nodeinfo に同じプラグインの宣言が無ければ送らない |
 
@@ -650,6 +658,7 @@ type Definition struct
   APIVersion int
   Peered     bool
   PeerMaxBody int64
+  Peer       func(Context, Peer) error
   Migrations []Migration
   Routes     func(Context, Router) error
   Jobs       func(Context, Jobs) error
