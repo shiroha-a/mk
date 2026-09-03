@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -127,10 +128,13 @@ func TestPeerBodyLimitsByPath(t *testing.T) {
 func TestPluginPeer_SendMeasuresEnvelope(t *testing.T) {
 	const limit int64 = 1 << 10
 
-	var got int64
+	// **atomic で持つ。** 書くのは httptest のハンドラ goroutine、読むのは
+	// Eventually のポーリング goroutine なので、素の変数だと -race が落とす
+	// (CI でだけ落ちた。make test は -race を付けない)。
+	var got atomic.Int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
-		got = int64(len(b))
+		got.Store(int64(len(b)))
 		w.WriteHeader(http.StatusNoContent)
 	}))
 	defer srv.Close()
@@ -159,8 +163,8 @@ func TestPluginPeer_SendMeasuresEnvelope(t *testing.T) {
 	require.NoError(t, err, "上限ちょうどは通る (境界を見ていることの確認)")
 	require.NotEmpty(t, sendID)
 
-	require.Eventually(t, func() bool { return got != 0 }, 2*time.Second, 10*time.Millisecond)
-	assert.Equal(t, limit, got, "実際に飛んだ本文が上限ちょうど")
+	require.Eventually(t, func() bool { return got.Load() != 0 }, 2*time.Second, 10*time.Millisecond)
+	assert.Equal(t, limit, got.Load(), "実際に飛んだ本文が上限ちょうど")
 }
 
 // 上限を超える応答は **切り詰めずにエラーにする**。黙って先頭だけ渡すと
