@@ -585,7 +585,10 @@ func (h *Handler) maybeMarkAsRead(c echo.Context, user *model.User, req ListRequ
 	if req.MarkAsRead != nil && !*req.MarkAsRead {
 		return
 	}
-	if err := h.svc.MarkAllAsRead(c.Request().Context(), user.ID); err != nil {
+	// 暗黙既読は upstream i/notifications 同様 force を立てない。毎 fetch で
+	// readAllNotifications を再送すると、保留中の unreadNotification を潰して
+	// 逆にバッジが点かなくなる (#420 follow-up)。
+	if err := h.svc.MarkAllAsRead(c.Request().Context(), user.ID, false); err != nil {
 		// 既読化失敗は通知一覧の取得結果には影響しないので 200 のまま
 		// 返し、ログだけ残す。
 		slog.Warn("notifications: implicit mark-all-as-read failed",
@@ -594,9 +597,14 @@ func (h *Handler) maybeMarkAsRead(c echo.Context, user *model.User, req ListRequ
 }
 
 // MarkAllAsRead handles POST /api/notifications/mark-all-as-read.
+//
+// **明示的な既読操作なので force で呼ぶ** (upstream mark-all-as-read.ts と同じ、
+// #2831)。バッジのカウンタはクライアント側にしか無く、readAllNotifications を
+// 取りこぼすと読み取り位置だけが進んで guard に阻まれ二度と publish されない。
+// このボタンがその唯一の復帰手段にあたる。
 func (h *Handler) MarkAllAsRead(c echo.Context) error {
 	user := middleware.GetUser(c)
-	if err := h.svc.MarkAllAsRead(c.Request().Context(), user.ID); err != nil {
+	if err := h.svc.MarkAllAsRead(c.Request().Context(), user.ID, true); err != nil {
 		return apierr.JSONInternalError(c)
 	}
 	return c.NoContent(http.StatusNoContent)

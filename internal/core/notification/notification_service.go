@@ -520,17 +520,28 @@ func (s *Service) scheduleUnreadPublish(notifieeID, streamID string, packed any,
 }
 
 // MarkAllAsRead advances the user's notification read marker to the newest
-// stream entry and, only when the marker actually moves forward, publishes
-// `readAllNotifications` to the user's main stream. The publish guard
-// matches upstream TS NotificationService.readAllNotification — without it
-// every `notifications-grouped` fetch would re-emit `readAllNotifications`
-// and clobber any pending `unreadNotification` for the same user, leaving
-// the badge stuck at 0 (#420 follow-up).
+// stream entry and, unless force is set, publishes `readAllNotifications` to
+// the user's main stream only when the marker actually moves forward. The
+// publish guard matches upstream TS NotificationService.readAllNotification —
+// without it every `notifications-grouped` fetch would re-emit
+// `readAllNotifications` and clobber any pending `unreadNotification` for the
+// same user, leaving the badge stuck at 0 (#420 follow-up).
+//
+// force は upstream の `readAllNotification(userId, force = false)` と同じ役割で、
+// **明示的な既読操作からの復帰手段**にあたる (#2831)。バッジの数値はサーバーが
+// 持たず `$i.unreadNotificationsCount` というクライアント側のカウンタでしかない
+// ので、`readAllNotifications` を 1 度でも取りこぼす (WebSocket 切断中に publish
+// される。pubsub なので再送は無い) と、読み取り位置はもう最新まで進んでいて
+// 以降は guard に阻まれ二度と publish されない。upstream が
+// `notifications/mark-all-as-read` だけ force で呼ぶのはこのためで、mk-go は
+// これを移植しておらず**ボタンを押しても復帰できなかった**。暗黙既読
+// (i/notifications 系の maybeMarkAsRead / WebSocket の readNotification) は
+// upstream と同じく force を立てない。
 //
 // note_unread repository が注入されていれば同時にユーザー分の行を全削除し
 // (hasUnreadSpecifiedNotes / hasUnreadMentions を false に戻すため)、
 // Redis SET 失敗時は note_unread を温存して再試行で整合性を担保する。
-func (s *Service) MarkAllAsRead(ctx context.Context, userID string) error {
+func (s *Service) MarkAllAsRead(ctx context.Context, userID string, force bool) error {
 	res, err := s.client.XRevRangeN(ctx, s.streamKey(userID), "+", "-", 1).Result()
 	if err != nil {
 		return err
@@ -552,7 +563,7 @@ func (s *Service) MarkAllAsRead(ctx context.Context, userID string) error {
 	// Redis SET成功後にnote_unreadを消す (SET失敗時は温存して次回retryで
 	// 両方更新されることを期待する)。
 	s.clearNoteUnread(userID)
-	if hadUnread && s.mainStreamPublisher != nil {
+	if (force || hadUnread) && s.mainStreamPublisher != nil {
 		s.mainStreamPublisher.PublishMainEvent(userID, "readAllNotifications", nil)
 	}
 	return nil

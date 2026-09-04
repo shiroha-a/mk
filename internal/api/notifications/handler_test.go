@@ -307,6 +307,58 @@ func TestMarkAllAsRead_OK(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 }
 
+// POST /api/notifications/mark-all-as-read は明示的な既読操作なので、読み取り
+// 位置が動かなくても readAllNotifications を再送する (#2831)。バッジのカウンタは
+// クライアント側にしか無く、イベントを取りこぼした状態からの復帰手段はこれだけ。
+func TestMarkAllAsRead_ForcesRepublishWhenAlreadyRead(t *testing.T) {
+	h, svc := newTestHandler(t)
+	_, err := svc.Create(context.Background(), notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	// Create 由来の unreadNotification を拾わないよう、通知を作ってから wire する。
+	pub := &stubMainPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	// 1 回目で read marker が最新まで進む。
+	c, _ := newJSONRequest(t, "/api/notifications/mark-all-as-read", `{}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.MarkAllAsRead(c))
+	require.Len(t, pub.types("alice"), 1)
+
+	c2, rec2 := newJSONRequest(t, "/api/notifications/mark-all-as-read", `{}`)
+	setAuth(c2, &model.User{ID: "alice"})
+	require.NoError(t, h.MarkAllAsRead(c2))
+	assert.Equal(t, http.StatusNoContent, rec2.Code)
+	assert.Equal(t, []string{"readAllNotifications", "readAllNotifications"}, pub.types("alice"),
+		"explicit mark-all-as-read must re-publish even when the marker does not move")
+}
+
+// 暗黙既読 (通知一覧 fetch の副作用) は force を立てない。毎 fetch で再送すると
+// 保留中の unreadNotification を潰してバッジが点かなくなる (#420 follow-up)。
+func TestShow_ImplicitMarkAsReadDoesNotForce(t *testing.T) {
+	h, svc := newTestHandler(t)
+	_, err := svc.Create(context.Background(), notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	// Create 由来の unreadNotification を拾わないよう、通知を作ってから wire する。
+	pub := &stubMainPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	for i := 0; i < 2; i++ {
+		c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+		setAuth(c, &model.User{ID: "alice"})
+		require.NoError(t, h.Show(c))
+		require.Equal(t, http.StatusOK, rec.Code)
+	}
+
+	assert.Equal(t, []string{"readAllNotifications"}, pub.types("alice"),
+		"implicit mark-as-read must publish only while the marker actually moves")
+}
+
 func TestMarkAllAsRead_RedisError(t *testing.T) {
 	closed := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1"})
 	_ = closed.Close()

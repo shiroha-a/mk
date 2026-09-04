@@ -3866,7 +3866,9 @@ type notifReaderAdapter struct {
 }
 
 func (a *notifReaderAdapter) ReadAll(userID string) error {
-	return a.svc.MarkAllAsRead(context.Background(), userID)
+	// WebSocket の readNotification は upstream Connection.onReadNotification と
+	// 同じく暗黙既読なので force を立てない (#2831)。
+	return a.svc.MarkAllAsRead(context.Background(), userID, false)
 }
 
 // hardMuteLookupAdapter bridges UserRepository to stream.HardMuteRulesLookup

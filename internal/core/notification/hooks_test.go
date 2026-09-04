@@ -356,7 +356,7 @@ func TestService_MarkAllAsRead_ClearsNoteUnread(t *testing.T) {
 	has, _ := svc.HasUnreadSpecifiedNotes(context.Background(), "alice")
 	require.True(t, has)
 
-	require.NoError(t, svc.MarkAllAsRead(context.Background(), "alice"))
+	require.NoError(t, svc.MarkAllAsRead(context.Background(), "alice", false))
 
 	has, err := svc.HasUnreadSpecifiedNotes(context.Background(), "alice")
 	require.NoError(t, err)
@@ -1002,7 +1002,7 @@ func TestHook_WebPushSuppressedAfterRead(t *testing.T) {
 
 	h.OnReactionCreated("alice", "bob", "n1", "\U0001F44D") // deferred push をスケジュール
 	// delay 前に既読化 (latestRead marker を最新へ前進)。
-	require.NoError(t, svc.MarkAllAsRead(context.Background(), "alice"))
+	require.NoError(t, svc.MarkAllAsRead(context.Background(), "alice", false))
 	// delay 経過を待つ。
 	time.Sleep(120 * time.Millisecond)
 	assert.Empty(t, pub.calls, "delay 内既読化で Web Push が抑制される")
