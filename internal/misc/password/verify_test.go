@@ -162,3 +162,66 @@ func TestOutcome_OKOnlyForMatch(t *testing.T) {
 		}
 	}
 }
+
+// **本物の枠枯渇**で Unavailable になること (#2849)。
+//
+// これまでは caller ctx を殺す枝しかテストしておらず、「枠が枯れたが ctx は
+// 生きている」= 本番の過負荷そのものの枝が無検証だった。`Acquire` 失敗時に
+// ctx が生きていれば Mismatch を返す変異 (= #2849 のバグを復活させる) が
+// 素通りしていた。
+//
+// timeout は package private な var なので、in-package のこのテストだけが
+// 短縮できる (export はしない)。
+func TestVerify_ExhaustedSlotsReturnUnavailable(t *testing.T) {
+	hash := cherryPickFixture("hunter2")
+	if err := argon2VerifySlots.Acquire(context.Background(), argon2MaxConcurrency); err != nil {
+		t.Fatal(err)
+	}
+	defer argon2VerifySlots.Release(argon2MaxConcurrency)
+
+	prev := argon2AcquireTimeout
+	argon2AcquireTimeout = 20 * time.Millisecond
+	defer func() { argon2AcquireTimeout = prev }()
+
+	// **ctx は生きている。** 死んでいると別の枝を踏んでしまう。
+	scheme, out := Verify(context.Background(), hash, "hunter2")
+	if out != OutcomeUnavailable || scheme != SchemeArgon2id {
+		t.Fatalf("Verify(exhausted)=(%v,%v), want (%v,%v)", scheme, out, SchemeArgon2id, OutcomeUnavailable)
+	}
+}
+
+// acquire timeout の値そのものを固定する (#2849)。
+//
+// 1 秒 → 3 秒がこの PR の主要変更の片方なのに、巻き戻す変異が全テストを
+// 素通りしていた。バーストを吸収できる長さであることが要点で、実測では
+// 1 秒だと同時 100 で 58 件が弾かれ、3 秒なら 0 件になる。
+func TestArgon2AcquireTimeout(t *testing.T) {
+	if argon2AcquireTimeout != 3*time.Second {
+		t.Fatalf("argon2AcquireTimeout=%v, want 3s", argon2AcquireTimeout)
+	}
+}
+
+// ProfileForLog は**想定外の field 構成でも値を返さない** (#2849)。
+//
+// argon2 のリファレンス実装は version 0x10 で `$v=` を省くので、
+// `$argon2id$m=...$salt$digest` という 5 分割になる。この形は
+// 「移行元が想定と違う実装」= まさに診断したい場面で踏むのに、初版は
+// parts[2] / parts[3] を無条件で返しており salt (場合により digest) が
+// ログへ出ていた。
+func TestProfileForLog_UnexpectedLayoutOmitsValues(t *testing.T) {
+	for _, in := range []string{
+		"$argon2id$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0c2Ex$ZGlnZXN0ZGlnZXN0",
+		"$argon2id$c2FsdA$ZGlnZXN0",
+		"$argon2id$v=19$SALTSALTSALTSALT$DIGESTDIGESTDIGEST",
+	} {
+		got := ProfileForLog(in)
+		if !strings.Contains(got, "unexpected field layout") {
+			t.Fatalf("ProfileForLog(%q)=%q, want unexpected-layout marker", in, got)
+		}
+		for _, f := range strings.Split(in, "$")[2:] {
+			if f != "" && strings.Contains(got, f) {
+				t.Fatalf("ProfileForLog(%q)=%q に field %q が漏れている", in, got, f)
+			}
+		}
+	}
+}

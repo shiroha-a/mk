@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -25,20 +26,26 @@ const (
 const (
 	cherryPickArgon2Params = "m=65536,t=3,p=4"
 	argon2MaxConcurrency   = 4
-	// argon2AcquireTimeout は枠が空くのを待つ上限 (#2849)。
-	//
-	// **バーストを吸収できる長さにする。** 1 回の検証は実測 63.8 ms、枠は 4 つ
-	// なのでスループットの上限は約 40 req/s。切替直後は全ログインが Argon2id に
-	// なるため、朝のログイン集中がそのままここに来る。短すぎると、セマフォが
-	// 守ろうとしているまさにその負荷で正当な利用者が弾かれる。
-	//
-	// 実測 (同時数 → 失敗数): 1 秒だと 50 → 14 / 100 → 58、3 秒なら
-	// 50 → 0 / 100 → 0 で、200 → 83 と過負荷では意図どおり shed する。
-	// goroutine を 3 秒保持するコストより、正当なログインを落とすほうが高い。
-	argon2AcquireTimeout = 3 * time.Second
 )
 
 var argon2VerifySlots = semaphore.NewWeighted(argon2MaxConcurrency)
+
+// argon2AcquireTimeout は枠が空くのを待つ上限 (#2849)。
+//
+// **バーストを吸収できる長さにする。** 輻輳下では 1 回の検証に実測 105 ms 前後
+// かかり (直列だと 42-64 ms)、枠は 4 つなのでスループットの上限は実測 約 40 req/s
+// (同時 100 を 2.63 秒で捌いた測定から)。切替直後は全ログインが Argon2id になる
+// ため、朝のログイン集中がそのままここに来る。短すぎると、セマフォが守ろうと
+// しているまさにその負荷で正当な利用者が弾かれる。
+//
+// 実測 (同時数 → 失敗数): 1 秒だと 50 → 14 / 100 → 58、3 秒なら 50 → 0 /
+// 100 → 0 で、200 → 83 と過負荷では意図どおり shed する。goroutine を 3 秒
+// 保持するコストより、正当なログインを落とすほうが高い。
+//
+// **const ではなく var。** in-package のテストが本物の枠枯渇を短い待ちで
+// 踏めるようにするため (export はしないので公開面は変わらない)。値そのものは
+// TestArgon2AcquireTimeout が固定する。
+var argon2AcquireTimeout = 3 * time.Second
 
 // Outcome reports why Verify accepted or rejected the password.
 //
@@ -121,6 +128,13 @@ func ProfileForLog(stored string) string {
 	parts := strings.Split(stored, "$")
 	if len(parts) < 4 || parts[1] != "argon2id" {
 		return "unrecognized"
+	}
+	// **想定の形でなければ値を返さない。** PHC の field 数が 6 でないとき
+	// parts[2] / parts[3] には salt や digest が来る。argon2 のリファレンス実装は
+	// version 0x10 で `$v=` を省くので、これは「移行元が想定と違う実装」という
+	// **まさに診断したい場面で踏む**形 (#2849)。
+	if len(parts) != 6 || !strings.HasPrefix(parts[2], "v=") {
+		return fmt.Sprintf("argon2id (unexpected field layout, parts=%d)", len(parts))
 	}
 	return "argon2id " + parts[2] + " " + parts[3]
 }

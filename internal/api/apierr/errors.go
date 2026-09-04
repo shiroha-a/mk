@@ -170,6 +170,13 @@ const (
 	// UUID for users/show (third_party/misskey/.../endpoints/users/show.ts).
 	UUIDFailedToResolveRemoteUser = "ef7b9be4-9cba-4e6f-ab41-90ed171c7d3c"
 
+	// UUIDPasswordVerificationUnavailable は password 検証の枠を取れなかったとき
+	// (503)。**新規に発番する** — 既存の UUID を流用すると、ID で分岐する
+	// クライアントが別の状況と区別できなくなる。実際 #2849 の初版は
+	// UUIDRateLimitExceeded (429) を流用しており、同じ ID が 429 と 503 の
+	// 両方で返る状態になっていた。upstream に対応する概念が無いので mk-go 固有。
+	UUIDPasswordVerificationUnavailable = "539f92bc-95e2-45b2-8fe4-c4afe5b8a67d"
+
 	// UUIDInvalidToken は 2FA token 検証失敗 (i/2fa/{done,register-key,key-done})。
 	// upstream は plain `Error('authentication failed')` で UUID 無しなので
 	// mk-go 固有の安定 UUID を発番する (#673 Phase B / #698)。
@@ -563,6 +570,17 @@ func ContainsTooManyMentions() map[string]any {
 // upstream users/show は kind:'server' (= HTTP 500、status は JSON wrapper 側で付与)。
 func FailedToResolveRemoteUser() map[string]any {
 	return ErrorWithKind("FAILED_TO_RESOLVE_REMOTE_USER", "Failed to resolve remote user.", UUIDFailedToResolveRemoteUser, KindServer)
+}
+
+// PasswordVerificationUnavailable returns the 503 body used when the password
+// verifier could not take a slot.
+//
+// **kind は server。** 飽和はサーバー側の事情なので client に倒すと意味が逆に
+// なる (#2849)。呼び出し側は Retry-After も付けること。
+func PasswordVerificationUnavailable() map[string]any {
+	return ErrorWithKind("SERVICE_UNAVAILABLE",
+		"Password verification is temporarily unavailable. Please try again later.",
+		UUIDPasswordVerificationUnavailable, KindServer)
 }
 
 // RateLimitExceeded returns a 429 RATE_LIMIT_EXCEEDED error response.

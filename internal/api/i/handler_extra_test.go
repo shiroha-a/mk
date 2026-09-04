@@ -1,11 +1,14 @@
 package i
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/shiroha-a/mk/internal/api/apierr"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -743,7 +746,53 @@ func TestChangePassword_VerifierBusyReturns503(t *testing.T) {
 
 	rec := postExtraCanceled(h.ChangePassword, `{"currentPassword":"oldpass","newPassword":"newpass"}`, user)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	// **kind は server。** 飽和はサーバー側の事情なので client に倒すと意味が逆。
+	var body struct {
+		Error struct {
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	assert.Equal(t, apierr.UUIDPasswordVerificationUnavailable, body.Error.ID)
+	assert.Equal(t, apierr.KindServer, body.Error.Kind)
 	// **hash は書き換わっていないこと。**
 	assert.True(t, strings.HasPrefix(*repo.Profiles["u1"].Password, "$argon2id$"))
+}
+
+// 未対応 profile では 400 のまま **hash を書き換えない** (#2849)。
+//
+// signin 側には同等のテストがあるのに `internal/api/i` だけ欠けており、
+// `!outcome.OK()` を `== OutcomeMismatch` に変える変異が素通りしていた。
+// その変異下では、壊れた hash を持つ利用者が**任意の現パスワードで
+// パスワードを変更できる**。
+func TestChangePassword_UnsupportedProfileStays400(t *testing.T) {
+	const stored = "$argon2id$v=19$m=4096,t=3,p=1$YWJjZGVmZ2hpamtsbW5vcA$YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY"
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "irrelevant")
+	p := stored
+	repo.Profiles["u1"].Password = &p
+
+	buf := captureExtraLogs(t)
+	rec := postExtra(h.ChangePassword, `{"currentPassword":"anything","newPassword":"newpass"}`, user)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	assert.Equal(t, stored, *repo.Profiles["u1"].Password, "hash が書き換わっている")
+
+	out := buf.String()
+	require.Contains(t, out, "unsupported password hash")
+	assert.Contains(t, out, "m=4096,t=3,p=1")
+	parts := strings.Split(stored, "$")
+	assert.NotContains(t, out, parts[4], "salt がログに出ている")
+	assert.NotContains(t, out, parts[5], "digest がログに出ている")
+}
+
+func captureExtraLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }

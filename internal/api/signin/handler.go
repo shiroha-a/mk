@@ -186,9 +186,9 @@ func (h *Handler) Signin(c echo.Context) error {
 	}
 
 	storedPassword := *profile.Password
-	scheme, passwordOK, resp := h.verifyPassword(c, storedPassword, *req.Password)
-	if resp != nil {
-		return resp
+	scheme, passwordOK, handled := h.verifyPassword(c, user.ID, storedPassword, *req.Password)
+	if handled {
+		return nil
 	}
 	setPendingPasswordMigration(c, scheme, passwordOK, storedPassword, *req.Password)
 	if !passwordOK {
@@ -293,9 +293,26 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	}
 
 	storedPassword := *profile.Password
-	scheme, passwordOK, resp := h.verifyPassword(c, storedPassword, *req.Password)
-	if resp != nil {
-		return resp
+
+	// **passwordless + credential では password を検証しない** (#2849)。
+	//
+	// `usePasswordLessLogin` の利用者はフロントが空の password と credential を
+	// 送り、下の credential 分岐が `!passwordOK && !UsePasswordLessLogin` で
+	// 素通しにするので、**検証結果はどこでも使われない**。それでも Verify を
+	// 呼ぶと argon2 の枠を無駄に消費し、しかも枠が枯れると 503 を返して
+	// credential 分岐へ到達できなくなる = **パスワードを持たない利用者が
+	// パスワード検証の輻輳でログインできない**。
+	passwordless := profile.UsePasswordLessLogin && len(req.Credential) > 0
+	var (
+		scheme     password.Scheme
+		passwordOK bool
+	)
+	if !passwordless {
+		var handled bool
+		scheme, passwordOK, handled = h.verifyPassword(c, user.ID, storedPassword, *req.Password)
+		if handled {
+			return nil
+		}
 	}
 	setPendingPasswordMigration(c, scheme, passwordOK, storedPassword, *req.Password)
 	if passwordOK && scheme == password.SchemeBcrypt {
@@ -569,37 +586,61 @@ func (h *Handler) recordSignin(userID, ip string, headers http.Header, success b
 	}
 }
 
+// verifyPassword wraps password.Verify and answers the request itself when the
+// verifier could not take a slot (#2849).
+//
+// **応答済みかどうかは error ではなく handled で返す。** `echo.Context.JSON` は
+// 書き込みに**成功すると nil を返す**ので、その戻り値を「応答した印」に使うと
+// `if err != nil` が一度も成立しない。初版がこれを踏み、503 を書いた後も処理が
+// 続いて (a) body に JSON が 2 つ連結され、(b) `h.fail` が偽の失敗ログイン履歴を
+// 残し、(c) SigninFlow では captcha の単回使用トークンまで消費していた。
+//
+// handled が真なら**呼び出し側は即座に nil を返すこと**。
+func (h *Handler) verifyPassword(c echo.Context, userID, stored, plain string) (scheme password.Scheme, ok, handled bool) {
+	scheme, outcome := password.Verify(c.Request().Context(), stored, plain)
+	switch outcome {
+	case password.OutcomeUnavailable:
+		// **403 に潰さない。** 枠を取れなかっただけで password は正しいかも
+		// しれず、「間違っています」と伝えると利用者が不要な reset に進む。
+		//
+		// **失敗ログイン履歴 (h.fail) も残さない。** password を一度も検証して
+		// いないので、残すと身に覚えのない失敗が signin-history に並ぶ。
+		slog.Warn("signin: password verification unavailable",
+			"path", c.Path(), "userId", userID, "scheme", scheme)
+		writeVerifierUnavailable(c)
+		return scheme, false, true
+	case password.OutcomeUnsupported:
+		// **profile だけ出す。** salt / digest は診断に不要 (ProfileForLog)。
+		// これが出続けるなら移行元が想定と違う argon2 実装を使っている。
+		// **userId を出す** — 「全員ログインできない」ときに、どのアカウントが
+		// 壊れているかを追えないと切り分けが進まない。
+		slog.Warn("signin: unsupported password hash",
+			"path", c.Path(), "userId", userID, "profile", password.ProfileForLog(stored))
+	}
+	return scheme, outcome.OK(), false
+}
+
+// writeVerifierUnavailable writes the shared 503 body plus Retry-After.
+//
+// **Retry-After は signin の rate limit と整合させる。** rate limit は handler
+// より前の middleware が数えるので 503 でも 1 消費される (返金の口が無い)。
+// 短い値を返すと、素直に従ったクライアントが 1h/10 の枠を数十秒で使い切り、
+// 1 時間ログインできなくなる — #2849 が問題にした被害そのもの。
+// acquire timeout (3 秒) より十分長く取る。
+func writeVerifierUnavailable(c echo.Context) {
+	c.Response().Header().Set("Retry-After", verifierRetryAfterSeconds)
+	_ = c.JSON(http.StatusServiceUnavailable, apierr.PasswordVerificationUnavailable())
+}
+
+// verifierRetryAfterSeconds は 503 の Retry-After。上のコメントの理由で
+// acquire timeout より十分長い値にしてある。
+const verifierRetryAfterSeconds = "30"
+
 // fail records a failed signin (success:false) for the already-resolved user
 // and returns the error response. upstream SigninApiService.fail() は password
 // 不一致 / 2FA 失敗 / passkey passwordless 無効 等の認証失敗で signins に
 // success:false を insert してから error を返す (#1776)。user/signinRepo 未配線時は
 // 記録を skip して error だけ返す (= 旧挙動の superset、test fixture を壊さない)。
-// verifyPassword wraps password.Verify and turns the two non-mismatch failures
-// into a response the operator and the user can act on (#2849).
-//
-// 返り値の error が非 nil ならそれをそのまま返すこと。**403 に潰さない** —
-// 枠を取れなかっただけの正しいパスワードを「間違っています」と伝えると、
-// 利用者が不要な reset に進み、signin の rate limit も食い潰す。
-func (h *Handler) verifyPassword(c echo.Context, stored, plain string) (password.Scheme, bool, error) {
-	scheme, outcome := password.Verify(c.Request().Context(), stored, plain)
-	switch outcome {
-	case password.OutcomeUnavailable:
-		// **Retry-After は acquire timeout と同じオーダーにする。** すぐ再試行
-		// されると枠の奪い合いが続く。
-		slog.Warn("signin: password verification unavailable",
-			"path", c.Path(), "scheme", scheme)
-		c.Response().Header().Set("Retry-After", "5")
-		return scheme, false, c.JSON(http.StatusServiceUnavailable,
-			errBody("d5826d14-3982-4d2e-8011-b9e9f02499ef"))
-	case password.OutcomeUnsupported:
-		// **profile だけ出す。** salt / digest は診断に不要 (ProfileForLog)。
-		// これが出続けるなら移行元が想定と違う argon2 実装を使っている。
-		slog.Warn("signin: unsupported password hash",
-			"path", c.Path(), "profile", password.ProfileForLog(stored))
-	}
-	return scheme, outcome.OK(), nil
-}
-
 func (h *Handler) fail(c echo.Context, user *model.User, status int, errID string) error {
 	if user != nil && h.signinRepo != nil && h.idGen != nil {
 		hdrs := c.Request().Header.Clone()

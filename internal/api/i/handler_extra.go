@@ -26,6 +26,12 @@ import (
 )
 
 // ChangePassword handles POST /api/i/change-password.
+// verifierRetryAfterSeconds は 503 の Retry-After (#2849)。rate limit は
+// handler より前の middleware が数えるので 503 でも 1 消費される (返金の口が
+// 無い)。短い値だと、素直に従ったクライアントが 1h/10 の枠を数十秒で使い切って
+// 1 時間ログインできなくなる。acquire timeout (3 秒) より十分長く取る。
+const verifierRetryAfterSeconds = "30"
+
 func (h *Handler) ChangePassword(c echo.Context) error {
 	u := middleware.GetUser(c)
 	var req struct {
@@ -46,18 +52,17 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
-	// 2FA gate: upstream Misskey TS (change-password.ts) は twoFactorEnabled
-	// なら token 必須 + twoFactorAuthenticate で検証する。mk-go では旧来
-	// password だけで通っていたため password 漏洩 = 2FA bypass で password
-	// 変更可能だった (drop-in regression)。verify2FAToken 経由なので RFC
-	// 6238 §5.2 の replay 保護も自動で効く。
-	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
-	}
-
-	// upstream Misskey TS は raw `throw new Error('authentication failed')` を
-	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
-	// に揃える (旧 mk-go は 403 を返していた)。
+	// **password を 2FA gate より先に検証する** (#2849)。upstream は逆順
+	// (token → password) だが、mk-go では順序を入れ替える前例がある
+	// (handler_2fa.go の requireWebAuthn。片方だけ正しい状態の検出可否は対称で
+	// 情報リーク的に等価)。
+	//
+	// ここで入れ替える理由は 503 の側にある。verify2FAToken は**バックアップ
+	// コードを DB から消し**、TOTP は replay guard に記録する = どちらも
+	// 消費が確定する。その後で検証枠が取れずに 503 を返すと、**サーバー都合の
+	// 一時障害で利用者の 2FA クレデンシャルが焼ける**。Retry-After に従って
+	// 再試行すると TOTP は replay guard に弾かれ、バックアップコードは 2 枚目が
+	// 消える。password 不一致でも同じことが起きていた。
 	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
 	switch outcome {
 	case password.OutcomeUnavailable:
@@ -65,17 +70,27 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		// 潰さない** (#2849)。
 		slog.Warn("change-password: password verification unavailable",
 			"userId", u.ID, "scheme", scheme)
-		c.Response().Header().Set("Retry-After", "5")
-		return c.JSON(http.StatusServiceUnavailable,
-			apierr.Error("SERVICE_UNAVAILABLE", "Password verification is temporarily unavailable.",
-				"d5826d14-3982-4d2e-8011-b9e9f02499ef"))
+		c.Response().Header().Set("Retry-After", verifierRetryAfterSeconds)
+		return c.JSON(http.StatusServiceUnavailable, apierr.PasswordVerificationUnavailable())
 	case password.OutcomeUnsupported:
 		// **profile だけ出す。** salt / digest は診断に不要。
 		slog.Warn("change-password: unsupported password hash",
 			"userId", u.ID, "profile", password.ProfileForLog(*profile.Password))
 	}
 	if !outcome.OK() {
+		// upstream Misskey TS は raw `throw new Error('authentication failed')` を
+		// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため
+		// 400 INCORRECT_PASSWORD に揃える。
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+	}
+
+	// 2FA gate: upstream Misskey TS (change-password.ts) は twoFactorEnabled
+	// なら token 必須 + twoFactorAuthenticate で検証する。mk-go では旧来
+	// password だけで通っていたため password 漏洩 = 2FA bypass で password
+	// 変更可能だった (drop-in regression)。verify2FAToken 経由なので RFC
+	// 6238 §5.2 の replay 保護も自動で効く。
+	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
+		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
 	// bcrypt は 73 byte 以上の password で ErrPasswordTooLong を返す。Node 側

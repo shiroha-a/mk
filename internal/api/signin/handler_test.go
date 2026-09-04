@@ -1,10 +1,13 @@
 package signin_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"github.com/shiroha-a/mk/internal/api/apierr"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -785,28 +788,85 @@ func TestSignin_DoesNotRehashWhenAlreadyStrong(t *testing.T) {
 	assert.Equal(t, strong, *repo.Profiles["u1"].Password, "同じ強度なのに焼き直している")
 }
 
-// 検証枠を取れなかったときは 403 ではなく 503 を返す (#2849)。
+// 検証枠を取れなかったときは 403 ではなく 503 を返し、**そこで処理を止める** (#2849)。
 //
-// **403 に潰さないのが要点。** 枠を取れなかっただけで password は正しいかも
-// しれないのに「間違っています」と伝えると、利用者が不要な reset に進み、
-// signin の rate limit (1h/10) も食い潰して 1 時間ログインできなくなる。
+// **body 全体を見るのが要点。** 初版は `c.JSON` が成功時に nil を返すことを
+// 見落として早期 return が死んでおり、503 の後も処理が続いて JSON が 2 個
+// 連結され、偽の失敗ログイン履歴まで残っていた。status だけ見るテストでは
+// echo が 2 回目の WriteHeader を無視するため素通りする。
 func TestSignin_VerifierBusyReturns503(t *testing.T) {
 	h, repo := newTestHandler(t)
 	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+	sr := &recordingSigninRepo{}
+	gen, _ := id.NewGenerator("aidx")
+	h.SetSigninRepo(sr, gen)
 
 	rec := doPostCanceled(h.Signin, `{"username":"admin","password":"pass123"}`)
+
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assertSingleJSONError(t, rec, apierr.UUIDPasswordVerificationUnavailable)
+	// **password を一度も検証していないので履歴も残さない。**
+	assert.Zero(t, sr.count(), "503 の経路で失敗ログイン履歴を残さないこと")
 }
 
-// 同じく signin-flow でも 503 になる。
+// 同じく signin-flow でも 503 になり、captcha まで進まない。
 func TestSigninFlow_VerifierBusyReturns503(t *testing.T) {
 	h, repo := newTestHandler(t)
 	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+	sr := &recordingSigninRepo{}
+	gen, _ := id.NewGenerator("aidx")
+	h.SetSigninRepo(sr, gen)
 
 	rec := doPostCanceled(h.SigninFlow, `{"username":"admin","password":"pass123"}`)
+
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assertSingleJSONError(t, rec, apierr.UUIDPasswordVerificationUnavailable)
+	assert.Zero(t, sr.count(), "503 の経路で失敗ログイン履歴を残さないこと")
+}
+
+// assertSingleJSONError は body が **JSON 1 個**で、その error.id が wantID で
+// あることを確かめる。連結された 2 個目を見逃さないために decoder で読み切る。
+func assertSingleJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantID string) {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(rec.Body.Bytes()))
+	var first struct {
+		Error struct {
+			ID   string `json:"id"`
+			Kind string `json:"kind"`
+		} `json:"error"`
+	}
+	require.NoError(t, dec.Decode(&first), "body=%q", rec.Body.String())
+	assert.Equal(t, wantID, first.Error.ID)
+	var extra json.RawMessage
+	if err := dec.Decode(&extra); err == nil {
+		t.Fatalf("body に JSON が 2 個以上ある: %q", rec.Body.String())
+	}
+}
+
+// recordingSigninRepo counts Create calls so tests can assert that the 503 path
+// leaves no signin history.
+type recordingSigninRepo struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (r *recordingSigninRepo) Create(*model.Signin) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.n++
+	return nil
+}
+
+func (r *recordingSigninRepo) ListByUserID(string, int, string, string) ([]*model.Signin, error) {
+	return nil, nil
+}
+
+func (r *recordingSigninRepo) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.n
 }
 
 // 未対応 profile は従来どおり 403 のまま。**503 に倒さない** — データの異常で
@@ -818,4 +878,68 @@ func TestSignin_UnsupportedProfileStays403(t *testing.T) {
 	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 	assert.Empty(t, rec.Header().Get("Retry-After"))
+}
+
+// captureLogs swaps the default slog handler for the duration of the test.
+// JSON で取る (属性と本文中の偶然の一致を区別するため)。
+func captureLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
+// 未対応 profile では **warn を出し、そこに salt / digest を含めない** (#2849)。
+//
+// **ヘルパ単体のテストでは守れない。** ProfileForLog が正しくても、handler が
+// 生の hash を渡してしまえば漏れる。初版はそれを差し替える変異も、slog.Warn を
+// 丸ごと消す変異も、全テストが緑のままだった。
+func TestSignin_UnsupportedProfileLogsWithoutHash(t *testing.T) {
+	const stored = "$argon2id$v=19$m=4096,t=3,p=1$YWJjZGVmZ2hpamtsbW5vcA$YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY"
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", stored)
+	buf := captureLogs(t)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+
+	out := buf.String()
+	require.Contains(t, out, "unsupported password hash", "warn が出ていない")
+	require.Contains(t, out, `"userId":"u1"`, "どのアカウントか追えない")
+	assert.Contains(t, out, "m=4096,t=3,p=1", "診断に要る profile が出ていない")
+
+	parts := strings.Split(stored, "$")
+	assert.NotContains(t, out, parts[4], "salt がログに出ている")
+	assert.NotContains(t, out, parts[5], "digest がログに出ている")
+}
+
+// 枠を取れなかったときも warn を出す。出ないと「なぜ 503 が出たか」を
+// operator が追えない (#2849)。
+func TestSignin_VerifierBusyLogsWarn(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+	buf := captureLogs(t)
+
+	rec := doPostCanceled(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Contains(t, buf.String(), "password verification unavailable")
+	assert.Contains(t, buf.String(), `"userId":"u1"`)
+}
+
+// passwordless + credential では password を検証しない (#2849)。
+// **枠が枯れても credential 分岐まで到達すること**が要点で、到達しないと
+// パスワードを持たない利用者がパスワード検証の輻輳でログインできなくなる。
+func TestSigninFlow_PasswordlessSkipsPasswordVerification(t *testing.T) {
+	h, repo := newTestHandler(t)
+	user := createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+	repo.Profiles[user.ID].UsePasswordLessLogin = true
+
+	rec := doPostCanceled(h.SigninFlow,
+		`{"username":"admin","password":"","credential":{"id":"x"}}`)
+
+	// credential 分岐に到達していれば 503 にはならない (webauthn 未配線なので
+	// passkey 検証の失敗で 403 になる)。
+	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 }
