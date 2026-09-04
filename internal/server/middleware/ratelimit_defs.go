@@ -74,6 +74,7 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	"gallery/posts/update": {Duration: time.Hour, Max: 300},
 
 	// ── I (account) ────────────────────────────────────
+	"i/change-password":       {Duration: time.Hour, Max: 10, MinInterval: time.Second},
 	"i/move":                  {Duration: 24 * time.Hour, Max: 5},
 	"i/notifications":         {Duration: 30 * time.Second, Max: 30},
 	"i/notifications-grouped": {Duration: 30 * time.Second, Max: 30},

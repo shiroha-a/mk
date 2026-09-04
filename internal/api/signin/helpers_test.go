@@ -10,6 +10,7 @@ import (
 
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -245,10 +246,19 @@ func TestFinishPasskeySignin_DoesNotMigrateArgon2(t *testing.T) {
 	repo.Profiles["u1"] = &model.UserProfile{UserID: "u1", Password: &stored, UsePasswordLessLogin: true}
 	h := NewHandler(repo)
 	c := newCtx()
+	c.Set(pendingPasswordMigrationKey, pendingPasswordMigration{stored: stored, plain: "argon-pass"})
 	user := &model.User{ID: "u1", Token: &tok}
 
 	require.NoError(t, h.finishPasskeySignin(c, user, nil))
 	assert.Equal(t, stored, *repo.Profiles["u1"].Password)
+}
+
+func TestSetPendingPasswordMigration_RequiresVerifiedPassword(t *testing.T) {
+	c := newCtx()
+
+	setPendingPasswordMigration(c, password.SchemeArgon2id, false, "stored", "wrong")
+
+	assert.Nil(t, c.Get(pendingPasswordMigrationKey))
 }
 
 // recordSignin は signinRepo.Create が err を返しても panic しないこと

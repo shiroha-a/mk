@@ -17,6 +17,7 @@ import (
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	passwordutil "github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -53,8 +54,8 @@ func postExtra(h func(echo.Context) error, body string, user *model.User) *httpt
 	return rec
 }
 
-func setupUserWithPassword(repo *testutil.MockUserRepository, uid, password string) *model.User {
-	hash, _ := bcrypt.GenerateFromPassword([]byte(password), bcrypt.MinCost)
+func setupUserWithPassword(repo *testutil.MockUserRepository, uid, plain string) *model.User {
+	hash, _ := bcrypt.GenerateFromPassword([]byte(plain), bcrypt.MinCost)
 	hashStr := string(hash)
 	token := "tok12345678901234"
 	user := &model.User{ID: uid, Username: uid, Token: &token}
@@ -105,6 +106,9 @@ func TestChangePassword_AcceptsArgon2AndStoresBcrypt(t *testing.T) {
 	stored := *repo.Profiles["u1"].Password
 	assert.True(t, strings.HasPrefix(stored, "$2"))
 	assert.NoError(t, bcrypt.CompareHashAndPassword([]byte(stored), []byte("newpass")))
+	cost, err := bcrypt.Cost([]byte(stored))
+	require.NoError(t, err)
+	assert.Equal(t, passwordutil.Cost(), cost)
 }
 
 func TestChangePassword_RejectsWrongArgon2PasswordWithoutRewrite(t *testing.T) {

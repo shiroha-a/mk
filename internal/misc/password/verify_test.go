@@ -1,10 +1,12 @@
 package password
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/crypto/bcrypt"
@@ -20,10 +22,10 @@ func cherryPickFixture(plain string) string {
 
 func TestVerify_CherryPickArgon2id(t *testing.T) {
 	hash := cherryPickFixture("correct horse battery staple")
-	if scheme, ok := Verify(hash, "correct horse battery staple"); !ok || scheme != SchemeArgon2id {
+	if scheme, ok := Verify(context.Background(), hash, "correct horse battery staple"); !ok || scheme != SchemeArgon2id {
 		t.Fatalf("Verify(correct)=(%v,%v), want (%v,true)", scheme, ok, SchemeArgon2id)
 	}
-	if scheme, ok := Verify(hash, "wrong"); ok || scheme != SchemeArgon2id {
+	if scheme, ok := Verify(context.Background(), hash, "wrong"); ok || scheme != SchemeArgon2id {
 		t.Fatalf("Verify(wrong)=(%v,%v), want (%v,false)", scheme, ok, SchemeArgon2id)
 	}
 }
@@ -33,7 +35,7 @@ func TestVerify_Bcrypt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scheme, ok := Verify(string(hash), "hunter2"); !ok || scheme != SchemeBcrypt {
+	if scheme, ok := Verify(context.Background(), string(hash), "hunter2"); !ok || scheme != SchemeBcrypt {
 		t.Fatalf("Verify(bcrypt)=(%v,%v), want (%v,true)", scheme, ok, SchemeBcrypt)
 	}
 }
@@ -70,10 +72,25 @@ func TestVerify_RejectsMalformedOrUnsupportedHashes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheme, ok := Verify(tt.hash, "hunter2")
+			scheme, ok := Verify(context.Background(), tt.hash, "hunter2")
 			if ok || scheme != tt.scheme {
 				t.Fatalf("Verify=(%v,%v), want (%v,false)", scheme, ok, tt.scheme)
 			}
 		})
+	}
+}
+
+func TestVerify_Argon2idHonorsContextWhileWaitingForSlot(t *testing.T) {
+	hash := cherryPickFixture("hunter2")
+	const expectedMaxConcurrency = 4
+	if err := argon2VerifySlots.Acquire(context.Background(), expectedMaxConcurrency); err != nil {
+		t.Fatal(err)
+	}
+	defer argon2VerifySlots.Release(expectedMaxConcurrency)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if scheme, ok := Verify(ctx, hash, "hunter2"); ok || scheme != SchemeArgon2id {
+		t.Fatalf("Verify(canceled)=(%v,%v), want (%v,false)", scheme, ok, SchemeArgon2id)
 	}
 }

@@ -186,7 +186,7 @@ func (h *Handler) Signin(c echo.Context) error {
 	}
 
 	storedPassword := *profile.Password
-	scheme, passwordOK := password.Verify(storedPassword, *req.Password)
+	scheme, passwordOK := password.Verify(c.Request().Context(), storedPassword, *req.Password)
 	setPendingPasswordMigration(c, scheme, passwordOK, storedPassword, *req.Password)
 	if !passwordOK {
 		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
@@ -290,7 +290,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	}
 
 	storedPassword := *profile.Password
-	scheme, passwordOK := password.Verify(storedPassword, *req.Password)
+	scheme, passwordOK := password.Verify(c.Request().Context(), storedPassword, *req.Password)
 	setPendingPasswordMigration(c, scheme, passwordOK, storedPassword, *req.Password)
 	if passwordOK && scheme == password.SchemeBcrypt {
 		h.maybeRehashPassword(user.ID, storedPassword, *req.Password)

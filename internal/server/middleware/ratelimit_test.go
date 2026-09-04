@@ -577,6 +577,7 @@ func TestDefaultEndpointLimits_KnownEndpoints(t *testing.T) {
 		{"signin", 10},
 		{"signin-flow", 10},
 		{"signin-with-passkey", 200},
+		{"i/change-password", 10},
 		{"request-reset-password", 3},
 		{"reset-password", 30},
 	}
@@ -660,6 +661,7 @@ func TestDefaultEndpointLimits_MinIntervalEndpoints(t *testing.T) {
 		{"notes/unrenote", time.Second},
 		{"notes/reactions/delete", 3 * time.Second},
 		{"bubble-game/register", 30 * time.Second},
+		{"i/change-password", time.Second},
 		{"signin", time.Second},
 		{"signin-flow", time.Second},
 		{"signin-with-passkey", 250 * time.Millisecond},
