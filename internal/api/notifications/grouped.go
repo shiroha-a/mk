@@ -72,7 +72,21 @@ func (h *Handler) Grouped(c echo.Context) error {
 		grouped = grouped[:(*req.Limit)]
 	}
 
-	h.maybeMarkAsRead(c, user, req)
+	// **取得が 0 件なら既読化しない** (#2833)。upstream i/notifications-grouped.ts は
+	// `notifications.length === 0` で `readAllNotification` を呼ぶ前に return する
+	// (i/notifications 側には無い、grouped だけの早期 return)。
+	//
+	// MarkAllAsRead が進める先は「fetch が返した行」ではなく**ストリームの最新
+	// エントリ**なので、0 件の fetch で呼ぶと、ユーザーが一度も受け取っていない
+	// 通知まで既読位置が飛ぶ。
+	//
+	// 判定は `all` = svc.List の生の結果で、upstream の `getNotifications` 戻り値に
+	// あたる。**grouped ではなく all を見る** — pack / 可視性 drop の後で判定すると
+	// upstream より後ろの位置になり、逆向きの乖離を作る (upstream はそこでは
+	// 既読化する)。
+	if len(all) > 0 {
+		h.maybeMarkAsRead(c, user, req)
+	}
 	return c.JSON(http.StatusOK, grouped)
 }
 
