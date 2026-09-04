@@ -1,0 +1,227 @@
+#━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# mk-go configuration (Docker)
+#
+# このファイルは `.config/docker.yml.example` です。
+# Dockerfile が build 時に `.config/docker.yml.example` を image 内の
+# `/app/.config/default.yml` として焼き込みます。docker-compose の
+# 既定値 (POSTGRES_USER=misskey / POSTGRES_PASSWORD=misskey) と
+# 整合する内容を初期値にしてあるので、`docker compose up` で out-of-
+# the-box に動作します。
+#
+# 設定をカスタマイズする場合:
+#   1. cp .config/docker.yml.example .config/docker.yml
+#   2. .config/docker.yml を編集
+#   3. docker-compose.yml の `volumes:` で
+#        - ./.config/docker.yml:/app/.config/default.yml:ro
+#      を有効化して mount 上書き
+#━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+#   ┌─────┐
+#───┘ URL └─────────────────────────────────────────────────────
+
+# Final accessible URL seen by a user.
+url: http://localhost:3000
+
+# ONCE YOU HAVE STARTED THE INSTANCE, DO NOT CHANGE THE
+# URL SETTINGS AFTER THAT!
+
+#   ┌───────────────────────┐
+#───┘ Port and TLS settings └───────────────────────────────────
+
+port: 3000
+
+#   ┌──────────────────────────┐
+#───┘ PostgreSQL configuration └────────────────────────────────
+
+db:
+  host: db
+  port: 5432
+
+  # Database name
+  db: misskey
+
+  # Auth — docker-compose.yml の POSTGRES_USER / POSTGRES_PASSWORD と
+  # 同じ値にしておく (out-of-the-box で接続できるように)。
+  # 本番運用では強いパスワードに変更すること。
+  user: misskey
+  pass: misskey
+
+  # Whether disable Caching queries
+  #disableCache: true
+
+  # Extra Connection options
+  #extra:
+  #  ssl: true
+
+dbReplications: false
+
+# You can configure any number of read replicas here
+#dbSlaves:
+#  -
+#    host:
+#    port:
+#    db:
+#    user:
+#    pass:
+
+#   ┌─────────────────────┐
+#───┘ Redis configuration └─────────────────────────────────────
+
+redis:
+  host: redis
+  port: 6379
+  #family: 0  # 0=Both, 4=IPv4, 6=IPv6
+  #pass: example-pass
+  #prefix: example-prefix
+  #db: 1
+
+#redisForPubsub:
+#  host: redis
+#  port: 6379
+
+#redisForJobQueue:
+#  host: redis
+#  port: 6379
+
+#redisForTimelines:
+#  host: redis
+#  port: 6379
+
+#redisForReactions:
+#  host: redis
+#  port: 6379
+
+#   ┌───────────────────┐
+#───┘ Job queue driver └────────────────────────────────────────
+
+# mk-go specific: select the job queue runtime.
+#
+#   - 'mkq' (default, recommended): shiroha-a/mkq based, BullMQ wire-
+#                         compatible (makes the admin queue dashboard
+#                         render correctly under the upstream Misskey
+#                         TS frontend) + supports per-queue concurrency
+#                         and rate-limit knobs.
+#   - 'asynq': legacy hibiken/asynq based runtime. **Future-deprecation
+#                         candidate** — once mkq is fully battle-tested
+#                         we plan to remove asynq entirely.
+#
+#jobQueueDriver: mkq
+
+#   ┌───────────────────────────────┐
+#───┘ Fulltext search configuration └─────────────────────────────
+
+fulltextSearch:
+  # - sqlLike (default), sqlPgroonga, meilisearch
+  provider: sqlLike
+
+#meilisearch:
+#  host: meilisearch
+#  port: 7700
+#  apiKey: ''
+#  ssl: true
+#  index: ''
+#  scope: local
+
+#   ┌───────────────┐
+#───┘ ID generation └───────────────────────────────────────────
+
+# Available methods: aid, aidx, meid, ulid, objectid
+# ONCE YOU HAVE STARTED THE INSTANCE, DO NOT CHANGE.
+
+id: 'aidx'
+
+#   ┌────────────────┐
+#───┘ Error tracking └──────────────────────────────────────────
+
+#sentryForBackend:
+#  options:
+#    dsn: 'https://examplePublicKey@o0.ingest.sentry.io/0'
+
+#   ┌─────────────────────┐
+#───┘ Job queue settings └──────────────────────────────────────
+
+#deliverJobConcurrency: 128
+#inboxJobConcurrency: 16
+
+#deliverJobPerSec: 128
+#inboxJobPerSec: 32
+
+# Job attempts (total tries incl. the first). Defaults match Misskey:
+# deliver=12, inbox=8. Set to 1 to disable retries to a failing remote.
+#deliverJobMaxAttempts: 12
+#inboxJobMaxAttempts: 8
+
+# Auto-scale: when jobQueueAutoScale=true, an AIMD controller dynamically
+# resizes worker pools for queues without an explicit *JobConcurrency knob,
+# within [minWorkers, maxWorkers]. mkq driver only (asynq returns a startup
+# error). Full spec: docs/design/auto-scale-job-workers.md.
+#jobQueueAutoScale: false
+#maxWorkers: 128                # per-queue upper bound (default: runtime.NumCPU() * 16)
+#minWorkers: 4                  # per-queue lower bound (kept warm even at idle)
+#maxWorkersGlobal: 256          # cluster-wide cap across queues for multi-pod use (default: unset = no cap)
+#autoScaleCooldownSeconds: 1    # minimum interval between scale events (5-10 recommended in production to avoid oscillation)
+
+#   ┌─────────────────────┐
+#───┘ Other configuration └─────────────────────────────────────
+
+#disableHsts: true
+
+#outgoingAddressFamily: ipv4
+
+# When set, **every third-party outbound HTTP/HTTPS request** mk-go makes is
+# routed through this proxy: ActivityPub delivery, WebFinger, media proxy,
+# summary (URL preview) target fetch, webhook delivery, Web Push, and SaaS
+# APIs (hCaptcha / reCAPTCHA / Turnstile / mCaptcha / DeepL / Truemail /
+# Verifymail, etc.). Use this to centralize egress or to keep the origin IP
+# hidden. Hosts that must bypass the proxy (exact hostname match) go in
+# proxyBypassHosts below.
+# Note: operator-trusted endpoints configured via `urlPreviewSummaryProxyUrl`
+# (the summaly proxy itself) are called directly so that internal/localhost
+# summaly deployments keep working.
+#proxy: http://127.0.0.1:3128
+
+# Hosts that bypass `proxy` (exact hostname match).
+proxyBypassHosts:
+  - api.deepl.com
+  - api-free.deepl.com
+  - www.recaptcha.net
+  - hcaptcha.com
+  - challenges.cloudflare.com
+
+#proxySmtp: http://127.0.0.1:3128
+
+#mediaProxy: https://example.com/proxy
+
+# Video thumbnail generator. docker-compose.yml に `video-thumb` service
+# (nekonoverse/video-thumb) を同梱しているが default では disabled。
+# 動画サムネを生成したい operator は docker-compose.yml の `video-thumb`
+# block と以下の行を両方コメントアウト解除する。
+# 設定が無ければ mk-go は video request に dummy PNG を返すだけで外部
+# generator を呼ばない。default wire mode "post" は multipart bytes 転送、
+# Misskey TS 互換の "get" 経路は default.yml.example を参照。
+#videoThumbnailGenerator: http://video-thumb:8005
+#videoThumbnailGeneratorMode: post
+
+# NSFW sensitive media detection (#406). Disabled by default. The operator
+# runs any compatible service and points this at its URL. The wire spec
+# and reference compatible images are documented in default.yml.example.
+#nsfwDetectorUrl: http://nsfw-detector:8080/score
+
+#allowedPrivateNetworks:
+#  - '127.0.0.1/32'
+
+#maxFileSize: 262144000
+
+#logging:
+#  sql:
+#    enableQueryParamLogging: false
+#    disableQueryTruncation: false
+
+# Expose the Prometheus /metrics endpoint with job-queue metrics.
+# Unauthenticated; restrict access via nginx / LB ACL if exposed outside
+# the cluster. See docs/design/auto-scale-job-workers.md §6.1.
+#enableMetrics: false
+
+# Maximum successful effective-policy entries retained per provider.
+# Non-positive values use the default 10000. Changes require a restart.
+#effectivePolicyProviderCacheEntries: 10000
