@@ -225,3 +225,24 @@ func TestProfileForLog_UnexpectedLayoutOmitsValues(t *testing.T) {
 		}
 	}
 }
+
+// Scheme.String は全ての値を読める形にする (#2849)。
+//
+// **ログのためだけに存在する。** slog の JSONHandler は fmt.Stringer を使わない
+// ので呼び出し側が明示的に通す必要があり、ここが壊れると `"scheme":2` のような
+// 数字がログに出て診断の役に立たなくなる。
+func TestScheme_String(t *testing.T) {
+	for _, tc := range []struct {
+		in   Scheme
+		want string
+	}{
+		{SchemeBcrypt, "bcrypt"},
+		{SchemeArgon2id, "argon2id"},
+		{SchemeUnknown, "unknown"},
+		{Scheme(99), "unknown"},
+	} {
+		if got := tc.in.String(); got != tc.want {
+			t.Fatalf("Scheme(%d).String()=%q, want %q", tc.in, got, tc.want)
+		}
+	}
+}

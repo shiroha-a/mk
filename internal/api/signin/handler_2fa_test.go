@@ -487,3 +487,27 @@ func Test2FA_WebAuthnPasswordless_WrongPassword_StillChallenges(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "passkey", resp["next"], "usePasswordLessLogin なら誤パスワードでも challenge を発行")
 }
+
+// **credential を送らない passwordless ユーザーは従来どおり移行される** (#2849)。
+//
+// passwordless の skip 条件から `len(req.Credential) > 0` を落とすと、passkey を
+// 使わずパスワードでログインした passwordless ユーザーの hash が Argon2id の
+// まま残る。ログインは通るので気付けないが、**移行という機能の目的が
+// その利用者に対してだけ失われる**。
+func Test2FA_Argon2MigrationForPasswordlessWithoutCredential(t *testing.T) {
+	h, repo := newTestHandler(t)
+	secret := "JBSWY3DPEHPK3PXP"
+	user := newTestUserWithTOTP(repo, "alice", "unused", secret, []string{"backup1"})
+	stored := signinArgon2Fixture("argon-pass")
+	repo.Profiles[user.ID].Password = &stored
+	repo.Profiles[user.ID].UsePasswordLessLogin = true
+
+	token, err := totp.GenerateCode(secret, time.Now())
+	require.NoError(t, err)
+	rec := doPost(h.SigninFlow, `{"username":"alice","password":"argon-pass","token":"`+token+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	assert.NoError(t, bcrypt.CompareHashAndPassword(
+		[]byte(*repo.Profiles[user.ID].Password), []byte("argon-pass")),
+		"credential 無しなら password 経路なので bcrypt へ移行されること")
+}

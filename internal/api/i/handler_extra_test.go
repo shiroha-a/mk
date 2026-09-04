@@ -746,7 +746,7 @@ func TestChangePassword_VerifierBusyReturns503(t *testing.T) {
 
 	rec := postExtraCanceled(h.ChangePassword, `{"currentPassword":"oldpass","newPassword":"newpass"}`, user)
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.Equal(t, "360", rec.Header().Get("Retry-After"))
 	// **kind は server。** 飽和はサーバー側の事情なので client に倒すと意味が逆。
 	var body struct {
 		Error struct {

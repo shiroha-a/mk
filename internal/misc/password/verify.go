@@ -47,6 +47,21 @@ var argon2VerifySlots = semaphore.NewWeighted(argon2MaxConcurrency)
 // TestArgon2AcquireTimeout が固定する。
 var argon2AcquireTimeout = 3 * time.Second
 
+// String implements fmt.Stringer so log output is readable.
+//
+// **無いと slog が uint8 をそのまま出す** (`"scheme":2`)。operator に手掛かりを
+// 残すのがこの仕組みの目的なので、数字だけでは意味が無い (#2849)。
+func (s Scheme) String() string {
+	switch s {
+	case SchemeBcrypt:
+		return "bcrypt"
+	case SchemeArgon2id:
+		return "argon2id"
+	default:
+		return "unknown"
+	}
+}
+
 // Outcome reports why Verify accepted or rejected the password.
 //
 // **3 つの失敗を区別するために足した** (#2849)。以前は全て `false` を返しており、

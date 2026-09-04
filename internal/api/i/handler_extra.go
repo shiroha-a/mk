@@ -25,13 +25,13 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-// ChangePassword handles POST /api/i/change-password.
-// verifierRetryAfterSeconds は 503 の Retry-After (#2849)。rate limit は
-// handler より前の middleware が数えるので 503 でも 1 消費される (返金の口が
-// 無い)。短い値だと、素直に従ったクライアントが 1h/10 の枠を数十秒で使い切って
-// 1 時間ログインできなくなる。acquire timeout (3 秒) より十分長く取る。
-const verifierRetryAfterSeconds = "30"
+// verifierRetryAfterSeconds は 503 の Retry-After (#2849)。rate limit は handler
+// より前の middleware が数えるので 503 でも 1 消費される (返金の口が無い)。
+// 素直に従ったクライアントが枠を使い切ると 1 時間ログインできなくなるので、
+// 窓 (1h) を上限回数 (10) で割った値にしてある。
+const verifierRetryAfterSeconds = "360"
 
+// ChangePassword handles POST /api/i/change-password.
 func (h *Handler) ChangePassword(c echo.Context) error {
 	u := middleware.GetUser(c)
 	var req struct {
@@ -52,36 +52,24 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
-	// **password を 2FA gate より先に検証する** (#2849)。upstream は逆順
-	// (token → password) だが、mk-go では順序を入れ替える前例がある
-	// (handler_2fa.go の requireWebAuthn。片方だけ正しい状態の検出可否は対称で
-	// 情報リーク的に等価)。
+	// **可用性チェックだけを 2FA gate より前に出す** (#2849)。
 	//
-	// ここで入れ替える理由は 503 の側にある。verify2FAToken は**バックアップ
-	// コードを DB から消し**、TOTP は replay guard に記録する = どちらも
-	// 消費が確定する。その後で検証枠が取れずに 503 を返すと、**サーバー都合の
-	// 一時障害で利用者の 2FA クレデンシャルが焼ける**。Retry-After に従って
-	// 再試行すると TOTP は replay guard に弾かれ、バックアップコードは 2 枚目が
-	// 消える。password 不一致でも同じことが起きていた。
+	// verify2FAToken はバックアップコードを DB から消し、TOTP を replay guard に
+	// 記録する = どちらも消費が確定する。その後で検証枠が取れず 503 を返すと、
+	// **サーバー都合の一時障害で利用者の 2FA クレデンシャルが焼ける**。
+	//
+	// **可観測な順序は upstream のまま (token → password)。** ここで password の
+	// 成否まで先に返すと、wrong-password + wrong-token のときの error code が
+	// upstream と drift する (INCORRECT_PASSWORD vs INVALID_TOKEN)。同じ罠を
+	// handler_2fa.go が 3 箇所で明示的に禁じている (TwoFARegister /
+	// TwoFAUnregister / TwoFARemoveKey)。Unavailable は「まだ判定していない」
+	// という第 3 の状態なので、先に返しても password の成否を漏らさない。
 	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
-	switch outcome {
-	case password.OutcomeUnavailable:
-		// 枠を取れなかっただけで現パスワードは正しいかもしれない。**400 に
-		// 潰さない** (#2849)。
+	if outcome == password.OutcomeUnavailable {
 		slog.Warn("change-password: password verification unavailable",
-			"userId", u.ID, "scheme", scheme)
+			"userId", u.ID, "scheme", scheme.String())
 		c.Response().Header().Set("Retry-After", verifierRetryAfterSeconds)
 		return c.JSON(http.StatusServiceUnavailable, apierr.PasswordVerificationUnavailable())
-	case password.OutcomeUnsupported:
-		// **profile だけ出す。** salt / digest は診断に不要。
-		slog.Warn("change-password: unsupported password hash",
-			"userId", u.ID, "profile", password.ProfileForLog(*profile.Password))
-	}
-	if !outcome.OK() {
-		// upstream Misskey TS は raw `throw new Error('authentication failed')` を
-		// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため
-		// 400 INCORRECT_PASSWORD に揃える。
-		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	// 2FA gate: upstream Misskey TS (change-password.ts) は twoFactorEnabled
@@ -91,6 +79,18 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	// 6238 §5.2 の replay 保護も自動で効く。
 	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	}
+
+	if outcome == password.OutcomeUnsupported {
+		// **profile だけ出す。** salt / digest は診断に不要。
+		slog.Warn("change-password: unsupported password hash",
+			"userId", u.ID, "profile", password.ProfileForLog(*profile.Password))
+	}
+	if !outcome.OK() {
+		// upstream Misskey TS は raw `throw new Error('authentication failed')` を
+		// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため
+		// 400 INCORRECT_PASSWORD に揃える。
+		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
 	// bcrypt は 73 byte 以上の password で ErrPasswordTooLong を返す。Node 側

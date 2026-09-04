@@ -297,12 +297,18 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	// **passwordless + credential では password を検証しない** (#2849)。
 	//
 	// `usePasswordLessLogin` の利用者はフロントが空の password と credential を
-	// 送り、下の credential 分岐が `!passwordOK && !UsePasswordLessLogin` で
-	// 素通しにするので、**検証結果はどこでも使われない**。それでも Verify を
-	// 呼ぶと argon2 の枠を無駄に消費し、しかも枠が枯れると 503 を返して
-	// credential 分岐へ到達できなくなる = **パスワードを持たない利用者が
-	// パスワード検証の輻輳でログインできない**。
-	passwordless := profile.UsePasswordLessLogin && len(req.Credential) > 0
+	// 送り、credential 分岐が `!passwordOK && !UsePasswordLessLogin` で素通しに
+	// するので、**検証結果はどこでも使われない**。それでも Verify を呼ぶと
+	// argon2 の枠を無駄に消費し、しかも枠が枯れると 503 を返して credential
+	// 分岐へ到達できなくなる = パスワードを持たない利用者がパスワード検証の
+	// 輻輳でログインできない。
+	//
+	// **`TwoFactorEnabled` も条件に要る。** credential 分岐は 2FA 経路の中に
+	// あり、2FA 無効なら `!profile.TwoFactorEnabled` の枝が先に `passwordOK` で
+	// 判定して返す。`UsePasswordLessLogin=true` かつ `TwoFactorEnabled=false` は
+	// 実際に到達しうる (2fa/unregister は usePasswordLessLogin を巻き戻さない)
+	// ので、ここを外すと**正しいパスワードを送っている利用者が 403 になる**。
+	passwordless := profile.UsePasswordLessLogin && profile.TwoFactorEnabled && len(req.Credential) > 0
 	var (
 		scheme     password.Scheme
 		passwordOK bool
@@ -606,7 +612,7 @@ func (h *Handler) verifyPassword(c echo.Context, userID, stored, plain string) (
 		// **失敗ログイン履歴 (h.fail) も残さない。** password を一度も検証して
 		// いないので、残すと身に覚えのない失敗が signin-history に並ぶ。
 		slog.Warn("signin: password verification unavailable",
-			"path", c.Path(), "userId", userID, "scheme", scheme)
+			"path", c.Path(), "userId", userID, "scheme", scheme.String())
 		writeVerifierUnavailable(c)
 		return scheme, false, true
 	case password.OutcomeUnsupported:
@@ -622,19 +628,19 @@ func (h *Handler) verifyPassword(c echo.Context, userID, stored, plain string) (
 
 // writeVerifierUnavailable writes the shared 503 body plus Retry-After.
 //
-// **Retry-After は signin の rate limit と整合させる。** rate limit は handler
-// より前の middleware が数えるので 503 でも 1 消費される (返金の口が無い)。
-// 短い値を返すと、素直に従ったクライアントが 1h/10 の枠を数十秒で使い切り、
-// 1 時間ログインできなくなる — #2849 が問題にした被害そのもの。
-// acquire timeout (3 秒) より十分長く取る。
+// **Retry-After は rate limit の窓から逆算する。** rate limit は handler より前の
+// middleware が数えるので 503 でも 1 消費される (返金の口が無い)。素直に従った
+// クライアントが枠を使い切ると 1 時間ログインできなくなる — #2849 が問題にした
+// 被害そのもの。signin は 1h/10 なので、窓を割った 3600/10 = 360 秒なら
+// 従っている限り枠を使い切らない。
 func writeVerifierUnavailable(c echo.Context) {
 	c.Response().Header().Set("Retry-After", verifierRetryAfterSeconds)
 	_ = c.JSON(http.StatusServiceUnavailable, apierr.PasswordVerificationUnavailable())
 }
 
 // verifierRetryAfterSeconds は 503 の Retry-After。上のコメントの理由で
-// acquire timeout より十分長い値にしてある。
-const verifierRetryAfterSeconds = "30"
+// rate limit の窓 (1h) を上限回数 (10) で割った値にしてある。
+const verifierRetryAfterSeconds = "360"
 
 // fail records a failed signin (success:false) for the already-resolved user
 // and returns the error response. upstream SigninApiService.fail() は password

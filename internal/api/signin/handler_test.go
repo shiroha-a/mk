@@ -797,33 +797,33 @@ func TestSignin_DoesNotRehashWhenAlreadyStrong(t *testing.T) {
 func TestSignin_VerifierBusyReturns503(t *testing.T) {
 	h, repo := newTestHandler(t)
 	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
-	sr := &recordingSigninRepo{}
+	sr := newRecordingSigninRepo()
 	gen, _ := id.NewGenerator("aidx")
 	h.SetSigninRepo(sr, gen)
 
 	rec := doPostCanceled(h.Signin, `{"username":"admin","password":"pass123"}`)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.Equal(t, "360", rec.Header().Get("Retry-After"))
 	assertSingleJSONError(t, rec, apierr.UUIDPasswordVerificationUnavailable)
 	// **password を一度も検証していないので履歴も残さない。**
-	assert.Zero(t, sr.count(), "503 の経路で失敗ログイン履歴を残さないこと")
+	sr.assertNoSigninRecorded(t)
 }
 
 // 同じく signin-flow でも 503 になり、captcha まで進まない。
 func TestSigninFlow_VerifierBusyReturns503(t *testing.T) {
 	h, repo := newTestHandler(t)
 	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
-	sr := &recordingSigninRepo{}
+	sr := newRecordingSigninRepo()
 	gen, _ := id.NewGenerator("aidx")
 	h.SetSigninRepo(sr, gen)
 
 	rec := doPostCanceled(h.SigninFlow, `{"username":"admin","password":"pass123"}`)
 
 	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
-	assert.Equal(t, "30", rec.Header().Get("Retry-After"))
+	assert.Equal(t, "360", rec.Header().Get("Retry-After"))
 	assertSingleJSONError(t, rec, apierr.UUIDPasswordVerificationUnavailable)
-	assert.Zero(t, sr.count(), "503 の経路で失敗ログイン履歴を残さないこと")
+	sr.assertNoSigninRecorded(t)
 }
 
 // assertSingleJSONError は body が **JSON 1 個**で、その error.id が wantID で
@@ -847,26 +847,35 @@ func assertSingleJSONError(t *testing.T, rec *httptest.ResponseRecorder, wantID 
 
 // recordingSigninRepo counts Create calls so tests can assert that the 503 path
 // leaves no signin history.
+//
+// **channel で受ける。** `h.fail` は `go h.recordSignin(...)` で非同期に書くので、
+// ハンドラ復帰直後にカウンタを読むと必ず 0 が返り、503 の経路で記録を足す変異が
+// 素通りする (実測で 6/6 生存)。
 type recordingSigninRepo struct {
-	mu sync.Mutex
-	n  int
+	ch chan struct{}
+}
+
+func newRecordingSigninRepo() *recordingSigninRepo {
+	return &recordingSigninRepo{ch: make(chan struct{}, 8)}
 }
 
 func (r *recordingSigninRepo) Create(*model.Signin) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.n++
+	r.ch <- struct{}{}
 	return nil
+}
+
+// assertNoSigninRecorded は一定時間 Create が呼ばれないことを確かめる。
+func (r *recordingSigninRepo) assertNoSigninRecorded(t *testing.T) {
+	t.Helper()
+	select {
+	case <-r.ch:
+		t.Fatal("503 の経路で失敗ログイン履歴が記録された")
+	case <-time.After(200 * time.Millisecond):
+	}
 }
 
 func (r *recordingSigninRepo) ListByUserID(string, int, string, string) ([]*model.Signin, error) {
 	return nil, nil
-}
-
-func (r *recordingSigninRepo) count() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.n
 }
 
 // 未対応 profile は従来どおり 403 のまま。**503 に倒さない** — データの異常で
@@ -929,17 +938,51 @@ func TestSignin_VerifierBusyLogsWarn(t *testing.T) {
 }
 
 // passwordless + credential では password を検証しない (#2849)。
-// **枠が枯れても credential 分岐まで到達すること**が要点で、到達しないと
-// パスワードを持たない利用者がパスワード検証の輻輳でログインできなくなる。
+//
+// **error id まで見る。** 「503 でないこと」だけだと、password 不一致の 403
+// (932c904e) でも通ってしまい、credential 分岐に到達したことを確かめられない。
+// 到達していれば webauthn 未配線なので passkey 検証失敗の 93b86c4b になる。
 func TestSigninFlow_PasswordlessSkipsPasswordVerification(t *testing.T) {
 	h, repo := newTestHandler(t)
 	user := createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
 	repo.Profiles[user.ID].UsePasswordLessLogin = true
+	// credential 分岐は 2FA 経路の中にあるので 2FA も有効でないと到達しない。
+	repo.Profiles[user.ID].TwoFactorEnabled = true
 
 	rec := doPostCanceled(h.SigninFlow,
 		`{"username":"admin","password":"","credential":{"id":"x"}}`)
 
-	// credential 分岐に到達していれば 503 にはならない (webauthn 未配線なので
-	// passkey 検証の失敗で 403 になる)。
-	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
+	assertSingleJSONError(t, rec, "93b86c4b-72f9-40eb-9815-798928603d1e")
+}
+
+// **2FA 無効の passwordless ユーザーは従来どおり password で通る** (#2849)。
+//
+// `usePasswordLessLogin=true` かつ `twoFactorEnabled=false` は 2fa/unregister が
+// usePasswordLessLogin を巻き戻さないため実際に到達しうる。ここで Verify を
+// 飛ばすと、**正しいパスワードを送っている利用者が 403 になる**回帰が入る。
+func TestSigninFlow_PasswordlessWithout2FAStillUsesPassword(t *testing.T) {
+	h, repo := newTestHandler(t)
+	user := createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+	repo.Profiles[user.ID].UsePasswordLessLogin = true
+
+	rec := doPost(h.SigninFlow,
+		`{"username":"admin","password":"pass123","credential":{"id":"x"}}`)
+
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, rec.Body.String(), `"finished":true`)
+}
+
+// 503 のログの scheme が**読める形**で出ること (#2849)。
+// slog の JSONHandler は fmt.Stringer を使わないので、呼び出し側で明示的に
+// String() を通さないと `"scheme":2` という数字になる。
+func TestSignin_VerifierBusyLogsReadableScheme(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+	buf := captureLogs(t)
+
+	doPostCanceled(h.Signin, `{"username":"admin","password":"pass123"}`)
+
+	assert.Contains(t, buf.String(), `"scheme":"argon2id"`)
+	assert.NotContains(t, buf.String(), `"scheme":2`)
 }
