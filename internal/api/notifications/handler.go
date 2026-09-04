@@ -186,6 +186,12 @@ func (h *Handler) Show(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// upstream i/notifications.ts が getNotifications の前に持つ 2 つの早期
+	// return (#2835)。既読化もここで止まる。
+	if emptyByTypeFilter(req) {
+		return c.JSON(http.StatusOK, []any{})
+	}
+
 	filtered, notifierByID, noteByID, err := h.collectNotifications(c, user, req)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -209,18 +215,76 @@ func (h *Handler) Show(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
+// notificationTypeList mirrors upstream `notificationTypes` (types.ts)。
+// **obsolete は含まない。** excludeTypes の全指定判定 (emptyByTypeFilter) が
+// upstream の `notificationTypes.every(...)` と同じ集合を見る必要があるため、
+// enum とは別に順序付きで持つ。
+var notificationTypeList = []string{
+	"note", "follow", "mention", "reply", "renote",
+	"quote", "reaction", "pollEnded", "scheduledNotePosted",
+	"scheduledNotePostFailed", "receiveFollowRequest", "followRequestAccepted",
+	"roleAssigned", "chatRoomInvitationReceived", "achievementEarned",
+	"exportCompleted", "login", "createToken", "app", "test",
+}
+
+// obsoleteNotificationTypeList mirrors upstream `obsoleteNotificationTypes`。
+// paramDef の enum には含まれるが、excludeTypes の全指定判定には数えない。
+var obsoleteNotificationTypeList = []string{"pollVote", "groupInvited"}
+
 // notificationTypeEnum mirrors upstream `[...notificationTypes,
 // ...obsoleteNotificationTypes]` (types.ts)。includeTypes/excludeTypes の
 // 要素検証に使う (#2062)。mk-go が produce しない type も upstream paramDef の
 // enum に含まれるため許容する (filter で何も match しないだけ)。
-var notificationTypeEnum = map[string]bool{
-	"note": true, "follow": true, "mention": true, "reply": true, "renote": true,
-	"quote": true, "reaction": true, "pollEnded": true, "scheduledNotePosted": true,
-	"scheduledNotePostFailed": true, "receiveFollowRequest": true, "followRequestAccepted": true,
-	"roleAssigned": true, "chatRoomInvitationReceived": true, "achievementEarned": true,
-	"exportCompleted": true, "login": true, "createToken": true, "app": true, "test": true,
-	// obsoleteNotificationTypes (paramDef enum に含まれる)
-	"pollVote": true, "groupInvited": true,
+//
+// **2 つの list から組み立てる。** 手で二重に持つと、片方に type を足したときに
+// もう片方が古いまま残る。enum にだけ足すと emptyByTypeFilter の全指定判定が
+// 足りない type を無視して**早く空を返しすぎる**方向に壊れる。
+var notificationTypeEnum = buildNotificationTypeEnum()
+
+func buildNotificationTypeEnum() map[string]bool {
+	m := make(map[string]bool, len(notificationTypeList)+len(obsoleteNotificationTypeList))
+	for _, t := range notificationTypeList {
+		m[t] = true
+	}
+	for _, t := range obsoleteNotificationTypeList {
+		m[t] = true
+	}
+	return m
+}
+
+// emptyByTypeFilter reports whether the type filters alone make the query
+// pointless, mirroring the two early returns upstream i/notifications.ts and
+// i/notifications-grouped.ts have before `getNotifications` (#2835).
+//
+//   - includeTypes が明示的に空 = 何も含めない
+//   - excludeTypes が notificationTypes を全て覆う
+//
+// **既読化より前に判定するのが要点。** MarkAllAsRead が進める先は fetch が返した
+// 行ではなくストリームの最新エントリなので、ここで抜けずに既読化すると、
+// 1 件も返していないのにユーザーが受け取っていない通知まで既読位置が飛ぶ
+// (#2833 と同じ害の別経路)。
+//
+// excludeTypes が nil / 空のときは false。upstream の
+// `notificationTypes.every(type => ps.excludeTypes?.includes(type))` も、
+// undefined なら `?.` で undefined になり every が false、空配列なら
+// `[].includes` が false で every が false になる。
+func emptyByTypeFilter(req ListRequest) bool {
+	if req.IncludeTypes != nil && len(req.IncludeTypes) == 0 {
+		return true
+	}
+	if len(req.ExcludeTypes) == 0 {
+		return false
+	}
+	excluded := make(map[string]struct{}, len(req.ExcludeTypes))
+	for _, t := range req.ExcludeTypes {
+		excluded[t] = struct{}{}
+	}
+	for _, t := range notificationTypeList {
+		if _, ok := excluded[t]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // validNotificationTypes reports whether every element of types is a known
@@ -309,11 +373,13 @@ func survivors(all []*notification.Notification, dropped map[string]struct{}) []
 // noteId / renote の target) で決まるので、落とした通知の中身そのものが要る。
 // resolveAllNotes は drop 済み行の note まで引くかどうか。grouped だけが true。
 func (h *Handler) collectNotificationsWithDropped(c echo.Context, user *model.User, req ListRequest, resolveAllNotes bool) ([]*notification.Notification, map[string]struct{}, map[string]*model.User, map[string]*model.Note, error) {
-	// upstream notifications.ts: 明示的な includeTypes:[] は空配列を返す
-	// (= 何も含めない)。omit (nil) は全 type を通す。Go の []string は
-	// absent→nil / []→non-nil(len 0) で区別できるので、ここで早期 return する
-	// (#1546)。excludeTypes 全指定の空返却は下の per-row exclude filter で既に
-	// 成立するため特別扱い不要。
+	// 明示的な includeTypes:[] は空配列を返す (= 何も含めない)。omit (nil) は全
+	// type を通す。Go の []string は absent→nil / []→non-nil(len 0) で区別できる
+	// (#1546)。
+	//
+	// **現状ここには到達しない** — Show / Grouped はどちらも emptyByTypeFilter で
+	// 先に抜ける (#2835)。collectNotificationsWithDropped を直接呼ぶ経路が増えた
+	// ときのための fail-closed な二重防御として残してある。
 	if req.IncludeTypes != nil && len(req.IncludeTypes) == 0 {
 		return nil, map[string]struct{}{}, map[string]*model.User{}, map[string]*model.Note{}, nil
 	}

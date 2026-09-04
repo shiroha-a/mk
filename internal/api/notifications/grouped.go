@@ -29,6 +29,19 @@ func (h *Handler) Grouped(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 
+	// upstream i/notifications-grouped.ts も getNotifications の前に同じ 2 つの
+	// 早期 return を持つ (#2835)。
+	//
+	// **下の `len(all) > 0` では止まらない。** svc.List の exclude filter は
+	// `excludeSet[n.Type]` の一致しか見ないので、**notificationTypeList に無い
+	// type の行は excludeTypes 全指定でも生き残る**。mk-go は upstream に対応
+	// type が無い `pollVote` を今も produce する (core/notification/hooks.go) ので、
+	// その行が 1 件あるだけで `len(all) > 0` が成立し、既読化まで走ってしまう。
+	// upstream は早期 return するので `[]` が正。
+	if emptyByTypeFilter(req) {
+		return c.JSON(http.StatusOK, []any{})
+	}
+
 	// **drop 前の全列を受け取る** (#2739)。grouping は全列で行い、drop 済みは
 	// グループの中身から外す。drop 済みを列から抜いてから畳むと、挟まった通知が
 	// 区切りとして働かず両隣が 1 グループになる。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	corenote "github.com/shiroha-a/mk/internal/core/note"
@@ -1283,7 +1284,8 @@ func TestGrouped_EmptyPageDoesNotMarkAsRead(t *testing.T) {
 }
 
 // excludeTypes が実在する type を全て覆っても同じ (#2833)。こちらも svc.List に
-// 到達する経路で、upstream の refetch loop がストリームを掘り切って 0 件になる形。
+// 到達する経路で、in-app の type filter で全行が落ちて 0 件になる形
+// (mk-go の svc.List に refetch loop は無く、MaxPerUser=300 を 1 回取って絞る)。
 func TestGrouped_ExcludeAllTypesDoesNotMarkAsRead(t *testing.T) {
 	h, svc, userRepo, _ := groupedHandler(t)
 	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
@@ -1308,4 +1310,43 @@ func TestGrouped_ExcludeAllTypesDoesNotMarkAsRead(t *testing.T) {
 	readID, err := svc.LatestReadID(ctx, "alice")
 	require.NoError(t, err)
 	assert.Empty(t, readID, "excluding every present type must not advance the read marker")
+}
+
+// excludeTypes 全指定でも、**notificationTypeList に無い type の行は生き残る**
+// (#2835)。svc.List の exclude filter は `excludeSet[n.Type]` の一致しか見ない
+// ので、mk-go 独自の pollVote (upstream に対応 type が無く、今も produce される)
+// が 1 件あるだけで `len(all) > 0` が成立し、#2833 の guard をすり抜けて
+// 既読化まで走る。upstream は早期 return するので `[]` が正。
+//
+// **この 1 本が Grouped 側の早期 return を守る唯一のテスト。** これが無いと
+// 早期 return を丸ごと消す変異が全テストを素通りする (実測)。
+func TestGrouped_ExcludeAllTypesStopsNonEnumRows(t *testing.T) {
+	h, svc, userRepo, noteRepo := groupedHandler(t)
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", Visibility: "public",
+		User: &model.User{ID: "alice", Username: "alice"}}
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob",
+		Type: notification.TypePollVote, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	pub := &stubMainPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	body, err := json.Marshal(map[string]any{"excludeTypes": notificationTypeList})
+	require.NoError(t, err)
+	c, rec := newJSONRequest(t, "/api/i/notifications-grouped", string(body))
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Grouped(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	// wire 上 `[]` であること。null は misskey-js / misskey_dart が non-null で
+	// 受けるので通知ページごと落ちる。
+	assert.Equal(t, "[]", strings.TrimSpace(rec.Body.String()))
+
+	assert.NotContains(t, pub.types("alice"), "readAllNotifications")
+	readID, err := svc.LatestReadID(ctx, "alice")
+	require.NoError(t, err)
+	assert.Empty(t, readID, "non-enum rows must not sneak past the early return")
 }
