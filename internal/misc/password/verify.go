@@ -114,6 +114,10 @@ func Verify(ctx context.Context, stored, plain string) (Scheme, Outcome) {
 	if err != nil || len(salt) != 16 {
 		return SchemeArgon2id, OutcomeUnsupported
 	}
+	// **digest 長の検査は冗長だが残す** (#2850)。argon2.IDKey(..., 32) は必ず
+	// 32 byte を返し、ConstantTimeCompare は長さ違いで 0 を返すので、無くても
+	// 結果は変わらない = **テストで殺せない**。argon2 を回す前に弾く安価な
+	// 足切りとして、また「受理する形」を 1 箇所に集める意図で置いている。
 	want, err := base64.RawStdEncoding.Strict().DecodeString(parts[5])
 	if err != nil || len(want) != 32 {
 		return SchemeArgon2id, OutcomeUnsupported

@@ -78,6 +78,10 @@ func TestVerify_RejectsMalformedOrUnsupportedHashes(t *testing.T) {
 		{"bad salt base64", strings.Join([]string{"", parts[1], parts[2], parts[3], "***", parts[5]}, "$"), SchemeArgon2id},
 		{"short salt", shortSaltHash, SchemeArgon2id},
 		{"bad digest base64", strings.Join([]string{"", parts[1], parts[2], parts[3], parts[4], "***"}, "$"), SchemeArgon2id},
+		// **このケースは digest 長の検査を外しても通る** (ConstantTimeCompare が
+		// 長さ違いで 0 を返すため)。狙ったガードを殺せないことを承知で、受理する
+		// 形の一覧として残している (#2850)。対照的に "short salt" は短い salt で
+		// digest を作り直しているのでちゃんと殺せる。
 		{"short digest", strings.Join([]string{"", parts[1], parts[2], parts[3], parts[4], base64.RawStdEncoding.EncodeToString(make([]byte, 16))}, "$"), SchemeArgon2id},
 	}
 	for _, tt := range tests {
@@ -244,5 +248,43 @@ func TestScheme_String(t *testing.T) {
 		if got := tc.in.String(); got != tc.want {
 			t.Fatalf("Scheme(%d).String()=%q, want %q", tc.in, got, tc.want)
 		}
+	}
+}
+
+// base64 は **Strict** で読む (#2850)。
+//
+// 非 canonical な末尾 bit を含む base64 を通すと、同じ digest を指す表現が
+// 複数できる。実害は小さい (stored は DB 由来) が、明示的に書いてある制約なので
+// 変異で落ちる形にしておく。
+func TestVerify_RejectsNonCanonicalBase64(t *testing.T) {
+	valid := cherryPickFixture("hunter2")
+	parts := strings.Split(valid, "$")
+
+	// 末尾に非 canonical な bit を立てた salt / digest を作る。
+	nonCanonical := func(std string) string {
+		raw, err := base64.RawStdEncoding.DecodeString(std)
+		if err != nil {
+			t.Fatal(err)
+		}
+		enc := []byte(base64.RawStdEncoding.EncodeToString(raw))
+		// 最終文字を、同じ byte 列へ復号されるが canonical でない文字へ差し替える。
+		const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+		for _, c := range alphabet {
+			cand := string(append(append([]byte{}, enc[:len(enc)-1]...), byte(c)))
+			if cand == std {
+				continue
+			}
+			if got, err := base64.RawStdEncoding.DecodeString(cand); err == nil && string(got) == string(raw) {
+				return cand
+			}
+		}
+		t.Skip("この長さでは非 canonical 表現を作れない")
+		return ""
+	}
+
+	badSalt := nonCanonical(parts[4])
+	hash := strings.Join([]string{"", parts[1], parts[2], parts[3], badSalt, parts[5]}, "$")
+	if _, out := Verify(context.Background(), hash, "hunter2"); out != OutcomeUnsupported {
+		t.Fatalf("Verify(non-canonical salt)=%v, want %v", out, OutcomeUnsupported)
 	}
 }

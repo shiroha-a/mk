@@ -442,20 +442,30 @@ func (h *Handler) migratePendingPassword(c echo.Context, userID string) {
 	}
 	fresh, err := password.Hash(pending.plain)
 	if err != nil {
-		category := "hash_error"
 		if errors.Is(err, bcrypt.ErrPasswordTooLong) {
-			category = "password_too_long"
+			// **恒久保留。** bcrypt は 72 byte で切るので、移行すると password が
+			// 黙って弱くなる。この利用者はログインのたびにここへ来るので Warn だと
+			// ログを埋める。直せる異常ではないので Info に落とす (#2850)。
+			slog.Info("signin: Argon2 password migration permanently deferred",
+				"userId", userID, "category", "password_too_long")
+			return
 		}
-		slog.Warn("signin: Argon2 password migration skipped", "userId", userID, "category", category)
+		slog.Warn("signin: Argon2 password migration skipped",
+			"userId", userID, "category", "hash_error", "err", err)
 		return
 	}
 	updated, err := h.userRepo.UpdatePasswordIfCurrent(userID, pending.stored, fresh)
 	if err != nil {
-		slog.Warn("signin: Argon2 password migration skipped", "userId", userID, "category", "persistence_error")
+		// **err を落とさない** (#2850)。無いと DB 障害と制約違反の切り分けが
+		// できない。GORM の error に平文は乗らない。
+		slog.Warn("signin: Argon2 password migration skipped",
+			"userId", userID, "category", "persistence_error", "err", err)
 		return
 	}
 	if !updated {
-		slog.Warn("signin: Argon2 password migration skipped", "userId", userID, "category", "concurrent_update")
+		// 競合して負けただけで異常ではない。
+		slog.Info("signin: Argon2 password migration skipped",
+			"userId", userID, "category", "concurrent_update")
 	}
 }
 
@@ -681,8 +691,19 @@ func (h *Handler) maybeRehashPassword(userID, storedHash, plain string) {
 		slog.Warn("signin: failed to rehash password", "userId", userID, "err", err)
 		return
 	}
-	if err := h.userRepo.UpdateProfile(userID, map[string]any{"password": fresh}); err != nil {
+	// **CAS で書く** (#2850)。無条件の UpdateProfile だと、cost を上げた instance で
+	// 「ログイン (旧パスワードで検証成功)」と「別タブでパスワード変更」が競合した
+	// とき、rehash が**旧パスワードの hash** を書き戻して新しいパスワードが消える。
+	// #2842 が Argon2 移行のために UpdatePasswordIfCurrent を新設したのに、隣の
+	// 同種の書き込みだけ無防備なままだった。
+	updated, err := h.userRepo.UpdatePasswordIfCurrent(userID, storedHash, fresh)
+	if err != nil {
 		slog.Warn("signin: failed to store rehashed password", "userId", userID, "err", err)
+		return
+	}
+	if !updated {
+		// 競合して負けただけ。認証は済んでいるのでログインは成立させる。
+		slog.Info("signin: skipped password rehash (concurrent update)", "userId", userID)
 	}
 }
 

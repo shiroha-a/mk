@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"log/slog"
@@ -949,4 +950,73 @@ func TestSignin_VerifierBusyLogsReadableScheme(t *testing.T) {
 
 	assert.Contains(t, buf.String(), `"scheme":"argon2id"`)
 	assert.NotContains(t, buf.String(), `"scheme":2`)
+}
+
+// bcrypt cost の rehash も CAS で書く (#2850)。
+//
+// **無条件の UpdateProfile だと新しいパスワードを消す。** cost を上げた instance
+// で「ログイン (旧パスワードで検証成功)」と「別タブでパスワード変更」が競合した
+// とき、rehash が旧パスワードの hash を書き戻す。#2842 が Argon2 移行のために
+// CAS を新設したのに、隣の同種の書き込みだけ無防備だった。
+func TestSignin_RehashUsesCASAndDoesNotOverwriteNewPassword(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "admin", "pass123") // bcrypt.MinCost = 設定より弱い
+	stored := *repo.Profiles["u1"].Password
+
+	// **競合は CAS の呼び出し中に起こす。** 先に差し替えると Verify が落ちて
+	// signin 自体が 403 になり、rehash まで到達しない。
+	newer, err := password.Hash("brand-new")
+	require.NoError(t, err)
+	var gotCurrent string
+	repo.UpdatePasswordIfCurrentFn = func(userID, current, next string) (bool, error) {
+		gotCurrent = current
+		p := newer
+		repo.Profiles["u1"].Password = &p // 別経路が先に書き換えた
+		return false, nil                 // CAS 不成立
+	}
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// **観測した古い hash を条件にしていること。**
+	assert.Equal(t, stored, gotCurrent, "CAS の条件が観測済み hash になっていない")
+	// **新しいパスワードが生きていること。**
+	assert.NoError(t, bcrypt.CompareHashAndPassword(
+		[]byte(*repo.Profiles["u1"].Password), []byte("brand-new")),
+		"rehash が新しいパスワードを上書きした")
+}
+
+// 移行の永続化失敗は err をログに残す (#2850)。
+// 無いと DB 障害と制約違反の切り分けができない。
+func TestSignin_MigrationPersistenceErrorLogsErr(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("argon-pass"))
+	repo.UpdatePasswordIfCurrentFn = func(string, string, string) (bool, error) {
+		return false, errors.New("boom-db-failure")
+	}
+	buf := captureLogs(t)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"argon-pass"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	out := buf.String()
+	assert.Contains(t, out, `"category":"persistence_error"`)
+	assert.Contains(t, out, "boom-db-failure", "err がログに落ちている")
+}
+
+// rehash の永続化が失敗してもログインは成立させる (#2850)。
+// 認証は済んでいるので、hash の焼き直しに失敗しただけで締め出さない。
+func TestSignin_RehashPersistenceErrorDoesNotFailSignin(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUser(repo, "admin", "pass123") // bcrypt.MinCost = 設定より弱い
+	repo.UpdatePasswordIfCurrentFn = func(string, string, string) (bool, error) {
+		return false, errors.New("boom-rehash-store")
+	}
+	buf := captureLogs(t)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	assert.Contains(t, buf.String(), "failed to store rehashed password")
+	assert.Contains(t, buf.String(), "boom-rehash-store", "err がログに落ちている")
 }
