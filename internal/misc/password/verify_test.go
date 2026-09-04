@@ -22,11 +22,13 @@ func cherryPickFixture(plain string) string {
 
 func TestVerify_CherryPickArgon2id(t *testing.T) {
 	hash := cherryPickFixture("correct horse battery staple")
-	if scheme, ok := Verify(context.Background(), hash, "correct horse battery staple"); !ok || scheme != SchemeArgon2id {
-		t.Fatalf("Verify(correct)=(%v,%v), want (%v,true)", scheme, ok, SchemeArgon2id)
+	if scheme, out := Verify(context.Background(), hash, "correct horse battery staple"); out != OutcomeMatch || scheme != SchemeArgon2id {
+		t.Fatalf("Verify(correct)=(%v,%v), want (%v,%v)", scheme, out, SchemeArgon2id, OutcomeMatch)
 	}
-	if scheme, ok := Verify(context.Background(), hash, "wrong"); ok || scheme != SchemeArgon2id {
-		t.Fatalf("Verify(wrong)=(%v,%v), want (%v,false)", scheme, ok, SchemeArgon2id)
+	// **平文違いは Mismatch であって Unsupported ではない** (#2849)。ここを
+	// 取り違えると、日常的な打ち間違いが警告ログを埋める。
+	if scheme, out := Verify(context.Background(), hash, "wrong"); out != OutcomeMismatch || scheme != SchemeArgon2id {
+		t.Fatalf("Verify(wrong)=(%v,%v), want (%v,%v)", scheme, out, SchemeArgon2id, OutcomeMismatch)
 	}
 }
 
@@ -35,8 +37,16 @@ func TestVerify_Bcrypt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if scheme, ok := Verify(context.Background(), string(hash), "hunter2"); !ok || scheme != SchemeBcrypt {
-		t.Fatalf("Verify(bcrypt)=(%v,%v), want (%v,true)", scheme, ok, SchemeBcrypt)
+	if scheme, out := Verify(context.Background(), string(hash), "hunter2"); out != OutcomeMatch || scheme != SchemeBcrypt {
+		t.Fatalf("Verify(bcrypt)=(%v,%v), want (%v,%v)", scheme, out, SchemeBcrypt, OutcomeMatch)
+	}
+	if scheme, out := Verify(context.Background(), string(hash), "wrong"); out != OutcomeMismatch || scheme != SchemeBcrypt {
+		t.Fatalf("Verify(bcrypt wrong)=(%v,%v), want (%v,%v)", scheme, out, SchemeBcrypt, OutcomeMismatch)
+	}
+	// 壊れた bcrypt hash は「平文違い」ではなく**保存データの異常**なので
+	// Unsupported に倒す (#2849)。
+	if scheme, out := Verify(context.Background(), "$2a$broken", "hunter2"); out != OutcomeUnsupported || scheme != SchemeBcrypt {
+		t.Fatalf("Verify(bcrypt broken)=(%v,%v), want (%v,%v)", scheme, out, SchemeBcrypt, OutcomeUnsupported)
 	}
 }
 
@@ -72,9 +82,11 @@ func TestVerify_RejectsMalformedOrUnsupportedHashes(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheme, ok := Verify(context.Background(), tt.hash, "hunter2")
-			if ok || scheme != tt.scheme {
-				t.Fatalf("Verify=(%v,%v), want (%v,false)", scheme, ok, tt.scheme)
+			// **Unsupported であることまで見る。** 単に「false」だと平文違いと
+			// 区別が付かず、呼び出し側が warn を出す判断ができない (#2849)。
+			scheme, out := Verify(context.Background(), tt.hash, "hunter2")
+			if out != OutcomeUnsupported || scheme != tt.scheme {
+				t.Fatalf("Verify=(%v,%v), want (%v,%v)", scheme, out, tt.scheme, OutcomeUnsupported)
 			}
 		})
 	}
@@ -90,7 +102,63 @@ func TestVerify_Argon2idHonorsContextWhileWaitingForSlot(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
 	defer cancel()
-	if scheme, ok := Verify(ctx, hash, "hunter2"); ok || scheme != SchemeArgon2id {
-		t.Fatalf("Verify(canceled)=(%v,%v), want (%v,false)", scheme, ok, SchemeArgon2id)
+	// **Unavailable であることまで見る。** Mismatch に倒すと呼び出し側が 403 を
+	// 返してしまい、正しいパスワードの利用者に不要な reset をさせる (#2849)。
+	if scheme, out := Verify(ctx, hash, "hunter2"); out != OutcomeUnavailable || scheme != SchemeArgon2id {
+		t.Fatalf("Verify(canceled)=(%v,%v), want (%v,%v)", scheme, out, SchemeArgon2id, OutcomeUnavailable)
+	}
+}
+
+// ProfileForLog は診断に要る version / parameter だけを返し、**salt と digest を
+// 返さない** (#2849)。ここが漏れると、未対応 profile の警告を出すたびに hash 本体が
+// ログへ流れる。
+func TestProfileForLog_OmitsSaltAndDigest(t *testing.T) {
+	hash := cherryPickFixture("hunter2")
+	parts := strings.Split(hash, "$")
+	got := ProfileForLog(hash)
+
+	if got != "argon2id v=19 m=65536,t=3,p=4" {
+		t.Fatalf("ProfileForLog(argon2id)=%q", got)
+	}
+	if strings.Contains(got, parts[4]) {
+		t.Fatal("salt がログ用文字列に含まれている")
+	}
+	if strings.Contains(got, parts[5]) {
+		t.Fatal("digest がログ用文字列に含まれている")
+	}
+
+	bc, err := bcrypt.GenerateFromPassword([]byte("hunter2"), bcrypt.MinCost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ProfileForLog(string(bc)); got != "bcrypt" {
+		t.Fatalf("ProfileForLog(bcrypt)=%q", got)
+	}
+	if strings.Contains(ProfileForLog(string(bc)), string(bc)[7:]) {
+		t.Fatal("bcrypt hash がログ用文字列に含まれている")
+	}
+	if got := ProfileForLog("$scrypt$bad"); got != "unrecognized" {
+		t.Fatalf("ProfileForLog(unknown)=%q", got)
+	}
+}
+
+// OK は OutcomeMatch だけを真にする (#2849)。
+//
+// **ここが緩むと認証が破れる。** 例えば OutcomeUnavailable を OK に含めると、
+// 検証枠を取れなかっただけのリクエストがログイン成功になる。呼び出し側は
+// `outcome.OK()` を素通しで passwordOK に使うので、この 1 関数が最後の砦。
+func TestOutcome_OKOnlyForMatch(t *testing.T) {
+	for _, tc := range []struct {
+		out  Outcome
+		want bool
+	}{
+		{OutcomeMatch, true},
+		{OutcomeMismatch, false},
+		{OutcomeUnsupported, false},
+		{OutcomeUnavailable, false},
+	} {
+		if got := tc.out.OK(); got != tc.want {
+			t.Fatalf("Outcome(%v).OK()=%v, want %v", tc.out, got, tc.want)
+		}
 	}
 }

@@ -1,6 +1,7 @@
 package signin_test
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -45,6 +46,24 @@ func newTestHandler(t *testing.T) (*signin.Handler, *testutil.MockUserRepository
 func doPost(h func(echo.Context) error, body string) *httptest.ResponseRecorder {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/api/signin", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	_ = h(c)
+	return rec
+}
+
+// doPostCanceled は**キャンセル済みの request context** で叩く。
+//
+// Argon2id の検証枠を取れなかった経路 (OutcomeUnavailable) を再現するのに使う。
+// セマフォを実際に占有する手段だと production 側にテスト専用の export が要り、
+// しかも acquire timeout 分 (3 秒) 待つことになる。`Acquire` は ctx が死んで
+// いれば即座に失敗するので、同じ分岐を待ち時間ゼロで踏める。
+func doPostCanceled(h func(echo.Context) error, body string) *httptest.ResponseRecorder {
+	e := echo.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/signin", strings.NewReader(body)).WithContext(ctx)
 	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
 	rec := httptest.NewRecorder()
 	c := e.NewContext(req, rec)
@@ -764,4 +783,39 @@ func TestSignin_DoesNotRehashWhenAlreadyStrong(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 
 	assert.Equal(t, strong, *repo.Profiles["u1"].Password, "同じ強度なのに焼き直している")
+}
+
+// 検証枠を取れなかったときは 403 ではなく 503 を返す (#2849)。
+//
+// **403 に潰さないのが要点。** 枠を取れなかっただけで password は正しいかも
+// しれないのに「間違っています」と伝えると、利用者が不要な reset に進み、
+// signin の rate limit (1h/10) も食い潰して 1 時間ログインできなくなる。
+func TestSignin_VerifierBusyReturns503(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+
+	rec := doPostCanceled(h.Signin, `{"username":"admin","password":"pass123"}`)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+}
+
+// 同じく signin-flow でも 503 になる。
+func TestSigninFlow_VerifierBusyReturns503(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
+
+	rec := doPostCanceled(h.SigninFlow, `{"username":"admin","password":"pass123"}`)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+}
+
+// 未対応 profile は従来どおり 403 のまま。**503 に倒さない** — データの異常で
+// あって一時的な負荷ではないので、再試行しても直らない (#2849)。
+func TestSignin_UnsupportedProfileStays403(t *testing.T) {
+	h, repo := newTestHandler(t)
+	createTestUserWithStoredPassword(repo, "admin", "$argon2id$v=19$m=4096,t=3,p=1$YWJjZGVmZ2hpamtsbW5vcA$YWJjZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXoxMjM0NTY")
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"pass123"}`)
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Header().Get("Retry-After"))
 }

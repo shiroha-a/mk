@@ -41,6 +41,23 @@ func newExtraHandler(t *testing.T) (*Handler, *testutil.MockUserRepository) {
 	return h, userRepo
 }
 
+// postExtraCanceled は**キャンセル済みの request context** で叩く。
+// Argon2id の検証枠を取れなかった経路 (OutcomeUnavailable) を待ち時間ゼロで再現する。
+func postExtraCanceled(h func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
+	e := echo.New()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)).WithContext(ctx)
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	if user != nil {
+		c.Set(string(middleware.UserContextKey), user)
+	}
+	_ = h(c)
+	return rec
+}
+
 func postExtra(h func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
 	e := echo.New()
 	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
@@ -716,4 +733,17 @@ func TestDeleteAccount_ProtectedSystemRejected(t *testing.T) {
 	rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.False(t, repo.Users["u1"].IsDeleted)
+}
+
+// change-password でも枠を取れなければ 503 を返す (#2849)。**400 に潰さない** —
+// 現パスワードは正しいかもしれない。
+func TestChangePassword_VerifierBusyReturns503(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithArgon2Password(repo, "u1", "oldpass")
+
+	rec := postExtraCanceled(h.ChangePassword, `{"currentPassword":"oldpass","newPassword":"newpass"}`, user)
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	assert.NotEmpty(t, rec.Header().Get("Retry-After"))
+	// **hash は書き換わっていないこと。**
+	assert.True(t, strings.HasPrefix(*repo.Profiles["u1"].Password, "$argon2id$"))
 }

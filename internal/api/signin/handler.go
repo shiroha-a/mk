@@ -186,7 +186,10 @@ func (h *Handler) Signin(c echo.Context) error {
 	}
 
 	storedPassword := *profile.Password
-	scheme, passwordOK := password.Verify(c.Request().Context(), storedPassword, *req.Password)
+	scheme, passwordOK, resp := h.verifyPassword(c, storedPassword, *req.Password)
+	if resp != nil {
+		return resp
+	}
 	setPendingPasswordMigration(c, scheme, passwordOK, storedPassword, *req.Password)
 	if !passwordOK {
 		return h.fail(c, user, http.StatusForbidden, "932c904e-9460-45b7-9ce6-7ed33be7eb2c")
@@ -290,7 +293,10 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	}
 
 	storedPassword := *profile.Password
-	scheme, passwordOK := password.Verify(c.Request().Context(), storedPassword, *req.Password)
+	scheme, passwordOK, resp := h.verifyPassword(c, storedPassword, *req.Password)
+	if resp != nil {
+		return resp
+	}
 	setPendingPasswordMigration(c, scheme, passwordOK, storedPassword, *req.Password)
 	if passwordOK && scheme == password.SchemeBcrypt {
 		h.maybeRehashPassword(user.ID, storedPassword, *req.Password)
@@ -568,6 +574,32 @@ func (h *Handler) recordSignin(userID, ip string, headers http.Header, success b
 // 不一致 / 2FA 失敗 / passkey passwordless 無効 等の認証失敗で signins に
 // success:false を insert してから error を返す (#1776)。user/signinRepo 未配線時は
 // 記録を skip して error だけ返す (= 旧挙動の superset、test fixture を壊さない)。
+// verifyPassword wraps password.Verify and turns the two non-mismatch failures
+// into a response the operator and the user can act on (#2849).
+//
+// 返り値の error が非 nil ならそれをそのまま返すこと。**403 に潰さない** —
+// 枠を取れなかっただけの正しいパスワードを「間違っています」と伝えると、
+// 利用者が不要な reset に進み、signin の rate limit も食い潰す。
+func (h *Handler) verifyPassword(c echo.Context, stored, plain string) (password.Scheme, bool, error) {
+	scheme, outcome := password.Verify(c.Request().Context(), stored, plain)
+	switch outcome {
+	case password.OutcomeUnavailable:
+		// **Retry-After は acquire timeout と同じオーダーにする。** すぐ再試行
+		// されると枠の奪い合いが続く。
+		slog.Warn("signin: password verification unavailable",
+			"path", c.Path(), "scheme", scheme)
+		c.Response().Header().Set("Retry-After", "5")
+		return scheme, false, c.JSON(http.StatusServiceUnavailable,
+			errBody("d5826d14-3982-4d2e-8011-b9e9f02499ef"))
+	case password.OutcomeUnsupported:
+		// **profile だけ出す。** salt / digest は診断に不要 (ProfileForLog)。
+		// これが出続けるなら移行元が想定と違う argon2 実装を使っている。
+		slog.Warn("signin: unsupported password hash",
+			"path", c.Path(), "profile", password.ProfileForLog(stored))
+	}
+	return scheme, outcome.OK(), nil
+}
+
 func (h *Handler) fail(c echo.Context, user *model.User, status int, errID string) error {
 	if user != nil && h.signinRepo != nil && h.idGen != nil {
 		hdrs := c.Request().Header.Clone()

@@ -58,7 +58,23 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	// upstream Misskey TS は raw `throw new Error('authentication failed')` を
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
 	// に揃える (旧 mk-go は 403 を返していた)。
-	if _, ok := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword); !ok {
+	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
+	switch outcome {
+	case password.OutcomeUnavailable:
+		// 枠を取れなかっただけで現パスワードは正しいかもしれない。**400 に
+		// 潰さない** (#2849)。
+		slog.Warn("change-password: password verification unavailable",
+			"userId", u.ID, "scheme", scheme)
+		c.Response().Header().Set("Retry-After", "5")
+		return c.JSON(http.StatusServiceUnavailable,
+			apierr.Error("SERVICE_UNAVAILABLE", "Password verification is temporarily unavailable.",
+				"d5826d14-3982-4d2e-8011-b9e9f02499ef"))
+	case password.OutcomeUnsupported:
+		// **profile だけ出す。** salt / digest は診断に不要。
+		slog.Warn("change-password: unsupported password hash",
+			"userId", u.ID, "profile", password.ProfileForLog(*profile.Password))
+	}
+	if !outcome.OK() {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
 
