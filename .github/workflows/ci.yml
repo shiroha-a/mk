@@ -485,6 +485,21 @@ jobs:
         working-directory: third_party/misskey/packages/frontend
         run: pnpm eslint
 
+      # fork frontend の vitest (#2844)。**どの workflow でも実行されていなかった。**
+      # spec は 20 本あるが ci.yml にも他の workflow にも実行箇所が無く、
+      # dropin-frontend-e2e は cypress で別物。
+      #
+      # #2831 で実際に効いた: frontend の修正 (WebSocket 再接続時の未読件数の
+      # 再同期) は in-flight 重複排除 / スロットル / 世代カウンタの 3 つのガードが
+      # 相互作用する実装なのに、敵対的レビューの「テストがゼロ」という指摘に対して
+      # **テスト基盤が無いこと**を理由に見送っている。
+      #
+      # 依存インストールと workspace ビルドは上の step で済んでいるので、追加
+      # コストは vitest の実行時間だけ。手元の再現は `make frontend-test`。
+      - name: Unit test (vitest)
+        working-directory: third_party/misskey/packages/frontend
+        run: pnpm test
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:

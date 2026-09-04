@@ -46,6 +46,13 @@ frontend-check: ## fork の frontend を型チェック (vue-tsc --noEmit のみ
 	# 型を見るだけならこちらで済む (Docker 不要、出力物も作らない)。
 	cd third_party/misskey/packages/frontend && npx vue-tsc --noEmit
 
+.PHONY: frontend-test
+frontend-test: ## fork の frontend の vitest を実行
+	# upstream の `pnpm --filter frontend test` と同じ。CI は frontend-check job で
+	# 回す (#2844)。workspace package の生成物が要るので、初回や submodule bump 後は
+	# 先に `cd third_party/misskey && pnpm install && pnpm build-pre && pnpm -r build`。
+	cd third_party/misskey/packages/frontend && npx vitest --run --globals --config vitest.config.unit.ts
+
 diff-check: ## 差分比較ハーネスを作り直して実行 (クリーン DB 前提)
 	$(MAKE) diff-down
 	$(MAKE) diff-up
