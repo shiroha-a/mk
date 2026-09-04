@@ -34,7 +34,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 32 tag (`-mk.0` ～ `-mk.22i`) | — | — |
+| fork frontend の独自変更 | 33 tag (`-mk.0` ～ `-mk.22j`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -378,6 +378,7 @@ submodule bump の PR で人が見る。
 | `2026.7.0-mk.22g` | 承認制と招待制を重ねたときの説明を実装に合わせる (#2813)。「承認は内部で招待を発行して通すので二重のゲートに意味が無い」と書いていたが、発行するのはメール確認の経路だけになった。実際に起きるのは**登録手段がゼロになる**こと (承認制の入口は `disableRegistration` で 503、`/api/signup` は承認制で 403) |
 | `2026.7.0-mk.22h` | WebSocket 接続時に未読通知の件数をサーバー値へ揃える (#2831)。通知バッジの件数は**サーバーが持っておらず**、`unreadNotification` (+1) と `readAllNotifications` (0) の差分イベントだけで同期している。pub/sub なので切断中に発行された分は再送されない。`readAllNotifications` を取りこぼすとサーバー側の既読位置だけが先に進み、暗黙既読 (通知一覧の取得 / WebSocket の `readNotification`) からは「既読位置が動いたとき」という発行条件を満たさなくなるため、**次の通知を受け取って読むまで**バッジが残り続ける (恒久的に固まるわけではない)。`serverDisconnectedBehavior` の既定は `quiet` なので、切断しても何も起きずそのまま stale な `$i` で走り続ける。**`$i` を丸ごと取り直す `refreshCurrentAccount()` は使わない** — 取得に失敗するとサインアウトして localStorage ごと消す経路を持ち (`fetchAccount` が 4xx の error 応答を全て `isAccountDeleted` に倒す)、サーバー再起動の直後は一時的な認証失敗が起こりうるうえ再接続は全タブ全ユーザーで同時に走るため、巻き添えでサインアウトさせうる。未読の 2 フィールドだけを部分適用し、失敗はダイアログにもサインアウトにも倒さない。飛行中に差分イベントが来たら世代カウンタで応答を捨て、in-flight の重複排除 + 30 秒スロットル + 最大 10 秒のジッタを掛ける。**失敗したときは抑止を 5 秒まで巻き戻す** — 再接続はほぼ即時 (`minReconnectionDelay` は 1ms) なので、素の 30 秒だと「起動途中のサーバーに繋がって `/api/i` が 502 → 直後に再接続」で抑止され、そのタブが以降ずっと stale になる。初回接続はブート時の `refreshCurrentAccount` と重複するのでスロットルで抑止する (`_disconnected_` は state が `connected` になった後の close でしか出ないので、一度も繋がらないまま復帰した場合に判別材料にならない)。**これは upstream Misskey にも同じ形で存在する不具合**で、この tag は例外的に「純正へ還元できるもの」を置いている (純正への PR は別途)。backend 側の復帰手段 (`mark-all-as-read` の force) は mk-go 本体で直した |
 | `2026.7.0-mk.22i` | `meUpdated` は未読を載せるときだけ世代を上げる (#2831)。`-mk.22h` の resync は「飛行中に未読を書くイベントが来たら応答を捨てる」ために世代カウンタを持つが、**`meUpdated` は未読を載せる producer と載せない producer が混在する**。mk-go では 2FA 系だけが `meDetailedWithUnread` で実値を載せ、プロフィール更新 / pin の経路は `PackUserDetailed` (= `UserDetailed`) を送るのでキー自体が無い (未読 2 フィールドは `MeDetailed` 側の宣言)。部分 merge の `publishMeUpdatedPartial` も指定 field しか持たない。載っていないのに世代を上げると、飛行中の応答が捨てられたうえで**誰も正しい値を書かない**ので、バッジが stale のまま次の再接続まで残る = 直しに来た症状そのものになる。`-mk.22h` と同じく純正へ還元できる行にあたる |
+| `2026.7.0-mk.22j` | type-only import を top-level 形式に直す (#2843)。eslint の `import/consistent-type-specifier-style` 違反が mk-go 独自ファイル 2 つ (`plugin-api.ts` / `MkPluginSlot.vue`) に 4 箇所 commit 済みで残っていた。**fork frontend の eslint が CI で一度も実行されていなかった**ため誰も気付いていなかったもので、同 issue で `frontend-check` job に足す前提として直す。upstream 由来のファイルに違反は無い。`-mk.22h` / `-mk.22i` と同じく純正へ還元できる行にあたる |
 
 `2026.7.0-mk.1` の内訳:
 

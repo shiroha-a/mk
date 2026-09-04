@@ -433,6 +433,24 @@ jobs:
       - name: Type check (vue-tsc)
         run: make frontend-check
 
+      # fork frontend の eslint (#2843)。**型だけでは足りない。** 1.0 以降
+      # fork frontend は mk-go 独自に進化させる方針で、独自コードは増え続ける
+      # (docs/divergence.md §4-2)。型は vue-tsc が見るが、それ以外の規約違反は
+      # 誰も見ていなかった。実際 mk-go 独自ファイル 2 つに commit 済みの
+      # 違反が 4 箇所残っていた (2026.7.0-mk.22j で修正)。
+      #
+      # upstream AGENTS.md も「変更を出す前の最低チェック」に pnpm lint
+      # (typecheck + eslint) を挙げている。範囲はその `pnpm eslint` と同じ
+      # `src/**/*.{ts,vue}` にする — **`eslint .` にしないこと**。upstream が
+      # lint していない test/ まで拾い、追従のたびに他人の負債で落ちる
+      # (実測で test/ 込みだと 115 件)。
+      #
+      # 依存インストールと workspace ビルドは上の step で済んでいるので、
+      # 追加コストは eslint の実行時間だけ。
+      - name: Lint (eslint)
+        working-directory: third_party/misskey/packages/frontend
+        run: pnpm eslint
+
   vulncheck:
     runs-on: ubuntu-latest
     steps:
