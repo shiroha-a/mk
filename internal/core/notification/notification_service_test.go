@@ -900,8 +900,13 @@ func TestToXAddID_NoOverflowFarFuture(t *testing.T) {
 // 同じユーザーで同時に走る。
 type advanceMarkerOnXRevRange struct {
 	client *redis.Client
-	readTo string
-	fired  bool
+	// readKey は Service.readKey から取る。**リテラルで書かない** — 鍵の形が
+	// 変わると誰も読まない鍵へ書くことになり、Get が Redis Nil を返して
+	// hadUnread が true に倒れ、**どちらの順序でもテストが通る** (#2777 と同型の
+	// regression guard 空振り)。
+	readKey string
+	readTo  string
+	fired   bool
 }
 
 func (h *advanceMarkerOnXRevRange) DialHook(next redis.DialHook) redis.DialHook { return next }
@@ -914,7 +919,7 @@ func (h *advanceMarkerOnXRevRange) ProcessHook(next redis.ProcessHook) redis.Pro
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		if !h.fired && cmd.Name() == "xrevrange" {
 			h.fired = true
-			h.client.Set(ctx, "latestReadNotification:alice", h.readTo, 0)
+			h.client.Set(ctx, h.readKey, h.readTo, 0)
 		}
 		return next(ctx, cmd)
 	}
@@ -944,11 +949,15 @@ func TestService_MarkAllAsRead_ReadsMarkerBeforeStream(t *testing.T) {
 	require.NotNil(t, first)
 
 	// 並走側が既読にする位置 = ストリームの最新。
-	newest, err := testRedis.Client.XRevRangeN(ctx, "notificationTimeline:alice", "+", "-", 1).Result()
+	newest, err := testRedis.Client.XRevRangeN(ctx, seed.streamKey("alice"), "+", "-", 1).Result()
 	require.NoError(t, err)
 	require.Len(t, newest, 1)
 
-	hooked.AddHook(&advanceMarkerOnXRevRange{client: testRedis.Client, readTo: newest[0].ID})
+	hooked.AddHook(&advanceMarkerOnXRevRange{
+		client:  testRedis.Client,
+		readKey: seed.readKey("alice"),
+		readTo:  newest[0].ID,
+	})
 
 	svc := NewService(hooked, idGen, "")
 	svc.SetUnreadPublishDelay(0)
