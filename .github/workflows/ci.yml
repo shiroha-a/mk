@@ -19,6 +19,40 @@ jobs:
       - name: Build
         run: go build ./...
 
+      # submodule の pointer が fork へ push 済みかを見る (#2845)。
+      #
+      # **required check で submodule を取っているものが 1 つも無い。** ci.yml で
+      # `submodules: recursive` を指定しているのは frontend-check だけで、build /
+      # test-shards / lint はいずれも取らない。submodule を取る他の workflow
+      # (diff-e2e / playwright / upstream-backend-e2e / dropin-e2e / docker) も全て
+      # 非 required。したがって pointer が未 push の SHA を指していても **required は
+      # 全部緑のままマージでき**、develop に誰も解決できない pointer が載る。復旧は
+      # その commit を持っている本人にしかできない。
+      #
+      # **`git ls-remote | grep` は使えない。** ls-remote が列挙するのは ref の
+      # 先端だけなので、push 済みブランチの祖先 commit を取りこぼして誤検知する。
+      # GitHub は SHA 指定の fetch を許可しているので、1 commit だけ shallow に
+      # 取れるかで判定する (実測 1.8 秒 / 13 MB。未 push は
+      # `upload-pack: not our ref` で exit 128)。
+      #
+      # 同 job の checkout は submodule を取らないが、gitlink の SHA は
+      # `git ls-tree` で読めるので追加の取得は要らない。
+      - name: Check submodule commit is pushed
+        run: |
+          set -euo pipefail
+          path=third_party/misskey
+          sha=$(git ls-tree HEAD "$path" | awk '{print $3}')
+          if [ -z "$sha" ]; then
+            echo "::error::$path の gitlink を読めませんでした。submodule の構成が変わったならこの step も直してください"
+            exit 1
+          fi
+          url=$(git config -f .gitmodules --get "submodule.$path.url")
+          echo "$path -> $sha ($url)"
+          if ! git fetch --depth=1 -q "$url" "$sha"; then
+            echo "::error::submodule の commit $sha が $url に存在しません。fork へ先に push してください (git -C $path push origin <branch>)"
+            exit 1
+          fi
+
       # 同梱サンプルは **既定無効** (#2495)。clone しただけの運営者のバイナリ・
       # フロント・DB に勝手に入らないようにするため。有効なままだと、設定して
       # いなくても plugin_wiring.go が Routes / Jobs の登録より先に専用 schema を
