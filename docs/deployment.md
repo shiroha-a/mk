@@ -226,8 +226,11 @@ curl -i http://localhost/
 
 ## コンテナログの上限
 
-配布する compose 3 つは、全サービスに **50 MiB × 3 世代**の上限を掛けている
-(`x-logging` アンカー)。1 サービスあたり最大 150 MiB。
+配布する compose 3 つは、全サービスに **50 MB × 3 世代**の上限を掛けている
+(`x-logging` アンカー)。1 サービスあたり最大 150 MB。
+
+**`max-size` は decimal で読まれる。** json-file は `units.FromHumanSize` を使うので
+`50m` は 50,000,000 バイト (= 47.7 MiB)。`50mib` と書いても同じで、MiB は表現できない。
 
 **Docker 既定の `json-file` はローテーションしない。** 指定しないとコンテナが
 動いているあいだログが増え続け、ディスクを埋める。
@@ -242,8 +245,16 @@ docker inspect <コンテナ名> --format '{{.HostConfig.LogConfig.Config}}'
 **既存のコンテナには効かない。** ログの設定はコンテナ生成時に固定されるので、
 `docker compose up -d` で作り直すまで反映されない。上限を変えるときも同じ。
 
+**この設定を初めて取り込む `up -d` は全サービスを作り直す。** 全部に同時に入る
+ので config hash が全部変わる — DB も一度止まるので、通常のアップデートのつもりで
+実行しないこと。
+
 値を変えるなら compose の `x-logging` を書き換える。ホスト全体に掛けたいなら
 `/etc/docker/daemon.json` の `log-opts` でもよいが、**compose 側の指定が優先される**。
+
+**anchor はファイルローカル。** `-f` で override ファイルを重ねる運用をしている
+場合、override 側で `*default-logging` は参照できない (`unknown anchor` で起動
+できない)。override 側には値を直接書くこと。
 
 ## バイナリ直接実行
 

@@ -78,6 +78,22 @@ MK_IMAGE=ghcr.io/shiroha-a/mk:1.1.1-bundled docker compose up -d
 利用できるタグは [GHCR のページ](https://github.com/shiroha-a/mk/pkgs/container/mk)
 で確認できる。
 
+## ログの上限
+
+`docker-compose.yml` は全サービスに **50 MB x 3 世代**の上限を掛けている
+(`x-logging` アンカー)。Docker 既定の `json-file` はローテーションしないので、
+指定しないとログが増え続けてディスクを埋める。
+
+```bash
+docker inspect <コンテナ名> --format '{{.HostConfig.LogConfig.Config}}'
+# → map[max-file:3 max-size:50m]   効いている
+# → map[]                          効いていない (作り直しが要る)
+```
+
+**既存のコンテナには効かない。** ログの設定は生成時に固定されるので、
+`docker compose up -d` で作り直すまで反映されない。**この設定を初めて取り込む
+`up -d` は 4 サービス全部を作り直す**ので、DB も一度止まる。
+
 ## 撤去
 
 ```bash

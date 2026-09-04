@@ -117,12 +117,14 @@ docker compose -f compose.uds.yaml logs -f nginx
 
 ### ログの上限
 
-`compose.uds.yaml.example` は全サービスに **50 MiB × 3 世代**の上限を掛けている
+`compose.uds.yaml.example` は全サービスに **50 MB × 3 世代**の上限を掛けている
 (`x-logging` アンカー)。Docker 既定の `json-file` はローテーションしないので、
-指定しないとディスクが埋まる。
+指定しないとディスクが埋まる。`max-size` は decimal で読まれるので `50m` は
+50,000,000 バイト (= 47.7 MiB)。
 
 **既存のコンテナには効かない。** ログの設定は生成時に固定されるので、
-`docker compose -f compose.uds.yaml up -d` で作り直すまで反映されない。
+`make uds-up` で作り直すまで反映されない。**この設定を初めて取り込む起動は
+4 サービス全部を作り直す**ので、postgres も一度止まる。
 
 ```sh
 docker inspect mk-mkgo-1 --format '{{.HostConfig.LogConfig.Config}}'

@@ -8,6 +8,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// 配布する compose が全サービスに掛ける上限。
+//
+// **`max-size` は decimal で読まれる** (json-file は units.FromHumanSize を使う)
+// ので、`50m` は 50,000,000 バイト = 47.7 MiB。`50mib` と書いても同じ扱い。
+const (
+	wantMaxSize = "50m"
+	wantMaxFile = "3"
+)
+
 // 配布する compose の全サービスにログの上限があること (#2828)。
 //
 // **既定の json-file はローテーションしない。** 指定を忘れたサービスが 1 つでも
@@ -16,6 +25,13 @@ import (
 //
 // **サービスを足したときが危ない。** anchor (`*default-logging`) を書き忘れても
 // compose は通るし、起動もするので、埋まるまで気付けない。
+//
+// **コメントアウトされたサービスは見えない** (YAML パーサはコメントを読まない)。
+// 既定無効のテンプレート (video-thumb) にも `#  logging: *default-logging` を
+// 書いてあるが、それが正しいかはこの gate では担保できない。
+//
+// **一覧は手で持つ。** root には検証用の compose が 8 つあるので `git ls-files`
+// の列挙が使えない。配布物を足したらここにも足すこと。
 func TestComposeServicesHaveLogLimits(t *testing.T) {
 	root := repoRoot(t)
 	for _, name := range []string{
@@ -51,12 +67,14 @@ func TestComposeServicesHaveLogLimits(t *testing.T) {
 						"`logging: *default-logging` を足すこと (#2828)", name, svc)
 					continue
 				}
-				if def.Logging.Options["max-size"] == "" {
-					t.Errorf("%s の service %q に max-size が無い。"+
-						"json-file はローテーションしないので、上限が要る", name, svc)
+				// **値そのものを見る。** 「空でない」だけだと `max-size: 50g` の
+				// ような「上限を書いたのに実質無制限」を通してしまう。
+				if got := def.Logging.Options["max-size"]; got != wantMaxSize {
+					t.Errorf("%s の service %q の max-size が %q (期待 %q)。"+
+						"揃えないと 1 サービスだけがディスクを埋める", name, svc, got, wantMaxSize)
 				}
-				if def.Logging.Options["max-file"] == "" {
-					t.Errorf("%s の service %q に max-file が無い", name, svc)
+				if got := def.Logging.Options["max-file"]; got != wantMaxFile {
+					t.Errorf("%s の service %q の max-file が %q (期待 %q)", name, svc, got, wantMaxFile)
 				}
 			}
 		})
