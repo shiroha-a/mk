@@ -78,10 +78,10 @@ func TestVerify_RejectsMalformedOrUnsupportedHashes(t *testing.T) {
 		{"bad salt base64", strings.Join([]string{"", parts[1], parts[2], parts[3], "***", parts[5]}, "$"), SchemeArgon2id},
 		{"short salt", shortSaltHash, SchemeArgon2id},
 		{"bad digest base64", strings.Join([]string{"", parts[1], parts[2], parts[3], parts[4], "***"}, "$"), SchemeArgon2id},
-		// **このケースは digest 長の検査を外しても通る** (ConstantTimeCompare が
-		// 長さ違いで 0 を返すため)。狙ったガードを殺せないことを承知で、受理する
-		// 形の一覧として残している (#2850)。対照的に "short salt" は短い salt で
-		// digest を作り直しているのでちゃんと殺せる。
+		// **Unsupported と Mismatch の区別を固定している。** digest 長の検査を
+		// 外すと Mismatch になり、呼び出し側の warn が消える (#2849 が足した
+		// 唯一の手掛かり)。ConstantTimeCompare が長さ違いで 0 を返すので
+		// 「一致しない」結果は同じだが、Outcome は同じではない (#2850)。
 		{"short digest", strings.Join([]string{"", parts[1], parts[2], parts[3], parts[4], base64.RawStdEncoding.EncodeToString(make([]byte, 16))}, "$"), SchemeArgon2id},
 	}
 	for _, tt := range tests {
@@ -278,13 +278,23 @@ func TestVerify_RejectsNonCanonicalBase64(t *testing.T) {
 				return cand
 			}
 		}
-		t.Skip("この長さでは非 canonical 表現を作れない")
+		// **Skip にしない。** skip は go test を ok のまま通すので、
+		// .Strict() を見る唯一のテストが黙って消える。
+		t.Fatalf("非 canonical 表現を作れない (len=%d)", len(raw))
 		return ""
 	}
 
+	// **salt と digest の両方を見る。** 片方だけだと、もう片方の .Strict() を
+	// 外す変異が素通りする (実測)。
 	badSalt := nonCanonical(parts[4])
-	hash := strings.Join([]string{"", parts[1], parts[2], parts[3], badSalt, parts[5]}, "$")
-	if _, out := Verify(context.Background(), hash, "hunter2"); out != OutcomeUnsupported {
+	saltHash := strings.Join([]string{"", parts[1], parts[2], parts[3], badSalt, parts[5]}, "$")
+	if _, out := Verify(context.Background(), saltHash, "hunter2"); out != OutcomeUnsupported {
 		t.Fatalf("Verify(non-canonical salt)=%v, want %v", out, OutcomeUnsupported)
+	}
+
+	badDigest := nonCanonical(parts[5])
+	digestHash := strings.Join([]string{"", parts[1], parts[2], parts[3], parts[4], badDigest}, "$")
+	if _, out := Verify(context.Background(), digestHash, "hunter2"); out != OutcomeUnsupported {
+		t.Fatalf("Verify(non-canonical digest)=%v, want %v", out, OutcomeUnsupported)
 	}
 }

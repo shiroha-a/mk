@@ -1020,3 +1020,25 @@ func TestSignin_RehashPersistenceErrorDoesNotFailSignin(t *testing.T) {
 	assert.Contains(t, buf.String(), "failed to store rehashed password")
 	assert.Contains(t, buf.String(), "boom-rehash-store", "err がログに落ちている")
 }
+
+// 72 byte 超は**恒久保留**として Info で記録する (#2850)。
+//
+// hash_error と同じ Warn に混ぜると、該当利用者がログインするたびに warn が
+// 出てログを埋める。直せる異常ではないので分類を分けている。
+func TestSignin_PasswordTooLongLogsPermanentDeferral(t *testing.T) {
+	h, repo := newTestHandler(t)
+	long := strings.Repeat("a", 80) // bcrypt は 72 byte で ErrPasswordTooLong
+	createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture(long))
+	buf := captureLogs(t)
+
+	rec := doPost(h.Signin, `{"username":"admin","password":"`+long+`"}`)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	out := buf.String()
+	assert.Contains(t, out, `"category":"password_too_long"`)
+	assert.Contains(t, out, "permanently deferred")
+	// **hash_error と混ざっていないこと。**
+	assert.NotContains(t, out, `"category":"hash_error"`)
+	// hash は Argon2id のまま。
+	assert.True(t, strings.HasPrefix(*repo.Profiles["u1"].Password, "$argon2id$"))
+}
