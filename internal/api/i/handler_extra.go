@@ -52,35 +52,31 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "No password set.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
-	// **可用性チェックだけを 2FA gate より前に出す** (#2849)。
-	//
-	// verify2FAToken はバックアップコードを DB から消し、TOTP を replay guard に
-	// 記録する = どちらも消費が確定する。その後で検証枠が取れず 503 を返すと、
-	// **サーバー都合の一時障害で利用者の 2FA クレデンシャルが焼ける**。
-	//
-	// **可観測な順序は upstream のまま (token → password)。** ここで password の
-	// 成否まで先に返すと、wrong-password + wrong-token のときの error code が
-	// upstream と drift する (INCORRECT_PASSWORD vs INVALID_TOKEN)。同じ罠を
-	// handler_2fa.go が 3 箇所で明示的に禁じている (TwoFARegister /
-	// TwoFAUnregister / TwoFARemoveKey)。Unavailable は「まだ判定していない」
-	// という第 3 の状態なので、先に返しても password の成否を漏らさない。
-	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
-	if outcome == password.OutcomeUnavailable {
-		slog.Warn("change-password: password verification unavailable",
-			"userId", u.ID, "scheme", scheme.String())
-		c.Response().Header().Set("Retry-After", verifierRetryAfterSeconds)
-		return c.JSON(http.StatusServiceUnavailable, apierr.PasswordVerificationUnavailable())
-	}
-
 	// 2FA gate: upstream Misskey TS (change-password.ts) は twoFactorEnabled
 	// なら token 必須 + twoFactorAuthenticate で検証する。mk-go では旧来
 	// password だけで通っていたため password 漏洩 = 2FA bypass で password
 	// 変更可能だった (drop-in regression)。verify2FAToken 経由なので RFC
 	// 6238 §5.2 の replay 保護も自動で効く。
+	//
+	// **順序は upstream のまま (token → password)。** 入れ替えると
+	// wrong-password + wrong-token の error code が drift する
+	// (INCORRECT_PASSWORD vs INVALID_TOKEN)。同じ罠を handler_2fa.go が 3 箇所で
+	// 明示的に禁じている。なお verify2FAToken はバックアップコードを消費するので、
+	// この後の 503 では 2FA が焼ける — develop でも password 不一致で同じことが
+	// 起きており本 PR で悪化はしないが、解消は別 issue にした。
 	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
 
+	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
+	if outcome == password.OutcomeUnavailable {
+		// 枠を取れなかっただけで現パスワードは正しいかもしれない。**400 に
+		// 潰さない** (#2849)。
+		slog.Warn("change-password: password verification unavailable",
+			"userId", u.ID, "scheme", scheme.String())
+		c.Response().Header().Set("Retry-After", verifierRetryAfterSeconds)
+		return c.JSON(http.StatusServiceUnavailable, apierr.PasswordVerificationUnavailable())
+	}
 	if outcome == password.OutcomeUnsupported {
 		// **profile だけ出す。** salt / digest は診断に不要。
 		slog.Warn("change-password: unsupported password hash",

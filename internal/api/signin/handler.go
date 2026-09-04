@@ -294,31 +294,9 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 
 	storedPassword := *profile.Password
 
-	// **passwordless + credential では password を検証しない** (#2849)。
-	//
-	// `usePasswordLessLogin` の利用者はフロントが空の password と credential を
-	// 送り、credential 分岐が `!passwordOK && !UsePasswordLessLogin` で素通しに
-	// するので、**検証結果はどこでも使われない**。それでも Verify を呼ぶと
-	// argon2 の枠を無駄に消費し、しかも枠が枯れると 503 を返して credential
-	// 分岐へ到達できなくなる = パスワードを持たない利用者がパスワード検証の
-	// 輻輳でログインできない。
-	//
-	// **`TwoFactorEnabled` も条件に要る。** credential 分岐は 2FA 経路の中に
-	// あり、2FA 無効なら `!profile.TwoFactorEnabled` の枝が先に `passwordOK` で
-	// 判定して返す。`UsePasswordLessLogin=true` かつ `TwoFactorEnabled=false` は
-	// 実際に到達しうる (2fa/unregister は usePasswordLessLogin を巻き戻さない)
-	// ので、ここを外すと**正しいパスワードを送っている利用者が 403 になる**。
-	passwordless := profile.UsePasswordLessLogin && profile.TwoFactorEnabled && len(req.Credential) > 0
-	var (
-		scheme     password.Scheme
-		passwordOK bool
-	)
-	if !passwordless {
-		var handled bool
-		scheme, passwordOK, handled = h.verifyPassword(c, user.ID, storedPassword, *req.Password)
-		if handled {
-			return nil
-		}
+	scheme, passwordOK, handled := h.verifyPassword(c, user.ID, storedPassword, *req.Password)
+	if handled {
+		return nil
 	}
 	setPendingPasswordMigration(c, scheme, passwordOK, storedPassword, *req.Password)
 	if passwordOK && scheme == password.SchemeBcrypt {

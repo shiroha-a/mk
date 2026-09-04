@@ -937,42 +937,6 @@ func TestSignin_VerifierBusyLogsWarn(t *testing.T) {
 	assert.Contains(t, buf.String(), `"userId":"u1"`)
 }
 
-// passwordless + credential では password を検証しない (#2849)。
-//
-// **error id まで見る。** 「503 でないこと」だけだと、password 不一致の 403
-// (932c904e) でも通ってしまい、credential 分岐に到達したことを確かめられない。
-// 到達していれば webauthn 未配線なので passkey 検証失敗の 93b86c4b になる。
-func TestSigninFlow_PasswordlessSkipsPasswordVerification(t *testing.T) {
-	h, repo := newTestHandler(t)
-	user := createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
-	repo.Profiles[user.ID].UsePasswordLessLogin = true
-	// credential 分岐は 2FA 経路の中にあるので 2FA も有効でないと到達しない。
-	repo.Profiles[user.ID].TwoFactorEnabled = true
-
-	rec := doPostCanceled(h.SigninFlow,
-		`{"username":"admin","password":"","credential":{"id":"x"}}`)
-
-	require.Equal(t, http.StatusForbidden, rec.Code, rec.Body.String())
-	assertSingleJSONError(t, rec, "93b86c4b-72f9-40eb-9815-798928603d1e")
-}
-
-// **2FA 無効の passwordless ユーザーは従来どおり password で通る** (#2849)。
-//
-// `usePasswordLessLogin=true` かつ `twoFactorEnabled=false` は 2fa/unregister が
-// usePasswordLessLogin を巻き戻さないため実際に到達しうる。ここで Verify を
-// 飛ばすと、**正しいパスワードを送っている利用者が 403 になる**回帰が入る。
-func TestSigninFlow_PasswordlessWithout2FAStillUsesPassword(t *testing.T) {
-	h, repo := newTestHandler(t)
-	user := createTestUserWithStoredPassword(repo, "admin", signinArgon2Fixture("pass123"))
-	repo.Profiles[user.ID].UsePasswordLessLogin = true
-
-	rec := doPost(h.SigninFlow,
-		`{"username":"admin","password":"pass123","credential":{"id":"x"}}`)
-
-	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
-	assert.Contains(t, rec.Body.String(), `"finished":true`)
-}
-
 // 503 のログの scheme が**読める形**で出ること (#2849)。
 // slog の JSONHandler は fmt.Stringer を使わないので、呼び出し側で明示的に
 // String() を通さないと `"scheme":2` という数字になる。
