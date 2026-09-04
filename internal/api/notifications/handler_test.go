@@ -1330,3 +1330,156 @@ func TestNotificationTypeEnumMatchesLists(t *testing.T) {
 			"%s is obsolete and must not be counted by emptyByTypeFilter", ty)
 	}
 }
+
+// includeTypes が obsolete type だけのときは「filter 無し = 全件」になる (#2837)。
+//
+// upstream は早期 return の後に obsolete を除去し、除去後に空になった includeTypes は
+// `includeTypes && length > 0` の分岐に入らないので filter が掛からない。
+// mk-go は除去せず渡していたため全件落ちて `[]` を返していた。
+//
+// **`includeTypes:[]` とは結果が逆になる。** あちらは明示的に「何も含めない」で
+// 空配列。順序 (早期 return が先、obsolete 除去が後) がこの差を作る。
+func TestShow_IncludeTypesObsoleteOnlyReturnsAll(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{"includeTypes":["pollVote"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1, "obsolete-only includeTypes means no filter, so all rows come back")
+	assert.Equal(t, "follow", resp[0]["type"])
+}
+
+// obsolete と実在 type の混在では、実在 type だけが残って filter として効く。
+// これが無いと「obsolete を含むなら filter を丸ごと捨てる」形の変異が素通りする。
+func TestShow_IncludeTypesObsoleteMixedStillFilters(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+	_, err = svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeMention, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications",
+		`{"includeTypes":["follow","pollVote"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1, "the non-obsolete half must still filter")
+	assert.Equal(t, "follow", resp[0]["type"])
+}
+
+// excludeTypes 側も除去する。obsolete を混ぜても実在 type の除外は効き続ける。
+func TestShow_ExcludeTypesObsoleteMixedStillFilters(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+	_, err = svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeMention, NoteID: "n1",
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications",
+		`{"excludeTypes":["follow","pollVote"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	assert.Equal(t, "mention", resp[0]["type"])
+}
+
+// stripObsoleteTypes の単体。nil / 空 / 全除去 / 部分除去 / 除去なしを固定する。
+func TestStripObsoleteTypes(t *testing.T) {
+	assert.Nil(t, stripObsoleteTypes(nil))
+	// 明示的な空はそのまま (非 nil の長さ 0)。全除去は nil。**この 2 つを混ぜない。**
+	// 前者は「何も含めない」、後者は「filter 無し」で意味が逆。
+	explicitEmpty := stripObsoleteTypes([]string{})
+	assert.NotNil(t, explicitEmpty, "explicit [] must stay non-nil")
+	assert.Empty(t, explicitEmpty)
+	assert.Nil(t, stripObsoleteTypes([]string{"pollVote", "groupInvited"}),
+		"fully stripped means no filter, which must be nil")
+	assert.Equal(t, []string{"follow"}, stripObsoleteTypes([]string{"follow", "pollVote"}))
+	assert.Equal(t, []string{"follow", "mention"},
+		stripObsoleteTypes([]string{"follow", "mention"}))
+}
+
+// excludeTypes が obsolete だけなら除去後に nil になり、filter が掛からない (#2837)。
+//
+// **obsolete type の行を実際に積んで確かめる。** 混在ケース
+// (TestShow_ExcludeTypesObsoleteMixedStillFilters) は該当行が無いので strip の
+// 有無で結果が変わらず、exclude 側の適用行を消す変異が素通りしていた。
+//
+// pollVote は notificationTypeList の外にある唯一の type で、現在は producer が
+// 無い (#690 で無効化) が、それ以前に積まれた行はストリームに残りうる。
+func TestShow_ExcludeTypesObsoleteOnlyDoesNotFilter(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypePollVote, NoteID: "n1",
+	})
+	require.NoError(t, err)
+	_, err = svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{"excludeTypes":["pollVote"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Show(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Len(t, resp, 2,
+		"obsolete-only excludeTypes is stripped to nil, so nothing is filtered out")
+}
+
+// collectNotificationsWithDropped の fail-closed guard を直接固定する (#2837)。
+//
+// Show / Grouped は emptyByTypeFilter で先に抜けるので**この guard には到達
+// しない**。直接呼ぶ経路が増えたときのための防御なので、endpoint 経由の
+// テストでは守れない。ここだけは中を直接叩く。
+//
+// stripObsoleteTypes が全除去で nil を返すのは、除去後の「filter 無し」を
+// ここへ「何も含めない」として渡さないため。両者の区別がこの guard の前提。
+func TestCollectNotificationsWithDropped_ExplicitEmptyIncludeTypesReturnsNothing(t *testing.T) {
+	h, svc := newTestHandler(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	limit := 10
+	c, _ := newJSONRequest(t, "/api/i/notifications", `{}`)
+	user := &model.User{ID: "alice"}
+
+	// 明示的な空 = 何も含めない。
+	all, _, _, _, err := h.collectNotificationsWithDropped(c, user,
+		ListRequest{Limit: &limit, IncludeTypes: []string{}}, false)
+	require.NoError(t, err)
+	assert.Empty(t, all, "explicit includeTypes:[] must select nothing")
+
+	// nil = 全 type を通す (対比)。
+	all, _, _, _, err = h.collectNotificationsWithDropped(c, user,
+		ListRequest{Limit: &limit, IncludeTypes: nil}, false)
+	require.NoError(t, err)
+	assert.Len(t, all, 1, "nil includeTypes must not filter")
+}

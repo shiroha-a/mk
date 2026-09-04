@@ -1157,8 +1157,9 @@ func TestGroupNotifications_GroupCreatedAtSkipsDropped(t *testing.T) {
 // なく**ストリームの最新エントリ**なので、0 件の fetch で呼ぶと、ユーザーが一度も
 // 受け取っていない通知まで既読になる。
 //
-// こちらは `includeTypes:[]` = collectNotificationsWithDropped が svc.List を
-// 呼ぶ**前**に早期 return する経路。**svc.List に到達する経路は別に要る** —
+// こちらは `includeTypes:[]` = Grouped の emptyByTypeFilter が
+// collectNotificationsWithDropped を呼ぶ**前**に早期 return する経路。
+// **svc.List に到達する経路は別に要る** —
 // この 1 本だけだと「includeTypes が空かどうか」だけを見る実装で全テストが通り、
 // untilId 末尾ページングや excludeTypes 全指定の回帰を検出できない
 // (TestGrouped_EmptyPageDoesNotMarkAsRead)。
@@ -1314,9 +1315,10 @@ func TestGrouped_ExcludeAllTypesDoesNotMarkAsRead(t *testing.T) {
 
 // excludeTypes 全指定でも、**notificationTypeList に無い type の行は生き残る**
 // (#2835)。svc.List の exclude filter は `excludeSet[n.Type]` の一致しか見ない
-// ので、mk-go 独自の pollVote (upstream に対応 type が無く、今も produce される)
-// が 1 件あるだけで `len(all) > 0` が成立し、#2833 の guard をすり抜けて
-// 既読化まで走る。upstream は早期 return するので `[]` が正。
+// ので、pollVote (notificationTypeList の外にある唯一の type。producer は #690 で
+// 無効化済みだが、それ以前の行は残りうる) が 1 件あるだけで `len(all) > 0` が
+// 成立し、#2833 の guard をすり抜けて既読化まで走る。upstream は早期 return
+// するので `[]` が正。
 //
 // **この 1 本が Grouped 側の早期 return を守る唯一のテスト。** これが無いと
 // 早期 return を丸ごと消す変異が全テストを素通りする (実測)。
@@ -1349,4 +1351,25 @@ func TestGrouped_ExcludeAllTypesStopsNonEnumRows(t *testing.T) {
 	readID, err := svc.LatestReadID(ctx, "alice")
 	require.NoError(t, err)
 	assert.Empty(t, readID, "non-enum rows must not sneak past the early return")
+}
+
+// Grouped も Show と同じく obsolete を除去する (#2837)。除去後に空になった
+// includeTypes は filter として効かないので全件が返る。
+func TestGrouped_IncludeTypesObsoleteOnlyReturnsAll(t *testing.T) {
+	h, svc, userRepo, _ := groupedHandler(t)
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	ctx := context.Background()
+	_, err := svc.Create(ctx, notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	c, rec := newJSONRequest(t, "/api/i/notifications-grouped",
+		`{"includeTypes":["pollVote"]}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Grouped(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	resp := decodeGrouped(t, rec.Body.Bytes())
+	require.Len(t, resp, 1, "obsolete-only includeTypes means no filter")
+	assert.Equal(t, "follow", resp[0]["type"])
 }

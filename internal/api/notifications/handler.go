@@ -191,6 +191,9 @@ func (h *Handler) Show(c echo.Context) error {
 	if emptyByTypeFilter(req) {
 		return c.JSON(http.StatusOK, []any{})
 	}
+	// 早期 return の**後**に obsolete を除去する (#2837)。順序が結果を分ける。
+	req.IncludeTypes = stripObsoleteTypes(req.IncludeTypes)
+	req.ExcludeTypes = stripObsoleteTypes(req.ExcludeTypes)
 
 	filtered, notifierByID, noteByID, err := h.collectNotifications(c, user, req)
 	if err != nil {
@@ -250,6 +253,44 @@ func buildNotificationTypeEnum() map[string]bool {
 		m[t] = true
 	}
 	return m
+}
+
+// obsoleteNotificationTypeSet is the lookup form of obsoleteNotificationTypeList.
+var obsoleteNotificationTypeSet = func() map[string]bool {
+	m := make(map[string]bool, len(obsoleteNotificationTypeList))
+	for _, t := range obsoleteNotificationTypeList {
+		m[t] = true
+	}
+	return m
+}()
+
+// stripObsoleteTypes removes obsolete types from a type filter, mirroring
+// upstream's `.filter(type => !obsoleteNotificationTypes.includes(type))` (#2837).
+//
+// **emptyByTypeFilter の後に掛ける。** upstream もその順序で、入れ替えると結果が
+// 逆になる — `includeTypes:[]` は「何も含めない」で空配列を返すが、
+// `includeTypes:["pollVote"]` は除去後に空になり、svc.List の
+// `len(includeSet) > 0` が false になって**filter 無し = 全件**になる。
+//
+// **全部落ちたら nil を返す。** 長さ 0 の slice を返すと「明示的な
+// `includeTypes:[]`」と区別が付かなくなり、collectNotificationsWithDropped の
+// fail-closed guard がそれを「何も含めない」と読んで全件落とす。upstream の
+// `filter()` は `[]` を返すが、あちらは nil / 空の区別を持たない言語なので
+// 形ではなく**意味**に合わせる — 除去後に空になったものの意味は「filter 無し」。
+func stripObsoleteTypes(types []string) []string {
+	if len(types) == 0 {
+		return types
+	}
+	out := make([]string, 0, len(types))
+	for _, t := range types {
+		if !obsoleteNotificationTypeSet[t] {
+			out = append(out, t)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 // emptyByTypeFilter reports whether the type filters alone make the query
@@ -378,11 +419,13 @@ func (h *Handler) collectNotificationsWithDropped(c echo.Context, user *model.Us
 	// (#1546)。
 	//
 	// **現状ここには到達しない** — Show / Grouped はどちらも emptyByTypeFilter で
-	// 先に抜ける (#2835)。collectNotificationsWithDropped を直接呼ぶ経路が増えた
-	// ときのための fail-closed な二重防御として残してある。
+	// 先に抜ける (#2835)。直接呼ぶ経路が増えたときのための fail-closed な二重防御。
+	// stripObsoleteTypes が全除去で nil を返すのは、その結果 (意味は「filter 無し」)
+	// をここへ「何も含めない」として渡さないため (#2837)。
 	if req.IncludeTypes != nil && len(req.IncludeTypes) == 0 {
 		return nil, map[string]struct{}{}, map[string]*model.User{}, map[string]*model.Note{}, nil
 	}
+
 	// svc.List が upstream NotificationService.getNotifications 相当に cursor
 	// (sinceId/untilId)・向き (sinceId-only は昇順)・type filter・limit を適用して
 	// 返す (#1953)。ここではその後段の drop (解決済み follow request / invalid

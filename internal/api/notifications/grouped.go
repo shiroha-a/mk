@@ -34,13 +34,16 @@ func (h *Handler) Grouped(c echo.Context) error {
 	//
 	// **下の `len(all) > 0` では止まらない。** svc.List の exclude filter は
 	// `excludeSet[n.Type]` の一致しか見ないので、**notificationTypeList に無い
-	// type の行は excludeTypes 全指定でも生き残る**。mk-go は upstream に対応
-	// type が無い `pollVote` を今も produce する (core/notification/hooks.go) ので、
-	// その行が 1 件あるだけで `len(all) > 0` が成立し、既読化まで走ってしまう。
+	// type の行は excludeTypes 全指定でも生き残る**。該当するのは `pollVote` で、
+	// 現在 producer は無い (#690 で無効化) が、それ以前に積まれた行はストリームに
+	// 残りうる。1 件あるだけで `len(all) > 0` が成立し既読化まで走ってしまう。
 	// upstream は早期 return するので `[]` が正。
 	if emptyByTypeFilter(req) {
 		return c.JSON(http.StatusOK, []any{})
 	}
+	// 早期 return の**後**に obsolete を除去する (#2837)。順序が結果を分ける。
+	req.IncludeTypes = stripObsoleteTypes(req.IncludeTypes)
+	req.ExcludeTypes = stripObsoleteTypes(req.ExcludeTypes)
 
 	// **drop 前の全列を受け取る** (#2739)。grouping は全列で行い、drop 済みは
 	// グループの中身から外す。drop 済みを列から抜いてから畳むと、挟まった通知が
