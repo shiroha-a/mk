@@ -600,8 +600,8 @@ func (h *Handler) maybeMarkAsRead(c echo.Context, user *model.User, req ListRequ
 //
 // **明示的な既読操作なので force で呼ぶ** (upstream mark-all-as-read.ts と同じ、
 // #2831)。バッジのカウンタはクライアント側にしか無く、readAllNotifications を
-// 取りこぼすと読み取り位置だけが進んで guard に阻まれ二度と publish されない。
-// このボタンがその唯一の復帰手段にあたる。
+// 取りこぼすと読み取り位置だけが進んで guard に阻まれる。次の通知が来るまで
+// バッジが残るので、その場で復帰させる手段としてこのボタンを force にする。
 func (h *Handler) MarkAllAsRead(c echo.Context) error {
 	user := middleware.GetUser(c)
 	if err := h.svc.MarkAllAsRead(c.Request().Context(), user.ID, true); err != nil {

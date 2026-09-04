@@ -392,17 +392,35 @@ func TestService_MarkAllAsRead_AlreadyRead_DoesNotPublish(t *testing.T) {
 	// 2 回目: 新着が無い → publish しない
 	require.NoError(t, svc.MarkAllAsRead(ctx, "alice", false))
 	assert.Len(t, pub.calls, 1, "second call must not re-publish readAllNotifications")
+
+	// 3 回目: 新着があるので読み取り位置がまた古くなり publish される。
+	//
+	// **この枝を固定するのが要点** — `prev < latestNotifID` を落として
+	// 「読み取り位置が無いときだけ publish」にしても、これが無いと全テストが
+	// 通ってしまう (変異で確認済み)。壊れると暗黙既読からバッジが二度と 0 に
+	// 戻らなくなるので、#2831 が force 経路以外で恒久化する。
+	_, err = svc.Create(ctx, CreateInput{
+		NotifieeID: "alice", NotifierID: "carol", Type: TypeFollow,
+	})
+	require.NoError(t, err)
+	require.NoError(t, svc.MarkAllAsRead(ctx, "alice", false))
+	calls := pub.snapshot()
+	require.NotEmpty(t, calls)
+	assert.Equal(t, "readAllNotifications", calls[len(calls)-1].eventType,
+		"a newer notification makes the marker stale again → publish")
 }
 
 // TestService_MarkAllAsRead_Force_PublishesWhenAlreadyRead pins the recovery
 // path from #2831: an explicit mark-all-as-read must re-emit
 // `readAllNotifications` even when the read marker does not move.
 //
-// **これが無いとバッジから抜け出せない。** 件数を持っているのはサーバーではなく
-// `$i.unreadNotificationsCount` というクライアント側のカウンタで、
+// **これが無いとその場でバッジから抜け出せない。** 件数を持っているのはサーバー
+// ではなく `$i.unreadNotificationsCount` というクライアント側のカウンタで、
 // `readAllNotifications` を 1 度取りこぼすと読み取り位置だけが最新まで進み、
-// 以降は hadUnread が永久に false になる。upstream が
+// **次の通知が届くまで** hadUnread が false になる。upstream が
 // `notifications/mark-all-as-read` にだけ force を渡しているのと同じ理由。
+// 「次の通知が届けば復帰する」ことは
+// TestService_MarkAllAsRead_AlreadyRead_DoesNotPublish が固定している。
 func TestService_MarkAllAsRead_Force_PublishesWhenAlreadyRead(t *testing.T) {
 	svc := newTestSvc(t)
 	ctx := context.Background()
@@ -425,6 +443,56 @@ func TestService_MarkAllAsRead_Force_PublishesWhenAlreadyRead(t *testing.T) {
 	assert.Nil(t, pub.calls[1].body)
 }
 
+// stubReadAllPusher records the Web Push half of postReadAllNotifications.
+type stubReadAllPusher struct {
+	mu    sync.Mutex
+	users []string
+}
+
+func (p *stubReadAllPusher) PushReadAllNotifications(userID string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.users = append(p.users, userID)
+}
+
+func (p *stubReadAllPusher) snapshot() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.users...)
+}
+
+// TestService_MarkAllAsRead_PushesReadAllNotifications pins the Web Push half of
+// upstream's postReadAllNotifications, which mk-go was missing entirely.
+//
+// SW 側は readAllNotifications の push を受けて**表示中の OS 通知を閉じる**。
+// sw_subscription の列も /api/sw/* の受け口も揃っているのに producer だけ
+// 無かったので、別端末に出たトーストは「すべて既読」を押しても残っていた。
+// main stream の publish と**同じ guard の中**で送る。
+func TestService_MarkAllAsRead_PushesReadAllNotifications(t *testing.T) {
+	svc := newTestSvc(t)
+	ctx := context.Background()
+	_, err := svc.Create(ctx, CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: TypeFollow,
+	})
+	require.NoError(t, err)
+
+	pusher := &stubReadAllPusher{}
+	svc.SetReadAllPusher(pusher)
+
+	require.NoError(t, svc.MarkAllAsRead(ctx, "alice", false))
+	require.Equal(t, []string{"alice"}, pusher.snapshot())
+
+	// guard に阻まれる呼びでは push もしない (トーストを閉じる理由が無い)。
+	require.NoError(t, svc.MarkAllAsRead(ctx, "alice", false))
+	assert.Equal(t, []string{"alice"}, pusher.snapshot(),
+		"suppressed publish must not push either")
+
+	// force なら publish と一緒に push も出る。
+	require.NoError(t, svc.MarkAllAsRead(ctx, "alice", true))
+	assert.Equal(t, []string{"alice", "alice"}, pusher.snapshot(),
+		"force must push alongside the main stream event")
+}
+
 // TestService_MarkAllAsRead_Force_NoEntries_DoesNotPublish pins that force does
 // not bypass the empty-stream early return.
 //
@@ -435,9 +503,14 @@ func TestService_MarkAllAsRead_Force_NoEntries_DoesNotPublish(t *testing.T) {
 	svc := newTestSvc(t)
 	pub := &stubMainPublisher{}
 	svc.SetMainStreamPublisher(pub)
+	// push 側も早期 return より前へ動かせないよう一緒に見る。publisher だけ
+	// 見ていると、push を早期 return の前に置く変異が素通りする。
+	pusher := &stubReadAllPusher{}
+	svc.SetReadAllPusher(pusher)
 
 	require.NoError(t, svc.MarkAllAsRead(context.Background(), "noone", true))
-	assert.Empty(t, pub.calls, "empty stream must not publish even with force")
+	assert.Empty(t, pub.snapshot(), "empty stream must not publish even with force")
+	assert.Empty(t, pusher.snapshot(), "empty stream must not push either")
 }
 
 func TestService_Flush_PublishesNotificationFlushed(t *testing.T) {
@@ -817,4 +890,73 @@ func TestToXAddID_NoOverflowFarFuture(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, far.UnixMilli(), gotMs,
 		"toXAddID's ms must equal time.Time.UnixMilli (no truncation)")
+}
+
+// advanceMarkerOnXRevRange simulates a second mark-as-read request that lands
+// between this one's two reads: it writes the read marker forward the first
+// time an XREVRANGE goes out.
+//
+// **並走は実際に起きる。** WebSocket の readNotification と通知一覧の暗黙既読は
+// 同じユーザーで同時に走る。
+type advanceMarkerOnXRevRange struct {
+	client *redis.Client
+	readTo string
+	fired  bool
+}
+
+func (h *advanceMarkerOnXRevRange) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *advanceMarkerOnXRevRange) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func (h *advanceMarkerOnXRevRange) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if !h.fired && cmd.Name() == "xrevrange" {
+			h.fired = true
+			h.client.Set(ctx, "latestReadNotification:alice", h.readTo, 0)
+		}
+		return next(ctx, cmd)
+	}
+}
+
+// TestService_MarkAllAsRead_ReadsMarkerBeforeStream pins the upstream read order
+// (`Get` first, then `XRevRangeN`) — see the comment in MarkAllAsRead (#2831).
+//
+// 逆順にすると、並走した別の既読要求が書いた**新しい**既読位置を後から読むので、
+// 「自分が見た最新 < 既読位置」で hadUnread が false へ倒れ、publish が落ちる。
+// これは #2831 が直そうとしている失敗モードそのもの。**この gate が無いと順序を
+// 戻す変異が 4 パッケージすべてで素通りする** (実測)。
+func TestService_MarkAllAsRead_ReadsMarkerBeforeStream(t *testing.T) {
+	testRedis.FlushAll(context.Background())
+	ctx := context.Background()
+
+	// hook は共有 client に付けると他のテストへ漏れるので専用に張る。
+	hooked := redis.NewClient(&redis.Options{Addr: testRedis.Addr})
+	t.Cleanup(func() { require.NoError(t, hooked.Close()) })
+
+	seed := NewService(testRedis.Client, idGen, "")
+	seed.SetUnreadPublishDelay(0)
+	first, err := seed.Create(ctx, CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: TypeFollow,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, first)
+
+	// 並走側が既読にする位置 = ストリームの最新。
+	newest, err := testRedis.Client.XRevRangeN(ctx, "notificationTimeline:alice", "+", "-", 1).Result()
+	require.NoError(t, err)
+	require.Len(t, newest, 1)
+
+	hooked.AddHook(&advanceMarkerOnXRevRange{client: testRedis.Client, readTo: newest[0].ID})
+
+	svc := NewService(hooked, idGen, "")
+	svc.SetUnreadPublishDelay(0)
+	pub := &stubMainPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	require.NoError(t, svc.MarkAllAsRead(ctx, "alice", false))
+	assert.Len(t, pub.snapshot(), 1,
+		"既読位置はストリームより先に読むこと。逆順だと並走した既読要求の書き込みを"+
+			"読んでしまい publish しない側へ倒れる")
 }

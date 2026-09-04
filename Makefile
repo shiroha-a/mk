@@ -791,7 +791,7 @@ perm-check: ## router middleware の権限が upstream より緩くないか検�
 
 .PHONY: wiring-check
 wiring-check: ## router で配線が必要なものが外れていないか検査
-	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired|TestReadAllNotificationsPusherIsWired' -count=1 -v
 
 .PHONY: compose-check
 compose-check: ## 配布する compose にログの上限があるか検査

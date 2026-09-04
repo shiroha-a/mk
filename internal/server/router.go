@@ -2729,6 +2729,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	antennaService.SetStreamingPublisher(notePublisher)
 	notificationService.SetStreamingPublisher(notificationPublisher)
 	notificationService.SetMainStreamPublisher(mainStreamPublisher)
+	// readAllNotifications は upstream postReadAllNotifications と同じく
+	// main stream と Web Push の両方へ送る。これが無いと SW 側の
+	// readAllNotifications 分岐 (表示中の OS 通知を閉じる) が発火しない。
+	notificationService.SetReadAllPusher(webPushService)
 	notificationService.SetPacker(notificationPublisher)
 	driveService.SetStreamingPublisher(drivePublisher)
 	// folder の folderCreated/folderUpdated/folderDeleted も同じ drive channel

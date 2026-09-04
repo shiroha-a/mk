@@ -177,6 +177,7 @@ type Service struct {
 	keyPrefix           string // TS drop-in互換用 `<host>:` prefix
 	publisher           StreamingPublisher
 	mainStreamPublisher MainStreamPublisher
+	readAllPusher       ReadAllPusher
 	packer              Packer
 	noteUnreadRepo      repository.NoteUnreadRepository
 	unreadPublishDelay  time.Duration
@@ -214,6 +215,24 @@ func (s *Service) SetStreamingPublisher(p StreamingPublisher) {
 // `notificationFlushed`). Optional — nil disables emit.
 func (s *Service) SetMainStreamPublisher(p MainStreamPublisher) {
 	s.mainStreamPublisher = p
+}
+
+// ReadAllPusher delivers the Web Push half of upstream's
+// postReadAllNotifications. Optional — nil disables the push.
+type ReadAllPusher interface {
+	PushReadAllNotifications(userID string)
+}
+
+// SetReadAllPusher attaches the Web Push sender used alongside the
+// `readAllNotifications` main stream event.
+//
+// upstream の postReadAllNotifications は main stream への publish と Web Push の
+// **2 つ**を送る (NotificationService.ts)。mk-go は前者しか送っておらず、
+// Service Worker 側の readAllNotifications 分岐 (表示中の OS 通知を閉じる) が
+// 一度も発火していなかった。sw_subscription の列も /api/sw/* の受け口も揃って
+// いるのに producer だけ無い状態だったので、設定を ON にしても何も起きなかった。
+func (s *Service) SetReadAllPusher(p ReadAllPusher) {
+	s.readAllPusher = p
 }
 
 // SetNoteUnreadRepo attaches a NoteUnreadRepository. When set, HasUnreadSpecifiedNotes
@@ -532,7 +551,9 @@ func (s *Service) scheduleUnreadPublish(notifieeID, streamID string, packed any,
 // 持たず `$i.unreadNotificationsCount` というクライアント側のカウンタでしかない
 // ので、`readAllNotifications` を 1 度でも取りこぼす (WebSocket 切断中に publish
 // される。pubsub なので再送は無い) と、読み取り位置はもう最新まで進んでいて
-// 以降は guard に阻まれ二度と publish されない。upstream が
+// guard に阻まれる。**恒久的に固まるわけではない** — 次の通知が届けば読み取り
+// 位置がまた古くなるので、それを読んだ時点で publish される。逆に言えば、次の
+// 通知が来るまでバッジは残ったままになる。upstream が
 // `notifications/mark-all-as-read` だけ force で呼ぶのはこのためで、mk-go は
 // これを移植しておらず**ボタンを押しても復帰できなかった**。暗黙既読
 // (i/notifications 系の maybeMarkAsRead / WebSocket の readNotification) は
@@ -542,6 +563,14 @@ func (s *Service) scheduleUnreadPublish(notifieeID, streamID string, packed any,
 // (hasUnreadSpecifiedNotes / hasUnreadMentions を false に戻すため)、
 // Redis SET 失敗時は note_unread を温存して再試行で整合性を担保する。
 func (s *Service) MarkAllAsRead(ctx context.Context, userID string, force bool) error {
+	// **既読位置を先に読む** (upstream readAllNotification と同じ順序)。逆にすると、
+	// 2 つの既読要求が並走したとき (WebSocket の readNotification と通知一覧の暗黙
+	// 既読は実際に同時に走る) 後発が書いた新しい位置を先発が読んでしまい、
+	// 「自分が見た最新 < 既読位置」で hadUnread が false に倒れる。判定が
+	// publish しない側へ偏るのは、まさにこのバグの失敗モードそのもの。
+	// `Get` の Redis Nil error は「初回 = 未読あり」として扱う。
+	prev, gerr := s.client.Get(ctx, s.readKey(userID)).Result()
+
 	res, err := s.client.XRevRangeN(ctx, s.streamKey(userID), "+", "-", 1).Result()
 	if err != nil {
 		return err
@@ -554,8 +583,6 @@ func (s *Service) MarkAllAsRead(ctx context.Context, userID string, force bool) 
 	}
 	latestNotifID := res[0].ID
 	// 直前の既読 ID と比較して、実際に進む場合だけ publish する。
-	// `Get` の Redis Nil error は「初回 = 未読あり」として扱う。
-	prev, gerr := s.client.Get(ctx, s.readKey(userID)).Result()
 	hadUnread := gerr != nil || prev == "" || prev < latestNotifID
 	if err := s.client.Set(ctx, s.readKey(userID), latestNotifID, 0).Err(); err != nil {
 		return err
@@ -563,8 +590,16 @@ func (s *Service) MarkAllAsRead(ctx context.Context, userID string, force bool) 
 	// Redis SET成功後にnote_unreadを消す (SET失敗時は温存して次回retryで
 	// 両方更新されることを期待する)。
 	s.clearNoteUnread(userID)
-	if (force || hadUnread) && s.mainStreamPublisher != nil {
-		s.mainStreamPublisher.PublishMainEvent(userID, "readAllNotifications", nil)
+	if force || hadUnread {
+		// upstream postReadAllNotifications と同じく main stream と Web Push の
+		// 両方へ送る。SW 側の readAllNotifications は表示中の OS 通知を閉じる
+		// だけで mark-all-as-read を呼び返さないのでループしない。
+		if s.mainStreamPublisher != nil {
+			s.mainStreamPublisher.PublishMainEvent(userID, "readAllNotifications", nil)
+		}
+		if s.readAllPusher != nil {
+			s.readAllPusher.PushReadAllNotifications(userID)
+		}
 	}
 	return nil
 }
