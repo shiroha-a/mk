@@ -150,7 +150,7 @@ make test
 go test ./internal/api/notes/...
 
 # レース検出 + カバレッジ (CIと同条件)
-go test -race -count=1 -timeout 10m \
+go test -race -count=1 -shuffle=3 -timeout 10m \
   -coverprofile=coverage.out -covermode=atomic ./...
 ```
 

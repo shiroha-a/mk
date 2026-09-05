@@ -138,12 +138,13 @@ make lint                   # go vet ./...
 make check                  # fmt → lint → test。コミット前に必須
 
 # テスト
-make test                   # go test ./... -v -shuffle=3 (CI と同じ seed)
+make test                   # go test ./... -v -race -count=1 -shuffle=3 (CI と同じ**テスト実行**条件)
+make test-fast              # -race 抜き (反復用)。**コミット前の検査ではない**
 make plugin-test            # 同梱プラグインのテスト (別 module なので ./... に含まれない)
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -206,7 +207,7 @@ make frontend-check          # fork frontend の型チェック (vue-tsc --noEmi
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 115 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 118 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -231,8 +232,12 @@ make e2e-down-all            # 検証用スタックを一括撤去 (**本番 pr
 ### 実行方法
 
 ```bash
-# 全テスト実行（verbose）
+# 全テスト実行（CI と同じテスト実行条件: -race -count=1 -shuffle=3）
+# **カバレッジ閾値の検査は再現しない** (CI は別 step)。下の -coverprofile 付きを使う
 make test
+
+# -race 抜きで速く回す（反復用）。**コミット前は make check を使うこと**
+make test-fast
 
 # 特定パッケージ
 go test ./internal/api/notes/...
@@ -514,7 +519,8 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 - テスト対象は`go list`で絞り込み（テストファイルがあるパッケージのみ）した上で
   `awk 'NF'`で空行除外→ImportPath順にソート→`NR % 4`で各shardに均等割り当て。
   新規パッケージ追加でshard内の構成が変わっても、決定的な分配により再現性は保たれる。
-- 実行条件: `-race -count=1 -shuffle=2795 -timeout 10m -coverprofile=coverage-shard-N.out -covermode=atomic`
+- 実行条件: `-race -count=1 -shuffle=3 -timeout 10m -coverprofile=coverage-shard-N.out -covermode=atomic`。
+  **`make test` と揃っていること**を `make testflags-check` が検査する (#2841)
 - **`-shuffle` の seed は全 shard 共通の固定値にする (#2795)。** `on` (毎回ランダム) は
   失敗を手元で再現できず、required check の `test` が不定期に赤くなる。**shard 番号も
   使わない** — shard 配属は `NR % 4` なので、テストパッケージが 1 つ増えるだけで既存
@@ -804,6 +810,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-05**: `make test` に `-race -count=1` を足し、`-race` 抜きの `make test-fast` を新設 (#2841)。`make help` の target は 116 → 118 (`test-fast` と `testflags-check`。数え方は `^名前:.*##` の行数)。**Section 3 の「115」が古くなった起点は #2828 ではなく #2844** (`frontend-test` の追加で 116。`e1fd1e06` が 115、`f9ec2716` が 116 と実測。#2844 のコミットメッセージ自身が「116 → 117」と誤記していた)。**順序依存は #2795 で seed を揃えて塞いだのに、データ競合は塞げていなかった** — `make test` は `-race` 無しで回るので、手元で緑のまま required check の `test` が落ちる。`fe7ea8f2` (2026-09-03「Fix CI: SendMeasuresEnvelope のテストが -race で落ちる」) で実際に踏んでいる。**実測は 65.0s → 160.5s (2.5 倍)**、`-race` が全 173 パッケージで競合ゼロ (= 揃えるために先に潰す既存の競合は無い) であることも確認した。CI の `test-shards` は 1 shard あたり実測 158-290s (直近 5 run × 4 shard の job 全体。テスト step 単体は 114-241s)。shard は並列なので `test` check の wall clock は max(shard) だが、**実際の往復は push から結果まで 4m10s-4m59s** かかるので、手元で 95s 払うほうが速い。`-count=1` 自体のコストはゼロだった (65.35s → 65.04s)。**`-shuffle` は `go test` の cacheable flag に入っていない**ので、seed を渡している時点でキャッシュは元から無効。`-count=1` を残すのは CI との一致のためで、キャッシュ対策としては効いていない。`-timeout` / `-coverprofile` / `-covermode` は揃えない — 前者は既定と同じ 10m、後 2 つはカバレッジ閾値チェック用で挙動に影響しない。**`make test-fast` はコミット前の検査ではない** (`-race` が無いので CI で落ちるものが手元で緑になる)。編集しながら回す用で、`make check` は `-race` 付きを使う。
+  **ドリフト自体を止めるゲートも足した** (`make testflags-check` / `TestMakeTestMatchesCIConditions`)。**CI 側を基準にする** — CI の flag のうち `ciOnlyTestFlags` に理由付きで挙げたもの以外は `make test` にも同じ値で無ければ落ちる。CI に flag が増えたときに「足す」か「無視する理由を書く」かを**選ばせる**形にしてある (無条件に無視すると #2841 と同じことが起きる)。片側だけ変えても落ちるので、`ci.yml` の seed を変えて Makefile を忘れる形も塞がる。**どちらかを読めなかったら落とす** — 書式が変わって拾えなくなると、検査していないのに緑になる (compose-check と同じ判断)。あわせて `TestDocsQuoteTheCIShuffleSeed` で **doc に書かれた seed が CI と一致するか**も見る — これは実際に 2 度起きていて、#2795 で seed を `3` にしたあとも `docs/testing.md` と CLAUDE.md には `2795` が残り、**唯一の再現コマンドが間違ったまま**だった (doc の手順で追うと別の並び順を試すので順序依存が再現せず flaky と誤診断される)。**値の不一致は tracked な md 全体**で見て、**欠落だけ名指しの一覧**で見る — 合計件数だと 1 ファイルが `-shuffle` を丸ごと落としても気付けない (実際 README.md が「CI と同条件」と書きながら `-shuffle` を持っていなかった)。正規表現は `-shuffle` への隣接を要求する — 裸の `2795` は issue 番号としても現れるため。散文で書くと拾えないので、doc 側は `-shuffle=3` のインライン表記に統一してある。
 - **2026-09-01**: Section 8 の `test-shards` に `-shuffle` を追加 (#2795)。**`internal/server` は `-shuffle` を有効にすると 5 seed すべてで落ちていた** (落ちるテストは seed ごとに違う)。原因は 2 系統で、どちらも**プロセス共有の状態を張り替えて戻していない**もの。(a) `newServer` / `New` が起動時にグローバルを **12 個** 差し替えるが、テストは同じプロセスで何度も呼ぶので、後続の `avatar` / `emoji_redirect` が素の URL ではなく署名付きプロキシURLを受け取る。(b) `frontendutil` の loader キャッシュはプロセスに 1 つで、fixture は `t.TempDir()` に置くため**ディレクトリが消えた後も内容がキャッシュに残る**。
   seed は **全 shard 共通の固定値**にした。`on` (毎回ランダム) は失敗を手元で再現できず、required check が不定期に赤くなる。**shard 番号も使わない** — shard 配属は `NR % 4` なので、テストパッケージが 1 つ増えるだけで既存パッケージの seed が変わり順序が丸ごと入れ替わる (無関係な PR が未実行の順序を引いて赤くなり、ランダム seed と同じ問題を別経路で持ち込む)。
   **seed は実測で選ぶこと。** 覚えやすい値 (issue 番号など) を置くと検出力を持たない値を引く — 実際 `2795` を置いたが、restore を無効化した変異で落ちる seed は 12 個中 7 個だけで、`2795` は落ちない側だった (= 直したバグを CI が検出しない)。採用した `3` は 6 テストが落ちる。

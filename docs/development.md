@@ -117,7 +117,9 @@ cd mk && docker compose up -d
 |---|---|
 | `make fmt` | `gofmt -s -w .` |
 | `make lint` | `go vet ./...` |
-| `make test` | `go test ./... -v -shuffle=3` (CI と同じ seed。PostgreSQL が要る → [testing.md](testing.md)) |
+| `make test` | `go test ./... -v -race -count=1 -shuffle=3` (CI と同じテスト実行条件。PostgreSQL が要る → [testing.md](testing.md)) |
+| `make test-fast` | `-race` 抜き (反復用)。**コミット前の検査ではない** — CI で落ちるものが手元で緑になる |
+| `make frontend-test` | fork frontend の vitest (#2844) |
 | `make plugin-vet` | 同梱プラグインを`go vet` + 既定無効を検査（CIの`build` jobの2 step相当） |
 | `make plugin-test` | 同梱プラグインのテスト (別 module なので `./...` に含まれない) |
 | `make plugin-doc-check` | `docs/plugins/authoring.md` の Go スニペットが実際にコンパイルできるか |
@@ -169,6 +171,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | `make wiring-check` | router / server で配線しないと効かないもの (FTT のトグル、global な security header) の配線が外れていないか |
 | `make catalog-check` | `pg_indexes` 等のシステムカタログのクエリが `schemaname` で絞られているか (#2777) |
 | `make notfound-check` | repository の lookup error を種別を見ずに 4xx にしている箇所を検出する (#2792)。**allowlist は件数で持つ** — key が `<file>:<func>` なので、同じ関数に足しても key が変わらない。増えたら新規流入、減ったら陳腐化として落ちる。**既知の限界**: **lookup が別ブロックに hoist されている形は射程外** — lookup と `if` のペアリングは「同じブロック内の後続 3 文」で見るので、`goroutine` に切り出して結果を外側の変数へ書く形 (`note_create_service.go` の reply / renote 先取得) は距離ではなくブロックが違うため掛からない。`lookupIfLookahead` を広げても増えない / **service 呼び出しの潰しは射程外** — `h.svc.Show(...)` の err を種別を見ずに 4xx にする形は api / core どちらの述語にも掛からない (lookup メソッドの呼び出ししか見ないため)。数え方: gate の `condChecksErrNonNil` / `bodyReturns4xx` をレシーバが `*svc` / `*Service` の `Show` / `Get` / `Find` / `Resolve` / `Fetch` / `Lookup` / `Require` 呼び出しに向け直して `internal/api` + `internal/server` + `internal/activitypub` を走査すると **29 件** (`ap/handler.go` 7 / `following/*` 7 / `users/*` 5 / `channels/*` 5 / `flash` 2 / `clips` 2 / ほか)。**AP の 404 はリモートに「消えた」と解釈されうる**。`notes/state` / `notes/conversation` / `antennas/show` の 3 件は #2799 で潰した / **重複チェックを DB 障害で skip する形も射程外** — `if dup, err := repo.Find(...); err == nil && dup != nil` は err を握り潰しているので `condMentionsErr` に掛からない。接続断のあいだ重複が作られる。**DB 側の backstop は無い** — 例えば `sw_subscription` に unique index は無く (`000020` が張るのは非 unique、`000068` がそれも落とす)、重複行は恒久的に残って web push が二重配信される。#2792 は handler 側の guard で塞いだだけなので、そこを外すと再発する。signup / page / reaction / poll などにも同じ形が残る / 同じ関数で 1 件直して 1 件足すと件数が変わらず素通りする / 4xx 以外への潰し (204 を返す `invite/handler.go:Delete` など) と `x, _ := repo.Find(...)` の握り潰しは対象外 / lookup メソッド名が `Find` で始まらず `Get` でもないもの (`metaRepo.Fetch()` など) は射程外 / 4xx を返すのが `if` の外や `else` 側にある形、`return h.notFound(c)` のような自前ヘルパー、`switch { case err != nil: ... }` も対象外。`internal/server` の該当は現在 0 件 (非テストの `internal/server/**` で `.Find*(` が 35、`.Get(` を足して 55。うち gate の述語に掛かったのは 2 件で、それも潰した) |
+| `make compose-check` | 配布する compose がログをローテーションするか (`max-size` / `max-file` の値そのものを見る、#2828) |
+| `make testflags-check` | `make test` が CI と同じテスト実行条件 (`-race` / `-count=1` / `-shuffle` seed) で走るか (#2841)。**両方向を見る** — CI にあって手元に無い flag も、手元にあって CI に無い flag (`-short` 等) も落とす。あわせて doc に書かれた `-shuffle` の seed が CI と一致するかも検査する |
 | `make apicompat` | [API 互換性マトリクス](api-compat.md)を生成。内部で `make apicompat-routes` (route dump、stack 起動が必要) と `make apicompat-render` を実行する |
 
 ### e2e・互換性検証
