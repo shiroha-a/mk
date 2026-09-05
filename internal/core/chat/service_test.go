@@ -3,12 +3,14 @@ package chat_test
 import (
 	"context"
 	"errors"
+	"sort"
 	"sync"
 	"testing"
 
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -80,6 +82,14 @@ func newSvc(t *testing.T) (*corechat.Service, *testutil.MockChatRepository, *cap
 	idGen, _ := id.NewGenerator("aidx")
 	svc := corechat.NewService(repo, idGen)
 	svc.SetStreamingPublisher(pub)
+	// push の body に fromUser を載せるため (#2840)。production は router が
+	// 同じものを配線する。
+	users := testutil.NewMockUserRepository()
+	for _, u := range []string{"alice", "bob", "carol"} {
+		name := u
+		users.Users[u] = &model.User{ID: u, Username: u, Name: &name}
+	}
+	svc.SetUserRepo(users)
 	return svc, repo, pub
 }
 
@@ -773,4 +783,290 @@ func TestCanViewRoomTimeline_ModeratorBypass(t *testing.T) {
 	ok3, err := svc.CanViewRoomTimeline("alice", "r1")
 	require.NoError(t, err)
 	assert.True(t, ok3, "owner は moderator でなくても購読可")
+}
+
+// --- newChatMessage の Web Push (#2840) ---
+
+// stubChatPusher captures PushNewChatMessage calls.
+type stubChatPusher struct {
+	mu    sync.Mutex
+	calls []chatPushCall
+}
+
+type chatPushCall struct {
+	userID string
+	body   map[string]any
+}
+
+func (p *stubChatPusher) PushNewChatMessage(userID string, body map[string]any) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, chatPushCall{userID, body})
+}
+
+func (p *stubChatPusher) recipients() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, 0, len(p.calls))
+	for _, c := range p.calls {
+		out = append(out, c.userID)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// mainRecipients returns the users that received a newChatMessage main event.
+func (p *stubMainPublisher) mainRecipients() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, 0, len(p.calls))
+	for _, c := range p.calls {
+		if c.eventType == "newChatMessage" {
+			out = append(out, c.userID)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// 1:1 チャットで main stream と Web Push が**対で**飛ぶ (#2840)。
+//
+// upstream ChatService.ts は publish と push を必ず同じ場所で対にしている。
+// 片方だけになると、タブを閉じている利用者に通知が届かない。
+func TestCreateMessageToUser_PushesNewChatMessage(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	main := &stubMainPublisher{}
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(main)
+	svc.SetChatPusher(push)
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"bob"}, push.recipients(), "recipient にだけ push する")
+	// **publish と push の宛先が一致すること。**
+	assert.Equal(t, main.mainRecipients(), push.recipients())
+
+	// **SW が無条件に参照するフィールドが body に載っていること。**
+	// packages/sw/src/scripts/create-notification.ts の newChatMessage 分岐は
+	// `fromUser.name` / `fromUser.avatarUrl` を読む。無いと TypeError で
+	// **通知が 1 件も出ない** (publish 側は body を読まないので気付けない)。
+	require.Len(t, push.calls, 1)
+	from, ok := push.calls[0].body["fromUser"].(map[string]any)
+	require.True(t, ok, "fromUser が無い: %v", push.calls[0].body)
+	assert.Equal(t, "alice", from["id"])
+	assert.Contains(t, from, "name")
+	assert.Contains(t, from, "avatarUrl")
+	assert.Contains(t, push.calls[0].body, "text")
+}
+
+// room チャットでも sender 以外の全員に対で飛ぶ (#2840)。
+func TestCreateMessageToRoom_PushesNewChatMessage(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	// owner=alice, members=bob,carol。sender=bob なら alice と carol に届く。
+	seedRoom(t, repo, "r1", "alice", "bob", "carol")
+	main := &stubMainPublisher{}
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(main)
+	svc.SetChatPusher(push)
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "bob", "r1", "hi", "")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"alice", "carol"}, push.recipients(), "sender (bob) には push しない")
+	assert.Equal(t, main.mainRecipients(), push.recipients())
+
+	// **room では toRoom が要る。** 無いと SW が DM 分岐に落ち、tag が
+	// chat:room:<id> ではなく chat:user:<senderId> になって別 room の通知が
+	// 同じ tag で潰れる。
+	require.NotEmpty(t, push.calls)
+	room, ok := push.calls[0].body["toRoom"].(map[string]any)
+	require.True(t, ok, "toRoom が無い: %v", push.calls[0].body)
+	assert.Equal(t, "r1", room["id"])
+	assert.Contains(t, room, "name")
+	require.Contains(t, push.calls[0].body, "fromUser")
+}
+
+// mute した member には push しない (#2840)。
+//
+// upstream ChatService.ts は `if (membership.isMuted) continue;` で marker を
+// 張らず publish も push も行かない。Web Push を足すと、**利用者が明示的に
+// 切った設定が OS 通知として破られる**。
+func TestCreateMessageToRoom_SkipsMutedMembers(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	seedRoom(t, repo, "r1", "alice", "bob", "carol")
+	repo.Memberships["carol:r1"].IsMuted = true
+	main := &stubMainPublisher{}
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(main)
+	svc.SetChatPusher(push)
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "bob", "r1", "hi", "")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"alice"}, push.recipients(), "mute した carol に push している")
+	assert.Equal(t, []string{"alice"}, main.mainRecipients(), "publish も揃えること")
+}
+
+// AP 受信の DM 経路でも push する (#2840)。
+//
+// mk-go は upstream に無い AP 受信経路を持つ (chat 連合は cherrypick 由来)。
+// **ここが抜けると、リモートからの DM だけ通知が来ない。**
+func TestCreateMessageViaAP_PushesNewChatMessage(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	main := &stubMainPublisher{}
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(main)
+	svc.SetChatPusher(push)
+	sender := &model.User{ID: "remote1", Username: "remote1"}
+
+	_, err := svc.CreateMessageViaAP(context.Background(),
+		"https://remote.example/chat-messages/1", sender, "local1", "hi")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"local1"}, push.recipients())
+	assert.Equal(t, main.mainRecipients(), push.recipients())
+	require.Len(t, push.calls, 1)
+	from, ok := push.calls[0].body["fromUser"].(map[string]any)
+	require.True(t, ok, "fromUser が無い: %v", push.calls[0].body)
+	assert.Equal(t, "remote1", from["id"])
+}
+
+// pusher 未配線でも落ちない (テスト構成や read-only 構成)。
+func TestCreateMessageToUser_NoPusherIsNoop(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetMainStreamPublisher(&stubMainPublisher{})
+
+	_, err := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+	assert.NoError(t, err)
+}
+
+// owner は membership 行が mute でも受け取る (#2840)。
+//
+// **これは 3 周目のレビューで元に戻した判断。** 2 周目で「mute した owner を
+// 除外する」形にしたが、mk-go の読み取り側と矛盾していた —
+// packRoomDetailed は owner に `isMuted: false` を固定で返し
+// (`api/chat/handler.go` の `meID != r.OwnerID` ガード)、フロントは owner に
+// ミュートのスイッチを出さない (`room.info.vue` の `v-if="!isOwner"`)。
+//
+// transfer-ownership は membership 行を消さずに OwnerID を書き換えるので、
+// mute したまま owner になった利用者が **room の通知を main stream ごと失い**、
+// API もフロントも「ミュートしていない」と表示するため原因に辿り着けない。
+// upstream も `concat({isMuted: false})` で owner を never-muted 扱いする。
+func TestCreateMessageToRoom_OwnerIsNeverMuted(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	seedRoom(t, repo, "r1", "alice", "alice", "carol")
+	repo.Memberships["alice:r1"].IsMuted = true
+	main := &stubMainPublisher{}
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(main)
+	svc.SetChatPusher(push)
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "carol", "r1", "hi", "")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"alice"}, push.recipients(), "owner を mute 扱いで落としている")
+	assert.Equal(t, []string{"alice"}, main.mainRecipients())
+}
+
+// owner が membership 行を持たない通常構成でも届く。
+//
+// **上の OwnerIsNeverMuted と対で意味を持つ。** owner の seed を丸ごと消す
+// 直し方を弾く。
+func TestCreateMessageToRoom_UnmutedOwnerStillReceives(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	seedRoom(t, repo, "r1", "alice", "carol")
+	main := &stubMainPublisher{}
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(main)
+	svc.SetChatPusher(push)
+
+	_, err := svc.CreateMessageToRoom(context.Background(), "carol", "r1", "hi", "")
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{"alice"}, push.recipients())
+}
+
+// AP 受信の room 経路でも sender を渡す (#2840)。
+//
+// **remote sender は user 表に居ないことがある** (viaRelay の ephemeral actor は
+// DB に載らない)。repo から引き直す実装だと fromUser が nil になり、push が
+// 丸ごと落ちて「リモートの room メッセージだけ通知が来ない」になる。
+func TestCreateRoomMessageViaAP_PushesNewChatMessage(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	seedRoom(t, repo, "r1", "alice", "carol", "remote1")
+	main := &stubMainPublisher{}
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(main)
+	svc.SetChatPusher(push)
+	// **userRepo に居ない** remote actor。
+	sender := &model.User{ID: "remote1", Username: "remote1"}
+
+	require.NoError(t, svc.CreateRoomMessageViaAP(
+		"https://remote.example/chat-messages/2", sender, "r1", "hi"))
+
+	assert.ElementsMatch(t, []string{"alice", "carol"}, push.recipients())
+	require.NotEmpty(t, push.calls)
+	from, ok := push.calls[0].body["fromUser"].(map[string]any)
+	require.True(t, ok, "fromUser が無い: %v", push.calls[0].body)
+	assert.Equal(t, "remote1", from["id"])
+}
+
+// sender を解決できないときは push しない (#2840)。
+//
+// **fromUser の無い body は SW を TypeError で落とす。** 通知が出ないうえに
+// push の枠だけ消費するので、無通知に倒すほうが安全。ここでは userRepo が
+// 未配線の構成と、lookup が error を返す構成の両方を見る。
+func TestCreateMessageToUser_UnresolvedSenderSkipsPush(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		users repository.UserRepository
+	}{
+		{name: "repo unwired", users: nil},
+		{name: "lookup fails", users: &failingUserRepo{MockUserRepository: testutil.NewMockUserRepository()}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _, _ := newSvc(t)
+			svc.SetUserRepo(tt.users)
+			main := &stubMainPublisher{}
+			push := &stubChatPusher{}
+			svc.SetMainStreamPublisher(main)
+			svc.SetChatPusher(push)
+
+			_, err := svc.CreateMessageToUser(context.Background(), "bob", "alice", "hi", "")
+			require.NoError(t, err)
+
+			assert.Empty(t, push.recipients(), "sender 不明でも push している")
+			// **publish は止めない。** アプリ内の未読は body を読まないので出せる。
+			assert.Equal(t, []string{"alice"}, main.mainRecipients())
+		})
+	}
+}
+
+// 添付のみのメッセージでも text キーを落とさない (#2840)。
+//
+// SW は `${name}: ${body.text}` を無条件に組むので、キーが無いと通知本文が
+// 「alice: undefined」になる。upstream は null を送る。
+func TestCreateMessageToUser_PushKeepsNullText(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	push := &stubChatPusher{}
+	svc.SetMainStreamPublisher(&stubMainPublisher{})
+	svc.SetChatPusher(push)
+
+	_, err := svc.CreateMessageToUser(context.Background(), "bob", "alice", "", "f1")
+	require.NoError(t, err)
+
+	require.Len(t, push.calls, 1)
+	text, ok := push.calls[0].body["text"]
+	require.True(t, ok, "text キーが無い: %v", push.calls[0].body)
+	assert.Nil(t, text)
+}
+
+// failingUserRepo makes FindByID fail so senderForPush returns nil.
+type failingUserRepo struct {
+	*testutil.MockUserRepository
+}
+
+func (f *failingUserRepo) FindByID(string) (*model.User, error) {
+	return nil, errors.New("db down")
 }

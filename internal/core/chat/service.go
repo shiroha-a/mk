@@ -136,6 +136,7 @@ type Service struct {
 	urls                *activitypub.URLBuilder
 	deliverer           APDeliverer
 	mainStreamPublisher MainStreamPublisher
+	chatPusher          ChatPusher
 	// moderatorChecker: chat/rooms/show 等の権限 gate で「moderator は閲覧可」
 	// を判定するために使う (upstream 2026.5.4 互換)。nil 安全。
 	moderatorChecker ModeratorChecker
@@ -192,6 +193,94 @@ func NewService(repo repository.ChatRepository, idGen id.Generator) *Service {
 // DB 処理は変わらない)。
 func (s *Service) SetStreamingPublisher(p StreamingPublisher) {
 	s.publisher = p
+}
+
+// ChatPusher delivers the Web Push half of a `newChatMessage` event.
+//
+// upstream ChatService.ts は main stream への publish と Web Push を**必ず同じ
+// 場所で対にして**送る (1:1 チャットと room の 2 箇所)。mk-go は publish 側しか
+// 持っておらず、`PushNewChatMessage` は実装も SW の受け口も揃っているのに
+// **呼ぶ側が存在しなかった** (#2840)。エラーもログも出ないので、ブラウザを
+// 閉じている利用者に通知が届かないだけだった。
+type ChatPusher interface {
+	PushNewChatMessage(userID string, body map[string]any)
+}
+
+// SetChatPusher attaches the Web Push sender used alongside `newChatMessage`.
+func (s *Service) SetChatPusher(p ChatPusher) {
+	s.chatPusher = p
+}
+
+// SetUserRepo attaches the user repository used to resolve the sender for the
+// Web Push body.
+//
+// **SetAPDelivery とは別に持つ。** push は AP 配送とは無関係なので、AP が
+// 未配線の構成でも sender を引けるようにする。
+func (s *Service) SetUserRepo(r repository.UserRepository) {
+	s.userRepo = r
+}
+
+// pushNewChatMessage sends the Web Push half. **main stream の publish と必ず
+// 対で呼ぶこと** — 片方だけになると、タブを開いている利用者にしか届かない。
+//
+// **body は publish と同じでは足りない。** SW の newChatMessage ハンドラ
+// (packages/sw/src/scripts/create-notification.ts) は `fromUser.name` /
+// `fromUser.avatarUrl` を無条件で読み、room なら `toRoom.name` も読む。
+// packMessageStream は `msg.FromUser` / `msg.ToRoom` が nil だと該当キーを
+// 落とすが、create 経路は行を素で組むので**必ず nil** (repo は Preload しない)。
+// そのまま渡すと SW が TypeError を投げ、**通知が 1 件も出ない** —
+// publish 側は body を読まない (main-boot.ts は引数を捨てる) ので気付けない。
+func (s *Service) pushNewChatMessage(userID string, packed map[string]any, sender *model.User, room *model.ChatRoom) {
+	if s.chatPusher == nil {
+		return
+	}
+	// **sender を引けなければ送らない。** fromUser の無い body を送ると SW が
+	// TypeError で落ち、通知が出ないうえに push の枠だけ消費する。無通知に
+	// 倒すほうが安全。
+	if sender == nil {
+		slog.Warn("chat: skipping newChatMessage push (sender unresolved)", "userId", userID)
+		return
+	}
+	s.chatPusher.PushNewChatMessage(userID, s.packMessagePush(packed, sender, room))
+}
+
+// packMessagePush augments the stream payload with the fields the service
+// worker dereferences unconditionally.
+func (s *Service) packMessagePush(packed map[string]any, sender *model.User, room *model.ChatRoom) map[string]any {
+	out := make(map[string]any, len(packed)+2)
+	for k, v := range packed {
+		out[k] = v
+	}
+	if _, ok := out["fromUser"]; !ok {
+		out["fromUser"] = packUserStream(sender)
+	}
+	// **text キーを必ず持たせる。** packMessage は msg.Text が nil だとキーごと
+	// 落とすが、SW は `${name}: ${body.text}` を無条件に組むので添付のみの
+	// メッセージが「alice: undefined」になる。upstream は null を送る。
+	if _, ok := out["text"]; !ok {
+		out["text"] = nil
+	}
+	if room != nil {
+		// **toRoom が無いと DM 分岐に落ちる。** tag が chat:room:<id> ではなく
+		// chat:user:<senderId> になり、別 room の通知が同じ tag で潰れる。
+		out["toRoom"] = map[string]any{"id": room.ID, "name": room.Name}
+	}
+	return out
+}
+
+// senderForPush resolves the message author for the push body. Returns nil when
+// the repo is unwired or the lookup fails; pushNewChatMessage then drops the
+// push entirely rather than sending a body the service worker cannot read.
+func (s *Service) senderForPush(fromUserID string) *model.User {
+	if s.userRepo == nil {
+		return nil
+	}
+	u, err := s.userRepo.FindByID(fromUserID)
+	if err != nil {
+		slog.Warn("chat: sender lookup failed, skipping newChatMessage push", "fromUserId", fromUserID, "err", err)
+		return nil
+	}
+	return u
 }
 
 // SetMainStreamPublisher attaches a publisher used to emit `newChatMessage`
@@ -431,7 +520,13 @@ func (s *Service) CreateMessageToUser(ctx context.Context, fromUserID, toUserID,
 	// 作成と同時に recipient (toUserID) の main に emit する (sender には
 	// 送らない: TS と同じ fan-out 方針)。
 	if s.mainStreamPublisher != nil {
-		s.mainStreamPublisher.PublishMainEvent(toUserID, "newChatMessage", s.packMessageStream(msg))
+		packed := s.packMessageStream(msg)
+		s.mainStreamPublisher.PublishMainEvent(toUserID, "newChatMessage", packed)
+		var sender *model.User
+		if s.chatPusher != nil {
+			sender = s.senderForPush(fromUserID)
+		}
+		s.pushNewChatMessage(toUserID, packed, sender, nil)
 	}
 	// リモートユーザー宛ならAP配送 (best-effort)
 	s.tryDeliverToRemoteUser(msg, fromUserID, toUserID)
@@ -757,7 +852,11 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 	// recipient の main チャネルに newChatMessage を emit してフロントの
 	// 未読インジケータを更新させる。sender は remote なので emit 対象外。
 	if s.mainStreamPublisher != nil {
-		s.mainStreamPublisher.PublishMainEvent(toUserID, "newChatMessage", s.packMessageStream(msg))
+		packed := s.packMessageStream(msg)
+		s.mainStreamPublisher.PublishMainEvent(toUserID, "newChatMessage", packed)
+		// **引数の fromUser をそのまま使う。** remote sender は user 表に
+		// 居ないこともあるので、引き直すと sender 未解決で push を落とす。
+		s.pushNewChatMessage(toUserID, packed, fromUser, nil)
 	}
 	return msg, nil
 }
@@ -806,10 +905,10 @@ func (s *Service) CreateMessageToRoom(ctx context.Context, fromUserID, roomID, t
 	if s.publisher != nil {
 		s.publisher.PublishRoomMessage(ctx, roomID, EventMessage, s.packMessageStream(msg))
 	}
-	// Room 宛も同様に、sender 以外の全 member (owner 含む) の main に
-	// newChatMessage を emit する。Misskey 本家 ChatService
-	// .createMessageToRoom と同じ fan-out 方針。
-	s.emitRoomNewChatMessage(room, fromUserID, msg)
+	// Room 宛も同様に、sender と **mute した member** を除く全 member
+	// (owner 含む) の main に newChatMessage を emit する。Misskey 本家
+	// ChatService.createMessageToRoom と同じ fan-out 方針。
+	s.emitRoomNewChatMessage(room, fromUserID, msg, nil)
 	// remote member が居れば group Create を AP 配送する (best-effort)。
 	s.tryDeliverRoomMessage(msg, room, fromUserID)
 	return msg, nil
@@ -1030,7 +1129,7 @@ func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID,
 	}
 	// sender は remote なので emitRoomNewChatMessage で local member の main に
 	// newChatMessage を流す (sender 自身は対象外、未読インジケータ更新)。
-	s.emitRoomNewChatMessage(room, sender.ID, msg)
+	s.emitRoomNewChatMessage(room, sender.ID, msg, sender)
 	return nil
 }
 
@@ -1048,9 +1147,11 @@ func (s *Service) isRoomMemberWith(room *model.ChatRoom, userID, roomID string) 
 }
 
 // emitRoomNewChatMessage fans out `newChatMessage` to every room member
-// except the sender. Room membership 列挙失敗時は警告ログを残して emit を
+// except the sender and those who muted the room. Room membership 列挙失敗時は警告ログを残して emit を
 // スキップする (message 自体の作成は成功として返される前に呼ばれる)。
-func (s *Service) emitRoomNewChatMessage(room *model.ChatRoom, fromUserID string, msg *model.ChatMessage) {
+// sender は分かっていれば渡す (nil なら fromUserID で引き直す)。**remote sender は
+// user 表に居ないことがある**ので、AP 経路は必ず渡すこと。
+func (s *Service) emitRoomNewChatMessage(room *model.ChatRoom, fromUserID string, msg *model.ChatMessage, sender *model.User) {
 	if s.mainStreamPublisher == nil || room == nil {
 		return
 	}
@@ -1060,19 +1161,42 @@ func (s *Service) emitRoomNewChatMessage(room *model.ChatRoom, fromUserID string
 		return
 	}
 	packed := s.packMessageStream(msg)
+	// push が無効な構成では引かない (1 メッセージあたり FindByID が 1 回増える)。
+	if sender == nil && s.chatPusher != nil {
+		sender = s.senderForPush(fromUserID)
+	}
 	// 重複 emit を防ぐため set 相当で ID を管理する (membership + owner)。
 	emitted := make(map[string]bool, len(members)+1)
+	// **owner は never-muted として扱う** (mute 判定より前に seed する)。
+	// upstream ChatService.ts は owner を `concat({isMuted: false})` で足すし、
+	// mk-go 自身も packRoomDetailed が owner に `isMuted: false` を固定で返し、
+	// フロントは owner にミュートのスイッチを出さない
+	// (`room.info.vue` の `v-if="!isOwner"`)。
+	//
+	// **ここだけ mute を尊重すると壊れる。** transfer-ownership は membership 行を
+	// 消さずに OwnerID を書き換えるので、mute したまま owner になった利用者が
+	// room の通知を main stream ごと失う。API もフロントも「ミュートしていない」と
+	// 表示し、解除する手段が UI に無いので原因に辿り着けない。
 	if room.OwnerID != fromUserID {
 		emitted[room.OwnerID] = true
 	}
 	for _, m := range members {
-		if m.UserID == fromUserID || emitted[m.UserID] {
+		if emitted[m.UserID] {
+			continue
+		}
+		// **mute した member は除外する。** upstream ChatService.ts は
+		// `if (membership.isMuted) continue;` で marker を張らず、publish も
+		// push も行かない。mk-go は publish 側でこれを見ていなかったが、
+		// Web Push を足すと**利用者が明示的に切った設定が OS 通知として
+		// 破られる**ので、ここで揃える (#2840)。
+		if m.UserID == fromUserID || m.IsMuted {
 			continue
 		}
 		emitted[m.UserID] = true
 	}
 	for uid := range emitted {
 		s.mainStreamPublisher.PublishMainEvent(uid, "newChatMessage", packed)
+		s.pushNewChatMessage(uid, packed, sender, room)
 	}
 }
 
