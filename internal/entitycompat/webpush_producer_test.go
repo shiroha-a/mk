@@ -14,11 +14,17 @@ import (
 // webPushProducerAllowlist は production の呼び出し元を持たなくてよい Push*。
 //
 // **理由を持たせる。** 空にできる形だと「呼ぶ側を消して allowlist に足す」が
-// 通ってしまう。件数も固定して、黙って増えないようにする。
+// 通ってしまう。件数も `webPushProducerAllowlistSize` で固定して、黙って
+// 増えないようにする — **理由の文字列だけでは足りない** (#2792 と同じ doctrine)。
+// 実際、件数を見ていなかったので「配線を消して allowlist に足す」が緑のまま
+// 通っていた (#2856 で実測)。
 var webPushProducerAllowlist = map[string]string{
 	"PushUnreadAntennaNote": "upstream にも producer が無い (PushNotificationService.ts に型宣言と SW の受け口だけ)。" +
 		"mk-go だけ送ると upstream に無い通知を出すことになるので送らない",
 }
+
+// webPushProducerAllowlistSize は allowlist の件数。増やすときは**意図的に**。
+const webPushProducerAllowlistSize = 1
 
 // Push* に production の呼び出し元があることを検査する (#2840)。
 //
@@ -41,6 +47,14 @@ func TestWebPushProducersAreWired(t *testing.T) {
 	// 検査していないのに緑になる。
 	if len(methods) == 0 {
 		t.Fatal("webpush.Service の Push* を 1 つも読めなかった。定義の形が変わったならこの gate も直すこと")
+	}
+
+	// **件数を固定する。** これが無いと「配線を消して allowlist に足す」で
+	// いくらでも緑にできる (実測)。
+	if len(webPushProducerAllowlist) != webPushProducerAllowlistSize {
+		t.Errorf("webPushProducerAllowlist が %d 件 (期待 %d)。"+
+			"送らない判断を増やすなら webPushProducerAllowlistSize も**意図的に**上げること",
+			len(webPushProducerAllowlist), webPushProducerAllowlistSize)
 	}
 
 	// allowlist は実在する method だけを指すこと (綴り違いで空振りさせない)。
@@ -113,19 +127,31 @@ func nonTestCallers(t *testing.T, root string, methods []string) map[string]int 
 			if strings.Contains(path, sep+"testutil"+sep) {
 				return
 			}
-			// **コメント行は数えない。** コメントアウトして残すのは消すのと同じ
-			// (CLAUDE.md §8 の wiring-check と同じ doctrine)。
-			for _, line := range strings.Split(string(src), "\n") {
-				trimmed := strings.TrimSpace(line)
-				if strings.HasPrefix(trimmed, "//") {
-					continue
-				}
-				for _, m := range methods {
-					if strings.Contains(trimmed, "."+m+"(") {
-						counts[m]++
-					}
-				}
+			// **AST で数える (#2856)。** 行の文字列一致だと 3 通りで空振りする
+			// (実測): `/* */` で囲む / 行末コメントに残す / 文字列リテラルに残す。
+			// パーサはコメントを構文木に載せず、文字列リテラルの中身も Go として
+			// 解析しない (BasicLit のまま) ので CallExpr にならない。
+			f, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
+			if err != nil {
+				// 読めなかったら黙って 0 にしない。検査していないのに緑になる。
+				t.Fatalf("parse %s: %v", path, err)
 			}
+			want := make(map[string]bool, len(methods))
+			for _, m := range methods {
+				want[m] = true
+			}
+			ast.Inspect(f, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok || !want[sel.Sel.Name] {
+					return true
+				}
+				counts[sel.Sel.Name]++
+				return true
+			})
 		})
 	}
 	return counts
@@ -134,7 +160,19 @@ func nonTestCallers(t *testing.T, root string, methods []string) map[string]int 
 func walkGoFiles(t *testing.T, dir string, fn func(path string, src []byte)) {
 	t.Helper()
 	_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+		if err != nil {
+			return nil
+		}
+		// **testdata は見ない。** parse 失敗を t.Fatalf にした以上、Go の
+		// ツールチェーン自身が無視する場所の壊れた fixture で、無関係な
+		// ゲートが落ちてしまう (実測)。
+		if info.IsDir() {
+			if info.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		src, rerr := os.ReadFile(path)

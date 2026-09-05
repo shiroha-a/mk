@@ -238,7 +238,7 @@ plugins:
 // router 側は `s.echo.Group("/api")` のリテラルを使う (既存の
 // `TestAPICompatDoc_MatchesRouter` がその形を固定しているため)。**別々の
 // リテラルなので、片方を変えると表だけが外れて上限が黙って /api の既定に戻る。**
-// 配線の gate は文字列一致なので緑のままになる。
+// 配線の gate は配線が「書かれていること」しか見ないので緑のままになる。
 func TestAPIGroupPrefixMatchesRouter(t *testing.T) {
 	src, err := os.ReadFile(filepath.Join("router.go"))
 	require.NoError(t, err)

@@ -1,7 +1,11 @@
 package entitycompat
 
 import (
+	"bytes"
 	"fmt"
+	"go/parser"
+	"go/printer"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -783,9 +787,14 @@ var (
 )
 
 // serverPackageSource concatenates internal/server's non-test sources with
-// line comments removed. **package 全体を読む** — router.go だけを見ると別
+// comments removed. **package 全体を読む** — router.go だけを見ると別
 // ファイルからの登録を取りこぼす。実際 plugin_wiring.go は `api.Group(...)` で
 // `/api` 配下を生やしている。
+//
+// **コメントが落ちるのは `parser.ParseFile` の mode が 0 だから。**
+// `parser.ParseComments` に変えると `printer.Fprint` が `*ast.File` の
+// `Comments` を印字するので、`/* */` で囲んだ登録が黙って復活する。
+// `TestServerPackageSourceDropsBlockComments` がそれを固定している。
 func serverPackageSource() (string, error) {
 	files, err := filepath.Glob(filepath.Join("..", "..", "internal", "server", "*.go"))
 	if err != nil {
@@ -802,16 +811,37 @@ func serverPackageSource() (string, error) {
 			return "", err
 		}
 		read++
-		for _, line := range strings.Split(string(src), "\n") {
-			if !strings.HasPrefix(strings.TrimSpace(line), "//") {
-				body = append(body, line)
-			}
+		stripped, perr := goSourceWithoutComments(f, src)
+		if perr != nil {
+			return "", perr
 		}
+		body = append(body, stripped)
 	}
 	if read == 0 {
 		return "", fmt.Errorf("internal/server/*.go を 1 ファイルも読めない")
 	}
 	return strings.Join(body, "\n"), nil
+}
+
+// goSourceWithoutComments re-prints Go source with every comment dropped.
+//
+// **コメントは AST で落とす (#2856)。** 行頭 `//` だけを除いても `/* */` で
+// 囲んだ登録が生きたものとして通る (実測)。パーサはコメントを構文木に載せない。
+//
+// **mode は 0 でなければならない。** `parser.ParseComments` にすると
+// `printer.Fprint` が `*ast.File` の `Comments` を印字するので、囲んだ登録が
+// 黙って復活する。`TestGoSourceWithoutComments` がそれを固定している。
+func goSourceWithoutComments(path string, src []byte) (string, error) {
+	fset := token.NewFileSet()
+	parsed, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		return "", fmt.Errorf("parse %s: %w", path, err)
+	}
+	var buf bytes.Buffer
+	if err := printer.Fprint(&buf, fset, parsed); err != nil {
+		return "", fmt.Errorf("print %s: %w", path, err)
+	}
+	return buf.String(), nil
 }
 
 // docChannelRowRe matches a §4-1 table row `| `notifications` | … |`.
@@ -904,4 +934,32 @@ doc にあって実装に無い (%d 件、= 名前の綴り違いか、消えた
 kebab-case (chat-room.ts) だが wire 上の名前は camelCase (chatRoom)。`,
 		len(missing), strings.Join(missing, "\n  "),
 		len(stale), strings.Join(stale, "\n  "))
+}
+
+// goSourceWithoutComments がブロックコメントを落とすことを固定する (#2856)。
+//
+// **`serverPackageSource` が使う関数をそのまま通す。** 同じ処理をテスト内に
+// 書き写すと、本体の parser mode を変えても落ちない (実測。最初そう書いていた)。
+func TestGoSourceWithoutComments(t *testing.T) {
+	const src = `package p
+
+func f() {
+	/* streamRegistry.Register("ghost", nil) */
+	// streamRegistry.Register("ghost2", nil)
+	streamRegistry.Register("real", nil)
+}
+`
+	body, err := goSourceWithoutComments("x.go", []byte(src))
+	if err != nil {
+		t.Fatalf("goSourceWithoutComments: %v", err)
+	}
+	for _, ghost := range []string{`"ghost"`, `"ghost2"`} {
+		if strings.Contains(body, ghost) {
+			t.Errorf("コメントアウトされた登録 %s が出力に残っている。"+
+				"parser mode が 0 のままか確認すること", ghost)
+		}
+	}
+	if !strings.Contains(body, `"real"`) {
+		t.Error("生きた登録が出力から消えている")
+	}
 }

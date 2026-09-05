@@ -1,9 +1,6 @@
 package entitycompat
 
 import (
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 )
 
@@ -16,32 +13,16 @@ import (
 // そこで同 package の他の gate (limit_specs / secure_endpoints / permissions) と
 // 同じく router.go をソースとして読み、呼び出しが残っていることを固定する。
 //
-// **文字列一致で十分。** ここが守りたいのは「配線が書かれていること」だけで、
-// 何が配線されるかは `internal/core/timeline` の TestWireMetaToggles_Wires* が
-// setter ごとに変異検証付きで固定している。
+// **呼び出しの形まで守る。** 何が配線されるかは `internal/core/timeline` の
+// TestWireMetaToggles_Wires* が setter ごとに変異検証付きで固定しているので、
+// ここが見るのは「router から正しい引数で呼ばれていること」だけ。
+//
+// コメント行は数えない。判定は `wiringNodes` の AST 照合なので、`//` でも
+// `/* */` でも同じように落ちる (#2856)。**引数まで照合する** ので、
+// 初版の前方一致では通り抜けた `WireMetaToggles(hook, nil, nil)` も落ちる。
 func TestTimelineTogglesAreWired(t *testing.T) {
-	path := filepath.Join(repoRoot(t), "internal/server/router.go")
-	src, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read router.go: %v", err)
-	}
-	const call = "coretimeline.WireMetaToggles("
-	// コメント行は数えない。router.go は gofmt 済みなので行頭 (indent 除去後) が
-	// `//` かどうかで足りる。コメントアウトして残すのは「消す」のと同じ。
-	found := false
-	for _, line := range strings.Split(string(src), "\n") {
-		t := strings.TrimSpace(line)
-		if strings.HasPrefix(t, "//") {
-			continue
-		}
-		if strings.Contains(t, call) {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("internal/server/router.go に %q の呼び出しが無い (コメントは数えない)。"+
-			"FTT のトグル (enableFanoutTimeline / enableFanoutTimelineDbFallback) が "+
-			"admin から切り替えても効かなくなる (#2762)", call)
-	}
+	assertWired(t, routerGo,
+		"coretimeline.WireMetaToggles(timelineFanoutHook, timelineService, metaRepo)",
+		"FTT のトグル (enableFanoutTimeline / enableFanoutTimelineDbFallback) が "+
+			"admin から切り替えても効かなくなる (#2762)")
 }
