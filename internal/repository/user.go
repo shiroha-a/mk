@@ -71,6 +71,8 @@ type UserRepository interface {
 	// UpdatePasswordIfCurrent replaces a profile password only when the stored
 	// hash still equals currentHash. The bool reports whether one row changed.
 	UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error)
+	// RemoveBackupCode atomically deletes one single-use 2FA backup code.
+	RemoveBackupCode(userID, code string) error
 	CreateProfile(profile *model.UserProfile) error
 	ListUsers(filter model.UserListFilter) ([]*model.User, error)
 	ListRemoteInboxes() ([]model.RemoteInbox, error)
@@ -528,6 +530,19 @@ func (r *userRepository) UpdateProfile(userID string, fields map[string]any) err
 		return nil
 	}
 	return r.db.Model(&model.UserProfile{}).Where("\"userId\" = ?", userID).Updates(fields).Error
+}
+
+// RemoveBackupCode deletes one backup code from the stored array in SQL.
+//
+// **読んだ配列を書き戻さない** (#2852)。gate で読んだスナップショットから
+// `remaining` を組み立てて丸ごと UPDATE すると、別のコードを使う同時実行が
+// 互いの消費を打ち消し合い、**使ったはずのコードが復活する**。`array_remove`
+// なら interleaving に関係なく冪等に消える。
+func (r *userRepository) RemoveBackupCode(userID, code string) error {
+	return r.db.Model(&model.UserProfile{}).
+		Where(`"userId" = ?`, userID).
+		Update("twoFactorBackupSecret", gorm.Expr(`array_remove("twoFactorBackupSecret", ?)`, code)).
+		Error
 }
 
 func (r *userRepository) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {

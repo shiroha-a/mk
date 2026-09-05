@@ -239,3 +239,106 @@ func TestValidateWithReplay_ProductionIgnoresEnv(t *testing.T) {
 	assert.False(t, ValidateWithReplay(ctx, g, "u1", code, secret), "本番は常に replay 保護が効く")
 	assert.False(t, ValidateWithReplay(ctx, g, "u1", "000000", secret), "本番は不正コードを拒否する")
 }
+
+// Release は記録を消して同じコードを再び受け付けられるようにする (#2852)。
+//
+// **必要になる理由。** 2FA を検証したあとに走る password 検証で落ちると、記録が
+// 残ったまま操作は失敗する。利用者が同じ (まだ有効な) コードで打ち直すと replay
+// として弾かれ、原因から遠い INVALID_TOKEN になる。
+func TestRedisReplayGuard_ReleaseAllowsReuse(t *testing.T) {
+	_, client := newMiniRedis(t)
+	g := NewRedisReplayGuard(client)
+	ctx := context.Background()
+
+	ok, err := g.MarkUsed(ctx, "u1", "123456")
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	require.NoError(t, g.Release(ctx, "u1", "123456"))
+
+	ok2, err := g.MarkUsed(ctx, "u1", "123456")
+	require.NoError(t, err)
+	assert.True(t, ok2, "Release 後も replay 扱いのままになっている")
+}
+
+// Release は他のコード / 他の利用者の記録を消さない。
+func TestRedisReplayGuard_ReleaseIsScoped(t *testing.T) {
+	_, client := newMiniRedis(t)
+	g := NewRedisReplayGuard(client)
+	ctx := context.Background()
+
+	mustMark(ctx, t, g, "u1", "111111")
+	mustMark(ctx, t, g, "u2", "111111")
+	mustMark(ctx, t, g, "u1", "222222")
+
+	require.NoError(t, g.Release(ctx, "u1", "111111"))
+
+	for _, tt := range []struct {
+		user, code string
+		reusable   bool
+	}{
+		{user: "u1", code: "111111", reusable: true},
+		{user: "u2", code: "111111", reusable: false},
+		{user: "u1", code: "222222", reusable: false},
+	} {
+		ok, err := g.MarkUsed(ctx, tt.user, tt.code)
+		require.NoError(t, err)
+		assert.Equal(t, tt.reusable, ok, "user=%s code=%s", tt.user, tt.code)
+	}
+}
+
+// nil guard の Release は落ちない (production 以外では guard を配線しない)。
+func TestRedisReplayGuard_ReleaseNilSafe(t *testing.T) {
+	var g *RedisReplayGuard
+	assert.NoError(t, g.Release(context.Background(), "u1", "123456"))
+	assert.NoError(t, (&RedisReplayGuard{}).Release(context.Background(), "u1", "123456"))
+}
+
+// ReleaseReplay は ReplayReleaser を実装しない guard では何もしない。
+func TestReleaseReplay_IgnoresGuardsWithoutRelease(t *testing.T) {
+	// failingGuard は Release を持たないので type assertion に失敗する。
+	ReleaseReplay(context.Background(), failingGuard{}, "u1", "123456")
+	ReleaseReplay(context.Background(), nil, "u1", "123456")
+}
+
+// mustMark records the code and fails the test if it was already present.
+func mustMark(ctx context.Context, t *testing.T, g *RedisReplayGuard, user, code string) {
+	t.Helper()
+	ok, err := g.MarkUsed(ctx, user, code)
+	require.NoError(t, err)
+	require.True(t, ok, "user=%s code=%s", user, code)
+}
+
+// ReserveOnce は同じ key を 2 度取らせない (#2852)。
+func TestReserveOnce_SecondAttemptRejected(t *testing.T) {
+	_, client := newMiniRedis(t)
+	g := NewRedisReplayGuard(client)
+	ctx := context.Background()
+
+	assert.True(t, ReserveOnce(ctx, g, "u1", "bc:code"), "1 本目が取れない")
+	assert.False(t, ReserveOnce(ctx, g, "u1", "bc:code"), "2 本目が通っている")
+	assert.True(t, ReserveOnce(ctx, g, "u1", "bc:other"), "別の key まで弾いている")
+	assert.True(t, ReserveOnce(ctx, g, "u2", "bc:code"), "別の user まで弾いている")
+}
+
+// guard が無い構成では素通しする (fail-open)。
+//
+// **Redis 障害で 2FA を閉塞させない。** operator が自分の環境から締め出される
+// 事故を避けるため、MarkUsed と同じ判断に揃えている。
+func TestReserveOnce_FailsOpen(t *testing.T) {
+	ctx := context.Background()
+	assert.True(t, ReserveOnce(ctx, nil, "u1", "bc:code"), "guard が nil なら素通し")
+	assert.True(t, ReserveOnce(ctx, failingGuard{}, "u1", "bc:code"), "guard 障害でも素通し")
+}
+
+// Release の失敗は握り潰す (記録が残るだけで安全側)。
+func TestReleaseReplay_SwallowsFailure(t *testing.T) {
+	ReleaseReplay(context.Background(), failingReleaser{}, "u1", "code")
+}
+
+// failingReleaser always fails both operations.
+type failingReleaser struct{ failingGuard }
+
+func (failingReleaser) Release(_ context.Context, _, _ string) error {
+	return errors.New("boom")
+}

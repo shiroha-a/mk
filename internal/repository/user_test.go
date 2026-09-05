@@ -1817,3 +1817,37 @@ func TestUserRepository_FindByUsernameLower_NonNotFoundErrorIsNotSwallowed(t *te
 	assert.False(t, errors.Is(err, gorm.ErrRecordNotFound), "record-not-found に化けないこと")
 	assert.Equal(t, 1, calls, "not-found 以外なら 2 回目を投げないこと")
 }
+
+// RemoveBackupCode は DB 側で 1 つだけ消す (#2852)。
+//
+// **読んだ配列を書き戻す形では解けない。** 別のコードを使う同時実行が互いの
+// 消費を打ち消し合い、使ったはずのコードが復活する。`array_remove` は冪等なので
+// interleaving に依存しない。
+func TestUserRepository_RemoveBackupCode(t *testing.T) {
+	repo := NewUserRepository(testDB)
+	user := insertTestUser(t, "bc_rm_1", "bcrm1")
+	defer cleanupUser(t, user.ID)
+
+	require.NoError(t, testDB.Create(&model.UserProfile{
+		UserID:                user.ID,
+		TwoFactorBackupSecret: model.StringArray{"c1", "c2", "c3"},
+		Fields:                datatypes.JSON([]byte("[]")),
+	}).Error)
+
+	require.NoError(t, repo.RemoveBackupCode(user.ID, "c2"))
+	found, err := repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c1", "c3"}, []string(found.TwoFactorBackupSecret))
+
+	// **冪等**。同じコードをもう一度消しても他が減らない。
+	require.NoError(t, repo.RemoveBackupCode(user.ID, "c2"))
+	found, err = repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c1", "c3"}, []string(found.TwoFactorBackupSecret))
+
+	// 存在しないコードは何も消さない。
+	require.NoError(t, repo.RemoveBackupCode(user.ID, "nope"))
+	found, err = repo.FindProfileByUserID(user.ID)
+	require.NoError(t, err)
+	assert.Len(t, found.TwoFactorBackupSecret, 2)
+}

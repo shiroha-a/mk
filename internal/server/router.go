@@ -3724,7 +3724,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		{"inbox.enqueuer", inboxHandler.HasEnqueuer(),
 			"同期 fallback へ落ち、actor 一致検査・LD-Signature 検証・replay guard を通らない"},
 		{"i.totpReplayGuard", iHandler.HasTOTPReplayGuard(),
-			"verify2FAToken 経由の 8 endpoint と i/2fa/done で有効な TOTP コードを再利用できる"},
+			"2FA gate を持つ 8 endpoint と i/2fa/done で有効な TOTP コードを再利用でき、バックアップコードの単回予約も効かなくなる"},
 		{"i.authInvalidator", iHandler.HasAuthInvalidator(),
 			"revoke-token / regenerate-token / delete-account / update の後も古い token が auth cache の TTL のあいだ通る"},
 		{"admin.userTokenInvalidator", adminHandler.HasUserTokenInvalidator(),
