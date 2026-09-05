@@ -2764,6 +2764,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	chatService := corechat.NewService(chatRepo, idGen)
 	chatService.SetStreamingPublisher(chatPublisher)
 	chatService.SetMainStreamPublisher(mainStreamPublisher)
+	// newChatMessage は upstream ChatService.ts と同じく main stream への publish と
+	// Web Push を対で送る。これが無いと、タブを閉じている利用者に届かない (#2840)。
+	chatService.SetChatPusher(webPushService)
+	// push の body に fromUser を載せるため sender を引く (#2840)。
+	chatService.SetUserRepo(userRepo)
 	// CherryPick 互換 AP 連合: 1-on-1 DM を Create+Note(_misskey_talk:true) で配送 (#692)。
 	chatService.SetAPDelivery(userRepo, apRenderer, apURLs, deliverService)
 	// chatScope=followers/following/mutual 判定用に following repo を渡す (#692)。
