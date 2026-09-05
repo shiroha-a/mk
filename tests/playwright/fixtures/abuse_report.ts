@@ -36,7 +36,8 @@ export async function fillAbuseReportWindow(page: Page, details: string): Promis
   });
 
   await page.evaluate((text) => {
-    const textarea = document.querySelector('textarea') as HTMLTextAreaElement | null;
+    const tas = Array.from(document.querySelectorAll('textarea')) as HTMLTextAreaElement[];
+    const textarea = tas[tas.length - 1];
     if (!textarea) return;
     textarea.focus();
     const setter = Object.getOwnPropertyDescriptor(
