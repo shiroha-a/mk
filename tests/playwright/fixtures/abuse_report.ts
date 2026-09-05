@@ -9,7 +9,7 @@ import { clickWhenReady } from './ui_click';
 /** MkAbuseReportWindow の定型フォームを埋めて Send 可能にする。 */
 export async function fillAbuseReportWindow(page: Page, details: string): Promise<void> {
   await page.waitForFunction(
-    () => document.querySelectorAll('textarea').length >= 1,
+    () => document.querySelector('[data-testid="abuse-report-details"] textarea') !== null,
     { timeout: 10_000 },
   );
 
@@ -36,8 +36,9 @@ export async function fillAbuseReportWindow(page: Page, details: string): Promis
   });
 
   await page.evaluate((text) => {
-    const tas = Array.from(document.querySelectorAll('textarea')) as HTMLTextAreaElement[];
-    const textarea = tas[tas.length - 1];
+    const textarea = document.querySelector(
+      '[data-testid="abuse-report-details"] textarea',
+    ) as HTMLTextAreaElement | null;
     if (!textarea) return;
     textarea.focus();
     const setter = Object.getOwnPropertyDescriptor(
