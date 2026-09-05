@@ -294,7 +294,28 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 
 	storedPassword := *profile.Password
 
-	scheme, passwordOK, handled := h.verifyPassword(c, user.ID, storedPassword, *req.Password)
+	// **passkey で認証できる利用者は、枠が取れなくても 503 にしない** (#2853)。
+	// `OutcomeUnavailable` は「password が正しいか分からない」であって
+	// 「間違っている」ではない。下の credential 分岐は
+	// `!passwordOK && !profile.UsePasswordLessLogin` で素通しにするので、
+	// passwordless 利用者はそこで認証できる。503 を返すと **passkey を持っている
+	// のにパスワード検証の輻輳でログインできない**。
+	//
+	// **検証自体は飛ばさない。** `migratePendingPassword` は `h.ok` 内でしか
+	// 走らず、step 2 は challenge を返すだけなので、**passkey でログインする
+	// 利用者にとっては** step 3 (`{username, password, credential}`) が唯一の
+	// 移行機会になる (TOTP で入る利用者は step 3 の token 経路で移行する)。
+	// 飛ばすと passkey 利用者が永久に argon2id のまま毎回 1 枠消費し続ける。fork frontend は
+	// passkey 完了時も実際の password を送る (`MkSignin.vue` の `onPasskeyDone`、
+	// 入力欄は `required`)。
+	// **token が来ていたら許容しない。** token 分岐は credential 分岐より前にあり、
+	// 先頭で `!passwordOK` を弾くので「password 不一致が素通しになる経路」では
+	// ない。許容すると、正しい password でも 403 (「パスワードが違います」) を
+	// 返し、身に覚えのない失敗ログイン履歴まで残す。
+	tolerateUnavailable := profile.UsePasswordLessLogin && profile.TwoFactorEnabled &&
+		len(req.Credential) > 0 && (req.Token == nil || *req.Token == "")
+
+	scheme, passwordOK, handled := h.verifyPasswordTolerant(c, user.ID, storedPassword, *req.Password, tolerateUnavailable)
 	if handled {
 		return nil
 	}
@@ -591,6 +612,19 @@ func (h *Handler) recordSignin(userID, ip string, headers http.Header, success b
 //
 // handled が真なら**呼び出し側は即座に nil を返すこと**。
 func (h *Handler) verifyPassword(c echo.Context, userID, stored, plain string) (scheme password.Scheme, ok, handled bool) {
+	return h.verifyPasswordTolerant(c, userID, stored, plain, false)
+}
+
+// verifyPasswordTolerant is verifyPassword with an opt-out from the 503.
+//
+// **`tolerateUnavailable` は「password が通らなくても他の要素で認証できる」
+// 呼び出し側だけが渡す** (#2853)。枠が取れなかったときに 503 で終わらせず、
+// `ok = false` で呼び出し側へ返す。passkey を持っている利用者が、使わない
+// パスワード検証の輻輳でログインできなくなるのを防ぐ。
+//
+// **渡してよいのは、その先で password 不一致が素通しになる経路だけ。** そうで
+// ないと「枠が取れなかった」が「パスワードが違う」に化ける。
+func (h *Handler) verifyPasswordTolerant(c echo.Context, userID, stored, plain string, tolerateUnavailable bool) (scheme password.Scheme, ok, handled bool) {
 	scheme, outcome := password.Verify(c.Request().Context(), stored, plain)
 	switch outcome {
 	case password.OutcomeUnavailable:
@@ -599,6 +633,12 @@ func (h *Handler) verifyPassword(c echo.Context, userID, stored, plain string) (
 		//
 		// **失敗ログイン履歴 (h.fail) も残さない。** password を一度も検証して
 		// いないので、残すと身に覚えのない失敗が signin-history に並ぶ。
+		if tolerateUnavailable {
+			// 呼び出し側が他の要素で認証できるので、503 にせず進める。
+			slog.Warn("signin: password verification unavailable, falling through to the second factor",
+				"path", c.Path(), "userId", userID, "scheme", scheme.String())
+			return scheme, false, false
+		}
 		slog.Warn("signin: password verification unavailable",
 			"path", c.Path(), "userId", userID, "scheme", scheme.String())
 		writeVerifierUnavailable(c)
