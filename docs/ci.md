@@ -29,7 +29,9 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 
 1. **カバレッジ閾値割れ** — パッケージごとに 90% (例外あり、CLAUDE.md Section 8 参照)。
    テストを足してから再 push する
-2. **本物の失敗** — ローカルで `go test ./internal/<pkg>/... -count=1` を回して再現させる
+2. **本物の失敗** — ローカルで `go test ./internal/<pkg>/... -race -count=1 -shuffle=3` を回して
+   再現させる。**`-race` と `-shuffle` を落とすと再現しない** (データ競合と順序依存は
+   これでしか出ない、#2841)。全体なら `make test` が同じ条件で走る
 3. **testcontainers の flaky** — PR と無関係なパッケージ (reaction の count_writer 等) で
    落ちていたら再実行を試す
 

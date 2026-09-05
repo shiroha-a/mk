@@ -15,7 +15,7 @@
 	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check \
+	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check \
 	diff-up diff-test diff-down diff-logs \
 	upstream-e2e upstream-e2e-deps upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
 
@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -185,10 +185,25 @@ clean: ## ビルド成果物を削除
 tidy: ## go mod tidy
 	go mod tidy
 
-test: ## 全テストを実行 (CI と同じ -shuffle seed)
-	# -shuffle は CI (.github/workflows/ci.yml) と同じ固定 seed。
-	# 揃えないと `make check` を通した変更が CI でだけ順序依存で落ちる (#2795)。
-	go test ./... -v -shuffle=3
+test: ## 全テストを実行 (CI と同じ -race / -count=1 / -shuffle seed)
+	# CI (.github/workflows/ci.yml) の test-shards と条件を揃える (#2841)。
+	# -shuffle の seed を揃えたのは #2795。順序依存は seed 固定で塞いだのに
+	# **データ競合は塞げていなかった** ので、同じ理屈で -race も揃える
+	# (実測 65s -> 160s。CI は push から結果まで 4-5 分かかるので往復するより速い)。
+	# -count=1 は CI との一致のため。-shuffle は cacheable flag ではないので、
+	# seed を渡している時点でキャッシュは元から効いていない。
+	# -race は cgo を要求する (CGO_ENABLED=0 の環境では make test-fast を使う)。
+	# -timeout / -coverprofile / -covermode は揃えなくてよい。前者は既定と同じ
+	# 10m で、後 2 つはカバレッジ閾値チェック用なので挙動に影響しない。
+	go test ./... -v -race -count=1 -shuffle=3
+
+.PHONY: test-fast
+test-fast: ## 全テストを -race 抜きで実行 (反復用。コミット前は make check を使う)
+	# **これはコミット前の検査ではない。** -race が無いので CI で落ちるものが
+	# 手元で緑になる。編集しながら回す用 (実測で make test の 1/2.5)。
+	# -count=1 は落とさない — -shuffle を外したときに (cached) で無検証の緑を
+	# 返すようになるため。
+	go test ./... -count=1 -shuffle=3
 
 plugin-doc-check: ## authoring.md の Go スニペットがコンパイルできるか検査
 	./tests/plugin-doc/check-snippets.sh
@@ -799,6 +814,10 @@ perm-check: ## router middleware の権限が upstream より緩くないか検�
 .PHONY: wiring-check
 wiring-check: ## router で配線が必要なものが外れていないか検査
 	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired|TestReadAllNotificationsPusherIsWired|TestWebPushProducersAreWired|TestChatPusherIsWired' -count=1 -v
+
+.PHONY: testflags-check
+testflags-check: ## make test が CI と同じテスト条件で走るか検査
+	go test ./internal/entitycompat/... -run 'TestMakeTestMatchesCIConditions|TestDocsQuoteTheCIShuffleSeed' -count=1 -v
 
 .PHONY: compose-check
 compose-check: ## 配布する compose にログの上限があるか検査

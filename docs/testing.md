@@ -51,6 +51,11 @@ go test ./internal/api/notes/...
 go test -race -count=1 -shuffle=3 -timeout 10m \
   -coverprofile=coverage.out -covermode=atomic ./...
 
+# `make test` はこのうち -race / -count=1 / -shuffle=3 の 3 つが同じ (#2841)。
+# **カバレッジは取らない**ので、閾値の検査には上のコマンドを使うこと。
+# **`-race` は cgo を要求する**ので、CGO_ENABLED=0 や C コンパイラの無い環境では
+# `make test-fast` を使う (ただしそれはコミット前の検査にならない)。
+
 # カバレッジHTMLレポート
 go tool cover -html=coverage.out
 ```
@@ -69,11 +74,11 @@ go tool cover -html=coverage.out
 
 CIではパッケージごとにカバレッジを計測し、閾値未達のパッケージがあればジョブが失敗する。CI は **4-way matrix shard** で並列実行され、ImportPath 順 modulo 分配で決定的にパッケージを割り当てる (約 4.7 分 → 1.5-2 分に短縮)。
 
-CI は **`-shuffle` を全 shard 共通の固定値 (`2795`) で**回す。`on` (毎回ランダム) は失敗を手元で再現できず、required check の `test` が不定期に赤くなる。**shard 番号も使わない** — shard 配属は`NR % 4` なので、テストパッケージが 1 つ増えるだけで既存パッケージの seed が変わり、順序が丸ごと入れ替わる (無関係な PR が未実行の順序を引いて赤くなる)。落ちたら`go test -count=1 -shuffle=2795 ./<package>/` でそのまま再現する。
+CI は **`-shuffle=3` を全 shard 共通の固定値として**回す。`on` (毎回ランダム) は失敗を手元で再現できず、required check の `test` が不定期に赤くなる。**shard 番号も使わない** — shard 配属は`NR % 4` なので、テストパッケージが 1 つ増えるだけで既存パッケージの seed が変わり、順序が丸ごと入れ替わる (無関係な PR が未実行の順序を引いて赤くなる)。落ちたら`go test -race -count=1 -shuffle=3 ./<package>/` でそのまま再現する (`make test` も同条件で走る、#2841)。
 
 **1 パッケージが試す順序は 1 通り**なので、`-shuffle` だけで全ての順序依存が見つかるわけではない。seed の値を時々変えると新しい順序を試せる。
 
-**カバレッジは順序に依存しうる。** 実測で 171 パッケージ中 3 つ (`internal/core/reversi` / `internal/core/role` / `internal/testutil`) が seed によって 0.1-0.5pt 動いた。いずれも閾値まで 2pt 以上あるので現状は落ちないが、閾値ぎりぎりのパッケージを 90.0% 台で放置すると seed 変更で落ちうる。
+**カバレッジは順序に依存しうる。** 実測で 173 パッケージ中 3 つ (`internal/core/reversi` / `internal/core/role` / `internal/testutil`) が seed によって 0.1-0.5pt 動いた。いずれも閾値まで 2pt 以上あるので現状は落ちないが、閾値ぎりぎりのパッケージを 90.0% 台で放置すると seed 変更で落ちうる。
 
 **プロセス共有の状態を張り替えるテストは必ず戻すこと。** `internal/server` の `newServer` / `New` はグローバルを 12 個 (`entity` の 7 つ: `SetMediaURLContext` / `SetAvatarDecorationLookup` / `SetCanChatLookup` / `SetUserRolesLookup` / `SetShowRemoteBadgesLookup` / `SetInstanceIconURLLookup` / `SetSilencedLookup`、加えて `notehide.SetFollowingRepo` / `coretwofactor.SetTestMode` / `meself.SetEnricher` / `password.SetCost` / `corenote.SetHookConcurrency`) 差し替える。1 度きりの起動を模したテストが戻さなかったため、後続の `avatar` / `emoji_redirect` が素の URL ではなく署名付きプロキシURL を受け取って落ちていた (5 seed すべてで失敗)。`internal/server/global_state_test.go` の `restoreProcessGlobals` を使う。`frontendutil` の loader キャッシュも同様で、fixture は `t.TempDir()` に置くので**ディレクトリが消えた後もキャッシュに内容が残る**。
 
