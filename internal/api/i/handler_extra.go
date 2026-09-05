@@ -55,18 +55,30 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	// 2FA gate: upstream Misskey TS (change-password.ts) は twoFactorEnabled
 	// なら token 必須 + twoFactorAuthenticate で検証する。mk-go では旧来
 	// password だけで通っていたため password 漏洩 = 2FA bypass で password
-	// 変更可能だった (drop-in regression)。verify2FAToken 経由なので RFC
+	// 変更可能だった (drop-in regression)。check2FAToken 経由なので RFC
 	// 6238 §5.2 の replay 保護も自動で効く。
 	//
 	// **順序は upstream のまま (token → password)。** 入れ替えると
 	// wrong-password + wrong-token の error code が drift する
 	// (INCORRECT_PASSWORD vs INVALID_TOKEN)。同じ罠を handler_2fa.go が 3 箇所で
-	// 明示的に禁じている。なお verify2FAToken はバックアップコードを消費するので、
-	// この後の 503 では 2FA が焼ける — develop でも password 不一致で同じことが
-	// 起きており本 PR で悪化はしないが、解消は別 issue にした。
-	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	// 明示的に禁じている。
+	//
+	// **消費は password が通ってから確定させる** (#2852)。検証と同時に焼くと、
+	// 現パスワードを打ち間違えるたびにバックアップコードが 1 枚減り、503
+	// (検証枠が取れない) でもサーバー都合で焼ける。
+	var use twoFAUse
+	if profile.TwoFactorEnabled {
+		var ok bool
+		if use, ok = h.check2FAToken(c.Request().Context(), profile, req.Token); !ok {
+			return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+		}
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			use.Rollback()
+		}
+	}()
 
 	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
 	if outcome == password.OutcomeUnavailable {
@@ -103,6 +115,10 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	if err := h.userService.UpdateProfileFields(u.ID, map[string]any{"password": hashStr}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// **password を書き換えられてから確定する。** 先に確定すると、書き込みに
+	// 失敗したときに何も変わっていないのに 2FA だけ焼ける。
+	use.Commit()
+	committed = true
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -129,10 +145,22 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// 2FA gate: upstream Misskey TS (delete-account.ts) は twoFactorEnabled
 	// なら token 必須。mk-go では旧来 password だけで通っていたため、
 	// password 漏洩 = 2FA bypass で account 削除可能だった (drop-in
-	// regression)。verify2FAToken 経由なので replay 保護も自動で効く。
-	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	// regression)。check2FAToken 経由なので replay 保護も自動で効く。
+	// **消費は password が通ってから確定させる** (#2852)。検証と同時に焼くと、
+	// password を打ち間違えるだけでバックアップコードが 1 枚減る。
+	var use twoFAUse
+	if profile.TwoFactorEnabled {
+		var ok bool
+		if use, ok = h.check2FAToken(c.Request().Context(), profile, req.Token); !ok {
+			return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+		}
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			use.Rollback()
+		}
+	}()
 
 	// upstream Misskey TS は raw `throw new Error('incorrect password')` を
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
@@ -182,6 +210,9 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 			slog.Warn("i/delete-account: enqueue cascade failed", "userId", u.ID, "err", err)
 		}
 	}
+	// **削除フラグが立ってから確定する** (#2852)。
+	use.Commit()
+	committed = true
 	return c.NoContent(http.StatusNoContent)
 }
 

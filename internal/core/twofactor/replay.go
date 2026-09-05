@@ -55,6 +55,25 @@ type ReplayGuard interface {
 	MarkUsed(ctx context.Context, userID, code string) (bool, error)
 }
 
+// ReplayReleaser is an optional extension of ReplayGuard for guards that can
+// undo a MarkUsed.
+//
+// **必要になる理由。** `MarkUsed` は SETNX で「検査」と「記録」が不可分なので、
+// 2FA を検証した時点で記録してしまう。ところが呼び出し側は、その後に走る
+// password 検証で落ちることがある (#2852)。記録を残したままにすると、利用者が
+// 同じ (まだ有効な) コードで打ち直したときに replay として弾かれ、原因から
+// 遠い `INVALID_TOKEN` になる。
+//
+// **検査を非破壊にする形は採らない。** EXISTS と SETNX に割ると、その隙間に
+// 同じコードで 2 本通せてしまい replay 保護が緩む。記録は今までどおり検証時に
+// 行い、失敗が確定した時点で取り消す。
+//
+// 実装しない guard は取り消しが no-op になる (Release を呼ぶ側が type assertion
+// で判定する)。fail-open 側なので、記録が残るだけで安全側に倒れる。
+type ReplayReleaser interface {
+	Release(ctx context.Context, userID, code string) error
+}
+
 // defaultReplayTTL covers the full acceptance window of a TOTP code under
 // our validation settings (Period=30s, Skew=totpSkew). A code generated for
 // step T stays structurally valid across [T-skew, T+skew] = (2*skew+1) steps,
@@ -112,6 +131,56 @@ func (g *RedisReplayGuard) MarkUsed(ctx context.Context, userID, code string) (b
 	}
 	key := fmt.Sprintf("%s:%s:%s", prefix, userID, code)
 	return g.Client.SetNX(ctx, key, "1", ttl).Result()
+}
+
+// Release removes the (userID, code) entry recorded by MarkUsed.
+//
+// 取り消せなかった場合は error を返すが、呼び出し側は握り潰してよい —
+// 記録が残るだけで、TOTP コードが 1 つ余分に使えなくなるのは安全側。
+func (g *RedisReplayGuard) Release(ctx context.Context, userID, code string) error {
+	if g == nil || g.Client == nil {
+		return nil
+	}
+	prefix := g.KeyPrefix
+	if prefix == "" {
+		prefix = "mk:2fa:totp:used"
+	}
+	return g.Client.Del(ctx, fmt.Sprintf("%s:%s:%s", prefix, userID, code)).Err()
+}
+
+// ReleaseReplay undoes a MarkUsed when the guard supports it.
+//
+// guard が nil、または ReplayReleaser を実装していない場合は何もしない。
+func ReleaseReplay(ctx context.Context, guard ReplayGuard, userID, code string) {
+	releaser, ok := guard.(ReplayReleaser)
+	if !ok || releaser == nil {
+		return
+	}
+	if err := releaser.Release(ctx, userID, code); err != nil {
+		// 取り消せなくても安全側 (コードが 1 つ使えなくなるだけ)。
+		slog.Warn("twofactor: failed to release replay guard entry", "userID", userID, "err", err)
+	}
+}
+
+// ReserveOnce records a single-use credential so a concurrent request cannot
+// accept the same one. Returns false when it was already reserved.
+//
+// **バックアップコードの単回性を守るために要る** (#2852)。DB の配列を読んでから
+// 書き戻すまでの間隔に複数のリクエストが入ると、全部が同じスナップショットを
+// 読んで全部が通る。SETNX なら原子的に 1 本だけに絞れる。
+//
+// guard が nil のときは true (fail-open)。Redis 障害で 2FA を閉塞させると
+// operator が自分の環境から締め出されるため、MarkUsed と同じ判断に揃える。
+func ReserveOnce(ctx context.Context, guard ReplayGuard, userID, key string) bool {
+	if guard == nil {
+		return true
+	}
+	ok, err := guard.MarkUsed(ctx, userID, key)
+	if err != nil {
+		slog.Warn("twofactor: reservation guard degraded, falling back to no protection", "userID", userID, "err", err)
+		return true
+	}
+	return ok
 }
 
 // ValidateWithReplay validates a TOTP code AND records it as consumed

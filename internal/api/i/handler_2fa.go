@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -62,9 +63,21 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	// (= mk-go も同じ shape にしないと frontend の error UI 分岐が崩れる)。
 	// mk-go では旧来 password だけで通っていたため、password 漏洩 = 既存 2FA を
 	// 攻撃者がコントロールする secret に置き換え可能だった。
-	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	// **消費は password が通ってから確定させる** (#2852)。検証と同時に焼くと、
+	// password を打ち間違えるだけでバックアップコードが 1 枚減る。
+	var use twoFAUse
+	if profile.TwoFactorEnabled {
+		var ok bool
+		if use, ok = h.check2FAToken(c.Request().Context(), profile, req.Token); !ok {
+			return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+		}
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			use.Rollback()
+		}
+	}()
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "78d6c839-20c9-4c66-b90a-fc0542168b48"))
 	}
@@ -87,6 +100,9 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	// tempSecretに保存 (doneで確認後にsecretに移動)
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{"twoFactorTempSecret": secret})
 
+	// **tempSecret を書き込んでから確定する** (#2852)。
+	use.Commit()
+	committed = true
 	return c.JSON(http.StatusOK, map[string]any{
 		"qr":     qrDataURL,
 		"url":    uri,
@@ -193,12 +209,32 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	// mk-go では旧来 password だけで通っていたため、password 漏洩 = 2FA bypass
 	// で 2FA 無効化 → 以後の sensitive 操作も password だけで通る連鎖が成立
 	// していた。
-	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	// **消費は password が通ってから確定させる** (#2852)。検証と同時に焼くと、
+	// password を打ち間違えるだけでバックアップコードが 1 枚減る。
+	var use twoFAUse
+	if profile.TwoFactorEnabled {
+		var ok bool
+		if use, ok = h.check2FAToken(c.Request().Context(), profile, req.Token); !ok {
+			return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+		}
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			use.Rollback()
+		}
+	}()
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "7add0395-9901-4098-82f9-4f67af65f775"))
 	}
+
+	// **ここでは Commit しない** (#2852)。この操作は 2FA を丸ごと消すので消費を
+	// 包含しており、直後の clear が同じ列を nil にする。
+	//
+	// **`committed` は立てる。** rollback を止めるためで、TOTP で解除したときに
+	// replay 記録が解放されると同じコードを window 内で使い回せてしまう
+	// (`TestTwoFAUnregister_KeepsTOTPReplayRecord` が固定)。
+	committed = true
 
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"twoFactorSecret":       nil,
@@ -251,28 +287,128 @@ func (h *Handler) requireWebAuthn(c echo.Context, password, incorrectPwID string
 	return user, profile, true
 }
 
-// verify2FAToken validates a TOTP token (or single-use backup code) against
-// the given profile. Backup codes are consumed in-place via UpdateProfileFields.
-// Returns true if the token authenticates the user.
+// twoFAUse is the deferred half of a 2FA verification: the token has been
+// accepted, but whether that acceptance becomes permanent is still open.
+//
+// **2FA を焼くのは操作が成立したときだけ** (#2852)。verify した直後に確定させて
+// いたので、この後ろで password を打ち間違えるだけでバックアップコードが 1 枚
+// 減っていた。TOTP は同じコードが replay guard に残り、打ち直すと原因から遠い
+// `INVALID_TOKEN` になる。
+type twoFAUse struct {
+	// commit makes the consumption permanent. nil のこともある (TOTP は検証時に
+	// 記録済みなので確定作業が無い)。
+	commit func()
+	// rollback undoes a consumption that was already recorded. nil のこともある
+	// (backup code は commit するまで何も書いていない)。
+	rollback func()
+}
+
+// Commit makes the 2FA consumption permanent. Safe on the zero value.
+func (u twoFAUse) Commit() {
+	if u.commit != nil {
+		u.commit()
+	}
+}
+
+// Rollback undoes a consumption recorded during verification. Safe on the
+// zero value, and safe to call after Commit only if the caller never commits
+// and rolls back the same use.
+func (u twoFAUse) Rollback() {
+	if u.rollback != nil {
+		u.rollback()
+	}
+}
+
+// check2FAToken validates a TOTP token (or single-use backup code) against the
+// given profile **without making the consumption permanent**. The caller must
+// call Commit on success or Rollback on failure.
 //
 // Misskey TS upstream の UserAuthService.twoFactorAuthenticate と同じ挙動:
 // backup code に hit したら使い捨てで消費し、それ以外は TOTP として検証する。
 // TOTP 経路は ValidateWithReplay で同一コードの replay を refuse する
 // (RFC 6238 §5.2 / mk-go 独自 hardening、upstream Misskey TS は持たない)。
-func (h *Handler) verify2FAToken(ctx context.Context, profile *model.UserProfile, token string) bool {
+//
+// **replay の記録だけは検証時に行う。** SETNX は検査と記録を分けられないので、
+// EXISTS と SETNX に割ると隙間に同じコードで 2 本通せてしまう。記録は今までどおり
+// 検証時に行い、失敗が確定したら Rollback で取り消す。
+func (h *Handler) check2FAToken(ctx context.Context, profile *model.UserProfile, token string) (twoFAUse, bool) {
 	if token == "" {
-		return false
+		return twoFAUse{}, false
 	}
-	if remaining, err := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), token); err == nil {
-		_ = h.userService.UpdateProfileFields(profile.UserID, map[string]any{
-			"twoFactorBackupSecret": model.StringArray(remaining),
-		})
-		return true
+	if _, err := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), token); err == nil {
+		userID := profile.UserID
+		// **DB へ書く前に予約する** (#2852)。commit を password 検証の後ろへ動かした
+		// ぶん、profile を読んでから書き戻すまでの間隔が伸びた。同じコードを載せた
+		// リクエストが同時に来ると、全部が同じスナップショットを読んで全部が通り、
+		// **1 枚の消費で複数の 2FA-gated 操作が成立する**。TOTP と同じ SETNX で
+		// 予約すれば、原子的に 1 本だけに絞れる。
+		//
+		// guard が無い構成では今までどおり素通しする (fail-open)。
+		if !twofactor.ReserveOnce(ctx, h.totpReplayGuard, userID, backupCodeGuardKey(token)) {
+			return twoFAUse{}, false
+		}
+		return twoFAUse{
+			commit: func() {
+				// **読んだ配列を書き戻さない** (#2852)。別のコードを使う同時実行が
+				// 互いの消費を打ち消し合い、使ったはずのコードが復活する。
+				if err := h.userService.RemoveBackupCode(userID, token); err != nil {
+					// 消費に失敗したら予約を残さない — 残すと TTL のあいだ
+					// 正当な利用者が同じコードで打ち直せなくなる。
+					slog.Warn("2fa: failed to consume backup code", "userId", userID, "err", err)
+					releaseReservation(ctx, h.totpReplayGuard, userID, backupCodeGuardKey(token))
+				}
+			},
+			rollback: func() {
+				releaseReservation(ctx, h.totpReplayGuard, userID, backupCodeGuardKey(token))
+			},
+		}, true
 	}
 	if profile.TwoFactorSecret == nil {
-		return false
+		return twoFAUse{}, false
 	}
-	return twofactor.ValidateWithReplay(ctx, h.totpReplayGuard, profile.UserID, token, *profile.TwoFactorSecret)
+	if !twofactor.ValidateWithReplay(ctx, h.totpReplayGuard, profile.UserID, token, *profile.TwoFactorSecret) {
+		return twoFAUse{}, false
+	}
+	guard, userID := h.totpReplayGuard, profile.UserID
+	return twoFAUse{rollback: func() {
+		releaseReservation(ctx, guard, userID, token)
+	}}, true
+}
+
+// backupCodeGuardKey namespaces a backup code inside the TOTP replay keyspace.
+//
+// 同じ guard を共有するので prefix で分ける。**今のコード生成では衝突しない**
+// (バックアップコードは hex 16 文字、TOTP は 6 桁) が、片方の桁数を変えたときに
+// 「一方を使うともう一方が使えなくなる」形で壊れるのを防ぐ。
+func backupCodeGuardKey(code string) string { return "bc:" + code }
+
+// releaseReservation undoes a MarkUsed, detached from the request context.
+//
+// **リクエストの ctx をそのまま使うと取り消せない** (#2852)。password 検証が
+// `OutcomeUnavailable` になる理由の 1 つが ctx キャンセルで、そのときは
+// `Del` も `context canceled` で落ちて記録が残る。安全側ではあるが、
+// 「503 でも焼けない」という狙いが半分しか効かない。
+func releaseReservation(ctx context.Context, guard twofactor.ReplayGuard, userID, key string) {
+	out, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	twofactor.ReleaseReplay(out, guard, userID, key)
+}
+
+// releaseTimeout bounds the best-effort rollback so a stuck Redis cannot hold
+// the request goroutine.
+const releaseTimeout = 3 * time.Second
+
+// verify2FAToken validates a 2FA token and consumes it immediately.
+//
+// **password を先に検証している経路だけが使ってよい。** 2FA gate が password
+// より前にある経路は check2FAToken を使い、password が通ってから Commit すること
+// (#2852)。
+func (h *Handler) verify2FAToken(ctx context.Context, profile *model.UserProfile, token string) bool {
+	use, ok := h.check2FAToken(ctx, profile, token)
+	if ok {
+		use.Commit()
+	}
+	return ok
 }
 
 // twoFAKeyNameMaxLen mirrors upstream の paramDef `name: { minLength: 1,
@@ -311,6 +447,7 @@ func (h *Handler) TwoFARegisterKey(c echo.Context) error {
 	if !ok {
 		return nil
 	}
+	// **password を先に検証している経路なので即時消費でよい** (#2852)。
 	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
@@ -359,6 +496,7 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	if !ok {
 		return nil
 	}
+	// **password を先に検証している経路なので即時消費でよい** (#2852)。
 	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
 		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
 	}
@@ -479,9 +617,21 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	}
 	// 2FA gate (passkey 削除は 2FA の物理 factor を 1 つ抜く操作なので強い
 	// 認証が必要)。**必ず password check より先** に置く (upstream 順)。
-	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	// **消費は password が通ってから確定させる** (#2852)。検証と同時に焼くと、
+	// password を打ち間違えるだけでバックアップコードが 1 枚減る。
+	var use twoFAUse
+	if profile.TwoFactorEnabled {
+		var ok bool
+		if use, ok = h.check2FAToken(c.Request().Context(), profile, req.Token); !ok {
+			return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+		}
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			use.Rollback()
+		}
+	}()
 	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "141c598d-a825-44c8-9173-cfb9d92be493"))
 	}
@@ -501,6 +651,9 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	}
 	// upstream 互換: 削除でも `meUpdated` を publish して frontend UI を即時更新 (#707)。
 	h.publishMeUpdated(user.ID)
+	// **key を消してから確定する** (#2852)。
+	use.Commit()
+	committed = true
 	// upstream は `return {}` なので 200 + 空オブジェクト (204 ではない)。
 	return c.JSON(http.StatusOK, map[string]any{})
 }

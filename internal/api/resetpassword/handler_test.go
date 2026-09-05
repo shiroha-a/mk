@@ -124,6 +124,8 @@ func (m *mockUserRepo) UpdateProfile(userID string, fields map[string]any) error
 	return nil
 }
 
+func (m *mockUserRepo) RemoveBackupCode(_, _ string) error { return nil }
+
 func (m *mockUserRepo) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {
 	p, ok := m.profiles[userID]
 	if !ok || p.Password == nil || *p.Password != currentHash {

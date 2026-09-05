@@ -57,11 +57,23 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 	// なら token 必須。mk-go では旧来 password だけで通っていたため、
 	// password 漏洩 = 2FA bypass で email 乗っ取り → password reset で
 	// account takeover まで到達可能だった (drop-in regression、認証強度
-	// として最も影響が大きい経路の 1 つ)。verify2FAToken 経由なので
+	// として最も影響が大きい経路の 1 つ)。check2FAToken 経由なので
 	// replay 保護も自動で効く。
-	if profile.TwoFactorEnabled && !h.verify2FAToken(c.Request().Context(), profile, req.Token) {
-		return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+	// **消費は password が通ってから確定させる** (#2852)。検証と同時に焼くと、
+	// password を打ち間違えるだけでバックアップコードが 1 枚減る。
+	var use twoFAUse
+	if profile.TwoFactorEnabled {
+		var ok bool
+		if use, ok = h.check2FAToken(c.Request().Context(), profile, req.Token); !ok {
+			return c.JSON(http.StatusForbidden, apierr.InvalidToken())
+		}
 	}
+	committed := false
+	defer func() {
+		if !committed {
+			use.Rollback()
+		}
+	}()
 
 	// パスワード検証。upstream Misskey TS は ApiError(meta.errors.incorrectPassword)
 	// を framework が 400 (= client error) に変換する (#885)。mk-go も
@@ -124,6 +136,9 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
+	// **profile を書き換えられてから確定する** (#2852)。
+	use.Commit()
+	committed = true
 	return h.Me(c)
 }
 

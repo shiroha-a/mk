@@ -1444,3 +1444,23 @@ func TestShowByUsername_NonNormalizedStoredHost(t *testing.T) {
 		})
 	}
 }
+
+// RemoveBackupCode は repo へそのまま委譲する (#2852)。
+//
+// **消費を DB 側の array_remove に移した経路。** service が引数を落とすと
+// 「消したはずのコードが残る」形で壊れるので、委譲そのものを固定する。
+func TestService_RemoveBackupCode(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	var gotUser, gotCode string
+	repo.RemoveBackupCodeFn = func(userID, code string) error {
+		gotUser, gotCode = userID, code
+		return nil
+	}
+	idGen, _ := id.NewGenerator("aidx")
+	svc := user.NewService(repo, testutil.NewMockNoteRepository(),
+		testutil.NewMockUserNotePiningRepository(), idGen)
+
+	require.NoError(t, svc.RemoveBackupCode("u1", "c2"))
+	assert.Equal(t, "u1", gotUser)
+	assert.Equal(t, "c2", gotCode)
+}

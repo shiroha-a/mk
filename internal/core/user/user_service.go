@@ -947,6 +947,14 @@ func (s *Service) UpdateProfileFields(userID string, fields map[string]any) erro
 	return s.userRepo.UpdateProfile(userID, fields)
 }
 
+// RemoveBackupCode atomically deletes one single-use 2FA backup code.
+//
+// **読んだ配列を書き戻さない** (#2852)。別のコードを使う同時実行が互いの消費を
+// 打ち消し合うため、消す操作そのものを DB 側で行う。
+func (s *Service) RemoveBackupCode(userID, code string) error {
+	return s.userRepo.RemoveBackupCode(userID, code)
+}
+
 // FindProfileByVerifyCode looks up a profile by emailVerifyCode.
 func (s *Service) FindProfileByVerifyCode(code string) (*model.UserProfile, error) {
 	return s.userRepo.FindProfileByVerifyCode(code)

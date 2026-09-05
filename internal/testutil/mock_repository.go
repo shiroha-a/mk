@@ -28,6 +28,7 @@ type MockUserRepository struct {
 	Profiles                  map[string]*model.UserProfile // keyed by userID
 	FindByUsernameLowerFn     func(username string, host *string) (*model.User, error)
 	UpdatePasswordIfCurrentFn func(userID, currentHash, newHash string) (bool, error)
+	RemoveBackupCodeFn        func(userID, code string) error
 	// RecommendationFollowing maps viewerID -> list of followeeIDs to exclude
 	// from ListUserRecommendations. Set by tests to emulate the "already
 	// following" filter.
@@ -797,6 +798,26 @@ func (m *MockUserRepository) UpdateProfile(userID string, fields map[string]any)
 	}
 	*p = next
 	m.Profiles[userID] = p
+	return nil
+}
+
+// RemoveBackupCode mirrors the SQL `array_remove` semantics: it deletes the
+// code from whatever is stored now, not from a caller-supplied snapshot.
+func (m *MockUserRepository) RemoveBackupCode(userID, code string) error {
+	if m.RemoveBackupCodeFn != nil {
+		return m.RemoveBackupCodeFn(userID, code)
+	}
+	p := m.Profiles[userID]
+	if p == nil {
+		return nil
+	}
+	out := make(model.StringArray, 0, len(p.TwoFactorBackupSecret))
+	for _, c := range p.TwoFactorBackupSecret {
+		if c != code {
+			out = append(out, c)
+		}
+	}
+	p.TwoFactorBackupSecret = out
 	return nil
 }
 
