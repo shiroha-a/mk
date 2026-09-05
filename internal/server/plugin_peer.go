@@ -43,7 +43,7 @@ const peerPath = "/_peer"
 //
 // **1 つの定数から作る。** ここと peerAPIPrefix が別々のリテラルだと、片方を
 // 変えたときに BodyLimitByPath の表だけが外れて、上限が黙って /api の既定に
-// 戻る (配線の gate は文字列一致なので緑のまま)。
+// 戻る (配線の gate は配線が「書かれていること」しか見ないので緑のまま)。
 const apiGroupPrefix = "/api"
 
 // peerAPIPrefix is where plugin routes actually live.
