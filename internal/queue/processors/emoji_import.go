@@ -40,7 +40,8 @@ func (p *ImportCustomEmojisProcessor) Handle(ctx context.Context, t driver.Task)
 			errors.Is(err, emojiimport.ErrMissingMeta) ||
 			errors.Is(err, emojiimport.ErrMalformedMeta) ||
 			errors.Is(err, emojiimport.ErrUserNotFound) ||
-			errors.Is(err, emojiimport.ErrDriveFileNotFound) {
+			errors.Is(err, emojiimport.ErrDriveFileNotFound) ||
+			errors.Is(err, emojiimport.ErrZipEntryTooLarge) {
 			return fmt.Errorf("%w: %w", err, driver.SkipRetry)
 		}
 		return err

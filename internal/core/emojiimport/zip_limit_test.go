@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"regexp"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/core/drive"
@@ -186,4 +187,73 @@ func TestRun_SkipsOversizedImage(t *testing.T) {
 	assert.Equal(t, 1, res.Total)
 	assert.Equal(t, 0, res.Imported, "上限超過の画像が取り込まれている")
 	assert.Equal(t, 1, res.Skipped)
+}
+
+// **出荷される既定値を固定する。** 上限を var にしたことで、`Run` を通るテストは
+// withCaps が、readZipEntry 直叩きのテストはリテラルが上限を与えるので、
+// **本番値を参照するアサーションが 1 つも無くなっていた**。桁を打ち間違えても
+// (実測: 64<<40 / 32<<40 にしても) 全テストが緑のままになる。
+func TestZipCaps_ProductionDefaults(t *testing.T) {
+	assert.Equal(t, int64(64<<20), maxMetaJSONBytes, "meta.json の上限は upstream zip.ts と同じ 64MiB")
+	assert.Equal(t, int64(32<<20), maxEmojiImageBytes, "画像の上限は upstream zip.ts と同じ 32MiB")
+}
+
+// **ヘッダを大きく偽装したケース。** 既存の偽装テストはサイズを小さく詰めており、
+// その場合は stdlib が不一致を検出するので `UncompressedSize64` 検査を消しても
+// 落ちなかった。宣言だけ大きくすると、ヘッダ検査だけが分岐点になる。
+func TestReadZipEntry_RejectsWhenHeaderClaimsHuge(t *testing.T) {
+	// Store 方式 (無圧縮) で 100 バイト。圧縮すると size 欄の探索が当たらない。
+	var buf bytes.Buffer
+	zw := zip.NewWriter(&buf)
+	w, err := zw.CreateHeader(&zip.FileHeader{Name: "small.png", Method: zip.Store})
+	require.NoError(t, err)
+	_, err = w.Write(bytes.Repeat([]byte("x"), 100))
+	require.NoError(t, err)
+	require.NoError(t, zw.Close())
+
+	// uncompressed size 欄 100 -> 16MiB。
+	forged := forgeUncompressedSize(t, buf.Bytes(), 100, 1<<24)
+	f := openEntry(t, forged, "small.png")
+	require.Equal(t, uint64(1<<24), f.UncompressedSize64, "ヘッダ偽装が効いていない")
+
+	_, err = readZipEntry(f, 4<<10)
+	assert.ErrorIs(t, err, ErrZipEntryTooLarge,
+		"ヘッダが上限超過を宣言しているのに読みに行っている")
+}
+
+// --- upstream 2026.9.0 の isValidName (長さ + パターン) ---
+
+func TestValidImportName(t *testing.T) {
+	// **リテラルで書く。** maxImportNameLength を参照すると、定数を変える変異に
+	// テスト側が追随してしまい境界がずれても落ちない (実測で 256 にする変異が
+	// 生き残った)。upstream の MAX_NAME_LENGTH は 255。
+	assert.Equal(t, 255, maxImportNameLength, "upstream MAX_NAME_LENGTH と揃える")
+	long := bytes.Repeat([]byte("a"), 255)
+	tooLong := bytes.Repeat([]byte("a"), 256)
+
+	cases := []struct {
+		name    string
+		value   string
+		pattern *regexp.Regexp
+		ok      bool
+	}{
+		{"plain file name", "smile.png", validFileName, true},
+		{"multi extension", "a.b.c", validFileName, true},
+		{"no extension", "smile", validFileName, true},
+		// 2026.9.0 で厳格化。旧パターン `^[a-zA-Z0-9_]+?([a-zA-Z0-9.]+)?$` は通していた。
+		{"double dot", "a..png", validFileName, false},
+		{"trailing dot", "a.", validFileName, false},
+		{"leading dot", ".png", validFileName, false},
+		{"path separator", "sub/a.png", validFileName, false},
+		{"exactly 255", string(long), validFileName, true},
+		{"256 chars", string(tooLong), validFileName, false},
+		{"emoji name", "smile", validEmojiName, true},
+		{"emoji name with dot", "smi.le", validEmojiName, false},
+		{"emoji name 256 chars", string(tooLong), validEmojiName, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.ok, validImportName(tc.value, tc.pattern))
+		})
+	}
 }

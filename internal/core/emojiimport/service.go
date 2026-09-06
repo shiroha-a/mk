@@ -104,12 +104,24 @@ type metaEmoji struct {
 	LocalOnly   bool     `json:"localOnly"`
 }
 
-// validFileName matches Misskey's ImportCustomEmojisProcessorService regex.
-// 「`[a-zA-Z0-9_]+?([a-zA-Z0-9\.]+)?`」相当。
-var validFileName = regexp.MustCompile(`^[a-zA-Z0-9_]+?([a-zA-Z0-9.]+)?$`)
+// maxImportNameLength は meta.json 中の名前の長さ上限。upstream
+// ImportCustomEmojisProcessorService の `MAX_NAME_LENGTH` と同じ。
+// これが無いと、DB の列長 (drive_file.name varchar(256) / emoji.name varchar(128))
+// で落ちるまでに画像処理と storage 書き込みが 1 件ぶん無駄に走る。
+const maxImportNameLength = 255
 
-// validEmojiName matches Misskey's validation for emoji names.
+// validFileName matches Misskey's ImportCustomEmojisProcessorService
+// `FILE_NAME_PATTERN` (2026.9.0 で厳格化された)。旧 upstream の
+// `^[a-zA-Z0-9_]+?([a-zA-Z0-9.]+)?$` は `a..png` や `a.` を通していた。
+var validFileName = regexp.MustCompile(`^[a-zA-Z0-9_]+(\.[a-zA-Z0-9]+)*$`)
+
+// validEmojiName matches Misskey's `EMOJI_NAME_PATTERN`.
 var validEmojiName = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
+
+// validImportName は upstream の isValidName 相当 (長さ + パターン)。
+func validImportName(v string, pattern *regexp.Regexp) bool {
+	return len(v) <= maxImportNameLength && pattern.MatchString(v)
+}
 
 // Run executes the import for the given user/file. Per-item errors are logged
 // and counted as Skipped so that a single malformed entry does not abort the
@@ -180,12 +192,12 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 			result.Skipped++
 			continue
 		}
-		if !validFileName.MatchString(record.FileName) {
+		if !validImportName(record.FileName, validFileName) {
 			slog.Warn("emoji import: invalid filename", "filename", record.FileName)
 			result.Skipped++
 			continue
 		}
-		if !validEmojiName.MatchString(record.Emoji.Name) {
+		if !validImportName(record.Emoji.Name, validEmojiName) {
 			slog.Warn("emoji import: invalid emoji name", "name", record.Emoji.Name)
 			result.Skipped++
 			continue
