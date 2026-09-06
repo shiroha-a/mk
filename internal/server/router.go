@@ -3224,7 +3224,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/queue/retry-job", adminHandler.QueueRetryJob, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:queue"))
 	api.POST("/admin/queue/show-job", adminHandler.QueueShowJob, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:queue"))
 	api.POST("/admin/queue/show-job-logs", adminHandler.QueueShowJobLogs, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:queue"))
-	api.POST("/admin/queue/stats", adminHandler.QueueStats, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:emoji"))
+	api.POST("/admin/queue/stats", adminHandler.QueueStats, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:queue"))
 
 	// --- Phase 7.6b: chat/*, auth/*, ap/*, sw/*, reversi/*, bubble-game/*, misc ---
 
