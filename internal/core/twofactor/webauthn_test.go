@@ -443,6 +443,38 @@ func TestPasskeySessionKey(t *testing.T) {
 	assert.Equal(t, "twofa:webauthn:passkey:ctx1", passkeySessionKey("ctx1"))
 }
 
+// upstream の GHSA は登録 / 2FA 認証 / passkey サインインが同一の
+// `webauthn:challenge:` 名前空間を共有していたこと (かつ passkey の context が
+// リクエストボディ由来だったこと) が原因だった。mk-go は固定リテラル `passkey:` を
+// **可変部の前**に置くので構造的に衝突しない。**キー名を文字列で pin するだけでは
+// この性質を検証できない** — 3 系統が互いのキーに化けられないことを直接見る。
+//
+// userID は base36 なので `:` を含まない。passkey の ctxID に他系統のキー形を
+// そのまま流し込んでも、生成されるキーは別物でなければならない。
+func TestWebAuthnSessionKeys_CannotCollideAcrossFlows(t *testing.T) {
+	const uid = "alice"
+	login := loginSessionKey(uid)
+	reg := registrationSessionKey(uid)
+
+	// 3 系統が互いに異なる。
+	assert.NotEqual(t, login, reg)
+	assert.NotEqual(t, login, passkeySessionKey(uid))
+	assert.NotEqual(t, reg, passkeySessionKey(uid))
+
+	// passkey の context に他系統のキーの可変部を流し込んでも当たらない。
+	for _, ctx := range []string{uid, uid + ":login", uid + ":registration", "alice:login"} {
+		got := passkeySessionKey(ctx)
+		assert.NotEqual(t, login, got, "passkey ctx %q が login キーに化けた", ctx)
+		assert.NotEqual(t, reg, got, "passkey ctx %q が registration キーに化けた", ctx)
+		assert.True(t, strings.HasPrefix(got, "twofa:webauthn:passkey:"),
+			"passkey キーは固定リテラルで始まる (可変部を前に置くと衝突しうる)")
+	}
+
+	// 逆向き: login / registration のキーが passkey 名前空間に入らない。
+	assert.False(t, strings.HasPrefix(login, "twofa:webauthn:passkey:"))
+	assert.False(t, strings.HasPrefix(reg, "twofa:webauthn:passkey:"))
+}
+
 // --- BeginRegistration / BeginLogin Redis error paths ---
 
 func TestBeginRegistration_PutSessionFails(t *testing.T) {
