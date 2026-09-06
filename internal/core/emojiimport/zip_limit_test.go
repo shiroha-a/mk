@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/binary"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/core/drive"
@@ -256,4 +257,16 @@ func TestValidImportName(t *testing.T) {
 			assert.Equal(t, tc.ok, validImportName(tc.value, tc.pattern))
 		})
 	}
+}
+
+// upstream の truncateForLog 相当。**上限を移植したなら log 側も要る** —
+// meta.json は 64MiB まで許すので、名前をそのまま出すと 1 行が数十 MiB になる。
+func TestTruncateForLog(t *testing.T) {
+	assert.Equal(t, "short", truncateForLog("short"))
+	exact := string(bytes.Repeat([]byte("a"), 255))
+	assert.Equal(t, exact, truncateForLog(exact), "255 はそのまま")
+	over := string(bytes.Repeat([]byte("a"), 256))
+	got := truncateForLog(over)
+	assert.Equal(t, 255+3, len(got), "255 で切って ... を足す")
+	assert.True(t, strings.HasSuffix(got, "..."))
 }

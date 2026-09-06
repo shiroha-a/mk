@@ -123,6 +123,16 @@ func validImportName(v string, pattern *regexp.Regexp) bool {
 	return len(v) <= maxImportNameLength && pattern.MatchString(v)
 }
 
+// truncateForLog は upstream の同名ヘルパー相当。**上限を移植したなら log 側も要る** —
+// meta.json は 64MiB まで許すので、1 レコードに数十 MiB の名前を入れればそのまま
+// 1 行のログとして出てしまう。
+func truncateForLog(v string) string {
+	if len(v) <= maxImportNameLength {
+		return v
+	}
+	return v[:maxImportNameLength] + "..."
+}
+
 // Run executes the import for the given user/file. Per-item errors are logged
 // and counted as Skipped so that a single malformed entry does not abort the
 // batch. 本家と同様「meta.json が壊れていれば job 全体失敗、個別エントリは
@@ -193,31 +203,31 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 			continue
 		}
 		if !validImportName(record.FileName, validFileName) {
-			slog.Warn("emoji import: invalid filename", "filename", record.FileName)
+			slog.Warn("emoji import: invalid filename", "filename", truncateForLog(record.FileName))
 			result.Skipped++
 			continue
 		}
 		if !validImportName(record.Emoji.Name, validEmojiName) {
-			slog.Warn("emoji import: invalid emoji name", "name", record.Emoji.Name)
+			slog.Warn("emoji import: invalid emoji name", "name", truncateForLog(record.Emoji.Name))
 			result.Skipped++
 			continue
 		}
 
 		entry := index[record.FileName]
 		if entry == nil {
-			slog.Warn("emoji import: missing zip entry", "filename", record.FileName)
+			slog.Warn("emoji import: missing zip entry", "filename", truncateForLog(record.FileName))
 			result.Skipped++
 			continue
 		}
 		imgBody, err := readZipEntry(entry, maxEmojiImageBytes)
 		if err != nil {
-			slog.Warn("emoji import: read entry failed", "filename", record.FileName, "err", err)
+			slog.Warn("emoji import: read entry failed", "filename", truncateForLog(record.FileName), "err", err)
 			result.Skipped++
 			continue
 		}
 
 		if err := i.replaceEmoji(ctx, record, imgBody); err != nil {
-			slog.Warn("emoji import: replace failed", "name", record.Emoji.Name, "err", err)
+			slog.Warn("emoji import: replace failed", "name", truncateForLog(record.Emoji.Name), "err", err)
 			result.Skipped++
 			continue
 		}
