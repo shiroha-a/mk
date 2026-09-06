@@ -716,7 +716,10 @@ func TestEffectivePolicy_TimeoutDisableWarnsOnceWithoutProviderData(t *testing.T
 	_, err = svc.GetUserPoliciesChecked("u2")
 	require.ErrorIs(t, err, role.ErrEffectivePolicyProvider)
 	output := logs.String()
-	assert.Equal(t, 1, strings.Count(output, "effective policy provider disabled after timeout"))
+	// **失敗したら logs を丸ごと出す。** 期待値と実際値だけだと 0 件なのか
+	// 2 件なのかも混入元も分からず、#2867 の調査で実際に詰まった。
+	assert.Equalf(t, 1, strings.Count(output, "effective policy provider disabled after timeout"),
+		"logs:\n%s", output)
 	assert.NotContains(t, output, "secret-provider-name")
 	assert.NotContains(t, output, "secret resolver detail")
 	assert.NotContains(t, output, "canSearchNotes")
@@ -739,7 +742,8 @@ func TestEffectivePolicy_UncheckedFallbackWarningsAreCountedAndRateLimited(t *te
 	}
 
 	output := logs.String()
-	assert.Equal(t, 3, strings.Count(output, "effective policy provider fallback"), "counts 1, 2, and 4 are reported instead of logging every request")
+	assert.Equalf(t, 3, strings.Count(output, "effective policy provider fallback"),
+		"counts 1, 2, and 4 are reported instead of logging every request\nlogs:\n%s", output)
 	assert.Contains(t, output, "failures=4")
 	assert.NotContains(t, output, "secret-provider-name")
 	assert.NotContains(t, output, "secret resolver detail")

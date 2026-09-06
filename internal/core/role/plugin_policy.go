@@ -31,6 +31,18 @@ type policyProviderRuntime struct {
 	disabled  atomic.Bool
 	fallbacks atomic.Uint64
 
+	// logger は runtime を作った時点の slog.Default() を握る。
+	//
+	// **毎回 slog.Default() を引き直さない** (#2867)。provider の goroutine は
+	// それを起こしたリクエストより長く生きる (deadline まで `<-ctx.Done()` で
+	// 待ち、返ってから warn を出す) ので、引き直すと「そのとき default だった
+	// 誰か」の出力先に書く。テストは `slog.SetDefault` でグローバルを差し替えて
+	// 出力を数えるため、**別のテストが残した goroutine の warn が紛れ込む**。
+	//
+	// production では `cmd/misskey/main.go` が起動時に `slog.SetDefault` を
+	// 済ませてからプラグインを登録する (= runtime 生成はその後) ので挙動は同じ。
+	logger *slog.Logger
+
 	cacheMu      sync.Mutex
 	cache        map[policyProviderCacheKey]*list.Element
 	cacheLRU     list.List
@@ -46,6 +58,7 @@ func newPolicyProviderRuntime(cacheEntries int) *policyProviderRuntime {
 		cacheEntries = defaultEffectivePolicyProviderCacheEntries
 	}
 	runtime := &policyProviderRuntime{
+		logger:       slog.Default(),
 		token:        make(chan struct{}, 1),
 		cache:        make(map[policyProviderCacheKey]*list.Element),
 		cacheEntries: cacheEntries,
@@ -260,11 +273,23 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 	return out, nil
 }
 
+// log returns the logger captured when the runtime was built, falling back to
+// the process default.
+//
+// **nil を許すこと。** 内部テストは `policyProviderRuntime` を直接組み立てる
+// ので、コンストラクタを通らない値が存在する。
+func (r *policyProviderRuntime) log() *slog.Logger {
+	if r.logger != nil {
+		return r.logger
+	}
+	return slog.Default()
+}
+
 func recordPolicyProviderFallback(runtime *policyProviderRuntime) {
 	failures := runtime.fallbacks.Add(1)
 	// 1, 2, 4, 8...回だけ記録し、恒常障害でもlog volumeを有界に近づける。
 	if failures&(failures-1) == 0 {
-		slog.Warn("effective policy provider fallback", "failures", failures)
+		runtime.log().Warn("effective policy provider fallback", "failures", failures)
 	}
 }
 
@@ -513,7 +538,7 @@ func disablePolicyProvider(runtime *policyProviderRuntime) {
 	}
 	runtime.cacheMu.Unlock()
 	if disabled {
-		slog.Warn("effective policy provider disabled after timeout")
+		runtime.log().Warn("effective policy provider disabled after timeout")
 	}
 }
 
