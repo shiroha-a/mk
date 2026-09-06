@@ -203,6 +203,7 @@
   "gallery/posts/like": "write:gallery-likes",
   "gallery/posts/unlike": "write:gallery-likes",
   "gallery/posts/update": "write:gallery",
+  "i": "read:account",
   "i/claim-achievement": "write:account",
   "i/favorites": "read:favorites",
   "i/gallery/likes": "read:gallery-likes",

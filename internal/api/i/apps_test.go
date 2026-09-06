@@ -438,6 +438,26 @@ func TestRevokeToken_UnauthenticatedUsesEndpointSpecificError(t *testing.T) {
 	assert.Contains(t, rec.Body.String(), "6f1f0d3a-3d5b-4b1f-9c3e-2a6d1e5b8c47")
 }
 
+// 凍結アカウントは 403。**upstream はこの endpoint で suspended を見ない** ので
+// 意図的な乖離 (docs/divergence.md に記録)。この分岐が無いと 401 になり、
+// upstream の 204 からさらに遠のく。
+func TestRevokeToken_SuspendedGets403(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	h.SetAccessTokenRepo(testutil.NewMockAccessTokenRepository())
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"tokenId":"t1"}`))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	// Authenticate は凍結ユーザーを anonymous に落としつつ flag だけ積む。
+	c.Set("misskeySuspended", true)
+	_ = h.RevokeToken(c)
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "YOUR_ACCOUNT_SUSPENDED")
+}
+
 // **DB 障害を「失効した」(204) に丸めない** (#2792)。
 func TestRevokeToken_DBFailureIsNot204(t *testing.T) {
 	h, _ := newExtraHandler(t)

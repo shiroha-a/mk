@@ -35,7 +35,11 @@ var (
 	requireCredRe      = regexp.MustCompile(`(?m)^\trequireCredential:\s*true`)
 	// kind は meta の直下 (タブ 1 つ) にだけ現れる。paramDef など入れ子の
 	// `kind:` を拾わないよう行頭のインデントまで含めて照合する。
-	kindRe = regexp.MustCompile(`(?m)^\tkind:\s*'([^']+)'`)
+	// **クォートは 2 種類ある。** upstream の `endpoints/i.ts` だけが
+	// `kind: "read:account"` とダブルクォートで書かれており、シングル限定にすると
+	// **最も広く叩かれる `/api/i` が丸ごと検査対象から外れる** (実測で scope を
+	// 変異させても gate が緑のままだった)。
+	kindRe = regexp.MustCompile(`(?m)^\tkind:\s*['"]([^'"]+)['"]`)
 )
 
 // level reduces an endpoint's meta to its access level. The hierarchy is
