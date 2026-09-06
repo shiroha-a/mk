@@ -14,8 +14,8 @@ import (
 
 // MkGoVersion is the mk-go version. Override at build time via:
 //
-//	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MkGoVersion=1.2.1"
-var MkGoVersion = "1.2.1"
+//	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MkGoVersion=1.3.0"
+var MkGoVersion = "1.3.0"
 
 // MisskeyVersion is the compatible Misskey version. Override at build time via:
 //
