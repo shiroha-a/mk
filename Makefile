@@ -808,8 +808,10 @@ limitspec-check: ## ページネーションの default / max の drift を検�
 
 # permission drift gate をローカルで実行する。mk-go の router middleware が
 # Misskey の requireAdmin/requireModerator/requireCredential より緩くないか検証。
+# TestOAuthKindDrift は別軸で、meta.kind (OAuth scope) の一致を見る。
+# **アクセス階層の gate では scope の取り違えを検出できない** (#2877)。
 perm-check: ## router middleware の権限が upstream より緩くないか検査
-	go test ./internal/entitycompat/... -run 'TestPermissionDrift|TestSecureDrift' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestPermissionDrift|TestSecureDrift|TestOAuthKindDrift' -count=1 -v
 
 .PHONY: wiring-check
 wiring-check: ## router で配線が必要なものが外れていないか検査

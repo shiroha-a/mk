@@ -2,6 +2,7 @@ package i
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -386,9 +387,74 @@ func TestRevokeToken_NativeSessionUnrestricted(t *testing.T) {
 	tokens.Tokens["h2"] = &model.AccessToken{ID: "t2", Hash: "h2", UserID: stubUser.ID}
 	h.SetAccessTokenRepo(tokens)
 
-	sc := &middleware.AuthScope{IsApp: false, TokenID: "native-session"}
+	// **native token の TokenID は必ず空文字**。auth.go の resolveUser が
+	// `put(token, user, nil, "", false)` を返すため。架空の値を置くと、production では
+	// 現行と等価なリファクタ (`sc.TokenID != "" && sc.TokenID != tok.ID`) を誤検出する。
+	sc := &middleware.AuthScope{IsApp: false, TokenID: ""}
 	rec := postExtraWithScope(h.RevokeToken, `{"tokenId":"t2"}`, stubUser, sc)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	_, err := tokens.FindByID("t2")
 	assert.Error(t, err, "native session は制限を受けない")
+}
+
+// **アプリが実際に使える経路は raw token 指定だけ。** `/i/apps` は RequireSecure 付きで
+// アプリは自分のトークンの DB 上の ID を知る手段が無く、MiAuth / OAuth のレスポンスにも
+// id は含まれない。tokenId 側しかテストしないと、TokenID の比較対象を req.TokenID に
+// 取り違える実装 (raw token 経由が常に 403 になる) を見逃す。
+func TestRevokeToken_AppRevokesItselfByRawToken(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	tokens.Tokens["h1"] = &model.AccessToken{ID: "t1", Hash: "h1", Token: "raw_app_xyz", UserID: stubUser.ID}
+	h.SetAccessTokenRepo(tokens)
+
+	rec := postExtraAsApp(h.RevokeToken, `{"token":"raw_app_xyz"}`, stubUser, "t1")
+	assert.Equal(t, http.StatusNoContent, rec.Code, "raw token による自己失効ができる")
+	_, err := tokens.FindByID("t1")
+	assert.Error(t, err)
+}
+
+// raw token 指定でも「自分の別トークン」は 403。
+func TestRevokeToken_AppCannotRevokeOtherOwnTokenByRawToken(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	tokens.Tokens["h2"] = &model.AccessToken{ID: "t2", Hash: "h2", Token: "raw_other", UserID: stubUser.ID}
+	h.SetAccessTokenRepo(tokens)
+
+	rec := postExtraAsApp(h.RevokeToken, `{"token":"raw_other"}`, stubUser, "t1")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	_, err := tokens.FindByID("t2")
+	assert.NoError(t, err, "403 のときは消さない")
+}
+
+// upstream c07ce75281 は requireCredential を外して **endpoint 固有の**
+// CREDENTIAL_REQUIRED を投げる。汎用 middleware に任せると id が
+// 1384574d-... になり wire が食い違う。
+func TestRevokeToken_UnauthenticatedUsesEndpointSpecificError(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	h.SetAccessTokenRepo(testutil.NewMockAccessTokenRepository())
+	rec := postExtra(h.RevokeToken, `{"tokenId":"t1"}`, nil)
+	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.Contains(t, rec.Body.String(), "CREDENTIAL_REQUIRED")
+	assert.Contains(t, rec.Body.String(), "6f1f0d3a-3d5b-4b1f-9c3e-2a6d1e5b8c47")
+}
+
+// **DB 障害を「失効した」(204) に丸めない** (#2792)。
+func TestRevokeToken_DBFailureIsNot204(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	h.SetAccessTokenRepo(&failingAccessTokenRepo{
+		MockAccessTokenRepository: testutil.NewMockAccessTokenRepository(),
+		err:                       errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+	})
+	rec := postExtra(h.RevokeToken, `{"tokenId":"t1"}`, stubUser)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "DB 障害が 204 に化けている")
+}
+
+type failingAccessTokenRepo struct {
+	*testutil.MockAccessTokenRepository
+	err error
+}
+
+func (r *failingAccessTokenRepo) FindByID(string) (*model.AccessToken, error) { return nil, r.err }
+func (r *failingAccessTokenRepo) FindByHashOrToken(string, string) (*model.AccessToken, error) {
+	return nil, r.err
 }

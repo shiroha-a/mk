@@ -660,7 +660,9 @@ func (h *Handler) ThreadMutingCreate(c echo.Context) error {
 		UserID:   user.ID,
 		ThreadID: threadID,
 	}); err != nil {
-		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		// Exists 側と同じ apierr.InternalError() に揃える。同じ endpoint の同じ
+		// code / id なのに kind が枝ごとに違うと、クライアントの分類が枝で変わる。
+		return apierr.JSONInternalError(c)
 	}
 	return c.NoContent(http.StatusNoContent)
 }

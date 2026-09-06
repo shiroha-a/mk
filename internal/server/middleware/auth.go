@@ -166,6 +166,18 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 	}
 }
 
+// IsSuspendedRequest reports whether the request carried a valid token whose
+// account is suspended. Handlers that do their own credential check (instead of
+// RequireAuth) need this to keep the 403 YOUR_ACCOUNT_SUSPENDED behaviour that
+// credentialRequiredResponse provides.
+//
+// upstream ApiCallService も suspended は 403 にするので、endpoint 固有の
+// CREDENTIAL_REQUIRED を返す handler でも suspended だけは 403 に分ける必要がある。
+func IsSuspendedRequest(c echo.Context) bool {
+	v, _ := c.Get(string(suspendedContextKey)).(bool)
+	return v
+}
+
 // credentialRequiredResponse writes the error for a credential-required gate
 // when GetUser is nil: 403 YOUR_ACCOUNT_SUSPENDED when the request carried a
 // valid token for a suspended account (upstream ApiCallService.ts、#1559)、else

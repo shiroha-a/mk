@@ -41,8 +41,9 @@ func (h *Handler) QueueClear(c echo.Context) error {
 //
 // 注意点 (mkq 制約 / upstream との差): (1) "wait" は DrainPending を呼ぶが mkq の
 // DrainPending は wait に加え paused / prioritized バケットも drain する。mk-go は
-// queue を pause せず deliver/inbox で per-job priority も使わないため両バケットは
-// 実運用で常に空であり observable な差は無い。(2) active / paused / prioritized を
+// deliver/inbox で per-job priority を使わないので prioritized は常に空。paused は
+// pause 中だけ埋まる (#2069 で pause/resume を実装済み) が、pause 中に clear を
+// 呼べば消えるべきものなので observable な差は無い。(2) active / paused / prioritized を
 // 単独 state で指定した場合は対応する bulk-clear 経路が無いため no-op。(3) cron
 // (repeat) 由来の delayed job は RemoveJob が拒否するため clear('delayed') で消えない。
 // (4) clearable job が約 100k を超える queue では 1 リクエストで消し切らない (再実行で継続)。
@@ -430,8 +431,10 @@ func (h *Handler) listTasksForState(queue, state string, page, limit int) ([]*Qu
 	case "failed":
 		return h.queueInspector.ListFailedTasks(queue, page, limit)
 	case "paused":
-		// "paused" は queue 状態であってジョブ一覧ではない。mk-go は queue を
-		// pause しないため空で返す。
+		// "paused" は queue 状態であってジョブ一覧ではない。**upstream 2026.9.0 は
+		// bullmq v6 化に伴い paramDef.state から 'paused' 自体を外し、Paused タブも
+		// 削除した**ので、空返しのまま upstream に揃う (mk-go は #2069 で pause/resume
+		// を実装済みだが、それとは別の話)。
 		return nil, nil
 	default:
 		return h.queueInspector.ListPendingTasks(queue, page, limit)

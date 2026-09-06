@@ -1210,4 +1210,7 @@ func TestThreadMutingCreate_ExistsDBFailureIsNot4xx(t *testing.T) {
 	}}
 	rec := postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code, "DB 障害が 4xx に化けている (#2792)")
+	// body も見る。status だけだと Create 失敗側 (kind:client) と取り違えても通る。
+	assert.Contains(t, rec.Body.String(), "INTERNAL_ERROR")
+	assert.Contains(t, rec.Body.String(), `"kind":"server"`)
 }

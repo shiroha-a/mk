@@ -1986,8 +1986,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/i/authorized-apps", iHandler.AuthorizedApps, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/signin-history", iHandler.SigninHistory, middleware.RequireAuth(), middleware.RequireSecure())
 	// upstream c07ce75281: サードパーティアプリが自身のアクセストークンを失効
-	// できるよう secure を外した。「自分のトークン以外は 403」は handler 側で見る。
-	api.POST("/i/revoke-token", iHandler.RevokeToken, middleware.RequireAuth())
+	// できるよう secure を外した。**RequireAuth も付けない** — upstream は
+	// requireCredential を外して endpoint 固有の CREDENTIAL_REQUIRED を投げるので、
+	// 汎用 middleware に任せると error id が食い違う。認証と「自分のトークン以外は
+	// 403」はどちらも handler 側で見る。
+	api.POST("/i/revoke-token", iHandler.RevokeToken)
 	api.POST("/i/update-email", iHandler.UpdateEmail, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/verify-email", iHandler.VerifyEmail)
 	api.POST("/i/move", iHandler.Move, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireSecure())

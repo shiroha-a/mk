@@ -25,10 +25,17 @@ import (
 	"strings"
 )
 
+// meta のフラグは行頭インデント 1 つの位置にしか現れない。**行頭を固定しないと
+// コメント内の記述を拾う** — upstream の `i/revoke-token` は
+// 「ApiCallService が requireCredential:true かつ kind なしの」という日本語コメントを
+// 持っており、素の部分一致だと requireCredential を宣言していないのに auth と判定される。
 var (
-	requireAdminRe     = regexp.MustCompile(`requireAdmin:\s*true`)
-	requireModeratorRe = regexp.MustCompile(`requireModerator:\s*true`)
-	requireCredRe      = regexp.MustCompile(`requireCredential:\s*true`)
+	requireAdminRe     = regexp.MustCompile(`(?m)^\trequireAdmin:\s*true`)
+	requireModeratorRe = regexp.MustCompile(`(?m)^\trequireModerator:\s*true`)
+	requireCredRe      = regexp.MustCompile(`(?m)^\trequireCredential:\s*true`)
+	// kind は meta の直下 (タブ 1 つ) にだけ現れる。paramDef など入れ子の
+	// `kind:` を拾わないよう行頭のインデントまで含めて照合する。
+	kindRe = regexp.MustCompile(`(?m)^\tkind:\s*'([^']+)'`)
 )
 
 // level reduces an endpoint's meta to its access level. The hierarchy is
@@ -49,9 +56,11 @@ func level(s string) string {
 func main() {
 	epDir := flag.String("endpoints", "third_party/misskey/packages/backend/src/server/api/endpoints", "path to Misskey backend endpoints dir")
 	out := flag.String("out", "internal/entitycompat/testdata/golden_permissions.json", "golden snapshot output path")
+	kindsOut := flag.String("kinds-out", "internal/entitycompat/testdata/golden_oauth_kinds.json", "OAuth kind golden output path")
 	flag.Parse()
 
 	perms := map[string]string{}
+	kinds := map[string]string{}
 	err := filepath.WalkDir(*epDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -68,7 +77,11 @@ func main() {
 		if err != nil {
 			return err
 		}
-		perms[ep] = level(string(data))
+		body := string(data)
+		perms[ep] = level(body)
+		if m := kindRe.FindStringSubmatch(body); m != nil {
+			kinds[ep] = m[1]
+		}
 		return nil
 	})
 	if err != nil {
@@ -90,4 +103,19 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Printf("permspec: wrote %d endpoints -> %s\n", len(perms), *out)
+
+	if len(kinds) == 0 {
+		fmt.Fprintln(os.Stderr, "permspec: ERROR no OAuth kinds parsed (upstream format change?)")
+		os.Exit(1)
+	}
+	kbuf, err := json.MarshalIndent(kinds, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "permspec: marshal kinds: %v\n", err)
+		os.Exit(1)
+	}
+	if err := os.WriteFile(*kindsOut, append(kbuf, '\n'), 0o644); err != nil {
+		fmt.Fprintf(os.Stderr, "permspec: write kinds: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Printf("permspec: wrote %d OAuth kinds -> %s\n", len(kinds), *kindsOut)
 }

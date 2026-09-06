@@ -438,6 +438,13 @@ func TestChangePassword_RedirectsToSettingsSecurity(t *testing.T) {
 	require.NoError(t, h.ChangePassword(c))
 	assert.Equal(t, http.StatusFound, rec.Code)
 	assert.Equal(t, "https://example.com/settings/security", rec.Header().Get("Location"))
+	// **global CORS middleware は `/.well-known/` を Skipper で除外している**ので、
+	// handler が付けないとヘッダがゼロになる。upstream は plugin scope の onRequest
+	// hook で 4 つとも付く。
+	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, "GET, OPTIONS", rec.Header().Get("Access-Control-Allow-Methods"))
+	assert.Equal(t, "Accept", rec.Header().Get("Access-Control-Allow-Headers"))
+	assert.Equal(t, "Vary", rec.Header().Get("Access-Control-Expose-Headers"))
 }
 
 // federation='none' でも 302 を返す。upstream が 403 にするのは host-meta /

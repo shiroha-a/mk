@@ -305,7 +305,7 @@
   "i/registry/remove": "auth",
   "i/registry/scopes-with-domain": "auth",
   "i/registry/set": "auth",
-  "i/revoke-token": "auth",
+  "i/revoke-token": "public",
   "i/signin-history": "auth",
   "i/unpin": "auth",
   "i/update": "auth",

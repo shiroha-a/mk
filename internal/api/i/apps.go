@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -166,7 +167,17 @@ func (h *Handler) RevokeToken(c echo.Context) error {
 	if h.accessTokenRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// upstream c07ce75281 は requireCredential を外し、認証を実装内に移したうえで
+	// **endpoint 固有の** CREDENTIAL_REQUIRED を投げる。汎用の middleware に任せると
+	// id が 1384574d-... になり upstream (6f1f0d3a-...) と wire が食い違う。
 	u := middleware.GetUser(c)
+	if u == nil {
+		// suspended は upstream ApiCallService も 403 なので分ける。
+		if middleware.IsSuspendedRequest(c) {
+			return c.JSON(http.StatusForbidden, apierr.YourAccountSuspended())
+		}
+		return c.JSON(http.StatusUnauthorized, apierr.Error("CREDENTIAL_REQUIRED", "Credential required.", "6f1f0d3a-3d5b-4b1f-9c3e-2a6d1e5b8c47"))
+	}
 	var req struct {
 		TokenID string `json:"tokenId"`
 		Token   string `json:"token"`
@@ -188,6 +199,12 @@ func (h *Handler) RevokeToken(c echo.Context) error {
 		// できる。
 		hash := fmt.Sprintf("%x", sha256.Sum256([]byte(req.Token)))
 		tok, err = h.accessTokenRepo.FindByHashOrToken(hash, req.Token)
+	}
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を「失効した」(204) に丸めない** (#2792)。呼び出し側は成功と
+		// 受け取るのに token は生きている。secure を外してサードパーティアプリが
+		// この経路に到達できるようになったので、露出範囲が広がっている。
+		return apierr.JSONInternalError(c)
 	}
 	if err != nil {
 		return c.NoContent(http.StatusNoContent)

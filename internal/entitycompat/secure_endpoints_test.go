@@ -57,7 +57,42 @@ func TestSecureDrift(t *testing.T) {
 		}
 		t.Fatal(b.String())
 	}
+
+	// **逆向きも見る。** golden にない endpoint に RequireSecure が付いていると、
+	// upstream ではサードパーティアプリから叩けるものが mk-go だけ 403 になる。
+	// 片方向のままだと、upstream が secure を外したとき (2026.9.0 の
+	// `i/revoke-token` がまさにそれ) に golden から消えるだけで、mk-go 側に
+	// RequireSecure が残っていても緑のまま通る = 機能が丸ごと死んでいても
+	// 検出できない。
+	//
+	// mk-go が意図的に upstream より厳しくする場合は、理由を添えて
+	// secureStricterThanUpstream に登録すること (現在は空 = 全件 upstream 一致)。
+	var extra []string
+	for ep, reg := range regs {
+		if secure[ep] || excludedEndpoint(ep) || secureStricterThanUpstream[ep] != "" {
+			continue
+		}
+		if strings.Contains(reg, "RequireSecure") {
+			extra = append(extra, ep)
+		}
+	}
+	if len(extra) > 0 {
+		sort.Strings(extra)
+		var b strings.Builder
+		b.WriteString("secure drift: mk-go applies RequireSecure to an endpoint Misskey does NOT mark `secure: true`.\n")
+		b.WriteString("third-party apps can drive it upstream but get 403 here. Remove it, or register the reason in secureStricterThanUpstream.\n")
+		for _, ep := range extra {
+			b.WriteString("  " + ep + "\n")
+		}
+		t.Fatal(b.String())
+	}
 }
+
+// secureStricterThanUpstream lists endpoints where mk-go deliberately requires a
+// native session token even though Misskey does not mark them `secure: true`.
+// The value is the reason; an empty map means every RequireSecure matches
+// upstream. Keep it empty unless there is a documented reason (docs/divergence.md).
+var secureStricterThanUpstream = map[string]string{}
 
 // parseRouteRegistrations returns endpoint path -> the full router registration
 // text (balanced parens), so middleware on a multi-line inline handler's closing

@@ -241,6 +241,12 @@ func (h *Handler) OAuthAuthorizationServer(c echo.Context) error {
 // host-meta / host-meta.json / nodeinfo / webfinger の 4 本で、この endpoint は
 // 連合ではなくローカル利用者のパスワード変更導線なので対象外。
 func (h *Handler) ChangePassword(c echo.Context) error {
+	// upstream の `fastify.addHook('onRequest')` は plugin scope 全体に張られるので
+	// この endpoint にも discovery 用 CORS が付く。**global CORS middleware は
+	// `/.well-known/` を Skipper で丸ごと除外している** ので、ここで付けないと
+	// ヘッダがゼロになり、cross-origin の fetch が preflight だけ通って本命の GET で
+	// 結果を捨てられる (一番切り分けにくい壊れ方)。
+	setDiscoveryCORS(c)
 	return c.Redirect(http.StatusFound, h.origin+"/settings/security")
 }
 

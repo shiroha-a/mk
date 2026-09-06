@@ -137,5 +137,8 @@ func TestWellKnown(t *testing.T) {
 
 		assert.Equal(t, http.StatusFound, resp.StatusCode)
 		assert.Equal(t, origin+"/settings/security", resp.Header.Get("Location"))
+		// global CORS middleware は `/.well-known/` を除外しているので、handler が
+		// 付けないとゼロになる。他の discovery endpoint と揃っていることを見る。
+		assert.Equal(t, "*", resp.Header.Get("Access-Control-Allow-Origin"))
 	})
 }

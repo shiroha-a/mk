@@ -577,6 +577,9 @@ func (h *Handler) Translate(c echo.Context) error {
 
 	// upstream は 2026.9.0 で判定を `note.text == null` から `text.trim() === ''`
 	// に変えた。空白のみ / 空文字は DeepL へ投げずに 204 (res optional → No Content)。
+	// **空白の集合は完全一致ではない** — JS の trim は U+FEFF を落とすが Go の
+	// unicode.IsSpace は落とさず、逆に Go は U+0085 を落とすが JS は落とさない。
+	// それだけで構成された本文でのみ分岐する。
 	// mk-go の旧 CANNOT_TRANSLATE は upstream に無い独自 error なので廃止済み (#1948-17)。
 	if strings.TrimSpace(text) == "" {
 		return c.NoContent(http.StatusNoContent)
