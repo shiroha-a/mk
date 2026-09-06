@@ -3956,12 +3956,21 @@ func TestNoteRepository_CountReplyTargets_ScanLimit(t *testing.T) {
 	viewer := insertTestUser(t, "u_crt_lim_v", "crtLimV")
 	defer cleanupUser(t, viewer.ID)
 
-	// 返信先はどちらも public。
-	recentTarget, oldTarget := "n_crt_lim_tr", "n_crt_lim_to"
-	for _, tg := range []struct{ id, uid string }{{recentTarget, recent.ID}, {oldTarget, old.ID}} {
-		require.NoError(t, testDB.Create(&model.Note{ID: tg.id, UserID: tg.uid, Visibility: model.NoteVisibilityPublic}).Error)
-		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, tg.id)
+	// **返信先は 1 件ずつ別のノートにする。** 同じノートへ 1000 回にすると、
+	// upstream は `note.id IN (replyIds)` で畳んで 1、mk-go の COUNT(*) は 1000 と
+	// なり、件数を assert すると**既知の乖離が最大に開いた形で固定される**。
+	// 別々にすれば両者とも 1000 で一致するので、乖離に依存せず件数を見られる。
+	oldTarget := "n_crt_lim_to"
+	require.NoError(t, testDB.Create(&model.Note{ID: oldTarget, UserID: old.ID, Visibility: model.NoteVisibilityPublic}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, oldTarget)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, recent.ID)
+	recentTargets := make([]*model.Note, 0, window)
+	for i := 0; i < window; i++ {
+		recentTargets = append(recentTargets, &model.Note{
+			ID: fmt.Sprintf("n_crt_lim_t%04d", i), UserID: recent.ID, Visibility: model.NoteVisibilityPublic,
+		})
 	}
+	require.NoError(t, testDB.CreateInBatches(recentTargets, 500).Error)
 	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, author.ID)
 
 	// id は昇順で新しくなる。old 宛を先に (= 古い側) 5 件、recent 宛を後に 1000 件。
@@ -3973,9 +3982,10 @@ func TestNoteRepository_CountReplyTargets_ScanLimit(t *testing.T) {
 		})
 	}
 	for i := 0; i < window; i++ {
+		tid := recentTargets[i].ID
 		notes = append(notes, &model.Note{
 			ID: fmt.Sprintf("n_crt_lim_b%04d", i), UserID: author.ID,
-			ReplyID: &recentTarget, ReplyUserID: &recent.ID, Visibility: model.NoteVisibilityPublic,
+			ReplyID: &tid, ReplyUserID: &recent.ID, Visibility: model.NoteVisibilityPublic,
 		})
 	}
 	require.NoError(t, testDB.CreateInBatches(notes, 500).Error)
@@ -3984,11 +3994,9 @@ func TestNoteRepository_CountReplyTargets_ScanLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "1000 件の窓の外にいる相手が集計に出ている")
 	assert.Equal(t, recent.ID, rows[0].UserID)
-	// **件数そのものは assert しない。** ここは「同じ返信先へ 1000 回」なので、
-	// upstream は `note.id IN (replyIds)` で重複を畳んで 1 と数えるのに対し
-	// mk-go の COUNT(*) は 1000 になる (既存の乖離。docs/divergence.md に記載)。
-	// 最大値で固定すると、その乖離をテストが恒久化してしまう。
-	assert.Positive(t, rows[0].Count)
+	// 返信先が全部別ノートなので upstream / mk-go とも 1000。窓のサイズを潰す変異
+	// (`.Limit(10)` など) はここで落ちる。
+	assert.EqualValues(t, window, rows[0].Count)
 }
 
 // 自己返信は窓を取った**後**に除外する。窓の内側に置くと、自己返信だけを大量に
