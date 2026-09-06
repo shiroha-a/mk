@@ -162,7 +162,7 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 		return nil, ErrMissingMeta
 	}
 
-	metaBytes, err := readZipEntry(metaFile)
+	metaBytes, err := readZipEntry(metaFile, maxMetaJSONBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read meta.json: %w", err)
 	}
@@ -197,7 +197,7 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 			result.Skipped++
 			continue
 		}
-		imgBody, err := readZipEntry(entry)
+		imgBody, err := readZipEntry(entry, maxEmojiImageBytes)
 		if err != nil {
 			slog.Warn("emoji import: read entry failed", "filename", record.FileName, "err", err)
 			result.Skipped++
@@ -214,15 +214,52 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 	return result, nil
 }
 
-// readZipEntry reads an entry body fully into memory. 絵文字画像は高々
-// 数百KB なので全量展開で問題ない。
-func readZipEntry(f *zip.File) ([]byte, error) {
+// Uncompressed size caps for zip entries, matching upstream Misskey's
+// `src/misc/zip.ts` (2026.9.0).
+//
+// **var にしてあるのはテストから下げるため。** const のままだと、上限が
+// 呼び出し側に配線されていることを検証するのに 64MiB の fixture が要る。
+var (
+	maxMetaJSONBytes   int64 = 64 << 20 // 64MiB
+	maxEmojiImageBytes int64 = 32 << 20 // 32MiB
+)
+
+// ErrZipEntryTooLarge is returned when a zip entry's uncompressed size exceeds
+// the cap for its kind.
+var ErrZipEntryTooLarge = errors.New("zip entry exceeds the uncompressed size limit")
+
+// readZipEntry reads an entry body into memory, refusing anything whose
+// uncompressed size exceeds maxBytes.
+//
+// **ヘッダ値と実際に読んだバイト数の両方で見る。** 旧実装は `io.ReadAll` で
+// 上限なしに読んでおり、コメントも「絵文字画像は高々数百KB なので全量展開で
+// 問題ない」としていたが、**中身を作るのは攻撃者**という前提が抜けていた。
+// deflate のゼロ埋めは 1000:1 を超える圧縮率が出るので、Drive の上限に収まる
+// ZIP から巨大な単一 allocation を起こせる。
+//
+// ヘッダ (`UncompressedSize64`) が主。実バイト数の打ち切りは**保険**で、
+// Go の `archive/zip` は宣言サイズと実データの不一致を読み出しの時点で
+// `zip: not a valid zip file` として弾くので、現状ここには到達しない
+// (実測: サイズ欄を偽装した zip は 0 バイトも読めずに失敗する)。
+// stdlib の挙動に依存しない形にしておくために両方置く。upstream の zip.ts も
+// ヘッダ値と実書き出しバイト数の 2 段構えにしている。
+func readZipEntry(f *zip.File, maxBytes int64) ([]byte, error) {
+	if f.UncompressedSize64 > uint64(maxBytes) {
+		return nil, ErrZipEntryTooLarge
+	}
 	rc, err := f.Open()
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rc.Close() }()
-	return io.ReadAll(rc)
+	data, err := io.ReadAll(io.LimitReader(rc, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, ErrZipEntryTooLarge
+	}
+	return data, nil
 }
 
 // replaceEmoji deletes any existing local emoji with the same name, uploads the
