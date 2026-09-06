@@ -33,7 +33,7 @@ specs/
 ├── upstream/       # upstream Misskey にも存在する機能の検証
 │   ├── ui/         # ブラウザを駆動する (195 spec)
 │   └── api/        # API の shape / 挙動 (96 spec)
-└── mkgo/           # mk-go 独自機能の検証 (boot_error_reload / csp_enforce の 2 件)
+└── mkgo/           # mk-go 独自機能の検証 (4 件)
 ```
 
 ### ui と api の境界
@@ -72,11 +72,14 @@ shape や挙動を検証する spec。
 1 件も無かった。むしろ `i/profile_extra.spec.ts` のように **mk-go 拡張を明示的に scope
 外としている** spec もある。
 
-`mkgo/` の 2 件はどちらも公式 image では通らない。`ui/boot_error_reload.spec.ts`
+`mkgo/` の 4 件はいずれも公式 image では通らない。`ui/boot_error_reload.spec.ts`
 (#2786) は fork の `2026.7.0-mk.22c` で足した `#mkBootReload` を見る。
 `ui/csp_enforce.spec.ts` (#2788) は mk-go 独自キー
 `frontendContentSecurityPolicy` が返す CSP header を見るので、公式 image では
-header 自体が無い。
+header 自体が無い。`ui/note_report_abuse_via_menu.spec.ts` と
+`ui/user_report_abuse_via_menu.spec.ts` (#2879) は fork の `2026.9.0-mk.1` で入れた
+通報の定型フォーム (`data-testid="abuse-report-details"` やカテゴリの `MkSelect`) を
+見るので、公式 image では要素自体が無い。
 **`make playwright-ts-test` は `specs/upstream` に絞ってある**ので、TS backend 実行が
 これで落ちることはない。
 
@@ -121,7 +124,7 @@ tests/playwright/
 ├── specs/
 │   ├── upstream/ui/            # ブラウザを駆動する (195 spec)
 │   ├── upstream/api/           # API の shape / 挙動 (96 spec)
-│   └── mkgo/                   # mk-go 独自 (2 件)
+│   └── mkgo/                   # mk-go 独自 (4 件)
 └── fixtures/                   # 13 ファイル
     ├── api.ts                  # POST /api/<endpoint> ラッパ
     ├── auth.ts                 # signup / signin helper

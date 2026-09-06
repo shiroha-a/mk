@@ -507,7 +507,8 @@ func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("docs/divergence.md のサマリ表に " +
-			"`| fork frontend の独自変更 | N tag (`-mk.X` ～ `-mk.Y`) |` の行が無い")
+			"`| fork frontend の独自変更 | N tag (`X.Y.Z-mk.A` ～ `X.Y.Z-mk.B`) |` の行が無い " +
+			"(**範囲は base 込みで書く** — bump で `-mk.N` は 0 に戻るため)")
 	}
 
 	start, _ := findDivergenceHeading(t, lines, "4-2")
@@ -536,11 +537,30 @@ tag を足したら**サマリの件数と範囲、§4-2 の表の両方**を直
 	// **連番は base ごとに見る。** submodule を bump すると `-mk.N` は 0 に戻るので
 	// (`2026.7.0-mk.22j` の次が `2026.9.0-mk.0`)、base をまたいで通し番号を期待すると
 	// 必ず落ちる。#2879 の取り込みで実際に踏んだ。
+	//
+	// **ただし base 同士の関係も見ること。** グループ化だけにすると、base の順序が
+	// 逆でも / 古い base を末尾に足しても / 同じ base が飛び飛びに現れても通ってしまう
+	// (旧実装の flat な連番検査はこれらを捕まえていた)。base をまたぐ検査を丸ごと
+	// 落とすと**検出力が下がる**ので、昇順と一意性をここで見る。
+	seen := make(map[string]bool, len(rows))
+	prevBase := ""
 	for i := 0; i < len(rows); {
 		j := i
 		for j < len(rows) && rows[j].base == rows[i].base {
 			j++
 		}
+		base := rows[i].base
+		if seen[base] {
+			t.Errorf(`docs/divergence.md §4-2 の base %s の行が飛び飛びに現れている。
+同じ base の行はまとめて並べること。`, base)
+		}
+		seen[base] = true
+		if prevBase != "" && compareForkBase(prevBase, base) >= 0 {
+			t.Errorf(`docs/divergence.md §4-2 の base が昇順でない (%s の次が %s)。
+古い順に並べること。`, prevBase, base)
+		}
+		prevBase = base
+
 		group := make([]string, 0, j-i)
 		for _, r := range rows[i:j] {
 			group = append(group, r.n)
@@ -548,6 +568,28 @@ tag を足したら**サマリの件数と範囲、§4-2 の表の両方**を直
 		assertForkTagSequence(t, group)
 		i = j
 	}
+}
+
+// compareForkBase compares two `X.Y.Z` version strings numerically.
+// 文字列比較だと `2026.10.0` < `2026.9.0` になるので使えない。
+func compareForkBase(a, b string) int {
+	as, bs := strings.Split(a, "."), strings.Split(b, ".")
+	for i := 0; i < len(as) || i < len(bs); i++ {
+		var x, y int
+		if i < len(as) {
+			x, _ = strconv.Atoi(as[i])
+		}
+		if i < len(bs) {
+			y, _ = strconv.Atoi(bs[i])
+		}
+		if x != y {
+			if x < y {
+				return -1
+			}
+			return 1
+		}
+	}
+	return 0
 }
 
 // assertForkTagSequence checks that §4-2's rows step through the tag scheme
