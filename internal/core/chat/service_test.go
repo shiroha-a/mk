@@ -474,6 +474,49 @@ func TestMarkReadByMessageID_Room(t *testing.T) {
 	assert.Equal(t, corechat.EventRead, pub.roomCalls[0].eventType)
 }
 
+// **当事者でなければ既読にできない。** 検査が無いと、非参加者が他人の reads を
+// 汚したうえ、購読側が閉じている topic に read イベントを注入できる。
+func TestMarkReadByMessageID_RequiresParticipation(t *testing.T) {
+	t.Run("DM の第三者", func(t *testing.T) {
+		svc, _, pub := newSvc(t)
+		msg, _ := svc.CreateMessageToUser(context.Background(), "alice", "bob", "hi", "")
+		pub.userCalls = nil
+
+		err := svc.MarkReadByMessageID(context.Background(), "carol", msg.ID)
+		assert.ErrorIs(t, err, corechat.ErrNotFound, "存在を秘匿するため not-found に倒す")
+		assert.Empty(t, pub.userCalls, "イベントを注入させない")
+	})
+	t.Run("room の非メンバー", func(t *testing.T) {
+		svc, repo, pub := newSvc(t)
+		seedRoom(t, repo, "r1", "alice", "bob")
+		msg, _ := svc.CreateMessageToRoom(context.Background(), "alice", "r1", "hi", "")
+		pub.roomCalls = nil
+
+		err := svc.MarkReadByMessageID(context.Background(), "carol", msg.ID)
+		assert.ErrorIs(t, err, corechat.ErrNotFound)
+		assert.Empty(t, pub.roomCalls)
+	})
+	t.Run("room の owner は membership 行が無くても既読にできる", func(t *testing.T) {
+		svc, repo, pub := newSvc(t)
+		seedRoom(t, repo, "r1", "alice", "bob")
+		msg, _ := svc.CreateMessageToRoom(context.Background(), "bob", "r1", "hi", "")
+		pub.roomCalls = nil
+
+		require.NoError(t, svc.MarkReadByMessageID(context.Background(), "alice", msg.ID))
+		assert.Len(t, pub.roomCalls, 1)
+	})
+}
+
+func TestLeaveRoom_MemberLeaves(t *testing.T) {
+	svc, repo, _ := newSvc(t)
+	seedRoom(t, repo, "r1", "alice", "bob")
+
+	require.NoError(t, svc.LeaveRoom(context.Background(), "bob", "r1"))
+
+	_, err := repo.FindMembership("bob", "r1")
+	assert.Error(t, err, "自分の membership は消える")
+}
+
 func TestMarkReadByMessageID_NotFound(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	err := svc.MarkReadByMessageID(context.Background(), "bob", "ghost")

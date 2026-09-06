@@ -1047,6 +1047,17 @@ func (h *Handler) MessagesShow(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
 	}
+	// **当事者か moderator でなければ返さない。** upstream show.ts と同じ判定
+	// (`message.fromUserId !== me.id && message.toUserId !== me.id && !isModerator`)。
+	// room 宛のメッセージは `toUserId` が null なので、投稿者本人以外はここで
+	// 落ちる — room の発言を読む経路は messages/room-timeline のほうで、
+	// そちらは member かどうかを見ている。
+	//
+	// 応答は not-found と同じにする。区別すると messageId を総当たりして
+	// 「その id が存在するか」を引き出せる。
+	if msg.FromUserID != user.ID && (msg.ToUserID == nil || *msg.ToUserID != user.ID) && !h.isModerator(user.ID) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MESSAGE", "No such message.", "006d73c9-dada-5b5d-a0f5-00b01f70bc3c"))
+	}
 	return c.JSON(http.StatusOK, h.packMessageDetailed(msg, user.ID))
 }
 

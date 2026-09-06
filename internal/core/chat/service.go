@@ -1295,6 +1295,29 @@ func (s *Service) MarkReadByMessageID(ctx context.Context, userID, messageID str
 		}
 		return ErrNotFound
 	}
+	// **当事者でなければ既読にしない。** 検査が無いと、非参加者が他人の
+	// `reads` を汚したうえ、下の publish で相手の topic に read イベントを
+	// 注入できる。購読側 (ChatUserChannel / ChatRoomChannel) は閉じているのに、
+	// publish 側だけが開いている状態だった。
+	//
+	// upstream にこの endpoint は無い (readUserChatMessage /
+	// readRoomChatMessage / readAllChatMessages しか無く、per-message read は
+	// mk-go 独自) ので、判定は他の chat 経路と同じ形に揃える。
+	//
+	// **応答は not-found に倒す** (ErrForbidden = ACCESS_DENIED ではなく)。
+	// 区別すると messageId を総当たりして「その id が存在するか」を引き出せる。
+	// messages/show も同じ判断にしてある。
+	if msg.ToRoomID != nil {
+		member, merr := s.IsRoomMember(userID, *msg.ToRoomID)
+		if merr != nil {
+			return merr
+		}
+		if !member {
+			return ErrNotFound
+		}
+	} else if msg.FromUserID != userID && (msg.ToUserID == nil || *msg.ToUserID != userID) {
+		return ErrNotFound
+	}
 	if err := s.repo.MarkRead(userID, messageID); err != nil {
 		return fmt.Errorf("mark read: %w", err)
 	}

@@ -2207,3 +2207,52 @@ func TestInvitationAcceptAndJoin_RoomLookupFailureIs500(t *testing.T) {
 		})
 	}
 }
+
+// **当事者でなければメッセージを返さない** (upstream show.ts と同じ判定)。
+// 以前は messageId さえ分かれば無関係な DM / room の発言と添付 DriveFile の
+// URL まで読めた。
+func TestMessagesShow_Authorization(t *testing.T) {
+	to := "u2"
+	other := "u3"
+	showRoomID := "r1"
+	for _, tc := range []struct {
+		name string
+		msg  *model.ChatMessage
+		me   *model.User
+		want int
+	}{
+		{"sender", &model.ChatMessage{ID: "m1", FromUserID: "u1", ToUserID: &to}, u1, http.StatusOK},
+		{"recipient", &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &to}, u2, http.StatusOK},
+		{"third party (DM)", &model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &other}, u1, http.StatusBadRequest},
+		{"room message by someone else", &model.ChatMessage{ID: "m1", FromUserID: "u2", ToRoomID: &showRoomID}, u1, http.StatusBadRequest},
+		{"own room message", &model.ChatMessage{ID: "m1", FromUserID: "u1", ToRoomID: &showRoomID}, u1, http.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo := newTestHandler()
+			require.NoError(t, repo.CreateMessage(tc.msg))
+			rec := post(h.MessagesShow, `{"messageId":"m1"}`, tc.me)
+			assert.Equal(t, tc.want, rec.Code)
+		})
+	}
+}
+
+// moderator は読める (upstream も isModerator を迂回路にしている)。
+func TestMessagesShow_ModeratorCanRead(t *testing.T) {
+	h, repo := newTestHandler()
+	h.SetModeratorChecker(fakeModeratorChecker{mods: map[string]bool{u1.ID: true}})
+	other := "u3"
+	require.NoError(t, repo.CreateMessage(&model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &other}))
+	rec := post(h.MessagesShow, `{"messageId":"m1"}`, u1)
+	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// **存在の有無を応答で区別しない** (messageId の総当たりを許さない)。
+func TestMessagesShow_UnknownIsSameAsForbidden(t *testing.T) {
+	h, repo := newTestHandler()
+	other := "u3"
+	require.NoError(t, repo.CreateMessage(&model.ChatMessage{ID: "m1", FromUserID: "u2", ToUserID: &other}))
+	forbidden := post(h.MessagesShow, `{"messageId":"m1"}`, u1)
+	missing := post(h.MessagesShow, `{"messageId":"nope"}`, u1)
+	assert.Equal(t, forbidden.Code, missing.Code)
+	assert.JSONEq(t, forbidden.Body.String(), missing.Body.String())
+}
