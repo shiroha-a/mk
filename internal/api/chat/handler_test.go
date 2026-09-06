@@ -1178,9 +1178,74 @@ func TestInvitationsCreate_Error(t *testing.T) {
 }
 
 func TestInvitationsDelete(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	repo.Invitations["i1"] = &model.ChatRoomInvitation{ID: "i1", UserID: "u2", RoomID: "r1"}
 	rec := post(h.InvitationsDelete, `{"invitationId":"i1"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, err := repo.FindInvitationByID("i1")
+	assert.Error(t, err, "招待は消える")
+}
+
+// **owner 以外は消せない。** 以前は invitationId だけで誰でも消せた。
+func TestInvitationsDelete_NotOwner(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "someoneElse"}
+	repo.Invitations["i1"] = &model.ChatRoomInvitation{ID: "i1", UserID: "u2", RoomID: "r1"}
+	rec := post(h.InvitationsDelete, `{"invitationId":"i1"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_INVITATION", "9db2b511-acf0-46f0-9856-ce089fa63b23")
+	_, err := repo.FindInvitationByID("i1")
+	assert.NoError(t, err, "招待は残る")
+}
+
+// 招待された本人も消せない (reject / ignore を使う。delete は連合 Reject を
+// 送らないので、開放すると remote room の招待を黙って消せる)。
+func TestInvitationsDelete_InviteeCannotDelete(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "someoneElse"}
+	repo.Invitations["i1"] = &model.ChatRoomInvitation{ID: "i1", UserID: "u1", RoomID: "r1"}
+	rec := post(h.InvitationsDelete, `{"invitationId":"i1"}`, u1)
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// **存在の有無を応答で区別しない** (invitationId の総当たりを許さない)。
+func TestInvitationsDelete_UnknownIsSameAsForbidden(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "someoneElse"}
+	repo.Invitations["i1"] = &model.ChatRoomInvitation{ID: "i1", UserID: "u2", RoomID: "r1"}
+
+	forbidden := post(h.InvitationsDelete, `{"invitationId":"i1"}`, u1)
+	missing := post(h.InvitationsDelete, `{"invitationId":"nope"}`, u1)
+	assert.Equal(t, forbidden.Code, missing.Code)
+	assert.JSONEq(t, forbidden.Body.String(), missing.Body.String())
+}
+
+// **DB 障害を not-found に丸めない** (#2792)。招待の lookup と room の lookup の
+// どちらが落ちても 500 にする。丸めると、DB 障害の間だけ「消せない」ではなく
+// 「そんな招待は無い」と応答が変わり、原因から遠い症状になる。
+func TestInvitationsDelete_LookupFailureIs500(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		set  func(*testutil.MockChatRepository, error)
+	}{
+		{"invitation lookup", func(r *testutil.MockChatRepository, e error) { r.FindInvitationErr = e }},
+		{"room lookup", func(r *testutil.MockChatRepository, e error) { r.FindRoomErr = e }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo := newTestHandler()
+			repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+			repo.Invitations["i1"] = &model.ChatRoomInvitation{ID: "i1", UserID: "u2", RoomID: "r1"}
+			tc.set(repo, errors.New("db down"))
+
+			rec := post(h.InvitationsDelete, `{"invitationId":"i1"}`, u1)
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+
+			tc.set(repo, nil)
+			_, err := repo.FindInvitationByID("i1")
+			assert.NoError(t, err, "失敗時に消さない")
+		})
+	}
 }
 
 func TestInvitationsDelete_InvalidParam(t *testing.T) {
@@ -1236,9 +1301,49 @@ func TestInvitationsReject_NoInvitationRejected(t *testing.T) {
 }
 
 func TestMembersBan(t *testing.T) {
-	h, _ := newTestHandler()
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	seedMember(t, repo, "u2", "r1")
 	rec := post(h.MembersBan, `{"roomId":"r1","userId":"u2"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, err := repo.FindMembership("u2", "r1")
+	assert.Error(t, err, "メンバーは退出させられる")
+}
+
+// **owner 以外は他人の room からメンバーを追い出せない。**
+// 以前は認証さえ通れば任意の room に対して実行できた。
+func TestMembersBan_NotOwner(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "someoneElse"}
+	seedMember(t, repo, "u2", "r1")
+	rec := post(h.MembersBan, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "1ebd1536-1c92-4e6b-9ee0-bf4d14998bdb")
+	_, err := repo.FindMembership("u2", "r1")
+	assert.NoError(t, err, "メンバーは残る")
+}
+
+// room の所在と権限の有無を応答で区別しない。
+func TestMembersBan_UnknownRoomIsSameAsForbidden(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "someoneElse"}
+	forbidden := post(h.MembersBan, `{"roomId":"r1","userId":"u2"}`, u1)
+	missing := post(h.MembersBan, `{"roomId":"nope","userId":"u2"}`, u1)
+	assert.Equal(t, forbidden.Code, missing.Code)
+	assert.JSONEq(t, forbidden.Body.String(), missing.Body.String())
+}
+
+// **DB 障害を not-found に丸めない** (#2792)。
+func TestMembersBan_LookupFailureIs500(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	seedMember(t, repo, "u2", "r1")
+	repo.FindRoomErr = errors.New("db down")
+	rec := post(h.MembersBan, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	repo.FindRoomErr = nil
+	_, err := repo.FindMembership("u2", "r1")
+	assert.NoError(t, err, "失敗時に消さない")
 }
 
 func TestMembersBan_InvalidParam(t *testing.T) {

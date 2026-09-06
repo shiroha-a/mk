@@ -57,6 +57,8 @@ type MockChatRepository struct {
 	FindRoomErr       error
 	FindMembershipErr error
 	ListMembersErr    error
+	// FindInvitationErr は FindInvitation と FindInvitationByID の両方に効く
+	// (どちらも同じ「招待を引く」経路で、#2792 の判断も同じであるべきなため)。
 	FindInvitationErr error
 }
 
@@ -497,6 +499,9 @@ func (m *MockChatRepository) UpdateInvitation(inv *model.ChatRoomInvitation) err
 func (m *MockChatRepository) FindInvitationByID(id string) (*model.ChatRoomInvitation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.FindInvitationErr != nil {
+		return nil, m.FindInvitationErr
+	}
 	if inv, ok := m.Invitations[id]; ok {
 		return inv, nil
 	}

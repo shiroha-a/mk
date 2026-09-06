@@ -1322,12 +1322,37 @@ func (h *Handler) InvitationsCreate(c echo.Context) error {
 }
 
 // InvitationsDelete handles POST /api/chat/rooms/invitations/delete.
+// ルームオーナーが自分の送った招待を取り消す。
+//
+// 招待された側は reject / ignore を使う。こちらは連合の Reject を送らないので、
+// 被招待者に開放すると remote room の招待を黙って消せてしまう。
 func (h *Handler) InvitationsDelete(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		InvitationID string `json:"invitationId"`
 	}
 	if err := c.Bind(&req); err != nil || req.InvitationID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "invitationId is required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// **招待の所在と権限の有無を応答で区別しない。** 区別すると invitationId を
+	// 総当たりして「その id が存在するか」だけを引き出せる。
+	inv, err := h.repo.FindInvitationByID(req.InvitationID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
+	if err == nil {
+		var room *model.ChatRoom
+		room, err = h.repo.FindRoomByID(inv.RoomID)
+		if err != nil && !repository.IsNotFound(err) {
+			return apierr.JSONInternalError(c)
+		}
+		if err == nil && room.OwnerID != user.ID {
+			err = repository.ErrNotFound
+		}
+	}
+	if err != nil {
+		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_INVITATION", "No such invitation.", "9db2b511-acf0-46f0-9856-ce089fa63b23"))
 	}
 	_ = h.repo.DeleteInvitation(req.InvitationID)
 	return c.NoContent(http.StatusNoContent)
@@ -1409,13 +1434,25 @@ func (h *Handler) InvitationsReject(c echo.Context) error {
 }
 
 // MembersBan handles POST /api/chat/rooms/members/ban.
+// ルームオーナーのみが他メンバーを退出させられる。
 func (h *Handler) MembersBan(c echo.Context) error {
+	user := middleware.GetUser(c)
 	var req struct {
 		RoomID string `json:"roomId"`
 		UserID string `json:"userId"`
 	}
 	if err := c.Bind(&req); err != nil || req.RoomID == "" || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "roomId and userId are required.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
+	// **owner だけが実行できる。** 隣の members/update-membership と同じ形。
+	// room の所在と権限の有無を応答で区別しない (どちらも NO_SUCH_ROOM)。
+	room, err := h.repo.FindRoomByID(req.RoomID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
+	if err != nil || room.OwnerID != user.ID {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "1ebd1536-1c92-4e6b-9ee0-bf4d14998bdb"))
 	}
 	_ = h.repo.DeleteMembership(req.UserID, req.RoomID)
 	return c.NoContent(http.StatusNoContent)
