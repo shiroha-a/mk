@@ -439,10 +439,12 @@ var apiCompatOnlyRe = regexp.MustCompile(`^- mk-go only \(TS spec 外\): \*\*(\d
 
 // forkTagSummaryRe matches the summary row
 // `| fork frontend の独自変更 | 23 tag (`-mk.0` ～ `-mk.22`) | — | — |`.
-var forkTagSummaryRe = regexp.MustCompile("^\\| fork frontend の独自変更 \\| (\\d+) tag \\(`-mk\\.(\\d+[a-z]*)` ～ `-mk\\.(\\d+[a-z]*)`\\)")
+// **範囲は base 込みで書く。** submodule を bump すると `-mk.N` は 0 に戻るので、
+// `-mk.0 ～ -mk.1` のような表記だと base をまたいだ範囲が読めない (#2879)。
+var forkTagSummaryRe = regexp.MustCompile("^\\| fork frontend の独自変更 \\| (\\d+) tag \\(`([0-9.]+-mk\\.\\d+[a-z]*)` ～ `([0-9.]+-mk\\.\\d+[a-z]*)`\\)")
 
 // forkTagRowRe matches a §4-2 table row `| `2026.7.0-mk.12` | ... |`.
-var forkTagRowRe = regexp.MustCompile("^\\| `[0-9.]+-mk\\.(\\d+[a-z]*)` \\|")
+var forkTagRowRe = regexp.MustCompile("^\\| `([0-9.]+)-mk\\.(\\d+[a-z]*)` \\|")
 
 // TestDivergenceDoc_EndpointCountMatchesAPICompat ties §1-1 to the generated
 // matrix. TestDivergenceDoc_EndpointCountMatchesTable only checks that the
@@ -509,10 +511,13 @@ func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
 	}
 
 	start, _ := findDivergenceHeading(t, lines, "4-2")
+	type forkTag struct{ base, n string }
+	var rows []forkTag
 	var tags []string
 	for _, line := range sectionLines(lines, start) {
 		if m := forkTagRowRe.FindStringSubmatch(line); m != nil {
-			tags = append(tags, m[1])
+			rows = append(rows, forkTag{base: m[1], n: m[2]})
+			tags = append(tags, m[1]+"-mk."+m[2])
 		}
 	}
 	if len(tags) == 0 {
@@ -525,10 +530,24 @@ func TestDivergenceDoc_ForkFrontendTagsMatchTable(t *testing.T) {
 tag を足したら**サマリの件数と範囲、§4-2 の表の両方**を直すこと。`, declared, len(tags))
 	}
 	if tags[0] != lo || tags[len(tags)-1] != hi {
-		t.Errorf(`docs/divergence.md のサマリの範囲は -mk.%s ～ -mk.%s だが、§4-2 の表は -mk.%s ～ -mk.%s。`,
+		t.Errorf(`docs/divergence.md のサマリの範囲は %s ～ %s だが、§4-2 の表は %s ～ %s。`,
 			lo, hi, tags[0], tags[len(tags)-1])
 	}
-	assertForkTagSequence(t, tags)
+	// **連番は base ごとに見る。** submodule を bump すると `-mk.N` は 0 に戻るので
+	// (`2026.7.0-mk.22j` の次が `2026.9.0-mk.0`)、base をまたいで通し番号を期待すると
+	// 必ず落ちる。#2879 の取り込みで実際に踏んだ。
+	for i := 0; i < len(rows); {
+		j := i
+		for j < len(rows) && rows[j].base == rows[i].base {
+			j++
+		}
+		group := make([]string, 0, j-i)
+		for _, r := range rows[i:j] {
+			group = append(group, r.n)
+		}
+		assertForkTagSequence(t, group)
+		i = j
+	}
 }
 
 // assertForkTagSequence checks that §4-2's rows step through the tag scheme

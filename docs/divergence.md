@@ -36,7 +36,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 33 tag (`-mk.0` ～ `-mk.22j`) | — | — |
+| fork frontend の独自変更 | 35 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.1`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -344,9 +344,9 @@ submodule bump の PR で人が見る。
 
 `third_party/misskey` fork (`shiroha-a/misskey-ts`) に載せている frontend の custom commit。**原則として**純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針。
 
-**還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `-mk.22h` / `-mk.22i` / `-mk.22j` の 3 行。
+**還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `-mk.22h` / `-mk.22i` / `-mk.22j` / `2026.9.0-mk.1` の 4 行。
 
-**現在の pin は `2026.9.0-mk.0`。** tag 列は「その変更が最初に入った世代」で、下の
+**現在の pin は `2026.9.0-mk.1`。** tag 列は「その変更が最初に入った世代」で、下の
 表の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている。載せ替えで衝突したのは
 `packages/frontend/src/pages/admin/job-queue.vue` の 1 ファイルだけで、
@@ -390,6 +390,8 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.7.0-mk.22h` | WebSocket 接続時に未読通知の件数をサーバー値へ揃える (#2831)。通知バッジの件数は**サーバーが持っておらず**、`unreadNotification` (+1) と `readAllNotifications` (0) の差分イベントだけで同期している。pub/sub なので切断中に発行された分は再送されない。`readAllNotifications` を取りこぼすとサーバー側の既読位置だけが先に進み、暗黙既読 (通知一覧の取得 / WebSocket の `readNotification`) からは「既読位置が動いたとき」という発行条件を満たさなくなるため、**次の通知を受け取って読むまで**バッジが残り続ける (恒久的に固まるわけではない)。`serverDisconnectedBehavior` の既定は `quiet` なので、切断しても何も起きずそのまま stale な `$i` で走り続ける。**`$i` を丸ごと取り直す `refreshCurrentAccount()` は使わない** — 取得に失敗するとサインアウトして localStorage ごと消す経路を持ち (`fetchAccount` が 4xx の error 応答を全て `isAccountDeleted` に倒す)、サーバー再起動の直後は一時的な認証失敗が起こりうるうえ再接続は全タブ全ユーザーで同時に走るため、巻き添えでサインアウトさせうる。未読の 2 フィールドだけを部分適用し、失敗はダイアログにもサインアウトにも倒さない。飛行中に差分イベントが来たら世代カウンタで応答を捨て、in-flight の重複排除 + 30 秒スロットル + 最大 10 秒のジッタを掛ける。**失敗したときは抑止を 5 秒まで巻き戻す** — 再接続はほぼ即時 (`minReconnectionDelay` は 1ms) なので、素の 30 秒だと「起動途中のサーバーに繋がって `/api/i` が 502 → 直後に再接続」で抑止され、そのタブが以降ずっと stale になる。初回接続はブート時の `refreshCurrentAccount` と重複するのでスロットルで抑止する (`_disconnected_` は state が `connected` になった後の close でしか出ないので、一度も繋がらないまま復帰した場合に判別材料にならない)。**これは upstream Misskey にも同じ形で存在する不具合**で、この tag は例外的に「純正へ還元できるもの」を置いている (純正への PR は別途)。backend 側の復帰手段 (`mark-all-as-read` の force) は mk-go 本体で直した |
 | `2026.7.0-mk.22i` | `meUpdated` は未読を載せるときだけ世代を上げる (#2831)。`-mk.22h` の resync は「飛行中に未読を書くイベントが来たら応答を捨てる」ために世代カウンタを持つが、**`meUpdated` は未読を載せる producer と載せない producer が混在する**。mk-go では 2FA 系だけが `meDetailedWithUnread` で実値を載せ、プロフィール更新 / pin の経路は `PackUserDetailed` (= `UserDetailed`) を送るのでキー自体が無い (未読 2 フィールドは `MeDetailed` 側の宣言)。部分 merge の `publishMeUpdatedPartial` も指定 field しか持たない。載っていないのに世代を上げると、飛行中の応答が捨てられたうえで**誰も正しい値を書かない**ので、バッジが stale のまま次の再接続まで残る = 直しに来た症状そのものになる。`-mk.22h` と同じく純正へ還元できる行にあたる |
 | `2026.7.0-mk.22j` | type-only import を top-level 形式に直す (#2843)。eslint の `import/consistent-type-specifier-style` 違反が mk-go 独自ファイル 2 つ (`plugin-api.ts` / `MkPluginSlot.vue`) に 4 箇所 commit 済みで残っていた。**fork frontend の eslint が CI で一度も実行されていなかった**ため誰も気付いていなかったもので、同 issue で `frontend-check` job に足す前提として直す。upstream 由来のファイルに違反は無い。`-mk.22h` / `-mk.22i` と同じく純正へ還元できる行にあたる |
+| `2026.9.0-mk.0` | Misskey 2026.9.0 への載せ替え (#2877)。**独自変更の内容は上の `2026.7.0-mk.*` の行がそのまま移ったもの**で、この tag 自体に固有の変更は無い。衝突したのは `packages/frontend/src/pages/admin/job-queue.vue` の 1 ファイルだけ |
+| `2026.9.0-mk.1` | 通報画面を 5W1H の定型フォームにする (#2879)。通報の宛先は `users/report-abuse` の `comment` という単一の文字列のままで、カテゴリ・該当 URL・発生日時・詳細・補足をクライアント側で 1 つの本文に組み立てる。モデレーターが初動を判断するのに足る情報を、報告者が書き漏らさない形で集めるのが狙い。**純正へ還元できる行にあたる** (純正 backend の変更を要さない) ので、`-mk.22h` / `-mk.22i` / `-mk.22j` と同じく upstream へ出せる。外部コントリビューターからの PR を、レビューで出た 4 点 (上限判定が恒真で自動収集した文脈が無言で消える / リモート利用者の host が落ちて該当 URL が別人を指す / `where` が single-line `<input>` に改行入りで渡り URL が連結される / spec が `specs/upstream` にあり TS backend の実行を壊す) を直したうえで取り込んだ |
 
 `2026.7.0-mk.1` の内訳:
 
