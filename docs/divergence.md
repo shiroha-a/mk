@@ -3,7 +3,7 @@
 mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または挙動が異なる」ものを 1 枚に集約したリファレンス。
 
 - 基準: **mk-go 1.2.1** ⇔ Misskey TS `2026.9.0`
-- 最終更新: 2026-08-31
+- 最終更新: 2026-09-07
 
 > ベースラインを固定したのは 1.0.0 (= Misskey TS `2026.7.0` 追従完了時点)。1.1.x は
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
@@ -697,6 +697,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 
 | 項目 | upstream | mk-go |
 |---|---|---|
+| `i/revoke-token` を凍結アカウントが叩く | **204 で失効できる。** upstream の `isSuspended` 判定は `ApiCallService` の `requireCredential \|\| requireModerator \|\| requireAdmin` ブロックの中にあり、この endpoint は 2026.9.0 でそのどれも宣言しなくなった (アクセストークン自身を失効させるため)。`AuthenticateService` にも suspended チェックは無い | **403 `YOUR_ACCOUNT_SUSPENDED`。** mk-go は `Authenticate` が凍結ユーザーを anonymous に落とす構造 (#1559) なので、分岐を置かないと 401 `CREDENTIAL_REQUIRED` になり upstream の 204 からさらに遠のく。403 のほうが「凍結ゆえに拒否した」ことが伝わるので採った (#2877) |
 | `invite/delete` の存在しない ID | `NO_SUCH_INVITE_CODE` (400) | **204 を返す** (= idempotent)。取り消しは「無くなっていること」が目的なので、既に無い状態を失敗にしない。ただし **DB 障害は 204 に潰さず 500 を返す** (#2812) — 取り消し系で 204 を返すと、消えたと思って戻ったあとも ticket が生きている |
 | AID/AIDXの上限外timestamp | AIDは8桁を超えて固定長を外れ、AIDXは下位8桁へwrapする | **base36 8桁の最大値へ飽和する。** 固定長を維持し、時系列順序の逆転を防ぐ安全側乖離 (#2672) |
 | リモート actor の `movedTo` 消滅 | `movedToUri: person.movedTo ?? null` で null に戻す | **既存値を温存する** (削除は追わない)。一時的な欠落でクリアすると、次の取得が「無→有」の遷移に見えて `movedAt` が打ち直され、移行の時間窓 (2h / 14 日) の基準が壊れるため。移行の取り消しに追従できない代わりに基準が安定する (#2412) |

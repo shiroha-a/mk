@@ -362,21 +362,24 @@ make shapecheck-gen   # golden_permissions.json も再生成
 
 **逆向きも見る (#2877)。** golden に無い endpoint に `RequireSecure` が付いていたら落とす。片方向のままだと、upstream が `secure` を外したとき (2026.9.0 の `i/revoke-token` がまさにそれ) に golden から消えるだけで、mk-go 側に `RequireSecure` が残っていても緑のまま通る = サードパーティアプリから叩けるようにする変更が**機能していなくても検出できない**。意図的に厳しくする場合は `secureStricterThanUpstream` に理由付きで登録する (現在は空)。
 
-### TestOAuthKindDrift
-
-`TestPermissionDrift` が見るのは `public|auth|moderator|admin` の粗い段だけで、**OAuth scope (`meta.kind`) の取り違えは素通りする**。実際 `admin/queue/stats` は `read:admin:emoji` のまま出荷されていた (upstream 自身の typo をそのまま移植したもので、upstream は 2026.9.0 で修正)。絵文字の scope しか持たないアプリが queue の統計を読め、queue の scope を持つアプリが読めない状態だった。
-
-`tools/permspec` が upstream の `meta.kind` を `golden_oauth_kinds.json` (296件) に出し、router の `middleware.RequireScope` と突き合わせる。**値の不一致と、kind があるのに `RequireScope` が無い方の両方**を見る (後者は app token が scope 無しで叩ける)。数え方: golden は endpoint 単位の map で、`kind` は meta 直下 (タブ 1 つ) の宣言のみを拾う。
-
 Misskeyの`secure`は「native session token のみ許可、第三者app/OAuth/MiAuth access token 不可」(ApiCallServiceの`isSecure = user != null && token == null`)。これが無いと、有効なaccess tokenを持つ第三者appがpassword変更や2FA解除を駆動できてしまう。
 
 mk-goは全認証がtoken経由(session無し)で、native token = `users.token`、app/MiAuthは別の`access_tokens`行。`RequireSecure`は`*user.Token == GetToken(c)`でnative判定し、一致しなければ403 ACCESS_DENIED(Misskey id `56f35758-...`)。`tools/securespec`が`secure: true` endpointのgolden(`golden_secure_endpoints.json`)を生成し、gateがrouter登録(複数行inline含む括弧バランスparse)に`RequireSecure`があるか突合する。
 
+## OAuth scope drift gate（meta.kind）
+
+`TestPermissionDrift` が見るのは `public|auth|moderator|admin` の粗い段だけで、**OAuth scope (`meta.kind`) の取り違えは素通りする**。実際 `admin/queue/stats` は `read:admin:emoji` のまま出荷されていた (upstream 自身の typo をそのまま移植したもので、upstream は 2026.9.0 で修正)。絵文字の scope しか持たないアプリが queue の統計を読め、queue の scope を持つアプリが読めない状態だった。
+
+`tools/permspec` が upstream の `meta.kind` を `golden_oauth_kinds.json` (297件) に出し、router の `middleware.RequireScope` と突き合わせる。**値の不一致と、kind があるのに `RequireScope` が無い方の両方**を見る (後者は app token が scope 無しで叩ける)。意図的に付けない場合は `kindMissingScope` に upstream の kind を添えて登録する (現在は空)。
+
+数え方: golden は endpoint 単位の map で、`kind` は **meta 直下 (タブ 1 つ) の宣言のみ**を拾う (`meta.errors` の中にも `kind: 'server'` があるため)。**クォートは 2 種類あることに注意** — `endpoints/i.ts` だけが `kind: "read:account"` とダブルクォートで、シングル限定にすると**最も広く叩かれる `/api/i` が丸ごと検査対象から外れる** (#2877 で実際に取りこぼし、scope を変異させても gate が緑のままだった)。
+
 ### 運用
 
 ```bash
-make perm-check       # permission + secure gate をローカル実行
-make shapecheck-gen   # golden_secure_endpoints.json も再生成
+make perm-check       # permission / secure / OAuth scope の 3 gate をローカル実行
+make shapecheck-gen   # golden_permissions.json / golden_secure_endpoints.json /
+                      # golden_oauth_kinds.json をまとめて再生成
 ```
 
 ## Schema drift gate（drop-in で生えない列）

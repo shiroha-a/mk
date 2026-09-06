@@ -255,6 +255,10 @@ mk-go と Misskey TS を並べて比較するハーネスは、**比較対象の
 | `docker-compose.diff.yml` | 差分比較ハーネス ([diff-e2e.md](./diff-e2e.md)) |
 | `docker-compose.playwright.ts.yml` | Playwright の TS baseline |
 | `.github/workflows/playwright.yml` | 上記の pre-pull (tag が sync していないと pull が無駄になる) |
+| `.github/workflows/diff-e2e.yml` | diff ハーネスの pre-pull。**compose 側だけ上げて忘れやすい** (#2877 で実際に残した) |
+| `docker-compose.dropin.yml` / `docker-compose.dropin-frontend.yml` / `docker-compose.federation.misskey.yml` | drop-in / 実連合の TS インスタンス |
+| `.github/workflows/dropin-e2e.yml` / `dropin-frontend-e2e.yml` | 上記の pre-pull と matrix |
+| `tests/bench/` / `tests/queue-bench/` の compose | 性能比較の対象 |
 | `Dockerfile.bundled` の `MISSKEY_ASSETS_IMAGE` | **配る image に焼く frontend**。これだけは TS image ではなく fork の assets image (`ghcr.io/shiroha-a/misskey-ts-assets:<tag>-mk.N`) で、**submodule のタグと 1:1 で対応させる**。ずれると 2026.9.0 の backend に古い frontend を載せた image を配ることになる |
 
 **`Dockerfile.bundled` は表に無かったせいで実際に 12 世代遅れた** (#2877 の時点で
@@ -262,6 +266,9 @@ mk-go と Misskey TS を並べて比較するハーネスは、**比較対象の
 assets image は fork 側の `Publish frontend assets image` workflow が `*-mk.*` タグで
 発火して publish するので、**submodule のタグを push した後**に上げること
 (`gh run list --repo shiroha-a/misskey-ts` で success を確認できる)。
+
+**探し方は `grep -rn 'misskey/misskey:' --include='*.yml' --include='*.yaml' --include='*.md' . | grep -v third_party`。**
+表を手で追うより確実で、doc の散文に埋まった版数 (`docs/dropin-e2e.md` のトラブルシュート等) も拾える。
 
 **除外リストの「version-gap」注記は、版を揃えたら必ず読み直す。** 実例として、
 diff harness の `META_IGNORE` には `app192IconUrl` / `app512IconUrl` /
