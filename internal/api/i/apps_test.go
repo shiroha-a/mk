@@ -3,11 +3,15 @@ package i
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -306,4 +310,85 @@ func TestRevokeToken_NoParams(t *testing.T) {
 	h.SetAccessTokenRepo(testutil.NewMockAccessTokenRepository())
 	// tokenId も token も空 → 400
 	assert.Equal(t, http.StatusBadRequest, postExtra(h.RevokeToken, `{}`, stubUser).Code)
+}
+
+// --- upstream c07ce75281: サードパーティアプリからのトークン失効 ---
+
+// postExtraWithScope は AuthScope を明示して叩く。**auth middleware は native
+// token でも AuthScope を立てる** (IsApp=false) ので、native 側を「AuthScope 無し」
+// で模すと IsApp を見ない実装でもテストが通ってしまう (変異検証で確認済み)。
+func postExtraWithScope(h func(echo.Context) error, body string, user *model.User, sc *middleware.AuthScope) *httptest.ResponseRecorder {
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+	c.Set(string(middleware.AuthScopeContextKey), sc)
+	_ = h(c)
+	return rec
+}
+
+func postExtraAsApp(h func(echo.Context) error, body string, user *model.User, tokenID string) *httptest.ResponseRecorder {
+	return postExtraWithScope(h, body, user, &middleware.AuthScope{IsApp: true, TokenID: tokenID})
+}
+
+// アクセストークン経由では、いま使っているトークン自身は失効できる。
+func TestRevokeToken_AppCanRevokeItself(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	tokens.Tokens["h1"] = &model.AccessToken{ID: "t1", Hash: "h1", UserID: stubUser.ID}
+	h.SetAccessTokenRepo(tokens)
+
+	rec := postExtraAsApp(h.RevokeToken, `{"tokenId":"t1"}`, stubUser, "t1")
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, err := tokens.FindByID("t1")
+	assert.Error(t, err, "自分自身のトークンは失効できる")
+}
+
+// アクセストークン経由で**別の**自分のトークンを消そうとすると 403。
+// これが無いと、1 つ許可しただけのアプリが他のアプリの連携を全部切れる。
+func TestRevokeToken_AppCannotRevokeOtherOwnToken(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	tokens.Tokens["h1"] = &model.AccessToken{ID: "t1", Hash: "h1", UserID: stubUser.ID}
+	tokens.Tokens["h2"] = &model.AccessToken{ID: "t2", Hash: "h2", UserID: stubUser.ID}
+	h.SetAccessTokenRepo(tokens)
+
+	rec := postExtraAsApp(h.RevokeToken, `{"tokenId":"t2"}`, stubUser, "t1")
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Contains(t, rec.Body.String(), "PERMISSION_DENIED")
+	assert.Contains(t, rec.Body.String(), "fc20d118-5705-4462-b6c5-2b5b43092cf3")
+	_, err := tokens.FindByID("t2")
+	assert.NoError(t, err, "403 のときは消さない")
+}
+
+// **他人のトークンには 403 ではなく 204。** 403 を返すと「その ID のトークンは
+// 実在する」ことが app に漏れる。
+func TestRevokeToken_AppForeignTokenStaysNoOp(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	tokens.Tokens["h9"] = &model.AccessToken{ID: "t9", Hash: "h9", UserID: "other"}
+	h.SetAccessTokenRepo(tokens)
+
+	rec := postExtraAsApp(h.RevokeToken, `{"tokenId":"t9"}`, stubUser, "t1")
+	assert.Equal(t, http.StatusNoContent, rec.Code, "存在を漏らさない")
+	_, err := tokens.FindByID("t9")
+	assert.NoError(t, err)
+}
+
+// native session (IsApp=false) は従来どおり自分の任意のトークンを失効できる。
+// AuthScope 自体は立っているので、IsApp を見ずに TokenID だけ比べる実装は
+// ここで落ちる。
+func TestRevokeToken_NativeSessionUnrestricted(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	tokens.Tokens["h2"] = &model.AccessToken{ID: "t2", Hash: "h2", UserID: stubUser.ID}
+	h.SetAccessTokenRepo(tokens)
+
+	sc := &middleware.AuthScope{IsApp: false, TokenID: "native-session"}
+	rec := postExtraWithScope(h.RevokeToken, `{"tokenId":"t2"}`, stubUser, sc)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	_, err := tokens.FindByID("t2")
+	assert.Error(t, err, "native session は制限を受けない")
 }

@@ -1985,7 +1985,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/i/apps", iHandler.Apps, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/authorized-apps", iHandler.AuthorizedApps, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/i/signin-history", iHandler.SigninHistory, middleware.RequireAuth(), middleware.RequireSecure())
-	api.POST("/i/revoke-token", iHandler.RevokeToken, middleware.RequireAuth(), middleware.RequireSecure())
+	// upstream c07ce75281: サードパーティアプリが自身のアクセストークンを失効
+	// できるよう secure を外した。「自分のトークン以外は 403」は handler 側で見る。
+	api.POST("/i/revoke-token", iHandler.RevokeToken, middleware.RequireAuth())
 	api.POST("/i/update-email", iHandler.UpdateEmail, middleware.RequireAuth(), middleware.RequireSecure())
 	api.POST("/verify-email", iHandler.VerifyEmail)
 	api.POST("/i/move", iHandler.Move, middleware.RequireAuth(), middleware.RequireNotMoved(), middleware.RequireSecure())

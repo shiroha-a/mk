@@ -198,6 +198,14 @@ func (h *Handler) RevokeToken(c echo.Context) error {
 		// 403 を返すと token の存在 / 所有者が leak するため、no-op 204 に揃える。
 		return c.NoContent(http.StatusNoContent)
 	}
+	// upstream c07ce75281: アクセストークン経由 (サードパーティアプリ) では
+	// **いま使っているトークン自身しか**失効させられない。native session から
+	// 叩く分は従来どおり自分の全トークンを失効できる。
+	// 他人のトークンより後に置く — 存在しないトークン ID に 403 を返すと
+	// 「そのトークンは在る」ことが漏れるため。
+	if sc := middleware.GetAuthScope(c); sc != nil && sc.IsApp && sc.TokenID != tok.ID {
+		return c.JSON(http.StatusForbidden, apierr.Error("PERMISSION_DENIED", "Permission denied.", "fc20d118-5705-4462-b6c5-2b5b43092cf3"))
+	}
 	if err := h.accessTokenRepo.DeleteByID(tok.ID); err != nil {
 		return apierr.JSONInternalError(c)
 	}
