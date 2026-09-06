@@ -333,7 +333,7 @@ func TestSave_DropsUniqueOnlyRequeueAfterRepeatedDayFailures(t *testing.T) {
 	c, repo, _ := newTestChart(t, perUserPvSchema)
 	// day 側だけを恒久的に落とす。hour は通り続ける。
 	repo.failApplyDeltas = &applyDeltasFailure{span: SpanDay}
-	buf := captureWarnings(t)
+	buf := captureWarningsFor(t, c)
 
 	for i := 1; i <= maxSaveAttempts; i++ {
 		// unique 列と int 列の両方を積む。int は hour 適用済みで戻せないので
@@ -393,7 +393,7 @@ func TestSave_WarnsWhenDroppingWork(t *testing.T) {
 			require.Error(t, c.Save(context.Background()))
 		}
 
-		buf := captureWarnings(t)
+		buf := captureWarningsFor(t, c)
 		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
 		require.Error(t, c.Save(context.Background()))
 
@@ -417,7 +417,7 @@ func TestSave_WarnsWhenDroppingWork(t *testing.T) {
 		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
 		repo.failApplyDeltas = &applyDeltasFailure{span: SpanDay}
 
-		buf := captureWarnings(t)
+		buf := captureWarningsFor(t, c)
 		require.Error(t, c.Save(context.Background()))
 
 		out := buf.String()
@@ -435,7 +435,7 @@ func TestSave_WarnsWhenDroppingWork(t *testing.T) {
 	t.Run("no warning on success", func(t *testing.T) {
 		c, _, _ := newTestChart(t, perUserNotesSchema)
 		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
-		buf := captureWarnings(t)
+		buf := captureWarningsFor(t, c)
 		require.NoError(t, c.Save(context.Background()))
 		assert.Empty(t, buf.String())
 	})
@@ -449,7 +449,7 @@ func TestSave_WarnsWhenDroppingWork(t *testing.T) {
 		require.NoError(t, c.Commit(Diff{"inc": 1}, "u2"))
 		repo.failApplyDeltas = &applyDeltasFailure{span: SpanDay}
 
-		buf := captureWarnings(t)
+		buf := captureWarningsFor(t, c)
 		require.Error(t, c.Save(context.Background()))
 
 		out := buf.String()
@@ -593,7 +593,7 @@ func TestWarnDropped_ExampleIsFirstSeenPerReason(t *testing.T) {
 		}
 	}
 
-	buf := captureWarnings(t)
+	buf := captureWarningsFor(t, c)
 	require.Error(t, c.Save(context.Background()))
 
 	out := buf.String()
@@ -1444,19 +1444,68 @@ func TestToStringSlice_DoesNotWarnOnValidValues(t *testing.T) {
 	}
 }
 
+// captureWarningsFor is captureWarnings plus the charts whose captured logger
+// must be redirected too.
+//
+// **Chart は構築時の logger を握る** (#2872) ので、グローバルを差し替えるだけ
+// では既に作られた Chart の出力先は変わらない。テストの途中で捕まえ始める形を
+// 保つために、対象の Chart も明示的に張り替える (cleanup で戻す)。
+//
+// **張り替えは atomic 経由で行う。** ticker goroutine が同じ field を読むので、
+// 素の代入だと `-race` が落ちる (sink の競合を潰した代わりにここへ移すことになる)。
+//
+// **chart を 1 つも渡さないのはバグ。** 渡し忘れると captureWarnings に劣化し、
+// `assert.Empty(t, buf.String())` のような否定アサートが黙って空振りする。
+func captureWarningsFor(t *testing.T, charts ...*Chart) *warnSink {
+	t.Helper()
+	if len(charts) == 0 {
+		t.Fatal("captureWarningsFor: chart を 1 つ以上渡すこと (渡さないと否定アサートが空振りする)")
+	}
+	buf := captureWarnings(t)
+	logger := slog.Default()
+	for _, c := range charts {
+		prev := c.log()
+		c.setLogger(logger)
+		t.Cleanup(func() { c.setLogger(prev) })
+	}
+	return buf
+}
+
+// warnSink is a mutex-guarded slog sink.
+//
+// **素の bytes.Buffer にしないこと** (#2872)。ManagementService の ticker
+// goroutine も warn を出しうるので、1 本混ざったら件数のずれではなく
+// `-race` のデータ競合になる。
+type warnSink struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (s *warnSink) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+func (s *warnSink) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
 // captureWarnings redirects slog warnings into a buffer for the duration of the
 // test and resets the once-guard so each case observes its own output.
-func captureWarnings(t *testing.T) *bytes.Buffer {
+func captureWarnings(t *testing.T) *warnSink {
 	t.Helper()
-	var buf bytes.Buffer
+	sink := &warnSink{}
 	restore := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+	slog.SetDefault(slog.New(slog.NewTextHandler(sink, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	uniqueTempDecodeWarnOnce = sync.Once{}
 	t.Cleanup(func() {
 		slog.SetDefault(restore)
 		uniqueTempDecodeWarnOnce = sync.Once{}
 	})
-	return &buf
+	return sink
 }
 
 // warn はプロセス 1 回だけ。scanRow は行ごと・unique 列ごとに呼ばれるので、
@@ -1856,4 +1905,78 @@ func TestChart_IsGrouped(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.True(t, grouped.IsGrouped())
+}
+
+// **別の Chart が残した warn が、後から差し替えたグローバルに流れないこと**
+// (#2872)。
+//
+// warnDropped は ManagementService の ticker goroutine からも呼ばれる
+// (management.go の loop → SaveAll)。出力先を毎回 `slog.Default()` から引くと、
+// その時点で default だった誰かに書くので、`slog.SetDefault` でグローバルを
+// 差し替えて出力を数えるテストに tick が紛れ込む。**件数がずれるだけでなく、
+// sink が並行安全でなければデータ競合になる。**
+func TestChart_WarnGoesToLoggerCapturedAtConstruction(t *testing.T) {
+	stale := captureWarnings(t)
+
+	// 1 つ目の Chart は stale を握る。
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	repo.failApplyDeltas = &applyDeltasFailure{group: strPtrOf("u1")}
+
+	// 構築後にグローバルを差し替える。以降の warn も stale に出なければならない。
+	fresh := captureWarnings(t)
+
+	for i := 1; i <= maxSaveAttempts; i++ {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		require.Error(t, c.Save(context.Background()))
+	}
+
+	assert.Contains(t, stale.String(), "dropped buffered work",
+		"構築時の logger に出ていない")
+	// **fresh 側は数えない。** 差し替え後のグローバルには同じバイナリの他の
+	// テストが残した warn も入りうる (role で実際に踏んだ)。stale に出た時点で
+	// fresh へ流れていないことは言えている。
+	_ = fresh
+}
+
+// **ticker が回っている最中に出力先を張り替えても競合しないこと** (#2872)。
+//
+// warnDropped は ManagementService の ticker goroutine から呼ばれる。ここが
+// 素の field 書き換えだと `-race` が落ちる — **sink の mutex を外す変異も、
+// logger の張り替えを非 atomic に戻す変異も、このテストでだけ捕まる**
+// (Start/Stop が対になっている他のテストには並行に書く経路が無い)。
+func TestChart_LoggerRedirectIsRaceFreeWhileTicking(t *testing.T) {
+	c, repo, _ := newTestChart(t, perUserNotesSchema)
+	repo.failApplyDeltas = &applyDeltasFailure{group: strPtrOf("u1")}
+
+	mgmt := NewManagementService([]*Chart{c}, time.Millisecond)
+	require.NoError(t, mgmt.Start(context.Background()))
+	t.Cleanup(func() { mgmt.Stop(context.Background()) })
+
+	// tick が warnDropped まで到達する状態を作る (retry limit まで積む)。
+	for i := 0; i < maxSaveAttempts+2; i++ {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+	}
+
+	// ticker が回っている最中に張り替える。
+	buf := captureWarningsFor(t, c)
+	sink := slog.Default()
+	// **読みながら、かつ張り替えながら回すこと。順序も効く** (すべて 20 回試行の実測)。
+	//   - 最後に 1 回 String() を呼ぶだけだと ticker の Write と重ならず、
+	//     sink の mutex を外す変異が素通りする。
+	//   - 張り替えをループの外に置くと、直後の Commit が bufMu を取り、ticker 側の
+	//     Save も同じ mutex を取るので **happens-before が張られてしまう**。
+	//     非 atomic に戻す変異の検出が 2-3 割まで落ちる。
+	//   - **setLogger を String() より後に置くのも駄目。** atomic store は release、
+	//     ticker の load は acquire なので、String() が store より前にあると
+	//     ticker の後続 Write がその後ろに順序付けられ、race detector が対に
+	//     できない。mutex 除去の検出が 20/20 → 11/20 まで落ちる。
+	//
+	// この並び (Commit → setLogger → String → Sleep) で、非 atomic 変異
+	// 20/20・mutex 除去変異 20/20・無変異の false positive 0/20。
+	for i := 0; i < maxSaveAttempts+2; i++ {
+		require.NoError(t, c.Commit(Diff{"inc": 1}, "u1"))
+		c.setLogger(sink)
+		_ = buf.String()
+		time.Sleep(time.Millisecond)
+	}
 }

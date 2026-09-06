@@ -347,6 +347,20 @@ func (r *gormRepository) ResetUniqueTempColumns(ctx context.Context, span Span, 
 var uniqueTempDecodeWarnOnce sync.Once
 
 // warnUniqueTempDecode reports that a unique-temp column could not be decoded.
+//
+// **ここはグローバルの slog を使う** (#2872 で Chart.warnDropped は構築時の
+// logger に移したが、こちらは移していない)。理由は 2 つ。パッケージ関数で
+// Chart を持たないこと、そして経路が `Repository` 実装の内部
+// (scanRow → toStringSlice) にあり、実 DB を叩くときにしか発火しないこと
+// (chart のテストは fakeRepo を使う)。
+//
+// **ticker goroutine から到達はする** (loop → SaveAll → Save → saveGroup →
+// claimCurrentLog → FindCurrent → findOne → scanRow)。ここを数えるテストを
+// 足すなら、先に Chart と同じ形へ寄せること。
+//
+// **`uniqueTempDecodeWarnOnce` の張り替えも同時に見直すこと。** テストの
+// captureWarnings はこの package 変数を素の代入でリセットするので、ticker が
+// 生きたまま実 repo を使うテストを足すと `sync.Once` 値への競合になる。
 func warnUniqueTempDecode(reason string, v any) {
 	uniqueTempDecodeWarnOnce.Do(func() {
 		slog.Warn("chart: cannot decode unique-temp column; unique cardinality will be undercounted",

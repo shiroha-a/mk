@@ -1041,7 +1041,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	}, 0)
 	// Save の集約エラーを slog に出す。既定は no-op なので、配線しないと
 	// 「どの group が書けなかったか」が本番でどこにも残らない (#2651)。
-	chartMgmt.SetLogger(slog.Warn)
+	//
+	// **`slog.Warn` ではなく、いま解決した logger の Warn を渡す** (#2872)。
+	// パッケージ関数を渡すと、ticker goroutine が実際に書く時点の
+	// `slog.Default()` に出る。Chart 側と揃えて、配線した時点のものに固定する。
+	chartMgmt.SetLogger(slog.Default().Warn)
 	s.setChartManagement(chartMgmt)
 	chartHooks := charthook.New(charthook.Config{
 		Notes:            chartCharts.Notes,

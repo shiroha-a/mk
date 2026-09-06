@@ -813,7 +813,7 @@ perm-check: ## router middleware の権限が upstream より緩くないか検�
 
 .PHONY: wiring-check
 wiring-check: ## router で配線が必要なものが外れていないか検査
-	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired|TestReadAllNotificationsPusherIsWired|TestWebPushProducersAreWired|TestChatPusherIsWired|TestNormalizeWiringKeepsStringLiteralSpacing' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired|TestReadAllNotificationsPusherIsWired|TestWebPushProducersAreWired|TestChatPusherIsWired|TestChartManagementLoggerIsResolvedAtWiring|TestNormalizeWiringKeepsStringLiteralSpacing' -count=1 -v
 
 .PHONY: gaterun-check
 gaterun-check: ## gates の -run が名指しするテストが実在するか検査

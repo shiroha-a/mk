@@ -11,8 +11,14 @@ import (
 
 // fakeRepo is an in-memory Repository used for engine unit tests. It
 // preserves insert order via a monotonic id and groups rows under
-// (span, group, ts) keys. The struct is safe for concurrent use because
-// the engine tests run Save() and Commit() from the same goroutine.
+// (span, group, ts) keys. State is guarded by a mutex, but the arm* helpers
+// write errOn without it.
+//
+// **ticker を起動したあとに arm しないこと** (#2872)。
+// TestChart_LoggerRedirectIsRaceFreeWhileTicking のように Save が ticker
+// goroutine から走る形が入ったので、「Save と Commit は同じ goroutine」という
+// 前提はもう成り立たない。Start より前に仕込めば goroutine 生成で
+// happens-before が張られる。
 type fakeRepo struct {
 	mu     sync.Mutex
 	nextID int64

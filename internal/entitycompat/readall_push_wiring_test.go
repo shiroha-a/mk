@@ -193,6 +193,27 @@ func TestChatPusherIsWired(t *testing.T) {
 		"push body の fromUser を引けず、チャットの Web Push が全滅する")
 }
 
+// chart の save エラーは、logger を**配線時に解決した形**で渡さないと
+// ticker goroutine の出力先が実行時の `slog.Default()` になる (#2872)。
+//
+// `slog.Warn` はパッケージ関数なので、渡すと「ticker が実際に書く時点の
+// default」に出る。`Chart` 側は構築時の logger を握るようにしたので、
+// ManagementService だけ実行時解決のままだと出力先が食い違う。
+//
+// **現状の production では差が出ない** — 非テストの `slog.SetDefault` は
+// `cmd/misskey/main.go` と `cmd/migrate/main.go` だけで、前者は `server.New`
+// より前に走る。差が出る前に #2867 / #2872 と揃えて固定しておくのが目的。
+//
+// **`internal/server` はカバレッジ 0% 例外で router のテストが薄い。** この 1 行を
+// 戻しても build もテストも通ることを実測したので、ここで固定する。
+func TestChartManagementLoggerIsResolvedAtWiring(t *testing.T) {
+	assertWired(t, routerGo, "chartMgmt.SetLogger(slog.Default().Warn)",
+		"起動後に slog.SetDefault を呼ぶコードが入った時点で、chart の save エラーが\n"+
+			"ticker の書き込み時点の default に出るようになり、Chart 側 (構築時に固定)\n"+
+			"と食い違う。**今は起きない** — 非テストの SetDefault は cmd/misskey と\n"+
+			"cmd/migrate だけで、前者は server.New より前。差が出る前に固定しておく")
+}
+
 // 複数行に折った配線が 1 行の正規形に畳まれることを固定する (#2856)。
 //
 // **`printer.Fprint` に元の fset を渡すと畳まれない。** go/printer はソースの

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -33,9 +34,43 @@ type Chart struct {
 	clock  Clock
 	tick   TickFunc
 
+	// logger は Chart を作った時点の slog.Default() を握る。
+	//
+	// **atomic にすること** (#2872)。warnDropped は ManagementService の
+	// ticker goroutine から呼ばれるので、テストが出力先を張り替える形にすると
+	// 素の field 書き換えでは `-race` が落ちる。**それは修正前には無かった
+	// 競合で、sink の競合を潰した代わりにここへ移すことになる** (実測で確認)。
+	//
+	// **毎回 slog.Default() を引き直さない** (#2872)。warnDropped は
+	// ManagementService の ticker goroutine からも呼ばれる (management.go の
+	// loop → SaveAll)。引き直すと「そのとき default だった誰か」の出力先に
+	// 書くので、`slog.SetDefault` でグローバルを差し替えて出力を数えるテストに
+	// tick が紛れ込む。**件数がずれるだけでなく、sink が並行安全でなければ
+	// データ競合になる。**
+	//
+	// production では `cmd/misskey/main.go` が起動時に `slog.SetDefault` を
+	// 済ませてから chart を組み立てるので挙動は同じ。
+	logger atomic.Pointer[slog.Logger]
+
 	bufMu  sync.Mutex
 	buffer map[string]*groupBuffer
 }
+
+// log returns the logger captured at construction.
+//
+// **nil へのフォールバックは到達不能だが残す。** `Chart` の composite literal は
+// New の中だけで、フィールドは全て unexported なのでパッケージ外からも組み立て
+// られない。それでも nil で panic するより既定へ落ちるほうが安全side。
+func (c *Chart) log() *slog.Logger {
+	if l := c.logger.Load(); l != nil {
+		return l
+	}
+	return slog.Default()
+}
+
+// setLogger redirects this chart's output. **テスト専用。** production は New で
+// 握った logger を使い続ける。
+func (c *Chart) setLogger(l *slog.Logger) { c.logger.Store(l) }
 
 // groupBuffer holds the merged pending diff for one group. Commit() folds
 // into it in place, so the retained memory is proportional to the number of
@@ -160,13 +195,15 @@ func New(cfg Config) (*Chart, error) {
 	if clk == nil {
 		clk = SystemClock{}
 	}
-	return &Chart{
+	c := &Chart{
 		schema: cfg.Schema,
 		repo:   cfg.Repo,
 		lock:   cfg.Lock,
 		clock:  clk,
 		tick:   cfg.Tick,
-	}, nil
+	}
+	c.logger.Store(slog.Default())
+	return c, nil
 }
 
 // BufferedGroups reports how many groups still hold unsaved work. Used by the
@@ -518,7 +555,7 @@ func (c *Chart) warnDropped(dropped []droppedWork) {
 		}
 		args = append(args, r.key+"Group", d.group, r.key+"Error", d.cause)
 	}
-	slog.Warn("chart: dropped buffered work that could not be saved", args...)
+	c.log().Warn("chart: dropped buffered work that could not be saved", args...)
 }
 
 // saveGroup claims the current rows for one group and applies its buffer.
