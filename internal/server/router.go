@@ -2294,6 +2294,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	s.echo.GET("/.well-known/host-meta.json", wellknownHandler.HostMetaJSON)
 	s.echo.GET("/.well-known/nodeinfo", wellknownHandler.NodeInfoDiscovery)
 	s.echo.GET("/.well-known/oauth-authorization-server", wellknownHandler.OAuthAuthorizationServer)
+	// W3C "A Well-Known URL for Changing Passwords"。パスワードマネージャが
+	// 変更画面を機械的に見つけるために引く (upstream PR 17901)。
+	s.echo.GET("/.well-known/change-password", wellknownHandler.ChangePassword)
 	// upstream `fastify.options('/.well-known/*')` 相当。
 	s.echo.OPTIONS("/.well-known/*", wellknownHandler.Preflight)
 

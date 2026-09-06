@@ -427,3 +427,26 @@ func TestPreflight(t *testing.T) {
 	assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
 	assert.Equal(t, "Vary", rec.Header().Get("Access-Control-Expose-Headers"))
 }
+
+// --- upstream PR 17901: W3C "A Well-Known URL for Changing Passwords" ---
+
+// パスワードマネージャは 302 の Location しか見ないので、絶対 URL であることを
+// 固定する (upstream は config.url 基準の絶対 URL を返す)。
+func TestChangePassword_RedirectsToSettingsSecurity(t *testing.T) {
+	h, _ := newHandler(t)
+	c, rec := newReq(t, "/.well-known/change-password")
+	require.NoError(t, h.ChangePassword(c))
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "https://example.com/settings/security", rec.Header().Get("Location"))
+}
+
+// federation='none' でも 302 を返す。upstream が 403 にするのは host-meta /
+// host-meta.json / nodeinfo / webfinger の 4 本だけで、パスワード変更導線は
+// 連合の可否と無関係。
+func TestChangePassword_NotGatedByFederation(t *testing.T) {
+	h, _ := newHandlerWithFederation(t, "none")
+	c, rec := newReq(t, "/.well-known/change-password")
+	require.NoError(t, h.ChangePassword(c))
+	assert.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "https://example.com/settings/security", rec.Header().Get("Location"))
+}

@@ -232,6 +232,18 @@ func (h *Handler) OAuthAuthorizationServer(c echo.Context) error {
 	return c.JSON(http.StatusOK, resp)
 }
 
+// ChangePassword redirects to the password change page. Implements the W3C
+// "A Well-Known URL for Changing Passwords" spec so that password managers
+// (iCloud Keychain / 1Password / Chrome) can find the page programmatically.
+// Mirrors upstream WellKnownServerService (upstream PR 17901).
+//
+// federationDisabled() は通さない。upstream が federation off で 403 を返すのは
+// host-meta / host-meta.json / nodeinfo / webfinger の 4 本で、この endpoint は
+// 連合ではなくローカル利用者のパスワード変更導線なので対象外。
+func (h *Handler) ChangePassword(c echo.Context) error {
+	return c.Redirect(http.StatusFound, h.origin+"/settings/security")
+}
+
 // webfingerResolve describes how to resolve a parsed webfinger resource:
 // either by user id (actor URI form) or by local username (acct / @username).
 type webfingerResolve struct {

@@ -2,6 +2,7 @@
 package e2e
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -116,5 +117,25 @@ func TestWellKnown(t *testing.T) {
 		assert.Equal(t, origin, body["issuer"])
 		assert.Equal(t, origin+"/oauth/authorize", body["authorization_endpoint"])
 		assert.Equal(t, origin+"/oauth/token", body["token_endpoint"])
+	})
+
+	// upstream PR 17901: W3C "A Well-Known URL for Changing Passwords"。
+	// router に登録されていないと OPTIONS /.well-known/* のワイルドカードに
+	// 引っかかって 405 になるので、ここで配線ごと固定する。
+	t.Run("change-password", func(t *testing.T) {
+		// パスワードマネージャは Location を読むだけでリダイレクトは追わない。
+		client := &http.Client{
+			CheckRedirect: func(*http.Request, []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		}
+		req, err := http.NewRequest(http.MethodGet, baseURL+"/.well-known/change-password", nil)
+		require.NoError(t, err)
+		resp, err := client.Do(req)
+		require.NoError(t, err)
+		defer resp.Body.Close()
+
+		assert.Equal(t, http.StatusFound, resp.StatusCode)
+		assert.Equal(t, origin+"/settings/security", resp.Header.Get("Location"))
 	})
 }
