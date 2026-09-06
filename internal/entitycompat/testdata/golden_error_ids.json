@@ -72,6 +72,10 @@
   "admin/relays/add": {
     "INVALID_URL": "fb8c92d3-d4e5-44e7-b3d4-800d5cef8b2c"
   },
+  "admin/reset-password": {
+    "ACCESS_DENIED": "cda8f8ce-89a6-4f92-8055-33bbe0c1464d",
+    "NO_SUCH_USER": "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"
+  },
   "admin/resolve-abuse-user-report": {
     "NO_SUCH_ABUSE_REPORT": "ac3794dd-2ce4-d878-e546-73c60c06b398"
   },
@@ -104,6 +108,10 @@
   "admin/system-webhook/test": {
     "NO_SUCH_WEBHOOK": "0c52149c-e913-18f8-5dc7-74870bfe0cf9"
   },
+  "admin/unset-mfa": {
+    "ACCESS_DENIED": "cda8f8ce-89a6-4f92-8055-33bbe0c1464d",
+    "NO_SUCH_USER": "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"
+  },
   "admin/update-abuse-user-report": {
     "NO_SUCH_ABUSE_REPORT": "15f51cf5-46d1-4b1d-a618-b35bcbed0662"
   },
@@ -119,6 +127,9 @@
     "NO_SUCH_ANTENNA": "b34dcf9d-348f-44bb-99d0-6c9314cfe2df"
   },
   "antennas/notes": {
+    "NO_SUCH_ANTENNA": "850926e0-fd3b-49b6-b69a-b28a5dbd82fe"
+  },
+  "antennas/remove-note": {
     "NO_SUCH_ANTENNA": "850926e0-fd3b-49b6-b69a-b28a5dbd82fe"
   },
   "antennas/show": {
@@ -173,6 +184,7 @@
     "NO_SUCH_CHANNEL": "4938f5f3-6167-4c04-9149-6607b7542861"
   },
   "channels/follow": {
+    "ALREADY_FOLLOWING": "7db31665-651e-40c1-8e6e-28e9ad829a2d",
     "NO_SUCH_CHANNEL": "c0031718-d573-4e85-928e-10039f1fbb68"
   },
   "channels/mute/create": {
@@ -344,6 +356,11 @@
     "EXT_RESOURCE_HASH_DIDNT_MATCH": "693ba8ba-b486-40df-a174-72f8279b56a4",
     "EXT_RESOURCE_RETURNED_INVALID_SCHEMA": "bb774091-7a15-4a70-9dc5-6ac8cf125856"
   },
+  "fetch-rss": {
+    "FETCH_RSS_FAILED": "8db5d3d8-31d7-452f-b0cc-ca3b8925de12",
+    "FETCH_RSS_UNAVAILABLE": "91e6ff44-c63f-4725-9ad0-b7a40d7f7655",
+    "INVALID_URL": "89b7ee05-ccfc-4bdd-9b13-61172fd1e06c"
+  },
   "flash/delete": {
     "ACCESS_DENIED": "1036ad7b-9f92-4fff-89c3-0e50dc941704",
     "NO_SUCH_FLASH": "de1623ef-bbb3-4289-a71e-14cfa83d9740"
@@ -494,6 +511,10 @@
   },
   "i/registry/remove": {
     "NO_SUCH_KEY": "1fac4e8a-a6cd-4e39-a4a5-3a7e11f1b019"
+  },
+  "i/revoke-token": {
+    "CREDENTIAL_REQUIRED": "6f1f0d3a-3d5b-4b1f-9c3e-2a6d1e5b8c47",
+    "PERMISSION_DENIED": "fc20d118-5705-4462-b6c5-2b5b43092cf3"
   },
   "i/unpin": {
     "NO_SUCH_NOTE": "454170ce-9d63-4a43-9da1-ea10afe81e21"
@@ -680,6 +701,7 @@
     "NO_SUCH_NOTE": "24fcbfc6-2e37-42b6-8388-c29b3861a08d"
   },
   "notes/thread-muting/create": {
+    "ALREADY_MUTING": "c146e22d-1141-4b31-b28d-176371014d18",
     "NO_SUCH_NOTE": "5ff67ada-ed3b-2e71-8e87-a1a421e177d2"
   },
   "notes/thread-muting/delete": {

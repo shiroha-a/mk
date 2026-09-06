@@ -342,7 +342,16 @@ submodule bump の PR で人が見る。
 
 `third_party/misskey` fork (`shiroha-a/misskey-ts`) に載せている frontend の custom commit。**原則として**純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針。
 
-**還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `-mk.22h` の 1 行だけ。
+**還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `-mk.22h` / `-mk.22i` / `-mk.22j` の 3 行。
+
+**現在の pin は `2026.9.0-mk.0`。** tag 列は「その変更が最初に入った世代」で、下の
+表の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
+custom commit 50 個) で `2026.9.0-mk.0` に入っている。載せ替えで衝突したのは
+`packages/frontend/src/pages/admin/job-queue.vue` の 1 ファイルだけで、
+upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][number]`) に
+変えたところに fork の `ApiQueueName` キャストが重なったもの。**upstream 側の型を
+採り、fork のキャストは残した** — Paused タブは upstream / fork のどちらにも既に
+無いので `'paused'` は到達しない。
 
 | tag | 内容 |
 |---|---|

@@ -42,7 +42,6 @@
   "i/move",
   "i/regenerate-token",
   "i/registry/scopes-with-domain",
-  "i/revoke-token",
   "i/signin-history",
   "i/update-email",
   "i/webhooks/test",

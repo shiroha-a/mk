@@ -14,6 +14,10 @@
   "admin/update-abuse-user-report": {
     "NO_SUCH_ABUSE_REPORT": "server"
   },
+  "fetch-rss": {
+    "FETCH_RSS_FAILED": "server",
+    "FETCH_RSS_UNAVAILABLE": "server"
+  },
   "i": {
     "USER_IS_DELETED": "permission"
   },

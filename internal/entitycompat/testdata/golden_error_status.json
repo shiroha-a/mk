@@ -35,8 +35,17 @@
   "drive/files/create": {
     "MAX_FILE_SIZE_EXCEEDED": 413
   },
+  "fetch-rss": {
+    "FETCH_RSS_FAILED": 422,
+    "FETCH_RSS_UNAVAILABLE": 503,
+    "INVALID_URL": 400
+  },
   "i": {
     "USER_IS_DELETED": 403
+  },
+  "i/revoke-token": {
+    "CREDENTIAL_REQUIRED": 401,
+    "PERMISSION_DENIED": 403
   },
   "i/update": {
     "YOUR_ACCOUNT_MOVED": 403,
