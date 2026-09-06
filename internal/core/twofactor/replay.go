@@ -38,14 +38,17 @@ func bypassForTest() bool {
 //
 // RFC 6238 §5.2 requires that "the verifier MUST NOT accept the second
 // attempt of the OTP after the successful validation has been issued
-// for the first OTP". Upstream Misskey TS (UserAuthService) does not
-// implement this protection, so an attacker who observes a 6-digit code
+// for the first OTP". Without it, an attacker who observes a 6-digit code
 // (phishing, shoulder surfing, MITM proxy) can replay it within the code's
 // acceptance window — long enough to open multiple sessions or to chain into
 // other 2FA-gated endpoints (i/2fa/done, key registration, etc.).
 //
-// mk-go ships this as an independent hardening on top of the drop-in
-// compatible schema: no new tables, no new error codes, just a Redis
+// **upstream も 2026.6.0 で同等の機構を持つ** (`UserAuthService.validateOtp` が
+// Redis の `SET NX EX` で使用済みトークンを記録する)。mk-go が先行実装したもので、
+// 現在は差分なし (docs/divergence.md)。バックアップコードの単回予約
+// (BackupCodeGuardKey + ReserveOnce) のほうは upstream に無い。
+//
+// 実装は drop-in 互換の schema の上に載る: no new tables, no new error codes, just a Redis
 // keyspace that mirrors the validity window of a TOTP code.
 type ReplayGuard interface {
 	// MarkUsed records (userID, code) as consumed. It returns true if
@@ -148,10 +151,10 @@ func (g *RedisReplayGuard) Release(ctx context.Context, userID, code string) err
 	return g.Client.Del(ctx, fmt.Sprintf("%s:%s:%s", prefix, userID, code)).Err()
 }
 
-// ReleaseReplay undoes a MarkUsed when the guard supports it.
+// releaseReplay undoes a MarkUsed when the guard supports it.
 //
 // guard が nil、または ReplayReleaser を実装していない場合は何もしない。
-func ReleaseReplay(ctx context.Context, guard ReplayGuard, userID, code string) {
+func releaseReplay(ctx context.Context, guard ReplayGuard, userID, code string) {
 	releaser, ok := guard.(ReplayReleaser)
 	if !ok || releaser == nil {
 		return
@@ -214,3 +217,29 @@ func ValidateWithReplay(ctx context.Context, guard ReplayGuard, userID, code, se
 	}
 	return ok
 }
+
+// BackupCodeGuardKey namespaces a backup code inside the TOTP replay keyspace.
+//
+// 同じ guard を共有するので prefix で分ける。**今のコード生成では衝突しない**
+// (バックアップコードは hex 16 文字、TOTP は 6 桁) が、片方の桁数を変えたときに
+// 「一方を使うともう一方が使えなくなる」形で壊れるのを防ぐ。
+//
+// **signin と i/* が同じ関数を使うこと** (#2862)。prefix が食い違うと、両者が
+// 別々の keyspace を予約することになり、跨いだ同時実行を 1 本に絞れない。
+func BackupCodeGuardKey(code string) string { return "bc:" + code }
+
+// ReleaseReservation undoes a MarkUsed, detached from the request context.
+//
+// **リクエストの ctx をそのまま使うと取り消せない** (#2852)。password 検証が
+// `OutcomeUnavailable` になる理由の 1 つが ctx キャンセルで、そのときは
+// `Del` も `context canceled` で落ちて記録が残る。安全側ではあるが、
+// 「503 でも焼けない」という狙いが半分しか効かない。
+func ReleaseReservation(ctx context.Context, guard ReplayGuard, userID, key string) {
+	out, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
+	defer cancel()
+	releaseReplay(out, guard, userID, key)
+}
+
+// releaseTimeout bounds the best-effort rollback so a stuck Redis cannot hold
+// the request goroutine.
+const releaseTimeout = 3 * time.Second

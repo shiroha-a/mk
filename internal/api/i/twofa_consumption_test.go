@@ -361,25 +361,9 @@ func TestCheck2FAToken_BackupCodeReservedOnce(t *testing.T) {
 	assert.True(t, ok3, "無関係なコードまで弾いている")
 }
 
-// rollback はリクエストの ctx から切り離す (#2852)。
-//
-// **ctx キャンセルでも `OutcomeUnavailable` になる** (`password.Verify` の
-// argon2 経路)。リクエストの ctx をそのまま使うと `Del` が `context canceled`
-// で落ち、記録が残ったまま 503 を返すので「503 でも焼けない」が半分しか効かない。
-//
-// **handler 経由では突けない。** キャンセル済み ctx を最初から渡すと gate の
-// 予約が fail-open して解放するものが無くなり、bcrypt は ctx を見ないので
-// 204 で終わる (実測)。解放そのものを直接見る。
-func TestReleaseReservation_DetachesFromRequestContext(t *testing.T) {
-	guard := &countingReplayGuard{used: map[string]bool{"u1:bc:backup1": true}}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-
-	releaseReservation(ctx, guard, "u1", "bc:backup1")
-
-	assert.Equal(t, 1, guard.releases)
-	assert.Empty(t, guard.used, "リクエストの ctx で release しているため予約が残っている")
-}
+// **ReleaseReservation の ctx 切り離しは internal/core/twofactor で検証する** (#2862)。
+// 関数が住んでいるパッケージに置かないと、そちらのカバレッジに計上されず、
+// 移動したときに検証ごと迷子になる。
 
 // バックアップコードの予約は TOTP の keyspace と衝突しない (#2852)。
 //
@@ -491,4 +475,33 @@ func TestTwoFAUnregister_KeepsTOTPReplayRecord(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code, "body=%s", rec.Body.String())
 	assert.Equal(t, 0, guard.releases, "成功したのに replay 記録を解放している")
 	assert.Contains(t, guard.used, "u1:"+code, "replay 記録が残っていない (同じコードを使い回せる)")
+}
+
+// **消費できなかったら通さない** (#2862)。`verify2FAToken` を使う 2 経路
+// (`i/2fa/register-key` / `i/2fa/key-done`) は gate される操作より前に Commit
+// するので、拒否できる。通すと書き込みが落ちているあいだ同じバックアップ
+// コードで何度でも操作が成立する (予約は Commit の中で解放されるので TTL も
+// 待たない)。signin と同じ判断。
+//
+// **mutation の後に Commit する経路 (change-password 等) には適用できない** —
+// そこで失敗しても返せるものが無い。だから一律 fail-closed にはしない。
+func TestVerify2FAToken_ConsumeFailureRejects(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	setupUserWithPassword(repo, "u1", "oldpass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	h.SetTOTPReplayGuard(&countingReplayGuard{used: map[string]bool{}})
+	repo.RemoveBackupCodeFn = func(string, string) error { return errors.New("db down") }
+
+	assert.False(t, h.verify2FAToken(context.Background(), repo.Profiles["u1"], "backup1"),
+		"消費に失敗したのに通している")
+}
+
+// 消費に成功したら通る (上の変異で全部落ちる形にしない)。
+func TestVerify2FAToken_SuccessPasses(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	setupUserWithPassword(repo, "u1", "oldpass")
+	enableTwoFactorWithBackupCodes(repo, "u1")
+	h.SetTOTPReplayGuard(&countingReplayGuard{used: map[string]bool{}})
+
+	assert.True(t, h.verify2FAToken(context.Background(), repo.Profiles["u1"], "backup1"))
 }

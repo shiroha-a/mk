@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -101,7 +100,7 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{"twoFactorTempSecret": secret})
 
 	// **tempSecret を書き込んでから確定する** (#2852)。
-	use.Commit()
+	_ = use.Commit()
 	committed = true
 	return c.JSON(http.StatusOK, map[string]any{
 		"qr":     qrDataURL,
@@ -297,17 +296,25 @@ func (h *Handler) requireWebAuthn(c echo.Context, password, incorrectPwID string
 type twoFAUse struct {
 	// commit makes the consumption permanent. nil のこともある (TOTP は検証時に
 	// 記録済みなので確定作業が無い)。
-	commit func()
+	//
+	// **error を返す。** 消費できたかどうかで応答を変えられる呼び出し元
+	// (gate される操作より前に Commit する経路) が存在するため (#2862)。
+	commit func() error
 	// rollback undoes a consumption that was already recorded. nil のこともある
 	// (backup code は commit するまで何も書いていない)。
 	rollback func()
 }
 
 // Commit makes the 2FA consumption permanent. Safe on the zero value.
-func (u twoFAUse) Commit() {
+//
+// **戻り値を捨ててよいのは、gate される操作を既に済ませた後で呼ぶ経路だけ。**
+// そこで失敗しても返せるものが無い (操作は成立済み)。操作より前に Commit する
+// 経路は error を見て拒否すること (#2862)。
+func (u twoFAUse) Commit() error {
 	if u.commit != nil {
-		u.commit()
+		return u.commit()
 	}
+	return nil
 }
 
 // Rollback undoes a consumption recorded during verification. Safe on the
@@ -326,7 +333,8 @@ func (u twoFAUse) Rollback() {
 // Misskey TS upstream の UserAuthService.twoFactorAuthenticate と同じ挙動:
 // backup code に hit したら使い捨てで消費し、それ以外は TOTP として検証する。
 // TOTP 経路は ValidateWithReplay で同一コードの replay を refuse する
-// (RFC 6238 §5.2 / mk-go 独自 hardening、upstream Misskey TS は持たない)。
+// (RFC 6238 §5.2)。**upstream も 2026.6.0 で同等の機構を持つ**
+// (`UserAuthService.validateOtp`)。mk-go が先行実装したもの。
 //
 // **replay の記録だけは検証時に行う。** SETNX は検査と記録を分けられないので、
 // EXISTS と SETNX に割ると隙間に同じコードで 2 本通せてしまう。記録は今までどおり
@@ -344,22 +352,24 @@ func (h *Handler) check2FAToken(ctx context.Context, profile *model.UserProfile,
 		// 予約すれば、原子的に 1 本だけに絞れる。
 		//
 		// guard が無い構成では今までどおり素通しする (fail-open)。
-		if !twofactor.ReserveOnce(ctx, h.totpReplayGuard, userID, backupCodeGuardKey(token)) {
+		if !twofactor.ReserveOnce(ctx, h.totpReplayGuard, userID, twofactor.BackupCodeGuardKey(token)) {
 			return twoFAUse{}, false
 		}
 		return twoFAUse{
-			commit: func() {
+			commit: func() error {
 				// **読んだ配列を書き戻さない** (#2852)。別のコードを使う同時実行が
 				// 互いの消費を打ち消し合い、使ったはずのコードが復活する。
 				if err := h.userService.RemoveBackupCode(userID, token); err != nil {
 					// 消費に失敗したら予約を残さない — 残すと TTL のあいだ
 					// 正当な利用者が同じコードで打ち直せなくなる。
 					slog.Warn("2fa: failed to consume backup code", "userId", userID, "err", err)
-					releaseReservation(ctx, h.totpReplayGuard, userID, backupCodeGuardKey(token))
+					twofactor.ReleaseReservation(ctx, h.totpReplayGuard, userID, twofactor.BackupCodeGuardKey(token))
+					return err
 				}
+				return nil
 			},
 			rollback: func() {
-				releaseReservation(ctx, h.totpReplayGuard, userID, backupCodeGuardKey(token))
+				twofactor.ReleaseReservation(ctx, h.totpReplayGuard, userID, twofactor.BackupCodeGuardKey(token))
 			},
 		}, true
 	}
@@ -371,32 +381,9 @@ func (h *Handler) check2FAToken(ctx context.Context, profile *model.UserProfile,
 	}
 	guard, userID := h.totpReplayGuard, profile.UserID
 	return twoFAUse{rollback: func() {
-		releaseReservation(ctx, guard, userID, token)
+		twofactor.ReleaseReservation(ctx, guard, userID, token)
 	}}, true
 }
-
-// backupCodeGuardKey namespaces a backup code inside the TOTP replay keyspace.
-//
-// 同じ guard を共有するので prefix で分ける。**今のコード生成では衝突しない**
-// (バックアップコードは hex 16 文字、TOTP は 6 桁) が、片方の桁数を変えたときに
-// 「一方を使うともう一方が使えなくなる」形で壊れるのを防ぐ。
-func backupCodeGuardKey(code string) string { return "bc:" + code }
-
-// releaseReservation undoes a MarkUsed, detached from the request context.
-//
-// **リクエストの ctx をそのまま使うと取り消せない** (#2852)。password 検証が
-// `OutcomeUnavailable` になる理由の 1 つが ctx キャンセルで、そのときは
-// `Del` も `context canceled` で落ちて記録が残る。安全側ではあるが、
-// 「503 でも焼けない」という狙いが半分しか効かない。
-func releaseReservation(ctx context.Context, guard twofactor.ReplayGuard, userID, key string) {
-	out, cancel := context.WithTimeout(context.WithoutCancel(ctx), releaseTimeout)
-	defer cancel()
-	twofactor.ReleaseReplay(out, guard, userID, key)
-}
-
-// releaseTimeout bounds the best-effort rollback so a stuck Redis cannot hold
-// the request goroutine.
-const releaseTimeout = 3 * time.Second
 
 // verify2FAToken validates a 2FA token and consumes it immediately.
 //
@@ -405,10 +392,14 @@ const releaseTimeout = 3 * time.Second
 // (#2852)。
 func (h *Handler) verify2FAToken(ctx context.Context, profile *model.UserProfile, token string) bool {
 	use, ok := h.check2FAToken(ctx, profile, token)
-	if ok {
-		use.Commit()
+	if !ok {
+		return false
 	}
-	return ok
+	// **消費できなかったら通さない** (#2862)。この経路は gate される操作より
+	// 前に Commit するので拒否できる。通すと、書き込みが落ちているあいだ
+	// 同じバックアップコードで何度でも操作が成立する (予約は Commit の中で
+	// 解放されるので TTL も待たない)。signin と同じ判断。
+	return use.Commit() == nil
 }
 
 // twoFAKeyNameMaxLen mirrors upstream の paramDef `name: { minLength: 1,
@@ -652,7 +643,7 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	// upstream 互換: 削除でも `meUpdated` を publish して frontend UI を即時更新 (#707)。
 	h.publishMeUpdated(user.ID)
 	// **key を消してから確定する** (#2852)。
-	use.Commit()
+	_ = use.Commit()
 	committed = true
 	// upstream は `return {}` なので 200 + 空オブジェクト (204 ではない)。
 	return c.JSON(http.StatusOK, map[string]any{})

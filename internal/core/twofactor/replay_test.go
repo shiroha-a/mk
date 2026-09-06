@@ -294,11 +294,11 @@ func TestRedisReplayGuard_ReleaseNilSafe(t *testing.T) {
 	assert.NoError(t, (&RedisReplayGuard{}).Release(context.Background(), "u1", "123456"))
 }
 
-// ReleaseReplay は ReplayReleaser を実装しない guard では何もしない。
+// releaseReplay は ReplayReleaser を実装しない guard では何もしない。
 func TestReleaseReplay_IgnoresGuardsWithoutRelease(t *testing.T) {
 	// failingGuard は Release を持たないので type assertion に失敗する。
-	ReleaseReplay(context.Background(), failingGuard{}, "u1", "123456")
-	ReleaseReplay(context.Background(), nil, "u1", "123456")
+	releaseReplay(context.Background(), failingGuard{}, "u1", "123456")
+	releaseReplay(context.Background(), nil, "u1", "123456")
 }
 
 // mustMark records the code and fails the test if it was already present.
@@ -333,7 +333,7 @@ func TestReserveOnce_FailsOpen(t *testing.T) {
 
 // Release の失敗は握り潰す (記録が残るだけで安全側)。
 func TestReleaseReplay_SwallowsFailure(t *testing.T) {
-	ReleaseReplay(context.Background(), failingReleaser{}, "u1", "code")
+	releaseReplay(context.Background(), failingReleaser{}, "u1", "code")
 }
 
 // failingReleaser always fails both operations.
@@ -341,4 +341,62 @@ type failingReleaser struct{ failingGuard }
 
 func (failingReleaser) Release(_ context.Context, _, _ string) error {
 	return errors.New("boom")
+}
+
+// releaseGuard counts Release calls and honours ctx, mirroring the real
+// RedisReplayGuard (whose Del fails with `context canceled`).
+type releaseGuard struct {
+	used     map[string]bool
+	releases int
+}
+
+func (g *releaseGuard) MarkUsed(ctx context.Context, userID, code string) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	k := userID + ":" + code
+	if g.used[k] {
+		return false, nil
+	}
+	g.used[k] = true
+	return true, nil
+}
+
+func (g *releaseGuard) Release(ctx context.Context, userID, code string) error {
+	g.releases++
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	delete(g.used, userID+":"+code)
+	return nil
+}
+
+// **ReleaseReservation はリクエストの ctx から切り離す** (#2852)。
+//
+// password 検証が `OutcomeUnavailable` になる理由の 1 つが ctx キャンセルで、
+// そのときリクエストの ctx をそのまま使うと `Del` が `context canceled` で
+// 落ちて予約が残る。「503 でも焼けない」という狙いが半分しか効かなくなる。
+//
+// **この検証はここに置くこと** (#2862)。呼び出し側のパッケージに置くと、
+// 関数が住んでいるパッケージのカバレッジには計上されず、移動したときに
+// 検証ごと迷子になる。
+func TestReleaseReservation_DetachesFromRequestContext(t *testing.T) {
+	guard := &releaseGuard{used: map[string]bool{"u1:bc:backup1": true}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	ReleaseReservation(ctx, guard, "u1", "bc:backup1")
+
+	assert.Equal(t, 1, guard.releases)
+	assert.Empty(t, guard.used, "リクエストの ctx で release しているため予約が残っている")
+}
+
+// バックアップコードの予約は TOTP の keyspace と衝突しない (#2852 / #2862)。
+//
+// **signin と i/* が同じ関数を使う。** prefix が食い違うと両者が別々の
+// keyspace を予約し、跨いだ同時実行を 1 本に絞れない。
+func TestBackupCodeGuardKey_NamespacesAwayFromTOTP(t *testing.T) {
+	assert.Equal(t, "bc:123456", BackupCodeGuardKey("123456"))
+	assert.NotEqual(t, "123456", BackupCodeGuardKey("123456"),
+		"TOTP と同じ keyspace を使うと互いを弾き合う")
 }

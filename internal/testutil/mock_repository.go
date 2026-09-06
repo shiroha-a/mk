@@ -43,6 +43,10 @@ type MockUserRepository struct {
 	// FindErr, when non-nil, is returned by FindByID. Same intent as
 	// FindProfileErr: a DB failure must not be collapsed into not-found (#2792).
 	FindErr error
+	// UpdateProfileFn, when non-nil, replaces UpdateProfile entirely. Used to
+	// assert on the fields a caller writes (e.g. 2FA backup codes must be
+	// consumed with RemoveBackupCode, never written back as a snapshot).
+	UpdateProfileFn func(userID string, fields map[string]any) error
 }
 
 func NewMockUserRepository() *MockUserRepository {
@@ -784,6 +788,9 @@ func (m *MockUserRepository) ListUserRecommendations(viewerID string, activeSinc
 }
 
 func (m *MockUserRepository) UpdateProfile(userID string, fields map[string]any) error {
+	if m.UpdateProfileFn != nil {
+		return m.UpdateProfileFn(userID, fields)
+	}
 	if m.UpdateProfileErr != nil {
 		return m.UpdateProfileErr
 	}

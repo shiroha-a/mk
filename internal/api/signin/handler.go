@@ -369,15 +369,39 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 		}
 		// まず TOTP を試す。失敗したらバックアップコードにフォールバック。
 		// ValidateWithReplay は RFC 6238 §5.2 に従い同コードの 2 回目以降
-		// (acceptance window 内) を拒否する (mk-go 独自 hardening、upstream
-		// Misskey TS は持たない)。
+		// (acceptance window 内) を拒否する。**upstream も 2026.6.0 で同等の
+		// 機構を持つ** (`UserAuthService.validateOtp`)。mk-go が先行実装したもの。
 		if profile.TwoFactorSecret != nil && twofactor.ValidateWithReplay(c.Request().Context(), h.totpReplayGuard, user.ID, *req.Token, *profile.TwoFactorSecret) {
 			return h.ok(c, user)
 		}
-		if remaining, berr := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), *req.Token); berr == nil {
-			_ = h.userRepo.UpdateProfile(user.ID, map[string]any{
-				"twoFactorBackupSecret": model.StringArray(remaining),
-			})
+		if _, berr := twofactor.ConsumeBackupCode([]string(profile.TwoFactorBackupSecret), *req.Token); berr == nil {
+			ctx := c.Request().Context()
+			// **DB へ書く前に予約する** (#2862)。ここは i/* と同じ guard・同じ
+			// keyspace (twofactor.BackupCodeGuardKey) を使う。分けると、
+			// 「同じコードで同時にログイン」も「ログインしながら 2FA を解除」も
+			// 素通りする。
+			//
+			// guard が無い構成では今までどおり素通しする (fail-open)。
+			if !twofactor.ReserveOnce(ctx, h.totpReplayGuard, user.ID, twofactor.BackupCodeGuardKey(*req.Token)) {
+				return h.fail(c, user, http.StatusForbidden, "cdf1235b-ac71-46d4-a3a6-84ccce48df6f")
+			}
+			// **読んだ配列を書き戻さない** (#2862)。別のコードを使う同時実行が
+			// 互いの消費を打ち消し合い、使ったはずのコードが復活する
+			// ([c1 c2 c3] から A が c1、B が c2 を消すと、後勝ちで片方が戻る)。
+			if err := h.userRepo.RemoveBackupCode(user.ID, *req.Token); err != nil {
+				// **消費できなかったら通さない。** 通すと、DB への書き込みが
+				// 落ちているあいだ同じコードで何度でもセッションを取れる。
+				// upstream も同じ挙動になる。UserAuthService が
+				// `await ...update(...)` していて自分では catch しないので、
+				// rejection が SigninApiService の catch に届いてこの 403 になる。
+				//
+				// **そのうえで予約は解放する。** 403 を返す以上、利用者は打ち直す。
+				// 残すと DB が復帰したあとも TTL のあいだ同じコードを弾き続ける。
+				// signin は未認証経路なので、締め出しの影響が i/* より大きい。
+				slog.Warn("signin: failed to consume backup code", "userId", user.ID, "err", err)
+				twofactor.ReleaseReservation(ctx, h.totpReplayGuard, user.ID, twofactor.BackupCodeGuardKey(*req.Token))
+				return h.fail(c, user, http.StatusForbidden, "cdf1235b-ac71-46d4-a3a6-84ccce48df6f")
+			}
 			return h.ok(c, user)
 		}
 		return h.fail(c, user, http.StatusForbidden, "cdf1235b-ac71-46d4-a3a6-84ccce48df6f")

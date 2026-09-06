@@ -137,7 +137,7 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 	}
 
 	// **profile を書き換えられてから確定する** (#2852)。
-	use.Commit()
+	_ = use.Commit()
 	committed = true
 	return h.Me(c)
 }

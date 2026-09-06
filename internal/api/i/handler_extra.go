@@ -117,7 +117,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	}
 	// **password を書き換えられてから確定する。** 先に確定すると、書き込みに
 	// 失敗したときに何も変わっていないのに 2FA だけ焼ける。
-	use.Commit()
+	_ = use.Commit()
 	committed = true
 	return c.NoContent(http.StatusNoContent)
 }
@@ -211,7 +211,7 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 		}
 	}
 	// **削除フラグが立ってから確定する** (#2852)。
-	use.Commit()
+	_ = use.Commit()
 	committed = true
 	return c.NoContent(http.StatusNoContent)
 }
