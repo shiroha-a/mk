@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -564,10 +565,20 @@ func (h *Handler) Translate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("CANNOT_TRANSLATE_INVISIBLE_NOTE", "Cannot translate invisible note.", "ea29f2ca-c368-43b3-aaf1-5ac3e74bbe5d"))
 	}
 
-	// upstream translate.ts:86-88: note.text == null は return; (res optional → 204
-	// No Content)。空文字は upstream が DeepL へ POST するので素通しする。mk-go の
-	// 旧 CANNOT_TRANSLATE は upstream に無い独自 error だったので廃止 (#1948-17)。
-	if n.Text == nil {
+	// upstream translate.ts: CW があれば `<cw>\n-----\n<text>` を翻訳対象にする
+	// (upstream ab26d2b7b2)。text が無くても CW だけあれば翻訳する。
+	text := ""
+	if n.Text != nil {
+		text = *n.Text
+	}
+	if n.CW != nil {
+		text = *n.CW + "\n-----\n" + text
+	}
+
+	// upstream は 2026.9.0 で判定を `note.text == null` から `text.trim() === ''`
+	// に変えた。空白のみ / 空文字は DeepL へ投げずに 204 (res optional → No Content)。
+	// mk-go の旧 CANNOT_TRANSLATE は upstream に無い独自 error なので廃止済み (#1948-17)。
+	if strings.TrimSpace(text) == "" {
 		return c.NoContent(http.StatusNoContent)
 	}
 
@@ -576,7 +587,7 @@ func (h *Handler) Translate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Translate of notes unavailable.", "50a70314-2d8a-431b-b433-efa5cc56444c"))
 	}
 
-	result, err := h.translator.Translate(c.Request().Context(), *n.Text, req.TargetLang)
+	result, err := h.translator.Translate(c.Request().Context(), text, req.TargetLang)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Translation failed.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

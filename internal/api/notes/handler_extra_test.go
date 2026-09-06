@@ -1196,3 +1196,59 @@ func TestMentions_Error(t *testing.T) {
 	rec := postExtra(h.Mentions, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// --- upstream ab26d2b7b2: ノート翻訳で CW も翻訳対象に含める ---
+
+// captureTranslateHandler は DeepL へ実際に送られた text を捕まえられる handler を返す。
+// 連結結果を直接見ないと「CW を足した」ことを検証できない (200 になるだけでは
+// text と CW のどちらを送ったか区別が付かない)。
+func captureTranslateHandler(t *testing.T) (*Handler, *testutil.MockNoteRepository, *string) {
+	t.Helper()
+	var sent string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		sent = r.FormValue("text")
+		_, _ = w.Write([]byte(`{"translations":[{"detected_source_language":"JA","text":"translated"}]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	querySvc := corenote.NewQueryService(noteRepo, followingRepo)
+	h := NewHandler(noteRepo, nil, nil, querySvc, nil, nil, nil, nil, idGen)
+	h.SetTranslator(translate.NewDeepLWithClient("key", srv.URL, srv.Client()))
+	return h, noteRepo, &sent
+}
+
+func TestTranslate_CWIsPrependedToText(t *testing.T) {
+	h, noteRepo, sent := captureTranslateHandler(t)
+	cw, txt := "注意", "本文"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, CW: &cw, Text: &txt}
+	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "注意\n-----\n本文", *sent, "CW を区切り付きで前置する")
+}
+
+// text が無くても CW だけあれば翻訳する (2026.9.0 より前は 204 だった)。
+func TestTranslate_CWOnlyNote_IsTranslated(t *testing.T) {
+	h, noteRepo, sent := captureTranslateHandler(t)
+	cw := "注意"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, CW: &cw, Text: nil}
+	rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code, "CW だけでも翻訳する")
+	assert.Equal(t, "注意\n-----\n", *sent)
+}
+
+// 空白のみ / 空文字は DeepL へ投げずに 204。判定が `text == nil` から
+// `strings.TrimSpace(text) == ""` に変わったことを固定する。
+func TestTranslate_BlankText_204(t *testing.T) {
+	for _, txt := range []string{"", "   ", "\n\t "} {
+		h, noteRepo, sent := captureTranslateHandler(t)
+		v := txt
+		noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", Visibility: model.NoteVisibilityPublic, Text: &v}
+		rec := postExtra(h.Translate, `{"noteId":"n1","targetLang":"en"}`, nil)
+		assert.Equal(t, http.StatusNoContent, rec.Code, "空白のみは 204 (%q)", txt)
+		assert.Empty(t, *sent, "DeepL を呼ばない (%q)", txt)
+	}
+}
