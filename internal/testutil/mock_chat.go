@@ -48,6 +48,16 @@ type MockChatRepository struct {
 	DeleteErr error
 	// ListMembershipsErr forces ListMembershipsByUser to return this error.
 	ListMembershipsErr error
+	// TransferOwnershipErr forces TransferRoomOwnership to return this error
+	// without touching the store.
+	TransferOwnershipErr error
+	// FindRoomErr / FindMembershipErr / ListMembersErr force the corresponding
+	// lookup to fail. Used to cover the "DB 障害を not-found に丸めない" branches
+	// (#2792), which are otherwise unreachable against an in-memory store.
+	FindRoomErr       error
+	FindMembershipErr error
+	ListMembersErr    error
+	FindInvitationErr error
 }
 
 // NewMockChatRepository constructs an empty MockChatRepository ready for use.
@@ -100,6 +110,9 @@ func (m *MockChatRepository) CreateRoom(room *model.ChatRoom) error {
 func (m *MockChatRepository) FindRoomByID(id string) (*model.ChatRoom, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.FindRoomErr != nil {
+		return nil, m.FindRoomErr
+	}
 	if r, ok := m.Rooms[id]; ok {
 		return r, nil
 	}
@@ -110,6 +123,48 @@ func (m *MockChatRepository) UpdateRoom(room *model.ChatRoom) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.Rooms[room.ID] = room
+	return nil
+}
+
+// TransferRoomOwnership mirrors the real repository: it moves ownership only
+// when the room is still owned by oldOwnerID, and swaps the membership rows so
+// that the owner never holds one (see repository.TransferRoomOwnership).
+//
+// **意味論を実装に揃えておくこと。** ここが単なる ownerId 代入だと、
+// membership 行の入れ替えを検証しているつもりのテストが素通りする。
+func (m *MockChatRepository) TransferRoomOwnership(roomID, oldOwnerID, newOwnerID, oldOwnerMembershipID string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.TransferOwnershipErr != nil {
+		return m.TransferOwnershipErr
+	}
+	room, ok := m.Rooms[roomID]
+	if !ok || room.OwnerID != oldOwnerID {
+		return ErrNotFound
+	}
+	// **引数で渡されたオブジェクトを書き換えない。** 実 repository は DB 行を
+	// 更新するだけなので、呼び出し元が握っている room は旧 owner のまま残る。
+	// ここで同じポインタを書き換えると、その差が test では見えなくなる。
+	updated := *room
+	updated.OwnerID = newOwnerID
+	m.Rooms[roomID] = &updated
+	if oldOwnerID == newOwnerID {
+		return nil
+	}
+	delete(m.Memberships, membershipKey(newOwnerID, roomID))
+	// 譲渡は保留中の招待も消す (残ると新 owner が accept して行を作り直せる)。
+	for id, inv := range m.Invitations {
+		if inv.RoomID == roomID && inv.UserID == newOwnerID {
+			delete(m.Invitations, id)
+		}
+	}
+	if _, exists := m.Memberships[membershipKey(oldOwnerID, roomID)]; !exists {
+		m.Memberships[membershipKey(oldOwnerID, roomID)] = &model.ChatRoomMembership{
+			ID:     oldOwnerMembershipID,
+			UserID: oldOwnerID,
+			RoomID: roomID,
+		}
+	}
 	return nil
 }
 
@@ -333,6 +388,9 @@ func (m *MockChatRepository) CreateMembership(mem *model.ChatRoomMembership) err
 func (m *MockChatRepository) FindMembership(userID, roomID string) (*model.ChatRoomMembership, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.FindMembershipErr != nil {
+		return nil, m.FindMembershipErr
+	}
 	if mem, ok := m.Memberships[membershipKey(userID, roomID)]; ok {
 		return mem, nil
 	}
@@ -356,6 +414,9 @@ func (m *MockChatRepository) DeleteMembership(userID, roomID string) error {
 func (m *MockChatRepository) ListMembersByRoom(roomID string) ([]*model.ChatRoomMembership, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.ListMembersErr != nil {
+		return nil, m.ListMembersErr
+	}
 	out := make([]*model.ChatRoomMembership, 0)
 	for _, mem := range m.Memberships {
 		if mem.RoomID == roomID {
@@ -445,6 +506,9 @@ func (m *MockChatRepository) FindInvitationByID(id string) (*model.ChatRoomInvit
 func (m *MockChatRepository) FindInvitation(userID, roomID string) (*model.ChatRoomInvitation, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.FindInvitationErr != nil {
+		return nil, m.FindInvitationErr
+	}
 	for _, inv := range m.Invitations {
 		if inv.UserID == userID && inv.RoomID == roomID {
 			return inv, nil

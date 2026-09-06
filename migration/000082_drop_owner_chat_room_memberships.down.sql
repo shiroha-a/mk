@@ -1,0 +1,12 @@
+-- 意図的に no-op にしてある。
+--
+-- 消した行のうち失われるのは membership の `id` / `isMuted` と、招待の `id` /
+-- `ignored` (owner が誰かは `chat_room."ownerId"` に残り続ける)。**そして戻すべきでもない** —
+-- 復元されるのは「owner が持つ mute 状態」で、フロントは owner に
+-- ミュートのスイッチを出さないため、#2858 の症状がそのまま戻る。
+--
+-- 中身が無くてもファイルは置く。CLAUDE.md の「down スクリプトは必ず書く」に
+-- 従うためで、golang-migrate 自体は down ファイルが無い version を空の
+-- migration として通す (migrate.go の `ReadDown` が os.ErrNotExist のとき
+-- `NewMigration(nil, ...)` を作る) ので、無くても down 方向は止まらない。
+SELECT 1;

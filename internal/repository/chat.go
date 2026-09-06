@@ -16,6 +16,10 @@ type ChatRepository interface {
 	DeleteRoom(id string) error
 	ListRoomsByOwner(ownerID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error)
 	ListJoinedRooms(userID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error)
+	// TransferRoomOwnership hands a room over to newOwnerID while keeping the
+	// "owner has no membership row" invariant intact. See the implementation
+	// for why both sides have to move together.
+	TransferRoomOwnership(roomID, oldOwnerID, newOwnerID, oldOwnerMembershipID string) error
 
 	// Message operations
 	CreateMessage(msg *model.ChatMessage) error
@@ -167,6 +171,94 @@ func (r *chatRepository) FindRoomByID(id string) (*model.ChatRoom, error) {
 
 func (r *chatRepository) UpdateRoom(room *model.ChatRoom) error {
 	return r.db.Save(room).Error
+}
+
+// TransferRoomOwnership hands roomID over from oldOwnerID to newOwnerID in one
+// transaction, keeping the "owner has no membership row" invariant.
+//
+// upstream ChatService.ts が room のメンバー集合を
+// `memberships.concat({userId: room.ownerId, isMuted: false})` で作り、
+// 「ownerはmembershipレコードを作らないため」とコメントしているとおり、owner は
+// membership 行を持たない。mk-go の読み取り側もこれに揃っている
+// (`packRoomDetailed` は owner に `isMuted: false` を固定で返し、
+// `isRoomMember` は owner を暗黙のメンバーとして扱う)。
+//
+// **ownerId を書き換えるだけだと両側が壊れる。**
+//   - 新 owner は membership 行を抱えたまま owner になる。mute していた場合、
+//     API もフロントも「ミュートしていない」と言うのに行だけが残り、UI から
+//     解除する手段が無い (フロントは owner に mute スイッチを出さない)。
+//     joined / joining 一覧にも自分の room が出る。
+//     **通知は落ちない** — fan-out は owner を mute 判定より前に never-muted と
+//     して seed する (core/chat/service.go の emitRoomNewChatMessage)。
+//   - 旧 owner は行を持たないまま非 owner になる。`isRoomMember` は
+//     `ownerId == userID || membership` なので**どちらも false** になり、
+//     譲渡した本人が room から締め出される。
+//
+// oldOwnerMembershipID は旧 owner に作る行の主キー。repository は ID 生成器を
+// 持たないので呼び出し元が採番する。
+//
+// **連合面は対象外。** 譲渡そのものを AP で伝える仕組みは無く、local 所有の
+// room を remote user へ渡すと roomURI や attributedTo が相手ホストに存在しない
+// 値に化ける (core/chat/service.go の roomURI 組み立てと renderer.go の
+// AttributedTo)。これは transfer-ownership が元から持つ性質で、ここでは直さない。
+//
+// UPDATE は `"ownerId" = oldOwnerID` を条件に持つ。同時に走った 2 つの譲渡の
+// うち後から来たほうは 0 行更新になり ErrNotFound を返すので、**消える側の
+// membership だけが適用された中途半端な状態**にはならない。
+func (r *chatRepository) TransferRoomOwnership(roomID, oldOwnerID, newOwnerID, oldOwnerMembershipID string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&model.ChatRoom{}).
+			Where(`"id" = ? AND "ownerId" = ?`, roomID, oldOwnerID).
+			Update("ownerId", newOwnerID)
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return ErrNotFound
+		}
+		if oldOwnerID == newOwnerID {
+			// owner が変わらないなら membership も動かさない。**ここで返さないと
+			// 下の入れ替えが自分の行を消して作り直す**ので、この関数自身が
+			// 「owner は行を持たない」契約を破る。呼び出し元のガードには任せない。
+			//
+			// owner 検査の**後**に置くこと。先頭で返すと、その room の owner で
+			// ない者による自己譲渡が黙って成功する。
+			return nil
+		}
+		if err := tx.Where(`"roomId" = ? AND "userId" = ?`, roomID, newOwnerID).
+			Delete(&model.ChatRoomMembership{}).Error; err != nil {
+			return err
+		}
+		// **保留中の招待も消す。** 残すと新 owner が自分でそれを accept でき、
+		// 今消したばかりの行が同じ room に作り直される
+		// (`InvitationsAccept` / `RoomsJoin` / `AddMemberViaAP` はいずれも
+		// 「その user が room の owner か」を見ない)。upstream は owner 宛の
+		// 招待を作れない (createRoomInvitation が self-invite と既存メンバーを
+		// 弾く) ので、この形の行は譲渡でしか生まれない。
+		if err := tx.Where(`"roomId" = ? AND "userId" = ?`, roomID, newOwnerID).
+			Delete(&model.ChatRoomInvitation{}).Error; err != nil {
+			return err
+		}
+		// 旧 owner を明示メンバーとして残す。譲渡は「owner の座を渡す」操作で
+		// あって「room を抜ける」操作ではない。
+		//
+		// **既にある行は触らない。** 不整合データ (この修正より前の譲渡で
+		// 残った行) では旧 owner が行を持っていることがあり、そこで
+		// `isMuted` を false に戻すと利用者が設定した mute を勝手に解除する。
+		var existing model.ChatRoomMembership
+		err := tx.Where(`"roomId" = ? AND "userId" = ?`, roomID, oldOwnerID).First(&existing).Error
+		if err == nil {
+			return nil
+		}
+		if !IsNotFound(err) {
+			return err
+		}
+		return tx.Create(&model.ChatRoomMembership{
+			ID:     oldOwnerMembershipID,
+			UserID: oldOwnerID,
+			RoomID: roomID,
+		}).Error
+	})
 }
 
 func (r *chatRepository) DeleteRoom(id string) error {

@@ -26,8 +26,8 @@ services:
       context: .
       # 既存の federation 用 Dockerfile を再利用する。migrate と server を
       # 両方ビルドし、entrypoint で migrate up → server start する構成。
-      # mk-go のマイグレーションは TS schema に対して原則追加のみ。例外は 9 件
-      # あり、うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随。
+      # mk-go のマイグレーションは TS schema に対して原則追加のみ。例外は 10 件
+      # あり、うち 9 件は mk-go が自分で作ったものの除去・初期化か upstream 追随。
       # 残る 000081 だけは TS が書いた note 行も対象になりうるが、消すのは
       # renoteId を失って表示されなくなった空殻だけ
       # (docs/migration-from-ts.md#破壊的なマイグレーション)。

@@ -2,6 +2,7 @@ package chat_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
@@ -93,6 +94,10 @@ func TestAddMemberViaAP_RequiresPendingInvitation(t *testing.T) {
 
 func TestAddMemberViaAP_CreatesMembershipAndConsumesInvitation(t *testing.T) {
 	svc, repo := newRoomFedService(t)
+	// **room を実在させること。** 無いと owner ガード (#2858) が評価されず、
+	// 「全員を owner とみなす」形に壊れても緑のまま通る (= 連合 chat room への
+	// 参加が全断する回帰が無検出)。本番では room は必ず存在する。
+	require.NoError(t, svc.EnsureRoomViaAP("room1", "General", "desc", "remoteOwner"))
 	require.NoError(t, svc.CreateInvitationViaAP("room1", "remoteUser"))
 	require.NoError(t, svc.AddMemberViaAP("room1", "remoteUser"))
 	_, err := repo.FindMembership("remoteUser", "room1")
@@ -100,6 +105,21 @@ func TestAddMemberViaAP_CreatesMembershipAndConsumesInvitation(t *testing.T) {
 	// 招待は consume される。
 	_, err = repo.FindInvitation("remoteUser", "room1")
 	assert.Error(t, err, "invitation should be consumed")
+}
+
+// owner 宛の Accept は membership 行を作らない (#2858)。owner は暗黙のメンバー
+// なので行を持たず、譲渡で招待が残っていた場合にここで実体化させない。
+func TestAddMemberViaAP_OwnerDoesNotCreateMembership(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, svc.EnsureRoomViaAP("room1", "General", "desc", "remoteOwner"))
+	require.NoError(t, svc.CreateInvitationViaAP("room1", "remoteOwner"))
+
+	require.NoError(t, svc.AddMemberViaAP("room1", "remoteOwner"))
+
+	_, err := repo.FindMembership("remoteOwner", "room1")
+	assert.Error(t, err, "owner は membership 行を持たない")
+	_, err = repo.FindInvitation("remoteOwner", "room1")
+	assert.Error(t, err, "招待は消費する")
 }
 
 func TestRemoveInvitationViaAP_DeletesPending(t *testing.T) {
@@ -459,4 +479,35 @@ func TestCreateMessageToRoom_RemoteSenderDoesNotFederate(t *testing.T) {
 	_, err := svc.CreateMessageToRoom(context.Background(), "rmt", "room1", "hi", "")
 	require.NoError(t, err)
 	assert.Equal(t, 0, deliverer.called)
+}
+
+// **DB 障害を not-found に丸めない** (#2792)。丸めると一過性のエラーの間だけ
+// owner ガードが素通りし、owner に membership 行ができる。
+func TestAddMemberViaAP_RoomLookupFailureIsError(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, svc.EnsureRoomViaAP("room1", "General", "desc", "remoteOwner"))
+	require.NoError(t, svc.CreateInvitationViaAP("room1", "remoteUser"))
+	repo.FindRoomErr = errors.New("db down")
+
+	require.Error(t, svc.AddMemberViaAP("room1", "remoteUser"))
+
+	repo.FindRoomErr = nil
+	_, err := repo.FindMembership("remoteUser", "room1")
+	assert.Error(t, err, "失敗時に membership を作らない")
+}
+
+// **DB 障害を「招待が無い」に丸めない** (#2792)。丸めると inbox の job が成功
+// 扱いで retry されず、membership が永久に作られないまま相手だけが「参加した」
+// と認識したままになる。
+func TestAddMemberViaAP_InvitationLookupFailureIsError(t *testing.T) {
+	svc, repo := newRoomFedService(t)
+	require.NoError(t, svc.EnsureRoomViaAP("room1", "General", "desc", "remoteOwner"))
+	require.NoError(t, svc.CreateInvitationViaAP("room1", "remoteUser"))
+	repo.FindInvitationErr = errors.New("db down")
+
+	require.Error(t, svc.AddMemberViaAP("room1", "remoteUser"))
+
+	repo.FindInvitationErr = nil
+	_, err := repo.FindMembership("remoteUser", "room1")
+	assert.Error(t, err, "失敗時に membership を作らない")
 }

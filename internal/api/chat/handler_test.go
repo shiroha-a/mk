@@ -66,6 +66,15 @@ func post(handler func(echo.Context) error, body string, user *model.User) *http
 	return rec
 }
 
+// seedMember makes userID a member of roomID. 譲渡先はメンバーに限られるので
+// (#2858)、transfer 系のテストはこれで前提を揃える。
+func seedMember(t *testing.T, repo *testutil.MockChatRepository, userID, roomID string) {
+	t.Helper()
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{
+		ID: "seed_" + userID + "_" + roomID, UserID: userID, RoomID: roomID,
+	}))
+}
+
 var u1 = &model.User{ID: "u1", Username: "alice"}
 var u2 = &model.User{ID: "u2", Username: "bob"}
 
@@ -330,9 +339,74 @@ func TestRoomsUnmute_InvalidParam(t *testing.T) {
 func TestRoomsTransferOwnership(t *testing.T) {
 	h, repo := newTestHandler()
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	seedMember(t, repo, "u2", "r1")
 	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
 	assert.Equal(t, "u2", repo.Rooms["r1"].OwnerID)
+}
+
+// 譲渡は membership 行を入れ替える。owner が行を持つ状態は upstream に存在せず、
+// 読み取り側 (packRoomDetailed / isRoomMember) がその前提で書かれている (#2858)。
+func TestRoomsTransferOwnership_SwapsMembershipRows(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	// 譲り受ける側は room を mute しているメンバー。
+	require.NoError(t, repo.CreateMembership(&model.ChatRoomMembership{
+		ID: "m1", UserID: "u2", RoomID: "r1", IsMuted: true,
+	}))
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	_, err := repo.FindMembership("u2", "r1")
+	assert.ErrorIs(t, err, testutil.ErrNotFound, "新 owner の membership 行は残らない")
+
+	// 旧 owner が締め出されないこと。isRoomMember は
+	// `ownerId == userID || membership` なので、行が無いと両方 false になる。
+	old, err := repo.FindMembership("u1", "r1")
+	require.NoError(t, err)
+	assert.False(t, old.IsMuted)
+	assert.True(t, h.isRoomMember(repo.Rooms["r1"], "u1"), "旧 owner は room に残る")
+
+	// 入れ替えなので行数は動かない (譲渡先はメンバーに限られる)。
+	members, err := repo.ListMembersByRoom("r1")
+	require.NoError(t, err)
+	assert.Len(t, members, 1)
+}
+
+// 自分への譲渡で自分の membership 行を作らないこと。作ると owner が行を持つ
+// 状態を自ら生む。
+func TestRoomsTransferOwnership_ToSelfIsNoop(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u1"}`, u1)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "u1", repo.Rooms["r1"].OwnerID)
+	members, err := repo.ListMembersByRoom("r1")
+	require.NoError(t, err)
+	assert.Empty(t, members, "owner は membership 行を持たない")
+}
+
+// 同時に別の譲渡が確定した場合。もう自分の room ではないので、owner 検査に
+// 落ちたときと同じ応答に揃える。
+func TestRoomsTransferOwnership_LostRaceIsNoSuchRoom(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	seedMember(t, repo, "u2", "r1")
+	repo.TransferOwnershipErr = testutil.ErrNotFound
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_ROOM", "6ab4d7df-5043-57b9-bd5d-ff9908288473")
+}
+
+// **DB 障害を not-found に丸めない** (#2792)。
+func TestRoomsTransferOwnership_RepositoryErrorIs500(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	seedMember(t, repo, "u2", "r1")
+	repo.TransferOwnershipErr = errors.New("db down")
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestRoomsTransferOwnership_NotOwner(t *testing.T) {
@@ -1117,6 +1191,10 @@ func TestInvitationsDelete_InvalidParam(t *testing.T) {
 
 func TestInvitationsAccept(t *testing.T) {
 	h, repo := newTestHandler()
+	// **room を実在させること。** 無いと FindRoomByID が not-found を返して
+	// owner ガード (#2858) が一度も評価されず、「全員を owner とみなす」形に
+	// 壊れても緑のまま通る (= 招待を受けても誰も room に入れない回帰が無検出)。
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "someoneElse"}
 	repo.Invitations["i1"] = &model.ChatRoomInvitation{ID: "i1", UserID: "u1", RoomID: "r1"}
 	rec := post(h.InvitationsAccept, `{"roomId":"r1"}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
@@ -1861,4 +1939,166 @@ func TestPackMessageDetailed_RoomReactionsNoUserRepoDegrades(t *testing.T) {
 	reactions := out["reactions"].([]map[string]any)
 	require.Len(t, reactions, 1)
 	assert.Equal(t, "👍", reactions[0]["reaction"])
+}
+
+// 譲渡は保留中の招待も消す。残すと新 owner がそれを accept でき、消したばかりの
+// membership 行が作り直される (#2858 のレビューで 3 人が独立に再現した経路)。
+func TestRoomsTransferOwnership_ConsumesPendingInvitation(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	// メンバーでありながら招待も残っている状態。invitations/create は既存
+	// メンバーを弾くので通常は生まれないが、#2858 以前のデータには存在しうる。
+	seedMember(t, repo, "u2", "r1")
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{
+		ID: "inv1", UserID: "u2", RoomID: "r1",
+	}))
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	_, err := repo.FindInvitation("u2", "r1")
+	assert.ErrorIs(t, err, testutil.ErrNotFound, "新 owner 宛の招待は残らない")
+
+	// 招待が残っていたら accept で行が作り直せてしまうので、その経路も塞がって
+	// いることを確認する。
+	rec = post(h.InvitationsAccept, `{"roomId":"r1"}`, u2)
+	assert.Equal(t, http.StatusNotFound, rec.Code, "消費済みなので accept できない")
+	members, err := repo.ListMembersByRoom("r1")
+	require.NoError(t, err)
+	assert.Len(t, members, 1, "旧 owner の 1 行だけ")
+}
+
+// 招待が別経路で残っていても owner の accept は membership 行を作らない
+// (多層防御。invitation の削除が漏れた場合の受け皿)。
+func TestInvitationsAccept_OwnerDoesNotCreateMembership(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u2"}
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{
+		ID: "inv1", UserID: "u2", RoomID: "r1",
+	}))
+
+	rec := post(h.InvitationsAccept, `{"roomId":"r1"}`, u2)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	members, err := repo.ListMembersByRoom("r1")
+	require.NoError(t, err)
+	assert.Empty(t, members, "owner は membership 行を持たない")
+	_, err = repo.FindInvitation("u2", "r1")
+	assert.ErrorIs(t, err, testutil.ErrNotFound, "招待は消費する")
+}
+
+// rooms/join も同じ (invitation 必須の経路がもう 1 つある)。
+func TestRoomsJoin_OwnerDoesNotCreateMembership(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u2"}
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{
+		ID: "inv1", UserID: "u2", RoomID: "r1",
+	}))
+
+	rec := post(h.RoomsJoin, `{"roomId":"r1"}`, u2)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	members, err := repo.ListMembersByRoom("r1")
+	require.NoError(t, err)
+	assert.Empty(t, members, "owner は membership 行を持たない")
+}
+
+// **非メンバーへは譲渡できない** (#2858)。旧 owner を membership 行として残す
+// 以上、非メンバーへ渡せると「同意していない相手の room に投稿し続けられ、
+// 相手は owner なので mute もできない」一方通行の経路になる。
+func TestRoomsTransferOwnership_NonMemberRejected(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"outsider"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_MEMBER", "05af3d8f-a5d9-4282-8cf0-4fcc5f4e1734")
+	assert.Equal(t, "u1", repo.Rooms["r1"].OwnerID)
+	members, err := repo.ListMembersByRoom("r1")
+	require.NoError(t, err)
+	assert.Empty(t, members, "旧 owner の行も作らない")
+}
+
+// 存在しない user も「メンバーではない」として同じ経路で弾かれる。ここが通ると
+// `chat_room."ownerId"` の FK 違反で原因の分からない 500 になる。
+func TestRoomsTransferOwnership_UnknownUserRejected(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"ghost"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assertErrorCode(t, rec, "NO_SUCH_MEMBER", "05af3d8f-a5d9-4282-8cf0-4fcc5f4e1734")
+}
+
+// mock が引数として渡された room を書き換えないこと。実 repository は DB 行しか
+// 更新しないので、handler が握っている room オブジェクトは旧 owner のまま残る。
+// mock が同じポインタを書き換えると、将来 handler がレスポンスに room を載せた
+// ときに「テストだけ通って本番は旧 owner を返す」形になる。
+func TestRoomsTransferOwnership_DoesNotMutateCallerRoom(t *testing.T) {
+	h, repo := newTestHandler()
+	room := &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	repo.Rooms["r1"] = room
+	seedMember(t, repo, "u2", "r1")
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	assert.Equal(t, "u1", room.OwnerID, "呼び出し元が握る room は書き換えない")
+	assert.Equal(t, "u2", repo.Rooms["r1"].OwnerID, "store 側は新 owner")
+}
+
+// 自己譲渡は 204 のまま。owner は membership 行を持たないので、早期 return が
+// 無いと自分自身が「非メンバー」として NO_SUCH_MEMBER で弾かれる。
+func TestRoomsTransferOwnership_ToSelfSkipsMemberCheck(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u1"}`, u1)
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Equal(t, "u1", repo.Rooms["r1"].OwnerID)
+	members, err := repo.ListMembersByRoom("r1")
+	require.NoError(t, err)
+	assert.Empty(t, members, "owner は membership 行を持たない")
+}
+
+// **DB 障害を not-found に丸めない** (#2792)。メンバー判定が失敗したら
+// 「メンバーではない」ではなく 500 を返す。
+func TestRoomsTransferOwnership_MembershipLookupFailureIs500(t *testing.T) {
+	h, repo := newTestHandler()
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+	repo.FindMembershipErr = errors.New("db down")
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, "u1", repo.Rooms["r1"].OwnerID)
+}
+
+// accept / join の owner 判定で room が引けなかった場合も 500 にする。
+// not-found に丸めると、DB 障害時に owner が membership 行を作ってしまう。
+func TestInvitationAcceptAndJoin_RoomLookupFailureIs500(t *testing.T) {
+	boom := errors.New("db down")
+	for _, tc := range []struct {
+		name string
+		call func(*Handler) *httptest.ResponseRecorder
+	}{
+		{"accept", func(h *Handler) *httptest.ResponseRecorder {
+			return post(h.InvitationsAccept, `{"roomId":"r1"}`, u2)
+		}},
+		{"join", func(h *Handler) *httptest.ResponseRecorder {
+			return post(h.RoomsJoin, `{"roomId":"r1"}`, u2)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, repo := newTestHandler()
+			repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "u1"}
+			require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{
+				ID: "inv1", UserID: "u2", RoomID: "r1",
+			}))
+			repo.FindRoomErr = boom
+			assert.Equal(t, http.StatusInternalServerError, tc.call(h).Code)
+			members, err := repo.ListMembersByRoom("r1")
+			require.NoError(t, err)
+			assert.Empty(t, members, "失敗時に membership を作らない")
+		})
+	}
 }

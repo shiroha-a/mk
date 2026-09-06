@@ -71,9 +71,9 @@ id: aidx             # Misskey-TS側のID生成方式と一致させること
 
 ## 4. データベースマイグレーション
 
-mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは原則として保持される** (例外は `000081`、後述)。
+mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは原則として保持される** (例外は `000081`、後述)。`000082` も行を DELETE するが、対象は upstream Misskey に無い `transfer-ownership` が作った行だけで TS 由来のものは含まない。
 
-共有テーブルにも触るものが 9 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
+共有テーブルにも触るものが 10 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
 
 ```bash
 # ローカルビルドの場合
@@ -87,7 +87,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 
 ### 破壊的なマイグレーション
 
-「追加のみ」ではない。共有テーブルに触るものが 9 件ある。**うち 8 件は mk-go が自分で作ったもの (列 / FK / index / seed / 重複行) の除去、その初期化、または upstream 追随で、Misskey-TS が書いた列の値には影響しない。**
+「追加のみ」ではない。共有テーブルに触るものが 10 件ある。**うち 9 件は mk-go 側だけが作るもの (列 / FK / index / seed / 重複行 / 譲渡が残した membership) の除去、その初期化、または upstream 追随で、Misskey-TS が書いた列の値には影響しない。**
 
 | migration | 内容 | 位置づけ |
 |---|---|---|
@@ -100,6 +100,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 | `000068` | 冗長な index を DROP | **落とすのは mk-go の migration が作った index だけ**。upstream 由来の index は絶対に触らない (触ると本家が再作成できず復路が壊れるため) |
 | `000080` | `note` の自己参照 FK (`renoteId` / `replyId`) を DROP | **upstream 追随。** 本家も 2025.8.0 の `1753868431598-remove_note_constraints.js` でこの 2 本を削除しており、現在の `MiNote` は `createForeignKeyConstraints: false` で FK を作らない |
 | `000081` | 孤児化した `note` 行を DELETE + 痕跡列を NULL 化 | **TS が書いた行が対象になりうる唯一のもの。** 下記参照 |
+| `000082` | owner が持つ `chat_room_membership` / `chat_room_invitation` を DELETE | **`transfer-ownership` だけが作れる行の除去** (#2858)。この endpoint は upstream Misskey に無い (出自は [乖離一覧](divergence.md))。upstream は owner に membership 行を作らず (`ChatService.ts` の `concat({userId: room.ownerId, isMuted: false})`)、owner 宛の招待も `createRoomInvitation` が弾くので TS 生まれの DB には存在しない |
 
 #### `000081` について
 
@@ -121,7 +122,7 @@ DELETE の対象はこの残骸で、条件は
 
 #### down が no-op のもの
 
-`000053` / `000056` / `000067` / `000068` / `000074` / `000081` の 6 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 5 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。
+`000053` / `000056` / `000067` / `000068` / `000074` / `000081` / `000082` の 7 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 6 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。
 
 #### mk-go 内での切り戻し
 
@@ -215,7 +216,7 @@ Misskey-TSに戻す場合の手順:
 
 データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
-ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 9 件は戻らない。うち 8 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。`000056` / `000081` が消した行と `000053` / `000067` が上書きした値は、down が no-op なので復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
+ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 10 件は戻らない。うち 9 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。`000056` / `000081` / `000082` が消した行と `000053` / `000067` が上書きした値は、down が no-op なので復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
 
 ## drop-in 互換性の現状 (2026-05-09 時点)
 

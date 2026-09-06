@@ -949,9 +949,10 @@ func TestCreateMessageToUser_NoPusherIsNoop(t *testing.T) {
 // (`api/chat/handler.go` の `meID != r.OwnerID` ガード)、フロントは owner に
 // ミュートのスイッチを出さない (`room.info.vue` の `v-if="!isOwner"`)。
 //
-// transfer-ownership は membership 行を消さずに OwnerID を書き換えるので、
-// mute したまま owner になった利用者が **room の通知を main stream ごと失い**、
-// API もフロントも「ミュートしていない」と表示するため原因に辿り着けない。
+// owner は membership 行を持たない (#2858 で transfer-ownership も行を入れ替える)
+// ので通常は読む先が無いが、不整合データで行が残っていた場合にここだけ mute を
+// 尊重すると、**API もフロントも「ミュートしていない」と表示するのに通知だけ
+// 来ない**状態になり原因に辿り着けない。
 // upstream も `concat({isMuted: false})` で owner を never-muted 扱いする。
 func TestCreateMessageToRoom_OwnerIsNeverMuted(t *testing.T) {
 	svc, repo, _ := newSvc(t)

@@ -603,7 +603,7 @@ upstream以外の設定はTCP構成と同じ。
 
 既存のMisskey (TypeScript版)からの移行手順は[TS版からの移行ガイド](migration-from-ts.md)を参照。
 
-mk-goはTS版と同じPostgreSQL/Redisを共有できるため、バイナリの差し替えだけで移行可能。マイグレーションはTS版テーブルに対して原則追加のみだが、例外が 9 件ある ([TS版からの移行](migration-from-ts.md#破壊的なマイグレーション))。
+mk-goはTS版と同じPostgreSQL/Redisを共有できるため、バイナリの差し替えだけで移行可能。マイグレーションはTS版テーブルに対して原則追加のみだが、例外が 10 件ある ([TS版からの移行](migration-from-ts.md#破壊的なマイグレーション))。
 
 ## アップデート
 
@@ -654,7 +654,7 @@ sudo systemctl restart misskey    # systemd の場合
 
 > **`go run ./cmd/migrate -direction down` を本番で叩かないこと。** `-steps` を省くと「全部」の意味になり、全 down マイグレーションが走って schema が消える。
 >
-> **down が用意されていても戻せない migration がある。** `000081` は孤児行を DELETE するが、削除した行の内容を保存していないので down は no-op。詳細は [TS版からの移行](migration-from-ts.md#破壊的なマイグレーション)。
+> **down が用意されていても戻せない migration がある。** `000081` は孤児行を、`000082` は chat room の owner が持つ membership / 招待行を DELETE するが、どちらも削除した行の内容を保存していないので down は no-op。詳細は [TS版からの移行](migration-from-ts.md#破壊的なマイグレーション)。
 
 Misskey TS へ戻す場合は[TS版からの移行](migration-from-ts.md)を参照。
 

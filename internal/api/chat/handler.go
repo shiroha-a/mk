@@ -323,6 +323,16 @@ func (h *Handler) packRoomWithCreatedAt(r *model.ChatRoom) map[string]any {
 //
 // caller が meID を渡せない場面 (例: federation 経由の eager pack や
 // 内部用途) では packRoomWithCreatedAt をそのまま使う。
+//
+// **owner の特別扱いは維持する** (#2858 で検討した結果)。これは upstream
+// ChatEntityService.ts:251-252 の `me.id !== room.ownerId` ガードの写しであって、
+// transfer-ownership が membership 行を残していたことへの回避策ではない。
+//
+// **membership を見る形に統一してはいけない。** owner の行が残っている DB
+// (000082 適用前) では `isMuted: true` を返すことになるが、フロントは owner に
+// ミュートのスイッチを出さない (`room.info.vue` の `v-if="!isOwner"`) ため、
+// 利用者からは**解除できない設定**として見える。owner never-muted で固定して
+// おけば、行が残っていても API の見え方は壊れない。
 func (h *Handler) packRoomDetailed(r *model.ChatRoom, meID string) map[string]any {
 	result := h.packRoomWithCreatedAt(r)
 	isMuted := false
@@ -813,8 +823,44 @@ func (h *Handler) RoomsTransferOwnership(c echo.Context) error {
 	if err != nil || room.OwnerID != user.ID {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
 	}
-	room.OwnerID = req.UserID
-	_ = h.repo.UpdateRoom(room)
+	if req.UserID == user.ID {
+		// 自分への譲渡は何も変えない。repository 側にも同じガードがあるが、
+		// ここで返すことで下の room-full 検査も含めて丸ごと省ける。
+		return c.NoContent(http.StatusNoContent)
+	}
+	// **譲渡先は room の既存メンバーに限る。**
+	//
+	// 非メンバーへ渡せると、旧 owner に membership 行を作るこの実装では
+	// **同意していない相手の room に投稿し続けられる**。相手は owner なので
+	// fan-out で never-muted 扱いになり (core/chat/service.go)、membership 行を
+	// 持たないため `rooms/mute` も 400 になる。つまり止める手段が room ごと
+	// 消すことしかない一方通行の経路になる。譲渡前の実装では旧 owner が
+	// 締め出されるため、この形は成立しなかった。
+	//
+	// メンバーに限ると副次的に 2 つ消える。membership 行数が動かないので
+	// room-full の上限がずれず、行がある以上 user も実在するので NO_SUCH_USER の
+	// 検査も要らない (`chat_room."ownerId"` の FK 違反による 500 も起きない)。
+	//
+	// upstream Misskey にこの endpoint は無いので parity 上の制約は無く、
+	// fork frontend と misskey-js のどちらにも caller が無い。
+	if _, err := h.repo.FindMembership(req.UserID, room.ID); err != nil {
+		if !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return apierr.JSONInternalError(c)
+		}
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MEMBER", "Not a member.", "05af3d8f-a5d9-4282-8cf0-4fcc5f4e1734"))
+	}
+	// **owner の membership 行を入れ替える。** ownerId を書き換えるだけだと
+	// 新 owner は解除できない mute を抱え、旧 owner は room から締め出される
+	// (repository.TransferRoomOwnership のコメントに詳しい)。
+	if err := h.repo.TransferRoomOwnership(room.ID, user.ID, req.UserID, h.idGen.Generate(time.Now())); err != nil {
+		if repository.IsNotFound(err) {
+			// 同時に別の譲渡が確定した場合。もう自分の room ではないので、
+			// 上の owner 検査と同じ応答に揃える。
+			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "6ab4d7df-5043-57b9-bd5d-ff9908288473"))
+		}
+		return apierr.JSONInternalError(c)
+	}
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -1308,6 +1354,19 @@ func (h *Handler) InvitationsAccept(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_INVITATION", "No such invitation.", "8c8f38f0-3b7e-4f5e-9c6d-2e3f4a5b6c7d"))
 	}
+	// **owner の招待は行を作らずに消費する** (#2858)。owner は暗黙のメンバーで
+	// membership 行を持たない。譲渡で owner 宛の招待が残っていた場合にここが
+	// 行を作ると、その不変条件が壊れる (rooms/joined に自分の room が出る、
+	// room-full の数が 1 ずれる、解除できない mute が生まれる)。
+	room, rerr := h.repo.FindRoomByID(req.RoomID)
+	if rerr != nil && !repository.IsNotFound(rerr) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
+	if rerr == nil && room.OwnerID == user.ID {
+		_ = h.repo.DeleteInvitation(inv.ID)
+		return c.NoContent(http.StatusNoContent)
+	}
 	// メンバーシップを作成して招待を消費する。
 	m := &model.ChatRoomMembership{
 		ID: h.idGen.Generate(time.Now()), UserID: user.ID, RoomID: req.RoomID,
@@ -1593,6 +1652,17 @@ func (h *Handler) RoomsJoin(c echo.Context) error {
 	inv, err := h.repo.FindInvitation(user.ID, req.RoomID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
+	}
+	// **owner の招待は行を作らずに消費する** (#2858、InvitationsAccept と同じ)。
+	// owner は暗黙のメンバーなので membership 行を持たない。
+	joinRoom, rerr := h.repo.FindRoomByID(req.RoomID)
+	if rerr != nil && !repository.IsNotFound(rerr) {
+		// **DB 障害を not-found に丸めない** (#2792)。
+		return apierr.JSONInternalError(c)
+	}
+	if rerr == nil && joinRoom.OwnerID == user.ID {
+		_ = h.repo.DeleteInvitation(inv.ID)
+		return c.NoContent(http.StatusNoContent)
 	}
 	// UNIQUE 制約違反を避けるため既存メンバーは冪等に扱う。新規 join 時のみ
 	// MAX_ROOM_MEMBERS=50 を超える room を拒否する (upstream 'room is full')。

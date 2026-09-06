@@ -40,6 +40,9 @@ type MockUserRepository struct {
 	// can exercise lookup-failure branches. **行が無いケースとは別物** で、
 	// 呼び出し側は ErrRecordNotFound と実エラーを区別することがある。
 	FindProfileErr error
+	// FindErr, when non-nil, is returned by FindByID. Same intent as
+	// FindProfileErr: a DB failure must not be collapsed into not-found (#2792).
+	FindErr error
 }
 
 func NewMockUserRepository() *MockUserRepository {
@@ -220,6 +223,9 @@ func (m *MockUserRepository) Create(u *model.User) error {
 }
 
 func (m *MockUserRepository) FindByID(id string) (*model.User, error) {
+	if m.FindErr != nil {
+		return nil, m.FindErr
+	}
 	u, ok := m.Users[id]
 	if !ok {
 		return nil, ErrNotFound

@@ -5,6 +5,10 @@
 -- replyUserHost) を NULL にする。どちらも**元の値を保存していない**ので、
 -- ここで復元する手段は無い。
 --
--- 意図的に no-op にしてある。「巻き戻せないので down を用意しない」形にすると
--- golang-migrate が down 方向で止まり、000080 まで戻せなくなるため。
+-- 意図的に no-op にしてある。巻き戻せないため中身は置けない。
+--
+-- ファイル自体は CLAUDE.md の「down スクリプトは必ず書く」に従って置いている。
+-- golang-migrate 自体は down ファイルが無い version を空の migration として
+-- 通す (migrate.go の `ReadDown` が os.ErrNotExist のとき `NewMigration(nil, ...)`
+-- を作る) ので、無くても down 方向が止まるわけではない。
 SELECT 1;

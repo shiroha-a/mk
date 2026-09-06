@@ -691,8 +691,28 @@ func (s *Service) AddMemberViaAP(roomID, userID string) error {
 		return ErrInvalidTarget
 	}
 	inv, err := s.repo.FindInvitation(userID, roomID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を「招待が無い」に丸めない** (#2792)。丸めると inbox の job が
+		// 成功扱いで retry されず、membership が永久に作られないまま相手だけが
+		// 「参加した」と認識する。下の room lookup と判断を揃える。
+		return err
+	}
 	if err != nil || inv == nil {
 		// 招待が無い相手の Accept は無視する (なりすまし membership 防止)。
+		return nil
+	}
+	// **owner の招待は行を作らずに消費する** (#2858)。owner は暗黙のメンバーで
+	// membership 行を持たないので、譲渡で残った招待をここで実体化させない。
+	//
+	// **DB 障害を not-found に丸めない** (#2792)。丸めると、一過性のエラーの間
+	// だけガードが素通りして owner に membership 行ができる。api/chat 側の
+	// accept / join と判断を揃える (あちらは 500、ここは error を返す)。
+	room, rerr := s.repo.FindRoomByID(roomID)
+	if rerr != nil && !repository.IsNotFound(rerr) {
+		return rerr
+	}
+	if rerr == nil && room != nil && room.OwnerID == userID {
+		_ = s.repo.DeleteInvitation(inv.ID)
 		return nil
 	}
 	if _, err := s.repo.FindMembership(userID, roomID); err != nil {
@@ -1173,10 +1193,11 @@ func (s *Service) emitRoomNewChatMessage(room *model.ChatRoom, fromUserID string
 	// フロントは owner にミュートのスイッチを出さない
 	// (`room.info.vue` の `v-if="!isOwner"`)。
 	//
-	// **ここだけ mute を尊重すると壊れる。** transfer-ownership は membership 行を
-	// 消さずに OwnerID を書き換えるので、mute したまま owner になった利用者が
-	// room の通知を main stream ごと失う。API もフロントも「ミュートしていない」と
-	// 表示し、解除する手段が UI に無いので原因に辿り着けない。
+	// **owner は membership 行を持たない**ので、そもそも読む先が無い
+	// (transfer-ownership も #2858 で行を入れ替えるようにした)。不整合データで
+	// 行が残っていても、ここだけ mute を尊重すると **API もフロントも
+	// 「ミュートしていない」と表示するのに通知だけ来ない**状態になり、
+	// 解除する手段が UI に無いので利用者は原因に辿り着けない。
 	if room.OwnerID != fromUserID {
 		emitted[room.OwnerID] = true
 	}
