@@ -36,6 +36,40 @@ type countingUserRepo struct {
 	updatePasswordCalls  atomic.Int64
 	updatePasswordResult bool
 	updatePasswordErr    error
+	removeBackupCodeErr  error
+	hardDeleteErr        error
+	// onBulkRead runs after the "DB read" has produced its rows but before the
+	// wrapper stores them. in-flight read 中に確定した更新を再現するのに使う。
+	onBulkRead func()
+}
+
+func (c *countingUserRepo) RemoveBackupCode(userID, code string) error {
+	if c.removeBackupCodeErr != nil {
+		return c.removeBackupCodeErr
+	}
+	p, ok := c.profiles[userID]
+	if !ok {
+		return nil
+	}
+	out := make(model.StringArray, 0, len(p.TwoFactorBackupSecret))
+	for _, v := range p.TwoFactorBackupSecret {
+		if v != code {
+			out = append(out, v)
+		}
+	}
+	next := *p
+	next.TwoFactorBackupSecret = out
+	c.profiles[userID] = &next
+	return nil
+}
+
+func (c *countingUserRepo) HardDeleteUser(userID string) error {
+	if c.hardDeleteErr != nil {
+		return c.hardDeleteErr
+	}
+	delete(c.users, userID)
+	delete(c.profiles, userID)
+	return nil
 }
 
 func newCountingUserRepo() *countingUserRepo {
@@ -127,12 +161,19 @@ func (c *countingUserRepo) IncrementNotesCount(_ string, _ int) error {
 	return nil
 }
 
+// FindManyByIDs returns **copies**, like a real DB read does (#2862)。
+// ポインタをそのまま返すと、read 中に元の行が書き換わったとき既に取り出した
+// 行まで一緒に変わってしまい、in-flight read の再現にならない。
 func (c *countingUserRepo) FindManyByIDs(ids []string) ([]*model.User, error) {
 	out := make([]*model.User, 0, len(ids))
 	for _, id := range ids {
 		if u, ok := c.users[id]; ok {
-			out = append(out, u)
+			cp := *u
+			out = append(out, &cp)
 		}
+	}
+	if c.onBulkRead != nil {
+		c.onBulkRead()
 	}
 	return out, nil
 }
@@ -141,8 +182,12 @@ func (c *countingUserRepo) FindProfilesByUserIDs(ids []string) ([]*model.UserPro
 	out := make([]*model.UserProfile, 0, len(ids))
 	for _, id := range ids {
 		if p, ok := c.profiles[id]; ok {
-			out = append(out, p)
+			cp := *p
+			out = append(out, &cp)
 		}
+	}
+	if c.onBulkRead != nil {
+		c.onBulkRead()
 	}
 	return out, nil
 }
@@ -838,4 +883,126 @@ func (m *missingThenFoundRepo) FindByID(string) (*model.User, error)  { return m
 func (m *missingThenFoundRepo) FindByURI(string) (*model.User, error) { return m.find() }
 func (m *missingThenFoundRepo) UpdateUser(string, map[string]any) error {
 	return nil
+}
+
+// **消費したバックアップコードがキャッシュに残らないこと** (#2862)。
+//
+// profile は 5 分キャッシュされる。`RemoveBackupCode` が invalidate しないと、
+// `array_remove` で DB から消えたコードがキャッシュ上には残り続ける。予約
+// (SETNX、TTL 120s) が切れたあとキャッシュが切れるまでの窓では
+// `ConsumeBackupCode` が一致し、予約も通り、`array_remove` は no-op で成功する
+// ので**ログインが成立する**。signin が UpdateProfile から乗り換えたときに、
+// そこにあった invalidate が落ちて生まれた穴だった。
+func TestCachedUserRepository_RemoveBackupCodeInvalidates(t *testing.T) {
+	inner := newCountingUserRepo()
+	inner.profiles["u1"] = &model.UserProfile{
+		UserID:                "u1",
+		TwoFactorBackupSecret: model.StringArray{"c1", "c2"},
+	}
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+
+	before, err := cached.FindProfileByUserID("u1")
+	require.NoError(t, err)
+	require.Equal(t, []string{"c1", "c2"}, []string(before.TwoFactorBackupSecret))
+	require.Equal(t, int64(1), inner.findProfileByUserIDCalls.Load())
+
+	require.NoError(t, cached.RemoveBackupCode("u1", "c1"))
+
+	after, err := cached.FindProfileByUserID("u1")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c2"}, []string(after.TwoFactorBackupSecret),
+		"消したコードがキャッシュから返っている")
+	assert.Equal(t, int64(2), inner.findProfileByUserIDCalls.Load(), "inner を引き直していない")
+}
+
+// 消費に失敗したらキャッシュを落とさない (落とす必要が無く、無駄に温度を下げる)。
+func TestCachedUserRepository_RemoveBackupCodeKeepsCacheOnError(t *testing.T) {
+	inner := newCountingUserRepo()
+	inner.profiles["u1"] = &model.UserProfile{UserID: "u1", TwoFactorBackupSecret: model.StringArray{"c1"}}
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+	_, err := cached.FindProfileByUserID("u1")
+	require.NoError(t, err)
+
+	inner.removeBackupCodeErr = assert.AnError
+	assert.ErrorIs(t, cached.RemoveBackupCode("u1", "c1"), assert.AnError)
+
+	_, _ = cached.FindProfileByUserID("u1")
+	assert.Equal(t, int64(1), inner.findProfileByUserIDCalls.Load())
+}
+
+// 削除に失敗したらキャッシュを落とさない (RemoveBackupCode と同じ判断)。
+func TestCachedUserRepository_HardDeleteUserKeepsCacheOnError(t *testing.T) {
+	inner := newCountingUserRepo()
+	inner.users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+	_, err := cached.FindByID("u1")
+	require.NoError(t, err)
+
+	inner.hardDeleteErr = assert.AnError
+	assert.ErrorIs(t, cached.HardDeleteUser("u1"), assert.AnError)
+
+	_, _ = cached.FindByID("u1")
+	assert.Equal(t, int64(1), inner.findByIDCalls.Load(), "失敗したのにキャッシュを落としている")
+}
+
+// HardDeleteUser も同型 (#2862)。今は削除前に isDeleted を立てる経路を通るので
+// 表には出ないが、wrapper の不変条件を破ったまま残さない。
+func TestCachedUserRepository_HardDeleteUserInvalidates(t *testing.T) {
+	inner := newCountingUserRepo()
+	inner.users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+	_, err := cached.FindByID("u1")
+	require.NoError(t, err)
+	require.Equal(t, int64(1), inner.findByIDCalls.Load())
+
+	require.NoError(t, cached.HardDeleteUser("u1"))
+
+	_, err = cached.FindByID("u1")
+	assert.Error(t, err, "削除済みユーザーがキャッシュから返っている")
+	assert.Equal(t, int64(2), inner.findByIDCalls.Load())
+}
+
+// **bulk read が in-flight のあいだに確定した更新を、古い行で塗り直さないこと**
+// (#2862)。単発の経路は #2257 で塞いだが bulk が残っていた。
+//
+// profile は `twoFactorBackupSecret` と `password` を持つので、ここが破れると
+// **消費済みのバックアップコードや旧パスワードのハッシュが TTL のあいだ復活する**。
+// 大きな bulk read を投げれば窓は好きなだけ広げられる。
+func TestCachedUserRepository_BulkProfileReadDoesNotResurrectStaleRow(t *testing.T) {
+	inner := newCountingUserRepo()
+	inner.profiles["u1"] = &model.UserProfile{
+		UserID:                "u1",
+		TwoFactorBackupSecret: model.StringArray{"c1", "c2"},
+	}
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+
+	// bulk read が行を取り出したあと、cache へ入れる前に消費を確定させる。
+	inner.onBulkRead = func() {
+		require.NoError(t, cached.RemoveBackupCode("u1", "c1"))
+	}
+	_, err := cached.FindProfilesByUserIDs([]string{"u1"})
+	require.NoError(t, err)
+
+	got, err := cached.FindProfileByUserID("u1")
+	require.NoError(t, err)
+	assert.NotContains(t, []string(got.TwoFactorBackupSecret), "c1",
+		"消したコードが bulk read の結果で焼き直されている")
+}
+
+// user 側も同型。凍結を確定させた直後に、凍結前の行が焼き直されないこと。
+func TestCachedUserRepository_BulkUserReadDoesNotResurrectStaleRow(t *testing.T) {
+	inner := newCountingUserRepo()
+	inner.users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	cached := repository.NewCachedUserRepositoryWithTTL(inner, time.Minute)
+
+	inner.onBulkRead = func() {
+		inner.users["u1"] = &model.User{ID: "u1", Username: "alice", IsSuspended: true}
+		require.NoError(t, cached.UpdateUser("u1", map[string]any{"isSuspended": true}))
+	}
+	_, err := cached.FindManyByIDs([]string{"u1"})
+	require.NoError(t, err)
+
+	got, err := cached.FindByID("u1")
+	require.NoError(t, err)
+	assert.True(t, got.IsSuspended, "凍結前の行が bulk read の結果で焼き直されている")
 }

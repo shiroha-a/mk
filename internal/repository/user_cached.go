@@ -463,6 +463,46 @@ func (c *CachedUserRepository) UpdateProfile(userID string, fields map[string]an
 	return nil
 }
 
+// RemoveBackupCode invalidates the cache after consuming a 2FA backup code.
+//
+// **override しないと消したコードがまた通る** (#2862)。profile はここで 5 分
+// キャッシュされるので、embed のまま素通しすると `array_remove` で DB から
+// 消えたコードがキャッシュ上には残る。予約 (SETNX、TTL 120s) が切れたあと
+// キャッシュが切れるまでの窓では、`ConsumeBackupCode` が一致し、予約も通り、
+// `array_remove` は no-op で成功するので**ログインが成立する**。
+// signin が `UpdateProfile` から乗り換えた結果、そこにあった invalidate が
+// 落ちて生まれた穴だった。
+func (c *CachedUserRepository) RemoveBackupCode(userID, code string) error {
+	if err := c.UserRepository.RemoveBackupCode(userID, code); err != nil {
+		return err
+	}
+	c.invalidate(userID)
+	return nil
+}
+
+// HardDeleteUser invalidates the cache after removing the row.
+//
+// 実際には削除の前に `isDeleted` を立てる経路 (UpdateUser 経由で invalidate
+// 済み) を通るので現状は素通しでも表に出ないが、**wrapper の不変条件を
+// 破ったまま残すと次に前提が変わったときに気付けない** (#2862)。
+func (c *CachedUserRepository) HardDeleteUser(userID string) error {
+	if err := c.UserRepository.HardDeleteUser(userID); err != nil {
+		return err
+	}
+	c.invalidate(userID)
+	return nil
+}
+
+// **DeleteOrphanRemoteUsers は意図的に override しない** (#2862)。
+//
+// 消えた userID を返さないので個別に invalidate できず、`invalidate("")` は
+// no-op (`userID == ""` の early return)。`invalidatedAt` は per-userID / per-URI なので、
+// 「in-flight read を壊さない全消し」を表す語彙がそもそも無い。
+//
+// 残る影響は「削除済みの remote user が最大 TTL 分キャッシュに残る」だけで、
+// 対象は grace 期間を過ぎた非活動ユーザー。**この 1 つだけが override されて
+// いないのは漏れではない**ので、消して回らないこと。
+
 func (c *CachedUserRepository) UpdatePasswordIfCurrent(userID, currentHash, newHash string) (bool, error) {
 	updated, err := c.UserRepository.UpdatePasswordIfCurrent(userID, currentHash, newHash)
 	if err != nil || !updated {
@@ -513,6 +553,11 @@ func (c *CachedUserRepository) IncrementNotesCount(userID string, delta int) err
 // (どの ID が抜けたかは戻り値からは判別できないため、別 round-trip での
 // FindByID が走った時に negative-cache する経路に任せる)。
 func (c *CachedUserRepository) FindManyByIDs(ids []string) ([]*model.User, error) {
+	// **単発の経路と同じく readStart を取る** (#2862)。取らずに warm すると、
+	// この read が飛んでいる最中に確定した更新を**古い行で塗り直す**。
+	// 単発側は #2257 で塞いだが bulk が残っていた。攻撃者が大きな bulk read を
+	// 投げれば窓は好きなだけ広げられる。
+	readStart := time.Now()
 	users, err := c.UserRepository.FindManyByIDs(ids)
 	if err != nil {
 		return nil, err
@@ -522,7 +567,7 @@ func (c *CachedUserRepository) FindManyByIDs(ids []string) ([]*model.User, error
 		c.evictExpiredUsersLocked()
 		expiry := time.Now().Add(c.ttl)
 		for _, u := range users {
-			if u != nil && u.ID != "" {
+			if u != nil && u.ID != "" && !c.staleLocked(u.ID, readStart) {
 				c.users[u.ID] = userCacheEntry{user: u, expiresAt: expiry}
 			}
 		}
@@ -534,6 +579,10 @@ func (c *CachedUserRepository) FindManyByIDs(ids []string) ([]*model.User, error
 // FindProfilesByUserIDs is the profile counterpart of FindManyByIDs:
 // バルクで返ってきた行を per-userID cache に warm する。
 func (c *CachedUserRepository) FindProfilesByUserIDs(userIDs []string) ([]*model.UserProfile, error) {
+	// FindManyByIDs と同じ理由で readStart を取る (#2862)。**こちらは影響が重い** —
+	// profile は `twoFactorBackupSecret` と `password` を持つので、古い行を
+	// 焼き直すと消費済みのバックアップコードや旧パスワードのハッシュが復活する。
+	readStart := time.Now()
 	profiles, err := c.UserRepository.FindProfilesByUserIDs(userIDs)
 	if err != nil {
 		return nil, err
@@ -543,7 +592,7 @@ func (c *CachedUserRepository) FindProfilesByUserIDs(userIDs []string) ([]*model
 		c.evictExpiredProfilesLocked()
 		expiry := time.Now().Add(c.ttl)
 		for _, p := range profiles {
-			if p != nil && p.UserID != "" {
+			if p != nil && p.UserID != "" && !c.staleLocked(p.UserID, readStart) {
 				c.profiles[p.UserID] = profileCacheEntry{profile: p, expiresAt: expiry}
 			}
 		}
