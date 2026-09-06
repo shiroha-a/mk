@@ -1119,7 +1119,9 @@ func newThreadMuteHandler() (*Handler, *testutil.MockNoteRepository, *testutil.M
 	return &Handler{idGen: idGen, noteRepo: noteRepo, threadMutingRepo: tmRepo}, noteRepo, tmRepo
 }
 
-func TestThreadMutingCreate_PersistsAndIdempotent(t *testing.T) {
+// upstream 1853898d71: 2 回目は 400 ALREADY_MUTING。#1538 までの mk-go は 204 を
+// 返す冪等実装で、同じ入力に対する wire 上のレスポンスが upstream と分岐していた。
+func TestThreadMutingCreate_PersistsAndRejectsDuplicate(t *testing.T) {
 	h, noteRepo, tmRepo := newThreadMuteHandler()
 	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
 	user := &model.User{ID: "viewer"}
@@ -1130,8 +1132,10 @@ func TestThreadMutingCreate_PersistsAndIdempotent(t *testing.T) {
 	assert.True(t, ex, "thread muting row must be persisted")
 
 	rec2 := postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, user)
-	assert.Equal(t, http.StatusNoContent, rec2.Code)
-	assert.Len(t, tmRepo.Mutings, 1, "create must be idempotent (no duplicate row)")
+	assert.Equal(t, http.StatusBadRequest, rec2.Code, "重複は upstream と同じ 400")
+	assert.Contains(t, rec2.Body.String(), "ALREADY_MUTING")
+	assert.Contains(t, rec2.Body.String(), "c146e22d-1141-4b31-b28d-176371014d18")
+	assert.Len(t, tmRepo.Mutings, 1, "重複行は作らない")
 }
 
 func TestThreadMutingCreate_UsesThreadID(t *testing.T) {
@@ -1184,4 +1188,26 @@ func TestThreadMuting_NilRepoFailsClosed(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	rec = postDraft(h.ThreadMutingDelete, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// failingThreadMutingRepo は Exists だけを DB 障害にする。
+type failingThreadMutingRepo struct {
+	*testutil.MockNoteThreadMutingRepository
+	err error
+}
+
+func (r *failingThreadMutingRepo) Exists(string, string) (bool, error) { return false, r.err }
+
+// **DB 障害を「既にミュート済み」にも成功にも丸めない** (#2792)。Exists の error を
+// 捨てると、接続断が 400 ALREADY_MUTING か 204 に化けて監視で 5xx が立たない。
+func TestThreadMutingCreate_ExistsDBFailureIsNot4xx(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "author"}
+	h := &Handler{idGen: idGen, noteRepo: noteRepo, threadMutingRepo: &failingThreadMutingRepo{
+		MockNoteThreadMutingRepository: testutil.NewMockNoteThreadMutingRepository(),
+		err:                            errors.New("dial tcp 127.0.0.1:5432: connect: connection refused"),
+	}}
+	rec := postDraft(h.ThreadMutingCreate, `{"noteId":"n1"}`, &model.User{ID: "viewer"})
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "DB 障害が 4xx に化けている (#2792)")
 }

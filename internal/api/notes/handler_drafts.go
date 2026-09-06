@@ -644,15 +644,23 @@ func (h *Handler) ThreadMutingCreate(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_NOTE", "No such note.", "5ff67ada-ed3b-2e71-8e87-a1a421e177d2"))
 	}
 	threadID := threadIDForMute(note)
-	// 冪等: 既存行があれば UNIQUE 制約違反 (500) を避けて成功扱い。
-	if exists, _ := h.threadMutingRepo.Exists(user.ID, threadID); !exists {
-		if err := h.threadMutingRepo.Create(&model.NoteThreadMuting{
-			ID:       h.idGen.Generate(time.Now()),
-			UserID:   user.ID,
-			ThreadID: threadID,
-		}); err != nil {
-			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
-		}
+	// upstream 1853898d71 で重複時の error が定義された。#1538 では UNIQUE 制約違反に
+	// よる 500 を避けるため既存行を成功扱い (204) にしていたが、upstream は 400
+	// ALREADY_MUTING を返すので wire 上のレスポンスが分岐していた。upstream に揃える。
+	exists, err := h.threadMutingRepo.Exists(user.ID, threadID)
+	if err != nil {
+		// **DB 障害を「既にミュート済み」に丸めない** (#2792)。
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	if exists {
+		return c.JSON(http.StatusBadRequest, apierr.Error("ALREADY_MUTING", "You are already muting that thread.", "c146e22d-1141-4b31-b28d-176371014d18"))
+	}
+	if err := h.threadMutingRepo.Create(&model.NoteThreadMuting{
+		ID:       h.idGen.Generate(time.Now()),
+		UserID:   user.ID,
+		ThreadID: threadID,
+	}); err != nil {
+		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	return c.NoContent(http.StatusNoContent)
 }
