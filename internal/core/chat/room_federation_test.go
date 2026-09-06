@@ -358,6 +358,45 @@ func TestLeaveRoom_DeliversRemoveToRemoteMembers(t *testing.T) {
 	assert.Contains(t, body, "https://local.example/users/carol")
 }
 
+// **メンバーでないなら配送しない。** 検査が無いと、任意の利用者が room ID を
+// 指定するだけで、その room の remote メンバー全員へ自分の署名付き Remove を
+// 配送させられる (受信側は冪等 no-op なので実害は配送量だが、増幅になる)。
+func TestLeaveRoom_NonMemberDoesNotFederate(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	remoteHost := "remote.example"
+	bobURI := "https://remote.example/users/bob"
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", Host: &remoteHost, URI: &bobURI}
+	userRepo.Users["mallory"] = &model.User{ID: "mallory", Username: "mallory"}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "bob", RoomID: "room1"}))
+
+	require.NoError(t, svc.LeaveRoom(context.Background(), "mallory", "room1"))
+
+	assert.Equal(t, 0, deliverer.called, "非メンバーの leave で Remove を配送しない")
+	_, err := chatRepo.FindMembership("bob", "room1")
+	assert.NoError(t, err, "他人の membership は消えない")
+}
+
+// **DB 障害を「メンバーではない」に丸めない** (#2792)。丸めると、障害の間だけ
+// leave が黙って成功扱いになり、membership が残ったまま利用者には「退出した」と
+// 見える。
+func TestLeaveRoom_MembershipLookupFailureIsError(t *testing.T) {
+	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
+	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	require.NoError(t, chatRepo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "G", OwnerID: "alice"}))
+	require.NoError(t, chatRepo.CreateMembership(&model.ChatRoomMembership{ID: "m1", UserID: "bob", RoomID: "room1"}))
+	chatRepo.FindMembershipErr = errors.New("db down")
+
+	require.Error(t, svc.LeaveRoom(context.Background(), "bob", "room1"))
+
+	chatRepo.FindMembershipErr = nil
+	_, err := chatRepo.FindMembership("bob", "room1")
+	assert.NoError(t, err, "失敗時に membership を消さない")
+	assert.Equal(t, 0, deliverer.called)
+}
+
 func TestLeaveRoom_LocalOnlyNoFederation(t *testing.T) {
 	svc, chatRepo, userRepo, deliverer := newInvitationService(t)
 	userRepo.Users["alice"] = &model.User{ID: "alice", Username: "alice"}

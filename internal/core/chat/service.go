@@ -1015,6 +1015,18 @@ func (s *Service) LeaveRoom(_ context.Context, userID, roomID string) error {
 	// room を先に引いて federation の recipient/roomURI 構築に使う。room が無くても
 	// membership 削除は冪等に試みる (drift cleanup)。
 	room, _ := s.repo.FindRoomByID(roomID)
+	// **メンバーでないなら何もしない。** 検査が無いと、任意の利用者が room ID を
+	// 指定するだけで、その room の remote メンバー全員へ自分の署名付き Remove を
+	// 配送させられる (受信側は冪等 no-op なので実害は配送量だが、増幅になる)。
+	// upstream の leaveRoom も membership を findOneByOrFail で要求する
+	// (owner は membership 行を持たないので leave ではなく room 削除を使う)。
+	if _, err := s.repo.FindMembership(userID, roomID); err != nil {
+		if !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			return err
+		}
+		return nil
+	}
 	if err := s.repo.DeleteMembership(userID, roomID); err != nil {
 		return err
 	}
