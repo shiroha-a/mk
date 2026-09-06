@@ -160,7 +160,11 @@ def test_note_state_parity(mkgo, ts):
     assert not diffs, format_diffs(diffs)
 
 
-# /api/i (authoritative MeDetailed). 自己固有 / role 依存 / version-gap を吸収する。
+# /api/i (authoritative MeDetailed). 自己固有 / role 依存 / mk-go 独自の additive を
+# 吸収する。**版ずれ由来の除外は 1 つも無い** — #2303 で 3 件 (app192IconUrl /
+# app512IconUrl / singleUserMode) を整理して以降、下の各項目はすべて版に依存しない
+# 理由で入っている。TS image を上げたときにここを読み直す運用は続けること
+# (docs/upstream-catch-up.md の checklist)。
 I_IGNORE = META_IGNORE | {
     "policies",  # role policy 依存 (instance role 設定で変わる)
     "avatarId", "bannerId", "achievements", "loggedInDays", "signupReason",
