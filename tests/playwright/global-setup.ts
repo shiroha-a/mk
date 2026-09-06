@@ -1,3 +1,8 @@
+/*
+ * SPDX-FileCopyrightText: mk-go project
+ * SPDX-License-Identifier: AGPL-3.0-only
+ */
+
 // #744 Phase 1 PR-2: Playwright globalSetup.
 //
 // 全 spec が start する前に 1 度だけ実行される。本 globalSetup は instance
