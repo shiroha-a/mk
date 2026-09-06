@@ -913,3 +913,23 @@ func TestNewRedisRateLimiter_Integration(t *testing.T) {
 	_ = mw(handler)(c)
 	assert.Equal(t, http.StatusTooManyRequests, rec.Code)
 }
+
+// chat のメッセージ送信は 3 つの path から同じ handler に入る
+// (`create` は `create-to-user` / `create-to-room` の alias)。**limiter のキーは
+// route path なので、1 つでも登録から漏れると上限そのものを迂回できる** —
+// 未登録の path はフォールバック無しで素通しになる。
+func TestDefaultEndpointLimits_ChatMessageSendPathsAgree(t *testing.T) {
+	paths := []string{
+		"chat/messages/create",
+		"chat/messages/create-to-user",
+		"chat/messages/create-to-room",
+	}
+	want := DefaultEndpointLimits[paths[0]]
+	require.NotNil(t, want, "%s が未登録", paths[0])
+	for _, p := range paths[1:] {
+		got := DefaultEndpointLimits[p]
+		require.NotNil(t, got, "%s が未登録", p)
+		assert.Equal(t, want.Duration, got.Duration, "%s の Duration が %s と違う", p, paths[0])
+		assert.Equal(t, want.Max, got.Max, "%s の Max が %s と違う", p, paths[0])
+	}
+}

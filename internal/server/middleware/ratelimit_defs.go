@@ -29,6 +29,11 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	"channels/create": {Duration: time.Hour, Max: 10},
 
 	// ── Chat ───────────────────────────────────────────
+	// **create も登録すること。** create-to-user / create-to-room は
+	// MessagesCreate への alias なので、create に toUserId / toRoomId を載せると
+	// 同じ送信ができる。未登録の path は limiter が素通しする (フォールバック
+	// が無い) ため、ここが抜けると上限そのものを迂回できる。
+	"chat/messages/create":          {Duration: time.Hour, Max: 500},
 	"chat/messages/create-to-room":  {Duration: time.Hour, Max: 500},
 	"chat/messages/create-to-user":  {Duration: time.Hour, Max: 500},
 	"chat/rooms/create":             {Duration: 24 * time.Hour, Max: 10},
