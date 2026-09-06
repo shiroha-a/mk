@@ -1557,6 +1557,11 @@ func (r *noteRepository) CountReplyTargets(userID, viewerID string, limit int) (
 	// followers/specified reply の対人関係を集計値経由で観測できる (#1486)。
 	// 条件は ListByUserIDFiltered / ListMentions / SearchByTag と同一。
 	q = applyViewerVisibility(q, viewerID)
+	// **返信先の note にも同じ gate を掛ける。** 集計は非正規化列 `"replyUserId"` を
+	// 読むだけなので、これが無いと「返信元は見えるが返信先は見えない」組で
+	// 相手の身元が集計値に出る。upstream も 2 つのクエリの両方に
+	// generateVisibilityQuery を足している。
+	q = applyViewerVisibilityExists(q, `"note"."replyId"`, viewerID)
 	err := q.Group(`"replyUserId"`).
 		Order(`count DESC`).
 		Limit(limit).

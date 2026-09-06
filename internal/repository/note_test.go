@@ -3883,3 +3883,54 @@ func TestNoteRepository_SearchByFilter_EscapesLikePattern(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, []string{"n_sel_3"}, idsOf(out))
 }
+
+// **返信先の note が見えないなら集計に出さない。** 集計は非正規化列
+// `"replyUserId"` を読むだけなので、返信元 (author の reply) だけを gate すると
+// 「返信元は public だが返信先は followers」の組で相手の身元が集計値に漏れる。
+// upstream も generateVisibilityQuery を 2 つのクエリ両方に足している。
+func TestNoteRepository_CountReplyTargets_ReplyTargetVisibility(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author := insertTestUser(t, "u_crt_rt_a", "crtRtA")
+	defer cleanupUser(t, author.ID)
+	hidden := insertTestUser(t, "u_crt_rt_h", "crtRtH")
+	defer cleanupUser(t, hidden.ID)
+	shown := insertTestUser(t, "u_crt_rt_v", "crtRtV")
+	defer cleanupUser(t, shown.ID)
+	stranger := insertTestUser(t, "u_crt_rt_s", "crtRtS")
+	defer cleanupUser(t, stranger.ID)
+
+	// 返信先 2 件: hidden の followers note (stranger には見えない) と
+	// shown の public note。
+	hiddenTarget := "n_crt_rt_hidden"
+	shownTarget := "n_crt_rt_shown"
+	require.NoError(t, testDB.Create(&model.Note{ID: hiddenTarget, UserID: hidden.ID, Visibility: model.NoteVisibilityFollowers}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, hiddenTarget)
+	require.NoError(t, testDB.Create(&model.Note{ID: shownTarget, UserID: shown.ID, Visibility: model.NoteVisibilityPublic}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, shownTarget)
+
+	// author の返信はどちらも public = **返信元だけ見ると両方とも集計対象**。
+	for _, n := range []*model.Note{
+		{ID: "n_crt_rt_r1", UserID: author.ID, ReplyID: &hiddenTarget, ReplyUserID: &hidden.ID, Visibility: model.NoteVisibilityPublic},
+		{ID: "n_crt_rt_r2", UserID: author.ID, ReplyID: &shownTarget, ReplyUserID: &shown.ID, Visibility: model.NoteVisibilityPublic},
+	} {
+		require.NoError(t, testDB.Create(n).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, n.ID)
+	}
+
+	// stranger からは shown だけが見える。hidden は返信先が followers なので出ない。
+	rows, err := repo.CountReplyTargets(author.ID, stranger.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "返信先が見えない相手が集計に出ている")
+	assert.Equal(t, shown.ID, rows[0].UserID)
+
+	// anonymous も同じ。
+	rows, err = repo.CountReplyTargets(author.ID, "", 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.Equal(t, shown.ID, rows[0].UserID)
+
+	// 返信先の author 自身からは両方見える (自分の followers note は見える)。
+	rows, err = repo.CountReplyTargets(author.ID, hidden.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2, "返信先の当人からは見えるはず")
+}
