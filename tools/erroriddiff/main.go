@@ -26,7 +26,7 @@ import (
 	"strings"
 )
 
-// codeIDRe matches a Misskey meta.errors entry. All 448 upstream entries place
+// codeIDRe matches a Misskey meta.errors entry. All 459 upstream entries place
 // `id` directly after `code`, so the adjacent pattern captures every pair.
 var codeIDRe = regexp.MustCompile(`code:\s*'([^']+)'\s*,\s*id:\s*'([^']+)'`)
 

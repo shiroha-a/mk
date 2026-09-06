@@ -284,9 +284,9 @@ upstream bump時は`make shapecheck-gen`で全goldenを再生成してcommit。�
 
 `TestErrorHTTPStatusDrift`は、エラーレスポンスの**HTTPステータス**をgateする。ただし**Misskeyが明示的にステータスを固定しているエラーだけ**を対象にする。
 
-Misskeyの`ApiCallService`は`httpStatusCode` → 無ければ`kind`既定(`client`→400 / `permission`→403 / `server`→500)でステータスを決め、`kind`既定値は`client`。実態として**448エラー中425件(95%)が未指定=400**で、mk-goは`NO_SUCH_*`に404、`ACCESS_DENIED`に403というセマンティックなステータスを返す。misskey-jsは`status===200`以外を一律errorとしてbodyを読むため400/404を区別せず、**全部400に倒すのは設計上の損失**(REST的セマンティクスを失う)。
+Misskeyの`ApiCallService`は`httpStatusCode` → 無ければ`kind`既定(`client`→400 / `permission`→403 / `server`→500)でステータスを決め、`kind`既定値は`client`。実態として**459エラー中431件(93.9%)が未指定=400**で、mk-goは`NO_SUCH_*`に404、`ACCESS_DENIED`に403というセマンティックなステータスを返す。misskey-jsは`status===200`以外を一律errorとしてbodyを読むため400/404を区別せず、**全部400に倒すのは設計上の損失**(REST的セマンティクスを失う)。
 
-そこで本gateは「Misskeyが`httpStatusCode`または非デフォルト`kind`を明示している」契約(23件)だけを golden 化(`tools/erroriddiff`が`golden_error_status.json`に出力、暗黙400は記録しない)。mk-goが各endpointで返すステータス(inline `c.JSON(http.StatusX, ...)` / `JSONXxx` wrapper)を解決して突合する。
+そこで本gateは「Misskeyが`httpStatusCode`または非デフォルト`kind`を明示している」契約(28件)だけを golden 化(`tools/erroriddiff`が`golden_error_status.json`に出力、暗黙400は記録しない)。mk-goが各endpointで返すステータス(inline `c.JSON(http.StatusX, ...)` / `JSONXxx` wrapper)を解決して突合する。
 
 検出・整合した実例(本gate新設時):
 
@@ -303,7 +303,7 @@ Misskeyの`ApiCallService.send()`は全エラーenvelopeに`kind`を必ず含め
 
 gateは2方向:
 
-- **明示kind**: `tools/erroriddiff`がupstreamのエラー定義から`kind`明示エントリだけを`golden_error_kinds.json`へ抽出(現行7件: `NO_SUCH_ABUSE_REPORT`等が`server`、`i`の`USER_IS_DELETED`が`permission`)。解決できたemissionのkindはこれと一致しなければならない。
+- **明示kind**: `tools/erroriddiff`がupstreamのエラー定義から`kind`明示エントリだけを`golden_error_kinds.json`へ抽出(現行9件: `NO_SUCH_ABUSE_REPORT`等が`server`、`i`の`USER_IS_DELETED`が`permission`)。解決できたemissionのkindはこれと一致しなければならない。
 - **暗黙client**: kind goldenに無くても`golden_error_ids.json`にcodeがある(=upstreamがそのendpointで定義する)エラーは、既定の`client`を要求する。mk-go独自code・route未解決はid gateと同じ方針で対象外。
 
 実行・golden再生成はid gateと同じ`make errorid-check` / `make shapecheck-gen`。
@@ -358,7 +358,15 @@ make shapecheck-gen   # golden_permissions.json も再生成
 
 ## Secure drift gate（app token 制限）
 
-`TestSecureDrift`は、Misskeyの`secure: true` endpoint(password変更 / 2FA / data export-import / authorized-apps 等のaccount-security系、52件)が、mk-goで`middleware.RequireSecure`を適用していることを検証する。
+`TestSecureDrift`は、Misskeyの`secure: true` endpoint(password変更 / 2FA / data export-import / authorized-apps 等のaccount-security系、51件)が、mk-goで`middleware.RequireSecure`を適用していることを検証する。
+
+**逆向きも見る (#2877)。** golden に無い endpoint に `RequireSecure` が付いていたら落とす。片方向のままだと、upstream が `secure` を外したとき (2026.9.0 の `i/revoke-token` がまさにそれ) に golden から消えるだけで、mk-go 側に `RequireSecure` が残っていても緑のまま通る = サードパーティアプリから叩けるようにする変更が**機能していなくても検出できない**。意図的に厳しくする場合は `secureStricterThanUpstream` に理由付きで登録する (現在は空)。
+
+### TestOAuthKindDrift
+
+`TestPermissionDrift` が見るのは `public|auth|moderator|admin` の粗い段だけで、**OAuth scope (`meta.kind`) の取り違えは素通りする**。実際 `admin/queue/stats` は `read:admin:emoji` のまま出荷されていた (upstream 自身の typo をそのまま移植したもので、upstream は 2026.9.0 で修正)。絵文字の scope しか持たないアプリが queue の統計を読め、queue の scope を持つアプリが読めない状態だった。
+
+`tools/permspec` が upstream の `meta.kind` を `golden_oauth_kinds.json` (296件) に出し、router の `middleware.RequireScope` と突き合わせる。**値の不一致と、kind があるのに `RequireScope` が無い方の両方**を見る (後者は app token が scope 無しで叩ける)。数え方: golden は endpoint 単位の map で、`kind` は meta 直下 (タブ 1 つ) の宣言のみを拾う。
 
 Misskeyの`secure`は「native session token のみ許可、第三者app/OAuth/MiAuth access token 不可」(ApiCallServiceの`isSecure = user != null && token == null`)。これが無いと、有効なaccess tokenを持つ第三者appがpassword変更や2FA解除を駆動できてしまう。
 

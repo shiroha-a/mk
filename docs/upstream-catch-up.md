@@ -255,6 +255,13 @@ mk-go と Misskey TS を並べて比較するハーネスは、**比較対象の
 | `docker-compose.diff.yml` | 差分比較ハーネス ([diff-e2e.md](./diff-e2e.md)) |
 | `docker-compose.playwright.ts.yml` | Playwright の TS baseline |
 | `.github/workflows/playwright.yml` | 上記の pre-pull (tag が sync していないと pull が無駄になる) |
+| `Dockerfile.bundled` の `MISSKEY_ASSETS_IMAGE` | **配る image に焼く frontend**。これだけは TS image ではなく fork の assets image (`ghcr.io/shiroha-a/misskey-ts-assets:<tag>-mk.N`) で、**submodule のタグと 1:1 で対応させる**。ずれると 2026.9.0 の backend に古い frontend を載せた image を配ることになる |
+
+**`Dockerfile.bundled` は表に無かったせいで実際に 12 世代遅れた** (#2877 の時点で
+`2026.7.0-mk.10`)。他の 3 つと違って CI が引かないので、腐っても誰も落ちない。
+assets image は fork 側の `Publish frontend assets image` workflow が `*-mk.*` タグで
+発火して publish するので、**submodule のタグを push した後**に上げること
+(`gh run list --repo shiroha-a/misskey-ts` で success を確認できる)。
 
 **除外リストの「version-gap」注記は、版を揃えたら必ず読み直す。** 実例として、
 diff harness の `META_IGNORE` には `app192IconUrl` / `app512IconUrl` /

@@ -24,7 +24,7 @@ upstream と一致するか」(計算結果・正規化・順序・条件分岐�
 docker-compose.diff.yml  (隔離 stack、production UDS には触れない)
 ├─ mkgo  (build: tests/federation/common/Dockerfile.mkgo, config: tests/diff/mkgo.yml)
 │   ├─ postgres-mk / redis-mk
-├─ ts    (image: misskey/misskey:2026.7.0, config: tests/diff/ts.yml)
+├─ ts    (image: misskey/misskey:2026.9.0, config: tests/diff/ts.yml)
 │   ├─ postgres-ts / redis-ts
 └─ diff-runner (profiles:[test], pytest + requests)
      MKGO_URL=http://mkgo:3000  TS_URL=http://ts:3000
@@ -32,7 +32,7 @@ docker-compose.diff.yml  (隔離 stack、production UDS には触れない)
 
 - **API-only (HTTP, no TLS/federation)**: runner は両 backend を `:3000` で直接
   叩く。WebAuthn/secure-context は不要なので nginx TLS 層は省く。
-- **version**: mk-go・TS ともに **2026.7.0** で一致している。かつては公式 image が
+- **version**: mk-go・TS ともに **2026.9.0** で一致している。かつては公式 image が
   1 minor 遅れており version-gap のノイズを ignore-list で吸収していたが、その必要は
   無くなった。追従直後で公式 image が未公開の期間だけ、再び gap が生じうる。
 - **隔離 (重要)**: compose 先頭で `name: mkdiff` を指定し専用 project に固定する。
@@ -170,7 +170,7 @@ assert する**。diff だけだと「両方 DESC」でも通ってしまい、T
 
 `test_meta_value_parity` の `META_IGNORE` は instance state (mediaProxy host /
 proxyAccountName) のノイズを吸収するためのもの。version-gap 由来の除外は TS image を
-2026.7.0 に揃えた時点で不要になったため、**残っているものが instance state 起因だけかを
+2026.9.0 に揃えた時点で不要になったため、**残っているものが instance state 起因だけかを
 追従のたびに見直すこと**。
 
 ## 既知の制約・今後
