@@ -1543,25 +1543,42 @@ func (r *noteRepository) ListByUserList(listID string, limit int, sinceID, until
 	return notes, nil
 }
 
+// recentReplyScanLimit は CountReplyTargets が集計対象にする直近の返信件数。
+// upstream get-frequently-replied-users.ts の `limit(1000)` と同じ値。
+const recentReplyScanLimit = 1000
+
 func (r *noteRepository) CountReplyTargets(userID, viewerID string, limit int) ([]model.ReplyTargetCount, error) {
 	if limit <= 0 {
 		limit = 10
 	}
 	var rows []model.ReplyTargetCount
-	// replyUserIdがNULLのもの (通常起こり得ないが防御)と自己返信は集計から除外する。
-	q := r.db.Model(&model.Note{}).
-		Select(`"replyUserId", COUNT(*) AS count`).
+	// **直近 1000 件に絞ってから集計する。** upstream
+	// (get-frequently-replied-users.ts) の recentNotesQuery が
+	// `ORDER BY note.id DESC LIMIT 1000` を持つのと同じ。この endpoint は
+	// upstream / mk-go とも **未認証で任意の userId に対して叩けて**、
+	// レート制限の定義も無い。上限が無いと投稿数に比例して重くなり、
+	// 特に下の相関 EXISTS が 1 行ごとの PK 探索になるので増幅する
+	// (実測: 返信 20 万件で 119ms -> 813ms)。
+	//
+	// replyUserId が NULL のもの (通常起こり得ないが防御) と自己返信は除外する。
+	recent := r.db.Model(&model.Note{}).
+		Select(`"id", "replyId", "replyUserId"`).
 		Where(`"userId" = ? AND "replyId" IS NOT NULL AND "replyUserId" IS NOT NULL AND "replyUserId" <> ?`, userID, userID)
 	// visibility push-down: 集計対象 reply note のうち viewer が CanSeeNote で
 	// 見られるものだけを残す。これが無いと第三者 viewer が author の
 	// followers/specified reply の対人関係を集計値経由で観測できる (#1486)。
 	// 条件は ListByUserIDFiltered / ListMentions / SearchByTag と同一。
-	q = applyViewerVisibility(q, viewerID)
+	//
+	// **絞り込みの前に掛ける。** 後に掛けると「見える 1000 件」ではなく
+	// 「直近 1000 件のうち見えるもの」になり、upstream と件数が変わる。
+	recent = applyViewerVisibility(recent, viewerID).Order(`"id" DESC`).Limit(recentReplyScanLimit)
+
 	// **返信先の note にも同じ gate を掛ける。** 集計は非正規化列 `"replyUserId"` を
 	// 読むだけなので、これが無いと「返信元は見えるが返信先は見えない」組で
 	// 相手の身元が集計値に出る。upstream も 2 つのクエリの両方に
 	// generateVisibilityQuery を足している。
-	q = applyViewerVisibilityExists(q, `"note"."replyId"`, viewerID)
+	q := r.db.Table(`(?) AS t`, recent).Select(`"replyUserId", COUNT(*) AS count`)
+	q = applyViewerVisibilityExists(q, `t."replyId"`, viewerID)
 	err := q.Group(`"replyUserId"`).
 		Order(`count DESC`).
 		Limit(limit).

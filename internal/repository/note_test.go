@@ -3934,3 +3934,49 @@ func TestNoteRepository_CountReplyTargets_ReplyTargetVisibility(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 2, "返信先の当人からは見えるはず")
 }
+
+// **直近 1000 件を超える返信は集計に入らない。** upstream
+// get-frequently-replied-users.ts の `ORDER BY note.id DESC LIMIT 1000` と同じ。
+// この endpoint は未認証で任意の userId に対して叩けてレート制限も無いので、
+// 上限が無いと投稿数に比例して重くなる (相関 EXISTS が 1 行ごとの PK 探索になる)。
+func TestNoteRepository_CountReplyTargets_ScanLimit(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author := insertTestUser(t, "u_crt_lim_a", "crtLimA")
+	defer cleanupUser(t, author.ID)
+	recent := insertTestUser(t, "u_crt_lim_r", "crtLimR")
+	defer cleanupUser(t, recent.ID)
+	old := insertTestUser(t, "u_crt_lim_o", "crtLimO")
+	defer cleanupUser(t, old.ID)
+	viewer := insertTestUser(t, "u_crt_lim_v", "crtLimV")
+	defer cleanupUser(t, viewer.ID)
+
+	// 返信先はどちらも public。
+	recentTarget, oldTarget := "n_crt_lim_tr", "n_crt_lim_to"
+	for _, tg := range []struct{ id, uid string }{{recentTarget, recent.ID}, {oldTarget, old.ID}} {
+		require.NoError(t, testDB.Create(&model.Note{ID: tg.id, UserID: tg.uid, Visibility: model.NoteVisibilityPublic}).Error)
+		defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, tg.id)
+	}
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, author.ID)
+
+	// id は昇順で新しくなる。old 宛を先に (= 古い側) 5 件、recent 宛を後に 1000 件。
+	notes := make([]*model.Note, 0, recentReplyScanLimit+5)
+	for i := 0; i < 5; i++ {
+		notes = append(notes, &model.Note{
+			ID: fmt.Sprintf("n_crt_lim_a%04d", i), UserID: author.ID,
+			ReplyID: &oldTarget, ReplyUserID: &old.ID, Visibility: model.NoteVisibilityPublic,
+		})
+	}
+	for i := 0; i < recentReplyScanLimit; i++ {
+		notes = append(notes, &model.Note{
+			ID: fmt.Sprintf("n_crt_lim_b%04d", i), UserID: author.ID,
+			ReplyID: &recentTarget, ReplyUserID: &recent.ID, Visibility: model.NoteVisibilityPublic,
+		})
+	}
+	require.NoError(t, testDB.CreateInBatches(notes, 500).Error)
+
+	rows, err := repo.CountReplyTargets(author.ID, viewer.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "1000 件の窓の外にいる相手が集計に出ている")
+	assert.Equal(t, recent.ID, rows[0].UserID)
+	assert.EqualValues(t, recentReplyScanLimit, rows[0].Count)
+}
