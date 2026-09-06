@@ -1552,18 +1552,23 @@ func (r *noteRepository) CountReplyTargets(userID, viewerID string, limit int) (
 		limit = 10
 	}
 	var rows []model.ReplyTargetCount
-	// **直近 1000 件に絞ってから集計する。** upstream
+	// **直近 1000 件の窓を取ってから集計する。** upstream
 	// (get-frequently-replied-users.ts) の recentNotesQuery が
 	// `ORDER BY note.id DESC LIMIT 1000` を持つのと同じ。この endpoint は
 	// upstream / mk-go とも **未認証で任意の userId に対して叩けて**、
 	// レート制限の定義も無い。上限が無いと投稿数に比例して重くなり、
-	// 特に下の相関 EXISTS が 1 行ごとの PK 探索になるので増幅する
+	// 下の相関 EXISTS が 1 行ごとの PK 探索になるので増幅する
 	// (実測: 返信 20 万件で 119ms -> 813ms)。
 	//
-	// replyUserId が NULL のもの (通常起こり得ないが防御) と自己返信は除外する。
+	// **窓の条件は upstream と同じにすること。** 自己返信の除外
+	// (`"replyUserId" <> userID`) は mk-go 固有で upstream の窓には無い。これを
+	// 内側に置くと、述語に当たらない行が続く限り LIMIT が満たされず、planner が
+	// `Index Scan Backward using note_pkey` に倒れて **note テーブル全体**を走査する
+	// (実測: 自己返信 200k・他者宛 0 のユーザーで 1.8M 行を全部読み 421ms。外へ
+	// 出すと 1.15ms)。**上限を入れたつもりで別経路の DoS を開けることになる。**
 	recent := r.db.Model(&model.Note{}).
 		Select(`"id", "replyId", "replyUserId"`).
-		Where(`"userId" = ? AND "replyId" IS NOT NULL AND "replyUserId" IS NOT NULL AND "replyUserId" <> ?`, userID, userID)
+		Where(`"userId" = ? AND "replyId" IS NOT NULL`, userID)
 	// visibility push-down: 集計対象 reply note のうち viewer が CanSeeNote で
 	// 見られるものだけを残す。これが無いと第三者 viewer が author の
 	// followers/specified reply の対人関係を集計値経由で観測できる (#1486)。
@@ -1573,11 +1578,16 @@ func (r *noteRepository) CountReplyTargets(userID, viewerID string, limit int) (
 	// 「直近 1000 件のうち見えるもの」になり、upstream と件数が変わる。
 	recent = applyViewerVisibility(recent, viewerID).Order(`"id" DESC`).Limit(recentReplyScanLimit)
 
-	// **返信先の note にも同じ gate を掛ける。** 集計は非正規化列 `"replyUserId"` を
-	// 読むだけなので、これが無いと「返信元は見えるが返信先は見えない」組で
+	// replyUserId が NULL のもの (通常起こり得ないが防御) と自己返信は**窓を取った後**に
+	// 除外する (上記のとおり窓の内側に置くと LIMIT が効かなくなる)。
+	//
+	// **返信先の note にも可視性 gate を掛ける。** 集計は非正規化列 `"replyUserId"`
+	// を読むだけなので、これが無いと「返信元は見えるが返信先は見えない」組で
 	// 相手の身元が集計値に出る。upstream も 2 つのクエリの両方に
 	// generateVisibilityQuery を足している。
-	q := r.db.Table(`(?) AS t`, recent).Select(`"replyUserId", COUNT(*) AS count`)
+	q := r.db.Table(`(?) AS t`, recent).
+		Select(`"replyUserId", COUNT(*) AS count`).
+		Where(`t."replyUserId" IS NOT NULL AND t."replyUserId" <> ?`, userID)
 	q = applyViewerVisibilityExists(q, `t."replyId"`, viewerID)
 	err := q.Group(`"replyUserId"`).
 		Order(`count DESC`).

@@ -3940,6 +3940,12 @@ func TestNoteRepository_CountReplyTargets_ReplyTargetVisibility(t *testing.T) {
 // この endpoint は未認証で任意の userId に対して叩けてレート制限も無いので、
 // 上限が無いと投稿数に比例して重くなる (相関 EXISTS が 1 行ごとの PK 探索になる)。
 func TestNoteRepository_CountReplyTargets_ScanLimit(t *testing.T) {
+	// **窓のサイズはリテラルで書く。** `recentReplyScanLimit` を fixture に使うと、
+	// 定数を変える変異にテスト側が追随して境界がずれても落ちない (実測で 7 / 2000 の
+	// どちらでも PASS した)。同じブランチの emoji 側で踏んだのと同じ型。
+	const window = 1000
+	assert.Equal(t, window, recentReplyScanLimit, "upstream の limit(1000) と揃える")
+
 	repo := NewNoteRepository(testDB)
 	author := insertTestUser(t, "u_crt_lim_a", "crtLimA")
 	defer cleanupUser(t, author.ID)
@@ -3959,14 +3965,14 @@ func TestNoteRepository_CountReplyTargets_ScanLimit(t *testing.T) {
 	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, author.ID)
 
 	// id は昇順で新しくなる。old 宛を先に (= 古い側) 5 件、recent 宛を後に 1000 件。
-	notes := make([]*model.Note, 0, recentReplyScanLimit+5)
+	notes := make([]*model.Note, 0, window+5)
 	for i := 0; i < 5; i++ {
 		notes = append(notes, &model.Note{
 			ID: fmt.Sprintf("n_crt_lim_a%04d", i), UserID: author.ID,
 			ReplyID: &oldTarget, ReplyUserID: &old.ID, Visibility: model.NoteVisibilityPublic,
 		})
 	}
-	for i := 0; i < recentReplyScanLimit; i++ {
+	for i := 0; i < window; i++ {
 		notes = append(notes, &model.Note{
 			ID: fmt.Sprintf("n_crt_lim_b%04d", i), UserID: author.ID,
 			ReplyID: &recentTarget, ReplyUserID: &recent.ID, Visibility: model.NoteVisibilityPublic,
@@ -3978,5 +3984,46 @@ func TestNoteRepository_CountReplyTargets_ScanLimit(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, rows, 1, "1000 件の窓の外にいる相手が集計に出ている")
 	assert.Equal(t, recent.ID, rows[0].UserID)
-	assert.EqualValues(t, recentReplyScanLimit, rows[0].Count)
+	// **件数そのものは assert しない。** ここは「同じ返信先へ 1000 回」なので、
+	// upstream は `note.id IN (replyIds)` で重複を畳んで 1 と数えるのに対し
+	// mk-go の COUNT(*) は 1000 になる (既存の乖離。docs/divergence.md に記載)。
+	// 最大値で固定すると、その乖離をテストが恒久化してしまう。
+	assert.Positive(t, rows[0].Count)
+}
+
+// 自己返信は窓を取った**後**に除外する。窓の内側に置くと、自己返信だけを大量に
+// 持つ利用者で LIMIT が満たされず全表走査に倒れる。
+func TestNoteRepository_CountReplyTargets_SelfRepliesConsumeWindow(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author := insertTestUser(t, "u_crt_self_a", "crtSelfA")
+	defer cleanupUser(t, author.ID)
+	other := insertTestUser(t, "u_crt_self_o", "crtSelfO")
+	defer cleanupUser(t, other.ID)
+	viewer := insertTestUser(t, "u_crt_self_v", "crtSelfV")
+	defer cleanupUser(t, viewer.ID)
+
+	selfTarget, otherTarget := "n_crt_self_ts", "n_crt_self_to"
+	require.NoError(t, testDB.Create(&model.Note{ID: selfTarget, UserID: author.ID, Visibility: model.NoteVisibilityPublic}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, selfTarget)
+	require.NoError(t, testDB.Create(&model.Note{ID: otherTarget, UserID: other.ID, Visibility: model.NoteVisibilityPublic}).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, otherTarget)
+	defer testDB.Exec(`DELETE FROM "note" WHERE "userId" = ?`, author.ID)
+
+	// 他者宛が古く (a)、自己返信が新しい (b)。窓は自己返信込みで取るので、
+	// 自己返信が窓を埋めれば他者宛は集計に出ない = upstream と同じ窓。
+	notes := []*model.Note{{
+		ID: "n_crt_self_a000", UserID: author.ID,
+		ReplyID: &otherTarget, ReplyUserID: &other.ID, Visibility: model.NoteVisibilityPublic,
+	}}
+	for i := 0; i < 1000; i++ {
+		notes = append(notes, &model.Note{
+			ID: fmt.Sprintf("n_crt_self_b%04d", i), UserID: author.ID,
+			ReplyID: &selfTarget, ReplyUserID: &author.ID, Visibility: model.NoteVisibilityPublic,
+		})
+	}
+	require.NoError(t, testDB.CreateInBatches(notes, 500).Error)
+
+	rows, err := repo.CountReplyTargets(author.ID, viewer.ID, 10)
+	require.NoError(t, err)
+	assert.Empty(t, rows, "自己返信が窓を埋めたら他者宛は出ない (upstream と同じ窓)")
 }

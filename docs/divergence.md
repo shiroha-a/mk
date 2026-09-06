@@ -697,6 +697,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 
 | 項目 | upstream | mk-go |
 |---|---|---|
+| `users/get-frequently-replied-users` の集計 | 直近 1000 件の返信を引き、**返信先ノートの id 集合**を作って引き直すので、同じノートへ何度返信しても **1** と数える | **`COUNT(*)` で数える**ので同じノートへ 5 回返信すれば **5**。`weight = count / peak` の順位が変わりうる。窓の取り方 (直近 1000 件・自己返信込み) は upstream に揃えてある (#2877) |
 | `i/revoke-token` を凍結アカウントが叩く | **204 で失効できる。** upstream の `isSuspended` 判定は `ApiCallService` の `requireCredential \|\| requireModerator \|\| requireAdmin` ブロックの中にあり、この endpoint は 2026.9.0 でそのどれも宣言しなくなった (アクセストークン自身を失効させるため)。`AuthenticateService` にも suspended チェックは無い | **403 `YOUR_ACCOUNT_SUSPENDED`。** mk-go は `Authenticate` が凍結ユーザーを anonymous に落とす構造 (#1559) なので、分岐を置かないと 401 `CREDENTIAL_REQUIRED` になり upstream の 204 からさらに遠のく。403 のほうが「凍結ゆえに拒否した」ことが伝わるので採った (#2877) |
 | `invite/delete` の存在しない ID | `NO_SUCH_INVITE_CODE` (400) | **204 を返す** (= idempotent)。取り消しは「無くなっていること」が目的なので、既に無い状態を失敗にしない。ただし **DB 障害は 204 に潰さず 500 を返す** (#2812) — 取り消し系で 204 を返すと、消えたと思って戻ったあとも ticket が生きている |
 | AID/AIDXの上限外timestamp | AIDは8桁を超えて固定長を外れ、AIDXは下位8桁へwrapする | **base36 8桁の最大値へ飽和する。** 固定長を維持し、時系列順序の逆転を防ぐ安全側乖離 (#2672) |
