@@ -128,17 +128,39 @@ func makeTestCommand(t *testing.T) string {
 	return makeTargetTestCommand(t, "test")
 }
 
+// makeTargetRecipeLines returns the recipe lines of the given target.
+//
+// **正規表現で `(?:\t.*\n)+` と書かない。** GNU make は recipe 中の空行を
+// 読み飛ばして続きも実行するので、そこで切ると**以降の行が検査されなくなる**
+// (#2857)。行頭固定なので `test` は `test-fast` を拾わない。
+func makeTargetRecipeLines(src, target string) []string {
+	head := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:.*$`)
+	loc := head.FindStringIndex(src)
+	if loc == nil {
+		return nil
+	}
+	var out []string
+	for _, line := range strings.Split(src[loc[1]:], "\n")[1:] {
+		// **空行も列 0 のコメントも recipe を終わらせない** (make 4.3 で実測)。
+		// ここで切ると以降の行が検査されなくなる (#2857)。
+		if strings.TrimSpace(line) == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		if !strings.HasPrefix(line, "\t") {
+			break
+		}
+		out = append(out, line)
+	}
+	return out
+}
+
 // makeTargetTestCommand extracts the `go test` line of the given target's recipe.
 func makeTargetTestCommand(t *testing.T, target string) string {
 	t.Helper()
-	src := readRepoFile(t, "Makefile")
-	// recipe は tab 始まりの行が続く限り。行頭固定なので `test` は `test-fast` を拾わない。
-	re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(target) + `:.*\n((?:\t.*\n)+)`)
-	m := re.FindStringSubmatch(src)
-	if m == nil {
+	lines := makeTargetRecipeLines(readRepoFile(t, "Makefile"), target)
+	if lines == nil {
 		t.Fatalf("Makefile の `%s:` recipe を読めなかった", target)
 	}
-	lines := strings.Split(m[1], "\n")
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(strings.TrimPrefix(line, "\t"))
 		// recipe 内のコメント行に `go test` があっても拾わない。
