@@ -3,6 +3,9 @@ package role
 import (
 	"bytes"
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -391,6 +394,9 @@ func (b *warnBuffer) String() string {
 func TestPolicyProviderRuntime_UsesLoggerCapturedAtConstruction(t *testing.T) {
 	var captured warnBuffer
 	previous := slog.Default()
+	// **panic / t.Fatal でも必ず戻す** (#2795)。差し替わったまま残すと、
+	// 同じバイナリの後続テストがグローバルを取り合う。
+	t.Cleanup(func() { slog.SetDefault(previous) })
 	slog.SetDefault(slog.New(slog.NewTextHandler(&captured, &slog.HandlerOptions{Level: slog.LevelWarn})))
 	runtime := newPolicyProviderRuntime(defaultEffectivePolicyProviderCacheEntries)
 	// **構築の直後に戻す。** 以降の warn がグローバルではなく runtime の
@@ -413,4 +419,60 @@ func TestPolicyProviderRuntime_NilLoggerFallsBackToDefault(t *testing.T) {
 		disablePolicyProvider(&policyProviderRuntime{})
 		recordPolicyProviderFallback(&policyProviderRuntime{})
 	})
+}
+
+// **warn は CAS と同じクリティカルセクションで出す** (#2867)。
+//
+// disable は requester と provider の goroutine の両方から呼ばれ、CAS に
+// 勝ったほうだけが warn を出す。warn を Unlock の後に置くと、勝ったほうが
+// 実際に書くまでの間に負けたほうが先へ進めてしまい、呼び出しから戻った時点で
+// **まだ何も記録されていない**状態が作れる (テストはそこで 0 件を観測して落ちる)。
+// stall を注入して実際にそうなることを確認してある。
+//
+// **構造で固定する。** タイミングで見ようとすると、勝者が warn を書き終えるまでの
+// 窓が狭すぎて lock の外に戻す変異を捕まえられなかった (実測で空振り)。
+func TestDisablePolicyProviderWarnsInsideCriticalSection(t *testing.T) {
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "plugin_policy.go", nil, 0)
+	require.NoError(t, err)
+
+	var body *ast.BlockStmt
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if ok && fn.Name.Name == "disablePolicyProvider" {
+			body = fn.Body
+			return false
+		}
+		return true
+	})
+	require.NotNil(t, body, "disablePolicyProvider が見つからない")
+
+	// 関数内での Unlock と Warn の位置を取る。
+	var unlockPos, warnPos token.Pos
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		switch sel.Sel.Name {
+		case "Unlock":
+			if !unlockPos.IsValid() {
+				unlockPos = call.Pos()
+			}
+		case "Warn":
+			if !warnPos.IsValid() {
+				warnPos = call.Pos()
+			}
+		}
+		return true
+	})
+	require.True(t, unlockPos.IsValid(), "Unlock の呼び出しが無い")
+	require.True(t, warnPos.IsValid(), "Warn の呼び出しが無い")
+
+	assert.Less(t, int(warnPos), int(unlockPos),
+		"warn が Unlock より後にある。CAS に負けた側が、記録される前に戻れてしまう (#2867)")
 }

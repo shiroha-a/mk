@@ -33,11 +33,12 @@ type policyProviderRuntime struct {
 
 	// logger は runtime を作った時点の slog.Default() を握る。
 	//
-	// **毎回 slog.Default() を引き直さない** (#2867)。provider の goroutine は
-	// それを起こしたリクエストより長く生きる (deadline まで `<-ctx.Done()` で
-	// 待ち、返ってから warn を出す) ので、引き直すと「そのとき default だった
-	// 誰か」の出力先に書く。テストは `slog.SetDefault` でグローバルを差し替えて
-	// 出力を数えるため、**別のテストが残した goroutine の warn が紛れ込む**。
+	// **これは防御であって、観測された不具合の修正ではない。** #2867 で落ちて
+	// いた経路は上の disablePolicyProvider の lock 位置で、こちらではない。
+	// 毎回 `slog.Default()` を引くと「そのとき default だった誰か」に書くので、
+	// `slog.SetDefault` でグローバルを差し替えて出力を数えるテストと、遅れて
+	// 書く goroutine が組み合わさったときに紛れ込みうる。実際にその形が
+	// 成立する経路は本パッケージには見つかっていない。
 	//
 	// production では `cmd/misskey/main.go` が起動時に `slog.SetDefault` を
 	// 済ませてからプラグインを登録する (= runtime 生成はその後) ので挙動は同じ。
@@ -530,16 +531,25 @@ func finishPolicyProviderInvocation(ctx context.Context, runtime *policyProvider
 }
 
 func disablePolicyProvider(runtime *policyProviderRuntime) {
+	// **warn を lock の中で出す** (#2867)。
+	//
+	// disable は 2 経路から呼ばれる — deadline を検出した requester と、
+	// あとから返ってきた provider の goroutine。CAS に勝ったほうだけが warn を
+	// 出す。warn を Unlock の後に置くと、goroutine が CAS を取ってから
+	// 実際に書くまでの間に requester が CAS に負けて先へ進めるので、
+	// **呼び出しから戻った時点でまだ何も記録されていない**状態が作れる。
+	// 出力を数えるテストはそこで 0 件を観測して落ちる (stall を注入して実証)。
+	//
+	// lock の中で出せば、負けたほうは Lock で待たされるため、記録が済むまで
+	// 戻れない。追加コストは無い — この lock は元から無条件で取っており、
+	// warn は CAS に守られて runtime 1 つにつき生涯 1 回しか出ない。
 	runtime.cacheMu.Lock()
-	disabled := runtime.disabled.CompareAndSwap(false, true)
-	if disabled {
+	if runtime.disabled.CompareAndSwap(false, true) {
 		runtime.globalEpoch++
 		runtime.cacheClear()
-	}
-	runtime.cacheMu.Unlock()
-	if disabled {
 		runtime.log().Warn("effective policy provider disabled after timeout")
 	}
+	runtime.cacheMu.Unlock()
 }
 
 func acquirePolicyProviderToken(ctx context.Context, runtime *policyProviderRuntime) bool {
