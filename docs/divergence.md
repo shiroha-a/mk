@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.0`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.2a`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -36,7 +36,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 36 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.2`) | — | — |
+| fork frontend の独自変更 | 37 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.2a`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -344,9 +344,9 @@ submodule bump の PR で人が見る。
 
 `third_party/misskey` fork (`shiroha-a/misskey-ts`) に載せている frontend の custom commit。**原則として**純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針。
 
-**還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` の 5 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
+**還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` の 6 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.2`。** tag 列は「その変更が最初に入った世代」で、下の
+**現在の pin は `2026.9.0-mk.2a`。** tag 列は「その変更が最初に入った世代」で、下の
 表の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている。載せ替えで衝突したのは
 `packages/frontend/src/pages/admin/job-queue.vue` の 1 ファイルだけで、
@@ -393,6 +393,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.0` | Misskey 2026.9.0 への載せ替え (#2877)。**独自変更の内容は上の `2026.7.0-mk.*` の行がそのまま移ったもの**。固有の変更は衝突解決の 1 箇所だけで、`packages/frontend/src/pages/admin/job-queue.vue` の `jobState` の型を upstream の autogen (`AdminQueueJobsRequest['state'][number]`) に寄せ、Paused タブの entry を落としている (fork の `ApiQueueName` キャストは残した) |
 | `2026.9.0-mk.1` | 通報画面を 5W1H の定型フォームにする (#2879)。通報の宛先は `users/report-abuse` の `comment` という単一の文字列のままで、カテゴリ・該当 URL・発生日時・詳細・補足をクライアント側で 1 つの本文に組み立てる。モデレーターが初動を判断するのに足る情報を、報告者が書き漏らさない形で集めるのが狙い。**純正へ還元できる行にあたる** (純正 backend の変更を要さない) ので、`-mk.22h` / `-mk.22i` / `-mk.22j` と同じく upstream へ出せる。外部コントリビューターからの PR を、レビューで出た 4 点 (上限判定が恒真で自動収集した文脈が無言で消える / リモート利用者とリノート元の host が落ちて該当 URL・メンションが別人を指す / `where` が single-line `<input>` に改行入りで渡り URL が連結される / 上限テストの context がフィールド名を誤っていて狙った状況を再現していない) を直したうえで取り込んだ。**spec の置き場所** (`specs/upstream` → `specs/mkgo`) は fork ではなく mk 本体側の修正 |
 | `2026.9.0-mk.2` | 通報コメントのリノート元の作者も acct で組む (#2879)。`-mk.1` は該当 URL と対象ユーザーを直したが、リノート元に渡す作者名だけ `username` のままだった。コメントは `<Mfm>` でレンダーされるので、host を落とすと `@bob` が mention ノードになり**ローカルの別人へリンクする**。`-mk.1` と同じく**純正へ還元できる行** |
+| `2026.9.0-mk.2a` | バックグラウンド復帰時に WebSocket を張り直す (#2883)。モバイル PWA を復帰させると、OS がサスペンド中に TCP を切っているのにブラウザが `close` を配送せず `readyState` が `OPEN` のまま残る (zombie socket)。`reconnecting-websocket` は `close` / `error` を観測しないと再接続を始めないので**リトライが一度も走らない**。さらに `Stream.onClose` が動かないため `state` が `'connected'` のままで `_disconnected_` が出ず、`serverDisconnectedBehavior` のリロードもダイアログも `quiet` のバナーも**同時に沈黙する** (3 つとも同じイベント 1 本にぶら下がっている)。heartbeat (`'h'`) は生存確認にならない — サーバーは返事をせず (upstream の `Connection.ts` / `StreamingApiServerService.ts` は protocol ping/pong と `connect` の `pong` フラグしか持たず、mk-go の `HandleClientMessage` にも `h` の case が無い)、死んだソケットへの `send()` は例外を投げない。**ゾンビの検知はせず、20 秒以上隠れていたら生死を判定せず張り直す** — 正確な検知には app レベルのプローブとサーバー応答とタイムアウト調整が要り、応答しないサーバー向けのフォールバックまで要る。誤って生きた接続を張り直す代償は再ハンドシェイクと購読の再送だけで、UI にも出さない。**`reconnect()` は自分で `onClose()` を呼ぶ** — RWS の `reconnect()` が `close` を配送するのは `readyState` が `OPEN` のときだけで、`CLOSED` / ソケット未生成では黙って繋ぎ直し、直後の `_connect()` が `_removeListeners()` でキュー済みの `close` も捨てる。frozen なページでは「CLOSED だが close は未配送」が滞在中ずっと続くので、埋めないと接続だけ張り直って購読ゼロになる (= 直しに来た症状の再現)。**`Pool` の購読リセットは `_disconnected_` の購読ではなく `Stream` からの直接呼び出し** — 通知を抑止すると道連れでリセットが飛び、`connect()` が早期 return して購読が復活しないため。張り直せないまま 30 秒を過ぎたら通常の切断として通知する (黙ったままだと離席中にサーバーが落ちても無表示になる)。**純正へ還元できる行** (純正 backend の変更を要さない) |
 
 `2026.7.0-mk.1` の内訳:
 
