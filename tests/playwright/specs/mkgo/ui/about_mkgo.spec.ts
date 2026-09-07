@@ -87,6 +87,20 @@ test.describe('UI: /about-mkgo', () => {
     await expect(page.locator('a[href^="/tarball/"]')).toHaveCount(0);
   });
 
+  // エントランス右上の GitHub リボン。#2700 が導線 3 箇所を `/about-mkgo` へ向けた
+  // ときの取りこぼしで、#2890 で直した。**upstream が触るファイルの 1 行**なので、
+  // 追従で元の外部リンク (Misskey 本体のリポジトリ) に戻されたらここで落ちる。
+  //
+  // `isRoot` は `mainRouter.currentRoute.value.name === 'index'` なので
+  // **`/` でしか描画されない** (`/about-misskey` などでは出ない)。
+  test('the entrance ribbon points at the mk-go source page', async ({ page, baseURL }) => {
+    await page.goto(`${baseURL}/`, { waitUntil: 'domcontentloaded' });
+
+    const ribbon = page.locator('a.github-corner');
+    await expect(ribbon).toBeVisible({ timeout: 20_000 });
+    await expect(ribbon).toHaveAttribute('href', '/about-mkgo');
+  });
+
   test('navigates from /about-mkgo to /about-misskey and back', async ({ page, baseURL }) => {
     await page.goto(`${baseURL}/about-mkgo`, { waitUntil: 'domcontentloaded' });
     await page.locator('a[href="/about-misskey"]').first().click();
