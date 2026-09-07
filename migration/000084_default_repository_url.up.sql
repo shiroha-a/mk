@@ -23,10 +23,9 @@
 -- のは TypeORM の列 DEFAULT がそのまま残っている行だけで、operator が admin 画面で
 -- 別の URL を設定していれば触らない。
 --
--- **`feedbackUrl` は触らない。** 000029 は `repositoryUrl` と同じ理由で
--- `feedbackUrl` にも列 DEFAULT を入れており、そちらも GORM 経由では効かないので
--- 新規インスタンスでは NULL のまま (フィードバックの導線が出ない)。ただし AGPL 13 条の
--- 案内とは無関係なので、この migration の範囲には入れない。
+-- **`feedbackUrl` はこの migration では触らない。** 000029 は隣り合う 2 行で
+-- `feedbackUrl` の列 DEFAULT も設定しており、そちらも GORM 経由では効かない。ただし
+-- AGPL 13 条の案内とは無関係なのでここでは扱わず、**#2891 の `000085` が同じ形で埋めた**。
 --
 -- **operator が意図的に空にした行も埋まる。** admin/update-meta は妥当な絶対 URL で
 -- なければ NULL を書く (upstream の `URL.canParse` と同じ) ので、「フィールドを空に

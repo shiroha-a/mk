@@ -161,6 +161,42 @@ func TestDefaultRepositoryURLMatchesConfig(t *testing.T) {
 		"nodeinfo の software.repository と meta.repositoryUrl の既定値がずれている")
 }
 
+// feedbackUrl 側も同じ理由で持ち直している (#2891)。
+func TestDefaultFeedbackURLMatchesConfig(t *testing.T) {
+	assert.Equal(t, config.MkGoFeedbackURL, defaultFeedbackURL,
+		"meta.feedbackUrl の既定値が config とずれている")
+}
+
+// 新規インスタンスで /about のフィードバック導線と nodeinfo の metadata が
+// 空にならないこと (#2891)。000029 の列 DEFAULT は GORM の NULL 明示挿入に
+// 負けるので、EnsureInitial 側で入れているかを見る。
+func TestMetaRepository_EnsureInitial_SetsFeedbackURL(t *testing.T) {
+	repo := NewMetaRepository(testDB)
+
+	testDB.Exec(`DELETE FROM "meta"`)
+	require.NoError(t, repo.EnsureInitial("m_ei_fb"))
+	defer testDB.Exec(`DELETE FROM "meta" WHERE id = ?`, "m_ei_fb")
+
+	got, err := repo.Fetch()
+	require.NoError(t, err)
+	require.NotNil(t, got.FeedbackURL, "feedbackUrl が NULL のままだとフィードバック導線が消える")
+	assert.Equal(t, defaultFeedbackURL, *got.FeedbackURL)
+}
+
+// Fetch は行が消えたときにも EnsureInitial を通るので、そちらの経路でも
+// 両方の既定値が入ること (#2700 の repositoryUrl 側と対称)。
+func TestMetaRepository_Fetch_RecreatesWithFeedbackURL(t *testing.T) {
+	repo := NewMetaRepository(testDB)
+
+	testDB.Exec(`DELETE FROM "meta"`)
+	defer testDB.Exec(`DELETE FROM "meta"`)
+
+	got, err := repo.Fetch()
+	require.NoError(t, err)
+	require.NotNil(t, got.FeedbackURL)
+	assert.Equal(t, defaultFeedbackURL, *got.FeedbackURL)
+}
+
 func TestMetaRepository_EnsureInitial_NoopWhenExists(t *testing.T) {
 	repo := NewMetaRepository(testDB)
 

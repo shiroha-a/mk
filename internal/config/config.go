@@ -50,6 +50,21 @@ var MkGoFrontendVersion = ""
 // 一本化する (#2700)。
 const MkGoRepositoryURL = "https://github.com/shiroha-a/mk"
 
+// MkGoFeedbackURL is the default destination of `meta.feedbackUrl`.
+//
+// **これは「ソフトウェアへのフィードバック先」** で、upstream が列 DEFAULT に
+// `.../misskey/issues/new` を置いているのと同じ位置づけ。「このサーバーへの
+// フィードバック」を受けたい operator は admin 画面の**ブランディング**で上書きする
+// (`repositoryUrl` は「全般 → 情報」だが、`feedbackUrl` の入力欄はそちらに無い、#2891)。
+//
+// **`internal/repository` からは参照されない** — あちらは config に依存しない方針なので
+// 値を持ち直しており、一致は `TestDefaultFeedbackURLMatchesConfig` が固定する。この定数は
+// その突き合わせ先として置いてある (未使用に見えても消さないこと)。
+//
+// **`/issues/new` の組み立ては GitHub / Codeberg 前提。** ホストを移すときは
+// `MkGoRepositoryURL` だけ変えても成立しない (GitLab 系は `/-/issues/new`)。
+const MkGoFeedbackURL = MkGoRepositoryURL + "/issues/new"
+
 // RedisOptions represents Redis connection configuration.
 type RedisOptions struct {
 	Host string `mapstructure:"host"`

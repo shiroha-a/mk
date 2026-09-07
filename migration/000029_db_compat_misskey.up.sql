@@ -133,8 +133,15 @@ ALTER TABLE "meta"
     ADD COLUMN IF NOT EXISTS "deliverSuspendedSoftware" jsonb NOT NULL DEFAULT '[]';
 
 -- --- 既存カラムのデフォルト値を本家に合わせる ---
--- 本家は repositoryUrl / feedbackUrl にハードコードデフォルトを持つ。新規
--- インストール時に本家と同じ挙動になるよう合わせておく。
+-- 本家は repositoryUrl / feedbackUrl にハードコードデフォルトを持つ。
+--
+-- **この列 DEFAULT は mk-go では一度も効いていない。** meta 行を作るのは GORM の
+-- `Create(&model.Meta{...})` (internal/repository/meta.go) で、`*string` の nil を
+-- **NULL として明示挿入する**ため、列 DEFAULT に落ちる経路が無い。新規インスタンスの
+-- 値は EnsureInitial 側で入れる (repositoryUrl は #2700、feedbackUrl は #2891)。
+--
+-- それでもここを残すのは **drop-in の復路で TypeORM が期待する DDL と一致させる**ため。
+-- TypeORM は未指定の列に `DEFAULT` キーワードを書くので、TS 側では実際に効く。
 ALTER TABLE "meta" ALTER COLUMN "repositoryUrl" SET DEFAULT 'https://github.com/misskey-dev/misskey';
 ALTER TABLE "meta" ALTER COLUMN "feedbackUrl" SET DEFAULT 'https://github.com/misskey-dev/misskey/issues/new';
 

@@ -71,9 +71,9 @@ id: aidx             # Misskey-TS側のID生成方式と一致させること
 
 ## 4. データベースマイグレーション
 
-mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは原則として保持される** (例外は `000081` と `000084`、後述)。`000082` も行を DELETE するが、対象は upstream Misskey に無い `transfer-ownership` が作った行だけで TS 由来のものは含まない。
+mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは原則として保持される** (例外は `000081` / `000084` / `000085`、後述)。`000082` も行を DELETE するが、対象は upstream Misskey に無い `transfer-ownership` が作った行だけで TS 由来のものは含まない。
 
-共有テーブルにも触るものが 12 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
+共有テーブルにも触るものが 13 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
 
 ```bash
 # ローカルビルドの場合
@@ -87,7 +87,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 
 ### 破壊的なマイグレーション
 
-「追加のみ」ではない。共有テーブルに触るものが 12 件ある。**うち 10 件は mk-go 側だけが作るもの (列 / FK / index / seed / 重複行 / 譲渡が残した membership) の除去、その初期化、または upstream 追随で、Misskey-TS が書いた列の値には影響しない。残る 2 件 (`000081` / `000084`) は TS が書いた値にも当たる。**
+「追加のみ」ではない。共有テーブルに触るものが 13 件ある。**うち 10 件は mk-go 側だけが作るもの (列 / FK / index / seed / 重複行 / 譲渡が残した membership) の除去、その初期化、または upstream 追随で、Misskey-TS が書いた列の値には影響しない。残る 3 件 (`000081` / `000084` / `000085`) は TS が書いた値にも当たる。**
 
 | migration | 内容 | 位置づけ |
 |---|---|---|
@@ -103,6 +103,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 | `000082` | owner が持つ `chat_room_membership` / `chat_room_invitation` を DELETE | **`transfer-ownership` だけが作れる行の除去** (#2858)。この endpoint は upstream Misskey に無い (出自は [乖離一覧](divergence.md))。upstream は owner に membership 行を作らず (`ChatService.ts` の `concat({userId: room.ownerId, isMuted: false})`)、owner 宛の招待も `createRoomInvitation` が弾くので TS 生まれの DB には存在しない |
 | `000083` | `IDX_note_userId` を DROP して `("userId","id" DESC)` の複合 index を作る | **upstream 追随であり、seed の実体が無かった穴を塞ぐもの。** 本家は 2025-04 の `1745378064470-composite-note-index.js` で同じ張り替えをしており、`000067` はその `CompositeNoteIndex1745378064470` を**適用済みとして seed していた**。しかし mk-go 側に index を作る migration が無かったため、TS へ復路で渡すと「適用済み」と誤認したまま index が存在しない状態になっていた。落とすのは mk-go 固有名の `IDX_note_userId` だけで、upstream 由来の index には触らない (`000068` と同じ方針)。作る側は upstream と同名なので TS 生まれの DB では `IF NOT EXISTS` で skip される |
 | `000084` | `meta."repositoryUrl"` の未設定行を mk-go のリポジトリで `UPDATE` | **TS が書いた列の値に当たる 2 つ目。** 対象は NULL と upstream の列 DEFAULT (`https://github.com/misskey-dev/misskey`) のままの行だけで、operator が設定した URL には触らない。下記参照 |
+| `000085` | `meta."feedbackUrl"` の未設定行を mk-go の issues で `UPDATE` | **TS が書いた列の値に当たる 3 つ目。** `000084` とまったく同じ構造で、`000029` が隣り合う 2 行で設定している列 DEFAULT のもう一方。対象は NULL と upstream の列 DEFAULT (`https://github.com/misskey-dev/misskey/issues/new`) のままの行だけ。下記参照 |
 
 #### `000081` について
 
@@ -152,9 +153,26 @@ TS 側は「Misskey を改変したバージョン」として mk-go のリポ�
 `down` は no-op なので自動では戻らない (up 後に operator が同じ値を明示設定した行と
 区別できないため)。
 
+#### `000085` について
+
+`000084` とまったく同じ構造。`000029` は `repositoryUrl` と **隣り合う 2 行**で
+`feedbackUrl` の列 DEFAULT も設定しているが、どちらも GORM の NULL 明示挿入に負ける。
+#2700 は前者だけを直したので、こちらは NULL のまま残っていた (#2891)。
+
+**影響は `/about` の導線だけではない。** `feedbackUrl` は nodeinfo の metadata にも
+載る (`internal/api/nodeinfo/handler.go`) ので、未設定だと他インスタンスや一覧サイトから
+見ても欠ける。実際に本番の nodeinfo は `feedbackUrl: null` だった。
+
+既定値は **mk-go の issues** (`https://github.com/shiroha-a/mk/issues/new`)。upstream が
+列 DEFAULT に Misskey 本体の issues を置いているのと同じ位置づけで、**「ソフトウェアへの
+フィードバック先」**にあたる。「このサーバーへのフィードバック」を受けたい operator は
+admin 画面 (全般 → 情報) で上書きする。
+
+対象・例外の扱い・`down` が no-op である理由はすべて `000084` と同じ。
+
 #### down が no-op のもの
 
-`000053` / `000056` / `000067` / `000068` / `000074` / `000081` / `000082` / `000084` の 8 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 7 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。`000084` は NULL だった `meta.repositoryUrl` を埋めるが、その後 operator が同じ値を明示設定した行と区別できないため戻せない。
+`000053` / `000056` / `000067` / `000068` / `000074` / `000081` / `000082` / `000084` / `000085` の 9 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 8 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。`000084` / `000085` は未設定だった `meta.repositoryUrl` / `meta.feedbackUrl` を埋めるが、その後 operator が同じ値を明示設定した行と区別できないため戻せない。
 
 #### mk-go 内での切り戻し
 
@@ -248,7 +266,7 @@ Misskey-TSに戻す場合の手順:
 
 データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
-ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 12 件は戻らない。うち 10 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。`000056` / `000081` / `000082` が消した行と `000053` / `000067` / `000084` が上書きした値は、down が no-op なので復元できない。**`000084` が書き換えるのは `meta."repositoryUrl"` なので、TS へ戻すときは admin 画面で設定し直すこと** (mk-go のリポジトリを案内したままになる)。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
+ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 13 件は戻らない。うち 10 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。`000056` / `000081` / `000082` が消した行と `000053` / `000067` / `000084` / `000085` が上書きした値は、down が no-op なので復元できない。**`000084` / `000085` が書き換えるのは `meta."repositoryUrl"` と `meta."feedbackUrl"` なので、TS へ戻すときは admin 画面で設定し直すこと** (mk-go のリポジトリと issues を案内したままになる)。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
 
 ## drop-in 互換性の現状 (2026-05-09 時点)
 
