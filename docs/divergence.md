@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.2a`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.3`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -36,7 +36,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 37 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.2a`) | — | — |
+| fork frontend の独自変更 | 38 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.3`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -77,6 +77,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `admin/queue/show-job` / `admin/queue/jobs` | `data` | mk-go は payload を `{"type": …, "body": <base64>}` で包んで保存するので、upstream のように Bull の `job.data` をそのまま返すと Data タブが base64 の塊になって読めない。**包みの形は保ったまま `body` だけ decode して返す** (#2689)。upstream の job data はそのまま読める形なので、この包みは mk-go 固有 |
 | `admin/queue/show-job` / `admin/queue/jobs` | `failedReason` / `returnValue` | **golden (upstream の宣言 schema) は required だが、upstream の実装自身が満たしていない。** Bull の job は失敗するまで `failedReason` を持たないので upstream の `packJobData` は `undefined` を返し、JSON からは消える。frontend は `v-if="job.failedReason != null"` / `job.returnValue != null` で出し分けるため、schema に寄せて空文字や `{}` を常に出すと**成功した job にも赤い警告アイコン付きの空の Failed reason 行と空の Return value タブ**が出る。upstream の**実装**に合わせて値が無ければ出さない (#2689)。golden は生成物なので直さず、テストは `shapetest.AssertExcept` で理由付きに例外化する |
 | `/api/meta` (+ SSR 埋め込み meta) | `mkGoVersion` | mk-go の実装バージョン。`version` は drop-in 互換のため**互換 Misskey バージョン**を返す契約 (第三者クライアントの feature detection / frontend `_error_.vue` の版ずれ検出が依存) なので別 field にした (#2274) |
+| `/api/meta` (+ SSR 埋め込み meta) | `mkGoCommit` / `mkGoFrontendVersion` | ビルドした revision (短縮ハッシュ) と、同梱した fork frontend の版 (`git describe --tags`、例 `2026.9.0-mk.3`)。`/about-mkgo` が「mk-go 1.3.0 (abc1234)」「Misskey 2026.9.0-mk.3」として出す (#2700)。**埋めるのはビルド側**で、`go run` や build-arg を渡さない `docker compose build` では空文字になる (キーは出す — 消すと「古い mk-go か埋め忘れか」を区別できない)。`.dockerignore` が `.git` を落とすので Dockerfile 内では git を呼べず、`make uds-build` / `make build` が値を渡す。**frontend を bind mount で差し替えた構成では `mkGoFrontendVersion` が実物とずれる** — 名乗っているのは「このバイナリをビルドしたときの submodule pin」で、`make uds-rebuild` のように両方を同時にビルドする経路でしか一致は保証されない |
 | `/api/meta` (+ SSR 埋め込み meta) | `approvalRequiredForSignup` | 承認制の登録 (#2554 / #2555) の有効/無効。登録ページが分岐に使うので公開する (`emailRequiredForSignup` と同じ扱い)。**`features` 側にも出す** — frontend は `features` を feature detection に使うため、片方だけだと検出できない。`admin/meta` にも出す (管理画面のトグルが読む) |
 | `/api/meta` (+ SSR 埋め込み meta) | `signupApplicationForm` | 承認制の申請フォームの定義 (#2570)。申請ページが描画に使うので公開する。項目は `{ label, type, required, maxLength }` の配列で、未設定なら空配列。**回答のラベルはここから埋める** — クライアントに送らせると申請者が審査画面に偽のラベルを流し込める |
 | `/api/meta` | `chunkedUpload` | 分割アップロード (#2313) の能力告知。`{ chunkSize }` を返す。**未対応構成 (オブジェクトストレージ未使用 / `meta.chunkedUploadEnabled=false`) では field ごと出さない**ので、純正 Misskey と同じく `undefined` になりクライアントは単発アップロードにフォールバックする |
@@ -346,7 +347,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` の 6 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.2a`。** tag 列は「その変更が最初に入った世代」で、下の
+**現在の pin は `2026.9.0-mk.3`。** tag 列は「その変更が最初に入った世代」で、下の
 表の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている。載せ替えで衝突したのは
 `packages/frontend/src/pages/admin/job-queue.vue` の 1 ファイルだけで、
@@ -394,6 +395,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.1` | 通報画面を 5W1H の定型フォームにする (#2879)。通報の宛先は `users/report-abuse` の `comment` という単一の文字列のままで、カテゴリ・該当 URL・発生日時・詳細・補足をクライアント側で 1 つの本文に組み立てる。モデレーターが初動を判断するのに足る情報を、報告者が書き漏らさない形で集めるのが狙い。**純正へ還元できる行にあたる** (純正 backend の変更を要さない) ので、`-mk.22h` / `-mk.22i` / `-mk.22j` と同じく upstream へ出せる。外部コントリビューターからの PR を、レビューで出た 4 点 (上限判定が恒真で自動収集した文脈が無言で消える / リモート利用者とリノート元の host が落ちて該当 URL・メンションが別人を指す / `where` が single-line `<input>` に改行入りで渡り URL が連結される / 上限テストの context がフィールド名を誤っていて狙った状況を再現していない) を直したうえで取り込んだ。**spec の置き場所** (`specs/upstream` → `specs/mkgo`) は fork ではなく mk 本体側の修正 |
 | `2026.9.0-mk.2` | 通報コメントのリノート元の作者も acct で組む (#2879)。`-mk.1` は該当 URL と対象ユーザーを直したが、リノート元に渡す作者名だけ `username` のままだった。コメントは `<Mfm>` でレンダーされるので、host を落とすと `@bob` が mention ノードになり**ローカルの別人へリンクする**。`-mk.1` と同じく**純正へ還元できる行** |
 | `2026.9.0-mk.2a` | バックグラウンド復帰時に WebSocket を張り直す (#2883)。モバイル PWA を復帰させると、OS がサスペンド中に TCP を切っているのにブラウザが `close` を配送せず `readyState` が `OPEN` のまま残る (zombie socket)。`reconnecting-websocket` は `close` / `error` を観測しないと再接続を始めないので**リトライが一度も走らない**。さらに `Stream.onClose` が動かないため `state` が `'connected'` のままで `_disconnected_` が出ず、`serverDisconnectedBehavior` のリロードもダイアログも `quiet` のバナーも**同時に沈黙する** (3 つとも同じイベント 1 本にぶら下がっている)。heartbeat (`'h'`) は生存確認にならない — サーバーは返事をせず (upstream の `Connection.ts` / `StreamingApiServerService.ts` は protocol ping/pong と `connect` の `pong` フラグしか持たず、mk-go の `HandleClientMessage` にも `h` の case が無い)、死んだソケットへの `send()` は例外を投げない。**ゾンビの検知はせず、20 秒以上隠れていたら生死を判定せず張り直す** — 正確な検知には app レベルのプローブとサーバー応答とタイムアウト調整が要り、応答しないサーバー向けのフォールバックまで要る。誤って生きた接続を張り直す代償は再ハンドシェイクと購読の再送だけで、UI にも出さない。**`reconnect()` は自分で `onClose()` を呼ぶ** — RWS の `reconnect()` が `close` を配送するのは `readyState` が `OPEN` のときだけで、`CLOSED` / ソケット未生成では黙って繋ぎ直し、直後の `_connect()` が `_removeListeners()` でキュー済みの `close` も捨てる。frozen なページでは「CLOSED だが close は未配送」が滞在中ずっと続くので、埋めないと接続だけ張り直って購読ゼロになる (= 直しに来た症状の再現)。**`Pool` の購読リセットは `_disconnected_` の購読ではなく `Stream` からの直接呼び出し** — 通知を抑止すると道連れでリセットが飛び、`connect()` が早期 return して購読が復活しないため。張り直せないまま 30 秒を過ぎたら通常の切断として通知する (黙ったままだと離席中にサーバーが落ちても無表示になる)。**純正へ還元できる行** (純正 backend の変更を要さない) |
+| `2026.9.0-mk.3` | `/about-mkgo` を新設し、ソースコードの案内をそこへ集約する (#2700)。実際に動いているのは mk-go なのに、説明・ソース案内・謝辞がすべて upstream Misskey のものだった。**体裁の話ではなく AGPL-3.0 section 13 の不備**で、新規インスタンスでは `/about-misskey` の「これは改変版です」節が「ソースコードはまだ提供されていません」の警告だけになる状態だった (`meta.repositoryUrl` が NULL のため `v-if` が falsy になり、**改変版の**リンクが 1 本も出ない。upstream Misskey 本体 / Crowdin / Patreon へのリンクはページ上部に出るので、ページ全体が空だったわけではない)。案内先が間違っているのではなく、**動いているコードに対応する案内が無い**。`MkSourceCodeAvailablePopup` がこのページへ誘導するので、ポップアップを追った利用者はその警告に行き着く。導線 3 箇所 (サイドバー / `/about` overview / ポップアップ) を `/about-mkgo` へ向け、`/about-misskey` は残して相互に行き来できるようにした。**`about-misskey.vue` は導線 1 ブロックしか触らない** — upstream が頻繁に更新するファイルなので、書き換えると追従のたびにコンフリクトを手で解くことになる。**純正へは還元できない行** (mk-go 固有の説明ページ) |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -421,6 +423,43 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 純正 Misskey には分割アップロードの backend が無いため `chunkedUpload` は常に `undefined` になり、従来の単発アップロードに倒れる。
 
 チャット / reversi の解禁 (`-mk.1`) はいずれも純正は backend が federation しない (`core/ChatService.ts` の remote 配送はコメントアウト) ため、純正へ PR しても意味がない。upstream 追従時は cherry-pick で持ち越す。
+
+`2026.9.0-mk.3` の内訳:
+
+| 箇所 | 変更 |
+|---|---|
+| `pages/about-mkgo.vue` | 新規。mk-go の説明・バックエンド / フロントエンドの版・ソースコードの案内 (**このサーバーが動かしているコード** / mk-go 本体 / フロントエンド / ライセンス) ・`/about-misskey` への導線・コントリビューター。**帰属の文章は置かない** — ソースコード欄が「フロントエンド (Misskey のフォーク)」を挙げており、AGPL が求める著作権表示は `LICENSE` と各ファイルの SPDX ヘッダーが担っている |
+| `pages/about-misskey.vue` | 冒頭に `/about-mkgo` への `FormLink` を 1 つ追加。**upstream のプロジェクトメンバー・スポンサー・パトロンは消さない** (ライセンス上必須なのは `LICENSE` と著作権表示であって謝辞一覧ではないが、upstream が明示的に管理しているものなので残す) |
+| `pages/about.overview.vue` | `/about-misskey` へのリンクを `/about-mkgo` に差し替え |
+| `ui/_common_/common.ts` | サイドバーの「Misskeyについて」を「mk-goについて」(`/about-mkgo`) に差し替え |
+| `components/MkSourceCodeAvailablePopup.vue` | AGPL の告知ポップアップの誘導先を `/about-mkgo` に差し替え |
+| `router.definition.ts` | `/about-mkgo` のルート追加。**これが無いとページは 404** |
+| `locales/ja-JP.yml` / `locales/en-US.yml` | `aboutMkGo` と `_aboutMkGo` (11 キー) |
+| `packages/i18n/src/autogen/locale.ts` | 生成物 (`pnpm --filter i18n generate`)。**`_abuseReportForm` の JSDoc も入る** — `2026.9.0-mk.1` が生成し直していなかった分で、次に誰がビルドしても出る差分 |
+
+**バージョンはバックエンドとフロントエンドを対で出す。** Go で書き直したのは
+バックエンドだけなので、`mk-go 1.3.0 (abc1234)` と `Misskey 2026.9.0-mk.3` が
+並ぶだけで構成が伝わる (それぞれ `mkGoCommit` / `mkGoFrontendVersion` を使う。
+§1-1b)。
+
+**ソースコードの案内は 3 つのリポジトリを並べる。** upstream の `about-misskey` が
+「このサーバーの改変版リポジトリ / Misskey 原典」の 2 段なのに対し、mk-go では
+「このサーバー (`instance.repositoryUrl`) / mk-go 本体 (サーバーサイド) /
+フロントエンド (`shiroha-a/misskey-ts`)」を出し、そのうえで Misskey 原典へ繋ぐ。
+
+- **1 つ目を省くと**、operator が mk-go をさらに改変した場合に AGPL 13 条の
+  案内先が間違ったものになる
+- **フロントエンドを省くと、いま表示されている画面のソースが案内から漏れる。**
+  Go で書き直したのは**サーバーサイドだけ**で、画面は Misskey のフロントエンドに
+  mk-go 向けの変更を載せたもの (この表の tag 一覧がその変更にあたる)。mk-go 本体の
+  submodule として辿れはするが、13 条が対象にするのは「動いているコード」全体なので
+  明示的に出す。ページ本文にも「フロントエンドは Misskey のものを利用している」旨を
+  書いてある
+
+**コントリビューターにアバター画像を出していない。** mk-go の CSP は
+`img-src 'self' data: blob:` なので、`avatars.githubusercontent.com` の画像は
+enforce 下で必ず落ちる (`about-misskey` のプロジェクトメンバー欄は実際に壊れた
+画像になっている)。名前だけならポリシーに触らず確実に表示できる。
 
 `2026.7.0-mk.3` の内訳:
 
@@ -729,6 +768,8 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
 | `admin/promo/create` | visibility check なし | public 以外を reject。**upstream にも mk-go にも promo の表示経路が無い**ので現時点では latent だが (#2781、`docs/api-compatibility.md` の「既知の制限」)、表示が入った瞬間に followers / specified / home note の本文が全 viewer に漏れる IDOR になる。**推測ではない** — upstream が 2022-09 に削除した `inject-promo.ts` は `Notes.findOneByOrFail({ id })` の結果を timeline へ `splice` するだけで、visibility を一切見ていなかった。create 段で先回りして塞いである |
+| `/api/meta` の `providesTarball` | `publishTarballInsteadOfProvideRepositoryUrl` の設定をそのまま返す。`ClientServerService` (`packages/backend/src/server/web/`) が `built/tarball` を `/tarball/` に静的配信するので、frontend の `/tarball/misskey-<version>.tar.gz` リンクは実在する | **常に false を返す** (`internal/config.Config.ProvidesTarball`、#2700)。mk-go に `/tarball/` を配信するルートが無いので、設定を通すと壊れたリンクを「ソースコード (Tarball)」として表示する。**404 にすらならない** — SPA の catchall (`GET /*`) が拾うので、`misskey-<version>.tar.gz` という名前の HTML が 200 で返る (実測)。AGPL 13 条の案内としては、壊れた tarball を掴ませるより `repositoryUrl` だけのほうが正しい。設定値そのものは読み、有効なときは `config.Load` の resolve で warn を出して無視していることを伝える。**frontend 側に tarball の分岐は 2 箇所ある** (`about-misskey.vue` / `about.overview.vue`)。`/tarball/` を実装するときは `ProvidesTarball()` を直すだけでは足りず、mk-go 独自の `about-mkgo.vue` にも分岐を足すことになる |
+| `meta.repositoryUrl` の既定値 | 列 DEFAULT の `https://github.com/misskey-dev/misskey` が入る。TypeORM は列を INSERT に含めたうえで**値として `DEFAULT` キーワードを書く** (`InsertQueryBuilder` の PostgreSQL 分岐。「未指定の列を含めない」わけではない) ので、列 DEFAULT が効く | **`https://github.com/shiroha-a/mk` を Go 側で入れる** (#2700)。列 DEFAULT (`migration/000029`) は upstream 互換のため据え置いてあるが、**GORM は `*string` の nil を NULL として明示挿入する**ので効かない。放置すると新規インスタンスは `repositoryUrl = NULL` になり、AGPL 13 条の案内が既定で存在しない状態になる。既存インスタンスは `migration/000084` が埋めるが、**対象は NULL と upstream の列 DEFAULT のままの行の両方**。後者は Misskey TS 生まれの DB (drop-in 移行) が必ず持つ値で、operator の申告ではないため、動いているのが mk-go である以上そのままでは「このサーバーのコード」として Misskey 本体を案内することになる。さらに frontend は `repositoryUrl !== 'https://github.com/misskey-dev/misskey'` で改変版の告知ポップアップを出すか決めるので、放置すると**告知そのものが出ない**。`about-mkgo.vue` 側も同じ値を「未設定」として扱う (migration 適用前や operator が明示設定した場合の保険)。**`feedbackUrl` は同じ理由で NULL のまま**で、こちらは直していない (`about.overview.vue` のフィードバック導線が出ない) |
 | `/embed/clips/:clip` | clip の存在だけを見る (非公開 clip も埋め込める) | `isPublic` も見る。埋め込みは無認証で誰でも読める経路なので、本人だけが見えるはずの clip を配らない (#2389) |
 | `federation/stats` の moderationNote | moderator には見せる | 公開 endpoint なので常に隠す |
 | moderator inactive 判定 | 空集合で登録を無効化しうる | lastActiveDate 保持者 0 人なら何もしない |

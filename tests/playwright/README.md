@@ -135,7 +135,7 @@ tests/playwright/
 
 ## 並列度
 
-**1 スタックに対しては直列で回すしかない** (`workers: 1`)。294 spec のうち 174 が
+**1 スタックに対しては直列で回すしかない** (`workers: 1`)。295 spec のうち 174 が
 共有の root (alice) でサインインし、instance meta は全 spec が共有する。Playwright は
 ファイル単位で並列化するので、`workers` を上げると `profile_iscat_toggle` と
 `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と

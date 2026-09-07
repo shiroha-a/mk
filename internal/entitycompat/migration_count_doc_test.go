@@ -32,7 +32,7 @@ import (
 //     `000077` が `DROP` も持つため)。どちらを truth にするか決められない
 //   - 「102」(`docs/api-compatibility.md`) — 112 から「上記 9 件」と
 //     `schema_migrations` を引いた数で、9 件の定義に依存する
-//   - 「データを不可逆に変えるのはこのうち 6 本」(no-op down の一覧と同じ文) —
+//   - 「データを不可逆に変えるのはこのうち 7 本」(no-op down の一覧と同じ文) —
 //     「不可逆に変えるか」は機械判定できない。**no-op down を 1 本足すと
 //     一覧と「7 本」は gate が要求するが、この「6 本」だけ古いまま残る**
 
@@ -185,6 +185,46 @@ func createdTableNames(t *testing.T) []string {
 	return out
 }
 
+// tsAffectingDestructivePattern captures the enumerated migrations that touch
+// values written by Misskey TS, and the count stated alongside them.
+var tsAffectingDestructivePattern = regexp.MustCompile("残る (\\d+) 件 \\(((?:`\\d{6}`(?: / )?)+)\\) は TS が書いた値にも当たる")
+
+// tsAffectingDestructiveMigrations returns the migrations that the 破壊的な
+// マイグレーション section declares as touching values Misskey TS wrote.
+//
+// **doc 自身の一覧を truth にする。** 「TS が書いた値に当たるか」は SQL からは
+// 機械判定できない (`000081` は条件付きの DELETE、`000084` は入っている値が列
+// DEFAULT のままかどうかで意味が変わる)。一覧は 1 行に列挙されているので拾える。
+//
+// これがあることで「うち N 件は mk-go 側だけが作るもの」を offset ではなく
+// **引き算の結果**として検証できる。#2700 で 2 件目 (`000084`) が出たときに
+// offset `-1` を `-2` へ動かす誘惑があったが、それは「正しい数字を書いた人に
+// 誤った数字へ直させる」方向に効くので、数え方のほうを直した。
+func tsAffectingDestructiveMigrations(t *testing.T) []string {
+	t.Helper()
+	body, err := os.ReadFile(filepath.Join(repoRoot(t), "docs/migration-from-ts.md"))
+	require.NoError(t, err)
+
+	m := tsAffectingDestructivePattern.FindSubmatch(body)
+	require.NotNil(t, m, "docs/migration-from-ts.md で TS が書いた値に当たる migration の一覧が拾えない。"+
+		"**書式を変えたならこの gate の正規表現も直すこと** — 拾えないまま放置すると、"+
+		"「うち N 件は mk-go 側だけが作るもの」が検査されないまま緑になる")
+
+	listed := regexp.MustCompile(`\d{6}`).FindAllString(string(m[2]), -1)
+	stated, err := strconv.Atoi(string(m[1]))
+	require.NoError(t, err)
+	require.Equal(t, stated, len(listed),
+		"「残る N 件」の N と列挙された migration の数が食い違っている")
+
+	rows := destructiveMigrationRows(t)
+	for _, num := range listed {
+		require.Contains(t, rows, num,
+			"TS が書いた値に当たるとされている %s が破壊的なマイグレーションの表に無い", num)
+	}
+	sort.Strings(listed)
+	return listed
+}
+
 // migrationCountClaims lists every place that restates a mechanically countable
 // migration fact.
 //
@@ -192,10 +232,11 @@ func createdTableNames(t *testing.T) []string {
 // **拾えなかったら落とす**ので、書式を変えたときに「検査していないのに緑」には
 // ならない。
 //
-// offset は truth からの差分。`-1` は「うち mk-go 由来のもの」= 破壊的な
-// マイグレーションのうち **TS が書いた行に触りうる 000081 の 1 件**を引いたもの。
-// **2 件目が出たらこの定数を動かすのではなく、数え方を直すこと** — offset の
-// ままだと、正しい数字を書いた人に誤った数字へ直させる方向に効く。
+// offset は truth からの差分。**「うち mk-go 由来のもの」に offset は使わない** —
+// かつては `-1` (TS が書いた行に触りうる `000081` の 1 件を引く) だったが、#2700 で
+// 2 件目 (`000084`) が出た。定数を動かすと、正しい数字を書いた人に誤った数字へ
+// 直させる方向に効くので、`destructive_mkgo` という fact を作って
+// 「表の行数 - doc が列挙する TS 由来の件数」で導くようにしてある。
 var migrationCountClaims = []struct {
 	file    string
 	pattern string
@@ -210,15 +251,15 @@ var migrationCountClaims = []struct {
 
 	{"docs/migration-from-ts.md", `共有テーブルにも触るものが (\d+) 件あるので`, "destructive", 0, "破壊的なマイグレーションの件数 (導入部)"},
 	{"docs/migration-from-ts.md", `共有テーブルに触るものが (\d+) 件ある`, "destructive", 0, "破壊的なマイグレーションの件数 (本文)"},
-	{"docs/migration-from-ts.md", `\*\*うち (\d+) 件は mk-go 側だけが作るもの`, "destructive", -1, "破壊的なうち mk-go 由来のもの"},
+	{"docs/migration-from-ts.md", `\*\*うち (\d+) 件は mk-go 側だけが作るもの`, "destructive_mkgo", 0, "破壊的なうち mk-go 由来のもの"},
 	{"docs/migration-from-ts.md", `破壊的なマイグレーション\]\(#破壊的なマイグレーション\) の (\d+) 件は戻らない`, "destructive", 0, "破壊的なマイグレーションの件数 (切り戻し節)"},
-	{"docs/migration-from-ts.md", `うち (\d+) 件は mk-go が自分で作ったものの除去`, "destructive", -1, "破壊的なうち mk-go 由来のもの"},
+	{"docs/migration-from-ts.md", `うち (\d+) 件は mk-go が自分で作ったものの除去`, "destructive_mkgo", 0, "破壊的なうち mk-go 由来のもの"},
 	{"docs/architecture.md", `例外が (\d+) 件あり`, "destructive", 0, "破壊的なマイグレーションの件数"},
-	{"docs/architecture.md", `うち (\d+) 件は mk-go が自分で作ったものの除去`, "destructive", -1, "破壊的なうち mk-go 由来のもの"},
+	{"docs/architecture.md", `うち (\d+) 件は mk-go が自分で作ったものの除去`, "destructive_mkgo", 0, "破壊的なうち mk-go 由来のもの"},
 	{"docs/deployment.md", `原則追加のみだが、例外が (\d+) 件ある`, "destructive", 0, "破壊的なマイグレーションの件数"},
 	{"docs/api-compatibility.md", `原則追加のみだが、例外が (\d+) 件ある`, "destructive", 0, "破壊的なマイグレーションの件数"},
 	{"docker-compose.dropin.mk.yml", `原則追加のみ。例外は (\d+) 件`, "destructive", 0, "破壊的なマイグレーションの件数"},
-	{"docker-compose.dropin.mk.yml", `うち (\d+) 件は mk-go が自分で作ったものの除去`, "destructive", -1, "破壊的なうち mk-go 由来のもの"},
+	{"docker-compose.dropin.mk.yml", `うち (\d+) 件は mk-go が自分で作ったものの除去`, "destructive_mkgo", 0, "破壊的なうち mk-go 由来のもの"},
 
 	{"docs/architecture.md", `宣言があるのは (\d+) 本だけ`, "dataloss", 0, "`-- data loss:` 宣言のある down"},
 	{"docs/migration-from-ts.md", `あるのは (\d+) 本だけで`, "dataloss", 0, "`-- data loss:` 宣言のある down"},
@@ -236,8 +277,10 @@ func TestMigrationCountsInDocsMatchReality(t *testing.T) {
 	facts := map[string]int{
 		"total":       len(migrationUpFiles(t)),
 		"destructive": len(destructiveMigrationRows(t)),
-		"dataloss":    len(dataLossDeclaredDowns(t)),
-		"tables":      len(createdTableNames(t)),
+		// 表の行数から、doc 自身が「TS が書いた値にも当たる」と列挙している分を引く。
+		"destructive_mkgo": len(destructiveMigrationRows(t)) - len(tsAffectingDestructiveMigrations(t)),
+		"dataloss":         len(dataLossDeclaredDowns(t)),
+		"tables":           len(createdTableNames(t)),
 	}
 	root := repoRoot(t)
 	bodies := map[string][]byte{}

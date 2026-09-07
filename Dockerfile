@@ -57,14 +57,23 @@ RUN test -f third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji
 # videoThumbnailGenerator API) への HTTP/UDS 呼び出しで実現するので、ここに
 # ffmpeg バイナリを同梱する必要は無い (#637 M2)。
 #
+# ビルドした revision と同梱 frontend の版を埋め込む (#2700)。**Dockerfile の
+# 中では git を呼べない** — `.dockerignore` が `.git` を落とすのでコンテキストに
+# リポジトリが入らない。渡し忘れたときは空のまま埋まり、/about-mkgo 側が
+# 「不明」として表示を省く。
+#
 # plugins/ に置かれたプラグインをビルドに取り込む (#2480)。生成物は gitignore
 # されているので、ここで生成しないと **image だけプラグイン無しになる** (手元で
 # make plugins を実行済みなら COPY で入るが、それに依存すると再現性が無い)。
 # プラグインが 1 つも無ければ何も生成せず、素の go build と同じになる。
+ARG MKGO_COMMIT=
+ARG MKGO_FRONTEND_VERSION=
+ENV REVISION_LDFLAGS="-X github.com/shiroha-a/mk/internal/config.MkGoCommit=${MKGO_COMMIT} -X github.com/shiroha-a/mk/internal/config.MkGoFrontendVersion=${MKGO_FRONTEND_VERSION}"
+
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     GOWORK=off go run ./tools/pluginbuild && \
-    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/misskey ./cmd/misskey && \
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w $REVISION_LDFLAGS" -o /app/built/misskey ./cmd/misskey && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-remote-host ./cmd/backfill-remote-host
 

@@ -71,9 +71,9 @@ id: aidx             # Misskey-TS側のID生成方式と一致させること
 
 ## 4. データベースマイグレーション
 
-mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは原則として保持される** (例外は `000081`、後述)。`000082` も行を DELETE するが、対象は upstream Misskey に無い `transfer-ownership` が作った行だけで TS 由来のものは含まない。
+mk-goの追加テーブルを作り、共有テーブルを upstream の形に揃える。**Misskey-TSが書いたデータは原則として保持される** (例外は `000081` と `000084`、後述)。`000082` も行を DELETE するが、対象は upstream Misskey に無い `transfer-ownership` が作った行だけで TS 由来のものは含まない。
 
-共有テーブルにも触るものが 11 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
+共有テーブルにも触るものが 12 件あるので、内容と復路への影響を[破壊的なマイグレーション](#破壊的なマイグレーション)にまとめてある。**先に読むこと。**
 
 ```bash
 # ローカルビルドの場合
@@ -87,7 +87,7 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 
 ### 破壊的なマイグレーション
 
-「追加のみ」ではない。共有テーブルに触るものが 11 件ある。**うち 10 件は mk-go 側だけが作るもの (列 / FK / index / seed / 重複行 / 譲渡が残した membership) の除去、その初期化、または upstream 追随で、Misskey-TS が書いた列の値には影響しない。**
+「追加のみ」ではない。共有テーブルに触るものが 12 件ある。**うち 10 件は mk-go 側だけが作るもの (列 / FK / index / seed / 重複行 / 譲渡が残した membership) の除去、その初期化、または upstream 追随で、Misskey-TS が書いた列の値には影響しない。残る 2 件 (`000081` / `000084`) は TS が書いた値にも当たる。**
 
 | migration | 内容 | 位置づけ |
 |---|---|---|
@@ -99,9 +99,10 @@ docker compose exec app /app/migrate -config .config/default.yml -direction up
 | `000067` | `migrations` の seed 行を DELETE + 正式名へ `UPDATE` + 未 seed 分を `INSERT` | **`000029` が seed した mk-go 由来の行を直すもの** (#2244)。TypeORM は `name` 列の文字列一致で未実行判定するので、短縮形のままだと TS 復帰時に本家 migration が再実行される |
 | `000068` | 冗長な index を DROP | **落とすのは mk-go の migration が作った index だけ**。upstream 由来の index は絶対に触らない (触ると本家が再作成できず復路が壊れるため) |
 | `000080` | `note` の自己参照 FK (`renoteId` / `replyId`) を DROP | **upstream 追随。** 本家も 2025.8.0 の `1753868431598-remove_note_constraints.js` でこの 2 本を削除しており、現在の `MiNote` は `createForeignKeyConstraints: false` で FK を作らない |
-| `000081` | 孤児化した `note` 行を DELETE + 痕跡列を NULL 化 | **TS が書いた行が対象になりうる唯一のもの。** 下記参照 |
+| `000081` | 孤児化した `note` 行を DELETE + 痕跡列を NULL 化 | **TS が書いた行が対象になりうる 1 つ目。** 下記参照 |
 | `000082` | owner が持つ `chat_room_membership` / `chat_room_invitation` を DELETE | **`transfer-ownership` だけが作れる行の除去** (#2858)。この endpoint は upstream Misskey に無い (出自は [乖離一覧](divergence.md))。upstream は owner に membership 行を作らず (`ChatService.ts` の `concat({userId: room.ownerId, isMuted: false})`)、owner 宛の招待も `createRoomInvitation` が弾くので TS 生まれの DB には存在しない |
 | `000083` | `IDX_note_userId` を DROP して `("userId","id" DESC)` の複合 index を作る | **upstream 追随であり、seed の実体が無かった穴を塞ぐもの。** 本家は 2025-04 の `1745378064470-composite-note-index.js` で同じ張り替えをしており、`000067` はその `CompositeNoteIndex1745378064470` を**適用済みとして seed していた**。しかし mk-go 側に index を作る migration が無かったため、TS へ復路で渡すと「適用済み」と誤認したまま index が存在しない状態になっていた。落とすのは mk-go 固有名の `IDX_note_userId` だけで、upstream 由来の index には触らない (`000068` と同じ方針)。作る側は upstream と同名なので TS 生まれの DB では `IF NOT EXISTS` で skip される |
+| `000084` | `meta."repositoryUrl"` の未設定行を mk-go のリポジトリで `UPDATE` | **TS が書いた列の値に当たる 2 つ目。** 対象は NULL と upstream の列 DEFAULT (`https://github.com/misskey-dev/misskey`) のままの行だけで、operator が設定した URL には触らない。下記参照 |
 
 #### `000081` について
 
@@ -121,9 +122,39 @@ DELETE の対象はこの残骸で、条件は
 
 **down は `SELECT 1;` (no-op) で戻せない。** 削除した行の内容も、NULL 化する前の値も保存していないため。適用前にバックアップを取ること。
 
+#### `000084` について
+
+`meta."repositoryUrl"` が「未設定」のままだと、frontend の `/about-mkgo` と
+`MkSourceCodeAvailablePopup` がソースコードの案内を出せない。AGPL-3.0 section 13 が
+求める案内が既定で存在しない状態なので埋める (#2700)。
+
+**未設定は 2 通りある。**
+
+- `NULL` — mk-go 生まれの DB。`000029` が列 DEFAULT を upstream 互換の
+  `https://github.com/misskey-dev/misskey` に設定しているが、meta 行を作るのは GORM の
+  `Create(&model.Meta{...})` で、`*string` の nil を **NULL として明示挿入する**ため
+  列 DEFAULT が効かない (新規行は `internal/repository/meta.go` の `EnsureInitial` 側で
+  入れるようにしたので、この migration の対象は既存行だけ)
+- `https://github.com/misskey-dev/misskey` — **Misskey TS 生まれの DB**。TypeORM は
+  未指定の列に `DEFAULT` を書くので、TS が作った meta 行は必ずこの値を持つ。operator の
+  申告ではなく列 DEFAULT の値であり、動いているのが mk-go である以上「このサーバーの
+  コード」として Misskey 本体を案内するのは誤りになる。さらに frontend は
+  `repositoryUrl !== 'https://github.com/misskey-dev/misskey'` で改変版の告知ポップアップを
+  出すか決めるので、この値のままだと**告知そのものが出ない**
+
+**operator が意図的に空にした行も埋まる。** `admin/update-meta` は妥当な絶対 URL で
+なければ NULL を書く (upstream の `URL.canParse` と同じ) ので、「フィールドを空にする」
+操作の結果は 1 つ目と区別できない。AGPL 13 条の観点では案内が無い状態のほうが問題なので
+埋める側に倒してある。別の URL を出したい operator は admin 画面で設定し直せる。
+
+**復路 (TS へ戻す) では operator が設定し直すこと。** mk-go が入れた値が残っていると、
+TS 側は「Misskey を改変したバージョン」として mk-go のリポジトリを案内し続ける。
+`down` は no-op なので自動では戻らない (up 後に operator が同じ値を明示設定した行と
+区別できないため)。
+
 #### down が no-op のもの
 
-`000053` / `000056` / `000067` / `000068` / `000074` / `000081` / `000082` の 7 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 6 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。
+`000053` / `000056` / `000067` / `000068` / `000074` / `000081` / `000082` / `000084` の 8 本は down が `SELECT 1;` で、up を巻き戻せない。**データを不可逆に変えるのはこのうち 7 本**で、変えないのは index を落とすだけの `000068` だけ。`000074` は backfill で入れた行とその後の実観測で入った行を区別できないので、消すと連合中に蓄積した観測まで巻き添えになる。`000084` は NULL だった `meta.repositoryUrl` を埋めるが、その後 operator が同じ値を明示設定した行と区別できないため戻せない。
 
 #### mk-go 内での切り戻し
 
@@ -217,11 +248,11 @@ Misskey-TSに戻す場合の手順:
 
 データベースは双方向に互換性があり、mk-goが追加したテーブルはMisskey-TSからは無視される。
 
-ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 11 件は戻らない。うち 10 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。`000056` / `000081` / `000082` が消した行と `000053` / `000067` が上書きした値は、down が no-op なので復元できない。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
+ただし [破壊的なマイグレーション](#破壊的なマイグレーション) の 12 件は戻らない。うち 10 件は mk-go が自分で作ったものの除去・初期化か upstream 追随なので**戻す必要が無い**。`000056` / `000081` / `000082` が消した行と `000053` / `000067` / `000084` が上書きした値は、down が no-op なので復元できない。**`000084` が書き換えるのは `meta."repositoryUrl"` なので、TS へ戻すときは admin 画面で設定し直すこと** (mk-go のリポジトリを案内したままになる)。この経路を CI で検証しているのは `make dropin-swap-test` (TS → mk-go → TS) で、`make dropin-mkgo-born-test` は逆に mk-go 生まれの DB を TS に引き渡せるかを見ている。
 
 ## drop-in 互換性の現状 (2026-05-09 時点)
 
-Playwright spec (#744) を **294 ファイル / 40 directory** (directory は spec を直接含むもの。`find tests/playwright/specs -name '*.spec.ts' -printf '%h\n' | sort -u | wc -l`) に育て、PR ごとに mk-go backend
+Playwright spec (#744) を **295 ファイル / 40 directory** (directory は spec を直接含むもの。`find tests/playwright/specs -name '*.spec.ts' -printf '%h\n' | sort -u | wc -l`) に育て、PR ごとに mk-go backend
 へ投げている。Misskey TS backend に対しては upstream 追従のタイミングで回し、spec の
 期待値が mk-go の挙動に引きずられていないかを検証する。発見した drop-in 互換 drift は
 40+ 件すべて解消済 (詳細: [api-compatibility.md](api-compatibility.md))。

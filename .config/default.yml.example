@@ -16,10 +16,19 @@
 # to this license. Please see the upstream Misskey example.yml for
 # the full explanation of license compliance options.
 #
-# If you have made changes to the source code (forks included)
-# and publish a Git repository, set the repository URL via the
-# admin settings page. Otherwise, uncomment the following line so
-# the source tarball is published from /api/meta:
+# If you have made changes to the source code (forks included),
+# publish a Git repository and set its URL from the admin control
+# panel (/admin/settings -> General -> Info -> Repository URL).
+# Fresh installs start with the mk-go repository so the notice is
+# never empty.
+#
+# **mk-go does not serve /tarball/**, so the option below has no
+# effect: /api/meta always reports providesTarball=false and the
+# server logs a warning at startup when it is enabled. Upstream
+# Misskey serves built/tarball at /tarball/; mk-go has no such route,
+# and the SPA catchall would answer such a link with HTML at 200 --
+# i.e. a download named misskey-<version>.tar.gz that is not an
+# archive at all (#2700).
 #
 # publishTarballInsteadOfProvideRepositoryUrl: true
 

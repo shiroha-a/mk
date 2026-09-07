@@ -1,7 +1,7 @@
 # Playwright e2e
 
 mk-go のフロントエンド / API を実ブラウザから検証する e2e。spec は
-`tests/playwright/specs/` にあり、現在 294 ファイル
+`tests/playwright/specs/` にあり、現在 295 ファイル
 (`npx playwright test --list` で数えられる)。
 
 Cypress からの移行完了に伴い、frontend e2e はこちらに一本化した (#2437)。本家も
@@ -46,7 +46,7 @@ bump したときに回す (`docs/upstream-catch-up.md`)。
 **4 シャード並列** (`--shard=i/4`、`fail-fast: false`)。check 名は
 `spec (mk-go 1/4)` 〜 `4/4`。
 
-**1 スタックあたりは直列でしか回せない。** 294 spec のうち 174 が共有の root (alice) で
+**1 スタックあたりは直列でしか回せない。** 295 spec のうち 174 が共有の root (alice) で
 サインインし、instance meta は全 spec が共有する。Playwright はファイル単位で並列化する
 ので `workers` を上げると `profile_iscat_toggle` と `profile_isbot_toggle` が同じ
 アカウントを、`admin_branding_save` と `about_page_render` が同じ meta を取り合う。
@@ -128,18 +128,25 @@ $L 2>&1 | grep msg=csp-report | grep -oE 'documentUri=\S+' | sort | uniq -c
 `third_party/misskey/packages/frontend/src/pages/about-misskey.vue` の外部 `<img>`
 の枚数と一致する (contributor 6 + sponsors 6 + patron 50)。`loading="lazy"` も
 `v-if` も折りたたみも無いので、ページを開いた時点で全部読まれる。上の 124 件は
-spec が `/about-misskey` を 2 回開くため。
+spec が `/about-misskey` を 2 回開いた時点の実測で、**#2700 の
+`specs/mkgo/ui/about_mkgo.spec.ts` が 2 回開くようになったので現在は 4 回**
+(件数は 248 前後になる)。**開く回数を変えたらこの数も動く** — 内訳の妥当性は
+「62 × 開いた回数」で確かめること。
 
 **CSP は緩めない。** `img-src 'self' data: blob:` はリモート画像を media proxy 経由に
 する設計と対で、外部 origin を許すと投稿経由でトラッキング画像を読ませる経路が開く。
-`/about-misskey` は upstream 由来のクレジットページで #2700 の作り直し対象なので、
-外部画像はそちらで解消する。
 
 **本番では既にこのページの外部画像が出ていない** (同一オリジンの
 `/client-assets/about-icon.png` などは出る)**。** `deploy/uds/config/default.yml` は
 `frontendContentSecurityPolicy: enforce` を持つ (`off` は `internal/config` の
-既定値であって本番設定ではない)。将来の注意点ではなく、**現行の既知の不具合**として
-#2700 まで残る。
+既定値であって本番設定ではない)。
+
+**これは恒久的な既知状態**として残る。#2700 が `/about-mkgo` を作ったときに
+`about-misskey.vue` を作り直す案もあったが、**upstream のプロジェクトメンバー・
+スポンサー・パトロンは消さない**方針を採った (upstream が頻繁に更新するファイルなので、
+書き換えると追従のたびにコンフリクトを手で解くことになる。[乖離一覧](divergence.md) の
+`2026.9.0-mk.3` の行)。したがって外部画像は残り、違反も出続ける。mk-go 独自の
+`/about-mkgo` は同じ理由でコントリビューターをテキストリンクだけにしてある。
 
 ### embed も enforce の対象
 

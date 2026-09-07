@@ -26,7 +26,9 @@ const defaultThemeColor = "#86b300"
 // nodeinfo software block. Upstream advertises homepage/repository in the same
 // object (2.0: homepage only; 2.1: homepage=repository=repositoryUrl); mk-go has
 // no separate hub, so both point at the repository (#1925)。
-const softwareRepository = "https://github.com/shiroha-a/mk"
+//
+// meta.repositoryUrl の既定値と同じ値なので config 側の定数を参照する (#2700)。
+const softwareRepository = config.MkGoRepositoryURL
 
 // Handler handles nodeinfo endpoints.
 type Handler struct {

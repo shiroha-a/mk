@@ -334,7 +334,7 @@ wire 互換を機械的に守る多層防御。upstream は **official `misskey/
 | drift detector | CanSeeNote ↔ SQL push-down 等のロジック整合検出 | shape-drift.md |
 | 値レベル diff harness | TS インスタンス ↔ mk-go の応答を値単位で diff（`make diff-test`） | diff-e2e.md |
 | drop-in e2e | 実 Misskey TS ↔ mk-go 切替の連合/フロント互換（PR ごと。frontend e2e のみ nightly） | dropin-e2e.md / dropin-frontend-e2e.md |
-| playwright | 294 spec を mk-go backend で（PR ごと、4 シャード）。TS backend は手動 | — |
+| playwright | 295 spec を mk-go backend で（PR ごと、4 シャード）。TS backend は手動 | — |
 | inbound/outbound 連合 | Fedibird-like mock との Ed25519 双方向 verify | federation.md |
 
 CI（`ci.yml`）は build / 4-shard test（パッケージ毎 90% カバレッジ強制）/ lint を必須化。
@@ -364,9 +364,9 @@ upstream に無い、または cherrypick 由来の加算機能（wire 互換を
 
 `MK_` プレフィックスの環境変数でオーバーライド可（例 `MK_DB_HOST`）。詳細は [configuration.md](configuration.md)。
 
-マイグレーション（`migration/`、golang-migrate、現在 83 本）:
+マイグレーション（`migration/`、golang-migrate、現在 84 本）:
 
-- TS Misskey の既存テーブルへは原則**追加のみ**。例外が 11 件あり、うち 10 件は mk-go が自分で作ったものの除去・初期化か upstream 追随 ([TS版からの移行](migration-from-ts.md#破壊的なマイグレーション))。Go 固有の追加列・テーブルは `IF NOT EXISTS`。
+- TS Misskey の既存テーブルへは原則**追加のみ**。例外が 12 件あり、うち 10 件は mk-go が自分で作ったものの除去・初期化か upstream 追随 ([TS版からの移行](migration-from-ts.md#破壊的なマイグレーション))。Go 固有の追加列・テーブルは `IF NOT EXISTS`。
 - drop-in テストで発見した補完列は専用マイグレーションで追加。
 - down スクリプトは必須（data loss する場合は `-- data loss:` で明記する）。**ただしこれは今後の規約で、既存の down は守れていない** — 宣言があるのは 8 本だけで、宣言が無いまま `DROP TABLE` / `DROP COLUMN` する down が 51 本ある（[migration-from-ts.md](migration-from-ts.md#mk-go-内での切り戻し)）。
 

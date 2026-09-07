@@ -18,6 +18,13 @@
 # to this license. See the upstream Misskey example.yml for the full
 # explanation of license compliance options.
 #
+# Set the repository URL from the admin settings page if you run a
+# modified build. **mk-go does not serve /tarball/**, so the option
+# below has no effect (/api/meta always reports providesTarball=false
+# and a warning is logged at startup when it is enabled). A link to
+# /tarball/ would not even 404 here -- the SPA catchall answers it
+# with HTML at 200 (#2700).
+#
 # publishTarballInsteadOfProvideRepositoryUrl: true
 
 #   ┌────────────────────────┐

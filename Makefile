@@ -227,6 +227,19 @@ ifneq ($(MISSKEY_VERSION),)
 LDFLAGS += -X github.com/shiroha-a/mk/internal/config.MisskeyVersion=$(MISSKEY_VERSION)
 endif
 
+# ビルドした revision と同梱 frontend の版。/about-mkgo が
+# 「mk-go 1.3.0 (abc1234)」「Misskey 2026.9.0-mk.3」として出す (#2700)。
+#
+# **`$(shell ...)` は使わない。** make の parse 時に必ず走るので、target と
+# 無関係な `make help` でも git を呼ぶことになるうえ、`gaterun-check` が
+# 「この Makefile に `$(shell …)` が無いので `make -pn` に副作用が無い」という
+# 前提で回っている (CLAUDE.md 2026-09-06)。recipe 内の `$$(...)` なら展開は
+# 実行時だけで、`make -n` では表示されるだけになる。
+#
+# git が無い / リポジトリ外でビルドした場合は空のまま。読む側が「不明」として
+# 扱うので、ここで `unknown` のような値を作らない (表示に出てしまう)。
+REVISION_LDFLAGS = -X github.com/shiroha-a/mk/internal/config.MkGoCommit=$$(git rev-parse --short HEAD 2>/dev/null) -X github.com/shiroha-a/mk/internal/config.MkGoFrontendVersion=$$(git -C third_party/misskey describe --tags 2>/dev/null)
+
 ##@ 開発
 plugins: ## plugins/ を走査して組み込み用ファイルを生成 (#2480)
 	GOWORK=off go run ./tools/pluginbuild
@@ -247,7 +260,7 @@ plugin-dev: ## プラグインを編集しながら動かす (PLUGIN=plugins/sta
 	GOWORK=off go run ./tools/plugindev $(if $(PLUGIN),-plugin $(PLUGIN),)
 
 build: plugins ## バイナリを ./built/misskey に生成
-	go build $(GOFLAGS) -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/misskey
+	go build $(GOFLAGS) -ldflags "$(LDFLAGS) $(REVISION_LDFLAGS)" -o $(BUILD_DIR)/$(BINARY) ./cmd/misskey
 
 run: build ## build して起動
 	$(BUILD_DIR)/$(BINARY) -config .config/default.yml
@@ -556,7 +569,11 @@ uds-init: | $(UDS_COMPOSE) $(UDS_CONFIG) ## UDS 構成を初期化
 # 既存 e2e-frontend-build のエイリアス (成果物先が同じなので共有して OK)。
 uds-frontend-build: e2e-frontend-build ## 本番向けフロントエンドをビルド (本番の配信物を差し替える)
 
+# revision は build-arg で渡す。**Dockerfile の中では git を呼べない** —
+# `.dockerignore` が `.git` を落とすので、コンテキストにリポジトリが入らない。
 uds-build: | $(UDS_COMPOSE) $(UDS_CONFIG) ## UDS スタックのイメージをビルド
+	MKGO_COMMIT=$$(git rev-parse --short HEAD 2>/dev/null) \
+	MKGO_FRONTEND_VERSION=$$(git -C third_party/misskey describe --tags 2>/dev/null) \
 	docker compose -f $(UDS_COMPOSE) build
 
 uds-up: | $(UDS_COMPOSE) $(UDS_CONFIG) ## UDS スタックを起動

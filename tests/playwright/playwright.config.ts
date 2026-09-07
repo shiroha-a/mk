@@ -62,7 +62,7 @@ export default defineConfig({
     // i18n key 解決に使うので、これで全 spec の text 前提が安定する。
     locale: 'en-US',
   },
-  // **1 スタックに対しては直列で回すしかない。** 294 spec のうち 174 が共有の
+  // **1 スタックに対しては直列で回すしかない。** 295 spec のうち 174 が共有の
   // root (alice) でサインインし、instance meta は全 spec が共有する。Playwright は
   // ファイル単位で並列化するので、workers を上げると `profile_iscat_toggle` と
   // `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と

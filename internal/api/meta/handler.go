@@ -158,7 +158,14 @@ func (h *Handler) buildMeta(detail bool) (map[string]any, error) {
 		// (第三者クライアントの feature detection と、frontend の
 		// `_error_.vue` が build 定数と比較する版ずれ検出がこれに依存する)
 		// ので、実際に動いている実装の版は別 field で出す。
-		"mkGoVersion":            config.MkGoVersion,
+		"mkGoVersion": config.MkGoVersion,
+		// ビルドした revision と同梱 frontend の版 (#2700)。/about-mkgo が
+		// 「mk-go 1.3.0 (abc1234)」「Misskey 2026.9.0-mk.3」として出す。
+		// **埋まっていないビルドでは空文字**になる (`go run` や build-arg を
+		// 渡さない `docker compose build`)。読む側が表示を省くので、ここで
+		// "unknown" のような代替値を作らない。
+		"mkGoCommit":             config.MkGoCommit,
+		"mkGoFrontendVersion":    config.MkGoFrontendVersion,
 		"name":                   m.Name,
 		"shortName":              m.ShortName,
 		"uri":                    h.config.URL,
@@ -207,16 +214,19 @@ func (h *Handler) buildMeta(detail bool) (map[string]any, error) {
 		// から取るので公開側に載せる必要が無い (#2089 diff harness で検出)。
 		// mascotImageUrl: meta 値があればそれを返す。空または nil なら従来の
 		// /assets/ai.png にフォールバック (フロントエンドが no-image にならないため)。
-		"mascotImageUrl":               mascotURL(m.MascotImageURL),
-		"translatorAvailable":          m.DeeplAuthKey != nil && *m.DeeplAuthKey != "",
-		"enableEmail":                  m.EnableEmail,
-		"enableUrlPreview":             m.URLPreviewEnabled,
-		"ads":                          h.serializeActiveAds(),
-		"notesPerOneAd":                m.NotesPerOneAd,
-		"mediaProxy":                   h.config.MediaProxy,
-		"cacheRemoteSensitiveFiles":    m.CacheRemoteSensitiveFiles,
-		"requireSetup":                 m.RootUserID == nil,
-		"providesTarball":              h.config.PublishTarballInsteadOfProvideRepositoryUrl,
+		"mascotImageUrl":            mascotURL(m.MascotImageURL),
+		"translatorAvailable":       m.DeeplAuthKey != nil && *m.DeeplAuthKey != "",
+		"enableEmail":               m.EnableEmail,
+		"enableUrlPreview":          m.URLPreviewEnabled,
+		"ads":                       h.serializeActiveAds(),
+		"notesPerOneAd":             m.NotesPerOneAd,
+		"mediaProxy":                h.config.MediaProxy,
+		"cacheRemoteSensitiveFiles": m.CacheRemoteSensitiveFiles,
+		"requireSetup":              m.RootUserID == nil,
+		// mk-go は /tarball/ を配信しないので常に false (#2700)。config の値を
+		// そのまま返すと、SPA catchall が HTML を 200 で返すリンクを
+		// 「ソースコード (Tarball)」として出すため config.ProvidesTarball() を通す。
+		"providesTarball":              h.config.ProvidesTarball(),
 		"maxFileSize":                  h.config.MaxFileSize,
 		"proxyAccountName":             resolveProxyAccountName(h.proxyAccountName),
 		"enableMcaptcha":               m.EnableMcaptcha,

@@ -22,6 +22,34 @@ var MkGoVersion = "1.3.0"
 //	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MisskeyVersion=2026.9.0"
 var MisskeyVersion = "2026.9.0"
 
+// MkGoCommit is the source revision this binary was built from (short hash).
+//
+// **空になることがある。** 埋めるのはビルド側 (`make build` / Dockerfile の
+// build-arg) で、`go build ./...` や `go run` では入らない。読む側は空を
+// 「不明」として扱い、表示しないこと。Override at build time via:
+//
+//	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MkGoCommit=abc1234"
+var MkGoCommit = ""
+
+// MkGoFrontendVersion is the version of the fork frontend bundled with this
+// build (`third_party/misskey`), typically its git tag such as "2026.9.0-mk.3".
+//
+// **frontend を bind mount で差し替えている構成では実物とずれうる。** これが
+// 名乗るのは「このバイナリをビルドしたときの submodule pin」で、`make uds-rebuild`
+// のように両方を同時にビルドする経路でしか一致は保証されない。MkGoCommit と同じく
+// 空になりうる。Override at build time via:
+//
+//	go build -ldflags "-X github.com/shiroha-a/mk/internal/config.MkGoFrontendVersion=2026.9.0-mk.3"
+var MkGoFrontendVersion = ""
+
+// MkGoRepositoryURL is the canonical source repository of mk-go itself.
+//
+// AGPL-3.0 section 13 で求められる「動いているコードに対応するソース」の案内は
+// meta.repositoryUrl (operator が改変版を指せる) が担うが、その既定値と
+// nodeinfo の software.repository はどちらも mk-go 本体を指すため、値をここに
+// 一本化する (#2700)。
+const MkGoRepositoryURL = "https://github.com/shiroha-a/mk"
+
 // RedisOptions represents Redis connection configuration.
 type RedisOptions struct {
 	Host string `mapstructure:"host"`
@@ -483,6 +511,24 @@ type Config struct {
 	PublishTarballInsteadOfProvideRepositoryUrl bool
 }
 
+// ProvidesTarball reports whether this server serves a source tarball at
+// /tarball/misskey-<version>.tar.gz.
+//
+// **常に false を返す。** upstream は ClientServerService が `built/tarball` を
+// `/tarball/` に静的配信するが、mk-go にはそのルートが無い。**代わりに SPA の
+// catchall (`GET /*`) が拾うので、404 にすらならず HTML が 200 で返る** — 設定を
+// そのまま公開すると、frontend が出す「ソースコード (Tarball)」のリンクは
+// `misskey-<version>.tar.gz` という名前の HTML をダウンロードさせる。AGPL 13 条の
+// 案内としては、壊れた tarball を掴ませるより repositoryUrl だけのほうが正しい (#2700)。
+//
+// **frontend 側は 2 箇所ある** (`about-misskey.vue` の tarball リンクと
+// `about.overview.vue` の `repositoryUrl || /tarball/...` フォールバック)。ルートを
+// 実装したときはこのメソッドを直すだけでは足りず、mk-go 独自の `about-mkgo.vue` にも
+// tarball の分岐を足す必要がある (現状は意図的に持っていない)。
+func (c *Config) ProvidesTarball() bool {
+	return false
+}
+
 const defaultMaxFileSize int64 = 262144000
 
 // Load reads the Misskey YAML configuration and returns a resolved Config.
@@ -792,6 +838,14 @@ func resolve(src *Source) (*Config, error) {
 
 	if cfg.EnablePprof {
 		slog.Warn("config: EnablePprof is enabled; /debug/pprof/* endpoints expose runtime internals. DO NOT enable this in production.",
+			"url", cfg.URL)
+	}
+
+	if cfg.PublishTarballInsteadOfProvideRepositoryUrl {
+		// 設定は読むが効かない。黙って無視すると operator は「tarball を配って
+		// いる」と思ったまま、frontend が壊れたリンクを出す状態に気付けない。
+		// **404 で気付ける類ではない** — SPA catchall が拾うので HTML が 200 で返る。
+		slog.Warn("config: publishTarballInsteadOfProvideRepositoryUrl is enabled but mk-go does not serve /tarball/ (the SPA catchall would return HTML with a .tar.gz name); providesTarball is reported as false. Set meta.repositoryUrl instead.",
 			"url", cfg.URL)
 	}
 

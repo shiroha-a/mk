@@ -60,6 +60,16 @@ enableIpRateLimit: false
 # (docker-compose.playwright.ts.yml overlay) 側は黙って無視する。
 frontendContentSecurityPolicy: enforce
 
+# **意図的に有効にしてある。** mk-go は /tarball/ を配信しないので、この設定が
+# 効いてしまうと frontend が `/tarball/misskey-<version>.tar.gz` へのリンクを出し、
+# SPA catchall が HTML を 200 で返す (404 にすらならない)。`about_mkgo.spec.ts` が
+# 「設定が true でも providesTarball は false で、tarball リンクが 1 本も出ない」
+# ことを見るので、ここを false に戻すとその検査が空振りする (#2700)。
+#
+# TS image (docker-compose.playwright.ts.yml overlay) 側ではこの設定が素直に効いて
+# providesTarball が true になるが、`specs/upstream` に tarball を見る spec は無い。
+publishTarballInsteadOfProvideRepositoryUrl: true
+
 # 注: 本 config は mk-go binary (docker-compose.playwright.yml) と TS image
 # (docker-compose.playwright.ts.yml overlay) の **両方で共有** する。差分が
 # 発生したら別 file に分けるが、現状 db/redis hostname も同じなので 1 file

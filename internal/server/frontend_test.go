@@ -994,3 +994,57 @@ func extractEmbeddedMeta(t *testing.T, body string) map[string]any {
 	require.NoError(t, json.Unmarshal([]byte(body[start:start+end]), &parsed))
 	return parsed
 }
+
+// SSR 埋め込み meta にもビルドの revision を載せること (#2700)。/about-mkgo は
+// fetchInstance を待たずに描けるので、こちらに無いと初回描画でだけ版が欠ける。
+func TestFrontendHTML_EmbedsBuildRevision(t *testing.T) {
+	// ldflags で埋める package 変数。プロセス共有なので必ず戻す (#2795)。
+	prevCommit, prevFrontend := config.MkGoCommit, config.MkGoFrontendVersion
+	t.Cleanup(func() {
+		config.MkGoCommit, config.MkGoFrontendVersion = prevCommit, prevFrontend
+	})
+	config.MkGoCommit = "abc1234"
+	config.MkGoFrontendVersion = "2026.9.0-mk.3"
+
+	cfg := &config.Config{URL: "https://example.test", Version: "0.0.1-test"}
+	repo := testutil.NewMockMetaRepository()
+	repo.Meta = &model.Meta{ID: "x"}
+	handler := frontendHTML(cfg, repo, nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	require.NoError(t, handler(c))
+
+	parsed := extractEmbeddedMeta(t, rec.Body.String())
+	assert.Equal(t, "abc1234", parsed["mkGoCommit"])
+	assert.Equal(t, "2026.9.0-mk.3", parsed["mkGoFrontendVersion"])
+}
+
+// SSR 埋め込み meta の providesTarball も /api/meta と同じく設定を無視して
+// false を返すこと (#2700)。
+//
+// **片側だけ戻る形を止めるためのテスト。** この埋め込み meta は frontend の
+// instance cache を上書きする経路なので、`/api/meta` だけ直っていても
+// ここが設定値を返すと、初回描画では tarball リンクが出るという食い違いになる。
+// 既存の `TestSSRMetaCoversAPIMeta` はキーの有無しか見ないので捕まらない。
+func TestFrontendHTML_ProvidesTarballIgnoresConfigFlag(t *testing.T) {
+	cfg := &config.Config{
+		URL:     "https://example.test",
+		Version: "0.0.1-test",
+		PublishTarballInsteadOfProvideRepositoryUrl: true,
+	}
+
+	repo := testutil.NewMockMetaRepository()
+	repo.Meta = &model.Meta{ID: "x"}
+	handler := frontendHTML(cfg, repo, nil, nil)
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	require.NoError(t, handler(c))
+
+	parsed := extractEmbeddedMeta(t, rec.Body.String())
+	assert.Equal(t, false, parsed["providesTarball"],
+		"設定が true でも mk-go に /tarball/ は無いので false を出すこと")
+}
