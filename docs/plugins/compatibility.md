@@ -110,7 +110,7 @@ go run ./tools/pluginspec -write
 |---|---|---|
 | `build` の `Vet bundled plugins` | 各プラグインを `go vet` (テストファイルも含めてコンパイル) | ○ |
 | `plugin-tests` | 各プラグインのテストを実行 (`replace` で本体の公開面に対してコンパイルされる) | × |
-| `frontend-check` | `make plugins-all` (`-include-disabled`) → 統合バイナリのビルド → `vue-tsc` | × |
+| `frontend-check` | `make plugins-all` (`-include-disabled`) → 統合バイナリのビルド → `vue-tsc` + submodule 依存のゲート | × |
 
 required なのは `build` だけ (`docs/ci.md` の required check は `build` / `test` / `lint` の 3 つ)。`plugin-tests` / `frontend-check` だけが落ちる壊れ方はマージをブロックしない。
 
