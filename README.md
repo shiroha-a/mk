@@ -98,21 +98,16 @@ DB マイグレーションは one-shot の `migrate` サービスが自動適�
 ## アップデート
 
 ```bash
-# 1. submodule ごと更新する (--recurse-submodules を忘れない)
-git pull --recurse-submodules
-
-# 2. third_party/misskey が動いていたらフロントエンドを再ビルドする
-make e2e-frontend-build
-
-# 3. 再ビルドして起動しなおす (マイグレーションは自動適用される)
-docker compose build
-docker compose up -d
+# pull → ビルド → 再起動 → 配信アセットの検証まで通す
+make docker-update   # Docker Compose 構成
+make uds-update      # UDS 構成
 ```
 
 注意点:
 
-- **`git pull` だけでは submodule が更新されない**。親リポのポインタが動くだけで `third_party/misskey/` の中身は古いまま。`git config submodule.recurse true` を一度実行しておくと以後は自動で追従する
-- **フロントエンドを再ビルドしたら必ず mk-go を再起動する**。エントリポイントを起動時に 1 回だけ解決してキャッシュするため、再起動しないと消えた古いファイルを参照し続けて 404 になる
+- **`git pull` だけでは submodule が更新されない**。親リポのポインタが動くだけで `third_party/misskey/` の中身は古いまま。`make pull` (または `git pull --recurse-submodules`) を使う
+- **フロントエンドを再ビルドしたら必ず mk-go を再起動する**。エントリポイントを起動時に 1 回だけ解決してキャッシュするため、再起動しないと消えた古いファイルを参照し続けて 404 になる。**`docker compose up -d` では再起動されない** — イメージと設定が変わらなければコンテナは作り直されず、フロントエンドは bind-mount なので何も変わらないため。`make *-update` / `make *-restart` は `restart` を明示したうえで、配信中のアセットが実在するかまで検証する (#2885)
+- **ビルド中はフロントエンドが 404 になる**。配信中のディレクトリを作り直すため。ビルドが失敗した場合は 404 のまま残るので、成功するまで直すこと
 - ブラウザ側に Service Worker が残っている場合はハードリロードする
 
 バイナリ直接実行や UDS 構成でのアップデート手順は[デプロイ](docs/deployment.md#アップデート)を参照。

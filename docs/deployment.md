@@ -481,7 +481,7 @@ WantedBy=multi-user.target
 mk-goはMisskeyのSPAフロントエンドをそのまま配信する。フロントエンドは`third_party/misskey`サブモジュールからビルドする。
 
 > **submodule bump 後の追従手順** (= 新 Misskey TS release を取り込んだ PR をマージした後):
-> 詳細は [upstream-catch-up.md](./upstream-catch-up.md#1-既存環境への適用--submodule-bump-pr-マージ後) 参照。`git pull` だけでは submodule の working tree は更新されないため、`git pull --recurse-submodules` または `git submodule update --init --recursive` が必要。frontend asset は `make uds-frontend-build` で再ビルド。
+> 詳細は [upstream-catch-up.md](./upstream-catch-up.md#1-既存環境への適用--submodule-bump-pr-マージ後) 参照。`git pull` だけでは submodule の working tree は更新されないため、`git pull --recurse-submodules` または `git submodule update --init --recursive` が必要。frontend asset の再ビルドと再起動は `make uds-update` (または `make uds-rebuild && make uds-restart`) がまとめて行う。**`make uds-frontend-build` 単体で止めないこと** — 再起動しないと配信物と HTML がずれて 404 になる。
 
 環境変数でアセットディレクトリを指定:
 
@@ -613,28 +613,43 @@ mk-goはTS版と同じPostgreSQL/Redisを共有できるため、バイナリの
 2. **submodule が動いたらフロントエンドを再ビルドする**。SPA のアセットは image に焼き込まず bind-mount で渡しているため、submodule だけ進めても配信物は変わらない
 3. **フロントエンドを再ビルドしたら mk-go を再起動する**。エントリポイント (`scripts/<hash>.js`) を起動時に 1 回だけ解決してキャッシュする実装なので、再起動しないと消えた古いファイルを指し続けて 404 になる。bind-mount であっても再起動は必要
 
+**`docker compose up -d` は再起動を保証しない。** compose はイメージと設定が変わらなければコンテナを作り直さないが、フロントエンドは bind-mount なのでフロントエンドだけ更新したときは何も変わらない。原則 3 を満たすには `restart` を明示するか、それを行う `make uds-restart` / `make docker-restart` を使う。2026-09-07 にこれで本番のフロントエンドが 10 分近く起動しなくなった (#2885)。
+
+**壊れても CSS では気付けない。** vite のファイル名は内容ハッシュなので、内容が変わらない CSS は再ビルド後も同じ名前で作り直され 200 を返し続ける。判定にはエントリの JS を直接叩く必要がある。`make *-restart` が呼ぶ [`deploy/check-frontend-entry.sh`](../deploy/check-frontend-entry.sh) はそこまで見て、404 なら非ゼロで落ちる。
+
 マイグレーションは構成によって適用方法が違う (下記参照)。golang-migrate が `schema_migrations` で適用済みバージョンを管理するため、何度流しても冪等。
 
 ### Docker Compose (TCP / UDS 共通)
 
 ```bash
-git pull --recurse-submodules
-
-# third_party/misskey が動いていた場合のみ
-make e2e-frontend-build      # UDS 構成では make uds-frontend-build
-
-docker compose build
-docker compose up -d         # UDS 構成では make uds-build && make uds-up
+# 本体・submodule・plugins/ の独立リポジトリをまとめて更新し、
+# ビルド → 再起動 → 配信アセットの検証まで通す
+make uds-update      # UDS 本番構成
+make docker-update   # Docker Compose 構成
 ```
 
-マイグレーションは one-shot の `migrate` サービスが `app` の起動前に自動適用する。`docker compose up -d` が完了した時点で適用済み。
+段階的に実行したい場合は分解できる。
+
+```bash
+make pull            # 本体 + submodule + プラグイン
+make uds-rebuild     # フロントエンド + イメージ (docker 構成では docker-rebuild)
+make uds-restart     # 再起動 + 配信アセットの検証 (同 docker-restart)
+```
+
+**フロントエンドのビルドは配信中のディレクトリを直接作り直す** (`packages/frontend/build.ts` が出力先を消してから作る)。ビルド開始から再起動完了までフロントエンドは 404 になる。#2885 の事故では、ビルド完了 (13:02:52) から再起動 (13:12:36) まででも **9 分 44 秒**、ビルド開始からならさらに長い窓ができた。**ビルドが失敗した場合はその窓が閉じない** — 配信物が消えたまま残るので、成功するまで直すこと。無停止で入れ替えたい場合は別ディレクトリにビルドして差し替える構成が要る。
+
+> **注意**: `docker-*` 系は `docker-compose.yml` を使うが、このファイルは `name:` を持たないため project 名がディレクトリ名 (`mk`) になり、**UDS 本番と同じ project に合流する**。本番 UDS を動かしているホストでは `uds-*` 系だけを使うこと。
+
+マイグレーションは構成によって適用者が違う。Docker Compose 構成では one-shot の `migrate` サービスが `app` の起動前に自動適用し、`docker compose up -d` が完了した時点で適用済み。UDS 構成には `migrate` サービスが無く、mkgo の entrypoint が起動のたびに流す (したがって再起動には migration の時間が含まれる)。
 
 `.config/docker.yml` を volume mount で使っている場合、**`migrate` 側の mount も忘れずに維持する**こと。片方だけだとマイグレーションと本体が別の DB を見る。
 
 ### バイナリ直接実行
 
 ```bash
-git pull --recurse-submodules
+# 本体・submodule・plugins/ の独立リポジトリをまとめて更新する。
+# make build は plugins を組み込むので、git pull だけだとプラグインが古いまま焼き込まれる。
+make pull
 
 # third_party/misskey が動いていた場合のみ
 make e2e-frontend-build

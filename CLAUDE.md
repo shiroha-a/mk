@@ -152,6 +152,15 @@ make plugins                # plugins/ を走査して生成 (make build が内�
 make plugins-all            # disabled のものも含める (CI 検証用)
 make plugin-dev             # 編集しながら動かす (PLUGIN=plugins/status)
 
+# 更新 (運用)
+make pull                   # 本体 + submodule + plugins/ の独立リポジトリを一括 pull
+make uds-update             # pull → ビルド → 再起動 → 配信 entry の検証 (UDS 本番)
+make docker-update          # 同上 (Docker Compose 構成)
+make uds-restart            # mkgo を再起動して配信 entry を検証だけする
+                            # **`up -d` は再起動を保証しない** — frontend は bind mount
+                            # なので frontend だけ更新すると recreate されず、mk-go が
+                            # 起動時にキャッシュした古い entry を配り続ける (#2885)
+
 # マイグレーション（接続先は -config、既定 .config/default.yml から決まる）
 make migrate-up             # 最新まで適用
 make migrate-down           # 1段階ロールバック (-steps 1)
@@ -207,7 +216,7 @@ make frontend-check          # fork frontend の型チェック (vue-tsc --noEmi
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 120 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 126 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -810,6 +819,15 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-07**: Section 3 に「更新 (運用)」のコマンドを足し、Makefile に `pull` / `pull-plugins` / `uds-rebuild` / `uds-restart` / `docker-rebuild` / `docker-restart` の 6 target を追加した (#2885)。`make help` の target は 120 → 126。**`docker compose up -d` は再起動を保証しない** — image と設定が変わらなければコンテナを作り直さないが、frontend は bind mount なので frontend だけ更新したときは何も変わらない。mk-go は `DetectClientEntry` で entry を起動時に 1 回だけ解決してキャッシュするので、再起動しないと消えた古いハッシュを配り続ける。**2026-09-07 に本番で 10 分近くこれを踏んだ** — `built` の最終書き込みが 13:02:52、mk-go の再起動が 13:12:36 で **9 分 44 秒**。`build.ts` は出力先を rm してから作るので、ビルド開始からの実際の窓はさらに長い。mk-go は 05:17 起動のままだった。Makefile と `docs/deployment.md` には「再ビルドと再起動は必ずセット」という原則が元からあったが、**そのセットを `up -d` が実現できていなかった** — 宣言した不変条件を、実行するコマンドが満たしていない型。
+  検証は `deploy/check-frontend-entry.sh` が持つ。敵対的レビューで、初版が**この PR が防ぎたい状況で緑を返す**ことが実測で示された (High 2 件)。(a) 公開 URL は Cloudflare の裏なので、直前まで配信していた古いアセットはエッジに残っており、素で叩くと `cf-cache-status: HIT` の 200 が返る (使い捨てクエリを足すと MISS になり、事故当時の entry は 404 と分かる)。(b) index の loader は `CLIENT_ENTRY.replace('scripts', lang)` で**言語ごとのパスへ振り替える**ので、`scripts/` だけ見てもブラウザが読む URL を見ていない。あわせて `sort -u | head -1` は「アルファベット順で最初の `scripts/*.js`」であって CLIENT_ENTRY ではなく、modulepreload が 1 本増えた日に無検証で緑になる形だった。**「CSS では判定できない」の理由も誤っていた** — `emptyOutDir: false` で古いファイルが残るからではなく、`build.ts` が毎回 `built/_frontend_vite_` を消したうえで**内容ハッシュが同じものは同じ名前で作り直す**ため。理由を取り違えると「CSS だけ内容が変わればその名前だけ変わる」という取り逃がしに気付けないので、現在は entry (全言語) と stylesheet の両方を見る。
+  **`DOCKER_CONFIG` という make 変数を作ってはいけない。** docker CLI が設定ディレクトリとして読む予約名で、make は環境由来の変数を recipe へ export し直すため、operator の環境にそれがあると値を奪って `docker compose` が `unknown command` で死ぬ (実測)。このリポジトリでは `uds-*` を含む docker 系 target が全滅する。初版で踏んだので `ENTRY_CHECK_DOCKER_CONFIG` に改名した。
+  **`docker-*` 系は本番 UDS のホストで叩かない。** `docker-compose.yml` は `name:` を持たないので project 名がディレクトリ名 `mk` になり UDS 本番と同じ project に合流する。`app` / `db` / `redis` が本番の隣に立ち上がり、本番のコンテナは orphan 扱いになる (compose 自身が `--remove-orphans` を勧めてくる)。しかも検証先は `.config/docker.yml` の url なので、**本番を触らないまま緑を返す**。
+  プラグインは `plugins/*/` のうち `.git` を持つ 4 つ (fedwatch / genshin / hsr / nowplaying) が独立リポジトリで、`make update` の `--recurse-submodules` では追従しなかった (`status` / `trustlevel` は本体に tracked なので追従する)。dirty なものは名前を出して skip する — 勝手に stash すると編集中の変更が「消えた」ように見えるうえ、復元手順もどこにも残らない。あわせて `update` が `git pull` の終了ステータスを見ておらず、**pull に失敗しても「変更なし」と表示して exit 0** していたのを直した (本番更新の起点になったので影響範囲が広がっていた)。
+  **`make pull` は submodule の生成物を先に戻す。** `make plugins` (pluginbuild) が `packages/frontend/src/server-plugins.generated.ts` を、`pnpm -r build` の i18n パッケージが `packages/i18n/src/autogen/locale.ts` を書き換える。どちらも submodule 内の **tracked ファイル**なので、一度でもビルドしたワークツリーは常に dirty になる。dirty なまま gitlink が動くと `git pull --recurse-submodules` は checkout に失敗するため、**frontend の再ビルドが要る回 (= submodule bump 回) に限って一括コマンドが必ず止まり、しかも親リポだけ進んだ混在状態で止まる**。そのまま分解実行を続けると新 backend + 旧 frontend が本番に載る。戻すのは**生成物だけ**にしてある — それ以外の変更が残っていれば git 自身が止まるので、frontend に手を入れている最中の作業を黙って捨てない。
+  **検証スクリプトは抽出に失敗したら落とす。** 初版は `LANGS` や stylesheet の書式が変わって正規表現が空振りしても、対象が減るだけで緑を返した (実測: 言語別アセットが全滅していても exit 0)。この PR 自身が引いている「拾えなかったら落とす」に反していたので、`LANGS` が空のとき、および index に `rel="stylesheet"` があるのに href を 1 本も拾えないときは落とすようにした。
+  **片側更新が 2 箇所残っていた。** `README.md` と `docs/upstream-catch-up.md` が事故そのものの手順 (`docker compose up -d` / `up --build -d`) を勧めたままで、しかも README は直下で「再ビルドしたら必ず再起動する」と宣言していた。後者は「submodule の静的アセットを image に焼き込んでいるので `--build` 必須」とも書いていたが、vite frontend は bind-mount で渡しており image に入るのは static-assets / twemoji / fluent-emoji だけ。CLAUDE.md 2026-08-20 の「直したら固有の語で `git grep` する」に該当。
+  **この PR は停止時間を縮めていない。** frontend のビルドは配信中のディレクトリを開始直後に消すので、ビルド開始から再起動完了までは 404 になる (事故当日の実測ではビルドが約 19 秒、再起動していなかった時間が 9 分 44 秒で、**窓のほぼ全部が後者**だった)。塞いだのは「**恒久的に**壊れたまま気付かない」方だけで、無停止にするには別ディレクトリへビルドして差し替える構成が要る。
 - **2026-09-06**: `make gates` に `migrationdoc-check` を追加 (#2874)。`make help` の target は 119 → 120。**gate が見るのは 8 ファイル 22 箇所** (数え方: claim 20 + no-op down の一覧 1 + 破壊的マイグレーションの表 1)。1 本足したとき実際に動くのはその一部で、#2866 (000082 の追加) では 17 箇所 (total 4 + destructive 11 + 一覧 1 + 表 1。テーブルを作らず data loss 宣言も持たないので tables / dataloss は動かない) — #2866 の敵対的レビューで 5 箇所の漏れが見つかっている (`docs/api-compatibility.md` はリンク先と違う数を出したまま、`internal/testutil` の 2 箇所は分母が migration ファイル数。**PR は単一コミットに squash されているので、漏れていた中間状態は履歴に残っていない**)。**一覧の突き合わせが本体** — 件数だけだと「1 本足して 1 本消す」で素通りする (実測で確認)。**破壊的なマイグレーションの件数は doc 自身の表の行数を truth にする** — migration の中身から「共有テーブルに触るか」を機械的に判定しようとすると、upstream に無いテーブル (`signup_application`) を触るものまで拾って人手で外すことになる。表は 1 行 1 migration なので判断が要らない。**最初これを「機械化できない」と誤って結論し、#2866 で実際に壊れた 5 箇所のうち 3 箇所を検査対象から外していた** (敵対的レビューで指摘)。対象外にしたのは 3 つだけ — 「宣言が無いまま DROP する down が 51 本」(`architecture.md` と `migration-from-ts.md` で**定義が違うのに同じ 51** を出しており、どちらを truth にするか決められない。実測ではどちらの定義でも 51)、「102」(「上記 9 件」の定義に依存)、「データを不可逆に変えるのはこのうち 6 本」(機械判定できない)。**拾えなかったら落とす** — 書式を変えて正規表現が空振りすると、検査していないのに緑になる。#2644 が「doc の静的検査は測ったら使い物にならなかった」と結論しているが、あれは**存在しない Makefile target / パスの検出**で不在候補 298 件の大半が偽陽性だった話。件数は数え方が一意に定義でき、実測で偽陽性 0 / claim 20 個と truth・書式の変異を合わせて全件検出、しかも**生きた drift を 1 件見つけた** (`docs/deployment.md` の self-check 出力例が version 81 のままで、82 だと `selfcheck` は FAIL を返すので例として成立していなかった)。**この gate 自身も untracked のまま `make gates` に落とされた** — #2857 の `gaterun-check` が `git ls-files` で見るため。
 - **2026-09-06**: `make gates` に `gaterun-check` を追加 (#2857)。`make help` の target は 118 → 119。**`go test -run` は該当が無くても exit 0 で通る** (`ok ... [no tests to run]`) ので、ゲートのテストが消えても `make gates` は緑のままだった。#2840 で実際に踏んでいる — 新設したゲートファイルが untracked のまま、`wiring-check` は PASS が 12 → 11 に減るだけで何も言わずに通った。**件数ではなく名前で突き合わせる** — 期待件数を別に持つと、それ自体が同期を要する第 2 の一覧になる。`-run` に書かれた名前がそのまま一覧なので「その名前に一致する tracked なテストが 1 つ以上あるか」だけを見る。**`git ls-files` で見るのが要点** — ディスクを走査すると `git add` を忘れた新規ゲートが手元では見つかり、CI で初めて落ちる。**完全一致にはしない** — `notfound-check` の `TestScanCollapsedLookups` は `_APILayer` / `_CoreLayer` をまとめて指す前方一致で、厳密にすると正当な書き方が落ちる (実測)。接頭辞を保つ rename は `-run` でも引き続き当たるので、検出したいのは「1 つも当たらなくなった」状態だけ。**`gates:` からの脱落も見る** — -run が解決しても一括実行から漏れていれば誰も回さない (同じ「黙って検査が止まる」型)。
   **Makefile を自前でパースしない** — 行継続・列 0 のコメント・recipe 中の空行・同一 target の複数ルール・集約 target は

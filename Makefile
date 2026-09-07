@@ -1,5 +1,5 @@
 .PHONY: help check gates version plugin-test frontend-check diff-check playwright-check e2e-down-all \
-	update docker-update uds-update \
+	update pull pull-plugins docker-update docker-rebuild docker-restart uds-update \
 	image-up image-down image-down-v image-logs image-build \
 	build run dev clean tidy test fmt lint plugin-doc-check migrate-up migrate-down migrate-create \
 	plugins plugins-all plugin-dev plugin-vet \
@@ -12,7 +12,7 @@
 	dropin-frontend-up dropin-frontend-down dropin-frontend-baseline dropin-frontend-logs \
 	dropin-frontend-mk-up dropin-frontend-mk-down dropin-frontend-swap-test \
 	e2e-submodule-init e2e-frontend-build \
-	uds-init uds-frontend-build uds-build uds-up uds-down uds-down-v uds-logs uds-ps \
+	uds-init uds-frontend-build uds-build uds-rebuild uds-restart uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
 	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check gaterun-check \
@@ -95,9 +95,29 @@ e2e-down-all: ## 検証用スタックを一括撤去 (本番 project mk は対�
 
 ##@ 更新 (運用)
 
+# submodule の中でビルドが書き換える tracked ファイル。`make plugins` (pluginbuild) が
+# server-plugins.generated.ts を、`pnpm -r build` の i18n パッケージが locale.ts を
+# 上書きするので、一度でもビルドしたワークツリーは常に dirty になる。**dirty なまま gitlink が動くと `git pull --recurse-submodules` は checkout に
+# 失敗する** — つまり frontend の再ビルドが要る回 (= submodule bump 回) に限って必ず
+# 止まり、しかも親リポだけ進んだ混在状態で止まる (#2885 のレビューで判明)。
+#
+# **生成物だけ**戻す。それ以外の変更が残っていれば git 自身が止めるので、
+# frontend に手を入れている最中の作業を黙って捨てることはない。
+SUBMODULE_GENERATED = \
+	packages/frontend/src/server-plugins.generated.ts \
+	packages/i18n/src/autogen/locale.ts
+
 update: ## submodule ごと pull し、frontend 再ビルドの要否を知らせる
+	@for f in $(SUBMODULE_GENERATED); do \
+		git -C third_party/misskey checkout -- "$$f" 2>/dev/null || true; \
+	done
 	@before=$$(git -C third_party/misskey rev-parse HEAD 2>/dev/null); \
-	git pull --recurse-submodules; \
+	if ! git pull --recurse-submodules; then \
+		printf "\033[31m==> pull に失敗した\033[0m\n"; \
+		printf "    submodule に手を入れている場合は third_party/misskey で\n"; \
+		printf "    変更を commit / stash してからやり直すこと。\n"; \
+		exit 1; \
+	fi; \
 	after=$$(git -C third_party/misskey rev-parse HEAD 2>/dev/null); \
 	if [ "$$before" != "$$after" ]; then \
 		printf "\n\033[33m==> submodule が更新された。frontend の再ビルドが必要\033[0m\n"; \
@@ -107,20 +127,76 @@ update: ## submodule ごと pull し、frontend 再ビルドの要否を知ら�
 		printf "\n==> submodule に変更なし。frontend の再ビルドは不要\n"; \
 	fi
 
+# plugins/*/ のうち独立した git リポジトリのものを更新する。同梱プラグイン
+# (status / trustlevel) は mk 本体に tracked なので本体の pull で追従する。
+#
+# dirty なリポジトリは触らない。勝手に stash すると編集中の変更が「消えた」
+# ように見えるうえ、復元手順もどこにも残らない。
+pull-plugins: ## plugins/ 配下の独立リポジトリを pull
+	@found=0; failed=""; \
+	for d in plugins/*/; do \
+		[ -e "$$d.git" ] || continue; \
+		found=$$((found + 1)); \
+		name=$$(basename "$$d"); \
+		if [ -n "$$(git -C "$$d" status --porcelain)" ]; then \
+			printf "\033[33m==> %-12s skip (未コミットの変更あり)\033[0m\n" "$$name"; \
+			continue; \
+		fi; \
+		if ! git -C "$$d" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then \
+			printf "\033[33m==> %-12s skip (upstream 未設定)\033[0m\n" "$$name"; \
+			continue; \
+		fi; \
+		printf "==> %s\n" "$$name"; \
+		git -C "$$d" pull --ff-only || failed="$$failed $$name"; \
+	done; \
+	if [ "$$found" -eq 0 ]; then printf "==> plugins/ に git リポジトリが無い\n"; fi; \
+	if [ -n "$$failed" ]; then \
+		printf "\033[31m==> pull に失敗:%s\033[0m\n" "$$failed"; \
+		exit 1; \
+	fi
+
+pull: ## 本体・submodule・プラグインをまとめて pull
+	$(MAKE) update
+	$(MAKE) pull-plugins
+
 # frontend の再ビルドと再起動は必ずセットで行う。mk-go は entry point を
 # 起動時に 1 回だけ解決してキャッシュするため、ビルドだけして再起動しないと
 # HTML が消えた古い scripts/<hash>.js を指したまま 404 になる。
-docker-update: ## pull → frontend ビルド → image 再ビルド → 再起動 (Docker Compose 構成)
-	$(MAKE) update
+#
+# **`up -d` では足りない。** compose は image と設定が変わらなければコンテナを
+# 作り直さないが、frontend は bind mount なので frontend だけ更新したときは
+# 何も変わらず、再起動されない (#2885。2026-09-07 に本番で実際に踏んだ)。
+# restart を明示したうえで、配信中の entry が実在するかまで見る。
+docker-rebuild: ## frontend と image をまとめてビルド (Docker Compose 構成)
 	$(MAKE) e2e-frontend-build
 	docker compose build
-	docker compose up -d
 
-uds-update: ## pull → frontend ビルド → image 再ビルド → 再起動 (UDS 本番構成)
-	$(MAKE) update
-	$(MAKE) uds-frontend-build
-	$(MAKE) uds-build
-	$(MAKE) uds-up
+# **本番 UDS を動かしているホストで叩かないこと。** docker-compose.yml は
+# `name:` を持たないので project 名がディレクトリ名 `mk` になり、UDS 本番と
+# 同じ project へ合流する。app / db / redis が本番の隣に立ち上がり、本番の
+# コンテナは orphan 扱いになる (compose 自身が --remove-orphans を勧めてくる)。
+# 検証先も .config/docker.yml の url なので、本番ではなく新しく立てた方を見て
+# 緑を返す。本番の更新は uds-update を使うこと。
+docker-restart: ## app を再起動して配信アセットを検証 (Docker Compose 構成。本番 UDS ホストでは使わない)
+	@before=$$(docker compose ps -q app 2>/dev/null); \
+	docker compose up -d || exit 1; \
+	after=$$(docker compose ps -q app 2>/dev/null); \
+	if [ -n "$$before" ] && [ "$$before" = "$$after" ]; then \
+		docker compose restart app || exit 1; \
+	else \
+		printf "==> up -d が起動し直したので restart は省略\n"; \
+	fi
+	@./deploy/check-frontend-entry.sh $(ENTRY_CHECK_DOCKER_CONFIG)
+
+docker-update: ## pull → ビルド → 再起動 → 検証 (Docker Compose 構成)
+	$(MAKE) pull
+	$(MAKE) docker-rebuild
+	$(MAKE) docker-restart
+
+uds-update: ## pull → ビルド → 再起動 → 検証 (UDS 本番構成)
+	$(MAKE) pull
+	$(MAKE) uds-rebuild
+	$(MAKE) uds-restart
 
 
 # Binary output
@@ -265,6 +341,16 @@ migrate-create: ## 新規マイグレーションファイルを作成
 
 # Docker
 ##@ Docker
+
+# 配信アセットの検証で url を読む先。operator が独自設定を置いていればそちら、
+# 無ければ image に焼き込まれる .example を見る (Dockerfile と同じ既定)。
+#
+# **`DOCKER_CONFIG` という名前にしてはいけない。** docker CLI が設定
+# ディレクトリとして読む予約名で、make は環境由来の変数を recipe へ export し
+# 直すため、operator の環境にそれがあると値を奪って `docker compose` 自体が
+# `unknown command` で死ぬ (このリポジトリの docker 系 target が全滅する)。
+ENTRY_CHECK_DOCKER_CONFIG=$(if $(wildcard .config/docker.yml),.config/docker.yml,.config/docker.yml.example)
+
 docker-build: ## Docker イメージをビルド
 	docker build -t mk-go .
 
@@ -475,6 +561,25 @@ uds-build: | $(UDS_COMPOSE) $(UDS_CONFIG) ## UDS スタックのイメージを�
 
 uds-up: | $(UDS_COMPOSE) $(UDS_CONFIG) ## UDS スタックを起動
 	docker compose -f $(UDS_COMPOSE) up -d --build
+
+uds-rebuild: ## frontend と image をまとめてビルド (本番の配信物を差し替える)
+	$(MAKE) uds-frontend-build
+	$(MAKE) uds-build
+
+# up -d は image と設定が変わらなければコンテナを作り直さない。frontend は
+# bind mount なので、frontend だけ更新したときは mkgo が再起動されず、起動時に
+# キャッシュした古い entry を配り続ける (実体は新しいビルドで消えているので
+# 404、#2885)。restart を明示し、配信中の entry が実在するかまで確かめる。
+uds-restart: | $(UDS_COMPOSE) $(UDS_CONFIG) ## mkgo を再起動して配信アセットを検証
+	@before=$$(docker compose -f $(UDS_COMPOSE) ps -q mkgo 2>/dev/null); \
+	docker compose -f $(UDS_COMPOSE) up -d || exit 1; \
+	after=$$(docker compose -f $(UDS_COMPOSE) ps -q mkgo 2>/dev/null); \
+	if [ -n "$$before" ] && [ "$$before" = "$$after" ]; then \
+		docker compose -f $(UDS_COMPOSE) restart mkgo || exit 1; \
+	else \
+		printf "==> up -d が起動し直したので restart は省略\n"; \
+	fi
+	@./deploy/check-frontend-entry.sh $(UDS_CONFIG)
 
 uds-down: | $(UDS_COMPOSE) ## UDS スタックを停止
 	docker compose -f $(UDS_COMPOSE) down

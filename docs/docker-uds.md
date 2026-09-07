@@ -29,7 +29,7 @@ git submodule update --init --recursive third_party/misskey
 make uds-init
 ```
 
-`uds-init` は order-only prerequisite で実装されているので、ファイルが既にある場合は何もしません (`.example` を更新してもローカル編集は上書きされない)。`uds-build` / `uds-up` / `uds-down` / `uds-down-v` / `uds-logs` / `uds-ps` も同じ prerequisite を持つため、コピー忘れでエラーになることはありません (`uds-frontend-build` は compose / config を参照しないので対象外)。
+`uds-init` は order-only prerequisite で実装されているので、ファイルが既にある場合は何もしません (`.example` を更新してもローカル編集は上書きされない)。`uds-build` / `uds-up` / `uds-restart` / `uds-down` / `uds-down-v` / `uds-logs` / `uds-ps` も同じ prerequisite を持つため、コピー忘れでエラーになることはありません (`uds-frontend-build` は compose / config を参照しないので対象外。`uds-rebuild` 自身は prerequisite を持ちませんが、呼び出す `uds-build` が満たします)。
 
 ### 1. 本家フロントエンドのビルド
 

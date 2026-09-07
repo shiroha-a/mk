@@ -94,10 +94,24 @@ cd mk && docker compose up -d
 | ターゲット | 内容 |
 |---|---|
 | `make update` | `git pull --recurse-submodules` して、フロントエンド再ビルドの要否を知らせる |
-| `make docker-update` | pull → フロントエンドビルド → イメージ再ビルド → 再起動 (Docker Compose 構成) |
-| `make uds-update` | 同上 (UDS 本番構成) |
+| `make pull-plugins` | `plugins/` 配下の独立リポジトリを pull |
+| `make pull` | `update` + `pull-plugins` (本体・submodule・プラグインを一括) |
+| `make docker-rebuild` | フロントエンド + イメージをビルド (Docker Compose 構成) |
+| `make docker-restart` | `app` を再起動して配信エントリを検証 (Docker Compose 構成) |
+| `make docker-update` | pull → ビルド → 再起動 → 検証 (Docker Compose 構成) |
+| `make uds-rebuild` `make uds-restart` `make uds-update` | 同上 (UDS 本番構成) |
 
-`docker-update` / `uds-update` は**フロントエンドの再ビルドと再起動を必ずセットで実行する**。mk-go はエントリポイントを起動時に 1 回だけ解決してキャッシュするため、ビルドだけして再起動しないと HTML が消えた古い `scripts/<hash>.js` を指したまま 404 になる。手順の詳細は[デプロイ](deployment.md#アップデート)を参照。
+`docker-update` / `uds-update` は**フロントエンドの再ビルドと再起動を必ずセットで実行する**。mk-go はエントリポイントを起動時に 1 回だけ解決してキャッシュするため、ビルドだけして再起動しないと HTML が消えた古い `scripts/<hash>.js` を指したまま 404 になる。
+
+**`up -d` では再起動されない。** compose はイメージと設定が変わらなければコンテナを作り直さないが、フロントエンドは bind-mount なので、フロントエンドだけ更新したときは何も変わらない。そのため `*-restart` は `restart` を明示したうえで、[`deploy/check-frontend-entry.sh`](../deploy/check-frontend-entry.sh) で**配信中のエントリが実在するか**まで確かめ、404 なら非ゼロで落ちる (#2885。2026-09-07 に本番で実際に踏んだ)。
+
+**CSS だけ見ても分からない。** vite のファイル名は内容ハッシュなので、内容が変わらないファイルは再ビルドしても同じ名前で作り直され、200 を返し続ける (`build.ts` は毎回 `built/_frontend_vite_` を消してから作るので、「古いファイルが残る」わけではない)。逆に CSS だけ内容が変われば CSS の名前だけが変わるので、スクリプトはエントリの JS と stylesheet の両方を見る。エントリは `CLIENT_ENTRY` から取り、index の loader と同じく言語ごとのパスへ振り替えて確かめる。
+
+**公開 URL は CDN の裏にいることがある。** 素で叩くと、まさに検出したい状況 (直前まで配信していた古いアセットがエッジに残っている) でキャッシュヒットの 200 が返る。スクリプトは使い捨てのクエリを付けて origin まで通す。
+
+`pull-plugins` は `plugins/*/` のうち `.git` を持つものだけを `git pull --ff-only` する。同梱プラグイン (`status` / `trustlevel`) は mk 本体に含まれるので本体の pull で追従する。未コミットの変更があるリポジトリは名前を出して skip する (勝手に stash しない)。
+
+手順の詳細は[デプロイ](deployment.md#アップデート)を参照。
 
 ### ビルド・実行
 
@@ -157,6 +171,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | `make docker-build` | Dockerイメージビルド |
 | `make docker-up` | `docker compose up -d` |
 | `make docker-down` | `docker compose down` |
+| `make docker-rebuild` | フロントエンド + イメージをまとめてビルド |
+| `make docker-restart` | `app` を再起動して配信エントリを検証 |
 
 ### 静的 parity ゲート
 
@@ -213,6 +229,8 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 |---|---|
 | `make uds-init` `uds-build` `uds-up` `uds-down` `uds-down-v` `uds-logs` `uds-ps` | UNIX ドメインソケット構成の本番スタック操作 ([UDSデプロイ](docker-uds.md)) |
 | `make uds-frontend-build` | 本番向けフロントエンドビルド |
+| `make uds-rebuild` | フロントエンド + イメージをまとめてビルド |
+| `make uds-restart` | `mkgo` を再起動して配信エントリを検証 |
 
 > **警告**: `make uds-frontend-build` と `make e2e-frontend-build` は `third_party/misskey/built` に出力する。**本番コンテナがこのディレクトリを bind-mount している**ため、「ビルドが通るか確かめるだけ」のつもりで実行すると配信中のアセットが差し替わる。mk-go はエントリポイントを起動時に 1 回だけ解決してキャッシュするので、ハッシュが変わると HTML が消えたファイルを指したまま **404 でフロントが起動しなくなる**。
 >

@@ -57,12 +57,15 @@ make uds-frontend-build
 
 ```bash
 # 1-1 / 1-2 と 1-4 を済ませた状態 (= submodule + frontend asset が最新) で
-docker compose -f compose.uds.yaml up --build -d
+make uds-build      # image を作り直す
+make uds-restart    # 再起動 + 配信アセットの検証
 ```
 
 **重要**:
-- `--build` フラグ必須。`docker compose up -d` 単体だと前回 build 済の image が再利用され、submodule 更新が反映されない
-- 確実に再ビルドさせたい場合は `--build --force-recreate` を併用
+- **image の作り直しと再起動は別の話で、両方要る**。image に焼き込むのは `deploy/uds/Dockerfile.mkgo` が `COPY` する 4 つ — static-assets (`packages/backend/assets`)、repo-assets (`third_party/misskey/assets`)、twemoji、fluent-emoji。submodule bump でこれらが変わるので `uds-build` が要る
+- **SPA のアセット (`built/_frontend_vite_`) は image に入らない**。bind-mount で渡しているので `uds-frontend-build` (1-4) の出力がそのまま配信される
+- **`--build` を付けても再起動は保証されない**。compose は image と設定が変わらなければコンテナを作り直さないので、bind-mount しか変わっていない場合は何も起きず、mk-go は起動時にキャッシュした古いエントリを配り続ける (#2885)。`make uds-restart` は `restart` を明示したうえで配信中のアセットが実在するかまで検証する
+- **その検証は bind-mount の SPA アセットしか見ない**。image 側の asset (twemoji 等) が古いままでも緑になるので、`uds-build` を省かないこと
 - `make uds-frontend-build` を skip すると Dockerfile builder の sanity check (`test -f .../1f004.svg` 等) で早期 fail する
 
 `postgres` / `valkey` / `nginx` / `video-thumb` 等の外部 image は Misskey 無関係なので submodule bump で影響を受けない。
