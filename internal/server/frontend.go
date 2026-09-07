@@ -219,6 +219,10 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 		cspExtra.Style = captchaEx.Style
 	}
 	cspExtra.Media = cspMediaExtras(cfg, cspMeta)
+	// **SPA shell にだけ足す。** `/about-misskey` は embed shell には無いので、
+	// captcha の origin を embed に足さないのと同じ判断 (使っていない host を
+	// CSP に載せない、#2892)。
+	cspExtra.Image = creditImageOrigins
 
 	// CLIENT_ENTRYの設定
 	clientEntryJS := "null"

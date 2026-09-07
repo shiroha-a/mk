@@ -134,6 +134,35 @@ type cspExtras struct {
 	// Style is appended to style-src (hCaptcha。公式 CSP ガイダンスが style-src
 	// まで要求しており、資材の変わり方によっては欠けると黙って壊れる、#2502)。
 	Style []string
+	// Image is appended to img-src only (upstream のクレジットページが読む
+	// 外部ホスト、#2892)。**`Media` と分けてある** — あちらは media-src /
+	// connect-src にも足すが、こちらは画像しか読まない。
+	Image []string
+}
+
+// creditImageOrigins are the hosts that upstream's `/about-misskey` reads
+// contributor / sponsor / patron icons from.
+//
+// **実測 62 枚** — `avatars.githubusercontent.com` が 6 (プロジェクトメンバー)、
+// `assets.misskey-hub.net` が 56 (スポンサー 6 + パトロン 50)。`loading="lazy"` も
+// `v-if` も折りたたみも無いので、ページを開いた時点で全部読まれる。
+//
+// #2700 で **upstream の謝辞は消さない**方針にした (頻繁に更新されるファイルなので
+// 書き換えると追従のたびにコンフリクトを手で解くことになる)。この 2 origin を
+// 許さないと、そのページには恒久的に壊れた画像が 62 個並ぶ (#2892)。
+//
+// **media proxy 経由にはできない。** mk-go の proxy は upstream と違い open proxy
+// ではなく、allowlist は **DB に実在する URL** (user の avatar / banner、drive_file、
+// emoji、instance の icon / favicon) だけを通す。静的にハードコードされた URL は
+// 入らないので 403 が返る (実測)。
+//
+// **「外部 origin を許すと投稿経由でトラッキング画像を読ませる経路が開く」は
+// 任意 origin の話。** ここで足すのは固定の 2 つで、投稿から別の host を読ませる
+// ことはできない。**閲覧者の IP はこの 2 host に渡る** — upstream は CSP 自体を
+// 持たないので元から同じ挙動で、mk-go だけが厳しかった箇所を parity に戻す形。
+var creditImageOrigins = []string{
+	"https://avatars.githubusercontent.com",
+	"https://assets.misskey-hub.net",
 }
 
 // buildFrontendCSP renders the policy string.
@@ -189,6 +218,9 @@ func appendExtras(directive string, ex cspExtras) string {
 	var add []string
 	if slices.Contains(mediaDirectives, name) {
 		add = append(add, ex.Media...)
+	}
+	if name == "img-src" {
+		add = append(add, ex.Image...)
 	}
 	if name == "script-src" {
 		add = append(add, ex.Script...)

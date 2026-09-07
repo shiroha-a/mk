@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.5`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.6`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -36,7 +36,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 40 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.5`) | — | — |
+| fork frontend の独自変更 | 41 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.6`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -347,7 +347,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` の 6 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.5`。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.6`。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -399,6 +399,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.3` | `/about-mkgo` を新設し、ソースコードの案内をそこへ集約する (#2700)。実際に動いているのは mk-go なのに、説明・ソース案内・謝辞がすべて upstream Misskey のものだった。**体裁の話ではなく AGPL-3.0 section 13 の不備**で、新規インスタンスでは `/about-misskey` の「これは改変版です」節が「ソースコードはまだ提供されていません」の警告だけになる状態だった (`meta.repositoryUrl` が NULL のため `v-if` が falsy になり、**改変版の**リンクが 1 本も出ない。upstream Misskey 本体 / Crowdin / Patreon へのリンクはページ上部に出るので、ページ全体が空だったわけではない)。案内先が間違っているのではなく、**動いているコードに対応する案内が無い**。`MkSourceCodeAvailablePopup` がこのページへ誘導するので、ポップアップを追った利用者はその警告に行き着く。導線 3 箇所 (サイドバー / `/about` overview / ポップアップ) を `/about-mkgo` へ向け、`/about-misskey` は残して相互に行き来できるようにした。**`about-misskey.vue` は導線 1 ブロックしか触らない** — upstream が頻繁に更新するファイルなので、書き換えると追従のたびにコンフリクトを手で解くことになる。**純正へは還元できない行** (mk-go 固有の説明ページ) |
 | `2026.9.0-mk.4` | エントランスの「他のサーバーを探す」を削除する (#2814)。訪問者ダッシュボードの 3 つのメインアクションの真ん中にあり、Misskey Hub のサーバー一覧 (`https://misskey-hub.net/servers/`) を開いていた。**mk-go はあの一覧に載らない** — nodeinfo で `software.name = "mk-go"` を返すので、Misskey として登録されたサーバーを並べる一覧に現れることはない。**「片道リンク」ではなく「行き先に mk-go が存在しないので機能しないリンク」**が正確な言い方 (`target="_blank"` なので元のタブは残る)。**差し替え先が無いので消した**のであって「不要だから」ではない — mk-go のサーバー一覧を作る予定が無い以上、別の一覧へ向ける・設定で切り替えられるようにする、はどれも「いつか一覧ができたら」という存在しない前提をコードに残すだけになる。**upstream 追従で同じ行に差分が出たとき、反射的に戻さないこと。** 失うものはある — upstream があのボタンを置いているのは「ここには入れなかった訪問者の行き先」でもあり、承認制 (#2554) や招待制のサーバーでは削除後の導線が細る。残るのは `⋯` メニューの「お問い合わせ」(`/contact`) で**ゼロにはならない**が、あのボタンは `aria-label` も `title` も持たないアイコンのみ (upstream 由来) なので、支援技術からは実質届かない。それでも行き先が mk-go を載せない一覧である以上、元から解決していない。**インライン `margin-right: 12px` は残す** — `full` は `width: 100%` で cross size が `auto` でない flex item は stretch されないため、この宣言はボタンを短くせず margin box を `.mainActions` の `padding: 32px` の内側へはみ出させるだけで**視覚効果がゼロ** (実測: margin の有無・ボタン 2 個と 3 個のいずれでも幅 536px / x=32 で不変)。横並びだった頃 (`inline` prop) の名残だが、掃除しても得が無く upstream ファイルの差分が増えるだけ。**ロケール定義 `exploreOtherServers` は upstream のものなので残す** — 消しても得は無く追従時の差分が増えるだけ。**純正へは還元できない行** (mk-go が別の software 名を名乗ることが前提) |
 | `2026.9.0-mk.5` | エントランスの GitHub リボンを `/about-mkgo` へ向ける (#2890)。upstream は Misskey 本体のリポジトリを指すが、`aria-label` が "View source on GitHub" と名乗るとおりこれは**動いているコードのソース**を示す導線で、mk-go では別実装を指すことになっていた。**#2700 が導線 3 箇所 (サイドバー / `/about` overview / `MkSourceCodeAvailablePopup`) を `/about-mkgo` へ向けたときの取りこぼし**で、AGPL-3.0 section 13 の観点では同じ系統。未ログインのトップ (`isRoot`) でのみ右上に固定表示される。**`instance.repositoryUrl` へ直リンクしない** — operator が改変していない構成では mk-go 本体だけを指し、いま表示している画面 (fork frontend) のソースが案内から漏れる (#2700 が 3 段構造にした理由)。`repositoryUrl` は GitHub とも限らないので、オクトキャットのアイコンと食い違いうる。`<a href>` から `MkA to` に変えたので SPA 内遷移になり `target="_blank"` は落とした。`aria-label` は他の 3 導線と同じ `i18n.ts.aboutMkGo` にする — 同じ行き先に別の名前を付けると、支援技術のリンク一覧で区別できない同名が並ぶ (`sourceCode` は `about.overview.vue` が**外部の** `instance.repositoryUrl` に使っている)。**アイコンは変えない** — 直接の遷移先は GitHub ではなく内部ページだが、そこから mk-go 本体 / フロントエンドの GitHub へ 3 本出る (`serverRepositoryUrl` は operator 申告なので 1 ホップ先が GitHub とは限らない)。オクトキャットを別のアイコンに替えると `github-corner` の装飾ごと作り直すことになり、upstream ファイルの差分が増える。**純正へは還元できない行** (`/about-mkgo` は mk-go 固有ページ) |
+| `2026.9.0-mk.6` | `about-mkgo` のアバター非表示の理由を実態に直す (#2892)。「mk-go の CSP では `avatars.githubusercontent.com` が必ず落ちる」と書いていたが、mk 本体が `img-src` にその origin を足したので成立しなくなった。**アバターを出さない判断自体は変えていない** (新規ページなので最初から外部画像を持たせる必要が無い)。理由が古いままだと、この行を読んだ人が誤った前提で判断する。**純正へは還元できない行** (mk-go 固有ページのコメント) |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -459,10 +460,11 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
   明示的に出す。ページ本文にも「フロントエンドは Misskey のものを利用している」旨を
   書いてある
 
-**コントリビューターにアバター画像を出していない。** mk-go の CSP は
-`img-src 'self' data: blob:` なので、`avatars.githubusercontent.com` の画像は
-enforce 下で必ず落ちる (`about-misskey` のプロジェクトメンバー欄は実際に壊れた
-画像になっている)。名前だけならポリシーに触らず確実に表示できる。
+**コントリビューターにアバター画像を出していない。** 新規ページなので最初から外部
+画像を持たせる必要が無く、名前だけで用は足りる (#2892 で `avatars.githubusercontent.com`
+は許可済みなので、出すこと自体は今は可能)。`about-misskey` 側の外部画像 62 枚は
+#2892 で `img-src` に 2 origin を足して表示できるようにした (upstream の謝辞を残す
+判断と、それが表示されない状態は両立しないため)。
 
 `2026.7.0-mk.3` の内訳:
 
@@ -771,6 +773,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | `notes/reactions` の可視性 | requireCredential:false で followers/specified note の reaction list も 200 | `CanSeeNote` gate で 404 |
 | reaction / chat の可視性エラー | generic INTERNAL_ERROR (500) に包まれる | 403 ACCESS_DENIED (500 拡散を回避) |
 | `admin/promo/create` | visibility check なし | public 以外を reject。**upstream にも mk-go にも promo の表示経路が無い**ので現時点では latent だが (#2781、`docs/api-compatibility.md` の「既知の制限」)、表示が入った瞬間に followers / specified / home note の本文が全 viewer に漏れる IDOR になる。**推測ではない** — upstream が 2022-09 に削除した `inject-promo.ts` は `Notes.findOneByOrFail({ id })` の結果を timeline へ `splice` するだけで、visibility を一切見ていなかった。create 段で先回りして塞いである |
+| frontend の `img-src` | CSP を設定しないので全 origin の画像が読める | **`'self' data: blob:` + 固定 2 origin** (設定次第で object storage / 外部 media proxy の origin も加わる、#2501 / #2892)。リモート画像は media proxy 経由にする設計で、外部 origin を許すと投稿経由でトラッキング画像を読ませる経路が開くため。**例外は `avatars.githubusercontent.com` と `assets.misskey-hub.net` の 2 つだけ** — upstream の `/about-misskey` が謝辞のアイコン 62 枚 (メンバー 6 / スポンサー 6 / パトロン 50) をここから直接読み、#2700 で「upstream の謝辞は消さない」判断をした以上、許さないと恒久的に壊れた画像が並ぶ。**media proxy 経由には落とせない** — mk-go の proxy は open proxy ではなく allowlist が DB に実在する URL だけを通すので、静的な URL は 403 (実測)。閲覧者の IP はこの 2 host に渡るが、upstream は CSP 自体が無いので元から同じ。`embed` shell には足さない (`/about-misskey` はそちらに無い) |
 | `/api/meta` の `providesTarball` | `publishTarballInsteadOfProvideRepositoryUrl` の設定をそのまま返す。`ClientServerService` (`packages/backend/src/server/web/`) が `built/tarball` を `/tarball/` に静的配信するので、frontend の `/tarball/misskey-<version>.tar.gz` リンクは実在する | **常に false を返す** (`internal/config.Config.ProvidesTarball`、#2700)。mk-go に `/tarball/` を配信するルートが無いので、設定を通すと壊れたリンクを「ソースコード (Tarball)」として表示する。**404 にすらならない** — SPA の catchall (`GET /*`) が拾うので、`misskey-<version>.tar.gz` という名前の HTML が 200 で返る (実測)。AGPL 13 条の案内としては、壊れた tarball を掴ませるより `repositoryUrl` だけのほうが正しい。設定値そのものは読み、有効なときは `config.Load` の resolve で warn を出して無視していることを伝える。**frontend 側に tarball の分岐は 2 箇所ある** (`about-misskey.vue` / `about.overview.vue`)。`/tarball/` を実装するときは `ProvidesTarball()` を直すだけでは足りず、mk-go 独自の `about-mkgo.vue` にも分岐を足すことになる |
 | `meta.repositoryUrl` / `meta.feedbackUrl` の既定値 | 列 DEFAULT の `https://github.com/misskey-dev/misskey` が入る。TypeORM は列を INSERT に含めたうえで**値として `DEFAULT` キーワードを書く** (`InsertQueryBuilder` の PostgreSQL 分岐。「未指定の列を含めない」わけではない) ので、列 DEFAULT が効く | **`https://github.com/shiroha-a/mk` を Go 側で入れる** (#2700)。列 DEFAULT (`migration/000029`) は upstream 互換のため据え置いてあるが、**GORM は `*string` の nil を NULL として明示挿入する**ので効かない。放置すると新規インスタンスは `repositoryUrl = NULL` になり、AGPL 13 条の案内が既定で存在しない状態になる。既存インスタンスは `migration/000084` が埋めるが、**対象は NULL と upstream の列 DEFAULT のままの行の両方**。後者は Misskey TS 生まれの DB (drop-in 移行) が必ず持つ値で、operator の申告ではないため、動いているのが mk-go である以上そのままでは「このサーバーのコード」として Misskey 本体を案内することになる。さらに frontend は `repositoryUrl !== 'https://github.com/misskey-dev/misskey'` で改変版の告知ポップアップを出すか決めるので、放置すると**告知そのものが出ない**。`about-mkgo.vue` 側も同じ値を「未設定」として扱う (migration 適用前や operator が明示設定した場合の保険)。**`feedbackUrl` も同じ理由で NULL になる** — `000029` は隣り合う 2 行で両方の列 DEFAULT を設定しており、どちらも効かない。#2891 で `migration/000085` と `EnsureInitial` を足して同じ形で埋めた (既定は mk-go の issues。upstream が Misskey 本体の issues を置いているのと同じ「ソフトウェアへのフィードバック先」)。**`feedbackUrl` は nodeinfo の metadata にも載る**ので、未設定だと他インスタンスからも見えない。**列 DEFAULT を残すのは drop-in の復路のため** — TypeORM は未指定の列に `DEFAULT` を書くので TS 側では実際に効く。`000029` のコメントは「新規インストール時に本家と同じ挙動になる」と書いていたが、GORM 経由では一度も効いていないので #2891 で実態に直した |
 | `/embed/clips/:clip` | clip の存在だけを見る (非公開 clip も埋め込める) | `isPublic` も見る。埋め込みは無認証で誰でも読める経路なので、本人だけが見えるはずの clip を配らない (#2389) |

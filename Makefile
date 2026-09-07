@@ -40,11 +40,17 @@ version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "互換 Misskey     : %s\n" "$$(sed -n 's/^var MisskeyVersion = "\(.*\)"/\1/p' internal/config/config.go)"
 	@printf "submodule (fork) : %s\n" "$$(git -C third_party/misskey describe --tags 2>/dev/null || echo '(未取得)')"
 
-frontend-check: ## fork の frontend を型チェック (vue-tsc --noEmit のみ)
+frontend-check: ## fork の frontend を型チェックし、submodule 依存のゲートを回す
 	# uds-frontend-build / e2e-frontend-build は本番が bind-mount している
 	# third_party/misskey/built を書き換えるため、検証目的では使わないこと。
 	# 型を見るだけならこちらで済む (Docker 不要、出力物も作らない)。
 	cd third_party/misskey/packages/frontend && npx vue-tsc --noEmit
+	# submodule のソースを読むゲート。**`make gates` には入れない** — あちらは
+	# submodule 無しでも回る前提で、ここを混ぜると checkout していない環境で
+	# skip され「検査していないのに緑」になる。REQUIRE を渡して skip を禁じる
+	# (#2892)。
+	MK_FRONTEND_GATES_REQUIRE_SUBMODULE=1 go test ./internal/server/ \
+		-run TestCreditImageOriginsCoverAboutMisskey -count=1
 
 .PHONY: frontend-test
 frontend-test: ## fork の frontend の vitest を実行

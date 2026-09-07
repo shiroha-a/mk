@@ -37,7 +37,8 @@ type Handler func(Request) (any, error)
 
 // Blob is a raw response body, for endpoints that do not return JSON.
 //
-// 主な用途は画像のプロキシ。本体の CSP は `img-src 'self' data: blob:` なので、
+// 主な用途は画像のプロキシ。本体の CSP は `img-src` を `'self' data: blob:` +
+// 固定 2 host に絞っている (#2892) ので、
 // **外部の画像を <img> で直接読めない**。プラグインが同一オリジンで配信すれば
 // CSP を緩めずに済み、取得元にも優しい (キャッシュできる)。
 //

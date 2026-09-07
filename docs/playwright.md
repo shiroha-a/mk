@@ -133,20 +133,29 @@ spec が `/about-misskey` を 2 回開いた時点の実測で、**#2700 の
 (件数は 248 前後になる)。**開く回数を変えたらこの数も動く** — 内訳の妥当性は
 「62 × 開いた回数」で確かめること。
 
-**CSP は緩めない。** `img-src 'self' data: blob:` はリモート画像を media proxy 経由に
-する設計と対で、外部 origin を許すと投稿経由でトラッキング画像を読ませる経路が開く。
+**任意 origin は開かない。** `img-src` を `'self' data: blob:` に絞るのはリモート画像を
+media proxy 経由にする設計と対で、外部 origin をワイルドカードで許すと投稿経由で
+トラッキング画像を読ませる経路が開く。**#2892 で足したのは固定の 2 host だけ**で、
+ユーザーが URL を指定できる経路 (投稿・カスタム絵文字・アバター) からそこへ到達する
+手段は無い (リモート画像はいずれも proxy 経由になる)。
 
-**本番では既にこのページの外部画像が出ていない** (同一オリジンの
-`/client-assets/about-icon.png` などは出る)**。** `deploy/uds/config/default.yml` は
-`frontendContentSecurityPolicy: enforce` を持つ (`off` は `internal/config` の
-既定値であって本番設定ではない)。
+**#2892 で解消済み。** `img-src` に `avatars.githubusercontent.com` と
+`assets.misskey-hub.net` を足したので、`/about-misskey` 由来の違反は出なくなる
+(`creditImageOrigins`、`internal/server/frontend_csp.go`)。**消える件数は上の表の 124 では
+なく、開く回数が 4 になった現在は 248 前後** (1 回あたり 62 枚)。**足すのは固定の 2 origin だけ**で、投稿から任意の
+host を読ませる経路は開かない。**上の内訳と件数は #2892 より前の実測**なので、
+再測するときは残る 236 件 (spec のフィクスチャが作る実在しないホスト) が基準になる。
 
-**これは恒久的な既知状態**として残る。#2700 が `/about-mkgo` を作ったときに
-`about-misskey.vue` を作り直す案もあったが、**upstream のプロジェクトメンバー・
-スポンサー・パトロンは消さない**方針を採った (upstream が頻繁に更新するファイルなので、
-書き換えると追従のたびにコンフリクトを手で解くことになる。[乖離一覧](divergence.md) の
-`2026.9.0-mk.3` の行)。したがって外部画像は残り、違反も出続ける。mk-go 独自の
-`/about-mkgo` は同じ理由でコントリビューターをテキストリンクだけにしてある。
+なぜ CSP 側で解いたか。#2700 が `/about-mkgo` を作ったときに `about-misskey.vue` を
+作り直す案もあったが、**upstream のプロジェクトメンバー・スポンサー・パトロンは
+消さない**方針を採った (upstream が頻繁に更新するファイルなので、書き換えると追従の
+たびにコンフリクトを手で解くことになる。[乖離一覧](divergence.md) の `2026.9.0-mk.3`
+の行)。**media proxy 経由にも落とせない** — mk-go の proxy は upstream と違い open
+proxy ではなく、allowlist は DB に実在する URL だけを通すので、静的にハードコード
+された URL は 403 になる (実測)。謝辞を残す以上、CSP を足す以外に表示させる道が無い。
+
+mk-go 独自の `/about-mkgo` がコントリビューターをテキストリンクにしてあるのは別の
+理由 (新規ファイルなので最初から外部画像を持たせる必要が無い)。
 
 ### embed も enforce の対象
 

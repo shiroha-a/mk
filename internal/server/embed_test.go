@@ -259,6 +259,25 @@ func TestEmbedShell_CSP(t *testing.T) {
 		assert.Empty(t, rec.Header().Get("Content-Security-Policy-Report-Only"))
 	})
 
+	// **クレジット画像の origin は embed に足さない** (#2892)。`/about-misskey` は
+	// SPA shell にしか無いので、embed で許す理由が無い。captcha の origin を
+	// embed に足さないのと同じ判断で、これが崩れると「使っていない host を
+	// CSP に載せない」という方針が形骸化する。
+	t.Run("credit image origins are not added to the embed shell", func(t *testing.T) {
+		cfg := base()
+		cfg.FrontendContentSecurityPolicy = CSPModeEnforce
+		rec := render(t, cfg, nil)
+
+		// SPA 側と同じ理由で host はリテラルで書く (定数をループの反復元にすると
+		// 空にしたときに素通りする)。
+		csp := rec.Header().Get("Content-Security-Policy")
+		require.NotEmpty(t, csp)
+		assert.NotContains(t, csp, "https://avatars.githubusercontent.com",
+			"embed の CSP にクレジット画像の origin が漏れている")
+		assert.NotContains(t, csp, "https://assets.misskey-hub.net",
+			"embed の CSP にクレジット画像の origin が漏れている")
+	})
+
 	t.Run("report-only sends the report-only header", func(t *testing.T) {
 		cfg := base()
 		cfg.FrontendContentSecurityPolicy = CSPModeReportOnly

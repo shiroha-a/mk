@@ -1048,3 +1048,56 @@ func TestFrontendHTML_ProvidesTarballIgnoresConfigFlag(t *testing.T) {
 	assert.Equal(t, false, parsed["providesTarball"],
 		"設定が true でも mk-go に /tarball/ は無いので false を出すこと")
 }
+
+// `/about-misskey` のクレジット画像 62 枚が読める origin を img-src に足していること
+// (#2892)。#2700 で upstream の謝辞を残す判断をしたので、ここを許さないとその
+// ページには恒久的に壊れた画像が並ぶ。
+//
+// **media proxy 経由には落とせない** — mk-go の proxy は open proxy ではなく、
+// allowlist は DB に実在する URL だけを通すので静的な URL は 403 になる。
+func TestFrontendHTML_CreditImageOriginsInCSP(t *testing.T) {
+	cfg := &config.Config{
+		URL: "https://example.test", Version: "0.0.1-test",
+		FrontendContentSecurityPolicy: CSPModeEnforce,
+	}
+	handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+	require.NoError(t, handler(c))
+
+	csp := rec.Header().Get("Content-Security-Policy")
+	require.NotEmpty(t, csp)
+
+	directives := map[string]string{}
+	for _, d := range strings.Split(csp, "; ") {
+		name, rest, _ := strings.Cut(d, " ")
+		directives[name] = rest
+	}
+
+	// **host はリテラルで書く。** `creditImageOrigins` をループの反復元にすると
+	// 検証対象そのものを truth にすることになり、定数を空にしても片方を消しても
+	// 通ってしまう (= #2892 が直した状態に戻っても検出しない)。
+	imgSrc, ok := directives["img-src"]
+	require.True(t, ok, "img-src directive が無い")
+	assert.Contains(t, imgSrc, "https://avatars.githubusercontent.com",
+		"プロジェクトメンバーのアイコン 6 枚が読めない")
+	assert.Contains(t, imgSrc, "https://assets.misskey-hub.net",
+		"スポンサー 6 枚とパトロン 50 枚が読めない")
+
+	// **増やす方向も固定する。** ワイルドカード (`https://*.githubusercontent.com`)
+	// に広げると open image proxy の `camo.githubusercontent.com` まで開く。
+	assert.Len(t, creditImageOrigins, 2, "許可する origin を増減させるときはこのテストも見直すこと")
+	for _, origin := range creditImageOrigins {
+		assert.NotContains(t, origin, "*", "ワイルドカードは使わない")
+	}
+
+	// **img-src だけに足す。** これらの host からは画像しか読まないので、
+	// media-src / connect-src には要らない (`cspExtras.Media` と分けた理由)。
+	for _, name := range []string{"media-src", "connect-src", "script-src", "style-src"} {
+		for _, origin := range []string{"https://avatars.githubusercontent.com", "https://assets.misskey-hub.net"} {
+			assert.NotContains(t, directives[name], origin,
+				"%s に画像用の origin が漏れている", name)
+		}
+	}
+}
