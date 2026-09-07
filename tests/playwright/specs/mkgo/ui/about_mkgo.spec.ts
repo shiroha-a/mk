@@ -96,9 +96,14 @@ test.describe('UI: /about-mkgo', () => {
   test('the entrance ribbon points at the mk-go source page', async ({ page, baseURL }) => {
     await page.goto(`${baseURL}/`, { waitUntil: 'domcontentloaded' });
 
+    // **`<a>` に `toBeVisible()` は使えない。** 中の `<svg>` が
+    // `position: fixed` で親のレイアウトから外れるため、`<a>` 自身の
+    // bounding box は 0 になり "hidden" と判定される (upstream から変わって
+    // いない構造で、実際には svg が右上に描画されクリックも届く)。
+    // href の一致で行き先を固定し、描画は svg 側で見る。
     const ribbon = page.locator('a.github-corner');
-    await expect(ribbon).toBeVisible({ timeout: 20_000 });
-    await expect(ribbon).toHaveAttribute('href', '/about-mkgo');
+    await expect(ribbon).toHaveAttribute('href', '/about-mkgo', { timeout: 20_000 });
+    await expect(page.locator('a.github-corner svg')).toBeVisible();
   });
 
   test('navigates from /about-mkgo to /about-misskey and back', async ({ page, baseURL }) => {
