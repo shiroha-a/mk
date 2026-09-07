@@ -29,6 +29,12 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # バージョンを返す契約なので、mk-go の実装版は別 field にしている (#2274)。
     # TS 側に存在しないのが仕様。
     "mkGoVersion",
+    # ビルドした revision と同梱 fork frontend の版 (#2700)。/about-mkgo が
+    # 「mk-go 1.3.0 (abc1234)」「Misskey 2026.9.0-mk.3」として出す。TS 側に
+    # 対応物が無い。docs/divergence.md に additive field として記載済み。
+    # **埋め込みの無いビルドでは空文字**になるので、値ではなくキーごと無視する
+    # (CI の diff harness は build-arg を渡さないので必ず空になる)。
+    "mkGoCommit", "mkGoFrontendVersion",
     # 分割アップロード (#2313) は mk-go 独自機能なので policies に TS 側の
     # 対応キーが無い。docs/divergence.md に additive field として記載済み。
     "canUseChunkedUpload", "chunkedUploadMaxConcurrentSessions",
