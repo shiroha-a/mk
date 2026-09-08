@@ -10,11 +10,20 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+)
+
+// 列幅は migration/000001_initial の `emoji` テーブル定義に対応する。
+// 変えるときは DDL と揃えること。
+const (
+	emojiCategoryMaxRunes = 128
+	emojiAliasMaxRunes    = 128
+	emojiLicenseMaxRunes  = 1024
 )
 
 // EmojiAddAliasesBulk handles POST /api/admin/emoji/add-aliases-bulk.
@@ -72,8 +81,19 @@ func (h *Handler) EmojiAddAliasesBulk(c echo.Context) error {
 //
 // ref: third_party/misskey/packages/backend/src/server/api/endpoints/admin/emoji/copy.ts
 func (h *Handler) EmojiCopy(c echo.Context) error {
+	// **上書き項目は mk-go 独自の additive パラメータ** (#2698)。upstream の
+	// paramDef は `emojiId` のみ必須なので、足しても既存の呼び出しは通る。
+	//
+	// リモート絵文字をインポートするとき、AP では運ばれないカテゴリ・エイリアス・
+	// センシティブを `admin/emoji/fetch-remote-meta` で取ってきて、確認・編集した値を
+	// ここに渡す。**ポインタで受けるのは「指定なし」と「空を指定」を区別するため** —
+	// 前者は src の値を保つ、後者は空にする。
 	var req struct {
-		EmojiID string `json:"emojiId"`
+		EmojiID     string    `json:"emojiId"`
+		Category    *string   `json:"category"`
+		Aliases     *[]string `json:"aliases"`
+		License     *string   `json:"license"`
+		IsSensitive *bool     `json:"isSensitive"`
 	}
 	if err := c.Bind(&req); err != nil || req.EmojiID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("emojiId is required."))
@@ -102,6 +122,42 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 	copied := *src
 	copied.ID = h.idGen.Generate(time.Now())
 	copied.Host = nil
+
+	// 指定された項目だけ上書きする (#2698)。
+	//
+	// **列に収まる形に整えてから入れる。** 値の出どころは相手サーバーの
+	// `/api/emoji` (= 相手が決める値) で、そのまま渡すと `emoji.category`
+	// varchar(128) / `license` varchar(1024) / `aliases` varchar(128)[] を
+	// 超えて SQLSTATE 22001 になり、インポートが 500 で落ちる。AP 経路は
+	// `internal/core/federation` が同じ 3 列に対して既に同じ規則を持っており
+	// (#2726、docs/divergence.md の「リモート由来の文字列を列に入れるときの
+	// 規則」)、REST 経路だけ素通しにすると非対称になる。
+	//
+	// **本文は切り、要素は落とす。** category / license は本文なので切る
+	// (`colfit.Text`)。alias は 1 つが長すぎるだけなので、その要素だけ落として
+	// 他は残す (切ると別の名前になり、リアクションの照合に使えない)。
+	if req.Category != nil {
+		v := colfit.Text(*req.Category, emojiCategoryMaxRunes)
+		copied.Category = &v
+	}
+	if req.Aliases != nil {
+		out := make([]string, 0, len(*req.Aliases))
+		for _, a := range *req.Aliases {
+			a = colfit.StripNUL(a)
+			if a == "" || !colfit.Fits(a, emojiAliasMaxRunes) {
+				continue
+			}
+			out = append(out, a)
+		}
+		copied.Aliases = model.StringArray(out)
+	}
+	if req.License != nil {
+		v := colfit.Text(*req.License, emojiLicenseMaxRunes)
+		copied.License = &v
+	}
+	if req.IsSensitive != nil {
+		copied.IsSensitive = *req.IsSensitive
+	}
 
 	// fetcher が wire され src.OriginalURL があれば drive に保存して URL
 	// を切り替える。drive file は upstream Misskey TS の uploadFromUrl

@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.6`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.7a`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -30,13 +30,13 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 3 + 分割アップロード 4 + 承認制 7 + exact assignment lookup 2 + admin 観測 5 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 4 + 分割アップロード 4 + 承認制 7 + exact assignment lookup 2 + admin 観測 5 | chat 15 | **0** |
 | API レスポンスの additive field | 5 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup` / `signupApplicationForm`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 10 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 41 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.6`) | — | — |
+| fork frontend の独自変更 | 43 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.7a`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -46,7 +46,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (59)
+### 1-1. mk-go にしかない (60)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
@@ -57,7 +57,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | 承認制の登録の審査 | 3 | `admin/signup-application/list` / `approve` / `reject` (#2555)。upstream に承認制が無いため対応物なし。scope は `read:admin:invite-codes` / `write:admin:invite-codes` を再利用する (承認はメール確認の経路で `registration_ticket` の発行につながり管轄が同じ。即時作成は #2813 で発行しなくなったが、承認そのものが「誰を入れるか」を決める点は変わらない。`internal/misc/permissions` は upstream misskey-js と完全一致させる契約があり mk-go 固有 scope を足せない) |
 | role assignment exact lookup | 2 | `roles/assignment-show` / `admin/roles/assignment-show` (#2607)。member一覧を走査せず、指定したuser/roleのactive assignmentだけを確認するbuild-time plugin向けhost API。self側は本人、admin側はmoderator以上に限定し、admin側は既存`admin/roles/users`と同じ`read:admin:roles` scopeを使う。**見るのは`role_assignment`行だけなので`target=conditional`のroleでは常に`assigned:false`**になる (行を持たずcondFormulaのread時評価で決まるため)。判別用に`role.target`を返す。既存の`admin/roles/users`も`ListByRole`で同じテーブルを引くので挙動は揃っている。effective判定は#2608側の担当 (#2633) |
 | admin の観測系 | 5 | `admin/server-plugins` (組み込みプラグインの一覧、`read:admin:meta`)、`admin/server-metrics` / `admin/self-check` / `admin/federation/delivery-health` / `admin/federation/inbox-health` (いずれも `read:admin:server-info`)。upstream に対応物が無い。**mk-go は連合の配送 / 受信の健全性を Redis に host 単位で記録している** (`internal/core/deliveryhealth`) ので、それを admin 画面から読むための endpoint。Redis 上のカウンタなので flush で消え、drop-in の引き継ぎ対象でもない |
-| その他 / alias | 3 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim) |
+| その他 / alias | 4 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim)、`admin/emoji/fetch-remote-meta` (リモート絵文字のインポート時に、AP では運ばれないカテゴリ・エイリアス・センシティブを相手の REST API から取る。#2698) |
 
 ランダムマッチ (`reversi/match` の `userId` 無し) は **local user 同士のみ**。待機列 (`reversi:matchAny`) に載るのはこのインスタンスで認証を通した local user だけなので、相手がリモートになることはない。upstream Misskey も yojo-art/cherrypick も**連合ランダムマッチは持っていない**ので意図的に揃えている。名指しの招待 (`userId` 指定) は従来どおり連合する。
 
@@ -81,6 +81,15 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `/api/meta` (+ SSR 埋め込み meta) | `approvalRequiredForSignup` | 承認制の登録 (#2554 / #2555) の有効/無効。登録ページが分岐に使うので公開する (`emailRequiredForSignup` と同じ扱い)。**`features` 側にも出す** — frontend は `features` を feature detection に使うため、片方だけだと検出できない。`admin/meta` にも出す (管理画面のトグルが読む) |
 | `/api/meta` (+ SSR 埋め込み meta) | `signupApplicationForm` | 承認制の申請フォームの定義 (#2570)。申請ページが描画に使うので公開する。項目は `{ label, type, required, maxLength }` の配列で、未設定なら空配列。**回答のラベルはここから埋める** — クライアントに送らせると申請者が審査画面に偽のラベルを流し込める |
 | `/api/meta` | `chunkedUpload` | 分割アップロード (#2313) の能力告知。`{ chunkSize }` を返す。**未対応構成 (オブジェクトストレージ未使用 / `meta.chunkedUploadEnabled=false`) では field ごと出さない**ので、純正 Misskey と同じく `undefined` になりクライアントは単発アップロードにフォールバックする |
+
+### 1-1c. リクエストパラメータの additive
+
+upstream にもある endpoint に、mk-go が任意パラメータを足しているもの。**足すだけ**なので
+upstream 由来のクライアントはそのまま通る (省略時は upstream と同じ挙動)。
+
+| endpoint | パラメータ | 内容 |
+|---|---|---|
+| `admin/emoji/copy` | `category` / `aliases` / `license` / `isSensitive` | リモート絵文字のインポート時に、確認・編集した値でコピーする (#2698)。**新しい作成 endpoint を作らず `copy` を拡張したのは、`emoji.originalUrl` が必ず `drive_file.url` と一致するという不変条件を再実装しないため** — `DriveFileRepository.DeleteOrphans` の cleanup guard が `NOT EXISTS (emoji.originalUrl = drive_file.url)` で system 所有の絵文字画像を保護しており (#722)、そこを踏み外すと画像が孤児判定で消える。重複チェックの「DB 障害を not-found に丸めない」形 (#2792) も同じ理由で再利用する。**ポインタで受けて「指定なし」と「空を指定」を区別する** — 前者は src の値を保ち、後者は空にする。**値は列に収まる形に整えてから入れる** — 出どころが相手サーバーの `/api/emoji` なので、そのままだと `category` varchar(128) / `license` varchar(1024) / `aliases` varchar(128)[] を超えて SQLSTATE 22001 になる (実測)。AP 経路が同じ 3 列に持っている規則 (#2726、§7 の「リモート由来の文字列を列に入れるときの規則」) と揃え、本文は切り、alias は超えた要素だけ落とす (切ると別の名前になりリアクションの照合に使えない)。**misskey-js の autogen 型には出ない**ので、fork frontend からは `as never` キャストで呼ぶ |
 
 ### 1-2. 未実装 (0)
 
@@ -347,7 +356,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` の 6 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.6`。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.7a`。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -400,6 +409,8 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.4` | エントランスの「他のサーバーを探す」を削除する (#2814)。訪問者ダッシュボードの 3 つのメインアクションの真ん中にあり、Misskey Hub のサーバー一覧 (`https://misskey-hub.net/servers/`) を開いていた。**mk-go はあの一覧に載らない** — nodeinfo で `software.name = "mk-go"` を返すので、Misskey として登録されたサーバーを並べる一覧に現れることはない。**「片道リンク」ではなく「行き先に mk-go が存在しないので機能しないリンク」**が正確な言い方 (`target="_blank"` なので元のタブは残る)。**差し替え先が無いので消した**のであって「不要だから」ではない — mk-go のサーバー一覧を作る予定が無い以上、別の一覧へ向ける・設定で切り替えられるようにする、はどれも「いつか一覧ができたら」という存在しない前提をコードに残すだけになる。**upstream 追従で同じ行に差分が出たとき、反射的に戻さないこと。** 失うものはある — upstream があのボタンを置いているのは「ここには入れなかった訪問者の行き先」でもあり、承認制 (#2554) や招待制のサーバーでは削除後の導線が細る。残るのは `⋯` メニューの「お問い合わせ」(`/contact`) で**ゼロにはならない**が、あのボタンは `aria-label` も `title` も持たないアイコンのみ (upstream 由来) なので、支援技術からは実質届かない。それでも行き先が mk-go を載せない一覧である以上、元から解決していない。**インライン `margin-right: 12px` は残す** — `full` は `width: 100%` で cross size が `auto` でない flex item は stretch されないため、この宣言はボタンを短くせず margin box を `.mainActions` の `padding: 32px` の内側へはみ出させるだけで**視覚効果がゼロ** (実測: margin の有無・ボタン 2 個と 3 個のいずれでも幅 536px / x=32 で不変)。横並びだった頃 (`inline` prop) の名残だが、掃除しても得が無く upstream ファイルの差分が増えるだけ。**ロケール定義 `exploreOtherServers` は upstream のものなので残す** — 消しても得は無く追従時の差分が増えるだけ。**純正へは還元できない行** (mk-go が別の software 名を名乗ることが前提) |
 | `2026.9.0-mk.5` | エントランスの GitHub リボンを `/about-mkgo` へ向ける (#2890)。upstream は Misskey 本体のリポジトリを指すが、`aria-label` が "View source on GitHub" と名乗るとおりこれは**動いているコードのソース**を示す導線で、mk-go では別実装を指すことになっていた。**#2700 が導線 3 箇所 (サイドバー / `/about` overview / `MkSourceCodeAvailablePopup`) を `/about-mkgo` へ向けたときの取りこぼし**で、AGPL-3.0 section 13 の観点では同じ系統。未ログインのトップ (`isRoot`) でのみ右上に固定表示される。**`instance.repositoryUrl` へ直リンクしない** — operator が改変していない構成では mk-go 本体だけを指し、いま表示している画面 (fork frontend) のソースが案内から漏れる (#2700 が 3 段構造にした理由)。`repositoryUrl` は GitHub とも限らないので、オクトキャットのアイコンと食い違いうる。`<a href>` から `MkA to` に変えたので SPA 内遷移になり `target="_blank"` は落とした。`aria-label` は他の 3 導線と同じ `i18n.ts.aboutMkGo` にする — 同じ行き先に別の名前を付けると、支援技術のリンク一覧で区別できない同名が並ぶ (`sourceCode` は `about.overview.vue` が**外部の** `instance.repositoryUrl` に使っている)。**アイコンは変えない** — 直接の遷移先は GitHub ではなく内部ページだが、そこから mk-go 本体 / フロントエンドの GitHub へ 3 本出る (`serverRepositoryUrl` は operator 申告なので 1 ホップ先が GitHub とは限らない)。オクトキャットを別のアイコンに替えると `github-corner` の装飾ごと作り直すことになり、upstream ファイルの差分が増える。**純正へは還元できない行** (`/about-mkgo` は mk-go 固有ページ) |
 | `2026.9.0-mk.6` | `about-mkgo` のアバター非表示の理由を実態に直す (#2892)。「mk-go の CSP では `avatars.githubusercontent.com` が必ず落ちる」と書いていたが、mk 本体が `img-src` にその origin を足したので成立しなくなった。**アバターを出さない判断自体は変えていない** (新規ページなので最初から外部画像を持たせる必要が無い)。理由が古いままだと、この行を読んだ人が誤った前提で判断する。**純正へは還元できない行** (mk-go 固有ページのコメント) |
+| `2026.9.0-mk.7` | リモート絵文字を右クリックからインポートできるようにする (#2698)。投稿本文中の絵文字 (`MkCustomEmoji`) とリアクション (`MkReactionsViewer.reaction`) の**両方**に導線を足し、どちらからも同じモーダルを開く (**CherryPick は本文からはモーダル、リアクションからは endpoint 直叩きで揃っていないが踏襲しない**)。`MkRemoteEmojiEditDialog` は表示専用だったものを編集可能にし、カテゴリ・エイリアス・ライセンス・センシティブを `admin/emoji/fetch-remote-meta` の取得値で埋める。**取得に失敗しても取り込みは続く** — 相手が per-name endpoint を持たない (Mastodon 系) のは正常な結果なので、理由を出して手入力に倒す。権限は `$i.isModerator || $i.policies.canManageCustomEmojis`、ローカル絵文字には出さない。**mk-go 独自 endpoint と additive パラメータは misskey-js の autogen 型に無い**ので `as never` キャストを使う (`signup-applications.vue` と同じ理由)。**純正へは還元できない行** (純正 backend に取得 endpoint が無い) |
+| `2026.9.0-mk.7a` | リモート絵文字インポートの導線と取得回数を直す (#2698)。敵対的レビューで見つかった 3 点。(a) **本文中の絵文字からのインポートが必ず no-op だった** — `MkCustomEmoji` は `name` (ホスト無しの裸の名前) と `host` を別の prop で受け取るのに `name@host` を期待していたため、メニューは出るのにクリックしても何も起きなかった。(b) **1 回のインポートで相手へ 2 リクエスト**出ていた (ユーティリティとモーダルが別々に取得。キャッシュ無し・timeout 10 秒なので最悪 20 秒)。(c) **管理画面の「詳細」を開くだけで外向き通信が発生し**、しかも Import で既存のカテゴリ・エイリアスが空で潰れていた (props が `id`/`name`/`host`/`license`/`url` しか持たないためフォームの初期値が空)。編集フォームと上書き送信は取得結果を渡された経路 = インポート導線でだけ有効にした |
 
 `2026.7.0-mk.1` の内訳:
 

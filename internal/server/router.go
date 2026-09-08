@@ -85,6 +85,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
+	"github.com/shiroha-a/mk/internal/core/emojimeta"
 	coreephemeral "github.com/shiroha-a/mk/internal/core/ephemeral"
 	"github.com/shiroha-a/mk/internal/core/event"
 	corefeatured "github.com/shiroha-a/mk/internal/core/featured"
@@ -3056,6 +3057,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// を wire する (#670)。outboundClient 経由なので SSRF / proxy / outgoing
 	// address が他の outbound 経路と同じ設定で適用される。
 	adminHandler.SetEmojiImageFetcher(apiadmin.NewEmojiImageFetcher(s.outboundClient(10*time.Second), driveService, s.config.UserAgent))
+	// admin/emoji/fetch-remote-meta が使うメタデータ取得 (#2698)。**取得先の host は
+	// 絵文字の host = 相手が決める値**なので、SSRF ガード付きの transport を組む。
+	adminHandler.SetRemoteEmojiMetaFetcher(emojimeta.NewFetcher(s.config.AllowedPrivateNetworks, s.config.UserAgent))
 	adminHandler.SetRelayService(relaySvc)
 	adminHandler.SetSystemWebhookRepo(systemWebhookRepo)
 	// admin/system-webhook/test は webhookService.DispatchSystemTest で real
@@ -3170,6 +3174,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/drive/show-file", adminHandler.DriveShowFile, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:drive"))
 	api.POST("/admin/emoji/add-aliases-bulk", adminHandler.EmojiAddAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/copy", adminHandler.EmojiCopy, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
+	// mk-go 独自 (#2698)。リモート絵文字のインポート時に、AP では運ばれない
+	// カテゴリ・エイリアス・センシティブを相手の REST API から取ってくる。
+	// **作成はしない**ので read 系の scope で足りるが、絵文字管理権限に揃える
+	// (取得先を相手に決められる = 外向き通信を起こす操作なので、誰でも叩けると
+	// 探索に使える)。
+	api.POST("/admin/emoji/fetch-remote-meta", adminHandler.EmojiFetchRemoteMeta, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("read:admin:emoji"))
 	api.POST("/admin/emoji/delete-bulk", adminHandler.EmojiDeleteBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	// upstream 2026.9.0 は emoji import zip の堅牢化 (GHSA 経由) と同時に
 	// requiredRolePolicy:'canManageCustomEmojis' から requireAdmin へ変えた。

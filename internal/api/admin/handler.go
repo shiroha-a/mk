@@ -126,14 +126,16 @@ type Handler struct {
 	queueRedis   QueueRedisInfoProvider
 	// procStats は admin/server-metrics が返すプロセス統計の provider 束 (#2395)。
 	// zero value でも Collect は成功する (取れない section が省かれる)。
-	procStats             procstats.Deps
-	emojiEnqueuer         EmojiImportEnqueuer
-	emojiImageFetcher     EmojiImageFetcher
-	relayService          RelayService
-	abuseForwarder        AbuseForwarder
-	deleteAccountEnqueuer DeleteAccountEnqueuer
-	systemWebhookRepo     repository.SystemWebhookRepository
-	recipientRepo         repository.AbuseReportNotificationRecipientRepository
+	procStats         procstats.Deps
+	emojiEnqueuer     EmojiImportEnqueuer
+	emojiImageFetcher EmojiImageFetcher
+	// remoteEmojiMetaFetcher は admin/emoji/fetch-remote-meta が使う (#2698)。
+	remoteEmojiMetaFetcher RemoteEmojiMetaFetcher
+	relayService           RelayService
+	abuseForwarder         AbuseForwarder
+	deleteAccountEnqueuer  DeleteAccountEnqueuer
+	systemWebhookRepo      repository.SystemWebhookRepository
+	recipientRepo          repository.AbuseReportNotificationRecipientRepository
 	// systemWebhookDispatcher は resolve-abuse-user-report 時に
 	// abuseReportResolved system webhook を発火するための dispatcher
 	// (*core/webhook.Service)。nil なら発火しない (#1723)。

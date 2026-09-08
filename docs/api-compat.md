@@ -8,13 +8,13 @@
 - mk-go implemented (TS の subset): **444**
 - mk-go coverage of TS: **100.0%**
 - TS only (mk-go 未実装): **0**
-- mk-go only (TS spec 外): **59**
+- mk-go only (TS spec 外): **60**
 
 ## TS 側に存在するが mk-go で未実装 (0)
 
 (なし)
 
-## mk-go 側にしかない endpoint (59)
+## mk-go 側にしかない endpoint (60)
 
 ### GET variant 追加 (23)
 
@@ -68,12 +68,13 @@ yojo-art/cherrypick 由来の federated chat 拡張 endpoint。Misskey TS 本家
 | POST | `/api/chat/rooms/unmute` |
 | POST | `/api/chat/unread-count` |
 
-### その他 mk-go 独自 / alias (21)
+### その他 mk-go 独自 / alias (22)
 
 上記カテゴリに当てはまらない mk-go 独自 endpoint。backward-compat shim や alias を含む。
 
 | Method | Path |
 |--------|------|
+| POST | `/api/admin/emoji/fetch-remote-meta` |
 | POST | `/api/admin/federation/delivery-health` |
 | POST | `/api/admin/federation/inbox-health` |
 | POST | `/api/admin/roles/assignment-show` |
