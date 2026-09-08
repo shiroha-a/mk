@@ -137,6 +137,38 @@ func (c *MediaURLContext) ProxiedURL(rawURL string, mode proxyMode) string {
 	return c.mediaProxyBase + "/" + filename + "?" + q.Encode()
 }
 
+// StaticEmojiProxyURL builds the proxy URL that serves an emoji as a still
+// image (#2905).
+//
+// **`ProxiedURL` を使うのが要点。** `/proxy` を手で組むと `sig` が付かず、
+// `Authorize` が HMAC ではなく DB allowlist の 4 テーブル UNION に落ちる。
+// `/emoji/:path` はリアクションアイコンのホットパスなので毎リクエスト DB を
+// 引くことになり、しかも DB の瞬断が 403 + `max-age=86400` で 1 日
+// キャッシュされる (このファイルが #2792 で潰したのと同じ罠)。
+//
+// **emoji と static の両方を立てる。** proxyMode は 1 つしか選べないが、
+// 静止画の絵文字は「emoji のリサイズ寸法で、ただしアニメーションを止める」
+// 意味なので両方が要る。
+//
+// context 未配線なら空文字を返す (呼び出し元は raw URL へ 302 する)。
+func StaticEmojiProxyURL(rawURL string) string {
+	c := currentMediaURLContext()
+	if c == nil {
+		return ""
+	}
+	filename, flag := modeEmoji.fileAndFlag()
+	q := url.Values{}
+	q.Set("url", rawURL)
+	if flag != "" {
+		q.Set(flag, "1")
+	}
+	q.Set("static", "1")
+	if !c.externalEnabled {
+		q.Set("sig", signURL(c.secret, rawURL))
+	}
+	return c.mediaProxyBase + "/" + filename + "?" + q.Encode()
+}
+
 // shouldProxyRemote reports whether remote-origin media should be wrapped.
 // True by default (proxyRemoteFiles defaults true); only false when an operator
 // disabled proxyRemoteFiles and configured no external proxy.

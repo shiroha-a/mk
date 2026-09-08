@@ -90,7 +90,7 @@ func TestResolveLocal_StaticPrefersWebpublic(t *testing.T) {
 	s.SetDriveStorage(store)
 	s.SetDriveLookup(stubLookup{primary: "primary-key", thumbKey: "thumb-key", webpubKey: "webpub-key"})
 
-	_, err := s.Fetch(context.Background(), "https://example.com/files/primary-key", ModeStatic, FormatWebP, true)
+	_, err := s.Fetch(context.Background(), "https://example.com/files/primary-key", ModeStatic, FormatWebP, false)
 	require.NoError(t, err)
 	assert.Contains(t, store.reads, "webpub-key")
 }
@@ -108,7 +108,7 @@ func TestResolveLocal_StaticDoesNotSwapToThumbnail(t *testing.T) {
 	s.SetDriveStorage(store)
 	s.SetDriveLookup(stubLookup{primary: "primary-key", thumbKey: "thumb-key"})
 
-	_, err := s.Fetch(context.Background(), "https://example.com/files/primary-key", ModeStatic, FormatWebP, true)
+	_, err := s.Fetch(context.Background(), "https://example.com/files/primary-key", ModeStatic, FormatWebP, false)
 	require.NoError(t, err)
 	assert.Contains(t, store.reads, "primary-key", "Static must serve primary when only thumbnail variant exists")
 	assert.NotContains(t, store.reads, "thumb-key")

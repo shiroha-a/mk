@@ -662,8 +662,10 @@ func TestParseAnimated(t *testing.T) {
 		{"emoji + static", "/proxy/image.webp?url=x&emoji=1&static=1", false, mediaproxy.ModeEmoji},
 		{"avatar + static", "/proxy/image.webp?url=x&avatar=1&static=1", false, mediaproxy.ModeAvatar},
 		{"static 単独", "/proxy/image.webp?url=x&static=1", false, mediaproxy.ModeStatic},
-		// 値は問わない (upstream も `'static' in query` で見る)。
+		// **値は問わない。** upstream は fastify の `'static' in query` なので、
+		// 空値でも静止画になる。emoji_redirect.go の判定とも揃える。
 		{"static=0 でも静止画扱い", "/proxy/image.webp?url=x&emoji=1&static=0", false, mediaproxy.ModeEmoji},
+		{"static= (空値) でも静止画扱い", "/proxy/image.webp?url=x&emoji=1&static=", false, mediaproxy.ModeEmoji},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

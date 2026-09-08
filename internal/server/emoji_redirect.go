@@ -2,7 +2,6 @@ package server
 
 import (
 	"net/http"
-	"net/url"
 	"regexp"
 	"strings"
 
@@ -119,9 +118,15 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		// **allowlist は通る** — proxy は DB に実在する URL だけを許可し、
 		// `emoji.publicUrl` / `originalUrl` はその対象。
 		if _, wantsStatic := c.QueryParams()["static"]; wantsStatic {
-			q := url.Values{"url": {target}, "emoji": {"1"}, "static": {"1"}}
-			c.Response().Header().Set("Content-Security-Policy", assetCSP)
-			return c.Redirect(http.StatusFound, "/proxy/emoji.webp?"+q.Encode())
+			// **entity 側で組む。** `/proxy` を手で組むと sig が付かず、
+			// Authorize が HMAC ではなく DB allowlist に落ちる (ホットパスで
+			// 毎回 DB を引き、瞬断が 403 + max-age=86400 で 1 日残る)。
+			// media proxy の設定 (external / proxyRemoteFiles) にも従う。
+			if proxied := entity.StaticEmojiProxyURL(target); proxied != "" {
+				c.Response().Header().Set("Content-Security-Policy", assetCSP)
+				return c.Redirect(http.StatusFound, proxied)
+			}
+			// context 未配線 (テスト等) なら従来どおり raw へ 302 する。
 		}
 		// upstream (`ServerService.ts` の `/emoji/:path`) はここで
 		// `default-src 'none'; style-src 'unsafe-inline'` を付けるので header を

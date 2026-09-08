@@ -172,7 +172,13 @@ func parseMode(c echo.Context) mediaproxy.ProxyMode {
 // 静止画かどうかはここで別に判定する (upstream の
 // `animated: !('static' in query)` と同じ)。
 func parseAnimated(c echo.Context) bool {
-	return c.QueryParam("static") == ""
+	// **存在で見る (値は問わない)。** upstream は fastify の `'static' in query`
+	// なので `?static=` (空値) でも静止画になる。値の非空で判定すると
+	// 同じリポジトリ内の emoji_redirect.go (存在判定) と食い違い、
+	// `/emoji/x.webp?static=` は静止画・`/proxy/...?static=` はアニメ、という
+	// 矛盾が生まれる。
+	_, present := c.QueryParams()["static"]
+	return !present
 }
 
 // parseOutputFormat picks the encoder format from `?avif=1` (explicit opt-in,

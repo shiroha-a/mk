@@ -248,7 +248,7 @@ func TestFetch_RemoteImage_Static(t *testing.T) {
 
 	s := testService(map[string]bool{ts.URL + "/img.png": true})
 
-	result, err := s.Fetch(context.Background(), ts.URL+"/img.png", ModeStatic, FormatWebP, true)
+	result, err := s.Fetch(context.Background(), ts.URL+"/img.png", ModeStatic, FormatWebP, false)
 	require.NoError(t, err)
 	defer result.Body.Close()
 
