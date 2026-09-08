@@ -39,6 +39,9 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # 対応キーが無い。docs/divergence.md に additive field として記載済み。
     "canUseChunkedUpload", "chunkedUploadMaxConcurrentSessions",
     "chunkedUploadMaxPendingMb",
+    # ロール単位の通知 opt-out (#2898) も mk-go 独自 policy。TS 側に対応キーが
+    # 無い。docs/divergence.md に additive field として記載済み。
+    "optOutNotificationTypes",
     # 承認制の登録 (#2554 / #2555) は mk-go 独自機能なので TS 側にキーが無い。
     # meta 直下と features の両方に出る (frontend は features を feature
     # detection に使うため片方だけだと検出できない)。docs/divergence.md に
@@ -89,6 +92,8 @@ USER_IGNORE = DEFAULT_IGNORE_KEYS | {
     # users/show は policies を含むので META_IGNORE と同じ除外が要る。
     "canUseChunkedUpload", "chunkedUploadMaxConcurrentSessions",
     "chunkedUploadMaxPendingMb",
+    # ロール単位の通知 opt-out (#2898)。同上。
+    "optOutNotificationTypes",
 }
 
 
