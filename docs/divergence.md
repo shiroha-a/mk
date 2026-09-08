@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.7a`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.8`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -36,7 +36,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 43 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.7a`) | — | — |
+| fork frontend の独自変更 | 44 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.8`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -80,6 +80,8 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | `/api/meta` (+ SSR 埋め込み meta) | `mkGoCommit` / `mkGoFrontendVersion` | ビルドした revision (短縮ハッシュ) と、同梱した fork frontend の版 (`git describe --tags`、例 `2026.9.0-mk.3`)。`/about-mkgo` が「mk-go 1.3.0 (abc1234)」「Misskey 2026.9.0-mk.3」として出す (#2700)。**埋めるのはビルド側**で、`go run` や build-arg を渡さない `docker compose build` では空文字になる (キーは出す — 消すと「古い mk-go か埋め忘れか」を区別できない)。`.dockerignore` が `.git` を落とすので Dockerfile 内では git を呼べず、`make uds-build` / `make build` が値を渡す。**frontend を bind mount で差し替えた構成では `mkGoFrontendVersion` が実物とずれる** — 名乗っているのは「このバイナリをビルドしたときの submodule pin」で、`make uds-rebuild` のように両方を同時にビルドする経路でしか一致は保証されない |
 | `/api/meta` (+ SSR 埋め込み meta) | `approvalRequiredForSignup` | 承認制の登録 (#2554 / #2555) の有効/無効。登録ページが分岐に使うので公開する (`emailRequiredForSignup` と同じ扱い)。**`features` 側にも出す** — frontend は `features` を feature detection に使うため、片方だけだと検出できない。`admin/meta` にも出す (管理画面のトグルが読む) |
 | `/api/meta` (+ SSR 埋め込み meta) | `signupApplicationForm` | 承認制の申請フォームの定義 (#2570)。申請ページが描画に使うので公開する。項目は `{ label, type, required, maxLength }` の配列で、未設定なら空配列。**回答のラベルはここから埋める** — クライアントに送らせると申請者が審査画面に偽のラベルを流し込める |
+| `/api/roles/*` / `admin/roles/*` / `/api/meta` の `policies` | `optOutNotificationTypes` | ロール単位で受け取らない通知の種類 (#2898)。**型ごとに `canReceiveXxx` を増やさない** — mk-go 固有の通知を足すたびに policy が増えるため、1 キーの配列にまとめてある (現在 43 キー)。**集約は intersection** で、他の `[]string` policy (`uploadableFileTypes` = set union) と向きが逆。「受け取らない」一覧を union すると複数のロールに属するほど通知が減る = 厳しい方に倒れ、upstream の policy 集約 (bool は OR、数値は max) が緩い方へ倒すのと食い違う。全ロールが切っている種類だけを切る。型不一致の候補は集約から除外し、有効な候補が 1 件も無ければ既定へ戻す。TS は未知の policy キーを無視するので drop-in の復路は壊れない (戻すと opt-out が効かなくなり、通知は届くようになる) |
+| `notifications` / `i/notifications` の `type` | `abuseReport` | 通報が作られたときにモデレーター / 管理者へ送る通知 (#2868)。**upstream は通報を email / system webhook / admin stream でしか流さず、通知欄に残す形を持たない。** `notifier` は通報者で、`reportId` / `targetUserId` / `comment` を持つ (`reportId` は管理画面の該当通報へ飛ぶために要る)。**upstream の 20 種を全て `excludeTypes` に並べても、この型の通知は返る** — 全指定判定の集合に mk-go 固有の型を含めているため (#2898)。TS へ swap back すると、この型の通知は**ヘッダも本文も空**で描画される (upstream の `MkNotification` に分岐が無い。`pollVote` が実際にそうなっていた既知の型) |
 | `/api/meta` | `chunkedUpload` | 分割アップロード (#2313) の能力告知。`{ chunkSize }` を返す。**未対応構成 (オブジェクトストレージ未使用 / `meta.chunkedUploadEnabled=false`) では field ごと出さない**ので、純正 Misskey と同じく `undefined` になりクライアントは単発アップロードにフォールバックする |
 
 ### 1-1c. リクエストパラメータの additive
@@ -356,7 +358,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` の 6 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.7a`。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.8`。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -411,6 +413,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.6` | `about-mkgo` のアバター非表示の理由を実態に直す (#2892)。「mk-go の CSP では `avatars.githubusercontent.com` が必ず落ちる」と書いていたが、mk 本体が `img-src` にその origin を足したので成立しなくなった。**アバターを出さない判断自体は変えていない** (新規ページなので最初から外部画像を持たせる必要が無い)。理由が古いままだと、この行を読んだ人が誤った前提で判断する。**純正へは還元できない行** (mk-go 固有ページのコメント) |
 | `2026.9.0-mk.7` | リモート絵文字を右クリックからインポートできるようにする (#2698)。投稿本文中の絵文字 (`MkCustomEmoji`) とリアクション (`MkReactionsViewer.reaction`) の**両方**に導線を足し、どちらからも同じモーダルを開く (**CherryPick は本文からはモーダル、リアクションからは endpoint 直叩きで揃っていないが踏襲しない**)。`MkRemoteEmojiEditDialog` は表示専用だったものを編集可能にし、カテゴリ・エイリアス・ライセンス・センシティブを `admin/emoji/fetch-remote-meta` の取得値で埋める。**取得に失敗しても取り込みは続く** — 相手が per-name endpoint を持たない (Mastodon 系) のは正常な結果なので、理由を出して手入力に倒す。権限は `$i.isModerator || $i.policies.canManageCustomEmojis`、ローカル絵文字には出さない。**mk-go 独自 endpoint と additive パラメータは misskey-js の autogen 型に無い**ので `as never` キャストを使う (`signup-applications.vue` と同じ理由)。**純正へは還元できない行** (純正 backend に取得 endpoint が無い) |
 | `2026.9.0-mk.7a` | リモート絵文字インポートの導線と取得回数を直す (#2698)。敵対的レビューで見つかった 3 点。(a) **本文中の絵文字からのインポートが必ず no-op だった** — `MkCustomEmoji` は `name` (ホスト無しの裸の名前) と `host` を別の prop で受け取るのに `name@host` を期待していたため、メニューは出るのにクリックしても何も起きなかった。(b) **1 回のインポートで相手へ 2 リクエスト**出ていた (ユーティリティとモーダルが別々に取得。キャッシュ無し・timeout 10 秒なので最悪 20 秒)。(c) **管理画面の「詳細」を開くだけで外向き通信が発生し**、しかも Import で既存のカテゴリ・エイリアスが空で潰れていた (props が `id`/`name`/`host`/`license`/`url` しか持たないためフォームの初期値が空)。編集フォームと上書き送信は取得結果を渡された経路 = インポート導線でだけ有効にした |
+| `2026.9.0-mk.8` | 通報の通知と、ロール単位の通知 opt-out を出す (#2868 / #2898)。`MkNotification` に `abuseReport` の分岐を足し、ヘッダ・本文・管理画面へのリンクを出す。**リンクが要点** — 通知欄で本文だけ見えても、対処するには結局どの通報かを探すことになる。あわせて**未知の型の受け皿** (`v-else`) を足した — これが無いと mk-go 固有の通知や upstream が後から足した型が**ヘッダも本文も空で描画される** (`pollVote` が実際にそうなっていた)。`roles.policy-editor` には `optOutNotificationTypes` をチェックボックスで出す (型名を手打ちさせない)。**misskey-js の autogen 型は触らない** — openapi から再生成されるので足しても次の生成で消える。mk-go 独自 policy / 通知タイプはキャストで受ける (独自 endpoint を `as never` で呼ぶのと同じ扱い)。i18n は `_mkgoNotification` を新設し、`_mkgoUnsupported` と同じく ja-JP のみ。**純正へは還元できない行** (純正 backend にこの通知タイプと policy が無い) |
 
 `2026.7.0-mk.1` の内訳:
 
