@@ -92,16 +92,36 @@ func TestMkGoRolePolicyKeysAreListedInFrontend(t *testing.T) {
 	}
 }
 
+// htmlComment matches a `<!-- ... -->` block in a Vue template.
+var htmlComment = regexp.MustCompile(`(?s)<!--.*?-->`)
+
+// matchQueryKey pulls the search key out of `matchQuery([..., 'key'])`.
+//
+// **拾うのは `])` の直前の文字列リテラル。** upstream は第 2 引数を policy キー
+// そのものではなく検索キーワードとして使うことがある (`canImportUserLists` の
+// XFolder は `'canImportUserList'` と単数で書いている)。mk-go 固有キーは
+// 検索語 = キー名で書く前提で、ずれたら「フォームが無い」と落ちる (fail-loud)。
+var matchQueryKey = regexp.MustCompile(`matchQuery\(\[[^\]]*?'([A-Za-z0-9_]+)'\s*\]\)`)
+
 // parsePolicyEditorFolderKeys collects the policy keys each XFolder targets.
 //
-// `matchQuery([..., 'key'])` の 2 つ目の引数が対象キー。全 XFolder が同じ形で
-// 書かれているので、そこを拾う。
+// **コメントアウトした XFolder は数えない。** 生テキストを走査すると
+// `<!-- 一時的に無効化 -->` で囲んだフォームを実在扱いしてしまい、管理画面から
+// 消えているのにゲートが緑になる。CLAUDE.md 2026-08-31 の wiring-check が
+// `/* */` で同じ穴を踏んでおり (#2856)、#2701 が記録した事故は
+// 「検証のために一時的に外して戻し忘れる」= まさにこの形。
 func parsePolicyEditorFolderKeys(t *testing.T, path string) []string {
 	t.Helper()
-	src, err := os.ReadFile(path)
+	raw, err := os.ReadFile(path)
 	require.NoError(t, err)
+	src := htmlComment.ReplaceAll(raw, nil)
+
+	// コメント除去で全部消えたら落とす (書式が変わって空振りしたのを緑にしない)。
+	require.NotEmpty(t, matchQueryKey.FindAll(src, -1),
+		"%s から XFolder を 1 つも読めなかった (書式が変わった?)", path)
+
 	var out []string
-	for _, m := range regexp.MustCompile(`matchQuery\(\[[^\]]*?'([A-Za-z0-9_]+)'\s*\]\)`).FindAllSubmatch(src, -1) {
+	for _, m := range matchQueryKey.FindAllSubmatch(src, -1) {
 		out = append(out, string(m[1]))
 	}
 	return out

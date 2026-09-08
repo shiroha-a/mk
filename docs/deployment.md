@@ -576,7 +576,7 @@ upstream以外の設定はTCP構成と同じ。
 
 ## オブジェクトストレージ
 
-**コントロールパネル → オブジェクトストレージ**で設定する。`meta` テーブルに保存されるため設定ファイルの編集も再起動も不要で、保存した時点から次のアップロードに反映される。
+**コントロールパネル → オブジェクトストレージ**で設定する。`meta` テーブルに保存されるため設定ファイルの編集も再起動も不要で、保存した時点から次のアップロードに反映される。**ただし UI に出ているのは有効/無効・チャンクサイズ・TTL の 3 つだけ**で、ロール policy の上限になる `chunkedUploadMaxSessionsPerUser` / `chunkedUploadMaxPendingMbPerUser` は `admin/update-meta` を直接呼ぶしかない (#2900 で確認)。
 
 `objectStorageEndpoint` は**ホスト名だけ**を入れる。`https://` などのスキームやバケット名のパスを含めると、mk-go が `https://` を前置してエンドポイント URL を組むため不正な URL になる (本家 Misskey の `S3Service.getS3Client` も同じ組み立て方をする)。
 
