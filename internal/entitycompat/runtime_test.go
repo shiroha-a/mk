@@ -439,6 +439,10 @@ func TestNotificationShapeL2(t *testing.T) {
 		// #1559: chatRoomInvitationReceived は Extra["invitationId"] を read 時に
 		// packed invitation へ解決する。notifier(招待者) を持つので userId も出る。
 		{notification.TypeChatRoomInvitationReceived, true, false, map[string]any{"invitationId": "inv1"}, []entity.NotificationOption{chatInvLookup}},
+		// #2868: abuseReport は mk-go 固有。golden の union に無いので
+		// allowlist_l2.json に登録してある。**実際に produce される初めての
+		// union 外 type** なので、ここに載せないと誰も検査しない。
+		{notification.TypeAbuseReport, true, false, map[string]any{"reportId": "rep1", "targetUserId": "u2", "comment": "spam"}, nil},
 	}
 
 	allow, err := LoadAllowlist(filepath.Join("testdata", "allowlist_l2.json"))

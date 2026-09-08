@@ -34,9 +34,11 @@ func (h *Handler) Grouped(c echo.Context) error {
 	//
 	// **下の `len(all) > 0` では止まらない。** svc.List の exclude filter は
 	// `excludeSet[n.Type]` の一致しか見ないので、**notificationTypeList に無い
-	// type の行は excludeTypes 全指定でも生き残る**。該当するのは `pollVote` で、
-	// 現在 producer は無い (#690 で無効化) が、それ以前に積まれた行はストリームに
-	// 残りうる。1 件あるだけで `len(all) > 0` が成立し既読化まで走ってしまう。
+	// type の行は excludeTypes 全指定でも生き残る**。該当するのは obsolete
+	// (`pollVote` / `groupInvited`) と mk-go 固有 (`importCompleted` /
+	// `abuseReport`)。前者の producer は無いが、それ以前に積まれた行は
+	// ストリームに残りうる。後者の `abuseReport` は現に produce される (#2868)。
+	// 1 件あるだけで `len(all) > 0` が成立し既読化まで走ってしまう。
 	// upstream は早期 return するので `[]` が正。
 	if emptyByTypeFilter(req) {
 		return c.JSON(http.StatusOK, []any{})

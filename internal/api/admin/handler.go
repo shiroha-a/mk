@@ -3259,6 +3259,9 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 		SinceDate        *int64 `json:"sinceDate"`
 		UntilDate        *int64 `json:"untilDate"`
 		Limit            *int   `json:"limit"`
+		// ReportID は mk-go 独自の additive パラメータ (#2868)。通報の通知から
+		// 該当の 1 件へ飛ぶために使う。
+		ReportID string `json:"reportId"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -3289,6 +3292,26 @@ func (h *Handler) AbuseReports(c echo.Context) error {
 	}
 	if !isValidOrigin(req.TargetUserOrigin) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "targetUserOrigin must be 'combined', 'local', or 'remote'.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// reportId 指定時はその 1 件だけを返す (#2868)。
+	//
+	// **state / origin / cursor の絞りを無視する。** 通知のリンクから開いた
+	// ときに「他のモデレーターが先に解決済みにしたので一覧に出ない」が起きると、
+	// リンクが役に立たない。1 件を名指しで引く以上、絞り込みは意味を持たない。
+	if req.ReportID != "" {
+		r, err := h.abuseRepo.FindByID(req.ReportID)
+		if err != nil {
+			// **DB 障害を not-found に丸めない** (#2792)。
+			if !repository.IsNotFound(err) {
+				return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+			}
+			return c.JSON(http.StatusOK, []packedAbuseReport{})
+		}
+		if r == nil {
+			return c.JSON(http.StatusOK, []packedAbuseReport{})
+		}
+		profByID := h.abuseUserProfiles([]*model.AbuseUserReport{r})
+		return c.JSON(http.StatusOK, []packedAbuseReport{h.packAbuseReport(c.Request().Context(), r, profByID)})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
 	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)

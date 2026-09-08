@@ -1332,13 +1332,23 @@ func TestNotificationTypeEnumMatchesLists(t *testing.T) {
 			"%s is an upstream type and must be counted by emptyByTypeFilter", ty)
 	}
 
+	// enum は upstream + obsolete + mk-go 固有。全指定判定 (notificationTypeList)
+	// は upstream のみ — 固有型を入れると upstream 由来のクライアントの
+	// 「すべて無効」が被覆判定を外れ、既読位置が飛ぶ (#2898)。
+	mkgoTypes := notification.MkGoTypeNames()
+	require.NotEmpty(t, mkgoTypes)
 	require.Len(t, notificationTypeEnum,
-		len(notificationTypeList)+len(obsoleteNotificationTypeList))
+		len(notificationTypeList)+len(obsoleteNotificationTypeList)+len(mkgoTypes))
 	for _, ty := range notificationTypeList {
 		assert.True(t, notificationTypeEnum[ty], "%s must be in the enum", ty)
 	}
 	for _, ty := range obsoleteNotificationTypeList {
 		assert.True(t, notificationTypeEnum[ty], "%s must be in the enum", ty)
+	}
+	for _, ty := range mkgoTypes {
+		assert.True(t, notificationTypeEnum[ty], "%s must be in the enum", ty)
+		assert.NotContains(t, notificationTypeList, ty,
+			"%s は mk-go 固有なので全指定判定に入れてはいけない", ty)
 	}
 	// obsolete は全指定判定の対象外。
 	for _, ty := range obsoleteNotificationTypeList {

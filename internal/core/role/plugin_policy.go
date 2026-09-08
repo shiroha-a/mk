@@ -253,7 +253,9 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 				value = baseVal
 			}
 			value = clonePolicyValue(value)
-			contribs[c.Key] = append(contribs[c.Key], policyEntry{priority: c.Priority, value: value})
+			// UseDefault のときは base を積むだけなので explicit ではない
+			// (#2898、intersection の集約で「設定していない」と区別する)。
+			contribs[c.Key] = append(contribs[c.Key], policyEntry{priority: c.Priority, value: value, explicit: !c.UseDefault})
 		}
 	}
 

@@ -923,6 +923,15 @@ func isFiniteAndInRange(v, lo, hi float64) bool {
 type policyEntry struct {
 	priority int
 	value    any
+	// explicit reports whether a role (or provider) actually set a value for
+	// this key, as opposed to falling back to the base default.
+	//
+	// **intersection で集約する policy にだけ意味がある (#2898)。** 未設定の
+	// ロールには base (opt-out なら空の一覧) が積まれるので、素直に
+	// intersection を取ると 1 つでも未設定のロールがあれば必ず空になり、
+	// 設定したロールの値が消える。GetUserRoles は conditional role も含むので、
+	// 管理者が割り当てていない自動マッチのロール 1 つで効かなくなっていた。
+	explicit bool
 }
 
 // computePolicy resolves the effective value for a single policy key by
@@ -948,7 +957,7 @@ func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolic
 		if p.UseDefault {
 			collected = append(collected, policyEntry{priority: p.Priority, value: baseVal})
 		} else {
-			collected = append(collected, policyEntry{priority: p.Priority, value: p.Value})
+			collected = append(collected, policyEntry{priority: p.Priority, value: p.Value, explicit: true})
 		}
 	}
 	// provider contribution は同じ priority cascade に参加させる
@@ -957,8 +966,12 @@ func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolic
 	// upstream: priority 2 → 1 → 0 の順で「該当 priority に少なくとも 1 件
 	// あればそのグループだけ aggregate」。fallback の priority 0 は全 role
 	// を対象とする (= entry が無い role の priority=0 default も含めて集約)。
+	//
+	// **intersection の policy は明示設定した entry だけを集約する (#2898)。**
+	// 詳細は policyEntry.explicit のコメント。
+	onlyExplicit := aggregatesByIntersection(key)
 	for _, prio := range []int{2, 1} {
-		group := filterByPriority(collected, prio)
+		group := filterByPriority(collected, prio, onlyExplicit)
 		if len(group) > 0 {
 			return aggregatePolicyValues(key, baseVal, group)
 		}
@@ -967,19 +980,36 @@ func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolic
 	// fallback でも、複数 role の数値 max / bool OR が反映される)。
 	values := make([]any, 0, len(collected))
 	for _, e := range collected {
+		if onlyExplicit && !e.explicit {
+			continue
+		}
 		values = append(values, e.value)
 	}
 	return aggregatePolicyValues(key, baseVal, values)
 }
 
-func filterByPriority(entries []policyEntry, prio int) []any {
+func filterByPriority(entries []policyEntry, prio int, onlyExplicit bool) []any {
 	out := make([]any, 0, len(entries))
 	for _, e := range entries {
-		if e.priority == prio {
-			out = append(out, e.value)
+		if e.priority != prio {
+			continue
 		}
+		if onlyExplicit && !e.explicit {
+			continue
+		}
+		out = append(out, e.value)
 	}
 	return out
+}
+
+// aggregatesByIntersection reports whether a policy key is merged by set
+// intersection instead of the default aggregator for its type.
+//
+// **1 箇所で判定する (#2898)。** computePolicy (どの entry を集約に渡すか) と
+// aggregatePolicyValues (どう畳むか) の両方が同じ答えを必要とするので、
+// 別々に key 名を書くと片方だけ直す形の穴ができる。
+func aggregatesByIntersection(key string) bool {
+	return key == PolicyOptOutNotificationTypes
 }
 
 // aggregatePolicyValues applies the per-key aggregator (bool OR / numeric
@@ -1010,7 +1040,7 @@ func aggregatePolicyValues(key string, baseVal any, values []any) any {
 		}
 		return baseVal
 	case []string:
-		if key == PolicyOptOutNotificationTypes {
+		if aggregatesByIntersection(key) {
 			// **union ではなく intersection (#2898)。** これは「受け取らない」
 			// 一覧なので、union にすると複数ロールに属するほど通知が減る =
 			// 厳しい方に倒れる。upstream の policy は緩い方に倒す (bool は OR、

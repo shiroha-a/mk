@@ -1963,6 +1963,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationsHandler.SetFollowRequestRepo(followRequestRepo)
 	notificationsHandler.SetInstanceRepo(instanceRepo)
 	notificationsHandler.SetEmojiRepo(emojiRepo)
+	// abuseReport 通知は read 時に権限を再確認する (#2868)。**未配線だと
+	// fail-closed で abuseReport が誰にも返らない** ので、機能ごと死ぬ。
+	notificationsHandler.SetModeratorChecker(roleService)
 	// read 時 valid-notifier filter (now-muted notifier の除外) 用 (#1775)。
 	notificationsHandler.SetMutingRepo(mutingRepo)
 	notificationsHandler.SetTestNotifier(notificationHook)
@@ -2813,6 +2816,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	federationProcessor.SetReversi(reversiService, reversiRepo, idGen, reversiFedCache)
 	federationProcessor.SetBlockingService(blockingService)
 	federationProcessor.SetAbuseReportRepo(repository.NewAbuseReportRepository(s.db), idGen)
+	// リモートからの通報 (AP Flag) もモデレーターの通知欄に出す (#2868)。
+	// **配線しないと通報の出どころで通知の有無が変わる。**
+	federationProcessor.SetAbuseReportNotification(roleService, notificationService)
 	federationProcessor.SetPinningRepo(piningRepo, idGen)
 	federationProcessor.SetRelayMarker(relaySvc)
 	federationProcessor.SetRelayActorChecker(relaySvc)

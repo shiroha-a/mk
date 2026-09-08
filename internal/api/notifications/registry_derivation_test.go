@@ -55,22 +55,26 @@ func TestTypeListsAreDerivedFromRegistry(t *testing.T) {
 		}
 	}
 
-	require.Equal(t, "FilterableTypeNames", derivedFrom["notificationTypeList"],
-		"notificationTypeList must be derived from notification.FilterableTypeNames(), not declared as a literal")
+	require.Equal(t, "UpstreamTypeNames", derivedFrom["notificationTypeList"],
+		"notificationTypeList must be derived from notification.UpstreamTypeNames(), not declared as a literal")
 	require.Equal(t, "ObsoleteTypeNames", derivedFrom["obsoleteNotificationTypeList"],
 		"obsoleteNotificationTypeList must be derived from notification.ObsoleteTypeNames(), not declared as a literal")
 
 	// 導出元と実際の値も突き合わせる (形だけ合っていて中身が空でないこと)。
-	require.Equal(t, notification.FilterableTypeNames(), notificationTypeList)
+	require.Equal(t, notification.UpstreamTypeNames(), notificationTypeList)
 	require.Equal(t, notification.ObsoleteTypeNames(), obsoleteNotificationTypeList)
 	require.NotEmpty(t, notificationTypeList)
 	require.NotEmpty(t, obsoleteNotificationTypeList)
 }
 
-// TestExcludeAllUpstreamTypesKeepsMkGoTypes pins the behaviour the derivation
-// exists for: excluding every upstream type must not silently drop mk-go
-// specific notifications.
-func TestExcludeAllUpstreamTypesKeepsMkGoTypes(t *testing.T) {
+// TestExcludeAllUpstreamTypesCoversEverything pins that a client sending only
+// the upstream types still hits the early return (#2898).
+//
+// **ここを外すと既読位置が飛ぶ。** 早期 return を抜けると maybeMarkAsRead まで
+// 進み、1 件も返していないのにユーザーが受け取っていない通知まで既読になる。
+// misskey-js の notificationTypes を送るクライアント (fork frontend の
+// 「すべて無効」を含む) が実際にこの入力を作る。
+func TestExcludeAllUpstreamTypesCoversEverything(t *testing.T) {
 	var upstream []string
 	var mkgo []string
 	for _, d := range notification.Descriptors() {
@@ -84,11 +88,13 @@ func TestExcludeAllUpstreamTypesKeepsMkGoTypes(t *testing.T) {
 	require.NotEmpty(t, upstream)
 	require.NotEmpty(t, mkgo, "no mk-go specific types; this gate is inspecting nothing")
 
-	// upstream の全種を excludeTypes に並べても「全部除外」にはならない。
-	require.False(t, emptyByTypeFilter(ListRequest{ExcludeTypes: upstream}),
-		"excluding every upstream type must not be treated as excluding everything")
+	require.True(t, emptyByTypeFilter(ListRequest{ExcludeTypes: upstream}),
+		"excluding every upstream type must still be treated as excluding everything")
 
-	// 固有型まで並べて初めて全部除外になる。
-	require.True(t, emptyByTypeFilter(ListRequest{ExcludeTypes: append(append([]string{}, upstream...), mkgo...)}),
-		"excluding upstream + mk-go types must be treated as excluding everything")
+	// 固有型は enum に入るので filter 値としては指定できる。
+	require.True(t, validNotificationTypes(mkgo),
+		"mk-go specific types must be accepted as filter values")
+
+	// 1 つでも欠ければ被覆にならない (判定が件数ではなく集合であることの確認)。
+	require.False(t, emptyByTypeFilter(ListRequest{ExcludeTypes: upstream[:len(upstream)-1]}))
 }

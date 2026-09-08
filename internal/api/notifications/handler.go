@@ -21,6 +21,13 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
+// ModeratorChecker reports whether a user has moderation privileges.
+// 実装は core/role.Service。
+type ModeratorChecker interface {
+	IsModerator(userID string) bool
+	IsAdministrator(userID string) bool
+}
+
 // Handler handles notifications-related API endpoints.
 type Handler struct {
 	svc           *notification.Service
@@ -38,6 +45,12 @@ type Handler struct {
 	testNotifier         TestNotifier
 	roleLookup           entity.RoleLookup
 	chatInvitationLookup entity.ChatInvitationLookup
+	// moderatorChecker は read 時に abuseReport 通知の閲覧権限を再確認する
+	// (#2868)。通報本文と対象ユーザー ID が Extra に入っているので、権限を
+	// 失った元モデレーターが admin/abuse-user-reports の 403 を迂回して
+	// 通知欄から読み続けられないようにする。**未配線なら abuseReport を
+	// 返さない (fail-closed)** — 判定できないまま出すより出さないほうが安全側。
+	moderatorChecker ModeratorChecker
 	// noteFieldResolver は通知に埋め込む note の後段 field (files / channel /
 	// myReaction / poll の isVoted) を埋める (#2735)。packer は Files を空スライスで
 	// 初期化するだけなので、未配線だと添付メディアが一切返らない。
@@ -58,6 +71,13 @@ func (h *Handler) SetAccessTokenRepo(r repository.AccessTokenRepository) {
 // SetRoleLookup wires the lookup used to pack roleAssigned notifications'
 // embedded role (#1559)。
 func (h *Handler) SetRoleLookup(fn entity.RoleLookup) { h.roleLookup = fn }
+
+// SetModeratorChecker wires the moderation check used to re-verify who may
+// read abuseReport notifications (#2868).
+//
+// **未配線なら abuseReport を返さない (fail-closed)。** 通報本文と対象ユーザー
+// ID が Extra に入っているので、判定できないまま出すより出さないほうが安全側。
+func (h *Handler) SetModeratorChecker(c ModeratorChecker) { h.moderatorChecker = c }
 
 // SetChatInvitationLookup wires the lookup used to pack
 // chatRoomInvitationReceived notifications' embedded invitation (#1559)。
@@ -219,17 +239,19 @@ func (h *Handler) Show(c echo.Context) error {
 }
 
 // notificationTypeList is the set counted by the excludeTypes "covers
-// everything" check (emptyByTypeFilter)。**obsolete は含まない。**
+// everything" check (emptyByTypeFilter)。**upstream 由来の型のみ。**
 //
 // **core の registry から導出する (#2898)。** 以前はここに upstream の一覧を
 // リテラルで持っていたが、core 側の `Type` 定数との間で片側更新が起きていた
 // (`importCompleted` が core にだけあった)。同じ一覧を 2 箇所に置くと、
 // 固有型を足すたびにその穴を踏む。
 //
-// **mk-go 固有の型も含む。** 含めないと upstream の 20 種を全て excludeTypes に
-// 並べただけで「全部除外された」と判定され、除外指定していない固有型の通知まで
-// 返らなくなる。
-var notificationTypeList = notification.FilterableTypeNames()
+// **obsolete も mk-go 固有も含まない。** 固有型を入れると、upstream の 20 種
+// しか送らないクライアント (misskey-js の notificationTypes を使うもの) の
+// 「すべて無効」が被覆判定を外れ、emptyByTypeFilter の早期 return を抜けて
+// 既読化まで進む。1 件も返していないのに既読位置が飛ぶ (#2833 / #2835 が塞いだ
+// 害の再オープン)。固有型は enum には入るので filter 値としては指定できる。
+var notificationTypeList = notification.UpstreamTypeNames()
 
 // obsoleteNotificationTypeList mirrors upstream `obsoleteNotificationTypes`。
 // paramDef の enum には含まれるが、excludeTypes の全指定判定には数えない。
@@ -246,11 +268,18 @@ var obsoleteNotificationTypeList = notification.ObsoleteTypeNames()
 var notificationTypeEnum = buildNotificationTypeEnum()
 
 func buildNotificationTypeEnum() map[string]bool {
-	m := make(map[string]bool, len(notificationTypeList)+len(obsoleteNotificationTypeList))
+	// mk-go 固有の型も filter 値としては受け付ける。全指定判定
+	// (notificationTypeList) には入れない — 理由は notificationTypeList の
+	// コメントを参照。
+	mkgo := notification.MkGoTypeNames()
+	m := make(map[string]bool, len(notificationTypeList)+len(obsoleteNotificationTypeList)+len(mkgo))
 	for _, t := range notificationTypeList {
 		m[t] = true
 	}
 	for _, t := range obsoleteNotificationTypeList {
+		m[t] = true
+	}
+	for _, t := range mkgo {
 		m[t] = true
 	}
 	return m
@@ -629,6 +658,12 @@ func (h *Handler) SetMutingRepo(r repository.MutingRepository) {
 // 害が小さいと判断している。notifier fetch の成否を知っているのは呼び出し元だけ
 // なので、その判定だけそちらに置く。
 func (h *Handler) filterValidNotifiers(viewerID string, rows []*notification.Notification, notifierByID map[string]*model.User) []*notification.Notification {
+	// abuseReport はモデレーション用なので、read 時に権限を再確認する (#2868)。
+	// 通報本文と対象ユーザー ID が Extra に入っているので、権限を失った元
+	// モデレーターが admin/abuse-user-reports の 403 を迂回して読み続けられない
+	// ようにする。
+	rows = h.filterModerationNotifications(viewerID, rows)
+
 	muted := map[string]bool{}
 	if h.mutingRepo != nil {
 		if ids, err := h.mutingRepo.ListMuteeIDs(viewerID); err == nil {
@@ -653,6 +688,14 @@ func (h *Handler) filterValidNotifiers(viewerID string, rows []*notification.Not
 	}
 	out := make([]*notification.Notification, 0, len(rows))
 	for _, n := range rows {
+		// **abuseReport は notifier のミュート等で落とさない (#2868)。**
+		// notifier は通報者なので、モデレーターがミュートしている相手からの
+		// 通報が通知欄に一切現れなくなる。凍結された利用者からの通報も同じ
+		// (凍結の理由がその通報の対象であることもある)。
+		if n.Type == notification.TypeAbuseReport {
+			out = append(out, n)
+			continue
+		}
 		if n.NotifierID != "" {
 			if muted[n.NotifierID] {
 				continue
@@ -828,4 +871,41 @@ func (h *Handler) TestNotification(c echo.Context) error {
 		h.testNotifier.OnTest(user.ID)
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// filterModerationNotifications drops moderation-only notifications when the
+// viewer no longer holds moderation privileges (#2868).
+//
+// **fail-closed。** checker 未配線なら abuseReport を落とす。通報本文と対象
+// ユーザー ID が Extra に入っているので、判定できないまま出すより出さないほうが
+// 安全側。administrator も通す (upstream の iAmModerator と同じ扱い)。
+//
+// **該当する通知が無ければ何もしない。** 権限判定は role 解決を伴うので、
+// 通知一覧の大半を占める通常の通知のために毎回引かない。
+func (h *Handler) filterModerationNotifications(viewerID string, rows []*notification.Notification) []*notification.Notification {
+	hasModerationRow := false
+	for _, n := range rows {
+		if n.Type == notification.TypeAbuseReport {
+			hasModerationRow = true
+			break
+		}
+	}
+	if !hasModerationRow {
+		return rows
+	}
+	allowed := false
+	if h.moderatorChecker != nil && viewerID != "" {
+		allowed = h.moderatorChecker.IsModerator(viewerID) || h.moderatorChecker.IsAdministrator(viewerID)
+	}
+	if allowed {
+		return rows
+	}
+	out := make([]*notification.Notification, 0, len(rows))
+	for _, n := range rows {
+		if n.Type == notification.TypeAbuseReport {
+			continue
+		}
+		out = append(out, n)
+	}
+	return out
 }

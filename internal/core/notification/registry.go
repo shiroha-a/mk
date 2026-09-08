@@ -76,16 +76,37 @@ var registry = []Descriptor{
 	{Type: TypeAbuseReport, Kind: KindMkGo, Produced: true},
 }
 
-// FilterableTypeNames returns the types counted by the "excludeTypes covers
+// UpstreamTypeNames returns the types counted by the "excludeTypes covers
 // everything" check, in registry order.
 //
-// **mk-go 固有の型を含めるのが要点。** 含めないと、upstream の 20 種を全て
-// excludeTypes に並べただけで「全部除外された」と判定され、**除外指定して
-// いない固有型の通知まで返らなくなる**。
-func FilterableTypeNames() []string {
+// **mk-go 固有の型を入れてはいけない (#2898)。** 一度入れて回帰させた:
+// upstream 由来のクライアント (misskey-js の notificationTypes を送るもの、
+// fork frontend の「すべて無効」を含む) は upstream の 20 種しか送らないので、
+// 固有型が集合にあると被覆判定が成立しなくなる。すると呼び出し側が早期 return
+// を抜けて既読化まで進み、**1 件も返していないのにユーザーが受け取っていない
+// 通知まで既読位置が飛ぶ** (#2833 / #2835 が塞いだ害の再オープン)。
+//
+// 固有型は enum には入るので、includeTypes / excludeTypes の値としては指定
+// できる。「upstream の全種を除外したら固有型も一緒に消える」のは、通知を
+// 全部切ったユーザーの意図にも沿う。
+func UpstreamTypeNames() []string {
 	out := make([]string, 0, len(registry))
 	for _, d := range registry {
-		if d.Kind != KindObsolete {
+		if d.Kind == KindUpstream {
+			out = append(out, string(d.Type))
+		}
+	}
+	return out
+}
+
+// MkGoTypeNames returns the mk-go specific types in registry order.
+//
+// enum (filter 値の検証) にだけ入る。全指定判定に入れない理由は
+// UpstreamTypeNames を参照。
+func MkGoTypeNames() []string {
+	out := make([]string, 0, 2)
+	for _, d := range registry {
+		if d.Kind == KindMkGo {
 			out = append(out, string(d.Type))
 		}
 	}

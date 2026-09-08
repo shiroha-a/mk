@@ -943,12 +943,12 @@ perm-check: ## router middleware の権限が upstream より緩くないか検�
 
 .PHONY: wiring-check
 wiring-check: ## router で配線が必要なものが外れていないか検査
-	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired|TestReadAllNotificationsPusherIsWired|TestWebPushProducersAreWired|TestChatPusherIsWired|TestChartManagementLoggerIsResolvedAtWiring|TestNotificationPolicyResolverIsWired|TestAbuseReportInAppNotifierIsWired|TestNormalizeWiringKeepsStringLiteralSpacing' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired|TestReadAllNotificationsPusherIsWired|TestWebPushProducersAreWired|TestChatPusherIsWired|TestChartManagementLoggerIsResolvedAtWiring|TestNotificationPolicyResolverIsWired|TestAbuseReportInAppNotifierIsWired|TestNotificationModeratorCheckerIsWired|TestRemoteAbuseReportNotificationIsWired|TestNormalizeWiringKeepsStringLiteralSpacing' -count=1 -v
 
 .PHONY: notiftype-check
 notiftype-check: ## 通知タイプの一覧が 1 箇所から導出されているか検査
-	go test ./internal/core/notification/ -run 'TestRegistryCoversEveryTypeConstant|TestRegistryKindsAreConsistent|TestFilterableIncludesMkGoTypes' -count=1 -v
-	go test ./internal/api/notifications/ -run 'TestTypeListsAreDerivedFromRegistry|TestExcludeAllUpstreamTypesKeepsMkGoTypes' -count=1 -v
+	go test ./internal/core/notification/ -run 'TestRegistryCoversEveryTypeConstant|TestRegistryKindsAreConsistent|TestMkGoTypesAreNotInUpstreamCoverage' -count=1 -v
+	go test ./internal/api/notifications/ -run 'TestTypeListsAreDerivedFromRegistry|TestExcludeAllUpstreamTypesCoversEverything' -count=1 -v
 
 .PHONY: migrationdoc-check
 migrationdoc-check: ## migration の本数を述べた doc が実態と合っているか検査

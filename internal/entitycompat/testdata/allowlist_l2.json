@@ -10,5 +10,11 @@
     "field": "type=importCompleted",
     "kind": "missing",
     "reason": "intentional: mk-go 独自の通知 type 'importCompleted' (transfer import 完了)。golden union は 'exportCompleted' のみで importCompleted は無い。upstream に対応 type が無い拡張。"
+  },
+  {
+    "layer": "Notification",
+    "field": "type=abuseReport",
+    "kind": "missing",
+    "reason": "intentional: mk-go 独自の通知 type 'abuseReport' (#2868)。通報が作られたときにモデレーター / 管理者へ送る。upstream は通報を email / system webhook / admin stream でしか流さず、通知欄に残す形を持たないので golden union にも無い。**pollVote / importCompleted と違い実際に produce される。** notifier は通報者で、reportId / targetUserId / comment を持つ。read 時にモデレーション権限を再確認するので、権限を持たない利用者にはそもそも返らない。TS へ swap back すると upstream の MkNotification に分岐が無いためヘッダも本文も空で描画される (pollVote と同じ既知の型)。"
   }
 ]
