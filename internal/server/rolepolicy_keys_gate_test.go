@@ -29,7 +29,12 @@ import (
 //
 // key ごとに理由を持つ (件数だけだと、1 つ足して 1 つ消す形で素通りする)。
 var notInFrontendUI = map[string]string{
-	"canUseChunkedUpload":                "分割アップロード (#2313) の policy。導入時から UI に無く、instance 設定 (chunkedUploadEnabled 等) だけで運用している。UI を足すかは別途判断する",
+	// **導入時 (#2313) から一覧にも編集フォーム (XFolder) にも無い。** 理由は
+	// 記録が無く分からない。backend は policy を読んでいる
+	// (internal/core/drive/chunked_upload.go) ので、API (admin/roles/update の
+	// policies は map[string]any) からは設定でき、ロール単位の制御自体は動く。
+	// 欠けているのは設定する画面だけ。UI を足すかは別途判断する。
+	"canUseChunkedUpload":                "分割アップロード (#2313)。UI が無い理由は不明",
 	"chunkedUploadMaxConcurrentSessions": "同上",
 	"chunkedUploadMaxPendingMb":          "同上",
 }
