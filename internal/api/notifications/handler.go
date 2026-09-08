@@ -218,21 +218,22 @@ func (h *Handler) Show(c echo.Context) error {
 	return c.JSON(http.StatusOK, out)
 }
 
-// notificationTypeList mirrors upstream `notificationTypes` (types.ts)。
-// **obsolete は含まない。** excludeTypes の全指定判定 (emptyByTypeFilter) が
-// upstream の `notificationTypes.every(...)` と同じ集合を見る必要があるため、
-// enum とは別に順序付きで持つ。
-var notificationTypeList = []string{
-	"note", "follow", "mention", "reply", "renote",
-	"quote", "reaction", "pollEnded", "scheduledNotePosted",
-	"scheduledNotePostFailed", "receiveFollowRequest", "followRequestAccepted",
-	"roleAssigned", "chatRoomInvitationReceived", "achievementEarned",
-	"exportCompleted", "login", "createToken", "app", "test",
-}
+// notificationTypeList is the set counted by the excludeTypes "covers
+// everything" check (emptyByTypeFilter)。**obsolete は含まない。**
+//
+// **core の registry から導出する (#2898)。** 以前はここに upstream の一覧を
+// リテラルで持っていたが、core 側の `Type` 定数との間で片側更新が起きていた
+// (`importCompleted` が core にだけあった)。同じ一覧を 2 箇所に置くと、
+// 固有型を足すたびにその穴を踏む。
+//
+// **mk-go 固有の型も含む。** 含めないと upstream の 20 種を全て excludeTypes に
+// 並べただけで「全部除外された」と判定され、除外指定していない固有型の通知まで
+// 返らなくなる。
+var notificationTypeList = notification.FilterableTypeNames()
 
 // obsoleteNotificationTypeList mirrors upstream `obsoleteNotificationTypes`。
 // paramDef の enum には含まれるが、excludeTypes の全指定判定には数えない。
-var obsoleteNotificationTypeList = []string{"pollVote", "groupInvited"}
+var obsoleteNotificationTypeList = notification.ObsoleteTypeNames()
 
 // notificationTypeEnum mirrors upstream `[...notificationTypes,
 // ...obsoleteNotificationTypes]` (types.ts)。includeTypes/excludeTypes の

@@ -1305,16 +1305,32 @@ func TestNotificationTypeEnumMatchesLists(t *testing.T) {
 	// 1 つ落としても両辺が同時に減って通ってしまう (変異で確認)。落ちた type は
 	// enum からも消えるので、正当な excludeTypes が 400 になり、同時に
 	// emptyByTypeFilter の被覆集合が縮んで「早く空を返しすぎる」側に倒れる。
-	// upstream types.ts の notificationTypes / obsoleteNotificationTypes と同順。
+	//
+	// **突き合わせ先は registry の KindUpstream (#2898)。** notificationTypeList
+	// 自体は upstream + mk-go 固有なので、upstream types.ts と直接比較すると
+	// 固有型を足すたびに落ちる。upstream との乖離を見たいのはあくまで
+	// 「upstream 由来と宣言した集合」なので、そこを固定する。
+	var upstreamTypes []string
+	for _, d := range notification.Descriptors() {
+		if d.Kind == notification.KindUpstream {
+			upstreamTypes = append(upstreamTypes, string(d.Type))
+		}
+	}
 	assert.Equal(t, []string{
 		"note", "follow", "mention", "reply", "renote",
 		"quote", "reaction", "pollEnded", "scheduledNotePosted",
 		"scheduledNotePostFailed", "receiveFollowRequest", "followRequestAccepted",
 		"roleAssigned", "chatRoomInvitationReceived", "achievementEarned",
 		"exportCompleted", "login", "createToken", "app", "test",
-	}, notificationTypeList, "upstream types.ts の notificationTypes と一致すること")
+	}, upstreamTypes, "upstream types.ts の notificationTypes と一致すること")
 	assert.Equal(t, []string{"pollVote", "groupInvited"}, obsoleteNotificationTypeList,
 		"upstream types.ts の obsoleteNotificationTypes と一致すること")
+
+	// notificationTypeList は upstream 由来を全て含み、かつ obsolete を含まない。
+	for _, ty := range upstreamTypes {
+		assert.Contains(t, notificationTypeList, ty,
+			"%s is an upstream type and must be counted by emptyByTypeFilter", ty)
+	}
 
 	require.Len(t, notificationTypeEnum,
 		len(notificationTypeList)+len(obsoleteNotificationTypeList))

@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check notiftype-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -944,6 +944,11 @@ perm-check: ## router middleware の権限が upstream より緩くないか検�
 .PHONY: wiring-check
 wiring-check: ## router で配線が必要なものが外れていないか検査
 	go test ./internal/entitycompat/... -run 'TestTimelineTogglesAreWired|TestSecurityHeadersAreWired|TestCriticalWiringCountMatchesTable|TestInviteModeratorCheckerIsWired|TestPluginPeerBodyLimitIsWired|TestPluginPeerRateLimiterIsWired|TestAPICatchallIsWired|TestPluginJobQueuesAreWired|TestPluginPeerEnqueuerIsWired|TestReadAllNotificationsPusherIsWired|TestWebPushProducersAreWired|TestChatPusherIsWired|TestChartManagementLoggerIsResolvedAtWiring|TestNormalizeWiringKeepsStringLiteralSpacing' -count=1 -v
+
+.PHONY: notiftype-check
+notiftype-check: ## 通知タイプの一覧が 1 箇所から導出されているか検査
+	go test ./internal/core/notification/ -run 'TestRegistryCoversEveryTypeConstant|TestRegistryKindsAreConsistent|TestFilterableIncludesMkGoTypes' -count=1 -v
+	go test ./internal/api/notifications/ -run 'TestTypeListsAreDerivedFromRegistry|TestExcludeAllUpstreamTypesKeepsMkGoTypes' -count=1 -v
 
 .PHONY: migrationdoc-check
 migrationdoc-check: ## migration の本数を述べた doc が実態と合っているか検査

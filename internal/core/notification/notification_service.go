@@ -35,6 +35,11 @@ const (
 	// service 側からは発火しない (poll_service が呼ばないように disable
 	// 済み)。type 自体は永続化済み notification の互換のため残す。
 	TypePollVote Type = "pollVote"
+	// TypeGroupInvited: upstream の obsoleteNotificationTypes にある型。
+	// mk-go は produce しないが、upstream が filter 値として受け付けるので
+	// registry に載せる (#2898)。定数を置かず registry だけに文字列で書くと、
+	// 定数と registry を突き合わせるゲートが「登録漏れ」と区別できなくなる。
+	TypeGroupInvited Type = "groupInvited"
 	// TypePollEnded: アンケート期限切れ時の通知 (#690)。Misskey TS の
 	// EndedPollNotificationProcessor 相当。著者 + 投票者 (ローカルのみ) に
 	// 1 件ずつ作る。core/poll.ExpiryWorker が周期 ticker で発火させる。
