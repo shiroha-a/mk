@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.8`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.8a`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -36,7 +36,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 44 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.8`) | — | — |
+| fork frontend の独自変更 | 45 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.8a`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -359,7 +359,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` の 6 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.8`。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.8a`。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -415,6 +415,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.7` | リモート絵文字を右クリックからインポートできるようにする (#2698)。投稿本文中の絵文字 (`MkCustomEmoji`) とリアクション (`MkReactionsViewer.reaction`) の**両方**に導線を足し、どちらからも同じモーダルを開く (**CherryPick は本文からはモーダル、リアクションからは endpoint 直叩きで揃っていないが踏襲しない**)。`MkRemoteEmojiEditDialog` は表示専用だったものを編集可能にし、カテゴリ・エイリアス・ライセンス・センシティブを `admin/emoji/fetch-remote-meta` の取得値で埋める。**取得に失敗しても取り込みは続く** — 相手が per-name endpoint を持たない (Mastodon 系) のは正常な結果なので、理由を出して手入力に倒す。権限は `$i.isModerator || $i.policies.canManageCustomEmojis`、ローカル絵文字には出さない。**mk-go 独自 endpoint と additive パラメータは misskey-js の autogen 型に無い**ので `as never` キャストを使う (`signup-applications.vue` と同じ理由)。**純正へは還元できない行** (純正 backend に取得 endpoint が無い) |
 | `2026.9.0-mk.7a` | リモート絵文字インポートの導線と取得回数を直す (#2698)。敵対的レビューで見つかった 3 点。(a) **本文中の絵文字からのインポートが必ず no-op だった** — `MkCustomEmoji` は `name` (ホスト無しの裸の名前) と `host` を別の prop で受け取るのに `name@host` を期待していたため、メニューは出るのにクリックしても何も起きなかった。(b) **1 回のインポートで相手へ 2 リクエスト**出ていた (ユーティリティとモーダルが別々に取得。キャッシュ無し・timeout 10 秒なので最悪 20 秒)。(c) **管理画面の「詳細」を開くだけで外向き通信が発生し**、しかも Import で既存のカテゴリ・エイリアスが空で潰れていた (props が `id`/`name`/`host`/`license`/`url` しか持たないためフォームの初期値が空)。編集フォームと上書き送信は取得結果を渡された経路 = インポート導線でだけ有効にした |
 | `2026.9.0-mk.8` | 通報の通知と、ロール単位の通知 opt-out を出す (#2868 / #2898)。`MkNotification` に `abuseReport` の分岐を足し、ヘッダ・本文・管理画面へのリンクを出す。**リンクが要点** — 通知欄で本文だけ見えても、対処するには結局どの通報かを探すことになる。あわせて**未知の型の受け皿** (`v-else`) を足した — これが無いと mk-go 固有の通知や upstream が後から足した型が**ヘッダも本文も空で描画される** (`pollVote` が実際にそうなっていた)。`roles.policy-editor` には `optOutNotificationTypes` をチェックボックスで出す (型名を手打ちさせない)。**misskey-js の autogen 型は触らない** — openapi から再生成されるので足しても次の生成で消える。mk-go 独自 policy / 通知タイプはキャストで受ける (独自 endpoint を `as never` で呼ぶのと同じ扱い)。i18n は `_mkgoNotification` を新設し、`_mkgoUnsupported` と同じく ja-JP のみ。**純正へは還元できない行** (純正 backend にこの通知タイプと policy が無い) 敵対的レビューで見つかった 3 点も含む。(a) **ロール個別の policy が UI から保存できなかった** — `roles.editor` の「fill missing policy」ループが misskey-js の `rolePolicies` (upstream キューのみ) を回すため mk-go 固有キーの枠が作られず、setter の `!= null` ガードが書き込みを黙って捨てていた。ベースロールだけは `instance.policies` を直接使うので動いており、「全員 opt-out」しか設定できない状態だった。(b) 通知のヘッダを「{name} からの通報」にした — アバターと名前は通報者のものなので、「新しい通報」だけだと通報された側と読み違えやすい。(c) `/admin/abuses?reportId=` が無視されていた (`abuses.vue` が query を読まず、backend にも絞りが無かった)。 本番確認で 4 点直した。(a) **通知に通報コメントを出さない** — 定型フォームの全文 (違反カテゴリ / 対象 / 該当 URL / 詳細) が入るので通知欄では読めない。誰からの通報かだけ伝え、中身は「通報を確認」ボタンから管理画面で見る。(b) **アイコンを警告色からエラー色へ** — `--MI_THEME-warn` は実績の `--eventAchievement` (#cb9a11) とほぼ同じ黄色で、通知一覧で並ぶと区別が付かなかった。(c) **バッジの `padding` を外した** — `.subIcon` は `box-sizing: border-box` + `line-height: 20px` で中身を中央に置くので、padding を足すと内容領域だけ縮んでアイコンが下へはみ出す (他の `t_*` はどれも padding を持たない)。(d) **1 件表示の通報を畳めないようにし、見出しも出さない** — `MkFolder` に `canCollapse` を足した (既定 true)。見出しは開閉のためのものなので畳めない状態では役に立たず、通報の 1 件表示では見出しが持つ情報 (対象 / 通報者 / コメント / 日時) が本体の「対象」「詳細」「通報者」にすべて出るので丸ごと重複していた。**DOM 構造は変えていない** — `MkFolder` は 75 ファイルで使われ Playwright の 18 spec が `folder-header` をクリックするので、`button` を `<component :is>` に置き換える案は採らず、クリックハンドラと chevron の出し分けだけにした。 (e) **対処済みの通報を通知欄で見分けられるようにした** — 未対応は赤いバッジ + `!`、対処済みはグレー + チェックにし、ヘッダに「対処済み」チップを出す。 |
+| `2026.9.0-mk.8a` | 分割アップロードのロールポリシーが設定できないのを直す (#2900)。`canUseChunkedUpload` / `chunkedUploadMaxConcurrentSessions` / `chunkedUploadMaxPendingMb` は導入時 (#2313) から**キー一覧にも編集フォームにも無く、管理画面から設定できなかった** — backend は読んでいる (`internal/core/drive/chunked_upload.go`) ので API からは設定できたが、`canUseChunkedUpload` の既定が `true` なので**特定のロールだけ禁止することが画面からできなかった**。#2898 で入れた「mk-go 固有 policy キーが fork frontend の 2 箇所に列挙されているか」のゲートが検出した。**キャストは汎用ヘルパー 2 つに集約した** (`mkGoPolicyValue` / `mkGoPolicyMeta`) — 固有キーが 4 つになり、キーごとに computed を手書きするとキャストが散らばって片側だけ直す形の穴ができる。**サーバー全体の設定が上限**である旨を caption に明記した (ロールに大きい値を入れても instance 設定は超えられない)。**純正へは還元できない行** (純正 backend にこの policy が無い) |
 
 `2026.7.0-mk.1` の内訳:
 

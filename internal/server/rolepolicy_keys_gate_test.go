@@ -28,16 +28,11 @@ import (
 // 「UI に出さないと決めた」ときだけ。
 //
 // key ごとに理由を持つ (件数だけだと、1 つ足して 1 つ消す形で素通りする)。
-var notInFrontendUI = map[string]string{
-	// **導入時 (#2313) から一覧にも編集フォーム (XFolder) にも無い。** 理由は
-	// 記録が無く分からない。backend は policy を読んでいる
-	// (internal/core/drive/chunked_upload.go) ので、API (admin/roles/update の
-	// policies は map[string]any) からは設定でき、ロール単位の制御自体は動く。
-	// 欠けているのは設定する画面だけ。UI を足すかは別途判断する。
-	"canUseChunkedUpload":                "分割アップロード (#2313)。UI が無い理由は不明",
-	"chunkedUploadMaxConcurrentSessions": "同上",
-	"chunkedUploadMaxPendingMb":          "同上",
-}
+//
+// **現在は空。** 分割アップロードの 3 キー (#2313) が導入時から UI に無く、
+// #2898 の gate が検出して #2900 で解消した。空のまま保つのが正しい状態で、
+// 足すときは「UI に出さない」と決めた理由を書くこと。
+var notInFrontendUI = map[string]string{}
 
 func TestMkGoRolePolicyKeysAreListedInFrontend(t *testing.T) {
 	root := filepath.Join(repoRootDir(t), "third_party", "misskey")
