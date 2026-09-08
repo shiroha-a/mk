@@ -78,6 +78,33 @@ func TestMkGoRolePolicyKeysAreListedInFrontend(t *testing.T) {
 				"%s の一覧に %q が無い。管理画面からこの policy を設定できなくなる", file, key)
 		}
 	}
+
+	// **一覧に載っているだけでは編集できない (#2900)。** 枠 (role.policies の
+	// キー) が作られるようになっても、編集フォーム (XFolder) が無ければ画面に
+	// 出ない。#2900 が直したのはまさにその状態なので、フォームの実在も見る。
+	editor := filepath.Join(root, "packages", "frontend", "src", "pages", "admin", "roles.policy-editor.vue")
+	folders := parsePolicyEditorFolderKeys(t, editor)
+	require.NotEmpty(t, folders, "roles.policy-editor.vue から XFolder の対象キーを読めなかった")
+	for _, key := range mkGoKeys {
+		require.Contains(t, folders, key,
+			"roles.policy-editor.vue に %q の編集フォーム (XFolder) が無い。"+
+				"キー一覧に載っていても画面に出ないので設定できない", key)
+	}
+}
+
+// parsePolicyEditorFolderKeys collects the policy keys each XFolder targets.
+//
+// `matchQuery([..., 'key'])` の 2 つ目の引数が対象キー。全 XFolder が同じ形で
+// 書かれているので、そこを拾う。
+func parsePolicyEditorFolderKeys(t *testing.T, path string) []string {
+	t.Helper()
+	src, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var out []string
+	for _, m := range regexp.MustCompile(`matchQuery\(\[[^\]]*?'([A-Za-z0-9_]+)'\s*\]\)`).FindAllSubmatch(src, -1) {
+		out = append(out, string(m[1]))
+	}
+	return out
 }
 
 // parseUpstreamRolePolicies reads misskey-js の `export const rolePolicies`.
