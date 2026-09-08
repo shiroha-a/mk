@@ -406,6 +406,11 @@ func TestNotificationShapeL2(t *testing.T) {
 	roleLookup := entity.WithRoleLookup(func(string) (map[string]any, bool) {
 		return entity.PackRole(&model.Role{ID: "r1", Name: "VIP", IsPublic: true}, 0, idGenRole, corerole.DefaultPolicies()), true
 	})
+	// #2868: abuseReport は read 時に通報の状態を引く。**渡さないと通知ごと
+	// drop される** (fail-closed) ので、shape を検査するには必須。
+	abuseLookup := entity.WithAbuseReportLookup(func(string) (entity.AbuseReportStatus, bool) {
+		return entity.AbuseReportStatus{Resolved: true, ResolvedAs: "accept", AssigneeID: "mod1"}, true
+	})
 	chatInvLookup := entity.WithChatInvitationLookup(func(invID, _ string) (map[string]any, bool) {
 		return map[string]any{
 			"id": invID, "createdAt": "2026-05-25T00:00:00.000Z",
@@ -442,7 +447,7 @@ func TestNotificationShapeL2(t *testing.T) {
 		// #2868: abuseReport は mk-go 固有。golden の union に無いので
 		// allowlist_l2.json に登録してある。**実際に produce される初めての
 		// union 外 type** なので、ここに載せないと誰も検査しない。
-		{notification.TypeAbuseReport, true, false, map[string]any{"reportId": "rep1", "targetUserId": "u2", "comment": "spam"}, nil},
+		{notification.TypeAbuseReport, true, false, map[string]any{"reportId": "rep1", "targetUserId": "u2"}, []entity.NotificationOption{abuseLookup}},
 	}
 
 	allow, err := LoadAllowlist(filepath.Join("testdata", "allowlist_l2.json"))

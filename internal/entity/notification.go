@@ -36,11 +36,32 @@ type RoleLookup func(roleID string) (map[string]any, bool)
 // (upstream NotificationEntityService が invitation==null で null を返すのと同じ)。
 type ChatInvitationLookup func(invitationID, viewerID string) (map[string]any, bool)
 
+// AbuseReportStatus is the read-time state of a report referenced by an
+// abuseReport notification (#2868).
+type AbuseReportStatus struct {
+	// Resolved reports whether a moderator has already dealt with it.
+	Resolved bool
+	// ResolvedAs is "accept" / "reject" / "" (その他)。Resolved が false の
+	// ときは空。
+	ResolvedAs string
+	// AssigneeID is the moderator who resolved it, if recorded.
+	AssigneeID string
+}
+
+// AbuseReportLookup resolves a report ID to its current state, returning false
+// when the report no longer exists (#2868).
+//
+// **read 時に引く。** 通知は作成時点の状態しか持たないので、他のモデレーターが
+// 対処しても通知欄は「未対応」のまま残る。roleAssigned が role を引き直すのと
+// 同じ形で、削除済みなら通知ごと drop する。
+type AbuseReportLookup func(reportID string) (AbuseReportStatus, bool)
+
 // packOptions carries the optional read-time lookups required by notification
 // types that embed a related entity which must be packed fresh. Threaded via
 // functional options so existing call sites stay unchanged.
 type packOptions struct {
 	role           RoleLookup
+	abuseReport    AbuseReportLookup
 	chatInvitation ChatInvitationLookup
 	// viewer は invitation pack の視点 (= notifiee)。chatRoomInvitationReceived
 	// の room.isMuted / invitationExists を viewer 視点で算出するために渡す。
@@ -53,6 +74,12 @@ type packOptions struct {
 
 // NotificationOption configures optional notification packing behavior.
 type NotificationOption func(*packOptions)
+
+// WithAbuseReportLookup supplies the AbuseReportLookup used to pack the current
+// state of abuseReport notifications (#2868)。
+func WithAbuseReportLookup(fn AbuseReportLookup) NotificationOption {
+	return func(o *packOptions) { o.abuseReport = fn }
+}
 
 // WithRoleLookup supplies the RoleLookup used to pack roleAssigned
 // notifications (#1559)。
@@ -247,6 +274,27 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 	}
 	// chatRoomInvitationReceived は Extra["invitationId"] を read 時に packed
 	// invitation へ解決する。削除済 / lookup 未配線なら通知ごと drop する。
+	// abuseReport は Extra["reportId"] を read 時に引き直して現在の状態を出す
+	// (#2868)。通知は作成時点しか持たないので、他のモデレーターが対処しても
+	// 通知欄が「未対応」のまま残る。削除済 / lookup 未配線なら通知ごと drop
+	// する (roleAssigned と同じ形)。
+	if n.Type == notification.TypeAbuseReport {
+		reportID, _ := n.Extra["reportId"].(string)
+		if opts == nil || opts.abuseReport == nil {
+			return nil
+		}
+		status, ok := opts.abuseReport(reportID)
+		if !ok {
+			return nil
+		}
+		out["resolved"] = status.Resolved
+		if status.ResolvedAs != "" {
+			out["resolvedAs"] = status.ResolvedAs
+		}
+		if status.AssigneeID != "" {
+			out["assigneeId"] = status.AssigneeID
+		}
+	}
 	if n.Type == notification.TypeChatRoomInvitationReceived {
 		invID, _ := n.Extra["invitationId"].(string)
 		if opts == nil || opts.chatInvitation == nil {

@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/core/notification"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
@@ -22,6 +23,15 @@ type stubModeratorChecker struct {
 
 func (s stubModeratorChecker) IsModerator(userID string) bool     { return s.moderators[userID] }
 func (s stubModeratorChecker) IsAdministrator(userID string) bool { return s.admins[userID] }
+
+// wireAbuseLookup は read 時の状態引き当てを配線する (#2868)。
+// **未配線だと abuseReport が drop される** (fail-closed) ので、通報の通知を
+// 期待するテストは必ず通す。
+func wireAbuseLookup(h *Handler, resolved bool) {
+	h.SetAbuseReportLookup(func(string) (entity.AbuseReportStatus, bool) {
+		return entity.AbuseReportStatus{Resolved: resolved}, true
+	})
+}
 
 func seedAbuseReport(t *testing.T, svc *notification.Service, notifieeID string) {
 	t.Helper()
@@ -47,6 +57,7 @@ func listNotifications(t *testing.T, h *Handler, userID string) []map[string]any
 func TestShow_AbuseReportVisibleToModerator(t *testing.T) {
 	h, svc := newTestHandler(t)
 	h.SetModeratorChecker(stubModeratorChecker{moderators: map[string]bool{"mod1": true}})
+	wireAbuseLookup(h, false)
 	seedAbuseReport(t, svc, "mod1")
 
 	out := listNotifications(t, h, "mod1")
@@ -59,6 +70,7 @@ func TestShow_AbuseReportVisibleToModerator(t *testing.T) {
 func TestShow_AbuseReportVisibleToAdministrator(t *testing.T) {
 	h, svc := newTestHandler(t)
 	h.SetModeratorChecker(stubModeratorChecker{admins: map[string]bool{"root": true}})
+	wireAbuseLookup(h, false)
 	seedAbuseReport(t, svc, "root")
 
 	out := listNotifications(t, h, "root")
@@ -113,8 +125,36 @@ func TestShow_AbuseReportSurvivesNotifierMute(t *testing.T) {
 	require.NoError(t, mutingRepo.Create(&model.Muting{ID: "mu1", MuterID: "mod1", MuteeID: "reporter"}))
 	h.SetRepos(userRepo, noteRepo)
 	h.SetMutingRepo(mutingRepo)
+	wireAbuseLookup(h, false)
 	seedAbuseReport(t, svc, "mod1")
 
 	out := listNotifications(t, h, "mod1")
 	require.Len(t, out, 1, "ミュートした相手からの通報も通知欄に出す")
+}
+
+// **対処済みの通報は resolved=true で返る (#2868)。** 通知は作成時点の状態しか
+// 持たないので、他のモデレーターが対処しても通知欄が「未対応」のまま残ると、
+// 同じ通報に二重で当たることになる。
+func TestShow_AbuseReportCarriesResolvedState(t *testing.T) {
+	h, svc := newTestHandler(t)
+	h.SetModeratorChecker(stubModeratorChecker{moderators: map[string]bool{"mod1": true}})
+	wireAbuseLookup(h, true)
+	seedAbuseReport(t, svc, "mod1")
+
+	out := listNotifications(t, h, "mod1")
+	require.Len(t, out, 1)
+	assert.Equal(t, true, out[0]["resolved"], "対処済みが read 時に反映されること")
+}
+
+// 通報が削除されていたら通知ごと落とす。
+func TestShow_AbuseReportDroppedWhenReportGone(t *testing.T) {
+	h, svc := newTestHandler(t)
+	h.SetModeratorChecker(stubModeratorChecker{moderators: map[string]bool{"mod1": true}})
+	h.SetAbuseReportLookup(func(string) (entity.AbuseReportStatus, bool) {
+		return entity.AbuseReportStatus{}, false
+	})
+	seedAbuseReport(t, svc, "mod1")
+
+	out := listNotifications(t, h, "mod1")
+	assert.Empty(t, out, "削除済みの通報を指す通知は返さない")
 }

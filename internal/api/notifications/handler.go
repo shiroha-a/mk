@@ -45,6 +45,11 @@ type Handler struct {
 	testNotifier         TestNotifier
 	roleLookup           entity.RoleLookup
 	chatInvitationLookup entity.ChatInvitationLookup
+	// abuseReportLookup は abuseReport 通知の現在の状態を read 時に引く
+	// (#2868)。**未配線なら abuseReport を返さない** (roleAssigned と同じ
+	// fail-closed)。状態を出せないまま「未対応」に見せると、対処済みの通報に
+	// 別のモデレーターが二重で当たる。
+	abuseReportLookup entity.AbuseReportLookup
 	// moderatorChecker は read 時に abuseReport 通知の閲覧権限を再確認する
 	// (#2868)。通報本文と対象ユーザー ID が Extra に入っているので、権限を
 	// 失った元モデレーターが admin/abuse-user-reports の 403 を迂回して
@@ -79,6 +84,10 @@ func (h *Handler) SetRoleLookup(fn entity.RoleLookup) { h.roleLookup = fn }
 // ID が Extra に入っているので、判定できないまま出すより出さないほうが安全側。
 func (h *Handler) SetModeratorChecker(c ModeratorChecker) { h.moderatorChecker = c }
 
+// SetAbuseReportLookup wires the read-time state lookup for abuseReport
+// notifications (#2868)。未配線なら abuseReport 通知を返さない (fail-closed)。
+func (h *Handler) SetAbuseReportLookup(fn entity.AbuseReportLookup) { h.abuseReportLookup = fn }
+
 // SetChatInvitationLookup wires the lookup used to pack
 // chatRoomInvitationReceived notifications' embedded invitation (#1559)。
 func (h *Handler) SetChatInvitationLookup(fn entity.ChatInvitationLookup) {
@@ -103,6 +112,7 @@ func (h *Handler) notificationOptions(viewerID string) []entity.NotificationOpti
 	return []entity.NotificationOption{
 		entity.WithRoleLookup(h.roleLookup),
 		entity.WithChatInvitationLookup(h.chatInvitationLookup),
+		entity.WithAbuseReportLookup(h.abuseReportLookup),
 		entity.WithViewer(viewerID),
 		entity.WithNoteFieldResolver(h.noteFieldResolver),
 	}

@@ -415,12 +415,30 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// roleAssigned 通知 (#1559): local public role 割当時に発火し、entity 側で
 	// read 時に packed role へ解決する。lookup は role 削除済なら (nil,false)。
 	roleService.SetRoleAssignNotifier(notificationHook)
+	abuseReportRepoForNotif := repository.NewAbuseReportRepository(s.db)
 	roleNotifLookup := func(roleID string) (map[string]any, bool) {
 		r, err := roleRepo.FindByID(roleID)
 		if err != nil || r == nil {
 			return nil, false
 		}
 		return entity.PackRole(r, roleService.CountAssignedUsers(roleID), idGen, corerole.DefaultPolicies()), true
+	}
+	// abuseReport 通知の現在の状態を read 時に引く (#2868)。通知は作成時点しか
+	// 持たないので、他のモデレーターが対処しても通知欄は「未対応」のまま残る。
+	// 削除済みなら false を返して通知ごと drop する (roleAssigned と同じ形)。
+	abuseNotifLookup := func(reportID string) (entity.AbuseReportStatus, bool) {
+		r, err := abuseReportRepoForNotif.FindByID(reportID)
+		if err != nil || r == nil {
+			return entity.AbuseReportStatus{}, false
+		}
+		st := entity.AbuseReportStatus{Resolved: r.Resolved}
+		if r.ResolvedAs != nil {
+			st.ResolvedAs = *r.ResolvedAs
+		}
+		if r.AssigneeID != nil {
+			st.AssigneeID = *r.AssigneeID
+		}
+		return st, true
 	}
 	followingService.SetNotificationHook(notificationHook)
 	reactionService.SetNotificationHook(notificationHook)
@@ -1970,6 +1988,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationsHandler.SetMutingRepo(mutingRepo)
 	notificationsHandler.SetTestNotifier(notificationHook)
 	notificationsHandler.SetRoleLookup(roleNotifLookup)
+	notificationsHandler.SetAbuseReportLookup(abuseNotifLookup)
 	// 通知に埋め込む note の files / channel / myReaction を埋める (#2735)。
 	notificationsHandler.SetNoteFieldResolver(noteFieldResolver)
 	// notifications/create の 'app' 通知で header/icon を token.name/iconUrl に
@@ -2695,6 +2714,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// followers note を本人以外に embed しない (= fail-closed)。
 	notificationPublisher.SetFollowingChecker(followingRepo)
 	notificationPublisher.SetRoleLookup(roleNotifLookup)
+	notificationPublisher.SetAbuseReportLookup(abuseNotifLookup)
 	// streaming の通知 payload にも note の files / channel を載せる (#2735)。
 	notificationPublisher.SetFieldResolver(noteFieldResolver)
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
