@@ -57,6 +57,14 @@ var defaults = map[string]any{
 	"canUseChunkedUpload":                true,
 	"chunkedUploadMaxConcurrentSessions": 4,
 	"chunkedUploadMaxPendingMb":          1024,
+	// optOutNotificationTypesはmk-go独自 (#2898)。ロール単位で受け取らない通知
+	// タイプを列挙する。型ごとにcanReceiveXxxを増やす形にすると、固有通知を
+	// 足すたびにpolicyが増えるので1キーにまとめている。
+	//
+	// **集約はintersection** (role_service.goのaggregatePolicyValues)。
+	// uploadableFileTypesと同じset unionにすると、複数ロールに属するほど通知が
+	// 減る = 厳しい方に倒れ、upstreamの「緩い方に倒す」思想と食い違う。
+	"optOutNotificationTypes": []string{},
 }
 
 // Defaults returns a mutable copy of the host's native policy defaults.

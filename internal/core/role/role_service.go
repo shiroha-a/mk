@@ -69,6 +69,12 @@ const (
 	PolicyChunkedUploadMaxConcurrentSessions = "chunkedUploadMaxConcurrentSessions"
 	PolicyChunkedUploadMaxPendingMb          = "chunkedUploadMaxPendingMb"
 
+	// PolicyOptOutNotificationTypes は mk-go 独自 (#2898)。ロール単位で
+	// 受け取らない通知タイプを列挙する。**集約は intersection** —
+	// aggregatePolicyValues の []string 既定 (set union) と逆向きなので、
+	// key 名で分岐している。
+	PolicyOptOutNotificationTypes = "optOutNotificationTypes"
+
 	// 以下は #1025 で admin 系 endpoint の gate に使う policy key。upstream
 	// Misskey TS は ApiCallService.ts で requiredRolePolicy のみで gate し
 	// (requireModerator/Admin flag は admin/emoji や avatar-decorations に
@@ -1004,6 +1010,13 @@ func aggregatePolicyValues(key string, baseVal any, values []any) any {
 		}
 		return baseVal
 	case []string:
+		if key == PolicyOptOutNotificationTypes {
+			// **union ではなく intersection (#2898)。** これは「受け取らない」
+			// 一覧なので、union にすると複数ロールに属するほど通知が減る =
+			// 厳しい方に倒れる。upstream の policy は緩い方に倒す (bool は OR、
+			// 数値は max) ので、全ロールが切っている型だけを切る。
+			return aggregateStringSetIntersection(values, baseVal)
+		}
 		// upstream RoleService.calc('uploadableFileTypes', set union) と等価。
 		// 全 role の値を flatten + trim + 空文字 skip した set union を deterministic
 		// に sort して返す。各 entry は []string (DefaultPolicies) または []any
@@ -1034,6 +1047,53 @@ func aggregateStringSetUnion(values []any, baseVal any) any {
 	}
 	out := make([]string, 0, len(set))
 	for s := range set {
+		out = append(out, s)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// aggregateStringSetIntersection merges the supplied candidate values by set
+// intersection, returning a deterministic []string.
+//
+// **optOutNotificationTypes 専用 (#2898)。** 「受け取らない」一覧なので、
+// set union だと複数ロールに属するほど通知が減る = 厳しい方に倒れる。
+// 全ロールが切っている型だけを切ることで、upstream の policy 集約 (bool は OR、
+// 数値は max) と同じ「緩い方に倒す」向きに揃う。
+//
+// **型不一致の候補は無視する。** normalizeStringSlice は型不一致に nil を、
+// 「slice だが 0 件」に非 nil の空 slice を返す。前者を intersection に
+// 参加させると結果が必ず空になり、不正な値を持つ role が 1 つあるだけで
+// 他 role の設定が消える。後者は「何も切らない」の明示なので参加させる
+// (結果は空 = 何も切らない)。
+//
+// 有効な候補が 1 つも無ければ baseVal をそのまま返す (union と同じ fail-soft)。
+func aggregateStringSetIntersection(values []any, baseVal any) any {
+	var acc map[string]struct{}
+	for _, v := range values {
+		norm := normalizeStringSlice(v)
+		if norm == nil {
+			continue
+		}
+		cur := make(map[string]struct{}, len(norm))
+		for _, s := range norm {
+			cur[s] = struct{}{}
+		}
+		if acc == nil {
+			acc = cur
+			continue
+		}
+		for k := range acc {
+			if _, ok := cur[k]; !ok {
+				delete(acc, k)
+			}
+		}
+	}
+	if acc == nil {
+		return baseVal
+	}
+	out := make([]string, 0, len(acc))
+	for s := range acc {
 		out = append(out, s)
 	}
 	sort.Strings(out)

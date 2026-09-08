@@ -311,7 +311,7 @@ resolverから本体のpolicy解決を呼び戻してはならない。同じ入
 
 contributionの`Priority`は`0..2`で、大きいpriorityのgroupだけをnative roleと同じ規則で集約する。同じprovider内では同じ`Key`と`Order`の組を重複できない。`UseDefault: true`では`Value`を無視し、そのkeyのnative defaultを同じpriorityへ参加させる。
 
-値はnative keyの型に一致させる。boolはOR、integer-native policyは最大値、`chatAvailability`は`available`、`readonly`、`unavailable`の順で寛容な値、`uploadableFileTypes`はtrim後のset unionを使う。integer-native policyは`int`、host `int`範囲内の`int64`、または有限かつhost `int`範囲内の`float64`を受理する。`float64`の小数部は拒否・切り捨てず、結果のpolicy mapでも小数として維持する。typed integerは`2^53`を超えても`float64`へ変換せず比較する。
+値はnative keyの型に一致させる。boolはOR、integer-native policyは最大値、`chatAvailability`は`available`、`readonly`、`unavailable`の順で寛容な値、`uploadableFileTypes`はtrim後のset unionを使う。`optOutNotificationTypes`は**set intersectionを使う** — 「受け取らない」一覧なのでunionにすると複数ロールに属するほど通知が減り、他のpolicyが緩い方へ倒れるのと向きが食い違うため (#2898)。型不一致の候補は集約から除外し、有効な候補が1件も無ければnative defaultへ戻す。integer-native policyは`int`、host `int`範囲内の`int64`、または有限かつhost `int`範囲内の`float64`を受理する。`float64`の小数部は拒否・切り捨てず、結果のpolicy mapでも小数として維持する。typed integerは`2^53`を超えても`float64`へ変換せず比較する。
 
 受理されたinteger-native policyはpolicy map内ではhost `int`の精度を維持する。consumerが分・MBなどを`time.Duration`、byte数、件数などの固定幅表現へ変換するときにだけ、consumer固有の境界処理を行う。容量・件数などは表現可能範囲へ飽和し、rate limitの最小間隔が正方向overflowする場合は実質的な無期限拒否を避けるため元の間隔へ戻す。大きな正数がwrapして負数・無制限扱いになることはなく、通常範囲の値・単位・instance/server capの優先順位は変わらない。
 
