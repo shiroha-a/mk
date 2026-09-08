@@ -94,15 +94,30 @@ func parseUpstreamRolePolicies(t *testing.T, path string) map[string]bool {
 	return out
 }
 
-// parseMkGoPolicyKeyList reads a `[...Misskey.rolePolicies, 'a', 'b']` literal.
+// parseMkGoPolicyKeyList reads a `const NAME = [...Misskey.rolePolicies, 'a']`
+// declaration and verifies the declared name is what the file actually loops over.
+//
+// **リテラルの存在だけでは足りない。** 宣言を残したままループを
+// `Misskey.rolePolicies` に戻す形が、まさに #2898 で 2 段階で踏んだ症状
+// (固有キーの meta が落ちて「ベース値を使用」表示、再編集で priority が 0 に
+// 戻る) を再現する。宣言だけ見る gate はそれを緑で通す (実測)。未使用 const は
+// vue-tsc も拾わない (`noUnusedLocals: false`)。
 func parseMkGoPolicyKeyList(t *testing.T, path string) []string {
 	t.Helper()
 	src, err := os.ReadFile(path)
 	require.NoError(t, err)
-	block := regexp.MustCompile(`\[\s*\.\.\.Misskey\.rolePolicies\s*,([^\]]*)\]`).FindSubmatch(src)
-	require.NotNil(t, block, "`[...Misskey.rolePolicies, ...]` の一覧が見つからない (書式が変わった?)")
+	decl := regexp.MustCompile(`const\s+([A-Za-z0-9_]+)\s*:[^=]*=\s*\[\s*\.\.\.Misskey\.rolePolicies\s*,([^\]]*)\]`).FindSubmatch(src)
+	require.NotNil(t, decl, "`const NAME = [...Misskey.rolePolicies, ...]` の宣言が見つからない (書式が変わった?)")
+
+	name := string(decl[1])
+	loop := regexp.MustCompile(`for\s*\(\s*const\s+[A-Za-z0-9_]+\s+of\s+` + regexp.QuoteMeta(name) + `\b`)
+	require.True(t, loop.Match(src),
+		"%s は宣言されているだけで、`for (const … of %s)` が無い。"+
+			"宣言を残したままループを Misskey.rolePolicies に戻すと、"+
+			"mk-go 固有 policy が管理画面から設定できなくなる", name, name)
+
 	var out []string
-	for _, m := range regexp.MustCompile(`'([A-Za-z0-9_]+)'`).FindAllSubmatch(block[1], -1) {
+	for _, m := range regexp.MustCompile(`'([A-Za-z0-9_]+)'`).FindAllSubmatch(decl[2], -1) {
 		out = append(out, string(m[1]))
 	}
 	return out
