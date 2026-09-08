@@ -62,7 +62,7 @@ make dev
 | `make check` | `fmt` → `lint` → `test`。コミット前に必須 |
 | `make gates` | 静的 parity ゲートを一括実行 (内訳は下の「静的 parity ゲート」表) |
 | `make version` | mk-go / 互換 Misskey / submodule のバージョンを表示 |
-| `make frontend-check` | 同梱フロントエンドの型チェック (`vue-tsc --noEmit`) と、**submodule のソースを読むゲート**。ビルド成果物を作らないので安全。ゲートを `make gates` に入れないのは、あちらが submodule 無しで回る前提で、混ぜると checkout していない環境で skip され「検査していないのに緑」になるため (#2892)。**eslint と vitest は入っていない** — CI の同名 job はそれらと `make plugins-all` / 統合バイナリの build を別 step で走らせる |
+| `make frontend-check` | 同梱フロントエンドの型チェック (`vue-tsc --noEmit`)、**submodule のソースを読むゲート**、**eslint** (#2906)。ビルド成果物を作らないので安全。ゲートを `make gates` に入れないのは、あちらが submodule 無しで回る前提で、混ぜると checkout していない環境で skip され「検査していないのに緑」になるため (#2892)。**vitest は入っていない** (`make frontend-test`) — CI の同名 job はそれと `make plugins-all` / 統合バイナリの build を別 step で走らせる |
 | `make diff-check` | 差分比較ハーネスを作り直して実行 (クリーン DB 前提のため) |
 | `make playwright-check` | Playwright を作り直して実行 (同上) |
 | `make e2e-down-all` | 検証用スタックを一括撤去。**本番 project `mk` は対象外** |
@@ -137,6 +137,7 @@ cd mk && docker compose up -d
 | `make plugin-vet` | 同梱プラグインを`go vet` + 既定無効を検査（CIの`build` jobの2 step相当） |
 | `make plugin-test` | 同梱プラグインのテスト (別 module なので `./...` に含まれない) |
 | `make plugin-doc-check` | `docs/plugins/authoring.md` の Go スニペットが実際にコンパイルできるか |
+| `make frontend-lint` | fork frontend の eslint。CI `frontend-check` job の Lint step と同じで、範囲は `package.json` の script が持つ (`--quiet "src/**/*.{ts,vue}"`)。`make frontend-check` から呼ばれる (#2906)。実測 55 秒 |
 | `make frontend-test` | fork frontend の vitest (`test/unit/**/*.test.ts`)。CI `frontend-check` job の Unit test step と同じ |
 | `make plugin-dev` | プラグインを編集しながら動かす (`PLUGIN=plugins/status`) |
 
@@ -309,7 +310,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 | check | workflow | 内容 |
 |---|---|---|
 | `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 |
-| `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + submodule のソースを読むゲート + eslint + vitest + `make plugins-all` と統合バイナリの build。**`make frontend-check` は型とゲートまで**なので、job 全体は [ci.md](ci.md) の手元再現を使う |
+| `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + submodule のソースを読むゲート + eslint + vitest + `make plugins-all` と統合バイナリの build。**`make frontend-check` は型・ゲート・eslint まで** (#2906) なので、job 全体は [ci.md](ci.md) の手元再現を使う |
 | `plugin-tests` | CI | 同梱プラグインのテスト (別 module なので `go list ./...` に入らない) |
 | `build-and-push` / `-bundled` | Docker | image がビルドできるか (PR では push しない) |
 | `spec (mk-go 1/4)` 〜 `4/4` | Playwright | ブラウザからの統合互換。TS backend での実行は `workflow_dispatch` のみ |

@@ -51,6 +51,27 @@ frontend-check: ## fork の frontend を型チェックし、submodule 依存の
 	# (#2892)。
 	MK_FRONTEND_GATES_REQUIRE_SUBMODULE=1 go test ./internal/server/ \
 		-run 'TestCreditImageOriginsCoverAboutMisskey|TestMkGoRolePolicyKeysAreListedInFrontend' -count=1
+	# **eslint も回す (#2906)。** CI は別 step で `pnpm eslint` を回しており、
+	# ここに無いと**手元で緑でも CI が落ちる**。#2903 で実際に踏んだ (デッドコードを
+	# 消したときの空行が @stylistic/no-multiple-empty-lines で落ちた)。個別ファイルに
+	# `npx eslint` を掛けても CI と同じ glob ではないので見落とす。
+	#
+	# **script を呼ぶ (引数を書き写さない)。** 書き写すと package.json と
+	# ドリフトする (#2841 の `make test` と CI の flag が同じ形でずれた)。
+	$(MAKE) frontend-lint
+
+.PHONY: frontend-lint
+frontend-lint: ## fork の frontend を eslint で検査 (CI と同じ範囲)
+	# CI の `Lint (eslint)` step と同じ。範囲は package.json の script が持つ
+	# (`--quiet "src/**/*.{ts,vue}"`)。**`eslint .` にしないこと** — upstream が
+	# lint していない test/ まで拾い、追従のたびに他人の負債で落ちる。
+	#
+	# **`npm run` で script を呼ぶ (引数を書き写さない)。** 書き写すと
+	# package.json とドリフトする (#2841 の `make test` と CI の flag が同じ形で
+	# ずれた)。CI は `pnpm eslint` だが手元に pnpm があるとは限らないので、
+	# 同じ script を呼べる npx/npm 側に寄せる (frontend-check / frontend-test も
+	# npx を使っている)。
+	cd third_party/misskey/packages/frontend && npm run --silent eslint
 
 .PHONY: frontend-test
 frontend-test: ## fork の frontend の vitest を実行
