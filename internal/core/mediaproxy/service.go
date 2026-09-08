@@ -291,18 +291,24 @@ func (s *Service) Authorize(ctx context.Context, rawURL, sig string) error {
 // Fetch downloads the remote URL (or resolves a local file), applies image
 // processing per the requested mode, and returns the result. out selects the
 // encoder format (FormatWebP / FormatAVIF) for resize-class modes.
-func (s *Service) Fetch(ctx context.Context, rawURL string, mode ProxyMode, out OutputFormat) (*ProxyResult, error) {
+// Fetch retrieves and processes a remote image.
+//
+// **animated=false はアニメーションを静止画にする (#2905)。** mode と直交する —
+// upstream は `?emoji=1&static=1` を「emoji のサイズで、ただし静止画」として扱う
+// (`FileServerProxyHandler.ts` の `animated: !('static' in query)`)。mode を
+// ModeStatic に倒すとリサイズ寸法まで変わってしまうので、別の軸で持つ。
+func (s *Service) Fetch(ctx context.Context, rawURL string, mode ProxyMode, out OutputFormat, animated bool) (*ProxyResult, error) {
 	// ローカルファイルの場合はdriveStorageから直接取得
 	filesPrefix := s.instanceURL + "/files/"
 	if strings.HasPrefix(rawURL, filesPrefix) {
-		return s.resolveLocal(ctx, rawURL, filesPrefix, mode, out)
+		return s.resolveLocal(ctx, rawURL, filesPrefix, mode, out, animated)
 	}
 
-	return s.fetchRemote(ctx, rawURL, mode, out)
+	return s.fetchRemote(ctx, rawURL, mode, out, animated)
 }
 
 // resolveLocal fetches a file from local drive storage by access key.
-func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, mode ProxyMode, out OutputFormat) (*ProxyResult, error) {
+func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, mode ProxyMode, out OutputFormat, animated bool) (*ProxyResult, error) {
 	primaryKey := strings.TrimPrefix(rawURL, filesPrefix)
 	// パスに/が含まれる場合は先頭のセグメントだけを使う
 	if idx := strings.Index(primaryKey, "/"); idx >= 0 {
@@ -387,7 +393,7 @@ func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, 
 	if isUnknownBinary(contentType) {
 		contentType = http.DetectContentType(data)
 	}
-	return s.processAndReturn(ctx, data, contentType, mode, out, rawURL)
+	return s.processAndReturn(ctx, data, contentType, mode, out, rawURL, animated)
 }
 
 // swapToVariant looks up the DriveFile by access key and returns the
@@ -430,7 +436,7 @@ func (s *Service) swapToVariant(accessKey string, mode ProxyMode) (string, strin
 }
 
 // fetchRemote downloads a file from a remote URL.
-func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode, out OutputFormat) (*ProxyResult, error) {
+func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode, out OutputFormat, animated bool) (*ProxyResult, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("mediaproxy: create request: %w", err)
@@ -479,7 +485,7 @@ func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode
 		contentType = http.DetectContentType(data)
 	}
 
-	return s.processAndReturn(ctx, data, contentType, mode, out, rawURL)
+	return s.processAndReturn(ctx, data, contentType, mode, out, rawURL, animated)
 }
 
 // OutputFormat selects the encoder used by resize-class processing modes.
@@ -504,7 +510,7 @@ const (
 // 呼び出し失敗のときは dummy PNG にフォールバックして frontend を壊さない
 // (#637 M2)。bytes 経由なので local /files/ source も remote URL も同じ
 // path で扱える。
-func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType string, mode ProxyMode, out OutputFormat, sourceURL string) (*ProxyResult, error) {
+func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType string, mode ProxyMode, out OutputFormat, sourceURL string, animated bool) (*ProxyResult, error) {
 	if isVideoMIME(contentType) && isResizeMode(mode) {
 		if s.videoThumbClient == nil {
 			return makeDummyPNG(), nil
@@ -529,7 +535,11 @@ func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType
 	// resize 経路に乗せると静止画化される (#941)。emoji / avatar / preview の
 	// ようにアニメ表示が期待される mode では pass-through で保持する。
 	// static / badge は明示的に静止画を要求しているので従来通り decode する。
-	if isAnimatedFormat(contentType) {
+	//
+	// **animated=false なら pass-through しない (#2905)。** 利用者の
+	// 「アニメーション画像を再生しない」設定 (disableShowingAnimatedImages) が
+	// `?emoji=1&static=1` として届くが、mode だけを見ていたので無視されていた。
+	if isAnimatedFormat(contentType) && animated {
 		switch mode {
 		case ModeEmoji, ModeAvatar, ModePreview:
 			return s.passThrough(data, contentType)

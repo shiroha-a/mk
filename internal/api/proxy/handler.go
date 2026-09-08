@@ -79,7 +79,7 @@ func (h *Handler) Handle(c echo.Context) error {
 	out := parseOutputFormat(c)
 
 	// Fetch + 画像処理
-	result, err := h.service.Fetch(c.Request().Context(), rawURL, mode, out)
+	result, err := h.service.Fetch(c.Request().Context(), rawURL, mode, out, parseAnimated(c))
 	if err != nil {
 		if errors.Is(err, mediaproxy.ErrNotFound) {
 			if c.QueryParam("fallback") != "" {
@@ -163,6 +163,16 @@ func parseMode(c echo.Context) mediaproxy.ProxyMode {
 		return mediaproxy.ModeBadge
 	}
 	return mediaproxy.ModeDefault
+}
+
+// parseAnimated reports whether animated formats may be returned as-is.
+//
+// **mode と直交する (#2905)。** `?emoji=1&static=1` は「emoji のサイズで、ただし
+// 静止画」を意味する。parseMode は emoji を先に見るので mode は ModeEmoji のままで、
+// 静止画かどうかはここで別に判定する (upstream の
+// `animated: !('static' in query)` と同じ)。
+func parseAnimated(c echo.Context) bool {
+	return c.QueryParam("static") == ""
 }
 
 // parseOutputFormat picks the encoder format from `?avif=1` (explicit opt-in,

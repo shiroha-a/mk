@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -221,4 +222,40 @@ func TestEmojiRedirectHandler_SetsAssetCSP(t *testing.T) {
 	assert.Equal(t, http.StatusFound, rec.Code)
 	assert.Equal(t, "default-src 'none'; style-src 'unsafe-inline'",
 		rec.Header().Get("Content-Security-Policy"))
+}
+
+// #2905: `?static=1` は raw へ 302 せず media proxy へ回す。
+//
+// **利用者の「アニメーション画像を再生しない」設定がここで落ちていた。**
+// frontend の getStaticImageUrl は `/emoji/` を見つけると searchParams を足すだけ
+// なので、raw へ 302 するとクエリごと失われて設定が無視される。
+func TestEmojiRedirectHandler_StaticGoesThroughProxy(t *testing.T) {
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		"smile|": {Name: "smile", PublicURL: "https://cdn.example/anim.gif"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "static=1")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	assert.Equal(t, "/proxy/emoji.webp", loc.Path, "media proxy へ回すこと")
+	assert.Equal(t, "https://cdn.example/anim.gif", loc.Query().Get("url"))
+	assert.Equal(t, "1", loc.Query().Get("static"), "static を落とすと設定が無視される")
+	assert.Equal(t, "1", loc.Query().Get("emoji"), "emoji のリサイズ寸法を保つこと")
+}
+
+// static が無ければ従来どおり raw へ 302 する (回帰していないこと)。
+func TestEmojiRedirectHandler_WithoutStaticKeepsDirectRedirect(t *testing.T) {
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		"smile|": {Name: "smile", PublicURL: "https://cdn.example/anim.gif"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "https://cdn.example/anim.gif", rec.Header().Get(echo.HeaderLocation))
 }

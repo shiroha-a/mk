@@ -40,7 +40,7 @@ func TestIsVideoMIME(t *testing.T) {
 // 表示で degrade)。
 func TestProcessAndReturn_VideoFallback_NoGenerator(t *testing.T) {
 	s := testService(nil)
-	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4")
+	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4", true)
 	assert.NoError(t, err)
 	defer res.Body.Close()
 	assert.Equal(t, "image/png", res.ContentType)
@@ -70,7 +70,7 @@ func TestProcessAndReturn_VideoGeneratorRoundtrip_POST(t *testing.T) {
 	s.SetVideoThumbnailGenerator(gen.URL)
 	s.videoThumbClient = gen.Client()
 
-	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4")
+	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4", true)
 	require.NoError(t, err)
 	defer res.Body.Close()
 	assert.Equal(t, "image/webp", res.ContentType, "thumbnail must be re-encoded to webp")
@@ -93,7 +93,7 @@ func TestProcessAndReturn_VideoGeneratorRoundtrip_GET(t *testing.T) {
 	s.SetVideoThumbnailGeneratorWithMode(gen.URL, "get")
 	s.videoThumbClient = gen.Client()
 
-	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4")
+	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4", true)
 	require.NoError(t, err)
 	defer res.Body.Close()
 	assert.Equal(t, "image/webp", res.ContentType)
@@ -111,7 +111,7 @@ func TestProcessAndReturn_VideoGeneratorFailure(t *testing.T) {
 	s.SetVideoThumbnailGenerator(gen.URL)
 	s.videoThumbClient = gen.Client()
 
-	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4")
+	res, err := s.processAndReturn(context.Background(), []byte("fake video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4", true)
 	require.NoError(t, err)
 	defer res.Body.Close()
 	assert.Equal(t, "image/png", res.ContentType)
@@ -132,7 +132,7 @@ func TestProcessAndReturn_VideoLocalSource_POSTForwardsBytes(t *testing.T) {
 	s.SetVideoThumbnailGenerator(gen.URL)
 	s.videoThumbClient = gen.Client()
 
-	res, err := s.processAndReturn(context.Background(), []byte("local video bytes"), "video/mp4", ModePreview, FormatWebP, "https://example.com/files/abc123")
+	res, err := s.processAndReturn(context.Background(), []byte("local video bytes"), "video/mp4", ModePreview, FormatWebP, "https://example.com/files/abc123", true)
 	require.NoError(t, err)
 	defer res.Body.Close()
 	assert.True(t, hit, "POST mode forwards bytes regardless of source URL origin")
@@ -241,7 +241,7 @@ func TestProcessAndReturn_VideoLocalSource_GETSkipsGenerator(t *testing.T) {
 	s.SetVideoThumbnailGeneratorWithMode(gen.URL, "get")
 	s.videoThumbClient = gen.Client()
 
-	res, err := s.processAndReturn(context.Background(), []byte("local"), "video/mp4", ModePreview, FormatWebP, "https://example.com/files/abc123")
+	res, err := s.processAndReturn(context.Background(), []byte("local"), "video/mp4", ModePreview, FormatWebP, "https://example.com/files/abc123", true)
 	require.NoError(t, err)
 	defer res.Body.Close()
 	assert.Equal(t, "image/png", res.ContentType, "must fall back to dummy PNG")
@@ -281,7 +281,7 @@ func TestProcessAndReturn_VideoGeneratorRoundtrip_UDS_POST(t *testing.T) {
 	s.SetVideoThumbnailGenerator("unix://" + sockPath)
 	require.NotNil(t, s.videoThumbClient, "UDS client must be wired")
 
-	res, err := s.processAndReturn(context.Background(), []byte("uds video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4")
+	res, err := s.processAndReturn(context.Background(), []byte("uds video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4", true)
 	require.NoError(t, err)
 	defer res.Body.Close()
 	assert.Equal(t, "image/webp", res.ContentType)
@@ -306,7 +306,7 @@ func TestProcessAndReturn_VideoGeneratorNonImageRejected(t *testing.T) {
 	s.SetVideoThumbnailGenerator(gen.URL)
 	s.videoThumbClient = gen.Client()
 
-	res, err := s.processAndReturn(context.Background(), []byte("video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4")
+	res, err := s.processAndReturn(context.Background(), []byte("video bytes"), "video/mp4", ModePreview, FormatWebP, "https://remote.example/clip.mp4", true)
 	require.NoError(t, err)
 	defer res.Body.Close()
 	assert.Equal(t, "image/png", res.ContentType, "non-image response must be rejected → dummy PNG")
@@ -326,7 +326,7 @@ func TestProcessAndReturn_ResizeMode_NonConvertibleMIME_NotFound(t *testing.T) {
 	s := testService(nil)
 	html := []byte("<html><body><script>alert(1)</script></body></html>")
 	for _, mode := range []ProxyMode{ModeEmoji, ModeAvatar, ModeStatic, ModePreview, ModeBadge} {
-		_, err := s.processAndReturn(context.Background(), html, "text/html", mode, FormatWebP, "https://remote.example/x.html")
+		_, err := s.processAndReturn(context.Background(), html, "text/html", mode, FormatWebP, "https://remote.example/x.html", true)
 		assert.ErrorIs(t, err, ErrNotFound, "mode=%v: 非変換 MIME は 404", mode)
 	}
 }

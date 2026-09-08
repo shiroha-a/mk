@@ -2,6 +2,7 @@ package server
 
 import (
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 
@@ -108,6 +109,19 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		}
 		if target == "" {
 			return c.NoContent(http.StatusNotFound)
+		}
+		// **`?static=1` は media proxy へ回す (#2905)。** 利用者の
+		// 「アニメーション画像を再生しない」設定 (disableShowingAnimatedImages) が
+		// frontend からこの形で届く (`getStaticImageUrl` は `/emoji/` を見つけると
+		// searchParams を足すだけ)。raw へ 302 するとクエリが落ちて設定が無視される。
+		// upstream (`ServerService.ts`) も同じく media proxy へ飛ばしている。
+		//
+		// **allowlist は通る** — proxy は DB に実在する URL だけを許可し、
+		// `emoji.publicUrl` / `originalUrl` はその対象。
+		if _, wantsStatic := c.QueryParams()["static"]; wantsStatic {
+			q := url.Values{"url": {target}, "emoji": {"1"}, "static": {"1"}}
+			c.Response().Header().Set("Content-Security-Policy", assetCSP)
+			return c.Redirect(http.StatusFound, "/proxy/emoji.webp?"+q.Encode())
 		}
 		// upstream (`ServerService.ts` の `/emoji/:path`) はここで
 		// `default-src 'none'; style-src 'unsafe-inline'` を付けるので header を

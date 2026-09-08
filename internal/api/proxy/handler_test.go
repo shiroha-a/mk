@@ -640,3 +640,37 @@ func TestHandle_RecursiveProxy_MkGoUA(t *testing.T) {
 
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
+
+// #2905: `static` は mode と直交する軸。
+//
+// **parseMode は emoji を static より先に見る。** `?emoji=1&static=1` は
+// 「emoji のリサイズ寸法で、ただし静止画」なので、mode を ModeStatic に倒すと
+// 寸法まで変わってしまう。静止画かどうかは parseAnimated が別に判定する
+// (upstream の `animated: !('static' in query)` と同じ)。
+func TestParseAnimated(t *testing.T) {
+	e := echo.New()
+
+	tests := []struct {
+		name  string
+		query string
+		want  bool
+		mode  mediaproxy.ProxyMode
+	}{
+		{"クエリ無しはアニメーションを保つ", "/proxy/image.webp?url=x", true, mediaproxy.ModeDefault},
+		{"emoji のみ", "/proxy/image.webp?url=x&emoji=1", true, mediaproxy.ModeEmoji},
+		// **これが #2905 の本体。** mode は ModeEmoji のまま、animated だけ false。
+		{"emoji + static", "/proxy/image.webp?url=x&emoji=1&static=1", false, mediaproxy.ModeEmoji},
+		{"avatar + static", "/proxy/image.webp?url=x&avatar=1&static=1", false, mediaproxy.ModeAvatar},
+		{"static 単独", "/proxy/image.webp?url=x&static=1", false, mediaproxy.ModeStatic},
+		// 値は問わない (upstream も `'static' in query` で見る)。
+		{"static=0 でも静止画扱い", "/proxy/image.webp?url=x&emoji=1&static=0", false, mediaproxy.ModeEmoji},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.query, nil)
+			c := e.NewContext(req, httptest.NewRecorder())
+			assert.Equal(t, tt.want, parseAnimated(c), "parseAnimated")
+			assert.Equal(t, tt.mode, parseMode(c), "mode は static で変わらないこと")
+		})
+	}
+}
