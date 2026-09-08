@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	neturl "net/url"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -151,3 +152,84 @@ func TestAvatarHandler_EmptyAcctFallback(t *testing.T) {
 // `parseAcct` は `users.ParseAcct` に一本化したので、テストも
 // `internal/api/users/explore_test.go` の `TestParseAcct` に集約した (#2791)。
 // avatar 経路は構築時に localHost を小文字化して渡す (avatar.go)。
+
+// newAvatarStaticContext builds a request with `?static=1` (#2908).
+func newAvatarStaticContext(t *testing.T, acct string) (echo.Context, *httptest.ResponseRecorder) {
+	t.Helper()
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodGet, "/avatar/@"+acct+"?static=1", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.SetPath("/avatar/@:acct")
+	c.SetParamNames("acct")
+	c.SetParamValues(acct)
+	return c, rec
+}
+
+// #2908: `?static=1` はリモートアバターを静止画プロキシへ回す。
+//
+// **frontend がこの形で叩けるようにするのが目的。** それまで frontend は
+// `getStaticImageUrl('/avatar/@u@h')` を呼んでおり、それは
+// `<mediaProxy>/static.webp?url=<instance>/avatar/@u@h&static=1` になる。
+// mk-go の proxy は allowlist が DB に実在する URL だけを通すので、その URL は
+// 403 + `max-age=86400` になり、静止画になるどころか 1 日壊れていた。
+func TestAvatarHandler_StaticGoesThroughProxy(t *testing.T) {
+	withMediaProxy(t)
+	avatarURL := "https://remote.example/avatars/bob.gif"
+	remote := "remote.example"
+	repo := &stubAvatarLookup{users: map[string]*model.User{
+		"bob|remote.example": {ID: "u2", Username: "bob", Host: &remote, AvatarURL: &avatarURL},
+	}}
+	h := avatarHandler(repo, "go.example")
+
+	c, rec := newAvatarStaticContext(t, "bob@remote.example")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	assert.Equal(t, "https://local.example/proxy/avatar.webp", loc.Scheme+"://"+loc.Host+loc.Path,
+		"media proxy の base を使うこと")
+	assert.Equal(t, avatarURL, loc.Query().Get("url"))
+	assert.Equal(t, "1", loc.Query().Get("static"), "static を落とすと設定が無視される")
+	assert.Equal(t, "1", loc.Query().Get("avatar"), "avatar のリサイズ寸法を保つこと")
+	assert.NotEmpty(t, loc.Query().Get("sig"),
+		"sig が無いと Authorize が DB allowlist に落ちる (mention chip はホットパス)")
+}
+
+// **identicon は static でもプロキシへ回さない (#2908)。**
+//
+// アニメーションしないうえ、相対 URL なので allowlist に無く 403 になる。
+func TestAvatarHandler_StaticKeepsIdenticonDirect(t *testing.T) {
+	withMediaProxy(t)
+	repo := &stubAvatarLookup{users: map[string]*model.User{
+		"dave|": {ID: "u4", Username: "dave"},
+	}}
+	h := avatarHandler(repo, "go.example")
+
+	c, rec := newAvatarStaticContext(t, "dave")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "/identicon/u4", rec.Header().Get(echo.HeaderLocation),
+		"identicon をプロキシへ回すと allowlist に無い URL になって 403 になる")
+}
+
+// static が無ければ従来どおり (回帰していないこと)。
+func TestAvatarHandler_WithoutStaticUnchanged(t *testing.T) {
+	withMediaProxy(t)
+	avatarURL := "https://remote.example/avatars/bob.gif"
+	remote := "remote.example"
+	repo := &stubAvatarLookup{users: map[string]*model.User{
+		"bob|remote.example": {ID: "u2", Username: "bob", Host: &remote, AvatarURL: &avatarURL},
+	}}
+	h := avatarHandler(repo, "go.example")
+
+	c, rec := newAvatarTestContext(t, "bob@remote.example")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	assert.Equal(t, "", loc.Query().Get("static"), "static を付けないこと")
+	assert.Equal(t, "1", loc.Query().Get("avatar"))
+}

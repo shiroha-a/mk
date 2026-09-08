@@ -140,23 +140,45 @@ func (c *MediaURLContext) ProxiedURL(rawURL string, mode proxyMode) string {
 // StaticEmojiProxyURL builds the proxy URL that serves an emoji as a still
 // image (#2905).
 //
-// **`ProxiedURL` を使うのが要点。** `/proxy` を手で組むと `sig` が付かず、
-// `Authorize` が HMAC ではなく DB allowlist の 4 テーブル UNION に落ちる。
-// `/emoji/:path` はリアクションアイコンのホットパスなので毎リクエスト DB を
-// 引くことになり、しかも DB の瞬断が 403 + `max-age=86400` で 1 日
-// キャッシュされる (このファイルが #2792 で潰したのと同じ罠)。
-//
-// **emoji と static の両方を立てる。** proxyMode は 1 つしか選べないが、
-// 静止画の絵文字は「emoji のリサイズ寸法で、ただしアニメーションを止める」
-// 意味なので両方が要る。
-//
 // context 未配線なら空文字を返す (呼び出し元は raw URL へ 302 する)。
 func StaticEmojiProxyURL(rawURL string) string {
+	return staticProxyURL(rawURL, modeEmoji)
+}
+
+// StaticAvatarProxyURL builds the proxy URL that serves an avatar as a still
+// image (#2908).
+//
+// `/avatar/@acct` の redirect 先に使う。frontend は静止画設定のとき
+// `getStaticImageUrl('/avatar/@u@h')` を呼び、それは
+// `<mediaProxy>/static.webp?url=<instance>/avatar/@u@h&static=1` になる。
+// **その URL は allowlist のどの列にも無い**ので 403 + `max-age=86400` で
+// 1 日壊れる。`/avatar/` 側が static を受けて自分でプロキシ URL を組めば、
+// frontend は素の `/avatar/@u@h?static=1` を出せばよくなる。
+//
+// context 未配線なら空文字を返す。
+func StaticAvatarProxyURL(rawURL string) string {
+	return staticProxyURL(rawURL, modeAvatar)
+}
+
+// staticProxyURL builds a signed proxy URL that keeps the mode's resize
+// geometry while forcing a still image.
+//
+// **`ProxiedURL` と同じ組み立てを使うのが要点 (#2905)。** `/proxy` を手で組むと
+// `sig` が付かず、`Authorize` が HMAC ではなく DB allowlist の 4 テーブル UNION に
+// 落ちる。`/emoji/:path` も `/avatar/@acct` も mention chip / リアクションアイコンの
+// ホットパスなので毎リクエスト DB を引くことになり、しかも DB の瞬断が
+// 403 + `max-age=86400` で 1 日キャッシュされる (このファイルが #2792 で潰したのと
+// 同じ罠)。
+//
+// **mode の flag と static の両方を立てる。** proxyMode は 1 つしか選べないが、
+// 静止画は「その mode のリサイズ寸法で、ただしアニメーションを止める」意味なので
+// 両方が要る (upstream の `animated: !('static' in query)` と同じ考え方)。
+func staticProxyURL(rawURL string, mode proxyMode) string {
 	c := currentMediaURLContext()
 	if c == nil {
 		return ""
 	}
-	filename, flag := modeEmoji.fileAndFlag()
+	filename, flag := mode.fileAndFlag()
 	q := url.Values{}
 	q.Set("url", rawURL)
 	if flag != "" {
