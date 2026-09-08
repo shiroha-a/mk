@@ -44,8 +44,11 @@ func TestReportAbuse_CreatesInAppNotification(t *testing.T) {
 		assert.Equal(t, notification.TypeAbuseReport, in.Type)
 		assert.Equal(t, "u1", in.NotifierID, "notifier は通報者")
 		assert.Equal(t, "u2", in.Extra["targetUserId"])
-		assert.Equal(t, "spam", in.Extra["comment"])
 		assert.NotEmpty(t, in.Extra["reportId"], "管理画面の該当通報へ飛ぶために要る")
+		// **通報コメントは入れない (#2868)。** 定型フォームの全文が入るので
+		// 通知欄に出しても読めず、出さない以上 Redis に本文の複製を残す理由が
+		// 無い (権限を失った元モデレーターに読まれる面も減る)。
+		assert.NotContains(t, in.Extra, "comment", "通報コメントを通知に持たせない")
 	}
 	assert.ElementsMatch(t, []string{"mod1", "mod2"},
 		[]string{notifier.created[0].NotifieeID, notifier.created[1].NotifieeID})

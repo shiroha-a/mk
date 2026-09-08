@@ -52,7 +52,8 @@ func TestProcess_FlagNotifiesModerators(t *testing.T) {
 		assert.Equal(t, notification.TypeAbuseReport, in.Type)
 		assert.Equal(t, "bob", in.Extra["targetUserId"])
 		assert.NotEmpty(t, in.Extra["reportId"])
-		assert.NotEmpty(t, in.Extra["comment"])
+		// 通報コメントは入れない (#2868)。local 経路と同じ。
+		assert.NotContains(t, in.Extra, "comment")
 	}
 	assert.ElementsMatch(t, []string{"mod1", "mod2"},
 		[]string{notifier.created[0].NotifieeID, notifier.created[1].NotifieeID})

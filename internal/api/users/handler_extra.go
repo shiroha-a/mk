@@ -340,10 +340,12 @@ func (h *Handler) notifyModeratorsOfAbuseReport(report *model.AbuseUserReport) {
 			NotifieeID: m.ID,
 			NotifierID: report.ReporterID,
 			Type:       notification.TypeAbuseReport,
+			// **comment は入れない (#2868)。** 通報コメントは定型フォームの全文が
+			// 入るので通知欄に出しても読めず、出さない以上 Redis に通報本文の
+			// 複製を残す理由が無い (権限を失った元モデレーターに読まれる面も減る)。
 			Extra: map[string]any{
 				"reportId":     report.ID,
 				"targetUserId": report.TargetUserID,
-				"comment":      report.Comment,
 			},
 		})
 		if nerr != nil && !errors.Is(nerr, notification.ErrSelfNotification) {
