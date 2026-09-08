@@ -1,13 +1,14 @@
 package server
 
 import (
-	"github.com/shiroha-a/mk/internal/entity"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/labstack/echo/v4"
 
 	apiusers "github.com/shiroha-a/mk/internal/api/users"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -87,30 +88,39 @@ func avatarHandler(userRepo avatarUserLookup, localHost string) echo.HandlerFunc
 		// **その URL は allowlist のどの列にも無い**ので 403 + `max-age=86400` に
 		// なり、静止画になるどころか 1 日壊れる (#2905 のレビューで実測)。
 		//
-		// **identicon / 同一オリジンは対象外。** どちらもアニメーションしないし、
-		// プロキシに通すと allowlist に無い URL になって同じ 403 を踏む。
-		if _, wantsStatic := c.QueryParams()["static"]; wantsStatic {
-			if proxied := entity.StaticAvatarProxyURL(*target); proxied != "" && isRemoteAvatarTarget(*target) {
+		// **同一オリジンでもプロキシへ回す。** ローカルの drive アバターも
+		// GIF / APNG / animated WebP になりうるので、リモートに限ると静止画設定が
+		// ローカルユーザーにだけ効かない。allowlist は判断材料にならない —
+		// `StaticAvatarProxyURL` は必ず `sig` を付け、`Authorize` は allowlist より
+		// **先に** HMAC を見る (`/emoji/:path` が無条件にプロキシへ回しているのと
+		// 同じ形、#2905)。
+		if _, wantsStatic := c.QueryParams()["static"]; wantsStatic && proxyableAvatarTarget(*target) {
+			if proxied := entity.StaticAvatarProxyURL(*target); proxied != "" {
 				return c.Redirect(http.StatusFound, proxied)
 			}
+			// context 未配線 (テスト等) なら従来どおり raw へ 302 する。
 		}
 		// 同一オリジン・相対 URL (identicon fallback を含む) は wrap されない。
 		return c.Redirect(http.StatusFound, entity.ProxyAvatarURLString(*target))
 	}
 }
 
-// isRemoteAvatarTarget reports whether the avatar URL points somewhere the
-// media proxy would wrap (#2908).
+// proxyableAvatarTarget reports whether the media proxy can fetch the avatar
+// URL at all (#2908).
 //
-// `entity.ProxyAvatarURL` が wrap する条件と同じにする必要がある。identicon
-// fallback (`/identicon/<id>`) や同一オリジンの drive URL は wrap されないので、
-// static のためだけにプロキシへ回すと allowlist に無い URL になって 403 になる。
-//
-// 判定は「絶対 URL かどうか」で足りる — 相対 URL は必ず同一オリジンで、絶対 URL の
-// うち同一オリジンのものは ProxyAvatarURLString が raw のまま返すため、その戻り値と
-// 元の URL が同じかどうかで見分けられる。
-func isRemoteAvatarTarget(rawURL string) bool {
-	return entity.ProxyAvatarURLString(rawURL) != rawURL
+// 除外するのは identicon fallback (`/identicon/<id>`) だけ。相対 URL なので
+// `mediaproxy.Fetch` は同一オリジン判定 (`instanceURL + "/files/"` の接頭一致) を
+// 外れて `fetchRemote` に落ち、`httpClient.Do` が `unsupported protocol scheme` で
+// 失敗する。結果は **404 + `max-age=86400`** で、静止画設定を入れた利用者だけが
+// アバターを 1 日失う。identicon は PNG を生成して返すのでアニメーションもせず、
+// 回す理由が無い。
+func proxyableAvatarTarget(rawURL string) bool {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return false
+	}
+	// proxy が実際に取得できるのは http(s) だけ。
+	return u.Scheme == "http" || u.Scheme == "https"
 }
 
 func strPtr(s string) *string { return &s }

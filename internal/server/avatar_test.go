@@ -199,7 +199,9 @@ func TestAvatarHandler_StaticGoesThroughProxy(t *testing.T) {
 
 // **identicon は static でもプロキシへ回さない (#2908)。**
 //
-// アニメーションしないうえ、相対 URL なので allowlist に無く 403 になる。
+// 相対 URL なので `mediaproxy.Fetch` の同一オリジン判定 (`<instance>/files/` の
+// 接頭一致) を外れて `fetchRemote` に落ち、`unsupported protocol scheme` で失敗して
+// 404 + `max-age=86400` になる。PNG を生成して返すのでアニメーションもしない。
 func TestAvatarHandler_StaticKeepsIdenticonDirect(t *testing.T) {
 	withMediaProxy(t)
 	repo := &stubAvatarLookup{users: map[string]*model.User{
@@ -212,6 +214,34 @@ func TestAvatarHandler_StaticKeepsIdenticonDirect(t *testing.T) {
 	require.Equal(t, http.StatusFound, rec.Code)
 	assert.Equal(t, "/identicon/u4", rec.Header().Get(echo.HeaderLocation),
 		"identicon をプロキシへ回すと allowlist に無い URL になって 403 になる")
+}
+
+// **同一オリジンのアバターもプロキシへ回す (#2908)。**
+//
+// ローカルの drive アバターも GIF / APNG / animated WebP になりうるので、
+// リモートに限ると静止画設定 (disableShowingAnimatedImages / dataSaver.avatar) が
+// ローカルユーザーにだけ効かない。allowlist は関係ない — `StaticAvatarProxyURL` は
+// 必ず `sig` を付け、`Authorize` は allowlist より先に HMAC を見る。
+func TestAvatarHandler_StaticProxiesSameOriginAvatar(t *testing.T) {
+	withMediaProxy(t)
+	avatarURL := "https://local.example/files/abc.gif"
+	repo := &stubAvatarLookup{users: map[string]*model.User{
+		"carol|": {ID: "u5", Username: "carol", AvatarURL: &avatarURL},
+	}}
+	h := avatarHandler(repo, "local.example")
+
+	c, rec := newAvatarStaticContext(t, "carol")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	assert.Equal(t, "https://local.example/proxy/avatar.webp", loc.Scheme+"://"+loc.Host+loc.Path,
+		"同一オリジンでも静止画にするにはプロキシを通す必要がある")
+	assert.Equal(t, avatarURL, loc.Query().Get("url"))
+	assert.Equal(t, "1", loc.Query().Get("static"))
+	assert.NotEmpty(t, loc.Query().Get("sig"),
+		"sig が無いと Authorize が DB allowlist に落ちる")
 }
 
 // static が無ければ従来どおり (回帰していないこと)。
