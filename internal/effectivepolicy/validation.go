@@ -73,7 +73,12 @@ func Defaults() map[string]any {
 	result := make(map[string]any, len(defaults))
 	for key, value := range defaults {
 		if values, ok := value.([]string); ok {
-			result[key] = append([]string(nil), values...)
+			// **`append([]string(nil), 空...)` は nil を返す。** 空の既定を持つ
+			// policy (optOutNotificationTypes) がそのまま JSON の `null` になり、
+			// meta.policies を読む frontend が配列を期待して壊れる (#2898 の
+			// 本番確認で実際に `null` が返っていた)。uploadableFileTypes は
+			// 既定が非空なので露見していなかった。
+			result[key] = append(make([]string, 0, len(values)), values...)
 			continue
 		}
 		result[key] = value

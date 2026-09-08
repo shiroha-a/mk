@@ -1608,9 +1608,11 @@ func clonePolicyValue(value any) any {
 func cloneMutablePolicyValue(value any) (any, bool) {
 	switch value := value.(type) {
 	case []string:
-		return append([]string(nil), value...), true
+		// 空 slice を nil に潰さない (#2898)。JSON で `null` になり、
+		// 配列を期待する frontend が壊れる。
+		return append(make([]string, 0, len(value)), value...), true
 	case []any:
-		return append([]any(nil), value...), true
+		return append(make([]any, 0, len(value)), value...), true
 	default:
 		return value, false
 	}
