@@ -1605,3 +1605,17 @@ func (s *Service) FindRole(roleID string) (*model.Role, error) {
 func (s *Service) IsAlreadyAssigned(err error) bool {
 	return errors.Is(err, ErrAlreadyAssigned)
 }
+
+// OptOutNotificationTypes returns the notification types userID has opted out
+// of through role policy (#2898).
+//
+// 実体は optOutNotificationTypes policy の集約結果。値が無い / 型が違うときは
+// nil (= 何も切らない) を返す。core/notification.PolicyResolver を満たす。
+func (s *Service) OptOutNotificationTypes(userID string) []string {
+	policies := s.GetUserPolicies(userID)
+	v, ok := policies[PolicyOptOutNotificationTypes]
+	if !ok {
+		return nil
+	}
+	return normalizeStringSlice(v)
+}

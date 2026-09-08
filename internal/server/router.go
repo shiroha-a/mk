@@ -2747,6 +2747,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// readAllNotifications 分岐 (表示中の OS 通知を閉じる) が発火しない。
 	notificationService.SetReadAllPusher(webPushService)
 	notificationService.SetPacker(notificationPublisher)
+	// ロール単位の通知 opt-out (#2898)。**配線しないと optOutNotificationTypes
+	// を設定しても効かない** — Service は resolver 未設定なら全ての通知を通す。
+	notificationService.SetPolicyResolver(roleService)
 	driveService.SetStreamingPublisher(drivePublisher)
 	// folder の folderCreated/folderUpdated/folderDeleted も同じ drive channel
 	// publisher で配信する (#1564)。

@@ -186,6 +186,18 @@ type Service struct {
 	packer              Packer
 	noteUnreadRepo      repository.NoteUnreadRepository
 	unreadPublishDelay  time.Duration
+	policyResolver      PolicyResolver
+}
+
+// PolicyResolver reports the notification types a user has opted out of
+// through role policy (#2898).
+//
+// **狭い interface で受ける。** policy map をそのまま渡すと、この package が
+// policy のキー名と値の型を知ることになる。
+type PolicyResolver interface {
+	// OptOutNotificationTypes returns the opted-out type names for userID.
+	// An empty or nil result means "receive everything".
+	OptOutNotificationTypes(userID string) []string
 }
 
 // NewService constructs a new NotificationService.
@@ -255,6 +267,32 @@ func (s *Service) SetPacker(p Packer) {
 	s.packer = p
 }
 
+// SetPolicyResolver wires role-policy based notification opt-out (#2898).
+//
+// **router で配線しないと効かない。** 未配線なら全ての通知が通る
+// (fail-open) ので、配線漏れは「設定したのに効かない」形で現れる。
+// internal/entitycompat の wiring gate がそれを検出する。
+func (s *Service) SetPolicyResolver(r PolicyResolver) {
+	s.policyResolver = r
+}
+
+// passesRolePolicy reports whether the notifiee's roles permit receiving a
+// notification of the given type.
+//
+// 未配線 / 空の一覧は許可側に倒す。通知の取りこぼしより「切ったのに届く」
+// ほうが害が小さく、passesReceiveConfig (個人ごと) の fail-soft とも揃う。
+func (s *Service) passesRolePolicy(notifieeID string, typ Type) bool {
+	if s.policyResolver == nil {
+		return true
+	}
+	for _, t := range s.policyResolver.OptOutNotificationTypes(notifieeID) {
+		if t == string(typ) {
+			return false
+		}
+	}
+	return true
+}
+
 // Errors returned by Service.
 var (
 	// ErrSelfNotification is returned when attempting to create a notification where notifier == notifiee.
@@ -263,6 +301,11 @@ var (
 
 // Create writes a notification entry to the user's notification stream.
 // notifier == notifiee の場合は何もしない (Misskey本家の挙動を踏襲)。
+// Create persists a notification and publishes the stream events for it.
+//
+// **抑制されると (nil, nil) を返す。** ロール policy の opt-out
+// (SetPolicyResolver) に当たった場合で、エラーではない。戻り値の
+// Notification を使う呼び出し元は nil を確認すること。
 func (s *Service) Create(ctx context.Context, in CreateInput) (*Notification, error) {
 	return s.createWithPush(ctx, in, nil)
 }
@@ -283,6 +326,14 @@ func (s *Service) createWithPush(ctx context.Context, in CreateInput, pushFn fun
 	}
 	if in.NotifierID != "" && in.NotifierID == in.NotifieeID {
 		return nil, ErrSelfNotification
+	}
+	// ロール単位の opt-out (#2898)。**Hook ではなく Service に置く** —
+	// 固有の通知は API から直接 Create を呼ぶ経路があり、Hook 側の
+	// passesReceiveConfig (個人ごと) だけではそこを通らない。
+	//
+	// 抑制は (nil, nil)。エラーではないので呼び出し元のログに出さない。
+	if !s.passesRolePolicy(in.NotifieeID, in.Type) {
+		return nil, nil
 	}
 
 	now := time.Now()
