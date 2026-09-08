@@ -971,10 +971,15 @@ func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolic
 	// 詳細は policyEntry.explicit のコメント。
 	onlyExplicit := aggregatesByIntersection(key)
 	for _, prio := range []int{2, 1} {
-		group := filterByPriority(collected, prio, onlyExplicit)
-		if len(group) > 0 {
-			return aggregatePolicyValues(key, baseVal, group)
+		// **グループの有無は explicit を見ずに判定する (#2898)。** 絞った結果で
+		// 判定すると `useDefault=true, priority=2` (= このロールは高優先度で
+		// ベース値を使う) だけの層で group が空になり、cascade が priority 0 まで
+		// 滑り落ちる。intersection の policy でだけ upstream の cascade
+		// (「priority 2 に 1 件でもあればそのグループだけ集約」) が崩れる。
+		if !hasPriority(collected, prio) {
+			continue
 		}
+		return aggregatePolicyValues(key, baseVal, filterByPriority(collected, prio, onlyExplicit))
 	}
 	// priority=0 fallback: 全 entry を対象に集約する (= 各 role が default
 	// fallback でも、複数 role の数値 max / bool OR が反映される)。
@@ -986,6 +991,17 @@ func computePolicy(key string, baseVal any, roleOverrides []map[string]rolePolic
 		values = append(values, e.value)
 	}
 	return aggregatePolicyValues(key, baseVal, values)
+}
+
+// hasPriority reports whether any entry declares the given priority,
+// regardless of whether it set an explicit value.
+func hasPriority(entries []policyEntry, prio int) bool {
+	for _, e := range entries {
+		if e.priority == prio {
+			return true
+		}
+	}
+	return false
 }
 
 func filterByPriority(entries []policyEntry, prio int, onlyExplicit bool) []any {

@@ -1307,9 +1307,11 @@ func TestNotificationTypeEnumMatchesLists(t *testing.T) {
 	// emptyByTypeFilter の被覆集合が縮んで「早く空を返しすぎる」側に倒れる。
 	//
 	// **突き合わせ先は registry の KindUpstream (#2898)。** notificationTypeList
-	// 自体は upstream + mk-go 固有なので、upstream types.ts と直接比較すると
-	// 固有型を足すたびに落ちる。upstream との乖離を見たいのはあくまで
-	// 「upstream 由来と宣言した集合」なので、そこを固定する。
+	// (= UpstreamTypeNames) と同じ集合になるので直接比較でも今は通るが、
+	// **見たいのは「upstream 由来と宣言した集合」**であって被覆判定用の list では
+	// ない。両者を同一視すると、被覆判定の中身を変えたときにこのテストの意味も
+	// 一緒に変わる (初版で固有型を list に入れて既読位置が飛ぶ回帰を起こしたとき、
+	// テストは緑のままだった)。
 	var upstreamTypes []string
 	for _, d := range notification.Descriptors() {
 		if d.Kind == notification.KindUpstream {

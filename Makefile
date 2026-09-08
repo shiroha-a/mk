@@ -50,7 +50,7 @@ frontend-check: ## fork の frontend を型チェックし、submodule 依存の
 	# skip され「検査していないのに緑」になる。REQUIRE を渡して skip を禁じる
 	# (#2892)。
 	MK_FRONTEND_GATES_REQUIRE_SUBMODULE=1 go test ./internal/server/ \
-		-run TestCreditImageOriginsCoverAboutMisskey -count=1
+		-run 'TestCreditImageOriginsCoverAboutMisskey|TestMkGoRolePolicyKeysAreListedInFrontend' -count=1
 
 .PHONY: frontend-test
 frontend-test: ## fork の frontend の vitest を実行

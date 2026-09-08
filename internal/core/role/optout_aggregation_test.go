@@ -167,3 +167,43 @@ func TestUploadableFileTypes_UnsetRolesStillParticipate(t *testing.T) {
 	require.Equal(t, []string{"image/*", "video/*"}, got,
 		"union の policy では未設定ロールの base も集約に参加する")
 }
+
+// TestOptOutNotificationTypes_PriorityCascadeMatchesOtherPolicies pins that the
+// intersection branch does not break the upstream priority cascade (#2898).
+//
+// **絞った結果でグループの有無を判定すると cascade が崩れる。**
+// `useDefault=true, priority=2` (= このロールは高優先度でベース値を使う) だけの
+// 層で group が空になり、priority 0 まで滑り落ちて下位ロールの設定が効いてしまう。
+// intersection の policy でだけ挙動が変わるのは、他の policy と揃わない。
+func TestOptOutNotificationTypes_PriorityCascadeMatchesOtherPolicies(t *testing.T) {
+	optOutBase := []string{}
+	uploadBase := []string{"image/*"}
+
+	// priority 2 の useDefault ロール + priority 0 の明示ロール。
+	overrides := func(key string, low []string) []map[string]rolePolicyOverride {
+		return []map[string]rolePolicyOverride{
+			{key: {Priority: 2, UseDefault: true}},
+			{key: {Priority: 0, Value: low}},
+		}
+	}
+
+	gotOptOut := computePolicy(PolicyOptOutNotificationTypes, optOutBase,
+		overrides(PolicyOptOutNotificationTypes, []string{"abuseReport"}), nil)
+	gotUpload := computePolicy("uploadableFileTypes", uploadBase,
+		overrides("uploadableFileTypes", []string{"video/*"}), nil)
+
+	require.Equal(t, optOutBase, gotOptOut,
+		"priority 2 が useDefault でも、その層で決まる (priority 0 へ滑り落ちない)")
+	require.Equal(t, uploadBase, gotUpload,
+		"比較対象: union の policy も同じ形で base に落ち着く")
+}
+
+// priority 2 に明示値があればそれで決まる (cascade 自体は生きている)。
+func TestOptOutNotificationTypes_HighPriorityExplicitWins(t *testing.T) {
+	got := computePolicy(PolicyOptOutNotificationTypes, []string{},
+		[]map[string]rolePolicyOverride{
+			{PolicyOptOutNotificationTypes: {Priority: 2, Value: []string{"abuseReport"}}},
+			{PolicyOptOutNotificationTypes: {Priority: 0, Value: []string{"note"}}},
+		}, nil)
+	require.Equal(t, []string{"abuseReport"}, got)
+}
