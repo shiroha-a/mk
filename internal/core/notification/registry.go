@@ -71,6 +71,9 @@ var registry = []Descriptor{
 	// からも発火しない**。upstream にも無い。enum に入れておかないと
 	// 「core にあるのに filter に指定できない型」が残るので登録する。
 	{Type: TypeImportCompleted, Kind: KindMkGo, Produced: false},
+	// 通報をモデレーターの通知欄に残す (#2868)。upstream は email /
+	// system webhook / admin stream しか持たない。
+	{Type: TypeAbuseReport, Kind: KindMkGo, Produced: true},
 }
 
 // FilterableTypeNames returns the types counted by the "excludeTypes covers

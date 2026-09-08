@@ -16,6 +16,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
+	"github.com/shiroha-a/mk/internal/core/notification"
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -47,6 +48,7 @@ type Handler struct {
 	proxyFollow        ProxyFollowEnqueuer
 	moderatorLister    ModeratorLister
 	abuseNotifier      AbuseReportNotifier
+	abuseInAppNotifier AbuseReportInAppNotifier
 	mutingRepo         repository.MutingRepository
 	// channelMutingRepo は users/notes (withChannelNotes) の post-fetch filter で
 	// チャンネルミュートを効かせるために使う。未配線なら no-op。
@@ -192,12 +194,27 @@ type AbuseReportNotifier interface {
 	PublishAdminEvent(userID, eventType string, body any)
 }
 
+// AbuseReportInAppNotifier creates the in-app notification moderators see in
+// their notification list (#2868)。実装は core/notification.Service。
+//
+// **admin stream (AbuseReportNotifier) では足りない。** あちらはその瞬間に
+// 管理画面を開いている人にしか届かず、後から見返せない。
+type AbuseReportInAppNotifier interface {
+	Create(ctx context.Context, in notification.CreateInput) (*notification.Notification, error)
+}
+
 // SetAbuseReportFanout wires the moderator lister + admin event notifier so
 // report-abuse fans out newAbuseUserReport to every moderator/admin (#1549).
 // 片方でも nil なら fanout を skip する (= test / 旧挙動)。
 func (h *Handler) SetAbuseReportFanout(lister ModeratorLister, notifier AbuseReportNotifier) {
 	h.moderatorLister = lister
 	h.abuseNotifier = notifier
+}
+
+// SetAbuseReportInAppNotifier wires the in-app notification for new reports
+// (#2868). nil なら通知を作らない (= test / 旧挙動)。
+func (h *Handler) SetAbuseReportInAppNotifier(n AbuseReportInAppNotifier) {
+	h.abuseInAppNotifier = n
 }
 
 // SetUserRepo wires a UserRepository so users/notes filters out notes that

@@ -2702,6 +2702,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// #1549: report-abuse が各 moderator の adminStream:<id> へ newAbuseUserReport
 	// を配信できるよう admin publisher + moderator lister を usersHandler に配線。
 	usersHandler.SetAbuseReportFanout(roleService, stream.NewAdminStreamPublisher(streamPubSub))
+	// 通報を通知欄にも残す (#2868)。**admin stream だけでは足りない** — あちらは
+	// その瞬間に管理画面を開いている人にしか届かず、後から見返せない。
+	usersHandler.SetAbuseReportInAppNotifier(notificationService)
 
 	// server / queue stats publishers (#344)。起動時から tick を回して
 	// `serverStats` / `queueStats` トピックへ定期 publish する。

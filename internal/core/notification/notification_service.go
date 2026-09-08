@@ -83,6 +83,13 @@ const (
 	// Extra["invitationId"] に invitation ID を持ち、entity 側で read 時に packed
 	// ChatRoomInvitation へ解決する (招待削除済なら通知を drop)。
 	TypeChatRoomInvitationReceived Type = "chatRoomInvitationReceived"
+	// TypeAbuseReport: 通報が作られた時にモデレーター / 管理者へ送る通知
+	// (#2868)。**mk-go 固有** — upstream は通報を email / system webhook /
+	// admin stream でしか流さず、通知欄に残る形を持たない。
+	//
+	// notifier は通報者。Extra に reportId / targetUserId / comment を持ち、
+	// frontend は reportId で管理画面の該当通報へ飛ぶ。
+	TypeAbuseReport Type = "abuseReport"
 )
 
 // MaxPerUser caps how many notifications are kept per user in the Redis stream.
