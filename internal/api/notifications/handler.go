@@ -45,13 +45,13 @@ type Handler struct {
 	testNotifier         TestNotifier
 	roleLookup           entity.RoleLookup
 	chatInvitationLookup entity.ChatInvitationLookup
-	// abuseReportLookup は abuseReport 通知の現在の状態を read 時に引く
-	// (#2868)。**未配線なら abuseReport を返さない** (roleAssigned と同じ
+	// abuseReportStates は abuseReport 通知の現在の状態を read 時に batch で
+	// 引く (#2868)。**未配線なら abuseReport を返さない** (roleAssigned と同じ
 	// fail-closed)。状態を出せないまま「未対応」に見せると、対処済みの通報に
 	// 別のモデレーターが二重で当たる。
-	abuseReportLookup entity.AbuseReportLookup
+	abuseReportStates AbuseReportStateLookup
 	// moderatorChecker は read 時に abuseReport 通知の閲覧権限を再確認する
-	// (#2868)。通報本文と対象ユーザー ID が Extra に入っているので、権限を
+	// (#2868)。対象ユーザー ID が Extra に入り通報の存在自体が機微なので、権限を
 	// 失った元モデレーターが admin/abuse-user-reports の 403 を迂回して
 	// 通知欄から読み続けられないようにする。**未配線なら abuseReport を
 	// 返さない (fail-closed)** — 判定できないまま出すより出さないほうが安全側。
@@ -80,13 +80,16 @@ func (h *Handler) SetRoleLookup(fn entity.RoleLookup) { h.roleLookup = fn }
 // SetModeratorChecker wires the moderation check used to re-verify who may
 // read abuseReport notifications (#2868).
 //
-// **未配線なら abuseReport を返さない (fail-closed)。** 通報本文と対象ユーザー
-// ID が Extra に入っているので、判定できないまま出すより出さないほうが安全側。
+// **未配線なら abuseReport を返さない (fail-closed)。** 対象ユーザー ID が Extra に入り通報の存在自体が機微なので、判定できないまま出すより出さないほうが安全側。
 func (h *Handler) SetModeratorChecker(c ModeratorChecker) { h.moderatorChecker = c }
+
+// AbuseReportStateLookup resolves the resolution state of several reports at
+// once (#2868)。実装は repository.AbuseReportRepository.FindStatesByIDs。
+type AbuseReportStateLookup func(ids []string) (map[string]model.AbuseReportState, error)
 
 // SetAbuseReportLookup wires the read-time state lookup for abuseReport
 // notifications (#2868)。未配線なら abuseReport 通知を返さない (fail-closed)。
-func (h *Handler) SetAbuseReportLookup(fn entity.AbuseReportLookup) { h.abuseReportLookup = fn }
+func (h *Handler) SetAbuseReportLookup(fn AbuseReportStateLookup) { h.abuseReportStates = fn }
 
 // SetChatInvitationLookup wires the lookup used to pack
 // chatRoomInvitationReceived notifications' embedded invitation (#1559)。
@@ -108,14 +111,78 @@ func (h *Handler) SetNoteFieldResolver(r *entity.NoteFieldResolver) {
 // viewer は note の後段 field 解決にも使われる。upstream NotificationEntityService は
 // note を `noteEntityService.pack(noteId, { id: meId }, { detail: true })` で
 // pack するので、myReaction / poll の isVoted も notifiee 視点で埋まる。
-func (h *Handler) notificationOptions(viewerID string) []entity.NotificationOption {
+func (h *Handler) notificationOptions(viewerID string, rows []entity.NotificationItem) ([]entity.NotificationOption, error) {
+	lookup, err := h.batchAbuseReportLookup(rows)
+	if err != nil {
+		return nil, err
+	}
 	return []entity.NotificationOption{
 		entity.WithRoleLookup(h.roleLookup),
 		entity.WithChatInvitationLookup(h.chatInvitationLookup),
-		entity.WithAbuseReportLookup(h.abuseReportLookup),
+		entity.WithAbuseReportLookup(lookup),
 		entity.WithViewer(viewerID),
 		entity.WithNoteFieldResolver(h.noteFieldResolver),
+	}, nil
+}
+
+// batchAbuseReportLookup resolves every abuseReport state in one query (#2868).
+//
+// **1 件ずつ引かない。** 通知一覧はページあたり最大 100 件で、1 件ずつ引くと
+// リクエストごとに数百 SELECT が直列に走る。noteFieldResolver が「ページで
+// lookup 1 回」に畳んでいるのと同じ形にする。
+//
+// **DB 障害を「削除済み」に丸めない (#2792)。** 丸めると一時的な接続断で通報の
+// 通知だけが消え、しかも既読位置は進むので未読の合図が失われる。エラーは
+// 呼び出し元へ返して 500 にする。
+//
+// abuseReport が 1 件も無いページでは 1 回も引かない。
+func (h *Handler) batchAbuseReportLookup(rows []entity.NotificationItem) (entity.AbuseReportLookup, error) {
+	ids := make([]string, 0, 4)
+	seen := make(map[string]struct{}, 4)
+	for _, item := range rows {
+		n := item.N
+		if n == nil || n.Type != notification.TypeAbuseReport {
+			continue
+		}
+		id, _ := n.Extra["reportId"].(string)
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		ids = append(ids, id)
 	}
+	if len(ids) == 0 {
+		// 未配線と区別が付かない nil ではなく、常に false を返す lookup を渡す。
+		// この経路には abuseReport が無いので実際には呼ばれない。
+		return func(string) (entity.AbuseReportStatus, bool) {
+			return entity.AbuseReportStatus{}, false
+		}, nil
+	}
+	if h.abuseReportStates == nil {
+		// 未配線: fail-closed (通知を drop する)。
+		return nil, nil
+	}
+	states, err := h.abuseReportStates(ids)
+	if err != nil {
+		return nil, err
+	}
+	return func(reportID string) (entity.AbuseReportStatus, bool) {
+		st, ok := states[reportID]
+		if !ok {
+			return entity.AbuseReportStatus{}, false
+		}
+		out := entity.AbuseReportStatus{Resolved: st.Resolved}
+		if st.ResolvedAs != nil {
+			out.ResolvedAs = *st.ResolvedAs
+		}
+		if st.AssigneeID != nil {
+			out.AssigneeID = *st.AssigneeID
+		}
+		return out, true
+	}, nil
 }
 
 // NewHandler creates a new notifications Handler.
@@ -238,7 +305,12 @@ func (h *Handler) Show(c echo.Context) error {
 			Note: noteByID[n.NoteID],
 		})
 	}
-	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup(), h.notificationOptions(user.ID)...)
+	opts, err := h.notificationOptions(user.ID, items)
+	if err != nil {
+		slog.Error("notifications: resolve abuse report states failed", "err", err)
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	out := entity.PackNotifications(items, h.idGen, h.instanceLookup(), h.emojiLookup(), opts...)
 	// depth-2 embed hide (#1570): collectNotifications の #1444 CanSeeNote gate は
 	// 見えない note を丸ごと落とすが embed (renote/reply) には再帰しない。通知 note の
 	// embed と著者設定ゲートを viewer 可視性で適用する。これを欠くと #1570 で塞いだ
@@ -669,7 +741,7 @@ func (h *Handler) SetMutingRepo(r repository.MutingRepository) {
 // なので、その判定だけそちらに置く。
 func (h *Handler) filterValidNotifiers(viewerID string, rows []*notification.Notification, notifierByID map[string]*model.User) []*notification.Notification {
 	// abuseReport はモデレーション用なので、read 時に権限を再確認する (#2868)。
-	// 通報本文と対象ユーザー ID が Extra に入っているので、権限を失った元
+	// 対象ユーザー ID が Extra に入り通報の存在自体が機微なので、権限を失った元
 	// モデレーターが admin/abuse-user-reports の 403 を迂回して読み続けられない
 	// ようにする。
 	rows = h.filterModerationNotifications(viewerID, rows)
@@ -886,9 +958,9 @@ func (h *Handler) TestNotification(c echo.Context) error {
 // filterModerationNotifications drops moderation-only notifications when the
 // viewer no longer holds moderation privileges (#2868).
 //
-// **fail-closed。** checker 未配線なら abuseReport を落とす。通報本文と対象
-// ユーザー ID が Extra に入っているので、判定できないまま出すより出さないほうが
-// 安全側。administrator も通す (upstream の iAmModerator と同じ扱い)。
+// **fail-closed。** checker 未配線なら abuseReport を落とす。対象ユーザー ID が
+// Extra に入り、通報の存在自体が機微なので、判定できないまま出すより出さない
+// ほうが安全側。administrator も通す (upstream の iAmModerator と同じ扱い)。
 //
 // **該当する通知が無ければ何もしない。** 権限判定は role 解決を伴うので、
 // 通知一覧の大半を占める通常の通知のために毎回引かない。

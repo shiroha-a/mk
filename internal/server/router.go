@@ -425,20 +425,32 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	}
 	// abuseReport 通知の現在の状態を read 時に引く (#2868)。通知は作成時点しか
 	// 持たないので、他のモデレーターが対処しても通知欄は「未対応」のまま残る。
-	// 削除済みなら false を返して通知ごと drop する (roleAssigned と同じ形)。
+	// 通報が消えていれば通知ごと drop する (roleAssigned と同じ形)。
+	//
+	// **REST は batch、WebSocket は 1 件。** 通知一覧はページあたり最大 100 件
+	// なので 1 件ずつ引くと数百 SELECT が直列に走る。realtime は 1 件ずつ届く
+	// ので同じ関数を 1 要素で呼ぶ。
+	abuseNotifStates := abuseReportRepoForNotif.FindStatesByIDs
 	abuseNotifLookup := func(reportID string) (entity.AbuseReportStatus, bool) {
-		r, err := abuseReportRepoForNotif.FindByID(reportID)
-		if err != nil || r == nil {
+		states, err := abuseNotifStates([]string{reportID})
+		if err != nil {
+			// **DB 障害を「削除済み」に丸めない (#2792)。** realtime はこの 1 件を
+			// 落とすしかないが、既読位置を動かさないので未読の合図は残る。
+			slog.Warn("notification: abuse report state lookup failed", "reportId", reportID, "err", err)
 			return entity.AbuseReportStatus{}, false
 		}
-		st := entity.AbuseReportStatus{Resolved: r.Resolved}
-		if r.ResolvedAs != nil {
-			st.ResolvedAs = *r.ResolvedAs
+		st, ok := states[reportID]
+		if !ok {
+			return entity.AbuseReportStatus{}, false
 		}
-		if r.AssigneeID != nil {
-			st.AssigneeID = *r.AssigneeID
+		out := entity.AbuseReportStatus{Resolved: st.Resolved}
+		if st.ResolvedAs != nil {
+			out.ResolvedAs = *st.ResolvedAs
 		}
-		return st, true
+		if st.AssigneeID != nil {
+			out.AssigneeID = *st.AssigneeID
+		}
+		return out, true
 	}
 	followingService.SetNotificationHook(notificationHook)
 	reactionService.SetNotificationHook(notificationHook)
@@ -1988,7 +2000,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationsHandler.SetMutingRepo(mutingRepo)
 	notificationsHandler.SetTestNotifier(notificationHook)
 	notificationsHandler.SetRoleLookup(roleNotifLookup)
-	notificationsHandler.SetAbuseReportLookup(abuseNotifLookup)
+	notificationsHandler.SetAbuseReportLookup(abuseNotifStates)
 	// 通知に埋め込む note の files / channel / myReaction を埋める (#2735)。
 	notificationsHandler.SetNoteFieldResolver(noteFieldResolver)
 	// notifications/create の 'app' 通知で header/icon を token.name/iconUrl に

@@ -6,7 +6,7 @@ import "testing"
 // 成立しない (#2868)。
 //
 // **fail-closed なので機能ごと死ぬ。** checker 未配線だと abuseReport は
-// 誰にも返らない (通報本文が Extra に入っているので、判定できないまま出すより
+// 誰にも返らない (対象ユーザー ID が Extra に入り通報の存在自体が機微なので、判定できないまま出すより
 // 出さないほうが安全側にしてある)。通知は作られ unread も飛ぶのに一覧に
 // 出ないので、症状が原因から遠い。
 func TestNotificationModeratorCheckerIsWired(t *testing.T) {

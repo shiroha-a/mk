@@ -348,6 +348,12 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		if k == "roleId" || k == "invitationId" {
 			continue
 		}
+		// abuseReport の comment は #2868 以降は積んでいないが、それ以前に
+		// 永続化された通知は本文を持つ (Redis stream は MaxPerUser で回転する
+		// まで残る)。通知に本文を出さない方針は既存分にも及ぼす。
+		if k == "comment" && n.Type == notification.TypeAbuseReport {
+			continue
+		}
 		// exportCompleted 通知の exportedEntity は misskey_dart / Misskey TS が
 		// singular / camelCase の enum で受ける。作成時に core/transfer 側で正規化
 		// 済み (#1249) だが、それ以前に永続化された通知は内部値 ("notes" 等) を

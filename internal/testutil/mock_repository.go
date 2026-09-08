@@ -7018,6 +7018,24 @@ func (m *MockAbuseReportRepository) List(resolved *bool, reporterOrigin, targetU
 	return result, nil
 }
 
+// FindStatesByIDs returns the scalar resolution state of the given reports
+// (#2868). 存在しない ID は map から単に落とす。
+func (m *MockAbuseReportRepository) FindStatesByIDs(ids []string) (map[string]model.AbuseReportState, error) {
+	out := make(map[string]model.AbuseReportState, len(ids))
+	for _, id := range ids {
+		r, ok := m.Reports[id]
+		if !ok {
+			continue
+		}
+		out[id] = model.AbuseReportState{
+			Resolved:   r.Resolved,
+			ResolvedAs: r.ResolvedAs,
+			AssigneeID: r.AssigneeID,
+		}
+	}
+	return out, nil
+}
+
 func (m *MockAbuseReportRepository) UpdateFields(id string, fields map[string]any) error {
 	r, ok := m.Reports[id]
 	if !ok {

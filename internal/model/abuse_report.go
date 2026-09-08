@@ -49,3 +49,13 @@ type ModerationLogFilter struct {
 	UserID  string
 	Search  string
 }
+
+// AbuseReportState is the scalar resolution state of a report (#2868).
+//
+// 通知の read 時に「対処済みか」を出すために使う。TargetUser / Reporter /
+// Assignee を Preload する FindByID とは別に、状態だけを batch で引くための型。
+type AbuseReportState struct {
+	Resolved   bool
+	ResolvedAs *string
+	AssigneeID *string
+}

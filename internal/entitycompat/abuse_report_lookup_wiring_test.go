@@ -12,7 +12,7 @@ import "testing"
 // 別々に pack するので、片方だけ配線すると「一覧には出るが realtime では
 // 出ない」という非対称になる。
 func TestAbuseReportLookupIsWired(t *testing.T) {
-	assertWired(t, routerGo, "notificationsHandler.SetAbuseReportLookup(abuseNotifLookup)",
+	assertWired(t, routerGo, "notificationsHandler.SetAbuseReportLookup(abuseNotifStates)",
 		"abuseReport 通知が一覧に出なくなる (fail-closed)。")
 	assertWired(t, routerGo, "notificationPublisher.SetAbuseReportLookup(abuseNotifLookup)",
 		"abuseReport 通知が realtime (WebSocket) で出なくなる。\n"+

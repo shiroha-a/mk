@@ -11,7 +11,6 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/core/notification"
-	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
@@ -28,8 +27,12 @@ func (s stubModeratorChecker) IsAdministrator(userID string) bool { return s.adm
 // **未配線だと abuseReport が drop される** (fail-closed) ので、通報の通知を
 // 期待するテストは必ず通す。
 func wireAbuseLookup(h *Handler, resolved bool) {
-	h.SetAbuseReportLookup(func(string) (entity.AbuseReportStatus, bool) {
-		return entity.AbuseReportStatus{Resolved: resolved}, true
+	h.SetAbuseReportLookup(func(ids []string) (map[string]model.AbuseReportState, error) {
+		out := make(map[string]model.AbuseReportState, len(ids))
+		for _, id := range ids {
+			out[id] = model.AbuseReportState{Resolved: resolved}
+		}
+		return out, nil
 	})
 }
 
@@ -150,11 +153,85 @@ func TestShow_AbuseReportCarriesResolvedState(t *testing.T) {
 func TestShow_AbuseReportDroppedWhenReportGone(t *testing.T) {
 	h, svc := newTestHandler(t)
 	h.SetModeratorChecker(stubModeratorChecker{moderators: map[string]bool{"mod1": true}})
-	h.SetAbuseReportLookup(func(string) (entity.AbuseReportStatus, bool) {
-		return entity.AbuseReportStatus{}, false
+	h.SetAbuseReportLookup(func([]string) (map[string]model.AbuseReportState, error) {
+		return map[string]model.AbuseReportState{}, nil
 	})
 	seedAbuseReport(t, svc, "mod1")
 
 	out := listNotifications(t, h, "mod1")
 	assert.Empty(t, out, "削除済みの通報を指す通知は返さない")
 }
+
+// **1 ページで 1 回しか引かない (#2868)。** 通知一覧はページあたり最大 100 件で、
+// 1 件ずつ引くとリクエストごとに数百 SELECT が直列に走る。
+func TestShow_AbuseReportStatesAreFetchedInOneBatch(t *testing.T) {
+	h, svc := newTestHandler(t)
+	h.SetModeratorChecker(stubModeratorChecker{moderators: map[string]bool{"mod1": true}})
+
+	var calls int
+	var askedIDs []string
+	h.SetAbuseReportLookup(func(ids []string) (map[string]model.AbuseReportState, error) {
+		calls++
+		askedIDs = append(askedIDs, ids...)
+		out := make(map[string]model.AbuseReportState, len(ids))
+		for _, id := range ids {
+			out[id] = model.AbuseReportState{}
+		}
+		return out, nil
+	})
+
+	ctx := context.Background()
+	for _, rid := range []string{"r1", "r2", "r3"} {
+		_, err := svc.Create(ctx, notification.CreateInput{
+			NotifieeID: "mod1", NotifierID: "reporter", Type: notification.TypeAbuseReport,
+			Extra: map[string]any{"reportId": rid, "targetUserId": "u2"},
+		})
+		require.NoError(t, err)
+	}
+
+	out := listNotifications(t, h, "mod1")
+	require.Len(t, out, 3)
+	require.Equal(t, 1, calls, "通報の状態はページごとに 1 回だけ引くこと")
+	require.ElementsMatch(t, []string{"r1", "r2", "r3"}, askedIDs)
+}
+
+// abuseReport が 1 件も無いページでは引かない。
+func TestShow_NoAbuseReportMeansNoStateQuery(t *testing.T) {
+	h, svc := newTestHandler(t)
+	var calls int
+	h.SetAbuseReportLookup(func(ids []string) (map[string]model.AbuseReportState, error) {
+		calls++
+		return map[string]model.AbuseReportState{}, nil
+	})
+	_, err := svc.Create(context.Background(), notification.CreateInput{
+		NotifieeID: "alice", NotifierID: "bob", Type: notification.TypeFollow,
+	})
+	require.NoError(t, err)
+
+	listNotifications(t, h, "alice")
+	require.Zero(t, calls, "abuseReport が無いページで通報を引いている")
+}
+
+// **DB 障害を「削除済み」に丸めない (#2792 / #2868)。** 丸めると一時的な接続断で
+// 通報の通知だけが消え、しかも既読位置は進むので未読の合図が失われる。
+func TestShow_AbuseReportStateErrorIs500(t *testing.T) {
+	h, svc := newTestHandler(t)
+	h.SetModeratorChecker(stubModeratorChecker{moderators: map[string]bool{"mod1": true}})
+	h.SetAbuseReportLookup(func([]string) (map[string]model.AbuseReportState, error) {
+		return nil, assertAnError{}
+	})
+	pub := &stubMainPublisher{}
+	svc.SetMainStreamPublisher(pub)
+	seedAbuseReport(t, svc, "mod1")
+
+	c, rec := newJSONRequest(t, "/api/i/notifications", `{}`)
+	setAuth(c, &model.User{ID: "mod1"})
+	require.NoError(t, h.Show(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, "DB 障害は 500 にする")
+	assert.NotContains(t, pub.types("mod1"), "readAllNotifications",
+		"エラーで返したのに既読化してはいけない")
+}
+
+type assertAnError struct{}
+
+func (assertAnError) Error() string { return "boom" }

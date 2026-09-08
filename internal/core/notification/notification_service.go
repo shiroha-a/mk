@@ -87,8 +87,11 @@ const (
 	// (#2868)。**mk-go 固有** — upstream は通報を email / system webhook /
 	// admin stream でしか流さず、通知欄に残る形を持たない。
 	//
-	// notifier は通報者。Extra に reportId / targetUserId / comment を持ち、
-	// frontend は reportId で管理画面の該当通報へ飛ぶ。
+	// notifier は通報者。Extra に reportId / targetUserId を持ち、frontend は
+	// reportId で管理画面の該当通報へ飛ぶ。**通報コメントは持たない** —
+	// 定型フォームの全文が入るので通知欄では読めず、出さない以上 Redis に
+	// 本文の複製を残す理由が無い。read 時に現在の状態 (resolved / resolvedAs /
+	// assigneeId) を引き直して載せる。
 	TypeAbuseReport Type = "abuseReport"
 )
 

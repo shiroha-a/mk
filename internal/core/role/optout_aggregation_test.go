@@ -1,6 +1,7 @@
 package role
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -206,4 +207,40 @@ func TestOptOutNotificationTypes_HighPriorityExplicitWins(t *testing.T) {
 			{PolicyOptOutNotificationTypes: {Priority: 0, Value: []string{"note"}}},
 		}, nil)
 	require.Equal(t, []string{"abuseReport"}, got)
+}
+
+// TestMergeMetaPolicies_EmptySliceMarshalsAsArray pins the half of the nil fix
+// that actually caused the production symptom (#2898).
+//
+// **`/api/meta` が通る経路は Defaults() ではなく cloneMutablePolicyValue。**
+// 本番で `meta.policies.optOutNotificationTypes` が `null` で配信されていたのは
+// こちら側で、effectivepolicy.Defaults() のテストだけでは
+// cloneMutablePolicyValue を元に戻しても緑のまま通る (実測)。
+func TestMergeMetaPolicies_EmptySliceMarshalsAsArray(t *testing.T) {
+	for _, name := range []string{"MergeMetaPolicies(nil)", "DefaultPoliciesClone"} {
+		t.Run(name, func(t *testing.T) {
+			var got map[string]any
+			if name == "DefaultPoliciesClone" {
+				got = DefaultPoliciesClone()
+			} else {
+				got = MergeMetaPolicies(nil)
+			}
+			v, ok := got[PolicyOptOutNotificationTypes]
+			require.True(t, ok, "%s が %s を持たない", name, PolicyOptOutNotificationTypes)
+
+			b, err := json.Marshal(v)
+			require.NoError(t, err)
+			require.Equal(t, "[]", string(b),
+				"%s の空 policy が JSON で null になっている (配列を期待する frontend が壊れる)", name)
+		})
+	}
+}
+
+// 空でない []string policy はコピーされ、元を共有しない。
+func TestDefaultPoliciesClone_DoesNotShareSlices(t *testing.T) {
+	a := DefaultPoliciesClone()["uploadableFileTypes"].([]string)
+	b := DefaultPoliciesClone()["uploadableFileTypes"].([]string)
+	require.NotEmpty(t, a)
+	a[0] = "mutated"
+	require.NotEqual(t, "mutated", b[0])
 }
