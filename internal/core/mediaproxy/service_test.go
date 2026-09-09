@@ -655,8 +655,8 @@ func TestProcessResize_NonConvertibleImage(t *testing.T) {
 
 // **変換できない MIME は 404 (#2920)。** upstream は
 // `requiresImageConversion && !isConvertibleImage` で `Unexpected mime` を
-// 404 にする。以前は元データを素通ししていたので、バッジのつもりで元画像が
-// そのまま通知に出ていた。
+// 404 にする。**本番経路では Fetch 側の同じ判定が先に効く**ので挙動は変わらないが、
+// processBadge 単体の契約として揃えておく。
 func TestProcessBadge_NonConvertibleImage(t *testing.T) {
 	s := testService(nil)
 	data := []byte("not an image")

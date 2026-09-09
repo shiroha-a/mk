@@ -991,50 +991,52 @@ NUL の扱いが分かれる土壌になっていたので中身を委譲した�
 `format_type(atttypid, atttypmod)` だけが `character varying(256)[]` を返すので、
 そちらで固定する (`TestRemoteArrayColumnLimits`)。
 
-## 7-2. 実装が近似になっているもの (意図と結末は同じ・数値は違う)
-
-upstream の挙動を再現しているが、依存ライブラリが違うため**画素値や中間値までは一致しない**もの。乖離として残すのではなく「ここまでしか揃わない」という記録。
-
-### プッシュ通知のバッジ画像 (`mediaproxy.processBadge`)
-
-upstream は sharp (libvips) で
-
-```js
-resize(96, 96, {fit: 'contain', position: 'centre', withoutEnlargement: false})
-  .greyscale().normalise().linear(1.75, -(128*1.75)+128)
-  .flatten({background: '#000'}).toColorspace('b-w')
-→ stats().entropy < 0.1 なら 404 (Skip to provide badge)
-→ 透明な 96x96 と boolean(mask, 'eor')
-```
-
-を行う (#2920 で mk-go も同じ形にした)。**揃っているのは結末**:
-
-- contain なので横長・縦長の絵文字でも内容が切り落とされず、余白は黒帯になる
-- 透明部分は黒に落ちる
-- 1.75x のコントラストが掛かる
-- 出力は R=G=B=A なので、**暗いところが透明な silhouette** になる
-- ほぼ単色なら 404 を返し、Service Worker (`create-notification.ts`) が `iconUrl('plus')` へ落ちる
-
-**揃わないのは数値**:
-
-| | upstream (sharp / libvips) | mk-go |
-|---|---|---|
-| greyscale | sRGB → B_W (線形光を経由する colour transform) | Rec.709 の係数を sRGB 値へ直接 |
-| リサンプリング | libvips の lanczos3 | `disintegration/imaging` の Lanczos |
-| normalise | sharp の実装 | min-max stretch |
-| entropy | `stats().entropy` (libvips 内部) | Shannon エントロピー |
-
-entropy は**値の意味が違う**。実測で、2 値画像は sharp=0.0000 / Shannon=1.0730、実絵文字は sharp=2.7792 / Shannon=2.0054。閾値 0.1 に対して実絵文字の Shannon は 2.0-4.9 なので、**「ほぼ空白なら 404」という結末は揃う**。
-
-画素値の差は実絵文字 3 件で**平均絶対差 6.6-14.1 / 255、差が 32 を超える画素が 9-13%** (sharp の出力と突き合わせて実測)。
-
-**厳密一致は追わない。** libvips の colour transform とリサンプリングを Go で再実装することになり、得られるのはバッジの見た目がわずかに近づくことだけ。通知に出る 96x96 のモノクロ silhouette でその差は問題にならない。
-
----
-
 ## 8. 逆方向 divergence (mk-go 独自 error を upstream に合わせて廃止したもの)
 
 `admin/emoji/import-zip` の `NO_SUCH_FILE`、clip 削除の `NOT_CLIPPED`、`notes/translate` の `CANNOT_TRANSLATE` はいずれも mk-go 独自 error だったため upstream に合わせて廃止済み。myReaction fetch の「作成 2 秒以内は skip」guard は mk-go では機能劣化になるため意図的に不採用。
+
+---
+
+## 9. 実装が近似になっているもの (意図も結末も同じ・数値がわずかに違う)
+
+upstream の挙動を再現しているが、依存ライブラリが違うため**画素値までは一致しない**もの。乖離として残す判断ではなく「ここまで揃っていて、残差はこれだけ」という記録。
+
+### プッシュ通知のバッジ画像 (`mediaproxy.processBadge`)
+
+upstream は sharp (libvips) で処理する (#2920 で mk-go も同じ形にした)。
+
+**sharp は呼び出し順ではなく固定の pipeline 順で実行する。** `FileServerProxyHandler.ts` の記述は `resize().greyscale().normalise().linear().flatten()` の順だが、`sharp/src/pipeline.cc` の実行順は **flatten → greyscale → resize/embed → linear → normalise**。記述順どおりに実装すると、輝度レンジの狭い絵文字で平均絶対差 28.7/255・43.8% の画素が 32 以上ずれる (実測)。**呼び出し順を入れ替えても sharp の出力が 1 バイトも変わらない**ことで固定順を確認してある。
+
+**entropy は元画像で測る。** `sharp/src/stats.cc` の `stats()` は入力を開き直すので、**pipeline の操作を一切適用しない**。`linear(0, 100)` で定数化しても `threshold(128)` で 2 値化しても値が変わらず、96 段のグラデーションで `log2(96) = 6.584963` に一致することを実測した。つまり判定は「**元画像**の greyscale が実質単色か」であって、処理後の mask ではない。
+
+揃っているもの:
+
+- contain なので横長・縦長の絵文字でも内容が切り落とされず、余白は黒帯になる (拡大もする)
+- 透明部分は黒に落ちる
+- linear (1.75x、0-255 でクリップ) の後に normalise
+- greyscale は線形光を経由する (係数を sRGB 値へ直接掛けると純赤が 127 ではなく 54 になり、赤/緑の明暗比が 1.73 → 3.37 に変わる)
+- 出力は R=G=B=A なので、**暗いところが透明な silhouette** になる
+- 元画像がほぼ単色なら 404 を返し、Service Worker (`create-notification.ts`) が `iconUrl('plus')` へ落ちる
+
+残差の出どころ:
+
+| | upstream (sharp / libvips) | mk-go |
+|---|---|---|
+| リサンプリング | libvips の lanczos3 | `kovidgoyal/imaging` の Lanczos |
+| normalise | LAB の L を stretch | linear 後の値を min-max stretch |
+| greyscale | sRGB → scRGB → B_W | sRGB → 線形光 → Rec.709 → sRGB |
+
+**実測 (実絵文字 3 件、sharp の出力と画素単位で突き合わせ)**:
+
+| | 平均絶対差 | 差が 32 を超える画素 | 完全一致 |
+|---|---|---|---|
+| webp 128x128 | 0.24 / 255 | 0.0% | 85.6% |
+| png 96x96 | 2.20 / 255 | 0.0% | 45.1% |
+| gif 100x100 | 0.23 / 255 | 0.0% | 84.9% |
+
+entropy も実測で sharp と一致する (gif は完全一致、他 2 件は差 0.03 以下)。**404 になるかどうかの判定は 3 件とも upstream と揃う。**
+
+**これ以上は追わない。** 残っているのはリサンプリング kernel と normalise の色空間だけで、通知に出る 96x96 のモノクロ silhouette でこの差は判別できない。
 
 ---
 

@@ -17,15 +17,32 @@ import (
 	"github.com/shiroha-a/mk/internal/core/mediaproxy"
 )
 
-// makeColorPNG builds a 200x120 image with a saturated red pixel, so that the
-// badge pipeline's resize (96x96) and grayscale conversion are both observable.
+// makeColorPNG builds a 200x120 image with a red-to-blue horizontal gradient.
+//
+// **単色にしてはいけない (#2920)。** upstream は元画像の greyscale エントロピーが
+// 0.1 未満なら 404 を返す (`Skip to provide badge`) ので、単色だとバッジが
+// 作られない。以前この fixture は単色の赤で、**upstream が 404 を返す入力に対して
+// 200 を固定していた**。
 func makeColorPNG(t *testing.T) []byte {
 	t.Helper()
 	img := image.NewRGBA(image.Rect(0, 0, 200, 120))
 	for y := 0; y < 120; y++ {
 		for x := 0; x < 200; x++ {
-			img.Set(x, y, color.RGBA{255, 0, 0, 255})
+			v := uint8(x * 255 / 199)
+			img.Set(x, y, color.RGBA{R: 255 - v, B: v, A: 255})
 		}
+	}
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
+}
+
+// makeSolidPNG builds a 96x96 solid image, which upstream skips with a 404.
+func makeSolidPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewRGBA(image.Rect(0, 0, 96, 96))
+	for i := range img.Pix {
+		img.Pix[i] = 255
 	}
 	var buf bytes.Buffer
 	require.NoError(t, png.Encode(&buf, img))
@@ -83,4 +100,37 @@ func TestHandle_BadgeEmojiIsGrayscale96(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.NotEqual(t, "image/png", rec.Header().Get("Content-Type"),
 		"emoji=1 が同居すると parseMode が ModeEmoji を返し、badge にならない")
+}
+
+// **単色の絵文字はハンドラ経由で 404 になる (#2920)。**
+//
+// upstream の `stats().entropy < 0.1` → `Skip to provide badge`。SW の
+// create-notification.ts は `res.status !== 200` で iconUrl('plus') へ落ちるので、
+// 判別できないバッジを配るより 404 の方が親切。**ハンドラまで通して見る** —
+// processBadge が error を返しても、それが 404 になるかは handler の
+// マッピング次第 (ErrNotFound だけが 404、他は 500)。
+func TestHandle_BadgeEmojiSkipsSolidImage(t *testing.T) {
+	pngData := makeSolidPNG(t)
+	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write(pngData)
+	}))
+	defer imgServer.Close()
+
+	cfg := &config.Config{
+		URL: "https://example.com", MediaProxy: "https://example.com/proxy",
+		MediaProxySecret: []byte("test-secret"),
+		UserAgent:        "Misskey/2026.5.4 (https://example.com)",
+	}
+	svc := mediaproxy.NewService(cfg.URL, cfg.UserAgent,
+		&mockStorage{files: map[string][]byte{}},
+		&mockAllowlist{allowed: map[string]bool{imgServer.URL + "/s.png": true}},
+		cfg.MediaProxySecret, testAllowedCIDRs)
+	h := NewHandler(svc, cfg)
+	e := echo.New()
+
+	rec := doRequest(e, h, http.MethodGet, "/proxy/emoji.png?url="+imgServer.URL+"/s.png&badge=1",
+		map[string]string{"User-Agent": "TestBrowser/1.0"})
+	assert.Equal(t, http.StatusNotFound, rec.Code,
+		"単色のバッジは配らない (SW が iconUrl('plus') へ落ちる)")
 }

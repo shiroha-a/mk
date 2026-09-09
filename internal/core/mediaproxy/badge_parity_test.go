@@ -141,37 +141,97 @@ func TestProcessBadge_ContentfulImageIsNot404(t *testing.T) {
 	res.Body.Close()
 }
 
-// shannonEntropy の境界。単色は 0、2 値の半々は 1 bit。
-func TestShannonEntropy(t *testing.T) {
-	assert.Equal(t, 0.0, shannonEntropy(nil))
-	assert.Equal(t, 0.0, shannonEntropy(bytes.Repeat([]byte{7}, 100)))
-	half := append(bytes.Repeat([]byte{0}, 50), bytes.Repeat([]byte{255}, 50)...)
-	assert.InDelta(t, 1.0, shannonEntropy(half), 1e-9)
+// inputEntropy の境界。単色は 0、2 値の半々は 1 bit、N 値の一様は log2(N)。
+//
+// **upstream の `stats().entropy` と同じもの**を測っていることの確認。sharp は
+// 入力を開き直して greyscale のヒストグラムから Shannon エントロピーを取る
+// (実測: 96 値のグラデーションで 6.584963 = log2(96))。
+func TestInputEntropy(t *testing.T) {
+	solid := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+	for i := range solid.Pix {
+		solid.Pix[i] = 200
+	}
+	assert.Equal(t, 0.0, inputEntropy(solid), "単色は 0")
+
+	half := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			v := uint8(0)
+			if x >= 16 {
+				v = 255
+			}
+			half.Set(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	assert.InDelta(t, 1.0, inputEntropy(half), 1e-9, "2 値の半々は 1 bit")
+
+	// **alpha は見ない。** RGB が一様なら alpha がどう変わっても 0。
+	// upstream の stats() も RGB の greyscale だけを測る。
+	alphaOnly := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			alphaOnly.Set(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: uint8(x * 255 / 31)})
+		}
+	}
+	assert.Equal(t, 0.0, inputEntropy(alphaOnly), "RGB が一様なら alpha が変わっても 0")
+
+	grad := image.NewNRGBA(image.Rect(0, 0, 96, 96))
+	for y := 0; y < 96; y++ {
+		for x := 0; x < 96; x++ {
+			v := uint8(80 + x*120/95)
+			grad.Set(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	// 96 段のグラデーション。sharp の実測値は 6.584963 = log2(96)。
+	assert.InDelta(t, 6.584963, inputEntropy(grad), 0.05,
+		"sharp の stats().entropy と同じ値になること")
 }
 
-// **normalise / 1.75x コントラスト / flatten が実際に効いていること (#2920)。**
+// **小さい絵文字は拡大する (#2920)。** upstream の
+// `resize(96, 96, {withoutEnlargement: false})`。32x32 の絵文字は現実的な入力で、
+// 縮小しか行わないと 96x96 の中央に 32x32 が浮いた形になる。
+func TestProcessBadge_EnlargesSmallInput(t *testing.T) {
+	s := testService(nil)
+	// 32x32 の左右で明暗が分かれた画像。拡大されれば 96 幅いっぱいに広がる。
+	img := image.NewNRGBA(image.Rect(0, 0, 32, 32))
+	for y := 0; y < 32; y++ {
+		for x := 0; x < 32; x++ {
+			v := uint8(x * 255 / 31)
+			img.Set(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	res, err := s.processBadge(encodePNG(t, img), "image/png")
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	out := decodeBadge(t, res)
+	at := func(x, y int) int { return int(out.Pix[(y*96+x)*4]) }
+	// 縮小しかしないと x=4 も x=91 も 32x32 の外 (黒帯) になる。
+	assert.Less(t, at(4, 48), 64, "拡大されて左端が暗いこと")
+	assert.Greater(t, at(91, 48), 192, "拡大されて右端が明るいこと")
+}
+
+// **normalise と 1.75x コントラストが実際に効いていること (#2920)。**
 //
 // **fixture の作りが要点。** フルレンジのグラデーションだと normalise もコントラストも
-// 恒等変換に近くなり、外しても結果が変わらない (実際、最初のテストはその形で
-// 4 つの変異を素通ししていた)。狭いレンジ・完全透明・半透明を 1 枚に入れて、
-// それぞれの段が結果を動かすことを別々の座標で見る。
+// 恒等変換に近くなり、外しても結果が変わらない (最初に書いたテストはその形で 4 つの
+// 変異を素通ししていた)。狭いレンジ・完全透明・半透明を 1 枚に入れて、段ごとに
+// 別の座標で見る。
 //
 // 実測値 (変異を入れたときの値):
 //
-//	                        (34,48)  (62,48)  (80,48)
-//	基準                        132      212      176
-//	透明画素の RGB を 0 にしない   0       13       96
-//	flatten を外す               132      212      255
-//	normalise を外す              82      146      127
-//	コントラストを外す            130      176      128
-func TestProcessBadge_NormaliseContrastAndFlattenAllApply(t *testing.T) {
+//	                    (34,48)  (80,48)
+//	基準                    142      135
+//	コントラストを外す      186      182
+//	normalise を外す         83       79
+func TestProcessBadge_NormaliseAndContrastApply(t *testing.T) {
 	s := testService(nil)
 	img := image.NewNRGBA(image.Rect(0, 0, 96, 96))
 	for y := 0; y < 96; y++ {
 		for x := 0; x < 96; x++ {
 			switch {
 			case x < 32:
-				// 白いが完全に透明。normalise に含めると狭レンジ側が潰れる。
+				// 白いが完全に透明。flatten で黒に落ちる。
 				img.Set(x, y, color.NRGBA{R: 255, G: 255, B: 255, A: 0})
 			case x < 64:
 				// 100..140 の狭いレンジ。normalise とコントラストで伸びる。
@@ -191,10 +251,45 @@ func TestProcessBadge_NormaliseContrastAndFlattenAllApply(t *testing.T) {
 	at := func(x, y int) int { return int(out.Pix[(y*96+x)*4]) }
 
 	assert.EqualValues(t, 0, at(10, 48), "完全に透明な部分は黒")
-	assert.InDelta(t, 132, at(34, 48), 12,
-		"狭レンジの暗い側。透明画素を normalise に含めると 0 まで落ちる / normalise を外すと 82 に留まる")
-	assert.InDelta(t, 212, at(62, 48), 12,
-		"狭レンジの明るい側。1.75x コントラストを外すと 176 に留まる")
-	assert.InDelta(t, 176, at(80, 48), 12,
-		"半透明の一定色。flatten を外すと 255 になる / normalise を外すと 127")
+	assert.InDelta(t, 142, at(34, 48), 15,
+		"狭レンジの暗い側。コントラストを外すと 186 / normalise を外すと 83")
+	assert.InDelta(t, 135, at(80, 48), 15,
+		"半透明の一定色。コントラストを外すと 182 / normalise を外すと 79")
+}
+
+// **greyscale は線形光を経由する (#2920)。**
+//
+// vips の `colourspace(B_W)` は sRGB を線形光へ戻してから輝度を取る。係数を
+// sRGB 値へ直接掛けると彩度の高い色で大きくずれ (純赤は vips 127 に対し 54)、
+// 赤/緑の明暗比が upstream の 1.73 から 3.37 になる。多色の絵文字ではシルエットの
+// 濃さが色ごとに入れ替わる。
+//
+// 黒 | 赤 | 緑 の 3 分割で見る。normalise が掛かっても赤と緑の相対位置は残る。
+func TestProcessBadge_GreyscaleUsesLinearLight(t *testing.T) {
+	s := testService(nil)
+	img := image.NewNRGBA(image.Rect(0, 0, 96, 96))
+	for y := 0; y < 96; y++ {
+		for x := 0; x < 96; x++ {
+			switch {
+			case x < 32:
+				img.Set(x, y, color.NRGBA{A: 255})
+			case x < 64:
+				img.Set(x, y, color.NRGBA{R: 255, A: 255})
+			default:
+				img.Set(x, y, color.NRGBA{G: 255, A: 255})
+			}
+		}
+	}
+	res, err := s.processBadge(encodePNG(t, img), "image/png")
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	out := decodeBadge(t, res)
+	at := func(x, y int) int { return int(out.Pix[(y*96+x)*4]) }
+
+	assert.EqualValues(t, 0, at(10, 48), "黒は 0")
+	assert.EqualValues(t, 255, at(80, 48), "緑が一番明るい")
+	// 線形光を経由しないと赤は 0 に潰れる。sharp の純赤の greyscale は 127。
+	assert.InDelta(t, 126, at(48, 48), 12,
+		"赤が中間に来ること。線形光を経由しないと 0 に潰れる")
 }

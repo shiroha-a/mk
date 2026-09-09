@@ -643,13 +643,16 @@ func exceedsPixelCap(img image.Image) bool {
 // processBadge creates a 96x96 badge PNG, mirroring upstream
 // FileServerProxyHandler.processBadge (#2920).
 //
-// upstream の pipeline は
+// **sharp は呼び出し順ではなく固定の pipeline 順で処理する。** JS の記述は
 //
-//	resize(96, 96, {fit: 'contain', position: 'centre', withoutEnlargement: false})
-//	  .greyscale().normalise().linear(1.75, -(128*1.75)+128)
+//	resize(...).greyscale().normalise().linear(1.75, -(128*1.75)+128)
 //	  .flatten({background: '#000'}).toColorspace('b-w')
-//	→ stats().entropy < 0.1 なら 404 (Skip to provide badge)
-//	→ 透明な 96x96 と boolean(mask, 'eor')
+//
+// だが、`sharp/src/pipeline.cc` の実行順は **flatten → greyscale → resize/embed →
+// linear → normalise**。記述順どおりに normalise → linear → flatten と書くと、
+// 輝度レンジの狭い絵文字で平均絶対差 28.7/255・43.8% の画素が 32 以上ずれる
+// (実測)。**呼び出し順を入れ替えても sharp の出力が 1 バイトも変わらない**ことで
+// 固定順であることを確認してある。
 //
 // **contain であって cover ではない。** 以前は imaging.Fill (cover + 中央クロップ)
 // だったので、200x120 の絵文字は横幅の 40% が失われていた。
@@ -657,16 +660,11 @@ func exceedsPixelCap(img image.Image) bool {
 // **最後の XOR は no-op ではない。** 透明な RGBA canvas (全バイト 0) と mask を
 // XOR すると R=G=B=A=mask になる。つまり**暗いところが透明**な silhouette に
 // なる。通知 UI の背景に乗せる形なのでこれが要る。
-//
-// **entropy は upstream と厳密には一致しない。** sharp の `stats().entropy` は
-// libvips の内部実装で、標準的な Shannon エントロピーとは別物 (実測: 2 値画像で
-// sharp=0.0000 / Shannon=1.0730、実絵文字で sharp=2.7792 / Shannon=2.0054)。
-// 意図は「ほぼ空白のバッジを配らず SW の fallback に落とす」ことで、実絵文字の
-// Shannon は実測 2.0-4.9 と閾値 0.1 から十分離れているため、判定の結末は揃う。
 func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, error) {
-	// upstream は `requiresImageConversion && !isConvertibleImage` で 404
-	// (`Unexpected mime`)。以前は元データを素通ししていたので、バッジのつもりで
-	// 元画像がそのまま通知に出ていた。
+	// upstream の `requiresImageConversion && !isConvertibleImage` → 404
+	// (`Unexpected mime`)。**本番経路では Fetch 側の
+	// `isResizeMode(mode) && !isConvertibleImage` が先に同じ 404 を返す**ので
+	// ここは到達しないが、processBadge 単体の契約として揃えておく。
 	if !isConvertibleImage(contentType) {
 		return nil, ErrNotFound
 	}
@@ -679,14 +677,19 @@ func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, e
 		return makeDummyPNG(), nil
 	}
 
-	mask := badgeMask(img)
-	if shannonEntropy(mask) < badgeMinEntropy {
+	// **entropy は元画像で測る。** upstream の `stats()` は
+	// `sharp/src/stats.cc` で入力を開き直すので、**pipeline の操作を一切
+	// 適用しない**。`linear(0, 100)` で定数化しても `threshold(128)` で 2 値化
+	// しても値が変わらないことで確認してある (どれも log2(値の種類) に一致)。
+	// つまり判定は「元画像の greyscale が実質単色か」。
+	if inputEntropy(img) < badgeMinEntropy {
 		// upstream の `StatusError('Skip to provide badge', 404)`。SW の
 		// create-notification.ts は `res.status !== 200` で iconUrl('plus') へ
 		// 落ちるので、判別できないバッジを配るより 404 の方が親切。
 		return nil, ErrNotFound
 	}
 
+	mask := badgeMask(img)
 	out := image.NewNRGBA(image.Rect(0, 0, badgeSize, badgeSize))
 	for i, v := range mask {
 		out.Pix[i*4] = v
@@ -702,80 +705,62 @@ func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, e
 	return makeResult(buf.Bytes(), "image/png"), nil
 }
 
-// badgeMask runs the upstream badge pipeline and returns the 96x96 mask as one
-// byte per pixel (row-major).
-func badgeMask(img image.Image) []byte {
-	// contain: 縦横比を保って 96x96 に収める。**拡大もする**
-	// (upstream の `withoutEnlargement: false`)。imaging.Fit は縮小しかしない
-	// ので自分で倍率を出す。余白は透明のまま置き、後段の flatten で黒にする。
-	b := img.Bounds()
-	w, h := b.Dx(), b.Dy()
-	scale := math.Min(float64(badgeSize)/float64(w), float64(badgeSize)/float64(h))
-	nw := max(1, int(math.Round(float64(w)*scale)))
-	nh := max(1, int(math.Round(float64(h)*scale)))
-	fitted := imaging.Resize(img, nw, nh, imaging.Lanczos)
-	canvas := imaging.New(badgeSize, badgeSize, color.NRGBA{})
-	canvas = imaging.PasteCenter(canvas, fitted)
-
-	n := badgeSize * badgeSize
-	grey := make([]float64, n)
-	alpha := make([]byte, n)
-	minV, maxV := math.MaxFloat64, -math.MaxFloat64
-	for i := 0; i < n; i++ {
-		r := float64(canvas.Pix[i*4])
-		g := float64(canvas.Pix[i*4+1])
-		bl := float64(canvas.Pix[i*4+2])
-		alpha[i] = canvas.Pix[i*4+3]
-		// **完全に透明な画素は 0 として数える。** PNG は透明部分にも任意の RGB を
-		// 持てる (白であることが多い)。そのまま輝度に含めると normalise の
-		// レンジが広がり、**見えている部分のコントラストが潰れる** — 実測で
-		// mk-go の出力が sharp のほぼ半分の値になっていた (249 に対し 128)。
-		// sharp は resize で alpha を premultiply するので、透明部分の RGB は
-		// 0 になってから normalise に入る。
-		if alpha[i] == 0 {
-			r, g, bl = 0, 0, 0
-		}
-		// Rec.709。vips の sRGB→B_W は線形光を経由するので厳密には違うが、
-		// 直後の normalise がレンジを揃えるので結末への影響は小さい。
-		y := 0.2126*r + 0.7152*g + 0.0722*bl
-		grey[i] = y
-		minV = math.Min(minV, y)
-		maxV = math.Max(maxV, y)
-	}
-
-	out := make([]byte, n)
-	span := maxV - minV
-	for i, y := range grey {
-		// normalise: 輝度を 0-255 いっぱいに伸ばす。単色なら伸ばさない。
-		if span > 0 {
-			y = (y - minV) * 255 / span
-		}
-		// linear(1.75, -(128*1.75)+128) = 1.75x コントラスト
-		y = 1.75*y - 96
-		// flatten({background: '#000'}): 透明部分は黒に落ちる
-		y = y * float64(alpha[i]) / 255
-		switch {
-		case y <= 0:
-			out[i] = 0
-		case y >= 255:
-			out[i] = 255
-		default:
-			out[i] = byte(math.Round(y))
+// srgbToLinear / linearToSRGB convert one 0-255 sRGB channel to and from linear
+// light. vips の `colourspace(B_W)` は線形光を経由するので、係数を sRGB 値へ
+// 直接掛けると彩度の高い色で大きくずれる (実測: 純赤は vips 127 に対し 54)。
+var srgbToLinearLUT = func() [256]float64 {
+	var t [256]float64
+	for i := range t {
+		c := float64(i) / 255
+		if c <= 0.04045 {
+			t[i] = c / 12.92
+		} else {
+			t[i] = math.Pow((c+0.055)/1.055, 2.4)
 		}
 	}
-	return out
+	return t
+}()
+
+func linearToSRGB(v float64) float64 {
+	if v <= 0.0031308 {
+		return v * 12.92
+	}
+	return 1.055*math.Pow(v, 1/2.4) - 0.055
 }
 
-// shannonEntropy returns the Shannon entropy (bits) of the byte histogram.
-func shannonEntropy(mask []byte) float64 {
-	if len(mask) == 0 {
+// greyLevel returns the vips-compatible greyscale value of one sRGB pixel.
+func greyLevel(r, g, b uint8) float64 {
+	y := 0.2126*srgbToLinearLUT[r] + 0.7152*srgbToLinearLUT[g] + 0.0722*srgbToLinearLUT[b]
+	return linearToSRGB(y) * 255
+}
+
+// inputEntropy returns the Shannon entropy (bits) of the source image's
+// greyscale histogram, which is what upstream's `stats().entropy` measures.
+// **alpha は見ない** — upstream も RGB の greyscale だけを測る (RGB 一様で alpha
+// だけ変化する画像の entropy が 0 になることで確認済み)。
+func inputEntropy(img image.Image) float64 {
+	var hist [256]int
+	b := img.Bounds()
+	n := 0
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			// **`At().RGBA()` は premultiplied を返す。** そのまま使うと
+			// 「alpha を見ない」つもりが透明部分だけ 0 に潰れる。upstream の
+			// stats() は RGB の greyscale を測るので、非乗算で読む。
+			c := color.NRGBAModel.Convert(img.At(x, y)).(color.NRGBA)
+			v := greyLevel(c.R, c.G, c.B)
+			hist[clampByte(v)]++
+			n++
+		}
+	}
+	return histEntropy(hist[:], n)
+}
+
+func histEntropy(hist []int, n int) float64 {
+	if n == 0 {
 		return 0
 	}
-	var hist [256]int
-	for _, v := range mask {
-		hist[v]++
-	}
-	total := float64(len(mask))
+	total := float64(n)
 	entropy := 0.0
 	for _, c := range hist {
 		if c == 0 {
@@ -785,6 +770,73 @@ func shannonEntropy(mask []byte) float64 {
 		entropy -= p * math.Log2(p)
 	}
 	return entropy
+}
+
+func clampByte(v float64) uint8 {
+	switch {
+	case v <= 0:
+		return 0
+	case v >= 255:
+		return 255
+	default:
+		return uint8(math.Round(v))
+	}
+}
+
+// badgeMask runs the upstream badge pipeline and returns the 96x96 mask as one
+// byte per pixel (row-major). 順序は sharp の pipeline 順
+// (flatten → greyscale → resize/embed → linear → normalise)。
+func badgeMask(img image.Image) []byte {
+	// 1. flatten({background: '#000'}) → 2. greyscale
+	//    **resize より前**なので、透明部分は先に黒へ落ちる。
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	flat := image.NewGray(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			// **`At().RGBA()` の premultiplied 値がそのまま
+			// `flatten({background: '#000'})` の結果**。RGB×alpha なので、
+			// 別途 alpha を掛けると二重になる。
+			r, g, bl, _ := img.At(b.Min.X+x, b.Min.Y+y).RGBA()
+			flat.Pix[y*w+x] = clampByte(greyLevel(uint8(r>>8), uint8(g>>8), uint8(bl>>8)))
+		}
+	}
+
+	// 3. resize(96, 96, {fit: 'contain', withoutEnlargement: false}) + embed(黒)
+	//    **拡大もする**。imaging.Fit は縮小しかしないので倍率を自分で出す。
+	scale := math.Min(float64(badgeSize)/float64(w), float64(badgeSize)/float64(h))
+	nw := max(1, int(math.Round(float64(w)*scale)))
+	nh := max(1, int(math.Round(float64(h)*scale)))
+	fitted := imaging.Resize(flat, nw, nh, imaging.Lanczos)
+	canvas := imaging.New(badgeSize, badgeSize, color.NRGBA{A: 255})
+	// **切り捨てで左上寄せ** — sharp の CalculateEmbedPosition と同じ。
+	// imaging.PasteCenter は奇数差で右下へ寄るので 1px ずれる。
+	canvas = imaging.Paste(canvas, fitted, image.Pt((badgeSize-nw)/2, (badgeSize-nh)/2))
+
+	n := badgeSize * badgeSize
+	vals := make([]float64, n)
+	minV, maxV := math.MaxFloat64, -math.MaxFloat64
+	for i := 0; i < n; i++ {
+		// 4. linear(1.75, -(128*1.75)+128)。sharp は uchar:true なので
+		//    この時点で 0-255 にクリップされる。
+		v := float64(canvas.Pix[i*4])
+		v = math.Round(1.75*v - 96)
+		v = math.Min(255, math.Max(0, v))
+		vals[i] = v
+		minV = math.Min(minV, v)
+		maxV = math.Max(maxV, v)
+	}
+
+	// 5. normalise。upstream は差が 1 以下なら伸ばさない (operations.cc)。
+	out := make([]byte, n)
+	span := maxV - minV
+	for i, v := range vals {
+		if span > 1 {
+			v = (v - minV) * 255 / span
+		}
+		out[i] = clampByte(v)
+	}
+	return out
 }
 
 // passThrough validates the MIME type and returns data as-is.
