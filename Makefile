@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check notiftype-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -1046,6 +1046,14 @@ notiftype-check: ## 通知タイプの一覧が 1 箇所から導出されてい
 .PHONY: migrationdoc-check
 migrationdoc-check: ## migration の本数を述べた doc が実態と合っているか検査
 	go test ./internal/entitycompat/... -run 'TestMigrationCountsInDocsMatchReality|TestNoopDownMigrationListMatchesReality|TestDestructiveMigrationTableRowsAreUnique' -count=1 -v
+
+.PHONY: mdtable-check
+mdtable-check: ## md の表の各行がヘッダと同じ列数か検査 (溢れたセルは描画時に捨てられる)
+	# GFM は溢れたセルを黙って捨てるので、ソースに書いた内容が GitHub 上で
+	# 読めなくなる。原因はほぼセル区切りとして働くパイプで、**コードスパンの
+	# 中でも働く** (`\|` へエスケープする)。#2930 で実際に踏んだ。
+	# **見るのは列数だけ。** 取りこぼす形はテストの doc コメントに明記してある。
+	go test ./internal/entitycompat/... -run 'TestMarkdownTablesDoNotDropContent' -count=1 -v
 
 .PHONY: gaterun-check
 gaterun-check: ## gates の -run が名指しするテストが実在するか検査

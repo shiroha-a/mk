@@ -144,7 +144,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -217,7 +217,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 128 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 129 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -829,6 +829,10 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-10**: `make gates` に `mdtable-check` を追加 (#2930)。`make help` の target は 128 → 129。**GFM は列が増えた行を「崩して描画」しない。溢れたセルを黙って捨てる。** ヘッダ行が列数を決め、それを超えたセルは破棄されるので、**ソースには書いてあるのに GitHub 上では読めない**という形で壊れる。ローカルで md を読んでいる限り気付けない。実際に踏んだのは `docs/divergence.md` の `2026.9.0-mk.7` の行で、コードスパンの中に書いた権限式 `$i.isModerator || $i.policies.canManageCustomEmojis` の `||` がセル区切りとして働き、**描画は 599 文字あるべきところ 394 文字で止まって 205 文字 (34.2%) が読めなかった** (数え方は `gh api /markdown --mode gfm` の出力からタグを除いた文字数)。消えた中に「純正へは還元できない行」という分類が入っており、この表を「還元不能な差分の一覧」として読む運用が成立していなかった。
+  **コードスパンの中でもパイプは区切りとして働く。** GFM のエスケープ (`\|` → `|`) は inline の解析より**前**に効くので、表セルの中では `` `a \|\| b` `` と書けば区切りにならずコード中の `||` になる。リテラルの `\|` を見せたいときは `` `a \\| b` ``。**表の外にはこの前処理が無い**ので、コードスパンに `\|` と書くとバックスラッシュがそのまま出る (この entry の 1 稿目で実際に間違えた)。
+  **見るのは列数だけにしてある。** 敵対的レビューで「列数が一致したままコードスパンが割れる形がある」(3 列の表の `` | `x|y` | z | `` は**セル数がヘッダと同じ 3 になる**) と指摘され、コードスパンの対応付けを自前で持つ実装と、外側パイプ省略に対応するため表の終端をブロック開始で判定する実装を足した。**どちらも次の周で正当な md を落とした** — 前者は**二重バッククォートのコードスパンを含む行**を、後者は**表の直後にリストを置くというごく普通の書き方**を偽陽性にした (どちらも GitHub では正常に描画されることを実測)。自前の inline / block パーサに継ぎ足す形は #2857 が「手当てするたびに隣の穴が開く」と結論した型なので、**列数という 1 つの条件だけ**に戻してある。取りこぼす側 (列数が一致したまま割れる形、外側パイプを省いた表、ヘッダ行自体が壊れた表) はテストの doc コメントに明記した。
+  **表は「先頭パイプの行が続く間」とする** — GFM はパイプを含まない行も表の行にするが、そこまで追うには全ブロックの開始判定が要る。このリポジトリの表 227 個はすべて先頭パイプ付きなので取りこぼしは無い。**フェンスの検出は行頭 3 スペースまで** (`^\s*` にすると、フェンスの書き方をインデントブロックで見せているdoc で開いたまま閉じず、そのファイルの残りが未検査になる。現 corpus に該当は無いが仕様どおりにしてある)。**`git ls-files` で見る** (#2857 と同じ理由。submodule の中は出ないので fork frontend の md は対象外)。**1 つも拾えなかったら落とす。** 実測は tracked な md 57 ファイル / 表 227 個で、**現 corpus に対し偽陽性 0・検出 1 件** (= 上記の実バグ)。**あわせて `make gates` の一覧に `notiftype-check` が漏れていたのを Section 3 と `docs/development.md` の両方で直した** (2026-09-08 に追加したときの片側更新)。
 - **2026-09-09**: `make frontend-check` に eslint を追加し、`make frontend-lint` を新設 (#2906)。`make help` の target は 127 → 128。**手元で CI と同じ検査ができていなかった** — `frontend-check` は `vue-tsc` と submodule ゲートだけで、eslint は CI の**別 step** (`pnpm eslint`) だった。#2903 で実際に踏んでいる (デッドコードを消したときの空行 2 連続が `@stylistic/no-multiple-empty-lines` で落ちた)。個別ファイルに `npx eslint` を掛けても CI と同じ glob ではないので見落とす。CLAUDE.md 2026-09-05 の #2841 (`make test` と CI の flag がずれていた) と**同じ型**。**引数は書き写さず `package.json` の script を呼ぶ** — 書き写すと #2841 と同じドリフトが起きるので、`npm run --silent eslint` で script を唯一の定義にした (CI は `pnpm eslint` だが手元に pnpm があるとは限らない。既存の `frontend-check` / `frontend-test` も npx を使っている)。**`eslint .` にしないこと** — upstream が lint していない `test/` まで拾い、追従のたびに他人の負債で落ちる。実測 55 秒で、#2903 と同じ違反を入れて `make frontend-check` が exit 2 で落ちることを確認した。**vitest は入れていない** (`make frontend-test`) — CI も別 step で、こちらは #2844 で既に手元の再現手段がある。
 - **2026-09-08**: `make gates` に `notiftype-check` を追加 (#2898)。`make help` の target は 126 → 127。通知タイプの一覧が **core の `Type` 定数と `internal/api/notifications` のリテラルの 2 箇所**にあり、片側更新が実際に起きていた (`importCompleted` が core にだけあった。発火箇所が無いので実害は出ていなかったが、固有型を足せば必ず踏む)。API 側を `internal/core/notification` の registry から導出する形にしたうえで、(a) registry と `Type` 定数が 1:1 か、(b) API 側がリテラルに書き戻されていないか、を検査する。**値の一致だけでは足りない** — リテラルに書き戻しても書いた時点の中身は同じなので値比較は通り、落ちるのは core に型を足した後 = 一番検出したい瞬間に検出できない。導出している「形」を AST で固定してある (中身が同一のリテラルへの書き戻しで落ちることを実測)。**固有型を全指定判定に含めるのが要点** — 含めないと upstream の 20 種を全て `excludeTypes` に並べただけで「全部除外」と判定され、除外指定していない固有型の通知まで返らなくなる。
 - **2026-09-08**: Section 3 の `make frontend-check` と Section 8 の `frontend-check` job に、submodule のソースを読むゲートを追記 (#2892)。`/about-misskey` の謝辞アイコン 62 枚が `img-src 'self' data: blob:` でブロックされ本番で 1 枚も表示されていなかったのを、`img-src` に固定 2 origin (`avatars.githubusercontent.com` / `assets.misskey-hub.net`) を足して直した。**upstream が host を足すと黙って壊れる**ので、`about-misskey.vue` から外部画像の host を抽出して定数と過不足なく突き合わせるゲートを置いた。**`make gates` には入れない** — あちらは submodule 無しで回る前提で、混ぜると checkout していない環境で skip され「検査していないのに緑」になる。`test-shards` は `third_party/misskey` を checkout しないため、submodule を取る `frontend-check` でだけ回し、`MK_FRONTEND_GATES_REQUIRE_SUBMODULE` で skip を禁じる (`plugin-tests` の `MK_PLUGIN_TESTS_REQUIRE_DB` と同じ形)。**media proxy 経由には落とせない** — mk-go の proxy は upstream と違い open proxy ではなく、allowlist が DB に実在する URL だけを通すので静的な URL は 403 (実測)。**この doc 更新自体が #2892 で漏れていた** — Makefile の target と CI job の中身を変えたのに、それを説明する 5 ファイル 7 箇所が「型チェックだけ」のまま残っていた (CLAUDE.md が「最多の型」と呼ぶ片側更新)。
