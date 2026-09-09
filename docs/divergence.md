@@ -1045,13 +1045,15 @@ entropy も sharp と一致する (gif は完全一致、他は差 0.03 以下)�
 
 ### 画像デコーダ由来の差 (badge に限らない)
 
-`decodeImage` は `kovidgoyal/imaging` を使うので、次の 3 つは **emoji / avatar / preview / static / badge の全モード**に効く。#2920 のレビューで測定したもので、いずれも develop 以前からある。
+`decodeImage` は `kovidgoyal/imaging` を使うので、次は **emoji / avatar / preview / static / badge の全モード**に効く。#2920 のレビューで挙がった 3 件を #2925 で実測した結果:
 
-| | upstream | mk-go |
-|---|---|---|
-| インターレース (Adam7) PNG | 正しくデコードする | **全画素 0 になる** (エラーは返さない)。badge では entropy 0 → 404 |
-| 透明部の RGB を持つ WebP | VP8 ストリームの RGB を見る | Go の decoder が `*image.NYCbCrA` を返し、透明部の RGB を復元できない。entropy が 1.5-2.3 bit 過小になる |
-| EXIF 回転 | badge では**適用しない** (`sharpBmp` は `autoOrient` を渡さない) | `imaging.AutoOrientation(true)` で適用する |
+**インターレース (Adam7) PNG は解消済み (#2925)。** `imaging` は alpha を持たない PNG を独自の `*nrgb.Image` に読むが、その Adam7 処理が壊れており**エラーを返さず全画素 0** を返していた (壊れるのは `colorType=2` かつ `interlace=1` の組み合わせだけで、gray / gray+alpha / palette / RGBA は正常)。IHDR の interlace method を見て stdlib の `png.Decode` へ回すようにした。**この経路では EXIF の向きが適用されない** (`imaging.AutoOrientation` を通らないため) が、PNG が eXIf を持つのは稀。
+
+**透明部の RGB を持つ WebP は問題なかった。** 「Go の decoder が `*image.NYCbCrA` を返すので透明部の RGB を復元できず、entropy が 1.5-2.3 bit 過小になる」という指摘があったが、**再現しない**。`imaging.Clone` は Y / Cb / Cr の plane を直接読むので、完全に透明な画素の色も保持する (実測: plane の生値 `[209 41 41]` がそのまま出る)。実ファイル 6 件で sharp の `stats().entropy` と比べても差は 0.03-0.15。
+
+潰れるのは `At()` / `draw.Draw` を通る経路だけで、`normalizeForResize` がそれに当たる。ただし `imaging` の resize は alpha で重み付けするため、**resize 後の出力は完全に同一** (128x128 を 64 / 32 へ縮めて差 0 バイト)。**直す価値が無いので直していない** — 同じ誤解で触られないようにここに残す。
+
+**EXIF の向きは mk-go だけが適用する (意図的)。** upstream の proxy は `sharpBmp` に `autoOrient` を渡さず `.rotate()` も呼ばないので向きを無視する。mk-go は `imaging.AutoOrientation(true)` で適用する。**mk-go の方が親切なので揃えない** — 向き情報を持つ写真が横倒しで出るより、正立で出る方が利用者の意図に近い。upstream 自身のテスト画像 `test/resources/rotate.jpg` では平均絶対差 127.40・画素の 50.5% が 32 以上ずれる (縦横が入れ替わるため)。
 
 ---
 

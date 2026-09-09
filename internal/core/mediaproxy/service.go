@@ -1015,11 +1015,47 @@ func decodeImage(data []byte, contentType string) (image.Image, error) {
 		}
 		return img, nil
 	}
+	// **インターレース (Adam7) の PNG は stdlib で読む (#2925)。**
+	// `kovidgoyal/imaging` は alpha を持たない PNG を独自の `*nrgb.Image` に
+	// 読むが、その Adam7 の処理が壊れており **エラーを返さずに全画素 0** を
+	// 返す。resize 系の mode は「真っ黒な絵文字」を 200 で配ることになり、
+	// 検出する手段が無い。
+	//
+	// **壊れるのは colorType=2 (RGB) かつ interlace=1 の組み合わせだけ** で、
+	// gray / gray+alpha / palette / RGBA と、非インターレースの RGB はいずれも
+	// 正しく読める (実測)。ただし条件を colorType まで絞ると、ライブラリが
+	// 別の型で同じ壊れ方をしたときに素通りする。**インターレースなら全部
+	// stdlib へ回す** — stdlib はどの colorType でも正しく、Adam7 自体が稀なので
+	// `nrgb.Image` の省メモリを捨てる代償も小さい。
+	//
+	// **EXIF の向きは適用されない。** `imaging.AutoOrientation` を通らないため。
+	// PNG が eXIf を持つのは稀で、向きを入れるのはさらに稀。
+	if isInterlacedPNG(data) {
+		img, err := png.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		return img, nil
+	}
 	img, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
 	if err != nil {
 		return nil, err
 	}
 	return img, nil
+}
+
+// isInterlacedPNG reports whether data is a PNG whose IHDR declares Adam7.
+//
+// **Content-Type ではなく magic bytes で見る。** 相手が申告する MIME は当てに
+// ならず、`decodeImage` は元から中身で dispatch している。
+func isInterlacedPNG(data []byte) bool {
+	const sig = "\x89PNG\r\n\x1a\n"
+	// signature 8 + length 4 + "IHDR" 4 + IHDR 13。interlace method は
+	// IHDR の 13 バイト目 (offset 28)。
+	if len(data) < 29 || string(data[:8]) != sig || string(data[12:16]) != "IHDR" {
+		return false
+	}
+	return data[28] == 1
 }
 
 // normalizeForResize converts img to NRGBA when the resize library cannot read
