@@ -43,6 +43,19 @@ jobs:
           # を展開しないと "failed to calculate checksum ... not found" で死ぬ。
           submodules: recursive
 
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          # pnpm のバージョンは submodule 側 package.json の packageManager から
+          # 取る。mk リポジトリ直下には package.json が無い。
+          #
+          # **corepack を使わない (#2914)。** Node.js 26 の配布物に corepack は
+          # 含まれておらず、今動いているのは runner image にプリインストールされた
+          # Node の corepack が PATH に残るからでしかない。image の Node が 26 に
+          # なった時点で一斉に落ちる。あわせて `corepack prepare pnpm@latest` は
+          # packageManager の宣言を無視して最新版を入れていたので、版もここで揃う。
+          package_json_file: third_party/misskey/package.json
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
@@ -55,8 +68,6 @@ jobs:
       - name: Build third_party/misskey frontend bundle
         working-directory: third_party/misskey
         run: |
-          corepack enable
-          corepack prepare pnpm@latest --activate
           pnpm install --frozen-lockfile
           pnpm build
 

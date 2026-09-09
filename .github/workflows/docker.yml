@@ -62,6 +62,19 @@ jobs:
       # その実体は third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built/twemoji
       # 配下にあり、pnpm install 後にしか存在しない。runner上で事前にinstallして
       # Docker build contextに含める (issue #359)。
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          # pnpm のバージョンは submodule 側 package.json の packageManager から
+          # 取る。mk リポジトリ直下には package.json が無い。
+          #
+          # **corepack を使わない (#2914)。** Node.js 26 の配布物に corepack は
+          # 含まれておらず、今動いているのは runner image にプリインストールされた
+          # Node の corepack が PATH に残るからでしかない。image の Node が 26 に
+          # なった時点で一斉に落ちる。あわせて `corepack prepare pnpm@latest` は
+          # packageManager の宣言を無視して最新版を入れていたので、版もここで揃う。
+          package_json_file: third_party/misskey/package.json
+
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
@@ -70,8 +83,6 @@ jobs:
       - name: Install third_party/misskey node_modules
         working-directory: third_party/misskey
         run: |
-          corepack enable
-          corepack prepare pnpm@latest --activate
           pnpm install --frozen-lockfile
 
       - name: Set up Docker Buildx
