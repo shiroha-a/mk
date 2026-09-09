@@ -1,8 +1,8 @@
 # Playwright e2e
 
 mk-go のフロントエンド / API を実ブラウザから検証する e2e。spec は
-`tests/playwright/specs/` にあり、現在 295 ファイル
-(`npx playwright test --list` で数えられる)。
+`tests/playwright/specs/` にあり、現在 296 ファイル
+(`find tests/playwright/specs -name '*.spec.ts' | wc -l`)。
 
 Cypress からの移行完了に伴い、frontend e2e はこちらに一本化した (#2437)。本家も
 Cypress を廃止して Playwright へ移行しており、参照先が消滅したため mk-go 側の
@@ -46,8 +46,11 @@ bump したときに回す (`docs/upstream-catch-up.md`)。
 **4 シャード並列** (`--shard=i/4`、`fail-fast: false`)。check 名は
 `spec (mk-go 1/4)` 〜 `4/4`。
 
-**1 スタックあたりは直列でしか回せない。** 295 spec のうち 174 が共有の root (alice) で
-サインインし、instance meta は全 spec が共有する。Playwright はファイル単位で並列化する
+**1 スタックあたりは直列でしか回せない。** 296 spec のうち 177 が共有の root (alice) で
+**ブラウザからサインイン**し (数え方は `grep -rlE 'uiSigninAsRoot|signin-username' tests/playwright/specs --include='*.spec.ts' | wc -l`。
+`uiSigninAsRoot` helper が 176 で、`signin.spec.ts` だけ signin フォームを直接駆動する)、
+さらに 32 がサインインせず root の token で API を叩く (`root.json` を読むのが 209 で、その差分)。
+instance meta は全 spec が共有する。Playwright はファイル単位で並列化する
 ので `workers` を上げると `profile_iscat_toggle` と `profile_isbot_toggle` が同じ
 アカウントを、`admin_branding_save` と `about_page_render` が同じ meta を取り合う。
 **並列度はスタックごと分ける = シャードでしか稼げない** (#2609)。

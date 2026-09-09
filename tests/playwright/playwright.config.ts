@@ -6,7 +6,7 @@
 import { defineConfig } from '@playwright/test';
 
 // mk-go backend に対する Playwright e2e の設定 (#744)。spec は
-// `specs/upstream/` に 290 ファイル、`specs/mkgo/` に 4 ファイル。CI では `--shard=i/4` を 4 job に
+// `specs/upstream/` に 290 ファイル、`specs/mkgo/` に 6 ファイル。CI では `--shard=i/4` を 4 job に
 // 分けて回す (docs/playwright.md)。
 export default defineConfig({
   testDir: './specs',
@@ -62,8 +62,12 @@ export default defineConfig({
     // i18n key 解決に使うので、これで全 spec の text 前提が安定する。
     locale: 'en-US',
   },
-  // **1 スタックに対しては直列で回すしかない。** 295 spec のうち 174 が共有の
-  // root (alice) でサインインし、instance meta は全 spec が共有する。Playwright は
+  // **1 スタックに対しては直列で回すしかない。** 296 spec のうち 177 が共有の
+  // root (alice) でブラウザからサインインし (数え方は
+  // `grep -rlE 'uiSigninAsRoot|signin-username' tests/playwright/specs --include='*.spec.ts' | wc -l`)、
+  // さらに 32 がサインインせず root の token で API を叩く
+  // (`root.json` を読むのが 209 で、その差分)。
+  // instance meta は全 spec が共有する。Playwright は
   // ファイル単位で並列化するので、workers を上げると `profile_iscat_toggle` と
   // `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
   // `about_page_render` が同じ meta を取り合う。root の quota
