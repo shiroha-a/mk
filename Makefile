@@ -670,6 +670,8 @@ bench-logs: ## k6 ベンチのログを表示
 # Queue bench (#563): 3-way deliver/inbox throughput comparison across
 # Misskey TS (BullMQ), mk-go (asynq), mk-go (mkq).
 QUEUE_BENCH_COMPOSE=tests/queue-bench/docker-compose.queue-bench.yml
+# compose の project 名 (`name: mk-queue-bench`) + network 名から決まる。
+QUEUE_BENCH_NETWORK=mk-queue-bench_bench
 
 queue-bench-up: ## queue-bench スタックを起動
 	docker compose -f $(QUEUE_BENCH_COMPOSE) up -d --build
@@ -705,6 +707,26 @@ queue-bench-seed: ## queue-bench 用のデータを投入
 		sleep 2; \
 	done; \
 	echo "warning: not all apps became healthy in time" >&2; exit 1
+	# **nginx も再起動する (#2917)。** `restart` はコンテナに IP を割り当て直し
+	# うるので、app 同士が IP を交換すると、upstream をホスト名で書いた nginx が
+	# **古いアドレスを掴んだまま相手側の app へ繋ぐ**。実測では nginx-ts が
+	# app-mkq に、nginx-mkq が app-ts に繋がり、Host が食い違って inbound が
+	# 全件 401 になっていた (9/4 から 6 夜連続で nightly が赤かった原因)。
+	# #2364 で seed の `--force-recreate` に `--no-deps` を足して依存の作り直しは
+	# 止めたが、**その次の restart は塞がっていなかった**。
+	#
+	# **app が healthy になってから restart する。** nginx は起動時に一度だけ
+	# 名前解決するので、app の IP が確定した後でなければ意味が無い。
+	docker compose -f $(QUEUE_BENCH_COMPOSE) restart nginx-asynq nginx-mkq nginx-ts
+	@echo "waiting for nginx fronts to accept connections..."
+	@for i in $$(seq 1 30); do \
+		if docker run --rm --network $(QUEUE_BENCH_NETWORK) alpine:3.21 \
+			sh -c 'nc -z mk-asynq 443 && nc -z mk-mkq 443 && nc -z ts 443' >/dev/null 2>&1; then \
+			echo "ready (all nginx fronts listening)"; exit 0; \
+		fi; \
+		sleep 2; \
+	done; \
+	echo "warning: nginx fronts did not come up in time" >&2; exit 1
 
 queue-bench-outbound: ## queue-bench の outbound 計測
 	# queue-bench-seed と同じ理由で `--force-recreate` (#1163)。

@@ -148,7 +148,19 @@ jobs:
                       f"{s['target']}: ok={s['ok']}/{s['sent']} failed={s['failed']}"
                   )
           if bad:
-              print("FAIL: inbound smoke detected partial failure:", file=sys.stderr)
+              # **全滅と部分失敗を区別する (#2917)。** 「partial failure」だけを
+              # 出していたので、ok=0/100 が全 stack で並ぶ状態 (= orchestration が
+              # 壊れていて 1 件も届いていない) を「一部が失敗した」と読んでしまう。
+              # 実際 #2917 は全滅だったのに 6 夜そう読まれ続けた。
+              total = len(d["send"]["stats"])
+              dead = sum(1 for s in d["send"]["stats"] if s["ok"] == 0)
+              if dead == total:
+                  head = f"FAIL: inbound smoke delivered nothing ({total} stacks all ok=0)"
+              elif dead:
+                  head = f"FAIL: inbound smoke: {dead}/{total} stacks delivered nothing"
+              else:
+                  head = "FAIL: inbound smoke detected partial failure:"
+              print(head, file=sys.stderr)
               for b in bad:
                   print(f"  {b}", file=sys.stderr)
               sys.exit(1)
@@ -188,3 +200,37 @@ jobs:
         if: always()
         run: |
           make queue-bench-down >/dev/null 2>&1 || true
+
+  # **失敗に気付ける手当て (#2917)。** schedule 専用の workflow は PR で発火
+  # しないので、赤くなっても誰も見ない。実際 9/4 から 6 夜連続で失敗していたのに
+  # 気付かれなかった。dropin-frontend-e2e.yml と同じ形で、open な同名 issue が
+  # 無いときだけ起票する。
+  notify-failure:
+    needs: [smoke]
+    if: ${{ always() && github.event_name == 'schedule' && needs.smoke.result == 'failure' }}
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open tracking issue when absent
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: "nightly queue-bench-smoke が失敗しています"
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          existing=$(gh issue list --state open --search "$TITLE in:title" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            echo "既に open な issue #$existing があるので起票しない"
+            exit 0
+          fi
+          {
+            printf 'nightly workflow `%s` が失敗しました。\n\n' "queue-bench-smoke"
+            printf -- '- 失敗した run: %s\n' "$RUN_URL"
+            printf -- '- 対象 branch: develop\n\n'
+            printf 'この issue は nightly の schedule 実行が失敗したときに自動起票されます。\n'
+            printf '既に open な同名 issue がある間は重複起票しません。原因を解消したら\n'
+            printf 'この issue を close してください (次回失敗時に再度起票されます)。\n'
+          } > /tmp/nightly-issue.md
+          gh issue create --title "$TITLE" --body-file /tmp/nightly-issue.md
