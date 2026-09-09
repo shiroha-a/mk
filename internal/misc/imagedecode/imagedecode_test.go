@@ -132,3 +132,31 @@ func TestHasChunk(t *testing.T) {
 	assert.False(t, hasChunk(broken, "tRNS"))
 	assert.NotPanics(t, func() { _ = IsBrokenInterlacedPNG(broken) })
 }
+
+// 対象外の入力は imaging に回る (既定の経路が生きていること)。
+func TestDecode_FallsBackToImaging(t *testing.T) {
+	for _, name := range []string{"plain-rgb8.png", "interlaced-rgba8.png"} {
+		data := fixture(t, name)
+		require.False(t, IsBrokenInterlacedPNG(data))
+		img, err := Decode(data)
+		require.NoError(t, err, name)
+		require.NotNil(t, img, name)
+		assert.Equal(t, 8, img.Bounds().Dx(), name)
+	}
+}
+
+// **chunk の走査が範囲外を読まないこと。** 細工した length や途中で切れた
+// 入力で index out of range にならず false を返す。
+func TestHasChunk_Bounds(t *testing.T) {
+	good := fixture(t, "interlaced-rgb8.png")
+
+	// chunk header の途中で切れている (pos+8 > len)。
+	assert.False(t, hasChunk(good[:12], "tRNS"))
+	assert.False(t, hasChunk(good[:8], "tRNS"))
+
+	// length を巨大にしても範囲外を読まない (`next > len(data)` で止まる)。
+	huge := append([]byte(nil), good...)
+	huge[8] = 0xff
+	assert.False(t, hasChunk(huge, "tRNS"))
+	assert.NotPanics(t, func() { _ = hasChunk(huge, "tRNS") })
+}

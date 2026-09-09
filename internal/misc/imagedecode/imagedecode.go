@@ -68,10 +68,10 @@ func hasChunk(data []byte, typ string) bool {
 		if pos+8 > len(data) {
 			return false
 		}
+		// **`length < 0` の検査は要らない。** byte を 24 bit 左シフトしても
+		// int (64bit) では正のままなので到達しない。範囲外は下の
+		// `next > len(data)` で止める。
 		length := int(data[pos])<<24 | int(data[pos+1])<<16 | int(data[pos+2])<<8 | int(data[pos+3])
-		if length < 0 {
-			return false
-		}
 		if string(data[pos+4:pos+8]) == typ {
 			return true
 		}
