@@ -86,6 +86,22 @@ func makePNG() []byte {
 	return w.data
 }
 
+// makeBadgePNG builds a 100x100 image with a horizontal gradient, so the badge
+// pipeline's entropy guard (#2920) does not skip it. makePNG is a solid colour
+// and is intentionally kept that way — it exercises the skip path.
+func makeBadgePNG() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 100, 100))
+	for y := 0; y < 100; y++ {
+		for x := 0; x < 100; x++ {
+			v := uint8(x * 255 / 99)
+			img.Set(x, y, color.RGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	w := &byteWriter{}
+	_ = png.Encode(w, img)
+	return w.data
+}
+
 type byteWriter struct {
 	data []byte
 }
@@ -273,7 +289,10 @@ func TestFetch_RemoteImage_Preview(t *testing.T) {
 }
 
 func TestFetch_RemoteImage_Badge(t *testing.T) {
-	imgData := makePNG()
+	// **単色だと entropy guard に落ちて 404 になる (#2920)。** グラデーションで
+	// 中身のある画像を使う。単色が 404 になること自体は
+	// TestProcessBadge_BlankImageIs404 が固定する。
+	imgData := makeBadgePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
 		w.Write(imgData)
@@ -634,13 +653,15 @@ func TestProcessResize_NonConvertibleImage(t *testing.T) {
 	assert.Equal(t, "application/octet-stream", result.ContentType)
 }
 
+// **変換できない MIME は 404 (#2920)。** upstream は
+// `requiresImageConversion && !isConvertibleImage` で `Unexpected mime` を
+// 404 にする。以前は元データを素通ししていたので、バッジのつもりで元画像が
+// そのまま通知に出ていた。
 func TestProcessBadge_NonConvertibleImage(t *testing.T) {
 	s := testService(nil)
 	data := []byte("not an image")
-	result, err := s.processBadge(data, "text/plain")
-	require.NoError(t, err)
-	defer result.Body.Close()
-	assert.Equal(t, "text/plain", result.ContentType)
+	_, err := s.processBadge(data, "text/plain")
+	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestResizeToHeight_SmallImage(t *testing.T) {
@@ -814,7 +835,7 @@ func TestProcessResize_HeightOnly(t *testing.T) {
 
 func TestProcessBadge_ValidImage(t *testing.T) {
 	s := testService(nil)
-	imgData := makePNG() // 100x100
+	imgData := makeBadgePNG() // 100x100 のグラデーション
 
 	result, err := s.processBadge(imgData, "image/png")
 	require.NoError(t, err)

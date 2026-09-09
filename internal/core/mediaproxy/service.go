@@ -11,6 +11,7 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"math"
 	"mime"
 	"net/http"
 	"strings"
@@ -59,10 +60,12 @@ const (
 	previewWidth  = 200
 	previewHeight = 200
 	badgeSize     = 96
-	webpQuality   = 77
-	avifQuality   = 60       // AVIF default; matches gen2brain/avif.DefaultQuality
-	avifSpeed     = 8        // 0..10 — 8 keeps quality close to default while staying responsive
-	maxDownload   = 32 << 20 // 32 MB
+	// badgeMinEntropy は upstream の `stats().entropy < 0.1` と同じ閾値 (#2920)。
+	badgeMinEntropy = 0.1
+	webpQuality     = 77
+	avifQuality     = 60       // AVIF default; matches gen2brain/avif.DefaultQuality
+	avifSpeed       = 8        // 0..10 — 8 keeps quality close to default while staying responsive
+	maxDownload     = 32 << 20 // 32 MB
 )
 
 // maxDecodedPixels caps width*height *after* decode so a pixel-bomb input
@@ -637,29 +640,151 @@ func exceedsPixelCap(img image.Image) bool {
 	return int64(w)*int64(h) > maxDecodedPixels
 }
 
-// processBadge creates a 96x96 greyscale PNG badge.
+// processBadge creates a 96x96 badge PNG, mirroring upstream
+// FileServerProxyHandler.processBadge (#2920).
+//
+// upstream の pipeline は
+//
+//	resize(96, 96, {fit: 'contain', position: 'centre', withoutEnlargement: false})
+//	  .greyscale().normalise().linear(1.75, -(128*1.75)+128)
+//	  .flatten({background: '#000'}).toColorspace('b-w')
+//	→ stats().entropy < 0.1 なら 404 (Skip to provide badge)
+//	→ 透明な 96x96 と boolean(mask, 'eor')
+//
+// **contain であって cover ではない。** 以前は imaging.Fill (cover + 中央クロップ)
+// だったので、200x120 の絵文字は横幅の 40% が失われていた。
+//
+// **最後の XOR は no-op ではない。** 透明な RGBA canvas (全バイト 0) と mask を
+// XOR すると R=G=B=A=mask になる。つまり**暗いところが透明**な silhouette に
+// なる。通知 UI の背景に乗せる形なのでこれが要る。
+//
+// **entropy は upstream と厳密には一致しない。** sharp の `stats().entropy` は
+// libvips の内部実装で、標準的な Shannon エントロピーとは別物 (実測: 2 値画像で
+// sharp=0.0000 / Shannon=1.0730、実絵文字で sharp=2.7792 / Shannon=2.0054)。
+// 意図は「ほぼ空白のバッジを配らず SW の fallback に落とす」ことで、実絵文字の
+// Shannon は実測 2.0-4.9 と閾値 0.1 から十分離れているため、判定の結末は揃う。
 func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, error) {
+	// upstream は `requiresImageConversion && !isConvertibleImage` で 404
+	// (`Unexpected mime`)。以前は元データを素通ししていたので、バッジのつもりで
+	// 元画像がそのまま通知に出ていた。
 	if !isConvertibleImage(contentType) {
-		return makeResult(data, contentType), nil
+		return nil, ErrNotFound
 	}
 
 	img, err := decodeImage(data, contentType)
-	if err == nil && exceedsPixelCap(img) {
+	if err != nil {
+		return nil, ErrNotFound
+	}
+	if exceedsPixelCap(img) {
 		return makeDummyPNG(), nil
 	}
-	if err != nil {
-		return makeResult(data, contentType), nil
+
+	mask := badgeMask(img)
+	if shannonEntropy(mask) < badgeMinEntropy {
+		// upstream の `StatusError('Skip to provide badge', 404)`。SW の
+		// create-notification.ts は `res.status !== 200` で iconUrl('plus') へ
+		// 落ちるので、判別できないバッジを配るより 404 の方が親切。
+		return nil, ErrNotFound
 	}
 
-	// 96x96にリサイズしてグレースケール変換
-	resized := imaging.Fill(img, badgeSize, badgeSize, imaging.Center, imaging.Lanczos)
-	grey := imaging.Grayscale(resized)
+	out := image.NewNRGBA(image.Rect(0, 0, badgeSize, badgeSize))
+	for i, v := range mask {
+		out.Pix[i*4] = v
+		out.Pix[i*4+1] = v
+		out.Pix[i*4+2] = v
+		out.Pix[i*4+3] = v
+	}
 
 	var buf bytes.Buffer
-	if err := png.Encode(&buf, grey); err != nil {
-		return makeResult(data, contentType), nil
+	if err := png.Encode(&buf, out); err != nil {
+		return nil, ErrNotFound
 	}
 	return makeResult(buf.Bytes(), "image/png"), nil
+}
+
+// badgeMask runs the upstream badge pipeline and returns the 96x96 mask as one
+// byte per pixel (row-major).
+func badgeMask(img image.Image) []byte {
+	// contain: 縦横比を保って 96x96 に収める。**拡大もする**
+	// (upstream の `withoutEnlargement: false`)。imaging.Fit は縮小しかしない
+	// ので自分で倍率を出す。余白は透明のまま置き、後段の flatten で黒にする。
+	b := img.Bounds()
+	w, h := b.Dx(), b.Dy()
+	scale := math.Min(float64(badgeSize)/float64(w), float64(badgeSize)/float64(h))
+	nw := max(1, int(math.Round(float64(w)*scale)))
+	nh := max(1, int(math.Round(float64(h)*scale)))
+	fitted := imaging.Resize(img, nw, nh, imaging.Lanczos)
+	canvas := imaging.New(badgeSize, badgeSize, color.NRGBA{})
+	canvas = imaging.PasteCenter(canvas, fitted)
+
+	n := badgeSize * badgeSize
+	grey := make([]float64, n)
+	alpha := make([]byte, n)
+	minV, maxV := math.MaxFloat64, -math.MaxFloat64
+	for i := 0; i < n; i++ {
+		r := float64(canvas.Pix[i*4])
+		g := float64(canvas.Pix[i*4+1])
+		bl := float64(canvas.Pix[i*4+2])
+		alpha[i] = canvas.Pix[i*4+3]
+		// **完全に透明な画素は 0 として数える。** PNG は透明部分にも任意の RGB を
+		// 持てる (白であることが多い)。そのまま輝度に含めると normalise の
+		// レンジが広がり、**見えている部分のコントラストが潰れる** — 実測で
+		// mk-go の出力が sharp のほぼ半分の値になっていた (249 に対し 128)。
+		// sharp は resize で alpha を premultiply するので、透明部分の RGB は
+		// 0 になってから normalise に入る。
+		if alpha[i] == 0 {
+			r, g, bl = 0, 0, 0
+		}
+		// Rec.709。vips の sRGB→B_W は線形光を経由するので厳密には違うが、
+		// 直後の normalise がレンジを揃えるので結末への影響は小さい。
+		y := 0.2126*r + 0.7152*g + 0.0722*bl
+		grey[i] = y
+		minV = math.Min(minV, y)
+		maxV = math.Max(maxV, y)
+	}
+
+	out := make([]byte, n)
+	span := maxV - minV
+	for i, y := range grey {
+		// normalise: 輝度を 0-255 いっぱいに伸ばす。単色なら伸ばさない。
+		if span > 0 {
+			y = (y - minV) * 255 / span
+		}
+		// linear(1.75, -(128*1.75)+128) = 1.75x コントラスト
+		y = 1.75*y - 96
+		// flatten({background: '#000'}): 透明部分は黒に落ちる
+		y = y * float64(alpha[i]) / 255
+		switch {
+		case y <= 0:
+			out[i] = 0
+		case y >= 255:
+			out[i] = 255
+		default:
+			out[i] = byte(math.Round(y))
+		}
+	}
+	return out
+}
+
+// shannonEntropy returns the Shannon entropy (bits) of the byte histogram.
+func shannonEntropy(mask []byte) float64 {
+	if len(mask) == 0 {
+		return 0
+	}
+	var hist [256]int
+	for _, v := range mask {
+		hist[v]++
+	}
+	total := float64(len(mask))
+	entropy := 0.0
+	for _, c := range hist {
+		if c == 0 {
+			continue
+		}
+		p := float64(c) / total
+		entropy -= p * math.Log2(p)
+	}
+	return entropy
 }
 
 // passThrough validates the MIME type and returns data as-is.
