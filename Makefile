@@ -551,7 +551,14 @@ dropin-frontend-swap-test: ## TS-A → mk-A 切替まで含む frontend e2e
 #
 # frontend e2e は Playwright に一本化した (#2437)。Cypress ラッパーは本家が
 # Cypress を廃止して参照先が消滅したため削除済み。spec は tests/playwright/。
-E2E_NODE_IMAGE=node:22-bookworm
+# **image のタグはハードコードしない (#2921)。** submodule の `.node-version` を
+# 唯一の定義にする (recipe の中で読む。`$(shell ...)` は使わない — 260 行目の
+# 理由を参照)。以前は `node:22-bookworm` 固定で、CI が `.node-version` (= Node 26)
+# を使うのに**本番のビルドだけ Node 22** という食い違いがあった。しかも
+# `packages/backend` の `engines.node` は `^22.22.2 || ...` で、node:22-bookworm の
+# 22.22.2 は**下限ちょうど**。upstream が下限を上げた瞬間に本番のビルドだけが
+# engines で弾かれ、CI は緑のまま気付けない。
+E2E_NODE_SUFFIX=bookworm
 E2E_WORKDIR=/work
 
 # submodule を初期化し、Misskey 本家のフロントエンドソースを取得する。
@@ -569,15 +576,25 @@ e2e-submodule-init: ## submodule を初期化 (本家フロントエンドの取
 # REMOVE_MODULES_DIR_NO_TTY で abort する。CI=true で skip させる。
 # plugins を先に走らせる。生成物が無いとプラグインの frontend が取り込まれず、
 # backend にだけ入った片肺の状態になる (#2479)。
-# **ここだけ corepack が残っている (#2921)。** workflow 側は #2914 で
-# pnpm/action-setup に寄せたが、こちらは GitHub Action を使えないので別の形が要る。
-# node:22 に pin しているので corepack は同梱されており当面は動く。**image を 26 に
-# 上げるなら pnpm の導入方法も同時に変えること** — Node.js 26 の配布物に corepack は
-# 含まれていない (実測)。
+# **corepack は使わない (#2921)。** Node.js 26 の配布物に corepack は含まれて
+# いない (`node:26-bookworm` で `command not found` を実測)。`.node-version` に
+# 追従して image を上げると同時に踏むので、`npm i -g pnpm@<packageManager>` に
+# 変えてある。**版は submodule の `packageManager` から取る** — CI は #2914 で
+# `pnpm/action-setup` + `package_json_file` に寄せてあり、これで両者が同じ
+# 定義を見る。
+#
+# **拾えなかったら落とす。** 書式が変わって空になると、`node:-bookworm` のような
+# 不正なタグで docker が落ちるか、最悪 latest を引いて黙って別の版でビルドする。
 e2e-frontend-build: plugins ## フロントエンドをビルド (本番の bind-mount 先を上書きするので注意)
+	@node_ver=$$(cat third_party/misskey/.node-version 2>/dev/null | tr -d '[:space:]'); \
+	pnpm_ver=$$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([^"]*\)".*/\1/p' \
+		third_party/misskey/package.json); \
+	if [ -z "$$node_ver" ]; then echo "third_party/misskey/.node-version を読めない" >&2; exit 1; fi; \
+	if [ -z "$$pnpm_ver" ]; then echo "package.json の packageManager を読めない" >&2; exit 1; fi; \
+	echo "==> node:$$node_ver-$(E2E_NODE_SUFFIX) / pnpm@$$pnpm_ver でビルドする"; \
 	docker run --rm -e CI=true -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/third_party/misskey \
-		$(E2E_NODE_IMAGE) \
-		bash -lc "corepack enable && corepack prepare pnpm@latest --activate && pnpm install --frozen-lockfile && pnpm build"
+		"node:$$node_ver-$(E2E_NODE_SUFFIX)" \
+		bash -lc "npm i -g pnpm@$$pnpm_ver && pnpm install --frozen-lockfile && pnpm build"
 
 # UDS-only compose stack (Phase 12-2)。Phase 12-1 で入った UNIX domain socket
 # 対応を使って nginx → mk-go → postgres / valkey をすべて UDS で繋ぐ。

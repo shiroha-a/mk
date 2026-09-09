@@ -33,7 +33,7 @@ make uds-init
 
 ### 1. 本家フロントエンドのビルド
 
-初回のみ、本家 Misskey の vite ビルドを行います (3〜10 分)。`make uds-frontend-build` は既存の `e2e-frontend-build` と同一のターゲットで、`node:22-bookworm` コンテナの中で `pnpm install --frozen-lockfile && pnpm build` を走らせます。
+初回のみ、本家 Misskey の vite ビルドを行います (3〜10 分)。`make uds-frontend-build` は既存の `e2e-frontend-build` と同一のターゲットで、**submodule の `.node-version` が指す Node** のコンテナの中で `pnpm install --frozen-lockfile && pnpm build` を走らせます (pnpm の版も submodule の `packageManager` から取る、#2921)。以前は `node:22-bookworm` 固定で、CI が `.node-version` を見るのに本番のビルドだけ Node 22 という食い違いがあった。
 
 ```sh
 make uds-frontend-build

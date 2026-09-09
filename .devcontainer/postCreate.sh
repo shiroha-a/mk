@@ -8,6 +8,28 @@ go mod download
 echo "=== Submodule init ==="
 git submodule update --init --recursive third_party/misskey
 
+# **Node / pnpm の版は submodule を唯一の定義にする (#2921)。** image には
+# bootstrap 用の Node しか入っていない。CI (`pnpm/action-setup` + `.node-version`)
+# と `make e2e-frontend-build` も同じ 2 ファイルを見るので、3 者が揃う。
+#
+# **拾えなかったら落とす。** 空のまま進むと不正なパッケージ名になるか、
+# 黙って別の版で開発することになる。
+echo "=== Node / pnpm (submodule の宣言に揃える) ==="
+node_ver=$(tr -d '[:space:]' < third_party/misskey/.node-version)
+pnpm_ver=$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([^"]*\)".*/\1/p' \
+    third_party/misskey/package.json)
+if [ -z "$node_ver" ] || [ -z "$pnpm_ver" ]; then
+    echo "submodule から Node / pnpm の版を読めない" >&2
+    exit 1
+fi
+if [ "$(node -v)" != "v$node_ver" ]; then
+    echo "node $(node -v) -> v$node_ver"
+    curl -fsSL "https://deb.nodesource.com/setup_${node_ver%%.*}.x" | sudo -E bash -
+    sudo apt-get install -y nodejs
+fi
+sudo npm i -g "pnpm@$pnpm_ver"
+echo "node $(node -v) / pnpm $(pnpm --version)"
+
 echo "=== Wait for PostgreSQL ==="
 for i in $(seq 1 30); do
     pg_isready -h localhost -p 5432 -U misskey && break
