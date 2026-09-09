@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.8c`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.8d`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -36,7 +36,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 47 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.8c`) | — | — |
+| fork frontend の独自変更 | 48 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.8d`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -360,7 +360,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` の 6 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.8c`。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.8d`。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -419,6 +419,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.8a` | 分割アップロードのロールポリシーが設定できないのを直す (#2900)。`canUseChunkedUpload` / `chunkedUploadMaxConcurrentSessions` / `chunkedUploadMaxPendingMb` は導入時 (#2313) から**キー一覧にも編集フォームにも無く、管理画面から設定できなかった** — backend は読んでいる (`internal/core/drive/chunked_upload.go`) ので API からは設定できたが、`canUseChunkedUpload` の既定が `true` なので**特定のロールだけ禁止することが画面からできなかった**。#2898 で入れた「mk-go 固有 policy キーが fork frontend の 2 箇所に列挙されているか」のゲートが検出した。**キャストは汎用ヘルパー 2 つに集約した** (`mkGoPolicyValue` / `mkGoPolicyMeta`) — 固有キーが 4 つになり、キーごとに computed を手書きするとキャストが散らばって片側だけ直す形の穴ができる。**サーバー全体の設定が上限**である旨を caption に明記した (ロールに大きい値を入れても instance 設定は超えられない)。**純正へは還元できない行** (純正 backend にこの policy が無い) |
 | `2026.9.0-mk.8b` | リモート絵文字インポートの導線 2 点を直す (#2903)。(a) **モーダルの画像が表示されなかった** — `originalUrl` (相手サーバー上の URL) を `<img src>` にそのまま入れており、mk-go の CSP (`img-src 'self' data: blob:`) でブロックされていた。通常の絵文字表示 (`MkCustomEmoji`) は media proxy を通しているのに、モーダルだけが raw を使っていた。静止画設定 (`disableShowingAnimatedImages`) の扱いも揃えた (**#2905 で backend 側も直した** — それまでは `processAndReturn` の pass-through 判定が `mode` しか見ておらず、`?emoji=1&static=1` でも GIF がそのまま返っていた。`parseMode` の順序を入れ替えるだけでは直らない — `ModeStatic` に倒すとリサイズ寸法まで変わるので、`animated` を `mode` と直交する軸にしてある)。**インポート自体は正しく動いていた**ので、壊れていたのはプレビューだけ。**プロキシの fallback に任せる** — `MkCustomEmoji` は `@error` で `:name:` に落とすが、このモーダルには受け皿が無く、allowlist が 403 を返すと 4 タイルすべてが壊れ画像になって理由も出ない。(b) **同名のローカル絵文字が既にあってもメニューが出ていた** — 押しても `admin/emoji/copy` が重複で弾くだけで、押してみるまで分からなかった。`customEmojisMap` (裸の名前がキー) で判定して本文中・リアクションの両方から出さない。**判定は `hasLocalEmojiWithSameName` に集約した** — `name@host` の分解が 3 箇所に重複しており、その重複のせいでリアクション側を「変数は作ったが条件式に配線し忘れる」形で出しかけた (vue-tsc は通り、CI の eslint は `--quiet` なので未使用変数も出ない)。単体テスト 10 件で固定してある。**純正へは還元できない行** (インポート導線が mk-go 固有) |
 | `2026.9.0-mk.8c` | 静止画設定で mention chip のアバターが壊れるのを直す (#2908)。`getStaticImageUrl('/avatar/@u@h')` は `/avatar/` を知らないので `<mediaProxy>/static.webp?url=<instance>/avatar/@u@h&static=1` を組み立てるが、**mk-go の media proxy は allowlist が DB に実在する URL だけを通す**ため 403 + `max-age=86400` になり、静止画になるどころか 1 日壊れていた (`disableShowingAnimatedImages` / `dataSaver.avatar` を有効にした利用者だけが踏む)。`/avatar/` 側が `?static=1` を受けて署名付きプロキシ URL へ 302 するようにしたので、frontend は素の `/avatar/@u@h?static=1` を出せばよくなった。**純正へは還元できない行** (upstream は proxy が open なので元の形で通る) |
+| `2026.9.0-mk.8d` | 静止画設定でアバター未設定の利用者のアイコンが壊れるのを直す (#2913)。`getStaticImageUrl` は `/emoji/` と mediaProxy 接頭以外を無条件に `<mediaProxy>/static.webp?url=…&static=1` へ包むが、**`sig` を付けない**ので `Authorize` が HMAC ではなく DB allowlist に落ちる。アバター未設定の利用者の `avatarUrl` は相対の `/identicon/<username>` で (`entity.IdenticonURL`)、allowlist の 4 テーブル UNION のどこにも無いため **403 + `max-age=86400`**。`MkAvatar` は通常のアバター表示すべてを通すので、`disableShowingAnimatedImages` / `dataSaver.avatar` を有効にした利用者には**タイムライン・通知・プロフィールのアイコンが 1 日壊れて見えていた** (本番実測で対象は `avatarUrl` が空の 25,605 / 37,396 = 68.5%)。identicon は生成した PNG なのでアニメーションせず、静止画へ変換する必要がそもそも無いため素通しにする。**同一オリジン限定**にするのが要点 — 他インスタンスの `/identicon/` はこちらの生成物ではないので従来どおりプロキシに通す。#2908 (`/avatar/`) と同じクラスだが、あちらは backend で `static` を受けて解決したのに対し、identicon は変換自体が不要なので frontend 側で止める。**純正へは還元できない行** (upstream は proxy が open なので元の形で通る) |
 
 `2026.7.0-mk.1` の内訳:
 
