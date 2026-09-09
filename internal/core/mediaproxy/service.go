@@ -24,13 +24,15 @@ import (
 	// blank import すると他 image format (PNG/JPEG/WebP/...) の自動 dispatch
 	// を破壊する。**`_ "github.com/ftrvxmtrx/tga"` を絶対追加しないこと**。
 	"github.com/blezek/tga"
+
 	"github.com/gen2brain/avif"
 	_ "github.com/gen2brain/heic" // HEIC/HEIF input decode (iPhone uploads)
 	_ "github.com/gen2brain/jpegxl"
 	"github.com/gen2brain/webp"
 	"github.com/kovidgoyal/imaging"
 	_ "github.com/mrjoshuak/go-jpeg2000" // JP2/J2K input decode (#734)
-	_ "github.com/spakin/netpbm"         // PBM/PGM/PPM/PAM input decode (#672 Phase 1)
+	"github.com/shiroha-a/mk/internal/misc/imagedecode"
+	_ "github.com/spakin/netpbm" // PBM/PGM/PPM/PAM input decode (#672 Phase 1)
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
@@ -686,7 +688,9 @@ func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, e
 	// しても値が変わらないことで確認してある (どれも log2(値の種類) に一致)。
 	// つまり判定は「元画像の greyscale が実質単色か」。
 	// **Clone は 1 回だけ。** 入力を NRGBA に正規化して Pix を直読みする。
-	src := imaging.Clone(img)
+	// **`normalizeForResize` を先に通す** — `imaging.Clone` は `*image.NYCbCrA`
+	// の alpha を行単位で壊す (#2925)。
+	src := imaging.Clone(normalizeForResize(img))
 	if inputEntropy(src) < badgeMinEntropy {
 		// upstream の `StatusError('Skip to provide badge', 404)`。SW の
 		// create-notification.ts は `res.status !== 200` で iconUrl('plus') へ
@@ -1015,47 +1019,15 @@ func decodeImage(data []byte, contentType string) (image.Image, error) {
 		}
 		return img, nil
 	}
-	// **インターレース (Adam7) の PNG は stdlib で読む (#2925)。**
-	// `kovidgoyal/imaging` は alpha を持たない PNG を独自の `*nrgb.Image` に
-	// 読むが、その Adam7 の処理が壊れており **エラーを返さずに全画素 0** を
-	// 返す。resize 系の mode は「真っ黒な絵文字」を 200 で配ることになり、
-	// 検出する手段が無い。
-	//
-	// **壊れるのは colorType=2 (RGB) かつ interlace=1 の組み合わせだけ** で、
-	// gray / gray+alpha / palette / RGBA と、非インターレースの RGB はいずれも
-	// 正しく読める (実測)。ただし条件を colorType まで絞ると、ライブラリが
-	// 別の型で同じ壊れ方をしたときに素通りする。**インターレースなら全部
-	// stdlib へ回す** — stdlib はどの colorType でも正しく、Adam7 自体が稀なので
-	// `nrgb.Image` の省メモリを捨てる代償も小さい。
-	//
-	// **EXIF の向きは適用されない。** `imaging.AutoOrientation` を通らないため。
-	// PNG が eXIf を持つのは稀で、向きを入れるのはさらに稀。
-	if isInterlacedPNG(data) {
-		img, err := png.Decode(bytes.NewReader(data))
-		if err != nil {
-			return nil, err
-		}
-		return img, nil
-	}
-	img, err := imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+	// **インターレースの truecolor PNG は decoder のバグを踏む (#2925)。**
+	// 規則は `internal/misc/imagedecode` に 1 つだけ置いてある — drive 側の
+	// image processor も同じ decode をしており、片方だけ直すともう片方に
+	// 同じバグが残る (初版で実際にそうなっていた)。
+	img, err := imagedecode.Decode(data)
 	if err != nil {
 		return nil, err
 	}
 	return img, nil
-}
-
-// isInterlacedPNG reports whether data is a PNG whose IHDR declares Adam7.
-//
-// **Content-Type ではなく magic bytes で見る。** 相手が申告する MIME は当てに
-// ならず、`decodeImage` は元から中身で dispatch している。
-func isInterlacedPNG(data []byte) bool {
-	const sig = "\x89PNG\r\n\x1a\n"
-	// signature 8 + length 4 + "IHDR" 4 + IHDR 13。interlace method は
-	// IHDR の 13 バイト目 (offset 28)。
-	if len(data) < 29 || string(data[:8]) != sig || string(data[12:16]) != "IHDR" {
-		return false
-	}
-	return data[28] == 1
 }
 
 // normalizeForResize converts img to NRGBA when the resize library cannot read
@@ -1070,12 +1042,38 @@ func isInterlacedPNG(data []byte) bool {
 // 単純な VP8 は `*image.YCbCr` になるので影響を受けない。ここで型を絞って
 // 変換するのは、NRGBA 化が画素あたりのコピーを 1 回増やすため。
 func normalizeForResize(img image.Image) image.Image {
-	if _, ok := img.(*image.NYCbCrA); !ok {
+	src, ok := img.(*image.NYCbCrA)
+	if !ok {
 		return img
 	}
-	b := img.Bounds()
+	// **`imaging.Clone` にも `draw.Draw` にも渡せない (#2925)。** どちらも
+	// 片方を壊す:
+	//
+	//   - `draw.Draw` / `At()` は premultiplied な値しか出さないので、
+	//     **完全に透明な画素の RGB が復元できず 0 に潰れる**
+	//   - `imaging.Clone` は RGB を plane から正しく読むが、**サブサンプル
+	//     (4:2:0 / 4:2:2 / 4:4:0 = lossy WebP の通常形) の分岐で alpha の
+	//     index を内側ループで進めない**ため、行の全画素がその行の先頭画素の
+	//     alpha になる (`nrgba/scanner.go`)。upstream のテスト画像
+	//     `with-alpha.webp` で 22.5% の画素の alpha が誤り、badge を sharp と
+	//     比べると 32 を超える差が 16.6% の画素に出る
+	//
+	// Y / Cb / Cr / A の plane を自分で読めば両方とも正しく取れる。
+	b := src.Bounds()
 	dst := image.NewNRGBA(b)
-	draw.Draw(dst, b, img, b.Min, draw.Src)
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			r, g, bl := color.YCbCrToRGB(
+				src.Y[src.YOffset(x, y)],
+				src.Cb[src.COffset(x, y)],
+				src.Cr[src.COffset(x, y)])
+			i := dst.PixOffset(x, y)
+			dst.Pix[i] = r
+			dst.Pix[i+1] = g
+			dst.Pix[i+2] = bl
+			dst.Pix[i+3] = src.A[src.AOffset(x, y)]
+		}
+	}
 	return dst
 }
 

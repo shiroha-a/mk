@@ -766,6 +766,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 
 | 項目 | upstream | mk-go |
 |---|---|---|
+| media proxy の EXIF 回転 | `sharpBmp` に `autoOrient` を渡さず `.rotate()` も呼ばないので**向きを無視する** (sharp 0.35.4 の既定は `autoOrient: false`) | **`imaging.AutoOrientation(true)` で適用する** (#2925)。向き情報を持つ写真が横倒しで出るより正立で出る方が利用者の意図に近い。upstream の `test/resources/rotate.jpg` では平均絶対差 127.40・画素の 50.5% が 32 以上ずれる (縦横が入れ替わるため)。**インターレース truecolor PNG だけは例外** — stdlib へ回すので向きが適用されない |
 | `users/get-frequently-replied-users` の集計 | 直近 1000 件の返信を引き、**返信先ノートの id 集合**を作って引き直すので、同じノートへ何度返信しても **1** と数える | **`COUNT(*)` で数える**ので同じノートへ 5 回返信すれば **5**。`weight = count / peak` の順位が変わりうる。窓の取り方 (直近 1000 件・自己返信込み) は upstream に揃えてある (#2877) |
 | `i/revoke-token` を凍結アカウントが叩く | **204 で失効できる。** upstream の `isSuspended` 判定は `ApiCallService` の `requireCredential \|\| requireModerator \|\| requireAdmin` ブロックの中にあり、この endpoint は 2026.9.0 でそのどれも宣言しなくなった (アクセストークン自身を失効させるため)。`AuthenticateService` にも suspended チェックは無い | **403 `YOUR_ACCOUNT_SUSPENDED`。** mk-go は `Authenticate` が凍結ユーザーを anonymous に落とす構造 (#1559) なので、分岐を置かないと 401 `CREDENTIAL_REQUIRED` になり upstream の 204 からさらに遠のく。403 のほうが「凍結ゆえに拒否した」ことが伝わるので採った (#2877) |
 | `invite/delete` の存在しない ID | `NO_SUCH_INVITE_CODE` (400) | **204 を返す** (= idempotent)。取り消しは「無くなっていること」が目的なので、既に無い状態を失敗にしない。ただし **DB 障害は 204 に潰さず 500 を返す** (#2812) — 取り消し系で 204 を返すと、消えたと思って戻ったあとも ticket が生きている |
@@ -1045,15 +1046,17 @@ entropy も sharp と一致する (gif は完全一致、他は差 0.03 以下)�
 
 ### 画像デコーダ由来の差 (badge に限らない)
 
-`decodeImage` は `kovidgoyal/imaging` を使うので、次は **emoji / avatar / preview / static / badge の全モード**に効く。#2920 のレビューで挙がった 3 件を #2925 で実測した結果:
+`decodeImage` は `kovidgoyal/imaging` を使う。#2920 のレビューで挙がった 3 件を #2925 で実測し、2 件は直した。**全モード (emoji / avatar / preview / static / badge) に効く。**
 
-**インターレース (Adam7) PNG は解消済み (#2925)。** `imaging` は alpha を持たない PNG を独自の `*nrgb.Image` に読むが、その Adam7 処理が壊れており**エラーを返さず全画素 0** を返していた (壊れるのは `colorType=2` かつ `interlace=1` の組み合わせだけで、gray / gray+alpha / palette / RGBA は正常)。IHDR の interlace method を見て stdlib の `png.Decode` へ回すようにした。**この経路では EXIF の向きが適用されない** (`imaging.AutoOrientation` を通らないため) が、PNG が eXIf を持つのは稀。
+**インターレース (Adam7) の truecolor PNG — 解消 (#2925)。** imaging は colorType=2 / bitDepth=8 / tRNS 無しの PNG を独自の `*nrgb.Image` に読むが、その Adam7 の pass 合成に `*nrgb.Image` の case が無く、**エラーを返さず全画素 0** を返していた (34 通りの組み合わせで実測し、壊れるのはこの 3 条件が揃ったときだけ)。`internal/misc/imagedecode` に判定を置き、該当するものだけ stdlib の `png.Decode` へ回す。
 
-**透明部の RGB を持つ WebP は問題なかった。** 「Go の decoder が `*image.NYCbCrA` を返すので透明部の RGB を復元できず、entropy が 1.5-2.3 bit 過小になる」という指摘があったが、**再現しない**。`imaging.Clone` は Y / Cb / Cr の plane を直接読むので、完全に透明な画素の色も保持する (実測: plane の生値 `[209 41 41]` がそのまま出る)。実ファイル 6 件で sharp の `stats().entropy` と比べても差は 0.03-0.15。
+- **条件を広げてはいけない。** インターレースだけで判定すると、壊れていない種別まで stdlib へ回して **ICC→sRGB 変換を落とす** (Display P3 の PNG でチャンネル差が最大 31/255)。upstream の sharp は `icc_transform("srgb")` を通すので、広げると乖離が増える
+- **この経路では EXIF の向きと ICC 変換が失われる。** 代わりに得られるのが「真っ黒な画像」なので、そちらの方がましという判断
+- **decode は 2 箇所にある。** media proxy と drive の image processor で、片方だけ直すと**ローカルにアップロードされた画像が真っ黒なサムネイルを storage に焼く** (proxy は variant を優先して返すので原本を読み直さない)。規則を `internal/misc/imagedecode` に 1 つだけ置いてある
 
-潰れるのは `At()` / `draw.Draw` を通る経路だけで、`normalizeForResize` がそれに当たる。ただし `imaging` の resize は alpha で重み付けするため、**resize 後の出力は完全に同一** (128x128 を 64 / 32 へ縮めて差 0 バイト)。**直す価値が無いので直していない** — 同じ誤解で触られないようにここに残す。
+**`*image.NYCbCrA` (lossy WebP + alpha) の alpha — 解消 (#2925)。** imaging の scanner は、サブサンプル (4:2:0 / 4:2:2 / 4:4:0 = lossy WebP の通常形) の分岐で alpha の index を内側ループで進めないため、**行の全画素がその行の先頭画素の alpha**になる。行頭が透明な画像は**丸ごと透明**になり、badge は見えないまま 200 で配られる (実測: 128x128 で 50% の画素の alpha が誤り、最大差 255)。
 
-**EXIF の向きは mk-go だけが適用する (意図的)。** upstream の proxy は `sharpBmp` に `autoOrient` を渡さず `.rotate()` も呼ばないので向きを無視する。mk-go は `imaging.AutoOrientation(true)` で適用する。**mk-go の方が親切なので揃えない** — 向き情報を持つ写真が横倒しで出るより、正立で出る方が利用者の意図に近い。upstream 自身のテスト画像 `test/resources/rotate.jpg` では平均絶対差 127.40・画素の 50.5% が 32 以上ずれる (縦横が入れ替わるため)。
+`draw.Draw` / `At()` は逆に alpha は正しいが premultiplied なので**完全に透明な画素の RGB が 0 に潰れる**。`normalizeForResize` が Y / Cb / Cr / A の plane を自分で読んで両方とも正しく取る。**resize 経路だけでなく `processBadge` もここを通す**必要がある。
 
 ---
 

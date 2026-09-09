@@ -12,6 +12,8 @@ import (
 	_ "github.com/gen2brain/avif" // AVIF input decode (mediaproxy と同じ wazero ベース)
 	"github.com/gen2brain/webp"
 	"github.com/kovidgoyal/imaging"
+
+	"github.com/shiroha-a/mk/internal/misc/imagedecode"
 	_ "golang.org/x/image/bmp"
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
@@ -117,9 +119,12 @@ func NewDefaultImageProcessor() *DefaultImageProcessor {
 // images using EXIF orientation data. golang.org/x/image の webp/bmp/tiff
 // デコーダは import _ で init 登録済み。
 func decodeImage(body []byte, mimeType string) (image.Image, error) {
-	// imaging.Decode は EXIF orientation を自動補正し、
-	// import _ で登録済みの webp/bmp/tiff も処理できる。
-	img, err := imaging.Decode(bytes.NewReader(body), imaging.AutoOrientation(true))
+	// 規則は `internal/misc/imagedecode` に 1 つだけ置いてある (#2925)。
+	// EXIF orientation の自動補正と、インターレース truecolor PNG の
+	// decoder バグ回避を含む。**ここを直接 imaging.Decode に戻さないこと** —
+	// media proxy 側と食い違い、ローカルにアップロードされた画像だけが
+	// 真っ黒なサムネイルを storage に焼く形になる。
+	img, err := imagedecode.Decode(body)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported image format: %s: %w", mimeType, err)
 	}
