@@ -141,8 +141,14 @@ jobs:
           import json, sys
           with open("tests/queue-bench/results/inbound.json") as f:
               d = json.load(f)
+          stats = d["send"]["stats"]
+          # **1 件も測っていないなら落とす (#2917)。** 空の stats で
+          # 「PASS: all 0 stacks」を出すと、検査していないのに緑になる。
+          if not stats:
+              print("FAIL: inbound smoke produced no stats", file=sys.stderr)
+              sys.exit(1)
           bad = []
-          for s in d["send"]["stats"]:
+          for s in stats:
               if s["ok"] != s["sent"]:
                   bad.append(
                       f"{s['target']}: ok={s['ok']}/{s['sent']} failed={s['failed']}"
@@ -152,8 +158,11 @@ jobs:
               # 出していたので、ok=0/100 が全 stack で並ぶ状態 (= orchestration が
               # 壊れていて 1 件も届いていない) を「一部が失敗した」と読んでしまう。
               # 実際 #2917 は全滅だったのに 6 夜そう読まれ続けた。
-              total = len(d["send"]["stats"])
-              dead = sum(1 for s in d["send"]["stats"] if s["ok"] == 0)
+              total = len(stats)
+              # **`sent > 0` を要求する。** sent=0 の stack は「配れなかった」の
+              # ではなく「投げていない」ので、dead に数えると bad の列挙と
+              # 食い違う (数えた stack が列挙されない)。
+              dead = sum(1 for s in stats if s["ok"] == 0 and s["sent"] > 0)
               if dead == total:
                   head = f"FAIL: inbound smoke delivered nothing ({total} stacks all ok=0)"
               elif dead:
@@ -164,7 +173,7 @@ jobs:
               for b in bad:
                   print(f"  {b}", file=sys.stderr)
               sys.exit(1)
-          print(f"PASS: all {len(d['send']['stats'])} stacks ok=sent")
+          print(f"PASS: all {len(stats)} stacks ok=sent")
           PYEOF
 
       - name: queue-bench smoke (down)

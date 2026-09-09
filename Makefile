@@ -670,8 +670,6 @@ bench-logs: ## k6 ベンチのログを表示
 # Queue bench (#563): 3-way deliver/inbox throughput comparison across
 # Misskey TS (BullMQ), mk-go (asynq), mk-go (mkq).
 QUEUE_BENCH_COMPOSE=tests/queue-bench/docker-compose.queue-bench.yml
-# compose の project 名 (`name: mk-queue-bench`) + network 名から決まる。
-QUEUE_BENCH_NETWORK=mk-queue-bench_bench
 
 queue-bench-up: ## queue-bench スタックを起動
 	docker compose -f $(QUEUE_BENCH_COMPOSE) up -d --build
@@ -695,7 +693,7 @@ queue-bench-seed: ## queue-bench 用のデータを投入
 	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile bench up --abort-on-container-exit --force-recreate --no-deps seed
 	# meta cache (5min TTL) が古い federation='none' を握っているので、seed
 	# 後に app コンテナを再起動して新しい meta.federation='all' を読ませる。
-	docker compose -f $(QUEUE_BENCH_COMPOSE) restart app-asynq app-mkq app-ts
+	docker compose -f $(QUEUE_BENCH_COMPOSE) restart --no-deps app-asynq app-mkq app-ts
 	@echo "waiting for apps to become healthy after restart..."
 	@for i in $$(seq 1 60); do \
 		ASYNQ=$$(docker compose -f $(QUEUE_BENCH_COMPOSE) ps app-asynq --format json 2>/dev/null | grep -o '"Health":"healthy"' || true); \
@@ -717,16 +715,33 @@ queue-bench-seed: ## queue-bench 用のデータを投入
 	#
 	# **app が healthy になってから restart する。** nginx は起動時に一度だけ
 	# 名前解決するので、app の IP が確定した後でなければ意味が無い。
-	docker compose -f $(QUEUE_BENCH_COMPOSE) restart nginx-asynq nginx-mkq nginx-ts
-	@echo "waiting for nginx fronts to accept connections..."
-	@for i in $$(seq 1 30); do \
-		if docker run --rm --network $(QUEUE_BENCH_NETWORK) alpine:3.21 \
-			sh -c 'nc -z mk-asynq 443 && nc -z mk-mkq 443 && nc -z ts 443' >/dev/null 2>&1; then \
-			echo "ready (all nginx fronts listening)"; exit 0; \
+	docker compose -f $(QUEUE_BENCH_COMPOSE) restart --no-deps nginx-asynq nginx-mkq nginx-ts
+	# **front が「生きているか」ではなく「自分の app に繋がっているか」を見る。**
+	# TCP connect や単なる 200 では足りない — 誤配線した front も listener は
+	# 生きていて、相手の app の応答を 200 で返す (#2917 の症状そのもの)。
+	# `/api/meta` の `uri` は config.url 由来なので、front ごとに期待する値が違う。
+	#
+	# network 名は project 名から決まるが、`COMPOSE_PROJECT_NAME` が compose の
+	# `name:` を上書きするので**実物から引く**。ハードコードすると、export して
+	# いる手元だけ「front が上がらない」と誤診する。
+	@echo "verifying each nginx front reaches its own app..."
+	@net=$$(docker inspect -f '{{range $$k, $$v := .NetworkSettings.Networks}}{{$$k}}{{end}}' \
+		$$(docker compose -f $(QUEUE_BENCH_COMPOSE) ps -q nginx-mkq)); \
+	if [ -z "$$net" ]; then echo "could not resolve the bench network" >&2; exit 1; fi; \
+	for i in $$(seq 1 30); do \
+		bad=""; \
+		for h in mk-asynq mk-mkq ts; do \
+			got=$$(docker run --rm --network "$$net" curlimages/curl:8.11.1 -sk --max-time 5 \
+				-X POST -H 'content-type: application/json' -d '{}' "https://$$h/api/meta" 2>/dev/null \
+				| grep -o '"uri":"[^"]*"' | head -1); \
+			if [ "$$got" != "\"uri\":\"https://$$h\"" ]; then bad="$$bad $$h(got=$$got)"; fi; \
+		done; \
+		if [ -z "$$bad" ]; then echo "ready (each front reaches its own app)"; exit 0; \
 		fi; \
 		sleep 2; \
 	done; \
-	echo "warning: nginx fronts did not come up in time" >&2; exit 1
+	echo "nginx fronts are not wired to their own apps:$$bad" >&2; \
+	echo "hint: nginx resolves its upstream once at startup (#2917)" >&2; exit 1
 
 queue-bench-outbound: ## queue-bench の outbound 計測
 	# queue-bench-seed と同じ理由で `--force-recreate` (#1163)。

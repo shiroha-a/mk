@@ -37,7 +37,7 @@ faker payload は 2 種類から選択 (env で driver_inbound に渡す):
 make queue-bench-up
 
 # 2) seed (user / follower / faker actor を DB 直挿入)
-#    meta.federation='all' を強制設定 → app コンテナを restart
+#    meta.federation='all' を強制設定 → app コンテナを restart → nginx も restart
 make queue-bench-seed
 
 # 3) outbound 計測
@@ -130,6 +130,10 @@ inbound bench で TS instance を sender に使うと、TS 側の deliver throug
 ### Federation flag 注意
 
 mk-go は新規 DB 初期化時 `meta.federation='none'` (= 連合無効) で立ち上がる。seed が DB 直接 UPDATE で `federation='all'` にしたあと、app の meta cache (5min TTL) を再読み込みさせるため `make queue-bench-seed` の最後で `app-asynq` / `app-mkq` / `app-ts` を restart する。
+
+**app を restart したら nginx front も必ず restart する (#2917)。** nginx は upstream をホスト名で書くと**起動時に一度だけ**名前解決するので、`restart` で app の IP が入れ替わると**古いアドレスを掴んだまま相手側の app へ繋ぐ**。conf も docker DNS も正しいまま、`nginx-ts` が `app-mkq` へ繋がるといった形になり、Host が食い違って inbound が全件 401 になる (mk-go は `ErrInboxHostMismatch`、TS も `ActivityPubServerService` が同じ判定を持つ)。`queue-bench-seed` は app が healthy になってから nginx を restart し、**各 front が自分の app に繋がっていること** (`/api/meta` の `uri` が自分のホストか) を確かめてから抜ける。**TCP が開いているかだけでは足りない** — 誤配線した front もlistener は生きていて 200 を返すため。
+
+#2364 は同じ罠の別経路 (`--force-recreate` が依存を作り直す) で、そちらは `--no-deps` で塞いである。**doc に書かなかったせいで 2 度踏んだ**ので、ここに残す。
 
 ### Network allowlist
 
