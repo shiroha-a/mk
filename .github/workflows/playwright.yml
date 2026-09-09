@@ -224,8 +224,12 @@ jobs:
           # **corepack を使わない (#2914)。** Node.js 26 の配布物に corepack は
           # 含まれておらず、今動いているのは runner image にプリインストールされた
           # Node の corepack が PATH に残るからでしかない。image の Node が 26 に
-          # なった時点で一斉に落ちる。あわせて `corepack prepare pnpm@latest` は
-          # packageManager の宣言を無視して最新版を入れていたので、版もここで揃う。
+          # なった時点で一斉に落ちる。
+          #
+          # **版は元から揃っていた。** corepack は packageManager の pin を尊重する
+          # ので、`prepare pnpm@latest` を挟んでも workspace 内で走るのは 11.25.0
+          # (実測)。ここで消えるのは corepack への依存と、使われない 12.x を毎回
+          # ダウンロードしていた無駄。
           package_json_file: third_party/misskey/package.json
 
       - name: Set up Node.js

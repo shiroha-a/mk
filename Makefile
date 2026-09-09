@@ -569,6 +569,11 @@ e2e-submodule-init: ## submodule を初期化 (本家フロントエンドの取
 # REMOVE_MODULES_DIR_NO_TTY で abort する。CI=true で skip させる。
 # plugins を先に走らせる。生成物が無いとプラグインの frontend が取り込まれず、
 # backend にだけ入った片肺の状態になる (#2479)。
+# **ここだけ corepack が残っている (#2921)。** workflow 側は #2914 で
+# pnpm/action-setup に寄せたが、こちらは GitHub Action を使えないので別の形が要る。
+# node:22 に pin しているので corepack は同梱されており当面は動く。**image を 26 に
+# 上げるなら pnpm の導入方法も同時に変えること** — Node.js 26 の配布物に corepack は
+# 含まれていない (実測)。
 e2e-frontend-build: plugins ## フロントエンドをビルド (本番の bind-mount 先を上書きするので注意)
 	docker run --rm -e CI=true -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/third_party/misskey \
 		$(E2E_NODE_IMAGE) \
