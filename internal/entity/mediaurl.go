@@ -169,9 +169,10 @@ func StaticAvatarProxyURL(rawURL string) string {
 //
 // upstream (`ServerService.ts` の `/emoji/:path`) は `badge` が来ると
 // `${mediaProxy}/emoji.png?url=…&badge=1` へ飛ばす。**`emoji=1` は付けず、
-// `static` も見ない** — badge は 96x96 のグレースケール PNG 固定 (mk-go 側も
-// `mediaproxy.processBadge` が同じ形で返す) なので、絵文字のリサイズ寸法も
-// アニメーションの有無も結果に影響しない。
+// `static` も見ない** — badge は 96x96 の silhouette PNG 固定 (暗いところが
+// 透明。mk-go 側も `mediaproxy.processBadge` が同じ形で返す) なので、絵文字の
+// リサイズ寸法もアニメーションの有無も結果に影響しない。**元画像がほぼ単色なら
+// 404 になる** (#2920) 点も upstream と同じ。
 //
 // 組み立ては ProxiedURL に任せる (url / flag / sig / base の付け方を 1 箇所に
 // 保つ)。modeBadge のファイル名と flag は fileAndFlag が持つ。

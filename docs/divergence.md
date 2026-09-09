@@ -21,6 +21,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | **mk-go 独自** | mk-go が独自に足した機能 (additive、wire 互換を壊さない) | 維持 |
 | **安全側 divergence** | upstream より厳しい / 正確な挙動 | 維持し理由を明記 ([[feedback_parity_mkgo_better_keep_document]] 方針) |
 | **未実装 / 欠落** | upstream にあって mk-go に無い | issue 化して解消する |
+| **近似** | 意図も結末も upstream と同じだが、依存ライブラリが違うため数値までは一致しない | §9 に残差を実測値つきで記録する |
 
 1.0.0 = Misskey 2026.7.0 追従完了。**ここで drop-in 互換をベースラインとして固定し、以降 frontend の独自進化を解禁する。** 本ドキュメントはその「固定したベースラインからの距離」の一覧であり、1.0.0 時点のスナップショットとして機能する。
 
@@ -1003,40 +1004,54 @@ upstream の挙動を再現しているが、依存ライブラリが違うた�
 
 ### プッシュ通知のバッジ画像 (`mediaproxy.processBadge`)
 
-upstream は sharp (libvips) で処理する (#2920 で mk-go も同じ形にした)。
+upstream は sharp (libvips) で処理する (#2920 で mk-go も同じ形にした)。**JS の記述を読むだけでは 3 つ取り違える。**
 
-**sharp は呼び出し順ではなく固定の pipeline 順で実行する。** `FileServerProxyHandler.ts` の記述は `resize().greyscale().normalise().linear().flatten()` の順だが、`sharp/src/pipeline.cc` の実行順は **flatten → greyscale → resize/embed → linear → normalise**。記述順どおりに実装すると、輝度レンジの狭い絵文字で平均絶対差 28.7/255・43.8% の画素が 32 以上ずれる (実測)。**呼び出し順を入れ替えても sharp の出力が 1 バイトも変わらない**ことで固定順を確認してある。
+**(1) sharp は呼び出し順ではなく固定の pipeline 順で実行する。** `FileServerProxyHandler.ts` の記述は `resize().greyscale().normalise().linear().flatten()` だが、`sharp/src/pipeline.cc` の実行順は **flatten → greyscale → resize/embed → linear → normalise**。記述順どおりに実装すると輝度レンジの狭い絵文字で平均絶対差 28.7/255・43.8% の画素が 32 以上ずれる。**呼び出し順を入れ替えても sharp の出力が 1 バイトも変わらない**ことで確認できる。
 
-**entropy は元画像で測る。** `sharp/src/stats.cc` の `stats()` は入力を開き直すので、**pipeline の操作を一切適用しない**。`linear(0, 100)` で定数化しても `threshold(128)` で 2 値化しても値が変わらず、96 段のグラデーションで `log2(96) = 6.584963` に一致することを実測した。つまり判定は「**元画像**の greyscale が実質単色か」であって、処理後の mask ではない。
+**(2) `normalise()` は min-max ではなく 1/99 パーセンタイル。** sharp の既定は `{lower: 1, upper: 99}` で、`operations.cc` は `luminance.percent()` を使う。min-max で実装すると upstream 自身のテスト画像 `test/resources/192.png` で平均絶対差 23.9/255・最大 42・32 を超える画素 16.7% になる。
+
+**(3) `stats()` は pipeline を無視する。** `sharp/src/stats.cc` は入力を開き直すので、entropy は**元画像**の greyscale ヒストグラムの**標準的な Shannon エントロピー**。`linear(0, 100)` で定数化しても `threshold(128)` で 2 値化しても値が変わらず、96 段のグラデーションで `log2(96) = 6.584963` に一致する。判定は「**元画像**が実質単色か」であって、処理後の mask ではない。
 
 揃っているもの:
 
-- contain なので横長・縦長の絵文字でも内容が切り落とされず、余白は黒帯になる (拡大もする)
+- contain なので横長・縦長の絵文字でも内容が切り落とされず、余白は黒帯になる (拡大もする。貼り付け位置は切り捨て)
 - 透明部分は黒に落ちる
-- linear (1.75x、0-255 でクリップ) の後に normalise
 - greyscale は線形光を経由する (係数を sRGB 値へ直接掛けると純赤が 127 ではなく 54 になり、赤/緑の明暗比が 1.73 → 3.37 に変わる)
+- linear (1.75x、0-255 でクリップ) の後に 1/99 パーセンタイルの normalise
 - 出力は R=G=B=A なので、**暗いところが透明な silhouette** になる
 - 元画像がほぼ単色なら 404 を返し、Service Worker (`create-notification.ts`) が `iconUrl('plus')` へ落ちる
+
+**実測 (sharp の出力と画素単位で突き合わせ)**:
+
+| 入力 | 平均絶対差 | 最大差 | 差が 32 を超える画素 | 完全一致 |
+|---|---|---|---|---|
+| webp 128x128 (実絵文字) | 0.18 / 255 | 4 | 0.0% | 86.9% |
+| png 96x96 (実絵文字) | 4.28 / 255 | 10 | 0.0% | 45.1% |
+| gif 100x100 (実絵文字) | 0.23 / 255 | 8 | 0.0% | 84.9% |
+| upstream の `test/resources/192.png` | 4.43 / 255 | 15 | 0.0% | 17.7% |
+| 同 `192.jpg` | 4.77 / 255 | 15 | 0.0% | 16.9% |
+
+entropy も sharp と一致する (gif は完全一致、他は差 0.03 以下)。**404 になるかどうかの判定は揃う。**
 
 残差の出どころ:
 
 | | upstream (sharp / libvips) | mk-go |
 |---|---|---|
 | リサンプリング | libvips の lanczos3 | `kovidgoyal/imaging` の Lanczos |
-| normalise | LAB の L を stretch | linear 後の値を min-max stretch |
-| greyscale | sRGB → scRGB → B_W | sRGB → 線形光 → Rec.709 → sRGB |
+| パーセンタイルの量子化 | LAB の L (0-100 の int) | 0-255 のヒストグラム |
+| normalise の色空間 | LAB の L を伸ばして chroma と再結合 | greyscale 値を直接伸ばす |
 
-**実測 (実絵文字 3 件、sharp の出力と画素単位で突き合わせ)**:
+**これ以上は追わない。** 32 を超える画素がゼロで、通知に出る 96x96 のモノクロ silhouette でこの差は判別できない。
 
-| | 平均絶対差 | 差が 32 を超える画素 | 完全一致 |
-|---|---|---|---|
-| webp 128x128 | 0.24 / 255 | 0.0% | 85.6% |
-| png 96x96 | 2.20 / 255 | 0.0% | 45.1% |
-| gif 100x100 | 0.23 / 255 | 0.0% | 84.9% |
+### 画像デコーダ由来の差 (badge に限らない)
 
-entropy も実測で sharp と一致する (gif は完全一致、他 2 件は差 0.03 以下)。**404 になるかどうかの判定は 3 件とも upstream と揃う。**
+`decodeImage` は `kovidgoyal/imaging` を使うので、次の 3 つは **emoji / avatar / preview / static / badge の全モード**に効く。#2920 のレビューで測定したもので、いずれも develop 以前からある。
 
-**これ以上は追わない。** 残っているのはリサンプリング kernel と normalise の色空間だけで、通知に出る 96x96 のモノクロ silhouette でこの差は判別できない。
+| | upstream | mk-go |
+|---|---|---|
+| インターレース (Adam7) PNG | 正しくデコードする | **全画素 0 になる** (エラーは返さない)。badge では entropy 0 → 404 |
+| 透明部の RGB を持つ WebP | VP8 ストリームの RGB を見る | Go の decoder が `*image.NYCbCrA` を返し、透明部の RGB を復元できない。entropy が 1.5-2.3 bit 過小になる |
+| EXIF 回転 | badge では**適用しない** (`sharpBmp` は `autoOrient` を渡さない) | `imaging.AutoOrientation(true)` で適用する |
 
 ---
 

@@ -298,7 +298,7 @@ func TestEmojiRedirectHandler_WithoutStaticKeepsDirectRedirect(t *testing.T) {
 //
 // Service Worker の `create-notification.ts` がリアクションのプッシュ通知で
 // `/emoji/<name>.webp?badge=1` を組み立てる。分岐が無いと badge が無視されて通常の
-// 枝に落ち、96x96 のグレースケール PNG ではなく**カラーの絵文字画像**が 200 で返る
+// 枝に落ち、96x96 の silhouette PNG ではなく**カラーの絵文字画像**が 200 で返る
 // ので、SW のエラー処理を素通りして静かに違うものが出る。
 func TestEmojiRedirectHandler_BadgeGoesThroughProxy(t *testing.T) {
 	withMediaProxy(t)
@@ -329,7 +329,7 @@ func TestEmojiRedirectHandler_BadgeGoesThroughProxy(t *testing.T) {
 // **badge は static より優先する (#2909)。**
 //
 // upstream の if/else が badge を先に取り、badge の枝では `static` を一切見ない。
-// badge は 96x96 グレースケール PNG 固定なので、アニメーションの有無を渡しても
+// badge は 96x96 の silhouette PNG 固定なので、アニメーションの有無を渡しても
 // 結果が変わらない。
 func TestEmojiRedirectHandler_BadgeWinsOverStatic(t *testing.T) {
 	withMediaProxy(t)

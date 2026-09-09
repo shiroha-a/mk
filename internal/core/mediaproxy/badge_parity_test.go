@@ -7,6 +7,7 @@ import (
 	"image/png"
 	"testing"
 
+	"github.com/kovidgoyal/imaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -292,4 +293,127 @@ func TestProcessBadge_GreyscaleUsesLinearLight(t *testing.T) {
 	// 線形光を経由しないと赤は 0 に潰れる。sharp の純赤の greyscale は 127。
 	assert.InDelta(t, 126, at(48, 48), 12,
 		"赤が中間に来ること。線形光を経由しないと 0 に潰れる")
+}
+
+// **normalise は min-max ではなく 1/99 パーセンタイル (#2920)。**
+//
+// sharp の既定は `{lower: 1, upper: 99}` (実測)。min-max で実装すると、暗部・
+// 明部の裾が薄い実写系の画像で upstream との平均絶対差が 23.9/255・32 を超える
+// 画素 16.7% になる (upstream の `test/resources/192.png` で実測)。
+func TestPercentileRange(t *testing.T) {
+	// 100 画素中 1 つが 0、1 つが 255、残り 98 は 128。
+	vals := make([]float64, 100)
+	for i := range vals {
+		vals[i] = 128
+	}
+	vals[0] = 0
+	vals[99] = 255
+
+	lo, hi := percentileRange(vals, 1, 99)
+	assert.EqualValues(t, 0, lo, "1 パーセンタイルは最小の 1 画素を含む")
+	assert.EqualValues(t, 128, hi, "99 パーセンタイルは最大の外れ値を切る")
+
+	loMM, hiMM := percentileRange(vals, 0, 100)
+	assert.EqualValues(t, 0, loMM)
+	assert.EqualValues(t, 255, hiMM, "min-max なら外れ値まで取る")
+}
+
+// **normalise のガード。** upstream の `std::abs(max - min) > 1`。
+func TestNormaliseToBytes_SpanGuard(t *testing.T) {
+	// span == 1: 伸ばさない。
+	flat := []float64{100, 101}
+	assert.Equal(t, []byte{100, 101}, normaliseToBytes(flat),
+		"差が 1 なら伸ばさない (span > 0 にすると 0/255 へ飛ぶ)")
+
+	// span == 2: 伸ばす。
+	wide := []float64{100, 101, 102}
+	assert.Equal(t, []byte{0, 128, 255}, normaliseToBytes(wide),
+		"差が 2 なら 0-255 へ伸ばす (ガードを外さない限り)")
+}
+
+// **entropy は元画像で測る。処理後の mask ではない (#2920)。**
+//
+// 単色の 200x120 は contain で上下に黒帯が付くので、**mask のエントロピーは
+// 0.97** になり閾値 0.1 を超える。upstream は元画像で測るので entropy 0 → 404。
+// mask で測る実装に変えるとこのテストだけが落ちる。
+func TestProcessBadge_SolidNonSquareIs404(t *testing.T) {
+	s := testService(nil)
+	img := image.NewNRGBA(image.Rect(0, 0, 200, 120))
+	for y := 0; y < 120; y++ {
+		for x := 0; x < 200; x++ {
+			img.Set(x, y, color.NRGBA{R: 255, A: 255})
+		}
+	}
+	_, err := s.processBadge(encodePNG(t, img), "image/png")
+	require.ErrorIs(t, err, ErrNotFound,
+		"元画像が単色なら、黒帯が付いて mask に濃淡ができても 404")
+}
+
+// **閾値は 0.1。** 実在の絵文字は 0.17-4.9 に分布するので、少しでも上げると
+// 普通の絵文字が配られなくなる。エントロピー約 0.5 の画像で固定する。
+func TestProcessBadge_LowButNonZeroEntropyIsNotSkipped(t *testing.T) {
+	s := testService(nil)
+	img := image.NewNRGBA(image.Rect(0, 0, 96, 96))
+	for y := 0; y < 96; y++ {
+		for x := 0; x < 96; x++ {
+			// 約 11% だけ明るい = entropy ≒ 0.5 bit
+			v := uint8(20)
+			if x < 11 {
+				v = 220
+			}
+			img.Set(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	e := inputEntropy(imaging.Clone(img))
+	require.Greater(t, e, 0.1, "前提: 閾値より上")
+	require.Less(t, e, 1.5, "前提: 閾値を 1.5 に上げると落ちる帯")
+	res, err := s.processBadge(encodePNG(t, img), "image/png")
+	require.NoError(t, err, "エントロピー %.3f の絵文字は配る", e)
+	res.Body.Close()
+}
+
+// **縮小後のサイズは四捨五入。** 切り捨てにすると黒帯の位置が 1px ずれる。
+func TestProcessBadge_RoundsFittedSize(t *testing.T) {
+	s := testService(nil)
+	// 100x61 → scale=0.96 → 61*0.96=58.56。四捨五入 59 / 切り捨て 58。
+	img := image.NewNRGBA(image.Rect(0, 0, 100, 61))
+	for y := 0; y < 61; y++ {
+		for x := 0; x < 100; x++ {
+			v := uint8(x * 255 / 99)
+			img.Set(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	res, err := s.processBadge(encodePNG(t, img), "image/png")
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	out := decodeBadge(t, res)
+	// nh=59 なら y=18..76 が内容、nh=58 なら y=19..76。y=18 の明暗で見分ける。
+	// **PasteCenter だと y0 が 19 になる**ので、この 1 点で両方の変異を捉える。
+	assert.Greater(t, int(out.Pix[(18*96+90)*4]), 0,
+		"四捨五入で 59 行になり y=18 が内容に入る (切り捨て / PasteCenter だと黒帯)")
+
+	// **幅側も見る。** 100x61 では nw が常に 96 なので、幅の丸めが検査されない。
+	// 転置した 61x100 で nw=58.56 → 四捨五入 59 / 切り捨て 58 を見分ける。
+	tall := image.NewNRGBA(image.Rect(0, 0, 61, 100))
+	for y := 0; y < 100; y++ {
+		for x := 0; x < 61; x++ {
+			v := uint8(y * 255 / 99)
+			tall.Set(x, y, color.NRGBA{R: v, G: v, B: v, A: 255})
+		}
+	}
+	res2, err := s.processBadge(encodePNG(t, tall), "image/png")
+	require.NoError(t, err)
+	defer res2.Body.Close()
+
+	out2 := decodeBadge(t, res2)
+	assert.Greater(t, int(out2.Pix[(90*96+18)*4]), 0,
+		"四捨五入で 59 列になり x=18 が内容に入る (切り捨てだと黒帯)")
+}
+
+// decode できない入力は 404 (以前は元データを素通ししていた)。
+func TestProcessBadge_DecodeFailureIs404(t *testing.T) {
+	s := testService(nil)
+	_, err := s.processBadge([]byte("not a png at all"), "image/png")
+	require.ErrorIs(t, err, ErrNotFound)
 }

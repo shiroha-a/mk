@@ -50,7 +50,7 @@ func makeSolidPNG(t *testing.T) []byte {
 }
 
 // #2909: `/emoji/<name>.webp?badge=1` が組み立てる URL の形が、ハンドラ経由で
-// 実際に badge (96x96 グレースケール PNG) になること。
+// 実際に badge (96x96、暗いところが透明な silhouette PNG) になること。
 //
 // **redirect の Location を固定するだけでは足りない。** `emoji_redirect_test.go` は
 // entity.BadgeEmojiProxyURL が出す URL の形しか見ておらず、その URL を proxy が
