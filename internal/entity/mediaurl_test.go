@@ -55,7 +55,7 @@ func TestProxiedURL_InternalFormatAndSig(t *testing.T) {
 		{modeAvatar, "avatar.webp", "avatar"},
 		{modeStatic, "static.webp", "static"},
 		{modePreview, "preview.webp", "preview"},
-		{modeBadge, "badge.webp", "badge"},
+		{modeBadge, "emoji.png", "badge"},
 		{modeEmoji, "emoji.webp", "emoji"},
 	}
 	for _, tc := range cases {
@@ -570,5 +570,71 @@ func TestOwnMediaHost_UnsetKeepsPreviousBehaviour(t *testing.T) {
 		if got := c.GetPublicURL(f, modeDefault); got == f.URL {
 			t.Errorf("without a resolver a foreign host must still be proxied: %q", got)
 		}
+	}
+}
+
+// #2909: badge URL は upstream (`ServerService.ts` の `/emoji/:path`) と同じ形
+// (`emoji.png` + `badge=1`) で、内部プロキシなら sig が付くこと。
+//
+// **`emoji=1` を付けてはいけない。** proxy の parseMode は emoji を先に見るので、
+// 同居すると ModeEmoji に落ちて badge が黙って無視される。
+func TestBadgeEmojiProxyURL(t *testing.T) {
+	SetMediaURLContext(NewMediaURLContext(
+		"https://local.example", "https://local.example/proxy",
+		[]byte("test-secret"), false, true))
+	t.Cleanup(func() { SetMediaURLContext(nil) })
+
+	got := BadgeEmojiProxyURL("https://cdn.example/anim.gif")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if u.Scheme+"://"+u.Host+u.Path != "https://local.example/proxy/emoji.png" {
+		t.Fatalf("upstream と同じ emoji.png を使うこと: %s", got)
+	}
+	if u.Query().Get("badge") != "1" {
+		t.Fatalf("badge=1 が要る: %s", got)
+	}
+	if u.Query().Get("emoji") != "" {
+		t.Fatalf("emoji=1 を付けてはいけない (parseMode が badge を奪う): %s", got)
+	}
+	if u.Query().Get("url") != "https://cdn.example/anim.gif" {
+		t.Fatalf("url が違う: %s", got)
+	}
+	if u.Query().Get("sig") == "" {
+		t.Fatalf("内部プロキシでは sig が要る (Authorize が DB allowlist に落ちる): %s", got)
+	}
+}
+
+// **外部プロキシでは sig を付けない (#2909)。** 署名は mk-go 自身の proxy が
+// 検証するものなので、外部へ渡しても意味が無い。ProxiedURL の既存の分岐に
+// 乗っているだけだが、badge 経路で実際に効いていることを固定する。
+func TestBadgeEmojiProxyURL_ExternalProxyHasNoSig(t *testing.T) {
+	SetMediaURLContext(NewMediaURLContext(
+		"https://local.example", "https://ext.proxy.example",
+		[]byte("test-secret"), true, true))
+	t.Cleanup(func() { SetMediaURLContext(nil) })
+
+	got := BadgeEmojiProxyURL("https://cdn.example/anim.gif")
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if u.Scheme+"://"+u.Host+u.Path != "https://ext.proxy.example/emoji.png" {
+		t.Fatalf("外部プロキシの base を使うこと: %s", got)
+	}
+	if u.Query().Get("sig") != "" {
+		t.Fatalf("外部プロキシに sig を渡さないこと: %s", got)
+	}
+	if u.Query().Get("badge") != "1" {
+		t.Fatalf("badge=1 が要る: %s", got)
+	}
+}
+
+// context 未配線なら空文字 (呼び出し元が raw へ 302 できる)。
+func TestBadgeEmojiProxyURL_NoContext(t *testing.T) {
+	SetMediaURLContext(nil)
+	if got := BadgeEmojiProxyURL("https://cdn.example/anim.gif"); got != "" {
+		t.Fatalf("context 未配線では空文字を返すこと: %s", got)
 	}
 }

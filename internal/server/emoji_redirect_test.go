@@ -297,9 +297,9 @@ func TestEmojiRedirectHandler_WithoutStaticKeepsDirectRedirect(t *testing.T) {
 // **`?badge=1` は badge モードへ回す (#2909)。**
 //
 // Service Worker の `create-notification.ts` がリアクションのプッシュ通知で
-// `/emoji/<name>.webp?badge=1` を組み立てる。分岐が無いと badge が無視されて
-// emoji モードに落ち、96x96 のグレースケール PNG ではなく高さ 128 のカラー絵文字が
-// **200 で**返るので、SW のエラー処理を素通りして静かに違うものが出る。
+// `/emoji/<name>.webp?badge=1` を組み立てる。分岐が無いと badge が無視されて通常の
+// 枝に落ち、96x96 のグレースケール PNG ではなく**カラーの絵文字画像**が 200 で返る
+// ので、SW のエラー処理を素通りして静かに違うものが出る。
 func TestEmojiRedirectHandler_BadgeGoesThroughProxy(t *testing.T) {
 	withMediaProxy(t)
 	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
@@ -378,4 +378,32 @@ func TestEmojiRedirectHandler_BadgeWithoutContextFallsBackToRaw(t *testing.T) {
 	require.NoError(t, h(c))
 	require.Equal(t, http.StatusFound, rec.Code)
 	assert.Equal(t, "https://cdn.example/anim.gif", rec.Header().Get(echo.HeaderLocation))
+}
+
+// **ローカル絵文字 (同一オリジン) でも badge へ回す (#2909)。**
+//
+// リアクションのプッシュ通知でローカル絵文字は主要ケース。ところが隣の
+// `ProxyEmojiURLString` は `isRemoteOrigin` で分岐して同一オリジンを wrap しない
+// ので、「同じファイルの他の関数に揃える」形で badge にも同じ gate を足すと、
+// **ローカル絵文字だけ #2909 の症状が戻る**。リモートの URL しか使わないテスト
+// だとその変異が素通りするため、ここで同一オリジンを固定する。
+func TestEmojiRedirectHandler_BadgeProxiesLocalEmoji(t *testing.T) {
+	withMediaProxy(t)
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		// ローカル絵文字の publicUrl は自インスタンスの drive URL。
+		"smile|": {Name: "smile", PublicURL: "https://local.example/files/abc.png"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "badge=1")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	assert.Equal(t, "/proxy/emoji.png", loc.Path,
+		"同一オリジンでも badge にするにはプロキシを通す必要がある")
+	assert.Equal(t, "1", loc.Query().Get("badge"))
+	assert.Equal(t, "https://local.example/files/abc.png", loc.Query().Get("url"))
+	assert.NotEmpty(t, loc.Query().Get("sig"))
 }

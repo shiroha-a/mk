@@ -112,9 +112,10 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		// **`?badge=1` は badge モードへ回す (#2909)。** Service Worker の
 		// `create-notification.ts` がリアクションのプッシュ通知で
 		// `/emoji/<name>.webp?badge=1` を組み立てる。分岐が無いと badge が無視されて
-		// emoji モードに落ち、96x96 のグレースケール PNG ではなく高さ 128 のカラー
-		// 絵文字が返る。**200 が返るので SW のエラー処理を素通りし、静かに違うものが
-		// 出る**。
+		// 通常の枝に落ち、96x96 のグレースケール PNG ではなく**カラーの絵文字画像**が
+		// 返る (リモート絵文字なら `ProxyEmojiURLString` で高さ 128 にリサイズされた
+		// もの、ローカル絵文字は同一オリジンなので wrap されず原寸の元ファイル)。
+		// **どちらも 200 が返るので SW のエラー処理を素通りし、静かに違うものが出る**。
 		//
 		// **static より先に見る。** upstream (`ServerService.ts`) の if/else が badge を
 		// 先に取り、badge の枝では `static` を一切見ない。badge は 96x96 グレースケール

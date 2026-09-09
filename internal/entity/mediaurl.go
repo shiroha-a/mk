@@ -93,7 +93,7 @@ const (
 	modeAvatar                   // avatar.webp, height 320
 	modeStatic                   // static.webp, fit 498x422 (thumbnails)
 	modePreview                  // preview.webp
-	modeBadge                    // badge.webp
+	modeBadge                    // emoji.png, 96x96 grayscale
 	modeEmoji                    // emoji.webp
 )
 
@@ -112,7 +112,11 @@ func (m proxyMode) fileAndFlag() (string, string) {
 	case modePreview:
 		return "preview.webp", "preview"
 	case modeBadge:
-		return "badge.webp", "badge"
+		// **upstream はこの mode だけ `emoji.png` を出す** (`ServerService.ts` の
+		// `/emoji/:path` の badge 枝)。`badge.webp` は proxy の isProxyFilename に
+		// 入っておらず、実際に返るのも PNG (mediaproxy.processBadge) なので、
+		// upstream 名の方が中身とも proxy 側の一覧とも一致する。
+		return "emoji.png", "badge"
 	case modeEmoji:
 		return "emoji.webp", "emoji"
 	default:
@@ -169,11 +173,8 @@ func StaticAvatarProxyURL(rawURL string) string {
 // `mediaproxy.processBadge` が同じ形で返す) なので、絵文字のリサイズ寸法も
 // アニメーションの有無も結果に影響しない。
 //
-// **ファイル名が `emoji.png` なのは upstream に合わせるため。** modeBadge の
-// canonical 名は `badge.webp` だが、upstream はこの経路だけ `emoji.png` を出す。
-// 実際に返るのも PNG なので、こちらの方が中身とも一致する。ファイル名は
-// `?url=` を必ず送る限り proxy の挙動を変えない (isProxyFilename の path 解析に
-// 落ちない) ので、drop-in の shape parity を優先してよい。
+// 組み立ては ProxiedURL に任せる (url / flag / sig / base の付け方を 1 箇所に
+// 保つ)。modeBadge のファイル名と flag は fileAndFlag が持つ。
 //
 // context 未配線なら空文字を返す (呼び出し元は raw URL へ 302 する)。
 func BadgeEmojiProxyURL(rawURL string) string {
@@ -181,13 +182,7 @@ func BadgeEmojiProxyURL(rawURL string) string {
 	if c == nil {
 		return ""
 	}
-	q := url.Values{}
-	q.Set("url", rawURL)
-	q.Set("badge", "1")
-	if !c.externalEnabled {
-		q.Set("sig", signURL(c.secret, rawURL))
-	}
-	return c.mediaProxyBase + "/emoji.png?" + q.Encode()
+	return c.ProxiedURL(rawURL, modeBadge)
 }
 
 // staticProxyURL builds a signed proxy URL that keeps the mode's resize

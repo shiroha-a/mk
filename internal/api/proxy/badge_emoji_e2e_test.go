@@ -35,10 +35,12 @@ func makeColorPNG(t *testing.T) []byte {
 // #2909: `/emoji/<name>.webp?badge=1` が組み立てる URL の形が、ハンドラ経由で
 // 実際に badge (96x96 グレースケール PNG) になること。
 //
-// **`emoji=1` を付けないのが要点。** parseMode は emoji を先に見るので、
-// `emoji=1&badge=1` だと ModeEmoji に落ちて badge が黙って無視される。
-// entity.BadgeEmojiProxyURL は upstream に合わせて badge だけを付けるが、
-// その判断が実際に効いているかはハンドラを叩かないと分からない。
+// **redirect の Location を固定するだけでは足りない。** `emoji_redirect_test.go` は
+// entity.BadgeEmojiProxyURL が出す URL の形しか見ておらず、その URL を proxy が
+// 実際に badge として解釈するかは検査していない (#2905 で「setter は固定したが
+// 渡す 1 行が未検証」を踏んだのと同じ型)。ここは URL を直書きして**受け側の挙動**を
+// 見る。`emoji=1` を足すと badge が奪われることも同時に固定するので、
+// BadgeEmojiProxyURL が emoji=1 を付けてはいけない理由が根拠つきで残る。
 func TestHandle_BadgeEmojiIsGrayscale96(t *testing.T) {
 	pngData := makeColorPNG(t)
 	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
