@@ -33,7 +33,7 @@ make uds-init
 
 ### 1. 本家フロントエンドのビルド
 
-初回のみ、本家 Misskey の vite ビルドを行います (3〜10 分)。`make uds-frontend-build` は既存の `e2e-frontend-build` と同一のターゲットで、**submodule の `.node-version` が指す Node** のコンテナの中で `pnpm install --frozen-lockfile && pnpm build` を走らせます (pnpm の版も submodule の `packageManager` から取る、#2921)。以前は `node:22-bookworm` 固定で、CI が `.node-version` を見るのに本番のビルドだけ Node 22 という食い違いがあった。
+初回のみ、本家 Misskey の vite ビルドを行います (3〜10 分)。`make uds-frontend-build` は既存の `e2e-frontend-build` と同一のターゲットで、**submodule 自身の `Dockerfile` の `ARG NODE_VERSION`** (`26.4.0-trixie` の形で版と distro の両方を持つ) が指す image の中で `pnpm install --frozen-lockfile && pnpm build` を走らせます。pnpm の版も submodule の `packageManager` から取ります (#2921)。以前は `node:22-bookworm` 固定で、CI が `.node-version` を見るのに本番のビルドだけ Node 22 という食い違いがあり、しかも `node:22-bookworm` の 22.22.2 は `engines.node` の下限ちょうどでした。
 
 ```sh
 make uds-frontend-build

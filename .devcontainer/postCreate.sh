@@ -22,10 +22,28 @@ if [ -z "$node_ver" ] || [ -z "$pnpm_ver" ]; then
     echo "submodule から Node / pnpm の版を読めない" >&2
     exit 1
 fi
+# **major だけ合わせても駄目。** nodesource は 26 系の最新を入れるので
+# 26.4.0 を宣言していても 26.8.1 が入る (実測)。CI は `actions/setup-node` +
+# `node-version-file` で厳密に一致させ、`make e2e-frontend-build` は
+# `node:<version>-<distro>` タグを引くので、ここも公式 tarball で厳密に合わせる。
 if [ "$(node -v)" != "v$node_ver" ]; then
     echo "node $(node -v) -> v$node_ver"
-    curl -fsSL "https://deb.nodesource.com/setup_${node_ver%%.*}.x" | sudo -E bash -
-    sudo apt-get install -y nodejs
+    arch=$(dpkg --print-architecture)
+    case "$arch" in
+        amd64) narch=x64 ;;
+        arm64) narch=arm64 ;;
+        *) echo "未対応のアーキテクチャ: $arch" >&2; exit 1 ;;
+    esac
+    # **既存の npm を先に消す。** `--strip-components=1` で /usr/local へ重ねると、
+    # そこに Node がある配置 (公式 node image 等) では古い npm のファイルが残って
+    # 混ざり、`Class extends value undefined` で npm が壊れる (実測)。
+    # devcontainer は nodesource が /usr へ入れるので通常は衝突しないが、
+    # base image が変わっても壊れないようにしておく。
+    sudo rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack
+    curl -fsSL "https://nodejs.org/dist/v$node_ver/node-v$node_ver-linux-$narch.tar.xz" \
+        | sudo tar -xJ -C /usr/local --strip-components=1 \
+            --exclude CHANGELOG.md --exclude LICENSE --exclude README.md
+    hash -r
 fi
 sudo npm i -g "pnpm@$pnpm_ver"
 echo "node $(node -v) / pnpm $(pnpm --version)"
@@ -55,8 +73,6 @@ make migrate-up || echo "Migration failed (may already be applied)"
 
 echo "=== Frontend build ==="
 cd /workspace/third_party/misskey
-# Corepackがバージョン不一致時にダウンロード確認を求めないようにする
-export COREPACK_ENABLE_DOWNLOAD_PROMPT=0
 pnpm install --frozen-lockfile
 pnpm build
 

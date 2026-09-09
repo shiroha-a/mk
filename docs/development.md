@@ -8,7 +8,7 @@ VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/cont
 
 `.devcontainer/`の構成:
 - Go 1.26 + PostgreSQL + Redis (network_mode: host)
-- golang-migrate、Node.js 22、pnpmがプリインストール
+- golang-migrate がプリインストール。Node.js / pnpm は `postCreate.sh` が submodule の `.node-version` / `packageManager` を読んで入れる (#2921。image に入るのは bootstrap 用の Node だけ)
 - `postCreate.sh`で初期化
 
 `postCreate.sh` が `.config/default.yml` を example から複製し (`.config/*` は gitignore なので clone 直後は存在せず、無いと `failed to load config` で落ちる)、migration まで流す。`TEST_DB_*` は compose が渡すので `.env.test` は要らない。

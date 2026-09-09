@@ -57,7 +57,7 @@ sudo chown -R "$(id -un):$(id -gn)" third_party/misskey/node_modules
 
 # B. dev server も Docker で動かす
 docker run --rm -it -v "$(pwd)":/work -w /work/third_party/misskey/packages/frontend \
-  -p 5173:5173 node:22-bookworm npx vite --host   # 版は .node-version に合わせてよい (#2921)
+  -p 5173:5173 "node:$(sed -n 's/^ARG NODE_VERSION=\(.*\)$/\1/p' third_party/misskey/Dockerfile)" npx vite --host
 ```
 
 ## 確認できること

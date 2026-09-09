@@ -551,14 +551,18 @@ dropin-frontend-swap-test: ## TS-A → mk-A 切替まで含む frontend e2e
 #
 # frontend e2e は Playwright に一本化した (#2437)。Cypress ラッパーは本家が
 # Cypress を廃止して参照先が消滅したため削除済み。spec は tests/playwright/。
-# **image のタグはハードコードしない (#2921)。** submodule の `.node-version` を
-# 唯一の定義にする (recipe の中で読む。`$(shell ...)` は使わない — 260 行目の
-# 理由を参照)。以前は `node:22-bookworm` 固定で、CI が `.node-version` (= Node 26)
-# を使うのに**本番のビルドだけ Node 22** という食い違いがあった。しかも
-# `packages/backend` の `engines.node` は `^22.22.2 || ...` で、node:22-bookworm の
-# 22.22.2 は**下限ちょうど**。upstream が下限を上げた瞬間に本番のビルドだけが
-# engines で弾かれ、CI は緑のまま気付けない。
-E2E_NODE_SUFFIX=bookworm
+# **base image は upstream 自身の Dockerfile から取る (#2921)。**
+# `third_party/misskey/Dockerfile` の `ARG NODE_VERSION` は `26.4.0-trixie` の形で、
+# **版と distro の両方**を持つ。upstream がコンテナでビルドするときの組み合わせ
+# そのものなので、こちらで distro を決め打つより確か
+# (`docs/update/20260700diff.md` も「base image は submodule bump 時に要確認」と
+# 書いていた)。recipe の中で読む — `$(shell ...)` は使わない (260 行目の理由)。
+#
+# 以前は `node:22-bookworm` 固定で、CI が `.node-version` (Node 26) を使うのに
+# **本番のビルドだけ Node 22** という食い違いがあった。しかも `packages/backend` の
+# `engines.node` は `^22.22.2 || ...` で、node:22-bookworm の 22.22.2 は**下限
+# ちょうど**。upstream が下限を上げた瞬間に本番のビルドだけが engines で弾かれ、
+# CI は緑のまま気付けない。
 E2E_WORKDIR=/work
 
 # submodule を初期化し、Misskey 本家のフロントエンドソースを取得する。
@@ -583,17 +587,26 @@ e2e-submodule-init: ## submodule を初期化 (本家フロントエンドの取
 # `pnpm/action-setup` + `package_json_file` に寄せてあり、これで両者が同じ
 # 定義を見る。
 #
-# **拾えなかったら落とす。** 書式が変わって空になると、`node:-bookworm` のような
-# 不正なタグで docker が落ちるか、最悪 latest を引いて黙って別の版でビルドする。
+# **拾えなかったら落とす。** docker 側は空タグ (`node:`) なら
+# `invalid reference format` で落ちるので実は安全側だが、**pnpm 側は
+# `npm i -g pnpm@` が exit 0 で最新を入れてしまう** (実測)。ガードが効いている
+# のは pnpm 側で、黙って別の版でビルドするのを止めている。
+# **node_modules の ABI に注意。** このターゲットはコンテナの Node で
+# `node_modules` を作り直すが、同じ木を**ホストで動く target** も使う
+# (`frontend-check` / `frontend-lint` / `frontend-test` / `upstream-e2e-test`)。
+# ホストの Node が違う版だと、ABI 固定の native module (`re2`) が
+# NODE_MODULE_VERSION 不一致で落ちる。**ホストも `.node-version` に揃えるのが前提**
+# (devcontainer は postCreate.sh がそうする)。ずれた場合はホスト側で
+# `pnpm install` を流し直せば直る。
 e2e-frontend-build: plugins ## フロントエンドをビルド (本番の bind-mount 先を上書きするので注意)
-	@node_ver=$$(cat third_party/misskey/.node-version 2>/dev/null | tr -d '[:space:]'); \
-	pnpm_ver=$$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([^"]*\)".*/\1/p' \
-		third_party/misskey/package.json); \
-	if [ -z "$$node_ver" ]; then echo "third_party/misskey/.node-version を読めない" >&2; exit 1; fi; \
+	@node_tag=$$(sed -n 's/^ARG NODE_VERSION=\(.*\)$$/\1/p' third_party/misskey/Dockerfile | head -1); \
+	pnpm_ver=$$(sed -n 's/.*"packageManager"[[:space:]]*:[[:space:]]*"pnpm@\([^"+]*\).*/\1/p' \
+		third_party/misskey/package.json | head -1); \
+	if [ -z "$$node_tag" ]; then echo "third_party/misskey/Dockerfile の ARG NODE_VERSION を読めない" >&2; exit 1; fi; \
 	if [ -z "$$pnpm_ver" ]; then echo "package.json の packageManager を読めない" >&2; exit 1; fi; \
-	echo "==> node:$$node_ver-$(E2E_NODE_SUFFIX) / pnpm@$$pnpm_ver でビルドする"; \
+	echo "==> node:$$node_tag / pnpm@$$pnpm_ver でビルドする"; \
 	docker run --rm -e CI=true -v $(PWD):$(E2E_WORKDIR) -w $(E2E_WORKDIR)/third_party/misskey \
-		"node:$$node_ver-$(E2E_NODE_SUFFIX)" \
+		"node:$$node_tag" \
 		bash -lc "npm i -g pnpm@$$pnpm_ver && pnpm install --frozen-lockfile && pnpm build"
 
 # UDS-only compose stack (Phase 12-2)。Phase 12-1 で入った UNIX domain socket
