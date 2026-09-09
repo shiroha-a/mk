@@ -109,6 +109,25 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		if target == "" {
 			return c.NoContent(http.StatusNotFound)
 		}
+		// **`?badge=1` は badge モードへ回す (#2909)。** Service Worker の
+		// `create-notification.ts` がリアクションのプッシュ通知で
+		// `/emoji/<name>.webp?badge=1` を組み立てる。分岐が無いと badge が無視されて
+		// emoji モードに落ち、96x96 のグレースケール PNG ではなく高さ 128 のカラー
+		// 絵文字が返る。**200 が返るので SW のエラー処理を素通りし、静かに違うものが
+		// 出る**。
+		//
+		// **static より先に見る。** upstream (`ServerService.ts`) の if/else が badge を
+		// 先に取り、badge の枝では `static` を一切見ない。badge は 96x96 グレースケール
+		// PNG 固定なので、アニメーションの有無を渡しても結果が変わらないため。
+		if _, wantsBadge := c.QueryParams()["badge"]; wantsBadge {
+			// static と同じく entity 側で組む。`/proxy` を手で組むと sig が付かず、
+			// Authorize が HMAC ではなく DB allowlist に落ちる (#2905)。
+			if proxied := entity.BadgeEmojiProxyURL(target); proxied != "" {
+				c.Response().Header().Set("Content-Security-Policy", assetCSP)
+				return c.Redirect(http.StatusFound, proxied)
+			}
+			// context 未配線 (テスト等) なら従来どおり raw へ 302 する。
+		}
 		// **`?static=1` は media proxy へ回す (#2905)。** 利用者の
 		// 「アニメーション画像を再生しない」設定 (disableShowingAnimatedImages) が
 		// frontend からこの形で届く (`getStaticImageUrl` は `/emoji/` を見つけると

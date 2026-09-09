@@ -160,6 +160,36 @@ func StaticAvatarProxyURL(rawURL string) string {
 	return staticProxyURL(rawURL, modeAvatar)
 }
 
+// BadgeEmojiProxyURL builds the proxy URL that serves an emoji as a push
+// notification badge (#2909).
+//
+// upstream (`ServerService.ts` の `/emoji/:path`) は `badge` が来ると
+// `${mediaProxy}/emoji.png?url=…&badge=1` へ飛ばす。**`emoji=1` は付けず、
+// `static` も見ない** — badge は 96x96 のグレースケール PNG 固定 (mk-go 側も
+// `mediaproxy.processBadge` が同じ形で返す) なので、絵文字のリサイズ寸法も
+// アニメーションの有無も結果に影響しない。
+//
+// **ファイル名が `emoji.png` なのは upstream に合わせるため。** modeBadge の
+// canonical 名は `badge.webp` だが、upstream はこの経路だけ `emoji.png` を出す。
+// 実際に返るのも PNG なので、こちらの方が中身とも一致する。ファイル名は
+// `?url=` を必ず送る限り proxy の挙動を変えない (isProxyFilename の path 解析に
+// 落ちない) ので、drop-in の shape parity を優先してよい。
+//
+// context 未配線なら空文字を返す (呼び出し元は raw URL へ 302 する)。
+func BadgeEmojiProxyURL(rawURL string) string {
+	c := currentMediaURLContext()
+	if c == nil {
+		return ""
+	}
+	q := url.Values{}
+	q.Set("url", rawURL)
+	q.Set("badge", "1")
+	if !c.externalEnabled {
+		q.Set("sig", signURL(c.secret, rawURL))
+	}
+	return c.mediaProxyBase + "/emoji.png?" + q.Encode()
+}
+
 // staticProxyURL builds a signed proxy URL that keeps the mode's resize
 // geometry while forcing a still image.
 //

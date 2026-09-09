@@ -293,3 +293,89 @@ func TestEmojiRedirectHandler_WithoutStaticKeepsDirectRedirect(t *testing.T) {
 	require.Equal(t, http.StatusFound, rec.Code)
 	assert.Equal(t, "https://cdn.example/anim.gif", rec.Header().Get(echo.HeaderLocation))
 }
+
+// **`?badge=1` は badge モードへ回す (#2909)。**
+//
+// Service Worker の `create-notification.ts` がリアクションのプッシュ通知で
+// `/emoji/<name>.webp?badge=1` を組み立てる。分岐が無いと badge が無視されて
+// emoji モードに落ち、96x96 のグレースケール PNG ではなく高さ 128 のカラー絵文字が
+// **200 で**返るので、SW のエラー処理を素通りして静かに違うものが出る。
+func TestEmojiRedirectHandler_BadgeGoesThroughProxy(t *testing.T) {
+	withMediaProxy(t)
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		"smile|": {Name: "smile", PublicURL: "https://cdn.example/anim.gif"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "badge=1")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	// upstream (`ServerService.ts`) は badge の枝だけ `emoji.png` を出す。
+	// 実際に返るのも PNG (mediaproxy.processBadge) なので中身とも一致する。
+	assert.Equal(t, "https://local.example/proxy/emoji.png", loc.Scheme+"://"+loc.Host+loc.Path,
+		"media proxy の base と upstream のファイル名を使うこと")
+	assert.Equal(t, "1", loc.Query().Get("badge"),
+		"badge を落とすと proxy が emoji モードに落ちる")
+	assert.Equal(t, "https://cdn.example/anim.gif", loc.Query().Get("url"))
+	assert.NotEmpty(t, loc.Query().Get("sig"),
+		"sig が無いと Authorize が DB allowlist に落ちる (#2905 と同じ罠)")
+	assert.Empty(t, loc.Query().Get("emoji"),
+		"upstream は badge の枝で emoji=1 を付けない (parseMode が emoji を先に見るので mode が奪われる)")
+}
+
+// **badge は static より優先する (#2909)。**
+//
+// upstream の if/else が badge を先に取り、badge の枝では `static` を一切見ない。
+// badge は 96x96 グレースケール PNG 固定なので、アニメーションの有無を渡しても
+// 結果が変わらない。
+func TestEmojiRedirectHandler_BadgeWinsOverStatic(t *testing.T) {
+	withMediaProxy(t)
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		"smile|": {Name: "smile", PublicURL: "https://cdn.example/anim.gif"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "badge=1&static=1")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	assert.Equal(t, "/proxy/emoji.png", loc.Path, "badge の枝を通ること")
+	assert.Equal(t, "1", loc.Query().Get("badge"))
+	assert.Empty(t, loc.Query().Get("static"),
+		"upstream は badge の枝で static を見ない")
+}
+
+// **値は問わない (存在で見る)。** upstream は fastify の `'badge' in query` なので
+// `?badge=` (空値) でも badge になる。static 側の判定と揃える。
+func TestEmojiRedirectHandler_BadgeWithoutValue(t *testing.T) {
+	withMediaProxy(t)
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		"smile|": {Name: "smile", PublicURL: "https://cdn.example/anim.gif"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "badge")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+	loc, err := neturl.Parse(rec.Header().Get(echo.HeaderLocation))
+	require.NoError(t, err)
+	assert.Equal(t, "/proxy/emoji.png", loc.Path)
+}
+
+// context 未配線なら従来どおり raw へ 302 する (static と同じ扱い)。
+func TestEmojiRedirectHandler_BadgeWithoutContextFallsBackToRaw(t *testing.T) {
+	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{
+		"smile|": {Name: "smile", PublicURL: "https://cdn.example/anim.gif"},
+	}}
+	h := emojiRedirectHandler(repo)
+
+	c, rec := newEmojiTestContext(t, "smile.webp", "badge=1")
+	require.NoError(t, h(c))
+	require.Equal(t, http.StatusFound, rec.Code)
+	assert.Equal(t, "https://cdn.example/anim.gif", rec.Header().Get(echo.HeaderLocation))
+}
