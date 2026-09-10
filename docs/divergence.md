@@ -19,7 +19,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 |---|---|---|
 | **cherrypick 由来** | yojo-art/cherrypick 系列が純正に加えた拡張を mk-go が取り込んだもの | 維持。vanilla misskey-js golden で厳密 gate しない |
 | **mk-go 独自** | mk-go が独自に足した機能 (additive、wire 互換を壊さない) | 維持 |
-| **安全側 divergence** | upstream より厳しい / 正確な挙動 | 維持し理由を明記 ([[feedback_parity_mkgo_better_keep_document]] 方針) |
+| **安全側 divergence** | upstream より厳しい / 正確な挙動 | 維持し理由を明記 (mk-go 優位は regress させず理由を明記する方針) |
 | **未実装 / 欠落** | upstream にあって mk-go に無い | issue 化して解消する |
 | **近似** | 意図も結末も upstream と同じだが、依存ライブラリが違うため数値までは一致しない | §9 に残差を実測値つきで記録する |
 
