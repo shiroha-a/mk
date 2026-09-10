@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -1054,6 +1054,16 @@ mdtable-check: ## md の表の各行がヘッダと同じ列数か検査 (溢れ
 	# 中でも働く** (`\|` へエスケープする)。#2930 で実際に踏んだ。
 	# **見るのは列数だけ。** 取りこぼす形はテストの doc コメントに明記してある。
 	go test ./internal/entitycompat/... -run 'TestMarkdownTablesDoNotDropContent' -count=1 -v
+
+.PHONY: pluginembed-check
+pluginembed-check: ## mk-go をビルドする Dockerfile が pluginbuild を go build より前に実行するか検査
+	# 組み込みを忘れた image は **エラーにならない** — plugins/ に置いたのに
+	# 入っていない mk-go が黙って出来る。#2940 で Dockerfile.bundled が実際に
+	# そうなっていた。生成が go build の後でも同じ結果になるので順序も見る。
+	# 検出は動詞 (go build / go install) と対象 (cmd/misskey / cmd/...) の共起で
+	# 行い、行継続は畳んでから判定する。組み込まない Dockerfile は理由付きで
+	# allowlist に登録する。
+	go test ./internal/entitycompat/... -run 'TestDockerfilesEmbedPlugins' -count=1 -v
 
 .PHONY: gaterun-check
 gaterun-check: ## gates の -run が名指しするテストが実在するか検査

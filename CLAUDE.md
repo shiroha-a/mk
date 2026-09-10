@@ -144,7 +144,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -217,7 +217,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 129 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 130 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -694,6 +694,26 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   `third_party/misskey/built` を書き換えるため**検証には使えない**。
 - required check (build / test / lint) には**含めない**。
 
+### `build-with-plugins` workflow (reusable) / `build-with-plugins-selftest` (PR トリガー)
+
+- `build-with-plugins.yml` は **`workflow_call` 専用**。運営者が自分のリポジトリから
+  「使いたいプラグインのリスト」を渡して呼ぶと、それらを `plugins/` へ clone して
+  `Dockerfile.bundled` を build し、**呼び出し元の GHCR** へ publish する (#2940)。
+  mk-go 側はビルド基盤も成果物も持たない。
+- **`permissions` を宣言していない。** reusable workflow の permissions は caller の
+  権限以下にしか設定できず、宣言すると caller がそれを持たない場合に run ごと
+  拒否される (`push: false` でも同じ)。publish する caller が `packages: write` を書く。
+- frontend を持つプラグインがあるかは `pluginbuild` の出力で判定し、あるときだけ
+  SPA を自前でビルドして `ASSETS_SOURCE=local` で焼き込む。無ければ公式の
+  assets イメージを使って pnpm のビルドを丸ごと省く。
+- **要求したプラグインが組み込まれたかを突き合わせる。** `disabled: true` は黙って
+  skip されるので、見ないと「指定したのに 0 個入っている image」が緑で出る。
+- `build-with-plugins-selftest.yml` が `pull_request` (paths フィルタ) と
+  `workflow_dispatch` でそれを呼び、`push: false` でビルドだけ通す。**PR で発火させる
+  のが要点** — `workflow_dispatch` は default branch にある workflow しか起動できず、
+  それだけだとマージ前に一度も検証できない。
+- PR の required check には**含めない** (外部リポジトリの clone に依存するため)。
+
 ### `docker` / `docker-branch` workflow
 
 - `docker.yml` は **`push` / `pull_request` / `workflow_dispatch`** で発火し、
@@ -829,6 +849,17 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-10**: `make gates` に `pluginembed-check` を追加し、運営者向けの reusable workflow (`build-with-plugins.yml`) を新設 (#2940)。`make help` の target は 129 → 130。**`Dockerfile.bundled` が `pluginbuild` を呼んでいなかった** — `plugins/` に置いてビルドしても入らない image が黙って出来ており、しかもエラーにならないので運営者は「入ったつもり」で起動できた。`docs/plugins/operating.md` は「`Dockerfile` / `deploy/uds/Dockerfile.mkgo` の両方が生成ツールを実行する」と書いて bundled を挙げていなかったが、**除外とも書いていなかった**。
+  **gate は 3 つの素通りを塞いである** (どれも敵対的レビューで実測された)。(a) **順序を見る** — `pluginbuild` を `go build` の後に置くと生成物が binary に入らないが、Dockerfile としては正当でビルドも成功する。(b) **builder の検出を 1 つの文字列に頼らない** — `./cmd/misskey` だけを探す形は module path (`github.com/shiroha-a/mk/cmd/misskey`) やワイルドカード (`./cmd/...`) で書かれた Dockerfile を検査対象から黙って落とす。**allowlist にも載らないので gate は鳴らない**まま検査が減る (「1 つも拾えなかったら落とす」は全部消えたときしか効かない)。(c) **RUN 内の行末 `#` も落とす** — シェルのコメントなので「書いてあるのに実行されない」状態になる (#2856 が `wiring-check` で `/* */` に対して踏んだのと同型)。(d) **行継続を畳んでから判定する** — `go build` と対象が同じ行にあることを要求すると、ldflags を 1 つ足して折り返した瞬間にその Dockerfile が検査対象から消える。(e) **動詞も 1 つに頼らない** (`go install` で外れる)。
+  **落としすぎる strip を builder の判定に使わない。** 行末 `#` の除去は「落としすぎる」側に倒してあるので、`go build` の行にたまたま ` #` があるとその Dockerfile ごと builder 集合から消える。**検出は広い body で、実行されるかの判定は狭い body で**、と分けてある (敵対的レビュー 2 周目で、(c) の対処が (b) の穴を新しく開けていることが実測された)。
+  **検出と順序判定でも広さを変える。** 検出は「ファイルのどこかに動詞と対象がある」で広く取る — 動詞と対象が同じコマンドに現れることを要求すると、対象を `ARG MK_MAIN=./cmd/misskey` のような変数に入れただけで検査対象から消える。逆に順序判定は「動詞と対象を**同時に含むコマンド**」だけを基準にする — 畳んだ RUN の中に無関係な `go build` / `go install` があると、そちらが基準点を前へ引っ張って**正しい Dockerfile が順序違反で落ちる** (しかも診断が事実と逆を指す)。**3 周目のレビューでこの 2 つが同時に指摘された** — (b)(d) の対処がそれぞれ別方向の穴を開けていた形。**残る既知の穴は「pluginbuild を使われない別 stage に置く」形** (存在判定はファイル全体を見るため素通りする)。テストの doc コメントに明記してある。
+  **突き合わせに使う出力は、無検証の値より前に置く。** `pluginbuild` の行は `dir=` を `name=` より前に出す — `name` は `mk-plugin.yml` の無検証な YAML 文字列で括弧も改行も入れられるので、後ろに置くと `name: "x dir=plugins/victim "` のように**別プラグインの行を偽装でき、無効化されたプラグインが組み込まれたと判定される** (実測)。書式は `tools/pluginbuild` 側のテストで固定した — 呼び出し側が突き合わせに使う契約なので、片側だけ変えて気付かないのを防ぐ。
+  **運用の動機は実測。** 定常運用は **343 MiB** (mk-go 91 / PostgreSQL 181 / valkey 69 / nginx 2) で 2GB VPS に載るのに、**Go のビルドは 1200MB 制限・既定の並列度で OOM する** (`-p 1` なら通る)。`/usr/bin/time -v` が出す 976MB は**単一プロセスの最大値**で、並列コンパイラの合計ではないので、コア数が多いホストほど OOM しやすい。さらに **BuildKit は dockerd に組み込まれている**ため、本番ホストでビルドするとヒープが膨らんだまま返らない — **ビルドキャッシュを 60.88GB 削除しても RSS は 4,465 → 4,485MB で不変**だった (削除処理自体で一時的に 6,798MB まで増え、2 分で戻った)。`builder.gc.defaultKeepStorage` はディスクにしか効かない。解放には dockerd の再起動が要る。
+  **`ARG` は最初の `FROM` より前に置く。** `FROM assets-${ASSETS_SOURCE}` のような stage 名の展開に使えるのは global ARG だけで、stage 内で宣言したものは参加しない。しかも**`--build-arg` を渡しても救われない** (未宣言の build-arg は metaArgs に入らない) ので、置き場所を間違えると `assets-` という不正な stage 名になり、**プラグイン経路だけでなく既定のビルドまで落ちる**。
+  **step の `if:` から `secrets` は参照できない** (使えるのは env / github / inputs / job / matrix / needs / runner / steps / strategy / vars)。書くと式の検証が `Unrecognized named-value` になり、**呼び出し元の job が 1 つも走らずに失敗する** — token を渡さない呼び出しでも同じ。判定は `run` の中で行う (step の `env` は `if` からは見えないが `run` からは見える)。
+  **reusable workflow 側で `permissions` を宣言しない。** caller の権限以下にしか設定できないので、宣言した時点で caller がそれを持っていなければ run ごと拒否される (`push: false` でも回避できない)。publish する caller が自分で `packages: write` を書く。
+  **要求したプラグインが実際に入ったかを突き合わせる。突き合わせるのはディレクトリ名。** `pluginbuild` が最初に出す名前は `mk-plugin.yml` の `name:` で、**置いたディレクトリ名とは限らない**。運営者が指定できるのはディレクトリ名だけなので、名前で照合すると**正しく組み込まれたプラグインで落ちる** (しかも診断が disabled を疑わせる方向になり事実と逆を指す)。`pluginbuild` の出力に `dir=` を足して、そちらで照合する。あわせて **`-dry-run` の stdout には spec 以外を書かない** — 「指定されたプラグインはありません」を stdout に出していたため、プラグインを全部コメントアウトすると案内文の 1 行目がプラグイン名として読まれて落ちた (どちらも敵対的レビュー 2 周目で、1 周目の修正が作った回帰として検出された)。`pluginbuild` は `mk-plugin.yml` が `disabled: true` のものを黙って skip して exit 0 で終わる。しかも `disabled: true` は #2701 でこのプロジェクト自身が同梱プラグインに要求している書き方なので、作者がそれに倣っていれば必ず踏む。見ないと**指定した N 個のうち 0 個しか入っていない image が緑で push される** = この issue が塞ごうとしている穴そのものになる。
+  **新しい workflow は PR 上で発火させて確認する** (`docs/ci.md`)。`workflow_dispatch` だけだと default branch にあるものしか起動できず、マージ前に一度も検証できない。**この PR の High 3 件はそこを踏み外したまま書いたことで生まれた。**
 - **2026-09-10**: `make gates` に `mdtable-check` を追加 (#2930)。`make help` の target は 128 → 129。**GFM は列が増えた行を「崩して描画」しない。溢れたセルを黙って捨てる。** ヘッダ行が列数を決め、それを超えたセルは破棄されるので、**ソースには書いてあるのに GitHub 上では読めない**という形で壊れる。ローカルで md を読んでいる限り気付けない。実際に踏んだのは `docs/divergence.md` の `2026.9.0-mk.7` の行で、コードスパンの中に書いた権限式 `$i.isModerator || $i.policies.canManageCustomEmojis` の `||` がセル区切りとして働き、**描画は 599 文字あるべきところ 394 文字で止まって 205 文字 (34.2%) が読めなかった** (数え方は `gh api /markdown --mode gfm` の出力からタグを除いた文字数)。消えた中に「純正へは還元できない行」という分類が入っており、この表を「還元不能な差分の一覧」として読む運用が成立していなかった。
   **コードスパンの中でもパイプは区切りとして働く。** GFM のエスケープ (`\|` → `|`) は inline の解析より**前**に効くので、表セルの中では `` `a \|\| b` `` と書けば区切りにならずコード中の `||` になる。リテラルの `\|` を見せたいときは `` `a \\| b` ``。**表の外にはこの前処理が無い**ので、コードスパンに `\|` と書くとバックスラッシュがそのまま出る (この entry の 1 稿目で実際に間違えた)。
   **見るのは列数だけにしてある。** 敵対的レビューで「列数が一致したままコードスパンが割れる形がある」(3 列の表の `` | `x|y` | z | `` は**セル数がヘッダと同じ 3 になる**) と指摘され、コードスパンの対応付けを自前で持つ実装と、外側パイプ省略に対応するため表の終端をブロック開始で判定する実装を足した。**どちらも次の周で正当な md を落とした** — 前者は**二重バッククォートのコードスパンを含む行**を、後者は**表の直後にリストを置くというごく普通の書き方**を偽陽性にした (どちらも GitHub では正常に描画されることを実測)。自前の inline / block パーサに継ぎ足す形は #2857 が「手当てするたびに隣の穴が開く」と結論した型なので、**列数という 1 つの条件だけ**に戻してある。取りこぼす側 (列数が一致したまま割れる形、外側パイプを省いた表、ヘッダ行自体が壊れた表) はテストの doc コメントに明記した。

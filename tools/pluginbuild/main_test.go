@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -631,4 +632,25 @@ func TestRun_OnlyDisabledPluginsResetsArtifacts(t *testing.T) {
 
 	assert.NoFileExists(t, genPath)
 	assert.NoFileExists(t, workPath)
+}
+
+// 出力 1 行の書式は build-with-plugins workflow が突き合わせに使う契約なので、
+// ここで固定する。書式が変われば全プラグインが NO MATCH になって落ちる
+// (fail-loud) が、片側だけ変えて気付かないのを防ぐ。
+func TestFormatDiscovered_Contract(t *testing.T) {
+	got := formatDiscovered(discovered{
+		dir: "plugins/weather", name: "weather-widget",
+		modulePath: "example.com/weather", hasFrontend: true,
+	})
+	require.Equal(t, "pluginbuild: dir=plugins/weather name=weather-widget (example.com/weather, frontend=true)", got)
+}
+
+// name は無検証の YAML 文字列なので、そこに書いた値で別プラグインの行を
+// 偽装できてはいけない。dir= が name より前にあることで塞いでいる。
+func TestFormatDiscovered_NameCannotForgeDir(t *testing.T) {
+	got := formatDiscovered(discovered{
+		dir: "plugins/real", name: "x dir=plugins/victim name=y", modulePath: "m",
+	})
+	require.True(t, strings.HasPrefix(got, "pluginbuild: dir=plugins/real "), got)
+	require.Less(t, strings.Index(got, "dir=plugins/real"), strings.Index(got, "dir=plugins/victim"))
 }

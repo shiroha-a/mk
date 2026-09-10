@@ -34,13 +34,58 @@ make build          # または docker build / make uds-build
 
 ### Docker の場合
 
-`Dockerfile` / `deploy/uds/Dockerfile.mkgo` の両方が生成ツールを実行するので、`plugins/` に置いた状態でイメージをビルドすれば取り込まれる。
+`Dockerfile` / `Dockerfile.bundled` / `deploy/uds/Dockerfile.mkgo` のいずれも生成ツールを実行するので、`plugins/` に置いた状態でイメージをビルドすれば取り込まれる。
+
+`Dockerfile.bundled` は SPA を同梱するが、その供給元は既定で mk-go 公式のアセットイメージ（`ghcr.io/shiroha-a/misskey-ts-assets`）なので、**プラグインのフロントエンドは入らない**。含めるには SPA を自前でビルドしたうえで `--build-arg ASSETS_SOURCE=local` を渡す。下記の GitHub Actions 経由ならこの判定は自動で行われる。
 
 ### フロントエンドを持つプラグイン
 
 `third_party/misskey` (submodule) が取得済みである必要がある。未取得のまま frontend 付きプラグインを置くと、生成の時点でエラーになる。
 
 **フロントエンドのビルド後は mk-go の再起動が必須。** mk-go は起動時に一度だけ manifest を読むので、ビルドしただけでは古いファイルを指したままになる（存在しないファイルを指すと画面が真っ白になる）。
+
+## GitHub Actions でビルドする
+
+**運用は 2GB のVPSに載るが、ビルドは載らない。** 実測では定常運用が 343 MiB（mk-go 91 / PostgreSQL 181 / valkey 69 / nginx 2）なのに対し、Go のビルドは 1200MB 制限・既定の並列度で OOM する（`-p 1` なら通る）。フロントエンドのビルドはさらに重い。
+
+加えて、**本番ホストで `docker build` するとメモリが戻らない**。Docker 23 以降の BuildKit は dockerd に組み込まれているため、ビルドで伸びたヒープが dockerd に残る。実測ではビルドキャッシュを 60.88GB 削除しても RSS は 4,465 → 4,485MB でほぼ変化しなかった（原因はキャッシュではなくビルドの実行そのもので、解放には dockerd の再起動が要る）。
+
+ビルドを GitHub Actions に任せれば、どちらも起きない。自分のリポジトリに次の workflow を1つ置くだけでよい。
+
+```yaml
+name: Build mk-go
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    permissions:
+      contents: read
+      packages: write
+    uses: shiroha-a/mk/.github/workflows/build-with-plugins.yml@main
+    with:
+      mk_ref: develop
+      plugins: |
+        weather    https://github.com/foo/mk-plugin-weather  v1.2.0
+        nowplaying https://github.com/bar/mk-plugin-np       0123456789abcdef0123456789abcdef01234567
+    secrets:
+      plugin_token: ${{ secrets.PLUGIN_TOKEN }}   # private なプラグインを使う場合のみ
+```
+
+出来上がったイメージは**自分の GHCR** に入るので、本番は `docker pull` するだけになる。
+
+- **`permissions` は呼び出す側で宣言する。** publish するなら `packages: write` が要る。reusable workflow 側では宣言していない — あちらで書くと呼び出し元の権限以下にしか設定できず、権限を持たない呼び出し（fork からの PR など）は `push: false` でも run ごと拒否されるため
+- **`mk_ref` にこの機能を含む版を指す。** リリース `1.3.0` には `tools/pluginresolve` が無いので、指定するとビルドが「no required module provides package」で落ちる。対応する最初のリリースが出るまでは `develop` か、その先のコミット SHA を指すこと
+- **ref は必須だが、それだけでは内容は固定されない。** タグ・ブランチ・コミット SHA のいずれも書けるので、`main` と書けば実質的に既定ブランチを追うことになる。省略を許さないのは「どの版を取るかを毎回書かせる」ためで、**内容まで固定したいならコミット SHA か、動かさない運用のタグを指すこと**。ブランチを指した場合、この文書の冒頭にある「特定のバージョンを名指しで含める」という前提は成立しない（作者のアカウントが侵害されれば、次のビルドで任意のコードが入る）
+- **フロントエンドを持つプラグインは自動で判定される。** 1つでもあれば SPA を自前でビルドして同梱し、無ければ公式のアセットイメージを使ってフロントエンドのビルドを丸ごと省く。判定は `mk-plugin.yml` で無効化されているものを除いた実際の組み込み対象に対して行われる
+- **指定したプラグインが組み込まれなかったらビルドが落ちる。** `mk-plugin.yml` が `disabled: true` のプラグインは生成ツールが黙って読み飛ばすため、突き合わせないと「指定したのに1つも入っていないイメージ」が成功扱いで publish される
+- **private なプラグインは `plugin_token` を渡す。** `https://github.com/` の URL 書き換えで差し込むので、プラグインの指定行に token を書く必要はない（書いた場合はビルドが弾く。指定行は秘密として扱われないので、ログに平文で残るため）
+- `push: false` を渡すとビルドだけ行い、publish しない。`image` は `ghcr.io/...` のみ受け付ける（ログイン先が ghcr.io に固定されているため）
+
+`mk_repository` を渡せば mk-go 自体を fork したものにも向けられる。
+
+**`@main` の部分も可動であることに注意。** 上の例は reusable workflow をブランチで参照しているので、mk-go 側の更新がそのまま次回のビルドに入る。固定したい場合はタグかコミット SHA を指す。なお、この workflow はビルド結果のキャッシュを**呼び出し元の** Actions キャッシュに書き出す。プラグインのソースを含むので、公開リポジトリで fork からの PR を許している場合は取り扱いに注意すること。
 
 ## 設定
 

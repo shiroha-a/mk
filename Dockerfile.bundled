@@ -21,11 +21,25 @@
 
 ARG MISSKEY_ASSETS_IMAGE=ghcr.io/shiroha-a/misskey-ts-assets:2026.9.0-mk.0
 
+# アセットの供給元。既定は external (公式のアセットイメージ) で、プラグインの
+# frontend を含めたいときだけ local に切り替える (#2940)。
+#
+# **最初の FROM より前に宣言しなければならない。** FROM の変数展開に使えるのは
+# global ARG だけで、stage の中で宣言したものは展開に参加しない。しかも
+# `--build-arg` を渡しても救われない (未宣言の build-arg は metaArgs に入らない)
+# ので、置き場所を間違えると `assets-` という不正な stage 名になり **既定の
+# ビルドまで落ちる**。
+ARG ASSETS_SOURCE=external
+
 # Stage 1: Go binary
 #
 # 既存 Dockerfile の builder stage と同じ手順。ただし submodule のアセットを
 # 参照しないので、`pnpm install` 済みかどうかの事前チェックは不要。
 FROM golang:1.26-alpine AS builder
+
+# git は go mod download 時の private module fetch に使う (通常の Dockerfile と同じ)。
+# plugins/ のプラグインが private な依存を持つ場合にここで要る。
+RUN apk add --no-cache git
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -35,8 +49,18 @@ COPY . .
 # `-tags nodynamic` は必須。CGO_ENABLED=0 だけでは gen2brain/webp の purego
 # (dlopen) 経路が残って musl に動的リンクされ、distroless で
 # `exec /app/misskey: no such file or directory` になる (#619)。
+#
+# plugins/ に置かれたプラグインをビルドに取り込む (#2940)。生成物は gitignore
+# されているので、ここで生成しないと **image だけプラグイン無しになる**。しかも
+# エラーにならないので、運営者は「入ったつもり」で起動できてしまう。
+#
+# **frontend を持つプラグインを含めるには ASSETS_SOURCE=local が要る。** 既定の
+# assets イメージは mk-go 公式のビルドなので、プラグインの .vue は入っていない。
+# pluginbuild は submodule 未取得かつ frontend を持つプラグインがあるとき明示的に
+# 落ちるので、片肺で組み込まれた image が黙って出来ることはない。
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
+    GOWORK=off go run ./tools/pluginbuild && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/misskey ./cmd/misskey && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate
 
@@ -48,7 +72,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 #
 # タグは submodule のタグと 1:1 で対応させること。ずれるとフロントエンドと
 # backend の実装がちぐはぐになる。`make version` で両方を確認できる。
-FROM ${MISSKEY_ASSETS_IMAGE} AS assets
+FROM ${MISSKEY_ASSETS_IMAGE} AS assets-external
+
+# プラグインの frontend を含む SPA を自前でビルドしたときの供給元 (#2940)。
+# 公式の assets イメージにはプラグインの .vue が入っていないので、frontend を
+# 持つプラグインを組み込むときは build context 側でビルドした成果物を使う。
+# 中身は Dockerfile.assets が作る 5 つと同じ形にしてある (ずれると runtime stage
+# の COPY が落ちる)。
+#
+# **使わない stage は BuildKit がビルドしない**ので、ASSETS_SOURCE=external の
+# ときに third_party/misskey/built が無くても問題ない。
+FROM scratch AS assets-local
+COPY third_party/misskey/built /built
+COPY third_party/misskey/packages/frontend/assets /frontend-assets
+COPY third_party/misskey/packages/backend/assets /backend-assets
+COPY third_party/misskey/assets /repo-assets
+COPY third_party/misskey/packages/backend/node_modules/@misskey-dev/emoji-assets/built /emoji-assets
+
+FROM assets-${ASSETS_SOURCE} AS assets
 
 # Stage 3: Runtime
 FROM gcr.io/distroless/static-debian13

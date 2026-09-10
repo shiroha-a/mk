@@ -156,13 +156,28 @@ func run(root, pluginDir string, inc include) error {
 	}
 
 	for _, p := range found {
-		note := ""
-		if p.disabled {
-			note = ", disabled だが明示指定で含めた"
-		}
-		fmt.Printf("pluginbuild: %s (%s, frontend=%t%s)\n", p.name, p.modulePath, p.hasFrontend, note)
+		fmt.Println(formatDiscovered(p))
 	}
 	return nil
+}
+
+// formatDiscovered renders one line of the plugin summary.
+//
+// **dir を出すのが要点。** name は mk-plugin.yml の `name:` で、置いたディレクトリ
+// 名とは限らない。呼び出し側 (build-with-plugins workflow) は「要求したプラグインが
+// 実際に組み込まれたか」を突き合わせるので、運営者が指定できる唯一の識別子である
+// ディレクトリを出す必要がある。
+//
+// **dir を name より前に置く。** name は無検証の YAML 文字列で括弧も改行も入れられる
+// ので、後ろに置くと `name: "x dir=plugins/victim "` のように別プラグインの行を
+// 偽装でき、**無効化されたプラグインが組み込まれたと判定される**。
+func formatDiscovered(p discovered) string {
+	note := ""
+	if p.disabled {
+		note = ", disabled だが明示指定で含めた"
+	}
+	return fmt.Sprintf("pluginbuild: dir=%s name=%s (%s, frontend=%t%s)",
+		p.dir, p.name, p.modulePath, p.hasFrontend, note)
 }
 
 // writeFrontend generates the files the fork's Vite build reads.

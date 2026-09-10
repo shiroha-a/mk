@@ -1,0 +1,279 @@
+# 運営者が自分のプラグイン構成で mk-go の image をビルドするための reusable
+# workflow (#2940)。
+#
+# プラグインはビルド時組み込みなので、独自プラグインを使う運営者は必ずビルドを
+# 通す必要がある。ところが実測では **運用は 343 MiB で 2GB VPS に載るのに、
+# ビルドは 1200MB 制限・並列で OOM する** (`-p 1` なら通る)。さらに BuildKit は
+# dockerd に組み込まれているため、本番ホストでビルドすると dockerd のヒープが
+# 膨らんだまま返らない (ビルドキャッシュを 60.88GB 消しても 4,465 → 4,485MB で
+# 不変。原因はキャッシュではなくビルドの実行そのもの)。
+#
+# 呼び出し側はこれだけで済む:
+#
+#   jobs:
+#     build:
+#       permissions:
+#         contents: read
+#         packages: write          # publish するなら caller 側で宣言する
+#       uses: shiroha-a/mk/.github/workflows/build-with-plugins.yml@main
+#       with:
+#         mk_ref: "1.3.0"
+#         plugins: |
+#           weather https://github.com/foo/mk-plugin-weather v1.2.0
+#       secrets:
+#         plugin_token: ${{ secrets.PLUGIN_TOKEN }}   # private plugin を使う場合のみ
+#
+# **frontend を持つプラグインは扱えない。** この image の SPA は assets イメージ
+# から COPY するので .vue を反映する経路が無い。指定するとビルドが明示的に
+# 失敗する (pluginbuild が submodule 未取得を検出して落ちる)。
+name: Build with plugins
+
+on:
+  workflow_call:
+    inputs:
+      mk_ref:
+        description: "mk-go の ref (タグ / ブランチ / commit SHA)。再現性のため必須"
+        required: true
+        type: string
+      plugins:
+        description: "組み込むプラグイン。1 行 1 つ `<name> <url> <ref>`"
+        required: false
+        type: string
+        default: ""
+      mk_repository:
+        description: "mk-go のリポジトリ (fork して使う場合のみ変更する)"
+        required: false
+        type: string
+        default: shiroha-a/mk
+      image:
+        description: "publish 先の image。既定は ghcr.io/<呼び出し元リポジトリ>"
+        required: false
+        type: string
+        default: ""
+      tags:
+        description: "付ける tag。カンマ区切り"
+        required: false
+        type: string
+        default: latest
+      push:
+        description: "registry へ push するか。false ならビルドだけ"
+        required: false
+        type: boolean
+        default: true
+    secrets:
+      plugin_token:
+        description: "private なプラグインを clone するための token"
+        required: false
+    outputs:
+      image:
+        description: "ビルドした image (tag 付き)"
+        value: ${{ jobs.build.outputs.image }}
+      digest:
+        description: "push した image の digest"
+        value: ${{ jobs.build.outputs.digest }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # **permissions をここで宣言しない。** reusable workflow の permissions は
+    # caller の権限以下にしか設定できず、宣言した時点で caller がそれを持って
+    # いなければ run ごと拒否される (`push: false` でも同じ)。push する caller が
+    # 自分で `packages: write` を書く。
+    outputs:
+      image: ${{ steps.target.outputs.tags }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      # submodule を取る。frontend を持つプラグインがあるかの判定 (pluginbuild) と、
+      # ある場合の SPA ビルドに third_party/misskey が要る。
+      - name: Checkout mk-go
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.mk_repository }}
+          ref: ${{ inputs.mk_ref }}
+          submodules: recursive
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # token は URL 書き換えで差し込む。プラグインの指定に token を書かせると
+      # workflow のログや outputs に載る経路が増える。
+      # **`if:` から secrets は参照できない** (step の if で使えるのは env / github /
+      # inputs / job / matrix / needs / runner / steps / strategy / vars のみ)。
+      # 書くと式の検証で `Unrecognized named-value` になり、**呼び出し元の job が
+      # 1 つも走らずに失敗する** — token を渡さない呼び出しでも同じ。判定は run の
+      # 中で行う。step の env は if からは見えないが run からは見える。
+      - name: Configure token for private plugins
+        if: inputs.plugins != ''
+        env:
+          PLUGIN_TOKEN: ${{ secrets.plugin_token }}
+        run: |
+          set -eu
+          if [ -z "${PLUGIN_TOKEN:-}" ]; then
+            echo "plugin_token が渡されていないので URL 書き換えは設定しません"
+            exit 0
+          fi
+          git config --global \
+            url."https://x-access-token:${PLUGIN_TOKEN}@github.com/".insteadOf \
+            "https://github.com/"
+
+      # 指定を検証して plugins/<name>/ に materialise する。ref は必須で、
+      # git の引数として解釈されうる値 (先頭 `-` など) は弾く。
+      - name: Resolve plugins
+        if: inputs.plugins != ''
+        env:
+          MK_PLUGINS: ${{ inputs.plugins }}
+        run: printf '%s\n' "$MK_PLUGINS" | go run ./tools/pluginresolve
+
+      # プラグインの配線を生成し、frontend を持つものがあるかを判定する。
+      # **`ls plugins/*/frontend` では判定できない** — mk-plugin.yml で無効化
+      # されているプラグインは組み込まれないので、pluginbuild の判断に従う。
+      # 生成は Dockerfile 側でも走る (冪等)。ここで走らせるのは SPA のビルドが
+      # 生成物 (server-plugins.generated.ts) を必要とするため。
+      - name: Generate plugin wiring
+        id: wiring
+        env:
+          MK_PLUGINS: ${{ inputs.plugins }}
+        run: |
+          set -eu
+          out=$(GOWORK=off go run ./tools/pluginbuild)
+          printf '%s\n' "$out"
+
+          # **要求したプラグインが実際に組み込まれたかを突き合わせる。**
+          # pluginbuild は mk-plugin.yml が `disabled: true` のプラグインを
+          # 黙って skip して exit 0 で終わる。しかも `disabled: true` は
+          # このプロジェクト自身が同梱プラグインに要求している書き方 (#2701) なので、
+          # 作者がそれに倣っていれば必ず踏む。見ないと **指定した N 個のうち
+          # 0 個しか入っていない image が緑で push される** — #2940 が塞ごうと
+          # している穴そのものになる。
+          #
+          # 判定は pluginbuild の出力形式に依存する。形式が変われば全て
+          # 「組み込まれていない」と判定されて落ちるので、空振りはしない。
+          #
+          # **突き合わせるのはディレクトリ名。** pluginbuild が最初に出す名前は
+          # `mk-plugin.yml` の `name:` で、置いたディレクトリ名とは限らない。
+          # 運営者が指定できるのはディレクトリ名だけなので、そちらで照合しないと
+          # **正しく組み込まれたプラグインで落ちる** (しかも診断が disabled を
+          # 疑わせる方向になり、事実と逆を指す)。`dir=` は name より前に出るので、
+          # mk-plugin.yml の `name:` に細工しても別プラグインの行は偽装できない。
+          #
+          # `GOWORK=off` が要る。ここは pluginbuild が go.work を書いた後に走る
+          # 唯一の `go run ./tools/*` で、付けないとプラグイン側の go.mod の問題が
+          # 「突き合わせ step が落ちた」として現れて原因から遠くなる。
+          if [ -n "${MK_PLUGINS}" ]; then
+            printf '%s\n' "$MK_PLUGINS" \
+              | GOWORK=off go run ./tools/pluginresolve -dry-run > "$RUNNER_TEMP/requested.txt"
+            while read -r name _rest; do
+              if [ -z "$name" ]; then continue; fi
+              case "$out" in
+                *"dir=plugins/${name} "*) ;;
+                *)
+                  echo "::error::プラグイン ${name} が組み込まれませんでした。mk-plugin.yml が disabled: true になっていないか確認してください"
+                  exit 1
+                  ;;
+              esac
+            done < "$RUNNER_TEMP/requested.txt"
+          fi
+
+          if printf '%s' "$out" | grep -q 'frontend=true'; then
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "frontend=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up pnpm
+        if: steps.wiring.outputs.frontend == 'true'
+        uses: pnpm/action-setup@v6
+        with:
+          # 版は submodule 側 package.json の packageManager から取る。
+          package_json_file: third_party/misskey/package.json
+
+      - name: Set up Node.js
+        if: steps.wiring.outputs.frontend == 'true'
+        uses: actions/setup-node@v7
+        with:
+          node-version-file: third_party/misskey/.node-version
+
+      # 公式の assets イメージにはプラグインの .vue が入っていないので、frontend を
+      # 持つプラグインがあるときは SPA を自前でビルドする。手順は fork 側の
+      # Dockerfile.assets と同じ。**NODE_ENV=production が要る** — frontend / sw /
+      # i18n など 7 パッケージがこれを見ており、production でないと minify されず
+      # _DEV_ フラグも立つ。
+      - name: Build frontend with plugins
+        if: steps.wiring.outputs.frontend == 'true'
+        working-directory: third_party/misskey
+        env:
+          NODE_ENV: production
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build-pre
+          pnpm --filter frontend... --filter sw... --filter frontend-embed... build
+          pnpm build-assets
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        if: inputs.push
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # image 名は小文字でなければ registry が受け付けない。GitHub の owner 名は
+      # 大文字を含みうるので、既定を組み立てるときに落とす。
+      - name: Resolve image target
+        id: target
+        env:
+          IMAGE: ${{ inputs.image }}
+          FALLBACK: ghcr.io/${{ github.repository }}
+          TAGS: ${{ inputs.tags }}
+        run: |
+          set -eu
+          base="${IMAGE:-$FALLBACK}"
+          base=$(printf '%s' "$base" | tr '[:upper:]' '[:lower:]')
+          # login は ghcr.io にしか行わない。別のレジストリを受けると、ビルドは
+          # 通って push で 401 になる (原因から遠い失敗の仕方をする)。
+          case "$base" in
+            ghcr.io/*) ;;
+            *) echo "image は ghcr.io/... である必要があります: $base" >&2; exit 1 ;;
+          esac
+          out=""
+          # glob を無効にする。tag に `*` が入るとカレントディレクトリの
+          # ファイル名に展開される。
+          set -f
+          IFS=','
+          for tag in $TAGS; do
+            tag=$(printf '%s' "$tag" | tr -d ' ')
+            if [ -z "$tag" ]; then continue; fi
+            out="${out:+$out,}${base}:${tag}"
+          done
+          if [ -z "$out" ]; then
+            echo "tags が空です" >&2
+            exit 1
+          fi
+          echo "tags=$out" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile.bundled
+          platforms: linux/amd64
+          push: ${{ inputs.push }}
+          tags: ${{ steps.target.outputs.tags }}
+          # frontend を持つプラグインがあれば、直前でビルドした SPA を使う。
+          # 無ければ公式の assets イメージ (既定) のままにして、pnpm のビルドを
+          # まるごと省く。
+          build-args: |
+            ASSETS_SOURCE=${{ steps.wiring.outputs.frontend == 'true' && 'local' || 'external' }}
+          labels: |
+            org.opencontainers.image.title=mk-go
+            org.opencontainers.image.description=mk-go built with operator-selected plugins
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

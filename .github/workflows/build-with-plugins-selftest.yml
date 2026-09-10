@@ -1,0 +1,51 @@
+# build-with-plugins.yml が実際に通ることを確認するための呼び出し元 (#2940)。
+#
+# 運営者が書く workflow の実例そのものでもある (docs/plugins/operating.md に
+# 同じ形を載せてある)。
+#
+# **PR で発火させる。** `workflow_dispatch` は default branch にある workflow しか
+# 起動できないので、それだけだとマージ前に一度も検証できない (docs/ci.md の
+# 「新しく CI に載せる workflow はその PR 自身の paths に含めて、PR 上で発火させて
+# 確認すること」)。フロントエンドを持つプラグインを指定しているので SPA のビルドが
+# 走る。paths を絞って、関係する変更のときだけ回す。
+#
+# required check には**含めない** (外部リポジトリの clone に依存するため)。
+name: Build with plugins (selftest)
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/build-with-plugins.yml"
+      - ".github/workflows/build-with-plugins-selftest.yml"
+      - "Dockerfile.bundled"
+      - ".dockerignore"
+      - "tools/pluginresolve/**"
+      - "tools/pluginbuild/**"
+      # plugin.APIVersion を上げると第三者プラグインが一斉に弾かれる。
+      # それを実際に検出できるのは、外部リポジトリを本当に clone する
+      # この job だけ。
+      - "plugin/**"
+      - "go.mod"
+      - "third_party/misskey"
+  workflow_dispatch:
+
+jobs:
+  build:
+    # push しないので packages の権限は要らない。
+    permissions:
+      contents: read
+    # ローカル参照なので、この PR / ブランチの build-with-plugins.yml が使われる。
+    uses: ./.github/workflows/build-with-plugins.yml
+    with:
+      # fork でも回るように、自分のリポジトリを見る。既定の shiroha-a/mk 固定だと
+      # fork 上の PR / dispatch で checkout が not our ref で落ちる。
+      mk_repository: ${{ github.repository }}
+      mk_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      # nowplaying は frontend を持つので、SPA を自前でビルドする経路
+      # (ASSETS_SOURCE=local) まで通る。**ref は固定する** — dispatch の input を
+      # そのまま埋め込むと、改行を含む値で行を増やして任意のリポジトリを
+      # clone させられる。
+      plugins: |
+        nowplaying https://github.com/shiroha-a/mk-plugin-nowplaying main
+      # publish はしない。検証したいのはビルドが通ることだけ。
+      push: false
