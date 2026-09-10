@@ -56,7 +56,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | `federation` | Drop-in e2e | 本物の Misskey TS との実連合 (follow/note/reaction/renote/reply/mention/delete) | 4 min | `make federation-misskey-e2e` |
 | `spec (mk-go 1/4)` 〜 `4/4` | Playwright | ブラウザからの統合互換 (296 spec ファイル) | 4-9 min | `make playwright-check` |
 | `build-and-push` / `-bundled` | Docker | image がビルドできるか (PR では push しない) | 4 min | `docker build -f Dockerfile .` |
-| `build / build` (未検証) | Build with plugins (selftest) | 運営者向けの reusable workflow が通るか。外部プラグインを実際に clone し、frontend を持つので SPA の自前ビルド (`ASSETS_SOURCE=local`) まで走る | 未計測 | `gh workflow run build-with-plugins-selftest.yml --ref <branch>` (default branch にある場合のみ) |
+| `build / build` | Build with plugins (selftest) | 運営者向けの reusable workflow が通るか。外部プラグインを実際に clone し、frontend を持つので SPA の自前ビルド (`ASSETS_SOURCE=local`) まで走る。**`docker build --check` では見えない範囲** (pluginbuild / go build が通るか、`assets-local` の COPY 元が context に実在するか、pnpm の symlink を越えられるか) を確認できるのはこの check だけ | 6 min | paths に該当する PR で自動発火する。手動なら `gh workflow run build-with-plugins-selftest.yml --ref <branch>` (default branch にある場合のみ) |
 
 ### e2e 系が「何を守っているか」の違い
 

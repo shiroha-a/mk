@@ -711,7 +711,13 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 - `build-with-plugins-selftest.yml` が `pull_request` (paths フィルタ) と
   `workflow_dispatch` でそれを呼び、`push: false` でビルドだけ通す。**PR で発火させる
   のが要点** — `workflow_dispatch` は default branch にある workflow しか起動できず、
-  それだけだとマージ前に一度も検証できない。
+  それだけだとマージ前に一度も検証できない。check 名は `build / build` (caller の
+  job 名 + callee の job 名) で、`gh pr checks` の一覧には現れないので
+  `gh run list --workflow build-with-plugins-selftest.yml` で見る。実測 6 分。
+  **`docker build --check` が見ない範囲を押さえるのはこれだけ** — stage 名の解決は
+  `--check` で分かるが、`pluginbuild` と `go build` が実際に通るか、`assets-local` の
+  COPY 元が context に実在するか、pnpm の symlink を越えられるかは RUN / COPY を
+  実行しないと分からない。
 - PR の required check には**含めない** (外部リポジトリの clone に依存するため)。
 
 ### `docker` / `docker-branch` workflow
