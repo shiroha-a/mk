@@ -67,12 +67,12 @@ shape や挙動を検証する spec。
 この境界は「どちらが上等か」ではない。API の shape 検証は drop-in 互換の regression
 検出に不可欠で、UI 操作より速く安定する。両方を別々に育てる。
 
-**290 spec が `upstream/`、6 spec が `mkgo/`。** 分割時に全 spec を確認したが、mk-go 独自
+**290 spec が `upstream/`、7 spec が `mkgo/`。** 分割時に全 spec を確認したが、mk-go 独自
 機能 (cherrypick 由来の chat 拡張、`mkGoVersion` 等の additive field) を検証するものは
 1 件も無かった。むしろ `i/profile_extra.spec.ts` のように **mk-go 拡張を明示的に scope
 外としている** spec もある。
 
-`mkgo/` の 6 件はいずれも公式 image では通らない。`ui/about_mkgo.spec.ts` (#2700)
+`mkgo/` の 7 件はいずれも公式 image では通らない。`ui/about_mkgo.spec.ts` (#2700)
 は mk-go 固有ページ `/about-mkgo` を開く。`ui/boot_error_reload.spec.ts`
 (#2786) は fork の `2026.7.0-mk.22c` で足した `#mkBootReload` を見る。
 `ui/csp_enforce.spec.ts` (#2788) は mk-go 独自キー
@@ -83,6 +83,9 @@ header 自体が無い。`ui/note_report_abuse_via_menu.spec.ts` と
 見るので、公式 image では要素自体が無い。`ui/profile_moderation_note_button_align.spec.ts`
 (#2926) はモデレーションノート追加ボタンの中央揃えを幾何で測るが、**純正はこれを
 今も直していない**ので公式 image では左に寄ったまま落ちる。
+`ui/federation_health_render.spec.ts` (#2944) は mk-go 独自の
+`admin/federation/{delivery,inbox}-health` を叩くタブを見るので、公式 image では
+endpoint 自体が無い。
 **`make playwright-ts-test` は `specs/upstream` に絞ってある**ので、TS backend 実行が
 これで落ちることはない。
 
@@ -138,11 +141,11 @@ tests/playwright/
 
 ## 並列度
 
-**1 スタックに対しては直列で回すしかない** (`workers: 1`)。296 spec のうち 177 が
+**1 スタックに対しては直列で回すしかない** (`workers: 1`)。297 spec のうち 178 が
 共有の root (alice) で**ブラウザからサインイン**し (数え方は
 `grep -rlE 'uiSigninAsRoot|signin-username' specs --include='*.spec.ts' | wc -l`。
-helper 経由が 176 で、`upstream/ui/signin.spec.ts` だけ signin フォームを直接駆動する)、
-さらに 32 がサインインせず root の token で API を叩く (`root.json` を読むのが 209 で、
+helper 経由が 177 で、`upstream/ui/signin.spec.ts` だけ signin フォームを直接駆動する)、
+さらに 32 がサインインせず root の token で API を叩く (`root.json` を読むのが 210 で、
 その差分)。instance meta は全 spec が共有する。Playwright は
 ファイル単位で並列化するので、`workers` を上げると `profile_iscat_toggle` と
 `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
