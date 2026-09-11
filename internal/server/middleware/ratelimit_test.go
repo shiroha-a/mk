@@ -933,3 +933,33 @@ func TestDefaultEndpointLimits_ChatMessageSendPathsAgree(t *testing.T) {
 		assert.Equal(t, want.Max, got.Max, "%s の Max が %s と違う", p, paths[0])
 	}
 }
+
+// TestDefaultEndpointLimits_ApplicationEntryPoints guards the authenticated
+// endpoints that create rows in a moderation queue.
+//
+// **テーブルに載っていないエンドポイントは無制限になる** (上の
+// UnauthenticatedEntryPoints と同じ理由)。認証が要るので誰でも叩けるわけでは
+// ないが、**1 人が審査キューを無制限に積める**のは未認証の入口と同じ害になる。
+// `emoji_application` の pending 一意制約は `(userId, name)` なので、名前を
+// 変えれば何件でも通る。
+//
+// #2935 で**任意のノートの絵文字メニューから 2 クリック**になり、露出が大きく
+// 変わった (従来は drive へ上げてから専用ページを開く必要があった)。
+func TestDefaultEndpointLimits_ApplicationEntryPoints(t *testing.T) {
+	paths := []string{
+		"/api/emoji-application/create",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			store := &mockLimitStore{}
+			rl := NewRateLimiter(store, true, DefaultEndpointLimits)
+			e, h := setupEcho(rl)
+
+			doRequest(e, rl.Middleware(), h, path, nil)
+
+			require.NotEmpty(t, store.calls,
+				"%s が無制限。DefaultEndpointLimits にキーが無いか、"+
+					"path からキーへの変換が合っていない", path)
+		})
+	}
+}

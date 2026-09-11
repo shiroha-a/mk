@@ -48,6 +48,11 @@ var (
 	// 見る形だと、もう片方を外しても素通りした (変異検証で実測)。
 	notifHTTPLookupRe   = regexp.MustCompile(`notificationsHandler\.SetEmojiApplicationLookup\(`)
 	notifStreamLookupRe = regexp.MustCompile(`notificationPublisher\.SetEmojiApplicationLookup\(`)
+
+	// リモートの承認が broadcast すること。**識別子は固定しない** — `&copied` を
+	// リテラルで見ると、無害な rename で「broadcast していない」と事実と逆の
+	// 診断を出す (このファイル冒頭で自分が禁じている型)。
+	publishRemoteRe = regexp.MustCompile(`publishEmojiAdded\(&\w+\)`)
 )
 
 // TestEmojiApplicationIsWired asserts the emoji registration request feature
@@ -125,14 +130,52 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	require.Containsf(t, manager, "custom-emojis-manager.applications.vue",
 		"カスタム絵文字の管理画面が申請タブを読み込んでいない。審査できなくなる")
 
-	// **単体テストの存在も見る。** 保存条件や所有者確認の担保はそこにしか無く、
-	// 消えても Go のテストは件数が減るだけで緑になる。
+	// **リモートのインポート申請の導線 (#2935)。** 権限を持つ人はその場で
+	// インポートし、持たない人は申請する。条件は同じで押した先だけが違うので、
+	// 片方が落ちても画面上は自然に見えてしまう。
+	creator := stripComments(readFileString(t, filepath.Join(root, "internal", "api", "admin", "emoji_application.go")))
+	emojiMenu := stripComments(readFileString(t, filepath.Join(fe, "src", "components", "global", "MkCustomEmoji.vue")))
+	require.Containsf(t, emojiMenu, "requestRemoteEmojiImport(",
+		"MkCustomEmoji が申請の導線を出していない。権限の無い人がリモート絵文字を頼めなくなる (#2935)")
+	require.Containsf(t, emojiMenu, "canRequestCustomEmojis",
+		"MkCustomEmoji が canRequestCustomEmojis を見ていない。ロールで制御できなくなる")
+
+	// **リアクション側も見る (レビュー M4)。** importRemoteEmoji の呼び出し元は
+	// 2 箇所あり、片方だけ対応すると「リアクションからは頼めない」という
+	// 気付きにくい非対称になる (#2698 が両方を揃えた経緯がある)。
+	reactionMenu := stripComments(readFileString(t, filepath.Join(fe, "src", "components", "MkReactionsViewer.reaction.vue")))
+	require.Containsf(t, reactionMenu, "requestRemoteEmojiImport(",
+		"MkReactionsViewer.reaction が申請の導線を出していない。リアクションから頼めなくなる (#2935)")
+	// **policy も見る (レビュー M3)。** 隣の MkCustomEmoji では見ているのに
+	// こちらだけ落ちていると、権限の無い人全員に「申請」が出る (server が
+	// 403 で弾くので実害は UX だが、片側更新の型)。
+	require.Containsf(t, reactionMenu, "canRequestCustomEmojis",
+		"MkReactionsViewer.reaction が canRequestCustomEmojis を見ていない。ロールで制御できなくなる")
+
+	// **審査画面が media proxy を通すこと (レビュー M2 / R2-H3)。**
+	// リモートの生 URL は `img-src 'self' data: blob:` を enforce している構成で
+	// **黙ってブロックされる**。この 1 行が「モデレーターに画像が見える」と
+	// 「何も出ない」を分けており、戻しても型もテストも通ってしまう。
+	applications := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.applications.vue")))
+	require.Containsf(t, applications, "getProxiedImageUrl(",
+		"審査画面がリモートの生 URL を出している。CSP でブロックされて画像が見えない (#2935)")
+
+	// **drive 取り込みはここで見ない (レビュー R2-M4)。**
+	// `TestCreateFromRemoteApplicationStoresInDrive` が実挙動で担保しており、
+	// リテラル照合を足しても検出力は増えず、`df` を rename しただけで
+	// 「取り込んでいない」と**事実と逆の診断**を出すだけになる。
+	//
+	// broadcast は単体テストが無いのでここで見る。
+	require.Regexpf(t, publishRemoteRe, creator,
+		"リモートの承認が emojiAdded を broadcast していない。承認した絵文字がピッカーに出ない")
+
 	// **承認が broadcast すること。** 落ちると、承認した絵文字が全クライアントの
 	// リロードまでピッカーに出てこない。EmojiAdd との差分として気付きにくい。
-	creator := stripComments(readFileString(t, filepath.Join(root, "internal", "api", "admin", "emoji_application.go")))
 	require.Containsf(t, creator, "h.publishEmojiAdded(e)",
 		"承認が emojiAdded を broadcast していない。承認した絵文字がピッカーに出ない")
 
+	// **単体テストの存在も見る。** 保存条件や所有者確認の担保はそこにしか無く、
+	// 消えても Go のテストは件数が減るだけで緑になる。
 	spec := findSpec(t, filepath.Join(root, "internal", "core", "emojiapplication"), "service_test.go")
 	require.Containsf(t, readFileString(t, spec), "ErrForbidden",
 		"%s が所有者の確認を試していない。他人の申請を取り下げられる回帰が無検査になる", spec)

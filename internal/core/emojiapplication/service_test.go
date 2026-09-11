@@ -72,11 +72,31 @@ func (f *fakeApps) UpdateIfPending(a *model.EmojiApplication) (bool, error) {
 type fakeEmojis struct {
 	existing *model.Emoji
 	err      error
+	// remote は host 付きの検索に答える (kind = remote の検証用)。
+	remote *model.Emoji
+	// 期待する引数。空なら検査しない。
+	remoteName string
+	remoteHost string
 }
 
-func (f *fakeEmojis) FindByNameAndHost(string, *string) (*model.Emoji, error) {
+// **name も host も見る。** 握り潰すと、呼び出し側が引数を入れ替えても
+// 気付けない (レビュー M5)。実測でその変異が素通りした。
+func (f *fakeEmojis) FindByNameAndHost(name string, host *string) (*model.Emoji, error) {
 	if f.err != nil {
 		return nil, f.err
+	}
+	if host != nil {
+		if f.remote == nil {
+			return nil, gorm.ErrRecordNotFound
+		}
+		// 引数が入れ替わっていれば期待と合わない。
+		if f.remoteName != "" && name != f.remoteName {
+			return nil, gorm.ErrRecordNotFound
+		}
+		if f.remoteHost != "" && *host != f.remoteHost {
+			return nil, gorm.ErrRecordNotFound
+		}
+		return f.remote, nil
 	}
 	if f.existing == nil {
 		return nil, gorm.ErrRecordNotFound
@@ -575,4 +595,135 @@ type recordingNotifier struct{ sent []string }
 func (r *recordingNotifier) NotifyEmojiApplicationProcessed(_ context.Context, app *model.EmojiApplication) error {
 	r.sent = append(r.sent, app.ID)
 	return nil
+}
+
+func remoteInput() CreateInput {
+	return CreateInput{
+		UserID: "u1", Kind: model.EmojiApplicationKindRemote,
+		Name: "sushi", License: "リモートから取り込み",
+		RemoteHost: "example.com", RemoteName: "sushi_remote",
+	}
+}
+
+// **リモート絵文字の申請も同じ共通検証を通ること (#2935)。**
+func TestCreateRemote(t *testing.T) {
+	apps := newFakeApps()
+	emojis := &fakeEmojis{remote: &model.Emoji{ID: "e-remote", Name: "sushi_remote"}}
+	svc := NewService(apps, emojis, &okFiles{}, &fixedID{}, nil, nil)
+
+	app, err := svc.Create(remoteInput())
+	require.NoError(t, err)
+	require.Equal(t, model.EmojiApplicationKindRemote, app.Kind)
+	require.Equal(t, "example.com", *app.RemoteHost)
+	require.Equal(t, "sushi_remote", *app.RemoteName)
+	// **自作用の列は空のまま。** kind を取り違えると承認で別の経路に入る。
+	require.Nil(t, app.FileID)
+}
+
+// **host / name が要ること。** 無いと承認時に取り直す手がかりが無い。
+func TestCreateRemoteRequiresHostAndName(t *testing.T) {
+	emojis := &fakeEmojis{remote: &model.Emoji{ID: "e1"}}
+	for _, tc := range []struct {
+		name   string
+		mutate func(*CreateInput)
+	}{
+		{"host が空", func(in *CreateInput) { in.RemoteHost = "" }},
+		{"name が空", func(in *CreateInput) { in.RemoteName = " " }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			in := remoteInput()
+			tc.mutate(&in)
+			_, err := NewService(newFakeApps(), emojis, &okFiles{}, &fixedID{}, nil, nil).Create(in)
+			require.ErrorIs(t, err, ErrRemoteRequired)
+		})
+	}
+}
+
+// **知らないリモート絵文字は受け付けない。** 承認時に取り直せないので、
+// 申請の時点で引けることを確かめる。
+func TestCreateRemoteRejectsUnknownEmoji(t *testing.T) {
+	svc := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	_, err := svc.Create(remoteInput())
+	require.ErrorIs(t, err, ErrNoSuchRemoteEmoji)
+}
+
+// **リモートでも同名のローカル絵文字があれば弾く。** 承認を押してから
+// DUPLICATE_NAME で落ちるのを防ぐ (own と同じ理由)。
+func TestCreateRemoteRejectsDuplicateLocalName(t *testing.T) {
+	emojis := &fakeEmojis{
+		existing: &model.Emoji{ID: "e-local"},
+		remote:   &model.Emoji{ID: "e-remote"},
+	}
+	svc := NewService(newFakeApps(), emojis, &okFiles{}, &fixedID{}, nil, nil)
+	_, err := svc.Create(remoteInput())
+	require.ErrorIs(t, err, ErrDuplicateName)
+}
+
+// **未知の kind は弾く。** 既定 (空文字) は own に倒す。
+//
+// **ライセンスを空にして試す (レビュー Low 4)。** fixture の
+// `remoteInput()` はライセンスを埋めているので、そのままだと「kind より先に
+// ライセンスを見る」順序の誤りを隠す。リモートのダイアログは license を任意と
+// して空で送るので、**実際に通るのは空のほう**。
+func TestCreateRejectsUnknownKind(t *testing.T) {
+	for _, license := range []string{"リモートから取り込み", ""} {
+		in := remoteInput()
+		in.Kind = "whatever"
+		in.License = license
+		_, err := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil).Create(in)
+		require.ErrorIsf(t, err, ErrInvalidKind, "license=%q", license)
+	}
+}
+
+// host / name の長さも列に収める。
+func TestCreateRemoteChecksLength(t *testing.T) {
+	emojis := &fakeEmojis{remote: &model.Emoji{ID: "e1"}}
+	in := remoteInput()
+	in.RemoteHost = strings.Repeat("あ", 129)
+	_, err := NewService(newFakeApps(), emojis, &okFiles{}, &fixedID{}, nil, nil).Create(in)
+	require.ErrorIs(t, err, ErrTooLong)
+}
+
+// **DB 障害を「知らない絵文字」に丸めない (#2792)。**
+func TestCreateRemoteSurfacesLookupFailure(t *testing.T) {
+	boom := errors.New("db down")
+	svc := NewService(newFakeApps(), &fakeEmojis{err: boom}, &okFiles{}, &fixedID{}, nil, nil)
+	_, err := svc.Create(remoteInput())
+	require.ErrorIs(t, err, boom)
+	require.NotErrorIs(t, err, ErrNoSuchRemoteEmoji)
+}
+
+// **name と host を取り違えていないこと (レビュー M5)。**
+//
+// 入れ替えると本番では全リモート申請が NO_SUCH_EMOJI になるが、偽物が引数を
+// 握り潰していると気付けない。非対称な値を与えて突き合わせる。
+func TestCreateRemotePassesArgumentsInOrder(t *testing.T) {
+	emojis := &fakeEmojis{
+		remote:     &model.Emoji{ID: "e-remote"},
+		remoteName: "sushi_remote",
+		remoteHost: "example.com",
+	}
+	svc := NewService(newFakeApps(), emojis, &okFiles{}, &fixedID{}, nil, nil)
+
+	_, err := svc.Create(remoteInput())
+	require.NoError(t, err, "name と host が入れ替わっている")
+}
+
+// リモートではライセンスを必須にしない (レビュー M1)。
+func TestCreateRemoteAllowsEmptyLicense(t *testing.T) {
+	emojis := &fakeEmojis{remote: &model.Emoji{ID: "e1"}}
+	in := remoteInput()
+	in.License = ""
+
+	app, err := NewService(newFakeApps(), emojis, &okFiles{}, &fixedID{}, nil, nil).Create(in)
+	require.NoError(t, err, "リモートでライセンスが必須になっている")
+	require.Equal(t, "", app.License)
+}
+
+// 自作では引き続き必須。
+func TestCreateOwnStillRequiresLicense(t *testing.T) {
+	in := validInput()
+	in.License = ""
+	_, err := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil).Create(in)
+	require.ErrorIs(t, err, ErrLicenseRequired)
 }

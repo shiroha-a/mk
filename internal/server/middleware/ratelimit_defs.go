@@ -141,6 +141,13 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	//
 	// apply は signup と同格。申請行と審査キューが無制限に積まれるのを防ぐ。
 	"signup-application/apply": {Duration: time.Hour, Max: 5},
+	// 絵文字の登録・インポート申請 (#2934 / #2935)。**未登録の endpoint は
+	// 上限が引けず素通しになる**ので明示する。pending の一意制約は
+	// `(userId, name)` なので、名前を変えれば 1 人で無制限に審査キューを
+	// 積める。#2935 で**任意のノートの絵文字メニューから 2 クリック**になり、
+	// 露出が大きく変わった (従来は drive へ上げてから専用ページを開く必要が
+	// あった)。signup の申請と同格にする。
+	"emoji-application/create": {Duration: time.Hour, Max: 5},
 	// form-token は apply を守る署名付きトークンの発行 (#2806)。フォームの
 	// 読み込み直しは正常な操作なので apply より緩くするが、**無制限にはしない** —
 	// 未登録の endpoint は上限が引けず素通しになる (ratelimit.go の lookup)。

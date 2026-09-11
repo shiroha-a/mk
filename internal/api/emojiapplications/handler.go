@@ -65,7 +65,13 @@ func (h *Handler) Create(c echo.Context) error {
 		License     string   `json:"license"`
 		IsSensitive bool     `json:"isSensitive"`
 		FileID      string   `json:"fileId"`
-		Comment     string   `json:"comment"`
+		// kind = remote (#2935)。どの絵文字を取り込むかを host + name で持つ。
+		// **emoji の行 ID では持たない** — リモート絵文字の行はキャッシュに
+		// 近く、審査を待つ間に消えると申請ごと無意味になる。
+		Kind       string `json:"kind"`
+		RemoteHost string `json:"remoteHost"`
+		RemoteName string `json:"remoteName"`
+		Comment    string `json:"comment"`
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error(
@@ -81,6 +87,9 @@ func (h *Handler) Create(c echo.Context) error {
 		License:     req.License,
 		IsSensitive: req.IsSensitive,
 		FileID:      req.FileID,
+		Kind:        req.Kind,
+		RemoteHost:  req.RemoteHost,
+		RemoteName:  req.RemoteName,
 		Comment:     req.Comment,
 	})
 	if err != nil {
@@ -120,6 +129,18 @@ func (h *Handler) createError(c echo.Context, err error) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"NO_SUCH_FILE", "No such file.",
 			"fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
+	case errors.Is(err, emojiapplication.ErrInvalidKind):
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "Unknown kind.",
+			"3d81ceae-475f-4600-b2a8-2bc116157532"))
+	case errors.Is(err, emojiapplication.ErrRemoteRequired):
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "remoteHost and remoteName are required.",
+			"3d81ceae-475f-4600-b2a8-2bc116157532"))
+	case errors.Is(err, emojiapplication.ErrNoSuchRemoteEmoji):
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"NO_SUCH_EMOJI", "No such emoji.",
+			"e2785b66-dca3-4087-9cac-b93c541cc425"))
 	case errors.Is(err, emojiapplication.ErrDuplicateName):
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"DUPLICATE_NAME", "Duplicate name.",
@@ -225,6 +246,12 @@ func (h *Handler) pack(app *model.EmojiApplication) map[string]any {
 	}
 	if app.EmojiID != nil {
 		out["emojiId"] = *app.EmojiID
+	}
+	// **両方を見る (レビュー Low 3)。** 片側だけの行があると nil deref で
+	// 500 になる (migration に「両方揃っている」CHECK は無い)。
+	if app.RemoteHost != nil && app.RemoteName != nil {
+		out["remoteHost"] = *app.RemoteHost
+		out["remoteName"] = *app.RemoteName
 	}
 	out["url"] = h.previewURL(app)
 	return out
