@@ -42,6 +42,10 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # ロール単位の通知 opt-out (#2898) も mk-go 独自 policy。TS 側に対応キーが
     # 無い。docs/divergence.md に additive field として記載済み。
     "optOutNotificationTypes",
+    # カスタム絵文字の登録申請 (#2934) も mk-go 独自 policy。upstream には申請
+    # という概念自体が無いので TS 側にキーが無い。docs/divergence.md に
+    # additive field として記載済み。
+    "canRequestCustomEmojis",
     # 承認制の登録 (#2554 / #2555) は mk-go 独自機能なので TS 側にキーが無い。
     # meta 直下と features の両方に出る (frontend は features を feature
     # detection に使うため片方だけだと検出できない)。docs/divergence.md に
@@ -94,6 +98,8 @@ USER_IGNORE = DEFAULT_IGNORE_KEYS | {
     "chunkedUploadMaxPendingMb",
     # ロール単位の通知 opt-out (#2898)。同上。
     "optOutNotificationTypes",
+    # カスタム絵文字の登録申請 (#2934)。同上。
+    "canRequestCustomEmojis",
 }
 
 
