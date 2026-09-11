@@ -11,15 +11,20 @@ import (
 )
 
 var defaults = map[string]any{
-	"gtlAvailable":               true,
-	"ltlAvailable":               true,
-	"canPublicNote":              true,
-	"mentionLimit":               20,
-	"canInvite":                  false,
-	"inviteLimit":                0,
-	"inviteLimitCycle":           10080,
-	"inviteExpirationTime":       0,
-	"canManageCustomEmojis":      false,
+	"gtlAvailable":          true,
+	"ltlAvailable":          true,
+	"canPublicNote":         true,
+	"mentionLimit":          20,
+	"canInvite":             false,
+	"inviteLimit":           0,
+	"inviteLimitCycle":      10080,
+	"inviteExpirationTime":  0,
+	"canManageCustomEmojis": false,
+	// 絵文字の登録申請 (#2934)。**default true** — 登録は必ずモデレーターの
+	// 承認を通るので、申請そのものを既定で塞ぐ必要が無い。canCreateChannel と
+	// 同じく、絞りたい運営者が role で false にする。
+	// canManageCustomEmojis を持つ人は申請ではなく直接登録できる。
+	"canRequestCustomEmojis":     true,
 	"canManageAvatarDecorations": false,
 	"canSearchNotes":             false,
 	"canSearchUsers":             true,

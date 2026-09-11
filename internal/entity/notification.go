@@ -36,6 +36,24 @@ type RoleLookup func(roleID string) (map[string]any, bool)
 // (upstream NotificationEntityService が invitation==null で null を返すのと同じ)。
 type ChatInvitationLookup func(invitationID, viewerID string) (map[string]any, bool)
 
+// EmojiApplicationStatus is the read-time state of a custom emoji request
+// referenced by an emojiApplicationProcessed notification (#2934).
+//
+// **通知には applicationId しか積んでいない。** 結果と却下理由を通知へ複製すると、
+// 申請を消しても文面が Redis に残り続ける。abuseReport (#2868) と同じ形。
+type EmojiApplicationStatus struct {
+	// Name is the requested emoji name, e.g. "sushi".
+	Name string
+	// Status is "approved" / "rejected" / その他の終端状態。
+	Status string
+	// RejectReason is shown to the applicant as-is. 却下でなければ空。
+	RejectReason string
+}
+
+// EmojiApplicationLookup resolves an application ID to its current state,
+// returning false when the row no longer exists.
+type EmojiApplicationLookup func(applicationID string) (EmojiApplicationStatus, bool)
+
 // AbuseReportStatus is the read-time state of a report referenced by an
 // abuseReport notification (#2868).
 type AbuseReportStatus struct {
@@ -60,9 +78,10 @@ type AbuseReportLookup func(reportID string) (AbuseReportStatus, bool)
 // types that embed a related entity which must be packed fresh. Threaded via
 // functional options so existing call sites stay unchanged.
 type packOptions struct {
-	role           RoleLookup
-	abuseReport    AbuseReportLookup
-	chatInvitation ChatInvitationLookup
+	role             RoleLookup
+	abuseReport      AbuseReportLookup
+	emojiApplication EmojiApplicationLookup
+	chatInvitation   ChatInvitationLookup
 	// viewer は invitation pack の視点 (= notifiee)。chatRoomInvitationReceived
 	// の room.isMuted / invitationExists を viewer 視点で算出するために渡す。
 	viewer string
@@ -79,6 +98,12 @@ type NotificationOption func(*packOptions)
 // state of abuseReport notifications (#2868)。
 func WithAbuseReportLookup(fn AbuseReportLookup) NotificationOption {
 	return func(o *packOptions) { o.abuseReport = fn }
+}
+
+// WithEmojiApplicationLookup supplies the lookup used to pack the current state
+// of emojiApplicationProcessed notifications (#2934)。
+func WithEmojiApplicationLookup(fn EmojiApplicationLookup) NotificationOption {
+	return func(o *packOptions) { o.emojiApplication = fn }
 }
 
 // WithRoleLookup supplies the RoleLookup used to pack roleAssigned
@@ -278,6 +303,28 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 	// (#2868)。通知は作成時点しか持たないので、他のモデレーターが対処しても
 	// 通知欄が「未対応」のまま残る。削除済 / lookup 未配線なら通知ごと drop
 	// する (roleAssigned と同じ形)。
+	// emojiApplicationProcessed は Extra["applicationId"] を read 時に引き直す
+	// (#2934)。承認/却下と却下理由を通知へ複製すると、申請を消しても文面が
+	// Redis に残る。**申請が消えていたら通知ごと drop する** — 経緯を辿れない
+	// 「処理されました」だけの通知は読んだ人に何も伝えない (roleAssigned と同じ形)。
+	if n.Type == notification.TypeEmojiApplicationProcessed {
+		applicationID, _ := n.Extra["applicationId"].(string)
+		if opts == nil || opts.emojiApplication == nil {
+			return nil
+		}
+		st, ok := opts.emojiApplication(applicationID)
+		if !ok {
+			return nil
+		}
+		out["emojiApplication"] = map[string]any{
+			"id":     applicationID,
+			"name":   st.Name,
+			"status": st.Status,
+		}
+		if st.RejectReason != "" {
+			out["emojiApplication"].(map[string]any)["rejectReason"] = st.RejectReason
+		}
+	}
 	if n.Type == notification.TypeAbuseReport {
 		reportID, _ := n.Extra["reportId"].(string)
 		if opts == nil || opts.abuseReport == nil {
@@ -351,6 +398,12 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		// abuseReport の comment は #2868 以降は積んでいないが、それ以前に
 		// 永続化された通知は本文を持つ (Redis stream は MaxPerUser で回転する
 		// まで残る)。通知に本文を出さない方針は既存分にも及ぼす。
+		// emojiApplicationProcessed は applicationId を out["emojiApplication"].id
+		// として出しているので、Extra から素通りさせると二重に出る
+		// (roleId / invitationId を落としているのと同じ)。
+		if k == "applicationId" && n.Type == notification.TypeEmojiApplicationProcessed {
+			continue
+		}
 		if k == "comment" && n.Type == notification.TypeAbuseReport {
 			continue
 		}

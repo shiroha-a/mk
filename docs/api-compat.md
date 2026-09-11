@@ -8,13 +8,13 @@
 - mk-go implemented (TS の subset): **444**
 - mk-go coverage of TS: **100.0%**
 - TS only (mk-go 未実装): **0**
-- mk-go only (TS spec 外): **60**
+- mk-go only (TS spec 外): **66**
 
 ## TS 側に存在するが mk-go で未実装 (0)
 
 (なし)
 
-## mk-go 側にしかない endpoint (60)
+## mk-go 側にしかない endpoint (66)
 
 ### GET variant 追加 (23)
 
@@ -68,12 +68,15 @@ yojo-art/cherrypick 由来の federated chat 拡張 endpoint。Misskey TS 本家
 | POST | `/api/chat/rooms/unmute` |
 | POST | `/api/chat/unread-count` |
 
-### その他 mk-go 独自 / alias (22)
+### その他 mk-go 独自 / alias (28)
 
 上記カテゴリに当てはまらない mk-go 独自 endpoint。backward-compat shim や alias を含む。
 
 | Method | Path |
 |--------|------|
+| POST | `/api/admin/emoji-application/approve` |
+| POST | `/api/admin/emoji-application/list` |
+| POST | `/api/admin/emoji-application/reject` |
 | POST | `/api/admin/emoji/fetch-remote-meta` |
 | POST | `/api/admin/federation/delivery-health` |
 | POST | `/api/admin/federation/inbox-health` |
@@ -88,6 +91,9 @@ yojo-art/cherrypick 由来の federated chat 拡張 endpoint。Misskey TS 本家
 | POST | `/api/drive/files/create-chunked/append` |
 | POST | `/api/drive/files/create-chunked/finish` |
 | POST | `/api/drive/files/create-chunked/start` |
+| POST | `/api/emoji-application/cancel` |
+| POST | `/api/emoji-application/create` |
+| POST | `/api/emoji-application/list-mine` |
 | POST | `/api/i/flashs` |
 | POST | `/api/i/flashs/likes` |
 | POST | `/api/roles/assignment-show` |

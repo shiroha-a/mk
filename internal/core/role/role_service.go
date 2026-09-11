@@ -80,7 +80,12 @@ const (
 	// (requireModerator/Admin flag は admin/emoji や avatar-decorations に
 	// 付いていない)、admin role 持ちのみ自動 bypass する semantics。mk-go も
 	// middleware.RequireRolePolicy 経由で同 挙動に揃える。
-	PolicyCanManageCustomEmojis      = "canManageCustomEmojis"
+	PolicyCanManageCustomEmojis = "canManageCustomEmojis"
+
+	// PolicyCanRequestCustomEmojis gates who may *request* a custom emoji
+	// (#2934 / #2935). canManageCustomEmojis を持つ人は申請ではなく直接
+	// 登録できるので、この policy は「登録はできないが頼める人」を表す。
+	PolicyCanRequestCustomEmojis     = "canRequestCustomEmojis"
 	PolicyCanManageAvatarDecorations = "canManageAvatarDecorations"
 
 	// 以下は #1026 で timeline endpoint の gate に使う policy key。匿名アクセス

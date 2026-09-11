@@ -61,6 +61,11 @@ var HostColumns = []HostColumn{
 	{Table: "user_profile", KeysetColumn: "userId", Column: "userHost"},
 	{Table: "abuse_user_report", KeysetColumn: "id", Column: "targetUserHost"},
 	{Table: "abuse_user_report", KeysetColumn: "id", Column: "reporterHost"},
+	// 絵文字のインポート申請が指すリモートの host (#2934 / #2935)。**対象一覧に
+	// 入れる** — 申請は host で相手を特定するので、正規化されていないと同じ
+	// サーバーが別物として並ぶ。本 migration の時点では kind='own' しか
+	// 発行されないので行は空だが、#2935 で書かれ始める。
+	{Table: "emoji_application", KeysetColumn: "id", Column: "remoteHost"},
 }
 
 // metaHostColumns are the host-ish columns deliberately left out of HostColumns.

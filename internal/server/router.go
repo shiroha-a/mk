@@ -31,6 +31,7 @@ import (
 	apichat "github.com/shiroha-a/mk/internal/api/chat"
 	"github.com/shiroha-a/mk/internal/api/clips"
 	"github.com/shiroha-a/mk/internal/api/drive"
+	apiemojiapplications "github.com/shiroha-a/mk/internal/api/emojiapplications"
 	apiemojis "github.com/shiroha-a/mk/internal/api/emojis"
 	"github.com/shiroha-a/mk/internal/api/endpoints"
 	apifederation "github.com/shiroha-a/mk/internal/api/federation"
@@ -84,6 +85,7 @@ import (
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
 	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
 	"github.com/shiroha-a/mk/internal/core/emojimeta"
 	coreephemeral "github.com/shiroha-a/mk/internal/core/ephemeral"
@@ -430,6 +432,29 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// **REST は batch、WebSocket は 1 件。** 通知一覧はページあたり最大 100 件
 	// なので 1 件ずつ引くと数百 SELECT が直列に走る。realtime は 1 件ずつ届く
 	// ので同じ関数を 1 要素で呼ぶ。
+	// 絵文字の登録申請の結果を read 時に引く (#2934)。通知には applicationId
+	// しか積んでいないので、承認/却下と却下理由はここで解決する。
+	//
+	// **申請が消えていたら false を返して通知ごと落とす。** 経緯を辿れない
+	// 「処理されました」だけの通知は読んだ人に何も伝えない。
+	emojiApplicationRepoForNotif := repository.NewEmojiApplicationRepository(s.db)
+	emojiApplicationNotifLookup := func(applicationID string) (entity.EmojiApplicationStatus, bool) {
+		app, err := emojiApplicationRepoForNotif.FindByID(applicationID)
+		if err != nil {
+			if !repository.IsNotFound(err) {
+				// **DB 障害を「削除済み」に丸めない (#2792)。**
+				slog.Warn("notification: emoji application lookup failed",
+					"applicationId", applicationID, "err", err)
+			}
+			return entity.EmojiApplicationStatus{}, false
+		}
+		out := entity.EmojiApplicationStatus{Name: app.Name, Status: app.Status}
+		if app.RejectReason != nil {
+			out.RejectReason = *app.RejectReason
+		}
+		return out, true
+	}
+
 	abuseNotifStates := abuseReportRepoForNotif.FindStatesByIDs
 	abuseNotifLookup := func(reportID string) (entity.AbuseReportStatus, bool) {
 		states, err := abuseNotifStates([]string{reportID})
@@ -2001,6 +2026,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationsHandler.SetTestNotifier(notificationHook)
 	notificationsHandler.SetRoleLookup(roleNotifLookup)
 	notificationsHandler.SetAbuseReportLookup(abuseNotifStates)
+	notificationsHandler.SetEmojiApplicationLookup(emojiApplicationNotifLookup)
 	// 通知に埋め込む note の files / channel / myReaction を埋める (#2735)。
 	notificationsHandler.SetNoteFieldResolver(noteFieldResolver)
 	// notifications/create の 'app' 通知で header/icon を token.name/iconUrl に
@@ -2727,6 +2753,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationPublisher.SetFollowingChecker(followingRepo)
 	notificationPublisher.SetRoleLookup(roleNotifLookup)
 	notificationPublisher.SetAbuseReportLookup(abuseNotifLookup)
+	notificationPublisher.SetEmojiApplicationLookup(emojiApplicationNotifLookup)
 	// streaming の通知 payload にも note の files / channel を載せる (#2735)。
 	notificationPublisher.SetFieldResolver(noteFieldResolver)
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
@@ -3048,6 +3075,35 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
 	adminHandler.SetSignupApplicationReviewer(signupApplicationService)
+	// カスタム絵文字の登録申請 (#2934)。承認までは emoji 行を作らず、
+	// 専用テーブルに閉じ込める (signup_application と同じ形)。
+	//
+	// **承認時の emoji 生成は adminHandler が行う。** service に持たせると
+	// admin/emoji/add と別経路になり、MIME の allowlist などの検証が申請
+	// だけ抜ける。ここでは依存を逆向きに渡すだけ。
+	// 通知の lookup が先に作った実体を使い回す (2 つ作らない)。
+	emojiApplicationRepo := emojiApplicationRepoForNotif
+	emojiApplicationService := emojiapplication.NewService(
+		emojiApplicationRepo,
+		emojiRepo,
+		driveFileRepo,
+		idGen,
+		adminHandler,
+		emojiapplication.NewResultNotifier(notificationService),
+	)
+	emojiApplicationHandler := apiemojiapplications.NewHandler(
+		emojiApplicationService, emojiApplicationRepo, driveFileRepo)
+	// **申請できる人をロールで絞る (#2934)。** canManageCustomEmojis を持つ人は
+	// 申請ではなく直接登録できるので、この policy は「登録はできないが頼める人」。
+	api.POST("/emoji-application/create", emojiApplicationHandler.Create,
+		middleware.RequireAuth(),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanRequestCustomEmojis))
+	// **一覧と取り下げは policy で塞がない。** 後から policy を外された人が
+	// 自分の申請を確認することも取り下げることもできなくなる。
+	api.POST("/emoji-application/list-mine", emojiApplicationHandler.ListMine, middleware.RequireAuth())
+	api.POST("/emoji-application/cancel", emojiApplicationHandler.Cancel, middleware.RequireAuth())
+	adminHandler.SetEmojiApplicationReviewer(emojiApplicationService)
+	adminHandler.SetEmojiApplicationRepo(emojiApplicationRepo)
 	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
 	// (server 側は既に migrate 済みで動いている前提。適用漏れの検出は
 	// `misskey -doctor` の担当で、あちらは同梱ファイルを数えられる)。
@@ -3230,6 +3286,17 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// fork frontend も iAmAdmin でインポート UI を出し分けるので backend も揃える。
 	api.POST("/admin/emoji/import-zip", adminHandler.EmojiImportZip, middleware.RequireAdmin(roleService), middleware.RequireSecure())
 	api.POST("/admin/emoji/list-remote", adminHandler.EmojiListRemote, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("read:admin:emoji"))
+	// 絵文字の登録申請の審査 (#2934)。canManageCustomEmojis で gate する —
+	// 承認は実質 admin/emoji/add と同じ操作なので、同じ権限を要求する。
+	api.POST("/admin/emoji-application/list", adminHandler.EmojiApplicationList,
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
+		middleware.RequireScope("read:admin:emoji"))
+	api.POST("/admin/emoji-application/approve", adminHandler.EmojiApplicationApprove,
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
+		middleware.RequireScope("write:admin:emoji"))
+	api.POST("/admin/emoji-application/reject", adminHandler.EmojiApplicationReject,
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
+		middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/remove-aliases-bulk", adminHandler.EmojiRemoveAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-aliases-bulk", adminHandler.EmojiSetAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-category-bulk", adminHandler.EmojiSetCategoryBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))

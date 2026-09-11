@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/procstats"
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -107,6 +108,9 @@ type Handler struct {
 	abuseRepo     repository.AbuseReportRepository
 	modLogService *moderationlog.Service
 	emojiRepo     repository.EmojiRepository
+	// #2934 の申請。nil なら endpoint は 500 を返す (未配線の構成)。
+	emojiApplicationRepo     repository.EmojiApplicationRepository
+	emojiApplicationReviewer emojiApplicationReviewer
 	// broadcastPub は emoji の add/update/delete を broadcast stream へ流し、全
 	// connection の emoji picker を live-refresh するために使う (#2046)。未配線なら
 	// 通知しない。
@@ -2761,22 +2765,17 @@ var emojiNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 // allowedEmojiImageTypes mirrors upstream FILE_TYPE_IMAGE (const.ts)。
 // image/svg+xml は XSS 理由で意図的に除外する。prefix 判定 ("image/") では
 // svg や任意 subtype を通してしまうため、明示 allowlist で完全一致判定する。
-var allowedEmojiImageTypes = map[string]bool{
-	"image/png":    true,
-	"image/gif":    true,
-	"image/jpeg":   true,
-	"image/webp":   true,
-	"image/avif":   true,
-	"image/apng":   true,
-	"image/bmp":    true,
-	"image/tiff":   true,
-	"image/x-icon": true,
+// **集合は core/emojiapplication が持つ。** 申請側 (checkFile) と承認側が別々に
+// 持つと、片方が prefix 判定になった瞬間に「申請は通るのに承認で落ちる」形に
+// なる (レビュー R3)。
+func isAllowedEmojiImageTypeShared(mime string) bool {
+	return emojiapplication.IsAllowedImageType(mime)
 }
 
 // isAllowedEmojiImageType reports whether a drive file MIME may back a custom
 // emoji. Empty type is rejected (upstream FILE_TYPE_IMAGE.includes("")===false)。
 func isAllowedEmojiImageType(mime string) bool {
-	return allowedEmojiImageTypes[mime]
+	return isAllowedEmojiImageTypeShared(mime)
 }
 
 // preferWebpublicURL returns the drive file's webpublic URL when present,

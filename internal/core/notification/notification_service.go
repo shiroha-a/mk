@@ -48,6 +48,9 @@ const (
 	TypeFollowRequestAccept Type = "followRequestAccepted"
 	TypeExportCompleted     Type = "exportCompleted"
 	TypeImportCompleted     Type = "importCompleted"
+	// TypeEmojiApplicationProcessed tells an applicant that their custom
+	// emoji request was approved or rejected (#2934).
+	TypeEmojiApplicationProcessed Type = "emojiApplicationProcessed"
 	// TypeScheduledNotePosted / TypeScheduledNotePostFailed は upstream
 	// Misskey TS の \`PostScheduledNoteProcessorService\` が発火する 2 種類
 	// の通知 (#1045 Phase 2-B)。posted は \`noteId\` を Extra (or NoteID) に

@@ -49,7 +49,8 @@ type Handler struct {
 	// 引く (#2868)。**未配線なら abuseReport を返さない** (roleAssigned と同じ
 	// fail-closed)。状態を出せないまま「未対応」に見せると、対処済みの通報に
 	// 別のモデレーターが二重で当たる。
-	abuseReportStates AbuseReportStateLookup
+	abuseReportStates      AbuseReportStateLookup
+	emojiApplicationLookup entity.EmojiApplicationLookup
 	// moderatorChecker は read 時に abuseReport 通知の閲覧権限を再確認する
 	// (#2868)。対象ユーザー ID が Extra に入り通報の存在自体が機微なので、権限を
 	// 失った元モデレーターが admin/abuse-user-reports の 403 を迂回して
@@ -91,6 +92,17 @@ type AbuseReportStateLookup func(ids []string) (map[string]model.AbuseReportStat
 // notifications (#2868)。未配線なら abuseReport 通知を返さない (fail-closed)。
 func (h *Handler) SetAbuseReportLookup(fn AbuseReportStateLookup) { h.abuseReportStates = fn }
 
+// SetEmojiApplicationLookup wires the read-time state lookup for
+// emojiApplicationProcessed notifications (#2934)。未配線なら返さない
+// (fail-closed、abuseReport と同じ)。
+//
+// **batch にしていない。** abuseReport はモデレーター全員へ配るので 1 ページに
+// 数百件並びうるが、申請の結果通知は申請者本人にしか飛ばず、同じページに何件も
+// 並ぶ形にならない。N+1 を避けるための複雑さに見合わない。
+func (h *Handler) SetEmojiApplicationLookup(fn entity.EmojiApplicationLookup) {
+	h.emojiApplicationLookup = fn
+}
+
 // SetChatInvitationLookup wires the lookup used to pack
 // chatRoomInvitationReceived notifications' embedded invitation (#1559)。
 func (h *Handler) SetChatInvitationLookup(fn entity.ChatInvitationLookup) {
@@ -120,6 +132,7 @@ func (h *Handler) notificationOptions(viewerID string, rows []entity.Notificatio
 		entity.WithRoleLookup(h.roleLookup),
 		entity.WithChatInvitationLookup(h.chatInvitationLookup),
 		entity.WithAbuseReportLookup(lookup),
+		entity.WithEmojiApplicationLookup(h.emojiApplicationLookup),
 		entity.WithViewer(viewerID),
 		entity.WithNoteFieldResolver(h.noteFieldResolver),
 	}, nil

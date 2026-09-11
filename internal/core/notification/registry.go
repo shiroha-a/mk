@@ -74,6 +74,9 @@ var registry = []Descriptor{
 	// 通報をモデレーターの通知欄に残す (#2868)。upstream は email /
 	// system webhook / admin stream しか持たない。
 	{Type: TypeAbuseReport, Kind: KindMkGo, Produced: true},
+	// 絵文字の登録申請の結果を申請者へ返す (#2934)。upstream には申請の
+	// 概念自体が無い。
+	{Type: TypeEmojiApplicationProcessed, Kind: KindMkGo, Produced: true},
 }
 
 // UpstreamTypeNames returns the types counted by the "excludeTypes covers
