@@ -50,7 +50,7 @@ frontend-check: ## fork の frontend を型チェックし、submodule 依存の
 	# skip され「検査していないのに緑」になる。REQUIRE を渡して skip を禁じる
 	# (#2892)。
 	MK_FRONTEND_GATES_REQUIRE_SUBMODULE=1 go test ./internal/server/ \
-		-run 'TestCreditImageOriginsCoverAboutMisskey|TestMkGoRolePolicyKeysAreListedInFrontend|TestReactionLongPressIsWired|TestReactableRemoteReactionIsWired' -count=1
+		-run 'TestCreditImageOriginsCoverAboutMisskey|TestMkGoRolePolicyKeysAreListedInFrontend|TestReactionLongPressIsWired|TestReactableRemoteReactionIsWired|TestMkGoUpdatedDialogIsWired' -count=1
 	# **eslint も回す (#2906)。** CI は別 step で `pnpm eslint` を回しており、
 	# ここに無いと**手元で緑でも CI が落ちる**。#2903 で実際に踏んだ (デッドコードを
 	# 消したときの空行が @stylistic/no-multiple-empty-lines で落ちた)。個別ファイルに
