@@ -13,6 +13,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -162,6 +163,14 @@ func emojiApplicationReviewError(c echo.Context, err error) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"UNSUPPORTED_FILE_TYPE", "Unsupported file type.",
 			"f7599d96-8750-af68-1633-9575d625c1a7"))
+	case errors.Is(err, emojiapplication.ErrRemoteFetchFailed):
+		return c.JSON(http.StatusInternalServerError, apierr.Error(
+			"INTERNAL_ERROR", "Failed to fetch emoji image.",
+			"0a4e0b9e-2d7c-4d6f-8f6b-1f9c2e9b4d83"))
+	case errors.Is(err, emojiapplication.ErrNoSuchRemoteEmoji):
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"NO_SUCH_EMOJI", "The remote emoji is no longer known to this instance.",
+			"e2785b66-dca3-4087-9cac-b93c541cc425"))
 	case errors.Is(err, emojiapplication.ErrFileGone):
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"NO_SUCH_FILE", "No such file.",
@@ -203,19 +212,53 @@ func (h *Handler) packEmojiApplicationForModerator(app *model.EmojiApplication) 
 	// **「消えた」と「確認できなかった」を区別する (レビュー M1)。** DB 障害を
 	// 「画像がありません」と表示すると、モデレーターが実際には存在する申請を
 	// 却下しうる。nameConflict と同じく null で区別できるようにする。
-	f, lookupOK := h.emojiApplicationFile(app)
-	switch {
-	case f != nil:
-		out["url"] = f.URL
-		out["fileType"] = f.Type
-	case lookupOK:
-		// 引けたが行が無い = 申請者が drive から消した。
-		out["url"] = ""
-		out["fileType"] = ""
-	default:
-		// 引けなかった。null で「分からない」を表す。
-		out["url"] = nil
-		out["fileType"] = nil
+	// **リモートも画像を出す (レビュー H1)。** 出さないと、モデレーターは
+	// `:name:@host` の文字列だけを見て承認を押すことになる — #2934 が「大きな
+	// 升目だけで判断すると本文で潰れて読めないものを通してしまう」として申請側と
+	// 審査側の両方にプレビューを置いた設計の、リモート側だけが抜ける。
+	// 名前だけ穏当にして中身が問題のある絵文字を通す審査回避にも直結する。
+	if app.RemoteHost != nil && app.RemoteName != nil {
+		out["remoteHost"] = *app.RemoteHost
+		out["remoteName"] = *app.RemoteName
+		// **処理済みの行でも引く (レビュー Low 3)。** 下の nameConflict は
+		// `IsPending()` で絞っているが、こちらは絞らない — 画像は履歴を見る
+		// ときにも要るもので、絞ると「承認済みのリモート絵文字だけ画像が
+		// 出ない」という own 側との非対称が生まれる。件数は frontend が
+		// limit 50 なので最大 100 クエリで、本番実測は 25-35ms (どちらも
+		// index scan)。
+		src, url, ft, lookupOK := h.remoteEmojiPreview(app)
+		out["url"] = url
+		out["fileType"] = ft
+		// **承認できるかどうかもここで分かるようにする。** 審査を待つ間に
+		// リモート絵文字の行が消えると承認は NO_SUCH_EMOJI で落ちる。
+		//
+		// **DB 障害を「消えた」に丸めない (レビュー R2-H2 / #2792)。** 丸めると
+		// 障害中にモデレーターが「もう無い」と言われて**承認を操作ごと止められる**。
+		// nil = 確認できなかった / false = ある / true = 消えた の 3 値にする。
+		switch {
+		case !lookupOK:
+			out["remoteGone"] = nil
+		default:
+			out["remoteGone"] = src == nil
+		}
+		// **早期 return しない (レビュー R2-H1)。** 下の nameConflict に到達
+		// しなくなり、リモートでだけ重複の警告が出なくなる — 承認を押してから
+		// DUPLICATE_NAME で落ちるという、#2934 が塞いだ状態に戻る。
+	} else {
+		f, lookupOK := h.emojiApplicationFile(app)
+		switch {
+		case f != nil:
+			out["url"] = f.URL
+			out["fileType"] = f.Type
+		case lookupOK:
+			// 引けたが行が無い = 申請者が drive から消した。
+			out["url"] = ""
+			out["fileType"] = ""
+		default:
+			// 引けなかった。null で「分からない」を表す。
+			out["url"] = nil
+			out["fileType"] = nil
+		}
 	}
 
 	// 審査中のものだけ重複を見る。処理済みの行で引いても意味が無く、
@@ -237,6 +280,39 @@ func (h *Handler) packEmojiApplicationForModerator(app *model.EmojiApplication) 
 		}
 	}
 	return out
+}
+
+// remoteEmojiPreview resolves the source emoji so the review screen can show it.
+//
+// `checkRemoteEmoji` と同じ lookup。**DB 障害と「消えた」を区別する** — 4 つ目の
+// 戻り値が false なら「引けなかった」で、呼び出し側は null を出して
+// 「分からない」と伝える。true かつ src が nil なら「もう無い」。
+func (h *Handler) remoteEmojiPreview(app *model.EmojiApplication) (*model.Emoji, any, any, bool) {
+	if h.emojiRepo == nil {
+		return nil, nil, nil, false
+	}
+	src, err := h.emojiRepo.FindByNameAndHost(*app.RemoteName, app.RemoteHost)
+	if err != nil {
+		if repository.IsNotFound(err) {
+			return nil, "", "", true
+		}
+		slog.Warn("emoji application: remote emoji lookup failed",
+			"applicationId", app.ID, "host", *app.RemoteHost, "name", *app.RemoteName, "err", err)
+		return nil, nil, nil, false
+	}
+	if src == nil {
+		return nil, "", "", true
+	}
+	// publicUrl が空なら originalUrl に落とす (entity の packSimple と同じ)。
+	url := src.PublicURL
+	if url == "" {
+		url = src.OriginalURL
+	}
+	var ft any = ""
+	if src.Type != nil {
+		ft = *src.Type
+	}
+	return src, url, ft, true
 }
 
 // emojiApplicationFile resolves the drive file for an application.
@@ -271,8 +347,14 @@ func (h *Handler) emojiApplicationFile(app *model.EmojiApplication) (*model.Driv
 // 迂回して絵文字を登録する方法」になる。共有しているのは
 // isAllowedEmojiImageType / preferWebpublicURL / preferWebpublicType の 3 つで、
 // これは EmojiAdd がそのまま使っているものと同一。
-func (h *Handler) CreateFromApplication(_ context.Context, app *model.EmojiApplication) (string, error) {
-	if h.emojiRepo == nil || h.driveFileRepo == nil || h.idGen == nil {
+func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApplication) (string, error) {
+	if h.emojiRepo == nil || h.idGen == nil {
+		return "", errors.New("admin: emoji creation is not wired")
+	}
+	if app.Kind == model.EmojiApplicationKindRemote {
+		return h.createFromRemoteApplication(ctx, app)
+	}
+	if h.driveFileRepo == nil {
 		return "", errors.New("admin: emoji creation is not wired")
 	}
 	if app.FileID == nil {
@@ -344,6 +426,122 @@ func emojiApplicationLogEmoji(app *model.EmojiApplication) map[string]any {
 		"aliases":  []string(app.Aliases),
 		"license":  app.License,
 	}
+}
+
+// createFromRemoteApplication imports a remote emoji for an approved request.
+//
+// **`admin/emoji/copy` と同じ経路を通す (#2935)。** 独自に emoji を組むと、
+// リモート由来の文字列を列に収める規則 (`colfit`、#2726) と drive への取り込み
+// (#670 / #722) が申請経路だけ抜ける。前者が抜けると相手サーバーが決めた長い
+// 文字列で SQLSTATE 22001、後者が抜けると相手が画像を消した瞬間に表示が壊れる。
+//
+// **承認の時点で引き直す。** 申請は host + name で持っており emoji の行 ID では
+// ない — リモート絵文字の行はキャッシュに近く、審査を待つ間に消えうる。
+func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.EmojiApplication) (string, error) {
+	if app.RemoteHost == nil || app.RemoteName == nil {
+		return "", emojiapplication.ErrNoSuchRemoteEmoji
+	}
+	src, err := h.emojiRepo.FindByNameAndHost(*app.RemoteName, app.RemoteHost)
+	if err != nil {
+		if repository.IsNotFound(err) {
+			// 審査を待つ間に消えた。500 ではなく「もう無い」と伝える。
+			return "", emojiapplication.ErrNoSuchRemoteEmoji
+		}
+		return "", err
+	}
+	if src == nil {
+		return "", emojiapplication.ErrNoSuchRemoteEmoji
+	}
+
+	// 承認の直前にもう一度だけ重複を見る (own と同じ)。
+	existing, dupErr := h.emojiRepo.FindByNameAndHost(app.Name, nil)
+	if dupErr != nil && !repository.IsNotFound(dupErr) {
+		return "", dupErr
+	}
+	if dupErr == nil && existing != nil {
+		return "", emojiapplication.ErrDuplicateName
+	}
+
+	now := time.Now()
+	copied := *src
+	copied.ID = h.idGen.Generate(now)
+	// **`updatedAt` は今にする。** `EmojiCopy` は src の値を引き継ぐが、
+	// それだと「相手サーバーで最後に更新された時刻」がローカル絵文字の
+	// 更新時刻として並ぶ。`EmojiAdd` は now を入れており、そちらが正しい。
+	// (`EmojiCopy` 側も揃えるべきだが、この PR の範囲外。)
+	copied.UpdatedAt = &now
+	copied.Host = nil
+	copied.Name = app.Name
+	// **`URI` は引き継ぐ。** `EmojiCopy` と同じ挙動で、renderer が
+	// `emoji.URI != nil` のとき AP の `tag.ID` にそれを使う — remote emoji の
+	// 参照同一性を壊さないための保守的方針 (#1948-11)。ここだけ変えると
+	// 同じ操作で結果が変わるので踏襲する (本番に該当が 11 件ある)。
+
+	// **申請で指定された値を列に収めてから入れる (#2726 と同じ規則)。**
+	// 出どころは相手サーバーなので、そのまま渡すと列を超えて 500 になる。
+	// 本文は切り、alias は長すぎる要素だけ落とす (切ると別の名前になる)。
+	if app.Category != nil {
+		v := colfit.Text(*app.Category, emojiCategoryMaxRunes)
+		copied.Category = &v
+	}
+	if len(app.Aliases) > 0 {
+		out := make([]string, 0, len(app.Aliases))
+		for _, a := range app.Aliases {
+			a = colfit.StripNUL(a)
+			if a == "" || !colfit.Fits(a, emojiAliasMaxRunes) {
+				continue
+			}
+			out = append(out, a)
+		}
+		copied.Aliases = model.StringArray(out)
+	}
+	// **申請者が書いたときだけ上書きする (レビュー M1)。** リモート絵文字の
+	// 43% は AP の `_misskey_license` 由来の**本物の license** を持っている
+	// (#731)。申請者は `fetch-remote-meta` を叩けない (moderator 専用) ので、
+	// 参照できない値を手で書かせて潰すことになる。`EmojiCopy` も
+	// `req.License != nil` のときだけ上書きしている。
+	if app.License != "" {
+		license := colfit.Text(app.License, emojiLicenseMaxRunes)
+		copied.License = &license
+	}
+	// isSensitive も同じ理由で、指定があったときだけ上書きする。
+	if app.IsSensitive {
+		copied.IsSensitive = true
+	}
+
+	// **drive へ取り込む (#670 / #722)。** URL を引き継ぐだけだと、相手が
+	// 画像を消した瞬間に表示が壊れる。system 所有で作るのは、操作者個人の
+	// drive に紐付けるとロール変更や削除で巻き込まれるため。
+	if h.emojiImageFetcher != nil && src.OriginalURL != "" {
+		df, ferr := h.emojiImageFetcher.FetchAndStore(ctx, src.OriginalURL, nil, src.Name)
+		if ferr != nil {
+			slog.WarnContext(ctx, "emoji application: drive fetch failed",
+				"applicationId", app.ID, "url", src.OriginalURL, "err", ferr)
+			// **取得できなかったことを伝える (レビュー Low 2)。** 生の err を
+			// 返すと汎用 500 になり、審査画面では「何か問題が」としか出ない。
+			return "", emojiapplication.ErrRemoteFetchFailed
+		}
+		// **取り込んだものの MIME を見る (レビュー M7)。** 相手が icon.url に
+		// 非画像を置くと、承認でそれが絵文字として登録される。own 経路は
+		// 申請時に見ているので、remote だけ無検査なのは非対称。
+		// (`EmojiCopy` も同じ穴だが、承認は「検証を迂回する方法」にしない。)
+		if !isAllowedEmojiImageType(df.Type) {
+			return "", emojiapplication.ErrUnsupportedFileType
+		}
+		copied.OriginalURL = df.URL
+		copied.PublicURL = preferWebpublicURL(df)
+		// **nil ガードは要らない。** 手前の isAllowedEmojiImageType が
+		// `df.Type` の空を弾くので、preferWebpublicType が nil を返す経路に
+		// 入らない (レビュー Low 1 の指摘はこの順序を見落としていた。
+		// ガードを入れても到達しないデッドコードになる)。
+		copied.Type = preferWebpublicType(df)
+	}
+
+	if err := h.emojiRepo.Create(&copied); err != nil {
+		return "", err
+	}
+	h.publishEmojiAdded(&copied)
+	return copied.ID, nil
 }
 
 // DeleteCreatedEmoji implements emojiapplication.EmojiCreator.

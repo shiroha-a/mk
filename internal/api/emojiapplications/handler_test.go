@@ -354,3 +354,63 @@ func TestCreateErrorMappingForFileAndLength(t *testing.T) {
 		})
 	}
 }
+
+// stubRemoteLookup answers host-qualified lookups so remote requests can pass.
+type stubRemoteLookup struct{ known bool }
+
+func (s *stubRemoteLookup) FindByNameAndHost(_ string, host *string) (*model.Emoji, error) {
+	if host != nil {
+		if s.known {
+			return &model.Emoji{ID: "e-remote"}, nil
+		}
+		return nil, gorm.ErrRecordNotFound
+	}
+	return nil, gorm.ErrRecordNotFound
+}
+
+// **リモートのインポート申請も error を種別ごとに落とす (#2935)。**
+func TestCreateRemoteErrorMapping(t *testing.T) {
+	cases := []struct {
+		name   string
+		known  bool
+		body   string
+		expect string
+	}{
+		{"知らないリモート絵文字", false,
+			`{"kind":"remote","name":"sushi","license":"x","remoteHost":"example.com","remoteName":"s"}`,
+			"NO_SUCH_EMOJI"},
+		{"host が無い", true,
+			`{"kind":"remote","name":"sushi","license":"x","remoteName":"s"}`,
+			"INVALID_PARAM"},
+		{"未知の kind", true,
+			`{"kind":"whatever","name":"sushi","license":"x"}`,
+			"INVALID_PARAM"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apps := &stubApps{}
+			svc := emojiapplication.NewService(apps, &stubRemoteLookup{known: tc.known},
+				ownedFile(), &stubIDGen{}, nil, nil)
+			rec := doPost(emojiapplications.NewHandler(svc, apps, nil).Create, tc.body, alice)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			require.Contains(t, rec.Body.String(), tc.expect)
+			require.Nil(t, apps.created, "検証を通さずに申請が保存されている")
+		})
+	}
+}
+
+// リモートの申請が成功すると、取り込み元が応答に出ること。
+func TestCreateRemoteSucceeds(t *testing.T) {
+	apps := &stubApps{}
+	svc := emojiapplication.NewService(apps, &stubRemoteLookup{known: true},
+		ownedFile(), &stubIDGen{}, nil, nil)
+	rec := doPost(emojiapplications.NewHandler(svc, apps, nil).Create,
+		`{"kind":"remote","name":"sushi","license":"x","remoteHost":"example.com","remoteName":"sushi_remote"}`, alice)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "remote", body["kind"])
+	require.Equal(t, "example.com", body["remoteHost"])
+	require.Equal(t, "sushi_remote", body["remoteName"])
+}

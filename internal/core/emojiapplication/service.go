@@ -26,6 +26,18 @@ var (
 	ErrLicenseRequired = errors.New("license is required")
 	// ErrFileRequired is returned when an "own" application has no file.
 	ErrFileRequired = errors.New("file is required")
+	// ErrInvalidKind is returned when the requested kind is not recognised.
+	ErrInvalidKind = errors.New("invalid application kind")
+	// ErrRemoteRequired is returned when a "remote" application has no host/name.
+	ErrRemoteRequired = errors.New("remote host and name are required")
+	// ErrRemoteFetchFailed is returned when the emoji image could not be stored.
+	ErrRemoteFetchFailed = errors.New("failed to fetch remote emoji image")
+	// ErrNoSuchRemoteEmoji is returned when the referenced remote emoji is not
+	// known to this instance.
+	//
+	// **リモート絵文字の行はキャッシュに近い。** 使われなくなると消えるので、
+	// 申請の時点で引けることを確かめる (審査時にもう一度取り直す)。
+	ErrNoSuchRemoteEmoji = errors.New("no such remote emoji")
 	// ErrDuplicateName is returned when a local emoji already uses the name.
 	ErrDuplicateName = errors.New("duplicate emoji name")
 	// ErrAlreadyPending is returned when the applicant already has a pending
@@ -174,14 +186,19 @@ func NewService(
 
 // CreateInput is the applicant-supplied part of a new application.
 type CreateInput struct {
-	UserID      string
+	UserID string
+	// Kind is "own" (default) or "remote".
+	Kind        string
 	Name        string
 	Category    string
 	Aliases     []string
 	License     string
 	IsSensitive bool
 	FileID      string
-	Comment     string
+	// RemoteHost / RemoteName identify the emoji to import when Kind == remote.
+	RemoteHost string
+	RemoteName string
+	Comment    string
 }
 
 // Create records a new pending application.
@@ -193,9 +210,6 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 		return nil, ErrInvalidName
 	}
 	license := strings.TrimSpace(in.License)
-	if license == "" {
-		return nil, ErrLicenseRequired
-	}
 	// **列の長さを超える入力を DB に渡さない (レビュー M8)。** 渡すと
 	// SQLSTATE 22001 が生のまま返り、利用者の入力で 5xx が立つ。
 	//
@@ -209,15 +223,52 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 		utf8.RuneCountInString(strings.TrimSpace(in.Comment)) > 2048 {
 		return nil, ErrTooLong
 	}
-	fileID := strings.TrimSpace(in.FileID)
-	if fileID == "" {
-		return nil, ErrFileRequired
+	// **素材の検証だけが kind で分かれる。** 名前・ライセンス・長さ・重複は
+	// 共通で、ここから下だけが「自作画像」と「リモート絵文字」で違う。
+	// どちらも**申請の時点で**検証する — 承認まで通してから落ちると、
+	// モデレーターが押した後にエラーになり、申請者にも審査者にも何も残らない。
+	kind := in.Kind
+	if kind == "" {
+		kind = model.EmojiApplicationKindOwn
 	}
-	// **申請の時点でファイルを検証する。** 承認まで通してから落ちると、
-	// モデレーターが押した後にエラーになり、申請者にも審査者にも何も残らない
-	// (namePattern と同じ理由)。所有権は security の問題で、MIME は体験の問題。
-	if err := s.checkFile(fileID, in.UserID); err != nil {
-		return nil, err
+
+	var fileID, remoteHost, remoteName string
+	switch kind {
+	case model.EmojiApplicationKindOwn:
+		fileID = strings.TrimSpace(in.FileID)
+		if fileID == "" {
+			return nil, ErrFileRequired
+		}
+		// 所有権は security の問題で、MIME は体験の問題。
+		if err := s.checkFile(fileID, in.UserID); err != nil {
+			return nil, err
+		}
+	case model.EmojiApplicationKindRemote:
+		remoteHost = strings.TrimSpace(in.RemoteHost)
+		remoteName = strings.TrimSpace(in.RemoteName)
+		if remoteHost == "" || remoteName == "" {
+			return nil, ErrRemoteRequired
+		}
+		if utf8.RuneCountInString(remoteHost) > 128 || utf8.RuneCountInString(remoteName) > 128 {
+			return nil, ErrTooLong
+		}
+		if err := s.checkRemoteEmoji(remoteName, remoteHost); err != nil {
+			return nil, err
+		}
+	default:
+		return nil, ErrInvalidKind
+	}
+
+	// **ライセンスの必須は自作のときだけ (レビュー M1)。** リモートは取り込み元
+	// (host + name) 自体が出典で、相手の絵文字が `_misskey_license` を持っていれば
+	// 承認時にそれが入る。申請者は `fetch-remote-meta` を叩けないので、参照できない
+	// 値の記入を必須にすると「それらしい嘘」を書かせることになる。
+	//
+	// **kind を確定させてから見る (レビュー Low 4)。** 正規化前の `in.Kind` で
+	// 判定していると、未知の kind + ライセンス空が ErrInvalidKind ではなく
+	// ErrLicenseRequired になり、診断が「ライセンスを書け」と事実と違うことを指す。
+	if license == "" && kind != model.EmojiApplicationKindRemote {
+		return nil, ErrLicenseRequired
 	}
 
 	// **既に同名の絵文字があるなら受け付けない。** 受けてしまうと、審査で
@@ -235,7 +286,7 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 	app := &model.EmojiApplication{
 		ID:          s.idGen.Generate(now),
 		UserID:      in.UserID,
-		Kind:        model.EmojiApplicationKindOwn,
+		Kind:        kind,
 		Status:      model.EmojiApplicationPending,
 		Name:        name,
 		Aliases:     normalizeAliases(in.Aliases),
@@ -248,7 +299,13 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 	if cat := strings.TrimSpace(in.Category); cat != "" {
 		app.Category = &cat
 	}
-	app.FileID = &fileID
+	if fileID != "" {
+		app.FileID = &fileID
+	}
+	if remoteHost != "" {
+		app.RemoteHost = &remoteHost
+		app.RemoteName = &remoteName
+	}
 
 	if err := s.apps.Create(app); err != nil {
 		if errors.Is(err, repository.ErrEmojiApplicationDuplicatePending) {
@@ -284,6 +341,27 @@ func (s *Service) checkFile(fileID, userID string) error {
 	}
 	if !IsAllowedImageType(f.Type) {
 		return ErrUnsupportedFileType
+	}
+	return nil
+}
+
+// checkRemoteEmoji asserts the referenced remote emoji is known to this instance.
+//
+// **リモート絵文字の行はキャッシュに近い。** 使われなくなると消えるので、
+// 申請の時点で引けることを確かめる。承認時にはもう一度取り直すので、審査を
+// 待つ間に消えても申請自体は無意味にならない (だから `emojiId` ではなく
+// host + name で持つ)。
+func (s *Service) checkRemoteEmoji(name, host string) error {
+	e, err := s.emojis.FindByNameAndHost(name, &host)
+	if err != nil {
+		if repository.IsNotFound(err) {
+			return ErrNoSuchRemoteEmoji
+		}
+		// DB 障害を not-found に丸めない (#2792)。
+		return err
+	}
+	if e == nil {
+		return ErrNoSuchRemoteEmoji
 	}
 	return nil
 }
