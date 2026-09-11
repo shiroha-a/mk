@@ -1,5 +1,10 @@
-# 既存除外: 開発時の git / 一時 / シークレット / 成果物
-.git
+# 開発時の git / 一時 / シークレット / 成果物
+#
+# **パターンはパス全体で照合される。** スラッシュを含まないパターンは root 直下に
+# しかマッチしないので、入れ子にも効かせたいものは `**/` を前置する (#2942)。
+# `built` を `**/built` にしないのは、`third_party/misskey/built` が SPA の
+# 成果物で image に入る必要があるため。
+**/.git
 .tmp
 .env
 .env.test
@@ -8,16 +13,40 @@ files
 node_modules
 *.md
 
+# 利用者がアップロードしたファイル。既定の drive は `./drive-files`
+# (`internal/server/router.go`) に置く。**配る image には入らない**
+# (最終 stage が明示パスの COPY しか持たないため) が、build context と
+# builder stage の layer には入る。`cache-to` を設定していると
+# そのキャッシュ経由で読める (#2942)。
+**/drive-files
+
+# operator-local な設定。**tracked なのは `*.example` だけ**で、これらは実運用の
+# DB / Redis のパスワードを持つ。`*.y*ml` は `*.yml.example` にマッチしないので、
+# Dockerfile が COPY する `.config/docker.yml.example` は残る (`config.Load` は
+# 拡張子を見ないので `.yaml` も設定ファイルになりうる。両方拾う)。
+# `.claude` は permission の allowlist で、同じく gitignored な operator-local。
+.config/*.y*ml
+deploy/uds/config/*.y*ml
+compose.uds.yaml
+.claude
+
 # IDE / editor 設定 (image に焼き込む意味なし)
 .vscode
 .idea
 *.swp
 *.swo
 
-# Coverage / テスト成果物 (CI で生成され、ビルドコンテキストに混ざると無駄)
-coverage*.out
+# Coverage / テスト成果物 (CI で生成され、ビルドコンテキストに混ざると無駄)。
+# `.out` を COPY する Dockerfile は無いので、列挙せず拡張子で落とす。
+*.out
 *.test
 dist
+.dropin-logs
+
+# **pnpm のストア。** リポジトリ直下に作られると 3.8GB (実測) あり、
+# ビルドコンテキストの大半を占める。CI では runner のホーム配下に作られるので
+# 存在しないが、手元でビルドする運営者には必ず効く (#2942)。
+.pnpm-store
 
 # CI / dev 用 docker compose のオーバーレイ。本体 Dockerfile が参照する
 # tests/federation/common/* は別 compose の COPY 対象なので blanket 除外
@@ -30,3 +59,15 @@ tests/dropin
 tests/dropin_frontend
 tests/playwright
 tests/bench
+
+# submodule の依存。実測 1.2GB あり、frontend をビルドしたコンテキストの大半を
+# 占める。**`**/node_modules` にはできない** — それだと
+# `packages/backend/node_modules/` 配下の symlink まで落ち、Dockerfile が
+# COPY する `@misskey-dev/emoji-assets/built/...` が解決できなくなる (#2942)。
+third_party/misskey/node_modules
+# ただし emoji-assets だけは image に入る。Dockerfile / Dockerfile.bundled が
+# /twemoji と /fluent-emoji を **ここから** COPY するので、除外すると
+# runtime で絵文字が全滅する。pnpm は実体を .pnpm 配下に置き、
+# packages/backend/node_modules/... はそこへの symlink なので、
+# **再包含するのは実体側**。外すと COPY が not found で落ちる (実測)。
+!third_party/misskey/node_modules/.pnpm/*emoji-assets*/**

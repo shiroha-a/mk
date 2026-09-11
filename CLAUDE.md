@@ -144,7 +144,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -217,7 +217,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 130 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 131 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -854,6 +854,17 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-09-11**: `make gates` に `dockerignore-check` を追加し、`.dockerignore` の漏れを塞いだ (#2942)。`make help` の target は 130 → 131。**`drive-files` と operator-local な設定 (`.config/*.y*ml` / `deploy/uds/config/*.y*ml` / `compose.uds.yaml` / `.claude`) が除外されていなかった。**
+  **「配る image に入る」ではない。** mk-go をビルドする Dockerfile はどれも最終 stage が**明示パスの `COPY --from=builder` しか持たない**ので、context に入ったファイルが配布物へ出ることはない (実測: 除外を外して build しても最終 image の `drive-files` は 0 件、builder stage には 2,790 件。修正前の `.dockerignore` でビルドされた本番 image の `/app/drive-files` も空)。**最初これを「image へ焼き込まれる」と裏取りせずに書き、7 箇所に伝播させた。** 守っているのは **build context と builder stage の layer** で、漏れる経路は (a) `cache-to` でキャッシュへ書き出したとき、(b) 手元の builder cache に滞留したとき、の 2 つ。加えて転送量にも効く。
+  **`.dockerignore` のパターンはパス全体で照合される。** スラッシュを含まない `node_modules` は `node_modules` にしかマッチせず、**`third_party/misskey/node_modules` (実測 1,133 MB) は残る**。同じことが `.git` にも起きており、`plugins/*/.git` が 4 つ入っていた (#2940 の `pluginresolve` は clone した分だけ自分で消しており、コメントに「`.dockerignore` は `plugins/*/.git` を落とさない」と書いてあった = 既知のまま放置されていた)。入れ子にも効かせるものは `**/` を前置する。**ただし `built` は前置しない** — `third_party/misskey/built` は SPA の成果物で image に要る。
+  **`**/node_modules` にもできない。** それだと `packages/backend/node_modules/` 配下の symlink まで落ち、Dockerfile が COPY する `emoji-assets/built/...` が解決できなくなる。`third_party/misskey/node_modules` を名指しで除外し、必要な emoji-assets (44 MB) だけを `!` で再包含する。**再包含は実体側に書く** — pnpm は実体を `.pnpm/` 配下に置き、`packages/backend/node_modules/...` はそこへの symlink なので、symlink 側を再包含しても効かない (実体側の再包含を外すと COPY が `not found` で落ちることを実測)。
+  **実測は 1,512 MB → 421 MB。** 手元ではさらに `.pnpm-store` (3.8 GB) が消える。**`docker build --check` では分からない** — `--check` は context を 849B しか送らないので、転送量も COPY の成否も実ビルドでしか測れない。
+  **gate はサイズを見ない。** コンテキストが太っても転送が遅くなるだけで、ビルドは通るし気付ける。見るのは「中身が読まれると困るもの」だけ。
+  **`.dockerignore` を自前で解釈しない。** `moby/patternmatcher` + `ignorefile` (Docker 本体が使う実装) に「そのパスが除外されるか」を直接判定させる。**最初は文字列の正規化で近似して書き、敵対的レビューで 8 形中 7 形を見逃すことを実測された** (`!*/**` / `!drive-files*` / `!/drive-files` / `!.config/**` / `!.config/*` / `!deploy/uds/config/*` / `!compose.uds.yaml*` がどれも gate PASS のまま再包含される)。`**/` の前置・末尾スラッシュ・先頭スラッシュ・`*` を挟む形・`!` の後勝ちが絡むので、近似は必ず取りこぼす。#2857 が「Makefile を自前でパースせず `make -n` に解決させる」と結論したのと同じ形。**`ignorefile.ReadAll` と組にするのが要点** — 先頭スラッシュの除去はそちらの仕事で、`patternmatcher` 単体だと `!/drive-files` を取り逃がす。両者は既に `go.sum` にある (testcontainers 経由) ので、`go get` するだけで **`go.mod` を変えずに** import できる。**`// indirect` のコメントは残る** — 落とすのは `go mod tidy` の仕事で、このリポジトリでは tidy が使えないため。充足は `GOFLAGS=-mod=readonly go build ./...` が通ることで確かめる。
+  **判定は字句だけで symlink を辿らない。** だから「Dockerfile が COPY する symlink 経路」と「pnpm が実体を置く `.pnpm/` 配下」の**両方**を一覧に入れる必要がある。実体側だけを守っていたときは、`third_party/misskey/node_modules` を `**/node_modules` に広げる変更が **gate 緑のまま全ビルドを壊した** (`!` の再包含は実体側だけを生かすので symlink が落ちる)。しかもそれは `.dockerignore` 自身が名指しで警告している形で、`Dockerfile` の guard は「pnpm install not run?」と**事実と逆**を出す。
+  **本物の matcher に解かせると、肯定側のアサーションが書けるようになる。** 「`.config/docker.yml.example` は context に**残る**」「emoji-assets の twemoji は**残る**」を検査対象にできるので、除外を広げすぎて COPY を壊す変更 (`.config/*.yml` → `.config/*`、`built` → `**/built`) がその場で落ちる。**除外側の文字列一致しか見ない形では原理的に書けない検査**で、変異検証でも肯定側 3 件が検出できている (合計 17/17)。
+  **`<Dockerfile名>.dockerignore` の存在も見る。** BuildKit はそれがあると root の `.dockerignore` を**一切見ない**ので、ファイル 1 つで全ての除外が静かに無効になる。
 
 - **2026-09-10**: `make gates` に `pluginembed-check` を追加し、運営者向けの reusable workflow (`build-with-plugins.yml`) を新設 (#2940)。`make help` の target は 129 → 130。**`Dockerfile.bundled` が `pluginbuild` を呼んでいなかった** — `plugins/` に置いてビルドしても入らない image が黙って出来ており、しかもエラーにならないので運営者は「入ったつもり」で起動できた。`docs/plugins/operating.md` は「`Dockerfile` / `deploy/uds/Dockerfile.mkgo` の両方が生成ツールを実行する」と書いて bundled を挙げていなかったが、**除外とも書いていなかった**。
   **gate は 3 つの素通りを塞いである** (どれも敵対的レビューで実測された)。(a) **順序を見る** — `pluginbuild` を `go build` の後に置くと生成物が binary に入らないが、Dockerfile としては正当でビルドも成功する。(b) **builder の検出を 1 つの文字列に頼らない** — `./cmd/misskey` だけを探す形は module path (`github.com/shiroha-a/mk/cmd/misskey`) やワイルドカード (`./cmd/...`) で書かれた Dockerfile を検査対象から黙って落とす。**allowlist にも載らないので gate は鳴らない**まま検査が減る (「1 つも拾えなかったら落とす」は全部消えたときしか効かない)。(c) **RUN 内の行末 `#` も落とす** — シェルのコメントなので「書いてあるのに実行されない」状態になる (#2856 が `wiring-check` で `/* */` に対して踏んだのと同型)。(d) **行継続を畳んでから判定する** — `go build` と対象が同じ行にあることを要求すると、ldflags を 1 つ足して折り返した瞬間にその Dockerfile が検査対象から消える。(e) **動詞も 1 つに頼らない** (`go install` で外れる)。

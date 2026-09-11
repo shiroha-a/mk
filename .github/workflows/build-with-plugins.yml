@@ -276,4 +276,12 @@ jobs:
             org.opencontainers.image.description=mk-go built with operator-selected plugins
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # **mode=min にする。** max は中間 stage をすべて書き出すので、
+          # `COPY . .` 済みの builder stage (build context が `du -sm` で 421 MB、プラグインのソース込み) が
+          # **呼び出し元の** 10GB キャッシュ枠を埋める。
+          #
+          # **`--mount=type=cache` の中身は cache-to では運ばれない** (min でも max
+          # でも空。実測)。runner は毎回まっさらなので Go のビルドはどちらでも
+          # 走り直す。max が追加で救うのは `apk add` と `go mod download` の 2 step
+          # だけで、その対価が 421 MB の layer になる。
+          cache-to: type=gha,mode=min

@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -1054,6 +1054,15 @@ mdtable-check: ## md の表の各行がヘッダと同じ列数か検査 (溢れ
 	# 中でも働く** (`\|` へエスケープする)。#2930 で実際に踏んだ。
 	# **見るのは列数だけ。** 取りこぼす形はテストの doc コメントに明記してある。
 	go test ./internal/entitycompat/... -run 'TestMarkdownTablesDoNotDropContent' -count=1 -v
+
+.PHONY: dockerignore-check
+dockerignore-check: ## .dockerignore がシークレットと利用者データを除外しているか検査
+	# .dockerignore は全 build context 共通なので、1 行落ちると全経路に同時に効く。
+	# #2942 で drive-files (既定の drive の置き場所) と operator-local な設定
+	# (.config/*.yml 等) が抜けていた。**配る image には入らない** (最終 stage が
+	# 明示パスの COPY しか持たないため) が、build context と builder stage の
+	# layer には入り、cache-to を設定していればキャッシュ経由で読める。
+	go test ./internal/entitycompat/... -run 'TestDockerignore' -count=1 -v
 
 .PHONY: pluginembed-check
 pluginembed-check: ## mk-go をビルドする Dockerfile が pluginbuild を go build より前に実行するか検査
