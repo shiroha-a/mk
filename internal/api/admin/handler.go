@@ -2881,6 +2881,23 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	if req.Name != nil {
 		// リネーム時は同名 local emoji の重複を弾く (SAME_NAME_EMOJI_EXISTS)。
 		if *req.Name != before.Name {
+			// **新しい名前に pattern を掛ける。これは upstream より厳しい。**
+			// upstream の paramDef は `anyOf[{id 必須}, {name 必須 + pattern}]`
+			// なので、**`id` を渡すと name の pattern は検査されない** —
+			// frontend の通常の呼び方がまさにそれ。結果として `:foo bar:` の
+			// ような名前が保存でき、AP で broadcast される
+			// (`docs/divergence.md` に意図的乖離として記載)。
+			//
+			// **名前が変わらないときは掛けない。** frontend は名前を編集して
+			// いなくても `name` を必ず送るので、掛けると**既に非準拠な名前で
+			// 保存されている絵文字のカテゴリやライセンスが編集できなくなる**。
+			// そういう行は実際に作れる — `EmojiCopy` は元の名前を無検証で
+			// コピーし、AP 経由の取り込みも長さしか見ない。塞ぎたいのは
+			// 「不正な名前を新しく入れる」ことで、既に保存済み・broadcast 済みの
+			// 名前を保存し直すのを拒む価値は無い。
+			if !emojiNamePattern.MatchString(*req.Name) {
+				return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid emoji name.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+			}
 			// **重複チェックを DB 障害で skip しない** (#2792)。
 			dup, derr := h.emojiRepo.FindByNameAndHost(*req.Name, nil)
 			if derr != nil && !repository.IsNotFound(derr) {

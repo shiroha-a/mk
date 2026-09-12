@@ -1764,3 +1764,83 @@ func TestDriveCleanup_WithoutLocalDeleterUsesPrimary(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.ElementsMatch(t, []string{"ak"}, primary.deleted)
 }
+
+// **リネーム時に name の pattern を掛ける。これは upstream より厳しい。**
+//
+// upstream の paramDef は `anyOf[{id 必須}, {name 必須 + pattern}]` なので、
+// **`id` を渡すと `^[a-zA-Z0-9_]+$` は検査されない** — frontend の通常の
+// 呼び方がそれにあたる。結果として `:foo bar:` のような名前が保存でき、
+// AP で broadcast される。
+func TestEmojiUpdate_RejectsInvalidName(t *testing.T) {
+	for _, name := range []string{"foo bar", "foo:bar", "foo<x>", "", "絵文字", "a/b"} {
+		t.Run(name, func(t *testing.T) {
+			h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+			body, err := json.Marshal(map[string]any{"id": "e1", "name": name})
+			require.NoError(t, err)
+
+			rec := doPost(h.EmojiUpdate, string(body), adminUser)
+			assert.Equalf(t, http.StatusBadRequest, rec.Code,
+				"name=%q が通った。AP で broadcast される", name)
+			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+
+			// 保存もされていないこと。
+			got, ferr := emojiRepo.FindByID("e1")
+			require.NoError(t, ferr)
+			assert.Equal(t, "smile", got.Name, "不正な名前が保存されている")
+		})
+	}
+}
+
+// 正当な名前は通る (pattern を厳しくしすぎていないか)。
+func TestEmojiUpdate_AcceptsValidName(t *testing.T) {
+	for _, name := range []string{"smile2", "foo_bar", "A", "a1_B2"} {
+		t.Run(name, func(t *testing.T) {
+			h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "smile"})
+			body, err := json.Marshal(map[string]any{"id": "e1", "name": name})
+			require.NoError(t, err)
+
+			rec := doPost(h.EmojiUpdate, string(body), adminUser)
+			require.Equalf(t, http.StatusNoContent, rec.Code, "name=%q が落ちた: %s", name, rec.Body.String())
+			got, ferr := emojiRepo.FindByID("e1")
+			require.NoError(t, ferr)
+			assert.Equal(t, name, got.Name)
+		})
+	}
+}
+
+// **名前を変えない更新は、既存の名前が非準拠でも通ること。**
+//
+// frontend は名前を編集していなくても `name` を必ず送る
+// (`custom-emojis-manager.local.list.vue` は `name: item.name`)。ここで
+// pattern を掛けると、**既に非準拠な名前で保存されている絵文字のカテゴリや
+// ライセンスが編集できなくなる**。そういう行は `EmojiCopy` (元の名前を無検証
+// でコピー) や AP 経由の取り込みで実際に作られる。
+func TestEmojiUpdate_KeepsNonConformingNameEditable(t *testing.T) {
+	h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "foo-bar.baz", Category: func() *string { v := "old"; return &v }()})
+
+	body, err := json.Marshal(map[string]any{"id": "e1", "name": "foo-bar.baz", "category": "new"})
+	require.NoError(t, err)
+	rec := doPost(h.EmojiUpdate, string(body), adminUser)
+	require.Equalf(t, http.StatusNoContent, rec.Code,
+		"非準拠な名前を保ったままの更新が落ちた。カテゴリすら直せなくなる: %s", rec.Body.String())
+
+	got, ferr := emojiRepo.FindByID("e1")
+	require.NoError(t, ferr)
+	assert.Equal(t, "foo-bar.baz", got.Name)
+	require.NotNil(t, got.Category)
+	assert.Equal(t, "new", *got.Category)
+}
+
+// 逆に、非準拠な名前へ**変える**のは拒む。
+func TestEmojiUpdate_RejectsRenameToInvalid(t *testing.T) {
+	h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "foo-bar.baz"})
+
+	body, err := json.Marshal(map[string]any{"id": "e1", "name": "still bad"})
+	require.NoError(t, err)
+	rec := doPost(h.EmojiUpdate, string(body), adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+
+	got, ferr := emojiRepo.FindByID("e1")
+	require.NoError(t, ferr)
+	assert.Equal(t, "foo-bar.baz", got.Name, "拒んだのに保存されている")
+}
