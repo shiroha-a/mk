@@ -266,6 +266,29 @@ var noCORSPaths = map[string]bool{
 	"/api/users/followers": true,
 }
 
+// corsRestrictedPath reports whether the path must not advertise CORS.
+//
+// **AP のコレクションも塞ぐ (レビュー M-1)。** `/users/<id>/following` は
+// `s.echo` 直付けで `/api` グループの外にあり、**同じフォローグラフを
+// `ACAO: *`・レート制限なし・プリフライト不要 (単純リクエスト) で返す**
+// (本番で実測)。`/api` 側だけ費用を上げても、隣に無料の経路が残っていては
+// 意味がない。
+//
+// **連合は壊れない。** AP の取得はサーバー間なので応答ヘッダを見ない。
+// ブラウザがこのパスを開く経路は SPA へのフォールバック (同一オリジンの
+// 画面遷移) で、CORS の対象外。
+func corsRestrictedPath(p string) bool {
+	if noCORSPaths[p] {
+		return true
+	}
+	// `/users/<id>/following` / `/followers`。id は可変なので前方 + 後方一致で
+	// 見る。広く取っても catchall が空を返すだけで無害な側に倒れる。
+	if strings.HasPrefix(p, "/users/") {
+		return strings.HasSuffix(p, "/following") || strings.HasSuffix(p, "/followers")
+	}
+	return false
+}
+
 // corsMiddleware returns the global CORS middleware.
 // Shared with cors_test.go so production and tests stay in sync.
 func corsMiddleware() echo.MiddlewareFunc {
@@ -287,12 +310,16 @@ func corsMiddleware() echo.MiddlewareFunc {
 		return func(c echo.Context) error {
 			// **`c.Request().URL.Path` で見る。** グローバル middleware の
 			// 時点では `c.Path()` が `/api/*` に解決されていることがある。
-			if !noCORSPaths[c.Request().URL.Path] {
+			if !corsRestrictedPath(c.Request().URL.Path) {
 				return wrapped(c)
 			}
-			// **`Vary: Origin` は自分で戻す。** echo の CORS は Skipper より
-			// 前に無条件で付けており、迂回すると落ちる。**`Set` ではなく
-			// `Add`** — gzip が付ける `Vary: Accept-Encoding` を消さないため。
+			// **`Vary: Origin` は自分で戻す。** echo の CORS は Skipper の
+			// **後**で `Vary` を付けるので、迂回した経路では落ちる (実測:
+			// `/.well-known/` の応答には元から `Vary: Origin` が無い)。
+			//
+			// **`Set` ではなく `Add`。** 現状 CORS より前に `Vary` を付ける
+			// middleware は無い (gzip は後段) ので `Set` でも同じ結果になるが、
+			// 順序を入れ替えたときに他の `Vary` を消さないため。
 			c.Response().Header().Add(echo.HeaderVary, echo.HeaderOrigin)
 			// **プリフライトはここで打ち切る。** 通すと `api.Any("/*")` の
 			// catchall が拾って `200 + {}` を返し、プリフライトのたびに
