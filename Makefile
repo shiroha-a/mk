@@ -1062,7 +1062,7 @@ submodulepin-check: ## fork frontend の pin が doc と gitlink で一致して
 	# branch と tag も push 済みなのに gitlink だけ古い、という状態で CI 28
 	# チェックが全部緑のままマージされた。SHA で突き合わせるので submodule の
 	# checkout は要らない。
-	go test ./internal/entitycompat/... -run 'TestSubmodulePinMatchesDoc' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestSubmodulePinMatchesDoc|TestSubmodulePinTagMatchesTable' -count=1 -v
 
 .PHONY: secretfield-check
 secretfield-check: ## モデルの秘密フィールドが json:"-" を保っているか検査

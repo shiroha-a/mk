@@ -53,6 +53,32 @@ jobs:
             exit 1
           fi
 
+          # **doc の pin が指す tag が、gitlink と同じ commit か。**
+          # `make submodulepin-check` は SHA だけを突き合わせる — tag から SHA を
+          # 解くにはネットワークが要り、`make gates` はそれを前提にできないため。
+          # **tag 名の正しさを見られるのはここだけ** (#2969)。
+          # #2963 の事故は「tag だけ直して gitlink を忘れた」形だったので、
+          # SHA 側を書き換え忘れると gates は素通りする。ここで塞ぐ。
+          n=$(grep -c '\*\*現在の pin は ' docs/divergence.md || true)
+          if [ "$n" != "1" ]; then
+            echo "::error::docs/divergence.md の pin 行が $n 件です。ちょうど 1 件にしてください (書式: **現在の pin は \`<tag>\` (\`<短縮 SHA>\`)。**)"
+            exit 1
+          fi
+          tag=$(sed -n 's/.*\*\*現在の pin は `\([^`]*\)`.*/\1/p' docs/divergence.md)
+          # annotated tag なら `^{}` が commit を指す。fork の tag は lightweight だが
+          # 将来変わっても壊れないよう両方見る。
+          tagsha=$(git ls-remote "$url" "refs/tags/${tag}^{}" | cut -f1)
+          [ -n "$tagsha" ] || tagsha=$(git ls-remote "$url" "refs/tags/${tag}" | cut -f1)
+          if [ -z "$tagsha" ]; then
+            echo "::error::docs/divergence.md の pin が指す tag $tag が $url にありません。tag を push し忘れていませんか"
+            exit 1
+          fi
+          if [ "$tagsha" != "$sha" ]; then
+            echo "::error::docs/divergence.md の tag $tag は $tagsha を指しますが、gitlink は $sha です。doc と pointer のどちらかが古いままです"
+            exit 1
+          fi
+          echo "pin ok: $tag -> $tagsha"
+
       # 同梱サンプルは **既定無効** (#2495)。clone しただけの運営者のバイナリ・
       # フロント・DB に勝手に入らないようにするため。有効なままだと、設定して
       # いなくても plugin_wiring.go が Routes / Jobs の登録より先に専用 schema を
