@@ -27,8 +27,9 @@ import (
 // も既存のテストも全て緑のままだった。native token を取れればそのユーザー
 // として API を叩けるので、あらゆる権限ゲートを迂回できる。
 //
-// **モデルを直接 JSON 化する経路は 3 系統ある。** API のレスポンス自体は
-// `map[string]any` か `internal/entity` を通るが、それとは別に:
+// **モデルを直接 JSON 化する経路は 6 系統ある** (数え方: `internal/model` の型が
+// `encoding/json` の Marshal/Unmarshal/Encode/Decode か `echo.Context.JSON` に
+// 静的型で到達する非テスト箇所):
 //
 //   - `internal/core/moderationlog/service.go` が `json.Marshal(info)` で
 //     モデルごと記録する (`*model.Meta` の before/after、
@@ -39,11 +40,24 @@ import (
 //     Redis へ入れる
 //   - `internal/core/webpush/cache.go` が `[]*model.SwSubscription` を
 //     Redis へ入れて読み戻す
+//   - **admin API のレスポンス本体**: `internal/api/admin/relays.go` が
+//     `*model.Relay` / `[]*model.Relay` を `c.JSON` にそのまま渡す
+//   - **同**: `internal/api/admin/abuse_report_notification.go` の
+//     `packedRecipient` が `*model.AbuseReportNotificationRecipient` を
+//     埋め込んで返す。`admin/show-user` も `[]*model.Role` を入れた map を返す
+//   - `internal/core/drive/chunked_upload.go` が `[]model.ChunkedUploadPart` を
+//     jsonb 列へ往復し、`internal/core/instance/instance_service.go` が
+//     `[]model.SuspendedSoftwareEntry` を読み戻す
+//
+// **「API のレスポンスは必ず map か entity を通る」は誤り** — 上の 2 つは
+// モデルの json タグがそのままレスポンスの shape になる。
 //
 // **つまりタグは「今すぐ効く」。** 1 周目のレビュー後に 4 件を `json:"-"` へ
 // 変えたところ、うち 2 件 (`Meta.SmtpPass` / `RegistrationTicket.Code`) で
 // **moderation log の記録が壊れた** — しかも既存のテストは 1 つも落ちな
-// かった。タグを動かす前に、この 3 系統に乗るかを必ず確かめること。
+// かった。しかもその判断の根拠にした「直接 marshal は 2 箇所だけ」も、
+// 直したはずの「3 系統」も、どちらも数え落としだった。**タグを動かす前に
+// この 6 系統に乗るかを必ず確かめること。**
 //
 // **名前だけでは判定できない。** `Meta` の captcha secret は `admin/meta` が
 // 管理画面へ返すうえ modlog にも載るし、drive の `accessKey` は URL の構成
@@ -87,8 +101,10 @@ import (
 //     (TypeSpec を総なめするため)。見えないのは**別パッケージの型を
 //     埋め込んだ場合**
 //
-// `Key` 全体には広げていない — `PublicKey` / `*SiteKey` (captcha のサイト
-// キーはフロントへ配る公開値) / `SortKeys` / `ExcludeKeywords` が入って
+// `Key` 全体には広げていない — 実測で **19 件増えて全部が偽陽性**になる。
+// `PublicKey` / `*SiteKey` (captcha のサイトキーはフロントへ配る公開値) /
+// `SortKeys` / `ExcludeKeywords` / `RegistryItem.Key` /
+// `UserPublickey.KeyPEM` などが入って
 // allowlist が誤検知で埋まり、本物が紛れる。
 var secretFieldNameRe = regexp.MustCompile(`Password|Passwd|Pass|Token|Secret|PrivateKey|PrivKey|Credential|Code|ApiKey|APIKey|AuthKey|AccessKey|Auth|Hash`)
 
@@ -147,7 +163,8 @@ var serializableSecretLike = map[string]string{
 // 無い alternative は正規表現から外しても緑のまま**になる。`Pass` / `Code` を
 // 足した直後が実際にそうで、1 周目の指摘を塞いだ修正そのものが黙って巻き
 // 戻せる状態だった (敵対的レビュー 2 周目で実測)。ここに並べたものが検出
-// されなくなったら落とす。
+// されなくなったら落とす。**`json:"-"` のフィールドを足したらここにも足すこと**
+// (一覧は手書きなので自動では増えない)。
 var mustDetectSecretFields = []string{
 	"User.Token",
 	"UserProfile.Password",
@@ -337,13 +354,28 @@ func TestModelSecretFieldsAreNotSerialized(t *testing.T) {
 func TestSerializableSecretLikeHasNoDeadEntries(t *testing.T) {
 	found := modelSecretLikeFields(t)
 
-	var dead []string
+	var dead, contradictory []string
 	for key, reason := range serializableSecretLike {
 		require.NotEmptyf(t, reason, "%s: 出してよい理由を書くこと", key)
-		if _, ok := found[key]; !ok {
+		tag, ok := found[key]
+		if !ok {
 			dead = append(dead, key)
+			continue
+		}
+		// **allowlist に載せた = 出ることが前提**なので、`json:"-"` は宣言と
+		// 矛盾する。2 周目で `Meta.SmtpPass` / `RegistrationTicket.Code` の
+		// タグを落として moderation log の記録を壊したのがこの形で、当時は
+		// 何も落ちなかった。allowlist 全件をこれで守る。
+		if tag == "-" {
+			contradictory = append(contradictory, key)
 		}
 	}
+	sort.Strings(contradictory)
+	require.Emptyf(t, contradictory,
+		"allowlist に載っているのに `json:\"-\"` になっている: %v\n"+
+			"落とすなら allowlist からも外し、**どの経路が壊れるか**を先に確かめること "+
+			"(moderation log / ephemeral store / webpush cache / admin API のレスポンス本体)",
+		contradictory)
 	sort.Strings(dead)
 	require.Emptyf(t, dead,
 		"serializableSecretLike に、検出対象に無いキーが残っている: %v\n"+
