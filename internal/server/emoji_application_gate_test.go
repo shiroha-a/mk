@@ -5,10 +5,13 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 )
 
 // 絵文字の登録申請 (#2934) の配線を照合する正規表現。
@@ -179,6 +182,112 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 			"%s が審査待ちの件数と取るべき行動を出していない (#2977)", tc.name)
 	}
 
+	// **ドロップの allowlist が backend と一致すること (#2959)。** frontend が
+	// 手前で弾く集合がズレると、(a) 受け入れたのに申請で `UNSUPPORTED_FILE_TYPE`
+	// になり drive に無駄なファイルが残る、(b) サーバーが受け入れる画像を手前で
+	// 拒否する、のどちらかになる。**別名 (`image/jpg` など) は frontend にだけ
+	// あってよい** — ブラウザが返す MIME は環境依存で、サーバーは中身から判定し
+	// 直す (upstream misskey#16091)。**別名は `EMOJI_IMAGE_TYPE_ALIASES` に
+	// 分けてあるので、主リストは完全一致で見られる** (下の require を参照)。
+	// **ページ遷移を止めるのは 4 経路すべて (#2959)。** 落とす場所を外すと
+	// ブラウザが画像を開き、入力中の内容ごと消える。modifier ではなく
+	// ハンドラ内で条件付きに呼ぶので (deck のカラム並べ替えを潰さないため)、
+	// **ハンドラごとに**見る — ファイル全体で `Contains` すると、1 つ落としても
+	// 他の 3 つで通ってしまう (実測)。
+	for _, fn := range []string{"onDragover", "onDrop", "onPageDragover", "onPageDrop"} {
+		require.Containsf(t, jsFuncBody(t, pageSrc, fn), "ev.preventDefault()",
+			"emoji-request.vue の %s が preventDefault を呼んでいない。ページ遷移で入力が消える (#2959)", fn)
+	}
+	// **伝播も止めること。** `dragover` はバブルするので、プレビュー側の
+	// あとに祖先の `onPageDragover` が走って `dropEffect` を `none` へ
+	// 上書きする。そうなると drag operation が none になり **`drop` が一切
+	// 発火しない** = 機能が丸ごと死ぬ。1 行消すだけで起きるのに、型も
+	// テストも通る。
+	// **診断は経路ごとに分ける。** `onDragover` は祖先 (`onPageDragover` /
+	// deck の column) が `dropEffect` を `none` へ上書きするので、止めないと
+	// drag operation が none になり **`drop` が一切発火しない**。`onDrop` の
+	// 祖先は現状どちらも無害なので、こちらは防御。
+	require.Containsf(t, jsFuncBody(t, pageSrc, "onDragover"), "ev.stopPropagation()",
+		"emoji-request.vue の onDragover が stopPropagation を呼んでいない。"+
+			"祖先が dropEffect を none に上書きしてドロップが一切効かなくなる (#2959)")
+	require.Containsf(t, jsFuncBody(t, pageSrc, "onDrop"), "ev.stopPropagation()",
+		"emoji-request.vue の onDrop が stopPropagation を呼んでいない。"+
+			"祖先のドロップ処理と二重に走る (現状の祖先は無害だが、増えたときに気付けない) (#2959)")
+
+	// **選び直しで世代を進めること (#2959)。** 進めないと、進行中のドロップが
+	// 後から届いたときに**いま選んだものを黙って上書きする**。`uploading` も
+	// 解除しないと `canSubmit` が false のままで、選び直しても申請できない。
+	// **2 度壊れた配線なので固定する** — 一度目は入れ忘れ、二度目はレビューで
+	// 実挙動を再現されるまで気付けなかった。
+	chooseBody := jsFuncBody(t, pageSrc, "chooseFile")
+	require.Containsf(t, chooseBody, "dropGeneration++",
+		"emoji-request.vue の chooseFile が世代を進めていない。遅れて届いたドロップに上書きされる (#2959)")
+	require.Containsf(t, chooseBody, "uploading.value = false",
+		"emoji-request.vue の chooseFile が uploading を解除していない。選び直しても申請できない (#2959)")
+	require.Containsf(t, jsFuncBody(t, pageSrc, "onDrop"), "generation !== dropGeneration",
+		"emoji-request.vue の onDrop が世代を見ていない。古いドロップの結果が新しい選択を上書きする (#2959)")
+	// **立ち上げる側も見る。** `canSubmit` が `!uploading.value` を見ていても、
+	// `onDrop` が `true` にしなければ常に false = 申請ボタンが塞がらない。
+	// 片側だけ見るのは `draghover` で「識別子が残っていれば通る」を避けたのと
+	// 同じ理由で不十分。
+	require.Containsf(t, jsFuncBody(t, pageSrc, "onDrop"), "uploading.value = true",
+		"emoji-request.vue の onDrop が uploading を立てていない。アップロード中でも申請できてしまう (#2959)")
+
+	// **コメントは落としてから見る。** 通さないと `// 'image/tiff',` と
+	// 1 行コメントアウトするだけで検査が素通りする (#2856 が `wiring-check` で
+	// 踏んだのと同型)。**このゲートが読む frontend ソースはこれを含めて 8 本**
+	// (数え方: `stripComments(readFileString(...))` のうち `fe` 配下と `page`)
+	// で、**他の 7 本は元から `stripComments` 済み**。ここだけ抜けていた。
+	dropSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "utility", "emoji-image-drop.ts")))
+	// **完全一致で見る。** 「frontend ⊇ backend」だけだと、frontend にだけ
+	// ある型 (backend から消したとき / frontend に足したとき) を検出できず、
+	// **drive にアップロードしてから `UNSUPPORTED_FILE_TYPE` で落ちて孤児
+	// ファイルが残る**。別名は `EMOJI_IMAGE_TYPE_ALIASES` に分けてあるので、
+	// 主リストは厳密に揃えられる。
+	wantTypes := emojiapplication.AllowedImageTypes()
+	gotTypes := emojiImageTypesFromSource(t, dropSrc)
+	require.Equalf(t, wantTypes, gotTypes,
+		"emoji-image-drop.ts の EMOJI_IMAGE_TYPES が backend の allowlist と違う。"+
+			"足りないとサーバーが受け入れる画像を拒否し、多いと drive にアップロードしてから弾かれる (#2959)")
+
+	// **申請画面がドロップを受けること (#2959)。** ハンドラだけ書いて
+	// `@drop` を繋ぎ忘れる / `.prevent` を落とすと、**ブラウザが画像を開いて
+	// 入力中の内容ごと失う**。型もテストも通るので気付けない。
+	for _, want := range []string{
+		// ドロップを受けて検証すること。
+		// **ここは識別子を固定する。** 冒頭で禁じている形だが、`.vue` は単体
+		// テストから駆動できず、これ以外に配線を守る手段が無い。rename すると
+		// 偽陽性になる代わりに、片側だけ外した状態が落ちる。
+		//
+		// **ハンドラ名まで見る。** `@drop=` だけだと、ページ側に足した
+		// `@drop="onPageDrop"` で条件が満たされ、**プレビュー側の配線を丸ごと
+		// 外しても緑になる** (実測)。そのとき機能は死ぬ (ページ側が握り潰す
+		// だけになる)。
+		`@drop="onDrop"`, `@dragover="onDragover"`, "pickDroppedEmojiImage(",
+		// ページ側の握り潰しも残っていること (外すと領域外で遷移する)。
+		`@drop="onPageDrop"`, `@dragover="onPageDragover"`,
+
+		// **drive を経由すること。** ここを直接 `URL.createObjectURL` などに
+		// すり替えると、申請 API が要求する fileId が作られないまま画面上は
+		// 通ったように見える。承認側の検証も迂回する。
+		"uploadFile(",
+		// 申請ボタンがアップロード中を見ていること (古い fileId で送らせない)。
+		"!uploading.value",
+		// ドラッグ中の強調表示。
+		"draghover",
+	} {
+		require.Containsf(t, pageSrc, want,
+			"emoji-request.vue に %s が無い。ドロップが効かない / ページ遷移で入力が消える / drive を経由しない (#2959)", want)
+	}
+	// **強調表示は症状が違うので診断を分ける。** `draghover` という識別子が
+	// script に残っているかだけを見ると、`:class` のバインドを外しても通る。
+	for _, want := range []string{
+		`@dragenter="onDragenter"`, `@dragleave="onDragleave"`, `$style.dragover]: draghover`,
+	} {
+		require.Containsf(t, pageSrc, want,
+			"emoji-request.vue に %s が無い。ドラッグ中に何も光らない / 光ったまま消えない (#2959)", want)
+	}
+
 	// **審査画面が media proxy を通すこと (レビュー M2 / R2-H3)。**
 	// リモートの生 URL は `img-src 'self' data: blob:` を enforce している構成で
 	// **黙ってブロックされる**。この 1 行が「モデレーターに画像が見える」と
@@ -217,3 +326,43 @@ func readFileString(t *testing.T, path string) string {
 }
 
 var _ fs.DirEntry // findSpec が io/fs を使う
+
+// emojiImageTypesFromSource extracts the EMOJI_IMAGE_TYPES literal (#2959).
+//
+// **別名の配列と取り違えないよう、宣言から次の `]` までに閉じる。** ファイル
+// 全体から `'image/...'` を拾うと `EMOJI_IMAGE_TYPE_ALIASES` まで混ざり、
+// 「完全一致」の検査が意味を失う。
+func emojiImageTypesFromSource(t *testing.T, src string) []string {
+	t.Helper()
+	const marker = "export const EMOJI_IMAGE_TYPES = ["
+	i := strings.Index(src, marker)
+	require.GreaterOrEqualf(t, i, 0, "EMOJI_IMAGE_TYPES の宣言が見つからない。書式を変えたなら検査も直すこと")
+	rest := src[i+len(marker):]
+	end := strings.Index(rest, "]")
+	require.GreaterOrEqualf(t, end, 0, "EMOJI_IMAGE_TYPES が閉じていない")
+	out := emojiImageTypeRe.FindAllStringSubmatch(rest[:end], -1)
+	got := make([]string, 0, len(out))
+	for _, m := range out {
+		got = append(got, m[1])
+	}
+	require.NotEmptyf(t, got, "EMOJI_IMAGE_TYPES が空。拾えていないなら検査していないのと同じ")
+	sort.Strings(got)
+	return got
+}
+
+var emojiImageTypeRe = regexp.MustCompile(`'([^']+)'`)
+
+// jsFuncBody returns the body of a top-level `function name(` declaration.
+//
+// **1 つの関数に閉じて見るためのもの。** ファイル全体を `Contains` で見ると、
+// 同じ呼び出しが別の関数にあるだけで通ってしまう。閉じ括弧は列 0 の `}` で
+// 判定する (このファイルの関数はすべてトップレベル)。
+func jsFuncBody(t *testing.T, src, name string) string {
+	t.Helper()
+	i := strings.Index(src, "function "+name+"(")
+	require.GreaterOrEqualf(t, i, 0, "%s が見つからない。rename したなら検査も直すこと", name)
+	rest := src[i:]
+	end := strings.Index(rest, "\n}")
+	require.GreaterOrEqualf(t, end, 0, "%s が閉じていない", name)
+	return rest[:end]
+}

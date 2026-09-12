@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -941,4 +942,25 @@ func TestCreateTranslatesPendingLimitExceeded(t *testing.T) {
 func TestPendingLimitExceededErrorMessage(t *testing.T) {
 	err := &PendingLimitExceededError{Used: 3, Limit: 3}
 	require.Contains(t, err.Error(), "pending")
+}
+
+// **allowlist は関数越しに公開する (#2959)。** 公開 mutable な map にすると
+// どこからでも書き換えられ、申請の検証を実行時に緩められる。
+func TestAllowedImageTypesReturnsACopy(t *testing.T) {
+	got := AllowedImageTypes()
+	require.NotEmpty(t, got)
+	require.True(t, sort.StringsAreSorted(got), "順序が安定しないとゲートの診断が毎回変わる")
+	for _, mime := range got {
+		require.True(t, IsAllowedImageType(mime), "%s が allowlist と食い違っている", mime)
+	}
+
+	// **2 回呼んで別インスタンスであることを見る。** `IsAllowedImageType` は
+	// map を見るので、slice への書き込みが届くことはどんな実装でもありえない
+	// = 反証不能なアサーションだった。package 変数を使い回す実装 (呼び出し側
+	// から破壊できる) を検出できず、テスト名の `ReturnsACopy` が空虚だった。
+	before := AllowedImageTypes()
+	got[0] = "mutated"
+	after := AllowedImageTypes()
+	require.Equal(t, before, after, "呼び出し側の書き換えが次の呼び出しに残っている")
+	require.NotContains(t, after, "mutated")
 }
