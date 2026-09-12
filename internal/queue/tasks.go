@@ -182,7 +182,16 @@ type DeliverPayload struct {
 	// (e.g. https://example.com/users/u1#main-key).
 	KeyID string `json:"keyId"`
 	// KeyPEM is the PEM-encoded RSA private key for signing the request.
-	KeyPEM string `json:"keyPem"`
+	//
+	// **enqueue する payload には詰めない。** queue の job は
+	// `admin/queue/jobs` が moderator へ返すので、詰めると署名鍵がそこから
+	// 読める (取得できれば任意のローカルユーザーとして連合リクエストを偽造
+	// できる)。worker は `SignerUserID` から引く。
+	//
+	// 残してあるのは 2 つの理由による。(1) この変更より前に積まれた job を
+	// 処理するため。(2) `SetSyncDeliverHookForTest` の inline 経路は queue を
+	// 経由しないので、そちらにだけ詰めて渡す (#780)。
+	KeyPEM string `json:"keyPem,omitempty"`
 	// Ed25519KeyID is the Ed25519 HTTP Signature keyId
 	// (e.g. https://example.com/users/u1#ed25519-key) で、recipient が FEP-521a
 	// Multikey で Ed25519 を expose していると DeliverService が判断したとき
@@ -190,11 +199,15 @@ type DeliverPayload struct {
 	// (#1067 / #1071)。
 	Ed25519KeyID string `json:"ed25519KeyId,omitempty"`
 	// Ed25519PrivPEM is the PEM-encoded Ed25519 (PKCS8) private key.
+	// **enqueue する payload には詰めない** (KeyPEM と同じ理由)。
 	Ed25519PrivPEM string `json:"ed25519PrivPem,omitempty"`
 	// IsSharedInbox marks deliveries to a remote instance's shared inbox. On a
 	// 410 Gone from a shared inbox the whole instance is suspended
 	// (goneSuspended)、upstream DeliverProcessorService と同じ (#1811)。
 	IsSharedInbox bool `json:"isSharedInbox,omitempty"`
+	// SignerUserID is the local user whose keypair signs this delivery.
+	// worker はこれを使って配送時に鍵を引く (payload には載せない)。
+	SignerUserID string `json:"signerUserId,omitempty"`
 }
 
 // NewDeliverTask serializes the payload into a driver.Task ready to

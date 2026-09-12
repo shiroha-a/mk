@@ -584,3 +584,78 @@ func TestDeliverProcessor_RateLimited_Retries(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, driver.SkipRetry)
 }
+
+// keySourceStub resolves keys the way the production repo-backed source does.
+type keySourceStub struct {
+	rsa string
+	ed  string
+}
+
+func (s *keySourceStub) SigningKeyPEM(_ string, kind string) (string, error) {
+	if kind == "ed" {
+		if s.ed == "" {
+			return "", processors.ErrSigningKeyMissing
+		}
+		return s.ed, nil
+	}
+	if s.rsa == "" {
+		return "", processors.ErrSigningKeyMissing
+	}
+	return s.rsa, nil
+}
+
+// **新しい形の payload (鍵を載せず SignerUserID だけ) で end-to-end に署名できること。**
+//
+// 署名鍵は `admin/queue/jobs` から読めてしまうため payload に載せなくなった。
+// worker が DB から引いて署名するところまで通らないと**配送が全滅する**が、
+// それは相手サーバー側でしか分からない。Ed25519 / RSA の両方を固定する。
+func TestDeliverProcessor_SignsWithoutKeyInPayload_Ed25519(t *testing.T) {
+	signer := &recordingSigner{responses: []*http.Response{okResponse(http.StatusOK)}}
+	p := processors.NewDeliverProcessor(signer)
+	p.SetSigningKeySource(&keySourceStub{
+		rsa: generateTestKey(t),
+		ed:  generateTestEd25519Key(t),
+	})
+
+	payload := makePayload(t)
+	payload.KeyPEM = ""
+	payload.Ed25519PrivPEM = ""
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.SignerUserID = "u1"
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 1)
+	assert.Equalf(t, payload.Ed25519KeyID, signer.calls[0],
+		"鍵を載せない payload で Ed25519 署名が発行されていない (判定を PrivPEM に戻すとこうなる)")
+}
+
+func TestDeliverProcessor_SignsWithoutKeyInPayload_RSA(t *testing.T) {
+	signer := &recordingSigner{responses: []*http.Response{okResponse(http.StatusOK)}}
+	p := processors.NewDeliverProcessor(signer)
+	p.SetSigningKeySource(&keySourceStub{rsa: generateTestKey(t)})
+
+	payload := makePayload(t)
+	payload.KeyPEM = ""
+	payload.SignerUserID = "u1"
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 1)
+	assert.Equal(t, payload.KeyID, signer.calls[0])
+}
+
+// Ed25519 の鍵が引けないときは RSA へ落ちる (配送を止めない)。
+func TestDeliverProcessor_FallsBackToRSAWhenEd25519KeyMissing(t *testing.T) {
+	signer := &recordingSigner{responses: []*http.Response{okResponse(http.StatusOK)}}
+	p := processors.NewDeliverProcessor(signer)
+	p.SetSigningKeySource(&keySourceStub{rsa: generateTestKey(t)}) // ed は無し
+
+	payload := makePayload(t)
+	payload.KeyPEM = ""
+	payload.Ed25519PrivPEM = ""
+	payload.Ed25519KeyID = "https://example.com/users/u1#ed25519-key"
+	payload.SignerUserID = "u1"
+
+	require.NoError(t, p.Handle(context.Background(), makeTask(t, payload)))
+	require.Len(t, signer.calls, 1)
+	assert.Equal(t, payload.KeyID, signer.calls[0], "Ed25519 が引けないなら RSA で署名すること")
+}

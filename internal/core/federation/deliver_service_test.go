@@ -151,8 +151,14 @@ func TestDeliverToUser_WithEd25519CapableRecipient_AddsEd25519Payload(t *testing
 	require.Len(t, enq.calls, 1)
 	got := enq.calls[0]
 	assert.Equal(t, "https://example.com/users/alice#ed25519-key", got.Ed25519KeyID)
-	assert.Equal(t, "PRIV-ED", got.Ed25519PrivPEM)
-	assert.Equal(t, "PEM-DATA", got.KeyPEM, "RSA も並行で詰められる (Processor 側 fallback 用)")
+	// **鍵そのものは payload に載せない** — `admin/queue/jobs` が job を
+	// moderator へ返すため。worker は SignerUserID から配送時に引く。
+	// Ed25519 を使うかの判定は Ed25519KeyID の有無で行う。
+	assert.Empty(t, got.Ed25519PrivPEM, "Ed25519 署名鍵は payload に載せない")
+	assert.Empty(t, got.KeyPEM, "RSA 署名鍵は payload に載せない")
+	assert.Equal(t, "alice", got.SignerUserID, "worker が鍵を引くための署名者")
+	assert.Equal(t, "https://example.com/users/alice#main-key", got.KeyID,
+		"RSA の keyID は fallback 用に並行で詰める")
 }
 
 // recipient が Ed25519 capable でない → payload に Ed25519 鍵情報なし
@@ -408,7 +414,9 @@ func TestDeliverActivity_EnqueuesUniqueInboxes(t *testing.T) {
 	assert.ElementsMatch(t, []string{"https://a.example/inbox", "https://b.example/inbox"}, got)
 	assert.Equal(t, body, enq.calls[0].Body)
 	assert.Equal(t, "https://example.com/users/alice#main-key", enq.calls[0].KeyID)
-	assert.Equal(t, "PEM-DATA", enq.calls[0].KeyPEM)
+	// 署名鍵は payload に載せず、worker が SignerUserID から引く。
+	assert.Empty(t, enq.calls[0].KeyPEM, "署名鍵は payload に載せない")
+	assert.Equal(t, "alice", enq.calls[0].SignerUserID)
 }
 
 func TestDeliverActivity_EmptyInboxes_NoEnqueue(t *testing.T) {

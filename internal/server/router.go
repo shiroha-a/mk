@@ -907,6 +907,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 持つ (#1067 / #1071)。Ed25519 sign 失敗時 5min 同 host を RSA only に
 	// 縮退する safety net。
 	deliverProcessor.SetRedis(s.redis.Default)
+	// **署名鍵は payload に載せず、配送時に引く。** queue の job は
+	// `admin/queue/jobs` が moderator へ返すので、載せると鍵がそこから読める。
+	deliverProcessor.SetSigningKeySource(processors.NewRepoSigningKeySource(keypairRepo, keypairExtraRepo))
 	// Ed25519 署名の配送が 2xx を返した (= 同期的には拒否されなかった) ことを
 	// 記録する (#2393)。
 	deliverProcessor.SetSignatureCapabilityRecorder(sigCapBuffer)
@@ -3939,6 +3942,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"federation: none でも Person を AP serve し、ap/show の FEDERATION_NOT_ALLOWED gate も skip される"},
 		{"deliverProcessor.deliveryGate", deliverProcessor.HasDeliveryGate(),
 			"block / federation mode は enqueue 時チェックの第 2 の関門が外れ (積み残しと retry 中が漏れる)、suspend は enqueue 側に検査が無いので新規ジョブごと配送し続ける"},
+		{"deliverProcessor.signingKeySource", deliverProcessor.HasSigningKeySource(),
+			"署名鍵は payload に載せず配送時に引くので、未配線だと全ての AP 配送が POST されないまま失敗する (連合が止まる)"},
 		{"notes.metaRepo", notesHandler.HasMetaRepo(),
 			"blocked-host の note が post-fetch 経路で漏れる"},
 		{"antennas.metaRepo", antennasHandler.HasMetaRepo(),

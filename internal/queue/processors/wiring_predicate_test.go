@@ -97,3 +97,13 @@ func TestDeliverProcessor_HasDeliveryGate(t *testing.T) {
 type stubWiringDeliveryGate struct{}
 
 func (stubWiringDeliveryGate) ShouldSkipDelivery(string) bool { return false }
+
+// 署名鍵の解決元。**未配線だと全ての AP 配送が POST されないまま失敗する**
+// (鍵を payload に載せなくなったので、これが無いと署名できない)。
+func TestDeliverProcessor_HasSigningKeySource(t *testing.T) {
+	assert.False(t, (&DeliverProcessor{}).HasSigningKeySource(), "未配線なら false")
+
+	p := &DeliverProcessor{}
+	p.SetSigningKeySource(&stubKeySource{})
+	assert.True(t, p.HasSigningKeySource())
+}
