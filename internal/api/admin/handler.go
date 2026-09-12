@@ -105,9 +105,12 @@ type Handler struct {
 	roleService   *role.Service
 	metaRepo      repository.MetaRepository
 	userRepo      repository.UserRepository
-	abuseRepo     repository.AbuseReportRepository
-	modLogService *moderationlog.Service
-	emojiRepo     repository.EmojiRepository
+	// suspensionOriginRepo は凍結の由来の記録先 (#2973)。モデレーターの判断を
+	// local として刻み、リモートの `toot:suspended` に上書きされないようにする。
+	suspensionOriginRepo repository.UserSuspensionOriginRepository
+	abuseRepo            repository.AbuseReportRepository
+	modLogService        *moderationlog.Service
+	emojiRepo            repository.EmojiRepository
 	// #2934 の申請。nil なら endpoint は 500 を返す (未配線の構成)。
 	emojiApplicationRepo     repository.EmojiApplicationRepository
 	emojiApplicationReviewer emojiApplicationReviewer
@@ -338,6 +341,34 @@ func (h *Handler) SetInstanceRepo(r repository.InstanceRepository) {
 // target user's signin history. Without it the `signins` field falls back to
 // an empty array (#1198).
 func (h *Handler) SetSigninRepo(r repository.SigninRepository) { h.signinRepo = r }
+
+// SetSuspensionOriginRepo wires the suspension-origin store (#2973).
+//
+// **未配線だとモデレーターの解除が次の actor refresh で戻る。** 由来が無い行を
+// resolver が local 扱いにするのは**解除方向だけ**で、凍結方向は
+// 「まだ誰も判断していない」として発信元に従うため。`criticalWiring` で見る。
+func (h *Handler) SetSuspensionOriginRepo(r repository.UserSuspensionOriginRepository) {
+	h.suspensionOriginRepo = r
+}
+
+// HasSuspensionOriginRepo reports whether the store is wired.
+func (h *Handler) HasSuspensionOriginRepo() bool { return h.suspensionOriginRepo != nil }
+
+// recordLocalSuspensionOrigin marks the user's suspension state as decided by
+// our own moderator (#2973).
+//
+// **失敗しても呼び出し元は続行する。** 凍結・削除そのものは成立させたいため。
+// ただし**残るのは「記録が無い」ではなく「古い由来」**なので、`remote` の行が
+// 残っていると発信元に解除されうる。そこは warn で拾う (解除側は
+// `UnsuspendUser` が 500 で返す)。
+func (h *Handler) recordLocalSuspensionOrigin(userID string) {
+	if h.suspensionOriginRepo == nil {
+		return
+	}
+	if err := h.suspensionOriginRepo.Set(userID, model.SuspensionOriginLocal); err != nil {
+		slog.Warn("admin: failed to record suspension origin", "userId", userID, "err", err)
+	}
+}
 
 // SetFollowingRepo attaches a FollowingRepository for admin endpoints that
 // need to enumerate Following rows by host (e.g.
@@ -1192,6 +1223,9 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// **モデレーターの判断を local として刻む** (#2973)。これが無いと、リモート
+	// actor が `toot:suspended` を下ろした時点で凍結が解除されてしまう。
+	h.recordLocalSuspensionOrigin(req.UserID)
 	// 凍結直後の auth bypass 防止 (#965)。target の全 token cache entry を
 	// 即時削除し、middleware 通過後の P2 gate (#964) に依存せず確実に弾く。
 	h.invalidateUserTokenCache(req.UserID)
@@ -1228,6 +1262,18 @@ func (h *Handler) UnsuspendUser(c echo.Context) error {
 
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": false}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+	}
+	// **解除も local として刻む** (#2973)。これが無いと、発信元が
+	// `toot:suspended` を立て続けている限り次の actor refresh で無言で戻る。
+	//
+	// **ここは失敗を 500 で返す。** 凍結側と違い、記録できないまま解除すると
+	// 「解除したはずが戻っている」という、この issue が塞ぎに来た状態そのものに
+	// なる。resolver 側が「記録できないなら触らない」に倒しているのと揃える。
+	if h.suspensionOriginRepo != nil {
+		if err := h.suspensionOriginRepo.Set(req.UserID, model.SuspensionOriginLocal); err != nil {
+			slog.Warn("admin: failed to record unsuspension origin", "userId", req.UserID, "err", err)
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
 	}
 	// 凍結解除直後に target の全 token cache entry を invalidate する (#965)。
 	// cache 内に isSuspended=true な stale user が残っていると middleware の

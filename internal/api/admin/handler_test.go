@@ -4278,3 +4278,88 @@ func TestUpdateMeta_SignupApplicationForm_Null(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
 	assert.JSONEq(t, `[]`, string(metaRepo.Meta.SignupApplicationForm))
 }
+
+// --- #2973: 凍結の由来 ---
+
+// stubOriginRepo is an in-memory UserSuspensionOriginRepository.
+type stubOriginRepo struct {
+	origins map[string]string
+	setErr  error
+}
+
+func newStubOriginRepo() *stubOriginRepo {
+	return &stubOriginRepo{origins: map[string]string{}}
+}
+
+func (s *stubOriginRepo) Origin(userID string) (string, error) { return s.origins[userID], nil }
+
+func (s *stubOriginRepo) Set(userID, origin string) error {
+	if s.setErr != nil {
+		return s.setErr
+	}
+	s.origins[userID] = origin
+	return nil
+}
+
+func (s *stubOriginRepo) Clear(userID string) error { delete(s.origins, userID); return nil }
+
+// **モデレーターの凍結は local として刻む。** 刻まないと、リモート actor が
+// `toot:suspended` を下ろした時点で凍結が解除される (#2973)。
+func TestSuspendUser_RecordsLocalOrigin(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	origins := newStubOriginRepo()
+	h.SetSuspensionOriginRepo(origins)
+
+	rec := doPost(h.SuspendUser, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Equal(t, model.SuspensionOriginLocal, origins.origins["u1"],
+		"凍結の由来を刻んでいない。発信元が suspended を下ろすと解除される")
+}
+
+// **モデレーターの解除も local として刻む。** 刻まないと、発信元が立て続けて
+// いる限り次の actor refresh で無言で戻る (この issue が塞ぎに来た状態そのもの)。
+func TestUnsuspendUser_RecordsLocalOrigin(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", IsSuspended: true}
+	origins := newStubOriginRepo()
+	origins.origins["u1"] = model.SuspensionOriginRemote // 発信元由来で凍結されていた
+	h.SetSuspensionOriginRepo(origins)
+
+	rec := doPost(h.UnsuspendUser, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Equalf(t, model.SuspensionOriginLocal, origins.origins["u1"],
+		"解除の由来を刻んでいない。remote のまま残ると次の refresh で再凍結される")
+}
+
+// **解除で由来を記録できなかったら 500 を返す。** 記録できないまま解除すると
+// 「解除したはずが戻っている」状態になるので、成功として返さない。
+func TestUnsuspendUser_OriginWriteFailureIs500(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", IsSuspended: true}
+	origins := newStubOriginRepo()
+	origins.setErr = errors.New("connection refused")
+	h.SetSuspensionOriginRepo(origins)
+
+	rec := doPost(h.UnsuspendUser, `{"userId":"u1"}`, nil)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"由来を記録できないのに解除を成功として返している")
+}
+
+// **アカウント削除も local として刻む。** `isSuspended` と `isDeleted` を同時に
+// 立てるので、remote 由来の記録が残っていると発信元が tombstone の凍結を外せる。
+// inbound の gate は `isSuspended` しか見ないため、削除済みアカウントからの
+// activity が再び通ることになる。
+func TestAccountsDelete_RecordsLocalOrigin(t *testing.T) {
+	h, userRepo, _, _ := newTestHandler(t)
+	host := "remote.example"
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", Host: &host}
+	origins := newStubOriginRepo()
+	origins.origins["u1"] = model.SuspensionOriginRemote
+	h.SetSuspensionOriginRepo(origins)
+
+	rec := doPost(h.AccountsDelete, `{"userId":"u1"}`, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	assert.Equalf(t, model.SuspensionOriginLocal, origins.origins["u1"],
+		"削除で由来を刻んでいない。発信元が tombstone の凍結を外せる")
+}

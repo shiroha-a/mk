@@ -389,6 +389,10 @@ type Resolver struct {
 	publickeyExtraRepo PublickeyExtraStore         // optional: 追加公開鍵 (Ed25519 / Multikey) の永続化
 	capabilities       SignatureCapabilityDeclarer // optional: Ed25519 対応宣言の記録 (#2393)
 	pollRepo           repository.PollRepository   // optional: Question(投票)のPoll作成
+	// suspensionOriginRepo は凍結の由来 (local / remote) の記録先 (#2973)。
+	// **未配線なら `toot:suspended` を読まない** — 由来を持てない状態で自動
+	// 凍結すると、モデレーターが解除しても次の refresh で無言で戻る。
+	suspensionOriginRepo repository.UserSuspensionOriginRepository
 	// pinningRepo / pinningIDGen はリモート actor の featured コレクション
 	// (ピン留め投稿) の取り込み先 (#2552)。未配線なら取り込まない。
 	pinningRepo   repository.UserNotePiningRepository
@@ -526,6 +530,73 @@ func (r *Resolver) SetPublickeyExtraRepo(repo PublickeyExtraStore) {
 func (r *Resolver) SetPollRepo(repo repository.PollRepository) {
 	r.pollRepo = repo
 }
+
+// resolveSuspensionChange decides whether to follow the actor's `suspended`.
+//
+// **ローカルの判断には触らない。** Mastodon の `ProcessAccountService#set_suspension!`
+// と同じ形で、最初に由来を見て local なら何もしない:
+//
+//	return if @account.suspended? && @account.suspension_origin_local?
+//
+// 由来が remote (= こちらが actor を見て凍結した) なら、発信元の解除にも追従する。
+// 記録が無い行 (この表より前から凍結されている / まだ一度も判断していない) は
+// **local 扱い**にする — モデレーターが凍結した可能性があるものをリモートに
+// 解除させないため。安全側に倒しても、誤って local にした行はモデレーターが
+// 手で戻せる。
+//
+// 2 つ目の戻り値は「変更するかどうか」。false なら呼び出し元は触らない。
+func (r *Resolver) resolveSuspensionChange(existing *model.User, actorSuspended bool) (bool, bool) {
+	if r.suspensionOriginRepo == nil {
+		// 由来を記録できないなら読まない (#2951 の制約を再生産しない)。
+		return false, false
+	}
+	if existing.IsSuspended == actorSuspended {
+		return false, false
+	}
+	// **削除済みの行には触らない** (#2973)。`admin/accounts/delete` は
+	// `isSuspended` と `isDeleted` を同時に立てるので、発信元由来の凍結が
+	// 残っている tombstone を発信元が解除できてしまう。inbound の gate は
+	// `isSuspended` しか見ない (`processor.go` の dispatch 前チェック) ので、
+	// 解除されると削除済みアカウントからの activity が再び通る。
+	if existing.IsDeleted {
+		return false, false
+	}
+	origin, err := r.suspensionOriginRepo.Origin(existing.ID)
+	if err != nil {
+		// **DB 障害では判断しない。** 「記録が無い」と取り違えると、
+		// 接続断の瞬間にモデレーターの判断を上書きしうる。
+		slog.Warn("federation: failed to read suspension origin; leaving state untouched",
+			"userId", existing.ID, "err", err)
+		return false, false
+	}
+	if actorSuspended {
+		// 凍結する側: 記録が無い = まだ誰も判断していないので従う。
+		// local なら「モデレーターが解除した」ので従わない。
+		if origin == model.SuspensionOriginLocal {
+			return false, false
+		}
+		return true, true
+	}
+	// 解除する側: **remote 由来のときだけ従う。** 記録が無い行を解除すると、
+	// この表より前にモデレーターが凍結したものをリモートが解除できてしまう。
+	if origin != model.SuspensionOriginRemote {
+		return false, false
+	}
+	return false, true
+}
+
+// SetSuspensionOriginRepo wires the store that records who decided a user's
+// suspension state (#2973).
+//
+// **未配線なら actor の `toot:suspended` を読まない。** 由来を持てない状態で
+// 自動凍結すると、モデレーターが `admin/unsuspend-user` で解除しても次の
+// actor refresh で無言で戻る (#2951 の既知の制約そのもの)。
+func (r *Resolver) SetSuspensionOriginRepo(repo repository.UserSuspensionOriginRepository) {
+	r.suspensionOriginRepo = repo
+}
+
+// HasSuspensionOriginRepo reports whether the store is wired.
+func (r *Resolver) HasSuspensionOriginRepo() bool { return r.suspensionOriginRepo != nil }
 
 // SetPinningRepo wires the pinned-notes store used to import a remote actor's
 // featured collection (#2552). 未配線なら featured の取り込み自体を行わない。
@@ -783,8 +854,14 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		IsSuspended: actor.Suspended.Bool(),
 	}
 	if user.IsSuspended {
-		slog.Info("federation: creating remote actor as suspended per toot:suspended",
-			"uri", actor.ID, "userId", user.ID)
+		// **由来を持てないなら凍結しない。** 記録できないまま凍結すると、
+		// モデレーターが解除しても次の refresh で無言で戻る (#2951 の制約)。
+		if r.suspensionOriginRepo == nil {
+			user.IsSuspended = false
+		} else {
+			slog.Info("federation: creating remote actor as suspended per toot:suspended",
+				"uri", actor.ID, "userId", user.ID)
+		}
 	}
 	if name := remoteDisplayName(actor.Name.String()); name != "" {
 		user.Name = &name
@@ -850,6 +927,22 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	}
 	if err := r.userRepo.Create(user); err != nil {
 		return nil, err
+	}
+	// **凍結して作ったなら由来も刻む** (#2973)。刻まないと、この行は次の
+	// refresh で「由来不明 = 解除方向では local 扱い」になり、**発信元が
+	// 解除しても永久に凍結のまま**になる (two-way が効かない層ができる)。
+	//
+	// FK があるので Create の後でしか書けない。失敗したら宣言どおり凍結を
+	// 取り下げる — 記録の無い凍結は解除できるかが運任せになるため。
+	if user.IsSuspended && r.suspensionOriginRepo != nil {
+		if oerr := r.suspensionOriginRepo.Set(user.ID, model.SuspensionOriginRemote); oerr != nil {
+			slog.Warn("federation: failed to record suspension origin on create; unsuspending",
+				"userId", user.ID, "err", oerr)
+			if uerr := r.userRepo.UpdateUser(user.ID, map[string]any{"isSuspended": false}); uerr != nil {
+				slog.Warn("federation: failed to roll back suspension", "userId", user.ID, "err", uerr)
+			}
+			user.IsSuspended = false
+		}
 	}
 	// リレー経由で初めて観測した行を記録する (#2340)。孤児掃除の対象をリレー
 	// 由来に限定するために使う。**新規作成時のみ**。既に DB に在る行 (上の
@@ -1267,25 +1360,25 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	// された場合にローカルの判定もずれないように)。
 	fields["isLocked"] = actor.ManuallyApproves.Bool()
 	existing.IsLocked = actor.ManuallyApproves.Bool()
-	// **`suspended` は true だけを反映する一方向の信号** (#2951)。
-	//
-	// `false` で解除すると、**侵害された発信元がこちらのモデレーターの判断を
-	// 取り消せる**。`true` のほうは「相手が自分の利用者を切った」という自己
-	// 申告なので、他人を貶めることには使えず安全に受け取れる。
-	//
-	// 発信元が解除してもこちらは凍結のままになるが、それはモデレーターが手で
-	// 戻せる。逆向きの事故のほうが回復しにくい。
-	if actor.Suspended.Bool() && !existing.IsSuspended {
-		fields["isSuspended"] = true
-		existing.IsSuspended = true
-		// **痕跡を残す。** これはモデレーターの操作を伴わない自動凍結で、
-		// moderation log には載らない。しかも**発信元が立てている間は
-		// `admin/unsuspend-user` の結果が次の refresh で無言で戻る**
-		// (`/api/federation/update-remote-user` は RequireAuth だけなので、
-		// 任意のログイン利用者が TTL を待たずに発火できる)。せめて
-		// 「なぜ凍結されたのか」が追える形にしておく。
-		slog.Info("federation: suspending remote actor per toot:suspended",
-			"uri", actor.ID, "userId", existing.ID)
+	// **由来 (#2973) を見て決める。** `local` = モデレーターの判断には触らず、
+	// `remote` = こちらが actor を見て凍結した行だけが発信元の解除に追従する。
+	// 記録が無い行は解除方向では `local` 扱い (安全側)。
+	if suspend, ok := r.resolveSuspensionChange(existing, actor.Suspended.Bool()); ok {
+		fields["isSuspended"] = suspend
+		existing.IsSuspended = suspend
+		// **痕跡を残す。** これはモデレーターの操作を伴わない変更で、
+		// moderation log には載らない。
+		slog.Info("federation: updating remote suspension per toot:suspended",
+			"uri", actor.ID, "userId", existing.ID, "suspended", suspend)
+		if err := r.suspensionOriginRepo.Set(existing.ID, model.SuspensionOriginRemote); err != nil {
+			// **由来を記録できなかったら凍結もしない。** 記録が無いまま
+			// 凍結すると、次の refresh で「由来不明」として扱われ、モデレーターが
+			// 解除しても戻せるかどうかが運任せになる。
+			slog.Warn("federation: failed to record suspension origin; skipping",
+				"uri", actor.ID, "userId", existing.ID, "err", err)
+			delete(fields, "isSuspended")
+			existing.IsSuspended = !suspend
+		}
 	}
 	if name := remoteDisplayName(actor.Name.String()); name != "" {
 		fields["name"] = &name

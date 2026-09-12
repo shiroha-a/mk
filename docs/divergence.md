@@ -33,7 +33,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 |---|---|---|---|
 | API endpoint | GET variant 23 + alias 4 + 分割アップロード 4 + 承認制 7 + 絵文字の申請 6 + exact assignment lookup 2 + admin 観測 5 | chat 15 | **0** |
 | API レスポンスの additive field | 6 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup` / `signupApplicationForm` / `canRequestCustomEmojis`) | reversi packed game の `crc32` 等 | — |
-| DB テーブル | 11 (+ bookkeeping 2) | 0 | 0 |
+| DB テーブル | 12 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
@@ -114,7 +114,7 @@ upstream 由来のクライアントはそのまま通る (省略時は upstream
 
 **逆方向の欠落はゼロ** — upstream の `@Entity` 76 テーブルと全共有カラムを mk-go が superset で保持している。
 
-### 2-1. mk-go 独自テーブル (13)
+### 2-1. mk-go 独自テーブル (14)
 
 | テーブル | 由来 | 理由 |
 |---|---|---|
@@ -125,6 +125,7 @@ upstream 由来のクライアントはそのまま通る (省略時は upstream
 | `chunked_upload_session` | mk-go 独自 | 分割アップロード (#2313) の進行中セッション。S3 の `UploadId` はここでだけ保持しクライアントには露出しない。`user` への FK は張らない — CASCADE で行だけ消えると `AbortMultipartUpload` されない未完了マルチパートアップロードが孤児として課金され続けるため、期限切れ GC に回収させる |
 | `emoji_application` | mk-go 独自 | カスタム絵文字の登録申請 (#2934)。**承認までは `emoji` 行を作らない** — 承認待ちを `emoji` に隠し列で持たせると、TS へ切り替えた瞬間に未承認の絵文字が全部有効になる (TS は mk-go 独自の列を知らない)。`signup_application` (#2555) が `user` に対して採ったのと同じ形。`kind` 列は自作画像 (`own`) とリモート絵文字の取り込み (`remote`、#2935) で 1 テーブルを共有するために持つ — 審査する側が見る場所を 2 つに増やさないため。`remote` では `fileId` ではなく `remoteHost` / `remoteName` が素材を指す。`user` / `drive_file` / `emoji` への FK は張らない (`signup_application` と同じ方針)。**純正へは還元できない行** (申請という概念自体が upstream に無い)。 |
 | `signup_application` | mk-go 独自 | 承認制の登録 (#2554 / #2555) の申請。**承認待ちを `user` 行として持たないための箱**で、`user` に承認列を足す設計だと TS へ切り替えた瞬間に承認待ち全員が有効なアカウントになる (TS はその列を知らないので素通りする)。申請の回答は `answers` 列に**提出時のラベルを同梱して**持つ (#2570) — 定義を後から変えても既存の申請がどの設問への答えだったか分かる。本人性は**クレームコードの SHA-256** が担保する (#2569) — 平文で持つと DB が漏れた時点で全申請が乗っ取れる。重複申請を DB では抑止しないので、captcha とレート制限が防波堤になる。TS は未知のテーブルを無視するだけ。**ticket を発行するのはメール確認の経路だけ** (#2813) — 即時作成では発行しても誰も参照しない (一回性は `settleApplicationTx` の行ロックが担保する、#2580) ので、`registration_ticket` の行が 1 つ増えるだけだった。即時作成では `ticketId` を**新しく記録しない**ぶん、監査は `processedById` / `usedById` で辿る (メール必須を切る前に始まっていた確認待ちの残骸だけは、ticket を破棄したあとも値として残る = dangling)。メール確認の経路で ticket が担うのは**前回試行の失効**で、置き換えた古い ticket を消すと確認リンクが失効し最新の試行だけが通る。再試行の直列化は ticket ではなく申請行のロック、`/api/signup` の 30 分の再送防止窓はこの経路を通らない。**内部発行する `registration_ticket` は `createdById` を入れない** (#2805) — 審査した管理者を入れると承認のたびにその管理者名義の招待が 1 枚増え、`invite/create` / `invite/limit` の上限 (`CountByCreatorSince`) を食い、利用者の `invite/list` (`ListByCreator`) にも出る (どちらも `WHERE "createdById" = ?` なので NULL は外れる)。監査は失われない — 審査した管理者は `processedById`、登録者は `usedById` で、どちらも**この表に FK が 1 つも無い**ので user を消しても残る。ticket 行のほうは `createdById` / `usedById` の FK がどちらも `ON DELETE CASCADE` なので、審査した管理者か登録者のどちらかを消せば消える (`ticketId` は dangling になる)。`createdById` を入れないとその引き金が 1 つ減る。**upstream が作らない状態を作る** — `createdById` が NULL の行は管理画面の招待一覧に `createdBy: null` (= `system` 表示) で出る (#2813 以降、この行が新しく増えるのはメール確認の経路だけ)。**`invite/delete` のモデレーターは消せる** (#2812 で upstream の bypass を入れた。それ以前は API から消す手段が無く、TS へ切り替えると消せるようになる非対称があった)。ただし endpoint 自体が `canInvite` の後段にあり、この policy を無条件に通るのは administrator / root だけ (既定は false) なので、**`canInvite` を持たない素のモデレーターは handler に届かず 403 になる** — これは upstream も同じ (`ApiCallService` の bypass も root と administrator のみ)。あわせて非モデレーターが使用済みの招待を消せる緩さも塞ぎ、`invite/list` の `used` を `usedAt` 由来に揃えた (upstream / `admin/invite/list` と同じ。`usedById` 由来だと確認メール待ちの ticket が未使用に見え、削除ボタンを押すと 400 になる)。**#2805 より前に作られた行はそのまま残す** — 上限は `inviteLimitCycle` (既定 7 日) の窓から抜けて自然に解消するが、`ListByCreator` は時間窓を持たないので個人の招待一覧には残り続ける。監査行の書き換えになるため移行は書かない |
+| `user_suspension_origin` | mk-go 独自 | 凍結の由来 (`local` / `remote`) を記録する (#2973)。リモート actor の `toot:suspended` を読む (#2951) にあたって、**モデレーターの判断がリモートに巻き戻されない**ようにするために要る。Mastodon は `accounts.suspension_origin` 列で同じことをしている。**`user` に列を足さず別テーブルにしてある** — TS は未知の列も無視するので列追加でも復路は壊れないが、別テーブルなら TS 側から一切見えず、`user` という連合・認証・API のあらゆる経路が触るホットテーブルにも手を入れずに済む (`relay_observed_user` と同じ判断)。TS へ切り替えると由来は失われるが、`user.isSuspended` は残るので**凍結は維持される**。既存の凍結済みユーザーは migration で `local` として登録する (安全側) |
 | `relay_observed_user` | mk-go 独自 | リレー経由で初めて観測した remote user の印 (#2340)。孤児掃除の対象をリレー由来に限定するために使う。印が無いと、リレー購読前から居る行やプロフィール閲覧・スレッド遡りで解決された行まで巻き込む。**`user` に列を足さず別テーブルにしてある**: TS は未知の列も無視するので列追加でも復路は壊れないが、別テーブルなら TS 側から一切見えず `check-migrations` にも差分が出ない。`user` は連合・認証・API のあらゆる経路が触るホットテーブルでもあるため、触らずに済ませる |
 | `instance_secret` | mk-go 独自 | インスタンスごとに生成する秘密値。最初の用途は media proxy の HMAC 鍵。以前は設定に `mediaProxySecret` が無いとインスタンス URL から導出していたが、**URL は公開情報なので誰でも同じ鍵を計算でき署名を偽造できた**。鍵はプロセス間・再起動をまたいで安定している必要があるので (署名した URL を別プロセスが検証する / 発行済み URL が再起動後も有効)、起動時のメモリ生成では足りず DB に置く |
 | `instance_signature_capability` | mk-go 独自 | リモートインスタンスがどの署名方式に対応しているかを host 単位で記録する。判定材料は宣言 (actor の `assertionMethod[]`) / 受信観測 / 送信結果の 3 系統で、それぞれ単独では穴があるので併記する |
@@ -223,19 +224,34 @@ mk-go の migration は TS 製の既存 DB にも流れるため、`CREATE TABLE
 「リモートの moderation 判断が、こちらの利用者が書いたノートの表示可否を決める」経路が
 新しくできる。データは消えないので凍結を解けば戻るが、下記の制約がある。
 
-**`true` だけを反映する一方向の信号。** `false` で解除すると、侵害された発信元が
-こちらのモデレーターの判断を取り消せる。`true` は「相手が自分の利用者を切った」という
-自己申告なので他人を貶めることには使えず、安全に受け取れる。actor document を出した
-ホストと `actor.id` のホストの一致は `fetchActor` が必須にしているので、第三者が他人に
-付けることもできない。
+**自己申告に限られる。** actor document を出したホストと `actor.id` のホストの一致は
+`fetchActor` が必須にしているので、第三者が他人に `suspended` を付けることはできない。
 
-**既知の制約: 発信元が `suspended` を立て続けている間、モデレーターは解除できない。**
-`admin/unsuspend-user` の結果は次の actor refresh で無言で戻る。しかも
-`/api/federation/update-remote-user` は `RequireAuth` だけなので、任意のログイン利用者が
-TTL を待たずに再凍結を発火できる。自動凍結は moderation log に載らないので、
-`slog.Info("federation: suspending remote actor per toot:suspended", ...)` を出している。
-Mastodon は `suspension_origin` (local / remote) を持ってこれを解いており、mk-go も同じ
-形にするのが本筋 (別途)。
+**凍結の由来を持つので、モデレーターの判断はリモートに巻き戻らない** (#2973)。
+`user_suspension_origin` に `local` / `remote` を記録する。**Mastodon を出発点にしつつ、
+解除側も記録する点だけ厳しくしてある** — Mastodon の `unsuspend!` は
+`suspension_origin` を `nil` に戻すので、モデレーターが解除しても発信元が立て直せば
+再凍結される。mk-go は解除も `local` として刻むので、その巻き戻しが起きない
+(この乖離の目的がまさにそこなので、原典より厳しい側に倒している)。判定の骨格は
+`ProcessAccountService#set_suspension!` と同じ:
+
+- モデレーターが凍結・解除した行 (`local`) には**触らない**
+- こちらが actor を見て凍結した行 (`remote`) は、発信元の解除にも**追従する** (two-way)
+- **記録が無い行は `local` 扱い** — この表より前から凍結されている行をリモートに解除
+  させないため。誤って `local` にしてもモデレーターが手で戻せるが、逆は回復しにくい
+- **由来を記録できないなら凍結もしない** (未配線 / 書き込み失敗)。記録の無い凍結は
+  次の refresh で「由来不明 = local」になり、解除できるかどうかが運任せになる
+- **由来の読み取りが失敗したら触らない** — 「記録が無い」と取り違えると、接続断の
+  瞬間にモデレーターの判断を上書きしうる
+
+**`user` に列を足さず別テーブルにしてある** (`relay_observed_user` / `signup_application`
+と同じ判断)。TS は未知の列も無視するので列追加でも復路は壊れないが、別テーブルなら
+TS 側から一切見えない。自動での変更は moderation log に載らないので `slog.Info` を出す。
+
+**drop-in で往復すると、`remote` の行だけ古くなる。** TS は由来を知らないので、TS 稼働中に
+モデレーターが「発信元がまだ凍結を主張しているリモート利用者」を解除し、その後 mk-go へ
+戻すと、行は `remote` のままなので**次の refresh で再凍結される**。`local` が付いている行は
+守られるので、影響は「こちらが actor を見て凍結した行」に限られる。
 
 **読めない形は `false` に倒す** (`APLenientBool`)。`APTruthyBool` だと `[]` / `{"a":1}` /
 `"maybe"` のような壊れた値が `true` になり、**誤って凍結する** (差が出る入力を実測で確認)。

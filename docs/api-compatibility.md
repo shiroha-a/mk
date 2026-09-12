@@ -280,9 +280,9 @@ TS版の`.config/default.yml`をそのまま使用可能。以下の設定もGo�
 
 Go側のマイグレーション (000001〜) はTS版テーブルに対して原則追加のみだが、例外が 13 件ある ([migration-from-ts.md](migration-from-ts.md#破壊的なマイグレーション))。TS版のマイグレーションで作成される全テーブルは維持される。
 
-**mk-go 固有のテーブル (upstream に対応するものが無い) は 10 件:**
+**mk-go 固有のテーブル (upstream に対応するものが無い) は 11 件:**
 
-> [divergence.md](divergence.md) §2-1 は同じものを **13** と数えている。差は 3 件で、
+> [divergence.md](divergence.md) §2-1 は同じものを **14** と数えている。差は 3 件で、
 > あちらは `note_unread` (upstream DB には legacy として残るが 2026.7.0 の `models/` に
 > entity が無く参照 0 件。mk-go はこれを実用している) と bookkeeping 2 件
 > (`migrations` / `schema_migrations`) を加える。CI の
@@ -299,8 +299,9 @@ Go側のマイグレーション (000001〜) はTS版テーブルに対して原
 | `instance_signature_capability` | 相手インスタンスの署名方式 capability | `000073` |
 | `signup_application` | 登録申請 | `000075` |
 | `emoji_application` | カスタム絵文字の登録申請 (#2934) | `000086` |
+| `user_suspension_origin` | 凍結の由来 (local / remote、#2973) | `000087` |
 
-mk-go の migration が作るテーブルは 113。上記 10 件と golang-migrate 台帳の
+mk-go の migration が作るテーブルは 114。上記 11 件と golang-migrate 台帳の
 `schema_migrations` を除く **102 はすべて upstream にも存在する** (TypeORM 台帳の
 `migrations` を含む)。
 
