@@ -364,6 +364,7 @@ export default definePlugin({
 | `settings:profile` | 設定 > プロフィール |
 | `admin:federation` | コントロールパネル > 連合（一覧の手前） |
 | `admin:instance-info` | インスタンス情報の概要タブ（`ctx.host` が渡る） |
+| `admin:user` | ユーザーのモデレーション画面の概要タブ（`ctx.user` が渡る）。`profile:info` と違い**モデレーターにしか見えない**ので、裁く材料はこちらへ置く |
 
 **位置は意味で定義されている。** upstream がコンポーネント名を変えても壊れない。
 
