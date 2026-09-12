@@ -36,6 +36,9 @@ var noPaginatorAutoLoad = map[string]string{
 	"MkDrive.vue": "drive/files / drive/folders にレート制限が無い",
 }
 
+// noPaginatorAutoLoad の除外の根拠になっている endpoint。制限が付いたら落とす。
+var noPaginatorAutoLoadEndpoints = []string{"drive/files", "drive/folders"}
+
 // bindsRateLimitedNotice reports whether the file binds the notice component.
 //
 // #2915 の `bindsSlotComponent` と同じ形 — パスを含む行から引用符の中身を
@@ -67,7 +70,7 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 	// だけを見ており、**サブディレクトリ / `pages` / `widgets` の 376 ファイルが
 	// 範囲外**だった。今は取りこぼしゼロだが、範囲外に自動追い読みを足した
 	// ときに**静かに検査から外れる**。
-	var autoLoading, missing, noImport []string
+	var autoLoading, missing, noImport []string // autoLoading はフルパス
 	require.NoError(t, filepath.WalkDir(fe, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || filepath.Ext(path) != ".vue" {
 			return err
@@ -83,7 +86,11 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 			return nil
 		}
 		name := filepath.Base(path)
-		autoLoading = append(autoLoading, name)
+		// **フルパスで持つ (レビュー 3 周目 M-1)。** basename だけを溜めて
+		// 後で `components/` から読み直す形にしていたため、`components` の外に
+		// 同名のファイルがあると**別のファイルを検査していた** (実測で
+		// `pages/MkPagination.vue` に欠陥のあるものを置いても緑だった)。
+		autoLoading = append(autoLoading, path)
 		if _, skip := noPaginatorAutoLoad[name]; skip {
 			return nil
 		}
@@ -114,6 +121,16 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 	require.Emptyf(t, missing,
 		"自動追い読みを持つのにレート制限の理由を出していない: %v\n"+
 			"429 で停止したとき、ボタンが黙って消えるだけになり「これで全部」に見える (#2955)", missing)
+	// **allowlist の理由を実装と突き合わせる (レビュー 3 周目 M-2)。** 除外の
+	// 根拠は「その endpoint にレート制限が無い」ことなので、制限を足した瞬間に
+	// 落ちる必要がある。ファイル名で引くだけだと、理由が偽になっても静かに
+	// 検査から外れたままになる。
+	defs := readFileString(t, filepath.Join(repoRootDir(t), "internal", "server", "middleware", "ratelimit_defs.go"))
+	for _, ep := range noPaginatorAutoLoadEndpoints {
+		require.NotContainsf(t, stripComments(defs), `"`+ep+`":`,
+			"%s にレート制限が付いた。除外の根拠が消えたので noPaginatorAutoLoad から外すこと", ep)
+	}
+
 	require.Emptyf(t, noImport,
 		"<MkRateLimitedNotice> は置かれているが import していない: %v\n"+
 			"components/global/ ではないのでグローバル登録されておらず、解決できないまま\n"+
@@ -127,11 +144,12 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 	// **MkError より前の枝に置くこと (レビュー 2 周目 H-1)。** v-if チェーンは
 	// 排他なので、後ろに置くと初回取得の 429 (= `error` も立つ) で必ず
 	// `MkError` (「何かがおかしいようです」) が選ばれ、**理由が画面に出ない**。
-	for _, name := range autoLoading {
+	for _, path := range autoLoading {
+		name := filepath.Base(path)
 		if _, skip := noPaginatorAutoLoad[name]; skip {
 			continue
 		}
-		src := stripComments(readFileString(t, filepath.Join(components, name)))
+		src := stripComments(readFileString(t, path))
 		notice := strings.Index(src, "<MkRateLimitedNotice v-else-if")
 		mkError := strings.Index(src, "<MkError")
 		require.GreaterOrEqualf(t, notice, 0, "%s: MkError と同じ枝に notice が無い", name)
@@ -141,8 +159,10 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 		}
 		// **読めている分があるときはこの枝を選ばない。** 条件を落とすと
 		// 429 で**一覧ごと消える** (H-1 の修正が一度作った回帰)。
-		require.Containsf(t, src, `v-else-if="paginator.rateLimited.value && paginator.items.value.length === 0"`,
-			"%s: 初回失敗用の枝に「一覧が空」の条件が無い。429 で一覧ごと消える", name)
+		// **条件は `error`。** items の件数で見ると、streaming が 1 件 prepend した
+		// 瞬間に枝から外れて MkError に戻る (realtimeMode は既定 true)。
+		require.Containsf(t, src, `v-else-if="paginator.rateLimited.value && paginator.error.value"`,
+			"%s: 初回失敗用の枝の条件が error でない。streaming で 1 件届くと MkError に戻る", name)
 	}
 
 	for _, want := range []struct{ frag, why string }{
@@ -150,7 +170,7 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 		{"i18n.ts.rateLimitExceeded", "理由の文言が出ない"},
 		{`@click="retry"`, "再試行の導線が無い"},
 		{"props.paginator.retryAfterRateLimit()", "再試行が Paginator を呼んでいない"},
-		{":disabled=\"cooling\"", "再試行に冷却が無い。押すほど窓が延びる"},
+		{`:disabled="!paginator.canRetryAfterRateLimit.value"`, "再試行の冷却が Paginator 側でない。枝の移動でアンマウントされて消える"},
 	} {
 		require.Containsf(t, noticeSrc, want.frag, "MkRateLimitedNotice: %s", want.why)
 	}
