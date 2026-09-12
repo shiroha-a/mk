@@ -18,17 +18,39 @@ import (
 // いた。**文字列照合では振る舞いを検証できない。**
 //
 // ここが見るのは vitest では届かない範囲、すなわち**新しい自動追い読みの場所が
-// 増えたときに理由の表示を忘れる**ことだけ。実際 `i/notifications`
-// (30s/30 と、このプロジェクトで最も厳しい閲覧系の制限) は `MkPagination` を
+// 増えたときに理由の表示を忘れる**ことだけ。実際 `i/notifications` は `MkPagination` を
 // 経由せず独自のボタンを持っており、**そこだけ理由が出ていなかった**。
 //
 // **既知の取りこぼし**: `MkDrive` は Paginator を使わず独自の `fetchMoreFiles`
 // で回すので対象外 (`drive/files` にレート制限も無い)。allowlist に理由付きで
 // 持つ。
 var noPaginatorAutoLoad = map[string]string{
-	// Paginator ではなく独自の fetchMoreFiles / canFetchFiles で回す。
-	// drive/files にレート制限は無い。
-	"MkDrive.vue": "Paginator を使わない",
+	// **`drive/files` / `drive/folders` にレート制限が無い** (`DefaultEndpointLimits`
+	// に無く、middleware は未登録 endpoint を素通しする) ので 429 が来ない。
+	//
+	// **当初「Paginator を使わない」と書いていたが事実と逆** (レビュー 2 周目 M-2)。
+	// `MkDrive` は `new Paginator('drive/files', ...)` を持ち、`fetchMoreFiles` は
+	// それを呼ぶだけ。**`drive/files` に制限を足したら、ここを外して
+	// `:paginator` を渡すだけで済む** — 誤った理由を残すと「使えない」と
+	// 誤解される。
+	"MkDrive.vue": "drive/files / drive/folders にレート制限が無い",
+}
+
+// bindsRateLimitedNotice reports whether the file binds the notice component.
+//
+// #2915 の `bindsSlotComponent` と同じ形 — パスを含む行から引用符の中身を
+// 消して識別子が残るかを見る。import の書き方 (静的 / 動的 / 相対) に依存せず、
+// 別名 import やパスを文字列として置いただけの形は落ちる。
+func bindsRateLimitedNotice(src string) bool {
+	for _, line := range strings.Split(src, "\n") {
+		if !strings.Contains(line, "MkRateLimitedNotice.vue") || typeOnlyImport.MatchString(line) {
+			continue
+		}
+		if strings.Contains(quotedRe.ReplaceAllString(line, ""), "MkRateLimitedNotice") {
+			return true
+		}
+	}
+	return false
 }
 
 func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
@@ -41,28 +63,50 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 		t.Skipf("submodule が無い (checkout する job でのみ検査する)")
 	}
 
-	entries, err := os.ReadDir(components)
-	require.NoError(t, err)
-
-	var autoLoading, missing []string
-	for _, e := range entries {
-		if e.IsDir() || filepath.Ext(e.Name()) != ".vue" {
-			continue
+	// **`src` 全体を歩く (レビュー 2 周目 M-3)。** 当初は `components/` 直下
+	// だけを見ており、**サブディレクトリ / `pages` / `widgets` の 376 ファイルが
+	// 範囲外**だった。今は取りこぼしゼロだが、範囲外に自動追い読みを足した
+	// ときに**静かに検査から外れる**。
+	var autoLoading, missing, noImport []string
+	require.NoError(t, filepath.WalkDir(fe, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() || filepath.Ext(path) != ".vue" {
+			return err
 		}
-		src := stripComments(readFileString(t, filepath.Join(components, e.Name())))
-		if !strings.Contains(src, "v-appear") {
-			continue
+		src := stripComments(readFileString(t, path))
+		// **`v-appear` だけでなく poll も見る。** streaming 系は
+		// `useInterval` で 10〜22.5 秒ごとに撃つので、`v-appear` を持たない
+		// コンポーネントでも 429 に当たる。
+		if !strings.Contains(src, "v-appear") && !strings.Contains(src, "useInterval") {
+			return nil
 		}
-		autoLoading = append(autoLoading, e.Name())
-		if _, skip := noPaginatorAutoLoad[e.Name()]; skip {
-			continue
+		if !strings.Contains(src, "fetchOlder") && !strings.Contains(src, "fetchNewer") {
+			return nil
+		}
+		name := filepath.Base(path)
+		autoLoading = append(autoLoading, name)
+		if _, skip := noPaginatorAutoLoad[name]; skip {
+			return nil
 		}
 		// **template での使用を見る。** 識別子だけを探すと **import 行が
 		// 残っているだけで緑になる** (実測で素通りした)。
-		if !strings.Contains(src, "<MkRateLimitedNotice") {
-			missing = append(missing, e.Name())
+		// **2 箇所とも要る。** 初回失敗用 (`v-else-if`、一覧が空のとき) と、
+		// 読めている一覧の末尾に出す用。片方だけだと、もう片方の状況で
+		// 何も出ない (実測で末尾だけ消しても素通りした)。
+		if strings.Count(src, "<MkRateLimitedNotice") < 2 {
+			missing = append(missing, name)
+			return nil
 		}
-	}
+		// **import も見る (レビュー 2 周目 H-2)。** `MkRateLimitedNotice` は
+		// `components/global/` ではないので**グローバル登録されていない**。
+		// import を落とすと解決できないまま素の要素として描画され、
+		// **production では警告すら出ない**。実測で vue-tsc も eslint も
+		// このゲートも緑のままだった。#2915 の `plugin_slot_gate_test.go` が
+		// 同じ条件で同じ検査を持っている。
+		if !bindsRateLimitedNotice(src) {
+			noImport = append(noImport, name)
+		}
+		return nil
+	}))
 
 	// 拾えなかったら落とす。書式が変わって空振りすると、検査していないのに
 	// 緑になる (#2874 / #2828 と同じ判断)。
@@ -70,12 +114,37 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 	require.Emptyf(t, missing,
 		"自動追い読みを持つのにレート制限の理由を出していない: %v\n"+
 			"429 で停止したとき、ボタンが黙って消えるだけになり「これで全部」に見える (#2955)", missing)
+	require.Emptyf(t, noImport,
+		"<MkRateLimitedNotice> は置かれているが import していない: %v\n"+
+			"components/global/ ではないのでグローバル登録されておらず、解決できないまま\n"+
+			"素の要素として描画される (production では無言)", noImport)
 
 	// **表示そのものが中身を持っていること。** 上は「置いてあるか」しか見て
 	// いないので、`MkRateLimitedNotice` の中を空にすると全部素通りする
 	// (実測で `v-if="false"` と再試行の削除が通った)。
-	notice := stripComments(readFileString(t,
+	noticeSrc := stripComments(readFileString(t,
 		filepath.Join(components, "MkRateLimitedNotice.vue")))
+	// **MkError より前の枝に置くこと (レビュー 2 周目 H-1)。** v-if チェーンは
+	// 排他なので、後ろに置くと初回取得の 429 (= `error` も立つ) で必ず
+	// `MkError` (「何かがおかしいようです」) が選ばれ、**理由が画面に出ない**。
+	for _, name := range autoLoading {
+		if _, skip := noPaginatorAutoLoad[name]; skip {
+			continue
+		}
+		src := stripComments(readFileString(t, filepath.Join(components, name)))
+		notice := strings.Index(src, "<MkRateLimitedNotice v-else-if")
+		mkError := strings.Index(src, "<MkError")
+		require.GreaterOrEqualf(t, notice, 0, "%s: MkError と同じ枝に notice が無い", name)
+		if mkError >= 0 {
+			require.Lessf(t, notice, mkError,
+				"%s: notice が MkError より後ろにある。初回の 429 で理由が出ない", name)
+		}
+		// **読めている分があるときはこの枝を選ばない。** 条件を落とすと
+		// 429 で**一覧ごと消える** (H-1 の修正が一度作った回帰)。
+		require.Containsf(t, src, `v-else-if="paginator.rateLimited.value && paginator.items.value.length === 0"`,
+			"%s: 初回失敗用の枝に「一覧が空」の条件が無い。429 で一覧ごと消える", name)
+	}
+
 	for _, want := range []struct{ frag, why string }{
 		{`v-if="paginator.rateLimited.value"`, "レート制限のときだけ出す条件が無い"},
 		{"i18n.ts.rateLimitExceeded", "理由の文言が出ない"},
@@ -83,6 +152,6 @@ func TestAutoLoadingComponentsShowRateLimit(t *testing.T) {
 		{"props.paginator.retryAfterRateLimit()", "再試行が Paginator を呼んでいない"},
 		{":disabled=\"cooling\"", "再試行に冷却が無い。押すほど窓が延びる"},
 	} {
-		require.Containsf(t, notice, want.frag, "MkRateLimitedNotice: %s", want.why)
+		require.Containsf(t, noticeSrc, want.frag, "MkRateLimitedNotice: %s", want.why)
 	}
 }
