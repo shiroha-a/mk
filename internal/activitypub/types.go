@@ -970,11 +970,21 @@ type Person struct {
 	// _misskey_requireSigninToViewContents を常に boolean で出力する。omitempty だと
 	// false で key 自体が消えて wire-shape が乖離するため omitempty を外す (#1948-11)。
 	// 値は RenderPerson で user 状態から populate 済み。
-	ManuallyApproves APTruthyBool    `json:"manuallyApprovesFollowers"`
-	Discoverable     APLenientBool   `json:"discoverable"`
-	IsCat            APLenientBool   `json:"isCat"`
-	VcardBday        APLenientString `json:"vcard:bday,omitempty"`
-	VcardAddress     APLenientString `json:"vcard:Address,omitempty"`
+	ManuallyApproves APTruthyBool `json:"manuallyApprovesFollowers"`
+	// Suspended is the Mastodon extension `toot:suspended` (#2951).
+	//
+	// **読むだけで、こちらからは出さない。** `RenderPerson` は設定しないので
+	// 常に false になり、`omitempty` で wire にも出ない (upstream Misskey も
+	// 出さないので shape は変わらない)。Misskey 系は凍結時に `Delete` を送り、
+	// Mastodon 系は actor にこれを立てるだけ、という違いを埋めるために読む。
+	//
+	// **`APLenientBool` を使う** (読めない形は false)。`APTruthyBool` だと
+	// 壊れた値で誤って凍結してしまう。
+	Suspended    APLenientBool   `json:"suspended,omitempty"`
+	Discoverable APLenientBool   `json:"discoverable"`
+	IsCat        APLenientBool   `json:"isCat"`
+	VcardBday    APLenientString `json:"vcard:bday,omitempty"`
+	VcardAddress APLenientString `json:"vcard:Address,omitempty"`
 	// #2106 L50: upstream renderPerson は _misskey_summary / _misskey_followedMessage を常時
 	// 出力する (description/followedMessage が null なら JSON null)。*string + omitempty 無しで
 	// nil→null を明示出力し wire-shape を揃える。

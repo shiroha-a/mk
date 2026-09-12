@@ -195,6 +195,59 @@ mk-go の migration は TS 製の既存 DB にも流れるため、`CREATE TABLE
 
 ## 3. ActivityPub
 
+### 3-3a. リモート actor の `suspended` を読む (mk-go 独自)
+
+**upstream は読まない。** `ApPersonService` / `type.ts` に `suspended` の参照は無く、
+`ApRendererService` も出力しない。mk-go は**読むだけ**で、こちらからは出さない
+(`RenderPerson` は設定しないので wire shape は変わらない。`TestRenderPerson_SuspendedIsNeverEmitted`
+で固定)。
+
+**理由は、凍結したときの合図がファミリーで違うこと。**
+
+| 発信元 | 凍結したときの合図 | 読まないと起きること |
+|---|---|---|
+| Misskey 系 | `Delete` を送る (`UserSuspendService.postSuspend` が `renderDelete` を全 sharedInbox へ) | `isDeleted = true` になる (対処済み) |
+| Mastodon 系 | actor に `toot:suspended` を立てて `Update(Actor)` を push + collections が 403 | **何も起きない** |
+
+**結末は Misskey 系と同じにはならない。** 立つ列も残るデータも違う:
+
+| | Misskey 系 (`Delete` 受信) | Mastodon 系 (この機能) |
+|---|---|---|
+| 立つ列 | `isDeleted` | `isSuspended` |
+| ノート・ドライブ・following 行 | **削除される** | 残る (読み取り時に隠れるだけ) |
+| 保留中のフォローリクエスト | 残る | **残る** (`cleanupSuspendedUserRelations` は admin 経路だけが呼ぶ) |
+| その人宛のローカル利用者の返信・リノート | 表示されたまま | **timeline から消える** |
+
+最後の行は方向が逆になる。`applySuspendedAuthorExclusion` が見るのは `isSuspended` だけで
+`isDeleted` を見ないため、**この経路のほうが巻き添えが大きい**。つまり
+「リモートの moderation 判断が、こちらの利用者が書いたノートの表示可否を決める」経路が
+新しくできる。データは消えないので凍結を解けば戻るが、下記の制約がある。
+
+**`true` だけを反映する一方向の信号。** `false` で解除すると、侵害された発信元が
+こちらのモデレーターの判断を取り消せる。`true` は「相手が自分の利用者を切った」という
+自己申告なので他人を貶めることには使えず、安全に受け取れる。actor document を出した
+ホストと `actor.id` のホストの一致は `fetchActor` が必須にしているので、第三者が他人に
+付けることもできない。
+
+**既知の制約: 発信元が `suspended` を立て続けている間、モデレーターは解除できない。**
+`admin/unsuspend-user` の結果は次の actor refresh で無言で戻る。しかも
+`/api/federation/update-remote-user` は `RequireAuth` だけなので、任意のログイン利用者が
+TTL を待たずに再凍結を発火できる。自動凍結は moderation log に載らないので、
+`slog.Info("federation: suspending remote actor per toot:suspended", ...)` を出している。
+Mastodon は `suspension_origin` (local / remote) を持ってこれを解いており、mk-go も同じ
+形にするのが本筋 (別途)。
+
+**読めない形は `false` に倒す** (`APLenientBool`)。`APTruthyBool` だと `[]` / `{"a":1}` /
+`"maybe"` のような壊れた値が `true` になり、**誤って凍結する** (差が出る入力を実測で確認)。
+真と読むのは PostgreSQL の boolean 入力構文 (`"true"` / `"yes"` / `1` など) なので、
+実際に `suspended` を出す Mastodon が送る素の JSON `true` より広い。片方向で巻き戻せない
+操作としては広い側だが、コードベースの他の AP boolean (`isCat` / `discoverable`) と
+判定を揃えてある。
+
+**キー名だけで読み、`@context` は見ない。** 他の AP boolean も同じで、upstream も同じ。
+意味の衝突が無いことを Mastodon (凍結時のみ出力) / Akkoma (出力なし) / Misskey (参照なし)
+で確認した。Pleroma / GoToSocial は未確認。
+
 ### 3-4. リモート note と antenna
 
 **upstream は載せる。** `ApInboxService` の Announce 経路は `fromRelay` 分岐で

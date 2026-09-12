@@ -178,3 +178,26 @@ func TestRenderNote_PublishedMillis(t *testing.T) {
 	out := r.RenderNote(n, idGen)
 	assert.Regexp(t, millisZ, out.Published, "Note.published は .000Z (#1948-11)")
 }
+
+// **`suspended` は読むだけで出さない** (#2951)。
+//
+// Mastodon 拡張を読む側だけ足したので、こちらから出すと upstream と wire
+// shape が乖離する (upstream の renderPerson は出さない)。
+//
+// このフィールドは `manuallyApprovesFollowers` / `discoverable` の間に置かれて
+// おり、**周りは「false でも必ず出す」という正反対の方針** (#1948-11)。
+// 「周りに揃える」リファクタで `omitempty` が外れると黙って出るようになるので、
+// ここで固定する。
+func TestRenderPerson_SuspendedIsNeverEmitted(t *testing.T) {
+	r := newRenderer()
+
+	m := marshalMap(t, r.RenderPerson(&model.User{ID: "u1", Username: "alice"}, nil, "PUBKEY", nil))
+	_, ok := m["suspended"]
+	assert.False(t, ok, "RenderPerson が suspended を出している (upstream は出さない)")
+
+	// 凍結されたローカルユーザーでも出さない。
+	m2 := marshalMap(t, r.RenderPerson(
+		&model.User{ID: "u2", Username: "bob", IsSuspended: true}, nil, "PUBKEY", nil))
+	_, ok2 := m2["suspended"]
+	assert.False(t, ok2, "凍結ユーザーの actor に suspended が出ている")
+}
