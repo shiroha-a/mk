@@ -11,6 +11,16 @@ import (
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
+// restrictedProbePaths は応答を実際に確かめる対象。**`noCORSPaths` を回さない**
+// — map を縮めるとループ回数が減って素通りするため (レビュー H-1)。AP 側は id が
+// 可変なので代表値を 1 つ置く。
+var restrictedProbePaths = []string{
+	"/api/users/following",
+	"/api/users/followers",
+	"/users/al9hjjx4b0ey0002/following",
+	"/users/al9hjjx4b0ey0002/followers",
+}
+
 // corsProbe runs the global CORS middleware over a stub handler and returns the
 // recorded response. DB も Redis も要らない (gzip_test.go と同じ形)。
 func corsProbe(t *testing.T, method, path, origin string) *httptest.ResponseRecorder {
@@ -28,6 +38,53 @@ func corsProbe(t *testing.T, method, path, origin string) *httptest.ResponseReco
 	return rec
 }
 
+// TestCORS_RestrictedPathsAreExactly pins the set of protected paths.
+//
+// **これが無いと防御を丸ごと消してもテストが緑になる (レビュー H-1)。** 他の
+// テストは `noCORSPaths` を回す形なので、**map を空にするとループが 0 周する
+// だけで全部 pass する**ことを実測された。集合そのものを期待値として持つ。
+//
+// 守る対象を増減させたらここも更新すること。
+func TestCORS_RestrictedPathsAreExactly(t *testing.T) {
+	cases := []struct {
+		path       string
+		restricted bool
+	}{
+		// API 側 (フロントエンドが使う経路)
+		{"/api/users/following", true},
+		{"/api/users/followers", true},
+		// AP のコレクション。id は可変 (レビュー M-1)
+		{"/users/al9hjjx4b0ey0002/following", true},
+		{"/users/al9hjjx4b0ey0002/followers", true},
+		// **兄弟は巻き込まない。** `/api/users/` へ前方一致で広げる事故を落とす
+		// (`api.POST("/users/...")` は 31 本ある)。
+		{"/api/users/show", false},
+		{"/api/users/notes", false},
+		{"/api/users/search", false},
+		{"/api/users/lists/list", false},
+		{"/api/users/relation", false},
+		{"/api/notes/create", false},
+		// AP 側も同様
+		{"/users/al9hjjx4b0ey0002", false},
+		{"/users/al9hjjx4b0ey0002/outbox", false},
+		{"/users/al9hjjx4b0ey0002/collections/featured", false},
+	}
+	for _, c := range cases {
+		require.Equalf(t, c.restricted, corsRestrictedPath(c.path),
+			"%s の扱いが想定と違う", c.path)
+	}
+}
+
+// **兄弟のエンドポイントが巻き込まれていないことを、実際の応答でも見る。**
+// 上の表は述語だけを見ているので、配線側で広がった場合に備える。
+func TestCORS_SiblingUsersEndpointsUnchanged(t *testing.T) {
+	for _, path := range []string{"/api/users/show", "/api/users/notes", "/api/users/lists/list"} {
+		rec := corsProbe(t, http.MethodPost, path, "https://example.com")
+		require.Equalf(t, "*", rec.Header().Get(echo.HeaderAccessControlAllowOrigin),
+			"%s が巻き込まれている。除外が広がりすぎ", path)
+	}
+}
+
 // TestCORS_RelationListsRejectCrossOriginBrowsers asserts that the public
 // relation lists do not advertise CORS (#2953).
 //
@@ -35,7 +92,7 @@ func corsProbe(t *testing.T, method, path, origin string) *httptest.ResponseReco
 // POST + JSON なのでプリフライトが必須で、`Access-Control-Allow-Origin` が
 // 無ければブラウザは実リクエストに到達しない。
 func TestCORS_RelationListsRejectCrossOriginBrowsers(t *testing.T) {
-	for path := range noCORSPaths {
+	for _, path := range restrictedProbePaths {
 		t.Run(path, func(t *testing.T) {
 			pre := corsProbe(t, http.MethodOptions, path, "https://example.com")
 			require.Emptyf(t, pre.Header().Get(echo.HeaderAccessControlAllowOrigin),
@@ -60,7 +117,7 @@ func TestCORS_RelationListsRejectCrossOriginBrowsers(t *testing.T) {
 // 同梱のフロントエンドは動く。Origin を持たないクライアント (ネイティブアプリ /
 // CLI / 連合) は応答ヘッダを見ない。
 func TestCORS_RelationListsStillServeRequests(t *testing.T) {
-	for path := range noCORSPaths {
+	for _, path := range restrictedProbePaths {
 		for _, origin := range []string{"", "https://example.com"} {
 			rec := corsProbe(t, http.MethodPost, path, origin)
 			require.Equalf(t, http.StatusOK, rec.Code,
@@ -69,11 +126,14 @@ func TestCORS_RelationListsStillServeRequests(t *testing.T) {
 	}
 }
 
-// **`Vary: Origin` を落とさない。** echo の CORS は Skipper より前に無条件で
-// 付けているので、迂回した経路では自分で戻す必要がある。落ちると、CORS ヘッダの
-// 有無が Origin ごとに違う応答が共有キャッシュで混ざりうる。
+// **`Vary: Origin` を落とさない。**
+//
+// **キャッシュ汚染の防止ではない (レビュー L-3)。** これらのパスは変更後どの
+// Origin でも同じ応答を返すし、`/api` 側は POST なので共有キャッシュに乗らない。
+// 変更前と同じヘッダ構成を保つためのもので、echo の CORS を迂回すると落ちる
+// (echo は Skipper の後で `Vary` を付ける)。
 func TestCORS_RelationListsKeepVaryOrigin(t *testing.T) {
-	for path := range noCORSPaths {
+	for _, path := range restrictedProbePaths {
 		rec := corsProbe(t, http.MethodPost, path, "https://example.com")
 		require.Containsf(t, rec.Header().Values(echo.HeaderVary), echo.HeaderOrigin,
 			"%s の応答から Vary: Origin が落ちている", path)
