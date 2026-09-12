@@ -3101,6 +3101,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		adminHandler,
 		emojiapplication.NewResultNotifier(notificationService),
 	)
+	// 期間上限をロールから引く (#2958)。未配線だと上限が丸ごと効かなくなる
+	// ので criticalWiring に載せてある。
+	emojiApplicationService.SetPolicyProvider(roleService)
 	emojiApplicationHandler := apiemojiapplications.NewHandler(
 		emojiApplicationService, emojiApplicationRepo, driveFileRepo)
 	// **申請できる人をロールで絞る (#2934)。** canManageCustomEmojis を持つ人は
@@ -3887,6 +3890,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"処理済み activity の再投函を検出できない (isReplay が常に false)"},
 		{"postScheduledNote.lock", postScheduledNoteProcessor.HasLock(),
 			"job が二度 fire したとき予約投稿が 2 回 publish される"},
+		{"emojiApplication.policyProvider", emojiApplicationService.HasPolicyProvider(),
+			"カスタム絵文字申請の日次・週次・月次の上限が丸ごと効かなくなる"},
 
 		// ここから可視性・権限・上限 (#2683)。認証ほど鋭くはないが、いずれも
 		// 利用者から見えない形で制限が外れる。

@@ -18,6 +18,7 @@ import (
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // stubEmojiReviewer records calls and returns canned results.
@@ -366,6 +367,9 @@ type stubAppsRepo struct {
 }
 
 func (s *stubAppsRepo) Create(*model.EmojiApplication) error { return nil }
+func (s *stubAppsRepo) CreateWithQuota(*model.EmojiApplication, []repository.QuotaWindow) error {
+	return nil
+}
 func (s *stubAppsRepo) FindByID(string) (*model.EmojiApplication, error) {
 	return nil, gorm.ErrRecordNotFound
 }

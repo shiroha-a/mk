@@ -7,6 +7,7 @@ import (
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -991,20 +992,36 @@ func TestRelationListLimitsUseAShortWindow(t *testing.T) {
 // #2935 で**任意のノートの絵文字メニューから 2 クリック**になり、露出が大きく
 // 変わった (従来は drive へ上げてから専用ページを開く必要があった)。
 func TestDefaultEndpointLimits_ApplicationEntryPoints(t *testing.T) {
-	paths := []string{
-		"/api/emoji-application/create",
+	// **値まで見る (#2958 レビュー L2)。** 「何らかの上限があるか」だけだと、
+	// 1 分 5000 回のような実質無制限へ緩めても緑のまま通る。#2958 が足した
+	// ロール別の期間上限は総量を絞るもので、こちらの連打の抑止とは層が違う
+	// ため、片方が消えたときにもう片方が代わりを務めることはない。
+	cases := []struct {
+		path     string
+		duration time.Duration
+		max      int
+	}{
+		{"/api/emoji-application/create", time.Hour, 5},
 	}
-	for _, path := range paths {
-		t.Run(path, func(t *testing.T) {
+	for _, tc := range cases {
+		t.Run(tc.path, func(t *testing.T) {
 			store := &mockLimitStore{}
 			rl := NewRateLimiter(store, true, DefaultEndpointLimits)
 			e, h := setupEcho(rl)
 
-			doRequest(e, rl.Middleware(), h, path, nil)
+			doRequest(e, rl.Middleware(), h, tc.path, nil)
 
 			require.NotEmpty(t, store.calls,
 				"%s が無制限。DefaultEndpointLimits にキーが無いか、"+
-					"path からキーへの変換が合っていない", path)
+					"path からキーへの変換が合っていない", tc.path)
+
+			key := strings.TrimPrefix(tc.path, "/api/")
+			limit, ok := DefaultEndpointLimits[key]
+			require.Truef(t, ok, "DefaultEndpointLimits に %q が無い", key)
+			require.Equalf(t, tc.duration, limit.Duration,
+				"%s の窓が変わっている。緩めるなら期間上限 (#2958) との役割分担を先に確認すること", tc.path)
+			require.Equalf(t, tc.max, limit.Max,
+				"%s の上限が変わっている。緩めるなら期間上限 (#2958) との役割分担を先に確認すること", tc.path)
 		})
 	}
 }

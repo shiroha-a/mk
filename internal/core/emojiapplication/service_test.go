@@ -3,6 +3,7 @@ package emojiapplication
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -23,6 +24,11 @@ type fakeApps struct {
 	// while FindByID still sees the row as pending. **読んだ後に負ける**状況は
 	// これでしか作れない (両方が同じ map を見ているため)。
 	loseRace bool
+	// quotaWindows records what Create asked for so the policy plumbing can be
+	// asserted without a database (#2958).
+	quotaWindows []repository.QuotaWindow
+	quotaCalls   int
+	quotaErr     error
 }
 
 func newFakeApps() *fakeApps { return &fakeApps{rows: map[string]*model.EmojiApplication{}} }
@@ -33,6 +39,15 @@ func (f *fakeApps) Create(a *model.EmojiApplication) error {
 	}
 	f.rows[a.ID] = a
 	return nil
+}
+
+func (f *fakeApps) CreateWithQuota(a *model.EmojiApplication, w []repository.QuotaWindow) error {
+	f.quotaWindows = w
+	f.quotaCalls++
+	if f.quotaErr != nil {
+		return f.quotaErr
+	}
+	return f.Create(a)
 }
 
 func (f *fakeApps) FindByID(id string) (*model.EmojiApplication, error) {
@@ -726,4 +741,155 @@ func TestCreateOwnStillRequiresLicense(t *testing.T) {
 	in.License = ""
 	_, err := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil).Create(in)
 	require.ErrorIs(t, err, ErrLicenseRequired)
+}
+
+// stubPolicies serves a fixed effective-policy map (#2958).
+type stubPolicies struct {
+	p     map[string]any
+	calls []string
+}
+
+func (s *stubPolicies) GetUserPolicies(userID string) map[string]any {
+	s.calls = append(s.calls, userID)
+	return s.p
+}
+
+// **ポリシーを 3 つとも窓へ渡すこと (#2958)。** どれか 1 つを取り違えると、
+// その期間の上限だけが黙って効かなくなる。
+func TestCreateBuildsQuotaWindowsFromPolicies(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	pol := &stubPolicies{p: map[string]any{
+		"emojiApplicationMaxPerDay":   3,
+		"emojiApplicationMaxPerWeek":  float64(10),
+		"emojiApplicationMaxPerMonth": int64(20),
+	}}
+	svc.SetPolicyProvider(pol)
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err)
+
+	require.Equal(t, 1, apps.quotaCalls)
+	require.Equal(t, []repository.QuotaWindow{
+		{Name: "day", Duration: 24 * time.Hour, Max: 3},
+		{Name: "week", Duration: 7 * 24 * time.Hour, Max: 10},
+		{Name: "month", Duration: 30 * 24 * time.Hour, Max: 20},
+	}, apps.quotaWindows)
+	// **上限は申請者のロールで決まる。** 別人の ID で引くと、権限の弱い人が
+	// 強い人の枠を使える。
+	require.Equal(t, []string{"u1"}, pol.calls)
+}
+
+// **未配線なら上限を掛けない (#2958)。** 掛けられないのに掛けたつもりに
+// なるより、既定 (0 = 無制限) と同じ挙動に倒す。配線の欠落は criticalWiring
+// が起動時に落とす。
+func TestCreateWithoutPolicyProviderAppliesNoQuota(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	require.False(t, svc.HasPolicyProvider())
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.Equal(t, 1, apps.quotaCalls)
+	require.Nil(t, apps.quotaWindows)
+}
+
+// ポリシーが引けなかったときも上限を掛けない (resolvePolicies は fail-soft で
+// nil を返しうる)。
+func TestCreateWithNilPoliciesAppliesNoQuota(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetPolicyProvider(&stubPolicies{p: nil})
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.Nil(t, apps.quotaWindows)
+}
+
+// **0 以下・未設定・読めない値は無制限に倒す。** ここを上限として扱うと、
+// 既定値のままのインスタンスで申請が全て塞がる。
+func TestCreateTreatsNonPositivePoliciesAsUnlimited(t *testing.T) {
+	cases := []struct {
+		name string
+		val  any
+		want int
+	}{
+		{"zero", 0, 0},
+		{"negative", -1, 0},
+		{"missing", nil, 0},
+		{"string", "5", 0},
+		// **小数は切り捨てる。** 切り上げると運営者の意図より 1 件多く通る。
+		{"fraction", 2.9, 2},
+		{"fraction below one", 0.9, 0},
+		{"positive", 4, 4},
+		// **int の幅を超える値で桁溢れさせない。** 32bit 環境で負に回ると
+		// 上限 0 = 無制限に化ける。
+		{"absurdly large", 1e18, math.MaxInt32},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apps := newFakeApps()
+			svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+			svc.SetPolicyProvider(&stubPolicies{p: map[string]any{
+				"emojiApplicationMaxPerDay": tc.val,
+			}})
+
+			_, err := svc.Create(validInput())
+			require.NoError(t, err)
+			require.Equal(t, tc.want, apps.quotaWindows[0].Max)
+		})
+	}
+}
+
+// **上限超過は専用の型で返すこと (#2958)。** 汎用エラーに潰すと API 層が 500 に
+// 倒し、利用者にはいつ空くかが伝わらない。
+func TestCreateTranslatesQuotaExceeded(t *testing.T) {
+	retryAt := time.Date(2026, 9, 12, 10, 0, 0, 0, time.UTC)
+	apps := newFakeApps()
+	apps.quotaErr = &repository.QuotaExceededError{
+		Window: repository.QuotaWindow{Name: "week", Duration: 7 * 24 * time.Hour, Max: 5},
+		// **Used と Limit を別の値にする。** 同じ値だと取り違えたまま緑になる
+		// (同時実行で上限を跨いだときは Used > Limit になりうる)。
+		Used:    7,
+		RetryAt: retryAt,
+	}
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{"emojiApplicationMaxPerWeek": 5}})
+
+	_, err := svc.Create(validInput())
+	var qe *QuotaExceededError
+	require.ErrorAs(t, err, &qe)
+	require.Equal(t, "week", qe.Period)
+	require.Equal(t, 7, qe.Used)
+	require.Equal(t, 5, qe.Limit)
+	require.Equal(t, retryAt, qe.RetryAt)
+}
+
+// 上限とは無関係な失敗を上限超過に化けさせない。
+func TestCreateKeepsOtherQuotaPathErrors(t *testing.T) {
+	apps := newFakeApps()
+	apps.quotaErr = errors.New("db down")
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+
+	_, err := svc.Create(validInput())
+	require.EqualError(t, err, "db down")
+	var qe *QuotaExceededError
+	require.False(t, errors.As(err, &qe))
+}
+
+// 番兵の文面が「上限に達した」と読めること。errors.As で分岐しない
+// 呼び出し元 (ログ) が唯一の手がかりにする。
+func TestQuotaExceededErrorMessage(t *testing.T) {
+	err := &QuotaExceededError{Period: "day", Used: 4, Limit: 3}
+	require.Contains(t, err.Error(), "quota")
+}
+
+// 審査待ちの重複は上限経路でも番兵のまま通すこと。
+func TestCreateKeepsDuplicatePendingThroughQuotaPath(t *testing.T) {
+	apps := newFakeApps()
+	apps.quotaErr = repository.ErrEmojiApplicationDuplicatePending
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+
+	_, err := svc.Create(validInput())
+	require.ErrorIs(t, err, ErrAlreadyPending)
 }

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"gorm.io/gorm"
@@ -32,6 +33,9 @@ var ErrEmojiApplicationDuplicatePending = errors.New("emoji application already 
 
 // EmojiApplicationRepository reads and writes `emoji_application` rows (#2934).
 type EmojiApplicationRepository interface {
+	// Create bypasses the rolling windows. **申請の作成は CreateWithQuota を
+	// 使うこと (#2958)。** こちらは上限が 1 つも設定されていないときの委譲先
+	// とテストの seed 用。
 	Create(app *model.EmojiApplication) error
 	FindByID(id string) (*model.EmojiApplication, error)
 	// List returns applications newest first. filter is one of the
@@ -48,6 +52,41 @@ type EmojiApplicationRepository interface {
 	// **絵文字は存在するのに申請は「却下」で emojiId も消える**。窓は「一覧を
 	// 開いてから押すまで」の全期間なので、実際に起きる。
 	UpdateIfPending(app *model.EmojiApplication) (bool, error)
+	// CreateWithQuota inserts the row only while every rolling window still
+	// has room, and reports which window was full otherwise (#2958).
+	//
+	// **COUNT してから INSERT では足りない。** 同じ利用者から同時に来た
+	// リクエストが両方とも「空きあり」を読んで両方 INSERT できる。数えるのも
+	// 作るのも 1 つのトランザクションに入れ、**利用者単位のアドバイザリロック**
+	// で直列化する (行ロックでは「まだ無い行」を守れない)。
+	//
+	// windows は期間ごとの (長さ, 上限)。上限 0 の窓は無制限として飛ばす。
+	// 収まらなければ *QuotaExceededError を返し、行は作らない。
+	CreateWithQuota(app *model.EmojiApplication, windows []QuotaWindow) error
+}
+
+// QuotaWindow is one rolling limit: "過去 Duration に Max 件まで" (#2958)。
+type QuotaWindow struct {
+	// Name は API が返す期間の識別子 ("day" / "week" / "month")。
+	Name     string
+	Duration time.Duration
+	Max      int
+}
+
+// QuotaExceededError reports which rolling window was full.
+type QuotaExceededError struct {
+	Window QuotaWindow
+	Used   int
+	// RetryAt は**申請が通るようになる時刻**。窓が複数あるときは、いちばん
+	// 遅く空くものに揃える (どれか 1 つでも満杯なら申請は通らない)。
+	//
+	// その窓の中では「`used - Max` 件飛ばした行が窓を出る時刻」。**最古では
+	// 足りない** — `used > Max` のときは 1 件抜けても `used-1 >= Max` のまま。
+	RetryAt time.Time
+}
+
+func (e *QuotaExceededError) Error() string {
+	return "emoji application quota exceeded for window " + e.Window.Name
 }
 
 type emojiApplicationRepository struct {
@@ -59,6 +98,11 @@ func NewEmojiApplicationRepository(db *gorm.DB) EmojiApplicationRepository {
 	return &emojiApplicationRepository{db: db}
 }
 
+// Create inserts an application without checking any rolling window.
+//
+// **新しい呼び出し元は `CreateWithQuota` を使うこと (#2958)。** こちらを直に
+// 呼ぶとロール別の期間上限を素通りする。残してあるのは、上限が 1 つも
+// 設定されていないときに `CreateWithQuota` が委譲する先だから。
 func (r *emojiApplicationRepository) Create(app *model.EmojiApplication) error {
 	err := r.db.Create(app).Error
 	if err == nil {
@@ -72,6 +116,100 @@ func (r *emojiApplicationRepository) Create(app *model.EmojiApplication) error {
 		return ErrEmojiApplicationDuplicatePending
 	}
 	return err
+}
+
+// quotaLockNamespace keeps the advisory lock key from colliding with other
+// features that lock on the same user id.
+const quotaLockNamespace = 2958
+
+func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication, windows []QuotaWindow) error {
+	active := make([]QuotaWindow, 0, len(windows))
+	for _, w := range windows {
+		if w.Max > 0 && w.Duration > 0 {
+			active = append(active, w)
+		}
+	}
+	if len(active) == 0 {
+		return r.Create(app)
+	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		// **利用者単位で直列化する。** 行ロックだと「これから作る行」を
+		// 守れないので、アドバイザリロックで数える側ごと囲う。
+		// トランザクション版なので commit / rollback で自動的に解放される。
+		if err := tx.Exec(`SELECT pg_advisory_xact_lock(?, hashtext(?))`,
+			quotaLockNamespace, app.UserID).Error; err != nil {
+			return err
+		}
+		now := app.CreatedAt
+		if now.IsZero() {
+			now = time.Now()
+		}
+		// **満杯の窓を全部評価する。** 最初に見つけたもので返すと、2 つ以上が
+		// 同時に満杯のときに早すぎる時刻を案内することになる (実測で 78 時間
+		// ずれた)。申請が通るのは全部の窓に空きができてからなので、いちばん
+		// 遅く空くものを返す。行は減る一方なので、そこまで待てば他の窓にも
+		// 空きがある。
+		var worst *QuotaExceededError
+		for _, w := range active {
+			since := now.Add(-w.Duration)
+			var used int64
+			// **全ステータスを数える。** 却下・取り下げで枠が戻ると、申請と
+			// 取り下げを繰り返して審査通知と履歴を大量に作れる。
+			if err := tx.Model(&model.EmojiApplication{}).
+				Where(`"userId" = ? AND "createdAt" >= ?`, app.UserID, since).
+				Count(&used).Error; err != nil {
+				return err
+			}
+			if used < int64(w.Max) {
+				continue
+			}
+			// **「最古の 1 件」では足りない。** 空くのは used が Max を下回った
+			// ときなので、`used - Max + 1` 件が窓を出るまで待つ必要がある。
+			// 最古だけを見ると、上限を後から下げたときや上限の緩いロールを
+			// 外したときに**広告した時刻に叩いてもまた弾かれる**。
+			// offset は 0 起算なので `used - Max` 件飛ばした行が最後の 1 件。
+			var freed []time.Time
+			if err := tx.Model(&model.EmojiApplication{}).
+				Select(`"createdAt"`).
+				Where(`"userId" = ? AND "createdAt" >= ?`, app.UserID, since).
+				Order(`"createdAt" ASC`).
+				Offset(int(used - int64(w.Max))).
+				Limit(1).
+				Scan(&freed).Error; err != nil {
+				return err
+			}
+			if len(freed) == 0 {
+				// **fail-closed に倒す。** ここへ来るのは残り行数が `used - Max`
+				// 以下のときで、「窓が空いた」とは限らない (used=10 / Max=3 なら
+				// 7 行残っていても空になる)。COUNT を取り直さない以上、満杯の
+				// まま通す側へは倒さない。`now` を置くと最大限保守的な時刻に
+				// なる。**現状は到達しない** — `emoji_application` を消す
+				// production 経路が無く、FK も張っていないので利用者削除の
+				// CASCADE でも消えない。
+				freed = []time.Time{now}
+			}
+			// **1ms 足す。** 窓の判定は `createdAt >= since` なので、境界ちょうど
+			// の行はまだ窓の中にいる。しかも `entity.ISOMillis` は切り捨てなので、
+			// 境界をそのまま広告すると**その値で再スケジュールするクライアントが
+			// 必ず 1 回空振りする**。
+			at := freed[0].Add(w.Duration + time.Millisecond)
+			if worst == nil || at.After(worst.RetryAt) {
+				worst = &QuotaExceededError{Window: w, Used: int(used), RetryAt: at}
+			}
+		}
+		if worst != nil {
+			return worst
+		}
+		if err := tx.Create(app).Error; err != nil {
+			var pgErr *pgconn.PgError
+			if errors.As(err, &pgErr) && pgErr.Code == "23505" &&
+				pgErr.ConstraintName == "IDX_emoji_application_pending_name" {
+				return ErrEmojiApplicationDuplicatePending
+			}
+			return err
+		}
+		return nil
+	})
 }
 
 func (r *emojiApplicationRepository) FindByID(id string) (*model.EmojiApplication, error) {
