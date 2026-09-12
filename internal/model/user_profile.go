@@ -15,17 +15,18 @@ const (
 
 // UserProfile represents the `user_profile` table.
 type UserProfile struct {
-	UserID                    string              `gorm:"column:userId;type:varchar(32);primaryKey" json:"userId"`
-	Location                  *string             `gorm:"column:location;type:varchar(128)" json:"location"`
-	Birthday                  *string             `gorm:"column:birthday;type:char(10)" json:"birthday"`
-	Description               *string             `gorm:"column:description;type:varchar(2048)" json:"description"`
-	FollowedMessage           *string             `gorm:"column:followedMessage;type:varchar(256)" json:"followedMessage"`
-	Fields                    datatypes.JSON      `gorm:"column:fields;type:jsonb;default:'[]'" json:"fields"`
-	VerifiedLinks             StringArray         `gorm:"column:verifiedLinks;type:varchar[];default:'{}'" json:"verifiedLinks"`
-	Lang                      *string             `gorm:"column:lang;type:varchar(32)" json:"lang"`
-	URL                       *string             `gorm:"column:url;type:varchar(512)" json:"url"`
-	Email                     *string             `gorm:"column:email;type:varchar(128)" json:"email"`
-	EmailVerifyCode           *string             `gorm:"column:emailVerifyCode;type:varchar(128)" json:"emailVerifyCode"`
+	UserID          string         `gorm:"column:userId;type:varchar(32);primaryKey" json:"userId"`
+	Location        *string        `gorm:"column:location;type:varchar(128)" json:"location"`
+	Birthday        *string        `gorm:"column:birthday;type:char(10)" json:"birthday"`
+	Description     *string        `gorm:"column:description;type:varchar(2048)" json:"description"`
+	FollowedMessage *string        `gorm:"column:followedMessage;type:varchar(256)" json:"followedMessage"`
+	Fields          datatypes.JSON `gorm:"column:fields;type:jsonb;default:'[]'" json:"fields"`
+	VerifiedLinks   StringArray    `gorm:"column:verifiedLinks;type:varchar[];default:'{}'" json:"verifiedLinks"`
+	Lang            *string        `gorm:"column:lang;type:varchar(32)" json:"lang"`
+	URL             *string        `gorm:"column:url;type:varchar(512)" json:"url"`
+	Email           *string        `gorm:"column:email;type:varchar(128)" json:"email"`
+	// メール確認用のワンタイムトークン。持っていれば本人確認を通せるので出さない。
+	EmailVerifyCode           *string             `gorm:"column:emailVerifyCode;type:varchar(128)" json:"-"`
 	EmailVerified             bool                `gorm:"column:emailVerified;default:false" json:"emailVerified"`
 	EmailNotificationTypes    datatypes.JSON      `gorm:"column:emailNotificationTypes;type:jsonb;default:'[\"follow\",\"receiveFollowRequest\"]'" json:"emailNotificationTypes"`
 	PublicReactions           bool                `gorm:"column:publicReactions;default:true" json:"publicReactions"`

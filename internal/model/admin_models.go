@@ -23,8 +23,10 @@ func (Ad) TableName() string { return "ad" }
 
 // RegistrationTicket represents the `registration_ticket` table.
 type RegistrationTicket struct {
-	ID          string     `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	Code        string     `gorm:"column:code;type:varchar(64);not null;uniqueIndex" json:"code"`
+	ID string `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	// 招待コード。`admin/invite/list` は map を手で組んで返すので、タグを
+	// 落としてもレスポンスは変わらない。
+	Code        string     `gorm:"column:code;type:varchar(64);not null;uniqueIndex" json:"-"`
 	ExpiresAt   *time.Time `gorm:"column:expiresAt;type:timestamp with time zone" json:"expiresAt"`
 	CreatedByID *string    `gorm:"column:createdById;type:varchar(32)" json:"createdById"`
 	UsedByID    *string    `gorm:"column:usedById;type:varchar(32)" json:"usedById"`

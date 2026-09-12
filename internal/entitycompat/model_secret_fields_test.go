@@ -27,10 +27,11 @@ import (
 // も既存のテストも全て緑のままだった。native token を取れればそのユーザー
 // として API を叩けるので、あらゆる権限ゲートを迂回できる。
 //
-// upstream Misskey TS は TypeORM の `select: false` で同じことをしており、
-// **そこが抜けていたために生の user 行から native token が読める**という
-// 実例がある。あちらは列の定義とレスポンスの形が離れているが、Go では
-// 構造体タグ 1 つなので、**タグを守れば同じ間違いが起きない**。
+// **現状モデルを直接 JSON 化しているのは `internal/core/ephemeral/store.go`
+// の 2 箇所** (`model.Note` と `model.User` を Redis へ入れる) だけで、API の
+// レスポンスは `map[string]any` や `internal/entity` を経由する。つまりタグは
+// 今すぐ漏れる経路ではなく、**将来モデルが直接 marshal される経路に乗った
+// ときの最後の防波堤**として守る。
 //
 // **名前だけでは判定できない。** `Meta` の captcha secret は `admin/meta` が
 // 管理画面へ返す必要があるし、drive の `accessKey` は URL の構成要素で秘密
@@ -49,18 +50,34 @@ import (
 // wire 層と同じ理由で 0% に張り付いて落ちる (#462 と同型)。gate の置き場は
 // ここで、対象パッケージのソースはファイルとして読む。
 //
-// **既知の取りこぼし**: 名前に該当の語を含まない秘密は拾えない。埋め込み
-// 構造体の昇格フィールドも見ない。`Key` 全体には広げていない —
-// `PublicKey` / `*SiteKey` (captcha のサイトキーはフロントへ配る公開値) /
-// `SortKeys` / `ExcludeKeywords` が入って allowlist が誤検知で埋まり、
-// 本物が紛れる。
-var secretFieldNameRe = regexp.MustCompile(`Password|Passwd|Token|Secret|PrivateKey|PrivKey|Credential|ApiKey|APIKey|AuthKey|AccessKey`)
+// **既知の取りこぼし** (どれも実測で確認した穴):
+//
+//   - 名前に該当の語を含まない秘密は拾えない。実例として
+//     `SwSubscription.Auth` (Web Push の auth secret) と `AccessToken.Hash`
+//     がある。`Auth` / `Hash` を足すと `Authorized*` / `NoteDraft.Hashtag` が
+//     誤検知に入るので、名前では分離できない
+//   - **`internal/model` の直下しか見ない** (glob が `*.go` で非再帰)
+//   - **名前付き型の中に匿名 struct を入れると見えない**
+//     (`Creds struct { Token string }` の形)
+//   - `MarshalJSON` を自前実装した型は静的検査を抜ける。下の
+//     `TestModelJSONDoesNotContainSecrets` が押さえるのは**そこに書いた型
+//     だけ**で、それ以外の型は素通りする
+//   - 埋め込みは `internal/model` 内で宣言された型なら昇格フィールドも見える
+//     (TypeSpec を総なめするため)。見えないのは**別パッケージの型を
+//     埋め込んだ場合**
+//
+// `Key` 全体には広げていない — `PublicKey` / `*SiteKey` (captcha のサイト
+// キーはフロントへ配る公開値) / `SortKeys` / `ExcludeKeywords` が入って
+// allowlist が誤検知で埋まり、本物が紛れる。
+var secretFieldNameRe = regexp.MustCompile(`Password|Passwd|Pass|Token|Secret|PrivateKey|PrivKey|Credential|Code|ApiKey|APIKey|AuthKey|AccessKey`)
 
 // serializableSecretLike lists fields that match the name pattern but are
 // intentionally serialized. **理由を書くこと。**
 var serializableSecretLike = map[string]string{
-	// admin/meta が管理画面へ返す。運営者が設定する値で moderator 以上にしか
-	// 届かない (upstream も同じものを返す)。
+	// `admin/meta` (`RequireAdmin` + `read:admin:meta`) が返す運営者の設定値。
+	// **返しているのは `map[string]any` を手で組んだもので、このタグは
+	// 使われていない** (`internal/api/admin/handler.go`)。公開 `/api/meta` に
+	// は出ない。将来 `json:"-"` へ寄せてこの一覧を縮めるのが望ましい。
 	"Meta.HcaptchaSecretKey":             "admin/meta が管理画面へ返す (upstream も同じ)",
 	"Meta.RecaptchaSecretKey":            "同上",
 	"Meta.TurnstileSecretKey":            "同上",
@@ -72,17 +89,21 @@ var serializableSecretLike = map[string]string{
 	"Meta.DeeplAuthKey":                  "同上",
 	"Meta.TruemailAuthKey":               "同上",
 	"Meta.VerifymailAuthKey":             "同上",
-	// URL の構成要素であって秘密ではない (/files/:accessKey は公開 GET)。
+	// URL の構成要素であって秘密ではない (`GET /files/:accessKey` は公開ルート)。
+	// **ここは `json:"-"` にできない。** `model.User` は `Avatar` / `Banner` に
+	// `*DriveFile` を持ち、`internal/core/ephemeral/store.go` が
+	// `json.Marshal(author)` で User ごと Redis へ入れるので、タグを落とすと
+	// 復元した avatar / banner の URL が作れなくなる。
 	"DriveFile.AccessKey":            "URL の構成要素で秘密ではない",
 	"DriveFile.ThumbnailAccessKey":   "同上",
 	"DriveFile.WebpublicAccessKey":   "同上",
 	"ChunkedUploadSession.AccessKey": "同上",
 	// 本人 / 作成者にだけ返る。
-	"AccessToken.Token":          "本人の app token 一覧に返る (upstream も同じ)",
-	"App.Secret":                 "作成者にだけ返る (upstream も同じ)",
-	"AuthSession.Token":          "認証フローで本人に返る (upstream も同じ)",
-	"Webhook.Secret":             "作成者にだけ返る (upstream も同じ)",
-	"SystemWebhook.Secret":       "管理者にだけ返る (upstream も同じ)",
+	"AccessToken.Token":          "auth/session/userkey と miauth が本人に返す (`internal/api/auth/handler.go`)。`i/apps` は token 値を返さない",
+	"App.Secret":                 "`packApp` が includeSecret のときだけ map に入れる (タグ非経由)",
+	"AuthSession.Token":          "認証フローで本人に返る",
+	"Webhook.Secret":             "作成者にだけ map で返る (タグ非経由)",
+	"SystemWebhook.Secret":       "管理者にだけ map で返る (タグ非経由)",
 	"PasswordResetRequest.Token": "メールのリンクに載せる (本人にだけ届く)",
 	// 名前が引っかかるだけで秘密ではない。
 	"UserProfile.UsePasswordLessLogin":     "真偽値であって秘密ではない",
@@ -110,14 +131,20 @@ func scanSecretLikeFields(src []byte, filename string) (map[string]string, error
 			return true
 		}
 		for _, fld := range st.Fields.List {
-			if len(fld.Names) == 0 || fld.Tag == nil {
+			if len(fld.Names) == 0 {
 				continue
 			}
 			for _, name := range fld.Names {
 				if !name.IsExported() || !secretFieldNameRe.MatchString(name.Name) {
 					continue
 				}
-				tag := reflect.StructTag(strings.Trim(fld.Tag.Value, "`"))
+				// **タグ無しも拾う。** `encoding/json` はタグの無い exported
+				// フィールドを Go の名前でそのまま出すので、ここで skip すると
+				// 「フィールドを足してタグを忘れる」形が素通りする。
+				var tag reflect.StructTag
+				if fld.Tag != nil {
+					tag = reflect.StructTag(strings.Trim(fld.Tag.Value, "`"))
+				}
 				out[ts.Name.Name+"."+name.Name] = tag.Get("json")
 			}
 		}
@@ -182,6 +209,7 @@ type Sample struct {
 	unexportedSecret   string  ` + "`json:\"unexportedSecret\"`" + `
 	Nickname           string  ` + "`json:\"nickname\"`" + `
 	PublicKey          string  ` + "`json:\"publicKey\"`" + `
+	SecretNoTag        string
 	NoTag              string
 }
 
@@ -198,15 +226,19 @@ type Other struct {
 		"Sample.HiddenToken":            "-",
 		"Sample.TwoFactorSecret":        "twoFactorSecret,omitempty",
 		"Sample.ObjectStorageAccessKey": "objectStorageAccessKey",
-		"Other.Password":                "password",
-	}, got, "秘密らしい名前のフィールドだけを、json タグ付きで拾うこと")
+		// **タグを書き忘れた形も拾う。** `encoding/json` はタグの無い exported
+		// フィールドを Go の名前でそのまま出すので、ここを skip すると
+		// 「フィールドを足してタグを忘れる」という最頻のミスが素通りする。
+		"Sample.SecretNoTag": "",
+		"Other.Password":     "password",
+	}, got, "秘密らしい名前のフィールドを、タグ無しも含めて拾うこと")
 
 	// leak 判定そのもの。**allowlist は人工のものを渡す** — 実の
 	// serializableSecretLike に依存させると、そちらを編集しただけでこの
 	// テストが落ちて、検出ロジックの検査という役目を果たさなくなる。
 	allow := map[string]string{"Sample.ObjectStorageAccessKey": "テスト用"}
 	require.Equal(t,
-		[]string{"Other.Password", "Sample.Token", "Sample.TwoFactorSecret"},
+		[]string{"Other.Password", "Sample.SecretNoTag", "Sample.Token", "Sample.TwoFactorSecret"},
 		leakingSecretFields(got, allow),
 		"json:\"-\" でなく allowlist にも無いものが leak として出ること "+
 			"(HiddenToken は json:\"-\"、ObjectStorageAccessKey は allowlist なので出ない)")

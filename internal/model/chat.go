@@ -78,8 +78,9 @@ func (ChatApproval) TableName() string { return "chat_approval" }
 // UserPending represents the `user_pending` table. It holds users awaiting
 // email confirmation during invite-based registration.
 type UserPending struct {
-	ID       string `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
-	Code     string `gorm:"column:code;type:varchar(128);not null;uniqueIndex" json:"code"`
+	ID string `gorm:"column:id;type:varchar(32);primaryKey" json:"id"`
+	// サインアップ確認コード。これを持っていればアカウントを有効化できる。
+	Code     string `gorm:"column:code;type:varchar(128);not null;uniqueIndex" json:"-"`
 	Username string `gorm:"column:username;type:varchar(128);not null" json:"username"`
 	Email    string `gorm:"column:email;type:varchar(128);not null" json:"email"`
 	Password string `gorm:"column:password;type:varchar(128);not null" json:"-"`

@@ -64,7 +64,9 @@ type Meta struct {
 	SmtpHost    *string `gorm:"column:smtpHost;type:varchar(1024)" json:"smtpHost"`
 	SmtpPort    *int    `gorm:"column:smtpPort" json:"smtpPort"`
 	SmtpUser    *string `gorm:"column:smtpUser;type:varchar(1024)" json:"smtpUser"`
-	SmtpPass    *string `gorm:"column:smtpPass;type:varchar(1024)" json:"smtpPass"`
+	// SMTP のパスワード。`admin/meta` は map を手で組んで返すので、タグを
+	// 落としてもレスポンスは変わらない。
+	SmtpPass *string `gorm:"column:smtpPass;type:varchar(1024)" json:"-"`
 
 	// Service Worker
 	EnableServiceWorker bool    `gorm:"column:enableServiceWorker;default:false" json:"enableServiceWorker"`
