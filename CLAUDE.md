@@ -143,7 +143,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / submodulepin-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -216,7 +216,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 132 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 133 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -853,6 +853,11 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-09-12**: `make gates` に `submodulepin-check` を追加 (#2969)。`make help` の target は 132 → 133。**fork frontend の pin が doc と gitlink で食い違ったまま緑になっていた。** #2963 で `third_party/misskey` に commit して fork へ push し、`docs/divergence.md` にも新しい tag を書いたのに、**親リポの gitlink だけ古いまま CI 28 チェックが全て緑でマージされた** (#2965 で解消)。気付いたのはマージ後に `git status` を見たときで、検出が人手に依存していた。
+  **実害の経路もある。** `Makefile` の `REVISION_LDFLAGS` は `git -C third_party/misskey describe --tags` で `MkGoFrontendVersion` を作るが、これは **submodule の working tree** を見るので、gitlink が遅れている窓に develop からビルドしたバイナリは古い tag を名乗りつつ doc は新しい tag を書いている状態になる。
+  **SHA で突き合わせるのが要点。** doc に書いてあるのは tag 名なので、tag から SHA を解くには submodule の checkout が要り、それだと `make gates` (submodule 不要が前提) に入れられず `frontend-check` でしか回せない。**pin 行に短縮 SHA を併記して親リポだけで完結**させると、`git ls-tree HEAD third_party/misskey` が submodule 未初期化の worktree でも gitlink を返すので `make gates` に載る (実測: submodule が空の worktree で PASS し、doc の SHA を変えると落ちることまで確認した)。**tag 名そのものの正しさはここでは見ない** — それは submodule が要るので別の場所の仕事で、ここが守るのは「doc に書いた pin と実際の gitlink が同じ commit を指しているか」だけ。
+  **拾えなかったら落とす。** pin 行の書式が変わって正規表現が空振りすると、検査していないのに緑になる。変異検証は 6 形すべてを検出した (doc の SHA を 1 文字変える / pin 行を消す / SHA の併記だけ消す / 正規表現を空振りさせる / 突き合わせのアサーションを外す / `ls-tree` の結果を無視する)。
 
 - **2026-09-12**: `make gates` に `secretfield-check` を追加。`make help` の target は 131 → 132。**モデルをそのまま JSON 化する経路があるので、`json:"-"` が唯一の防波堤になっているフィールドがある。** 実測で `internal/model` の該当タグを外しても `make gates` も全テストも緑のままだった。**名前だけでは判定できない** — `Meta` の captcha secret は `admin/meta` が管理画面へ返すうえ moderation log にも載るし、drive の `accessKey` は URL の構成要素で秘密ではない。そこで #2792 と同じ **allowlist に書かせる**方式にした。
   **allowlist には「出してよい理由」ではなく「どの経路で実際に出るか」を書く。** 前者だと、タグが使われていないという誤った前提のまま動かしてしまう — 実際にそれで壊した (下記)。

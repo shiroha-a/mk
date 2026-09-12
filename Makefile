@@ -15,7 +15,7 @@
 	uds-init uds-frontend-build uds-build uds-rebuild uds-restart uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check gaterun-check secretfield-check \
+	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check gaterun-check secretfield-check submodulepin-check \
 	diff-up diff-test diff-down diff-logs \
 	upstream-e2e upstream-e2e-deps upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
 
@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -1054,6 +1054,15 @@ mdtable-check: ## md の表の各行がヘッダと同じ列数か検査 (溢れ
 	# 中でも働く** (`\|` へエスケープする)。#2930 で実際に踏んだ。
 	# **見るのは列数だけ。** 取りこぼす形はテストの doc コメントに明記してある。
 	go test ./internal/entitycompat/... -run 'TestMarkdownTablesDoNotDropContent' -count=1 -v
+
+.PHONY: submodulepin-check
+submodulepin-check: ## fork frontend の pin が doc と gitlink で一致しているか検査
+	# submodule に commit して fork へ push したあと、親リポの gitlink を上げ
+	# 忘れる片側更新が実際に起きた (#2963)。doc には新しい tag を書き、fork の
+	# branch と tag も push 済みなのに gitlink だけ古い、という状態で CI 28
+	# チェックが全部緑のままマージされた。SHA で突き合わせるので submodule の
+	# checkout は要らない。
+	go test ./internal/entitycompat/... -run 'TestSubmodulePinMatchesDoc' -count=1 -v
 
 .PHONY: secretfield-check
 secretfield-check: ## モデルの秘密フィールドが json:"-" を保っているか検査
