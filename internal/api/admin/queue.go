@@ -905,7 +905,7 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 		"queue":   t.Queue,
 		"type":    t.Type,
 		"state":   t.State,
-		"payload": string(t.Payload),
+		"payload": redactPayloadSecrets(t.Payload),
 		"retried": t.Retried,
 		// maxRetry は asynq 由来の独自 field。mkq driver は TaskSummary.MaxRetry を
 		// 埋めないので、opts.attempts から拾えるならそちらを使う (0 のまま出すと
@@ -965,6 +965,7 @@ func packJobData(t *QueueTaskSummary) map[string]any {
 	if body == nil {
 		body = map[string]any{}
 	}
+	body = redactJobSecrets(body)
 	// Type が空になることは無い。mkq driver は framing が無ければ BullMQ の
 	// job.name に落とし、その既定は queue 名。asynq も TaskInfo.Type を必ず持つ。
 	return map[string]any{"type": t.Type, "body": body}
@@ -1096,4 +1097,67 @@ func (h *Handler) queueRuntimeFor(qname string) *QueueRuntime {
 		return nil
 	}
 	return &rt
+}
+
+// jobSecretKeys are payload fields that must never reach the API response.
+//
+// **deliver job の署名鍵。** 現在の producer は payload に載せないが、この
+// 変更より前に積まれた job は持っている。取得できれば任意のローカルユーザーと
+// して署名付き連合リクエストを偽造できるので、**到達点でも伏せる**
+// (moderator + `read:admin:queue` で届く)。
+var jobSecretKeys = map[string]struct{}{
+	// deliver job の署名鍵 (`queue.DeliverPayload`)。
+	"keyPem":         {},
+	"ed25519PrivPem": {},
+	// webhook job の上書き secret (`queue.WebhookPayload`)。`i/webhooks/test` の
+	// 送信内容で、**他人のものも同じ endpoint から読める** (queue 名に
+	// allowlist が無い)。upstream も job data に secret を入れているので
+	// parity ではあるが、読める必要は無い。
+	"overrideSecret": {},
+}
+
+const redactedPlaceholder = "[redacted]"
+
+// redactJobSecrets replaces secret-bearing fields in a decoded job body.
+func redactJobSecrets(body any) any {
+	m, ok := body.(map[string]any)
+	if !ok {
+		return body
+	}
+	for k := range m {
+		if _, secret := jobSecretKeys[k]; secret {
+			m[k] = redactedPlaceholder
+		}
+	}
+	return m
+}
+
+// redactPayloadSecrets returns the raw payload with secret fields removed.
+//
+// JSON として読めないものはそのまま返す (asynq 由来の非 JSON payload がある)。
+// 伏せ損ねるより読めるほうを優先する形だが、この経路は `data` 側の redact と
+// 二重になっており、かつ producer は既に鍵を載せていないので実害は無い。
+func redactPayloadSecrets(raw []byte) string {
+	if len(raw) == 0 {
+		return string(raw)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return string(raw)
+	}
+	var found bool
+	for k := range m {
+		if _, secret := jobSecretKeys[k]; secret {
+			m[k] = redactedPlaceholder
+			found = true
+		}
+	}
+	if !found {
+		return string(raw)
+	}
+	out, err := json.Marshal(m)
+	if err != nil {
+		return string(raw)
+	}
+	return string(out)
 }

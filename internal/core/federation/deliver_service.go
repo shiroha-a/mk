@@ -196,18 +196,29 @@ func (s *DeliverService) deliverInternal(signerUserID string, body []byte, inbox
 		seen[inbox] = struct{}{}
 		isShared := sharedInboxes[inbox] ||
 			(recipient != nil && recipient.SharedInbox != nil && *recipient.SharedInbox != "" && inbox == *recipient.SharedInbox)
+		// **署名鍵は payload に詰めない。** queue の job は
+		// `admin/queue/jobs` が moderator へ返すので、詰めると鍵がそこから
+		// 読める。worker は `SignerUserID` から配送時に引く。
+		//
+		// `keyID` / `edKeyID` は署名ヘッダに載る公開の識別子なので残す。
+		// 鍵の存在確認は上の `signerCredentials` が enqueue 前に済ませて
+		// いるので、鍵の無いユーザーの配送はここへ来ない。
 		payload := queue.DeliverPayload{
-			Inbox:          inbox,
-			Body:           body,
-			KeyID:          keyID,
-			KeyPEM:         keyPEM,
-			Ed25519KeyID:   edKeyID,
-			Ed25519PrivPEM: edPrivPEM,
-			IsSharedInbox:  isShared,
+			Inbox:         inbox,
+			Body:          body,
+			KeyID:         keyID,
+			Ed25519KeyID:  edKeyID,
+			IsSharedInbox: isShared,
+			SignerUserID:  signerUserID,
 		}
 		if s.syncDeliverHook != nil {
 			// test 経路 (#780): queue を経由せず inline で sign + POST。
-			if err := s.syncDeliverHook(payload); err != nil {
+			// **こちらにだけ鍵を詰める** — queue を通らないので Redis にも
+			// admin API にも出ない。hook 側が DB を引く必要も無くなる。
+			inline := payload
+			inline.KeyPEM = keyPEM
+			inline.Ed25519PrivPEM = edPrivPEM
+			if err := s.syncDeliverHook(inline); err != nil {
 				return fmt.Errorf("sync deliver to %s: %w", inbox, err)
 			}
 			continue
