@@ -59,7 +59,7 @@ misskey-ts への PR は base を mk の gitlink が指す系列に合わせ、m
 
 ### 手元での確認（CI `frontend-check` job 相当）
 
-`make frontend-check` は **型 (`vue-tsc`) だけ**。job 全体は eslint と vitest も走る。
+`make frontend-check` は**型 (`vue-tsc`) + submodule のソースを読むゲート + eslint** まで (#2892 / #2906)。job 全体はさらに vitest と `make plugins-all` / 統合バイナリの build も走る。下のブロックが eslint を再度呼ぶのは、CI も別 step (`Lint (eslint)`) で回しているのを揃えているため。
 
 ```bash
 cd third_party/misskey && pnpm install && pnpm build-pre && pnpm -r build
