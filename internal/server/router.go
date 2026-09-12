@@ -194,6 +194,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		slog.Info("user_keypair を PKCS#8 に正規化した", "converted", converted)
 	}
 	keypairExtraRepo := repository.NewUserKeypairExtraRepository(s.db)
+	// 凍結の由来 (local / remote)。モデレーターの判断をリモートに巻き戻させない (#2973)。
+	suspensionOriginRepo := repository.NewUserSuspensionOriginRepository(s.db)
 	instanceRepo := repository.NewInstanceRepository(s.db)
 	// instance.{followersCount,followingCount} は following service の
 	// adjustInstanceCountsForFollowing (Follow/Unfollow/AcceptRequest) と
@@ -849,6 +851,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// FEP-521a Multikey 対応で recipient capable + sender Ed25519 鍵あり 経路で
 	// Ed25519 sign を試行できるよう wire (#1067 / #1071)。
 	deliverService.SetKeypairExtraRepo(keypairExtraRepo)
+	// **未配線だと actor の `toot:suspended` を読まない** — 由来を持てない状態で
+	// 自動凍結すると、モデレーターが解除しても次の refresh で無言で戻る (#2973)。
+	federationResolver.SetSuspensionOriginRepo(suspensionOriginRepo)
 	deliverService.SetPublickeyExtraRepo(repository.NewUserPublickeyExtraRepository(s.db))
 	// test (#780) で queue を bypass して同期 deliver する hook を後付けで
 	// 差し替えられるよう、Server から参照を保持する。
@@ -3061,6 +3066,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// recipientRepo がここで揃うため本箇所で配線する。
 	usersHandler.SetAbuseReportWebhook(webhookService, recipientRepo)
 	adminHandler := apiadmin.NewHandler(signupService, roleService, metaRepo, userRepo, idGen)
+	// モデレーターの suspend / unsuspend を local 由来として刻む (#2973)。
+	adminHandler.SetSuspensionOriginRepo(suspensionOriginRepo)
 	// catalog 更新を entity 側 packer に即時反映する (#2258)。TTL 任せだと
 	// 作成直後に装着された decoration が lookup miss で silent drop される。
 	adminHandler.SetAvatarDecorationInvalidator(avatarDecorationResolver)
@@ -3942,6 +3949,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"federation: none でも Person を AP serve し、ap/show の FEDERATION_NOT_ALLOWED gate も skip される"},
 		{"deliverProcessor.deliveryGate", deliverProcessor.HasDeliveryGate(),
 			"block / federation mode は enqueue 時チェックの第 2 の関門が外れ (積み残しと retry 中が漏れる)、suspend は enqueue 側に検査が無いので新規ジョブごと配送し続ける"},
+		{"admin.suspensionOriginRepo", adminHandler.HasSuspensionOriginRepo(),
+			"モデレーターの suspend / unsuspend が由来を刻まないので、解除が次の actor refresh で無言で戻る (#2973)"},
+		{"resolver.suspensionOriginRepo", federationResolver.HasSuspensionOriginRepo(),
+			"リモート actor の凍結を読まなくなる (#2951 が効かない)。読んだとしても由来を刻めないので、モデレーターが解除しても次の refresh で無言で戻る"},
 		{"deliverProcessor.signingKeySource", deliverProcessor.HasSigningKeySource(),
 			"署名鍵は payload に載せず配送時に引くので、未配線だと全ての AP 配送が POST されないまま失敗する (連合が止まる)"},
 		{"notes.metaRepo", notesHandler.HasMetaRepo(),
