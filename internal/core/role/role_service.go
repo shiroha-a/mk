@@ -69,6 +69,16 @@ const (
 	PolicyChunkedUploadMaxConcurrentSessions = "chunkedUploadMaxConcurrentSessions"
 	PolicyChunkedUploadMaxPendingMb          = "chunkedUploadMaxPendingMb"
 
+	// カスタム絵文字申請の期間上限 (#2958、mk-go 独自)。**0 は無制限**。
+	// ローリング期間 (過去 24 時間 / 7 日 / 30 日) で数える。
+	//
+	// 既存の短時間レート制限は連打防止として残す — あちらは「1 時間に何回
+	// 叩けるか」で、こちらは「長期間にわたって審査キューへ何件積めるか」を
+	// 見るので守備範囲が違う。
+	PolicyEmojiApplicationMaxPerDay   = "emojiApplicationMaxPerDay"
+	PolicyEmojiApplicationMaxPerWeek  = "emojiApplicationMaxPerWeek"
+	PolicyEmojiApplicationMaxPerMonth = "emojiApplicationMaxPerMonth"
+
 	// PolicyOptOutNotificationTypes は mk-go 独自 (#2898)。ロール単位で
 	// 受け取らない通知タイプを列挙する。**集約は intersection** —
 	// aggregatePolicyValues の []string 既定 (set union) と逆向きなので、

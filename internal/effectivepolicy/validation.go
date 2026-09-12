@@ -62,6 +62,15 @@ var defaults = map[string]any{
 	"canUseChunkedUpload":                true,
 	"chunkedUploadMaxConcurrentSessions": 4,
 	"chunkedUploadMaxPendingMb":          1024,
+	// カスタム絵文字申請の期間上限 (#2958、mk-go独自)。**0は無制限**。
+	// ローリング期間 (過去24時間 / 7日 / 30日) で数える — 固定暦にすると
+	// タイムゾーン依存になり、切り替わり直前と直後に連続で申請できる。
+	//
+	// 既定は0 (無制限)。既存インスタンスの挙動を変えないため。
+	// 申請そのものを止めるのはcanRequestCustomEmojisの仕事。
+	"emojiApplicationMaxPerDay":   0,
+	"emojiApplicationMaxPerWeek":  0,
+	"emojiApplicationMaxPerMonth": 0,
 	// optOutNotificationTypesはmk-go独自 (#2898)。ロール単位で受け取らない通知
 	// タイプを列挙する。型ごとにcanReceiveXxxを増やす形にすると、固有通知を
 	// 足すたびにpolicyが増えるので1キーにまとめている。

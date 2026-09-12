@@ -152,6 +152,26 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	require.Containsf(t, reactionMenu, "canRequestCustomEmojis",
 		"MkReactionsViewer.reaction が canRequestCustomEmojis を見ていない。ロールで制御できなくなる")
 
+	// **期間上限のエラーを両方の申請経路で扱うこと (#2958)。** 自作画像は
+	// `emoji-request.vue`、リモート絵文字は `request-remote-emoji.ts` が
+	// 独立した switch を持つので、片方だけ足すと同じ上限が一方では
+	// 「何かがおかしいようです」になる。共有ヘルパを呼んでいるかまで見る
+	// (case だけ足して汎用文へ落とす形を通さない)。**ここだけは識別子を固定
+	// する** — 冒頭で禁じている形だが、既存の `requestRemoteEmojiImport(` と
+	// 同じく「呼び出し契約を跨いで固定する」用途。rename すると偽陽性になる
+	// 代わりに、片側だけ直した状態が落ちる。
+	pageSrc := stripComments(readFileString(t, page))
+	remoteReq := stripComments(readFileString(t, filepath.Join(fe, "src", "utility", "request-remote-emoji.ts")))
+	for _, tc := range []struct{ name, src string }{
+		{"emoji-request.vue", pageSrc},
+		{"request-remote-emoji.ts", remoteReq},
+	} {
+		require.Containsf(t, tc.src, "EMOJI_APPLICATION_QUOTA_EXCEEDED",
+			"%s が期間上限のエラーを扱っていない。汎用の「何かがおかしいようです」になる (#2958)", tc.name)
+		require.Containsf(t, tc.src, "emojiApplicationQuotaText(",
+			"%s が期間・上限・再試行時刻を出していない。待てば通るのか設定で塞がれているのか分からない (#2958)", tc.name)
+	}
+
 	// **審査画面が media proxy を通すこと (レビュー M2 / R2-H3)。**
 	// リモートの生 URL は `img-src 'self' data: blob:` を enforce している構成で
 	// **黙ってブロックされる**。この 1 行が「モデレーターに画像が見える」と

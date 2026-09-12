@@ -2127,3 +2127,45 @@ func TestGetUserPolicies_CanUseChunkedUploadAggregation(t *testing.T) {
 	svc.InvalidateAllRoleCaches()
 	assert.Equal(t, true, svc.GetUserPolicies("user1")[role.PolicyCanUseChunkedUpload])
 }
+
+// **ロールに入れた値が実際に届くこと (#2958)。**
+//
+// `resolvePolicies` は `effectivepolicy.Defaults()` のキーだけで出力 map を
+// 作るので、**defaults からキーが落ちると、管理画面には設定が入って見えるのに
+// 上限が一切効かない**。しかも frontend のキー一覧を見る gate は期待値を
+// defaults から導出するため、削除すると gate 自身が黙って弱くなる。
+// service 側のテストは stub の map を返すのでこの経路を通らない。
+func TestGetUserPolicies_EmojiApplicationQuotaAggregation(t *testing.T) {
+	for _, key := range []string{
+		role.PolicyEmojiApplicationMaxPerDay,
+		role.PolicyEmojiApplicationMaxPerWeek,
+		role.PolicyEmojiApplicationMaxPerMonth,
+	} {
+		t.Run(key, func(t *testing.T) {
+			svc, roleRepo, assignRepo, _ := newTestService(t)
+			// 既定は 0 = その期間の上限なし。
+			assert.Equal(t, 0, svc.GetUserPolicies("user1")[key])
+
+			roleRepo.Roles["tight"] = &model.Role{
+				ID: "tight", Name: "Tight",
+				Policies: datatypes.JSON([]byte(
+					`{"` + key + `": {"useDefault": false, "priority": 0, "value": 3}}`)),
+			}
+			assignRepo.Assignments["user1:tight"] = &model.RoleAssignment{ID: "a1", UserID: "user1", RoleID: "tight"}
+			svc.InvalidateAllRoleCaches()
+			assert.Equal(t, 3, svc.GetUserPolicies("user1")[key])
+
+			// **集約は max。** 緩い方に倒れるので、上限としては弱い方が勝つ。
+			// `docs/divergence.md` が「0 は無制限を表現できない」と書いている
+			// のはこの向きによる。
+			roleRepo.Roles["loose"] = &model.Role{
+				ID: "loose", Name: "Loose",
+				Policies: datatypes.JSON([]byte(
+					`{"` + key + `": {"useDefault": false, "priority": 0, "value": 10}}`)),
+			}
+			assignRepo.Assignments["user1:loose"] = &model.RoleAssignment{ID: "a2", UserID: "user1", RoleID: "loose"}
+			svc.InvalidateAllRoleCaches()
+			assert.Equal(t, 10, svc.GetUserPolicies("user1")[key])
+		})
+	}
+}

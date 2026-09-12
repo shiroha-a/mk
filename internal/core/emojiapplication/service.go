@@ -9,11 +9,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"math"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -161,6 +163,74 @@ type Service struct {
 	creator  EmojiCreator
 	notifier ResultNotifier
 	nowFunc  func() time.Time
+	// policies は申請の期間上限を引く先 (#2958)。**未配線なら上限を掛けない** —
+	// 掛けられないのに掛けたつもりになると、ロールを設定した運営者が
+	// 「効いている」と誤解する。既定値も 0 (無制限) なので挙動は変わらない。
+	policies PolicyProvider
+}
+
+// PolicyProvider resolves a user's effective role policies (#2958).
+type PolicyProvider interface {
+	GetUserPolicies(userID string) map[string]any
+}
+
+// SetPolicyProvider wires the role policy source used for the rolling quota.
+func (s *Service) SetPolicyProvider(p PolicyProvider) { s.policies = p }
+
+// HasPolicyProvider reports whether the quota can be enforced.
+func (s *Service) HasPolicyProvider() bool { return s.policies != nil }
+
+// QuotaExceededError is returned when a rolling window is full (#2958).
+// 呼び出し元はこれを HTTP 429 に翻訳し、期間・使用数・上限・再試行時刻を返す。
+type QuotaExceededError struct {
+	Period  string
+	Used    int
+	Limit   int
+	RetryAt time.Time
+}
+
+func (e *QuotaExceededError) Error() string { return "emoji application quota exceeded" }
+
+// quotaWindows builds the rolling windows from the user's role policies.
+//
+// **ローリング期間にする。** 固定暦だとタイムゾーン依存になり、切り替わりの
+// 直前と直後に連続で申請できてしまう。
+func (s *Service) quotaWindows(userID string) []repository.QuotaWindow {
+	if s.policies == nil {
+		return nil
+	}
+	// **errorless 版を使う。** ロール解決に失敗すると base が返る。base には
+	// `meta.policies` (管理画面のベースロール) まで載っているので、そちらに
+	// 上限を入れていればそれが効き、入れていなければ既定の 0 = 無制限に
+	// 倒れる。他の policy consumer と揃えた fail-soft で、DB 全断ならこの
+	// 直後の INSERT も落ちる。
+	p := s.policies.GetUserPolicies(userID)
+	if p == nil {
+		return nil
+	}
+	// 窓は狭い順に並べてある。**ただし repository 側は満杯のものを全部評価して
+	// いちばん遅く空くものを返す**ので、順序は結果を変えない (読みやすさのため)。
+	return []repository.QuotaWindow{
+		{Name: "day", Duration: 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerDay)},
+		{Name: "week", Duration: 7 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerWeek)},
+		{Name: "month", Duration: 30 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerMonth)},
+	}
+}
+
+// policyMax reads a rolling-window limit. 0 以下・未設定・読めない値はすべて
+// 「無制限」(0) に倒す。
+//
+// **小数は切り捨てる。** `PolicyNumber` は 2.5 のような値をそのまま返すので、
+// 切り上げると運営者が意図した上限より 1 件多く通る。
+func policyMax(p map[string]any, key string) int {
+	v, ok := role.PolicyNumber(p[key])
+	if !ok || v <= 0 {
+		return 0
+	}
+	if v > float64(math.MaxInt32) {
+		return math.MaxInt32
+	}
+	return int(math.Floor(v))
 }
 
 // NewService constructs the service. creator / notifier may be nil in tests and
@@ -307,9 +377,18 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 		app.RemoteName = &remoteName
 	}
 
-	if err := s.apps.Create(app); err != nil {
+	// **数えるのと作るのを 1 つのトランザクションでやる (#2958)。** COUNT →
+	// INSERT に分けると、同じ利用者から同時に来たリクエストが両方とも
+	// 「空きあり」を読んで両方通る。
+	if err := s.apps.CreateWithQuota(app, s.quotaWindows(in.UserID)); err != nil {
 		if errors.Is(err, repository.ErrEmojiApplicationDuplicatePending) {
 			return nil, ErrAlreadyPending
+		}
+		var qe *repository.QuotaExceededError
+		if errors.As(err, &qe) {
+			return nil, &QuotaExceededError{
+				Period: qe.Window.Name, Used: qe.Used, Limit: qe.Window.Max, RetryAt: qe.RetryAt,
+			}
 		}
 		return nil, err
 	}

@@ -6,7 +6,10 @@ package emojiapplications
 
 import (
 	"errors"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/labstack/echo/v4"
 
@@ -104,7 +107,11 @@ func (h *Handler) Create(c echo.Context) error {
 // 「何か間違っている」としか伝わらず、名前を直せばよいのか別の問題なのかが
 // 分からない。DB 障害は 500 のまま残す (#2792 と同じ理由)。
 func (h *Handler) createError(c echo.Context, err error) error {
+	// 期間上限は sentinel ではなく値を持つので errors.As で受ける (#2958)。
+	var quota *emojiapplication.QuotaExceededError
 	switch {
+	case errors.As(err, &quota):
+		return h.quotaExceeded(c, quota)
 	case errors.Is(err, emojiapplication.ErrInvalidName):
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"INVALID_EMOJI_NAME", "Emoji name must match ^[a-zA-Z0-9_]+$.",
@@ -221,6 +228,32 @@ func (h *Handler) Cancel(c echo.Context) error {
 	default:
 		return apierr.JSONInternalError(c)
 	}
+}
+
+// quotaExceeded renders the rolling-window rejection (#2958).
+//
+// **429 にする。** 上限に達しただけで申請の内容は正しいので、400 に倒すと
+// 利用者は入力を直そうとして無駄に試行する。`Retry-After` も付けて、いつ
+// 空くかを機械可読にしておく (既存の 1 時間 rate limit と同じ形)。
+func (h *Handler) quotaExceeded(c echo.Context, q *emojiapplication.QuotaExceededError) error {
+	// **切り上げる。** 切り捨てると「Retry-After 秒後」に叩いてもまだ窓の
+	// 中にいて、もう一度 429 を返すことになる。
+	retryAfter := int64(math.Ceil(time.Until(q.RetryAt).Seconds()))
+	if retryAfter < 0 {
+		retryAfter = 0
+	}
+	c.Response().Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+	body := apierr.Error(
+		"EMOJI_APPLICATION_QUOTA_EXCEEDED",
+		"You have reached the maximum number of emoji applications for this period.",
+		"0b6f2a1e-9c34-4f8d-8a51-7b2e4d6c9f30")
+	body["error"].(map[string]any)["info"] = map[string]any{
+		"period":  q.Period,
+		"used":    q.Used,
+		"limit":   q.Limit,
+		"retryAt": entity.ISOMillis(q.RetryAt),
+	}
+	return c.JSON(http.StatusTooManyRequests, body)
 }
 
 // pack renders an application for the applicant.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -27,6 +28,8 @@ type stubApps struct {
 	created   *model.EmojiApplication
 	// lastUser records who the list was scoped to.
 	lastUser string
+	// quotaErr is returned from CreateWithQuota (#2958).
+	quotaErr error
 }
 
 func (s *stubApps) Create(a *model.EmojiApplication) error {
@@ -35,6 +38,12 @@ func (s *stubApps) Create(a *model.EmojiApplication) error {
 	}
 	s.created = a
 	return nil
+}
+func (s *stubApps) CreateWithQuota(a *model.EmojiApplication, _ []repository.QuotaWindow) error {
+	if s.quotaErr != nil {
+		return s.quotaErr
+	}
+	return s.Create(a)
 }
 func (s *stubApps) FindByID(id string) (*model.EmojiApplication, error) {
 	if a, ok := s.byID[id]; ok {
@@ -413,4 +422,80 @@ func TestCreateRemoteSucceeds(t *testing.T) {
 	require.Equal(t, "remote", body["kind"])
 	require.Equal(t, "example.com", body["remoteHost"])
 	require.Equal(t, "sushi_remote", body["remoteName"])
+}
+
+// **上限超過は 429 で返し、いつ空くかも返す (#2958)。** 400 に倒すと利用者は
+// 入力を直そうとして無駄に試行する。
+func TestCreateQuotaExceededReturns429(t *testing.T) {
+	// **now からの差と、ミリ秒未満の端数を、どちらも決定的にする。**
+	// `Truncate(time.Millisecond)` だけだと RFC3339Nano との差が出るのが
+	// 実測 10% しかなく書式の検査が空振りし、秒の端数を落とすと今度は
+	// `Ceil` と `Floor` が区別できない秒に落ちる。
+	// - 端数 456789ns → `ISOMillis` は切り捨てて `.xxx`、RFC3339Nano とは必ず違う
+	// - now との差 5400.5 秒 → `Ceil` は 5401、`Floor` は 5400 で必ず割れる
+	retryAt := time.Now().Add(90*time.Minute + 500*time.Millisecond).UTC().
+		Truncate(time.Millisecond).Add(456789 * time.Nanosecond)
+	apps := &stubApps{quotaErr: &repository.QuotaExceededError{
+		Window:  repository.QuotaWindow{Name: "day", Duration: 24 * time.Hour, Max: 3},
+		Used:    4,
+		RetryAt: retryAt,
+	}}
+	// **policy provider は配線しない。** stub が windows を無視するので、
+	// 配線しても何も検証していない。ここで見るのは HTTP の形だけ。
+	svc := emojiapplication.NewService(apps, &stubEmojiLookup{}, ownedFile(), &stubIDGen{}, nil, nil)
+	rec := doPost(emojiapplications.NewHandler(svc, apps, nil).Create,
+		`{"name":"sushi","license":"自作","fileId":"f1"}`, alice)
+
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+			ID   string `json:"id"`
+			Info struct {
+				Period  string `json:"period"`
+				Used    int    `json:"used"`
+				Limit   int    `json:"limit"`
+				RetryAt string `json:"retryAt"`
+			} `json:"info"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "EMOJI_APPLICATION_QUOTA_EXCEEDED", body.Error.Code)
+	require.NotEmpty(t, body.Error.ID)
+	require.Equal(t, "day", body.Error.Info.Period)
+	require.Equal(t, 4, body.Error.Info.Used)
+	require.Equal(t, 3, body.Error.Info.Limit)
+	// ミリ秒で丸めた形 (`.123Z`) であること。RFC3339Nano だと `.123456789Z`。
+	require.Equal(t, retryAt.Format("2006-01-02T15:04:05.000Z"), body.Error.Info.RetryAt)
+	require.NotEqual(t, retryAt.Format(time.RFC3339Nano), body.Error.Info.RetryAt,
+		"ナノ秒まで出ている。misskey-js の他の時刻はミリ秒")
+
+	// **Retry-After も付ける。** 機械的に再試行するクライアントが 429 を
+	// 無視して叩き続けるのを防ぐ唯一の手がかり。
+	secs, err := strconv.Atoi(rec.Header().Get("Retry-After"))
+	require.NoError(t, err)
+	// 5400.5 秒先なので切り上げれば 5401。**切り捨てると 5400** になり、
+	// その秒に叩いてもまだ窓の中にいる。
+	require.Equal(t, 5401, secs)
+	// 申請自体は作られていないこと。
+	require.Nil(t, apps.created)
+}
+
+// 既に窓を出ている (RetryAt が過去) ときに負の Retry-After を返さない。
+// 負値はクライアントによっては解釈に失敗する。
+func TestCreateQuotaExceededClampsRetryAfter(t *testing.T) {
+	apps := &stubApps{quotaErr: &repository.QuotaExceededError{
+		Window:  repository.QuotaWindow{Name: "month", Duration: 30 * 24 * time.Hour, Max: 1},
+		Used:    1,
+		RetryAt: time.Now().Add(-time.Hour),
+	}}
+	svc := emojiapplication.NewService(apps, &stubEmojiLookup{}, ownedFile(), &stubIDGen{}, nil, nil)
+	rec := doPost(emojiapplications.NewHandler(svc, apps, nil).Create,
+		`{"name":"sushi","license":"自作","fileId":"f1"}`, alice)
+
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	require.Equal(t, "0", rec.Header().Get("Retry-After"))
+	// どの期間で弾かれたかは窓から取ること (決め打ちにしない)。
+	require.Contains(t, rec.Body.String(), `"period":"month"`)
 }
