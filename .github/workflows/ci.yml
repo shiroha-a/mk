@@ -403,7 +403,7 @@ jobs:
       - name: Check duplicate test fixture IDs
         run: |
           set -e
-          dupes=$(grep -rh 'insertTestUser(t, "\|insertRemoteTestUser(t, "' \
+          dupes=$(grep -rh 'insertTestUser(t, "\|insertRemoteTestUser(t, "\|createTestUser(t, "' \
             internal/repository/*_test.go \
             | awk -F'"' '{print $2}' | sort | uniq -c | sort -rn \
             | awk '$1 > 1')
@@ -419,7 +419,7 @@ jobs:
               grep -n "\"$id\"" internal/repository/*_test.go | sed 's/^/    /'
               echo ""
             done <<< "$dupes"
-            echo "Each insertTestUser / insertRemoteTestUser caller must use"
+            echo "Each insertTestUser / insertRemoteTestUser / createTestUser caller must use"
             echo "a unique ID literal across the repository package. Rename"
             echo "the duplicates to file-specific prefixes (e.g. u_<file>_*)."
             exit 1

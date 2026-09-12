@@ -24,11 +24,11 @@ type fakeApps struct {
 	// while FindByID still sees the row as pending. **読んだ後に負ける**状況は
 	// これでしか作れない (両方が同じ map を見ているため)。
 	loseRace bool
-	// quotaWindows records what Create asked for so the policy plumbing can be
-	// asserted without a database (#2958).
-	quotaWindows []repository.QuotaWindow
-	quotaCalls   int
-	quotaErr     error
+	// quotaLimits records what Create asked for so the policy plumbing can be
+	// asserted without a database (#2958 / #2977).
+	quotaLimits repository.QuotaLimits
+	quotaCalls  int
+	quotaErr    error
 }
 
 func newFakeApps() *fakeApps { return &fakeApps{rows: map[string]*model.EmojiApplication{}} }
@@ -41,8 +41,8 @@ func (f *fakeApps) Create(a *model.EmojiApplication) error {
 	return nil
 }
 
-func (f *fakeApps) CreateWithQuota(a *model.EmojiApplication, w []repository.QuotaWindow) error {
-	f.quotaWindows = w
+func (f *fakeApps) CreateWithQuota(a *model.EmojiApplication, l repository.QuotaLimits) error {
+	f.quotaLimits = l
 	f.quotaCalls++
 	if f.quotaErr != nil {
 		return f.quotaErr
@@ -774,7 +774,7 @@ func TestCreateBuildsQuotaWindowsFromPolicies(t *testing.T) {
 		{Name: "day", Duration: 24 * time.Hour, Max: 3},
 		{Name: "week", Duration: 7 * 24 * time.Hour, Max: 10},
 		{Name: "month", Duration: 30 * 24 * time.Hour, Max: 20},
-	}, apps.quotaWindows)
+	}, apps.quotaLimits.Windows)
 	// **上限は申請者のロールで決まる。** 別人の ID で引くと、権限の弱い人が
 	// 強い人の枠を使える。
 	require.Equal(t, []string{"u1"}, pol.calls)
@@ -791,7 +791,7 @@ func TestCreateWithoutPolicyProviderAppliesNoQuota(t *testing.T) {
 	_, err := svc.Create(validInput())
 	require.NoError(t, err)
 	require.Equal(t, 1, apps.quotaCalls)
-	require.Nil(t, apps.quotaWindows)
+	require.Nil(t, apps.quotaLimits.Windows)
 }
 
 // ポリシーが引けなかったときも上限を掛けない (resolvePolicies は fail-soft で
@@ -803,7 +803,8 @@ func TestCreateWithNilPoliciesAppliesNoQuota(t *testing.T) {
 
 	_, err := svc.Create(validInput())
 	require.NoError(t, err)
-	require.Nil(t, apps.quotaWindows)
+	require.Nil(t, apps.quotaLimits.Windows)
+	require.Zero(t, apps.quotaLimits.MaxPending)
 }
 
 // **0 以下・未設定・読めない値は無制限に倒す。** ここを上限として扱うと、
@@ -836,7 +837,7 @@ func TestCreateTreatsNonPositivePoliciesAsUnlimited(t *testing.T) {
 
 			_, err := svc.Create(validInput())
 			require.NoError(t, err)
-			require.Equal(t, tc.want, apps.quotaWindows[0].Max)
+			require.Equal(t, tc.want, apps.quotaLimits.Windows[0].Max)
 		})
 	}
 }
@@ -892,4 +893,52 @@ func TestCreateKeepsDuplicatePendingThroughQuotaPath(t *testing.T) {
 
 	_, err := svc.Create(validInput())
 	require.ErrorIs(t, err, ErrAlreadyPending)
+}
+
+// **審査待ちの上限もポリシーから引くこと (#2977)。** 期間上限と同じ経路で
+// 渡さないと、設定しても効かないまま気付けない。
+func TestCreateBuildsPendingLimitFromPolicies(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{
+		"emojiApplicationMaxPending": 4,
+	}})
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.Equal(t, 4, apps.quotaLimits.MaxPending)
+}
+
+// 未配線・ポリシーなしなら審査待ちの上限も掛けない。
+func TestCreateWithoutPolicyProviderAppliesNoPendingLimit(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.Zero(t, apps.quotaLimits.MaxPending)
+}
+
+// **審査待ちの上限は専用の型で返すこと (#2977)。** 期間上限と同じ型に潰すと、
+// API 層が 429 と `Retry-After` を付けてしまい「待てば通る」と誤解させる。
+func TestCreateTranslatesPendingLimitExceeded(t *testing.T) {
+	apps := newFakeApps()
+	apps.quotaErr = &repository.PendingLimitExceededError{Used: 5, Limit: 3}
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{"emojiApplicationMaxPending": 3}})
+
+	_, err := svc.Create(validInput())
+	var pe *PendingLimitExceededError
+	require.ErrorAs(t, err, &pe)
+	require.Equal(t, 5, pe.Used)
+	require.Equal(t, 3, pe.Limit)
+	// 期間上限とは別の型であること (API 層の分岐がこれに依存する)。
+	var qe *QuotaExceededError
+	require.False(t, errors.As(err, &qe))
+}
+
+// 番兵の文面が審査待ちを指すこと。
+func TestPendingLimitExceededErrorMessage(t *testing.T) {
+	err := &PendingLimitExceededError{Used: 3, Limit: 3}
+	require.Contains(t, err.Error(), "pending")
 }

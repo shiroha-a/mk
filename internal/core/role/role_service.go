@@ -79,6 +79,13 @@ const (
 	PolicyEmojiApplicationMaxPerWeek  = "emojiApplicationMaxPerWeek"
 	PolicyEmojiApplicationMaxPerMonth = "emojiApplicationMaxPerMonth"
 
+	// 同時に審査待ちにできる件数 (#2977、mk-go 独自)。**0 は無制限**。
+	//
+	// **上の期間上限とは数え方が逆で、絞っているものも違う。** こちらは
+	// pending だけを数えるので**却下・取り下げ・承認で枠が戻る**。期間上限が
+	// 絞るのは「出せる総量」、こちらが絞るのは「モデレーターが見る一覧の長さ」。
+	PolicyEmojiApplicationMaxPending = "emojiApplicationMaxPending"
+
 	// PolicyOptOutNotificationTypes は mk-go 独自 (#2898)。ロール単位で
 	// 受け取らない通知タイプを列挙する。**集約は intersection** —
 	// aggregatePolicyValues の []string 既定 (set union) と逆向きなので、

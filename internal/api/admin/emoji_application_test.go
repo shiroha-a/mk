@@ -367,7 +367,7 @@ type stubAppsRepo struct {
 }
 
 func (s *stubAppsRepo) Create(*model.EmojiApplication) error { return nil }
-func (s *stubAppsRepo) CreateWithQuota(*model.EmojiApplication, []repository.QuotaWindow) error {
+func (s *stubAppsRepo) CreateWithQuota(*model.EmojiApplication, repository.QuotaLimits) error {
 	return nil
 }
 func (s *stubAppsRepo) FindByID(string) (*model.EmojiApplication, error) {

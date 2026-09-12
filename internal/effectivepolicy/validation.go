@@ -71,6 +71,9 @@ var defaults = map[string]any{
 	"emojiApplicationMaxPerDay":   0,
 	"emojiApplicationMaxPerWeek":  0,
 	"emojiApplicationMaxPerMonth": 0,
+	// 同時に審査待ちにできる件数 (#2977)。**上の期間上限とは数え方が逆**で、
+	// pendingだけを数えるので却下・取り下げ・承認で枠が戻る。既定は0 (無制限)。
+	"emojiApplicationMaxPending": 0,
 	// optOutNotificationTypesはmk-go独自 (#2898)。ロール単位で受け取らない通知
 	// タイプを列挙する。型ごとにcanReceiveXxxを増やす形にすると、固有通知を
 	// 足すたびにpolicyが増えるので1キーにまとめている。

@@ -170,6 +170,13 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 			"%s が期間上限のエラーを扱っていない。汎用の「何かがおかしいようです」になる (#2958)", tc.name)
 		require.Containsf(t, tc.src, "emojiApplicationQuotaText(",
 			"%s が期間・上限・再試行時刻を出していない。待てば通るのか設定で塞がれているのか分からない (#2958)", tc.name)
+		// **審査待ちの上限も両方で扱うこと (#2977)。** 期間の上限とは解決の
+		// 仕方が違う (待つのではなく取り下げる) ので、汎用文に落とすと
+		// 利用者は待ち続けることになる。
+		require.Containsf(t, tc.src, "EMOJI_APPLICATION_PENDING_LIMIT_EXCEEDED",
+			"%s が審査待ちの上限を扱っていない。汎用の「何かがおかしいようです」になる (#2977)", tc.name)
+		require.Containsf(t, tc.src, "emojiApplicationPendingLimitText(",
+			"%s が審査待ちの件数と取るべき行動を出していない (#2977)", tc.name)
 	}
 
 	// **審査画面が media proxy を通すこと (レビュー M2 / R2-H3)。**

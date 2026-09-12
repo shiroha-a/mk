@@ -46,9 +46,9 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # という概念自体が無いので TS 側にキーが無い。docs/divergence.md に
     # additive field として記載済み。
     "canRequestCustomEmojis",
-    # 申請のロール別の期間上限 (#2958)。同上。
+    # 申請のロール別の期間上限 (#2958) と審査待ち上限 (#2977)。同上。
     "emojiApplicationMaxPerDay", "emojiApplicationMaxPerWeek",
-    "emojiApplicationMaxPerMonth",
+    "emojiApplicationMaxPerMonth", "emojiApplicationMaxPending",
     # 承認制の登録 (#2554 / #2555) は mk-go 独自機能なので TS 側にキーが無い。
     # meta 直下と features の両方に出る (frontend は features を feature
     # detection に使うため片方だけだと検出できない)。docs/divergence.md に
@@ -103,9 +103,9 @@ USER_IGNORE = DEFAULT_IGNORE_KEYS | {
     "optOutNotificationTypes",
     # カスタム絵文字の登録申請 (#2934)。同上。
     "canRequestCustomEmojis",
-    # 申請のロール別の期間上限 (#2958)。同上。
+    # 申請のロール別の期間上限 (#2958) と審査待ち上限 (#2977)。同上。
     "emojiApplicationMaxPerDay", "emojiApplicationMaxPerWeek",
-    "emojiApplicationMaxPerMonth",
+    "emojiApplicationMaxPerMonth", "emojiApplicationMaxPending",
 }
 
 

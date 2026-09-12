@@ -39,7 +39,7 @@ func (s *stubApps) Create(a *model.EmojiApplication) error {
 	s.created = a
 	return nil
 }
-func (s *stubApps) CreateWithQuota(a *model.EmojiApplication, _ []repository.QuotaWindow) error {
+func (s *stubApps) CreateWithQuota(a *model.EmojiApplication, _ repository.QuotaLimits) error {
 	if s.quotaErr != nil {
 		return s.quotaErr
 	}
@@ -498,4 +498,69 @@ func TestCreateQuotaExceededClampsRetryAfter(t *testing.T) {
 	require.Equal(t, "0", rec.Header().Get("Retry-After"))
 	// どの期間で弾かれたかは窓から取ること (決め打ちにしない)。
 	require.Contains(t, rec.Body.String(), `"period":"month"`)
+}
+
+// **審査待ちの上限は 429 にしない (#2977)。** いつ空くかを返せないので
+// `Retry-After` を付けられず、レート制限と同じ形にすると「待てば通る」と
+// 誤解させる。実際に空くのはモデレーターが処理したときか、取り下げたとき。
+func TestCreatePendingLimitExceededReturns400(t *testing.T) {
+	apps := &stubApps{quotaErr: &repository.PendingLimitExceededError{Used: 5, Limit: 3}}
+	svc := emojiapplication.NewService(apps, &stubEmojiLookup{}, ownedFile(), &stubIDGen{}, nil, nil)
+	rec := doPost(emojiapplications.NewHandler(svc, apps, nil).Create,
+		`{"name":"sushi","license":"自作","fileId":"f1"}`, alice)
+
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Empty(t, rec.Header().Get("Retry-After"), "待てば通ると誤解させる")
+
+	var body struct {
+		Error struct {
+			Code string `json:"code"`
+			ID   string `json:"id"`
+			Info struct {
+				Used    int    `json:"used"`
+				Limit   int    `json:"limit"`
+				RetryAt string `json:"retryAt"`
+			} `json:"info"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "EMOJI_APPLICATION_PENDING_LIMIT_EXCEEDED", body.Error.Code)
+	require.NotEmpty(t, body.Error.ID)
+	require.Equal(t, 5, body.Error.Info.Used)
+	require.Equal(t, 3, body.Error.Info.Limit)
+	require.Empty(t, body.Error.Info.RetryAt, "予告できない時刻を出している")
+	// 期間上限とコードが衝突しないこと (どちらで弾かれたかを区別できる)。
+	require.NotContains(t, rec.Body.String(), "EMOJI_APPLICATION_QUOTA_EXCEEDED")
+	require.Nil(t, apps.created)
+}
+
+// **時刻が無ければ `retryAt` も `Retry-After` も出さないこと (#2977)。**
+// 審査待ちの上限も同時に満杯だと、期間が空いてもまだ通らない。予告できない
+// 時刻を広告すると、利用者はその時刻に叩いて別のエラーを受け取る。
+func TestCreateQuotaExceededWithoutRetryAtOmitsTime(t *testing.T) {
+	apps := &stubApps{quotaErr: &repository.QuotaExceededError{
+		Window: repository.QuotaWindow{Name: "day", Duration: 24 * time.Hour, Max: 3},
+		Used:   4,
+		// RetryAt はゼロ値 (審査待ちも満杯)。
+	}}
+	svc := emojiapplication.NewService(apps, &stubEmojiLookup{}, ownedFile(), &stubIDGen{}, nil, nil)
+	rec := doPost(emojiapplications.NewHandler(svc, apps, nil).Create,
+		`{"name":"sushi","license":"自作","fileId":"f1"}`, alice)
+
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+	require.Empty(t, rec.Header().Get("Retry-After"), "予告できない時刻を出している")
+
+	var body struct {
+		Error struct {
+			Code string         `json:"code"`
+			Info map[string]any `json:"info"`
+		} `json:"error"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, "EMOJI_APPLICATION_QUOTA_EXCEEDED", body.Error.Code)
+	require.NotContains(t, body.Error.Info, "retryAt")
+	// 期間と件数は出す (どこで弾かれたかは伝わる)。
+	require.Equal(t, "day", body.Error.Info["period"])
+	require.EqualValues(t, 4, body.Error.Info["used"])
+	require.EqualValues(t, 3, body.Error.Info["limit"])
 }

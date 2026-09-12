@@ -2140,6 +2140,7 @@ func TestGetUserPolicies_EmojiApplicationQuotaAggregation(t *testing.T) {
 		role.PolicyEmojiApplicationMaxPerDay,
 		role.PolicyEmojiApplicationMaxPerWeek,
 		role.PolicyEmojiApplicationMaxPerMonth,
+		role.PolicyEmojiApplicationMaxPending,
 	} {
 		t.Run(key, func(t *testing.T) {
 			svc, roleRepo, assignRepo, _ := newTestService(t)
