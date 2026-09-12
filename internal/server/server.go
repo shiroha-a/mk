@@ -241,6 +241,75 @@ func extractIPFallback(req *http.Request, trusted []*net.IPNet) string {
 	return ""
 }
 
+// noCORSPaths lists the API paths that must not be usable from a cross-origin
+// browser (#2953).
+//
+// **フォロー一覧を一括で抜いて CSV にし、インポートに食わせる収集**を
+// ブラウザから行えなくする。対象は `POST` + `Content-Type: application/json`
+// なので**単純リクエストではなくプリフライトが必須**で、CORS ヘッダを出さなけ
+// れば越境のブラウザは実リクエストに到達できない。
+//
+// **壁ではない。** サーバー側プロキシを 1 つ挟めば CORS は無関係になる。狙う
+// 費用を上げるための措置で、レート制限 (`ratelimit_defs.go` の同じ 2 つ) と
+// 対になっている。
+//
+// **同一オリジンは影響を受けない。** ブラウザは同一オリジンの応答に CORS 検査
+// を適用しないので、ヘッダを出さなくても同梱のフロントエンドは動く (叩き先は
+// `window.location.origin + '/api'`)。**Origin の値は見ない** — 同一オリジンの
+// POST にもブラウザは Origin を付けるので「Origin があれば越境」は誤りだし、
+// `cfg.URL` と突き合わせる形は逆プロキシや別ドメイン運用で壊れる。
+//
+// **Origin を持たないクライアント (ネイティブアプリ / CLI / 連合) は無影響。**
+// 応答ヘッダを見ないため。
+var noCORSPaths = map[string]bool{
+	"/api/users/following": true,
+	"/api/users/followers": true,
+}
+
+// corsMiddleware returns the global CORS middleware.
+// Shared with cors_test.go so production and tests stay in sync.
+func corsMiddleware() echo.MiddlewareFunc {
+	inner := echomw.CORSWithConfig(echomw.CORSConfig{
+		// discovery endpoint は upstream が専用の hook で
+		// `Access-Control-Allow-Headers: Accept` だけを広告する。ここで
+		// グローバル CORS を通すと preflight に Origin/Content-Type/
+		// Authorization まで載って乖離するので除外する (handler 側が
+		// setDiscoveryCORS で必要なヘッダを全て付ける)。
+		Skipper: func(c echo.Context) bool {
+			return strings.HasPrefix(c.Request().URL.Path, "/.well-known/")
+		},
+		AllowOrigins: []string{"*"},
+		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
+		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
+	})
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		wrapped := inner(next)
+		return func(c echo.Context) error {
+			// **`c.Request().URL.Path` で見る。** グローバル middleware の
+			// 時点では `c.Path()` が `/api/*` に解決されていることがある。
+			if !noCORSPaths[c.Request().URL.Path] {
+				return wrapped(c)
+			}
+			// **`Vary: Origin` は自分で戻す。** echo の CORS は Skipper より
+			// 前に無条件で付けており、迂回すると落ちる。**`Set` ではなく
+			// `Add`** — gzip が付ける `Vary: Accept-Encoding` を消さないため。
+			c.Response().Header().Add(echo.HeaderVary, echo.HeaderOrigin)
+			// **プリフライトはここで打ち切る。** 通すと `api.Any("/*")` の
+			// catchall が拾って `200 + {}` を返し、プリフライトのたびに
+			// 「unimplemented API endpoint」の警告ログを吐く。auth の
+			// `io.ReadAll` やレート制限にも OPTIONS が流れる。
+			//
+			// **拒否はしない (204)。** CORS ヘッダが無い時点でブラウザは
+			// 止まるので 403 にしても挙動は変わらず、Origin を付けてくる
+			// 非ブラウザのクライアントを壊す側にだけ倒れる。
+			if c.Request().Method == http.MethodOptions {
+				return c.NoContent(http.StatusNoContent)
+			}
+			return next(c)
+		}
+	}
+}
+
 // gzipConfig returns the GzipConfig used by the global middleware stack.
 // Shared with gzip_test.go so production and tests stay in sync.
 func gzipConfig() echomw.GzipConfig {
@@ -417,19 +486,7 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 			return buf.WriteString(redact.URI(c.Request().RequestURI))
 		},
 	}))
-	e.Use(echomw.CORSWithConfig(echomw.CORSConfig{
-		// discovery endpoint は upstream が専用の hook で
-		// `Access-Control-Allow-Headers: Accept` だけを広告する。ここで
-		// グローバル CORS を通すと preflight に Origin/Content-Type/
-		// Authorization まで載って乖離するので除外する (handler 側が
-		// setDiscoveryCORS で必要なヘッダを全て付ける)。
-		Skipper: func(c echo.Context) bool {
-			return strings.HasPrefix(c.Request().URL.Path, "/.well-known/")
-		},
-		AllowOrigins: []string{"*"},
-		AllowMethods: []string{http.MethodGet, http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodOptions},
-		AllowHeaders: []string{echo.HeaderOrigin, echo.HeaderContentType, echo.HeaderAccept, echo.HeaderAuthorization},
-	}))
+	e.Use(corsMiddleware())
 	// gzip response compression (#413 Phase 3 #12)。Misskey TS は nginx
 	// 前段で gzip するのが定石だが、mk-go は単体運用も想定するので app 側
 	// で提供する。設定は gzipConfig() に集約してテストと共有。

@@ -175,5 +175,31 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	// upstream 2026.7.0 GHSA hardening: fetch-rss は 60s/300 回。
 	"fetch-rss":             {Duration: time.Minute, Max: 300},
 	"roles/assignment-show": {Duration: time.Minute, Max: 60},
-	"users/lists/push":      {Duration: time.Hour, Max: 30},
+
+	// ── 公開の関係一覧 (#2953) ──────────────────────────
+	//
+	// **upstream には上限が無い** (`users/following.ts` / `followers.ts` の
+	// `meta` に `limit` が無い) mk-go 独自の追加。未認証で全件を引けるので、
+	// フォロー一覧を CSV 化してインポートに食わせる収集の速度に上限を置く。
+	//
+	// **壁ではなく速度制限帯。** 1 アカウントぶんの書き出し (実測 39 件 =
+	// 2 リクエスト) は止まらない。止めるのは社会グラフの一括収集のほう。
+	//
+	// **窓を 1 時間にしない。** store は拒否したリクエストも記録するので、
+	// 429 を無視して叩き続けるクライアントは Retry-After を 1 窓ぶんに
+	// 押し戻し続ける。長い窓だと**行儀の悪いタブ 1 つで CGNAT 配下が丸ごと
+	// 閲覧不能**になる。閲覧系の前例 (`i/notifications` の 30s/30、
+	// `roles/assignment-show` の 1m/60) と同じ短い窓に揃える。
+	//
+	// **30 は人間のスクロールを大きく上回る。** フロントエンドは初回 20 行、
+	// 以降 1 リクエスト 30 行 (`paginator.ts` の SECOND_FETCH_LIMIT) なので、
+	// 30 req/min は「毎秒 15 行を 1 分間読み続ける」速度に相当する。当たっても
+	// ロックは最大 60 秒で、`Retry-After` が付く。
+	//
+	// **未認証だけに絞らない。** オープン登録のインスタンスでは捨て
+	// アカウント 1 個で迂回でき、IP をローテートするより安い。絞るほうが
+	// 防御として弱くなる。
+	"users/following":  {Duration: time.Minute, Max: 30},
+	"users/followers":  {Duration: time.Minute, Max: 30},
+	"users/lists/push": {Duration: time.Hour, Max: 30},
 }

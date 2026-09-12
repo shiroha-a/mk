@@ -934,6 +934,51 @@ func TestDefaultEndpointLimits_ChatMessageSendPathsAgree(t *testing.T) {
 	}
 }
 
+// TestDefaultEndpointLimits_RelationListEndpoints guards the public relation
+// lists against bulk harvesting (#2953).
+//
+// **UnauthenticatedEntryPoints に相乗りしない。** あちらの doc は「サーバー側に
+// 行やメールを作る入口」を守ると宣言しているが、こちらは**作らない、漏らす**
+// 側なので、混ぜると既存テストの説明が嘘になる。
+//
+// **テーブルに載っていないエンドポイントは無制限**になる。この 2 つは未認証で
+// 全件を引けるので、載っていないと収集の速度に上限が無い。
+func TestDefaultEndpointLimits_RelationListEndpoints(t *testing.T) {
+	paths := []string{
+		"/api/users/following",
+		"/api/users/followers",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			store := &mockLimitStore{}
+			rl := NewRateLimiter(store, true, DefaultEndpointLimits)
+			e, h := setupEcho(rl)
+
+			doRequest(e, rl.Middleware(), h, path, nil)
+
+			require.NotEmptyf(t, store.calls,
+				"%s が無制限。DefaultEndpointLimits にキーが無いか、"+
+					"path からキーへの変換が合っていない", path)
+		})
+	}
+}
+
+// **窓は短く保つ。** store は拒否したリクエストも記録するので、429 を無視して
+// 叩き続けるクライアントは Retry-After を 1 窓ぶんに押し戻し続ける。長い窓を
+// 置くと、行儀の悪いタブ 1 つで CGNAT 配下が丸ごとその時間だけ閲覧不能になる。
+func TestRelationListLimitsUseAShortWindow(t *testing.T) {
+	for _, key := range []string{"users/following", "users/followers"} {
+		limit, ok := DefaultEndpointLimits[key]
+		require.Truef(t, ok, "%s の定義が無い", key)
+		require.LessOrEqualf(t, limit.Duration, time.Minute,
+			"%s の窓が長すぎる (%s)。拒否も記録されるので、長い窓は"+
+				"共有 IP の巻き添えを長引かせる", key, limit.Duration)
+		// 人間のスクロール (1 リクエスト 30 行) を明確に上回ること。
+		require.GreaterOrEqualf(t, limit.Max, 30,
+			"%s の上限が低すぎる。通常の閲覧が 429 になる", key)
+	}
+}
+
 // TestDefaultEndpointLimits_ApplicationEntryPoints guards the authenticated
 // endpoints that create rows in a moderation queue.
 //
