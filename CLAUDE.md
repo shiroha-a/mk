@@ -143,7 +143,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -216,7 +216,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 131 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 132 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -853,6 +853,13 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-09-12**: `make gates` に `secretfield-check` を追加。`make help` の target は 131 → 132。**モデルをそのまま JSON 化する経路があるので、`json:"-"` が唯一の防波堤になっているフィールドがある。** 実測で `internal/model` の該当タグを外しても `make gates` も全テストも緑のままだった。**名前だけでは判定できない** — `Meta` の captcha secret は `admin/meta` が管理画面へ返すし、drive の `accessKey` は URL の構成要素で秘密ではない。そこで #2792 と同じ **allowlist に理由を書かせる**方式にした。
+  **allowlist は検出集合と突き合わせる。** 実在しないキーを書いても黙って無視される形だと、守っているつもりで何も検査していない状態になる。**初版が実際にそうだった** — `Meta.SensitiveMediaDetectionAPIKey` を登録していたのに、正規表現が `ApiKey` しか見ておらず `APIKey` には一致していなかった。この突き合わせを足して初めて発覚し、あわせて `DeeplAuthKey` / `TruemailAuthKey` / `VerifymailAuthKey` の取りこぼしも出た。**副作用として、正規表現を狭める変異でも落ちる** — 検出対象が減ると allowlist のキーが該当集合から消えるため。
+  **`Key` 全体には広げない。** `PublicKey` / `*SiteKey` (captcha のサイトキーはフロントへ配る公開値) / `SortKeys` / `ExcludeKeywords` が入って allowlist が誤検知で埋まり、本物が紛れる。
+  **gate は `internal/model` には置けない。** あそこは `_test.go` を 1 つも持たないので、テストを足すと CI のカバレッジ閾値 (90%) の対象に**初めて**入り、wire 層と同じ理由で 0% に張り付いて落ちる (#462 と同型。実測で `coverage: 0.0%`)。`internal/entitycompat` に置き、対象のソースはファイルとして読む。
+  **検出ロジックは人工のソースで固定する。** 実モデルは allowlist で全て許可済みなので leak は 0 件で、実モデルだけを見ていると**検出の枝が一度も実行されない**。人工の struct を食わせるテストを別に置いてある (これが無いと、leak 判定を空にする変異が素通りすることを実測)。
+  **静的なタグ検査だけでは足りない。** `MarshalJSON` を自前で実装した型で抜けるので、代表的な型を実際に `json.Marshal` して秘密が出ないことも見る。逆に**新しい秘密フィールドを `json:"-"` 無しで足す**形は静的検査でしか捕まらない (JSON 側は既知の型しか見ない)。変異検証は 20 形中 19 形を検出した — 唯一の非検出は「実モデルの leak 検査を丸ごと消す」形で、leak が 0 件である以上は原理的に捕まらない (#2792 で allowlist が空になったのと同じ)。
 
 - **2026-09-11**: `make gates` に `dockerignore-check` を追加し、`.dockerignore` の漏れを塞いだ (#2942)。`make help` の target は 130 → 131。**`drive-files` と operator-local な設定 (`.config/*.y*ml` / `deploy/uds/config/*.y*ml` / `compose.uds.yaml` / `.claude`) が除外されていなかった。**
   **「配る image に入る」ではない。** mk-go をビルドする Dockerfile はどれも最終 stage が**明示パスの `COPY --from=builder` しか持たない**ので、context に入ったファイルが配布物へ出ることはない (実測: 除外を外して build しても最終 image の `drive-files` は 0 件、builder stage には 2,790 件。修正前の `.dockerignore` でビルドされた本番 image の `/app/drive-files` も空)。**最初これを「image へ焼き込まれる」と裏取りせずに書き、7 箇所に伝播させた。** 守っているのは **build context と builder stage の layer** で、漏れる経路は (a) `cache-to` でキャッシュへ書き出したとき、(b) 手元の builder cache に滞留したとき、の 2 つ。加えて転送量にも効く。
