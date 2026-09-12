@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"math"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -80,7 +81,7 @@ var (
 // 押した後でエラーになり、申請者にも審査者にも何も残らない。
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
-// AllowedImageTypes mirrors upstream FILE_TYPE_IMAGE (const.ts).
+// The accepted set mirrors upstream FILE_TYPE_IMAGE (const.ts).
 //
 // **prefix 判定 ("image/") にしない。** それでは `image/svg+xml` を通してしまい、
 // 絵文字は本文中にそのまま埋め込まれるので XSS になる。admin 側の
@@ -93,6 +94,20 @@ var namePattern = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 // **map を公開しない (レビュー Low 8)。** 公開 mutable な map だと、どこからでも
 // 書き換えられる。関数越しにすれば集合の共有はそのままで、書き換えの経路が消える。
 func IsAllowedImageType(mime string) bool { return allowedImageTypes[mime] }
+
+// AllowedImageTypes returns the accepted MIME types.
+//
+// **コピーを返す。** 公開 mutable な map にすると、どこからでも書き換えられる
+// (`IsAllowedImageType` を関数越しにしたのと同じ理由)。fork frontend の
+// ドロップ判定 (#2959) と突き合わせるゲートが使う。
+func AllowedImageTypes() []string {
+	out := make([]string, 0, len(allowedImageTypes))
+	for mime := range allowedImageTypes {
+		out = append(out, mime)
+	}
+	sort.Strings(out)
+	return out
+}
 
 var allowedImageTypes = map[string]bool{
 	"image/png":    true,
