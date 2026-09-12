@@ -31,16 +31,28 @@ import (
 //     実測: 同じ画面のインポートログは `it.item.url` で、これには当たらない。
 //   - 変数に入れてから渡す形、`v-bind` でまとめて渡す形。
 //
-// 字面の素直な形だけを見る。**取りこぼしても「新規流入を止める」という目的は
-// ほぼ達成できる** — 3 回とも `publicUrl` / `originalUrl` を直接渡す形だった。
+// **カバー率は正直に書く。** 過去 3 件を実測すると、この検査が当たるのは
+// **1 件だけ**:
+//
+//	#2903 モーダル   `const imgUrl = computed(() => props.emoji.url)`  → 当たらない
+//	#2935 審査画面   `<img :src="app.url">`                            → 当たらない
+//	#2957 一覧       `url: it.publicUrl`                               → 当たる
+//
+// 当初「3 回とも publicUrl/originalUrl を直接渡す形だった」と書いたが、**裏取り
+// していない誤りだった** (上の 2 件は別の名前で受けている)。字面の素直な形しか
+// 見ないので、**この検査だけに依存しないこと。**
 // **行の断片で持つ (ファイル単位にしない)。** ファイル単位だと、同じファイルの
 // **別の行から proxy を外しても素通りする** (実測で修正前の状態を再現しても
 // 落ちなかった)。
 type allowedRawMedia struct{ file, frag, why string }
 
 var rawRemoteMediaAllowed = []allowedRawMedia{
-	// ローカル絵文字の publicUrl は自サーバーのオリジンで、CSP の 'self' に
-	// 入る。proxy を通すと無駄な負荷になる。
+	// 自サーバーが配る URL なので CSP に入る。**'self' とは限らない** —
+	// object storage を使っていると `objectStorageBaseUrl` のオリジンになり、
+	// 通るのは `cspMediaExtras` がそれを img-src に足しているから (実測: この
+	// 運用サーバーのローカル絵文字は 16 件中 12 件が object storage 側)。
+	// **object storage を無効化した / baseUrl を変えた後に古い行が残る運用では
+	// img-src から落ちて壊れる。** proxy を通すと無駄な負荷になるので通さない。
 	{"pages/admin/custom-emojis-manager.local.list.vue", "\t\turl: it.publicUrl,", "ローカル絵文字なので自オリジン"},
 	// MkRemoteEmojiEditDialog へ渡すだけで、あちらが getProxiedImageUrl を
 	// 通す (#2903)。ここで二重に通すと proxy の URL を proxy に食わせる。
@@ -59,6 +71,12 @@ func allowedRawMediaLine(rel, line string) bool {
 // `url: x.publicUrl` / `:src="x.originalUrl"` のように、リモート由来の URL を
 // そのまま画像へ渡している形。
 var rawRemoteMediaRe = regexp.MustCompile(`(?:url:\s*|:src="[^"]*)\b[\w.]*\.(publicUrl|originalUrl)\b`)
+
+// **免除は「その式を包んでいるか」で見る。** 行に `getProxiedImageUrl` という
+// 文字列があるかだけを見ると、**同じ行の無関係な呼び出しで免除される** —
+// `url: it.publicUrl, alt: getProxiedImageUrl(it.name, ...)` が素通りすることを
+// 実測された。これは「識別子の出現だけを見る」型の、行の粒度での再発。
+var proxiedRemoteMediaRe = regexp.MustCompile(`getProxied\w*Url\(\s*[\w.]*\.(publicUrl|originalUrl)\b`)
 
 func TestRemoteMediaGoesThroughProxy(t *testing.T) {
 	fe := filepath.Join(repoRootDir(t), "third_party", "misskey", "packages", "frontend", "src")
@@ -84,15 +102,29 @@ func TestRemoteMediaGoesThroughProxy(t *testing.T) {
 		// 実際 `custom-emojis-manager.remote.vue` は 2 箇所で使うので、修正前の
 		// 状態を再現しても落ちなかった。
 		for _, line := range strings.Split(src, "\n") {
-			hit := rawRemoteMediaRe.FindString(line)
-			if hit == "" {
+			raw := rawRemoteMediaRe.FindAllStringIndex(line, -1)
+			if len(raw) == 0 {
 				continue
 			}
 			scanned++
-			if allowedRawMediaLine(rel, line) || strings.Contains(line, "getProxiedImageUrl") {
+			if allowedRawMediaLine(rel, line) {
 				continue
 			}
-			violations = append(violations, rel+": "+strings.TrimSpace(line))
+			// proxy が包んでいる範囲を集め、違反マッチがその中に収まるかを見る。
+			wrapped := proxiedRemoteMediaRe.FindAllStringIndex(line, -1)
+			for _, m := range raw {
+				covered := false
+				for _, w := range wrapped {
+					if m[0] >= w[0] && m[1] <= w[1] {
+						covered = true
+						break
+					}
+				}
+				if !covered {
+					violations = append(violations, rel+": "+strings.TrimSpace(line))
+					break
+				}
+			}
 		}
 		return nil
 	}))
