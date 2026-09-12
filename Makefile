@@ -1062,7 +1062,7 @@ secretfield-check: ## モデルの秘密フィールドが json:"-" を保って
 	# make gates も全テストも緑のままだった (native token が取れると、その
 	# ユーザーとして API を叩けるので権限ゲートを全て迂回できる)。
 	# 出してよいものは serializableSecretLike に理由付きで登録する。
-	go test ./internal/entitycompat/... -run 'TestScanSecretLikeFields|TestModelSecretFieldsAreNotSerialized|TestSerializableSecretLikeHasNoDeadEntries|TestModelJSONDoesNotContainSecrets' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestScanSecretLikeFields|TestModelSecretFieldsAreNotSerialized|TestSerializableSecretLikeHasNoDeadEntries|TestModelJSONDoesNotContainSecrets|TestModelJSONKeepsAuditedFields' -count=1 -v
 
 .PHONY: dockerignore-check
 dockerignore-check: ## .dockerignore がシークレットと利用者データを除外しているか検査

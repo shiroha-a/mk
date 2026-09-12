@@ -27,23 +27,39 @@ import (
 // も既存のテストも全て緑のままだった。native token を取れればそのユーザー
 // として API を叩けるので、あらゆる権限ゲートを迂回できる。
 //
-// **現状モデルを直接 JSON 化しているのは `internal/core/ephemeral/store.go`
-// の 2 箇所** (`model.Note` と `model.User` を Redis へ入れる) だけで、API の
-// レスポンスは `map[string]any` や `internal/entity` を経由する。つまりタグは
-// 今すぐ漏れる経路ではなく、**将来モデルが直接 marshal される経路に乗った
-// ときの最後の防波堤**として守る。
+// **モデルを直接 JSON 化する経路は 3 系統ある。** API のレスポンス自体は
+// `map[string]any` か `internal/entity` を通るが、それとは別に:
+//
+//   - `internal/core/moderationlog/service.go` が `json.Marshal(info)` で
+//     モデルごと記録する (`*model.Meta` の before/after、
+//     `[]*model.RegistrationTicket`、`*model.Role`、`*model.Ad`、
+//     `*model.SystemWebhook` など)。`admin/show-moderation-logs` が
+//     `info` をそのまま返す
+//   - `internal/core/ephemeral/store.go` が `model.Note` / `model.User` を
+//     Redis へ入れる
+//   - `internal/core/webpush/cache.go` が `[]*model.SwSubscription` を
+//     Redis へ入れて読み戻す
+//
+// **つまりタグは「今すぐ効く」。** 1 周目のレビュー後に 4 件を `json:"-"` へ
+// 変えたところ、うち 2 件 (`Meta.SmtpPass` / `RegistrationTicket.Code`) で
+// **moderation log の記録が壊れた** — しかも既存のテストは 1 つも落ちな
+// かった。タグを動かす前に、この 3 系統に乗るかを必ず確かめること。
 //
 // **名前だけでは判定できない。** `Meta` の captcha secret は `admin/meta` が
-// 管理画面へ返す必要があるし、drive の `accessKey` は URL の構成要素で秘密
-// ではない。したがって #2792 と同じ allowlist 方式にし、**出してよいものには
-// 理由を書かせる**。
+// 管理画面へ返すうえ modlog にも載るし、drive の `accessKey` は URL の構成
+// 要素で秘密ではない。したがって #2792 と同じ allowlist 方式にし、**出して
+// よいものには実態を書かせる** (「出してよい理由」ではなく「どの経路で実際に
+// 出るか」を書く — 前者だと、タグが使われていないという誤った前提のまま
+// 動かしてしまう)。
 //
 // **allowlist は該当集合と突き合わせる。** 実在しないキーを書いても黙って
 // 無視される形だと、検査していないのに緑になる。初版は
 // `Meta.SensitiveMediaDetectionAPIKey` を登録していたが、当時の正規表現は
 // `ApiKey` しか見ておらず **`APIKey` には一致しないので何も検査していなかった**
-// (この突き合わせを足して初めて発覚した)。副作用として、**正規表現を狭める
-// 変異でも落ちる** — 検出対象が減ると allowlist のキーが該当集合から消える。
+// (この突き合わせを足して初めて発覚した)。ただし**これが守るのは allowlist に
+// 該当があるキーだけ**で、`Pass` / `Code` のように該当が全て `json:"-"` 側に
+// あるものは正規表現から外しても緑のままになる。そちらは
+// `mustDetectSecretFields` で別に固定してある。
 //
 // **`internal/model` には置けない。** あそこは `_test.go` を 1 つも持たない
 // ので、テストを足すと CI のカバレッジ閾値 (90%) の対象に**初めて**入り、
@@ -52,10 +68,15 @@ import (
 //
 // **既知の取りこぼし** (どれも実測で確認した穴):
 //
-//   - 名前に該当の語を含まない秘密は拾えない。実例として
-//     `SwSubscription.Auth` (Web Push の auth secret) と `AccessToken.Hash`
-//     がある。`Auth` / `Hash` を足すと `Authorized*` / `NoteDraft.Hashtag` が
-//     誤検知に入るので、名前では分離できない
+//   - 名前に該当の語を含まない秘密は拾えない
+//   - **`Pass` / `Code` / `Auth` / `Hash` は部分一致**なので、`PassedAt` /
+//     `StatusCode` / `CountryCode` のような普通の名前も拾う。fail-closed
+//     (allowlist に理由を書けば通る) なので危険側には倒れないが、素の語を
+//     足すときはこの費用を見込むこと
+//   - **`datatypes.JSON` 列の中身は見えない** (`Meta.ClientOptions` など)
+//   - **`internal/model` 以外の構造体は対象外**。`internal/queue` の
+//     `WebhookPayload.OverrideSecret` は実際に marshal されて Redis の
+//     ジョブに載るが、ここでは見ていない
 //   - **`internal/model` の直下しか見ない** (glob が `*.go` で非再帰)
 //   - **名前付き型の中に匿名 struct を入れると見えない**
 //     (`Creds struct { Token string }` の形)
@@ -69,16 +90,26 @@ import (
 // `Key` 全体には広げていない — `PublicKey` / `*SiteKey` (captcha のサイト
 // キーはフロントへ配る公開値) / `SortKeys` / `ExcludeKeywords` が入って
 // allowlist が誤検知で埋まり、本物が紛れる。
-var secretFieldNameRe = regexp.MustCompile(`Password|Passwd|Pass|Token|Secret|PrivateKey|PrivKey|Credential|Code|ApiKey|APIKey|AuthKey|AccessKey`)
+var secretFieldNameRe = regexp.MustCompile(`Password|Passwd|Pass|Token|Secret|PrivateKey|PrivKey|Credential|Code|ApiKey|APIKey|AuthKey|AccessKey|Auth|Hash`)
 
 // serializableSecretLike lists fields that match the name pattern but are
 // intentionally serialized. **理由を書くこと。**
 var serializableSecretLike = map[string]string{
-	// `admin/meta` (`RequireAdmin` + `read:admin:meta`) が返す運営者の設定値。
-	// **返しているのは `map[string]any` を手で組んだもので、このタグは
-	// 使われていない** (`internal/api/admin/handler.go`)。公開 `/api/meta` に
-	// は出ない。将来 `json:"-"` へ寄せてこの一覧を縮めるのが望ましい。
-	"Meta.HcaptchaSecretKey":             "admin/meta が管理画面へ返す (upstream も同じ)",
+	// **moderation log がモデルごと marshal するので、このタグは実際に使われる。**
+	// `internal/core/moderationlog/service.go` が `json.Marshal(info)` し、
+	// `admin/show-moderation-logs` (RequireAdmin) が `info` をそのまま返す。
+	// upstream も同じものを mask せずに記録するので、落とすと監査記録が欠ける。
+	"Meta.SmtpPass":           "moderation log が update-meta の before/after を *model.Meta ごと marshal する (upstream も mask しない)",
+	"RegistrationTicket.Code": "moderation log が createInvitation で []*model.RegistrationTicket を marshal する (upstream も同じ)",
+	"SystemWebhook.Secret":    "moderation log が before/after を *model.SystemWebhook ごと marshal する (upstream も同じ)",
+
+	// **Redis のキャッシュが JSON で往復するので、落とすと復元に失敗する。**
+	"SwSubscription.Auth": "internal/core/webpush/cache.go が []*model.SwSubscription を Redis へ JSON で入れて読み戻す。落とすと Web Push の暗号化に要る auth secret が失われる",
+
+	// `admin/meta` (RequireAdmin + read:admin:meta) と `admin/captcha/current` が
+	// map を手で組んで返す運営者の設定値。公開 `/api/meta` には出ない。
+	// **ただし上の modlog 経路でも出る**ので、タグを落とせば監査記録が欠ける。
+	"Meta.HcaptchaSecretKey":             "admin/meta が返す運営者の設定値。modlog にも載る",
 	"Meta.RecaptchaSecretKey":            "同上",
 	"Meta.TurnstileSecretKey":            "同上",
 	"Meta.McaptchaSecretKey":             "同上",
@@ -89,26 +120,53 @@ var serializableSecretLike = map[string]string{
 	"Meta.DeeplAuthKey":                  "同上",
 	"Meta.TruemailAuthKey":               "同上",
 	"Meta.VerifymailAuthKey":             "同上",
+
 	// URL の構成要素であって秘密ではない (`GET /files/:accessKey` は公開ルート)。
-	// **ここは `json:"-"` にできない。** `model.User` は `Avatar` / `Banner` に
-	// `*DriveFile` を持ち、`internal/core/ephemeral/store.go` が
-	// `json.Marshal(author)` で User ごと Redis へ入れるので、タグを落とすと
-	// 復元した avatar / banner の URL が作れなくなる。
 	"DriveFile.AccessKey":            "URL の構成要素で秘密ではない",
 	"DriveFile.ThumbnailAccessKey":   "同上",
 	"DriveFile.WebpublicAccessKey":   "同上",
 	"ChunkedUploadSession.AccessKey": "同上",
+
 	// 本人 / 作成者にだけ返る。
-	"AccessToken.Token":          "auth/session/userkey と miauth が本人に返す (`internal/api/auth/handler.go`)。`i/apps` は token 値を返さない",
-	"App.Secret":                 "`packApp` が includeSecret のときだけ map に入れる (タグ非経由)",
+	"AccessToken.Token":          "auth/session/userkey と miauth が本人に返す。`i/apps` は token 値を返さない",
+	"AccessToken.Hash":           "sha256(token)。middleware は sha256(提示値) を計算して引く (auth.go:445) ので、hash 値そのものでは認証できない",
+	"App.Secret":                 "packApp が includeSecret のときだけ map に入れる",
 	"AuthSession.Token":          "認証フローで本人に返る",
-	"Webhook.Secret":             "作成者にだけ map で返る (タグ非経由)",
-	"SystemWebhook.Secret":       "管理者にだけ map で返る (タグ非経由)",
+	"Webhook.Secret":             "作成者にだけ map で返る",
 	"PasswordResetRequest.Token": "メールのリンクに載せる (本人にだけ届く)",
+
 	// 名前が引っかかるだけで秘密ではない。
+	"NoteDraft.Hashtag":                    "ハッシュタグ。`Hash` に部分一致するだけ",
 	"UserProfile.UsePasswordLessLogin":     "真偽値であって秘密ではない",
 	"UserSecurityKey.CredentialDeviceType": "WebAuthn の種別。秘密ではない",
 	"UserSecurityKey.CredentialBackedUp":   "真偽値であって秘密ではない",
+}
+
+// **検出集合そのものを固定する。** allowlist の dead-entry 検査は
+// 「allowlist に該当があるキー」しか守らないので、**allowlist に 1 つも該当が
+// 無い alternative は正規表現から外しても緑のまま**になる。`Pass` / `Code` を
+// 足した直後が実際にそうで、1 周目の指摘を塞いだ修正そのものが黙って巻き
+// 戻せる状態だった (敵対的レビュー 2 周目で実測)。ここに並べたものが検出
+// されなくなったら落とす。
+var mustDetectSecretFields = []string{
+	"User.Token",
+	"UserProfile.Password",
+	"UserProfile.TwoFactorSecret",
+	"UserProfile.TwoFactorBackupSecret",
+	"UserProfile.TwoFactorTempSecret",
+	"UserProfile.EmailVerifyCode",
+	"UserPending.Password",
+	"UserPending.Code",
+	"UserKeypair.PrivateKey",
+	"UserKeypairExtra.Ed25519PrivateKey",
+	"SignupApplication.ClaimCodeHash",
+	"Meta.SmtpPass",
+	"RegistrationTicket.Code",
+	"SwSubscription.Auth",
+	"AccessToken.Hash",
+	"AccessToken.Token",
+	"App.Secret",
+	"DriveFile.AccessKey",
 }
 
 // scanSecretLikeFields returns every exported struct field in src whose name
@@ -251,6 +309,19 @@ func TestModelSecretFieldsAreNotSerialized(t *testing.T) {
 	// 検査していないのに緑になる (#2874 / #2828 と同じ判断)。
 	require.NotEmpty(t, found, "秘密らしい名前のフィールドを 1 つも拾えない (書式が変わった?)")
 
+	// 検出集合が痩せたら落とす。allowlist の dead-entry 検査では守れない
+	// alternative があるため (mustDetectSecretFields の doc を参照)。
+	var undetected []string
+	for _, key := range mustDetectSecretFields {
+		if _, ok := found[key]; !ok {
+			undetected = append(undetected, key)
+		}
+	}
+	sort.Strings(undetected)
+	require.Emptyf(t, undetected,
+		"検出集合から外れた: %v\n"+
+			"secretFieldNameRe を狭めたか、フィールドを rename / 削除した", undetected)
+
 	leaks := leakingSecretFields(found, serializableSecretLike)
 	for i, key := range leaks {
 		leaks[i] = key + " (json:\"" + found[key] + "\")"
@@ -312,4 +383,36 @@ func TestModelJSONDoesNotContainSecrets(t *testing.T) {
 	ub, err := json.Marshal(model.UserPending{ID: "p1", Username: "bob", Password: "pending-pw-hash"})
 	require.NoError(t, err)
 	require.NotContainsf(t, string(ub), "pending-pw-hash", "UserPending を JSON 化すると password hash が出る")
+}
+
+// **タグが「使われている」側も固定する。**
+//
+// allowlist に載っているものの一部は、単に許されているのではなく
+// **落とすと壊れる**。1 周目のレビュー後に `Meta.SmtpPass` と
+// `RegistrationTicket.Code` を `json:"-"` にしたところ、moderation log の
+// 記録が黙って欠けた (既存のテストは 1 つも落ちなかった)。同じことを
+// 繰り返さないよう、出ることをここで固定する。
+func TestModelJSONKeepsAuditedFields(t *testing.T) {
+	// moderation log は `admin/update-meta` の before/after を `*model.Meta`
+	// ごと marshal する (`internal/core/moderationlog/service.go`)。
+	// upstream も SMTP secret を mask せずに記録する。
+	sp := "smtp-secret"
+	mb, err := json.Marshal(model.Meta{SmtpPass: &sp})
+	require.NoError(t, err)
+	require.Containsf(t, string(mb), `"smtpPass"`,
+		"Meta を JSON 化すると smtpPass が消える。moderation log の before/after が欠ける")
+
+	// `admin/invite/create` は `[]*model.RegistrationTicket` をそのまま
+	// moderation log へ渡す。code が消えると招待の監査記録が成立しない。
+	tb, err := json.Marshal(model.RegistrationTicket{ID: "t1", Code: "INVITE-CODE"})
+	require.NoError(t, err)
+	require.Containsf(t, string(tb), "INVITE-CODE",
+		"RegistrationTicket を JSON 化すると code が消える。招待の監査記録が空になる")
+
+	// `internal/core/webpush/cache.go` は `[]*model.SwSubscription` を Redis へ
+	// JSON で入れて読み戻す。auth が消えると Web Push の暗号化ができない。
+	sb, err := json.Marshal(model.SwSubscription{ID: "s1", Auth: "auth-secret"})
+	require.NoError(t, err)
+	require.Containsf(t, string(sb), "auth-secret",
+		"SwSubscription を JSON 化すると auth が消える。Redis から復元した購読で Web Push が壊れる")
 }
