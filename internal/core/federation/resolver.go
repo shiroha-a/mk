@@ -769,6 +769,22 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 		// AP仕様が崩れる。
 		IsLocked:      actor.ManuallyApproves.Bool(),
 		LastFetchedAt: &now,
+		// **発信元が凍結を明示しているなら、作る時点で凍結しておく** (#2951)。
+		// Mastodon 系は凍結しても `Delete` を送らず actor に `suspended` を
+		// 立てるだけなので、読まないと「相手は切ったのにこちらでは生きている」
+		// 状態になる。
+		//
+		// **`Delete` 経路と同じ結末にはならない。** あちらは `isDeleted` を
+		// 立ててノート・ドライブ・following 行を消すが、こちらは `isSuspended`
+		// を立てて読み取り時に隠すだけ。逆に `applySuspendedAuthorExclusion`
+		// は `isSuspended` しか見ないので、**その人宛のローカル利用者の返信や
+		// リノートまで timeline から消える** (`Delete` 経路では消えない)。
+		// 詳細は docs/divergence.md §3-3a。
+		IsSuspended: actor.Suspended.Bool(),
+	}
+	if user.IsSuspended {
+		slog.Info("federation: creating remote actor as suspended per toot:suspended",
+			"uri", actor.ID, "userId", user.ID)
 	}
 	if name := remoteDisplayName(actor.Name.String()); name != "" {
 		user.Name = &name
@@ -1251,6 +1267,26 @@ func (r *Resolver) refreshActor(existing *model.User, uri string, skipFeatured b
 	// された場合にローカルの判定もずれないように)。
 	fields["isLocked"] = actor.ManuallyApproves.Bool()
 	existing.IsLocked = actor.ManuallyApproves.Bool()
+	// **`suspended` は true だけを反映する一方向の信号** (#2951)。
+	//
+	// `false` で解除すると、**侵害された発信元がこちらのモデレーターの判断を
+	// 取り消せる**。`true` のほうは「相手が自分の利用者を切った」という自己
+	// 申告なので、他人を貶めることには使えず安全に受け取れる。
+	//
+	// 発信元が解除してもこちらは凍結のままになるが、それはモデレーターが手で
+	// 戻せる。逆向きの事故のほうが回復しにくい。
+	if actor.Suspended.Bool() && !existing.IsSuspended {
+		fields["isSuspended"] = true
+		existing.IsSuspended = true
+		// **痕跡を残す。** これはモデレーターの操作を伴わない自動凍結で、
+		// moderation log には載らない。しかも**発信元が立てている間は
+		// `admin/unsuspend-user` の結果が次の refresh で無言で戻る**
+		// (`/api/federation/update-remote-user` は RequireAuth だけなので、
+		// 任意のログイン利用者が TTL を待たずに発火できる)。せめて
+		// 「なぜ凍結されたのか」が追える形にしておく。
+		slog.Info("federation: suspending remote actor per toot:suspended",
+			"uri", actor.ID, "userId", existing.ID)
+	}
 	if name := remoteDisplayName(actor.Name.String()); name != "" {
 		fields["name"] = &name
 		existing.Name = &name
