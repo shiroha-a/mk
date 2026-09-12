@@ -109,9 +109,23 @@ func (h *Handler) Create(c echo.Context) error {
 func (h *Handler) createError(c echo.Context, err error) error {
 	// 期間上限は sentinel ではなく値を持つので errors.As で受ける (#2958)。
 	var quota *emojiapplication.QuotaExceededError
+	var pending *emojiapplication.PendingLimitExceededError
 	switch {
 	case errors.As(err, &quota):
 		return h.quotaExceeded(c, quota)
+	case errors.As(err, &pending):
+		// **429 にしない (#2977)。** いつ空くかを返せないので `Retry-After` を
+		// 付けられず、レート制限と同じ形にすると「待てば通る」と誤解させる。
+		// 実際に空くのはモデレーターが処理したときか、自分で取り下げたとき。
+		body := apierr.Error(
+			"EMOJI_APPLICATION_PENDING_LIMIT_EXCEEDED",
+			"Too many emoji applications are awaiting review.",
+			"5a4f8c27-3e61-4d9b-b0a8-1f6d2c4e8b53")
+		body["error"].(map[string]any)["info"] = map[string]any{
+			"used":  pending.Used,
+			"limit": pending.Limit,
+		}
+		return c.JSON(http.StatusBadRequest, body)
 	case errors.Is(err, emojiapplication.ErrInvalidName):
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"INVALID_EMOJI_NAME", "Emoji name must match ^[a-zA-Z0-9_]+$.",
@@ -233,26 +247,35 @@ func (h *Handler) Cancel(c echo.Context) error {
 // quotaExceeded renders the rolling-window rejection (#2958).
 //
 // **429 にする。** 上限に達しただけで申請の内容は正しいので、400 に倒すと
-// 利用者は入力を直そうとして無駄に試行する。`Retry-After` も付けて、いつ
-// 空くかを機械可読にしておく (既存の 1 時間 rate limit と同じ形)。
+// 利用者は入力を直そうとして無駄に試行する。いつ空くかが分かるときは
+// `Retry-After` も付けて機械可読にしておく (既存の 1 時間 rate limit と同じ形)。
+//
+// **`RetryAt` がゼロ値なら時刻を出さない (#2977)。** 審査待ちの上限も同時に
+// 満杯だと、期間が空いてもまだ通らないので時刻を予告できない。
 func (h *Handler) quotaExceeded(c echo.Context, q *emojiapplication.QuotaExceededError) error {
-	// **切り上げる。** 切り捨てると「Retry-After 秒後」に叩いてもまだ窓の
-	// 中にいて、もう一度 429 を返すことになる。
-	retryAfter := int64(math.Ceil(time.Until(q.RetryAt).Seconds()))
-	if retryAfter < 0 {
-		retryAfter = 0
-	}
-	c.Response().Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
 	body := apierr.Error(
 		"EMOJI_APPLICATION_QUOTA_EXCEEDED",
 		"You have reached the maximum number of emoji applications for this period.",
 		"0b6f2a1e-9c34-4f8d-8a51-7b2e4d6c9f30")
-	body["error"].(map[string]any)["info"] = map[string]any{
-		"period":  q.Period,
-		"used":    q.Used,
-		"limit":   q.Limit,
-		"retryAt": entity.ISOMillis(q.RetryAt),
+	info := map[string]any{
+		"period": q.Period,
+		"used":   q.Used,
+		"limit":  q.Limit,
 	}
+	// **時刻が無ければ出さない (#2977)。** 審査待ちの上限も同時に満杯だと、
+	// 期間が空いてもまだ通らない。予告できない時刻を広告すると、利用者は
+	// その時刻に叩いて別のエラーを受け取る。
+	if !q.RetryAt.IsZero() {
+		// **切り上げる。** 切り捨てると「Retry-After 秒後」に叩いてもまだ窓の
+		// 中にいて、もう一度 429 を返すことになる。
+		retryAfter := int64(math.Ceil(time.Until(q.RetryAt).Seconds()))
+		if retryAfter < 0 {
+			retryAfter = 0
+		}
+		c.Response().Header().Set("Retry-After", strconv.FormatInt(retryAfter, 10))
+		info["retryAt"] = entity.ISOMillis(q.RetryAt)
+	}
+	body["error"].(map[string]any)["info"] = info
 	return c.JSON(http.StatusTooManyRequests, body)
 }
 

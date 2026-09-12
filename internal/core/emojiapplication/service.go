@@ -183,21 +183,37 @@ func (s *Service) HasPolicyProvider() bool { return s.policies != nil }
 // QuotaExceededError is returned when a rolling window is full (#2958).
 // 呼び出し元はこれを HTTP 429 に翻訳し、期間・使用数・上限・再試行時刻を返す。
 type QuotaExceededError struct {
-	Period  string
-	Used    int
-	Limit   int
+	Period string
+	Used   int
+	Limit  int
+	// RetryAt はゼロ値のことがある (#2977)。審査待ちの上限も同時に満杯だと
+	// その時刻でも通らないので、時刻を予告できない。
 	RetryAt time.Time
 }
 
 func (e *QuotaExceededError) Error() string { return "emoji application quota exceeded" }
 
-// quotaWindows builds the rolling windows from the user's role policies.
+// PendingLimitExceededError is returned when too many applications from the
+// same user are still awaiting review (#2977).
+//
+// **再試行時刻を持たない。** 空くのはモデレーターが処理したときなので予告
+// できない。呼び出し元はこれを 400 系へ翻訳し、`Retry-After` を付けない。
+type PendingLimitExceededError struct {
+	Used  int
+	Limit int
+}
+
+func (e *PendingLimitExceededError) Error() string {
+	return "emoji application pending limit exceeded"
+}
+
+// quotaLimits builds every per-user limit from the user's role policies.
 //
 // **ローリング期間にする。** 固定暦だとタイムゾーン依存になり、切り替わりの
 // 直前と直後に連続で申請できてしまう。
-func (s *Service) quotaWindows(userID string) []repository.QuotaWindow {
+func (s *Service) quotaLimits(userID string) repository.QuotaLimits {
 	if s.policies == nil {
-		return nil
+		return repository.QuotaLimits{}
 	}
 	// **errorless 版を使う。** ロール解決に失敗すると base が返る。base には
 	// `meta.policies` (管理画面のベースロール) まで載っているので、そちらに
@@ -206,19 +222,22 @@ func (s *Service) quotaWindows(userID string) []repository.QuotaWindow {
 	// 直後の INSERT も落ちる。
 	p := s.policies.GetUserPolicies(userID)
 	if p == nil {
-		return nil
+		return repository.QuotaLimits{}
 	}
 	// 窓は狭い順に並べてある。**ただし repository 側は満杯のものを全部評価して
 	// いちばん遅く空くものを返す**ので、順序は結果を変えない (読みやすさのため)。
-	return []repository.QuotaWindow{
-		{Name: "day", Duration: 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerDay)},
-		{Name: "week", Duration: 7 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerWeek)},
-		{Name: "month", Duration: 30 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerMonth)},
+	return repository.QuotaLimits{
+		Windows: []repository.QuotaWindow{
+			{Name: "day", Duration: 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerDay)},
+			{Name: "week", Duration: 7 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerWeek)},
+			{Name: "month", Duration: 30 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerMonth)},
+		},
+		MaxPending: policyMax(p, role.PolicyEmojiApplicationMaxPending),
 	}
 }
 
-// policyMax reads a rolling-window limit. 0 以下・未設定・読めない値はすべて
-// 「無制限」(0) に倒す。
+// policyMax reads one numeric quota policy (期間の窓と審査待ちの両方で使う)。
+// 0 以下・未設定・読めない値はすべて「無制限」(0) に倒す。
 //
 // **小数は切り捨てる。** `PolicyNumber` は 2.5 のような値をそのまま返すので、
 // 切り上げると運営者が意図した上限より 1 件多く通る。
@@ -380,7 +399,7 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 	// **数えるのと作るのを 1 つのトランザクションでやる (#2958)。** COUNT →
 	// INSERT に分けると、同じ利用者から同時に来たリクエストが両方とも
 	// 「空きあり」を読んで両方通る。
-	if err := s.apps.CreateWithQuota(app, s.quotaWindows(in.UserID)); err != nil {
+	if err := s.apps.CreateWithQuota(app, s.quotaLimits(in.UserID)); err != nil {
 		if errors.Is(err, repository.ErrEmojiApplicationDuplicatePending) {
 			return nil, ErrAlreadyPending
 		}
@@ -389,6 +408,10 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 			return nil, &QuotaExceededError{
 				Period: qe.Window.Name, Used: qe.Used, Limit: qe.Window.Max, RetryAt: qe.RetryAt,
 			}
+		}
+		var pe *repository.PendingLimitExceededError
+		if errors.As(err, &pe) {
+			return nil, &PendingLimitExceededError{Used: pe.Used, Limit: pe.Limit}
 		}
 		return nil, err
 	}

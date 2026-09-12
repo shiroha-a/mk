@@ -52,17 +52,32 @@ type EmojiApplicationRepository interface {
 	// **絵文字は存在するのに申請は「却下」で emojiId も消える**。窓は「一覧を
 	// 開いてから押すまで」の全期間なので、実際に起きる。
 	UpdateIfPending(app *model.EmojiApplication) (bool, error)
-	// CreateWithQuota inserts the row only while every rolling window still
-	// has room, and reports which window was full otherwise (#2958).
+	// CreateWithQuota inserts the row only while every limit still has room:
+	// the rolling windows (#2958) and the awaiting-review cap (#2977).
 	//
 	// **COUNT してから INSERT では足りない。** 同じ利用者から同時に来た
 	// リクエストが両方とも「空きあり」を読んで両方 INSERT できる。数えるのも
 	// 作るのも 1 つのトランザクションに入れ、**利用者単位のアドバイザリロック**
 	// で直列化する (行ロックでは「まだ無い行」を守れない)。
 	//
-	// windows は期間ごとの (長さ, 上限)。上限 0 の窓は無制限として飛ばす。
-	// 収まらなければ *QuotaExceededError を返し、行は作らない。
-	CreateWithQuota(app *model.EmojiApplication, windows []QuotaWindow) error
+	// limits の内訳は QuotaLimits を参照。収まらなければ
+	// *QuotaExceededError / *PendingLimitExceededError を返し、行は作らない。
+	CreateWithQuota(app *model.EmojiApplication, limits QuotaLimits) error
+}
+
+// QuotaLimits collects every per-user limit checked before an application is
+// created. ゼロ値は「上限なし」。
+type QuotaLimits struct {
+	// Windows はローリング期間の上限 (#2958)。**全ステータスを数える**ので、
+	// 却下・取り下げでも枠は戻らない。上限 0 の窓は無制限として飛ばす。
+	Windows []QuotaWindow
+	// MaxPending は同時に審査待ちにできる件数 (#2977)。0 は無制限。
+	//
+	// **Windows とは数え方が逆で、絞っているものも違う。** こちらは
+	// `status = 'pending'` だけを数えるので**却下・取り下げで枠が戻る**。
+	// Windows が絞るのは「出せる総量」、こちらが絞るのは「モデレーターが
+	// 見る一覧の長さ」で、片方だけでは両方を制御できない。
+	MaxPending int
 }
 
 // QuotaWindow is one rolling limit: "過去 Duration に Max 件まで" (#2958)。
@@ -82,11 +97,30 @@ type QuotaExceededError struct {
 	//
 	// その窓の中では「`used - Max` 件飛ばした行が窓を出る時刻」。**最古では
 	// 足りない** — `used > Max` のときは 1 件抜けても `used-1 >= Max` のまま。
+	//
+	// **審査待ちの上限 (#2977) も満杯ならゼロ値になる。** そのとき通るのは
+	// モデレーターが処理した後で、時刻を予告できない。呼び出し元はゼロ値なら
+	// `retryAt` も `Retry-After` も出さないこと。
 	RetryAt time.Time
 }
 
 func (e *QuotaExceededError) Error() string {
 	return "emoji application quota exceeded for window " + e.Window.Name
+}
+
+// PendingLimitExceededError reports that too many applications from the same
+// user are still awaiting review (#2977).
+//
+// **RetryAt を持たない。** 空くのはモデレーターが処理したときで、時刻を
+// 予告できない。`QuotaExceededError` と同じ形にして `Retry-After` を付けると
+// 「待てば通る」と誤解させる。利用者が取れる行動は取り下げか、結果を待つか。
+type PendingLimitExceededError struct {
+	Used  int
+	Limit int
+}
+
+func (e *PendingLimitExceededError) Error() string {
+	return "too many emoji applications awaiting review"
 }
 
 type emojiApplicationRepository struct {
@@ -122,14 +156,14 @@ func (r *emojiApplicationRepository) Create(app *model.EmojiApplication) error {
 // features that lock on the same user id.
 const quotaLockNamespace = 2958
 
-func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication, windows []QuotaWindow) error {
-	active := make([]QuotaWindow, 0, len(windows))
-	for _, w := range windows {
+func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication, limits QuotaLimits) error {
+	active := make([]QuotaWindow, 0, len(limits.Windows))
+	for _, w := range limits.Windows {
 		if w.Max > 0 && w.Duration > 0 {
 			active = append(active, w)
 		}
 	}
-	if len(active) == 0 {
+	if len(active) == 0 && limits.MaxPending <= 0 {
 		return r.Create(app)
 	}
 	return r.db.Transaction(func(tx *gorm.DB) error {
@@ -144,6 +178,20 @@ func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication
 		if now.IsZero() {
 			now = time.Now()
 		}
+		// **審査待ちの件数は先に数えるが、返すかどうかは窓の結果で決める。**
+		// 両方満杯のときに審査待ちを返すと「取り下げれば出せる」と案内することに
+		// なるが、**期間上限は全ステータスを数えるので取り下げた行は枠を占有した
+		// まま戻らない** — 案内に従うと申請を 1 件失ったうえに枠も消費する。
+		var pending int64
+		if limits.MaxPending > 0 {
+			if err := tx.Model(&model.EmojiApplication{}).
+				Where(`"userId" = ? AND "status" = ?`, app.UserID, model.EmojiApplicationPending).
+				Count(&pending).Error; err != nil {
+				return err
+			}
+		}
+		pendingFull := limits.MaxPending > 0 && pending >= int64(limits.MaxPending)
+
 		// **満杯の窓を全部評価する。** 最初に見つけたもので返すと、2 つ以上が
 		// 同時に満杯のときに早すぎる時刻を案内することになる (実測で 78 時間
 		// ずれた)。申請が通るのは全部の窓に空きができてからなので、いちばん
@@ -198,7 +246,17 @@ func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication
 			}
 		}
 		if worst != nil {
+			if pendingFull {
+				// **時刻を出さない。** `RetryAt` の契約は「申請が通るようになる
+				// 時刻」だが、審査待ちも満杯ならその時刻でも通らない。審査待ちが
+				// 空くのはモデレーターが処理したときで予告できないので、嘘の時刻を
+				// 広告するより「いつ空くか分からない」と伝えるほうが正確。
+				worst.RetryAt = time.Time{}
+			}
 			return worst
+		}
+		if pendingFull {
+			return &PendingLimitExceededError{Used: int(pending), Limit: limits.MaxPending}
 		}
 		if err := tx.Create(app).Error; err != nil {
 			var pgErr *pgconn.PgError
