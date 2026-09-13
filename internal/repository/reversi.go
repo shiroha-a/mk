@@ -24,6 +24,14 @@ type ReversiRepository interface {
 	// 二重到達したとき、startedイベントを一度だけ発火させるための排他 (#1626)。
 	MarkStarted(game *model.ReversiGame) (bool, error)
 	ListByUser(userID string, limit int) ([]*model.ReversiGame, error)
+	// FindPendingInvitation returns the newest not-yet-started invitation
+	// from inviter to invitee, or nil when there is none.
+	//
+	// **一覧の窓で代用しない。** 招待の重複排除を `ListByUser(invitee, 20)` の
+	// 走査で済ませていたため、**別の actor が 20 件流し込むだけで重複排除が
+	// 破れ**、同じ相手からの再送が新しい行を作れるようになっていた
+	// (1 ペアあたりの上限が消える)。条件を SQL に渡せば窓に依存しない。
+	FindPendingInvitation(inviteeID, inviterID string) (*model.ReversiGame, error)
 	// ListByUserCursor returns user's games (User1 or User2) with keyset
 	// pagination via sinceID / untilID。limit は上限 (0 → 10)。並び順は
 	// paginationOrder に従う (sinceID 単独指定のみ id 昇順)。
@@ -132,6 +140,22 @@ func (r *reversiRepository) ListByUser(userID string, limit int) ([]*model.Rever
 		return nil, err
 	}
 	return games, nil
+}
+
+func (r *reversiRepository) FindPendingInvitation(inviteeID, inviterID string) (*model.ReversiGame, error) {
+	var game model.ReversiGame
+	err := r.db.Preload("User1").Preload("User2").
+		Where(`"user1Id" = ? AND "user2Id" = ? AND "isStarted" = false AND "isEnded" = false`,
+			inviterID, inviteeID).
+		Order(`"id" DESC`).First(&game).Error
+	if err != nil {
+		if IsNotFound(err) {
+			return nil, nil
+		}
+		// DB 障害を not-found に丸めない (#2792)。
+		return nil, err
+	}
+	return &game, nil
 }
 
 func (r *reversiRepository) ListActive() ([]*model.ReversiGame, error) {

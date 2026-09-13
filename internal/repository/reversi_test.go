@@ -224,3 +224,82 @@ func TestReversiRepository_CRUD(t *testing.T) {
 	_, err = repo.FindByID(game.ID)
 	assert.Error(t, err)
 }
+
+// **招待の重複排除を一覧の窓で代用しない。** 以前は `ListByUser(invitee, 20)`
+// の中を線形に探していたので、**別の相手からの招待を 20 件流し込むだけで
+// 重複排除が破れ**、同じ相手からの再送が新しい行を作れるようになっていた
+// (1 ペアあたりの上限が消える)。条件を SQL に渡せば窓に依存しない。
+func TestReversiRepository_FindPendingInvitation(t *testing.T) {
+	repo := NewReversiRepository(testDB)
+	invitee := insertTestUser(t, "u_revfpi_0", "revfpi0")
+	defer cleanupUser(t, invitee.ID)
+	inviter := insertTestUser(t, "u_revfpi_1", "revfpi1")
+	defer cleanupUser(t, inviter.ID)
+
+	var ids []string
+	mk := func(id, u1, u2 string, started, ended bool) {
+		g := &model.ReversiGame{
+			ID: id, User1ID: u1, User2ID: u2, IsStarted: started, IsEnded: ended,
+			Map: model.StringArray{"--------"}, BW: "random", TimeLimitForEachTurn: 90,
+			Logs: datatypes.JSON("[]"),
+		}
+		require.NoError(t, repo.Create(g))
+		ids = append(ids, id)
+	}
+	defer func() {
+		for _, id := range ids {
+			testDB.Exec(`DELETE FROM "reversi_game" WHERE id = ?`, id)
+		}
+	}()
+
+	t.Run("招待が無ければ nil", func(t *testing.T) {
+		got, err := repo.FindPendingInvitation(invitee.ID, inviter.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got)
+	})
+
+	mk("revfpi_a_pending", inviter.ID, invitee.ID, false, false)
+
+	t.Run("pending な招待を返す", func(t *testing.T) {
+		got, err := repo.FindPendingInvitation(invitee.ID, inviter.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "revfpi_a_pending", got.ID)
+	})
+
+	t.Run("向きが逆の行は拾わない", func(t *testing.T) {
+		got, err := repo.FindPendingInvitation(inviter.ID, invitee.ID)
+		require.NoError(t, err)
+		assert.Nil(t, got, "inviter と invitee を入れ替えた行を招待として扱っている")
+	})
+
+	// **窓に依存しないこと。** 無関係な相手からの招待を 30 件積む。一覧の先頭
+	// 20 件を走査する実装だと、ここで元の招待が押し出されて nil になる。
+	others := make([]*model.User, 0, 3)
+	for i := 0; i < 3; i++ {
+		u := insertTestUser(t, fmt.Sprintf("u_revfpi_o%d", i), fmt.Sprintf("revfpio%d", i))
+		others = append(others, u)
+		defer cleanupUser(t, u.ID)
+	}
+	for i := 0; i < 30; i++ {
+		mk(fmt.Sprintf("revfpi_z_flood_%02d", i), others[i%len(others)].ID, invitee.ID, false, false)
+	}
+
+	t.Run("他からの招待を積まれても見失わない", func(t *testing.T) {
+		got, err := repo.FindPendingInvitation(invitee.ID, inviter.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got, "flood で重複排除が破れている (再送が新しい行を作れる)")
+		assert.Equal(t, "revfpi_a_pending", got.ID)
+	})
+
+	mk("revfpi_b_started", inviter.ID, invitee.ID, true, false)
+	mk("revfpi_c_ended", inviter.ID, invitee.ID, false, true)
+
+	t.Run("開始済み / 終了済みは招待ではない", func(t *testing.T) {
+		got, err := repo.FindPendingInvitation(invitee.ID, inviter.ID)
+		require.NoError(t, err)
+		require.NotNil(t, got)
+		assert.Equal(t, "revfpi_a_pending", got.ID,
+			"開始済み / 終了済みの行を pending な招待として返している")
+	})
+}

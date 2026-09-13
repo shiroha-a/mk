@@ -104,6 +104,26 @@ func (r *fakeRepo) MarkStarted(g *model.ReversiGame) (bool, error) {
 	return true, nil
 }
 
+func (r *fakeRepo) FindPendingInvitation(inviteeID, inviterID string) (*model.ReversiGame, error) {
+	games, err := r.ListByUser(inviteeID, 0)
+	if err != nil {
+		return nil, err
+	}
+	var found *model.ReversiGame
+	for _, g := range games {
+		if g.IsStarted || g.IsEnded {
+			continue
+		}
+		if g.User1ID != inviterID || g.User2ID != inviteeID {
+			continue
+		}
+		if found == nil || g.ID > found.ID {
+			found = g
+		}
+	}
+	return found, nil
+}
+
 func (r *fakeRepo) ListByUser(userID string, limit int) ([]*model.ReversiGame, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

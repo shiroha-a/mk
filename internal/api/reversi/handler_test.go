@@ -101,6 +101,27 @@ func (m *mockReversiRepo) ListByUser(userID string, limit int) ([]*model.Reversi
 	return result, nil
 }
 
+// FindPendingInvitation mirrors the repository's SQL: newest not-yet-started
+// row with User1 = inviter and User2 = invitee.
+func (m *mockReversiRepo) FindPendingInvitation(inviteeID, inviterID string) (*model.ReversiGame, error) {
+	if m.listErr != nil {
+		return nil, m.listErr
+	}
+	var found *model.ReversiGame
+	for _, g := range m.games {
+		if g.IsStarted || g.IsEnded {
+			continue
+		}
+		if g.User1ID != inviterID || g.User2ID != inviteeID {
+			continue
+		}
+		if found == nil || g.ID > found.ID {
+			found = g
+		}
+	}
+	return found, nil
+}
+
 func (m *mockReversiRepo) ListByUserCursor(userID, sinceID, untilID string, limit int) ([]*model.ReversiGame, error) {
 	var result []*model.ReversiGame
 	for _, g := range m.games {

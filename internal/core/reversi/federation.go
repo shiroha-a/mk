@@ -11,28 +11,23 @@ import (
 // PendingGameLookup is the minimal interface for finding a pending reversi
 // game between two users. repository.ReversiRepository がそのまま満たす。
 type PendingGameLookup interface {
-	ListByUser(userID string, limit int) ([]*model.ReversiGame, error)
+	FindPendingInvitation(inviteeID, inviterID string) (*model.ReversiGame, error)
 }
 
 // FindPendingInvitation returns the latest pending (not started / ended)
 // reversi_game row where User1=inviterID and User2=inviteeID. 招待の受諾
 // (/api/reversi/match) 経路と、連合経路 (handleReversiInvite の 5 秒再送
-// dedup) の両方から使う共有ヘルパー。ListByUser は id DESC なので最初に
-// ヒットしたものを返すだけで最新が取れる。
+// dedup) の両方から使う共有ヘルパー。
+//
+// **一覧の窓を走査しない。** 以前は `ListByUser(invitee, 20)` の中を線形に
+// 探しており、**別の actor が 20 件流し込むだけで重複排除が破れ**、同じ相手
+// からの再送が新しい行を作れるようになっていた (1 ペアあたりの上限が消える)。
 func FindPendingInvitation(repo PendingGameLookup, inviteeID, inviterID string) *model.ReversiGame {
-	games, err := repo.ListByUser(inviteeID, 20)
+	g, err := repo.FindPendingInvitation(inviteeID, inviterID)
 	if err != nil {
 		return nil
 	}
-	for _, g := range games {
-		if g.IsStarted || g.IsEnded {
-			continue
-		}
-		if g.User1ID == inviterID && g.User2ID == inviteeID {
-			return g
-		}
-	}
-	return nil
+	return g
 }
 
 // GameTypeUUID is the unique identifier for the reversi game type in ActivityPub.

@@ -115,6 +115,25 @@ func (r *fedFakeReversiRepo) ListByUser(userID string, _ int) ([]*model.ReversiG
 	}
 	return out, nil
 }
+func (r *fedFakeReversiRepo) FindPendingInvitation(inviteeID, inviterID string) (*model.ReversiGame, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var found *model.ReversiGame
+	for _, g := range r.games {
+		if g.IsStarted || g.IsEnded {
+			continue
+		}
+		if g.User1ID != inviterID || g.User2ID != inviteeID {
+			continue
+		}
+		if found == nil || g.ID > found.ID {
+			clone := *g
+			found = &clone
+		}
+	}
+	return found, nil
+}
+
 func (r *fedFakeReversiRepo) ListByUserCursor(_, _, _ string, _ int) ([]*model.ReversiGame, error) {
 	return nil, nil
 }

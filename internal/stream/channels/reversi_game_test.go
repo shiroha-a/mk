@@ -57,6 +57,10 @@ func (r *channelFakeRepo) MarkStarted(g *model.ReversiGame) (bool, error) {
 	stored.CRC32 = g.CRC32
 	return true, nil
 }
+func (r *channelFakeRepo) FindPendingInvitation(_, _ string) (*model.ReversiGame, error) {
+	return nil, nil
+}
+
 func (r *channelFakeRepo) ListByUser(_ string, _ int) ([]*model.ReversiGame, error) {
 	return nil, nil
 }
