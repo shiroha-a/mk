@@ -648,13 +648,19 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 // 承認が競合に負けたときだけ呼ばれる。**broadcast も出す** — 作成時に
 // emojiAdded を流しているので、消したことも伝えないとピッカーに残る。
 func (h *Handler) DeleteCreatedEmoji(ctx context.Context, created emojiapplication.CreatedEmoji) error {
-	// **drive のファイルは絵文字の削除に成功しなくても片付ける (#2966)。**
-	// 絵文字が消せない理由 (DB 障害) と、複製したファイルが孤児になることは
-	// 別の問題。順序は絵文字が先 — 先にファイルを消すと、絵文字だけ残って
-	// 画像が出ない状態になる窓が開く。
-	err := h.deleteCreatedEmojiRow(created.EmojiID)
+	// **絵文字が消せなかったら複製も残す (2 周目レビュー L4)。** 順序は絵文字が
+	// 先 — 先にファイルを消すと、絵文字だけ残って画像が出ない窓が開く。同じ
+	// 理由で、絵文字の削除に失敗したときにファイルだけ消すと、その状態が
+	// **窓ではなく恒久状態**になる: 申請は pending、名前は使用中なので再承認は
+	// `DUPLICATE_NAME`、画像は 404。
+	//
+	// 残した複製が孤児になることはない — 参照している絵文字が消えるまでは
+	// `orphanWhere` の保護条件に当たり、消えれば cleanup が回収する。
+	if err := h.deleteCreatedEmojiRow(created.EmojiID); err != nil {
+		return err
+	}
 	h.deleteSystemEmojiFile(ctx, created.DriveFileID)
-	return err
+	return nil
 }
 
 func (h *Handler) deleteCreatedEmojiRow(emojiID string) error {

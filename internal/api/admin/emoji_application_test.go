@@ -1447,7 +1447,7 @@ func TestDeleteCreatedEmojiRemovesSystemFile(t *testing.T) {
 
 // **絵文字の削除に失敗しても複製したファイルは片付ける。** 別々の問題なので、
 // 片方の失敗でもう片方を諦めない。
-func TestDeleteCreatedEmojiCleansFileEvenWhenEmojiDeleteFails(t *testing.T) {
+func TestDeleteCreatedEmojiKeepsFileWhenEmojiDeleteFails(t *testing.T) {
 	emojis := newEmojiRepoWith("existing")
 	emojis.DeleteErr = errors.New("db down")
 	fetcher := &stubFetcher{}
@@ -1456,8 +1456,11 @@ func TestDeleteCreatedEmojiCleansFileEvenWhenEmojiDeleteFails(t *testing.T) {
 	err := h.DeleteCreatedEmoji(context.Background(),
 		emojiapplication.CreatedEmoji{EmojiID: "e-existing", DriveFileID: "sys9"})
 	require.Error(t, err, "絵文字の削除の失敗を握り潰している")
-	require.Equal(t, []string{"sys9"}, fetcher.deletedIDs,
-		"絵文字を消せなかったことを理由に複製したファイルを残している")
+	// **「絵文字はあるのに画像が 404」を恒久化しない。** 消せなかった絵文字は
+	// ピッカーに残り、名前が使用中なので再承認も `DUPLICATE_NAME` で通らない。
+	// 複製を残しておけば、絵文字を消せたときに孤児 cleanup が回収する。
+	require.Empty(t, fetcher.deletedIDs,
+		"絵文字を消せていないのに画像だけ消している (絵文字が壊れたまま残る)")
 }
 
 // **リモート経路でも、弾いた取り込みを片付けること (#2966)。** MIME で拒否した
@@ -1548,4 +1551,35 @@ func TestCreateFromApplicationCopyTooLarge(t *testing.T) {
 		CreateFromApplication(context.Background(), ownApplication())
 	require.ErrorIs(t, err, emojiapplication.ErrImageTooLarge)
 	require.NotErrorIs(t, err, emojiapplication.ErrFileGone)
+}
+
+// **起動時の自己診断が依存する述語なので、定数化されると診断が静かに止まる。**
+// 兄弟の `HasQuotaResetRepo` には同じ形のテストがあるのに、こちらだけ
+// カバレッジ 0% で `return true` にしても全緑だった (2 周目レビュー L1)。
+func TestHasEmojiImageFetcherReflectsWiring(t *testing.T) {
+	h := &apiadmin.Handler{}
+	require.False(t, h.HasEmojiImageFetcher(), "未配線なのに配線済みと報告している")
+
+	h.SetEmojiImageFetcher(&stubFetcher{})
+	require.True(t, h.HasEmojiImageFetcher(), "配線したのに未配線と報告している")
+}
+
+// **申請の sensitive 指定が複製へ渡ることを固定する (2 周目レビュー L2)。**
+// `stubFetcher` は記録していたがどのテストも見ておらず、handler 側を
+// `false` 固定に変える変異が全緑だった。fetcher 単体のテストは `true` を
+// 直接渡しているので、受け渡しの経路はここでしか押さえられない。
+func TestCreateFromApplicationPassesSensitiveToCopy(t *testing.T) {
+	for _, sensitive := range []bool{true, false} {
+		t.Run(map[bool]string{true: "sensitive", false: "通常"}[sensitive], func(t *testing.T) {
+			app := ownApplication()
+			app.IsSensitive = sensitive
+			fetcher := &stubFetcher{}
+
+			_, err := newCreatorHandlerWithFetcher(t, newEmojiRepoWith(""), newDriveRepoWith(pngFile()), fetcher).
+				CreateFromApplication(context.Background(), app)
+			require.NoError(t, err)
+			require.Equal(t, []bool{sensitive}, fetcher.copySensitive,
+				"申請の sensitive 指定が複製に伝わっていない")
+		})
+	}
 }
