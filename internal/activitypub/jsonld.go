@@ -2,6 +2,9 @@ package activitypub
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -97,9 +100,28 @@ var canonicalTerms = map[string]string{
 	"sec:owner":        "owner",
 }
 
+// ErrConflictingKeys is returned when two different JSON keys collapse to the
+// same canonical name with different values.
+//
+// **正規化は決定的でなければならない。** `actor` と `as:actor` はどちらも
+// canonical `actor` へ畳まれるが、Go の map 走査順はランダムなので、両方を
+// 持つ document は**呼び出しごとに違う結果**を返していた。inbox は同じ
+// バイト列を複数回 (認可ゲート / dispatch / activity id の取り出し) 独立に
+// 正規化するため、**ゲートが署名者の actor を見て通し、本処理が詐称 actor で
+// 動く**組み合わせが成立していた (実測で約 10%)。届く先は
+// `handleDelete` の actor 削除・note 削除、`handleCreate` の作者偽装など。
+//
+// 片方を優先する規則にしても「攻撃者が選んだ側が常に勝つ」だけなので、
+// **両方あること自体を異常として拒否する**。正当な実装は compact 形式か
+// expand 形式のどちらか一方しか出さない (同じ値が重複しているだけなら通す)。
+var ErrConflictingKeys = errors.New("activitypub: conflicting json-ld keys")
+
 // Normalize re-encodes a JSON-LD activity body so that AS terms appear in
 // their canonical short form. 入力が JSON object でも JSON 配列でも受け付け、
 // 不明なキー / scalar はそのまま透過する。
+//
+// Returns ErrConflictingKeys if two source keys collapse to the same canonical
+// name with different values.
 func Normalize(body []byte) ([]byte, error) {
 	if len(body) == 0 {
 		return body, nil
@@ -108,13 +130,26 @@ func Normalize(body []byte) ([]byte, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, err
 	}
-	normalized := normalizeValue(raw)
+	normalized, err := normalizeValue(raw)
+	if err != nil {
+		return nil, err
+	}
 	return json.Marshal(normalized)
+}
+
+// setCanonical writes one canonical key, refusing a second source key that
+// carries a different value.
+func setCanonical(out map[string]any, key string, val any) error {
+	if prev, dup := out[key]; dup && !reflect.DeepEqual(prev, val) {
+		return fmt.Errorf("%w: %q", ErrConflictingKeys, key)
+	}
+	out[key] = val
+	return nil
 }
 
 // normalizeValue is the recursive worker that transforms map keys and unwraps
 // JSON-LD specific value containers (`@value`, type arrays, etc.).
-func normalizeValue(v any) any {
+func normalizeValue(v any) (any, error) {
 	switch x := v.(type) {
 	case map[string]any:
 		// `{"@value": "foo"}` のような JSON-LD value object はスカラーに展開する。
@@ -127,7 +162,7 @@ func normalizeValue(v any) any {
 		// が string と同等に扱える。
 		if id, ok := x["@id"]; ok && len(x) == 1 {
 			if s, ok := id.(string); ok {
-				return s
+				return s, nil
 			}
 		}
 		out := make(map[string]any, len(x))
@@ -148,7 +183,9 @@ func normalizeValue(v any) any {
 					// room URI の場合のみ保持して下流 (handleChatRoomMessageCreate) が
 					// room を識別できるようにする (#1209)。
 					if s, ok := child.(string); ok && strings.Contains(s, "/chat/rooms/") {
-						out["@context"] = s
+						if err := setCanonical(out, "@context", s); err != nil {
+							return nil, err
+						}
 					}
 					continue
 				case "@value", "@language", "@graph", "@list":
@@ -160,25 +197,36 @@ func normalizeValue(v any) any {
 					canonical = k
 				}
 			}
-			normalizedChild := normalizeValue(child)
+			normalizedChild, err := normalizeValue(child)
+			if err != nil {
+				return nil, err
+			}
 			// type が配列で来た場合は最初の AS type 文字列を採用する。
 			if canonical == "type" {
 				if s := flattenType(normalizedChild); s != "" {
-					out[canonical] = s
+					if err := setCanonical(out, canonical, s); err != nil {
+						return nil, err
+					}
 					continue
 				}
 			}
-			out[canonical] = normalizedChild
+			if err := setCanonical(out, canonical, normalizedChild); err != nil {
+				return nil, err
+			}
 		}
-		return out
+		return out, nil
 	case []any:
 		out := make([]any, len(x))
 		for i, item := range x {
-			out[i] = normalizeValue(item)
+			normalized, err := normalizeValue(item)
+			if err != nil {
+				return nil, err
+			}
+			out[i] = normalized
 		}
-		return out
+		return out, nil
 	default:
-		return x
+		return x, nil
 	}
 }
 

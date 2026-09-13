@@ -305,3 +305,60 @@ func TestNormalize_TypeArrayUsesFirstElementOnly(t *testing.T) {
 		})
 	}
 }
+
+// **正規化は決定的でなければならない。** `actor` と `as:actor` はどちらも
+// canonical `actor` へ畳まれるが、Go の map 走査順はランダムなので、両方を持つ
+// document は呼び出しごとに違う結果を返していた。inbox は同じバイト列を
+// 複数回 (認可ゲート / dispatch / activity id の取り出し) 独立に正規化するので、
+// **ゲートが署名者の actor を見て通し、本処理が詐称 actor で動く**組み合わせが
+// 実測で約 10% 成立していた。
+func TestNormalizeRejectsConflictingCanonicalKeys(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"actor と as:actor", `{"type":"Delete","actor":"https://evil.example/users/m","as:actor":"https://victim.example/users/a"}`},
+		{"id と @id", `{"type":"Delete","id":"https://evil.example/activities/1","@id":"https://victim.example/activities/1","actor":"https://evil.example/users/m"}`},
+		{"type と as:type", `{"type":"Delete","as:type":"Create","actor":"https://evil.example/users/m"}`},
+		{"object と as:object", `{"type":"Delete","actor":"https://e.example/users/m","object":"https://e.example/notes/1","as:object":"https://v.example/notes/2"}`},
+		{"入れ子の object の中", `{"type":"Create","actor":"https://e.example/users/m","object":{"type":"Note","attributedTo":"https://e.example/users/m","as:attributedTo":"https://v.example/users/a"}}`},
+		{"配列の要素の中", `{"type":"Create","actor":"https://e.example/users/m","object":{"type":"Note","tag":[{"type":"Mention","name":"@m@e.example","as:name":"@a@v.example"}]}}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := Normalize([]byte(tc.body))
+			require.ErrorIs(t, err, ErrConflictingKeys,
+				"同じ canonical に畳まれる別の値を受け入れている (正規化のたびに勝者が変わる)")
+		})
+	}
+}
+
+// 同じ値が重複しているだけなら異常ではないので通す。expand 形式と compact 形式
+// の両方を出す実装が理論上ありうるため、そこまでは弾かない。
+func TestNormalizeAcceptsDuplicateKeysWithSameValue(t *testing.T) {
+	out, err := Normalize([]byte(`{"type":"Delete","actor":"https://a.example/users/x","as:actor":"https://a.example/users/x"}`))
+	require.NoError(t, err)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(out, &got))
+	require.Equal(t, "https://a.example/users/x", got["actor"])
+}
+
+// **同じ入力からは必ず同じ出力が出る。** 衝突を弾いたので、map 走査順に
+// 左右される余地が無いことを繰り返しで確かめる。1 回でも違う結果が出れば、
+// 認可ゲートと本処理が別の actor を見る窓が残っていることになる。
+func TestNormalizeIsDeterministic(t *testing.T) {
+	body := []byte(`{"@context":"https://www.w3.org/ns/activitystreams","type":"Create",` +
+		`"id":"https://a.example/activities/1","actor":"https://a.example/users/x",` +
+		`"object":{"type":"Note","id":"https://a.example/notes/1","attributedTo":"https://a.example/users/x",` +
+		`"content":"hi","to":["https://www.w3.org/ns/activitystreams#Public"],` +
+		`"tag":[{"type":"Mention","href":"https://b.example/users/y"}]}}`)
+
+	first, err := Normalize(body)
+	require.NoError(t, err)
+	for i := 0; i < 200; i++ {
+		got, err := Normalize(body)
+		require.NoError(t, err)
+		require.Equal(t, string(first), string(got), "正規化の結果が呼び出しごとに変わっている")
+	}
+}
