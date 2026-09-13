@@ -360,18 +360,18 @@ func (h *Handler) emojiApplicationFile(app *model.EmojiApplication) (*model.Driv
 // 迂回して絵文字を登録する方法」になる。共有しているのは
 // isAllowedEmojiImageType / preferWebpublicURL / preferWebpublicType の 3 つで、
 // これは EmojiAdd がそのまま使っているものと同一。
-func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApplication) (string, error) {
+func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApplication) (emojiapplication.CreatedEmoji, error) {
 	if h.emojiRepo == nil || h.idGen == nil {
-		return "", errors.New("admin: emoji creation is not wired")
+		return emojiapplication.CreatedEmoji{}, errors.New("admin: emoji creation is not wired")
 	}
 	if app.Kind == model.EmojiApplicationKindRemote {
 		return h.createFromRemoteApplication(ctx, app)
 	}
 	if h.driveFileRepo == nil {
-		return "", errors.New("admin: emoji creation is not wired")
+		return emojiapplication.CreatedEmoji{}, errors.New("admin: emoji creation is not wired")
 	}
 	if app.FileID == nil {
-		return "", emojiapplication.ErrFileGone
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrFileGone
 	}
 
 	f, err := h.driveFileRepo.FindByID(*app.FileID)
@@ -379,51 +379,96 @@ func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApp
 		if repository.IsNotFound(err) {
 			// **申請から承認までの間にファイルが消えることがある。** 利用者が
 			// drive から消せるので、500 ではなく「もう無い」と伝える。
-			return "", emojiapplication.ErrFileGone
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrFileGone
 		}
-		return "", err
+		return emojiapplication.CreatedEmoji{}, err
 	}
 	// **承認側でも所有者を見る (レビュー Low 3)。** 申請時にも見ているが、
 	// 検証が入る前に作られた行が残っている可能性があり、多層にしておけば
 	// 「申請時の検証を落としたら承認が素通りする」形にもならない。
 	if f.UserID == nil || *f.UserID != app.UserID {
-		return "", emojiapplication.ErrFileGone
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrFileGone
 	}
 	if !isAllowedEmojiImageType(f.Type) {
-		return "", emojiapplication.ErrUnsupportedFileType
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrUnsupportedFileType
 	}
 
 	// 承認の直前にもう一度だけ重複を見る。申請の受付時にも見ているが、審査を
 	// 待つ間に同じ名前が登録されうる。
 	existing, dupErr := h.emojiRepo.FindByNameAndHost(app.Name, nil)
 	if dupErr != nil && !repository.IsNotFound(dupErr) {
-		return "", dupErr
+		return emojiapplication.CreatedEmoji{}, dupErr
 	}
 	if dupErr == nil && existing != nil {
-		return "", emojiapplication.ErrDuplicateName
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrDuplicateName
+	}
+
+	// **申請者のファイルを参照し続けない (#2966)。** 承認した絵文字が
+	// 申請者所有の drive ファイルの URL を指したままだと、申請者がそれを
+	// 消した時点で / アカウントを消した時点で表示が壊れる。リモート経路は
+	// 既に system 所有で取り込んでおり、同じ機能で保存期間が非対称だった。
+	//
+	// **元のファイルは触らない。** 所有権を移すと、ノートの添付やプロフィールで
+	// 使っているファイルが利用者の drive から突然消える。
+	src := f
+	systemFileID := ""
+	if h.emojiImageFetcher != nil {
+		copied, cerr := h.emojiImageFetcher.CopyToSystemFile(ctx, f, app.Name)
+		if cerr != nil {
+			slog.WarnContext(ctx, "emoji application: drive copy failed",
+				"applicationId", app.ID, "fileId", *app.FileID, "err", cerr)
+			// **絵文字を作らない。** ここで元ファイルを参照して作ると、直そうと
+			// しているバグをそのまま残すことになる。申請は pending のまま。
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrFileGone
+		}
+		src = copied
+		systemFileID = copied.ID
 	}
 
 	now := time.Now()
 	e := &model.Emoji{
-		ID:          h.idGen.Generate(now),
-		UpdatedAt:   &now,
-		Name:        app.Name,
-		OriginalURL: f.URL,
-		PublicURL:   preferWebpublicURL(f),
-		Type:        preferWebpublicType(f),
+		ID:        h.idGen.Generate(now),
+		UpdatedAt: &now,
+		Name:      app.Name,
+		// **`originalUrl` は複製した実体の `url` と一致させる。** drive の孤児
+		// cleanup は `emoji.originalUrl = drive_file.url` または
+		// `publicUrl = url` を参照保護の条件にしているので、webpublic だけを
+		// 入れると保護が外れて消される。
+		OriginalURL: src.URL,
+		PublicURL:   preferWebpublicURL(src),
+		Type:        preferWebpublicType(src),
 		Category:    app.Category,
 		Aliases:     model.StringArray(app.Aliases),
 		License:     &app.License,
 		IsSensitive: app.IsSensitive,
 	}
 	if err := h.emojiRepo.Create(e); err != nil {
-		return "", err
+		// **作った system ファイルを片付ける (#2966)。** 残すと誰からも
+		// 参照されない孤児になる。消せなくてもログに残して cleanup に拾わせる。
+		h.deleteSystemEmojiFile(ctx, systemFileID)
+		return emojiapplication.CreatedEmoji{}, err
 	}
 	// **EmojiAdd と同じく broadcast する (レビュー M3)。** これが無いと、承認した
 	// 絵文字が全クライアントのリロードまで絵文字ピッカーに出てこない
 	// (`boot/main-boot.ts` が emojiAdded を受けて addCustomEmoji する)。
 	h.publishEmojiAdded(e)
-	return e.ID, nil
+	return emojiapplication.CreatedEmoji{EmojiID: e.ID, DriveFileID: systemFileID}, nil
+}
+
+// deleteSystemEmojiFile removes a system-owned drive file created during an
+// approval that then failed (#2966).
+//
+// **握り潰してログに残す。** 後始末に失敗しても審査の結果は変わらないので、
+// 呼び出し元のエラーを上書きしない。残ったものは drive の孤児 cleanup から
+// 見つけられる状態にしておく。
+func (h *Handler) deleteSystemEmojiFile(ctx context.Context, fileID string) {
+	if fileID == "" || h.emojiImageFetcher == nil {
+		return
+	}
+	if err := h.emojiImageFetcher.DeleteSystemFile(ctx, fileID); err != nil {
+		slog.WarnContext(ctx, "emoji application: system drive file cleanup failed",
+			"driveFileId", fileID, "err", err)
+	}
 }
 
 // emojiApplicationLogEmoji renders the emoji-ish payload the moderation log UI
@@ -450,29 +495,29 @@ func emojiApplicationLogEmoji(app *model.EmojiApplication) map[string]any {
 //
 // **承認の時点で引き直す。** 申請は host + name で持っており emoji の行 ID では
 // ない — リモート絵文字の行はキャッシュに近く、審査を待つ間に消えうる。
-func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.EmojiApplication) (string, error) {
+func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.EmojiApplication) (emojiapplication.CreatedEmoji, error) {
 	if app.RemoteHost == nil || app.RemoteName == nil {
-		return "", emojiapplication.ErrNoSuchRemoteEmoji
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrNoSuchRemoteEmoji
 	}
 	src, err := h.emojiRepo.FindByNameAndHost(*app.RemoteName, app.RemoteHost)
 	if err != nil {
 		if repository.IsNotFound(err) {
 			// 審査を待つ間に消えた。500 ではなく「もう無い」と伝える。
-			return "", emojiapplication.ErrNoSuchRemoteEmoji
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrNoSuchRemoteEmoji
 		}
-		return "", err
+		return emojiapplication.CreatedEmoji{}, err
 	}
 	if src == nil {
-		return "", emojiapplication.ErrNoSuchRemoteEmoji
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrNoSuchRemoteEmoji
 	}
 
 	// 承認の直前にもう一度だけ重複を見る (own と同じ)。
 	existing, dupErr := h.emojiRepo.FindByNameAndHost(app.Name, nil)
 	if dupErr != nil && !repository.IsNotFound(dupErr) {
-		return "", dupErr
+		return emojiapplication.CreatedEmoji{}, dupErr
 	}
 	if dupErr == nil && existing != nil {
-		return "", emojiapplication.ErrDuplicateName
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrDuplicateName
 	}
 
 	now := time.Now()
@@ -525,6 +570,7 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 	// **drive へ取り込む (#670 / #722)。** URL を引き継ぐだけだと、相手が
 	// 画像を消した瞬間に表示が壊れる。system 所有で作るのは、操作者個人の
 	// drive に紐付けるとロール変更や削除で巻き込まれるため。
+	systemFileID := ""
 	if h.emojiImageFetcher != nil && src.OriginalURL != "" {
 		df, ferr := h.emojiImageFetcher.FetchAndStore(ctx, src.OriginalURL, nil, src.Name)
 		if ferr != nil {
@@ -532,14 +578,18 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 				"applicationId", app.ID, "url", src.OriginalURL, "err", ferr)
 			// **取得できなかったことを伝える (レビュー Low 2)。** 生の err を
 			// 返すと汎用 500 になり、審査画面では「何か問題が」としか出ない。
-			return "", emojiapplication.ErrRemoteFetchFailed
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrRemoteFetchFailed
 		}
+		systemFileID = df.ID
 		// **取り込んだものの MIME を見る (レビュー M7)。** 相手が icon.url に
 		// 非画像を置くと、承認でそれが絵文字として登録される。own 経路は
 		// 申請時に見ているので、remote だけ無検査なのは非対称。
 		// (`EmojiCopy` も同じ穴だが、承認は「検証を迂回する方法」にしない。)
 		if !isAllowedEmojiImageType(df.Type) {
-			return "", emojiapplication.ErrUnsupportedFileType
+			// **取り込んだものを片付ける (#2966)。** 弾いた時点で誰からも
+			// 参照されないので、残すと孤児になる。
+			h.deleteSystemEmojiFile(ctx, systemFileID)
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrUnsupportedFileType
 		}
 		copied.OriginalURL = df.URL
 		copied.PublicURL = preferWebpublicURL(df)
@@ -551,17 +601,28 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 	}
 
 	if err := h.emojiRepo.Create(&copied); err != nil {
-		return "", err
+		h.deleteSystemEmojiFile(ctx, systemFileID)
+		return emojiapplication.CreatedEmoji{}, err
 	}
 	h.publishEmojiAdded(&copied)
-	return copied.ID, nil
+	return emojiapplication.CreatedEmoji{EmojiID: copied.ID, DriveFileID: systemFileID}, nil
 }
 
 // DeleteCreatedEmoji implements emojiapplication.EmojiCreator.
 //
 // 承認が競合に負けたときだけ呼ばれる。**broadcast も出す** — 作成時に
 // emojiAdded を流しているので、消したことも伝えないとピッカーに残る。
-func (h *Handler) DeleteCreatedEmoji(_ context.Context, emojiID string) error {
+func (h *Handler) DeleteCreatedEmoji(ctx context.Context, created emojiapplication.CreatedEmoji) error {
+	// **drive のファイルは絵文字の削除に成功しなくても片付ける (#2966)。**
+	// 絵文字が消せない理由 (DB 障害) と、複製したファイルが孤児になることは
+	// 別の問題。順序は絵文字が先 — 先にファイルを消すと、絵文字だけ残って
+	// 画像が出ない状態になる窓が開く。
+	err := h.deleteCreatedEmojiRow(created.EmojiID)
+	h.deleteSystemEmojiFile(ctx, created.DriveFileID)
+	return err
+}
+
+func (h *Handler) deleteCreatedEmojiRow(emojiID string) error {
 	if h.emojiRepo == nil || emojiID == "" {
 		return nil
 	}

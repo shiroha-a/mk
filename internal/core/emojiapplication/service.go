@@ -138,14 +138,27 @@ type IDGenerator interface {
 // 抜ける — 承認が「検証を迂回して絵文字を登録する方法」になってしまう。
 // 実装は admin handler 側に置き、既存の追加処理と 1 本にまとめる。
 type EmojiCreator interface {
-	CreateFromApplication(ctx context.Context, app *model.EmojiApplication) (emojiID string, err error)
-	// DeleteCreatedEmoji removes an emoji created for an application that then
-	// lost the race to another moderator.
+	// CreateFromApplication registers the emoji and returns what it created.
 	//
-	// **作った emoji を片付ける口 (レビュー R5)。** 承認が条件付き UPDATE に
+	// **drive ファイルの id も返す (#2966)。** 承認時に画像を system 所有の
+	// drive ファイルとして複製するので、競合に負けたときは絵文字と一緒に
+	// それも片付ける必要がある。返さないと孤児が残る。
+	CreateFromApplication(ctx context.Context, app *model.EmojiApplication) (CreatedEmoji, error)
+	// DeleteCreatedEmoji removes what CreateFromApplication created for an
+	// application that then lost the race to another moderator.
+	//
+	// **作ったものを片付ける口 (レビュー R5)。** 承認が条件付き UPDATE に
 	// 負けると、申請は「却下」なのに絵文字だけ登録済みで使える状態が残る。
 	// M1 前の「絵文字があるのに申請は却下」と症状が同じで、確率が下がっただけ。
-	DeleteCreatedEmoji(ctx context.Context, emojiID string) error
+	DeleteCreatedEmoji(ctx context.Context, created CreatedEmoji) error
+}
+
+// CreatedEmoji is what an approval created (#2966).
+type CreatedEmoji struct {
+	EmojiID string
+	// DriveFileID は承認時に作った system 所有の drive ファイル。空のことも
+	// ある (リモート経路で取り込みが未配線のとき、既存データの経路)。
+	DriveFileID string
 }
 
 // ResultNotifier tells the applicant that their request was processed.
@@ -717,14 +730,14 @@ func (s *Service) Approve(ctx context.Context, id, moderatorID string) (*model.E
 		return nil, errors.New("emojiapplication: creator is not wired")
 	}
 
-	emojiID, err := s.creator.CreateFromApplication(ctx, app)
+	created, err := s.creator.CreateFromApplication(ctx, app)
 	if err != nil {
 		return nil, err
 	}
 
 	now := s.nowFunc()
 	app.Status = model.EmojiApplicationApproved
-	app.EmojiID = &emojiID
+	app.EmojiID = &created.EmojiID
 	app.ProcessedByID = &moderatorID
 	app.ProcessedAt = &now
 	app.UpdatedAt = now
@@ -738,9 +751,12 @@ func (s *Service) Approve(ctx context.Context, id, moderatorID string) (*model.E
 		// **負けたら作った emoji を片付ける (レビュー R5)。** 残すと、申請は
 		// 「却下」で通知も却下なのに絵文字だけ使える状態になる。削除に失敗しても
 		// 審査の結果は変わらないので、ErrNotPending をそのまま返す。
-		if derr := s.creator.DeleteCreatedEmoji(ctx, emojiID); derr != nil {
-			slog.Warn("emojiapplication: 競合で負けた承認の emoji を消せなかった",
-				"applicationId", app.ID, "emojiId", emojiID, "err", derr)
+		// **drive ファイルも一緒に消す (#2966)。** 絵文字だけ消すと、複製した
+		// system 所有のファイルが誰からも参照されないまま残る。
+		if derr := s.creator.DeleteCreatedEmoji(ctx, created); derr != nil {
+			slog.Warn("emojiapplication: 競合で負けた承認の後始末に失敗した",
+				"applicationId", app.ID, "emojiId", created.EmojiID,
+				"driveFileId", created.DriveFileID, "err", derr)
 		}
 		return nil, ErrNotPending
 	}

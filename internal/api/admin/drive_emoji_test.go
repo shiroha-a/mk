@@ -494,6 +494,14 @@ type fakeEmojiImageFetcher struct {
 	}
 	returnDF  *model.DriveFile
 	returnErr error
+
+	// #2966 (承認時に system 所有へ複製する経路)
+	copyCalls  []*model.DriveFile
+	copyNames  []string
+	copyDF     *model.DriveFile
+	copyErr    error
+	deletedIDs []string
+	deleteErr  error
 }
 
 func (f *fakeEmojiImageFetcher) FetchAndStore(_ context.Context, url string, user *model.User, name string) (*model.DriveFile, error) {
@@ -506,6 +514,20 @@ func (f *fakeEmojiImageFetcher) FetchAndStore(_ context.Context, url string, use
 		return nil, f.returnErr
 	}
 	return f.returnDF, nil
+}
+
+func (f *fakeEmojiImageFetcher) CopyToSystemFile(_ context.Context, src *model.DriveFile, name string) (*model.DriveFile, error) {
+	f.copyCalls = append(f.copyCalls, src)
+	f.copyNames = append(f.copyNames, name)
+	if f.copyErr != nil {
+		return nil, f.copyErr
+	}
+	return f.copyDF, nil
+}
+
+func (f *fakeEmojiImageFetcher) DeleteSystemFile(_ context.Context, fileID string) error {
+	f.deletedIDs = append(f.deletedIDs, fileID)
+	return f.deleteErr
 }
 
 // TestEmojiCopy_StoresInDrive verifies that a wired fetcher is invoked and

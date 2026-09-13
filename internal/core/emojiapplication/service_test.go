@@ -199,21 +199,35 @@ type fixedID struct{ n int }
 func (f *fixedID) Generate(time.Time) string { f.n++; return "id" + string(rune('0'+f.n)) }
 
 type fakeCreator struct {
-	id        string
-	err       error
-	called    bool
-	deleted   []string
-	deleteErr error
+	id string
+	// driveFileID は承認時に作った system 所有の drive ファイル (#2966)。
+	driveFileID string
+	err         error
+	called      bool
+	deleted     []CreatedEmoji
+	deleteErr   error
 }
 
-func (c *fakeCreator) CreateFromApplication(context.Context, *model.EmojiApplication) (string, error) {
+func (c *fakeCreator) CreateFromApplication(context.Context, *model.EmojiApplication) (CreatedEmoji, error) {
 	c.called = true
-	return c.id, c.err
+	if c.err != nil {
+		return CreatedEmoji{}, c.err
+	}
+	return CreatedEmoji{EmojiID: c.id, DriveFileID: c.driveFileID}, nil
 }
 
-func (c *fakeCreator) DeleteCreatedEmoji(_ context.Context, emojiID string) error {
-	c.deleted = append(c.deleted, emojiID)
+func (c *fakeCreator) DeleteCreatedEmoji(_ context.Context, created CreatedEmoji) error {
+	c.deleted = append(c.deleted, created)
 	return c.deleteErr
+}
+
+// deletedEmojiIDs renders the emoji ids handed to DeleteCreatedEmoji.
+func (c *fakeCreator) deletedEmojiIDs() []string {
+	out := make([]string, 0, len(c.deleted))
+	for _, d := range c.deleted {
+		out = append(out, d.EmojiID)
+	}
+	return out
 }
 
 func newService(t *testing.T, apps *fakeApps, emojis *fakeEmojis, creator EmojiCreator) *Service {
@@ -599,7 +613,7 @@ func TestApproveCleansUpWhenLosingRace(t *testing.T) {
 	_, err := svc.Approve(context.Background(), "a1", "mod1")
 	require.ErrorIs(t, err, ErrNotPending)
 	require.True(t, creator.called, "emoji が作られていない (前提が崩れている)")
-	require.Equal(t, []string{"e-orphan"}, creator.deleted,
+	require.Equal(t, []string{"e-orphan"}, creator.deletedEmojiIDs(),
 		"競合に負けた承認の emoji が残っている")
 
 	// 申請は書き換わっていないこと。

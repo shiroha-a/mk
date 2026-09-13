@@ -3925,6 +3925,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"カスタム絵文字申請の日次・週次・月次の上限が丸ごと効かなくなる"},
 		{"emojiApplication.quotaResetRepo", emojiApplicationService.HasQuotaResetRepo(),
 			"申請枠の手動リセットが常に失敗し、過去に戻した枠も再び満杯に見える"},
+		{"admin.emojiImageFetcher", adminHandler.HasEmojiImageFetcher(),
+			"承認した絵文字が申請者 / 相手サーバーのファイルを参照し続け、消された時点で壊れる"},
 
 		// ここから可視性・権限・上限 (#2683)。認証ほど鋭くはないが、いずれも
 		// 利用者から見えない形で制限が外れる。

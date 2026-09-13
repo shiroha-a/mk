@@ -2452,6 +2452,9 @@ type MockEmojiRepository struct {
 	// without persisting. Used to exercise upsertEmojis error handling paths.
 	CreateErr error
 	UpdateErr error
+	// DeleteErr forces Delete to return the given error (#2966 の補償処理で
+	// 「絵文字は消せなかったが drive の複製は片付ける」経路を作るため)。
+	DeleteErr error
 }
 
 func NewMockEmojiRepository() *MockEmojiRepository {
@@ -2598,6 +2601,9 @@ func (m *MockEmojiRepository) FindManyByNamesAndHost(names []string, host *strin
 }
 
 func (m *MockEmojiRepository) Delete(id string) error {
+	if m.DeleteErr != nil {
+		return m.DeleteErr
+	}
 	for k, e := range m.Emojis {
 		if e.ID == id {
 			delete(m.Emojis, k)

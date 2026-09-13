@@ -18,6 +18,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safehttp"
 	"github.com/shiroha-a/mk/internal/safemath"
 	"gorm.io/datatypes"
 
@@ -288,6 +289,41 @@ func (s *Service) storageFor(f *model.DriveFile) Storage {
 		return s.localStorage
 	}
 	return ResolveStorage(s.storage)
+}
+
+// ReadFileBody reads the stored bytes of f from whichever backend actually
+// holds it (#2966).
+//
+// **HTTP で自分の公開 URL を叩かない。** SSRF ガードと衝突するうえ、非公開
+// URL や内部向けの構成では取れず、DB 上の行と実体の対応も確かめられない。
+// `storageFor` は `storedInternal` を見るので、オブジェクトストレージへ
+// 移行する前に保存されたファイルもローカルから読める。
+//
+// max を超える本体は読まずにエラーにする (絵文字として複製する用途で、
+// 上限なしにすると 1 リクエストで任意サイズをメモリに載せられる)。
+func (s *Service) ReadFileBody(f *model.DriveFile, max int64) ([]byte, error) {
+	if f == nil {
+		return nil, ErrObjectNotFound
+	}
+	// **リンクは実体を持たない。** `isLink` の行は URL を指しているだけなので、
+	// storage から読めない (#2966 の複製はこの経路を使わない前提だが、
+	// 呼び出し側が増えたときに黙って空を返さないようにする)。
+	if f.IsLink {
+		return nil, ErrObjectNotFound
+	}
+	if f.AccessKey == nil || *f.AccessKey == "" {
+		return nil, ErrObjectNotFound
+	}
+	st := s.storageFor(f)
+	if st == nil {
+		return nil, ErrObjectNotFound
+	}
+	rc, err := st.Get(*f.AccessKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+	return safehttp.ReadAllLimit(rc, max)
 }
 
 // SetSensitiveDetection attaches the sensitive media detector and config.
@@ -1028,6 +1064,45 @@ func (s *Service) Delete(user *model.User, id string) error {
 	if s.chartHook != nil {
 		s.chartHook.OnFileDeleted(f)
 	}
+	return nil
+}
+
+// DeleteSystemFile removes a system-owned file (userId IS NULL) by id (#2966).
+//
+// **所有者チェックを通せないので別の口にする。** `Delete` は
+// `findOwnedFile` が user を要求するが、絵文字の実体として作るファイルは
+// 誰のものでもない。代わりに**「利用者のファイルではないこと」を確かめる** —
+// id を取り違えたときに利用者のファイルを消さないため。
+//
+// 承認が途中で失敗したときの後始末に使う。存在しない id は成功として扱う
+// (二重に呼ばれても壊れない)。
+func (s *Service) DeleteSystemFile(id string) error {
+	if id == "" {
+		return nil
+	}
+	f, err := s.fileRepo.FindByID(id)
+	if err != nil {
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	if f.UserID != nil {
+		// **利用者のファイルは消さない。** 呼び出し側が id を取り違えたときに
+		// 申請者のファイルを消すのが最悪の壊れ方なので、ここで止める。
+		return ErrAccessDenied
+	}
+	if err := s.deleteFileObjects(f); err != nil {
+		return err
+	}
+	if err := s.fileRepo.Delete(f); err != nil {
+		return err
+	}
+	if s.chartHook != nil {
+		s.chartHook.OnFileDeleted(f)
+	}
+	// **イベントは出さない。** `publishEvent` は利用者の stream 宛てで、
+	// system ファイルには宛先が無い。
 	return nil
 }
 

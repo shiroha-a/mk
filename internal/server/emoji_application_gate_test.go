@@ -333,6 +333,17 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// なる。
 	require.Containsf(t, src, `.HasQuotaResetRepo()`,
 		"%s が申請枠のリセットの配線を起動時に自己診断していない (#2962)", router)
+	// **絵文字の画像を drive へ取り込む配線 (#2966 / #670)。** 未配線だと、
+	// 自作画像の申請を承認した絵文字が**申請者所有のファイルを参照し続け**
+	// (申請者が消すと壊れる)、リモート絵文字の複製は相手サーバーの URL を
+	// 参照し続ける。どちらも「動いているように見えて後から壊れる」ので、
+	// 起動時に気付ける形にしておく。
+	require.Containsf(t, src, "SetEmojiImageFetcher(",
+		"%s が絵文字画像の取り込みを配線していない (#2966)", router)
+	require.NotRegexpf(t, `SetEmojiImageFetcher\(\s*nil\b`, src,
+		"%s が絵文字画像の取り込みに nil を渡している (#2966)", router)
+	require.Containsf(t, src, `.HasEmojiImageFetcher()`,
+		"%s が絵文字画像の取り込みの配線を起動時に自己診断していない (#2966)", router)
 
 	// **理由の上限が列の幅と一致すること (レビュー L7)。** 3 箇所 (migration の
 	// `varchar`、Go の定数、ダイアログの `maxLength`) に散っていて、どれか 1 つ

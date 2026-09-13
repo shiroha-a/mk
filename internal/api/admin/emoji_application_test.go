@@ -351,15 +351,15 @@ func TestDeleteCreatedEmoji(t *testing.T) {
 	emojis := newEmojiRepoWith("sushi")
 	h := newCreatorHandler(t, emojis, newDriveRepoWith(pngFile()))
 
-	require.NoError(t, h.DeleteCreatedEmoji(context.Background(), "e-existing"))
+	require.NoError(t, h.DeleteCreatedEmoji(context.Background(), emojiapplication.CreatedEmoji{EmojiID: "e-existing"}))
 	require.Empty(t, emojis.Emojis, "emoji が消えていない")
 }
 
 // 既に無い emoji を指定しても失敗しない (二重に走っても壊れない)。
 func TestDeleteCreatedEmojiIgnoresMissing(t *testing.T) {
 	h := newCreatorHandler(t, newEmojiRepoWith(""), newDriveRepoWith(pngFile()))
-	require.NoError(t, h.DeleteCreatedEmoji(context.Background(), "gone"))
-	require.NoError(t, h.DeleteCreatedEmoji(context.Background(), ""))
+	require.NoError(t, h.DeleteCreatedEmoji(context.Background(), emojiapplication.CreatedEmoji{EmojiID: "gone"}))
+	require.NoError(t, h.DeleteCreatedEmoji(context.Background(), emojiapplication.CreatedEmoji{}))
 }
 
 // **重複の確認に失敗したことを隠さない (レビュー Low 1)。**
@@ -664,6 +664,14 @@ func TestEmojiApplicationApproveMapsRemoteGone(t *testing.T) {
 type stubFetcher struct {
 	file *model.DriveFile
 	err  error
+
+	// #2966 (承認時に system 所有へ複製する経路)
+	copySrc    []*model.DriveFile
+	copyNames  []string
+	copyFile   *model.DriveFile
+	copyErr    error
+	deletedIDs []string
+	deleteErr  error
 }
 
 func (s *stubFetcher) FetchAndStore(_ context.Context, _ string, _ *model.User, _ string) (*model.DriveFile, error) {
@@ -671,6 +679,29 @@ func (s *stubFetcher) FetchAndStore(_ context.Context, _ string, _ *model.User, 
 		return nil, s.err
 	}
 	return s.file, nil
+}
+
+func (s *stubFetcher) CopyToSystemFile(_ context.Context, src *model.DriveFile, name string) (*model.DriveFile, error) {
+	s.copySrc = append(s.copySrc, src)
+	s.copyNames = append(s.copyNames, name)
+	if s.copyErr != nil {
+		return nil, s.copyErr
+	}
+	if s.copyFile != nil {
+		return s.copyFile, nil
+	}
+	// 既定は「system 所有の別ファイルができた」形を返す。
+	copied := *src
+	copied.ID = src.ID + "-sys"
+	copied.UserID = nil
+	copied.UserHost = nil
+	copied.URL = src.URL + "?sys"
+	return &copied, nil
+}
+
+func (s *stubFetcher) DeleteSystemFile(_ context.Context, fileID string) error {
+	s.deletedIDs = append(s.deletedIDs, fileID)
+	return s.deleteErr
 }
 
 // **取り込んだ drive file の MIME を見ること (レビュー M7 / R2-M5)。**
@@ -1287,4 +1318,163 @@ func TestEmojiApplicationResetQuotaWithoutActorIs500(t *testing.T) {
 	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"理由"}`, nil)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	require.Zero(t, rev.resetCalls, "操作者が取れないのにリセットを実行している")
+}
+
+// --- #2966 承認時に system 所有へ複製する ---
+
+func newCreatorHandlerWithFetcher(t *testing.T, emojis *testutil.MockEmojiRepository,
+	files *testutil.MockDriveFileRepository, fetcher *stubFetcher,
+) *apiadmin.Handler {
+	t.Helper()
+	h := newCreatorHandler(t, emojis, files)
+	h.SetEmojiImageFetcher(fetcher)
+	return h
+}
+
+// **承認した絵文字が申請者のファイルを参照し続けないこと (#2966)。**
+// これがバグの本体 — 申請者が drive から元のファイルを消すと、または
+// アカウントを消すと、承認済みの絵文字が表示できなくなる。
+func TestCreateFromApplicationCopiesToSystemFile(t *testing.T) {
+	emojis := newEmojiRepoWith("")
+	src := pngFile()
+	files := newDriveRepoWith(src)
+	sysWeb := "https://x/sys-webpublic.webp"
+	sysWebType := "image/webp"
+	fetcher := &stubFetcher{copyFile: &model.DriveFile{
+		ID: "sys1", URL: "https://x/sys-original.png", Type: "image/png",
+		WebpublicURL: &sysWeb, WebpublicType: &sysWebType,
+	}}
+
+	created, err := newCreatorHandlerWithFetcher(t, emojis, files, fetcher).
+		CreateFromApplication(context.Background(), ownApplication())
+	require.NoError(t, err)
+	require.NotEmpty(t, created.EmojiID)
+	require.Equal(t, "sys1", created.DriveFileID, "複製した drive ファイルを返していない")
+
+	// **申請者のファイルから読んで複製すること。**
+	require.Len(t, fetcher.copySrc, 1, "複製していない")
+	require.Equal(t, "f1", fetcher.copySrc[0].ID, "元のファイルから読んでいない")
+	require.Equal(t, "sushi", fetcher.copyNames[0], "絵文字の名前でファイルを作っていない")
+
+	e := emojis.Emojis["sushi@"]
+	require.NotNil(t, e)
+	// **`originalUrl` は複製した実体の `url` と一致させる。** drive の孤児
+	// cleanup がこの一致を参照保護の条件にしているので、ずれると保護が外れる。
+	require.Equal(t, "https://x/sys-original.png", e.OriginalURL,
+		"申請者のファイルを参照し続けている (申請者が消すと絵文字が壊れる)")
+	require.Equal(t, "https://x/sys-webpublic.webp", e.PublicURL, "複製の webpublic を使っていない")
+	require.NotNil(t, e.Type)
+	require.Equal(t, "image/webp", *e.Type)
+
+	// **元のファイルは触らない。** 申請者はノートの添付やプロフィールで
+	// 使っている可能性がある。
+	require.Equal(t, "https://x/original.png", src.URL, "元のファイルの URL が変わっている")
+	require.NotNil(t, src.UserID, "元のファイルの所有者を奪っている")
+	require.Equal(t, "u1", *src.UserID)
+	require.NotNil(t, files.Files["f1"], "元のファイルが消えている")
+}
+
+// **複製に失敗したら絵文字を作らない (#2966)。** 元のファイルを参照して作ると、
+// 直そうとしているバグをそのまま残すことになる。申請は pending のまま。
+func TestCreateFromApplicationFailsWhenCopyFails(t *testing.T) {
+	emojis := newEmojiRepoWith("")
+	fetcher := &stubFetcher{copyErr: errors.New("storage down")}
+
+	_, err := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher).
+		CreateFromApplication(context.Background(), ownApplication())
+	require.Error(t, err, "複製に失敗したのに承認が通っている")
+	require.Empty(t, emojis.Emojis, "複製に失敗したのに絵文字が作られている")
+}
+
+// **絵文字の作成に失敗したら複製したファイルを片付ける (#2966)。**
+// 残すと誰からも参照されない孤児になる。
+func TestCreateFromApplicationCleansUpSystemFileOnEmojiFailure(t *testing.T) {
+	emojis := newEmojiRepoWith("")
+	emojis.CreateErr = errors.New("db down")
+	fetcher := &stubFetcher{}
+
+	_, err := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher).
+		CreateFromApplication(context.Background(), ownApplication())
+	require.Error(t, err)
+	require.Equal(t, []string{"f1-sys"}, fetcher.deletedIDs,
+		"絵文字の作成に失敗したのに複製したファイルが残っている")
+}
+
+// **競合に負けたら絵文字と複製したファイルの両方を片付ける (#2966)。**
+// 絵文字だけ消すと、複製が誰からも参照されないまま残る。
+func TestDeleteCreatedEmojiRemovesSystemFile(t *testing.T) {
+	emojis := newEmojiRepoWith("existing")
+	fetcher := &stubFetcher{}
+	h := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher)
+
+	require.NoError(t, h.DeleteCreatedEmoji(context.Background(),
+		emojiapplication.CreatedEmoji{EmojiID: "e-existing", DriveFileID: "sys9"}))
+	require.Equal(t, []string{"sys9"}, fetcher.deletedIDs, "複製したファイルが残っている")
+}
+
+// **絵文字の削除に失敗しても複製したファイルは片付ける。** 別々の問題なので、
+// 片方の失敗でもう片方を諦めない。
+func TestDeleteCreatedEmojiCleansFileEvenWhenEmojiDeleteFails(t *testing.T) {
+	emojis := newEmojiRepoWith("existing")
+	emojis.DeleteErr = errors.New("db down")
+	fetcher := &stubFetcher{}
+	h := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher)
+
+	err := h.DeleteCreatedEmoji(context.Background(),
+		emojiapplication.CreatedEmoji{EmojiID: "e-existing", DriveFileID: "sys9"})
+	require.Error(t, err, "絵文字の削除の失敗を握り潰している")
+	require.Equal(t, []string{"sys9"}, fetcher.deletedIDs,
+		"絵文字を消せなかったことを理由に複製したファイルを残している")
+}
+
+// **リモート経路でも、弾いた取り込みを片付けること (#2966)。** MIME で拒否した
+// 時点で誰からも参照されないので、残すと孤児の drive ファイルになる。
+func TestCreateFromRemoteApplicationCleansUpRejectedFile(t *testing.T) {
+	remoteHost := "remote.example"
+	emojis := newEmojiRepoWith("")
+	emojis.Emojis["kusa@remote.example"] = &model.Emoji{
+		ID: "src1", Name: "kusa", Host: &remoteHost,
+		OriginalURL: "https://remote.example/e/kusa.png",
+	}
+	fetcher := &stubFetcher{file: &model.DriveFile{
+		ID: "sys-bad", URL: "https://x/bad.svg", Type: "image/svg+xml",
+	}}
+	h := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher)
+
+	app := ownApplication()
+	app.Kind = model.EmojiApplicationKindRemote
+	app.RemoteHost = &remoteHost
+	rname := "kusa"
+	app.RemoteName = &rname
+
+	_, err := h.CreateFromApplication(context.Background(), app)
+	require.ErrorIs(t, err, emojiapplication.ErrUnsupportedFileType)
+	require.Equal(t, []string{"sys-bad"}, fetcher.deletedIDs,
+		"弾いた取り込みが drive に残っている")
+}
+
+// **リモート経路も複製した id を返すこと (#2966)。** 返さないと、競合に負けた
+// ときに取り込んだファイルを片付けられない。
+func TestCreateFromRemoteApplicationReturnsDriveFileID(t *testing.T) {
+	remoteHost := "remote.example"
+	emojis := newEmojiRepoWith("")
+	emojis.Emojis["kusa@remote.example"] = &model.Emoji{
+		ID: "src1", Name: "kusa", Host: &remoteHost,
+		OriginalURL: "https://remote.example/e/kusa.png",
+	}
+	fetcher := &stubFetcher{file: &model.DriveFile{
+		ID: "sys-ok", URL: "https://x/ok.png", Type: "image/png",
+	}}
+	h := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher)
+
+	app := ownApplication()
+	app.Kind = model.EmojiApplicationKindRemote
+	app.RemoteHost = &remoteHost
+	rname := "kusa"
+	app.RemoteName = &rname
+
+	created, err := h.CreateFromApplication(context.Background(), app)
+	require.NoError(t, err)
+	require.Equal(t, "sys-ok", created.DriveFileID, "取り込んだ drive ファイルを返していない")
+	require.NotEmpty(t, created.EmojiID)
 }

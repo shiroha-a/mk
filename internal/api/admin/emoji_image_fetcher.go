@@ -106,3 +106,52 @@ func (f *EmojiImageFetcherImpl) FetchAndStore(ctx context.Context, imageURL stri
 	}
 	return df, nil
 }
+
+// CopyToSystemFile implements EmojiImageFetcher (#2966).
+//
+// 承認した絵文字が申請者の drive ファイルに依存し続けるのを断つための複製。
+// 申請者がファイルを消しても、アカウントを消しても、絵文字は生き残る。
+func (f *EmojiImageFetcherImpl) CopyToSystemFile(ctx context.Context, src *model.DriveFile, name string) (*model.DriveFile, error) {
+	if f.driveSvc == nil {
+		return nil, fmt.Errorf("emoji image fetcher not wired")
+	}
+	if src == nil {
+		return nil, fmt.Errorf("no source file")
+	}
+	// **ストレージから直に読む。** `storageFor` が `storedInternal` を見るので、
+	// オブジェクトストレージへ移行する前に保存されたファイルもローカルから読める。
+	body, err := f.driveSvc.ReadFileBody(src, MaxEmojiImageBytes)
+	if err != nil {
+		return nil, fmt.Errorf("read source file: %w", err)
+	}
+
+	driveName := name
+	if driveName == "" {
+		driveName = src.Name
+	}
+	// **`User: nil` が system-owned の作り方。** 利用者に紐付けると、ロールの
+	// 変更やアカウント削除で巻き込まれる (このバグそのもの)。`Force` は
+	// user==nil のとき dedup が元から効かないので no-op だが、「重複しても
+	// 新しいファイルを作る」契約を読み手に示すために明示する。
+	df, err := f.driveSvc.Upload(ctx, drive.UploadInput{
+		User:  nil,
+		Body:  body,
+		Name:  driveName,
+		Force: true,
+		// **センシティブの指定は引き継ぐ。** 申請の `isSensitive` は絵文字側に
+		// 入るが、drive のファイル自体にも印を残しておくと管理画面で分かる。
+		IsSensitive: src.IsSensitive,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upload copy to drive: %w", err)
+	}
+	return df, nil
+}
+
+// DeleteSystemFile implements EmojiImageFetcher (#2966).
+func (f *EmojiImageFetcherImpl) DeleteSystemFile(_ context.Context, fileID string) error {
+	if f.driveSvc == nil {
+		return fmt.Errorf("emoji image fetcher not wired")
+	}
+	return f.driveSvc.DeleteSystemFile(fileID)
+}

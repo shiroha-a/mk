@@ -537,6 +537,19 @@ func (h *Handler) SetEmojiImportEnqueuer(e EmojiImportEnqueuer) {
 // handler 単体テストで fake を差し込める。
 type EmojiImageFetcher interface {
 	FetchAndStore(ctx context.Context, url string, user *model.User, name string) (*model.DriveFile, error)
+	// CopyToSystemFile duplicates an existing drive file as a system-owned one
+	// (#2966).
+	//
+	// **HTTP を経由しない。** 自分の公開 URL を叩くと SSRF ガードと衝突し、
+	// 非公開 URL の構成では取れず、DB 上の行と実体の対応も確かめられない。
+	// ストレージから直に読む。
+	//
+	// **元のファイルは触らない** — 申請者はノートの添付やプロフィールで
+	// 使っている可能性があり、所有権を移すと drive から突然消える。
+	CopyToSystemFile(ctx context.Context, src *model.DriveFile, name string) (*model.DriveFile, error)
+	// DeleteSystemFile removes a system-owned file created by CopyToSystemFile
+	// when the approval then failed (#2966).
+	DeleteSystemFile(ctx context.Context, fileID string) error
 }
 
 // SetEmojiImageFetcher attaches an EmojiImageFetcher used by admin/emoji/copy.
@@ -545,6 +558,14 @@ type EmojiImageFetcher interface {
 func (h *Handler) SetEmojiImageFetcher(f EmojiImageFetcher) {
 	h.emojiImageFetcher = f
 }
+
+// HasEmojiImageFetcher reports whether emoji images can be taken into drive.
+//
+// **未配線だと 2 つのバグがそのまま残る (#2966 / #670)。** 自作画像の申請を
+// 承認すると絵文字が申請者所有のファイルを参照し続け (申請者が消すと壊れる)、
+// リモート絵文字の複製は相手サーバーの URL を参照し続ける (相手が消すと壊れる)。
+// どちらも「動いているように見えて後から壊れる」ので、起動時に気付けるようにする。
+func (h *Handler) HasEmojiImageFetcher() bool { return h.emojiImageFetcher != nil }
 
 // QueueInspector abstracts asynq.Inspector for queue management endpoints.
 type QueueInspector interface {
