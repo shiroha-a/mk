@@ -11,6 +11,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -435,6 +436,14 @@ func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApp
 			// モデレーターには却下すべき申請に見える。
 			if errors.Is(cerr, safehttp.ErrResponseTooLarge) {
 				return emojiapplication.CreatedEmoji{}, emojiapplication.ErrImageTooLarge
+			}
+			// **逆に潰しすぎない (2 周目レビュー M1)。** #2792 が禁じているのは
+			// 「障害を not-found に丸める」ことで、その逆ではない。実体が本当に
+			// 無い場合 (`storedInternal` の行だけ残ってローカルの実体を失った /
+			// S3 の lifecycle で object だけ消えた / `isLink` の行) は**却下が
+			// 正しい操作**なのに、500 を返すと運用側に直しようがなく理由も出ない。
+			if errors.Is(cerr, drive.ErrObjectNotFound) {
+				return emojiapplication.CreatedEmoji{}, emojiapplication.ErrFileGone
 			}
 			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrImageCopyFailed
 		}

@@ -146,6 +146,12 @@ func (h *Handler) createError(c echo.Context, err error) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"UNSUPPORTED_FILE_TYPE", "Unsupported file type.",
 			"f7599d96-8750-af68-1633-9575d625c1a7"))
+	case errors.Is(err, emojiapplication.ErrImageTooLarge):
+		// **承認側と同じ id を返す。** 同じ理由で断っているので、申請の時点でも
+		// 承認の時点でも利用者には同じ文面が出る (2 周目レビュー M2)。
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"EMOJI_IMAGE_TOO_LARGE", "The image is too large to register as an emoji.",
+			"6b1d5f0a-3c9e-4f27-9a4d-7e2b8c1f0d64"))
 	case errors.Is(err, emojiapplication.ErrFileGone):
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"NO_SUCH_FILE", "No such file.",

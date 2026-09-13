@@ -17,6 +17,7 @@ import (
 	"gorm.io/gorm"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	"github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -124,12 +125,21 @@ func TestEmojiApplicationReviewErrorMapping(t *testing.T) {
 		err  error
 		code int
 		body string
+		// **id も見る。** 500 に落とすものが複数あるので、code だけだと
+		// 取り違えても気付けない (id はエラーごとに一意)。
+		id string
 	}{
-		{"存在しない", emojiapplication.ErrNotFound, http.StatusNotFound, "NO_SUCH_APPLICATION"},
-		{"処理済み", emojiapplication.ErrNotPending, http.StatusBadRequest, "ALREADY_PROCESSED"},
-		{"同名あり", emojiapplication.ErrDuplicateName, http.StatusBadRequest, "DUPLICATE_NAME"},
-		{"未対応の形式", emojiapplication.ErrUnsupportedFileType, http.StatusBadRequest, "UNSUPPORTED_FILE_TYPE"},
-		{"画像が消えた", emojiapplication.ErrFileGone, http.StatusBadRequest, "NO_SUCH_FILE"},
+		{"存在しない", emojiapplication.ErrNotFound, http.StatusNotFound, "NO_SUCH_APPLICATION", "2b7e0c94-6d1a-4f3e-b5c8-0a9d3e7f1b44"},
+		{"処理済み", emojiapplication.ErrNotPending, http.StatusBadRequest, "ALREADY_PROCESSED", "4e6f1a37-9c2b-4d80-a1f5-7b3c8e0d2a55"},
+		{"同名あり", emojiapplication.ErrDuplicateName, http.StatusBadRequest, "DUPLICATE_NAME", "f7a3462c-4e6e-4069-8421-b9bd4f4c3975"},
+		{"未対応の形式", emojiapplication.ErrUnsupportedFileType, http.StatusBadRequest, "UNSUPPORTED_FILE_TYPE", "f7599d96-8750-af68-1633-9575d625c1a7"},
+		{"画像が消えた", emojiapplication.ErrFileGone, http.StatusBadRequest, "NO_SUCH_FILE", "fc46b5a4-6b92-4c33-ac66-b806659bb5cf"},
+		// 以下 4 つは「承認だけが失敗する」経路。**却下すべき申請と、直せば
+		// 通る申請を区別できる文面が要る**ので、種別ごとに分けている。
+		{"大きすぎる", emojiapplication.ErrImageTooLarge, http.StatusBadRequest, "EMOJI_IMAGE_TOO_LARGE", "6b1d5f0a-3c9e-4f27-9a4d-7e2b8c1f0d64"},
+		{"複製に失敗", emojiapplication.ErrImageCopyFailed, http.StatusInternalServerError, "INTERNAL_ERROR", "c2f7a3d1-58be-4e09-bb26-0d4a9e7f3c15"},
+		{"リモート取得に失敗", emojiapplication.ErrRemoteFetchFailed, http.StatusInternalServerError, "INTERNAL_ERROR", "0a4e0b9e-2d7c-4d6f-8f6b-1f9c2e9b4d83"},
+		{"リモート絵文字が消えた", emojiapplication.ErrNoSuchRemoteEmoji, http.StatusBadRequest, "NO_SUCH_EMOJI", "e2785b66-dca3-4087-9cac-b93c541cc425"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -137,6 +147,7 @@ func TestEmojiApplicationReviewErrorMapping(t *testing.T) {
 			rec := doPost(newEmojiReviewerHandler(t, rev).EmojiApplicationApprove, `{"applicationId":"a1"}`, adminUser)
 			require.Equal(t, tc.code, rec.Code)
 			require.Contains(t, rec.Body.String(), tc.body)
+			require.Contains(t, rec.Body.String(), tc.id)
 		})
 	}
 }
@@ -1380,14 +1391,32 @@ func TestCreateFromApplicationCopiesToSystemFile(t *testing.T) {
 
 // **複製に失敗したら絵文字を作らない (#2966)。** 元のファイルを参照して作ると、
 // 直そうとしているバグをそのまま残すことになる。申請は pending のまま。
-func TestCreateFromApplicationFailsWhenCopyFails(t *testing.T) {
-	emojis := newEmojiRepoWith("")
-	fetcher := &stubFetcher{copyErr: errors.New("storage down")}
+//
+// **失敗の種類も潰さない (2 周目レビュー M1)。** 全部同じにすると、却下が
+// 正しい申請 (画像の実体がもう無い) と、こちらの障害 (ストレージが落ちている) を
+// モデレーターが区別できない。しかも後者を 4xx にすると監視で 5xx が立たない
+// (#2792)。逆に前者を 5xx にすると運用側に直しようがない。
+func TestCreateFromApplicationCopyErrorKinds(t *testing.T) {
+	cases := []struct {
+		name    string
+		copyErr error
+		want    error
+	}{
+		{"上限を超えた", safehttp.ErrResponseTooLarge, emojiapplication.ErrImageTooLarge},
+		{"実体がもう無い", drive.ErrObjectNotFound, emojiapplication.ErrFileGone},
+		{"ストレージ障害", errors.New("storage down"), emojiapplication.ErrImageCopyFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			emojis := newEmojiRepoWith("")
+			fetcher := &stubFetcher{copyErr: tc.copyErr}
 
-	_, err := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher).
-		CreateFromApplication(context.Background(), ownApplication())
-	require.Error(t, err, "複製に失敗したのに承認が通っている")
-	require.Empty(t, emojis.Emojis, "複製に失敗したのに絵文字が作られている")
+			_, err := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher).
+				CreateFromApplication(context.Background(), ownApplication())
+			require.ErrorIs(t, err, tc.want, "複製の失敗が別の種類に化けている")
+			require.Empty(t, emojis.Emojis, "複製に失敗したのに絵文字が作られている")
+		})
+	}
 }
 
 // **絵文字の作成に失敗したら複製したファイルを片付ける (#2966)。**

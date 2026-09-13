@@ -8,6 +8,7 @@ import (
 	"path"
 
 	"github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/safehttp"
 )
@@ -20,15 +21,10 @@ const MaxEmojiImageBytes int64 = 8 << 20
 
 // MaxEmojiCopyBytes caps the local drive file duplicated on approval (#2966).
 //
-// **リモート取得の上限 (8 MiB) を流用しない。** あちらは相手サーバーが
-// いくらでも送れるので低く抑えているが、こちらは**自分の drive が既に
-// 受け取ったファイル**で、大きさは role policy の `maxFileSizeMb` (既定 30)
-// が決めている。8 MiB のままだと、**申請はできたのに承認だけが恒久的に
-// 失敗する**サイズ帯が生まれる (レビュー H2 で実測)。
-//
-// 既定の 30 MB に余裕を足した値にする。policy をこれより上げている構成では
-// 承認が `EMOJI_IMAGE_TOO_LARGE` になるが、原因が分かる文面を返す。
-const MaxEmojiCopyBytes int64 = 32 << 20
+// **定義は core に 1 つだけ置く (2 周目レビュー M2)。** 申請側 (`checkFile`) と
+// 承認側でこの値が食い違うと、「申請はできたのに承認だけが恒久的に失敗する」
+// サイズ帯が生まれる。別名にして、片方だけ動かせないようにする。
+const MaxEmojiCopyBytes = emojiapplication.MaxEmojiCopyBytes
 
 // DefaultEmojiCopyAccept matches the headers Misskey TS sends when fetching
 // emoji images via DriveService.uploadFromUrl. */* fallback is required since

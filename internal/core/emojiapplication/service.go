@@ -89,6 +89,18 @@ var (
 	ErrFileGone = errors.New("drive file is gone")
 )
 
+// MaxEmojiCopyBytes caps the local drive file duplicated on approval (#2966).
+//
+// **申請側と承認側で同じ値を見る。** ここが食い違うと「申請はできたのに承認
+// だけが恒久的に失敗する」サイズ帯が生まれる (2 周目レビュー M2)。drive が
+// 受け取る上限は role policy の `maxFileSizeMb` (既定 30) が決めていて、
+// これより上へ設定できる。
+//
+// **リモート取得の上限 (8 MiB) を流用しない。** あちらは相手サーバーが
+// いくらでも送れるので低く抑えているが、こちらは自分の drive が既に受け取った
+// ファイル。既定の 30 MB に余裕を足した値にする。
+const MaxEmojiCopyBytes int64 = 32 << 20
+
 // namePattern mirrors the constraint upstream's admin/emoji/add enforces.
 //
 // **申請側で先に弾く。** 承認まで通してから登録で落ちると、モデレーターが
@@ -706,6 +718,14 @@ func (s *Service) checkFile(fileID, userID string) (string, error) {
 	}
 	if !IsAllowedImageType(f.Type) {
 		return "", ErrUnsupportedFileType
+	}
+	// **承認時に複製できない大きさは申請の時点で断る (2 周目レビュー M2)。**
+	// 承認側は実体を読んで複製するので上限があるが、drive が受け取る上限
+	// (role policy の `maxFileSizeMb`) はそれより上げられる。見ないと、申請は
+	// 通るのに承認だけが `EMOJI_IMAGE_TOO_LARGE` で永久に失敗する — 申請者には
+	// 直しようが無く、モデレーターには却下すべき申請に見える。
+	if int64(f.Size) > MaxEmojiCopyBytes {
+		return "", ErrImageTooLarge
 	}
 	return f.MD5, nil
 }

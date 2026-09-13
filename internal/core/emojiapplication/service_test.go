@@ -28,6 +28,14 @@ type fakeApps struct {
 	// updateLands makes a failing UpdateIfPending still persist the row, so the
 	// "commit は通ったが応答が返らなかった" case can be exercised (#2966)。
 	updateLands bool
+	// updateLandsAs replaces the row instead, so approvalLanded can be exercised
+	// against a row written by **someone else** (2 周目レビュー M3)。
+	updateLandsAs *model.EmojiApplication
+	// findErrAfter makes FindByID fail from the Nth call onward (1-origin).
+	// **2 回目だけ落とす**のに要る — Approve は自分で 1 回読んでから
+	// approvalLanded でもう 1 回読む。
+	findErrAfter int
+	findCalls    int
 	// quotaLimits records what Create asked for so the policy plumbing can be
 	// asserted without a database (#2958 / #2977).
 	quotaLimits repository.QuotaLimits
@@ -112,8 +120,12 @@ func (f *fakeApps) CreateWithQuota(a *model.EmojiApplication, l repository.Quota
 }
 
 func (f *fakeApps) FindByID(id string) (*model.EmojiApplication, error) {
+	f.findCalls++
 	if f.findErr != nil {
 		return nil, f.findErr
+	}
+	if f.findErrAfter > 0 && f.findCalls >= f.findErrAfter {
+		return nil, errBoom
 	}
 	a, ok := f.rows[id]
 	if !ok {
@@ -134,6 +146,10 @@ func (f *fakeApps) UpdateIfPending(a *model.EmojiApplication) (bool, error) {
 		// まま err を返すと、呼び出し側が読み直して気付けるかを試せる。
 		if f.updateLands {
 			cp := *a
+			f.rows[a.ID] = &cp
+		}
+		if f.updateLandsAs != nil {
+			cp := *f.updateLandsAs
 			f.rows[a.ID] = &cp
 		}
 		return false, f.updateErr
@@ -412,6 +428,33 @@ func TestCreateRejectsNonImage(t *testing.T) {
 	svc := NewService(newFakeApps(), &fakeEmojis{}, files, &fixedID{}, nil, nil)
 	_, err := svc.Create(validInput())
 	require.ErrorIs(t, err, ErrUnsupportedFileType)
+}
+
+// **承認時に複製できない大きさは申請の時点で断る (2 周目レビュー M2)。**
+// drive が受け取る上限 (role policy の `maxFileSizeMb`) はこの値より上げられる
+// ので、ここで見ないと「申請はできたのに承認だけが恒久的に失敗する」帯が残る。
+// 申請者には何も直しようが無く、モデレーターには却下すべき申請に見える。
+func TestCreateRejectsFileLargerThanCopyLimit(t *testing.T) {
+	owner := "u1"
+	files := &okFiles{file: &model.DriveFile{
+		ID: "f1", UserID: &owner, Type: "image/png",
+		Size: int(MaxEmojiCopyBytes) + 1,
+	}}
+	svc := NewService(newFakeApps(), &fakeEmojis{}, files, &fixedID{}, nil, nil)
+	_, err := svc.Create(validInput())
+	require.ErrorIs(t, err, ErrImageTooLarge, "承認できない大きさの申請が通っている")
+}
+
+// 上限ちょうどは通す (境界を片側に寄せない)。
+func TestCreateAcceptsFileAtCopyLimit(t *testing.T) {
+	owner := "u1"
+	files := &okFiles{file: &model.DriveFile{
+		ID: "f1", UserID: &owner, Type: "image/png",
+		Size: int(MaxEmojiCopyBytes),
+	}}
+	svc := NewService(newFakeApps(), &fakeEmojis{}, files, &fixedID{}, nil, nil)
+	_, err := svc.Create(validInput())
+	require.NoError(t, err, "上限ちょうどの申請が弾かれている")
 }
 
 // **未配線なら通さない (fail-closed)。** 検証できないものを通すと、配線を
@@ -1448,4 +1491,67 @@ func TestApproveKeepsCreatedWhenApprovalLanded(t *testing.T) {
 	_, err := svc.Approve(context.Background(), "a1", "mod1")
 	require.ErrorIs(t, err, errBoom)
 	require.Empty(t, creator.deleted, "承認が通っていたのに作ったものを消している")
+}
+
+// **読み直せなかったら消す側に倒す (2 周目レビュー M3)。** 判定の方針そのもの
+// なので固定する。残す側に倒すと、DB が読めない間に押した承認がすべて
+// 「申請は pending のまま絵文字だけ存在する」状態を積み、その申請は次から
+// `DUPLICATE_NAME` で二度と承認できなくなる。消す側なら、承認をもう一度
+// 押せば作り直せる。
+func TestApproveCleansUpWhenReadBackFails(t *testing.T) {
+	apps := newFakeApps()
+	apps.rows["a1"] = &model.EmojiApplication{ID: "a1", UserID: "u1", Status: model.EmojiApplicationPending}
+	apps.updateErr = errBoom
+	// Approve 自身の読み取り (1 回目) は通し、approvalLanded の読み直し
+	// (2 回目) だけ落とす。
+	apps.findErrAfter = 2
+	creator := &fakeCreator{id: "e-unknown", driveFileID: "sys-unknown"}
+	svc := newService(t, apps, &fakeEmojis{}, creator)
+
+	_, err := svc.Approve(context.Background(), "a1", "mod1")
+	require.Error(t, err)
+	require.Equal(t, []CreatedEmoji{{EmojiID: "e-unknown", DriveFileID: "sys-unknown"}}, creator.deleted,
+		"書けたか確かめられないのに作ったものを残している")
+}
+
+// **載っているのが他人の承認なら、自分が作ったものは消す (2 周目レビュー M3)。**
+// 先に別のモデレーターの承認が載った状態で「approved だから消さない」と判断すると、
+// 自分が作った絵文字と複製が誰からも参照されないまま残り、しかも取り残した絵文字が
+// 複製を孤児 cleanup から守るのでストレージも回収されない。local emoji は
+// `host IS NULL` なので一意制約が効かず (Postgres は NULL を distinct 扱い)、
+// 同名の行が 2 つできる形は実在する。
+func TestApproveCleansUpWhenAnotherApprovalLanded(t *testing.T) {
+	apps := newFakeApps()
+	apps.rows["a1"] = &model.EmojiApplication{ID: "a1", UserID: "u1", Status: model.EmojiApplicationPending}
+	apps.updateErr = errBoom
+	other := "e-other"
+	apps.updateLandsAs = &model.EmojiApplication{
+		ID: "a1", UserID: "u1", Status: model.EmojiApplicationApproved, EmojiID: &other,
+	}
+	creator := &fakeCreator{id: "e-mine", driveFileID: "sys-mine"}
+	svc := newService(t, apps, &fakeEmojis{}, creator)
+
+	_, err := svc.Approve(context.Background(), "a1", "mod1")
+	require.ErrorIs(t, err, errBoom)
+	require.Equal(t, []CreatedEmoji{{EmojiID: "e-mine", DriveFileID: "sys-mine"}}, creator.deleted,
+		"載っているのは他人の承認なのに自分が作ったものを残している")
+}
+
+// **status が pending のままなら消す (2 周目レビュー M3)。** emojiId だけ
+// 一致していても承認は載っていない。残すと上と同じ孤児になる。
+func TestApproveCleansUpWhenRowStillPending(t *testing.T) {
+	apps := newFakeApps()
+	apps.rows["a1"] = &model.EmojiApplication{ID: "a1", UserID: "u1", Status: model.EmojiApplicationPending}
+	apps.updateErr = errBoom
+	mine := "e-mine"
+	apps.updateLandsAs = &model.EmojiApplication{
+		ID: "a1", UserID: "u1", Status: model.EmojiApplicationPending, EmojiID: &mine,
+	}
+	creator := &fakeCreator{id: "e-mine", driveFileID: "sys-mine"}
+	svc := newService(t, apps, &fakeEmojis{}, creator)
+
+	_, err := svc.Approve(context.Background(), "a1", "mod1")
+	require.ErrorIs(t, err, errBoom)
+	require.Equal(t, []CreatedEmoji{{EmojiID: "e-mine", DriveFileID: "sys-mine"}}, creator.deleted,
+		"申請が pending のままなのに作ったものを残している")
 }
