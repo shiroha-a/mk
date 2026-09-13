@@ -324,7 +324,9 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// **`nil` そのものだけを弾く (レビュー L6)。** 語境界が無いと
 	// `SetQuotaResetRepo(nilSafeRepo)` のような正当な識別子でも落ち、
 	// 診断が「nil を渡している」と事実と逆になる。
-	require.NotRegexpf(t, `SetQuotaResetRepo\(\s*nil\s*\)`, src,
+	// **語境界で見る (レビュー L-1)。** 閉じ括弧を要求すると
+	// `SetQuotaResetRepo(\n\tnil,\n)` を取り逃がす (gofmt も通る)。
+	require.NotRegexpf(t, `SetQuotaResetRepo\(\s*nil\b`, src,
 		"%s が申請枠のリセットに nil を渡している。リセットが常に失敗する (#2962)", router)
 	// **ローカル変数の名前は固定しない (レビュー L7)。** `emojiApplicationService`
 	// を rename しただけで落ち、しかも診断が「自己診断していない」と事実と逆に
@@ -332,12 +334,6 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	require.Containsf(t, src, `.HasQuotaResetRepo()`,
 		"%s が申請枠のリセットの配線を起動時に自己診断していない (#2962)", router)
 
-	// **mk-go 独自の LogType には fork 側の見出しが要る (#2962 / レビュー L5)。**
-	// upstream の modlog は `i18n.ts._moderationLogTypes[log.type]` を引くだけで
-	// フォールバックを持たないので、キーが無いと**見出しが空欄の折りたたみ**が
-	// 並ぶ。1 度実測で踏んでおり、次に独自の型を足したときに同じことが起きる。
-	//
-	// 目印より下の定数を全部拾うので、型を足せば自動で対象になる。
 	// **理由の上限が列の幅と一致すること (レビュー L7)。** 3 箇所 (migration の
 	// `varchar`、Go の定数、ダイアログの `maxLength`) に散っていて、どれか 1 つ
 	// だけ動かすと「打ち終わってから 400」か「500 が返って何度やっても通らない」
@@ -347,9 +343,17 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	col := regexp.MustCompile(`"reason" varchar\((\d+)\)`).FindStringSubmatch(resetSQL)
 	require.Lenf(t, col, 2, "migration から reason の列幅を読めない (#2962)")
 	svcSrc := readFileString(t, filepath.Join("..", "core", "emojiapplication", "service.go"))
-	require.Containsf(t, svcSrc, "quotaResetReasonMaxLen = "+col[1],
+	// **前方一致にしない (レビュー L-2)。** `Contains` だと `10240` が `1024` を
+	// 含んで素通りする。桁を増やす変更がいちばんありそうな壊し方。
+	require.Regexpf(t, `quotaResetReasonMaxLen = `+col[1]+`\b`, svcSrc,
 		"理由の上限が列の幅 (%s) と違う。超えると 500 が返り、画面は再試行を促すが"+
 			"何度やっても通らない (#2962)", col[1])
+	// **mk-go 独自の LogType には fork 側の見出しが要る (#2962 / レビュー L5)。**
+	// upstream の modlog は `i18n.ts._moderationLogTypes[log.type]` を引くだけで
+	// フォールバックを持たないので、キーが無いと**見出しが空欄の折りたたみ**が
+	// 並ぶ。1 度実測で踏んでおり、次に独自の型を足したときに同じことが起きる。
+	//
+	// 目印より下の定数を全部拾うので、型を足せば自動で対象になる。
 	logTypes := readFileString(t, filepath.Join("..", "core", "moderationlog", "types.go"))
 	marker := strings.Index(logTypes, "ここから下は upstream に無い")
 	require.GreaterOrEqualf(t, marker, 0,
@@ -358,10 +362,10 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		FindAllStringSubmatch(logTypes[marker:], -1)
 	require.NotEmptyf(t, ownTypes, "mk-go 独自の LogType が 1 つも拾えていない (#2962)")
 	for _, locale := range []string{"ja-JP.yml", "en-US.yml"} {
-		src := readFileString(t, filepath.Join(fe, "..", "..", "locales", locale))
-		section := src[strings.Index(src, "_moderationLogTypes:"):]
+		section := yamlSection(t, readFileString(t, filepath.Join(fe, "..", "..", "locales", locale)),
+			"_moderationLogTypes:")
 		for _, m := range ownTypes {
-			require.Containsf(t, section[:min(len(section), 8000)], m[1]+":",
+			require.Containsf(t, section, "  "+m[1]+":",
 				"%s の _moderationLogTypes に %s が無い。modlog の見出しが空欄になる (#2962)",
 				locale, m[1])
 		}
@@ -625,9 +629,18 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// **節の条件も見る (レビュー L5)。** 裸の `<FormSection>` に変えると、
 	// 集計の取得に失敗しているときに「状況を確認できませんでした」の隣で
 	// 「最後のリセット: リセットされたことはありません」と断言する。
-	require.Regexpf(t, `<FormSection[^>]*v-if="[^"]*canResetQuota`, userApps,
+	// **止めているのは `!summaryFailed` のほう (レビュー M-1)。** `canResetQuota` の
+	// 存在だけを見ると、そちらを落としても通る — `fetchSummary` の catch は
+	// フラグを立てるだけで `windows` / `lastReset` を戻さないので、リセット直後に
+	// 取得が一過性に失敗すると「状況を確認できませんでした」の隣で**今まさに
+	// 実行したリセットを否定する**「リセットされたことはありません」が並び、
+	// ボタンも押せたまま (監査行が二重に積まれる)。
+	resetSection := regexp.MustCompile(`<FormSection[^>]*v-if="[^"]*canResetQuota[^"]*"`).
+		FindString(userApps)
+	require.NotEmptyf(t, resetSection, "リセットの節に出し分けが無い (#2962)")
+	require.Containsf(t, resetSection, "summaryFailed",
 		"リセットの節が集計の取得失敗を見ていない (#2962)")
-	require.Containsf(t, userApps, "maxLength: "+col[1],
+	require.Regexpf(t, `maxLength: `+col[1]+`\b`, userApps,
 		"リセットの理由の入力に列の幅 (%s) と同じ上限が付いていない (#2962)", col[1])
 	for _, want := range []string{
 		"admin/emoji-application/related",
@@ -993,4 +1006,22 @@ func jsFunctionBody(t *testing.T, src, header string) string {
 	}
 	t.Fatalf("%s の対応する括弧が見つからない", header)
 	return ""
+}
+
+// yamlSection returns the body of one top-level YAML key.
+//
+// **窓を固定長で切らない (レビュー L-3)。** 8000 バイトでは隣のセクションまで
+// 入り、キーを別のブロックへ移しても気付けなかった (実測)。**見つからないときは
+// 落とす** — `strings.Index` の -1 をそのまま slice すると panic して、意図した
+// 診断が出ない (レビュー L-4)。
+func yamlSection(t *testing.T, src, key string) string {
+	t.Helper()
+	i := strings.Index(src, key)
+	require.GreaterOrEqualf(t, i, 0, "%s が無い", key)
+	rest := src[i+len(key):]
+	// 次の行頭非空白 (= 次のトップレベルキー) までが本体。
+	if j := regexp.MustCompile(`(?m)^[^\s#]`).FindStringIndex(rest); j != nil {
+		return rest[:j[0]]
+	}
+	return rest
 }
