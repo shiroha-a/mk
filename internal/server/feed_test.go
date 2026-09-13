@@ -191,3 +191,66 @@ func TestFeed_TryServe(t *testing.T) {
 		}
 	}
 }
+
+// 凍結済みの利用者はフィードを配らない。upstream getFeed は
+// `isSuspended: false` を lookup 条件に入れており、外れると 404 になる。
+func TestFeed_SuspendedUserIs404(t *testing.T) {
+	h := newFeedTestHandler(sampleFeedNotes())
+	h.users.(stubFeedUsers).users["alice"].IsSuspended = true
+	for _, fn := range []func(echo.Context, string) error{h.RSS, h.Atom, h.JSON} {
+		rec := doFeedReq(t, fn, "alice")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		assert.NotContains(t, rec.Body.String(), "hello")
+	}
+}
+
+// 「ログインしていないユーザーにコンテンツを見せない」設定の利用者も同様に
+// 404。フィードは常に未認証で読めるので、ここが唯一のゲートになる。
+func TestFeed_RequireSigninToViewContentsIs404(t *testing.T) {
+	h := newFeedTestHandler(sampleFeedNotes())
+	h.users.(stubFeedUsers).users["alice"].RequireSigninToViewContents = true
+	for _, fn := range []func(echo.Context, string) error{h.RSS, h.Atom, h.JSON} {
+		rec := doFeedReq(t, fn, "alice")
+		assert.Equal(t, http.StatusNotFound, rec.Code)
+		// 本文 (MFM→HTML 変換済み) も著者名も 1 文字も出さない。
+		body := rec.Body.String()
+		assert.NotContains(t, body, "hello")
+		assert.NotContains(t, body, "Alice")
+	}
+}
+
+// TryServe 経由 (= 実際のルーティング経路) でも同じゲートが効く。
+// serve() を直接叩くテストだけだと、振り分け側にバイパスがあっても気付けない。
+func TestFeed_TryServeAppliesVisibilityGate(t *testing.T) {
+	e := echo.New()
+	for _, tc := range []struct {
+		name  string
+		apply func(*model.User)
+	}{
+		{"suspended", func(u *model.User) { u.IsSuspended = true }},
+		{"requireSignin", func(u *model.User) { u.RequireSigninToViewContents = true }},
+	} {
+		for _, acct := range []string{"alice.rss", "alice.atom", "alice.json"} {
+			h := newFeedTestHandler(sampleFeedNotes())
+			tc.apply(h.users.(stubFeedUsers).users["alice"])
+			rec := httptest.NewRecorder()
+			c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+			handled, err := h.TryServe(c, acct)
+			assert.True(t, handled, "%s/%s", tc.name, acct)
+			var he *echo.HTTPError
+			require.True(t, asHTTPError(err, &he), "%s/%s: expected an echo.HTTPError", tc.name, acct)
+			assert.Equal(t, http.StatusNotFound, he.Code, "%s/%s", tc.name, acct)
+			assert.NotContains(t, rec.Body.String(), "hello", "%s/%s", tc.name, acct)
+		}
+	}
+}
+
+// ゲートを足しても通常の利用者は 200 のまま (= ゲートが広すぎないこと)。
+func TestFeed_NormalUserStillServed(t *testing.T) {
+	h := newFeedTestHandler(sampleFeedNotes())
+	for _, fn := range []func(echo.Context, string) error{h.RSS, h.Atom, h.JSON} {
+		rec := doFeedReq(t, fn, "alice")
+		assert.Equal(t, http.StatusOK, rec.Code)
+		assert.Contains(t, rec.Body.String(), "hello")
+	}
+}

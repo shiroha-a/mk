@@ -261,6 +261,20 @@ func (h *feedHandler) serve(c echo.Context, username string, render func(*feedDa
 	if err != nil || u == nil {
 		return echo.NewHTTPError(http.StatusNotFound)
 	}
+	// 凍結中 / 「ログインしていないユーザーにコンテンツを見せない」設定の
+	// 利用者はフィードを配らない。upstream ClientServerService.getFeed は
+	// `isSuspended: false, requireSigninToViewContents: false` を lookup の
+	// 条件に入れており、外れると user が undefined になって 404 が返る
+	// (ClientServerService.ts の getFeed)。mk-go は lookup 自体は
+	// FindByUsernameLower を共有しているので、ここで同じ 2 条件を見る。
+	//
+	// **フィードは常に未認証で読める**ので viewer 判定は無い。他の 3 経路
+	// (`ssr_meta.go` の NotePage / `internal/api/notehide` / `internal/stream/
+	// channels/note_filter.go`) と同じく「requireSigninToViewContents な著者の
+	// コンテンツは匿名に出さない」を、この経路でも成立させる。
+	if u.IsSuspended || u.RequireSigninToViewContents {
+		return echo.NewHTTPError(http.StatusNotFound)
+	}
 
 	data := h.build(u)
 	out, err := render(data)
