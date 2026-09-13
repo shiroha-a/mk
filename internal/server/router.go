@@ -3899,6 +3899,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"new-login メールの instance lang fallback が空のまま進み、profile.lang 未設定時に併記ではなく英語だけになる"},
 		{"resetpassword.metaRepo", resetHandler.HasMetaRepo(),
 			"パスワードリセットメールの instance lang fallback が空のまま進む"},
+		{"federation.noteDeleteHook.userRepo", noteDeleteHook.HasUserRepo(),
+			"DM / フォロワー限定ノートの Delete が宛先に届かず、相手サーバーに残り続ける"},
 		{"federation.localBaseURL", federationProcessor.HasLocalBaseURL(),
 			"relay の Accept / Reject が全て落ち、ローカル URI の判定も外れて自ホスト宛の object がリモート扱いになる"},
 		{"inbox.expectedHost", inboxHandler.HasExpectedHost(),
