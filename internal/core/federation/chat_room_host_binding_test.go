@@ -7,9 +7,13 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/shiroha-a/mk/internal/activitypub"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/core/federation"
+	corefollowing "github.com/shiroha-a/mk/internal/core/following"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 )
 
 // chatRoomInviteBody renders an Invite carrying a chat room Group object.
@@ -169,4 +173,58 @@ func TestProcess_ChatRoomInvite_RoomMissingIsNotRetried(t *testing.T) {
 	))
 
 	assert.ErrorIs(t, err, federation.ErrUnsupportedActivity)
+}
+
+// **恒久的な失敗は ack、一時的な失敗は retry (2 周目レビュー M3)。** dispatch は
+// `handleChatRoomInvite` の戻り値を `isPermanentSkipError` に通さないので、生で
+// 返すと queue が無駄に回り続ける。逆に何でも ack すると、相手が一時的に落ちて
+// いるだけの Invite を捨てることになる。
+func TestProcess_ChatRoomInvite_ActorResolutionErrorClassification(t *testing.T) {
+	inviteBody := chatRoomInviteBody(
+		"https://remote.example/users/alice",
+		"https://remote.example/chat/rooms/room1",
+	)
+
+	t.Run("恒久的な失敗は ack する", func(t *testing.T) {
+		// actor document が不正 (= ErrInvalidActor 系)。retry しても変わらない。
+		p, repo, _, _ := newProcessor(t, `{"id":"https://remote.example/users/alice"}`)
+		recv := &fakeChatRoomReceiver{}
+		p.SetChatRoomReceiver(recv)
+		bobURI := "https://example.com/users/bob"
+		repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+
+		err := p.Process(inviteBody)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, federation.ErrUnsupportedActivity,
+			"恒久的な失敗を retry する種類のエラーで返している")
+		assert.Empty(t, recv.ensureCalls)
+	})
+
+	t.Run("一時的な失敗は retry させる", func(t *testing.T) {
+		// fetcher が落ちている (= ネットワーク障害)。retry すれば通りうる。
+		p, repo, _, _ := newProcessorFetchErr(t, errors.New("dial tcp: i/o timeout"))
+		recv := &fakeChatRoomReceiver{}
+		p.SetChatRoomReceiver(recv)
+		bobURI := "https://example.com/users/bob"
+		repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+
+		err := p.Process(inviteBody)
+		require.Error(t, err)
+		assert.NotErrorIs(t, err, federation.ErrUnsupportedActivity,
+			"一時的な失敗を ack して捨てている (Invite が失われる)")
+		assert.Empty(t, recv.ensureCalls)
+	})
+}
+
+// newProcessorFetchErr builds a processor whose actor fetch fails with err.
+func newProcessorFetchErr(t *testing.T, err error) (*federation.Processor, *testutil.MockUserRepository, *testutil.MockFollowingRepository, *testutil.MockNoteRepository) {
+	t.Helper()
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{err: err}, idGen)
+	followingSvc := corefollowing.NewService(repo, followingRepo, testutil.NewMockFollowRequestRepository(), idGen)
+	return federation.NewProcessor(resolver, followingSvc, nil, nil, repo, noteRepo), repo, followingRepo, noteRepo
 }

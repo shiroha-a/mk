@@ -273,3 +273,35 @@ func TestPollDeliveryHook_OnLocalPollUpdated_NonSpecifiedFansOutToFollowers(t *t
 		})
 	}
 }
+
+// **メンション先にも票数の Update を送る (2 周目レビュー H1)。** mk-go は
+// upstream と同じく mention を `visibleUserIds` に入れない (一方向) ので、
+// 宛先だけに送ると**メンションされたリモート利用者はノート本文は受け取るのに
+// 票数の Update を一度も受け取らない** — 票が永久に初期値のまま見える。
+// `Create` も `Delete` も宛先 + メンション先へ送っている。
+func TestPollDeliveryHook_OnLocalPollUpdated_SpecifiedReachesMentioned(t *testing.T) {
+	hook, enq, userRepo, keypairRepo, followingRepo, _ := newHookSetupWithFollowing(t)
+	seedSigner(t, userRepo, keypairRepo, "author")
+	followerInbox := "https://follower.example/inbox"
+	followingRepo.RemoteInboxes["author"] = []string{followerInbox}
+	dmInbox := "https://dmpeer.example/users/bob/inbox"
+	seedRemoteUser(userRepo, "dmpeer", "dmpeer.example", dmInbox)
+	mentionedInbox := "https://mentioned.example/users/carol/inbox"
+	seedRemoteUser(userRepo, "mentioned", "mentioned.example", mentionedInbox)
+
+	secret := "secret DM body @carol@mentioned.example"
+	hook.OnLocalPollUpdated(&model.Note{
+		ID: "n1", UserID: "author", HasPoll: true, Text: &secret,
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: model.StringArray{"dmpeer"},
+		Mentions:       model.StringArray{"mentioned"},
+	})
+
+	got := make([]string, 0, len(enq.delivers))
+	for _, d := range enq.delivers {
+		got = append(got, d.Inbox)
+		assert.NotEqual(t, followerInbox, d.Inbox, "DM 本文をフォロワーへ配送しない")
+	}
+	assert.ElementsMatch(t, []string{dmInbox, mentionedInbox}, got,
+		"メンション先に票数の Update が届いていない")
+}

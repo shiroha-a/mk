@@ -902,11 +902,9 @@ func remoteChatRoomURI(ownerURI, roomID string) string {
 // 渡すことになる (`extractRemoteDescription` と同じ順序)。`colfit.Text` は
 // NUL も落とす。
 //
-// **`source` / `_misskey_content` はここでは見られない。** note 取り込みは
-// upstream と同じ 3 段 (source → _misskey_content → content) で拾うが、chat は
-// `internal/core/federation/processor.go` の probe が `content` しか読まずに
-// 文字列として渡してくるため、この層に届いていない。優先順位を揃えるには
-// probe と `ChatMessageReceiver` の signature を広げる必要がある。
+// **note 取り込みと同じ 3 段** (source → _misskey_content → content) で拾う。
+// 前 2 つは `internal/core/federation/processor.go` の probe が読み取って
+// `mfmSource` として渡してくるので、この層では「原文があるか」だけを見る。
 func remoteChatText(content, mfmSource string) string {
 	// **原文があれば HTML から戻さない。** `mfm.Parse` -> `ToHTML` -> `FromHTML`
 	// は往復で情報が落ちる (装飾 `$[shake x]` / 色 / `<center>` / 引用の改行 /

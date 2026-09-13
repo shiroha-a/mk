@@ -344,6 +344,14 @@ func TestVerifyInboxAdmission_DateFormatsJSAccepts(t *testing.T) {
 				t.Fatalf("30 日前の Date が通った: %v", err)
 			}
 		})
+		// **`UTC` の綴りも読む (2 周目レビュー H1)。** Go の
+		// `t.UTC().Format(time.RFC1123)` や Python の `%Z` はこれを出す。
+		// 読めないと、その peer からの署名付き POST を無期限に再投函できる。
+		t.Run("RFC1123 UTC", func(t *testing.T) {
+			if err := admit(stale.Format(time.RFC1123)); !errors.Is(err, ErrInboxDateSkew) {
+				t.Fatalf("30 日前の Date が通った (UTC 綴り): %v", err)
+			}
+		})
 	})
 
 	t.Run("窓の中は書式によらず通る", func(t *testing.T) {
@@ -351,6 +359,7 @@ func TestVerifyInboxAdmission_DateFormatsJSAccepts(t *testing.T) {
 			"RFC1123Z":    time.RFC1123Z,
 			"RFC3339":     time.RFC3339,
 			"RFC3339Nano": time.RFC3339Nano,
+			"RFC1123 UTC": time.RFC1123,
 		} {
 			t.Run(name, func(t *testing.T) {
 				if err := admit(base.Format(layout)); err != nil {

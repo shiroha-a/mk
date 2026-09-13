@@ -40,7 +40,12 @@ type HTTPFetcher interface {
 // 既定は true なので、既定構成でそのまま成立していた。最終 URL まで見て
 // 初めて「その host の文書を読んだ」と言える。
 type hostBoundJSONFetcher interface {
+	// FetchJSONWithFinalURL follows cross-host redirects and reports where the
+	// response came from (discovery hop: `.well-known/*` の委譲は正当)。
 	FetchJSONWithFinalURL(uri string) ([]byte, string, error)
+	// FetchJSONSameHost refuses cross-host redirects (document hop: href は
+	// リモートが返す値なので、飛び先まで縛らないと GET リレーになる)。
+	FetchJSONSameHost(uri string) ([]byte, string, error)
 }
 
 // FetchMetadataService fetches /.well-known/nodeinfo for a remote host and
@@ -49,6 +54,18 @@ type FetchMetadataService struct {
 	repo    repository.InstanceRepository
 	fetcher HTTPFetcher
 	clock   func() time.Time
+}
+
+// HasHostBoundFetcher reports whether the wired fetcher can bind a nodeinfo
+// fetch to the host we asked for.
+//
+// **optional interface なので、外れても静かに無束縛へ落ちる (2 周目レビュー M1)。**
+// `fetchJSONFromHost` は実装が無ければ `FetchJSON` に fallback するので、
+// `FetchJSONSameHost` を rename しただけで**redirect の束縛が丸ごと消えたまま
+// 全テストが緑**になる。起動時に気付けるよう述語を出す。
+func (s *FetchMetadataService) HasHostBoundFetcher() bool {
+	_, ok := s.fetcher.(hostBoundJSONFetcher)
+	return ok
 }
 
 // NewFetchMetadataService constructs a FetchMetadataService.
@@ -566,28 +583,35 @@ func firstNonEmptyStr(vals ...string) string {
 // 成功なら non-nil doc + nil error、失敗なら nil doc + error。upstream の
 // `fetchNodeinfo(...).catch(() => null)` と同じ粒度 (#2730)。
 func (s *FetchMetadataService) fetchNodeinfo(host string) (*nodeinfoDocument, error) {
-	disc, err := s.fetchDiscovery(host)
+	// **discovery の redirect は追う (2 周目レビュー M5)。** `.well-known/*` を
+	// 別の host へまとめて委譲する構成は実在する (Mastodon の `WEB_DOMAIN` 分離、
+	// CDN の force-www など)。ここを縛ると、その相手の softwareName / nodeName /
+	// icon が永久に取れなくなる。**飛んだ先を以後の基準にする** — discovery が
+	// 応答した host が、その instance の nodeinfo を出す権限を持つ host。
+	disc, base, err := s.fetchDiscovery(host)
 	if err != nil {
 		return nil, err
 	}
-	href := selectNodeinfoHref(disc, host)
+	href := selectNodeinfoHref(disc, base)
 	if href == "" {
 		return nil, errors.New("no supported nodeinfo schema")
 	}
-	return s.fetchDocument(href, host)
+	return s.fetchDocument(href, base)
 }
 
 // fetchDiscovery fetches /.well-known/nodeinfo and decodes the link list.
-func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, error) {
-	body, err := s.fetchJSONFromHost("https://"+host+"/.well-known/nodeinfo", host)
+// It returns the host that actually served the document, which becomes the
+// base for validating `links[].href` (see fetchNodeinfo).
+func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, string, error) {
+	body, servedBy, err := s.fetchJSONAllowingHostDelegation("https://"+host+"/.well-known/nodeinfo", host)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	var disc nodeinfoDiscovery
 	if err := json.Unmarshal(body, &disc); err != nil {
-		return nil, err
+		return nil, "", err
 	}
-	return &disc, nil
+	return &disc, servedBy, nil
 }
 
 // fetchDocument fetches the actual nodeinfo document.
@@ -603,6 +627,32 @@ func (s *FetchMetadataService) fetchDocument(href, host string) (*nodeinfoDocume
 // different host than the one we asked for.
 var errNodeinfoHostEscaped = errors.New("nodeinfo: response came from another host")
 
+// fetchJSONAllowingHostDelegation fetches JSON and reports the host that served
+// it, allowing a redirect to a different host.
+//
+// **discovery にだけ使う。** `.well-known/*` の委譲は実在する構成なので追う。
+// 返した host を以後の基準にするので、任意の host へ抜けられるわけではない
+// (document の href はその host に縛られる)。
+func (s *FetchMetadataService) fetchJSONAllowingHostDelegation(uri, host string) ([]byte, string, error) {
+	bound, ok := s.fetcher.(hostBoundJSONFetcher)
+	if !ok {
+		body, err := s.fetcher.FetchJSON(uri)
+		return body, host, err
+	}
+	body, finalURL, err := bound.FetchJSONWithFinalURL(uri)
+	if err != nil {
+		return nil, "", err
+	}
+	if finalURL == "" {
+		return body, host, nil
+	}
+	u, perr := url.Parse(finalURL)
+	if perr != nil || u.Hostname() == "" {
+		return body, host, nil
+	}
+	return body, trimDefaultPort(u.Host, u.Scheme), nil
+}
+
 // fetchJSONFromHost fetches JSON and refuses a response served by a different
 // host (see hostBoundJSONFetcher).
 func (s *FetchMetadataService) fetchJSONFromHost(uri, host string) ([]byte, error) {
@@ -612,7 +662,7 @@ func (s *FetchMetadataService) fetchJSONFromHost(uri, host string) ([]byte, erro
 		// fetcher は必ず実装している。
 		return s.fetcher.FetchJSON(uri)
 	}
-	body, finalURL, err := bound.FetchJSONWithFinalURL(uri)
+	body, finalURL, err := bound.FetchJSONSameHost(uri)
 	if err != nil {
 		return nil, err
 	}
@@ -647,7 +697,7 @@ func selectNodeinfoHref(disc *nodeinfoDiscovery, host string) string {
 	return ""
 }
 
-// nodeinfoHrefBelongsTo reports whether href is an https URL on host.
+// nodeinfoHrefBelongsTo reports whether href is an http(s) URL on host.
 //
 // discovery は `https://<host>/.well-known/nodeinfo` から取っているので、
 // そこが指す文書も同じ host の https でなければならない。既定ポートの明記
@@ -666,10 +716,19 @@ func nodeinfoHrefBelongsTo(href, host string) bool {
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return false
 	}
-	return strings.EqualFold(trimDefaultHTTPSPort(u.Host), trimDefaultHTTPSPort(host))
+	// **既定ポートは scheme ごとに剥がす。** `:443` しか剥がさないと、
+	// `http://h:80/nodeinfo` を advertise する相手 (http を許した理由そのもの)
+	// を落とす。host 側は scheme を持たないので、href の scheme で判断する。
+	return strings.EqualFold(trimDefaultPort(u.Host, u.Scheme), trimDefaultPort(host, u.Scheme))
 }
 
-func trimDefaultHTTPSPort(h string) string {
+func trimDefaultPort(h, scheme string) string {
 	h = strings.ToLower(strings.TrimSpace(h))
-	return strings.TrimSuffix(h, ":443")
+	switch scheme {
+	case "https":
+		return strings.TrimSuffix(h, ":443")
+	case "http":
+		return strings.TrimSuffix(h, ":80")
+	}
+	return h
 }

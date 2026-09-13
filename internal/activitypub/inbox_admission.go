@@ -188,14 +188,24 @@ func parseSignatureDate(raw string) (time.Time, bool) {
 		return t, true
 	}
 	// http.ParseTime が扱わないが `new Date()` は解釈する書式。
-	// **ゾーン略称を受ける layout は使わない (レビュー M2)。** `time.RFC1123`
-	// (`... MST`) を入れると、Go は未知の略称を**オフセット 0 の捏造ゾーン**と
-	// して受けるので絶対時刻がずれ、しかもずれ方がサーバーの TZ 設定に依存する
-	// (`TZ=UTC` で `JST` を読むと 9 時間ずれる)。ずれた瞬間に skew の窓から
-	// 外れて 401 になるので、**これまで検査を skip して通っていた peer を
-	// 落とす**方向の退行になる。数値オフセットと ISO8601 だけを足す。
 	for _, layout := range []string{time.RFC1123Z, time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	// **ゾーン名が UTC / GMT のときだけ RFC1123 を受ける (2 周目レビュー H1)。**
+	// Go は未知の略称を**オフセット 0 の捏造ゾーン**として受けるので、`JST` を
+	// `TZ=UTC` のホストで読むと 9 時間ずれ、**ずれ方がサーバーの TZ 設定に
+	// 依存する**。だからといって RFC1123 を丸ごと外すと、今度は
+	// `Date: ... UTC` (Go の `t.UTC().Format(time.RFC1123)` や Python の `%Z` が
+	// 出す綴り) が読めなくなり、**その peer からの署名付き POST を無期限に
+	// 再投函できる**ようになる — skew 検査が存在する理由そのものの層。
+	//
+	// **オフセットでは判定できない。** `off != 0` を条件にすると、`TZ=Asia/Tokyo`
+	// のホストでは `JST` が +09:00 に解決されて通ってしまう (= 捏造ゾーンの
+	// 問題を別経路で持ち込む)。ゾーン**名**で見る。
+	if t, err := time.Parse(time.RFC1123, raw); err == nil {
+		if name, _ := t.Zone(); name == "UTC" || name == "GMT" {
 			return t, true
 		}
 	}

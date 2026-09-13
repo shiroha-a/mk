@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -96,7 +97,7 @@ func (c *FederationChecker) fetchRemoteVersion(ctx context.Context, host string)
 	if nodeinfoURL == "" {
 		return ""
 	}
-	body, err := c.httpGetJSON(ctx, nodeinfoURL)
+	body, err := c.httpGetJSON(ctx, nodeinfoURL, true)
 	if err != nil {
 		return ""
 	}
@@ -115,7 +116,7 @@ func (c *FederationChecker) fetchRemoteVersion(ctx context.Context, host string)
 // document and returns the actual nodeinfo JSON URL (preferring 2.1, then
 // 2.0)。discovery shape 見つからなければ空文字。
 func (c *FederationChecker) resolveNodeinfoURL(ctx context.Context, host, discoveryURL string) string {
-	body, err := c.httpGetJSON(ctx, discoveryURL)
+	body, err := c.httpGetJSON(ctx, discoveryURL, false)
 	if err != nil {
 		return ""
 	}
@@ -150,7 +151,7 @@ func (c *FederationChecker) resolveNodeinfoURL(ctx context.Context, host, discov
 	return ""
 }
 
-// nodeinfoHrefBelongsTo reports whether href is an https URL on host.
+// nodeinfoHrefBelongsTo reports whether href is an http(s) URL on host.
 //
 // 既定ポートの明記 (`:443`) だけは同じ host として扱う — Go の `net/url` は
 // ポートを剥がさないので、そうしないと正当な相手を落とす。
@@ -167,14 +168,14 @@ func nodeinfoHrefBelongsTo(href, host string) bool {
 	if u.Scheme != "https" && u.Scheme != "http" {
 		return false
 	}
-	trim := func(h string) string {
-		return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ":443")
-	}
-	return trim(u.Host) == trim(host)
+	// **既定ポートの判定は 1 箇所に寄せる (2 周目レビュー M6)。** 同じファイルの
+	// `sameRequestHost` が数値比較なのに、ここだけ文字列 TrimSuffix という状態
+	// だった (`:0443` を別 host として扱う)。
+	return trimDefaultPort(u.Host, u.Scheme) == trimDefaultPort(host, u.Scheme)
 }
 
 // httpGetJSON is a small GET helper that reads up to 1 MiB of body.
-func (c *FederationChecker) httpGetJSON(ctx context.Context, url string) ([]byte, error) {
+func (c *FederationChecker) httpGetJSON(ctx context.Context, url string, sameHostOnly bool) ([]byte, error) {
 	// **未配線なら取りに行かない (fail-closed)。** 素の `http.Client` へ落とすと
 	// SSRF ガードを通らない client で外へ出てしまう。
 	if c.client == nil {
@@ -190,13 +191,17 @@ func (c *FederationChecker) httpGetJSON(ctx context.Context, url string) ([]byte
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// **redirect 先も縛る (レビュー H3)。** href の host を検証しても、client が
-	// 追従するなら **302 一回で任意の host / ポートへ飛べる**。ここの client は
-	// `CheckRedirect` を設定していないので常に追従する。最終 URL まで見て初めて
-	// 「その host の文書を読んだ」と言える。
-	if final := resp.Request; final != nil && final.URL != nil && req.URL != nil {
-		if !sameRequestHost(final.URL, req.URL) {
-			return nil, errRedirectedToAnotherHost
+	// **document hop は飛び先も縛る (レビュー H3)。** href の host を検証しても、
+	// client が追従するなら 302 一回で任意の host / ポートへ飛べる。
+	// **discovery hop は縛らない (2 周目レビュー M5)** — `.well-known/*` を別の
+	// host へ委譲する構成は実在するので、そこを落とすと相手の reversiVersion が
+	// 永久に取れない。飛んだ先を以後の基準にすることで、任意の host へは抜け
+	// られないようにしてある。
+	if sameHostOnly {
+		if final := resp.Request; final != nil && final.URL != nil && req.URL != nil {
+			if !sameRequestHost(final.URL, req.URL) {
+				return nil, errRedirectedToAnotherHost
+			}
 		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -216,15 +221,25 @@ var errRedirectedToAnotherHost = errors.New("reversi: nodeinfo response came fro
 
 // sameRequestHost compares two request URLs ignoring the scheme's default port.
 func sameRequestHost(a, b *url.URL) bool {
-	trim := func(u *url.URL) string {
-		h := strings.ToLower(u.Hostname())
-		p := u.Port()
-		if p == "" || isDefaultPortForScheme(u.Scheme, p) {
-			return h
-		}
-		return h + ":" + p
+	return trimDefaultPort(a.Host, a.Scheme) == trimDefaultPort(b.Host, b.Scheme)
+}
+
+// trimDefaultPort normalizes an authority by dropping the scheme's default
+// port, comparing numerically (`url.Port()` returns "0443" verbatim but Go
+// connects to 443).
+func trimDefaultPort(hostPort, scheme string) string {
+	hostPort = strings.ToLower(strings.TrimSpace(hostPort))
+	h, p, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		return hostPort
 	}
-	return trim(a) == trim(b)
+	if isDefaultPortForScheme(scheme, p) {
+		return h
+	}
+	if n, cerr := strconv.Atoi(p); cerr == nil {
+		return net.JoinHostPort(h, strconv.Itoa(n))
+	}
+	return hostPort
 }
 
 // isDefaultPortForScheme mirrors the federation package's rule (numeric

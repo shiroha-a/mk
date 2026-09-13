@@ -112,7 +112,16 @@ func (h *PollDeliveryHook) OnLocalPollUpdated(target *model.Note) {
 	// recipient 集合の作り方は reaction_delivery_hook.go に揃える:
 	// specified は DirectRecipe のみ、それ以外は follower fanout。
 	if target.Visibility == model.NoteVisibilitySpecified {
-		inboxes := remoteInboxesForUserIDs(h.userRepo, target.VisibleUserIDs, target.UserID)
+		// **メンション先も入れる (2 周目レビュー H1)。** mk-go は upstream と同じく
+		// mention を `visibleUserIds` に入れない (一方向) ので、宛先だけに送ると
+		// **メンションされたリモート利用者はノート本文は受け取るのに票数の
+		// Update を一度も受け取らない** — 票が永久に初期値のまま見える。
+		// `Create` (note_delivery_hook) も `Delete` (note_delete_delivery_hook)
+		// も宛先 + メンション先へ送っているので、ここだけ狭いのは非対称。
+		ids := make([]string, 0, len(target.VisibleUserIDs)+len(target.Mentions))
+		ids = append(ids, target.VisibleUserIDs...)
+		ids = append(ids, target.Mentions...)
+		inboxes := remoteInboxesForUserIDs(h.userRepo, ids, target.UserID)
 		if len(inboxes) == 0 {
 			return
 		}

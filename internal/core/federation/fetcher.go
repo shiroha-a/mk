@@ -110,10 +110,17 @@ func (f *APFetcher) FetchJSON(uri string) ([]byte, error) {
 }
 
 // FetchJSONWithFinalURL is FetchJSON but also returns the URL that actually
-// served the response (after redirects), so callers can bind the document to
-// the host they asked.
+// served the response (after redirects), so callers can bind what follows to
+// that host. Redirects to other hosts are followed (used for `.well-known/*`
+// delegation).
 func (f *APFetcher) FetchJSONWithFinalURL(uri string) ([]byte, string, error) {
 	return f.client.FetchUnsignedJSONWithURL(uri)
+}
+
+// FetchJSONSameHost is FetchJSONWithFinalURL but refuses redirects that leave
+// the host of the original request.
+func (f *APFetcher) FetchJSONSameHost(uri string) ([]byte, string, error) {
+	return f.client.FetchUnsignedJSONSameHost(uri)
 }
 
 // shouldFallbackToUnsigned reports whether an error from a signed fetch

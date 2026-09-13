@@ -84,7 +84,7 @@ func TestFederationCheckerWithoutClientDoesNotFetch(t *testing.T) {
 
 	// 取得口を直接叩く。ここが fail-open に戻ると、client を自前で作って
 	// 外へ出てしまう。
-	_, err := c.httpGetJSON(context.Background(), "https://remote.example/.well-known/nodeinfo")
+	_, err := c.httpGetJSON(context.Background(), "https://remote.example/.well-known/nodeinfo", true)
 	require.ErrorIs(t, err, errNoHTTPClient, "client 未配線なのに取りに行っている")
 
 	// discovery の解決も同じ理由で何も返さない。
@@ -132,7 +132,7 @@ func TestHTTPGetJSONRefusesCrossHostRedirect(t *testing.T) {
 	t.Run("別 host へ飛ばされたら読まない", func(t *testing.T) {
 		d := &redirectingDoer{to: "https://evil.example/ni", body: `{"metadata":{"reversiVersion":"1.1.1"}}`}
 		c := NewFederationChecker(nil, d)
-		_, err := c.httpGetJSON(context.Background(), asked)
+		_, err := c.httpGetJSON(context.Background(), asked, true)
 		require.ErrorIs(t, err, errRedirectedToAnotherHost,
 			"別 host が返した本文を読んでいる")
 	})
@@ -140,7 +140,7 @@ func TestHTTPGetJSONRefusesCrossHostRedirect(t *testing.T) {
 	t.Run("同じ host の中の redirect は通す", func(t *testing.T) {
 		d := &redirectingDoer{to: "https://remote.example/nodeinfo/2.1/", body: `{"ok":true}`}
 		c := NewFederationChecker(nil, d)
-		body, err := c.httpGetJSON(context.Background(), asked)
+		body, err := c.httpGetJSON(context.Background(), asked, true)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"ok":true}`, string(body))
 	})
@@ -148,7 +148,40 @@ func TestHTTPGetJSONRefusesCrossHostRedirect(t *testing.T) {
 	t.Run("既定ポートの明記は同じ host", func(t *testing.T) {
 		d := &redirectingDoer{to: "https://remote.example:443/nodeinfo/2.1", body: `{"ok":true}`}
 		c := NewFederationChecker(nil, d)
-		_, err := c.httpGetJSON(context.Background(), asked)
+		_, err := c.httpGetJSON(context.Background(), asked, true)
 		require.NoError(t, err)
 	})
+}
+
+// **http の href も選ぶ (2 周目レビュー M2)。** 1 周目で https 限定をやめたのに、
+// reversi 側は reject 一覧から消しただけで positive case が無く、`https` 限定へ
+// 戻しても緑のままだった。TLS 終端が前段にある相手のメタデータが取れなくなる。
+func TestResolveNodeinfoURLAcceptsHTTPHref(t *testing.T) {
+	const host = "remote.example"
+	const discovery = "https://remote.example/.well-known/nodeinfo"
+
+	for name, href := range map[string]string{
+		"http":         "http://remote.example/nodeinfo/2.1",
+		"http の既定ポート":  "http://remote.example:80/nodeinfo/2.1",
+		"https の既定ポート": "https://remote.example:443/nodeinfo/2.1",
+	} {
+		t.Run(name, func(t *testing.T) {
+			d := &recordingDoer{body: map[string]string{discovery: discoveryJSON(t, href)}}
+			c := NewFederationChecker(nil, d)
+			require.Equal(t, href, c.resolveNodeinfoURL(context.Background(), host, discovery),
+				"正当な href を落としている")
+		})
+	}
+}
+
+// **discovery の委譲は追う (2 周目レビュー M5)。** `.well-known/*` を別 host へ
+// まとめて委譲する構成は実在する。document hop だけ飛び先を縛る。
+func TestHTTPGetJSONFollowsDiscoveryRedirect(t *testing.T) {
+	d := &redirectingDoer{to: "https://social.remote.example/.well-known/nodeinfo", body: `{"ok":true}`}
+	c := NewFederationChecker(nil, d)
+
+	body, err := c.httpGetJSON(context.Background(),
+		"https://remote.example/.well-known/nodeinfo", false)
+	require.NoError(t, err, "`.well-known` の委譲を落としている")
+	require.JSONEq(t, `{"ok":true}`, string(body))
 }
