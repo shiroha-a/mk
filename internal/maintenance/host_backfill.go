@@ -97,7 +97,12 @@ type HostConflict struct {
 }
 
 // BackfillHostColumnBatch normalizes one keyset batch of a remote-host column
-// to the form hostFromURI now stores (idna.ToASCII(lowercase), UTS#46).
+// with idna.ToASCII(lowercase) (UTS#46).
+//
+// **`hostFromURI` が保存する形と完全には一致しない。** あちらは既定ポート
+// (`https://h:443` の `:443`) も剥がすようになったが、この backfill は
+// `idnhost.Puny` しか掛けないのでポートを落とさない。過去に `h:443` の形で
+// 保存された行は、これを流しても `h` にはならない。
 //
 // 既存行は `url.Parse` の生の host で保存されており、`Mixed.Example` のような
 // 表記のまま残る。acct 解決は読み取り側の両当たり (hostCandidates) で救っているが、

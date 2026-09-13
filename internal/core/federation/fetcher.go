@@ -109,6 +109,13 @@ func (f *APFetcher) FetchJSON(uri string) ([]byte, error) {
 	return f.client.FetchUnsignedJSON(uri)
 }
 
+// FetchJSONWithFinalURL is FetchJSON but also returns the URL that actually
+// served the response (after redirects), so callers can bind the document to
+// the host they asked.
+func (f *APFetcher) FetchJSONWithFinalURL(uri string) ([]byte, string, error) {
+	return f.client.FetchUnsignedJSONWithURL(uri)
+}
+
 // shouldFallbackToUnsigned reports whether an error from a signed fetch
 // warrants retrying without the signature. AP の authorized-fetch 系の peer
 // は鍵検証失敗で 401 / 403 を返すので、この 2 つだけフォールバック対象に

@@ -213,9 +213,20 @@ func (c *Client) FetchUnsigned(url string) ([]byte, error) {
 // fetch) free of fallback logic and makes the request semantics explicit
 // at the call site.
 func (c *Client) FetchUnsignedJSON(url string) ([]byte, error) {
+	body, _, err := c.FetchUnsignedJSONWithURL(url)
+	return body, err
+}
+
+// FetchUnsignedJSONWithURL is FetchUnsignedJSON but also returns the final
+// response URL (after redirects).
+//
+// **nodeinfo の取得元を呼び出し側が縛れるようにするため。** discovery が返す
+// `links[].href` の host を検証しても、client が redirect を追従するなら
+// **302 一回で任意の host へ飛べる** ので、href の検証だけでは足りない。
+func (c *Client) FetchUnsignedJSONWithURL(url string) ([]byte, string, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	req.Header.Set("Accept", "application/json, */*")
 	if c.userAgent != "" {
@@ -223,14 +234,15 @@ func (c *Client) FetchUnsignedJSON(url string) ([]byte, error) {
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		drainBody(resp)
-		return nil, &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
+		return nil, "", &StatusError{StatusCode: resp.StatusCode, Status: resp.Status, URL: url}
 	}
-	return safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
+	body, rerr := safehttp.ReadAllLimit(resp.Body, MaxBodyBytes)
+	return body, finalURLOf(resp, url), rerr
 }
 
 // drainBodyLimit caps how many bytes `drainBody` is willing to read from

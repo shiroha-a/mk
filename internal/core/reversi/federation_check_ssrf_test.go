@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -92,4 +93,62 @@ func TestFederationCheckerWithoutClientDoesNotFetch(t *testing.T) {
 
 	require.False(t, c.Available(context.Background(), "remote.example"),
 		"client 未配線なのに連合可能と答えている")
+}
+
+// redirectingDoer follows one redirect the way a real http.Client does, and
+// reports the final URL through resp.Request (which is what the guard reads).
+type redirectingDoer struct {
+	seen []string
+	to   string
+	body string
+}
+
+func (d *redirectingDoer) Do(req *http.Request) (*http.Response, error) {
+	d.seen = append(d.seen, req.URL.String())
+	final := req
+	if d.to != "" {
+		u, err := url.Parse(d.to)
+		if err != nil {
+			return nil, err
+		}
+		final = req.Clone(req.Context())
+		final.URL = u
+		d.seen = append(d.seen, d.to)
+	}
+	rec := httptest.NewRecorder()
+	rec.WriteHeader(http.StatusOK)
+	_, _ = rec.WriteString(d.body)
+	resp := rec.Result()
+	resp.Request = final
+	return resp, nil
+}
+
+// **href の host を縛っても redirect で抜けられた (レビュー H3)。** この client は
+// `CheckRedirect` を設定していないので常に追従する。最終 URL まで見ないと
+// 「その host の文書を読んだ」とは言えない。
+func TestHTTPGetJSONRefusesCrossHostRedirect(t *testing.T) {
+	const asked = "https://remote.example/nodeinfo/2.1"
+
+	t.Run("別 host へ飛ばされたら読まない", func(t *testing.T) {
+		d := &redirectingDoer{to: "https://evil.example/ni", body: `{"metadata":{"reversiVersion":"1.1.1"}}`}
+		c := NewFederationChecker(nil, d)
+		_, err := c.httpGetJSON(context.Background(), asked)
+		require.ErrorIs(t, err, errRedirectedToAnotherHost,
+			"別 host が返した本文を読んでいる")
+	})
+
+	t.Run("同じ host の中の redirect は通す", func(t *testing.T) {
+		d := &redirectingDoer{to: "https://remote.example/nodeinfo/2.1/", body: `{"ok":true}`}
+		c := NewFederationChecker(nil, d)
+		body, err := c.httpGetJSON(context.Background(), asked)
+		require.NoError(t, err)
+		require.JSONEq(t, `{"ok":true}`, string(body))
+	})
+
+	t.Run("既定ポートの明記は同じ host", func(t *testing.T) {
+		d := &redirectingDoer{to: "https://remote.example:443/nodeinfo/2.1", body: `{"ok":true}`}
+		c := NewFederationChecker(nil, d)
+		_, err := c.httpGetJSON(context.Background(), asked)
+		require.NoError(t, err)
+	})
 }

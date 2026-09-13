@@ -20,6 +20,11 @@ import (
 // 両方の形に当てているのは、**backfill 前に非正規化で保存された行**を引くため
 // (`cmd/backfill-remote-host` を流し終えた環境では外せる)。
 //
+// **既定ポートの扱いだけは違う。** `hostFromURI` は `https://h:443` を `h` として
+// 保存するようになったが (連合ゲートの綴り回避を塞ぐため)、`Puny` はポートを
+// 剥がさない。ポートを含む host を引き当てるときは、保存側と同じ形にしてから
+// 渡すこと。
+//
 // idna が失敗する不正入力のみ小文字化で返す (Go default の lenient UTS#46
 // profile では port 付き host も成功し ASCII tail はそのまま残るため、fallback は
 // 実質ほぼ発生しない)。

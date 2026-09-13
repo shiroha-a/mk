@@ -30,6 +30,22 @@ type scriptedFetcher struct {
 	// jsonURLs は FetchJSON に渡された URL を順に記録する。どの schema の href が
 	// 選ばれたかを見るテスト用 (#2730)。
 	jsonURLs []string
+
+	// finalURLs は i 回目の取得で「実際に応答した URL」。空なら要求した URL を
+	// そのまま返す (= redirect 無し)。redirect で別 host へ抜けられないことを
+	// 見るテスト用 (レビュー H3)。
+	finalURLs []string
+}
+
+// FetchJSONWithFinalURL implements hostBoundJSONFetcher.
+func (s *scriptedFetcher) FetchJSONWithFinalURL(url string) ([]byte, string, error) {
+	idx := s.idx
+	body, err := s.FetchJSON(url)
+	final := url
+	if idx < len(s.finalURLs) && s.finalURLs[idx] != "" {
+		final = s.finalURLs[idx]
+	}
+	return body, final, err
 }
 
 func (s *scriptedFetcher) FetchJSON(url string) ([]byte, error) {
@@ -458,4 +474,58 @@ func TestFetch_IconURLLengthIsCountedInRunes(t *testing.T) {
 	require.NotNil(t, got.IconURL, "列に収まる icon URL を byte 長で落としている")
 	assert.LessOrEqual(t, len([]rune(*got.IconURL)), 256)
 	assert.Greater(t, len(*got.IconURL), 256, "前提: byte 長では列を超える")
+}
+
+// **href の host を縛っても redirect で抜けられた (レビュー H3)。** 取得に使う
+// client は `meta.allowExternalApRedirect` (既定 true) のとき追従するので、
+// 攻撃者は自分の host を指す href (束縛を満たす) から任意の host へ飛ばせた。
+// 返ってきた JSON は content-type も見ずに instance 行へ書き戻る。
+func TestFetchNodeinfo_RefusesCrossHostRedirect(t *testing.T) {
+	poisoned := `{"software":{"name":"poisoned"},"metadata":{"nodeName":"victim"}}`
+
+	t.Run("discovery が別 host へ飛ばされたら読まない", func(t *testing.T) {
+		repo := testutil.NewMockInstanceRepository()
+		fetcher := &scriptedFetcher{
+			bodies:    [][]byte{[]byte(discoveryBody), []byte(poisoned)},
+			finalURLs: []string{"https://evil.example/.well-known/nodeinfo", ""},
+		}
+		svc := instance.NewFetchMetadataService(repo, fetcher)
+		require.NoError(t, repo.Create(&model.Instance{ID: "i1", Host: "remote.example"}))
+
+		svc.Fetch("remote.example")
+		got, err := repo.FindByHost("remote.example")
+		require.NoError(t, err)
+		require.Nil(t, got.SoftwareName, "別 host が返した JSON を書き戻している")
+	})
+
+	t.Run("文書が別 host へ飛ばされたら読まない", func(t *testing.T) {
+		repo := testutil.NewMockInstanceRepository()
+		fetcher := &scriptedFetcher{
+			bodies:    [][]byte{[]byte(discoveryBody), []byte(poisoned)},
+			finalURLs: []string{"", "https://evil.example/ni"},
+		}
+		svc := instance.NewFetchMetadataService(repo, fetcher)
+		require.NoError(t, repo.Create(&model.Instance{ID: "i2", Host: "remote.example"}))
+
+		svc.Fetch("remote.example")
+		got, err := repo.FindByHost("remote.example")
+		require.NoError(t, err)
+		require.Nil(t, got.SoftwareName, "別 host が返した JSON を書き戻している")
+	})
+
+	t.Run("同じ host の中の redirect は通す", func(t *testing.T) {
+		repo := testutil.NewMockInstanceRepository()
+		fetcher := &scriptedFetcher{
+			bodies:    [][]byte{[]byte(discoveryBody), []byte(documentBody)},
+			finalURLs: []string{"", "https://remote.example:443/nodeinfo/2.1"},
+		}
+		svc := instance.NewFetchMetadataService(repo, fetcher)
+		require.NoError(t, repo.Create(&model.Instance{ID: "i3", Host: "remote.example"}))
+
+		svc.Fetch("remote.example")
+		got, err := repo.FindByHost("remote.example")
+		require.NoError(t, err)
+		require.NotNil(t, got.SoftwareName, "同じ host の redirect を落としている")
+		require.Equal(t, "misskey", *got.SoftwareName)
+	})
 }

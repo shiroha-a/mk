@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -189,6 +190,15 @@ func (c *FederationChecker) httpGetJSON(ctx context.Context, url string) ([]byte
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	// **redirect 先も縛る (レビュー H3)。** href の host を検証しても、client が
+	// 追従するなら **302 一回で任意の host / ポートへ飛べる**。ここの client は
+	// `CheckRedirect` を設定していないので常に追従する。最終 URL まで見て初めて
+	// 「その host の文書を読んだ」と言える。
+	if final := resp.Request; final != nil && final.URL != nil && req.URL != nil {
+		if !sameRequestHost(final.URL, req.URL) {
+			return nil, errRedirectedToAnotherHost
+		}
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, errStatus{code: resp.StatusCode}
 	}
@@ -199,6 +209,39 @@ func (c *FederationChecker) httpGetJSON(ctx context.Context, url string) ([]byte
 // errNoHTTPClient is returned when the checker was constructed without an
 // outbound HTTP client (see NewFederationChecker).
 var errNoHTTPClient = errors.New("reversi: federation checker has no http client")
+
+// errRedirectedToAnotherHost is returned when a nodeinfo fetch was served by a
+// host other than the one we asked for.
+var errRedirectedToAnotherHost = errors.New("reversi: nodeinfo response came from another host")
+
+// sameRequestHost compares two request URLs ignoring the scheme's default port.
+func sameRequestHost(a, b *url.URL) bool {
+	trim := func(u *url.URL) string {
+		h := strings.ToLower(u.Hostname())
+		p := u.Port()
+		if p == "" || isDefaultPortForScheme(u.Scheme, p) {
+			return h
+		}
+		return h + ":" + p
+	}
+	return trim(a) == trim(b)
+}
+
+// isDefaultPortForScheme mirrors the federation package's rule (numeric
+// comparison — `url.Port()` returns "0443" verbatim but Go connects to 443).
+func isDefaultPortForScheme(scheme, port string) bool {
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	switch scheme {
+	case "https":
+		return n == 443
+	case "http":
+		return n == 80
+	}
+	return false
+}
 
 type errStatus struct{ code int }
 

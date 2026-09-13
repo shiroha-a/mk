@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/url"
@@ -28,6 +29,18 @@ type HTTPFetcher interface {
 	// FetchJSON は Accept: application/json, */* で nodeinfo を取得する。
 	FetchJSON(uri string) ([]byte, error)
 	FetchHTML(uri string) ([]byte, error)
+}
+
+// hostBoundJSONFetcher is the optional面 used to bind a nodeinfo fetch to the
+// host we asked for.
+//
+// **href の検証だけでは足りない (レビュー H3)。** discovery が返す
+// `links[].href` の host を縛っても、client が redirect を追従するなら
+// **302 一回で任意の host / ポートへ飛べる**。`meta.allowExternalApRedirect` の
+// 既定は true なので、既定構成でそのまま成立していた。最終 URL まで見て
+// 初めて「その host の文書を読んだ」と言える。
+type hostBoundJSONFetcher interface {
+	FetchJSONWithFinalURL(uri string) ([]byte, string, error)
 }
 
 // FetchMetadataService fetches /.well-known/nodeinfo for a remote host and
@@ -561,12 +574,12 @@ func (s *FetchMetadataService) fetchNodeinfo(host string) (*nodeinfoDocument, er
 	if href == "" {
 		return nil, errors.New("no supported nodeinfo schema")
 	}
-	return s.fetchDocument(href)
+	return s.fetchDocument(href, host)
 }
 
 // fetchDiscovery fetches /.well-known/nodeinfo and decodes the link list.
 func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, error) {
-	body, err := s.fetcher.FetchJSON("https://" + host + "/.well-known/nodeinfo")
+	body, err := s.fetchJSONFromHost("https://"+host+"/.well-known/nodeinfo", host)
 	if err != nil {
 		return nil, err
 	}
@@ -578,12 +591,35 @@ func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, 
 }
 
 // fetchDocument fetches the actual nodeinfo document.
-func (s *FetchMetadataService) fetchDocument(href string) (*nodeinfoDocument, error) {
-	body, err := s.fetcher.FetchJSON(href)
+func (s *FetchMetadataService) fetchDocument(href, host string) (*nodeinfoDocument, error) {
+	body, err := s.fetchJSONFromHost(href, host)
 	if err != nil {
 		return nil, err
 	}
 	return parseNodeinfoDocument(body)
+}
+
+// errNodeinfoHostEscaped is returned when a nodeinfo fetch ended up on a
+// different host than the one we asked for.
+var errNodeinfoHostEscaped = errors.New("nodeinfo: response came from another host")
+
+// fetchJSONFromHost fetches JSON and refuses a response served by a different
+// host (see hostBoundJSONFetcher).
+func (s *FetchMetadataService) fetchJSONFromHost(uri, host string) ([]byte, error) {
+	bound, ok := s.fetcher.(hostBoundJSONFetcher)
+	if !ok {
+		// 最終 URL を返せない実装 (テスト用の偽物) では従来どおり。本番の
+		// fetcher は必ず実装している。
+		return s.fetcher.FetchJSON(uri)
+	}
+	body, finalURL, err := bound.FetchJSONWithFinalURL(uri)
+	if err != nil {
+		return nil, err
+	}
+	if finalURL != "" && !nodeinfoHrefBelongsTo(finalURL, host) {
+		return nil, fmt.Errorf("%w: %s", errNodeinfoHostEscaped, finalURL)
+	}
+	return body, nil
 }
 
 // selectNodeinfoHref picks the highest-priority schema URL from the discovery

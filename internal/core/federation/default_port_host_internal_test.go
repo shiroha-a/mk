@@ -106,3 +106,36 @@ func TestIsSelfHost_UnwiredBuilderMatchesNothing(t *testing.T) {
 	assert.Equal(t, "", r3.selfHost())
 	assert.False(t, r3.isSelfHost("example.com"))
 }
+
+// **既定ポートの判定は数値で行う (レビュー H2)。** `url.Port()` は `"0443"` を
+// そのまま返すが、Go の HTTP client はそれを 443 として接続する。文字列一致だと
+// `blocked.example:0443` が別 host として保存・比較され、**既定ポートの明記で
+// gate を回避できるのと同じ穴が別の綴りで残る**。
+func TestHostFromURI_StripsPaddedDefaultPort(t *testing.T) {
+	cases := map[string]string{
+		"https://blocked.example/x":        "blocked.example",
+		"https://blocked.example:443/x":    "blocked.example",
+		"https://blocked.example:0443/x":   "blocked.example",
+		"https://blocked.example:00443/x":  "blocked.example",
+		"http://blocked.example:80/x":      "blocked.example",
+		"http://blocked.example:080/x":     "blocked.example",
+		"http://blocked.example:0000080/x": "blocked.example",
+		// 非既定ポートは別 host のまま (upstream も同じ)。
+		"https://blocked.example:8443/x": "blocked.example:8443",
+		"https://blocked.example:0844/x": "blocked.example:0844",
+		// scheme が違えば既定も違う。
+		"http://blocked.example:443/x": "blocked.example:443",
+		"https://blocked.example:80/x": "blocked.example:80",
+	}
+	for raw, want := range cases {
+		t.Run(raw, func(t *testing.T) {
+			got, err := hostFromURI(raw)
+			if err != nil {
+				t.Fatalf("hostFromURI(%q) が error: %v", raw, err)
+			}
+			if got != want {
+				t.Fatalf("hostFromURI(%q) = %q, want %q", raw, got, want)
+			}
+		})
+	}
+}

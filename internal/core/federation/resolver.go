@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -4023,6 +4024,10 @@ func hostFromURI(uri string) (string, error) {
 // 同じ値を作る。punyHost が今も要るのは、**backfill 前に非正規化で保存された行**と
 // 外から渡ってくる acct の host を突き合わせるため。
 //
+// **既定ポートの扱いだけは違う。** `hostFromURI` は `https://h:443` を `h` として
+// 保存する (`punyHostPort` が剥がす) が、`punyHost` はポートを見ない。ポートを
+// 含む host を突き合わせるときは `punyHostPort` / `NormalizeGateHost` を使う。
+//
 // なお Go の idna は ideographic/fullwidth dot (U+3002 等) を `.` に畳まない
 // (Node の domainToASCII と異なるが、別 authority を同一視しない安全側)。
 func punyHost(host string) string { return idnhost.Puny(host) }
@@ -4179,8 +4184,7 @@ func normalizeMatchHost(u *url.URL) string {
 	host := punyHost(u.Hostname())
 	host = strings.TrimPrefix(host, "www.")
 	port := u.Port()
-	isDefaultPort := (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")
-	if port != "" && !isDefaultPort {
+	if port != "" && !isDefaultPortForScheme(u.Scheme, port) {
 		return host + ":" + port
 	}
 	return host
@@ -4238,11 +4242,31 @@ func punyHostPort(u *url.URL) string {
 		host = "[" + host + "]"
 	}
 	port := u.Port()
-	isDefaultPort := (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")
-	if port != "" && !isDefaultPort {
+	if port != "" && !isDefaultPortForScheme(u.Scheme, port) {
 		return host + ":" + port
 	}
 	return host
+}
+
+// isDefaultPortForScheme reports whether port is the scheme's default port.
+//
+// **数値として比較する (レビュー H2)。** `url.Port()` は `"0443"` をそのまま
+// 返すが、**Go の HTTP client はそれを 443 として接続する**。文字列一致だと
+// `blocked.example:0443` が別 host として保存・比較され、既定ポートの明記で
+// gate を回避できるのと**同じ穴が別の綴りで残る**。WHATWG URL はポートを数値と
+// して解釈するので、この形は upstream には無い。
+func isDefaultPortForScheme(scheme, port string) bool {
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		return false
+	}
+	switch scheme {
+	case "https":
+		return n == 443
+	case "http":
+		return n == 80
+	}
+	return false
 }
 
 // NormalizeGateHost returns the canonical host form used by the federation
