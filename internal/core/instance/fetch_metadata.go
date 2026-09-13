@@ -51,11 +51,17 @@ func (s *FetchMetadataService) SetClock(now func() time.Time) {
 }
 
 // nodeinfoDiscovery is the JSON shape of /.well-known/nodeinfo.
+// nodeinfoLink is one entry of the discovery document's link list.
+//
+// **名前を付けてある。** href の検証をテストから直接叩けるようにするため
+// (無名 struct だとテスト側で同じ形を書き写すことになり、片方だけ変わる)。
+type nodeinfoLink struct {
+	Rel  string `json:"rel"`
+	Href string `json:"href"`
+}
+
 type nodeinfoDiscovery struct {
-	Links []struct {
-		Rel  string `json:"rel"`
-		Href string `json:"href"`
-	} `json:"links"`
+	Links []nodeinfoLink `json:"links"`
 }
 
 // nodeinfoDocument holds the nodeinfo 2.0/2.1 fields mk-go stores.
@@ -551,7 +557,7 @@ func (s *FetchMetadataService) fetchNodeinfo(host string) (*nodeinfoDocument, er
 	if err != nil {
 		return nil, err
 	}
-	href := selectNodeinfoHref(disc)
+	href := selectNodeinfoHref(disc, host)
 	if href == "" {
 		return nil, errors.New("no supported nodeinfo schema")
 	}
@@ -581,14 +587,45 @@ func (s *FetchMetadataService) fetchDocument(href string) (*nodeinfoDocument, er
 }
 
 // selectNodeinfoHref picks the highest-priority schema URL from the discovery
-// document. 未知の rel しか無い場合は空文字を返す。
-func selectNodeinfoHref(disc *nodeinfoDiscovery) string {
+// document, refusing links that point anywhere but the host we asked.
+// 未知の rel しか無い場合、および host 外を指す link しか無い場合は空文字を返す。
+//
+// **href をそのまま fetch しない。** discovery はリモートが返す JSON なので、
+// 任意の URL を指せる。到達先は SSRF-safe transport なので private IP へは
+// 行かないが、**任意の public host / 任意ポートへの GET リレー**は成立する。
+// しかも nodeinfo の取得は content-type を検査しないので、**返ってきた任意の
+// JSON が nodeinfo として instance 行へ書き戻される** (`software.name` /
+// `metadata.nodeName` / `nodeDescription` / `themeColor`)。
+func selectNodeinfoHref(disc *nodeinfoDiscovery, host string) string {
 	for _, want := range preferredRels {
 		for _, link := range disc.Links {
-			if link.Rel == want && link.Href != "" {
-				return link.Href
+			if link.Rel != want || link.Href == "" {
+				continue
 			}
+			if !nodeinfoHrefBelongsTo(link.Href, host) {
+				continue
+			}
+			return link.Href
 		}
 	}
 	return ""
+}
+
+// nodeinfoHrefBelongsTo reports whether href is an https URL on host.
+//
+// discovery は `https://<host>/.well-known/nodeinfo` から取っているので、
+// そこが指す文書も同じ host の https でなければならない。既定ポートの明記
+// (`:443`) だけは同じ host として扱う — Go の `net/url` はポートを剥がさない
+// ので、そうしないと正当な相手を落とす。
+func nodeinfoHrefBelongsTo(href, host string) bool {
+	u, err := url.Parse(href)
+	if err != nil || u.Scheme != "https" {
+		return false
+	}
+	return strings.EqualFold(trimDefaultHTTPSPort(u.Host), trimDefaultHTTPSPort(host))
+}
+
+func trimDefaultHTTPSPort(h string) string {
+	h = strings.ToLower(strings.TrimSpace(h))
+	return strings.TrimSuffix(h, ":443")
 }
