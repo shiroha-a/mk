@@ -1278,3 +1278,13 @@ func TestEmojiApplicationResetQuotaToleratesEmptyPeriod(t *testing.T) {
 	// 空の期間名はキーを作らない ("used" に潰れて他の窓を上書きするため)。
 	require.NotContains(t, info, "used")
 }
+
+// **操作者が取れないまま進めない (レビュー L3)。** 空のまま続けると
+// `resetById = ”` の行が残り、しかも `logModeration` は actor nil で黙って
+// return するので**監査ログが 1 件も残らない**。approve / reject と同じ扱い。
+func TestEmojiApplicationResetQuotaWithoutActorIs500(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"理由"}`, nil)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.Zero(t, rev.resetCalls, "操作者が取れないのにリセットを実行している")
+}

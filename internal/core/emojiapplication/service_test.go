@@ -1376,3 +1376,14 @@ func TestResetQuotaRejectsTooLongReason(t *testing.T) {
 	require.ErrorIs(t, err, ErrTooLong)
 	require.Len(t, resets.created, 1, "弾いたのに記録が残っている")
 }
+
+// **配線の述語を固定する (レビュー L2)。** これは起動時の自己診断
+// (`criticalWiring`) が読む値で、`return true` に潰れると「nil 相当の値を
+// 渡した構成」を実行時にも検出できなくなる (静的ゲートは `nil` リテラルしか
+// 見ない)。sibling の `HasPolicyProvider` と同じ扱い。
+func TestHasQuotaResetRepoReflectsWiring(t *testing.T) {
+	svc := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	require.False(t, svc.HasQuotaResetRepo(), "未配線なのに配線済みと報告している")
+	svc.SetQuotaResetRepo(&fakeResets{})
+	require.True(t, svc.HasQuotaResetRepo())
+}

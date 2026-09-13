@@ -323,8 +323,34 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// `nil` の `n` が一致して素通りした (実測)。
 	require.NotRegexpf(t, `SetQuotaResetRepo\(\s*nil`, src,
 		"%s が申請枠のリセットに nil を渡している。リセットが常に失敗する (#2962)", router)
-	require.Containsf(t, src, `emojiApplicationService.HasQuotaResetRepo()`,
+	// **ローカル変数の名前は固定しない (レビュー L7)。** `emojiApplicationService`
+	// を rename しただけで落ち、しかも診断が「自己診断していない」と事実と逆に
+	// なる。
+	require.Containsf(t, src, `.HasQuotaResetRepo()`,
 		"%s が申請枠のリセットの配線を起動時に自己診断していない (#2962)", router)
+
+	// **mk-go 独自の LogType には fork 側の見出しが要る (#2962 / レビュー L5)。**
+	// upstream の modlog は `i18n.ts._moderationLogTypes[log.type]` を引くだけで
+	// フォールバックを持たないので、キーが無いと**見出しが空欄の折りたたみ**が
+	// 並ぶ。1 度実測で踏んでおり、次に独自の型を足したときに同じことが起きる。
+	//
+	// 目印より下の定数を全部拾うので、型を足せば自動で対象になる。
+	logTypes := readFileString(t, filepath.Join("..", "core", "moderationlog", "types.go"))
+	marker := strings.Index(logTypes, "ここから下は upstream に無い")
+	require.GreaterOrEqualf(t, marker, 0,
+		"moderationlog に mk-go 独自の値の目印が無い (#2962)")
+	ownTypes := regexp.MustCompile(`LogType = "([A-Za-z0-9_]+)"`).
+		FindAllStringSubmatch(logTypes[marker:], -1)
+	require.NotEmptyf(t, ownTypes, "mk-go 独自の LogType が 1 つも拾えていない (#2962)")
+	for _, locale := range []string{"ja-JP.yml", "en-US.yml"} {
+		src := readFileString(t, filepath.Join(fe, "..", "..", "locales", locale))
+		section := src[strings.Index(src, "_moderationLogTypes:"):]
+		for _, m := range ownTypes {
+			require.Containsf(t, section[:min(len(section), 8000)], m[1]+":",
+				"%s の _moderationLogTypes に %s が無い。modlog の見出しが空欄になる (#2962)",
+				locale, m[1])
+		}
+	}
 
 	relatedSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.application-related.vue")))
 	require.NotContainsf(t, relatedSrc, "onMounted(",
@@ -428,7 +454,10 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		// **枠のリセット (#2962)。** locale キーは template にしか現れないので、
 		// 描画まで見たことになる (ref の宣言だけで満たされる needle にしない)。
 		"admin/emoji-application/reset-user-quota",
-		"resetQuotaTitle", "lastReset\"",
+		// **表示項目まで見る (レビュー L4)。** `lastReset"` だけだと
+		// `v-if="lastReset"` で満たされ、実行者と理由の表示を丸ごと消しても
+		// 通る (issue の表示要件 4 つのうち 2 つが固定されない)。
+		"resetQuotaTitle", "lastResetBy", "resetQuotaReason",
 		// **戻す枠が無いなら出さない。** 押しても何も変わらない操作を
 		// 「効いたように見える」形で出すことになり、監査ログだけが増える。
 		"canResetQuota(",

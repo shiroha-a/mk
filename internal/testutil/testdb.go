@@ -255,7 +255,7 @@ func projectRoot() string {
 // `tables can have at most 1600 columns` で落ちる。
 //
 // **再適用で実際に枠を食うのは `note` だけ** (実測。migration が作る 115 テーブル
-// 中 1 つ。`internal_repository` を数えると 114 だが、その 1 つはこの台帳自身)。
+// 中 1 つ。`internal_repository` を数えると 116 だが、その 1 つはこの台帳自身)。
 // `000033` が `ADD COLUMN IF NOT EXISTS` で足し `000036` が落とすため。`DROP
 // COLUMN` を含む migration は他に 3 本あるが、落とす列は `CREATE TABLE` 由来で
 // 再適用時は `IF NOT EXISTS` の no-op になるので枠を食わない。
