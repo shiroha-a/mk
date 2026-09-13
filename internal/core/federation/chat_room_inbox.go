@@ -102,10 +102,40 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 	}
 	roomID := extractChatRoomID(group.ID)
 
+	// **room の host を actor の host に縛る。** これが無いと、署名が通る任意の
+	// remote actor が **自分が管理していない host の room URI を名乗れる** —
+	// 具体的には (a) `https://<このインスタンス>/chat/rooms/{id}` を名乗って
+	// ローカルの room id 空間に行を作る、(b) 無関係な第三者インスタンスの URI を
+	// 名乗って、その instance の room として行を作る、の 2 つ。
+	//
+	// **id の先取り自体はこれでは塞げない。** `chat_room` は room id だけで
+	// keying しており host 列が無いので、攻撃者が **自分の host で** 好きな id の
+	// room を作れば、同じ id を持つ正規の remote room の Invite は
+	// EnsureRoomViaAP の owner mismatch で恒久的に drop される。そちらを直すには
+	// host 列 (または host 込みのキー) を足す migration が要る。
+	//
+	// 比較は actor が申告する値の host 検証と同じ `sameDeliveryHost`
+	// (punycode + 非既定 port。`www.` は同一視しない)。inbox 側も activity.id の
+	// host を actor に縛っており (#1779、queue/processors/inbox.go の
+	// authorizeActor)、判断をそこに揃える。恒久的な条件なので retry させない。
+	if !sameDeliveryHost(group.ID, act.Actor) {
+		slog.Warn("chat room invite: group id host does not match actor host",
+			"actor", act.Actor, "group", group.ID)
+		return ErrUnsupportedActivity
+	}
+
 	// owner (= inviter) は activity の actor。room copy の owner として保存する。
 	owner, err := p.resolver.ResolveActor(act.Actor)
 	if err != nil {
 		return err
+	}
+	// local actor 名義の Invite は loopback / なりすまし。room copy の owner が
+	// local user になると「作った覚えのない room」がローカル利用者の名前で生える。
+	// group message 経路 (handleChatRoomMessageCreate の sender.IsLocal) と判断を
+	// 揃える。host 一致だけでは通ってしまう (local actor + local room URI)。
+	if owner == nil || owner.IsLocal() {
+		slog.Warn("chat room invite: actor is local (loopback?)", "actor", act.Actor)
+		return ErrUnsupportedActivity
 	}
 
 	// target = 招待された local user。Invite の `target` フィールドから読む。
@@ -143,6 +173,16 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 		return fmt.Errorf("chat room invite: ensure room: %w", err)
 	}
 	if err := p.chatRoomReceiver.CreateInvitationViaAP(roomID, invitee.ID); err != nil {
+		// block されている / room が定員 / room が消えた、はいずれも retry しても
+		// 解決しない条件なので drop する。それ以外 (DB 一過性エラー等) は
+		// retryable のまま伝播させる。
+		if errors.Is(err, corechat.ErrChatBlocked) ||
+			errors.Is(err, corechat.ErrRoomFull) ||
+			errors.Is(err, corechat.ErrNotFound) ||
+			errors.Is(err, corechat.ErrInvalidTarget) {
+			slog.Warn("chat room invite: invitation rejected", "roomID", roomID, "err", err)
+			return ErrUnsupportedActivity
+		}
 		return fmt.Errorf("chat room invite: create invitation: %w", err)
 	}
 	return nil
