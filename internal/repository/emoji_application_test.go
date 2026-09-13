@@ -1597,3 +1597,27 @@ func TestEmojiApplicationRepository_QuotaReset_DoesNotClearPendingLimit(t *testi
 	require.ErrorAs(t, err, &pe, "リセットで審査待ちの上限まで解除されている")
 	require.Equal(t, 2, pe.Used)
 }
+
+// **同時刻のリセットでも「最後の 1 件」が決まること (レビュー L3)。**
+// tie-break が無いとプラン依存になり、**実行者と理由が入れ替わって見える**
+// (境界の値は同じなので枠の計算は変わらず、画面以外では気付けない)。
+func TestEmojiApplicationQuotaResetRepository_TieBreak(t *testing.T) {
+	cleanupQuotaResets(t)
+	defer cleanupQuotaResets(t)
+	createTestUser(t, "ea_g7")
+	repo := NewEmojiApplicationQuotaResetRepository(testDB)
+	at := time.Now().Truncate(time.Millisecond)
+
+	require.NoError(t, repo.Create(&model.EmojiApplicationQuotaReset{
+		ID: "zzA", UserID: "ea_g7", ResetByID: "m1", Reason: "先に入れた", CreatedAt: at,
+	}))
+	require.NoError(t, repo.Create(&model.EmojiApplicationQuotaReset{
+		ID: "zzB", UserID: "ea_g7", ResetByID: "m2", Reason: "後に入れた", CreatedAt: at,
+	}))
+
+	got, err := repo.LatestByUser("ea_g7")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "zzB", got.ID, "同時刻のリセットで最後の 1 件が決まっていない")
+	require.Equal(t, "m2", got.ResetByID, "実行者が入れ替わって見える")
+}

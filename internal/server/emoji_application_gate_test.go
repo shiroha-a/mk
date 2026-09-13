@@ -321,7 +321,10 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		"%s が申請枠のリセットを配線していない (#2962)", router)
 	// **`nil` を明示的に弾く。** 「識別子が続くこと」だけを見る形にしたら
 	// `nil` の `n` が一致して素通りした (実測)。
-	require.NotRegexpf(t, `SetQuotaResetRepo\(\s*nil`, src,
+	// **`nil` そのものだけを弾く (レビュー L6)。** 語境界が無いと
+	// `SetQuotaResetRepo(nilSafeRepo)` のような正当な識別子でも落ち、
+	// 診断が「nil を渡している」と事実と逆になる。
+	require.NotRegexpf(t, `SetQuotaResetRepo\(\s*nil\s*\)`, src,
 		"%s が申請枠のリセットに nil を渡している。リセットが常に失敗する (#2962)", router)
 	// **ローカル変数の名前は固定しない (レビュー L7)。** `emojiApplicationService`
 	// を rename しただけで落ち、しかも診断が「自己診断していない」と事実と逆に
@@ -335,6 +338,18 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// 並ぶ。1 度実測で踏んでおり、次に独自の型を足したときに同じことが起きる。
 	//
 	// 目印より下の定数を全部拾うので、型を足せば自動で対象になる。
+	// **理由の上限が列の幅と一致すること (レビュー L7)。** 3 箇所 (migration の
+	// `varchar`、Go の定数、ダイアログの `maxLength`) に散っていて、どれか 1 つ
+	// だけ動かすと「打ち終わってから 400」か「500 が返って何度やっても通らない」
+	// のどちらかになる。
+	resetSQL := readFileString(t, filepath.Join("..", "..", "migration",
+		"000089_emoji_application_quota_reset.up.sql"))
+	col := regexp.MustCompile(`"reason" varchar\((\d+)\)`).FindStringSubmatch(resetSQL)
+	require.Lenf(t, col, 2, "migration から reason の列幅を読めない (#2962)")
+	svcSrc := readFileString(t, filepath.Join("..", "core", "emojiapplication", "service.go"))
+	require.Containsf(t, svcSrc, "quotaResetReasonMaxLen = "+col[1],
+		"理由の上限が列の幅 (%s) と違う。超えると 500 が返り、画面は再試行を促すが"+
+			"何度やっても通らない (#2962)", col[1])
 	logTypes := readFileString(t, filepath.Join("..", "core", "moderationlog", "types.go"))
 	marker := strings.Index(logTypes, "ここから下は upstream に無い")
 	require.GreaterOrEqualf(t, marker, 0,
@@ -594,8 +609,26 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// **ボタン自身が出し分けを持つこと。** 節の条件に `canResetQuota` があるだけ
 	// だと、ボタンから条件を外しても通る (実測) — 戻す枠が無いのに押せる状態は、
 	// 押しても何も変わらない操作を「効いたように見える」形で出すことになる。
-	require.Regexpf(t, `<MkButton[^>]*v-if="[^"]*canResetQuota`, userApps,
-		"戻す枠が無くてもリセットのボタンが出る (#2962)")
+	//
+	// **同じタグで見る (レビュー L4)。** 「どこかの MkButton が持っている」だと、
+	// 条件を集計の再試行ボタンへ移すだけで通る — そのとき (a) 戻す枠が無くても
+	// リセットが押せ、(b) 全部無制限のときに取得失敗からの唯一の復旧導線が消える。
+	resetButton := false
+	for _, tag := range regexp.MustCompile(`<MkButton[^>]*>`).FindAllString(userApps, -1) {
+		if strings.Contains(tag, "canResetQuota") && strings.Contains(tag, `@click="`) &&
+			strings.Contains(tag, "resetQuota") && !strings.Contains(tag, "fetchSummary") {
+			resetButton = true
+		}
+	}
+	require.Truef(t, resetButton,
+		"戻す枠が無くてもリセットのボタンが出る (出し分けが別のボタンに付いていないか) (#2962)")
+	// **節の条件も見る (レビュー L5)。** 裸の `<FormSection>` に変えると、
+	// 集計の取得に失敗しているときに「状況を確認できませんでした」の隣で
+	// 「最後のリセット: リセットされたことはありません」と断言する。
+	require.Regexpf(t, `<FormSection[^>]*v-if="[^"]*canResetQuota`, userApps,
+		"リセットの節が集計の取得失敗を見ていない (#2962)")
+	require.Containsf(t, userApps, "maxLength: "+col[1],
+		"リセットの理由の入力に列の幅 (%s) と同じ上限が付いていない (#2962)", col[1])
 	for _, want := range []string{
 		"admin/emoji-application/related",
 		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは

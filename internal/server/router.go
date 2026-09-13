@@ -3107,7 +3107,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 申請枠の手動リセット (#2962)。**未配線ならリセットは 500 で失敗する**
 	// (`ErrQuotaResetUnavailable`) ので、戻したつもりで戻っていない状態にはならない。
 	// ただし既存のリセットも読めなくなる = 過去に戻した枠が再び満杯に見えるので、
-	// 配線の有無は静的ゲート (`emoji_application_gate_test.go`) で見る。
+	// 配線の有無は静的ゲート (`emoji_application_gate_test.go`) と**起動時の
+	// 自己診断 (`criticalWiring`) の両方**で見る。**片方では足りない** — 静的
+	// ゲートは `nil` リテラルしか見ないので変数経由で渡す形を素通りし、自己診断は
+	// 呼び出しを消した構成を起動するまで気付けない。
 	emojiApplicationService.SetQuotaResetRepo(
 		repository.NewEmojiApplicationQuotaResetRepository(s.db))
 	emojiApplicationHandler := apiemojiapplications.NewHandler(
