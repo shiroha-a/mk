@@ -1005,6 +1005,18 @@ func TestEmojiApplicationRepository_FindRelated_NullHashDoesNotMatch(t *testing.
 	got, err = repo.FindRelated(cur, 10, "")
 	require.NoError(t, err)
 	require.Empty(t, got, "own の申請が空のリモート元と一致している")
+
+	// **名前も同じ扱い (レビュー R2-Low1)。** `Service.Create` が空名を弾くので
+	// 現状は到達しないが、ガードを外しても落ちないままだと「3 条件を非対称に
+	// しない」という意図が検証されない。空名同士が一致すると、名前を持たない
+	// 行がまとめて「関連する過去の申請」として並ぶ。
+	require.NoError(t, testDB.Model(cur).Update("name", "").Error)
+	cur.Name = ""
+	seedRelated(t, "ea_r4nam", "ea_r4", "", model.EmojiApplicationRejected, nil, nil, nil, now.Add(-4*time.Hour))
+
+	got, err = repo.FindRelated(cur, 10, "")
+	require.NoError(t, err)
+	require.Empty(t, got, "空の名前同士が一致している")
 }
 
 // ページング。**id の降順で切る** — createdAt で切ると同時刻の行を取りこぼす。

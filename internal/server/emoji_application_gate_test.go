@@ -308,6 +308,30 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	require.NotContainsf(t, relatedSrc, "onMounted(",
 		"関連履歴を onMounted で取っている。審査待ちタブは全行が開いているので "+
 			"limit 50 のときに 50 本が同時に飛ぶ (#2960)")
+	// **綴りを 1 つ塞ぐだけでは足りない (レビュー R2-L2)。** `v-appear` を
+	// 残したまま `<script setup>` の直下に `void fetchPage();` を 1 行足すと、
+	// onMounted と同じ「全行が一斉に飛ぶ」状態に戻るのに、ゲートも vitest も
+	// 緑のままだった (実測)。setup 直下は列 0 なので、そこからの呼び出しだけを
+	// 落とす (関数の中からの呼び出しはインデントされているので当たらない)。
+	require.NotRegexpf(t, `(?m)^(?:void\s+)?fetchPage\(`, relatedSrc,
+		"関連履歴を setup 直下で取っている。可視になる前に全行が飛ぶ (#2960)")
+	// **取得の失敗を握り潰さない (script 側)。** ref の名前は固定しない —
+	// リネームで落ちると診断が事実と逆になる (レビュー R2-L1)。catch の中で
+	// 何らかのフラグを立てていることだけを見る。
+	require.Regexpf(t, `(?s)catch\s*(?:\([^)]*\))?\s*\{[^}]*=\s*true`, relatedSrc,
+		"関連履歴の取得失敗を握り潰している。何も出さないと「履歴が無い」と読める (#2960)")
+	// **初回の取得に失敗したときの再試行手段は MkFolder の外に置く
+	// (レビュー R2-M1 / R2-M2)。** 初回失敗では `counts` が null のままなので
+	// 折りたたみ自体が描画されず、中に置いたボタンは存在しない。`MkFolder` は
+	// 一度開いた body を閉じても unmount しないため開き直しても `loaded` は
+	// true のままで、**復旧手段がページのリロードだけ**になる。いちばん
+	// 起きやすい「初回の通信失敗」がそれ。
+	outsideFolder := relatedSrc
+	if i := strings.Index(relatedSrc, "<MkFolder"); i >= 0 {
+		outsideFolder = relatedSrc[:i]
+	}
+	require.Containsf(t, outsideFolder, "<MkButton",
+		"初回の取得に失敗したときに再試行できない。MkFolder の中のボタンは描画されない (#2960)")
 	for _, want := range []string{
 		"admin/emoji-application/related",
 		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは
@@ -321,16 +345,22 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		"relatedNote",
 		// **描画まで見る。** 型注釈の `matchedBy: string[]` だけでも
 		// `Contains("matchedBy")` は満たされるので、バッジの v-for を消しても
-		// 通ってしまう (実測)。
-		"matchedByLabel(m)",
+		// 通ってしまう (実測)。**括弧まで**で足りる — 型注釈にも import 行にも
+		// 一致しない。v-for の変数名まで固定すると、リネームという正当な変更で
+		// 落ちたうえ診断が事実と逆になる (レビュー R2-L1)。
+		"matchedByLabel(",
 		// **却下理由が本体。** これが無いと「過去に却下された」しか分からない。
-		"item.rejectReason",
+		// 先頭のドットを要求する — 型宣言の `rejectReason?: string;` では
+		// 満たされず、ループ変数のリネームでは落ちない。
+		".rejectReason",
 		// **リモートのサムネイルは media proxy を通す。** 生 URL は
 		// `img-src 'self'` を enforce している構成で黙ってブロックされる
 		// (#2957 と同じ)。
 		"relatedPreviewUrl(",
-		// 取得失敗を握り潰さない (script 側)。
-		"failed.value = true",
+		// **「確認できなかった」と「消された」を同じ文面に丸めない
+		// (レビュー R2-L4)。** 確定していないものを「画像がありません」と
+		// 言い切ると、実際には残っている申請を却下しうる。
+		"relatedImageMissingLabel(",
 		// 判断を誤らせない status 表示と、追い読みのカーソル。
 		"relatedStatusLabel(", "relatedNextCursor(",
 	} {

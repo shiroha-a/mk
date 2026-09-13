@@ -364,13 +364,17 @@ type stubAppsRepo struct {
 	// #2960 の関連履歴。
 	related       []repository.RelatedApplication
 	relatedCounts repository.RelatedCounts
-	relatedErr    error
-	findErr       error
-	lastLimit2    int
-	lastUntil     string
-	rows          []model.EmojiApplication
-	lastFilter    string
-	lastLimit     int
+	// **count と list で別々に持つ。** 1 つの err を両方から返すと、
+	// どちらの分岐を消しても「もう片方の err」で 500 になり、
+	// 2 つのテストが揃って空虚になる (レビュー R2-H1 で実測)。
+	countErr   error
+	listErr    error
+	findErr    error
+	lastLimit2 int
+	lastUntil  string
+	rows       []model.EmojiApplication
+	lastFilter string
+	lastLimit  int
 }
 
 func (s *stubAppsRepo) Create(*model.EmojiApplication) error { return nil }
@@ -379,10 +383,10 @@ func (s *stubAppsRepo) CreateWithQuota(*model.EmojiApplication, repository.Quota
 }
 func (s *stubAppsRepo) FindRelated(_ *model.EmojiApplication, limit int, untilID string) ([]repository.RelatedApplication, error) {
 	s.lastLimit2, s.lastUntil = limit, untilID
-	return s.related, s.relatedErr
+	return s.related, s.listErr
 }
 func (s *stubAppsRepo) CountRelated(*model.EmojiApplication) (repository.RelatedCounts, error) {
-	return s.relatedCounts, s.relatedErr
+	return s.relatedCounts, s.countErr
 }
 
 func (s *stubAppsRepo) FindByID(id string) (*model.EmojiApplication, error) {
@@ -839,8 +843,8 @@ func TestEmojiApplicationRelatedClampsLimit(t *testing.T) {
 func TestEmojiApplicationRelatedSurfacesCountFailure(t *testing.T) {
 	h := &apiadmin.Handler{}
 	h.SetEmojiApplicationRepo(&stubAppsRepo{
-		rows:       []model.EmojiApplication{{ID: "a1", Name: "s", Status: model.EmojiApplicationPending}},
-		relatedErr: gorm.ErrInvalidDB,
+		rows:     []model.EmojiApplication{{ID: "a1", Name: "s", Status: model.EmojiApplicationPending}},
+		countErr: gorm.ErrInvalidDB,
 	})
 	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
@@ -853,7 +857,7 @@ func TestEmojiApplicationRelatedSurfacesListFailure(t *testing.T) {
 	h := &apiadmin.Handler{}
 	h.SetEmojiApplicationRepo(&stubAppsRepo{
 		rows:          []model.EmojiApplication{{ID: "a1", Name: "s", Status: model.EmojiApplicationPending}},
-		relatedErr:    gorm.ErrInvalidDB,
+		listErr:       gorm.ErrInvalidDB,
 		relatedCounts: repository.RelatedCounts{Total: 3},
 	})
 	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
