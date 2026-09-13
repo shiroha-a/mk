@@ -1215,9 +1215,13 @@ func TestEmojiApplicationRepository_ListByUserFiltered_Query(t *testing.T) {
 	require.Equal(t, []string{"ea_f2a"}, ids("", "foo_bar"), "_ がワイルドカードとして効いている")
 	// `%` も同じ。全件が返ってはいけない。
 	require.Empty(t, ids("", "%"), "% で全件返っている")
-	// バックスラッシュを入れても壊れない (エスケープの二重適用で 0 件になったり
-	// SQL が落ちたりしない)。
-	require.Empty(t, ids("", `\`))
+	// **バックスラッシュもエスケープすること (レビュー M1)。** seed に `\` を
+	// 含む行を入れて実際に当てる — 含まない行しか無いと、エスケープを外しても
+	// 0 件のままで通ってしまう (空虚なアサーションだった)。
+	seedRelated(t, "ea_f2d", "ea_f2", `a\_b`, model.EmojiApplicationRejected, nil, nil, nil, now.Add(-4*time.Hour))
+	seedRelated(t, "ea_f2e", "ea_f2", `a\Xb`, model.EmojiApplicationRejected, nil, nil, nil, now.Add(-5*time.Hour))
+	require.Equal(t, []string{"ea_f2d"}, ids("", `a\_b`),
+		`\ をエスケープしていないので _ がワイルドカードとして効いている`)
 	// 普通の部分一致は効く。
 	require.ElementsMatch(t, []string{"ea_f2a", "ea_f2b"}, ids("", "bar"))
 	// 大文字小文字を区別しない (ILIKE)。
@@ -1306,17 +1310,17 @@ func TestEmojiApplicationRepository_QuotaUsage_MatchesEnforcement(t *testing.T) 
 	seedApplicationAt(t, "ea_f5b", "ea_f5", "b", model.EmojiApplicationCanceled, now.Add(-3*time.Hour))
 	seedApplicationAt(t, "ea_f5c", "ea_f5", "c", model.EmojiApplicationApproved, now.Add(-40*time.Hour))
 
-	usage, err := repo.QuotaUsage("ea_f5", windows, now)
+	usage, err := repo.QuotaUsage("ea_f5", QuotaLimits{Windows: windows}, now)
 	require.NoError(t, err)
-	require.Len(t, usage, 3)
-	require.Equal(t, 2, usage[0].Used, "day の使用数が合わない")
-	require.Equal(t, 3, usage[1].Used, "week の使用数が合わない")
-	require.Equal(t, 3, usage[2].Used, "上限なしの窓でも件数は数える")
+	require.Len(t, usage.Windows, 3)
+	require.Equal(t, 2, usage.Windows[0].Used, "day の使用数が合わない")
+	require.Equal(t, 3, usage.Windows[1].Used, "week の使用数が合わない")
+	require.Equal(t, 3, usage.Windows[2].Used, "上限なしの窓でも件数は数える")
 
 	// 満杯の窓にだけ RetryAt が入る。
-	require.False(t, usage[0].RetryAt.IsZero(), "満杯の窓に次回可能時刻が無い")
-	require.True(t, usage[1].RetryAt.IsZero(), "空きのある窓に次回可能時刻が入っている")
-	require.True(t, usage[2].RetryAt.IsZero(), "上限なしの窓に次回可能時刻が入っている")
+	require.False(t, usage.Windows[0].RetryAt.IsZero(), "満杯の窓に次回可能時刻が無い")
+	require.True(t, usage.Windows[1].RetryAt.IsZero(), "空きのある窓に次回可能時刻が入っている")
+	require.True(t, usage.Windows[2].RetryAt.IsZero(), "上限なしの窓に次回可能時刻が入っている")
 
 	// **作成側が返す時刻と一致すること。** ここが噛み合っていないと、画面の
 	// 案内どおりに再申請しても弾かれる。
@@ -1324,7 +1328,61 @@ func TestEmojiApplicationRepository_QuotaUsage_MatchesEnforcement(t *testing.T) 
 	var qe *QuotaExceededError
 	require.ErrorAs(t, err, &qe, "満杯なのに作成できている")
 	require.Equal(t, "day", qe.Window.Name)
-	require.Equal(t, usage[0].Used, qe.Used, "画面の使用数と実際の判定がずれている")
-	require.WithinDuration(t, usage[0].RetryAt, qe.RetryAt, 0,
+	require.Equal(t, usage.Windows[0].Used, qe.Used, "画面の使用数と実際の判定がずれている")
+	require.WithinDuration(t, usage.Windows[0].RetryAt, qe.RetryAt, 0,
 		"画面の次回可能時刻と実際の判定がずれている")
+}
+
+// **審査待ちの上限も読み取り側に効くこと (レビュー H1)。** 窓と審査待ちの
+// 両方が満杯なら、窓が空く時刻に叩いてもまだ通らない。作成側だけがこの規則を
+// 持っていたとき、読み取り側は**その時刻でも通らない時刻を画面に広告して
+// いた** (実測)。あわせて、窓に空きがあっても審査待ちが満杯なら申請は通らない
+// ので、その件数も返さないと画面が「空きあり」と描いてしまう。
+func TestEmojiApplicationRepository_QuotaUsage_PendingLimit(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_f6")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	seedApplicationAt(t, "ea_f6a", "ea_f6", "a", model.EmojiApplicationPending, now.Add(-time.Hour))
+	seedApplicationAt(t, "ea_f6b", "ea_f6", "b", model.EmojiApplicationPending, now.Add(-2*time.Hour))
+
+	day := QuotaWindow{Name: "day", Duration: 24 * time.Hour, Max: 2}
+
+	// (1) 窓が満杯 + 審査待ちも満杯 → 時刻を出さない (作成側と同じ)。
+	both, err := repo.QuotaUsage("ea_f6", QuotaLimits{Windows: []QuotaWindow{day}, MaxPending: 2}, now)
+	require.NoError(t, err)
+	require.True(t, both.PendingFull)
+	require.Equal(t, 2, both.Pending)
+	require.Equal(t, 2, both.MaxPending)
+	require.True(t, both.Windows[0].RetryAt.IsZero(),
+		"審査待ちも満杯なのに、その時刻に叩いても通らない時刻を広告している")
+
+	createErr := repo.CreateWithQuota(quotaApp("ea_f6new", "ea_f6", "new", now),
+		QuotaLimits{Windows: []QuotaWindow{day}, MaxPending: 2})
+	var qe *QuotaExceededError
+	require.ErrorAs(t, createErr, &qe)
+	require.True(t, qe.RetryAt.IsZero(), "作成側と読み取り側で時刻の扱いが違う")
+
+	// (2) 窓に空きがあっても審査待ちが満杯なら申請は通らない。件数を返さないと
+	// 画面は「空きあり」と描く。
+	roomy, err := repo.QuotaUsage("ea_f6",
+		QuotaLimits{Windows: []QuotaWindow{{Name: "day", Duration: 24 * time.Hour, Max: 10}}, MaxPending: 2}, now)
+	require.NoError(t, err)
+	require.True(t, roomy.PendingFull, "審査待ちが満杯なのに空きありとして返っている")
+	require.Equal(t, 2, roomy.Pending)
+	require.True(t, roomy.Windows[0].RetryAt.IsZero(), "空きのある窓に時刻が入っている")
+
+	pendErr := repo.CreateWithQuota(quotaApp("ea_f6n2", "ea_f6", "n2", now),
+		QuotaLimits{Windows: []QuotaWindow{{Name: "day", Duration: 24 * time.Hour, Max: 10}}, MaxPending: 2})
+	var pe *PendingLimitExceededError
+	require.ErrorAs(t, pendErr, &pe, "実際の申請は審査待ちの上限で弾かれるのに、画面は空きありと描いている")
+
+	// (3) 上限なしなら満杯にならない。
+	none, err := repo.QuotaUsage("ea_f6", QuotaLimits{Windows: []QuotaWindow{day}}, now)
+	require.NoError(t, err)
+	require.False(t, none.PendingFull)
+	require.Equal(t, 0, none.MaxPending)
+	require.False(t, none.Windows[0].RetryAt.IsZero(), "審査待ちが無制限なら窓の時刻はそのまま")
 }

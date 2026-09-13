@@ -90,13 +90,13 @@ type EmojiApplicationRepository interface {
 	ListByUserFiltered(userID, status, query string, limit int, untilID string) ([]model.EmojiApplication, error)
 	// CountByUserStatus breaks one user's applications down by status (#2961).
 	CountByUserStatus(userID string) (StatusCounts, error)
-	// QuotaUsage reports how much of each rolling window the user has used
-	// (#2961).
+	// QuotaUsage reports how much of every per-user limit is in use (#2961).
 	//
 	// **作成側と同じ計算を使う。** 別の SQL で組み直すと、画面が「空きあり」と
-	// 言っているのに実際は弾かれる、という形でずれる。満杯の窓には
-	// `RetryAt` が入る。
-	QuotaUsage(userID string, windows []QuotaWindow, now time.Time) ([]QuotaWindowUsage, error)
+	// 言っているのに実際は弾かれる、という形でずれる。満杯の窓には `RetryAt`
+	// が入るが、**審査待ちも満杯なら時刻は落ちる** — その時刻に叩いてもまだ
+	// 通らないため (#2977 と同じ規則を共有する)。
+	QuotaUsage(userID string, limits QuotaLimits, now time.Time) (QuotaUsage, error)
 }
 
 // RelatedApplication is one past application plus why it matched (#2960).
@@ -231,6 +231,21 @@ func (r *emojiApplicationRepository) Create(app *model.EmojiApplication) error {
 // features that lock on the same user id.
 const quotaLockNamespace = 2958
 
+// QuotaUsage is the read-side view of every per-user limit (#2961).
+type QuotaUsage struct {
+	Windows []QuotaWindowUsage
+	// Worst は満杯の窓のうちいちばん遅く空くもの。満杯が無ければ nil。
+	// **Windows の要素を指す**ので、`RetryAt` の抑制は両方に効く。
+	Worst *QuotaWindowUsage
+	// Pending は審査待ちの件数、MaxPending はその上限 (0 は無制限)。
+	//
+	// **窓と一緒に返す (レビュー H1)。** これを捨てると、審査待ちが満杯なのに
+	// 画面が「24時間: 2 / 10 (空きあり)」と描き、実際の申請は 400 で弾かれる。
+	Pending     int
+	MaxPending  int
+	PendingFull bool
+}
+
 // QuotaWindowUsage is one rolling window's current usage (#2961).
 type QuotaWindowUsage struct {
 	Window QuotaWindow
@@ -238,6 +253,52 @@ type QuotaWindowUsage struct {
 	// RetryAt is when the window frees up. **満杯のときだけ入る** — ゼロ値は
 	// 「まだ空きがある」で、「時刻が分からない」ではない。
 	RetryAt time.Time
+}
+
+// evaluateQuotaLimits evaluates every per-user limit at once (#2961).
+//
+// **`RetryAt` を落とす規則までここに置く (レビュー H1)。** 窓と審査待ちの
+// 両方が満杯なら、窓が空く時刻に叩いてもまだ通らない。作成側だけがこの規則を
+// 持っていたとき、読み取り側は**その時刻でも通らない時刻を画面に広告して
+// いた** (実測)。「同じ計算を共有する」の対象は窓の件数だけではない。
+func evaluateQuotaLimits(tx *gorm.DB, userID string, limits QuotaLimits, now time.Time) (QuotaUsage, error) {
+	out := QuotaUsage{MaxPending: limits.MaxPending}
+	if limits.MaxPending > 0 {
+		var pending int64
+		if err := tx.Model(&model.EmojiApplication{}).
+			Where(`"userId" = ? AND "status" = ?`, userID, model.EmojiApplicationPending).
+			Count(&pending).Error; err != nil {
+			return QuotaUsage{}, err
+		}
+		out.Pending = int(pending)
+		out.PendingFull = pending >= int64(limits.MaxPending)
+	}
+
+	windows, err := evaluateQuotaWindows(tx, userID, limits.Windows, now)
+	if err != nil {
+		return QuotaUsage{}, err
+	}
+	// **満杯の窓のうち、いちばん遅く空くものを採る。** 申請が通るのは全部の窓に
+	// 空きができてからなので、最初に見つけたもので返すと早すぎる時刻になる
+	// (#2958 で実測 78 時間ずれた)。
+	for i := range windows {
+		if windows[i].RetryAt.IsZero() {
+			continue
+		}
+		if out.Worst == nil || windows[i].RetryAt.After(out.Worst.RetryAt) {
+			out.Worst = &windows[i]
+		}
+	}
+	if out.PendingFull {
+		// **時刻を出さない。** 審査待ちが空くのはモデレーターが処理したときで
+		// 予告できないので、嘘の時刻を広告するより「いつ空くか分からない」と
+		// 伝えるほうが正確 (#2977)。
+		for i := range windows {
+			windows[i].RetryAt = time.Time{}
+		}
+	}
+	out.Windows = windows
+	return out, nil
 }
 
 // evaluateQuotaWindows counts each window and, for the full ones, works out when
@@ -333,51 +394,24 @@ func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication
 		if now.IsZero() {
 			now = time.Now()
 		}
-		// **審査待ちの件数は先に数えるが、返すかどうかは窓の結果で決める。**
-		// 両方満杯のときに審査待ちを返すと「取り下げれば出せる」と案内することに
-		// なるが、**期間上限は全ステータスを数えるので取り下げた行は枠を占有した
-		// まま戻らない** — 案内に従うと申請を 1 件失ったうえに枠も消費する。
-		var pending int64
-		if limits.MaxPending > 0 {
-			if err := tx.Model(&model.EmojiApplication{}).
-				Where(`"userId" = ? AND "status" = ?`, app.UserID, model.EmojiApplicationPending).
-				Count(&pending).Error; err != nil {
-				return err
-			}
-		}
-		pendingFull := limits.MaxPending > 0 && pending >= int64(limits.MaxPending)
-
-		// **満杯の窓を全部評価する。** 最初に見つけたもので返すと、2 つ以上が
-		// 同時に満杯のときに早すぎる時刻を案内することになる (実測で 78 時間
-		// ずれた)。申請が通るのは全部の窓に空きができてからなので、いちばん
-		// 遅く空くものを返す。行は減る一方なので、そこまで待てば他の窓にも
-		// 空きがある。
-		usages, err := evaluateQuotaWindows(tx, app.UserID, active, now)
+		// **審査待ちの件数と窓を 1 か所で評価する。** 両方満杯のときに審査待ちを
+		// 返すと「取り下げれば出せる」と案内することになるが、**期間上限は全
+		// ステータスを数えるので取り下げた行は枠を占有したまま戻らない** —
+		// 案内に従うと申請を 1 件失ったうえに枠も消費する。だから満杯の窓が
+		// あればそちらを優先し、時刻だけを落とす。
+		usage, err := evaluateQuotaLimits(tx, app.UserID, QuotaLimits{Windows: active, MaxPending: limits.MaxPending}, now)
 		if err != nil {
 			return err
 		}
-		var worst *QuotaExceededError
-		for _, u := range usages {
-			if u.RetryAt.IsZero() {
-				// 満杯でない窓。`RetryAt` が入るのは満杯のときだけ。
-				continue
-			}
-			if worst == nil || u.RetryAt.After(worst.RetryAt) {
-				worst = &QuotaExceededError{Window: u.Window, Used: u.Used, RetryAt: u.RetryAt}
+		if usage.Worst != nil {
+			return &QuotaExceededError{
+				Window:  usage.Worst.Window,
+				Used:    usage.Worst.Used,
+				RetryAt: usage.Worst.RetryAt,
 			}
 		}
-		if worst != nil {
-			if pendingFull {
-				// **時刻を出さない。** `RetryAt` の契約は「申請が通るようになる
-				// 時刻」だが、審査待ちも満杯ならその時刻でも通らない。審査待ちが
-				// 空くのはモデレーターが処理したときで予告できないので、嘘の時刻を
-				// 広告するより「いつ空くか分からない」と伝えるほうが正確。
-				worst.RetryAt = time.Time{}
-			}
-			return worst
-		}
-		if pendingFull {
-			return &PendingLimitExceededError{Used: int(pending), Limit: limits.MaxPending}
+		if usage.PendingFull {
+			return &PendingLimitExceededError{Used: usage.Pending, Limit: limits.MaxPending}
 		}
 		if err := tx.Create(app).Error; err != nil {
 			var pgErr *pgconn.PgError
@@ -568,15 +602,6 @@ func foldStatusCounts(rows []statusCountRow) StatusCounts {
 	return out
 }
 
-// likeEscaper neutralises LIKE metacharacters in a user-supplied search string.
-//
-// **バックスラッシュを先に置く。** strings.Replacer は左から順に 1 回ずつ当てる
-// ので後から二重に置換されることは無いが、順序を書き換えたときに気付けるよう
-// 意図を残す。PostgreSQL の LIKE の既定エスケープ文字はバックスラッシュなので
-// `ESCAPE` 句は付けない (句をリテラルで書くと standard_conforming_strings に
-// 依存する)。
-var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
-
 func (r *emojiApplicationRepository) ListByUserFiltered(userID, status, query string, limit int, untilID string) ([]model.EmojiApplication, error) {
 	q := r.db.Model(&model.EmojiApplication{}).Where(`"userId" = ?`, userID)
 	switch status {
@@ -590,7 +615,11 @@ func (r *emojiApplicationRepository) ListByUserFiltered(userID, status, query st
 		return []model.EmojiApplication{}, nil
 	}
 	if term := strings.TrimSpace(query); term != "" {
-		like := "%" + likeEscaper.Replace(term) + "%"
+		// **エスケープは既存の実装を使う (レビュー M1)。** この
+		// パッケージには `escapeSQLLikePattern` が既にあり、`\` を含む
+		// 表テストも持っている。3 つ目を書くと、片方だけ直したときに
+		// 「ここだけエスケープが甘い」が残る。
+		like := "%" + escapeSQLLikePattern(term) + "%"
 		// **remoteHost / remoteName は NULL を取りうる。** ILIKE は NULL に
 		// 対して NULL を返すので OR の中では偽として扱われ、own の申請が
 		// 検索から落ちることはない (名前側で拾う)。
@@ -612,11 +641,11 @@ func (r *emojiApplicationRepository) CountByUserStatus(userID string) (StatusCou
 	return foldStatusCounts(rows), nil
 }
 
-func (r *emojiApplicationRepository) QuotaUsage(userID string, windows []QuotaWindow, now time.Time) ([]QuotaWindowUsage, error) {
+func (r *emojiApplicationRepository) QuotaUsage(userID string, limits QuotaLimits, now time.Time) (QuotaUsage, error) {
 	if now.IsZero() {
 		now = time.Now()
 	}
 	// **ロックを取らない。** 数えるだけなので、囲うと画面を開いただけで
 	// 申請の直列化 (pg_advisory_xact_lock) に割り込む。
-	return evaluateQuotaWindows(r.db, userID, windows, now)
+	return evaluateQuotaLimits(r.db, userID, limits, now)
 }

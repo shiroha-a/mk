@@ -241,12 +241,12 @@ func (s *Service) quotaLimits(userID string) repository.QuotaLimits {
 	}
 	// 窓は狭い順に並べてある。**ただし repository 側は満杯のものを全部評価して
 	// いちばん遅く空くものを返す**ので、順序は結果を変えない (読みやすさのため)。
+	windows := defaultQuotaWindows()
+	for i := range windows {
+		windows[i].Max = policyMax(p, quotaWindowDefs[i].policyKey)
+	}
 	return repository.QuotaLimits{
-		Windows: []repository.QuotaWindow{
-			{Name: "day", Duration: 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerDay)},
-			{Name: "week", Duration: 7 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerWeek)},
-			{Name: "month", Duration: 30 * 24 * time.Hour, Max: policyMax(p, role.PolicyEmojiApplicationMaxPerMonth)},
-		},
+		Windows:    windows,
 		MaxPending: policyMax(p, role.PolicyEmojiApplicationMaxPending),
 	}
 }
@@ -257,6 +257,14 @@ type UserSummary struct {
 	// Windows は期間上限の使用状況。**上限なしの窓も落とさない** — 「無制限」
 	// であることも審査の材料なので、返さずに画面側で補うと 0 件と区別できない。
 	Windows []QuotaWindowUsage
+	// Pending / MaxPending は審査待ちの上限 (#2977) の使用状況。
+	//
+	// **窓だけでは足りない (レビュー H1)。** 審査待ちが満杯なら、期間の窓に
+	// 空きがあっても申請は 400 で弾かれる。これを出さないと画面は
+	// 「24時間: 2 / 10 (空きあり)」と描き、**実際には出せない人を出せると
+	// 案内する** — この機能が塞ごうとしている失敗形そのもの。
+	Pending    int
+	MaxPending int
 }
 
 // QuotaWindowUsage is one window's usage for the moderation screen (#2961).
@@ -287,12 +295,23 @@ func (s *Service) UserSummary(userID string) (UserSummary, error) {
 	if len(windows) == 0 {
 		windows = defaultQuotaWindows()
 	}
-	usage, err := s.apps.QuotaUsage(userID, windows, s.nowFunc())
+	usage, err := s.apps.QuotaUsage(userID, repository.QuotaLimits{
+		Windows: windows,
+		// **審査待ちの上限も渡す。** 渡さないと、両方満杯のときに
+		// repository が `RetryAt` を落とす規則が働かず、**その時刻に叩いても
+		// 通らない時刻**を画面に広告することになる (レビュー H1)。
+		MaxPending: limits.MaxPending,
+	}, s.nowFunc())
 	if err != nil {
 		return UserSummary{}, err
 	}
-	out := UserSummary{Counts: counts, Windows: make([]QuotaWindowUsage, 0, len(usage))}
-	for _, u := range usage {
+	out := UserSummary{
+		Counts:     counts,
+		Windows:    make([]QuotaWindowUsage, 0, len(usage.Windows)),
+		Pending:    usage.Pending,
+		MaxPending: usage.MaxPending,
+	}
+	for _, u := range usage.Windows {
 		out.Windows = append(out.Windows, QuotaWindowUsage{
 			Period:  u.Window.Name,
 			Used:    u.Used,
@@ -303,16 +322,28 @@ func (s *Service) UserSummary(userID string) (UserSummary, error) {
 	return out, nil
 }
 
-// defaultQuotaWindows is the window set used when no policy could be resolved.
+// quotaWindowDefs is the single definition of the rolling windows (#2958 /
+// #2961).
 //
-// **quotaLimits と同じ 3 つ。** 片方だけ足すと、policy が引けるときと引けない
-// ときで画面の行数が変わる。
+// **一覧を 2 つ持たない (レビュー L1)。** policy が引けるときと引けないときで
+// 別々に書いていたので、片方だけ足すと画面の行数や期間が食い違う。
+var quotaWindowDefs = []struct {
+	name      string
+	duration  time.Duration
+	policyKey string
+}{
+	{"day", 24 * time.Hour, role.PolicyEmojiApplicationMaxPerDay},
+	{"week", 7 * 24 * time.Hour, role.PolicyEmojiApplicationMaxPerWeek},
+	{"month", 30 * 24 * time.Hour, role.PolicyEmojiApplicationMaxPerMonth},
+}
+
+// defaultQuotaWindows returns the windows with no limit applied.
 func defaultQuotaWindows() []repository.QuotaWindow {
-	return []repository.QuotaWindow{
-		{Name: "day", Duration: 24 * time.Hour},
-		{Name: "week", Duration: 7 * 24 * time.Hour},
-		{Name: "month", Duration: 30 * 24 * time.Hour},
+	out := make([]repository.QuotaWindow, 0, len(quotaWindowDefs))
+	for _, d := range quotaWindowDefs {
+		out = append(out, repository.QuotaWindow{Name: d.name, Duration: d.duration})
 	}
+	return out
 }
 
 // policyMax reads one numeric quota policy (期間の窓と審査待ちの両方で使う)。

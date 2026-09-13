@@ -392,7 +392,7 @@ type stubAppsRepo struct {
 	byUserErr       error
 	userCounts      repository.StatusCounts
 	userCountsErr   error
-	usage           []repository.QuotaWindowUsage
+	usage           repository.QuotaUsage
 	usageErr        error
 	lastUserID      string
 	lastStatus      string
@@ -430,8 +430,8 @@ func (s *stubAppsRepo) CountByUserStatus(userID string) (repository.StatusCounts
 	return s.userCounts, s.userCountsErr
 }
 
-func (s *stubAppsRepo) QuotaUsage(userID string, windows []repository.QuotaWindow, _ time.Time) ([]repository.QuotaWindowUsage, error) {
-	s.lastUsageUserID, s.lastWindows = userID, windows
+func (s *stubAppsRepo) QuotaUsage(userID string, limits repository.QuotaLimits, _ time.Time) (repository.QuotaUsage, error) {
+	s.lastUsageUserID, s.lastWindows = userID, limits.Windows
 	return s.usage, s.usageErr
 }
 
@@ -968,6 +968,20 @@ func TestEmojiApplicationListByUserPassesFilters(t *testing.T) {
 	require.Equal(t, 30, repo.lastUserLimit, "limit がクランプされていない")
 	// status 未指定は全件 (repository 側が "" を全件として扱う)。
 	require.Equal(t, "", repo.lastStatus)
+
+	// **"all" も通ること (レビュー M2)。** 画面の既定値がこれなので、
+	// allowlist から落ちるとタブを開いた瞬間に 400 になり、履歴が丸ごと
+	// 出なくなる。未指定 ("") しか検査していないと気付けない。
+	rec := doPost(h.EmojiApplicationListByUser, `{"userId":"u1","status":"all"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code, "画面の既定値 (all) が弾かれている")
+	require.Equal(t, "all", repo.lastStatus)
+}
+
+// 未配線なら 500 (空の一覧を返して「申請なし」と描かない)。
+func TestEmojiApplicationListByUserWithoutRepoIs500(t *testing.T) {
+	h := &apiadmin.Handler{}
+	rec := doPost(h.EmojiApplicationListByUser, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 // **障害を「履歴なし」に化けさせない。** 0 件として描くと、実際には申請が
@@ -1012,7 +1026,9 @@ func TestEmojiApplicationUserSummaryRequiresUserID(t *testing.T) {
 func TestEmojiApplicationUserSummaryMarksUnlimited(t *testing.T) {
 	at := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
 	rev := &stubEmojiReviewer{summary: emojiapplication.UserSummary{
-		Counts: repository.StatusCounts{Total: 3, Rejected: 2, Pending: 1},
+		Counts:     repository.StatusCounts{Total: 3, Rejected: 2, Pending: 1},
+		Pending:    2,
+		MaxPending: 3,
 		Windows: []emojiapplication.QuotaWindowUsage{
 			{Period: "day", Used: 5, Limit: 5, RetryAt: at},
 			{Period: "week", Used: 8, Limit: 20},
@@ -1025,6 +1041,11 @@ func TestEmojiApplicationUserSummaryMarksUnlimited(t *testing.T) {
 
 	var body struct {
 		Counts  repository.StatusCounts `json:"counts"`
+		Pending struct {
+			Used      int  `json:"used"`
+			Limit     int  `json:"limit"`
+			Unlimited bool `json:"unlimited"`
+		} `json:"pending"`
 		Windows []struct {
 			Period    string `json:"period"`
 			Used      int    `json:"used"`
@@ -1041,6 +1062,11 @@ func TestEmojiApplicationUserSummaryMarksUnlimited(t *testing.T) {
 	require.True(t, body.Windows[2].Unlimited, "上限 0 が無制限として出ていない")
 	// **満杯の窓にだけ時刻。** 空きのある窓に出ると「今は出せない」と読める。
 	require.NotEmpty(t, body.Windows[0].RetryAt, "満杯の窓に次回可能時刻が無い")
+	// **審査待ちの上限も出ること (レビュー H1)。** 窓に空きがあってもこれが
+	// 満杯なら申請は 400 で弾かれる。
+	require.Equal(t, 2, body.Pending.Used, "審査待ちの件数が出ていない")
+	require.Equal(t, 3, body.Pending.Limit, "審査待ちの上限が出ていない")
+	require.False(t, body.Pending.Unlimited)
 	require.Empty(t, body.Windows[1].RetryAt, "空きのある窓に次回可能時刻が出ている")
 	require.Empty(t, body.Windows[2].RetryAt)
 }

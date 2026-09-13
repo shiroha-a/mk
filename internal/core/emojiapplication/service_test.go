@@ -32,14 +32,16 @@ type fakeApps struct {
 	quotaErr    error
 
 	// #2961 (ユーザーモデレーション画面の集計)
-	userCounts   repository.StatusCounts
-	countErr     error
-	usage        []repository.QuotaWindowUsage
-	usageErr     error
-	countUserID  string
-	usageUserID  string
-	usageWindows []repository.QuotaWindow
-	usageNow     time.Time
+	userCounts      repository.StatusCounts
+	countErr        error
+	usage           []repository.QuotaWindowUsage
+	usageErr        error
+	countUserID     string
+	usageUserID     string
+	usageWindows    []repository.QuotaWindow
+	usageNow        time.Time
+	usageMaxPending int
+	usagePending    int
 }
 
 func newFakeApps() *fakeApps { return &fakeApps{rows: map[string]*model.EmojiApplication{}} }
@@ -71,17 +73,22 @@ func (f *fakeApps) CountByUserStatus(userID string) (repository.StatusCounts, er
 	return f.userCounts, f.countErr
 }
 
-func (f *fakeApps) QuotaUsage(userID string, windows []repository.QuotaWindow, now time.Time) ([]repository.QuotaWindowUsage, error) {
-	f.usageUserID, f.usageWindows, f.usageNow = userID, windows, now
+func (f *fakeApps) QuotaUsage(userID string, limits repository.QuotaLimits, now time.Time) (repository.QuotaUsage, error) {
+	f.usageUserID, f.usageWindows, f.usageNow = userID, limits.Windows, now
+	f.usageMaxPending = limits.MaxPending
 	if f.usageErr != nil {
-		return nil, f.usageErr
+		return repository.QuotaUsage{}, f.usageErr
 	}
-	if f.usage != nil {
-		return f.usage, nil
+	out := repository.QuotaUsage{
+		Windows:    f.usage,
+		Pending:    f.usagePending,
+		MaxPending: limits.MaxPending,
 	}
-	out := make([]repository.QuotaWindowUsage, 0, len(windows))
-	for _, w := range windows {
-		out = append(out, repository.QuotaWindowUsage{Window: w})
+	if out.Windows == nil {
+		out.Windows = make([]repository.QuotaWindowUsage, 0, len(limits.Windows))
+		for _, w := range limits.Windows {
+			out.Windows = append(out.Windows, repository.QuotaWindowUsage{Window: w})
+		}
 	}
 	return out, nil
 }
@@ -1073,6 +1080,10 @@ func TestUserSummaryBuildsWindowsFromPolicies(t *testing.T) {
 	got, err := svc.UserSummary("u1")
 	require.NoError(t, err)
 	require.Equal(t, "u1", apps.usageUserID, "別のユーザーを数えている")
+	// **時計を渡していること (レビュー L2)。** 渡さないと repository が
+	// `time.Now()` に落ちるので production では等価だが、注入した時計が
+	// 効かないとテストで窓の境界を作れない。
+	require.False(t, apps.usageNow.IsZero(), "現在時刻が渡っていない")
 	require.Len(t, apps.usageWindows, 3)
 	require.Equal(t, "day", apps.usageWindows[0].Name)
 	require.Equal(t, 3, apps.usageWindows[0].Max)
@@ -1140,6 +1151,26 @@ func TestUserSummaryWithoutPolicyProviderStillReturnsWindows(t *testing.T) {
 			apps.usageWindows[1].Duration,
 			apps.usageWindows[2].Duration,
 		}, "既定の窓の期間が違う")
+}
+
+// **審査待ちの上限も渡すこと (レビュー H1)。** 渡さないと repository の
+// 「両方満杯なら時刻を落とす」規則が働かず、**その時刻に叩いても通らない時刻**を
+// 画面に広告する。窓に空きがあっても審査待ちが満杯なら申請は通らないので、
+// 件数そのものも出力に載せる。
+func TestUserSummaryPassesPendingLimit(t *testing.T) {
+	apps := newFakeApps()
+	apps.usagePending = 2
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{
+		"emojiApplicationMaxPerDay":  10,
+		"emojiApplicationMaxPending": 2,
+	}})
+
+	got, err := svc.UserSummary("u1")
+	require.NoError(t, err)
+	require.Equal(t, 2, apps.usageMaxPending, "審査待ちの上限が repository に渡っていない")
+	require.Equal(t, 2, got.Pending, "審査待ちの件数が出力に載っていない")
+	require.Equal(t, 2, got.MaxPending, "審査待ちの上限が出力に載っていない")
 }
 
 // **障害を握り潰さない。** 0 件として描くと、実際には申請があるユーザーを

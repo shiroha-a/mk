@@ -387,8 +387,9 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		// **リモートのサムネイルは media proxy を通す。** 生 URL は
 		// `img-src 'self'` を enforce している構成で黙ってブロックされる。
 		"relatedPreviewUrl(",
-		// 「確認できなかった」と「消された」を分ける。
-		"relatedImageMissingLabel(",
+		// 「確認できなかった」と「消された」を分ける。**判定は審査画面と共有する**
+		// (文面だけこの画面のものにする)。
+		"relatedImageMissingReason(",
 		// 判断を誤らせない status 表示。
 		"relatedStatusLabel(",
 		// 期間上限の表示。**無制限を 0 で描かない**ための分岐ごと。
@@ -428,6 +429,38 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// 「却下だけ」を選んでいるのに承認済みが並ぶ。
 	require.Containsf(t, userApps, "items.value = []",
 		"絞り込みを変えても古い行が残る (#2961)")
+	// **取得中の要求を捨てないこと (レビュー H1)。** `if (fetching) return` で
+	// 新しい要求を捨てる形だと、取得中に絞り込みや検索を変えたときに**要求が
+	// 1 本も出ないまま、あとから解決した旧フィルタの結果が並ぶ** — 「却下」と
+	// 表示された一覧に承認済みが混ざり、エラーもスピナーも出ないので気付けない。
+	// 次の「もっと見る」は別の結果集合から採ったカーソルを渡すので、以降の行が
+	// 永久に出てこない。捨てるのは要求ではなく**古い応答**のほう。
+	require.NotContainsf(t, userApps, "if (fetching.value) return",
+		"取得中に絞り込みを変えると要求が捨てられ、旧フィルタの行が残る (#2961)")
+	// **成功経路に置くこと。** 「どこかに 1 つある」だと、行を積む側から外しても
+	// 通る = H1 の回帰そのものが素通りする (実測)。取得と `items` への代入の
+	// 間にあることを見る。
+	//
+	// **範囲は Go 側で切る。** 正規表現の `.*?` だけだと、`reload()` の
+	// `items.value = []` まで跨いで別の判定を拾い、**成功経路から外しても通る**
+	// (実測)。取得の直後から**最初の** `items.value =` までに限る。
+	fetchStart := strings.Index(userApps, "admin/emoji-application/list-by-user")
+	require.GreaterOrEqualf(t, fetchStart, 0, "申請履歴の取得が無い (#2961)")
+	assign := strings.Index(userApps[fetchStart:], "items.value =")
+	require.GreaterOrEqualf(t, assign, 0, "取得した行を反映していない (#2961)")
+	require.Regexpf(t, `if \([A-Za-z_$][\w$]* !== [A-Za-z_$][\w$]*\) return;`,
+		userApps[fetchStart:fetchStart+assign],
+		"古い応答を捨てる判定が無い。取得中に絞り込みを変えると旧フィルタの行が並ぶ (#2961)")
+	// catch 側でも捨てること (古い失敗で新しい取得を «失敗» にしない)。
+	catchGuards := regexp.MustCompile(`if \([A-Za-z_$][\w$]* !== [A-Za-z_$][\w$]*\) return;`).
+		FindAllString(userApps, -1)
+	require.GreaterOrEqualf(t, len(catchGuards), 2,
+		"古い応答を捨てる判定が成功経路にしか無い。古い失敗が新しい取得を上書きする (#2961)")
+	// **集計にも再取得の手段を置くこと (レビュー M1)。** 失敗すると期間別の
+	// 使用状況ごと消えるうえ、取得は mount 時の 1 回しか無いので、復旧手段が
+	// ページのリロードだけになる (#2960 が mk.20c で直したのと同じ形)。
+	require.Containsf(t, userApps, `@click="fetchSummary"`,
+		"集計の取得に失敗したときに再取得できない (#2961)")
 	for _, want := range []string{
 		"admin/emoji-application/related",
 		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは
@@ -627,29 +660,54 @@ func trueAssignedIn(t *testing.T, src string) []string {
 	return out
 }
 
-// tagConditionUsesAny reports whether any element rendering needle carries one of
-// flags in its opening tag (v-if / v-else-if など).
+// tagConditionUsesAny reports whether needle is rendered under a condition that
+// uses one of flags.
+//
+// **直近の `v-if` / `v-else-if` を見る (開始タグだけでは足りない)。** 条件は
+// 親の要素に付くこともある (警告と再試行ボタンを 1 つの div にまとめる形)。
+// タグだけを見ていると、そこを括った瞬間に「条件が無い」と誤検知した (実測)。
 func tagConditionUsesAny(src, needle string, flags []string) bool {
+	found := false
 	for off := 0; ; {
 		i := strings.Index(src[off:], needle)
 		if i < 0 {
-			return false
+			// **1 つも無いのは「条件が無い」と同じ扱い。** 文面ごと消えていれば
+			// 失敗は画面に出ない。
+			return found
 		}
 		i += off
 		off = i + len(needle)
-		open := strings.LastIndex(src[:i], "<")
-		if open < 0 {
-			continue
-		}
-		end := strings.Index(src[open:], ">")
-		if end < 0 {
-			continue
-		}
-		tag := src[open : open+end]
+		cond := lastVueCondition(src[:i])
+		ok := false
 		for _, f := range flags {
-			if regexp.MustCompile(`\b` + regexp.QuoteMeta(f) + `\b`).MatchString(tag) {
-				return true
+			if regexp.MustCompile(`\b` + regexp.QuoteMeta(f) + `\b`).MatchString(cond) {
+				ok = true
 			}
 		}
+		// **全ての出現が条件付きであること (レビューの変異で実測)。** 「いずれか」
+		// だと、2 箇所に出している文面の片方から条件を外しても通る — そのとき
+		// 「取得できませんでした」が**成功して 0 件のときにも出る**。
+		if !ok {
+			return false
+		}
+		found = true
 	}
+}
+
+// lastVueCondition returns the value of the last v-if / v-else-if in src.
+func lastVueCondition(src string) string {
+	best := -1
+	for _, attr := range []string{`v-if="`, `v-else-if="`} {
+		if i := strings.LastIndex(src, attr); i > best {
+			best = i + len(attr)
+		}
+	}
+	if best < 0 {
+		return ""
+	}
+	end := strings.Index(src[best:], `"`)
+	if end < 0 {
+		return src[best:]
+	}
+	return src[best : best+end]
 }

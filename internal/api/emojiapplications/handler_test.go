@@ -56,8 +56,8 @@ func (s *stubApps) ListByUserFiltered(string, string, string, int, string) ([]mo
 func (s *stubApps) CountByUserStatus(string) (repository.StatusCounts, error) {
 	return repository.StatusCounts{}, nil
 }
-func (s *stubApps) QuotaUsage(string, []repository.QuotaWindow, time.Time) ([]repository.QuotaWindowUsage, error) {
-	return nil, nil
+func (s *stubApps) QuotaUsage(string, repository.QuotaLimits, time.Time) (repository.QuotaUsage, error) {
+	return repository.QuotaUsage{}, nil
 }
 
 func (s *stubApps) CreateWithQuota(a *model.EmojiApplication, _ repository.QuotaLimits) error {

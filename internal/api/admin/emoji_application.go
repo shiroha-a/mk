@@ -732,5 +732,14 @@ func (h *Handler) EmojiApplicationUserSummary(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{
 		"counts":  sum.Counts,
 		"windows": windows,
+		// **審査待ちの上限も出す (レビュー H1)。** 期間の窓に空きがあっても
+		// これが満杯なら申請は 400 で弾かれる。出さないと画面は
+		// 「24時間: 2 / 10 (空きあり)」と描き、実際には出せない人を出せると
+		// 案内する — この機能が塞ごうとしている失敗形そのもの。
+		"pending": map[string]any{
+			"used":      sum.Pending,
+			"limit":     sum.MaxPending,
+			"unlimited": sum.MaxPending <= 0,
+		},
 	})
 }
