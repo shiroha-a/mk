@@ -70,6 +70,21 @@ func (c *WebFingerClient) LookupActorURI(username, host string) (string, error) 
 	if username == "" || host == "" {
 		return "", errors.New("webfinger: username and host are required")
 	}
+	// **host は無検証で URL に連結されていた。** `endpoint` は
+	// `"https://" + host + "/.well-known/webfinger"` を組むだけなので、
+	// `a.example/x` ならパス注入、`a.example@b.example` なら url.Parse の
+	// host が `b.example` になって authority がすり替わる。ここに来る host は
+	// `POST /api/users/followers` のような**未認証で叩ける経路**から渡るので、
+	// 呼び出し側の `idnhost.Puny` (punycode プロファイル。ASCII は素通し) を
+	// 唯一の砦にできない。
+	//
+	// 規則は `internal/core/federation/remote_stats.go` の `isValidHost` と
+	// 同じ (あちらのコメントは「webfinger 経由で sanitize されるはず」と
+	// 書いているが、その前提がここで初めて成立する)。パッケージを跨いで
+	// 共有すると `activitypub` → `core` の逆向き依存になるので規則だけ揃える。
+	if !isPlainHost(host) {
+		return "", fmt.Errorf("webfinger: invalid host %q", host)
+	}
 	// 同一 acct への並行 lookup は singleflight で collapse (#300 3-7)。
 	// inbox / 検索画面で同じ remote handle が連続して resolve されるケース
 	// で WebFinger HTTP fan-out を抑える。
@@ -122,6 +137,13 @@ func (c *WebFingerClient) lookupActorURIOnce(host, resource string) (string, err
 		if link.Href == "" {
 			continue
 		}
+		// **href は相手サーバーが自由に決められる値**で、そのまま
+		// `ResolveActor` へ渡る。http(s) 以外の scheme を弾いておく
+		// (`internal/core/federation` の `remoteNoteURL` と同じ方針で、
+		// scheme は RFC 3986 に従い case-insensitive に見る)。
+		if !isHTTPScheme(link.Href) {
+			continue
+		}
 		if isActivityPubLinkType(link.Type) {
 			return link.Href, nil
 		}
@@ -139,6 +161,36 @@ func (c *WebFingerClient) endpoint(host string) string {
 		}
 	}
 	return "https://" + host + "/.well-known/webfinger"
+}
+
+// isPlainHost reports whether host is a bare hostname (optionally with a
+// port) that can be concatenated into a URL without changing its meaning.
+//
+// url.Parse に解かせて、入力がまるごと authority に収まっていることを確かめる。
+// `/` `?` `#` `@` 空白などが混ざっていると Host / Path が input と食い違うので
+// 落ちる。自前で文字集合を列挙すると必ず取りこぼす。
+//
+// **port は許す。** `example.com:3000` のような host は fediverse に実在し、
+// mk-go も `idnhost.Puny` が port 付きを通す前提で書かれている。ここで
+// 落とすと、そうした相手との連合が解決できなくなる (upstream WebfingerService
+// も acct の host 部分をそのまま使うので port を許す)。
+func isPlainHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	parsed, err := url.Parse("https://" + host + "/")
+	if err != nil {
+		return false
+	}
+	return parsed.Host == host && parsed.Path == "/" && parsed.User == nil &&
+		parsed.RawQuery == "" && parsed.Fragment == ""
+}
+
+// isHTTPScheme reports whether raw uses the http or https scheme.
+// scheme は RFC 3986 に従い case-insensitive に判定する。
+func isHTTPScheme(raw string) bool {
+	lower := strings.ToLower(raw)
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
 // isActivityPubLinkType reports whether t is an ActivityPub-compatible link

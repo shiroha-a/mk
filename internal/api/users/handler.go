@@ -932,25 +932,43 @@ func (h *Handler) Following(c echo.Context) error {
 	return h.listRelations(c, false)
 }
 
+// jsonNoSuchUserForRelations returns the NO_SUCH_USER error with the id
+// upstream assigns to users/followers / users/following (別 id が振られている)。
+func jsonNoSuchUserForRelations(c echo.Context, followers bool) error {
+	nsuID := "63e4aba4-4156-4e53-be25-c9559e42d71b" // users/following
+	if followers {
+		nsuID = "27fa5435-88ab-43de-9360-387de88727cd" // users/followers
+	}
+	return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", nsuID))
+}
+
 func (h *Handler) listRelations(c echo.Context, followers bool) error {
 	var req FollowersRequest
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
 	}
+	// **viewer は username 解決より前に読む。** 下の匿名 gate が要る。
+	viewer := middleware.GetUser(c)
 	// userId 指定が無ければ username(+host) から解決する (upstream followers.ts:60-71、
 	// #1547)。usernameLower + host で findOne。
 	if req.UserID == "" {
 		if req.Username == "" {
 			return apierr.JSONInvalidParam(c)
 		}
+		// **users/show と同じ匿名 gate をここにも掛ける** (handler.go の Show に
+		// ある #2106 S3 の判定)。`users/followers` / `users/following` は
+		// auth middleware が無く**未認証で叩ける**のに、`ShowByUsername` は
+		// ローカル DB が miss すると WebFinger + actor fetch へ落ちる。gate が
+		// 無いと、認証不要の POST 1 回ごとに未知のリモート host への outbound
+		// HTTP とリモート user 行の作成を外部から強制できる (= `ShowByUsernameDB`
+		// の doc コメントが `/@:acct` について書いているのと同じ増幅面)。
+		if req.Host != nil && *req.Host != "" && viewer == nil && h.ugcVisibility == "local" {
+			return jsonNoSuchUserForRelations(c, followers)
+		}
 		// #2106 L10: Followers/Following も Show と同じく lookup 前に trim する。
 		bundle, err := h.userService.ShowByUsername(strings.ToLower(strings.TrimSpace(req.Username)), req.Host)
 		if err != nil || bundle == nil {
-			nsuID := "63e4aba4-4156-4e53-be25-c9559e42d71b" // users/following
-			if followers {
-				nsuID = "27fa5435-88ab-43de-9360-387de88727cd" // users/followers
-			}
-			return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", nsuID))
+			return jsonNoSuchUserForRelations(c, followers)
 		}
 		req.UserID = bundle.User.ID
 	}
@@ -962,17 +980,10 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 	req.Limit = &limit
 
 	if _, err := h.userService.ShowByID(req.UserID); err != nil {
-		// upstream は users/followers と users/following で NO_SUCH_USER に別 id を割り当てる
-		nsuID := "63e4aba4-4156-4e53-be25-c9559e42d71b" // users/following
-		if followers {
-			nsuID = "27fa5435-88ab-43de-9360-387de88727cd" // users/followers
-		}
-		return c.JSON(http.StatusNotFound, apierr.Error("NO_SUCH_USER", "No such user.", nsuID))
+		return jsonNoSuchUserForRelations(c, followers)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
 	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-
-	viewer := middleware.GetUser(c)
 
 	// followersVisibility / followingVisibility gate (#1461)。upstream
 	// `users/followers.ts` / `users/following.ts` と同等に、target profile の

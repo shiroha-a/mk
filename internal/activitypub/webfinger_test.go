@@ -3,6 +3,7 @@ package activitypub
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -263,5 +264,162 @@ func TestIsActivityPubLinkType(t *testing.T) {
 	}
 	for input, want := range cases {
 		assert.Equal(t, want, isActivityPubLinkType(input), input)
+	}
+}
+
+// --- host validation ---
+
+// recordingTransport captures the outbound URL without ever dialing.
+type recordingTransport struct {
+	urls []string
+	body string
+}
+
+func (r *recordingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.urls = append(r.urls, req.URL.String())
+	body := r.body
+	if body == "" {
+		body = `{"subject":"acct:alice@a.example","links":[{"rel":"self","type":"application/activity+json","href":"https://a.example/users/alice"}]}`
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/jrd+json"}},
+		Body:       io.NopCloser(strings.NewReader(body)),
+		Request:    req,
+	}, nil
+}
+
+// host は URL に素で連結されるので、authority 以外に化ける入力は
+// **HTTP を 1 本も出さずに** 弾く。
+func TestWebFingerClient_RejectsMalformedHost(t *testing.T) {
+	for _, host := range []string{
+		"a.example/x",         // path injection
+		"a.example/../evil",   // path traversal
+		"a.example@b.example", // authority すり替え (url.Parse の host は b.example)
+		"a.example?x=1",       // query injection
+		"a.example#frag",      // fragment injection
+		"a.example/.well-known/nodeinfo",
+		"a.example ",              // trailing space
+		"a b.example",             // 空白
+		"a.example\\evil.example", // backslash
+		"",                        // 空文字 (既存の guard)
+	} {
+		t.Run(host, func(t *testing.T) {
+			rt := &recordingTransport{}
+			c := NewWebFingerClient(&http.Client{Transport: rt}, "ua")
+			_, err := c.LookupActorURI("alice", host)
+			require.Error(t, err, "host %q must be rejected", host)
+			assert.Empty(t, rt.urls, "rejected host must not produce an outbound request")
+		})
+	}
+}
+
+// 正常な host は従来どおり `https://<host>/.well-known/webfinger` を叩く。
+// ゲートが広すぎないことの確認 (port 付きも通す)。
+func TestWebFingerClient_AcceptsPlainHost(t *testing.T) {
+	for _, tc := range []struct{ host, want string }{
+		{"a.example", "https://a.example/.well-known/webfinger?resource=acct%3Aalice%40a.example"},
+		{"a.example:8443", "https://a.example:8443/.well-known/webfinger?resource=acct%3Aalice%40a.example%3A8443"},
+		{"xn--eckve.example", "https://xn--eckve.example/.well-known/webfinger?resource=acct%3Aalice%40xn--eckve.example"},
+	} {
+		t.Run(tc.host, func(t *testing.T) {
+			rt := &recordingTransport{}
+			c := NewWebFingerClient(&http.Client{Transport: rt}, "ua")
+			uri, err := c.LookupActorURI("alice", tc.host)
+			require.NoError(t, err)
+			assert.Equal(t, "https://a.example/users/alice", uri)
+			require.Len(t, rt.urls, 1)
+			assert.Equal(t, tc.want, rt.urls[0])
+		})
+	}
+}
+
+func TestIsPlainHost(t *testing.T) {
+	cases := map[string]bool{
+		"a.example":           true,
+		"a.example:8443":      true,
+		"xn--eckve.example":   true,
+		"[::1]":               true,
+		"":                    false,
+		"a.example/x":         false,
+		"a.example@b.example": false,
+		"a.example?x":         false,
+		"a.example#f":         false,
+		"a.example/":          false,
+		"a%2Eexample":         false,
+		"https://a.example":   false,
+	}
+	for input, want := range cases {
+		assert.Equal(t, want, isPlainHost(input), input)
+	}
+}
+
+// --- link href scheme validation ---
+
+// self link の href は相手サーバーが自由に決められ、そのまま ResolveActor に
+// 渡る。http(s) 以外の scheme は採用しない。
+func TestWebFingerClient_RejectsNonHTTPHref(t *testing.T) {
+	for _, href := range []string{
+		"javascript:alert(1)",
+		"file:///etc/passwd",
+		"data:application/activity+json,{}",
+		"ftp://a.example/users/alice",
+		"/users/alice",
+		"users/alice",
+	} {
+		t.Run(href, func(t *testing.T) {
+			c, _ := newTestWebFingerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"subject":"acct:alice@a.example","links":[{"rel":"self","type":"application/activity+json","href":%q}]}`, href)
+			})
+			_, err := c.LookupActorURI("alice", "a.example")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "no self link")
+		})
+	}
+}
+
+// http:// は通す。https 限定にすると http のみの開発用インスタンスと
+// 連合できなくなるうえ、本体の他の scheme 判定 (remoteNoteURL) とも揃わない。
+func TestWebFingerClient_AcceptsHTTPHref(t *testing.T) {
+	for _, href := range []string{"http://a.example/users/alice", "HTTPS://a.example/users/alice"} {
+		t.Run(href, func(t *testing.T) {
+			c, _ := newTestWebFingerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+				fmt.Fprintf(w, `{"subject":"acct:alice@a.example","links":[{"rel":"self","type":"application/activity+json","href":%q}]}`, href)
+			})
+			uri, err := c.LookupActorURI("alice", "a.example")
+			require.NoError(t, err)
+			assert.Equal(t, href, uri)
+		})
+	}
+}
+
+// 使えない href を持つ self link があっても、後ろに正当な self link があれば
+// そちらを採る (最初の 1 件で打ち切らない)。
+func TestWebFingerClient_SkipsBadHrefAndKeepsScanning(t *testing.T) {
+	c, _ := newTestWebFingerClient(t, func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprint(w, `{"subject":"acct:alice@a.example","links":[
+			{"rel":"self","type":"application/activity+json","href":"javascript:alert(1)"},
+			{"rel":"self","type":"application/activity+json","href":"https://a.example/users/alice"}
+		]}`)
+	})
+	uri, err := c.LookupActorURI("alice", "a.example")
+	require.NoError(t, err)
+	assert.Equal(t, "https://a.example/users/alice", uri)
+}
+
+func TestIsHTTPScheme(t *testing.T) {
+	cases := map[string]bool{
+		"http://a.example":    true,
+		"https://a.example":   true,
+		"HTTPS://a.example":   true,
+		"HtTp://a.example":    true,
+		"javascript:alert(1)": false,
+		"file:///etc/passwd":  false,
+		"//a.example/x":       false,
+		"":                    false,
+		" https://a.example":  false,
+	}
+	for input, want := range cases {
+		assert.Equal(t, want, isHTTPScheme(input), input)
 	}
 }
