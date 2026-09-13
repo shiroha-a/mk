@@ -313,13 +313,31 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// onMounted と同じ「全行が一斉に飛ぶ」状態に戻るのに、ゲートも vitest も
 	// 緑のままだった (実測)。setup 直下は列 0 なので、そこからの呼び出しだけを
 	// 落とす (関数の中からの呼び出しはインデントされているので当たらない)。
+	//
+	// **塞げているのは 2 綴りだけ (レビュー R3-L3)。** `await fetchPage();`
+	// (top-level await)、`;(fetchPage)();`、`const _ = fetchPage();`、
+	// `onBeforeMount(() => …)` のような他のライフサイクルは素通りする。
+	// 上の `onMounted(` の禁止も同じ性質で、どちらも「よくある綴り」を
+	// 落とすだけ。可視になってから取ることの本体は `v-appear` の要求。
 	require.NotRegexpf(t, `(?m)^(?:void\s+)?fetchPage\(`, relatedSrc,
 		"関連履歴を setup 直下で取っている。可視になる前に全行が飛ぶ (#2960)")
 	// **取得の失敗を握り潰さない (script 側)。** ref の名前は固定しない —
-	// リネームで落ちると診断が事実と逆になる (レビュー R2-L1)。catch の中で
-	// 何らかのフラグを立てていることだけを見る。
-	require.Regexpf(t, `(?s)catch\s*(?:\([^)]*\))?\s*\{[^}]*=\s*true`, relatedSrc,
-		"関連履歴の取得失敗を握り潰している。何も出さないと「履歴が無い」と読める (#2960)")
+	// リネームで落ちると診断が事実と逆になる (レビュー R2-L1)。
+	//
+	// **「catch の中で何かを true にしている」では足りない (レビュー R3-H1)。**
+	// 同じ catch は `loaded` も立てるので、`failed` の行を消しても / `false` に
+	// 反転させても素通りする (実測)。そうなると 3 分岐がすべて false になり、
+	// **コンポーネントが何も描画しない** — 審査画面から欄ごと消えるので、
+	// モデレーターには「関連する履歴は無い」と読める。このゲートが存在する
+	// 理由そのものの失敗形。
+	//
+	// 立てたフラグが**失敗の文面を出す条件になっている**ことまで見る。
+	// 名前は突き合わせに使うだけなので、全置換のリネームでは落ちない。
+	flags := trueAssignedIn(t, catchBody(t, relatedSrc))
+	require.NotEmptyf(t, flags, "関連履歴の取得失敗を握り潰している (#2960)")
+	require.Truef(t, tagConditionUsesAny(relatedSrc, "relatedUnknown", flags),
+		"取得の失敗が画面に出ない。catch で立てたフラグ %v が「確認できなかった」の"+
+			"表示条件になっていない (#2960)", flags)
 	// **初回の取得に失敗したときの再試行手段は MkFolder の外に置く
 	// (レビュー R2-M1 / R2-M2)。** 初回失敗では `counts` が null のままなので
 	// 折りたたみ自体が描画されず、中に置いたボタンは存在しない。`MkFolder` は
@@ -330,8 +348,13 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	if i := strings.Index(relatedSrc, "<MkFolder"); i >= 0 {
 		outsideFolder = relatedSrc[:i]
 	}
+	// **既知の穴 (レビュー R3-L2)。** 位置でしか見ていないので、(a) 分岐の
+	// 順を入れ替えて `<MkFolder>` を先に書くと正当な形でも落ち、(b) 折りたたみ
+	// より前にある別のボタンでも満たされる。診断は「検査したこと」だけを言う。
 	require.Containsf(t, outsideFolder, "<MkButton",
-		"初回の取得に失敗したときに再試行できない。MkFolder の中のボタンは描画されない (#2960)")
+		"折りたたみ (<MkFolder>) より前に <MkButton> が無い。初回の取得に失敗すると "+
+			"counts が null のままで折りたたみごと描画されないので、中のボタンでは "+
+			"再試行できない (#2960)")
 	for _, want := range []string{
 		"admin/emoji-application/related",
 		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは
@@ -349,10 +372,6 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		// 一致しない。v-for の変数名まで固定すると、リネームという正当な変更で
 		// 落ちたうえ診断が事実と逆になる (レビュー R2-L1)。
 		"matchedByLabel(",
-		// **却下理由が本体。** これが無いと「過去に却下された」しか分からない。
-		// 先頭のドットを要求する — 型宣言の `rejectReason?: string;` では
-		// 満たされず、ループ変数のリネームでは落ちない。
-		".rejectReason",
 		// **リモートのサムネイルは media proxy を通す。** 生 URL は
 		// `img-src 'self'` を enforce している構成で黙ってブロックされる
 		// (#2957 と同じ)。
@@ -367,6 +386,23 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		require.Containsf(t, relatedSrc, want,
 			"関連履歴の画面に %s が無い (#2960)", want)
 	}
+
+	// **却下理由が本体。** これが無いと「過去に却下された」しか分からない。
+	// **ラベルの参照では満たさない (レビュー R3-M1)。** `rejectReason` は
+	// 既存の locale キーでもあるので、`.rejectReason` を探すだけだと
+	// 「`i18n.ts._emojiApplication.rejectReason` をラベルに使う」整形を
+	// した時点で恒久的に満たされ、値のバインドを消しても落ちなくなる
+	// (この行の他の項目は全て MkKeyValue + locale ラベルなので、その整形は
+	// ごく自然に起きる)。値として描画していることを見る。
+	bound := false
+	for _, m := range regexp.MustCompile(`([A-Za-z_$][\w$]*)\.rejectReason`).FindAllStringSubmatch(relatedSrc, -1) {
+		if m[1] != "_emojiApplication" {
+			bound = true
+		}
+	}
+	require.Truef(t, bound,
+		"関連履歴が却下理由を値として描画していない。ラベルの参照だけでは "+
+			"「過去に却下された」しか分からない (#2960)")
 
 	// **審査画面が media proxy を通すこと (レビュー M2 / R2-H3)。**
 	// リモートの生 URL は `img-src 'self' data: blob:` を enforce している構成で
@@ -444,4 +480,76 @@ func jsFuncBody(t *testing.T, src, name string) string {
 	end := strings.Index(rest, "\n}")
 	require.GreaterOrEqualf(t, end, 0, "%s が閉じていない", name)
 	return rest[:end]
+}
+
+// catchBody returns the body of the first catch block in src, resolved by brace
+// matching.
+//
+// **正規表現で `[^}]*` と書かない (レビュー R3-L1)。** catch の中に `if` を
+// 1 つ置いただけで最初の `}` で止まり、握り潰していないのに「握り潰している」
+// と**事実と逆の診断**で落ちる (実測)。
+func catchBody(t *testing.T, src string) string {
+	t.Helper()
+	i := strings.Index(src, "catch")
+	require.GreaterOrEqualf(t, i, 0, "catch が無い (取得の失敗を握り潰している)")
+	j := strings.Index(src[i:], "{")
+	require.GreaterOrEqualf(t, j, 0, "catch の本体が無い")
+	start := i + j
+	depth := 0
+	for k := start; k < len(src); k++ {
+		switch src[k] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start+1 : k]
+			}
+		}
+	}
+	t.Fatalf("catch の対応する括弧が見つからない")
+	return ""
+}
+
+var trueAssignRe = regexp.MustCompile(`([A-Za-z_$][\w$]*)(?:\.value)?\s*=\s*true`)
+
+// trueAssignedIn collects the identifiers assigned `true` in src.
+func trueAssignedIn(t *testing.T, src string) []string {
+	t.Helper()
+	var out []string
+	seen := map[string]bool{}
+	for _, m := range trueAssignRe.FindAllStringSubmatch(src, -1) {
+		if !seen[m[1]] {
+			seen[m[1]] = true
+			out = append(out, m[1])
+		}
+	}
+	return out
+}
+
+// tagConditionUsesAny reports whether any element rendering needle carries one of
+// flags in its opening tag (v-if / v-else-if など).
+func tagConditionUsesAny(src, needle string, flags []string) bool {
+	for off := 0; ; {
+		i := strings.Index(src[off:], needle)
+		if i < 0 {
+			return false
+		}
+		i += off
+		off = i + len(needle)
+		open := strings.LastIndex(src[:i], "<")
+		if open < 0 {
+			continue
+		}
+		end := strings.Index(src[open:], ">")
+		if end < 0 {
+			continue
+		}
+		tag := src[open : open+end]
+		for _, f := range flags {
+			if regexp.MustCompile(`\b` + regexp.QuoteMeta(f) + `\b`).MatchString(tag) {
+				return true
+			}
+		}
+	}
 }

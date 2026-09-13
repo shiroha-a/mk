@@ -882,6 +882,15 @@ func TestEmojiApplicationRepository_FindRelated_Matches(t *testing.T) {
 
 	// 同じ名前 (別人・却下済み)
 	seedRelated(t, "ea_r1name", "ea_r1other", "sushi", model.EmojiApplicationRejected, nil, nil, nil, now.Add(-time.Hour))
+	// **却下理由と審査日時を実際に載せておく (レビュー R3-M1)。** これが無いと
+	// `SELECT a.*` を列指定に絞る変更 (「使わない列を引かない」最適化) で
+	// `rejectReason` / `processedAt` が NULL のまま返り、**審査画面から却下理由が
+	// 消える**のに Go のテストが全部緑になる (実測)。repository は ID と
+	// `MatchedBy()` しか見ておらず、handler のテストは stub が手で組んだ struct を
+	// packer に通すだけなので、GORM の hydration を誰も検査していなかった。
+	processedAt := now.Add(-30 * time.Minute)
+	require.NoError(t, testDB.Model(&model.EmojiApplication{}).Where(`"id" = ?`, "ea_r1name").
+		Updates(map[string]any{"rejectReason": "潰れて読めません", "processedAt": processedAt}).Error)
 	// 同じ画像・名前は違う
 	seedRelated(t, "ea_r1hash", "ea_r1other", "onigiri", model.EmojiApplicationApproved, nil, nil, strp("H1"), now.Add(-2*time.Hour))
 	// 無関係
@@ -901,6 +910,16 @@ func TestEmojiApplicationRepository_FindRelated_Matches(t *testing.T) {
 
 	// **自分自身は含めない。** 開いている行が並ぶと件数も意味も狂う。
 	require.NotContains(t, ids, "ea_r1cur")
+
+	// 却下理由と審査日時が実際に返ること (上のコメントの理由)。
+	for i := range got {
+		if got[i].ID != "ea_r1name" {
+			continue
+		}
+		require.NotNil(t, got[i].RejectReason, "却下理由が返っていない")
+		require.Equal(t, "潰れて読めません", *got[i].RejectReason)
+		require.NotNil(t, got[i].ProcessedAt, "審査日時が返っていない")
+	}
 }
 
 // リモート元での照合。**希望するローカル名が変わっていても辿れること**が要点。
@@ -1047,6 +1066,15 @@ func TestEmojiApplicationRepository_FindRelated_Paging(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, second, 2)
 	require.Less(t, second[0].ID, first[1].ID, "untilId より後ろが返っている")
+
+	// **repository 側の clamp も通す (レビュー R3-L3)。** handler が clamp して
+	// いるので実害は小さいが、backstop そのものが一度も実行されていなかった。
+	// 0 と範囲外はどちらも既定 (10) に落ちる。
+	for _, limit := range []int{0, -1, 101} {
+		all, err := repo.FindRelated(cur, limit, "")
+		require.NoError(t, err)
+		require.Len(t, all, 5, "limit=%d が既定に落ちていない", limit)
+	}
 }
 
 // **件数はステータスごとに出す。** 「却下2 / 承認1」が分かると、開く前に
