@@ -406,6 +406,15 @@ func (p *Processor) process(body []byte, signer *model.User) error {
 
 	normalized, err := activitypub.Normalize(body)
 	if err != nil {
+		// **retry しても結果が変わらないものは ack する (レビュー L1)。** 衝突
+		// キーを持つ document も JSON として壊れた body も、同じ body を何度
+		// 投げ直しても同じ error になる。生で返すと inbox job が 8 回 retry して
+		// dead letter に積まれるだけ。この PR の他の判断 (禁止語 / chat の
+		// 恒久エラー) と揃える。
+		if errors.Is(err, activitypub.ErrConflictingKeys) {
+			slog.Warn("activitypub: conflicting json-ld keys", "err", err)
+			return ErrUnsupportedActivity
+		}
 		return fmt.Errorf("invalid activity json: %w", err)
 	}
 	body = normalized

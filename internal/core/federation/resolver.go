@@ -698,6 +698,21 @@ func (r *Resolver) SetProhibitedWordsProvider(p ProhibitedWordsProvider) {
 	r.prohibitedWordsProvider = p
 }
 
+// HasProhibitedWordsSource reports whether a source for meta.prohibitedWords is
+// reachable (either the explicit setter or the hostBlocker's optional面).
+//
+// **未配線だと禁止語が AP 経路だけ静かに効かなくなる (レビュー L2)。**
+// fallback が optional interface なので、`SetHostBlockChecker` に
+// `ProhibitedWords()` を持たない型を渡した瞬間に無検査へ落ちる。起動時に
+// 気付けるよう述語を出す。
+func (r *Resolver) HasProhibitedWordsSource() bool {
+	if r.prohibitedWordsProvider != nil {
+		return true
+	}
+	_, ok := r.hostBlocker.(ProhibitedWordsProvider)
+	return ok
+}
+
 // prohibitedWords returns the configured meta.prohibitedWords, or nil when no
 // source is wired / meta is unreadable (= 判定を skip、他の meta ゲートと同じ
 // ベストエフォート)。

@@ -3899,6 +3899,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"new-login メールの instance lang fallback が空のまま進み、profile.lang 未設定時に併記ではなく英語だけになる"},
 		{"resetpassword.metaRepo", resetHandler.HasMetaRepo(),
 			"パスワードリセットメールの instance lang fallback が空のまま進む"},
+		{"federation.prohibitedWords", federationResolver.HasProhibitedWordsSource(),
+			"リモートから届くノートに禁止語のフィルタが掛からなくなる (ローカル投稿にだけ効く状態)"},
 		{"federation.noteDeleteHook.userRepo", noteDeleteHook.HasUserRepo(),
 			"DM / フォロワー限定ノートの Delete が宛先に届かず、相手サーバーに残り続ける"},
 		{"federation.localBaseURL", federationProcessor.HasLocalBaseURL(),
