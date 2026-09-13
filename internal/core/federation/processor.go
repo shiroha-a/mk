@@ -178,6 +178,13 @@ func (p *Processor) SetLocalBaseURL(baseURL string) {
 	p.localBaseURL = baseURL
 }
 
+// HasLocalBaseURL reports whether the local base URL was wired.
+//
+// **未配線だと静かに壊れる。** relay の Accept / Reject は activity id が
+// 自ホストの URI であることを要求する (fail-closed) ので、ここが空だと
+// relay の状態遷移が全て落ちる。ローカル URI の判定も全部外れる。
+func (p *Processor) HasLocalBaseURL() bool { return p.localBaseURL != "" }
+
 // resolveTargetUser looks up a user referenced by URI in an inbound activity.
 // ローカルユーザの user.uri は DB 上 NULL なので FindByURI では解決できない。
 // 対策として localBaseURL 配下の URI ("{baseURL}/users/{id}") を検出し、
