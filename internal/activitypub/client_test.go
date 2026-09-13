@@ -355,50 +355,10 @@ func TestValidateAPContentType(t *testing.T) {
 	}
 }
 
-// **host を跨ぐ redirect は追従しない (`SameHost` 版)。** 最終 URL を見て
-// 本文を捨てるだけだと「書き戻し」は止まっても**GET 自体は出る** (= 任意の
-// public host へのリクエストリレー)。nodeinfo の discovery はリモートが返す
-// JSON なので、href の検証だけでは飛び先を縛れない。
-func TestFetchUnsignedJSONSameHost_RefusesCrossHostRedirect(t *testing.T) {
-	var victimHits int
-	victim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		victimHits++
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"software":{"name":"victim"}}`))
-	}))
-	defer victim.Close()
-
-	attacker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/away" {
-			http.Redirect(w, r, victim.URL+"/ni", http.StatusFound)
-			return
-		}
-		http.Redirect(w, r, "/inner", http.StatusFound)
-	}))
-	defer attacker.Close()
-
-	c := NewClient(attacker.Client(), "test")
-
-	t.Run("別 host へは飛ばない", func(t *testing.T) {
-		_, _, err := c.FetchUnsignedJSONSameHost(attacker.URL + "/away")
-		require.Error(t, err, "別 host への redirect を追従している")
-		assert.Zero(t, victimHits, "別 host へ実際に GET が出ている")
-	})
-
-	t.Run("同じ host の中の redirect は追う", func(t *testing.T) {
-		// /inner は最終的に /inner 自身へ飛び続けるので 10 回で止まる。
-		// ここで見たいのは「同 host なら CheckRedirect が拒まない」こと。
-		_, _, err := c.FetchUnsignedJSONSameHost(attacker.URL + "/start")
-		if err != nil {
-			assert.NotContains(t, err.Error(), "redirect to another host",
-				"同じ host の redirect を別 host として拒んでいる")
-		}
-	})
-}
-
-// **`WithURL` のほうは追従する (`.well-known/*` の委譲があるため)。** 飛び先は
-// 呼び出し側が「以後の基準」として使うので、任意の host へ抜けられるわけでは
-// ない (nodeinfo は discovery が応答した host に document を縛る)。
+// **redirect は追従し、飛び先を呼び出し側へ返す。** 止めるかどうかは呼び出し側の
+// 判断 (nodeinfo は最終 URL が要求した host と違えば本文を読み戻さない)。
+// `CheckRedirect` で止める形は `allowExternalApRedirect` の設定を上書きして
+// しまうので採らない (3 周目レビュー M1)。
 func TestFetchUnsignedJSONWithURL_FollowsCrossHostRedirect(t *testing.T) {
 	victim := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

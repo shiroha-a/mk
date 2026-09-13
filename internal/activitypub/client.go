@@ -3,11 +3,8 @@ package activitypub
 import (
 	"bytes"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
-	"net/url"
-	"strconv"
 	"strings"
 
 	"github.com/shiroha-a/mk/internal/safehttp"
@@ -205,55 +202,6 @@ func (c *Client) FetchUnsigned(url string) ([]byte, error) {
 	return body, err
 }
 
-// sameRedirectTarget reports whether two URLs point at the same host:port,
-// treating the scheme's default port as absent.
-//
-// ポートは数値で比べる — `url.Port()` は `"0443"` を verbatim で返すが、Go は
-// それを 443 として接続する (`internal/core/federation` の同名の判断と揃える)。
-func sameRedirectTarget(a, b *url.URL) bool {
-	norm := func(u *url.URL) string {
-		h := strings.ToLower(u.Hostname())
-		p := u.Port()
-		if p == "" {
-			return h
-		}
-		if n, err := strconv.Atoi(p); err == nil {
-			if (u.Scheme == "https" && n == 443) || (u.Scheme == "http" && n == 80) {
-				return h
-			}
-			return h + ":" + strconv.Itoa(n)
-		}
-		return h + ":" + p
-	}
-	return norm(a) == norm(b)
-}
-
-// sameHostRedirectClient returns a copy of the client that refuses redirects
-// leaving the host of the original request.
-//
-// `http.Client` の `CheckRedirect` はリクエストごとには渡せないので、値コピーを
-// 作ってそこにだけ設定する (Transport は共有するので SSRF ガードはそのまま)。
-func (c *Client) sameHostRedirectClient() *http.Client {
-	cp := *c.httpClient
-	cp.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) == 0 {
-			return nil
-		}
-		// **ポートも見る。** host 名だけだと `h:8080` -> `h:9090` が
-		// 同じ到達先として通る (内部サービスの横移動になる)。既定ポートの
-		// 表記ゆれは数値で吸収する。
-		if !sameRedirectTarget(req.URL, via[0].URL) {
-			return fmt.Errorf("redirect to another host (%s -> %s)",
-				via[0].URL.Host, req.URL.Host)
-		}
-		if len(via) >= 10 {
-			return errors.New("stopped after 10 redirects")
-		}
-		return nil
-	}
-	return &cp
-}
-
 // FetchUnsignedJSON performs an unsigned GET with `Accept: application/json, */*`.
 // Used for non-AP discovery endpoints that speak plain JSON (notably
 // `/.well-known/nodeinfo` and the nodeinfo 2.x documents themselves).
@@ -276,25 +224,14 @@ func (c *Client) FetchUnsignedJSON(url string) ([]byte, error) {
 // `links[].href` の host を検証しても、client が redirect を追従するなら
 // **302 一回で任意の host へ飛べる** ので、href の検証だけでは足りない。
 //
-// **host を跨ぐ redirect は追従しない。** 最終 URL を見て本文を捨てるだけだと
-// 「書き戻し」は止まっても**GET 自体は出る** (= 任意の public host への
-// リクエストリレー)。ここで止めれば飛ばない。
+// **飛び先そのものは止めない。** host を跨ぐ redirect を `CheckRedirect` で
+// 弾く形も試したが、(a) `.well-known/*` を別 host へ委譲する構成を落とす、
+// (b) `meta.allowExternalApRedirect` の設定を上書きしてしまう、(c) hop ごとに
+// 方針を分けると配線を取り違えてもテストで気付けない、が重なった。
+// **呼び出し側が最終 URL を見て「読み戻すか」を決める**形にしてある。残る面は
+// 「任意の public host へ GET が出る」ことだけで、到達先は SSRF-safe transport
+// が private IP を落とす。
 func (c *Client) FetchUnsignedJSONWithURL(url string) ([]byte, string, error) {
-	return c.fetchUnsignedJSON(url, false)
-}
-
-// FetchUnsignedJSONSameHost is FetchUnsignedJSONWithURL but refuses redirects
-// that leave the host of the original request.
-//
-// **飛び先まで縛りたい hop に使う。** 最終 URL を見て本文を捨てるだけだと
-// 「読み戻し」は止まっても**GET 自体は出る** (= 任意の public host への
-// リクエストリレー)。一方、`.well-known/*` のように**別 host への委譲が
-// 正当な hop** もあるので、止めるかどうかは呼び出し側が選ぶ。
-func (c *Client) FetchUnsignedJSONSameHost(url string) ([]byte, string, error) {
-	return c.fetchUnsignedJSON(url, true)
-}
-
-func (c *Client) fetchUnsignedJSON(url string, sameHostOnly bool) ([]byte, string, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, "", err
@@ -303,13 +240,7 @@ func (c *Client) fetchUnsignedJSON(url string, sameHostOnly bool) ([]byte, strin
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
-	var client *http.Client
-	if sameHostOnly {
-		client = c.sameHostRedirectClient()
-	} else {
-		client = c.httpClient
-	}
-	resp, err := client.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, "", err
 	}

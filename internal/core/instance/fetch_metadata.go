@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/url"
 	"runtime/debug"
 	"strconv"
@@ -40,12 +41,7 @@ type HTTPFetcher interface {
 // 既定は true なので、既定構成でそのまま成立していた。最終 URL まで見て
 // 初めて「その host の文書を読んだ」と言える。
 type hostBoundJSONFetcher interface {
-	// FetchJSONWithFinalURL follows cross-host redirects and reports where the
-	// response came from (discovery hop: `.well-known/*` の委譲は正当)。
 	FetchJSONWithFinalURL(uri string) ([]byte, string, error)
-	// FetchJSONSameHost refuses cross-host redirects (document hop: href は
-	// リモートが返す値なので、飛び先まで縛らないと GET リレーになる)。
-	FetchJSONSameHost(uri string) ([]byte, string, error)
 }
 
 // FetchMetadataService fetches /.well-known/nodeinfo for a remote host and
@@ -583,35 +579,34 @@ func firstNonEmptyStr(vals ...string) string {
 // 成功なら non-nil doc + nil error、失敗なら nil doc + error。upstream の
 // `fetchNodeinfo(...).catch(() => null)` と同じ粒度 (#2730)。
 func (s *FetchMetadataService) fetchNodeinfo(host string) (*nodeinfoDocument, error) {
-	// **discovery の redirect は追う (2 周目レビュー M5)。** `.well-known/*` を
-	// 別の host へまとめて委譲する構成は実在する (Mastodon の `WEB_DOMAIN` 分離、
-	// CDN の force-www など)。ここを縛ると、その相手の softwareName / nodeName /
-	// icon が永久に取れなくなる。**飛んだ先を以後の基準にする** — discovery が
-	// 応答した host が、その instance の nodeinfo を出す権限を持つ host。
-	disc, base, err := s.fetchDiscovery(host)
+	// **`.well-known/*` を別 host へ委譲する構成 (Mastodon の `WEB_DOMAIN` 分離、
+	// CDN の force-www) では nodeinfo が取れない。** hop ごとに redirect の方針を
+	// 分ける形を試したが、配線を取り違えてもテストで気付けず、`allowExternalApRedirect`
+	// の設定まで上書きしてしまったので、**両 hop とも「応答した host が要求した
+	// host と同じであること」だけを見る**単純な形に戻した (3 周目レビュー H1/H2/M1)。
+	// 委譲している相手の softwareName / nodeName / icon は記録されない。
+	disc, err := s.fetchDiscovery(host)
 	if err != nil {
 		return nil, err
 	}
-	href := selectNodeinfoHref(disc, base)
+	href := selectNodeinfoHref(disc, host)
 	if href == "" {
 		return nil, errors.New("no supported nodeinfo schema")
 	}
-	return s.fetchDocument(href, base)
+	return s.fetchDocument(href, host)
 }
 
 // fetchDiscovery fetches /.well-known/nodeinfo and decodes the link list.
-// It returns the host that actually served the document, which becomes the
-// base for validating `links[].href` (see fetchNodeinfo).
-func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, string, error) {
-	body, servedBy, err := s.fetchJSONAllowingHostDelegation("https://"+host+"/.well-known/nodeinfo", host)
+func (s *FetchMetadataService) fetchDiscovery(host string) (*nodeinfoDiscovery, error) {
+	body, err := s.fetchJSONFromHost("https://"+host+"/.well-known/nodeinfo", host)
 	if err != nil {
-		return nil, "", err
+		return nil, err
 	}
 	var disc nodeinfoDiscovery
 	if err := json.Unmarshal(body, &disc); err != nil {
-		return nil, "", err
+		return nil, err
 	}
-	return &disc, servedBy, nil
+	return &disc, nil
 }
 
 // fetchDocument fetches the actual nodeinfo document.
@@ -627,32 +622,6 @@ func (s *FetchMetadataService) fetchDocument(href, host string) (*nodeinfoDocume
 // different host than the one we asked for.
 var errNodeinfoHostEscaped = errors.New("nodeinfo: response came from another host")
 
-// fetchJSONAllowingHostDelegation fetches JSON and reports the host that served
-// it, allowing a redirect to a different host.
-//
-// **discovery にだけ使う。** `.well-known/*` の委譲は実在する構成なので追う。
-// 返した host を以後の基準にするので、任意の host へ抜けられるわけではない
-// (document の href はその host に縛られる)。
-func (s *FetchMetadataService) fetchJSONAllowingHostDelegation(uri, host string) ([]byte, string, error) {
-	bound, ok := s.fetcher.(hostBoundJSONFetcher)
-	if !ok {
-		body, err := s.fetcher.FetchJSON(uri)
-		return body, host, err
-	}
-	body, finalURL, err := bound.FetchJSONWithFinalURL(uri)
-	if err != nil {
-		return nil, "", err
-	}
-	if finalURL == "" {
-		return body, host, nil
-	}
-	u, perr := url.Parse(finalURL)
-	if perr != nil || u.Hostname() == "" {
-		return body, host, nil
-	}
-	return body, trimDefaultPort(u.Host, u.Scheme), nil
-}
-
 // fetchJSONFromHost fetches JSON and refuses a response served by a different
 // host (see hostBoundJSONFetcher).
 func (s *FetchMetadataService) fetchJSONFromHost(uri, host string) ([]byte, error) {
@@ -662,7 +631,7 @@ func (s *FetchMetadataService) fetchJSONFromHost(uri, host string) ([]byte, erro
 		// fetcher は必ず実装している。
 		return s.fetcher.FetchJSON(uri)
 	}
-	body, finalURL, err := bound.FetchJSONSameHost(uri)
+	body, finalURL, err := bound.FetchJSONWithFinalURL(uri)
 	if err != nil {
 		return nil, err
 	}
@@ -722,13 +691,22 @@ func nodeinfoHrefBelongsTo(href, host string) bool {
 	return strings.EqualFold(trimDefaultPort(u.Host, u.Scheme), trimDefaultPort(host, u.Scheme))
 }
 
-func trimDefaultPort(h, scheme string) string {
-	h = strings.ToLower(strings.TrimSpace(h))
-	switch scheme {
-	case "https":
-		return strings.TrimSuffix(h, ":443")
-	case "http":
-		return strings.TrimSuffix(h, ":80")
+// **ポートは数値で比べる (3 周目レビュー M3)。** `url.Port()` は `"0443"` を
+// verbatim で返すが Go は 443 へ接続するので、文字列一致だと同じ到達先を
+// 別物として扱う。`internal/core/federation` / `internal/core/reversi` と同じ規則。
+func trimDefaultPort(hostPort, scheme string) string {
+	hostPort = strings.ToLower(strings.TrimSpace(hostPort))
+	h, p, err := net.SplitHostPort(hostPort)
+	if err != nil {
+		// ポートが無い形。IPv6 リテラルの bracket は下の JoinHostPort と揃える。
+		return strings.TrimSuffix(strings.TrimPrefix(hostPort, "["), "]")
 	}
-	return h
+	n, cerr := strconv.Atoi(p)
+	if cerr != nil {
+		return hostPort
+	}
+	if (scheme == "https" && n == 443) || (scheme == "http" && n == 80) {
+		return h
+	}
+	return net.JoinHostPort(h, strconv.Itoa(n))
 }

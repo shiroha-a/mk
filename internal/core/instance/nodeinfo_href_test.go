@@ -68,3 +68,34 @@ func TestSelectNodeinfoHrefRequiresSameHost(t *testing.T) {
 		require.Equal(t, "https://remote.example/nodeinfo/2.0", selectNodeinfoHref(disc, host))
 	})
 }
+
+// **既定ポートは数値で比べ、scheme ごとに剥がす (3 周目レビュー M3 / L5)。**
+// 文字列一致だと `:0443` を別 host として扱い、`:443` しか剥がさないと
+// `http://h:80` を advertise する相手 (http を許した理由そのもの) を落とす。
+func TestNodeinfoHrefBelongsTo_DefaultPorts(t *testing.T) {
+	cases := []struct {
+		href, host string
+		want       bool
+	}{
+		{"https://remote.example:443/ni", "remote.example", true},
+		{"https://remote.example:0443/ni", "remote.example", true},
+		{"https://remote.example:00443/ni", "remote.example", true},
+		{"http://remote.example:80/ni", "remote.example", true},
+		{"http://remote.example:080/ni", "remote.example", true},
+		{"https://remote.example/ni", "remote.example:443", true},
+		// scheme が違えば既定も違う。
+		{"https://remote.example:80/ni", "remote.example", false},
+		{"http://remote.example:443/ni", "remote.example", false},
+		// 非既定ポートは別 host。
+		{"https://remote.example:8443/ni", "remote.example", false},
+		// IPv6 リテラル (bracket の有無で食い違わないこと)。
+		{"https://[2001:db8::1]:443/ni", "[2001:db8::1]", true},
+		{"https://[2001:db8::1]/ni", "[2001:db8::1]", true},
+		{"https://[2001:db8::1]:8443/ni", "[2001:db8::1]", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.href+" vs "+tc.host, func(t *testing.T) {
+			require.Equal(t, tc.want, nodeinfoHrefBelongsTo(tc.href, tc.host))
+		})
+	}
+}

@@ -37,12 +37,6 @@ type scriptedFetcher struct {
 	finalURLs []string
 }
 
-// FetchJSONSameHost implements hostBoundJSONFetcher (document hop)。
-// scripted fetcher は redirect を自前で模すので挙動は同じ。
-func (s *scriptedFetcher) FetchJSONSameHost(url string) ([]byte, string, error) {
-	return s.FetchJSONWithFinalURL(url)
-}
-
 // FetchJSONWithFinalURL implements hostBoundJSONFetcher.
 func (s *scriptedFetcher) FetchJSONWithFinalURL(url string) ([]byte, string, error) {
 	idx := s.idx
@@ -489,12 +483,12 @@ func TestFetch_IconURLLengthIsCountedInRunes(t *testing.T) {
 func TestFetchNodeinfo_RefusesCrossHostRedirect(t *testing.T) {
 	poisoned := `{"software":{"name":"poisoned"},"metadata":{"nodeName":"victim"}}`
 
-	// **discovery の委譲は許す (2 周目レビュー M5)。** `.well-known/*` を別の
-	// host へまとめて委譲する構成は実在する (Mastodon の `WEB_DOMAIN` 分離、
-	// CDN の force-www)。縛ると相手の softwareName / nodeName / icon が永久に
-	// 取れない。**飛んだ先を以後の基準にする**ので、任意の host へ抜けられる
-	// わけではない — 下の「委譲先を基準に href を縛る」がそれを固定する。
-	t.Run("discovery の委譲は追う", func(t *testing.T) {
+	// **`.well-known/*` を別 host へ委譲している相手からは取れない (既知の限界)。**
+	// hop ごとに redirect の方針を分ける形を試したが、配線を取り違えてもテストで
+	// 気付けず、`allowExternalApRedirect` の設定まで上書きしてしまったので、
+	// 両 hop とも「応答した host が要求した host と同じか」だけを見る形に戻した
+	// (3 周目レビュー H1/H2/M1)。落ちることを固定する。
+	t.Run("discovery が別 host へ委譲されていたら読まない", func(t *testing.T) {
 		repo := testutil.NewMockInstanceRepository()
 		delegated := `{"links":[{"rel":"http://nodeinfo.diaspora.software/ns/schema/2.1",
 			"href":"https://social.remote.example/nodeinfo/2.1"}]}`
@@ -508,27 +502,7 @@ func TestFetchNodeinfo_RefusesCrossHostRedirect(t *testing.T) {
 		svc.Fetch("remote.example")
 		got, err := repo.FindByHost("remote.example")
 		require.NoError(t, err)
-		require.NotNil(t, got.SoftwareName, "`.well-known` の委譲を落としている")
-		require.Equal(t, "misskey", *got.SoftwareName)
-	})
-
-	// 委譲先を基準に href を縛る (元の host ではなく、実際に応答した host)。
-	t.Run("委譲先を基準に href を縛る", func(t *testing.T) {
-		repo := testutil.NewMockInstanceRepository()
-		// discovery は social.remote.example が返したのに、href は元の host。
-		orig := `{"links":[{"rel":"http://nodeinfo.diaspora.software/ns/schema/2.1",
-			"href":"https://remote.example/nodeinfo/2.1"}]}`
-		fetcher := &scriptedFetcher{
-			bodies:    [][]byte{[]byte(orig), []byte(poisoned)},
-			finalURLs: []string{"https://social.remote.example/.well-known/nodeinfo", ""},
-		}
-		svc := instance.NewFetchMetadataService(repo, fetcher)
-		require.NoError(t, repo.Create(&model.Instance{ID: "i1", Host: "remote.example"}))
-
-		svc.Fetch("remote.example")
-		got, err := repo.FindByHost("remote.example")
-		require.NoError(t, err)
-		require.Nil(t, got.SoftwareName, "委譲先以外を指す href を辿っている")
+		require.Nil(t, got.SoftwareName, "別 host が返した JSON を書き戻している")
 	})
 
 	t.Run("文書が別 host へ飛ばされたら読まない", func(t *testing.T) {

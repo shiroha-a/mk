@@ -97,7 +97,7 @@ func (c *FederationChecker) fetchRemoteVersion(ctx context.Context, host string)
 	if nodeinfoURL == "" {
 		return ""
 	}
-	body, err := c.httpGetJSON(ctx, nodeinfoURL, true)
+	body, err := c.httpGetJSON(ctx, nodeinfoURL)
 	if err != nil {
 		return ""
 	}
@@ -116,7 +116,7 @@ func (c *FederationChecker) fetchRemoteVersion(ctx context.Context, host string)
 // document and returns the actual nodeinfo JSON URL (preferring 2.1, then
 // 2.0)。discovery shape 見つからなければ空文字。
 func (c *FederationChecker) resolveNodeinfoURL(ctx context.Context, host, discoveryURL string) string {
-	body, err := c.httpGetJSON(ctx, discoveryURL, false)
+	body, err := c.httpGetJSON(ctx, discoveryURL)
 	if err != nil {
 		return ""
 	}
@@ -175,7 +175,7 @@ func nodeinfoHrefBelongsTo(href, host string) bool {
 }
 
 // httpGetJSON is a small GET helper that reads up to 1 MiB of body.
-func (c *FederationChecker) httpGetJSON(ctx context.Context, url string, sameHostOnly bool) ([]byte, error) {
+func (c *FederationChecker) httpGetJSON(ctx context.Context, url string) ([]byte, error) {
 	// **未配線なら取りに行かない (fail-closed)。** 素の `http.Client` へ落とすと
 	// SSRF ガードを通らない client で外へ出てしまう。
 	if c.client == nil {
@@ -191,17 +191,18 @@ func (c *FederationChecker) httpGetJSON(ctx context.Context, url string, sameHos
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	// **document hop は飛び先も縛る (レビュー H3)。** href の host を検証しても、
-	// client が追従するなら 302 一回で任意の host / ポートへ飛べる。
-	// **discovery hop は縛らない (2 周目レビュー M5)** — `.well-known/*` を別の
-	// host へ委譲する構成は実在するので、そこを落とすと相手の reversiVersion が
-	// 永久に取れない。飛んだ先を以後の基準にすることで、任意の host へは抜け
-	// られないようにしてある。
-	if sameHostOnly {
-		if final := resp.Request; final != nil && final.URL != nil && req.URL != nil {
-			if !sameRequestHost(final.URL, req.URL) {
-				return nil, errRedirectedToAnotherHost
-			}
+	// **応答した host が要求した host と同じであることを見る (レビュー H3)。**
+	// href の host を検証しても、client が追従するなら 302 一回で任意の host /
+	// ポートへ飛べる。
+	//
+	// **hop ごとに方針を分けない (3 周目レビュー H1/H2)。** discovery だけ追従を
+	// 許して「飛んだ先を以後の基準にする」形を試したが、この層は最終 URL を
+	// 呼び出し側へ返さないので**委譲先を基準にする実装がそもそも無く**、
+	// 「直った」と書いたコメントとテストだけが残っていた。`.well-known/*` を
+	// 別 host へ委譲している相手の reversiVersion は取れない。
+	if final := resp.Request; final != nil && final.URL != nil && req.URL != nil {
+		if !sameRequestHost(final.URL, req.URL) {
+			return nil, errRedirectedToAnotherHost
 		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -231,7 +232,10 @@ func trimDefaultPort(hostPort, scheme string) string {
 	hostPort = strings.ToLower(strings.TrimSpace(hostPort))
 	h, p, err := net.SplitHostPort(hostPort)
 	if err != nil {
-		return hostPort
+		// ポートが無い形。IPv6 リテラルは `[::1]` のまま来るので、下の
+		// JoinHostPort が付け直す形と揃うよう bracket を外しておく
+		// (3 周目レビュー L3 — 外さないと `[::1]:443` と `[::1]` が別物になる)。
+		return strings.TrimSuffix(strings.TrimPrefix(hostPort, "["), "]")
 	}
 	if isDefaultPortForScheme(scheme, p) {
 		return h

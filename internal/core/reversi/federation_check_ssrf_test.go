@@ -84,7 +84,7 @@ func TestFederationCheckerWithoutClientDoesNotFetch(t *testing.T) {
 
 	// 取得口を直接叩く。ここが fail-open に戻ると、client を自前で作って
 	// 外へ出てしまう。
-	_, err := c.httpGetJSON(context.Background(), "https://remote.example/.well-known/nodeinfo", true)
+	_, err := c.httpGetJSON(context.Background(), "https://remote.example/.well-known/nodeinfo")
 	require.ErrorIs(t, err, errNoHTTPClient, "client 未配線なのに取りに行っている")
 
 	// discovery の解決も同じ理由で何も返さない。
@@ -132,7 +132,7 @@ func TestHTTPGetJSONRefusesCrossHostRedirect(t *testing.T) {
 	t.Run("別 host へ飛ばされたら読まない", func(t *testing.T) {
 		d := &redirectingDoer{to: "https://evil.example/ni", body: `{"metadata":{"reversiVersion":"1.1.1"}}`}
 		c := NewFederationChecker(nil, d)
-		_, err := c.httpGetJSON(context.Background(), asked, true)
+		_, err := c.httpGetJSON(context.Background(), asked)
 		require.ErrorIs(t, err, errRedirectedToAnotherHost,
 			"別 host が返した本文を読んでいる")
 	})
@@ -140,7 +140,7 @@ func TestHTTPGetJSONRefusesCrossHostRedirect(t *testing.T) {
 	t.Run("同じ host の中の redirect は通す", func(t *testing.T) {
 		d := &redirectingDoer{to: "https://remote.example/nodeinfo/2.1/", body: `{"ok":true}`}
 		c := NewFederationChecker(nil, d)
-		body, err := c.httpGetJSON(context.Background(), asked, true)
+		body, err := c.httpGetJSON(context.Background(), asked)
 		require.NoError(t, err)
 		require.JSONEq(t, `{"ok":true}`, string(body))
 	})
@@ -148,7 +148,7 @@ func TestHTTPGetJSONRefusesCrossHostRedirect(t *testing.T) {
 	t.Run("既定ポートの明記は同じ host", func(t *testing.T) {
 		d := &redirectingDoer{to: "https://remote.example:443/nodeinfo/2.1", body: `{"ok":true}`}
 		c := NewFederationChecker(nil, d)
-		_, err := c.httpGetJSON(context.Background(), asked, true)
+		_, err := c.httpGetJSON(context.Background(), asked)
 		require.NoError(t, err)
 	})
 }
@@ -174,14 +174,39 @@ func TestResolveNodeinfoURLAcceptsHTTPHref(t *testing.T) {
 	}
 }
 
-// **discovery の委譲は追う (2 周目レビュー M5)。** `.well-known/*` を別 host へ
-// まとめて委譲する構成は実在する。document hop だけ飛び先を縛る。
-func TestHTTPGetJSONFollowsDiscoveryRedirect(t *testing.T) {
+// **`.well-known/*` を別 host へ委譲している相手からは取れない (既知の限界)。**
+// hop ごとに方針を分ける形を試したが、この層は最終 URL を呼び出し側へ返さない
+// ので委譲先を基準にする実装がそもそも作れず、「直った」と書いたコメントと
+// テストだけが残る状態になった (3 周目レビュー H1)。落ちることを固定する。
+func TestHTTPGetJSONRefusesDelegatedDiscovery(t *testing.T) {
 	d := &redirectingDoer{to: "https://social.remote.example/.well-known/nodeinfo", body: `{"ok":true}`}
 	c := NewFederationChecker(nil, d)
 
-	body, err := c.httpGetJSON(context.Background(),
-		"https://remote.example/.well-known/nodeinfo", false)
-	require.NoError(t, err, "`.well-known` の委譲を落としている")
-	require.JSONEq(t, `{"ok":true}`, string(body))
+	_, err := c.httpGetJSON(context.Background(), "https://remote.example/.well-known/nodeinfo")
+	require.ErrorIs(t, err, errRedirectedToAnotherHost,
+		"委譲先が返した本文を読んでいる")
+}
+
+// **既定ポートは数値で比べる (3 周目レビュー L6)。** 統合の動機がこれなのに、
+// 文字列比較へ戻す変異が検出されなかった。IPv6 リテラルの bracket も、
+// ポートの有無で食い違わないこと (同 L3)。
+func TestNodeinfoHrefBelongsTo_DefaultPorts(t *testing.T) {
+	cases := []struct {
+		href, host string
+		want       bool
+	}{
+		{"https://remote.example:443/ni", "remote.example", true},
+		{"https://remote.example:0443/ni", "remote.example", true},
+		{"http://remote.example:80/ni", "remote.example", true},
+		{"http://remote.example:080/ni", "remote.example", true},
+		{"https://remote.example:80/ni", "remote.example", false},
+		{"https://remote.example:8443/ni", "remote.example", false},
+		{"https://[2001:db8::1]:443/ni", "[2001:db8::1]", true},
+		{"https://[2001:db8::1]/ni", "[2001:db8::1]", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.href+" vs "+tc.host, func(t *testing.T) {
+			require.Equal(t, tc.want, nodeinfoHrefBelongsTo(tc.href, tc.host))
+		})
+	}
 }
