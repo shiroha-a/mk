@@ -68,6 +68,20 @@ var (
 	// 絵文字として登録される。`core/user` の applyMediaUpdate が avatar / banner
 	// に対して同じ検証をしている。
 	ErrForeignFile = errors.New("drive file belongs to another user")
+	// ErrImageCopyFailed is returned when the approved image could not be
+	// duplicated into a system-owned drive file (#2966).
+	//
+	// **`ErrFileGone` に潰さない。** ストレージ障害や DB 障害を「そんな
+	// ファイルは無い」(400) に化けさせると、モデレーターには却下すべき申請に
+	// 見え、監視でも 5xx が立たない (#2792 が禁じている形)。リモート経路が
+	// `ErrRemoteFetchFailed` を 500 に倒しているのと揃える。
+	ErrImageCopyFailed = errors.New("failed to copy emoji image")
+	// ErrImageTooLarge is returned when the approved image exceeds the copy
+	// limit (#2966).
+	//
+	// **利用者に伝わる形にする。** drive が受け取れる大きさと複製の上限が
+	// 食い違うと、承認だけが恒久的に失敗する。原因が分かる文面を返す。
+	ErrImageTooLarge = errors.New("emoji image is too large to register")
 	// ErrFileGone is returned when the drive file backing the request was
 	// deleted between applying and approving.
 	//
@@ -745,6 +759,23 @@ func (s *Service) Approve(ctx context.Context, id, moderatorID string) (*model.E
 	// いたら、上書きせずに ErrNotPending を返す (レビュー M1)。
 	ok, err := s.apps.UpdateIfPending(app)
 	if err != nil {
+		// **障害で書けなかったときも作ったものを片付ける (レビュー M1)。**
+		// 残すと、申請は `pending` のままなのに絵文字だけ存在するので、もう一度
+		// 承認を押すと**自分がさっき作った絵文字**が重複として当たり
+		// `DUPLICATE_NAME` になる — その申請は二度と承認できない。しかも
+		// 取り残した絵文字が複製した drive ファイルを孤児 cleanup から守って
+		// しまうので、ストレージも回収されない。
+		//
+		// **書けていたかどうかを先に確かめる。** 稀に「commit は通ったが応答が
+		// 返らなかった」ことがあり、そのとき消すと承認済みの申請が存在しない
+		// 絵文字を指す。読み直して自分の承認が載っていれば何も消さない。
+		if !s.approvalLanded(app.ID, created.EmojiID) {
+			if derr := s.creator.DeleteCreatedEmoji(ctx, created); derr != nil {
+				slog.Warn("emojiapplication: 書き込みに失敗した承認の後始末に失敗した",
+					"applicationId", app.ID, "emojiId", created.EmojiID,
+					"driveFileId", created.DriveFileID, "err", derr)
+			}
+		}
 		return nil, err
 	}
 	if !ok {
@@ -762,6 +793,22 @@ func (s *Service) Approve(ctx context.Context, id, moderatorID string) (*model.E
 	}
 	s.notify(ctx, app)
 	return app, nil
+}
+
+// approvalLanded reports whether the approval actually reached the DB despite
+// UpdateIfPending returning an error (#2966 / レビュー M1)。
+//
+// **読めなければ「載っていない」に倒す。** 確かめられないまま残すと、申請は
+// 二度と承認できないうえ複製したファイルも回収されない。消す側に倒すと、稀な
+// ケースで「承認済みなのに絵文字が無い」になるが、そちらは画面から見えて手で
+// 直せる。黙って詰むより良い。
+func (s *Service) approvalLanded(appID, emojiID string) bool {
+	cur, err := s.apps.FindByID(appID)
+	if err != nil || cur == nil {
+		return false
+	}
+	return cur.Status == model.EmojiApplicationApproved &&
+		cur.EmojiID != nil && *cur.EmojiID == emojiID
 }
 
 // Reject closes the application without registering anything.

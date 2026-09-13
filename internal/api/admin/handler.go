@@ -546,7 +546,7 @@ type EmojiImageFetcher interface {
 	//
 	// **元のファイルは触らない** — 申請者はノートの添付やプロフィールで
 	// 使っている可能性があり、所有権を移すと drive から突然消える。
-	CopyToSystemFile(ctx context.Context, src *model.DriveFile, name string) (*model.DriveFile, error)
+	CopyToSystemFile(ctx context.Context, src *model.DriveFile, name string, sensitive bool) (*model.DriveFile, error)
 	// DeleteSystemFile removes a system-owned file created by CopyToSystemFile
 	// when the approval then failed (#2966).
 	DeleteSystemFile(ctx context.Context, fileID string) error

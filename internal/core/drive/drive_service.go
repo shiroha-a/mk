@@ -1087,9 +1087,16 @@ func (s *Service) DeleteSystemFile(id string) error {
 		}
 		return err
 	}
-	if f.UserID != nil {
+	if f.UserID != nil || f.UserHost != nil {
 		// **利用者のファイルは消さない。** 呼び出し側が id を取り違えたときに
 		// 申請者のファイルを消すのが最悪の壊れ方なので、ここで止める。
+		//
+		// **`userHost` も見る (レビュー M1)。** `userId IS NULL` かつ
+		// `userHost` 付きの行は、著者をまだ materialize していないリモートの
+		// 添付ファイル (#2717) で、**表示中の note が参照している**。
+		// `orphanWhere` (`internal/repository/drive_file.go`) も同じ理由で
+		// `"userHost" IS NULL` を要求しており、そちらより緩いと守る範囲が
+		// 食い違う。
 		return ErrAccessDenied
 	}
 	if err := s.deleteFileObjects(f); err != nil {

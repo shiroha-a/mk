@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -19,6 +20,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safehttp"
 )
 
 // stubEmojiReviewer records calls and returns canned results.
@@ -666,12 +668,13 @@ type stubFetcher struct {
 	err  error
 
 	// #2966 (承認時に system 所有へ複製する経路)
-	copySrc    []*model.DriveFile
-	copyNames  []string
-	copyFile   *model.DriveFile
-	copyErr    error
-	deletedIDs []string
-	deleteErr  error
+	copySrc       []*model.DriveFile
+	copyNames     []string
+	copySensitive []bool
+	copyFile      *model.DriveFile
+	copyErr       error
+	deletedIDs    []string
+	deleteErr     error
 }
 
 func (s *stubFetcher) FetchAndStore(_ context.Context, _ string, _ *model.User, _ string) (*model.DriveFile, error) {
@@ -681,9 +684,10 @@ func (s *stubFetcher) FetchAndStore(_ context.Context, _ string, _ *model.User, 
 	return s.file, nil
 }
 
-func (s *stubFetcher) CopyToSystemFile(_ context.Context, src *model.DriveFile, name string) (*model.DriveFile, error) {
+func (s *stubFetcher) CopyToSystemFile(_ context.Context, src *model.DriveFile, name string, sensitive bool) (*model.DriveFile, error) {
 	s.copySrc = append(s.copySrc, src)
 	s.copyNames = append(s.copyNames, name)
+	s.copySensitive = append(s.copySensitive, sensitive)
 	if s.copyErr != nil {
 		return nil, s.copyErr
 	}
@@ -1477,4 +1481,42 @@ func TestCreateFromRemoteApplicationReturnsDriveFileID(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "sys-ok", created.DriveFileID, "取り込んだ drive ファイルを返していない")
 	require.NotEmpty(t, created.EmojiID)
+}
+
+// **複製した実体の MIME を見ること (#2966 / レビュー M5)。** `Upload` は
+// バイト列から型を引き直すので、元の行の宣言と実体がずれていると allowlist 外の
+// 型が絵文字として登録される。remote 経路は同じ理由で取り込み後に見ている。
+func TestCreateFromApplicationChecksCopiedMIME(t *testing.T) {
+	emojis := newEmojiRepoWith("")
+	// 元の行は png を名乗るが、複製したら svg だった、という形。
+	fetcher := &stubFetcher{copyFile: &model.DriveFile{
+		ID: "sys-bad", URL: "https://x/bad.svg", Type: "image/svg+xml",
+	}}
+
+	_, err := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher).
+		CreateFromApplication(context.Background(), ownApplication())
+	require.ErrorIs(t, err, emojiapplication.ErrUnsupportedFileType)
+	require.Empty(t, emojis.Emojis, "allowlist 外の型で絵文字が作られている")
+	require.Equal(t, []string{"sys-bad"}, fetcher.deletedIDs, "弾いた複製が drive に残っている")
+}
+
+// 複製の失敗は 400「そんなファイルは無い」に潰さない (#2966 / レビュー M2)。
+// ストレージや DB の障害が client error に化けると、監視でも 5xx が立たず、
+// モデレーターには却下すべき申請に見える。
+func TestCreateFromApplicationCopyFailureIsNotFileGone(t *testing.T) {
+	fetcher := &stubFetcher{copyErr: errors.New("storage down")}
+	_, err := newCreatorHandlerWithFetcher(t, newEmojiRepoWith(""), newDriveRepoWith(pngFile()), fetcher).
+		CreateFromApplication(context.Background(), ownApplication())
+	require.ErrorIs(t, err, emojiapplication.ErrImageCopyFailed)
+	require.NotErrorIs(t, err, emojiapplication.ErrFileGone,
+		"ストレージ障害が「ファイルが無い」(400) に化けている")
+}
+
+// 大きすぎる画像は、原因が分かる専用のエラーにする (#2966 / レビュー H1)。
+func TestCreateFromApplicationCopyTooLarge(t *testing.T) {
+	fetcher := &stubFetcher{copyErr: fmt.Errorf("read source file: %w", safehttp.ErrResponseTooLarge)}
+	_, err := newCreatorHandlerWithFetcher(t, newEmojiRepoWith(""), newDriveRepoWith(pngFile()), fetcher).
+		CreateFromApplication(context.Background(), ownApplication())
+	require.ErrorIs(t, err, emojiapplication.ErrImageTooLarge)
+	require.NotErrorIs(t, err, emojiapplication.ErrFileGone)
 }

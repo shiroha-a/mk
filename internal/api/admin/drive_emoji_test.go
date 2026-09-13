@@ -516,7 +516,7 @@ func (f *fakeEmojiImageFetcher) FetchAndStore(_ context.Context, url string, use
 	return f.returnDF, nil
 }
 
-func (f *fakeEmojiImageFetcher) CopyToSystemFile(_ context.Context, src *model.DriveFile, name string) (*model.DriveFile, error) {
+func (f *fakeEmojiImageFetcher) CopyToSystemFile(_ context.Context, src *model.DriveFile, name string, sensitive bool) (*model.DriveFile, error) {
 	f.copyCalls = append(f.copyCalls, src)
 	f.copyNames = append(f.copyNames, name)
 	if f.copyErr != nil {

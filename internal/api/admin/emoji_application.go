@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safehttp"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
@@ -176,6 +177,14 @@ func emojiApplicationReviewError(c echo.Context, err error) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"UNSUPPORTED_FILE_TYPE", "Unsupported file type.",
 			"f7599d96-8750-af68-1633-9575d625c1a7"))
+	case errors.Is(err, emojiapplication.ErrImageTooLarge):
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"EMOJI_IMAGE_TOO_LARGE", "The image is too large to register as an emoji.",
+			"6b1d5f0a-3c9e-4f27-9a4d-7e2b8c1f0d64"))
+	case errors.Is(err, emojiapplication.ErrImageCopyFailed):
+		return c.JSON(http.StatusInternalServerError, apierr.Error(
+			"INTERNAL_ERROR", "Failed to copy emoji image.",
+			"c2f7a3d1-58be-4e09-bb26-0d4a9e7f3c15"))
 	case errors.Is(err, emojiapplication.ErrRemoteFetchFailed):
 		return c.JSON(http.StatusInternalServerError, apierr.Error(
 			"INTERNAL_ERROR", "Failed to fetch emoji image.",
@@ -413,13 +422,30 @@ func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApp
 	src := f
 	systemFileID := ""
 	if h.emojiImageFetcher != nil {
-		copied, cerr := h.emojiImageFetcher.CopyToSystemFile(ctx, f, app.Name)
+		copied, cerr := h.emojiImageFetcher.CopyToSystemFile(ctx, f, app.Name, app.IsSensitive)
 		if cerr != nil {
 			slog.WarnContext(ctx, "emoji application: drive copy failed",
 				"applicationId", app.ID, "fileId", *app.FileID, "err", cerr)
 			// **絵文字を作らない。** ここで元ファイルを参照して作ると、直そうと
 			// しているバグをそのまま残すことになる。申請は pending のまま。
-			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrFileGone
+			//
+			// **失敗の種類を潰さない (レビュー H2)。** すべて `ErrFileGone` に
+			// すると 400「そんなファイルは無い」になり、ストレージや DB の障害が
+			// **client error に化けて監視でも 5xx が立たない** (#2792)。しかも
+			// モデレーターには却下すべき申請に見える。
+			if errors.Is(cerr, safehttp.ErrResponseTooLarge) {
+				return emojiapplication.CreatedEmoji{}, emojiapplication.ErrImageTooLarge
+			}
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrImageCopyFailed
+		}
+		// **複製した実体の MIME を見る (レビュー M5)。** `Upload` は
+		// `AnalyseFile` でバイト列から型を引き直すので、元の行の宣言と実体が
+		// ずれていると allowlist 外の型が絵文字として登録される (TS 製 DB からの
+		// drop-in や実体破損で起きうる)。remote 経路が同じ理由で取り込み後に
+		// 見ているのに、own だけ無検査なのは非対称。
+		if !isAllowedEmojiImageType(copied.Type) {
+			h.deleteSystemEmojiFile(ctx, copied.ID)
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrUnsupportedFileType
 		}
 		src = copied
 		systemFileID = copied.ID

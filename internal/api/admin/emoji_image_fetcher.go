@@ -18,6 +18,18 @@ import (
 // generous headroom for animated PNG / APNG / WebP.
 const MaxEmojiImageBytes int64 = 8 << 20
 
+// MaxEmojiCopyBytes caps the local drive file duplicated on approval (#2966).
+//
+// **リモート取得の上限 (8 MiB) を流用しない。** あちらは相手サーバーが
+// いくらでも送れるので低く抑えているが、こちらは**自分の drive が既に
+// 受け取ったファイル**で、大きさは role policy の `maxFileSizeMb` (既定 30)
+// が決めている。8 MiB のままだと、**申請はできたのに承認だけが恒久的に
+// 失敗する**サイズ帯が生まれる (レビュー H2 で実測)。
+//
+// 既定の 30 MB に余裕を足した値にする。policy をこれより上げている構成では
+// 承認が `EMOJI_IMAGE_TOO_LARGE` になるが、原因が分かる文面を返す。
+const MaxEmojiCopyBytes int64 = 32 << 20
+
 // DefaultEmojiCopyAccept matches the headers Misskey TS sends when fetching
 // emoji images via DriveService.uploadFromUrl. */* fallback is required since
 // some CDN-fronted emoji use generic image/* responses.
@@ -111,7 +123,7 @@ func (f *EmojiImageFetcherImpl) FetchAndStore(ctx context.Context, imageURL stri
 //
 // 承認した絵文字が申請者の drive ファイルに依存し続けるのを断つための複製。
 // 申請者がファイルを消しても、アカウントを消しても、絵文字は生き残る。
-func (f *EmojiImageFetcherImpl) CopyToSystemFile(ctx context.Context, src *model.DriveFile, name string) (*model.DriveFile, error) {
+func (f *EmojiImageFetcherImpl) CopyToSystemFile(ctx context.Context, src *model.DriveFile, name string, sensitive bool) (*model.DriveFile, error) {
 	if f.driveSvc == nil {
 		return nil, fmt.Errorf("emoji image fetcher not wired")
 	}
@@ -120,7 +132,7 @@ func (f *EmojiImageFetcherImpl) CopyToSystemFile(ctx context.Context, src *model
 	}
 	// **ストレージから直に読む。** `storageFor` が `storedInternal` を見るので、
 	// オブジェクトストレージへ移行する前に保存されたファイルもローカルから読める。
-	body, err := f.driveSvc.ReadFileBody(src, MaxEmojiImageBytes)
+	body, err := f.driveSvc.ReadFileBody(src, MaxEmojiCopyBytes)
 	if err != nil {
 		return nil, fmt.Errorf("read source file: %w", err)
 	}
@@ -140,7 +152,9 @@ func (f *EmojiImageFetcherImpl) CopyToSystemFile(ctx context.Context, src *model
 		Force: true,
 		// **センシティブの指定は引き継ぐ。** 申請の `isSensitive` は絵文字側に
 		// 入るが、drive のファイル自体にも印を残しておくと管理画面で分かる。
-		IsSensitive: src.IsSensitive,
+		// **申請側の指定も見る (レビュー L2)** — 元ファイルに印が無くても、
+		// 申請で sensitive を付けたなら複製にも付ける。
+		IsSensitive: src.IsSensitive || sensitive,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("upload copy to drive: %w", err)

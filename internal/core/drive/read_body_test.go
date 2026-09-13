@@ -1,13 +1,16 @@
 package drive_test
 
 import (
+	"bytes"
 	"context"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 )
 
 // **ストレージから実体を読めること (#2966)。** 承認時に絵文字の画像を
@@ -55,6 +58,44 @@ func TestReadFileBodyWithoutBody(t *testing.T) {
 	}
 }
 
+// **`storedInternal` の行はローカルから読むこと (#2966 / レビュー M4)。**
+// オブジェクトストレージを有効にする前に保存されたファイルはローカル FS に
+// 残る。primary だけを見ると、S3 に存在しないキーを読みに行って空振りする。
+// primary と local が同じ構成では、この分岐を消しても結果が変わらない。
+func TestReadFileBodyUsesLocalForStoredInternal(t *testing.T) {
+	fileRepo := testutil.NewMockDriveFileRepository()
+	folderRepo := testutil.NewMockDriveFolderRepository()
+	folderRepo.FilesRef = fileRepo
+	idGen, _ := id.NewGenerator("aidx")
+
+	// primary (= オブジェクトストレージのつもり) と local を別物にする。
+	primary := drive.NewLocalStorage(t.TempDir(), "https://s3.example/files")
+	local := drive.NewLocalStorage(t.TempDir(), "https://example.com/files")
+	svc := drive.NewService(fileRepo, folderRepo, primary, idGen)
+	svc.SetLocalStorage(local)
+
+	// ローカルにだけ実体がある行 (移行前に保存されたもの)。
+	key := "legacy-key"
+	want := []byte("legacy-bytes")
+	_, err := local.Put(key, bytes.NewReader(want))
+	require.NoError(t, err)
+
+	f := &model.DriveFile{ID: "f-legacy", AccessKey: &key, StoredInternal: true}
+	got, err := svc.ReadFileBody(f, 1<<20)
+	require.NoError(t, err, "storedInternal の行をローカルから読めていない")
+	require.Equal(t, want, got)
+
+	// primary にしか無い行は primary から読む。
+	key2 := "s3-key"
+	want2 := []byte("s3-bytes")
+	_, err = primary.Put(key2, bytes.NewReader(want2))
+	require.NoError(t, err)
+	f2 := &model.DriveFile{ID: "f-s3", AccessKey: &key2}
+	got2, err := svc.ReadFileBody(f2, 1<<20)
+	require.NoError(t, err)
+	require.Equal(t, want2, got2)
+}
+
 // **実体があってもリンクは読まない。** `isLink` の行は URL を指しているだけで、
 // accessKey にキャッシュが残っていても「そのファイルの本体」ではない。
 // 実体の有無で結果が変わらない seed だと、ガードを外す変異が素通りする (実測)。
@@ -99,6 +140,27 @@ func TestDeleteSystemFileRefusesUserOwned(t *testing.T) {
 	got, err := fileRepo.FindByID(f.ID)
 	require.NoError(t, err)
 	require.NotNil(t, got, "利用者のファイルが消えている")
+}
+
+// **リモートの添付も消さない (レビュー M1)。** `userId IS NULL` でも
+// `userHost` が付いている行は、著者をまだ materialize していないリモートの
+// 添付 (#2717) で、**表示中の note が参照している**。`orphanWhere` も同じ理由で
+// `"userHost" IS NULL` を要求しており、そちらより緩いと守る範囲が食い違う。
+func TestDeleteSystemFileRefusesRemoteAttachment(t *testing.T) {
+	svc, fileRepo, _ := newSvc(t)
+	// 著者をまだ materialize していないリモートの添付 (#2717) —
+	// `userId` は NULL だが `userHost` が付いている。
+	host := "remote.example"
+	key := "k-remote"
+	require.NoError(t, fileRepo.Create(&model.DriveFile{
+		ID: "rf1", UserHost: &host, AccessKey: &key,
+		URL: "https://remote.example/a.png", Type: "image/png",
+	}))
+
+	require.Error(t, svc.DeleteSystemFile("rf1"), "リモートの添付を消している")
+	got, err := fileRepo.FindByID("rf1")
+	require.NoError(t, err)
+	require.NotNil(t, got, "リモートの添付が消えている")
 }
 
 // 存在しない id は成功として扱う (二重に呼ばれても壊れない)。

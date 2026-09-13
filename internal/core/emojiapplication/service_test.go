@@ -25,6 +25,9 @@ type fakeApps struct {
 	// while FindByID still sees the row as pending. **読んだ後に負ける**状況は
 	// これでしか作れない (両方が同じ map を見ているため)。
 	loseRace bool
+	// updateLands makes a failing UpdateIfPending still persist the row, so the
+	// "commit は通ったが応答が返らなかった" case can be exercised (#2966)。
+	updateLands bool
 	// quotaLimits records what Create asked for so the policy plumbing can be
 	// asserted without a database (#2958 / #2977).
 	quotaLimits repository.QuotaLimits
@@ -127,6 +130,12 @@ func (f *fakeApps) ListByUser(string, int, string) ([]model.EmojiApplication, er
 func (f *fakeApps) CountPending() (int64, error)                                     { return 0, nil }
 func (f *fakeApps) UpdateIfPending(a *model.EmojiApplication) (bool, error) {
 	if f.updateErr != nil {
+		// **「書けたが応答が返らなかった」を作る (#2966)。** 行には反映された
+		// まま err を返すと、呼び出し側が読み直して気付けるかを試せる。
+		if f.updateLands {
+			cp := *a
+			f.rows[a.ID] = &cp
+		}
 		return false, f.updateErr
 	}
 	if f.loseRace {
@@ -604,7 +613,10 @@ func TestCreateCountsLengthInRunes(t *testing.T) {
 func TestApproveCleansUpWhenLosingRace(t *testing.T) {
 	apps := newFakeApps()
 	apps.rows["a1"] = &model.EmojiApplication{ID: "a1", UserID: "u1", Status: model.EmojiApplicationPending}
-	creator := &fakeCreator{id: "e-orphan"}
+	// **drive の複製も一緒に渡ること (#2966 / レビュー M3)。** 絵文字だけ
+	// 片付けると、承認時に作った system 所有のファイルが誰からも参照されない
+	// まま残り、しかも孤児 cleanup にも拾われない。
+	creator := &fakeCreator{id: "e-orphan", driveFileID: "sys-orphan"}
 	svc := newService(t, apps, &fakeEmojis{}, creator)
 
 	// **読んだ時点では pending だが、書く直前に他のモデレーターが処理する。**
@@ -613,6 +625,8 @@ func TestApproveCleansUpWhenLosingRace(t *testing.T) {
 	_, err := svc.Approve(context.Background(), "a1", "mod1")
 	require.ErrorIs(t, err, ErrNotPending)
 	require.True(t, creator.called, "emoji が作られていない (前提が崩れている)")
+	require.Equal(t, []CreatedEmoji{{EmojiID: "e-orphan", DriveFileID: "sys-orphan"}}, creator.deleted,
+		"drive の複製が片付けられていない (#2966)")
 	require.Equal(t, []string{"e-orphan"}, creator.deletedEmojiIDs(),
 		"競合に負けた承認の emoji が残っている")
 
@@ -1400,4 +1414,38 @@ func TestHasQuotaResetRepoReflectsWiring(t *testing.T) {
 	require.False(t, svc.HasQuotaResetRepo(), "未配線なのに配線済みと報告している")
 	svc.SetQuotaResetRepo(&fakeResets{})
 	require.True(t, svc.HasQuotaResetRepo())
+}
+
+// **書き込みが障害で失敗したときも作ったものを片付けること (#2966 / レビュー M1)。**
+// 残すと、申請は pending のままなのに絵文字だけ存在するので、もう一度承認を
+// 押すと自分がさっき作った絵文字が重複として当たり、その申請は二度と承認
+// できない。取り残した絵文字が複製した drive ファイルを孤児 cleanup から
+// 守るので、ストレージも回収されない。
+func TestApproveCleansUpWhenUpdateFails(t *testing.T) {
+	apps := newFakeApps()
+	apps.rows["a1"] = &model.EmojiApplication{ID: "a1", UserID: "u1", Status: model.EmojiApplicationPending}
+	apps.updateErr = errBoom
+	creator := &fakeCreator{id: "e-orphan", driveFileID: "sys-orphan"}
+	svc := newService(t, apps, &fakeEmojis{}, creator)
+
+	_, err := svc.Approve(context.Background(), "a1", "mod1")
+	require.ErrorIs(t, err, errBoom)
+	require.Equal(t, []CreatedEmoji{{EmojiID: "e-orphan", DriveFileID: "sys-orphan"}}, creator.deleted,
+		"書き込みに失敗したのに作ったものが残っている (その申請は二度と承認できない)")
+}
+
+// **書けていたなら消さない。** 稀に「commit は通ったが応答が返らなかった」ことが
+// あり、そのとき消すと承認済みの申請が存在しない絵文字を指す。
+func TestApproveKeepsCreatedWhenApprovalLanded(t *testing.T) {
+	apps := newFakeApps()
+	apps.rows["a1"] = &model.EmojiApplication{ID: "a1", UserID: "u1", Status: model.EmojiApplicationPending}
+	apps.updateErr = errBoom
+	// 書き込み自体は通っていた形にする。
+	apps.updateLands = true
+	creator := &fakeCreator{id: "e-landed", driveFileID: "sys-landed"}
+	svc := newService(t, apps, &fakeEmojis{}, creator)
+
+	_, err := svc.Approve(context.Background(), "a1", "mod1")
+	require.ErrorIs(t, err, errBoom)
+	require.Empty(t, creator.deleted, "承認が通っていたのに作ったものを消している")
 }
