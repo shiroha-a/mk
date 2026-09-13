@@ -208,7 +208,9 @@ func (p *Processor) resolveTargetUser(uri string) (*model.User, error) {
 
 // ChatMessageReceiver handles inbound Misskey:ChatMessage activities.
 type ChatMessageReceiver interface {
-	CreateMessageViaAP(ctx context.Context, uri string, fromUser *model.User, toUserID, text string) (*model.ChatMessage, error)
+	// mfmSource は相手が併記した MFM の原文 (`source` / `_misskey_content`)。
+	// 空なら text (HTML) から戻す。
+	CreateMessageViaAP(ctx context.Context, uri string, fromUser *model.User, toUserID, text, mfmSource string) (*model.ChatMessage, error)
 }
 
 // Hook mutation contract (TimelineFanoutHook / NotificationHook / NoteChartHook):
@@ -1486,20 +1488,36 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 	// chatRoomReceiver が処理するのでどちらか配線済みなら probe する。
 	if p.chatService != nil || p.chatRoomReceiver != nil {
 		var probe struct {
-			Type        string          `json:"type"`
-			ID          string          `json:"id"`
-			Content     string          `json:"content"`
-			MisskeyTalk bool            `json:"_misskey_talk"`
-			To          json.RawMessage `json:"to"`
-			Context     json.RawMessage `json:"@context"`
+			Type    string `json:"type"`
+			ID      string `json:"id"`
+			Content string `json:"content"`
+			// **MFM の原文も拾う。** `content` は HTML なので、MFM に戻すと
+			// 情報が落ちる (装飾・色・絵文字・引用の改行など)。note 取り込みは
+			// 同じ 3 段 (source -> _misskey_content -> content) で拾っており、
+			// chat だけ `content` しか見ていなかった。
+			Source *struct {
+				Content   string `json:"content"`
+				MediaType string `json:"mediaType"`
+			} `json:"source"`
+			MisskeyContent string          `json:"_misskey_content"`
+			MisskeyTalk    bool            `json:"_misskey_talk"`
+			To             json.RawMessage `json:"to"`
+			Context        json.RawMessage `json:"@context"`
 		}
 		if err := json.Unmarshal(act.Object, &probe); err == nil && probe.MisskeyTalk && probe.Type == "Note" {
+			mfmSource := ""
+			if probe.Source != nil && probe.Source.MediaType == "text/x.misskeymarkdown" {
+				mfmSource = probe.Source.Content
+			}
+			if mfmSource == "" {
+				mfmSource = probe.MisskeyContent
+			}
 			// note の @context が room URI なら group chat message (#1209)。
 			// それ以外は従来の 1-on-1 DM。
 			if roomID, isRoom := chatRoomIDFromContext(probe.Context); isRoom {
-				return p.handleChatRoomMessageCreate(actor, probe.ID, probe.Content, roomID)
+				return p.handleChatRoomMessageCreate(actor, probe.ID, probe.Content, mfmSource, roomID)
 			}
-			return p.handleChatCreate(actor, probe.ID, probe.Content, probe.To)
+			return p.handleChatCreate(actor, probe.ID, probe.Content, mfmSource, probe.To)
 		}
 	}
 	// 本家 ApInboxService.create は resolve 前に activity.to/cc を Note object の
@@ -2710,7 +2728,7 @@ func readActorString(act genericActivity) (string, error) {
 // Create の入口 (`chatRoomIDFromContext`) が先に振り分け、
 // `handleChatRoomMessageCreate` → `CreateRoomMessageViaAP` が room のメンバー
 // 全員に配る。ここに複数 recipient が来ることはない。
-func (p *Processor) handleChatCreate(sender *model.User, noteURI, content string, toRaw json.RawMessage) error {
+func (p *Processor) handleChatCreate(sender *model.User, noteURI, content, mfmSource string, toRaw json.RawMessage) error {
 	if p.chatService == nil {
 		return ErrUnsupportedActivity
 	}
@@ -2736,7 +2754,7 @@ func (p *Processor) handleChatCreate(sender *model.User, noteURI, content string
 	if !recipient.IsLocal() {
 		return fmt.Errorf("chat create: recipient %s is not local", to)
 	}
-	_, err = p.chatService.CreateMessageViaAP(context.Background(), noteURI, sender, recipient.ID, content)
+	_, err = p.chatService.CreateMessageViaAP(context.Background(), noteURI, sender, recipient.ID, content, mfmSource)
 	// 列に収まらない uri は retry しても解決しないので drop する (#2726)。
 	if errors.Is(err, corechat.ErrInvalidTarget) {
 		slog.Warn("chat create: message cannot be stored", "actor", sender.ID)
@@ -2784,6 +2802,12 @@ func (p *Processor) handleChatMessage(act genericActivity) error {
 		AttributedTo string `json:"attributedTo"`
 		To           string `json:"to"`
 		Content      string `json:"content"`
+		// Create 経由の probe と同じ 3 段で MFM の原文も拾う。
+		Source *struct {
+			Content   string `json:"content"`
+			MediaType string `json:"mediaType"`
+		} `json:"source"`
+		MisskeyContent string `json:"_misskey_content"`
 	}
 	if err := json.Unmarshal(act.raw, &raw); err != nil {
 		return fmt.Errorf("chat message: unmarshal: %w", err)
@@ -2813,7 +2837,14 @@ func (p *Processor) handleChatMessage(act genericActivity) error {
 	if !recipient.IsLocal() {
 		return fmt.Errorf("chat message: recipient %s is not local", raw.To)
 	}
-	_, err = p.chatService.CreateMessageViaAP(context.Background(), act.ID, sender, recipient.ID, raw.Content)
+	mfmSource := ""
+	if raw.Source != nil && raw.Source.MediaType == "text/x.misskeymarkdown" {
+		mfmSource = raw.Source.Content
+	}
+	if mfmSource == "" {
+		mfmSource = raw.MisskeyContent
+	}
+	_, err = p.chatService.CreateMessageViaAP(context.Background(), act.ID, sender, recipient.ID, raw.Content, mfmSource)
 	// handleChatCreate と同じ理由で non-retry に落とす (#2726)。
 	if errors.Is(err, corechat.ErrInvalidTarget) {
 		slog.Warn("chat message: message cannot be stored", "actor", act.Actor)

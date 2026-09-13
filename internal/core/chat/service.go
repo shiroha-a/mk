@@ -907,8 +907,22 @@ func remoteChatRoomURI(ownerURI, roomID string) string {
 // `internal/core/federation/processor.go` の probe が `content` しか読まずに
 // 文字列として渡してくるため、この層に届いていない。優先順位を揃えるには
 // probe と `ChatMessageReceiver` の signature を広げる必要がある。
-func remoteChatText(content string) string {
+func remoteChatText(content, mfmSource string) string {
+	// **原文があれば HTML から戻さない。** `mfm.Parse` -> `ToHTML` -> `FromHTML`
+	// は往復で情報が落ちる (装飾 `$[shake x]` / 色 / `<center>` / 引用の改行 /
+	// 数式が失われ、絵文字の前後にゼロ幅文字が入る)。note 取り込みと同じ扱い。
+	if mfmSource != "" {
+		return colfit.Text(remoteNoNUL(mfmSource), chatMessageTextMaxRunes)
+	}
 	return colfit.Text(mfm.FromHTML(content), chatMessageTextMaxRunes)
+}
+
+// remoteNoNUL drops NUL bytes the way mfm.FromHTML does for the content path.
+//
+// `source` / `_misskey_content` は FromHTML を通らないので、ここで落とさないと
+// PostgreSQL の text 列が 22021 で落ちる (note 側の `remoteText` と同じ判断)。
+func remoteNoNUL(s string) string {
+	return strings.ReplaceAll(s, "\x00", "")
 }
 
 // CreateMessageViaAP persists a chat message received via ActivityPub from a
@@ -918,7 +932,7 @@ func remoteChatText(content string) string {
 // recipient の chatScope を必ず強制する (#692)。連合受信時は AP retry でこの
 // path が複数回踏まれるが、scope 違反は最初の試行で拒絶し、retry でも同じ
 // 結果になるので peer 側は dead letter で処理する。
-func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *model.User, toUserID, text string) (*model.ChatMessage, error) {
+func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *model.User, toUserID, text, mfmSource string) (*model.ChatMessage, error) {
 	if fromUser == nil || toUserID == "" {
 		return nil, ErrInvalidTarget
 	}
@@ -966,7 +980,7 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 		ToUserID:   &toUserID,
 	}
 	// text は HTML で届くので MFM に戻してから切る (CreateRoomMessageViaAP と同じ)。
-	if text = remoteChatText(text); text != "" {
+	if text = remoteChatText(text, mfmSource); text != "" {
 		msg.Text = &text
 	}
 	if uri != "" {
@@ -1223,7 +1237,7 @@ func (s *Service) RemoveMemberViaAP(roomID, userID string) error {
 // actor that is not part of the room. URI-based dedup handles AP retries.
 // Returns ErrNotFound when the room is unknown locally and ErrForbidden when
 // the sender is not a member, both of which the caller treats as permanent.
-func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error {
+func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text, mfmSource string) error {
 	if sender == nil || roomID == "" {
 		return ErrInvalidTarget
 	}
@@ -1260,7 +1274,7 @@ func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID,
 	}
 	// text は HTML で届くので MFM に戻してから切る (CreateMessageViaAP と同じ)。
 	// 空になったら列を NULL のままにする (生値が空だったときと同じ形にする)。
-	if text = remoteChatText(text); text != "" {
+	if text = remoteChatText(text, mfmSource); text != "" {
 		msg.Text = &text
 	}
 	if uri != "" {

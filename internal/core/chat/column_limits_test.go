@@ -59,7 +59,7 @@ func TestCreateRoomMessageViaAP_TruncatesText(t *testing.T) {
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "R", OwnerID: sender.ID}))
 
 	require.NoError(t, svc.CreateRoomMessageViaAP(
-		"https://remote.example/chat/messages/m1", sender, "room1", strings.Repeat("あ", 5000)))
+		"https://remote.example/chat/messages/m1", sender, "room1", strings.Repeat("あ", 5000), ""))
 	msgs, err := repo.ListMessagesByRoom("room1", "", "", 10)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
@@ -73,7 +73,7 @@ func TestCreateRoomMessageViaAP_NULOnlyTextStaysNull(t *testing.T) {
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "R", OwnerID: sender.ID}))
 
 	require.NoError(t, svc.CreateRoomMessageViaAP(
-		"https://remote.example/chat/messages/m1", sender, "room1", "\x00"))
+		"https://remote.example/chat/messages/m1", sender, "room1", "\x00", ""))
 	msgs, err := repo.ListMessagesByRoom("room1", "", "", 10)
 	require.NoError(t, err)
 	require.Len(t, msgs, 1)
@@ -88,7 +88,7 @@ func TestCreateRoomMessageViaAP_RejectsOversizedURI(t *testing.T) {
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "R", OwnerID: sender.ID}))
 
 	longURI := "https://remote.example/chat/messages/" + strings.Repeat("a", 512)
-	err := svc.CreateRoomMessageViaAP(longURI, sender, "room1", "hi")
+	err := svc.CreateRoomMessageViaAP(longURI, sender, "room1", "hi", "")
 	// uri を捨てて行だけ作ると retry のたびに重複するので、message ごと拒否する。
 	require.ErrorIs(t, err, corechat.ErrInvalidTarget)
 	msgs, ferr := repo.ListMessagesByRoom("room1", "", "", 10)
@@ -103,12 +103,12 @@ func TestCreateMessageViaAP_TruncatesTextAndRejectsOversizedURI(t *testing.T) {
 	sender := &model.User{ID: "remote1", Username: "remote1"}
 
 	msg, err := svc.CreateMessageViaAP(context.Background(),
-		"https://remote.example/chat-messages/1", sender, "local1", strings.Repeat("あ", 5000))
+		"https://remote.example/chat-messages/1", sender, "local1", strings.Repeat("あ", 5000), "")
 	require.NoError(t, err)
 	require.NotNil(t, msg.Text)
 	assert.Equal(t, 4096, len([]rune(*msg.Text)))
 
 	longURI := "https://remote.example/chat-messages/" + strings.Repeat("a", 512)
-	_, err = svc.CreateMessageViaAP(context.Background(), longURI, sender, "local1", "hi")
+	_, err = svc.CreateMessageViaAP(context.Background(), longURI, sender, "local1", "hi", "")
 	require.ErrorIs(t, err, corechat.ErrInvalidTarget)
 }

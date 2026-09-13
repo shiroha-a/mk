@@ -64,7 +64,7 @@ func TestChatService_DBFailureIsNotNotFound(t *testing.T) {
 		}},
 		{"CreateRoomMessageViaAP", func(s *corechat.Service) error {
 			return s.CreateRoomMessageViaAP("https://remote.example/m/1",
-				&model.User{ID: "u1"}, "r1", "hi")
+				&model.User{ID: "u1"}, "r1", "hi", "")
 		}},
 		{"React", func(s *corechat.Service) error {
 			return s.React(ctx, "m1", &model.User{ID: "u1"}, "👍")

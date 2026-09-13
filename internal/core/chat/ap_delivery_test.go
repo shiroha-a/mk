@@ -89,7 +89,7 @@ func TestCreateMessageViaAP(t *testing.T) {
 	svc := corechat.NewService(chatRepo, idGen)
 	sender := &model.User{ID: "remote1", Username: "remote1"}
 
-	msg, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/chat-messages/1", sender, "local1", "hello from remote")
+	msg, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/chat-messages/1", sender, "local1", "hello from remote", "")
 	require.NoError(t, err)
 	require.NotNil(t, msg)
 	assert.Equal(t, "remote1", msg.FromUserID)
@@ -104,10 +104,10 @@ func TestCreateMessageViaAP_InvalidTarget(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := corechat.NewService(chatRepo, idGen)
 
-	_, err := svc.CreateMessageViaAP(context.Background(), "", nil, "local1", "hi")
+	_, err := svc.CreateMessageViaAP(context.Background(), "", nil, "local1", "hi", "")
 	assert.Error(t, err)
 
-	_, err = svc.CreateMessageViaAP(context.Background(), "", &model.User{ID: "x"}, "", "hi")
+	_, err = svc.CreateMessageViaAP(context.Background(), "", &model.User{ID: "x"}, "", "hi", "")
 	assert.Error(t, err)
 }
 
@@ -237,7 +237,7 @@ func TestCreateMessageViaAP_ScopeEnforced(t *testing.T) {
 	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", ChatScope: "none"}
 	sender := &model.User{ID: "remote-alice", Username: "alice"}
 
-	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/cm/1", sender, "bob", "x")
+	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/cm/1", sender, "bob", "x", "")
 	require.ErrorIs(t, err, corechat.ErrChatScopeViolation)
 }
 

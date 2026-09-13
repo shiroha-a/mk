@@ -16,7 +16,7 @@ import (
 // distinguish 1-on-1 routing from group (room) routing.
 type fakeChatMessageReceiver struct{ calls int }
 
-func (f *fakeChatMessageReceiver) CreateMessageViaAP(_ context.Context, _ string, _ *model.User, _, _ string) (*model.ChatMessage, error) {
+func (f *fakeChatMessageReceiver) CreateMessageViaAP(_ context.Context, _ string, _ *model.User, _, _, _ string) (*model.ChatMessage, error) {
 	f.calls++
 	return &model.ChatMessage{}, nil
 }
@@ -35,7 +35,7 @@ type fakeChatRoomReceiver struct {
 	rmMemberErr   error
 }
 
-func (f *fakeChatRoomReceiver) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error {
+func (f *fakeChatRoomReceiver) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text, mfmSource string) error {
 	sid := ""
 	if sender != nil {
 		sid = sender.ID

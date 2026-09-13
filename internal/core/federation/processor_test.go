@@ -1509,20 +1509,23 @@ func TestProcess_AcceptNonRelay_IgnoresMarker(t *testing.T) {
 // --- Chat federation (Misskey:ChatMessage) ---
 
 type stubChatReceiver struct {
-	called    int
-	lastURI   string
-	lastFrom  *model.User
-	lastTo    string
-	lastText  string
+	called   int
+	lastURI  string
+	lastFrom *model.User
+	lastTo   string
+	lastText string
+	// lastMFM は相手が併記した MFM の原文 (`source` / `_misskey_content`)。
+	lastMFM   string
 	returnErr error
 }
 
-func (s *stubChatReceiver) CreateMessageViaAP(_ context.Context, uri string, fromUser *model.User, toUserID, text string) (*model.ChatMessage, error) {
+func (s *stubChatReceiver) CreateMessageViaAP(_ context.Context, uri string, fromUser *model.User, toUserID, text, mfmSource string) (*model.ChatMessage, error) {
 	s.called++
 	s.lastURI = uri
 	s.lastFrom = fromUser
 	s.lastTo = toUserID
 	s.lastText = text
+	s.lastMFM = mfmSource
 	if s.returnErr != nil {
 		return nil, s.returnErr
 	}

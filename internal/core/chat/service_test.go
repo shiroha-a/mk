@@ -183,7 +183,7 @@ func TestCreateMessageViaAP_BlockedByRecipient(t *testing.T) {
 	svc.SetBlockingRepo(blocks)
 
 	remoteSender := &model.User{ID: "alice"}
-	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote/notes/1", remoteSender, "bob", "hi")
+	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote/notes/1", remoteSender, "bob", "hi", "")
 	assert.ErrorIs(t, err, corechat.ErrChatBlocked)
 	assert.Empty(t, pub.userCalls, "blocked inbound DM must not be persisted/published")
 }
@@ -280,7 +280,7 @@ func TestCreateMessageViaAP_PublishesNewChatMessageToLocalRecipient(t *testing.T
 	// Remote → local DM: fromUser は remote (host set)、toUserID はローカル。
 	remoteHost := "remote.example"
 	fromUser := &model.User{ID: "remote_user", Host: &remoteHost}
-	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/n/1", fromUser, "bob", "hello from remote")
+	_, err := svc.CreateMessageViaAP(context.Background(), "https://remote.example/n/1", fromUser, "bob", "hello from remote", "")
 	require.NoError(t, err)
 
 	main.mu.Lock()
@@ -964,7 +964,7 @@ func TestCreateMessageViaAP_PushesNewChatMessage(t *testing.T) {
 	sender := &model.User{ID: "remote1", Username: "remote1"}
 
 	_, err := svc.CreateMessageViaAP(context.Background(),
-		"https://remote.example/chat-messages/1", sender, "local1", "hi")
+		"https://remote.example/chat-messages/1", sender, "local1", "hi", "")
 	require.NoError(t, err)
 
 	assert.Equal(t, []string{"local1"}, push.recipients())
@@ -1047,7 +1047,7 @@ func TestCreateRoomMessageViaAP_PushesNewChatMessage(t *testing.T) {
 	sender := &model.User{ID: "remote1", Username: "remote1"}
 
 	require.NoError(t, svc.CreateRoomMessageViaAP(
-		"https://remote.example/chat-messages/2", sender, "r1", "hi"))
+		"https://remote.example/chat-messages/2", sender, "r1", "hi", ""))
 
 	assert.ElementsMatch(t, []string{"alice", "carol"}, push.recipients())
 	require.NotEmpty(t, push.calls)

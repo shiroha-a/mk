@@ -21,7 +21,9 @@ type ChatRoomReceiver interface {
 	AddMemberViaAP(roomID, userID string) error
 	RemoveInvitationViaAP(roomID, userID string) error
 	RemoveMemberViaAP(roomID, userID string) error
-	CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text string) error
+	// mfmSource は相手が併記した MFM の原文 (`source` / `_misskey_content`)。
+	// 空なら text (HTML) から戻す。
+	CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text, mfmSource string) error
 }
 
 // SetChatRoomReceiver wires the chat room federation receiver for inbound
@@ -253,7 +255,7 @@ func chatRoomIDFromContext(raw json.RawMessage) (roomID string, isRoom bool) {
 // locally-known room. The room must exist locally and the remote sender must
 // be a member (enforced by the chat service): unknown room or non-member is a
 // permanent condition, so it is reported as ErrUnsupportedActivity (no retry).
-func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, content, roomID string) error {
+func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, content, mfmSource, roomID string) error {
 	// roomID が空 = `@context` は room URI だが id が `chat_room.id` に収まらない
 	// (chatRoomIDFromContext)。retry では解決しないので drop する (#2726)。
 	if roomID == "" {
@@ -274,7 +276,7 @@ func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, con
 	if p.chatRoomReceiver == nil {
 		return ErrUnsupportedActivity
 	}
-	if err := p.chatRoomReceiver.CreateRoomMessageViaAP(noteURI, sender, roomID, content); err != nil {
+	if err := p.chatRoomReceiver.CreateRoomMessageViaAP(noteURI, sender, roomID, content, mfmSource); err != nil {
 		// 未関与の room / 非メンバー送信、および列に収まらない uri は retry しても
 		// 解決しないので drop (後者は ErrInvalidTarget、#2726)。
 		if errors.Is(err, corechat.ErrNotFound) ||

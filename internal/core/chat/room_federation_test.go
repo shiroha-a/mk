@@ -309,7 +309,7 @@ func TestCreateRoomMessageViaAP_PersistsForMember(t *testing.T) {
 	sender := &model.User{ID: "rmt", Username: "rmt"}
 
 	uri := "https://remote.example/chat/messages/m1"
-	err := svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi room")
+	err := svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi room", "")
 	require.NoError(t, err)
 	stored, ferr := repo.FindMessageByURI(uri)
 	require.NoError(t, ferr)
@@ -323,16 +323,16 @@ func TestCreateRoomMessageViaAP_DedupByURI(t *testing.T) {
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "rmt"}))
 	sender := &model.User{ID: "rmt", Username: "rmt"}
 	uri := "https://remote.example/chat/messages/m1"
-	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi"))
+	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi", ""))
 	// 同一 URI の再送は重複作成しない (AP retry 対策)。
-	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi"))
+	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", "hi", ""))
 	assert.Len(t, repo.Messages, 1)
 }
 
 func TestCreateRoomMessageViaAP_UnknownRoom(t *testing.T) {
 	svc, _ := newRoomFedService(t)
 	sender := &model.User{ID: "rmt", Username: "rmt"}
-	err := svc.CreateRoomMessageViaAP("https://remote.example/chat/messages/m1", sender, "ghost", "hi")
+	err := svc.CreateRoomMessageViaAP("https://remote.example/chat/messages/m1", sender, "ghost", "hi", "")
 	assert.ErrorIs(t, err, corechat.ErrNotFound)
 }
 
@@ -341,7 +341,7 @@ func TestCreateRoomMessageViaAP_NonMemberForbidden(t *testing.T) {
 	// owner = localOwner、sender rmt は member でない。
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "localOwner"}))
 	sender := &model.User{ID: "rmt", Username: "rmt"}
-	err := svc.CreateRoomMessageViaAP("https://remote.example/chat/messages/m1", sender, "room1", "hi")
+	err := svc.CreateRoomMessageViaAP("https://remote.example/chat/messages/m1", sender, "room1", "hi", "")
 	assert.ErrorIs(t, err, corechat.ErrForbidden)
 }
 
