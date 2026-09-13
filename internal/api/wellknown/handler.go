@@ -175,11 +175,18 @@ func (h *Handler) HostMeta(c echo.Context) error {
 }
 
 // NodeInfoDiscovery handles GET /.well-known/nodeinfo.
+//
+// **Cache-Control を付ける。** この文書は origin から組み立てるだけで内容が
+// 変わらないのに、付けていないと crawler の 1 hit ごとに origin まで届いていた
+// (同ファイルの WebFinger は `public, max-age=180` を返している)。max-age は
+// ここが advertise する `/nodeinfo/2.x` と同じ 600 に揃える — 参照先より短く
+// しても、先に discovery だけが失効して得るものが無い。
 func (h *Handler) NodeInfoDiscovery(c echo.Context) error {
 	if h.federationDisabled() {
 		return c.NoContent(http.StatusForbidden)
 	}
 	setDiscoveryCORS(c)
+	c.Response().Header().Set("Cache-Control", "public, max-age=600")
 	resp := map[string]any{
 		"links": []map[string]any{
 			{

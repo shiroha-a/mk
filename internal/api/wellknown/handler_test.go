@@ -457,3 +457,25 @@ func TestChangePassword_NotGatedByFederation(t *testing.T) {
 	assert.Equal(t, http.StatusFound, rec.Code)
 	assert.Equal(t, "https://example.com/settings/security", rec.Header().Get("Location"))
 }
+
+// /.well-known/nodeinfo は内容が origin だけから決まる静的文書なので、
+// 未認証 crawler の 1 hit ごとに origin まで届かせない。同ファイルの
+// WebFinger が `public, max-age=180` を返すのに、ここだけ Cache-Control が
+// 無かった。
+func TestNodeInfoDiscovery_CacheControl(t *testing.T) {
+	h, _ := newHandler(t)
+	c, rec := newReq(t, "/.well-known/nodeinfo")
+	require.NoError(t, h.NodeInfoDiscovery(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "public, max-age=600", rec.Header().Get("Cache-Control"))
+}
+
+// 403 (federation=none) には Cache-Control を付けない。付けると連合を
+// 有効に戻したあとも中継が 403 を配り続ける。
+func TestNodeInfoDiscovery_NoCacheControlWhenForbidden(t *testing.T) {
+	h, _ := newHandlerWithFederation(t, "none")
+	c, rec := newReq(t, "/.well-known/nodeinfo")
+	require.NoError(t, h.NodeInfoDiscovery(c))
+	require.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Empty(t, rec.Header().Get("Cache-Control"))
+}

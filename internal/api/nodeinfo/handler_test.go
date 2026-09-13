@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -349,4 +351,202 @@ func TestVersion2_1_PeeredPlugins(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
 	meta, _ = out["metadata"].(map[string]any)
 	assert.Equal(t, []any{"demo"}, meta["mkGoPlugins"])
+}
+
+// --- server-side cache (upstream MemorySingleCache 相当) ---
+
+// countingUserRepo counts how many times the nodeinfo document asked for the
+// local user total, so a test can tell a cache hit from a rebuild.
+type countingUserRepo struct {
+	*testutil.MockUserRepository
+	calls atomic.Int64
+	// before は COUNT に入った瞬間に呼ばれる hook。並行テストが「build 中」の
+	// 窓を掴むのに使う。
+	before func()
+}
+
+func (c *countingUserRepo) CountLocalUsers() (int64, error) {
+	c.calls.Add(1)
+	if c.before != nil {
+		c.before()
+	}
+	return c.MockUserRepository.CountLocalUsers()
+}
+
+type countingNoteRepo struct {
+	*testutil.MockNoteRepository
+	calls atomic.Int64
+}
+
+func (c *countingNoteRepo) CountLocalNotes() (int64, error) {
+	c.calls.Add(1)
+	return c.MockNoteRepository.CountLocalNotes()
+}
+
+func newCountingHandler(t *testing.T, now time.Time) (*Handler, *countingUserRepo, *countingNoteRepo) {
+	t.Helper()
+	userRepo := &countingUserRepo{MockUserRepository: testutil.NewMockUserRepository()}
+	noteRepo := &countingNoteRepo{MockNoteRepository: testutil.NewMockNoteRepository()}
+	userRepo.Users["u1"] = &model.User{ID: "u1", Host: nil}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "u1", UserHost: nil}
+	h := NewHandler(&config.Config{Version: "0.0.0", Host: "example.com"})
+	h.SetUsageRepos(userRepo, noteRepo)
+	h.SetClock(func() time.Time { return now })
+	return h, userRepo, noteRepo
+}
+
+func getNodeinfo(t *testing.T, fn func(echo.Context) error) map[string]any {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo", nil), rec)
+	require.NoError(t, fn(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+	var out map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &out))
+	return out
+}
+
+// 未認証の 1 リクエストごとに全表 COUNT を 2 本走らせない。TTL 内の 2 回目
+// 以降は build せずに cache から返す (upstream の MemorySingleCache 10 分相当)。
+func TestNodeinfo_CachesDocumentWithinTTL(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	h, userRepo, noteRepo := newCountingHandler(t, now)
+
+	for i := 0; i < 5; i++ {
+		out := getNodeinfo(t, h.Version2_1)
+		usage := out["usage"].(map[string]any)
+		assert.Equal(t, float64(1), usage["users"].(map[string]any)["total"])
+	}
+	assert.Equal(t, int64(1), userRepo.calls.Load(), "CountLocalUsers は TTL 内で 1 回だけ")
+	assert.Equal(t, int64(1), noteRepo.calls.Load(), "CountLocalNotes は TTL 内で 1 回だけ")
+}
+
+// TTL が切れたら build し直す (= キャッシュが永久に固まらない)。
+func TestNodeinfo_RebuildsAfterTTL(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	h, userRepo, _ := newCountingHandler(t, now)
+
+	getNodeinfo(t, h.Version2_1)
+	require.Equal(t, int64(1), userRepo.calls.Load())
+
+	// TTL 直前はまだ hit。
+	cur := now.Add(CacheTTL - time.Nanosecond)
+	h.clock = func() time.Time { return cur }
+	getNodeinfo(t, h.Version2_1)
+	assert.Equal(t, int64(1), userRepo.calls.Load(), "TTL 内は cache hit のまま")
+
+	// TTL ちょうどで失効する。
+	cur = now.Add(CacheTTL)
+	getNodeinfo(t, h.Version2_1)
+	assert.Equal(t, int64(2), userRepo.calls.Load(), "TTL 経過後は build し直す")
+}
+
+// 2.0 と 2.1 で cache を共有しない。upstream は 1 つの cache を共有したうえで
+// 2.0 側が software.repository を delete するので、2.0 を先に引くと 2.1 からも
+// repository が消える。mk-go は version ごとに持つのでその穴が無い。
+func TestNodeinfo_CacheIsPerVersion(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	h, _, _ := newCountingHandler(t, now)
+
+	v20 := getNodeinfo(t, h.Version2_0)
+	_, has20 := v20["software"].(map[string]any)["repository"]
+	assert.False(t, has20, "schema 2.0 に software.repository は無い")
+
+	v21 := getNodeinfo(t, h.Version2_1)
+	assert.Equal(t, "2.1", v21["version"])
+	assert.Equal(t, softwareRepository, v21["software"].(map[string]any)["repository"])
+
+	// 逆順でも同じ (cache hit 経路を通しても混ざらない)。
+	assert.Equal(t, "2.0", getNodeinfo(t, h.Version2_0)["version"])
+	assert.Equal(t, "2.1", getNodeinfo(t, h.Version2_1)["version"])
+}
+
+// cache hit でも miss と同じヘッダを返す。ヘッダだけ落ちると中継キャッシュの
+// 挙動が hit/miss で変わってしまう。
+func TestNodeinfo_CachedResponseKeepsHeaders(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	h, _, _ := newCountingHandler(t, now)
+
+	var bodies []string
+	for i := 0; i < 2; i++ {
+		rec := httptest.NewRecorder()
+		c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil), rec)
+		require.NoError(t, h.Version2_1(c))
+		assert.Equal(t, `application/json; profile="http://nodeinfo.diaspora.software/ns/schema/2.1#"`, rec.Header().Get("Content-Type"))
+		assert.Equal(t, "public, max-age=600", rec.Header().Get("Cache-Control"))
+		assert.Equal(t, "*", rec.Header().Get("Access-Control-Allow-Origin"))
+		assert.Equal(t, "Vary", rec.Header().Get("Access-Control-Expose-Headers"))
+		bodies = append(bodies, rec.Body.String())
+	}
+	assert.Equal(t, bodies[0], bodies[1], "cache hit は miss と 1 byte 単位で同じ body")
+}
+
+// 並行 miss は singleflight で 1 build に集約する。集約しないと、cache が
+// 空の瞬間を突いた並行リクエストがそのまま COUNT の並行実行になる。
+//
+// **build を全 caller が入場するまで止める。** sleep で「たぶん集まった」を
+// 期待すると、集約していなくても 1 回しか数えない実行が出て空虚になる
+// (`internal/api/fetchrss` の同種テストと同じ作り)。
+func TestNodeinfo_ConcurrentMissesCollapse(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	h, userRepo, _ := newCountingHandler(t, now)
+
+	const callers = 8
+	var entered atomic.Int64
+	userRepo.before = func() {
+		// 全 caller が Version2_1 に入るまで待つ。集約されていれば待っている
+		// のは leader 1 本だけで、他は singleflight の中で待っている。
+		deadline := time.Now().Add(5 * time.Second)
+		for entered.Load() < callers && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		// 入場直後 = まだ singleflight に登録される前かもしれないので一息置く。
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for i := 0; i < callers; i++ {
+		go func() {
+			defer wg.Done()
+			entered.Add(1)
+			rec := httptest.NewRecorder()
+			c := echo.New().NewContext(httptest.NewRequest(http.MethodGet, "/nodeinfo/2.1", nil), rec)
+			assert.NoError(t, h.Version2_1(c))
+			assert.Equal(t, http.StatusOK, rec.Code)
+		}()
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(1), userRepo.calls.Load(),
+		"singleflight must collapse concurrent nodeinfo builds; got %d COUNT round-trips for %d callers",
+		userRepo.calls.Load(), callers)
+}
+
+// SetCacheTTL(0) で cache を切れる (毎回 build する)。
+func TestNodeinfo_CacheDisabled(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	h, userRepo, _ := newCountingHandler(t, now)
+	h.SetCacheTTL(0)
+
+	getNodeinfo(t, h.Version2_1)
+	getNodeinfo(t, h.Version2_1)
+	assert.Equal(t, int64(2), userRepo.calls.Load())
+}
+
+// 配線 setter は cache を捨てる。捨てないと、起動時の配線順を変えただけで
+// 古い document を TTL の間配り続ける。
+func TestNodeinfo_SettersInvalidateCache(t *testing.T) {
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	h, _, _ := newCountingHandler(t, now)
+
+	out := getNodeinfo(t, h.Version2_1)
+	meta := out["metadata"].(map[string]any)
+	_, present := meta["mkGoPlugins"]
+	require.False(t, present)
+
+	h.SetPeeredPlugins([]string{"demo"})
+	out = getNodeinfo(t, h.Version2_1)
+	meta = out["metadata"].(map[string]any)
+	assert.Equal(t, []any{"demo"}, meta["mkGoPlugins"], "setter 後は build し直す")
 }

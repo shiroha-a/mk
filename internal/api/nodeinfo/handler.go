@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -12,11 +13,22 @@ import (
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/repository"
+	"golang.org/x/sync/singleflight"
 )
 
 // maxNoteTextLength mirrors upstream MAX_NOTE_TEXT_LENGTH advertised in nodeinfo
 // metadata。実際の投稿長 limit は別経路だが nodeinfo は upstream と同じ定数を出す。
 const maxNoteTextLength = 3000
+
+// CacheTTL mirrors upstream NodeinfoServerService の
+// `new MemorySingleCache<...>(1000 * 60 * 10)` (10 分)。
+//
+// **サーバー側キャッシュが無いと未認証の 1 リクエストごとに全表 COUNT が
+// 2 本走る** (`CountLocalUsers` + `CountLocalNotes`)。`/nodeinfo/*` は
+// `s.echo.GET` 直付けで rate limiter (`/api` グループ専用) も掛からないので、
+// 外部から無制限に回せる。Cache-Control: max-age=600 は返していたが、
+// それは中継キャッシュ任せで origin には効かない。
+const CacheTTL = 10 * time.Minute
 
 // defaultThemeColor mirrors upstream NodeinfoServerService の
 // `meta.themeColor ?? '#86b300'` fallback。
@@ -41,11 +53,117 @@ type Handler struct {
 	noteRepo      repository.NoteRepository
 	proxyAccount  func() (string, bool)
 	clock         func() time.Time
+
+	// Server-side cache: version ("2.0" / "2.1") ごとに marshal 済み body を
+	// TTL の間だけ保持する。cache miss が同時に来ても singleflight で 1 回の
+	// build に集約するので、COUNT が並行に積み上がることもない。
+	cacheTTL time.Duration
+	cacheMu  sync.Mutex
+	cache    map[string]cacheEntry
+	sf       singleflight.Group
+}
+
+// cacheEntry は marshal 済みの nodeinfo document と、その有効期限。
+type cacheEntry struct {
+	body    []byte
+	expires time.Time
 }
 
 // NewHandler constructs a Handler.
 func NewHandler(cfg *config.Config) *Handler {
-	return &Handler{cfg: cfg, clock: time.Now}
+	return &Handler{
+		cfg:      cfg,
+		clock:    time.Now,
+		cacheTTL: CacheTTL,
+		cache:    make(map[string]cacheEntry),
+	}
+}
+
+// SetCacheTTL overrides the server-side cache TTL. Intended for tests; in
+// production the default (CacheTTL) matches the Cache-Control header so
+// clients and the origin see the same freshness window.
+//
+// 0 以下を渡すとキャッシュを無効化する (毎回 build し直す)。
+func (h *Handler) SetCacheTTL(d time.Duration) {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	h.cacheTTL = d
+	h.cache = make(map[string]cacheEntry)
+}
+
+// now reads the injected clock, falling back to time.Now for a zero-value
+// Handler (NewHandler always wires it).
+func (h *Handler) now() time.Time {
+	if h.clock == nil {
+		return time.Now()
+	}
+	return h.clock()
+}
+
+// cacheGet returns the cached body for version when it is still fresh.
+func (h *Handler) cacheGet(version string) ([]byte, bool) {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if h.cacheTTL <= 0 {
+		return nil, false
+	}
+	e, ok := h.cache[version]
+	if !ok || !h.now().Before(e.expires) {
+		return nil, false
+	}
+	return e.body, true
+}
+
+// cachePut stores the marshalled body for version.
+func (h *Handler) cachePut(version string, body []byte) {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	if h.cacheTTL <= 0 {
+		return
+	}
+	if h.cache == nil {
+		h.cache = make(map[string]cacheEntry)
+	}
+	h.cache[version] = cacheEntry{body: body, expires: h.now().Add(h.cacheTTL)}
+}
+
+// invalidateCache drops every cached version. 配線 setter (SetMetaRepo /
+// SetUsageRepos / SetPeeredPlugins / SetProxyAccountResolver / SetClock) が
+// 呼ぶ。**呼ばないと、起動時に順序を変えただけで古い document を TTL の間
+// 配り続ける**。運用では起動時に 1 度呼ばれるだけなので実質無コスト。
+func (h *Handler) invalidateCache() {
+	h.cacheMu.Lock()
+	defer h.cacheMu.Unlock()
+	h.cache = make(map[string]cacheEntry)
+}
+
+// documentBody returns the marshalled nodeinfo document for version, building
+// it at most once per TTL per version.
+//
+// **cache は version ごとに持つ。** upstream は 1 つの cache を共有して 2.0 で
+// `delete base.software.repository` するため、2.0 を先に引くと 2.1 からも
+// repository が消える。mk-go は version ごとに build して同じ穴を作らない。
+func (h *Handler) documentBody(version string) ([]byte, error) {
+	if body, ok := h.cacheGet(version); ok {
+		return body, nil
+	}
+	v, err, _ := h.sf.Do(version, func() (any, error) {
+		// singleflight 入場時に再確認する。直前に coalesce された呼び出しが
+		// 積んでいれば build せずに済む。
+		if body, ok := h.cacheGet(version); ok {
+			return body, nil
+		}
+		body, err := json.Marshal(h.buildDocument(version))
+		if err != nil {
+			return nil, err
+		}
+		h.cachePut(version, body)
+		return body, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return v.([]byte), nil
 }
 
 // SetPeeredPlugins declares the plugins that accept the mk-go-only plugin
@@ -55,6 +173,7 @@ func NewHandler(cfg *config.Config) *Handler {
 // 運営者がどんな拡張を使っているかが攻撃面の情報になる。
 func (h *Handler) SetPeeredPlugins(names []string) {
 	h.peeredPlugins = names
+	h.invalidateCache()
 }
 
 // SetMetaRepo injects a MetaRepository so that the nodeName / nodeDescription
@@ -62,6 +181,7 @@ func (h *Handler) SetPeeredPlugins(names []string) {
 // 未配線のまま呼ばれると cfg.Host fallback になる (#348)。
 func (h *Handler) SetMetaRepo(r repository.MetaRepository) {
 	h.metaRepo = r
+	h.invalidateCache()
 }
 
 // SetUsageRepos injects repositories used to populate the usage statistics
@@ -70,12 +190,14 @@ func (h *Handler) SetMetaRepo(r repository.MetaRepository) {
 func (h *Handler) SetUsageRepos(userRepo repository.UserRepository, noteRepo repository.NoteRepository) {
 	h.userRepo = userRepo
 	h.noteRepo = noteRepo
+	h.invalidateCache()
 }
 
 // SetClock overrides the clock source. Intended for tests.
 func (h *Handler) SetClock(now func() time.Time) {
 	if now != nil {
 		h.clock = now
+		h.invalidateCache()
 	}
 }
 
@@ -83,6 +205,7 @@ func (h *Handler) SetClock(now func() time.Time) {
 // metadata.proxyAccountName field (#1777)。未配線なら proxyAccountName は null。
 func (h *Handler) SetProxyAccountResolver(r func() (string, bool)) {
 	h.proxyAccount = r
+	h.invalidateCache()
 }
 
 // Version2_1 handles GET /nodeinfo/2.1.
@@ -103,8 +226,11 @@ func (h *Handler) Version2_0(c echo.Context) error {
 // (`application/json; profile="...schema/<ver>#"`), `Cache-Control: public,
 // max-age=600`, and the CORS/Expose headers. c.JSON forces application/json so
 // the document is written via c.Blob with an explicit Content-Type (#1948-22).
+//
+// 本体は documentBody が TTL 付きで cache する (upstream の MemorySingleCache
+// 相当)。ヘッダは cache hit / miss で同じものを返す。
 func (h *Handler) serveDocument(c echo.Context, version string) error {
-	body, err := json.Marshal(h.buildDocument(version))
+	body, err := h.documentBody(version)
 	if err != nil {
 		return c.NoContent(http.StatusInternalServerError)
 	}
