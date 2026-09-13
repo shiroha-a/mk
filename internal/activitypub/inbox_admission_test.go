@@ -331,7 +331,6 @@ func TestVerifyInboxAdmission_DateFormatsJSAccepts(t *testing.T) {
 			"RFC1123Z":    time.RFC1123Z,
 			"RFC3339":     time.RFC3339,
 			"RFC3339Nano": time.RFC3339Nano,
-			"RFC1123":     time.RFC1123,
 		} {
 			t.Run(name, func(t *testing.T) {
 				if err := admit(stale.Format(layout)); !errors.Is(err, ErrInboxDateSkew) {
@@ -339,6 +338,12 @@ func TestVerifyInboxAdmission_DateFormatsJSAccepts(t *testing.T) {
 				}
 			})
 		}
+		// HTTP-date の GMT 形は元から `http.ParseTime` が読む。
+		t.Run("HTTP-date", func(t *testing.T) {
+			if err := admit(stale.Format(http.TimeFormat)); !errors.Is(err, ErrInboxDateSkew) {
+				t.Fatalf("30 日前の Date が通った: %v", err)
+			}
+		})
 	})
 
 	t.Run("窓の中は書式によらず通る", func(t *testing.T) {
@@ -359,6 +364,22 @@ func TestVerifyInboxAdmission_DateFormatsJSAccepts(t *testing.T) {
 	t.Run("解釈できない値は通す", func(t *testing.T) {
 		if err := admit("not a date at all"); err != nil {
 			t.Fatalf("通るはずが %v", err)
+		}
+	})
+
+	// **ゾーン略称は読まない (レビュー M2)。** Go は未知の略称をオフセット 0 の
+	// 捏造ゾーンとして受けるので、絶対時刻がサーバーの TZ 設定に依存してずれる。
+	// ずれた瞬間に skew の窓から外れて 401 になり、**これまで検査を skip して
+	// 通っていた peer を落とす**方向の退行になる。読めない値として扱う。
+	t.Run("ゾーン略称は読まない", func(t *testing.T) {
+		for _, raw := range []string{
+			"Mon, 14 Sep 2026 09:00:00 JST",
+			"Sun, 13 Sep 2026 20:00:00 EST",
+			"Mon, 14 Sep 2026 09:00:00 MST",
+		} {
+			if err := admit(raw); err != nil {
+				t.Fatalf("ゾーン略称の Date を解釈して弾いている (%s): %v", raw, err)
+			}
 		}
 	})
 }

@@ -129,6 +129,15 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 	// owner (= inviter) は activity の actor。room copy の owner として保存する。
 	owner, err := p.resolver.ResolveActor(act.Actor)
 	if err != nil {
+		// **恒久的な失敗は ack する (レビュー L1)。** 自ホストの actor URI や
+		// 不正な actor document は retry しても結果が変わらない。生で返すと
+		// dispatch がここを `isPermanentSkipError` に通さないので、queue が
+		// 無駄に回り続ける。
+		if isPermanentSkipError(err) {
+			slog.Warn("chat room invite: actor is not resolvable",
+				"actor", act.Actor, "err", err)
+			return ErrUnsupportedActivity
+		}
 		return err
 	}
 	// local actor 名義の Invite は loopback / なりすまし。room copy の owner が

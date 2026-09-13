@@ -1555,20 +1555,22 @@ func (r *Renderer) RenderMove(src *model.User, dstURI string) *Move {
 // と同じ mfm.Parse -> mfm.ToHTML を通すことで、text ノードは
 // html.EscapeString され、MFM は upstream と同じ HTML になる。
 //
-// source/_misskey_content を出す条件も RenderNote に揃える (標準ノードだけ
-// なら省略)。これが無いと受信側は HTML から MFM を復元するしかなくなる。
+// **source は常に出す (レビュー M1)。** RenderNote は「標準ノードだけなら
+// 省略」するが、`IsSimple` はカスタム絵文字 (`:name:`) を simple 扱いする一方、
+// `ToHTML` は絵文字の前後に `\u200b` を書く。省略すると受信側は HTML から
+// 戻すしかなく、**絵文字 1 個につきゼロ幅スペースが 2 文字混入した本文が
+// 保存される**。この PR より前は `content` が MFM 原文だったので混入しなかった
+// ので、省略したままだと chat がノートの既知の欠陥を新しく引き継ぐことになる。
 func (r *Renderer) setChatMessageContent(note *Note, text *string) {
 	if text == nil || *text == "" {
 		return
 	}
 	nodes := mfm.Parse(*text)
 	note.Content = mfm.ToHTML(nodes, r.host)
-	if !mfm.IsSimple(nodes) {
-		note.MisskeyContent = APLenientString(*text)
-		note.Source = &Source{
-			Content:   *text,
-			MediaType: "text/x.misskeymarkdown",
-		}
+	note.MisskeyContent = APLenientString(*text)
+	note.Source = &Source{
+		Content:   *text,
+		MediaType: "text/x.misskeymarkdown",
 	}
 }
 

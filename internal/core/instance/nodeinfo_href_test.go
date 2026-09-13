@@ -34,10 +34,17 @@ func TestSelectNodeinfoHrefRequiresSameHost(t *testing.T) {
 		require.Equal(t, "https://REMOTE.example/nodeinfo/2.1", got)
 	})
 
+	// **http も選ぶ。** リバースプロキシで TLS を終端していて `url` が http の
+	// インスタンスは href を `http://` で advertise する。落とすとその相手の
+	// メタデータが永久に取れない (レビュー M4)。
+	t.Run("http の href も選ぶ", func(t *testing.T) {
+		got := selectNodeinfoHref(link(rel, "http://remote.example/nodeinfo/2.1"), host)
+		require.Equal(t, "http://remote.example/nodeinfo/2.1", got)
+	})
+
 	for name, href := range map[string]string{
 		"別 host":         "https://evil.example/nodeinfo/2.1",
 		"別ポート":           "https://remote.example:8443/nodeinfo/2.1",
-		"http へ降格":       "http://remote.example/nodeinfo/2.1",
 		"スキーム無し":         "//evil.example/nodeinfo/2.1",
 		"file スキーム":      "file:///etc/passwd",
 		"host を含む別 host": "https://remote.example.evil.example/nodeinfo/2.1",

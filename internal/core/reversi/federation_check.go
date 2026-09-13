@@ -155,7 +155,15 @@ func (c *FederationChecker) resolveNodeinfoURL(ctx context.Context, host, discov
 // ポートを剥がさないので、そうしないと正当な相手を落とす。
 func nodeinfoHrefBelongsTo(href, host string) bool {
 	u, err := url.Parse(href)
-	if err != nil || u.Scheme != "https" {
+	if err != nil {
+		return false
+	}
+	// **http も許す (レビュー M4)。** discovery は常に https から取るが、
+	// リバースプロキシで TLS を終端していて `url` が http のインスタンスは
+	// href を `http://` で advertise する。https 限定にすると、その相手の
+	// softwareName / nodeName / icon が永久に取れなくなる。到達先は
+	// SSRF-safe transport が守るので、scheme は host ほど重要ではない。
+	if u.Scheme != "https" && u.Scheme != "http" {
 		return false
 	}
 	trim := func(h string) string {

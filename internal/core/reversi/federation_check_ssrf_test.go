@@ -57,10 +57,9 @@ func TestResolveNodeinfoURLRequiresSameHost(t *testing.T) {
 	})
 
 	for name, href := range map[string]string{
-		"別 host":   "https://evil.example/nodeinfo/2.1",
-		"別ポート":     "https://remote.example:9999/nodeinfo/2.1",
-		"http へ降格": "http://remote.example/nodeinfo/2.1",
-		"内部宛て":     "https://169.254.169.254/latest/meta-data/",
+		"別 host": "https://evil.example/nodeinfo/2.1",
+		"別ポート":   "https://remote.example:9999/nodeinfo/2.1",
+		"内部宛て":   "https://169.254.169.254/latest/meta-data/",
 	} {
 		t.Run("辿らない: "+name, func(t *testing.T) {
 			d := &recordingDoer{body: map[string]string{discovery: discoveryJSON(t, href)}}
@@ -75,8 +74,22 @@ func TestResolveNodeinfoURLRequiresSameHost(t *testing.T) {
 
 // **未配線なら取りに行かない (fail-closed)。** 以前は素の `http.Client` へ
 // 落としており、配線を落とした瞬間に SSRF ガードを通らない経路が開いた。
+//
+// **「取りに行かない」ことを直接見る (レビュー H1)。** `Available` の戻り値だけを
+// 見ていると、fail-open に戻しても名前解決に失敗して false になるので素通り
+// する — しかもその変異は**単体テストから実ネットワークへ出る**形になる。
 func TestFederationCheckerWithoutClientDoesNotFetch(t *testing.T) {
 	c := NewFederationChecker(nil, nil)
+
+	// 取得口を直接叩く。ここが fail-open に戻ると、client を自前で作って
+	// 外へ出てしまう。
+	_, err := c.httpGetJSON(context.Background(), "https://remote.example/.well-known/nodeinfo")
+	require.ErrorIs(t, err, errNoHTTPClient, "client 未配線なのに取りに行っている")
+
+	// discovery の解決も同じ理由で何も返さない。
+	require.Empty(t, c.resolveNodeinfoURL(context.Background(), "remote.example",
+		"https://remote.example/.well-known/nodeinfo"))
+
 	require.False(t, c.Available(context.Background(), "remote.example"),
 		"client 未配線なのに連合可能と答えている")
 }

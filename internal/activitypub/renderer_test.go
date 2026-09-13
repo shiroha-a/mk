@@ -925,13 +925,36 @@ func TestRenderer_RenderChatMessage_PlainTextUnchanged(t *testing.T) {
 		"https://remote.example/users/bob", "2026-05-24T00:00:00Z")
 	note := c.Object.(*Note)
 	assert.Equal(t, "hello room", note.Content)
-	assert.Nil(t, note.Source)
-	assert.Empty(t, note.MisskeyContent.String())
+	// **chat は source を常に出す (レビュー M1)。** `IsSimple` はカスタム絵文字を
+	// simple 扱いする一方 `ToHTML` は前後に `\u200b` を書くので、省略すると
+	// 受信側が HTML から戻したときにゼロ幅スペースが混入する。
+	require.NotNil(t, note.Source)
+	assert.Equal(t, "hello room", note.Source.Content)
+	assert.Equal(t, "text/x.misskeymarkdown", note.Source.MediaType)
+	assert.Equal(t, "hello room", note.MisskeyContent.String())
 
 	// Text が nil でも panic せず content は空。
 	c2 := r.RenderChatMessage(&model.ChatMessage{ID: "m2"}, "https://example.com/users/alice",
 		"https://remote.example/users/bob", "2026-05-24T00:00:00Z")
 	assert.Empty(t, c2.Object.(*Note).Content)
+	assert.Nil(t, c2.Object.(*Note).Source, "本文が無いのに source を出している")
+}
+
+// **カスタム絵文字は往復で `\u200b` を増やさない (レビュー M1)。** `IsSimple` は
+// 絵文字を simple 扱いするが `ToHTML` は前後にゼロ幅スペースを書くので、
+// `source` を省くと受信側の本文が別物になる。
+func TestRenderer_RenderChatMessage_EmojiRoundTrip(t *testing.T) {
+	r := newRenderer()
+	for _, txt := range []string{":smile:", ":smile: text", "plain #tag and :e: mix"} {
+		t.Run(txt, func(t *testing.T) {
+			msg := &model.ChatMessage{ID: "m1", Text: &txt}
+			c := r.RenderChatMessage(msg, "https://example.com/users/alice",
+				"https://remote.example/users/bob", "2026-05-24T00:00:00Z")
+			note := c.Object.(*Note)
+			require.NotNil(t, note.Source, "絵文字を含む本文で source を省いている")
+			assert.Equal(t, txt, note.Source.Content, "原文が source に入っていない")
+		})
+	}
 }
 
 // 純粋リノートの削除は Delete(Tombstone) ではなく Undo(Announce) を出す。

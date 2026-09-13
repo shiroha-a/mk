@@ -68,23 +68,28 @@ func TestExtractAttachments_CapCountsAcceptedEntries(t *testing.T) {
 
 // 絵文字 tag も同様に打ち切ること。1 件につき emoji 行の INSERT / UPDATE が
 // 走り、名前は note.emojis / user.emojis (varchar(128)[]) にも載る。
-// 上限は hashtag と同じ 32 (upstream の `.splice(0, 32)` 由来)。
+//
+// **hashtag の 32 には揃えない (レビュー M3)。** あちらは upstream 自身が切って
+// いるが絵文字は切っておらず、33 種類以上使うノート (絵文字アート) は珍しく
+// ない。実用上まず届かない値まで上げて、無制限の fan-out だけを止める。
 func TestExtractEmojiTags_CapsCount(t *testing.T) {
-	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(32)), 32)
-	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(33)), 32)
-	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(5000)), 32)
+	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(128)), 128)
+	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(129)), 128)
+	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(5000)), 128)
 	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(4)), 4)
+	// 絵文字アートの実サイズが落ちないこと。
+	assert.Len(t, federation.ExtractEmojiTags(rawEmojiTags(64)), 64)
 }
 
 // 絵文字も採用件数で数えること。
 func TestExtractEmojiTags_CapCountsAcceptedEntries(t *testing.T) {
-	raw := make([]any, 0, 132)
+	raw := make([]any, 0, 228)
 	for i := 0; i < 100; i++ {
 		raw = append(raw, map[string]any{"type": "Hashtag", "name": "#x"})
 	}
-	raw = append(raw, rawEmojiTags(32)...)
+	raw = append(raw, rawEmojiTags(128)...)
 
 	got := federation.ExtractEmojiTags(raw)
-	require.Len(t, got, 32)
+	require.Len(t, got, 128)
 	assert.Equal(t, ":e0:", got[0].Name)
 }

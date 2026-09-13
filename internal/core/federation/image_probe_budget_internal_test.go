@@ -122,3 +122,22 @@ func TestUpsertAttachments_ZeroProbeBudgetFallsBackToDefault(t *testing.T) {
 	require.NotNil(t, drive.Files[ids[0]].Properties)
 	assert.JSONEq(t, `{"width":12,"height":34}`, string(drive.Files[ids[0]].Properties))
 }
+
+// **既定値そのものを固定する (レビュー L2)。** 他のテストは `probeBudget` を
+// 注入しているので、定数を戻しても気付けなかった。塞いだのは「上限いっぱいの
+// 添付 x 1 件あたりの timeout」の直列占有なので、その worst case より十分
+// 小さいことを要求する。
+func TestAttachmentProbeBudgetBoundsWorstCase(t *testing.T) {
+	worst := time.Duration(maxRemoteAttachments) * imageFetchTimeout
+	if attachmentProbeBudget >= worst {
+		t.Fatalf("予算 %v が worst case %v を抑えていない (上限だけでは直列占有が残る)",
+			attachmentProbeBudget, worst)
+	}
+	// 桁が変わる変更 (10s -> 10000s) を落とす。
+	if attachmentProbeBudget > worst/2 {
+		t.Fatalf("予算 %v が worst case %v の半分を超えている", attachmentProbeBudget, worst)
+	}
+	if attachmentProbeBudget <= 0 {
+		t.Fatalf("予算が %v で probe が常に打ち切られる", attachmentProbeBudget)
+	}
+}

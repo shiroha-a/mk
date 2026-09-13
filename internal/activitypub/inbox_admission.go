@@ -188,9 +188,13 @@ func parseSignatureDate(raw string) (time.Time, bool) {
 		return t, true
 	}
 	// http.ParseTime が扱わないが `new Date()` は解釈する書式。
-	// `time.RFC1123` は `http.ParseTime` の HTTP-date 版 (GMT 固定) と違い、
-	// `UTC` のようなゾーン名も受ける。JS はそちらも読む。
-	for _, layout := range []string{time.RFC1123Z, time.RFC1123, time.RFC3339Nano, time.RFC3339} {
+	// **ゾーン略称を受ける layout は使わない (レビュー M2)。** `time.RFC1123`
+	// (`... MST`) を入れると、Go は未知の略称を**オフセット 0 の捏造ゾーン**と
+	// して受けるので絶対時刻がずれ、しかもずれ方がサーバーの TZ 設定に依存する
+	// (`TZ=UTC` で `JST` を読むと 9 時間ずれる)。ずれた瞬間に skew の窓から
+	// 外れて 401 になるので、**これまで検査を skip して通っていた peer を
+	// 落とす**方向の退行になる。数値オフセットと ISO8601 だけを足す。
+	for _, layout := range []string{time.RFC1123Z, time.RFC3339Nano, time.RFC3339} {
 		if t, err := time.Parse(layout, raw); err == nil {
 			return t, true
 		}

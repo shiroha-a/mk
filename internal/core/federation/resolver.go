@@ -4280,12 +4280,15 @@ const maxRemoteAttachments = 16
 // document (Note or Person) can contribute.
 //
 // upstream に上限は無いが、1 件につき `emoji` の INSERT / UPDATE が走り、名前は
-// `note.emojis` / `user.emojis` (varchar(128)[]) にも載る。同じ「tag 由来の
-// per-document コレクション」である hashtag が upstream の `.splice(0, 32)` に
-// 揃えて 32 (`hashtag.MaxNoteTags` / `MaxUserTags`) なので、同値にする。
-// 超過分は落とす — クライアントは未解決の絵文字を `:name:` のまま出すので、
-// 列に収まらない tag を落とす既存の扱い (upsertEmojis) と同じ degrade になる。
-const maxRemoteEmojiTags = 32
+// `note.emojis` / `user.emojis` (varchar(128)[]) にも載る。無制限だと 1 通で
+// 任意件数の書き込みを強制できる。
+//
+// **hashtag の 32 には揃えない (レビュー M3)。** あちらは upstream 自身が
+// `.splice(0, 32)` で切っているが、絵文字は upstream が切っていない。**絵文字を
+// 33 種類以上使うノート (いわゆる絵文字アート) は珍しくなく**、32 にすると
+// 正当な投稿が目に見えて劣化する (超過分は `:name:` のリテラルで表示される)。
+// 実用上まず届かない値まで上げて、無制限の fan-out だけを止める。
+const maxRemoteEmojiTags = 128
 
 // extractAttachments parses the AP `attachment` array (heterogeneous []any
 // after JSON unmarshal) and returns Document entries. type が upstream の
