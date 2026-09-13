@@ -394,11 +394,14 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		"relatedStatusLabel(",
 		// 期間上限の表示。**無制限を 0 で描かない**ための分岐ごと。
 		"quotaUsageLabel(", "quotaPeriodLabel(", "quotaIsFull(",
-		// **審査待ちの上限を読むこと (レビュー H1)。** 期間の窓に空きがあっても
-		// これが満杯なら申請は 400 で弾かれる。API が返しているのに画面が
-		// 読んでいないと、「1日: 2 / 10 (空きあり)」と描いて実際には出せない
-		// 人を出せると案内する。
-		"res.pending", "pendingLimit",
+		// **審査待ちの上限を画面に出すこと (レビュー H1 / H-2)。** 期間の窓に
+		// 空きがあってもこれが満杯なら申請は 400 で弾かれる。
+		//
+		// **script から満たせる needle にしない。** `res.pending` / `pendingLimit`
+		// は ref の宣言だけで満たされ、**template を丸ごと消しても緑**だった
+		// (実測) — それは塞ごうとした状態そのもの。locale キーは template に
+		// しか現れないので、描画まで見たことになる。
+		"pendingLimitTitle", "pendingLimitFull",
 		// 追い読みのカーソルと可否。
 		"userApplicationNextCursor(", "canLoadMoreUserApplications(",
 		// 絞り込みと検索が API に渡ること。
@@ -409,13 +412,7 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	}
 	// **却下理由を値として描画すること。** ラベルの参照では満たさない
 	// (#2960 の R3-M1 と同じ形)。
-	userBound := false
-	for _, m := range regexp.MustCompile(`([A-Za-z_$][\w$]*)\.rejectReason`).FindAllStringSubmatch(userApps, -1) {
-		if m[1] != "_emojiApplication" {
-			userBound = true
-		}
-	}
-	require.Truef(t, userBound,
+	require.Regexpf(t, rejectReasonBoundRe, userApps,
 		"申請履歴が却下理由を値として描画していない。「却下された」しか分からない (#2961)")
 	// **取得の失敗を握り潰さない。** 集計と履歴で別々に立てること — 片方の
 	// フラグを使い回すと、履歴が取れているのに「状況を確認できませんでした」と
@@ -449,6 +446,37 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		userApps,
 		"取得の先頭で世代を採っていない。取得中に絞り込みを変えると要求が捨てられ、"+
 			"旧フィルタの行が残る (#2961)")
+	// **位置だけでは足りない (レビュー H-1)。** 世代を採った**直後**に
+	// `if (fetching.value) return;` を置くと上の正規表現には一致したまま、
+	// 要求は飛ばず、しかも先行要求の `finally` が `gen !== generation` で
+	// 解除できなくなる — **スピナーが永久に回り「もっと見る」も出ない**ので、
+	// 元の欠陥より悪い。取得の本体に in-flight の早期 return を置かせない。
+	//
+	// **範囲は `fetchPage` の中だけ。** 集計側 (`fetchSummary`) の二重押し防止は
+	// 正当 — あちらの入口は mount と `:disabled` 付きのボタンだけで、取りこぼす
+	// 要求が無い。
+	pageBody := jsFunctionBody(t, userApps, "async function fetchPage(")
+	require.NotRegexpf(t, `if \([^)]*fetching[^)]*\)\s*\{?\s*return`, pageBody,
+		"取得中を理由に要求を捨てている。絞り込みを変えても新しい取得が走らず、"+
+			"読み込み中の表示が解除されなくなる (#2961)")
+	// **取り直す間は失敗の表示を出さないこと (レビュー M-3)。** 残すと、
+	// 読み込み中もずっと「確認できませんでした」が出たままになる (`v-else-if`
+	// なので読み込み中の表示に来ない)。**要求を出す前に**戻すこと — 成功して
+	// から戻すのでは、いちばん押される復旧経路 (再試行ボタン) で効かない。
+	// ref の名前は固定せず、catch で立てるフラグのどれかが戻ることを見る。
+	beforeAwait := pageBody
+	if i := strings.Index(pageBody, "await "); i >= 0 {
+		beforeAwait = pageBody[:i]
+	}
+	reset := false
+	for _, f := range userFlags {
+		if strings.Contains(beforeAwait, f+".value = false") {
+			reset = true
+		}
+	}
+	require.Truef(t, reset,
+		"取り直す間も失敗の表示が残る。再試行を押しても「確認できませんでした」が"+
+			"出たままになる (#2961)")
 	// **成功経路に置くこと。** 「どこかに 1 つある」だと、行を積む側から外しても
 	// 通る = H1 の回帰そのものが素通りする (実測)。取得と `items` への代入の
 	// 間にあることを見る。
@@ -463,16 +491,23 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	require.Regexpf(t, `if \([A-Za-z_$][\w$]* !== [A-Za-z_$][\w$]*\) return;`,
 		userApps[fetchStart:fetchStart+assign],
 		"古い応答を捨てる判定が無い。取得中に絞り込みを変えると旧フィルタの行が並ぶ (#2961)")
-	// catch 側でも捨てること (古い失敗で新しい取得を «失敗» にしない)。
-	catchGuards := regexp.MustCompile(`if \([A-Za-z_$][\w$]* !== [A-Za-z_$][\w$]*\) return;`).
-		FindAllString(userApps, -1)
-	require.GreaterOrEqualf(t, len(catchGuards), 2,
-		"古い応答を捨てる判定が成功経路にしか無い。古い失敗が新しい取得を上書きする (#2961)")
 	// **解除するのも最新の世代だけ (レビュー L3)。** 古い応答が解除すると、
 	// 実際にはまだ飛んでいるのにボタンが押せる状態になる。
-	require.Regexpf(t, `if \([A-Za-z_$][\w$]* === [A-Za-z_$][\w$]*\) [A-Za-z_$][\w$]*\.value = false`,
+	//
+	// **4 箇所が同じ識別子であることまで見る (レビュー L-5)。** 名前を固定せずに
+	// 形だけ見ると、別のカウンタを増やす変異 (`const gen = ++bump;` を足して
+	// `generation` は 0 のまま) で**全ての応答が捨てられ一覧が永久に空**になるのに
+	// 緑だった。
+	genDecl := regexp.MustCompile(`const ([A-Za-z_$][\w$]*) = \+\+([A-Za-z_$][\w$]*);`).
+		FindStringSubmatch(userApps)
+	require.Lenf(t, genDecl, 3, "世代を採っていない (#2961)")
+	gen, counter := regexp.QuoteMeta(genDecl[1]), regexp.QuoteMeta(genDecl[2])
+	require.Regexpf(t, `if \(`+gen+` === `+counter+`\)\s*\{?\s*[A-Za-z_$][\w$]*\.value = false`,
 		userApps,
 		"古い応答が取得中の表示を解除する。まだ飛んでいるのにボタンが押せる (#2961)")
+	require.GreaterOrEqualf(t,
+		len(regexp.MustCompile(`if \(`+gen+` !== `+counter+`\) return;`).FindAllString(userApps, -1)), 2,
+		"古い応答を捨てる判定が、世代を採ったのと同じ識別子で行われていない (#2961)")
 	// **集計にも再取得の手段を置くこと (レビュー M1)。** 失敗すると期間別の
 	// 使用状況ごと消えるうえ、取得は mount 時の 1 回しか無いので、復旧手段が
 	// ページのリロードだけになる (#2960 が mk.20c で直したのと同じ形)。
@@ -517,13 +552,12 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// した時点で恒久的に満たされ、値のバインドを消しても落ちなくなる
 	// (この行の他の項目は全て MkKeyValue + locale ラベルなので、その整形は
 	// ごく自然に起きる)。値として描画していることを見る。
-	bound := false
-	for _, m := range regexp.MustCompile(`([A-Za-z_$][\w$]*)\.rejectReason`).FindAllStringSubmatch(relatedSrc, -1) {
-		if m[1] != "_emojiApplication" {
-			bound = true
-		}
-	}
-	require.Truef(t, bound,
+	// **補間の中にあることまで見る (レビュー R3-L1)。** 「どこかに
+	// `item.rejectReason` がある」だと、`v-if` に残したまま本文をリテラルへ
+	// 差し替えても通る (実測) — 却下理由が画面に出ないのに緑になる。
+	// `{{ i18n.ts._emojiApplication.rejectReason }}` は識別子が直後に来ないので
+	// この形には一致しない。
+	require.Regexpf(t, rejectReasonBoundRe, relatedSrc,
 		"関連履歴が却下理由を値として描画していない。ラベルの参照だけでは "+
 			"「過去に却下された」しか分からない (#2960)")
 
@@ -618,6 +652,9 @@ func catchBody(t *testing.T, src string) string {
 	return bodies[0]
 }
 
+// rejectReasonBoundRe matches the reject reason rendered as a value.
+var rejectReasonBoundRe = regexp.MustCompile(`\{\{ *[A-Za-z_$][\w$]*\.rejectReason *\}\}`)
+
 // catchBodies returns every catch block body in src, resolved by brace matching.
 //
 // **全部返す。** 取得経路が 2 つある画面 (#2961 の集計と履歴) では、最初の 1 つ
@@ -684,6 +721,12 @@ func trueAssignedIn(t *testing.T, src string) []string {
 // 親の要素に付くこともある (警告と再試行ボタンを 1 つの div にまとめる形)。
 // タグだけを見ていると、そこを括った瞬間に「条件が無い」と誤検知した (実測)。
 func tagConditionUsesAny(src, needle string, flags []string) bool {
+	// **template だけを見る (レビュー M-2)。** script 側にも同じ文面の参照を
+	// 置く整形 (文面を関数で出し分ける形。このファイルにも実例がある) をすると、
+	// そこには囲む条件が無いので「画面に出ない」と**事実と逆の診断**で落ちた。
+	if i := strings.Index(src, "\n<script"); i >= 0 {
+		src = src[:i]
+	}
 	found := false
 	for off := 0; ; {
 		i := strings.Index(src[off:], needle)
@@ -696,6 +739,10 @@ func tagConditionUsesAny(src, needle string, flags []string) bool {
 		off = i + len(needle)
 		ok := false
 		for _, cond := range enclosingConditions(src, i) {
+			// **否定は数えない (レビュー L-1)。** `v-if="!failed"` は
+			// `\bfailed\b` に一致するが、**失敗の文面を成功時に出す**という
+			// 反転そのもの。照合の前に否定の出現を落とす。
+			cond = negatedFlagRe.ReplaceAllString(cond, " ")
 			for _, f := range flags {
 				if regexp.MustCompile(`\b` + regexp.QuoteMeta(f) + `\b`).MatchString(cond) {
 					ok = true
@@ -740,8 +787,11 @@ func enclosingConditions(src string, pos int) []string {
 			}
 		case strings.HasPrefix(tag, "<!"):
 			// コメント / doctype。入れ子には数えない。
-		case selfClosing:
-			// 自己終端の要素は中身を持たない。
+		case selfClosing || isVoidElement(tag):
+			// 自己終端と void 要素は中身を持たない。**void を push すると、
+			// 直後の閉じタグがそれを pop してしまい、閉じたはずの条件付き
+			// 祖先がスタックに残る** — 失敗の文面を無条件で出す変異が
+			// fail-open で素通りした (レビュー M-1 で実測)。
 		default:
 			stack = append(stack, vueCondition(tag))
 		}
@@ -772,6 +822,25 @@ func scanTag(src string, i int) (int, bool) {
 	return -1, false
 }
 
+// negatedFlagRe matches a negated identifier in a Vue condition.
+var negatedFlagRe = regexp.MustCompile(`![\s(]*[A-Za-z_$][\w$.]*`)
+
+// voidElements never have a closing tag in HTML.
+var voidElements = map[string]bool{
+	"area": true, "base": true, "br": true, "col": true, "embed": true,
+	"hr": true, "img": true, "input": true, "link": true, "meta": true,
+	"param": true, "source": true, "track": true, "wbr": true,
+}
+
+// isVoidElement reports whether the opening tag is an HTML void element.
+func isVoidElement(tag string) bool {
+	name := strings.TrimPrefix(tag, "<")
+	if i := strings.IndexAny(name, " \t\r\n/>"); i >= 0 {
+		name = name[:i]
+	}
+	return voidElements[strings.ToLower(name)]
+}
+
 // vueCondition returns the v-if / v-else-if value of one opening tag.
 func vueCondition(tag string) string {
 	for _, attr := range []string{`v-if="`, `v-else-if="`} {
@@ -783,5 +852,29 @@ func vueCondition(tag string) string {
 			return rest
 		}
 	}
+	return ""
+}
+
+// jsFunctionBody returns the body of the function whose header starts src.
+func jsFunctionBody(t *testing.T, src, header string) string {
+	t.Helper()
+	i := strings.Index(src, header)
+	require.GreaterOrEqualf(t, i, 0, "%s が無い", header)
+	j := strings.Index(src[i:], "{")
+	require.GreaterOrEqualf(t, j, 0, "%s の本体が無い", header)
+	start := i + j
+	depth := 0
+	for k := start; k < len(src); k++ {
+		switch src[k] {
+		case '{':
+			depth++
+		case '}':
+			depth--
+			if depth == 0 {
+				return src[start+1 : k]
+			}
+		}
+	}
+	t.Fatalf("%s の対応する括弧が見つからない", header)
 	return ""
 }
