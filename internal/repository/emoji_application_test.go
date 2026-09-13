@@ -1379,10 +1379,13 @@ func TestEmojiApplicationRepository_QuotaUsage_PendingLimit(t *testing.T) {
 	var pe *PendingLimitExceededError
 	require.ErrorAs(t, pendErr, &pe, "実際の申請は審査待ちの上限で弾かれるのに、画面は空きありと描いている")
 
-	// (3) 上限なしなら満杯にならない。
+	// (3) 上限なしなら満杯にならない。**それでも件数は返す (レビュー M2)。**
+	// 0 のままだと、同じレスポンスの中で `counts.pending` と食い違う
+	// (既定が無制限なのでほぼ全ての構成がこれに当たる)。
 	none, err := repo.QuotaUsage("ea_f6", QuotaLimits{Windows: []QuotaWindow{day}}, now)
 	require.NoError(t, err)
 	require.False(t, none.PendingFull)
 	require.Equal(t, 0, none.MaxPending)
+	require.Equal(t, 2, none.Pending, "上限なしのとき審査待ちの件数が返らない")
 	require.False(t, none.Windows[0].RetryAt.IsZero(), "審査待ちが無制限なら窓の時刻はそのまま")
 }

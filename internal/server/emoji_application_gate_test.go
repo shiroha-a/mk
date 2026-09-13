@@ -394,6 +394,11 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		"relatedStatusLabel(",
 		// 期間上限の表示。**無制限を 0 で描かない**ための分岐ごと。
 		"quotaUsageLabel(", "quotaPeriodLabel(", "quotaIsFull(",
+		// **審査待ちの上限を読むこと (レビュー H1)。** 期間の窓に空きがあっても
+		// これが満杯なら申請は 400 で弾かれる。API が返しているのに画面が
+		// 読んでいないと、「1日: 2 / 10 (空きあり)」と描いて実際には出せない
+		// 人を出せると案内する。
+		"res.pending", "pendingLimit",
 		// 追い読みのカーソルと可否。
 		"userApplicationNextCursor(", "canLoadMoreUserApplications(",
 		// 絞り込みと検索が API に渡ること。
@@ -435,8 +440,15 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// 表示された一覧に承認済みが混ざり、エラーもスピナーも出ないので気付けない。
 	// 次の「もっと見る」は別の結果集合から採ったカーソルを渡すので、以降の行が
 	// 永久に出てこない。捨てるのは要求ではなく**古い応答**のほう。
-	require.NotContainsf(t, userApps, "if (fetching.value) return",
-		"取得中に絞り込みを変えると要求が捨てられ、旧フィルタの行が残る (#2961)")
+	// **世代を採るのが最初の文であること。** 文字列 1 本の `NotContains` だと
+	// 波括弧を付けた `if (fetching.value) {\n return;\n}` で素通りし、しかも
+	// その形は**先行要求の finally が解除できなくなる**ので元より悪い
+	// (スピナーが永久に回り「もっと見る」が押せなくなる。レビュー L2 で実測)。
+	// 早期 return があれば下の正規表現に一致しなくなる。
+	require.Regexpf(t, `(?s)async function fetchPage\([^)]*\)[^{]*\{\s*const [A-Za-z_$][\w$]* = \+\+[A-Za-z_$][\w$]*;`,
+		userApps,
+		"取得の先頭で世代を採っていない。取得中に絞り込みを変えると要求が捨てられ、"+
+			"旧フィルタの行が残る (#2961)")
 	// **成功経路に置くこと。** 「どこかに 1 つある」だと、行を積む側から外しても
 	// 通る = H1 の回帰そのものが素通りする (実測)。取得と `items` への代入の
 	// 間にあることを見る。
@@ -456,6 +468,11 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		FindAllString(userApps, -1)
 	require.GreaterOrEqualf(t, len(catchGuards), 2,
 		"古い応答を捨てる判定が成功経路にしか無い。古い失敗が新しい取得を上書きする (#2961)")
+	// **解除するのも最新の世代だけ (レビュー L3)。** 古い応答が解除すると、
+	// 実際にはまだ飛んでいるのにボタンが押せる状態になる。
+	require.Regexpf(t, `if \([A-Za-z_$][\w$]* === [A-Za-z_$][\w$]*\) [A-Za-z_$][\w$]*\.value = false`,
+		userApps,
+		"古い応答が取得中の表示を解除する。まだ飛んでいるのにボタンが押せる (#2961)")
 	// **集計にも再取得の手段を置くこと (レビュー M1)。** 失敗すると期間別の
 	// 使用状況ごと消えるうえ、取得は mount 時の 1 回しか無いので、復旧手段が
 	// ページのリロードだけになる (#2960 が mk.20c で直したのと同じ形)。
@@ -677,11 +694,12 @@ func tagConditionUsesAny(src, needle string, flags []string) bool {
 		}
 		i += off
 		off = i + len(needle)
-		cond := lastVueCondition(src[:i])
 		ok := false
-		for _, f := range flags {
-			if regexp.MustCompile(`\b` + regexp.QuoteMeta(f) + `\b`).MatchString(cond) {
-				ok = true
+		for _, cond := range enclosingConditions(src, i) {
+			for _, f := range flags {
+				if regexp.MustCompile(`\b` + regexp.QuoteMeta(f) + `\b`).MatchString(cond) {
+					ok = true
+				}
 			}
 		}
 		// **全ての出現が条件付きであること (レビューの変異で実測)。** 「いずれか」
@@ -694,20 +712,76 @@ func tagConditionUsesAny(src, needle string, flags []string) bool {
 	}
 }
 
-// lastVueCondition returns the value of the last v-if / v-else-if in src.
-func lastVueCondition(src string) string {
-	best := -1
-	for _, attr := range []string{`v-if="`, `v-else-if="`} {
-		if i := strings.LastIndex(src, attr); i > best {
-			best = i + len(attr)
+// enclosingConditions returns the v-if / v-else-if values of the elements that
+// are still open at pos, outermost first.
+//
+// **「直前の v-if」では足りない (レビュー M1)。** ファイル全体から最後の条件を
+// 拾う形にしたところ、(a) `v-else` で反転させて失敗の文面を**成功時に**出す、
+// (b) 条件を持つ兄弟の直後に無条件で置く、のどちらも素通りするようになった
+// (旧実装では落ちていた)。入れ子を実際に追って、その要素を囲っている条件だけを
+// 見る。**属性値の中の `>` を終端と誤読しない** — `items.length > 0` のような
+// 条件が実在する。
+func enclosingConditions(src string, pos int) []string {
+	var stack []string
+	for i := 0; i < pos && i < len(src); {
+		if src[i] != '<' {
+			i++
+			continue
+		}
+		end, selfClosing := scanTag(src, i)
+		if end < 0 {
+			break
+		}
+		tag := src[i:end]
+		switch {
+		case strings.HasPrefix(tag, "</"):
+			if len(stack) > 0 {
+				stack = stack[:len(stack)-1]
+			}
+		case strings.HasPrefix(tag, "<!"):
+			// コメント / doctype。入れ子には数えない。
+		case selfClosing:
+			// 自己終端の要素は中身を持たない。
+		default:
+			stack = append(stack, vueCondition(tag))
+		}
+		i = end
+	}
+	return stack
+}
+
+// scanTag returns the index just past the tag starting at i, and whether it is
+// self-closing. 引用符の中は終端として扱わない。
+func scanTag(src string, i int) (int, bool) {
+	var quote byte
+	for j := i; j < len(src); j++ {
+		c := src[j]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '>':
+			return j + 1, j > i && src[j-1] == '/'
 		}
 	}
-	if best < 0 {
-		return ""
+	return -1, false
+}
+
+// vueCondition returns the v-if / v-else-if value of one opening tag.
+func vueCondition(tag string) string {
+	for _, attr := range []string{`v-if="`, `v-else-if="`} {
+		if i := strings.Index(tag, attr); i >= 0 {
+			rest := tag[i+len(attr):]
+			if end := strings.Index(rest, `"`); end >= 0 {
+				return rest[:end]
+			}
+			return rest
+		}
 	}
-	end := strings.Index(src[best:], `"`)
-	if end < 0 {
-		return src[best:]
-	}
-	return src[best : best+end]
+	return ""
 }

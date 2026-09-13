@@ -264,14 +264,12 @@ type QuotaWindowUsage struct {
 func evaluateQuotaLimits(tx *gorm.DB, userID string, limits QuotaLimits, now time.Time) (QuotaUsage, error) {
 	out := QuotaUsage{MaxPending: limits.MaxPending}
 	if limits.MaxPending > 0 {
-		var pending int64
-		if err := tx.Model(&model.EmojiApplication{}).
-			Where(`"userId" = ? AND "status" = ?`, userID, model.EmojiApplicationPending).
-			Count(&pending).Error; err != nil {
+		pending, err := countPendingApplications(tx, userID)
+		if err != nil {
 			return QuotaUsage{}, err
 		}
-		out.Pending = int(pending)
-		out.PendingFull = pending >= int64(limits.MaxPending)
+		out.Pending = pending
+		out.PendingFull = pending >= limits.MaxPending
 	}
 
 	windows, err := evaluateQuotaWindows(tx, userID, limits.Windows, now)
@@ -647,5 +645,32 @@ func (r *emojiApplicationRepository) QuotaUsage(userID string, limits QuotaLimit
 	}
 	// **ロックを取らない。** 数えるだけなので、囲うと画面を開いただけで
 	// 申請の直列化 (pg_advisory_xact_lock) に割り込む。
-	return evaluateQuotaLimits(r.db, userID, limits, now)
+	out, err := evaluateQuotaLimits(r.db, userID, limits, now)
+	if err != nil {
+		return QuotaUsage{}, err
+	}
+	if limits.MaxPending <= 0 {
+		// **上限が無くても件数は返す (レビュー M2)。** 作成側は上限があるときしか
+		// 数えないが、読み取り側が 0 のままだと**同じレスポンスの中で
+		// `counts.pending` と食い違う** (既定は無制限なので、ほぼ全ての構成が
+		// これに当たる)。作成側に余計な COUNT を足さずに読み取り側だけ揃える。
+		pending, err := countPendingApplications(r.db, userID)
+		if err != nil {
+			return QuotaUsage{}, err
+		}
+		out.Pending = pending
+	}
+	return out, nil
+}
+
+// countPendingApplications counts how many of the user's applications are still
+// awaiting review (#2977 / #2961).
+func countPendingApplications(tx *gorm.DB, userID string) (int, error) {
+	var n int64
+	if err := tx.Model(&model.EmojiApplication{}).
+		Where(`"userId" = ? AND "status" = ?`, userID, model.EmojiApplicationPending).
+		Count(&n).Error; err != nil {
+		return 0, err
+	}
+	return int(n), nil
 }
