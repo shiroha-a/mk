@@ -288,6 +288,34 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 			"emoji-request.vue に %s が無い。ドラッグ中に何も光らない / 光ったまま消えない (#2959)", want)
 	}
 
+	// **審査画面が関連履歴を出すこと (#2960)。** 同じ名前・同じ取り込み元・
+	// 同じ画像で過去に却下されていても、出さなければモデレーターは気付けない。
+	// **ボタンより前に置くこと**も見る — 押した後に出しても判断材料にならない。
+	applicationsSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.applications.vue")))
+	require.Containsf(t, applicationsSrc, "custom-emojis-manager.application-related.vue",
+		"審査画面が関連履歴のコンポーネントを読み込んでいない (#2960)")
+	relatedIdx := strings.Index(applicationsSrc, "<XRelated")
+	approveIdx := strings.Index(applicationsSrc, `@click="approve(app)"`)
+	require.GreaterOrEqualf(t, relatedIdx, 0, "審査画面に <XRelated> が無い (#2960)")
+	require.GreaterOrEqualf(t, approveIdx, 0, "審査画面の承認ボタンが見つからない")
+	require.Lessf(t, relatedIdx, approveIdx,
+		"関連履歴が承認ボタンより後ろにある。押した後に出しても判断材料にならない (#2960)")
+
+	relatedSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.application-related.vue")))
+	for _, want := range []string{
+		// 取得は詳細を開いたときの 1 回だけ (一覧に埋め込むと N+1)。
+		"admin/emoji-application/related",
+		// **取得できなかったことを隠さない。** 何も出さないと「履歴が無い」と読める。
+		"relatedUnknown",
+		// 自動拒否への戒めを画面にも出す。
+		"relatedNote",
+		// どの条件で一致したか。
+		"matchedBy",
+	} {
+		require.Containsf(t, relatedSrc, want,
+			"関連履歴の画面に %s が無い (#2960)", want)
+	}
+
 	// **審査画面が media proxy を通すこと (レビュー M2 / R2-H3)。**
 	// リモートの生 URL は `img-src 'self' data: blob:` を enforce している構成で
 	// **黙ってブロックされる**。この 1 行が「モデレーターに画像が見える」と
