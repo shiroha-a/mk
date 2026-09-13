@@ -182,6 +182,10 @@ type Service struct {
 	// 掛けられないのに掛けたつもりになると、ロールを設定した運営者が
 	// 「効いている」と誤解する。既定値も 0 (無制限) なので挙動は変わらない。
 	policies PolicyProvider
+	// resets は枠の手動リセット (#2962) を読み書きする先。**未配線なら
+	// リセットは無かったものとして数える** — 配線を忘れた構成で枠が勝手に
+	// 広がるより、従来どおり厳しい側に倒れるほうが安全。
+	resets repository.EmojiApplicationQuotaResetRepository
 }
 
 // PolicyProvider resolves a user's effective role policies (#2958).
@@ -194,6 +198,11 @@ func (s *Service) SetPolicyProvider(p PolicyProvider) { s.policies = p }
 
 // HasPolicyProvider reports whether the quota can be enforced.
 func (s *Service) HasPolicyProvider() bool { return s.policies != nil }
+
+// SetQuotaResetRepo wires the manual quota reset store (#2962).
+func (s *Service) SetQuotaResetRepo(r repository.EmojiApplicationQuotaResetRepository) {
+	s.resets = r
+}
 
 // QuotaExceededError is returned when a rolling window is full (#2958).
 // 呼び出し元はこれを HTTP 429 に翻訳し、期間・使用数・上限・再試行時刻を返す。
@@ -227,8 +236,26 @@ func (e *PendingLimitExceededError) Error() string {
 // **ローリング期間にする。** 固定暦だとタイムゾーン依存になり、切り替わりの
 // 直前と直後に連続で申請できてしまう。
 func (s *Service) quotaLimits(userID string) repository.QuotaLimits {
+	limits, _ := s.quotaLimitsWithReset(userID)
+	return limits
+}
+
+// quotaLimitsWithReset builds the limits and also returns the reset row they
+// were built from.
+//
+// **リセットは 1 回だけ引く (#2962)。** 境界に使う値と画面に出す値を別々に
+// 引くと、その間にリセットが入ったときに**「最後のリセット」として表示した時刻と、
+// 実際に数えた境界が食い違う**。
+func (s *Service) quotaLimitsWithReset(userID string) (repository.QuotaLimits, *model.EmojiApplicationQuotaReset) {
+	reset := s.lastReset(userID)
+	resetAt := time.Time{}
+	if reset != nil {
+		resetAt = reset.CreatedAt
+	}
 	if s.policies == nil {
-		return repository.QuotaLimits{}
+		// policy が無くてもリセットの境界は要る — 上限が 0 (無制限) でも、
+		// 件数の表示 (#2961) はリセット後の数であるべき。
+		return repository.QuotaLimits{ResetAt: resetAt}, reset
 	}
 	// **errorless 版を使う。** ロール解決に失敗すると base が返る。base には
 	// `meta.policies` (管理画面のベースロール) まで載っているので、そちらに
@@ -237,7 +264,7 @@ func (s *Service) quotaLimits(userID string) repository.QuotaLimits {
 	// 直後の INSERT も落ちる。
 	p := s.policies.GetUserPolicies(userID)
 	if p == nil {
-		return repository.QuotaLimits{}
+		return repository.QuotaLimits{ResetAt: resetAt}, reset
 	}
 	// 窓は狭い順に並べてある。**ただし repository 側は満杯のものを全部評価して
 	// いちばん遅く空くものを返す**ので、順序は結果を変えない (読みやすさのため)。
@@ -246,9 +273,73 @@ func (s *Service) quotaLimits(userID string) repository.QuotaLimits {
 		windows[i].Max = policyMax(p, quotaWindowDefs[i].policyKey)
 	}
 	return repository.QuotaLimits{
-		Windows:    windows,
+		Windows: windows,
+		// **審査待ちの上限には効かない (#2962)。** あれは「今まさに審査待ちの
+		// 件数」で、枠を戻しても申請は審査待ちのまま残るので意味を持たない。
 		MaxPending: policyMax(p, role.PolicyEmojiApplicationMaxPending),
+		ResetAt:    resetAt,
+	}, reset
+}
+
+// ErrResetReasonRequired is returned when a quota reset carries no reason.
+//
+// **監査ログに残る唯一の文脈なので必須。** 空を許すと「誰かが戻した」以上の
+// ことが後から分からない。
+var ErrResetReasonRequired = errors.New("emoji application quota reset reason is required")
+
+// ErrQuotaResetUnavailable is returned when the reset store is not wired.
+var ErrQuotaResetUnavailable = errors.New("emoji application quota reset is not available")
+
+// ResetQuota clears the user's rolling quota by recording a reset (#2962).
+//
+// **申請の行は触らない。** 履歴を消して枠を空けると、過去の判断 (#2960 が
+// 審査の材料として出している却下理由や同じ画像かどうか) も同時に消える。
+//
+// 戻り値は**リセット前**の使用状況。監査ログに「何件使っていた人を戻したか」を
+// 残すために呼び出し元が使う — 後から採ると必ず 0 になり、記録として意味が無い。
+func (s *Service) ResetQuota(userID, moderatorID, reason string) (UserSummary, *model.EmojiApplicationQuotaReset, error) {
+	if s.resets == nil {
+		return UserSummary{}, nil, ErrQuotaResetUnavailable
 	}
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return UserSummary{}, nil, ErrResetReasonRequired
+	}
+
+	// **先に読む。** 書いてから読むと、返すのはリセット後の 0 件になる。
+	before, err := s.UserSummary(userID)
+	if err != nil {
+		return UserSummary{}, nil, err
+	}
+
+	row := &model.EmojiApplicationQuotaReset{
+		ID:        s.idGen.Generate(s.nowFunc()),
+		UserID:    userID,
+		ResetByID: moderatorID,
+		Reason:    reason,
+		CreatedAt: s.nowFunc(),
+	}
+	if err := s.resets.Create(row); err != nil {
+		return UserSummary{}, nil, err
+	}
+	return before, row, nil
+}
+
+// lastReset returns the most recent manual reset, or nil.
+//
+// **引けなかったら nil に倒す (fail-closed)。** リセットを「あった」ことに
+// すると枠が勝手に広がる。読めないときは従来どおり厳しい側で数える。
+func (s *Service) lastReset(userID string) *model.EmojiApplicationQuotaReset {
+	if s.resets == nil {
+		return nil
+	}
+	row, err := s.resets.LatestByUser(userID)
+	if err != nil {
+		slog.Warn("emoji application: quota reset lookup failed",
+			"userId", userID, "err", err)
+		return nil
+	}
+	return row
 }
 
 // UserSummary is the moderation-screen view of one user's applications (#2961).
@@ -265,6 +356,8 @@ type UserSummary struct {
 	// 案内する** — この機能が塞ごうとしている失敗形そのもの。
 	Pending    int
 	MaxPending int
+	// LastReset は最後に枠を手動で戻した操作 (#2962)。未実施なら nil。
+	LastReset *model.EmojiApplicationQuotaReset
 }
 
 // QuotaWindowUsage is one window's usage for the moderation screen (#2961).
@@ -287,7 +380,7 @@ func (s *Service) UserSummary(userID string) (UserSummary, error) {
 	if err != nil {
 		return UserSummary{}, err
 	}
-	limits := s.quotaLimits(userID)
+	limits, reset := s.quotaLimitsWithReset(userID)
 	// **policy が引けなくても窓は返す。** 窓が消えると画面は「期間上限の設定が
 	// 無い」と描くので、上限が効いているのに無いと見える。上限 0 = 無制限として
 	// 出すほうが、少なくとも件数は正しい。
@@ -297,6 +390,9 @@ func (s *Service) UserSummary(userID string) (UserSummary, error) {
 	}
 	usage, err := s.apps.QuotaUsage(userID, repository.QuotaLimits{
 		Windows: windows,
+		// **`ResetAt` を落とさない (#2962)。** 組み直すときに落とすと、画面だけ
+		// リセット前の件数を出し続ける (作成側は戻っているのに画面は満杯)。
+		ResetAt: limits.ResetAt,
 		// **審査待ちの上限も渡す。** 渡さないと、両方満杯のときに
 		// repository が `RetryAt` を落とす規則が働かず、**その時刻に叩いても
 		// 通らない時刻**を画面に広告することになる (レビュー H1)。
@@ -310,6 +406,7 @@ func (s *Service) UserSummary(userID string) (UserSummary, error) {
 		Windows:    make([]QuotaWindowUsage, 0, len(usage.Windows)),
 		Pending:    usage.Pending,
 		MaxPending: usage.MaxPending,
+		LastReset:  reset,
 	}
 	for _, u := range usage.Windows {
 		out.Windows = append(out.Windows, QuotaWindowUsage{

@@ -42,6 +42,8 @@ type fakeApps struct {
 	usageNow        time.Time
 	usageMaxPending int
 	usagePending    int
+	usageResetAt    time.Time
+	onUsage         func()
 }
 
 func newFakeApps() *fakeApps { return &fakeApps{rows: map[string]*model.EmojiApplication{}} }
@@ -74,8 +76,12 @@ func (f *fakeApps) CountByUserStatus(userID string) (repository.StatusCounts, er
 }
 
 func (f *fakeApps) QuotaUsage(userID string, limits repository.QuotaLimits, now time.Time) (repository.QuotaUsage, error) {
+	if f.onUsage != nil {
+		f.onUsage()
+	}
 	f.usageUserID, f.usageWindows, f.usageNow = userID, limits.Windows, now
 	f.usageMaxPending = limits.MaxPending
+	f.usageResetAt = limits.ResetAt
 	if f.usageErr != nil {
 		return repository.QuotaUsage{}, f.usageErr
 	}
@@ -1062,6 +1068,55 @@ func TestCreateRemoteHasNoFileHash(t *testing.T) {
 	require.Nil(t, app.FileHash)
 }
 
+// fakeResets is the #2962 quota reset store.
+type fakeResets struct {
+	rows      []model.EmojiApplicationQuotaReset
+	latestErr error
+	createErr error
+	created   []model.EmojiApplicationQuotaReset
+	calls     int
+	onCreate  func()
+}
+
+func (f *fakeResets) Create(row *model.EmojiApplicationQuotaReset) error {
+	if f.onCreate != nil {
+		f.onCreate()
+	}
+	if f.createErr != nil {
+		return f.createErr
+	}
+	f.created = append(f.created, *row)
+	f.rows = append(f.rows, *row)
+	return nil
+}
+
+func (f *fakeResets) LatestByUser(userID string) (*model.EmojiApplicationQuotaReset, error) {
+	f.calls++
+	if f.latestErr != nil {
+		return nil, f.latestErr
+	}
+	var out *model.EmojiApplicationQuotaReset
+	for i := range f.rows {
+		if f.rows[i].UserID != userID {
+			continue
+		}
+		if out == nil || f.rows[i].CreatedAt.After(out.CreatedAt) {
+			out = &f.rows[i]
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeResets) ListByUser(userID string, _ int) ([]model.EmojiApplicationQuotaReset, error) {
+	var out []model.EmojiApplicationQuotaReset
+	for i := range f.rows {
+		if f.rows[i].UserID == userID {
+			out = append(out, f.rows[i])
+		}
+	}
+	return out, nil
+}
+
 // errBoom stands in for any repository failure (#2961).
 var errBoom = errors.New("boom")
 
@@ -1185,4 +1240,132 @@ func TestUserSummarySurfacesErrors(t *testing.T) {
 	usageFail.usageErr = errBoom
 	_, err = NewService(usageFail, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil).UserSummary("u1")
 	require.ErrorIs(t, err, errBoom, "使用状況の取得失敗を握り潰している")
+}
+
+// **リセットの境界が窓へ渡ること (#2962)。** 渡らないと、戻したはずの枠が
+// 戻らない (作成側) / 画面が古い件数を出す (読み取り側)。
+func TestQuotaLimitsCarriesResetBoundary(t *testing.T) {
+	apps := newFakeApps()
+	resets := &fakeResets{}
+	at := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	resets.rows = []model.EmojiApplicationQuotaReset{
+		{ID: "r1", UserID: "u1", ResetByID: "m1", Reason: "古い", CreatedAt: at.Add(-time.Hour)},
+		{ID: "r2", UserID: "u1", ResetByID: "m2", Reason: "新しい", CreatedAt: at},
+		{ID: "r3", UserID: "other", ResetByID: "m1", Reason: "別人", CreatedAt: at.Add(time.Hour)},
+	}
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetQuotaResetRepo(resets)
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{"emojiApplicationMaxPerDay": 3}})
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.Equal(t, at, apps.quotaLimits.ResetAt, "最新のリセットが窓へ渡っていない")
+}
+
+// **未配線なら「リセット無し」に倒す (fail-closed)。** あったことにすると
+// 枠が勝手に広がる。
+func TestQuotaLimitsWithoutResetRepoIsZero(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{"emojiApplicationMaxPerDay": 3}})
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.True(t, apps.quotaLimits.ResetAt.IsZero(), "未配線でリセットが効いている")
+}
+
+// **引けなかったときも「リセット無し」に倒す。** 読めないときに枠を広げると、
+// DB 障害のたびに上限が消える。
+func TestQuotaLimitsToleratesResetLookupFailure(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetQuotaResetRepo(&fakeResets{latestErr: errBoom})
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{"emojiApplicationMaxPerDay": 3}})
+
+	_, err := svc.Create(validInput())
+	require.NoError(t, err, "リセットが引けないだけで申請が落ちている")
+	require.True(t, apps.quotaLimits.ResetAt.IsZero(), "引けなかったのにリセットが効いている")
+}
+
+// **リセット前の使用状況を返すこと (#2962)。** 監査ログに「何件使っていた人を
+// 戻したか」を残すためで、後から採ると必ず 0 になる。
+func TestResetQuotaReturnsUsageBeforeReset(t *testing.T) {
+	apps := newFakeApps()
+	apps.usage = []repository.QuotaWindowUsage{
+		{Window: repository.QuotaWindow{Name: "day", Max: 5}, Used: 5},
+		{Window: repository.QuotaWindow{Name: "week", Max: 20}, Used: 8},
+	}
+	resets := &fakeResets{}
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetQuotaResetRepo(resets)
+
+	// **順序を固定する。** 使用状況を後から採ると必ず 0 になり、監査ログの
+	// 「何件使っていた人を戻したか」が意味を失う。fake の戻り値は固定なので、
+	// 呼ばれた順そのものを見ないとこの取り違えを検出できない (実測)。
+	seq, usageSeq, createSeq := 0, 0, 0
+	apps.onUsage = func() { seq++; usageSeq = seq }
+	resets.onCreate = func() { seq++; createSeq = seq }
+
+	before, row, err := svc.ResetQuota("u1", "mod1", "  修正後の画像で再申請してもらうため  ")
+	require.NoError(t, err)
+	require.Equal(t, 5, before.Windows[0].Used, "リセット前の使用状況になっていない")
+	require.Equal(t, 8, before.Windows[1].Used)
+
+	require.NotNil(t, row)
+	require.Equal(t, "u1", row.UserID)
+	require.Equal(t, "mod1", row.ResetByID)
+	// 前後の空白は落とす (空白だけの理由を弾くのと同じ扱い)。
+	require.Equal(t, "修正後の画像で再申請してもらうため", row.Reason)
+	require.Len(t, resets.created, 1, "リセットが記録されていない")
+	require.Greater(t, usageSeq, 0, "使用状況を採っていない")
+	require.Less(t, usageSeq, createSeq, "リセットを記録してから使用状況を採っている (必ず 0 になる)")
+	require.False(t, row.CreatedAt.IsZero(), "リセット時刻が入っていない")
+}
+
+// **理由は必須。** 監査ログに残る唯一の文脈。
+func TestResetQuotaRequiresReason(t *testing.T) {
+	resets := &fakeResets{}
+	svc := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetQuotaResetRepo(resets)
+
+	for _, reason := range []string{"", "   ", "\t\n"} {
+		_, _, err := svc.ResetQuota("u1", "mod1", reason)
+		require.ErrorIs(t, err, ErrResetReasonRequired, "理由 %q が通っている", reason)
+	}
+	require.Empty(t, resets.created, "弾いたのに記録が残っている")
+}
+
+// 未配線なら明示的に失敗する (黙って何もしない、にしない)。
+func TestResetQuotaWithoutRepoFails(t *testing.T) {
+	svc := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	_, _, err := svc.ResetQuota("u1", "mod1", "理由")
+	require.ErrorIs(t, err, ErrQuotaResetUnavailable)
+}
+
+// 記録に失敗したら握り潰さない (成功したように見せない)。
+func TestResetQuotaSurfacesCreateFailure(t *testing.T) {
+	svc := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetQuotaResetRepo(&fakeResets{createErr: errBoom})
+	_, _, err := svc.ResetQuota("u1", "mod1", "理由")
+	require.ErrorIs(t, err, errBoom)
+}
+
+// **`UserSummary` は最後のリセットを 1 回だけ引くこと (#2962)。** 境界に使う値と
+// 画面に出す値を別々に引くと、その間にリセットが入ったときに食い違う。
+func TestUserSummaryReadsResetOnce(t *testing.T) {
+	apps := newFakeApps()
+	resets := &fakeResets{}
+	at := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	resets.rows = []model.EmojiApplicationQuotaReset{
+		{ID: "r1", UserID: "u1", ResetByID: "m1", Reason: "理由", CreatedAt: at},
+	}
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetQuotaResetRepo(resets)
+
+	got, err := svc.UserSummary("u1")
+	require.NoError(t, err)
+	require.NotNil(t, got.LastReset, "最後のリセットが返っていない")
+	require.Equal(t, "r1", got.LastReset.ID)
+	require.Equal(t, at, apps.usageResetAt, "境界と表示で別の値を使っている")
+	require.Equal(t, 1, resets.calls, "リセットを 2 回引いている (間に操作が入ると食い違う)")
 }

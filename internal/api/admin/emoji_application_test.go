@@ -34,11 +34,38 @@ type stubEmojiReviewer struct {
 	summary       emojiapplication.UserSummary
 	summaryErr    error
 	lastSummaryID string
+
+	// #2962
+	resetBefore     emojiapplication.UserSummary
+	resetRow        *model.EmojiApplicationQuotaReset
+	resetErr        error
+	resetCalls      int
+	lastResetUserID string
+	lastResetBy     string
+	lastResetReason string
 }
 
 func (s *stubEmojiReviewer) UserSummary(userID string) (emojiapplication.UserSummary, error) {
 	s.lastSummaryID = userID
 	return s.summary, s.summaryErr
+}
+
+// #2962 (申請枠の手動リセット)。**err は他と分ける** — 共有すると、片方の
+// 分岐を消してももう片方の err で同じ結果になる。
+func (s *stubEmojiReviewer) ResetQuota(userID, moderatorID, reason string) (emojiapplication.UserSummary, *model.EmojiApplicationQuotaReset, error) {
+	s.lastResetUserID, s.lastResetBy, s.lastResetReason = userID, moderatorID, reason
+	s.resetCalls++
+	if s.resetErr != nil {
+		return emojiapplication.UserSummary{}, nil, s.resetErr
+	}
+	row := s.resetRow
+	if row == nil {
+		row = &model.EmojiApplicationQuotaReset{
+			ID: "qr1", UserID: userID, ResetByID: moderatorID, Reason: reason,
+			CreatedAt: time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC),
+		}
+	}
+	return s.resetBefore, row, nil
 }
 
 func (s *stubEmojiReviewer) Approve(_ context.Context, id, moderatorID string) (*model.EmojiApplication, error) {
@@ -1083,4 +1110,140 @@ func TestEmojiApplicationUserSummaryWithoutServiceIs500(t *testing.T) {
 	h := &apiadmin.Handler{}
 	rec := doPost(h.EmojiApplicationUserSummary, `{"userId":"u1"}`, adminUser)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// --- #2962 申請枠の手動リセット ---
+
+func resetQuotaHandler(t *testing.T) (*apiadmin.Handler, *stubEmojiReviewer, *testutil.MockUserRepository) {
+	t.Helper()
+	h, userRepo, _, _ := newTestHandler(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+	rev := &stubEmojiReviewer{}
+	h.SetEmojiApplicationReviewer(rev)
+	return h, rev, userRepo
+}
+
+// **理由は必須。** 監査ログに残る唯一の文脈なので、空を許すと「誰かが戻した」
+// 以上のことが後から分からなくなる。空白だけも弾く。
+func TestEmojiApplicationResetQuotaRequiresReason(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	for _, body := range []string{
+		`{"userId":"u1"}`,
+		`{"userId":"u1","reason":""}`,
+		`{"userId":"u1","reason":"   "}`,
+	} {
+		rec := doPost(h.EmojiApplicationResetUserQuota, body, adminUser)
+		require.Equal(t, http.StatusBadRequest, rec.Code, "body=%s", body)
+	}
+	require.Zero(t, rev.resetCalls, "弾く前にリセットを実行している")
+}
+
+func TestEmojiApplicationResetQuotaRequiresUserID(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"reason":"理由"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Zero(t, rev.resetCalls)
+}
+
+// **実在しない利用者に対して行を作らない。** 打ち間違いで残った行は
+// 誰のものでもない監査記録になる。
+func TestEmojiApplicationResetQuotaRejectsUnknownUser(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"nope","reason":"理由"}`, adminUser)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "NO_SUCH_USER")
+	require.Zero(t, rev.resetCalls, "存在しない利用者に対してリセットを実行している")
+}
+
+// **リセット前の使用数を監査ログに残す。** 後から採ると必ず 0 になり、
+// 「何件使っていた人を戻したか」という記録として意味が無くなる。
+func TestEmojiApplicationResetQuotaWritesModerationLog(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rev.resetBefore = emojiapplication.UserSummary{
+		Windows: []emojiapplication.QuotaWindowUsage{
+			{Period: "day", Used: 5, Limit: 5},
+			{Period: "week", Used: 8, Limit: 20},
+			{Period: "month", Used: 24, Limit: 50},
+		},
+	}
+	repo := attachModLog(t, h)
+
+	rec := doPost(h.EmojiApplicationResetUserQuota,
+		`{"userId":"u1","reason":"修正後の画像で再申請してもらうため"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "u1", rev.lastResetUserID)
+	require.Equal(t, adminUser.ID, rev.lastResetBy, "操作者が渡っていない")
+	require.Equal(t, "修正後の画像で再申請してもらうため", rev.lastResetReason)
+
+	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 },
+		500*time.Millisecond, 5*time.Millisecond)
+	entry := repo.Snapshot()[0]
+	require.Equal(t, "resetEmojiApplicationQuota", entry.Type)
+	require.Equal(t, adminUser.ID, entry.UserID, "操作者が記録されていない")
+
+	var info map[string]any
+	require.NoError(t, json.Unmarshal(entry.Info, &info))
+	require.Equal(t, "u1", info["userId"], "対象者が記録されていない")
+	require.Equal(t, "alice", info["userUsername"])
+	require.Equal(t, "修正後の画像で再申請してもらうため", info["reason"], "理由が記録されていない")
+	// **リセット前の使用数。** 0 になっていたら、書いてから採っている。
+	require.EqualValues(t, 5, info["usedDay"], "リセット前の日次の使用数が残っていない")
+	require.EqualValues(t, 8, info["usedWeek"])
+	require.EqualValues(t, 24, info["usedMonth"])
+}
+
+// 実行後は最後のリセットを返す (画面が取り直さずに反映できる)。
+func TestEmojiApplicationResetQuotaReturnsLastReset(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rev.resetRow = &model.EmojiApplicationQuotaReset{
+		ID: "qr9", UserID: "u1", ResetByID: "mod1", Reason: "理由",
+		CreatedAt: time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC),
+	}
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"理由"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		LastReset struct {
+			At     string `json:"at"`
+			ByID   string `json:"byId"`
+			Reason string `json:"reason"`
+		} `json:"lastReset"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.NotEmpty(t, body.LastReset.At, "リセット時刻が返っていない")
+	require.Equal(t, "mod1", body.LastReset.ByID, "実行者が返っていない")
+	require.Equal(t, "理由", body.LastReset.Reason)
+}
+
+// 失敗を握り潰さない (成功したように見せない)。
+func TestEmojiApplicationResetQuotaSurfacesFailure(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rev.resetErr = gorm.ErrInvalidDB
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"理由"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// 未配線なら 500 (黙って何もせず 200 を返さない)。
+func TestEmojiApplicationResetQuotaWithoutServiceIs500(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"理由"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// user-summary が最後のリセットを返すこと (未実施なら null)。
+func TestEmojiApplicationUserSummaryReportsLastReset(t *testing.T) {
+	rev := &stubEmojiReviewer{summary: emojiapplication.UserSummary{
+		LastReset: &model.EmojiApplicationQuotaReset{
+			ID: "qr1", UserID: "u1", ResetByID: "mod1", Reason: "理由",
+			CreatedAt: time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC),
+		},
+	}}
+	rec := doPost(newEmojiReviewerHandler(t, rev).EmojiApplicationUserSummary, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"reason":"理由"`, "最後のリセットが返っていない")
+	require.Contains(t, rec.Body.String(), `"byId":"mod1"`)
+
+	none := &stubEmojiReviewer{}
+	rec = doPost(newEmojiReviewerHandler(t, none).EmojiApplicationUserSummary, `{"userId":"u1"}`, adminUser)
+	require.Contains(t, rec.Body.String(), `"lastReset":null`, "未実施が null になっていない")
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -24,6 +25,12 @@ import (
 type emojiApplicationReviewer interface {
 	Approve(ctx context.Context, id, moderatorID string) (*model.EmojiApplication, error)
 	Reject(ctx context.Context, id, moderatorID, reason string) (*model.EmojiApplication, error)
+	// ResetQuota clears the user's rolling quota and returns the usage
+	// *before* the reset plus the recorded row (#2962).
+	//
+	// **前の使用状況を返させるのが要点。** 監査ログに「何件使っていた人を
+	// 戻したか」を残すためで、後から採ると必ず 0 になる。
+	ResetQuota(userID, moderatorID, reason string) (emojiapplication.UserSummary, *model.EmojiApplicationQuotaReset, error)
 	// UserSummary backs the moderation screen's per-user tab (#2961).
 	//
 	// **service 経由で採る。** 期間上限の窓はロールの policy から組むもので、
@@ -741,5 +748,84 @@ func (h *Handler) EmojiApplicationUserSummary(c echo.Context) error {
 			"limit":     sum.MaxPending,
 			"unlimited": sum.MaxPending <= 0,
 		},
+		// 最後に枠を手動で戻した操作 (#2962)。未実施なら null。
+		"lastReset": packQuotaReset(sum.LastReset),
 	})
+}
+
+// packQuotaReset renders one manual quota reset for the moderation screen (#2962).
+//
+// **モデレーターにだけ出す経路なので実行者を出す。** 申請者向けの pack が
+// 審査担当者を落とすのとは前提が違う (こちらは admin gate の内側)。
+func packQuotaReset(row *model.EmojiApplicationQuotaReset) any {
+	if row == nil {
+		return nil
+	}
+	return map[string]any{
+		"at":     entity.ISOMillis(row.CreatedAt),
+		"byId":   row.ResetByID,
+		"reason": row.Reason,
+	}
+}
+
+// EmojiApplicationResetUserQuota handles
+// POST /api/admin/emoji-application/reset-user-quota (#2962).
+//
+// **申請の行は触らない。** 履歴を消して枠を空けると、過去の判断 (#2960 が
+// 審査の材料として出している却下理由や同じ画像かどうか) も同時に消える。
+func (h *Handler) EmojiApplicationResetUserQuota(c echo.Context) error {
+	if h.emojiApplicationReviewer == nil || h.userRepo == nil {
+		return apierr.JSONInternalError(c)
+	}
+	var req struct {
+		UserID string `json:"userId"`
+		Reason string `json:"reason"`
+	}
+	if err := c.Bind(&req); err != nil || req.UserID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "userId is required.", apierr.UUIDInvalidParam))
+	}
+	// **理由は必須。** 監査ログに残る唯一の文脈なので、空を許すと
+	// 「誰かが戻した」以上のことが後から分からない。空白だけも弾く。
+	if strings.TrimSpace(req.Reason) == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "reason is required.", apierr.UUIDInvalidParam))
+	}
+
+	// **実在しない利用者に対して行を作らない。** 打ち間違いで残った行は
+	// 誰のものでもない監査記録になる。
+	target, err := h.userRepo.FindByID(req.UserID)
+	if err != nil {
+		// DB 障害を not-found に丸めない (#2792)。
+		if repository.IsNotFound(err) {
+			return c.JSON(http.StatusNotFound, apierr.Error(
+				"NO_SUCH_USER", "No such user.", apierr.UUIDNoSuchUser))
+		}
+		return apierr.JSONInternalError(c)
+	}
+
+	actor := middleware.GetUser(c)
+	actorID := ""
+	if actor != nil {
+		actorID = actor.ID
+	}
+	before, row, err := h.emojiApplicationReviewer.ResetQuota(req.UserID, actorID, req.Reason)
+	if err != nil {
+		if errors.Is(err, emojiapplication.ErrResetReasonRequired) {
+			return c.JSON(http.StatusBadRequest, apierr.Error(
+				"INVALID_PARAM", "reason is required.", apierr.UUIDInvalidParam))
+		}
+		return apierr.JSONInternalError(c)
+	}
+
+	// **リセット前の使用数を残す。** 後から採ると必ず 0 になり、「何件使って
+	// いた人を戻したか」という記録として意味が無くなる。
+	info := moderationlog.UserInfo(target)
+	info["reason"] = row.Reason
+	for _, w := range before.Windows {
+		info["used"+strings.ToUpper(w.Period[:1])+w.Period[1:]] = w.Used
+	}
+	h.logModeration(c, moderationlog.LogResetEmojiApplicationQuota, info)
+
+	return c.JSON(http.StatusOK, map[string]any{"lastReset": packQuotaReset(row)})
 }

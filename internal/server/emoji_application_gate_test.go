@@ -46,7 +46,7 @@ var (
 	// `(?s)` と `[^;]*` で**次の文まで**取る — router は引数を複数行に折り返す。
 	// **長いものを先に並べる。** `list` を先に置くと `list-by-user` が
 	// `list` + 余り、と読めてしまう形なので、意図を順序でも示しておく。
-	adminRouteRe = regexp.MustCompile(`(?s)api\.POST\(\s*"/admin/emoji-application/(?:list-by-user|list|user-summary|approve|reject|related)"[^\n]*(?:\n\t\t+[^\n]*)*`)
+	adminRouteRe = regexp.MustCompile(`(?s)api\.POST\(\s*"/admin/emoji-application/(?:list-by-user|list|user-summary|reset-user-quota|approve|reject|related)"[^\n]*(?:\n\t\t+[^\n]*)*`)
 
 	// 通知の read-time 解決。**2 経路あるので両方見る** — HTTP の一覧
 	// (notificationsHandler) と realtime (notificationPublisher)。片方だけを
@@ -95,9 +95,9 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	}
 
 	adminRoutes := adminRouteRe.FindAllString(src, -1)
-	require.Lenf(t, adminRoutes, 6,
-		"%s の admin/emoji-application が 6 本揃っていない "+
-			"(list / list-by-user / user-summary / approve / reject / related)", router)
+	require.Lenf(t, adminRoutes, 7,
+		"%s の admin/emoji-application が 7 本揃っていない "+
+			"(list / list-by-user / user-summary / reset-user-quota / approve / reject / related)", router)
 	for _, route := range adminRoutes {
 		require.Containsf(t, route, "PolicyCanManageCustomEmojis",
 			"admin/emoji-application の route に canManageCustomEmojis が付いていない。"+
@@ -106,7 +106,10 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		// 通る (レビュー Low 5)。3 本が隣接していてコピペしやすい形なので、
 		// 読み取りと書き込みを取り違える変更を止める。
 		wantScope := "read:admin:emoji"
-		if strings.Contains(route, "/approve") || strings.Contains(route, "/reject") {
+		// **枠のリセットは書き込み (#2962)。** 読み取りの scope で通ると、
+		// 閲覧用に渡した狭いトークンで上限を無効化できる。
+		if strings.Contains(route, "/approve") || strings.Contains(route, "/reject") ||
+			strings.Contains(route, "/reset-user-quota") {
 			wantScope = "write:admin:emoji"
 		}
 		require.Containsf(t, route, `RequireScope("`+wantScope+`")`,
@@ -307,6 +310,12 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	require.Lessf(t, relatedIdx, approveIdx,
 		"関連履歴が承認ボタンより後ろにある。押した後に出しても判断材料にならない (#2960)")
 
+	// **枠のリセットの配線 (#2962)。** 未配線だと `SetQuotaResetRepo` が呼ばれず、
+	// **リセットが無かったことにされる** — モデレーターは戻したつもりなのに
+	// 申請者は弾かれ続ける。service は fail-closed に倒すので気付けない。
+	require.Containsf(t, src, "SetQuotaResetRepo(",
+		"%s が申請枠のリセットを配線していない。戻したはずの枠が戻らない (#2962)", router)
+
 	relatedSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.application-related.vue")))
 	require.NotContainsf(t, relatedSrc, "onMounted(",
 		"関連履歴を onMounted で取っている。審査待ちタブは全行が開いているので "+
@@ -406,6 +415,15 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		"userApplicationNextCursor(", "canLoadMoreUserApplications(",
 		// 絞り込みと検索が API に渡ること。
 		"status: status.value", "query: query.value",
+		// **枠のリセット (#2962)。** locale キーは template にしか現れないので、
+		// 描画まで見たことになる (ref の宣言だけで満たされる needle にしない)。
+		"admin/emoji-application/reset-user-quota",
+		"resetQuotaTitle", "resetQuota\"", "lastReset\"",
+		// **戻す枠が無いなら出さない。** 押しても何も変わらない操作を
+		// 「効いたように見える」形で出すことになり、監査ログだけが増える。
+		"canResetQuota(",
+		// **理由を必ず取ってから送る。** 監査ログに残る唯一の文脈。
+		"isValidResetReason(",
 	} {
 		require.Containsf(t, userApps, want,
 			"ユーザーモデレーション画面の申請履歴に %s が無い (#2961)", want)
@@ -513,6 +531,20 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// ページのリロードだけになる (#2960 が mk.20c で直したのと同じ形)。
 	require.Containsf(t, userApps, `@click="fetchSummary"`,
 		"集計の取得に失敗したときに再取得できない (#2961)")
+	// **リセットの後に集計を取り直すこと (#2962)。** 返り値の `lastReset` だけ
+	// 入れて件数を古いままにすると、押したのに「5 / 5」のままに見える。
+	resetBody := jsFunctionBody(t, userApps, "async function resetQuota(")
+	require.Containsf(t, resetBody, "fetchSummary(",
+		"リセット後に件数を取り直していない。押したのに枠が戻って見えない (#2962)")
+	// 失敗を握り潰さない (成功したように見せると、戻っていない枠を戻ったものとして扱う)。
+	require.Containsf(t, resetBody, "resetQuotaFailed",
+		"リセットの失敗を握り潰している (#2962)")
+	// **何が起きて何が起きないかを確認の瞬間に出すこと。** 履歴が消えると思って
+	// 押されると取り返しがつかないし、短時間の送信制限と審査待ちの上限はこれでは
+	// 解除されない。**ダイアログの中で見る** — 画面のどこかに同じ文面があるかを
+	// 見るだけだと、押す前に読まれない場所へ移しても通る (実測)。
+	require.Containsf(t, resetBody, "resetQuotaNote",
+		"リセットの確認で、何が起きて何が起きないかを出していない (#2962)")
 	for _, want := range []string{
 		"admin/emoji-application/related",
 		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは

@@ -103,6 +103,17 @@ const (
 
 	// Misc
 	LogUpdateProxyAccountDescription LogType = "updateProxyAccountDescription"
+
+	// **ここから下は upstream に無い (mk-go 独自)。** 上の値は
+	// Misskey TS と verbatim で揃える契約だが、カスタム絵文字の申請という
+	// 概念自体が upstream に無いので対応する値も存在しない。frontend の
+	// modlog は未知の型を汎用表示に落とすので、足しても壊れない。
+	//
+	// 申請枠の手動リセット (#2962)。info は
+	// {userId, userUsername, userHost, reason, usedPerDay, usedPerWeek,
+	// usedPerMonth}。**リセット前の使用数を残す** — 後から採ると必ず 0 に
+	// なり、「何件使っていた人を戻したか」が分からなくなる。
+	LogResetEmojiApplicationQuota LogType = "resetEmojiApplicationQuota"
 )
 
 // UserInfo builds the standard {userId, userUsername, userHost} info

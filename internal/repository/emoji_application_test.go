@@ -1389,3 +1389,175 @@ func TestEmojiApplicationRepository_QuotaUsage_PendingLimit(t *testing.T) {
 	require.Equal(t, 2, none.Pending, "上限なしのとき審査待ちの件数が返らない")
 	require.False(t, none.Windows[0].RetryAt.IsZero(), "審査待ちが無制限なら窓の時刻はそのまま")
 }
+
+func seedQuotaReset(t *testing.T, id, userID, by string, at time.Time) {
+	t.Helper()
+	require.NoError(t, testDB.Create(&model.EmojiApplicationQuotaReset{
+		ID: id, UserID: userID, ResetByID: by, Reason: "再申請してもらうため", CreatedAt: at,
+	}).Error)
+}
+
+func cleanupQuotaResets(t *testing.T) {
+	t.Helper()
+	testDB.Exec(`DELETE FROM "emoji_application_quota_reset"`)
+}
+
+// **リセットが枠を戻すこと、そして履歴は残ること (#2962)。** 行を消して枠を
+// 空けると、過去の判断 (#2960 の審査材料) も同時に消える。
+func TestEmojiApplicationRepository_QuotaReset_ClearsWindowButKeepsRows(t *testing.T) {
+	cleanupEmojiApplications(t)
+	cleanupQuotaResets(t)
+	defer func() { cleanupEmojiApplications(t); cleanupQuotaResets(t) }()
+	createTestUser(t, "ea_g1")
+	createTestUser(t, "ea_g1mod")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	// 窓の中に 2 件 = day (Max 2) は満杯。
+	seedApplicationAt(t, "ea_g1a", "ea_g1", "a", model.EmojiApplicationRejected, now.Add(-3*time.Hour))
+	seedApplicationAt(t, "ea_g1b", "ea_g1", "b", model.EmojiApplicationCanceled, now.Add(-2*time.Hour))
+	windows := []QuotaWindow{{Name: "day", Duration: 24 * time.Hour, Max: 2}}
+
+	full, err := repo.QuotaUsage("ea_g1", QuotaLimits{Windows: windows}, now)
+	require.NoError(t, err)
+	require.Equal(t, 2, full.Windows[0].Used)
+	require.False(t, full.Windows[0].RetryAt.IsZero(), "満杯なのに次回可能時刻が無い")
+
+	// リセット (1 時間前の申請より後ろ) を入れる。
+	resetAt := now.Add(-time.Hour)
+	seedQuotaReset(t, "ea_g1r", "ea_g1", "ea_g1mod", resetAt)
+
+	after, err := repo.QuotaUsage("ea_g1", QuotaLimits{Windows: windows, ResetAt: resetAt}, now)
+	require.NoError(t, err)
+	require.Equal(t, 0, after.Windows[0].Used, "リセット後の枠が戻っていない")
+	require.True(t, after.Windows[0].RetryAt.IsZero(), "空きがあるのに次回可能時刻が出ている")
+
+	// **申請の行は残っている。** 審査材料を消さないのがこの設計の要点。
+	var n int64
+	require.NoError(t, testDB.Model(&model.EmojiApplication{}).
+		Where(`"userId" = ?`, "ea_g1").Count(&n).Error)
+	require.EqualValues(t, 2, n, "リセットで申請の行が消えている")
+
+	// **作成側にも同じ境界が効く。** 片方だけだと「画面は空きありなのに弾かれる」
+	// (またはその逆) になる。
+	require.NoError(t, repo.CreateWithQuota(
+		quotaApp("ea_g1new", "ea_g1", "new", now),
+		QuotaLimits{Windows: windows, ResetAt: resetAt}),
+		"リセット後も申請が弾かれている")
+}
+
+// **リセットより後の申請は数えること。** 境界を「以降」にしないと、リセット後に
+// 出した分まで無かったことになり、上限が実質無効になる。
+func TestEmojiApplicationRepository_QuotaReset_CountsAfterReset(t *testing.T) {
+	cleanupEmojiApplications(t)
+	cleanupQuotaResets(t)
+	defer func() { cleanupEmojiApplications(t); cleanupQuotaResets(t) }()
+	createTestUser(t, "ea_g2")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+	resetAt := now.Add(-2 * time.Hour)
+
+	seedApplicationAt(t, "ea_g2old", "ea_g2", "old", model.EmojiApplicationRejected, now.Add(-3*time.Hour))
+	seedApplicationAt(t, "ea_g2new", "ea_g2", "new", model.EmojiApplicationPending, now.Add(-time.Hour))
+	windows := []QuotaWindow{{Name: "day", Duration: 24 * time.Hour, Max: 2}}
+
+	usage, err := repo.QuotaUsage("ea_g2", QuotaLimits{Windows: windows, ResetAt: resetAt}, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, usage.Windows[0].Used, "リセット後の申請が数えられていない")
+}
+
+// **窓より古いリセットは何も変えない。** 既に窓の外なので効かせる対象が無い。
+func TestEmojiApplicationRepository_QuotaReset_OlderThanWindowIsNoop(t *testing.T) {
+	cleanupEmojiApplications(t)
+	cleanupQuotaResets(t)
+	defer func() { cleanupEmojiApplications(t); cleanupQuotaResets(t) }()
+	createTestUser(t, "ea_g3")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	seedApplicationAt(t, "ea_g3a", "ea_g3", "a", model.EmojiApplicationRejected, now.Add(-2*time.Hour))
+	// **窓の外にあり、かつ古いリセットより後ろの行を置く。** これが無いと、
+	// 境界を `max(...)` ではなく「リセットがあれば必ずそれ」にする変異でも
+	// 同じ件数になり、テストが空虚になる (実測)。
+	seedApplicationAt(t, "ea_g3old", "ea_g3", "old", model.EmojiApplicationRejected, now.Add(-30*time.Hour))
+	windows := []QuotaWindow{{Name: "day", Duration: 24 * time.Hour, Max: 2}}
+
+	usage, err := repo.QuotaUsage("ea_g3",
+		QuotaLimits{Windows: windows, ResetAt: now.Add(-48 * time.Hour)}, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, usage.Windows[0].Used,
+		"窓より古いリセットが窓を広げている (max(期間の開始, リセット) になっていない)")
+}
+
+// **`retryAt` にも境界が効くこと。** リセット後の行だけで満杯になったときの
+// 次回可能時刻は、リセット前の行に引きずられてはいけない。
+func TestEmojiApplicationRepository_QuotaReset_RetryAtUsesBoundary(t *testing.T) {
+	cleanupEmojiApplications(t)
+	cleanupQuotaResets(t)
+	defer func() { cleanupEmojiApplications(t); cleanupQuotaResets(t) }()
+	createTestUser(t, "ea_g4")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+	resetAt := now.Add(-5 * time.Hour)
+
+	// リセット前 (古い) 1 件 + リセット後 1 件で、Max 1 の窓を満杯にする。
+	seedApplicationAt(t, "ea_g4old", "ea_g4", "old", model.EmojiApplicationRejected, now.Add(-10*time.Hour))
+	seedApplicationAt(t, "ea_g4new", "ea_g4", "new", model.EmojiApplicationPending, now.Add(-time.Hour))
+	windows := []QuotaWindow{{Name: "day", Duration: 24 * time.Hour, Max: 1}}
+
+	usage, err := repo.QuotaUsage("ea_g4", QuotaLimits{Windows: windows, ResetAt: resetAt}, now)
+	require.NoError(t, err)
+	require.Equal(t, 1, usage.Windows[0].Used)
+	require.False(t, usage.Windows[0].RetryAt.IsZero())
+	// リセット後の行 (1 時間前) が窓を出る時刻 = now + 23 時間。古い行
+	// (10 時間前) を採ると now + 14 時間になり、**その時刻に叩いても弾かれる**。
+	require.WithinDuration(t, now.Add(23*time.Hour), usage.Windows[0].RetryAt, time.Minute,
+		"リセット前の行を基準に次回可能時刻を出している")
+
+	// 作成側も同じ時刻を返すこと。
+	err = repo.CreateWithQuota(quotaApp("ea_g4x", "ea_g4", "x", now),
+		QuotaLimits{Windows: windows, ResetAt: resetAt})
+	var qe *QuotaExceededError
+	require.ErrorAs(t, err, &qe)
+	require.WithinDuration(t, usage.Windows[0].RetryAt, qe.RetryAt, 0,
+		"画面と実際の判定で次回可能時刻がずれている")
+}
+
+// リセットの記録そのもの。**最新の 1 件を採ること**と、履歴が積まれること。
+func TestEmojiApplicationQuotaResetRepository(t *testing.T) {
+	cleanupQuotaResets(t)
+	defer cleanupQuotaResets(t)
+	createTestUser(t, "ea_g5")
+	createTestUser(t, "ea_g5other")
+	repo := NewEmojiApplicationQuotaResetRepository(testDB)
+	now := time.Now()
+
+	// 未実施なら nil (エラーではない)。
+	got, err := repo.LatestByUser("ea_g5")
+	require.NoError(t, err)
+	require.Nil(t, got, "未実施が not-found エラーになっている")
+
+	require.NoError(t, repo.Create(&model.EmojiApplicationQuotaReset{
+		ID: "qr1", UserID: "ea_g5", ResetByID: "m1", Reason: "1回目", CreatedAt: now.Add(-2 * time.Hour),
+	}))
+	require.NoError(t, repo.Create(&model.EmojiApplicationQuotaReset{
+		ID: "qr2", UserID: "ea_g5", ResetByID: "m2", Reason: "2回目", CreatedAt: now.Add(-time.Hour),
+	}))
+	// 他人の行が混ざらないこと。
+	require.NoError(t, repo.Create(&model.EmojiApplicationQuotaReset{
+		ID: "qr3", UserID: "ea_g5other", ResetByID: "m1", Reason: "別人", CreatedAt: now,
+	}))
+
+	got, err = repo.LatestByUser("ea_g5")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, "qr2", got.ID, "最新の 1 件を採っていない")
+	require.Equal(t, "2回目", got.Reason)
+	require.Equal(t, "m2", got.ResetByID)
+
+	// **履歴は上書きされない。** 誰がいつ何回戻したかが残る。
+	list, err := repo.ListByUser("ea_g5", 10)
+	require.NoError(t, err)
+	require.Len(t, list, 2, "履歴が上書きされている")
+	require.Equal(t, []string{"qr2", "qr1"}, []string{list[0].ID, list[1].ID}, "新しい順になっていない")
+}

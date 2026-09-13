@@ -3104,6 +3104,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 期間上限をロールから引く (#2958)。未配線だと上限が丸ごと効かなくなる
 	// ので criticalWiring に載せてある。
 	emojiApplicationService.SetPolicyProvider(roleService)
+	// 申請枠の手動リセット (#2962)。**未配線だとリセットが無かったことにされる**
+	// ので、criticalWiring と同じ扱いで配線する — 戻したはずの枠が戻らない。
+	emojiApplicationService.SetQuotaResetRepo(
+		repository.NewEmojiApplicationQuotaResetRepository(s.db))
 	emojiApplicationHandler := apiemojiapplications.NewHandler(
 		emojiApplicationService, emojiApplicationRepo, driveFileRepo)
 	// **申請できる人をロールで絞る (#2934)。** canManageCustomEmojis を持つ人は
@@ -3322,6 +3326,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/emoji-application/user-summary", adminHandler.EmojiApplicationUserSummary,
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
 		middleware.RequireScope("read:admin:emoji"))
+	// 申請枠の手動リセット (#2962)。**書き込みなので write scope**。
+	api.POST("/admin/emoji-application/reset-user-quota", adminHandler.EmojiApplicationResetUserQuota,
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
+		middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/remove-aliases-bulk", adminHandler.EmojiRemoveAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-aliases-bulk", adminHandler.EmojiSetAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-category-bulk", adminHandler.EmojiSetCategoryBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))

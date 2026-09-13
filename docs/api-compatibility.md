@@ -301,7 +301,7 @@ Go側のマイグレーション (000001〜) はTS版テーブルに対して原
 | `emoji_application` | カスタム絵文字の登録申請 (#2934) | `000086` |
 | `user_suspension_origin` | 凍結の由来 (local / remote、#2973) | `000087` |
 
-mk-go の migration が作るテーブルは 114。上記 11 件と golang-migrate 台帳の
+mk-go の migration が作るテーブルは 115。上記 11 件と golang-migrate 台帳の
 `schema_migrations` を除く **102 はすべて upstream にも存在する** (TypeORM 台帳の
 `migrations` を含む)。
 

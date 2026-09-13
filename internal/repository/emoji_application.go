@@ -146,6 +146,14 @@ type QuotaLimits struct {
 	// Windows はローリング期間の上限 (#2958)。**全ステータスを数える**ので、
 	// 却下・取り下げでも枠は戻らない。上限 0 の窓は無制限として飛ばす。
 	Windows []QuotaWindow
+	// ResetAt はモデレーターが枠を手動で戻した時刻 (#2962)。ゼロ値なら未実施。
+	//
+	// **窓の開始をこれで押し上げる** (`max(期間の開始, ResetAt)`)。申請の行は
+	// 消さないので、履歴 (#2960 の審査材料) は残したまま枠だけ戻せる。
+	//
+	// **審査待ちの上限には効かない。** あれは「今まさに審査待ちの件数」で、
+	// 戻しても申請は審査待ちのまま残るので意味を持たない。
+	ResetAt time.Time
 	// MaxPending は同時に審査待ちにできる件数 (#2977)。0 は無制限。
 	//
 	// **Windows とは数え方が逆で、絞っているものも違う。** こちらは
@@ -272,7 +280,7 @@ func evaluateQuotaLimits(tx *gorm.DB, userID string, limits QuotaLimits, now tim
 		out.PendingFull = pending >= limits.MaxPending
 	}
 
-	windows, err := evaluateQuotaWindows(tx, userID, limits.Windows, now)
+	windows, err := evaluateQuotaWindows(tx, userID, limits.Windows, now, limits.ResetAt)
 	if err != nil {
 		return QuotaUsage{}, err
 	}
@@ -311,7 +319,7 @@ func evaluateQuotaLimits(tx *gorm.DB, userID string, limits QuotaLimits, now tim
 // tx にはトランザクションでも素の DB でも渡せる。作成側はアドバイザリロックの
 // 中で呼ぶが、読み取り側は数えるだけなので囲まない (囲うと、画面を開いただけで
 // 申請の直列化に割り込む)。
-func evaluateQuotaWindows(tx *gorm.DB, userID string, windows []QuotaWindow, now time.Time) ([]QuotaWindowUsage, error) {
+func evaluateQuotaWindows(tx *gorm.DB, userID string, windows []QuotaWindow, now, resetAt time.Time) ([]QuotaWindowUsage, error) {
 	out := make([]QuotaWindowUsage, 0, len(windows))
 	for _, w := range windows {
 		u := QuotaWindowUsage{Window: w}
@@ -321,7 +329,9 @@ func evaluateQuotaWindows(tx *gorm.DB, userID string, windows []QuotaWindow, now
 			out = append(out, u)
 			continue
 		}
-		since := now.Add(-w.Duration)
+		// **リセットの境界を当てる (#2962)。** 作成側と読み取り側で同じ関数を
+		// 通すので、画面の「0 / 5」と実際の判定がずれない。
+		since := quotaWindowSince(now, w.Duration, resetAt)
 		var used int64
 		// **全ステータスを数える。** 却下・取り下げで枠が戻ると、申請と
 		// 取り下げを繰り返して審査通知と履歴を大量に作れる。
@@ -397,7 +407,13 @@ func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication
 		// ステータスを数えるので取り下げた行は枠を占有したまま戻らない** —
 		// 案内に従うと申請を 1 件失ったうえに枠も消費する。だから満杯の窓が
 		// あればそちらを優先し、時刻だけを落とす。
-		usage, err := evaluateQuotaLimits(tx, app.UserID, QuotaLimits{Windows: active, MaxPending: limits.MaxPending}, now)
+		// **`ResetAt` を落とさない (#2962)。** 組み直すときに落とすと、読み取り側
+		// だけリセットが効いて「画面は空きありなのに実際は弾かれる」になる。
+		usage, err := evaluateQuotaLimits(tx, app.UserID, QuotaLimits{
+			Windows:    active,
+			MaxPending: limits.MaxPending,
+			ResetAt:    limits.ResetAt,
+		}, now)
 		if err != nil {
 			return err
 		}
