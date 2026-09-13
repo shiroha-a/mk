@@ -27,6 +27,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/hashtag"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/idnhost"
+	"github.com/shiroha-a/mk/internal/misc/keyword"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"gorm.io/datatypes"
@@ -77,6 +78,13 @@ type HashtagHook interface {
 var (
 	// ErrInvalidActor is returned when the fetched JSON cannot be parsed.
 	ErrInvalidActor = errors.New("invalid actor document")
+	// ErrLocalActor is returned when an actor URI points at this instance.
+	//
+	// upstream ApPersonService.createPerson の
+	// `throw new StatusError('cannot resolve local user', 400, ...)` に対応する。
+	// **ErrInvalidActor を包む** ので、既存の `isPermanentSkipError` (= ack して
+	// retry しない) と呼び出し側の分岐がそのまま効く。
+	ErrLocalActor = fmt.Errorf("%w: cannot resolve local user", ErrInvalidActor)
 	// ErrInvalidNote is returned when a fetched Note cannot be parsed.
 	ErrInvalidNote = errors.New("invalid note document")
 	// ErrHostNotAllowed is returned when the resolver is asked to fetch /
@@ -414,6 +422,9 @@ type Resolver struct {
 	// を除くためのもの。残すと hydrate で ephemeral 側が拾われ二重表示になる。
 	ephemeralTimeline EphemeralTimelineRemover
 	imageProbeClient  *http.Client
+	// probeBudget は 1 document 分の dimension probe に許す合計時間。0 なら
+	// attachmentProbeBudget を使う (テストだけが縮める)。
+	probeBudget time.Duration
 	// hostBlocker は federation 設定 (none / specified / blockedHosts) を
 	// 評価する gate。fetchActor / resolveNoteOnce / IngestNoteWithCreated
 	// の入口で URI の host / attributedTo の host を判定して、ホワイト
@@ -424,6 +435,10 @@ type Resolver struct {
 	// silencedChecker は remote note ingest 時に meta.silencedHosts 該当 host の
 	// public note を home に降格する判定に使う (#2106 N14)。未配線時は降格しない。
 	silencedChecker SilencedHostChecker
+
+	// prohibitedWordsProvider は meta.prohibitedWords の読み取り元。nil なら
+	// hostBlocker から optional interface で拾う (prohibitedWords() を参照)。
+	prohibitedWordsProvider ProhibitedWordsProvider
 
 	// resolveActorGroup / resolveNoteGroup は同一 URI への並行 ResolveActor /
 	// ResolveNote 呼び出しを 1 度の DB lookup + HTTP fetch に collapse する
@@ -664,6 +679,113 @@ func (r *Resolver) SetSilencedHostChecker(c SilencedHostChecker) {
 	r.silencedChecker = c
 }
 
+// ProhibitedWordsProvider exposes meta.prohibitedWords to the inbound note
+// ingest path. *instance.Service implements it.
+type ProhibitedWordsProvider interface {
+	ProhibitedWords() []string
+}
+
+// SetProhibitedWordsProvider overrides where meta.prohibitedWords is read from.
+//
+// **通常は配線不要。** 既定では hostBlocker (router.go が core/instance.Service を
+// 渡す、= prohibitedWords と同じ meta を読む実体) から optional interface で
+// 拾う。専用の Set* を必須にすると、配線を忘れたときに「検査していないのに緑」に
+// なる — 本番で必ず立っている依存から取るほうが安全側で、`fetcher` の
+// finalURLFetcher と同じ方式。この setter はテストと、将来 hostBlocker とは
+// 別の実体から読みたくなった場合のための逃げ道。
+func (r *Resolver) SetProhibitedWordsProvider(p ProhibitedWordsProvider) {
+	r.prohibitedWordsProvider = p
+}
+
+// prohibitedWords returns the configured meta.prohibitedWords, or nil when no
+// source is wired / meta is unreadable (= 判定を skip、他の meta ゲートと同じ
+// ベストエフォート)。
+func (r *Resolver) prohibitedWords() []string {
+	if r.prohibitedWordsProvider != nil {
+		return r.prohibitedWordsProvider.ProhibitedWords()
+	}
+	if p, ok := r.hostBlocker.(ProhibitedWordsProvider); ok {
+		return p.ProhibitedWords()
+	}
+	return nil
+}
+
+// containsProhibitedWords reports whether cw / text / poll choices hit
+// meta.prohibitedWords.
+//
+// 判定そのものは `internal/misc/keyword` (= `core/note.checkProhibitedWords` と
+// `matchesSensitiveWords` が使うのと同じ実装) に委ねる。`/regex/flags` と
+// スペース区切り AND、case-sensitive の扱いをローカル投稿経路と揃えるため。
+// 検査対象の 3 つ (cw / text / poll choices) も upstream の
+// `checkProhibitedWordsContain` と同じ。
+func (r *Resolver) containsProhibitedWords(text, cw *string, pollChoices []string) bool {
+	words := r.prohibitedWords()
+	if len(words) == 0 {
+		return false
+	}
+	if cw != nil && *cw != "" && keyword.IsKeyWordIncluded(*cw, words) {
+		return true
+	}
+	if text != nil && *text != "" && keyword.IsKeyWordIncluded(*text, words) {
+		return true
+	}
+	for _, choice := range pollChoices {
+		if choice != "" && keyword.IsKeyWordIncluded(choice, words) {
+			return true
+		}
+	}
+	return false
+}
+
+// apPollChoices returns the AP Question's choice labels in the same normalized
+// form createPollFromQuestion would store, so the prohibited-word check sees
+// what the row would hold.
+func apPollChoices(apNote *activitypub.Note) []string {
+	choices := apNote.OneOf
+	if len(apNote.AnyOf) > 0 {
+		choices = apNote.AnyOf
+	}
+	if len(choices) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(choices))
+	for _, c := range choices {
+		out = append(out, remotePollChoice(c.Name))
+	}
+	return out
+}
+
+// selfHost returns this instance's own host in the same normalized form
+// hostFromURI produces, or "" when the URL builder is unwired.
+func (r *Resolver) selfHost() string {
+	if r.urls == nil {
+		return ""
+	}
+	// UserURI("") = `<baseURL>/users/`。URLBuilder は baseURL を公開しないので
+	// 既存の組み立てから取り出す。正規化は host を作る唯一の規則を通す。
+	return NormalizeGateHost(r.urls.UserURI(""))
+}
+
+// isSelfHost reports whether host is this instance's own host.
+//
+// **host で判定する (URI の接頭辞ではない)。** upstream も
+// `host === toPuny(config.host)` で見る。接頭辞一致 (`urls.IsLocalURI`) だと
+// scheme 違い (`http://` を名乗る) で素通りし、その後の host binding は
+// 通ってしまうので shadow 行が作られる。
+func (r *Resolver) isSelfHost(host string) bool {
+	self := r.selfHost()
+	return self != "" && host != "" && host == self
+}
+
+// isSelfHostURI reports whether uri is served by this instance.
+func (r *Resolver) isSelfHostURI(uri string) bool {
+	host, err := hostFromURI(uri)
+	if err != nil {
+		return false
+	}
+	return r.isSelfHost(host)
+}
+
 // hostAllowed reports whether the resolver may talk to / persist content
 // authored on host. host == "" (= local) は常に true。未配線時も true。
 func (r *Resolver) hostAllowed(host string) bool {
@@ -782,6 +904,17 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	if strings.Contains(uri, "#") {
 		return nil, ErrResolveFragment
 	}
+	// **FindByURI より前に弾く。** ローカル利用者は `user.uri` が NULL なので
+	// ここで引けるのは「過去に作られた shadow 行」だけで、返すと refresh まで
+	// 走る。upstream の `resolvePerson` は自ホスト URI を DB から引いて
+	// ローカル利用者を返すが、mk-go では**返さない** — `resolveNoteAuthor` が
+	// この戻り値をそのまま note の著者にするので、`allowCrossHost` 経路で
+	// 「ローカル利用者名義の偽ノート」を作れるようになってしまう。
+	// ローカル利用者を URI から引きたい呼び出し側は ExtractLocalUserID +
+	// userRepo.FindByID を使うこと。
+	if r.isSelfHostURI(uri) {
+		return nil, ErrLocalActor
+	}
 	if existing, err := r.userRepo.FindByURI(uri); err == nil {
 		if r.shouldRefreshActor(existing) {
 			r.refreshActor(existing, uri, skipFeatured, chain)
@@ -806,6 +939,16 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	host, err := hostFromURI(actor.ID)
 	if err != nil {
 		return nil, ErrInvalidActor
+	}
+	// **fetch 後にも見る。** 通常は finalURL ↔ id の binding
+	// (`assertResponseHostMatches`) が先に落とす (実測: `allowCrossHost` でも
+	// そちらが `ErrObjectHostMismatch` を返す) が、あれは **fetcher が最終 URL を
+	// 返せるときにしか効かない**。id が自ホストを指す document を「リモート
+	// actor」として取り込む経路を、binding が無い条件でも閉じておく。
+	if r.isSelfHost(host) {
+		slog.Warn("federation: refusing to create a remote row for a local actor URI",
+			"uri", truncateRunes(actor.ID, userURIMaxRunes))
+		return nil, ErrLocalActor
 	}
 	// **必須の値が列に入らないなら actor ごと拒否する** (#2723)。`uri` / `host` は
 	// 身元そのもので、切ると別人になるし捨てるわけにもいかない (lookup の鍵)。
@@ -1689,6 +1832,15 @@ func alsoKnownAsContains(csvPtr *string, uri string) bool {
 // document whose `type` is not in activitypub.ValidActorTypes — this guards
 // against a non-Actor object (e.g. a Note) being interpreted as a Person.
 func (r *Resolver) fetchActor(uri string, allowCrossHost bool) (*activitypub.Person, error) {
+	// **自ホストの actor は取りに行かない。** 取りに行くと自分の actor document が
+	// 返り、`host = 自ホスト` の「リモート扱いの」user / user_profile 行と、
+	// `notifyInstance` 経由で自ホストの instance 行 + chart まで出来る。upstream は
+	// ApPersonService.createPerson で明示的に弾く (`cannot resolve local user`)。
+	// **到達経路は未認証** — inbox の署名検証は keyId の base URL を
+	// ResolveActor に渡すのが先なので、誰でも任意のローカル利用者の URI を送れる。
+	if r.isSelfHostURI(uri) {
+		return nil, ErrLocalActor
+	}
 	// federation policy gate: ホワイトリスト連合 (federation: specified) や
 	// blockedHosts 設定下では、対象 URI の host が許可されていなければ HTTP
 	// fetch 自体を抑止する。refreshActor / refreshPublicKey / resolveActorOnce
@@ -2758,6 +2910,23 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 		empty := ""
 		note.CW = &empty
 	}
+	// 禁止語 (meta.prohibitedWords) は inbound にも掛ける。upstream の
+	// ApNoteService.ts:203 が `checkProhibitedWordsContain({cw, text, pollChoices})`
+	// を**添付とユーザーを登録する前**に呼ぶのと同じ位置づけで、ここより後ろの
+	// `upsertEmojis` / `upsertAttachments` / `noteRepo.Create` はどれも行を作る。
+	//
+	// **error ではなく (nil, false, nil) で落とす。** upstream は
+	// IdentifiableError('689ee33f-…') を投げるが、InboxProcessorService がそれを
+	// catch して `'blocked notes with prohibited words'` を返す = **ack して
+	// retry しない**。mk-go の handleCreate は未知の error をそのまま retry キューへ
+	// 戻すので、error にすると同じ note が 8 回配送し直されて dead letter に積まれる。
+	// note を作らずに抜ける形は AP vote 経路が既に使っており、呼び出し側は
+	// nil note を扱える (ResolveNoteWithCreated だけは ErrInvalidNote に倒す)。
+	if r.containsProhibitedWords(note.Text, note.CW, apPollChoices(&apNote)) {
+		slog.Info("federation: dropping inbound note containing prohibited words",
+			"uri", truncateRunes(apNote.ID, noteURIMaxRunes), "actor", actor.ID)
+		return nil, false, nil
+	}
 	// 返信先がローカルに存在すれば紐付ける。リモート返信先の解決は後続 phase で
 	// 対応するため、現状では nil のままにする。
 	var replyTarget *model.Note
@@ -3199,6 +3368,43 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	} else if apNote.Content != "" {
 		newText = mfm.FromHTML(apNote.Content)
 	}
+	// CW は**下の fields 反映より前に**決める。禁止語の判定を「更新後の値」で
+	// 行うために先に要るが、判定は `existing` を書き換える前に済ませたい
+	// (弾く場合は in-memory の note も無傷で返す)。
+	var newCW *string
+	if summary := remoteText(apNote.Summary.String(), noteCWMaxRunes); summary != "" {
+		newCW = &summary
+	} else if apNote.Sensitive {
+		// Summary が空でも sensitive なら空 CW を保つ (IngestNote と対称)。
+		empty := ""
+		newCW = &empty
+	}
+	// 禁止語 (meta.prohibitedWords) は編集経路にも掛ける。
+	//
+	// **upstream には対応物が無い** — 本家 ApInboxService.update は object が
+	// Actor でも Question でもなければ `skip: Unknown type` で捨てるので、Note の
+	// 編集を取り込むのは mk-go 固有の拡張。取り込む以上、create 側と同じ検査を
+	// 通さないと「禁止語を含まない note を投げてから Update で差し替える」で
+	// 判定を素通りできる。
+	//
+	// **書き込みより前に判定する。** 以降の `upsertEmojis` / `upsertAttachments` は
+	// note の列とは別に `emoji` / `drive_file` の行を書くので、後ろに置くと
+	// 「本文は更新しないが絵文字だけ差し替わる」形になる。poll は
+	// UpdateRemoteQuestion 側の担当なのでここでは渡さない (選択肢の文言自体は
+	// Update(Question) でも変わらない — 変わるのは投票数だけ)。
+	effectiveText := existing.Text
+	if newText != "" {
+		effectiveText = &newText
+	}
+	effectiveCW := existing.CW
+	if newCW != nil {
+		effectiveCW = newCW
+	}
+	if r.containsProhibitedWords(effectiveText, effectiveCW, nil) {
+		slog.Info("federation: dropping inbound note update containing prohibited words",
+			"uri", truncateRunes(apNote.ID, noteURIMaxRunes), "noteId", existing.ID)
+		return existing, nil
+	}
 	if newText != "" {
 		fields["text"] = &newText
 		existing.Text = &newText
@@ -3219,14 +3425,9 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 		fields["mentions"] = mentions
 		existing.Mentions = mentions
 	}
-	if summary := remoteText(apNote.Summary.String(), noteCWMaxRunes); summary != "" {
-		fields["cw"] = &summary
-		existing.CW = &summary
-	} else if apNote.Sensitive {
-		// Summary が空でも sensitive なら空 CW を保つ (IngestNote と対称)。
-		empty := ""
-		fields["cw"] = &empty
-		existing.CW = &empty
+	if newCW != nil {
+		fields["cw"] = newCW
+		existing.CW = newCW
 	}
 	// permalink も追従する (#2729)。**捨てられた値では上書きしない** — 読めない
 	// `url` が来ただけで、取り込み時に保存した正しい permalink を消してしまう。
@@ -3508,6 +3709,10 @@ func extractHashtagTagNames(tags []any) []string {
 // extractEmojiTags parses the Tag array of a Person or Note and returns
 // any elements with type "Emoji". Tag配列はJSON unmarshal後に []any
 // (各要素が map[string]any) として届くため、型アサーションで抽出する。
+//
+// **採用件数は maxRemoteEmojiTags で打ち切る。** upsertEmojis は 1 件ごとに
+// `emoji` 行を書くので、上限が無いと 1 document で任意件数の書き込みを起こせる。
+// 打ち切りは採用側で数える (Emoji 以外の tag は勘定に入れない)。
 func extractEmojiTags(tags []any) []activitypub.EmojiTag {
 	if len(tags) == 0 {
 		return nil
@@ -3558,6 +3763,9 @@ func extractEmojiTags(tags []any) []activitypub.EmojiTag {
 			Updated: updated,
 			License: license,
 		})
+		if len(out) >= maxRemoteEmojiTags {
+			break
+		}
 	}
 	return out
 }
@@ -3793,11 +4001,16 @@ func hostFromURI(uri string) (string, error) {
 	// host 不在の URI が `":8443"` として通ってしまう。同ファイルの binding 検査
 	// (assertResponseHostMatches 等) は元から `u.Hostname()` を見ており、保存の
 	// 入口になった今は揃えないと「binding では弾かれるのに保存はされる」形が残る
-	// (#2714 review LOW-9)。返す値は port 込みのまま (`user.host` は port を持つ)。
+	// (#2714 review LOW-9)。
 	if u.Hostname() == "" {
 		return "", fmt.Errorf("missing host in %q", uri)
 	}
-	return idnhost.Puny(u.Host), nil
+	// **既定ポートは剥がして返す。** 非既定ポートは残る (`user.host` は port を
+	// 持ちうる)。`idnhost.Puny(u.Host)` で済ませていた頃は `https://h:443/x` が
+	// `h:443` として保存され、`blockedHosts` の suffix 一致から外れていた。
+	// 比較側の `sameDeliveryHost` は元から `punyHostPort` で剥がしていたので、
+	// **片側だけ正規化している**状態だった。
+	return punyHostPort(u), nil
 }
 
 // punyHost normalizes a host for comparison the way upstream
@@ -4006,8 +4219,24 @@ func trimWHATWGURL(raw string) string {
 }
 
 // punyHostPort mirrors upstream's punyHost (idna host + non-default port).
+//
+// **既定ポートは剥がす。これが host の正規形を作る唯一の規則。** upstream の
+// `punyHost` / `extractDbHost` は WHATWG `new URL()` を使うので
+// `new URL("https://x:443/").host` は `x`、`.port` は `""` になる。Go の
+// `net/url` は剥がさないので、剥がさずに比較すると `blocked.example:443` という
+// **同じ authority の別綴り**が `blockedHosts` の suffix 一致 (`HostMatchesAny`)
+// をすり抜ける。片側 (sameDeliveryHost) だけが剥がしていた頃は、defederation した
+// 相手が actor id / inbox に `:443` を書くだけで配送も inbound 受理も続いた。
+//
+// 非既定ポート (`:8443`) は別 host のまま残す (upstream も同じ)。
 func punyHostPort(u *url.URL) string {
 	host := punyHost(u.Hostname())
+	// IPv6 リテラルは authority では `[::1]` の形で現れるが `Hostname()` が
+	// bracket を外す。戻さないと `::1` + port が `::1:8443` になり、host 部に
+	// コロンを含むだけの値と見分けが付かなくなる。
+	if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
 	port := u.Port()
 	isDefaultPort := (u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")
 	if port != "" && !isDefaultPort {
@@ -4016,17 +4245,63 @@ func punyHostPort(u *url.URL) string {
 	return host
 }
 
+// NormalizeGateHost returns the canonical host form used by the federation
+// gates (blockedHosts / silencedHosts / federationHosts) and by `instance.host`
+// for an absolute URL string. Returns "" when the URL has no host.
+//
+// **配送側と取り込み側で同じ規則を使うための唯一の入口。** 別パッケージ
+// (`internal/queue/processors`) の inbox URL 解釈もここを通す — 規則を写すと
+// 片側だけ既定ポートを剥がす状態に戻る (#2915 review HIGH)。
+func NormalizeGateHost(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+	return punyHostPort(u)
+}
+
+// maxRemoteAttachments bounds how many AP `attachment` entries one inbound
+// document can contribute.
+//
+// **upstream に上限は無い** (`ApNoteService` は `toArray(note.attachment)` を
+// そのまま回す) が、mk-go では 1 件につき `drive_file` の SELECT + INSERT と、
+// `mediaType` が `image/*` で width/height が欠けていれば**外向き GET** が
+// 直列に走る。上限が無いと、署名付き POST 1 通 (inbox の body 上限 64 KiB に
+// 添付 900 件が収まる) で inbox worker を数十分占有できる。
+//
+// 値はローカルの受け入れ上限に揃える — `notes/create` の paramDef は
+// `fileIds: maxItems 16` (upstream も同値、`validateCreateInput` 参照)。
+// profile fields (maxRemoteFields) を i/update の 16 に揃えたのと同じ決め方。
+// 超過分は落とす: 17 枚目以降を持つ note がローカルで作れない以上、リモート
+// だけ受け入れる理由が無い。
+const maxRemoteAttachments = 16
+
+// maxRemoteEmojiTags bounds how many AP `tag` Emoji entries one inbound
+// document (Note or Person) can contribute.
+//
+// upstream に上限は無いが、1 件につき `emoji` の INSERT / UPDATE が走り、名前は
+// `note.emojis` / `user.emojis` (varchar(128)[]) にも載る。同じ「tag 由来の
+// per-document コレクション」である hashtag が upstream の `.splice(0, 32)` に
+// 揃えて 32 (`hashtag.MaxNoteTags` / `MaxUserTags`) なので、同値にする。
+// 超過分は落とす — クライアントは未解決の絵文字を `:name:` のまま出すので、
+// 列に収まらない tag を落とす既存の扱い (upsertEmojis) と同じ degrade になる。
+const maxRemoteEmojiTags = 32
+
 // extractAttachments parses the AP `attachment` array (heterogeneous []any
 // after JSON unmarshal) and returns Document entries. type が upstream の
 // `validDocumentTypes` ("Audio" / "Document" / "Image" / "Page" / "Video") の
 // いずれかで `url` を持つもののみ採用する。#378 / #2662。
 // noteSensitive は upstream の `attach.sensitive ??= note.sensitive` に対応する。
 // 添付側に `sensitive` が無いとき note レベルの値を継ぐ。
+//
+// **採用件数は maxRemoteAttachments で打ち切る。** 打ち切りは採用側で数える
+// (raw の要素数ではない) ので、type が合わない要素が前に並んでいても有効な
+// 添付が削られない。
 func extractAttachments(rawAttachments []any, noteSensitive bool) []activitypub.Document {
 	if len(rawAttachments) == 0 {
 		return nil
 	}
-	out := make([]activitypub.Document, 0, len(rawAttachments))
+	out := make([]activitypub.Document, 0, min(len(rawAttachments), maxRemoteAttachments))
 	for _, raw := range rawAttachments {
 		m, ok := raw.(map[string]any)
 		if !ok {
@@ -4084,6 +4359,9 @@ func extractAttachments(rawAttachments []any, noteSensitive bool) []activitypub.
 			Icon:      icon,
 			Blurhash:  blurhash,
 		})
+		if len(out) >= maxRemoteAttachments {
+			break
+		}
 	}
 	return out
 }
@@ -4334,6 +4612,19 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		return model.StringArray{}
 	}
 	ids := make(model.StringArray, 0, len(docs))
+	// dimension probe の予算は**この呼び出し全体**で 1 つ。添付ごとの
+	// `imageFetchTimeout` は 1 本の GET しか縛らないので、直列に積まれると
+	// 件数分だけ待たされる (attachmentProbeBudget の説明を参照)。
+	//
+	// **ジョブの ctx は届かない。** IngestNote / upsertAttachments は ctx を
+	// 引き回していない (queue processor から resolver までの経路が ctx を取らない)
+	// ので、ここで根を作る。ctx を通す改修が入ったらこの Background を差し替える。
+	budget := r.probeBudget
+	if budget <= 0 {
+		budget = attachmentProbeBudget
+	}
+	probeCtx, cancelProbe := context.WithTimeout(context.Background(), budget)
+	defer cancelProbe()
 	for _, doc := range docs {
 		// **URL が列に入らないなら添付ごと諦める。** `drive_file.url` は
 		// varchar(1024) NOT NULL で、この添付の実体そのもの。切ると別の場所を
@@ -4415,7 +4706,7 @@ func (r *Resolver) upsertAttachments(docs []activitypub.Document, userID, host *
 		// 0/0 のまま属性 JSON を空にしておき、表示側のフォールバック
 		// に任せる。タイムアウト 3s で inbox 全体は止めない。
 		if (width == 0 || height == 0) && strings.HasPrefix(mediaType, "image/") && r.imageProbeClient != nil {
-			if w, h, ok := probeImageDimensions(r.imageProbeClient, doc.URL); ok {
+			if w, h, ok := probeImageDimensions(probeCtx, r.imageProbeClient, doc.URL); ok {
 				if width == 0 {
 					width = w
 				}

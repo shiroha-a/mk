@@ -12,13 +12,13 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"net/url"
 	"time"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
+	"github.com/shiroha-a/mk/internal/core/federation"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
@@ -389,12 +389,16 @@ func (p *DeliverProcessor) SetDeliveryTelemetry(t DeliveryTelemetry) {
 
 // hostFromInbox returns the host portion of an inbox URL, or "" if the URL is
 // not parseable. ResponseHook 通知用に共通化する。
+//
+// **正規化は federation 側の規則をそのまま使う。** この値は
+// `ShouldSkipDelivery` (blockedHosts / federationHosts / suspensionState) と
+// `instance.host` の lookup に渡るので、取り込み側 (`federation.hostFromURI`)
+// と同じ形でないと gate が空振りする。生の `u.Host` を返していた頃は
+// `https://blocked.example:443/inbox` が `blocked.example:443` になり、
+// dispatch 時の block 判定を素通りしていた。**規則をここへ写さないこと** —
+// 写した瞬間に片側だけ既定ポートを剥がす状態へ戻る。
 func hostFromInbox(inbox string) string {
-	u, err := url.Parse(inbox)
-	if err != nil {
-		return ""
-	}
-	return u.Host
+	return federation.NormalizeGateHost(inbox)
 }
 
 // recordSuccess is a best-effort wrapper that fires both the response

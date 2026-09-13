@@ -306,14 +306,19 @@ func (s *DeliverService) isBlockedInbox(inbox string) bool {
 	if s.hostBlocker == nil {
 		return false
 	}
+	// **既定ポートを剥がした形で判定する。** 生の `u.Host` を渡していた頃は
+	// `https://blocked.example:443/inbox` が `blocked.example:443` として
+	// `HostMatchesAny` の suffix 一致から外れ、defederation した相手への配送が
+	// 続いていた。取り込み側 (`hostFromURI`) と同じ `punyHostPort` を通す。
 	u, err := url.Parse(inbox)
 	if err != nil || u.Host == "" {
 		return false
 	}
-	if s.hostBlocker.IsBlocked(u.Host) {
+	host := punyHostPort(u)
+	if s.hostBlocker.IsBlocked(host) {
 		return true
 	}
-	return !s.hostBlocker.IsAllowed(u.Host)
+	return !s.hostBlocker.IsAllowed(host)
 }
 
 // DeliverToFollowers enqueues delivery to all remote followers of signerUserID.

@@ -941,6 +941,7 @@ status で分岐するクライアントが壊れるため、drop-in 互換を�
 | fetch-rss の URL 正規化 | WHATWG `new URL()` | host 小文字化 / default port 除去 / 空 path 補完まで再現。**IDN の punycode 変換 (UTS#46) は行わない** (取得は成功するが Unicode 表記と punycode 表記で cache key が分かれる)。空 userinfo (`http://@example.com/`) は upstream が許可するのに対し拒否 |
 | `MK_ONLY_SERVER` / `MK_ONLY_QUEUE` の値 | `if (process.env[...])` の truthy 判定。**`=false` と書いても有効になる** (無効化するには変数ごと消すしかない) | `1/true/yes/on` を真、`0/false/no/off/空` を偽として解釈する。未知の値は起動時エラー。`=1` を使う既存構成は影響を受けず、`=false` と書いた運用者だけが意図どおりに動く (#2459) |
 | 同上を両方指定したとき | `onlyServer` を優先して黙って続行 | **起動エラー**。矛盾した設定は運用ミスで、起動してから「配送が動かない」と気付く方が高くつく (#2459) |
+| inbound `Update(Note)` の禁止語 (`meta.prohibitedWords`) | **Note の `Update` を処理しない** (`ApInboxService.update` は Actor と Question 以外を `skip: Unknown type` で捨てる) ので判定も存在しない | inbound の note 編集は mk-go の拡張なので、**create と同じ禁止語判定を編集にも掛ける**。掛けないと「禁止語を含まない note を投げてから `Update` で差し替える」で create 側の判定 (upstream の `ApNoteService.ts` と同じ位置に入れてある) を素通りできる。弾いた場合は note の列も `emoji` / `drive_file` の行も一切書かず、activity は ack する (retry しない) |
 | `MK_ONLY_QUEUE` ノードの listener | 一切 listen しない | `/healthz` (と `enableMetrics` 時の `/metrics`) だけを持つ最小 mux を listen する。upstream 相当だと `-healthcheck` が必ず失敗し、**コンテナのヘルスチェックを外さないと運用できないノード**になるため。API 面は生えない (`s.echo` を流用せず別 mux を立てる、#2459) |
 
 ### リモート由来の文字列を列に入れるときの規則

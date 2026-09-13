@@ -404,6 +404,20 @@ func (s *Service) IsSilenced(host string) bool {
 	return HostMatchesAny(meta.SilencedHosts, host)
 }
 
+// ProhibitedWords returns meta.prohibitedWords.
+//
+// 連合の note 取り込み (`federation.Resolver`) がローカル投稿経路と同じ禁止語
+// 判定を掛けるために読む。meta が読めない場合は nil を返す (= 判定を skip)。
+// IsBlocked / IsAllowed と同じベストエフォート方針で、一時的な DB error で
+// inbound が止まらないようにする。
+func (s *Service) ProhibitedWords() []string {
+	meta, err := s.metaRepo.Fetch()
+	if err != nil {
+		return nil
+	}
+	return []string(meta.ProhibitedWords)
+}
+
 // IsMediaSilenced reports whether the host matches an entry in
 // meta.mediaSilencedHosts. Used by reaction gating to reject custom emoji
 // reactions from media-silenced remote hosts (#1538).

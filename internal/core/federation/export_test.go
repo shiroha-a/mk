@@ -24,6 +24,10 @@ func (r *Resolver) UpsertAttachments(docs []activitypub.Document, userID, host *
 	return r.upsertAttachments(docs, userID, host)
 }
 
+// SetProbeBudget shrinks the per-document image-probe budget so tests do not
+// have to burn attachmentProbeBudget of wall clock.
+func (r *Resolver) SetProbeBudget(d time.Duration) { r.probeBudget = d }
+
 // CollectAttachedFileTypes exposes the unexported collectAttachedFileTypes for external tests.
 func (r *Resolver) CollectAttachedFileTypes(fileIDs []string) []string {
 	return r.collectAttachedFileTypes(fileIDs)

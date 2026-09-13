@@ -678,3 +678,18 @@ func TestService_SetClock(t *testing.T) {
 	assert.Equal(t, fixed, got.FirstRetrievedAt)
 	assert.Equal(t, fixed, repo.Instances["alpha.example"].FirstRetrievedAt)
 }
+
+// meta.prohibitedWords を連合の note 取り込み (federation.Resolver) へ渡す
+// 経路 (#2915)。meta が読めないときは判定を skip できるよう nil を返す。
+func TestService_ProhibitedWords(t *testing.T) {
+	svc, _, metaRepo := newService(t)
+	assert.Empty(t, svc.ProhibitedWords(), "既定は空")
+
+	metaRepo.Meta.ProhibitedWords = model.StringArray{"forbidden", "/ba[dn]word/i"}
+	assert.Equal(t, []string{"forbidden", "/ba[dn]word/i"}, svc.ProhibitedWords())
+
+	// meta が読めない場合は IsBlocked / IsAllowed と同じくベストエフォートで
+	// 空を返す (一時的な DB error で inbound を止めない)。
+	metaRepo.Meta = nil
+	assert.Nil(t, svc.ProhibitedWords())
+}

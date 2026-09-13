@@ -82,7 +82,7 @@ func TestFetchImageDimensions_BadURL(t *testing.T) {
 // 単体は test 用に DefaultClient フォールバックを残しているが、production
 // 経路の probeImageDimensions では required にする。
 func TestProbeImageDimensions_NilClientReturnsFalse(t *testing.T) {
-	w, h, ok := probeImageDimensions(nil, "https://attacker.example/x.png")
+	w, h, ok := probeImageDimensions(context.Background(), nil, "https://attacker.example/x.png")
 	assert.False(t, ok, "nil client should not perform any HTTP request")
 	assert.Equal(t, 0, w)
 	assert.Equal(t, 0, h)
@@ -96,7 +96,7 @@ func TestProbeImageDimensions_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	w, h, ok := probeImageDimensions(server.Client(), server.URL+"/cat.png")
+	w, h, ok := probeImageDimensions(context.Background(), server.Client(), server.URL+"/cat.png")
 	require.True(t, ok)
 	assert.Equal(t, 800, w)
 	assert.Equal(t, 600, h)
@@ -110,7 +110,7 @@ func TestProbeImageDimensions_FailureReturnsFalse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	w, h, ok := probeImageDimensions(server.Client(), server.URL+"/x.png")
+	w, h, ok := probeImageDimensions(context.Background(), server.Client(), server.URL+"/x.png")
 	assert.False(t, ok)
 	assert.Equal(t, 0, w)
 	assert.Equal(t, 0, h)

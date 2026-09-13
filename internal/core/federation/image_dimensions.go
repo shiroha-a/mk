@@ -33,6 +33,15 @@ const imageFetchTimeout = 3 * time.Second
 // でも LimitReader で読み込み上限を切って早期 close する。
 const imageFetchMaxBytes int64 = 64 * 1024
 
+// attachmentProbeBudget bounds the total time one inbound document may spend
+// probing image dimensions.
+//
+// probe は添付ごとに**直列**で走るので、`imageFetchTimeout` (3s) だけでは
+// `maxRemoteAttachments` (16) × 3s = 48s まで伸びる。note 単位でも予算を切って、
+// 無応答のメディアサーバーを並べた 1 通で inbox worker を押さえ込めないようにする。
+// 予算切れの添付は `properties` が空のまま残るだけ (probe 失敗時と同じ degrade)。
+const attachmentProbeBudget = 10 * time.Second
+
 // fetchImageDimensions issues a best-effort HTTP GET against rawURL,
 // decodes only the image header bytes, and returns width / height in
 // pixels. Errors (non-200, decode failure, timeout, non-image MIME) are
@@ -99,12 +108,17 @@ func fetchImageDimensions(ctx context.Context, httpClient *http.Client, rawURL s
 // http.DefaultClient で呼ぶと SSRF 脆弱性になる (#464 review)。nil 渡しは
 // 呼び出し側で gate されている前提だが、安全側に倒して probe 自体を
 // 止める。
-func probeImageDimensions(httpClient *http.Client, rawURL string) (width, height int, ok bool) {
+//
+// **ctx は呼び出し側が握る。** 以前はここで `context.Background()` を作って
+// いたため、1 添付ごとの `imageFetchTimeout` 以外に打ち切る手段が無く、添付を
+// 並べるだけで直列の外向き GET を積み上げられた。呼び出し側 (upsertAttachments)
+// は note 単位の予算を張った ctx を渡す。
+func probeImageDimensions(ctx context.Context, httpClient *http.Client, rawURL string) (width, height int, ok bool) {
 	if httpClient == nil {
 		// SSRF 対策: 未配線時は probe しない (defaultClient フォールバック禁止)
 		return 0, 0, false
 	}
-	w, h, err := fetchImageDimensions(context.Background(), httpClient, rawURL)
+	w, h, err := fetchImageDimensions(ctx, httpClient, rawURL)
 	if err != nil {
 		slog.Warn("federation: image dimension probe failed",
 			"url", rawURL, "err", err)

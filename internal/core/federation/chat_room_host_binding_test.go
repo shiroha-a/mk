@@ -1,6 +1,7 @@
 package federation_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -116,7 +117,15 @@ func TestProcess_ChatRoomInvite_LocalActorDropped(t *testing.T) {
 		"https://example.com/chat/rooms/room1",
 	))
 
-	assert.ErrorIs(t, err, federation.ErrUnsupportedActivity)
+	// **どの層で落ちてもよい。** resolver が自ホストの actor URI を拒否する
+	// ようになったので、今はそちらが先に効く。chat_room_inbox 側のガードは
+	// 多層防御として残してある (resolver を通らない経路が将来できたときの
+	// 防波堤)。固定するのは「room も招待も作らない」ことと、retry させない
+	// 種類のエラーで落ちること。
+	require.Error(t, err)
+	assert.True(t,
+		errors.Is(err, federation.ErrUnsupportedActivity) || errors.Is(err, federation.ErrLocalActor),
+		"local actor の Invite が retry される種類のエラーで落ちている: %v", err)
 	assert.Empty(t, recv.ensureCalls, "local actor の Invite で room を作らない")
 	assert.Empty(t, recv.inviteCalls)
 }
