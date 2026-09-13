@@ -305,3 +305,60 @@ func TestSplitDigestHeader(t *testing.T) {
 		}
 	}
 }
+
+// **JS が読めて Go が読めない書式で skew 検査が丸ごと飛んでいた。**
+// `http.ParseTime` が扱うのは RFC1123 (GMT) / RFC850 / ANSIC だけで、
+// RFC1123Z と ISO8601 は失敗する。読めない値は upstream に合わせて通す設計
+// なので、そういう Date を出す peer は**30 日前のリクエストでも通っていた** —
+// replay guard の TTL が切れた後は同じ activity を無期限に再投函できる。
+func TestVerifyInboxAdmission_DateFormatsJSAccepts(t *testing.T) {
+	body := []byte(`{"type":"Follow"}`)
+	digest := SHA256Digest(body)
+	const host = "example.com"
+	base := time.Date(2026, 8, 17, 12, 0, 0, 0, time.UTC)
+	restore := nowFuncForAdmission
+	nowFuncForAdmission = func() time.Time { return base }
+	t.Cleanup(func() { nowFuncForAdmission = restore })
+
+	admit := func(date string) error {
+		return VerifyInboxAdmission(sig("(request-target)", "date", "host", "digest"),
+			host, host, date, digest, body)
+	}
+	stale := base.Add(-30 * 24 * time.Hour).UTC()
+
+	t.Run("窓の外は書式によらず弾く", func(t *testing.T) {
+		for name, layout := range map[string]string{
+			"RFC1123Z":    time.RFC1123Z,
+			"RFC3339":     time.RFC3339,
+			"RFC3339Nano": time.RFC3339Nano,
+			"RFC1123":     time.RFC1123,
+		} {
+			t.Run(name, func(t *testing.T) {
+				if err := admit(stale.Format(layout)); !errors.Is(err, ErrInboxDateSkew) {
+					t.Fatalf("30 日前の Date が通った (%s): %v", layout, err)
+				}
+			})
+		}
+	})
+
+	t.Run("窓の中は書式によらず通る", func(t *testing.T) {
+		for name, layout := range map[string]string{
+			"RFC1123Z":    time.RFC1123Z,
+			"RFC3339":     time.RFC3339,
+			"RFC3339Nano": time.RFC3339Nano,
+		} {
+			t.Run(name, func(t *testing.T) {
+				if err := admit(base.Format(layout)); err != nil {
+					t.Fatalf("通るはずが %v", err)
+				}
+			})
+		}
+	})
+
+	// 本当に解釈できない値は従来どおり通す (upstream も Invalid Date は素通し)。
+	t.Run("解釈できない値は通す", func(t *testing.T) {
+		if err := admit("not a date at all"); err != nil {
+			t.Fatalf("通るはずが %v", err)
+		}
+	})
+}

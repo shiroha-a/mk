@@ -159,8 +159,8 @@ func verifyDateSkew(dateHeader string) error {
 	if raw == "" {
 		return nil
 	}
-	t, err := http.ParseTime(raw)
-	if err != nil {
+	t, ok := parseSignatureDate(raw)
+	if !ok {
 		return nil
 	}
 	skew := nowFuncForAdmission().Sub(t)
@@ -171,6 +171,31 @@ func verifyDateSkew(dateHeader string) error {
 		return ErrInboxDateSkew
 	}
 	return nil
+}
+
+// parseSignatureDate accepts the HTTP-date forms Go knows, plus the two forms
+// upstream's `new Date()` accepts that Go's http.ParseTime does not.
+//
+// **「読めない値は通す」は upstream と同じ寛容さのときだけ成立する。**
+// `http.ParseTime` が読むのは RFC1123 (GMT) / RFC850 / ANSIC の 3 つだけで、
+// **RFC1123Z (`... +0000`) と ISO8601 (`2009-11-10T23:00:00Z`) は失敗する**
+// 一方、JS の `new Date()` は両方読む。この差があると、そういう Date を出す
+// peer からの署名付きリクエストは**30 日前のものでも skew 検査を丸ごと飛ばして
+// 通る** — replay guard の TTL (2*InboxDateSkew + 5m) が切れた後は、同じ
+// activity を無期限に再投函できる。`InboxDateSkew` が存在する理由そのものの層。
+func parseSignatureDate(raw string) (time.Time, bool) {
+	if t, err := http.ParseTime(raw); err == nil {
+		return t, true
+	}
+	// http.ParseTime が扱わないが `new Date()` は解釈する書式。
+	// `time.RFC1123` は `http.ParseTime` の HTTP-date 版 (GMT 固定) と違い、
+	// `UTC` のようなゾーン名も受ける。JS はそちらも読む。
+	for _, layout := range []string{time.RFC1123Z, time.RFC1123, time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, raw); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // containsHeaderFold reports whether name appears in the signed header set,
