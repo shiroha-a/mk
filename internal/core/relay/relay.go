@@ -175,8 +175,17 @@ func (s *Service) List(ctx context.Context) ([]*model.Relay, error) {
 	return s.repo.List()
 }
 
+// FindByID returns the relay row with the given id.
+//
+// inbox の Accept / Reject ハンドラが、status を書き換える前に「送信元 actor が
+// その relay 自身か」を検証するために使う (federation.RelayStatusMarker)。
+func (s *Service) FindByID(ctx context.Context, id string) (*model.Relay, error) {
+	return s.repo.FindByID(id)
+}
+
 // MarkAccepted flips the status of the given relay to "accepted". Used
-// by the inbox Accept handler when it detects a follow-relay activity.
+// by the inbox Accept handler when it detects a follow-relay activity
+// whose sender is that relay.
 func (s *Service) MarkAccepted(ctx context.Context, id string) error {
 	if err := s.repo.UpdateStatus(id, StatusAccepted); err != nil {
 		return err

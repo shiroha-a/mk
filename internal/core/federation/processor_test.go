@@ -1259,11 +1259,25 @@ func TestProcess_FlagWithoutRepo(t *testing.T) {
 	assert.ErrorIs(t, p.Process(body), federation.ErrUnsupportedActivity)
 }
 
-// fakeRelayMarker records MarkAccepted/MarkRejected calls for assertion.
+// fakeRelayMarker records MarkAccepted/MarkRejected calls for assertion and
+// serves the relay rows that the ownership check looks up.
 type fakeRelayMarker struct {
+	relays   map[string]*model.Relay
 	accepted []string
 	rejected []string
+	lookups  []string
 	err      error
+	findErr  error
+}
+
+// newFakeRelayMarker returns a marker holding a single relay row whose inbox
+// is inbox (empty inbox = no row at all, so FindByID fails).
+func newFakeRelayMarker(id, inbox string) *fakeRelayMarker {
+	m := &fakeRelayMarker{relays: map[string]*model.Relay{}}
+	if inbox != "" {
+		m.relays[id] = &model.Relay{ID: id, Inbox: inbox, Status: "requesting"}
+	}
+	return m
 }
 
 func (f *fakeRelayMarker) MarkAccepted(_ context.Context, id string) error {
@@ -1276,21 +1290,42 @@ func (f *fakeRelayMarker) MarkRejected(_ context.Context, id string) error {
 	return f.err
 }
 
-func TestProcess_AcceptFollowRelay_MarksAccepted(t *testing.T) {
-	p, _, _, _ := newProcessor(t, aliceActor)
-	marker := &fakeRelayMarker{}
-	p.SetRelayMarker(marker)
+func (f *fakeRelayMarker) FindByID(_ context.Context, id string) (*model.Relay, error) {
+	f.lookups = append(f.lookups, id)
+	if f.findErr != nil {
+		return nil, f.findErr
+	}
+	rel, ok := f.relays[id]
+	if !ok {
+		return nil, errors.New("no such relay")
+	}
+	return rel, nil
+}
 
-	body := []byte(`{
-		"type": "Accept",
-		"actor": "https://remote.example/users/alice",
+// relayAcceptBody builds an Accept(Follow) whose inner id is activityID,
+// signed by actor.
+func relayAcceptBody(kind, actor, activityID string) []byte {
+	return []byte(`{
+		"type": "` + kind + `",
+		"actor": "` + actor + `",
 		"object": {
-			"id": "https://example.com/activities/follow-relay/rel123",
+			"id": "` + activityID + `",
 			"type": "Follow",
 			"actor": "https://example.com/users/relay.actor",
 			"object": "https://www.w3.org/ns/activitystreams#Public"
 		}
 	}`)
+}
+
+func TestProcess_AcceptFollowRelay_MarksAccepted(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	p.SetLocalBaseURL("https://example.com")
+	marker := newFakeRelayMarker("rel123", "https://relay.example/inbox")
+	p.SetRelayMarker(marker)
+
+	// 送信元は relay 自身 (inbox と同じ host)。
+	body := relayAcceptBody("Accept", "https://relay.example/actor",
+		"https://example.com/activities/follow-relay/rel123")
 	require.NoError(t, p.Process(body))
 	assert.Equal(t, []string{"rel123"}, marker.accepted)
 	assert.Empty(t, marker.rejected)
@@ -1298,19 +1333,154 @@ func TestProcess_AcceptFollowRelay_MarksAccepted(t *testing.T) {
 
 func TestProcess_RejectFollowRelay_MarksRejected(t *testing.T) {
 	p, _, _, _ := newProcessor(t, aliceActor)
-	marker := &fakeRelayMarker{}
+	p.SetLocalBaseURL("https://example.com")
+	marker := newFakeRelayMarker("rel456", "https://relay.example/inbox")
 	p.SetRelayMarker(marker)
 
-	body := []byte(`{
-		"type": "Reject",
-		"actor": "https://remote.example/users/alice",
-		"object": {
-			"id": "https://example.com/activities/follow-relay/rel456",
-			"type": "Follow"
-		}
-	}`)
+	body := relayAcceptBody("Reject", "https://relay.example/actor",
+		"https://example.com/activities/follow-relay/rel456")
 	require.NoError(t, p.Process(body))
 	assert.Equal(t, []string{"rel456"}, marker.rejected)
+	assert.Empty(t, marker.accepted)
+}
+
+// TestProcess_FollowRelay_HostNormalizedMatch は host 比較が punycode / 大小文字を
+// 揃えてから行われることを固定する (素の文字列比較へ退行すると落ちる)。
+func TestProcess_FollowRelay_HostNormalizedMatch(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	p.SetLocalBaseURL("https://example.com")
+	marker := newFakeRelayMarker("rel1", "https://xn--eckve.example/inbox")
+	p.SetRelayMarker(marker)
+
+	body := relayAcceptBody("Accept", "https://パイ.Example/actor",
+		"https://example.com/activities/follow-relay/rel1")
+	require.NoError(t, p.Process(body))
+	assert.Equal(t, []string{"rel1"}, marker.accepted)
+}
+
+// TestProcess_AcceptFollowRelay_ForeignActorDropped は「署名が通る任意の actor が
+// relay を accepted に倒せる」欠陥 (upstream ApInboxService.ts:250 と同型) を固定する。
+// accepted に倒されると DeliverToAccepted が未承認の inbox へ全公開ノートを流し始める。
+func TestProcess_AcceptFollowRelay_ForeignActorDropped(t *testing.T) {
+	for _, kind := range []string{"Accept", "Reject"} {
+		t.Run(kind, func(t *testing.T) {
+			p, _, _, _ := newProcessor(t, aliceActor)
+			p.SetLocalBaseURL("https://example.com")
+			marker := newFakeRelayMarker("rel123", "https://relay.example/inbox")
+			p.SetRelayMarker(marker)
+
+			// relay とは無関係な remote actor。
+			body := relayAcceptBody(kind, "https://remote.example/users/alice",
+				"https://example.com/activities/follow-relay/rel123")
+			// drop は ack 扱い (retry させない)。
+			require.NoError(t, p.Process(body))
+			assert.Empty(t, marker.accepted)
+			assert.Empty(t, marker.rejected)
+			// 行の lookup 自体は行われている (= 検証を通って落ちた)。
+			assert.Equal(t, []string{"rel123"}, marker.lookups)
+		})
+	}
+}
+
+// TestProcess_AcceptFollowRelay_ForeignActivityIDIgnored は inner.id の host を
+// 見ていなかった欠陥を固定する。他ホストの follow-relay URI は relay 行を
+// 一切触らせない (通常の Accept(Follow) 経路へ落ちる)。
+func TestProcess_AcceptFollowRelay_ForeignActivityIDIgnored(t *testing.T) {
+	for _, activityID := range []string{
+		"https://evil.test/activities/follow-relay/rel123",
+		// prefix を伸ばした紛らわしい host も自ホストではない。
+		"https://example.com.evil.test/activities/follow-relay/rel123",
+		// 自ホスト配下でも path が違えば follow-relay URI ではない。
+		"https://example.com/activities/follow-relay/rel123/extra",
+	} {
+		t.Run(activityID, func(t *testing.T) {
+			p, _, _, _ := newProcessor(t, aliceActor)
+			p.SetLocalBaseURL("https://example.com")
+			marker := newFakeRelayMarker("rel123", "https://relay.example/inbox")
+			p.SetRelayMarker(marker)
+
+			body := relayAcceptBody("Accept", "https://remote.example/users/alice", activityID)
+			require.NoError(t, p.Process(body))
+			assert.Empty(t, marker.accepted)
+			assert.Empty(t, marker.rejected)
+			// relay 行を引きにすら行かない。
+			assert.Empty(t, marker.lookups)
+		})
+	}
+}
+
+// TestProcess_AcceptFollowRelay_UnparsableHostDropped は host を取り出せない URI
+// (壊れた actor / scheme 無しの inbox / inbox 未設定の行) を fail-closed で
+// 落とすことを固定する。
+func TestProcess_AcceptFollowRelay_UnparsableHostDropped(t *testing.T) {
+	cases := map[string]struct{ actor, inbox string }{
+		"malformed actor":  {actor: "not-a-uri", inbox: "https://relay.example/inbox"},
+		"schemeless inbox": {actor: "https://relay.example/actor", inbox: "relay.example/inbox"},
+		"empty inbox":      {actor: "https://relay.example/actor", inbox: ""},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, _, _, _ := newProcessor(t, aliceActor)
+			p.SetLocalBaseURL("https://example.com")
+			// inbox が空の行も「存在はする」状態として作る。
+			marker := &fakeRelayMarker{relays: map[string]*model.Relay{
+				"rel123": {ID: "rel123", Inbox: tc.inbox, Status: "requesting"},
+			}}
+			p.SetRelayMarker(marker)
+
+			body := relayAcceptBody("Accept", tc.actor,
+				"https://example.com/activities/follow-relay/rel123")
+			require.NoError(t, p.Process(body))
+			assert.Empty(t, marker.accepted)
+		})
+	}
+}
+
+// TestProcess_AcceptFollowRelay_UnknownRelayDropped は存在しない relay id を
+// 指す Accept が status を触らないことを固定する。
+func TestProcess_AcceptFollowRelay_UnknownRelayDropped(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	p.SetLocalBaseURL("https://example.com")
+	marker := newFakeRelayMarker("rel123", "")
+	p.SetRelayMarker(marker)
+
+	body := relayAcceptBody("Accept", "https://relay.example/actor",
+		"https://example.com/activities/follow-relay/rel123")
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, marker.accepted)
+	assert.Equal(t, []string{"rel123"}, marker.lookups)
+}
+
+// TestProcess_AcceptFollowRelay_LookupErrorDropped は relay 行の取得が失敗した
+// ときに status を書き換えないこと (fail-closed) を固定する。
+func TestProcess_AcceptFollowRelay_LookupErrorDropped(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	p.SetLocalBaseURL("https://example.com")
+	marker := newFakeRelayMarker("rel123", "https://relay.example/inbox")
+	marker.findErr = errors.New("db down")
+	p.SetRelayMarker(marker)
+
+	body := relayAcceptBody("Accept", "https://relay.example/actor",
+		"https://example.com/activities/follow-relay/rel123")
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, marker.accepted)
+}
+
+// TestProcess_AcceptFollowRelay_NoLocalBaseURLDropped は localBaseURL が
+// 未配線のときに fail-closed になることを固定する (自ホスト判定ができない以上、
+// どの follow-relay URI も信用できない)。
+func TestProcess_AcceptFollowRelay_NoLocalBaseURLDropped(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	// inbox host と actor host は一致している = localBaseURL さえ配線されていれば
+	// 通るはずの activity。それでも触らせない。
+	marker := newFakeRelayMarker("rel123", "https://remote.example/inbox")
+	p.SetRelayMarker(marker)
+
+	body := relayAcceptBody("Accept", "https://remote.example/users/alice",
+		"https://example.com/activities/follow-relay/rel123")
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, marker.accepted)
+	assert.Empty(t, marker.lookups)
 }
 
 func TestProcess_AcceptNonRelay_IgnoresMarker(t *testing.T) {

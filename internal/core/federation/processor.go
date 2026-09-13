@@ -37,10 +37,18 @@ var (
 
 // RelayStatusMarker is the minimal interface needed from core/relay.Service
 // for the inbox processor to toggle relay status on Accept / Reject
-// activities whose id matches `/activities/follow-relay/{id}`.
+// activities whose id matches `{baseURL}/activities/follow-relay/{id}`.
 type RelayStatusMarker interface {
 	MarkAccepted(ctx context.Context, id string) error
 	MarkRejected(ctx context.Context, id string) error
+	// FindByID returns the relay row identified by id, or an error when no
+	// such row exists.
+	//
+	// status を書き換える前に「送信元 actor がその relay 自身か」を確かめる
+	// ために要る。行が持っている identity は inbox URI だけなので、
+	// 突き合わせはその host と act.actor の host で行う
+	// (relayActorOwnsRelay)。
+	FindByID(ctx context.Context, id string) (*model.Relay, error)
 }
 
 // RelayActorChecker reports whether a given remote user is one of the locally
@@ -723,8 +731,9 @@ func (p *Processor) SetPinningRepo(repo repository.UserNotePiningRepository, idG
 }
 
 // SetRelayMarker wires a RelayStatusMarker so inbound Accept / Reject
-// activities whose id matches the follow-relay URI pattern can flip
-// the corresponding relay row to accepted / rejected.
+// activities whose id is a follow-relay URI issued by this instance can flip
+// the corresponding relay row to accepted / rejected. 反映するのは送信元
+// actor がその relay 自身だったときだけ (relayStatusChangeAllowed)。
 func (p *Processor) SetRelayMarker(m RelayStatusMarker) {
 	p.relayMarker = m
 }
@@ -796,19 +805,84 @@ func (p *Processor) SetNoteChartHook(h NoteChartHook) {
 	p.noteChartHook = h
 }
 
-// followRelayIDPattern extracts the relay id embedded in
-// `.../activities/follow-relay/{id}` URIs. Must stay in lockstep with
+// followRelayPath is the path prefix of the Follow(Relay) activity ids this
+// instance issues. Must stay in lockstep with
 // activitypub.URLBuilder.FollowRelayURI.
-var followRelayIDPattern = regexp.MustCompile(`/activities/follow-relay/([\w-]+)$`)
+const followRelayPath = "/activities/follow-relay/"
 
-// matchFollowRelayID returns the relay id if uri is a follow-relay URI,
-// otherwise the empty string.
-func matchFollowRelayID(uri string) string {
-	m := followRelayIDPattern.FindStringSubmatch(uri)
-	if len(m) < 2 {
+// followRelayIDPattern matches the id part of a Follow(Relay) activity URI
+// (the `{id}` in `{baseURL}/activities/follow-relay/{id}`). 字種は旧実装の
+// 末尾正規表現と同じ集合に揃えてあり、path 区切りを含む値 (`rel/../other`
+// のような細工) は relay 行の主キーとして受け付けない。
+var followRelayIDPattern = regexp.MustCompile(`^[\w-]+$`)
+
+// matchFollowRelayID returns the relay id when uri is a Follow(Relay) activity
+// URI **issued by this instance**, otherwise the empty string.
+//
+// localBaseURL を必須にしているのが要点。relay への Follow はこちらが出した
+// ものなので、その id は必ず自ホストの URI になる。旧実装はパス末尾だけを
+// 正規表現で見ていたため `https://evil.test/activities/follow-relay/<id>` の
+// ような他ホストの id でも relay 行を特定でき、任意のリモート actor が
+// relay の status を書き換えられた (upstream ApInboxService の accept() /
+// reject() も同じ形)。localBaseURL が未配線 (空) のときは fail-closed で
+// "" を返す。
+func matchFollowRelayID(uri, localBaseURL string) string {
+	if localBaseURL == "" {
 		return ""
 	}
-	return m[1]
+	rest, ok := strings.CutPrefix(uri, localBaseURL+followRelayPath)
+	if !ok || !followRelayIDPattern.MatchString(rest) {
+		return ""
+	}
+	return rest
+}
+
+// relayActorOwnsRelay reports whether actorURI belongs to the same host as the
+// relay's registered inbox.
+//
+// relay 行は inbox URI しか identity を持たないので host で突き合わせる。
+// host は hostFromURI で punycode + 小文字に正規化してから比較するため、
+// `https://Relay.Example/actor` と `https://relay.example/inbox` は一致する。
+// port は host の一部として扱う (別 authority を同一視しない安全側)。
+//
+// 既知の限界: relay と同じ host に別 actor を立てられる相手 (マルチテナントな
+// relay サーバー) は依然としてその relay の status を動かせる。行が inbox URI
+// しか持たない以上ここが上限で、actor の advertise する inbox と管理者が
+// 登録した inbox が完全一致する保証は無い (末尾スラッシュ等で正当な relay を
+// 落とすほうが害が大きい)。
+func relayActorOwnsRelay(actorURI string, rel *model.Relay) bool {
+	if rel == nil || rel.Inbox == "" || actorURI == "" {
+		return false
+	}
+	actorHost, err := hostFromURI(actorURI)
+	if err != nil || actorHost == "" {
+		return false
+	}
+	inboxHost, err := hostFromURI(rel.Inbox)
+	if err != nil || inboxHost == "" {
+		return false
+	}
+	return actorHost == inboxHost
+}
+
+// relayStatusChangeAllowed reports whether the actor that signed an inbound
+// Accept / Reject may flip the status of the relay row referenced by relayID.
+//
+// kind はログ用の activity 種別 ("Accept" / "Reject")。検証に落ちたケースは
+// 呼び出し側で状態を変えずに drop する (ack して retry しない)。
+func (p *Processor) relayStatusChangeAllowed(actorURI, relayID, kind string) bool {
+	rel, err := p.relayMarker.FindByID(context.Background(), relayID)
+	if err != nil || rel == nil {
+		slog.Info("federation: dropping relay "+kind+" for unknown relay",
+			"actor", actorURI, "relayId", relayID, "err", err)
+		return false
+	}
+	if !relayActorOwnsRelay(actorURI, rel) {
+		slog.Warn("federation: dropping forged relay "+kind+" (actor is not the relay)",
+			"actor", actorURI, "relayId", relayID, "relayInbox", rel.Inbox)
+		return false
+	}
+	return true
 }
 
 // SetReversi wires the reversi federation dependencies. When any of the
@@ -1175,8 +1249,9 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 
 // handleAccept processes an inbound Accept activity. リモートfolloweeがローカル
 // followerからのフォローリクエストを承認した場合に、フォロー関係を確立する。
-// inner.id が follow-relay パターンにマッチすれば relay の Accept とみなし、
-// RelayStatusMarker.MarkAccepted を呼び出す (upstream ApInboxService 互換)。
+// inner.id が自ホストの follow-relay URI で、かつ送信元 actor がその relay
+// 自身であれば relay の Accept とみなし、RelayStatusMarker.MarkAccepted を
+// 呼び出す (所有権検証は upstream に無い mk-go 側の硬化)。
 func (p *Processor) handleAccept(act genericActivity) error {
 	var inner genericActivity
 	// 型エラーを握らないと、直後の normalizeActor (#999) が救うはずの
@@ -1195,7 +1270,13 @@ func (p *Processor) handleAccept(act genericActivity) error {
 	if !strings.EqualFold(inner.Type, "follow") {
 		return nil
 	}
-	if relayID := matchFollowRelayID(inner.ID); relayID != "" && p.relayMarker != nil {
+	if relayID := matchFollowRelayID(inner.ID, p.localBaseURL); relayID != "" && p.relayMarker != nil {
+		// 送信元がその relay 自身でなければ状態を変えずに drop する。
+		// 通さないと、署名が通る任意のリモート actor が未承認 / 拒否済みの
+		// relay を accepted に倒せ、全公開ノートがその inbox へ流れ出す。
+		if !p.relayStatusChangeAllowed(act.Actor, relayID, "Accept") {
+			return nil
+		}
 		return p.relayMarker.MarkAccepted(context.Background(), relayID)
 	}
 	// actorはリモートfollowee（承認した側）
@@ -2192,8 +2273,9 @@ func isBearcapURI(raw json.RawMessage) bool {
 //
 // 想定: 自分 (ローカル follower) が remote followee に対して Follow を送ったが
 // 拒否された場合に呼ばれる。inner.Follow.actor がローカル follower、object が
-// remote followee。inner.id が follow-relay パターンなら relay 関連として
-// RelayStatusMarker.MarkRejected を呼ぶ。
+// remote followee。inner.id が自ホストの follow-relay URI で、かつ送信元
+// actor がその relay 自身なら relay 関連として RelayStatusMarker.MarkRejected
+// を呼ぶ。
 func (p *Processor) handleReject(act genericActivity) error {
 	var inner genericActivity
 	// 型エラーを握らないと、直後の normalizeActor (#999) が救うはずの
@@ -2211,7 +2293,12 @@ func (p *Processor) handleReject(act genericActivity) error {
 	if !strings.EqualFold(inner.Type, "follow") {
 		return ErrUnsupportedActivity
 	}
-	if relayID := matchFollowRelayID(inner.ID); relayID != "" && p.relayMarker != nil {
+	if relayID := matchFollowRelayID(inner.ID, p.localBaseURL); relayID != "" && p.relayMarker != nil {
+		// Accept 側と同じ理由で送信元を検証する。こちらを通すと稼働中の
+		// relay 配送を任意の actor が無言で止められる。
+		if !p.relayStatusChangeAllowed(act.Actor, relayID, "Reject") {
+			return nil
+		}
 		return p.relayMarker.MarkRejected(context.Background(), relayID)
 	}
 	followee, err := p.resolver.ResolveActor(act.Actor)
