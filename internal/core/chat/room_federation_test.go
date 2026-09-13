@@ -49,6 +49,9 @@ func TestEnsureRoomViaAP_OwnerMismatchRejected(t *testing.T) {
 
 func TestCreateInvitationViaAP_CreatesAndIdempotent(t *testing.T) {
 	svc, repo := newRoomFedService(t)
+	// **room を実在させること。** `chat_room_invitation.roomId` は `chat_room(id)`
+	// への FK なので、本番では room の無い招待行は作れない。
+	require.NoError(t, svc.EnsureRoomViaAP("room1", "General", "desc", "remoteOwner"))
 	require.NoError(t, svc.CreateInvitationViaAP("room1", "localUser"))
 	inv, err := repo.FindInvitation("localUser", "room1")
 	require.NoError(t, err)
@@ -112,7 +115,13 @@ func TestAddMemberViaAP_CreatesMembershipAndConsumesInvitation(t *testing.T) {
 func TestAddMemberViaAP_OwnerDoesNotCreateMembership(t *testing.T) {
 	svc, repo := newRoomFedService(t)
 	require.NoError(t, svc.EnsureRoomViaAP("room1", "General", "desc", "remoteOwner"))
-	require.NoError(t, svc.CreateInvitationViaAP("room1", "remoteOwner"))
+	// **招待は repository に直接入れる。** `CreateInvitationViaAP` は owner 自身
+	// への招待を作らなくなったので、そちらで用意すると行が無いまま
+	// 「消費された」ように見え、この test が空虚になる。ここで再現したいのは
+	// 「所有権の譲渡で owner 宛の招待が残った」状態 (#2858)。
+	require.NoError(t, repo.CreateInvitation(&model.ChatRoomInvitation{
+		ID: "inv-owner", UserID: "remoteOwner", RoomID: "room1",
+	}))
 
 	require.NoError(t, svc.AddMemberViaAP("room1", "remoteOwner"))
 
@@ -124,6 +133,7 @@ func TestAddMemberViaAP_OwnerDoesNotCreateMembership(t *testing.T) {
 
 func TestRemoveInvitationViaAP_DeletesPending(t *testing.T) {
 	svc, repo := newRoomFedService(t)
+	require.NoError(t, svc.EnsureRoomViaAP("room1", "General", "desc", "remoteOwner"))
 	require.NoError(t, svc.CreateInvitationViaAP("room1", "remoteUser"))
 	require.NoError(t, svc.RemoveInvitationViaAP("room1", "remoteUser"))
 	_, err := repo.FindInvitation("remoteUser", "room1")

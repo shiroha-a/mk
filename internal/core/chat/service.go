@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	"github.com/shiroha-a/mk/internal/activitypub/mfm"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -73,11 +74,24 @@ var (
 	// ErrNoSuchEmoji is returned by React when a custom emoji reaction references
 	// a local emoji that does not exist (upstream 'no such emoji').
 	ErrNoSuchEmoji = errors.New("no such emoji")
+	// ErrRoomFull is returned by CreateInvitationViaAP when the room's members
+	// plus its pending invitations already fill maxRoomMembers. Mirrors upstream
+	// createRoomInvitation's 'room is full' (upstream counts memberships only).
+	// Permanent: callers must not retry.
+	ErrRoomFull = errors.New("chat room is full")
 )
 
 // maxReactionsPerMessage caps the reactions on a single chat message
 // (upstream MAX_REACTIONS_PER_MESSAGE = 100).
 const maxReactionsPerMessage = 100
+
+// maxRoomMembers mirrors upstream ChatService.MAX_ROOM_MEMBERS (= 50).
+//
+// owner は membership 行を持たないので、数えるのは owner を除いたメンバー数
+// (upstream countBy({roomId}) と同じ)。api 層 (`internal/api/chat/handler.go`)
+// が同じ値を自前で持っており、片側だけ動かすと AP 経路とローカル API で定員が
+// 食い違う。`TestMaxRoomMembersMatchesAPILayer` が両者の一致を固定する。
+const maxRoomMembers = 50
 
 // chatCustomEmojiPattern matches a local custom-emoji reaction (`:name:` or the
 // canonical `:name@.:` form). upstream isCustomEmojiRegexp は local emoji だけを
@@ -655,12 +669,93 @@ func (s *Service) EnsureRoomViaAP(roomID, name, summary, ownerUserID string) err
 
 // CreateInvitationViaAP records a pending chat room invitation for a local
 // user received from a remote room. Idempotent.
+//
+// AP 経路は署名が通る remote actor なら誰でも叩けるので、ローカル API
+// (`chat/rooms/invitations/create`) が強制している条件をここでも通す:
+// room の実在 / owner 自身への招待でない / 既存メンバーでない / 既存招待で
+// ない / 定員 (upstream MAX_ROOM_MEMBERS)。
+//
+// 加えて **invitee が room owner (= 招待者) を block していれば招待ごと拒否する**。
+// upstream の createRoomInvitation は `// TODO: cehck block` のまま block を見ないが、
+// 1-on-1 DM の受信 (CreateMessageViaAP) は見ており、同じ chat 機能の中で AP 経路の
+// 招待だけが無制限に通っていた (通知も発火する)。向きは DM と揃えて
+// `Exists(invitee, owner)` = 受け手が送り手を block しているか。
+//
+// **chatScope (canChat) は見ない。** upstream で chatScope を評価するのは
+// createMessageToUser だけで、room の招待は対象外 (createRoomInvitation にも
+// ローカル API にも無い)。招待に広げると「chatScope=followers の利用者が
+// 非 follower の room に呼ばれなくなる」形で AP 経路だけ挙動が変わり、ローカル
+// API との非対称も増える。block は「その相手を既に拒否している」という invitee
+// 自身の意思表示なので、こちらだけを適用する。
+//
+// ErrChatBlocked / ErrRoomFull / ErrNotFound はいずれも retry では解決しない条件なので、
+// 呼び出し側 (federation の inbox handler) はこれらを non-retry に落とす。
 func (s *Service) CreateInvitationViaAP(roomID, inviteeUserID string) error {
 	if roomID == "" || inviteeUserID == "" {
 		return ErrInvalidTarget
 	}
-	if _, err := s.repo.FindInvitation(inviteeUserID, roomID); err == nil {
+	// 既存招待は冪等 no-op (通知も再送しない)。**DB 障害を「招待が無い」に
+	// 丸めない** (#2792) — 丸めると一過性のエラーの間だけ UNIQUE 違反まで進む。
+	existing, err := s.repo.FindInvitation(inviteeUserID, roomID)
+	if err != nil && !repository.IsNotFound(err) {
+		return err
+	}
+	if err == nil && existing != nil {
 		return nil
+	}
+	// room は block 判定の相手 (= inviter = owner) と定員判定に要る。
+	// `chat_room_invitation.roomId` は `chat_room(id)` への FK (000022_chat.up.sql)
+	// なので、room 不在で行だけ作ることはそもそもできない。
+	room, err := s.repo.FindRoomByID(roomID)
+	if err != nil && !repository.IsNotFound(err) {
+		return err
+	}
+	if err != nil || room == nil {
+		return ErrNotFound
+	}
+	// owner 自身への招待は行を作らない (upstream 'yourself')。owner は暗黙の
+	// メンバーなので、残しても AddMemberViaAP が消費するだけ (#2858)。
+	if room.OwnerID == inviteeUserID {
+		return nil
+	}
+	// 既にメンバーなら招待不要 (upstream 'already member')。
+	// ここでも DB 障害を not-found に丸めない。
+	if _, err := s.repo.FindMembership(inviteeUserID, roomID); err == nil {
+		return nil
+	} else if !repository.IsNotFound(err) {
+		return err
+	}
+	// invitee が owner を block していれば招待を作らない (通知も出さない)。
+	// CreateMessageViaAP の checkBlocked(to, from) gate と同じ形。
+	if s.blockingRepo != nil {
+		blocked, berr := s.blockingRepo.Exists(inviteeUserID, room.OwnerID)
+		if berr != nil {
+			// fail-closed: block 判定が引けない間は招待を作らない。
+			return fmt.Errorf("chat block check: %w", berr)
+		}
+		if blocked {
+			return ErrChatBlocked
+		}
+	}
+	// 定員 (upstream MAX_ROOM_MEMBERS)。列挙の失敗は fail-closed にする
+	// (数えられないまま作ると定員判定が素通りする)。
+	members, err := s.repo.ListMembersByRoom(roomID)
+	if err != nil {
+		return fmt.Errorf("chat room member count: %w", err)
+	}
+	// **未消化の招待も定員に数える** (AP 経路のみの硬化)。upstream は membership
+	// しか数えないので、誰も accept しない限り 1 つの room で invitation 行と
+	// chatRoomInvitationReceived 通知を無制限に作れてしまう。room の収容人数は
+	// maxRoomMembers なので、それを超える招待はどのみち全部は通らない。
+	// membership だけで定員に達している upstream の 'room is full' も同じ式で落ちる。
+	// limit は maxRoomMembers+1 で打ち切る (全件数える必要は無く、repository 側の
+	// ページ上限 100 にも収まる)。
+	pending, err := s.repo.ListInvitationsByRoom(roomID, "", "", maxRoomMembers+1)
+	if err != nil {
+		return fmt.Errorf("chat room invitation count: %w", err)
+	}
+	if len(members)+len(pending) >= maxRoomMembers {
+		return ErrRoomFull
 	}
 	inv := &model.ChatRoomInvitation{
 		ID: s.idGen.Generate(time.Now()), UserID: inviteeUserID, RoomID: roomID,
@@ -669,14 +764,9 @@ func (s *Service) CreateInvitationViaAP(roomID, inviteeUserID string) error {
 		return err
 	}
 	// local invitee へ chatRoomInvitationReceived 通知を送る (#1559)。notifier
-	// は招待者 (= room owner)。room load 失敗時は notifier 引数を空にして発火する
-	// (notifier 不明でも通知自体は出す)。
+	// は招待者 (= room owner)。
 	if s.invitationNotifier != nil {
-		inviterID := ""
-		if room, err := s.repo.FindRoomByID(roomID); err == nil && room != nil {
-			inviterID = room.OwnerID
-		}
-		s.invitationNotifier.OnChatRoomInvitationReceived(inviteeUserID, inviterID, inv.ID)
+		s.invitationNotifier.OnChatRoomInvitationReceived(inviteeUserID, room.OwnerID, inv.ID)
 	}
 	return nil
 }
@@ -798,6 +888,29 @@ func remoteChatRoomURI(ownerURI, roomID string) string {
 	return u.Scheme + "://" + u.Host + "/chat/rooms/" + roomID
 }
 
+// remoteChatText converts an inbound ActivityPub `content` payload into the MFM
+// text mk-go stores, then clips it to `chat_message.text`.
+//
+// **連合で届く chat の本文は HTML。** upstream の note 取り込み
+// (`ApNoteService`) も mk-go の `IngestNote` (`internal/core/federation/resolver.go`)
+// も `content` を `mfm.FromHTML` で MFM に戻してから保存しており、chat だけが
+// 生のまま保存していた。frontend は本文を MFM として描画するので、HTML のまま
+// だと `<` や `&` が `&lt;` / `&amp;` とリテラル表示され、`<p>` などのタグは
+// 本文として残る。mk-go 同士でも往復で壊れる。
+//
+// **変換してから切る。** 先に切ると tag の途中で切れた壊れた HTML を parser に
+// 渡すことになる (`extractRemoteDescription` と同じ順序)。`colfit.Text` は
+// NUL も落とす。
+//
+// **`source` / `_misskey_content` はここでは見られない。** note 取り込みは
+// upstream と同じ 3 段 (source → _misskey_content → content) で拾うが、chat は
+// `internal/core/federation/processor.go` の probe が `content` しか読まずに
+// 文字列として渡してくるため、この層に届いていない。優先順位を揃えるには
+// probe と `ChatMessageReceiver` の signature を広げる必要がある。
+func remoteChatText(content string) string {
+	return colfit.Text(mfm.FromHTML(content), chatMessageTextMaxRunes)
+}
+
 // CreateMessageViaAP persists a chat message received via ActivityPub from a
 // remote user. The uri parameter is the activity's canonical ID. AP retries
 // are common so URI-based dedup is performed (IngestNote と同じパターン).
@@ -852,8 +965,8 @@ func (s *Service) CreateMessageViaAP(ctx context.Context, uri string, fromUser *
 		FromUserID: fromUser.ID,
 		ToUserID:   &toUserID,
 	}
-	// text は本文なので切って NUL を落とす (CreateRoomMessageViaAP と同じ)。
-	if text = colfit.Text(text, chatMessageTextMaxRunes); text != "" {
+	// text は HTML で届くので MFM に戻してから切る (CreateRoomMessageViaAP と同じ)。
+	if text = remoteChatText(text); text != "" {
 		msg.Text = &text
 	}
 	if uri != "" {
@@ -1145,9 +1258,9 @@ func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID,
 		FromUserID: sender.ID,
 		ToRoomID:   &roomID,
 	}
-	// text は本文なので切って NUL を落とす。空になったら列を NULL のままにする
-	// (生値が空だったときと同じ形にする)。
-	if text = colfit.Text(text, chatMessageTextMaxRunes); text != "" {
+	// text は HTML で届くので MFM に戻してから切る (CreateMessageViaAP と同じ)。
+	// 空になったら列を NULL のままにする (生値が空だったときと同じ形にする)。
+	if text = remoteChatText(text); text != "" {
 		msg.Text = &text
 	}
 	if uri != "" {
