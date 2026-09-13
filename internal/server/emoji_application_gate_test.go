@@ -361,6 +361,16 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	ownTypes := regexp.MustCompile(`LogType = "([A-Za-z0-9_]+)"`).
 		FindAllStringSubmatch(logTypes[marker:], -1)
 	require.NotEmptyf(t, ownTypes, "mk-go 独自の LogType が 1 つも拾えていない (#2962)")
+	// **対象者が見出しに出ること (レビュー M2)。** 出さないと
+	// 「絵文字申請枠をリセット」+ 時刻だけの行が並び、誰のものか raw を開くまで
+	// 分からない。upstream の 38 種が同じ形で出しているのに、独自の型だけ
+	// 落ちていた。
+	modlog := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "modlog.ModLog.vue")))
+	for _, m := range ownTypes {
+		require.Containsf(t, modlog, m[1]+"'",
+			"modlog が %s の行に対象者を出していない (#2962)", m[1])
+	}
+
 	for _, locale := range []string{"ja-JP.yml", "en-US.yml"} {
 		section := yamlSection(t, readFileString(t, filepath.Join(fe, "..", "..", "locales", locale)),
 			"_moderationLogTypes:")

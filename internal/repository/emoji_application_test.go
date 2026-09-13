@@ -1621,3 +1621,46 @@ func TestEmojiApplicationQuotaResetRepository_TieBreak(t *testing.T) {
 	require.Equal(t, "zzB", got.ID, "同時刻のリセットで最後の 1 件が決まっていない")
 	require.Equal(t, "m2", got.ResetByID, "実行者が入れ替わって見える")
 }
+
+// **3 つの窓すべてに効くこと (#2962 / レビュー M1)。** issue の完了条件が
+// 名指ししている項目だが、既存のテストはどれも `day` 1 本だけで、
+// 「week / month には効かせない」変異が全パッケージ緑で通っていた (実測)。
+// 壊れると、週次が満杯の利用者を戻しても `429 period=week` で弾かれ続け、
+// 画面も 20/20 のまま — 完了条件そのものが壊れているのに CI は緑になる。
+func TestEmojiApplicationRepository_QuotaReset_AppliesToAllWindows(t *testing.T) {
+	cleanupEmojiApplications(t)
+	cleanupQuotaResets(t)
+	defer func() { cleanupEmojiApplications(t); cleanupQuotaResets(t) }()
+	createTestUser(t, "ea_g8")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	// 3 つの窓それぞれの中に 1 件ずつ置く (day の中 / week の中 / month の中)。
+	seedApplicationAt(t, "ea_g8a", "ea_g8", "a", model.EmojiApplicationRejected, now.Add(-2*time.Hour))
+	seedApplicationAt(t, "ea_g8b", "ea_g8", "b", model.EmojiApplicationRejected, now.Add(-3*24*time.Hour))
+	seedApplicationAt(t, "ea_g8c", "ea_g8", "c", model.EmojiApplicationRejected, now.Add(-20*24*time.Hour))
+
+	windows := []QuotaWindow{
+		{Name: "day", Duration: 24 * time.Hour, Max: 1},
+		{Name: "week", Duration: 7 * 24 * time.Hour, Max: 2},
+		{Name: "month", Duration: 30 * 24 * time.Hour, Max: 3},
+	}
+
+	full, err := repo.QuotaUsage("ea_g8", QuotaLimits{Windows: windows}, now)
+	require.NoError(t, err)
+	require.Equal(t, []int{1, 2, 3},
+		[]int{full.Windows[0].Used, full.Windows[1].Used, full.Windows[2].Used},
+		"リセット前の使用数が想定と違う")
+
+	// **全部の行より新しいリセット。** 3 窓とも 0 になるのが正。
+	after, err := repo.QuotaUsage("ea_g8",
+		QuotaLimits{Windows: windows, ResetAt: now.Add(-time.Hour)}, now)
+	require.NoError(t, err)
+	require.Equal(t, []int{0, 0, 0},
+		[]int{after.Windows[0].Used, after.Windows[1].Used, after.Windows[2].Used},
+		"リセットが効いていない窓がある (day だけに効かせていないか)")
+	for i := range after.Windows {
+		require.True(t, after.Windows[i].RetryAt.IsZero(),
+			"%s の窓が満杯のまま", after.Windows[i].Window.Name)
+	}
+}
