@@ -204,6 +204,14 @@ func (s *Service) SetQuotaResetRepo(r repository.EmojiApplicationQuotaResetRepos
 	s.resets = r
 }
 
+// HasQuotaResetRepo reports whether the manual quota reset is available.
+//
+// **起動時の自己診断に載せるため (レビュー M2)。** 静的ゲートは
+// `SetQuotaResetRepo(` という呼び出しの存在しか見ないので、`nil` を渡す形は
+// 素通りする。未配線だとリセットは 500 で失敗し続け、**過去に戻した枠も
+// 読めなくなる** (再び満杯に見える)。
+func (s *Service) HasQuotaResetRepo() bool { return s.resets != nil }
+
 // QuotaExceededError is returned when a rolling window is full (#2958).
 // 呼び出し元はこれを HTTP 429 に翻訳し、期間・使用数・上限・再試行時刻を返す。
 type QuotaExceededError struct {
@@ -281,6 +289,10 @@ func (s *Service) quotaLimitsWithReset(userID string) (repository.QuotaLimits, *
 	}, reset
 }
 
+// quotaResetReasonMaxLen mirrors `emoji_application_quota_reset.reason`
+// (varchar(1024)).
+const quotaResetReasonMaxLen = 1024
+
 // ErrResetReasonRequired is returned when a quota reset carries no reason.
 //
 // **監査ログに残る唯一の文脈なので必須。** 空を許すと「誰かが戻した」以上の
@@ -304,6 +316,13 @@ func (s *Service) ResetQuota(userID, moderatorID, reason string) (UserSummary, *
 	reason = strings.TrimSpace(reason)
 	if reason == "" {
 		return UserSummary{}, nil, ErrResetReasonRequired
+	}
+	// **列の長さを超える入力を DB に渡さない (レビュー M1)。** 渡すと
+	// SQLSTATE 22001 が生のまま返り、**利用者の入力で 5xx が立つ** — 画面は
+	// 「もう一度お試しください」と案内するが、何度やっても同じ結果になる。
+	// このパッケージが license に対して既に採っている扱いと揃える。
+	if utf8.RuneCountInString(reason) > quotaResetReasonMaxLen {
+		return UserSummary{}, nil, ErrTooLong
 	}
 
 	// **先に読む。** 書いてから読むと、返すのはリセット後の 0 件になる。

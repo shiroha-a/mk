@@ -3104,8 +3104,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 期間上限をロールから引く (#2958)。未配線だと上限が丸ごと効かなくなる
 	// ので criticalWiring に載せてある。
 	emojiApplicationService.SetPolicyProvider(roleService)
-	// 申請枠の手動リセット (#2962)。**未配線だとリセットが無かったことにされる**
-	// ので、criticalWiring と同じ扱いで配線する — 戻したはずの枠が戻らない。
+	// 申請枠の手動リセット (#2962)。**未配線ならリセットは 500 で失敗する**
+	// (`ErrQuotaResetUnavailable`) ので、戻したつもりで戻っていない状態にはならない。
+	// ただし既存のリセットも読めなくなる = 過去に戻した枠が再び満杯に見えるので、
+	// 配線の有無は静的ゲート (`emoji_application_gate_test.go`) で見る。
 	emojiApplicationService.SetQuotaResetRepo(
 		repository.NewEmojiApplicationQuotaResetRepository(s.db))
 	emojiApplicationHandler := apiemojiapplications.NewHandler(
@@ -3912,6 +3914,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"job が二度 fire したとき予約投稿が 2 回 publish される"},
 		{"emojiApplication.policyProvider", emojiApplicationService.HasPolicyProvider(),
 			"カスタム絵文字申請の日次・週次・月次の上限が丸ごと効かなくなる"},
+		{"emojiApplication.quotaResetRepo", emojiApplicationService.HasQuotaResetRepo(),
+			"申請枠の手動リセットが常に失敗し、過去に戻した枠も再び満杯に見える"},
 
 		// ここから可視性・権限・上限 (#2683)。認証ほど鋭くはないが、いずれも
 		// 利用者から見えない形で制限が外れる。

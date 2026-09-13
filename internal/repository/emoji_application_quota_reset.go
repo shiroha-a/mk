@@ -19,8 +19,6 @@ type EmojiApplicationQuotaResetRepository interface {
 	// ときに枠が満杯のまま見え (読み取り側)、あるいはリセットが無かったことに
 	// されて申請が弾かれる (作成側)。err はそのまま返す。
 	LatestByUser(userID string) (*model.EmojiApplicationQuotaReset, error)
-	// ListByUser returns the reset history, newest first.
-	ListByUser(userID string, limit int) ([]model.EmojiApplicationQuotaReset, error)
 }
 
 type emojiApplicationQuotaResetRepository struct {
@@ -43,7 +41,10 @@ func (r *emojiApplicationQuotaResetRepository) LatestByUser(userID string) (*mod
 	// 「無い = nil」が自然な問い合わせ。
 	if err := r.db.
 		Where(`"userId" = ?`, userID).
-		Order(`"createdAt" DESC`).
+		// **id でも切る (レビュー L4)。** 同一時刻の 2 行があると、どちらが
+		// 「最後のリセット」として表示されるかがプラン依存になる。境界の値は
+		// 同じなので枠の計算は変わらないが、理由と実行者が入れ替わって見える。
+		Order(`"createdAt" DESC, "id" DESC`).
 		Limit(1).
 		Find(&rows).Error; err != nil {
 		return nil, err
@@ -52,21 +53,6 @@ func (r *emojiApplicationQuotaResetRepository) LatestByUser(userID string) (*mod
 		return nil, nil
 	}
 	return &rows[0], nil
-}
-
-func (r *emojiApplicationQuotaResetRepository) ListByUser(userID string, limit int) ([]model.EmojiApplicationQuotaReset, error) {
-	if limit <= 0 || limit > 100 {
-		limit = 30
-	}
-	var out []model.EmojiApplicationQuotaReset
-	if err := r.db.
-		Where(`"userId" = ?`, userID).
-		Order(`"createdAt" DESC`).
-		Limit(limit).
-		Find(&out).Error; err != nil {
-		return nil, err
-	}
-	return out, nil
 }
 
 // quotaWindowSince returns the start of the window, taking a manual reset into

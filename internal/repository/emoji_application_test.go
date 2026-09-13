@@ -1556,8 +1556,44 @@ func TestEmojiApplicationQuotaResetRepository(t *testing.T) {
 	require.Equal(t, "m2", got.ResetByID)
 
 	// **履歴は上書きされない。** 誰がいつ何回戻したかが残る。
-	list, err := repo.ListByUser("ea_g5", 10)
+	var n int64
+	require.NoError(t, testDB.Model(&model.EmojiApplicationQuotaReset{}).
+		Where(`"userId" = ?`, "ea_g5").Count(&n).Error)
+	require.EqualValues(t, 2, n, "履歴が上書きされている")
+}
+
+// **審査待ちの上限にはリセットが効かないこと (#2962 / レビュー M1)。**
+// 効いてしまうと、審査待ちが上限に達している利用者を「戻した」だけで
+// **審査待ちを無制限に積めるようになる** — モデレーターの一覧が 1 人で埋まる。
+// リセットは「期間内に何件出したか」を戻すもので、審査待ちは「今まさに
+// 処理を待っている件数」なので、戻しても申請は残っている。
+func TestEmojiApplicationRepository_QuotaReset_DoesNotClearPendingLimit(t *testing.T) {
+	cleanupEmojiApplications(t)
+	cleanupQuotaResets(t)
+	defer func() { cleanupEmojiApplications(t); cleanupQuotaResets(t) }()
+	createTestUser(t, "ea_g6")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	seedApplicationAt(t, "ea_g6a", "ea_g6", "a", model.EmojiApplicationPending, now.Add(-3*time.Hour))
+	seedApplicationAt(t, "ea_g6b", "ea_g6", "b", model.EmojiApplicationPending, now.Add(-2*time.Hour))
+	// **申請より新しいリセット。** 期間の窓は空になるが、審査待ちは変わらない。
+	resetAt := now.Add(-time.Hour)
+
+	limits := QuotaLimits{
+		Windows:    []QuotaWindow{{Name: "day", Duration: 24 * time.Hour, Max: 2}},
+		MaxPending: 2,
+		ResetAt:    resetAt,
+	}
+	usage, err := repo.QuotaUsage("ea_g6", limits, now)
 	require.NoError(t, err)
-	require.Len(t, list, 2, "履歴が上書きされている")
-	require.Equal(t, []string{"qr2", "qr1"}, []string{list[0].ID, list[1].ID}, "新しい順になっていない")
+	require.Equal(t, 0, usage.Windows[0].Used, "期間の枠が戻っていない")
+	require.Equal(t, 2, usage.Pending, "リセットで審査待ちの件数まで戻っている")
+	require.True(t, usage.PendingFull, "リセットで審査待ちの上限まで解除されている")
+
+	// 作成側も同じ — 期間は空いても審査待ちで弾かれる。
+	err = repo.CreateWithQuota(quotaApp("ea_g6new", "ea_g6", "new", now), limits)
+	var pe *PendingLimitExceededError
+	require.ErrorAs(t, err, &pe, "リセットで審査待ちの上限まで解除されている")
+	require.Equal(t, 2, pe.Used)
 }

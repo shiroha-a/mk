@@ -1107,16 +1107,6 @@ func (f *fakeResets) LatestByUser(userID string) (*model.EmojiApplicationQuotaRe
 	return out, nil
 }
 
-func (f *fakeResets) ListByUser(userID string, _ int) ([]model.EmojiApplicationQuotaReset, error) {
-	var out []model.EmojiApplicationQuotaReset
-	for i := range f.rows {
-		if f.rows[i].UserID == userID {
-			out = append(out, f.rows[i])
-		}
-	}
-	return out, nil
-}
-
 // errBoom stands in for any repository failure (#2961).
 var errBoom = errors.New("boom")
 
@@ -1368,4 +1358,21 @@ func TestUserSummaryReadsResetOnce(t *testing.T) {
 	require.Equal(t, "r1", got.LastReset.ID)
 	require.Equal(t, at, apps.usageResetAt, "境界と表示で別の値を使っている")
 	require.Equal(t, 1, resets.calls, "リセットを 2 回引いている (間に操作が入ると食い違う)")
+}
+
+// **列の長さを超える理由は弾くこと (レビュー M1)。** そのまま DB へ渡すと
+// SQLSTATE 22001 が生のまま返り、**利用者の入力で 5xx が立つ** — 画面は
+// 「もう一度お試しください」と案内するが、何度やっても同じ結果になる。
+func TestResetQuotaRejectsTooLongReason(t *testing.T) {
+	resets := &fakeResets{}
+	svc := NewService(newFakeApps(), &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetQuotaResetRepo(resets)
+
+	// 1024 文字ちょうどは通る (列の幅と同じ)。
+	_, _, err := svc.ResetQuota("u1", "mod1", strings.Repeat("あ", 1024))
+	require.NoError(t, err, "列の幅ちょうどで弾いている")
+
+	_, _, err = svc.ResetQuota("u1", "mod1", strings.Repeat("あ", 1025))
+	require.ErrorIs(t, err, ErrTooLong)
+	require.Len(t, resets.created, 1, "弾いたのに記録が残っている")
 }

@@ -313,8 +313,18 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// **枠のリセットの配線 (#2962)。** 未配線だと `SetQuotaResetRepo` が呼ばれず、
 	// **リセットが無かったことにされる** — モデレーターは戻したつもりなのに
 	// 申請者は弾かれ続ける。service は fail-closed に倒すので気付けない。
+	// **`nil` を渡す形も弾く (レビュー M2)。** 呼び出しの存在だけを見ると
+	// `SetQuotaResetRepo(nil)` が素通りし、リセットは 500 で失敗し続ける
+	// (過去に戻した枠も読めなくなり、再び満杯に見える)。起動時の自己診断
+	// (`criticalWiring`) にも載せてあるので、実行時にも気付ける。
 	require.Containsf(t, src, "SetQuotaResetRepo(",
-		"%s が申請枠のリセットを配線していない。戻したはずの枠が戻らない (#2962)", router)
+		"%s が申請枠のリセットを配線していない (#2962)", router)
+	// **`nil` を明示的に弾く。** 「識別子が続くこと」だけを見る形にしたら
+	// `nil` の `n` が一致して素通りした (実測)。
+	require.NotRegexpf(t, `SetQuotaResetRepo\(\s*nil`, src,
+		"%s が申請枠のリセットに nil を渡している。リセットが常に失敗する (#2962)", router)
+	require.Containsf(t, src, `emojiApplicationService.HasQuotaResetRepo()`,
+		"%s が申請枠のリセットの配線を起動時に自己診断していない (#2962)", router)
 
 	relatedSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.application-related.vue")))
 	require.NotContainsf(t, relatedSrc, "onMounted(",
@@ -418,7 +428,7 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		// **枠のリセット (#2962)。** locale キーは template にしか現れないので、
 		// 描画まで見たことになる (ref の宣言だけで満たされる needle にしない)。
 		"admin/emoji-application/reset-user-quota",
-		"resetQuotaTitle", "resetQuota\"", "lastReset\"",
+		"resetQuotaTitle", "lastReset\"",
 		// **戻す枠が無いなら出さない。** 押しても何も変わらない操作を
 		// 「効いたように見える」形で出すことになり、監査ログだけが増える。
 		"canResetQuota(",
@@ -545,6 +555,18 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// 見るだけだと、押す前に読まれない場所へ移しても通る (実測)。
 	require.Containsf(t, resetBody, "resetQuotaNote",
 		"リセットの確認で、何が起きて何が起きないかを出していない (#2962)")
+	// **押せる導線があること。** ハンドラ名だけを見ると `async function
+	// resetQuota(` の定義で満たされるので、クリックに繋がっていることを見る。
+	// **`@click="resetQuota"` とは書き方を固定しない (レビュー L7)** —
+	// `@click="() => resetQuota()"` という正当な書き方で落ち、しかも診断が
+	// 「locale キーが無い」ように読めた。
+	require.Regexpf(t, `@click="[^"]*resetQuota`, userApps,
+		"申請枠をリセットするボタンが押せない (#2962)")
+	// **ボタン自身が出し分けを持つこと。** 節の条件に `canResetQuota` があるだけ
+	// だと、ボタンから条件を外しても通る (実測) — 戻す枠が無いのに押せる状態は、
+	// 押しても何も変わらない操作を「効いたように見える」形で出すことになる。
+	require.Regexpf(t, `<MkButton[^>]*v-if="[^"]*canResetQuota`, userApps,
+		"戻す枠が無くてもリセットのボタンが出る (#2962)")
 	for _, want := range []string{
 		"admin/emoji-application/related",
 		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは

@@ -804,16 +804,28 @@ func (h *Handler) EmojiApplicationResetUserQuota(c echo.Context) error {
 		return apierr.JSONInternalError(c)
 	}
 
+	// **操作者が取れないまま進めない (レビュー L1)。** 空のまま続けると
+	// `resetById = ''` の行が残り、しかも `logModeration` は actor nil で
+	// 黙って return するので**監査ログが 1 件も残らない**。approve / reject が
+	// 採っているのと同じ扱いにする (middleware が 401 で止めるので production
+	// では到達しない)。
 	actor := middleware.GetUser(c)
-	actorID := ""
-	if actor != nil {
-		actorID = actor.ID
+	if actor == nil {
+		return apierr.JSONInternalError(c)
 	}
+	actorID := actor.ID
 	before, row, err := h.emojiApplicationReviewer.ResetQuota(req.UserID, actorID, req.Reason)
 	if err != nil {
 		if errors.Is(err, emojiapplication.ErrResetReasonRequired) {
 			return c.JSON(http.StatusBadRequest, apierr.Error(
 				"INVALID_PARAM", "reason is required.", apierr.UUIDInvalidParam))
+		}
+		// **長すぎる理由は 400 (レビュー M1)。** そのまま DB へ渡すと
+		// SQLSTATE 22001 で 500 になり、画面は「もう一度お試しください」と
+		// 案内するが何度やっても通らない。
+		if errors.Is(err, emojiapplication.ErrTooLong) {
+			return c.JSON(http.StatusBadRequest, apierr.Error(
+				"INVALID_PARAM", "reason is too long.", apierr.UUIDInvalidParam))
 		}
 		return apierr.JSONInternalError(c)
 	}
@@ -823,9 +835,25 @@ func (h *Handler) EmojiApplicationResetUserQuota(c echo.Context) error {
 	info := moderationlog.UserInfo(target)
 	info["reason"] = row.Reason
 	for _, w := range before.Windows {
-		info["used"+strings.ToUpper(w.Period[:1])+w.Period[1:]] = w.Used
+		// **バイトで切らない (レビュー L5)。** `Period` は素の string なので、
+		// 空なら panic、非 ASCII の窓名を足すと不正な UTF-8 のキーになる。
+		if k := quotaUsageInfoKey(w.Period); k != "" {
+			info[k] = w.Used
+		}
 	}
 	h.logModeration(c, moderationlog.LogResetEmojiApplicationQuota, info)
 
 	return c.JSON(http.StatusOK, map[string]any{"lastReset": packQuotaReset(row)})
+}
+
+// quotaUsageInfoKey renders the moderation log key for one window (#2962).
+//
+// 例: "day" -> "usedDay"。空の期間名はキーを作らない (キーが "used" に潰れて
+// 窓ごとの値が上書きされる)。
+func quotaUsageInfoKey(period string) string {
+	r := []rune(period)
+	if len(r) == 0 {
+		return ""
+	}
+	return "used" + strings.ToUpper(string(r[0])) + string(r[1:])
 }

@@ -1192,7 +1192,8 @@ func TestEmojiApplicationResetQuotaWritesModerationLog(t *testing.T) {
 	require.EqualValues(t, 24, info["usedMonth"])
 }
 
-// 実行後は最後のリセットを返す (画面が取り直さずに反映できる)。
+// 実行後は最後のリセットを返す。**画面はこれを使わず集計を取り直す** (件数まで
+// 更新しないと「5 / 5」のままに見える) が、レスポンスとしては操作の結果を返す。
 func TestEmojiApplicationResetQuotaReturnsLastReset(t *testing.T) {
 	h, rev, _ := resetQuotaHandler(t)
 	rev.resetRow = &model.EmojiApplicationQuotaReset{
@@ -1246,4 +1247,34 @@ func TestEmojiApplicationUserSummaryReportsLastReset(t *testing.T) {
 	none := &stubEmojiReviewer{}
 	rec = doPost(newEmojiReviewerHandler(t, none).EmojiApplicationUserSummary, `{"userId":"u1"}`, adminUser)
 	require.Contains(t, rec.Body.String(), `"lastReset":null`, "未実施が null になっていない")
+}
+
+// 長すぎる理由は 400 (500 にして「もう一度お試しください」と案内しない)。
+func TestEmojiApplicationResetQuotaRejectsTooLongReason(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rev.resetErr = emojiapplication.ErrTooLong
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"長い"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"長すぎる理由が 500 になっている (画面は再試行を促すが何度やっても通らない)")
+	require.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}
+
+// **窓の名前が空でも panic しない。** `Period` は素の string なので、
+// バイトで切ると空のときに落ちる。
+func TestEmojiApplicationResetQuotaToleratesEmptyPeriod(t *testing.T) {
+	h, rev, _ := resetQuotaHandler(t)
+	rev.resetBefore = emojiapplication.UserSummary{
+		Windows: []emojiapplication.QuotaWindowUsage{{Period: "", Used: 3}, {Period: "day", Used: 1}},
+	}
+	repo := attachModLog(t, h)
+	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"理由"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.Eventually(t, func() bool { return len(repo.Snapshot()) == 1 },
+		500*time.Millisecond, 5*time.Millisecond)
+	var info map[string]any
+	require.NoError(t, json.Unmarshal(repo.Snapshot()[0].Info, &info))
+	require.EqualValues(t, 1, info["usedDay"])
+	// 空の期間名はキーを作らない ("used" に潰れて他の窓を上書きするため)。
+	require.NotContains(t, info, "used")
 }

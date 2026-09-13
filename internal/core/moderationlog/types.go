@@ -106,13 +106,21 @@ const (
 
 	// **ここから下は upstream に無い (mk-go 独自)。** 上の値は
 	// Misskey TS と verbatim で揃える契約だが、カスタム絵文字の申請という
-	// 概念自体が upstream に無いので対応する値も存在しない。frontend の
-	// modlog は未知の型を汎用表示に落とすので、足しても壊れない。
+	// 概念自体が upstream に無いので対応する値も存在しない。**汎用表示に
+	// 落ちるわけではない** — 見出しは locale を引くだけなので、fork 側に
+	// キーを足さないと空欄になる (レビュー M2 で実測)。本体の raw 表示は
+	// そのまま出るので情報は失われない。
 	//
 	// 申請枠の手動リセット (#2962)。info は
-	// {userId, userUsername, userHost, reason, usedPerDay, usedPerWeek,
-	// usedPerMonth}。**リセット前の使用数を残す** — 後から採ると必ず 0 に
-	// なり、「何件使っていた人を戻したか」が分からなくなる。
+	// {userId, userUsername, userHost, reason, usedDay, usedWeek, usedMonth}
+	// (キーは窓の名前から組むので、窓が増えればそのぶん増える)。
+	// **リセット前の使用数を残す** — 後から採ると必ず 0 になり、「何件使って
+	// いた人を戻したか」が分からなくなる。
+	//
+	// **frontend の modlog は未知の型のタイトルを空欄で描く** (`?? log.type` の
+	// フォールバックが無い)。fork 側に `_moderationLogTypes` のキーを足して
+	// あるので見出しは出るが、upstream の misskey-js から作る絞り込みの
+	// 選択肢には出ない (「全て」でのみ見える)。
 	LogResetEmojiApplicationQuota LogType = "resetEmojiApplicationQuota"
 )
 
