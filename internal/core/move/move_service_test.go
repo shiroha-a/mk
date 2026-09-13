@@ -22,7 +22,12 @@ type fakeResolver struct {
 	byURI map[string]*model.User
 	err   error
 	calls []string
+	// localIDs maps a local actor URI to the user id the resolver would
+	// extract. 本番の resolver は自ホストの URI をここで短絡する。
+	localIDs map[string]string
 }
+
+func (f *fakeResolver) ExtractLocalUserID(uri string) string { return f.localIDs[uri] }
 
 func (f *fakeResolver) ResolveActor(uri string) (*model.User, error) {
 	f.calls = append(f.calls, uri)
@@ -1238,4 +1243,30 @@ func TestMove_DelayedUnfollowListFailureIsBestEffort(t *testing.T) {
 
 	require.NoError(t, moveWithRepos(t, userRepo, followingRepo, fq))
 	assert.Zero(t, fq.unfollowCalls)
+}
+
+// **同一インスタンス内の移行を AP で解決しない。** `ResolveActor` は自ホストの
+// actor URI を拒否する (自分自身を AP で取りに行くと「リモート扱いの」shadow
+// user 行ができるため)。ローカル宛ての移行はそれとは別の話なので、`user` 行を
+// 直接引く (upstream の `fetchPerson` と同じ扱い)。
+func TestMove_LocalDestinationResolvedFromDB(t *testing.T) {
+	const srcURI = "https://local.example/users/src"
+	const dstURI = "https://local.example/users/other"
+
+	resolver := &fakeResolver{
+		byURI:    map[string]*model.User{},
+		localIDs: map[string]string{dstURI: "dst"},
+	}
+	svc, userRepo, _ := newService(resolver, &fakeDeliverer{})
+	src := &model.User{ID: "src", Username: "me"}
+	userRepo.Users["src"] = src
+	userRepo.Users["dst"] = &model.User{ID: "dst", Username: "other", AlsoKnownAs: strPtr(srcURI)}
+
+	require.NoError(t, svc.Move(src, dstURI))
+	assert.Empty(t, resolver.calls, "ローカル宛ての移行で AP の actor 取得を呼んでいる")
+
+	moved, err := userRepo.FindByID("src")
+	require.NoError(t, err)
+	require.NotNil(t, moved.MovedToURI)
+	assert.Equal(t, dstURI, *moved.MovedToURI)
 }

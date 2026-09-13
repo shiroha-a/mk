@@ -42,6 +42,14 @@ var (
 // wiring).
 type Resolver interface {
 	ResolveActor(uri string) (*model.User, error)
+	// ExtractLocalUserID returns the local user id when uri points at this
+	// instance, or "" otherwise.
+	//
+	// **自ホストの actor URI は `ResolveActor` が拒否する。** 自分自身を AP で
+	// 取りに行くと「リモート扱いの」shadow user 行ができるため。同一
+	// インスタンス内の移行は upstream も DB 参照 (`fetchPerson`) で解決して
+	// いるので、こちらも DB を引く。
+	ExtractLocalUserID(uri string) string
 }
 
 // Deliverer delivers a pre-rendered activity body to the follower inboxes of
@@ -158,7 +166,7 @@ func (s *Service) Move(src *model.User, dstURI string) error {
 	if s.resolver == nil {
 		return ErrNoSuchUser
 	}
-	dst, err := s.resolver.ResolveActor(dstURI)
+	dst, err := s.resolveDestination(dstURI)
 	if err != nil || dst == nil {
 		return ErrNoSuchUser
 	}
@@ -214,6 +222,19 @@ func (s *Service) Move(src *model.User, dstURI string) error {
 			"srcID", src.ID, "dstURI", dstCanonical, "err", err)
 	}
 	return nil
+}
+
+// resolveDestination resolves the move destination, looking local URIs up in
+// the database instead of fetching them over ActivityPub.
+//
+// `ResolveActor` は自ホストの actor URI を拒否する (shadow user 行を作らせない
+// ため)。同一インスタンス内の移行はそれとは別の話なので、ローカル URI は
+// `user` 行から直接引く (upstream の `fetchPerson` と同じ扱い)。
+func (s *Service) resolveDestination(dstURI string) (*model.User, error) {
+	if localID := s.resolver.ExtractLocalUserID(dstURI); localID != "" {
+		return s.userRepo.FindByID(localID)
+	}
+	return s.resolver.ResolveActor(dstURI)
 }
 
 // alsoKnownAsIncludes returns true if the csv alsoKnownAs field contains uri.
