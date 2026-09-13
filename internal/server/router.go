@@ -3310,6 +3310,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/emoji-application/reject", adminHandler.EmojiApplicationReject,
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
 		middleware.RequireScope("write:admin:emoji"))
+	// 関連する過去の申請 (#2960)。**読むだけなので read scope**。
+	api.POST("/admin/emoji-application/related", adminHandler.EmojiApplicationRelated,
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
+		middleware.RequireScope("read:admin:emoji"))
 	api.POST("/admin/emoji/remove-aliases-bulk", adminHandler.EmojiRemoveAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-aliases-bulk", adminHandler.EmojiSetAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-category-bulk", adminHandler.EmojiSetCategoryBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))

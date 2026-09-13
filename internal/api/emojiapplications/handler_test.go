@@ -21,11 +21,15 @@ import (
 )
 
 type stubApps struct {
-	rows      []model.EmojiApplication
-	byID      map[string]*model.EmojiApplication
-	err       error
-	createErr error
-	created   *model.EmojiApplication
+	// #2960 の関連履歴。
+	related       []repository.RelatedApplication
+	relatedCounts repository.RelatedCounts
+	relatedErr    error
+	rows          []model.EmojiApplication
+	byID          map[string]*model.EmojiApplication
+	err           error
+	createErr     error
+	created       *model.EmojiApplication
 	// lastUser records who the list was scoped to.
 	lastUser string
 	// quotaErr is returned from CreateWithQuota (#2958).
@@ -39,6 +43,13 @@ func (s *stubApps) Create(a *model.EmojiApplication) error {
 	s.created = a
 	return nil
 }
+func (s *stubApps) FindRelated(*model.EmojiApplication, int, string) ([]repository.RelatedApplication, error) {
+	return s.related, s.relatedErr
+}
+func (s *stubApps) CountRelated(*model.EmojiApplication) (repository.RelatedCounts, error) {
+	return s.relatedCounts, s.relatedErr
+}
+
 func (s *stubApps) CreateWithQuota(a *model.EmojiApplication, _ repository.QuotaLimits) error {
 	if s.quotaErr != nil {
 		return s.quotaErr

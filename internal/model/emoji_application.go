@@ -64,6 +64,18 @@ type EmojiApplication struct {
 	// FileID is set when Kind == own. 承認するまで drive に置いたままにする。
 	FileID *string `gorm:"column:fileId;type:varchar(32)" json:"fileId"`
 
+	// FileHash is the drive file's MD5 at the time of application (#2960).
+	//
+	// **スナップショットで持つ。** 申請者は審査を待つ間に drive のファイルを
+	// 消せるので、照合のたびに引き直すと「消した申請は履歴から消える」ことに
+	// なり、過去の判断を追えなくなる。**審査の材料にのみ使う** — 自動拒否や
+	// 重複判定には使わない。
+	//
+	// **API には出さない。** 照合の結果は `matchedBy` で伝わるので出す理由が
+	// 無く、MD5 は画像の指紋なので「このインスタンスが既知の画像を持っているか」
+	// を外から確かめる手がかりになる。
+	FileHash *string `gorm:"column:fileHash;type:varchar(32)" json:"-"`
+
 	// RemoteHost / RemoteName are set when Kind == remote (#2935).
 	RemoteHost *string `gorm:"column:remoteHost;type:varchar(128)" json:"remoteHost"`
 	RemoteName *string `gorm:"column:remoteName;type:varchar(128)" json:"remoteName"`

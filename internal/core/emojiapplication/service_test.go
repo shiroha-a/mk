@@ -42,6 +42,14 @@ func (f *fakeApps) Create(a *model.EmojiApplication) error {
 	return nil
 }
 
+func (f *fakeApps) FindRelated(*model.EmojiApplication, int, string) ([]repository.RelatedApplication, error) {
+	return nil, nil
+}
+
+func (f *fakeApps) CountRelated(*model.EmojiApplication) (repository.RelatedCounts, error) {
+	return repository.RelatedCounts{}, nil
+}
+
 func (f *fakeApps) CreateWithQuota(a *model.EmojiApplication, l repository.QuotaLimits) error {
 	f.quotaLimits = l
 	f.quotaCalls++

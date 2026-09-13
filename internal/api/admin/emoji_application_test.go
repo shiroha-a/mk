@@ -361,16 +361,39 @@ func TestEmojiApplicationListDefaultsToPending(t *testing.T) {
 }
 
 type stubAppsRepo struct {
-	rows       []model.EmojiApplication
-	lastFilter string
-	lastLimit  int
+	// #2960 の関連履歴。
+	related       []repository.RelatedApplication
+	relatedCounts repository.RelatedCounts
+	relatedErr    error
+	findErr       error
+	lastLimit2    int
+	lastUntil     string
+	rows          []model.EmojiApplication
+	lastFilter    string
+	lastLimit     int
 }
 
 func (s *stubAppsRepo) Create(*model.EmojiApplication) error { return nil }
 func (s *stubAppsRepo) CreateWithQuota(*model.EmojiApplication, repository.QuotaLimits) error {
 	return nil
 }
-func (s *stubAppsRepo) FindByID(string) (*model.EmojiApplication, error) {
+func (s *stubAppsRepo) FindRelated(_ *model.EmojiApplication, limit int, untilID string) ([]repository.RelatedApplication, error) {
+	s.lastLimit2, s.lastUntil = limit, untilID
+	return s.related, s.relatedErr
+}
+func (s *stubAppsRepo) CountRelated(*model.EmojiApplication) (repository.RelatedCounts, error) {
+	return s.relatedCounts, s.relatedErr
+}
+
+func (s *stubAppsRepo) FindByID(id string) (*model.EmojiApplication, error) {
+	if s.findErr != nil {
+		return nil, s.findErr
+	}
+	for i := range s.rows {
+		if s.rows[i].ID == id {
+			return &s.rows[i], nil
+		}
+	}
 	return nil, gorm.ErrRecordNotFound
 }
 func (s *stubAppsRepo) List(filter string, limit int, _ string) ([]model.EmojiApplication, error) {
@@ -710,4 +733,102 @@ func TestEmojiApplicationListDistinguishesLookupFailure(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
 	require.Nil(t, body[0]["remoteGone"], "DB 障害が「消えた」に丸められている")
 	require.Nil(t, body[0]["url"])
+}
+
+// **関連履歴は審査側の pack で返す (#2960)。** 申請者向けの pack はモデレーター
+// と却下理由を落とすので、履歴として見る意味が無くなる。
+func TestEmojiApplicationRelatedReturnsCountsAndItems(t *testing.T) {
+	reason := "権利関係が不明"
+	mod := "mod1"
+	repo := &stubAppsRepo{
+		rows: []model.EmojiApplication{
+			{ID: "a1", UserID: "u1", Name: "sushi", Status: model.EmojiApplicationPending},
+		},
+		relatedCounts: repository.RelatedCounts{Total: 3, Approved: 1, Rejected: 2},
+		related: []repository.RelatedApplication{{
+			EmojiApplication: model.EmojiApplication{
+				ID: "old1", UserID: "u2", Name: "sushi", Status: model.EmojiApplicationRejected,
+				RejectReason: &reason, ProcessedByID: &mod,
+			},
+			MatchedName: true, MatchedHash: true,
+		}},
+	}
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(repo)
+
+	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body struct {
+		Counts repository.RelatedCounts `json:"counts"`
+		Items  []map[string]any         `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, 3, body.Counts.Total)
+	require.Equal(t, 2, body.Counts.Rejected)
+	require.Len(t, body.Items, 1)
+	require.Equal(t, "old1", body.Items[0]["id"])
+	require.Equal(t, []any{"name", "fileHash"}, body.Items[0]["matchedBy"])
+	// **却下理由を出す。** これが無いと「過去に却下された」しか分からず、
+	// 同じ理由で再び却下すべきかを判断できない。
+	require.Equal(t, reason, body.Items[0]["rejectReason"])
+}
+
+// **モデレーターは出さない。** 申請者向けの pack と同じく、誰が審査したかは
+// 履歴にも載せない (#2934 で決めた扱いをここでも崩さない)。
+func TestEmojiApplicationRelatedOmitsModerator(t *testing.T) {
+	mod := "mod1"
+	repo := &stubAppsRepo{
+		rows: []model.EmojiApplication{{ID: "a1", Name: "sushi", Status: model.EmojiApplicationPending}},
+		related: []repository.RelatedApplication{{
+			EmojiApplication: model.EmojiApplication{
+				ID: "old1", Name: "sushi", Status: model.EmojiApplicationRejected, ProcessedByID: &mod,
+			},
+			MatchedName: true,
+		}},
+	}
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(repo)
+
+	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NotContains(t, rec.Body.String(), "mod1")
+}
+
+// applicationId は必須。無いと「全申請の履歴」を引くことになる。
+func TestEmojiApplicationRelatedRequiresID(t *testing.T) {
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(&stubAppsRepo{})
+	rec := doPost(h.EmojiApplicationRelated, `{}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// 存在しない申請は 404。**DB 障害は 500 のまま残す (#2792)。**
+func TestEmojiApplicationRelatedNotFoundVsFailure(t *testing.T) {
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(&stubAppsRepo{})
+	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"nope"}`, adminUser)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+
+	h2 := &apiadmin.Handler{}
+	h2.SetEmojiApplicationRepo(&stubAppsRepo{findErr: gorm.ErrInvalidDB})
+	rec2 := doPost(h2.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec2.Code)
+}
+
+// limit の既定と上限。**上限を外すと 1 回で全履歴を引ける。**
+func TestEmojiApplicationRelatedClampsLimit(t *testing.T) {
+	repo := &stubAppsRepo{rows: []model.EmojiApplication{{ID: "a1", Name: "s", Status: model.EmojiApplicationPending}}}
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(repo)
+
+	doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
+	require.Equal(t, 10, repo.lastLimit2, "既定が 10 でない")
+
+	doPost(h.EmojiApplicationRelated, `{"applicationId":"a1","limit":9999}`, adminUser)
+	require.Equal(t, 10, repo.lastLimit2, "上限を超える limit がそのまま渡っている")
+
+	doPost(h.EmojiApplicationRelated, `{"applicationId":"a1","limit":5,"untilId":"x"}`, adminUser)
+	require.Equal(t, 5, repo.lastLimit2)
+	require.Equal(t, "x", repo.lastUntil, "untilId が渡っていない")
 }

@@ -572,3 +572,61 @@ func derefString(s *string) string {
 	}
 	return *s
 }
+
+// EmojiApplicationRelated handles POST /api/admin/emoji-application/related (#2960).
+//
+// **一覧には埋め込まない。** 全行ぶん履歴を引くと N+1 になるので、申請の詳細を
+// 開いたときだけ呼ぶ。
+//
+// **過去に却下されていたことを理由に自動拒否はしない。** ライセンスの変更・
+// 画像の修正・運用方針の変更がありうるので、これは審査を補助する情報。
+func (h *Handler) EmojiApplicationRelated(c echo.Context) error {
+	if h.emojiApplicationRepo == nil {
+		return apierr.JSONInternalError(c)
+	}
+	var req struct {
+		ApplicationID string `json:"applicationId"`
+		Limit         int    `json:"limit"`
+		UntilID       string `json:"untilId"`
+	}
+	if err := c.Bind(&req); err != nil || req.ApplicationID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "applicationId is required.", apierr.UUIDInvalidParam))
+	}
+	if req.Limit <= 0 || req.Limit > 100 {
+		req.Limit = 10
+	}
+
+	app, err := h.emojiApplicationRepo.FindByID(req.ApplicationID)
+	if err != nil {
+		// DB 障害を not-found に丸めない (#2792)。
+		if repository.IsNotFound(err) {
+			return c.JSON(http.StatusNotFound, apierr.Error(
+				"NO_SUCH_APPLICATION", "No such application.",
+				"3f0e6b4a-9c21-4d7e-8b35-6a1f2c9d4e08"))
+		}
+		return apierr.JSONInternalError(c)
+	}
+
+	counts, err := h.emojiApplicationRepo.CountRelated(app)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	rows, err := h.emojiApplicationRepo.FindRelated(app, req.Limit, req.UntilID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+
+	items := make([]map[string]any, 0, len(rows))
+	for i := range rows {
+		// **審査側の pack を使う。** 申請者向けの pack はモデレーターや
+		// 却下理由を落とすので、履歴として見る意味が無くなる。
+		packed := h.packEmojiApplicationForModerator(&rows[i].EmojiApplication)
+		packed["matchedBy"] = rows[i].MatchedBy()
+		items = append(items, packed)
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"counts": counts,
+		"items":  items,
+	})
+}

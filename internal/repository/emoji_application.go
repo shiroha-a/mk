@@ -63,6 +63,55 @@ type EmojiApplicationRepository interface {
 	// limits の内訳は QuotaLimits を参照。収まらなければ
 	// *QuotaExceededError / *PendingLimitExceededError を返し、行は作らない。
 	CreateWithQuota(app *model.EmojiApplication, limits QuotaLimits) error
+	// FindRelated returns past applications that look like the given one (#2960).
+	//
+	// **審査の材料。** 同じ名前・同じリモート元・同じ画像で過去に出された
+	// 申請を、却下理由ごとモデレーターに見せる。**自動拒否には使わない** —
+	// ライセンスの変更・画像の修正・運用方針の変更がありうる。
+	//
+	// 自分自身は含めない。ページングは id の降順 + untilID。
+	FindRelated(app *model.EmojiApplication, limit int, untilID string) ([]RelatedApplication, error)
+	// CountRelated returns how many past applications match, by status (#2960).
+	//
+	// **一覧では呼ばない。** 全行ぶん引くと N+1 になるので、申請の詳細を
+	// 開いたときだけ 1 回呼ぶ。
+	CountRelated(app *model.EmojiApplication) (RelatedCounts, error)
+}
+
+// RelatedApplication is one past application plus why it matched (#2960).
+type RelatedApplication struct {
+	model.EmojiApplication
+	// MatchedName / MatchedRemote / MatchedHash は SQL 側で判定する。
+	//
+	// **WHERE と同じ式を使う。** Go 側で組み直すと、片方だけ直したときに
+	// 「一致したのに理由が空」「理由はあるのに出てこない」がすり抜ける。
+	MatchedName   bool `gorm:"column:matched_name"`
+	MatchedRemote bool `gorm:"column:matched_remote"`
+	MatchedHash   bool `gorm:"column:matched_hash"`
+}
+
+// MatchedBy renders the reasons in a stable order for the API.
+func (r *RelatedApplication) MatchedBy() []string {
+	out := make([]string, 0, 3)
+	if r.MatchedName {
+		out = append(out, "name")
+	}
+	if r.MatchedRemote {
+		out = append(out, "remoteSource")
+	}
+	if r.MatchedHash {
+		out = append(out, "fileHash")
+	}
+	return out
+}
+
+// RelatedCounts breaks the related applications down by status (#2960).
+type RelatedCounts struct {
+	Total    int `json:"total"`
+	Pending  int `json:"pending"`
+	Approved int `json:"approved"`
+	Rejected int `json:"rejected"`
+	Canceled int `json:"canceled"`
 }
 
 // QuotaLimits collects every per-user limit checked before an application is
@@ -337,4 +386,100 @@ func (r *emojiApplicationRepository) UpdateIfPending(app *model.EmojiApplication
 		return false, res.Error
 	}
 	return res.RowsAffected > 0, nil
+}
+
+// relatedMatchSQL is the shared match expression for FindRelated / CountRelated.
+//
+// **1 箇所に持つのが要点 (#2960)。** SELECT の理由列・WHERE の絞り・件数の
+// 集計で別々に書くと、片方だけ直したときに「一致したのに理由が空」「理由は
+// あるのに一覧に出てこない」「件数と中身が合わない」がすり抜ける。
+//
+// 名前付き引数で渡すのは、同じ値を何度も使うため。
+const (
+	relatedMatchName   = `(a."name" = @name)`
+	relatedMatchRemote = `(@remoteHost <> '' AND a."remoteHost" = @remoteHost AND a."remoteName" = @remoteName)`
+	relatedMatchHash   = `(@fileHash <> '' AND a."fileHash" = @fileHash)`
+	relatedMatchAny    = relatedMatchName + ` OR ` + relatedMatchRemote + ` OR ` + relatedMatchHash
+)
+
+// relatedArgs builds the named arguments shared by both queries.
+//
+// **NULL ではなく空文字で渡す。** `@x <> ”` は NULL 比較の三値論理を避けられる
+// ので、「ハッシュを持たない申請」と「ハッシュが一致しない申請」を取り違えない。
+func relatedArgs(app *model.EmojiApplication) map[string]any {
+	deref := func(p *string) string {
+		if p == nil {
+			return ""
+		}
+		return *p
+	}
+	return map[string]any{
+		"id":         app.ID,
+		"name":       app.Name,
+		"remoteHost": deref(app.RemoteHost),
+		"remoteName": deref(app.RemoteName),
+		"fileHash":   deref(app.FileHash),
+	}
+}
+
+func (r *emojiApplicationRepository) FindRelated(app *model.EmojiApplication, limit int, untilID string) ([]RelatedApplication, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 10
+	}
+	args := relatedArgs(app)
+	args["limit"] = limit
+	args["untilId"] = untilID
+
+	// **自分自身は除く。** 「この申請に関連する過去の申請」なので、開いている
+	// 行そのものが並ぶと件数も意味も狂う。
+	q := `
+SELECT a.*,
+	` + relatedMatchName + ` AS matched_name,
+	` + relatedMatchRemote + ` AS matched_remote,
+	` + relatedMatchHash + ` AS matched_hash
+FROM "emoji_application" a
+WHERE a."id" <> @id
+	AND (` + relatedMatchAny + `)
+	AND (@untilId = '' OR a."id" < @untilId)
+ORDER BY a."id" DESC
+LIMIT @limit`
+
+	var out []RelatedApplication
+	if err := r.db.Raw(q, args).Scan(&out).Error; err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (r *emojiApplicationRepository) CountRelated(app *model.EmojiApplication) (RelatedCounts, error) {
+	q := `
+SELECT a."status", count(*) AS n
+FROM "emoji_application" a
+WHERE a."id" <> @id AND (` + relatedMatchAny + `)
+GROUP BY a."status"`
+
+	var rows []struct {
+		Status string
+		N      int
+	}
+	if err := r.db.Raw(q, relatedArgs(app)).Scan(&rows).Error; err != nil {
+		return RelatedCounts{}, err
+	}
+	var out RelatedCounts
+	for _, row := range rows {
+		out.Total += row.N
+		switch row.Status {
+		case model.EmojiApplicationPending:
+			out.Pending = row.N
+		case model.EmojiApplicationApproved:
+			out.Approved = row.N
+		case model.EmojiApplicationRejected:
+			out.Rejected = row.N
+		case model.EmojiApplicationCanceled:
+			out.Canceled = row.N
+		}
+		// **未知の status も Total には数える。** 内訳から漏れても「関連あり」
+		// という事実は伝える (status が増えたときに件数が合わなくなるより良い)。
+	}
+	return out, nil
 }

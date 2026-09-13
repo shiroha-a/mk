@@ -843,3 +843,263 @@ func TestPendingLimitExceededError_Message(t *testing.T) {
 	err := &PendingLimitExceededError{Used: 3, Limit: 3}
 	require.Contains(t, err.Error(), "awaiting review")
 }
+
+// seedRelated inserts an application with the fields the related-lookup uses.
+func seedRelated(t *testing.T, id, userID, name, status string, host, rname, hash *string, at time.Time) {
+	t.Helper()
+	app := &model.EmojiApplication{
+		ID: id, UserID: userID, Kind: model.EmojiApplicationKindOwn,
+		Status: status, Name: name, License: "自作",
+		RemoteHost: host, RemoteName: rname, FileHash: hash,
+		CreatedAt: at, UpdatedAt: at,
+	}
+	if host != nil {
+		app.Kind = model.EmojiApplicationKindRemote
+	}
+	require.NoError(t, testDB.Create(app).Error)
+}
+
+func strp(s string) *string { return &s }
+
+// **3 つの条件で引けること (#2960)。** 同じ名前・同じリモート元・同じ画像の
+// どれかで過去の判断を辿れないと、名前を変えた再申請や別人による再申請で
+// 却下理由を見落とす。
+func TestEmojiApplicationRepository_FindRelated_Matches(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_r1")
+	createTestUser(t, "ea_r1other")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	// 審査中の申請 (own、名前 sushi、ハッシュ H1)。
+	cur := &model.EmojiApplication{
+		ID: "ea_r1cur", UserID: "ea_r1", Kind: model.EmojiApplicationKindOwn,
+		Status: model.EmojiApplicationPending, Name: "sushi", License: "自作",
+		FileHash: strp("H1"), CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, testDB.Create(cur).Error)
+
+	// 同じ名前 (別人・却下済み)
+	seedRelated(t, "ea_r1name", "ea_r1other", "sushi", model.EmojiApplicationRejected, nil, nil, nil, now.Add(-time.Hour))
+	// 同じ画像・名前は違う
+	seedRelated(t, "ea_r1hash", "ea_r1other", "onigiri", model.EmojiApplicationApproved, nil, nil, strp("H1"), now.Add(-2*time.Hour))
+	// 無関係
+	seedRelated(t, "ea_r1none", "ea_r1other", "ramen", model.EmojiApplicationRejected, nil, nil, strp("H9"), now.Add(-3*time.Hour))
+
+	got, err := repo.FindRelated(cur, 10, "")
+	require.NoError(t, err)
+	ids := make([]string, 0, len(got))
+	byID := map[string][]string{}
+	for i := range got {
+		ids = append(ids, got[i].ID)
+		byID[got[i].ID] = got[i].MatchedBy()
+	}
+	require.ElementsMatch(t, []string{"ea_r1name", "ea_r1hash"}, ids, "無関係な申請が混ざっている / 一致したものが落ちている")
+	require.Equal(t, []string{"name"}, byID["ea_r1name"])
+	require.Equal(t, []string{"fileHash"}, byID["ea_r1hash"])
+
+	// **自分自身は含めない。** 開いている行が並ぶと件数も意味も狂う。
+	require.NotContains(t, ids, "ea_r1cur")
+}
+
+// リモート元での照合。**希望するローカル名が変わっていても辿れること**が要点。
+func TestEmojiApplicationRepository_FindRelated_RemoteSource(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_r2")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+	host, rname := "remote.example", "kusa"
+
+	cur := &model.EmojiApplication{
+		ID: "ea_r2cur", UserID: "ea_r2", Kind: model.EmojiApplicationKindRemote,
+		Status: model.EmojiApplicationPending, Name: "kusa_new", License: "取り込み元",
+		RemoteHost: &host, RemoteName: &rname, CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, testDB.Create(cur).Error)
+	// 同じリモート元・別のローカル名で却下済み
+	seedRelated(t, "ea_r2old", "ea_r2", "kusa_old", model.EmojiApplicationRejected,
+		&host, &rname, nil, now.Add(-time.Hour))
+	// 別のホストの同名絵文字
+	otherHost := "other.example"
+	seedRelated(t, "ea_r2oth", "ea_r2", "kusa_x", model.EmojiApplicationRejected,
+		&otherHost, &rname, nil, now.Add(-2*time.Hour))
+	// **同じホストの別の絵文字。** host だけで照合すると、そのインスタンス
+	// から取り込んだ全申請が「関連」として並ぶ。
+	otherName := "not_kusa"
+	seedRelated(t, "ea_r2same", "ea_r2", "kusa_y", model.EmojiApplicationRejected,
+		&host, &otherName, nil, now.Add(-3*time.Hour))
+
+	got, err := repo.FindRelated(cur, 10, "")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, "ea_r2old", got[0].ID)
+	require.Equal(t, []string{"remoteSource"}, got[0].MatchedBy())
+}
+
+// **複数の理由で一致したら全部出す。** 片方しか出ないと、名前を変えれば
+// 別物として通ると誤解される。
+func TestEmojiApplicationRepository_FindRelated_MultipleReasons(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_r3")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+	host, rname := "remote.example", "kusa"
+
+	cur := &model.EmojiApplication{
+		ID: "ea_r3cur", UserID: "ea_r3", Kind: model.EmojiApplicationKindRemote,
+		Status: model.EmojiApplicationPending, Name: "kusa", License: "取り込み元",
+		RemoteHost: &host, RemoteName: &rname, FileHash: strp("H1"),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, testDB.Create(cur).Error)
+	seedRelated(t, "ea_r3all", "ea_r3", "kusa", model.EmojiApplicationRejected,
+		&host, &rname, strp("H1"), now.Add(-time.Hour))
+
+	got, err := repo.FindRelated(cur, 10, "")
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	require.Equal(t, []string{"name", "remoteSource", "fileHash"}, got[0].MatchedBy())
+}
+
+// **ハッシュを持たない申請同士を「同じ画像」にしない。** drive のファイルが
+// 消えた申請は NULL のままなので、NULL 同士が一致すると無関係な履歴が並ぶ。
+func TestEmojiApplicationRepository_FindRelated_NullHashDoesNotMatch(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_r4")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	cur := &model.EmojiApplication{
+		ID: "ea_r4cur", UserID: "ea_r4", Kind: model.EmojiApplicationKindOwn,
+		Status: model.EmojiApplicationPending, Name: "sushi", License: "自作",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, testDB.Create(cur).Error)
+	// 名前もハッシュも違う (どちらも NULL)
+	seedRelated(t, "ea_r4oth", "ea_r4", "ramen", model.EmojiApplicationRejected, nil, nil, nil, now.Add(-time.Hour))
+
+	got, err := repo.FindRelated(cur, 10, "")
+	require.NoError(t, err)
+	require.Empty(t, got, "ハッシュを持たない申請同士が一致している")
+
+	// **空文字も同じ扱い。** service は空を保存しないが、古いデータや手で
+	// 入れた行は空文字を持ちうる。空同士が「同じ画像」になると、ハッシュの
+	// 無い申請が全部まとめて並ぶ。
+	cur.FileHash = strp("")
+	require.NoError(t, testDB.Model(cur).Update("fileHash", "").Error)
+	seedRelated(t, "ea_r4emp", "ea_r4", "udon", model.EmojiApplicationRejected, nil, nil, strp(""), now.Add(-2*time.Hour))
+
+	got, err = repo.FindRelated(cur, 10, "")
+	require.NoError(t, err)
+	require.Empty(t, got, "空ハッシュ同士が一致している")
+
+	// **リモート元も同じ。** own の申請 (remoteHost なし) が、空文字の
+	// remoteHost を持つ行と一致すると、無関係な履歴がまとめて並ぶ。
+	empty := ""
+	seedRelated(t, "ea_r4rem", "ea_r4", "soba", model.EmojiApplicationRejected, &empty, &empty, nil, now.Add(-3*time.Hour))
+
+	got, err = repo.FindRelated(cur, 10, "")
+	require.NoError(t, err)
+	require.Empty(t, got, "own の申請が空のリモート元と一致している")
+}
+
+// ページング。**id の降順で切る** — createdAt で切ると同時刻の行を取りこぼす。
+func TestEmojiApplicationRepository_FindRelated_Paging(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_r5")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	cur := &model.EmojiApplication{
+		ID: "ea_r5cur", UserID: "ea_r5", Kind: model.EmojiApplicationKindOwn,
+		Status: model.EmojiApplicationPending, Name: "sushi", License: "自作",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, testDB.Create(cur).Error)
+	for i := 0; i < 5; i++ {
+		seedRelated(t, "ea_r5a"+string(rune('a'+i)), "ea_r5", "sushi",
+			model.EmojiApplicationRejected, nil, nil, nil, now.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	first, err := repo.FindRelated(cur, 2, "")
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	require.Equal(t, "ea_r5ae", first[0].ID, "id の降順になっていない")
+
+	second, err := repo.FindRelated(cur, 2, first[1].ID)
+	require.NoError(t, err)
+	require.Len(t, second, 2)
+	require.Less(t, second[0].ID, first[1].ID, "untilId より後ろが返っている")
+}
+
+// **件数はステータスごとに出す。** 「却下2 / 承認1」が分かると、開く前に
+// 見るべき履歴かどうか判断できる。
+func TestEmojiApplicationRepository_CountRelated(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_r6")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	cur := &model.EmojiApplication{
+		ID: "ea_r6cur", UserID: "ea_r6", Kind: model.EmojiApplicationKindOwn,
+		Status: model.EmojiApplicationPending, Name: "sushi", License: "自作",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, testDB.Create(cur).Error)
+	createTestUser(t, "ea_r6other")
+	for i, st := range []string{
+		model.EmojiApplicationRejected, model.EmojiApplicationRejected,
+		model.EmojiApplicationApproved, model.EmojiApplicationCanceled,
+		model.EmojiApplicationPending,
+	} {
+		// **審査待ちだけ別人にする。** 部分一意索引 (userId, name) WHERE
+		// pending があるので、同じ人が同じ名前で 2 件 pending にはできない。
+		// 「別人が同じ名前で申請中」は実際に起きる形でもある。
+		owner := "ea_r6"
+		if st == model.EmojiApplicationPending {
+			owner = "ea_r6other"
+		}
+		seedRelated(t, "ea_r6"+string(rune('a'+i)), owner, "sushi", st, nil, nil, nil,
+			now.Add(-time.Duration(i+1)*time.Hour))
+	}
+
+	got, err := repo.CountRelated(cur)
+	require.NoError(t, err)
+	require.Equal(t, RelatedCounts{Total: 5, Pending: 1, Approved: 1, Rejected: 2, Canceled: 1}, got)
+}
+
+// **一覧と件数が同じ条件で動くこと。** 別々に書くと「件数はあるのに中身が
+// 空」「中身はあるのに 0 件」になる。
+func TestEmojiApplicationRepository_RelatedCountMatchesList(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_r7")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+	host, rname := "remote.example", "kusa"
+
+	cur := &model.EmojiApplication{
+		ID: "ea_r7cur", UserID: "ea_r7", Kind: model.EmojiApplicationKindRemote,
+		Status: model.EmojiApplicationPending, Name: "kusa", License: "取り込み元",
+		RemoteHost: &host, RemoteName: &rname, FileHash: strp("H1"),
+		CreatedAt: now, UpdatedAt: now,
+	}
+	require.NoError(t, testDB.Create(cur).Error)
+	seedRelated(t, "ea_r7a", "ea_r7", "kusa", model.EmojiApplicationRejected, nil, nil, nil, now.Add(-time.Hour))
+	seedRelated(t, "ea_r7b", "ea_r7", "x", model.EmojiApplicationApproved, &host, &rname, nil, now.Add(-2*time.Hour))
+	seedRelated(t, "ea_r7c", "ea_r7", "y", model.EmojiApplicationRejected, nil, nil, strp("H1"), now.Add(-3*time.Hour))
+	seedRelated(t, "ea_r7d", "ea_r7", "z", model.EmojiApplicationRejected, nil, nil, strp("H9"), now.Add(-4*time.Hour))
+
+	counts, err := repo.CountRelated(cur)
+	require.NoError(t, err)
+	list, err := repo.FindRelated(cur, 100, "")
+	require.NoError(t, err)
+	require.Equal(t, counts.Total, len(list), "件数と一覧の条件がずれている")
+	require.Equal(t, 3, counts.Total)
+}

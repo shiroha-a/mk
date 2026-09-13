@@ -336,7 +336,7 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 		kind = model.EmojiApplicationKindOwn
 	}
 
-	var fileID, remoteHost, remoteName string
+	var fileID, remoteHost, remoteName, fileHash string
 	switch kind {
 	case model.EmojiApplicationKindOwn:
 		fileID = strings.TrimSpace(in.FileID)
@@ -344,7 +344,8 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 			return nil, ErrFileRequired
 		}
 		// 所有権は security の問題で、MIME は体験の問題。
-		if err := s.checkFile(fileID, in.UserID); err != nil {
+		var err error
+		if fileHash, err = s.checkFile(fileID, in.UserID); err != nil {
 			return nil, err
 		}
 	case model.EmojiApplicationKindRemote:
@@ -406,6 +407,11 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 	if fileID != "" {
 		app.FileID = &fileID
 	}
+	// **空は載せない。** drive が md5 を持たない行 (古い取り込み等) を空文字で
+	// 保存すると、空同士が「同じ画像」として一致してしまう。
+	if fileHash != "" {
+		app.FileHash = &fileHash
+	}
 	if remoteHost != "" {
 		app.RemoteHost = &remoteHost
 		app.RemoteName = &remoteName
@@ -433,33 +439,37 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 	return app, nil
 }
 
-// checkFile resolves the drive file and asserts the applicant owns a usable image.
+// checkFile resolves the drive file, asserts the applicant owns a usable image,
+// and returns its MD5 for the snapshot (#2960).
 //
 // **userId が NULL のものも拒否する。** 未紐付けのファイルは誰のものとも
 // 言えないので、申請の素材にはしない (applyMediaUpdate と同じ判断)。
-func (s *Service) checkFile(fileID, userID string) error {
+//
+// **ハッシュもここで返す。** 審査画面の関連履歴 (#2960) で使うが、そのために
+// drive をもう一度引くと申請 1 件あたりのクエリが増える。ここは既に引いている。
+func (s *Service) checkFile(fileID, userID string) (string, error) {
 	if s.files == nil {
 		// 未配線の構成では検証できない。**通さない** — 検証していないものを
 		// 通すと、配線を落とした瞬間に穴が開く (fail-closed)。
-		return ErrFileGone
+		return "", ErrFileGone
 	}
 	f, err := s.files.FindByID(fileID)
 	if err != nil {
 		if repository.IsNotFound(err) {
-			return ErrFileGone
+			return "", ErrFileGone
 		}
 		// DB 障害を not-found に丸めない (#2792)。
-		return err
+		return "", err
 	}
 	if f.UserID == nil || *f.UserID != userID {
 		// **「他人のもの」とは答えない。** 区別できると、ファイル ID の
 		// 存在確認に使える。存在しないのと同じ応答にする。
-		return ErrFileGone
+		return "", ErrFileGone
 	}
 	if !IsAllowedImageType(f.Type) {
-		return ErrUnsupportedFileType
+		return "", ErrUnsupportedFileType
 	}
-	return nil
+	return f.MD5, nil
 }
 
 // checkRemoteEmoji asserts the referenced remote emoji is known to this instance.
