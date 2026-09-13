@@ -396,7 +396,10 @@ func (r *emojiApplicationRepository) UpdateIfPending(app *model.EmojiApplication
 //
 // 名前付き引数で渡すのは、同じ値を何度も使うため。
 const (
-	relatedMatchName   = `(a."name" = @name)`
+	// **空名にもガードを付ける。** `Service.Create` が空名を弾くので現状は
+	// 到達しないが、remote / hash と非対称のまま残すと「3 条件を同列に扱う」
+	// という下のコメントが事実でなくなる。
+	relatedMatchName   = `(@name <> '' AND a."name" = @name)`
 	relatedMatchRemote = `(@remoteHost <> '' AND a."remoteHost" = @remoteHost AND a."remoteName" = @remoteName)`
 	relatedMatchHash   = `(@fileHash <> '' AND a."fileHash" = @fileHash)`
 	relatedMatchAny    = relatedMatchName + ` OR ` + relatedMatchRemote + ` OR ` + relatedMatchHash

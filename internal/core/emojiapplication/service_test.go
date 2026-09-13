@@ -972,3 +972,49 @@ func TestAllowedImageTypesReturnsACopy(t *testing.T) {
 	require.Equal(t, before, after, "呼び出し側の書き換えが次の呼び出しに残っている")
 	require.NotContains(t, after, "mutated")
 }
+
+// **申請時点の画像ハッシュを載せること (#2960)。** 載らないと、審査画面の
+// 「同じ画像の過去申請」が静かに効かなくなる。症状は「関連なし」と出るだけで、
+// 正常時と区別が付かない。
+func TestCreateSnapshotsFileHash(t *testing.T) {
+	owner := "u1"
+	apps := newFakeApps()
+	files := &okFiles{file: &model.DriveFile{ID: "f1", UserID: &owner, Type: "image/png", MD5: "d41d8cd98f00b204e9800998ecf8427e"}}
+	svc := NewService(apps, &fakeEmojis{}, files, &fixedID{}, nil, nil)
+
+	app, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.NotNil(t, app.FileHash, "ハッシュが載っていない")
+	require.Equal(t, "d41d8cd98f00b204e9800998ecf8427e", *app.FileHash)
+	// 保存された行にも載っていること (返り値だけ埋めても意味が無い)。
+	require.NotNil(t, apps.rows[app.ID].FileHash)
+	require.Equal(t, "d41d8cd98f00b204e9800998ecf8427e", *apps.rows[app.ID].FileHash)
+}
+
+// **空は載せない (#2960)。** drive が md5 を持たない行を空文字で保存すると、
+// 空同士が「同じ画像」として一致し、無関係な履歴がまとめて並ぶ。
+func TestCreateOmitsEmptyFileHash(t *testing.T) {
+	owner := "u1"
+	apps := newFakeApps()
+	files := &okFiles{file: &model.DriveFile{ID: "f1", UserID: &owner, Type: "image/png", MD5: ""}}
+	svc := NewService(apps, &fakeEmojis{}, files, &fixedID{}, nil, nil)
+
+	app, err := svc.Create(validInput())
+	require.NoError(t, err)
+	require.Nil(t, app.FileHash, "空のハッシュを載せている")
+}
+
+// リモート絵文字の申請には drive のファイルが無いので、ハッシュも載らない。
+func TestCreateRemoteHasNoFileHash(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{remote: &model.Emoji{ID: "e1"}}, &okFiles{}, &fixedID{}, nil, nil)
+
+	in := validInput()
+	in.Kind = model.EmojiApplicationKindRemote
+	in.FileID = ""
+	in.RemoteHost = "remote.example"
+	in.RemoteName = "kusa"
+	app, err := svc.Create(in)
+	require.NoError(t, err)
+	require.Nil(t, app.FileHash)
+}

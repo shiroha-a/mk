@@ -44,7 +44,7 @@ var (
 	// 無検査になる。route 行そのものを取り、policy と scope の有無を見る。
 	//
 	// `(?s)` と `[^;]*` で**次の文まで**取る — router は引数を複数行に折り返す。
-	adminRouteRe = regexp.MustCompile(`(?s)api\.POST\(\s*"/admin/emoji-application/(?:list|approve|reject)"[^\n]*(?:\n\t\t+[^\n]*)*`)
+	adminRouteRe = regexp.MustCompile(`(?s)api\.POST\(\s*"/admin/emoji-application/(?:list|approve|reject|related)"[^\n]*(?:\n\t\t+[^\n]*)*`)
 
 	// 通知の read-time 解決。**2 経路あるので両方見る** — HTTP の一覧
 	// (notificationsHandler) と realtime (notificationPublisher)。片方だけを
@@ -93,8 +93,8 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	}
 
 	adminRoutes := adminRouteRe.FindAllString(src, -1)
-	require.Lenf(t, adminRoutes, 3,
-		"%s の admin/emoji-application が 3 本揃っていない (list / approve / reject)", router)
+	require.Lenf(t, adminRoutes, 4,
+		"%s の admin/emoji-application が 4 本揃っていない (list / approve / reject / related)", router)
 	for _, route := range adminRoutes {
 		require.Containsf(t, route, "PolicyCanManageCustomEmojis",
 			"admin/emoji-application の route に canManageCustomEmojis が付いていない。"+
@@ -288,29 +288,51 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 			"emoji-request.vue に %s が無い。ドラッグ中に何も光らない / 光ったまま消えない (#2959)", want)
 	}
 
-	// **審査画面が関連履歴を出すこと (#2960)。** 同じ名前・同じ取り込み元・
+	applications := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.applications.vue")))
+	// **審査画面が関連履歴を出すこと (#2960)。ここも識別子を固定する** —
+	// 冒頭で禁じている形だが、`.vue` は単体テストから駆動できず、これ以外に
+	// 配線を守る手段が無い (#2959 の節と同じ判断)。rename すると偽陽性になる
+	// 代わりに、片側だけ外した状態が落ちる。 同じ名前・同じ取り込み元・
 	// 同じ画像で過去に却下されていても、出さなければモデレーターは気付けない。
 	// **ボタンより前に置くこと**も見る — 押した後に出しても判断材料にならない。
-	applicationsSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.applications.vue")))
-	require.Containsf(t, applicationsSrc, "custom-emojis-manager.application-related.vue",
+	require.Containsf(t, applications, "custom-emojis-manager.application-related.vue",
 		"審査画面が関連履歴のコンポーネントを読み込んでいない (#2960)")
-	relatedIdx := strings.Index(applicationsSrc, "<XRelated")
-	approveIdx := strings.Index(applicationsSrc, `@click="approve(app)"`)
+	relatedIdx := strings.Index(applications, "<XRelated")
+	approveIdx := strings.Index(applications, `@click="approve(app)"`)
 	require.GreaterOrEqualf(t, relatedIdx, 0, "審査画面に <XRelated> が無い (#2960)")
 	require.GreaterOrEqualf(t, approveIdx, 0, "審査画面の承認ボタンが見つからない")
 	require.Lessf(t, relatedIdx, approveIdx,
 		"関連履歴が承認ボタンより後ろにある。押した後に出しても判断材料にならない (#2960)")
 
 	relatedSrc := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.application-related.vue")))
+	require.NotContainsf(t, relatedSrc, "onMounted(",
+		"関連履歴を onMounted で取っている。審査待ちタブは全行が開いているので "+
+			"limit 50 のときに 50 本が同時に飛ぶ (#2960)")
 	for _, want := range []string{
-		// 取得は詳細を開いたときの 1 回だけ (一覧に埋め込むと N+1)。
 		"admin/emoji-application/related",
+		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは
+		// `defaultOpen` で全行が最初から開いているので、`onMounted` で取ると
+		// limit 50 のときに 50 本が同時に飛ぶ。`v-appear` は画面に入った行
+		// だけを取りに行かせる。
+		"v-appear=",
 		// **取得できなかったことを隠さない。** 何も出さないと「履歴が無い」と読める。
 		"relatedUnknown",
 		// 自動拒否への戒めを画面にも出す。
 		"relatedNote",
-		// どの条件で一致したか。
-		"matchedBy",
+		// **描画まで見る。** 型注釈の `matchedBy: string[]` だけでも
+		// `Contains("matchedBy")` は満たされるので、バッジの v-for を消しても
+		// 通ってしまう (実測)。
+		"matchedByLabel(m)",
+		// **却下理由が本体。** これが無いと「過去に却下された」しか分からない。
+		"item.rejectReason",
+		// **リモートのサムネイルは media proxy を通す。** 生 URL は
+		// `img-src 'self'` を enforce している構成で黙ってブロックされる
+		// (#2957 と同じ)。
+		"relatedPreviewUrl(",
+		// 取得失敗を握り潰さない (script 側)。
+		"failed.value = true",
+		// 判断を誤らせない status 表示と、追い読みのカーソル。
+		"relatedStatusLabel(", "relatedNextCursor(",
 	} {
 		require.Containsf(t, relatedSrc, want,
 			"関連履歴の画面に %s が無い (#2960)", want)
@@ -320,7 +342,6 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	// リモートの生 URL は `img-src 'self' data: blob:` を enforce している構成で
 	// **黙ってブロックされる**。この 1 行が「モデレーターに画像が見える」と
 	// 「何も出ない」を分けており、戻しても型もテストも通ってしまう。
-	applications := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager.applications.vue")))
 	require.Containsf(t, applications, "getProxiedImageUrl(",
 		"審査画面がリモートの生 URL を出している。CSP でブロックされて画像が見えない (#2935)")
 

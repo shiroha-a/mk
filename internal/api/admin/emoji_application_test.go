@@ -832,3 +832,43 @@ func TestEmojiApplicationRelatedClampsLimit(t *testing.T) {
 	require.Equal(t, 5, repo.lastLimit2)
 	require.Equal(t, "x", repo.lastUntil, "untilId が渡っていない")
 }
+
+// **件数の取得に失敗したら 500 にする (#2960)。** 握り潰して `total: 0` を
+// 返すと、frontend は「関連する過去の申請は無い」と描画する — DB 障害を
+// 「履歴なし」に化けさせると、実際には却下歴のある申請を承認してしまう。
+func TestEmojiApplicationRelatedSurfacesCountFailure(t *testing.T) {
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(&stubAppsRepo{
+		rows:       []model.EmojiApplication{{ID: "a1", Name: "s", Status: model.EmojiApplicationPending}},
+		relatedErr: gorm.ErrInvalidDB,
+	})
+	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.NotContains(t, rec.Body.String(), `"total":0`, "障害を「履歴なし」に化けさせている")
+}
+
+// 一覧の取得に失敗したときも同じ。件数だけ返して中身が空だと、
+// 「3 件あるはずなのに何も出ない」という読めない状態になる。
+func TestEmojiApplicationRelatedSurfacesListFailure(t *testing.T) {
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(&stubAppsRepo{
+		rows:          []model.EmojiApplication{{ID: "a1", Name: "s", Status: model.EmojiApplicationPending}},
+		relatedErr:    gorm.ErrInvalidDB,
+		relatedCounts: repository.RelatedCounts{Total: 3},
+	})
+	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// **0 件でも `items` は配列で返す。** `null` を返すと frontend の
+// `[...items, ...res.items]` が TypeError になる。
+func TestEmojiApplicationRelatedReturnsEmptyArray(t *testing.T) {
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(&stubAppsRepo{
+		rows: []model.EmojiApplication{{ID: "a1", Name: "s", Status: model.EmojiApplicationPending}},
+	})
+	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"items":[]`)
+	require.NotContains(t, rec.Body.String(), `"items":null`)
+}
