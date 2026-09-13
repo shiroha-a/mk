@@ -24,6 +24,12 @@ import (
 type emojiApplicationReviewer interface {
 	Approve(ctx context.Context, id, moderatorID string) (*model.EmojiApplication, error)
 	Reject(ctx context.Context, id, moderatorID, reason string) (*model.EmojiApplication, error)
+	// UserSummary backs the moderation screen's per-user tab (#2961).
+	//
+	// **service 経由で採る。** 期間上限の窓はロールの policy から組むもので、
+	// handler が repository を直に叩くと policy の解決を書き写すことになる
+	// (作成側と数え方がずれる)。
+	UserSummary(userID string) (emojiapplication.UserSummary, error)
 }
 
 // SetEmojiApplicationReviewer wires the review half of #2934.
@@ -628,5 +634,103 @@ func (h *Handler) EmojiApplicationRelated(c echo.Context) error {
 	return c.JSON(http.StatusOK, map[string]any{
 		"counts": counts,
 		"items":  items,
+	})
+}
+
+// emojiApplicationUserStatuses is the status filter accepted by list-by-user.
+//
+// **未知の値を全件に倒さない (#2961)。** 絞ったつもりで全部出るほうが危険側で、
+// モデレーターは「却下されたものだけ」を見ているつもりで判断する。
+var emojiApplicationUserStatuses = map[string]bool{
+	repository.EmojiApplicationFilterAll: true,
+	model.EmojiApplicationPending:        true,
+	model.EmojiApplicationApproved:       true,
+	model.EmojiApplicationRejected:       true,
+	model.EmojiApplicationCanceled:       true,
+}
+
+// EmojiApplicationListByUser handles POST /api/admin/emoji-application/list-by-user.
+//
+// ユーザーモデレーション画面の申請履歴 (#2961)。**一般ユーザー向けには公開
+// しない** — 却下理由とモデレーターへの補足が載る。
+func (h *Handler) EmojiApplicationListByUser(c echo.Context) error {
+	if h.emojiApplicationRepo == nil {
+		return apierr.JSONInternalError(c)
+	}
+	var req struct {
+		UserID  string `json:"userId"`
+		Status  string `json:"status"`
+		Query   string `json:"query"`
+		Limit   int    `json:"limit"`
+		UntilID string `json:"untilId"`
+	}
+	if err := c.Bind(&req); err != nil || req.UserID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "userId is required.", apierr.UUIDInvalidParam))
+	}
+	if req.Status != "" && !emojiApplicationUserStatuses[req.Status] {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "Unknown status.", apierr.UUIDInvalidParam))
+	}
+	// **既存の一覧と同じクランプ。** packer が 1 行あたり drive / emoji を
+	// 引くので、上限を上げると 1 リクエストで数百クエリになる。
+	if req.Limit <= 0 || req.Limit > 100 {
+		req.Limit = 30
+	}
+
+	rows, err := h.emojiApplicationRepo.ListByUserFiltered(req.UserID, req.Status, req.Query, req.Limit, req.UntilID)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	// **0 件でも配列で返す。** null だと frontend の追い読みが TypeError になる。
+	items := make([]map[string]any, 0, len(rows))
+	for i := range rows {
+		items = append(items, h.packEmojiApplicationForModerator(&rows[i]))
+	}
+	return c.JSON(http.StatusOK, map[string]any{"items": items})
+}
+
+// EmojiApplicationUserSummary handles POST /api/admin/emoji-application/user-summary.
+//
+// 件数の内訳と、期間上限の使用状況 (#2961)。
+func (h *Handler) EmojiApplicationUserSummary(c echo.Context) error {
+	if h.emojiApplicationReviewer == nil {
+		return apierr.JSONInternalError(c)
+	}
+	var req struct {
+		UserID string `json:"userId"`
+	}
+	if err := c.Bind(&req); err != nil || req.UserID == "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "userId is required.", apierr.UUIDInvalidParam))
+	}
+
+	sum, err := h.emojiApplicationReviewer.UserSummary(req.UserID)
+	if err != nil {
+		// **0 件として返さない。** 障害を「申請なし」と描くと、実際には
+		// 履歴のあるユーザーを何も無いものとして扱う。
+		return apierr.JSONInternalError(c)
+	}
+
+	windows := make([]map[string]any, 0, len(sum.Windows))
+	for _, w := range sum.Windows {
+		out := map[string]any{
+			"period": w.Period,
+			"used":   w.Used,
+			"limit":  w.Limit,
+			// **無制限を 0 で表さない。** 0 を「上限 0 件 = 出せない」と読める
+			// 形にすると、画面が「0 / 0」を出して枠が尽きているように見える。
+			"unlimited": w.Limit <= 0,
+		}
+		// 満杯の窓だけ次に出せる時刻を載せる。空きがあるのに時刻が出ると
+		// 「今は出せない」と読める。
+		if !w.RetryAt.IsZero() {
+			out["retryAt"] = entity.ISOMillis(w.RetryAt)
+		}
+		windows = append(windows, out)
+	}
+	return c.JSON(http.StatusOK, map[string]any{
+		"counts":  sum.Counts,
+		"windows": windows,
 	})
 }

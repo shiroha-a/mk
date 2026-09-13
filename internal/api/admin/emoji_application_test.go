@@ -28,6 +28,17 @@ type stubEmojiReviewer struct {
 	lastID  string
 	lastMod string
 	lastWhy string
+
+	// #2961 (ユーザーモデレーション画面の集計)。**err は review 側と分ける** —
+	// 共有すると、片方の分岐を消してももう片方の err で同じ結果になる。
+	summary       emojiapplication.UserSummary
+	summaryErr    error
+	lastSummaryID string
+}
+
+func (s *stubEmojiReviewer) UserSummary(userID string) (emojiapplication.UserSummary, error) {
+	s.lastSummaryID = userID
+	return s.summary, s.summaryErr
 }
 
 func (s *stubEmojiReviewer) Approve(_ context.Context, id, moderatorID string) (*model.EmojiApplication, error) {
@@ -375,6 +386,22 @@ type stubAppsRepo struct {
 	rows       []model.EmojiApplication
 	lastFilter string
 	lastLimit  int
+
+	// #2961 (ユーザーモデレーション画面の申請履歴)
+	byUser          []model.EmojiApplication
+	byUserErr       error
+	userCounts      repository.StatusCounts
+	userCountsErr   error
+	usage           []repository.QuotaWindowUsage
+	usageErr        error
+	lastUserID      string
+	lastStatus      string
+	lastQuery       string
+	lastUserLimit   int
+	lastUserUntil   string
+	lastCountUserID string
+	lastUsageUserID string
+	lastWindows     []repository.QuotaWindow
 }
 
 func (s *stubAppsRepo) Create(*model.EmojiApplication) error { return nil }
@@ -387,6 +414,25 @@ func (s *stubAppsRepo) FindRelated(_ *model.EmojiApplication, limit int, untilID
 }
 func (s *stubAppsRepo) CountRelated(*model.EmojiApplication) (repository.RelatedCounts, error) {
 	return s.relatedCounts, s.countErr
+}
+
+// #2961 のユーザー単位の読み取り。**err はメソッドごとに分ける** — 1 つを
+// 共有すると、片方の分岐を消しても「もう片方の err」で同じ結果になり、
+// テストが揃って空虚になる (#2960 の R2-H1 で実測した形)。
+func (s *stubAppsRepo) ListByUserFiltered(userID, status, query string, limit int, untilID string) ([]model.EmojiApplication, error) {
+	s.lastUserID, s.lastStatus, s.lastQuery = userID, status, query
+	s.lastUserLimit, s.lastUserUntil = limit, untilID
+	return s.byUser, s.byUserErr
+}
+
+func (s *stubAppsRepo) CountByUserStatus(userID string) (repository.StatusCounts, error) {
+	s.lastCountUserID = userID
+	return s.userCounts, s.userCountsErr
+}
+
+func (s *stubAppsRepo) QuotaUsage(userID string, windows []repository.QuotaWindow, _ time.Time) ([]repository.QuotaWindowUsage, error) {
+	s.lastUsageUserID, s.lastWindows = userID, windows
+	return s.usage, s.usageErr
 }
 
 func (s *stubAppsRepo) FindByID(id string) (*model.EmojiApplication, error) {
@@ -875,4 +921,140 @@ func TestEmojiApplicationRelatedReturnsEmptyArray(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), `"items":[]`)
 	require.NotContains(t, rec.Body.String(), `"items":null`)
+}
+
+// --- #2961 ユーザーモデレーション画面の申請履歴 ---
+
+func userAppsHandler(rows []model.EmojiApplication) (*apiadmin.Handler, *stubAppsRepo) {
+	repo := &stubAppsRepo{byUser: rows}
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(repo)
+	return h, repo
+}
+
+// **userId が要る。** 省略を「全員ぶん」に倒すと、1 リクエストで全利用者の
+// 却下理由が出る。
+func TestEmojiApplicationListByUserRequiresUserID(t *testing.T) {
+	h, _ := userAppsHandler(nil)
+	rec := doPost(h.EmojiApplicationListByUser, `{}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}
+
+// **未知の status を全件に倒さない。** 絞ったつもりで全部出ると、
+// モデレーターは「却下されたものだけ」を見ているつもりで判断する。
+func TestEmojiApplicationListByUserRejectsUnknownStatus(t *testing.T) {
+	h, repo := userAppsHandler(nil)
+	rec := doPost(h.EmojiApplicationListByUser, `{"userId":"u1","status":"escalated"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Empty(t, repo.lastUserID, "弾く前に repository を呼んでいる")
+}
+
+// 絞り込みと検索とページングがそのまま渡ること。
+func TestEmojiApplicationListByUserPassesFilters(t *testing.T) {
+	h, repo := userAppsHandler(nil)
+	doPost(h.EmojiApplicationListByUser,
+		`{"userId":"u1","status":"rejected","query":"sushi","limit":5,"untilId":"x"}`, adminUser)
+	require.Equal(t, "u1", repo.lastUserID)
+	require.Equal(t, "rejected", repo.lastStatus)
+	require.Equal(t, "sushi", repo.lastQuery)
+	require.Equal(t, 5, repo.lastUserLimit)
+	require.Equal(t, "x", repo.lastUserUntil, "untilId が渡っていない")
+
+	// 既定と、際限のない limit のクランプ。packer が 1 行あたり drive を引く。
+	doPost(h.EmojiApplicationListByUser, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, 30, repo.lastUserLimit)
+	doPost(h.EmojiApplicationListByUser, `{"userId":"u1","limit":500}`, adminUser)
+	require.Equal(t, 30, repo.lastUserLimit, "limit がクランプされていない")
+	// status 未指定は全件 (repository 側が "" を全件として扱う)。
+	require.Equal(t, "", repo.lastStatus)
+}
+
+// **障害を「履歴なし」に化けさせない。** 0 件として描くと、実際には申請が
+// あるユーザーを何も無いものとして扱う。
+func TestEmojiApplicationListByUserSurfacesFailure(t *testing.T) {
+	h, repo := userAppsHandler(nil)
+	repo.byUserErr = gorm.ErrInvalidDB
+	rec := doPost(h.EmojiApplicationListByUser, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// 0 件でも配列で返す (null だと frontend の追い読みが TypeError になる)。
+func TestEmojiApplicationListByUserReturnsEmptyArray(t *testing.T) {
+	h, _ := userAppsHandler(nil)
+	rec := doPost(h.EmojiApplicationListByUser, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"items":[]`)
+	require.NotContains(t, rec.Body.String(), `"items":null`)
+}
+
+// 審査画面と同じ pack を使う (却下理由が載る)。
+func TestEmojiApplicationListByUserPacksForModerator(t *testing.T) {
+	reason := "潰れて読めません"
+	h, _ := userAppsHandler([]model.EmojiApplication{{
+		ID: "a1", UserID: "u1", Name: "sushi",
+		Status: model.EmojiApplicationRejected, RejectReason: &reason,
+	}})
+	rec := doPost(h.EmojiApplicationListByUser, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), reason, "却下理由が出ていない")
+}
+
+func TestEmojiApplicationUserSummaryRequiresUserID(t *testing.T) {
+	rev := &stubEmojiReviewer{}
+	rec := doPost(newEmojiReviewerHandler(t, rev).EmojiApplicationUserSummary, `{}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Empty(t, rev.lastSummaryID, "弾く前に service を呼んでいる")
+}
+
+// **無制限を 0 で表さない。** 0 を「上限 0 件 = 出せない」と読める形にすると、
+// 画面が「0 / 0」を出して枠が尽きているように見える。
+func TestEmojiApplicationUserSummaryMarksUnlimited(t *testing.T) {
+	at := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	rev := &stubEmojiReviewer{summary: emojiapplication.UserSummary{
+		Counts: repository.StatusCounts{Total: 3, Rejected: 2, Pending: 1},
+		Windows: []emojiapplication.QuotaWindowUsage{
+			{Period: "day", Used: 5, Limit: 5, RetryAt: at},
+			{Period: "week", Used: 8, Limit: 20},
+			{Period: "month", Used: 24, Limit: 0},
+		},
+	}}
+	rec := doPost(newEmojiReviewerHandler(t, rev).EmojiApplicationUserSummary, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, "u1", rev.lastSummaryID)
+
+	var body struct {
+		Counts  repository.StatusCounts `json:"counts"`
+		Windows []struct {
+			Period    string `json:"period"`
+			Used      int    `json:"used"`
+			Limit     int    `json:"limit"`
+			Unlimited bool   `json:"unlimited"`
+			RetryAt   string `json:"retryAt"`
+		} `json:"windows"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	require.Equal(t, 3, body.Counts.Total)
+	require.Len(t, body.Windows, 3)
+	require.False(t, body.Windows[0].Unlimited)
+	require.False(t, body.Windows[1].Unlimited)
+	require.True(t, body.Windows[2].Unlimited, "上限 0 が無制限として出ていない")
+	// **満杯の窓にだけ時刻。** 空きのある窓に出ると「今は出せない」と読める。
+	require.NotEmpty(t, body.Windows[0].RetryAt, "満杯の窓に次回可能時刻が無い")
+	require.Empty(t, body.Windows[1].RetryAt, "空きのある窓に次回可能時刻が出ている")
+	require.Empty(t, body.Windows[2].RetryAt)
+}
+
+func TestEmojiApplicationUserSummarySurfacesFailure(t *testing.T) {
+	rev := &stubEmojiReviewer{summaryErr: gorm.ErrInvalidDB}
+	rec := doPost(newEmojiReviewerHandler(t, rev).EmojiApplicationUserSummary, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	require.NotContains(t, rec.Body.String(), `"total":0`, "障害を「申請なし」に化けさせている")
+}
+
+// 未配線なら 500 (空の集計を返して「申請なし」と描かない)。
+func TestEmojiApplicationUserSummaryWithoutServiceIs500(t *testing.T) {
+	h := &apiadmin.Handler{}
+	rec := doPost(h.EmojiApplicationUserSummary, `{"userId":"u1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
 }

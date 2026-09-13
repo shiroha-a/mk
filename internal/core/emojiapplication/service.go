@@ -251,6 +251,70 @@ func (s *Service) quotaLimits(userID string) repository.QuotaLimits {
 	}
 }
 
+// UserSummary is the moderation-screen view of one user's applications (#2961).
+type UserSummary struct {
+	Counts repository.StatusCounts
+	// Windows は期間上限の使用状況。**上限なしの窓も落とさない** — 「無制限」
+	// であることも審査の材料なので、返さずに画面側で補うと 0 件と区別できない。
+	Windows []QuotaWindowUsage
+}
+
+// QuotaWindowUsage is one window's usage for the moderation screen (#2961).
+type QuotaWindowUsage struct {
+	Period string
+	Used   int
+	// Limit は 0 なら無制限。**0 を「上限 0 件」と読ませない**ため、API 側は
+	// `unlimited` を別に立てる。
+	Limit int
+	// RetryAt は満杯の窓が空く時刻。空きがあればゼロ値。
+	RetryAt time.Time
+}
+
+// UserSummary collects the status breakdown and the rolling-window usage.
+//
+// **使用状況は作成側と同じ計算を使う (repository.QuotaUsage)。** 画面用に
+// 数え直すと「空きありと出ているのに弾かれる」という形でずれる。
+func (s *Service) UserSummary(userID string) (UserSummary, error) {
+	counts, err := s.apps.CountByUserStatus(userID)
+	if err != nil {
+		return UserSummary{}, err
+	}
+	limits := s.quotaLimits(userID)
+	// **policy が引けなくても窓は返す。** 窓が消えると画面は「期間上限の設定が
+	// 無い」と描くので、上限が効いているのに無いと見える。上限 0 = 無制限として
+	// 出すほうが、少なくとも件数は正しい。
+	windows := limits.Windows
+	if len(windows) == 0 {
+		windows = defaultQuotaWindows()
+	}
+	usage, err := s.apps.QuotaUsage(userID, windows, s.nowFunc())
+	if err != nil {
+		return UserSummary{}, err
+	}
+	out := UserSummary{Counts: counts, Windows: make([]QuotaWindowUsage, 0, len(usage))}
+	for _, u := range usage {
+		out.Windows = append(out.Windows, QuotaWindowUsage{
+			Period:  u.Window.Name,
+			Used:    u.Used,
+			Limit:   u.Window.Max,
+			RetryAt: u.RetryAt,
+		})
+	}
+	return out, nil
+}
+
+// defaultQuotaWindows is the window set used when no policy could be resolved.
+//
+// **quotaLimits と同じ 3 つ。** 片方だけ足すと、policy が引けるときと引けない
+// ときで画面の行数が変わる。
+func defaultQuotaWindows() []repository.QuotaWindow {
+	return []repository.QuotaWindow{
+		{Name: "day", Duration: 24 * time.Hour},
+		{Name: "week", Duration: 7 * 24 * time.Hour},
+		{Name: "month", Duration: 30 * 24 * time.Hour},
+	}
+}
+
 // policyMax reads one numeric quota policy (期間の窓と審査待ちの両方で使う)。
 // 0 以下・未設定・読めない値はすべて「無制限」(0) に倒す。
 //

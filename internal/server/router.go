@@ -3314,6 +3314,14 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/emoji-application/related", adminHandler.EmojiApplicationRelated,
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
 		middleware.RequireScope("read:admin:emoji"))
+	// ユーザーモデレーション画面の申請履歴と集計 (#2961)。**却下理由と
+	// モデレーターへの補足が載るので、一般ユーザー向けには公開しない。**
+	api.POST("/admin/emoji-application/list-by-user", adminHandler.EmojiApplicationListByUser,
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
+		middleware.RequireScope("read:admin:emoji"))
+	api.POST("/admin/emoji-application/user-summary", adminHandler.EmojiApplicationUserSummary,
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis),
+		middleware.RequireScope("read:admin:emoji"))
 	api.POST("/admin/emoji/remove-aliases-bulk", adminHandler.EmojiRemoveAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-aliases-bulk", adminHandler.EmojiSetAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/set-category-bulk", adminHandler.EmojiSetCategoryBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))

@@ -30,6 +30,16 @@ type fakeApps struct {
 	quotaLimits repository.QuotaLimits
 	quotaCalls  int
 	quotaErr    error
+
+	// #2961 (ユーザーモデレーション画面の集計)
+	userCounts   repository.StatusCounts
+	countErr     error
+	usage        []repository.QuotaWindowUsage
+	usageErr     error
+	countUserID  string
+	usageUserID  string
+	usageWindows []repository.QuotaWindow
+	usageNow     time.Time
 }
 
 func newFakeApps() *fakeApps { return &fakeApps{rows: map[string]*model.EmojiApplication{}} }
@@ -48,6 +58,32 @@ func (f *fakeApps) FindRelated(*model.EmojiApplication, int, string) ([]reposito
 
 func (f *fakeApps) CountRelated(*model.EmojiApplication) (repository.RelatedCounts, error) {
 	return repository.RelatedCounts{}, nil
+}
+
+func (f *fakeApps) ListByUserFiltered(string, string, string, int, string) ([]model.EmojiApplication, error) {
+	return nil, nil
+}
+
+// #2961. **err はメソッドごとに分ける** — 1 つを共有すると、片方の分岐を
+// 消してももう片方の err で同じ結果になり、テストが揃って空虚になる。
+func (f *fakeApps) CountByUserStatus(userID string) (repository.StatusCounts, error) {
+	f.countUserID = userID
+	return f.userCounts, f.countErr
+}
+
+func (f *fakeApps) QuotaUsage(userID string, windows []repository.QuotaWindow, now time.Time) ([]repository.QuotaWindowUsage, error) {
+	f.usageUserID, f.usageWindows, f.usageNow = userID, windows, now
+	if f.usageErr != nil {
+		return nil, f.usageErr
+	}
+	if f.usage != nil {
+		return f.usage, nil
+	}
+	out := make([]repository.QuotaWindowUsage, 0, len(windows))
+	for _, w := range windows {
+		out = append(out, repository.QuotaWindowUsage{Window: w})
+	}
+	return out, nil
 }
 
 func (f *fakeApps) CreateWithQuota(a *model.EmojiApplication, l repository.QuotaLimits) error {
@@ -1017,4 +1053,105 @@ func TestCreateRemoteHasNoFileHash(t *testing.T) {
 	app, err := svc.Create(in)
 	require.NoError(t, err)
 	require.Nil(t, app.FileHash)
+}
+
+// errBoom stands in for any repository failure (#2961).
+var errBoom = errors.New("boom")
+
+// **ロールの上限をそのまま窓へ渡すこと (#2961)。** 画面が出す「3 / 5」は
+// ここで組んだ窓が元なので、取り違えるとモデレーターが別の期間の数字を見て
+// 判断する。作成側 (#2958) と同じ policy から組む。
+func TestUserSummaryBuildsWindowsFromPolicies(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+	svc.SetPolicyProvider(&stubPolicies{p: map[string]any{
+		"emojiApplicationMaxPerDay":   3,
+		"emojiApplicationMaxPerWeek":  float64(10),
+		"emojiApplicationMaxPerMonth": int64(20),
+	}})
+
+	got, err := svc.UserSummary("u1")
+	require.NoError(t, err)
+	require.Equal(t, "u1", apps.usageUserID, "別のユーザーを数えている")
+	require.Len(t, apps.usageWindows, 3)
+	require.Equal(t, "day", apps.usageWindows[0].Name)
+	require.Equal(t, 3, apps.usageWindows[0].Max)
+	require.Equal(t, 24*time.Hour, apps.usageWindows[0].Duration)
+	require.Equal(t, "week", apps.usageWindows[1].Name)
+	require.Equal(t, 10, apps.usageWindows[1].Max)
+	require.Equal(t, 7*24*time.Hour, apps.usageWindows[1].Duration)
+	require.Equal(t, "month", apps.usageWindows[2].Name)
+	require.Equal(t, 20, apps.usageWindows[2].Max)
+	require.Equal(t, 30*24*time.Hour, apps.usageWindows[2].Duration)
+
+	require.Len(t, got.Windows, 3)
+	require.Equal(t, []string{"day", "week", "month"},
+		[]string{got.Windows[0].Period, got.Windows[1].Period, got.Windows[2].Period})
+	require.Equal(t, 3, got.Windows[0].Limit, "上限が出力に載っていない")
+}
+
+// 件数と使用状況がそのまま出ること。
+func TestUserSummaryReportsCountsAndUsage(t *testing.T) {
+	apps := newFakeApps()
+	apps.userCounts = repository.StatusCounts{Total: 7, Pending: 1, Approved: 2, Rejected: 3, Canceled: 1}
+	at := time.Date(2026, 9, 13, 12, 0, 0, 0, time.UTC)
+	apps.usage = []repository.QuotaWindowUsage{
+		{Window: repository.QuotaWindow{Name: "day", Max: 5}, Used: 5, RetryAt: at},
+		{Window: repository.QuotaWindow{Name: "week", Max: 20}, Used: 8},
+		{Window: repository.QuotaWindow{Name: "month", Max: 0}, Used: 24},
+	}
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+
+	got, err := svc.UserSummary("u1")
+	require.NoError(t, err)
+	require.Equal(t, "u1", apps.countUserID)
+	require.Equal(t, apps.userCounts, got.Counts)
+	require.Len(t, got.Windows, 3)
+	// **満杯の窓だけ時刻が載る。** 空きのある窓に時刻が出ると「今は出せない」
+	// と読める。
+	require.Equal(t, 5, got.Windows[0].Used)
+	require.Equal(t, at, got.Windows[0].RetryAt)
+	require.True(t, got.Windows[1].RetryAt.IsZero(), "空きのある窓に次回可能時刻が入っている")
+	// **上限なしでも件数は出す。** 0 件と「無制限」を混同させない。
+	require.Equal(t, 24, got.Windows[2].Used)
+	require.Equal(t, 0, got.Windows[2].Limit)
+}
+
+// **policy が引けなくても窓を返すこと (#2961)。** 窓が消えると画面は
+// 「期間上限の設定が無い」と描くので、上限が効いているのに無いと見える。
+func TestUserSummaryWithoutPolicyProviderStillReturnsWindows(t *testing.T) {
+	apps := newFakeApps()
+	svc := NewService(apps, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil)
+
+	got, err := svc.UserSummary("u1")
+	require.NoError(t, err)
+	require.Len(t, got.Windows, 3, "policy が無いと窓が消えている")
+	require.Equal(t, []string{"day", "week", "month"},
+		[]string{got.Windows[0].Period, got.Windows[1].Period, got.Windows[2].Period})
+	for i := range got.Windows {
+		require.Equal(t, 0, got.Windows[i].Limit, "上限なしとして返っていない")
+	}
+	// **期間まで見る。** 取り違えると、policy が引けないときだけ「7日間」の
+	// 欄に 24 時間ぶんの件数が出る (数字はもっともらしいので気付けない)。
+	require.Len(t, apps.usageWindows, 3)
+	require.Equal(t, []time.Duration{24 * time.Hour, 7 * 24 * time.Hour, 30 * 24 * time.Hour},
+		[]time.Duration{
+			apps.usageWindows[0].Duration,
+			apps.usageWindows[1].Duration,
+			apps.usageWindows[2].Duration,
+		}, "既定の窓の期間が違う")
+}
+
+// **障害を握り潰さない。** 0 件として描くと、実際には申請があるユーザーを
+// 「履歴なし」と判断する。件数と使用状況は別々に検査する。
+func TestUserSummarySurfacesErrors(t *testing.T) {
+	countFail := newFakeApps()
+	countFail.countErr = errBoom
+	_, err := NewService(countFail, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil).UserSummary("u1")
+	require.ErrorIs(t, err, errBoom, "件数の取得失敗を握り潰している")
+
+	usageFail := newFakeApps()
+	usageFail.usageErr = errBoom
+	_, err = NewService(usageFail, &fakeEmojis{}, &okFiles{}, &fixedID{}, nil, nil).UserSummary("u1")
+	require.ErrorIs(t, err, errBoom, "使用状況の取得失敗を握り潰している")
 }

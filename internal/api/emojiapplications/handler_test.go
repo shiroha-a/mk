@@ -50,6 +50,16 @@ func (s *stubApps) CountRelated(*model.EmojiApplication) (repository.RelatedCoun
 	return s.relatedCounts, s.relatedErr
 }
 
+func (s *stubApps) ListByUserFiltered(string, string, string, int, string) ([]model.EmojiApplication, error) {
+	return nil, nil
+}
+func (s *stubApps) CountByUserStatus(string) (repository.StatusCounts, error) {
+	return repository.StatusCounts{}, nil
+}
+func (s *stubApps) QuotaUsage(string, []repository.QuotaWindow, time.Time) ([]repository.QuotaWindowUsage, error) {
+	return nil, nil
+}
+
 func (s *stubApps) CreateWithQuota(a *model.EmojiApplication, _ repository.QuotaLimits) error {
 	if s.quotaErr != nil {
 		return s.quotaErr

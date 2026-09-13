@@ -1143,3 +1143,188 @@ func TestEmojiApplicationRepository_RelatedCountMatchesList(t *testing.T) {
 	require.Equal(t, counts.Total, len(list), "件数と一覧の条件がずれている")
 	require.Equal(t, 3, counts.Total)
 }
+
+// **ステータスで絞れること (#2961)。** モデレーション画面は「却下されている
+// ものだけ見たい」が主用途なので、絞りが効かないと使い物にならない。
+func TestEmojiApplicationRepository_ListByUserFiltered_Status(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_f1")
+	createTestUser(t, "ea_f1other")
+	repo := NewEmojiApplicationRepository(testDB)
+
+	seedApplication(t, "ea_f1a", "ea_f1", "pend", model.EmojiApplicationPending)
+	seedApplication(t, "ea_f1b", "ea_f1", "appr", model.EmojiApplicationApproved)
+	seedApplication(t, "ea_f1c", "ea_f1", "rej", model.EmojiApplicationRejected)
+	seedApplication(t, "ea_f1d", "ea_f1", "can", model.EmojiApplicationCanceled)
+	// **他人の行が混ざらないこと。** userId を落とすと全員の履歴が出る。
+	seedApplication(t, "ea_f1x", "ea_f1other", "pend", model.EmojiApplicationPending)
+
+	for _, tc := range []struct {
+		status string
+		want   []string
+	}{
+		{"", []string{"ea_f1d", "ea_f1c", "ea_f1b", "ea_f1a"}},
+		{"all", []string{"ea_f1d", "ea_f1c", "ea_f1b", "ea_f1a"}},
+		{model.EmojiApplicationPending, []string{"ea_f1a"}},
+		{model.EmojiApplicationApproved, []string{"ea_f1b"}},
+		{model.EmojiApplicationRejected, []string{"ea_f1c"}},
+		{model.EmojiApplicationCanceled, []string{"ea_f1d"}},
+	} {
+		rows, err := repo.ListByUserFiltered("ea_f1", tc.status, "", 50, "")
+		require.NoError(t, err)
+		got := make([]string, 0, len(rows))
+		for i := range rows {
+			got = append(got, rows[i].ID)
+		}
+		require.Equal(t, tc.want, got, "status=%q の絞り込み", tc.status)
+	}
+
+	// **未知の status は全件に倒さない。** 絞ったつもりで全部出るほうが危険側。
+	rows, err := repo.ListByUserFiltered("ea_f1", "escalated", "", 50, "")
+	require.NoError(t, err)
+	require.Empty(t, rows, "未知の status で全件返っている")
+}
+
+// **検索の LIKE メタ文字をエスケープすること (#2961)。** 素通しすると
+// `foo_bar` が `fooXbar` に当たり、`%` の 1 文字で全件返る。モデレーターは
+// 「この名前の申請は無い」と読むので、取り違えたまま判断する。
+func TestEmojiApplicationRepository_ListByUserFiltered_Query(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_f2")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	seedRelated(t, "ea_f2a", "ea_f2", "foo_bar", model.EmojiApplicationRejected, nil, nil, nil, now.Add(-time.Hour))
+	seedRelated(t, "ea_f2b", "ea_f2", "fooXbar", model.EmojiApplicationRejected, nil, nil, nil, now.Add(-2*time.Hour))
+	host, rname := "remote.example", "kusa"
+	seedRelated(t, "ea_f2c", "ea_f2", "sushi", model.EmojiApplicationApproved, &host, &rname, nil, now.Add(-3*time.Hour))
+
+	ids := func(status, query string) []string {
+		rows, err := repo.ListByUserFiltered("ea_f2", status, query, 50, "")
+		require.NoError(t, err)
+		out := make([]string, 0, len(rows))
+		for i := range rows {
+			out = append(out, rows[i].ID)
+		}
+		return out
+	}
+
+	// `_` はワイルドカードにならない。
+	require.Equal(t, []string{"ea_f2a"}, ids("", "foo_bar"), "_ がワイルドカードとして効いている")
+	// `%` も同じ。全件が返ってはいけない。
+	require.Empty(t, ids("", "%"), "% で全件返っている")
+	// バックスラッシュを入れても壊れない (エスケープの二重適用で 0 件になったり
+	// SQL が落ちたりしない)。
+	require.Empty(t, ids("", `\`))
+	// 普通の部分一致は効く。
+	require.ElementsMatch(t, []string{"ea_f2a", "ea_f2b"}, ids("", "bar"))
+	// 大文字小文字を区別しない (ILIKE)。
+	require.ElementsMatch(t, []string{"ea_f2a", "ea_f2b"}, ids("", "BAR"))
+	// リモート元でも引ける。**host と name の両方**が対象。
+	require.Equal(t, []string{"ea_f2c"}, ids("", "remote.example"))
+	require.Equal(t, []string{"ea_f2c"}, ids("", "kusa"))
+	// 絞り込みと併用できる。
+	require.Empty(t, ids(model.EmojiApplicationPending, "bar"))
+}
+
+// ページングと件数。
+func TestEmojiApplicationRepository_ListByUserFiltered_Paging(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_f3")
+	createTestUser(t, "ea_f3other")
+	repo := NewEmojiApplicationRepository(testDB)
+
+	for i := 0; i < 5; i++ {
+		seedApplication(t, "ea_f3"+string(rune('a'+i)), "ea_f3", "n"+string(rune('a'+i)),
+			model.EmojiApplicationRejected)
+	}
+	seedApplication(t, "ea_f3z", "ea_f3other", "other", model.EmojiApplicationRejected)
+
+	first, err := repo.ListByUserFiltered("ea_f3", "", "", 2, "")
+	require.NoError(t, err)
+	require.Len(t, first, 2)
+	require.Equal(t, "ea_f3e", first[0].ID, "id の降順になっていない")
+
+	second, err := repo.ListByUserFiltered("ea_f3", "", "", 2, first[1].ID)
+	require.NoError(t, err)
+	require.Len(t, second, 2)
+	require.Less(t, second[0].ID, first[1].ID, "untilId より後ろが返っている")
+
+	counts, err := repo.CountByUserStatus("ea_f3")
+	require.NoError(t, err)
+	require.Equal(t, 5, counts.Total, "他人の行が数に混ざっている")
+	require.Equal(t, 5, counts.Rejected)
+	require.Equal(t, 0, counts.Pending)
+}
+
+// 集計はステータスごとに出る。
+func TestEmojiApplicationRepository_CountByUserStatus(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_f4")
+	repo := NewEmojiApplicationRepository(testDB)
+
+	seedApplication(t, "ea_f4a", "ea_f4", "a", model.EmojiApplicationPending)
+	seedApplication(t, "ea_f4b", "ea_f4", "b", model.EmojiApplicationRejected)
+	seedApplication(t, "ea_f4c", "ea_f4", "c", model.EmojiApplicationRejected)
+	seedApplication(t, "ea_f4d", "ea_f4", "d", model.EmojiApplicationApproved)
+	seedApplication(t, "ea_f4e", "ea_f4", "e", model.EmojiApplicationCanceled)
+
+	got, err := repo.CountByUserStatus("ea_f4")
+	require.NoError(t, err)
+	require.Equal(t, StatusCounts{Total: 5, Pending: 1, Approved: 1, Rejected: 2, Canceled: 1}, got)
+
+	// 1 件も無いユーザーはゼロ値。
+	createTestUser(t, "ea_f4none")
+	empty, err := repo.CountByUserStatus("ea_f4none")
+	require.NoError(t, err)
+	require.Equal(t, StatusCounts{}, empty)
+}
+
+// **表示する使用状況が、実際に効いている判定と一致すること (#2961)。**
+// 別の SQL で数えると「画面は 2/3 なのに実際は弾かれる」という形でずれる。
+// ここが両者を突き合わせる唯一の場所。
+func TestEmojiApplicationRepository_QuotaUsage_MatchesEnforcement(t *testing.T) {
+	cleanupEmojiApplications(t)
+	defer cleanupEmojiApplications(t)
+	createTestUser(t, "ea_f5")
+	repo := NewEmojiApplicationRepository(testDB)
+	now := time.Now()
+
+	windows := []QuotaWindow{
+		{Name: "day", Duration: 24 * time.Hour, Max: 2},
+		{Name: "week", Duration: 7 * 24 * time.Hour, Max: 5},
+		// 上限なしの窓も「何件出しているか」は返す。
+		{Name: "month", Duration: 30 * 24 * time.Hour, Max: 0},
+	}
+
+	// 窓の中に 2 件 (day が満杯)、外に 1 件。
+	seedApplicationAt(t, "ea_f5a", "ea_f5", "a", model.EmojiApplicationRejected, now.Add(-2*time.Hour))
+	seedApplicationAt(t, "ea_f5b", "ea_f5", "b", model.EmojiApplicationCanceled, now.Add(-3*time.Hour))
+	seedApplicationAt(t, "ea_f5c", "ea_f5", "c", model.EmojiApplicationApproved, now.Add(-40*time.Hour))
+
+	usage, err := repo.QuotaUsage("ea_f5", windows, now)
+	require.NoError(t, err)
+	require.Len(t, usage, 3)
+	require.Equal(t, 2, usage[0].Used, "day の使用数が合わない")
+	require.Equal(t, 3, usage[1].Used, "week の使用数が合わない")
+	require.Equal(t, 3, usage[2].Used, "上限なしの窓でも件数は数える")
+
+	// 満杯の窓にだけ RetryAt が入る。
+	require.False(t, usage[0].RetryAt.IsZero(), "満杯の窓に次回可能時刻が無い")
+	require.True(t, usage[1].RetryAt.IsZero(), "空きのある窓に次回可能時刻が入っている")
+	require.True(t, usage[2].RetryAt.IsZero(), "上限なしの窓に次回可能時刻が入っている")
+
+	// **作成側が返す時刻と一致すること。** ここが噛み合っていないと、画面の
+	// 案内どおりに再申請しても弾かれる。
+	err = repo.CreateWithQuota(quotaApp("ea_f5new", "ea_f5", "new", now), QuotaLimits{Windows: windows})
+	var qe *QuotaExceededError
+	require.ErrorAs(t, err, &qe, "満杯なのに作成できている")
+	require.Equal(t, "day", qe.Window.Name)
+	require.Equal(t, usage[0].Used, qe.Used, "画面の使用数と実際の判定がずれている")
+	require.WithinDuration(t, usage[0].RetryAt, qe.RetryAt, 0,
+		"画面の次回可能時刻と実際の判定がずれている")
+}

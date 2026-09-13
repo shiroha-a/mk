@@ -44,7 +44,9 @@ var (
 	// 無検査になる。route 行そのものを取り、policy と scope の有無を見る。
 	//
 	// `(?s)` と `[^;]*` で**次の文まで**取る — router は引数を複数行に折り返す。
-	adminRouteRe = regexp.MustCompile(`(?s)api\.POST\(\s*"/admin/emoji-application/(?:list|approve|reject|related)"[^\n]*(?:\n\t\t+[^\n]*)*`)
+	// **長いものを先に並べる。** `list` を先に置くと `list-by-user` が
+	// `list` + 余り、と読めてしまう形なので、意図を順序でも示しておく。
+	adminRouteRe = regexp.MustCompile(`(?s)api\.POST\(\s*"/admin/emoji-application/(?:list-by-user|list|user-summary|approve|reject|related)"[^\n]*(?:\n\t\t+[^\n]*)*`)
 
 	// 通知の read-time 解決。**2 経路あるので両方見る** — HTTP の一覧
 	// (notificationsHandler) と realtime (notificationPublisher)。片方だけを
@@ -93,8 +95,9 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	}
 
 	adminRoutes := adminRouteRe.FindAllString(src, -1)
-	require.Lenf(t, adminRoutes, 4,
-		"%s の admin/emoji-application が 4 本揃っていない (list / approve / reject / related)", router)
+	require.Lenf(t, adminRoutes, 6,
+		"%s の admin/emoji-application が 6 本揃っていない "+
+			"(list / list-by-user / user-summary / approve / reject / related)", router)
 	for _, route := range adminRoutes {
 		require.Containsf(t, route, "PolicyCanManageCustomEmojis",
 			"admin/emoji-application の route に canManageCustomEmojis が付いていない。"+
@@ -355,6 +358,76 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		"折りたたみ (<MkFolder>) より前に <MkButton> が無い。初回の取得に失敗すると "+
 			"counts が null のままで折りたたみごと描画されないので、中のボタンでは "+
 			"再試行できない (#2960)")
+
+	// **ユーザーモデレーション画面の申請履歴 (#2961)。**
+	//
+	// ここも識別子を固定する — `.vue` は単体テストから駆動できず、配線を守る
+	// 手段がこれしか無い (#2959 / #2960 の節と同じ判断)。
+	adminUser := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin-user.vue")))
+	require.Containsf(t, adminUser, "admin-user.emoji-applications.vue",
+		"ユーザーモデレーション画面が絵文字申請のタブを読み込んでいない (#2961)")
+	require.Containsf(t, adminUser, `tab === 'emojiApplication'`,
+		"絵文字申請タブの本体が描画されていない (#2961)")
+	// **backend の gate と同じ条件で出すこと。** `admin/emoji-application/*` は
+	// `canManageCustomEmojis` (または管理者) を要求するので、moderator という
+	// だけで出すと開いた先が必ず 403 になる。**policy を見ていることを固定する**
+	// — `iAmModerator` に緩めても型は通り、押すまで壊れていると分からない。
+	require.Containsf(t, adminUser, "policies.canManageCustomEmojis",
+		"絵文字申請タブが canManageCustomEmojis を見ていない。権限の無い"+
+			"モデレーターに 403 になるタブを出す (#2961)")
+	// **リモートとシステムアカウントには出さない** (申請できないので必ず空になる)。
+	require.Containsf(t, adminUser, "canSeeEmojiApplications",
+		"絵文字申請タブの出し分けが無い (#2961)")
+
+	userApps := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin-user.emoji-applications.vue")))
+	for _, want := range []string{
+		// 2 つの endpoint。片方だけでも「履歴はあるのに件数が出ない」等になる。
+		"admin/emoji-application/list-by-user",
+		"admin/emoji-application/user-summary",
+		// **リモートのサムネイルは media proxy を通す。** 生 URL は
+		// `img-src 'self'` を enforce している構成で黙ってブロックされる。
+		"relatedPreviewUrl(",
+		// 「確認できなかった」と「消された」を分ける。
+		"relatedImageMissingLabel(",
+		// 判断を誤らせない status 表示。
+		"relatedStatusLabel(",
+		// 期間上限の表示。**無制限を 0 で描かない**ための分岐ごと。
+		"quotaUsageLabel(", "quotaPeriodLabel(", "quotaIsFull(",
+		// 追い読みのカーソルと可否。
+		"userApplicationNextCursor(", "canLoadMoreUserApplications(",
+		// 絞り込みと検索が API に渡ること。
+		"status: status.value", "query: query.value",
+	} {
+		require.Containsf(t, userApps, want,
+			"ユーザーモデレーション画面の申請履歴に %s が無い (#2961)", want)
+	}
+	// **却下理由を値として描画すること。** ラベルの参照では満たさない
+	// (#2960 の R3-M1 と同じ形)。
+	userBound := false
+	for _, m := range regexp.MustCompile(`([A-Za-z_$][\w$]*)\.rejectReason`).FindAllStringSubmatch(userApps, -1) {
+		if m[1] != "_emojiApplication" {
+			userBound = true
+		}
+	}
+	require.Truef(t, userBound,
+		"申請履歴が却下理由を値として描画していない。「却下された」しか分からない (#2961)")
+	// **取得の失敗を握り潰さない。** 集計と履歴で別々に立てること — 片方の
+	// フラグを使い回すと、履歴が取れているのに「状況を確認できませんでした」と
+	// 出る (逆もある)。ref の名前は固定せず、catch で立てたフラグが失敗の文面の
+	// 表示条件になっていることを見る (#2960 の R3-H1 と同じ形)。
+	var userFlags []string
+	for _, body := range catchBodies(t, userApps) {
+		userFlags = append(userFlags, trueAssignedIn(t, body)...)
+	}
+	require.NotEmptyf(t, userFlags, "申請履歴の取得失敗を握り潰している (#2961)")
+	require.Truef(t, tagConditionUsesAny(userApps, "summaryUnknown", userFlags),
+		"申請の状況の取得失敗が画面に出ない。0 件として描くと「申請なし」と読める (#2961)")
+	require.Truef(t, tagConditionUsesAny(userApps, "historyUnknown", userFlags),
+		"申請履歴の取得失敗が画面に出ない。0 件として描くと「申請なし」と読める (#2961)")
+	// **絞り込みを変えたら 1 ページ目から取り直すこと。** 古い行を残すと
+	// 「却下だけ」を選んでいるのに承認済みが並ぶ。
+	require.Containsf(t, userApps, "items.value = []",
+		"絞り込みを変えても古い行が残る (#2961)")
 	for _, want := range []string{
 		"admin/emoji-application/related",
 		// **可視になるまで取りに行かないこと (#2960)。** 審査待ちタブは
@@ -490,25 +563,52 @@ func jsFuncBody(t *testing.T, src, name string) string {
 // と**事実と逆の診断**で落ちる (実測)。
 func catchBody(t *testing.T, src string) string {
 	t.Helper()
-	i := strings.Index(src, "catch")
-	require.GreaterOrEqualf(t, i, 0, "catch が無い (取得の失敗を握り潰している)")
-	j := strings.Index(src[i:], "{")
-	require.GreaterOrEqualf(t, j, 0, "catch の本体が無い")
-	start := i + j
-	depth := 0
-	for k := start; k < len(src); k++ {
-		switch src[k] {
-		case '{':
-			depth++
-		case '}':
-			depth--
-			if depth == 0 {
-				return src[start+1 : k]
+	bodies := catchBodies(t, src)
+	require.NotEmptyf(t, bodies, "catch が無い (取得の失敗を握り潰している)")
+	return bodies[0]
+}
+
+// catchBodies returns every catch block body in src, resolved by brace matching.
+//
+// **全部返す。** 取得経路が 2 つある画面 (#2961 の集計と履歴) では、最初の 1 つ
+// だけを見ると片方の握り潰しを検出できない。
+func catchBodies(t *testing.T, src string) []string {
+	t.Helper()
+	var out []string
+	for off := 0; ; {
+		i := strings.Index(src[off:], "catch")
+		if i < 0 {
+			return out
+		}
+		i += off
+		j := strings.Index(src[i:], "{")
+		if j < 0 {
+			return out
+		}
+		start := i + j
+		depth := 0
+		end := -1
+		for k := start; k < len(src); k++ {
+			switch src[k] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					end = k
+				}
+			}
+			if end >= 0 {
+				break
 			}
 		}
+		if end < 0 {
+			t.Fatalf("catch の対応する括弧が見つからない")
+			return out
+		}
+		out = append(out, src[start+1:end])
+		off = end
 	}
-	t.Fatalf("catch の対応する括弧が見つからない")
-	return ""
 }
 
 var trueAssignRe = regexp.MustCompile(`([A-Za-z_$][\w$]*)(?:\.value)?\s*=\s*true`)

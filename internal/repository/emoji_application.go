@@ -2,6 +2,7 @@ package repository
 
 import (
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -76,6 +77,26 @@ type EmojiApplicationRepository interface {
 	// **一覧では呼ばない。** 全行ぶん引くと N+1 になるので、申請の詳細を
 	// 開いたときだけ 1 回呼ぶ。
 	CountRelated(app *model.EmojiApplication) (RelatedCounts, error)
+	// ListByUserFiltered returns one user's applications for the moderation
+	// screen (#2961), newest first.
+	//
+	// status は "" / "all" で全件、それ以外は model.EmojiApplication* の
+	// いずれか。**未知の値は全件に倒さない** — 絞ったつもりで全部出るほうが
+	// 危険側なので 0 件を返す。
+	//
+	// query は名前 / remoteHost / remoteName の部分一致。**LIKE のメタ文字は
+	// エスケープする** — 素通しすると `foo_bar` が `fooXbar` に当たり、`%` の
+	// 1 文字で全件返る。
+	ListByUserFiltered(userID, status, query string, limit int, untilID string) ([]model.EmojiApplication, error)
+	// CountByUserStatus breaks one user's applications down by status (#2961).
+	CountByUserStatus(userID string) (StatusCounts, error)
+	// QuotaUsage reports how much of each rolling window the user has used
+	// (#2961).
+	//
+	// **作成側と同じ計算を使う。** 別の SQL で組み直すと、画面が「空きあり」と
+	// 言っているのに実際は弾かれる、という形でずれる。満杯の窓には
+	// `RetryAt` が入る。
+	QuotaUsage(userID string, windows []QuotaWindow, now time.Time) ([]QuotaWindowUsage, error)
 }
 
 // RelatedApplication is one past application plus why it matched (#2960).
@@ -105,14 +126,19 @@ func (r *RelatedApplication) MatchedBy() []string {
 	return out
 }
 
-// RelatedCounts breaks the related applications down by status (#2960).
-type RelatedCounts struct {
+// StatusCounts breaks a set of applications down by status.
+//
+// 関連する過去の申請 (#2960) とユーザー単位の集計 (#2961) で同じ形を使う。
+type StatusCounts struct {
 	Total    int `json:"total"`
 	Pending  int `json:"pending"`
 	Approved int `json:"approved"`
 	Rejected int `json:"rejected"`
 	Canceled int `json:"canceled"`
 }
+
+// RelatedCounts is the #2960 spelling of StatusCounts.
+type RelatedCounts = StatusCounts
 
 // QuotaLimits collects every per-user limit checked before an application is
 // created. ゼロ値は「上限なし」。
@@ -205,6 +231,86 @@ func (r *emojiApplicationRepository) Create(app *model.EmojiApplication) error {
 // features that lock on the same user id.
 const quotaLockNamespace = 2958
 
+// QuotaWindowUsage is one rolling window's current usage (#2961).
+type QuotaWindowUsage struct {
+	Window QuotaWindow
+	Used   int
+	// RetryAt is when the window frees up. **満杯のときだけ入る** — ゼロ値は
+	// 「まだ空きがある」で、「時刻が分からない」ではない。
+	RetryAt time.Time
+}
+
+// evaluateQuotaWindows counts each window and, for the full ones, works out when
+// they free up.
+//
+// **作成側と読み取り側で同じ計算を使うためのヘルパー (#2961)。** モデレーション
+// 画面に出す「3 / 5」や「次に出せる日時」を別の SQL で組み直すと、**画面は
+// 空きありと言っているのに実際は弾かれる**という形でずれる。#2958 の retryAt は
+// 2 段階の誤りを経て今の形 (満杯の窓を全部評価し、`used - Max` 件飛ばした行が
+// 窓を出る時刻を採る) になっており、それを read 側で再現し直さない。
+//
+// tx にはトランザクションでも素の DB でも渡せる。作成側はアドバイザリロックの
+// 中で呼ぶが、読み取り側は数えるだけなので囲まない (囲うと、画面を開いただけで
+// 申請の直列化に割り込む)。
+func evaluateQuotaWindows(tx *gorm.DB, userID string, windows []QuotaWindow, now time.Time) ([]QuotaWindowUsage, error) {
+	out := make([]QuotaWindowUsage, 0, len(windows))
+	for _, w := range windows {
+		u := QuotaWindowUsage{Window: w}
+		if w.Duration <= 0 {
+			// 期間が無い窓は数えようがない。0 件として返す (呼び出し側が
+			// 上限の有無を表示できるように、窓そのものは落とさない)。
+			out = append(out, u)
+			continue
+		}
+		since := now.Add(-w.Duration)
+		var used int64
+		// **全ステータスを数える。** 却下・取り下げで枠が戻ると、申請と
+		// 取り下げを繰り返して審査通知と履歴を大量に作れる。
+		if err := tx.Model(&model.EmojiApplication{}).
+			Where(`"userId" = ? AND "createdAt" >= ?`, userID, since).
+			Count(&used).Error; err != nil {
+			return nil, err
+		}
+		u.Used = int(used)
+		if w.Max <= 0 || used < int64(w.Max) {
+			out = append(out, u)
+			continue
+		}
+		// **「最古の 1 件」では足りない。** 空くのは used が Max を下回った
+		// ときなので、`used - Max + 1` 件が窓を出るまで待つ必要がある。
+		// 最古だけを見ると、上限を後から下げたときや上限の緩いロールを
+		// 外したときに**広告した時刻に叩いてもまた弾かれる**。
+		// offset は 0 起算なので `used - Max` 件飛ばした行が最後の 1 件。
+		var freed []time.Time
+		if err := tx.Model(&model.EmojiApplication{}).
+			Select(`"createdAt"`).
+			Where(`"userId" = ? AND "createdAt" >= ?`, userID, since).
+			Order(`"createdAt" ASC`).
+			Offset(int(used - int64(w.Max))).
+			Limit(1).
+			Scan(&freed).Error; err != nil {
+			return nil, err
+		}
+		if len(freed) == 0 {
+			// **fail-closed に倒す。** ここへ来るのは残り行数が `used - Max`
+			// 以下のときで、「窓が空いた」とは限らない (used=10 / Max=3 なら
+			// 7 行残っていても空になる)。COUNT を取り直さない以上、満杯の
+			// まま通す側へは倒さない。`now` を置くと最大限保守的な時刻に
+			// なる。**現状は到達しない** — `emoji_application` を消す
+			// production 経路が無く、FK も張っていないので利用者削除の
+			// CASCADE でも消えない。
+			freed = []time.Time{now}
+		}
+		// **1ms 足す。** 窓の判定は `createdAt >= since` なので、境界ちょうど
+		// の行はまだ窓の中にいる。しかも `entity.ISOMillis` は切り捨てなので、
+		// 境界をそのまま広告すると**その値で再スケジュールするクライアントが
+		// 必ず 1 回空振りする**。
+		u.RetryAt = freed[0].Add(w.Duration + time.Millisecond)
+		out = append(out, u)
+	}
+	return out, nil
+}
+
 func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication, limits QuotaLimits) error {
 	active := make([]QuotaWindow, 0, len(limits.Windows))
 	for _, w := range limits.Windows {
@@ -246,52 +352,18 @@ func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication
 		// ずれた)。申請が通るのは全部の窓に空きができてからなので、いちばん
 		// 遅く空くものを返す。行は減る一方なので、そこまで待てば他の窓にも
 		// 空きがある。
+		usages, err := evaluateQuotaWindows(tx, app.UserID, active, now)
+		if err != nil {
+			return err
+		}
 		var worst *QuotaExceededError
-		for _, w := range active {
-			since := now.Add(-w.Duration)
-			var used int64
-			// **全ステータスを数える。** 却下・取り下げで枠が戻ると、申請と
-			// 取り下げを繰り返して審査通知と履歴を大量に作れる。
-			if err := tx.Model(&model.EmojiApplication{}).
-				Where(`"userId" = ? AND "createdAt" >= ?`, app.UserID, since).
-				Count(&used).Error; err != nil {
-				return err
-			}
-			if used < int64(w.Max) {
+		for _, u := range usages {
+			if u.RetryAt.IsZero() {
+				// 満杯でない窓。`RetryAt` が入るのは満杯のときだけ。
 				continue
 			}
-			// **「最古の 1 件」では足りない。** 空くのは used が Max を下回った
-			// ときなので、`used - Max + 1` 件が窓を出るまで待つ必要がある。
-			// 最古だけを見ると、上限を後から下げたときや上限の緩いロールを
-			// 外したときに**広告した時刻に叩いてもまた弾かれる**。
-			// offset は 0 起算なので `used - Max` 件飛ばした行が最後の 1 件。
-			var freed []time.Time
-			if err := tx.Model(&model.EmojiApplication{}).
-				Select(`"createdAt"`).
-				Where(`"userId" = ? AND "createdAt" >= ?`, app.UserID, since).
-				Order(`"createdAt" ASC`).
-				Offset(int(used - int64(w.Max))).
-				Limit(1).
-				Scan(&freed).Error; err != nil {
-				return err
-			}
-			if len(freed) == 0 {
-				// **fail-closed に倒す。** ここへ来るのは残り行数が `used - Max`
-				// 以下のときで、「窓が空いた」とは限らない (used=10 / Max=3 なら
-				// 7 行残っていても空になる)。COUNT を取り直さない以上、満杯の
-				// まま通す側へは倒さない。`now` を置くと最大限保守的な時刻に
-				// なる。**現状は到達しない** — `emoji_application` を消す
-				// production 経路が無く、FK も張っていないので利用者削除の
-				// CASCADE でも消えない。
-				freed = []time.Time{now}
-			}
-			// **1ms 足す。** 窓の判定は `createdAt >= since` なので、境界ちょうど
-			// の行はまだ窓の中にいる。しかも `entity.ISOMillis` は切り捨てなので、
-			// 境界をそのまま広告すると**その値で再スケジュールするクライアントが
-			// 必ず 1 回空振りする**。
-			at := freed[0].Add(w.Duration + time.Millisecond)
-			if worst == nil || at.After(worst.RetryAt) {
-				worst = &QuotaExceededError{Window: w, Used: int(used), RetryAt: at}
+			if worst == nil || u.RetryAt.After(worst.RetryAt) {
+				worst = &QuotaExceededError{Window: u.Window, Used: u.Used, RetryAt: u.RetryAt}
 			}
 		}
 		if worst != nil {
@@ -461,14 +533,25 @@ FROM "emoji_application" a
 WHERE a."id" <> @id AND (` + relatedMatchAny + `)
 GROUP BY a."status"`
 
-	var rows []struct {
-		Status string
-		N      int
-	}
+	var rows []statusCountRow
 	if err := r.db.Raw(q, relatedArgs(app)).Scan(&rows).Error; err != nil {
 		return RelatedCounts{}, err
 	}
-	var out RelatedCounts
+	return foldStatusCounts(rows), nil
+}
+
+// statusCountRow is one `GROUP BY "status"` row.
+type statusCountRow struct {
+	Status string
+	N      int
+}
+
+// foldStatusCounts turns grouped rows into the API shape.
+//
+// **未知の status も Total には数える。** 内訳から漏れても「何件ある」という
+// 事実は伝える (status が増えたときに件数が合わなくなるより良い)。
+func foldStatusCounts(rows []statusCountRow) StatusCounts {
+	var out StatusCounts
 	for _, row := range rows {
 		out.Total += row.N
 		switch row.Status {
@@ -481,8 +564,59 @@ GROUP BY a."status"`
 		case model.EmojiApplicationCanceled:
 			out.Canceled = row.N
 		}
-		// **未知の status も Total には数える。** 内訳から漏れても「関連あり」
-		// という事実は伝える (status が増えたときに件数が合わなくなるより良い)。
 	}
-	return out, nil
+	return out
+}
+
+// likeEscaper neutralises LIKE metacharacters in a user-supplied search string.
+//
+// **バックスラッシュを先に置く。** strings.Replacer は左から順に 1 回ずつ当てる
+// ので後から二重に置換されることは無いが、順序を書き換えたときに気付けるよう
+// 意図を残す。PostgreSQL の LIKE の既定エスケープ文字はバックスラッシュなので
+// `ESCAPE` 句は付けない (句をリテラルで書くと standard_conforming_strings に
+// 依存する)。
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
+func (r *emojiApplicationRepository) ListByUserFiltered(userID, status, query string, limit int, untilID string) ([]model.EmojiApplication, error) {
+	q := r.db.Model(&model.EmojiApplication{}).Where(`"userId" = ?`, userID)
+	switch status {
+	case "", EmojiApplicationFilterAll:
+	case model.EmojiApplicationPending, model.EmojiApplicationApproved,
+		model.EmojiApplicationRejected, model.EmojiApplicationCanceled:
+		q = q.Where(`"status" = ?`, status)
+	default:
+		// **未知の status を全件に倒さない。** 絞ったつもりで全部出るほうが
+		// 危険側。handler も弾くが、ここでも閉じる。
+		return []model.EmojiApplication{}, nil
+	}
+	if term := strings.TrimSpace(query); term != "" {
+		like := "%" + likeEscaper.Replace(term) + "%"
+		// **remoteHost / remoteName は NULL を取りうる。** ILIKE は NULL に
+		// 対して NULL を返すので OR の中では偽として扱われ、own の申請が
+		// 検索から落ちることはない (名前側で拾う)。
+		q = q.Where(`("name" ILIKE @like OR "remoteHost" ILIKE @like OR "remoteName" ILIKE @like)`,
+			map[string]any{"like": like})
+	}
+	return r.scanPage(q, limit, untilID)
+}
+
+func (r *emojiApplicationRepository) CountByUserStatus(userID string) (StatusCounts, error) {
+	var rows []statusCountRow
+	if err := r.db.Model(&model.EmojiApplication{}).
+		Select(`"status", count(*) AS n`).
+		Where(`"userId" = ?`, userID).
+		Group(`"status"`).
+		Scan(&rows).Error; err != nil {
+		return StatusCounts{}, err
+	}
+	return foldStatusCounts(rows), nil
+}
+
+func (r *emojiApplicationRepository) QuotaUsage(userID string, windows []QuotaWindow, now time.Time) ([]QuotaWindowUsage, error) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	// **ロックを取らない。** 数えるだけなので、囲うと画面を開いただけで
+	// 申請の直列化 (pg_advisory_xact_lock) に割り込む。
+	return evaluateQuotaWindows(r.db, userID, windows, now)
 }
