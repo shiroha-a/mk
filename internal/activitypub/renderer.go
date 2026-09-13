@@ -1393,6 +1393,30 @@ func (r *Renderer) RenderUndoAnnounce(renoter *model.User, announce *Announce) *
 	return u
 }
 
+// RenderUndoAnnounceForNote builds the Undo(Announce) emitted when a local
+// pure renote (boost) is deleted. Mirrors upstream NoteDeleteService
+// (`renderUndo(renderAnnounce(renote.uri ?? local, note), user)`).
+//
+// **Delete(Tombstone) では取り消せない。** Announce の id は
+// `<noteURI>/activity` で、受信側はその id を renote の uri として保存する
+// (mk-go 自身も processor.go が `renote.URI = act.ID` とする)。Tombstone の
+// id は `/activity` の付かない note URI なので一致せず、ブーストが相手側に
+// 残り続ける。
+//
+// renote 先の URI は noteResolver で解決する (リモート note のブーストでは
+// 相手側の URI でないと mk-go 受信側の handleUndoAnnounce が対象を引けない)。
+// idGen が nil のときは inner Announce の published を省く (omitempty)。
+func (r *Renderer) RenderUndoAnnounceForNote(renoter *model.User, renote *model.Note, idGen id.Generator) *Undo {
+	if renoter == nil || renote == nil || renote.RenoteID == nil || *renote.RenoteID == "" {
+		return nil
+	}
+	announce := r.RenderAnnounce(renoter, renote.ID, r.resolveNoteURI(*renote.RenoteID), renote.Visibility, idGen)
+	// inner Announce の @context は outer Undo に集約する (RenderQuestionUpdate
+	// と同じパターン、#2510)。
+	announce.Context = nil
+	return r.RenderUndoAnnounce(renoter, announce)
+}
+
 // RenderDelete returns a Delete activity targeting the note URI. Object is a
 // Tombstone so receivers can match it to a previously known note.
 func (r *Renderer) RenderDelete(author *model.User, noteURI string) *Delete {
@@ -1403,7 +1427,10 @@ func (r *Renderer) RenderDelete(author *model.User, noteURI string) *Delete {
 				Type: "Delete",
 			},
 			Actor: r.urls.UserURI(author.ID),
-			To:    []string{Public},
+			// **to を付けない (upstream ApRendererService.renderDelete と同じ)。**
+			// 実配送先は inbox の一覧で決まるので受信者集合は変わらないが、
+			// to:[Public] のままだと followers/specified なノートの URI を
+			// 参照する activity が公開宛てとして出てしまう。
 			// upstream renderDelete は published を常に付与する (#1948-11)。
 			Published: time.Now().UTC().Format(publishedLayout),
 		},
@@ -1518,6 +1545,33 @@ func (r *Renderer) RenderMove(src *model.User, dstURI string) *Move {
 	return m
 }
 
+// setChatMessageContent fills the AP `content` of a chat message note with the
+// same MFM -> HTML conversion RenderNote performs, and mirrors its
+// `source` / `_misskey_content` handling.
+//
+// `content` は mediaType を出していないので AS2 既定の text/html として解釈
+// される。生の本文をそのまま入れると `<script>` や `onerror=` が受信側の
+// content に HTML として載る (chat には入力時のサニタイズも無い)。RenderNote
+// と同じ mfm.Parse -> mfm.ToHTML を通すことで、text ノードは
+// html.EscapeString され、MFM は upstream と同じ HTML になる。
+//
+// source/_misskey_content を出す条件も RenderNote に揃える (標準ノードだけ
+// なら省略)。これが無いと受信側は HTML から MFM を復元するしかなくなる。
+func (r *Renderer) setChatMessageContent(note *Note, text *string) {
+	if text == nil || *text == "" {
+		return
+	}
+	nodes := mfm.Parse(*text)
+	note.Content = mfm.ToHTML(nodes, r.host)
+	if !mfm.IsSimple(nodes) {
+		note.MisskeyContent = APLenientString(*text)
+		note.Source = &Source{
+			Content:   *text,
+			MediaType: "text/x.misskeymarkdown",
+		}
+	}
+}
+
 // RenderChatMessage returns a CherryPick-compatible Create activity wrapping
 // a Note flagged with `_misskey_talk: true`. ApRendererService.renderChatMessage
 // と同じ wire format を出すことで CherryPick / レガシー Misskey との 1-on-1
@@ -1539,9 +1593,7 @@ func (r *Renderer) RenderChatMessage(msg *model.ChatMessage, senderURI, recipien
 		To:           []string{recipientURI},
 		MisskeyTalk:  true,
 	}
-	if msg.Text != nil {
-		note.Content = *msg.Text
-	}
+	r.setChatMessageContent(note, msg.Text)
 	c := &Create{
 		Activity: Activity{
 			Object: Object{
@@ -1579,9 +1631,7 @@ func (r *Renderer) RenderChatRoomMessage(msg *model.ChatMessage, senderURI strin
 		To:           memberURIs,
 		MisskeyTalk:  true,
 	}
-	if msg.Text != nil {
-		note.Content = *msg.Text
-	}
+	r.setChatMessageContent(note, msg.Text)
 	c := &Create{
 		Activity: Activity{
 			Object: Object{
@@ -1617,13 +1667,28 @@ func (r *Renderer) addressing(n *model.Note) (to []string, cc []string) {
 			// resolvePerson に失敗して visibleUsers が空になり DM が silent-drop する
 			// (自ドメイン /users/<remoteId> は送信元で 404、内部 ID 漏洩にもなる)。
 			// mentionResolver は local→UserURI / remote→user.URI を返す (mention と同経路)。
-			uri := r.urls.UserURI(uid)
+			//
+			// **解決できなかった宛先は落とす。** upstream の specified は
+			// `to = mentionedRemoteUsers の uri` で、名前を引けないものは
+			// そもそも並ばない (空の to も upstream では普通に起きる)。自ドメインの
+			// `/users/<内部ID>` を代わりに置くと、(a) 自分の DB に居ない user を
+			// 指す解決不能な URI になり、(b) 他の DM 宛先サーバへ内部 DB ID が
+			// 出る。mention 側 (RenderNote の Mentions ループ) も resolve 失敗は
+			// skip するので経路を揃える。
+			//
+			// resolver 未配線 (nil) のときだけ従来どおり local URI を置く。
+			// local か remote かを判別する手段が無く、全宛先を落とすと specified
+			// ノートの to が必ず空になるため。production は router.go が必ず
+			// 配線する。
 			if r.mentionResolver != nil {
-				if _, resolved, err := r.mentionResolver.ResolveMention(uid); err == nil && resolved != "" {
-					uri = resolved
+				_, resolved, err := r.mentionResolver.ResolveMention(uid)
+				if err != nil || resolved == "" {
+					continue
 				}
+				to = append(to, resolved)
+				continue
 			}
-			to = append(to, uri)
+			to = append(to, r.urls.UserURI(uid))
 		}
 	}
 	return to, cc

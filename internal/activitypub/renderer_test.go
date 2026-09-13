@@ -860,7 +860,156 @@ func TestRenderer_RenderDelete(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "Tombstone", tomb.Type)
 	assert.Equal(t, "https://example.com/notes/n1", tomb.ID)
-	assert.Contains(t, d.To, Public)
+	// **to は付けない (upstream ApRendererService.renderDelete と同じ)。**
+	// followers / specified なノートの URI を参照する activity を公開宛てで
+	// 出さないため。実配送先は inbox の一覧で決まるので受信者集合は変わらない。
+	assert.Empty(t, d.To)
+	m := marshalMap(t, d)
+	_, hasTo := m["to"]
+	assert.False(t, hasTo, "Delete に to キーを出さない")
+}
+
+// chat の本文は AS2 既定の text/html として解釈される `content` に入るので、
+// RenderNote と同じ MFM → HTML 変換 (= text ノードの html escape) を通す。
+// 通していないと `<script>` や `onerror=` が受信側の content に生で載る。
+func TestRenderer_RenderChatMessage_EscapesHTML(t *testing.T) {
+	r := newRenderer()
+	txt := "<script>alert(1)</script><img src=x onerror=alert(2)>"
+	msg := &model.ChatMessage{ID: "m1", Text: &txt}
+	c := r.RenderChatMessage(msg, "https://example.com/users/alice",
+		"https://remote.example/users/bob", "2026-05-24T00:00:00Z")
+	note, ok := c.Object.(*Note)
+	require.True(t, ok)
+	assert.Equal(t,
+		"&lt;script&gt;alert(1)&lt;/script&gt;&lt;img src=x onerror=alert(2)&gt;",
+		note.Content)
+	assert.NotContains(t, note.Content, "<script>")
+	assert.NotContains(t, note.Content, "<img")
+}
+
+func TestRenderer_RenderChatRoomMessage_EscapesHTML(t *testing.T) {
+	r := newRenderer()
+	txt := "<script>alert(1)</script>"
+	msg := &model.ChatMessage{ID: "m1", Text: &txt}
+	c := r.RenderChatRoomMessage(msg, "https://example.com/users/alice",
+		[]string{"https://remote.example/users/bob"},
+		"https://example.com/chat/rooms/room1", "2026-05-24T00:00:00Z")
+	note, ok := c.Object.(*Note)
+	require.True(t, ok)
+	assert.Equal(t, "&lt;script&gt;alert(1)&lt;/script&gt;", note.Content)
+	assert.NotContains(t, note.Content, "<script>")
+}
+
+// MFM は RenderNote と同じく HTML へ変換し、標準ノードだけでないときは
+// source / _misskey_content に raw MFM を併記する (受信側が復元できるように)。
+func TestRenderer_RenderChatMessage_MFMAndSource(t *testing.T) {
+	r := newRenderer()
+	txt := "**bold** <b>"
+	msg := &model.ChatMessage{ID: "m1", Text: &txt}
+	c := r.RenderChatMessage(msg, "https://example.com/users/alice",
+		"https://remote.example/users/bob", "2026-05-24T00:00:00Z")
+	note := c.Object.(*Note)
+	assert.Equal(t, "<b>bold</b> &lt;b&gt;", note.Content)
+	require.NotNil(t, note.Source)
+	assert.Equal(t, txt, note.Source.Content)
+	assert.Equal(t, "text/x.misskeymarkdown", note.Source.MediaType)
+	assert.Equal(t, txt, note.MisskeyContent.String())
+}
+
+// 素のテキストは変換後も同じ文字列で、source も付かない (既存 wire 互換)。
+func TestRenderer_RenderChatMessage_PlainTextUnchanged(t *testing.T) {
+	r := newRenderer()
+	txt := "hello room"
+	msg := &model.ChatMessage{ID: "m1", Text: &txt}
+	c := r.RenderChatMessage(msg, "https://example.com/users/alice",
+		"https://remote.example/users/bob", "2026-05-24T00:00:00Z")
+	note := c.Object.(*Note)
+	assert.Equal(t, "hello room", note.Content)
+	assert.Nil(t, note.Source)
+	assert.Empty(t, note.MisskeyContent.String())
+
+	// Text が nil でも panic せず content は空。
+	c2 := r.RenderChatMessage(&model.ChatMessage{ID: "m2"}, "https://example.com/users/alice",
+		"https://remote.example/users/bob", "2026-05-24T00:00:00Z")
+	assert.Empty(t, c2.Object.(*Note).Content)
+}
+
+// 純粋リノートの削除は Delete(Tombstone) ではなく Undo(Announce) を出す。
+// 受信側は Announce を `uri = <noteURI>/activity` で保存するので、Tombstone の
+// id (= /activity の付かない note URI) では一致せずブーストが残る。
+func TestRenderer_RenderUndoAnnounceForNote(t *testing.T) {
+	r := newRenderer()
+	targetURI := "https://remote.example/notes/orig"
+	r.SetNoteResolver(&stubNoteResolver{note: &model.Note{URI: &targetURI}})
+	renoter := &model.User{ID: "alice"}
+	renoteTarget := "target-note"
+	note := &model.Note{
+		ID: "renote1", UserID: "alice",
+		RenoteID:   &renoteTarget,
+		Visibility: model.NoteVisibilityPublic,
+	}
+
+	u := r.RenderUndoAnnounceForNote(renoter, note, nil)
+	require.NotNil(t, u)
+	assert.Equal(t, "Undo", u.Type.String())
+	assert.Equal(t, "https://example.com/users/alice", u.Actor)
+	ann, ok := u.Object.(*Announce)
+	require.True(t, ok)
+	assert.Equal(t, "Announce", ann.Type.String())
+	assert.Equal(t, "https://example.com/notes/renote1/activity", ann.ID,
+		"Announce id は /activity 付き (受信側が renote の uri として保存する値)")
+	assert.Equal(t, targetURI, ann.Object,
+		"object はブースト元の URI (リモートなら相手側の URI)")
+	assert.Equal(t, ann.ID+"/undo", u.ID)
+	assert.Nil(t, ann.Context, "inner Announce の @context は outer Undo に集約する")
+	assert.NotNil(t, u.Context)
+}
+
+// noteResolver が URI を持たない (= ローカル note のブースト) ときはローカル URI。
+func TestRenderer_RenderUndoAnnounceForNote_LocalTarget(t *testing.T) {
+	r := newRenderer()
+	r.SetNoteResolver(&stubNoteResolver{note: &model.Note{}})
+	renoteTarget := "local-target"
+	u := r.RenderUndoAnnounceForNote(&model.User{ID: "alice"}, &model.Note{
+		ID: "renote1", UserID: "alice", RenoteID: &renoteTarget,
+		Visibility: model.NoteVisibilityHome,
+	}, nil)
+	require.NotNil(t, u)
+	ann := u.Object.(*Announce)
+	assert.Equal(t, "https://example.com/notes/local-target", ann.Object)
+	// to/cc は renote 自身の visibility 由来 (home)。
+	assert.Equal(t, []string{"https://example.com/users/alice/followers"}, []string(ann.To))
+}
+
+func TestRenderer_RenderUndoAnnounceForNote_NilGuards(t *testing.T) {
+	r := newRenderer()
+	renoter := &model.User{ID: "alice"}
+	assert.Nil(t, r.RenderUndoAnnounceForNote(nil, &model.Note{ID: "n1"}, nil))
+	assert.Nil(t, r.RenderUndoAnnounceForNote(renoter, nil, nil))
+	// renote でない note は取り消す Announce が無い。
+	assert.Nil(t, r.RenderUndoAnnounceForNote(renoter, &model.Note{ID: "n1"}, nil))
+	empty := ""
+	assert.Nil(t, r.RenderUndoAnnounceForNote(renoter, &model.Note{ID: "n1", RenoteID: &empty}, nil))
+}
+
+// specified の to は解決できた宛先だけを並べる。解決できないものに自ドメインの
+// `/users/<内部ID>` を置くと、他の DM 宛先サーバへ内部 DB ID が出る。
+func TestRenderer_RenderNote_SpecifiedDropsUnresolvableRecipient(t *testing.T) {
+	r := newRenderer()
+	r.SetMentionResolver(&stubMentionResolver{entries: map[string]struct{ name, uri string }{
+		"uRemote": {name: "@bob@remote.example", uri: "https://remote.example/users/bob"},
+	}})
+	idGen := newIDGen(t)
+	n := &model.Note{
+		ID:             idGen.Generate(time.Now()),
+		UserID:         "author",
+		Visibility:     model.NoteVisibilitySpecified,
+		VisibleUserIDs: model.StringArray{"uRemote", "ghost"},
+	}
+	out := r.RenderNote(n, idGen)
+	assert.Equal(t, []string{"https://remote.example/users/bob"}, []string(out.To))
+	assert.NotContains(t, []string(out.To), "https://example.com/users/ghost",
+		"解決できない宛先に自ドメインの内部 ID を出さない")
 }
 
 // #1759: actor delete は object も actor も当該 user の URI 文字列 (Tombstone 不使用)。
