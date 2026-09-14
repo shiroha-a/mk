@@ -370,7 +370,15 @@ func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, 
 	// drive_file を引いて storedInternal を見る手もあるが、default mode で DB を
 	// 引かない設計 (#637 review UR-014) を崩したくないので、object-not-found の
 	// ときだけローカルを見に行く。ホットパスには何も足さない。
-	if errors.Is(err, coredrive.ErrObjectNotFound) && s.localStorage != nil && !coredrive.StorageIsLocal(s.driveStorage) {
+	//
+	// **種別を問わず倒す (#2990)。** この fallback が守っている行 (移行前 /
+	// TS 時代に保存された `storedInternal = true`) の実体は object storage に
+	// 置かれていないので、あちら側の失敗が not-found か障害かは判断の材料に
+	// ならない。`S3Storage.Get` が全エラーを not-found に潰していた
+	// 頃はどちらでも倒れていたが、種別を分けた結果**鍵の期限切れや 503 で
+	// ローカルを見に行かなくなり、移行前の画像が全部 500 になる**。
+	// ローカルにも無ければ下の分岐が元のエラーをそのまま伝える。
+	if err != nil && s.localStorage != nil && !coredrive.StorageIsLocal(s.driveStorage) {
 		if b, lerr := s.localStorage.Get(primaryKey); lerr == nil {
 			body, err = b, nil
 			accessKey = primaryKey

@@ -5,10 +5,14 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net/http"
 	"testing"
 
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -195,15 +199,64 @@ func TestS3Storage_Get_HappyPath(t *testing.T) {
 	assert.Equal(t, "file content", string(data))
 }
 
-func TestS3Storage_Get_NotFound(t *testing.T) {
-	mock := &mockS3API{getErr: errors.New("NoSuchKey")}
-	st := NewS3Storage(S3StorageConfig{
-		Client: mock,
-		Bucket: "bucket",
-	})
-
-	_, err := st.Get("missing")
-	assert.ErrorIs(t, err, ErrObjectNotFound)
+// **「無い」と「読めない」を分ける (#2990)。** すべて ErrObjectNotFound に潰すと、
+// 認証切れや provider の 5xx が「そんなオブジェクトは無い」に化け、呼び出し側が
+// 404 を返す / 申請を却下扱いにする / 「絵文字を消せ」と案内する、という危険側の
+// 判断をする (#2792)。
+func TestS3Storage_Get_ErrorClassification(t *testing.T) {
+	notFound := func(code string, status int) error {
+		return &awshttp.ResponseError{
+			ResponseError: &smithyhttp.ResponseError{
+				Response: &smithyhttp.Response{Response: &http.Response{StatusCode: status}},
+				Err:      &smithy.GenericAPIError{Code: code},
+			},
+		}
+	}
+	bareStatus := func(status int) error {
+		return &awshttp.ResponseError{
+			ResponseError: &smithyhttp.ResponseError{
+				Response: &smithyhttp.Response{Response: &http.Response{StatusCode: status}},
+				Err:      errors.New("could not parse response body"),
+			},
+		}
+	}
+	for _, tc := range []struct {
+		name       string
+		err        error
+		wantAbsent bool
+	}{
+		{"NoSuchKey (S3 本家)", &types.NoSuchKey{}, true},
+		{"NotFound + HTTP 404", notFound("NotFound", http.StatusNotFound), true},
+		{"NotFound コードだけ", &smithy.GenericAPIError{Code: "NotFound"}, true},
+		// **コードが読めないときだけ status を見る。** endpoint が別の HTTP
+		// サーバーを指していて `smithy.APIError` にすらならない 404。
+		{"APIError にならない HTTP 404", bareStatus(http.StatusNotFound), true},
+		// 空のコードで返す `S3API` 実装 (差し替え可能なので有りうる)。
+		{"コードが空 + HTTP 404", notFound("", http.StatusNotFound), true},
+		{"コードが空 + HTTP 500", notFound("", http.StatusInternalServerError), false},
+		// **`NoSuchBucket` は 404 だが「無い」ではない。** バケット名の設定誤りで、
+		// 倒すと 1 文字の typo で全オブジェクトが「消えた」と判定される。
+		{"NoSuchBucket + HTTP 404", notFound("NoSuchBucket", http.StatusNotFound), false},
+		{"知らないコード + HTTP 404", notFound("SlowDown", http.StatusNotFound), false},
+		{"AccessDenied (403)", notFound("AccessDenied", http.StatusForbidden), false},
+		{"provider の 5xx", notFound("InternalError", http.StatusInternalServerError), false},
+		{"接続断", errors.New("dial tcp: connection refused"), false},
+		// 文字列に NoSuchKey を含むだけの素のエラーは「無い」と断定できない。
+		{"素のエラー (文字列だけ一致)", errors.New("NoSuchKey"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			st := NewS3Storage(S3StorageConfig{Client: &mockS3API{getErr: tc.err}, Bucket: "bucket"})
+			_, err := st.Get("k")
+			require.Error(t, err)
+			if tc.wantAbsent {
+				assert.ErrorIs(t, err, ErrObjectNotFound)
+				return
+			}
+			assert.NotErrorIs(t, err, ErrObjectNotFound,
+				"障害を not-found に潰している (呼び出し側が危険側に倒れる)")
+			assert.ErrorIs(t, err, tc.err, "元のエラーが辿れない")
+		})
+	}
 }
 
 func TestS3Storage_Delete_HappyPath(t *testing.T) {

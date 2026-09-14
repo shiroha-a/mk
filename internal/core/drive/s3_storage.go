@@ -3,13 +3,17 @@ package drive
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/aws/smithy-go"
 )
 
 // S3API abstracts the subset of S3 client operations used by S3Storage.
@@ -132,6 +136,15 @@ func (s *S3Storage) Put(accessKey string, body io.Reader) (string, error) {
 }
 
 // Get retrieves an object from S3 and returns an io.ReadCloser.
+//
+// **本当に「無い」ときだけ ErrObjectNotFound を返す (#2990)。** 以前は
+// `GetObject` の失敗を種別を問わず ErrObjectNotFound に潰していたので、
+// 認証切れ・throttling・endpoint 誤設定・provider の 5xx・接続断がすべて
+// 「そんなオブジェクトは無い」に化けていた。#2792 が禁じている形そのもので、
+// 呼び出し側は 3 つとも危険な判断をする — media proxy は 404 を返して
+// 監視に 5xx が立たず、絵文字申請の承認は 400 `NO_SUCH_FILE` を返して
+// モデレーターには却下すべき申請に見え、#2990 のバッチは「元画像を復元できない
+// ので絵文字を消すか差し替えろ」と案内する。
 func (s *S3Storage) Get(accessKey string) (io.ReadCloser, error) {
 	key := s.objectKey(accessKey)
 	output, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
@@ -139,9 +152,53 @@ func (s *S3Storage) Get(accessKey string) (io.ReadCloser, error) {
 		Key:    aws.String(key),
 	})
 	if err != nil {
-		return nil, ErrObjectNotFound
+		if isS3NotFound(err) {
+			return nil, ErrObjectNotFound
+		}
+		return nil, fmt.Errorf("s3 get %s: %w", key, err)
 	}
 	return output.Body, nil
+}
+
+// isS3NotFound reports whether err means the object genuinely is not there.
+//
+// **読めているエラーコードを最優先する。** S3 本家と互換実装 (MinIO / R2 / Wasabi /
+// Ceph) はどれも 404 + `<Code>NoSuchKey</Code>` を返す。`NotFound` のほうは
+// **SDK が status から作るコード** — 本文に `<Code>` も `<Message>` も無い 404 だと
+// `s3shared` の `UseStatusCode` が `http.StatusText(404)` から `NotFound` を組み立てる
+// (本文が空 / plain text の互換実装で実際に起きる)。
+//
+// **`NoSuchBucket` も HTTP 404 だが「無い」ではない** — バケット名の設定誤りで、
+// これを not-found に倒すと **1 文字の typo で全オブジェクトが「消えた」と判定
+// される** (#2990 のバッチはそれを「絵文字を消すか差し替えろ」と案内する)。
+// コードが読めているなら、知らないコードも「無い」とは断定しない。
+//
+// **`s3:ListBucket` 権限が無いバケットは対象外。** あの構成では存在しないキーへの
+// `GetObject` が 403 `AccessDenied` になり、ここでは障害として扱う。S3 自身が存在の
+// 有無を隠しているので「無い」と断定できず、fail-closed に倒すしかない。
+//
+// **HTTP status に頼るのはコードが読めないときだけ。** endpoint がまったく別の
+// HTTP サーバーを指していると `smithy.APIError` にすらならないので、その場合だけ
+// 404 を「無い」と見なす。
+//
+// **`*types.NoSuchKey` を名指しでは見ない。** あれも `smithy.APIError` を満たし
+// `ErrorCode() == "NoSuchKey"` を返すので、名指しの分岐は一度も実行されない
+// (変異検証で素通りすることを確認した)。
+func isS3NotFound(err error) bool {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		switch apiErr.ErrorCode() {
+		case "NoSuchKey", "NotFound":
+			return true
+		case "":
+			// **この deserializer では起きない** (必ず何かのコードが入る) が、
+			// `S3API` を差し替えた実装が空で返す余地はあるので status へ抜ける。
+		default:
+			return false
+		}
+	}
+	var respErr *awshttp.ResponseError
+	return errors.As(err, &respErr) && respErr.HTTPStatusCode() == http.StatusNotFound
 }
 
 // Delete removes an object from S3. Missing objects are silently ignored.
