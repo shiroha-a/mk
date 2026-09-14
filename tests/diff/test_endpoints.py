@@ -49,6 +49,10 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # 申請のロール別の期間上限 (#2958) と審査待ち上限 (#2977)。同上。
     "emojiApplicationMaxPerDay", "emojiApplicationMaxPerWeek",
     "emojiApplicationMaxPerMonth", "emojiApplicationMaxPending",
+    # カスタム絵文字をアバターデコレーションにできるか (#2975) も mk-go 独自
+    # policy。upstream の avatar decoration は管理者が登録した素材しか使えない
+    # ので TS 側にキーが無い。docs/divergence.md に additive field として記載済み。
+    "canUseEmojiAsAvatarDecoration",
     # 承認制の登録 (#2554 / #2555) は mk-go 独自機能なので TS 側にキーが無い。
     # meta 直下と features の両方に出る (frontend は features を feature
     # detection に使うため片方だけだと検出できない)。docs/divergence.md に
@@ -106,6 +110,10 @@ USER_IGNORE = DEFAULT_IGNORE_KEYS | {
     # 申請のロール別の期間上限 (#2958) と審査待ち上限 (#2977)。同上。
     "emojiApplicationMaxPerDay", "emojiApplicationMaxPerWeek",
     "emojiApplicationMaxPerMonth", "emojiApplicationMaxPending",
+    # カスタム絵文字をアバターデコレーションにできるか (#2975) も mk-go 独自
+    # policy。upstream の avatar decoration は管理者が登録した素材しか使えない
+    # ので TS 側にキーが無い。docs/divergence.md に additive field として記載済み。
+    "canUseEmojiAsAvatarDecoration",
 }
 
 

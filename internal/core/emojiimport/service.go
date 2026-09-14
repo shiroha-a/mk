@@ -45,12 +45,26 @@ type DriveReader interface {
 }
 
 // Deps bundles the dependencies needed by Importer.
+// DecorationCacheInvalidator drops the in-process map used to resolve
+// emoji-backed avatar decorations (#2975).
+//
+// **zip インポートは `publishEmoji*` を通らない。** admin の絵文字 endpoint は
+// どれもあの helper を経由するのでそちらで捨てているが、この経路は
+// `EmojiRepo` を直に叩くので自分で捨てる必要がある。捨てないと、インポート
+// 直後の絵文字は TTL のあいだ装着しても表示されず、置き換えで消えた絵文字は
+// TTL のあいだプロフィールに残る (#2258 と同じ形)。
+type DecorationCacheInvalidator interface {
+	Invalidate()
+}
+
 type Deps struct {
 	UserRepo  repository.UserRepository
 	EmojiRepo repository.EmojiRepository
 	Drive     DriveReader
 	Uploader  *drive.Service
 	IDGen     id.Generator
+	// DecorationCache は未配線でも動く (TTL 分だけ反映が遅れる)。
+	DecorationCache DecorationCacheInvalidator
 }
 
 // Importer runs the emoji ZIP import process.
@@ -290,6 +304,12 @@ func readZipEntry(f *zip.File, maxBytes int64) ([]byte, error) {
 // the user is *not* propagated here because the resulting drive file is
 // system-owned (see Upload comment below for #670 rationale).
 func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []byte) error {
+	// **捨てるのは defer 1 本にする。** delete と create の 2 箇所に書くと、
+	// 片方を消しても「この関数はどこかで捨てている」という静的な検査を
+	// 素通りする (実測)。create が途中で失敗しても delete は済んでいるので、
+	// どのみち return 時に捨てる必要がある。
+	defer i.invalidateDecorationCache()
+
 	// 既存 local 絵文字 (同名) は上書きのために先に削除する。
 	// 本家 Misskey では emojisRepository.delete({ name, host: IsNull() }) 相当。
 	if existing, err := i.deps.EmojiRepo.FindByNameAndHost(record.Emoji.Name, nil); err == nil && existing != nil {
@@ -345,4 +365,12 @@ func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []b
 		return fmt.Errorf("create emoji row: %w", err)
 	}
 	return nil
+}
+
+// invalidateDecorationCache is a nil-safe helper (unit tests leave it unwired).
+func (i *Importer) invalidateDecorationCache() {
+	if i.deps.DecorationCache == nil {
+		return
+	}
+	i.deps.DecorationCache.Invalidate()
 }

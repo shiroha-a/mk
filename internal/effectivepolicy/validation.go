@@ -74,6 +74,15 @@ var defaults = map[string]any{
 	// 同時に審査待ちにできる件数 (#2977)。**上の期間上限とは数え方が逆**で、
 	// pendingだけを数えるので却下・取り下げ・承認で枠が戻る。既定は0 (無制限)。
 	"emojiApplicationMaxPending": 0,
+	// カスタム絵文字をアバターデコレーションとして重ねられるか (#2975、mk-go独自)。
+	// **個数は専用のpolicyを持たず、既存のavatarDecorationLimitに合算する** —
+	// 管理者が登録したデコレーションと同じ場所に並ぶので、別枠にすると
+	// 「1つしか付けられない」と言いながら合計2つ付いている状態になる。
+	//
+	// 既定はtrue。ローカル絵文字は本文・リアクションで既に誰にでも見えており、
+	// センシティブなものは設定時にも表示時にも弾く。canCreateChannelと同じく、
+	// 絞りたい運営者がroleでfalseにする。
+	"canUseEmojiAsAvatarDecoration": true,
 	// optOutNotificationTypesはmk-go独自 (#2898)。ロール単位で受け取らない通知
 	// タイプを列挙する。型ごとにcanReceiveXxxを増やす形にすると、固有通知を
 	// 足すたびにpolicyが増えるので1キーにまとめている。

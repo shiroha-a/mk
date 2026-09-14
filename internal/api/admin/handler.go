@@ -151,6 +151,7 @@ type Handler struct {
 	metaResponseInvalidator MetaResponseCacheInvalidator
 	avatarDecoRepo          repository.AvatarDecorationRepository
 	avatarDecoInvalidator   AvatarDecorationCacheInvalidator
+	emojiDecoInvalidator    AvatarDecorationCacheInvalidator
 	inviteRepo              repository.RegistrationTicketRepository
 	promoNoteRepo           repository.PromoNoteRepository
 	noteFinder              NoteFinder
@@ -458,6 +459,33 @@ func (h *Handler) invalidateAvatarDecorationCache() {
 		return
 	}
 	h.avatarDecoInvalidator.Invalidate()
+}
+
+// SetEmojiDecorationInvalidator wires the cache used to resolve emoji-backed
+// avatar decorations (#2975). 絵文字を作った直後にそれを装着すると、キャッシュが
+// 古い間は**保存されているのに API が `avatarDecorations: []` を返す** —
+// #2258 が catalog 側で踏んだのと同じ形なので、同じように mutation で捨てる。
+func (h *Handler) SetEmojiDecorationInvalidator(inv AvatarDecorationCacheInvalidator) {
+	h.emojiDecoInvalidator = inv
+}
+
+// invalidateEmojiDecorationCache is a nil-safe helper. noop when unwired.
+//
+// **呼ぶのは publishEmoji* の 4 つで、いずれも body の先頭**。どの helper も
+// `broadcastPub == nil` で早期 return するので、後ろに置くと stream を
+// 使わない構成で効かなくなる。位置は
+// `TestEveryEmojiPublishHelperCallsInvalidate` が AST で固定する。
+//
+// **helper に置くだけでは足りない。** 絵文字 row を変えて publishEmoji* を
+// 通らない経路があると素通りするので、`TestEmojiMutationsDropDecorationCache`
+// が「絵文字を変える関数はキャッシュを捨てる」を関数単位で見る (zip
+// インポートは実際にこちら側で、`internal/core/emojiimport` が自前の
+// invalidator を持つ)。
+func (h *Handler) invalidateEmojiDecorationCache() {
+	if h.emojiDecoInvalidator == nil {
+		return
+	}
+	h.emojiDecoInvalidator.Invalidate()
 }
 
 // SetAvatarDecorationRepo attaches an AvatarDecorationRepository for
@@ -2684,6 +2712,7 @@ func (h *Handler) SetBroadcastPublisher(p BroadcastPublisher) { h.broadcastPub =
 
 // publishEmojiAdded emits emojiAdded `{emoji}` (single packed emoji).
 func (h *Handler) publishEmojiAdded(e *model.Emoji) {
+	h.invalidateEmojiDecorationCache()
 	if h.broadcastPub == nil {
 		return
 	}
@@ -2692,6 +2721,7 @@ func (h *Handler) publishEmojiAdded(e *model.Emoji) {
 
 // publishEmojiUpdated emits emojiUpdated `{emojis:[...]}` (packed array).
 func (h *Handler) publishEmojiUpdated(emojis ...*model.Emoji) {
+	h.invalidateEmojiDecorationCache()
 	if h.broadcastPub == nil || len(emojis) == 0 {
 		return
 	}
@@ -2704,6 +2734,7 @@ func (h *Handler) publishEmojiUpdated(emojis ...*model.Emoji) {
 
 // publishEmojiDeleted emits emojiDeleted `{emojis:[...]}` (packed array).
 func (h *Handler) publishEmojiDeleted(emojis ...*model.Emoji) {
+	h.invalidateEmojiDecorationCache()
 	if h.broadcastPub == nil || len(emojis) == 0 {
 		return
 	}
@@ -2717,6 +2748,7 @@ func (h *Handler) publishEmojiDeleted(emojis ...*model.Emoji) {
 // publishEmojiUpdatedByIDs re-fetches the given emoji ids and emits a single
 // emojiUpdated event (upstream bulk ops の packDetailedMany(ids) 相当、#2046)。
 func (h *Handler) publishEmojiUpdatedByIDs(ids []string) {
+	h.invalidateEmojiDecorationCache()
 	if h.broadcastPub == nil || h.emojiRepo == nil || len(ids) == 0 {
 		return
 	}

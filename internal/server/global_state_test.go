@@ -47,6 +47,7 @@ func restoreProcessGlobals(t *testing.T) {
 	t.Cleanup(func() {
 		entity.SetMediaURLContext(nil)
 		entity.SetAvatarDecorationLookup(nil)
+		entity.SetEmojiDecorationLookup(nil)
 		entity.SetCanChatLookup(nil)
 		entity.SetUserRolesLookup(nil)
 		entity.SetShowRemoteBadgesLookup(nil)
@@ -119,6 +120,7 @@ func TestProcessGlobalsAreRestored(t *testing.T) {
 
 	want := map[string]string{
 		"entity.SetAvatarDecorationLookup": "router.go",
+		"entity.SetEmojiDecorationLookup":  "router.go",
 		"entity.SetCanChatLookup":          "router.go",
 		"entity.SetUserRolesLookup":        "router.go",
 		"entity.SetShowRemoteBadgesLookup": "router.go",

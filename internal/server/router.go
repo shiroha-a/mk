@@ -173,6 +173,14 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 5 分 TTL の in-memory cache + mutation 時 invalidate で DB 負荷を消す
 	// (#300 3-6)。
 	emojiRepo := repository.NewCachedEmojiRepository(repository.NewEmojiRepository(s.db))
+	// 絵文字由来のアバターデコレーション (#2975) の解決に使う。**catalog と同じ形の
+	// TTL cache だが、載せるのはローカルかつ非センシティブなものだけ**で、その
+	// 条件がそのまま「表示してよいか」の判定になっている。絵文字をセンシティブに
+	// したり消したりすると、後始末なしに次の TTL で全プロフィールから消える。
+	//
+	// **`emojiRepo` より後・絵文字を変える配線より前に置く。** zip インポータと
+	// admin handler の両方がこの invalidator を受け取る。
+	emojiDecorationResolver := avatardecoration.NewEmojiResolver(emojiRepo)
 	blockingRepo := repository.NewBlockingRepository(s.db)
 	mutingRepo := repository.NewMutingRepository(s.db)
 	renoteMutingRepo := repository.NewRenoteMutingRepository(s.db)
@@ -706,6 +714,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		Drive:     driveReader,
 		Uploader:  driveService,
 		IDGen:     idGen,
+		// zip インポートは publishEmoji* を通らないので、絵文字由来の
+		// アバターデコレーション (#2975) のキャッシュはここで捨てる。
+		DecorationCache: emojiDecorationResolver,
 	})
 	emojiImportProcessor := processors.NewImportCustomEmojisProcessor(emojiImporter)
 	s.queueServer.Handle(queue.TaskTypeImportCustomEmojis, emojiImportProcessor.Handle)
@@ -1912,6 +1923,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// admin 管理で低頻度更新のため 30s TTL の in-memory cache で十分。
 	avatarDecorationResolver := avatardecoration.NewResolver(avatarDecorationRepo)
 	entity.SetAvatarDecorationLookup(avatarDecorationResolver)
+	entity.SetEmojiDecorationLookup(emojiDecorationResolver)
 	// PackUserLite の canChat を role policy 由来 (= upstream
 	// `chatAvailability === "available"`) に揃える (#988)。roleService 自体
 	// が in-memory cache を持つ (#761) ので追加 DB 負荷は実質ゼロ。
@@ -3073,6 +3085,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// catalog 更新を entity 側 packer に即時反映する (#2258)。TTL 任せだと
 	// 作成直後に装着された decoration が lookup miss で silent drop される。
 	adminHandler.SetAvatarDecorationInvalidator(avatarDecorationResolver)
+	adminHandler.SetEmojiDecorationInvalidator(emojiDecorationResolver)
 	// admin/ad/* の変更を /api/meta の response cache に反映する (#2649)。
 	adminHandler.SetMetaResponseInvalidator(metaHandler)
 	// admin/suspend-user / admin/unsuspend-user / admin/accounts/delete が
@@ -4030,7 +4043,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		{"notes.userFollowingRepo", notesHandler.HasUserFollowingRepo(),
 			"followers 限定投稿への返信が非フォロワーの HTL / STL に出る"},
 		{"i.roleProvider", iHandler.HasRoleProvider(),
-			"alwaysMarkNsfw の自己解除防止・wordMuteLimit・canUpdateBioMedia・i/import-antennas の antennaLimit が同時に外れ、avatarDecorationLimit は policy を無視して 1 固定になる"},
+			"alwaysMarkNsfw の自己解除防止・wordMuteLimit・canUpdateBioMedia・i/import-antennas の antennaLimit が同時に外れ、avatarDecorationLimit は policy を無視して 1 固定になり、canUseEmojiAsAvatarDecoration も既定の true 固定になる (ロールで絵文字デコレーションを止められなくなる)"},
 		{"notes.ugcVisibility", notesHandler.HasUGCVisibility(),
 			"匿名 visitor への note 露出を ugcVisibilityForVisitor で gate できない"},
 		{"users.ugcVisibility", usersHandler.HasUGCVisibility(),

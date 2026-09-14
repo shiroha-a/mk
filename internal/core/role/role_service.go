@@ -105,6 +105,12 @@ const (
 	PolicyCanRequestCustomEmojis     = "canRequestCustomEmojis"
 	PolicyCanManageAvatarDecorations = "canManageAvatarDecorations"
 
+	// PolicyCanUseEmojiAsAvatarDecoration gates whether a user may overlay a
+	// local custom emoji on their own avatar (#2975). mk-go 独自で upstream に
+	// 対応キーは無い。**個数はこの policy では見ない** — 既存の
+	// avatarDecorationLimit に合算する。
+	PolicyCanUseEmojiAsAvatarDecoration = "canUseEmojiAsAvatarDecoration"
+
 	// 以下は #1026 で timeline endpoint の gate に使う policy key。匿名アクセス
 	// 可な経路 (local-timeline / global-timeline) と認証必須経路 (hybrid-
 	// timeline) の両方で使う。upstream Misskey TS は handler 内で
