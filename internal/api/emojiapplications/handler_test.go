@@ -344,7 +344,11 @@ func TestPreviewURLTolerable(t *testing.T) {
 		require.Equal(t, http.StatusOK, rec.Code, "画像が無いだけで一覧が落ちている")
 		var body []map[string]any
 		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
-		require.Equal(t, "", body[0]["url"])
+		// #2989: 空文字ではなく理由を返す。「削除された」と「確認できなかった」を
+		// クライアントが区別できるようにするため。
+		preview := body[0]["preview"].(map[string]any)
+		require.Equal(t, "", preview["url"])
+		require.Equal(t, "sourceGone", preview["state"])
 	})
 }
 

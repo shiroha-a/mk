@@ -3156,6 +3156,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		repository.NewEmojiApplicationQuotaResetRepository(s.db))
 	emojiApplicationHandler := apiemojiapplications.NewHandler(
 		emojiApplicationService, emojiApplicationRepo, driveFileRepo)
+	// 「自分の申請」の画像プレビュー (#2989)。承認済みは `emojiId`、未承認の
+	// リモート申請は `remoteHost + remoteName` で引く。**未配線だと preview が
+	// `unknown` になる** — 「消えた」と断定しないので害は「理由が出ない」だけ。
+	emojiApplicationHandler.SetEmojiLookup(emojiRepo)
 	// **申請できる人をロールで絞る (#2934)。** canManageCustomEmojis を持つ人は
 	// 申請ではなく直接登録できるので、この policy は「登録はできないが頼める人」。
 	api.POST("/emoji-application/create", emojiApplicationHandler.Create,

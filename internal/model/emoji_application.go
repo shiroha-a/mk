@@ -91,7 +91,14 @@ type EmojiApplication struct {
 	// RejectReason は申請者にそのまま見せる。
 	RejectReason *string `gorm:"column:rejectReason;type:varchar(2048)" json:"rejectReason"`
 
-	// EmojiID は承認して作られた絵文字。消されたら NULL に落ちる。
+	// EmojiID は承認して作られた絵文字。
+	//
+	// **絵文字を消しても NULL には落ちない。** migration は FK を張っていない
+	// (`000086_emoji_application.up.sql`、`signup_application` と同じ方針)
+	// ので、行は id を持ったまま残る。`emoji-application/list-mine` の
+	// プレビュー (#2989) はこれに依存していて、**id はあるのに絵文字が
+	// 引けない = 承認後に削除された**と判定する。ここを「NULL に落ちる」と
+	// 読むと、その分岐を逆に直してしまう。
 	EmojiID *string `gorm:"column:emojiId;type:varchar(32)" json:"emojiId"`
 }
 

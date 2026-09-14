@@ -32,12 +32,29 @@ type Handler struct {
 	// 一式持つが、ここで要るのは 1 件の解決だけ。狭く取ると依存の実態が読んで
 	// 分かり、テストの偽物が本物の面を全部埋める必要も無くなる。
 	files DriveFileLookup
+	// emojis resolves the emoji rows the preview needs (#2989)。承認済みの
+	// 申請は `emojiId`、未承認のリモート申請は `remoteHost + remoteName` で引く。
+	// 未配線なら preview は `unknown` (= 確認できなかった) になる — 「消えた」と
+	// 断定しない。
+	emojis EmojiLookup
 }
 
 // DriveFileLookup resolves a drive file for the preview image.
 type DriveFileLookup interface {
 	FindByID(id string) (*model.DriveFile, error)
 }
+
+// EmojiLookup resolves the emoji rows the preview needs (#2989).
+//
+// **狭く取る。** repository.EmojiRepository は CRUD を一式持つが、ここで要るのは
+// 2 つの引き方だけ。
+type EmojiLookup interface {
+	FindByID(id string) (*model.Emoji, error)
+	FindByNameAndHost(name string, host *string) (*model.Emoji, error)
+}
+
+// SetEmojiLookup wires the emoji resolver used by the preview (#2989).
+func (h *Handler) SetEmojiLookup(l EmojiLookup) { h.emojis = l }
 
 // NewHandler creates the handler. A nil svc disables the endpoints, which is
 // how a deployment that has not wired the feature behaves.
@@ -315,21 +332,107 @@ func (h *Handler) pack(app *model.EmojiApplication) map[string]any {
 		out["remoteHost"] = *app.RemoteHost
 		out["remoteName"] = *app.RemoteName
 	}
-	out["url"] = h.previewURL(app)
+	// **`url` は残さず `preview` に置き換える (#2989)。** 空文字だけでは
+	// 「削除された」「確認できなかった」「承認後の絵文字を見るべきだった」を
+	// 区別できず、クライアントが推測することになる。この endpoint は mk-go
+	// 固有で、読んでいるのは同梱 frontend だけ (しかも #2989 以前は `url` を
+	// 使っていなかった)。
+	out["preview"] = h.resolvePreview(app)
 	return out
 }
 
-// previewURL resolves the image to show in the list.
+// resolvePreview decides which image to show for one application (#2989).
 //
-// drive の行が消えていれば空文字を返す。**それで一覧ごと落とさない** — 画像が
-// 消えても申請の経緯 (却下理由など) は読めるべき。
-func (h *Handler) previewURL(app *model.EmojiApplication) string {
-	if app.FileID == nil || h.files == nil {
-		return ""
+// **画像が無くても一覧は落とさない。** 画像が消えても申請の経緯 (名前・日時・
+// 却下理由) は読めるべきなので、理由を state に入れて返す。
+func (h *Handler) resolvePreview(app *model.EmojiApplication) Preview {
+	switch previewSourceFor(app) {
+	case PreviewSourceApprovedEmoji:
+		return h.approvedPreview(app)
+	case PreviewSourceRemoteEmoji:
+		return h.remotePreview(app)
+	default:
+		return h.applicationFilePreview(app)
+	}
+}
+
+// approvedPreview resolves the local emoji created on approval.
+//
+// **申請元は見ない。** #2966 以降、承認時の画像は system 所有の drive ファイルへ
+// 複製されるので、申請者が元ファイルを消してもアカウントを消しても出せる。
+func (h *Handler) approvedPreview(app *model.EmojiApplication) Preview {
+	out := Preview{Source: PreviewSourceApprovedEmoji}
+	if h.emojis == nil || app.EmojiID == nil || *app.EmojiID == "" {
+		// 承認済みなのに emojiId が無い行は、承認の記録として壊れている。
+		// 「消えた」と断定できないので unknown。
+		out.State = PreviewStateUnknown
+		return out
+	}
+	e, err := h.emojis.FindByID(*app.EmojiID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **DB 障害を「削除済み」に丸めない (#2792)。**
+		out.State = PreviewStateUnknown
+		return out
+	}
+	if err != nil || e == nil {
+		out.State = PreviewStateApprovedEmojiGone
+		return out
+	}
+	out.URL = emojiImageURL(e)
+	if out.URL == "" {
+		out.State = PreviewStateUnknown
+		return out
+	}
+	out.State = PreviewStateAvailable
+	return out
+}
+
+// remotePreview resolves the remote emoji an unapproved remote request points at.
+func (h *Handler) remotePreview(app *model.EmojiApplication) Preview {
+	out := Preview{Source: PreviewSourceRemoteEmoji}
+	if h.emojis == nil {
+		out.State = PreviewStateUnknown
+		return out
+	}
+	e, err := h.emojis.FindByNameAndHost(*app.RemoteName, app.RemoteHost)
+	if err != nil && !repository.IsNotFound(err) {
+		out.State = PreviewStateUnknown
+		return out
+	}
+	if err != nil || e == nil {
+		out.State = PreviewStateSourceGone
+		return out
+	}
+	out.URL = emojiImageURL(e)
+	if out.URL == "" {
+		out.State = PreviewStateUnknown
+		return out
+	}
+	out.State = PreviewStateAvailable
+	return out
+}
+
+// applicationFilePreview resolves the drive file the applicant uploaded.
+func (h *Handler) applicationFilePreview(app *model.EmojiApplication) Preview {
+	out := Preview{Source: PreviewSourceApplicationFile}
+	if h.files == nil || app.FileID == nil || *app.FileID == "" {
+		out.State = PreviewStateUnknown
+		return out
 	}
 	f, err := h.files.FindByID(*app.FileID)
-	if err != nil || f == nil {
-		return ""
+	if err != nil && !repository.IsNotFound(err) {
+		out.State = PreviewStateUnknown
+		return out
 	}
-	return f.URL
+	if err != nil || f == nil {
+		out.State = PreviewStateSourceGone
+		return out
+	}
+	out.URL = f.URL
+	if out.URL == "" {
+		out.State = PreviewStateUnknown
+		return out
+	}
+	out.State = PreviewStateAvailable
+	return out
 }

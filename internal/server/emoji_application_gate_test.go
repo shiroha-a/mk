@@ -158,6 +158,28 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 		t.Skipf("submodule が無い (checkout する job でのみ検査する)")
 	}
 
+	// 「自分の申請」の画像プレビュー (#2989)。**未配線だと承認済みと未承認の
+	// リモート申請が全件 `unknown` になり、全行に「画像を取得できません」が出る。**
+	// 兄弟の read-time lookup (`SetEmojiApplicationLookup`) を pin しているのと
+	// 同じ tier なのに、こちらだけ漏れていた (敵対的レビューで実測)。
+	require.Containsf(t, src, "emojiApplicationHandler.SetEmojiLookup(emojiRepo)",
+		"%s が申請のプレビューの emoji lookup を配線していない。"+
+			"承認済みとリモート申請の画像が全て「取得できません」になる (#2989)", router)
+
+	// **画像の読み込み失敗の記録は、引き直したら捨てる (#2989)。** 残すと、
+	// media proxy の一時的な失敗で欠けた行が、画像が復旧しても
+	// 「読み込めません」のまま戻らない (ページを離れるまで)。**プレビューを
+	// 出す画面は 2 つあり**、片方だけ直しても症状は残る。
+	for _, rel := range []string{
+		"pages/emoji-request.vue",
+		"pages/admin/custom-emojis-manager.applications.vue",
+	} {
+		body := stripComments(readFileString(t, filepath.Join(fe, "src", rel)))
+		require.Containsf(t, body, "brokenPreviews.value = new Set();",
+			"%s が一覧の引き直しで画像の失敗記録を捨てていない。"+
+				"画像が復旧してもその行だけ「読み込めません」のまま戻らない (#2989)", rel)
+	}
+
 	routes := stripComments(readFileString(t, filepath.Join(fe, "src", "router.definition.ts")))
 	require.Containsf(t, routes, "/emoji-request",
 		"router.definition.ts に /emoji-request が無い。申請ページへ到達できない")
