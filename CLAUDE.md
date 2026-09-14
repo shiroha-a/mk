@@ -55,8 +55,9 @@
 │   ├── misskey/            # メインバイナリのエントリポイント
 │   ├── migrate/            # マイグレーションCLIツール
 │   ├── backfill-note-tags/ # note.tags を NFKC 正規化し直す一回限りのバッチ
-│   └── backfill-remote-host/ # 保存済みリモート host を punycode 正規化し直すバッチ
-├── internal/               # 全23パッケージ
+│   ├── backfill-remote-host/ # 保存済みリモート host を punycode 正規化し直すバッチ
+│   └── backfill-emoji-system-file/ # 承認済み自作絵文字の画像を system 所有へ複製し直すバッチ
+├── internal/               # 全26ディレクトリ (`git ls-tree -d HEAD internal/ | wc -l`)
 │   ├── config/             # 設定ローダー（Misskey YAML互換）
 │   ├── db/                 # GORM の PostgreSQL 接続配線
 │   ├── server/             # HTTPサーバーのセットアップ、ルーティング、ミドルウェア
@@ -82,6 +83,9 @@
 │   ├── pluginstore/        # プラグインごとの専用 PostgreSQL schema (#2481)
 │   ├── safehttp/           # 外向きHTTPの共通ヘルパー（SSRFガード等）
 │   ├── charttick/          # チャートの絶対時刻を再導出する TickFunc 群
+│   ├── effectivepolicy/    # ロールポリシーの host schema (本番の解決とプラグイン検証で共有)
+│   ├── l10n/               # サーバーが送るメール文面のロケール解決
+│   ├── safemath/           # 固定幅へ寄せるときに飽和させる算術ヘルパー
 │   ├── maintenance/        # SQL migration として書けない後始末バッチ（`cmd/` の CLI から手動で回す）
 │   ├── frontendutil/       # 同梱フロントエンドの資産配信ヘルパー
 │   ├── pgarray/            # database/sql 用の PostgreSQL 配列型

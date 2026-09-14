@@ -75,7 +75,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     GOWORK=off go run ./tools/pluginbuild && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w $REVISION_LDFLAGS" -o /app/built/misskey ./cmd/misskey && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate && \
-    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-remote-host ./cmd/backfill-remote-host
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-remote-host ./cmd/backfill-remote-host && \
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-emoji-system-file ./cmd/backfill-emoji-system-file
 
 # Stage 2: Runtime
 #
@@ -98,6 +99,7 @@ COPY --from=builder /app/built/migrate /app/migrate
 # 使い捨てコンテナで流す (#2706)。
 #   docker compose run --rm --entrypoint /app/backfill-remote-host app -dry-run
 COPY --from=builder /app/built/backfill-remote-host /app/backfill-remote-host
+COPY --from=builder /app/built/backfill-emoji-system-file /app/backfill-emoji-system-file
 COPY --from=builder /app/migration /app/migration
 
 # 本家のpackages/backend/assets (favicon / icons等) をimageに焼き込む。

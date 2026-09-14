@@ -147,8 +147,8 @@ make image-build       # ghcr.io/shiroha-a/mk:bundled をローカルにビル�
 
 | イメージ | 内容 | 用途 |
 |---|---|---|
-| `ghcr.io/shiroha-a/mk:bundled` | Goバイナリ + マイグレーション + **フロントエンドアセット同梱** | pull して即起動 |
-| `ghcr.io/shiroha-a/mk:latest` | Goバイナリ + マイグレーションのみ | アセットを別途用意する構成 |
+| `ghcr.io/shiroha-a/mk:bundled` | Goバイナリ + マイグレーション + [後始末バッチ](#後始末バッチ) + **フロントエンドアセット同梱** | pull して即起動 |
+| `ghcr.io/shiroha-a/mk:latest` | Goバイナリ + マイグレーション + [後始末バッチ](#後始末バッチ) | アセットを別途用意する構成 |
 
 `bundled` / `latest` は develop の最新を指す **可変タグ**。本番ではバージョンを固定する。
 
@@ -687,6 +687,90 @@ SQL migration として書けない一回限りの正規化は、独立したバ
 
 **稼働中の本体プロセスに影響しない使い捨てコンテナ**で流す。entrypoint を差し替えるのは
 `docker-compose.yml` の `migrate` サービスと同じ手法。
+
+### `backfill-emoji-system-file` — 承認済み自作絵文字の画像を system 所有へ複製 (#2990)
+
+#2966 より前に承認された `kind = own` のカスタム絵文字申請は、作られた絵文字が
+**申請者所有の drive ファイルの URL をそのまま参照している**。申請者がそのファイルを
+drive から消すか、アカウントを削除した時点で表示できなくなる。`emoji` テーブルは drive
+ファイル ID を持たず `originalUrl` / `publicUrl` の文字列しか持たないので、参照元を
+たどって保護する処理は既存に無い。
+
+このバッチは画像を system 所有 (`userId` / `userHost` が NULL) の drive ファイルへ
+複製し、絵文字の `originalUrl` / `publicUrl` / `type` を複製側へ向け直す。**複製には
+承認経路と同じ処理 (`drive.Service.CopyToSystemFile`) を使う。**
+
+**申請者所有の元ファイルは読むだけで、変更も移動も削除もしない。**
+**`emoji_application.fileId` も書き換えない** (申請時に利用者が提出したファイル、という
+意味を保つ)。
+
+```bash
+# まず分類だけ見る (既定は dry-run)
+docker compose run --rm --no-deps --entrypoint /app/backfill-emoji-system-file app \
+  -config /app/.config/default.yml
+
+# 実行
+docker compose run --rm --no-deps --entrypoint /app/backfill-emoji-system-file app \
+  -config /app/.config/default.yml -apply
+```
+
+**`--no-deps` を付ける。** `app` は `db` / `redis` / `migrate` に `depends_on` している
+ので、stack を落とした状態で叩くと**読み取りだけのつもりで migration まで走る**。
+
+UDS 構成ではサービス名が異なるので `docker compose -f ... run --rm --no-deps
+--entrypoint /app/backfill-emoji-system-file mkgo ...` の形になる。バイナリ直接実行なら
+`go run ./cmd/backfill-emoji-system-file -config .config/default.yml`。
+
+**保存先の解決はサーバーと同じ。** オブジェクトストレージを有効にしていれば複製もそちら
+へ書き、`storedInternal = true` の行 (移行前に保存されたもの) はローカル FS から読む。
+ローカルの探索先は既定で `./drive-files` (WORKDIR が `/app` なので `/app/drive-files`) で、
+compose の `run` はサービスの volume をそのまま引き継ぐ。別の場所に置いている構成では
+`-drive-dir` を渡すこと。
+
+冪等。途中で失敗しても、作れた複製の分だけ進んだ状態から再実行して安全。
+
+**既定は dry-run で、書き込みには `-apply` が要る。** 姉妹バッチ
+(`backfill-remote-host` / `backfill-note-tags`) は**逆** (無指定で書き込み、
+`-dry-run` で抑止) なので、手が覚えているほうで打たないこと。`-dry-run` と `-apply`
+を両方渡すと落ちる。
+
+**dry-run で分かるのは DB だけで判定できるところまで。** 実体を読んで初めて分かる
+もの (ストレージからの欠落、複製の上限を超える大きさ、複製した実体の MIME が宣言と
+違う) は `-apply` で初めて `unrepairable` に変わる。dry-run が `would-copy` と出した
+ものが本実行で要対応になることがある。
+
+**exit code が非ゼロなら一覧を読むこと。** 該当するのは 3 種類。
+
+| 分類 | 意味 | 対処 |
+|---|---|---|
+| `unrepairable` | 再実行しても直らない (申請ファイルが削除済み / リンク行で実体を持たない / `accessKey` が無く実体を辿れない / 実体がストレージから消えている / 複製の上限 32 MiB を超えている / MIME が絵文字として許可されない) | モデレーターが絵文字管理画面から画像を差し替えるか、絵文字を削除する。**承認済みの申請は却下できない** |
+| `needs-review` | 絵文字が申請ファイルを参照しておらず、参照先も system 所有ではない (モデレーターが `admin/emoji/update` で差し替えた形)。**まだ誰かの drive 操作で壊れうる** | 絵文字管理画面から画像を入れ直す。バッチは差し替えを巻き戻さないので触らない |
+| `failed` | ストレージや DB の障害で修復に失敗した / 実行中に他の書き込みと競合した | 原因を取り除いて再実行する。作りかけの複製はバッチが片付ける。**理由にファイル ID が出ているものは残してある** — 片付けに失敗したか、更新が載ったか確認できず消すほうが危険だと判断したかのどちらか。参照されていなければ `admin/drive/cleanup` (手動) が回収する |
+
+**差し替えで直すときは system 所有のファイルを選ぶこと。** `admin/emoji/update` は
+渡した drive ファイルの URL をそのまま絵文字に入れるので、モデレーター自身の drive
+ファイルを選ぶと**このバッチが消そうとしている形をもう一度作る**ことになる。
+
+`skipped` だけは exit code に効かない。入るのは「承認後にモデレーターが絵文字を
+削除した」だけで、守るものがもう無い。
+
+**このバッチが直すのは申請経由の絵文字だけ。** `admin/emoji/add` で直接登録した絵文字が
+drive ファイルの URL をそのまま参照する非対称は対象外。
+
+**稼働中の本体には即座には伝わらない。** バッチは DB を直接書き、`emojiUpdated` も
+publish しない。サーバー側は `emoji` のキャッシュ (5 分) とアバターデコレーションの
+絵文字キャッシュ (30 秒)、**ブラウザ側は同梱 frontend が 1 時間**持つ
+(`packages/frontend/src/custom-emojis.ts`。IndexedDB、使えない環境では localStorage)。
+再起動は要らない。
+
+**壊れはしない** — 古い URL は申請者の元ファイルを指しており、バッチはそれを消さない
+ので、キャッシュが切れるまで従来どおり表示できる。**ただし「もう元ファイルを消して
+よい」と申請者に伝えるのは急がないこと。** 開いたままのタブはリロードするまで古い URL
+を使い続けるので、1 時間はあくまで**新しく開いたブラウザ**が追いつく目安。
+
+**チャートには載らない。** バッチは drive チャートの hook を配線していないので、複製の
+ぶんのストレージ使用量はチャートの累積値に加算されない (行の中身は承認経路が作るものと
+同じ)。
 
 ### `backfill-remote-host` — 保存済みリモート host の punycode 正規化 (#2706)
 
