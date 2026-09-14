@@ -54,6 +54,22 @@ type EmojiApplicationStatus struct {
 // returning false when the row no longer exists.
 type EmojiApplicationLookup func(applicationID string) (EmojiApplicationStatus, bool)
 
+// SignupApplicationStatus is the read-time state of an account signup request
+// referenced by a signupApplicationReceived notification (#2987).
+//
+// **回答は持たない。** 申請フォームの回答は運営者が定義した任意の項目で、
+// 氏名や連絡先が入りうる。通知欄では読めないうえ、申請を消しても複製が残る。
+// モデレーターが通知欄で知る必要があるのは「まだ処理されていないか」だけで、
+// 中身は管理画面で見る。
+type SignupApplicationStatus struct {
+	// Status is "pending" / "approved" / "rejected" / "expired"。
+	Status string
+}
+
+// SignupApplicationLookup resolves an application ID to its current state,
+// returning false when the row no longer exists (#2987).
+type SignupApplicationLookup func(applicationID string) (SignupApplicationStatus, bool)
+
 // AbuseReportStatus is the read-time state of a report referenced by an
 // abuseReport notification (#2868).
 type AbuseReportStatus struct {
@@ -78,10 +94,11 @@ type AbuseReportLookup func(reportID string) (AbuseReportStatus, bool)
 // types that embed a related entity which must be packed fresh. Threaded via
 // functional options so existing call sites stay unchanged.
 type packOptions struct {
-	role             RoleLookup
-	abuseReport      AbuseReportLookup
-	emojiApplication EmojiApplicationLookup
-	chatInvitation   ChatInvitationLookup
+	role              RoleLookup
+	abuseReport       AbuseReportLookup
+	emojiApplication  EmojiApplicationLookup
+	signupApplication SignupApplicationLookup
+	chatInvitation    ChatInvitationLookup
 	// viewer は invitation pack の視点 (= notifiee)。chatRoomInvitationReceived
 	// の room.isMuted / invitationExists を viewer 視点で算出するために渡す。
 	viewer string
@@ -104,6 +121,12 @@ func WithAbuseReportLookup(fn AbuseReportLookup) NotificationOption {
 // of emojiApplicationProcessed notifications (#2934)。
 func WithEmojiApplicationLookup(fn EmojiApplicationLookup) NotificationOption {
 	return func(o *packOptions) { o.emojiApplication = fn }
+}
+
+// WithSignupApplicationLookup supplies the lookup used to pack the current state
+// of signupApplicationReceived notifications (#2987)。
+func WithSignupApplicationLookup(fn SignupApplicationLookup) NotificationOption {
+	return func(o *packOptions) { o.signupApplication = fn }
 }
 
 // WithRoleLookup supplies the RoleLookup used to pack roleAssigned
@@ -307,7 +330,10 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 	// (#2934)。承認/却下と却下理由を通知へ複製すると、申請を消しても文面が
 	// Redis に残る。**申請が消えていたら通知ごと drop する** — 経緯を辿れない
 	// 「処理されました」だけの通知は読んだ人に何も伝えない (roleAssigned と同じ形)。
-	if n.Type == notification.TypeEmojiApplicationProcessed {
+	// emojiApplicationReceived (#2987) は審査する側へ出す通知で、向きは逆だが
+	// 引くものは同じ (同じ行の現在の状態)。**処理済みかどうかが要る** — 通知は
+	// 作成時点しか持たないので、無いと他の人が処理済みの申請に二重で当たる。
+	if n.Type == notification.TypeEmojiApplicationProcessed || n.Type == notification.TypeEmojiApplicationReceived {
 		applicationID, _ := n.Extra["applicationId"].(string)
 		if opts == nil || opts.emojiApplication == nil {
 			return nil
@@ -323,6 +349,20 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		}
 		if st.RejectReason != "" {
 			out["emojiApplication"].(map[string]any)["rejectReason"] = st.RejectReason
+		}
+	}
+	if n.Type == notification.TypeSignupApplicationReceived {
+		applicationID, _ := n.Extra["applicationId"].(string)
+		if opts == nil || opts.signupApplication == nil {
+			return nil
+		}
+		st, ok := opts.signupApplication(applicationID)
+		if !ok {
+			return nil
+		}
+		out["signupApplication"] = map[string]any{
+			"id":     applicationID,
+			"status": st.Status,
 		}
 	}
 	if n.Type == notification.TypeAbuseReport {
@@ -401,7 +441,9 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 		// emojiApplicationProcessed は applicationId を out["emojiApplication"].id
 		// として出しているので、Extra から素通りさせると二重に出る
 		// (roleId / invitationId を落としているのと同じ)。
-		if k == "applicationId" && n.Type == notification.TypeEmojiApplicationProcessed {
+		if k == "applicationId" && (n.Type == notification.TypeEmojiApplicationProcessed ||
+			n.Type == notification.TypeEmojiApplicationReceived ||
+			n.Type == notification.TypeSignupApplicationReceived) {
 			continue
 		}
 		if k == "comment" && n.Type == notification.TypeAbuseReport {

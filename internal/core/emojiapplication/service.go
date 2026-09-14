@@ -194,6 +194,10 @@ type ResultNotifier interface {
 	NotifyEmojiApplicationProcessed(ctx context.Context, app *model.EmojiApplication) error
 }
 
+// SetReceivedNotifier wires the reviewer notification emitted on Create (#2987).
+// Optional — nil leaves申請の受付を通知しない (既存の挙動)。
+func (s *Service) SetReceivedNotifier(n ReceivedNotifier) { s.receivedNotifier = n }
+
 // DriveFileLookup resolves the drive file backing an "own" application.
 type DriveFileLookup interface {
 	FindByID(id string) (*model.DriveFile, error)
@@ -216,7 +220,10 @@ type Service struct {
 	idGen    IDGenerator
 	creator  EmojiCreator
 	notifier ResultNotifier
-	nowFunc  func() time.Time
+	// receivedNotifier は申請の受付を審査できる人へ知らせる (#2987)。
+	// 未配線なら通知を出さない (既存の挙動)。
+	receivedNotifier ReceivedNotifier
+	nowFunc          func() time.Time
 	// policies は申請の期間上限を引く先 (#2958)。**未配線なら上限を掛けない** —
 	// 掛けられないのに掛けたつもりになると、ロールを設定した運営者が
 	// 「効いている」と誤解する。既定値も 0 (無制限) なので挙動は変わらない。
@@ -685,6 +692,14 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 			return nil, &PendingLimitExceededError{Used: pe.Used, Limit: pe.Limit}
 		}
 		return nil, err
+	}
+	// **申請は永続化済みなので、通知の失敗で申請を失わせない。** 呼び出し元の
+	// ctx も使わない — クライアントが切断しても審査側への通知は出す必要がある
+	// (abuseReport #2868 と同じ判断)。
+	if s.receivedNotifier != nil {
+		if err := s.receivedNotifier.NotifyEmojiApplicationReceived(context.Background(), app); err != nil {
+			slog.Warn("emoji-application: notify reviewers failed", "application", app.ID, "err", err)
+		}
 	}
 	return app, nil
 }

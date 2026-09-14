@@ -2,14 +2,84 @@ package emojiapplication
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 
 	"github.com/shiroha-a/mk/internal/core/notification"
+	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
 // InAppNotifier is the subset of the notification service this package needs.
 type InAppNotifier interface {
 	Create(ctx context.Context, in notification.CreateInput) (*notification.Notification, error)
+}
+
+// ReviewerLister enumerates the users who may review emoji applications.
+//
+// 実装は `core/role.Service.GetUsersWithPolicy(canManageCustomEmojis)`。
+type ReviewerLister interface {
+	GetUsersWithPolicy(policyKey string) ([]*model.User, error)
+}
+
+// ReceivedNotifier tells the reviewers that a new application arrived (#2987).
+//
+// 通知は副作用なので、失敗しても申請自体は成立させる (呼び出し側で握る)。
+type ReceivedNotifier interface {
+	NotifyEmojiApplicationReceived(ctx context.Context, app *model.EmojiApplication) error
+}
+
+// NewReceivedNotifier adapts the notification service to ReceivedNotifier.
+//
+// **宛先は「審査できる人」で、モデレーターではない** (#2987)。審査 endpoint は
+// `canManageCustomEmojis` で gate されており、`HasRolePolicy` が短絡するのは
+// root と管理者だけ。モデレーターへ配ると「届いたのに押せない」「押せるのに
+// 届かない」が同時に起きる。
+func NewReceivedNotifier(n InAppNotifier, lister ReviewerLister) ReceivedNotifier {
+	if n == nil || lister == nil {
+		return nil
+	}
+	return &receivedNotifier{inner: n, lister: lister}
+}
+
+type receivedNotifier struct {
+	inner  InAppNotifier
+	lister ReviewerLister
+}
+
+func (r *receivedNotifier) NotifyEmojiApplicationReceived(ctx context.Context, app *model.EmojiApplication) error {
+	if app == nil {
+		return nil
+	}
+	reviewers, err := r.lister.GetUsersWithPolicy(role.PolicyCanManageCustomEmojis)
+	if err != nil {
+		return err
+	}
+	for _, u := range reviewers {
+		if u == nil {
+			continue
+		}
+		// **本文は載せない。** 名前・ライセンス・画像は読み出し時に申請の行から
+		// 引き直す (#2868 の abuseReport と同じ形)。通知へ複製すると、申請を
+		// 消しても内容が Redis に残る。
+		//
+		// **NotifierID は申請者。** 通知サービスは notifier == notifiee を
+		// ErrSelfNotification で弾くので、審査できる人が自分で出した申請は
+		// 自分の通知欄に出ない。それは正しい (自分が出したことは知っている)。
+		_, nerr := r.inner.Create(ctx, notification.CreateInput{
+			NotifieeID: u.ID,
+			NotifierID: app.UserID,
+			Type:       notification.TypeEmojiApplicationReceived,
+			Extra: map[string]any{
+				"applicationId": app.ID,
+			},
+		})
+		if nerr != nil && !errors.Is(nerr, notification.ErrSelfNotification) {
+			slog.Warn("emoji-application: received notification failed",
+				"reviewer", u.ID, "application", app.ID, "err", nerr)
+		}
+	}
+	return nil
 }
 
 // NewResultNotifier adapts the notification service to ResultNotifier.

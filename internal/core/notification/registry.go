@@ -26,6 +26,15 @@ type Descriptor struct {
 	// false = the constant exists for compatibility with persisted rows or
 	// with upstream's enum, but no code path emits it.
 	Produced bool
+	// Staff marks a notification that is delivered to the moderation team
+	// rather than to the user it is about (#2987).
+	//
+	// **この印が付いた型は、利用者が自分では切れない。** 個人設定の
+	// `notificationRecieveConfig` は upstream の型しか知らないので、運営向けに
+	// 配られる固有型を止める手段はロールの `optOutNotificationTypes` だけになる。
+	// fork frontend の opt-out の候補一覧をこの印と突き合わせる gate があるので、
+	// 新しい運営向け通知を足したときに「ロールから切れない」状態にならない。
+	Staff bool
 }
 
 // registry is the single source of truth for notification types.
@@ -73,10 +82,39 @@ var registry = []Descriptor{
 	{Type: TypeImportCompleted, Kind: KindMkGo, Produced: false},
 	// 通報をモデレーターの通知欄に残す (#2868)。upstream は email /
 	// system webhook / admin stream しか持たない。
-	{Type: TypeAbuseReport, Kind: KindMkGo, Produced: true},
+	{Type: TypeAbuseReport, Kind: KindMkGo, Produced: true, Staff: true},
 	// 絵文字の登録申請の結果を申請者へ返す (#2934)。upstream には申請の
 	// 概念自体が無い。
 	{Type: TypeEmojiApplicationProcessed, Kind: KindMkGo, Produced: true},
+	// 申請が出されたことを審査できる人へ知らせる (#2987)。上の Processed とは
+	// **向きが逆** — あちらは申請者へ結果を返すもので、こちらは運営向け。
+	{Type: TypeEmojiApplicationReceived, Kind: KindMkGo, Produced: true, Staff: true},
+	{Type: TypeSignupApplicationReceived, Kind: KindMkGo, Produced: true, Staff: true},
+}
+
+// IsStaffType reports whether the type is delivered to the moderation team
+// rather than to the user it is about (#2987).
+func IsStaffType(t Type) bool {
+	for _, d := range registry {
+		if d.Type == t {
+			return d.Staff
+		}
+	}
+	return false
+}
+
+// StaffTypeNames returns the notification types delivered to the moderation
+// team, in registry order (#2987).
+//
+// fork frontend の opt-out の候補一覧と突き合わせる gate が使う。
+func StaffTypeNames() []string {
+	out := make([]string, 0, len(registry))
+	for _, d := range registry {
+		if d.Staff {
+			out = append(out, string(d.Type))
+		}
+	}
+	return out
 }
 
 // UpstreamTypeNames returns the types counted by the "excludeTypes covers

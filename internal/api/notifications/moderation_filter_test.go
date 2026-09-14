@@ -18,10 +18,22 @@ import (
 type stubModeratorChecker struct {
 	moderators map[string]bool
 	admins     map[string]bool
+	// policies[userID][policyKey]。絵文字の申請の通知 (#2987) は
+	// `canManageCustomEmojis` で判定されるので、モデレーターとは別に持つ。
+	policies map[string]map[string]bool
 }
 
 func (s stubModeratorChecker) IsModerator(userID string) bool     { return s.moderators[userID] }
 func (s stubModeratorChecker) IsAdministrator(userID string) bool { return s.admins[userID] }
+
+// HasRolePolicy mirrors core/role.Service: root / 管理者は短絡し、
+// **モデレーターは短絡しない**。
+func (s stubModeratorChecker) HasRolePolicy(userID, policyKey string) bool {
+	if s.admins[userID] {
+		return true
+	}
+	return s.policies[userID][policyKey]
+}
 
 // wireAbuseLookup は read 時の状態引き当てを配線する (#2868)。
 // **未配線だと abuseReport が drop される** (fail-closed) ので、通報の通知を

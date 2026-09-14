@@ -672,6 +672,85 @@ func (s *Service) GetModerators() ([]*model.User, error) {
 	return s.userRepo.FindManyByIDs(ids)
 }
 
+// GetUsersWithPolicy returns the users who may perform an action gated by
+// policyKey — the same set `HasRolePolicy` answers true for (#2987).
+//
+// 中身は root / 管理者 + **そのキーを true にする割り当て型ロールのメンバー**。
+// `GetModerators` と同じ形で、ロールを走査して assignment を引く。
+//
+// **conditional role は列挙しない。** あちらは assignment を持たず、所属は
+// 条件式で毎回計算されるので、列挙するには全ユーザー走査が要る。`GetModerators`
+// も同じ制限を持つ (既存の割り切り) ので揃えてある。条件ロールでだけ権限を
+// 与えられている人には通知が届かない。
+//
+// **base policy が true でも全員へは広げない。** `meta.policies` でそのキーを
+// true にすると全利用者が `HasRolePolicy` を満たすが、それを宛先にすると
+// 申請 1 件ごとに全員へ通知が飛ぶ。ここが答えるのは「運営チーム」= root /
+// 管理者 + ロールで権限を与えられた人、に限る。
+func (s *Service) GetUsersWithPolicy(policyKey string) ([]*model.User, error) {
+	if s.userRepo == nil {
+		return nil, nil
+	}
+	roles, err := s.listRolesCached()
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	idSet := make(map[string]struct{})
+	for _, r := range roles {
+		// 管理者ロールは policy を見ずに通る (HasRolePolicy が短絡する)。
+		// **モデレーターは短絡しない**ので、ここでも特別扱いしない。
+		if !r.IsAdministrator && !roleMentionsPolicy(r, policyKey) {
+			continue
+		}
+		assigns, err := s.assignmentRepo.ListByRole(r.ID, "", "", 100000)
+		if err != nil {
+			return nil, err
+		}
+		for _, a := range assigns {
+			if a.ExpiresAt == nil || a.ExpiresAt.After(now) {
+				idSet[a.UserID] = struct{}{}
+			}
+		}
+	}
+	// root は常に通る (IsAdministrator が内部で root を含む)。
+	if meta, err := s.metaRepo.Fetch(); err == nil && meta != nil && meta.RootUserID != nil && *meta.RootUserID != "" {
+		idSet[*meta.RootUserID] = struct{}{}
+	}
+	if len(idSet) == 0 {
+		return nil, nil
+	}
+	// **最終判定は HasRolePolicy に委ねる。** 上のループが集めるのは候補で、
+	// 「そのキーに言及するロールのメンバー」でしかない。ここで許可の有無を
+	// 自前で決めると `computePolicy` の cascade を再実装することになり、
+	// **実際に割れていた** — priority 2 で false にするロールがあると
+	// `computePolicy` はその群だけを集約するので priority 0 の許可は無視される
+	// のに、素朴な「explicit に true か」判定では許可扱いになっていた。
+	// 結果は「通知は届くのに審査 endpoint は 403」で、この機能が防ごうとした
+	// 状態そのもの。
+	ids := make([]string, 0, len(idSet))
+	for id := range idSet {
+		if !s.HasRolePolicy(id, policyKey) {
+			continue
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	return s.userRepo.FindManyByIDs(ids)
+}
+
+// roleMentionsPolicy reports whether the role has an entry for policyKey at all.
+//
+// **値も priority も見ない。** ここは候補を集めるだけで、許可の有無は
+// `HasRolePolicy` が決める。`useDefault` の entry も候補には入れる —
+// 「高優先度でベース値を使う」宣言なので、cascade の結果を変えうる。
+func roleMentionsPolicy(r *model.Role, policyKey string) bool {
+	_, ok := parseRolePolicies(r.Policies)[policyKey]
+	return ok
+}
+
 // HasRolePolicy reports whether `userID` is allowed to perform an action gated
 // by `policyKey`. upstream `ApiCallService.ts` の requiredRolePolicy check と
 // 等価な判定で、以下のいずれかなら true:

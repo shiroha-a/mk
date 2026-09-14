@@ -51,6 +51,20 @@ const (
 	// TypeEmojiApplicationProcessed tells an applicant that their custom
 	// emoji request was approved or rejected (#2934).
 	TypeEmojiApplicationProcessed Type = "emojiApplicationProcessed"
+	// TypeEmojiApplicationReceived tells the people who can review custom emoji
+	// requests that a new one arrived (#2987).
+	//
+	// **宛先は「審査できる人」で、モデレーターではない。** 審査 endpoint は
+	// `canManageCustomEmojis` で gate されており、`HasRolePolicy` が短絡する
+	// のは root と管理者だけ (モデレーターは短絡しない)。モデレーターへ配ると
+	// 「届いたのに押せない」「押せるのに届かない」が同時に起きる。
+	TypeEmojiApplicationReceived Type = "emojiApplicationReceived"
+	// TypeSignupApplicationReceived tells moderators that a new account signup
+	// request arrived (#2987).
+	//
+	// 審査 endpoint (`admin/signup-application/*`) は `RequireModerator` なので、
+	// 宛先は `GetModerators()` (モデレーター + 管理者 + root) とそのまま一致する。
+	TypeSignupApplicationReceived Type = "signupApplicationReceived"
 	// TypeScheduledNotePosted / TypeScheduledNotePostFailed は upstream
 	// Misskey TS の \`PostScheduledNoteProcessorService\` が発火する 2 種類
 	// の通知 (#1045 Phase 2-B)。posted は \`noteId\` を Extra (or NoteID) に

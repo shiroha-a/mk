@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/core/notification"
+	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -26,6 +27,11 @@ import (
 type ModeratorChecker interface {
 	IsModerator(userID string) bool
 	IsAdministrator(userID string) bool
+	// HasRolePolicy は運営向け通知のうち、モデレーター権限ではなく**ロール
+	// ポリシーで gate されているもの**の再確認に使う (#2987)。絵文字の申請は
+	// `canManageCustomEmojis` で審査でき、`HasRolePolicy` が短絡するのは root と
+	// 管理者だけ (モデレーターは短絡しない) ので、IsModerator では判定できない。
+	HasRolePolicy(userID, policyKey string) bool
 }
 
 // Handler handles notifications-related API endpoints.
@@ -49,8 +55,9 @@ type Handler struct {
 	// 引く (#2868)。**未配線なら abuseReport を返さない** (roleAssigned と同じ
 	// fail-closed)。状態を出せないまま「未対応」に見せると、対処済みの通報に
 	// 別のモデレーターが二重で当たる。
-	abuseReportStates      AbuseReportStateLookup
-	emojiApplicationLookup entity.EmojiApplicationLookup
+	abuseReportStates       AbuseReportStateLookup
+	emojiApplicationLookup  entity.EmojiApplicationLookup
+	signupApplicationLookup entity.SignupApplicationLookup
 	// moderatorChecker は read 時に abuseReport 通知の閲覧権限を再確認する
 	// (#2868)。対象ユーザー ID が Extra に入り通報の存在自体が機微なので、権限を
 	// 失った元モデレーターが admin/abuse-user-reports の 403 を迂回して
@@ -103,6 +110,13 @@ func (h *Handler) SetEmojiApplicationLookup(fn entity.EmojiApplicationLookup) {
 	h.emojiApplicationLookup = fn
 }
 
+// SetSignupApplicationLookup wires the read-time state lookup for
+// signupApplicationReceived notifications (#2987)。未配線なら通知ごと返さない
+// (fail-closed。状態を引けないまま出すと、処理済みの申請に二重で当たる)。
+func (h *Handler) SetSignupApplicationLookup(fn entity.SignupApplicationLookup) {
+	h.signupApplicationLookup = fn
+}
+
 // SetChatInvitationLookup wires the lookup used to pack
 // chatRoomInvitationReceived notifications' embedded invitation (#1559)。
 func (h *Handler) SetChatInvitationLookup(fn entity.ChatInvitationLookup) {
@@ -133,6 +147,7 @@ func (h *Handler) notificationOptions(viewerID string, rows []entity.Notificatio
 		entity.WithChatInvitationLookup(h.chatInvitationLookup),
 		entity.WithAbuseReportLookup(lookup),
 		entity.WithEmojiApplicationLookup(h.emojiApplicationLookup),
+		entity.WithSignupApplicationLookup(h.signupApplicationLookup),
 		entity.WithViewer(viewerID),
 		entity.WithNoteFieldResolver(h.noteFieldResolver),
 	}, nil
@@ -787,7 +802,7 @@ func (h *Handler) filterValidNotifiers(viewerID string, rows []*notification.Not
 		// notifier は通報者なので、モデレーターがミュートしている相手からの
 		// 通報が通知欄に一切現れなくなる。凍結された利用者からの通報も同じ
 		// (凍結の理由がその通報の対象であることもある)。
-		if n.Type == notification.TypeAbuseReport {
+		if isStaffNotification(n.Type) {
 			out = append(out, n)
 			continue
 		}
@@ -980,7 +995,7 @@ func (h *Handler) TestNotification(c echo.Context) error {
 func (h *Handler) filterModerationNotifications(viewerID string, rows []*notification.Notification) []*notification.Notification {
 	hasModerationRow := false
 	for _, n := range rows {
-		if n.Type == notification.TypeAbuseReport {
+		if isStaffNotification(n.Type) {
 			hasModerationRow = true
 			break
 		}
@@ -988,19 +1003,55 @@ func (h *Handler) filterModerationNotifications(viewerID string, rows []*notific
 	if !hasModerationRow {
 		return rows
 	}
-	allowed := false
-	if h.moderatorChecker != nil && viewerID != "" {
-		allowed = h.moderatorChecker.IsModerator(viewerID) || h.moderatorChecker.IsAdministrator(viewerID)
-	}
-	if allowed {
-		return rows
+	// **型ごとに判定が違う (#2987)。** 通報とアカウントの登録申請は
+	// `RequireModerator` で審査するが、絵文字の申請は
+	// `RequireRolePolicy(canManageCustomEmojis)` で、`HasRolePolicy` が短絡
+	// するのは root と管理者だけ。モデレーターかどうかでは判定できない。
+	//
+	// 1 度ずつしか引かないよう、型ごとの結果を memo する。
+	allowed := make(map[notification.Type]bool, 2)
+	permitted := func(t notification.Type) bool {
+		if v, ok := allowed[t]; ok {
+			return v
+		}
+		v := h.staffNotificationVisible(viewerID, t)
+		allowed[t] = v
+		return v
 	}
 	out := make([]*notification.Notification, 0, len(rows))
 	for _, n := range rows {
-		if n.Type == notification.TypeAbuseReport {
+		if isStaffNotification(n.Type) && !permitted(n.Type) {
 			continue
 		}
 		out = append(out, n)
 	}
 	return out
+}
+
+// staffNotificationVisible reports whether viewerID may still see a staff
+// notification of type t (#2868 / #2987).
+//
+// **未配線 / 未ログインでは見せない (fail-closed)。** 判定できないまま出すより
+// 出さないほうが安全側 — 申請や通報の存在自体が機微で、Extra には対象の id が
+// 入る。
+func (h *Handler) staffNotificationVisible(viewerID string, t notification.Type) bool {
+	if h.moderatorChecker == nil || viewerID == "" {
+		return false
+	}
+	if t == notification.TypeEmojiApplicationReceived {
+		// `HasRolePolicy` は root / 管理者を短絡し、そうでなければ policy を見る。
+		return h.moderatorChecker.HasRolePolicy(viewerID, role.PolicyCanManageCustomEmojis)
+	}
+	// abuseReport / signupApplicationReceived。administrator も通す
+	// (upstream の iAmModerator と同じ扱い)。
+	return h.moderatorChecker.IsModerator(viewerID) || h.moderatorChecker.IsAdministrator(viewerID)
+}
+
+// isStaffNotification reports whether the type is delivered to the moderation
+// team rather than to the user it is about (#2987).
+//
+// **registry を truth にする。** ここで型を並べ直すと、新しい運営向け通知を
+// 足したときに「ミュートで消える」「権限を失っても見える」が静かに起きる。
+func isStaffNotification(t notification.Type) bool {
+	return notification.IsStaffType(t)
 }

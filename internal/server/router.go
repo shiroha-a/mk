@@ -465,6 +465,22 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		return out, true
 	}
 
+	// アカウントの登録申請の read 時の状態 (#2987)。**回答は載せない** —
+	// 運営者が定義した任意の項目で氏名や連絡先が入りうる。
+	signupApplicationRepoForNotif := repository.NewSignupApplicationRepository(s.db)
+	signupApplicationNotifLookup := func(applicationID string) (entity.SignupApplicationStatus, bool) {
+		app, err := signupApplicationRepoForNotif.FindByID(applicationID)
+		if err != nil {
+			if !repository.IsNotFound(err) {
+				// **DB 障害を「削除済み」に丸めない (#2792)。**
+				slog.Warn("notification: signup application lookup failed",
+					"applicationId", applicationID, "err", err)
+			}
+			return entity.SignupApplicationStatus{}, false
+		}
+		return entity.SignupApplicationStatus{Status: app.Status}, true
+	}
+
 	abuseNotifStates := abuseReportRepoForNotif.FindStatesByIDs
 	abuseNotifLookup := func(reportID string) (entity.AbuseReportStatus, bool) {
 		states, err := abuseNotifStates([]string{reportID})
@@ -1486,6 +1502,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 承認制の登録 (#2554 / #2569)。本人性はクレームコードが担保するので、
 	// 外部サーバーには一切依存しない。
 	signupHandler.SetSignupApplications(signupApplicationService)
+	// 申請が出されたことをモデレーターへ知らせる (#2987)。**審査 endpoint が
+	// RequireModerator なので宛先は GetModerators と一致する。**
+	signupApplicationService.SetReceivedNotifier(
+		signupapplication.NewReceivedNotifier(notificationService, roleService))
 	signupHandler.SetTestMode(s.config.TestMode)
 	// emailRequiredForSignup フローの確認メール送信。常に sender を配線し、
 	// closure 内で毎回 meta を読み直すことで admin UI の SMTP 設定変更が
@@ -2049,6 +2069,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationsHandler.SetRoleLookup(roleNotifLookup)
 	notificationsHandler.SetAbuseReportLookup(abuseNotifStates)
 	notificationsHandler.SetEmojiApplicationLookup(emojiApplicationNotifLookup)
+	notificationsHandler.SetSignupApplicationLookup(signupApplicationNotifLookup)
 	// 通知に埋め込む note の files / channel / myReaction を埋める (#2735)。
 	notificationsHandler.SetNoteFieldResolver(noteFieldResolver)
 	// notifications/create の 'app' 通知で header/icon を token.name/iconUrl に
@@ -2776,6 +2797,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	notificationPublisher.SetRoleLookup(roleNotifLookup)
 	notificationPublisher.SetAbuseReportLookup(abuseNotifLookup)
 	notificationPublisher.SetEmojiApplicationLookup(emojiApplicationNotifLookup)
+	notificationPublisher.SetSignupApplicationLookup(signupApplicationNotifLookup)
 	// streaming の通知 payload にも note の files / channel を載せる (#2735)。
 	notificationPublisher.SetFieldResolver(noteFieldResolver)
 	drivePublisher := stream.NewDrivePublisher(streamPubSub)
@@ -3119,6 +3141,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 期間上限をロールから引く (#2958)。未配線だと上限が丸ごと効かなくなる
 	// ので criticalWiring に載せてある。
 	emojiApplicationService.SetPolicyProvider(roleService)
+	// 申請が出されたことを**審査できる人**へ知らせる (#2987)。モデレーターでは
+	// なく `canManageCustomEmojis` を持つ人 — 審査 endpoint の gate と揃える。
+	emojiApplicationService.SetReceivedNotifier(
+		emojiapplication.NewReceivedNotifier(notificationService, roleService))
 	// 申請枠の手動リセット (#2962)。**未配線ならリセットは 500 で失敗する**
 	// (`ErrQuotaResetUnavailable`) ので、戻したつもりで戻っていない状態にはならない。
 	// ただし既存のリセットも読めなくなる = 過去に戻した枠が再び満杯に見えるので、
