@@ -2879,26 +2879,18 @@ func isAllowedEmojiImageType(mime string) bool {
 
 // preferWebpublicURL returns the drive file's webpublic URL when present,
 // else its canonical URL (upstream `webpublicUrl ?? url`).
+//
+// **実体は core/drive が持つ。** 既存データを直すバッチ (#2990) が同じ導出を
+// するので、api 層に閉じたままだと再実装になる。
 func preferWebpublicURL(f *model.DriveFile) string {
-	if f.WebpublicURL != nil && *f.WebpublicURL != "" {
-		return *f.WebpublicURL
-	}
-	return f.URL
+	return coredrive.PreferWebpublicURL(f)
 }
 
 // preferWebpublicType returns the drive file's webpublic MIME when present,
 // else its canonical type (upstream `webpublicType ?? type`). Returned as a
 // pointer so a non-empty value lands in emoji.type (NULL when both empty).
 func preferWebpublicType(f *model.DriveFile) *string {
-	if f.WebpublicType != nil && *f.WebpublicType != "" {
-		t := *f.WebpublicType
-		return &t
-	}
-	if f.Type != "" {
-		t := f.Type
-		return &t
-	}
-	return nil
+	return coredrive.PreferWebpublicType(f)
 }
 
 // EmojiUpdate handles POST /api/admin/emoji/update.

@@ -326,6 +326,91 @@ func (s *Service) ReadFileBody(f *model.DriveFile, max int64) ([]byte, error) {
 	return safehttp.ReadAllLimit(rc, max)
 }
 
+// CopyToSystemFile duplicates src as a system-owned drive file (userId /
+// userHost NULL) and returns the copy (#2966).
+//
+// 元のファイルは読むだけで、移動も変更も削除もしない。所有権を移すと、ノートの
+// 添付やプロフィールで使っているファイルが利用者の drive から突然消える。
+//
+// **実体はストレージから直に読む。** 自分の公開 URL を HTTP で叩くと SSRF ガードと
+// 衝突し、非公開 URL の構成では取れず、DB 上の行と実体の対応も確かめられない。
+// `ReadFileBody` の `storageFor` が `storedInternal` を見るので、オブジェクト
+// ストレージへ移行する前に保存されたファイルもローカルから読める。
+//
+// max は読み出しの上限。**ここには既定値を置かない** — 用途ごとの上限を呼び出し側が
+// 1 箇所で定義できるようにするため (絵文字は core/emojiapplication の
+// MaxEmojiCopyBytes が唯一の定義で、申請側と承認側で食い違うと「申請はできたのに
+// 承認だけが恒久的に失敗する」サイズ帯が生まれる)。
+//
+// 実体が無い行 (isLink / accessKey 無し / ストレージから消えた) は
+// ErrObjectNotFound、上限超過は safehttp.ErrResponseTooLarge が `%w` で伝わるので、
+// 呼び出し側は errors.Is で種別を分けられる。
+func (s *Service) CopyToSystemFile(ctx context.Context, src *model.DriveFile, name string, sensitive bool, max int64) (*model.DriveFile, error) {
+	if src == nil {
+		return nil, fmt.Errorf("no source file")
+	}
+	body, err := s.ReadFileBody(src, max)
+	if err != nil {
+		return nil, fmt.Errorf("read source file: %w", err)
+	}
+
+	driveName := name
+	if driveName == "" {
+		driveName = src.Name
+	}
+	// **`User: nil` が system-owned の作り方。** 利用者に紐付けると、ロールの
+	// 変更やアカウント削除で巻き込まれる。`Force` は user==nil のとき dedup が
+	// 元から効かないので no-op だが、「重複しても新しいファイルを作る」契約を
+	// 読み手に示すために明示する。
+	df, err := s.Upload(ctx, UploadInput{
+		User:  nil,
+		Body:  body,
+		Name:  driveName,
+		Force: true,
+		// **センシティブの指定は引き継ぐ。** 元ファイルに印が無くても、呼び出し側
+		// (申請) が sensitive を指定していれば複製にも付ける。
+		IsSensitive: src.IsSensitive || sensitive,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("upload copy to drive: %w", err)
+	}
+	return df, nil
+}
+
+// PreferWebpublicURL returns f's webpublic URL when present, else its canonical
+// URL (upstream `webpublicUrl ?? url`).
+//
+// **絵文字の `originalUrl` にはこれを使わない。** drive の孤児 cleanup は
+// `emoji.originalUrl = drive_file.url` または `publicUrl = url` を参照保護の条件に
+// しているので、`originalUrl` に webpublic だけを入れると保護が外れて消される。
+func PreferWebpublicURL(f *model.DriveFile) string {
+	if f == nil {
+		return ""
+	}
+	if f.WebpublicURL != nil && *f.WebpublicURL != "" {
+		return *f.WebpublicURL
+	}
+	return f.URL
+}
+
+// PreferWebpublicType returns f's webpublic MIME when present, else its
+// canonical type (upstream `webpublicType ?? type`). Returned as a pointer so a
+// non-empty value lands in emoji.type and NULL when both are empty.
+func PreferWebpublicType(f *model.DriveFile) *string {
+	if f == nil {
+		return nil
+	}
+	if f.WebpublicType != nil && *f.WebpublicType != "" {
+		t := *f.WebpublicType
+		return &t
+	}
+	if f.Type != "" {
+		t := f.Type
+		return &t
+	}
+	return nil
+}
+
 // SetSensitiveDetection attaches the sensitive media detector and config.
 func (s *Service) SetSensitiveDetection(detector SensitiveDetector, cfg SensitiveConfig) {
 	s.sensitiveDetector = detector
