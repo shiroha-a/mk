@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.24`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.25`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -37,7 +37,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 17 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 90 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.24`) | — | — |
+| fork frontend の独自変更 | 91 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.25`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -445,7 +445,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` / `2026.9.0-mk.8e` / `2026.9.0-mk.8f` / `2026.9.0-mk.15` / `2026.9.0-mk.15a` / `2026.9.0-mk.15b` / `2026.9.0-mk.15c` / `2026.9.0-mk.16` / `2026.9.0-mk.16a` / `2026.9.0-mk.16b` の 15 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.24` (`362b69b5`)。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.25` (`67b10074`)。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -547,6 +547,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.22c` | モデレーションログの行に対象者を出す (#2962)。`resetEmojiApplicationQuota` の分岐が無いので、`/admin/modlog` には「絵文字申請枠をリセット」+ 時刻だけの行が並び、**誰の枠を戻したのか raw を開くまで分からない**。upstream の 38 種が同じ形で対象者を出しているのに、mk-go 独自の型だけが落ちていた。**`log.type` の union は misskey-js 由来で mk-go 固有の値を含まない**ので、比較も `log.info` の narrowing も効かない (対象者を取り出すヘルパーを置いてそこだけで cast する)。**純正へは還元できない行** (申請という概念自体が upstream に無い)。 |
 | `2026.9.0-mk.23` | 絵文字申請の審査で画像が大きすぎる場合の文面を出す (#2966)。`EMOJI_IMAGE_TOO_LARGE` に case が無く、審査画面には**「問題が発生しました」しか出ていなかった** — 何度押しても同じで、原因もモデレーターに伝わらない。mk-go は申請の時点でも同じ上限で弾くので普通は届かないが、**ロールの上限を後から下げると既存の申請がこの経路に来る**。**純正へは還元できない行** (申請という概念自体が upstream に無い)。 |
 | `2026.9.0-mk.24` | カスタム絵文字をアバターデコレーションとして選べるようにする (#2975)。既存のアバターデコレーションは**管理者が登録した素材しか使えず**、利用者が自分で選ぶ手段が無かった。設定 → アバターデコレーションに絵文字ピッカーの導線を足し、選んだ絵文字を既存の調整ダイアログ (`avatar-decoration.dialog.vue`) へそのまま流す — あれは `{id, url, name, roleIdsThatCanBeUsedThisDecoration}` を受けて角度・位置・反転を返すだけなので、絵文字をその形に詰めれば分岐が要らない。保存のときだけ `emojiName` を送る。**「使用中」の表示は catalog を引かない** — 絵文字由来の要素を `avatar_decoration` から探すと必ず外れて `?` になるので、`emojiName` の有無で分けて `:name:` の形で出す。**Unicode 絵文字とセンシティブな絵文字はピッカーの後で弾く** (backend も弾くが、選んだ直後に理由が出るほうが分かりやすい)。ピッカーの候補は `/api/emojis` 由来 = ローカル絵文字だけなので、リモート絵文字はそもそも出てこない。ロール編集画面の `canUseEmojiAsAvatarDecoration` は mk-go 固有 policy なので**列挙が要るのは 3 箇所** (`roles.editor.vue` のキー一覧、`roles.policy-editor.vue` のキー一覧と編集フォーム)。**大きさのスライダーを足した** (#2975)。`.decoration` はアバターの 2 倍の枠に描かれるので、余白の無いカスタム絵文字は既定のままだとアイコンを覆う — 本番確認で最初に出た指摘がこれ。新規の絵文字だけ 0.5 から始め、カタログ由来は従来どおり 1 から始める。`MkAvatar` の `getDecorationScale` は `flipH` しか見ていなかったので、そこへ大きさを掛ける。**拡大方向は出さない** (backend が弾くうえ、既に 2 倍の枠なのでアイコンの外へはみ出す)。`Decoration` 型には交差型で `scale?` を足す — misskey-js の autogen 型は openapi から再生成されるので直接は触らない。**policy を外された利用者への注意書きも出す** — 検証は配列の全要素に掛かるので、絵文字を着けたまま別の装飾を編集すると `RESTRICTED_BY_ROLE` で落ちる。導線を隠すだけだと原因が画面のどこにも出ない。**純正へは還元できない行** (純正 backend にこの field と policy が無い)。 |
+| `2026.9.0-mk.25` | 従来の絵文字管理画面にも登録申請の審査タブを出す (#2984)。絵文字の管理画面は `/admin/emojis` (従来) と `/admin/emojis2` (beta) の 2 つがあり、**どちらも admin メニューに出ている**。#2934 で足した審査タブは beta 側にしか無く、従来の画面を使っている運営者は審査へ到達できなかった。**いちばん効くのはモデレーターではない運営者** — 従来画面は `/custom-emojis-manager` でも配信されていて**そちらは `iAmModerator` gate を持たず**、ツールメニューが `$i.isAdmin \|\| $i.policies.canManageCustomEmojis` で出す。`/admin` 配下は全て `iAmModerator` gate なので、`canManageCustomEmojis` だけを持つ層は beta 画面に入れない。server 側の `admin/emoji-application/*` は `canManageCustomEmojis` しか要求しない (モデレーター権限は見ない) ので、**API では審査できるのに画面が無い**状態だった。**既存の `_spacer` の外に置く** — `custom-emojis-manager.applications.vue` は自前で `_spacer` を持つので、従来画面の `_spacer` の中に入れると入れ子になって幅と余白が二重に掛かる。あわせて `tab` の型を明示した (素の `ref('local')` は `Ref<string>` になるので、タブのキーを打ち間違えても何も言われない)。**gate は 2 画面を一覧で持つ** (`emojiManagerPages`) — 片方だけ名指しする形だと、まさにこの状態が緑で通る。import だけでなく**タブ一覧に載っているか**まで見る (読み込んでいても一覧に無ければ画面に出ない)。**純正へは還元できない行** (申請という概念自体が upstream に無い)。 |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -1225,7 +1226,7 @@ entropy も sharp と一致する (gif は完全一致、他は差 0.03 以下)�
 - **本家 e2e に対する適合**: `make upstream-e2e` (Misskey 本家の `test/e2e/**` を無改変で mk-go に向けて実行)。**意図的な差分は `tests/upstream-e2e/known-divergences.json` に根拠付きで登録し、expected-failure として扱う。** skip ではないので、乖離が解消して通るようになったら逆に落ちて気付ける。本ドキュメントに載せた divergence のうち API 挙動に現れるものは、原則この一覧にも entry がある ([upstream-backend-e2e.md](upstream-backend-e2e.md))
 - **コード内の divergence 注記**: `grep -rn "#2106 L" internal/` で全件を辿れる
 - **upstream 追従時**: `docs/update/` に release ごとの diff doc を追加し、そこで確定した divergence を本ドキュメントへ反映する。golden の再生成 (`make shapecheck-gen`) と TypeORM seed の追加も必要 ([upstream-catch-up.md](upstream-catch-up.md))
-- **fork frontend の変更**: `third_party/misskey` に custom commit を積んで tag を打ち、mk 側の submodule pin を bump する。純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針。tag は機能追加が `X.Y.Z-mk.N`、**バグ修正はその N に英字を足す** (`-mk.22` の修正なら `-mk.22a`、次が `-mk.22b`)
+- **fork frontend の変更**: `third_party/misskey` に custom commit を積んで tag を打ち、mk 側の submodule pin を bump する。純正へ還元できない (= 純正 backend が対応しない) ものだけを置く方針。tag は機能追加が `X.Y.Z-mk.N`、**直前の数字タグの後追い修正はその N に英字を足す** (`-mk.22` の修正なら `-mk.22a`、次が `-mk.22b`)。**世代をまたぐ修正は新しい数字を取る** — 英字は列の順序を保つためのものなので、`-mk.24` の後に `-mk.12a` を打つと `git describe --tags` が後戻りして見える。先例は `-mk.23` (`fix(frontend):` で `-mk.12` の取りこぼしを直したが数字を取った) と `-mk.25` (同じく #2934 の取りこぼし)
 
 ## 関連ドキュメント
 

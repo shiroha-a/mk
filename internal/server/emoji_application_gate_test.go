@@ -60,6 +60,33 @@ var (
 	publishRemoteRe = regexp.MustCompile(`publishEmojiAdded\(&\w+\)`)
 )
 
+// emojiManagerRouteRe pulls the custom emoji manager pages out of the router.
+//
+// **画面の一覧は router から導出する。** 手書きの一覧にすると、#2984 の原因
+// (「一覧が人手依存だった」) がそのまま残る — 名指しを 1 つから 2 つに増やして
+// も、3 つ目が増えたときに足し忘れれば同じことが起きる。router は「その画面へ
+// 到達できるか」の truth なので、そこから引けば足し忘れようがない。
+// 導出元を truth にするのは #2969 の submodulepin-check と同じ判断。
+//
+// `custom-emojis-manager.applications.vue` のような**部品**は router に現れない
+// ので、この正規表現では拾われない (拾うと「タブ自身がタブを読み込んでいない」
+// と言い出す)。
+// emojiApplicationImportRe extracts the local alias of the applications tab
+// component so the gate can look for it in the template.
+var emojiApplicationImportRe = regexp.MustCompile(`import\s+(\w+)\s+from\s+'[^']*custom-emojis-manager\.applications\.vue'`)
+
+var emojiManagerRouteRe = regexp.MustCompile(`component: page\(\(\) => import\('@/(pages/(?:admin/)?custom-emojis-manager\d*\.vue)'\)\)`)
+
+// mustDetectEmojiManagerPages pins the screens the derived list has to contain.
+//
+// **導出だけでは足りない。** 正規表現が書式変更で空振りすると、一覧が縮んだ
+// ことに誰も気付かないまま緑になる。#2984 で実際に取りこぼした従来画面と、
+// #2934 が唯一足した beta 画面の 2 つを固定しておく。
+var mustDetectEmojiManagerPages = map[string]string{
+	"pages/custom-emojis-manager.vue":        "/admin/emojis と /custom-emojis-manager (従来)",
+	"pages/admin/custom-emojis-manager2.vue": "/admin/emojis2 (beta)",
+}
+
 // TestEmojiApplicationIsWired asserts the emoji registration request feature
 // stays connected end to end (#2934).
 //
@@ -135,9 +162,42 @@ func TestEmojiApplicationIsWired(t *testing.T) {
 	require.Containsf(t, routes, "/emoji-request",
 		"router.definition.ts に /emoji-request が無い。申請ページへ到達できない")
 
-	manager := stripComments(readFileString(t, filepath.Join(fe, "src", "pages", "admin", "custom-emojis-manager2.vue")))
-	require.Containsf(t, manager, "custom-emojis-manager.applications.vue",
-		"カスタム絵文字の管理画面が申請タブを読み込んでいない。審査できなくなる")
+	// **絵文字の管理画面は複数ある。** `/admin/emojis` (従来) と `/admin/emojis2`
+	// (beta) で、どちらも admin メニューに出ている。さらに従来画面は
+	// `/custom-emojis-manager` でも配信されており、**そちらは `iAmModerator` gate
+	// を持たない** — `canManageCustomEmojis` を持つがモデレーターではない運営者は
+	// `/admin/*` に入れないので、従来画面が審査への唯一の到達経路になる。
+	// #2934 は beta 側にしかタブを足しておらず、その層は審査できなかった (#2984)。
+	//
+	// **一覧は router から導出する** (手書きだと 3 つ目で同じことが起きる)。
+	pageSet := map[string]bool{}
+	for _, m := range emojiManagerRouteRe.FindAllStringSubmatch(routes, -1) {
+		pageSet[m[1]] = true
+	}
+	for rel, why := range mustDetectEmojiManagerPages {
+		require.Truef(t, pageSet[rel],
+			"router から %s (%s) を拾えていない。書式が変わって一覧が縮んでいないか"+
+				"確認すること (縮むと、その画面にタブが無くても緑になる)", rel, why)
+	}
+	for rel := range pageSet {
+		manager := stripComments(readFileString(t, filepath.Join(fe, "src", rel)))
+		require.Containsf(t, manager, "custom-emojis-manager.applications.vue",
+			"%s が申請タブを読み込んでいない。この画面からは審査できなくなる", rel)
+		// **import だけでは出ない。** タブの一覧に載っていなければ、読み込んで
+		// いても画面のどこにも現れない (#2900 が policy 編集で踏んだのと同じ形)。
+		require.Containsf(t, manager, "_emojiApplication.tabTitle",
+			"%s のタブ一覧に申請タブが無い。読み込んでいても画面に出ない", rel)
+		// **テンプレートで実際に描いているかまで見る。** import とタブ一覧が
+		// 残ったまま `<XApplicationsComponent …>` の 1 行だけ落ちると、タブは
+		// 出るのに押すと**真っ白**になる。`vue-tsc` は通り、eslint の
+		// 「未使用の import」は `--quiet` で握り潰されるので、**どこにも
+		// 引っかからない** (実測)。この gate の docstring が自ら守ると書いて
+		// いる「審査タブが空になる」がまさにこの形。
+		alias := emojiApplicationImportRe.FindStringSubmatch(manager)
+		require.NotNilf(t, alias, "%s の申請タブの import を読めない (書式が変わった?)", rel)
+		require.Containsf(t, manager, "<"+alias[1],
+			"%s がタブの中身を描画していない。タブは出るが押すと空になる", rel)
+	}
 
 	// **リモートのインポート申請の導線 (#2935)。** 権限を持つ人はその場で
 	// インポートし、持たない人は申請する。条件は同じで押した先だけが違うので、
