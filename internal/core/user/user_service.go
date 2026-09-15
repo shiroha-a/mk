@@ -263,12 +263,15 @@ func (s *Service) ShowManyByIDs(ids []string) ([]*UserWithProfile, error) {
 // resolver 未設定の場合は ErrUserNotFound を返し (後方互換)、設定済みで解決
 // に失敗した場合は ErrFailedToResolveRemoteUser を返す。
 func (s *Service) ShowByUsername(username string, host *string) (*UserWithProfile, error) {
-	// **ここで正規化しない。** repository の `hostMatch` は正規化形と生の両方に
-	// 当てるが、先に正規化してしまうと生の腕が死に、非正規化で保存された行が
-	// この経路から引けなくなる (#2704 review HIGH-1)。upstream が読み取り側で
-	// toPuny を掛けられるのは、**保存側で正規化しているから**
-	// (`ApPersonService.ts:307`)。mk-go の保存側は生なので、揃えるのは
-	// リモートへ問い合わせる直前だけにする。
+	// **正規化は repository に任せる。** `FindByUsernameLower` が引く直前に
+	// `idnhost.Puny` を掛けるので (#2704)、ここで掛けると二度手間になるだけ。
+	//
+	// **非正規化のまま保存された行は引けない (#2996)。** その場合は下のリモート解決
+	// (WebFinger) へ落ちる。**行は増えない** — 解決先の actor URI は変わらないので
+	// `ResolveActor` の `FindByURI` が既存行に当たる。増えるのは**呼ばれるたびの
+	// 外向きリクエスト**のほうで、`LookupActorURI` にキャッシュは無い。
+	// `backfill-remote-host` を流していない環境で上げるとこの形になる
+	// (経路ごとの症状は docs/deployment.md)。
 	u, err := s.userRepo.FindByUsernameLower(username, host)
 	if err == nil {
 		profile, _ := s.userRepo.FindProfileByUserID(u.ID)

@@ -8,8 +8,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// **比較の両辺を揃えるための正規化** (#2704)。保存側も #2706 で揃えたが、それ以前の行は非正規化のまま
-// (`idnhost.go` のコメント参照) ので、これは比較専用。
+// **比較の両辺を揃えるための正規化** (#2704)。保存側も #2706 で `hostFromURI` が同じ
+// 正規化を掛けるので、引き当ては正規形どうしの完全一致になる (#2996 で読み取り側の
+// 両当たりを撤去した。`idnhost.go` のコメント参照)。
 func TestPuny(t *testing.T) {
 	cases := []struct {
 		name string

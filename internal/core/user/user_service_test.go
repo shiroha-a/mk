@@ -1328,8 +1328,8 @@ func (r *recordingResolver) ResolveByUsernameHost(username, host string) (*model
 //
 // 引く側は Unicode で来ることがある (フロントの mention リンクは
 // `toUnicode(host)` で URL を組む)。正規化しないと「通知からは開けるのに
-// メンションからは開けない」という形で出る。**backfill 前の行は非正規化のまま**なので、
-// 正規化形と生の両方に当てる (repository の hostCandidates)。
+// メンションからは開けない」という形で出る。引く前に正規化し、正規形の完全一致で
+// 当てる (repository の hostMatch、#2996)。
 func TestShowByUsername_IDNHost(t *testing.T) {
 	const puny = "xn--eckve.example"
 
@@ -1416,15 +1416,18 @@ func TestShowByUsername_LocalHostShortCircuit(t *testing.T) {
 	}
 }
 
-// **非正規化で保存された行が主経路 (users/show) から引けること** (#2704 review
-// HIGH-1)。
+// **非正規化で保存された行は主経路 (users/show) から引けなくなる (#2996)。**
 //
-// backfill 前の行は非正規化のまま (#2706 以前の `hostFromURI` は `url.Parse(uri).Host` をそのまま
-// 入れる) ので、`https://Mixed.Example/users/x` を出すサーバーの行は大文字
-// 混じりで入る。DB を引く前に正規化すると repository の両当たりが死んで、
-// この経路から引けなくなる。upstream が読み取り側で toPuny を掛けられるのは
-// **保存側で正規化しているから** (`ApPersonService.ts:307`)。
-func TestShowByUsername_NonNormalizedStoredHost(t *testing.T) {
+// 生の形にも当てる互換経路を撤去したので、backfill 前の行 (#2706 以前の
+// `hostFromURI` は `url.Parse(uri).Host` をそのまま入れる) は DB から引けず、
+// **リモート解決 (WebFinger) へ落ちる**。
+//
+// **行は増えない** — 解決先の actor URI は変わらないので `ResolveActor` の
+// `FindByURI` が既存行に当たる。増えるのは**呼ばれるたびの外向きリクエスト**の
+// ほうで、`LookupActorURI` にキャッシュは無い。「引けない」ではなく「WebFinger へ
+// 落ちる」ところまで固定するのが要点。
+// アップグレード前に `backfill-remote-host` を流す前提 (docs/deployment.md)。
+func TestShowByUsername_NonNormalizedStoredHostFallsBackToRemote(t *testing.T) {
 	for _, stored := range []string{"Mixed.Example", "XN--ECKVE.EXAMPLE"} {
 		t.Run(stored, func(t *testing.T) {
 			repo := testutil.NewMockUserRepository()
@@ -1433,14 +1436,13 @@ func TestShowByUsername_NonNormalizedStoredHost(t *testing.T) {
 				ID: "u1", Username: "Alice", UsernameLower: "alice", Host: &h,
 			}
 			svc := user.NewService(repo, nil, nil, nil)
-			res := &recordingResolver{err: errors.New("must not be called")}
+			res := &recordingResolver{err: errors.New("not resolvable in test")}
 			svc.SetRemoteUserResolver(res)
 
 			q := stored
-			got, err := svc.ShowByUsername("alice", &q)
-			require.NoError(t, err, "保存されている文字列そのもので引けること")
-			assert.Equal(t, "u1", got.User.ID)
-			assert.Empty(t, res.calls, "DB に居るのにリモート解決へ落ちないこと")
+			_, err := svc.ShowByUsername("alice", &q)
+			require.Error(t, err)
+			assert.NotEmpty(t, res.calls, "DB で引けないのにリモート解決へ落ちていない")
 		})
 	}
 }

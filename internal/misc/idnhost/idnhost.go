@@ -18,9 +18,9 @@ import (
 // `xn--eckve.example`、`Remote.Example` と `remote.example` を同一視する。
 //
 // **保存側も #2706 で同じ正規化を掛ける。** `hostFromURI` が `Puny` に通すので、
-// 新しく入る行は正規化形しか持たない。`internal/repository` の `hostMatch` が今も
-// 両方の形に当てているのは、**backfill 前に非正規化で保存された行**を引くため
-// (`cmd/backfill-remote-host` を流し終えた環境では外せる)。
+// 新しく入る行は正規化形しか持たない。`internal/repository` の `hostMatch` は
+// #2996 で**引き当て側も正規形の完全一致だけ**にした (生の形にも当てる互換経路を
+// 撤去した)。backfill 前の非正規化の行が残っている環境では、その行が引けなくなる。
 //
 // **既定ポートの扱いだけは違う。** `hostFromURI` は `https://h:443` を `h` として
 // 保存するようになったが (連合ゲートの綴り回避を塞ぐため)、`Puny` はポートを

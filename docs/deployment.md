@@ -620,6 +620,14 @@ mk-goはTS版と同じPostgreSQL/Redisを共有できるため、バイナリの
 2. **submodule が動いたらフロントエンドを再ビルドする**。SPA のアセットは image に焼き込まず bind-mount で渡しているため、submodule だけ進めても配信物は変わらない
 3. **フロントエンドを再ビルドしたら mk-go を再起動する**。エントリポイント (`scripts/<hash>.js`) を起動時に 1 回だけ解決してキャッシュする実装なので、再起動しないと消えた古いファイルを指し続けて 404 になる。bind-mount であっても再起動は必要
 
+**1.3.0 より後へ上げるときは、先に `backfill-remote-host` を流す (#2996)。** リモート
+host の読み取り側にあった、非正規化のまま保存された行むけの互換経路を撤去した。流して
+いない環境で上げると**非正規化の行が DB から引けなくなる** (`users/show` が呼ばれる
+たびに WebFinger を叩く、AP の acct 解決が 404 になる、リモート宛メンションの通知が
+飛ばない)。**保存側を正規化したのが 1.3.0 なので、それより古い版から上げる場合ほど
+対象行は多い。** 確認方法と手順は[後始末バッチ](#後始末バッチ)の
+`backfill-remote-host`。
+
 **`docker compose up -d` は再起動を保証しない。** compose はイメージと設定が変わらなければコンテナを作り直さないが、フロントエンドは bind-mount なのでフロントエンドだけ更新したときは何も変わらない。原則 3 を満たすには `restart` を明示するか、それを行う `make uds-restart` / `make docker-restart` を使う。2026-09-07 にこれで本番のフロントエンドが 10 分近く起動しなくなった (#2885)。
 
 **壊れても CSS では気付けない。** vite のファイル名は内容ハッシュなので、内容が変わらない CSS は再ビルド後も同じ名前で作り直され 200 を返し続ける。判定にはエントリの JS を直接叩く必要がある。`make *-restart` が呼ぶ [`deploy/check-frontend-entry.sh`](../deploy/check-frontend-entry.sh) はそこまで見て、404 なら非ゼロで落ちる。
@@ -775,12 +783,48 @@ publish しない。サーバー側は `emoji` のキャッシュ (5 分) とア
 ### `backfill-remote-host` — 保存済みリモート host の punycode 正規化 (#2706)
 
 `hostFromURI` は #2706 から保存時に `idna.ToASCII(lowercase)` を掛けるが、それ以前に
-取り込んだ行は `Mixed.Example` のような生の表記のまま残る。acct 解決は読み取り側の
-両当たりで救っているが、**連合ゲート (blocked / silenced host) と timeline の
-instance-mute は完全一致なので取りこぼす**。
+取り込んだ行は `Mixed.Example` のような生の表記のまま残る。**連合ゲート
+(blocked / silenced host) と timeline の instance-mute は完全一致なので取りこぼし**、
+acct 解決も #2996 で両当たりを撤去したので引けない。
 
 `lower()` だけでは `パイ.example` → `xn--eckve.example` を作れず、PostgreSQL に IDNA
 変換が無いので SQL migration では書けない。
+
+> **1.3.0 より後へ上げる前に必ず流すこと (#2996)。** 読み取り側が非正規化の行にも
+> 当てていた互換経路を撤去したので、**流していない環境では非正規化のまま残っている
+> 行が DB から引けなくなる**。経路ごとに症状が違う。
+>
+> | 経路 | 症状 |
+> |---|---|
+> | `users/show` | **リモートへ WebFinger で問い合わせ直す。** 相手が応答すれば表示できるが、`LookupActorURI` にキャッシュが無いので**呼ばれるたびに外向きのリクエストが飛ぶ** (未認証でも叩ける)。応答が無ければ DB の行には戻らず `FAILED_TO_RESOLVE_REMOTE_USER` (500)。非正規化の行は #2706 より前に取り込んだものなので、既に消滅・改名した相手が混ざりやすい。解決できたときは**行は増えない** (actor URI は変わらないので `FindByURI` が既存行に当たる) |
+> | `/@:acct` の AP JSON | `ShowByUsernameDB` が DB だけを見るので **404**。リモートからの acct 解決はここで失敗する |
+> | `/@:acct` の HTML | 404 にはならない。素の SPA shell を 200 で返し (upstream も同じ)、OGP の meta だけが落ちる |
+> | `/avatar/@:acct` | `/static-assets/user-unknown.png` へ 302。**`Cache-Control: public, max-age=86400` を先に書く**ので、backfill を流しても最大 1 日はブラウザ側で unknown のまま出る |
+> | リモート宛メンション | 宛先を引けないので AP の `Mention` タグが付かない。**フォロワーには通常の配送で届くがメンション通知は飛ばず**、フォロワーでない相手には届かない |
+>
+> 連合ゲート (blocked / silenced host) と instance-mute は元から完全一致なので、
+> そちらは #2706 の時点から取りこぼしている。
+>
+> **確認は `-dry-run` の `updated` が 0 になること。** 0 でなければ本実行してから
+> 上げる。本実行で `conflicts` が出た行は**据え置かれる** (同じリモートが表記違いで
+> 2 行に増えていて、正規化すると一意制約に当たる) ので、dry-run の `updated` は
+> 0 にならないまま残る。その場合は衝突した行を個別に手当てすること — ログに
+> `conflict <table>.<column> ...` の形で出る。
+>
+> **既定ポート付きの行は対象外。** バッチが掛けるのは `idnhost.Puny` だけで、
+> `h:443` のような行は `updated` にも `conflicts` にも出てこない。保存側
+> (`hostFromURI`) は #2706 で既定ポートを剥がすようになったので、それ以前の行は
+> `updated=0` でも引けないまま残る。**`-dry-run` では気付けない**ので、DB を直接
+> 見ること (`emoji` / `note`.`userHost` / `following`.`*Host` も同じ形で数えられる):
+>
+> ```sql
+> SELECT count(*) FROM "user" WHERE host LIKE '%:443' OR host LIKE '%:80';
+> SELECT count(*) FROM instance WHERE host LIKE '%:443' OR host LIKE '%:80';
+> ```
+>
+> **非既定ポートは対象ではない。** `hostFromURI` は `h:3000` のようなポートを意図的に
+> 残す (別 authority なので畳むと連合ゲートを綴りで回避できる)。`idnhost.Puny` は
+> ポートを変えないので、そういう行は正規形のまま引ける。
 
 ```bash
 # まず件数を見積もる (書き込まない)

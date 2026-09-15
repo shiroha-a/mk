@@ -2,7 +2,7 @@
 // hostFromURI now produces (idna.ToASCII(lowercase), UTS#46) — #2706.
 //
 // 既存行は `url.Parse` の生の host で保存されており、`Mixed.Example` のような表記の
-// まま残る。acct 解決は読み取り側の両当たりで救っているが、連合ゲート
+// まま残る。読み取り側の両当たりは #2996 で撤去したので acct 解決からも引けず、連合ゲート
 // (blocked / silenced host) や timeline の instance-mute は完全一致なので取りこぼす。
 //
 // **SQL migration では書けない。** PostgreSQL に IDNA 変換が無く、`lower()` だけでは

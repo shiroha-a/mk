@@ -10,9 +10,10 @@ import (
 
 // **mock は本番の repository (hostMatch) と同じ意味論であること** (#2704)。
 //
-// ずれると、mock を使うテストだけが通って本番との差が隠れる。ここを直接
-// 固定しているのは、service 経由だと先に正規化されて mock まで非正規化の host が
-// 届かないため (= service 経由のテストでは差が観測できない)。
+// ずれると、mock を使うテストだけが通って本番との差が隠れる。service 経由でも
+// host は正規化されずに repository まで届く (`ShowByUsername` は自分で正規化しない)
+// が、そちらは DB miss がリモート解決に化けるので**引けたかどうかを直接は見られない**。
+// 引き当ての意味論はここで固定する。
 func TestMockUserRepository_HostMatchesProduction(t *testing.T) {
 	newRepo := func(stored string) *MockUserRepository {
 		repo := NewMockUserRepository()
@@ -31,13 +32,14 @@ func TestMockUserRepository_HostMatchesProduction(t *testing.T) {
 		{"unicode で引く", "xn--eckve.example", "パイ.example", true},
 		{"大文字 punycode で引く", "xn--eckve.example", "XN--ECKVE.EXAMPLE", true},
 		{"大文字 ASCII で引く", "remote.example", "Remote.Example", true},
-		{"非正規化で保存された行は保存された形で引ける", "Mixed.Example", "Mixed.Example", true},
 		{"別ホストは引かない", "remote.example", "other.example", false},
-		// **ここが無いと「mock だけ緩い」変異を捕まえられない。** 両辺を
-		// 正規化して比べる実装 (= 保存側も正規化する前提) にすると、下の 2 つが
-		// true になってしまい本番と食い違う。
+		// **非正規化のまま保存された行は引けない (#2996)。** 生の形にも当てる
+		// 互換経路を撤去したので、保存された綴りそのもので問い合わせても当たらない。
+		// ここが true に戻ると「mock だけ緩い」状態になり、本番で引けない行が
+		// テストでだけ引ける。
+		{"非正規化で保存された行は保存された形でも引けない", "Mixed.Example", "Mixed.Example", false},
+		{"非正規化で保存された行は正規化形でも引けない", "Mixed.Example", "mixed.example", false},
 		{"unicode で保存された行は punycode では引けない", "パイ.example", "xn--eckve.example", false},
-		{"非正規化で保存された行は正規化形では引けない", "Mixed.Example", "mixed.example", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -65,39 +67,51 @@ func TestMockUserRepository_HostMatchesProduction(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "local", got.ID)
 	})
+
+	// **username も本番と同じく小文字化して突き合わせること。** 本番は
+	// `"usernameLower" = lower(?)` なので `@Alice@remote.example` でも引けるが、
+	// mock が byte 一致だと**そこだけ引けない**。mention の解決は
+	// `ExtractMentionStructs` の結果をそのまま渡すので、書き手が大文字で打てば
+	// 大文字のまま届く (`internal/core/federation` の 2 箇所)。
+	t.Run("username の大文字小文字を問わない", func(t *testing.T) {
+		repo := newRepo("remote.example")
+		h := "remote.example"
+		for _, name := range []string{"alice", "Alice", "ALICE"} {
+			got, err := repo.FindByUsernameLower(name, &h)
+			require.NoError(t, err, "username=%q", name)
+			assert.Equal(t, "u1", got.ID)
+
+			local := NewMockUserRepository()
+			local.Users["l1"] = &model.User{ID: "l1", Username: "Alice", UsernameLower: "alice"}
+			lgot, lerr := local.FindByUsernameLower(name, nil)
+			require.NoError(t, lerr, "ローカルでも同じこと (username=%q)", name)
+			assert.Equal(t, "l1", lgot.ID)
+		}
+	})
 }
 
-// **host 表記の違う 2 行があるとき、本番と同じ行を選ぶこと** (#2704 review)。
-//
-// 1 行しか入れないケースでは「どちらを返すか」を観測できないので、完全一致優先を
-// 外す変異が素通りしてしまう。畳み込みも本番と揃っていないと、mention 解決を
-// mock で書いたテストが map の反復順に依存して非決定になる。
-func TestMockUserRepository_PrefersExactRowLikeProduction(t *testing.T) {
+// **表記違いの 2 行があっても正規形の行に決まる (#2996)。** 本番と同じく、
+// 問い合わせ側の綴りで結果が変わらないこと (変わると mention の解決先が書き手の
+// 打ち方で揺れる)。
+func TestMockUserRepository_ResolvesToNormalizedRowLikeProduction(t *testing.T) {
 	newRepo := func() *MockUserRepository {
 		repo := NewMockUserRepository()
-		a, b := "mixed.example", "Mixed.Example"
-		repo.Users["ua"] = &model.User{ID: "ua", Username: "Alice", UsernameLower: "alice", Host: &a}
-		repo.Users["ub"] = &model.User{ID: "ub", Username: "Alice", UsernameLower: "alice", Host: &b}
+		norm, raw := "mixed.example", "Mixed.Example"
+		repo.Users["u_norm"] = &model.User{ID: "u_norm", UsernameLower: "dupuser", Host: &norm}
+		repo.Users["u_raw"] = &model.User{ID: "u_raw", UsernameLower: "dupuser", Host: &raw}
 		return repo
 	}
-
-	t.Run("完全一致の行を返す", func(t *testing.T) {
-		// map の反復順に依存しないよう繰り返す。
-		for i := 0; i < 50; i++ {
-			q := "Mixed.Example"
-			got, err := newRepo().FindByUsernameLower("alice", &q)
+	for _, q := range []string{"Mixed.Example", "mixed.example", "MIXED.EXAMPLE"} {
+		t.Run(q, func(t *testing.T) {
+			h := q
+			got, err := newRepo().FindByUsernameLower("dupuser", &h)
 			require.NoError(t, err)
-			require.Equal(t, "ub", got.ID)
-		}
-	})
+			assert.Equal(t, "u_norm", got.ID, "正規形の行を返すこと")
 
-	t.Run("一括引きは username ごとに 1 行へ畳む", func(t *testing.T) {
-		for i := 0; i < 50; i++ {
-			q := "Mixed.Example"
-			many, err := newRepo().FindManyByUsernamesAndHost([]string{"Alice"}, &q)
-			require.NoError(t, err)
-			require.Len(t, many, 1)
-			require.Equal(t, "ub", many[0].ID)
-		}
-	})
+			many, merr := newRepo().FindManyByUsernamesAndHost([]string{"dupuser"}, &h)
+			require.NoError(t, merr)
+			require.Len(t, many, 1, "正規形の行だけが返ること (#2996 で畳む処理は撤去した)")
+			assert.Equal(t, "u_norm", many[0].ID)
+		})
+	}
 }

@@ -4006,8 +4006,9 @@ func hasPublicAudience(list []string) bool {
 // 非正規化で入り、acct 解決が空振りする (#2704 / #2706)。upstream も保存時に
 // `punyHost` を掛けている (ApPersonService.ts)。
 //
-// 比較専用の punyHost とは役割が違う。あちらは**読み取り側で両辺を揃える**もので、
-// backfill 前の非正規化行が残っているあいだは併存する。
+// 比較専用の punyHost とは役割が違う。保存側 (この関数) が正規化した値に対して、
+// punyHost は**外から来る綴りを同じ正規形へ寄せる**。両者が揃っているので完全一致で
+// 引ける (#2996 で読み取り側の両当たりを撤去できたのはこのため)。
 func hostFromURI(uri string) (string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
@@ -4036,8 +4037,8 @@ func hostFromURI(uri string) (string, error) {
 // 小文字化で返す (Go default の lenient UTS#46 profile では port 付き host も
 // 成功し ASCII tail はそのまま残るため、fallback は実質ほぼ発生しない)。これは
 // 保存側 (`hostFromURI`) も #2706 で同じ正規化を掛けるようになったので、両者は
-// 同じ値を作る。punyHost が今も要るのは、**backfill 前に非正規化で保存された行**と
-// 外から渡ってくる acct の host を突き合わせるため。
+// 同じ値を作る。punyHost が今も要るのは、**外から渡ってくる acct や actor の host**
+// を保存形と同じ正規形へ揃えるため (読み取り側の両当たりは #2996 で撤去した)。
 //
 // **既定ポートの扱いだけは違う。** `hostFromURI` は `https://h:443` を `h` として
 // 保存する (`punyHostPort` が剥がす) が、`punyHost` はポートを見ない。ポートを

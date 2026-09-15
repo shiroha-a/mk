@@ -1680,7 +1680,7 @@ func TestUserRepository_SearchByUsernameAndHost_FindsNeverPostedUser(t *testing.
 // `toUnicode(host)` で URL を組むので、メンションからユーザーページを開くと
 // この形になる。生の完全一致で引いていた頃は、そこだけが NO_SUCH_USER になって
 // 「通知からは開けるのにメンションからは開けない」という形で出ていた。
-// **backfill 前の行は非正規化のまま**なので、正規化形と生の両方に当てる。
+// 引く前に `idnhost.Puny` で正規化するので、綴りが違っても正規形の行に当たる。
 func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	const puny = "xn--eckve.example"
@@ -1716,32 +1716,27 @@ func TestUserRepository_FindByUsernameLower_IDNHost(t *testing.T) {
 	})
 }
 
-// **非正規化で保存された行が引けなくなっていないこと** (#2704 review MEDIUM-1)。
+// **非正規化のまま保存された行は引けなくなる (#2996)。** #2706 以降は保存側が
+// 正規化するので新しい行は正規形しか持たないが、それ以前の行が残っている環境で
+// 上げるとこの形になる。**アップグレード前に `backfill-remote-host` を流す前提**
+// (`-dry-run` で `updated=0` を確認できる)。
 //
-// backfill 前の行は非正規化のまま (#2706 以前の `hostFromURI` は `url.Parse(uri).Host` をそのまま
-// 入れる) ので、`https://Mixed.Example/users/x` のような actor URI を出す
-// サーバーの行は大文字混じりで入る。正規化形だけを引くと、そういう行が
-// **どの acct 経路からも引けなくなる**。
-func TestUserRepository_FindByUsernameLower_NonNormalizedStoredHost(t *testing.T) {
+// 「引けなくなる」を固定しておかないと、撤去の代償が doc にしか無い状態になる。
+func TestUserRepository_FindByUsernameLower_NonNormalizedStoredHostIsUnreachable(t *testing.T) {
 	repo := NewUserRepository(testDB)
 	insertRemoteTestUser(t, "idnstored00000000001", "storedmixed", "Mixed.Example")
-	insertRemoteTestUser(t, "idnstored00000000002", "storedpunyup", "XN--ECKVE.EXAMPLE")
 	t.Cleanup(func() {
-		testDB.Exec(`DELETE FROM "user" WHERE id IN (?, ?)`, "idnstored00000000001", "idnstored00000000002")
+		testDB.Exec(`DELETE FROM "user" WHERE id = ?`, "idnstored00000000001")
 	})
 
-	for _, tc := range []struct{ id, username, stored string }{
-		{"idnstored00000000001", "storedmixed", "Mixed.Example"},
-		{"idnstored00000000002", "storedpunyup", "XN--ECKVE.EXAMPLE"},
-	} {
-		h := tc.stored
-		got, err := repo.FindByUsernameLower(tc.username, &h)
-		require.NoError(t, err, "保存されている文字列そのもので引けること (stored=%q)", tc.stored)
-		assert.Equal(t, tc.id, got.ID)
+	for _, q := range []string{"Mixed.Example", "mixed.example"} {
+		h := q
+		_, err := repo.FindByUsernameLower("storedmixed", &h)
+		assert.Error(t, err, "非正規化で保存された行が引けている (query=%q)", q)
 
-		many, err := repo.FindManyByUsernamesAndHost([]string{tc.username}, &h)
-		require.NoError(t, err)
-		assert.Len(t, many, 1, "一括引きでも同じ (stored=%q)", tc.stored)
+		many, merr := repo.FindManyByUsernamesAndHost([]string{"storedmixed"}, &h)
+		require.NoError(t, merr)
+		assert.Empty(t, many, "一括引きでも同じ (query=%q)", q)
 	}
 }
 
@@ -1762,42 +1757,41 @@ func TestUserRepository_FindManyByUsernamesAndHost_IDNHost(t *testing.T) {
 	}
 }
 
-// **host 表記の違う行が共存するとき、完全一致の行を返すこと** (#2704 review
-// MEDIUM-2)。
-//
-// `IDX_user_usernameLower_host_unique` は host 表記の違いを別行として許すので、
-// 同じリモートが actor URI の host 表記を変えると 2 行になりうる。順序を付けないと
-// `First` が primary key 順で選ぶので、完全一致があっても負けることがある。
-// 一括引きも username ごとに 1 行へ畳む (呼び出し側が後勝ちで潰すと通知先が
-// DB の行順で決まる)。
-func TestUserRepository_HostMatch_PrefersExactRow(t *testing.T) {
+// **表記違いで共存している 2 行のうち、正規形の行だけが引ける (#2996)。**
+// `IDX_user_usernameLower_host_unique` は表記違いを別行として許すので、
+// backfill 前の DB にはこの形が残りうる。撤去後は正規形の完全一致なので、
+// どちらの綴りで問い合わせても正規形の行に決まる (問い合わせ側の綴りで結果が
+// 変わらないことが要点 — 変わると mention の解決先が書き手の打ち方で揺れる)。
+func TestUserRepository_HostMatch_ResolvesToNormalizedRow(t *testing.T) {
 	repo := NewUserRepository(testDB)
-	// 非完全一致の行を先に (= primary key が小さい側に) 入れる。
 	insertRemoteTestUser(t, "idndup000000000000a1", "dupuser", "mixed.example")
 	insertRemoteTestUser(t, "idndup000000000000a2", "dupuser", "Mixed.Example")
 	t.Cleanup(func() {
 		testDB.Exec(`DELETE FROM "user" WHERE id IN (?, ?)`, "idndup000000000000a1", "idndup000000000000a2")
 	})
 
-	h := "Mixed.Example"
-	got, err := repo.FindByUsernameLower("dupuser", &h)
-	require.NoError(t, err)
-	assert.Equal(t, "idndup000000000000a2", got.ID, "完全一致の行を返すこと")
+	for _, q := range []string{"Mixed.Example", "mixed.example", "MIXED.EXAMPLE"} {
+		h := q
+		got, err := repo.FindByUsernameLower("dupuser", &h)
+		require.NoError(t, err, "query=%q", q)
+		assert.Equal(t, "idndup000000000000a1", got.ID, "正規形の行を返すこと (query=%q)", q)
 
-	many, err := repo.FindManyByUsernamesAndHost([]string{"dupuser"}, &h)
-	require.NoError(t, err)
-	require.Len(t, many, 1, "username ごとに 1 行へ畳むこと")
-	assert.Equal(t, "idndup000000000000a2", many[0].ID)
+		many, merr := repo.FindManyByUsernamesAndHost([]string{"dupuser"}, &h)
+		require.NoError(t, merr)
+		require.Len(t, many, 1, "query=%q", q)
+		assert.Equal(t, "idndup000000000000a1", many[0].ID)
+	}
 }
 
-// **not-found 以外のエラーは次の候補を試さず、そのまま返すこと** (#2704 review)。
+// **not-found 以外のエラーはそのまま返すこと** (#2704 review / #2996)。
 //
-// 候補を順に引く形にしたので、接続断などを次の試行の結果で上書きすると、
-// 呼び出し側には record-not-found に見える。`ShowByUsername` はそれを DB miss と
-// 解釈して WebFinger へ落ちるので、DB の一過性障害が outbound 増幅に化ける。
+// 引き当ては 1 クエリだけになったが、**握り潰すと壊れ方は同じ**。接続断を
+// record-not-found に化けさせると、`ShowByUsername` がそれを DB miss と解釈して
+// WebFinger へ落ちるので、DB の一過性障害が outbound 増幅になる (core 側は
+// `TestShowByUsername_DBErrorIsNotTreatedAsMiss` が固定している)。
 func TestUserRepository_FindByUsernameLower_NonNotFoundErrorIsNotSwallowed(t *testing.T) {
 	boom := errors.New("boom: connection reset")
-	// 1 回目の Query だけ失敗させる。候補が 2 つある host を使う。
+	// 1 回目の Query だけ失敗させる。
 	session := testDB.Session(&gorm.Session{NewDB: true})
 	calls := 0
 	require.NoError(t, session.Callback().Query().Before("gorm:query").
@@ -1815,7 +1809,7 @@ func TestUserRepository_FindByUsernameLower_NonNotFoundErrorIsNotSwallowed(t *te
 	require.Error(t, err)
 	assert.ErrorIs(t, err, boom, "1 回目のエラーをそのまま返すこと")
 	assert.False(t, errors.Is(err, gorm.ErrRecordNotFound), "record-not-found に化けないこと")
-	assert.Equal(t, 1, calls, "not-found 以外なら 2 回目を投げないこと")
+	assert.Equal(t, 1, calls, "引き当ては 1 クエリだけ (#2996 で候補列挙を撤去した)")
 }
 
 // RemoveBackupCode は DB 側で 1 つだけ消す (#2852)。

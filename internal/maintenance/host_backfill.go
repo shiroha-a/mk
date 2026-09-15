@@ -110,7 +110,7 @@ type HostConflict struct {
 // 保存された行は、これを流しても `h` にはならない。
 //
 // 既存行は `url.Parse` の生の host で保存されており、`Mixed.Example` のような
-// 表記のまま残る。acct 解決は読み取り側の両当たり (hostCandidates) で救っているが、
+// 表記のまま残る。読み取り側の両当たりは #2996 で撤去したので acct 解決からも引けず、
 // 連合ゲートや timeline の instance-mute は完全一致なので取りこぼす (#2706)。
 //
 // **PostgreSQL に IDNA 変換が無い**ので SQL migration では書けない。`lower()` だけ

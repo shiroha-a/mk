@@ -258,12 +258,15 @@ func (m *MockUserRepository) FindByUsernameLower(username string, host *string) 
 	if m.FindByUsernameLowerFn != nil {
 		return m.FindByUsernameLowerFn(username, host)
 	}
-	// **本番の repository と同じ意味論にする** (#2704)。揃えないと、mock を使う
-	// テストだけが通って本番との差が隠れる。完全一致を優先するのも同じ理由
-	// (host 表記の違う 2 行が共存しうる)。
-	var fallback *model.User
+	// **本番の repository と同じ意味論にする** (#2704 / #2996)。揃えないと、mock を
+	// 使うテストだけが通って本番との差が隠れる。
+	//
+	// **username も小文字化して比べる。** 本番は `"usernameLower" = lower(?)` で、
+	// 呼び出し側は打たれたままの綴りで来る (`ExtractMentionStructs` は小文字化しない
+	// ので、`@Alice@remote.example` は `Alice` のまま届く)。
+	lowered := strings.ToLower(username)
 	for _, u := range m.Users {
-		if u.UsernameLower != username {
+		if u.UsernameLower != lowered {
 			continue
 		}
 		if host == nil {
@@ -275,26 +278,22 @@ func (m *MockUserRepository) FindByUsernameLower(username string, host *string) 
 		if u.Host == nil {
 			continue
 		}
-		if *u.Host == *host {
+		// **正規形の完全一致だけ (#2996)。** 生の形にも当てる互換経路は撤去した。
+		if hostMatches(*host, *u.Host) {
 			return u, nil
 		}
-		if fallback == nil && hostMatches(*host, *u.Host) {
-			fallback = u
-		}
-	}
-	if fallback != nil {
-		return fallback, nil
 	}
 	return nil, ErrNotFound
 }
 
-// hostMatches mirrors repository.hostMatch: the stored value matches either the
-// normalized form of the query or the query as given.
+// hostMatches mirrors repository.hostMatch: the query is normalized and then
+// compared exactly.
 //
-// **backfill 前の行は非正規化のまま**なので、正規化形だけで比べると非正規化で保存された
-// 行が引けなくなる。本番と同じ両当たりにしておく (#2704 review)。
+// **生の形にも当てる互換経路は #2996 で撤去した。** 保存側も #2706 で正規化する
+// ので、正規形どうしの完全一致で引ける。非正規化のまま残っている行は引けなく
+// なる (それが撤去の意味で、`backfill-remote-host` を流してから上げる前提)。
 func hostMatches(query, stored string) bool {
-	return stored == query || stored == idnhost.Puny(query)
+	return stored == idnhost.Puny(query)
 }
 
 // FindManyByUsernamesAndHost mirrors the production repo: case-insensitive
@@ -319,26 +318,13 @@ func (m *MockUserRepository) FindManyByUsernamesAndHost(usernames []string, host
 			out = append(out, u)
 		}
 	}
-	if host == nil {
-		return out, nil
-	}
-	// **本番と同じく username ごとに 1 行へ畳む** (#2704)。畳まないと、呼び出し側
-	// (mention 解決) が `m[usernameLower] = id` で後勝ちに潰すので、mock 経由の
-	// テストが map の反復順に依存して非決定になる。完全一致を優先するのも本番と同じ。
-	best := make(map[string]*model.User, len(out))
-	for _, u := range out {
-		cur, ok := best[u.UsernameLower]
-		if !ok || (*u.Host == *host && *cur.Host != *host) {
-			best[u.UsernameLower] = u
-		}
-	}
-	folded := out[:0]
-	for _, u := range out {
-		if best[u.UsernameLower] == u {
-			folded = append(folded, u)
-		}
-	}
-	return folded, nil
+	// **本番と同じく畳まない (#2996)。** `hostMatches` が正規形の完全一致になり、
+	// `(usernameLower, host)` は一意制約で高々 1 行なので、本番側も畳む処理を
+	// 撤去した。mock だけ畳むと「fixture が同じ組を 2 行持っていても mock では
+	// 通る」という差を隠すことになる。**`m.Users` は map なので `out` の順序は
+	// 非決定** — 畳んでも先頭がどれになるかは決まらず、決定性は元から得られない
+	// (#2704 のときは完全一致を優先する規則がその役目を持っていた)。
+	return out, nil
 }
 
 func (m *MockUserRepository) FindProfileByUserID(userID string) (*model.UserProfile, error) {
