@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 
+	"github.com/shiroha-a/mk/internal/activitypub"
 	corechat "github.com/shiroha-a/mk/internal/core/chat"
 	"github.com/shiroha-a/mk/internal/model"
 )
@@ -15,15 +15,19 @@ import (
 // ChatRoomReceiver wires the chat service's room-federation operations into the
 // inbox processor. Implemented by core/chat.Service. Mirrors the CherryPick
 // group chat federation handshake (Invite / Accept / Reject of a Group object).
+//
+// **room の指定は URI で渡す (#2994)。** room id は相手が自由に決められる値で
+// ID 空間はホストをまたいで共有されているので、id だけでは「どのホストの room か」
+// が決まらない。core/chat 側が URI から自ホスト / 取り込み済み copy を引き分ける。
 type ChatRoomReceiver interface {
-	EnsureRoomViaAP(roomID, name, summary, ownerUserID string) error
-	CreateInvitationViaAP(roomID, inviteeUserID string) error
-	AddMemberViaAP(roomID, userID string) error
-	RemoveInvitationViaAP(roomID, userID string) error
-	RemoveMemberViaAP(roomID, userID string) error
+	EnsureRoomViaAP(roomURI, name, summary, ownerUserID string) error
+	CreateInvitationViaAP(roomURI, inviteeUserID string) error
+	AddMemberViaAP(roomURI, userID string) error
+	RemoveInvitationViaAP(roomURI, userID string) error
+	RemoveMemberViaAP(roomURI, userID string) error
 	// mfmSource は相手が併記した MFM の原文 (`source` / `_misskey_content`)。
 	// 空なら text (HTML) から戻す。
-	CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text, mfmSource string) error
+	CreateRoomMessageViaAP(uri string, sender *model.User, roomURI, text, mfmSource string) error
 }
 
 // SetChatRoomReceiver wires the chat room federation receiver for inbound
@@ -32,32 +36,41 @@ func (p *Processor) SetChatRoomReceiver(r ChatRoomReceiver) {
 	p.chatRoomReceiver = r
 }
 
-// chatRoomURIRe extracts the room id from a CherryPick chat room URI
-// (`https://host/chat/rooms/{id}`). The id is alphanumeric (aidx/ULID).
-var chatRoomURIRe = regexp.MustCompile(`/chat/rooms/([a-zA-Z0-9]+)$`)
-
-// chatRoomIDMaxRunes は `chat_room.id` / `chat_room_membership.roomId` /
-// `chat_room_invitation.roomId` の varchar(32) (migration/000022_chat.up.sql)。
+// nonRetryableChatRoomErr maps the chat service's permanent conditions onto
+// ErrUnsupportedActivity so the inbox job is acked instead of retried.
 //
-// **相手が自由に決められる値**で、正規表現は長さを縛らない。溢れると
-// `CreateRoom` が SQLSTATE 22001 で落ち、呼び出し側が `%w` で包んで返すため
-// **その inbox job が retry を使い切って dead になる** (#2726)。room id は行の
-// 身元 (PK かつ FK) なので切れない — 収まらなければ room として認識しない。
-const chatRoomIDMaxRunes = 32
+// **room を URI で引くようになって「知らない room」が出るようになった (#2994)。**
+// 以前の id 引きは room が無くても no-op で成功していたので、この経路は
+// 無かった。生で返すと、取り込んでいない room への Accept / Reject が retry を
+// 使い切って dead になる。
+func nonRetryableChatRoomErr(err error) error {
+	if errors.Is(err, corechat.ErrNotFound) || errors.Is(err, corechat.ErrInvalidTarget) {
+		return ErrUnsupportedActivity
+	}
+	return err
+}
 
-// extractChatRoomID returns the room id embedded in uri, or "" when uri is not
-// a chat room URI or the id cannot be stored.
+// chatRoomURIMaxRunes は `chat_room.uri` の varchar(512)
+// (migration/000090_chat_room_host.up.sql)。
 //
-// 正規表現が ASCII 英数字だけを通すので NUL は入らない。長さだけ見る。
-func extractChatRoomID(uri string) string {
-	m := chatRoomURIRe.FindStringSubmatch(uri)
-	if len(m) != 2 {
+// **room の身元は URI であって room id ではない (#2994)。** 行の `id` は取り込み時に
+// こちらで採番するので相手の値は入らず、溢れうるのは URI のほう。収まらない URI は
+// room として認識しない — 切ると別の room を指すので (#2726 と同じ判断)。
+const chatRoomURIMaxRunes = 512
+
+// chatRoomURI returns uri when it is a storable chat room URI, else "".
+//
+// 形の判定は URI を組み立てる側の隣 (`activitypub.ChatRoomIDFromURI`) にある。
+//
+// **`fitsColumn` は長さだけでなく NUL も見る。** 正規表現が縛るのは末尾の room id
+// だけで、URI 全体には任意のバイトが混ざりうる (`https://e.example/<NUL>/chat/rooms/r1`
+// は今の正規表現を通る)。長さだけの検査に「簡約」すると PostgreSQL へ NUL が渡り、
+// 22021 で落ちた配送が retry を使い切る。
+func chatRoomURI(uri string) string {
+	if !activitypub.IsChatRoomURI(uri) || !fitsColumn(uri, chatRoomURIMaxRunes) {
 		return ""
 	}
-	if !fitsColumn(m[1], chatRoomIDMaxRunes) {
-		return ""
-	}
-	return m[1]
+	return uri
 }
 
 // apGroupObject is the AP `Group` object representing a chat room, carried as
@@ -77,7 +90,7 @@ func parseGroupObject(raw json.RawMessage) (apGroupObject, bool) {
 	if len(raw) == 0 || json.Unmarshal(raw, &g) != nil {
 		return apGroupObject{}, false
 	}
-	if !strings.EqualFold(g.Type, "Group") || extractChatRoomID(g.ID) == "" {
+	if !strings.EqualFold(g.Type, "Group") || chatRoomURI(g.ID) == "" {
 		return apGroupObject{}, false
 	}
 	return g, true
@@ -102,7 +115,7 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 	if !ok {
 		return ErrUnsupportedActivity
 	}
-	roomID := extractChatRoomID(group.ID)
+	roomURI := group.ID
 
 	// **room の host を actor の host に縛る。** これが無いと、署名が通る任意の
 	// remote actor が **自分が管理していない host の room URI を名乗れる** —
@@ -110,11 +123,11 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 	// ローカルの room id 空間に行を作る、(b) 無関係な第三者インスタンスの URI を
 	// 名乗って、その instance の room として行を作る、の 2 つ。
 	//
-	// **id の先取り自体はこれでは塞げない。** `chat_room` は room id だけで
-	// keying しており host 列が無いので、攻撃者が **自分の host で** 好きな id の
-	// room を作れば、同じ id を持つ正規の remote room の Invite は
-	// EnsureRoomViaAP の owner mismatch で恒久的に drop される。そちらを直すには
-	// host 列 (または host 込みのキー) を足す migration が要る。
+	// **id の先取りは #2994 で塞いだ。** それまでは `chat_room` が room id だけで
+	// keying していたので、攻撃者が **自分の host で** 好きな id の room を作ると、
+	// 同じ id を持つ正規の remote room の Invite が EnsureRoomViaAP の owner
+	// mismatch で恒久的に drop されていた。今は room の身元が URI で、取り込む行の
+	// `id` はこちらで採番する。
 	//
 	// 比較は actor が申告する値の host 検証と同じ `sameDeliveryHost`
 	// (punycode + 非既定 port。`www.` は同一視しない)。inbox 側も activity.id の
@@ -167,23 +180,23 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 		return ErrUnsupportedActivity
 	}
 
-	if err := p.chatRoomReceiver.EnsureRoomViaAP(roomID, group.Name, group.Summary, owner.ID); err != nil {
+	if err := p.chatRoomReceiver.EnsureRoomViaAP(roomURI, group.Name, group.Summary, owner.ID); err != nil {
 		// owner mismatch (= roomId が無関係なローカル room と衝突) は永久に
 		// 解決しないので retry させない。それ以外 (DB 一過性エラー等) は
 		// retryable のまま伝播させる。
 		if errors.Is(err, corechat.ErrRoomOwnerMismatch) {
-			slog.Warn("chat room invite: room id collides with an unrelated local room", "roomID", roomID)
+			slog.Warn("chat room invite: room uri is already owned by someone else", "roomURI", roomURI)
 			return ErrUnsupportedActivity
 		}
 		// 列に収まらない room id も恒久的な条件なので retry させない (#2726)。
 		// parseGroupObject が先に落とすので通常はここまで来ない。
 		if errors.Is(err, corechat.ErrInvalidTarget) {
-			slog.Warn("chat room invite: room id cannot be stored", "actor", act.Actor)
+			slog.Warn("chat room invite: room uri cannot be stored", "actor", act.Actor)
 			return ErrUnsupportedActivity
 		}
 		return fmt.Errorf("chat room invite: ensure room: %w", err)
 	}
-	if err := p.chatRoomReceiver.CreateInvitationViaAP(roomID, invitee.ID); err != nil {
+	if err := p.chatRoomReceiver.CreateInvitationViaAP(roomURI, invitee.ID); err != nil {
 		// block されている / room が定員 / room が消えた、はいずれも retry しても
 		// 解決しない条件なので drop する。それ以外 (DB 一過性エラー等) は
 		// retryable のまま伝播させる。
@@ -191,7 +204,7 @@ func (p *Processor) handleChatRoomInvite(act genericActivity) error {
 			errors.Is(err, corechat.ErrRoomFull) ||
 			errors.Is(err, corechat.ErrNotFound) ||
 			errors.Is(err, corechat.ErrInvalidTarget) {
-			slog.Warn("chat room invite: invitation rejected", "roomID", roomID, "err", err)
+			slog.Warn("chat room invite: invitation rejected", "roomURI", roomURI, "err", err)
 			return ErrUnsupportedActivity
 		}
 		return fmt.Errorf("chat room invite: create invitation: %w", err)
@@ -215,7 +228,10 @@ func (p *Processor) handleChatRoomAccept(act, inner genericActivity) error {
 	if err != nil {
 		return err
 	}
-	return p.chatRoomReceiver.AddMemberViaAP(extractChatRoomID(group.ID), accepter.ID)
+	// **知らない room への Accept は retry しない (#2994)。** room を URI で引く
+	// ようになったので、取り込んでいない room / 収まらない URI は `ErrNotFound` /
+	// `ErrInvalidTarget` で返る。どちらも待っても解決しないので ack する。
+	return nonRetryableChatRoomErr(p.chatRoomReceiver.AddMemberViaAP(group.ID, accepter.ID))
 }
 
 // handleChatRoomReject processes an inbound Reject of a chat room Invite: the
@@ -232,20 +248,20 @@ func (p *Processor) handleChatRoomReject(act, inner genericActivity) error {
 	if err != nil {
 		return err
 	}
-	return p.chatRoomReceiver.RemoveInvitationViaAP(extractChatRoomID(group.ID), rejecter.ID)
+	return nonRetryableChatRoomErr(p.chatRoomReceiver.RemoveInvitationViaAP(group.ID, rejecter.ID))
 }
 
-// chatRoomIDFromContext extracts the room id from a group chat message note's
+// chatRoomURIFromContext extracts the room URI from a group chat message note's
 // `@context`. CherryPick group messages set the note-level `@context` to the
 // room URI (a JSON string); a normal note carries the standard JSON-LD context
 // (an array), which is not a room.
 //
 // isRoom reports whether the `@context` is a chat room URI **at all**, and is
-// true even when roomID comes back empty because the id does not fit
-// `chat_room.id`. 呼び出し側はこれで「room だが受け取れない」と「そもそも
-// room ではない (= 1-on-1 DM)」を区別する。混ぜると、保存できない id の
+// true even when roomURI comes back empty because the URI does not fit
+// `chat_room.uri`. 呼び出し側はこれで「room だが受け取れない」と「そもそも
+// room ではない (= 1-on-1 DM)」を区別する。混ぜると、保存できない URI の
 // group message が DM 経路へ落ちて別の理由で dead になる (#2726)。
-func chatRoomIDFromContext(raw json.RawMessage) (roomID string, isRoom bool) {
+func chatRoomURIFromContext(raw json.RawMessage) (roomURI string, isRoom bool) {
 	if len(raw) == 0 {
 		return "", false
 	}
@@ -254,21 +270,21 @@ func chatRoomIDFromContext(raw json.RawMessage) (roomID string, isRoom bool) {
 		// 配列形式 (標準 JSON-LD context) は room ではない。
 		return "", false
 	}
-	if !chatRoomURIRe.MatchString(ctx) {
+	if !activitypub.IsChatRoomURI(ctx) {
 		return "", false
 	}
-	return extractChatRoomID(ctx), true
+	return chatRoomURI(ctx), true
 }
 
 // handleChatRoomMessageCreate persists an inbound group chat message into a
 // locally-known room. The room must exist locally and the remote sender must
 // be a member (enforced by the chat service): unknown room or non-member is a
 // permanent condition, so it is reported as ErrUnsupportedActivity (no retry).
-func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, content, mfmSource, roomID string) error {
-	// roomID が空 = `@context` は room URI だが id が `chat_room.id` に収まらない
-	// (chatRoomIDFromContext)。retry では解決しないので drop する (#2726)。
-	if roomID == "" {
-		slog.Warn("chat room message: room id does not fit its column", "sender", sender.ID)
+func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, content, mfmSource, roomURI string) error {
+	// roomURI が空 = `@context` は room URI だが `chat_room.uri` に収まらない
+	// (chatRoomURIFromContext)。retry では解決しないので drop する (#2726)。
+	if roomURI == "" {
+		slog.Warn("chat room message: room uri does not fit its column", "sender", sender.ID)
 		return ErrUnsupportedActivity
 	}
 	// note id 欠落 / sender が local (loopback) は retry しても解決しない恒久的
@@ -285,7 +301,7 @@ func (p *Processor) handleChatRoomMessageCreate(sender *model.User, noteURI, con
 	if p.chatRoomReceiver == nil {
 		return ErrUnsupportedActivity
 	}
-	if err := p.chatRoomReceiver.CreateRoomMessageViaAP(noteURI, sender, roomID, content, mfmSource); err != nil {
+	if err := p.chatRoomReceiver.CreateRoomMessageViaAP(noteURI, sender, roomURI, content, mfmSource); err != nil {
 		// 未関与の room / 非メンバー送信、および列に収まらない uri は retry しても
 		// 解決しないので drop (後者は ErrInvalidTarget、#2726)。
 		if errors.Is(err, corechat.ErrNotFound) ||

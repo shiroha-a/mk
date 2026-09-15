@@ -1523,8 +1523,8 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 			}
 			// note の @context が room URI なら group chat message (#1209)。
 			// それ以外は従来の 1-on-1 DM。
-			if roomID, isRoom := chatRoomIDFromContext(probe.Context); isRoom {
-				return p.handleChatRoomMessageCreate(actor, probe.ID, probe.Content, mfmSource, roomID)
+			if roomURI, isRoom := chatRoomURIFromContext(probe.Context); isRoom {
+				return p.handleChatRoomMessageCreate(actor, probe.ID, probe.Content, mfmSource, roomURI)
 			}
 			return p.handleChatCreate(actor, probe.ID, probe.Content, mfmSource, probe.To)
 		}
@@ -2599,12 +2599,12 @@ func (p *Processor) handleRemove(act genericActivity) error {
 	// chat room target の Remove は group chat の leave (#1364)。featured pin
 	// より先に判定する (pinningRepo 未配線でも chat leave は処理する)。actor の
 	// membership を削除する (cherrypick ApInboxService.remove と同じく actor 基準)。
-	if roomID := extractChatRoomID(target.Target); roomID != "" && p.chatRoomReceiver != nil {
+	if roomURI := chatRoomURI(target.Target); roomURI != "" && p.chatRoomReceiver != nil {
 		actor, err := p.resolver.ResolveActor(act.Actor)
 		if err != nil {
 			return err
 		}
-		if err := p.chatRoomReceiver.RemoveMemberViaAP(roomID, actor.ID); err != nil {
+		if err := p.chatRoomReceiver.RemoveMemberViaAP(roomURI, actor.ID); err != nil {
 			if errors.Is(err, corechat.ErrNotFound) || errors.Is(err, corechat.ErrInvalidTarget) {
 				return ErrUnsupportedActivity
 			}
@@ -2734,7 +2734,7 @@ func readActorString(act genericActivity) (string, error) {
 // として扱う。**1-on-1 経路なのでそれで正しい。**
 //
 // group chat は別プロトコルで、note の `@context` に room URI が入る形で届く。
-// Create の入口 (`chatRoomIDFromContext`) が先に振り分け、
+// Create の入口 (`chatRoomURIFromContext`) が先に振り分け、
 // `handleChatRoomMessageCreate` → `CreateRoomMessageViaAP` が room のメンバー
 // 全員に配る。ここに複数 recipient が来ることはない。
 func (p *Processor) handleChatCreate(sender *model.User, noteURI, content, mfmSource string, toRaw json.RawMessage) error {

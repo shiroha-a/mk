@@ -23,49 +23,57 @@ func (f *fakeChatMessageReceiver) CreateMessageViaAP(_ context.Context, _ string
 
 // fakeChatRoomReceiver records inbound chat room federation calls.
 type fakeChatRoomReceiver struct {
-	ensureCalls   [][4]string // roomID, name, summary, ownerUserID
-	inviteCalls   [][2]string // roomID, inviteeUserID
-	memberCalls   [][2]string // roomID, userID
-	removeCalls   [][2]string // roomID, userID (RemoveInvitationViaAP)
-	rmMemberCalls [][2]string // roomID, userID (RemoveMemberViaAP)
-	msgCalls      [][3]string // roomID, senderID, text
+	ensureCalls   [][4]string // roomURI, name, summary, ownerUserID
+	inviteCalls   [][2]string // roomURI, inviteeUserID
+	memberCalls   [][2]string // roomURI, userID
+	removeCalls   [][2]string // roomURI, userID (RemoveInvitationViaAP)
+	rmMemberCalls [][2]string // roomURI, userID (RemoveMemberViaAP)
+	msgCalls      [][3]string // roomURI, senderID, text
 	ensureErr     error
 	inviteErr     error
 	msgErr        error
+	memberErr     error
+	removeErr     error
 	rmMemberErr   error
 }
 
-func (f *fakeChatRoomReceiver) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text, mfmSource string) error {
+func (f *fakeChatRoomReceiver) CreateRoomMessageViaAP(uri string, sender *model.User, roomURI, text, mfmSource string) error {
 	sid := ""
 	if sender != nil {
 		sid = sender.ID
 	}
-	f.msgCalls = append(f.msgCalls, [3]string{roomID, sid, text})
+	f.msgCalls = append(f.msgCalls, [3]string{roomURI, sid, text})
 	return f.msgErr
 }
 
-func (f *fakeChatRoomReceiver) EnsureRoomViaAP(roomID, name, summary, ownerUserID string) error {
-	f.ensureCalls = append(f.ensureCalls, [4]string{roomID, name, summary, ownerUserID})
+func (f *fakeChatRoomReceiver) EnsureRoomViaAP(roomURI, name, summary, ownerUserID string) error {
+	f.ensureCalls = append(f.ensureCalls, [4]string{roomURI, name, summary, ownerUserID})
 	return f.ensureErr
 }
 
-func (f *fakeChatRoomReceiver) CreateInvitationViaAP(roomID, inviteeUserID string) error {
-	f.inviteCalls = append(f.inviteCalls, [2]string{roomID, inviteeUserID})
+func (f *fakeChatRoomReceiver) CreateInvitationViaAP(roomURI, inviteeUserID string) error {
+	f.inviteCalls = append(f.inviteCalls, [2]string{roomURI, inviteeUserID})
 	return f.inviteErr
 }
 
-func (f *fakeChatRoomReceiver) AddMemberViaAP(roomID, userID string) error {
-	f.memberCalls = append(f.memberCalls, [2]string{roomID, userID})
+func (f *fakeChatRoomReceiver) AddMemberViaAP(roomURI, userID string) error {
+	f.memberCalls = append(f.memberCalls, [2]string{roomURI, userID})
+	if f.memberErr != nil {
+		return f.memberErr
+	}
 	return nil
 }
 
-func (f *fakeChatRoomReceiver) RemoveInvitationViaAP(roomID, userID string) error {
-	f.removeCalls = append(f.removeCalls, [2]string{roomID, userID})
+func (f *fakeChatRoomReceiver) RemoveInvitationViaAP(roomURI, userID string) error {
+	f.removeCalls = append(f.removeCalls, [2]string{roomURI, userID})
+	if f.removeErr != nil {
+		return f.removeErr
+	}
 	return nil
 }
 
-func (f *fakeChatRoomReceiver) RemoveMemberViaAP(roomID, userID string) error {
-	f.rmMemberCalls = append(f.rmMemberCalls, [2]string{roomID, userID})
+func (f *fakeChatRoomReceiver) RemoveMemberViaAP(roomURI, userID string) error {
+	f.rmMemberCalls = append(f.rmMemberCalls, [2]string{roomURI, userID})
 	return f.rmMemberErr
 }
 
@@ -92,12 +100,12 @@ func TestProcess_ChatRoomInvite_CreatesRoomCopyAndInvitation(t *testing.T) {
 	require.NoError(t, p.Process(body))
 
 	require.Len(t, recv.ensureCalls, 1)
-	assert.Equal(t, "room1", recv.ensureCalls[0][0])
+	assert.Equal(t, "https://remote.example/chat/rooms/room1", recv.ensureCalls[0][0])
 	assert.Equal(t, "General", recv.ensureCalls[0][1])
 	assert.Equal(t, "desc", recv.ensureCalls[0][2])
 	assert.NotEmpty(t, recv.ensureCalls[0][3], "owner (resolved remote actor) must be set")
 	require.Len(t, recv.inviteCalls, 1)
-	assert.Equal(t, [2]string{"room1", "bob"}, recv.inviteCalls[0])
+	assert.Equal(t, [2]string{"https://remote.example/chat/rooms/room1", "bob"}, recv.inviteCalls[0])
 }
 
 func TestProcess_ChatRoomAccept_AddsMembership(t *testing.T) {
@@ -123,7 +131,7 @@ func TestProcess_ChatRoomAccept_AddsMembership(t *testing.T) {
 	require.NoError(t, p.Process(body))
 
 	require.Len(t, recv.memberCalls, 1)
-	assert.Equal(t, "room1", recv.memberCalls[0][0])
+	assert.Equal(t, "https://example.com/chat/rooms/room1", recv.memberCalls[0][0])
 	assert.NotEmpty(t, recv.memberCalls[0][1])
 }
 
@@ -141,7 +149,7 @@ func TestProcess_ChatRoomRemove_DeletesMembership(t *testing.T) {
 	}`)
 	require.NoError(t, p.Process(body))
 	require.Len(t, recv.rmMemberCalls, 1)
-	assert.Equal(t, "room1", recv.rmMemberCalls[0][0])
+	assert.Equal(t, "https://example.com/chat/rooms/room1", recv.rmMemberCalls[0][0])
 	assert.NotEmpty(t, recv.rmMemberCalls[0][1], "actor (resolved remote user) membership is removed")
 }
 
@@ -198,7 +206,7 @@ func TestProcess_ChatRoomReject_RemovesInvitation(t *testing.T) {
 	require.NoError(t, p.Process(body))
 
 	require.Len(t, recv.removeCalls, 1)
-	assert.Equal(t, "room1", recv.removeCalls[0][0])
+	assert.Equal(t, "https://example.com/chat/rooms/room1", recv.removeCalls[0][0])
 }
 
 func TestProcess_ChatRoomInvite_MissingTarget(t *testing.T) {
@@ -395,7 +403,7 @@ func TestProcess_ChatRoomMessage_PersistedToRoom(t *testing.T) {
 	}`)
 	require.NoError(t, p.Process(body))
 	require.Len(t, recv.msgCalls, 1)
-	assert.Equal(t, "room1", recv.msgCalls[0][0])
+	assert.Equal(t, "https://remote.example/chat/rooms/room1", recv.msgCalls[0][0])
 	assert.NotEmpty(t, recv.msgCalls[0][1], "sender (resolved remote actor) must be set")
 	assert.Equal(t, "hello room", recv.msgCalls[0][2])
 }
@@ -540,4 +548,67 @@ func TestProcess_NonGroupInvite_NotRoutedToChatRoom(t *testing.T) {
 	}`)
 	_ = p.Process(body)
 	assert.Empty(t, recv.ensureCalls, "Game invite must not hit chat room federation")
+}
+
+// **知らない room への Accept / Reject は retry しない (#2994)。** room を URI で
+// 引くようになったので、取り込んでいない room は `ErrNotFound` で返る。生で返すと
+// inbox job が retry を使い切って dead になる (待っても room は現れない)。
+func TestProcess_ChatRoomAcceptReject_UnknownRoomIsAcked(t *testing.T) {
+	const acceptBody = `{
+		"type": "Accept",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Invite",
+			"actor": "https://example.com/users/owner",
+			"target": "https://remote.example/users/alice",
+			"object": {"type": "Group", "id": "https://example.com/chat/rooms/gone", "name": "G"}
+		}
+	}`
+	const rejectBody = `{
+		"type": "Reject",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Invite",
+			"actor": "https://example.com/users/owner",
+			"target": "https://remote.example/users/alice",
+			"object": {"type": "Group", "id": "https://example.com/chat/rooms/gone", "name": "G"}
+		}
+	}`
+	for _, tc := range []struct {
+		name string
+		body string
+		recv *fakeChatRoomReceiver
+	}{
+		{"Accept / room が無い", acceptBody, &fakeChatRoomReceiver{memberErr: corechat.ErrNotFound}},
+		{"Accept / URI が収まらない", acceptBody, &fakeChatRoomReceiver{memberErr: corechat.ErrInvalidTarget}},
+		{"Reject / room が無い", rejectBody, &fakeChatRoomReceiver{removeErr: corechat.ErrNotFound}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _, _, _ := newProcessor(t, aliceActor)
+			p.SetChatRoomReceiver(tc.recv)
+			err := p.Process([]byte(tc.body))
+			require.ErrorIs(t, err, federation.ErrUnsupportedActivity,
+				"知らない room への応答が retry される")
+		})
+	}
+}
+
+// DB 障害のような一過性の失敗は retry させる (not-found に丸めない、#2792)。
+func TestProcess_ChatRoomAccept_TransientErrorIsRetried(t *testing.T) {
+	p, _, _, _ := newProcessor(t, aliceActor)
+	boom := errors.New("dial tcp: connection refused")
+	p.SetChatRoomReceiver(&fakeChatRoomReceiver{memberErr: boom})
+	body := []byte(`{
+		"type": "Accept",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Invite",
+			"actor": "https://example.com/users/owner",
+			"target": "https://remote.example/users/alice",
+			"object": {"type": "Group", "id": "https://example.com/chat/rooms/room1", "name": "G"}
+		}
+	}`)
+	err := p.Process(body)
+	require.ErrorIs(t, err, boom)
+	assert.NotErrorIs(t, err, federation.ErrUnsupportedActivity)
 }

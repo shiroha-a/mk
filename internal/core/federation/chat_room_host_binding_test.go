@@ -99,7 +99,7 @@ func TestProcess_ChatRoomInvite_DefaultPortIsSameHost(t *testing.T) {
 	)))
 
 	require.Len(t, recv.ensureCalls, 1)
-	assert.Equal(t, "room1", recv.ensureCalls[0][0])
+	assert.Equal(t, "https://remote.example:443/chat/rooms/room1", recv.ensureCalls[0][0])
 	require.Len(t, recv.inviteCalls, 1)
 }
 

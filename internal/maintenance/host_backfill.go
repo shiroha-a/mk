@@ -61,6 +61,11 @@ var HostColumns = []HostColumn{
 	{Table: "user_profile", KeysetColumn: "userId", Column: "userHost"},
 	{Table: "abuse_user_report", KeysetColumn: "id", Column: "targetUserHost"},
 	{Table: "abuse_user_report", KeysetColumn: "id", Column: "reporterHost"},
+	// 取り込んだ chat room の出どころ (#2994)。**対象一覧に入れる** — 値は正規形の
+	// room URI の authority (実行時) か owner の `user.host` (migration) から入るので
+	// 普通は書き換えが起きないが、一覧から外すと「host 列なのに誰も見ていない」
+	// 状態になり、別経路で入った非正規化の値が残っても気付けない。
+	{Table: "chat_room", KeysetColumn: "id", Column: "host"},
 	// 絵文字のインポート申請が指すリモートの host (#2934 / #2935)。**対象一覧に
 	// 入れる** — 申請は host で相手を特定するので、正規化されていないと同じ
 	// サーバーが別物として並ぶ。本 migration の時点では kind='own' しか

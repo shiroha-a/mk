@@ -8,6 +8,7 @@ import (
 	"errors"
 	"html"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -183,6 +184,35 @@ func (b *URLBuilder) ChatMessageURI(messageID string) string {
 func (b *URLBuilder) ChatRoomURI(roomID string) string {
 	return b.baseURL + "/chat/rooms/" + roomID
 }
+
+// chatRoomURIRe is the parser half of ChatRoomURI's format contract. The id is
+// alphanumeric (aidx / ULID).
+//
+// **組み立てる側の隣に置く。** 受信側はこの正規表現で room id を取り出すので、
+// `ChatRoomURI` のパス形状を変えると連合が黙って壊れる。別パッケージに写すと
+// 片方だけ直る。
+//
+// **接頭辞は縛らない。** これは**相手の URI** も通す正規表現で、`/chat/rooms/{id}`
+// をどこに生やすかは相手の実装次第 (サブパスの下に出す構成もありうる)。自分の側は
+// `config.resolve()` が `scheme://host` だけを `cfg.URL` にするのでサブパスは
+// 出ないが、そこに合わせて縛ると相手の正当な URI を落とす。
+//
+// 「自分の room か」は host 文字列ではなく `URLBuilder.ChatRoomURI` で組み立て直して
+// 突き合わせる (core/chat)。
+var chatRoomURIRe = regexp.MustCompile(`/chat/rooms/([a-zA-Z0-9]+)$`)
+
+// ChatRoomIDFromURI returns the room id embedded in a chat room URI, or "" when
+// uri is not one.
+func ChatRoomIDFromURI(uri string) string {
+	m := chatRoomURIRe.FindStringSubmatch(uri)
+	if len(m) != 2 {
+		return ""
+	}
+	return m[1]
+}
+
+// IsChatRoomURI reports whether uri has the shape of a chat room URI.
+func IsChatRoomURI(uri string) bool { return ChatRoomIDFromURI(uri) != "" }
 
 // ErrMentionUserNotFound is returned by MentionResolver implementations
 // when the user does not exist (typically deleted or the ID is stale).

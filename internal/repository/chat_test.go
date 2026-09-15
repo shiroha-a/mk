@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -945,4 +946,160 @@ func TestMigration000082_DropsOnlyOwnerMemberships(t *testing.T) {
 
 	// down は no-op で成功すること (ここで落ちると 000081 まで戻せなくなる)。
 	require.NoError(t, testDB.Exec(migrationSQL(t, "000082_drop_owner_chat_room_memberships.down.sql")).Error)
+}
+
+// --- #2994: room は URI で引く ---
+
+// **ローカル room を URI で掴まない。** `uri` は NULL なので、空文字や他ホストの
+// URI で引いたときにローカル room が返ってはいけない (それが #2994 の取り違え)。
+func TestChat_FindRoomByURI(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	owner := insertTestUser(t, "u_findbyuri", "findbyuri")
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "chat_room" WHERE "ownerId" = ?`, owner.ID)
+		cleanupUser(t, owner.ID)
+	})
+
+	const uri = "https://remote.example/chat/rooms/room1"
+	host := "remote.example"
+	u := uri
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{
+		ID: "rm_remote_1", Name: "R", OwnerID: owner.ID, Host: &host, URI: &u,
+	}))
+	// 同じ room id のローカル room。`uri` は NULL。
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "L", OwnerID: owner.ID}))
+
+	got, err := repo.FindRoomByURI(uri)
+	require.NoError(t, err)
+	assert.Equal(t, "rm_remote_1", got.ID)
+	require.NotNil(t, got.Host)
+	assert.Equal(t, host, *got.Host)
+
+	_, err = repo.FindRoomByURI("")
+	assert.Error(t, err, "空文字でローカル room を掴んでいる")
+	_, err = repo.FindRoomByURI("https://other.example/chat/rooms/room1")
+	assert.Error(t, err)
+}
+
+// `IDX_chat_room_uri` が**部分 UNIQUE** であることを schema から固定する (#2994)。
+//
+// **既に migration を流した schema では、index の定義を変える変異を入れても
+// `CREATE INDEX IF NOT EXISTS` が skip されるので検出できない。** CI は毎回
+// クリーンな DB を立てるのでそちらでは効く。手元で確かめるなら schema を作り直す。
+func TestChat_RoomURIIndexIsPartialUnique(t *testing.T) {
+	var defs []string
+	require.NoError(t, testDB.Raw(`SELECT indexdef FROM pg_indexes
+		WHERE schemaname = current_schema() AND tablename = 'chat_room' AND indexname = 'IDX_chat_room_uri'`).
+		Scan(&defs).Error)
+	require.Len(t, defs, 1, "IDX_chat_room_uri が無い")
+	assert.Contains(t, defs[0], "UNIQUE", "二重取り込みを DB で止められない")
+	assert.Contains(t, defs[0], "WHERE (uri IS NOT NULL)",
+		"部分 index でないとローカル room (uri が NULL) を巻き込む")
+}
+
+// **同じ room URI は 1 行しか持てない。** 並行する Invite が同時に通っても
+// 二重取り込みにならないよう、DB 側でも止める (部分 UNIQUE index)。
+func TestChat_RoomURIIsUnique(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	owner := insertTestUser(t, "u_uriunique", "uriunique")
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "chat_room" WHERE "ownerId" = ?`, owner.ID)
+		cleanupUser(t, owner.ID)
+	})
+
+	const uri = "https://remote.example/chat/rooms/dup"
+	host := "remote.example"
+	a, b := uri, uri
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "rm_dup_a", Name: "A", OwnerID: owner.ID, Host: &host, URI: &a}))
+	require.Error(t, repo.CreateRoom(&model.ChatRoom{ID: "rm_dup_b", Name: "B", OwnerID: owner.ID, Host: &host, URI: &b}),
+		"同じ uri の room が 2 行作れている")
+
+	// ローカル room (uri が NULL) は何行でも作れる (部分 index なので NULL は対象外)。
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "rm_local_a", Name: "A", OwnerID: owner.ID}))
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "rm_local_b", Name: "B", OwnerID: owner.ID}))
+}
+
+// **backfill そのものを流して確かめる (#2994)。** migration の SQL は冪等
+// (`ADD COLUMN IF NOT EXISTS` / `WHERE "uri" IS NULL` / `CREATE INDEX IF NOT EXISTS`)
+// なので、ファイルをそのまま再実行できる。SQL を書き写して確かめると、写し間違い
+// ごと緑になる。
+func TestChat_MigrationBackfillsRemoteRoomHostAndURI(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	remoteHost := "remote.example"
+	// **scheme は `user.uri` から、authority は `user.host` から。** 片方だけを
+	// 見る実装と区別が付かないと、この assert は空虚になる。`user.host` は
+	// 非既定ポートを保つ (`hostFromURI` / `punyHostPort`)。
+	ownerURI := "http://remote.example:8080/users/bob"
+	remoteHostWithPort := "remote.example:8080"
+	remote := insertTestUser(t, "u_bf_remote", "bfremote")
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET host = ?, uri = ? WHERE id = ?`,
+		remoteHostWithPort, ownerURI, remote.ID).Error)
+	// owner の uri が無いリモート (fallback 経路)。
+	noURI := insertTestUser(t, "u_bf_nouri", "bfnouri")
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET host = ? WHERE id = ?`, remoteHost, noURI.ID).Error)
+	local := insertTestUser(t, "u_bf_local", "bflocal")
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "chat_room" WHERE id IN (?, ?, ?)`, "bf_remote", "bf_nouri", "bf_local")
+		cleanupUser(t, remote.ID)
+		cleanupUser(t, noURI.ID)
+		cleanupUser(t, local.ID)
+	})
+
+	// migration より前の形: host / uri は NULL、id が origin の room id そのもの。
+	for id, owner := range map[string]string{
+		"bf_remote": remote.ID, "bf_nouri": noURI.ID, "bf_local": local.ID,
+	} {
+		require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: id, Name: "R", OwnerID: owner}))
+	}
+
+	require.NoError(t, testDB.Exec(migrationSQL(t, "000090_chat_room_host.up.sql")).Error)
+
+	got, err := repo.FindRoomByID("bf_remote")
+	require.NoError(t, err)
+	require.NotNil(t, got.Host)
+	assert.Equal(t, remoteHostWithPort, *got.Host)
+	require.NotNil(t, got.URI)
+	assert.Equal(t, "http://remote.example:8080/chat/rooms/bf_remote", *got.URI,
+		"owner の actor URI の scheme+authority から復元していない")
+
+	// owner の uri が無ければ host から https で組み立てる。**埋め損ねると、次の
+	// Invite が同じ room を別の行として作り直し、membership と invitation が宙に浮く。**
+	got, err = repo.FindRoomByID("bf_nouri")
+	require.NoError(t, err)
+	require.NotNil(t, got.URI)
+	assert.Equal(t, "https://remote.example/chat/rooms/bf_nouri", *got.URI)
+
+	// ローカル room は NULL のまま。
+	got, err = repo.FindRoomByID("bf_local")
+	require.NoError(t, err)
+	assert.Nil(t, got.Host, "ローカル room に host が付いている")
+	assert.Nil(t, got.URI, "ローカル room に uri が付いている")
+}
+
+// **backfill した `uri` は実行時の引き当てと同じ正規形であること (#2994 レビュー H1)。**
+// 実行時は `idnhost.CanonicalURI` を通した形で引くので、相手が名乗った生の actor id
+// (`https://Mixed.Example/...` / `:443` 付き / IDN) をそのまま刻むと、**その room 宛の
+// Accept も本文も引き当てに失敗して恒久的に落ちる**。しかも配送側は古い綴りを
+// 名乗り続けるので誰も気付かない。
+func TestChat_MigrationBackfillUsesCanonicalURI(t *testing.T) {
+	repo := NewChatRepository(testDB)
+	owner := insertTestUser(t, "u_bf_canon", "bfcanon")
+	// `user.host` は #2706 以降 punycode + 小文字 + 既定ポート除去で保存される。
+	// `user.uri` は相手が名乗った生の値。
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET host = ?, uri = ? WHERE id = ?`,
+		"xn--eckve.example", "https://パイ.example:443/users/bob", owner.ID).Error)
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "chat_room" WHERE id = ?`, "bf_canon")
+		cleanupUser(t, owner.ID)
+	})
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "bf_canon", Name: "R", OwnerID: owner.ID}))
+
+	require.NoError(t, testDB.Exec(migrationSQL(t, "000090_chat_room_host.up.sql")).Error)
+
+	got, err := repo.FindRoomByID("bf_canon")
+	require.NoError(t, err)
+	require.NotNil(t, got.URI)
+	assert.Equal(t, "https://xn--eckve.example/chat/rooms/bf_canon", *got.URI,
+		"生の actor id の綴りをそのまま刻んでいる (実行時の引き当てと食い違う)")
+	assert.Equal(t, idnhost.CanonicalURI(*got.URI), *got.URI, "実行時の正規形と一致しない")
 }

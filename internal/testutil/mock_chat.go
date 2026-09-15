@@ -121,6 +121,22 @@ func (m *MockChatRepository) FindRoomByID(id string) (*model.ChatRoom, error) {
 	return nil, ErrNotFound
 }
 
+// FindRoomByURI looks a room up by its canonical AP URI (#2994). ローカル room は
+// `uri` が NULL なので一致しない (本物の SQL と同じ)。
+func (m *MockChatRepository) FindRoomByURI(uri string) (*model.ChatRoom, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.FindRoomErr != nil {
+		return nil, m.FindRoomErr
+	}
+	for _, r := range m.Rooms {
+		if r.URI != nil && *r.URI == uri {
+			return r, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
 func (m *MockChatRepository) UpdateRoom(room *model.ChatRoom) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()

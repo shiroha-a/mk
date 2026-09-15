@@ -12,6 +12,10 @@ type ChatRepository interface {
 	// Room operations
 	CreateRoom(room *model.ChatRoom) error
 	FindRoomByID(id string) (*model.ChatRoom, error)
+	// FindRoomByURI looks up a room by its canonical AP URI. リモート room の
+	// 身元は URI であって room id ではない (#2994) ので、AP 経路の引き当ては
+	// すべてこちらを通す。
+	FindRoomByURI(uri string) (*model.ChatRoom, error)
 	UpdateRoom(room *model.ChatRoom) error
 	DeleteRoom(id string) error
 	ListRoomsByOwner(ownerID, sinceID, untilID string, limit int) ([]*model.ChatRoom, error)
@@ -164,6 +168,18 @@ func (r *chatRepository) CreateRoom(room *model.ChatRoom) error {
 func (r *chatRepository) FindRoomByID(id string) (*model.ChatRoom, error) {
 	var room model.ChatRoom
 	if err := r.db.Preload("Owner").Where(`"id" = ?`, id).First(&room).Error; err != nil {
+		return nil, err
+	}
+	return &room, nil
+}
+
+// FindRoomByURI looks up a remote room copy by its canonical AP URI.
+//
+// **ローカル room は `uri` が NULL。** SQL の `=` は NULL に一致しないので、
+// 空文字で引いてもローカル room は返らない (自前のガードは置かない)。
+func (r *chatRepository) FindRoomByURI(uri string) (*model.ChatRoom, error) {
+	var room model.ChatRoom
+	if err := r.db.Preload("Owner").Where(`"uri" = ?`, uri).First(&room).Error; err != nil {
 		return nil, err
 	}
 	return &room, nil

@@ -22,6 +22,17 @@ import (
 // 呼ぶこと。既存呼び出しも段階的に置換していく方針。
 //
 // Deprecated: use testutil.NewMockChatRepository directly.
+// --- #2994: room は URI で指定する ---
+
+// testRemoteRoomHost is the origin host used by the remote-room fixtures.
+const testRemoteRoomHost = "remote.example"
+
+// remoteRoomURI builds the canonical AP URI a remote instance would use for
+// roomID. AP 経路の引数はすべてこれ (room id ではない)。
+func remoteRoomURI(roomID string) string {
+	return "https://" + testRemoteRoomHost + "/chat/rooms/" + roomID
+}
+
 func newFakeRepo() *testutil.MockChatRepository {
 	return testutil.NewMockChatRepository()
 }
@@ -1038,7 +1049,11 @@ func TestCreateMessageToRoom_UnmutedOwnerStillReceives(t *testing.T) {
 // 丸ごと落ちて「リモートの room メッセージだけ通知が来ない」になる。
 func TestCreateRoomMessageViaAP_PushesNewChatMessage(t *testing.T) {
 	svc, repo, _ := newSvc(t)
-	seedRoom(t, repo, "r1", "alice", "carol", "remote1")
+	// 取り込んだリモート room に remote sender が投げる形 (#2994 以降、AP 経路の
+	// room 指定は URI)。
+	roomURI := seedRemoteRoom(t, repo, "r1", "alice")
+	repo.Memberships["carol:r1"] = &model.ChatRoomMembership{UserID: "carol", RoomID: "r1"}
+	repo.Memberships["remote1:r1"] = &model.ChatRoomMembership{UserID: "remote1", RoomID: "r1"}
 	main := &stubMainPublisher{}
 	push := &stubChatPusher{}
 	svc.SetMainStreamPublisher(main)
@@ -1047,7 +1062,7 @@ func TestCreateRoomMessageViaAP_PushesNewChatMessage(t *testing.T) {
 	sender := &model.User{ID: "remote1", Username: "remote1"}
 
 	require.NoError(t, svc.CreateRoomMessageViaAP(
-		"https://remote.example/chat-messages/2", sender, "r1", "hi", ""))
+		"https://remote.example/chat-messages/2", sender, roomURI, "hi", ""))
 
 	assert.ElementsMatch(t, []string{"alice", "carol"}, push.recipients())
 	require.NotEmpty(t, push.calls)

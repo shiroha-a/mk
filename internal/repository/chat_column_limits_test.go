@@ -11,13 +11,15 @@ import (
 )
 
 // chatRemoteColumns は core/chat の ...ViaAP が AP から受けた値を書く列と、その上限。
-// migration/000022_chat.up.sql と一致させる。
+// migration/000022_chat.up.sql と 000090_chat_room_host.up.sql に一致させる。
 var chatRemoteColumns = []struct {
 	table  string
 	column string
 	max    int
 }{
 	{"chat_room", "id", 32},
+	{"chat_room", "host", 128},
+	{"chat_room", "uri", 512},
 	{"chat_room", "name", 256},
 	{"chat_room", "description", 2048},
 	{"chat_message", "text", 4096},

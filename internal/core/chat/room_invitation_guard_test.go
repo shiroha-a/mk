@@ -16,9 +16,25 @@ import (
 
 // seedRemoteRoom creates the local copy of a remote room the way the inbox
 // does (EnsureRoomViaAP) so invitation guards run against a real room row.
-func seedRemoteRoom(t *testing.T, repo *testutil.MockChatRepository, roomID, ownerID string) {
+// Returns the room's AP URI — **AP 経路の引数は room id ではなく URI** (#2994)。
+//
+// id を固定して作るので、招待や membership の assert は今までどおり id で書ける。
+// 取り込み経路そのものを試すテストだけが、採番された id を URI から引き直す。
+func seedRemoteRoom(t *testing.T, repo *testutil.MockChatRepository, roomID, ownerID string) string {
 	t.Helper()
-	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: roomID, Name: "R", OwnerID: ownerID}))
+	uri := remoteRoomURI(roomID)
+	host := testRemoteRoomHost
+	require.NoError(t, repo.CreateRoom(&model.ChatRoom{
+		ID: roomID, Name: "R", OwnerID: ownerID, Host: &host, URI: &uri,
+	}))
+	return uri
+}
+
+// remoteRoomRow builds a room copy row (host / uri set) the way the inbox does.
+func remoteRoomRow(roomID, name, ownerID string) *model.ChatRoom {
+	uri := remoteRoomURI(roomID)
+	host := testRemoteRoomHost
+	return &model.ChatRoom{ID: roomID, Name: name, OwnerID: ownerID, Host: &host, URI: &uri}
 }
 
 // 招待者 (= room owner) を block している local invitee へは、AP 経由の招待でも
@@ -34,7 +50,7 @@ func TestCreateInvitationViaAP_BlockedInviteeCreatesNoRow(t *testing.T) {
 	notifier := &recordingInvitationNotifier{}
 	svc.SetInvitationNotifier(notifier)
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	assert.ErrorIs(t, err, corechat.ErrChatBlocked)
 	_, ferr := repo.FindInvitation("localUser", "room1")
@@ -51,7 +67,7 @@ func TestCreateInvitationViaAP_ReverseBlockStillInvites(t *testing.T) {
 	require.NoError(t, blocks.Create(&model.Blocking{ID: "b1", BlockerID: "remoteOwner", BlockeeID: "localUser"}))
 	svc.SetBlockingRepo(blocks)
 
-	require.NoError(t, svc.CreateInvitationViaAP("room1", "localUser"))
+	require.NoError(t, svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser"))
 	_, err := repo.FindInvitation("localUser", "room1")
 	assert.NoError(t, err, "逆向きの block は招待を止めない")
 }
@@ -64,7 +80,7 @@ func TestCreateInvitationViaAP_UnrelatedBlockStillInvites(t *testing.T) {
 	require.NoError(t, blocks.Create(&model.Blocking{ID: "b1", BlockerID: "localUser", BlockeeID: "someoneElse"}))
 	svc.SetBlockingRepo(blocks)
 
-	require.NoError(t, svc.CreateInvitationViaAP("room1", "localUser"))
+	require.NoError(t, svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser"))
 	_, err := repo.FindInvitation("localUser", "room1")
 	assert.NoError(t, err)
 }
@@ -77,7 +93,7 @@ func TestCreateInvitationViaAP_BlockCheckFailClosed(t *testing.T) {
 	blocks.ExistsErr = errors.New("db down")
 	svc.SetBlockingRepo(blocks)
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, corechat.ErrChatBlocked, "一過性エラーを block 判定に丸めない")
@@ -89,7 +105,7 @@ func TestCreateInvitationViaAP_BlockCheckFailClosed(t *testing.T) {
 // ErrNotFound は呼び出し側で non-retry に落ちる。
 func TestCreateInvitationViaAP_RoomMustExist(t *testing.T) {
 	svc, repo := newRoomFedService(t)
-	err := svc.CreateInvitationViaAP("ghost", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("ghost"), "localUser")
 	assert.ErrorIs(t, err, corechat.ErrNotFound)
 	_, ferr := repo.FindInvitation("localUser", "ghost")
 	assert.Error(t, ferr)
@@ -103,7 +119,7 @@ func TestCreateInvitationViaAP_RoomLookupFailureIsError(t *testing.T) {
 	boom := errors.New("db down")
 	repo.FindRoomErr = boom
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	assert.ErrorIs(t, err, boom)
 	assert.NotErrorIs(t, err, corechat.ErrNotFound)
@@ -116,7 +132,7 @@ func TestCreateInvitationViaAP_OwnerSelfInviteCreatesNoRow(t *testing.T) {
 	notifier := &recordingInvitationNotifier{}
 	svc.SetInvitationNotifier(notifier)
 
-	require.NoError(t, svc.CreateInvitationViaAP("room1", "remoteOwner"))
+	require.NoError(t, svc.CreateInvitationViaAP(remoteRoomURI("room1"), "remoteOwner"))
 
 	_, err := repo.FindInvitation("remoteOwner", "room1")
 	assert.Error(t, err, "owner 自身への招待は作らない")
@@ -131,7 +147,7 @@ func TestCreateInvitationViaAP_ExistingMemberCreatesNoRow(t *testing.T) {
 	notifier := &recordingInvitationNotifier{}
 	svc.SetInvitationNotifier(notifier)
 
-	require.NoError(t, svc.CreateInvitationViaAP("room1", "localUser"))
+	require.NoError(t, svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser"))
 
 	_, err := repo.FindInvitation("localUser", "room1")
 	assert.Error(t, err, "既存メンバーへは招待を作らない")
@@ -145,7 +161,7 @@ func TestCreateInvitationViaAP_MembershipLookupFailureIsError(t *testing.T) {
 	boom := errors.New("db down")
 	repo.FindMembershipErr = boom
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	assert.ErrorIs(t, err, boom)
 	_, ferr := repo.FindInvitation("localUser", "room1")
@@ -162,7 +178,7 @@ func TestCreateInvitationViaAP_RoomFullRejected(t *testing.T) {
 		}))
 	}
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	assert.ErrorIs(t, err, corechat.ErrRoomFull)
 	_, ferr := repo.FindInvitation("localUser", "room1")
@@ -180,7 +196,7 @@ func TestCreateInvitationViaAP_PendingInvitationsCountTowardCapacity(t *testing.
 		}))
 	}
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	assert.ErrorIs(t, err, corechat.ErrRoomFull)
 	_, ferr := repo.FindInvitation("localUser", "room1")
@@ -203,7 +219,7 @@ func TestCreateInvitationViaAP_JustUnderCapacityStillInvites(t *testing.T) {
 		}))
 	}
 
-	require.NoError(t, svc.CreateInvitationViaAP("room1", "localUser"))
+	require.NoError(t, svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser"))
 	_, err := repo.FindInvitation("localUser", "room1")
 	assert.NoError(t, err)
 }
@@ -214,7 +230,7 @@ func TestCreateInvitationViaAP_MemberListFailureIsError(t *testing.T) {
 	seedRemoteRoom(t, repo, "room1", "remoteOwner")
 	repo.ListMembersErr = errors.New("db down")
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	require.Error(t, err)
 	_, ferr := repo.FindInvitation("localUser", "room1")
@@ -228,7 +244,7 @@ func TestCreateInvitationViaAP_InvitationLookupFailureIsError(t *testing.T) {
 	boom := errors.New("db down")
 	repo.FindInvitationErr = boom
 
-	err := svc.CreateInvitationViaAP("room1", "localUser")
+	err := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	assert.ErrorIs(t, err, boom)
 }
@@ -250,13 +266,13 @@ func (r *invitationListFailingRepo) ListInvitationsByRoom(string, string, string
 // 未消化の招待を数えられないときも fail-closed (定員判定を素通りさせない)。
 func TestCreateInvitationViaAP_InvitationListFailureIsError(t *testing.T) {
 	base := newFakeRepo()
-	require.NoError(t, base.CreateRoom(&model.ChatRoom{ID: "room1", Name: "R", OwnerID: "remoteOwner"}))
+	require.NoError(t, base.CreateRoom(remoteRoomRow("room1", "R", "remoteOwner")))
 	boom := errors.New("db down")
 	idGen, err := id.NewGenerator("aidx")
 	require.NoError(t, err)
 	svc := corechat.NewService(&invitationListFailingRepo{MockChatRepository: base, err: boom}, idGen)
 
-	cerr := svc.CreateInvitationViaAP("room1", "localUser")
+	cerr := svc.CreateInvitationViaAP(remoteRoomURI("room1"), "localUser")
 
 	assert.ErrorIs(t, cerr, boom)
 	_, ferr := base.FindInvitation("localUser", "room1")

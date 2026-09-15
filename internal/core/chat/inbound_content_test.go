@@ -46,11 +46,11 @@ func TestCreateMessageViaAP_DecodesHTMLContentToMFM(t *testing.T) {
 // group (room) chat も同じ扱い。
 func TestCreateRoomMessageViaAP_DecodesHTMLContentToMFM(t *testing.T) {
 	svc, repo := newRoomFedService(t)
-	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "rmt"}))
+	require.NoError(t, repo.CreateRoom(remoteRoomRow("room1", "General", "rmt")))
 	sender := &model.User{ID: "rmt"}
 
 	uri := "https://remote.example/chat/messages/m1"
-	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", "<p>a &lt; b &amp; c</p>", ""))
+	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, remoteRoomURI("room1"), "<p>a &lt; b &amp; c</p>", ""))
 
 	stored, ferr := repo.FindMessageByURI(uri)
 	require.NoError(t, ferr)
@@ -87,12 +87,12 @@ func TestCreateMessageViaAP_RoundTripsRenderedText(t *testing.T) {
 // room 経路でも往復すること (1-on-1 だけ直して片側が残る形を防ぐ)。
 func TestCreateRoomMessageViaAP_RoundTripsRenderedText(t *testing.T) {
 	svc, repo := newRoomFedService(t)
-	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "rmt"}))
+	require.NoError(t, repo.CreateRoom(remoteRoomRow("room1", "General", "rmt")))
 	sender := &model.User{ID: "rmt"}
 	text := "<script>alert(1)</script> & 5 > 3"
 	uri := "https://remote.example/chat/messages/m2"
 
-	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", renderChatContent(text), ""))
+	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, remoteRoomURI("room1"), renderChatContent(text), ""))
 
 	stored, ferr := repo.FindMessageByURI(uri)
 	require.NoError(t, ferr)
@@ -153,7 +153,7 @@ func TestCreateMessageToUser_KeepsLocalTextVerbatim(t *testing.T) {
 // room へのローカル投稿も同じ (AP 経路だけを変換していること)。
 func TestCreateMessageToRoom_KeepsLocalTextVerbatim(t *testing.T) {
 	svc, repo, _ := newSvc(t)
-	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "alice"}))
+	require.NoError(t, repo.CreateRoom(remoteRoomRow("room1", "General", "alice")))
 	text := "a < b & <p>tag</p>"
 
 	msg, err := svc.CreateMessageToRoom(context.Background(), "alice", "room1", text, "")
@@ -190,12 +190,12 @@ func TestCreateMessageViaAP_PrefersMFMSource(t *testing.T) {
 // room も同じ扱い。
 func TestCreateRoomMessageViaAP_PrefersMFMSource(t *testing.T) {
 	svc, repo := newRoomFedService(t)
-	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "room1", Name: "General", OwnerID: "rmt"}))
+	require.NoError(t, repo.CreateRoom(remoteRoomRow("room1", "General", "rmt")))
 	sender := &model.User{ID: "rmt"}
 
 	const text = "$[shake ゆれる]"
 	uri := "https://remote.example/chat/messages/m-src"
-	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, "room1", renderChatContent(text), text))
+	require.NoError(t, svc.CreateRoomMessageViaAP(uri, sender, remoteRoomURI("room1"), renderChatContent(text), text))
 
 	stored, ferr := repo.FindMessageByURI(uri)
 	require.NoError(t, ferr)

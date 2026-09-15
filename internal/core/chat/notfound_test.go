@@ -21,7 +21,8 @@ type failingChatRepo struct {
 	err error
 }
 
-func (r *failingChatRepo) FindRoomByID(string) (*model.ChatRoom, error) { return nil, r.err }
+func (r *failingChatRepo) FindRoomByID(string) (*model.ChatRoom, error)  { return nil, r.err }
+func (r *failingChatRepo) FindRoomByURI(string) (*model.ChatRoom, error) { return nil, r.err }
 func (r *failingChatRepo) FindMessageByID(string) (*model.ChatMessage, error) {
 	return nil, r.err
 }
@@ -62,9 +63,21 @@ func TestChatService_DBFailureIsNotNotFound(t *testing.T) {
 			_, err := s.CreateMessageToRoom(ctx, "u1", "r1", "hi", "")
 			return err
 		}},
+		// #2994 で room lookup が入った 3 つ。**DB 障害を「その room は無い」に
+		// 丸めると**、EnsureRoomViaAP は二重取り込みへ進んで UNIQUE index に当たり、
+		// 残りは「知らない room」として ack されて招待や退出が黙って落ちる。
+		{"EnsureRoomViaAP", func(s *corechat.Service) error {
+			return s.EnsureRoomViaAP("https://remote.example/chat/rooms/r1", "G", "", "u1")
+		}},
+		{"RemoveInvitationViaAP", func(s *corechat.Service) error {
+			return s.RemoveInvitationViaAP("https://remote.example/chat/rooms/r1", "u1")
+		}},
+		{"RemoveMemberViaAP", func(s *corechat.Service) error {
+			return s.RemoveMemberViaAP("https://remote.example/chat/rooms/r1", "u1")
+		}},
 		{"CreateRoomMessageViaAP", func(s *corechat.Service) error {
 			return s.CreateRoomMessageViaAP("https://remote.example/m/1",
-				&model.User{ID: "u1"}, "r1", "hi", "")
+				&model.User{ID: "u1"}, "https://remote.example/chat/rooms/r1", "hi", "")
 		}},
 		{"React", func(s *corechat.Service) error {
 			return s.React(ctx, "m1", &model.User{ID: "u1"}, "👍")

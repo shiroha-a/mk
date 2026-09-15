@@ -23,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -34,11 +35,18 @@ import (
 // どおり: 本文 (name / description / text) は切る、身元 (id / uri) は
 // document ごと拒否する。
 const (
-	chatRoomIDMaxRunes          = 32
 	chatRoomNameMaxRunes        = 256
 	chatRoomDescriptionMaxRunes = 2048
 	chatMessageTextMaxRunes     = 4096
 	chatMessageURIMaxRunes      = 512
+	// chatRoomURIMaxRunes is `chat_room.uri` (migration/000090_chat_room_host.up.sql).
+	//
+	// **room の身元は URI であって room id ではない (#2994)。** id は行を作るときに
+	// こちらで採番するので相手の値は入らない。収まらない URI は room として
+	// 認識しない (身元は切れない)。
+	chatRoomURIMaxRunes = 512
+	// chatRoomHostMaxRunes is `chat_room.host`.
+	chatRoomHostMaxRunes = 128
 )
 
 // Errors returned by Service.
@@ -636,35 +644,156 @@ func (s *Service) FederateInvitation(roomID, inviteeID string) {
 	}
 }
 
-// EnsureRoomViaAP creates a local copy of a remote chat room (keyed by the
-// origin room ID) so inbound invitations and group messages can reference it.
-// Idempotent: an existing room with a matching owner is a no-op. If a room
-// with the same ID already exists but has a different owner, the call fails to
-// avoid attaching federated invitations to an unrelated local room (ID
-// collision / hijack guard). ownerUserID must be the resolved remote owner.
-func (s *Service) EnsureRoomViaAP(roomID, name, summary, ownerUserID string) error {
-	if roomID == "" || ownerUserID == "" {
+// EnsureRoomViaAP creates a local copy of a remote chat room, keyed by its
+// canonical AP URI. Idempotent: an existing room with a matching owner is a
+// no-op. An existing room with a different owner fails so federated
+// invitations never attach to a room somebody else controls.
+//
+// **キーは URI で、room id ではない (#2994)。** room id は相手が自由に決められる
+// 値なので ID 空間はホストをまたいで共有されている。id で keying していた頃は、
+// あるホストが先に同じ id の room を作ると、別のホストの正規の room からの Invite が
+// owner 不一致で**恒久的に drop されて**いた。取り込む行の `id` はこちらで採番する。
+func (s *Service) EnsureRoomViaAP(roomURI, name, summary, ownerUserID string) error {
+	if roomURI == "" || ownerUserID == "" {
 		return ErrInvalidTarget
 	}
-	// room id は行の身元 (PK かつ membership / invitation の FK)。切ると別の room を
-	// 指すので、収まらなければ受け取らない。呼び出し側の extractChatRoomID が既に
-	// 同じ上限で落としているが、判断を書き込みの隣にも置く (#2726)。
-	if !colfit.Fits(roomID, chatRoomIDMaxRunes) {
+	// 身元なので切れない。収まらなければ room として受け取らない (#2726)。
+	if !colfit.Fits(roomURI, chatRoomURIMaxRunes) {
 		return ErrInvalidTarget
 	}
-	if existing, err := s.repo.FindRoomByID(roomID); err == nil && existing != nil {
+	// **自ホストの URI を名乗る Invite は取り込まない。** federation 側の
+	// sameDeliveryHost が先に落とすが、判断を書き込みの隣にも置く — 取り込むと
+	// 「ローカルの room なのに uri が付いた行」ができ、以後その room への Accept が
+	// URI 経路と id 経路のどちらでも引けてしまう。
+	if s.isLocalRoomURI(roomURI) {
+		return ErrInvalidTarget
+	}
+	// **綴りを畳んでから身元にする。** 比較側 (`sameDeliveryHost`) は punycode と
+	// 既定ポートを畳むので、`https://パイ.example/...` と
+	// `https://xn--eckve.example/...`、`:443` の有無はどれも gate を通る。畳まずに
+	// 保存すると**同じ room が別々の identity になり**、Invite で作った行に本文が
+	// 届かなくなる (#1850 が同じ形を報告している)。
+	canonical := idnhost.CanonicalURI(roomURI)
+	if canonical == "" {
+		return ErrInvalidTarget
+	}
+	if !colfit.Fits(canonical, chatRoomURIMaxRunes) {
+		return ErrInvalidTarget
+	}
+	host := apURIHost(canonical)
+	if host == "" || !colfit.Fits(host, chatRoomHostMaxRunes) {
+		return ErrInvalidTarget
+	}
+
+	// **DB 障害を「その room は無い」に丸めない (#2792)。** 丸めると一過性の
+	// エラーの間だけ二重取り込みへ進み、UNIQUE index に当たって job が dead になる。
+	existing, err := s.repo.FindRoomByURI(canonical)
+	if err != nil && !repository.IsNotFound(err) {
+		return err
+	}
+	if err == nil && existing != nil {
 		if existing.OwnerID != ownerUserID {
-			return fmt.Errorf("%w: room %s", ErrRoomOwnerMismatch, roomID)
+			return fmt.Errorf("%w: room %s", ErrRoomOwnerMismatch, canonical)
 		}
 		return nil
 	}
 	// name / description は表示用の本文なので切って NUL を落とす。
 	return s.repo.CreateRoom(&model.ChatRoom{
-		ID:          roomID,
+		ID:          s.idGen.Generate(time.Now()),
 		Name:        colfit.Text(name, chatRoomNameMaxRunes),
 		Description: colfit.Text(summary, chatRoomDescriptionMaxRunes),
 		OwnerID:     ownerUserID,
+		Host:        &host,
+		URI:         &canonical,
 	})
+}
+
+// resolveRoomByAPURI resolves the room an inbound activity refers to.
+//
+// **URI が指す先は 2 通りある。** 取り込んだ copy (`uri` を持つ) か、こちらの room
+// (`uri` は NULL)。片方しか見ないと、自分の room への Accept (相手がこちらの招待を
+// 受けた形) か、相手の room からの本文のどちらかが丸ごと落ちる。
+//
+// **URI で引いてから id へ落ちる順序が要点。** 先に id で引くと、他ホストの URI に
+// 含まれる id がたまたま取り込んだ copy の id と一致したときにその copy を掴む。
+func (s *Service) resolveRoomByAPURI(roomURI string) (*model.ChatRoom, error) {
+	if roomURI == "" || !colfit.Fits(roomURI, chatRoomURIMaxRunes) {
+		return nil, ErrInvalidTarget
+	}
+	// 保存側と同じ正規形にしてから引く (綴り違いで取り違えない)。
+	//
+	// **host を持たない URI は room の身元にならない。** `@context` に
+	// `/chat/rooms/<id>` のような相対形を書かれると、host の判定を通らないまま
+	// id だけでローカル room に届いてしまう。
+	canonical := idnhost.CanonicalURI(roomURI)
+	if canonical == "" || !colfit.Fits(canonical, chatRoomURIMaxRunes) {
+		return nil, ErrInvalidTarget
+	}
+	room, err := s.repo.FindRoomByURI(canonical)
+	if err != nil && !repository.IsNotFound(err) {
+		return nil, err
+	}
+	if err == nil && room != nil {
+		return room, nil
+	}
+
+	// **ここから先はこちらの room。** 取り込んだ copy は上で引けている。
+	//
+	// **相手が返してくる URI の綴りには賭けない。** こちらが送った URI をそのまま
+	// 返す実装 (mk-go 同士) なら自ホストの URI で来るが、自分の copy から
+	// `${config.url}/chat/rooms/${room.id}` を組み立て直す実装は**相手の host +
+	// こちらの room id** を送ってくる。id 一致で引いていた #2994 以前はそれで
+	// 通っていたので、host の一致まで求めると interop の回帰になる。
+	//
+	// **安全性はここに依存していない。** Accept は保留中の招待、Reject / Remove は
+	// 本人の行、group message はメンバー判定で、いずれも呼び出し先が独立に認可する。
+	// 行を**作る** `EnsureRoomViaAP` だけが URI に厳格である必要があり、そこが
+	// #2994 の穴だった。
+	id := apRoomIDFromURI(roomURI)
+	if id == "" {
+		return nil, ErrNotFound
+	}
+	room, err = s.repo.FindRoomByID(id)
+	if err != nil && !repository.IsNotFound(err) {
+		return nil, err
+	}
+	// **取り込んだ copy を id で掴まない。** ローカルで採番した id が URI の id と
+	// 一致する余地があるので、`uri` を持つ行はここでは返さない。
+	if err != nil || room == nil || (room.URI != nil && *room.URI != "") {
+		return nil, ErrNotFound
+	}
+	return room, nil
+}
+
+// isLocalRoomURI reports whether roomURI is this instance's own room URI.
+func (s *Service) isLocalRoomURI(roomURI string) bool {
+	return s.localRoomIDFromAPURI(roomURI) != ""
+}
+
+// localRoomIDFromAPURI returns the room id when roomURI is this instance's own
+// canonical room URI, else "".
+//
+// **自前の URL builder で組み立て直して突き合わせる。** 両辺を正規形にしてから
+// 比べるので、`:443` や大小文字の揺れでは外れない。
+//
+// **URL builder が未配線なら "" を返す = 「自ホストではない」と答える。**
+// これは fail-open 側で、唯一の利用者である `EnsureRoomViaAP` の拒否が効かなく
+// なる。本番では `router.go` が必ず配線するうえ、実際の防波堤は federation 側の
+// `sameDeliveryHost` と local actor の除外なので、ここは多層防御の 1 枚目。
+func (s *Service) localRoomIDFromAPURI(roomURI string) string {
+	if s.urls == nil {
+		return ""
+	}
+	id := apRoomIDFromURI(roomURI)
+	if id == "" {
+		return ""
+	}
+	mine := idnhost.CanonicalURI(s.urls.ChatRoomURI(id))
+	theirs := idnhost.CanonicalURI(roomURI)
+	if mine == "" || mine != theirs {
+		return ""
+	}
+	return id
 }
 
 // CreateInvitationViaAP records a pending chat room invitation for a local
@@ -690,28 +819,26 @@ func (s *Service) EnsureRoomViaAP(roomID, name, summary, ownerUserID string) err
 //
 // ErrChatBlocked / ErrRoomFull / ErrNotFound はいずれも retry では解決しない条件なので、
 // 呼び出し側 (federation の inbox handler) はこれらを non-retry に落とす。
-func (s *Service) CreateInvitationViaAP(roomID, inviteeUserID string) error {
-	if roomID == "" || inviteeUserID == "" {
+func (s *Service) CreateInvitationViaAP(roomURI, inviteeUserID string) error {
+	if roomURI == "" || inviteeUserID == "" {
 		return ErrInvalidTarget
-	}
-	// 既存招待は冪等 no-op (通知も再送しない)。**DB 障害を「招待が無い」に
-	// 丸めない** (#2792) — 丸めると一過性のエラーの間だけ UNIQUE 違反まで進む。
-	existing, err := s.repo.FindInvitation(inviteeUserID, roomID)
-	if err != nil && !repository.IsNotFound(err) {
-		return err
-	}
-	if err == nil && existing != nil {
-		return nil
 	}
 	// room は block 判定の相手 (= inviter = owner) と定員判定に要る。
 	// `chat_room_invitation.roomId` は `chat_room(id)` への FK (000022_chat.up.sql)
 	// なので、room 不在で行だけ作ることはそもそもできない。
-	room, err := s.repo.FindRoomByID(roomID)
-	if err != nil && !repository.IsNotFound(err) {
+	room, err := s.resolveRoomByAPURI(roomURI)
+	if err != nil {
 		return err
 	}
-	if err != nil || room == nil {
-		return ErrNotFound
+	roomID := room.ID
+	// 既存招待は冪等 no-op (通知も再送しない)。**DB 障害を「招待が無い」に
+	// 丸めない** (#2792) — 丸めると一過性のエラーの間だけ UNIQUE 違反まで進む。
+	existing, ierr := s.repo.FindInvitation(inviteeUserID, roomID)
+	if ierr != nil && !repository.IsNotFound(ierr) {
+		return ierr
+	}
+	if ierr == nil && existing != nil {
+		return nil
 	}
 	// owner 自身への招待は行を作らない (upstream 'yourself')。owner は暗黙の
 	// メンバーなので、残しても AddMemberViaAP が消費するだけ (#2858)。
@@ -776,10 +903,15 @@ func (s *Service) CreateInvitationViaAP(roomID, inviteeUserID string) error {
 // user+room is required: this prevents a remote actor from pushing itself into
 // an arbitrary local room via a forged Accept. The invitation is consumed on
 // success. Idempotent when membership already exists.
-func (s *Service) AddMemberViaAP(roomID, userID string) error {
-	if roomID == "" || userID == "" {
+func (s *Service) AddMemberViaAP(roomURI, userID string) error {
+	if roomURI == "" || userID == "" {
 		return ErrInvalidTarget
 	}
+	room, rerr := s.resolveRoomByAPURI(roomURI)
+	if rerr != nil {
+		return rerr
+	}
+	roomID := room.ID
 	inv, err := s.repo.FindInvitation(userID, roomID)
 	if err != nil && !repository.IsNotFound(err) {
 		// **DB 障害を「招待が無い」に丸めない** (#2792)。丸めると inbox の job が
@@ -793,15 +925,7 @@ func (s *Service) AddMemberViaAP(roomID, userID string) error {
 	}
 	// **owner の招待は行を作らずに消費する** (#2858)。owner は暗黙のメンバーで
 	// membership 行を持たないので、譲渡で残った招待をここで実体化させない。
-	//
-	// **DB 障害を not-found に丸めない** (#2792)。丸めると、一過性のエラーの間
-	// だけガードが素通りして owner に membership 行ができる。api/chat 側の
-	// accept / join と判断を揃える (あちらは 500、ここは error を返す)。
-	room, rerr := s.repo.FindRoomByID(roomID)
-	if rerr != nil && !repository.IsNotFound(rerr) {
-		return rerr
-	}
-	if rerr == nil && room != nil && room.OwnerID == userID {
+	if room.OwnerID == userID {
 		_ = s.repo.DeleteInvitation(inv.ID)
 		return nil
 	}
@@ -818,11 +942,15 @@ func (s *Service) AddMemberViaAP(roomID, userID string) error {
 
 // RemoveInvitationViaAP deletes a pending invitation when a remote invitee
 // rejects our room invitation. No-op when none exists.
-func (s *Service) RemoveInvitationViaAP(roomID, userID string) error {
-	if roomID == "" || userID == "" {
+func (s *Service) RemoveInvitationViaAP(roomURI, userID string) error {
+	if roomURI == "" || userID == "" {
 		return ErrInvalidTarget
 	}
-	if inv, err := s.repo.FindInvitation(userID, roomID); err == nil && inv != nil {
+	room, rerr := s.resolveRoomByAPURI(roomURI)
+	if rerr != nil {
+		return rerr
+	}
+	if inv, err := s.repo.FindInvitation(userID, room.ID); err == nil && inv != nil {
 		return s.repo.DeleteInvitation(inv.ID)
 	}
 	return nil
@@ -851,10 +979,7 @@ func (s *Service) FederateInvitationResponse(roomID, localUserID string, accept 
 	if owner.URI == nil || *owner.URI == "" {
 		return
 	}
-	// room copy には origin URI を保存していないため、owner URI の scheme+host
-	// から remote room URI (`https://{ownerHost}/chat/rooms/{id}`) を復元する。
-	// 受信側は path の room id だけを正規表現で抽出するので host が要点。
-	roomURI := remoteChatRoomURI(*owner.URI, room.ID)
+	roomURI := s.roomAPURI(room, owner)
 	if roomURI == "" {
 		return
 	}
@@ -877,15 +1002,47 @@ func (s *Service) FederateInvitationResponse(roomID, localUserID string, accept 
 	}
 }
 
-// remoteChatRoomURI reconstructs a remote chat room URI from the room owner's
-// actor URI (taking its scheme+host) and the room ID. Returns "" when ownerURI
-// cannot be parsed.
-func remoteChatRoomURI(ownerURI, roomID string) string {
-	u, err := url.Parse(ownerURI)
-	if err != nil || u.Scheme == "" || u.Host == "" {
+// apRoomIDFromURI returns the room id embedded in a chat room URI, or "".
+// 形式は URI を組み立てる側 (`activitypub.URLBuilder.ChatRoomURI`) の隣にある。
+func apRoomIDFromURI(uri string) string { return activitypub.ChatRoomIDFromURI(uri) }
+
+// apURIHost returns the authority of uri, or "" when it has none.
+//
+// **正規形の URI を渡すこと** (`idnhost.CanonicalURI`)。`chat_room.host` は
+// `user.host` / `emoji.host` と突き合わせうる値なので、punycode と既定ポートが
+// 畳まれていないと同じサーバーが別物として並ぶ。
+func apURIHost(uri string) string {
+	u, err := url.Parse(uri)
+	if err != nil || u.Host == "" {
 		return ""
 	}
-	return u.Scheme + "://" + u.Host + "/chat/rooms/" + roomID
+	return u.Host
+}
+
+// roomAPURI returns the AP URI to put on activities about room.
+//
+// **取り込んだ room は保存済みの URI をそのまま使う (#2994)。** 行の `id` は
+// こちらで採番するので、owner の URI から `id` で組み立て直す旧来の導出は
+// **別の room を指す**。その導出は削除した。
+//
+// **`uri` を持たない room はローカルのものだけ** — #2994 の migration が取り込み
+// 済みの room をすべて埋め、`rooms/transfer-ownership` はローカル利用者にしか
+// 譲れない。それでも owner がリモートな行を見たら身元が分からないので**名乗らない** —
+// ローカルの正規 URI を返すと「その room はうちのもの」と主張することになる。
+func (s *Service) roomAPURI(room *model.ChatRoom, owner *model.User) string {
+	if room == nil {
+		return ""
+	}
+	if room.URI != nil && *room.URI != "" {
+		return *room.URI
+	}
+	if (room.Host != nil && *room.Host != "") || (owner != nil && !owner.IsLocal()) {
+		return ""
+	}
+	if s.urls == nil {
+		return ""
+	}
+	return s.urls.ChatRoomURI(room.ID)
 }
 
 // remoteChatText converts an inbound ActivityPub `content` payload into the MFM
@@ -1102,14 +1259,16 @@ func (s *Service) tryDeliverRoomMessage(msg *model.ChatMessage, room *model.Chat
 		return
 	}
 
-	// room URI: local 所有なら local の正規 URI、remote 所有 copy なら owner の
-	// host から復元する (受信側は path の room id のみ抽出する)。owner は member
-	// ループで既に解決済みなので使い回す。
-	roomURI := s.urls.ChatRoomURI(room.ID)
-	if owner != nil && !owner.IsLocal() && owner.URI != nil {
-		if ru := remoteChatRoomURI(*owner.URI, room.ID); ru != "" {
-			roomURI = ru
-		}
+	// room URI: local 所有なら local の正規 URI、取り込んだ copy なら保存済みの
+	// URI。owner は member ループで既に解決済みなので使い回す。
+	//
+	// **空なら配送しない。** `@context` は `omitempty` なので、空のまま送ると
+	// room の印が落ちて**受信側が 1-on-1 DM として取り込む** (`to` の先頭 1 人宛の
+	// 私信になる)。届かないほうがまだ良い。
+	roomURI := s.roomAPURI(room, owner)
+	if roomURI == "" {
+		slog.Warn("chat: room message federation: room uri is unknown", "roomID", room.ID)
+		return
 	}
 
 	published := time.Now().UTC().Format(time.RFC3339)
@@ -1199,12 +1358,12 @@ func (s *Service) tryDeliverRoomLeave(room *model.ChatRoom, leavingUserID string
 	if len(remoteRecipients) == 0 {
 		return
 	}
-	// room URI: local 所有なら local 正規 URI、remote 所有 copy なら owner host から復元。
-	roomURI := s.urls.ChatRoomURI(room.ID)
-	if owner != nil && !owner.IsLocal() && owner.URI != nil {
-		if ru := remoteChatRoomURI(*owner.URI, room.ID); ru != "" {
-			roomURI = ru
-		}
+	// room URI: local 所有なら local 正規 URI、取り込んだ copy なら保存済みの URI。
+	// **空なら配送しない** (どの room の Remove か伝わらない)。
+	roomURI := s.roomAPURI(room, owner)
+	if roomURI == "" {
+		slog.Warn("chat: room leave federation: room uri is unknown", "roomID", room.ID)
+		return
 	}
 	body, err := json.Marshal(s.renderer.RenderChatRoomRemove(s.urls.UserURI(leaver.ID), roomURI))
 	if err != nil {
@@ -1222,11 +1381,15 @@ func (s *Service) tryDeliverRoomLeave(room *model.ChatRoom, leavingUserID string
 // to an inbound Remove activity targeting the chat room. Idempotent: a no-op
 // when the membership does not exist. Mirrors cherrypick ApInboxService.remove
 // (deletes the membership of the activity actor).
-func (s *Service) RemoveMemberViaAP(roomID, userID string) error {
-	if roomID == "" || userID == "" {
+func (s *Service) RemoveMemberViaAP(roomURI, userID string) error {
+	if roomURI == "" || userID == "" {
 		return ErrInvalidTarget
 	}
-	return s.repo.DeleteMembership(userID, roomID)
+	room, rerr := s.resolveRoomByAPURI(roomURI)
+	if rerr != nil {
+		return rerr
+	}
+	return s.repo.DeleteMembership(userID, room.ID)
 }
 
 // CreateRoomMessageViaAP persists a group chat (room) message received via
@@ -1235,8 +1398,8 @@ func (s *Service) RemoveMemberViaAP(roomID, userID string) error {
 // actor that is not part of the room. URI-based dedup handles AP retries.
 // Returns ErrNotFound when the room is unknown locally and ErrForbidden when
 // the sender is not a member, both of which the caller treats as permanent.
-func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID, text, mfmSource string) error {
-	if sender == nil || roomID == "" {
+func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomURI, text, mfmSource string) error {
+	if sender == nil || roomURI == "" {
 		return ErrInvalidTarget
 	}
 	// uri は dedup の鍵。捨てて行だけ作ると **AP retry のたびに同じ message が
@@ -1250,14 +1413,11 @@ func (s *Service) CreateRoomMessageViaAP(uri string, sender *model.User, roomID,
 			return nil
 		}
 	}
-	room, err := s.repo.FindRoomByID(roomID)
-	if err != nil && !repository.IsNotFound(err) {
-		// **DB 障害を not-found に丸めない** (#2792)。
+	room, err := s.resolveRoomByAPURI(roomURI)
+	if err != nil {
 		return err
 	}
-	if err != nil || room == nil {
-		return ErrNotFound
-	}
+	roomID := room.ID
 	isMember, err := s.isRoomMemberWith(room, sender.ID, roomID)
 	if err != nil {
 		return err
