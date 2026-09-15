@@ -1583,3 +1583,24 @@ func TestCreateFromApplicationPassesSensitiveToCopy(t *testing.T) {
 		})
 	}
 }
+
+// **承認が通ったら取り込んだ画像を消さない** (#2998)。
+//
+// 弾いた経路と `Create` 失敗の経路は既に固定してあるが、**成功したときに消さない**
+// ことは誰も見ていなかった。後始末を `defer` へ動かすような変更で、承認した絵文字の
+// 画像が作成直後に消えて「絵文字はピッカーに出るのに画像は 404」になる
+// (`DeleteCreatedEmoji` の doc コメントが恒久化を避けると書いているのと同じ状態)。
+func TestCreateFromRemoteApplicationKeepsFileOnSuccess(t *testing.T) {
+	emojis := newRemoteEmojiRepo(t)
+	fetcher := &stubFetcher{file: &model.DriveFile{
+		ID: "sys-ok", URL: "https://local.example/files/sushi.png", Type: "image/png",
+	}}
+	h := newCreatorHandlerWithFetcher(t, emojis, newDriveRepoWith(pngFile()), fetcher)
+
+	created, err := h.CreateFromApplication(context.Background(), remoteApplication())
+	require.NoError(t, err)
+	require.NotEmpty(t, created.EmojiID)
+	require.Equal(t, "sys-ok", created.DriveFileID)
+	require.Empty(t, fetcher.deletedIDs,
+		"承認が通ったのに取り込んだ画像を消している (絵文字だけ残って画像が 404 になる)")
+}

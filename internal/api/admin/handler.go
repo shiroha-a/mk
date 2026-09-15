@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -2783,7 +2784,14 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "name is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// upstream paramDef は name に `^[a-zA-Z0-9_]+$` を強制する。
-	if !emojiNamePattern.MatchString(req.Name) {
+	//
+	// **長さも見る (#2998)。** upstream の paramDef に `maxLength` は無いので、
+	// 128 文字を超える名前は `emoji.name` varchar(128) に入らず SQLSTATE 22001 が
+	// 生のまま 500 になる。**利用者の入力で 5xx を立てない**のは申請経路
+	// (`emojiapplication.service`) が既に採っている判断で、`admin/emoji/copy` も
+	// #2998 で同じ形にした。ここだけ残すと同じ入力が endpoint 次第で 400 と 500 に
+	// 分かれる。
+	if !emojiNamePattern.MatchString(req.Name) || utf8.RuneCountInString(req.Name) > emojiNameMaxRunes {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid emoji name.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	if h.emojiRepo == nil {
@@ -2982,8 +2990,11 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 			// **名前が変わらないときは掛けない。** frontend は名前を編集して
 			// いなくても `name` を必ず送るので、掛けると**既に非準拠な名前で
 			// 保存されている絵文字のカテゴリやライセンスが編集できなくなる**。
-			// そういう行は実際に作れる — `EmojiCopy` は元の名前を無検証で
-			// コピーし、AP 経由の取り込みも長さしか見ない。塞ぎたいのは
+			// そういう行は **TS から引き継いだ DB に残りうる** — upstream の
+			// `admin/emoji/update` は `id` を渡す経路で pattern を掛けないので、
+			// 非準拠な名前のローカル絵文字が作れてしまう。**AP 経路は根拠にならない**
+			// (作るのは remote 行だけで、ここが守るのはローカル)。`EmojiCopy` は
+			// #2998 で塞いだので、mk-go が新しく作る経路はもう無い。塞ぎたいのは
 			// 「不正な名前を新しく入れる」ことで、既に保存済み・broadcast 済みの
 			// 名前を保存し直すのを拒む価値は無い。
 			if !emojiNamePattern.MatchString(*req.Name) {

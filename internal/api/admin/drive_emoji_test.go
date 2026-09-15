@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -579,6 +580,11 @@ func TestEmojiCopy_StoresInDrive(t *testing.T) {
 	require.NotNil(t, copied.Type)
 	// Webpublic type is preferred when present (matches Misskey TS behaviour).
 	assert.Equal(t, "image/webp", *copied.Type)
+	// **成功したら消さない** (#2998)。後始末を `defer` へ動かすような変更で、
+	// 取り込んだ画像が作成直後に消えて「絵文字はピッカーに出るのに画像は 404」に
+	// なる。承認経路にも同じ形を足した
+	// (`TestCreateFromRemoteApplicationKeepsFileOnSuccess`)。
+	require.Empty(t, fetcher.deletedIDs, "成功した copy で drive ファイルを消さないこと")
 }
 
 // TestEmojiCopy_StoresInDrive_NoWebpublic falls back to df.URL / df.Type
@@ -1835,8 +1841,9 @@ func TestEmojiUpdate_AcceptsValidName(t *testing.T) {
 // frontend は名前を編集していなくても `name` を必ず送る
 // (`custom-emojis-manager.local.list.vue` は `name: item.name`)。ここで
 // pattern を掛けると、**既に非準拠な名前で保存されている絵文字のカテゴリや
-// ライセンスが編集できなくなる**。そういう行は `EmojiCopy` (元の名前を無検証
-// でコピー) や AP 経由の取り込みで実際に作られる。
+// ライセンスが編集できなくなる**。そういう行は **TS から引き継いだ DB に残りうる**
+// (upstream の `update` は `id` 経路で pattern を掛けない)。`EmojiCopy` は #2998 で
+// 塞いだので、mk-go が新しく作る経路はもう無い。
 func TestEmojiUpdate_KeepsNonConformingNameEditable(t *testing.T) {
 	h, emojiRepo := setupEmojiHandler(t, &model.Emoji{ID: "e1", Name: "foo-bar.baz", Category: func() *string { v := "old"; return &v }()})
 
@@ -1865,4 +1872,222 @@ func TestEmojiUpdate_RejectsRenameToInvalid(t *testing.T) {
 	got, ferr := emojiRepo.FindByID("e1")
 	require.NoError(t, ferr)
 	assert.Equal(t, "foo-bar.baz", got.Name, "拒んだのに保存されている")
+}
+
+// **制約外の名前をそのままコピーしない** (#2998)。
+//
+// リモート絵文字の `name` は相手サーバーが決める値で、upstream の
+// `admin/emoji/add` が強制する `^[a-zA-Z0-9_]+$` を満たすとは限らない。そのまま
+// コピーすると **MFM の `:name:` から参照できないローカル絵文字**ができ、同じ名前を
+// `add` で作ろうとすると 400 で弾かれるので経路によって結果が変わる。ケースは本番の
+// 実測にあった 3 つの形 (記号のみ / `@host` 付き / ハイフン) をそのまま並べてある。
+//
+// **画像を取りに行く前に弾く。** 後から弾くと、その都度リモートへ 1 往復して
+// drive ファイルを作っては消すことになる。
+func TestEmojiCopy_RejectsInvalidRemoteName(t *testing.T) {
+	for _, name := range []string{"+_+", "ablobcatnodmeltcry@3.5mbps.net", "mikan_8-2"} {
+		t.Run(name, func(t *testing.T) {
+			remoteHost := "remote.example"
+			h, repo := setupEmojiHandler(t, &model.Emoji{
+				ID: "src1", Name: name, Host: &remoteHost,
+				OriginalURL: "https://remote.example/emoji/x.png",
+			})
+			fetcher := &fakeEmojiImageFetcher{returnDF: &model.DriveFile{
+				ID: "df1", URL: "https://local.example/files/x.png", Type: "image/png",
+			}}
+			h.SetEmojiImageFetcher(fetcher)
+
+			rec := doPost(h.EmojiCopy, `{"emojiId":"src1"}`, adminUser)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+			assert.Empty(t, fetcher.calls, "弾くなら画像を取りに行かないこと")
+			_, err := repo.FindByNameAndHost(name, nil)
+			assert.Error(t, err, "ローカル絵文字が作られていないこと")
+		})
+	}
+}
+
+// **`name` を上書きすれば制約外の絵文字も取り込める** (#2998)。
+//
+// 弾くだけだと取り込む手段が無くなる (`admin/emoji/add` は URL からの取得をしない)
+// ので、`category` などと同じ additive なパラメータで人が決められるようにしてある。
+// **drive ファイル名も新しい名前になること**まで見る — 元の名前のままだと、drive を
+// 開いたときに絵文字と対応が取れない。
+func TestEmojiCopy_NameOverrideAllowsInvalidRemoteName(t *testing.T) {
+	remoteHost := "remote.example"
+	h, repo := setupEmojiHandler(t, &model.Emoji{
+		ID: "src1", Name: "+_+", Host: &remoteHost,
+		OriginalURL: "https://remote.example/emoji/x.png",
+	})
+	fetcher := &fakeEmojiImageFetcher{returnDF: &model.DriveFile{
+		ID: "df1", URL: "https://local.example/files/x.png", Type: "image/png",
+	}}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiCopy, `{"emojiId":"src1","name":"plus_eyes"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+	copied := findEmojiByID(t, repo, body["id"].(string))
+	assert.Equal(t, "plus_eyes", copied.Name)
+	require.Len(t, fetcher.calls, 1)
+	assert.Equal(t, "plus_eyes", fetcher.calls[0].Name, "drive ファイル名も上書き後の名前にすること")
+}
+
+// **上書きした名前も検証する** (#2998)。src 側が正当でも、上書きが制約外なら弾く。
+func TestEmojiCopy_RejectsInvalidNameOverride(t *testing.T) {
+	remoteHost := "remote.example"
+	h, _ := setupEmojiHandler(t, &model.Emoji{
+		ID: "src1", Name: "valid_name", Host: &remoteHost,
+		OriginalURL: "https://remote.example/emoji/x.png",
+	})
+	fetcher := &fakeEmojiImageFetcher{returnDF: &model.DriveFile{
+		ID: "df1", URL: "https://local.example/files/x.png", Type: "image/png",
+	}}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiCopy, `{"emojiId":"src1","name":"bad-name"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, fetcher.calls)
+}
+
+// **重複チェックは上書き後の名前で行う** (#2998)。
+//
+// src の名前で見ていると、上書き先が既存のローカル絵文字と衝突しても通ってしまう。
+// **一意制約は救ってくれない** — `IDX_emoji_name_host` は `(name, host)` で、ローカルは
+// `host IS NULL`。PostgreSQL の既定 (NULLS DISTINCT) では NULL 同士が重複と見なされない
+// ので、`:name:` が 2 行できて MFM の解決もピッカーも二重になる (upstream が
+// `checkDuplicate` をアプリ側に持っているのはこのため)。
+func TestEmojiCopy_DuplicateCheckUsesOverriddenName(t *testing.T) {
+	remoteHost := "remote.example"
+	h, _ := setupEmojiHandler(t,
+		&model.Emoji{ID: "src1", Name: "free", Host: &remoteHost, OriginalURL: "https://remote.example/e.png"},
+		&model.Emoji{ID: "local1", Name: "taken"},
+	)
+	fetcher := &fakeEmojiImageFetcher{returnDF: &model.DriveFile{
+		ID: "df1", URL: "https://local.example/files/x.png", Type: "image/png",
+	}}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiCopy, `{"emojiId":"src1","name":"taken"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "DUPLICATE_NAME")
+	assert.Empty(t, fetcher.calls, "重複が分かっているなら画像を取りに行かないこと")
+}
+
+// **`Create` が失敗したら取り込んだ drive ファイルを片付ける** (#2998)。
+//
+// 残すと誰からも参照されない孤児になる。`DriveFileRepository.DeleteOrphans` の
+// 対象ではあるが自動では走らないので、掃除するまで実体ストレージを食い続ける。
+// 承認経路 (`emoji_application.go`) は #2966 で同じ形にしてある。
+func TestEmojiCopy_CleansUpDriveFileWhenCreateFails(t *testing.T) {
+	remoteHost := "remote.example"
+	h, repo := setupEmojiHandler(t, &model.Emoji{
+		ID: "src1", Name: "ok_name", Host: &remoteHost,
+		OriginalURL: "https://remote.example/emoji/x.png",
+	})
+	h.SetEmojiRepo(&failingCreateEmojiRepo{MockEmojiRepository: repo})
+	fetcher := &fakeEmojiImageFetcher{returnDF: &model.DriveFile{
+		ID: "df1", URL: "https://local.example/files/x.png", Type: "image/png",
+	}}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiCopy, `{"emojiId":"src1"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, []string{"df1"}, fetcher.deletedIDs, "取り込んだ drive ファイルを消すこと")
+}
+
+// **取り込んだものの MIME を見る** (#2998)。
+//
+// 承認経路は #2966 で既に見ているので、こちらだけ無検査だと**承認で弾かれるものが
+// copy なら通る**という迂回路になる。相手が `originalUrl` に非画像を置いたときの形。
+// **弾いたものを片付けること**まで見る — その時点で誰からも参照されない孤児になる。
+func TestEmojiCopy_RejectsUnsupportedFileType(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		mime string
+	}{
+		{"非画像", "application/zip"},
+		// upstream の `FILE_TYPE_IMAGE.includes("")` は false。drive 側が type を
+		// 埋められなかった行をそのまま絵文字にしない。
+		{"空の MIME", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteHost := "remote.example"
+			h, repo := setupEmojiHandler(t, &model.Emoji{
+				ID: "src1", Name: "not_an_image", Host: &remoteHost,
+				OriginalURL: "https://remote.example/emoji/x.bin",
+			})
+			fetcher := &fakeEmojiImageFetcher{returnDF: &model.DriveFile{
+				ID: "df1", URL: "https://local.example/files/x.bin", Type: tc.mime,
+			}}
+			h.SetEmojiImageFetcher(fetcher)
+
+			rec := doPost(h.EmojiCopy, `{"emojiId":"src1"}`, adminUser)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Contains(t, rec.Body.String(), "UNSUPPORTED_FILE_TYPE")
+			assert.Equal(t, []string{"df1"}, fetcher.deletedIDs, "弾いたものを片付けること")
+			_, err := repo.FindByNameAndHost("not_an_image", nil)
+			assert.Error(t, err, "ローカル絵文字が作られていないこと")
+		})
+	}
+}
+
+// **名前の長さも見る** (#2998)。
+//
+// `^[a-zA-Z0-9_]+$` は文字種しか縛らないので、`emoji.name` varchar(128) を
+// 超える名前が素通りすると `Create` が SQLSTATE 22001 で落ちる。**弾くのは
+// リモートへ問い合わせる前**でないと、1 往復して drive ファイルを作った後に
+// 500 を返すことになる。空文字は `+` 量化子が弾く。
+func TestEmojiCopy_RejectsNameOverrideByLength(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		override string
+	}{
+		{"空文字", ""},
+		{"128 文字ちょうどは通る", strings.Repeat("a", 128)},
+		{"129 文字は弾く", strings.Repeat("a", 129)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			remoteHost := "remote.example"
+			h, _ := setupEmojiHandler(t, &model.Emoji{
+				ID: "src1", Name: "src_name", Host: &remoteHost,
+				OriginalURL: "https://remote.example/emoji/x.png",
+			})
+			fetcher := &fakeEmojiImageFetcher{returnDF: &model.DriveFile{
+				ID: "df1", URL: "https://local.example/files/x.png", Type: "image/png",
+			}}
+			h.SetEmojiImageFetcher(fetcher)
+
+			body, err := json.Marshal(map[string]any{"emojiId": "src1", "name": tc.override})
+			require.NoError(t, err)
+			rec := doPost(h.EmojiCopy, string(body), adminUser)
+			if len(tc.override) == 128 {
+				require.Equal(t, http.StatusOK, rec.Code)
+				return
+			}
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Empty(t, fetcher.calls, "弾くなら画像を取りに行かないこと")
+		})
+	}
+}
+
+// **`admin/emoji/add` も名前の長さで 5xx を立てない** (#2998)。
+//
+// upstream の paramDef に `maxLength` は無いので、128 文字を超える名前は
+// `emoji.name` varchar(128) に入らず SQLSTATE 22001 が生のまま 500 になる。
+// `copy` と申請経路が 400 で弾く以上、**同じ入力が endpoint 次第で 400 と 500 に
+// 分かれる**のは筋が通らない。
+func TestEmojiAdd_RejectsOverlongName(t *testing.T) {
+	h, _ := setupEmojiHandler(t)
+	body, err := json.Marshal(map[string]any{"name": strings.Repeat("a", 129), "url": "https://local.example/x.png"})
+	require.NoError(t, err)
+	rec := doPost(h.EmojiAdd, string(body), adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+
+	ok, err := json.Marshal(map[string]any{"name": strings.Repeat("a", 128), "url": "https://local.example/x.png"})
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, doPost(h.EmojiAdd, string(ok), adminUser).Code, "128 文字ちょうどは通ること")
 }

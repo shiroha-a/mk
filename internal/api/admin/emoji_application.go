@@ -619,7 +619,7 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 		// **取り込んだものの MIME を見る (レビュー M7)。** 相手が icon.url に
 		// 非画像を置くと、承認でそれが絵文字として登録される。own 経路は
 		// 申請時に見ているので、remote だけ無検査なのは非対称。
-		// (`EmojiCopy` も同じ穴だが、承認は「検証を迂回する方法」にしない。)
+		// (`EmojiCopy` にも同じ穴があったが #2998 で塞いだ。)
 		if !isAllowedEmojiImageType(df.Type) {
 			// **取り込んだものを片付ける (#2966)。** 弾いた時点で誰からも
 			// 参照されないので、残すと孤児になる。

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 	"time"
+	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -21,6 +22,7 @@ import (
 // 列幅は migration/000001_initial の `emoji` テーブル定義に対応する。
 // 変えるときは DDL と揃えること。
 const (
+	emojiNameMaxRunes     = 128
 	emojiCategoryMaxRunes = 128
 	emojiAliasMaxRunes    = 128
 	emojiLicenseMaxRunes  = 1024
@@ -90,6 +92,7 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 	// 前者は src の値を保つ、後者は空にする。
 	var req struct {
 		EmojiID     string    `json:"emojiId"`
+		Name        *string   `json:"name"`
 		Category    *string   `json:"category"`
 		Aliases     *[]string `json:"aliases"`
 		License     *string   `json:"license"`
@@ -109,10 +112,35 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_EMOJI", "No such emoji.", "e2785b66-dca3-4087-9cac-b93c541cc425"))
 	}
+	// **名前は検証してから使う (#2998)。** リモート絵文字の `name` は相手サーバーが
+	// 決める値で、upstream の `admin/emoji/add` が強制する `^[a-zA-Z0-9_]+$` を
+	// 満たすとは限らない (2026-09-15 の実測ではリモート 21,505 件のうち 10 件が制約外で、
+	// `+_+` や `ablobcatnodmeltcry@3.5mbps.net` のような名前がある)。そのまま
+	// コピーすると **MFM の `:name:` から参照できないローカル絵文字**ができ、しかも
+	// 同じ名前を `add` で作ろうとすると 400 で弾かれるので、**経路によって通ったり
+	// 通らなかったりする**。
+	//
+	// **upstream は検証しない** (`copy.ts` は `emoji.name` をそのまま
+	// `customEmojiService.add` へ渡す) ので意図的な差分。弾くだけだと制約外の絵文字を
+	// 取り込む手段が無くなるため、`name` の上書きを受けて人が決められるようにしてある
+	// (`category` などと同じ additive なパラメータ)。
+	name := src.Name
+	if req.Name != nil {
+		name = *req.Name
+	}
+	//
+	// **長さも見る。** `^[a-zA-Z0-9_]+$` は文字種しか縛らないので、`emoji.name`
+	// varchar(128) を超える名前が素通りして `Create` が SQLSTATE 22001 で落ちる
+	// (リモートへ 1 往復して drive ファイルを作った後に 500)。兄弟の上書きは
+	// `colfit` で切るが、**名前は切ると別物になる**ので弾く (AP 経路も
+	// `emojiNameMaxRunes` で同じ値を見ている)。
+	if !emojiNamePattern.MatchString(name) || utf8.RuneCountInString(name) > emojiNameMaxRunes {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid emoji name.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
 	// **重複チェックを DB 障害で skip しない** (#2792)。`err == nil` だけを見ると、
 	// 接続断のときに「重複していない」と判断して同名の絵文字を作ってしまう。
 	// not-found のときだけ「重複なし」と扱う。
-	existing, dupErr := h.emojiRepo.FindByNameAndHost(src.Name, nil)
+	existing, dupErr := h.emojiRepo.FindByNameAndHost(name, nil)
 	if dupErr != nil && !repository.IsNotFound(dupErr) {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
@@ -122,6 +150,13 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 	copied := *src
 	copied.ID = h.idGen.Generate(time.Now())
 	copied.Host = nil
+	copied.Name = name
+	// **`uri` は元のまま継承する (#2998)。** 名前を変えても出自は変わらないので、
+	// 承認経路 (`emoji_application.go`) と同じ扱いにしてある。ただし AP の tag には
+	// `id` として出る (`renderer.go`) ので、名前を変えた絵文字は
+	// `{id: <元の URI>, name: ":<新しい名前>:"}` になり両者が食い違う。受け手は
+	// name + host で照合するので実害は見つかっていないが、`tag.id` を辿る実装には
+	// 別の名前のオブジェクトが返る。
 
 	// 指定された項目だけ上書きする (#2698)。
 	//
@@ -166,12 +201,25 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 	// 紐付けるとロール変更や削除で巻き込まれて表示が壊れる。失敗時は
 	// INTERNAL_ERROR を返して emoji 作成自体を中止する (URL 引き継ぎだけで
 	// 作成すると #670 の症状に逆戻りするため)。
+	systemFileID := ""
 	if h.emojiImageFetcher != nil && src.OriginalURL != "" {
-		df, err := h.emojiImageFetcher.FetchAndStore(c.Request().Context(), src.OriginalURL, nil, src.Name)
+		df, err := h.emojiImageFetcher.FetchAndStore(c.Request().Context(), src.OriginalURL, nil, name)
 		if err != nil {
 			slog.WarnContext(c.Request().Context(), "emoji copy: drive fetch failed",
 				"srcId", src.ID, "url", src.OriginalURL, "err", err)
 			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Failed to fetch emoji image.", "0a4e0b9e-2d7c-4d6f-8f6b-1f9c2e9b4d83"))
+		}
+		systemFileID = df.ID
+		// **取り込んだものの MIME を見る (#2998)。** 承認経路は #2966 で既に見て
+		// いるので、こちらだけ無検査だと**承認で弾かれるものが copy なら通る**という
+		// 迂回路になる (`emoji_application.go` のコメントが「EmojiCopy も同じ穴」と
+		// 書いていたのがここ)。相手が `originalUrl` に非画像を置くと、それがそのまま
+		// 絵文字として登録される。`admin/emoji/add` も fileId 経路で同じ検証をする。
+		//
+		// **弾いたら片付ける。** その時点で誰からも参照されないので、残すと孤児になる。
+		if !isAllowedEmojiImageType(df.Type) {
+			h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
+			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
 		}
 		// 不変条件 (#722): emoji.originalUrl は必ず drive_file.url と一致
 		// させる。`DriveFileRepository.DeleteOrphans` の cleanup guard が
@@ -185,19 +233,18 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 		} else {
 			copied.PublicURL = df.URL
 		}
-		// webpublic / fallback いずれの経路も defensive copy で *string を
-		// 作って df のポインタを共有しない (df 側を後から触る経路は無いが、
-		// 型 (*string) を扱う読み手のメンタルモデルを揃えるため)。
-		if df.WebpublicType != nil && *df.WebpublicType != "" {
-			t := *df.WebpublicType
-			copied.Type = &t
-		} else if df.Type != "" {
-			t := df.Type
-			copied.Type = &t
-		}
+		// **導出は共有ヘルパーに寄せる (#2998)。** `EmojiAdd` も承認経路の 2 つも
+		// `preferWebpublicType` を通しており、ここだけ手で書くと片方だけ直す事故に
+		// なる (実際、両方が空のときの戻りが違っていた)。
+		copied.Type = preferWebpublicType(df)
 	}
 
 	if err := h.emojiRepo.Create(&copied); err != nil {
+		// **取り込んだものを片付ける (#2998)。** ここまで来た drive ファイルは
+		// 誰からも参照されないので、残すと孤児になる。`DeleteOrphans` の対象では
+		// あるが自動では走らないので、掃除するまで実体ストレージを食い続ける。
+		// 承認経路 (`emoji_application.go`) は #2966 で同じ形にしてある。
+		h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	h.logModeration(c, moderationlog.LogAddCustomEmoji, map[string]any{
