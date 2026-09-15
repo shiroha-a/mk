@@ -846,9 +846,33 @@ docker compose run --rm --no-deps --entrypoint /app/backfill-remote-host app \
 `ORDER BY id` に効かないため、ローカル note が支配的なインスタンスでは batch あたりの
 走査行数が膨らむ。`-batch` / `-sleep-ms` で絞ること。
 
-UDS 構成ではサービス名が異なるので `docker compose -f ... run --rm --entrypoint
-/app/backfill-remote-host mkgo ...` の形になる。バイナリ直接実行なら
+UDS 構成ではサービス名が異なるので `docker compose -f compose.uds.yaml run --rm
+--no-deps --entrypoint /app/backfill-remote-host mkgo ...` の形になる (`mkgo` も
+`depends_on` に `condition: service_healthy` を持つので `--no-deps` は同じく要る)。
+バイナリ直接実行なら
 `go run ./cmd/backfill-remote-host -config .config/default.yml -dry-run`。
+
+**流すのは「いま動いている版」のバッチにすること。** 対象の列一覧はリリースごとに
+増えるので、**まだ適用していない migration が作る列**を持つ版で流すとそこで落ちる。
+
+```
+backfill chat_room.host (cursor=""): ERROR: column "host" does not exist (SQLSTATE 42703)
+```
+
+`chat_room.host` は #2994 の `000090` が作る列で、**それを取り込む前の DB には無い**
+(1.3.0 のタグ時点では `000083` まで)。
+`docker compose run` は現在の image を使うので **pull の前に流せば自然に避けられる**が、
+`git pull` 済みのツリーで `go run ./cmd/backfill-remote-host` を叩くと踏む
+(自分でビルドしたバイナリを持ち込む場合も同じ)。
+
+**それで取りこぼしは生じない。** 対象一覧はその版の schema をちょうど覆う —
+`TestHostColumns_CoversSchema` が「schema にある host 系の列は対象一覧か明示的な除外
+一覧のどちらかに必ず入っている」ことを見る。そして**これから適用される migration が
+作る列は、その migration 自身が正規形で埋める** (`chat_room.host` は `000090` が
+`user.host` 経由で backfill する)。上げる前に検査すべきなのは既にある列だけで、それは
+現行版の一覧と一致する。
+
+落ちても**そこまでの列は検査済み**なので、残りだけ流し直せばよい。
 
 冪等なので、途中で失敗しても再実行して安全。`-table` / `-column` で 1 組だけ流せる。
 
