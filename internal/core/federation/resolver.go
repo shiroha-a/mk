@@ -4239,37 +4239,11 @@ func trimWHATWGURL(raw string) string {
 
 // punyHostPort mirrors upstream's punyHost (idna host + non-default port).
 //
-// **既定ポートは剥がす。これが host の正規形を作る唯一の規則。** upstream の
-// `punyHost` / `extractDbHost` は WHATWG `new URL()` を使うので
-// `new URL("https://x:443/").host` は `x`、`.port` は `""` になる。Go の
-// `net/url` は剥がさないので、剥がさずに比較すると `blocked.example:443` という
-// **同じ authority の別綴り**が `blockedHosts` の suffix 一致 (`HostMatchesAny`)
-// をすり抜ける。片側 (sameDeliveryHost) だけが剥がしていた頃は、defederation した
-// 相手が actor id / inbox に `:443` を書くだけで配送も inbound 受理も続いた。
-//
-// 非既定ポート (`:8443`) は別 host のまま残す (upstream も同じ)。
-func punyHostPort(u *url.URL) string {
-	host := punyHost(u.Hostname())
-	// IPv6 リテラルは authority では `[::1]` の形で現れるが `Hostname()` が
-	// bracket を外す。戻さないと `::1` + port が `::1:8443` になり、host 部に
-	// コロンを含むだけの値と見分けが付かなくなる。
-	if strings.Contains(host, ":") {
-		host = "[" + host + "]"
-	}
-	port := u.Port()
-	if port != "" && !isDefaultPortForScheme(u.Scheme, port) {
-		return host + ":" + port
-	}
-	return host
-}
+// **規則は `idnhost.HostPort` に 1 つだけ置く。** 保存側 (#2994 の
+// `chat_room.uri`) も同じ正規形を作る必要があり、片方だけ動かすと「比較では
+// 同じ authority なのに保存は別物」という綴り違いの取り違えが生まれる。
+func punyHostPort(u *url.URL) string { return idnhost.HostPort(u) }
 
-// isDefaultPortForScheme reports whether port is the scheme's default port.
-//
-// **数値として比較する (レビュー H2)。** `url.Port()` は `"0443"` をそのまま
-// 返すが、**Go の HTTP client はそれを 443 として接続する**。文字列一致だと
-// `blocked.example:0443` が別 host として保存・比較され、既定ポートの明記で
-// gate を回避できるのと**同じ穴が別の綴りで残る**。WHATWG URL はポートを数値と
-// して解釈するので、この形は upstream には無い。
 func isDefaultPortForScheme(scheme, port string) bool {
 	n, err := strconv.Atoi(port)
 	if err != nil {

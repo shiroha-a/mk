@@ -1,9 +1,11 @@
 package idnhost
 
 import (
+	"net/url"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // **比較の両辺を揃えるための正規化** (#2704)。保存側も #2706 で揃えたが、それ以前の行は非正規化のまま
@@ -46,4 +48,66 @@ func TestPuny(t *testing.T) {
 		// 安全側なので、この挙動を固定しておく。
 		assert.NotEqual(t, "xn--eckve.example", Puny("パイ。example"))
 	})
+}
+
+// **正規形を作る規則は 1 つだけ (#2994)。** 比較側 (`sameDeliveryHost`) と保存側
+// (`chat_room.uri`) が別々に持つと、「比較では同じ authority なのに保存は別物」という
+// 綴り違いの取り違えが生まれる。
+func TestHostPort(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"そのまま", "https://example.com/x", "example.com"},
+		{"大文字は畳む", "https://Example.COM/x", "example.com"},
+		{"https の既定ポートは剥がす", "https://example.com:443/x", "example.com"},
+		{"http の既定ポートは剥がす", "http://example.com:80/x", "example.com"},
+		{"非既定ポートは残す", "https://example.com:8443/x", "example.com:8443"},
+		{"scheme が違えば 443 も残す", "http://example.com:443/x", "example.com:443"},
+		{"punycode へ畳む", "https://パイ.example/x", "xn--eckve.example"},
+		{"IPv6 は bracket を戻す", "https://[::1]:8443/x", "[::1]:8443"},
+		{"IPv6 の既定ポート", "https://[::1]:443/x", "[::1]"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.raw)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, HostPort(u))
+		})
+	}
+}
+
+func TestCanonicalURI(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"そのまま", "https://example.com/chat/rooms/r1", "https://example.com/chat/rooms/r1"},
+		{"authority を畳む", "https://Example.COM:443/chat/rooms/r1", "https://example.com/chat/rooms/r1"},
+		{"scheme を小文字化", "HTTPS://example.com/chat/rooms/r1", "https://example.com/chat/rooms/r1"},
+		{"punycode", "https://パイ.example/chat/rooms/r1", "https://xn--eckve.example/chat/rooms/r1"},
+		{"非既定ポートは残す", "https://example.com:8443/chat/rooms/r1", "https://example.com:8443/chat/rooms/r1"},
+		// host が無いものは身元にできない。
+		{"host 不在", "/chat/rooms/r1", ""},
+		{"空", "", ""},
+		{"解析できない", "://bad", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, CanonicalURI(tc.raw))
+		})
+	}
+}
+
+// 同じ authority の別綴りは同じ正規形になること (取り違えの本体)。
+func TestCanonicalURI_FoldsSpellings(t *testing.T) {
+	want := CanonicalURI("https://remote.example/chat/rooms/r1")
+	require.NotEmpty(t, want)
+	for _, raw := range []string{
+		"https://remote.example:443/chat/rooms/r1",
+		"https://REMOTE.EXAMPLE/chat/rooms/r1",
+		"HTTPS://Remote.Example:443/chat/rooms/r1",
+	} {
+		assert.Equal(t, want, CanonicalURI(raw), raw)
+	}
 }
