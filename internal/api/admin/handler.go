@@ -35,6 +35,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/safehttp"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
@@ -567,7 +568,7 @@ func (h *Handler) SetEmojiImportEnqueuer(e EmojiImportEnqueuer) {
 type EmojiImageFetcher interface {
 	FetchAndStore(ctx context.Context, url string, user *model.User, name string) (*model.DriveFile, error)
 	// CopyToSystemFile duplicates an existing drive file as a system-owned one
-	// (#2966).
+	// (#2966。`admin/emoji/add` も同じ複製を通す、#2999)。
 	//
 	// **HTTP を経由しない。** 自分の公開 URL を叩くと SSRF ガードと衝突し、
 	// 非公開 URL の構成では取れず、DB 上の行と実体の対応も確かめられない。
@@ -590,10 +591,11 @@ func (h *Handler) SetEmojiImageFetcher(f EmojiImageFetcher) {
 
 // HasEmojiImageFetcher reports whether emoji images can be taken into drive.
 //
-// **未配線だと 2 つのバグがそのまま残る (#2966 / #670)。** 自作画像の申請を
+// **未配線だと 3 つのバグがそのまま残る (#2966 / #670 / #2999)。** 自作画像の申請を
 // 承認すると絵文字が申請者所有のファイルを参照し続け (申請者が消すと壊れる)、
-// リモート絵文字の複製は相手サーバーの URL を参照し続ける (相手が消すと壊れる)。
-// どちらも「動いているように見えて後から壊れる」ので、起動時に気付けるようにする。
+// リモート絵文字の複製は相手サーバーの URL を参照し続け (相手が消すと壊れる)、
+// `admin/emoji/add` は操作者の drive ファイルを参照し続ける (操作者が消すと壊れる)。
+// いずれも「動いているように見えて後から壊れる」ので、起動時に気付けるようにする。
 func (h *Handler) HasEmojiImageFetcher() bool { return h.emojiImageFetcher != nil }
 
 // QueueInspector abstracts asynq.Inspector for queue management endpoints.
@@ -2768,6 +2770,18 @@ func (h *Handler) publishEmojiUpdatedByIDs(ids []string) {
 //   - `fileId` 指定時: drive_file から URL を resolve して保存 (= upstream 互換)
 //   - `url` 直接指定時: そのまま保存 (legacy)
 //   - 両方なし: 400 INVALID_PARAM
+//
+// `fileId` 経路は**画像を system 所有の drive ファイルへ複製してから**参照する
+// (#2999)。upstream は操作者のファイルをそのまま指すので意図的な乖離
+// (docs/divergence.md §7)。
+//
+// **`url` 経路は取り込まない。** あちらの意味は「この URL を指す」で、drive に行の
+// 無い外部 URL も指せる escape hatch (upstream には無い mk-go 独自の経路)。
+// 取り込むには HTTP が要り、自分の URL を叩くのは SSRF ガードと衝突する。
+// 直そうとしている失敗形は「**利用者が自分の drive ファイルを消す**」で、
+// `url` 経路には所有者の概念そのものが無い。fork frontend もこの経路は使わない
+// (`emoji-edit-dialog.vue` / `custom-emojis-manager.register.vue` はどちらも
+// `fileId` を送る)。
 func (h *Handler) EmojiAdd(c echo.Context) error {
 	var req struct {
 		Name        string   `json:"name"`
@@ -2794,7 +2808,10 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	if !emojiNamePattern.MatchString(req.Name) || utf8.RuneCountInString(req.Name) > emojiNameMaxRunes {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid emoji name.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
-	if h.emojiRepo == nil {
+	// **`idGen` もここで見る (#2999)。** `Generate` は複製を作った**後**に呼ぶので、
+	// nil のまま到達すると panic し、誰からも参照されない複製が残る。
+	// `CreateFromApplication` が同じ理由で冒頭に置いている。
+	if h.emojiRepo == nil || h.idGen == nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	// fileId 経路は drive_file を resolve する (NO_SUCH_FILE)。filetype 検証は
@@ -2829,13 +2846,79 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	// originalUrl/publicUrl/type を導出する (upstream CustomEmojiService.add)。
 	publicURL := url
 	var fileType *string
+	systemFileID := ""
 	if driveFile != nil {
 		if !isAllowedEmojiImageType(driveFile.Type) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
 		}
-		url = driveFile.URL
-		publicURL = preferWebpublicURL(driveFile)
-		fileType = preferWebpublicType(driveFile)
+		// **操作者の drive ファイルを参照し続けない (#2999)。** `fileId` で渡るのは
+		// ふつうモデレーター自身が直前に上げたファイルで、本人が drive から消せば
+		// 絵文字の画像が壊れる (ロールの変更や退会でも同じ)。申請の承認は #2966、
+		// リモートの複製と zip の取り込みは #670 で既に system 所有にしてある。
+		// **`admin/emoji/update` の `fileId` はまだ利用者の drive に依存している**
+		// (差し替えると再び利用者所有のファイルを指す)。あちらは別 issue。
+		//
+		// **元のファイルは触らない** — ノートの添付やプロフィールで使っている
+		// 可能性があり、所有権を移すと利用者の drive から突然消える。
+		//
+		// **HTTP は経由しない** (`CopyToSystemFile`)。自分の公開 URL を叩くのは
+		// SSRF ガードと衝突し、非公開 URL の構成では取れない (#2966 と同じ判断)。
+		//
+		// **複製は検証をすべて通した後。** 先に複製すると、重複名や MIME で弾く
+		// 分まで実体を作って捨てることになる (upstream の `copy.ts` がその形で、
+		// `DUPLICATE_NAME` のたびに孤児を残す)。
+		src := driveFile
+		if h.emojiImageFetcher != nil && !coredrive.IsSystemOwned(driveFile) {
+			// **読む前に行の `size` で断る (レビュー M3/L7)。** 複製は実体を丸ごと
+			// メモリへ読むので、上限超過を読み切ってから 400 にするのは無駄。申請経路も
+			// `emojiapplication.checkFile` が同じ規則を申請の時点で掛けている。
+			//
+			// **発火するのは role policy の `maxFileSizeMb` を 32 MiB より上へ
+			// 設定した (ことがある) 構成だけ** — 既定は 30 MB なので upload できた
+			// 時点で必ず上限内だが、一度上げて入れた行は上限を戻しても残る。
+			// **一括登録の同時実行 (同梱 frontend は最大 100 件を一度に投げる) は
+			// これでは軽くならない** — 1 件あたりのピークは上限のままで、rate limit か
+			// queue 化が要る (別 issue)。
+			//
+			// **`size` は行に書いてあるだけで実体とずれうる** (TS 由来の行や手で直した
+			// 行)。**過小申告は読み出し側の `safehttp.ErrResponseTooLarge` が捕まえる**
+			// が、**過大申告はここで確定する** (実体を読まずに 400 になる)。
+			if int64(driveFile.Size) > MaxEmojiCopyBytes {
+				return c.JSON(http.StatusBadRequest, apierr.Error(
+					"EMOJI_IMAGE_TOO_LARGE", "The image is too large to register as an emoji.",
+					"6b1d5f0a-3c9e-4f27-9a4d-7e2b8c1f0d64"))
+			}
+			ctx := c.Request().Context()
+			copied, cerr := h.emojiImageFetcher.CopyToSystemFile(ctx, driveFile, req.Name, req.IsSensitive)
+			if cerr == nil && copied == nil {
+				// 実装の契約違反。ここで気付かないと下の `src` 参照で panic する。
+				cerr = errors.New("copy returned no file")
+			}
+			if cerr != nil {
+				slog.WarnContext(ctx, "emoji add: drive copy failed",
+					"fileId", req.FileID, "name", req.Name, "err", cerr)
+				// **絵文字を作らない。** 元ファイルを参照して作ると、直そうと
+				// している依存をそのまま残すことになる。
+				return emojiCopyFailureResponse(c, cerr)
+			}
+			// **複製した実体の MIME を見る (#2966 と同じ理由)。** `Upload` は
+			// `AnalyseFile` でバイト列から型を引き直すので、行の宣言と実体が
+			// ずれていると allowlist 外の型が絵文字として登録される。
+			// **弾いたら片付ける** — その時点で誰からも参照されない。
+			if !isAllowedEmojiImageType(copied.Type) {
+				h.deleteSystemEmojiFile(ctx, copied.ID)
+				return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
+			}
+			src = copied
+			systemFileID = copied.ID
+		}
+		// 不変条件 (#722): `emoji.originalUrl` は必ず `drive_file.url` と一致
+		// させる。`DriveFileRepository.DeleteOrphans` の guard が
+		// `NOT EXISTS (emoji.originalUrl = drive_file.url ...)` で system 所有の
+		// 絵文字画像を保護しているので、webpublic を入れると guard が外れる。
+		url = src.URL
+		publicURL = preferWebpublicURL(src)
+		fileType = preferWebpublicType(src)
 	}
 	now := time.Now()
 	e := &model.Emoji{
@@ -2853,6 +2936,10 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray(req.RoleIDs),
 	}
 	if err := h.emojiRepo.Create(e); err != nil {
+		// **取り込んだものを片付ける (#2999)。** ここまで来た複製は誰からも
+		// 参照されないので、残すと孤児になる。`DeleteOrphans` は
+		// `admin/drive/cleanup` からしか走らないので、掃除するまで実体を食う。
+		h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	h.logModeration(c, moderationlog.LogAddCustomEmoji, map[string]any{
@@ -2864,6 +2951,37 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	// upstream は EmojiDetailed (packDetailed) を返す。raw model.Emoji を返すと
 	// `url` が欠落し originalUrl/publicUrl/uri/type 等の内部 field が漏れる。
 	return c.JSON(http.StatusOK, entity.PackEmojiDetailed(e))
+}
+
+// emojiCopyFailureResponse maps a CopyToSystemFile failure onto the wire.
+//
+// **承認経路 (`emojiApplicationReviewError`) と同じ error id を返す。** 同じ複製が
+// 同じ理由で失敗したのに endpoint ごとに id が違うと、クライアントは経路ごとに
+// 分岐を持つことになる。
+//
+// **種別を潰さない (#2792)。** 全部 500 にすると、選び直せば済むもの
+// (実体がもう無い / 大きすぎる) が運用側に直しようのない 5xx になる。逆に全部
+// 400 にすると、ストレージや DB の障害が client error に化けて監視でも 5xx が
+// 立たない。
+func emojiCopyFailureResponse(c echo.Context, err error) error {
+	switch {
+	case errors.Is(err, coredrive.ErrObjectNotFound):
+		// 行はあるのに実体が無い (`isLink` / `accessKey` 無し / ストレージから
+		// 消えた)。別のファイルを選べば済むので 400。
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"NO_SUCH_FILE", "No such file.",
+			"fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
+	case errors.Is(err, safehttp.ErrResponseTooLarge):
+		// 複製の上限 (32 MiB) を超えている。drive が受け取る上限 (role policy の
+		// `maxFileSizeMb`) はこれより上へ設定できるので、**upload はできたのに
+		// 絵文字にはできない**帯がありうる。
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"EMOJI_IMAGE_TOO_LARGE", "The image is too large to register as an emoji.",
+			"6b1d5f0a-3c9e-4f27-9a4d-7e2b8c1f0d64"))
+	}
+	return c.JSON(http.StatusInternalServerError, apierr.Error(
+		"INTERNAL_ERROR", "Failed to copy emoji image.",
+		"c2f7a3d1-58be-4e09-bb26-0d4a9e7f3c15"))
 }
 
 // emojiNamePattern mirrors upstream admin/emoji/add の paramDef name pattern。

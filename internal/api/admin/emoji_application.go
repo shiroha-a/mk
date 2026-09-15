@@ -491,7 +491,10 @@ func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApp
 }
 
 // deleteSystemEmojiFile removes a system-owned drive file created during an
-// approval that then failed (#2966).
+// emoji registration that then failed.
+//
+// 申請の承認 (#2966) だけでなく、`admin/emoji/copy` (#2998) と
+// `admin/emoji/add` (#2999) も同じ後始末を通る。
 //
 // **握り潰してログに残す。** 後始末に失敗しても審査の結果は変わらないので、
 // 呼び出し元のエラーを上書きしない。残ったものは drive の孤児 cleanup から
@@ -501,7 +504,7 @@ func (h *Handler) deleteSystemEmojiFile(ctx context.Context, fileID string) {
 		return
 	}
 	if err := h.emojiImageFetcher.DeleteSystemFile(ctx, fileID); err != nil {
-		slog.WarnContext(ctx, "emoji application: system drive file cleanup failed",
+		slog.WarnContext(ctx, "emoji: system drive file cleanup failed",
 			"driveFileId", fileID, "err", err)
 	}
 }

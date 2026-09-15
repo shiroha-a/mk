@@ -93,8 +93,12 @@ func TestEmojiAdd_FileIDCopiesToSystemOwnedFile(t *testing.T) {
 // 既に system 所有のファイルは複製しない (利用者の drive 操作から既に切れている)。
 func TestEmojiAdd_FileIDSkipsCopyForSystemOwnedFile(t *testing.T) {
 	h, repo := setupEmojiHandler(t)
+	// **`size` は上限超過にしてある。** 複製しない経路では読み出しが無いので、
+	// 上限の前捌きも効いてはいけない (効くと、複製済みの大きな絵文字を登録
+	// し直せなくなる)。
 	ownedDriveFile(t, h, &model.DriveFile{
 		ID: "f_sys", Type: "image/png", URL: "https://example/system/already.png",
+		Size: int(apiadmin.MaxEmojiCopyBytes) + 1,
 	})
 	fetcher := &fakeEmojiImageFetcher{copyDF: systemCopy("sys2", "https://example/system/copy.png", "", "")}
 	h.SetEmojiImageFetcher(fetcher)
@@ -153,12 +157,11 @@ func TestEmojiAdd_FileIDRejectsCopiedNonImageAndCleansUp(t *testing.T) {
 // ストレージや DB の障害は 500。error id は承認経路と同じものを返す。
 func TestEmojiAdd_FileIDCopyFailureMapping(t *testing.T) {
 	cases := []struct {
-		name     string
-		copyErr  error
-		status   int
-		code     string
-		id       string
-		deleteOK bool
+		name    string
+		copyErr error
+		status  int
+		code    string
+		id      string
 	}{
 		{
 			name:    "object gone",
@@ -201,8 +204,97 @@ func TestEmojiAdd_FileIDCopyFailureMapping(t *testing.T) {
 			// 依存をそのまま残すことになる。
 			_, err := repo.FindByNameAndHost("happy", nil)
 			assert.Error(t, err, "複製に失敗したのに絵文字が作られている")
+			// 複製できていないので消しに行く相手もいない。
+			assert.Empty(t, fetcher.deletedIDs, "作っていない複製を消しに行っている")
 		})
 	}
+}
+
+// **検証をすべて通す前に複製しない。** 先に複製すると、重複名や MIME で弾く分まで
+// 実体を作って捨てることになり (upstream の `copy.ts` がその形)、誰からも参照されない
+// 孤児が残る。`DeleteOrphans` は `admin/drive/cleanup` からしか走らないので、
+// 掃除するまで実体ストレージを食い続ける。
+//
+// あわせて upstream の error 順序 (noSuchFile → duplicate → unsupportedFileType) も
+// 固定する。非画像のファイルで同名の絵文字を作ろうとしたときは `DUPLICATE_NAME` が先。
+func TestEmojiAdd_DoesNotCopyBeforeValidation(t *testing.T) {
+	newHandler := func(t *testing.T, mime string, seed ...*model.Emoji) (*apiadmin.Handler, *fakeEmojiImageFetcher) {
+		t.Helper()
+		h, _ := setupEmojiHandler(t, seed...)
+		owner := "u1"
+		ownedDriveFile(t, h, &model.DriveFile{
+			ID: "f_img", UserID: &owner, Type: mime, URL: "https://example/user/orig.png",
+		})
+		fetcher := &fakeEmojiImageFetcher{copyDF: systemCopy("sys_x", "https://example/system/copy.png", "", "")}
+		h.SetEmojiImageFetcher(fetcher)
+		return h, fetcher
+	}
+
+	t.Run("重複名は複製する前に弾く", func(t *testing.T) {
+		h, fetcher := newHandler(t, "image/png", &model.Emoji{ID: "e1", Name: "happy"})
+		rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_img"}`, adminUser)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		code, _ := errorID(t, rec.Body.Bytes())
+		assert.Equal(t, "DUPLICATE_NAME", code)
+		assert.Empty(t, fetcher.copyCalls, "重複で弾くのに複製を作っている (孤児になる)")
+	})
+
+	t.Run("非画像は複製する前に弾く", func(t *testing.T) {
+		h, fetcher := newHandler(t, "text/plain")
+		rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_img"}`, adminUser)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		code, _ := errorID(t, rec.Body.Bytes())
+		assert.Equal(t, "UNSUPPORTED_FILE_TYPE", code)
+		assert.Empty(t, fetcher.copyCalls, "MIME で弾くのに複製を作っている (孤児になる)")
+	})
+
+	t.Run("非画像かつ重複名なら DUPLICATE_NAME が先", func(t *testing.T) {
+		h, fetcher := newHandler(t, "text/plain", &model.Emoji{ID: "e1", Name: "happy"})
+		rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_img"}`, adminUser)
+		require.Equal(t, http.StatusBadRequest, rec.Code)
+		code, _ := errorID(t, rec.Body.Bytes())
+		assert.Equal(t, "DUPLICATE_NAME", code, "upstream の error 順序が変わっている")
+		assert.Empty(t, fetcher.copyCalls)
+	})
+}
+
+// 行の `size` が複製の上限を超えていたら、実体を読む前に断る。
+// **`size` は前捌きで、上限の権威ではない** — 実体とずれうるので、読み出し側の
+// 上限 (safehttp.ErrResponseTooLarge) は別に効いている (上のケース表)。
+func TestEmojiAdd_FileIDRejectsOversizedRowBeforeReading(t *testing.T) {
+	h, repo := setupEmojiHandler(t)
+	owner := "u1"
+	ownedDriveFile(t, h, &model.DriveFile{
+		ID: "f_big", UserID: &owner, Type: "image/png", URL: "https://example/user/big.png",
+		Size: int(apiadmin.MaxEmojiCopyBytes) + 1,
+	})
+	fetcher := &fakeEmojiImageFetcher{copyDF: systemCopy("sys7", "https://example/system/copy.png", "", "")}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_big"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	code, id := errorID(t, rec.Body.Bytes())
+	assert.Equal(t, "EMOJI_IMAGE_TOO_LARGE", code)
+	assert.Equal(t, "6b1d5f0a-3c9e-4f27-9a4d-7e2b8c1f0d64", id, "申請・承認と同じ error id を返す")
+	assert.Empty(t, fetcher.copyCalls, "上限超過が分かっているのに実体を読んでいる")
+	_, err := repo.FindByNameAndHost("happy", nil)
+	assert.Error(t, err)
+}
+
+// 上限ちょうどは通す (境界を off-by-one で締めない)。
+func TestEmojiAdd_FileIDAcceptsRowAtSizeLimit(t *testing.T) {
+	h, _ := setupEmojiHandler(t)
+	owner := "u1"
+	ownedDriveFile(t, h, &model.DriveFile{
+		ID: "f_max", UserID: &owner, Type: "image/png", URL: "https://example/user/max.png",
+		Size: int(apiadmin.MaxEmojiCopyBytes),
+	})
+	fetcher := &fakeEmojiImageFetcher{copyDF: systemCopy("sys8", "https://example/system/copy.png", "", "")}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_max"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, fetcher.copyCalls, 1)
 }
 
 // fetcher が nil, nil を返しても panic させない (実装の契約違反を 500 に落とす)。
@@ -256,8 +348,10 @@ func TestEmojiAdd_URLPathDoesNotCopy(t *testing.T) {
 func TestEmojiAdd_FetcherUnsetKeepsDriveURL(t *testing.T) {
 	h, repo := setupEmojiHandler(t)
 	owner := "u1"
+	// 未配線でも読み出しは無いので、上限の前捌きは効かない (L-B と同じ理由)。
 	ownedDriveFile(t, h, &model.DriveFile{
 		ID: "f_img", UserID: &owner, Type: "image/png", URL: "https://example/user/orig.png",
+		Size: int(apiadmin.MaxEmojiCopyBytes) + 1,
 	})
 
 	rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_img"}`, adminUser)
@@ -265,4 +359,81 @@ func TestEmojiAdd_FetcherUnsetKeepsDriveURL(t *testing.T) {
 	got, err := repo.FindByNameAndHost("happy", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "https://example/user/orig.png", got.OriginalURL)
+}
+
+// `idGen` 未配線は複製を作る前に 500 で止める。
+//
+// **配線上は起きない** (`NewHandler` でしか設定できず、router は必ず実 generator を
+// 渡す) が、`Generate` は複製の**後**に呼ぶので、素通りさせると panic して誰からも
+// 参照されない複製が残る。`CreateFromApplication` が同じ形を冒頭に持っている。
+func TestEmojiAdd_IDGenUnsetReturns500BeforeCopy(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	h := apiadmin.NewHandler(nil, nil, metaRepo, userRepo, nil)
+	h.SetEmojiRepo(testutil.NewMockEmojiRepository())
+	owner := "u1"
+	ownedDriveFile(t, h, &model.DriveFile{
+		ID: "f_img", UserID: &owner, Type: "image/png", URL: "https://example/user/orig.png",
+	})
+	fetcher := &fakeEmojiImageFetcher{copyDF: systemCopy("sys9", "https://example/system/copy.png", "", "")}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_img"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, fetcher.copyCalls, "作った複製を誰も参照できない状態で止まっている")
+}
+
+// 存在しない fileId は NO_SUCH_FILE。**upstream の最初のエラー**なので、
+// 複製が絡む経路より前に返ることを固定する。
+func TestEmojiAdd_UnknownFileIDReturnsNoSuchFile(t *testing.T) {
+	h, _ := setupEmojiHandler(t)
+	ownedDriveFile(t, h, &model.DriveFile{ID: "f_other", Type: "image/png", URL: "https://example/x.png"})
+	fetcher := &fakeEmojiImageFetcher{copyDF: systemCopy("sys10", "https://example/system/copy.png", "", "")}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"missing"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	code, id := errorID(t, rec.Body.Bytes())
+	assert.Equal(t, "NO_SUCH_FILE", code)
+	assert.Equal(t, "fc46b5a4-6b92-4c33-ac66-b806659bb5cf", id)
+	assert.Empty(t, fetcher.copyCalls)
+}
+
+// url も fileId も無ければ 400 INVALID_PARAM (drive repo が配線済みでも同じ)。
+func TestEmojiAdd_NeitherURLNorFileIDReturns400(t *testing.T) {
+	h, _ := setupEmojiHandler(t)
+	ownedDriveFile(t, h, &model.DriveFile{ID: "f_img", Type: "image/png", URL: "https://example/x.png"})
+
+	rec := doPost(h.EmojiAdd, `{"name":"happy"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	code, _ := errorID(t, rec.Body.Bytes())
+	assert.Equal(t, "INVALID_PARAM", code)
+}
+
+// **重複チェックの DB 障害を「重複なし」に倒さない (#2792)。** 倒すと接続断のあいだ
+// 同名の絵文字が作れてしまう。
+func TestEmojiAdd_DuplicateLookupFailureReturns500(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetEmojiRepo(&failingFindByNameEmojiRepo{testutil.NewMockEmojiRepository()})
+	owner := "u1"
+	ownedDriveFile(t, h, &model.DriveFile{
+		ID: "f_img", UserID: &owner, Type: "image/png", URL: "https://example/user/orig.png",
+	})
+	fetcher := &fakeEmojiImageFetcher{copyDF: systemCopy("sys11", "https://example/system/copy.png", "", "")}
+	h.SetEmojiImageFetcher(fetcher)
+
+	rec := doPost(h.EmojiAdd, `{"name":"happy","fileId":"f_img"}`, adminUser)
+	require.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, fetcher.copyCalls, "重複か分からないのに複製を作っている")
+}
+
+// failingFindByNameEmojiRepo fails the local-duplicate lookup with a non
+// not-found error (= DB 障害)。
+type failingFindByNameEmojiRepo struct {
+	*testutil.MockEmojiRepository
+}
+
+func (f *failingFindByNameEmojiRepo) FindByNameAndHost(_ string, _ *string) (*model.Emoji, error) {
+	return nil, assert.AnError
 }

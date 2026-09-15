@@ -496,13 +496,14 @@ type fakeEmojiImageFetcher struct {
 	returnDF  *model.DriveFile
 	returnErr error
 
-	// #2966 (承認時に system 所有へ複製する経路)
-	copyCalls  []*model.DriveFile
-	copyNames  []string
-	copyDF     *model.DriveFile
-	copyErr    error
-	deletedIDs []string
-	deleteErr  error
+	// #2966 (承認時に system 所有へ複製する経路。#2999 で admin/emoji/add も通る)
+	copyCalls     []*model.DriveFile
+	copyNames     []string
+	copySensitive []bool
+	copyDF        *model.DriveFile
+	copyErr       error
+	deletedIDs    []string
+	deleteErr     error
 }
 
 func (f *fakeEmojiImageFetcher) FetchAndStore(_ context.Context, url string, user *model.User, name string) (*model.DriveFile, error) {
@@ -520,6 +521,7 @@ func (f *fakeEmojiImageFetcher) FetchAndStore(_ context.Context, url string, use
 func (f *fakeEmojiImageFetcher) CopyToSystemFile(_ context.Context, src *model.DriveFile, name string, sensitive bool) (*model.DriveFile, error) {
 	f.copyCalls = append(f.copyCalls, src)
 	f.copyNames = append(f.copyNames, name)
+	f.copySensitive = append(f.copySensitive, sensitive)
 	if f.copyErr != nil {
 		return nil, f.copyErr
 	}
