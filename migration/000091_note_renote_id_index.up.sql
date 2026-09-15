@@ -1,0 +1,24 @@
+-- #2995: `note."renoteId"` に index を張る。
+--
+-- **削除の配送がこの列で引くようになった。** `NoteDeleteDeliveryHook` は
+-- 「この note を renote / reply したリモート user」を集めて Delete を届ける
+-- (upstream の getRenotedOrRepliedRemoteUsers 相当)。index が無いと、ノートを
+-- 1 件消すたびに `note` 全体の seq scan が**同期の削除リクエストの中で**走る。
+-- 実測で 163k 行の本番 DB に対し 25.9 ms / shared read 4345 buffers、しかも
+-- コストは結果件数ではなくテーブルの大きさに比例して増え続ける。
+--
+-- upstream は元から両方に index を持っている (`MiNote` の `@Index()`)。
+-- mk-go はどちらも持っていなかった。
+--
+-- **名前と定義は upstream に揃える。** TS 製 DB では index 名が違うと二重に
+-- 作られる (`CREATE INDEX IF NOT EXISTS` は名前でしか存在判定しない)。partial に
+-- すると定義が変わって同じことが起きるので、`WHERE ... IS NOT NULL` も付けない。
+--
+-- `note` は最大テーブルなので CONCURRENTLY で書き込みを block せずに構築する
+-- (000045 / 000054 / 000055 / 000057 と同じ方針)。**CONCURRENTLY は単一文でしか
+-- 実行できない**ので `replyId` は 000092 に分けてある。
+--
+-- 失敗時の回復は 000057 と同じ: INVALID な index が残ったら
+-- `DROP INDEX CONCURRENTLY IF EXISTS "IDX_52ccc804d7c69037d558bac4c9";` してから
+-- `schema_migrations` を直前 version へ戻して再適用する。
+CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_52ccc804d7c69037d558bac4c9" ON "note" ("renoteId");
