@@ -259,7 +259,8 @@ func processEmojiSystemFile(
 		// (`admin/emoji/add` 経由の非対称は別 issue) だが、要対応としては出す。
 		return classify(entry, EmojiSystemFileNeedsReview,
 			"絵文字が申請ファイルを参照していない (モデレーターが差し替えた可能性)。"+
-				"参照先は system 所有ではないので、絵文字管理画面から画像を入れ直すこと")
+				"参照先は system 所有ではないので、絵文字を削除して同じ名前で登録し直すこと "+
+				"(admin/emoji/update での差し替えでは直らない。docs/deployment.md 参照)")
 	}
 	if !emojiapplication.IsAllowedImageType(src.Type) {
 		return classify(entry, EmojiSystemFileUnrepairable,
@@ -289,7 +290,8 @@ func processEmojiSystemFile(
 			// **再実行では直らないので `failed` にしない。** 複製の上限
 			// (`MaxEmojiCopyBytes`) を超える画像は、role policy の
 			// `maxFileSizeMb` をそれより上へ設定していた時期に承認されたもの。
-			// 待っても縮まないので、絵文字管理画面から差し替えるしかない。
+			// 待っても縮まないので、絵文字を削除して別の画像で登録し直すしかない
+			// (差し替えでは利用者所有のファイルを指したままになる)。
 			return classify(entry, EmojiSystemFileUnrepairable,
 				fmt.Sprintf("申請ファイルが複製の上限 (%d bytes) を超えている: %v", maxBytes, err))
 		}
