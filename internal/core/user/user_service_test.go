@@ -1447,6 +1447,26 @@ func TestShowByUsername_NonNormalizedStoredHostFallsBackToRemote(t *testing.T) {
 	}
 }
 
+// **DB 障害を DB miss として扱わない (#2792 / #2799)。**
+//
+// `ShowByUsername` は「引けなかった」ことをリモート解決の合図に使うので、接続断の
+// ような一過性の障害を not-found に丸めると**外向きリクエストに化ける**。
+// `users/show` は未認証でも叩けるため、DB が不調なあいだ外部から任意に焚き付け
+// られる形になる。**リモート解決を撃たないこと**まで固定するのが要点。
+func TestShowByUsername_DBErrorIsNotTreatedAsMiss(t *testing.T) {
+	boom := errors.New("connection reset by peer")
+	repo := testutil.NewMockUserRepository()
+	repo.FindByUsernameLowerFn = func(string, *string) (*model.User, error) { return nil, boom }
+	svc := user.NewService(repo, nil, nil, nil)
+	res := &recordingResolver{}
+	svc.SetRemoteUserResolver(res)
+
+	h := "remote.example"
+	_, err := svc.ShowByUsername("alice", &h)
+	require.ErrorIs(t, err, boom, "DB のエラーをそのまま返すこと")
+	assert.Empty(t, res.calls, "DB 障害でリモート解決を撃たないこと")
+}
+
 // RemoveBackupCode は repo へそのまま委譲する (#2852)。
 //
 // **消費を DB 側の array_remove に移した経路。** service が引数を落とすと

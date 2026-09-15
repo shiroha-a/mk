@@ -150,3 +150,50 @@ func TestRelationVisibility_ProfileDBFailureIsNot200(t *testing.T) {
 		})
 	}
 }
+
+// dbFailingAcctLookupRepo makes acct (username/host) lookups look like a
+// database failure.
+type dbFailingAcctLookupRepo struct {
+	*testutil.MockUserRepository
+	err error
+}
+
+func (r *dbFailingAcctLookupRepo) FindByUsernameLower(string, *string) (*model.User, error) {
+	return nil, r.err
+}
+
+// **acct 引きの DB 障害を 404 に丸めない** (#2792 / #2996)。
+//
+// #2996 で `ShowByUsername` が DB 障害をそのまま返すようになった (それ以前は
+// DB miss と同じ扱いで WebFinger へ落ちていた)。handler が `err != nil` を一律
+// NO_SUCH_USER にしていると、接続断が「そんなユーザーは居ない」として返り、
+// クライアントからは区別できず監視でも 5xx が立たない。
+func TestAcctLookupDBFailureIsNot404(t *testing.T) {
+	dbErr := errors.New("dial tcp 127.0.0.1:5432: connect: connection refused")
+	const body = `{"username":"alice","host":"remote.example"}`
+	for _, ep := range []struct {
+		name string
+		run  func(*Handler) int
+	}{
+		{"users/show", func(h *Handler) int {
+			return postStub(h.Show, body, &model.User{ID: "viewer"}).Code
+		}},
+		{"users/followers", func(h *Handler) int {
+			return postStub(h.Followers, body, &model.User{ID: "viewer"}).Code
+		}},
+		{"users/following", func(h *Handler) int {
+			return postStub(h.Following, body, &model.User{ID: "viewer"}).Code
+		}},
+	} {
+		t.Run(ep.name, func(t *testing.T) {
+			h, repo := newTestHandler(t)
+			h.SetUserRepo(repo)
+			h.userService = coreuser.NewService(
+				&dbFailingAcctLookupRepo{MockUserRepository: repo, err: dbErr},
+				testutil.NewMockNoteRepository(), testutil.NewMockUserNotePiningRepository(), h.idGen)
+
+			assert.Equal(t, http.StatusInternalServerError, ep.run(h),
+				"DB 障害が NO_SUCH_USER に丸められている (#2792)")
+		})
+	}
+}

@@ -47,6 +47,10 @@ func TestUserService_DBFailureIsNotUserNotFound(t *testing.T) {
 		{"ShowByID", func() error { _, err := svc.ShowByID("u1"); return err }},
 		{"ShowByUsernameDB", func() error { _, err := svc.ShowByUsernameDB("u1", nil); return err }},
 		{"GetProfileErr", func() error { _, err := svc.GetProfileErr("u1"); return err }},
+		// **#2996 で追加。** ここは DB miss を「リモートへ問い合わせる合図」に
+		// 使う経路なので、丸めると 4xx になるだけでなく**外向きリクエストに化ける**
+		// (そちらは `TestShowByUsername_DBErrorIsNotTreatedAsMiss` が固定する)。
+		{"ShowByUsername", func() error { _, err := svc.ShowByUsername("u1", nil); return err }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.run()

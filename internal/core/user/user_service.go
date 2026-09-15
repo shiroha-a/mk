@@ -277,6 +277,13 @@ func (s *Service) ShowByUsername(username string, host *string) (*UserWithProfil
 		profile, _ := s.userRepo.FindProfileByUserID(u.ID)
 		return &UserWithProfile{User: u, Profile: profile}, nil
 	}
+	// **DB 障害を not-found に丸めない (#2792 / #2799)。** 丸めると接続断のような
+	// 一過性の障害がそのまま下の WebFinger 問い合わせに化ける。`users/show` は
+	// 未認証でも叩けるので、DB が不調なあいだ外向きリクエストを外部から任意に
+	// 焚き付けられることになる。`ShowByUsernameDB` は #2799 で同じ形に直してある。
+	if !repository.IsNotFound(err) {
+		return nil, err
+	}
 	// ローカル DB miss。host 指定なしや resolver 未注入の場合は従来どおり
 	// ErrUserNotFound を返し、handler 側で NO_SUCH_USER にマップさせる。
 	if host == nil || *host == "" || s.remoteResolver == nil {

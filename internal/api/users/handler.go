@@ -594,6 +594,12 @@ func (h *Handler) Show(c echo.Context) error {
 		if errors.Is(err, user.ErrFailedToResolveRemoteUser) {
 			return apierr.JSONFailedToResolveRemoteUser(c)
 		}
+		// **DB 障害を 404 に丸めない (#2792 / #2996)。** service は「行が無い」を
+		// `ErrUserNotFound` に寄せるので、それ以外は接続断のような障害。
+		// クライアントからは区別できず監視でも 5xx が立たないので、ここで分ける。
+		if !errors.Is(err, user.ErrUserNotFound) {
+			return apierr.JSONInternalError(c)
+		}
 		return apierr.JSONNoSuchUser(c)
 	}
 
@@ -968,6 +974,13 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 		// #2106 L10: Followers/Following も Show と同じく lookup 前に trim する。
 		bundle, err := h.userService.ShowByUsername(strings.ToLower(strings.TrimSpace(req.Username)), req.Host)
 		if err != nil || bundle == nil {
+			// Show と同じく DB 障害は 500 に倒す (#2792 / #2996)。
+			// `ErrFailedToResolveRemoteUser` は「引けたが解決できない」なので
+			// not-found 側に寄せる (この endpoint に専用の error code は無い)。
+			if err != nil && !errors.Is(err, user.ErrUserNotFound) &&
+				!errors.Is(err, user.ErrFailedToResolveRemoteUser) {
+				return apierr.JSONInternalError(c)
+			}
 			return jsonNoSuchUserForRelations(c, followers)
 		}
 		req.UserID = bundle.User.ID
