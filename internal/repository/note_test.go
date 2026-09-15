@@ -4035,3 +4035,59 @@ func TestNoteRepository_CountReplyTargets_SelfRepliesConsumeWindow(t *testing.T)
 	require.NoError(t, err)
 	assert.Empty(t, rows, "自己返信が窓を埋めたら他者宛は出ない (upstream と同じ窓)")
 }
+
+// #2995: この note を renote / reply したリモート user を引く。
+//
+// **ローカルの renote / reply は返さない** (連合配送の宛先を組み立てるための
+// クエリで、ローカル user には inbox が無い)。**重複も返さない** (同じ user が
+// renote と reply の両方をしている、複数回 reply している)。
+func TestNote_ListRenoteOrReplyRemoteUserIDs(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	local := insertTestUser(t, "u_rr_local", "rrlocal")
+	remoteA := insertTestUser(t, "u_rr_a", "rra")
+	remoteB := insertTestUser(t, "u_rr_b", "rrb")
+	host := "remote.example"
+	for _, id := range []string{remoteA.ID, remoteB.ID} {
+		require.NoError(t, testDB.Exec(`UPDATE "user" SET host = ? WHERE id = ?`, host, id).Error)
+	}
+	t.Cleanup(func() {
+		testDB.Exec(`DELETE FROM "note" WHERE id LIKE 'rr_%'`)
+		cleanupUser(t, local.ID)
+		cleanupUser(t, remoteA.ID)
+		cleanupUser(t, remoteB.ID)
+	})
+
+	target := &model.Note{ID: "rr_target", UserID: local.ID, Visibility: model.NoteVisibilityFollowers}
+	require.NoError(t, repo.Create(target))
+
+	seed := func(id, userID string, userHost *string, renote, reply bool) {
+		n := &model.Note{ID: id, UserID: userID, UserHost: userHost, Visibility: model.NoteVisibilityPublic}
+		if renote {
+			n.RenoteID = &target.ID
+		}
+		if reply {
+			n.ReplyID = &target.ID
+		}
+		require.NoError(t, repo.Create(n))
+	}
+	seed("rr_remote_renote", remoteA.ID, &host, true, false)
+	// 同じ user が reply もしている (重複しないこと)。
+	seed("rr_remote_reply", remoteA.ID, &host, false, true)
+	seed("rr_remote_b_reply", remoteB.ID, &host, false, true)
+	// ローカルの renote は対象外。
+	seed("rr_local_renote", local.ID, nil, true, false)
+	// 無関係な note も対象外。
+	seed("rr_unrelated", remoteB.ID, &host, false, false)
+
+	ids, err := repo.ListRenoteOrReplyRemoteUserIDs(target.ID)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{remoteA.ID, remoteB.ID}, ids)
+
+	// 引き当てが無ければ空。
+	none, err := repo.ListRenoteOrReplyRemoteUserIDs("rr_unrelated")
+	require.NoError(t, err)
+	assert.Empty(t, none)
+	empty, err := repo.ListRenoteOrReplyRemoteUserIDs("")
+	require.NoError(t, err)
+	assert.Empty(t, empty)
+}

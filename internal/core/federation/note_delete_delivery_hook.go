@@ -18,9 +18,10 @@ import (
 //   - localOnly note → 配信不要
 //   - public / home → 既知のリモートインスタンス全体 (sharedInbox 単位)。
 //     ap/show などで pull 済みのインスタンスにも反映させるため。
-//   - followers → フォロワー + メンション先 (フォロワーとは限らない)
-//   - specified (DM) → 宛先 (visibleUserIds) とメンション先だけ。**フォロワーには
-//     送らない** (宛先でない相手に DM の URI を見せない)
+//   - followers → フォロワー + メンション先 + この note を renote / reply した
+//     リモート user (いずれもフォロワーとは限らない、#2995)
+//   - specified (DM) → 宛先 (visibleUserIds) とメンション先だけ。**フォロワーにも
+//     renote / reply した相手にも送らない** (宛先でない相手に DM の URI を見せない)
 //
 // 純粋リノート (ブースト) の削除だけは Delete ではなく Undo(Announce) を出す。
 // 理由は activitypub.RenderUndoAnnounceForNote の doc を参照。
@@ -29,6 +30,7 @@ type NoteDeleteDeliveryHook struct {
 	renderer *activitypub.Renderer
 	urls     *activitypub.URLBuilder
 	userRepo repository.UserRepository
+	noteRepo repository.NoteRepository
 }
 
 // NewNoteDeleteDeliveryHook constructs a NoteDeleteDeliveryHook.
@@ -45,6 +47,20 @@ func NewNoteDeleteDeliveryHook(
 func (h *NoteDeleteDeliveryHook) SetUserRepo(r repository.UserRepository) {
 	h.userRepo = r
 }
+
+// SetNoteRepo wires the note repository used to find the remote users who
+// renoted or replied to the deleted note (#2995).
+func (h *NoteDeleteDeliveryHook) SetNoteRepo(r repository.NoteRepository) {
+	h.noteRepo = r
+}
+
+// HasNoteRepo reports whether the note repository was wired.
+//
+// **未配線だと renote / reply したリモート user へ Delete が届かない。**
+// 自分をフォローしていない相手が renote / reply したノートを消しても、その
+// サーバーには何も届かず、削除したはずのノートが残り続ける。失敗しても例外は
+// 出ないので、載せておかないと気付けない。
+func (h *NoteDeleteDeliveryHook) HasNoteRepo() bool { return h.noteRepo != nil }
 
 // HasUserRepo reports whether the user repository was wired.
 //
@@ -155,16 +171,53 @@ func (h *NoteDeleteDeliveryHook) renderBody(author *model.User, note *model.Note
 // when they do not follow the author: the explicit recipients of a DM
 // (visibleUserIds) and the mentioned users.
 //
-// upstream の getMentionedRemoteUsers (mentionedRemoteUsers + DM 宛先) に対応する。
-// getRenotedOrRepliedRemoteUsers 相当 (この note を renote / reply した
-// リモート user) は note repository が要るため未対応。
+// upstream の getMentionedRemoteUsers (mentionedRemoteUsers + DM 宛先) と
+// getRenotedOrRepliedRemoteUsers (この note を renote / reply したリモート user) の
+// 両方に対応する。
+//
+// **renote / reply した相手はフォロワーとは限らない (#2995)。** フォローしていない
+// リモート user が renote / reply したノートを消しても、フォロワー配送では相手の
+// サーバーに届かず、削除したはずのノートが残り続ける。フォロワー経由で届くことは
+// あるが、それは「たまたまフォローしていた」だけで保証にならない。
+//
+// 重複は `remoteInboxesForUserIDs` が user id と inbox の両方で落とす
+// (フォロワーかつ renote 者、同じインスタンスの複数 user、いずれもここで畳まれる)。
 func (h *NoteDeleteDeliveryHook) directInboxes(note *model.Note) []string {
 	ids := make([]string, 0, len(note.VisibleUserIDs)+len(note.Mentions))
 	if note.Visibility == model.NoteVisibilitySpecified {
 		ids = append(ids, note.VisibleUserIDs...)
 	}
 	ids = append(ids, note.Mentions...)
+	// **DM では renote / reply した相手を足さない。** inbound の reply は
+	// `replyId` を可視性を見ずに結ぶので (core/federation/resolver.go)、敵対的な
+	// host が任意のローカル note id を `replyId` に書いた note を投げておくだけで
+	// 「その DM が存在し、いつ誰に消されたか」を Delete の配送で確かめられる。
+	// **正当な返信者は元から `visibleUserIDs` に居る** (宛先でなければ DM を
+	// 見られない) ので、足しても届く相手は増えない。upstream は specified でも
+	// この集合を使うが、mk-go は `specified` でフォロワーにも送らない方針
+	// (上のコメント) と同じ理由でここも絞る。
+	if note.Visibility != model.NoteVisibilitySpecified {
+		ids = append(ids, h.renotedOrRepliedRemoteUserIDs(note)...)
+	}
 	return remoteInboxesForUserIDs(h.userRepo, ids, note.UserID)
+}
+
+// renotedOrRepliedRemoteUserIDs returns the remote users who renoted or replied
+// to note. Failures are logged and treated as an empty set.
+//
+// **引けなくても他の宛先は配る。** ここで諦めると、DM の宛先やメンション先への
+// Delete まで道連れになる — 元から届いていた相手に届かなくなるぶん今より悪い。
+func (h *NoteDeleteDeliveryHook) renotedOrRepliedRemoteUserIDs(note *model.Note) []string {
+	if h.noteRepo == nil {
+		return nil
+	}
+	ids, err := h.noteRepo.ListRenoteOrReplyRemoteUserIDs(note.ID)
+	if err != nil {
+		slog.Warn("note delete delivery: renote/reply lookup failed",
+			"noteId", note.ID, "err", err)
+		return nil
+	}
+	return ids
 }
 
 // deliverDirect enqueues body to an explicit inbox list, logging failures.

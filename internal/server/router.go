@@ -928,6 +928,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	blockingService.SetFederationHook(corefederation.NewBlockingDeliveryHook(deliverService, userRepo, apRenderer))
 	noteDeleteHook := corefederation.NewNoteDeleteDeliveryHook(deliverService, apRenderer, apURLs)
 	noteDeleteHook.SetUserRepo(userRepo)
+	noteDeleteHook.SetNoteRepo(noteRepo)
 	noteDeleteService.SetFederationHook(noteDeleteHook)
 	deliverProcessor := processors.NewDeliverProcessor(apClient)
 	// 配信結果に応じて instance.isNotResponding を更新する
@@ -3948,6 +3949,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"リモートから届くノートに禁止語のフィルタが掛からなくなる (ローカル投稿にだけ効く状態)"},
 		{"federation.noteDeleteHook.userRepo", noteDeleteHook.HasUserRepo(),
 			"DM / フォロワー限定ノートの Delete が宛先に届かず、相手サーバーに残り続ける"},
+		{"federation.noteDeleteHook.noteRepo", noteDeleteHook.HasNoteRepo(),
+			"フォローしていないリモート user が renote / reply したノートを消しても、相手サーバーに Delete が届かない"},
 		{"federation.localBaseURL", federationProcessor.HasLocalBaseURL(),
 			"relay の Accept / Reject が全て落ち、ローカル URI の判定も外れて自ホスト宛の object がリモート扱いになる"},
 		{"inbox.expectedHost", inboxHandler.HasExpectedHost(),

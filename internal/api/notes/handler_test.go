@@ -847,7 +847,10 @@ func TestDelete_InvalidJSON(t *testing.T) {
 // failingNoteRepo always returns errors on Create.
 type failingNoteRepo struct{}
 
-func (f *failingNoteRepo) Create(_ *model.Note) error             { return testutil.ErrNotFound }
+func (f *failingNoteRepo) Create(_ *model.Note) error { return testutil.ErrNotFound }
+func (f *failingNoteRepo) ListRenoteOrReplyRemoteUserIDs(_ string) ([]string, error) {
+	return nil, testutil.ErrNotFound
+}
 func (f *failingNoteRepo) FindByID(_ string) (*model.Note, error) { return nil, testutil.ErrNotFound }
 func (f *failingNoteRepo) FindByIDWithUser(_ string) (*model.Note, error) {
 	return nil, testutil.ErrNotFound

@@ -130,6 +130,10 @@ type NoteRepository interface {
 	// specified 除外版を流用しないこと。post-fetch filter だとページ過少充填 +
 	// followers 判定 N+1 になるため (#1418 / #1452 と同 doctrine)。
 	ListRenotesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
+	// ListRenoteOrReplyRemoteUserIDs returns the ids of remote users who
+	// renoted or replied to noteID (#2995)。ノートを削除したとき、その相手の
+	// サーバーにも Delete を届けるために使う。
+	ListRenoteOrReplyRemoteUserIDs(noteID string) ([]string, error)
 	ListRepliesOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
 	ListChildrenOf(noteID, viewerID, untilID, sinceID string, limit int) ([]*model.Note, error)
 	SearchByFilter(filter model.NoteSearchFilter) ([]*model.Note, error)
@@ -535,6 +539,34 @@ func (r *noteRepository) ListRenotesOf(noteID, viewerID, untilID, sinceID string
 		return nil, err
 	}
 	return notes, nil
+}
+
+// ListRenoteOrReplyRemoteUserIDs returns the distinct ids of remote users who
+// renoted or replied to noteID (upstream の getRenotedOrRepliedRemoteUsers 相当)。
+//
+// **可視性では絞らない。** 引きたいのは「この note を実際に取り込んで参照している
+// リモート user」で、削除を届ける必要があるかどうかはその一点で決まる。相手が
+// 今その note を見られるかは関係がない (見られなくなったからこそ消してほしい)。
+//
+// **`user` へ join せず `note.userHost` を見る。** 同じ判定を upstream も
+// `userHost IS NOT NULL` で書いており、note 側に列があるので join を足す理由が無い。
+//
+// **件数は絞らない。** 返るのは 1 つの note に対する distinct なリモート user なので
+// 実測で問題になる規模にならず、配送側は sharedInbox へ畳むのでインスタンス数まで
+// 落ちる。`public` / `home` も broadcast が失敗したときはこの経路へ来る
+// (`broadcastDelete` が false を返す) ので、「followers / specified だけ」では
+// ない点に注意。
+//
+// **`renoteId` / `replyId` には index が要る** (000091 / 000092)。無いと削除の
+// たびに `note` 全体の seq scan が同期の削除リクエストの中で走る。
+func (r *noteRepository) ListRenoteOrReplyRemoteUserIDs(noteID string) ([]string, error) {
+	var ids []string
+	if err := r.db.Raw(`SELECT DISTINCT "userId" FROM "note"
+		WHERE ("renoteId" = ? OR "replyId" = ?) AND "userHost" IS NOT NULL`,
+		noteID, noteID).Scan(&ids).Error; err != nil {
+		return nil, err
+	}
+	return ids, nil
 }
 
 // ListRepliesOf returns notes whose replyId equals noteID.

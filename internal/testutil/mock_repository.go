@@ -1242,6 +1242,10 @@ type MockNoteRepository struct {
 	// ExistingOnPrimaryErr, when set, is returned by ExistingNoteIDsOnPrimary
 	// so callers can exercise the fail-safe path (#2719).
 	ExistingOnPrimaryErr error
+	// ListRenoteOrReplyErr, when set, is returned by
+	// ListRenoteOrReplyRemoteUserIDs so callers can exercise the lookup
+	// failure path (#2995).
+	ListRenoteOrReplyErr error
 	// Following は ListByUserIDFiltered の visibility push-down (followers note
 	// の follow 判定) に使う followerID -> followeeIDs map。未設定なら follow
 	// なし扱い (= 非 follower viewer)。testutil は core/note を import すると
@@ -1436,6 +1440,34 @@ func (m *MockNoteRepository) ListRenotesOf(noteID, viewerID, untilID, sinceID st
 		}
 		return n.RenoteID != nil && *n.RenoteID == noteID
 	}, untilID, sinceID, limit), nil
+}
+
+// ListRenoteOrReplyRemoteUserIDs returns the distinct ids of remote users who
+// renoted or replied to noteID (#2995)。`note.userHost` が非 NULL の行だけを見る
+// のは本物の SQL と同じ。
+func (m *MockNoteRepository) ListRenoteOrReplyRemoteUserIDs(noteID string) ([]string, error) {
+	if m.ListRenoteOrReplyErr != nil {
+		return nil, m.ListRenoteOrReplyErr
+	}
+	if noteID == "" {
+		return nil, nil
+	}
+	seen := map[string]struct{}{}
+	var ids []string
+	for _, n := range m.Notes {
+		if n == nil || n.UserHost == nil || *n.UserHost == "" {
+			continue
+		}
+		if (n.RenoteID == nil || *n.RenoteID != noteID) && (n.ReplyID == nil || *n.ReplyID != noteID) {
+			continue
+		}
+		if _, dup := seen[n.UserID]; dup {
+			continue
+		}
+		seen[n.UserID] = struct{}{}
+		ids = append(ids, n.UserID)
+	}
+	return ids, nil
 }
 
 // ListRepliesOf returns notes whose replyId equals noteID.
