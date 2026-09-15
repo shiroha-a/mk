@@ -850,6 +850,32 @@ func (h *Handler) RoomsTransferOwnership(c echo.Context) error {
 		}
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MEMBER", "Not a member.", "05af3d8f-a5d9-4282-8cf0-4fcc5f4e1734"))
 	}
+	// **譲渡先はローカル利用者に限る (#2994)。** リモート利用者は
+	// `AddMemberViaAP` でこちらの room のメンバーになれるので、この endpoint は
+	// **ローカルの room の owner をリモート利用者にできてしまう**。そうなると
+	// 「owner がリモート = 取り込んだ copy」という前提が崩れ、
+	// `chat_room.host` / `uri` の backfill がこちらの room に偽のリモート URI を
+	// 刻む。以後その room 宛の Accept / Reject / group message は
+	// `resolveRoomByAPURI` に弾かれて恒久的に drop され、配送側は存在しない
+	// リモート URI を名乗る。
+	//
+	// 譲る意味も無い — リモート利用者はこちらの API を叩けないので、owner に
+	// なっても room を管理できない。upstream にこの endpoint は無いので parity 上の
+	// 制約も無い。
+	if h.userRepo == nil {
+		// 未配線では譲渡先がローカルか確かめられない。素通しにしない。
+		return apierr.JSONInternalError(c)
+	}
+	target, terr := h.userRepo.FindByID(req.UserID)
+	if terr != nil {
+		if !repository.IsNotFound(terr) {
+			return apierr.JSONInternalError(c)
+		}
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MEMBER", "Not a member.", "05af3d8f-a5d9-4282-8cf0-4fcc5f4e1734"))
+	}
+	if !target.IsLocal() {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_MEMBER", "Not a member.", "05af3d8f-a5d9-4282-8cf0-4fcc5f4e1734"))
+	}
 	// **owner の membership 行を入れ替える。** ownerId を書き換えるだけだと
 	// 新 owner は解除できない mute を抱え、旧 owner は room から締め出される
 	// (repository.TransferRoomOwnership のコメントに詳しい)。

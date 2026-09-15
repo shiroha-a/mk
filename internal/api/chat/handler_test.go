@@ -38,7 +38,15 @@ var errMock = assert.AnError
 func newTestHandler() (*Handler, *testutil.MockChatRepository) {
 	repo := testutil.NewMockChatRepository()
 	idGen, _ := id.NewGenerator("aidx")
-	return NewHandler(repo, idGen), repo
+	h := NewHandler(repo, idGen)
+	// **利用者表も配線する。** `rooms/transfer-ownership` は譲渡先がローカル利用者か
+	// を見る (#2994)。router は必ず配線するので、未配線のまま試すと本番と違う枝を
+	// 通ることになる。
+	users := testutil.NewMockUserRepository()
+	users.Users[u1.ID] = u1
+	users.Users[u2.ID] = u2
+	h.SetUserRepo(users)
+	return h, repo
 }
 
 // newTestHandlerWithService は chat Service を inject 済みの Handler を返す。
@@ -1110,7 +1118,8 @@ func TestInvitationsCreate_InviteeNotFound(t *testing.T) {
 
 // userRepo 未配線 (degraded path) では invitation を作成しつつ user field を省略する。
 func TestInvitationsCreate_NoUserRepoOmitsUser(t *testing.T) {
-	h, repo := newTestHandler() // SetUserRepo しない
+	h, repo := newTestHandler()
+	h.SetUserRepo(nil) // 未配線の構成を作る
 	require.NoError(t, repo.CreateRoom(&model.ChatRoom{ID: "r1", OwnerID: u1.ID}))
 	rec := post(h.InvitationsCreate, `{"roomId":"r1","userId":"u2"}`, u1)
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -2255,4 +2264,36 @@ func TestMessagesShow_UnknownIsSameAsForbidden(t *testing.T) {
 	missing := post(h.MessagesShow, `{"messageId":"nope"}`, u1)
 	assert.Equal(t, forbidden.Code, missing.Code)
 	assert.JSONEq(t, forbidden.Body.String(), missing.Body.String())
+}
+
+// **譲渡先はローカル利用者に限る (#2994)。** リモート利用者は AP 経由でこちらの
+// room のメンバーになれるので、制限が無いと**ローカルの room の owner が
+// リモート利用者**になる。そうなると「owner がリモート = 取り込んだ copy」という
+// `chat_room.host` / `uri` の前提が崩れ、backfill がこちらの room に偽のリモート
+// URI を刻む (以後その room 宛の Accept / group message が恒久的に drop される)。
+func TestRoomsTransferOwnership_RejectsRemoteTarget(t *testing.T) {
+	h, repo := newTestHandler()
+	remoteHost := "remote.example"
+	users := testutil.NewMockUserRepository()
+	users.Users[u1.ID] = u1
+	users.Users["rmt"] = &model.User{ID: "rmt", Username: "bob", Host: &remoteHost}
+	h.SetUserRepo(users)
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
+	seedMember(t, repo, "rmt", "r1")
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"rmt"}`, u1)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, u1.ID, repo.Rooms["r1"].OwnerID, "リモート利用者へ譲渡している")
+}
+
+// 未配線では譲渡先がローカルか確かめられないので素通しにしない。
+func TestRoomsTransferOwnership_WithoutUserRepoIsError(t *testing.T) {
+	h, repo := newTestHandler()
+	h.SetUserRepo(nil)
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: u1.ID}
+	seedMember(t, repo, "u2", "r1")
+
+	rec := post(h.RoomsTransferOwnership, `{"roomId":"r1","userId":"u2"}`, u1)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Equal(t, u1.ID, repo.Rooms["r1"].OwnerID)
 }
