@@ -595,9 +595,13 @@ func compareForkBase(a, b string) int {
 // assertForkTagSequence checks that §4-2's rows step through the tag scheme
 // without gaps.
 //
-// **機能追加は N を進め、バグ修正はその N に英字を足す** (`-mk.22` の修正が
-// `-mk.22a`、次が `-mk.22b`)。したがって数字は重複しうるので、単純な連番検査は
-// 使えない。数字は 1 ずつ、同じ数字の中の英字は a から 1 文字ずつ進むこと
+// **機能追加は N を進め、直前の数字タグの後追い修正はその N に英字を足す**
+// (`-mk.22` の修正が `-mk.22a`、次が `-mk.22b`)。**世代をまたぐ修正は新しい数字を
+// 取る** — 英字は列の順序を保つためのものなので、`-mk.24` の後に `-mk.12a` を打つと
+// `git describe --tags` が後戻りして見える (規則の全文は docs/divergence.md の
+// 「fork frontend の変更」。先例は `-mk.23` / `-mk.25` / `-mk.28`)。
+// **英字を足す形があるので数字は重複しうる。** 単純な連番検査は使えないので、
+// 数字は 1 ずつ、同じ数字の中の英字は a から 1 文字ずつ進むこと
 // (#2689)。
 func assertForkTagSequence(t *testing.T, tags []string) {
 	t.Helper()
