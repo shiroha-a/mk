@@ -2,7 +2,6 @@ package entitycompat
 
 import (
 	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -55,7 +54,11 @@ func TestDockerfilesEmbedPlugins(t *testing.T) {
 	var builders []builder
 
 	for _, path := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		if !strings.HasPrefix(strings.ToLower(filepath.Base(path)), "dockerfile") {
+		// **判定は `looksLikeDockerfile` と共有する。** 接頭辞一致だけだと
+		// `bundled.Dockerfile` や `Containerfile` を黙って検査対象から落とす
+		// (#3011 でそちらの gate を書いたときに実測した)。現在の集合は
+		// 17 ファイルで両者一致する。
+		if !looksLikeDockerfile(path) {
 			continue
 		}
 		// **builder の判定にはシェルのコメントを落とさない body を使う。**

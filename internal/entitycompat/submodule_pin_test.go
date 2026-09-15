@@ -3,7 +3,6 @@ package entitycompat
 import (
 	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -43,22 +42,7 @@ const submodulePath = "third_party/misskey"
 
 func TestSubmodulePinMatchesDoc(t *testing.T) {
 	root := repoRoot(t)
-
-	docPath := filepath.Join(root, "docs", "divergence.md")
-	src, err := os.ReadFile(docPath)
-	require.NoError(t, err)
-
-	// 拾えなかったら落とす。書式が変わって正規表現が空振りすると、検査して
-	// いないのに緑になる (#2874 / #2828 と同じ判断)。
-	//
-	// **ちょうど 1 件であることも要求する。** `FindSubmatch` で最初の一致だけを
-	// 採ると、前方に書式の例を書いた瞬間に本物の pin 行が検査対象から外れる
-	// (このゲートの失敗メッセージ自身が書式を提示するので、doc へ写す動機がある)。
-	ms := submodulePinRe.FindAllSubmatch(src, -1)
-	require.Lenf(t, ms, 1, "docs/divergence.md の pin 行が %d 件。ちょうど 1 件であること。\n"+
-		"書式は **現在の pin は `<tag>` (`<短縮 SHA>`)。** で、SHA は gitlink と\n"+
-		"突き合わせるためにある。変えるならこのゲートも直すこと", len(ms))
-	docTag, docSHA := string(ms[0][1]), string(ms[0][2])
+	docTag, docSHA := divergencePin(t)
 
 	// **index から読む。** doc は working tree (`os.ReadFile`) から読むので、
 	// gitlink を `ls-tree HEAD` (= 直前の commit) から読むと**読み元が非対称**に
@@ -119,16 +103,7 @@ func filterGitEnv(env []string) []string {
 // (または逆) のを `make gates` の時点で気付ける。
 func TestSubmodulePinTagMatchesTable(t *testing.T) {
 	lines := readDivergenceDoc(t)
-
-	var pinTag string
-	for _, line := range lines {
-		if m := submodulePinRe.FindStringSubmatch(line); m != nil {
-			pinTag = m[1]
-			break
-		}
-	}
-	require.NotEmptyf(t, pinTag, "docs/divergence.md に pin 行が見つからない "+
-		"(書式は **現在の pin は `<tag>` (`<短縮 SHA>`)。**)")
+	pinTag := divergencePinTag(t)
 
 	start, _ := findDivergenceHeading(t, lines, "4-2")
 	var tags []string
@@ -144,4 +119,39 @@ func TestSubmodulePinTagMatchesTable(t *testing.T) {
 		"pin 行の tag (%s) が §4-2 の表の最終行 (%s) と違う。\n"+
 			"tag を足したら pin 行も直すこと (逆も同じ)。SHA の側は "+
 			"TestSubmodulePinMatchesDoc が gitlink と突き合わせる", pinTag, last)
+}
+
+// divergencePin returns the fork frontend tag and short SHA written on the pin
+// line of docs/divergence.md.
+//
+// 拾えなかったら落とす。書式が変わって正規表現が空振りすると、検査していないのに
+// 緑になる (#2874 / #2828 と同じ判断)。
+//
+// **ちょうど 1 件であることも要求する。** 最初の一致だけを採ると、前方に書式の
+// 例を書いた瞬間に本物の pin 行が検査対象から外れる (このゲートの失敗メッセージ
+// 自身が書式を提示するので、doc へ写す動機がある)。
+//
+// **doc 全体を 1 つの文字列として見る。** 行ごとに数えると (a) 1 行に 2 つ
+// 書かれた形が 1 件になり、(b) 改行をまたぐ形 (tag のコードスパンの中に改行が
+// 入った形) が見えなくなる。どちらも「ちょうど 1 件」要求を空振りさせる (実測で素通りした)。
+//
+// **読み手が 3 つあるので 1 実装にまとめてある** (gitlink / §4-2 の表 /
+// bundled image の pin)。片方だけ書式要求を変えると、もう片方が置き去りになる。
+func divergencePin(t *testing.T) (tag, sha string) {
+	t.Helper()
+
+	doc := strings.Join(readDivergenceDoc(t), "\n")
+	ms := submodulePinRe.FindAllStringSubmatch(doc, -1)
+	require.Lenf(t, ms, 1, "docs/divergence.md の pin 行が %d 件。ちょうど 1 件であること。\n"+
+		"書式は **現在の pin は `<tag>` (`<短縮 SHA>`)。** で、SHA は gitlink と\n"+
+		"突き合わせるためにある。変えるならこのゲートも直すこと", len(ms))
+	return ms[0][1], ms[0][2]
+}
+
+// divergencePinTag returns just the fork frontend tag from the pin line.
+func divergencePinTag(t *testing.T) string {
+	t.Helper()
+
+	tag, _ := divergencePin(t)
+	return tag
 }

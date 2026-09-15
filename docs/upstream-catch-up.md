@@ -293,7 +293,7 @@ mk-go と Misskey TS を並べて比較するハーネスは、**比較対象の
 | `docker-compose.dropin.yml` / `docker-compose.dropin-frontend.yml` / `docker-compose.federation.misskey.yml` | drop-in / 実連合の TS インスタンス |
 | `.github/workflows/dropin-e2e.yml` / `dropin-frontend-e2e.yml` | 上記の pre-pull と matrix |
 | `tests/bench/` / `tests/queue-bench/` の compose | 性能比較の対象 |
-| `Dockerfile.bundled` の `MISSKEY_ASSETS_IMAGE` | **配る image に焼く frontend**。これだけは TS image ではなく fork の assets image (`ghcr.io/shiroha-a/misskey-ts-assets:<tag>-mk.N`) で、**submodule のタグと 1:1 で対応させる**。ずれると 2026.9.0 の backend に古い frontend を載せた image を配ることになる |
+| `Dockerfile.bundled` の `MISSKEY_ASSETS_IMAGE` | **配る image に焼く frontend**。これだけは TS image ではなく fork の assets image (`ghcr.io/shiroha-a/misskey-ts-assets:<tag>-mk.N`) で、**submodule のタグと 1:1 で対応させる**。ずれると 2026.9.0 の backend に古い frontend を載せた image を配ることになる。`make submodulepin-check` が `docs/divergence.md` の pin 行と突き合わせる (#3011) |
 
 **`Dockerfile.bundled` は表に無かったせいで実際に 23 世代遅れた** (#2877 の時点で
 `2026.7.0-mk.10`。数え方は fork の `*-mk.*` タグを `2026.7.0-mk.10` より後で数えた値で、
@@ -305,8 +305,23 @@ assets image は fork 側の `Publish frontend assets image` workflow が `*-mk.
 発火して publish するので、**submodule のタグを push した後**に上げること
 (`gh run list --repo shiroha-a/misskey-ts` で success を確認できる)。
 
+**表に載せただけでは止まらなかった。** #2877 で表へ載せた後も `Dockerfile.bundled` の
+pin は `2026.9.0-mk.0` に置き去りのままで、**リリースした `1.3.0-bundled` は既に 2 世代**
+(submodule は `2026.9.0-mk.2`)、develop では 29 世代ずれていた (pin されていた `mk.0` から数えた間隔。数字付きの tag 30 個から 1 を引いた値で、英字付きを含めると 62 個から 1 を引いて 61)。現在は
+`make submodulepin-check` が pin 行の tag と突き合わせるので、片側だけ上げると
+`make gates` が落ちる (#3011)。**publish 済みかどうかまでは見ない** —
+ネットワークが要るので `make gates` では取れない。tag を上げたら上の `gh run list` で
+assets image の workflow が success していることを必ず確認し、**失敗していたら fork 側で
+回し直す** (`gh workflow run assets-image.yml --repo shiroha-a/misskey-ts -f tag=<tag>`。
+`tag` は `required: true` の input で、workflow 自身がその tag を checkout するので `--ref` では代用できない)。
+publish されていない tag を pin すると `docker.yml` の `build-and-push-bundled` が `FROM` の
+pull で落ちる。実測で `2026.7.0-mk.18` は**タグはあるのに image が無い**状態で残っている
+(`2026.7.0-mk.4` 以前は workflow 導入前なので期待どおり)。
+
 **探し方は `grep -rn 'misskey/misskey:' --include='*.yml' --include='*.yaml' --include='*.md' . | grep -v third_party`。**
 表を手で追うより確実で、doc の散文に埋まった版数 (`docs/dropin-e2e.md` のトラブルシュート等) も拾える。
+**ただし `Dockerfile.bundled` だけは拾えない** — image 名が `misskey-ts-assets` で、
+`--include` にも Dockerfile が無い。そちらは `make submodulepin-check` が見る。
 
 **除外リストの「version-gap」注記は、版を揃えたら必ず読み直す。** 実例として、
 diff harness の `META_IGNORE` には `app192IconUrl` / `app512IconUrl` /
