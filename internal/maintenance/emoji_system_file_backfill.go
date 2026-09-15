@@ -414,15 +414,14 @@ func classify(entry EmojiSystemFileEntry, outcome EmojiSystemFileOutcome, reason
 	return entry
 }
 
-// isSystemOwned reports whether f belongs to the instance rather than to a user
-// or to a remote author, matching the condition drive's orphan cleanup uses.
-func isSystemOwned(f *model.DriveFile) bool {
-	return f != nil && f.UserID == nil && f.UserHost == nil
-}
-
+// anySystemOwned reports whether any of files belongs to the instance itself.
+//
+// **判定は `drive.IsSystemOwned` に寄せる。** `admin/emoji/add` (#2999) も同じ
+// 条件で「複製が要るか」を決めるので、ここに自前の定義を置くと片方だけ直したときに
+// 「新規の登録は複製するのに、既存データの検査は複製済みと見なす」形でずれる。
 func anySystemOwned(files []*model.DriveFile) bool {
 	for _, f := range files {
-		if isSystemOwned(f) {
+		if drive.IsSystemOwned(f) {
 			return true
 		}
 	}

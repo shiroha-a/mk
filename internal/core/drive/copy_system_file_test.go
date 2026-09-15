@@ -204,6 +204,30 @@ func TestPreferWebpublic(t *testing.T) {
 	}
 }
 
+// system 所有の判定は孤児 cleanup の guard (`orphanWhere`) と同じ条件でなければ
+// ならない。`admin/emoji/add` (#2999) と後始末バッチ (#2990) がこれで「複製が
+// 要るか」を決めるので、片方だけ見ると守られない行を「複製済み」と判定する。
+func TestIsSystemOwned(t *testing.T) {
+	s := func(v string) *string { return &v }
+	for _, tc := range []struct {
+		name string
+		f    *model.DriveFile
+		want bool
+	}{
+		{"nil", nil, false},
+		{"所有者なし", &model.DriveFile{ID: "a"}, true},
+		{"利用者所有", &model.DriveFile{ID: "a", UserID: s("u1")}, false},
+		// リモートキャッシュは admin/drive/clean-remote-files で消えるので
+		// system 所有ではない (`userId` は NULL でも守られない、#2717)。
+		{"リモート由来 (userId NULL)", &model.DriveFile{ID: "a", UserHost: s("remote.example")}, false},
+		{"リモート利用者所有", &model.DriveFile{ID: "a", UserID: s("u1"), UserHost: s("remote.example")}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, drive.IsSystemOwned(tc.f))
+		})
+	}
+}
+
 // failingPutStorage reads through to inner but refuses every write.
 type failingPutStorage struct {
 	inner drive.Storage

@@ -377,6 +377,18 @@ func (s *Service) CopyToSystemFile(ctx context.Context, src *model.DriveFile, na
 	return df, nil
 }
 
+// IsSystemOwned reports whether f belongs to the instance itself rather than to
+// a local user or to a remote author.
+//
+// **条件は孤児 cleanup の guard (`orphanWhere`) と同じ。** あちらが
+// `"userId" IS NULL AND "userHost" IS NULL` を system 所有の定義にしているので、
+// ここで片方だけを見ると「cleanup からは守られないのに複製も要らない」と判定する
+// 行が生まれる。リモート由来の行 (`userHost` 非 NULL) は
+// `admin/drive/clean-remote-files` で消えるので system 所有ではない。
+func IsSystemOwned(f *model.DriveFile) bool {
+	return f != nil && f.UserID == nil && f.UserHost == nil
+}
+
 // PreferWebpublicURL returns f's webpublic URL when present, else its canonical
 // URL (upstream `webpublicUrl ?? url`).
 //
