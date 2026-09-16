@@ -2983,7 +2983,11 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		// **取り込んだものを片付ける (#2999)。** ここまで来た複製は誰からも
 		// 参照されないので、残すと孤児になる。`DeleteOrphans` は
 		// `admin/drive/cleanup` からしか走らないので、掃除するまで実体を食う。
-		h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
+		//
+		// **ただし載ったかを読み直してから (#3019)。** INSERT が commit 済みで
+		// ack だけ失われた場合に消すと、**名前が使用中のまま画像だけ無い**状態に
+		// なり、同じ名前で登録し直しても `DUPLICATE_NAME` で弾かれる。
+		h.cleanupUnreferencedEmojiCopy(c.Request().Context(), e.ID, systemFileID, e.OriginalURL)
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	h.logModeration(c, moderationlog.LogAddCustomEmoji, map[string]any{
@@ -3347,7 +3351,7 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 			// 無い」に化けると、クライアントからは区別できず監視でも 5xx が立たない。
 			slog.ErrorContext(c.Request().Context(), "EmojiUpdate: UpdateFields failed",
 				"id", req.ID, "fields", fieldKeys(fields), "systemFileId", systemFileID, "err", err)
-			h.cleanupUnlandedEmojiCopy(c.Request().Context(), req.ID, systemFileID, systemFileURL)
+			h.cleanupUnreferencedEmojiCopy(c.Request().Context(), req.ID, systemFileID, systemFileURL)
 			return apierr.JSONInternalError(c)
 		}
 		// #729: FindByID 直後の RowsAffected==0 はほぼ起こらない (concurrent
@@ -3382,44 +3386,72 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	return c.NoContent(http.StatusNoContent)
 }
 
-// cleanupUnlandedEmojiCopy deletes a system-owned copy when the failed update
-// did not land on the emoji row (#3014).
+// cleanupUnreferencedEmojiCopy deletes a system-owned copy unless the emoji row
+// ended up referencing it (#3014 / #3019).
 //
-// **エラーが返っても適用されていることがある。** PostgreSQL は COMMIT を送った
+// **エラーが返っても書き込みが載っていることがある。** PostgreSQL は COMMIT を送った
 // 後・ack が届く前に接続が切れると、サーバー側は commit 済みなのにクライアントは
-// エラーを受け取る。載っているのに複製を消すと**絵文字が存在しないファイルを指す**
-// (差し替え前の画像はもう参照されていないので戻らず、後始末バッチも
-// `needs-review` に落とすだけで直せない)。
+// エラーを受け取る。載っているのに複製を消すと**絵文字が存在しないファイルを指す** —
+// 差し替え (`update`) なら差し替え前の画像はもう参照されておらず戻らないし、
+// 登録 (`add` / 承認) なら**名前が使用中のまま画像だけ無い**状態になり、同じ名前で
+// 登録し直しても `DUPLICATE_NAME` で弾かれる (承認では申請が pending のまま残り、
+// もう一度承認を押しても同じ理由で通らない)。
 //
 // **逆に、確実に載っていない失敗では孤児になる。** 列幅超過 (SQLSTATE 22001) や
 // 一意制約違反はそれで、`admin/drive/cleanup` は手動でしか走らないので掃除するまで
 // 実体を食う。
 //
-// **読み直して分ける。** 後始末バッチ (#2990) の `finishFailedUpdate` と同じ 3 分岐で、
-// **読み直せないときは残す** — 参照されている複製を消すほうが、参照されない複製を
-// 残すより悪い (後者は孤児 cleanup が回収する)。
+// **読み直して分ける。** 後始末バッチ (#2990) の `finishFailedUpdate` と同じ
+// 3 分岐で、**読み直せないときは残す** — 参照されている複製を消すほうが、
+// 参照されない複製を残すより悪い (後者は孤児 cleanup が回収する)。
 //
-// **`admin/emoji/add` と承認経路は再読していない** (`Create` の失敗でそのまま複製を
-// 消す)。同じ窓はあちらにもあり、INSERT が commit 済みで ack だけ失われると
-// **絵文字はあるのに画像が消え、同じ名前で登録し直すと `DUPLICATE_NAME` で詰む**。
-// この PR では差し替え経路だけに入れた (別 issue)。
-func (h *Handler) cleanupUnlandedEmojiCopy(ctx context.Context, emojiID, fileID, copiedURL string) {
-	if fileID == "" {
+// **承認の `approvalLanded` (#2966) は逆に倒している (読めなければ消す)。**
+// 理由は「復旧できるか」ではなく**消せる範囲が違う**こと。あちらの後始末
+// (`DeleteCreatedEmoji`) は**絵文字の行ごと**消せるので、消せば承認を押し直して
+// 作り直せる (`TestApproveCleansUpWhenReadBackFails` がその判断を固定している)。
+// こちらが決められるのは**複製の行方だけ**で、絵文字の行には触らない — 選べるのは
+// 「画像が生きた絵文字」か「画像だけ 404 の絵文字」で、後者を選ぶ理由が無い。
+//
+// **「残せば復旧できる」ではない。** 承認経路では `Create` が失敗した時点で
+// `Approve` が return するので申請は pending のまま残り、**そのまま押し直すと
+// 複製を残しても消しても `DUPLICATE_NAME`**。差がつくのは画像が生きているか
+// どうかだけ。
+//
+// **復旧はできる。** 審査画面は衝突している絵文字の id を出す
+// (`packEmojiApplicationForModerator` の `nameConflict`) ので、それを
+// `admin/emoji/delete` で消せば承認を押し直せる。**却下に倒さないこと** —
+// 申請者の枠を消費したまま閉じることになる。
+//
+// **`copiedURL` で照合する。** 登録 (`add` / 承認) は id が新しいので「行があるか」
+// だけでも判定できるが、差し替えは行が元からあるので URL を見ないと分からない。
+// どちらの経路も `emoji.originalUrl` には複製の `url` をそのまま入れる (#722) ので、
+// 同じ述語で足りる。
+func (h *Handler) cleanupUnreferencedEmojiCopy(ctx context.Context, emojiID, fileID, copiedURL string) {
+	// **`copiedURL` が空なら照合にならない** ので触らない (空同士が「一致」に見える)。
+	// **現状の storage 実装では到達しない** — `Put` は成功すれば必ず非空の URL を
+	// 返す。防御的に置いてあるだけで、倒す向きは「消さない」。後始末バッチの
+	// `unrepairableFromRow` が同じ曖昧さを理由に複製対象から外している。
+	if fileID == "" || copiedURL == "" {
 		return
 	}
 	after, err := h.emojiRepo.FindByID(emojiID)
 	switch {
 	case err != nil && !repository.IsNotFound(err):
 		// 読み直せないので載ったか分からない。残す。
-		slog.WarnContext(ctx, "EmojiUpdate: cannot tell whether the update landed; keeping the system copy",
-			"id", emojiID, "systemFileId", fileID, "err", err)
+		slog.WarnContext(ctx, "emoji: cannot tell whether the write landed; keeping the system copy",
+			"emojiId", emojiID, "systemFileId", fileID, "err", err)
 		return
 	case err == nil && after != nil && after.OriginalURL == copiedURL:
-		// エラーは返ったが更新は載っていた。複製は参照されている。
+		// **エラーは返ったが書き込みは載っていた。** 複製は参照されているので残す。
+		//
+		// **ログに残す。** 呼び出し元は 5xx を返すのに絵文字は実在する、という
+		// 食い違いが起きている。運用側はこれを見ないと「失敗したはずなのに
+		// `DUPLICATE_NAME` になる」の原因に辿り着けない。
+		slog.WarnContext(ctx, "emoji: the write landed despite the error; keeping the system copy",
+			"emojiId", emojiID, "systemFileId", fileID)
 		return
 	}
-	// 行がもう無い / 差し替え前の URL のまま = 載っていない。複製は誰からも
-	// 参照されない。
+	// 行が無い / 別の URL を指している = 載っていない。複製は誰からも参照されない。
 	h.deleteSystemEmojiFile(ctx, fileID)
 }
 

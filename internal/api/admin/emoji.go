@@ -357,7 +357,11 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 		// 誰からも参照されないので、残すと孤児になる。`DeleteOrphans` の対象では
 		// あるが自動では走らないので、掃除するまで実体ストレージを食い続ける。
 		// 承認経路 (`emoji_application.go`) は #2966 で同じ形にしてある。
-		h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
+		//
+		// **ただし載ったかを読み直してから (#3019)。** INSERT が commit 済みで
+		// ack だけ失われた場合に消すと、名前が使用中のまま画像だけ無い状態になり、
+		// 同じ名前で取り込み直しても `DUPLICATE_NAME` で弾かれる。
+		h.cleanupUnreferencedEmojiCopy(c.Request().Context(), copied.ID, systemFileID, copied.OriginalURL)
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	h.logModeration(c, moderationlog.LogAddCustomEmoji, map[string]any{

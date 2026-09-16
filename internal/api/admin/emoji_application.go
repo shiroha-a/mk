@@ -487,7 +487,30 @@ func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApp
 	if err := h.emojiRepo.Create(e); err != nil {
 		// **作った system ファイルを片付ける (#2966)。** 残すと誰からも
 		// 参照されない孤児になる。消せなくてもログに残して cleanup に拾わせる。
-		h.deleteSystemEmojiFile(ctx, systemFileID)
+		//
+		// **ただし載ったかを読み直してから (#3019)。** INSERT が commit 済みで
+		// ack だけ失われた場合に消すと、絵文字はあるのに画像が無い状態になり、
+		// 申請は pending のままなので**もう一度承認を押しても `DUPLICATE_NAME`
+		// で通らない** = 恒久的に壊れる。
+		//
+		// **`UpdateIfPending` の失敗 (`approvalLanded`) とは逆に倒している。**
+		// 理由は消せる範囲の違い — あちらは絵文字の行ごと消せるので押し直しで
+		// 作り直せるが、ここで決められるのは複製の行方だけ。
+		//
+		// **載っていた場合、申請は pending のまま押し直せない。** `Create` が
+		// 失敗した時点で `Approve` は return するので申請は pending のまま残り、
+		// そのまま押し直すと `DUPLICATE_NAME` になる。**復旧はできる** — 審査画面は
+		// 衝突している絵文字の id を出す (`packEmojiApplicationForModerator` の
+		// `nameConflict`) ので、それを消せば承認を押し直せる。却下に倒すと申請者の
+		// 枠を消費したまま閉じることになる。
+		//
+		// **申請 ID をログに残す。** 500 だけでは、どの申請が手当てを要するのか
+		// 運用側から分からない。**載っていない失敗 (押し直せば通る) でも出る** —
+		// どちらかはこの時点では未確定で、載っていた場合だけ
+		// `cleanupUnreferencedEmojiCopy` が別の warn を出す。
+		slog.WarnContext(ctx, "emojiapplication: emoji write failed during approval",
+			"applicationId", app.ID, "emojiId", e.ID, "systemFileId", systemFileID, "err", err)
+		h.cleanupUnreferencedEmojiCopy(ctx, e.ID, systemFileID, e.OriginalURL)
 		return emojiapplication.CreatedEmoji{}, err
 	}
 	// **EmojiAdd と同じく broadcast する (レビュー M3)。** これが無いと、承認した
@@ -638,7 +661,11 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 	}
 
 	if err := h.emojiRepo.Create(&copied); err != nil {
-		h.deleteSystemEmojiFile(ctx, systemFileID)
+		// **載ったかを読み直してから片付ける (#3019)。** own 経路と同じ窓で、
+		// 申請が pending のまま詰むところまで同じ。
+		slog.WarnContext(ctx, "emojiapplication: emoji write failed during approval",
+			"applicationId", app.ID, "emojiId", copied.ID, "systemFileId", systemFileID, "err", err)
+		h.cleanupUnreferencedEmojiCopy(ctx, copied.ID, systemFileID, copied.OriginalURL)
 		return emojiapplication.CreatedEmoji{}, err
 	}
 	h.publishEmojiAdded(&copied)
