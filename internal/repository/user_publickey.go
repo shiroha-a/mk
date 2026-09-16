@@ -31,6 +31,9 @@ func (r *userPublickeyRepository) Upsert(pk *model.UserPublickey) error {
 }
 
 func (r *userPublickeyRepository) FindByUserID(userID string) (*model.UserPublickey, error) {
+	if !storable(userID) {
+		return nil, ErrNotFound
+	}
 	var pk model.UserPublickey
 	if err := r.db.Where(`"userId" = ?`, userID).First(&pk).Error; err != nil {
 		return nil, err
@@ -46,6 +49,9 @@ func (r *userPublickeyRepository) FindByUserID(userID string) (*model.UserPublic
 // 新たに keyId を保存する経路を足すときは必ず host binding を通すこと
 // (#security: HTTP-sig key confusion)。
 func (r *userPublickeyRepository) FindByKeyID(keyID string) (*model.UserPublickey, error) {
+	if !storable(keyID) {
+		return nil, ErrNotFound
+	}
 	var pk model.UserPublickey
 	if err := r.db.Where(`"keyId" = ?`, keyID).First(&pk).Error; err != nil {
 		return nil, err

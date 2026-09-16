@@ -122,6 +122,9 @@ func (r *userRepository) Create(u *model.User) error {
 }
 
 func (r *userRepository) FindByID(id string) (*model.User, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var user model.User
 	if err := r.db.First(&user, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -130,6 +133,9 @@ func (r *userRepository) FindByID(id string) (*model.User, error) {
 }
 
 func (r *userRepository) FindByURI(uri string) (*model.User, error) {
+	if !storable(uri) {
+		return nil, ErrNotFound
+	}
 	var user model.User
 	if err := r.db.Where("uri = ?", uri).First(&user).Error; err != nil {
 		return nil, err
@@ -138,6 +144,9 @@ func (r *userRepository) FindByURI(uri string) (*model.User, error) {
 }
 
 func (r *userRepository) FindByToken(token string) (*model.User, error) {
+	if !storable(token) {
+		return nil, ErrNotFound
+	}
 	var user model.User
 	if err := r.db.Where("token = ?", token).First(&user).Error; err != nil {
 		return nil, err
@@ -146,6 +155,9 @@ func (r *userRepository) FindByToken(token string) (*model.User, error) {
 }
 
 func (r *userRepository) FindByUsernameLower(username string, host *string) (*model.User, error) {
+	if !storable(username) || (host != nil && !storable(*host)) {
+		return nil, ErrNotFound
+	}
 	if host == nil {
 		var user model.User
 		if err := r.db.Where("\"usernameLower\" = lower(?)", username).
@@ -224,6 +236,9 @@ func (r *userRepository) FindManyByUsernamesAndHost(usernames []string, host *st
 }
 
 func (r *userRepository) FindProfileByUserID(userID string) (*model.UserProfile, error) {
+	if !storable(userID) {
+		return nil, ErrNotFound
+	}
 	var profile model.UserProfile
 	if err := r.db.First(&profile, "\"userId\" = ?", userID).Error; err != nil {
 		return nil, err
@@ -235,6 +250,7 @@ func (r *userRepository) FindProfileByUserID(userID string) (*model.UserProfile,
 // Used together with FindProfilesByUserIDs by core/user.Service.ShowManyByIDs
 // to eliminate the user/show bulk N+1 (#503).
 func (r *userRepository) FindManyByIDs(ids []string) ([]*model.User, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -293,6 +309,11 @@ func (r *userRepository) IncrementNotesCount(userID string, delta int) error {
 // when meID is set, ordered by updatedAt DESC NULLS LAST. query is the raw user
 // input (with any leading @ and original case preserved).
 func (r *userRepository) SearchUsers(query, meID string, limit, offset int, origin string) ([]*model.User, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(query) || !storable(meID) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -435,6 +456,11 @@ func applyUserSearchOrigin(q *gorm.DB, origin string) *gorm.DB {
 // 意図的な divergence として docs/divergence.md に記録済み (#2286)。並び順の
 // 優先度付けを入れる場合も、NULL 除外は持ち込まないこと。
 func (r *userRepository) SearchByUsernameAndHost(query string, host *string, localOnly bool, limit int) ([]*model.User, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(query) || (host != nil && !storable(*host)) {
+		return nil, nil
+	}
 	var users []*model.User
 	q := r.db.Where("\"isSuspended\" = false")
 	// upstream generateUserQueryBuilder は `if (params.username)` で falsy を
@@ -513,6 +539,9 @@ func (r *userRepository) CreateProfile(profile *model.UserProfile) error {
 
 // FindProfileByVerifyCode looks up a user_profile by emailVerifyCode.
 func (r *userRepository) FindProfileByVerifyCode(code string) (*model.UserProfile, error) {
+	if !storable(code) {
+		return nil, ErrNotFound
+	}
 	var p model.UserProfile
 	if err := r.db.Where(`"emailVerifyCode" = ?`, code).First(&p).Error; err != nil {
 		return nil, err
@@ -525,6 +554,9 @@ func (r *userRepository) FindProfileByVerifyCode(code string) (*model.UserProfil
 // email 列は nullable + case-insensitive 検索にしたいが、本家 DB は
 // unique index を張っていないので「最初に見つかった 1 件」を返す。
 func (r *userRepository) FindProfileByEmail(email string) (*model.UserProfile, error) {
+	if !storable(email) {
+		return nil, ErrNotFound
+	}
 	var p model.UserProfile
 	if err := r.db.Where(`"email" = ?`, email).First(&p).Error; err != nil {
 		return nil, err
@@ -566,6 +598,11 @@ WHERE host IS NOT NULL
 
 // ListUsers returns users matching the filter.
 func (r *userRepository) ListUsers(filter model.UserListFilter) ([]*model.User, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(filter.Username) || !storable(filter.ExcludeRelatedTo) || !storable(filter.Hostname) {
+		return nil, nil
+	}
 	q := r.db.Model(&model.User{})
 
 	switch filter.Origin {

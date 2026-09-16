@@ -31,6 +31,9 @@ func NewSwSubscriptionRepository(db *gorm.DB) SwSubscriptionRepository {
 }
 
 func (r *swSubscriptionRepository) FindByUserAndEndpoint(userID, endpoint string) (*model.SwSubscription, error) {
+	if !storable(userID) || !storable(endpoint) {
+		return nil, ErrNotFound
+	}
 	var sub model.SwSubscription
 	if err := r.db.Where(`"userId" = ? AND "endpoint" = ?`, userID, endpoint).First(&sub).Error; err != nil {
 		return nil, err
@@ -39,6 +42,9 @@ func (r *swSubscriptionRepository) FindByUserAndEndpoint(userID, endpoint string
 }
 
 func (r *swSubscriptionRepository) FindByUserEndpointAuthKey(userID, endpoint, auth, publicKey string) (*model.SwSubscription, error) {
+	if !storable(userID) || !storable(endpoint) || !storable(auth) || !storable(publicKey) {
+		return nil, ErrNotFound
+	}
 	var sub model.SwSubscription
 	if err := r.db.Where(`"userId" = ? AND "endpoint" = ? AND "auth" = ? AND "publickey" = ?`,
 		userID, endpoint, auth, publicKey).First(&sub).Error; err != nil {

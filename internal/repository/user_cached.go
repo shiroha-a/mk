@@ -209,6 +209,9 @@ func (c *CachedUserRepository) Invalidate(userID string) {
 // on miss / expiry. Errors other than not-found are returned unchanged and
 // **never cached** so transient DB errors recover on the next call.
 func (c *CachedUserRepository) FindByID(id string) (*model.User, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	if id == "" {
 		return c.UserRepository.FindByID(id)
 	}
@@ -241,6 +244,9 @@ func (c *CachedUserRepository) FindByID(id string) (*model.User, error) {
 // FindProfileByUserID returns the cached profile for userID with the same
 // negative-cache semantics as FindByID.
 func (c *CachedUserRepository) FindProfileByUserID(userID string) (*model.UserProfile, error) {
+	if !storable(userID) {
+		return nil, ErrNotFound
+	}
 	if userID == "" {
 		return c.UserRepository.FindProfileByUserID(userID)
 	}
@@ -315,6 +321,9 @@ func (c *CachedUserRepository) storeProfileMissing(userID string, readStart time
 // 別経路で user row が更新された場合に refresh されるよう同期 store する
 // FindByID 経路と TTL を揃える。
 func (c *CachedUserRepository) FindByURI(uri string) (*model.User, error) {
+	if !storable(uri) {
+		return nil, ErrNotFound
+	}
 	if uri == "" {
 		return c.UserRepository.FindByURI(uri)
 	}
@@ -553,6 +562,7 @@ func (c *CachedUserRepository) IncrementNotesCount(userID string, delta int) err
 // (どの ID が抜けたかは戻り値からは判別できないため、別 round-trip での
 // FindByID が走った時に negative-cache する経路に任せる)。
 func (c *CachedUserRepository) FindManyByIDs(ids []string) ([]*model.User, error) {
+	ids = storableIDs(ids)
 	// **単発の経路と同じく readStart を取る** (#2862)。取らずに warm すると、
 	// この read が飛んでいる最中に確定した更新を**古い行で塗り直す**。
 	// 単発側は #2257 で塞いだが bulk が残っていた。攻撃者が大きな bulk read を

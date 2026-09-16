@@ -29,6 +29,9 @@ func (r *relayRepository) Create(rel *model.Relay) error {
 }
 
 func (r *relayRepository) FindByID(id string) (*model.Relay, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var rel model.Relay
 	if err := r.db.Where(`"id" = ?`, id).First(&rel).Error; err != nil {
 		return nil, err

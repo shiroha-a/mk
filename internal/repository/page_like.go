@@ -40,6 +40,9 @@ func (r *pageLikeRepository) Delete(l *model.PageLike) error {
 }
 
 func (r *pageLikeRepository) FindByPair(userID, pageID string) (*model.PageLike, error) {
+	if !storable(userID) || !storable(pageID) {
+		return nil, ErrNotFound
+	}
 	var l model.PageLike
 	if err := r.db.Where("\"userId\" = ? AND \"pageId\" = ?", userID, pageID).First(&l).Error; err != nil {
 		return nil, err

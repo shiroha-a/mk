@@ -35,6 +35,9 @@ func (r *systemWebhookRepository) Create(w *model.SystemWebhook) error {
 }
 
 func (r *systemWebhookRepository) FindByID(id string) (*model.SystemWebhook, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var w model.SystemWebhook
 	if err := r.db.Where(`"id" = ?`, id).First(&w).Error; err != nil {
 		return nil, err

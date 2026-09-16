@@ -94,6 +94,9 @@ func (r *emojiRepository) Create(e *model.Emoji) error {
 }
 
 func (r *emojiRepository) FindByID(id string) (*model.Emoji, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var e model.Emoji
 	if err := r.db.Where("id = ?", id).First(&e).Error; err != nil {
 		return nil, err
@@ -117,6 +120,7 @@ func (r *emojiRepository) UpdateFields(id string, fields map[string]any) error {
 }
 
 func (r *emojiRepository) FindManyByIDs(ids []string) ([]*model.Emoji, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -128,6 +132,7 @@ func (r *emojiRepository) FindManyByIDs(ids []string) ([]*model.Emoji, error) {
 }
 
 func (r *emojiRepository) UpdateFieldsMany(ids []string, fields map[string]any) error {
+	ids = storableIDs(ids)
 	if len(ids) == 0 || len(fields) == 0 {
 		return nil
 	}
@@ -140,6 +145,7 @@ func (r *emojiRepository) Delete(id string) error {
 }
 
 func (r *emojiRepository) DeleteMany(ids []string) error {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil
 	}
@@ -164,6 +170,11 @@ func (r *emojiRepository) FindManyByNamesAndHost(names []string, host *string) (
 }
 
 func (r *emojiRepository) ListRemoteWithFilter(query, host, sinceID, untilID string, limit, offset int) ([]*model.Emoji, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(query) || !storable(host) {
+		return nil, nil
+	}
 	// **paginationOrder を使わないのは意図的** (#2713)。upstream
 	// admin/emoji/list-remote.ts:62,75 は makePaginationQuery の**後に**
 	// `.orderBy('emoji.id', 'DESC')` を呼ぶ。TypeORM の orderBy は既存の
@@ -206,6 +217,11 @@ func (r *emojiRepository) ListRemoteWithFilter(query, host, sinceID, untilID str
 }
 
 func (r *emojiRepository) ListWithFilter(query, category string, local bool, sinceID, untilID string, limit, offset int) ([]*model.Emoji, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(query) || !storable(category) {
+		return nil, nil
+	}
 	// upstream list.ts は makePaginationQuery を使うため、カーソル無し時は
 	// id DESC (最新が先頭)、sinceId のみ指定時は id ASC で並べる (#1543)。
 	q := r.db.Order(paginationOrder(sinceID, untilID, "id"))
@@ -278,6 +294,12 @@ func multipleWordsToQuery(words string) []string {
 	parts := strings.Fields(words)
 	out := make([]string, 0, len(parts))
 	for _, x := range parts {
+		// **語ごとに落とす (#3025)。** ここは OR 展開なので、NUL を含む語の枝が
+		// 偽になるだけで他の語の一致は残る。全部落ちたら空になり、呼び出し側の
+		// `len(patterns) == 0` が `1 = 0` に倒す。
+		if !storable(x) {
+			continue
+		}
 		out = append(out, "%"+escapeLike(x)+"%")
 	}
 	return out
@@ -292,6 +314,26 @@ func (r *emojiRepository) buildV2Query(filter model.EmojiV2Filter) *gorm.DB {
 	q := r.db.Model(&model.Emoji{})
 	if filter.Query != nil {
 		fq := filter.Query
+		// **LIKE を通らない値もここで弾く (#3025)。** 日付は
+		// `multipleWordsToQuery` を経由しないので、NUL を含むとクエリごと落ちる。
+		// こちらは AND なので、一致しえない以上は空結果 (`1 = 0`) が正しい。
+		if !storable(fq.UpdatedAtFrom) || !storable(fq.UpdatedAtTo) {
+			return q.Where("1 = 0")
+		}
+		// **role id は overlap (`&&`) = OR なので要素ごとに落とす。** 全体を
+		// 空にすると、一緒に指定した他の role の一致まで消える。書き込み側の
+		// `normalizeEmojiRoleIDs` (#3018) と同じ扱い。
+		//
+		// **`fq` に書き戻さない。** `filter.Query` はポインタなので、書き戻すと
+		// 同じ filter で 2 回呼ぶ経路 (`ListV2` の直後に `CountV2`) の 2 回目で
+		// `len(fq.RoleIDs) > 0` が偽になり、**guard も後段のフィルタも両方
+		// 素通りして全件を数える** (実測で `allCount` が絞り前の件数になった)。
+		roleIDs := storableIDs(fq.RoleIDs)
+		if len(fq.RoleIDs) > 0 && len(roleIDs) == 0 {
+			// 指定はあったのに 1 つも残らなかった = どの role にも一致しない。
+			// ここでフィルタごと落とすと**絞ったつもりで全件出る**。
+			return q.Where("1 = 0")
+		}
 		// likeAny applies `(<col> LIKE p1 OR <col> LIKE p2 ...)` (case-sensitive,
 		// ESCAPE '\') over the whitespace-split escaped patterns = upstream の
 		// `<col> ~~ ANY(multipleWordsToQuery(...))` と等価。空白のみの値は ANY(空) =
@@ -363,8 +405,8 @@ func (r *emojiRepository) buildV2Query(filter model.EmojiV2Filter) *gorm.DB {
 		if fq.UpdatedAtTo != "" {
 			q = q.Where(`CAST("updatedAt" AS DATE) <= ?`, fq.UpdatedAtTo)
 		}
-		if len(fq.RoleIDs) > 0 {
-			q = q.Where(`"roleIdsThatCanBeUsedThisEmojiAsReaction" && ARRAY[?]::varchar[]`, fq.RoleIDs)
+		if len(roleIDs) > 0 {
+			q = q.Where(`"roleIdsThatCanBeUsedThisEmojiAsReaction" && ARRAY[?]::varchar[]`, roleIDs)
 		}
 	}
 	if filter.SinceID != "" {
@@ -434,6 +476,9 @@ func (r *emojiRepository) CountV2(filter model.EmojiV2Filter) (int64, error) {
 // FindByNameAndHost looks up a custom emoji by its name and host.
 // host=nil の場合はローカル絵文字 (host IS NULL) として検索する。
 func (r *emojiRepository) FindByNameAndHost(name string, host *string) (*model.Emoji, error) {
+	if !storable(name) || (host != nil && !storable(*host)) {
+		return nil, ErrNotFound
+	}
 	var e model.Emoji
 	q := r.db.Where("name = ?", name)
 	if host == nil {

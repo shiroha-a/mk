@@ -41,6 +41,9 @@ func (r *flashRepository) Create(f *model.Flash) error {
 }
 
 func (r *flashRepository) FindByID(id string) (*model.Flash, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var f model.Flash
 	if err := r.db.First(&f, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -89,6 +92,11 @@ func (r *flashRepository) ListByUser(userID, sinceID, untilID string, limit, off
 }
 
 func (r *flashRepository) ListPublicByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.Flash, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !storable(sinceID) || !storable(untilID) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}
@@ -151,6 +159,11 @@ func (r *flashRepository) ListFeatured(sinceID, untilID string, limit, offset in
 // Search performs a substring search across title and summary. cursor 指定時
 // は id 順、未指定時は updatedAt DESC で従来通り。
 func (r *flashRepository) Search(query, sinceID, untilID string, limit, offset int) ([]*model.Flash, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(query) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}

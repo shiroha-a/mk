@@ -36,6 +36,9 @@ func (r *webhookRepository) Create(webhook *model.Webhook) error {
 }
 
 func (r *webhookRepository) FindByID(id string) (*model.Webhook, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var w model.Webhook
 	if err := r.db.Where(`"id" = ?`, id).First(&w).Error; err != nil {
 		return nil, err
@@ -44,6 +47,9 @@ func (r *webhookRepository) FindByID(id string) (*model.Webhook, error) {
 }
 
 func (r *webhookRepository) FindByIDAndUserID(id, userID string) (*model.Webhook, error) {
+	if !storable(id) || !storable(userID) {
+		return nil, ErrNotFound
+	}
 	var w model.Webhook
 	if err := r.db.Where(`"id" = ? AND "userId" = ?`, id, userID).First(&w).Error; err != nil {
 		return nil, err

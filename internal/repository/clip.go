@@ -41,6 +41,9 @@ func (r *clipRepository) Create(c *model.Clip) error {
 }
 
 func (r *clipRepository) FindByID(id string) (*model.Clip, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var c model.Clip
 	if err := r.db.First(&c, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -49,6 +52,7 @@ func (r *clipRepository) FindByID(id string) (*model.Clip, error) {
 }
 
 func (r *clipRepository) ListPublicByIDs(ids []string) ([]*model.Clip, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -109,6 +113,11 @@ func (r *clipRepository) CountByUser(userID string) (int64, error) {
 }
 
 func (r *clipRepository) ListPublicByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.Clip, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !storable(sinceID) || !storable(untilID) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}

@@ -363,3 +363,20 @@ func TestRegister_DBFailureIsNot2xx(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code,
 		"DB 障害で重複チェックが skip されている (#2792)")
 }
+
+// **列に入らない値は 400 (#3025)。** ここは「見つからない」に丸めてはいけない
+// 数少ない形 — 下の重複チェックは `IsNotFound` を「重複ではない」と読んで
+// 新規登録へ進むので、通すと INSERT が SQLSTATE 22021 で落ちて 500 になる。
+func TestRegister_RejectsUnstorableValues(t *testing.T) {
+	for _, body := range []string{
+		`{"endpoint":"a\u0000b","auth":"a1","publickey":"pk1"}`,
+		`{"endpoint":"https://push.example/1","auth":"a\u0000b","publickey":"pk1"}`,
+		`{"endpoint":"https://push.example/1","auth":"a1","publickey":"p\u0000k"}`,
+	} {
+		h, repo := newTestHandler()
+		rec := post(h.Register, body, &model.User{ID: "u1"})
+		assert.Equal(t, http.StatusBadRequest, rec.Code,
+			"列に入らない値を INSERT へ流している: %s", rec.Body.String())
+		assert.Empty(t, repo.subs, "弾いたはずの値で行を作っている")
+	}
+}

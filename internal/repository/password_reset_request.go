@@ -26,6 +26,9 @@ func (r *passwordResetRequestRepository) Create(req *model.PasswordResetRequest)
 }
 
 func (r *passwordResetRequestRepository) FindByToken(token string) (*model.PasswordResetRequest, error) {
+	if !storable(token) {
+		return nil, ErrNotFound
+	}
 	var req model.PasswordResetRequest
 	if err := r.db.Where(`"token" = ?`, token).First(&req).Error; err != nil {
 		return nil, err

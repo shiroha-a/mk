@@ -44,6 +44,9 @@ func (r *registryRepository) scopeQuery(q *gorm.DB, scope []string, domain *stri
 }
 
 func (r *registryRepository) Get(userID, key string, scope []string, domain *string) (*model.RegistryItem, error) {
+	if !storable(userID) || !storable(key) || !allStorable(scope) || (domain != nil && !storable(*domain)) {
+		return nil, ErrNotFound
+	}
 	var item model.RegistryItem
 	q := r.db.Where("\"userId\" = ? AND key = ?", userID, key)
 	q = r.scopeQuery(q, scope, domain)
@@ -70,6 +73,11 @@ func (r *registryRepository) Set(item *model.RegistryItem) error {
 }
 
 func (r *registryRepository) GetAll(userID string, scope []string, domain *string) ([]*model.RegistryItem, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !allStorable(scope) || (domain != nil && !storable(*domain)) {
+		return nil, nil
+	}
 	var items []*model.RegistryItem
 	q := r.db.Where("\"userId\" = ?", userID)
 	q = r.scopeQuery(q, scope, domain)
@@ -80,6 +88,11 @@ func (r *registryRepository) GetAll(userID string, scope []string, domain *strin
 }
 
 func (r *registryRepository) KeysWithType(userID string, scope []string, domain *string) (map[string]string, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !allStorable(scope) || (domain != nil && !storable(*domain)) {
+		return nil, nil
+	}
 	items, err := r.GetAll(userID, scope, domain)
 	if err != nil {
 		return nil, err
@@ -92,6 +105,11 @@ func (r *registryRepository) KeysWithType(userID string, scope []string, domain 
 }
 
 func (r *registryRepository) Remove(userID, key string, scope []string, domain *string) error {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !storable(key) || !allStorable(scope) || (domain != nil && !storable(*domain)) {
+		return nil
+	}
 	q := r.db.Where("\"userId\" = ? AND key = ?", userID, key)
 	q = r.scopeQuery(q, scope, domain)
 	return q.Delete(&model.RegistryItem{}).Error

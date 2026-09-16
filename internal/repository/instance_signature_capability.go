@@ -47,6 +47,9 @@ func NewInstanceSignatureCapabilityRepository(db *gorm.DB) InstanceSignatureCapa
 }
 
 func (r *instanceSignatureCapabilityRepository) FindByHost(host string) (*model.InstanceSignatureCapability, error) {
+	if !storable(host) {
+		return nil, ErrNotFound
+	}
 	var row model.InstanceSignatureCapability
 	if err := r.db.Where("host = ?", host).First(&row).Error; err != nil {
 		return nil, err

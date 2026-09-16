@@ -21,6 +21,9 @@ func NewSystemAccountRepository(db *gorm.DB) SystemAccountRepository {
 }
 
 func (r *systemAccountRepository) FindByType(typ string) (*model.SystemAccount, error) {
+	if !storable(typ) {
+		return nil, ErrNotFound
+	}
 	var sa model.SystemAccount
 	if err := r.db.Where(`"type" = ?`, typ).First(&sa).Error; err != nil {
 		return nil, err

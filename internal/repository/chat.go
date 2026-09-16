@@ -166,6 +166,9 @@ func (r *chatRepository) CreateRoom(room *model.ChatRoom) error {
 }
 
 func (r *chatRepository) FindRoomByID(id string) (*model.ChatRoom, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var room model.ChatRoom
 	if err := r.db.Preload("Owner").Where(`"id" = ?`, id).First(&room).Error; err != nil {
 		return nil, err
@@ -178,6 +181,9 @@ func (r *chatRepository) FindRoomByID(id string) (*model.ChatRoom, error) {
 // **ローカル room は `uri` が NULL。** SQL の `=` は NULL に一致しないので、
 // 空文字で引いてもローカル room は返らない (自前のガードは置かない)。
 func (r *chatRepository) FindRoomByURI(uri string) (*model.ChatRoom, error) {
+	if !storable(uri) {
+		return nil, ErrNotFound
+	}
 	var room model.ChatRoom
 	if err := r.db.Preload("Owner").Where(`"uri" = ?`, uri).First(&room).Error; err != nil {
 		return nil, err
@@ -306,6 +312,9 @@ func (r *chatRepository) CreateMessage(msg *model.ChatMessage) error {
 }
 
 func (r *chatRepository) FindMessageByID(id string) (*model.ChatMessage, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var msg model.ChatMessage
 	if err := r.db.Preload("FromUser").Preload("File").Where(`"id" = ?`, id).First(&msg).Error; err != nil {
 		return nil, err
@@ -314,6 +323,9 @@ func (r *chatRepository) FindMessageByID(id string) (*model.ChatMessage, error) 
 }
 
 func (r *chatRepository) FindMessageByURI(uri string) (*model.ChatMessage, error) {
+	if !storable(uri) {
+		return nil, ErrNotFound
+	}
 	var msg model.ChatMessage
 	if err := r.db.Preload("FromUser").Preload("File").Where(`"uri" = ?`, uri).First(&msg).Error; err != nil {
 		return nil, err
@@ -380,6 +392,11 @@ func (r *chatRepository) ListMessagesByUser(userID, otherUserID, sinceID, untilI
 // + NO_SUCH_ROOM gate for roomID is enforced by the handler before this is
 // reached (upstream search.ts).
 func (r *chatRepository) SearchMessages(meID, query string, limit int, userID, roomID string) ([]*model.ChatMessage, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(query) || !storable(meID) || !storable(userID) || !storable(roomID) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 10
 	}
@@ -415,6 +432,9 @@ func (r *chatRepository) CreateMembership(m *model.ChatRoomMembership) error {
 }
 
 func (r *chatRepository) FindMembership(userID, roomID string) (*model.ChatRoomMembership, error) {
+	if !storable(userID) || !storable(roomID) {
+		return nil, ErrNotFound
+	}
 	var m model.ChatRoomMembership
 	if err := r.db.Where(`"userId" = ? AND "roomId" = ?`, userID, roomID).First(&m).Error; err != nil {
 		return nil, err
@@ -470,6 +490,9 @@ func (r *chatRepository) UpdateInvitation(inv *model.ChatRoomInvitation) error {
 }
 
 func (r *chatRepository) FindInvitation(userID, roomID string) (*model.ChatRoomInvitation, error) {
+	if !storable(userID) || !storable(roomID) {
+		return nil, ErrNotFound
+	}
 	var inv model.ChatRoomInvitation
 	if err := r.db.Where(`"userId" = ? AND "roomId" = ?`, userID, roomID).First(&inv).Error; err != nil {
 		return nil, err
@@ -478,6 +501,9 @@ func (r *chatRepository) FindInvitation(userID, roomID string) (*model.ChatRoomI
 }
 
 func (r *chatRepository) FindInvitationByID(id string) (*model.ChatRoomInvitation, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var inv model.ChatRoomInvitation
 	if err := r.db.Where(`"id" = ?`, id).First(&inv).Error; err != nil {
 		return nil, err

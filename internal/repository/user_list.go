@@ -71,6 +71,9 @@ func (r *userListRepository) Create(list *model.UserList) error {
 }
 
 func (r *userListRepository) FindByID(id string) (*model.UserList, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var list model.UserList
 	if err := r.db.Where("id = ?", id).First(&list).Error; err != nil {
 		return nil, err

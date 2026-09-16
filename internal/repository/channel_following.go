@@ -44,6 +44,9 @@ func (r *channelFollowingRepository) Delete(f *model.ChannelFollowing) error {
 }
 
 func (r *channelFollowingRepository) FindByPair(followerID, channelID string) (*model.ChannelFollowing, error) {
+	if !storable(followerID) || !storable(channelID) {
+		return nil, ErrNotFound
+	}
 	var f model.ChannelFollowing
 	if err := r.db.Where("\"followerId\" = ? AND \"followeeId\" = ?", followerID, channelID).First(&f).Error; err != nil {
 		return nil, err

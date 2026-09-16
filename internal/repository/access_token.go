@@ -55,6 +55,9 @@ func (r *accessTokenRepository) Create(token *model.AccessToken) error {
 }
 
 func (r *accessTokenRepository) FindByHash(hash string) (*model.AccessToken, error) {
+	if !storable(hash) {
+		return nil, ErrNotFound
+	}
 	var token model.AccessToken
 	if err := r.db.Where("hash = ?", hash).Preload("User").First(&token).Error; err != nil {
 		return nil, err
@@ -63,6 +66,9 @@ func (r *accessTokenRepository) FindByHash(hash string) (*model.AccessToken, err
 }
 
 func (r *accessTokenRepository) FindByHashOrToken(hash, rawToken string) (*model.AccessToken, error) {
+	if !storable(hash) || !storable(rawToken) {
+		return nil, ErrNotFound
+	}
 	var token model.AccessToken
 	if err := r.db.
 		Where(`"hash" = ? OR "token" = ?`, hash, rawToken).
@@ -74,6 +80,9 @@ func (r *accessTokenRepository) FindByHashOrToken(hash, rawToken string) (*model
 }
 
 func (r *accessTokenRepository) FindByID(id string) (*model.AccessToken, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var token model.AccessToken
 	if err := r.db.Where(`"id" = ?`, id).First(&token).Error; err != nil {
 		return nil, err
@@ -142,5 +151,10 @@ func (r *accessTokenRepository) ListByUserIDPreloadApp(userID, sort string) ([]*
 // DeleteByID removes an access token. i/revoke-token の権限チェックは呼び出し
 // 側 (handler) の責務で、ここでは id 一致のみ扱う。
 func (r *accessTokenRepository) DeleteByID(id string) error {
+	if !storable(id) {
+		// 一致する行が無いのと同じ扱い。GORM の Delete は 0 行でも error を
+		// 返さないので、ここも nil を返す (#3025)。
+		return nil
+	}
 	return r.db.Where(`"id" = ?`, id).Delete(&model.AccessToken{}).Error
 }

@@ -67,6 +67,9 @@ func (r *mutingRepository) Delete(m *model.Muting) error {
 }
 
 func (r *mutingRepository) FindByPair(muterID, muteeID string) (*model.Muting, error) {
+	if !storable(muterID) || !storable(muteeID) {
+		return nil, ErrNotFound
+	}
 	var m model.Muting
 	if err := r.db.Where("\"muterId\" = ? AND \"muteeId\" = ?", muterID, muteeID).First(&m).Error; err != nil {
 		return nil, err
@@ -204,6 +207,9 @@ func (r *renoteMutingRepository) Delete(m *model.RenoteMuting) error {
 }
 
 func (r *renoteMutingRepository) FindByPair(muterID, muteeID string) (*model.RenoteMuting, error) {
+	if !storable(muterID) || !storable(muteeID) {
+		return nil, ErrNotFound
+	}
 	var m model.RenoteMuting
 	if err := r.db.Where("\"muterId\" = ? AND \"muteeId\" = ?", muterID, muteeID).First(&m).Error; err != nil {
 		return nil, err

@@ -68,6 +68,9 @@ func (r *reversiRepository) DeleteOutdatedGames(thresholdID string) (int64, erro
 }
 
 func (r *reversiRepository) FindByID(id string) (*model.ReversiGame, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var game model.ReversiGame
 	if err := r.db.Preload("User1").Preload("User2").Where(`"id" = ?`, id).First(&game).Error; err != nil {
 		return nil, err
@@ -79,6 +82,9 @@ func (r *reversiRepository) FindByID(id string) (*model.ReversiGame, error) {
 // session ID (populated when a match crosses an AP boundary). Used by the
 // inbox processor to route incoming Invite/Join/Update/Leave activities.
 func (r *reversiRepository) FindByFederationID(federationID string) (*model.ReversiGame, error) {
+	if !storable(federationID) {
+		return nil, ErrNotFound
+	}
 	var game model.ReversiGame
 	if err := r.db.Preload("User1").Preload("User2").
 		Where(`"federationId" = ?`, federationID).
@@ -143,6 +149,11 @@ func (r *reversiRepository) ListByUser(userID string, limit int) ([]*model.Rever
 }
 
 func (r *reversiRepository) FindPendingInvitation(inviteeID, inviterID string) (*model.ReversiGame, error) {
+	if !storable(inviteeID) || !storable(inviterID) {
+		// この関数は「無い」を `(nil, nil)` で表す (下の `IsNotFound` 分岐と同じ)。
+		// ここだけ error を返すと呼び出し側の扱いが分かれる (#3025)。
+		return nil, nil
+	}
 	var game model.ReversiGame
 	err := r.db.Preload("User1").Preload("User2").
 		Where(`"user1Id" = ? AND "user2Id" = ? AND "isStarted" = false AND "isEnded" = false`,

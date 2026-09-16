@@ -140,6 +140,9 @@ func (r *followingRepository) Delete(f *model.Following) error {
 }
 
 func (r *followingRepository) FindByPair(followerID, followeeID string) (*model.Following, error) {
+	if !storable(followerID) || !storable(followeeID) {
+		return nil, ErrNotFound
+	}
 	var f model.Following
 	if err := r.db.Where("\"followerId\" = ? AND \"followeeId\" = ?", followerID, followeeID).First(&f).Error; err != nil {
 		return nil, err
@@ -342,6 +345,11 @@ func (r *followingRepository) ListFollowersByHost(host string, limit, offset int
 // ListFollowingByHost returns Following rows whose followerHost matches the
 // given remote host. 本家 federation/following.ts と同じく followerHost で絞る。
 func (r *followingRepository) ListFollowingByHost(host string, limit, offset int) ([]*model.Following, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(host) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}
@@ -359,6 +367,11 @@ func (r *followingRepository) ListFollowingByHost(host string, limit, offset int
 // ListFollowersByHostCursor is the cursor-paginated variant of
 // ListFollowersByHost (federation/followers, #1732)。
 func (r *followingRepository) ListFollowersByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(host) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}
@@ -382,6 +395,11 @@ func (r *followingRepository) ListFollowersByHostCursor(host, sinceID, untilID s
 // ListFollowingByHostCursor is the cursor-paginated variant of
 // ListFollowingByHost (federation/following, #1732)。
 func (r *followingRepository) ListFollowingByHostCursor(host, sinceID, untilID string, limit int) ([]*model.Following, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(host) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}

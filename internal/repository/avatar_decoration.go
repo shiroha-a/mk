@@ -30,6 +30,9 @@ func (r *avatarDecorationRepository) Create(d *model.AvatarDecoration) error {
 }
 
 func (r *avatarDecorationRepository) FindByID(id string) (*model.AvatarDecoration, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var d model.AvatarDecoration
 	if err := r.db.Where(`"id" = ?`, id).First(&d).Error; err != nil {
 		return nil, err

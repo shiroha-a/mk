@@ -45,6 +45,9 @@ func NewHashtagRepository(db *gorm.DB) HashtagRepository {
 }
 
 func (r *hashtagRepository) FindByName(name string) (*model.Hashtag, error) {
+	if !storable(name) {
+		return nil, ErrNotFound
+	}
 	var h model.Hashtag
 	if err := r.db.Where("name = ?", name).First(&h).Error; err != nil {
 		return nil, err

@@ -33,6 +33,9 @@ func (r *pollVoteRepository) Create(v *model.PollVote) error {
 
 // FindByUserAndChoice returns the vote for the given (user, note, choice) triple.
 func (r *pollVoteRepository) FindByUserAndChoice(userID, noteID string, choice int) (*model.PollVote, error) {
+	if !storable(userID) || !storable(noteID) {
+		return nil, ErrNotFound
+	}
 	var v model.PollVote
 	if err := r.db.
 		Where("\"userId\" = ? AND \"noteId\" = ? AND choice = ?", userID, noteID, choice).

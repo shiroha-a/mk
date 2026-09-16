@@ -47,6 +47,9 @@ func (r *noteDraftRepository) Create(draft *model.NoteDraft) error {
 }
 
 func (r *noteDraftRepository) FindByIDAndUser(id, userID string) (*model.NoteDraft, error) {
+	if !storable(id) || !storable(userID) {
+		return nil, ErrNotFound
+	}
 	var d model.NoteDraft
 	if err := r.db.Where(`"id" = ? AND "userId" = ?`, id, userID).First(&d).Error; err != nil {
 		return nil, err
@@ -96,6 +99,9 @@ func (r *noteDraftRepository) CountByUser(userID string) (int64, error) {
 }
 
 func (r *noteDraftRepository) FindByID(id string) (*model.NoteDraft, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var d model.NoteDraft
 	if err := r.db.Where(`"id" = ?`, id).First(&d).Error; err != nil {
 		return nil, err

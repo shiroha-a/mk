@@ -49,6 +49,9 @@ func (r *clipNoteRepository) Delete(cn *model.ClipNote) error {
 }
 
 func (r *clipNoteRepository) FindByPair(clipID, noteID string) (*model.ClipNote, error) {
+	if !storable(clipID) || !storable(noteID) {
+		return nil, ErrNotFound
+	}
 	var cn model.ClipNote
 	if err := r.db.Where("\"clipId\" = ? AND \"noteId\" = ?", clipID, noteID).First(&cn).Error; err != nil {
 		return nil, err
@@ -92,6 +95,11 @@ func (r *clipNoteRepository) ListByClipVisible(clipID, viewerID, untilID, sinceI
 }
 
 func (r *clipNoteRepository) listByClip(clipID, viewerID string, filterVisibility bool, untilID, sinceID string, limit int, searchWords []string) ([]*model.ClipNote, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(clipID) || !storable(viewerID) || !allStorable(searchWords) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}

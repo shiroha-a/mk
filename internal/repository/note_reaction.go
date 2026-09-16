@@ -65,6 +65,9 @@ func (r *noteReactionRepository) Delete(rec *model.NoteReaction) (int64, error) 
 }
 
 func (r *noteReactionRepository) FindByPair(userID, noteID string) (*model.NoteReaction, error) {
+	if !storable(userID) || !storable(noteID) {
+		return nil, ErrNotFound
+	}
 	var rec model.NoteReaction
 	if err := r.db.Where("\"userId\" = ? AND \"noteId\" = ?", userID, noteID).First(&rec).Error; err != nil {
 		return nil, err
@@ -91,6 +94,16 @@ func (r *noteReactionRepository) FindByUserAndNoteIDs(userID string, noteIDs []s
 // reaction string. Uses keyset pagination with paginationOrder (DESC by
 // default; ASC when only sinceID is supplied, upstream parity).
 func (r *noteReactionRepository) ListByNoteID(noteID string, untilID, sinceID string, limit int, reactions []string) ([]*model.NoteReaction, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	//
+	// **`reactions` は `IN` = OR で畳むが、ここは要素ごとに落とさない。** 呼び出し元
+	// (`reaction.Service.List`) が渡すのは利用者が指定した 1 つの型の派生形だけなので、
+	// 要素ごとに落とすと**残り 0 件でフィルタが消えて全件返る**ほうへ倒れる。
+	// 「絞ったつもりで全部出る」より「一致しえないので空」が安全側。
+	if !storable(noteID) || !allStorable(reactions) {
+		return nil, nil
+	}
 	var rows []*model.NoteReaction
 	q := r.db.Preload("User").Where("\"noteId\" = ?", noteID)
 	if len(reactions) == 1 {

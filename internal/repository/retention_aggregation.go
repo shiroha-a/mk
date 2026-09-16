@@ -56,6 +56,9 @@ func (r *retentionAggregationRepository) ListSince(cutoff time.Time) ([]*model.R
 }
 
 func (r *retentionAggregationRepository) FindByDateKey(dateKey string) (*model.RetentionAggregation, error) {
+	if !storable(dateKey) {
+		return nil, ErrNotFound
+	}
 	var row model.RetentionAggregation
 	if err := r.db.Where(`"dateKey" = ?`, dateKey).First(&row).Error; err != nil {
 		return nil, err

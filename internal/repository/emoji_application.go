@@ -440,6 +440,9 @@ func (r *emojiApplicationRepository) CreateWithQuota(app *model.EmojiApplication
 }
 
 func (r *emojiApplicationRepository) FindByID(id string) (*model.EmojiApplication, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var app model.EmojiApplication
 	if err := r.db.Where(`"id" = ?`, id).First(&app).Error; err != nil {
 		return nil, err
@@ -617,6 +620,11 @@ func foldStatusCounts(rows []statusCountRow) StatusCounts {
 }
 
 func (r *emojiApplicationRepository) ListByUserFiltered(userID, status, query string, limit int, untilID string) ([]model.EmojiApplication, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(query) || !storable(userID) || !storable(status) {
+		return []model.EmojiApplication{}, nil
+	}
 	q := r.db.Model(&model.EmojiApplication{}).Where(`"userId" = ?`, userID)
 	switch status {
 	case "", EmojiApplicationFilterAll:

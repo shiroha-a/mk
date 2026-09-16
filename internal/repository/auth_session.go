@@ -46,6 +46,9 @@ func NewAuthSessionRepository(db *gorm.DB) AuthSessionRepository {
 }
 
 func (r *authSessionRepository) FindAppBySecret(secret string) (*model.App, error) {
+	if !storable(secret) {
+		return nil, ErrNotFound
+	}
 	var app model.App
 	if err := r.db.Where(`"secret" = ?`, secret).First(&app).Error; err != nil {
 		return nil, err
@@ -62,6 +65,9 @@ func (r *authSessionRepository) CreateSession(session *model.AuthSession) error 
 }
 
 func (r *authSessionRepository) FindSessionByToken(token string) (*model.AuthSession, error) {
+	if !storable(token) {
+		return nil, ErrNotFound
+	}
 	var session model.AuthSession
 	if err := r.db.Preload("App").Where(`"token" = ?`, token).First(&session).Error; err != nil {
 		return nil, err
@@ -70,6 +76,9 @@ func (r *authSessionRepository) FindSessionByToken(token string) (*model.AuthSes
 }
 
 func (r *authSessionRepository) FindSessionByTokenAndAppID(token, appID string) (*model.AuthSession, error) {
+	if !storable(token) || !storable(appID) {
+		return nil, ErrNotFound
+	}
 	var session model.AuthSession
 	if err := r.db.Preload("App").Preload("User").Where(`"token" = ? AND "appId" = ?`, token, appID).First(&session).Error; err != nil {
 		return nil, err
@@ -86,6 +95,9 @@ func (r *authSessionRepository) DeleteSession(sessionID string) error {
 }
 
 func (r *authSessionRepository) FindAccessTokenByAppAndUser(appID, userID string) (*model.AccessToken, error) {
+	if !storable(appID) || !storable(userID) {
+		return nil, ErrNotFound
+	}
 	var token model.AccessToken
 	if err := r.db.Where(`"appId" = ? AND "userId" = ?`, appID, userID).First(&token).Error; err != nil {
 		return nil, err
@@ -94,6 +106,9 @@ func (r *authSessionRepository) FindAccessTokenByAppAndUser(appID, userID string
 }
 
 func (r *authSessionRepository) FindAccessTokenBySession(session string) (*model.AccessToken, error) {
+	if !storable(session) {
+		return nil, ErrNotFound
+	}
 	var token model.AccessToken
 	if err := r.db.Where(`"session" = ?`, session).First(&token).Error; err != nil {
 		return nil, err
@@ -119,6 +134,9 @@ func (r *authSessionRepository) CreateAccessToken(token *model.AccessToken) erro
 }
 
 func (r *authSessionRepository) FindAppByID(id string) (*model.App, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var app model.App
 	if err := r.db.Where(`"id" = ?`, id).First(&app).Error; err != nil {
 		return nil, err

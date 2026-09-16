@@ -2821,3 +2821,29 @@ func TestUpdate_ReturnsRoleFlags(t *testing.T) {
 	assert.Equal(t, true, resp["isAdmin"], "admin の i/update は isAdmin=true を返す")
 	assert.Equal(t, true, resp["isModerator"])
 }
+
+// **registry の `key` / `domain` も列に入らない値を弾く (#3025)。** scope だけ
+// 検証していたので、`key = ?` / `domain = ?` の bind parameter に NUL が乗って
+// 500 になっていた (`i/registry/*` は**任意の認証ユーザー**が叩ける)。
+func TestRegistryRejectsUnstorableKeyAndDomain(t *testing.T) {
+	user := &model.User{ID: "u1"}
+	for _, tt := range []struct {
+		name string
+		call func(h *Handler) func(echo.Context) error
+		body string
+	}{
+		{"set の key", func(h *Handler) func(echo.Context) error { return h.RegistrySet }, `{"key":"a\u0000b","value":"x"}`},
+		{"set の domain", func(h *Handler) func(echo.Context) error { return h.RegistrySet }, `{"key":"theme","value":"x","domain":"a\u0000b"}`},
+		{"get-all の domain", func(h *Handler) func(echo.Context) error { return h.RegistryGetAll }, `{"domain":"a\u0000b"}`},
+		{"keys の domain", func(h *Handler) func(echo.Context) error { return h.RegistryKeys }, `{"domain":"a\u0000b"}`},
+		{"remove の key", func(h *Handler) func(echo.Context) error { return h.RegistryRemove }, `{"key":"a\u0000b"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _ := newHandlerWithRegistry(t)
+			rec := post(tt.call(h), tt.body, user)
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"列に入らない値を SQL へ流している: %s", rec.Body.String())
+			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+		})
+	}
+}

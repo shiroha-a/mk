@@ -91,6 +91,9 @@ func (r *signupApplicationRepository) Create(a *model.SignupApplication) error {
 }
 
 func (r *signupApplicationRepository) FindByID(id string) (*model.SignupApplication, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var a model.SignupApplication
 	if err := r.db.Where(`"id" = ?`, id).First(&a).Error; err != nil {
 		return nil, err
@@ -99,6 +102,9 @@ func (r *signupApplicationRepository) FindByID(id string) (*model.SignupApplicat
 }
 
 func (r *signupApplicationRepository) FindByClaimCodeHash(hash string) (*model.SignupApplication, error) {
+	if !storable(hash) {
+		return nil, ErrNotFound
+	}
 	var a model.SignupApplication
 	if err := r.db.Where(`"claimCodeHash" = ?`, hash).First(&a).Error; err != nil {
 		return nil, err
@@ -107,6 +113,9 @@ func (r *signupApplicationRepository) FindByClaimCodeHash(hash string) (*model.S
 }
 
 func (r *signupApplicationRepository) FindByIDForUpdateTx(tx *gorm.DB, id string) (*model.SignupApplication, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var a model.SignupApplication
 	if err := tx.Raw(`SELECT * FROM "signup_application" WHERE "id" = ? FOR UPDATE`, id).
 		Scan(&a).Error; err != nil {

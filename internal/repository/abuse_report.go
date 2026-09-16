@@ -40,6 +40,9 @@ func (r *abuseReportRepository) Create(report *model.AbuseUserReport) error {
 }
 
 func (r *abuseReportRepository) FindByID(id string) (*model.AbuseUserReport, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var report model.AbuseUserReport
 	if err := r.db.Preload("TargetUser").Preload("Reporter").Preload("Assignee").
 		Where("id = ?", id).First(&report).Error; err != nil {
@@ -49,6 +52,7 @@ func (r *abuseReportRepository) FindByID(id string) (*model.AbuseUserReport, err
 }
 
 func (r *abuseReportRepository) FindStatesByIDs(ids []string) (map[string]model.AbuseReportState, error) {
+	ids = storableIDs(ids)
 	out := make(map[string]model.AbuseReportState, len(ids))
 	if len(ids) == 0 {
 		return out, nil
@@ -159,6 +163,11 @@ func (r *moderationLogRepository) CreateMany(logs []*model.ModerationLog) error 
 }
 
 func (r *moderationLogRepository) List(filter model.ModerationLogFilter) ([]*model.ModerationLog, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(filter.Search) || !storable(filter.Type) || !storable(filter.UserID) {
+		return nil, nil
+	}
 	limit := filter.Limit
 	if limit <= 0 {
 		limit = 10

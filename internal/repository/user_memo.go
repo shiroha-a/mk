@@ -33,6 +33,9 @@ func (r *userMemoRepository) CreateOrUpdate(memo *model.UserMemo) error {
 }
 
 func (r *userMemoRepository) FindByPair(userID, targetUserID string) (*model.UserMemo, error) {
+	if !storable(userID) || !storable(targetUserID) {
+		return nil, ErrNotFound
+	}
 	var m model.UserMemo
 	if err := r.db.Where(`"userId" = ? AND "targetUserId" = ?`, userID, targetUserID).First(&m).Error; err != nil {
 		return nil, err

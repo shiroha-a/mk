@@ -697,7 +697,7 @@ func (h *Handler) RegistryGet(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
-	if !validRegistryScope(req.Scope) {
+	if !validRegistryScope(req.Scope) || !storableRegistryValue(req.Key, req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, registryEffectiveDomain(c, req.Domain))
@@ -729,7 +729,7 @@ func (h *Handler) RegistrySet(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
-	if !validRegistryScope(req.Scope) {
+	if !validRegistryScope(req.Scope) || !storableRegistryValue(req.Key, req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// app token は自分の token id を domain に強制する (#1717)。
@@ -773,7 +773,7 @@ func (h *Handler) RegistryGetAll(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
-	if !validRegistryScope(req.Scope) {
+	if !validRegistryScope(req.Scope) || !storableRegistryValue("", req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	items, err := h.registryRepo.GetAll(u.ID, req.Scope, registryEffectiveDomain(c, req.Domain))
@@ -800,7 +800,7 @@ func (h *Handler) RegistryKeysWithType(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
-	if !validRegistryScope(req.Scope) {
+	if !validRegistryScope(req.Scope) || !storableRegistryValue("", req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	keys, err := h.registryRepo.KeysWithType(u.ID, req.Scope, registryEffectiveDomain(c, req.Domain))
@@ -824,7 +824,7 @@ func (h *Handler) RegistryRemove(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
-	if !validRegistryScope(req.Scope) {
+	if !validRegistryScope(req.Scope) || !storableRegistryValue(req.Key, req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	if err := h.registryRepo.Remove(u.ID, req.Key, req.Scope, registryEffectiveDomain(c, req.Domain)); err != nil {

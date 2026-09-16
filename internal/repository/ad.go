@@ -51,6 +51,9 @@ func (r *adRepository) Create(a *model.Ad) error {
 }
 
 func (r *adRepository) FindByID(id string) (*model.Ad, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var a model.Ad
 	if err := r.db.Where(`"id" = ?`, id).First(&a).Error; err != nil {
 		return nil, err

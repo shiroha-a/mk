@@ -42,6 +42,11 @@ func clampLimit(limit int) int {
 }
 
 func (r *galleryRepository) ListByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.GalleryPost, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !storable(sinceID) || !storable(untilID) {
+		return nil, nil
+	}
 	limit = clampLimit(limit)
 	// packGalleryPost が p.User を読んで user フィールドを埋めるので、
 	// FindPostsByIDs と揃えて User を Preload する。Preload なしだと
@@ -76,6 +81,7 @@ func (r *galleryRepository) ExistsLike(userID, postID string) (bool, error) {
 }
 
 func (r *galleryRepository) FindPostsByIDs(ids []string) ([]*model.GalleryPost, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}

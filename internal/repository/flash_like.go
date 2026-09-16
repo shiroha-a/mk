@@ -45,6 +45,9 @@ func (r *flashLikeRepository) Delete(l *model.FlashLike) error {
 }
 
 func (r *flashLikeRepository) FindByPair(userID, flashID string) (*model.FlashLike, error) {
+	if !storable(userID) || !storable(flashID) {
+		return nil, ErrNotFound
+	}
 	var l model.FlashLike
 	if err := r.db.Where("\"userId\" = ? AND \"flashId\" = ?", userID, flashID).First(&l).Error; err != nil {
 		return nil, err
@@ -94,6 +97,11 @@ func (r *flashLikeRepository) ListByUser(userID, sinceID, untilID string, limit,
 // Empty search delegates to ListByUser. Cursor / offset semantics match
 // ListByUser but are anchored on flash_like.id (#1548).
 func (r *flashLikeRepository) ListByUserSearch(userID, search, sinceID, untilID string, limit, offset int) ([]*model.FlashLike, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(search) || !storable(userID) {
+		return nil, nil
+	}
 	words := strings.Fields(search)
 	if len(words) == 0 {
 		return r.ListByUser(userID, sinceID, untilID, limit, offset)

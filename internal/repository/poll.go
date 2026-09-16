@@ -49,6 +49,9 @@ func (r *pollRepository) Create(poll *model.Poll) error {
 
 // FindByNoteID returns the poll attached to noteID.
 func (r *pollRepository) FindByNoteID(noteID string) (*model.Poll, error) {
+	if !storable(noteID) {
+		return nil, ErrNotFound
+	}
 	var p model.Poll
 	if err := r.db.Where("\"noteId\" = ?", noteID).First(&p).Error; err != nil {
 		return nil, err

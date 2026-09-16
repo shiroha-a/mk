@@ -31,6 +31,9 @@ func (r *userKeypairRepository) Create(k *model.UserKeypair) error {
 }
 
 func (r *userKeypairRepository) FindByUserID(userID string) (*model.UserKeypair, error) {
+	if !storable(userID) {
+		return nil, ErrNotFound
+	}
 	var k model.UserKeypair
 	if err := r.db.First(&k, "\"userId\" = ?", userID).Error; err != nil {
 		return nil, err

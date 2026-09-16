@@ -43,6 +43,9 @@ func (r *userPublickeyExtraRepository) Upsert(pk *model.UserPublickeyExtra) erro
 }
 
 func (r *userPublickeyExtraRepository) FindByUserAndKeyID(userID, keyID string) (*model.UserPublickeyExtra, error) {
+	if !storable(userID) || !storable(keyID) {
+		return nil, ErrNotFound
+	}
 	var pk model.UserPublickeyExtra
 	if err := r.db.Where(`"userId" = ? AND "keyId" = ?`, userID, keyID).First(&pk).Error; err != nil {
 		return nil, err

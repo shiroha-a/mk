@@ -61,6 +61,9 @@ func (r *instanceRepository) Create(i *model.Instance) error {
 }
 
 func (r *instanceRepository) FindByHost(host string) (*model.Instance, error) {
+	if !storable(host) {
+		return nil, ErrNotFound
+	}
 	var inst model.Instance
 	if err := r.db.Where("host = ?", host).First(&inst).Error; err != nil {
 		return nil, err
@@ -133,6 +136,11 @@ func (r *instanceRepository) ListPeerHosts() ([]string, error) {
 
 // List returns instances matching the filter, ordered by the requested sort.
 func (r *instanceRepository) List(filter model.InstanceListFilter) ([]*model.Instance, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(filter.Host) {
+		return nil, nil
+	}
 	q := r.db.Model(&model.Instance{})
 	if filter.Host != "" {
 		// LIKE metacharacter (% / _ / backslash) を escape して literal 一致にする

@@ -126,14 +126,21 @@ func (c *CachedEmojiRepository) DeleteMany(ids []string) error {
 // --- read-only methods: direct delegate ------------------------------------
 
 func (c *CachedEmojiRepository) FindByNameAndHost(name string, host *string) (*model.Emoji, error) {
+	if !storable(name) || (host != nil && !storable(*host)) {
+		return nil, ErrNotFound
+	}
 	return c.inner.FindByNameAndHost(name, host)
 }
 
 func (c *CachedEmojiRepository) FindByID(id string) (*model.Emoji, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	return c.inner.FindByID(id)
 }
 
 func (c *CachedEmojiRepository) FindManyByIDs(ids []string) ([]*model.Emoji, error) {
+	ids = storableIDs(ids)
 	return c.inner.FindManyByIDs(ids)
 }
 

@@ -53,6 +53,9 @@ func (r *announcementRepository) Create(a *model.Announcement) error {
 }
 
 func (r *announcementRepository) FindByID(id string) (*model.Announcement, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var a model.Announcement
 	if err := r.db.Where("id = ?", id).First(&a).Error; err != nil {
 		return nil, err

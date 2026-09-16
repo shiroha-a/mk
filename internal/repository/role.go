@@ -34,6 +34,9 @@ func (r *roleRepository) Create(role *model.Role) error {
 }
 
 func (r *roleRepository) FindByID(id string) (*model.Role, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var role model.Role
 	if err := r.db.Where("id = ?", id).First(&role).Error; err != nil {
 		return nil, err
@@ -113,6 +116,12 @@ func (r *roleAssignmentRepository) DeleteExpired(now time.Time) (int64, error) {
 // FindActive returns the active exact assignment, or (nil, nil) when no row is
 // active. A nil expiry is active; an expiry equal to at is inactive.
 func (r *roleAssignmentRepository) FindActive(userID, roleID string, at time.Time) (*model.RoleAssignment, error) {
+	if !storable(userID) || !storable(roleID) {
+		// **この関数の契約に合わせる (#3025)。** 「無い」を `(nil, nil)` で表す
+		// ので、ここだけ `ErrNotFound` を返すと呼び出し側が err として扱い、
+		// `roles/assignment-show` が 500 に倒れる。
+		return nil, nil
+	}
 	var assignment model.RoleAssignment
 	result := r.db.Where(`"userId" = ? AND "roleId" = ? AND ("expiresAt" IS NULL OR "expiresAt" > ?)`, userID, roleID, at).
 		Limit(1).

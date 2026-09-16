@@ -195,6 +195,9 @@ func (c *CachedAntennaRepository) afterWrite(err error) error {
 // --- 読み取り: そのまま委譲 ---
 
 func (c *CachedAntennaRepository) FindByID(id string) (*model.Antenna, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	return c.inner.FindByID(id)
 }
 

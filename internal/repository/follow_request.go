@@ -58,6 +58,9 @@ func (r *followRequestRepository) DeleteAllByUser(userID string) error {
 }
 
 func (r *followRequestRepository) FindByPair(followerID, followeeID string) (*model.FollowRequest, error) {
+	if !storable(followerID) || !storable(followeeID) {
+		return nil, ErrNotFound
+	}
 	var req model.FollowRequest
 	if err := r.db.Where("\"followerId\" = ? AND \"followeeId\" = ?", followerID, followeeID).First(&req).Error; err != nil {
 		return nil, err

@@ -589,3 +589,30 @@ func TestUsers_OriginEnum(t *testing.T) {
 func TestUsers_DBError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, doPost(brokenHandler().Users, `{"tag":"test","sort":"+follower"}`).Code)
 }
+
+// **列に入らない tag / query は 500 にしない (#3025)。** ここは実 DB を使うので、
+// guard が無ければ SELECT が SQLSTATE 08P01 で落ち、handler が 500 (Search /
+// Users) または「DB 障害を not-found に丸めた」400 (Show) を返す。
+//
+// **JSON では NUL をエスケープで送る。** 生バイトを body に載せると JSON として
+// 不正になり、`Bind` の 400 で guard まで届かない (= 何も検証しないまま緑になる)。
+//
+// **`hashtags/show` はここに入れていない。** あちらは `err != nil` を丸ごと
+// `NO_SUCH_HASHTAG` (400) に潰す既存実装なので、guard の有無で**外から見える
+// 応答が変わらない** (実測で、guard を外しても同じ 400 が返る)。空虚なテストに
+// なるので置かない。guard 自体は、確実に落ちるクエリを投げないため、および
+// DB 障害が not-found に化ける経路 (#2792) にこの入力を流し込まないために残す。
+func TestUnstorableTagIsNotAServerError(t *testing.T) {
+	h := newHandler()
+
+	t.Run("search", func(t *testing.T) {
+		rec := doPost(h.Search, `{"query":"a\u0000b"}`)
+		require.Equal(t, http.StatusOK, rec.Code, "検索語を LIKE に載せている: %s", rec.Body.String())
+		assert.Equal(t, "[]", strings.TrimSpace(rec.Body.String()))
+	})
+	t.Run("users", func(t *testing.T) {
+		rec := doPost(h.Users, `{"tag":"a\u0000b","sort":"+follower"}`)
+		require.Equal(t, http.StatusOK, rec.Code, "tag を containment query に載せている: %s", rec.Body.String())
+		assert.Equal(t, "[]", strings.TrimSpace(rec.Body.String()))
+	})
+}

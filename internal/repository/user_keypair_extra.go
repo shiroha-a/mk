@@ -51,6 +51,9 @@ func (r *userKeypairExtraRepository) InsertIfAbsent(k *model.UserKeypairExtra) (
 }
 
 func (r *userKeypairExtraRepository) FindByUserID(userID string) (*model.UserKeypairExtra, error) {
+	if !storable(userID) {
+		return nil, ErrNotFound
+	}
 	var k model.UserKeypairExtra
 	if err := r.db.Where(`"userId" = ?`, userID).First(&k).Error; err != nil {
 		return nil, err

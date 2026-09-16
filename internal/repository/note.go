@@ -280,6 +280,9 @@ func (r *noteRepository) Create(note *model.Note) error {
 }
 
 func (r *noteRepository) FindByID(id string) (*model.Note, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var note model.Note
 	if err := r.db.First(&note, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -288,6 +291,9 @@ func (r *noteRepository) FindByID(id string) (*model.Note, error) {
 }
 
 func (r *noteRepository) FindByIDWithUser(id string) (*model.Note, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var note model.Note
 	if err := r.db.Preload("User").First(&note, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -296,6 +302,9 @@ func (r *noteRepository) FindByIDWithUser(id string) (*model.Note, error) {
 }
 
 func (r *noteRepository) FindByIDWithRelations(id string) (*model.Note, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var note model.Note
 	if err := preloadNoteRelations(r.db).First(&note, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -306,6 +315,9 @@ func (r *noteRepository) FindByIDWithRelations(id string) (*model.Note, error) {
 // FindByURI looks up a note by its ActivityPub URI. リモート由来の note は
 // uri 列に作成元のIRIが入っているため、配信や inbox 処理での重複検出に使う。
 func (r *noteRepository) FindByURI(uri string) (*model.Note, error) {
+	if !storable(uri) {
+		return nil, ErrNotFound
+	}
 	var note model.Note
 	if err := r.db.Where("uri = ?", uri).First(&note).Error; err != nil {
 		return nil, err
@@ -624,6 +636,11 @@ func (r *noteRepository) ListChildrenOf(noteID, viewerID, untilID, sinceID strin
 // f.ViewerID 視点で push-down する (空は public/home のみ、非空なら viewer 自身の
 // followers/specified/visibleUserIds note も含む、#1554)。
 func (r *noteRepository) SearchByFilter(f model.NoteSearchFilter) ([]*model.Note, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(f.Query) || !storable(f.UserID) || !storable(f.ChannelID) || !storable(f.Host) {
+		return nil, nil
+	}
 	var notes []*model.Note
 	q := preloadNoteRelations(r.db)
 	if f.Pgroonga {
@@ -717,6 +734,7 @@ func (r *noteRepository) ExistingNoteIDsOnPrimary(ids []string) ([]string, error
 // FindManyByIDsWithUser returns the requested notes preserving the order of `ids`.
 // Notes that are not found are simply omitted from the result.
 func (r *noteRepository) FindManyByIDsWithUser(ids []string) ([]*model.Note, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -958,6 +976,9 @@ func (r *noteRepository) ListFeaturedByUser(userID, viewerID, untilID string, li
 }
 
 func (r *noteRepository) FindRenoteByUser(userID, renoteID string) (*model.Note, error) {
+	if !storable(userID) || !storable(renoteID) {
+		return nil, ErrNotFound
+	}
 	var note model.Note
 	if err := r.db.Where("\"userId\" = ? AND \"renoteId\" = ? AND text IS NULL", userID, renoteID).
 		Order("id DESC").First(&note).Error; err != nil {

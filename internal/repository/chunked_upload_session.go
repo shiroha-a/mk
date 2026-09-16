@@ -60,6 +60,9 @@ func (r *chunkedUploadSessionRepository) Create(s *model.ChunkedUploadSession) e
 }
 
 func (r *chunkedUploadSessionRepository) FindByID(id string) (*model.ChunkedUploadSession, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var s model.ChunkedUploadSession
 	if err := r.db.Where(`"id" = ?`, id).First(&s).Error; err != nil {
 		return nil, err

@@ -89,6 +89,9 @@ func (r *registrationTicketRepository) Create(t *model.RegistrationTicket) error
 }
 
 func (r *registrationTicketRepository) FindByCode(code string) (*model.RegistrationTicket, error) {
+	if !storable(code) {
+		return nil, ErrNotFound
+	}
 	var ticket model.RegistrationTicket
 	if err := r.db.Where(`"code" = ?`, code).First(&ticket).Error; err != nil {
 		return nil, err
@@ -97,6 +100,9 @@ func (r *registrationTicketRepository) FindByCode(code string) (*model.Registrat
 }
 
 func (r *registrationTicketRepository) FindByIDForUpdateTx(tx *gorm.DB, id string) (*model.RegistrationTicket, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var ticket model.RegistrationTicket
 	if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
 		Where(`"id" = ?`, id).First(&ticket).Error; err != nil {
@@ -182,6 +188,9 @@ func (r *registrationTicketRepository) CountByCreatorSince(creatorID, sinceID st
 
 // FindByID returns the ticket by primary key.
 func (r *registrationTicketRepository) FindByID(id string) (*model.RegistrationTicket, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var ticket model.RegistrationTicket
 	if err := r.db.Where(`"id" = ?`, id).First(&ticket).Error; err != nil {
 		return nil, err

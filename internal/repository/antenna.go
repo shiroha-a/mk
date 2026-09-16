@@ -40,6 +40,9 @@ func (r *antennaRepository) Create(a *model.Antenna) error {
 }
 
 func (r *antennaRepository) FindByID(id string) (*model.Antenna, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var a model.Antenna
 	if err := r.db.First(&a, "id = ?", id).Error; err != nil {
 		return nil, err

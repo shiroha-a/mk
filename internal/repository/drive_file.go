@@ -132,6 +132,9 @@ func (r *driveFileRepository) Create(f *model.DriveFile) error {
 }
 
 func (r *driveFileRepository) FindByID(id string) (*model.DriveFile, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var f model.DriveFile
 	if err := r.db.First(&f, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -140,6 +143,7 @@ func (r *driveFileRepository) FindByID(id string) (*model.DriveFile, error) {
 }
 
 func (r *driveFileRepository) FindByIDs(ids []string) ([]*model.DriveFile, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -152,6 +156,9 @@ func (r *driveFileRepository) FindByIDs(ids []string) ([]*model.DriveFile, error
 
 // FindByMD5 returns the user's most recent file with the given md5 hash.
 func (r *driveFileRepository) FindByMD5(userID, md5 string) (*model.DriveFile, error) {
+	if !storable(userID) || !storable(md5) {
+		return nil, ErrNotFound
+	}
 	var f model.DriveFile
 	if err := r.db.
 		Where("\"userId\" = ? AND md5 = ?", userID, md5).
@@ -166,6 +173,11 @@ func (r *driveFileRepository) FindByMD5(userID, md5 string) (*model.DriveFile, e
 // oldest first (id ASC). upstream find-by-hash の findBy({md5, userId}) は
 // order 未指定だが、決定的な応答のため id 昇順に固定する。
 func (r *driveFileRepository) FindAllByMD5(userID, md5 string) ([]*model.DriveFile, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !storable(md5) {
+		return nil, nil
+	}
 	var files []*model.DriveFile
 	if err := r.db.
 		Where("\"userId\" = ? AND md5 = ?", userID, md5).
@@ -181,6 +193,9 @@ func (r *driveFileRepository) FindAllByMD5(userID, md5 string) ([]*model.DriveFi
 // OR 3 条件は migration 000059-000061 (#1625) の各列 index を BitmapOr で
 // 束ねて解決される (seq scan 回避)。
 func (r *driveFileRepository) FindByAnyURL(url string) (*model.DriveFile, error) {
+	if !storable(url) {
+		return nil, ErrNotFound
+	}
 	if url == "" {
 		return nil, gorm.ErrRecordNotFound
 	}
@@ -195,6 +210,9 @@ func (r *driveFileRepository) FindByAnyURL(url string) (*model.DriveFile, error)
 }
 
 func (r *driveFileRepository) FindByURI(uri string) (*model.DriveFile, error) {
+	if !storable(uri) {
+		return nil, ErrNotFound
+	}
 	if uri == "" {
 		return nil, gorm.ErrRecordNotFound
 	}
@@ -215,6 +233,9 @@ func (r *driveFileRepository) FindByURI(uri string) (*model.DriveFile, error) {
 // ため、それらの match は dead clause だった。primary 単独 + unique index
 // で planner も最短経路に落とせる (#637 review UR-014)。
 func (r *driveFileRepository) FindByAccessKey(accessKey string) (*model.DriveFile, error) {
+	if !storable(accessKey) {
+		return nil, ErrNotFound
+	}
 	if accessKey == "" {
 		return nil, gorm.ErrRecordNotFound
 	}
@@ -231,6 +252,9 @@ func (r *driveFileRepository) FindByAccessKey(accessKey string) (*model.DriveFil
 // 引く必要がある (#1414)。3 列とも unique index 付きで planner は bitmap-or
 // に落とせる。primary のみで充足する mediaproxy.swapToVariant とは別経路。
 func (r *driveFileRepository) FindByAnyAccessKey(accessKey string) (*model.DriveFile, error) {
+	if !storable(accessKey) {
+		return nil, ErrNotFound
+	}
 	if accessKey == "" {
 		return nil, gorm.ErrRecordNotFound
 	}
@@ -636,6 +660,7 @@ func (r *driveFileRepository) ListByUserAll(userID string, limit int) ([]*model.
 }
 
 func (r *driveFileRepository) DeleteByIDs(ids []string) (int64, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return 0, nil
 	}

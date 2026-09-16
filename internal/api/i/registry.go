@@ -7,6 +7,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -24,6 +25,16 @@ func validRegistryScope(scope []string) bool {
 		}
 	}
 	return true
+}
+
+// storableRegistryValue reports whether a registry key / domain can be stored.
+//
+// **scope だけ検証していた (#3025)。** `key` と `domain` は無検証のまま
+// `key = ?` / `domain = ?` の bind parameter に載るので、NUL を 1 文字入れると
+// クエリごと落ちて 500 になる (`i/registry/get-all` などは**任意の認証
+// ユーザー**が叩ける)。scope と同じ場所で弾く。
+func storableRegistryValue(key string, domain *string) bool {
+	return colfit.Storable(key) && (domain == nil || colfit.Storable(*domain))
 }
 
 // registryEffectiveDomain returns the domain a registry request operates on.
@@ -74,7 +85,7 @@ func (h *Handler) RegistryGetDetail(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	req.Scope = normalizeRegistryScope(req.Scope)
-	if !validRegistryScope(req.Scope) {
+	if !validRegistryScope(req.Scope) || !storableRegistryValue(req.Key, req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	item, err := h.registryRepo.Get(u.ID, req.Key, req.Scope, registryEffectiveDomain(c, req.Domain))
@@ -106,7 +117,7 @@ func (h *Handler) RegistryKeys(c echo.Context) error {
 	var req registryScopeDomainRequest
 	_ = c.Bind(&req)
 	req.Scope = normalizeRegistryScope(req.Scope)
-	if !validRegistryScope(req.Scope) {
+	if !validRegistryScope(req.Scope) || !storableRegistryValue("", req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	keysMap, err := h.registryRepo.KeysWithType(u.ID, req.Scope, registryEffectiveDomain(c, req.Domain))

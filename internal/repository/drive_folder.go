@@ -37,6 +37,9 @@ func (r *driveFolderRepository) Create(f *model.DriveFolder) error {
 }
 
 func (r *driveFolderRepository) FindByID(id string) (*model.DriveFolder, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var f model.DriveFolder
 	if err := r.db.First(&f, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -45,6 +48,7 @@ func (r *driveFolderRepository) FindByID(id string) (*model.DriveFolder, error) 
 }
 
 func (r *driveFolderRepository) FindByIDs(ids []string) ([]*model.DriveFolder, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}

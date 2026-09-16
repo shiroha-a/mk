@@ -12,6 +12,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/api/userrelation"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/searchnorm"
 	"github.com/shiroha-a/mk/internal/model"
@@ -130,6 +131,12 @@ func (h *Handler) Search(c echo.Context) error {
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	// repository 層の検索と同じく、空の結果で答える (エラーではない)。
+	if !colfit.Storable(req.Query) {
+		return c.JSON(http.StatusOK, []string{})
+	}
 	// upstream search.ts: name LIKE sqlLikeEscape(query.toLowerCase())+'%' (前方一致)
 	// を mentionedLocalUsersCount DESC で並べ offset を適用する。hashtag.name は
 	// normalizeForSearch 済 (lowercase) で格納されるため小文字化で一致する。
@@ -162,6 +169,12 @@ func (h *Handler) Show(c echo.Context) error {
 	// upstream show.ts: hashtags.findOneBy({name: normalizeForSearch(tag)})。
 	// hashtag.name は normalizeForSearch (NFKC+lowercase) 済で格納されるため、
 	// 入力も同じく正規化して一致させる ('Misskey' → 'misskey')。
+	// 列に入らない文字を含む tag はどの行とも一致しえない (#3025)。**引く前に
+	// 弾く** — 比較の右辺に載せるとクエリごと落ち、下の `err != nil` が
+	// **DB 障害まで NO_SUCH_HASHTAG に潰す**経路に流れ込む。
+	if !colfit.Storable(req.Tag) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_HASHTAG", "No such hashtag.", "110ee688-193e-4a3a-9ecf-c167b2e6981e"))
+	}
 	var tag model.Hashtag
 	if err := h.db.Where("name = ?", searchnorm.Normalize(req.Tag)).First(&tag).Error; err != nil {
 		// HTTP semantics 的には not-found = 404 が望ましいが、upstream
@@ -381,6 +394,11 @@ func (h *Handler) Users(c echo.Context) error {
 		req.Offset = 0
 	}
 
+	// 列に入らない文字を含む tag はどの行とも一致しえない (#3025)。配列の
+	// containment も bind parameter なので、載せるとクエリごと落ちる。
+	if !colfit.Storable(req.Tag) {
+		return c.JSON(http.StatusOK, []any{})
+	}
 	// containment query。upstream は `:tag <@ user.tags` (= tag 配列が user.tags の
 	// 部分集合)。単一要素なので `tags @> {normTag}` と等価。
 	normTag := searchnorm.Normalize(req.Tag)

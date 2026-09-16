@@ -27,6 +27,9 @@ func (r *userPendingRepository) Create(p *model.UserPending) error {
 }
 
 func (r *userPendingRepository) FindByCode(code string) (*model.UserPending, error) {
+	if !storable(code) {
+		return nil, ErrNotFound
+	}
 	var row model.UserPending
 	if err := r.db.Where("code = ?", code).First(&row).Error; err != nil {
 		return nil, err

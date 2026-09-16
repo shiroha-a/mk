@@ -30,6 +30,9 @@ func (r *channelRepository) Create(c *model.Channel) error {
 }
 
 func (r *channelRepository) FindByID(id string) (*model.Channel, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var c model.Channel
 	if err := r.db.First(&c, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -38,6 +41,7 @@ func (r *channelRepository) FindByID(id string) (*model.Channel, error) {
 }
 
 func (r *channelRepository) FindByIDs(ids []string) ([]*model.Channel, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -68,6 +72,11 @@ func (r *channelRepository) IncrementCount(channelID, column string, delta int) 
 // Cursor (SinceID / UntilID) 指定時は id 順 + WHERE id 範囲で frontend
 // Paginator に対応する。Offset は無視。
 func (r *channelRepository) List(filter model.ChannelListFilter) ([]*model.Channel, error) {
+	// 列に入らない文字は保存された値に現れないので、一致しえない (#3025)。
+	// **引く前に弾く** — LIKE のパターンに載せるとクエリごと落ちて 500 になる。
+	if !storable(filter.Query) || !storable(filter.OwnerID) {
+		return nil, nil
+	}
 	q := r.db.Model(&model.Channel{})
 	if filter.OwnerID != "" {
 		q = q.Where("\"userId\" = ?", filter.OwnerID)

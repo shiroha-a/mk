@@ -42,6 +42,9 @@ func (r *pageRepository) Create(p *model.Page) error {
 }
 
 func (r *pageRepository) FindByID(id string) (*model.Page, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var p model.Page
 	if err := r.db.First(&p, "id = ?", id).Error; err != nil {
 		return nil, err
@@ -50,6 +53,7 @@ func (r *pageRepository) FindByID(id string) (*model.Page, error) {
 }
 
 func (r *pageRepository) FindManyByIDs(ids []string) ([]*model.Page, error) {
+	ids = storableIDs(ids)
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -63,6 +67,9 @@ func (r *pageRepository) FindManyByIDs(ids []string) ([]*model.Page, error) {
 // FindByUserAndName looks up a page by the (userId, name) pair which is the
 // primary user-facing identity for a Page in Misskey.
 func (r *pageRepository) FindByUserAndName(userID, name string) (*model.Page, error) {
+	if !storable(userID) || !storable(name) {
+		return nil, ErrNotFound
+	}
 	var p model.Page
 	if err := r.db.Where("\"userId\" = ? AND name = ?", userID, name).First(&p).Error; err != nil {
 		return nil, err
@@ -111,6 +118,11 @@ func (r *pageRepository) ListByUser(userID, sinceID, untilID string, limit, offs
 }
 
 func (r *pageRepository) ListPublicByUser(userID, sinceID, untilID string, limit, offset int) ([]*model.Page, error) {
+	// 列に入らない値はどの行とも一致しえない (#3025)。**引く前に弾く** —
+	// 比較の右辺に載せるとクエリごと落ちて 500 になる。
+	if !storable(userID) || !storable(sinceID) || !storable(untilID) {
+		return nil, nil
+	}
 	if limit <= 0 {
 		limit = 30
 	}

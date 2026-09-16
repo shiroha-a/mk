@@ -36,6 +36,9 @@ func (r *userSecurityKeyRepository) Create(key *model.UserSecurityKey) error {
 }
 
 func (r *userSecurityKeyRepository) FindByID(id string) (*model.UserSecurityKey, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var key model.UserSecurityKey
 	if err := r.db.Where("id = ?", id).First(&key).Error; err != nil {
 		return nil, err

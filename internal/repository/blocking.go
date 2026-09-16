@@ -42,6 +42,9 @@ func (r *blockingRepository) Delete(b *model.Blocking) error {
 }
 
 func (r *blockingRepository) FindByPair(blockerID, blockeeID string) (*model.Blocking, error) {
+	if !storable(blockerID) || !storable(blockeeID) {
+		return nil, ErrNotFound
+	}
 	var b model.Blocking
 	if err := r.db.Where("\"blockerId\" = ? AND \"blockeeId\" = ?", blockerID, blockeeID).First(&b).Error; err != nil {
 		return nil, err

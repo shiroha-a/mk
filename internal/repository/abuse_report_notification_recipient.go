@@ -32,6 +32,9 @@ func (r *abuseReportNotificationRecipientRepository) Create(rec *model.AbuseRepo
 }
 
 func (r *abuseReportNotificationRecipientRepository) FindByID(id string) (*model.AbuseReportNotificationRecipient, error) {
+	if !storable(id) {
+		return nil, ErrNotFound
+	}
 	var rec model.AbuseReportNotificationRecipient
 	if err := r.db.Where(`"id" = ?`, id).First(&rec).Error; err != nil {
 		return nil, err

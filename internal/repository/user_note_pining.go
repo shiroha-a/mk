@@ -38,6 +38,9 @@ func (r *userNotePiningRepository) Delete(p *model.UserNotePining) error {
 }
 
 func (r *userNotePiningRepository) FindByPair(userID, noteID string) (*model.UserNotePining, error) {
+	if !storable(userID) || !storable(noteID) {
+		return nil, ErrNotFound
+	}
 	var p model.UserNotePining
 	if err := r.db.Where("\"userId\" = ? AND \"noteId\" = ?", userID, noteID).First(&p).Error; err != nil {
 		return nil, err
