@@ -23,7 +23,8 @@ var emojiRemoteColumns = []struct {
 	{"license", 1024},
 }
 
-// emojiAdminColumns は `admin/emoji/*` が書く列と、その上限 (#3018)。
+// emojiAdminColumns は `admin/emoji/*` と `import-zip` が書く列と、その上限
+// (#3018 / #3021)。
 // `internal/api/admin` の `emojiCategoryMaxRunes` などと同じ数値が独立に書かれて
 // いるだけだと、揃って動かせば全部緑になる。
 var emojiAdminColumns = []struct {
@@ -59,11 +60,13 @@ func TestEmoji_AdminColumnLimits(t *testing.T) {
 			WHERE table_schema = current_schema() AND table_name = 'emoji' AND column_name = ?`,
 			tc.column).Scan(&n).Error)
 		assert.Equal(t, tc.max, n,
-			"emoji.%s の列長が変わっている (internal/api/admin/emoji.go の定数も直すこと)", tc.column)
+			"emoji.%s の列長が変わっている (internal/api/admin/emoji.go と、対応する定数があれば internal/core/emojiimport/service.go も直すこと)",
+			tc.column)
 	}
 	for _, tc := range emojiAdminArrayColumns {
 		assert.Equal(t, tc.want, arrayElementMaxLength(t, "emoji", tc.column),
-			"emoji.%s の要素長が変わっている (internal/api/admin/emoji.go の定数も直すこと)", tc.column)
+			"emoji.%s の要素長が変わっている (internal/api/admin/emoji.go と internal/core/emojiimport/service.go の定数も直すこと)",
+			tc.column)
 	}
 }
 

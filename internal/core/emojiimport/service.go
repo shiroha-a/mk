@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -120,8 +121,8 @@ type metaEmoji struct {
 
 // maxImportNameLength は meta.json 中の名前の長さ上限。upstream
 // ImportCustomEmojisProcessorService の `MAX_NAME_LENGTH` と同じ。
-// これが無いと、DB の列長 (drive_file.name varchar(256) / emoji.name varchar(128))
-// で落ちるまでに画像処理と storage 書き込みが 1 件ぶん無駄に走る。
+// **これだけでは列を守れない** (下記) が、桁違いに長い名前をここで落とせば、
+// 画像処理と storage 書き込みが 1 件ぶん無駄に走るのを避けられる。
 const maxImportNameLength = 255
 
 // validFileName matches Misskey's ImportCustomEmojisProcessorService
@@ -133,8 +134,71 @@ var validFileName = regexp.MustCompile(`^[a-zA-Z0-9_]+(\.[a-zA-Z0-9]+)*$`)
 var validEmojiName = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
 // validImportName は upstream の isValidName 相当 (長さ + パターン)。
+//
+// **`maxImportNameLength` は upstream から移した 255。** upstream のコメントが
+// 書いているとおり**ファイルシステムのファイル名長**の上限で、列幅ではない。
+// `emoji.name` は varchar(128) と狭いので、絵文字名には `emojiNameMaxRunes` を
+// 別に掛ける (#3021)。
+//
+// **`fileName` 側は塞ぎきれていない。** `Upload` は `CorrectFilename` で拡張子を
+// 足すので、255 バイトの名前は `drive_file.name` varchar(256) を超えて 22001 に
+// なる (実測で 259 バイト)。**破壊的ではない** — 取り込みが先なので既存の絵文字は
+// 残り、そのレコードが skip されるだけ。
+//
+// **`drive/files/create` は塞がっている** — `ValidateFileName` が 200 rune で
+// 止めるので、拡張子を足しても列に収まる。`drive.Service.Upload` 自体は名前を
+// 見ないので、**長さの決まらない名前が届くのは `drive/files/upload-from-url`
+// (`path.Base` をそのまま渡す) とここの 2 つ** (数え方: 非テストの `Upload`
+// 呼び出し 7 箇所から、`ValidateFileName` を通るもの・生成した名前を渡すもの・
+// 呼び出し元が絵文字名の規則で 128 rune に縛るもの (`CopyToSystemFile` 経由) を
+// 除いた残り)。別 issue。
 func validImportName(v string, pattern *regexp.Regexp) bool {
 	return len(v) <= maxImportNameLength && pattern.MatchString(v)
+}
+
+// 列幅は migration/000001_initial の `emoji` テーブル定義に対応する (#3021)。
+// 変えるときは DDL と揃えること — DDL 側の実値は
+// `internal/repository/emoji_column_limits_test.go` が `information_schema` と
+// 突き合わせ、こちらの定数は `column_fit_test.go` の at-limit ケースが固定する
+// (あちらは独立した数字で入力を作るので、定数だけ動かすと落ちる)。
+//
+// **`internal/api/admin` が同じ値を別に持っている。** あちらは API のリクエストを、
+// こちらは `meta.json` を見るので、共有せずに DDL と突き合わせる形で揃えてある。
+const (
+	emojiNameMaxRunes     = 128
+	emojiCategoryMaxRunes = 128
+	emojiAliasMaxRunes    = 128
+	emojiLicenseMaxRunes  = 1024
+)
+
+// fitsColumns reports whether the record's body values can be stored, and
+// returns the aliases with unstorable elements dropped (#3021)。
+//
+// **本文はレコードごと skip、alias は要素ごと落とす。** zip は複数レコードの一括
+// 処理なので、1 件のために全体を落とさない。alias を切ると別の名前になって
+// リアクションの照合に使えないので、その要素だけ落とす (`admin/emoji/*` と同じ規則)。
+//
+// **NUL も落とす。** 長さに関わらず列に入らない (本番の pgx extended protocol では
+// SQLSTATE 22021) ので、通すと同じ書き込みに乗っている他の列まで巻き添えになる。
+func fitsColumns(e metaEmoji) ([]string, string, bool) {
+	if !colfit.Fits(e.Name, emojiNameMaxRunes) {
+		return nil, "emoji name", false
+	}
+	if e.Category != nil && !colfit.Fits(*e.Category, emojiCategoryMaxRunes) {
+		return nil, "category", false
+	}
+	if e.License != nil && !colfit.Fits(*e.License, emojiLicenseMaxRunes) {
+		return nil, "license", false
+	}
+	out := make([]string, 0, len(e.Aliases))
+	for _, a := range e.Aliases {
+		a = colfit.StripNUL(a)
+		if a == "" || !colfit.Fits(a, emojiAliasMaxRunes) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out, "", true
 }
 
 // truncateForLog は upstream の同名ヘルパー相当。**上限を移植したなら log 側も要る** —
@@ -226,6 +290,20 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 			result.Skipped++
 			continue
 		}
+		// **列に入らない値はここで落とす (#3021)。** 名前の検査と並べるのは、
+		// ここが**何も読まず何も書かないうち**だから。`replaceEmoji` まで持って
+		// いくと、弾いたレコードごとに孤児の drive ファイルが残り、消した行を戻す
+		// 経路 (それ自体が失敗しうる) にも頼ることになる。
+		// **テストが固定しているのは「弾いたら drive に何も作らない」まで** —
+		// zip の展開を省くこと自体は観測できない (`maxImportNameLength` が避けて
+		// いるのと同じ無駄なので、位置は前のほうがよい)。
+		aliases, badField, ok := fitsColumns(record.Emoji)
+		if !ok {
+			slog.Warn("emoji import: value does not fit the column",
+				"name", truncateForLog(record.Emoji.Name), "field", badField)
+			result.Skipped++
+			continue
+		}
 
 		entry := index[record.FileName]
 		if entry == nil {
@@ -240,7 +318,7 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 			continue
 		}
 
-		if err := i.replaceEmoji(ctx, record, imgBody); err != nil {
+		if err := i.replaceEmoji(ctx, record, imgBody, aliases); err != nil {
 			slog.Warn("emoji import: replace failed", "name", truncateForLog(record.Emoji.Name), "err", err)
 			result.Skipped++
 			continue
@@ -298,23 +376,23 @@ func readZipEntry(f *zip.File, maxBytes int64) ([]byte, error) {
 	return data, nil
 }
 
-// replaceEmoji deletes any existing local emoji with the same name, uploads the
-// image to Drive as a new DriveFile, and creates a fresh emoji row. Run still
-// resolves the requesting user up front to fail-fast on missing accounts, but
-// the user is *not* propagated here because the resulting drive file is
-// system-owned (see Upload comment below for #670 rationale).
-func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []byte) error {
+// replaceEmoji uploads the image to Drive as a new DriveFile, then swaps the
+// same-named local emoji for a fresh row. Run still resolves the requesting user
+// up front to fail-fast on missing accounts, but the user is *not* propagated
+// here because the resulting drive file is system-owned (see Upload comment
+// below for #670 rationale).
+//
+// **消すのは「置き換える中身が用意できてから」(#3021)。** 旧実装は先に削除して
+// いたので、画像の取り込みでも `Create` でも失敗すると**元の絵文字が戻らない**まま
+// job が終わっていた。取り込みを先に済ませ、削除と作成を隣に置き、`Create` が
+// 失敗したら消した行を戻す。
+func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []byte, aliases []string) error {
 	// **捨てるのは defer 1 本にする。** delete と create の 2 箇所に書くと、
 	// 片方を消しても「この関数はどこかで捨てている」という静的な検査を
-	// 素通りする (実測)。create が途中で失敗しても delete は済んでいるので、
-	// どのみち return 時に捨てる必要がある。
+	// 素通りする (実測)。**何も書かずに return する経路もある** (取り込みの失敗、
+	// 既存行の lookup 失敗、削除に失敗して元の行が残っているとき、#3021 で増えた)
+	// が、倒す向きは「余分に捨てる」なので安全側。
 	defer i.invalidateDecorationCache()
-
-	// 既存 local 絵文字 (同名) は上書きのために先に削除する。
-	// 本家 Misskey では emojisRepository.delete({ name, host: IsNull() }) 相当。
-	if existing, err := i.deps.EmojiRepo.FindByNameAndHost(record.Emoji.Name, nil); err == nil && existing != nil {
-		_ = i.deps.EmojiRepo.Delete(existing.ID)
-	}
 
 	// emoji import zip で展開された画像は upstream Misskey TS と同じく
 	// system 所有 drive file (User: nil) として保存する (#670)。custom emoji
@@ -341,7 +419,7 @@ func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []b
 	}
 
 	now := i.now()
-	aliases := model.StringArray(append([]string(nil), record.Emoji.Aliases...))
+	// 列に入らない要素は `fitsColumns` が落とし済み (#3021)。
 	// 不変条件 (#722): emoji.originalUrl は drive_file.url と一致させる。
 	// `DriveFileRepository.DeleteOrphans` の cleanup guard は
 	// `NOT EXISTS (emoji.originalUrl = drive_file.url ...)` で system 所有
@@ -356,15 +434,87 @@ func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []b
 		OriginalURL: uploaded.URL,
 		PublicURL:   publicURL,
 		Type:        &fileType,
-		Aliases:     aliases,
+		Aliases:     model.StringArray(aliases),
 		License:     record.Emoji.License,
 		IsSensitive: record.Emoji.IsSensitive,
 		LocalOnly:   record.Emoji.LocalOnly,
 	}
+	// 既存 local 絵文字 (同名) は上書きのために削除する。
+	// 本家 Misskey では emojisRepository.delete({ name, host: IsNull() }) 相当。
+	//
+	// **DB 障害を「同名なし」に丸めない。** 丸めると、接続断のあいだ同名の行が
+	// 2 つできる (local emoji は `host IS NULL` なので一意制約が効かない)。
+	var replaced *model.Emoji
+	existing, err := i.deps.EmojiRepo.FindByNameAndHost(record.Emoji.Name, nil)
+	if err != nil && !repository.IsNotFound(err) {
+		return fmt.Errorf("look up existing emoji: %w", err)
+	}
+	if err == nil && existing != nil {
+		if derr := i.deps.EmojiRepo.Delete(existing.ID); derr != nil {
+			// **消えたかを読み直す (#3021 のレビュー H2)。** COMMIT の後・ack の前に
+			// 接続が切れると、**消えているのにエラーが返る**。そのまま skip すると
+			// 元の絵文字が消えたまま新しい行も作られず、この issue が直そうとしている
+			// 被害そのものになる。
+			//
+			// **まだ残っている / 読み直せないなら作らない。** 作ると同名の行が 2 つ
+			// 残り、どちらが引かれるか決まらない (local emoji は `host IS NULL` なので
+			// 一意制約が効かない)。
+			//
+			// **読み直せない枝だけは「元の絵文字が残る」と断言できない** — 削除が
+			// 載っていた可能性があり、その場合は消えたままになる (戻す相手も無い)。
+			// 作る側と逆に倒しているのは、ここで作ると**確実に**同名 2 行を作りうる
+			// から。残るのは warn 1 行なので、そこから追うことになる。
+			if gone, rerr := i.deps.EmojiRepo.FindByID(existing.ID); rerr == nil && gone != nil {
+				return fmt.Errorf("delete existing emoji: %w", derr)
+			} else if rerr != nil && !repository.IsNotFound(rerr) {
+				return fmt.Errorf("delete existing emoji: %w (read back: %w)", derr, rerr)
+			}
+		}
+		replaced = existing
+	}
+
 	if err := i.deps.EmojiRepo.Create(emoji); err != nil {
+		// **消した行を戻す (#3021)。** ここまで来ると元の絵文字は消えているので、
+		// 戻さないと「import に失敗したら手元の絵文字も消えた」になる。元の行が
+		// 指していた drive ファイルは触っていないので、行を入れ直せば表示も戻る。
+		//
+		// **戻せなかったらログに残す。** 握り潰すと、消えた絵文字がどれだったか
+		// 追う手がかりが無くなる。
+		if replaced != nil && i.shouldRestoreReplaced(emoji) {
+			if rerr := i.deps.EmojiRepo.Create(replaced); rerr != nil {
+				slog.Error("emoji import: failed to restore the replaced emoji",
+					"name", truncateForLog(replaced.Name), "emojiId", replaced.ID, "err", rerr)
+			}
+		}
 		return fmt.Errorf("create emoji row: %w", err)
 	}
 	return nil
+}
+
+// shouldRestoreReplaced reports whether the row deleted for this import has to
+// be put back after a failed Create (#3021)。
+//
+// **エラーが返っても INSERT が載っていることがある。** COMMIT の後・ack の前に
+// 接続が切れる窓で、載っているのに戻すと**同名の行が 2 つ**残る (local emoji は
+// `host IS NULL` なので一意制約が効かず、どちらが引かれるかは id 順で決まる)。
+//
+// **読み直せないときは戻す。** 倒す向きが #3019 と逆なのは、残る状態が違うため —
+// あちらで残るのは「参照されない複製」(孤児 cleanup が回収する) だが、こちらで
+// 残らないのは**運用者が手で入れた絵文字**で、戻さなければ自動では復旧しない。
+// 重複のほうは管理画面の一覧に 2 件出るので気付けて、片方を消せば済む。
+func (i *Importer) shouldRestoreReplaced(created *model.Emoji) bool {
+	landed, err := i.deps.EmojiRepo.FindByID(created.ID)
+	if err == nil && landed != nil {
+		// エラーは返ったが INSERT は載っていた。戻すと同名の行が 2 つになる。
+		slog.Warn("emoji import: the emoji write landed despite the error; not restoring",
+			"name", truncateForLog(created.Name), "emojiId", created.ID)
+		return false
+	}
+	if err != nil && !repository.IsNotFound(err) {
+		slog.Error("emoji import: cannot tell whether the emoji write landed; restoring anyway",
+			"name", truncateForLog(created.Name), "emojiId", created.ID, "err", err)
+	}
+	return true
 }
 
 // invalidateDecorationCache is a nil-safe helper (unit tests leave it unwired).
