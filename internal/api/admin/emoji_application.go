@@ -581,15 +581,7 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 		copied.Category = &v
 	}
 	if len(app.Aliases) > 0 {
-		out := make([]string, 0, len(app.Aliases))
-		for _, a := range app.Aliases {
-			a = colfit.StripNUL(a)
-			if a == "" || !colfit.Fits(a, emojiAliasMaxRunes) {
-				continue
-			}
-			out = append(out, a)
-		}
-		copied.Aliases = model.StringArray(out)
+		copied.Aliases = model.StringArray(normalizeEmojiAliases(app.Aliases))
 	}
 	// **申請者が書いたときだけ上書きする (レビュー M1)。** リモート絵文字の
 	// 43% は AP の `_misskey_license` 由来の**本物の license** を持っている

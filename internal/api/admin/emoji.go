@@ -26,7 +26,119 @@ const (
 	emojiCategoryMaxRunes = 128
 	emojiAliasMaxRunes    = 128
 	emojiLicenseMaxRunes  = 1024
+	emojiRoleIDMaxRunes   = 128
+	// `emoji.originalUrl` / `publicUrl` は varchar(512)。`admin/emoji/add` の
+	// `url` 直接指定 (mk-go 独自の legacy 経路) だけが利用者の文字列をそのまま
+	// ここへ入れる。
+	emojiURLMaxRunes = 512
 )
+
+// emojiBodyFits reports whether a locally entered body value can be stored in
+// its column. A nil pointer (= 省略) は常に真。
+//
+// **弾く。切らない (#3018)。** ここを通るのは管理画面で人がその場で打った値で、
+// 黙って切ると保存した本人にも分からない形で別の値になる。とくに `license` は
+// 権利表示なので、切った結果は**嘘になる**。申請経路
+// (`emojiapplication.Service.Create`) が利用者入力に対して既に `ErrTooLong` で
+// 弾いており、そちらに揃える (あちらが守るのは `emoji_application` の同じ幅の列で、
+// 別テーブル。**長さの扱いだけが同じ**で、NUL はあちらでは見ていない)。
+//
+// **切るのはリモート由来の値だけ** — `admin/emoji/copy` と AP 経路は相手サーバーが
+// 決めた値を入れるので、弾くと取り込みそのものができなくなる (docs/divergence.md の
+// 「リモート由来の文字列を列に入れるときの規則」、#2726)。
+//
+// NUL も `colfit.Fits` が落とす。PostgreSQL の text 系列は長さに関わらず NUL を
+// SQLSTATE 22021 で弾くので、通すと同じく 500 になる。
+func emojiBodyFits(v *string, max int) bool {
+	return v == nil || colfit.Fits(*v, max)
+}
+
+// emojiValueTooLong renders the 400 for a body value that does not fit.
+//
+// **`INVALID_PARAM` を共有する。** upstream の paramDef に maxLength は無いので
+// 対応する error code / id が存在せず、新しい id を作ると misskey-js の型にも
+// 載せることになる (`admin/emoji/copy` の名前検証 #2998 と同じ判断)。
+func emojiValueTooLong(c echo.Context, field string) error {
+	return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+		field+" is too long or contains an invalid character.",
+		"3d81ceae-475f-4600-b2a8-2bc116157532"))
+}
+
+// normalizeEmojiAliases drops alias elements that cannot be stored.
+//
+// **要素ごとに落とす。切らない。** 1 つが長すぎるだけで他の alias まで捨てないが、
+// 切ると別の名前になってリアクションの照合に使えないので、その要素は落とす。
+// `admin/emoji/copy` (#2998) と申請経路の remote 取り込みも同じ関数を通る。
+//
+// **空要素も落とす。** 列には入るが、空の alias は照合に使えないうえ、NUL だけの
+// 要素が `StripNUL` で空になったものと区別できない。`admin/emoji/copy` は #2998 から
+// この挙動で、`add` / `update` / 一括編集は #3018 で揃えた (upstream は `[""]` を
+// そのまま保存する)。
+//
+// 申請の作成側 (`internal/core/emojiapplication` の `normalizeAliases`) は**別物**で、
+// あちらは `emoji_application` の列に対して trim / 重複排除 / 件数上限も掛ける一方、
+// NUL は落とさない。共有していないのは書き込む先のテーブルが違うため。
+//
+// **NUL を含む要素だけは値が変わる** (`a\x00b` → `ab`)。「切らない」原則の例外で、
+// NUL を含んだままでは長さに関わらず SQLSTATE 22021 で落ちるため。#2998 からの挙動。
+func normalizeEmojiAliases(in []string) []string {
+	return dropUnstorableElements(in, emojiAliasMaxRunes)
+}
+
+// fitEmojiAliases / fitEmojiRoleIDs normalize a locally entered array and report
+// whether the request still means what the operator asked for (#3018)。
+//
+// **送った要素が全部落ちたら成功にしない。** 空配列を書くのは「全消去」なので、
+// 「送ったのに 1 つも入らなかった」を 204 で返すと**既存の値を黙って消す**方向へ
+// 倒れる (同梱 frontend の一括タグ付けは入力をそのまま `split(' ')` するだけなので、
+// 長すぎる文字列を 1 つ貼れば選択中の全絵文字の alias が消える)。#3018 より前は
+// NOT NULL 違反で 500 になっており、**うるさいがデータは無事**だった。
+//
+// **明示的な `[]` は通す** — あちらは「全消去」という意思表示で、落ちた結果ではない。
+//
+// **リモート由来の経路 (`admin/emoji/copy` / 申請の remote 取り込み) では使わない。**
+// あちらは相手サーバーが決めた値なので、全部落ちたからといって取り込み自体を
+// 失敗させる理由が無い (`normalizeEmojiAliases` をそのまま使う)。
+func fitEmojiAliases(in []string) ([]string, bool) {
+	return fitEmojiArray(in, emojiAliasMaxRunes)
+}
+
+func fitEmojiRoleIDs(in []string) ([]string, bool) {
+	return fitEmojiArray(in, emojiRoleIDMaxRunes)
+}
+
+func fitEmojiArray(in []string, max int) ([]string, bool) {
+	out := dropUnstorableElements(in, max)
+	return out, len(in) == 0 || len(out) > 0
+}
+
+// normalizeEmojiRoleIDs drops role ids that cannot be stored (#3018).
+//
+// `emoji.roleIdsThatCanBeUsedThisEmojiAsReaction` も varchar(128)[] で、`aliases` と
+// 同じ request struct から無検証で書かれていた。**実在するロールかは見ない** —
+// それは別の検証で、ここは列に入るかだけを見る。id は aidx (16 文字) なので、
+// 落ちるのは最初から存在しえない値だけ。
+func normalizeEmojiRoleIDs(in []string) []string {
+	return dropUnstorableElements(in, emojiRoleIDMaxRunes)
+}
+
+// dropUnstorableElements returns the elements of in that fit a varchar(max)[]
+// column, with NUL stripped first.
+//
+// 返り値は必ず非 nil。呼び出し側は `req.Aliases != nil` で「フィールドを明示送信
+// したか」を判定するし、`model.StringArray(nil)` は SQL の NULL になって
+// NOT NULL 制約で落ちる (#729)。
+func dropUnstorableElements(in []string, max int) []string {
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		v = colfit.StripNUL(v)
+		if v == "" || !colfit.Fits(v, max) {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
 
 // EmojiAddAliasesBulk handles POST /api/admin/emoji/add-aliases-bulk.
 //
@@ -49,8 +161,16 @@ func (h *Handler) EmojiAddAliasesBulk(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
+	// **列に入らない alias を落としてから混ぜる (#3018)。** そのまま渡すと
+	// `emoji.aliases` varchar(128)[] を超えて SQLSTATE 22001 になり、per-emoji の
+	// log だけ残して全件が黙って失敗する。**全部落ちたら弾く** — 足すつもりの値が
+	// 1 つも入らないのに 204 を返すと、成功したように見えて何も起きない。
+	adding, ok := fitEmojiAliases(req.Aliases)
+	if !ok {
+		return emojiValueTooLong(c, "aliases")
+	}
 	for _, e := range rows {
-		merged := dedupe(append(append([]string{}, e.Aliases...), req.Aliases...))
+		merged := dedupe(append(append([]string{}, e.Aliases...), adding...))
 		// model.Emoji.Aliases は model.StringArray なので plain []string で
 		// 渡すと GORM が record literal `('a','b')` を生成して
 		// SQLSTATE 42804 (column type mismatch) になる drift がある
@@ -176,15 +296,7 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 		copied.Category = &v
 	}
 	if req.Aliases != nil {
-		out := make([]string, 0, len(*req.Aliases))
-		for _, a := range *req.Aliases {
-			a = colfit.StripNUL(a)
-			if a == "" || !colfit.Fits(a, emojiAliasMaxRunes) {
-				continue
-			}
-			out = append(out, a)
-		}
-		copied.Aliases = model.StringArray(out)
+		copied.Aliases = model.StringArray(normalizeEmojiAliases(*req.Aliases))
 	}
 	if req.License != nil {
 		v := colfit.Text(*req.License, emojiLicenseMaxRunes)
@@ -452,9 +564,25 @@ func (h *Handler) EmojiSetAliasesBulk(c echo.Context) error {
 	if h.emojiRepo == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
+	// **省略を「全消去」にしない (#3018)。** upstream の paramDef は `aliases` を
+	// required にしているので、落として送るのは schema validator で 400 になる形。
+	// mk-go は #3018 まで `model.StringArray(nil)` を書いており、`aliases` は
+	// NOT NULL なので**書き込みが落ちて 500** = データは無事だった。正規化を通すと
+	// nil が `{}` になり、**黙って全件の alias を消す**方向へ倒れる。
+	// `add-aliases-bulk` / `remove-aliases-bulk` は省略しても merge / filter が
+	// no-op になるだけなので、この判定は要らない。
+	if req.Aliases == nil {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "aliases is required.",
+			"3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// 列に入らない要素は落とす。**全部落ちたら弾く** — 空配列を書くと全消去になる (#3018)。
+	aliases, ok := fitEmojiAliases(req.Aliases)
+	if !ok {
+		return emojiValueTooLong(c, "aliases")
+	}
 	// model.StringArray wrap (#896 と同 pattern) — UpdateFieldsMany 経由でも
 	// 同 drift が発生するので caller 側で wrap する。
-	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"aliases": model.StringArray(req.Aliases)}); err != nil {
+	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"aliases": model.StringArray(aliases)}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	h.publishEmojiUpdatedByIDs(req.IDs) // #2046
@@ -472,6 +600,10 @@ func (h *Handler) EmojiSetCategoryBulk(c echo.Context) error {
 	}
 	if h.emojiRepo == nil {
 		return c.NoContent(http.StatusNoContent)
+	}
+	// 列に入らない値は 400 で返す (#3018)。渡すと SQLSTATE 22001 が生のまま 500。
+	if !emojiBodyFits(req.Category, emojiCategoryMaxRunes) {
+		return emojiValueTooLong(c, "category")
 	}
 	// upstream set-category-bulk は category nullable ('Use null to reset') で
 	// ps.category ?? null を書く。*string にして JSON null を SQL NULL に落とす
@@ -504,6 +636,10 @@ func (h *Handler) EmojiSetLicenseBulk(c echo.Context) error {
 	}
 	if h.emojiRepo == nil {
 		return c.NoContent(http.StatusNoContent)
+	}
+	// 列に入らない値は 400 で返す (#3018)。
+	if !emojiBodyFits(req.License, emojiLicenseMaxRunes) {
+		return emojiValueTooLong(c, "license")
 	}
 	// upstream set-license-bulk も license nullable で ps.license ?? null を書く (#1948-13)。
 	if err := h.emojiRepo.UpdateFieldsMany(req.IDs, map[string]any{"license": nullableString(req.License)}); err != nil {

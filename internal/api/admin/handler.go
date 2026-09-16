@@ -31,6 +31,7 @@ import (
 	corewebhook "github.com/shiroha-a/mk/internal/core/webhook"
 	"github.com/shiroha-a/mk/internal/core/webpush"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -2842,6 +2843,47 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	if dupErr == nil && existing != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("DUPLICATE_NAME", "Duplicate name.", "f7a3462c-4e6e-4069-8421-b9bd4f4c3975"))
 	}
+	// **name 以外の列も見る (#3018)。** `category` varchar(128) /
+	// `license` varchar(1024) を超える値はここを抜けると `Create` で
+	// SQLSTATE 22001 になり、**利用者の入力で 5xx が立つ**。名前だけ長さを見て
+	// いたのは #2998 の片手落ちで、`admin/emoji/copy` は 4 列すべて見ている。
+	//
+	// **upstream が宣言する error より後ろに置く。** `add.ts` の
+	// `noSuchFile` / `duplicateName` を先に返さないと、2 つ問題があるリクエストで
+	// drop-in クライアントの分岐が変わる (`EmojiUpdate` も同じ理由で絵文字の解決より
+	// 後ろに置いてある)。
+	//
+	// **`unsupportedFileType` より前になるのは、置ける場所が無いから。** MIME の検査と
+	// 複製は同じ `if driveFile != nil` ブロックにあり、**ブロックの中へ入れると `url`
+	// 経路が検査から外れ、ブロックの外 (後ろ) へ出すと複製の後ろになる** — 後者は
+	// 400 のたびに誰からも参照されない system 所有の複製が残る (#2999 / #3014)。
+	// どちらも 400 の client error なので、この 2 つの順序が入れ替わってもクライアント
+	// から見た意味は変わらない。
+	if !emojiBodyFits(req.Category, emojiCategoryMaxRunes) {
+		return emojiValueTooLong(c, "category")
+	}
+	if !emojiBodyFits(req.License, emojiLicenseMaxRunes) {
+		return emojiValueTooLong(c, "license")
+	}
+	// **`url` 直接指定も見る (#3018)。** `emoji.originalUrl` / `publicUrl` は
+	// varchar(512) で、この経路は利用者の文字列をそのまま両方へ入れる。
+	// **`fileId` 経路は対象外** — あちらに入るのは drive が作った URL で、
+	// `drive_file.url` は varchar(1024) と広いため、極端に長い prefix の
+	// オブジェクトストレージ構成でだけ超えうる (別 issue)。
+	// **切らない** — 途中で切った URL は別物で、取りに行っても無駄なうえ壊れた
+	// 参照を保存することになる (`colfit` の doc と同じ判断)。
+	if url != "" && !colfit.Fits(url, emojiURLMaxRunes) {
+		return emojiValueTooLong(c, "url")
+	}
+	// 配列も**複製より前**に確定させる。全部落ちたら弾く (#3018)。
+	aliases, ok := fitEmojiAliases(req.Aliases)
+	if !ok {
+		return emojiValueTooLong(c, "aliases")
+	}
+	roleIDs, ok := fitEmojiRoleIDs(req.RoleIDs)
+	if !ok {
+		return emojiValueTooLong(c, "roleIdsThatCanBeUsedThisEmojiAsReaction")
+	}
 	// drive 画像なら MIME を allowlist で検証し、webpublic variant を優先して
 	// originalUrl/publicUrl/type を導出する (upstream CustomEmojiService.add)。
 	publicURL := url
@@ -2922,18 +2964,20 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	}
 	now := time.Now()
 	e := &model.Emoji{
-		ID:                                      h.idGen.Generate(now),
-		UpdatedAt:                               &now,
-		Name:                                    req.Name,
-		OriginalURL:                             url,
-		PublicURL:                               publicURL,
-		Type:                                    fileType,
-		Category:                                req.Category,
-		Aliases:                                 model.StringArray(req.Aliases),
-		License:                                 req.License,
-		IsSensitive:                             req.IsSensitive,
-		LocalOnly:                               req.LocalOnly,
-		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray(req.RoleIDs),
+		ID:          h.idGen.Generate(now),
+		UpdatedAt:   &now,
+		Name:        req.Name,
+		OriginalURL: url,
+		PublicURL:   publicURL,
+		Type:        fileType,
+		Category:    req.Category,
+		// 列に入らない alias は要素ごと落とす (#3018)。
+		Aliases:     model.StringArray(aliases),
+		License:     req.License,
+		IsSensitive: req.IsSensitive,
+		LocalOnly:   req.LocalOnly,
+		// 列に入らない role id は落とす (#3018)。`aliases` と同じ varchar(128)[]。
+		RoleIDsThatCanBeUsedThisEmojiAsReaction: model.StringArray(roleIDs),
 	}
 	if err := h.emojiRepo.Create(e); err != nil {
 		// **取り込んだものを片付ける (#2999)。** ここまで来た複製は誰からも
@@ -3126,7 +3170,12 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 			// #2998 で塞いだので、mk-go が新しく作る経路はもう無い。塞ぎたいのは
 			// 「不正な名前を新しく入れる」ことで、既に保存済み・broadcast 済みの
 			// 名前を保存し直すのを拒む価値は無い。
-			if !emojiNamePattern.MatchString(*req.Name) {
+			//
+			// **長さも見る (#3018)。** pattern は文字種しか縛らないので、129 文字の
+			// ASCII 名は素通りして `UpdateFields` が SQLSTATE 22001 で落ちる。
+			// `admin/emoji/add` と `copy` は既に同じ値 (`emojiNameMaxRunes`) を見ており、
+			// **名前は切らずに弾く** — 切ると別の絵文字になる。
+			if !emojiNamePattern.MatchString(*req.Name) || utf8.RuneCountInString(*req.Name) > emojiNameMaxRunes {
 				return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid emoji name.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 			}
 			// **重複チェックを DB 障害で skip しない** (#2792)。
@@ -3139,6 +3188,32 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 			}
 		}
 		fields["name"] = *req.Name
+	}
+	// **列に入らない値を複製より前に弾く (#3018)。** `category` varchar(128) /
+	// `license` varchar(1024) を超える値はここを抜けると `UpdateFields` が
+	// SQLSTATE 22001 で落ち、**利用者の入力で 5xx が立つ**。#3014 より前は
+	// `UpdateFields` のエラーを種別を問わず 404 に丸めていたので「そんな絵文字は
+	// 無い」に化けていた。
+	//
+	// **複製より前**でなければならない — 後ろに置くと、400 のたびに誰からも
+	// 参照されない system 所有の複製が残る (#2999 / #3014 と同じ理由)。
+	// upstream の error 順序 (NO_SUCH_FILE → NO_SUCH_EMOJI) は変えないので、
+	// 絵文字の解決より後に置いてある。
+	if !emojiBodyFits(req.Category, emojiCategoryMaxRunes) {
+		return emojiValueTooLong(c, "category")
+	}
+	if !emojiBodyFits(req.License, emojiLicenseMaxRunes) {
+		return emojiValueTooLong(c, "license")
+	}
+	// 配列も**複製より前**に確定させる。全部落ちたら弾く (#3018) — 空配列を書くのは
+	// 「全消去」なので、落ちた結果を 204 で返すと既存の値を黙って消すことになる。
+	aliases, ok := fitEmojiAliases(req.Aliases)
+	if !ok {
+		return emojiValueTooLong(c, "aliases")
+	}
+	roleIDs, ok := fitEmojiRoleIDs(req.RoleIDs)
+	if !ok {
+		return emojiValueTooLong(c, "roleIdsThatCanBeUsedThisEmojiAsReaction")
 	}
 	// fileId 指定時は drive の画像で URL を差し替える (upstream 互換)。file は
 	// emoji 解決前に検証済み (emojiFile)、NO_SUCH_FILE はそこで返している (#1772)。
@@ -3245,7 +3320,9 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		// と空 slice 含めて `'{}'` PostgreSQL array リテラルに正しく変換さ
 		// れる。Aliases 列は NOT NULL DEFAULT '{}' なので NULL 書き込みは
 		// 即制約違反でエラーになっていた。
-		fields["aliases"] = model.StringArray(req.Aliases)
+		// 正規化は上で済ませてある。**nil にはしない** — `req.Aliases != nil` が
+		// 「明示送信した」の判定なので、nil に戻すと「省略」に化ける。
+		fields["aliases"] = model.StringArray(aliases)
 	}
 	if req.License != nil {
 		fields["license"] = *req.License
@@ -3258,7 +3335,7 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	}
 	// リアクション利用可能ロールの更新 (upstream の roleIdsThatCanBeUsedThisEmojiAsReaction)。
 	if req.RoleIDs != nil {
-		fields["roleIdsThatCanBeUsedThisEmojiAsReaction"] = model.StringArray(req.RoleIDs)
+		fields["roleIdsThatCanBeUsedThisEmojiAsReaction"] = model.StringArray(roleIDs)
 	}
 	if len(fields) == 0 {
 		// 何も変更しないリクエストは log を書かずに 204 で返す。
