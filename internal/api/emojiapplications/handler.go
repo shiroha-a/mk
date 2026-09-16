@@ -156,8 +156,11 @@ func (h *Handler) createError(c echo.Context, err error) error {
 			"NO_SUCH_FILE", "fileId is required.",
 			"fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
 	case errors.Is(err, emojiapplication.ErrTooLong):
+		// **NUL もここに来る (#3022)。** 長さと NUL を同じ述語 (`colfit.Fits`) で
+		// 見ているので、message は両方を説明する形にしてある。code / id は
+		// 据え置き (分けても利用者にできることは変わらない)。
 		return c.JSON(http.StatusBadRequest, apierr.Error(
-			"TOO_LONG", "A field is too long.",
+			"TOO_LONG", "A field is too long or contains an invalid character.",
 			"8c5e2f60-1a4d-4b93-8e77-3d0f6a2b9c66"))
 	case errors.Is(err, emojiapplication.ErrUnsupportedFileType):
 		return c.JSON(http.StatusBadRequest, apierr.Error(

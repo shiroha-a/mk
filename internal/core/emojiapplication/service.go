@@ -14,9 +14,9 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -55,10 +55,11 @@ var (
 	// ErrUnsupportedFileType is returned when the drive file is not an image
 	// type the emoji pipeline accepts.
 	ErrUnsupportedFileType = errors.New("unsupported file type")
-	// ErrTooLong is returned when a field exceeds the column width.
+	// ErrTooLong is returned when a field does not fit its column.
 	//
-	// 列の長さを超えたまま DB へ渡すと SQLSTATE 22001 が生で返り、利用者の
-	// 入力で 5xx が立つ。
+	// 列に入らない値をそのまま DB へ渡すと、長さ超過は SQLSTATE 22001、NUL は
+	// 22021 (本番の pgx extended protocol) が生で返り、利用者の入力で 5xx が立つ。
+	// **長さだけではない** — 判定は `colfit.Fits` で、NUL もここに落ちる (#3022)。
 	ErrTooLong = errors.New("field is too long")
 	// ErrForeignFile is returned when the drive file belongs to someone else.
 	//
@@ -82,10 +83,11 @@ var (
 	// **利用者に伝わる形にする。** drive が受け取れる大きさと複製の上限が
 	// 食い違うと、承認だけが恒久的に失敗する。原因が分かる文面を返す。
 	ErrImageTooLarge = errors.New("emoji image is too large to register")
-	// ErrFileGone is returned when the drive file backing the request was
-	// deleted between applying and approving.
+	// ErrFileGone is returned when the drive file backing the request cannot be
+	// used: deleted between applying and approving, or an id that cannot exist.
 	//
-	// 申請者が drive から消せるので普通に起きる。500 にしない。
+	// 申請者が drive から消せるので普通に起きる。500 にしない。**列に入らない
+	// `fileId` もここに落ちる** (#3022) — 存在しえない id なので「無い」と同じ。
 	ErrFileGone = errors.New("drive file is gone")
 )
 
@@ -151,6 +153,42 @@ var allowedImageTypes = map[string]bool{
 //
 // 検索用の別名で、際限なく受けると emoji 行の配列がそのまま膨らむ。
 const maxAliases = 16
+
+// 列幅は migration/000086_emoji_application (と 000089 の quota reset) の定義に
+// 対応する。変えるときは DDL と揃えること — 突き合わせは
+// `internal/repository/emoji_application_column_limits_test.go`。
+//
+// **判定は `colfit.Fits` に寄せる (#3022)。** 長さと NUL を 1 つの述語で見ないと、
+// 片方だけ足した状態に戻りやすい。NUL は長さに関わらず列に入らず
+// (本番の pgx extended protocol では SQLSTATE 22021)、**同じ書き込みに乗っている
+// 他の列まで巻き添えになる**ので、通すと利用者の入力で 5xx が立つ。
+const (
+	applicationNameMaxRunes         = 128
+	applicationCategoryMaxRunes     = 128
+	applicationAliasMaxRunes        = 128
+	applicationLicenseMaxRunes      = 1024
+	applicationCommentMaxRunes      = 2048
+	applicationRemoteHostMaxRunes   = 128
+	applicationRemoteNameMaxRunes   = 128
+	applicationRejectReasonMaxRunes = 2048
+	applicationFileIDMaxRunes       = 32
+	applicationIDMaxRunes           = 32
+	// `emoji_application_quota_reset.reason` (migration/000089)。
+	quotaResetReasonMaxLen = 1024
+)
+
+// FitsApplicationID reports whether id can be stored in `emoji_application.id`.
+//
+// **列に入らない id は引く前に弾く (#3022)。** NUL を含む id を SELECT のパラメータに
+// 載せるとその時点で落ち、`IsNotFound` でもないので 500 になる。実在する id は必ず
+// この述語を通る (列が varchar(32) で、NUL は text 型に入らない) ので、弾かれるのは
+// **存在しえない id だけ**。
+//
+// サービス層を通らずリポジトリを直叩きする経路 (`admin/emoji-application/related`)
+// からも同じ規則を使えるように公開している。
+func FitsApplicationID(id string) bool {
+	return colfit.Fits(id, applicationIDMaxRunes)
+}
 
 // IDGenerator issues new row IDs.
 type IDGenerator interface {
@@ -337,7 +375,6 @@ func (s *Service) quotaLimitsWithReset(userID string) (repository.QuotaLimits, *
 
 // quotaResetReasonMaxLen mirrors `emoji_application_quota_reset.reason`
 // (varchar(1024)).
-const quotaResetReasonMaxLen = 1024
 
 // ErrResetReasonRequired is returned when a quota reset carries no reason.
 //
@@ -367,7 +404,7 @@ func (s *Service) ResetQuota(userID, moderatorID, reason string) (UserSummary, *
 	// SQLSTATE 22001 が生のまま返り、**利用者の入力で 5xx が立つ** — 画面は
 	// 「もう一度お試しください」と案内するが、何度やっても同じ結果になる。
 	// このパッケージが license に対して既に採っている扱いと揃える。
-	if utf8.RuneCountInString(reason) > quotaResetReasonMaxLen {
+	if !colfit.Fits(reason, quotaResetReasonMaxLen) {
 		return UserSummary{}, nil, ErrTooLong
 	}
 
@@ -566,22 +603,23 @@ type CreateInput struct {
 func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 	name := strings.TrimSpace(in.Name)
 	// name は ASCII のみ (namePattern) なので文字数 = バイト数だが、数え方を
-	// 揃えておく。
-	if name == "" || utf8.RuneCountInString(name) > 128 || !namePattern.MatchString(name) {
+	// 揃えておく。**NUL は pattern が既に弾く**が、`colfit.Fits` を通しておくと
+	// pattern を緩めたときに穴が開かない (テストで両方を固定してある)。
+	if name == "" || !colfit.Fits(name, applicationNameMaxRunes) || !namePattern.MatchString(name) {
 		return nil, ErrInvalidName
 	}
 	license := strings.TrimSpace(in.License)
-	// **列の長さを超える入力を DB に渡さない (レビュー M8)。** 渡すと
-	// SQLSTATE 22001 が生のまま返り、利用者の入力で 5xx が立つ。
+	// **列に入らない入力を DB に渡さない (レビュー M8 / #3022)。** 渡すと
+	// SQLSTATE 22001 (長さ) / 22021 (NUL) が生のまま返り、利用者の入力で 5xx が立つ。
 	//
 	// **文字数で数える (レビュー R4)。** varchar(N) は文字数だが len() は
 	// バイト数なので、バイトで見ると日本語は列の約 1/3 しか使えず、正当な
-	// 入力が 400 になる。
-	if utf8.RuneCountInString(license) > 1024 {
+	// 入力が 400 になる。`colfit.Fits` が rune で数え、NUL も同時に落とす。
+	if !colfit.Fits(license, applicationLicenseMaxRunes) {
 		return nil, ErrTooLong
 	}
-	if utf8.RuneCountInString(strings.TrimSpace(in.Category)) > 128 ||
-		utf8.RuneCountInString(strings.TrimSpace(in.Comment)) > 2048 {
+	if !colfit.Fits(strings.TrimSpace(in.Category), applicationCategoryMaxRunes) ||
+		!colfit.Fits(strings.TrimSpace(in.Comment), applicationCommentMaxRunes) {
 		return nil, ErrTooLong
 	}
 	// **素材の検証だけが kind で分かれる。** 名前・ライセンス・長さ・重複は
@@ -600,6 +638,13 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 		if fileID == "" {
 			return nil, ErrFileRequired
 		}
+		// **id も列に入るかを見る (#3022)。** `remoteHost` / `remoteName` と同じで、
+		// **書き込みより前に SELECT で使う** — NUL を含む id を渡すと
+		// `FindByID` がその時点で落ち、`IsNotFound` でもないので 500 になる。
+		// 存在しえない id なので「そんなファイルは無い」で返す。
+		if !colfit.Fits(fileID, applicationFileIDMaxRunes) {
+			return nil, ErrFileGone
+		}
 		// 所有権は security の問題で、MIME は体験の問題。
 		var err error
 		if fileHash, err = s.checkFile(fileID, in.UserID); err != nil {
@@ -611,7 +656,10 @@ func (s *Service) Create(in CreateInput) (*model.EmojiApplication, error) {
 		if remoteHost == "" || remoteName == "" {
 			return nil, ErrRemoteRequired
 		}
-		if utf8.RuneCountInString(remoteHost) > 128 || utf8.RuneCountInString(remoteName) > 128 {
+		// **書き込みより前に SELECT で使う** (`checkRemoteEmoji`) ので、NUL が
+		// あると照会の時点で落ちる (#3022)。
+		if !colfit.Fits(remoteHost, applicationRemoteHostMaxRunes) ||
+			!colfit.Fits(remoteName, applicationRemoteNameMaxRunes) {
 			return nil, ErrTooLong
 		}
 		if err := s.checkRemoteEmoji(remoteName, remoteHost); err != nil {
@@ -848,6 +896,14 @@ func (s *Service) approvalLanded(appID, emojiID string) bool {
 
 // Reject closes the application without registering anything.
 func (s *Service) Reject(ctx context.Context, id, moderatorID, reason string) (*model.EmojiApplication, error) {
+	// **却下理由も列に入るかを見る (#3022)。** `rejectReason` は varchar(2048) で、
+	// ここは長さも NUL も見ていなかった。モデレーターの入力だが、落ちると
+	// **押した却下が保存されない**まま 500 になる。
+	// **保存されるのは trim 後** (`optionalString`) なので、そちらで判定する。
+	// 生の値で見ると、末尾の改行だけで上限ちょうどの理由が弾かれる。
+	if !colfit.Fits(strings.TrimSpace(reason), applicationRejectReasonMaxRunes) {
+		return nil, ErrTooLong
+	}
 	app, err := s.pending(id)
 	if err != nil {
 		return nil, err
@@ -875,6 +931,14 @@ func (s *Service) Cancel(id, userID string) error {
 	// 他人の「処理済み」申請に対して ErrNotPending が返り、存在しない ID
 	// (ErrNotFound) と区別できてしまう — ID 列挙のオラクルになる。呼び出し側が
 	// ErrForbidden を 404 に潰しても、この順序でなければ塞がらない。
+	//
+	// **列に入らない id は引く前に弾く (#3022)。** 存在しえない id なので
+	// not-found で返す — 所有者の確認より前だが、**申請の存在にも所有者にも
+	// 依存しない判定**なので上の列挙オラクルは開かない (実在する id は列に入る
+	// 以上、必ずこの述語を通る)。
+	if !FitsApplicationID(id) {
+		return ErrNotFound
+	}
 	app, err := s.apps.FindByID(id)
 	if err != nil {
 		if repository.IsNotFound(err) {
@@ -903,6 +967,12 @@ func (s *Service) Cancel(id, userID string) error {
 
 // pending loads an application and asserts it still awaits review.
 func (s *Service) pending(id string) (*model.EmojiApplication, error) {
+	// **列に入らない id は引く前に弾く (#3022)。** NUL を含む id を渡すと
+	// SELECT がその時点で落ち、`IsNotFound` でもないので 500 になる
+	// (`fileId` と同じ形)。存在しえない id なので not-found で返す。
+	if !FitsApplicationID(id) {
+		return nil, ErrNotFound
+	}
 	app, err := s.apps.FindByID(id)
 	if err != nil {
 		if repository.IsNotFound(err) {
@@ -930,7 +1000,9 @@ func normalizeAliases(in []string) []string {
 	seen := make(map[string]struct{}, len(in))
 	for _, a := range in {
 		a = strings.TrimSpace(a)
-		if a == "" || utf8.RuneCountInString(a) > 128 {
+		// 列に入らない要素は落とす。**切らない** — 切ると別の名前になり、
+		// リアクションの照合に使えないものが混ざる (#3018 / #3022)。
+		if a == "" || !colfit.Fits(a, applicationAliasMaxRunes) {
 			continue
 		}
 		if _, dup := seen[a]; dup {

@@ -170,6 +170,13 @@ func emojiApplicationReviewError(c echo.Context, err error) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"ALREADY_PROCESSED", "This request was already processed.",
 			"4e6f1a37-9c2b-4d80-a1f5-7b3c8e0d2a55"))
+	case errors.Is(err, emojiapplication.ErrTooLong):
+		// **却下理由が列に入らない場合 (#3022)。** 無いと 500 に落ちる。
+		// **申請側と同じ code / id を返す** — 同じ理由で断っているので、
+		// 経路ごとに分岐を持たせない。
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"TOO_LONG", "A field is too long or contains an invalid character.",
+			"8c5e2f60-1a4d-4b93-8e77-3d0f6a2b9c66"))
 	case errors.Is(err, emojiapplication.ErrDuplicateName):
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"DUPLICATE_NAME", "Duplicate name.",
@@ -707,6 +714,15 @@ func (h *Handler) EmojiApplicationRelated(c echo.Context) error {
 		req.Limit = 10
 	}
 
+	// **列に入らない id は引く前に弾く (#3022)。** ここはサービス層を通らず
+	// リポジトリを直叩きするので、`cancel` / `approve` / `reject` の guard が
+	// 効かない。NUL を含む id を渡すと SELECT がその時点で落ち、`IsNotFound`
+	// でもないので 500 になる。
+	if !emojiapplication.FitsApplicationID(req.ApplicationID) {
+		return c.JSON(http.StatusNotFound, apierr.Error(
+			"NO_SUCH_APPLICATION", "No such application.",
+			"3f0e6b4a-9c21-4d7e-8b35-6a1f2c9d4e08"))
+	}
 	app, err := h.emojiApplicationRepo.FindByID(req.ApplicationID)
 	if err != nil {
 		// DB 障害を not-found に丸めない (#2792)。
@@ -922,7 +938,8 @@ func (h *Handler) EmojiApplicationResetUserQuota(c echo.Context) error {
 		// 案内するが何度やっても通らない。
 		if errors.Is(err, emojiapplication.ErrTooLong) {
 			return c.JSON(http.StatusBadRequest, apierr.Error(
-				"INVALID_PARAM", "reason is too long.", apierr.UUIDInvalidParam))
+				"INVALID_PARAM", "reason is too long or contains an invalid character.",
+				apierr.UUIDInvalidParam))
 		}
 		return apierr.JSONInternalError(c)
 	}

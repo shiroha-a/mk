@@ -140,6 +140,9 @@ func TestEmojiApplicationReviewErrorMapping(t *testing.T) {
 		{"複製に失敗", emojiapplication.ErrImageCopyFailed, http.StatusInternalServerError, "INTERNAL_ERROR", "c2f7a3d1-58be-4e09-bb26-0d4a9e7f3c15"},
 		{"リモート取得に失敗", emojiapplication.ErrRemoteFetchFailed, http.StatusInternalServerError, "INTERNAL_ERROR", "0a4e0b9e-2d7c-4d6f-8f6b-1f9c2e9b4d83"},
 		{"リモート絵文字が消えた", emojiapplication.ErrNoSuchRemoteEmoji, http.StatusBadRequest, "NO_SUCH_EMOJI", "e2785b66-dca3-4087-9cac-b93c541cc425"},
+		// 却下理由が列に入らない場合 (#3022)。**無いと 500 に落ちる**ので、
+		// 申請側と同じ code / id で 400 を返す。
+		{"列に入らない理由", emojiapplication.ErrTooLong, http.StatusBadRequest, "TOO_LONG", "8c5e2f60-1a4d-4b93-8e77-3d0f6a2b9c66"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1295,14 +1298,17 @@ func TestEmojiApplicationUserSummaryReportsLastReset(t *testing.T) {
 	require.Contains(t, rec.Body.String(), `"lastReset":null`, "未実施が null になっていない")
 }
 
-// 長すぎる理由は 400 (500 にして「もう一度お試しください」と案内しない)。
+// 列に入らない理由は 400 (500 にして「もう一度お試しください」と案内しない)。
 func TestEmojiApplicationResetQuotaRejectsTooLongReason(t *testing.T) {
 	h, rev, _ := resetQuotaHandler(t)
 	rev.resetErr = emojiapplication.ErrTooLong
 	rec := doPost(h.EmojiApplicationResetUserQuota, `{"userId":"u1","reason":"長い"}`, adminUser)
 	require.Equal(t, http.StatusBadRequest, rec.Code,
-		"長すぎる理由が 500 になっている (画面は再試行を促すが何度やっても通らない)")
+		"列に入らない理由が 500 になっている (画面は再試行を促すが何度やっても通らない)")
 	require.Contains(t, rec.Body.String(), "INVALID_PARAM")
+	// **message が長さだけを言わない (#3022)。** NUL もここへ来るので、
+	// 「短くすれば通る」と読める文面だと直しようが無くなる。
+	require.Contains(t, rec.Body.String(), "invalid character")
 }
 
 // **窓の名前が空でも panic しない。** `Period` は素の string なので、
@@ -1603,4 +1609,22 @@ func TestCreateFromRemoteApplicationKeepsFileOnSuccess(t *testing.T) {
 	require.Equal(t, "sys-ok", created.DriveFileID)
 	require.Empty(t, fetcher.deletedIDs,
 		"承認が通ったのに取り込んだ画像を消している (絵文字だけ残って画像が 404 になる)")
+}
+
+// `related` はサービス層を通らずリポジトリを直叩きするので、申請 ID の guard を
+// ここにも置いてある (#3022 のレビュー M1)。**NUL を含む id は SELECT が
+// その時点で落ち、`IsNotFound` でもないので 500 になっていた。**
+func TestEmojiApplicationRelatedRejectsUnstorableID(t *testing.T) {
+	// 実 DB と同じ壊れ方をさせる — not-found を返す stub だと、guard を外しても
+	// 同じ 404 になって検出できない。
+	repo := &stubAppsRepo{findErr: errors.New("invalid message format")}
+	h := &apiadmin.Handler{}
+	h.SetEmojiApplicationRepo(repo)
+
+	// **JSON では NUL をエスケープで送る。** 生バイトを body に載せると JSON
+	// として不正になり、`Bind` の 400 で guard まで届かない。
+	rec := doPost(h.EmojiApplicationRelated, `{"applicationId":"a\u0000b"}`, adminUser)
+	require.Equal(t, http.StatusNotFound, rec.Code,
+		"存在しえない id で申請を引きに行っている (SELECT がそこで落ちる)")
+	require.Contains(t, rec.Body.String(), "NO_SUCH_APPLICATION")
 }

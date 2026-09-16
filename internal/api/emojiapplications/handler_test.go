@@ -367,6 +367,12 @@ func TestCreateErrorMappingForFileAndLength(t *testing.T) {
 			&model.DriveFile{ID: "f1", UserID: &owner, Type: "image/png"},
 			`{"name":"sushi","fileId":"f1","license":"` + strings.Repeat("x", 1100) + `"}`,
 			"TOO_LONG"},
+		// NUL も同じ TOO_LONG に落ちる (#3022)。長さと NUL を 1 つの述語で
+		// 見ているので、message は両方を説明する形にしてある。
+		{"ライセンスに NUL",
+			&model.DriveFile{ID: "f1", UserID: &owner, Type: "image/png"},
+			`{"name":"sushi","fileId":"f1","license":"a\u0000b"}`,
+			"TOO_LONG"},
 		{"画像でない",
 			&model.DriveFile{ID: "f1", UserID: &owner, Type: "video/mp4"},
 			`{"name":"sushi","fileId":"f1","license":"自作"}`,
@@ -384,6 +390,11 @@ func TestCreateErrorMappingForFileAndLength(t *testing.T) {
 			rec := doPost(emojiapplications.NewHandler(svc, apps, nil).Create, tc.body, alice)
 			require.Equal(t, http.StatusBadRequest, rec.Code)
 			require.Contains(t, rec.Body.String(), tc.expect)
+			if tc.expect == "TOO_LONG" {
+				// **message が長さだけを言わない。** NUL もここへ来るので、
+				// 「短くすれば通る」と読める文面だと直しようが無くなる。
+				require.Contains(t, rec.Body.String(), "invalid character")
+			}
 			require.Nil(t, apps.created, "検証を通さずに申請が保存されている")
 		})
 	}

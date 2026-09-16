@@ -41,7 +41,7 @@ const (
 // 権利表示なので、切った結果は**嘘になる**。申請経路
 // (`emojiapplication.Service.Create`) が利用者入力に対して既に `ErrTooLong` で
 // 弾いており、そちらに揃える (あちらが守るのは `emoji_application` の同じ幅の列で、
-// 別テーブル。**長さの扱いだけが同じ**で、NUL はあちらでは見ていない)。
+// 別テーブル。**NUL も #3022 で同じ述語に揃えた**)。
 //
 // **切るのはリモート由来の値だけ** — `admin/emoji/copy` と AP 経路は相手サーバーが
 // 決めた値を入れるので、弾くと取り込みそのものができなくなる (docs/divergence.md の
@@ -76,8 +76,9 @@ func emojiValueTooLong(c echo.Context, field string) error {
 // そのまま保存する)。
 //
 // 申請の作成側 (`internal/core/emojiapplication` の `normalizeAliases`) は**別物**で、
-// あちらは `emoji_application` の列に対して trim / 重複排除 / 件数上限も掛ける一方、
-// NUL は落とさない。共有していないのは書き込む先のテーブルが違うため。
+// あちらは `emoji_application` の列に対して trim / 重複排除 / 件数上限も掛ける。
+// **NUL の扱いも違う** — あちらは NUL を含む要素を丸ごと落とし (#3022)、こちらは
+// 下記のとおり NUL を除去して残す。共有していないのは書き込む先のテーブルが違うため。
 //
 // **NUL を含む要素だけは値が変わる** (`a\x00b` → `ab`)。「切らない」原則の例外で、
 // NUL を含んだままでは長さに関わらず SQLSTATE 22021 で落ちるため。#2998 からの挙動。
