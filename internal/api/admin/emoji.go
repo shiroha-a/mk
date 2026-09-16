@@ -27,9 +27,9 @@ const (
 	emojiAliasMaxRunes    = 128
 	emojiLicenseMaxRunes  = 1024
 	emojiRoleIDMaxRunes   = 128
-	// `emoji.originalUrl` / `publicUrl` は varchar(512)。`admin/emoji/add` の
-	// `url` 直接指定 (mk-go 独自の legacy 経路) だけが利用者の文字列をそのまま
-	// ここへ入れる。
+	// `emoji.originalUrl` / `publicUrl` は varchar(512)。利用者の文字列が直接入る
+	// のは `admin/emoji/add` の `url` 直接指定 (mk-go 独自の legacy 経路) だけだが、
+	// drive が作った URL も同じ列に入るので #3023 でそちらにも掛けている。
 	emojiURLMaxRunes = 512
 )
 
@@ -51,6 +51,66 @@ const (
 // SQLSTATE 22021 で弾くので、通すと同じく 500 になる。
 func emojiBodyFits(v *string, max int) bool {
 	return v == nil || colfit.Fits(*v, max)
+}
+
+// emojiFileURLFits reports whether the drive file's URLs fit `emoji.originalUrl`
+// and `publicUrl` (#3023)。
+//
+// **`drive_file.url` は varchar(1024) で、`emoji` 側は varchar(512)。** 保存先の
+// URL は `objectStorageBaseUrl` (+ prefix) + `/` + `accessKey` で決まる (`accessKey` は
+// 32 桁の hex 固定なので、長さを決めるのは設定のほう) ので、長い prefix の
+// オブジェクトストレージ構成では超えうる。通すと `Create` /
+// `UpdateFields` が SQLSTATE 22001 で落ち、**操作者には直しようのない 5xx** になる。
+//
+// **列は広げない。** upstream も 512 (`models/Emoji.ts`) なので広げると TS が
+// 保存できない値が入り、`emoji` は共有テーブルなので upstream 由来の列を `ALTER`
+// すると復路が壊れる (down で narrow できない)。**URL は切らない** — 途中で切った
+// URL は別物で、取りに行っても無駄なうえ壊れた参照を保存することになる
+// (#3018 の `url` 直接指定と同じ判断)。
+//
+// **これで 5xx が全部消えるわけではない。** `Storage.Put` が返す URL は
+// `base (+ prefix) + accessKey` で、`accessKey` は 32 桁の hex 固定なので、
+// `url` / `thumbnailUrl` / `webpublicUrl` の長さは**必ず同じ**になる。
+// `drive_file` 側の `thumbnailUrl` / `webpublicUrl` は varchar(512) なので、
+// **`url` が 512 を超える構成ではサムネイルを作る画像は複製の INSERT が先に
+// 22001 で落ちる** (= `Upload` の失敗として 500)。サムネイルは decode できる
+// 画像なら必ず作られる (`isMimeImage` + `imagedecode.Decode`) ので、ここが結果を
+// 変えるのは**サムネイルも webpublic も作られなかった行 (decode に失敗した画像) と、
+// 複製を作らない経路 (元が既に system 所有 / fetcher 未配線)**。`drive_file` 自身の
+// 列の食い違い (`url` は 1024 なのに派生 URL は 512) は別 issue。
+//
+// **`emoji.type` も見ていない。** varchar(64) に入るのは `webpublicType ?? type` で、
+// `drive_file` 側はどちらも varchar(128)。**フォールバックする `type` のほうが本命** —
+// `GenerateWebpublic` は EXIF が無く `webpublicMax` 以下の画像に nil を返すので、
+// webpublic が作られないことのほうが多い。入りうる値は絵文字の MIME allowlist
+// (最長は `image/vnd.mozilla.apng` の 22 文字) なので 64 には収まるが、上の
+// `drive_file` の食い違いと同じ粒度で残っている。
+//
+// **`publicUrl` 側も見るが、現状は冗長。** 上の「長さが同じ」から `url` が入れば
+// `publicUrl` も入る。導出を変えたときに素通りさせないために両方見る。
+// **`f == nil` は呼び出し元が手前で弾いているので到達しない。** false を返すのは
+// fail-closed のため (到達したら「URL が長すぎる」として 400 になる)。
+func emojiFileURLFits(f *model.DriveFile) bool {
+	return f != nil &&
+		colfit.Fits(f.URL, emojiURLMaxRunes) &&
+		colfit.Fits(preferWebpublicURL(f), emojiURLMaxRunes)
+}
+
+// emojiFileURLTooLong renders the 400 for a drive file whose URL cannot be
+// stored on an emoji.
+//
+// **`INVALID_PARAM` を共有する** (#3018 と同じ理由)。
+//
+// **「別のファイルを選べば済む」ではない。** URL の長さは
+// `base (+ prefix) + accessKey (32 桁固定)` で決まるので、同じ保存先の設定で選び直せば
+// どのファイルも同じ長さになる (選び直しで直るのは、元が既に system 所有で、その行が
+// 別の設定だったころに作られていた場合だけ)。**message では対処を指示せず、長さが
+// どこで決まるかを書く** — 保存先はオブジェクトストレージとは限らず、モデレーターが
+// 設定を変えられるとも限らないため。
+func emojiFileURLTooLong(c echo.Context) error {
+	return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+		"The drive file URL is too long to store on an emoji (max 512 characters). Its length is determined by the file storage base URL and prefix.",
+		"3d81ceae-475f-4600-b2a8-2bc116157532"))
 }
 
 // emojiValueTooLong renders the 400 for a body value that does not fit.
@@ -333,6 +393,12 @@ func (h *Handler) EmojiCopy(c echo.Context) error {
 		if !isAllowedEmojiImageType(df.Type) {
 			h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
+		}
+		// **URL が列に入るかを見る (#3023)。** 取り込んだ実体の URL は保存先が
+		// 決めるので、作ってからでないと分からない。弾いたら片付ける。
+		if !emojiFileURLFits(df) {
+			h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
+			return emojiFileURLTooLong(c)
 		}
 		// 不変条件 (#722): emoji.originalUrl は必ず drive_file.url と一致
 		// させる。`DriveFileRepository.DeleteOrphans` の cleanup guard が

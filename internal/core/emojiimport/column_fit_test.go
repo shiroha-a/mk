@@ -3,6 +3,7 @@ package emojiimport_test
 import (
 	"context"
 	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -29,6 +30,7 @@ const (
 	licLimit     = 1024
 	aliasLimit   = 128
 	nameLimit    = 128
+	urlLimit     = 512
 	existingName = "smile"
 )
 
@@ -376,6 +378,7 @@ func TestColumnLimitConstants(t *testing.T) {
 	assert.Equal(t, 128, catLimit, "emoji.category は varchar(128)")
 	assert.Equal(t, 128, aliasLimit, "emoji.aliases は varchar(128)[]")
 	assert.Equal(t, 1024, licLimit, "emoji.license は varchar(1024)")
+	assert.Equal(t, 512, urlLimit, "emoji.originalUrl / publicUrl は varchar(512)")
 }
 
 // **新しい guard の両方を固定する (#3021 のレビュー H1)。** 読み直しそのものを
@@ -468,4 +471,137 @@ func TestRun_RejectedRecordUploadsNothing(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 1, res.Skipped)
 	assert.Empty(t, files.Files, "弾いたレコードのために drive ファイルを作っている")
+}
+
+// storedURL returns a URL of exactly n runes.
+func storedURL(n int) string {
+	const prefix = "https://s3.example/"
+	return prefix + strings.Repeat("a", n-len(prefix))
+}
+
+// varyingStorage は Put のたびに別の URL を返す (本体 → webpublic の順)。
+//
+// **既定の構成では webpublic が作られない**ので `publicUrl` に入るのは `url` その
+// もので、publicUrl 側の判定が url 側を包含してしまう。url 側の条件を外した変異を
+// 捕まえるために、長さの違う URL を返す保存先を作る (レビュー M1)。
+type varyingStorage struct {
+	drive.Storage
+	urls []string
+	n    int
+}
+
+func (s *varyingStorage) Put(accessKey string, body io.Reader) (string, error) {
+	if _, err := s.Storage.Put(accessKey, body); err != nil {
+		return "", err
+	}
+	u := s.urls[len(s.urls)-1]
+	if s.n < len(s.urls) {
+		u = s.urls[s.n]
+	}
+	s.n++
+	return u, nil
+}
+
+// webpublicOnlyProcessor は webpublic だけを作る (サムネイルは作らない)。
+type webpublicOnlyProcessor struct{ drive.ImageProcessor }
+
+func (webpublicOnlyProcessor) GenerateThumbnail([]byte, string) (*drive.ProcessedImage, error) {
+	return nil, nil
+}
+
+func (webpublicOnlyProcessor) GenerateWebpublic(body []byte, _ string) (*drive.ProcessedImage, error) {
+	return &drive.ProcessedImage{Data: body, MimeType: "image/webp"}, nil
+}
+
+// 保存先の URL が `emoji.originalUrl` / `publicUrl` に入らないレコードは skip する
+// (#3023)。**元の絵文字は消さない** — 取り込みの後・削除の前で弾く。
+//
+// **上限は数字で作る。** `LocalStorage.Put` が返すのは `<base>/<accessKey>` で、
+// `accessKey` は 32 桁の hex 固定なので、base の長さから URL の長さが決まる。
+// 512 ちょうどは通り、1 文字超えると skip する形にしてあるので、`emojiURLMaxRunes`
+// を動かす変異はここで落ちる (DDL との突き合わせは
+// `internal/repository/emoji_column_limits_test.go`)。
+func TestRun_ChecksStoredURLAgainstEmojiColumns(t *testing.T) {
+	const accessKeyLen = 32 // hex 32 桁 (`newAccessKey`)
+	for _, tc := range []struct {
+		name     string
+		urlRunes int
+		imported int
+	}{
+		{"上限ちょうどは通す", urlLimit, 1},
+		{"1 文字超過は skip する", urlLimit + 1, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, _, repo, _ := newDeps(t, importOne(t, map[string]any{"name": existingName}))
+			// 長い prefix のオブジェクトストレージ構成を模す (base URL が長い)。
+			files := testutil.NewMockDriveFileRepository()
+			folders := testutil.NewMockDriveFolderRepository()
+			folders.FilesRef = files
+			idGen, err := id.NewGenerator("aidx")
+			require.NoError(t, err)
+			const prefix = "https://s3.example/"
+			base := prefix + strings.Repeat("a", tc.urlRunes-len(prefix)-1-accessKeyLen)
+			deps.Uploader = drive.NewService(files, folders,
+				drive.NewLocalStorage(t.TempDir(), base), idGen)
+			require.NoError(t, repo.Create(&model.Emoji{
+				ID: "old", Name: existingName, OriginalURL: "https://example/old.png",
+			}))
+
+			res, rerr := emojiimport.NewImporter(deps).Run(context.Background(), "admin", "f1")
+			require.NoError(t, rerr)
+			assert.Equal(t, tc.imported, res.Imported)
+			found, ferr := repo.FindByNameAndHost(existingName, nil)
+			require.NoError(t, ferr, "既存の絵文字が消えている")
+			if tc.imported == 1 {
+				assert.NotEqual(t, "old", found.ID, "取り込めるはずの URL で skip している")
+				assert.Equal(t, tc.urlRunes, len([]rune(found.OriginalURL)),
+					"想定した長さの URL になっていない (テストの前提が崩れている)")
+				return
+			}
+			assert.Equal(t, 1, res.Skipped)
+			assert.Equal(t, "old", found.ID, "弾いたのに既存の絵文字が差し替わっている")
+		})
+	}
+}
+
+// **片方だけが超過する形**を両向きとも固定する (#3023 のレビュー M1 / M2)。
+//
+// 既定の構成では webpublic が作られず `publicUrl` は `url` と同じ値になるので、
+// どちらか一方の条件を外した変異が素通りする。`emoji.originalUrl` に入るのは `url`
+// そのもの (#722 の不変条件)、`publicUrl` に入るのは webpublic なので両方見る。
+func TestRun_SkipsWhenEitherStoredURLDoesNotFit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// 1 回目の Put = 本体、2 回目 = webpublic。
+		urls []string
+	}{
+		{"url だけ超過 (webpublic は収まる)", []string{storedURL(urlLimit + 1), storedURL(urlLimit)}},
+		{"webpublic だけ超過 (url は収まる)", []string{storedURL(urlLimit), storedURL(urlLimit + 1)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			deps, _, repo, _ := newDeps(t, importOne(t, map[string]any{"name": existingName}))
+			files := testutil.NewMockDriveFileRepository()
+			folders := testutil.NewMockDriveFolderRepository()
+			folders.FilesRef = files
+			idGen, err := id.NewGenerator("aidx")
+			require.NoError(t, err)
+			svc := drive.NewService(files, folders, &varyingStorage{
+				Storage: drive.NewLocalStorage(t.TempDir(), "https://example.com/files"),
+				urls:    tc.urls,
+			}, idGen)
+			svc.SetImageProcessor(webpublicOnlyProcessor{drive.NewDefaultImageProcessor()})
+			deps.Uploader = svc
+			require.NoError(t, repo.Create(&model.Emoji{
+				ID: "old", Name: existingName, OriginalURL: "https://example/old.png",
+			}))
+
+			res, rerr := emojiimport.NewImporter(deps).Run(context.Background(), "admin", "f1")
+			require.NoError(t, rerr)
+			assert.Equal(t, 0, res.Imported)
+			assert.Equal(t, 1, res.Skipped)
+			found, ferr := repo.FindByNameAndHost(existingName, nil)
+			require.NoError(t, ferr, "弾いたのに既存の絵文字が消えている")
+			assert.Equal(t, "old", found.ID)
+		})
+	}
 }

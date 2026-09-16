@@ -60,7 +60,7 @@ func TestEmoji_AdminColumnLimits(t *testing.T) {
 			WHERE table_schema = current_schema() AND table_name = 'emoji' AND column_name = ?`,
 			tc.column).Scan(&n).Error)
 		assert.Equal(t, tc.max, n,
-			"emoji.%s の列長が変わっている (internal/api/admin/emoji.go と、対応する定数があれば internal/core/emojiimport/service.go も直すこと)",
+			"emoji.%s の列長が変わっている (同じ値を持つ定数は internal/api/admin/emoji.go / internal/core/emojiimport/service.go / internal/maintenance/emoji_system_file_backfill.go / internal/core/federation/resolver.go。`grep -rnE 'emoji[A-Za-z]*MaxRunes +=' --include=*.go internal/` で確かめること)",
 			tc.column)
 	}
 	for _, tc := range emojiAdminArrayColumns {

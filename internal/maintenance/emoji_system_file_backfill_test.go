@@ -680,6 +680,93 @@ func TestBackfillEmojiSystemFilesRejectsCopiedType(t *testing.T) {
 	requireNoSystemFiles(t, "許可外の複製の行が残っている")
 }
 
+// storedEmojiURL returns a URL of exactly n runes (保存先が返す形を模す)。
+//
+// **長さは定数から作る。** マジックナンバー (600 文字など) で作ると、上限を
+// **締める**向きの変異 (512 → 511) が素通りする — 正常な複製を `unrepairable` に
+// 落として消す側に倒れる変異なので、そちらのほうが危険 (レビュー M2 で実測)。
+func storedEmojiURL(n int) string {
+	const prefix = "https://s3.example/"
+	return prefix + strings.Repeat("a", n-len(prefix))
+}
+
+// **複製の URL が `emoji` の列に入らないなら、複製を消して `unrepairable` にする (#3023)。**
+// `drive_file.url` は varchar(1024) なので複製自体は作れるが、
+// `emoji.originalUrl` / `publicUrl` は varchar(512) なので更新が SQLSTATE 22001 で
+// 落ちる。**再実行しても同じ**ので `failed` (= 原因を取り除いて再実行) ではない。
+// 保存先の prefix が長いオブジェクトストレージ構成で起こりうる。
+func TestBackfillEmojiSystemFilesRejectsCopyURLTooLongForEmoji(t *testing.T) {
+	over := storedEmojiURL(emojiURLMaxRunes + 1)
+	fits := storedEmojiURL(emojiURLMaxRunes)
+	for _, tc := range []struct {
+		name string
+		// suffix は行の id に入るので短くする (`emoji_application.id` は varchar(32))。
+		suffix  string
+		breakIt func(*model.DriveFile)
+	}{
+		{"url が 1 文字超過", "lu1", func(copied *model.DriveFile) { copied.URL = over }},
+		// **`url` 側だけが超過する形も要る。** `PreferWebpublicURL` は
+		// `webpublicUrl ?? url` なので、webpublic が空のケースだけだと publicUrl 側の
+		// 判定が url 側を包含し、url 側の条件を外した変異が素通りする (レビュー M1)。
+		{"url だけ超過 (webpublic は収まる)", "lu2", func(copied *model.DriveFile) {
+			copied.URL = over
+			copied.WebpublicURL = &fits
+		}},
+		// **webpublic 側も見る。** 本番では `drive_file.webpublicUrl` も
+		// varchar(512) なので複製の INSERT が先に落ちるが、`emoji.publicUrl` に
+		// 入るのはこちらの値なので、導出を変えたときに素通りさせない。
+		{"webpublic が 1 文字超過", "lu3", func(copied *model.DriveFile) {
+			copied.WebpublicURL = &over
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := localFixture(t)
+			app, e, _ := seedApprovedOwn(t, fx, tc.suffix)
+			before := reloadEmoji(t, e.ID).OriginalURL
+			c := &hookedCopier{inner: fx.svc, afterCopy: tc.breakIt}
+
+			res := run(t, c, EmojiSystemFileBackfillOptions{Apply: true})
+			entry := entryFor(t, res, app.ID)
+			require.Equal(t, EmojiSystemFileUnrepairable, entry.Outcome, entry.Reason)
+			require.Contains(t, entry.Reason, "varchar(512)")
+			require.True(t, res.NeedsAttention())
+			require.Len(t, c.deleteFile, 1, "入らない複製を片付けていない")
+			require.Equal(t, before, reloadEmoji(t, e.ID).OriginalURL, "絵文字が変わっている")
+			requireNoSystemFiles(t, "入らない複製の行が残っている")
+		})
+	}
+}
+
+// **上限ちょうどは通す。** 締める向きの off-by-one で、正常な複製を消したうえで
+// 「削除か差し替え」を運用者に案内する形に倒れる (レビュー M2)。
+// 512 文字の URL が実際に `emoji.originalUrl` へ書けることもここで確かめている
+// (テスト DB は本物の DDL を適用してある)。
+func TestBackfillEmojiSystemFilesAcceptsCopyURLAtLimit(t *testing.T) {
+	fx := localFixture(t)
+	app, e, _ := seedApprovedOwn(t, fx, "atlimit")
+	url := storedEmojiURL(emojiURLMaxRunes)
+	c := &hookedCopier{inner: fx.svc, afterCopy: func(copied *model.DriveFile) {
+		copied.URL = url
+	}}
+
+	res := run(t, c, EmojiSystemFileBackfillOptions{Apply: true})
+	entry := entryFor(t, res, app.ID)
+	require.Equal(t, EmojiSystemFileCopied, entry.Outcome, entry.Reason)
+	require.Empty(t, c.deleteFile, "入るはずの複製を片付けている")
+	require.Equal(t, url, reloadEmoji(t, e.ID).OriginalURL)
+}
+
+// 上限の値そのものを固定する (#3023)。
+//
+// **上の 2 つは URL を `emojiURLMaxRunes` から作るので、締める向きは自分では
+// 捕まえられない** (511 にすると URL も 511/512 になって自己整合する。実測で
+// 落ちるのはこのテストだけ)。広げる向き (513) は `AcceptsCopyURLAtLimit` が
+// 513 文字を実 DDL へ書こうとして落ちる。**だからこの固定が要る。**
+// DDL との突き合わせは `internal/repository/emoji_column_limits_test.go`。
+func TestEmojiURLMaxRunesMatchesColumn(t *testing.T) {
+	require.Equal(t, 512, emojiURLMaxRunes, "emoji.originalUrl / publicUrl は varchar(512)")
+}
+
 // --- 対象の絞り込み ---
 
 // 申請経由でない絵文字や、承認されていない申請は対象にしない。
@@ -775,18 +862,19 @@ var _ SystemFileCopier = (*drive.Service)(nil)
 // **絵文字の更新が障害で失敗したら、作った複製を片付けて `failed` にする。**
 // 残すと誰からも参照されない孤児になり、しかも申請は直っていない。
 //
-// 失敗させるのに `drive_file.url` (varchar(1024)) には収まるが
-// `emoji.originalUrl` (varchar(512)) には収まらない URL を複製に持たせる。
-// オブジェクトストレージの endpoint が長い構成では実際に起こりうる形。
+// 失敗は UPDATE の手前で注入する。**列幅で落とす形は使えない** — #3023 で
+// 長すぎる URL は更新の前に `unrepairable` として弾くようになったので、
+// ここを通らない (それを固定するのが
+// `TestBackfillEmojiSystemFilesRejectsCopyURLTooLongForEmoji`)。
 func TestBackfillEmojiSystemFilesUpdateFailure(t *testing.T) {
 	fx := localFixture(t)
 	app, e, _ := seedApprovedOwn(t, fx, "updfail")
 	before := reloadEmoji(t, e.ID).OriginalURL
 
-	c := &hookedCopier{inner: fx.svc, afterCopy: func(copied *model.DriveFile) {
-		copied.URL = "https://s3.example/" + strings.Repeat("a", 600)
-	}}
-	res := run(t, c, EmojiSystemFileBackfillOptions{Apply: true})
+	db := failingUpdateDB(t)
+	c := &hookedCopier{inner: fx.svc}
+	res, err := BackfillEmojiSystemFiles(context.Background(), db, c, EmojiSystemFileBackfillOptions{Apply: true})
+	require.NoError(t, err)
 	entry := entryFor(t, res, app.ID)
 	require.Equal(t, EmojiSystemFileFailed, entry.Outcome, entry.Reason)
 	require.Contains(t, entry.Reason, "絵文字の更新に失敗")
@@ -986,6 +1074,27 @@ func failingUpdateAfterExecDB(t *testing.T) *gorm.DB {
 	require.NoError(t, db.Callback().Update().After("gorm:update").
 		Register("maintenance_test_update_ack_lost", func(tx *gorm.DB) {
 			tx.AddError(errors.New("injected: connection reset after commit"))
+		}))
+	return db
+}
+
+// failingUpdateDB returns a handle whose UPDATE statements fail before they are
+// sent, reproducing "the write never landed".
+//
+// GORM の組み込み callback は先頭で `db.Error` を見て早期 return するので、
+// `Before` で足したエラーは UPDATE そのものを実行させない。
+func failingUpdateDB(t *testing.T) *gorm.DB {
+	t.Helper()
+	db, err := testutil.OpenTestDB()
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if sqlDB, derr := db.DB(); derr == nil {
+			_ = sqlDB.Close()
+		}
+	})
+	require.NoError(t, db.Callback().Update().Before("gorm:update").
+		Register("maintenance_test_update_never_ran", func(tx *gorm.DB) {
+			tx.AddError(errors.New("injected: update failed"))
 		}))
 	return db
 }

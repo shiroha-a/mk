@@ -169,6 +169,9 @@ const (
 	emojiCategoryMaxRunes = 128
 	emojiAliasMaxRunes    = 128
 	emojiLicenseMaxRunes  = 1024
+	// `emoji.originalUrl` / `publicUrl` (#3023)。`drive_file.url` は varchar(1024)
+	// と広いので、保存先次第で超えうる。
+	emojiURLMaxRunes = 512
 )
 
 // fitsColumns reports whether the record's body values can be stored, and
@@ -412,6 +415,32 @@ func (i *Importer) replaceEmoji(ctx context.Context, record metaRecord, body []b
 	publicURL := uploaded.URL
 	if uploaded.WebpublicURL != nil && *uploaded.WebpublicURL != "" {
 		publicURL = *uploaded.WebpublicURL
+	}
+	// **URL が列に入るかを見る (#3023)。** `drive_file.url` は varchar(1024) だが
+	// `emoji.originalUrl` / `publicUrl` は varchar(512)。保存先の URL は
+	// `objectStorageBaseUrl` + prefix + `accessKey` で決まるので、長い prefix の
+	// 構成では超える。通すと `Create` が 22001 で落ち、**その時点で元の絵文字は
+	// まだ消していない**とはいえ復元経路に頼ることになる。
+	//
+	// **取り込んだ実体は消さない。** この時点では絵文字の行に一切触っていないので
+	// 未参照なのは確実だが、この関数は upload を消す経路を持たない (#3021 と同じ形)。
+	// **100 件の zip が全滅すれば 100 個の孤児が残り**、回収は手動の
+	// `admin/drive/cleanup` だけ。
+	//
+	// **ここまで来ないことが多い** — `Put` が返す URL は `base (+ prefix) + accessKey`
+	// (32 桁の hex 固定) なので `url` / `thumbnailUrl` / `webpublicUrl` の長さは必ず
+	// 同じで、`drive_file` 側の後ろ 2 つは varchar(512)。つまりサムネイルを作る画像
+	// (decode できるものはすべて) は上の `Upload` が先に落ちる。同じ理由で
+	// `publicURL` 側の判定も現状は冗長だが、導出を変えたときに素通りさせないために
+	// 両方見る。
+	//
+	// **数えるのは rune。** `colfit.Fits` は PostgreSQL の varchar(n) と同じ
+	// 「n 文字」で見る (byte ではない)。NUL も入らないので、長さが収まっていても
+	// 落ちることがある。
+	if !colfit.Fits(uploaded.URL, emojiURLMaxRunes) || !colfit.Fits(publicURL, emojiURLMaxRunes) {
+		return fmt.Errorf(
+			"drive file url does not fit emoji.originalUrl / publicUrl (max %d runes; url=%d, publicUrl=%d)",
+			emojiURLMaxRunes, len([]rune(uploaded.URL)), len([]rune(publicURL)))
 	}
 	fileType := uploaded.Type
 	if uploaded.WebpublicType != nil && *uploaded.WebpublicType != "" {

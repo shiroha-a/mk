@@ -77,6 +77,13 @@ var (
 	// 見え、監視でも 5xx が立たない (#2792 が禁じている形)。リモート経路が
 	// `ErrRemoteFetchFailed` を 500 に倒しているのと揃える。
 	ErrImageCopyFailed = errors.New("failed to copy emoji image")
+	// ErrImageURLTooLong is returned when the stored image URL does not fit the
+	// emoji columns (#3023)。
+	//
+	// `drive_file.url` は varchar(1024) だが `emoji.originalUrl` / `publicUrl` は
+	// varchar(512) で、長い prefix のオブジェクトストレージ構成では超えうる。
+	// 通すと `Create` が SQLSTATE 22001 で落ち、承認が 5xx になる。
+	ErrImageURLTooLong = errors.New("emoji image URL is too long to store")
 	// ErrImageTooLarge is returned when the approved image exceeds the copy
 	// limit (#2966).
 	//

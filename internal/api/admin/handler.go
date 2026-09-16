@@ -2867,9 +2867,8 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 	}
 	// **`url` 直接指定も見る (#3018)。** `emoji.originalUrl` / `publicUrl` は
 	// varchar(512) で、この経路は利用者の文字列をそのまま両方へ入れる。
-	// **`fileId` 経路は対象外** — あちらに入るのは drive が作った URL で、
-	// `drive_file.url` は varchar(1024) と広いため、極端に長い prefix の
-	// オブジェクトストレージ構成でだけ超えうる (別 issue)。
+	// **`fileId` 経路は複製を作った後に見る** (#3023)。あちらに入るのは drive が
+	// 作った URL で、保存先が決めるまで長さが分からないため。
 	// **切らない** — 途中で切った URL は別物で、取りに行っても無駄なうえ壊れた
 	// 参照を保存することになる (`colfit` の doc と同じ判断)。
 	if url != "" && !colfit.Fits(url, emojiURLMaxRunes) {
@@ -2953,6 +2952,13 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 			}
 			src = copied
 			systemFileID = copied.ID
+		}
+		// **URL が列に入るかを見る (#3023)。** 複製の URL は保存先が決めるので、
+		// 作ってからでないと分からない。**弾いたら片付ける** — その時点で誰からも
+		// 参照されない (MIME の再検査と同じ形)。
+		if !emojiFileURLFits(src) {
+			h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
+			return emojiFileURLTooLong(c)
 		}
 		// 不変条件 (#722): `emoji.originalUrl` は必ず `drive_file.url` と一致
 		// させる。`DriveFileRepository.DeleteOrphans` の guard が
@@ -3301,6 +3307,11 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 			src = copied
 			systemFileID = copied.ID
 			systemFileURL = copied.URL
+		}
+		// **URL が列に入るかを見る (#3023)。** 弾いたら複製を片付ける。
+		if !emojiFileURLFits(src) {
+			h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
+			return emojiFileURLTooLong(c)
 		}
 		// upstream update.ts: originalUrl=url, publicUrl=webpublicUrl??url,
 		// fileType=webpublicType??type。EmojiAdd / EmojiCopy と同ロジック。

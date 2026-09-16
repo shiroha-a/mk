@@ -170,6 +170,15 @@ func emojiApplicationReviewError(c echo.Context, err error) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error(
 			"ALREADY_PROCESSED", "This request was already processed.",
 			"4e6f1a37-9c2b-4d80-a1f5-7b3c8e0d2a55"))
+	case errors.Is(err, emojiapplication.ErrImageURLTooLong):
+		// **保存先の URL が `emoji` の列に入らない (#3023)。** 直せるのは保存先の
+		// 設定だけ (URL の長さは `base (+ prefix) + accessKey` で決まるので、
+		// 申請者が別の画像を出し直しても同じ長さになる) だが、**操作者の入力で
+		// 起きた失敗ではない**ので 500 にはしない。承認できないあいだの出口は却下。
+		// `admin/emoji/*` と同じ code / id / message を返す。
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+			"The drive file URL is too long to store on an emoji (max 512 characters). Its length is determined by the file storage base URL and prefix.",
+			"3d81ceae-475f-4600-b2a8-2bc116157532"))
 	case errors.Is(err, emojiapplication.ErrTooLong):
 		// **却下理由が列に入らない場合 (#3022)。** 無いと 500 に落ちる。
 		// **申請側と同じ code / id を返す** — 同じ理由で断っているので、
@@ -466,6 +475,12 @@ func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApp
 		src = copied
 		systemFileID = copied.ID
 	}
+	// **URL が列に入るかを見る (#3023)。** 複製の URL は保存先が決めるので、
+	// 作ってからでないと分からない。**弾いたら片付ける** (MIME の再検査と同じ形)。
+	if !emojiFileURLFits(src) {
+		h.deleteSystemEmojiFile(ctx, systemFileID)
+		return emojiapplication.CreatedEmoji{}, emojiapplication.ErrImageURLTooLong
+	}
 
 	now := time.Now()
 	e := &model.Emoji{
@@ -650,6 +665,19 @@ func (h *Handler) createFromRemoteApplication(ctx context.Context, app *model.Em
 			// 参照されないので、残すと孤児になる。
 			h.deleteSystemEmojiFile(ctx, systemFileID)
 			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrUnsupportedFileType
+		}
+		// **URL が列に入るかを見る (#3023)。**
+		//
+		// **ここだけ取り込みブロックの内側にある。** own 経路 (上) と
+		// `admin/emoji/*` はブロックの外に置いてあるが、こちらは取り込まなかった
+		// ときのフォールバックが `src` = **`emoji` 行の値**で、その `originalUrl` /
+		// `publicUrl` は同じ varchar(512) なので入ることが保証されている
+		// (`copied` の初期化を参照)。**揃えるつもりで外へ出さないこと** — 出すと
+		// fetcher 未配線の構成で毎回この検査を通ることになり、意味は変わらないが
+		// 「入るはずのものを見ている」分かりにくさだけが残る。
+		if !emojiFileURLFits(df) {
+			h.deleteSystemEmojiFile(ctx, systemFileID)
+			return emojiapplication.CreatedEmoji{}, emojiapplication.ErrImageURLTooLong
 		}
 		copied.OriginalURL = df.URL
 		copied.PublicURL = preferWebpublicURL(df)

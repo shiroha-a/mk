@@ -143,6 +143,8 @@ func TestEmojiApplicationReviewErrorMapping(t *testing.T) {
 		// 却下理由が列に入らない場合 (#3022)。**無いと 500 に落ちる**ので、
 		// 申請側と同じ code / id で 400 を返す。
 		{"列に入らない理由", emojiapplication.ErrTooLong, http.StatusBadRequest, "TOO_LONG", "8c5e2f60-1a4d-4b93-8e77-3d0f6a2b9c66"},
+		// 保存先の URL が emoji の列に入らない (#3023)。**無いと 500 に落ちる。**
+		{"列に入らない URL", emojiapplication.ErrImageURLTooLong, http.StatusBadRequest, "INVALID_PARAM", "3d81ceae-475f-4600-b2a8-2bc116157532"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

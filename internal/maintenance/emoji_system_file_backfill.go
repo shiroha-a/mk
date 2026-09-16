@@ -10,6 +10,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/safehttp"
 )
@@ -312,6 +313,24 @@ func processEmojiSystemFile(
 		return classify(entry, EmojiSystemFileUnrepairable,
 			fmt.Sprintf("複製した実体の MIME が絵文字として許可されていない (%s)", copied.Type))
 	}
+	// **URL が `emoji` の列に入るかを見る (#3023)。** `drive_file.url` は
+	// varchar(1024) だが `emoji.originalUrl` / `publicUrl` は varchar(512) で、
+	// 長い prefix のオブジェクトストレージ構成では超える。見ないと下の `Updates` が
+	// SQLSTATE 22001 で落ち、**再実行では直らないのに `failed` (= 再実行を促す)**
+	// に分類される。上限超過を `unrepairable` に分けているのと同じ判断。
+	//
+	// **ここまで来ないことが多い** — `Put` が返す URL は `base (+ prefix) + accessKey`
+	// (32 桁の hex 固定) なので `url` / `thumbnailUrl` / `webpublicUrl` の長さは必ず
+	// 同じで、`drive_file` 側の後ろ 2 つは varchar(512)。つまりサムネイルを作る画像は
+	// 上の `CopyToSystemFile` が先に落ち、こちらは `failed` (複製に失敗) になる。
+	// 同じ理由で `publicUrl` 側の判定も現状は冗長だが、導出を変えたときに素通り
+	// させないために両方見る。
+	if !colfit.Fits(copied.URL, emojiURLMaxRunes) ||
+		!colfit.Fits(drive.PreferWebpublicURL(copied), emojiURLMaxRunes) {
+		deleteCopy(copier, copied.ID, &entry)
+		return classify(entry, EmojiSystemFileUnrepairable,
+			"複製の URL が emoji.originalUrl / publicUrl (varchar(512)) に入らない。保存先の設定を短くするしかない")
+	}
 
 	now := nowFn()
 	// **条件付き更新。** 走っている間に誰かが同じ絵文字の画像を差し替えていたら、
@@ -417,6 +436,11 @@ func classify(entry EmojiSystemFileEntry, outcome EmojiSystemFileOutcome, reason
 	entry.Reason = entry.Reason + reason
 	return entry
 }
+
+// emojiURLMaxRunes は `emoji.originalUrl` / `publicUrl` の列幅 (#3023)。
+// `drive_file.url` は varchar(1024) と広いので、保存先次第で超えうる。
+// DDL 側の実値は `internal/repository/emoji_column_limits_test.go` が突き合わせる。
+const emojiURLMaxRunes = 512
 
 // anySystemOwned reports whether any of files belongs to the instance itself.
 //
