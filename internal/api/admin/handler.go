@@ -2855,8 +2855,8 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 		// ふつうモデレーター自身が直前に上げたファイルで、本人が drive から消せば
 		// 絵文字の画像が壊れる (ロールの変更や退会でも同じ)。申請の承認は #2966、
 		// リモートの複製と zip の取り込みは #670 で既に system 所有にしてある。
-		// **`admin/emoji/update` の `fileId` はまだ利用者の drive に依存している**
-		// (差し替えると再び利用者所有のファイルを指す)。あちらは別 issue。
+		// **`admin/emoji/update` の `fileId` も #3014 で同じ形にした** — 差し替えた
+		// 先も複製してから参照するので、REST の経路はこれで揃っている。
 		//
 		// **元のファイルは触らない** — ノートの添付やプロフィールで使っている
 		// 可能性があり、所有権を移すと利用者の drive から突然消える。
@@ -2899,7 +2899,7 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 					"fileId", req.FileID, "name", req.Name, "err", cerr)
 				// **絵文字を作らない。** 元ファイルを参照して作ると、直そうと
 				// している依存をそのまま残すことになる。
-				return emojiCopyFailureResponse(c, cerr)
+				return emojiCopyFailureResponse(c, cerr, "fc46b5a4-6b92-4c33-ac66-b806659bb5cf")
 			}
 			// **複製した実体の MIME を見る (#2966 と同じ理由)。** `Upload` は
 			// `AnalyseFile` でバイト列から型を引き直すので、行の宣言と実体が
@@ -2955,22 +2955,29 @@ func (h *Handler) EmojiAdd(c echo.Context) error {
 
 // emojiCopyFailureResponse maps a CopyToSystemFile failure onto the wire.
 //
-// **承認経路 (`emojiApplicationReviewError`) と同じ error id を返す。** 同じ複製が
-// 同じ理由で失敗したのに endpoint ごとに id が違うと、クライアントは経路ごとに
-// 分岐を持つことになる。
+// **`EMOJI_IMAGE_TOO_LARGE` と 500 は承認経路 (`emojiApplicationReviewError`) と
+// 同じ error id を返す。** 同じ複製が同じ理由で失敗したのに endpoint ごとに id が
+// 違うと、クライアントは経路ごとに分岐を持つことになる。**`NO_SUCH_FILE` だけは
+// 例外**で、upstream が endpoint ごとに別の id を宣言しているため呼び出し元から
+// 渡す (下記)。
 //
 // **種別を潰さない (#2792)。** 全部 500 にすると、選び直せば済むもの
 // (実体がもう無い / 大きすぎる) が運用側に直しようのない 5xx になる。逆に全部
 // 400 にすると、ストレージや DB の障害が client error に化けて監視でも 5xx が
 // 立たない。
-func emojiCopyFailureResponse(c echo.Context, err error) error {
+//
+// **`NO_SUCH_FILE` の id だけは呼び出し元から渡す。** upstream は endpoint ごとに
+// 別の id を宣言しており (`add.ts` は `fc46b5a4…`、`update.ts` は `14fb9fd9…`)、
+// 共有すると**同じ endpoint が同じ code に 2 つの id を返す**ことになる
+// (`update` は drive 行が無いときに自分の id を返すので)。`error.id` で分岐する
+// クライアントは片方を取りこぼす。
+func emojiCopyFailureResponse(c echo.Context, err error, noSuchFileID string) error {
 	switch {
 	case errors.Is(err, coredrive.ErrObjectNotFound):
 		// 行はあるのに実体が無い (`isLink` / `accessKey` 無し / ストレージから
 		// 消えた)。別のファイルを選べば済むので 400。
 		return c.JSON(http.StatusBadRequest, apierr.Error(
-			"NO_SUCH_FILE", "No such file.",
-			"fc46b5a4-6b92-4c33-ac66-b806659bb5cf"))
+			"NO_SUCH_FILE", "No such file.", noSuchFileID))
 	case errors.Is(err, safehttp.ErrResponseTooLarge):
 		// 複製の上限 (32 MiB) を超えている。drive が受け取る上限 (role policy の
 		// `maxFileSizeMb`) はこれより上へ設定できるので、**upload はできたのに
@@ -3024,6 +3031,10 @@ func preferWebpublicType(f *model.DriveFile) *string {
 // Misskey TS の admin/emoji/update は name/category/aliases に加え license/
 // isSensitive/localOnly も受け付ける。フロントの編集ダイアログがこれら全部
 // 送信するため Request struct を Misskey 互換に拡張する (#650 問題 2)。
+//
+// `fileId` 経路は**画像を system 所有の drive ファイルへ複製してから**参照する
+// (#3014)。upstream は渡された drive ファイルの URL をそのまま入れるので、意図的な
+// 乖離 (docs/divergence.md §7)。`admin/emoji/add` の #2999 と同じ形。
 //
 // Aliases は []string なので nil (省略) と [] (空配列) が型で区別できない。
 // Misskey TS 側も optional `?` で undefined と空配列を区別しないため、
@@ -3131,16 +3142,97 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 	}
 	// fileId 指定時は drive の画像で URL を差し替える (upstream 互換)。file は
 	// emoji 解決前に検証済み (emojiFile)、NO_SUCH_FILE はそこで返している (#1772)。
+	systemFileID := ""
+	systemFileURL := ""
 	if emojiFile != nil {
 		f := emojiFile
 		if !isAllowedEmojiImageType(f.Type) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
 		}
+		// **差し替えた先も system 所有にする (#3014)。** ここに来る `fileId` は
+		// ふつうモデレーター自身が直前に上げたファイルで、本人が drive から消せば
+		// 絵文字の画像が壊れる (ロールの変更や退会でも同じ)。`admin/emoji/add` は
+		// #2999、申請の承認は #2966、リモートの複製と zip の取り込みは #670 で
+		// 既に system 所有にしてあり、**REST の経路ではここが最後の 1 つ**だった。
+		// 回避策も無い — 画像を選ぶ画面が叩く `drive/files` は呼び出し元自身の
+		// ファイルしか返さないので、「system 所有のファイルを選ぶ」ことはできない。
+		//
+		// **差し替える前に指していたファイルは消さない。** 元が既に system 所有なら
+		// 複製しない規則 (#2999) がある以上、同じファイルを別の絵文字が指している
+		// 可能性があり、`EmojiRepository` に `originalUrl` の完全一致引きは無く
+		// (`ListV2` が持つのは `publicUrl` の部分一致だけ)、足しても「引いた後・
+		// 消す前」のレースは残る。`admin/emoji/delete` も絵文字の行だけ消して
+		// drive ファイルは残す (`admin/drive/cleanup` が回収する) ので、ここだけ
+		// 消すと経路ごとに後始末の意味が変わる。孤児 guard (`orphanWhere`) は
+		// `emoji.originalUrl = drive_file.url` または `publicUrl = url` で参照を
+		// 判定するので、**参照が外れたものだけ**が回収対象になり、共有中のものは
+		// 守られる。元が利用者
+		// 所有ならそもそも触ってはいけない (ノートの添付やプロフィールで使っている
+		// 可能性がある)。代償は「cleanup を回すまで実体を食う」ことだけで、これは
+		// `admin/emoji/delete` が既に持っている性質と同じ。
+		//
+		// 検証をすべて通した後に複製する / 複製した実体の MIME をもう一度見る /
+		// 行の `size` で先に断る、はどれも `EmojiAdd` と同じ理由 (#2999)。
+		src := f
+		if h.emojiImageFetcher != nil && !coredrive.IsSystemOwned(f) {
+			// **読む前に行の `size` で断る。** 複製は実体を丸ごとメモリへ読むので、
+			// 上限超過を読み切ってから 400 にするのは無駄。過小申告は読み出し側の
+			// `safehttp.ErrResponseTooLarge` が捕まえる。
+			if int64(f.Size) > MaxEmojiCopyBytes {
+				return c.JSON(http.StatusBadRequest, apierr.Error(
+					"EMOJI_IMAGE_TOO_LARGE", "The image is too large to register as an emoji.",
+					"6b1d5f0a-3c9e-4f27-9a4d-7e2b8c1f0d64"))
+			}
+			// **複製に渡すのは更新後の値。** 同じリクエストで `name` /
+			// `isSensitive` を変えていればそちらが載るので、省略されたときだけ
+			// 現在の絵文字の値を使う。
+			copyName := before.Name
+			if req.Name != nil {
+				copyName = *req.Name
+			}
+			copySensitive := before.IsSensitive
+			if req.IsSensitive != nil {
+				copySensitive = *req.IsSensitive
+			}
+			ctx := c.Request().Context()
+			copied, cerr := h.emojiImageFetcher.CopyToSystemFile(ctx, f, copyName, copySensitive)
+			if cerr == nil && copied == nil {
+				// 実装の契約違反。ここで気付かないと下の `src` 参照で panic する。
+				cerr = errors.New("copy returned no file")
+			}
+			if cerr != nil {
+				slog.WarnContext(ctx, "emoji update: drive copy failed",
+					"emojiId", req.ID, "fileId", *req.FileID, "err", cerr)
+				// **絵文字を書き換えない。** 元ファイルを指して更新すると、直そうと
+				// している依存をそのまま作ることになる。差し替え前の画像は生きて
+				// いるので、失敗しても表示は壊れない。
+				// **`NO_SUCH_FILE` は `update.ts` の id で返す** — 上の drive 行が
+				// 無いときと同じ endpoint・同じ code なので、id を分けると
+				// クライアントが片方を取りこぼす。
+				return emojiCopyFailureResponse(c, cerr, "14fb9fd9-0731-4e2f-aeb9-f09e4740333d")
+			}
+			// **複製した実体の MIME を見る (#2966 と同じ理由)。** `Upload` は
+			// `AnalyseFile` でバイト列から型を引き直すので、行の宣言と実体が
+			// ずれていると allowlist 外の型が絵文字として登録される。
+			// **弾いたら片付ける** — その時点で誰からも参照されない。
+			if !isAllowedEmojiImageType(copied.Type) {
+				h.deleteSystemEmojiFile(ctx, copied.ID)
+				return c.JSON(http.StatusBadRequest, apierr.Error("UNSUPPORTED_FILE_TYPE", "Unsupported file type.", "f7599d96-8750-af68-1633-9575d625c1a7"))
+			}
+			src = copied
+			systemFileID = copied.ID
+			systemFileURL = copied.URL
+		}
 		// upstream update.ts: originalUrl=url, publicUrl=webpublicUrl??url,
 		// fileType=webpublicType??type。EmojiAdd / EmojiCopy と同ロジック。
-		fields["originalUrl"] = f.URL
-		fields["publicUrl"] = preferWebpublicURL(f)
-		if t := preferWebpublicType(f); t != nil {
+		//
+		// 不変条件 (#722): `originalUrl` は必ず `drive_file.url` と一致させる。
+		// 孤児 cleanup の guard が `NOT EXISTS (emoji.originalUrl = drive_file.url
+		// ...)` で system 所有の絵文字画像を保護しているので、webpublic を入れると
+		// guard が外れる。
+		fields["originalUrl"] = src.URL
+		fields["publicUrl"] = preferWebpublicURL(src)
+		if t := preferWebpublicType(src); t != nil {
 			fields["type"] = *t
 		}
 	}
@@ -3173,10 +3265,22 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if err := h.emojiRepo.UpdateFields(req.ID, fields); err != nil {
+		if !repository.IsNotFound(err) {
+			// **DB 障害を not-found に丸めない (#2792)。** 接続断が「そんな絵文字は
+			// 無い」に化けると、クライアントからは区別できず監視でも 5xx が立たない。
+			slog.ErrorContext(c.Request().Context(), "EmojiUpdate: UpdateFields failed",
+				"id", req.ID, "fields", fieldKeys(fields), "systemFileId", systemFileID, "err", err)
+			h.cleanupUnlandedEmojiCopy(c.Request().Context(), req.ID, systemFileID, systemFileURL)
+			return apierr.JSONInternalError(c)
+		}
 		// #729: FindByID 直後の RowsAffected==0 はほぼ起こらない (concurrent
 		// delete 等のレース) ので診断 log で気付けるようにする。
 		slog.WarnContext(c.Request().Context(), "EmojiUpdate: NO_SUCH_EMOJI on UpdateFields",
 			"id", req.ID, "fields", fieldKeys(fields), "err", err)
+		// **載らなかった複製を片付ける (#3014)。** 行がもう無い (= `RowsAffected==0`
+		// の昇格を含む) ので更新は載っておらず、絵文字は差し替え前の URL を指した
+		// まま。作った複製は誰からも参照されない孤児として残る。
+		h.deleteSystemEmojiFile(c.Request().Context(), systemFileID)
 		return c.JSON(http.StatusNotFound, apierr.NoSuchEmoji())
 	}
 	after, err := h.emojiRepo.FindByID(req.ID)
@@ -3199,6 +3303,47 @@ func (h *Handler) EmojiUpdate(c echo.Context) error {
 		h.publishEmojiUpdated(after)
 	}
 	return c.NoContent(http.StatusNoContent)
+}
+
+// cleanupUnlandedEmojiCopy deletes a system-owned copy when the failed update
+// did not land on the emoji row (#3014).
+//
+// **エラーが返っても適用されていることがある。** PostgreSQL は COMMIT を送った
+// 後・ack が届く前に接続が切れると、サーバー側は commit 済みなのにクライアントは
+// エラーを受け取る。載っているのに複製を消すと**絵文字が存在しないファイルを指す**
+// (差し替え前の画像はもう参照されていないので戻らず、後始末バッチも
+// `needs-review` に落とすだけで直せない)。
+//
+// **逆に、確実に載っていない失敗では孤児になる。** 列幅超過 (SQLSTATE 22001) や
+// 一意制約違反はそれで、`admin/drive/cleanup` は手動でしか走らないので掃除するまで
+// 実体を食う。
+//
+// **読み直して分ける。** 後始末バッチ (#2990) の `finishFailedUpdate` と同じ 3 分岐で、
+// **読み直せないときは残す** — 参照されている複製を消すほうが、参照されない複製を
+// 残すより悪い (後者は孤児 cleanup が回収する)。
+//
+// **`admin/emoji/add` と承認経路は再読していない** (`Create` の失敗でそのまま複製を
+// 消す)。同じ窓はあちらにもあり、INSERT が commit 済みで ack だけ失われると
+// **絵文字はあるのに画像が消え、同じ名前で登録し直すと `DUPLICATE_NAME` で詰む**。
+// この PR では差し替え経路だけに入れた (別 issue)。
+func (h *Handler) cleanupUnlandedEmojiCopy(ctx context.Context, emojiID, fileID, copiedURL string) {
+	if fileID == "" {
+		return
+	}
+	after, err := h.emojiRepo.FindByID(emojiID)
+	switch {
+	case err != nil && !repository.IsNotFound(err):
+		// 読み直せないので載ったか分からない。残す。
+		slog.WarnContext(ctx, "EmojiUpdate: cannot tell whether the update landed; keeping the system copy",
+			"id", emojiID, "systemFileId", fileID, "err", err)
+		return
+	case err == nil && after != nil && after.OriginalURL == copiedURL:
+		// エラーは返ったが更新は載っていた。複製は参照されている。
+		return
+	}
+	// 行がもう無い / 差し替え前の URL のまま = 載っていない。複製は誰からも
+	// 参照されない。
+	h.deleteSystemEmojiFile(ctx, fileID)
 }
 
 // fieldKeys は map のキー一覧を sort 済み slice で返す診断 log 用 helper。

@@ -3192,11 +3192,16 @@ func (f *failingUpdateEmojiRepo) UpdateFields(_ string, _ map[string]any) error 
 	return assert.AnError
 }
 
+// UpdateFields が DB 障害を返したら 500 (#2792)。**絵文字を seed するのが要点** —
+// 入れずに書くと FindByID の時点で 404 になり、UpdateFields の枝に入らないまま
+// 緑になる (#3014 でここを分けるまで、実際にそうなっていた)。
 func TestEmojiUpdate_Error(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	h.SetEmojiRepo(&failingUpdateEmojiRepo{testutil.NewMockEmojiRepository()})
+	repo := testutil.NewMockEmojiRepository()
+	require.NoError(t, repo.Create(&model.Emoji{ID: "e1", Name: "happy"}))
+	h.SetEmojiRepo(&failingUpdateEmojiRepo{repo})
 	rec := doPost(h.EmojiUpdate, `{"id":"e1","name":"x"}`, nil)
-	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 func TestEmojiList_InvalidJSON(t *testing.T) {
