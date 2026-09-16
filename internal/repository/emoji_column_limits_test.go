@@ -23,6 +23,50 @@ var emojiRemoteColumns = []struct {
 	{"license", 1024},
 }
 
+// emojiAdminColumns は `admin/emoji/*` が書く列と、その上限 (#3018)。
+// `internal/api/admin` の `emojiCategoryMaxRunes` などと同じ数値が独立に書かれて
+// いるだけだと、揃って動かせば全部緑になる。
+var emojiAdminColumns = []struct {
+	column string
+	max    int
+}{
+	{"name", 128},
+	{"category", 128},
+	{"license", 1024},
+	{"originalUrl", 512},
+	{"publicUrl", 512},
+}
+
+// emojiAdminArrayColumns は同じく配列の列 (#3018)。配列は
+// `information_schema.columns.character_maximum_length` が NULL なので
+// `format_type` で見る (`arrayElementMaxLength`、#2726)。
+var emojiAdminArrayColumns = []struct {
+	column string
+	want   string
+}{
+	{"aliases", "character varying(128)[]"},
+	{"roleIdsThatCanBeUsedThisEmojiAsReaction", "character varying(128)[]"},
+}
+
+// `admin/emoji/*` が見ている列の上限を schema から固定する (#3018)。
+//
+// `internal/api/admin/emoji_column_fit_internal_test.go` は Go 定数側を固定する
+// だけなので、DDL を変えても気付けない。突き合わせる相手はここ。
+func TestEmoji_AdminColumnLimits(t *testing.T) {
+	for _, tc := range emojiAdminColumns {
+		var n int
+		require.NoError(t, testDB.Raw(`SELECT character_maximum_length FROM information_schema.columns
+			WHERE table_schema = current_schema() AND table_name = 'emoji' AND column_name = ?`,
+			tc.column).Scan(&n).Error)
+		assert.Equal(t, tc.max, n,
+			"emoji.%s の列長が変わっている (internal/api/admin/emoji.go の定数も直すこと)", tc.column)
+	}
+	for _, tc := range emojiAdminArrayColumns {
+		assert.Equal(t, tc.want, arrayElementMaxLength(t, "emoji", tc.column),
+			"emoji.%s の要素長が変わっている (internal/api/admin/emoji.go の定数も直すこと)", tc.column)
+	}
+}
+
 // 列の上限そのものを schema から固定する (#2726)。
 func TestEmoji_RemoteColumnLimits(t *testing.T) {
 	for _, tc := range emojiRemoteColumns {
