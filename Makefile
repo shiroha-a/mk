@@ -15,7 +15,7 @@
 	uds-init uds-frontend-build uds-build uds-rebuild uds-restart uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check gaterun-check secretfield-check submodulepin-check \
+	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check gaterun-check secretfield-check submodulepin-check \
 	diff-up diff-test diff-down diff-logs \
 	upstream-e2e upstream-e2e-deps upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
 
@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -1117,3 +1117,7 @@ catalog-check: ## システムカタログのクエリが schema で絞られて
 .PHONY: notfound-check
 notfound-check: ## repository の lookup error を種別を見ずに 4xx にしていないか検査
 	go test ./internal/entitycompat/... -run 'TestRepoErrorsAreNotCollapsed|TestScanCollapsedLookups|TestBodyReturnsNotFoundSentinel|TestNotFoundGateWalks' -count=1 -v
+
+.PHONY: nulparam-check
+nulparam-check: ## 列に入らない値 (NUL) が SQL の bind parameter に載らないか検査
+	go test ./internal/entitycompat/... -run 'TestCursorGuardsAreChecked|TestScanCursorGuards|TestCursorParamsAreNormalized|TestScanCursorParamBinders|TestRepositoryLookupsRejectUnstorableValues|TestScanRepoLookupGuards|TestLikePatternsRejectUnmatchableInput|TestScanLikePatternGuards' -count=1 -v

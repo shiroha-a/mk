@@ -147,7 +147,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / submodulepin-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / submodulepin-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -220,7 +220,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 133 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 134 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -857,6 +857,23 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-09-17**: `make gates` に `nulparam-check` を追加 (#3025)。`make help` の target は 133 → 134。**認証済みの一般利用者が、パラメータに NUL を 1 文字入れるだけで 500 を起こせた** (`federation/*` や `users/clips` など**未認証**で叩けるものもあった)。NUL はどの列にも入らないうえ、**比較の右辺に置くだけで PostgreSQL がクエリごと落とす** (手元の simple protocol で SQLSTATE 08P01、本番の pgx extended protocol で 22021)。`IsNotFound` でもないので handler は `JSONInternalError` へ倒す。NUL は JSON のエスケープで普通に送れる。#3018 / #3022 は主に「列に**書く**値」を塞いだ (申請 ID のように引く側も一部含む) が、**カーソル / id / 検索語は系統的に残っていた**。
+  **upstream は「全部 500」ではない。** ajv に `misskey:id` (`/^[a-zA-Z0-9]+$/`) を登録しているので、その format を持つ `sinceId` / `untilId` / `userId` / `noteId` は**列に届く前に 400 で弾かれる**。format を持たない値 (検索語や `users/show` の `username` など) だけが 500 になる。**この裏取りをせずに「upstream は 500」と書き、敵対的レビューで指摘された。**
+  **役割ごとに答えが違う。** カーソルは 400 (空に倒すと「カーソル無し = 先頭から」になり、**利用者の指定と無関係なページを正しい応答として返す**)、単体 id と完全一致で引く値は not-found (一致しえない値は「無い」が事実)、検索語は**空の結果**(「その語を含む行が無い」が事実で、利用者の入力が壊れているわけではないので wire に新しいエラーコードを足さない)。**issue の完了条件は「4xx になる」だったが、検索語だけは 200 + 空にしてある** — 理由は docs/divergence.md に書いた。**単体 id は upstream と code / id が違い、status も一致しない経路がある** (`users/show` は mk-go 404 / upstream 400) ので、これも divergence として記録した。
+  **1 箇所で塞げるものとそうでないものがある。** カーソルは `id.NormalizeCursor` を 39 ファイルが通るので choke point になる (数え方: 非テストの `internal/` で `id.NormalizeCursor(` を含むファイル)。**signature を 3 値にしてコンパイルで全件の書き換えを強制した** (呼び出しは実測 88)。id と完全一致の値は共通の入口が無いので、repository の**単一行 lookup** (`Find*` / `Get*` が `(*model.X, error)` を返すもの) と `*ByID*` の 118 メソッドに guard を置いた。検索語は `escapeSQLLikePattern` が NUL を見ていないので、LIKE を組み立てる 16 関数に置いた。
+  **#2792 に反しない。** 丸めているのは DB 障害ではなく、**引く前に分かっている「一致しえない」**という事実で、クエリを投げていない以上そこに隠れる障害が無い。逆に言うと、この判定を「引いた後」へ動かすと #2792 違反になるので、gate は**順序も見る**。
+  **関数の契約を上書きしない。** 「無い」を `(nil, nil)` で表す lookup (`FindActive` / `FindPendingInvitation`) に `ErrNotFound` を返す guard を入れたところ、呼び出し側が err として扱って **`roles/assignment-show` が 500 のまま残った** (敵対的レビュー 2 周目で実測)。guard はその関数が既に持っている「無い」の表現に合わせること。
+  **共有の入力構造体を書き換えない。** `buildV2Query` で `fq.RoleIDs` をフィルタ済みの値に書き戻したら、handler が同じ filter で `ListV2` の直後に `CountV2` を呼ぶため、**2 回目は guard もフィルタも素通りして絞り前の件数を返した** (同 2 周目で実測)。`filter.Query` がポインタなのが効いている。局所変数に受けること。
+  **mock では検出できない。** `internal/testutil` の mock repository は NUL を渡しても普通に「見つからない」を返すので、**guard を外しても handler テストは緑のまま通る**。だから (a) 静的な gate、(b) 実 PostgreSQL に対する「引く前に弾いている」テストの 2 本で押さえる。後者は `IsNotFound(err)` が真であることに加えて**普通の入力が引けたまま**であることまで見る (空を返すだけの実装でも「NUL で空になる」テストは通る)。
+  **gate は「どの値を見ているか」まで照合する。** 呼び出しの有無だけを見る初版は、敵対的レビューで**バグを再導入する 3 変異が全て素通り**することを実測された — (a) 複数の値を取る lookup で片方だけ guard する、(b) `storableIDs(ids)` と書いて**戻り値を捨てる** (式文として合法で `go vet` も黙る)、(c) LIKE に載る値そのものの guard を落として別の値だけ見る。**実際にその形で本番コードが漏れていた** (`ListUsers` が `Username` は見て `Hostname` を見ていなかった)。パラメータを 1 つ残らず guard の引数と突き合わせ、`storableIDs` は代入し直していること、**guard の分岐が実際に return すること**、**順序はパラメータごとに見ること** (関数単位で「最初の guard」と比べると 2 つ目以降が SELECT の後ろでも通る) まで見る形に直した。
+  **カーソル側の gate も 3 つ穴が開いていた。** 「関数のどこかに `!ok` があればよい」形にしていたため、(a) 手前の `pagination.ResolveLimit` の `limitOK` に受け直すだけで黙る (**全 handler がその形の `!limitOK` を持っている**)、(b) guard を DB 呼び出しの後ろへ動かしても緑、(c) `if !ok { sinceID, untilID = "", "" }` と**空に倒して 200 を返す**形も緑。**「カーソルの値を使う前に `!ok` を見て抜ける」**に限定して塞いだ。**「直後の 1 文」に狭めると今度は正当な書き方を落とす** — guard を 2 つ積む / 条件を束ねる / `switch` の case に置く / ループで `continue` する、のどれもが偽陽性になり、しかも診断が「guard が無い」と事実と逆を指す。
+  **「呼び出し側を見る」だけでは片側しか塞がらない。** `id.NormalizeCursor` の呼び出しを見る gate は、**そもそも呼んでいない handler** を視界に入れられない。実際 `list-mine` (一般ユーザーが叩ける) と `admin/emoji-application/*` の 3 つが `untilId` をそのまま `"id" < ?` に載せていた。`untilId` / `sinceId` を bind する handler 側を数える gate (実測 44) を別に足してある。
+  **「引く前に弾く」の判定に「組み込み以外の呼び出し」を使わない。** `time.Now()` や `r.normalizeHost(host)` を guard の前に 1 行置いただけで落ちるのでは述語と意図が食い違う。DB とみなすのは `tx.` / `db.` / `q.` と、レシーバの**フィールド**越しの呼び出し (`r.db.` / `c.inner.`) だけにする。
+  **AND と OR で落とし方が違う。** AND で畳む検索語は 1 つでも一致しえなければ全体が空 (`allStorable`)、**OR で畳む語は要素ごとに落とす** (`storableIDs`)。`multipleWordsToQuery` は後者だが、**`roleIds` を前者で書いて実測で壊した** — `&&` は overlap = OR なので、一緒に指定した他の role の一致まで消えていた (書き込み側の `normalizeEmojiRoleIDs` は #3018 で既に要素ごとに落としている)。
+  **gate の対象集合は「LIKE を作る側」だけにする。** `multipleWordsToQuery` を escape helper の集合に入れると、その呼び出し側 (`buildV2Query`) に判定を要求してしまう — あの関数は自分の中で語ごとに落としているので偽陽性になる。集合から外しても、あの関数自身が `escapeLike` を呼ぶので中の判定を外せば捕まる。
+  **射程外**: gate が見るのはカーソル (呼び出し側 88 + bind 側 44) / 単一行 lookup + `*ByID*` 118 / LIKE 16 で、値を受ける一覧系は見ていない。**guard を呼ばずに DB を触るメソッドが 311 残っている** (数え方は docs/divergence.md)。**実際に届く経路は測って個別に塞いだ** — 未認証で叩けるものだけでも `federation/followers` / `following` / `users` の `host`、`hashtags/users` / `show` の `tag`、`notes/reactions` の `type`、`users/clips` / `flashs` / `gallery/posts` / `pages` の `userId`。網羅ではないので、一覧系を足すときは受け取る値を自分で弾くこと。
+  **変異検証は 25 形** (production 21 + gate の述語 4)。production: `colfit.Storable` を常に真 / `mute.List` の `!cursorOK` を `_` / `ListMine` の `!cursorOK` を `_` / `userRepository.FindByID` の guard を外す / `storableIDs` を素通し / `instanceRepository.List` の guard を外す / `multipleWordsToQuery` の語ごと判定を外す / `hashtags/search` の guard を外す / `hashtags/show` と `users` の guard を外す / `FindByIDAndUserID` の `id` だけ外す / `storableIDs(ids)` の戻り値を捨てる / `SearchMessages` の `query` だけ外す / `ListUsers` の `Hostname` を外す / `following` の `host` guard を外す / `buildV2Query` の `roleIds` フィルタを無効化 / `registry.Get` の `key` の guard だけ SELECT の後ろへ / `SearchUsers` の `query` の guard だけ escape の後ろへ / `buildV2Query` が `fq.RoleIDs` へ書き戻す / `FindActive` の guard を `ErrNotFound` に戻す / `note_reaction.ListByNoteID` の guard を外す / `clip.ListPublicByUser` の guard を外す。gate: カーソルの抽出 (`isCursorCall`) / lookup の対象判定 (`isGuardedLookup`) / LIKE の escape 集合 / `paramKindOf` の `*string` 枝。**下限の件数を持たせているのが要点** — 違反 0 件が正常な状態なので、抽出を壊しても「検出 0 件」と区別が付かない。**`hashtags/show` の handler テストは置いていない** — あちらは `err != nil` を丸ごと 400 に潰す既存実装なので、guard の有無で外から見える応答が変わらず空虚になる (実測)。repository 側のテストで押さえてある。
 
 - **2026-09-12**: `make gates` に `submodulepin-check` を追加 (#2969)。`make help` の target は 132 → 133。**fork frontend の pin が doc と gitlink で食い違ったまま緑になっていた。** #2963 で `third_party/misskey` に commit して fork へ push し、`docs/divergence.md` にも新しい tag を書いたのに、**親リポの gitlink だけ古いまま CI 28 チェックが全て緑でマージされた** (#2965 で解消)。気付いたのはマージ後に `git status` を見たときで、検出が人手に依存していた。
   **実害の経路もある。** `Makefile` の `REVISION_LDFLAGS` は `git -C third_party/misskey describe --tags` で `MkGoFrontendVersion` を作るが、これは **submodule の working tree** を見るので、gitlink が遅れている窓に develop からビルドしたバイナリは古い tag を名乗りつつ doc は新しい tag を書いている状態になる。
