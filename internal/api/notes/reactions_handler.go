@@ -109,7 +109,10 @@ func (h *Handler) Reactions(c echo.Context) error {
 	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	viewer := middleware.GetUser(c)
 	rows, err := h.reactionService.List(viewer, req.NoteID, untilID, sinceID, limit, req.Type)
 	if err != nil {

@@ -1,6 +1,10 @@
 package id
 
-import "time"
+import (
+	"time"
+
+	"github.com/shiroha-a/mk/internal/misc/colfit"
+)
 
 // NormalizeCursor converts upstream Misskey pagination params (sinceId /
 // untilId / sinceDate / untilDate) into the (sinceID, untilID) shape that
@@ -27,12 +31,26 @@ import "time"
 // aidx 以外の generator (aid / meid / objectid / ulid) で動かしている operator
 // では本 helper は意図通り機能しない。それらの generator は drop-in 主流路で
 // 使われない既知の制限。
-func NormalizeCursor(sinceID, untilID string, sinceDate, untilDate *int64) (string, string) {
+//
+// **ok=false は列に入らないカーソルで、呼び出し側は 400 を返すこと (#3025)。**
+// `pagination.ResolveLimit` と同じ形。NUL を含むカーソルは `id < ?` の bind
+// parameter に載せた時点で PostgreSQL が落とすので (本番の pgx extended
+// protocol で SQLSTATE 22021)、そのまま渡すと**認証済みの一般利用者が
+// パラメータ 1 文字で 500 を起こせる**。
+//
+// **空に倒して 200 を返してはいけない。** 空文字は「カーソル無し = 先頭から」の
+// 意味なので、利用者が指定した位置と無関係なページを正しい応答として返して
+// しまう。ok=false のときに返す `""` は「無視しても DB に NUL を渡さない」ための
+// 値で、**ページを返してよいという意味ではない**。
+func NormalizeCursor(sinceID, untilID string, sinceDate, untilDate *int64) (string, string, bool) {
 	if sinceID == "" && sinceDate != nil {
 		sinceID = AidxCutoffPrefix(time.UnixMilli(*sinceDate))
 	}
 	if untilID == "" && untilDate != nil {
 		untilID = AidxCutoffPrefix(time.UnixMilli(*untilDate))
 	}
-	return sinceID, untilID
+	if !colfit.Storable(sinceID) || !colfit.Storable(untilID) {
+		return "", "", false
+	}
+	return sinceID, untilID, true
 }

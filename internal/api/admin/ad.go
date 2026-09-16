@@ -145,7 +145,10 @@ func (h *Handler) AdList(c echo.Context) error {
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// cursor も publishing も無く offset 指定がある旧クライアント向けに offset 経路を維持。
 	if sinceID == "" && untilID == "" && req.Publishing == nil && req.Offset > 0 {
 		rows, err := h.adRepo.List(limit, req.Offset)

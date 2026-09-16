@@ -499,7 +499,13 @@ func (h *Handler) bindListRequest(c echo.Context) (ListRequest, bool) {
 	// `n.ID >= untilID`) で sinceDate / untilDate も正しく効く。Redis Stream
 	// native ID と aidx ID は別物だが、本 endpoint の cursor は notification.ID
 	// (= aidx) で判定する設計なので adapter pattern で完結する。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	// **列に入らないカーソルもここで ok=false にする (#3025)。** そのまま渡すと
+	// `id < ?` の bind parameter で落ちて 500 になる。
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return req, false
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
 	if !limitOK {
 		return req, false

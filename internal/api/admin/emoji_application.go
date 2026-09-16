@@ -16,6 +16,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/colfit"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/safehttp"
@@ -69,7 +70,14 @@ func (h *Handler) EmojiApplicationList(c echo.Context) error {
 		req.Filter = repository.EmojiApplicationFilterPending
 	}
 
-	rows, err := h.emojiApplicationRepo.List(req.Filter, req.Limit, req.UntilID)
+	// **列に入らないカーソルは 400 (#3025)。** `untilId` はそのまま
+	// `"id" < ?` の bind parameter に載るので、NUL を含むとクエリごと落ちて
+	// 500 になる。他のページングと同じく `id.NormalizeCursor` を通す。
+	_, untilID, cursorOK := id.NormalizeCursor("", req.UntilID, nil, nil)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.emojiApplicationRepo.List(req.Filter, req.Limit, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -793,7 +801,14 @@ func (h *Handler) EmojiApplicationRelated(c echo.Context) error {
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
-	rows, err := h.emojiApplicationRepo.FindRelated(app, req.Limit, req.UntilID)
+	// **列に入らないカーソルは 400 (#3025)。** `untilId` はそのまま
+	// `"id" < ?` の bind parameter に載るので、NUL を含むとクエリごと落ちて
+	// 500 になる。他のページングと同じく `id.NormalizeCursor` を通す。
+	_, untilID, cursorOK := id.NormalizeCursor("", req.UntilID, nil, nil)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.emojiApplicationRepo.FindRelated(app, req.Limit, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}
@@ -853,7 +868,14 @@ func (h *Handler) EmojiApplicationListByUser(c echo.Context) error {
 		req.Limit = 30
 	}
 
-	rows, err := h.emojiApplicationRepo.ListByUserFiltered(req.UserID, req.Status, req.Query, req.Limit, req.UntilID)
+	// **列に入らないカーソルは 400 (#3025)。** `untilId` はそのまま
+	// `"id" < ?` の bind parameter に載るので、NUL を含むとクエリごと落ちて
+	// 500 になる。他のページングと同じく `id.NormalizeCursor` を通す。
+	_, untilID, cursorOK := id.NormalizeCursor("", req.UntilID, nil, nil)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	rows, err := h.emojiApplicationRepo.ListByUserFiltered(req.UserID, req.Status, req.Query, req.Limit, untilID)
 	if err != nil {
 		return apierr.JSONInternalError(c)
 	}

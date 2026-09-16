@@ -867,7 +867,10 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	viewer := middleware.GetUser(c)
 	viewerID := ""
 	if viewer != nil {
@@ -996,7 +999,11 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 		return jsonNoSuchUserForRelations(c, followers)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 
 	// followersVisibility / followingVisibility gate (#1461)。upstream
 	// `users/followers.ts` / `users/following.ts` と同等に、target profile の

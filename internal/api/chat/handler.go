@@ -36,7 +36,9 @@ type chatPageParams struct {
 
 // cursor normalizes the 4 cursor params to (sinceID, untilID) via
 // id.NormalizeCursor (sinceDate/untilDate を aidx prefix へ変換)。
-func (p chatPageParams) cursor() (string, string) {
+//
+// ok=false は列に入らないカーソルで、呼び出し側は 400 を返すこと (#3025)。
+func (p chatPageParams) cursor() (string, string, bool) {
 	return id.NormalizeCursor(p.SinceID, p.UntilID, p.SinceDate, p.UntilDate)
 }
 
@@ -556,7 +558,10 @@ func (h *Handler) AttachedChatMessages(c echo.Context) error {
 	if !isMod && (file.UserID == nil || *file.UserID != user.ID) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "Some files are not found.", "485ce26d-f5d2-4313-9783-e689d131eafb"))
 	}
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	msgs, err := h.repo.ListMessagesByFileID(req.FileID, untilID, sinceID, req.Limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -711,7 +716,10 @@ func (h *Handler) RoomsOwned(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req chatPageParams
 	_ = c.Bind(&req)
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	rooms, _ := h.repo.ListRoomsByOwner(user.ID, sinceID, untilID, req.clampedLimit(30))
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
@@ -728,7 +736,10 @@ func (h *Handler) RoomsJoined(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req chatPageParams
 	_ = c.Bind(&req)
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	rooms, _ := h.repo.ListJoinedRooms(user.ID, sinceID, untilID, req.clampedLimit(30))
 	result := make([]map[string]any, len(rooms))
 	for i, r := range rooms {
@@ -1570,7 +1581,10 @@ func (h *Handler) UserTimeline(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "11795c64-40ea-4198-b06e-3c873ed9039d"))
 		}
 	}
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	msgs, err := h.repo.ListMessagesByUser(user.ID, req.UserID, sinceID, untilID, req.clampedLimit(10))
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -1612,7 +1626,10 @@ func (h *Handler) RoomTimeline(c echo.Context) error {
 	if !h.isRoomMember(room, user.ID) && !h.isModerator(user.ID) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "c4d9f88c-9270-4632-b032-6ed8cee36f7f"))
 	}
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	msgs, err := h.repo.ListMessagesByRoom(req.RoomID, sinceID, untilID, req.clampedLimit(10))
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -1657,7 +1674,10 @@ func (h *Handler) InvitationsInbox(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req chatPageParams
 	_ = c.Bind(&req)
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	rows, err := h.repo.ListInvitationsByUser(user.ID, false, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -1694,7 +1714,10 @@ func (h *Handler) InvitationsOutbox(c echo.Context) error {
 	if err != nil || room.OwnerID != user.ID {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "a3c6b309-9717-4316-ae94-a69b53437237"))
 	}
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	rows, err := h.repo.ListInvitationsByRoom(req.RoomID, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -1770,7 +1793,10 @@ func (h *Handler) RoomsJoining(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req chatPageParams
 	_ = c.Bind(&req)
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	rows, err := h.repo.ListMembershipsByUser(user.ID, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -1806,7 +1832,10 @@ func (h *Handler) RoomsMembers(c echo.Context) error {
 	if !h.isRoomMember(room, user.ID) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROOM", "No such room.", "7b9fe84c-eafc-4d21-bf89-485458ed2c18"))
 	}
-	sinceID, untilID := req.cursor()
+	sinceID, untilID, cursorOK := req.cursor()
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	members, err := h.repo.ListMembersByRoomPaged(req.RoomID, sinceID, untilID, req.clampedLimit(30))
 	if err != nil {
 		return apierr.JSONInternalError(c)

@@ -791,7 +791,10 @@ func (h *Handler) FilesList(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	files, err := h.fileRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), false, req.Type, req.Sort, untilID, sinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})
@@ -914,7 +917,10 @@ func (h *Handler) FilesAttachedNotes(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
@@ -1060,7 +1066,10 @@ func (h *Handler) Stream(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// upstream stream.ts は folder 条件を付けず全 folder 横断 (#1564)。
 	files, err := h.fileRepo.ListByUser(user.ID, nil, true, req.Type, "", untilID, sinceID, limit)
 	if err != nil {
@@ -1096,7 +1105,10 @@ func (h *Handler) FoldersList(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	folders, err := h.folderRepo.ListByUser(user.ID, emptyFolderIDToNil(req.FolderID), untilID, sinceID, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})

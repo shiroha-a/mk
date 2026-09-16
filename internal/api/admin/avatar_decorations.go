@@ -8,6 +8,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -117,6 +118,13 @@ func (h *Handler) AvatarDecorationsList(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.InvalidParam("Invalid parameters."))
+	}
+	// **結果に影響しなくてもカーソルは検証する (#3025)。** upstream の paramDef は
+	// `misskey:id` (`^[a-zA-Z0-9]+$`) なので ajv が 400 で弾く。ここだけ 200 を
+	// 返すと「カーソルは 400」という規則の例外になり、`untilId` を bind する
+	// handler が正規化を通っているかを機械的に見られなくなる。
+	if _, _, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate); !cursorOK {
+		return apierr.JSONInvalidParam(c)
 	}
 	if h.avatarDecoRepo == nil {
 		return c.JSON(http.StatusOK, []any{})

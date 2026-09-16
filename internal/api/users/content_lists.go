@@ -43,7 +43,11 @@ func (h *Handler) Clips(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 	viewer := middleware.GetUser(c)
 	isSelf := viewer != nil && viewer.ID == req.UserID
 	// upstream clips.ts:54 は viewer に関係なく公開 clip のみ返す (clip.isPublic=true)。
@@ -117,7 +121,11 @@ func (h *Handler) Flashs(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 	// upstream flashs.ts:54 は viewer に関係なく公開 flash のみ返す
 	// (visibility='public')。owner の非公開 flash は i/* 系で取得する設計 (#1784)。
 	rows, err := h.flashRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)
@@ -182,7 +190,11 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 	rows, err := h.galleryRepo.ListByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -287,7 +299,11 @@ func (h *Handler) Pages(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 	// upstream pages.ts:54 は viewer に関係なく公開 page のみ返す
 	// (visibility='public')。owner の非公開 page は i/pages 等で取得する設計 (#1784)。
 	rows, err := h.pageRepo.ListPublicByUser(req.UserID, req.SinceID, req.UntilID, limit, req.Offset)

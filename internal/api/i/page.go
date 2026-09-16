@@ -27,7 +27,10 @@ func (h *Handler) PageLikes(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	u := middleware.GetUser(c)
-	limit, offset, sinceID, untilID := paginationFromRequest(c)
+	limit, offset, sinceID, untilID, cursorOK := paginationFromRequest(c)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	likes, err := h.pageLikeRepo.ListByUser(u.ID, sinceID, untilID, limit, offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)

@@ -377,7 +377,11 @@ func (h *Handler) serveTimeline(
 	// を生成していたが、SQL `id > Generate(time)` 比較では同 msec の早期 ID
 	// を取りこぼすバグがあった。AidxCutoffPrefix (= time prefix + "00000000")
 	// で deterministic + 同 msec 内全 ID を含む正しい cutoff に修正。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 
 	viewer := middleware.GetUser(c)
 	if requireAuth && viewer == nil {

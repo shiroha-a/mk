@@ -673,7 +673,12 @@ func (r *listRequest) normalize() bool {
 	r.Limit = &limit
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。serveList から
 	// 呼ばれて Renotes / Replies / Children の 3 handler で一括適用される。
-	r.SinceID, r.UntilID = id.NormalizeCursor(r.SinceID, r.UntilID, r.SinceDate, r.UntilDate)
+	// **列に入らないカーソルもここで ok=false にする (#3025)。**
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(r.SinceID, r.UntilID, r.SinceDate, r.UntilDate)
+	if !cursorOK {
+		return false
+	}
+	r.SinceID, r.UntilID = cursorSince, cursorUntil
 	return true
 }
 
@@ -836,7 +841,10 @@ func (h *Handler) Search(c echo.Context) error {
 	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 
 	viewer := middleware.GetUser(c)
 
@@ -1016,7 +1024,10 @@ func (h *Handler) BulkShow(c echo.Context) error {
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	notes, err := h.noteRepo.ListPublicNotes(model.PublicNotesFilter{
 		Local:     req.Local,
 		Reply:     req.Reply,

@@ -154,7 +154,10 @@ func (h *Handler) Instances(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// blocked / silenced は instance 列ではなく meta.blockedHosts /
 	// silencedHosts との突合で判定する。meta は 1 回だけ取得し、フィルタ突合と
 	// レスポンスの isBlocked / isSilenced / isMediaSilenced 算出の双方で使う。

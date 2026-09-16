@@ -260,7 +260,10 @@ func (h *Handler) Games(c echo.Context) error {
 		req.Limit = 100
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	viewer := middleware.GetUser(c)
 	var games []*model.ReversiGame
 	if req.My && viewer != nil {

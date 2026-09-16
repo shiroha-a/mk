@@ -136,7 +136,10 @@ func (h *Handler) Featured(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// untilDate を aidx prefix に正規化 (#1166)。
-	_, untilID := id.NormalizeCursor("", req.UntilID, nil, req.UntilDate)
+	_, untilID, cursorOK := id.NormalizeCursor("", req.UntilID, nil, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	notes, err := h.featuredNotes(c.Request().Context(), req.ChannelID, untilID, limit, req.Offset)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
@@ -268,7 +271,10 @@ func (h *Handler) Mentions(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// visibility kind の絞り込みは ListMentions の SQL push-down に委譲する
 	// (#1451)。upstream TS notes/mentions と同じく、visibility 指定時のみ
 	// note.visibility = <値> で exact-match し、未指定は全種別を返す。旧実装は
@@ -331,7 +337,10 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 		}
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// list owner gate だけでは note の visibility を守れない。list メンバーは
 	// 自由に編集できるため、未フォローのアカウントを list に詰めれば followers
 	// visibility note を読めてしまう (#1442)。#1452 で visibility を
@@ -414,7 +423,10 @@ func (h *Handler) SearchByTag(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// tagsカラムにtagを含むノートを検索。visibility は repository 側で
 	// push-down する (#1439)。discovery 系の tag 検索は notes/show の
 	// 「ID 既知公開」doctrine 対象外なので、匿名/非follower には followers/

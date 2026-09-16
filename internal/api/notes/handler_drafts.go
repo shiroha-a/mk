@@ -48,7 +48,10 @@ func (h *Handler) DraftsList(c echo.Context) error {
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	drafts, err := h.draftRepo.ListByUser(user.ID, sinceID, untilID, req.Scheduled, limit)
 	if err != nil {
 		return c.JSON(http.StatusOK, []any{})

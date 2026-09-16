@@ -1270,3 +1270,30 @@ func TestFilesList_EmptyFolderIDTreatedAsRoot(t *testing.T) {
 	// "" → nil 正規化により root の file が返る。
 	assert.Contains(t, rec.Body.String(), "root.png")
 }
+
+// **列に入らないカーソルは 400 (#3025)。** NUL を含む値は `id < ?` の bind
+// parameter に載せた時点で PostgreSQL が落とすので、そのまま repository へ渡すと
+// 500 になる。**JSON では NUL をエスケープで送る** — 生バイトを body に載せると
+// JSON として不正になり、`Bind` の 400 で guard まで届かない。
+func TestCursorGuardRejectsUnstorableCursor(t *testing.T) {
+	const body = `{"untilId":"a\u0000b"}`
+	for _, tt := range []struct {
+		name string
+		fn   func(h *Handler) func(echo.Context) error
+	}{
+		{"FilesList", func(h *Handler) func(echo.Context) error { return h.FilesList }},
+		{"FilesAttachedNotes", func(h *Handler) func(echo.Context) error { return h.FilesAttachedNotes }},
+		{"Stream", func(h *Handler) func(echo.Context) error { return h.Stream }},
+		{"FoldersList", func(h *Handler) func(echo.Context) error { return h.FoldersList }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, _, _ := newHandlerWithRepos(t)
+			c, rec := newJSONReq(t, body)
+			setUser(c, "alice")
+			require.NoError(t, tt.fn(h)(c))
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"列に入らないカーソルを repository へ渡している (SELECT がそこで落ちる)")
+			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+		})
+	}
+}

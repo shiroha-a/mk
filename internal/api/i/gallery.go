@@ -15,7 +15,9 @@ import (
 // JSON fields, with Misskey-friendly defaults (limit=10, offset=0,
 // limit clamped to 100). Cursor 指定時は frontend Paginator が untilId
 // / sinceId を投げてくる経路 (#493)。
-func paginationFromRequest(c echo.Context) (limit, offset int, sinceID, untilID string) {
+//
+// ok=false は列に入らないカーソルで、呼び出し側は 400 を返すこと (#3025)。
+func paginationFromRequest(c echo.Context) (limit, offset int, sinceID, untilID string, ok bool) {
 	var req struct {
 		Limit     *int   `json:"limit"`
 		Offset    *int   `json:"offset"`
@@ -39,8 +41,12 @@ func paginationFromRequest(c echo.Context) (limit, offset int, sinceID, untilID 
 		offset = *req.Offset
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
-	return limit, offset, sinceID, untilID
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return 0, 0, "", "", false
+	}
+	sinceID, untilID = cursorSince, cursorUntil
+	return limit, offset, sinceID, untilID, true
 }
 
 // GalleryLikes handles POST /api/i/gallery/likes.
@@ -56,7 +62,10 @@ func (h *Handler) GalleryLikes(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	u := middleware.GetUser(c)
-	limit, offset, sinceID, untilID := paginationFromRequest(c)
+	limit, offset, sinceID, untilID, cursorOK := paginationFromRequest(c)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	likes, err := h.galleryRepo.ListLikesByUser(u.ID, sinceID, untilID, limit, offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)
@@ -175,7 +184,10 @@ func (h *Handler) GalleryPosts(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	u := middleware.GetUser(c)
-	limit, offset, sinceID, untilID := paginationFromRequest(c)
+	limit, offset, sinceID, untilID, cursorOK := paginationFromRequest(c)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	posts, err := h.galleryRepo.ListByUser(u.ID, sinceID, untilID, limit, offset)
 	if err != nil {
 		return apierr.JSONInternalError(c)

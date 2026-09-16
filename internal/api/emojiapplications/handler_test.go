@@ -600,3 +600,14 @@ func TestCreateQuotaExceededWithoutRetryAtOmitsTime(t *testing.T) {
 	require.EqualValues(t, 4, body.Error.Info["used"])
 	require.EqualValues(t, 3, body.Error.Info["limit"])
 }
+
+// **列に入らないカーソルは 400 (#3025)。** `untilId` はそのまま `"id" < ?` の
+// bind parameter に載るので、NUL を含むとクエリごと落ちて 500 になる。ここは
+// `list-mine` = **一般の認証ユーザーが叩ける**経路。
+func TestListMineRejectsUnstorableCursor(t *testing.T) {
+	h := emojiapplications.NewHandler(nil, &stubApps{}, nil)
+	rec := doPost(h.ListMine, `{"untilId":"a\u0000b"}`, alice)
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"列に入らないカーソルを repository へ渡している (SELECT がそこで落ちる)")
+	require.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}

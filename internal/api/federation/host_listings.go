@@ -156,7 +156,12 @@ func parseHostPage(c echo.Context) (hostPageRequest, bool) {
 	req.Limit = &limit
 	// sinceDate / untilDate を aidx prefix に正規化して cursor 値に落とす
 	// (#1732、upstream makePaginationQuery 互換)。
-	req.sinceID, req.untilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	// **列に入らないカーソルもここで ok=false にする (#3025)。**
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return req, false
+	}
+	req.sinceID, req.untilID = cursorSince, cursorUntil
 	return req, true
 }
 

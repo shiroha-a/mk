@@ -351,3 +351,41 @@ func TestList_RepoError(t *testing.T) {
 	require.NoError(t, h.List(c))
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+// **列に入らないカーソルは 400 (#3025)。** NUL を含む値は `id < ?` の bind
+// parameter に載せた時点で PostgreSQL が落とすので (手元の simple protocol で
+// SQLSTATE 08P01、本番の pgx extended protocol で 22021)、そのまま repository へ
+// 渡すと**認証済みの一般利用者がパラメータ 1 文字で 500 を起こせる**。
+//
+// **JSON では NUL をエスケープで送る。** 生バイトを body に載せると JSON として
+// 不正になり、`Bind` の 400 で guard まで届かない (= 何も検証しないまま緑になる)。
+func TestList_RejectsUnstorableCursor(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{"untilId に NUL", `{"untilId":"a\u0000b"}`},
+		{"sinceId に NUL", `{"sinceId":"a\u0000b"}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			h, repo := newHandler(t)
+			addUser(repo, "alice")
+			c, rec := newReq(t, tt.body)
+			setUser(c, "alice")
+			require.NoError(t, h.List(c))
+			assert.Equal(t, http.StatusBadRequest, rec.Code,
+				"列に入らないカーソルを repository へ渡している (SELECT がそこで落ちる)")
+			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+		})
+	}
+}
+
+// 正常なカーソルは通る (guard を広げすぎると全ページングが 400 になる)。
+func TestList_AcceptsOrdinaryCursor(t *testing.T) {
+	h, repo := newHandler(t)
+	addUser(repo, "alice")
+	c, rec := newReq(t, `{"untilId":"9abcdef0123456"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.List(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}

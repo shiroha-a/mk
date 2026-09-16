@@ -920,3 +920,14 @@ func TestAvatarDecorations_MutationsInvalidateCatalogCache(t *testing.T) {
 		assert.Equal(t, 1, spy.calls)
 	})
 }
+
+// **結果に影響しないカーソルでも 400 (#3025)。** upstream の paramDef は
+// `misskey:id` なので ajv が弾く。ここだけ 200 を返すと「カーソルは 400」という
+// 規則の例外になり、`untilId` を bind する handler を機械的に検査できなくなる。
+func TestAvatarDecorationsList_RejectsUnstorableCursor(t *testing.T) {
+	h, _ := setupAvatarDecorationHandler(t)
+	rec := doPost(h.AvatarDecorationsList, `{"untilId":"a\u0000b"}`, adminUser)
+	assert.Equal(t, http.StatusBadRequest, rec.Code,
+		"列に入らないカーソルを 200 で受けている: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+}

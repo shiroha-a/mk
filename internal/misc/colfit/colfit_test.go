@@ -61,3 +61,24 @@ func TestText(t *testing.T) {
 	assert.Equal(t, "ab", colfit.Text("a\x00b", 0))
 	assert.Equal(t, "", colfit.Text("\x00", 4))
 }
+
+// Storable は長さを見ない。**幅を混ぜると、比較できるだけの値まで落とす。**
+func TestStorable(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"素の文字列", "abc", true},
+		{"空文字", "", true},
+		{"長い文字列でも幅は見ない", strings.Repeat("x", 10000), true},
+		{"非 ASCII", "こんにちは", true},
+		{"NUL を含む", "a\x00b", false},
+		{"NUL だけ", "\x00", false},
+		{"末尾の NUL", "abc\x00", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, colfit.Storable(tt.in))
+		})
+	}
+}

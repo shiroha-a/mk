@@ -191,7 +191,10 @@ func (h *Handler) DriveFiles(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// userId に @system が指定されたら system file 専用 listing を返す。
 	// origin / host filter は**無視する** (upstream も userId 指定時は読まない)。
 	// この一覧は local (userHost IS NULL) に限定してあるので、origin=remote を

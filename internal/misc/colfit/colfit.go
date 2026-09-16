@@ -20,7 +20,22 @@ import "strings"
 // byte 長で見ると非 ASCII を含む値を必要以上に落とす。NUL は長さに関わらず
 // SQLSTATE 22021 で弾かれるので別に見る。
 func Fits(s string, max int) bool {
-	return !strings.ContainsRune(s, 0) && len([]rune(s)) <= max
+	return Storable(s) && len([]rune(s)) <= max
+}
+
+// Storable reports whether s can be stored in a PostgreSQL text column **at
+// all**, ignoring how wide the column is.
+//
+// 幅を知らない場所でも同じ判定を使えるようにするための分離 (#3025)。カーソルや
+// id のように「列に入るかは分かっているが幅は関係ない」値は、`Fits` に適当な
+// max を渡すと**比較できるだけの値まで落とす**ことになる (`id < ?` は長さに
+// 関わらず成立する)。落とすべきなのは NUL だけ。
+//
+// **NUL を含む値は SELECT の bind parameter にも載せられない。** 手元の simple
+// protocol では SQLSTATE 08P01 (protocol_violation)、本番の pgx extended
+// protocol では 22021 (character_not_in_repertoire) になる (#2726 / #3025)。
+func Storable(s string) bool {
+	return !strings.ContainsRune(s, 0)
 }
 
 // StripNUL removes NUL code points from s.
@@ -29,7 +44,7 @@ func Fits(s string, max int) bool {
 // PostgreSQL の text 系列はこれを受け付けず (SQLSTATE 22021)、jsonb も拒否する
 // (22P05)。同じ書き込みに乗っている他の列まで巻き添えになるので落とす。
 func StripNUL(s string) string {
-	if !strings.ContainsRune(s, 0) {
+	if Storable(s) {
 		return s
 	}
 	return strings.Map(func(r rune) rune {

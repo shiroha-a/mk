@@ -86,6 +86,13 @@ func (h *Handler) Featured(c echo.Context) error {
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
+	// 他のページングと同じく `id.NormalizeCursor` を通す (#3025)。ここは
+	// in-memory の比較にしか使わないので 500 にはならないが、**upstream の
+	// paramDef も `misskey:id` (`^[a-zA-Z0-9]+$`) で弾く**ので 400 に揃える。
+	_, untilID, cursorOK := id.NormalizeCursor("", req.UntilID, nil, nil)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	if h.ranking == nil {
 		return c.JSON(http.StatusOK, []map[string]any{})
 	}
@@ -95,10 +102,10 @@ func (h *Handler) Featured(c echo.Context) error {
 	}
 	// upstream は postIds を id DESC に sort してから untilId/limit を適用する。
 	sort.Sort(sort.Reverse(sort.StringSlice(ids)))
-	if req.UntilID != "" {
+	if untilID != "" {
 		filtered := ids[:0:0]
 		for _, pid := range ids {
-			if pid < req.UntilID {
+			if pid < untilID {
 				filtered = append(filtered, pid)
 			}
 		}
@@ -150,7 +157,10 @@ func (h *Handler) Posts(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	q := h.db.Preload("User")
 	if sinceID != "" {
 		q = q.Where("id > ?", sinceID)

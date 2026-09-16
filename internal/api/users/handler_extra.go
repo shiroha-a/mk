@@ -382,7 +382,11 @@ func (h *Handler) Reactions(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1166)。
-	req.SinceID, req.UntilID = id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	cursorSince, cursorUntil, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
+	req.SinceID, req.UntilID = cursorSince, cursorUntil
 	limit, limitOK := pagination.ResolveLimit(req.Limit, 10, 100)
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
@@ -561,6 +565,11 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	if !limitOK {
 		return apierr.JSONInvalidParam(c)
 	}
+	// 他のページングと同じく `id.NormalizeCursor` を通す (#3025)。
+	_, untilID, cursorOK := id.NormalizeCursor("", req.UntilID, nil, nil)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	viewer := middleware.GetUser(c)
 	var viewerID string
 	if viewer != nil {
@@ -570,7 +579,7 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	if h.isBlockedByTarget(viewer, req.UserID) {
 		return c.JSON(http.StatusOK, []entity.NoteEntity{})
 	}
-	notes, err := h.featuredNotesByUser(c.Request().Context(), req.UserID, viewerID, req.UntilID, limit)
+	notes, err := h.featuredNotesByUser(c.Request().Context(), req.UserID, viewerID, untilID, limit)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}

@@ -553,7 +553,10 @@ func (h *Handler) EmojiListRemote(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	// upstream list-remote.ts:69 は host を toPuny (lowercase + IDN punycode) して
 	// から equality 突合する。保存側も #2706 で同じ正規化を掛けるようになったので、
 	// IDN / 大文字混在の host param を正規化しないと match しない (#1948-13)。

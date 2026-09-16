@@ -209,7 +209,10 @@ func (h *Handler) Users(c echo.Context) error {
 		limit = 100
 	}
 	// sinceDate / untilDate を aidx prefix に正規化 (Notes と同 pattern、#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	assigns, err := h.roleService.ListByRole(req.RoleID, untilID, sinceID, limit)
 	if err != nil {
 		if errors.Is(err, role.ErrRoleNotFound) {
@@ -319,7 +322,10 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	// sinceDate / untilDate を aidx prefix に正規化 (#1173)。
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	notes, err := h.notesQuery.ListByRole(req.RoleID, limit, sinceID, untilID)
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

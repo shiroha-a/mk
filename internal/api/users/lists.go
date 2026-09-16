@@ -412,7 +412,10 @@ func (h *Handler) ListsGetMemberships(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_LIST", "No such list.", noSuchList))
 	}
 
-	sinceID, untilID := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	sinceID, untilID, cursorOK := id.NormalizeCursor(req.SinceID, req.UntilID, req.SinceDate, req.UntilDate)
+	if !cursorOK {
+		return apierr.JSONInvalidParam(c)
+	}
 	members, err := h.userListRepo.ListMembershipsPage(req.ListID, sinceID, untilID, limit)
 	if err != nil {
 		return apierr.JSONInternalError(c)
