@@ -154,8 +154,8 @@ func report(w io.Writer, res maintenance.EmojiSystemFileBackfillResult, applied 
 		res.NeedsReview, res.Unrepairable, res.Failed)
 	if res.NeedsAttention() {
 		fmt.Fprintf(w, "要対応が %d 件ある: unrepairable と needs-review は再実行しても直らないので、"+
-			"モデレーターが絵文字を削除して同じ名前で登録し直すか、絵文字を削除する "+
-			"(admin/emoji/update での差し替えでは直らない。手順は docs/deployment.md。"+
+			"モデレーターが admin/emoji/update で画像を差し替え直すか、絵文字を削除する "+
+			"(#3014 から差し替え先も system 所有へ複製する。手順は docs/deployment.md。"+
 			"承認済みの申請は却下できない)。failed は原因を取り除いて再実行する\n",
 			res.Unrepairable+res.NeedsReview+res.Failed)
 	}

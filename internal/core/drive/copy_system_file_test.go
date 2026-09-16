@@ -205,8 +205,9 @@ func TestPreferWebpublic(t *testing.T) {
 }
 
 // system 所有の判定は孤児 cleanup の guard (`orphanWhere`) と同じ条件でなければ
-// ならない。`admin/emoji/add` (#2999) と後始末バッチ (#2990) がこれで「複製が
-// 要るか」を決めるので、片方だけ見ると守られない行を「複製済み」と判定する。
+// ならない。`admin/emoji/add` (#2999) / `admin/emoji/update` (#3014) と後始末
+// バッチ (#2990) がこれで「複製が要るか」を決めるので、片方だけ見ると守られない行を
+// 「複製済み」と判定する。
 func TestIsSystemOwned(t *testing.T) {
 	s := func(v string) *string { return &v }
 	for _, tc := range []struct {

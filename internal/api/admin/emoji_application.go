@@ -493,8 +493,8 @@ func (h *Handler) CreateFromApplication(ctx context.Context, app *model.EmojiApp
 // deleteSystemEmojiFile removes a system-owned drive file created during an
 // emoji registration that then failed.
 //
-// 申請の承認 (#2966) だけでなく、`admin/emoji/copy` (#2998) と
-// `admin/emoji/add` (#2999) も同じ後始末を通る。
+// 申請の承認 (#2966) だけでなく、`admin/emoji/copy` (#2998) /
+// `admin/emoji/add` (#2999) / `admin/emoji/update` (#3014) も同じ後始末を通る。
 //
 // **握り潰してログに残す。** 後始末に失敗しても審査の結果は変わらないので、
 // 呼び出し元のエラーを上書きしない。残ったものは drive の孤児 cleanup から

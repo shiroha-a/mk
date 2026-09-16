@@ -256,11 +256,13 @@ func processEmojiSystemFile(
 		// **ただし放置でもない。** ここに来た時点で「system 所有のファイルを
 		// 参照していない」ことは確定している (上の `already` を通過している) ので、
 		// その絵文字は今も誰かの drive 操作で壊れうる。直すのはこのバッチの対象外
-		// (`admin/emoji/add` 経由の非対称は別 issue) だが、要対応としては出す。
+		// だが、要対応としては出す。**直し方は差し替え** — #3014 から
+		// `admin/emoji/update` も差し替え先を system 所有へ複製するので、
+		// 次の実行ではその絵文字は `already` に落ちる。
 		return classify(entry, EmojiSystemFileNeedsReview,
 			"絵文字が申請ファイルを参照していない (モデレーターが差し替えた可能性)。"+
-				"参照先は system 所有ではないので、絵文字を削除して同じ名前で登録し直すこと "+
-				"(admin/emoji/update での差し替えでは直らない。docs/deployment.md 参照)")
+				"参照先は system 所有ではないので、admin/emoji/update で画像を差し替え直すこと "+
+				"(#3014 から差し替え先も system 所有へ複製する)。docs/deployment.md 参照")
 	}
 	if !emojiapplication.IsAllowedImageType(src.Type) {
 		return classify(entry, EmojiSystemFileUnrepairable,
@@ -290,8 +292,8 @@ func processEmojiSystemFile(
 			// **再実行では直らないので `failed` にしない。** 複製の上限
 			// (`MaxEmojiCopyBytes`) を超える画像は、role policy の
 			// `maxFileSizeMb` をそれより上へ設定していた時期に承認されたもの。
-			// 待っても縮まないので、絵文字を削除して別の画像で登録し直すしかない
-			// (差し替えでは利用者所有のファイルを指したままになる)。
+			// 待っても縮まないので、`admin/emoji/update` で別の画像へ差し替える
+			// しかない (#3014 から差し替え先も system 所有へ複製する)。
 			return classify(entry, EmojiSystemFileUnrepairable,
 				fmt.Sprintf("申請ファイルが複製の上限 (%d bytes) を超えている: %v", maxBytes, err))
 		}
@@ -418,9 +420,10 @@ func classify(entry EmojiSystemFileEntry, outcome EmojiSystemFileOutcome, reason
 
 // anySystemOwned reports whether any of files belongs to the instance itself.
 //
-// **判定は `drive.IsSystemOwned` に寄せる。** `admin/emoji/add` (#2999) も同じ
-// 条件で「複製が要るか」を決めるので、ここに自前の定義を置くと片方だけ直したときに
-// 「新規の登録は複製するのに、既存データの検査は複製済みと見なす」形でずれる。
+// **判定は `drive.IsSystemOwned` に寄せる。** `admin/emoji/add` (#2999) と
+// `admin/emoji/update` (#3014) も同じ条件で「複製が要るか」を決めるので、ここに
+// 自前の定義を置くと片方だけ直したときに「新規の登録は複製するのに、既存データの
+// 検査は複製済みと見なす」形でずれる。
 func anySystemOwned(files []*model.DriveFile) bool {
 	for _, f := range files {
 		if drive.IsSystemOwned(f) {

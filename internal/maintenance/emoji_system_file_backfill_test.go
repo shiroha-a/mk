@@ -441,7 +441,7 @@ func TestBackfillEmojiSystemFilesReportsMissingObject(t *testing.T) {
 }
 
 // **複製の上限を超える画像は `failed` にしない。** 待っても縮まないので、
-// 再実行を促すのは誤った案内になる (人が絵文字を登録し直すしかない)。
+// 再実行を促すのは誤った案内になる (人が別の画像へ差し替えるしかない)。
 func TestBackfillEmojiSystemFilesReportsOversized(t *testing.T) {
 	fx := localFixture(t)
 	app, _, _ := seedApprovedOwn(t, fx, "toobig")

@@ -3980,7 +3980,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		{"emojiApplication.quotaResetRepo", emojiApplicationService.HasQuotaResetRepo(),
 			"申請枠の手動リセットが常に失敗し、過去に戻した枠も再び満杯に見える"},
 		{"admin.emojiImageFetcher", adminHandler.HasEmojiImageFetcher(),
-			"承認した絵文字と admin/emoji/add で登録した絵文字が申請者 / 操作者 / 相手サーバーのファイルを参照し続け、消された時点で壊れる"},
+			"承認した絵文字と admin/emoji/add で登録した絵文字 / admin/emoji/update で差し替えた絵文字が申請者 / 操作者 / 相手サーバーのファイルを参照し続け、消された時点で壊れる"},
 
 		// ここから可視性・権限・上限 (#2683)。認証ほど鋭くはないが、いずれも
 		// 利用者から見えない形で制限が外れる。

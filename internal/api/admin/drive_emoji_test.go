@@ -496,7 +496,8 @@ type fakeEmojiImageFetcher struct {
 	returnDF  *model.DriveFile
 	returnErr error
 
-	// #2966 (承認時に system 所有へ複製する経路。#2999 で admin/emoji/add も通る)
+	// #2966 (承認時に system 所有へ複製する経路。#2999 で admin/emoji/add、
+	// #3014 で admin/emoji/update も通る)
 	copyCalls     []*model.DriveFile
 	copyNames     []string
 	copySensitive []bool
