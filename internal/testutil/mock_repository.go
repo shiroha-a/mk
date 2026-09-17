@@ -4477,6 +4477,9 @@ type MockPageRepository struct {
 	Pages     map[string]*model.Page
 	CreateErr error
 	UpdateErr error
+	// UpdateFieldsCalls は UpdateFields に渡された field map を順に記録する。
+	// jsonb 列へ `[]byte` を渡していないか等、**値の型そのもの**を検査する用。
+	UpdateFieldsCalls []map[string]any
 }
 
 // NewMockPageRepository creates an empty MockPageRepository.
@@ -4523,6 +4526,11 @@ func (m *MockPageRepository) FindByUserAndName(userID, name string) (*model.Page
 }
 
 func (m *MockPageRepository) UpdateFields(pageID string, fields map[string]any) error {
+	// **渡された field map をそのまま記録する。** 実 repo は値の型を driver へ
+	// そのまま流すので、jsonb 列に `[]byte` を載せると bytea として送られて
+	// SQLSTATE 22P02 で落ちる。in-memory の値を見るだけでは型の誤りを
+	// 検出できないので、呼び出し側が何を渡したか自体を検査対象にする。
+	m.UpdateFieldsCalls = append(m.UpdateFieldsCalls, fields)
 	if m.UpdateErr != nil {
 		return m.UpdateErr
 	}

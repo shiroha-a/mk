@@ -31,6 +31,10 @@ const (
 //
 // **正規表現だけでは足りない。** `^[a-zA-Z0-9_]+$` は文字種しか見ないので、
 // 同じ文字を 1025 個並べるだけで列に入らない値が通っていた。
+//
+// **scope は読み取り側でも弾いてよい。** 元から `INVALID_PARAM` を返す述語
+// (upstream の paramDef 相当) で、長すぎる要素も同じ「形が違う」の一種。
+// `key` / `domain` のように「無い」を返す述語ではない。
 func validRegistryScope(scope []string) bool {
 	for _, s := range scope {
 		if !registryScopeElemRe.MatchString(s) || !colfit.Fits(s, registryScopeMaxRunes) {
@@ -47,10 +51,23 @@ func validRegistryScope(scope []string) bool {
 // クエリごと落ちて 500 になる (`i/registry/get-all` などは**任意の認証
 // ユーザー**が叩ける)。scope と同じ場所で弾く。
 //
-// **幅も見る (#3037)。** NUL だけ見ていたので、列幅を超える値は 22001 で
-// 同じ 500 になっていた。#3022 と同じく**既存の述語に畳んで既存の 400 に
-// 落とす** — 利用者にできることは変わらないので新しいエラーコードを足さない。
+// **幅を見るのは書き込み側だけ (#3037)。** NUL は比較の右辺に置いただけで
+// クエリごと落ちるのでどちらにも要るが、**幅は落ちない** — `varchar(10)` の列に
+// 対する `WHERE v = repeat('a', 2000)` は 0 行を返すだけ (実測)。読み取り側にも
+// 掛けると、1025 文字の key に対する応答が従来の `NO_SUCH_KEY` から
+// `INVALID_PARAM` に変わってしまう。
+//
+// 書き込み側は 22001 で 500 になるので、#3022 と同じく**既存の述語に畳んで
+// 既存の 400 に落とす** — 利用者にできることは変わらないので新しいエラー
+// コードを足さない。
 func storableRegistryValue(key string, domain *string) bool {
+	return colfit.Storable(key) && (domain == nil || colfit.Storable(*domain))
+}
+
+// storableRegistryWrite is storableRegistryValue plus the column widths.
+//
+// `i/registry/set` だけが使う。読み取り側の応答コードを変えないための分離。
+func storableRegistryWrite(key string, domain *string) bool {
 	return colfit.Fits(key, registryKeyMaxRunes) &&
 		(domain == nil || colfit.Fits(*domain, registryDomainMaxRunes))
 }

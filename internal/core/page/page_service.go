@@ -274,11 +274,17 @@ func (s *Service) Update(ownerID, pageID string, in UpdateInput) (*model.Page, e
 	if in.EyeCatchingImageID != nil {
 		fields["eyeCatchingImageId"] = *in.EyeCatchingImageID
 	}
+	// **jsonb 列は `string` へキャストしてから渡す (#3037)。** `[]byte` の
+	// まま `Updates` に載せると driver が **bytea** として送り、jsonb 列への
+	// 代入が SQLSTATE 22P02 `invalid input syntax for type json` で落ちる。
+	// つまり `pages/update` の `content` / `variables` は**どんな値でも 500**
+	// だった (実 DB で実測)。`internal/core/user/user_service.go` は同じ罠を
+	// 知っていて 6 箇所で `string(...)` を明示しており、ここだけ抜けていた。
 	if in.Content != nil {
-		fields["content"] = in.Content
+		fields["content"] = string(in.Content)
 	}
 	if in.Variables != nil {
-		fields["variables"] = in.Variables
+		fields["variables"] = string(in.Variables)
 	}
 	if in.Script != nil {
 		fields["script"] = *in.Script

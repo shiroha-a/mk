@@ -1,6 +1,7 @@
 package page_test
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -645,4 +646,31 @@ func TestUnlike_LikeLookupDBFailureIsNotNotLiked(t *testing.T) {
 	err := svc.Unlike("u1", "p1")
 	require.Error(t, err)
 	assert.False(t, errors.Is(err, page.ErrNotLiked), "DB 障害が「like していない」に化けている")
+}
+
+// **jsonb 列は `string` で渡すこと (#3037)。**
+//
+// `[]byte` のまま `Updates` に載せると driver が bytea として送り、jsonb 列への
+// 代入が SQLSTATE 22P02 で落ちる。つまり `pages/update` の `content` /
+// `variables` は**どんな値でも 500** だった。mock repository では値をそのまま
+// 受けてしまうので、**何を渡したか自体**を検査する。
+func TestUpdate_PassesJSONBColumnsAsString(t *testing.T) {
+	repo := testutil.NewMockPageRepository()
+	likeRepo := testutil.NewMockPageLikeRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	svc := page.NewService(repo, likeRepo, idGen)
+
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "n", Title: "t"}
+
+	content := json.RawMessage(`[{"x":1}]`)
+	variables := json.RawMessage(`[{"v":"a"}]`)
+	_, err := svc.Update("alice", "p1", page.UpdateInput{Content: content, Variables: variables})
+	require.NoError(t, err)
+
+	require.Len(t, repo.UpdateFieldsCalls, 1)
+	fields := repo.UpdateFieldsCalls[0]
+	assert.IsType(t, "", fields["content"], "content を []byte のまま渡している (bytea になる)")
+	assert.IsType(t, "", fields["variables"], "variables を []byte のまま渡している (bytea になる)")
+	assert.Equal(t, `[{"x":1}]`, fields["content"])
+	assert.Equal(t, `[{"v":"a"}]`, fields["variables"])
 }

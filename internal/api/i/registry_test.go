@@ -320,23 +320,30 @@ func TestRegistryGet_DBFailureIsNot4xx(t *testing.T) {
 func TestRegistryGuards_RejectOverwideValues(t *testing.T) {
 	long := strings.Repeat("a", 1025)
 
-	assert.False(t, storableRegistryValue(long, nil), "key の幅を見ていない")
+	assert.False(t, storableRegistryWrite(long, nil), "key の幅を見ていない")
 	domain := strings.Repeat("d", 513)
-	assert.False(t, storableRegistryValue("k", &domain), "domain の幅を見ていない")
+	assert.False(t, storableRegistryWrite("k", &domain), "domain の幅を見ていない")
 	assert.False(t, validRegistryScope([]string{long}), "scope の幅を見ていない")
 
 	// NUL は従来どおり (回帰していないこと)。
 	assert.False(t, storableRegistryValue("a\x00b", nil))
 	nulDomain := "a\x00b"
 	assert.False(t, storableRegistryValue("k", &nulDomain))
+
+	// **読み取り側は幅を見ない。** 列幅を超えた値は比較の右辺では落ちない
+	// (`varchar(10)` の列に 2000 文字を比べても 0 行が返るだけ、実測) ので、
+	// 応答は従来どおり `NO_SUCH_KEY` でなければならない。幅で 400 にすると
+	// wire のエラーコードが変わる。
+	assert.True(t, storableRegistryValue(long, nil), "読み取り側で幅を弾いている")
+	assert.True(t, storableRegistryValue("k", &domain), "読み取り側で幅を弾いている")
 }
 
 // **境界ちょうどと普通の値は通ったまま。** これが無いと「常に拒否する」実装でも
 // 上のテストが通る。
 func TestRegistryGuards_AcceptOrdinaryValues(t *testing.T) {
-	assert.True(t, storableRegistryValue(strings.Repeat("a", 1024), nil), "key の上限ちょうどを弾いている")
+	assert.True(t, storableRegistryWrite(strings.Repeat("a", 1024), nil), "key の上限ちょうどを弾いている")
 	domain := strings.Repeat("d", 512)
-	assert.True(t, storableRegistryValue("k", &domain), "domain の上限ちょうどを弾いている")
+	assert.True(t, storableRegistryWrite("k", &domain), "domain の上限ちょうどを弾いている")
 	assert.True(t, validRegistryScope([]string{strings.Repeat("a", 1024)}), "scope の上限ちょうどを弾いている")
 	assert.True(t, storableRegistryValue("client", nil))
 	assert.True(t, validRegistryScope([]string{"client", "base"}))

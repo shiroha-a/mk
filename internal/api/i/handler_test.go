@@ -2881,3 +2881,33 @@ func TestUpdate_OrdinaryJSONBFieldsStillPass(t *testing.T) {
 	rec := post(h.Update, `{"room":{"あ":"絵文字"},"mutedInstances":["example.com"]}`, user)
 	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 }
+
+// **`fields` も jsonb 列へ入る (#3037)。**
+//
+// ここはプレーンな `string` なので NUL のエスケープが実 NUL バイトとして
+// decode され、`core/user` が `json.Marshal` で戻したものが jsonb へ渡って
+// SQLSTATE 22P05 で落ちる。`json.RawMessage` の一覧とは経路が違うので、
+// 手で持つ一覧から漏れていた (敵対的レビューで実測)。
+func TestUpdate_UnstorableFieldsAre400(t *testing.T) {
+	esc := `\u0` + `000`
+	for name, body := range map[string]string{
+		"name に NUL":  `{"fields":[{"name":"a` + esc + `b","value":"x"}]}`,
+		"value に NUL": `{"fields":[{"name":"a","value":"x` + esc + `y"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, repo, _, _ := newTestHandler(t)
+			user := updateUser(repo)
+			rec := post(h.Update, body, user)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "列に入らない fields を受け入れている")
+			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+		})
+	}
+}
+
+// **普通の fields は通ったまま。** これが無いと「常に拒否する」実装でも上が通る。
+func TestUpdate_OrdinaryFieldsStillPass(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"fields":[{"name":"サイト","value":"https://example.com"}]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}

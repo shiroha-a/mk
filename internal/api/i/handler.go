@@ -730,7 +730,9 @@ func (h *Handler) RegistrySet(c echo.Context) error {
 	if req.Scope == nil {
 		req.Scope = []string{}
 	}
-	if !validRegistryScope(req.Scope) || !storableRegistryValue(req.Key, req.Domain) {
+	// **書き込みなので幅も見る。** 読み取り側は幅を見ない (列幅を超えた値は
+	// 比較の右辺では落ちず、`NO_SUCH_KEY` を返すのが事実)。
+	if !validRegistryScope(req.Scope) || !storableRegistryWrite(req.Key, req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// **value は jsonb 列へそのまま入る (#3037)。** PostgreSQL の jsonb は
@@ -1451,6 +1453,10 @@ func (h *Handler) Update(c echo.Context) error {
 	// varchar 列へ落ちるもの (`name` / `birthday` / `avatarId` など) も混ざって
 	// いるので、型で機械的には選べない。ここは jsonb 列へ**中身をそのまま**
 	// 書くものだけ。
+	//
+	// **`fields` はここに入らない。** あれは `[]FieldInput` (プレーンな
+	// `string`) で、`core/user` が marshal し直してから jsonb へ渡すので、
+	// 判定も要素ごとに下で行う。手で持つ一覧の失敗形として 1 度漏らしている。
 	for _, raw := range []json.RawMessage{
 		req.Room, req.MutedWords, req.HardMutedWords,
 		req.NotificationRecieveConfig, req.MutedInstances, req.EmailNotificationTypes,
@@ -1677,6 +1683,15 @@ func (h *Handler) Update(c echo.Context) error {
 		}
 		items := make([]user.FieldItem, len(*req.Fields))
 		for i, f := range *req.Fields {
+			// **`fields` も jsonb 列へ入る (#3037)。** ここはプレーンな
+			// `string` なので NUL のエスケープが**実 NUL バイト**として
+			// decode され、`core/user` が `json.Marshal` で戻したものが
+			// jsonb へ渡って SQLSTATE 22P05 で落ちる。上の
+			// `json.RawMessage` の一覧とは経路が違うので、手で持つ一覧からは
+			// 漏れていた (敵対的レビューで実測)。
+			if !colfit.Storable(f.Name) || !colfit.Storable(f.Value) {
+				return apierr.JSONInvalidParam(c)
+			}
 			items[i] = user.FieldItem{Name: f.Name, Value: f.Value}
 		}
 		in.Fields = &items

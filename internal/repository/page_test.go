@@ -280,3 +280,38 @@ func TestPageRepository_ListFeatured_QueryError(t *testing.T) {
 	_, err := repo.ListFeatured("", "", 10, 0)
 	assert.Error(t, err)
 }
+
+// **jsonb 列は `string` で渡す (#3037)。**
+//
+// `[]byte` のまま `Updates` に載せると driver が bytea として送り、jsonb 列への
+// 代入が SQLSTATE 22P02 で落ちる。`pages/update` の `content` / `variables` は
+// **どんな値でも 500** だった。モック repository ではこの罠が出ないので、
+// 実 DB に対して固定する。
+func TestPageRepository_UpdateFieldsAcceptsJSONBColumns(t *testing.T) {
+	repo := NewPageRepository(testDB)
+	user := insertTestUser(t, "u_page_jsonb", "pagejsonb")
+	defer cleanupUser(t, user.ID)
+
+	p := &model.Page{
+		ID: "pg_jsonb_1", UserID: user.ID, Name: "n", Title: "t",
+		Content: datatypes.JSON([]byte(`[]`)), Variables: datatypes.JSON([]byte(`[]`)),
+	}
+	require.NoError(t, repo.Create(p))
+	defer testDB.Exec(`DELETE FROM page WHERE id = ?`, p.ID)
+
+	// **`string` を渡す経路が通ること。** core/page が組み立てる形と同じ。
+	require.NoError(t, repo.UpdateFields(p.ID, map[string]any{
+		"content":   string([]byte(`[{"x":1}]`)),
+		"variables": string([]byte(`[{"v":"a"}]`)),
+	}), "jsonb 列の UPDATE が通らない")
+
+	got, err := repo.FindByID(p.ID)
+	require.NoError(t, err)
+	assert.JSONEq(t, `[{"x":1}]`, string(got.Content))
+	assert.JSONEq(t, `[{"v":"a"}]`, string(got.Variables))
+
+	// **`[]byte` は落ちる**ことも固定しておく。これが無いと「どちらでも
+	// 通る」と誤解して core 側のキャストが外れる。
+	err = repo.UpdateFields(p.ID, map[string]any{"content": []byte(`[{"y":2}]`)})
+	assert.Error(t, err, "[]byte が bytea として通ってしまっている")
+}
