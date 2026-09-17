@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,14 +14,32 @@ import (
 	"github.com/shiroha-a/mk/internal/core/mediaproxy"
 )
 
+// statusClientClosedRequest is nginx's non-standard 499, used when the client
+// went away before we produced a response.
+//
+// 標準の status ではないが、本文を書かないので wire 上は問題にならない。
+// 500 と混ぜないことが目的 (#3032)。
+const statusClientClosedRequest = 499
+
+// MediaProxy is the subset of *mediaproxy.Service this handler needs.
+//
+// **インターフェースにしてあるのは、失敗の分岐をテストから決定的に踏むため
+// (#3032)。** 過負荷や not-found を実サービスで再現しようとすると、枠を
+// 埋める側と観測する側の競争になって flaky になる。handler の責務は
+// 「error を wire の形に写す」ことなので、そこだけを見る。
+type MediaProxy interface {
+	Authorize(ctx context.Context, rawURL, sig string) error
+	Fetch(ctx context.Context, rawURL string, mode mediaproxy.ProxyMode, out mediaproxy.OutputFormat, animated bool) (*mediaproxy.ProxyResult, error)
+}
+
 // Handler handles the /proxy/* media proxy endpoint.
 type Handler struct {
-	service *mediaproxy.Service
+	service MediaProxy
 	config  *config.Config
 }
 
 // NewHandler creates a new proxy Handler.
-func NewHandler(service *mediaproxy.Service, cfg *config.Config) *Handler {
+func NewHandler(service MediaProxy, cfg *config.Config) *Handler {
 	return &Handler{service: service, config: cfg}
 }
 
@@ -81,6 +101,54 @@ func (h *Handler) Handle(c echo.Context) error {
 	// Fetch + 画像処理
 	result, err := h.service.Fetch(c.Request().Context(), rawURL, mode, out, parseAnimated(c))
 	if err != nil {
+		if errors.Is(err, mediaproxy.ErrOverloaded) {
+			// **枠の枯渇は access log から区別が付かない** ので残す。
+			// #2849 の argon2 枠が signin handler で同じことをしている。
+			//
+			// **流量は signin とは桁が違う。** 1 リクエスト 1 行で、shed は
+			// 「到着率 - 排出率」の分だけ出る (排出は 8 core・枠 4 の実測で
+			// 63.9 rps)。到着 200 rps なら約 136 行/秒。ローテーションは
+			// #2828 で効いているのでディスクは埋まらないが、輻輳時に
+			// 他のログが流れることは織り込んでおくこと。
+			slog.Warn("mediaproxy: shed request, image pipeline saturated",
+				// **`.String()` を明示的に通す。** slog の JSONHandler は
+				// `fmt.Stringer` を使わないので、handler を差し替えた瞬間に
+				// `"mode":2` に戻る (#2849 の call site も同じ形)。
+				"url", rawURL, "mode", mode.String())
+			// **過負荷の応答は絶対にキャッシュさせない (#3032)。** 通常の
+			// fallback は `max-age=300` だが、瞬間的な輻輳を CDN に載せると
+			// その 5 分間ずっと壊れた画像が見える。#2913 (403 が 1 日
+			// キャッシュされてアイコンが壊れ続けた) と同型の失敗になる。
+			if c.QueryParam("fallback") != "" {
+				// **`Retry-After` は付けない。** 返すのは 200 の画像で、
+				// RFC 9110 が `Retry-After` を定義しているのは 503 と 3xx。
+				return h.serveFallbackWithCache(c, "no-store")
+			}
+			c.Response().Header().Set("Retry-After", "1")
+			c.Response().Header().Set("Cache-Control", "no-store")
+			return c.NoContent(http.StatusServiceUnavailable)
+		}
+		// **`context.Canceled` だけ。`DeadlineExceeded` を混ぜてはいけない
+		// (#3032 レビュー)。** `/proxy` のリクエスト context に deadline を
+		// 付ける middleware は無い (`grep 'middleware.Timeout\|WithDeadline'
+		// internal/server/` が 0 件) ので、利用者の離脱が deadline として
+		// 現れることはない。一方 `DeadlineExceeded` は **mk-go 自身の 30 秒
+		// `httpClient.Timeout`** から来る — Go 1.26 では `Client.Timeout`
+		// 由来のエラーが `errors.Is(err, context.DeadlineExceeded)` を満たし、
+		// `fetchRemote` が `%w` でラップしている。これを 499 に倒すと、
+		// origin が body を引き延ばしただけの**サーバー側障害**が 4xx にも
+		// 5xx にも出ず、しかも `?fallback` が無視される。
+		if errors.Is(err, context.Canceled) {
+			// 利用者が接続を切っただけ。500 に数えると監視で本物の障害が
+			// 埋もれるので、nginx と同じ 499 にして本文は書かない。
+			//
+			// **ここに来るのは「枠待ち中の cancel」と「body 読み出し中の
+			// cancel」の 2 経路だけ。** リクエスト時間の大半を占める
+			// `httpClient.Do` の最中に切られた場合は、`fetchRemote` が
+			// エラー種別を問わず `ErrNotFound` に潰すので 404 側へ行く
+			// (この丸めは本コミットの範囲外の既存挙動)。
+			return c.NoContent(statusClientClosedRequest)
+		}
 		if errors.Is(err, mediaproxy.ErrNotFound) {
 			if c.QueryParam("fallback") != "" {
 				return h.serveFallback(c)
@@ -138,9 +206,17 @@ func (h *Handler) redirectToExternalProxy(c echo.Context, rawURL string) error {
 
 // serveFallback returns a 1x1 transparent PNG with short cache.
 func (h *Handler) serveFallback(c echo.Context) error {
+	return h.serveFallbackWithCache(c, "max-age=300")
+}
+
+// serveFallbackWithCache is serveFallback with an explicit Cache-Control.
+//
+// **一時的な失敗と恒久的な失敗でキャッシュ時間を分けるために要る (#3032)。**
+// 過負荷で落とした応答が CDN に載ると、輻輳が去っても壊れたままになる。
+func (h *Handler) serveFallbackWithCache(c echo.Context, cacheControl string) error {
 	dummy := mediaproxy.DummyPNG()
 	defer dummy.Body.Close()
-	c.Response().Header().Set("Cache-Control", "max-age=300")
+	c.Response().Header().Set("Cache-Control", cacheControl)
 	data, _ := io.ReadAll(dummy.Body)
 	return c.Blob(http.StatusOK, dummy.ContentType, data)
 }
