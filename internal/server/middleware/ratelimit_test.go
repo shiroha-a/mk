@@ -1044,8 +1044,10 @@ func TestDefaultEndpointLimits_AvailabilityOracles(t *testing.T) {
 			assert.LessOrEqual(t, limit.Duration, time.Minute, "窓が長すぎる")
 			// **登録フォームの実使用は上回る。** 同梱フロントは入力中に
 			// debounce 付きで叩くので 1 分に十数回。
-			assert.GreaterOrEqual(t, limit.Max, 30, "登録フォームの実使用を下回っている")
-			assert.LessOrEqual(t, limit.Max, 120, "総当たりの速度として緩すぎる")
+			// **debounce 1000ms で打ち続けると 1 分 60 回に達する。**
+			// 利用者名はそこに張り付きうるので、実使用の 2 倍を要求する。
+			assert.GreaterOrEqual(t, limit.Max, 60, "登録フォームの実使用を下回っている")
+			assert.LessOrEqual(t, limit.Max, 200, "総当たりの速度として緩すぎる")
 		})
 	}
 }
