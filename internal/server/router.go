@@ -1471,10 +1471,21 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// CAPTCHA service — meta から有効な provider を選択して構築する。
 	// meta 取得失敗時は captcha 無効として動作する (ログイン不能を避けるため)。
 	// siteverify は SSRF-safe transport + forward proxy 経由にする (#638)。
-	var captchaSvc *corecaptcha.Service
-	if serverMeta, err := metaRepo.Fetch(); err == nil {
-		captchaSvc = corecaptcha.NewServiceWithClient(serverMeta, s.outboundClient(10*time.Second))
+	//
+	// **起動時に meta を読めなくても service は作る (#3037)。** 以前は nil の
+	// ままにしていたので、`SetCaptcha` も呼ばれず `reloadCaptcha` も
+	// `captchaSvc == nil` で即 return し、**その後 meta が読めるようになっても
+	// captcha が永久に無効**だった。しかも `/api/meta` は DB を読むので
+	// フロントはウィジェットを描画し、運営者には ON に見える — この配線が
+	// 塞ごうとしている状態そのもの。空の meta で作っておけば、次の
+	// `metaUpdated` で provider が入る。
+	captchaMeta, captchaMetaErr := metaRepo.Fetch()
+	if captchaMetaErr != nil || captchaMeta == nil {
+		slog.Warn("captcha: meta unavailable at startup; starting disabled and waiting for metaUpdated",
+			"err", captchaMetaErr)
+		captchaMeta = &model.Meta{}
 	}
+	captchaSvc := corecaptcha.NewServiceWithClient(captchaMeta, s.outboundClient(10*time.Second))
 
 	// Signup (public)
 	userPendingRepo := repository.NewUserPendingRepository(s.db)

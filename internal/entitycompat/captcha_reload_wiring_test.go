@@ -42,10 +42,11 @@ func TestCaptchaReloadIsWired(t *testing.T) {
 	require.NoError(t, err, "router.go を読めない")
 
 	var (
-		hookHasReload       bool
-		subscriberHasReload bool
-		sawHook             bool
-		sawSubscriber       bool
+		hookHasReload              bool
+		subscriberHasReload        bool
+		subInvalidatesBeforeReload bool
+		sawHook                    bool
+		sawSubscriber              bool
 	)
 
 	// callsReload reports whether the func literal body calls reloadCaptcha.
@@ -96,6 +97,9 @@ func TestCaptchaReloadIsWired(t *testing.T) {
 				if callsReload(a) {
 					subscriberHasReload = true
 				}
+				if invalidatesBeforeReload(a) {
+					subInvalidatesBeforeReload = true
+				}
 			}
 		}
 		return true
@@ -118,6 +122,95 @@ func TestCaptchaReloadIsWired(t *testing.T) {
 	// (実測)。こちらは 1 箇所しか無いので集合ベースの assertWired で足りる。
 	assertWired(t, routerGo, "captchaSvc.Reload(m)",
 		"reloadCaptcha が呼ばれるだけで provider 集合を差し替えていない")
+
+	// **subscriber は先に meta の cache を落とすこと。** `reloadCaptcha` は
+	// `cachedMeta.Fetch()` を読むので、`Invalidate` を落とすと**最大 5 分古い
+	// スナップショット**から provider を組み直してしまい、入れ替わらない。
+	// 呼ばれていることだけを見る形ではこの変異が素通りする。
+	// **service は無条件に作ること。** 起動時に meta を読めなかったときに nil の
+	// ままにすると、`SetCaptcha` も呼ばれず `reloadCaptcha` も
+	// `captchaSvc == nil` で即 return するので、**その後 meta が読めるように
+	// なっても captcha が永久に無効**になる。この配線が塞ごうとしている状態
+	// そのもの。空の meta で作っておけば次の `metaUpdated` で provider が入る。
+	require.True(t, captchaServiceIsUnconditional(f),
+		"captchaSvc を条件付きで作っている。起動時に meta を読めないと captcha が永久に無効になる")
+
+	require.True(t, subInvalidatesBeforeReload,
+		`"metaUpdated" の subscriber が cachedMeta.Invalidate() を reloadCaptcha より前に呼んでいない。`+"\n"+
+			"古い meta から provider を組み直すので、管理画面の変更が反映されない")
+}
+
+// captchaServiceIsUnconditional reports whether captchaSvc is assigned by a
+// plain `:=` (not declared with `var` and filled inside an `if`).
+//
+// **形で見るしかない。** `internal/server` は CI のカバレッジ対象外で router を
+// 組み立てるテストも無いので、nil のまま残る経路は build もテストも緑のまま
+// 起きる。
+func captchaServiceIsUnconditional(f *ast.File) bool {
+	declared := false
+	assigned := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		switch t := n.(type) {
+		case *ast.DeclStmt:
+			// `var captchaSvc *corecaptcha.Service` を探す。
+			gd, ok := t.Decl.(*ast.GenDecl)
+			if !ok || gd.Tok != token.VAR {
+				return true
+			}
+			for _, spec := range gd.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok {
+					continue
+				}
+				for _, name := range vs.Names {
+					if name.Name == "captchaSvc" {
+						declared = true
+					}
+				}
+			}
+		case *ast.AssignStmt:
+			if t.Tok != token.DEFINE {
+				return true
+			}
+			for _, lhs := range t.Lhs {
+				if id, ok := lhs.(*ast.Ident); ok && id.Name == "captchaSvc" {
+					assigned = true
+				}
+			}
+		}
+		return true
+	})
+	return assigned && !declared
+}
+
+// invalidatesBeforeReload reports whether the body calls
+// `cachedMeta.Invalidate()` before `reloadCaptcha()`.
+//
+// **順序を見るのが要点。** `reloadCaptcha` は `cachedMeta.Fetch()` を読むので、
+// 先に cache を落としていないと古いスナップショットから provider を組み直す。
+// 呼び出しの有無だけでは検出できない。
+func invalidatesBeforeReload(n ast.Node) bool {
+	invalidateAt, reloadAt := token.NoPos, token.NoPos
+	ast.Inspect(n, func(x ast.Node) bool {
+		call, ok := x.(*ast.CallExpr)
+		if !ok {
+			return true
+		}
+		switch fun := call.Fun.(type) {
+		case *ast.SelectorExpr:
+			if id, ok := fun.X.(*ast.Ident); ok && id.Name == "cachedMeta" && fun.Sel.Name == "Invalidate" {
+				if !invalidateAt.IsValid() {
+					invalidateAt = call.Pos()
+				}
+			}
+		case *ast.Ident:
+			if fun.Name == "reloadCaptcha" && !reloadAt.IsValid() {
+				reloadAt = call.Pos()
+			}
+		}
+		return true
+	})
+	return invalidateAt.IsValid() && reloadAt.IsValid() && invalidateAt < reloadAt
 }
 
 // hasStringArg reports whether the call has the given basic string literal arg.
