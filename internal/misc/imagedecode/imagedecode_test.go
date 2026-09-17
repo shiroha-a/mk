@@ -2,6 +2,8 @@ package imagedecode
 
 import (
 	"bytes"
+	"encoding/binary"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/png"
@@ -9,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/kovidgoyal/imaging"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -326,4 +329,113 @@ func encode8BitPNG(t *testing.T, w, h int) []byte {
 	require.NoError(t, err)
 	require.Equal(t, int64(4), decodedBytesPerPixel(cfg.ColorModel))
 	return buf.Bytes()
+}
+
+// **`image.DecodeConfig` は PNG の `tRNS` を読まない (#3037 レビューで実測)。**
+//
+// 非パレット画像では `tRNS` に当たる前に break するので、グレースケールは
+// `tRNS` の有無に関わらず `Gray` / `Gray16` と報告される。ところがデコーダは
+// `tRNS` があるとアルファ付きへ展開する — 16bit グレースケールは
+// `image.NRGBA64` (1 画素 8 バイト、報告値の 4 倍)。**バイト予算を入れた意味が
+// そこだけ消えていた。**
+func TestDecodeWithPixelCap_Gray16WithTransparencyCostsEightBytes(t *testing.T) {
+	plain := encodeGray16PNG(t, 4, 4)
+	withTRNS := insertPNGChunk(t, plain, "tRNS", []byte{0x00, 0x00})
+
+	// どちらも DecodeConfig は Gray16 と報告する (= 報告値は当てにならない)。
+	for _, data := range [][]byte{plain, withTRNS} {
+		cfg, err := png.DecodeConfig(bytes.NewReader(data))
+		require.NoError(t, err)
+		require.Equal(t, color.Gray16Model, cfg.ColorModel)
+	}
+
+	// 16 画素。予算は maxPixels*4 バイト。maxPixels=16 なら予算 64 バイト。
+	// tRNS 無し (2 B/px = 32 バイト) は通る。
+	_, err := DecodeWithPixelCap(plain, 16)
+	assert.NoError(t, err, "tRNS 無しの Gray16 の判定が変わっている")
+
+	// tRNS 有り (8 B/px = 128 バイト) は同じ予算では落ちる。
+	_, err = DecodeWithPixelCap(withTRNS, 16)
+	require.Error(t, err, "tRNS 付き Gray16 が 2 B/px と見積もられている")
+	assert.ErrorIs(t, err, ErrTooManyPixels)
+
+	// 予算を増やせば通る (一律拒否ではない)。
+	_, err = DecodeWithPixelCap(withTRNS, 32)
+	assert.NoError(t, err)
+}
+
+// **見積もりが実際の確保と合っていること。** ここが合っていないと、予算の
+// 判定そのものが意味を持たない。
+func TestDecodedBytesPerPixelFor_MatchesTheDecodedImage(t *testing.T) {
+	gray16 := encodeGray16PNG(t, 4, 4)
+
+	for _, tt := range []struct {
+		name string
+		data []byte
+		want int64
+	}{
+		{"Gray16", gray16, 2},
+		{"Gray16 + tRNS", insertPNGChunk(t, gray16, "tRNS", []byte{0x00, 0x00}), 8},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := png.DecodeConfig(bytes.NewReader(tt.data))
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, decodedBytesPerPixelFor(tt.data, cfg.ColorModel))
+
+			// 実際にデコードして、見積もりが下回っていないことを確かめる。
+			img, err := imaging.Decode(bytes.NewReader(tt.data), imaging.AutoOrientation(true))
+			require.NoError(t, err)
+			assert.LessOrEqual(t, actualBytesPerPixel(img), tt.want,
+				"見積もりが実際の確保量を下回っている (%T)", img)
+		})
+	}
+}
+
+// **JXL の判定は登録側の magic に合わせる。** `gen2brain/jpegxl` が登録するのは
+// `????JXL` (7 バイト) なので、`JXL ` + `0D0A870A` まで要求すると 1 バイト違う
+// 入力が guard を抜けて wasm へ全量渡る。
+func TestUsesSandboxedDecoder_JXLContainerMatchesRegisteredMagic(t *testing.T) {
+	data := make([]byte, 16)
+	copy(data, []byte{0, 0, 0, 0x0C})
+	copy(data[4:], "JXL")
+	data[7] = 0x00 // 末尾スペースではない形
+	assert.True(t, usesSandboxedDecoder(data), "登録 magic と同じ形を取り逃がしている")
+}
+
+func actualBytesPerPixel(img image.Image) int64 {
+	switch img.(type) {
+	case *image.NRGBA64, *image.RGBA64:
+		return 8
+	case *image.NRGBA, *image.RGBA, *image.CMYK:
+		return 4
+	case *image.Gray16:
+		return 2
+	case *image.Gray, *image.Paletted:
+		return 1
+	default:
+		return 4
+	}
+}
+
+func encodeGray16PNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, image.NewGray16(image.Rect(0, 0, w, h))))
+	return buf.Bytes()
+}
+
+// insertPNGChunk splices a chunk in just before IDAT.
+func insertPNGChunk(t *testing.T, src []byte, typ string, data []byte) []byte {
+	t.Helper()
+	idx := bytes.Index(src, []byte("IDAT"))
+	require.Greater(t, idx, 4)
+	pos := idx - 4
+
+	body := append([]byte(typ), data...)
+	out := make([]byte, 0, len(src)+len(body)+8)
+	out = append(out, src[:pos]...)
+	out = binary.BigEndian.AppendUint32(out, uint32(len(data)))
+	out = append(out, body...)
+	out = binary.BigEndian.AppendUint32(out, crc32.ChecksumIEEE(body))
+	return append(out, src[pos:]...)
 }

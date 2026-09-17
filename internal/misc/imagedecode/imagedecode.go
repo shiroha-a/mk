@@ -129,9 +129,10 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 		//
 		// 予算は「cap ちょうどの 8bit 画像」= `maxPixels * 4` バイト。
 		// 8bit の画像にとっては従来と同じ判定で、**通る集合は変わらない**。
-		if px*decodedBytesPerPixel(cfg.ColorModel) > maxPixels*rasterBytesPerPixelBaseline {
+		bpp := decodedBytesPerPixelFor(data, cfg.ColorModel)
+		if px*bpp > maxPixels*rasterBytesPerPixelBaseline {
 			return nil, fmt.Errorf("%w: %dx%d at %d bytes/pixel",
-				ErrTooManyPixels, cfg.Width, cfg.Height, decodedBytesPerPixel(cfg.ColorModel))
+				ErrTooManyPixels, cfg.Width, cfg.Height, bpp)
 		}
 	}
 	// **アニメーションは 1 コマだけ読む。** `imaging.Decode` は内部で
@@ -226,9 +227,11 @@ func isJPEGXL(data []byte) bool {
 	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0x0A {
 		return true // 素の codestream
 	}
-	// ISOBMFF 風のコンテナ。`ftyp` ではなく `JXL ` box で始まる。
-	return len(data) >= 12 && string(data[4:8]) == "JXL " &&
-		data[8] == 0x0D && data[9] == 0x0A && data[10] == 0x87 && data[11] == 0x0A
+	// ISOBMFF 風のコンテナ。**判定は登録側の magic に合わせる** —
+	// `gen2brain/jpegxl` が `image.RegisterFormat` するのは `????JXL`
+	// (7 バイト、末尾スペース無し) なので、`JXL ` + `0D0A870A` まで要求すると
+	// **1 バイト違う入力が guard を抜けて wasm へ全量渡る** (#3037 レビュー)。
+	return len(data) >= 7 && string(data[4:7]) == "JXL"
 }
 
 // isWebP reports whether data is a RIFF/WEBP file.
@@ -246,6 +249,45 @@ func isWebP(data []byte) bool {
 // 8bit の RGBA / NRGBA が 4 バイト。`MaxPixels` はこの前提で決めた値なので、
 // バイト予算に読み替えるときも同じ係数を使う。
 const rasterBytesPerPixelBaseline int64 = 4
+
+// decodedBytesPerPixelFor is decodedBytesPerPixel with the encoded bytes at
+// hand, so it can correct the cases where the reported color model lies.
+//
+// **`image.DecodeConfig` は PNG の `tRNS` を読まない (#3037 レビューで実測)。**
+// 非パレット画像では `tRNS` に当たる前に break するので、グレースケールは
+// `tRNS` の有無に関わらず `Gray` / `Gray16` と報告される。ところがデコーダは
+// `tRNS` があると**アルファ付きへ展開する** — 16bit グレースケールは
+// `image.NRGBA64` (1 画素 8 バイト、報告値の 4 倍)、8bit は `image.NRGBA`
+// (4 バイト、報告値の 4 倍)。
+//
+// 実測: 8x8 の Gray16 PNG に `tRNS` を 1 つ足すと、`DecodeConfig` は
+// `Gray16Model` のままで `imaging.Decode` の戻りが `*image.NRGBA64` になる。
+// cap ちょうどの 64MP なら 512MB、drive の 268MP なら 2GiB の単一確保で、
+// **バイト予算を入れた意味がそこだけ消えていた**。
+//
+// 真偽値ではなく実際の確保量を見積もるので、ここを直しても 8bit の普通の
+// 画像 (tRNS 無し) の判定は変わらない。
+func decodedBytesPerPixelFor(data []byte, m color.Model) int64 {
+	bpp := decodedBytesPerPixel(m)
+	switch m {
+	case color.GrayModel, color.Gray16Model:
+		// グレースケールだけが報告値と食い違う。truecolor は
+		// `tRNS` があっても RGBA / NRGBA64 で同じバイト数になる。
+		if isPNG(data) && hasChunk(data, "tRNS") {
+			if m == color.Gray16Model {
+				return 8
+			}
+			return 4
+		}
+	}
+	return bpp
+}
+
+// isPNG reports whether data starts with the PNG signature.
+func isPNG(data []byte) bool {
+	const sig = "\x89PNG\r\n\x1a\n"
+	return len(data) >= 8 && string(data[:8]) == sig
+}
 
 // decodedBytesPerPixel estimates the per-pixel cost of the decoded raster.
 //
