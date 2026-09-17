@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/color"
 	"image/draw"
 	"image/gif"
 	"image/png"
@@ -116,8 +117,21 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 	// 通る集合を変えないという前提で入れている)。その場合は従来どおり
 	// デコード後の cap が受け止める。
 	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
-		if int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+		px := int64(cfg.Width) * int64(cfg.Height)
+		if px > maxPixels {
 			return nil, fmt.Errorf("%w: %dx%d", ErrTooManyPixels, cfg.Width, cfg.Height)
+		}
+		// **画素数だけでは確保量が決まらない (#3037)。** 16bit の PNG は
+		// `image.NRGBA64` へ展開されるので**1 画素 8 バイト**、8bit の倍を
+		// 食う。cap ちょうどの 64MP なら 512MB で、同時実行枠 (既定
+		// `GOMAXPROCS/2`) が 4 あれば 2GB を超える。cap を通っているので
+		// 今までは何も止めなかった。
+		//
+		// 予算は「cap ちょうどの 8bit 画像」= `maxPixels * 4` バイト。
+		// 8bit の画像にとっては従来と同じ判定で、**通る集合は変わらない**。
+		if px*decodedBytesPerPixel(cfg.ColorModel) > maxPixels*rasterBytesPerPixelBaseline {
+			return nil, fmt.Errorf("%w: %dx%d at %d bytes/pixel",
+				ErrTooManyPixels, cfg.Width, cfg.Height, decodedBytesPerPixel(cfg.ColorModel))
 		}
 	}
 	// **アニメーションは 1 コマだけ読む。** `imaging.Decode` は内部で
@@ -225,6 +239,33 @@ func isJPEGXL(data []byte) bool {
 // 残さない。
 func isWebP(data []byte) bool {
 	return len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
+}
+
+// rasterBytesPerPixelBaseline is the bytes/pixel that MaxPixels was sized for.
+//
+// 8bit の RGBA / NRGBA が 4 バイト。`MaxPixels` はこの前提で決めた値なので、
+// バイト予算に読み替えるときも同じ係数を使う。
+const rasterBytesPerPixelBaseline int64 = 4
+
+// decodedBytesPerPixel estimates the per-pixel cost of the decoded raster.
+//
+// **`image.DecodeConfig` が返す色モデルで決まる。** 16bit の PNG は
+// `NRGBA64` / `RGBA64` / `Gray16` になり、素の Go デコーダがその形で
+// ラスタを確保する。
+//
+// **分からないものは 4 と見なす** (YCbCr / CMYK / パレット)。どれも 4 を
+// 超えないので、既定へ倒しても予算を踏み越えない。
+func decodedBytesPerPixel(m color.Model) int64 {
+	switch m {
+	case color.RGBA64Model, color.NRGBA64Model:
+		return 8
+	case color.Gray16Model:
+		return 2
+	case color.GrayModel:
+		return 1
+	default:
+		return 4
+	}
 }
 
 // isGIF reports whether data starts with a GIF signature.

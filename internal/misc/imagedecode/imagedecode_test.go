@@ -2,6 +2,8 @@ package imagedecode
 
 import (
 	"bytes"
+	"image"
+	"image/color"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -241,4 +243,87 @@ func TestDecode_SandboxedCapDoesNotApplyToNativeFormats(t *testing.T) {
 			assert.NotErrorIs(t, err, ErrEncodedTooLarge)
 		})
 	}
+}
+
+// **画素数だけでは確保量が決まらない (#3037)。**
+//
+// 16bit の PNG は `image.NRGBA64` へ展開されるので 1 画素 8 バイト。cap
+// ちょうどの 64MP なら 512MB で、同時実行枠が 4 あれば 2GB を超える。
+// cap を通っているので今までは何も止めなかった。
+func TestDecodeWithPixelCap_CountsBytesNotOnlyPixels(t *testing.T) {
+	// 4x4 = 16 画素。予算は maxPixels*4 バイト。
+	const w, h = 4, 4
+	deep := encode16BitPNG(t, w, h)
+	shallow := encode8BitPNG(t, w, h)
+
+	// maxPixels=20 → 予算 80 バイト。8bit は 64 バイトで通り、16bit は
+	// 128 バイトで落ちる。**画素数はどちらも 16 で cap 内**。
+	_, err := DecodeWithPixelCap(shallow, 20)
+	require.NoError(t, err, "8bit の判定が変わっている")
+
+	_, err = DecodeWithPixelCap(deep, 20)
+	require.Error(t, err, "16bit がバイト予算を超えても通っている")
+	assert.ErrorIs(t, err, ErrTooManyPixels)
+
+	// 予算を倍にすれば 16bit も通る (「16bit を一律で拒否」ではない)。
+	_, err = DecodeWithPixelCap(deep, 40)
+	assert.NoError(t, err, "16bit を一律で拒否している")
+}
+
+// **8bit の画像にとっては従来と同じ判定。** 通る集合が変わると、cap を
+// 通っていた実写真がサムネイル・webpublic を失い、EXIF が公開側へ出る
+// (#3037 で塞いだばかりの経路)。
+func TestDecodeWithPixelCap_EightBitBoundaryUnchanged(t *testing.T) {
+	data := encode8BitPNG(t, 4, 4) // 16 画素
+
+	_, err := DecodeWithPixelCap(data, 16)
+	assert.NoError(t, err, "cap ちょうどの 8bit 画像を落としている")
+
+	_, err = DecodeWithPixelCap(data, 15)
+	assert.ErrorIs(t, err, ErrTooManyPixels)
+}
+
+func TestDecodedBytesPerPixel(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		model color.Model
+		want  int64
+	}{
+		{"NRGBA64", color.NRGBA64Model, 8},
+		{"RGBA64", color.RGBA64Model, 8},
+		{"Gray16", color.Gray16Model, 2},
+		{"Gray", color.GrayModel, 1},
+		{"NRGBA", color.NRGBAModel, 4},
+		// 分からないものは 4 に倒す (どれも 4 を超えない)。
+		{"YCbCr", color.YCbCrModel, 4},
+		{"CMYK", color.CMYKModel, 4},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, decodedBytesPerPixel(tt.model))
+		})
+	}
+}
+
+func encode16BitPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewNRGBA64(image.Rect(0, 0, w, h))
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	// png.Encode が 16bit で書いていることを確かめる (8bit に落ちていたら
+	// このテストは何も検査していない)。
+	cfg, err := png.DecodeConfig(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, int64(8), decodedBytesPerPixel(cfg.ColorModel), "16bit で書けていない")
+	return buf.Bytes()
+}
+
+func encode8BitPNG(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	cfg, err := png.DecodeConfig(bytes.NewReader(buf.Bytes()))
+	require.NoError(t, err)
+	require.Equal(t, int64(4), decodedBytesPerPixel(cfg.ColorModel))
+	return buf.Bytes()
 }
