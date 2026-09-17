@@ -1,9 +1,7 @@
 package entitycompat
 
 import (
-	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -25,26 +23,43 @@ import (
 // `emoji-application/*` の 3 つがその状態だった。
 //
 // `internal/server` は CI のカバレッジ対象外で router を組み立てるテストも
-// 無いので、新しい route を足しても build もテストも緑のまま抜ける。ここで
-// 形を固定する。
+// 無いので、新しい route を足しても build もテストも緑のまま抜ける。
 func TestCredentialRoutesWithoutScopeRejectAppTokens(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "server", "router.go"))
-	require.NoError(t, err)
+	// **同 package の括弧対応パーサを使う (#3037 レビュー)。** 自前の行畳みは
+	// 文字列・コメント中の括弧まで数えるので、引数の途中に括弧入りのコメントを
+	// 1 行足すと後続 route を飲み込み、その route の `RequireScope` が手前の
+	// 判定に混ざる。パーサを 2 本持つこと自体がドリフト源でもある。
+	routes := parseRouteRegistrations(t, filepath.Join("..", "server", "router.go"))
+	require.Greater(t, len(routes), 400, "route の抽出が壊れている")
+	require.Contains(t, routes, "i/change-password")
+	assert.Contains(t, routes["i/change-password"], "RequireSecure", "middleware を拾えていない")
 
 	var missing []string
-	for _, call := range routeRegistrations(string(src)) {
-		if !strings.Contains(call.mws, "RequireAuth") {
+	for ep, raw := range routes {
+		// **コメントは数えない (#3037 レビュー / #2856 と同型)。**
+		// `// middleware.RejectAppToken(),` と書くとコンパイルは通り、
+		// app token が handler に到達するのに、文字列一致だと gate は緑のまま。
+		reg := stripGoComments(raw)
+
+		// **upstream の規則は `requireCredential || requireModerator ||
+		// requireAdmin` (`ApiCallService.ts:413`)。** `RequireAuth` だけを見ると、
+		// `RequireModerator` / `RequireAdmin` だけで資格情報を要求している
+		// route (実測 95 本) が視界に入らない。
+		if !strings.Contains(reg, "RequireAuth") &&
+			!strings.Contains(reg, "RequireModerator") &&
+			!strings.Contains(reg, "RequireAdmin") &&
+			!strings.Contains(reg, "RequireRolePolicy(") {
 			continue
 		}
-		if strings.Contains(call.mws, "RequireScope") ||
-			strings.Contains(call.mws, "RequireSecure") ||
-			strings.Contains(call.mws, "RejectAppToken") {
+		if strings.Contains(reg, "RequireScope") ||
+			strings.Contains(reg, "RequireSecure") ||
+			strings.Contains(reg, "RejectAppToken") {
 			continue
 		}
-		if _, ok := appTokenGateExempt[call.path]; ok {
+		if _, ok := appTokenGateExempt["/"+ep]; ok {
 			continue
 		}
-		missing = append(missing, call.path)
+		missing = append(missing, "/"+ep)
 	}
 	sort.Strings(missing)
 	assert.Empty(t, missing,
@@ -66,83 +81,80 @@ var appTokenGateExempt = map[string]string{
 }
 
 // **除外の一覧が腐らないようにする。** 実在しない path が残ると、その行が
-// 何を守っているのか分からなくなる。
+// 何を守っているのか分からなくなる。gate を後から付けた route が残っていても
+// 同じなので、そちらも落とす (#3037 レビュー)。
 func TestAppTokenGateExemptHasNoDeadEntries(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "server", "router.go"))
-	require.NoError(t, err)
-
-	seen := map[string]bool{}
-	for _, call := range routeRegistrations(string(src)) {
-		seen[call.path] = true
-	}
+	routes := parseRouteRegistrations(t, filepath.Join("..", "server", "router.go"))
 	for path, reason := range appTokenGateExempt {
-		assert.True(t, seen[path], "appTokenGateExempt の %q が router.go に無い", path)
+		raw, ok := routes[strings.TrimPrefix(path, "/")]
+		assert.True(t, ok, "appTokenGateExempt の %q が router.go に無い", path)
 		assert.NotEmpty(t, reason, "%q に理由が無い", path)
+
+		reg := stripGoComments(raw)
+		assert.False(t,
+			strings.Contains(reg, "RequireScope") || strings.Contains(reg, "RequireSecure") ||
+				strings.Contains(reg, "RejectAppToken"),
+			"%q は既に gate を持っている。appTokenGateExempt から外すこと", path)
 	}
 }
 
-// **抽出そのものが壊れていないこと。** 1 件も拾えなくなると「検査していない
-// のに緑」になる (#2857 と同じ型)。件数の下限は実測 (POST/GET 合わせて 700 超)
-// より十分低いところに置く。
-func TestRouteRegistrationsAreExtracted(t *testing.T) {
-	src, err := os.ReadFile(filepath.Join("..", "server", "router.go"))
-	require.NoError(t, err)
-
-	calls := routeRegistrations(string(src))
-	assert.Greater(t, len(calls), 300, "route の抽出が壊れている")
-
-	// 代表例が拾えていること (path と middleware の両方)。
-	var found bool
-	for _, c := range calls {
-		if c.path == "/i/change-password" {
-			found = true
-			assert.Contains(t, c.mws, "RequireSecure", "middleware を拾えていない")
-		}
-	}
-	assert.True(t, found, "既知の route を拾えていない")
-}
-
-type routeRegistration struct {
-	path string
-	mws  string
-}
-
-var routeCallPattern = regexp.MustCompile(`api\.(?:POST|GET|PUT|DELETE)\(\s*"([^"]+)"([^\n]*)`)
-
-// routeRegistrations extracts `api.<VERB>("/path", handler, mw...)` calls.
+// stripGoComments removes // and /* */ comments, leaving string literals alone.
 //
-// **行継続を畳んでから走査する。** 引数を複数行に分けて書いた route を
-// 落とすと、そこだけ検査されないまま緑になる。
-func routeRegistrations(src string) []routeRegistration {
-	// 継続行を 1 行に畳む。`)` が来るまでを 1 つの呼び出しとして扱う。
-	flat := foldRouteCalls(src)
-	var out []routeRegistration
-	for _, m := range routeCallPattern.FindAllStringSubmatch(flat, -1) {
-		out = append(out, routeRegistration{path: m[1], mws: m[2]})
-	}
-	return out
-}
-
-// foldRouteCalls joins the continuation lines of a route registration.
-func foldRouteCalls(src string) string {
+// **文字列の中は触らない。** route の path には `//` を含む URL が入りうる
+// (`https://…`)。素朴に `//` 以降を落とすと、その行の残りの middleware まで
+// 消えて偽陽性になる。
+func stripGoComments(src string) string {
 	var b strings.Builder
-	lines := strings.Split(src, "\n")
-	for i := 0; i < len(lines); i++ {
-		line := lines[i]
-		if !strings.Contains(line, "api.POST(") && !strings.Contains(line, "api.GET(") &&
-			!strings.Contains(line, "api.PUT(") && !strings.Contains(line, "api.DELETE(") {
-			b.WriteString(line)
-			b.WriteString("\n")
-			continue
-		}
-		joined := line
-		// 括弧が閉じるまで続きを足す。
-		for strings.Count(joined, "(") > strings.Count(joined, ")") && i+1 < len(lines) {
+	for i := 0; i < len(src); i++ {
+		switch {
+		case src[i] == '"' || src[i] == '`':
+			quote := src[i]
+			b.WriteByte(src[i])
+			for i++; i < len(src); i++ {
+				b.WriteByte(src[i])
+				if src[i] == '\\' && quote == '"' && i+1 < len(src) {
+					i++
+					b.WriteByte(src[i])
+					continue
+				}
+				if src[i] == quote {
+					break
+				}
+			}
+		case src[i] == '/' && i+1 < len(src) && src[i+1] == '/':
+			for i < len(src) && src[i] != '\n' {
+				i++
+			}
+			b.WriteByte('\n')
+		case src[i] == '/' && i+1 < len(src) && src[i+1] == '*':
+			i += 2
+			for i+1 < len(src) && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
 			i++
-			joined += " " + strings.TrimSpace(lines[i])
+			b.WriteByte(' ')
+		default:
+			b.WriteByte(src[i])
 		}
-		b.WriteString(joined)
-		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// **コメント落としが文字列を壊さないこと。**
+func TestStripGoComments(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"行コメント", "a // b\nc", "a \nc"},
+		{"ブロックコメント", "a /* b */ c", "a   c"},
+		{"文字列の中の //", `x("https://e.test")`, `x("https://e.test")`},
+		{"文字列の中の /*", "x(`a /* b`)", "x(`a /* b`)"},
+		{"エスケープされた引用符", `x("a\"// b")`, `x("a\"// b")`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, stripGoComments(tt.in))
+		})
+	}
 }

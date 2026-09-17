@@ -44,8 +44,18 @@ func TestOutboundConstructorsReceiveSharedOptions(t *testing.T) {
 		f, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
 		require.NoError(t, err)
 		imports := importIdents(f)
+		currentFunc := ""
+
+		// 自分自身が `...safehttp.Option` を受ける関数の中では、その引数を
+		// そのまま流すのが正しい (`oauthDiscoveryTransport`)。
+		forwardable := forwardableOptionParams(f)
 
 		ast.Inspect(f, func(n ast.Node) bool {
+			fn, isFunc := n.(*ast.FuncDecl)
+			if isFunc {
+				currentFunc = fn.Name.Name
+				return true
+			}
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
 				return true
@@ -69,7 +79,7 @@ func TestOutboundConstructorsReceiveSharedOptions(t *testing.T) {
 			default:
 				return true
 			}
-			if !qualified[key] || callPassesOutboundOpts(call) {
+			if !qualified[key] || callPassesOutboundOpts(call, forwardable[currentFunc]) {
 				return true
 			}
 			missing = append(missing, filepath.Base(file)+":"+key)
@@ -125,14 +135,19 @@ func variadicSafehttpOptionFuncs(t *testing.T) map[string]bool {
 		return nil
 	})
 	require.NoError(t, err)
-	// **forwarding する側は対象外。** `safehttp` 自身と、受け取った
-	// `opts...` をそのまま流す wrapper (`mediaproxy.NewSSRFSafeTransport`) は
-	// 「渡し忘れ」の概念が無い。
-	for k := range out {
-		if strings.HasSuffix(k, "/internal/core/mediaproxy.NewSSRFSafeTransport") {
-			delete(out, k)
-		}
-	}
+	// **transport を直に組む関数も対象にする (#3037 レビュー)。**
+	//
+	// `safehttp.NewSSRFSafeTransport` は同 package なので `opts ...Option` と
+	// 宣言されており、`safehttp.Option` という selector にならないので上の
+	// 走査に一度も当たらない。ところが**これこそが本命** — 修正前の
+	// `oauthDiscoveryTransport` が書いていたのはまさに
+	// `safehttp.NewSSRFSafeTransport(allowedPrivateNetworks)` (opts 無し) で、
+	// この形が素通りすると gate が守りたいものを守れない。
+	//
+	// `mediaproxy.NewSSRFSafeTransport` も同じ (受け取った opts を流す
+	// wrapper だが、**呼ぶ側の渡し忘れ**はここでしか見られない)。
+	out[modulePrefix+"internal/safehttp.NewSSRFSafeTransport"] = true
+	out[modulePrefix+"internal/core/mediaproxy.NewSSRFSafeTransport"] = true
 	return out
 }
 
@@ -157,7 +172,7 @@ func serverSourceFiles(t *testing.T) []string {
 // **展開 (`...`) まで見る。** `s.outboundOpts()` を引数に置いただけでは
 // 型が合わずコンパイルも通らないが、判定を名前だけにすると将来
 // `[]safehttp.Option` を受ける形に変えたときに素通りする。
-func callPassesOutboundOpts(call *ast.CallExpr) bool {
+func callPassesOutboundOpts(call *ast.CallExpr, forwardable string) bool {
 	if !call.Ellipsis.IsValid() {
 		return false
 	}
@@ -168,13 +183,44 @@ func callPassesOutboundOpts(call *ast.CallExpr) bool {
 				return true
 			}
 		case *ast.Ident:
-			// 受け取った variadic をそのまま流す形 (`opts...`)。
-			if a.Name == "opts" || a.Name == "transportOpts" {
+			// **囲む関数自身の variadic だけを通す (#3037 レビュー)。**
+			// 名前で判定すると、`opts` という名前の空 slice を宣言して
+			// 渡すだけで gate を抜けられる。
+			if forwardable != "" && a.Name == forwardable {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+// forwardableOptionParams maps each function to the name of its own
+// `...safehttp.Option` parameter (空文字なら持たない)。
+//
+// **その関数の引数だけを「流してよい」と認める。** 名前で判定すると、同じ
+// 名前の空 slice を作って渡すだけで gate を抜けられる。
+func forwardableOptionParams(f *ast.File) map[string]string {
+	out := map[string]string{}
+	for _, decl := range f.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Type.Params == nil {
+			continue
+		}
+		for _, p := range fn.Type.Params.List {
+			ell, ok := p.Type.(*ast.Ellipsis)
+			if !ok {
+				continue
+			}
+			sel, ok := ell.Elt.(*ast.SelectorExpr)
+			if !ok || sel.Sel.Name != "Option" {
+				continue
+			}
+			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "safehttp" && len(p.Names) > 0 {
+				out[fn.Name.Name] = p.Names[0].Name
+			}
+		}
+	}
+	return out
 }
 
 // importIdents maps the local identifier of each import to its path.

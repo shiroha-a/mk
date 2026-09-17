@@ -147,8 +147,17 @@ func TestCaptchaReloadIsWired(t *testing.T) {
 // 組み立てるテストも無いので、nil のまま残る経路は build もテストも緑のまま
 // 起きる。
 func captchaServiceIsUnconditional(f *ast.File) bool {
-	declared := false
+	// **`:=` の右辺が constructor そのものであることまで見る (#3037 レビュー)。**
+	//
+	// 「`:=` があって `var` が無い」だけだと、
+	//
+	//	captchaSvc := (*corecaptcha.Service)(nil)
+	//	if m, err := metaRepo.Fetch(); err == nil { captchaSvc = ... }
+	//
+	// が gate 緑のまま同じバグを完全に再導入する。**変異検証で押さえたのは
+	// 巻き戻し前の特定 diff 1 形だけだった。**
 	assigned := false
+	conditional := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		switch t := n.(type) {
 		case *ast.DeclStmt:
@@ -164,23 +173,47 @@ func captchaServiceIsUnconditional(f *ast.File) bool {
 				}
 				for _, name := range vs.Names {
 					if name.Name == "captchaSvc" {
-						declared = true
+						conditional = true
 					}
 				}
 			}
 		case *ast.AssignStmt:
-			if t.Tok != token.DEFINE {
-				return true
-			}
-			for _, lhs := range t.Lhs {
-				if id, ok := lhs.(*ast.Ident); ok && id.Name == "captchaSvc" {
-					assigned = true
+			for i, lhs := range t.Lhs {
+				id, ok := lhs.(*ast.Ident)
+				if !ok || id.Name != "captchaSvc" {
+					continue
 				}
+				if t.Tok != token.DEFINE {
+					// 後から代入し直す形 (= 条件付き)。
+					conditional = true
+					continue
+				}
+				if i < len(t.Rhs) && isCaptchaConstructorCall(t.Rhs[i]) {
+					assigned = true
+					continue
+				}
+				// `:=` だが右辺が constructor でない (nil 初期化など)。
+				conditional = true
 			}
 		}
 		return true
 	})
-	return assigned && !declared
+	return assigned && !conditional
+}
+
+// isCaptchaConstructorCall reports whether e is
+// `corecaptcha.NewServiceWithClient(...)`.
+func isCaptchaConstructorCall(e ast.Expr) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "NewServiceWithClient" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	return ok && pkg.Name == "corecaptcha"
 }
 
 // invalidatesBeforeReload reports whether the body calls
