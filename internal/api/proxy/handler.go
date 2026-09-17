@@ -282,9 +282,27 @@ func (h *Handler) Handle(c echo.Context) error {
 	// AVIF to a Safari 15 / WebP-only client cached behind a CDN, and
 	// vice-versa (#637 review UR-012).
 	c.Response().Header().Set("Vary", "Accept")
+	setProxyContentSecurityHeaders(c)
 	c.Response().WriteHeader(http.StatusOK)
 	_, _ = io.Copy(c.Response(), result.Body)
 	return nil
+}
+
+// setProxyContentSecurityHeaders mirrors what `filesHandler` attaches to drive
+// responses.
+//
+// **`/proxy/*` にだけ無かった (#3037)。** `nosniff` は #2782 で全応答に付くように
+// なり、Content-Type も `browsersafeMIMEs` に絞ってあるので既知の経路は塞がって
+// いるが、**この origin は自分のドメイン**なので、1 つでも取りこぼすとそこから
+// 同一オリジンの XSS になる。mk-go は自分のファイル配信で同じ脅威を 3 重に
+// 塞いでいるのだから、こちらだけ 1 枚薄いままにしない。
+//
+// 値は `filesHandler` と同じ。
+func setProxyContentSecurityHeaders(c echo.Context) {
+	c.Response().Header().Set("Content-Security-Policy",
+		"default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'")
+	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
+	c.Response().Header().Set("Content-Disposition", "inline")
 }
 
 // redirectToExternalProxy sends a 301 redirect to the configured external proxy.
@@ -325,6 +343,7 @@ func (h *Handler) serveFallbackWithCache(c echo.Context, cacheControl string) er
 	dummy := mediaproxy.DummyPNG()
 	defer dummy.Body.Close()
 	c.Response().Header().Set("Cache-Control", cacheControl)
+	setProxyContentSecurityHeaders(c)
 	data, _ := io.ReadAll(dummy.Body)
 	return c.Blob(http.StatusOK, dummy.ContentType, data)
 }

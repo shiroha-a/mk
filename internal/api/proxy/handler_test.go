@@ -680,3 +680,46 @@ func TestParseAnimated(t *testing.T) {
 		})
 	}
 }
+
+// **`/proxy/*` にも `filesHandler` と同じ 3 点を付ける (#3037)。**
+//
+// `nosniff` は #2782 で全応答に付き、Content-Type も `browsersafeMIMEs` に
+// 絞ってあるので既知の経路は塞がっているが、**この origin は自分のドメイン**
+// なので 1 つ取りこぼすと同一オリジンの XSS になる。mk-go は自分のファイル
+// 配信で 3 重に塞いでいるのだから、こちらだけ 1 枚薄いままにしない。
+func TestHandle_SetsContentSecurityHeaders(t *testing.T) {
+	h, e, imgServer := setupHandler(t, map[string]bool{})
+	defer imgServer.Close()
+
+	url := imgServer.URL + "/avatar.png"
+	sig := mediaproxy.SignURL([]byte("test-secret"), url)
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?url="+url+"&sig="+sig,
+		map[string]string{"User-Agent": "TestBrowser/1.0"})
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t,
+		"default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'",
+		rec.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+	assert.Equal(t, "inline", rec.Header().Get("Content-Disposition"))
+}
+
+// **ダミー画像に倒れた応答にも付ける。** 失敗経路だけ薄くならないように。
+func TestHandle_FallbackAlsoSetsContentSecurityHeaders(t *testing.T) {
+	h, e, imgServer := setupHandler(t, map[string]bool{})
+	defer imgServer.Close()
+
+	// 署名は通るが取得に失敗する URL は fallback (ダミー PNG) になる。
+	url := imgServer.URL + "/missing.png"
+	sig := mediaproxy.SignURL([]byte("test-secret"), url)
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?url="+url+"&sig="+sig+"&fallback=1",
+		map[string]string{"User-Agent": "TestBrowser/1.0"})
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t,
+		"default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'",
+		rec.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "inline", rec.Header().Get("Content-Disposition"))
+}
