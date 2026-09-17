@@ -305,3 +305,38 @@ func credentialTakeoverCalls() map[string]func(*apiadmin.Handler, string, *model
 		},
 	}
 }
+
+// **「相手が特権を持っていないことを確かめてから触る」判定は全部 fail-closed
+// にする (#3037 レビュー 2 周目)。**
+//
+// `IsAdministrator` / `IsModerator` は判定できないときに false を返すので、
+// 素で使うと `assignmentRepo.ListByUser` が一時的に失敗する窓で判定が
+// 「特権なし」に倒れる。1 周目では資格情報のリセット 2 本だけを直しており、
+// 同じ形が 3 箇所残っていた。
+func TestTargetPrivilegeChecksAreFailClosed(t *testing.T) {
+	t.Run("suspend-user", func(t *testing.T) {
+		target := &model.User{ID: "mod2", Username: "mod2"}
+
+		ok := newTakeoverFixture(t, target, false)
+		rec := doPost(ok.h.SuspendUser, `{"userId":"mod2"}`, &model.User{ID: "mod1"})
+		require.Less(t, rec.Code, 300, "正常時に凍結できていない: %s", rec.Body.String())
+
+		broken := newTakeoverFixture(t, target, true)
+		rec = doPost(broken.h.SuspendUser, `{"userId":"mod2"}`, &model.User{ID: "mod1"})
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"ロールを引けない窓でモデレーターを凍結できている: %s", rec.Body.String())
+	})
+
+	t.Run("show-user", func(t *testing.T) {
+		target := &model.User{ID: "boss", Username: "boss"}
+
+		ok := newTakeoverFixture(t, target, false)
+		rec := doPost(ok.h.ShowUser, `{"userId":"boss"}`, &model.User{ID: "mod1"})
+		require.Less(t, rec.Code, 300, "正常時に閲覧できていない: %s", rec.Body.String())
+
+		broken := newTakeoverFixture(t, target, true)
+		rec = doPost(broken.h.ShowUser, `{"userId":"boss"}`, &model.User{ID: "mod1"})
+		assert.Equal(t, http.StatusInternalServerError, rec.Code,
+			"ロールを引けない窓で管理者の詳細が見えている: %s", rec.Body.String())
+	})
+}

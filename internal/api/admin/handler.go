@@ -1061,10 +1061,23 @@ func (h *Handler) ShowUser(c echo.Context) error {
 
 	// 非 administrator (= moderator) は他 administrator の情報を閲覧できない
 	// (upstream show-user.ts:223-226 の 'cannot show info of admin' guard)。
+	//
+	// **対象側は判定できないときに通さない (#3037 レビュー 2 周目)。**
+	// `IsAdministrator` は判定できないときに false を返すので、素で使うと
+	// `ListByUser` が一時的に失敗する窓で**管理者の email / 2FA / サインイン
+	// 履歴が見える** (#2792)。実行者側は false = 「管理者ではない」に倒れる
+	// ので、そちらは元から安全側。
 	if h.roleService != nil {
 		me := middleware.GetUser(c)
-		if me != nil && !h.roleService.IsAdministrator(me.ID) && h.roleService.IsAdministrator(user.ID) {
-			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot show info of admin.", "0d4e3a3e-2c1f-4d8b-9d2a-7a0c1c1b2f3a"))
+		if me != nil && !h.roleService.IsAdministrator(me.ID) {
+			targetAdmin, _, err := h.roleService.RolePrivileges(user.ID)
+			if err != nil {
+				slog.Error("admin/show-user: cannot determine the target's privileges", "userId", user.ID, "err", err)
+				return apierr.JSONInternalError(c)
+			}
+			if targetAdmin {
+				return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot show info of admin.", "0d4e3a3e-2c1f-4d8b-9d2a-7a0c1c1b2f3a"))
+			}
 		}
 	}
 
@@ -1305,8 +1318,22 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 
 	// upstream suspend-user.ts: モデレーター/管理者 (root を含む) アカウントは
 	// 凍結できない。moderator が他の moderator/admin を凍結する権限昇格を防ぐ。
-	if user.IsRoot || (h.roleService != nil && h.roleService.IsModerator(user.ID)) {
+	//
+	// **判定できないときは通さない (#3037 レビュー 2 周目)。** `IsModerator` は
+	// 判定できないときに false を返すので、素で使うと `ListByUser` が一時的に
+	// 失敗する窓で**他のモデレーターを凍結できる** (#2792)。
+	if user.IsRoot {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot suspend a moderator account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
+	if h.roleService != nil {
+		_, targetMod, err := h.roleService.RolePrivileges(user.ID)
+		if err != nil {
+			slog.Error("admin/suspend-user: cannot determine the target's privileges", "userId", user.ID, "err", err)
+			return apierr.JSONInternalError(c)
+		}
+		if targetMod {
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot suspend a moderator account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+		}
 	}
 
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true}); err != nil {

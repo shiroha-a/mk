@@ -353,9 +353,20 @@ func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User)
 		resp["requestIp"] = f.RequestIP
 		// owner が moderator のときは headers を隠す (upstream 仕様、
 		// モデレーター同士の互いの個人情報保護)。
-		ownerIsModerator := false
-		if f.UserID != nil && *f.UserID != "" && h.roleService != nil {
-			ownerIsModerator = h.roleService.IsModerator(*f.UserID)
+		//
+		// **判定できないときは隠す側に倒す (#3037 レビュー 2 周目)。**
+		// `IsModerator` は判定できないときに false を返すので、素で使うと
+		// `ListByUser` が一時的に失敗する窓で他のモデレーターの
+		// `requestHeaders` が出る。隠して困るのは表示が減ることだけ。
+		ownerIsModerator := true
+		if f.UserID == nil || *f.UserID == "" {
+			ownerIsModerator = false
+		} else if h.roleService != nil {
+			if _, mod, err := h.roleService.RolePrivileges(*f.UserID); err == nil {
+				ownerIsModerator = mod
+			}
+		} else {
+			ownerIsModerator = false
 		}
 		if !ownerIsModerator {
 			resp["requestHeaders"] = driveFileRequestHeaders(f.RequestHeaders)
