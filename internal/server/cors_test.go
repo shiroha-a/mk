@@ -19,6 +19,13 @@ var restrictedProbePaths = []string{
 	"/api/users/followers",
 	"/users/al9hjjx4b0ey0002/following",
 	"/users/al9hjjx4b0ey0002/followers",
+	"/api/signin",
+	"/api/signin-flow",
+	"/api/signin-with-passkey",
+	"/api/signup",
+	"/api/signup-pending",
+	"/api/reset-password",
+	"/api/request-reset-password",
 }
 
 // corsProbe runs the global CORS middleware over a stub handler and returns the
@@ -53,6 +60,19 @@ func TestCORS_RestrictedPathsAreExactly(t *testing.T) {
 		// API 側 (フロントエンドが使う経路)
 		{"/api/users/following", true},
 		{"/api/users/followers", true},
+		// 資格情報を扱う経路。応答を越境で読ませると、ユーザー名の存在判定・
+		// パスワード正誤・2FA 有無のオラクルと、成功時のトークン奪取が
+		// **訪問者の IP に分散したまま**成立する。
+		{"/api/signin", true},
+		{"/api/signin-flow", true},
+		{"/api/signin-with-passkey", true},
+		{"/api/signup", true},
+		{"/api/signup-pending", true},
+		{"/api/reset-password", true},
+		{"/api/request-reset-password", true},
+		// **兄弟は巻き込まない。**
+		{"/api/signup-application/apply", false},
+		{"/api/username/available", false},
 		// AP のコレクション。id は可変 (レビュー M-1)
 		{"/users/al9hjjx4b0ey0002/following", true},
 		{"/users/al9hjjx4b0ey0002/followers", true},

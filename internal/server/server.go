@@ -264,6 +264,29 @@ func extractIPFallback(req *http.Request, trusted []*net.IPNet) string {
 var noCORSPaths = map[string]bool{
 	"/api/users/following": true,
 	"/api/users/followers": true,
+	// **signin 系は応答を越境で読ませない。**
+	//
+	// `ACAO: *` だと、悪意あるサイトが訪問者のブラウザからこれらを叩いて
+	// **応答を読める**。読めることで (a) ユーザー名の存在判定 (404 と 200)、
+	// (b) パスワード正誤と 2FA 有無のオラクル (403 / `next:"totp"` /
+	// `finished:true`)、(c) 成功時のセッショントークンの奪取 が、**訪問者の
+	// IP に分散したまま**成立する。1 IP あたりのレート制限を訪問者数ぶん
+	// 掛け算できてしまう。
+	//
+	// upstream は `SigninApiService` / `SigninWithPasskeyApiService` が
+	// `Access-Control-Allow-Origin` を `config.url` に**明示的に上書き**して
+	// いる (グローバルは `origin: '*'` なので、意図的な上書き)。
+	//
+	// **同一オリジンのフロントエンドは影響を受けない** — ブラウザは同一
+	// オリジンの応答に CORS 検査を適用しない。ネイティブアプリや CLI も
+	// 応答ヘッダを見ないので無影響。
+	"/api/signin":                 true,
+	"/api/signin-flow":            true,
+	"/api/signin-with-passkey":    true,
+	"/api/signup":                 true,
+	"/api/signup-pending":         true,
+	"/api/reset-password":         true,
+	"/api/request-reset-password": true,
 }
 
 // corsRestrictedPath reports whether the path must not advertise CORS.
