@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/stretchr/testify/assert"
 )
 
 const (
@@ -516,8 +517,13 @@ func TestOwnMediaHost_NotProxied(t *testing.T) {
 		WebpublicURL: &web,
 	}
 
-	if got := c.GetPublicURL(own, modeDefault); got != own.URL {
-		t.Errorf("own object storage url must stay raw: got %q", got)
+	// 他人向けは webpublic を指す (upstream `webpublicUrl ?? url`) が、
+	// **どちらも proxy を通さない**のがこのテストの主題。
+	if got := c.GetPublicURL(own, modeDefault); got != web {
+		t.Errorf("own object storage webpublic url must stay raw: got %q", got)
+	}
+	if got := c.GetSelfURL(own, modeDefault); got != own.URL {
+		t.Errorf("own object storage url must stay raw for the owner: got %q", got)
 	}
 	if got := c.GetThumbnailURL(own); got == nil || *got != thumb {
 		t.Errorf("own thumbnail must stay raw: got %v", got)
@@ -637,4 +643,77 @@ func TestBadgeEmojiProxyURL_NoContext(t *testing.T) {
 	if got := BadgeEmojiProxyURL("https://cdn.example/anim.gif"); got != "" {
 		t.Fatalf("context 未配線では空文字を返すこと: %s", got)
 	}
+}
+
+// **他人に見せる url は webpublic を指す (#3037)。**
+//
+// webpublic は EXIF を落とした再エンコード版なので、原本を指すと**撮影位置
+// (GPS) が公開側に出る**。upstream `DriveFileEntityService.getPublicUrl` は
+// `file.webpublicUrl ?? file.url` を返すのに、mk-go はここが `f.URL` 固定
+// だった。
+func TestGetPublicURL_PrefersWebpublic(t *testing.T) {
+	c := NewMediaURLContext("https://mk.example", "https://mk.example/proxy", []byte("s"), false, false)
+	web := "https://mk.example/files/abc-web"
+	f := &model.DriveFile{
+		Type:         "image/jpeg",
+		URL:          "https://mk.example/files/abc",
+		WebpublicURL: &web,
+	}
+
+	assert.Equal(t, web, c.GetPublicURL(f, modeDefault), "他人向けに原本を指している")
+	// **所有者には原本。** 落とした版しか手に入らないとダウンロードが劣化コピーに
+	// なる (upstream の `pack({self: true})` も `file.url` を返す)。
+	assert.Equal(t, f.URL, c.GetSelfURL(f, modeDefault), "所有者に webpublic を返している")
+}
+
+// webpublic が無ければ従来どおり原本。空文字列も「無い」として扱う。
+func TestGetPublicURL_FallsBackToOriginal(t *testing.T) {
+	c := NewMediaURLContext("https://mk.example", "https://mk.example/proxy", []byte("s"), false, false)
+	empty := ""
+	for name, f := range map[string]*model.DriveFile{
+		"nil":   {Type: "image/jpeg", URL: "https://mk.example/files/abc"},
+		"empty": {Type: "image/jpeg", URL: "https://mk.example/files/abc", WebpublicURL: &empty},
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.Equal(t, "https://mk.example/files/abc", c.GetPublicURL(f, modeDefault))
+		})
+	}
+}
+
+// remote origin は webpublic 側を proxy する (判定に使う URL も揃える)。
+func TestGetPublicURL_ProxiesTheWebpublicURL(t *testing.T) {
+	c := NewMediaURLContext("https://mk.example", "https://mk.example/proxy", []byte("s"), true, false)
+	web := "https://remote.example/files/abc-web"
+	f := &model.DriveFile{
+		Type:         "image/jpeg",
+		URL:          "https://remote.example/files/abc",
+		WebpublicURL: &web,
+	}
+
+	got := c.GetPublicURL(f, modeDefault)
+	assert.Contains(t, got, "https://mk.example/proxy", "proxy を通していない")
+	assert.Contains(t, got, url.QueryEscape(web), "原本の URL を proxy に載せている")
+}
+
+// **pack が self を見て url を出し分けていること。**
+//
+// `GetPublicURL` / `GetSelfURL` を分けても、pack がどちらか一方しか呼ばなければ
+// 意味が無い (変異検証で実測: 分岐を潰しても他のテストは全部緑だった)。
+func TestPackDriveFile_SelfKeepsTheOriginalURL(t *testing.T) {
+	SetMediaURLContext(internalCtx())
+	defer SetMediaURLContext(nil)
+
+	idGen := newTestIDGen(t)
+	web := testInstanceURL + "/files/abc-web"
+	local := &model.DriveFile{
+		ID:           idGen.Generate(time.Now()),
+		Type:         "image/jpeg",
+		URL:          testInstanceURL + "/files/abc",
+		WebpublicURL: &web,
+	}
+
+	assert.Equal(t, web, PackDriveFile(local, idGen).URL,
+		"他人向けの pack が原本 (EXIF 込み) を指している")
+	assert.Equal(t, local.URL, PackDriveFileSelf(local, idGen).URL,
+		"所有者向けの pack が webpublic を指している")
 }

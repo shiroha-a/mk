@@ -277,12 +277,45 @@ func (c *MediaURLContext) ownMediaHost() string {
 }
 
 // GetPublicURL mirrors DriveFileEntityService.getPublicUrl for the DriveFile
-// `url` field. Local files are returned unchanged; remote-origin files are
-// wrapped through the proxy. A nil receiver returns the raw url (preserves the
-// pre-#1529 behavior for call sites / tests that have no context wired).
+// `url` field shown to **other** users. Local files are returned unchanged;
+// remote-origin files are wrapped through the proxy. A nil receiver returns the
+// raw url (preserves the pre-#1529 behavior for call sites / tests that have no
+// context wired).
+//
+// **webpublic があればそちらを指す (upstream `file.webpublicUrl ?? file.url`)。**
+// webpublic は EXIF を落とした再エンコード版なので、原本を指すと**撮影位置
+// (GPS) が公開側に出る**。mk-go はここが `f.URL` 固定だった。
+// 所有者自身に見せる URL は `GetSelfURL`。
 func (c *MediaURLContext) GetPublicURL(f *model.DriveFile, mode proxyMode) string {
+	return c.publicURL(f, mode, webpublicOrOriginal(f))
+}
+
+// GetSelfURL is the `url` field shown to the file's **owner** (and to admin
+// moderation views).
+//
+// **原本を指す** (upstream の `pack({self: true})` は `file.url` をそのまま
+// 返す)。所有者には EXIF 込みの原本が要る — 落とした版しか手に入らないと
+// ダウンロードが劣化コピーになる。
+//
+// remote origin を proxy 経由にする点だけは upstream と違う (moderator の IP
+// 保護、#1529 / #1948-14 で文書化済み)。
+func (c *MediaURLContext) GetSelfURL(f *model.DriveFile, mode proxyMode) string {
+	return c.publicURL(f, mode, f.URL)
+}
+
+// webpublicOrOriginal mirrors upstream's `file.webpublicUrl ?? file.url`.
+func webpublicOrOriginal(f *model.DriveFile) string {
+	if f.WebpublicURL != nil && *f.WebpublicURL != "" {
+		return *f.WebpublicURL
+	}
+	return f.URL
+}
+
+// publicURL is the shared body of GetPublicURL / GetSelfURL. base is the URL
+// the caller wants when no proxying applies.
+func (c *MediaURLContext) publicURL(f *model.DriveFile, mode proxyMode, base string) string {
 	if c == nil {
-		return f.URL
+		return base
 	}
 	// proxy が default mode で再配信できるのは browsersafe な image だけ
 	// (mediaproxy passThrough は PDF/zip 等の non-image MIME を拒否する)。
@@ -293,16 +326,16 @@ func (c *MediaURLContext) GetPublicURL(f *model.DriveFile, mode proxyMode) strin
 	// non-image file は user がクリックして初めて取得され、IP 露出はその時
 	// だけに限定される (proxy が任意 MIME を配信できるようになるまでの妥協)。
 	if !isImageMime(f.Type) {
-		return f.URL
+		return base
 	}
 	// remote + external proxy: upstream proxies the canonical AP uri.
 	if c.externalEnabled && f.URI != nil && f.UserHost != nil {
 		return c.ProxiedURL(*f.URI, mode)
 	}
-	if c.shouldProxyRemote() && c.isRemoteOrigin(f.URL) {
-		return c.ProxiedURL(f.URL, mode)
+	if c.shouldProxyRemote() && c.isRemoteOrigin(base) {
+		return c.ProxiedURL(base, mode)
 	}
-	return f.URL
+	return base
 }
 
 // GetWebpublicURL wraps the webpublicUrl field when it points at a remote

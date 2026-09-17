@@ -88,6 +88,19 @@ func PackDriveFileSelf(f *model.DriveFile, idGen id.Generator) DriveFileEntity {
 	return packDriveFile(f, idGen, true)
 }
 
+// driveFileURL picks the `url` field for the viewer.
+//
+// **所有者には原本、他人には webpublic (upstream `pack` の `opts.self` 分岐)。**
+// webpublic は EXIF を落とした再エンコード版なので、他人向けに原本を指すと
+// **撮影位置 (GPS) が公開側に出る**。逆に所有者へ webpublic を返すと、
+// ダウンロードが劣化コピーになる。
+func driveFileURL(ctx *MediaURLContext, f *model.DriveFile, self bool) string {
+	if self {
+		return ctx.GetSelfURL(f, modeDefault)
+	}
+	return ctx.GetPublicURL(f, modeDefault)
+}
+
 func packDriveFile(f *model.DriveFile, idGen id.Generator, self bool) DriveFileEntity {
 	createdAt := ""
 	if t, err := idGen.ParseTime(f.ID); err == nil {
@@ -121,7 +134,7 @@ func packDriveFile(f *model.DriveFile, idGen id.Generator, self bool) DriveFileE
 		Blurhash:     f.Blurhash,
 		Properties:   props,
 		Comment:      f.Comment,
-		URL:          ctx.GetPublicURL(f, modeDefault),
+		URL:          driveFileURL(ctx, f, self),
 		ThumbnailURL: ctx.GetThumbnailURL(f),
 		WebpublicURL: ctx.GetWebpublicURL(f),
 		FolderID:     f.FolderID,
