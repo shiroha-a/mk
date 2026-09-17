@@ -1619,6 +1619,27 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// alias が frontend から来たら DB カラム名に translate して渡す。
 	renameUpdateMetaFields(fields)
 
+	// **既定 policy の型をここでも見る (#3037 レビュー 2 周目)。**
+	// `policies` は `roles/update-default-policies` と **同じ `meta.policies`
+	// 列**を書く 4 本目の経路で (`metaJSONBColumns` のコメント参照)、
+	// generic passthrough なので保護列でもなく `dropUnknownMetaFields` も
+	// 通す。ここを素通しにすると、数値の policy に文字列を入れるだけで
+	// **全利用者でその上限が消える** — consumer は
+	// `if limit, ok := role.PolicyNumber(v); ok { ...gate... }` の形で読むので、
+	// 上限違反で弾かれるのではなく上限そのものが無くなる (#2611 / #3037)。
+	// rename の後に置くのは、alias で来た場合も正規名で見るため。
+	if raw, ok := fields["policies"]; ok {
+		policies, isMap := raw.(map[string]any)
+		if !isMap {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+				"policies must be an object.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
+		if key := invalidDefaultPolicyKey(policies); key != "" {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+				"policy "+key+" has a value of the wrong type.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
+	}
+
 	// upstream update-meta.ts の値正規化 (host lowercase/sort/dedup、空文字→null、
 	// URL 検証、trim) を再現する。coerceMetaArrayFields より前に走らせ、host 系は
 	// ここで model.StringArray 化まで済ませる (coerce 側は pass-through になる)。

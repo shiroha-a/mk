@@ -78,3 +78,38 @@ func TestRolesUpdateDefaultPolicies_AcceptsCorrectValueType(t *testing.T) {
 
 	assert.Equal(t, http.StatusNoContent, rec.Code, "正しい値を拒否している: %s", rec.Body.String())
 }
+
+// **`admin/update-meta` も同じ `meta.policies` 列を書く (#3037 レビュー 2 周目)。**
+//
+// 1 周目で `roles/create` / `roles/update` / `roles/update-default-policies` の
+// 3 経路に型検査を入れたが、**4 本目のこれを見ていなかった**。`policies` は
+// 保護列ではなく `dropUnknownMetaFields` も通すので、endpoint を直に 1 回叩く
+// だけで数値の policy に文字列を入れられ、**全利用者でその上限が消える**。
+func TestUpdateMeta_RejectsWrongPolicyValueType(t *testing.T) {
+	h, _, _, _, _ := newTestHandlerWithAssign(t)
+
+	rec := doPost(h.UpdateMeta, `{"policies":{"driveCapacityMb":"100"}}`, adminUser)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "型の違う既定 policy を受け取っている: %s", rec.Body.String())
+	assert.Contains(t, rec.Body.String(), "driveCapacityMb")
+}
+
+// **`policies` がそもそも object でない形も弾く。**
+func TestUpdateMeta_RejectsNonObjectPolicies(t *testing.T) {
+	h, _, _, _, _ := newTestHandlerWithAssign(t)
+
+	rec := doPost(h.UpdateMeta, `{"policies":"everything"}`, adminUser)
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "object でない policies を受け取っている: %s", rec.Body.String())
+}
+
+// **型が合っていれば通る。** これが無いと「policies を常に拒否する」実装でも
+// 上の 2 つが通る。
+func TestUpdateMeta_AcceptsCorrectPolicyValueType(t *testing.T) {
+	h, _, metaRepo, _, _ := newTestHandlerWithAssign(t)
+	require.NotNil(t, metaRepo)
+
+	rec := doPost(h.UpdateMeta, `{"policies":{"driveCapacityMb":100,"canInvite":true,"chatAvailability":"readonly"}}`, adminUser)
+
+	assert.Less(t, rec.Code, 300, "正しい値を拒否している: %s", rec.Body.String())
+}
