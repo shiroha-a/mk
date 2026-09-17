@@ -203,3 +203,39 @@ func TestJSONStorable_RawMessageKeepsTheOriginalBytes(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(`{"v":"\ud800"}`), &plain))
 	assert.Equal(t, "�", plain.V)
 }
+
+// **走査の端の条件を踏む。** `jsonEscapesStorable` / `parseHex4` は壊れた
+// JSON の途中で打ち切る枝を多く持ち、通常の入力では通らない。ここが未実行の
+// まま残ると、**打ち切りの条件を 1 つ緩めても緑のまま**になる。
+func TestJSONStorable_TruncatedAndMalformedEscapes(t *testing.T) {
+	bs := "\\"    // JSON 上のバックスラッシュ 1 文字
+	u := bs + "u" // エスケープの開始
+	hi := u + "d800"
+
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		// バックスラッシュで終わる (次の 1 バイトが無い)。
+		{"末尾がバックスラッシュ", `{"a":"x` + bs, true},
+		// エスケープの開始だが 4 桁ぶんのバイトが足りない。
+		{"エスケープの開始で終わる", `{"a":"` + u, true},
+		{"16 進が 1 桁足りない", `{"a":"` + u + `004`, true},
+		// 16 進でない文字。
+		{"16 進でない", `{"a":"` + u + `zzzz"}`, true},
+		{"大文字の 16 進", `{"a":"` + u + `00E9"}`, true},
+		// 上位サロゲートの直後が切れている / 対になっていない。
+		{"上位サロゲートで終わる", `{"a":"` + hi, false},
+		{"上位の後ろがエスケープでない", `{"a":"` + hi + bs + `t"}`, false},
+		{"下位サロゲートの 16 進が壊れている", `{"a":"` + hi + u + `zzzz"}`, false},
+		// 文字列の外のバックスラッシュは無視する。
+		{"文字列の外", `{` + bs + `}`, true},
+		// 文字列が閉じたあとは生の文字列。
+		{"閉じたあと", `{"a":"b"} ` + u + `0000`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, colfit.JSONStorable([]byte(tt.raw)))
+		})
+	}
+}
