@@ -149,12 +149,100 @@ GOGC を上げると消えるが、peak RSS が 585MB → 1,033-3,188MB に膨�
 動くことより、こちらの寄与のほうが大きい。
 
 したがって、コーデックをネイティブ実装に寄せる判断には**速度以外の根拠がある**。
-ただし本文が却下したのは cgo を要する `govips` で、`gen2brain/*` が既に持つ
-`purego` 経由の動的ロード (`-tags nodynamic` を外す) は **`CGO_ENABLED=0` を
-維持したまま**同じ効果を狙える別物である。`purego` は
-`dlfcn_nocgo_linux.go` (`//go:build !cgo`) を持つ。実測では system libwebp を
-dlopen させるだけで WebP encode が 7.22ms → 1.54ms (4.7 倍) になった。
-**ヒープ圧が実際に下がるかは未測定**なので、導入時に上表と同じ形で測り直すこと。
+
+**ただし「`CGO_ENABLED=0` を維持したまま同じ効果を狙える」と書いていたのは
+誤解を招く記述だった (下記で訂正)。** cgo ツールチェーンは確かに不要なままだが、
+**静的バイナリではなくなる**。
+
+## 追記 2 (#3037 の後): 動的リンク化は静的バイナリと両立しない
+
+上の段落を受けて `-tags nodynamic` を外す案を実測したが、**#618 / #619 / #620 が
+確立した「static binary 化」の方針と両立しない**ことが分かったので採らなかった。
+同じ検討を繰り返さないために記録する。
+
+### 1. 静的バイナリでなくなる
+
+`purego` の nocgo 経路は `//go:cgo_import_dynamic purego_dlopen dlopen "libdl.so.2"`
+で dlfcn を**動的にインポート**する。`./cmd/misskey` を両方の形でビルドして
+`file` / `readelf -d` で比較した実測:
+
+| ビルド | リンク | interpreter | DT_NEEDED |
+|---|---|---|---|
+| `-tags nodynamic` (現行) | **statically linked** | 無し | 無し |
+| タグ無し | **dynamically linked** | `/lib64/ld-linux-x86-64.so.2` | `libdl.so.2` / `libpthread.so.0` / `libc.so.6` |
+
+`gcr.io/distroless/static-debian13` は libc を持たないので、**現行の最終 stage では
+そもそも起動しない**。ランタイムイメージの変更が必須になる。
+
+### 2. builder が Alpine (musl) なので事情が増える
+
+`golang:1.26.6-alpine` でビルドすると interpreter は `/lib/ld-musl-x86_64.so.1` に
+なる (DT_NEEDED は glibc の soname のまま)。Alpine 上では起動して**動作もした**が、
+builder とランタイムの libc を揃える必要が生じる。
+
+### 3. 効果は出る (Alpine + `-dev` パッケージ)
+
+1024x1024 の decode 実測 (`golang:1.26.6-alpine` 上):
+
+| 構成 | webp | avif |
+|---|---|---|
+| A. `-tags nodynamic` (現行) | 31.10 ms | 222.69 ms |
+| B. タグ無し・ライブラリ**無し** | 31.02 ms | 223.75 ms |
+| C. タグ無し・native ライブラリ**あり** | **6.69 ms** | **46.74 ms** |
+
+- **B が A と同じ** = ライブラリが無ければ黙って wazero にフォールバックする。
+  イメージが lib を落としても壊れず**遅くなるだけ**なので、導入するなら
+  「実際に native を使っているか」を起動時ログと CI で検証する必要がある
+- **`-dev` パッケージが要る。** dlopen する名前は `libwebp.so` /
+  `libavif.so` で、soname 付き (`libwebp.so.7`) では見つからない。
+  その symlink を提供するのは `-dev` 側
+- Alpine には `libavif` / `libjxl` / `libwebp` / `libheif` が揃っている
+
+### 4. wazero 側にチューニングの余地は無い
+
+`gen2brain/avif` は `CompileModule` を `sync.OnceFunc` で 1 回だけ行い、
+`InstantiateModule` を decode ごとに呼ぶ。後者が支配的なら改善余地があるが、
+画像サイズを振った実測では**固定コストは 3-4ms しかない**:
+
+| サイズ | decode | 速度 |
+|---|---|---|
+| 64x64 | 4.05 ms | 1.0 px/ms |
+| 256x256 | 18.40 ms | 3.6 px/ms |
+| 1024x1024 | 227.49 ms | 4.6 px/ms |
+| 2048x2048 | 904.04 ms | 4.6 px/ms |
+
+大きい側で px/ms が一定に収束するので、**222ms は本物の AV1 デコード処理**であり
+SIMD が無いことが原因。instantiation の削減では取れない。
+
+### 5. 純 Go の代替も無い
+
+`golang.org/x/image` が `Encode` を持つのは tiff と bmp だけで、**WebP encoder は
+無い** (decoder のみ)。全リサイズ要求が通る WebP encode (7.22ms) を静的リンクの
+まま置き換える既製品は存在しない。
+
+### 結論: 外部メディアプロキシに逃がす
+
+静的リンクを維持したまま残る手は「結果をキャッシュ / 永続化して**デコード回数を
+減らす**」だけで、コーデックそのものは速くできない。一方 mk-go には
+`externalMediaProxyEnabled` (`config.mediaProxy` を設定すると `/proxy` が 301 で
+転送する) が既にあるので、**性能が要る運営者は media-proxy-rs 等を指せばよい**。
+内蔵プロキシを無理に高速化する必要は無い、というのが現時点の判断。
+
+**ただし外部に回すと 3 つを失う** (実測で確認した内蔵だけの利点):
+
+- `swapToVariant` — ローカルファイルの resize モードで、生成済み variant に
+  すり替えて画像処理ごと飛ばす
+- ローカル drive ファイルの直接読み出し (HTTP 往復が無い)
+- allowlist — mk-go の `/proxy` は open proxy ではない
+
+`externalMediaProxyEnabled` は全経路を一律に転送するので、運営者はこの 3 つと
+性能のどちらを取るかを選ぶことになる。
+
+**再評価する条件**: 静的リンクの方針を変える判断が別途下りたとき、または
+上記 3 点を保ったまま重い形式だけ外部へ委譲する仕組み
+(`videoThumbnailGenerator` と同じ形) を入れる価値が出たとき。後者は
+**AVIF / HEIC / JXL が実トラフィックに占める割合が未測定**なので、
+先にそれを測ること。
 
 ## 関連
 
@@ -163,4 +251,5 @@ dlopen させるだけで WebP encode が 7.22ms → 1.54ms (4.7 倍) になっ�
 - #618 / #619 / #620 (cgo 完全排除 → static binary 化)
 - #733 (Phase 1: Netpbm + TGA + JXR/MNG pass-through)
 - #736 (Phase 2: JPEG 2000 pure Go)
+- #3034 / #3035 / #3036 / #3037 (この調査から派生した `/proxy` のエラー写像の修正)
 - `internal/core/mediaproxy/bench_test.go` (本評価のベンチマーク source)
