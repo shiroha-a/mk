@@ -123,6 +123,20 @@ func TestCaptchaReloadIsWired(t *testing.T) {
 	assertWired(t, routerGo, "captchaSvc.Reload(m)",
 		"reloadCaptcha が呼ばれるだけで provider 集合を差し替えていない")
 
+	// **handler へ渡していること (#3037 レビュー 2 周目)。**
+	//
+	// 1 周目の gate は「service を無条件に作っているか」「reload が配線されて
+	// いるか」しか見ておらず、**その service を handler に渡す 2 行を消しても
+	// 緑のまま通った** (実測)。`SetCaptcha` は router.go にしか無く、
+	// `internal/api/signup` / `signin` のテストは自前で注入するので、
+	// 消えたことに気付く経路がどこにも無い。症状はこの gate の doc が
+	// 書いているものそのもの — **有効化したつもりのまま `/api/signup` と
+	// `/api/signin` が素通りする**。
+	assertWired(t, routerGo, "signupHandler.SetCaptcha(captchaSvc)",
+		"captcha service を signup handler に渡していない (登録が captcha を検証しない)")
+	assertWired(t, routerGo, "signinHandler.SetCaptcha(captchaSvc)",
+		"captcha service を signin handler に渡していない (サインインが captcha を検証しない)")
+
 	// **subscriber は先に meta の cache を落とすこと。** `reloadCaptcha` は
 	// `cachedMeta.Fetch()` を読むので、`Invalidate` を落とすと**最大 5 分古い
 	// スナップショット**から provider を組み直してしまい、入れ替わらない。

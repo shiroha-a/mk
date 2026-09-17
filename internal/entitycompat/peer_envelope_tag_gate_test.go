@@ -5,6 +5,8 @@ import (
 	"go/parser"
 	"go/token"
 	"path/filepath"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -49,7 +51,20 @@ func TestPeerJobEnvelopeTagIsStable(t *testing.T) {
 	})
 
 	require.True(t, found, "peerJob.Envelope が見つからない (rename した? admin の jobSecretKeys も直すこと)")
-	assert.Contains(t, tag, `json:"envelope"`,
+	// **オプションはカンマで切ってから比べる (#3037 レビュー 2 周目)。**
+	// `json:"envelope,omitempty"` は wire 名が変わらないのに、素の
+	// `Contains` だと落ちる。`internal/api/admin` の `queue_redact_test.go`
+	// は元からカンマで切っており、両者の規則が食い違っていた。
+	assert.Equal(t, "envelope", jsonTagName(tag),
 		"peerJob.Envelope の json tag が変わっている。`internal/api/admin` の jobSecretKeys も直すこと "+
 			"(放置するとプラグイン peer の送信本文が admin/queue/jobs から読める)")
+}
+
+// jsonTagName extracts the wire name from a struct tag.
+func jsonTagName(tag string) string {
+	m := regexp.MustCompile(`json:"([^"]*)"`).FindStringSubmatch(tag)
+	if m == nil {
+		return ""
+	}
+	return strings.Split(m[1], ",")[0]
 }

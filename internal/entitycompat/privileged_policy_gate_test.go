@@ -25,8 +25,13 @@ func TestPrivilegedPolicyKeysMatchAdminRoutes(t *testing.T) {
 	routes := parseRouteRegistrations(t, filepath.Join("..", "server", "router.go"))
 	require.Greater(t, len(routes), 400, "route の抽出が壊れている")
 
-	policyRe := regexp.MustCompile(`corerole\.(Policy\w+)`)
+	// **`RequireRolePolicy` の引数そのものを読む (#3037 レビュー 2 周目)。**
+	// 1 周目は `corerole.PolicyXxx` という書き方だけを正規表現で拾っていたが、
+	// あの引数は `policyKey string` なので**リテラルを直接書いてもコンパイル
+	// は通る**。実測で `RequireRolePolicy(roleService, "canManageZzDanger")`
+	// と `zzPolicy := corerole.PolicyCanManageZzDanger` 経由の 2 形が素通りした。
 	fromRouter := map[string]struct{}{}
+	var unresolved []string
 	for ep, raw := range routes {
 		if !strings.HasPrefix(ep, "admin/") {
 			continue
@@ -37,22 +42,34 @@ func TestPrivilegedPolicyKeysMatchAdminRoutes(t *testing.T) {
 		if strings.Contains(reg, "RequireModerator") || strings.Contains(reg, "RequireAdmin") {
 			continue
 		}
-		for _, m := range policyRe.FindAllStringSubmatch(reg, -1) {
-			fromRouter[m[1]] = struct{}{}
+		for _, arg := range requireRolePolicyArgs(reg) {
+			switch {
+			case policyConstRe.MatchString(arg):
+				fromRouter[policyConstValue(t, policyConstRe.FindStringSubmatch(arg)[1])] = struct{}{}
+			case policyLiteralRe.MatchString(arg):
+				fromRouter[policyLiteralRe.FindStringSubmatch(arg)[1]] = struct{}{}
+			default:
+				// **読めない形は落とす。** 変数を経由されると、この gate は
+				// その route を黙って視界から外す = 検査していないのに緑になる。
+				unresolved = append(unresolved, ep+": "+arg)
+			}
 		}
 	}
+	sort.Strings(unresolved)
+	require.Empty(t, unresolved,
+		"`RequireRolePolicy` の policy を定数かリテラルで書いていない。"+
+			"変数を経由するとこの gate がその route を検査できない")
 	require.NotEmpty(t, fromRouter, "policy だけで開く admin route を 1 つも拾えていない")
 
 	declared := privilegedPolicyKeysFromSource(t)
 	var missing, stale []string
-	for constName := range fromRouter {
-		value := policyConstValue(t, constName)
+	for value := range fromRouter {
 		if _, ok := declared[value]; !ok {
-			missing = append(missing, value+" ("+constName+")")
+			missing = append(missing, value)
 		}
 	}
 	for value := range declared {
-		if !policyValueUsedByAdminRoute(t, value, fromRouter) {
+		if _, ok := fromRouter[value]; !ok {
 			stale = append(stale, value)
 		}
 	}
@@ -64,6 +81,45 @@ func TestPrivilegedPolicyKeysMatchAdminRoutes(t *testing.T) {
 			"足さないと、その policy を配る条件つきロールで自己付与できる")
 	assert.Empty(t, stale,
 		"`privilegedPolicyKeys` に、もう admin を開けない key が残っている")
+}
+
+var (
+	policyConstRe       = regexp.MustCompile(`^\s*corerole\.(Policy\w+)\s*$`)
+	policyLiteralRe     = regexp.MustCompile(`^\s*"([^"]+)"\s*$`)
+	requireRolePolicyRe = regexp.MustCompile(`RequireRolePolicy\(`)
+)
+
+// requireRolePolicyArgs returns the policy argument of every
+// RequireRolePolicy call in the registration text.
+//
+// 引数は `(checker, policyKey)` の 2 つなので、括弧の深さを見て最後の 1 つを取る。
+func requireRolePolicyArgs(reg string) []string {
+	var out []string
+	for _, loc := range requireRolePolicyRe.FindAllStringIndex(reg, -1) {
+		depth := 1
+		start := loc[1]
+		last := start
+		for i := start; i < len(reg); i++ {
+			switch reg[i] {
+			case '(', '[', '{':
+				depth++
+			case ')', ']', '}':
+				depth--
+				if depth == 0 {
+					out = append(out, reg[last:i])
+					i = len(reg)
+				}
+			case ',':
+				if depth == 1 {
+					last = i + 1
+				}
+			}
+			if depth == 0 {
+				break
+			}
+		}
+	}
+	return out
 }
 
 // privilegedPolicyKeysFromSource reads the map literal from role_service.go.
@@ -94,16 +150,6 @@ func policyConstValue(t *testing.T, constName string) string {
 	m := regexp.MustCompile(constName + `\s*=\s*"([^"]+)"`).FindStringSubmatch(string(src))
 	require.NotNil(t, m, "%s の値を読めない", constName)
 	return m[1]
-}
-
-func policyValueUsedByAdminRoute(t *testing.T, value string, fromRouter map[string]struct{}) bool {
-	t.Helper()
-	for constName := range fromRouter {
-		if policyConstValue(t, constName) == value {
-			return true
-		}
-	}
-	return false
 }
 
 func betweenMarkers(t *testing.T, src, start, end string) string {

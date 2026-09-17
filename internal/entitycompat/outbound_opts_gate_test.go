@@ -44,47 +44,56 @@ func TestOutboundConstructorsReceiveSharedOptions(t *testing.T) {
 		f, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
 		require.NoError(t, err)
 		imports := importIdents(f)
-		currentFunc := ""
 
 		// 自分自身が `...safehttp.Option` を受ける関数の中では、その引数を
 		// そのまま流すのが正しい (`oauthDiscoveryTransport`)。
 		forwardable := forwardableOptionParams(f)
 
-		ast.Inspect(f, func(n ast.Node) bool {
-			fn, isFunc := n.(*ast.FuncDecl)
-			if isFunc {
-				currentFunc = fn.Name.Name
-				return true
+		// **走査は宣言ごとに分ける (#3037 レビュー 2 周目)。**
+		// 1 周目は `ast.Inspect` を 1 本で回して `currentFunc` を持ち回って
+		// いたが、FuncDecl を抜けても戻さないので**package レベルの `var`
+		// 初期化子が直前の関数の名前を引きずる**。実測で、variadic を持つ
+		// 関数の後ろに `var x = func() { ... }` を書くと、その中の呼び出しが
+		// 「自分の opts を流している」と誤判定された。
+		for _, decl := range f.Decls {
+			scope := ""
+			if fn, ok := decl.(*ast.FuncDecl); ok {
+				scope = fn.Name.Name
 			}
-			call, ok := n.(*ast.CallExpr)
-			if !ok {
-				return true
-			}
-			key := ""
-			switch fn := call.Fun.(type) {
-			case *ast.Ident:
-				key = serverPkg + "." + fn.Name
-			case *ast.SelectorExpr:
-				pkgIdent, ok := fn.X.(*ast.Ident)
+			// この宣言の中で `outboundOpts()` から受けた局所変数。
+			derived := outboundOptsDerivedVars(decl)
+
+			ast.Inspect(decl, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
-				path, ok := imports[pkgIdent.Name]
-				if !ok {
-					// レシーバ越しの呼び出し (`s.foo()`) は同 package。
-					key = serverPkg + "." + fn.Sel.Name
-					break
+				key := ""
+				switch fn := call.Fun.(type) {
+				case *ast.Ident:
+					key = serverPkg + "." + fn.Name
+				case *ast.SelectorExpr:
+					pkgIdent, ok := fn.X.(*ast.Ident)
+					if !ok {
+						return true
+					}
+					path, ok := imports[pkgIdent.Name]
+					if !ok {
+						// レシーバ越しの呼び出し (`s.foo()`) は同 package。
+						key = serverPkg + "." + fn.Sel.Name
+						break
+					}
+					key = path + "." + fn.Sel.Name
+				default:
+					return true
 				}
-				key = path + "." + fn.Sel.Name
-			default:
+				if !qualified[key] || callPassesOutboundOpts(call, forwardable[scope], derived) {
+					return true
+				}
+				missing = append(missing, filepath.Base(file)+":"+key)
 				return true
-			}
-			if !qualified[key] || callPassesOutboundOpts(call, forwardable[currentFunc]) {
-				return true
-			}
-			missing = append(missing, filepath.Base(file)+":"+key)
-			return true
-		})
+			})
+		}
 	}
 	sort.Strings(missing)
 	assert.Empty(t, missing,
@@ -113,6 +122,7 @@ func variadicSafehttpOptionFuncs(t *testing.T) map[string]bool {
 			return nil
 		}
 		pkgPath := modulePrefix + "internal/" + filepath.ToSlash(rel)
+		imports := importIdents(f)
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Type.Params == nil {
@@ -123,11 +133,7 @@ func variadicSafehttpOptionFuncs(t *testing.T) map[string]bool {
 				if !ok {
 					continue
 				}
-				sel, ok := ell.Elt.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Option" {
-					continue
-				}
-				if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "safehttp" {
+				if isSafehttpOption(ell.Elt, imports) {
 					out[pkgPath+"."+fn.Name.Name] = true
 				}
 			}
@@ -172,26 +178,73 @@ func serverSourceFiles(t *testing.T) []string {
 // **展開 (`...`) まで見る。** `s.outboundOpts()` を引数に置いただけでは
 // 型が合わずコンパイルも通らないが、判定を名前だけにすると将来
 // `[]safehttp.Option` を受ける形に変えたときに素通りする。
-func callPassesOutboundOpts(call *ast.CallExpr, forwardable string) bool {
-	if !call.Ellipsis.IsValid() {
+func callPassesOutboundOpts(call *ast.CallExpr, forwardable string, derived map[string]bool) bool {
+	if !call.Ellipsis.IsValid() || len(call.Args) == 0 {
 		return false
 	}
-	for _, arg := range call.Args {
-		switch a := arg.(type) {
-		case *ast.CallExpr:
-			if calleeName(a.Fun) == "outboundOpts" {
-				return true
-			}
-		case *ast.Ident:
-			// **囲む関数自身の variadic だけを通す (#3037 レビュー)。**
-			// 名前で判定すると、`opts` という名前の空 slice を宣言して
-			// 渡すだけで gate を抜けられる。
-			if forwardable != "" && a.Name == forwardable {
-				return true
-			}
+	// 展開されるのは最後の引数だけ。
+	spread := call.Args[len(call.Args)-1]
+
+	// **式の中に `outboundOpts()` があれば通す (#3037 レビュー 2 周目)。**
+	// 1 周目は「引数そのものが `outboundOpts()` の呼び出しか」しか見て
+	// いなかったので、共通 opts に 1 つ足す唯一の書き方である
+	// `append(s.outboundOpts(), extra)...` を**偽陽性で落としていた**
+	// (しかも診断は「渡していない」と事実と逆を指す)。
+	if containsOutboundOptsCall(spread) {
+		return true
+	}
+	if id, ok := spread.(*ast.Ident); ok {
+		// **囲む関数自身の variadic (#3037 レビュー)。** 名前で判定すると、
+		// `opts` という名前の空 slice を宣言して渡すだけで抜けられるので、
+		// その宣言が実際にこの関数の引数であることまで見る。
+		if forwardable != "" && id.Name == forwardable {
+			return true
+		}
+		// **局所変数に受けてから展開する形も通す (レビュー 2 周目)。**
+		// `emojiOpts := s.outboundOpts()` はごく普通の書き方で、1 周目は
+		// これも偽陽性で落としていた。`outboundOpts()` を含む式から
+		// 受けたものだけを認めるので、空 slice を渡す抜け道にはならない。
+		if derived[id.Name] {
+			return true
 		}
 	}
 	return false
+}
+
+// containsOutboundOptsCall reports whether expr calls outboundOpts anywhere.
+func containsOutboundOptsCall(expr ast.Expr) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if ok && calleeName(call.Fun) == "outboundOpts" {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
+// outboundOptsDerivedVars collects the local variables assigned from an
+// expression that calls outboundOpts.
+func outboundOptsDerivedVars(decl ast.Decl) map[string]bool {
+	out := map[string]bool{}
+	ast.Inspect(decl, func(n ast.Node) bool {
+		assign, ok := n.(*ast.AssignStmt)
+		if !ok {
+			return true
+		}
+		for i, rhs := range assign.Rhs {
+			if i >= len(assign.Lhs) || !containsOutboundOptsCall(rhs) {
+				continue
+			}
+			if id, ok := assign.Lhs[i].(*ast.Ident); ok {
+				out[id.Name] = true
+			}
+		}
+		return true
+	})
+	return out
 }
 
 // forwardableOptionParams maps each function to the name of its own
@@ -201,6 +254,7 @@ func callPassesOutboundOpts(call *ast.CallExpr, forwardable string) bool {
 // 名前の空 slice を作って渡すだけで gate を抜けられる。
 func forwardableOptionParams(f *ast.File) map[string]string {
 	out := map[string]string{}
+	imports := importIdents(f)
 	for _, decl := range f.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
 		if !ok || fn.Type.Params == nil {
@@ -211,16 +265,35 @@ func forwardableOptionParams(f *ast.File) map[string]string {
 			if !ok {
 				continue
 			}
-			sel, ok := ell.Elt.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "Option" {
-				continue
-			}
-			if pkg, ok := sel.X.(*ast.Ident); ok && pkg.Name == "safehttp" && len(p.Names) > 0 {
+			if isSafehttpOption(ell.Elt, imports) && len(p.Names) > 0 {
 				out[fn.Name.Name] = p.Names[0].Name
 			}
 		}
 	}
 	return out
+}
+
+// safehttpPkgPath is the package that declares Option.
+const safehttpPkgPath = "github.com/shiroha-a/mk/internal/safehttp"
+
+// isSafehttpOption reports whether expr names safehttp.Option, resolving the
+// import alias.
+//
+// **alias を解決するのが要点 (#3037 レビュー 2 周目)。** `safehttp` という
+// 識別子だけを見ていたので、`import sh "…/internal/safehttp"` と書いた
+// package の constructor は**集合から黙って消えていた** (実測: urlpreview を
+// alias にすると、その呼び出しから opts を落としても gate が緑のまま通る)。
+// 「1 つも拾えなかったら落とす」の保護は、ハードコードした 2 つにしか効かない。
+func isSafehttpOption(expr ast.Expr, imports map[string]string) bool {
+	sel, ok := expr.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Option" {
+		return false
+	}
+	pkg, ok := sel.X.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return imports[pkg.Name] == safehttpPkgPath
 }
 
 // importIdents maps the local identifier of each import to its path.

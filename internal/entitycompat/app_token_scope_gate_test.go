@@ -98,21 +98,29 @@ func TestAppTokenGateExemptHasNoDeadEntries(t *testing.T) {
 	}
 }
 
-// stripGoComments removes // and /* */ comments, leaving string literals alone.
+// stripGoComments removes // and /* */ comments, leaving string and rune
+// literals alone.
 //
 // **文字列の中は触らない。** route の path には `//` を含む URL が入りうる
 // (`https://…`)。素朴に `//` 以降を落とすと、その行の残りの middleware まで
 // 消えて偽陽性になる。
+//
+// **rune literal も同じ扱いにする (#3037 レビュー 2 周目)。** シングル
+// クォートを見ていなかったので、`'"'` や '`' のような rune literal が
+// **文字列モードを開いたまま以降を verbatim にコピー**していた。実測で
+// `middleware.Sep('"') /* middleware.RejectAppToken() */` を router.go に
+// 置くと、コメントアウトされた middleware が生きていると判定される
+// (= 1 周目で塞いだ形が rune literal 1 つで戻る)。
 func stripGoComments(src string) string {
 	var b strings.Builder
 	for i := 0; i < len(src); i++ {
 		switch {
-		case src[i] == '"' || src[i] == '`':
+		case src[i] == '"' || src[i] == '`' || src[i] == '\'':
 			quote := src[i]
 			b.WriteByte(src[i])
 			for i++; i < len(src); i++ {
 				b.WriteByte(src[i])
-				if src[i] == '\\' && quote == '"' && i+1 < len(src) {
+				if src[i] == '\\' && quote != '`' && i+1 < len(src) {
 					i++
 					b.WriteByte(src[i])
 					continue
@@ -152,6 +160,14 @@ func TestStripGoComments(t *testing.T) {
 		{"文字列の中の //", `x("https://e.test")`, `x("https://e.test")`},
 		{"文字列の中の /*", "x(`a /* b`)", "x(`a /* b`)"},
 		{"エスケープされた引用符", `x("a\"// b")`, `x("a\"// b")`},
+		// **rune literal (#3037 レビュー 2 周目)。** シングルクォートを
+		// 見ていないと、これらが文字列モードを開いたまま以降を verbatim に
+		// コピーし、**コメント落としが丸ごと無効になる**。
+		{"rune の二重引用符", `x('"') // c`, `x('"') ` + "\n"},
+		{"rune のバッククォート", "x('`') // c", "x('`') \n"},
+		{"rune のスラッシュ", `x('/') /* c */`, `x('/')  `},
+		{"エスケープされた rune", `x('\'') // c`, `x('\'') ` + "\n"},
+		{"rune のバックスラッシュ", `x('\\') // c`, `x('\\') ` + "\n"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, stripGoComments(tt.in))
