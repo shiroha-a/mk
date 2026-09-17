@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/queue"
@@ -65,7 +66,18 @@ func TestJobSecretKeysMatchPayloadTags(t *testing.T) {
 		{reflect.TypeOf(queue.WebhookPayload{}), []string{"OverrideSecret"}},
 	}
 
+	// **別 package の非公開 struct に由来するものは、ここでは名前で持つ。**
+	// `internal/server` の `peerJob` は unexported なので reflect で引けない。
+	// tag が変わっていないことは `internal/entitycompat` の
+	// `TestPeerJobEnvelopeTagIsStable` が固定する (そちらが落ちればここも直す)。
+	externalSecretTags := map[string]string{
+		"envelope": "internal/server の peerJob.Envelope (プラグイン peer の送信本文)",
+	}
+
 	want := map[string]struct{}{}
+	for tag := range externalSecretTags {
+		want[tag] = struct{}{}
+	}
 	for _, sp := range specs {
 		for _, name := range sp.fields {
 			f, ok := sp.typ.FieldByName(name)
@@ -141,4 +153,31 @@ func TestPackTaskSummary_RedactsWebhookSecret(t *testing.T) {
 	require.NotContainsf(t, string(encoded), "HOOK-SECRET",
 		"レスポンスから webhook の secret が読める: %s", encoded)
 	require.Contains(t, string(encoded), "https://example/hook")
+}
+
+// **プラグイン peer の送信本文が API から読めないこと (#3037)。**
+//
+// 中身を決めるのはプラグインで、本体はそれが何かを知らない。peer は本来
+// 「そのプラグイン同士」の通信で、モデレーション画面に出す前提のものでは
+// ない。Redis に再送のあいだ残り、`admin/queue/jobs` から (moderator +
+// `read:admin:queue` で) 読めていた。
+func TestPeerEnvelopeIsRedacted(t *testing.T) {
+	raw := []byte(`{"host":"peer.example","sendId":"s1","envelope":{"secret":"plugin data"}}`)
+
+	// asynq 由来の `payload` フィールド側。
+	out := redactPayloadSecrets(raw)
+	assert.NotContains(t, out, "plugin data", "peer の送信本文がそのまま出ている")
+	assert.Contains(t, out, redactedPlaceholder)
+	// **伏せるのは envelope だけ。** host / sendId は追跡に要る。
+	assert.Contains(t, out, "peer.example")
+	assert.Contains(t, out, "s1")
+
+	// `data.body` 側。
+	body := redactJobSecrets(map[string]any{
+		"host": "peer.example", "envelope": map[string]any{"secret": "plugin data"},
+	})
+	m, ok := body.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, redactedPlaceholder, m["envelope"])
+	assert.Equal(t, "peer.example", m["host"])
 }

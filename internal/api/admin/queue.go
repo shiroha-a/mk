@@ -1114,6 +1114,17 @@ var jobSecretKeys = map[string]struct{}{
 	// allowlist が無い)。upstream も job data に secret を入れているので
 	// parity ではあるが、読める必要は無い。
 	"overrideSecret": {},
+	// プラグイン peer の送信本文 (`peerJob.Envelope`、#3037)。**中身を決めるのは
+	// プラグイン**で、本体はそれが何かを知らない。実際の同梱プラグインは
+	// 利用者のノートや外部サービスの応答を載せうるし、peer は本来「その
+	// プラグイン同士」の通信で、モデレーション画面に出す前提のものではない。
+	// Redis に再送のあいだ残り、`admin/queue/jobs` から (moderator +
+	// `read:admin:queue` で) 読めていた。**upstream に peer は無い**ので
+	// mk-go 独自の判断。
+	//
+	// 伏せても運用は困らない — 同じ job に `host` / `sendId` / 試行回数 /
+	// 失敗理由が出るので、送信の追跡はできる。
+	"envelope": {},
 }
 
 const redactedPlaceholder = "[redacted]"
