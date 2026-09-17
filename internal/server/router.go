@@ -1050,7 +1050,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// Daily generic clean (#1563): scheduler の cron (0 0 * * *) が enqueue する。
 	// user_ip 90 日 prune / 期限切れ role_assignment 削除 / reversi outdated game 削除 /
 	// 未使用 antenna の deactivate (#1604, deactivateAntennaThreshold ミリ秒)。
-	cleanGenericProcessor := processors.NewCleanProcessor(userIPRepo, roleAssignmentRepo, reversiRepo, idGen, antennaRepo, time.Duration(s.config.DeactivateAntennaThreshold)*time.Millisecond)
+	cleanGenericProcessor := processors.NewCleanProcessor(userIPRepo, roleAssignmentRepo, reversiRepo, idGen, antennaRepo, time.Duration(s.config.DeactivateAntennaThreshold)*time.Millisecond, repository.NewUserPendingRepository(s.db))
 	s.queueServer.Handle(queue.TaskTypeClean, cleanGenericProcessor.Handle)
 
 	// 分割アップロードセッションの GC (#2313): scheduler の cron (*/15) が

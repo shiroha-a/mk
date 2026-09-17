@@ -7517,6 +7517,21 @@ func (m *MockUserPendingRepository) Create(p *model.UserPending) error {
 	return nil
 }
 
+// DeleteOlderThan removes rows whose id sorts before thresholdID.
+//
+// **実データに合わせて件数を返す。** 常に 0 を返すと、掃除を検査するテストが
+// 空虚になる (#3037)。
+func (m *MockUserPendingRepository) DeleteOlderThan(thresholdID string) (int64, error) {
+	var n int64
+	for id := range m.Rows {
+		if id < thresholdID {
+			delete(m.Rows, id)
+			n++
+		}
+	}
+	return n, nil
+}
+
 func (m *MockUserPendingRepository) FindByCode(code string) (*model.UserPending, error) {
 	for _, r := range m.Rows {
 		if r.Code == code {

@@ -11,6 +11,17 @@ type UserPendingRepository interface {
 	Create(p *model.UserPending) error
 	FindByCode(code string) (*model.UserPending, error)
 	Delete(id string) error
+	// DeleteOlderThan removes rows whose id sorts before thresholdID and
+	// reports how many were deleted.
+	//
+	// **期限切れの行を残さない (#3037)。** `PromotePending` は期限切れを
+	// 拒否するだけで行を消さないので、`user_pending` は**放置された登録の
+	// メールアドレスとパスワードハッシュを無期限に貯め続ける**。DB が漏れた
+	// ときに出ていく量が、登録を完了しなかった人のぶんだけ増える。
+	//
+	// id は時刻を含む (aidx / ULID) ので、閾値も id で表す
+	// (`ReversiRepository.DeleteOutdatedGames` と同じ形)。
+	DeleteOlderThan(thresholdID string) (int64, error)
 }
 
 type userPendingRepository struct {
@@ -39,4 +50,15 @@ func (r *userPendingRepository) FindByCode(code string) (*model.UserPending, err
 
 func (r *userPendingRepository) Delete(id string) error {
 	return r.db.Where("id = ?", id).Delete(&model.UserPending{}).Error
+}
+
+func (r *userPendingRepository) DeleteOlderThan(thresholdID string) (int64, error) {
+	// **列に入らない値を投げない (#3025)。** id は varchar なので NUL や
+	// 不正な UTF-8 を渡すとクエリごと落ちる。呼び出し元は id generator なので
+	// 通常は起きないが、guard の有無が経路ごとに違う状態を作らない。
+	if !storable(thresholdID) {
+		return 0, nil
+	}
+	res := r.db.Where(`"id" < ?`, thresholdID).Delete(&model.UserPending{})
+	return res.RowsAffected, res.Error
 }

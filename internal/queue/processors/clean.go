@@ -35,6 +35,11 @@ type (
 	AntennaDeactivator interface {
 		DeactivateUnusedSince(cutoff time.Time) (int64, error)
 	}
+	// PendingSignupPruner removes expired user_pending rows
+	// (repository.UserPendingRepository).
+	PendingSignupPruner interface {
+		DeleteOlderThan(thresholdID string) (int64, error)
+	}
 )
 
 const (
@@ -44,6 +49,17 @@ const (
 	// reversiOutdatedAfter は開始されないまま放置された reversi game を outdated
 	// と見なす猶予。upstream cleanOutdatedGames は now-10min の id を閾値にする。
 	reversiOutdatedAfter = 10 * time.Minute
+	// pendingSignupRetention は期限切れ `user_pending` 行を残す猶予 (#3037)。
+	//
+	// **`signup.PendingSignupTTL` (30 分) より十分長くする。** 掃除は日次なので
+	// 厳密さは要らず、短くしても得は無い一方、短すぎると「昇格できるはずの行を
+	// 掃除が先に消す」競合が生まれる。
+	//
+	// **upstream に対応する cron は無い** (`CleanProcessorService` は
+	// `user_pending` を見ない) mk-go 独自の追加。`PromotePending` は期限切れを
+	// 拒否するだけで行を消さないので、放置された登録の**メールアドレスと
+	// パスワードハッシュ**が無期限に貯まっていた。
+	pendingSignupRetention = 24 * time.Hour
 )
 
 // CleanProcessor implements the upstream generic `clean` systemQueue cron
@@ -59,12 +75,13 @@ type CleanProcessor struct {
 	idGen            CleanIDGenerator
 	antenna          AntennaDeactivator
 	antennaThreshold time.Duration
+	pending          PendingSignupPruner
 }
 
 // NewCleanProcessor constructs the processor. Any nil dependency disables its
 // sub-task (no-op) rather than panicking. antennaThreshold <= 0 also disables
 // the antenna deactivate sub-task (matching upstream's `> 0` guard).
-func NewCleanProcessor(userIP UserIPPruner, roleAssign RoleAssignmentPruner, reversi OutdatedGamePruner, idGen CleanIDGenerator, antenna AntennaDeactivator, antennaThreshold time.Duration) *CleanProcessor {
+func NewCleanProcessor(userIP UserIPPruner, roleAssign RoleAssignmentPruner, reversi OutdatedGamePruner, idGen CleanIDGenerator, antenna AntennaDeactivator, antennaThreshold time.Duration, pending PendingSignupPruner) *CleanProcessor {
 	return &CleanProcessor{
 		userIP:           userIP,
 		roleAssign:       roleAssign,
@@ -72,6 +89,7 @@ func NewCleanProcessor(userIP UserIPPruner, roleAssign RoleAssignmentPruner, rev
 		idGen:            idGen,
 		antenna:          antenna,
 		antennaThreshold: antennaThreshold,
+		pending:          pending,
 	}
 }
 
@@ -103,6 +121,15 @@ func (p *CleanProcessor) Handle(_ context.Context, _ driver.Task) error {
 			slog.Warn("clean: delete outdated reversi games failed", "err", err)
 		} else if n > 0 {
 			slog.Info("clean: deleted outdated reversi games", "count", n)
+		}
+	}
+
+	if p.pending != nil && p.idGen != nil {
+		threshold := p.idGen.Generate(now.Add(-pendingSignupRetention))
+		if n, err := p.pending.DeleteOlderThan(threshold); err != nil {
+			slog.Warn("clean: delete expired pending signups failed", "err", err)
+		} else if n > 0 {
+			slog.Info("clean: deleted expired pending signups", "count", n)
 		}
 	}
 

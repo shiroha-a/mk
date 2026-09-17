@@ -150,9 +150,23 @@ func (f *fakeGamePruner) DeleteOutdatedGames(threshold string) (int64, error) {
 	return 4, f.err
 }
 
-type fakeCleanIDGen struct{ got time.Time }
+// fakeCleanIDGen records **every** call. 1 つの clean で複数の閾値を生成する
+// ので (reversi と user_pending)、最後の 1 つだけ覚えると先の検査が後の呼び
+// 出しに上書きされる。
+type fakeCleanIDGen struct {
+	got  time.Time
+	all  []time.Time
+	next string
+}
 
-func (f *fakeCleanIDGen) Generate(t time.Time) string { f.got = t; return "threshold-id" }
+func (f *fakeCleanIDGen) Generate(t time.Time) string {
+	f.got = t
+	f.all = append(f.all, t)
+	if f.next != "" {
+		return f.next
+	}
+	return "threshold-id"
+}
 
 type fakeAntennaDeactivator struct {
 	gotCutoff time.Time
@@ -168,13 +182,27 @@ func (f *fakeAntennaDeactivator) DeactivateUnusedSince(cutoff time.Time) (int64,
 
 const testAntennaThreshold = 7 * 24 * time.Hour
 
+// fakePendingPruner records the threshold the clean job asks for.
+type fakePendingPruner struct {
+	gotThreshold string
+	called       bool
+	err          error
+}
+
+func (f *fakePendingPruner) DeleteOlderThan(thresholdID string) (int64, error) {
+	f.called = true
+	f.gotThreshold = thresholdID
+	return 3, f.err
+}
+
 func TestClean_RunsAllSubtasks(t *testing.T) {
 	ip := &fakeUserIPPruner{}
 	role := &fakeRolePruner{}
 	game := &fakeGamePruner{}
 	idGen := &fakeCleanIDGen{}
 	antenna := &fakeAntennaDeactivator{}
-	proc := NewCleanProcessor(ip, role, game, idGen, antenna, testAntennaThreshold)
+	pending := &fakePendingPruner{}
+	proc := NewCleanProcessor(ip, role, game, idGen, antenna, testAntennaThreshold, pending)
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
 
 	// user_ip は 90 日より前を prune する。
@@ -182,20 +210,28 @@ func TestClean_RunsAllSubtasks(t *testing.T) {
 	assert.True(t, role.called)
 	// reversi の閾値 id は now-10min から生成される。
 	assert.Equal(t, "threshold-id", game.gotThreshold)
-	assert.WithinDuration(t, time.Now().Add(-reversiOutdatedAfter), idGen.got, time.Minute)
+	require.Len(t, idGen.all, 2, "閾値の生成回数が変わっている")
+	assert.WithinDuration(t, time.Now().Add(-reversiOutdatedAfter), idGen.all[0], time.Minute)
+	// user_pending の閾値は now-24h。
+	assert.WithinDuration(t, time.Now().Add(-pendingSignupRetention), idGen.all[1], time.Minute)
 	// antenna は now-threshold より古い lastUsedAt を deactivate する。
 	assert.True(t, antenna.called)
 	assert.WithinDuration(t, time.Now().Add(-testAntennaThreshold), antenna.gotCutoff, time.Minute)
+	// **期限切れの pending signup も掃除する (#3037)。** `PromotePending` は
+	// 期限切れを拒否するだけで行を消さないので、放置された登録のメール
+	// アドレスとパスワードハッシュが無期限に貯まっていた。
+	assert.True(t, pending.called, "期限切れの user_pending を掃除していない")
+	assert.Equal(t, "threshold-id", pending.gotThreshold)
 }
 
 func TestClean_NilDepsNoOp(t *testing.T) {
-	require.NoError(t, NewCleanProcessor(nil, nil, nil, nil, nil, testAntennaThreshold).Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+	require.NoError(t, NewCleanProcessor(nil, nil, nil, nil, nil, testAntennaThreshold, nil).Handle(context.Background(), driver.RawTask{TypeName: "test"}))
 }
 
 func TestClean_AntennaThresholdZeroSkips(t *testing.T) {
 	antenna := &fakeAntennaDeactivator{}
 	// threshold <= 0 は antenna deactivate を無効化する (本家 `> 0` ガード相当)。
-	proc := NewCleanProcessor(nil, nil, nil, nil, antenna, 0)
+	proc := NewCleanProcessor(nil, nil, nil, nil, antenna, 0, nil)
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
 	assert.False(t, antenna.called, "threshold=0 では呼ばれない")
 }
@@ -208,6 +244,7 @@ func TestClean_SubtaskErrorsSwallowed(t *testing.T) {
 		&fakeCleanIDGen{},
 		&fakeAntennaDeactivator{err: errors.New("d")},
 		testAntennaThreshold,
+		&fakePendingPruner{err: errors.New("e")},
 	)
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}), "個々の失敗は swallow して success")
 }
