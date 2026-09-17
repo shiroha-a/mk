@@ -261,6 +261,69 @@ func TestWrapPluginHandler_BlobAlwaysSetsNosniff(t *testing.T) {
 	assert.Contains(t, rec.Header().Get("Content-Type"), echo.MIMEOctetStream)
 }
 
+// **allowlist 外の Content-Type は octet-stream に矯正する (#3037)。**
+//
+// `nosniff` はブラウザの MIME 推測を止めるだけで、Content-Type が**実際に**
+// `text/html` / `image/svg+xml` のときには何も止めない。プラグインが取得元の
+// Content-Type をそのまま流すと同一オリジンの XSS になり、Misskey の
+// フロントは `account` を localStorage に置くのでアカウント乗っ取りと同じ。
+func TestWrapPluginHandler_BlobCoercesUnsafeContentType(t *testing.T) {
+	for _, unsafe := range []string{
+		"text/html",
+		"text/html; charset=utf-8",
+		"IMAGE/SVG+XML",
+		"application/xhtml+xml",
+		"text/xml",
+		"application/javascript",
+		"text/plain",
+	} {
+		t.Run(unsafe, func(t *testing.T) {
+			rec := serveWrapped(t, func(plugin.Request) (any, error) {
+				return plugin.Blob{ContentType: unsafe, Body: []byte("<script>alert(1)</script>")}, nil
+			}, "{}")
+
+			assert.Equal(t, echo.MIMEOctetStream, rec.Header().Get("Content-Type"),
+				"allowlist 外の型をそのまま流している")
+			// **本文は変えない。** 矯正するのは解釈のされ方だけ。
+			assert.Equal(t, "<script>alert(1)</script>", rec.Body.String())
+		})
+	}
+}
+
+// **画像 / 音声 / 動画はそのまま通る。** これが無いと「常に octet-stream に
+// する」実装でも上のテストが通り、画像プロキシという本来の用途が壊れる。
+func TestWrapPluginHandler_BlobKeepsBrowserSafeContentType(t *testing.T) {
+	for _, safe := range []string{
+		"image/png",
+		"image/jpeg",
+		"image/webp",
+		"video/mp4",
+		"audio/mpeg",
+	} {
+		t.Run(safe, func(t *testing.T) {
+			rec := serveWrapped(t, func(plugin.Request) (any, error) {
+				return plugin.Blob{ContentType: safe, Body: []byte("x")}, nil
+			}, "{}")
+			assert.Equal(t, safe, rec.Header().Get("Content-Type"))
+		})
+	}
+}
+
+// CSP と Content-Disposition も付ける。**`filesHandler` と同じ 3 点セット。**
+// Content-Type の矯正だけだと、allowlist に載っている型 (例えば
+// `image/png` を名乗る HTML) を単体で開かれたときに何も止められない。
+func TestWrapPluginHandler_BlobSetsCSPAndDisposition(t *testing.T) {
+	rec := serveWrapped(t, func(plugin.Request) (any, error) {
+		return plugin.Blob{ContentType: "image/png", Body: []byte("x")}, nil
+	}, "{}")
+
+	assert.Equal(t,
+		"default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'",
+		rec.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "inline", rec.Header().Get("Content-Disposition"))
+	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
+}
+
 // CacheControl 未指定なら /api 既定の Cache-Control を壊さない。
 func TestWrapPluginHandler_BlobWithoutCacheControl(t *testing.T) {
 	e := echo.New()

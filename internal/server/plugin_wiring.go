@@ -19,6 +19,7 @@ import (
 	"github.com/labstack/echo/v4"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	corerole "github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/pluginstore"
 	"github.com/shiroha-a/mk/internal/queue"
@@ -713,15 +714,37 @@ func wrapPluginHandler(h plugin.Handler, roles middleware.RoleChecker) echo.Hand
 
 // writePluginBlob writes a raw plugin response.
 //
-// **nosniff を必ず付ける。** プラグインが外部から取得したものをそのまま流す
-// 用途 (画像プロキシ) を想定しているので、ブラウザの MIME 推測で意図しない
-// 解釈をされる余地を残さない。
+// **`nosniff` だけでは足りない (#3037)。** あれはブラウザの MIME 推測を止める
+// だけで、Content-Type が**実際に** `text/html` や `image/svg+xml` のときには
+// 何も止めない。プラグインが取得元の Content-Type をそのまま流すと
+// (`plugin.Blob` の doc が「主な用途は画像のプロキシ」と書いている用途その
+// もの)、**同一オリジンの XSS** になる。Misskey のフロントは `account` を
+// localStorage に置くので、これはアカウント乗っ取りと同じ。
+//
+// **mk-go は自分のファイル配信 (`filesHandler`) で同じ脅威を 3 重に塞いで
+// いる**のに、こちらはそのどれも持っていなかった。同じ 3 つを付ける:
+//
+//   - `BrowserSafeContentType` で allowlist 外の型を
+//     `application/octet-stream` に矯正する (upstream
+//     `FileServerUtils.getSafeContentType` と同じ規則)
+//   - `Content-Security-Policy` で script / object の実行を封じる
+//     (値は `filesHandler` と同じ)
+//   - `Content-Disposition: inline`
+//
+// **allowlist は image / audio / video だけ。** JSON を返したいプラグインは
+// `Blob` ではなく素の値を返せばよい (本体が JSON 化する)。`text/plain` 等は
+// octet-stream に落ちるので、ブラウザでは表示ではなくダウンロードになる。
+// denylist にしないのは、危険な型を数え上げる形が必ず漏れるため。
 func writePluginBlob(c echo.Context, b plugin.Blob) error {
 	ct := b.ContentType
 	if ct == "" {
 		ct = echo.MIMEOctetStream
 	}
+	ct = coredrive.BrowserSafeContentType(ct)
 	c.Response().Header().Set("X-Content-Type-Options", "nosniff")
+	c.Response().Header().Set("Content-Security-Policy",
+		"default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'")
+	c.Response().Header().Set("Content-Disposition", "inline")
 	if b.CacheControl != "" {
 		// /api 配下には既定の Cache-Control が付くので上書きする。
 		c.Response().Header().Set("Cache-Control", b.CacheControl)

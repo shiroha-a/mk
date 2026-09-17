@@ -124,7 +124,15 @@ return plugin.Blob{
 
 主な用途は画像のプロキシ。本体の CSP は `img-src` を `'self' data: blob:` + 固定 2 host (upstream のクレジットページ用、#2892) に絞っているので、**プラグインが指す外部の画像は `<img>` で直接読めない**。同一オリジンで配信すれば CSP を緩めずに済む。
 
-mk-go は `X-Content-Type-Options: nosniff` を必ず付ける。**取得元の `Content-Type` をそのまま流さず、扱う型を決めて検証すること。** 読み込みの上限（`io.LimitReader` など）もプラグイン側の責務。
+mk-go は `filesHandler` と同じ 3 点を必ず付ける。
+
+- **`Content-Type` を allowlist に通す。** image / audio / video 以外は `application/octet-stream` に矯正される（upstream `FileServerUtils.getSafeContentType` と同じ規則）。`text/html` や `image/svg+xml` をそのまま流すと**同一オリジンの XSS** になり、Misskey のフロントは `account` を localStorage に置くのでアカウント乗っ取りと同じになるため。`nosniff` はブラウザの MIME 推測を止めるだけで、Content-Type が**実際に** `text/html` のときには何も止めない
+- `Content-Security-Policy: default-src 'none'; img-src 'self'; media-src 'self'; style-src 'unsafe-inline'`
+- `X-Content-Type-Options: nosniff` と `Content-Disposition: inline`
+
+JSON を返したいときは `Blob` ではなく素の値を返す（本体が JSON 化する）。`text/plain` 等は octet-stream に落ちるので、ブラウザでは表示ではなくダウンロードになる。
+
+それでも**取得元の `Content-Type` をそのまま流さず、扱う型を決めて検証すること。** 読み込みの上限（`io.LimitReader` など）もプラグイン側の責務。
 
 ## ストレージ
 
@@ -870,7 +878,7 @@ PluginPage: { path, component, navTitle?, navIcon?, admin? }
 | ActivityPub に関わるものを触る | 公開していない。不具合の症状が他人のサーバー側に出て、自分では気づけない |
 | mk-go 本体のテーブルを読む | 可視性判定を迂回する。非公開ノートが混ざる |
 | `plugin-api.ts` に無いコンポーネントを import する | upstream のリファクタで黙って壊れる |
-| 取得元の `Content-Type` をそのまま `Blob` に流す | ブラウザの MIME 推測で意図しない解釈をされる |
+| 取得元の `Content-Type` をそのまま `Blob` に流す | 本体が allowlist で矯正するので XSS にはならないが、画像のつもりが `application/octet-stream` になってダウンロードになる |
 | 素の `go` で goroutine を起動する | panic でプロセスごと落ちる。`ctx.Go()` を使う |
 | 管理用の API を `IsModerator()` で守らない | 画面を隠しても API は誰でも叩ける |
 
