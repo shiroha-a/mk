@@ -2683,6 +2683,28 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		reloadCaptcha()
 	})
 
+	// #3037: ロール / ポリシーの cross-worker cache invalidation。更新した
+	// worker は internal:rolesUpdated を publish し、各 worker は受信して自
+	// プロセスのキャッシュを落とす。upstream の
+	// `RoleService` が `internal` チャンネルの `roleUpdated` /
+	// `userRoleAssigned` 等を購読しているのに相当する。
+	//
+	// **繋がないと剥奪が届かない。** `roleCacheTTL` は 5 分で、複数プロセス
+	// 構成 (`MK_ONLY_SERVER` / `MK_ONLY_QUEUE`) は明示的にサポートされている。
+	// 侵害された管理者のロールを剥奪しても、**剥奪操作を受け付けなかった側の
+	// ノードでは最大 5 分間、管理 API が通り続ける**。
+	//
+	// **受信側は `InvalidateAllCachesLocally`。** 通常の invalidate を呼ぶと
+	// そこから再び publish され、ワーカー同士が通知を投げ合って止まらなくなる。
+	roleService.SetInvalidationHook(func() {
+		if err := internalPubSub.Publish(context.Background(), "rolesUpdated", struct{}{}); err != nil {
+			slog.Warn("role: publish rolesUpdated failed", "err", err)
+		}
+	})
+	internalPubSub.Subscribe(context.Background(), "rolesUpdated", func([]byte) {
+		roleService.InvalidateAllCachesLocally()
+	})
+
 	// #2752: antenna の cross-worker cache invalidation。書き込んだ worker が
 	// internal:antennaUpdated を publish し、各 worker が自プロセスの
 	// CachedAntennaRepository を invalidate する。upstream の

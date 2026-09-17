@@ -653,6 +653,9 @@ func (s *Service) InvalidateUser(_ context.Context, userID string) error {
 
 func (s *Service) invalidateUserPolicyCaches(userID string) {
 	s.InvalidateUserRoleCache(userID)
+	// **他のワーカーにも伝える。** 伝えないと、剥奪を受け付けなかった側の
+	// ノードでは最大 roleCacheTTL (5 分) のあいだ古いロールで通り続ける。
+	defer s.notifyInvalidated()
 	if userID == "" {
 		return
 	}
@@ -680,6 +683,24 @@ func (s *Service) invalidateRolePolicyCaches(roleID string) {
 	if roleID == "" {
 		return
 	}
+	s.InvalidateAllCachesLocally()
+	// **他のワーカーにも伝える** (invalidateUserPolicyCaches と同じ理由)。
+	s.notifyInvalidated()
+}
+
+// InvalidateAllCachesLocally drops every cached role / policy input in **this**
+// process without telling the others.
+//
+// **他ワーカーからの通知を受けたときに呼ぶ入口。** ここから再通知すると、
+// ワーカー同士が通知を投げ合って止まらなくなる。ローカルの変更から呼ぶ経路は
+// `invalidateUserPolicyCaches` / `invalidateRolePolicyCaches` の方で、
+// そちらは通知する。
+//
+// **粒度は落として全消しにしてある。** 受信側は「誰の」「どのロールが」変わった
+// かを知らなくても正しく動く (余分なキャッシュミスが出るだけ) 一方、ロールは
+// conditional 評価があるので、ID を運んでも影響範囲は絞りきれない
+// (`InvalidateRolePolicies` の doc と同じ理由)。
+func (s *Service) InvalidateAllCachesLocally() {
 	s.InvalidateAllRoleCaches()
 	for _, provider := range s.snapshotPolicyProviders() {
 		provider.runtime.cacheMu.Lock()
@@ -687,5 +708,22 @@ func (s *Service) invalidateRolePolicyCaches(roleID string) {
 		provider.runtime.cacheClear()
 		clear(provider.runtime.userEpoch)
 		provider.runtime.cacheMu.Unlock()
+	}
+}
+
+// SetInvalidationHook registers fn, invoked after a **local** mutation has
+// dropped this process's role / policy caches.
+//
+// 配線は `internal/server/router.go` で、`internal:rolesUpdated` へ publish
+// する。meta (#1740) / antenna (#2752) と同じ形。
+//
+// **起動時専用。** リクエストを捌いている最中に差し替えると、読みとの間で
+// データ競合になる。
+func (s *Service) SetInvalidationHook(fn func()) { s.invalidationHook = fn }
+
+// notifyInvalidated fires the hook when one is wired.
+func (s *Service) notifyInvalidated() {
+	if s.invalidationHook != nil {
+		s.invalidationHook()
 	}
 }

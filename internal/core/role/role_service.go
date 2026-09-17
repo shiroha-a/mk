@@ -196,6 +196,12 @@ type Service struct {
 	// 当該 userID を、Delete (role 削除) で全 entry を invalidate する。
 	// admin/roles/update が roleRepo を直接叩く経路は TTL でしかカバー
 	// できないが、roleCacheTTL = 5 min で staleness は bounded (#300 3-5)。
+	// invalidationHook は**ローカルの**変更でキャッシュを落とした後に呼ぶ。
+	// 複数ワーカー構成 (`MK_ONLY_SERVER` / `MK_ONLY_QUEUE`) では、これを繋がない
+	// と剥奪を受け付けなかった側のノードで最大 roleCacheTTL のあいだ古いロールが
+	// 通り続ける。配線は router.go (`internal:rolesUpdated`)。
+	invalidationHook func()
+
 	userRoleCacheMu  sync.RWMutex
 	userRoleCache    map[string]*roleCacheEntry
 	userRoleEpoch    map[string]uint64
