@@ -97,9 +97,13 @@ func TestRequireRolePolicy_PolicyDenied(t *testing.T) {
 	assert.False(t, called, "next は呼ばれない")
 }
 
-func TestRequireRolePolicy_NilCheckerSkipsGate(t *testing.T) {
-	// nil checker は test 経路 (= wire-time に provider 未注入) で発生しうる。
-	// gate を skip して通常成功するのが期待挙動 (auth は通っている前提)。
+// **checker 未配線は通さない (#3037)。**
+//
+// 以前は gate を skip していたが、それは「依存が欠けたら gate ごと消える」形で、
+// `RequireRolePolicy(nil, ...)` と書いた route が**静かに無防備**になる。
+// プラグインの `pluginRequest.roles` が「未配線なら常に false = 画面は出ても
+// API は通らない」と決めているのと同じ側に倒す。
+func TestRequireRolePolicy_NilCheckerDenies(t *testing.T) {
 	c, rec := newRolePolicyReq(t, &model.User{ID: "alice"})
 	called := false
 	handler := RequireRolePolicy(nil, "canSearchNotes")(func(c echo.Context) error {
@@ -108,8 +112,8 @@ func TestRequireRolePolicy_NilCheckerSkipsGate(t *testing.T) {
 	})
 
 	require.NoError(t, handler(c))
-	assert.Equal(t, http.StatusOK, rec.Code, "checker 未配線は gate skip")
-	assert.True(t, called)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "checker 未配線で gate が消えている")
+	assert.False(t, called, "handler まで到達している")
 }
 
 func TestRequireRolePolicy_DifferentPolicyKey(t *testing.T) {
@@ -176,8 +180,8 @@ func TestRequireRolePolicyPublic_AuthedUser(t *testing.T) {
 	assert.Equal(t, http.StatusOK, rec.Code)
 }
 
-// checker 未配線時は gate skip。
-func TestRequireRolePolicyPublic_NilCheckerSkips(t *testing.T) {
+// checker 未配線は通さない (認証版と同じ理由)。
+func TestRequireRolePolicyPublic_NilCheckerDenies(t *testing.T) {
 	c, rec := newRolePolicyReq(t, nil)
 	called := false
 	handler := RequireRolePolicyPublic(nil, "canSearchUsers")(func(c echo.Context) error {
@@ -185,8 +189,8 @@ func TestRequireRolePolicyPublic_NilCheckerSkips(t *testing.T) {
 		return c.String(http.StatusOK, "ok")
 	})
 	require.NoError(t, handler(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.True(t, called)
+	assert.Equal(t, http.StatusForbidden, rec.Code, "checker 未配線で gate が消えている")
+	assert.False(t, called, "handler まで到達している")
 }
 
 // --- #1796: chatAvailability gate ---

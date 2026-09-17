@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -46,11 +47,18 @@ func RequireRolePolicy(checker RolePolicyChecker, policyKey string) echo.Middlew
 					},
 				})
 			}
-			// checker 未配線 (= 旧挙動 / test 経路) では gate を skip する。
-			// 本番経路では router.setupRoutes で core/role.Service を必ず注入する
-			// ので nil 経路は通らない。
+			// **checker 未配線は通さない (#3037)。** 以前は skip していたが、
+			// それは「依存が欠けたら gate ごと消える」形で、
+			// `RequireRolePolicy(nil, ...)` と書いた route が**静かに無防備**に
+			// なる。プラグインの `pluginRequest.roles` が「未配線なら常に
+			// false = 画面は出ても API は通らない」と決めているのと同じ側に倒す。
+			//
+			// **Error で記録する。** 配線漏れはサーバー側の不具合なので、
+			// 403 だけ返して黙ると誰も気付けない。
 			if checker == nil {
-				return next(c)
+				slog.Error("middleware: role policy checker is not wired; denying",
+					"policy", policyKey, "path", c.Request().URL.Path)
+				return c.JSON(http.StatusForbidden, apierr.RolePermissionDenied())
 			}
 			if !checker.HasRolePolicy(user.ID, policyKey) {
 				return c.JSON(http.StatusForbidden, apierr.RolePermissionDenied())
@@ -68,8 +76,11 @@ func RequireRolePolicy(checker RolePolicyChecker, policyKey string) echo.Middlew
 func RequireRolePolicyPublic(checker RolePolicyChecker, policyKey string) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
+			// 未配線は通さない (`RequireRolePolicy` と同じ理由)。
 			if checker == nil {
-				return next(c)
+				slog.Error("middleware: role policy checker is not wired; denying",
+					"policy", policyKey, "path", c.Request().URL.Path)
+				return c.JSON(http.StatusForbidden, apierr.RolePermissionDenied())
 			}
 			uid := ""
 			if u := GetUser(c); u != nil {
