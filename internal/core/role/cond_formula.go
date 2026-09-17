@@ -228,10 +228,10 @@ type condSatisfiability struct {
 
 // condLeafSatisfiability is the table for every non-composite type.
 var condLeafSatisfiability = map[CondFormulaType]condSatisfiability{
-	// 登録するだけで満たせる。古いアカウントは用意できない。
-	CondTypeIsLocal:         {positive: true, negative: false},
-	CondTypeCreatedLessThan: {positive: true, negative: false},
-	CondTypeCreatedMoreThan: {positive: false, negative: true},
+	// 登録するだけで満たせる。
+	CondTypeIsLocal: {positive: true, negative: false},
+	// `createdLessThan` / `createdMoreThan` は閾値で変わるので
+	// `condLeafWithThreshold` が別に判定する (この表には置かない)。
 	// リモート利用者はこのインスタンスにサインインできないので、ロールの
 	// 権限を API で使えない。逆に「リモートでない」は登録すれば満たせる。
 	CondTypeIsRemote: {positive: false, negative: true},
@@ -278,9 +278,14 @@ func CondDependsOnUserControlledValue(f CondFormula) bool {
 func condSatisfiable(f CondFormula, negated bool) bool {
 	switch f.Type {
 	case CondTypeNot:
-		// **中身が無い `not` は `not(false)` = 恒真。**
+		// **中身が無い `not` は恒偽 (#3037 レビュー 3 周目で訂正)。**
+		// `evalCondAt` は `formula.Value == nil` に **false** を返すので、
+		// `not(nil)` は `not(false)` ではなく定数 false。2 周目は恒真だと
+		// 書いて `!negated` を返しており、極性が逆だった — そのせいで
+		// **`not(not())` という本物の恒真式が guard を素通り**していた
+		// (二重否定で符号が戻り、全アカウントに一致する)。
 		if f.Value == nil {
-			return !negated
+			return negated
 		}
 		return condSatisfiable(*f.Value, !negated)
 	case CondTypeAnd:
@@ -298,6 +303,12 @@ func condSatisfiable(f CondFormula, negated bool) bool {
 		}
 		// 肯定の `or` はどれか 1 つ。否定の下では `and(not ...)` になる。
 		return foldOperands(f.Values, negated, !negated)
+	}
+	if sat, ok := condLeafWithThreshold(f); ok {
+		if negated {
+			return sat.negative
+		}
+		return sat.positive
 	}
 	sat, known := condLeafSatisfiability[f.Type]
 	if !known {
@@ -328,6 +339,42 @@ func foldOperands(values []CondFormula, negated, anyWins bool) bool {
 		}
 	}
 	return true
+}
+
+// deliberateAgeWindow is how old an account must be required to be before
+// `createdMoreThan` counts as a deliberate trust signal rather than a footgun.
+//
+// **待てば満たせるので、閾値を見ないと判定できない (#3037 レビュー 3 周目)。**
+// 2 周目は `createdMoreThan` を一律「攻撃者は用意できない」に置いたが、
+// `evalCondAt` は `t.Before(now - sec)` なので **`sec` が小さいと全アカウントに
+// 一致する** — `sec=0` なら登録した直後の利用者まで含む。管理画面の既定値は
+// `86400` (1 日) で、`and(isLocal, createdMoreThan 86400)` + `isAdministrator`
+// は「登録して 1 日経ったローカル利用者は全員管理者」になる。
+//
+// **これは判断であって境界ではない。** 攻撃者はいくらでも待てるので、どの
+// 閾値を置いても「待って取る」は止まらない。ここで止めたいのは
+// 「条件を書いたつもりが実質全員に配っていた」という**取り違え**のほうで、
+// 30 日は「運営者が長期の信頼として意図的に置いた」と読める下限として選んだ。
+// 逆に言うと、30 日以上を指定した設定は運営者の明示的な判断として通す
+// (doc に書いた「1 年以上前のローカル利用者はモデレーター」がこれ)。
+const deliberateAgeWindow = 30 * 24 * 60 * 60
+
+// condLeafWithThreshold answers for the leaves whose satisfiability depends on
+// their threshold, reporting ok=false for every other type.
+func condLeafWithThreshold(f CondFormula) (condSatisfiability, bool) {
+	switch f.Type {
+	case CondTypeCreatedLessThan:
+		// 「作られて `sec` 未満」。新規アカウントは `sec > 0` なら満たす。
+		// 否定 (`sec` 以上前に作られた) は古いアカウントが要る。
+		return condSatisfiability{positive: f.Sec > 0, negative: false}, true
+	case CondTypeCreatedMoreThan:
+		// 「作られて `sec` より後」。`sec` が短ければ待つまでもなく満たす。
+		return condSatisfiability{
+			positive: f.Sec < deliberateAgeWindow,
+			negative: true,
+		}, true
+	}
+	return condSatisfiability{}, false
 }
 
 // CondReferencedRoleIDs collects every roleId the formula keys off.

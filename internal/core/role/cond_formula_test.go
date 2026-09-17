@@ -428,7 +428,15 @@ func TestCondDependsOnUserControlledValue(t *testing.T) {
 		// 攻撃者がアカウントを用意できない。
 		{"isRemote", `{"type":"isRemote"}`, false},
 		{"isSuspended", `{"type":"isSuspended"}`, false},
-		{"createdMoreThan", `{"type":"createdMoreThan","sec":3600}`, false},
+		// **`createdMoreThan` は閾値で変わる (#3037 レビュー 3 周目)。**
+		// `evalCondAt` は `t.Before(now - sec)` なので、短い `sec` は
+		// 実質全アカウントに一致する。管理画面の既定値は 86400 (1 日)。
+		{"createdMoreThan 1時間", `{"type":"createdMoreThan","sec":3600}`, true},
+		{"createdMoreThan 1日 (管理画面の既定)", `{"type":"createdMoreThan","sec":86400}`, true},
+		{"createdMoreThan 0秒", `{"type":"createdMoreThan","sec":0}`, true},
+		// 30 日以上は運営者の明示的な判断として通す。
+		{"createdMoreThan 1年", `{"type":"createdMoreThan","sec":31536000}`, false},
+		{"createdLessThan 0秒", `{"type":"createdLessThan","sec":0}`, false},
 		{"roleAssignedTo", `{"type":"roleAssignedTo","roleId":"r1"}`, false},
 		// **否定は向きが入れ替わる。** 新規アカウントは「1 年以上前に
 		// 作られて**いない**」「凍結されて**いない**」「そのロールを持って
@@ -441,7 +449,15 @@ func TestCondDependsOnUserControlledValue(t *testing.T) {
 		{"空の and", `{"type":"and","values":[]}`, true},
 		{"空の or を否定", `{"type":"not","value":{"type":"or","values":[]}}`, true},
 		{"未知の type を否定", `{"type":"not","value":{"type":"somethingNew"}}`, true},
-		{"中身の無い not", `{"type":"not"}`, true},
+		// **中身の無い `not` は恒偽 (レビュー 3 周目で訂正)。**
+		// `evalCondAt` は nil の operand に false を返すので `not(nil)` は
+		// 定数 false = 誰にも一致しない。2 周目は恒真だと決め打って極性を
+		// 逆に持っており、**二重否定で符号が戻って `not(not())` が
+		// 素通り**していた。
+		{"中身の無い not", `{"type":"not"}`, false},
+		{"中身の無い not の否定 (恒真)", `{"type":"not","value":{"type":"not"}}`, true},
+		{"and(not) の否定 (恒真)", `{"type":"not","value":{"type":"and","values":[{"type":"not"}]}}`, true},
+		{"or(not) の否定 (恒真)", `{"type":"not","value":{"type":"or","values":[{"type":"not"}]}}`, true},
 		// 空の `or` そのものは誰にも一致しない。
 		{"空の or", `{"type":"or","values":[]}`, false},
 		// **入れ子も見る。** and / or / not のどこかにあれば同じこと。
@@ -452,10 +468,13 @@ func TestCondDependsOnUserControlledValue(t *testing.T) {
 		// **`and` は全部を満たす必要がある。** `isLocal` は登録すれば満たせるが
 		// 「1 年以上前に作られた」は用意できないので、この組み合わせは安全。
 		// 「どこかに危ない葉があるか」で見るとこの正当な設定を弾く。
-		{"入れ子だが全部安全", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":1}]}`, false},
+		{"入れ子だが全部安全", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":31536000}]}`, false},
+		// **短い `sec` と組んでも安全にはならない。** 「登録して 1 秒経った
+		// ローカル利用者は全員」= 空の `and` と同じ恒真式。
+		{"and だが sec が短い", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":1}]}`, true},
 		// **`or` はどれか 1 つで足りる。**
-		{"or に危ない枝が 1 つ", `{"type":"or","values":[{"type":"createdMoreThan","sec":1},{"type":"isCat"}]}`, true},
-		{"or が全部安全", `{"type":"or","values":[{"type":"createdMoreThan","sec":1},{"type":"isRemote"}]}`, false},
+		{"or に危ない枝が 1 つ", `{"type":"or","values":[{"type":"createdMoreThan","sec":31536000},{"type":"isCat"}]}`, true},
+		{"or が全部安全", `{"type":"or","values":[{"type":"createdMoreThan","sec":31536000},{"type":"isRemote"}]}`, false},
 		// **知らない型は判定できないので拒否側に倒す。** 評価は false に
 		// 倒れるが、`not` で包まれると恒真式になる。
 		{"未知の type", `{"type":"somethingNew"}`, true},
@@ -464,6 +483,38 @@ func TestCondDependsOnUserControlledValue(t *testing.T) {
 			var f CondFormula
 			require.NoError(t, json.Unmarshal([]byte(tt.raw), &f))
 			assert.Equal(t, tt.want, CondDependsOnUserControlledValue(f))
+		})
+	}
+}
+
+// **参照の収集は `not` と入れ子の中まで見る (#3037 レビュー 3 周目)。**
+//
+// `RoleGrantsPrivilegeIndirectly` がこの結果で「そのロールを配ると特権が付くか」
+// を判定する。`not(roleAssignedTo staff)` を持つ特権ロールでは、`staff` を
+// **外した**ときにメンバーが特権を得るので、unassign 側の保護にこの枝が要る。
+// 2 周目はこの再帰を書いたのにテストを置いておらず、**丸ごと消しても
+// `internal/core/role` と `internal/api/admin` が緑のまま**だった。
+func TestCondReferencedRoleIDs(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{"単体", `{"type":"roleAssignedTo","roleId":"r1"}`, []string{"r1"}},
+		{"not の中", `{"type":"not","value":{"type":"roleAssignedTo","roleId":"r1"}}`, []string{"r1"}},
+		{"and の中", `{"type":"and","values":[{"type":"isCat"},{"type":"roleAssignedTo","roleId":"r1"}]}`, []string{"r1"}},
+		{
+			"深い入れ子で複数",
+			`{"type":"or","values":[{"type":"not","value":{"type":"roleAssignedTo","roleId":"a"}},{"type":"and","values":[{"type":"roleAssignedTo","roleId":"b"}]}]}`,
+			[]string{"a", "b"},
+		},
+		{"roleId が空なら拾わない", `{"type":"roleAssignedTo"}`, nil},
+		{"参照が無い", `{"type":"isCat"}`, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var f CondFormula
+			require.NoError(t, json.Unmarshal([]byte(tt.raw), &f))
+			assert.Equal(t, tt.want, CondReferencedRoleIDs(f))
 		})
 	}
 }
