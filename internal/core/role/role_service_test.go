@@ -2170,3 +2170,50 @@ func TestGetUserPolicies_EmojiApplicationQuotaAggregation(t *testing.T) {
 		})
 	}
 }
+
+// **`rootUserId` を設定したら、それが唯一の答え (#3037)。**
+//
+// 以前は「どちらかが一致すれば root」だったので、`user.isRoot` が立った
+// 利用者を降ろす手段がどこにも無かった (mk-go には `isRoot` を書く経路しか
+// 無く、admin API にも false へ戻す口が無い)。DB を直接触るしかないうえ、
+// 管理画面にも出ないので「元の運営者が永久に管理者のまま」に気付けない。
+func TestIsAdministrator_RootUserIDOverridesStaleIsRoot(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	newRoot := "carol"
+	metaRepo.Meta = &model.Meta{ID: "x", RootUserID: &newRoot}
+	userRepo := testutil.NewMockUserRepository()
+	// 引き継ぎ前の運営者。フラグは立ったまま。
+	require.NoError(t, userRepo.Create(&model.User{ID: "alice", Username: "alice", IsRoot: true}))
+	require.NoError(t, userRepo.Create(&model.User{ID: "carol", Username: "carol"}))
+	svc.SetUserRepo(userRepo)
+
+	assert.False(t, svc.IsAdministrator("alice"), "降ろしたはずの root が管理者のまま")
+	assert.True(t, svc.IsAdministrator("carol"), "設定した root が管理者になっていない")
+}
+
+// **空文字は「未設定」として扱う。** 列は nullable だが、空文字が入った DB を
+// 「root は誰もいない」ではなく「誰とも一致しない」と読むと、drop-in の
+// fallback が効かなくなる。
+func TestIsAdministrator_EmptyRootUserIDFallsBackToIsRoot(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	empty := ""
+	metaRepo.Meta = &model.Meta{ID: "x", RootUserID: &empty}
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "alice", Username: "alice", IsRoot: true}))
+	svc.SetUserRepo(userRepo)
+
+	assert.True(t, svc.IsAdministrator("alice"))
+}
+
+// **meta を読めないときは従来どおり `isRoot` を見る。** 「設定されているか」が
+// 分からない状態で無視すると、DB の瞬断のあいだ本物の root が管理画面から
+// 締め出される。
+func TestIsAdministrator_MetaUnavailableFallsBackToIsRoot(t *testing.T) {
+	svc, _, _, metaRepo := newTestService(t)
+	metaRepo.Meta = nil // Fetch がエラーになる
+	userRepo := testutil.NewMockUserRepository()
+	require.NoError(t, userRepo.Create(&model.User{ID: "alice", Username: "alice", IsRoot: true}))
+	svc.SetUserRepo(userRepo)
+
+	assert.True(t, svc.IsAdministrator("alice"))
+}

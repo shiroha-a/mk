@@ -548,9 +548,28 @@ func (s *Service) evaluateConditionalRoles(userID string, assigned []*model.Role
 //
 // userRepo 未配線でも (1) のみで動作するので既存テスト互換性は保たれる。
 func (s *Service) isRootUser(userID string) bool {
-	if meta, err := s.metaRepo.Fetch(); err == nil && meta.RootUserID != nil && *meta.RootUserID == userID {
-		return true
+	// **`rootUserId` が設定されていれば、それが唯一の答え (#3037)。**
+	//
+	// 以前は「どちらかが一致すれば root」だったので、`user.isRoot` が立った
+	// 利用者を**降ろす手段がどこにも無かった** — mk-go には `isRoot` を書く
+	// 経路 (初回セットアップ) しか無く、admin API にも `false` に戻す口は
+	// 無い。DB を直接触るしかないうえ、管理画面にも出ないので「元の運営者が
+	// 永久に管理者のまま」という状態に気付けない。
+	//
+	// `rootUserId` を設定した時点で運営者は「root はこの利用者だ」と明示的に
+	// 宣言しているので、そこに書かれていない `isRoot` は過去の遺物として
+	// 無視してよい。これで `admin/update-meta` の `rootUserId` が引き継ぎと
+	// 剥奪の両方を担う。
+	//
+	// **未設定 (TS から引き継いだ DB) のときだけ `isRoot` に落ちる** ので、
+	// #785 の drop-in 互換はそのまま。
+	meta, err := s.metaRepo.Fetch()
+	if err == nil && meta != nil && meta.RootUserID != nil && *meta.RootUserID != "" {
+		return *meta.RootUserID == userID
 	}
+	// **meta を読めないときは従来どおり `isRoot` を見る。** 「設定されて
+	// いるか」が分からない状態で無視すると、DB の瞬断のあいだ本物の root が
+	// 管理画面から締め出される。
 	if s.userRepo != nil {
 		u, err := s.userRepo.FindByID(userID)
 		switch {
