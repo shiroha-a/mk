@@ -840,16 +840,20 @@ func TestDeleteAccount_RootProtectionUsesMeta(t *testing.T) {
 		assert.True(t, repo.Users["u1"].IsDeleted)
 	})
 
-	// meta が読めなければ守る側に倒す。DB 障害を「root ではない」と解釈して
-	// 不可逆な削除を通すわけにいかない。
-	t.Run("meta が読めなければ拒否", func(t *testing.T) {
+	// **meta が読めなければ 500 (#3037)。**
+	//
+	// 削除は通さない (DB 障害を「root ではない」と解釈して不可逆な操作を
+	// 通すわけにいかない) が、**`ACCESS_DENIED` で返すのも事実ではない** —
+	// 「root だから断った」のではなく「判定できなかった」。4xx に丸めると
+	// 本人の退会が自分のせいに見えるうえ、監視にも 4xx しか出ない (#2792)。
+	t.Run("meta が読めなければ 500", func(t *testing.T) {
 		h, repo, metaRepo := setup(t, nil)
 		metaRepo.Meta = nil // Fetch が error を返す
 		user := setupUserWithPassword(repo, "u1", "pass")
 
 		rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
-		assert.Equal(t, http.StatusBadRequest, rec.Code)
-		assert.False(t, repo.Users["u1"].IsDeleted)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+		assert.False(t, repo.Users["u1"].IsDeleted, "判定できないまま削除している")
 	})
 
 	// 従来の `isRoot` 判定も残っていること (drop-in で TS から引き継いだ列)。

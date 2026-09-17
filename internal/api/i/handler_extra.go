@@ -3,6 +3,7 @@ package i
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -172,7 +173,15 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// #2230: root / system アカウントの自己削除は連合・instance を壊すため拒否する
 	// (admin/delete-account の isProtectedAccount と同じ guard、upstream DeleteAccountService の
 	// rootUserId / system account ガード相当)。cascade を走らせる前に弾く。
-	if h.isProtectedSelfDelete(u) {
+	protected, perr := h.isProtectedSelfDelete(u)
+	if perr != nil {
+		// **DB 障害を 4xx に丸めない (#2792)。** 「root かどうか判定できない」を
+		// `ACCESS_DENIED` で返すと、本人の退会が自分のせいに見えるうえ、
+		// 監視にも 4xx しか出ない。
+		slog.Error("i/delete-account: cannot determine root protection", "err", perr)
+		return apierr.JSONInternalError(c)
+	}
+	if protected {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
@@ -244,9 +253,9 @@ func (h *Handler) SetAccountDeletionFederationHook(hook AccountDeletionFederatio
 // system account that must never be deleted (#2230). Mirrors admin's
 // isProtectedAccount: IsRoot, or a local (host==nil) account whose username
 // contains '.' (systemaccount uses `<kind>.actor`).
-func (h *Handler) isProtectedSelfDelete(u *model.User) bool {
+func (h *Handler) isProtectedSelfDelete(u *model.User) (bool, error) {
 	if u == nil {
-		return false
+		return false, nil
 	}
 	// **root の権威ソースは `meta.rootUserId`。** `user.isRoot` は upstream が
 	// system_account 移行で DROP 済みの残存列で、mk-go は drop-in のために
@@ -264,21 +273,28 @@ func (h *Handler) isProtectedSelfDelete(u *model.User) bool {
 	// `rootUserId` が NULL になり、今度は `admin/accounts/create` の初回
 	// セットアップ窓が開く側に倒れる。
 	//
-	// **meta が読めなければ守る側に倒す。** DB 障害を「root ではない」と
-	// 解釈して不可逆な削除を通すわけにいかない。
+	// **meta が読めなければ error を返す。** DB 障害を「root ではない」と
+	// 解釈して不可逆な削除を通すわけにいかないが、「root だ」と解釈して
+	// `ACCESS_DENIED` を返すのも違う — どちらも事実ではない。呼び出し側が
+	// 500 に倒す (#2792)。
+	//
+	// **`admin/accounts.go` の `isProtectedAccount` とは倒れる向きが違う。**
+	// あちらは fail-open で、同じ原因 (meta が読めない) で片方は守りすぎ、
+	// 片方は守り損ねる。こちらは不可逆な削除なので、判定できないことを
+	// 呼び出し側へ伝える形にしてある。
 	if h.metaRepo != nil {
 		meta, err := h.metaRepo.Fetch()
 		if err != nil {
-			return true
+			return false, fmt.Errorf("fetch meta: %w", err)
 		}
 		if meta != nil && meta.RootUserID != nil && *meta.RootUserID == u.ID {
-			return true
+			return true, nil
 		}
 	}
 	if u.IsRoot {
-		return true
+		return true, nil
 	}
-	return u.Host == nil && strings.Contains(u.Username, ".")
+	return u.Host == nil && strings.Contains(u.Username, "."), nil
 }
 
 // Favorites handles POST /api/i/favorites.
