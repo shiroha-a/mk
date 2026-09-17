@@ -284,9 +284,27 @@ func TestChatRepository_Reactions(t *testing.T) {
 	assert.Len(t, found.Reactions, 2)
 
 	// RemoveReaction
-	require.NoError(t, repo.RemoveReaction(msg.ID, user1.ID+"/👍"))
+	removed, err := repo.RemoveReaction(msg.ID, user1.ID+"/👍")
+	require.NoError(t, err)
+	assert.True(t, removed, "実在するリアクションを消せていない")
 	found, _ = repo.FindMessageByID(msg.ID)
 	assert.Len(t, found.Reactions, 1)
+
+	// **持っていないものを消そうとしたら false。** 呼び出し側はこれを見て
+	// stream への publish を決めるので (#3037)、常に true を返すと
+	// 非参加者によるイベント注入が塞がらない。
+	removed, err = repo.RemoveReaction(msg.ID, user1.ID+"/👍")
+	require.NoError(t, err)
+	assert.False(t, removed, "既に無いリアクションを消したと報告している")
+
+	removed, err = repo.RemoveReaction(msg.ID, "someone-else/🎉")
+	require.NoError(t, err)
+	assert.False(t, removed, "他人のリアクションを消したと報告している")
+
+	// 存在しないメッセージ。
+	removed, err = repo.RemoveReaction("no-such-message", user2.ID+"/❤️")
+	require.NoError(t, err)
+	assert.False(t, removed)
 }
 
 func TestChatRepository_DeliveryStatus(t *testing.T) {

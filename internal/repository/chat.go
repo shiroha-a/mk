@@ -112,7 +112,13 @@ type ChatRepository interface {
 
 	// Reactions
 	AddReaction(messageID, reaction string) error
-	RemoveReaction(messageID, reaction string) error
+	// RemoveReaction removes one reaction and reports whether a row changed.
+	//
+	// **消えたかどうかを返すのが要点 (#3037)。** 呼び出し側はこれを見て
+	// stream への publish を決める。無条件に publish すると、**会話の参加者で
+	// ない利用者**が任意の messageId に対して `unreact` を投げるだけで、
+	// その部屋 / DM のストリームにイベントを注入できる。
+	RemoveReaction(messageID, reaction string) (bool, error)
 }
 
 type chatRepository struct {
@@ -732,7 +738,14 @@ func (r *chatRepository) AddReaction(messageID, reaction string) error {
 		reaction, messageID, reaction).Error
 }
 
-func (r *chatRepository) RemoveReaction(messageID, reaction string) error {
-	return r.db.Exec(`UPDATE "chat_message" SET "reactions" = array_remove("reactions", ?) WHERE "id" = ?`,
-		reaction, messageID).Error
+func (r *chatRepository) RemoveReaction(messageID, reaction string) (bool, error) {
+	// **実際に持っているときだけ UPDATE する。** `array_remove` は無い要素を
+	// 渡しても成功するので、条件を付けないと `RowsAffected` が常に 1 になり
+	// 「消えたか」を判定できない (`AddReaction` の重複ガードと対称)。
+	res := r.db.Exec(`UPDATE "chat_message" SET "reactions" = array_remove("reactions", ?) WHERE "id" = ? AND "reactions" @> ARRAY[?]::varchar[]`,
+		reaction, messageID, reaction)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected > 0, nil
 }

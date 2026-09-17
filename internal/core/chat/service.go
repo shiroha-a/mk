@@ -1744,11 +1744,29 @@ func (s *Service) Unreact(ctx context.Context, messageID string, reactor *model.
 		}
 		return ErrNotFound
 	}
-	if err := s.repo.RemoveReaction(messageID, reactor.ID+"/"+reaction); err != nil {
+	removed, err := s.repo.RemoveReaction(messageID, reactor.ID+"/"+reaction)
+	if err != nil {
 		return fmt.Errorf("remove reaction: %w", err)
 	}
-	// #2106 N4: stream event も正規化済 reaction で publish し React と対称にする。
-	s.publishReaction(ctx, msg, EventUnreact, reactor, reaction)
+	// **実際に消えたときだけ publish する (#3037)。**
+	//
+	// `React` は参加者かどうかを 3 通り (自分宛の DM / room の member /
+	// 自分のメッセージでない) で検査するのに、こちらは何も見ていなかった。
+	// 無条件に publish すると、**会話と無関係な利用者**が任意の messageId を
+	// 投げるだけでその部屋 / DM のストリームにイベントを注入でき、しかも
+	// `reaction` は利用者が決める文字列なのでそのまま相手の画面へ届く。
+	// 400 / 204 の違いからメッセージの存在も分かる。
+	//
+	// **権限検査を足すのではなく publish の条件を絞る。** 消せるのは
+	// `<自分の ID>/<reaction>` だけなので、実際に消えたということは
+	// **自分が過去にそのリアクションを付けられた = 参加者だった**という
+	// こと。upstream (`ChatService.unreact`) も「権限チェックは不要」と
+	// 書いたうえで `TODO: 実際に削除が行われたときのみイベントを発行する`
+	// を残しており、塞ぎ方としてはそちらに沿う。
+	if removed {
+		// #2106 N4: stream event も正規化済 reaction で publish し React と対称にする。
+		s.publishReaction(ctx, msg, EventUnreact, reactor, reaction)
+	}
 	return nil
 }
 

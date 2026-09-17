@@ -635,7 +635,19 @@ func (m *MockChatRepository) AddReaction(_, key string) error {
 	return nil
 }
 
-func (m *MockChatRepository) RemoveReaction(_, key string) error {
+func (m *MockChatRepository) RemoveReaction(messageID, key string) (bool, error) {
 	m.RemovedReactions = append(m.RemovedReactions, key)
-	return nil
+	// **実データに合わせて「消えたか」を返す。** 常に true を返すと、
+	// publish の条件 (#3037) を検査するテストが空虚になる。
+	msg := m.Messages[messageID]
+	if msg == nil {
+		return false, nil
+	}
+	for i, r := range msg.Reactions {
+		if r == key {
+			msg.Reactions = append(append([]string{}, msg.Reactions[:i]...), msg.Reactions[i+1:]...)
+			return true, nil
+		}
+	}
+	return false, nil
 }

@@ -687,10 +687,71 @@ func TestReact_RoomPublishesReact(t *testing.T) {
 func TestUnreact_PublishesUnreact(t *testing.T) {
 	svc, repo, pub := newSvc(t)
 	to := "bob"
-	repo.Messages["m1"] = &model.ChatMessage{ID: "m1", FromUserID: "carol", ToUserID: &to}
-	require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: "alice"}, "👍"))
+	repo.Messages["m1"] = &model.ChatMessage{
+		ID: "m1", FromUserID: "carol", ToUserID: &to,
+		Reactions: []string{"bob/👍"},
+	}
+	require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: "bob"}, "👍"))
 	require.Len(t, pub.userCalls, 1)
 	assert.Equal(t, corechat.EventUnreact, pub.userCalls[0].eventType)
+}
+
+// **消えていないなら publish しない (#3037)。**
+//
+// 以前は無条件に publish していたので、**会話と無関係な利用者**が任意の
+// messageId を投げるだけでその DM / 部屋のストリームにイベントを注入でき、
+// `reaction` は利用者が決める文字列なのでそのまま相手の画面へ届いた。
+// `React` は参加者かどうかを 3 通りで検査するのに、こちらは何も見ていなかった。
+func TestUnreact_NonParticipantCannotInjectEvent(t *testing.T) {
+	to := "bob"
+
+	for _, tt := range []struct {
+		name      string
+		reactions []string
+		actor     string
+		reaction  string
+	}{
+		{"会話と無関係な利用者", []string{"bob/👍"}, "mallory", "👍"},
+		// 参加者でも、付けていないリアクションは消えないので publish しない。
+		{"付けていないリアクション", []string{"bob/👍"}, "bob", "🎉"},
+		{"リアクションが 1 つも無い", nil, "bob", "👍"},
+		// **任意の文字列を流し込めない。** 消せるのは実際に保存されている
+		// `<自分の ID>/<reaction>` だけ。
+		{"任意の文字列", []string{"bob/👍"}, "mallory", "<script>alert(1)</script>"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, repo, pub := newSvc(t)
+			repo.Messages["m1"] = &model.ChatMessage{
+				ID: "m1", FromUserID: "carol", ToUserID: &to,
+				Reactions: tt.reactions,
+			}
+
+			require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: tt.actor}, tt.reaction))
+			assert.Empty(t, pub.userCalls, "何も消えていないのにイベントを流している")
+			assert.Empty(t, pub.roomCalls)
+		})
+	}
+}
+
+// room 側も同じ。
+func TestUnreact_RoomPublishesOnlyWhenRemoved(t *testing.T) {
+	room := "r1"
+
+	svc, repo, pub := newSvc(t)
+	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
+	repo.Messages["m1"] = &model.ChatMessage{
+		ID: "m1", FromUserID: "carol", ToRoomID: &room,
+		Reactions: []string{"alice/👍"},
+	}
+
+	// 非メンバーが投げても何も起きない。
+	require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: "mallory"}, "👍"))
+	assert.Empty(t, pub.roomCalls)
+
+	// 自分が付けたものは消せて、そのときだけ publish される。
+	require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: "alice"}, "👍"))
+	require.Len(t, pub.roomCalls, 1)
+	assert.Equal(t, corechat.EventUnreact, pub.roomCalls[0].eventType)
 }
 
 func TestReact_MessageNotFound(t *testing.T) {
