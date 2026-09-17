@@ -17,6 +17,27 @@ import (
 // videoThumbnailGenerator is configured or the upstream call failed.
 var ErrVideoThumbnailUnavailable = errors.New("mediaproxy: video thumbnail unavailable")
 
+// ErrVideoThumbnailTransient marks the subset of generator failures that are
+// expected to fix themselves (#3035).
+//
+// **恒久的な失敗と分ける理由はキャッシュ時間。** 生成に失敗したときは
+// ダミー画像を 200 で返すので、handler は成功として
+// `max-age=31536000, immutable` を張る。generator コンテナが数秒再起動した
+// だけでも、その間に見られた動画のサムネイルが **1 年・再検証なし**で空
+// PNG に固定され、`immutable` なのでリロードでも直らない。
+//
+// ここに入れるのは「相手が戻れば直る」ものだけ — 接続拒否 / タイムアウト等の
+// transport エラー、転送断、そして `transientStatus` が真を返す status
+// (5xx と 408 / 425 / 429)。**4xx を一律で恒久扱いにはしない** — 429 は
+// 文字どおり「後で来い」なので、詳細は `transientStatus` の GoDoc を見ること。
+//
+// それ以外 (その他の非 2xx / 非画像の応答 / サイズ超過) は何度引いても同じ
+// なので恒久側へ。ただし**恒久側も既定の 1 年 immutable ではない** —
+// `permanentDummyCacheControl` を見ること。
+//
+// `ErrVideoThumbnailUnavailable` も同時に満たすので、既存の判定は壊れない。
+var ErrVideoThumbnailTransient = errors.New("transient")
+
 // videoThumbnailTimeout caps the round-trip to the external thumbnail
 // generator. Generators normally finish in well under a second; longer
 // than this we suspect a stalled decoder or unreachable service.
@@ -176,21 +197,57 @@ func (s *Service) fetchVideoThumbnailGET(ctx context.Context, sourceURL string) 
 	return s.doVideoThumbnailRequest(req)
 }
 
+// transientStatus reports whether a generator response status is expected to
+// fix itself (#3035).
+//
+// **5xx だけでは足りない。** 4xx はほとんどが「この動画からは作れない」
+// (415 / 422 など) で恒久的だが、以下は文字どおり「後で来い」なので
+// 恒久扱いにすると 1 年 immutable の空 PNG に固定してしまう:
+//
+//   - 408 Request Timeout — POST モードは最大 32MiB を multipart で送るので、
+//     generator の前段 nginx の `client_body_timeout` に当たると出る
+//   - 425 Too Early
+//   - 429 Too Many Requests — RFC 6585。generator を nginx の
+//     `limit_req_status 429` や Cloudflare の背後に置けば普通に出る。
+//     **恒久であることがありえない唯一の 4xx**
+//
+// **集合は upstream の `StatusError.isRetryable` の上位集合にしてある** —
+// あちらは `!isClientError || statusCode === 429` (= 5xx + 429) なので、
+// それに 408 / 425 を足した形。
+//
+// 5xx は一律で一時扱いにする。501 Not Implemented だけは RFC 9110 が
+// heuristically cacheable に分類しており恒久寄りだが、**短い側に倒れる**
+// (5 分ごとに引き直すだけ) ので分けていない。
+func transientStatus(code int) bool {
+	switch code {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests:
+		return true
+	}
+	return code >= 500
+}
+
 // doVideoThumbnailRequest executes the prepared request and validates the
 // response shape (status / size cap / content type). Shared between POST
 // and GET wires.
 func (s *Service) doVideoThumbnailRequest(req *http.Request) ([]byte, string, error) {
 	resp, err := s.videoThumbClient.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %v", ErrVideoThumbnailUnavailable, err)
+		// transport の失敗は generator が戻れば直る (#3035)。
+		// **`%w` で包む。** 元の原因を落とすと、利用者の離脱
+		// (`context.Canceled`) と generator 障害が区別できなくなる。
+		return nil, "", fmt.Errorf("%w: %w: %w", ErrVideoThumbnailUnavailable, ErrVideoThumbnailTransient, err)
 	}
 	defer resp.Body.Close()
+	if transientStatus(resp.StatusCode) {
+		return nil, "", fmt.Errorf("%w: %w: status %d", ErrVideoThumbnailUnavailable, ErrVideoThumbnailTransient, resp.StatusCode)
+	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, "", fmt.Errorf("%w: status %d", ErrVideoThumbnailUnavailable, resp.StatusCode)
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownload+1))
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: read body: %v", ErrVideoThumbnailUnavailable, err)
+		// 転送が途中で切れたのも generator 側の一時障害 (#3035)。
+		return nil, "", fmt.Errorf("%w: %w: read body: %w", ErrVideoThumbnailUnavailable, ErrVideoThumbnailTransient, err)
 	}
 	if int64(len(data)) > maxDownload {
 		// Wrap so callers can match a single sentinel for any
