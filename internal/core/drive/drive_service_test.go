@@ -1911,6 +1911,39 @@ func TestUpload_RejectsImagesWhoseMetadataCannotBeStripped(t *testing.T) {
 		"メタデータを落とせない画像を受け取っている (原本が公開側に出る)")
 }
 
+// **拒否したファイルの実体を残さない (#3037 レビュー 3 周目)。**
+//
+// guard が `backend.Put` の後ろにあると、本体だけがストレージに残る。
+// `drive_file` 行は作られないので `UsageByUser` にも `DeleteOrphans`
+// (行ベース) にも乗らず、**恒久的にリークする** — 実測で拒否 1 回あたり
+// 34,603,050 バイトが残った。認証済みの利用者が何度でも叩ける。
+func TestUpload_RejectedImageLeavesNothingInStorage(t *testing.T) {
+	dir := t.TempDir()
+	storage := drive.NewLocalStorage(dir, "https://example.com/files")
+	svc, fileRepo := newSvcWithStorage(t, storage)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": 64},
+	}})
+
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: webpWithExif(33 << 20), Name: "x.webp",
+	})
+	require.ErrorIs(t, err, drive.ErrUndecodableImage)
+
+	assert.Empty(t, fileRepo.Files, "拒否したのに drive_file 行がある")
+	var left []string
+	require.NoError(t, filepath.Walk(dir, func(path string, info os.FileInfo, werr error) error {
+		if werr != nil {
+			return werr
+		}
+		if !info.IsDir() {
+			left = append(left, path)
+		}
+		return nil
+	}))
+	assert.Empty(t, left, "拒否したファイルの実体がストレージに残っている (恒久的にリークする)")
+}
+
 // **上限の内側なら従来どおり通る。** これが無いと「WebP を常に拒否する」
 // 実装でも上のテストが通る。
 func TestUpload_AcceptsImagesUnderTheDecoderSizeCap(t *testing.T) {
@@ -1948,4 +1981,61 @@ func TestUpload_AcceptsLargeImagesWithoutMetadata(t *testing.T) {
 	})
 
 	require.NotErrorIs(t, err, drive.ErrUndecodableImage, "落とすものが無い画像を弾いている")
+}
+
+// **AVIF は中身に関わらず拒否する (#3037 レビュー 3 周目)。**
+//
+// `hasStrippableMetadata` は AVIF に false を返す — 「AVIF は寸法に関わらず
+// webpublic を作る枝が別にある」ことが前提だが、**デコードできなければその枝も
+// 動かない**。AVIF の原本は Mastodon / MS Edge が表示できないので、通すと
+// 壊れた添付になる。2 周目はこの枝を足したのにテストを置いておらず、
+// **条件を消しても緑のままだった**。
+func TestUpload_RejectsOversizedAVIFEvenWithoutMetadata(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": 64},
+	}})
+
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: avifWithoutMetadata(33 << 20), Name: "x.avif",
+	})
+
+	require.ErrorIs(t, err, drive.ErrUndecodableImage,
+		"メタデータの無い巨大 AVIF を受け取っている (原本は Mastodon / Edge で表示できない)")
+}
+
+// **上限の内側の AVIF は通す。** これが無いと「AVIF を常に拒否する」実装でも
+// 上のテストが通る。
+func TestUpload_AcceptsAVIFUnderTheDecoderSizeCap(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": 64},
+	}})
+
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: avifWithoutMetadata(1 << 20), Name: "x.avif",
+	})
+
+	require.NotErrorIs(t, err, drive.ErrUndecodableImage, "上限の内側の AVIF を弾いている")
+}
+
+// avifWithoutMetadata builds an ISOBMFF container with the `avif` brand and no
+// EXIF/XMP box, padded to at least size bytes.
+func avifWithoutMetadata(size int) []byte {
+	pad := size
+	if pad < 64 {
+		pad = 64
+	}
+	b := make([]byte, 0, pad+32)
+	// ftyp box: size(4) + "ftyp" + major brand + minor version + compatible brand.
+	b = append(b, 0, 0, 0, 20)
+	b = append(b, "ftyp"...)
+	b = append(b, "avif"...)
+	b = append(b, 0, 0, 0, 0)
+	b = append(b, "avif"...)
+	// mdat box に嵩を持たせる (中身は読まれない)。
+	b = append(b, 0, 0, 0, 8)
+	b = append(b, "mdat"...)
+	b = append(b, make([]byte, pad)...)
+	return b
 }

@@ -744,6 +744,34 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	// PreStored (#2313) の場合も同じ backend を使う。分割アップロードは
 	// MultipartStorage を要求するので backend は必ず object storage 側であり、
 	// storedInternal は false になる。
+	// **メタデータを落とせない画像は受け取らない (#3037 レビュー 2 周目)。**
+	//
+	// 代替画像の生成は best-effort だが、`webpublic` が作られないと
+	// `GetPublicURL` が原本へ落ちるので、**EXIF の GPS がそのまま公開側へ出る**
+	// — この PR が `entity/drive.go` 側で塞いだ穴と同じもの。
+	// `SandboxedDecoderMaxBytes` は #3037 が新しく入れた上限なので、**それが
+	// 原因で落ちる入力だけ**を「作れないなら受け取らない」に倒す (元から
+	// デコードできない形式の扱いは変えない)。
+	//
+	// 条件に `hasStrippableMetadata` を入れてあるので、落とすものが無い画像は
+	// 従来どおり通る (その場合は原本を出しても漏れない)。
+	//
+	// **AVIF だけは別に見る。** `hasStrippableMetadata` は AVIF に false を
+	// 返す — 「AVIF は寸法に関わらず webpublic を作る枝が別にある」ことが
+	// 前提だが、**デコードできなければその枝も動かない**。AVIF の原本は
+	// Mastodon / MS Edge が表示できないので、通すと壊れた添付になる。
+	//
+	// **`backend.Put` より前に置く (#3037 レビュー 3 周目)。** 後ろに置くと
+	// 本体だけがストレージに残り、`drive_file` 行が無いので
+	// `UsageByUser` にも `DeleteOrphans` (行ベース) にも乗らない =
+	// **恒久的にリークする**。実測で拒否 1 回あたり 34,603,050 バイトが
+	// 残った。分割アップロードは `discardChunkedObject` が消すので
+	// 残らないが、`drive/files/create` と `upload-from-url` は残る。
+	if isMimeImage(info.MimeType) && imagedecode.ExceedsSandboxedDecoderSize(info.Body) &&
+		(hasStrippableMetadata(info.Body, info.MimeType) || info.MimeType == "image/avif") {
+		return nil, ErrUndecodableImage
+	}
+
 	backend := ResolveStorage(s.storage)
 	storedInternal := StorageIsLocal(backend)
 
@@ -765,27 +793,6 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	// **メタデータを落とせない画像は受け取らない (#3037 レビュー 2 周目)。**
-	//
-	// 代替画像の生成は best-effort だが、`webpublic` が作られないと
-	// `GetPublicURL` が原本へ落ちるので、**EXIF の GPS がそのまま公開側へ出る**
-	// — この PR が `entity/drive.go` 側で塞いだ穴と同じもの。
-	// `SandboxedDecoderMaxBytes` は #3037 が新しく入れた上限なので、**それが
-	// 原因で落ちる入力だけ**を「作れないなら受け取らない」に倒す (元から
-	// デコードできない形式の扱いは変えない)。
-	//
-	// 条件に `hasStrippableMetadata` を入れてあるので、落とすものが無い画像は
-	// 従来どおり通る (その場合は原本を出しても漏れない)。
-	//
-	// **AVIF だけは別に見る。** `hasStrippableMetadata` は AVIF に false を
-	// 返す — 「AVIF は寸法に関わらず webpublic を作る枝が別にある」ことが
-	// 前提だが、**デコードできなければその枝も動かない**。AVIF の原本は
-	// Mastodon / MS Edge が表示できないので、通すと壊れた添付になる。
-	if isMimeImage(info.MimeType) && imagedecode.ExceedsSandboxedDecoderSize(info.Body) &&
-		(hasStrippableMetadata(info.Body, info.MimeType) || info.MimeType == "image/avif") {
-		return nil, ErrUndecodableImage
 	}
 
 	// 画像/動画処理 (best-effort)

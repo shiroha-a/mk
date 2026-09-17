@@ -506,6 +506,9 @@ func TestChunkedError_Mapping(t *testing.T) {
 		{coredrive.ErrFolderNotFound, http.StatusBadRequest, "NO_SUCH_FOLDER"},
 		{coredrive.ErrUnallowedFileType, http.StatusBadRequest, "UNALLOWED_FILE_TYPE"},
 		{coredrive.ErrMaxFileSizeExceeded, http.StatusRequestEntityTooLarge, "MAX_FILE_SIZE_EXCEEDED"},
+		// **#3037 レビュー 3 周目。** 落とすと汎用の 500 INTERNAL_ERROR に
+		// なるのに、テストが無いので外から見える挙動の変化を検出できなかった。
+		{coredrive.ErrUndecodableImage, http.StatusRequestEntityTooLarge, "MAX_FILE_SIZE_EXCEEDED"},
 		{coredrive.ErrNoFreeSpace, http.StatusBadRequest, "NO_FREE_SPACE"},
 		{coredrive.ErrAccessDenied, http.StatusBadRequest, "ACCESS_DENIED"},
 		{stubError, http.StatusInternalServerError, "INTERNAL_ERROR"},
