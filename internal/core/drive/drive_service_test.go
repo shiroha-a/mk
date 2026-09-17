@@ -14,6 +14,7 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -1617,11 +1618,18 @@ func TestGenerateAlts_CancelledWhileWaiting(t *testing.T) {
 	<-holder
 }
 
-// 既定の枠は 1 以上で、上限 4。0 以下を渡したら既定へ戻す。
+// 既定の枠は GOMAXPROCS の半分 (最低 1)。0 以下を渡したら既定へ戻す。
+//
+// **「1 以上 4 以下」のような緩い範囲では固定にならない。** GOMAXPROCS 全部に
+// 戻す変異 (= 無制限と区別が付かなくなる形) がコア数次第で素通りする。
+// media proxy の枠 (#3032) と同じ規則であることまで書く。
 func TestMediaProcessingConcurrency_Defaults(t *testing.T) {
+	want := runtime.GOMAXPROCS(0) / 2
+	if want < 1 {
+		want = 1
+	}
 	def := drive.DefaultMediaProcessingConcurrencyForTest()
-	assert.GreaterOrEqual(t, def, 1)
-	assert.LessOrEqual(t, def, 4)
+	assert.Equal(t, want, def, "既定が GOMAXPROCS/2 (最低 1) でない")
 
 	svc, _, _ := newSvc(t)
 	assert.Equal(t, def, svc.MediaProcessingSlotsForTest(), "NewService が枠を配線していない")

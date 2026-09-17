@@ -69,7 +69,7 @@ func (s *Service) GenerateAltsCtxForTest(ctx context.Context, body []byte, mimeT
 }
 
 // MediaProcessingSlotsForTest reports the configured processing pool size.
-func (s *Service) MediaProcessingSlotsForTest() int { return cap(s.mediaSlots) }
+func (s *Service) MediaProcessingSlotsForTest() int { return s.mediaSlotCap }
 
 // DefaultMediaProcessingConcurrencyForTest exposes the default pool size.
 func DefaultMediaProcessingConcurrencyForTest() int { return defaultMediaProcessingConcurrency() }

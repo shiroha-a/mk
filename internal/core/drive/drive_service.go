@@ -21,6 +21,7 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/safehttp"
 	"github.com/shiroha-a/mk/internal/safemath"
+	"golang.org/x/sync/semaphore"
 	"gorm.io/datatypes"
 
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -193,7 +194,10 @@ type Service struct {
 	objectDeleteEnqueuer ObjectDeleteEnqueuer
 	// mediaSlots は画像 / 動画処理の同時実行枠。**構築時に必ず埋める**
 	// (`NewService`)。nil のまま使うと枠が無いのと同じになる。
-	mediaSlots chan struct{}
+	mediaSlots *semaphore.Weighted
+	// mediaSlotCap は mediaSlots の容量。semaphore.Weighted は容量を公開
+	// しないので、テストと自己検査のために持っておく。
+	mediaSlotCap int
 }
 
 // defaultMediaProcessingConcurrency is how many uploads may decode at once.
@@ -205,22 +209,16 @@ type Service struct {
 // 投げるだけで確保量を掛け算できた (`semaphore` / `Acquire(` の grep が 0 件
 // だった)。
 //
-// GOMAXPROCS に上限 4 を掛けた値にする。**メモリの多いホストほどコアも多い**
-// という相関に乗る形で、2GB VPS (このプロジェクトが前提にしている構成) では
-// 1-2 に落ち着く。処理は CPU 律速なので、コア数を超えて走らせても速くならない。
-//
-// **専用の設定キーは足していない。** 絞りたい運営者は `GOMAXPROCS` で足りる
-// (コンテナの CPU 制限でも動く)、という判断。配線から変えるなら
-// `SetMediaProcessingConcurrency`。
+// **値と根拠は media proxy の枠 (#3032) と同じ。** 同じデコーダで同じ中間
+// バッファを確保するので、あちらの実測 (8 core / AVIF / c=8 で peak RSS が
+// 枠 1 → 131MB、2 → 409MB、4 → 636MB、8 → 995MB、無制限 → 959MB) がそのまま
+// 当てはまる。GOMAXPROCS 全部にすると無制限と区別が付かず枠を持つ意味が無い。
+// 詳細は `internal/core/mediaproxy/cpulimit.go`。
 func defaultMediaProcessingConcurrency() int {
-	n := runtime.GOMAXPROCS(0)
-	if n > 4 {
-		n = 4
+	if n := runtime.GOMAXPROCS(0) / 2; n > 0 {
+		return n
 	}
-	if n < 1 {
-		n = 1
-	}
-	return n
+	return 1
 }
 
 // ObjectDeleteEnqueuer queues the removal of one object storage object.
@@ -491,11 +489,12 @@ func NewService(
 	idGen id.Generator,
 ) *Service {
 	return &Service{
-		fileRepo:   fileRepo,
-		folderRepo: folderRepo,
-		storage:    storage,
-		idGen:      idGen,
-		mediaSlots: make(chan struct{}, defaultMediaProcessingConcurrency()),
+		fileRepo:     fileRepo,
+		folderRepo:   folderRepo,
+		storage:      storage,
+		idGen:        idGen,
+		mediaSlots:   semaphore.NewWeighted(int64(defaultMediaProcessingConcurrency())),
+		mediaSlotCap: defaultMediaProcessingConcurrency(),
 	}
 }
 
@@ -503,11 +502,17 @@ func NewService(
 //
 // n <= 0 は既定に戻す。**枠を無くす指定は用意しない** — 無制限にすると、
 // 認証済みの利用者が並行アップロードだけでプロセスを落とせる状態に戻る。
+//
+// **起動時専用。goroutine-safe ではない。** `mediaproxy.SetCPUConcurrency` と
+// 同じ理由で、リクエストを捌いている最中に呼ぶと (a) `acquireMediaSlot` の
+// 読みとの間でデータ競合になり、(b) 旧枠の保持者と新枠の容量で一瞬 2n 本が
+// 同時にデコードする = **この枠が守っている不変条件そのものが破れる**。
 func (s *Service) SetMediaProcessingConcurrency(n int) {
 	if n <= 0 {
 		n = defaultMediaProcessingConcurrency()
 	}
-	s.mediaSlots = make(chan struct{}, n)
+	s.mediaSlotCap = n
+	s.mediaSlots = semaphore.NewWeighted(int64(n))
 }
 
 // SetStreamingPublisher attaches a StreamingPublisher invoked best-effort
@@ -975,20 +980,36 @@ func (s *Service) generateAlts(ctx context.Context, body []byte, mimeType string
 
 // acquireMediaSlot takes one processing slot, returning the release func.
 //
-// ok=false は ctx が切れた場合だけ。枠が未配線 (テストが Service を構造体
-// リテラルで組んだ場合など) のときは**素通しせずに既定の枠を作る** — 素通しに
-// すると、この関数を通しているのに枠が効いていない状態が静かに生まれる。
+// ok=false は ctx が切れた場合だけ。**待ちに固有の上限は置かない** — 待って
+// いるのはアップロード中のリクエストで、その ctx は利用者が接続を切れば切れる
+// ので、待ち時間はそこで頭打ちになる。media proxy と違って途中で 503 に倒さ
+// ないのは、代替画像を作れなかったアップロードは**やり直しが効かない**ため
+// (ファイル自体は保存済みで、サムネイルだけが恒久的に欠ける)。
+//
+// **取った semaphore をクロージャに捕まえる。** `SetMediaProcessingConcurrency`
+// は `s.mediaSlots` を差し替えるので、解放時にフィールドを読み直すと acquire
+// したのと別の Weighted へ Release が入り `semaphore: released more than held`
+// で **panic してプロセスが落ちる** (`mediaproxy.acquireCPU` と同じ理由)。
+//
+// 枠が未配線 (テストが Service を構造体リテラルで組んだ場合など) なら
+// 素通しする。`NewService` は必ず張るので production では起きない
+// (`TestMediaProcessingConcurrency_Defaults` が固定)。
 func (s *Service) acquireMediaSlot(ctx context.Context) (func(), bool) {
-	if s.mediaSlots == nil {
-		s.mediaSlots = make(chan struct{}, defaultMediaProcessingConcurrency())
-	}
 	slots := s.mediaSlots
-	select {
-	case slots <- struct{}{}:
-		return func() { <-slots }, true
-	case <-ctx.Done():
+	if slots == nil {
+		return func() {}, true
+	}
+	if err := slots.Acquire(ctx, 1); err != nil {
 		return nil, false
 	}
+	var released bool
+	return func() {
+		if released {
+			return
+		}
+		released = true
+		slots.Release(1)
+	}, true
 }
 
 // processImage runs all image processing steps (best-effort).
