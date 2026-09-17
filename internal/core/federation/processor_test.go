@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -958,10 +959,10 @@ func resolveAliceAndSetFeatured(t *testing.T, p *federation.Processor, repo *tes
 
 func TestProcess_Add(t *testing.T) {
 	p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
-	_ = resolveAliceAndSetFeatured(t, p, repo)
+	aliceID := resolveAliceAndSetFeatured(t, p, repo)
 
 	noteURI := "https://remote.example/notes/n1"
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", URI: &noteURI}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: aliceID, URI: &noteURI}
 
 	body := []byte(`{
 		"type": "Add",
@@ -970,7 +971,91 @@ func TestProcess_Add(t *testing.T) {
 		"target": "https://remote.example/users/alice/collections/featured"
 	}`)
 	require.NoError(t, p.Process(body))
-	assert.True(t, len(piningRepo.Pinings) > 0)
+	require.Len(t, piningRepo.Pinings, 1)
+	for _, pin := range piningRepo.Pinings {
+		assert.Equal(t, aliceID, pin.UserID)
+		assert.Equal(t, "n1", pin.NoteID)
+	}
+}
+
+// **`Add` でピン留めできるのは自分の投稿だけ。** 見ないと、署名さえ通る
+// リモート actor が他人のノートを自分のプロフィールに並べられる。ローカルの
+// 非公開ノートも `ResolveNote` は可視性を見ずに引くので、`users/show` の
+// `pinnedNoteIds` 経由でその ID が未認証の相手へ出る。
+//
+// pull 側 (`resolveFeaturedNotes`) には同じ規則が既にあり、push 側のここだけが
+// 取り残されていた。
+func TestProcess_Add_RejectsOtherUsersNote(t *testing.T) {
+	p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
+	_ = resolveAliceAndSetFeatured(t, p, repo)
+
+	// 著者は alice ではない。URI は alice のホストなので、host 一致だけでは
+	// 弾けないことに注意。
+	noteURI := "https://remote.example/notes/victim"
+	noteRepo.Notes["victim"] = &model.Note{ID: "victim", UserID: "someone-else", URI: &noteURI}
+
+	body := []byte(`{
+		"type": "Add",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://remote.example/notes/victim",
+		"target": "https://remote.example/users/alice/collections/featured"
+	}`)
+	require.NoError(t, p.Process(body))
+	assert.Empty(t, piningRepo.Pinings, "他人のノートがピン留めされた")
+}
+
+// **件数の上限。** `Add` は署名さえ通れば何度でも送れるので、上限が無いと
+// `user_note_pining` を無制限に増やせる。`internal/api/users/handler.go` の
+// 設計メモ (#1489) は `pinnedNoteIds` を絞らない理由として「pinning は
+// per-user 上限が厳しい」と書いており、その前提がここで壊れる。
+//
+// **「上限未満なら通る」まで見る。** それが無いと、常に弾く実装でもテストが
+// 通ってしまう (変異検証で実測)。
+func TestProcess_Add_StopsAtPinLimit(t *testing.T) {
+	p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
+	aliceID := resolveAliceAndSetFeatured(t, p, repo)
+
+	add := func(n string) {
+		t.Helper()
+		uri := "https://remote.example/notes/" + n
+		noteRepo.Notes[n] = &model.Note{ID: n, UserID: aliceID, URI: &uri}
+		body := []byte(`{
+			"type": "Add",
+			"actor": "https://remote.example/users/alice",
+			"object": "` + uri + `",
+			"target": "https://remote.example/users/alice/collections/featured"
+		}`)
+		require.NoError(t, p.Process(body))
+	}
+
+	for i := 0; i < federation.FeaturedPinLimit; i++ {
+		add(fmt.Sprintf("n%d", i))
+		require.Len(t, piningRepo.Pinings, i+1, "上限に達する前のピンが弾かれた")
+	}
+
+	add("overflow")
+	assert.Len(t, piningRepo.Pinings, federation.FeaturedPinLimit, "上限を超えてピン留めできた")
+}
+
+// 数えられなかったときは error を返す。握り潰すと上限が効かないまま進むし、
+// nil で捨てると inbox job が「処理済み」として再試行しない。
+func TestProcess_Add_CountFailureIsRetryable(t *testing.T) {
+	p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
+	aliceID := resolveAliceAndSetFeatured(t, p, repo)
+
+	noteURI := "https://remote.example/notes/n1"
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: aliceID, URI: &noteURI}
+	piningRepo.CountErr = errors.New("boom")
+
+	body := []byte(`{
+		"type": "Add",
+		"actor": "https://remote.example/users/alice",
+		"object": "https://remote.example/notes/n1",
+		"target": "https://remote.example/users/alice/collections/featured"
+	}`)
+	err := p.Process(body)
+	require.Error(t, err)
+	assert.Empty(t, piningRepo.Pinings)
 }
 
 func TestProcess_Add_WrongTarget(t *testing.T) {
@@ -988,10 +1073,10 @@ func TestProcess_Add_WrongTarget(t *testing.T) {
 
 func TestProcess_Remove(t *testing.T) {
 	p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
-	_ = resolveAliceAndSetFeatured(t, p, repo)
+	aliceID := resolveAliceAndSetFeatured(t, p, repo)
 
 	noteURI := "https://remote.example/notes/n1"
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", URI: &noteURI}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: aliceID, URI: &noteURI}
 
 	// まずAddでピン留め
 	addBody := []byte(`{

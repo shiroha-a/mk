@@ -3484,6 +3484,9 @@ type MockUserNotePiningRepository struct {
 	// ReplaceErr forces ReplaceByUser to fail, for exercising the
 	// best-effort paths that must not abort actor resolution.
 	ReplaceErr error
+	// CountErr forces CountByUser to fail, for exercising the paths that must
+	// not silently skip the pin cap when the count is unavailable.
+	CountErr error
 }
 
 func NewMockUserNotePiningRepository() *MockUserNotePiningRepository {
@@ -3539,6 +3542,9 @@ func (m *MockUserNotePiningRepository) ReplaceByUser(userID string, pins []*mode
 }
 
 func (m *MockUserNotePiningRepository) CountByUser(userID string) (int, error) {
+	if m.CountErr != nil {
+		return 0, m.CountErr
+	}
 	count := 0
 	for _, p := range m.Pinings {
 		if p.UserID == userID {

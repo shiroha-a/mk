@@ -2573,6 +2573,38 @@ func (p *Processor) handleAdd(act genericActivity) error {
 			return err
 		}
 	}
+	// **ピン留めできるのは自分の投稿だけ。** これを見ないと、署名付きの
+	// リモート actor が**他人のノートを自分のプロフィールに並べられる**。
+	// ローカルの非公開ノートも対象になりうる (`ResolveNote` はローカル URI を
+	// 可視性を見ずに引く) ので、`users/show` の `pinnedNoteIds` 経由でその ID が
+	// 未認証の相手に出る。
+	//
+	// **同じ規則が `featured.go` に既にある** (pull 側の featured 取り込み)。
+	// こちらの push 側 (`Add`) だけが取り残されていた。upstream も
+	// `NotePiningService.addPinned` が `findOneBy({id, userId: user.id})` で
+	// 弾いている。
+	if note.UserID != actor.ID {
+		return nil
+	}
+	// **件数にも上限を置く。** `Add` は署名さえ通れば何度でも送れるので、
+	// 上限が無いと `user_note_pining` を無制限に増やせる。しかも
+	// `internal/api/users/handler.go` の設計メモ (#1489) は `pinnedNoteIds` を
+	// 絞らない理由として「pinning は per-user 上限が厳しい (= 数件) ので
+	// mass enumeration リスクは低い」と書いており、**その前提がここで壊れる**。
+	//
+	// 値は pull 側の `featuredPinLimit` と同じ。片方だけ緩いと、同じ
+	// リモート actor が経路によって違う上限を受けることになる。
+	// **数えられなかったら errで返す。** ここで握り潰すと上限が効かないまま
+	// 進むし、`nil` で捨てると inbox job が「処理済み」として再試行しない。
+	// error なら再試行されるので、DB 障害が上限の無効化にも取りこぼしにも
+	// 化けない (#2792 と同じ判断)。
+	count, cerr := p.pinningRepo.CountByUser(actor.ID)
+	if cerr != nil {
+		return fmt.Errorf("count pinned notes: %w", cerr)
+	}
+	if count >= featuredPinLimit {
+		return nil
+	}
 	now := nowFn()
 	pin := &model.UserNotePining{
 		ID:     p.pinningIDGen.Generate(now),

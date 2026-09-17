@@ -66,3 +66,8 @@ func (r *Resolver) KeyFetchFailureCount() int {
 
 // MarkKeyFetchFailed exposes markKeyFetchFailed for external tests.
 func (r *Resolver) MarkKeyFetchFailed(userID string) { r.markKeyFetchFailed(userID) }
+
+// FeaturedPinLimit exposes the pin cap so external tests do not hardcode it.
+// **同じ値を push 側 (`handleAdd`) と pull 側 (`resolveFeaturedNotes`) が使う**
+// ので、片方だけ変えたらテストが落ちる形にしておく。
+const FeaturedPinLimit = featuredPinLimit
