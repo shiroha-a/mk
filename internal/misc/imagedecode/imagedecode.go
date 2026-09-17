@@ -10,11 +10,29 @@ package imagedecode
 
 import (
 	"bytes"
+	"errors"
+	"fmt"
 	"image"
 	"image/png"
 
 	"github.com/kovidgoyal/imaging"
 )
+
+// ErrTooManyPixels reports that the header declares more pixels than
+// MaxPixels, so the image was refused **before** allocating its raster.
+var ErrTooManyPixels = errors.New("imagedecode: declared dimensions exceed the pixel cap")
+
+// MaxPixels caps width*height as declared by the image header.
+//
+// **デコードの前に見るのが要点。** デコーダはヘッダの寸法だけでラスタを確保する
+// ので、デコード後に測っても遅い。BMP は 54 バイトのヘッダで 8.6GB を要求でき、
+// PNG は zlib の圧縮率 1032:1 で 12MB から 65535x65535 (NRGBA 17GB) を作れる。
+// **Go の大確保失敗は `throw("out of memory")` で recover できない**ので、
+// echo の Recover ミドルウェアは効かずプロセスごと落ちる。
+//
+// 値は mediaproxy が従来デコード後に使っていた cap (8192x8192 = 64MP) と同じ。
+// 変えていないのは**判定の位置だけ**で、通る画像の集合は変わらない。
+var MaxPixels int64 = 8192 * 8192
 
 // Decode decodes image bytes, working around a decoder bug for a narrow class
 // of PNG.
@@ -22,6 +40,19 @@ import (
 // 既定は `imaging.Decode` — EXIF の向きを補正し、ICC/CICP を sRGB へ変換し、
 // `import _` で登録済みの webp/bmp/tiff も読める。
 func Decode(data []byte) (image.Image, error) {
+	// **ラスタを確保する前にヘッダの寸法を見る。** `image.DecodeConfig` は
+	// 登録済みデコーダのヘッダだけを読むので、ここで弾けば巨大な確保が起きない。
+	//
+	// **読めなかったら通す。** TGA のように magic bytes を持たない形式や、
+	// `image.RegisterFormat` されていない形式はここで判定できない。判定できない
+	// ことを理由に拒否すると、これまで読めていた画像が読めなくなる (この変更は
+	// 通る集合を変えないという前提で入れている)。その場合は従来どおり
+	// デコード後の cap が受け止める。
+	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
+		if int64(cfg.Width)*int64(cfg.Height) > MaxPixels {
+			return nil, fmt.Errorf("%w: %dx%d", ErrTooManyPixels, cfg.Width, cfg.Height)
+		}
+	}
 	if IsBrokenInterlacedPNG(data) {
 		// **stdlib で読む。** 下記の条件の PNG は imaging が全画素 0 にする。
 		// **EXIF の向きと ICC→sRGB 変換は失われる**が、代わりに得られるのは
