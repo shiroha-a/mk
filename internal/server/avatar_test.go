@@ -200,8 +200,9 @@ func TestAvatarHandler_StaticGoesThroughProxy(t *testing.T) {
 // **identicon は static でもプロキシへ回さない (#2908)。**
 //
 // 相対 URL なので `mediaproxy.Fetch` の同一オリジン判定 (`<instance>/files/` の
-// 接頭一致) を外れて `fetchRemote` に落ち、`unsupported protocol scheme` で失敗して
-// 404 + `max-age=86400` になる。PNG を生成して返すのでアニメーションもしない。
+// 接頭一致) を外れて `fetchRemote` に落ち、取りに行けない URL として
+// 400 + `max-age=86400` になる (#3034 より前は 404 + 同じキャッシュ)。
+// PNG を生成して返すのでアニメーションもしない。
 func TestAvatarHandler_StaticKeepsIdenticonDirect(t *testing.T) {
 	withMediaProxy(t)
 	repo := &stubAvatarLookup{users: map[string]*model.User{

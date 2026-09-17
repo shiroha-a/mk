@@ -110,10 +110,10 @@ func avatarHandler(userRepo avatarUserLookup, localHost string) echo.HandlerFunc
 //
 // 除外するのは identicon fallback (`/identicon/<id>`) だけ。相対 URL なので
 // `mediaproxy.Fetch` は同一オリジン判定 (`instanceURL + "/files/"` の接頭一致) を
-// 外れて `fetchRemote` に落ち、`httpClient.Do` が `unsupported protocol scheme` で
-// 失敗する。結果は **404 + `max-age=86400`** で、静止画設定を入れた利用者だけが
-// アバターを 1 日失う。identicon は PNG を生成して返すのでアニメーションもせず、
-// 回す理由が無い。
+// 外れて `fetchRemote` に落ち、取りに行けない URL として弾かれる。結果は
+// **400 + `max-age=86400`** (#3034 より前は 404 + 同じキャッシュ) で、静止画
+// 設定を入れた利用者だけがアバターを 1 日失う。identicon は PNG を生成して
+// 返すのでアニメーションもせず、回す理由が無い。
 func proxyableAvatarTarget(rawURL string) bool {
 	u, err := url.Parse(rawURL)
 	if err != nil {
