@@ -1069,6 +1069,12 @@ gate の外で**実際に届く経路**は測って個別に塞いである。�
 `admin/federation/remove-all-following` の `host`、`v2/admin/emoji/list` の
 `updatedAtFrom` / `updatedAtTo` / `roleIds`。
 
+**`drive/files` / `admin/drive/files` の `type` も塞いだ (#3037)。** `/*` 終端の
+prefix LIKE に載る値で、**upstream は escape せずに載せる**ので `a_b/*` のような
+指定で `_` が 1 文字 wildcard として働く。mk-go は #1054 から LIKE を必ず
+escape する方針なので、そちらに揃えた (mk-go のほうが厳しい方向の乖離)。
+あわせて列に入らない `type` は引く前に空へ倒す。
+
 **この一覧は網羅ではない。** 一覧系を足すときは受け取る値を自分で弾くこと。
 数え方: 非テストの `internal/repository` で、レシーバ付きメソッドのうち
 (a) `string` / `*string` / `[]string` のパラメータを持ち (可変長 `...string` は

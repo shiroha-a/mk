@@ -281,6 +281,34 @@ func (r *driveFileRepository) Delete(f *model.DriveFile) error {
 
 // ListByUser returns the user's drive files filtered/sorted per the
 // interface doc (#1564).
+// driveTypeFilter applies upstream files.ts の `type` 絞り込みを 1 箇所に集める。
+//
+// upstream `admin/drive/files.ts` と `drive/files.ts` は `/*` 終端を
+// `type.replace('/*','/') + '%'` の prefix LIKE にし、それ以外は完全一致にする。
+//
+// **LIKE のパターンは escape する (#3037)。** upstream は生のまま載せるので、
+// `image/_` のような値が 1 文字 wildcard として働く。MIME の subtype に
+// `_` は稀だが使えるので、escape しないと「その型だけ」を指定したつもりの
+// 絞り込みが別の型まで拾う。mk-go は #1054 から LIKE を必ず escape する方針で、
+// ここだけ通っていなかった (docs/divergence.md)。
+//
+// ok=false は「一致しえない値」= 呼び出し側は空を返す。列に入らない値
+// (NUL / 不正な UTF-8) がそれで、比較の右辺に置くだけで PostgreSQL が
+// クエリごと落とす (#3025 と同じ判断)。
+func driveTypeFilter(q *gorm.DB, fileType string) (*gorm.DB, bool) {
+	if fileType == "" {
+		return q, true
+	}
+	if !storable(fileType) {
+		return q, false
+	}
+	if strings.HasSuffix(fileType, "/*") {
+		return q.Where(`"type" LIKE ? ESCAPE '\'`,
+			escapeSQLLikePattern(strings.TrimSuffix(fileType, "*"))+"%"), true
+	}
+	return q.Where(`"type" = ?`, fileType), true
+}
+
 func (r *driveFileRepository) ListByUser(userID string, folderID *string, anyFolder bool, fileType, sort, untilID, sinceID string, limit int) ([]*model.DriveFile, error) {
 	var rows []*model.DriveFile
 	q := r.db.Where("\"userId\" = ?", userID)
@@ -291,14 +319,9 @@ func (r *driveFileRepository) ListByUser(userID string, folderID *string, anyFol
 			q = q.Where("\"folderId\" = ?", *folderID)
 		}
 	}
-	if fileType != "" {
-		// upstream files.ts: `/*` 終端は `type.replace('/*','/') + '%'` の
-		// prefix LIKE、それ以外は完全一致。
-		if strings.HasSuffix(fileType, "/*") {
-			q = q.Where(`"type" LIKE ?`, strings.TrimSuffix(fileType, "*")+"%")
-		} else {
-			q = q.Where(`"type" = ?`, fileType)
-		}
+	var typeOK bool
+	if q, typeOK = driveTypeFilter(q, fileType); !typeOK {
+		return nil, nil
 	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
@@ -415,16 +438,9 @@ func (r *driveFileRepository) ListForAdmin(userID, origin, host, fileType, until
 			q = q.Where(`"userHost" = ?`, host)
 		}
 	}
-	if fileType != "" {
-		// upstream admin/drive/files.ts:78-84: `/*` 終端は prefix LIKE
-		// (type.replace('/*','/')+'%')、それ以外は完全一致 (#1772、ListByUser と
-		// 同 semantics)。以前は無条件 prefix LIKE で image/* がほぼ 0 件、
-		// image/png が過剰マッチしていた。
-		if strings.HasSuffix(fileType, "/*") {
-			q = q.Where(`"type" LIKE ?`, strings.TrimSuffix(fileType, "*")+"%")
-		} else {
-			q = q.Where(`"type" = ?`, fileType)
-		}
+	var typeOK bool
+	if q, typeOK = driveTypeFilter(q, fileType); !typeOK {
+		return nil, nil
 	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
@@ -462,14 +478,9 @@ func (r *driveFileRepository) ListSystemFiles(fileType, untilID, sinceID string,
 	// (host が表示され、操作者に文脈がある側)。host 単独では出ない —
 	// handler が origin 未指定を local に倒すため (#1545)。
 	q := r.db.Model(&model.DriveFile{}).Where(`"userId" IS NULL AND "userHost" IS NULL`)
-	if fileType != "" {
-		// upstream files.ts と同じく `/*` 終端は prefix LIKE、それ以外は完全一致
-		// (#1772、ListForAdmin と semantics 統一)。
-		if strings.HasSuffix(fileType, "/*") {
-			q = q.Where(`"type" LIKE ?`, strings.TrimSuffix(fileType, "*")+"%")
-		} else {
-			q = q.Where(`"type" = ?`, fileType)
-		}
+	var typeOK bool
+	if q, typeOK = driveTypeFilter(q, fileType); !typeOK {
+		return nil, nil
 	}
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)

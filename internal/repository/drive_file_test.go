@@ -1027,3 +1027,76 @@ func TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates_Guards(t *test
 	require.NoError(t, err)
 	assert.Equal(t, []string{"oag_1"}, ids)
 }
+
+// **`type` の LIKE パターンを escape する (#3037)。**
+//
+// upstream は `type.replace('/*','/') + '%'` を生のまま載せるので、`_` が
+// 1 文字 wildcard として働く。MIME の subtype に `_` は稀だが使えるので、
+// escape しないと「その型だけ」を指定したつもりの絞り込みが別の型まで拾う。
+// mk-go は #1054 から LIKE を必ず escape する方針で、ここだけ通っていなかった。
+func TestDriveFileRepository_TypeFilterEscapesLike(t *testing.T) {
+	db := testDB
+	repo := NewDriveFileRepository(db)
+
+	require.NoError(t, db.Exec(`DELETE FROM drive_file`).Error)
+	// **wildcard が効くのは `/*` 終端の prefix だけ** (upstream と同じ
+	// semantics)。`_` はその prefix 側に置かないと LIKE に載らない。
+	for i, typ := range []string{"a_b/x", "axb/x"} {
+		require.NoError(t, db.Create(&model.DriveFile{
+			ID: "dtf" + string(rune('0'+i)), Name: "n", Type: typ,
+			MD5: "m", Size: 1, URL: "https://e/x",
+		}).Error)
+	}
+	t.Cleanup(func() { db.Exec(`DELETE FROM drive_file WHERE id LIKE 'dtf%'`) })
+
+	// `a_b/*` は `a_b/` で始まる型だけを指す。escape していないと `_` が
+	// 1 文字 wildcard になって `axb/x` まで拾う。
+	got, err := repo.ListForAdmin("", "local", "", "a_b/*", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "1 文字 wildcard として解釈されている")
+	assert.Equal(t, "a_b/x", got[0].Type)
+}
+
+// **列に入らない `type` は引く前に空にする (#3037)。** NUL も不正な UTF-8 も
+// 比較の右辺に置くだけで PostgreSQL がクエリごと落とす。`drive/files` は
+// 任意の認証ユーザーが叩けるので、そのままだと 500 を起こせる。
+func TestDriveFileRepository_TypeFilterRejectsUnstorable(t *testing.T) {
+	db := testDB
+	repo := NewDriveFileRepository(db)
+
+	for name, typ := range map[string]string{
+		"NUL":           "image/a\x00b",
+		"invalid UTF-8": "image/a\x80b",
+		"NUL in prefix": "image/a\x00*",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := repo.ListForAdmin("", "local", "", typ, "", "", 10)
+			require.NoError(t, err, "SELECT に載せてしまっている")
+			assert.Empty(t, got)
+
+			got, err = repo.ListByUser("u1", nil, true, typ, "", "", "", 10)
+			require.NoError(t, err, "SELECT に載せてしまっている")
+			assert.Empty(t, got)
+		})
+	}
+}
+
+// **普通の絞り込みは効いたまま。** これが無いと「常に空を返す」実装でも上が通る。
+func TestDriveFileRepository_TypeFilterStillMatches(t *testing.T) {
+	db := testDB
+	repo := NewDriveFileRepository(db)
+
+	require.NoError(t, db.Exec(`DELETE FROM drive_file`).Error)
+	require.NoError(t, db.Create(&model.DriveFile{
+		ID: "dtf9", Name: "n", Type: "image/png", MD5: "m", Size: 1, URL: "https://e/x",
+	}).Error)
+	t.Cleanup(func() { db.Exec(`DELETE FROM drive_file WHERE id = 'dtf9'`) })
+
+	got, err := repo.ListForAdmin("", "local", "", "image/*", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "prefix LIKE が効いていない")
+
+	got, err = repo.ListForAdmin("", "local", "", "image/png", "", "", 10)
+	require.NoError(t, err)
+	assert.Len(t, got, 1, "完全一致が効いていない")
+}
