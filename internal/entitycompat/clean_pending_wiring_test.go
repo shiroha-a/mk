@@ -11,20 +11,50 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+// pendingPrunerParamType is the parameter type the pruner is passed as.
+const pendingPrunerParamType = "PendingSignupPruner"
+
+// pendingPrunerConstructor is the only expression that may fill it.
+const pendingPrunerConstructor = "repository.NewUserPendingRepository"
+
 // **期限切れ `user_pending` の掃除が配線されていること (#3037 レビュー)。**
 //
-// `NewCleanProcessor` の最後の引数に `nil` を渡しても**コンパイルは通り**、
+// `NewCleanProcessor` の該当引数に `nil` を渡しても**コンパイルは通り**、
 // `if p.pending != nil` で掃除が黙って止まる。`internal/server` は CI の
 // カバレッジ対象外で router を組み立てるテストも無いので、build もテストも
 // 緑のまま巻き戻せる。同じ PR が `captchaSvc` に AST gate を足したのと
 // 完全に同じ理由。
+//
+// **「最後の引数がリテラルの `nil` でない」では足りない (レビュー 2 周目)。**
+// 実測で 3 形が素通りした:
+//
+//   - `var p processors.PendingSignupPruner` を宣言して渡す (nil interface)
+//   - `repository.UserPendingRepository(nil)` と型付き nil へ変換する
+//   - **`NewCleanProcessor` に引数を 1 つ足す** — 位置で最後を見ているので、
+//     gate は黙って**別の引数**を検査するようになる。これは普通の進化なので、
+//     いちばん起きやすい
+//
+// そこで (a) 引数の位置を**定義側の signature から引き**、(b) そこに
+// `repository.NewUserPendingRepository(...)` の呼び出しがあることまで見る。
 func TestCleanProcessorReceivesThePendingPruner(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, filepath.Join("..", "server", "router.go"), nil, parser.ParseComments)
+
+	// (a) 定義側から「何番目の引数か」と「引数の総数」を引く。
+	def, err := parser.ParseFile(fset,
+		filepath.Join("..", "queue", "processors", "clean.go"), nil, parser.ParseComments)
+	require.NoError(t, err)
+
+	idx, total := pendingPrunerParamIndex(def)
+	require.GreaterOrEqual(t, idx, 0,
+		"NewCleanProcessor に %s の引数が無い (rename した?)", pendingPrunerParamType)
+
+	// (b) 呼び出し側がその位置に constructor を渡していること。
+	f, err := parser.ParseFile(fset,
+		filepath.Join("..", "server", "router.go"), nil, parser.ParseComments)
 	require.NoError(t, err)
 
 	found := false
-	ok := false
+	wired := false
 	ast.Inspect(f, func(n ast.Node) bool {
 		call, isCall := n.(*ast.CallExpr)
 		if !isCall {
@@ -35,21 +65,71 @@ func TestCleanProcessorReceivesThePendingPruner(t *testing.T) {
 			return true
 		}
 		found = true
-		// 最後の引数が nil / 空でないこと。**呼び出しの形まで見る** —
-		// 「引数の数が合っている」だけだと nil を渡す変異が素通りする。
-		if len(call.Args) == 0 {
+
+		// **引数の数が signature と合っていること。** 合っていなければ
+		// 位置の対応が崩れているので、検査したことにしない。
+		if len(call.Args) != total || idx >= len(call.Args) {
 			return true
 		}
-		last := call.Args[len(call.Args)-1]
-		if id, isIdent := last.(*ast.Ident); isIdent && id.Name == "nil" {
-			return true
+		if exprString(call.Args[idx]) == pendingPrunerConstructor {
+			wired = true
 		}
-		ok = true
 		return true
 	})
 
 	require.True(t, found, "router.go に NewCleanProcessor の呼び出しが無い (rename した?)")
-	assert.True(t, ok,
-		"NewCleanProcessor に user_pending の pruner を渡していない。"+
-			"渡さないと期限切れの登録 (メールアドレスとパスワードハッシュ) が無期限に貯まる")
+	assert.True(t, wired,
+		"NewCleanProcessor の %d 番目の引数に %s(...) を渡していない。"+
+			"渡さないと期限切れの登録 (メールアドレスとパスワードハッシュ) が無期限に貯まる",
+		idx, pendingPrunerConstructor)
+}
+
+// pendingPrunerParamIndex returns the flattened index of the pruner parameter
+// and the total parameter count of NewCleanProcessor.
+//
+// **グループ化された引数 (`a, b T`) を展開する。** 展開しないと位置がずれ、
+// 呼び出し側の別の引数を検査してしまう。
+func pendingPrunerParamIndex(f *ast.File) (idx int, total int) {
+	idx = -1
+	ast.Inspect(f, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "NewCleanProcessor" || fn.Type.Params == nil {
+			return true
+		}
+		pos := 0
+		for _, field := range fn.Type.Params.List {
+			names := len(field.Names)
+			if names == 0 {
+				names = 1
+			}
+			if exprString(field.Type) == pendingPrunerParamType {
+				idx = pos
+			}
+			pos += names
+		}
+		total = pos
+		return false
+	})
+	return idx, total
+}
+
+// exprString renders an identifier or a selector as source text.
+//
+// 呼び出し式なら**呼ばれている関数の名前**を返す
+// (`repository.NewUserPendingRepository(s.db)` -> `repository.NewUserPendingRepository`)。
+func exprString(e ast.Expr) string {
+	switch t := e.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.SelectorExpr:
+		if x, ok := t.X.(*ast.Ident); ok {
+			return x.Name + "." + t.Sel.Name
+		}
+		return t.Sel.Name
+	case *ast.CallExpr:
+		return exprString(t.Fun)
+	case *ast.StarExpr:
+		return exprString(t.X)
+	}
+	return ""
 }
