@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"time"
@@ -32,6 +34,9 @@ type filesDriveLookup interface {
 //
 // lookup == nil もしくは DB error 時は primary に倒す。
 //
+// **ストレージ側の失敗は種別で分ける。** `ErrObjectNotFound` だけが 404 で、
+// それ以外 (S3 の認証失効 / throttling / 5xx / FS の I/O エラー) は 500。
+//
 // primary が現時点でローカルなら local と同じ FS を指すので storedInternal 判定は
 // 無意味であり、ホットパスの DB クエリを省く。backend は admin 設定で動的に
 // 切り替わる (#2315) ため、この判定は配線時ではなくリクエストごとに行う。
@@ -54,7 +59,16 @@ func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) ech
 		}
 		body, err := storage.Get(key)
 		if err != nil {
-			return c.NoContent(http.StatusNotFound)
+			// **ストレージ障害を「無い」に潰さない (#2792)。** #2990 が
+			// `S3Storage.Get` で種別を分けたのはこのためで、他の呼び出し側は
+			// すべて直っているのにここだけ残っていた。S3 の認証失効 /
+			// throttling / 5xx が全部 404 になると、クライアントからは区別が
+			// 付かず**監視にも 5xx が立たない**。
+			if errors.Is(err, coredrive.ErrObjectNotFound) {
+				return c.NoContent(http.StatusNotFound)
+			}
+			slog.Error("server: drive storage read failed", "accessKey", key, "err", err)
+			return c.NoContent(http.StatusInternalServerError)
 		}
 		defer body.Close()
 

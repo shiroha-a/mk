@@ -2,6 +2,7 @@ package server
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -290,4 +291,42 @@ type countingFilesLookup struct {
 func (c *countingFilesLookup) FindByAnyAccessKey(key string) (*model.DriveFile, error) {
 	c.calls++
 	return c.inner.FindByAnyAccessKey(key)
+}
+
+// failingStorage always fails with a non-not-found error, standing in for an
+// S3 credential expiry / throttling / 5xx.
+type failingStorage struct{ err error }
+
+func (f *failingStorage) Put(string, io.Reader) (string, error) { return "", nil }
+func (f *failingStorage) Get(string) (io.ReadCloser, error)     { return nil, f.err }
+func (f *failingStorage) Delete(string) error                   { return nil }
+
+// **ストレージ障害を「無い」に潰さない (#2792)。** S3 の認証失効 / throttling /
+// 5xx が全部 404 になると、クライアントからは「消えた」と区別が付かないうえ、
+// **監視にも 5xx が立たない**。#2990 が `S3Storage.Get` で種別を分けた目的
+// そのもので、他の呼び出し側は全部直っているのにここだけ残っていた。
+func TestFilesHandler_StorageFailureIs500(t *testing.T) {
+	lookup := &stubFilesLookup{byKey: map[string]*model.DriveFile{}}
+	primary := &failingStorage{err: errors.New("AccessDenied: token expired")}
+	local := &memStorage{byKey: map[string]string{}}
+
+	c, rec := newFilesTestContext(t, "k1")
+	h := filesHandler(lookup, primary, local)
+	require.NoError(t, h(c))
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+}
+
+// **wrap された ErrObjectNotFound は 404 のまま。** `errors.Is` ではなく `==`
+// で比べる実装だと、ここで 500 に化ける。
+func TestFilesHandler_WrappedNotFoundStays404(t *testing.T) {
+	lookup := &stubFilesLookup{byKey: map[string]*model.DriveFile{}}
+	primary := &failingStorage{err: fmt.Errorf("s3 get k1: %w", coredrive.ErrObjectNotFound)}
+	local := &memStorage{byKey: map[string]string{}}
+
+	c, rec := newFilesTestContext(t, "k1")
+	h := filesHandler(lookup, primary, local)
+	require.NoError(t, h(c))
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
 }
