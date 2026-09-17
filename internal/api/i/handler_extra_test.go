@@ -796,3 +796,70 @@ func captureExtraLogs(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }
+
+// 自己削除の root 保護は `meta.rootUserId` を見ること。
+//
+// **`user.isRoot` だけでは足りない。** あれは upstream が system_account 移行で
+// DROP 済みの残存列で、mk-go は drop-in のために持っているだけ。列を追加した
+// migration より前に作られた root は `isRoot = false` のままなので、meta を
+// 見ないとガードが発火しない (本番の root がまさにその状態だった)。
+//
+// 通ると `user` 行が物理削除され、`meta` に FK が無い構成では `rootUserId` が
+// 消えた ID を指したまま残るので **root が永久に不在**になる。`update-meta` は
+// `rootUserId` を落とすので API 経由で指名し直す手段が無い。
+func TestDeleteAccount_RootProtectionUsesMeta(t *testing.T) {
+	setup := func(t *testing.T, rootID *string) (*Handler, *testutil.MockUserRepository, *testutil.MockMetaRepository) {
+		t.Helper()
+		h, repo := newExtraHandler(t)
+		metaRepo := testutil.NewMockMetaRepository()
+		metaRepo.Meta = &model.Meta{ID: "x", RootUserID: rootID}
+		h.SetMetaRepo(metaRepo)
+		return h, repo, metaRepo
+	}
+
+	t.Run("isRoot が false でも meta が指していれば拒否", func(t *testing.T) {
+		rootID := "u1"
+		h, repo, _ := setup(t, &rootID)
+		user := setupUserWithPassword(repo, "u1", "pass")
+		user.IsRoot = false // 列が追加される前に作られた root
+
+		rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+		assert.False(t, repo.Users["u1"].IsDeleted, "削除が進んでいる")
+	})
+
+	// **弾きすぎていないことを見る。** 常に拒否する実装でも上は緑になる。
+	t.Run("root でない利用者は削除できる", func(t *testing.T) {
+		rootID := "other"
+		h, repo, _ := setup(t, &rootID)
+		user := setupUserWithPassword(repo, "u1", "pass")
+
+		rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+		assert.Equal(t, http.StatusNoContent, rec.Code)
+		assert.True(t, repo.Users["u1"].IsDeleted)
+	})
+
+	// meta が読めなければ守る側に倒す。DB 障害を「root ではない」と解釈して
+	// 不可逆な削除を通すわけにいかない。
+	t.Run("meta が読めなければ拒否", func(t *testing.T) {
+		h, repo, metaRepo := setup(t, nil)
+		metaRepo.Meta = nil // Fetch が error を返す
+		user := setupUserWithPassword(repo, "u1", "pass")
+
+		rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.False(t, repo.Users["u1"].IsDeleted)
+	})
+
+	// 従来の `isRoot` 判定も残っていること (drop-in で TS から引き継いだ列)。
+	t.Run("isRoot が true なら meta が指していなくても拒否", func(t *testing.T) {
+		rootID := "other"
+		h, repo, _ := setup(t, &rootID)
+		user := setupUserWithPassword(repo, "u1", "pass")
+		user.IsRoot = true
+
+		rec := postExtra(h.DeleteAccount, `{"password":"pass"}`, user)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+	})
+}

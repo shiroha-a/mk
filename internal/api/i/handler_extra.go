@@ -172,7 +172,7 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// #2230: root / system アカウントの自己削除は連合・instance を壊すため拒否する
 	// (admin/delete-account の isProtectedAccount と同じ guard、upstream DeleteAccountService の
 	// rootUserId / system account ガード相当)。cascade を走らせる前に弾く。
-	if isProtectedSelfDelete(u) {
+	if h.isProtectedSelfDelete(u) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot delete a root or system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 
@@ -244,9 +244,36 @@ func (h *Handler) SetAccountDeletionFederationHook(hook AccountDeletionFederatio
 // system account that must never be deleted (#2230). Mirrors admin's
 // isProtectedAccount: IsRoot, or a local (host==nil) account whose username
 // contains '.' (systemaccount uses `<kind>.actor`).
-func isProtectedSelfDelete(u *model.User) bool {
+func (h *Handler) isProtectedSelfDelete(u *model.User) bool {
 	if u == nil {
 		return false
+	}
+	// **root の権威ソースは `meta.rootUserId`。** `user.isRoot` は upstream が
+	// system_account 移行で DROP 済みの残存列で、mk-go は drop-in のために
+	// 持っているだけ。`admin/accounts.go` の `isProtectedAccount` は meta を
+	// 先に見ており、**自己削除の経路だけが見ていなかった**。
+	//
+	// 実害がある。列が追加された migration より前に作られた root は
+	// `isRoot = false` のままなので (本番の root がまさにそれ)、meta を見ないと
+	// **ガードが発火しない**。通ると `user` 行が物理削除され、`meta` に FK が
+	// 無い構成では `rootUserId` が消えた ID を指したまま残るので **root が永久に
+	// 不在**になる。`update-meta` は `rootUserId` を protected として落とすため、
+	// API 経由で指名し直す手段が無い。
+	//
+	// TS 由来の DB では upstream migration の `ON DELETE SET NULL` が効いて
+	// `rootUserId` が NULL になり、今度は `admin/accounts/create` の初回
+	// セットアップ窓が開く側に倒れる。
+	//
+	// **meta が読めなければ守る側に倒す。** DB 障害を「root ではない」と
+	// 解釈して不可逆な削除を通すわけにいかない。
+	if h.metaRepo != nil {
+		meta, err := h.metaRepo.Fetch()
+		if err != nil {
+			return true
+		}
+		if meta != nil && meta.RootUserID != nil && *meta.RootUserID == u.ID {
+			return true
+		}
 	}
 	if u.IsRoot {
 		return true
