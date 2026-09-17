@@ -35,6 +35,11 @@ META_IGNORE = DEFAULT_IGNORE_KEYS | {
     # **埋め込みの無いビルドでは空文字**になるので、値ではなくキーごと無視する
     # (CI の diff harness は build-arg を渡さないので必ず空になる)。
     "mkGoCommit", "mkGoFrontendVersion",
+    # 新規登録の username の最小文字数 (#3015)。upstream には対応する設定が
+    # 無い (`preservedUsernames` は名前を 1 つずつ列挙する仕組みなので
+    # 「2 文字以下を全部」を表現できない)。登録フォームが判定に使うので公開
+    # meta に出している。docs/divergence.md に additive field として記載済み。
+    "minimumUsernameLength",
     # 分割アップロード (#2313) は mk-go 独自機能なので policies に TS 側の
     # 対応キーが無い。docs/divergence.md に additive field として記載済み。
     "canUseChunkedUpload", "chunkedUploadMaxConcurrentSessions",
