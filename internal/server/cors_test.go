@@ -165,7 +165,7 @@ func TestCORS_RelationListsKeepVaryOrigin(t *testing.T) {
 func TestCORS_OtherEndpointsUnchanged(t *testing.T) {
 	rec := corsProbe(t, http.MethodPost, "/api/notes/create", "https://example.com")
 	require.Equal(t, "*", rec.Header().Get(echo.HeaderAccessControlAllowOrigin),
-		"除外が広がりすぎている。対象は noCORSPaths の 2 つだけ")
+		"除外が広がりすぎている。対象は noCORSPaths に列挙したものだけ")
 }
 
 // **CORS の除外とレート制限は同じ endpoint を対象にする (#2953)。**
