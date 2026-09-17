@@ -926,7 +926,7 @@ func (s *Service) detectSensitiveOfficial(ctx context.Context, body []byte, mime
 			slog.Warn("drive: official sensitive detection for videos requires FFmpeg video processor", "mime", mime)
 			return false
 		}
-		frames, err := extractor.ExtractDetectionFrames(body)
+		frames, err := extractor.ExtractDetectionFrames(ctx, body)
 		if err != nil || len(frames) == 0 {
 			if err != nil {
 				slog.Warn("drive: detection frame extraction failed", "mime", mime, "err", err)
@@ -1003,14 +1003,18 @@ func (s *Service) generateAlts(ctx context.Context, body []byte, mimeType string
 	}
 	if video {
 		// **ffmpeg は枠の外で回す。** 別プロセスなので Go ヒープの中間バッファを
-		// 1 つも抱えない一方、`exec.Command` は context も timeout も持たない
-		// ので、枠の内側に入れると**動画 1 本がその間ずっと枠を占有する**。
-		// 既定枠は `GOMAXPROCS / 2` (2 core の VPS では 1) なので、大きい動画
-		// 1 本で画像アップロードのサムネイル生成が全部止まる。
+		// 1 つも抱えない一方、ffmpeg 自身は 1 本で何十秒も回りうるので、枠の
+		// 内側に入れると**動画 1 本がその間ずっと枠を占有する**。既定枠は
+		// `GOMAXPROCS / 2` (2 core の VPS では 1) なので、大きい動画 1 本で
+		// 画像アップロードのサムネイル生成が全部止まる。
+		//
+		// **#3037 で ffmpeg 側に ctx と timeout を入れた**ので「何分でも
+		// 居座る」ことは無くなったが、枠の外に置く判断は変えていない
+		// (timeout は 60 秒で、枠 1 つがその間塞がるのは変わらない)。
 		//
 		// media proxy の枠も同じ理由で「囲むのは decode/resize/encode だけ」と
 		// 決めてある (`internal/core/mediaproxy/cpulimit.go`)。
-		thumb, _ := s.videoProcessor.GenerateThumbnail(body, mimeType)
+		thumb, _ := s.videoProcessor.GenerateThumbnail(ctx, body, mimeType)
 		if thumb != nil {
 			return &generateAltsResult{thumbnail: thumb}
 		}

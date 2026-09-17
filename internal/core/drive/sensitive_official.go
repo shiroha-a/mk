@@ -268,5 +268,5 @@ func AggregateFrameJudgements(frameSensitive []bool, threshold float64) bool {
 // (FFmpegVideoProcessor)。interface 拡張ではなく type-assertion で使う
 // (既存 mock 実装への波及を避ける)。
 type DetectionFrameExtractor interface {
-	ExtractDetectionFrames(body []byte) ([][]byte, error)
+	ExtractDetectionFrames(ctx context.Context, body []byte) ([][]byte, error)
 }

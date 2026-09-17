@@ -1220,7 +1220,7 @@ type stubVideoProcessor struct {
 	thumbnail *drive.ProcessedImage
 }
 
-func (s *stubVideoProcessor) GenerateThumbnail(_ []byte, _ string) (*drive.ProcessedImage, error) {
+func (s *stubVideoProcessor) GenerateThumbnail(_ context.Context, _ []byte, _ string) (*drive.ProcessedImage, error) {
 	return s.thumbnail, nil
 }
 
@@ -1526,7 +1526,7 @@ type blockingVideoProcessor struct {
 	release  chan struct{}
 }
 
-func (b *blockingVideoProcessor) GenerateThumbnail(_ []byte, _ string) (*drive.ProcessedImage, error) {
+func (b *blockingVideoProcessor) GenerateThumbnail(_ context.Context, _ []byte, _ string) (*drive.ProcessedImage, error) {
 	b.mu.Lock()
 	b.inFlight++
 	if b.inFlight > b.peak {

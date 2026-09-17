@@ -2,6 +2,7 @@ package drive
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"image"
 	"image/draw"
@@ -48,7 +49,10 @@ type VideoProcessor interface {
 	// GenerateThumbnail extracts a frame from the video and returns a
 	// WebP thumbnail. Returns nil, nil if extraction fails or FFmpeg is
 	// unavailable.
-	GenerateThumbnail(body []byte, mimeType string) (*ProcessedImage, error)
+	//
+	// ctx は ffmpeg の実行に渡る (#3037)。利用者が接続を切ったら外部
+	// プロセスも止める。
+	GenerateThumbnail(ctx context.Context, body []byte, mimeType string) (*ProcessedImage, error)
 }
 
 // Thumbnail / webpublic 生成パラメータ (Misskey TS 準拠)

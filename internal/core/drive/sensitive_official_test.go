@@ -219,10 +219,10 @@ type stubFrameExtractor struct {
 	err    error
 }
 
-func (s *stubFrameExtractor) GenerateThumbnail(_ []byte, _ string) (*ProcessedImage, error) {
+func (s *stubFrameExtractor) GenerateThumbnail(_ context.Context, _ []byte, _ string) (*ProcessedImage, error) {
 	return nil, nil
 }
-func (s *stubFrameExtractor) ExtractDetectionFrames(_ []byte) ([][]byte, error) {
+func (s *stubFrameExtractor) ExtractDetectionFrames(_ context.Context, _ []byte) ([][]byte, error) {
 	return s.frames, s.err
 }
 
