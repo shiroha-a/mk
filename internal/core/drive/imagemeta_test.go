@@ -131,3 +131,53 @@ func TestHasStrippableMetadata_IgnoresLyingMIME(t *testing.T) {
 	assert.True(t, hasStrippableMetadata(jpegWithExif, "image/png"), "MIME を信じて中身を見ていない")
 	assert.False(t, hasStrippableMetadata(makeTestPNG(10, 10), "image/jpeg"))
 }
+
+// **`GenerateWebpublic` が実際に `hasStrippableMetadata` を見ていること。**
+//
+// ヘルパー単体のテストだけでは配線が固定できない (敵対的レビューで実測:
+// `hasStrippableMetadata` を修正前の JPEG 限定に戻してもテストが緑のままだった)。
+// 2048px 以下でも**メタデータがあれば webpublic を作る**、というのがこの分岐の
+// 仕事で、作られないと `GetPublicURL` が原本を指して GPS が公開側へ出る。
+func TestGenerateWebpublic_UsesTheWidenedMetadataDetection(t *testing.T) {
+	p := NewDefaultImageProcessor()
+
+	// eXIf を持つ小さい PNG。寸法は 2048 以下なので、メタデータを見て
+	// いなければ webpublic は作られない。
+	withMeta := pngWithChunk(t, "eXIf", []byte("II\x2a\x00\x08\x00\x00\x00"))
+	got, err := p.GenerateWebpublic(withMeta, "image/png")
+	require.NoError(t, err)
+	assert.NotNil(t, got, "PNG の eXIf を見ていない (webpublic が作られない)")
+
+	// ImageMagick が書く zTXt 形式も同じ。
+	withRaw := pngWithChunk(t, "zTXt", []byte("Raw profile type exif\x00\x00"))
+	got, err = p.GenerateWebpublic(withRaw, "image/png")
+	require.NoError(t, err)
+	assert.NotNil(t, got, "ImageMagick の Raw profile type exif を見ていない")
+
+	// **メタデータが無ければ作らない。** これが無いと「常に作る」実装でも
+	// 上のテストが通り、2048px 以下の全画像が再エンコードされる。
+	plain := pngWithChunk(t, "tEXt", []byte("Software\x00mk-go"))
+	got, err = p.GenerateWebpublic(plain, "image/png")
+	require.NoError(t, err)
+	assert.Nil(t, got, "無害な注記で webpublic を作っている")
+}
+
+// JPEG の XMP / IPTC も見る (upstream の `exif ?? iptc ?? xmp ?? tifftagPhotoshop`)。
+//
+// **GPS を XMP にだけ持つ JPEG** は Lightroom / Photoshop の書き出しでよくある。
+// EXIF だけ見ていると 2048px 以下でそれが素通りする。
+func TestHasStrippableMetadata_JPEGXMPAndIPTC(t *testing.T) {
+	base := makeTestJPEG(10, 10)
+	for name, marker := range map[string]string{
+		"XMP":    "http://ns.adobe.com/xap/1.0/\x00",
+		"拡張 XMP": "http://ns.adobe.com/xmp/extension/",
+		"IPTC":   "Photoshop 3.0\x00",
+	} {
+		t.Run(name, func(t *testing.T) {
+			// SOI の直後にマーカーを差し込む (先頭 64KB 以内であればよい)。
+			doctored := append(append([]byte{}, base[:2]...), append([]byte(marker), base[2:]...)...)
+			assert.True(t, hasStrippableMetadata(doctored, "image/jpeg"), "%s を見落としている", name)
+		})
+	}
+	assert.False(t, hasStrippableMetadata(base, "image/jpeg"), "素の JPEG を拾っている")
+}

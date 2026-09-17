@@ -10,6 +10,7 @@ package imagedecode
 
 import (
 	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"image"
@@ -33,8 +34,23 @@ var ErrTooManyPixels = errors.New("imagedecode: declared dimensions exceed the p
 // echo の Recover ミドルウェアは効かずプロセスごと落ちる。
 //
 // 値は mediaproxy が従来デコード後に使っていた cap (8192x8192 = 64MP) と同じ。
-// 変えていないのは**判定の位置だけ**で、通る画像の集合は変わらない。
+// **media proxy については判定の位置を変えただけ**で、通る画像の集合は変わらない。
+//
+// **drive は別の cap を使う (`DecodeWithPixelCap`)。** あちらは develop の時点で
+// cap が無かったので、この値をそのまま当てると**今まで通っていた 64MP 超の
+// 実写真 (102MP の中判、パノラマ合成、高解像度スキャン) がサムネイル・
+// blurhash・寸法・webpublic を全部失う**。webpublic が作られないと
+// `GetPublicURL` が原本を指すので、EXIF の GPS が公開側へ出る側に倒れる。
 var MaxPixels int64 = 8192 * 8192
+
+// UpstreamMaxPixels mirrors sharp's default `limitInputPixels` (0x3FFF^2)。
+//
+// upstream Misskey は `DriveService` / `ImageProcessingService` のどちらでも
+// `limitInputPixels` を上書きしていないので、アップロード経路で通る画像の
+// 上限はこの値になる。drive をこれに揃えると「upstream で通る写真が mk-go で
+// だけ劣化する」形を作らずに、宣言寸法での爆弾 (46341^2 = 21 億画素) は
+// 引き続き弾ける。
+const UpstreamMaxPixels int64 = 0x3FFF * 0x3FFF
 
 // Decode decodes image bytes, working around a decoder bug for a narrow class
 // of PNG.
@@ -42,6 +58,15 @@ var MaxPixels int64 = 8192 * 8192
 // 既定は `imaging.Decode` — EXIF の向きを補正し、ICC/CICP を sRGB へ変換し、
 // `import _` で登録済みの webp/bmp/tiff も読める。
 func Decode(data []byte) (image.Image, error) {
+	return DecodeWithPixelCap(data, MaxPixels)
+}
+
+// DecodeWithPixelCap is Decode with an explicit declared-pixel ceiling.
+//
+// **呼び出し側で上限が違う。** media proxy はリモートの任意 URL を未認証で
+// 引く経路なので厳しく (64MP)、drive は認証済みのアップロードで
+// `maxFileSize` と同時実行枠にも縛られるので upstream と同じ値にする。
+func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 	// **ラスタを確保する前にヘッダの寸法を見る。** `image.DecodeConfig` は
 	// 登録済みデコーダのヘッダだけを読むので、ここで弾けば巨大な確保が起きない。
 	//
@@ -51,7 +76,7 @@ func Decode(data []byte) (image.Image, error) {
 	// 通る集合を変えないという前提で入れている)。その場合は従来どおり
 	// デコード後の cap が受け止める。
 	if cfg, _, err := image.DecodeConfig(bytes.NewReader(data)); err == nil {
-		if int64(cfg.Width)*int64(cfg.Height) > MaxPixels {
+		if int64(cfg.Width)*int64(cfg.Height) > maxPixels {
 			return nil, fmt.Errorf("%w: %dx%d", ErrTooManyPixels, cfg.Width, cfg.Height)
 		}
 	}
@@ -78,10 +103,22 @@ func Decode(data []byte) (image.Image, error) {
 		return normalizeOrigin(img), nil
 	}
 	if isAnimatedPNG(data) {
-		// APNG の既定像は IDAT そのもの。stdlib は `acTL` / `fcTL` / `fdAT` を
-		// ancillary チャンクとして読み飛ばすので、1 コマ目だけが返る。
-		// imaging も既定像があればそれを返すので、見える結果は変わらない。
-		// **ICC→sRGB 変換は失われる** (下の interlaced PNG と同じ割り切り)。
+		// **アニメーション用のチャンクだけ落として imaging に渡す。**
+		//
+		// `png.Decode` で済ませると 1 コマ目は取れるが、**ICC / CICP →
+		// sRGB 変換が落ちて色が変わる** (実測で Display P3 の APNG が
+		// R チャンネル 32/255 ずれた)。カスタム絵文字は APNG がよく使われる
+		// ので、静止画化のたびに色が変わるのは受け入れられない。
+		//
+		// `acTL` を落とせば imaging の `pngmeta` は `HasFrames` を立てず、
+		// 単一画像の枝 (`apng.Decode` → `fix_colors` → `fix_orientation`) を
+		// 通る。フレームの増幅は起きないまま、色の扱いは普通の PNG と同じに
+		// なる。**捨てるのは `acTL` / `fcTL` / `fdAT` の 3 種だけ**で、
+		// `iCCP` / `cICP` / `eXIf` は残す。
+		if still := stripAPNGAnimation(data); still != nil {
+			return imaging.Decode(bytes.NewReader(still), imaging.AutoOrientation(true))
+		}
+		// 書き換えられなかった (壊れている) ときは stdlib で 1 コマ目だけ読む。
 		return png.Decode(bytes.NewReader(data))
 	}
 	if IsBrokenInterlacedPNG(data) {
@@ -136,6 +173,60 @@ func normalizeOrigin(src image.Image) image.Image {
 	dst := image.NewNRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
 	draw.Draw(dst, dst.Bounds(), src, r.Min, draw.Src)
 	return dst
+}
+
+// apngAnimationChunks are the chunk types that make a PNG an APNG.
+var apngAnimationChunks = map[string]struct{}{
+	"acTL": {}, "fcTL": {}, "fdAT": {},
+}
+
+// stripAPNGAnimation rewrites an APNG as a plain still PNG.
+//
+// 返すのは `acTL` / `fcTL` / `fdAT` を取り除いたバイト列。**チャンクの CRC は
+// そのまま使える** — 落とすだけで中身は触らないため。走査中に形が合わなければ
+// nil を返して呼び出し側の fallback に任せる。
+//
+// **`IDAT` で止めない。** `fcTL` は IDAT の前にも後ろにも現れる。
+func stripAPNGAnimation(data []byte) []byte {
+	const sigLen = 8
+	if len(data) < sigLen {
+		return nil
+	}
+	out := make([]byte, 0, len(data))
+	out = append(out, data[:sigLen]...)
+
+	pos := sigLen
+	dropped := false
+	for {
+		if pos == len(data) {
+			break
+		}
+		if pos+8 > len(data) {
+			return nil
+		}
+		length := int(binary.BigEndian.Uint32(data[pos : pos+4]))
+		if length < 0 {
+			return nil
+		}
+		end := pos + 12 + length // length + type + data + CRC
+		if end < pos || end > len(data) {
+			return nil
+		}
+		typ := string(data[pos+4 : pos+8])
+		if _, drop := apngAnimationChunks[typ]; drop {
+			dropped = true
+		} else {
+			out = append(out, data[pos:end]...)
+		}
+		pos = end
+		if typ == "IEND" {
+			break
+		}
+	}
+	if !dropped {
+		return nil
+	}
+	return out
 }
 
 // IsBrokenInterlacedPNG reports whether data is a PNG that

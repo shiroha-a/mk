@@ -124,7 +124,17 @@ func decodeImage(body []byte, mimeType string) (image.Image, error) {
 	// decoder バグ回避を含む。**ここを直接 imaging.Decode に戻さないこと** —
 	// media proxy 側と食い違い、ローカルにアップロードされた画像だけが
 	// 真っ黒なサムネイルを storage に焼く形になる。
-	img, err := imagedecode.Decode(body)
+	// **cap は upstream の sharp に揃える。** media proxy の 64MP をそのまま
+	// 当てると、develop では通っていた 64MP 超の実写真 (102MP の中判、パノラマ
+	// 合成、高解像度スキャン) がサムネイル・blurhash・寸法・**webpublic** を
+	// 全部失う。webpublic が作られないと `GetPublicURL` が原本を指すので、
+	// EXIF の GPS が公開側へ出る側に倒れる — 同じ PR の別コミットが塞いだ
+	// ばかりの穴を、この cap で開け直すことになる。
+	//
+	// upstream は `limitInputPixels` を上書きしないので、アップロードで通る
+	// 上限は sharp の既定 (0x3FFF^2) になる。ここを揃えても宣言寸法での爆弾
+	// (46341^2 = 21 億画素) は引き続き弾ける。
+	img, err := imagedecode.DecodeWithPixelCap(body, imagedecode.UpstreamMaxPixels)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported image format: %s: %w", mimeType, err)
 	}

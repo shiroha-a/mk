@@ -115,11 +115,22 @@ func TestStorable(t *testing.T) {
 
 // jsonb 列に入るかの判定。
 //
-// **PostgreSQL の jsonb は NUL を受け付けない。** エスケープされた NUL も
-// SQLSTATE 22P05 (`unsupported Unicode escape sequence`) で拒否される。値でも
-// **キーでも**同じ (実 PostgreSQL で両方を実測)。
+// **判定するのは decode 前の生バイト列。** ガードの対象は `json.RawMessage` で、
+// 列へ入るのはほどく前のバイトそのもの。1 稿目は「ほどいてから文字列を歩く」
+// 実装で、**4 つある拒否形のうち 1 つしか見ていなかった** (敵対的レビューで
+// 実測された)。
+//
+// 期待値は実 PostgreSQL で境界まで測ってある:
+//
+//	孤立サロゲートのエスケープ -> 22P02 invalid input syntax for type json
+//	{"n":1e131071} -> OK    {"n":1e131072} -> 22003
+//	{"n":1e-16383} -> OK    {"n":1e-16384} -> 22003
+//	9 を 131072 個 -> OK    131073 個      -> 22003
+//	小数 16383 桁  -> OK    16384 桁       -> 22003
+//	生の 0x80 バイト           -> 22021
+//	NUL のエスケープ           -> 22P05
 func TestJSONStorable(t *testing.T) {
-	esc := `\u0000` // JSON 上の NUL エスケープ (6 文字)
+	esc := `\u0` + `000` // JSON 上の NUL エスケープ (6 文字)
 	for _, tt := range []struct {
 		name string
 		raw  string
@@ -131,14 +142,27 @@ func TestJSONStorable(t *testing.T) {
 		{"null", `null`, true},
 		{"数値だけ", `42`, true},
 		{"非 ASCII", `{"あ":"絵文字"}`, true},
-		// **ここが本題。** wire 上ではエスケープで届く。
 		{"値に NUL", `{"a":"x` + esc + `y"}`, false},
 		{"キーに NUL", `{"x` + esc + `y":"b"}`, false},
 		{"配列の要素に NUL", `["ok","x` + esc + `y"]`, false},
 		{"入れ子", `{"a":{"b":["x` + esc + `"]}}`, false},
 		// **バックスラッシュ自体がエスケープされた形はただの 6 文字。**
-		// 生バイト列を文字列検索する実装だとここで誤検出する。
-		{"エスケープされたバックスラッシュ", `{"a":"x\\u0000y"}`, true},
+		// 走査で `\\` を飛ばさないとここで誤検出する。
+		{"エスケープされたバックスラッシュ", `{"a":"x\\` + `u0000y"}`, true},
+		// 対になっていないサロゲート (22P02)。
+		{"単独の上位サロゲート", `{"a":"\ud800"}`, false},
+		{"単独の下位サロゲート", `{"a":"\udc00"}`, false},
+		{"上位の後ろが別のエスケープ", `{"a":"\ud800\n"}`, false},
+		{"上位の後ろが普通の文字", `{"a":"\ud800x"}`, false},
+		// 正しい組は通す (絵文字はこの形で来る)。
+		{"対になったサロゲート", `{"a":"😀"}`, true},
+		// numeric の範囲 (22003)。
+		{"指数が上限ちょうど", `{"n":1e131071}`, true},
+		{"指数が上限超過", `{"n":1e131072}`, false},
+		{"負の指数が上限ちょうど", `{"n":1e-16383}`, true},
+		{"負の指数が上限超過", `{"n":1e-16384}`, false},
+		{"int に入らない指数", `{"n":1e99999999999999999999}`, false},
+		{"普通の小数", `{"n":1.5,"m":-0.25,"e":1e10}`, true},
 		// 構文エラーは通す (呼び出し側の既存の扱いに任せる)。
 		{"壊れた JSON", `{`, true},
 	} {
@@ -146,12 +170,36 @@ func TestJSONStorable(t *testing.T) {
 			assert.Equal(t, tt.want, colfit.JSONStorable([]byte(tt.raw)))
 		})
 	}
-	// **実 NUL バイトが入った JSON テキストはそもそも JSON として不正。**
-	// JSON は 0x20 未満の制御文字をエスケープ無しで書けないので、Go の decoder が
-	// 先に落とす = 保存経路には届かない。`JSONStorable` はそれを「構文エラーは
-	// 通す」枝で受けるので true を返すが、呼び出し側の Bind が既に 400 にして
-	// いる (実測でこの前提を確かめた。1 稿目はここを false と書いて外れた)。
-	var probe any
-	require.Error(t, json.Unmarshal([]byte("{\"a\":\"x\x00y\"}"), &probe),
-		"この前提が崩れると JSONStorable にも判定が要る")
+
+	// 桁数そのもので上限に当たる形 (指数を使わない)。
+	assert.True(t, colfit.JSONStorable([]byte(`{"n":`+strings.Repeat("9", 131072)+`}`)))
+	assert.False(t, colfit.JSONStorable([]byte(`{"n":`+strings.Repeat("9", 131073)+`}`)))
+	assert.True(t, colfit.JSONStorable([]byte(`{"n":0.`+strings.Repeat("9", 16383)+`}`)))
+	assert.False(t, colfit.JSONStorable([]byte(`{"n":0.`+strings.Repeat("9", 16384)+`}`)))
+
+	// **生の不正 UTF-8 バイト列** (22021)。`json.RawMessage` はこれを
+	// そのまま保持するので、decode 後の値からは見えない。
+	assert.False(t, colfit.JSONStorable([]byte("{\"a\":\"x\x80y\"}")),
+		"生の不正 UTF-8 を通している")
+	// 生の NUL バイト。
+	assert.False(t, colfit.JSONStorable([]byte("{\"a\":\"x\x00y\"}")))
+}
+
+// **`json.RawMessage` は decode しないので生の形が残る。** ここが
+// `JSONStorable` を生バイト列に対する判定にしている理由。
+func TestJSONStorable_RawMessageKeepsTheOriginalBytes(t *testing.T) {
+	var req struct {
+		V json.RawMessage `json:"v"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(`{"v":"\ud800"}`), &req))
+	assert.Equal(t, `"\ud800"`, string(req.V), "decoder が RawMessage を正規化している")
+	assert.False(t, colfit.JSONStorable(req.V))
+
+	// プレーンな string に decode する field では U+FFFD へ矯正される
+	// (こちらは `Storable` の担当で、そもそも列に届かない)。
+	var plain struct {
+		V string `json:"v"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(`{"v":"\ud800"}`), &plain))
+	assert.Equal(t, "�", plain.V)
 }

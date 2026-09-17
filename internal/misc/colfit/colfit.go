@@ -13,7 +13,9 @@
 package colfit
 
 import (
+	"bytes"
 	"encoding/json"
+	"strconv"
 	"strings"
 	"unicode/utf8"
 )
@@ -109,17 +111,19 @@ func Text(raw string, max int) string {
 // JSONStorable reports whether a JSON document can be stored in a `jsonb`
 // column.
 //
-// **PostgreSQL の jsonb は NUL を受け付けない。** テキストとしての NUL エスケープ
-// (JSON の `\u` 表記) も拒否され、SQLSTATE 22P05
-// (`unsupported Unicode escape sequence`) でクエリごと落ちる。text 列の
-// 22021 とは番号が違うだけで、症状は同じ 500。
+// **判定するのは decode 前の生バイト列。** ガードの対象はどれも
+// `json.RawMessage` (あるいはそれを marshal した []byte) で、**列へ入るのは
+// ほどく前のバイトそのもの**。Go の decoder は RawMessage の中身を一切正規化
+// しないので、「ほどいてから文字列を歩く」実装だと素通りする形がある
+// (1 稿目がそれで、敵対的レビューで 3 形を実測された)。
 //
-// **生バイト列を検索しない。** wire 上の NUL はエスケープされた 6 文字で
-// 届くので、実 NUL バイトを探しても見つからない。逆に文字列の中に現れる
-// 「バックスラッシュ自体がエスケープされた」形は**ただの 6 文字**なので、
-// 文字列検索では誤検出する。値をほどいて歩くのが唯一正しい。
+// PostgreSQL が jsonb を拒む形は 4 つあり、**全部ここで見る** (実 PostgreSQL で
+// 境界まで実測):
 //
-// **キーも見る。** jsonb はオブジェクトのキーにも同じ制約を掛ける。
+//   - 不正な UTF-8 のバイト列 → SQLSTATE 22021
+//   - `\u0000` エスケープ → 22P05
+//   - 対になっていないサロゲートのエスケープ → 22P02
+//   - numeric の範囲外 (整数部 131072 桁超 / 小数部 16383 桁超) → 22003
 //
 // **構文エラーは通す。** ここは「列に入るか」だけを見る述語で、パースの
 // 可否は呼び出し側の既存の扱いに任せる (`json.RawMessage` は親の Unmarshal が
@@ -128,30 +132,155 @@ func JSONStorable(raw []byte) bool {
 	if len(raw) == 0 {
 		return true
 	}
-	var v any
-	if err := json.Unmarshal(raw, &v); err != nil {
-		return true
+	// **生の NUL バイトは JSON として不正**なので親の Unmarshal が先に落とす
+	// はずだが、`[]byte` を直に渡す呼び出しもあるので見ておく。
+	if bytes.IndexByte(raw, 0) >= 0 {
+		return false
 	}
-	return jsonValueStorable(v)
+	if !utf8.Valid(raw) {
+		return false
+	}
+	if !jsonEscapesStorable(raw) {
+		return false
+	}
+	return jsonNumbersStorable(raw)
 }
 
-// jsonValueStorable walks a decoded JSON value looking for an unstorable string.
-func jsonValueStorable(v any) bool {
-	switch t := v.(type) {
-	case string:
-		return Storable(t)
-	case map[string]any:
-		for k, item := range t {
-			if !Storable(k) || !jsonValueStorable(item) {
-				return false
+// jsonEscapesStorable scans the raw document for `\u` escapes jsonb rejects.
+//
+// **自前で走査するしかない。** Go の decoder は `\u0000` を実 NUL に、対に
+// なっていないサロゲートを U+FFFD に**置き換えて**しまうので、ほどいた後の
+// 値からは元の形が分からない。`json.Valid` も両方を通す。
+//
+// **壊れた JSON は通す** (`JSONStorable` の契約どおり)。読めない位置に来たら
+// そこで打ち切って true を返す。
+func jsonEscapesStorable(raw []byte) bool {
+	inString := false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !inString {
+			if c == '"' {
+				inString = true
 			}
+			continue
 		}
-	case []any:
-		for _, item := range t {
-			if !jsonValueStorable(item) {
-				return false
+		switch c {
+		case '"':
+			inString = false
+		case '\\':
+			if i+1 >= len(raw) {
+				return true
 			}
+			if raw[i+1] != 'u' {
+				// `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` はまとめて読み飛ばす。
+				// **`\\` を飛ばすのが要点** — 飛ばさないと次の `u` を
+				// エスケープの開始と誤読する (`"\\u0000"` はただの 6 文字)。
+				i++
+				continue
+			}
+			if i+6 > len(raw) {
+				return true
+			}
+			v, ok := parseHex4(raw[i+2 : i+6])
+			if !ok {
+				return true
+			}
+			if v == 0 {
+				return false // 22P05
+			}
+			if v >= 0xD800 && v <= 0xDBFF {
+				// 上位サロゲートは直後に下位サロゲートのエスケープが要る。
+				if i+12 > len(raw) || raw[i+6] != '\\' || raw[i+7] != 'u' {
+					return false // 22P02
+				}
+				lo, ok2 := parseHex4(raw[i+8 : i+12])
+				if !ok2 || lo < 0xDC00 || lo > 0xDFFF {
+					return false // 22P02
+				}
+				i += 11
+				continue
+			}
+			if v >= 0xDC00 && v <= 0xDFFF {
+				return false // 単独の下位サロゲート。22P02
+			}
+			i += 5
 		}
 	}
 	return true
+}
+
+// parseHex4 reads exactly four hex digits.
+func parseHex4(b []byte) (int, bool) {
+	if len(b) != 4 {
+		return 0, false
+	}
+	v := 0
+	for _, c := range b {
+		switch {
+		case c >= '0' && c <= '9':
+			v = v<<4 | int(c-'0')
+		case c >= 'a' && c <= 'f':
+			v = v<<4 | int(c-'a'+10)
+		case c >= 'A' && c <= 'F':
+			v = v<<4 | int(c-'A'+10)
+		default:
+			return 0, false
+		}
+	}
+	return v, true
+}
+
+// PostgreSQL numeric の桁数上限 (実 PostgreSQL で境界まで実測)。
+//
+//	1e131071 は通り 1e131072 は 22003 / 9 を 131072 個は通り 131073 個は 22003
+//	1e-16383 は通り 1e-16384 は 22003 / 0.9...(16383 桁) は通り 16384 桁は 22003
+const (
+	pgNumericMaxWeight = 131072 // 整数部の桁数
+	pgNumericMaxScale  = 16383  // 小数部の桁数
+)
+
+// jsonNumbersStorable reports whether every number in the document fits
+// PostgreSQL's numeric.
+//
+// **数値はエスケープの影響を受けない**ので、こちらは decoder のトークンで歩く。
+// `UseNumber` で元の字面を保つのが要点 — float64 に落とすと桁が失われて
+// 判定できない。
+func jsonNumbersStorable(raw []byte) bool {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			// io.EOF も構文エラーもここへ来る。どちらも通す。
+			return true
+		}
+		if n, ok := tok.(json.Number); ok && !numberFitsNumeric(n.String()) {
+			return false
+		}
+	}
+}
+
+// numberFitsNumeric reports whether a JSON number literal fits numeric.
+func numberFitsNumeric(s string) bool {
+	s = strings.TrimPrefix(s, "-")
+	mant, expPart, hasExp := strings.Cut(s, "e")
+	if !hasExp {
+		mant, expPart, hasExp = strings.Cut(s, "E")
+	}
+	intPart, fracPart, _ := strings.Cut(mant, ".")
+	// 先頭 0 は桁数に数えない (`0.5` の整数部は 0 桁)。
+	intPart = strings.TrimLeft(intPart, "0")
+	exp := 0
+	if hasExp {
+		v, err := strconv.Atoi(strings.TrimPrefix(expPart, "+"))
+		if err != nil {
+			// int に入らない指数 = 確実に範囲外。
+			return false
+		}
+		exp = v
+	}
+	if len(intPart)+exp > pgNumericMaxWeight {
+		return false
+	}
+	return len(fracPart)-exp <= pgNumericMaxScale
 }

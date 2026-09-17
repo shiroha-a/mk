@@ -3,6 +3,7 @@ package drive
 import (
 	"bytes"
 	"encoding/binary"
+	"strings"
 )
 
 // hasStrippableMetadata reports whether the uploaded bytes carry metadata that
@@ -22,7 +23,7 @@ import (
 func hasStrippableMetadata(body []byte, mime string) bool {
 	switch {
 	case isJPEGBytes(body):
-		return jpegHasExif(body)
+		return jpegHasMetadata(body)
 	case isPNGBytes(body):
 		return pngHasMetadata(body)
 	case isWebPBytes(body):
@@ -56,15 +57,34 @@ func isTIFFBytes(b []byte) bool {
 	return string(b[:4]) == "II\x2a\x00" || string(b[:4]) == "MM\x00\x2a"
 }
 
-// jpegHasExif looks for the APP1 "Exif\0\0" signature.
+// jpegHasMetadata looks for the APP segment signatures listed above.
 //
 // 先頭 64KB に限るのは従来どおり。EXIF は APP1 セグメント (先頭側) に置かれる。
-func jpegHasExif(body []byte) bool {
+// jpegMetadataMarkers are the APP segment signatures that carry metadata the
+// webpublic re-encode drops.
+//
+// upstream の条件は `metadata.exif ?? iptc ?? xmp ?? tifftagPhotoshop` で、
+// **EXIF だけではない**。Lightroom / Photoshop の書き出しは GPS を
+// XMP (`exif:GPSLatitude`) にだけ持つことがあり、EXIF だけ見ていると
+// 2048px 以下でそれが素通りする。
+var jpegMetadataMarkers = [][]byte{
+	[]byte("Exif\x00\x00"),                       // APP1 EXIF
+	[]byte("http://ns.adobe.com/xap/1.0/\x00"),   // APP1 XMP
+	[]byte("http://ns.adobe.com/xmp/extension/"), // APP1 拡張 XMP
+	[]byte("Photoshop 3.0\x00"),                  // APP13 IPTC / tifftagPhotoshop
+}
+
+func jpegHasMetadata(body []byte) bool {
 	if len(body) < 12 {
 		return false
 	}
-	limit := min(len(body), 65536)
-	return bytes.Contains(body[:limit], []byte("Exif\x00\x00"))
+	head := body[:min(len(body), 65536)]
+	for _, marker := range jpegMetadataMarkers {
+		if bytes.Contains(head, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // pngHasMetadata looks for an `eXIf` chunk or an XMP-bearing `iTXt` chunk.
@@ -84,6 +104,18 @@ func pngHasMetadata(body []byte) bool {
 			if i := bytes.IndexByte(data, 0); i >= 0 && string(data[:i]) == "XML:com.adobe.xmp" {
 				found = true
 				return false
+			}
+		case "zTXt", "tEXt":
+			// **`Raw profile type exif` / `...iptc` / `...xmp` だけ拾う。**
+			// ImageMagick は `convert a.jpg a.png` の既定で EXIF をこの形へ
+			// 移すので、見ないと変換済みの写真から GPS が漏れる。
+			// `Software` のような無害な注記は拾わない — 拾うとほぼ全ての PNG が
+			// 再エンコードされる。
+			if i := bytes.IndexByte(data, 0); i >= 0 {
+				if key := string(data[:i]); strings.HasPrefix(key, "Raw profile type ") {
+					found = true
+					return false
+				}
 			}
 		}
 		return true

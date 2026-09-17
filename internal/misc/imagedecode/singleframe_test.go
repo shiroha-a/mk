@@ -200,3 +200,101 @@ func TestIsGIF(t *testing.T) {
 	assert.False(t, isGIF([]byte("\x89PNG\r\n\x1a\n")))
 	assert.False(t, isGIF(nil))
 }
+
+// exifOrientationPNG builds a non-square PNG carrying an `eXIf` chunk that
+// declares orientation 6 (90 度回転)、optionally as an APNG.
+//
+// **imaging の pipeline を通ったかどうかを、色ではなく向きで見る。** ICC
+// プロファイルを組むより軽く、通ったかどうかが Bounds に出るので判定が確実。
+func exifOrientationPNG(t *testing.T, animated bool) []byte {
+	t.Helper()
+	src := image.NewNRGBA(image.Rect(0, 0, 8, 4))
+	src.Set(0, 0, color.NRGBA{R: 1, G: 2, B: 3, A: 255})
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, src))
+	base := buf.Bytes()
+
+	idat := bytes.Index(base, []byte("IDAT"))
+	require.Positive(t, idat)
+	idatStart := idat - 4
+
+	// TIFF header + IFD 1 件 (tag 0x0112 Orientation / type SHORT / value 6)。
+	exif := make([]byte, 0, 26)
+	exif = append(exif, 'I', 'I', 0x2a, 0x00)
+	exif = binary.LittleEndian.AppendUint32(exif, 8)
+	exif = binary.LittleEndian.AppendUint16(exif, 1)
+	exif = binary.LittleEndian.AppendUint16(exif, 0x0112)
+	exif = binary.LittleEndian.AppendUint16(exif, 3)
+	exif = binary.LittleEndian.AppendUint32(exif, 1)
+	exif = binary.LittleEndian.AppendUint16(exif, 6)
+	exif = append(exif, 0, 0)
+	exif = binary.LittleEndian.AppendUint32(exif, 0)
+
+	var out bytes.Buffer
+	out.Write(base[:idatStart])
+	out.Write(pngChunk("eXIf", exif))
+	if animated {
+		acTL := make([]byte, 8)
+		binary.BigEndian.PutUint32(acTL[0:], 1)
+		out.Write(pngChunk("acTL", acTL))
+		fcTL := make([]byte, 26)
+		binary.BigEndian.PutUint32(fcTL[4:], 8)
+		binary.BigEndian.PutUint32(fcTL[8:], 4)
+		binary.BigEndian.PutUint16(fcTL[20:], 1)
+		binary.BigEndian.PutUint16(fcTL[22:], 10)
+		out.Write(pngChunk("fcTL", fcTL))
+	}
+	out.Write(base[idatStart:])
+	return out.Bytes()
+}
+
+// **APNG でも imaging の pipeline を通すこと。**
+//
+// 1 稿目は `png.Decode` で 1 コマ目を取っていたが、それだと EXIF の向き補正も
+// **ICC / CICP → sRGB 変換も落ちる** (敵対的レビューで Display P3 の APNG が
+// R チャンネル 32/255 ずれることを実測された)。カスタム絵文字は APNG が
+// よく使われるので、静止画化のたびに色や向きが変わるのは受け入れられない。
+//
+// いまは `acTL` / `fcTL` / `fdAT` だけ落として静止 PNG として imaging へ渡す
+// ので、フレームの増幅は起きないまま扱いが普通の PNG と揃う。
+func TestDecode_APNGKeepsTheImagingPipeline(t *testing.T) {
+	still := exifOrientationPNG(t, false)
+	anim := exifOrientationPNG(t, true)
+	require.False(t, isAnimatedPNG(still))
+	require.True(t, isAnimatedPNG(anim))
+
+	want, err := imaging.Decode(bytes.NewReader(still), imaging.AutoOrientation(true))
+	require.NoError(t, err)
+	got, err := Decode(anim)
+	require.NoError(t, err)
+	assert.Equal(t, want.Bounds(), got.Bounds(), "APNG だけ向き補正が落ちている")
+
+	// **補正が実際に走っていること**まで見る。これが無いと「どちらも無補正」でも
+	// テストが通り、回帰を検出できない。8x4 が 4x8 になる。
+	raw, err := png.Decode(bytes.NewReader(still))
+	require.NoError(t, err)
+	assert.NotEqual(t, raw.Bounds(), want.Bounds(),
+		"eXIf の向き補正が走っていない (この細工では経路を踏めていない)")
+	assert.Equal(t, 4, got.Bounds().Dx())
+	assert.Equal(t, 8, got.Bounds().Dy())
+}
+
+// アニメーション用チャンクだけを落とすこと。
+func TestStripAPNGAnimation(t *testing.T) {
+	anim := exifOrientationPNG(t, true)
+	still := stripAPNGAnimation(anim)
+	require.NotNil(t, still)
+
+	assert.False(t, bytes.Contains(still, []byte("acTL")), "acTL が残っている")
+	assert.False(t, bytes.Contains(still, []byte("fcTL")), "fcTL が残っている")
+	assert.True(t, bytes.Contains(still, []byte("eXIf")), "eXIf まで落としている")
+	assert.True(t, bytes.Contains(still, []byte("IDAT")))
+	assert.True(t, bytes.Contains(still, []byte("IEND")))
+
+	// アニメーションでない PNG は書き換えない (nil を返して呼び出し側に任せる)。
+	assert.Nil(t, stripAPNGAnimation(exifOrientationPNG(t, false)))
+	// 壊れた入力でも panic せず nil。
+	assert.NotPanics(t, func() {
+		assert.Nil(t, stripAPNGAnimation([]byte("\x89PNG\r\n\x1a\n\x00\x00")))
+	})
+}

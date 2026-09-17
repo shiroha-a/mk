@@ -1531,9 +1531,17 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 			// `FindMessageByURI` が hit して黙って捨てられる (= 相手のメッセージを
 			// 先回りして潰せる)。
 			//
+			// **`sameDeliveryHost` を使う。`assertRequestHostMatches` では緩い。**
+			// あちらは `normalizeMatchHost` 経由で **`www.` を剥がして同一視する**
+			// ので、`www.remote.example` の actor が `remote.example` の id を
+			// 名乗れてしまう。`normalizeMatchHost` 自身のコメントが「actor が
+			// 申告する値の host 検証には `sameDeliveryHost` を使うこと」と書いて
+			// いて (#2662)、chat の id はまさに actor の申告値。note 側の
+			// `validateNote` も `punyHost` 比較で `www.` を剥がさない。
+			//
 			// **1-on-1 と room の両方の手前に置く。** どちらも同じ `probe.ID` を
 			// メッセージの uri として保存する。
-			if err := assertRequestHostMatches(act.Actor, probe.ID); err != nil {
+			if !sameDeliveryHost(act.Actor, probe.ID) {
 				slog.Warn("federation: chat message id host does not match delivering actor",
 					"actor", act.Actor, "id", probe.ID)
 				// retry では解決しないので ack して drop する。
@@ -2895,6 +2903,15 @@ func (p *Processor) handleChatMessage(act genericActivity) error {
 	}
 	if !recipient.IsLocal() {
 		return fmt.Errorf("chat message: recipient %s is not local", raw.To)
+	}
+	// **id を配送元ホストに縛る。** `Create` + `_misskey_talk` 側と同じ理由で、
+	// ここも `act.ID` をそのままメッセージの uri として保存する
+	// (`CreateMessageViaAP` の呼び出しはこの 2 箇所だけ)。片方だけ塞いでも、
+	// この兄弟の活動型で同じ squat が通る。
+	if !sameDeliveryHost(act.Actor, act.ID) {
+		slog.Warn("federation: chat message id host does not match delivering actor",
+			"actor", act.Actor, "id", act.ID)
+		return ErrUnsupportedActivity
 	}
 	mfmSource := ""
 	if raw.Source != nil && raw.Source.MediaType == "text/x.misskeymarkdown" {

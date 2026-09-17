@@ -931,6 +931,18 @@ func (s *Service) detectSensitiveOfficial(ctx context.Context, body []byte, mime
 		return false
 	}
 
+	// **ここも枠を取る (#3037)。** `NormalizeImageForDetection` は
+	// `imagedecode.Decode` + `imaging.Fill` で、`processImage` と同じ大きさの
+	// 中間バッファを確保する。枠の外に置くと、並行アップロードのぶんだけ
+	// 無制限に積み上がって「同時にデコードする本数を縛る」という枠の不変条件が
+	// 成立しない。
+	release, slotOK := s.acquireMediaSlot(ctx)
+	if !slotOK {
+		slog.Warn("drive: センシティブ判定の枠を待っている間に中断されました", "mime", mime)
+		return false
+	}
+	defer release()
+
 	normalized, err := NormalizeImageForDetection(body, mime)
 	if err != nil {
 		slog.Warn("drive: image normalization for detection failed", "mime", mime, "err", err)
@@ -965,6 +977,22 @@ func (s *Service) generateAlts(ctx context.Context, body []byte, mimeType string
 	if !image && !video {
 		return nil
 	}
+	if video {
+		// **ffmpeg は枠の外で回す。** 別プロセスなので Go ヒープの中間バッファを
+		// 1 つも抱えない一方、`exec.Command` は context も timeout も持たない
+		// ので、枠の内側に入れると**動画 1 本がその間ずっと枠を占有する**。
+		// 既定枠は `GOMAXPROCS / 2` (2 core の VPS では 1) なので、大きい動画
+		// 1 本で画像アップロードのサムネイル生成が全部止まる。
+		//
+		// media proxy の枠も同じ理由で「囲むのは decode/resize/encode だけ」と
+		// 決めてある (`internal/core/mediaproxy/cpulimit.go`)。
+		thumb, _ := s.videoProcessor.GenerateThumbnail(body, mimeType)
+		if thumb != nil {
+			return &generateAltsResult{thumbnail: thumb}
+		}
+		return nil
+	}
+
 	release, ok := s.acquireMediaSlot(ctx)
 	if !ok {
 		// **ctx が切れたときだけここへ来る。** 呼び出し元が諦めている状態なので
@@ -973,15 +1001,7 @@ func (s *Service) generateAlts(ctx context.Context, body []byte, mimeType string
 		return nil
 	}
 	defer release()
-
-	if image {
-		return s.processImage(body, mimeType)
-	}
-	thumb, _ := s.videoProcessor.GenerateThumbnail(body, mimeType)
-	if thumb != nil {
-		return &generateAltsResult{thumbnail: thumb}
-	}
-	return nil
+	return s.processImage(body, mimeType)
 }
 
 // acquireMediaSlot takes one processing slot, returning the release func.

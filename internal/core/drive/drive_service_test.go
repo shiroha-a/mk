@@ -1477,7 +1477,48 @@ func TestDelete_WithoutLocalStorageFallsBackToPrimary(t *testing.T) {
 	assert.Contains(t, objStore.deleted, "k")
 }
 
-// blockingVideoProcessor reports the peak number of concurrent calls.
+// blockingImageProcessor reports the peak number of concurrent calls.
+//
+// **画像で測る。** 枠が守っているのは「同時に確保される中間バッファの本数」で、
+// その根拠 (`imagedecode` の pixel cap / `processImage` の 4 回デコード) は
+// すべて画像の話。動画で測っていた 1 稿目は、**画像だけ枠を外す変異が素通り
+// する**ことを敵対的レビューで実測された。
+type blockingImageProcessor struct {
+	mu       sync.Mutex
+	inFlight int
+	peak     int
+	release  chan struct{}
+}
+
+func (b *blockingImageProcessor) enter() {
+	b.mu.Lock()
+	b.inFlight++
+	if b.inFlight > b.peak {
+		b.peak = b.inFlight
+	}
+	b.mu.Unlock()
+	<-b.release
+	b.mu.Lock()
+	b.inFlight--
+	b.mu.Unlock()
+}
+
+func (b *blockingImageProcessor) GetDimensions(_ []byte, _ string) (int, int, error) {
+	b.enter()
+	return 1, 1, nil
+}
+func (b *blockingImageProcessor) CalculateBlurhash(_ []byte, _ string) (string, error) {
+	return "", nil
+}
+func (b *blockingImageProcessor) GenerateThumbnail(_ []byte, _ string) (*drive.ProcessedImage, error) {
+	return nil, nil
+}
+func (b *blockingImageProcessor) GenerateWebpublic(_ []byte, _ string) (*drive.ProcessedImage, error) {
+	return nil, nil
+}
+
+// blockingVideoProcessor blocks so tests can observe whether the video path
+// takes a slot.
 type blockingVideoProcessor struct {
 	mu       sync.Mutex
 	inFlight int
@@ -1499,40 +1540,41 @@ func (b *blockingVideoProcessor) GenerateThumbnail(_ []byte, _ string) (*drive.P
 	return &drive.ProcessedImage{Data: []byte("thumb"), MimeType: "image/webp"}, nil
 }
 
-// **同時実行枠が実際に効いていること。**
-//
-// デコードは 1 枚で数百 MB を確保しうる (`imagedecode.MaxPixels` は 64MP =
-// NRGBA 268MB) ので、枠が無いと認証済みの利用者が並行アップロードを投げるだけで
-// 確保量を掛け算できた。Go の大確保失敗は `throw("out of memory")` で recover
-// できないため、プロセスごと落ちる。
-func TestGenerateAlts_ConcurrencyIsBounded(t *testing.T) {
-	svc, _, _ := newSvc(t)
-	proc := &blockingVideoProcessor{release: make(chan struct{})}
-	svc.SetVideoProcessor(proc)
-	svc.SetMediaProcessingConcurrency(1)
-
-	const callers = 4
-	var wg sync.WaitGroup
-	for i := 0; i < callers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			svc.GenerateAltsCtxForTest(context.Background(), []byte("video"), "video/mp4")
-		}()
-	}
-
-	// 全員が枠待ちに入るまで少し待ってから解放する。枠が効いていなければ
-	// この時点で peak は callers になっている。
+// waitForInFlight waits until the probe reports at least n concurrent calls.
+func waitForInFlight(get func() int, n int) {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		proc.mu.Lock()
-		n := proc.inFlight
-		proc.mu.Unlock()
-		if n >= 1 {
-			break
+		if get() >= n {
+			return
 		}
 		time.Sleep(time.Millisecond)
 	}
+}
+
+// **同時実行枠が実際に効いていること (画像経路)。**
+//
+// デコードは 1 枚で数百 MB を確保しうるので、枠が無いと認証済みの利用者が
+// 並行アップロードを投げるだけで確保量を掛け算できる。Go の大確保失敗は
+// `throw("out of memory")` で recover できないため、プロセスごと落ちる。
+func TestGenerateAlts_ConcurrencyIsBounded(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	proc := &blockingImageProcessor{release: make(chan struct{})}
+	svc.SetImageProcessor(proc)
+	svc.SetMediaProcessingConcurrency(1)
+
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.GenerateAltsCtxForTest(context.Background(), []byte("img"), "image/png")
+		}()
+	}
+	waitForInFlight(func() int {
+		proc.mu.Lock()
+		defer proc.mu.Unlock()
+		return proc.inFlight
+	}, 1)
 	time.Sleep(50 * time.Millisecond)
 	close(proc.release)
 	wg.Wait()
@@ -1545,29 +1587,23 @@ func TestGenerateAlts_ConcurrencyIsBounded(t *testing.T) {
 // 枠を広げれば同時に走る。**これが無いと「常に 1 本ずつ」でもテストが通る。**
 func TestGenerateAlts_ConcurrencyHonoursTheConfiguredSize(t *testing.T) {
 	svc, _, _ := newSvc(t)
-	proc := &blockingVideoProcessor{release: make(chan struct{})}
-	svc.SetVideoProcessor(proc)
+	proc := &blockingImageProcessor{release: make(chan struct{})}
+	svc.SetImageProcessor(proc)
 	svc.SetMediaProcessingConcurrency(3)
 
 	var wg sync.WaitGroup
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			svc.GenerateAltsCtxForTest(context.Background(), []byte("video"), "video/mp4")
+			svc.GenerateAltsCtxForTest(context.Background(), []byte("img"), "image/png")
 		}()
 	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitForInFlight(func() int {
 		proc.mu.Lock()
-		n := proc.inFlight
-		proc.mu.Unlock()
-		if n == 3 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+		defer proc.mu.Unlock()
+		return proc.inFlight
+	}, 3)
 	close(proc.release)
 	wg.Wait()
 
@@ -1576,28 +1612,53 @@ func TestGenerateAlts_ConcurrencyHonoursTheConfiguredSize(t *testing.T) {
 	assert.Equal(t, 3, proc.peak, "枠を広げても 1 本ずつになっている")
 }
 
-// 枠待ちの間に呼び出し元が諦めたら処理しない (best-effort の契約どおり nil)。
-func TestGenerateAlts_CancelledWhileWaiting(t *testing.T) {
+// **動画は枠を取らない。** ffmpeg は別プロセスで Go ヒープの中間バッファを
+// 抱えず、`exec.Command` は context も timeout も持たないので、枠の内側に
+// 入れると動画 1 本が画像処理を全部止める。
+func TestGenerateAlts_VideoDoesNotTakeASlot(t *testing.T) {
 	svc, _, _ := newSvc(t)
 	proc := &blockingVideoProcessor{release: make(chan struct{})}
 	svc.SetVideoProcessor(proc)
 	svc.SetMediaProcessingConcurrency(1)
 
+	var wg sync.WaitGroup
+	for range 3 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.GenerateAltsCtxForTest(context.Background(), []byte("video"), "video/mp4")
+		}()
+	}
+	waitForInFlight(func() int {
+		proc.mu.Lock()
+		defer proc.mu.Unlock()
+		return proc.inFlight
+	}, 3)
+	close(proc.release)
+	wg.Wait()
+
+	proc.mu.Lock()
+	defer proc.mu.Unlock()
+	assert.Equal(t, 3, proc.peak, "ffmpeg が枠を占有している (枠 1 で 1 本ずつになっている)")
+}
+
+// 枠待ちの間に呼び出し元が諦めたら処理しない (best-effort の契約どおり nil)。
+func TestGenerateAlts_CancelledWhileWaiting(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	proc := &blockingImageProcessor{release: make(chan struct{})}
+	svc.SetImageProcessor(proc)
+	svc.SetMediaProcessingConcurrency(1)
+
 	holder := make(chan struct{})
 	go func() {
 		defer close(holder)
-		svc.GenerateAltsCtxForTest(context.Background(), []byte("video"), "video/mp4")
+		svc.GenerateAltsCtxForTest(context.Background(), []byte("img"), "image/png")
 	}()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
+	waitForInFlight(func() int {
 		proc.mu.Lock()
-		n := proc.inFlight
-		proc.mu.Unlock()
-		if n == 1 {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
+		defer proc.mu.Unlock()
+		return proc.inFlight
+	}, 1)
 
 	// **待たずに済む形で呼ぶ。** guard が無いと processor の中で止まるので、
 	// 直接呼ぶとテストごとデッドロックして「タイムアウトで落ちた」という
@@ -1606,7 +1667,7 @@ func TestGenerateAlts_CancelledWhileWaiting(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	done := make(chan bool, 1)
-	go func() { done <- svc.GenerateAltsCtxForTest(ctx, []byte("video"), "video/mp4") }()
+	go func() { done <- svc.GenerateAltsCtxForTest(ctx, []byte("img"), "image/png") }()
 
 	select {
 	case processed := <-done:

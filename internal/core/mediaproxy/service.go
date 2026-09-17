@@ -824,6 +824,16 @@ func (s *Service) processResize(data []byte, contentType string, width, height i
 
 	img, err := decodeImage(data, contentType)
 	if err != nil {
+		// **pixel cap に当たったものを素通ししない (#3037)。** cap の判定を
+		// `image.DecodeConfig` の段へ前倒しした結果、64MP 超はデコード
+		// **エラー**になってこの枝へ落ちるようになった。素通しすると
+		// 74 バイトのダミー PNG だったものが**最大 32MiB の原本**に変わり、
+		// しかも成功応答なので `max-age=31536000, immutable` で CDN に焼かれる。
+		// タイムラインに出るたび全閲覧者へ配られ、各ブラウザが 9 億画素を
+		// デコードする — 塞ごうとした爆弾を増幅して配る形になる。
+		if errors.Is(err, imagedecode.ErrTooManyPixels) {
+			return makeDummyPNG(), nil
+		}
 		// デコード失敗時は元データをそのまま返す
 		return makeResult(data, contentType), nil
 	}
@@ -902,6 +912,10 @@ func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, e
 
 	img, err := decodeImage(data, contentType)
 	if err != nil {
+		// cap に当たったものは従来どおりダミーへ (`processResize` と同じ理由)。
+		if errors.Is(err, imagedecode.ErrTooManyPixels) {
+			return makeDummyPNG(), nil
+		}
 		return nil, ErrNotFound
 	}
 	if exceedsPixelCap(img) {
