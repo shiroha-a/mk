@@ -171,7 +171,9 @@ func decodeImage(body []byte, mimeType string) (image.Image, error) {
 	// upstream は `limitInputPixels` を上書きしないので、アップロードで通る
 	// 上限は sharp の既定 (0x3FFF^2) になる。ここを揃えても宣言寸法での爆弾
 	// (46341^2 = 21 億画素) は引き続き弾ける。
-	img, err := imagedecode.DecodeWithPixelCap(body, imagedecode.UpstreamMaxPixels)
+	// **バイト予算は寸法の cap とは別 (#3038)。** 268MP をそのまま
+	// バイトに読み替えると 1.07GB になり、2GB の VPS が 1 本で落ちる。
+	img, err := imagedecode.DecodeWithLimits(body, imagedecode.UpstreamMaxPixels, imagedecode.DriveMaxRasterBytes)
 	if err != nil {
 		return nil, fmt.Errorf("unsupported image format: %s: %w", mimeType, err)
 	}

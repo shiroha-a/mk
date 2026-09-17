@@ -102,6 +102,23 @@ func Decode(data []byte) (image.Image, error) {
 // 引く経路なので厳しく (64MP)、drive は認証済みのアップロードで
 // `maxFileSize` と同時実行枠にも縛られるので upstream と同じ値にする。
 func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
+	return DecodeWithLimits(data, maxPixels, maxPixels*rasterBytesPerPixelBaseline)
+}
+
+// DecodeWithLimits decodes data, refusing it when the header declares more than
+// maxPixels pixels or when the raster would need more than maxRasterBytes.
+//
+// **画素数とバイト数を分けて渡せるようにする (#3038)。** drive は宣言寸法の
+// cap を upstream と同じ 268MP に揃えてあるが、それをバイト予算に読み替えると
+// **1.07GB** になり、`GOMAXPROCS/2 = 1` の 2GB VPS では 1 本で落ちる。実測で
+// 16383x16383 の全画素ゼロ PNG は **764 KiB** で作れて 268MP にちょうど一致
+// するので、認証済みの利用者が小さなアップロードで RAM を使い切れた
+// (`processImage` の 4 段を通してピーク RSS 2.23 GiB / 13.6 秒)。
+//
+// 宣言寸法の cap を下げないのは、**102MP の実写真がサムネイルと webpublic を
+// 失う**のを避けるため (#3037 でその回帰を実際に出した)。バイト予算だけを
+// 別に持てば、寸法の互換を保ったまま確保量を縛れる。
+func DecodeWithLimits(data []byte, maxPixels, maxRasterBytes int64) (image.Image, error) {
 	// **wasm のデコーダへ渡す前に入力の大きさを見る (#3037)。**
 	// 下の `image.DecodeConfig` は**ヘッダを読むためだけでも wasm を起動して
 	// 入力を丸ごと linear memory へ写す**ので、この判定はその前に置く。
@@ -127,10 +144,17 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 		// `GOMAXPROCS/2`) が 4 あれば 2GB を超える。cap を通っているので
 		// 今までは何も止めなかった。
 		//
-		// 予算は「cap ちょうどの 8bit 画像」= `maxPixels * 4` バイト。
-		// 8bit の画像にとっては従来と同じ判定で、**通る集合は変わらない**。
+		// **見積もりは 4 バイト/画素を下回らせない (#3038)。**
+		// デコード後の処理 (`resizeFit` / `imaging.Fill`) は NRGBA へ変換する
+		// ので、グレースケールやパレットの画像も**パイプラインのピークでは
+		// 4 バイト/画素**になる。デコード直後の値だけで見ると、268MP の
+		// 8bit グレースケール PNG が 268MB と見積もられて通り、その後の変換で
+		// 1.07GB を確保する。
 		bpp := decodedBytesPerPixelFor(data, cfg.ColorModel)
-		if px*bpp > maxPixels*rasterBytesPerPixelBaseline {
+		if bpp < rasterBytesPerPixelBaseline {
+			bpp = rasterBytesPerPixelBaseline
+		}
+		if px*bpp > maxRasterBytes {
 			return nil, fmt.Errorf("%w: %dx%d at %d bytes/pixel",
 				ErrTooManyPixels, cfg.Width, cfg.Height, bpp)
 		}
@@ -256,6 +280,23 @@ func isJPEGXL(data []byte) bool {
 func isWebP(data []byte) bool {
 	return len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
 }
+
+// DriveMaxRasterBytes bounds how much one drive upload may allocate.
+//
+// **宣言寸法の cap とは別に持つ (#3038)。** drive の cap は upstream と同じ
+// 268MP で、そのままバイト予算に読み替えると 1.07GB になる。既定の同時実行枠
+// は `GOMAXPROCS / 2` (2 core の VPS では 1) なので、**764 KiB のアップロード
+// 1 本で 2GB の RAM を使い切れた** (実測ピーク RSS 2.23 GiB)。
+//
+// 512MiB = 8bit で約 134MP。手元にある最大級の実写真 (102MP = 11648x8736、
+// 388MiB) は通り、268MP の細工した PNG (1024MiB) は落ちる。**落ちたときは
+// 「webpublic を作れなかった」経路に入ってアップロードごと拒否される**ので、
+// #3037 で問題になった「原本が公開側へ出る」形にはならない。
+//
+// `processImage` は寸法 / blurhash / サムネイル / webpublic で**順に 4 回
+// デコードする**ので、実際のピークはこの値の 2 倍前後になる。枠と合わせて
+// 「同時に確保されうる総量」を見積もること。
+const DriveMaxRasterBytes int64 = 512 << 20
 
 // rasterBytesPerPixelBaseline is the bytes/pixel that MaxPixels was sized for.
 //

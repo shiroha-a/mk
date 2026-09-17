@@ -481,3 +481,64 @@ func insertPNGChunk(t *testing.T, src []byte, typ string, data []byte) []byte {
 	out = binary.BigEndian.AppendUint32(out, crc32.ChecksumIEEE(body))
 	return append(out, src[pos:]...)
 }
+
+// **小さな入力で巨大なラスタを確保させない (#3038)。**
+//
+// drive の宣言寸法の cap は upstream と同じ 268MP だが、そのままバイト予算に
+// 読み替えると 1.07GB になる。既定の同時実行枠は `GOMAXPROCS / 2` (2 core の
+// VPS では 1) なので、**764 KiB のアップロード 1 本で 2GB の RAM を使い切れた**
+// (実測ピーク RSS 2.23 GiB / 13.6 秒)。
+func TestDecodeWithLimits_RejectsSmallInputsThatAllocateTooMuch(t *testing.T) {
+	// 16383x16383 = 268,402,689 画素 = UpstreamMaxPixels にちょうど一致する。
+	// 宣言寸法の cap は通り抜けるので、バイト予算だけが止められる。
+	const edge = 16383
+	require.Equal(t, UpstreamMaxPixels, int64(edge)*int64(edge), "寸法の cap にちょうど一致していない")
+
+	bomb := pngHeaderOnly(edge, edge, 8, 2) // 8bit truecolor
+	require.Less(t, len(bomb), 1<<10, "ヘッダだけのはずが大きい")
+
+	_, err := DecodeWithLimits(bomb, UpstreamMaxPixels, DriveMaxRasterBytes)
+	require.ErrorIs(t, err, ErrTooManyPixels, "268MP を通している (1.07GB を確保する)")
+
+	// **寸法の cap だけでは止まらないことも固定する。** 予算を従来どおり
+	// `maxPixels * 4` にすると通ってしまう = この修正が効いている証拠。
+	_, err = DecodeWithLimits(bomb, UpstreamMaxPixels, UpstreamMaxPixels*4)
+	assert.NotErrorIs(t, err, ErrTooManyPixels, "寸法の cap で止まってしまい、予算の効果を測れていない")
+}
+
+// **実在する最大級の写真は通す。** 厳しくしすぎると 102MP の実写真が
+// サムネイルと webpublic を失い、#3037 で塞いだ「原本が公開側へ出る」形に
+// 戻る (今は拒否に倒れるが、正当な写真を拒否するのは別の壊れ方)。
+func TestDecodeWithLimits_AcceptsTheLargestRealPhotos(t *testing.T) {
+	// Fujifilm GFX100 = 11648x8736 = 101,744,128 画素 (8bit で 388MiB)。
+	_, err := DecodeWithLimits(pngHeaderOnly(11648, 8736, 8, 2), UpstreamMaxPixels, DriveMaxRasterBytes)
+	assert.NotErrorIs(t, err, ErrTooManyPixels, "102MP の実写真を拒否している")
+}
+
+// **グレースケールも 4 バイト/画素で見積もる。**
+//
+// デコード直後は 1 バイト/画素でも、`resizeFit` / `imaging.Fill` が NRGBA へ
+// 変換するのでパイプラインのピークは 4 倍になる。デコード直後の値だけで
+// 見ると 268MP のグレースケールが 268MB と見積もられて通り、その後の変換で
+// 1.07GB を確保する。
+func TestDecodeWithLimits_GrayscaleIsBudgetedAtTheBaseline(t *testing.T) {
+	_, err := DecodeWithLimits(pngHeaderOnly(16383, 16383, 8, 0), UpstreamMaxPixels, DriveMaxRasterBytes)
+	assert.ErrorIs(t, err, ErrTooManyPixels, "グレースケールを 1 バイト/画素で見積もって通している")
+}
+
+// pngHeaderOnly builds a PNG whose IHDR declares the given shape. The pixel
+// data is absent — the caps are applied from DecodeConfig.
+func pngHeaderOnly(w, h uint32, depth, colorType byte) []byte {
+	ihdr := []byte{
+		byte(w >> 24), byte(w >> 16), byte(w >> 8), byte(w),
+		byte(h >> 24), byte(h >> 16), byte(h >> 8), byte(h),
+		depth, colorType, 0, 0, 0,
+	}
+	b := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 13}
+	b = append(b, 'I', 'H', 'D', 'R')
+	b = append(b, ihdr...)
+	crc := crc32.NewIEEE()
+	_, _ = crc.Write([]byte("IHDR"))
+	_, _ = crc.Write(ihdr)
+	return binary.BigEndian.AppendUint32(b, crc.Sum32())
+}
