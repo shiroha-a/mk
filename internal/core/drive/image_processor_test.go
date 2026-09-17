@@ -121,27 +121,27 @@ func TestIsAnimatedMime(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// hasExifMarker
+// hasStrippableMetadata
 // ---------------------------------------------------------------------------
 
-func TestHasExifMarker_WithExif(t *testing.T) {
+func TestHasStrippableMetadata_JPEGWithExif(t *testing.T) {
 	data := makeTestJPEGWithExif(10, 10)
-	assert.True(t, hasExifMarker(data))
+	assert.True(t, hasStrippableMetadata(data, "image/jpeg"))
 }
 
-func TestHasExifMarker_WithoutExif(t *testing.T) {
+func TestHasStrippableMetadata_JPEGWithoutExif(t *testing.T) {
 	data := makeTestJPEG(10, 10)
-	assert.False(t, hasExifMarker(data))
+	assert.False(t, hasStrippableMetadata(data, "image/jpeg"))
 }
 
-func TestHasExifMarker_NotJPEG(t *testing.T) {
+func TestHasStrippableMetadata_PlainPNG(t *testing.T) {
 	data := makeTestPNG(10, 10)
-	assert.False(t, hasExifMarker(data))
+	assert.False(t, hasStrippableMetadata(data, "image/png"))
 }
 
-func TestHasExifMarker_TooShort(t *testing.T) {
-	assert.False(t, hasExifMarker([]byte{0xFF, 0xD8}))
-	assert.False(t, hasExifMarker(nil))
+func TestHasStrippableMetadata_TooShort(t *testing.T) {
+	assert.False(t, hasStrippableMetadata([]byte{0xFF, 0xD8}, "image/jpeg"))
+	assert.False(t, hasStrippableMetadata(nil, "image/jpeg"))
 }
 
 // ---------------------------------------------------------------------------

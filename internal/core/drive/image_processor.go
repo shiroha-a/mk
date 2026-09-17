@@ -204,7 +204,7 @@ func (p *DefaultImageProcessor) GenerateWebpublic(body []byte, mimeType string) 
 
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
-	hasExif := hasExifMarker(body)
+	hasExif := hasStrippableMetadata(body, mimeType)
 
 	// AVIF は Mastodon / MS Edge が表示できないため、寸法やメタデータに
 	// 関わらず必ず WebP の webpublic を作る (upstream DriveService の
@@ -264,20 +264,4 @@ func (p *DefaultImageProcessor) CalculateBlurhash(body []byte, mimeType string) 
 	// blurhash.Encode は xComp/yComp が 1-9 の範囲内であれば常に成功する
 	hash, _ := blurhash.Encode(blurhashXComp, blurhashYComp, nrgba)
 	return hash, nil
-}
-
-// hasExifMarker checks if the image bytes contain an EXIF marker.
-// JPEG の APP1 (0xFF 0xE1) + "Exif\0\0" パターンを検索する。
-func hasExifMarker(body []byte) bool {
-	if len(body) < 12 {
-		return false
-	}
-	// JPEG 先頭の SOI マーカー確認
-	if body[0] != 0xFF || body[1] != 0xD8 {
-		return false // JPEG でなければ EXIF なしとみなす
-	}
-	// APP1 マーカー + Exif ヘッダを探す (先頭 64KB 以内)
-	limit := min(len(body), 65536)
-	exifSig := []byte{0x45, 0x78, 0x69, 0x66, 0x00, 0x00} // "Exif\0\0"
-	return bytes.Contains(body[:limit], exifSig)
 }
