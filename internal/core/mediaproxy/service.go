@@ -14,6 +14,7 @@ import (
 	"math"
 	"mime"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -114,6 +115,11 @@ var (
 	ErrNotFound     = errors.New("mediaproxy: resource not found")
 	ErrBadRequest   = errors.New("mediaproxy: bad request")
 	ErrTooLarge     = errors.New("mediaproxy: file too large")
+	// ErrUpstreamUnavailable はリモートからバイト列を取れなかったことを表す
+	// (#3034)。**「無い」とは言えない**ので `ErrNotFound` と分ける — DNS
+	// 失敗・接続拒否・TLS エラー・タイムアウトはどれもリモート側の一時障害
+	// で、復旧すれば同じ URL が引ける。
+	ErrUpstreamUnavailable = errors.New("mediaproxy: upstream fetch failed")
 )
 
 // browsersafeMIMEs lists MIME types safe to serve inline in browsers.
@@ -495,6 +501,20 @@ func (s *Service) swapToVariant(accessKey string, mode ProxyMode) (string, strin
 
 // fetchRemote downloads a file from a remote URL.
 func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode, out OutputFormat, animated bool) (*ProxyResult, error) {
+	// **取りに行けない URL は「リモートの障害」ではない (#3034)。**
+	// 相対 URL (`/identicon/<id>`) や `data:` はここまで来るが、そもそも
+	// `httpClient.Do` には渡せない。それを 502 + 短期キャッシュにすると、
+	// (a) 監視で「相手インスタンスが落ちている」と読め、(b) 恒久的に直らない
+	// ものを 5 分ごとに引き直し続ける。
+	//
+	// **`http.NewRequestWithContext` より前に置く。** あちらは内部で同じ
+	// `url.Parse` を先に通すので、後ろに置くと parse 失敗が
+	// `mediaproxy: create request` で返ってこの判定に届かず、制御文字入りの
+	// URL のような「恒久的に取りに行けない」ものが generic 500 に落ちる。
+	if u, perr := url.Parse(rawURL); perr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, ErrBadRequest
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("mediaproxy: create request: %w", err)
@@ -504,7 +524,18 @@ func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
-		return nil, ErrNotFound
+		// **種別を問わず `ErrNotFound` に潰してはいけない (#3034)。**
+		// handler はそれを 404 + `Cache-Control: max-age=86400` で返すので、
+		// DNS 失敗・接続拒否・TLS エラー・タイムアウトといったリモート側の
+		// 一時障害が、CDN に「この画像は存在しない」として 1 日焼き付く。
+		// #2913 (403 が 1 日キャッシュされてアイコンが 1 日壊れた) と同型で、
+		// #2792 の「lookup error を種別を見ずに 4xx へ潰さない」にも反する。
+		//
+		// **`%w` を 2 つ使うのが要点。** `http.Client` は cancel / timeout を
+		// `*url.Error` で包んで返すので、こう書くと
+		// `errors.Is(err, context.Canceled)` が生き残り、handler が利用者の
+		// 離脱を 499 に振り分けられる (潰していた頃は 404 になっていた)。
+		return nil, fmt.Errorf("%w: %w", ErrUpstreamUnavailable, err)
 	}
 	defer resp.Body.Close()
 
@@ -524,7 +555,10 @@ func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode
 	// Content-Lengthが嘘や未設定の場合でもサイレント切り捨てを防ぐ
 	data, err := io.ReadAll(io.LimitReader(resp.Body, maxDownload+1))
 	if err != nil {
-		return nil, fmt.Errorf("mediaproxy: read remote: %w", err)
+		// 途中で切れた転送も上と同じ「取れなかった」なので 502 側へ倒す
+		// (#3034)。`%w` で包むので `context.Canceled` / `DeadlineExceeded`
+		// の判定は従来どおり生きる。
+		return nil, fmt.Errorf("%w: read remote: %w", ErrUpstreamUnavailable, err)
 	}
 	if int64(len(data)) > maxDownload {
 		return nil, ErrTooLarge
