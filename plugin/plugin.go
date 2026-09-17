@@ -23,6 +23,7 @@ package plugin
 import (
 	"fmt"
 	"log/slog"
+	"net/http"
 	"sort"
 	"sync"
 )
@@ -229,6 +230,24 @@ type Context interface {
 	// [Definition.Peered] を立てていない場合、呼び出しはエラーを返す
 	// (nil は返さないので、nil チェックは要らない)。
 	Peer() Peer
+
+	// HTTP returns an HTTP client wired with the instance's outbound policy.
+	//
+	// **自分で `&http.Client{}` を作らないこと。** この client は
+	//
+	//   - SSRF ガード (プライベート IP / 非 http(s) への接続を落とす)
+	//   - 運営者の `proxy` / `outgoingAddress` / `outgoingAddressFamily`
+	//   - 送信の timeout
+	//
+	// を既に持っている。素の client を使うと、運営者が proxy を設定していても
+	// **そのプラグインだけがサーバーの素の IP で外へ出る**。
+	//
+	// **Transport を差し替えないこと。** 差し替えると上の 2 つが消える。
+	// per-request の timeout は `http.NewRequestWithContext` で付ける。
+	//
+	// これはセキュリティ境界ではない (パッケージの doc を参照) — プラグインは
+	// `net/http` を直接使えるので、これは「間違えにくい既定」を配るもの。
+	HTTP() *http.Client
 
 	// Go runs fn in a new goroutine, recovering panics.
 	//

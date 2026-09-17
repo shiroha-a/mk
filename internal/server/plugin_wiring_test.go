@@ -1730,3 +1730,41 @@ func TestSetupPlugins_RoutesRejectAppTokens(t *testing.T) {
 	assert.Equal(t, http.StatusOK, get().Code)
 	assert.True(t, reached)
 }
+
+// **プラグインに渡す HTTP client が outbound の共通設定を通ること (#3037)。**
+//
+// 自分で `&http.Client{}` を作られると SSRF ガードも運営者の proxy 設定も
+// 効かず、そのプラグインだけがサーバーの素の IP で外へ出る。
+func TestPluginContext_HTTPUsesTheSharedOutboundClient(t *testing.T) {
+	var got plugin.Context
+	def := pluginDef("p", func(c plugin.Context, _ plugin.Router) error {
+		got = c
+		return nil
+	}, nil)
+
+	s, api := newPluginTestServer(config.RoleServer)
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+
+	require.NotNil(t, got)
+	client := got.HTTP()
+	require.NotNil(t, client, "nil を返すとプラグイン側が nil 参照 panic になる")
+	assert.Equal(t, pluginHTTPTimeout, client.Timeout)
+	// **素の transport ではないこと。** `http.DefaultTransport` のままだと
+	// SSRF ガードも proxy 設定も乗っていない。
+	assert.NotNil(t, client.Transport)
+	assert.NotSame(t, http.DefaultTransport, client.Transport, "素の transport が渡っている")
+}
+
+// **未配線でも nil を返さない。** nil を返すと `ctx.HTTP().Do(...)` が
+// そのまま nil 参照 panic になる。素の client を返すのも駄目 (無防備に
+// 外へ出る) ので、必ず失敗する transport を返す。
+func TestPluginContext_HTTPWithoutWiringFailsLoudly(t *testing.T) {
+	c := &pluginContext{}
+	client := c.HTTP()
+	require.NotNil(t, client)
+
+	req := httptest.NewRequest(http.MethodGet, "https://example.com/", nil)
+	//nolint:bodyclose // 常に error を返すので body は無い
+	_, err := client.Transport.RoundTrip(req)
+	assert.Error(t, err, "未配線の client が素通りしている")
+}

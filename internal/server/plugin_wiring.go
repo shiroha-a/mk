@@ -89,6 +89,10 @@ func (s *Server) setupPlugins(api *echo.Group, plugins []plugin.Definition, open
 			),
 			api:    &pluginAPI{echo: s.echo, userRepo: s.userRepo, host: requestHostFor(s.config.URL)},
 			config: pluginConfig(settings),
+			// **共通の outbound 設定を通す (#3037)。** プラグインが自分で
+			// `&http.Client{}` を作ると SSRF ガードも運営者の proxy 設定も
+			// 効かず、そのプラグインだけがサーバーの素の IP で外へ出る。
+			httpClient: s.outboundClient(pluginHTTPTimeout),
 		}
 
 		// ストレージはロールに関係なく渡す。Routes からも Jobs からも使うため。
@@ -361,15 +365,16 @@ func requestHostFor(rawURL string) string {
 // --- Context ---
 
 type pluginContext struct {
-	name    string
-	logger  *slog.Logger
-	api     plugin.API
-	storage plugin.Storage
-	config  plugin.Config
-	peer    plugin.Peer
-	queue   plugin.Queue
-	goGate  *pluginGoGate
-	goStart func(func())
+	name       string
+	logger     *slog.Logger
+	api        plugin.API
+	storage    plugin.Storage
+	config     plugin.Config
+	peer       plugin.Peer
+	queue      plugin.Queue
+	httpClient *http.Client
+	goGate     *pluginGoGate
+	goStart    func(func())
 }
 
 func (c *pluginContext) Name() string            { return c.name }
@@ -377,6 +382,27 @@ func (c *pluginContext) Logger() *slog.Logger    { return c.logger }
 func (c *pluginContext) API() plugin.API         { return c.api }
 func (c *pluginContext) Storage() plugin.Storage { return c.storage }
 func (c *pluginContext) Config() plugin.Config   { return c.config }
+
+// HTTP returns the outbound client shared with the rest of mk-go.
+//
+// **未配線でも nil を返さない (#3037)。** nil を返すと、プラグイン側の
+// `ctx.HTTP().Do(...)` がそのまま nil 参照 panic になる。素の client は
+// SSRF ガードも proxy 設定も持たないので、代わりに**必ず失敗する**
+// transport を返す — 「黙って無防備に外へ出る」より「動かない」ほうが
+// 気付ける。
+func (c *pluginContext) HTTP() *http.Client {
+	if c.httpClient == nil {
+		return &http.Client{Transport: unwiredPluginTransport{}}
+	}
+	return c.httpClient
+}
+
+// unwiredPluginTransport fails every request with an explanatory error.
+type unwiredPluginTransport struct{}
+
+func (unwiredPluginTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, errors.New("plugin: HTTP client が未配線です (mk-go の不具合です)")
+}
 
 // Peer は **常に非 nil** を返す。Peered を立てていないプラグインには、
 // 呼ぶとエラーになる実装を渡す — nil を返すと、プラグイン側の nil チェック
@@ -386,6 +412,13 @@ func (c *pluginContext) Peer() plugin.Peer { return c.peer }
 // Queue も **常に非 nil**。queue client が未配線のときは呼ぶとエラーになる
 // 実装を渡す (Peer と同じ理由)。
 func (c *pluginContext) Queue() plugin.Queue { return c.queue }
+
+// pluginHTTPTimeout bounds one request made through ctx.HTTP().
+//
+// **プラグインの主な用途はリモートからの取り寄せ**なので、AP の配送
+// (10 秒) より長めに取る。足りないものは
+// `http.NewRequestWithContext` で per-request に伸ばせる。
+const pluginHTTPTimeout = 30 * time.Second
 
 // pluginRetryBackoffBase is the exponential backoff base applied whenever a
 // plugin asks for retries.

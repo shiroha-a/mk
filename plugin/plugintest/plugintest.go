@@ -32,6 +32,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -55,6 +56,7 @@ type Harness struct {
 	// peer 経路 (#2537) の記録。Handle / OnReply はプラグインが登録し、
 	// テストは DeliverPeer / DeliverPeerReply から叩く。
 	mu          sync.Mutex
+	httpClient  *http.Client
 	peers       []string
 	peerSends   []PeerSend
 	peerHandler plugin.PeerHandler
@@ -102,6 +104,19 @@ func (h *Harness) WithDB(db *sql.DB) *Harness {
 // mk-go の API を呼ぶプラグインは自分でフェイクを渡すこと.
 func (h *Harness) WithAPI(api plugin.API) *Harness {
 	h.api = api
+	return h
+}
+
+// WithHTTPClient sets the client returned by [plugin.Context.HTTP].
+//
+// **既定は「必ず失敗する」client。** 設定しないと `ctx.HTTP()` を使う
+// コードはテストで落ちる — 素の client を既定にすると、テストが気付かない
+// うちに本物の外部サービスへ出ていくため。`httptest.NewServer` の
+// `Client()` を渡すのが普通。
+func (h *Harness) WithHTTPClient(c *http.Client) *Harness {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.httpClient = c
 	return h
 }
 
@@ -470,6 +485,28 @@ func (c *fakeContext) Storage() plugin.Storage {
 
 func (c *fakeContext) Peer() plugin.Peer   { return &fakePeer{h: c.h} }
 func (c *fakeContext) Queue() plugin.Queue { return &fakeQueue{h: c.h} }
+
+// HTTP returns the client the test wired with [Harness.WithHTTPClient], or a
+// client that fails every request.
+//
+// **既定を「必ず失敗する」にしてある。** 素の `&http.Client{}` を返すと、
+// テストが気付かないうちに**本物の外部サービスへ出ていく**。本番の
+// `ctx.HTTP()` は SSRF ガードと運営者の proxy 設定を持つので、テストでも
+// 明示的に差し替えさせる。
+func (c *fakeContext) HTTP() *http.Client {
+	c.h.mu.Lock()
+	defer c.h.mu.Unlock()
+	if c.h.httpClient == nil {
+		return &http.Client{Transport: unwiredTransport{}}
+	}
+	return c.h.httpClient
+}
+
+type unwiredTransport struct{}
+
+func (unwiredTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	return nil, fmt.Errorf("plugintest: HTTP client が未設定です (Harness.WithHTTPClient で差し替えてください)")
+}
 
 type fakeQueue struct{ h *Harness }
 

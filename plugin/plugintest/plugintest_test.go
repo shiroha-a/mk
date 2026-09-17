@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -542,4 +544,33 @@ func TestHarness_PeerCallbackNil(t *testing.T) {
 	h := plugintest.New(t)
 	h.Peer(plugin.Definition{Name: "demo", APIVersion: plugin.APIVersion})
 	assert.Empty(t, h.PeerSends())
+}
+
+// **`ctx.HTTP()` の既定は必ず失敗する client (#3037)。**
+//
+// 素の `&http.Client{}` を既定にすると、テストが気付かないうちに**本物の
+// 外部サービスへ出ていく**。本番の `ctx.HTTP()` は SSRF ガードと運営者の
+// proxy 設定を持つので、テストでも明示的に差し替えさせる。
+func TestHarness_HTTPDefaultsToFailing(t *testing.T) {
+	h := plugintest.New(t)
+	client := h.Context().HTTP()
+	require.NotNil(t, client, "nil を返すとプラグイン側が nil 参照 panic になる")
+
+	_, err := client.Get("https://example.com/")
+	require.Error(t, err, "未設定の client が本当に外へ出ている")
+	assert.Contains(t, err.Error(), "WithHTTPClient")
+}
+
+// 差し替えたものがそのまま返ること。
+func TestHarness_WithHTTPClient(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer srv.Close()
+
+	h := plugintest.New(t).WithHTTPClient(srv.Client())
+	res, err := h.Context().HTTP().Get(srv.URL)
+	require.NoError(t, err)
+	defer res.Body.Close() //nolint:errcheck // テスト
+	assert.Equal(t, http.StatusOK, res.StatusCode)
 }

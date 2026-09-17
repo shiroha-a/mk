@@ -352,6 +352,38 @@ if err := ctx.Config().Unmarshal(&c); err != nil {
 
 **キーの大文字小文字に注意。** 読み込みに使っている Viper はキーを小文字化する（`apiKey` → `apikey`）。構造体のフィールドは `encoding/json` が大文字小文字を無視して照合するので camelCase のタグで問題ないが、**map で受ける設定はキーの大小が復元されない**。
 
+## 外へ HTTP を出す
+
+**自分で `&http.Client{}` を作らないこと。** `ctx.HTTP()` が返す client を使う。
+
+```go
+hreq, err := http.NewRequestWithContext(req.Context(), http.MethodGet, "https://example.com/api", nil)
+if err != nil {
+	return err
+}
+res, err := ctx.HTTP().Do(hreq)
+if err != nil {
+	return err
+}
+defer res.Body.Close() //nolint:errcheck // 読み捨て
+```
+
+この client は次を既に持っている。
+
+| | |
+|---|---|
+| SSRF ガード | プライベート IP / 非 http(s) への接続を落とす |
+| 運営者の設定 | `proxy` / `outgoingAddress` / `outgoingAddressFamily` |
+| timeout | 1 リクエスト 30 秒 |
+
+素の client を使うと、運営者が proxy を設定していても**そのプラグインだけがサーバーの素の IP で外へ出る**。リモートに「このインスタンスの所在」を渡すことになるので、匿名性を期待している運営者の前提が崩れる。
+
+**`Transport` を差し替えないこと。** 差し替えると上の 2 つが消える。もっと短い / 長い期限が要るなら `http.NewRequestWithContext` で per-request に付ける。
+
+これは**セキュリティ境界ではない** — プラグインは `net/http` を直接使えるので、これは「間違えにくい既定」を配るもの。
+
+テストでは `plugintest.Harness.WithHTTPClient` で差し替える。設定しないと `ctx.HTTP()` は必ず失敗する client を返す (既定を素の client にすると、テストが気付かないうちに本物の外部サービスへ出ていくため)。
+
 ## フロントエンド
 
 `frontend/index.ts` を置くと Vite のビルドに取り込まれる。
@@ -785,6 +817,7 @@ type Context interface
   Config() Config
   Peer() Peer
   Queue() Queue
+  HTTP() *http.Client
   Go(func())
 
 type Peer interface
