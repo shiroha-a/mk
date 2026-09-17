@@ -208,49 +208,143 @@ func evalCondAt(user *model.User, assignedRoles []*model.Role, formula CondFormu
 	}
 }
 
-// userControlledCondTypes are the conditions a user can satisfy by themselves.
+// condSatisfiability says whether a new account can satisfy a leaf condition,
+// and whether it can satisfy its negation.
 //
-// **本人が切り替えられる / 積み上げられる値だけを挙げる (#3037)。**
-// `isLocal` / `isRemote` / `isSuspended` / `createdLessThan` /
-// `createdMoreThan` / `roleAssignedTo` は本人の操作では変えられない
-// (`isSuspended` はモデレーターが決める)。
-var userControlledCondTypes = map[CondFormulaType]struct{}{
-	// プロフィール設定のトグル。
-	CondTypeIsLocked:     {},
-	CondTypeIsBot:        {},
-	CondTypeIsCat:        {},
-	CondTypeIsExplorable: {},
-	// 投稿する / フォローする / フォローされる で動く数値。捨てアカウントを
-	// 並べれば任意に作れる。
-	CondTypeFollowersLessThanOrEq: {},
-	CondTypeFollowersMoreThanOrEq: {},
-	CondTypeFollowingLessThanOrEq: {},
-	CondTypeFollowingMoreThanOrEq: {},
-	CondTypeNotesLessThanOrEq:     {},
-	CondTypeNotesMoreThanOrEq:     {},
+// **述語は「本人がその値を変えられるか」ではなく「条件を満たすアカウントを
+// 自分で用意できるか」(#3037 レビュー 2 周目)。** 前者で考えると `isLocal` と
+// `createdLessThan` を取りこぼす — どちらも**登録するだけ**で満たせるので、
+// `isLocal` + `isAdministrator` は「このインスタンスの全ローカル利用者が
+// 管理者」、`createdLessThan` は「今から登録した人が管理者」になる。
+// `isCat` と同じ危険度なのに、1 周目の集合はどちらも通していた。
+//
+// **否定側を別に持つのが要点。** `not(createdMoreThan 1年)` は「作られて
+// 1 年未満」= 登録するだけで満たせるが、`createdMoreThan` 自体は満たせない。
+// 1 つの集合で「危ないかどうか」を決めると、この非対称を表せない。
+type condSatisfiability struct {
+	positive bool // その条件そのものを満たせるか
+	negative bool // その条件の否定を満たせるか
 }
 
-// CondDependsOnUserControlledValue reports whether the formula (or any of its
-// operands) keys off a value the user can change themselves.
+// condLeafSatisfiability is the table for every non-composite type.
+var condLeafSatisfiability = map[CondFormulaType]condSatisfiability{
+	// 登録するだけで満たせる。古いアカウントは用意できない。
+	CondTypeIsLocal:         {positive: true, negative: false},
+	CondTypeCreatedLessThan: {positive: true, negative: false},
+	CondTypeCreatedMoreThan: {positive: false, negative: true},
+	// リモート利用者はこのインスタンスにサインインできないので、ロールの
+	// 権限を API で使えない。逆に「リモートでない」は登録すれば満たせる。
+	CondTypeIsRemote: {positive: false, negative: true},
+	// 凍結はモデレーターが決めるうえ、凍結中はサインインできない。
+	// 「凍結されていない」は新規アカウントがそのまま満たす。
+	CondTypeIsSuspended: {positive: false, negative: true},
+	// プロフィール設定のトグル。どちらの向きにもできる。
+	CondTypeIsLocked:     {positive: true, negative: true},
+	CondTypeIsBot:        {positive: true, negative: true},
+	CondTypeIsCat:        {positive: true, negative: true},
+	CondTypeIsExplorable: {positive: true, negative: true},
+	// 新規アカウントは 0 なので下限側はそのまま満たし、上限側は捨て
+	// アカウントを並べれば積み上げられる。
+	CondTypeFollowersLessThanOrEq: {positive: true, negative: true},
+	CondTypeFollowersMoreThanOrEq: {positive: true, negative: true},
+	CondTypeFollowingLessThanOrEq: {positive: true, negative: true},
+	CondTypeFollowingMoreThanOrEq: {positive: true, negative: true},
+	CondTypeNotesLessThanOrEq:     {positive: true, negative: true},
+	CondTypeNotesMoreThanOrEq:     {positive: true, negative: true},
+	// **誰かが配る必要がある。** ただし配れるのがモデレーターなら迂回に
+	// なるので、そちらは `RoleGrantsPrivilegeIndirectly` が別に見る。
+	// 「そのロールを持っていない」は新規アカウントがそのまま満たす。
+	CondTypeRoleAssignedTo: {positive: false, negative: true},
+}
+
+// CondDependsOnUserControlledValue reports whether an account the attacker can
+// create would satisfy the formula.
 //
-// **条件つきロールで管理者 / モデレーターを配れるかの判定に使う。** 管理画面は
-// 条件を並べるだけなので、`isCat` にチェックを入れた管理者ロールを作るのは
-// 操作としてはごく簡単だが、**そのロールは「猫と名乗る」だけで誰でも取れる**。
-// 作った側は「条件を満たす人に配る」つもりで、「誰でも自分で満たせる条件」だと
-// 気付きにくい。
+// **条件つきロールで管理者 / モデレーター / 特権 policy を配れるかの判定に
+// 使う。** 管理画面は条件を並べるだけなので、`isCat` にチェックを入れた
+// 管理者ロールを作るのは操作としてはごく簡単だが、**そのロールは「猫と名乗る」
+// だけで誰でも取れる**。作った側は「条件を満たす人に配る」つもりで、「誰でも
+// 自分で満たせる条件」だとは気付きにくい。
 func CondDependsOnUserControlledValue(f CondFormula) bool {
-	if _, ok := userControlledCondTypes[f.Type]; ok {
+	return condSatisfiable(f, false)
+}
+
+// condSatisfiable folds the formula, carrying whether we are under a negation.
+//
+// **and / or は畳み方が違う。** `and` は全部を満たす必要があるので
+// `and(isLocal, createdMoreThan 1年)` は満たせない (登録しただけの
+// アカウントは 1 年前に作られていない)。素朴に「どこかに危ない葉があるか」で
+// 見ると、この正当な設定を弾いてしまう。否定の下では De Morgan で入れ替わる。
+func condSatisfiable(f CondFormula, negated bool) bool {
+	switch f.Type {
+	case CondTypeNot:
+		// **中身が無い `not` は `not(false)` = 恒真。**
+		if f.Value == nil {
+			return !negated
+		}
+		return condSatisfiable(*f.Value, !negated)
+	case CondTypeAnd:
+		// 空の `and` は恒真 (否定すると恒偽)。
+		if len(f.Values) == 0 {
+			return !negated
+		}
+		// 肯定の `and` は全部を満たす必要がある。否定の下では
+		// De Morgan で `or(not ...)` になるのでどれか 1 つでよい。
+		return foldOperands(f.Values, negated, negated)
+	case CondTypeOr:
+		// 空の `or` は恒偽 (否定すると恒真)。
+		if len(f.Values) == 0 {
+			return negated
+		}
+		// 肯定の `or` はどれか 1 つ。否定の下では `and(not ...)` になる。
+		return foldOperands(f.Values, negated, !negated)
+	}
+	sat, known := condLeafSatisfiability[f.Type]
+	if !known {
+		// **知らない型は判定できないので拒否側に倒す。**
+		// `evaluateCondFormula` は未知 type を false にするので、`not` で
+		// 包むと**恒真式**になる (`not(bogus)` は全員に一致)。
 		return true
 	}
-	// and / or / not は中身を見る。**`not` の中も見る** — `not(isCat)` も
-	// 「猫と名乗らない」で満たせるので同じこと。
-	if f.Value != nil && CondDependsOnUserControlledValue(*f.Value) {
-		return true
+	if negated {
+		return sat.negative
 	}
-	for _, v := range f.Values {
-		if CondDependsOnUserControlledValue(v) {
-			return true
+	return sat.positive
+}
+
+// foldOperands combines operands with "any" when anyWins, else with "all".
+func foldOperands(values []CondFormula, negated, anyWins bool) bool {
+	if anyWins {
+		for _, v := range values {
+			if condSatisfiable(v, negated) {
+				return true
+			}
+		}
+		return false
+	}
+	for _, v := range values {
+		if !condSatisfiable(v, negated) {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+// CondReferencedRoleIDs collects every roleId the formula keys off.
+//
+// **`roleAssignedTo` は「誰かが配る必要がある」ので単体では自己付与できない
+// が、配れるのがモデレーターなら迂回になる (#3037 レビュー 2 周目)。**
+// 呼び出し側 (`RoleGrantsPrivilegeIndirectly`) がその判定に使う。
+func CondReferencedRoleIDs(f CondFormula) []string {
+	var ids []string
+	if f.Type == CondTypeRoleAssignedTo && f.RoleID != "" {
+		ids = append(ids, f.RoleID)
+	}
+	if f.Value != nil {
+		ids = append(ids, CondReferencedRoleIDs(*f.Value)...)
+	}
+	for _, v := range f.Values {
+		ids = append(ids, CondReferencedRoleIDs(v)...)
+	}
+	return ids
 }

@@ -421,20 +421,44 @@ func TestCondDependsOnUserControlledValue(t *testing.T) {
 		{"notesMoreThanOrEq", `{"type":"notesMoreThanOrEq","value":10}`, true},
 		{"followersMoreThanOrEq", `{"type":"followersMoreThanOrEq","value":10}`, true},
 		{"followingLessThanOrEq", `{"type":"followingLessThanOrEq","value":10}`, true},
-		// 本人の操作では変えられない。
-		{"isLocal", `{"type":"isLocal"}`, false},
+		// **登録するだけで満たせる (#3037 レビュー 2 周目)。**
+		// 「本人が値を変えられるか」で考えると取りこぼしていた。
+		{"isLocal", `{"type":"isLocal"}`, true},
+		{"createdLessThan", `{"type":"createdLessThan","sec":86400}`, true},
+		// 攻撃者がアカウントを用意できない。
 		{"isRemote", `{"type":"isRemote"}`, false},
 		{"isSuspended", `{"type":"isSuspended"}`, false},
 		{"createdMoreThan", `{"type":"createdMoreThan","sec":3600}`, false},
 		{"roleAssignedTo", `{"type":"roleAssignedTo","roleId":"r1"}`, false},
+		// **否定は向きが入れ替わる。** 新規アカウントは「1 年以上前に
+		// 作られて**いない**」「凍結されて**いない**」「そのロールを持って
+		// **いない**」をどれもそのまま満たす。
+		{"not createdMoreThan", `{"type":"not","value":{"type":"createdMoreThan","sec":31536000}}`, true},
+		{"not isSuspended", `{"type":"not","value":{"type":"isSuspended"}}`, true},
+		{"not roleAssignedTo", `{"type":"not","value":{"type":"roleAssignedTo","roleId":"r1"}}`, true},
+		{"not isLocal", `{"type":"not","value":{"type":"isLocal"}}`, false},
+		// **恒真式。** 条件を書いたつもりで全員に一致する。
+		{"空の and", `{"type":"and","values":[]}`, true},
+		{"空の or を否定", `{"type":"not","value":{"type":"or","values":[]}}`, true},
+		{"未知の type を否定", `{"type":"not","value":{"type":"somethingNew"}}`, true},
+		{"中身の無い not", `{"type":"not"}`, true},
+		// 空の `or` そのものは誰にも一致しない。
+		{"空の or", `{"type":"or","values":[]}`, false},
 		// **入れ子も見る。** and / or / not のどこかにあれば同じこと。
 		{"and の中", `{"type":"and","values":[{"type":"isLocal"},{"type":"isCat"}]}`, true},
 		{"or の中", `{"type":"or","values":[{"type":"isCat"}]}`, true},
 		{"not の中", `{"type":"not","value":{"type":"isCat"}}`, true},
 		{"深い入れ子", `{"type":"and","values":[{"type":"or","values":[{"type":"not","value":{"type":"isBot"}}]}]}`, true},
+		// **`and` は全部を満たす必要がある。** `isLocal` は登録すれば満たせるが
+		// 「1 年以上前に作られた」は用意できないので、この組み合わせは安全。
+		// 「どこかに危ない葉があるか」で見るとこの正当な設定を弾く。
 		{"入れ子だが全部安全", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":1}]}`, false},
-		// 未知の type は「本人が満たせる」側には数えない (評価も false に倒れる)。
-		{"未知の type", `{"type":"somethingNew"}`, false},
+		// **`or` はどれか 1 つで足りる。**
+		{"or に危ない枝が 1 つ", `{"type":"or","values":[{"type":"createdMoreThan","sec":1},{"type":"isCat"}]}`, true},
+		{"or が全部安全", `{"type":"or","values":[{"type":"createdMoreThan","sec":1},{"type":"isRemote"}]}`, false},
+		// **知らない型は判定できないので拒否側に倒す。** 評価は false に
+		// 倒れるが、`not` で包まれると恒真式になる。
+		{"未知の type", `{"type":"somethingNew"}`, true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			var f CondFormula

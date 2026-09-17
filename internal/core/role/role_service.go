@@ -67,6 +67,57 @@ func checkConditionalPrivilege(target model.RoleTarget, condFormula, policies []
 	return nil
 }
 
+// RoleGrantsPrivilegeIndirectly reports whether assigning roleID hands the
+// member administrator / moderator / a privileged policy through some
+// conditional role that keys off `roleAssignedTo`.
+//
+// **`checkConditionalPrivilege` と `requireCanEditRoleMembers` の隙間を塞ぐ
+// (#3037 レビュー 2 周目)。** 前者は「利用者本人が条件を満たせるか」、後者は
+// 「そのロール自身が管理者ロールか」しか見ない。だから
+//
+//	staff            = 手動 / 権限なし / canEditMembersByModerator: true
+//	conditional-boss = 条件つき / isAdministrator: true
+//	                   condFormula: {"type":"roleAssignedTo","roleId":"staff"}
+//
+// という 2 つを作ると、**モデレーターが `staff` を自分に付けるだけで管理者に
+// なれる**。`roleAssignedTo` は「誰かが配る必要がある」ので自己付与判定は
+// 通るし、`staff` 自身は管理者ロールではないので付け外しの判定も通る。
+//
+// 判定できないときは true を返す (fail-closed)。ロールを列挙できない窓で
+// 付け外しを通すと、まさにこの昇格が成立する。
+func (s *Service) RoleGrantsPrivilegeIndirectly(roleID string) (bool, error) {
+	if roleID == "" {
+		return false, nil
+	}
+	roles, err := s.listRolesCached()
+	if err != nil {
+		return true, err
+	}
+	for _, r := range roles {
+		if r == nil || r.Target != model.RoleTargetConditional {
+			continue
+		}
+		if !r.IsAdministrator && !r.IsModerator && !grantsPrivilegedPolicy(r.Policies) {
+			continue
+		}
+		if len(r.CondFormula) == 0 {
+			continue
+		}
+		var f CondFormula
+		if err := json.Unmarshal(r.CondFormula, &f); err != nil {
+			// **読めない式は判定できない。** 特権を配る条件つきロールなので
+			// 拒否側へ倒す (`checkConditionalPrivilege` と同じ扱い)。
+			return true, nil
+		}
+		for _, referenced := range CondReferencedRoleIDs(f) {
+			if referenced == roleID {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
 // Policy key constants. requiredRolePolicy gate 経路 (HasRolePolicy / 各 endpoint
 // での policy 文字列参照) で typo を防ぐため定数化する。新規 policy-gated
 // endpoint を追加する際はここに対応 const を生やしてから call site で使う。

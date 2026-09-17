@@ -2713,6 +2713,27 @@ func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID
 	if r.IsAdministrator && !isAdmin {
 		return true, c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of an administrator role.", accessDeniedID))
 	}
+	// **間接的に特権を配るロールも管理者しか付け外しできない
+	// (#3037 レビュー 2 周目)。**
+	//
+	// 上の判定は「そのロール自身が管理者ロールか」しか見ない。条件つきロールが
+	// `roleAssignedTo` でこのロールを参照していると、**権限を持たない素の
+	// ロールを配るだけで管理者になれる**。`checkConditionalPrivilege` の側も
+	// 「利用者本人が条件を満たせるか」しか見ないので、2 つの判定の隙間を通る。
+	if !isAdmin {
+		indirect, err := h.roleService.RoleGrantsPrivilegeIndirectly(roleID)
+		if err != nil {
+			// **判定できないなら通さない (#2792)。** ここは「特権を配らない
+			// ことを確かめてから触る」判定なので、fail-open にすると
+			// ロールを列挙できない窓で昇格が成立する。
+			slog.Error("admin: cannot determine whether the role grants privileges indirectly", "roleId", roleID, "err", err)
+			return true, apierr.JSONInternalError(c)
+		}
+		if indirect {
+			return true, c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED",
+				"Only administrators can edit members of a role that grants privileges through a conditional role.", accessDeniedID))
+		}
+	}
 	if r.CanEditMembersByModerator {
 		return false, nil
 	}
