@@ -157,6 +157,14 @@ func (h *Handler) Signin(c echo.Context) error {
 	var req struct {
 		Username string  `json:"username"`
 		Password *string `json:"password"`
+		// captcha のトークン。**`signin-flow` と同じ field 名で受ける。**
+		// この endpoint は upstream に無い互換 shim だが、パスワードを検証する
+		// 以上 captcha も同じように見る必要がある。
+		HcaptchaResponse    string `json:"hcaptcha-response"`
+		RecaptchaResponse   string `json:"g-recaptcha-response"`
+		TurnstileResponse   string `json:"turnstile-response"`
+		McaptchaResponse    string `json:"m-captcha-response"`
+		TestcaptchaResponse string `json:"testcaptcha-response"`
 	}
 	if err := c.Bind(&req); err != nil || req.Username == "" {
 		return c.JSON(http.StatusBadRequest, errBody("6cc579cc-885d-43d8-95c2-b8c7fc963280"))
@@ -192,6 +200,27 @@ func (h *Handler) Signin(c echo.Context) error {
 	}
 	if err != nil || profile.Password == nil {
 		return c.JSON(http.StatusForbidden, errBody("932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+	}
+
+	// **captcha を検証する。** この endpoint は `signin-flow` に統合される前の
+	// 互換 shim (`docs/divergence.md`) だが、**captcha だけ見ていなかった**。
+	// 運営者が captcha を有効にしてもこちらは素通りするので、2FA 無効の利用者に
+	// 対するクレデンシャルスタッフィング対策が効かなかった。upstream には
+	// この endpoint 自体が無く、`signin-flow` 相当は 5 provider すべてを検証する。
+	//
+	// **2FA 有効なら見ない。** あちらは challenge を返すだけで token を発行せず、
+	// `signin-flow` も同じ条件で分けている。
+	if !profile.TwoFactorEnabled && h.captchaSvc != nil {
+		tokens := captcha.CaptchaTokens{
+			Hcaptcha:    req.HcaptchaResponse,
+			Recaptcha:   req.RecaptchaResponse,
+			Turnstile:   req.TurnstileResponse,
+			Mcaptcha:    req.McaptchaResponse,
+			Testcaptcha: req.TestcaptchaResponse,
+		}
+		if err := h.captchaSvc.Verify(c.Request().Context(), tokens); err != nil {
+			return apierr.FastifyReply(c, http.StatusBadRequest, "CAPTCHA_FAILED")
+		}
 	}
 
 	storedPassword := *profile.Password

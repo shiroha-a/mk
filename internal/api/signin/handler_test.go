@@ -1042,3 +1042,43 @@ func TestSignin_PasswordTooLongLogsPermanentDeferral(t *testing.T) {
 	// hash は Argon2id のまま。
 	assert.True(t, strings.HasPrefix(*repo.Profiles["u1"].Password, "$argon2id$"))
 }
+
+// legacy `/api/signin` も captcha を検証すること。
+//
+// **この endpoint は `signin-flow` に統合される前の互換 shim** だが、パスワードを
+// 検証してセッショントークンを発行する以上、captcha も同じように見る必要がある。
+// 見ていないと、運営者が captcha を有効にしても 2FA 無効の利用者に対する
+// クレデンシャルスタッフィング対策が素通りする。upstream にはこの endpoint 自体が
+// 無く、`signin-flow` 相当は 5 provider すべてを検証する。
+func TestSignin_VerifiesCaptcha(t *testing.T) {
+	t.Run("トークンが無ければ拒否", func(t *testing.T) {
+		h, repo := newTestHandler(t)
+		createTestUser(repo, "legacycap", "pass")
+		h.SetCaptcha(captcha.NewService(&model.Meta{EnableTestcaptcha: true}))
+
+		rec := doPost(h.Signin, `{"username":"legacycap","password":"pass"}`)
+		testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "CAPTCHA_FAILED")
+	})
+
+	// **弾きすぎていないことを見る。** 常に拒否する実装でも上は緑になる。
+	t.Run("正しいトークンなら通る", func(t *testing.T) {
+		h, repo := newTestHandler(t)
+		createTestUser(repo, "legacycap2", "pass")
+		h.SetCaptcha(captcha.NewService(&model.Meta{EnableTestcaptcha: true}))
+
+		rec := doPost(h.Signin, `{"username":"legacycap2","password":"pass","testcaptcha-response":"testcaptcha-passed"}`)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Equal(t, true, resp["finished"])
+	})
+
+	// captcha 未設定なら従来どおり通る (既存インスタンスを壊さない)。
+	t.Run("captcha 未配線なら通る", func(t *testing.T) {
+		h, repo := newTestHandler(t)
+		createTestUser(repo, "legacycap3", "pass")
+
+		rec := doPost(h.Signin, `{"username":"legacycap3","password":"pass"}`)
+		assert.Equal(t, http.StatusOK, rec.Code)
+	})
+}
