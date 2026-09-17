@@ -97,12 +97,27 @@ var secureStricterThanUpstream = map[string]string{}
 // parseRouteRegistrations returns endpoint path -> the full router registration
 // text (balanced parens), so middleware on a multi-line inline handler's closing
 // line is included.
+//
+// **コメントを先に落とす (#3037 レビュー 3 周目)。** 深さ数えは文字列にも
+// コメントにも入るので、引数の途中に**括弧を含むコメントを 1 行足すだけ**で
+// 対応が崩れ、後続の route を丸ごと飲み込む。飲み込まれた route の
+// middleware が手前の判定に混ざるので、
+//
+//   - app-token gate: `RejectAppToken()` を外した route が、後続 route の
+//     文字列に紛れて「付いている」と判定される
+//   - privileged policy gate: 後続の `RequireModerator` が混ざって
+//     「ロールで守られている」と読まれ、検査対象から外れる
+//
+// の 2 形が実測で素通りした。**2 周目はこのパーサを「自前の行畳みと違って
+// 文字列・コメントを数えない」と書いて採用したが、事実と逆だった。**
+// `stripGoComments` は rune / 文字列リテラルを保つので、route の path に
+// 含まれる `(` が消えることはない。
 func parseRouteRegistrations(t *testing.T, path string) map[string]string {
 	src, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatalf("read router: %v", err)
 	}
-	s := string(src)
+	s := stripGoComments(string(src))
 	out := map[string]string{}
 	for _, loc := range routeRegRe.FindAllStringSubmatchIndex(s, -1) {
 		ep := strings.TrimPrefix(s[loc[2]:loc[3]], "/")

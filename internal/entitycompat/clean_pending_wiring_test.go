@@ -45,6 +45,9 @@ func TestCleanProcessorReceivesThePendingPruner(t *testing.T) {
 	require.NoError(t, err)
 
 	idx, total := pendingPrunerParamIndex(def)
+	require.NotEqual(t, -2, idx,
+		"NewCleanProcessor に %s の引数が 2 つ以上ある。どれが掃除に使われるか"+
+			"この gate では判定できないので、型を分けること", pendingPrunerParamType)
 	require.GreaterOrEqual(t, idx, 0,
 		"NewCleanProcessor に %s の引数が無い (rename した?)", pendingPrunerParamType)
 
@@ -103,7 +106,15 @@ func pendingPrunerParamIndex(f *ast.File) (idx int, total int) {
 				names = 1
 			}
 			if exprString(field.Type) == pendingPrunerParamType {
-				idx = pos
+				// **同じ型の引数が 2 つあったら判定できない
+				// (#3037 レビュー 3 周目)。** 上書きすると末尾が勝つので、
+				// `(…, pending PendingSignupPruner, extra PendingSignupPruner)`
+				// にして `pending` に nil を渡す形が素通りした (実測)。
+				if idx >= 0 {
+					idx = -2
+				} else {
+					idx = pos
+				}
 			}
 			pos += names
 		}

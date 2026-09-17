@@ -228,22 +228,42 @@ func containsOutboundOptsCall(expr ast.Expr) bool {
 // outboundOptsDerivedVars collects the local variables assigned from an
 // expression that calls outboundOpts.
 func outboundOptsDerivedVars(decl ast.Decl) map[string]bool {
-	out := map[string]bool{}
+	derived := map[string]bool{}
+	// **`outboundOpts()` を含まない代入があった名前は認めない
+	// (#3037 レビュー 3 周目)。** 位置もスコープも見ていないので、
+	//
+	//	emojiOpts := s.outboundOpts()
+	//	emojiOpts = nil
+	//
+	// や、同じ関数の別ブロックで同名に空 slice を入れる形が素通りしていた
+	// (どちらも実測)。`router.go` の `setupRoutes` は数千行あるので同名の
+	// 再利用は起こりうる。**1 度でも別物を入れたら落とす**ほうへ倒す
+	// (偽陽性側は「名前を分ける」で直せる)。
+	tainted := map[string]bool{}
 	ast.Inspect(decl, func(n ast.Node) bool {
 		assign, ok := n.(*ast.AssignStmt)
 		if !ok {
 			return true
 		}
-		for i, rhs := range assign.Rhs {
-			if i >= len(assign.Lhs) || !containsOutboundOptsCall(rhs) {
+		for i, lhs := range assign.Lhs {
+			id, ok := lhs.(*ast.Ident)
+			if !ok || i >= len(assign.Rhs) {
 				continue
 			}
-			if id, ok := assign.Lhs[i].(*ast.Ident); ok {
-				out[id.Name] = true
+			if containsOutboundOptsCall(assign.Rhs[i]) {
+				derived[id.Name] = true
+			} else {
+				tainted[id.Name] = true
 			}
 		}
 		return true
 	})
+	out := map[string]bool{}
+	for name := range derived {
+		if !tainted[name] {
+			out[name] = true
+		}
+	}
 	return out
 }
 
@@ -285,6 +305,14 @@ const safehttpPkgPath = "github.com/shiroha-a/mk/internal/safehttp"
 // alias にすると、その呼び出しから opts を落としても gate が緑のまま通る)。
 // 「1 つも拾えなかったら落とす」の保護は、ハードコードした 2 つにしか効かない。
 func isSafehttpOption(expr ast.Expr, imports map[string]string) bool {
+	if id, ok := expr.(*ast.Ident); ok {
+		// **dot import と同 package (#3037 レビュー 3 周目)。**
+		// `import . "…/internal/safehttp"` した package の `opts ...Option` は
+		// selector にならないので、selector だけを見ていると**集合から黙って
+		// 消える**。実測で urlpreview を dot import して opts を落とすと
+		// gate が緑のまま通った。
+		return id.Name == "Option" && imports["."] == safehttpPkgPath
+	}
 	sel, ok := expr.(*ast.SelectorExpr)
 	if !ok || sel.Sel.Name != "Option" {
 		return false

@@ -25,10 +25,10 @@ import (
 // `internal/server` は CI のカバレッジ対象外で router を組み立てるテストも
 // 無いので、新しい route を足しても build もテストも緑のまま抜ける。
 func TestCredentialRoutesWithoutScopeRejectAppTokens(t *testing.T) {
-	// **同 package の括弧対応パーサを使う (#3037 レビュー)。** 自前の行畳みは
-	// 文字列・コメント中の括弧まで数えるので、引数の途中に括弧入りのコメントを
-	// 1 行足すと後続 route を飲み込み、その route の `RequireScope` が手前の
-	// 判定に混ざる。パーサを 2 本持つこと自体がドリフト源でもある。
+	// **同 package の括弧対応パーサを使う (#3037 レビュー)。** パーサを 2 本
+	// 持つこと自体がドリフト源。**そのパーサ自身がコメント中の括弧を数えて
+	// いたのはレビュー 3 周目で直した** — 括弧入りのコメントを 1 行足すだけで
+	// 後続 route を飲み込み、その route の middleware が手前の判定に混ざる。
 	routes := parseRouteRegistrations(t, filepath.Join("..", "server", "router.go"))
 	require.Greater(t, len(routes), 400, "route の抽出が壊れている")
 	require.Contains(t, routes, "i/change-password")
