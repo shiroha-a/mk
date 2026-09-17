@@ -840,8 +840,15 @@ func (s *Service) processResize(data []byte, contentType string, width, height i
 		// **入力の大きさで断ったものも同じ扱い。** 素通しすると、デコーダに
 		// 渡すには大きすぎると判断したバイト列をそのまま閲覧者へ配ることに
 		// なる (判断の意味が無い)。
+		//
+		// **`immutable` にはしない (#3037 レビュー 2 周目)。** 素の
+		// `makeDummyPNG` は `CacheControl` が空なので handler の既定
+		// (`max-age=31536000, immutable`) が付く。上限は運営者が設定で
+		// 変えられるし、こちらの見積もりが実測と合っていなくて落ちることも
+		// ある — その場合に**直してもリロードで戻せなくなる**。
+		// #3035 が動画サムネイルの生成失敗について同じ判断をしている。
 		if errors.Is(err, imagedecode.ErrTooManyPixels) || errors.Is(err, imagedecode.ErrEncodedTooLarge) {
-			return makeDummyPNG(), nil
+			return dummyPNGWithCache(permanentDummyCacheControl), nil
 		}
 		// デコード失敗時は元データをそのまま返す
 		return makeResult(data, contentType), nil
@@ -850,7 +857,7 @@ func (s *Service) processResize(data []byte, contentType string, width, height i
 		// pixel-bomb (32MB AVIF/HEIC/JXL が 30000x30000 に展開される類) は
 		// resize/encode で多 GB のバッファを抱えるので dummy PNG にして
 		// proxy の OOM を防ぐ (#637 review UR-016)。
-		return makeDummyPNG(), nil
+		return dummyPNGWithCache(permanentDummyCacheControl), nil
 	}
 
 	var resized image.Image
@@ -921,14 +928,15 @@ func (s *Service) processBadge(data []byte, contentType string) (*ProxyResult, e
 
 	img, err := decodeImage(data, contentType)
 	if err != nil {
-		// cap に当たったものは従来どおりダミーへ (`processResize` と同じ理由)。
+		// cap に当たったものは従来どおりダミーへ (`processResize` と同じ理由。
+		// `immutable` にしないのも同じ)。
 		if errors.Is(err, imagedecode.ErrTooManyPixels) || errors.Is(err, imagedecode.ErrEncodedTooLarge) {
-			return makeDummyPNG(), nil
+			return dummyPNGWithCache(permanentDummyCacheControl), nil
 		}
 		return nil, ErrNotFound
 	}
 	if exceedsPixelCap(img) {
-		return makeDummyPNG(), nil
+		return dummyPNGWithCache(permanentDummyCacheControl), nil
 	}
 
 	// **entropy は元画像で測る。** upstream の `stats()` は

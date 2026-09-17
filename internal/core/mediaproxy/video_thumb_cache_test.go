@@ -2,6 +2,7 @@ package mediaproxy
 
 import (
 	"context"
+	"hash/crc32"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -223,4 +224,46 @@ func TestVideoThumbnailTransientAlsoSatisfiesUnavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrVideoThumbnailTransient)
 	assert.ErrorIs(t, err, ErrVideoThumbnailUnavailable)
+}
+
+// **上限に当たったダミーも `immutable` にしない (#3037 レビュー 2 周目)。**
+//
+// 素の `makeDummyPNG` は `CacheControl` が空なので、handler の既定
+// (`max-age=31536000, immutable`) が付く。上限は運営者が設定で変えられるし、
+// 1 画素あたりのバイト数の見積もりが実測と合わずに落ちることもある。
+// その場合に**直してもリロードで戻せなくなる** — #3035 が動画サムネイルの
+// 生成失敗について同じ判断をしている。
+func TestProcessResize_PixelCapDummyIsNotImmutable(t *testing.T) {
+	s := testService(nil)
+	// 宣言寸法が cap を超える PNG。デコードは走らない (ヘッダだけで弾く)。
+	huge := makePNGHeader(20000, 20000)
+
+	res, err := s.processResize(huge, "image/png", 0, 80, FormatWebP)
+	require.NoError(t, err)
+	defer res.Body.Close()
+
+	assert.NotContains(t, res.CacheControl, "immutable",
+		"上限に当たったダミーを immutable で固定している (直してもリロードで戻せない)")
+	assert.Equal(t, permanentDummyCacheControl, res.CacheControl)
+}
+
+// makePNGHeader builds a PNG whose IHDR declares the given size. The pixel
+// data is intentionally absent — the cap is applied from DecodeConfig.
+func makePNGHeader(w, h uint32) []byte {
+	var b []byte
+	b = append(b, 0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n')
+	ihdr := []byte{
+		byte(w >> 24), byte(w >> 16), byte(w >> 8), byte(w),
+		byte(h >> 24), byte(h >> 16), byte(h >> 8), byte(h),
+		8, 2, 0, 0, 0,
+	}
+	b = append(b, 0, 0, 0, 13)
+	b = append(b, 'I', 'H', 'D', 'R')
+	b = append(b, ihdr...)
+	crc := crc32.NewIEEE()
+	_, _ = crc.Write([]byte("IHDR"))
+	_, _ = crc.Write(ihdr)
+	sum := crc.Sum32()
+	b = append(b, byte(sum>>24), byte(sum>>16), byte(sum>>8), byte(sum))
+	return b
 }

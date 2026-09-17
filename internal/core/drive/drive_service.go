@@ -243,12 +243,29 @@ type Service struct {
 
 // defaultMediaProcessingConcurrency is how many uploads may decode at once.
 //
-// **1 枠あたりの最悪値で決める。** `imagedecode.MaxPixels` は 8192x8192 =
-// 64MP なので、NRGBA のラスタ 1 枚で 268MB。`processImage` は寸法 / blurhash /
+// **枠が無いと確保量を掛け算できた。** `processImage` は寸法 / blurhash /
 // サムネイル / webpublic で**順に 4 回デコードする**ため、GC が前の 1 枚を
-// 返す前に次を確保しうる。枠が無いと、認証済みの利用者が並行アップロードを
-// 投げるだけで確保量を掛け算できた (`semaphore` / `Acquire(` の grep が 0 件
-// だった)。
+// 返す前に次を確保しうる。認証済みの利用者が並行アップロードを投げるだけで
+// それを人数分重ねられた (`semaphore` / `Acquire(` の grep が 0 件だった)。
+//
+// **1 枠あたりの最悪値は 1GB 級 (#3037 レビュー 2 周目で実測)。**
+// drive が渡すのは `imagedecode.MaxPixels` (64MP) ではなく
+// `UpstreamMaxPixels` (0x3FFF^2 = 268MP) — upstream に揃える判断で、
+// 厳しくすると 102MP の実写真が webpublic を失い EXIF の GPS が公開側へ
+// 出るため (`imagedecode.go` 参照)。16383x16383 の全画素ゼロ PNG は
+// **764 KiB** で作れて `UpstreamMaxPixels` にちょうど一致するので上限を
+// 通り抜け、8 core / 32GB の実測で `processImage` の 4 段を通すと
+// **ピーク RSS 2.23 GiB / 13.6 秒**だった (デコード単体で TotalAlloc 768MiB)。
+//
+// **バイト予算はこの帯を縛らない。** 確保量の判定は
+// `画素数 x 1 画素あたりのバイト数 > 上限画素数 x 4` なので、8bit 画像には
+// 「宣言寸法の cap と同じ」判定にしかならない (16bit 画像を縛るための段)。
+//
+// **枠の本数はこの最悪値を前提にしていない。** 値と根拠は media proxy の枠
+// (#3032) から採っており、あちらは 64MP の cap で測っている。2GB の VPS は
+// `GOMAXPROCS / 2 = 1` なので、764 KiB のアップロード 1 本で RAM を使い切り
+// うる。`GOMEMLIMIT` の設定はリポジトリに無い (grep 0 件)。**残存リスクとして
+// `docs/divergence.md` に記録してある。**
 //
 // **値と根拠は media proxy の枠 (#3032) と同じ。** 同じデコーダで同じ中間
 // バッファを確保するので、あちらの実測 (8 core / AVIF / c=8 で peak RSS が
@@ -988,8 +1005,9 @@ func (s *Service) detectSensitiveOfficial(ctx context.Context, body []byte, mime
 	}
 
 	// **ここも枠を取る (#3037)。** `NormalizeImageForDetection` は
-	// `imagedecode.Decode` + `imaging.Fill` で、`processImage` と同じ大きさの
-	// 中間バッファを確保する。枠の外に置くと、並行アップロードのぶんだけ
+	// `decodeImage` (= `DecodeWithPixelCap(body, UpstreamMaxPixels)`) +
+	// `imaging.Fill` で、`processImage` と**同じ cap・同じ大きさ**の中間
+	// バッファを確保する。枠の外に置くと、並行アップロードのぶんだけ
 	// 無制限に積み上がって「同時にデコードする本数を縛る」という枠の不変条件が
 	// 成立しない。
 	release, slotOK := s.acquireMediaSlot(ctx)
