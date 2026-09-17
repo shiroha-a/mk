@@ -337,22 +337,102 @@ func TestReadFileAtMost(t *testing.T) {
 // **エラーも出ないまま 6K 以上の動画のサムネイルが恒久的に欠ける**。
 func TestVideoProcessor_ScalesBeforeReadingTheFrame(t *testing.T) {
 	var args []string
-	runner := &argCapturingRunner{onRun: func(a []string) { args = a }}
+	runner := &argCapturingRunner{onRun: func(_ string, a []string) { args = a }}
 	vp := NewFFmpegVideoProcessor(nil, runner)
 
 	_, _ = vp.GenerateThumbnail(context.Background(), []byte("video-data"), "video/mp4")
 
-	joined := strings.Join(args, " ")
-	require.Contains(t, joined, "-vf", "scale フィルタを渡していない")
-	assert.Contains(t, joined, "force_original_aspect_ratio=decrease",
+	vf := argValue(args, "-vf")
+	require.NotEmpty(t, vf, "scale フィルタを渡していない")
+	assert.Contains(t, vf, "force_original_aspect_ratio=decrease",
 		"縦横比を保たない縮小をしている")
+
+	// **長辺の値まで固定する。** ここを 16384 に変えても 8K のフレームは
+	// そのまま出るので、「-vf がある」だけ見る形ではテストが空虚になる
+	// (#3037 レビュー 2 周目で実測)。
+	assert.Contains(t, vf, "1280", "長辺の上限が変わっている")
+
+	// **`min()` で包んでいること。** `force_original_aspect_ratio=decrease` は
+	// 箱に内接させるので、これが無いと**小さい動画が拡大される**
+	// (実測: 320x240 が 1280x960 になり中間 PNG が 14 倍)。
+	assert.Contains(t, vf, "min(", "小さい動画が拡大される形になっている")
+}
+
+// **`-ss` は秒で渡す。** `5%` は fluent-ffmpeg の記法で、ffmpeg 本体は
+// `Invalid duration for option ss: 5%` でコマンドごと失敗する (実測
+// ffmpeg 7.1.5)。そのため**全解像度でサムネイルが生成されていなかった**。
+func TestVideoProcessor_SeeksWithSecondsNotAPercentage(t *testing.T) {
+	var args []string
+	runner := &argCapturingRunner{
+		onRun: func(name string, a []string) {
+			if name == "ffmpeg" {
+				args = a
+			}
+		},
+		// ffprobe は 40 秒の動画として応答する。
+		probeOutput: "40.0\n",
+	}
+	vp := NewFFmpegVideoProcessor(nil, runner)
+
+	_, _ = vp.GenerateThumbnail(context.Background(), []byte("video-data"), "video/mp4")
+
+	ss := argValue(args, "-ss")
+	require.NotEmpty(t, ss, "-ss を渡していない")
+	assert.NotContains(t, ss, "%", "ffmpeg が受け付けない書式を渡している")
+	secs, err := strconv.ParseFloat(ss, 64)
+	require.NoError(t, err, "-ss が秒として読めない: %q", ss)
+	assert.InDelta(t, 2.0, secs, 0.001, "5%% 地点になっていない")
+
+	// **`-ss` は `-i` より前。** 後ろに置くと先頭からデコードするので、
+	// 長尺動画では 5%% 地点に着く前に timeout する。
+	assert.Less(t, indexOf(args, "-ss"), indexOf(args, "-i"), "-ss が -i の後ろにある")
+}
+
+// **probe に失敗してもサムネイルを諦めない。**
+func TestVideoProcessor_FallsBackToTheStartWhenProbeFails(t *testing.T) {
+	var args []string
+	runner := &argCapturingRunner{onRun: func(name string, a []string) {
+		if name == "ffmpeg" {
+			args = a
+		}
+	}}
+	vp := NewFFmpegVideoProcessor(nil, runner)
+
+	_, _ = vp.GenerateThumbnail(context.Background(), []byte("video-data"), "video/mp4")
+
+	assert.Equal(t, "0", argValue(args, "-ss"), "probe 失敗時に先頭から取っていない")
+}
+
+func argValue(args []string, flag string) string {
+	for i, a := range args {
+		if a == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
+}
+
+func indexOf(args []string, flag string) int {
+	for i, a := range args {
+		if a == flag {
+			return i
+		}
+	}
+	return -1
 }
 
 type argCapturingRunner struct {
-	onRun func([]string)
+	onRun       func(name string, args []string)
+	probeOutput string
 }
 
-func (r *argCapturingRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
-	r.onRun(args)
+func (r *argCapturingRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
+	r.onRun(name, args)
+	if name == "ffprobe" {
+		if r.probeOutput == "" {
+			return nil, errors.New("ffprobe not available")
+		}
+		return []byte(r.probeOutput), nil
+	}
 	return nil, errors.New("not run")
 }

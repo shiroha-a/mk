@@ -5,10 +5,12 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -119,25 +121,51 @@ func (p *FFmpegVideoProcessor) GenerateThumbnail(ctx context.Context, body []byt
 		return nil, nil
 	}
 
-	// FFmpeg: 5% 地点のスクリーンショットを PNG で出力
 	runCtx, cancel := context.WithTimeout(ctx, ffmpegTimeout)
 	defer cancel()
+
+	// **`-ss` は秒で渡す (#3037 レビュー 2 周目)。**
+	//
+	// upstream は fluent-ffmpeg の `screenshots({timestamps:['5%']})` を使って
+	// おり、**あちらが自分で duration を probe して秒に直してから** ffmpeg へ
+	// 渡す。ffmpeg の `-ss` は `5%` を受け付けず
+	// `Invalid duration for option ss: 5%` でコマンドごと失敗するので、
+	// `GenerateThumbnail` は常に `nil, nil` を返していた (= **全解像度で
+	// サムネイルが生成されていなかった**。実測 ffmpeg 7.1.5)。
+	//
+	// probe に失敗したら先頭から取る。真っ黒な導入部を引く可能性はあるが、
+	// サムネイルが無いよりはよい。
+	seek := "0"
+	if d, ok := p.durationSeconds(runCtx, inputPath); ok {
+		seek = strconv.FormatFloat(d*thumbnailSeekRatio, 'f', 3, 64)
+	}
+
+	// FFmpeg: 5% 地点のスクリーンショットを PNG で出力。
+	//
+	// **`-ss` は `-i` より前に置く** (input seeking)。後ろに置くと先頭から
+	// デコードするので、長尺動画では 5% 地点に着く前に timeout する。
 	_, err = p.runner.Run(runCtx, "ffmpeg",
+		"-ss", seek,
 		"-i", inputPath,
-		"-ss", "5%",
 		"-vframes", "1",
 		// **ffmpeg 側で縮めてから受け取る (#3037 レビュー)。**
 		//
 		// 引数に scale が無いと出力 PNG は入力動画の解像度そのままで、
-		// 8K なら 50-80MB になる。`readFileAtMost` の上限 (32MiB) に当たると
-		// `GenerateThumbnail` は `nil, nil` を返すので、**エラーも出ないまま
-		// 6K 以上の動画のサムネイルが恒久的に欠ける**。
+		// 8K なら 70MB になる (実測 7680x4320 + noise で 74,167,935 バイト)。
+		// `readFileAtMost` の上限 (32MiB) に当たると `GenerateThumbnail` は
+		// `nil, nil` を返すので、そこでもサムネイルが欠ける。
+		//
+		// **`min()` で包むのが要点 (#3037 レビュー 2 周目)。**
+		// `force_original_aspect_ratio=decrease` は「箱に内接させる」ので、
+		// 箱より小さい入力は**拡大される** — 実測で 320x240 が 1280x960 に
+		// なり、中間 PNG は 14 倍に太った。`min(1280,iw)` で包むと縮小方向に
+		// だけ効く (実測: 320x240 と 640x480 は原寸のまま、1920x1080 は
+		// 1280x720、3840x100 は 1280x33)。
 		//
 		// どうせこの後 `imgProc.GenerateThumbnail` が 498x422 へ縮めるので、
-		// ここで長辺を抑えても結果は変わらない。`force_original_aspect_ratio`
-		// で縦横比を保ち、`-1` ではなく `decrease` を使うのは奇数幅で
-		// エンコーダが落ちるのを避けるため。小さい動画は拡大しない。
-		"-vf", "scale=w=1280:h=1280:force_original_aspect_ratio=decrease",
+		// 縮小側の結果は変わらない (3840x100 は scale の有無どちらでも
+		// 最終 498x12 になることを実測)。
+		"-vf", `scale=w=min(1280\,iw):h=min(1280\,ih):force_original_aspect_ratio=decrease`,
 		"-f", "image2",
 		outputPath,
 	)
@@ -157,6 +185,32 @@ func (p *FFmpegVideoProcessor) GenerateThumbnail(ctx context.Context, body []byt
 	}
 
 	return nil, nil
+}
+
+// thumbnailSeekRatio is the position in the video the thumbnail is taken from.
+//
+// upstream `VideoProcessingService` の `timestamps: ['5%']` と同じ。
+const thumbnailSeekRatio = 0.05
+
+// durationSeconds probes the container duration with ffprobe.
+//
+// **ffprobe が無い / 読めないときは ok=false。** 呼び出し側は先頭から取る
+// (サムネイルを諦めない)。
+func (p *FFmpegVideoProcessor) durationSeconds(ctx context.Context, path string) (float64, bool) {
+	out, err := p.runner.Run(ctx, "ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration",
+		"-of", "default=noprint_wrappers=1:nokey=1",
+		path,
+	)
+	if err != nil {
+		return 0, false
+	}
+	d, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
+	if err != nil || d <= 0 || math.IsInf(d, 0) || math.IsNaN(d) {
+		return 0, false
+	}
+	return d, true
 }
 
 // ffmpegMaxFrameBytes caps how much of an ffmpeg-produced frame we load.
