@@ -242,14 +242,17 @@ func TestRequireChatAvailability_UnavailableReadDenied(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
 
-func TestRequireChatAvailability_NilCheckerSkips(t *testing.T) {
-	c, rec := newRolePolicyReq(t, &model.User{ID: "u1"})
+// **checker 未配線は通さない (#3037)。** `RequireRolePolicy` と同じ原則で、
+// ここだけ skip を残すと、次に nil を渡す経路が生えたとき chat だけ黙って開く。
+func TestRequireChatAvailability_NilCheckerDenies(t *testing.T) {
+	c, rec := newRolePolicyReq(t, &model.User{ID: "alice"})
 	called := false
-	h := RequireChatAvailability(nil, "write")(func(c echo.Context) error {
+	handler := RequireChatAvailability(nil, "write")(func(c echo.Context) error {
 		called = true
 		return c.String(http.StatusOK, "ok")
 	})
-	require.NoError(t, h(c))
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.True(t, called)
+
+	require.NoError(t, handler(c))
+	assert.Equal(t, http.StatusForbidden, rec.Code, "checker 未配線で gate が消えている")
+	assert.False(t, called, "handler まで到達している")
 }
