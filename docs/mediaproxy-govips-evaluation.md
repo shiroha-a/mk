@@ -120,9 +120,46 @@ govips は速度面では有利だが、cgo / system library 依存の **archite
 - **大規模インスタンス運用**: 単一 mediaproxy が秒間数百リクエストを捌く規模では現行性能が limit に達する可能性
 - **pure Go alternative の停滞**: `gen2brain/*` / `mrjoshuak/go-jpeg2000` の保守が止まり security / 速度問題が解消されない
 
+## 追記 (#3032): GC 圧という第 2 の軸
+
+本評価は **1 リクエストあたりの速度**だけを見ていた。#3032 の実測で、
+それとは別に **Go ヒープへの割り当て量**が効いていることが分かったので記録する。
+
+内蔵プロキシは API サーバーと同じプロセスで動く。デコードの中間バッファは
+すべて Go ヒープに載るため、重い画像を捌いている間は**無関係なリクエストまで
+GC assist を負わされる**。8 core で AVIF→avatar を c=4 流しながら、同じ
+プロセスの軽い pass-through を測った結果:
+
+| 軽い要求 | GOGC | p99 | rps |
+|---|---|---|---|
+| 343KB の JPEG (pass-through) | 100 (既定) | 163.9ms | 194 |
+| 343KB の JPEG (pass-through) | 800 | 2.5ms | 1438 |
+| 163B の PNG (pass-through) | 100 (既定) | 6.3ms | 747 |
+| 163B の PNG (pass-through) | 800 | 0.4ms | 4086 |
+
+**裾はリクエスト自身の割り当て量に比例する。** P の奪い合いなら要求サイズと
+無関係なはずなので、これは GC assist と特定できる。#3032 の同時実行枠では
+消えない (枠 1 でも p99 155ms、無制限で 168ms)。
+
+GOGC を上げると消えるが、peak RSS が 585MB → 1,033-3,188MB に膨らむため
+2GB VPS 構成 (定常 343MiB) では採れない。
+
+**Misskey 純正が同条件で平坦 (p99 6.1ms → 6.7ms) なのは、sharp が libvips の
+ネイティブメモリを使い、V8 のヒープに載せないため。** libuv スレッドプールで
+動くことより、こちらの寄与のほうが大きい。
+
+したがって、コーデックをネイティブ実装に寄せる判断には**速度以外の根拠がある**。
+ただし本文が却下したのは cgo を要する `govips` で、`gen2brain/*` が既に持つ
+`purego` 経由の動的ロード (`-tags nodynamic` を外す) は **`CGO_ENABLED=0` を
+維持したまま**同じ効果を狙える別物である。`purego` は
+`dlfcn_nocgo_linux.go` (`//go:build !cgo`) を持つ。実測では system libwebp を
+dlopen させるだけで WebP encode が 7.22ms → 1.54ms (4.7 倍) になった。
+**ヒープ圧が実際に下がるかは未測定**なので、導入時に上表と同じ形で測り直すこと。
+
 ## 関連
 
 - #672 (parent issue: media format 拡充)
+- #3032 (画像処理の同時実行枠。上記 GC 圧の測定元)
 - #618 / #619 / #620 (cgo 完全排除 → static binary 化)
 - #733 (Phase 1: Netpbm + TGA + JXR/MNG pass-through)
 - #736 (Phase 2: JPEG 2000 pure Go)
