@@ -1293,7 +1293,7 @@ const (
 // description は mfm.FromHTML が NUL を落とすが、**_misskey_summary は
 // FromHTML を通らない** ので description も対象に含める。
 func sanitizeRemoteText(s string) string {
-	return colfit.StripNUL(s)
+	return colfit.ToStorable(s)
 }
 
 // apTypeOf returns an AP object's `type`, tolerating the array form.

@@ -17,7 +17,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	// 注意 (#672 Phase 1): TGA decoder は `blezek/tga` (auto-register 無し)
 	// を採用し、`decodeImage` 内で MIME 判定で manual dispatch している。
@@ -382,8 +381,13 @@ func (s *Service) SetVideoThumbnailGeneratorWithMode(genURL, mode string) {
 // PostgreSQL は NUL を含む値も不正な UTF-8 も**比較の右辺に置くだけで**
 // クエリごと落とす。どちらも列に入りえないので、一致しえないことは引く前に
 // 分かる。#3025 が cursor / id / 検索語に対して置いた guard と同じ判断。
+//
+// **判定そのものは `colfit.Storable` が持つ。** 以前はここだけが
+// `utf8.ValidString` を併記していて、同じ guard を通る他の 118 箇所は不正な
+// UTF-8 を素通りさせていた。数え方を 2 箇所に置くとまた分かれるので、ここは
+// 「この経路で何を意味するか」だけを持つ。
 func storableURL(rawURL string) bool {
-	return colfit.Storable(rawURL) && utf8.ValidString(rawURL)
+	return colfit.Storable(rawURL)
 }
 
 // SignURL generates an HMAC-SHA256 signature for the given URL.

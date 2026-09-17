@@ -195,7 +195,7 @@ func fitsColumns(e metaEmoji) ([]string, string, bool) {
 	}
 	out := make([]string, 0, len(e.Aliases))
 	for _, a := range e.Aliases {
-		a = colfit.StripNUL(a)
+		a = colfit.ToStorable(a)
 		if a == "" || !colfit.Fits(a, emojiAliasMaxRunes) {
 			continue
 		}

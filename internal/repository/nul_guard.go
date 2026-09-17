@@ -11,6 +11,11 @@ import "github.com/shiroha-a/mk/internal/misc/colfit"
 // handler は `JSONInternalError` へ倒し、**認証済みの一般利用者がパラメータ
 // 1 文字で 5xx を立てられる** (#3025)。
 //
+// **不正な UTF-8 も同じ** (SQLSTATE 22021 `invalid byte sequence for encoding
+// "UTF8"`)。判定は `colfit.Storable` が両方まとめて持つ。JSON body から来る値は
+// Go の decoder が U+FFFD へ矯正するので届かないが、**クエリパラメータと
+// パス要素は percent-decode した生のバイト列がそのまま届く**。
+//
 // **#2792 の「DB 障害を not-found に丸めない」には反しない。** 丸めているのは
 // 障害ではなく、**引く前に分かっている「一致しえない」**という事実で、クエリを
 // 投げていない以上そこに隠れる障害が無い。逆に言うと、この判定を「引いた後」へ

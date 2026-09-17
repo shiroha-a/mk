@@ -482,3 +482,48 @@ func TestGuardedLookupsRejectUnstorableValues(t *testing.T) {
 		})
 	}
 }
+
+// **不正な UTF-8 も NUL と同じく列に入らない** (SQLSTATE 22021
+// `invalid byte sequence for encoding "UTF8"`)。以前は `colfit.Storable` が NUL
+// しか見ていなかったので、この 3 形はどれも guard を素通りして 500 になっていた。
+//
+// **クエリパラメータ経由でしか来ない形**なので、JSON body だけを試すテストでは
+// 再現しない (Go の json decoder が U+FFFD へ矯正する)。ここは repository に
+// 直接渡して、引く前に弾いていることを実 DB で固定する。
+func TestLookupsRejectInvalidUTF8BeforeQuerying(t *testing.T) {
+	db := testutil.MustOpenTestDB()
+	testutil.ApplyMigrations(db)
+
+	for _, tt := range []struct {
+		name string
+		in   string
+	}{
+		{"孤立した継続バイト", "a\x80b"},
+		{"UTF-8 で符号化した孤立サロゲート", "a\xed\xa0\x80b"},
+		{"0xFF", "\xff"},
+		{"切れた multibyte", "\xe3\x81"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewUserRepository(db).FindByID(tt.in)
+			require.Error(t, err)
+			assert.True(t, IsNotFound(err), "SELECT に載せてしまっている: %v", err)
+		})
+	}
+}
+
+// **入る値は引けたまま**であることまで見る。「不正な UTF-8 かどうか」ではなく
+// 「非 ASCII かどうか」で弾く実装にすると、ここで落ちる。
+func TestLookupsStillMatchValidNonASCII(t *testing.T) {
+	db := testutil.MustOpenTestDB()
+	testutil.ApplyMigrations(db)
+
+	repo := NewUserRepository(db)
+	u := &model.User{ID: "utf8ok1", Username: "utf8ok1", UsernameLower: "utf8ok1", Name: strPtr2("絵文字\U0001F600")}
+	require.NoError(t, db.Create(u).Error)
+	t.Cleanup(func() { db.Delete(&model.User{}, `"id" = ?`, u.ID) })
+
+	got, err := repo.FindByID(u.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.Name)
+	assert.Equal(t, "絵文字\U0001F600", *got.Name)
+}

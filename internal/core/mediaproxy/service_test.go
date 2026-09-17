@@ -881,7 +881,8 @@ func TestAuthorize_AllowlistErrorIsNotUnauthorized(t *testing.T) {
 // 実測 (実 PostgreSQL): 0xff と孤立サロゲートは SQLSTATE 22021。NUL は
 // **プロトコルで値が違う** — 本番の extended protocol では同じ 22021、
 // テストハーネスの simple protocol では 08P01。
-// **`colfit.Storable` だけでは足りない** — あれは NUL しか見ない。
+// 判定は `colfit.Storable` が NUL と不正な UTF-8 の両方を見る (以前は NUL しか
+// 見ておらず、この経路だけが `utf8.ValidString` を併記していた)。
 //
 // **このテスト自体は PostgreSQL に触らない** — 見ているのは「引く前に弾く」
 // ことだけで、上の実測は guard がなぜ要るかの根拠。

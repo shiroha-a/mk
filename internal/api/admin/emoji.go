@@ -131,7 +131,7 @@ func emojiValueTooLong(c echo.Context, field string) error {
 // `admin/emoji/copy` (#2998) と申請経路の remote 取り込みも同じ関数を通る。
 //
 // **空要素も落とす。** 列には入るが、空の alias は照合に使えないうえ、NUL だけの
-// 要素が `StripNUL` で空になったものと区別できない。`admin/emoji/copy` は #2998 から
+// 要素が `ToStorable` で空になったものと区別できない。`admin/emoji/copy` は #2998 から
 // この挙動で、`add` / `update` / 一括編集は #3018 で揃えた (upstream は `[""]` を
 // そのまま保存する)。
 //
@@ -192,7 +192,7 @@ func normalizeEmojiRoleIDs(in []string) []string {
 func dropUnstorableElements(in []string, max int) []string {
 	out := make([]string, 0, len(in))
 	for _, v := range in {
-		v = colfit.StripNUL(v)
+		v = colfit.ToStorable(v)
 		if v == "" || !colfit.Fits(v, max) {
 			continue
 		}
