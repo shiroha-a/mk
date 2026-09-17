@@ -73,3 +73,13 @@ func (s *Service) MediaProcessingSlotsForTest() int { return s.mediaSlotCap }
 
 // DefaultMediaProcessingConcurrencyForTest exposes the default pool size.
 func DefaultMediaProcessingConcurrencyForTest() int { return defaultMediaProcessingConcurrency() }
+
+// HasStrippableMetadataForTest exposes hasStrippableMetadata so external test
+// packages can assert their fixtures actually carry metadata.
+//
+// **フィクスチャが前提を満たしているかを固定するため (#3038)。** 受け取りの
+// 可否が「webpublic を作れるか」で決まるので、EXIF の入っていない画像で
+// 「メタデータがある場合」を試すと、テストが別の理由で緑になる。
+func HasStrippableMetadataForTest(body []byte, mime string) bool {
+	return hasStrippableMetadata(body, mime)
+}

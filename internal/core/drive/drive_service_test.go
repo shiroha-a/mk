@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"hash/crc32"
 	"image"
 	"image/color"
 	"image/jpeg"
@@ -1862,8 +1863,68 @@ func TestMaxUploadBytes(t *testing.T) {
 
 // --- #3037 レビュー 2 周目: メタデータを落とせない画像は受け取らない ---
 
+// realPNGWithExif encodes a decodable PNG and splices an `eXIf` chunk into it.
+//
+// **デコードできる本物を使う (#3038)。** 受け取りの可否が「webpublic を
+// 作れるか」で決まるので、でたらめなバイト列では「メタデータがあるから
+// 落とす」と「そもそも読めないから落とす」を区別できない。
+//
+// WebP ではなく PNG なのは、**単純形式の WebP は EXIF を持てない**ため
+// (拡張形式の VP8X が要る)。PNG の `eXIf` は仕様どおり後ろに足せる。
+func realPNGWithExif(t *testing.T, w, h int) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	for y := range h {
+		for x := range w {
+			img.Set(x, y, color.NRGBA{R: uint8(x), G: uint8(y), B: 0x40, A: 0xFF})
+		}
+	}
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return splicePNGChunk(buf.Bytes(), "eXIf", minimalEXIF())
+}
+
+// minimalEXIF returns a well-formed little-endian TIFF with an empty IFD.
+//
+// **切り詰めた EXIF では駄目 (#3038)。** 自動回転の EXIF パーサが
+// `tiff: seek offset after EOF` で落ち、`decodeImage` ごと失敗する。それは
+// それで「壊れた EXIF を持つ画像は webpublic が作られない」という別の実例
+// だが、ここで試したいのは**正常な画像が通ること**なので正しい形を使う。
+func minimalEXIF() []byte {
+	b := []byte("II*\x00")                     // little-endian, magic 42
+	b = binary.LittleEndian.AppendUint32(b, 8) // 最初の IFD は offset 8
+	b = binary.LittleEndian.AppendUint16(b, 0) // エントリ 0 件
+	b = binary.LittleEndian.AppendUint32(b, 0) // 次の IFD 無し
+	return b
+}
+
+// splicePNGChunk inserts a chunk just before IDAT.
+func splicePNGChunk(src []byte, typ string, data []byte) []byte {
+	idx := bytes.Index(src, []byte("IDAT"))
+	if idx < 4 {
+		return src
+	}
+	pos := idx - 4
+
+	body := append([]byte(typ), data...)
+	crc := crc32.NewIEEE()
+	_, _ = crc.Write(body)
+
+	chunk := make([]byte, 0, len(body)+8)
+	chunk = binary.BigEndian.AppendUint32(chunk, uint32(len(data)))
+	chunk = append(chunk, body...)
+	chunk = binary.BigEndian.AppendUint32(chunk, crc.Sum32())
+
+	out := make([]byte, 0, len(src)+len(chunk))
+	out = append(out, src[:pos]...)
+	out = append(out, chunk...)
+	out = append(out, src[pos:]...)
+	return out
+}
+
 // webpWithExif builds a RIFF/WEBP container of at least size bytes that carries
-// an EXIF chunk, without needing a real encoder.
+// an EXIF chunk. **デコードはできない** — デコーダへ渡す前のバイト数の上限に
+// 当てるためだけのもの。
 func webpWithExif(size int) []byte {
 	exif := []byte("EXIF")
 	payload := []byte("Exif\x00\x00II*\x00\x08\x00\x00\x00")
@@ -1898,6 +1959,7 @@ func webpWithExif(size int) []byte {
 // 発火するのは `maxFileSizeMb >= 33` の構成だけ (既定は 30)。
 func TestUpload_RejectsImagesWhoseMetadataCannotBeStripped(t *testing.T) {
 	svc, _, _ := newSvc(t)
+	svc.SetImageProcessor(drive.NewDefaultImageProcessor())
 	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
 		"u1": {"maxFileSizeMb": 64},
 	}})
@@ -1921,6 +1983,7 @@ func TestUpload_RejectedImageLeavesNothingInStorage(t *testing.T) {
 	dir := t.TempDir()
 	storage := drive.NewLocalStorage(dir, "https://example.com/files")
 	svc, fileRepo := newSvcWithStorage(t, storage)
+	svc.SetImageProcessor(drive.NewDefaultImageProcessor())
 	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
 		"u1": {"maxFileSizeMb": 64},
 	}})
@@ -1944,26 +2007,34 @@ func TestUpload_RejectedImageLeavesNothingInStorage(t *testing.T) {
 	assert.Empty(t, left, "拒否したファイルの実体がストレージに残っている (恒久的にリークする)")
 }
 
-// **上限の内側なら従来どおり通る。** これが無いと「WebP を常に拒否する」
-// 実装でも上のテストが通る。
-func TestUpload_AcceptsImagesUnderTheDecoderSizeCap(t *testing.T) {
+// **デコードできる画像は通り、webpublic が作られる。** これが無いと
+// 「EXIF を持つ画像を常に拒否する」実装でも上のテストが通る。
+func TestUpload_AcceptsDecodableImagesWithMetadata(t *testing.T) {
 	svc, _, _ := newSvc(t)
+	// **実物の画像プロセッサを配線する。** `NewService` は配線しないので、
+	// そのままだと `generateAlts` が何も作らず、判定が別の理由で通る。
+	svc.SetImageProcessor(drive.NewDefaultImageProcessor())
 	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
 		"u1": {"maxFileSizeMb": 64},
 	}})
-	body := webpWithExif(1 << 20)
 
-	_, err := svc.Upload(context.Background(), drive.UploadInput{
-		User: &model.User{ID: "u1"}, Body: body, Name: "x.webp",
+	body := realPNGWithExif(t, 32, 32)
+	require.True(t, drive.HasStrippableMetadataForTest(body, "image/png"), "fixture に EXIF が入っていない")
+
+	f, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: body, Name: "x.png",
 	})
 
-	require.NotErrorIs(t, err, drive.ErrUndecodableImage, "上限の内側を弾いている")
+	require.NoError(t, err, "デコードできる画像を弾いている")
+	require.NotNil(t, f)
+	assert.NotNil(t, f.WebpublicURL, "EXIF を持つ画像に webpublic が作られていない")
 }
 
 // **落とすものが無い画像は通す。** 原本を出しても漏れないので、上限に当たる
 // だけで拒否すると受け取れるものを不必要に減らす。
 func TestUpload_AcceptsLargeImagesWithoutMetadata(t *testing.T) {
 	svc, _, _ := newSvc(t)
+	svc.SetImageProcessor(drive.NewDefaultImageProcessor())
 	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
 		"u1": {"maxFileSizeMb": 64},
 	}})
@@ -1992,6 +2063,7 @@ func TestUpload_AcceptsLargeImagesWithoutMetadata(t *testing.T) {
 // **条件を消しても緑のままだった**。
 func TestUpload_RejectsOversizedAVIFEvenWithoutMetadata(t *testing.T) {
 	svc, _, _ := newSvc(t)
+	svc.SetImageProcessor(drive.NewDefaultImageProcessor())
 	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
 		"u1": {"maxFileSizeMb": 64},
 	}})
@@ -2004,24 +2076,38 @@ func TestUpload_RejectsOversizedAVIFEvenWithoutMetadata(t *testing.T) {
 		"メタデータの無い巨大 AVIF を受け取っている (原本は Mastodon / Edge で表示できない)")
 }
 
-// **上限の内側の AVIF は通す。** これが無いと「AVIF を常に拒否する」実装でも
-// 上のテストが通る。
-func TestUpload_AcceptsAVIFUnderTheDecoderSizeCap(t *testing.T) {
+// **HEIC / HEIF もブラウザが開けないので webpublic を必須にする (#3038)。**
+//
+// 以前は `isMimeImage` に無かったため画像処理ごと skip され、**サイズの
+// 閾値すら無く全 HEIC が原本のまま公開されていた** (iPhone の既定形式で
+// 位置情報を持つのが普通)。
+func TestUpload_RejectsHEICWithoutWebpublic(t *testing.T) {
 	svc, _, _ := newSvc(t)
+	svc.SetImageProcessor(drive.NewDefaultImageProcessor())
 	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
 		"u1": {"maxFileSizeMb": 64},
 	}})
 
-	_, err := svc.Upload(context.Background(), drive.UploadInput{
-		User: &model.User{ID: "u1"}, Body: avifWithoutMetadata(1 << 20), Name: "x.avif",
-	})
-
-	require.NotErrorIs(t, err, drive.ErrUndecodableImage, "上限の内側の AVIF を弾いている")
+	for name, body := range map[string][]byte{
+		"heic": isobmffWithoutMetadata("heic", 1<<10),
+		"heif": isobmffWithoutMetadata("mif1", 1<<10),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := svc.Upload(context.Background(), drive.UploadInput{
+				User: &model.User{ID: "u1"}, Body: body, Name: "x." + name,
+			})
+			require.ErrorIs(t, err, drive.ErrUndecodableImage,
+				"webpublic を作れない %s を受け取っている (原本が公開側に出る)", name)
+		})
+	}
 }
 
-// avifWithoutMetadata builds an ISOBMFF container with the `avif` brand and no
-// EXIF/XMP box, padded to at least size bytes.
-func avifWithoutMetadata(size int) []byte {
+// avifWithoutMetadata builds an ISOBMFF container with the `avif` brand.
+func avifWithoutMetadata(size int) []byte { return isobmffWithoutMetadata("avif", size) }
+
+// isobmffWithoutMetadata builds an ISOBMFF container with the given major
+// brand and no EXIF/XMP box, padded to at least size bytes.
+func isobmffWithoutMetadata(brand string, size int) []byte {
 	pad := size
 	if pad < 64 {
 		pad = 64
@@ -2030,9 +2116,9 @@ func avifWithoutMetadata(size int) []byte {
 	// ftyp box: size(4) + "ftyp" + major brand + minor version + compatible brand.
 	b = append(b, 0, 0, 0, 20)
 	b = append(b, "ftyp"...)
-	b = append(b, "avif"...)
+	b = append(b, brand...)
 	b = append(b, 0, 0, 0, 0)
-	b = append(b, "avif"...)
+	b = append(b, brand...)
 	// mdat box に嵩を持たせる (中身は読まれない)。
 	b = append(b, 0, 0, 0, 8)
 	b = append(b, "mdat"...)

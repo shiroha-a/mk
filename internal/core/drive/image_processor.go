@@ -11,6 +11,10 @@ import (
 
 	"github.com/bbrks/go-blurhash"
 	_ "github.com/gen2brain/avif" // AVIF input decode (mediaproxy と同じ wazero ベース)
+	_ "github.com/gen2brain/heic" // HEIC/HEIF input decode (iPhone uploads)
+	// **HEIC も直接 import する (#3038)。** 登録はプロセス全体なので実行時は
+	// `internal/core/mediaproxy` 側の import でも効くが、そちらに依存すると
+	// **この package 単体のテストでだけデコードできない**状態になる。
 	"github.com/gen2brain/webp"
 	"github.com/kovidgoyal/imaging"
 
@@ -84,7 +88,21 @@ func isMimeImage(mime string) bool {
 		"image/vnd.mozilla.apng", "image/apng",
 		// AVIF は gen2brain/avif (wazero) で decode できる。upstream は
 		// sharp-convertible-image に含めており、webpublic を必ず WebP で作る。
-		"image/avif":
+		"image/avif",
+		// **HEIC / HEIF も画像として扱う (#3038)。**
+		//
+		// 以前はここに無かったので `generateAlts` が画像処理ごと skip し、
+		// **webpublic も thumbnail も作られなかった**。`GetPublicURL` は
+		// 原本へ落ちるので、**EXIF の GPS がそのまま公開される** — しかも
+		// HEIC は iPhone の既定形式で位置情報を持つのが普通なので、
+		// AVIF / WebP で塞いだものより条件が緩い (サイズの閾値すら無い)。
+		//
+		// **upstream の `sharp-convertible-image` にも HEIC は無い** ので
+		// parity ではあるが、mk-go は media proxy 側で既に
+		// `gen2brain/heic` を使って HEIC をデコードしており
+		// (`isConvertibleImage` に入っている)、drive だけが取り残されていた。
+		// 厳しい側へ倒して `docs/divergence.md` に記録する。
+		"image/heic", "image/heif":
 		return true
 	default:
 		return false
@@ -92,6 +110,21 @@ func isMimeImage(mime string) bool {
 }
 
 // isMimeVideo returns true if the MIME type represents a video format.
+// requiresWebpublic reports whether the original must never be the public URL,
+// so a webpublic has to be produced regardless of size and metadata.
+//
+// **ブラウザが開けない形式 (#3038)。** AVIF は Mastodon / MS Edge が表示
+// できず (upstream `DriveService` も `type !== 'image/avif'` を条件に含めて
+// いる)、HEIC / HEIF は Safari 以外ほぼ全滅。原本を公開 URL にすると壊れた
+// 添付になるうえ、**どちらも EXIF を持てる**ので GPS がそのまま出る。
+func requiresWebpublic(mime string) bool {
+	switch mime {
+	case "image/avif", "image/heic", "image/heif":
+		return true
+	}
+	return false
+}
+
 func isMimeVideo(mime string) bool {
 	return strings.HasPrefix(mime, "video/")
 }
@@ -224,7 +257,7 @@ func (p *DefaultImageProcessor) GenerateWebpublic(body []byte, mimeType string) 
 	// 関わらず必ず WebP の webpublic を作る (upstream DriveService の
 	// satisfyWebpublic は `type !== 'image/avif'` を条件に含めている)。
 	// SVG は現在未対応なのでここには来ない (isMimeImage で弾かれる)。
-	if mimeType != "image/avif" && !hasExif && w <= webpublicMax && h <= webpublicMax {
+	if !requiresWebpublic(mimeType) && !hasExif && w <= webpublicMax && h <= webpublicMax {
 		return nil, nil
 	}
 

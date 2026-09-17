@@ -17,7 +17,6 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
-	"github.com/shiroha-a/mk/internal/misc/imagedecode"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/safehttp"
@@ -744,31 +743,46 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	// PreStored (#2313) の場合も同じ backend を使う。分割アップロードは
 	// MultipartStorage を要求するので backend は必ず object storage 側であり、
 	// storedInternal は false になる。
-	// **メタデータを落とせない画像は受け取らない (#3037 レビュー 2 周目)。**
+	// **代替画像は本体を置く前に作る (#3038)。**
 	//
-	// 代替画像の生成は best-effort だが、`webpublic` が作られないと
-	// `GetPublicURL` が原本へ落ちるので、**EXIF の GPS がそのまま公開側へ出る**
-	// — この PR が `entity/drive.go` 側で塞いだ穴と同じもの。
-	// `SandboxedDecoderMaxBytes` は #3037 が新しく入れた上限なので、**それが
-	// 原因で落ちる入力だけ**を「作れないなら受け取らない」に倒す (元から
-	// デコードできない形式の扱いは変えない)。
+	// `webpublic` が作られないと `GetPublicURL` が原本へ落ちるので、
+	// **EXIF の GPS がそのまま公開側へ出る**。作れなかったときに受け取りを
+	// 断るには、**断る判断が本体を置く前に済んでいる**必要がある — 後ろに
+	// 置くと本体だけがストレージに残り、`drive_file` 行が無いので
+	// `UsageByUser` にも `DeleteOrphans` (行ベース) にも乗らず恒久的に
+	// リークする (#3037 レビュー 3 周目で実測)。
 	//
-	// 条件に `hasStrippableMetadata` を入れてあるので、落とすものが無い画像は
-	// 従来どおり通る (その場合は原本を出しても漏れない)。
+	// 生成そのものは以前と同じで、並べ替えただけ (`generateAlts` は
+	// `accessKey` / `url` を使わない)。
+	alts := s.generateAlts(ctx, in.Body, info.MimeType)
+	var thumbnail, webpublic *ProcessedImage
+	var blurhash *string
+	var properties datatypes.JSON
+	if alts != nil {
+		thumbnail = alts.thumbnail
+		webpublic = alts.webpublic
+		blurhash = alts.blurhash
+		properties = alts.properties
+	}
+
+	// **原本を出せない画像は、webpublic を作れなければ受け取らない (#3038)。**
 	//
-	// **AVIF だけは別に見る。** `hasStrippableMetadata` は AVIF に false を
-	// 返す — 「AVIF は寸法に関わらず webpublic を作る枝が別にある」ことが
-	// 前提だが、**デコードできなければその枝も動かない**。AVIF の原本は
-	// Mastodon / MS Edge が表示できないので、通すと壊れた添付になる。
+	// 対象は 2 つ。
 	//
-	// **`backend.Put` より前に置く (#3037 レビュー 3 周目)。** 後ろに置くと
-	// 本体だけがストレージに残り、`drive_file` 行が無いので
-	// `UsageByUser` にも `DeleteOrphans` (行ベース) にも乗らない =
-	// **恒久的にリークする**。実測で拒否 1 回あたり 34,603,050 バイトが
-	// 残った。分割アップロードは `discardChunkedObject` が消すので
-	// 残らないが、`drive/files/create` と `upload-from-url` は残る。
-	if isMimeImage(info.MimeType) && imagedecode.ExceedsSandboxedDecoderSize(info.Body) &&
-		(hasStrippableMetadata(info.Body, info.MimeType) || info.MimeType == "image/avif") {
+	//   - **落とすメタデータを持つもの** (EXIF / XMP)。原本を配ると GPS が出る
+	//   - **原本がブラウザで開けないもの** (AVIF / HEIC / HEIF)。`webpublic` が
+	//     無いと壊れた添付になるうえ、HEIC は iPhone の既定形式で**位置情報を
+	//     持つのが普通**
+	//
+	// 代替画像の生成そのものは従来どおり best-effort のまま。ここで断るのは
+	// 「作れなかったことが漏洩に直結する」組み合わせだけで、落とすものが無く
+	// 原本をそのまま配ってよい画像 (メタデータ無しの PNG など) は通る。
+	//
+	// **画像プロセッサが配線されていない構成では見ない。** そこは代替画像の
+	// 生成そのものを行わない運用なので、断ると**画像が 1 枚も上げられなく
+	// なる**。原本が出るのは元からの挙動で、この変更の射程外。
+	if s.imageProcessor != nil && isMimeImage(info.MimeType) && webpublic == nil &&
+		(hasStrippableMetadata(info.Body, info.MimeType) || requiresWebpublic(info.MimeType)) {
 		return nil, ErrUndecodableImage
 	}
 
@@ -793,19 +807,6 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		if err != nil {
 			return nil, err
 		}
-	}
-
-	// 画像/動画処理 (best-effort)
-	var thumbnail, webpublic *ProcessedImage
-	var blurhash *string
-	var properties datatypes.JSON
-
-	alts := s.generateAlts(ctx, in.Body, info.MimeType)
-	if alts != nil {
-		thumbnail = alts.thumbnail
-		webpublic = alts.webpublic
-		blurhash = alts.blurhash
-		properties = alts.properties
 	}
 
 	// サムネイル/webpublic を storage に保存
