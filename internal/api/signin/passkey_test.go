@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/api/signin"
@@ -101,7 +102,7 @@ func TestSigninWithPasskey_VerifyBadCredential(t *testing.T) {
 	require.NoError(t, err)
 	h.SetWebAuthn(svc, &inMemorySK{keys: map[string][]*model.UserSecurityKey{}})
 
-	body := `{"context":"ghost","credential":{"id":"x","rawId":"x","type":"public-key","response":{}}}`
+	body := `{"context":"00112233445566778899aabbccddeeff","credential":{"id":"x","rawId":"x","type":"public-key","response":{}}}`
 	rec := doPost(h.SigninWithPasskey, body)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
 }
@@ -158,7 +159,49 @@ func TestSigninWithPasskey_PasswordlessNotEnabled_Fails(t *testing.T) {
 		UsePasswordLessLogin: false,
 	}
 
-	body := `{"context":"ghost","credential":{"id":"x","rawId":"x","type":"public-key","response":{}}}`
+	body := `{"context":"00112233445566778899aabbccddeeff","credential":{"id":"x","rawId":"x","type":"public-key","response":{}}}`
 	rec := doPost(h.SigninWithPasskey, body)
 	assert.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+// **`context` は形まで見る (#3037)。**
+//
+// サーバーが発行した 16 バイト乱数の hex 以外を受け取る意味が無い。素通しすると
+// この値が (a) Redis のキーの一部 (`twofa:webauthn:passkey:<context>`) になり、
+// (b) 失敗時にそのままログへ出る。どちらも**未認証で任意長・任意バイト列**を
+// 渡せる面。upstream (`SigninWithPasskeyApiService.ts:122`) も UUID 形式を
+// 要求する。
+func TestSigninWithPasskey_RejectsMalformedContext(t *testing.T) {
+	h, _ := newTestHandler(t)
+	svc, err := twofactor.NewWebAuthnService("https://example.com", "Misskey", signinTestRedis.Client)
+	require.NoError(t, err)
+	h.SetWebAuthn(svc, &inMemorySK{keys: map[string][]*model.UserSecurityKey{}})
+
+	for _, tt := range []struct {
+		name string
+		ctx  string
+	}{
+		{"短い", "00112233"},
+		{"長い", strings.Repeat("a", 33)},
+		{"hex でない文字", "00112233445566778899aabbccddeegg"},
+		{"大文字", "00112233445566778899AABBCCDDEEFF"},
+		{"Redis のキー区切りを含む", "00112233445566778899aabbccdd:eef"},
+		// 長大な値 (ログとキーの両方に効く)。
+		{"極端に長い", strings.Repeat("0", 100000)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body := `{"context":"` + tt.ctx + `","credential":{"id":"x","rawId":"x","type":"public-key","response":{}}}`
+			rec := doPost(h.SigninWithPasskey, body)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "形の違う context を受け取っている")
+		})
+	}
+}
+
+// **生成した形は通る。** これが無いと「常に 400」の実装でも上のテストが通る。
+func TestValidPasskeyContext_AcceptsGenerated(t *testing.T) {
+	for i := 0; i < 20; i++ {
+		ctxID, err := signin.NewPasskeyContextForTest()
+		require.NoError(t, err)
+		assert.True(t, signin.ValidPasskeyContextForTest(ctxID), "生成した context を弾いている: %q", ctxID)
+	}
 }

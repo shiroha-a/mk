@@ -58,7 +58,17 @@ func (h *Handler) SigninWithPasskey(c echo.Context) error {
 	}
 
 	// Step 2: credential 検証。
-	if req.Context == "" {
+	//
+	// **形まで見る (#3037)。** `context` はサーバーが発行した 16 バイト乱数の
+	// hex でしかないので、それ以外は受け取る意味が無い。upstream も
+	// `SigninWithPasskeyApiService.ts:122` で「context は常にサーバー側の
+	// `randomUUID()` なので UUID でないものは拒否する」と書いて同じ形の
+	// 検査をしている。
+	//
+	// 素通しすると、この値が (a) **Redis のキーの一部**になり
+	// (`twofa:webauthn:passkey:<context>`)、(b) 失敗時に**そのままログへ出る**。
+	// どちらも未認証で任意長・任意バイト列を渡せる面なので、閉じておく。
+	if !validPasskeyContext(req.Context) {
 		return c.JSON(http.StatusBadRequest, errBody("1658cc2e-4495-461f-aee4-d403cdf073c1"))
 	}
 
@@ -166,6 +176,27 @@ func newPasskeyContext() (string, error) {
 	}
 	return hex.EncodeToString(buf), nil
 }
+
+// validPasskeyContext reports whether s has the exact shape newPasskeyContext
+// produces: 32 lowercase hex characters (16 random bytes).
+//
+// **生成側と 1 対 1 にする。** 「hex であればよい」のような緩い判定にすると、
+// 長さが変わったときに検査が実質的に消える。
+func validPasskeyContext(s string) bool {
+	if len(s) != passkeyContextHexLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// passkeyContextHexLen is the hex length of a passkey context id.
+const passkeyContextHexLen = 32
 
 // readRandom is the indirection point for crypto/rand.Read. tests swap this
 // to exercise rand-failure paths. test-only swapper は export_test.go に置く
