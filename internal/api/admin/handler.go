@@ -2597,10 +2597,31 @@ func (h *Handler) requireCanEditRoleMembers(c echo.Context, roleID, noSuchRoleID
 		}
 		return true, apierr.JSONInternalError(c)
 	}
+	isAdmin := false
+	if me := middleware.GetUser(c); me != nil {
+		isAdmin = h.roleService.IsAdministrator(me.ID)
+	}
+	// **管理者権限を配るロールは管理者しか付け外しできない (#3037)。**
+	//
+	// `canEditMembersByModerator` は「モデレーターがメンバーを編集してよいか」
+	// しか見ない。**管理者ロールにそれを立てるのは管理画面のチェックボックス
+	// 1 つ**で、立った瞬間からモデレーターは自分自身にそのロールを付けられる
+	// = 管理者へ昇格できる。ロールの作成・更新は管理者専用 (`RequireAdmin`)
+	// なのに、付け外しだけがこの穴で抜けていた。
+	//
+	// **unassign も塞ぐ。** 管理者ロールを外せるなら、モデレーターが管理者を
+	// 降格させて (あるいは全管理者を降ろして) 実質の最上位になれる。
+	//
+	// **upstream も同じ状態だが、そちらに合わせない。** `assign.ts:69-76` は
+	// `canEditMembersByModerator` だけを見る。ここは mk-go を厳しい側に倒して
+	// `docs/divergence.md` に記録する (プロジェクトの既定方針)。
+	if r.IsAdministrator && !isAdmin {
+		return true, c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of an administrator role.", accessDeniedID))
+	}
 	if r.CanEditMembersByModerator {
 		return false, nil
 	}
-	if me := middleware.GetUser(c); me != nil && h.roleService.IsAdministrator(me.ID) {
+	if isAdmin {
 		return false, nil
 	}
 	return true, c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Only administrators can edit members of the role.", accessDeniedID))
