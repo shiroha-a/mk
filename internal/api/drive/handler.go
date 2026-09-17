@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"regexp"
 	"strings"
@@ -171,18 +172,41 @@ func (h *Handler) packDriveFileSelfList(f *model.DriveFile) entity.DriveFileEnti
 	return entity.PackDriveFileSelf(f, h.idGen)
 }
 
+// openMultipartFile opens one parsed multipart part. テスト用の差し替え口。
+//
+// **メモリ由来とは限らない。** echo の multipart パーサは `maxMemory` を
+// 超えた分を一時ファイルへ落とすので、`Open` は実ファイルを開く。ディスクが
+// 埋まっている / 一時ファイルが消された / I/O エラーのいずれでも失敗しうる。
+var openMultipartFile = func(fh *multipart.FileHeader) (multipart.File, error) {
+	return fh.Open()
+}
+
 // readMultipartFile extracts the uploaded file's bytes and original filename.
-// テスト用に差し替え可能な変数として定義する。Open()/ReadAll()はechoの
-// multipartパース後ではメモリまたはtempfile由来のreaderしか返さないため
-// 実用上失敗しない (FormFile以外のerrorパスは defensive 扱い)。
+// テスト用に差し替え可能な変数として定義する。
+//
+// **`Open` と `ReadAll` の error を捨てない (#3037)。** 以前は `src, _ :=` /
+// `body, _ :=` と書いており、
+//
+//   - `Open` 失敗 → `src` が nil のまま `defer src.Close()` で **nil 参照 panic**
+//   - `ReadAll` の途中失敗 → **無言で切り詰められた本体**がそのまま保存され、
+//     MD5 / size / MIME がその切れ端で確定する (利用者には成功として返る)
+//
+// の 2 つが起きた。どちらも「実用上失敗しない」を前提にしていたが、上の
+// `openMultipartFile` のとおりその前提が成り立たない。
 var readMultipartFile = func(c echo.Context) ([]byte, string, error) {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return nil, "", err
 	}
-	src, _ := fileHeader.Open()
+	src, err := openMultipartFile(fileHeader)
+	if err != nil {
+		return nil, "", fmt.Errorf("open uploaded file: %w", err)
+	}
 	defer src.Close()
-	body, _ := io.ReadAll(src)
+	body, err := io.ReadAll(src)
+	if err != nil {
+		return nil, "", fmt.Errorf("read uploaded file: %w", err)
+	}
 	return body, fileHeader.Filename, nil
 }
 

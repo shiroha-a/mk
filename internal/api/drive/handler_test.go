@@ -1297,3 +1297,96 @@ func TestCursorGuardRejectsUnstorableCursor(t *testing.T) {
 		})
 	}
 }
+
+// --- multipart の error を捨てない (#3037) ---
+
+// failingMultipartFile yields n bytes then fails, standing in for a temp file
+// that becomes unreadable mid-upload (disk full / removed / I/O error).
+type failingMultipartFile struct {
+	data []byte
+	pos  int
+	stop int
+	err  error
+}
+
+func (f *failingMultipartFile) Read(p []byte) (int, error) {
+	if f.pos >= f.stop {
+		return 0, f.err
+	}
+	n := copy(p, f.data[f.pos:f.stop])
+	f.pos += n
+	return n, nil
+}
+func (f *failingMultipartFile) ReadAt([]byte, int64) (int, error) { return 0, f.err }
+func (f *failingMultipartFile) Seek(int64, int) (int64, error)    { return 0, f.err }
+func (f *failingMultipartFile) Close() error                      { return nil }
+
+// **`Open` の失敗を捨てない。** 以前は `src, _ :=` と書いていたので、
+// `src` が nil のまま `defer src.Close()` に落ちて **nil 参照 panic** していた。
+// echo の multipart パーサは `maxMemory` を超えた分を一時ファイルへ落とすので、
+// `Open` は実ファイルを開く = 失敗しうる。
+func TestReadMultipartFile_OpenFailureIsReported(t *testing.T) {
+	prev := openMultipartFile
+	t.Cleanup(func() { openMultipartFile = prev })
+	openMultipartFile = func(*multipart.FileHeader) (multipart.File, error) {
+		return nil, errors.New("disk is gone")
+	}
+
+	c, _ := newMultipartReq(t, "hello.txt", "hello", nil)
+	require.NotPanics(t, func() {
+		body, name, err := readMultipartFile(c)
+		assert.Error(t, err, "Open の失敗を握り潰している")
+		assert.Nil(t, body)
+		assert.Empty(t, name)
+	})
+}
+
+// **`ReadAll` の途中失敗を捨てない。** 以前は `body, _ :=` と書いていたので、
+// **無言で切り詰められた本体**がそのまま保存され、MD5 / size / MIME がその
+// 切れ端で確定していた (利用者には成功として返る)。
+func TestReadMultipartFile_ReadFailureIsReported(t *testing.T) {
+	prev := openMultipartFile
+	t.Cleanup(func() { openMultipartFile = prev })
+	openMultipartFile = func(*multipart.FileHeader) (multipart.File, error) {
+		return &failingMultipartFile{
+			data: []byte("hello world"),
+			stop: 5, // 5 バイト読めた時点で失敗する
+			err:  errors.New("input/output error"),
+		}, nil
+	}
+
+	c, _ := newMultipartReq(t, "hello.txt", "hello world", nil)
+	body, _, err := readMultipartFile(c)
+	require.Error(t, err, "途中で切れた本体を成功として返している")
+	assert.Nil(t, body, "切れ端を返している")
+}
+
+// 切れ端が保存されないことを handler まで通して見る。
+func TestFilesCreate_ReadFailureDoesNotStoreTruncatedFile(t *testing.T) {
+	prev := openMultipartFile
+	t.Cleanup(func() { openMultipartFile = prev })
+	openMultipartFile = func(*multipart.FileHeader) (multipart.File, error) {
+		return &failingMultipartFile{
+			data: []byte("hello world"),
+			stop: 5,
+			err:  errors.New("input/output error"),
+		}, nil
+	}
+
+	h, fileRepo, _ := newHandler(t)
+	c, rec := newMultipartReq(t, "hello.txt", "hello world", nil)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "切れ端を成功として返している")
+	assert.Empty(t, fileRepo.Files, "切れ端が保存されている")
+}
+
+// **普通のアップロードは通ったまま。** これが無いと「常にエラーを返す」実装でも
+// 上のテストが通る。
+func TestReadMultipartFile_OrdinaryUploadStillReads(t *testing.T) {
+	c, _ := newMultipartReq(t, "hello.txt", "hello world", nil)
+	body, name, err := readMultipartFile(c)
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", string(body))
+	assert.Equal(t, "hello.txt", name)
+}
