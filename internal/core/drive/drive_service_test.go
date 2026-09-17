@@ -1810,3 +1810,52 @@ func TestValidateFileName_OrdinaryNamesStillPass(t *testing.T) {
 		assert.True(t, drive.ValidateFileName(in), "正当な名前を弾いている: %q", in)
 	}
 }
+
+// **読み切る前に上限を引けること (#3037)。**
+//
+// `Upload` の中にも同じ判定があるが、あそこへ届く時点で本体は全部メモリに
+// 載っている。既定では policy が 30MB なのに `config.maxFileSize` が 250MB
+// なので、30MB しか保存できない利用者が 250MB を確保させられた。
+func TestMaxUploadBytes(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	local := &model.User{ID: "u1"}
+	remoteHost := "remote.example"
+	remote := &model.User{ID: "u2", Host: &remoteHost}
+
+	// roleChecker 未配線 → 上限なし。
+	_, ok := svc.MaxUploadBytes(local)
+	assert.False(t, ok, "role が未配線なのに上限を作っている")
+
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": 30},
+		"u2": {"maxFileSizeMb": 30},
+		"u3": {"maxFileSizeMb": 0},
+		"u4": {"maxFileSizeMb": 1.5},
+	}})
+
+	got, ok := svc.MaxUploadBytes(local)
+	require.True(t, ok)
+	assert.Equal(t, int64(30*1024*1024), got)
+
+	// 小数の policy も gate と同じ値になる (`Capacity` と同じ理由、#2611)。
+	got, ok = svc.MaxUploadBytes(&model.User{ID: "u4"})
+	require.True(t, ok)
+	assert.Equal(t, int64(1.5*1024*1024), got)
+
+	// 上限を作らない側。**`Upload` の gate と対象を揃える** — あちらも
+	// system file と remote user は見ない。
+	for _, tt := range []struct {
+		name string
+		user *model.User
+	}{
+		{"system file (user なし)", nil},
+		{"remote user", remote},
+		{"policy が 0", &model.User{ID: "u3"}},
+		{"policy の無い user", &model.User{ID: "u9"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, ok := svc.MaxUploadBytes(tt.user)
+			assert.False(t, ok, "上限を作ってはいけない相手に上限を作っている")
+		})
+	}
+}

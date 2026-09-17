@@ -193,21 +193,54 @@ var openMultipartFile = func(fh *multipart.FileHeader) (multipart.File, error) {
 //
 // の 2 つが起きた。どちらも「実用上失敗しない」を前提にしていたが、上の
 // `openMultipartFile` のとおりその前提が成り立たない。
-var readMultipartFile = func(c echo.Context) ([]byte, string, error) {
+var readMultipartFile = func(c echo.Context, maxBytes int64) ([]byte, string, error) {
 	fileHeader, err := c.FormFile("file")
 	if err != nil {
 		return nil, "", err
+	}
+	// **読む前に落とす (#3037)。** `Upload` にも同じ判定があるが、あそこへ
+	// 届く時点で本体は全部メモリに載っている。既定では policy が 30MB なのに
+	// `config.maxFileSize` が 250MB なので、**30MB しか保存できない利用者が
+	// 250MB を確保させられた**。
+	if maxBytes > 0 && fileHeader.Size > maxBytes {
+		return nil, "", coredrive.ErrMaxFileSizeExceeded
 	}
 	src, err := openMultipartFile(fileHeader)
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: open: %w", errMultipartIO, err)
 	}
 	defer src.Close()
-	body, err := io.ReadAll(src)
+	body, err := readAtMost(src, maxBytes)
 	if err != nil {
+		if errors.Is(err, coredrive.ErrMaxFileSizeExceeded) {
+			return nil, "", err
+		}
 		return nil, "", fmt.Errorf("%w: read: %w", errMultipartIO, err)
 	}
 	return body, fileHeader.Filename, nil
+}
+
+// readAtMost reads r fully, failing with ErrMaxFileSizeExceeded past maxBytes.
+//
+// **`FileHeader.Size` だけに頼らない。** あれはパーサが数えた値なので、
+// 数え方が変わったり part が差し替わったりすると読み込み量と食い違う。
+// 上限を強制するのは実際に読むこちら側で、`Size` は「読む前に落とせる
+// ときは落とす」ための早い枝。
+//
+// maxBytes <= 0 は上限なし (policy 未設定 / system file / remote user)。
+func readAtMost(r io.Reader, maxBytes int64) ([]byte, error) {
+	if maxBytes <= 0 {
+		return io.ReadAll(r)
+	}
+	// 1 バイト余分に読んで、超過を「読めてしまった」ことで判定する。
+	body, err := io.ReadAll(io.LimitReader(r, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, coredrive.ErrMaxFileSizeExceeded
+	}
+	return body, nil
 }
 
 // errMultipartIO marks a multipart failure as **server-side**.
@@ -226,8 +259,15 @@ var errMultipartIO = errors.New("drive: multipart io")
 func (h *Handler) FilesCreate(c echo.Context) error {
 	user := middleware.GetUser(c)
 
-	body, filename, err := readMultipartFile(c)
+	// 読み切る前に上限を引く (`readMultipartFile` の doc 参照)。
+	maxBytes, _ := h.svc.MaxUploadBytes(user)
+	body, filename, err := readMultipartFile(c, maxBytes)
 	if err != nil {
+		// upstream `drive/files/create` と同じ 413。**`Upload` が返すのと
+		// 同じ error** なので、読む前に落ちたか後で落ちたかで応答は変わらない。
+		if errors.Is(err, coredrive.ErrMaxFileSizeExceeded) {
+			return c.JSON(http.StatusRequestEntityTooLarge, apierr.Error("MAX_FILE_SIZE_EXCEEDED", "Max file size exceeded.", "b9d8c348-33f0-4673-b9a9-5d4da058977a"))
+		}
 		// サーバー側の I/O 障害は 500 + ログ。クライアント起因 (`file` が
 		// 無い) だけ 400 のまま。
 		if errors.Is(err, errMultipartIO) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1334,7 +1335,7 @@ func TestReadMultipartFile_OpenFailureIsReported(t *testing.T) {
 
 	c, _ := newMultipartReq(t, "hello.txt", "hello", nil)
 	require.NotPanics(t, func() {
-		body, name, err := readMultipartFile(c)
+		body, name, err := readMultipartFile(c, 0)
 		assert.Error(t, err, "Open の失敗を握り潰している")
 		assert.Nil(t, body)
 		assert.Empty(t, name)
@@ -1356,7 +1357,7 @@ func TestReadMultipartFile_ReadFailureIsReported(t *testing.T) {
 	}
 
 	c, _ := newMultipartReq(t, "hello.txt", "hello world", nil)
-	body, _, err := readMultipartFile(c)
+	body, _, err := readMultipartFile(c, 0)
 	require.Error(t, err, "途中で切れた本体を成功として返している")
 	assert.Nil(t, body, "切れ端を返している")
 }
@@ -1390,7 +1391,7 @@ func TestFilesCreate_ReadFailureDoesNotStoreTruncatedFile(t *testing.T) {
 // 上のテストが通る。
 func TestReadMultipartFile_OrdinaryUploadStillReads(t *testing.T) {
 	c, _ := newMultipartReq(t, "hello.txt", "hello world", nil)
-	body, name, err := readMultipartFile(c)
+	body, name, err := readMultipartFile(c, 0)
 	require.NoError(t, err)
 	assert.Equal(t, "hello world", string(body))
 	assert.Equal(t, "hello.txt", name)
@@ -1405,4 +1406,154 @@ func TestFilesCreate_MissingFileFieldStays400(t *testing.T) {
 	require.NoError(t, h.FilesCreate(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Empty(t, fileRepo.Files)
+}
+
+// roleStub は maxFileSizeMb policy だけを返す最小の RoleChecker。
+type roleStub struct {
+	maxFileSizeMb any
+}
+
+func (roleStub) IsModerator(string) bool { return false }
+
+func (r roleStub) GetUserPolicies(string) map[string]any {
+	return map[string]any{"maxFileSizeMb": r.maxFileSizeMb}
+}
+
+// **policy の上限は読み切る前に効くこと (#3037)。**
+//
+// 既定では `maxFileSizeMb` が 30MB なのに `config.maxFileSize` が 250MB
+// なので、判定が `Upload` の中だけだと「30MB しか保存できない利用者が
+// 250MB を送り付けてメモリを確保させる」ことができた。
+func TestReadMultipartFile_StopsAtPolicyLimit(t *testing.T) {
+	// 11 バイトの本体に 5 バイトの上限。
+	c, _ := newMultipartReq(t, "hello.txt", "hello world", nil)
+	body, _, err := readMultipartFile(c, 5)
+	require.ErrorIs(t, err, coredrive.ErrMaxFileSizeExceeded)
+	assert.Nil(t, body, "上限を超えた本体を返している")
+
+	// 上限ちょうどは通る。
+	c, _ = newMultipartReq(t, "hello.txt", "hello", nil)
+	body, _, err = readMultipartFile(c, 5)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(body))
+}
+
+// **`FileHeader.Size` だけに頼らない。** あれはパーサが数えた値なので、
+// 実際の読み込み量と食い違いうる。上限を強制するのは実際に読む側。
+func TestReadMultipartFile_LimitsEvenWhenHeaderSizeLies(t *testing.T) {
+	prev := openMultipartFile
+	t.Cleanup(func() { openMultipartFile = prev })
+	// FileHeader.Size は 5 のまま、実体は 11 バイト返す。
+	openMultipartFile = func(*multipart.FileHeader) (multipart.File, error) {
+		return &failingMultipartFile{data: []byte("hello world"), stop: 11, err: io.EOF}, nil
+	}
+
+	c, _ := newMultipartReq(t, "hello.txt", "hello", nil)
+	_, _, err := readMultipartFile(c, 5)
+	require.ErrorIs(t, err, coredrive.ErrMaxFileSizeExceeded)
+}
+
+// handler まで通して 413 になること。**`Upload` が返すのと同じ応答**なので、
+// 読む前に落ちたか後で落ちたかで挙動は変わらない。
+func TestFilesCreate_PolicyLimitReturns413(t *testing.T) {
+	h, fileRepo, _ := newHandler(t)
+	h.svc.SetRoleChecker(roleStub{maxFileSizeMb: 0.000001}) // 約 1 バイト
+
+	c, rec := newMultipartReq(t, "hello.txt", "hello world", nil)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+	assert.Contains(t, rec.Body.String(), "MAX_FILE_SIZE_EXCEEDED")
+	assert.Empty(t, fileRepo.Files, "上限を超えたファイルが保存されている")
+}
+
+// **普通のアップロードは通ったまま。** これが無いと「常に 413 を返す」実装でも
+// 上のテストが通る。
+func TestFilesCreate_UnderPolicyLimitStillUploads(t *testing.T) {
+	h, fileRepo, _ := newHandler(t)
+	h.svc.SetRoleChecker(roleStub{maxFileSizeMb: 30})
+
+	c, rec := newMultipartReq(t, "hello.txt", "hello world", nil)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, fileRepo.Files, 1)
+}
+
+// countingMultipartFile records how many bytes were actually read.
+type countingMultipartFile struct {
+	data []byte
+	pos  int
+	read int
+}
+
+func (f *countingMultipartFile) Read(p []byte) (int, error) {
+	if f.pos >= len(f.data) {
+		return 0, io.EOF
+	}
+	n := copy(p, f.data[f.pos:])
+	f.pos += n
+	f.read += n
+	return n, nil
+}
+func (f *countingMultipartFile) ReadAt([]byte, int64) (int, error) { return 0, io.EOF }
+func (f *countingMultipartFile) Seek(int64, int) (int64, error)    { return 0, nil }
+func (f *countingMultipartFile) Close() error                      { return nil }
+
+// **上限を超える本体を「最後まで読んでから」落としていないこと (#3037)。**
+//
+// 応答だけを見ると、読む前に落としても `Upload` が落としても同じ 413 に
+// なるので区別が付かない。**実際に読んだバイト数**を見る。
+func TestFilesCreate_DoesNotReadPastPolicyLimit(t *testing.T) {
+	const size = 64 * 1024
+
+	// **申告どおりの大きさなら、そもそも開かない。** `FileHeader.Size` で
+	// 落とせる早い枝。
+	t.Run("申告が正しければ開きもしない", func(t *testing.T) {
+		opened := false
+		prev := openMultipartFile
+		t.Cleanup(func() { openMultipartFile = prev })
+		openMultipartFile = func(fh *multipart.FileHeader) (multipart.File, error) {
+			opened = true
+			return prev(fh)
+		}
+
+		h, fileRepo, _ := newHandler(t)
+		h.svc.SetRoleChecker(roleStub{maxFileSizeMb: 1.0 / 1024}) // 1KiB
+
+		c, rec := newMultipartReq(t, "big.bin", strings.Repeat("x", size), nil)
+		setUser(c, "u1")
+		require.NoError(t, h.FilesCreate(c))
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+		assert.Empty(t, fileRepo.Files)
+		assert.False(t, opened, "上限超過が申告で分かるのに本体を開いている")
+	})
+
+	// **申告が嘘でも、読むのは上限 +1 バイトまで。**
+	t.Run("申告が嘘でも読み切らない", func(t *testing.T) {
+		var seen *countingMultipartFile
+		prev := openMultipartFile
+		t.Cleanup(func() { openMultipartFile = prev })
+		openMultipartFile = func(*multipart.FileHeader) (multipart.File, error) {
+			seen = &countingMultipartFile{data: bytes.Repeat([]byte("x"), size)}
+			return seen, nil
+		}
+
+		h, fileRepo, _ := newHandler(t)
+		h.svc.SetRoleChecker(roleStub{maxFileSizeMb: 1.0 / 1024}) // 1KiB
+
+		// 申告は 5 バイト (上限内) なので Size の枝は通り抜ける。
+		c, rec := newMultipartReq(t, "small.bin", "hello", nil)
+		setUser(c, "u1")
+		require.NoError(t, h.FilesCreate(c))
+
+		assert.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+		assert.Empty(t, fileRepo.Files)
+		require.NotNil(t, seen, "openMultipartFile が呼ばれていない")
+		assert.LessOrEqual(t, seen.read, 1024+1,
+			"上限を超えた本体を最後まで読んでいる (読んだのは %d バイト)", seen.read)
+	})
 }

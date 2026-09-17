@@ -92,6 +92,30 @@ func policyMegabytes(v any) (int64, bool) {
 	return safemath.MulFloat64(mb, 1024*1024), mb > 0
 }
 
+// MaxUploadBytes reports the `maxFileSizeMb` role policy for a user, in bytes.
+//
+// **読み切る前に見るためのもの (#3037)。** `Upload` の中にも同じ判定がある
+// が、あそこに届く時点で**本体はすでに全部メモリに載っている**。既定では
+// policy が 30MB なのに `config.maxFileSize` が 250MB なので、
+// 「30MB しか保存できない利用者が 250MB を送り付けてメモリを確保させる」
+// ことができた。handler が先にこれを引いて、超える分は読まずに落とす。
+//
+// ok=false は「上限なし」(policy 未設定 / 0 以下 / system file / role が
+// 未配線)。判定できないときに勝手な上限を作らないための形で、`Upload` 側の
+// `policyMegabytes` の ok と同じ意味。
+func (s *Service) MaxUploadBytes(user *model.User) (int64, bool) {
+	// system file (user == nil) と remote user は `Upload` 側でも gate の
+	// 対象外なので、ここでも上限を作らない。
+	if user == nil || !user.IsLocal() || s.roleChecker == nil {
+		return 0, false
+	}
+	policies := s.roleChecker.GetUserPolicies(user.ID)
+	if policies == nil {
+		return 0, false
+	}
+	return policyMegabytes(policies["maxFileSizeMb"])
+}
+
 // ValidateFileName mirrors upstream DriveFileEntityService.validateFileName:
 // the trimmed name must be non-empty, at most 200 characters, and must not
 // contain a backslash, a slash, or "..". 長さは JS の String.length (UTF-16)
