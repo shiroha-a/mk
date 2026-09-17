@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -157,5 +160,55 @@ func TestPreview_RemoteThumbnailProxied(t *testing.T) {
 	}
 	if strings.HasPrefix(thumb, "https://cdn.example.test") || !strings.Contains(thumb, "cdn.example.test") {
 		t.Fatalf("proxied thumbnail must embed remote target in url= param, not expose it directly: %q", thumb)
+	}
+}
+
+// **URL プレビューの画像に出す署名は期限付き (#3037)。**
+//
+// ここで包むのは「利用者が渡した URL のページに書いてあった URL」なので、
+// 攻撃者が自由に決められる。無期限の署名を出すと、それを貼るだけで media
+// proxy の allowlist を恒久的に迂回できる。
+func TestPreview_ProxySignatureExpires(t *testing.T) {
+	secret := []byte("url-preview-secret")
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.test", "https://mk.test/proxy", secret, false, true))
+	defer entity.SetMediaURLContext(nil)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`<html><head>
+			<meta property="og:image" content="https://cdn.example.test/img.png">
+			<link rel="icon" href="https://cdn.example.test/favicon.ico">
+		</head><body></body></html>`))
+	}))
+	defer srv.Close()
+
+	f := urlpreview.NewFetcher(urlpreview.Config{
+		Enabled: true, AllowRedirect: true, TimeoutMs: 5000, MaxContentLength: 1 << 20,
+	}, nil, "", nil)
+	f.SetHTTPClient(&http.Client{})
+
+	rec := doPreview(apiurl.NewHandler(f), srv.URL)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &body))
+
+	// thumbnail と icon の**両方**。片方だけ直すのがこの種の修正で一番多い。
+	for _, key := range []string{"thumbnail", "icon"} {
+		got, _ := body[key].(string)
+		require.NotEmpty(t, got, "%s が無い", key)
+
+		u, err := url.Parse(got)
+		require.NoError(t, err)
+		sig := u.Query().Get("sig")
+		require.NotEmpty(t, sig, "%s に署名が無い", key)
+
+		exp, _, ok := strings.Cut(sig, ".")
+		require.True(t, ok, "%s の署名が無期限: %q", key, sig)
+		sec, err := strconv.ParseInt(exp, 10, 64)
+		require.NoError(t, err)
+		assert.Greater(t, sec, time.Now().Unix(), "%s の署名が発行時点で期限切れ", key)
+		assert.LessOrEqual(t, sec, time.Now().Add(entity.UserSuppliedProxyTTL).Unix()+1,
+			"%s の署名の期限が長すぎる", key)
 	}
 }

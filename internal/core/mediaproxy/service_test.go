@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -122,6 +123,25 @@ func TestAuthorize_ValidHMAC(t *testing.T) {
 
 	err := s.Authorize(context.Background(), url, sig)
 	assert.NoError(t, err)
+}
+
+// **期限付きの署名も受ける (#3037)。** `/url` が発行する形。
+func TestAuthorize_ValidExpiringHMAC(t *testing.T) {
+	s := testService(map[string]bool{})
+	target := "https://evil.example/anything.png"
+
+	sig := SignURLUntil([]byte("test-secret"), target, time.Now().Add(time.Hour))
+	assert.NoError(t, s.Authorize(context.Background(), target, sig))
+}
+
+// **期限を過ぎたら allowlist に落ちる。** allowlist に無い URL なので
+// `ErrUnauthorized`。
+func TestAuthorize_ExpiredHMACIsUnauthorized(t *testing.T) {
+	s := testService(map[string]bool{})
+	target := "https://evil.example/anything.png"
+
+	sig := SignURLUntil([]byte("test-secret"), target, time.Now().Add(-time.Second))
+	assert.ErrorIs(t, s.Authorize(context.Background(), target, sig), ErrUnauthorized)
 }
 
 func TestAuthorize_InvalidHMAC_AllowlistedURL(t *testing.T) {

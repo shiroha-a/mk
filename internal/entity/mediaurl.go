@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
 )
@@ -491,6 +493,77 @@ func ProxyMediaURLPtr(p *string) *string {
 	}
 	s := ProxyMediaURL(*p)
 	return &s
+}
+
+// UserSuppliedProxyTTL bounds how long a signature minted for a
+// user-supplied URL stays valid.
+//
+// **プレビュー応答自身のキャッシュより長く、しかし有限に。** `/url` の応答は
+// `max-age=86400, immutable` で 1 日キャッシュされるので、署名がそれより早く
+// 死ぬと**キャッシュに残ったプレビューの画像だけが壊れる**。7 日なら 6 日の
+// 余裕があり、貼り付けた proxy URL が恒久的に生き続けることもない。
+const UserSuppliedProxyTTL = 7 * 24 * time.Hour
+
+// ProxyUserSuppliedMediaURLPtr is ProxyMediaURLPtr for URLs that came from a
+// user-supplied document (URL preview の OGP 画像 / favicon)。
+//
+// **署名に期限を付けるのが違い (#3037)。** `/url` は未認証で任意の URL を
+// 渡せるので、攻撃者は自分のページの `og:image` に好きな URL を書いておけば
+// **その URL に対する proxy 署名を発行させられる**。`ProxyMediaURLPtr` が
+// 出す署名は URL だけを覆っていて**無期限**なので、一度取れば allowlist
+// (`user.avatarUrl` / `emoji.originalUrl` / `instance.iconUrl` /
+// `drive_file.url` のどれかに実在する URL だけを通す mk-go 独自の硬化) を
+// 恒久的に迂回できた。
+//
+// **管理者が設定する画像 (ロールのアイコン / お知らせの画像 / チャンネルの
+// バナー) には付けない。** あちらは値を入れられるのが管理者だけで、しかも
+// 長期間そのまま配る前提なので、期限を付けると「いつの間にか画像が消える」
+// 側の事故になる。
+func ProxyUserSuppliedMediaURLPtr(p *string) *string {
+	if p == nil || *p == "" {
+		return p
+	}
+	c := currentMediaURLContext()
+	if c == nil {
+		return p
+	}
+	if !c.shouldProxyRemote() || !c.isRemoteOrigin(*p) {
+		return p
+	}
+	// mode は `ProxyMediaURLPtr` と同じ (modeDefault)。**ここで upstream の
+	// `preview.webp?preview=1` に寄せない** — 署名の期限とは別の話で、
+	// 混ぜると「どちらの変更が何を壊したか」が分からなくなる。
+	s := c.expiringProxiedURL(*p, modeDefault)
+	return &s
+}
+
+// expiringProxiedURL is ProxiedURL with a deadline baked into the signature.
+//
+// 外部プロキシ構成では署名を出さない (`ProxiedURL` と同じ) — 署名を見るのは
+// mk-go 自身の `/proxy` だけなので、外部に渡す URL に付けても意味が無い。
+func (c *MediaURLContext) expiringProxiedURL(rawURL string, mode proxyMode) string {
+	filename, flag := mode.fileAndFlag()
+	q := url.Values{}
+	q.Set("url", rawURL)
+	if flag != "" {
+		q.Set(flag, "1")
+	}
+	if !c.externalEnabled {
+		q.Set("sig", signURLUntil(c.secret, rawURL, time.Now().Add(UserSuppliedProxyTTL)))
+	}
+	return c.mediaProxyBase + "/" + filename + "?" + q.Encode()
+}
+
+// signURLUntil MUST stay byte-for-byte identical to
+// internal/core/mediaproxy.SignURLUntil (mediaurl_test.go asserts it, same as
+// signURL / SignURL).
+func signURLUntil(secret []byte, rawURL string, until time.Time) string {
+	exp := strconv.FormatInt(until.Unix(), 10)
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(rawURL))
+	mac.Write([]byte("\n"))
+	mac.Write([]byte(exp))
+	return exp + "." + hex.EncodeToString(mac.Sum(nil))
 }
 
 // signURL is hex(HMAC-SHA256(secret, rawURL)). It MUST stay byte-for-byte

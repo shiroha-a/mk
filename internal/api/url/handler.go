@@ -51,8 +51,14 @@ func (h *Handler) Preview(c echo.Context) error {
 	// (MkUrlPreview) がこれらを直接描画するため、proxy 経由に書き換えて閲覧者の
 	// IP が外部サイトへ漏洩するのを防ぐ (issue #1529)。player.url は iframe embed
 	// なので対象外。
-	result.Thumbnail = entity.ProxyMediaURLPtr(result.Thumbnail)
-	result.Icon = entity.ProxyMediaURLPtr(result.Icon)
+	//
+	// **署名は期限付きにする (#3037)。** ここで包むのは**利用者が渡した
+	// URL のページに書いてあった URL**、つまり攻撃者が自由に決められる値。
+	// 無期限の署名を出すと、それを貼るだけで media proxy の allowlist を
+	// 恒久的に迂回できる (allowlist は mk-go 独自の硬化で、upstream の
+	// `/proxy` は元から open proxy なので「退化」の概念が無い)。
+	result.Thumbnail = entity.ProxyUserSuppliedMediaURLPtr(result.Thumbnail)
+	result.Icon = entity.ProxyUserSuppliedMediaURLPtr(result.Icon)
 	// #2106 N18: upstream は成功 preview を 1 日キャッシュさせる。
 	c.Response().Header().Set("Cache-Control", "max-age=86400, immutable")
 	return c.JSON(http.StatusOK, result)

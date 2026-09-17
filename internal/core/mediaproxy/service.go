@@ -401,6 +401,12 @@ func (s *Service) Authorize(ctx context.Context, rawURL, sig string) error {
 	if sig != "" && VerifyHMAC(s.hmacSecret, rawURL, sig) {
 		return nil
 	}
+	// **期限付きの署名 (#3037)。** `/url` のように**利用者が渡した URL**に
+	// 対して署名を出す経路は、無期限の署名を配ると allowlist を恒久的に
+	// 迂回する手段になる。そちらは `<unix 秒>.<hex>` の形で発行する。
+	if sig != "" && VerifyExpiringHMAC(s.hmacSecret, rawURL, sig, time.Now()) {
+		return nil
+	}
 
 	// **列に入りえない値は引く前に弾く (#3036、doctrine は #3025)。**
 	// `IsAllowedURL` は `?url` を無検査で 11 箇所に bind する (4 テーブルの UNION) ので、

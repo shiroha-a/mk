@@ -9,7 +9,13 @@ package entity_test
 
 import (
 	"net/url"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/core/mediaproxy"
 	"github.com/shiroha-a/mk/internal/entity"
@@ -49,4 +55,58 @@ func TestProxySigAcceptedByMediaproxy(t *testing.T) {
 	if !mediaproxy.VerifyHMAC(secret, raw, sig) {
 		t.Error("mediaproxy.VerifyHMAC rejected the builder's sig")
 	}
+}
+
+// **期限付き署名も proxy 側の検証と byte 単位で揃っていること (#3037)。**
+// 素の署名と同じ理由 — ずれると URL プレビューの画像が全部 403 になる。
+func TestExpiringProxySigAcceptedByMediaproxy(t *testing.T) {
+	secret := []byte("parity-secret-9f3a")
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", secret, false, true))
+	defer entity.SetMediaURLContext(nil)
+
+	raw := "https://remote.example/og/a b.png?w=1&h=2"
+	built := entity.ProxyUserSuppliedMediaURLPtr(&raw)
+	require.NotNil(t, built)
+
+	u, err := url.Parse(*built)
+	require.NoError(t, err)
+	q := u.Query()
+	require.Equal(t, raw, q.Get("url"), "url param did not round-trip")
+	sig := q.Get("sig")
+	require.NotEmpty(t, sig, "expiring proxy URL is missing its sig")
+
+	// **期限が入っていること。** 素の署名 (hex 64 文字) のままだと無期限に
+	// 戻っているので、形そのものを見る。
+	exp, _, ok := strings.Cut(sig, ".")
+	require.True(t, ok, "sig に期限が入っていない: %q", sig)
+	sec, err := strconv.ParseInt(exp, 10, 64)
+	require.NoError(t, err)
+	assert.WithinDuration(t, time.Now().Add(entity.UserSuppliedProxyTTL), time.Unix(sec, 0), time.Minute)
+
+	assert.Equal(t, mediaproxy.SignURLUntil(secret, raw, time.Unix(sec, 0)), sig,
+		"entity 側と mediaproxy 側の署名がずれている")
+	assert.True(t, mediaproxy.VerifyExpiringHMAC(secret, raw, sig, time.Now()),
+		"mediaproxy.VerifyExpiringHMAC が builder の署名を拒否した")
+
+	// 期限を過ぎたら通らない。
+	assert.False(t, mediaproxy.VerifyExpiringHMAC(secret, raw, sig,
+		time.Unix(sec, 0).Add(time.Second)))
+}
+
+// **管理者が入れる画像には期限を付けない。** ロールのアイコンやお知らせの
+// 画像は長期間そのまま配る前提なので、期限を付けると「いつの間にか画像が
+// 消える」事故になる。
+func TestAdminSuppliedProxySigHasNoExpiry(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("k"), false, true))
+	defer entity.SetMediaURLContext(nil)
+
+	raw := "https://remote.example/role-icon.png"
+	built := entity.ProxyMediaURLPtr(&raw)
+	require.NotNil(t, built)
+
+	u, err := url.Parse(*built)
+	require.NoError(t, err)
+	assert.NotContains(t, u.Query().Get("sig"), ".", "管理者設定の画像に期限が付いている")
 }
