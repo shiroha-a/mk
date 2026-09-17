@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"sync"
 
 	"github.com/shiroha-a/mk/internal/model"
 )
@@ -38,11 +39,44 @@ type CaptchaTokens struct {
 // the corresponding token. If no provider is enabled, verification succeeds
 // unconditionally (captcha is optional).
 type Service struct {
+	// **provider は meta の更新で差し替わる (`Reload`)。** 起動時のスナップ
+	// ショットのままだと、運営者が管理画面で captcha を有効にしても再起動まで
+	// 一切検証されない。`/api/meta` は DB を読むのでフロントは captcha を
+	// 描画し、**運営者からは ON に見える**という最悪の形になっていた。
+	//
+	// upstream は `GlobalModule` が `metaUpdated` を受けて `meta` オブジェクトを
+	// その場で書き換え、`SignupApiService` がリクエストごとに読む。
+	mu        sync.RWMutex
+	client    *http.Client
 	hcaptcha  Verifier
 	recaptcha Verifier
 	turnstile Verifier
 	mcaptcha  Verifier
 	testcap   Verifier
+}
+
+// Reload swaps the provider set to match meta.
+//
+// **起動時のスナップショットを更新する唯一の経路。** `metaUpdated` の
+// subscriber から呼ぶ (自 worker の更新も他 worker からの受信も同じ channel を
+// 通る)。nil meta は無視する — 読めなかったことを理由に検証を落とすと、
+// captcha を有効にしている運営者の設定が DB の瞬断で消える。
+func (s *Service) Reload(meta *model.Meta) {
+	if s == nil || meta == nil {
+		return
+	}
+	s.mu.RLock()
+	client := s.client
+	s.mu.RUnlock()
+	next := buildProviders(meta, client)
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.hcaptcha = next.hcaptcha
+	s.recaptcha = next.recaptcha
+	s.turnstile = next.turnstile
+	s.mcaptcha = next.mcaptcha
+	s.testcap = next.testcap
 }
 
 // NewService builds a Service from the given meta. Equivalent to
@@ -60,6 +94,13 @@ func NewService(meta *model.Meta) *Service {
 // client を渡し、operator が outbound 経路を集約 / origin IP を隠せるように
 // する (#638)。
 func NewServiceWithClient(meta *model.Meta, client *http.Client) *Service {
+	s := buildProviders(meta, client)
+	s.client = client
+	return s
+}
+
+// buildProviders constructs the provider set for meta. Reload と共有する。
+func buildProviders(meta *model.Meta, client *http.Client) *Service {
 	s := &Service{}
 
 	if meta.EnableHcaptcha && meta.HcaptchaSecretKey != nil {
@@ -87,6 +128,8 @@ func NewServiceWithClient(meta *model.Meta, client *http.Client) *Service {
 
 // IsEnabled reports whether any captcha provider is configured.
 func (s *Service) IsEnabled() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.hcaptcha != nil || s.recaptcha != nil || s.turnstile != nil || s.mcaptcha != nil || s.testcap != nil
 }
 
@@ -101,23 +144,30 @@ func (s *Service) HasRealProvider() bool {
 	if s == nil {
 		return false
 	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	return s.hcaptcha != nil || s.recaptcha != nil || s.turnstile != nil || s.mcaptcha != nil
 }
 
 // Verify checks the token matching the first enabled provider. Returns nil
 // if no provider is enabled (captcha disabled).
 func (s *Service) Verify(ctx context.Context, tokens CaptchaTokens) error {
+	// **provider は Reload で差し替わりうる**ので、判定と呼び出しの間で
+	// 読み直さないよう局所変数に写してからロックを外す。
+	s.mu.RLock()
+	hcap, recap, turn, mcap, testc := s.hcaptcha, s.recaptcha, s.turnstile, s.mcaptcha, s.testcap
+	s.mu.RUnlock()
 	switch {
-	case s.hcaptcha != nil:
-		return s.hcaptcha.Verify(ctx, tokens.Hcaptcha)
-	case s.recaptcha != nil:
-		return s.recaptcha.Verify(ctx, tokens.Recaptcha)
-	case s.turnstile != nil:
-		return s.turnstile.Verify(ctx, tokens.Turnstile)
-	case s.mcaptcha != nil:
-		return s.mcaptcha.Verify(ctx, tokens.Mcaptcha)
-	case s.testcap != nil:
-		return s.testcap.Verify(ctx, tokens.Testcaptcha)
+	case hcap != nil:
+		return hcap.Verify(ctx, tokens.Hcaptcha)
+	case recap != nil:
+		return recap.Verify(ctx, tokens.Recaptcha)
+	case turn != nil:
+		return turn.Verify(ctx, tokens.Turnstile)
+	case mcap != nil:
+		return mcap.Verify(ctx, tokens.Mcaptcha)
+	case testc != nil:
+		return testc.Verify(ctx, tokens.Testcaptcha)
 	default:
 		return nil
 	}

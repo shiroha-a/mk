@@ -2649,8 +2649,30 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// CachedMetaRepository.Update が invalidate してから notifyUpdate する
 	// 実装がその順序を保証しており、subscriber 側はここの並び順で保証する。
 	internalPubSub := event.NewPubSubService(s.redis.Pubsub, "internal:")
+	// captcha の provider 集合は起動時の meta スナップショットから組まれるので、
+	// **ここで繋がないと管理画面で有効にしても再起動まで一切検証されない**。
+	// `/api/meta` は DB を読むのでフロントは captcha を描画し、運営者からは
+	// ON に見える。provider が 1 つも無いときの `Verify` は成功を返すため、
+	// 有効化したつもりのまま `/api/signup` と `/api/signin` が素通りしていた。
+	//
+	// **自 worker の更新と他 worker からの受信の両方を通す。** 前者は hook、
+	// 後者は subscriber で、どちらも同じ channel を経由する。
+	reloadCaptcha := func() {
+		if captchaSvc == nil {
+			return
+		}
+		m, err := cachedMeta.Fetch()
+		if err != nil || m == nil {
+			// **読めなければ据え置く。** DB の瞬断で運営者の設定が消える側に
+			// 倒さない。
+			slog.Warn("captcha: reload skipped (meta unavailable)", "err", err)
+			return
+		}
+		captchaSvc.Reload(m)
+	}
 	cachedMeta.SetInvalidationHook(func() {
 		metaHandler.InvalidateResponseCache()
+		reloadCaptcha()
 		if err := internalPubSub.Publish(context.Background(), "metaUpdated", struct{}{}); err != nil {
 			slog.Warn("meta: publish metaUpdated failed", "err", err)
 		}
@@ -2658,6 +2680,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	internalPubSub.Subscribe(context.Background(), "metaUpdated", func([]byte) {
 		cachedMeta.Invalidate()
 		metaHandler.InvalidateResponseCache()
+		reloadCaptcha()
 	})
 
 	// #2752: antenna の cross-worker cache invalidation。書き込んだ worker が

@@ -333,3 +333,45 @@ func TestService_HasRealProvider(t *testing.T) {
 	var nilSvc *captcha.Service
 	assert.False(t, nilSvc.HasRealProvider())
 }
+
+// Reload が provider 集合を差し替えること。
+//
+// **起動時のスナップショットのままだと、運営者が管理画面で captcha を有効に
+// しても再起動まで一切検証されない。** `/api/meta` は DB を読むのでフロントは
+// captcha を描画し、**運営者からは ON に見える**。provider が 1 つも無いときの
+// `Verify` は成功を返すので、有効化したつもりのまま signup / signin が素通りする。
+func TestService_Reload(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("無効から有効へ", func(t *testing.T) {
+		s := captcha.NewService(&model.Meta{})
+		require.NoError(t, s.Verify(ctx, captcha.CaptchaTokens{}), "provider が無ければ成功")
+		assert.False(t, s.IsEnabled())
+
+		s.Reload(&model.Meta{EnableTestcaptcha: true})
+		assert.True(t, s.IsEnabled())
+		assert.Error(t, s.Verify(ctx, captcha.CaptchaTokens{}), "有効化後はトークン無しを拒否")
+		assert.NoError(t, s.Verify(ctx, captcha.CaptchaTokens{Testcaptcha: "testcaptcha-passed"}))
+	})
+
+	t.Run("有効から無効へ", func(t *testing.T) {
+		s := captcha.NewService(&model.Meta{EnableTestcaptcha: true})
+		assert.Error(t, s.Verify(ctx, captcha.CaptchaTokens{}))
+
+		s.Reload(&model.Meta{})
+		assert.False(t, s.IsEnabled())
+		assert.NoError(t, s.Verify(ctx, captcha.CaptchaTokens{}))
+	})
+
+	// **nil は据え置く。** 読めなかったことを理由に運営者の設定を消さない。
+	t.Run("nil meta は無視", func(t *testing.T) {
+		s := captcha.NewService(&model.Meta{EnableTestcaptcha: true})
+		s.Reload(nil)
+		assert.True(t, s.IsEnabled(), "設定が消えている")
+	})
+
+	t.Run("nil レシーバでも落ちない", func(t *testing.T) {
+		var s *captcha.Service
+		assert.NotPanics(t, func() { s.Reload(&model.Meta{EnableTestcaptcha: true}) })
+	})
+}
