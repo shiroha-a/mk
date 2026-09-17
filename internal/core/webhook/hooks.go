@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"time"
 
+	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -115,7 +116,27 @@ func (h *NoteCreateHook) packNoteFor(note *model.Note, author *model.User, recip
 		note = &clone
 	}
 	packed := entity.PackNote(note, h.idGen)
-	gateNoteEmbeds(&model.User{ID: recipientID}, &packed, h.followingRepo, time.Now().UnixMilli())
+	recipient := &model.User{ID: recipientID}
+	// **top-level の可視性ゲート。** `gateNoteEmbeds` が見るのは embed だけなので、
+	// これが無いと note 本体が受信者の可視性を無視して届く。
+	//
+	// 実害は `specified` (DM) で出る。`note.Mentions` と `note.VisibleUserIDs` は
+	// 乖離しうる (本文に `@x` があっても visible 指定は別) ことを
+	// `note_create_service.go` 自身がコメントで書いており、通知経路
+	// (`notifyVisibleToTarget`) と main stream (`canSeeNoteForStream`) は
+	// その前提で弾いている。**webhook だけが弾いていなかった。**
+	//
+	// **隠すのであって配送を止めない。** upstream の mention webhook は
+	// 受信者ごとに `pack(note, u, {detail:true})` して `hideNote()` を通す形で、
+	// 「あなたが mention された」という信号は残す。ここも同じにする。
+	//
+	// **note / reply / renote / mention の 4 経路すべてに掛かる** —
+	// mention だけ直すと隣に同じ穴が残る (`renote` は、自分の public note を
+	// followers 限定で引用されたときに引用側の本文が届く形)。
+	if !corenote.CanSeeNote(recipient, note, h.followingRepo) {
+		entity.HideNoteEntity(&packed)
+	}
+	gateNoteEmbeds(recipient, &packed, h.followingRepo, time.Now().UnixMilli())
 	return noteEntityToMap(packed)
 }
 

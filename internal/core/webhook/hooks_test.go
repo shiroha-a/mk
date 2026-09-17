@@ -399,3 +399,108 @@ func TestSignupHook_NilSafe(t *testing.T) {
 	h = webhook.NewSignupHook(nil)
 	h.OnUserCreated(nil)
 }
+
+// webhook の payload に top-level の可視性ゲートが掛かること。
+//
+// **`gateNoteEmbeds` は embed しか見ない。** それだけだと note 本体が受信者の
+// 可視性を無視して届く。実害は `specified` (DM) で出る — `note.Mentions` と
+// `note.VisibleUserIDs` は乖離しうる (本文に `@x` があっても visible 指定は別) と
+// `note_create_service.go` 自身が書いており、通知経路と main stream はその前提で
+// 弾いているのに、**webhook だけが弾いていなかった**。
+func TestNoteCreateHook_TopLevelVisibilityGate(t *testing.T) {
+	// noteText extracts body.note.text from the single captured delivery.
+	noteBody := func(t *testing.T, enq *fakeEnqueuer) map[string]any {
+		t.Helper()
+		require.Len(t, enq.userCalls, 1, "配送そのものは残す (upstream と同じ)")
+		// payload は `{"server":..., "body": {"note": {...}}}` の形。
+		var env struct {
+			Body struct {
+				Note map[string]any `json:"note"`
+			} `json:"body"`
+		}
+		require.NoError(t, json.Unmarshal(enq.userCalls[0].Body, &env))
+		return env.Body.Note
+	}
+
+	newHook := func(t *testing.T, ownerID, event string) (*webhook.NoteCreateHook, *fakeEnqueuer, *testutil.MockFollowingRepository) {
+		t.Helper()
+		svc, enq, userRepo, _ := newTestService(t)
+		userRepo.hooks["h1"] = &model.Webhook{
+			ID: "h1", UserID: ownerID, Active: true, On: model.StringArray{event},
+		}
+		idGen, _ := id.NewGenerator("aidx")
+		h := webhook.NewNoteCreateHook(svc, idGen)
+		follows := testutil.NewMockFollowingRepository()
+		h.SetFollowingRepo(follows)
+		return h, enq, follows
+	}
+
+	author := &model.User{ID: "alice", Username: "alice", UsernameLower: "alice"}
+
+	t.Run("DM の本文は宛先外の mention には届かない", func(t *testing.T) {
+		h, enq, _ := newHook(t, "bob", "mention")
+		text := "secret @bob"
+		h.OnNoteCreated(&model.Note{
+			ID: "n1", UserID: "alice", Text: &text,
+			Visibility:     model.NoteVisibilitySpecified,
+			VisibleUserIDs: []string{"carol"}, // bob は宛先ではない
+			Mentions:       []string{"bob"},
+		}, author, nil, nil)
+
+		note := noteBody(t, enq)
+		assert.Nil(t, note["text"], "DM 本文が宛先外へ漏れている")
+		assert.Equal(t, true, note["isHidden"])
+	})
+
+	// **弾きすぎていないことを見る。** 常に隠す実装でも上は緑になる。
+	t.Run("宛先に入っていれば本文が届く", func(t *testing.T) {
+		h, enq, _ := newHook(t, "bob", "mention")
+		text := "secret @bob"
+		h.OnNoteCreated(&model.Note{
+			ID: "n1", UserID: "alice", Text: &text,
+			Visibility:     model.NoteVisibilitySpecified,
+			VisibleUserIDs: []string{"bob"},
+			Mentions:       []string{"bob"},
+		}, author, nil, nil)
+
+		assert.Equal(t, "secret @bob", noteBody(t, enq)["text"])
+	})
+
+	t.Run("作者本人には常に本文が届く", func(t *testing.T) {
+		h, enq, _ := newHook(t, "alice", "note")
+		text := "secret"
+		h.OnNoteCreated(&model.Note{
+			ID: "n1", UserID: "alice", Text: &text,
+			Visibility: model.NoteVisibilitySpecified, VisibleUserIDs: []string{"carol"},
+		}, author, nil, nil)
+
+		assert.Equal(t, "secret", noteBody(t, enq)["text"])
+	})
+
+	// **mention だけでなく renote 経路にも掛かること。** 片方だけ直すと隣に
+	// 同じ穴が残る。
+	t.Run("followers 限定の引用は非フォロワーの renote に本文を出さない", func(t *testing.T) {
+		h, enq, _ := newHook(t, "bob", "renote")
+		text := "quote body"
+		h.OnNoteCreated(
+			&model.Note{ID: "n1", UserID: "alice", Text: &text, Visibility: model.NoteVisibilityFollowers},
+			author, nil,
+			&model.Note{ID: "t1", UserID: "bob", Visibility: model.NoteVisibilityPublic},
+		)
+
+		assert.Nil(t, noteBody(t, enq)["text"], "followers 限定の本文が非フォロワーへ届いている")
+	})
+
+	t.Run("フォロワーなら引用本文が届く", func(t *testing.T) {
+		h, enq, follows := newHook(t, "bob", "renote")
+		require.NoError(t, follows.Create(&model.Following{ID: "f1", FollowerID: "bob", FolloweeID: "alice"}))
+		text := "quote body"
+		h.OnNoteCreated(
+			&model.Note{ID: "n1", UserID: "alice", Text: &text, Visibility: model.NoteVisibilityFollowers},
+			author, nil,
+			&model.Note{ID: "t1", UserID: "bob", Visibility: model.NoteVisibilityPublic},
+		)
+
+		assert.Equal(t, "quote body", noteBody(t, enq)["text"])
+	})
+}
