@@ -25,6 +25,40 @@ import (
 // MaxPixels, so the image was refused **before** allocating its raster.
 var ErrTooManyPixels = errors.New("imagedecode: declared dimensions exceed the pixel cap")
 
+// ErrEncodedTooLarge reports that a WASM-backed decoder was asked to read more
+// encoded bytes than SandboxedDecoderMaxBytes.
+var ErrEncodedTooLarge = errors.New("imagedecode: encoded input is too large for the sandboxed decoder")
+
+// SandboxedDecoderMaxBytes caps the encoded bytes handed to the wazero-backed
+// decoders (AVIF / HEIC / HEIF / JPEG XL / WebP).
+//
+// **これらのデコーダは wasm の中で動き、上限を持たない (#3037)。**
+// `gen2brain/*` は `wazero.NewRuntime(context.Background())` を package 内の
+// `sync.Once` で 1 度だけ作る。`WithMemoryLimitPages` は未指定なので linear
+// memory の上限は wazero の既定 **4GiB**、`WithCloseOnContextDone` も未使用
+// なのでリクエストの context が届かず、**遅いデコードを中断できない**。
+// runtime は package 内の変数で、**呼び出し側から設定を差し込む口が無い**
+// (v0.4.4 で実測)。本番は `-tags nodynamic` なので必ずこの WASM 経路を通る。
+//
+// mk-go 側で握れるのは「何を、何バイト、何本同時に渡すか」だけ:
+//
+//   - 宣言寸法の cap (`MaxPixels` / `UpstreamMaxPixels`) が、確保の主項である
+//     ラスタの大きさを縛る
+//   - 同時実行枠 (`mediaproxy.acquireCPU` / `drive.acquireMediaSlot`) が、
+//     同時に走る本数を縛る
+//   - この定数が、wasm へ写す入力そのものを縛る
+//
+// **それでも「wasm 内部の上限」は無いまま**なので、細工したヘッダで
+// デコーダに大きな確保をさせる余地は残る。消すには wazero の runtime を
+// こちら側で作る必要があり、依存ライブラリを fork しない限りできない。
+// `docs/divergence.md` に残存リスクとして記録してある。
+//
+// 32MiB は media proxy のダウンロード上限と同じ。実写真はこれをはるかに
+// 下回る (iPhone の HEIC が 1-5MB、AVIF はさらに小さい) ので、**通る画像の
+// 集合は実質変わらない**。超えたものはデコードしないだけで、アップロード
+// 自体は従来どおり通る。
+const SandboxedDecoderMaxBytes = 32 << 20
+
 // MaxPixels caps width*height as declared by the image header.
 //
 // **デコードの前に見るのが要点。** デコーダはヘッダの寸法だけでラスタを確保する
@@ -67,6 +101,12 @@ func Decode(data []byte) (image.Image, error) {
 // 引く経路なので厳しく (64MP)、drive は認証済みのアップロードで
 // `maxFileSize` と同時実行枠にも縛られるので upstream と同じ値にする。
 func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
+	// **wasm のデコーダへ渡す前に入力の大きさを見る (#3037)。**
+	// 下の `image.DecodeConfig` は**ヘッダを読むためだけでも wasm を起動して
+	// 入力を丸ごと linear memory へ写す**ので、この判定はその前に置く。
+	if len(data) > SandboxedDecoderMaxBytes && usesSandboxedDecoder(data) {
+		return nil, fmt.Errorf("%w: %d bytes", ErrEncodedTooLarge, len(data))
+	}
 	// **ラスタを確保する前にヘッダの寸法を見る。** `image.DecodeConfig` は
 	// 登録済みデコーダのヘッダだけを読むので、ここで弾けば巨大な確保が起きない。
 	//
@@ -132,6 +172,59 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 	// imaging の `webp.DecodeAnimated` が唯一の経路) ため、塞ぐと現在動いて
 	// いる変換が落ちる。GIF / APNG と同じ増幅が残っている。
 	return imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+}
+
+// usesSandboxedDecoder reports whether data would be decoded by one of the
+// wazero-backed decoders.
+//
+// **magic bytes だけで見る。** `image.DecodeConfig` に判定させると、その
+// 判定自体が wasm を起動してしまう (塞ごうとしている経路そのもの)。
+func usesSandboxedDecoder(data []byte) bool {
+	return isISOBMFFImage(data) || isJPEGXL(data) || isWebP(data)
+}
+
+// sandboxedISOBMFFBrands are the `ftyp` major brands decoded by gen2brain/avif
+// and gen2brain/heic.
+var sandboxedISOBMFFBrands = map[string]struct{}{
+	// AVIF (still / sequence)。
+	"avif": {}, "avis": {},
+	// HEIC / HEIF。`mif1` / `msf1` は汎用の image item / sequence brand で、
+	// iPhone の HEIC はこちらを名乗ることがある。
+	"heic": {}, "heix": {}, "hevc": {}, "hevx": {},
+	"heim": {}, "heis": {}, "hevm": {}, "hevs": {},
+	"mif1": {}, "msf1": {},
+}
+
+// isISOBMFFImage reports whether data is an ISOBMFF file whose major brand is
+// one of the sandboxed image brands.
+//
+// 形は `<4 byte size><"ftyp"><4 byte major brand>`。
+func isISOBMFFImage(data []byte) bool {
+	if len(data) < 12 || string(data[4:8]) != "ftyp" {
+		return false
+	}
+	_, ok := sandboxedISOBMFFBrands[string(data[8:12])]
+	return ok
+}
+
+// isJPEGXL reports whether data is a JPEG XL codestream or container.
+func isJPEGXL(data []byte) bool {
+	if len(data) >= 2 && data[0] == 0xFF && data[1] == 0x0A {
+		return true // 素の codestream
+	}
+	// ISOBMFF 風のコンテナ。`ftyp` ではなく `JXL ` box で始まる。
+	return len(data) >= 12 && string(data[4:8]) == "JXL " &&
+		data[8] == 0x0D && data[9] == 0x0A && data[10] == 0x87 && data[11] == 0x0A
+}
+
+// isWebP reports whether data is a RIFF/WEBP file.
+//
+// **WebP も対象にする。** `gen2brain/webp` と `golang.org/x/image/webp` の
+// 両方が "webp" を `image.RegisterFormat` するので、どちらが引かれるかは
+// package の初期化順に依存する。前者を引いたときだけ無防備、という形を
+// 残さない。
+func isWebP(data []byte) bool {
+	return len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP"
 }
 
 // isGIF reports whether data starts with a GIF signature.

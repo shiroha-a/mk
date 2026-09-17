@@ -160,3 +160,85 @@ func TestHasChunk_Bounds(t *testing.T) {
 	assert.False(t, hasChunk(huge, "tRNS"))
 	assert.NotPanics(t, func() { _ = hasChunk(huge, "tRNS") })
 }
+
+// **wasm のデコーダへ渡す入力を縛る (#3037)。**
+//
+// `gen2brain/*` は wazero の runtime を package 内で 1 度だけ作り、
+// `WithMemoryLimitPages` も `WithCloseOnContextDone` も指定しない。設定を
+// 差し込む口が無いので、mk-go 側で握れるのは入力の大きさ・宣言寸法・
+// 同時実行数だけ。
+func TestDecode_RefusesOversizedSandboxedInput(t *testing.T) {
+	big := SandboxedDecoderMaxBytes + 1
+
+	// ISOBMFF (`ftyp` + brand) を名乗るバイト列。中身は問わない —
+	// **デコーダに渡す前に断る**ことが要点。
+	isobmff := func(brand string) []byte {
+		b := make([]byte, big)
+		copy(b, []byte{0, 0, 0, 0x20})
+		copy(b[4:], "ftyp")
+		copy(b[8:], brand)
+		return b
+	}
+
+	for _, tt := range []struct {
+		name string
+		data []byte
+	}{
+		{"AVIF", isobmff("avif")},
+		{"AVIF sequence", isobmff("avis")},
+		{"HEIC", isobmff("heic")},
+		{"HEIF generic brand", isobmff("mif1")},
+		{"JPEG XL codestream", append([]byte{0xFF, 0x0A}, make([]byte, big)...)},
+		{"WebP", func() []byte {
+			b := make([]byte, big)
+			copy(b, "RIFF")
+			copy(b[8:], "WEBP")
+			return b
+		}()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := Decode(tt.data)
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrEncodedTooLarge)
+		})
+	}
+}
+
+// **上限ちょうどは通す。** 判定が off-by-one で 1 バイト厳しくなると、
+// 「通る画像の集合を変えない」という前提が崩れる。
+func TestDecode_SandboxedCapIsInclusive(t *testing.T) {
+	data := make([]byte, SandboxedDecoderMaxBytes)
+	copy(data, []byte{0, 0, 0, 0x20})
+	copy(data[4:], "ftyp")
+	copy(data[8:], "avif")
+
+	_, err := Decode(data)
+	require.Error(t, err, "中身は AVIF ではないのでデコードは失敗する")
+	assert.NotErrorIs(t, err, ErrEncodedTooLarge, "上限ちょうどで断っている")
+}
+
+// **wasm を使わない形式には掛けない。** PNG / JPEG / GIF は Go のデコーダで、
+// 宣言寸法の cap が既に効いている。ここまで縛ると大きな PNG の
+// サムネイル生成が落ち、webpublic が作られず EXIF が公開側へ出る
+// (#3037 で塞いだばかりの経路)。
+func TestDecode_SandboxedCapDoesNotApplyToNativeFormats(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		head []byte
+	}{
+		{"PNG", []byte("\x89PNG\r\n\x1a\n")},
+		{"JPEG", []byte{0xFF, 0xD8, 0xFF, 0xE0}},
+		{"GIF", []byte("GIF89a")},
+		// `ftyp` だが画像ではない brand (MP4)。
+		{"MP4", append([]byte{0, 0, 0, 0x20}, []byte("ftypisom")...)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			data := make([]byte, SandboxedDecoderMaxBytes+1)
+			copy(data, tt.head)
+
+			_, err := Decode(data)
+			require.Error(t, err, "中身が壊れているのでデコードは失敗する")
+			assert.NotErrorIs(t, err, ErrEncodedTooLarge)
+		})
+	}
+}
