@@ -68,6 +68,23 @@ func TestUsernameAvailable(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, rec.Code)
 	})
 
+	t.Run("a username shorter than the minimum is unavailable", func(t *testing.T) {
+		// **登録経路と同じ判定を通すこと (#3015)。** ここを見ないと
+		// 「空いています」と案内した名前が送信時に弾かれる。
+		h, _, _, meta := setup(t)
+		meta.Meta = &model.Meta{ID: "x", MinimumUsernameLength: 5}
+		assert.False(t, available(t, h, `{"username":"abcd"}`))
+		// **弾きすぎていないこと。** 常に false でもこの subtest 単体は緑になる。
+		assert.True(t, available(t, h, `{"username":"abcde"}`))
+	})
+
+	t.Run("the default minimum keeps single-char usernames available", func(t *testing.T) {
+		// 既定 (列が未設定 = 0) は 1 に丸めるので、従来どおり 1 文字も空いている。
+		h, _, _, meta := setup(t)
+		meta.Meta = &model.Meta{ID: "x"}
+		assert.True(t, available(t, h, `{"username":"a"}`))
+	})
+
 	t.Run("a malformed body is a 400", func(t *testing.T) {
 		h, _, _, _ := setup(t)
 		rec := doPost(h.UsernameAvailable, `{`)

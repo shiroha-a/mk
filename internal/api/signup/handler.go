@@ -272,6 +272,15 @@ func (h *Handler) Signup(c echo.Context) error {
 				// DENIED_USERNAME で返す (非 email path の USED_USERNAME とは異なる、#2080)。
 				return apierr.FastifyReply(c, http.StatusBadRequest, "DENIED_USERNAME")
 			}
+			if errors.Is(perr, coresignup.ErrUsernameTooShort) {
+				// **`USED_USERNAME` / `INVALID_USERNAME` に混ぜない (#3015)。**
+				// 前者は「他人が使っている」、後者は「文字種か長さの上限が不正」で、
+				// どちらも利用者の直し方が違う。最小文字数は運営者の設定なので、
+				// 何文字必要かが分からないと直しようがない。additive な error code
+				// なので既存クライアントの互換は壊れない (未知の code は汎用の
+				// エラー表示に落ちる)。
+				return apierr.FastifyReply(c, http.StatusBadRequest, "USERNAME_TOO_SHORT")
+			}
 			if errors.Is(perr, coresignup.ErrPasswordTooLong) {
 				return apierr.FastifyReply(c, http.StatusBadRequest, "PASSWORD_TOO_LONG")
 			}
@@ -312,7 +321,7 @@ func (h *Handler) Signup(c echo.Context) error {
 		hv := strings.ToLower(strings.TrimSpace(req.Host))
 		remoteHost = &hv
 	}
-	result, err := h.signupService.SignupWithHost(req.Username, req.Password, isInitialSetup, remoteHost)
+	result, err := h.signupService.SignupWithHost(req.Username, req.Password, isInitialSetup, remoteHost, coresignup.UsernamePolicyPublic)
 	if err != nil {
 		// upstream の `/api/signup` は username 系 error を Fastify-style
 		// reply error で投げる (SignupApiService.ts)。shape を揃える (#802)。
@@ -329,6 +338,10 @@ func (h *Handler) Signup(c echo.Context) error {
 		if errors.Is(err, coresignup.ErrUsernameReserved) {
 			// 非 email path は upstream SignupService と同じく preserved も USED_USERNAME (#2080)。
 			return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
+		}
+		if errors.Is(err, coresignup.ErrUsernameTooShort) {
+			// 最小文字数 (#3015)。理由は email path 側のコメントを参照。
+			return apierr.FastifyReply(c, http.StatusBadRequest, "USERNAME_TOO_SHORT")
 		}
 		if errors.Is(err, coresignup.ErrPasswordTooLong) {
 			return apierr.FastifyReply(c, http.StatusBadRequest, "PASSWORD_TOO_LONG")

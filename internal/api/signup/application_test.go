@@ -995,3 +995,101 @@ func TestApplicationApply_NonceStoreFailureIsNotFailOpen(t *testing.T) {
 	assert.NotContains(t, rec.Body.String(), "FORM_TOKEN")
 	assert.Nil(t, env.apps.appliedAnswers, "申請行を作らない")
 }
+
+// 申請経由の登録も最小文字数を受け、`USERNAME_TOO_SHORT` で返す (#3015)。
+//
+// **`signupServiceError` の写像を落とすと 500 になる。** 承認された人が
+// 何度やっても登録できず、しかも原因が「サーバーの不具合」に見える。
+// 即時作成とメール確認の**両方**を見る — 通る関数が違う
+// (`SignupForApplication` / `CreatePendingForApplication`)。
+func TestApplicationRegister_UsernameTooShort(t *testing.T) {
+	t.Run("即時作成", func(t *testing.T) {
+		env := newApprovalEnv(t, true)
+		env.apps.app = approvedApplication()
+		env.meta.MinimumUsernameLength = 5
+
+		rec := doPost(env.handler.ApplicationRegister,
+			`{"claimCode":"c","username":"abcd","password":"hunter22"}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "USERNAME_TOO_SHORT")
+
+		// **弾きすぎていないこと。** 常に 400 でもこの subtest 単体は緑になる。
+		rec = doPost(env.handler.ApplicationRegister,
+			`{"claimCode":"c","username":"abcde","password":"hunter22"}`)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	t.Run("メール確認経由", func(t *testing.T) {
+		env, pendingRepo, _, _ := newApprovalEnvWithEmail(t)
+		env.meta.MinimumUsernameLength = 5
+
+		rec := doPost(env.handler.ApplicationRegister,
+			`{"claimCode":"c","username":"abcd","password":"hunter22","emailAddress":"a@example.com"}`)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "USERNAME_TOO_SHORT")
+		assert.Empty(t, pendingRepo.Rows, "弾いたのに pending を作っている")
+	})
+}
+
+// 申請経路の error は **Misskey misc 形式** (`{"error":{"code":...}}`) で返す。
+//
+// **Fastify 形式だと code がクライアントに届かない。** あちらは code を
+// `message` にしか載せず、frontend の `misskeyApi` は `body.error` —
+// Fastify 形式では文字列 `"Bad Request"` — で reject する。受け側は
+// `err.code` で分岐するので**どの case にも当たらず**、
+// 「処理に失敗しました。時間をおいて試してください。」だけが出ていた。
+//
+// `signup-application/*` は upstream に存在しない mk-go 独自 endpoint なので、
+// 形を揃える相手もいない (`apierr/fastify.go` が Fastify 化の対象を 4 endpoint に
+// 限っている)。
+func TestApplicationRegister_ErrorsCarryCodeInTheMiscShape(t *testing.T) {
+	newEnv := func(t *testing.T) *approvalEnv {
+		t.Helper()
+		env := newApprovalEnv(t, true)
+		env.apps.app = approvedApplication()
+		return env
+	}
+
+	for name, tc := range map[string]struct {
+		setup func(env *approvalEnv)
+		body  string
+		want  string
+	}{
+		"USERNAME_TOO_SHORT": {
+			setup: func(env *approvalEnv) { env.meta.MinimumUsernameLength = 5 },
+			body:  `{"claimCode":"c","username":"abcd","password":"hunter22"}`,
+			want:  "USERNAME_TOO_SHORT",
+		},
+		"INVALID_USERNAME": {
+			body: `{"claimCode":"c","username":"!!!","password":"hunter22"}`,
+			want: "INVALID_USERNAME",
+		},
+		"USED_USERNAME": {
+			setup: func(env *approvalEnv) { env.meta.PreservedUsernames = model.StringArray{"admin"} },
+			body:  `{"claimCode":"c","username":"admin","password":"hunter22"}`,
+			want:  "USED_USERNAME",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			env := newEnv(t)
+			if tc.setup != nil {
+				tc.setup(env)
+			}
+			rec := doPost(env.handler.ApplicationRegister, tc.body)
+			require.Equal(t, http.StatusBadRequest, rec.Code)
+
+			// **`code` を名指しで読む。** body の文字列一致だと、Fastify 形式の
+			// `"message":"Error: USERNAME_TOO_SHORT"` でも通ってしまう
+			// (= 直したはずの形に戻しても緑になる)。
+			var resp struct {
+				Error struct {
+					Code string `json:"code"`
+					ID   string `json:"id"`
+				} `json:"error"`
+			}
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp), rec.Body.String())
+			assert.Equal(t, tc.want, resp.Error.Code, "クライアントが分岐に使う code が届いていない")
+			assert.NotEmpty(t, resp.Error.ID)
+		})
+	}
+}

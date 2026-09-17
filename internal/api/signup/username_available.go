@@ -49,14 +49,20 @@ func (h *Handler) UsernameAvailable(c echo.Context) error {
 	existsUser := userErr == nil
 	// (2) used_usernames (過去に使われ解放された username)
 	usedExists, _ := h.usedUsernameRepo.Exists(lower)
-	// (3) preservedUsernames (予約 username)
+	// (3) preservedUsernames (予約 username) と (4) 最小文字数 (#3015)
+	//
+	// **最小長をここで落とすと「空いています」と案内した名前が登録で弾かれる。**
+	// 判定は登録経路と同じ `coresignup` の関数を通し、値の解釈 (0 や範囲外を
+	// どう倒すか) が 2 箇所に分かれないようにする。
 	preserved := false
+	tooShort := false
 	if h.metaRepo != nil {
 		if m, err := h.metaRepo.Fetch(); err == nil && m != nil {
 			preserved = coresignup.IsReservedUsername(lower, m.PreservedUsernames)
+			tooShort = coresignup.ViolatesMinimumUsernameLength(req.Username, m, coresignup.UsernamePolicyPublic)
 		}
 	}
 
-	available := !existsUser && !usedExists && !preserved
+	available := !existsUser && !usedExists && !preserved && !tooShort
 	return c.JSON(http.StatusOK, map[string]any{"available": available})
 }

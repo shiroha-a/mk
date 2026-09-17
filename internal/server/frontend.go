@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/oauth"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/frontendutil"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -447,7 +448,13 @@ func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.
 		// /api/meta を再取得しない。申請ページは定義を空と見て answers を 0 件送り、
 		// サーバーは定義どおりの件数を期待するので FORM_CHANGED で弾き続ける。
 		// 「再読み込みしてやり直してください」と出るが、再読み込みしても直らない。
-		"signupApplicationForm":     ssrJSONArray(m.SignupApplicationForm),
+		"signupApplicationForm": ssrJSONArray(m.SignupApplicationForm),
+		// 登録 username の最小文字数 (#3015)。**ここに載せ忘れると、登録
+		// フォームが最大 1 時間「1 文字以上」として振る舞う** — 上と同じ理由で
+		// SSR 埋め込みが localStorage cache を上書きする。事前チェックは通るのに
+		// `username/available` が false を返すので、利用者には理由の分からない
+		// 「利用できません」だけが出る。
+		"minimumUsernameLength":     signup.EffectiveMinimumUsernameLength(m),
 		"enableHcaptcha":            m.EnableHcaptcha,
 		"hcaptchaSiteKey":           m.HcaptchaSiteKey,
 		"enableRecaptcha":           m.EnableRecaptcha,

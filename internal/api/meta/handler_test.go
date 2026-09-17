@@ -983,3 +983,38 @@ func TestMeta_UnsetThemeStaysNull(t *testing.T) {
 	assert.Nil(t, resp["defaultDarkTheme"])
 	assert.Nil(t, resp["defaultLightTheme"])
 }
+
+// 新規登録の最小文字数を additive field で出すこと (#3015)。
+//
+// **frontend の登録フォームが事前チェックに使う。** 出さないと入力中は
+// 「使えます」に見えて、送信して初めて弾かれる。
+//
+// **出すのは列の生値ではなく「実際に効く値」。** 列が範囲外の値を持っていても
+// (TS が書いた行、手で UPDATE した行)、登録側は clamp 後の値で判定するので、
+// 生値を出すと表示と挙動がずれる。
+func TestMeta_ExposesEffectiveMinimumUsernameLength(t *testing.T) {
+	for name, tc := range map[string]struct {
+		column int
+		want   float64
+	}{
+		"列が未設定 (0) なら 1": {0, 1},
+		"設定値をそのまま":       {5, 5},
+		"範囲外は 20 に丸める":   {999, 20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, metaRepo := newTestHandler()
+			metaRepo.Meta = &model.Meta{ID: "x", MinimumUsernameLength: tc.column}
+
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPost, "/api/meta", nil)
+			req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+			rec := httptest.NewRecorder()
+			require.NoError(t, h.Meta(e.NewContext(req, rec)))
+			require.Equal(t, http.StatusOK, rec.Code)
+
+			var resp map[string]any
+			require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+			assert.Equal(t, tc.want, resp["minimumUsernameLength"])
+		})
+	}
+}

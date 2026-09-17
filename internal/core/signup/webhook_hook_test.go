@@ -4,6 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,7 +24,7 @@ func TestSignupService_WebhookHookFires(t *testing.T) {
 	hook := &recordingSignupWebhook{}
 	svc.SetWebhookHook(hook)
 
-	_, err := svc.Signup("webhook_user", "password123", false)
+	_, err := svc.Signup("webhook_user", "password123", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&hook.count))

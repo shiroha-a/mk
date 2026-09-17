@@ -34,6 +34,74 @@ import (
 // regression があった (#800)。
 var localUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
 
+// UsernamePolicy selects which meta-driven username restrictions apply (#3015).
+//
+// **引数で渡すのが要点。** `admin/accounts/create` は `Signup` を呼ぶので、
+// `preservedUsernames` を見ている位置からは通常の公開登録と区別が付かない
+// (どちらも `isInitialSetup == false`)。位置だけで除外しようとすると admin まで
+// 巻き込むので、呼び出し側に選ばせる。**シグネチャを変えることで、
+// コンパイラに全呼び出し元の書き換えを強制する** (#3025 で `NormalizeCursor` を
+// 3 値にしたのと同じ考え方)。
+//
+// **`bool` にしない。** 隣に `isInitialSetup bool` があるので、位置を取り違えても
+// コンパイルが通ってしまう。
+type UsernamePolicy int
+
+const (
+	// UsernamePolicyPublic applies every meta-driven restriction. 公開登録と
+	// 申請経由の登録はこちら。
+	UsernamePolicyPublic UsernamePolicy = iota
+	// UsernamePolicyOperator skips the minimum length only.
+	//
+	// **`preservedUsernames` は引き続き適用される。** 運営が公式アカウントに
+	// 短い ID を配れるようにするのが目的で、予約済みの名前まで通したいわけでは
+	// ないため。結果として admin 経路は「予約は効くが最小長は効かない」という
+	// 非対称になる。
+	UsernamePolicyOperator
+)
+
+// minimumUsernameLength returns the effective floor, clamped to the range the
+// column is validated against.
+//
+// **0 や負値は 1 に倒す。** 列は 1-20 で検証するが、TS 側が書いた行や手で
+// UPDATE した行が範囲外を持ちうる。**上限も切る** — 20 を超えると
+// `localUsernamePattern` が先に弾くので、どの username も通らない
+// インスタンスになる (設定ミスで登録が全滅する形は避ける)。
+func minimumUsernameLength(meta *model.Meta) int {
+	if meta == nil || meta.MinimumUsernameLength < 1 {
+		return 1
+	}
+	if meta.MinimumUsernameLength > MaxUsernameLength {
+		return MaxUsernameLength
+	}
+	return meta.MinimumUsernameLength
+}
+
+const (
+	// MinUsernameLength / MaxUsernameLength は `localUsernamePattern` に
+	// 焼かれている境界。`admin/update-meta` の範囲検証が参照する (#3015)。
+	//
+	// **パターンと二重管理になる。** 変えるときは両方直すこと —
+	// TestUsernameLengthBoundsMatchPattern が食い違いを落とす。
+	MinUsernameLength = 1
+	MaxUsernameLength = 20
+)
+
+// violatesMinimumUsernameLength reports whether username is shorter than the
+// configured floor. policy が Operator なら常に false。
+//
+// **長さは byte で数える。** 呼び出し元はいずれも先に
+// `normalizeAndValidateUsername` か `ValidUsernameFormat` を通しており、
+// `localUsernamePattern` が `[a-zA-Z0-9_]` に限定するので byte 長と文字数は
+// 一致する。format 検証を通っていない値を渡すと、multibyte が 1 文字で
+// 3 byte に数えられて**制限を素通りする**ので、その順序を崩さないこと。
+func violatesMinimumUsernameLength(username string, meta *model.Meta, policy UsernamePolicy) bool {
+	if policy == UsernamePolicyOperator {
+		return false
+	}
+	return len(username) < minimumUsernameLength(meta)
+}
+
 // normalizeAndValidateUsername trims surrounding whitespace and validates
 // the username against upstream Misskey TS の `localUsernameSchema`. 返り値
 // の username は trim 済みなので、caller はそのまま小文字化や DB 永続化に
@@ -63,6 +131,14 @@ var (
 	// meta.preservedUsernames (case-insensitive). 初回セットアップ時は root
 	// ユーザー作成を妨げないため、このチェックはスキップする。
 	ErrUsernameReserved = errors.New("username is reserved")
+	// ErrUsernameTooShort is returned when the username is shorter than
+	// meta.minimumUsernameLength (#3015).
+	//
+	// **`ErrInvalidUsername` と分ける。** あちらは format (文字種・20 文字の
+	// 上限) の違反で、どのインスタンスでも同じ判定になる。こちらは運営者が
+	// 設定した値に依存するので、利用者に返す文面も「使えない文字が入って
+	// います」ではなく「n 文字以上にしてください」でなければ直しようがない。
+	ErrUsernameTooShort = errors.New("username is shorter than the minimum length")
 	// ErrUsernameUsed is returned when the username matches a deleted account's
 	// username recorded in used_usernames (再利用防止)。upstream SignupService /
 	// SignupApiService の usedUsernamesRepository.exists 相当 (#2080)。
@@ -296,8 +372,9 @@ type SignupResult struct {
 
 // Signup creates a new local user with the given username and password.
 // isInitialSetup=true の場合、作成したユーザーを rootUser に設定する。
-func (s *Service) Signup(username, password string, isInitialSetup bool) (*SignupResult, error) {
-	return s.SignupWithHost(username, password, isInitialSetup, nil)
+// policy は meta 由来の username 制限のどれを適用するかを選ぶ (#3015)。
+func (s *Service) Signup(username, password string, isInitialSetup bool, policy UsernamePolicy) (*SignupResult, error) {
+	return s.SignupWithHost(username, password, isInitialSetup, nil, policy)
 }
 
 // SignupWithHost creates a user attributed to the given remote host.
@@ -307,7 +384,7 @@ func (s *Service) Signup(username, password string, isInitialSetup bool) (*Signu
 // (e2e で「リモートユーザーのノートが LTL に出ない」等を検証するため)。
 // host=nil なら従来どおりローカルユーザー。呼び出し側で TestMode を確認する
 // こと。
-func (s *Service) SignupWithHost(username, password string, isInitialSetup bool, host *string) (*SignupResult, error) {
+func (s *Service) SignupWithHost(username, password string, isInitialSetup bool, host *string, policy UsernamePolicy) (*SignupResult, error) {
 	username, err := normalizeAndValidateUsername(username)
 	if err != nil {
 		return nil, err
@@ -328,8 +405,15 @@ func (s *Service) SignupWithHost(username, password string, isInitialSetup bool,
 	// meta.preservedUsernames チェック。初回セットアップ (root ユーザー作成) は
 	// admin / root が予約ワードに含まれうるので除外する。meta fetch 失敗時は
 	// ベストエフォートで通過させる (オンライン性を優先)。
+	//
+	// **最小文字数 (#3015) も同じブロックで見る。** 初回セットアップを除外する
+	// のは、n を大きくすると最初のアカウントを作れなくなり構築が詰むため。
+	// admin 経路の除外は `policy` が担う (位置では区別が付かない)。
 	if !isInitialSetup {
 		if meta, err := s.metaRepo.Fetch(); err == nil {
+			if violatesMinimumUsernameLength(username, meta, policy) {
+				return nil, ErrUsernameTooShort
+			}
 			if isReservedUsername(lower, meta.PreservedUsernames) {
 				return nil, ErrUsernameReserved
 			}
@@ -481,6 +565,11 @@ func (s *Service) CreatePendingForApplication(username, email, password string, 
 		return nil, ErrUsernameUsed
 	}
 	if meta, err := s.metaRepo.Fetch(); err == nil {
+		// 最小文字数 (#3015)。この 2 経路は公開登録と申請経由なので、
+		// 常に制限を適用する (admin が通る経路ではない)。
+		if violatesMinimumUsernameLength(username, meta, UsernamePolicyPublic) {
+			return nil, ErrUsernameTooShort
+		}
 		if isReservedUsername(lower, meta.PreservedUsernames) {
 			return nil, ErrUsernameReserved
 		}
@@ -798,7 +887,8 @@ func (s *Service) promotePendingNoTx(pending *model.UserPending) (*SignupResult,
 // SignupApplicationCompleted=false を返す (呼び出し側が従来どおり完了記録する)。
 func (s *Service) SignupForApplication(username, password, applicationID, ticketID string) (*SignupResult, error) {
 	if s.db == nil || s.appRepo == nil {
-		return s.Signup(username, password, false)
+		// 申請経由なので公開登録と同じ制限を適用する (#3015)。
+		return s.Signup(username, password, false, UsernamePolicyPublic)
 	}
 
 	username, err := normalizeAndValidateUsername(username)
@@ -815,6 +905,11 @@ func (s *Service) SignupForApplication(username, password, applicationID, ticket
 		return nil, ErrUsernameUsed
 	}
 	if meta, err := s.metaRepo.Fetch(); err == nil {
+		// 最小文字数 (#3015)。この 2 経路は公開登録と申請経由なので、
+		// 常に制限を適用する (admin が通る経路ではない)。
+		if violatesMinimumUsernameLength(username, meta, UsernamePolicyPublic) {
+			return nil, ErrUsernameTooShort
+		}
 		if isReservedUsername(lower, meta.PreservedUsernames) {
 			return nil, ErrUsernameReserved
 		}
@@ -1015,6 +1110,26 @@ func isReservedUsername(lower string, reserved []string) bool {
 // endpoint so it shares signup's preservedUsernames check (#1551)。
 func IsReservedUsername(lower string, reserved []string) bool {
 	return isReservedUsername(lower, reserved)
+}
+
+// EffectiveMinimumUsernameLength returns the value the API should advertise
+// (#3015)。列が範囲外の値を持っていても、**実際に効く値**を返す。
+//
+// **生の列値をそのまま公開しない。** frontend は事前チェックにこれを使うので、
+// 0 や 999 が出ると「1 文字で通るのに弾かれる」「何を入れても弾かれる」と
+// 表示がずれる。
+func EffectiveMinimumUsernameLength(meta *model.Meta) int {
+	return minimumUsernameLength(meta)
+}
+
+// ViolatesMinimumUsernameLength is the exported form used by
+// `POST /api/username/available` (#3015).
+//
+// **`IsReservedUsername` と同じ理由で export する。** 判定を available 側に
+// 書き写すと、値の解釈 (0 や範囲外の倒し方) が 2 箇所に分かれ、
+// 「空いています」と案内した名前が登録で弾かれる形になる。
+func ViolatesMinimumUsernameLength(username string, meta *model.Meta, policy UsernamePolicy) bool {
+	return violatesMinimumUsernameLength(username, meta, policy)
 }
 
 // HasTicketConsumption reports whether the transactional promote path is wired.

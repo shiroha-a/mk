@@ -818,3 +818,42 @@ func newTxServiceWithMeta(t *testing.T, db *gorm.DB, meta *model.Meta) *signup.S
 	svc.SetDB(db)
 	return svc
 }
+
+// 申請経由の tx 経路も最小文字数を受ける (#3015)。
+//
+// **mock だけでは踏めない。** db / appRepo が未配線だと
+// `SignupForApplication` は `Signup` へ委譲する fallback に入るので、
+// tx 経路に置いた guard を外しても unit test は緑のまま通る (変異検証で実測)。
+func TestSignupForApplication_RejectsUsernameShorterThanMinimum(t *testing.T) {
+	db := integrationDB(t)
+	const prefix = "itmul_"
+	defer cleanupSignupRows(t, db, prefix)
+	defer db.Exec(`DELETE FROM "signup_application" WHERE id LIKE ?`, prefix+"%")
+
+	svc := newTxServiceWithMeta(t, db, &model.Meta{ID: "x", MinimumUsernameLength: 12})
+	app := insertApprovedApplication(t, db, prefix+"app1")
+
+	// prefix (6) + "short" = 11 文字で n-1。
+	short := prefix + "short"
+	require.Len(t, short, 11)
+	_, err := svc.SignupForApplication(short, "hunter22", app.ID, "")
+	require.ErrorIs(t, err, signup.ErrUsernameTooShort)
+
+	var count int64
+	require.NoError(t, db.Model(&model.User{}).
+		Where(`"usernameLower" = ?`, short).Count(&count).Error)
+	assert.Equal(t, int64(0), count, "弾いたのにアカウントを作っている")
+
+	// **申請は消費されていないこと。** 弾いた時点で tx が始まっていれば
+	// 巻き戻るはずで、消費されていたら承認が 1 回無駄になる。
+	var stored model.SignupApplication
+	require.NoError(t, db.Where("id = ?", app.ID).First(&stored).Error)
+	assert.Equal(t, model.SignupApplicationApproved, stored.Status)
+
+	// 境界の上側は通る。**弾きすぎていないことを見る。**
+	long := prefix + "longenough"
+	require.Len(t, long, 16)
+	res, err := svc.SignupForApplication(long, "hunter22", app.ID, "")
+	require.NoError(t, err)
+	assert.Equal(t, long, res.User.Username)
+}

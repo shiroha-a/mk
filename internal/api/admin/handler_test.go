@@ -4368,3 +4368,65 @@ func TestAccountsDelete_RecordsLocalOrigin(t *testing.T) {
 	assert.Equalf(t, model.SuspensionOriginLocal, origins.origins["u1"],
 		"削除で由来を刻んでいない。発信元が tombstone の凍結を外せる")
 }
+
+// #3015: 最小文字数の範囲検証。上限は `localUsernamePattern` の 20 と揃える。
+//
+// **21 以上を書けると登録が全滅する** — どの username も format 検証で先に
+// 落ちるので、管理画面から自分のインスタンスを壊せてしまう。service 側にも
+// clamp があるが、admin が入れた値が黙って別の値になるのは分かりにくいので
+// 入口で拒否する (分割アップロードの範囲検証と同じ判断)。
+func TestUpdateMeta_MinimumUsernameLengthRange(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+
+	tooSmall := fmt.Sprintf(`{"minimumUsernameLength":%d}`, signup.MinUsernameLength-1)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, tooSmall, nil).Code)
+	tooBig := fmt.Sprintf(`{"minimumUsernameLength":%d}`, signup.MaxUsernameLength+1)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, tooBig, nil).Code)
+	assert.Equal(t, http.StatusBadRequest, doPost(h.UpdateMeta, `{"minimumUsernameLength":5.5}`, nil).Code, "non-integer must be rejected")
+
+	// 境界は通り、実際に保存されること。**弾きすぎていないことを見ないと
+	// 「常に 400」でも緑になる。**
+	for _, v := range []int{signup.MinUsernameLength, signup.MaxUsernameLength} {
+		body := fmt.Sprintf(`{"minimumUsernameLength":%d}`, v)
+		require.Equal(t, http.StatusNoContent, doPost(h.UpdateMeta, body, nil).Code, body)
+		assert.Equal(t, v, metaRepo.Meta.MinimumUsernameLength)
+	}
+}
+
+// #3015: admin/meta は**列の生値**を返す。
+//
+// 公開 meta (`/api/meta`) が返すのは clamp 後の「実際に効く値」だが、管理画面は
+// 入力欄の初期値に使うので、丸めた値を出すと**開いて保存しただけで設定が
+// 書き換わる**。
+func TestAdminMeta_ExposesMinimumUsernameLength(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	metaRepo.Meta.MinimumUsernameLength = 5
+
+	rec := doPost(h.AdminMeta, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, float64(5), resp["minimumUsernameLength"])
+}
+
+// #3015: `admin/accounts/create` は最小文字数を受けない。
+//
+// 運営が公式アカウントに短い ID を配れるようにするため
+// (`signup.UsernamePolicyOperator`)。**位置では区別が付かない** — admin も
+// `isInitialSetup == false` で `Signup` を呼ぶので、handler が policy を選ぶ。
+func TestAccountsCreate_IgnoresMinimumUsernameLength(t *testing.T) {
+	h, _, metaRepo, _ := newTestHandler(t)
+	rootID := "root1"
+	metaRepo.Meta.RootUserID = &rootID
+	metaRepo.Meta.MinimumUsernameLength = 10
+
+	rootUser := &model.User{ID: "root1", Username: "root"}
+	rec := doPost(h.AccountsCreate, `{"username":"ops","password":"pass1234"}`, rootUser)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	// **予約は引き続き効く。** 除外したのは最小長だけなので、
+	// 「policy を渡したら全部素通り」になっていないことを見る。
+	metaRepo.Meta.PreservedUsernames = model.StringArray{"reserved"}
+	rec = doPost(h.AccountsCreate, `{"username":"reserved","password":"pass1234"}`, rootUser)
+	assert.NotEqual(t, http.StatusOK, rec.Code, "予約 username が admin 経路で通っている")
+}

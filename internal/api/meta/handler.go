@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/misc/json5"
 	"github.com/shiroha-a/mk/internal/repository"
 	"gorm.io/datatypes"
@@ -159,6 +160,12 @@ func (h *Handler) buildMeta(detail bool) (map[string]any, error) {
 		// `_error_.vue` が build 定数と比較する版ずれ検出がこれに依存する)
 		// ので、実際に動いている実装の版は別 field で出す。
 		"mkGoVersion": config.MkGoVersion,
+		// minimumUsernameLength は mk-go 独自の additive field (#3015)。
+		// **frontend の登録フォームが事前チェックに使う** — 出さないと、
+		// 入力中は「使えます」と見えて送信時に初めて弾かれる。
+		// upstream の `localUsernameSchema` は `^\w{1,20}$` 固定なので
+		// 対応する field が無い。
+		"minimumUsernameLength": signup.EffectiveMinimumUsernameLength(m),
 		// ビルドした revision と同梱 frontend の版 (#2700)。/about-mkgo が
 		// 「mk-go 1.3.0 (abc1234)」「Misskey 2026.9.0-mk.3」として出す。
 		// **埋まっていないビルドでは空文字**になる (`go run` や build-arg を

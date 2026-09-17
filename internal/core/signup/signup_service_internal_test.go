@@ -6,6 +6,7 @@ package signup
 
 import (
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -44,4 +45,21 @@ func TestMaybeCreateEd25519Keypair_NilRepoIsNoOp(t *testing.T) {
 	tx := &failingTxInserter{err: errors.New("must not be called")}
 	err := svc.maybeCreateEd25519Keypair(tx, "u1")
 	assert.NoError(t, err)
+}
+
+// MinUsernameLength / MaxUsernameLength が localUsernamePattern と食い違って
+// いないこと (#3015)。
+//
+// **`admin/update-meta` の範囲検証はこの定数を読む**ので、ずれると
+// 「保存できるのに登録が全滅する値」または「保存できない正当な値」が生まれる。
+// pattern 側を変えたときに気付けるよう、パターンそのものに当てて確かめる。
+func TestUsernameLengthBoundsMatchPattern(t *testing.T) {
+	ok := func(n int) bool {
+		return localUsernamePattern.MatchString(strings.Repeat("a", n))
+	}
+
+	assert.True(t, ok(MinUsernameLength), "下限が pattern に通らない")
+	assert.True(t, ok(MaxUsernameLength), "上限が pattern に通らない")
+	assert.False(t, ok(MinUsernameLength-1), "下限より 1 短いものが pattern を通る")
+	assert.False(t, ok(MaxUsernameLength+1), "上限より 1 長いものが pattern を通る")
 }

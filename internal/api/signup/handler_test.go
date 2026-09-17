@@ -997,3 +997,42 @@ func mustIDGen(t *testing.T) id.Generator {
 	require.NoError(t, err)
 	return g
 }
+
+// 最小文字数の違反は `USERNAME_TOO_SHORT` で返す (#3015)。
+//
+// **`USED_USERNAME` / `DENIED_USERNAME` / `INVALID_USERNAME` に混ぜない。**
+// 前二者は「他人のもの」、後者は「文字種か 20 文字の上限が不正」で、利用者の
+// 直し方が違う。最小文字数は運営者の設定なので、何文字必要かが分からないと
+// 直しようがない。additive な code なので既存クライアントは汎用表示に落ちる。
+func TestSignup_UsernameTooShort(t *testing.T) {
+	t.Run("非 email path", func(t *testing.T) {
+		h, _, metaRepo := newTestHandler(t)
+		metaRepo.Meta.MinimumUsernameLength = 5
+		rec := doPost(h.Signup, `{"username":"abcd","password":"pass1234"}`)
+		testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "USERNAME_TOO_SHORT")
+	})
+
+	t.Run("email path", func(t *testing.T) {
+		h, _, metaRepo := newTestHandler(t)
+		metaRepo.Meta.EmailRequiredForSignup = true
+		metaRepo.Meta.MinimumUsernameLength = 5
+		rec := doPost(h.Signup, `{"username":"abcd","password":"pass1234","emailAddress":"x@example.com"}`)
+		testutil.AssertFastifyError(t, rec, http.StatusBadRequest, "USERNAME_TOO_SHORT")
+	})
+
+	// 境界の上側は通ること。**弾きすぎていない**ことを見ないと、
+	// 「常に USERNAME_TOO_SHORT」でもテストが緑になる。
+	t.Run("ちょうど n 文字は通る", func(t *testing.T) {
+		h, _, metaRepo := newTestHandler(t)
+		metaRepo.Meta.MinimumUsernameLength = 5
+		rec := doPost(h.Signup, `{"username":"abcde","password":"pass1234"}`)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+
+	// 既定 (1) では従来どおり 1 文字でも通る。**既存インスタンスを壊さない。**
+	t.Run("既定では 1 文字でも通る", func(t *testing.T) {
+		h, _, _ := newTestHandler(t)
+		rec := doPost(h.Signup, `{"username":"a","password":"pass1234"}`)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	})
+}

@@ -574,16 +574,41 @@ type approvalTicketDeleter interface {
 // signupServiceError maps SignupService failures to the same shapes the normal
 // `/api/signup` returns, so a client can handle one set of errors.
 func (h *Handler) signupServiceError(c echo.Context, err error) error {
+	// **Misskey misc 形式 (`apierr.Error`) で返す。`FastifyReply` は使わない。**
+	//
+	// あちらは code を `message` にしか載せず (`{"statusCode":400,
+	// "error":"Bad Request","message":"Error: CODE"}`)、frontend の
+	// `misskeyApi` は `body.error` — つまり文字列 `"Bad Request"` — で reject
+	// する。受け側の `message(err)` は `err.code` を見るので**どの case にも
+	// 当たらず**、「処理に失敗しました。時間をおいて試してください。」だけが
+	// 出ていた (時間をおいても直らない)。
+	//
+	// `apierr/fastify.go` 自身が「Fastify 化が必要なのは `/api/signup` など
+	// 4 endpoint で、それ以外は `Error()` を使うこと」と宣言しており、
+	// `signup-application/*` はその 4 つに入っていない。**この endpoint は
+	// upstream に存在しない**ので、形を揃える相手もいない。
+	//
+	// `duplicatedUsernameError` は `/api/signup` (Fastify 化対象) と共有なので
+	// 呼ばず、ここで misc 形式を組む。
 	switch {
 	case errors.Is(err, coresignup.ErrUsernameAlreadyExists):
-		return duplicatedUsernameError(c)
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("DUPLICATED_USERNAME", "That username is already taken.", "8963629e-bf72-4963-b623-d85783fbeb7e"))
 	case errors.Is(err, coresignup.ErrInvalidUsername):
-		return apierr.FastifyReply(c, http.StatusBadRequest, "INVALID_USERNAME")
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("INVALID_USERNAME", "That username cannot be used.", "2b63ca5a-a7b1-4ef3-91ae-47b5278901b8"))
 	case errors.Is(err, coresignup.ErrUsernameUsed), errors.Is(err, coresignup.ErrUsernameReserved):
-		return apierr.FastifyReply(c, http.StatusBadRequest, "USED_USERNAME")
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("USED_USERNAME", "That username is not available.", "d15331bf-b05c-478a-bf50-0cf1403a5134"))
+	case errors.Is(err, coresignup.ErrUsernameTooShort):
+		// 最小文字数 (#3015)。申請経由も公開登録と同じ制限を受ける。
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("USERNAME_TOO_SHORT", "That username is shorter than the minimum length.", "0cede9f8-c051-4bfc-8432-276582ad3a57"))
 	case errors.Is(err, coresignup.ErrPasswordTooLong):
-		return apierr.FastifyReply(c, http.StatusBadRequest, "PASSWORD_TOO_LONG")
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("PASSWORD_TOO_LONG", "That password is too long.", "11724a57-04e5-4e1a-b32b-cc1731ce8d11"))
 	default:
-		return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
+		return c.JSON(http.StatusInternalServerError,
+			apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 }

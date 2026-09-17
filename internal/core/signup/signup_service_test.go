@@ -30,7 +30,7 @@ func newTestService(t *testing.T) (*signup.Service, *testutil.MockUserRepository
 
 func TestSignup_Success(t *testing.T) {
 	svc, userRepo, _ := newTestService(t)
-	result, err := svc.Signup("testuser", "password123", false)
+	result, err := svc.Signup("testuser", "password123", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 	assert.Equal(t, "testuser", result.User.Username)
 	assert.NotEmpty(t, result.Token)
@@ -49,7 +49,7 @@ func TestSignup_Success(t *testing.T) {
 
 func TestSignup_InitialSetup_SetsRootUser(t *testing.T) {
 	svc, _, metaRepo := newTestService(t)
-	result, err := svc.Signup("admin", "pass", true)
+	result, err := svc.Signup("admin", "pass", true, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 
 	// rootUserId が設定される
@@ -59,7 +59,7 @@ func TestSignup_InitialSetup_SetsRootUser(t *testing.T) {
 
 func TestSignup_NotInitialSetup_DoesNotSetRootUser(t *testing.T) {
 	svc, _, metaRepo := newTestService(t)
-	_, err := svc.Signup("user1", "pass", false)
+	_, err := svc.Signup("user1", "pass", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 	assert.Nil(t, metaRepo.Meta.RootUserID)
 }
@@ -72,13 +72,13 @@ func TestSignup_DuplicateUsername(t *testing.T) {
 		UsernameLower: "taken",
 	}
 
-	_, err := svc.Signup("taken", "pass", false)
+	_, err := svc.Signup("taken", "pass", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrUsernameAlreadyExists)
 }
 
 func TestSignup_EmptyUsername(t *testing.T) {
 	svc, _, _ := newTestService(t)
-	_, err := svc.Signup("", "pass", false)
+	_, err := svc.Signup("", "pass", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrInvalidUsername)
 }
 
@@ -88,7 +88,7 @@ func TestSignup_TooLongUsername(t *testing.T) {
 	for i := range long {
 		long[i] = 'a'
 	}
-	_, err := svc.Signup(string(long), "pass", false)
+	_, err := svc.Signup(string(long), "pass", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrInvalidUsername)
 }
 
@@ -109,7 +109,7 @@ func TestSignup_UsernameLengthBoundary(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			svc, _, _ := newTestService(t)
 			username := strings.Repeat("a", tc.length)
-			_, err := svc.Signup(username, "pass", false)
+			_, err := svc.Signup(username, "pass", false, signup.UsernamePolicyPublic)
 			if tc.wantErr == nil {
 				require.NoError(t, err)
 			} else {
@@ -134,7 +134,7 @@ func TestSignup_UsernameIllegalCharsRejected(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.desc, func(t *testing.T) {
 			svc, _, _ := newTestService(t)
-			_, err := svc.Signup(tc.username, "pass", false)
+			_, err := svc.Signup(tc.username, "pass", false, signup.UsernamePolicyPublic)
 			assert.ErrorIs(t, err, signup.ErrInvalidUsername)
 		})
 	}
@@ -145,11 +145,11 @@ func TestSignup_PreservedUsernameRejected(t *testing.T) {
 	// meta.preservedUsernames に "admin" が入っている想定。
 	metaRepo.Meta.PreservedUsernames = []string{"admin", "root", "System"}
 
-	_, err := svc.Signup("admin", "pass", false)
+	_, err := svc.Signup("admin", "pass", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrUsernameReserved)
 
 	// case-insensitive (slot "System" を大文字で登録、小文字で試行)
-	_, err = svc.Signup("SYSTEM", "pass", false)
+	_, err = svc.Signup("SYSTEM", "pass", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrUsernameReserved)
 }
 
@@ -159,7 +159,7 @@ func TestSignup_PreservedUsernameBypassedOnInitialSetup(t *testing.T) {
 	svc, _, metaRepo := newTestService(t)
 	metaRepo.Meta.PreservedUsernames = []string{"admin"}
 
-	result, err := svc.Signup("admin", "pass", true)
+	result, err := svc.Signup("admin", "pass", true, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 	assert.NotNil(t, result)
 }
@@ -168,7 +168,7 @@ func TestSignup_PreservedUsernameAllowsOthers(t *testing.T) {
 	svc, _, metaRepo := newTestService(t)
 	metaRepo.Meta.PreservedUsernames = []string{"admin"}
 
-	result, err := svc.Signup("alice", "pass", false)
+	result, err := svc.Signup("alice", "pass", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 	assert.Equal(t, "alice", result.User.Username)
 }
@@ -193,7 +193,7 @@ func TestSignup_UserCreateError(t *testing.T) {
 	metaRepo.Meta = &model.Meta{ID: "x"}
 	idGen, _ := id.NewGenerator("aidx")
 	svc := signup.NewService(repo, metaRepo, idGen)
-	_, err := svc.Signup("user1", "pass", false)
+	_, err := svc.Signup("user1", "pass", false, signup.UsernamePolicyPublic)
 	assert.Error(t, err)
 }
 
@@ -203,7 +203,7 @@ func TestSignup_ProfileCreateError(t *testing.T) {
 	metaRepo.Meta = &model.Meta{ID: "x"}
 	idGen, _ := id.NewGenerator("aidx")
 	svc := signup.NewService(repo, metaRepo, idGen)
-	_, err := svc.Signup("user1", "pass", false)
+	_, err := svc.Signup("user1", "pass", false, signup.UsernamePolicyPublic)
 	assert.Error(t, err)
 }
 
@@ -222,7 +222,7 @@ func TestSignup_PasswordLengthBoundary(t *testing.T) {
 		t.Run(tc.desc, func(t *testing.T) {
 			svc, _, _ := newTestService(t)
 			pw := strings.Repeat("a", tc.length)
-			_, err := svc.Signup("user1", pw, false)
+			_, err := svc.Signup("user1", pw, false, signup.UsernamePolicyPublic)
 			if tc.want == nil {
 				require.NoError(t, err)
 			} else {
@@ -244,7 +244,7 @@ func TestSignup_TokenShape(t *testing.T) {
 	seen := map[string]bool{}
 	sawNonHex := false
 	for range 40 {
-		result, err := svc.Signup("user"+strconv.Itoa(len(seen)), "pass", false)
+		result, err := svc.Signup("user"+strconv.Itoa(len(seen)), "pass", false, signup.UsernamePolicyPublic)
 		require.NoError(t, err)
 		assert.Len(t, result.Token, misc.NativeTokenLength)
 		assert.Regexp(t, `^[0-9a-zA-Z]{16}$`, result.Token)
@@ -264,7 +264,7 @@ func TestSignup_WithKeypairRepo(t *testing.T) {
 	keypairRepo := testutil.NewMockUserKeypairRepository()
 	svc.SetKeypairRepo(keypairRepo)
 
-	result, err := svc.Signup("alice", "pass", false)
+	result, err := svc.Signup("alice", "pass", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 
 	// Keypair created for the new user.
@@ -286,7 +286,7 @@ func TestSignup_KeypairCreateError(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	svc.SetKeypairRepo(&failingCreateKeypairRepo{})
 
-	_, err := svc.Signup("alice", "pass", false)
+	_, err := svc.Signup("alice", "pass", false, signup.UsernamePolicyPublic)
 	assert.Error(t, err)
 }
 
@@ -297,7 +297,7 @@ func TestSignup_WithKeypairExtraRepo(t *testing.T) {
 	svc.SetKeypairRepo(keypairRepo)
 	svc.SetKeypairExtraRepo(keypairExtraRepo)
 
-	result, err := svc.Signup("alice", "pass", false)
+	result, err := svc.Signup("alice", "pass", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 
 	// Ed25519 鍵が併発行されている
@@ -328,7 +328,7 @@ func TestSignup_KeypairExtraUpsertError(t *testing.T) {
 	svc.SetKeypairRepo(testutil.NewMockUserKeypairRepository())
 	svc.SetKeypairExtraRepo(&failingUpsertKeypairExtraRepo{})
 
-	_, err := svc.Signup("alice", "pass", false)
+	_, err := svc.Signup("alice", "pass", false, signup.UsernamePolicyPublic)
 	assert.Error(t, err)
 }
 
@@ -645,16 +645,16 @@ func TestSignup_UsedUsername(t *testing.T) {
 	usedRepo.Usernames["taken"] = true
 	svc.SetUsedUsernameRepo(usedRepo)
 
-	_, err := svc.Signup("taken", "password123", false)
+	_, err := svc.Signup("taken", "password123", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
 
 	// 大文字違いも lowercase 照合で弾く。
-	_, err = svc.Signup("TAKEN", "password123", false)
+	_, err = svc.Signup("TAKEN", "password123", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
 
 	// repo 未配線なら skip (後方互換) — 別 svc で確認。
 	svc2, _, _ := newTestService(t)
-	_, err = svc2.Signup("taken", "password123", false)
+	_, err = svc2.Signup("taken", "password123", false, signup.UsernamePolicyPublic)
 	assert.NoError(t, err, "repo 未配線時は used_usernames を見ない")
 }
 
@@ -665,7 +665,7 @@ func TestSignup_RecordsUsedUsername(t *testing.T) {
 	usedRepo := testutil.NewMockUsedUsernameRepository()
 	svc.SetUsedUsernameRepo(usedRepo)
 
-	_, err := svc.Signup("NewUser", "password123", false)
+	_, err := svc.Signup("NewUser", "password123", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 
 	exists, err := usedRepo.Exists("newuser")
@@ -683,7 +683,7 @@ func (errUsedUsernameRepo) Exists(string) (bool, error) { return false, nil }
 func TestSignup_UsedUsernameCreateErrorIsBestEffort(t *testing.T) {
 	svc, _, _ := newTestService(t)
 	svc.SetUsedUsernameRepo(errUsedUsernameRepo{})
-	result, err := svc.Signup("besteffort", "password123", false)
+	result, err := svc.Signup("besteffort", "password123", false, signup.UsernamePolicyPublic)
 	require.NoError(t, err, "used_username 記録失敗でも signup は成功する")
 	require.NotNil(t, result)
 }
@@ -710,7 +710,7 @@ func TestPromotePending_NoTxRecordsUsedUsername(t *testing.T) {
 func TestSignup_ProhibitedUsername(t *testing.T) {
 	svc, _, metaRepo := newTestService(t)
 	metaRepo.Meta.ProhibitedWordsForNameOfUser = []string{"badname"}
-	_, err := svc.Signup("badname123", "pass", false)
+	_, err := svc.Signup("badname123", "pass", false, signup.UsernamePolicyPublic)
 	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
 }
 
@@ -719,7 +719,7 @@ func TestSignup_ProhibitedUsername(t *testing.T) {
 func TestSignup_ProhibitedUsernameAllowedOnInitialSetup(t *testing.T) {
 	svc, _, metaRepo := newTestService(t)
 	metaRepo.Meta.ProhibitedWordsForNameOfUser = []string{"badname"}
-	result, err := svc.Signup("badname123", "pass", true)
+	result, err := svc.Signup("badname123", "pass", true, signup.UsernamePolicyPublic)
 	require.NoError(t, err)
 	require.NotNil(t, result)
 }

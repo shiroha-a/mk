@@ -114,3 +114,26 @@ func TestSSRMetaCarriesSignupApplicationForm(t *testing.T) {
 		})
 	}
 }
+
+// 登録 username の最小文字数が SSR 埋め込みだけで正しく効くこと (#3015)。
+//
+// 網羅テストはキーの有無しか見ないので、**clamp 後の「実際に効く値」**を
+// 出していることはここで固定する。列の生値をそのまま出すと、範囲外の行で
+// 登録フォームの事前チェックとサーバーの判定がずれる。
+func TestSSRMetaCarriesMinimumUsernameLength(t *testing.T) {
+	cfg := &config.Config{Version: config.MisskeyVersion, URL: "https://misskey.example.com"}
+
+	for name, tc := range map[string]struct {
+		column int
+		want   float64
+	}{
+		"列が未設定 (0) なら 1": {0, 1},
+		"設定値をそのまま":       {5, 5},
+		"範囲外は 20 に丸める":   {999, 20},
+	} {
+		t.Run(name, func(t *testing.T) {
+			ssr := buildSSRMetaKeys(t, cfg, &model.Meta{ID: "x", MinimumUsernameLength: tc.column})
+			require.Equal(t, tc.want, ssr["minimumUsernameLength"])
+		})
+	}
+}

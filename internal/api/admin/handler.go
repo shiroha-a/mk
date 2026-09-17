@@ -880,7 +880,10 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 		}
 	}
 
-	result, err := h.signupService.Signup(req.Username, req.Password, isInitialSetup)
+	// **admin は最小文字数の制限を受けない (#3015)。** 運営が公式アカウントに
+	// 短い ID を配れるようにするため。`preservedUsernames` は引き続き効くので、
+	// 「予約は効くが最小長は効かない」という非対称になる。
+	result, err := h.signupService.Signup(req.Username, req.Password, isInitialSetup, signup.UsernamePolicyOperator)
 	if err != nil {
 		if err == signup.ErrUsernameAlreadyExists {
 			return c.JSON(http.StatusConflict, apierr.Error("USERNAME_ALREADY_EXISTS", "Username already exists.", "0a504947-b888-4a99-9f62-8c4a0f3a3dab"))
@@ -1490,6 +1493,7 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"bannedEmailDomains":           m.BannedEmailDomains,
 		"mediaSilencedHosts":           m.MediaSilencedHosts,
 		"preservedUsernames":           m.PreservedUsernames,
+		"minimumUsernameLength":        m.MinimumUsernameLength,
 		"prohibitedWordsForNameOfUser": m.ProhibitedWordsForNameOfUser,
 		"deliverSuspendedSoftware":     metaJSONValue(m.DeliverSuspendedSoftware, []any{}),
 		"verifymailAuthKey":            m.VerifymailAuthKey, "truemailAuthKey": m.TruemailAuthKey, "truemailInstance": m.TruemailInstance,
@@ -1787,6 +1791,12 @@ var updateMetaNumericMinimums = map[string]float64{
 var updateMetaNumericRanges = map[string]struct{ min, max float64 }{
 	"chunkedUploadChunkSizeMb":       {coredrive.MinChunkSizeMb, coredrive.MaxChunkSizeMb},
 	"chunkedUploadSessionTtlMinutes": {coredrive.MinSessionTTLMinutes, coredrive.MaxSessionTTLMinutes},
+	// 最小文字数 (#3015)。**上限は `localUsernamePattern` の 20 と揃える** —
+	// 21 以上を書けると、どの username も format 検証で先に落ちるので
+	// 登録が全滅する。0 以下も列の既定 (1) と食い違うので弾く。
+	// service 側にも clamp があるが、**壊れた値を DB に書かせない**のが
+	// ここの役割 (silent fallback で admin の意図と乖離するのを防ぐ、#1108)。
+	"minimumUsernameLength": {float64(signup.MinUsernameLength), float64(signup.MaxUsernameLength)},
 }
 
 // validateUpdateMetaNumericRanges rejects integer columns outside their
