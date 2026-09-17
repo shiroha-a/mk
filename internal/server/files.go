@@ -52,10 +52,18 @@ func storableAccessKey(key string) bool {
 // Misskey TS から S3 移行する前にアップロードされた drive_file 行は
 // `storedInternal=true` のままローカル FS に残っており、TS upstream の
 // FileServerService も storedInternal を見て storage を切り替える。同じ挙動に
-// 合わせるため、DB を引いて storedInternal=true なら local を、それ以外
-// (= 行が無い・ false / lookup 自体が unwired) は primary を使う (#1414)。
+// 合わせるため、DB を引いて storedInternal=true なら local を、false なら
+// primary を使う (#1414)。
 //
-// lookup == nil もしくは DB error 時は primary に倒す。
+// **行が無ければ 404、lookup が落ちたら 500 (#3037)。** 以前は「行が無い /
+// DB error / lookup 未配線」をまとめて primary に倒していたが、それだと
+// `drive_file` 行を確認せず実体を配ることになる (削除したのに実体が残って
+// いると、URL を知っている人には削除が効かない)。lookup == nil のときだけは
+// 従来どおり primary に倒す (配線していない構成の最低保証)。
+//
+// **#2315 の「primary がローカルなら DB を引かない」は撤回した。**
+// storedInternal の判定だけなら確かに無意味だが、**行があるかどうかの判定**は
+// 無意味ではない。
 //
 // **ストレージ側の失敗は種別で分ける。** `ErrObjectNotFound` だけが 404 で、
 // それ以外 (S3 の認証失効 / throttling / 5xx / FS の I/O エラー) は 500。
