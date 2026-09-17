@@ -194,6 +194,10 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 //
 // **magic bytes だけで見る。** `image.DecodeConfig` に判定させると、その
 // 判定自体が wasm を起動してしまう (塞ごうとしている経路そのもの)。
+func usesSandboxedDecoder(data []byte) bool {
+	return isISOBMFFImage(data) || isJPEGXL(data) || isWebP(data)
+}
+
 // ExceedsSandboxedDecoderSize reports whether data would be refused by
 // DecodeWithPixelCap purely because of its encoded size.
 //
@@ -205,10 +209,6 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 // ように、判定だけを切り出してある。
 func ExceedsSandboxedDecoderSize(data []byte) bool {
 	return len(data) > SandboxedDecoderMaxBytes && usesSandboxedDecoder(data)
-}
-
-func usesSandboxedDecoder(data []byte) bool {
-	return isISOBMFFImage(data) || isJPEGXL(data) || isWebP(data)
 }
 
 // sandboxedISOBMFFBrands are the `ftyp` major brands decoded by gen2brain/avif

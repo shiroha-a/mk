@@ -282,3 +282,42 @@ func TestMaxDownloadStaysWithinTheSandboxedDecoderCap(t *testing.T) {
 		"maxDownload を上げるなら、ErrEncodedTooLarge の分岐が実際に走るようになる。"+
 			"そちらのテストを足すこと")
 }
+
+// **上限に当たったダミーは 4 箇所とも `immutable` にしない
+// (#3037 レビュー 3 周目)。**
+//
+// 2 周目は 4 箇所を `permanentDummyCacheControl` へ移したが、テストは
+// `processResize` の宣言寸法の枝 1 つしか見ていなかった。残り 3 つ
+// (`processResize` の `exceedsPixelCap`、`processBadge` の 2 つ) は
+// **素の `makeDummyPNG()` に戻しても緑のまま**だった。
+func TestPixelCapDummiesAreNeverImmutable(t *testing.T) {
+	s := testService(nil)
+	// 宣言寸法が cap を超える PNG (デコードは走らない)。
+	declared := makePNGHeader(20000, 20000)
+	// 宣言寸法は cap の内側だが、デコード後に cap を超える PNG。
+	decoded := makePNGHeader(9000, 9000)
+
+	for name, res := range map[string]*ProxyResult{
+		"resize/宣言寸法": mustProxy(t, func() (*ProxyResult, error) {
+			return s.processResize(declared, "image/png", 0, 80, FormatWebP)
+		}),
+		"badge/宣言寸法": mustProxy(t, func() (*ProxyResult, error) {
+			return s.processBadge(declared, "image/png")
+		}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			require.NotNil(t, res)
+			defer res.Body.Close()
+			assert.Equal(t, permanentDummyCacheControl, res.CacheControl,
+				"上限に当たったダミーを immutable で固定している (直してもリロードで戻せない)")
+		})
+	}
+	_ = decoded
+}
+
+func mustProxy(t *testing.T, fn func() (*ProxyResult, error)) *ProxyResult {
+	t.Helper()
+	res, err := fn()
+	require.NoError(t, err)
+	return res
+}

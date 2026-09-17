@@ -350,7 +350,10 @@ func TestVideoProcessor_ScalesBeforeReadingTheFrame(t *testing.T) {
 	// **長辺の値まで固定する。** ここを 16384 に変えても 8K のフレームは
 	// そのまま出るので、「-vf がある」だけ見る形ではテストが空虚になる
 	// (#3037 レビュー 2 周目で実測)。
-	assert.Contains(t, vf, "1280", "長辺の上限が変わっている")
+	// **`Contains` では弱い (#3037 レビュー 3 周目)。** `1280` を `12800` に
+	// 変えても部分一致で通ってしまう。長辺を両軸ぶん固定する。
+	assert.Contains(t, vf, "min(1280\\,iw)", "幅の上限が変わっている")
+	assert.Contains(t, vf, "min(1280\\,ih)", "高さの上限が変わっている")
 
 	// **`min()` で包んでいること。** `force_original_aspect_ratio=decrease` は
 	// 箱に内接させるので、これが無いと**小さい動画が拡大される**
