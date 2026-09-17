@@ -666,7 +666,7 @@ func (s *Service) PromotePending(code string) (*SignupResult, error) {
 // **承認制は「承認を経ていないローカルアカウントは存在しない」ことの主張。**
 // 申請に紐付かない `user_pending` は #2576 の確定処理を通らないので、ゲートが
 // 無いと承認を経ずにアカウントになる。`PendingSignupTTL` は 30 分なので、承認制へ
-// 切り替える直前 24 時間に発行された確認メールがそのまま通っていた。窓が開くのは
+// 切り替える直前 30 分に発行された確認メールがそのまま通っていた。窓が開くのは
 // 切り替え**前**に `emailRequiredForSignup` が ON だった構成だけ (OFF なら
 // `/api/signup` が即座にアカウントを作るので待ち行列が無い)。
 //
@@ -680,7 +680,9 @@ func (s *Service) PromotePending(code string) (*SignupResult, error) {
 // **meta が読めなければ通さない。** 既存の username 検査は読めなければ素通しするが、
 // ゲートで同じ形にすると DB 障害が承認の迂回路になる。error はそのまま返して
 // ErrApplicationNotApproved に丸めない — DB 障害をドメインの答えに化けさせない
-// (#2799)。確認コードは 24 時間有効なままなので復旧後にやり直せる。
+// (#2799)。**障害が 30 分 (`PendingSignupTTL`) を超えると確認リンクは失効する**
+// ので「復旧後にやり直せる」とは限らないが、結論は変わらない — 承認を経ない
+// アカウントを作るより、申請からやり直してもらうほうがよい。
 func (s *Service) checkApprovalGate(pending *model.UserPending) error {
 	if pending.SignupApplicationID != nil {
 		// 本番経路 (promotePendingTx) は settleApplicationTx で申請を確定させる

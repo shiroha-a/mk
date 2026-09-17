@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,6 +194,18 @@ func (f *fakePendingPruner) DeleteOlderThan(thresholdID string) (int64, error) {
 	f.called = true
 	f.gotThreshold = thresholdID
 	return 3, f.err
+}
+
+// **掃除の猶予は `PendingSignupTTL` より長いこと (#3037 レビュー)。**
+//
+// `clean.go` のコメントは「短すぎると昇格できるはずの行を掃除が先に消す競合が
+// 生まれる」と書いているが、それを固定するものが無かった。
+// `TestClean_RunsAllSubtasks` の `WithinDuration` は同じ定数どうしの比較なので
+// **恒真**で、10 分に下げても緑のまま通る (その場合、有効な確認リンクが
+// `EXPIRED` ではなく `NO_SUCH_CODE` で死ぬ)。
+func TestPendingSignupRetentionOutlivesTheTTL(t *testing.T) {
+	assert.Greater(t, pendingSignupRetention, signup.PendingSignupTTL,
+		"掃除の猶予が確認リンクの寿命を下回っている")
 }
 
 func TestClean_RunsAllSubtasks(t *testing.T) {

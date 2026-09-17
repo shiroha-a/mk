@@ -119,13 +119,19 @@ func TestCheckRootUser(t *testing.T) {
 
 	// **読めないときは fail。** 「未設定」と区別が付かないので、判定できない
 	// ことを ok に倒さない。
+	//
+	// **DDL で再現しない (#3037 レビュー)。** `ALTER TABLE meta RENAME` は
+	// このパッケージの schema を書き換えるので、テストが途中で死ぬと
+	// `meta` の無い schema が残る。`ApplyMigrations` は台帳を見て作り直さない
+	// ため、以後このパッケージは永久に落ちる (CLAUDE.md §4 / #2756)。
+	// 閉じた接続を渡せば同じ枝を踏めて、共有状態に触らない。
 	t.Run("meta を読めないなら fail", func(t *testing.T) {
-		broken := testutil.MustOpenTestDB()
-		testutil.ApplyMigrations(broken)
-		require.NoError(t, broken.Exec(`ALTER TABLE meta RENAME TO meta_selfcheck_tmp`).Error)
-		t.Cleanup(func() { broken.Exec(`ALTER TABLE meta_selfcheck_tmp RENAME TO meta`) })
+		closed := testutil.MustOpenTestDB()
+		sqlDB, err := closed.DB()
+		require.NoError(t, err)
+		require.NoError(t, sqlDB.Close())
 
-		got := CheckRootUser(context.Background(), LocalDeps{DB: broken})
+		got := CheckRootUser(context.Background(), LocalDeps{DB: closed})
 		assert.Equal(t, StatusFail, got.Status)
 	})
 }
