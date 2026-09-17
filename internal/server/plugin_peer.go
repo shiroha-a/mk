@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -109,10 +111,20 @@ type peerActorResolver interface {
 	PublicKeyForKeyID(actorID, keyID string) (string, error)
 }
 
-// peerHostBlocker mirrors the federation policy checks used by the inbox.
+// peerHostBlocker mirrors the federation policy checks used by the inbox and
+// the deliver queue.
+//
+// **受信と送信で見るものが違う。** AP もそうなっている —
+// `internal/api/inbox` は `IsBlocked || !IsAllowed` だけを見るが、deliver は
+// `ShouldSkipDelivery` を通すので `instance.suspensionState` も効く。peer も
+// 同じ分け方にする (以前は送信側も受信側の判定を使っていたので、**停止した
+// インスタンスへ署名付きの peer 送信が飛び続けていた**)。
 type peerHostBlocker interface {
 	IsBlocked(host string) bool
 	IsAllowed(host string) bool
+	// ShouldSkipDelivery reports whether outbound delivery to host must stop.
+	// blockedHosts / federation モードに加えて suspensionState も見る。
+	ShouldSkipDelivery(host string) bool
 }
 
 // peerSigner provides the instance actor key used to sign outgoing requests.
@@ -228,7 +240,7 @@ func (p *pluginPeer) Has(ctx context.Context, host string) (bool, error) {
 	if host == "" || host == p.deps.selfHost {
 		return false, nil
 	}
-	if p.blocked(host) {
+	if p.skipDelivery(host) {
 		return false, nil
 	}
 	if p.deps.remote == nil {
@@ -261,7 +273,7 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 	if host == p.deps.selfHost {
 		return "", fmt.Errorf("plugin peer: 自分自身には送れません")
 	}
-	if p.blocked(host) {
+	if p.skipDelivery(host) {
 		return "", fmt.Errorf("plugin peer: %s はブロックされています", host)
 	}
 	ok, err := p.Has(ctx, host)
@@ -295,11 +307,25 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 	return sendID, nil
 }
 
+// blocked reports whether an **inbound** peer request from host must be
+// refused. AP の inbox と同じ判定。
 func (p *pluginPeer) blocked(host string) bool {
 	if p.deps.blocker == nil {
 		return false
 	}
 	return p.deps.blocker.IsBlocked(host) || !p.deps.blocker.IsAllowed(host)
+}
+
+// skipDelivery reports whether **outbound** peer traffic to host must stop.
+//
+// AP の deliver と同じく `ShouldSkipDelivery` を通すので、blockedHosts と
+// federation モードに加えて `instance.suspensionState` も効く。運営者が
+// 相手を停止しても peer だけ飛び続ける、という状態を作らない。
+func (p *pluginPeer) skipDelivery(host string) bool {
+	if p.deps.blocker == nil {
+		return false
+	}
+	return p.deps.blocker.ShouldSkipDelivery(host)
 }
 
 // peerEnvelope wraps the plugin's payload with the correlation id.
@@ -356,7 +382,7 @@ func (p *pluginPeer) deliverOnce(job peerJob) error {
 	// バックオフ 60 秒・queue の一時停止・再起動が挟まる。その間にブロック
 	// しても、積み済みのジョブは署名付きで飛んでしまう (AP の deliver が
 	// #1404 で同じ穴を塞いでいる)。
-	if p.blocked(job.Host) {
+	if p.skipDelivery(job.Host) {
 		p.logger.Warn("peer の送信を取りやめました (ブロック済み)", "host", job.Host, "id", job.SendID)
 		return fmt.Errorf("%w: %s はブロックされています", driver.SkipRetry, job.Host)
 	}
@@ -619,6 +645,13 @@ var peerHostPattern = regexp.MustCompile(
 //
 // SSRF 自体は outbound が safehttp なので塞がっている。ここで防ぐのは、意図
 // しない**公開**ホストへ署名付きのリクエストを送ってしまうこと。
+//
+// **既定ポートは剥がす。** `idnhost.HostPort` が「これが authority の正規形を
+// 作る唯一の規則」と宣言しているのに、peer だけ剥がしていなかった。
+// `HostMatchesAny` は `"." + host` の suffix 一致なので、`blocked.example:443`
+// は `blocked.example` というブロック指定に**当たらない** — 同じ authority の
+// 別綴りを 1 つ足すだけでブロックをすり抜けられた。非既定ポート (`:8443`) は
+// 別ホストのまま残す (upstream も同じ)。
 func normalizePeerHost(host string) string {
 	host = strings.TrimSpace(host)
 	host = strings.TrimPrefix(host, "https://")
@@ -628,7 +661,10 @@ func normalizePeerHost(host string) string {
 	if !peerHostPattern.MatchString(host) {
 		return ""
 	}
-	return host
+	// **形を確かめてから正規化する。** `url.URL` に食わせる前にパターンで
+	// 絞っておけば、`Hostname()` / `Port()` の解釈に揺れが入らない。peer は
+	// 常に https で送る (`peerURL` の既定) ので scheme も固定でよい。
+	return idnhost.HostPort(&url.URL{Scheme: "https", Host: host})
 }
 
 // apiCatchall answers requests to /api paths that no route claimed.

@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/plugin"
 )
 
@@ -44,6 +45,9 @@ type fakePeerBlocker struct {
 	blocked map[string]bool
 	// allowOnly, when non-empty, mimics federation=specified.
 	allowOnly map[string]bool
+	// suspended mimics instance.suspensionState != none. **受信では効かない** —
+	// 本物の `ShouldSkipDelivery` だけがこれを見る。
+	suspended map[string]bool
 }
 
 func (b *fakePeerBlocker) IsBlocked(host string) bool { return b.blocked[host] }
@@ -52,6 +56,12 @@ func (b *fakePeerBlocker) IsAllowed(host string) bool {
 		return true
 	}
 	return b.allowOnly[host]
+}
+
+// ShouldSkipDelivery mirrors instance.Service: blockedHosts / federation モード
+// に加えて suspensionState も見る。
+func (b *fakePeerBlocker) ShouldSkipDelivery(host string) bool {
+	return b.blocked[host] || !b.IsAllowed(host) || b.suspended[host]
 }
 
 type fakePeerLister struct {
@@ -438,3 +448,84 @@ func TestPluginPeer_DeliverURLAndRoundTrip(t *testing.T) {
 type fakePeerSigner struct{ key *activitypub.PrivateKey }
 
 func (s *fakePeerSigner) Signer() (*activitypub.PrivateKey, error) { return s.key, nil }
+
+// **停止したインスタンスへ送らない (#3037)。** AP の deliver は
+// `ShouldSkipDelivery` を通すので `instance.suspensionState` が効くが、peer は
+// 受信側と同じ `IsBlocked || !IsAllowed` を使っていたため、運営者が相手を停止
+// しても peer だけ署名付きで飛び続けていた。
+func TestPluginPeer_SendSkipsSuspendedInstance(t *testing.T) {
+	blocker := &fakePeerBlocker{suspended: map[string]bool{"dead.example": true}}
+	p := testPeer(t, &pluginPeerDeps{
+		blocker: blocker,
+		remote:  &fakePeerLister{byHost: map[string][]string{"dead.example": {"demo"}}},
+	})
+
+	_, err := p.Send(context.Background(), "dead.example", map[string]any{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ブロック")
+
+	got, err := p.Has(context.Background(), "dead.example")
+	require.NoError(t, err)
+	assert.False(t, got, "停止した相手には nodeinfo も引きに行かない")
+}
+
+// dispatch 時にも見る。積んでから飛ぶまでの間に停止されたジョブを止める。
+func TestPluginPeer_DeliverOnceSkipsSuspendedInstance(t *testing.T) {
+	p := testPeer(t, &pluginPeerDeps{
+		blocker: &fakePeerBlocker{suspended: map[string]bool{"dead.example": true}},
+		// **client は渡さない。** ガードが効いていなければ nil client で
+		// panic するので、素通りが「たまたま成功」に化けない。
+		urlFor: func(host, plugin string) string { return "https://" + host + "/x" },
+	})
+
+	err := p.deliverOnce(peerJob{Host: "dead.example", SendID: "id1", Envelope: []byte(`{}`)})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, driver.SkipRetry, "恒久的な失敗なので再試行させない")
+}
+
+// **受信は停止状態を見ない。** AP の inbox も見ないので揃える。相手を停止して
+// いても、向こうから届いたものは (ブロックしていない限り) 受ける。
+func TestPluginPeer_InboundIgnoresSuspension(t *testing.T) {
+	p := testPeer(t, &pluginPeerDeps{
+		blocker: &fakePeerBlocker{suspended: map[string]bool{"dead.example": true}},
+	})
+
+	assert.False(t, p.blocked("dead.example"), "受信側で停止状態を見てしまっている")
+	assert.True(t, p.skipDelivery("dead.example"), "送信側で停止状態を見ていない")
+}
+
+// **既定ポートは剥がす。** `HostMatchesAny` は `"." + host` の suffix 一致なので、
+// `blocked.example:443` は `blocked.example` というブロック指定に当たらない。
+// 剥がさないと、同じ authority の別綴りを 1 つ足すだけでブロックをすり抜けられる。
+func TestNormalizePeerHost_StripsDefaultPort(t *testing.T) {
+	for in, want := range map[string]string{
+		"blocked.example:443":         "blocked.example",
+		"https://blocked.example:443": "blocked.example",
+		"BLOCKED.example:443":         "blocked.example",
+		// 非既定ポートは別ホストのまま残す (upstream も同じ)。
+		"blocked.example:8443": "blocked.example:8443",
+		"blocked.example:80":   "blocked.example:80",
+		"blocked.example":      "blocked.example",
+	} {
+		assert.Equal(t, want, normalizePeerHost(in), in)
+	}
+}
+
+// 正規化が効いていることを、ブロック判定まで通して見る。
+//
+// **`normalizePeerHost` の単体テストだけでは足りない** — 呼び忘れた経路が
+// あれば同じ穴が残る。
+func TestPluginPeer_SendRefusesBlockedHostWithDefaultPort(t *testing.T) {
+	p := testPeer(t, &pluginPeerDeps{
+		blocker: &fakePeerBlocker{blocked: map[string]bool{"bad.example": true}},
+		remote:  &fakePeerLister{byHost: map[string][]string{"bad.example": {"demo"}}},
+	})
+
+	_, err := p.Send(context.Background(), "bad.example:443", map[string]any{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "ブロック")
+
+	got, err := p.Has(context.Background(), "bad.example:443")
+	require.NoError(t, err)
+	assert.False(t, got)
+}
