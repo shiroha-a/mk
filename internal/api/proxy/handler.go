@@ -180,6 +180,42 @@ func (h *Handler) Handle(c echo.Context) error {
 			// 利用者が自分で切ったものは 502 ではなく 499 が正しい。
 			return c.NoContent(statusClientClosedRequest)
 		}
+		if errors.Is(err, mediaproxy.ErrTargetBlocked) {
+			// **502 にしない (#3037)。** 相手が落ちているのではなく、
+			// こちらが遮断した。502 だと監視で「相手インスタンスが落ちている」
+			// と読める。
+			//
+			// **キャッシュは 502 のときと同じ 5 分のまま。** SSRF の可否は
+			// 毎リクエストの DNS 解決で決まるので恒久的ではない (詳細は
+			// `mediaproxy.ErrTargetBlocked` の GoDoc)。変えるのは status とログだけ。
+			//
+			// **`Authorize` 失敗の 403 と同じ status だが、こちらはログを出す。**
+			// 合流させると監視で「allowlist に無い」と「private IP を遮断した」が
+			// 区別できない。Error ではなく Warn — 設定どおりに働いた結果で、
+			// 運用者が直すべき障害ではない。
+			//
+			// **未認証の利用者がこのログを任意に生成できる。** `/proxy/*` は
+			// `api` グループの外でレートリミットが無く、allowlist 済みの URL が
+			// private IP へ 302 するだけでここに来る (allowlist の列は連合相手が
+			// 埋められる)。それでも Warn で残すのは、(a) 5xx を作らないので
+			// 可用性の監視を汚さない、(b) 1 リクエスト 1 行でローテーションは
+			// #2828 で効いている、(c) ここを消すと `Authorize` の 403 と
+			// 区別する手段が無くなる、の 3 点による。障害が長引く構成では
+			// サンプリングを検討すること (#3032 の shed ログと同じ判断)。
+			//
+			// **`errors.Unwrap` を使わない。** `fetchRemote` は `%w` を 2 つ
+			// 使うので、返る型が実装するのは `Unwrap() []error` のほう。
+			// `errors.Unwrap` は `Unwrap() error` しか呼ばないので **本番では
+			// nil になり、safehttp 側のメッセージが丸ごと消える** (1 周目の
+			// 「message と err が重複する」という指摘に応えて入れたが、
+			// 2 周目で実測して戻した)。
+			slog.Warn("mediaproxy: blocked target", "url", rawURL, "err", err)
+			if c.QueryParam("fallback") != "" {
+				return h.serveFallback(c)
+			}
+			c.Response().Header().Set("Cache-Control", "max-age=300")
+			return c.NoContent(http.StatusForbidden)
+		}
 		if errors.Is(err, mediaproxy.ErrUpstreamUnavailable) {
 			// **404 にしない (#3034)。** リモートが「無い」と言ったわけでは
 			// なく、こちらが取れなかっただけなので、復旧すれば同じ URL が

@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"testing"
 
@@ -12,6 +14,7 @@ import (
 
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/core/mediaproxy"
+	"github.com/shiroha-a/mk/internal/safehttp"
 )
 
 // 過負荷で落とした応答の wire 上の形を固定する (#3032)。
@@ -347,6 +350,111 @@ func TestHandle_CancelDuringAuthorizeIsClientClosed(t *testing.T) {
 
 	assert.Equal(t, statusClientClosedRequest, rec.Code)
 	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code)
+}
+
+// blockedErr builds the error shape `fetchRemote` actually produces.
+//
+// **`%w` を 2 つ使うのが要点。** stub を 1 つで作ると `errors.Unwrap` が
+// 動いてしまい、本番では nil になる書き方を検出できない (2 周目で実測)。
+func blockedErr() error {
+	cause := fmt.Errorf("Get %q: %w", "http://10.0.0.1/a.png", safehttp.ErrSSRFBlocked)
+	return fmt.Errorf("%w: %w", mediaproxy.ErrTargetBlocked, cause)
+}
+
+// SSRF ガードが遮断した要求は 403 + 5 分 (#3037)。
+//
+// **#3034 で service 側だけ分けて handler に受け口を作らず、500 に落ちる
+// 状態を作った。** その失敗を繰り返さないために、写像と対でここに置く。
+func TestHandle_BlockedTargetIsForbidden(t *testing.T) {
+	h, e := stubHandler(t, blockedErr())
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=http%3A%2F%2F10.0.0.1%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.NotEqual(t, http.StatusBadGateway, rec.Code,
+		"こちらが遮断した事実を相手の障害として返している")
+	// **502 のときと同じ 5 分。** SSRF の可否は毎リクエストの DNS 解決で
+	// 決まるので恒久的ではない — 1 日にすると #2913 (403 が 1 日キャッシュ
+	// されてアイコンが 1 日壊れた) の窓を 288 倍に広げる。
+	assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
+	assert.NotEqual(t, "max-age=86400", rec.Header().Get("Cache-Control"))
+}
+
+func TestHandle_BlockedTargetWithFallbackIsShortCached(t *testing.T) {
+	h, e := stubHandler(t, blockedErr())
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&fallback=1&url=http%3A%2F%2F10.0.0.1%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "image/png", rec.Header().Get("Content-Type"))
+	// **名乗っている性質を固定する。** これが無いと `no-store` に変える変異が
+	// 素通りする (レビューで実測)。
+	assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
+}
+
+// 遮断の事実がログに残ること (#3037)。
+//
+// **`Authorize` 失敗の 403 と同じ status なので、ログが唯一の区別手段。**
+// 合流させると監視で「allowlist に無い」と「private IP を遮断した」が
+// 区別できない。Error ではなく Warn — 設定どおりに働いた結果で、運用者が
+// 直すべき障害ではない。
+func TestHandle_BlockedTargetIsLogged(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	h, e := stubHandler(t, blockedErr())
+	doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=http%3A%2F%2F10.0.0.1%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	out := buf.String()
+	// **`msg=` まで含めて固定する。** 部分一致だと `err` の中身に同じ文字列が
+	// 入っているせいで、message を変える変異が素通りする (2 周目で実測)。
+	assert.Contains(t, out, `msg="mediaproxy: blocked target"`)
+	// **属性の形まで固定する。** `"err", err` に戻したことで err の文字列にも
+	// URL が入るようになり、`"url", rawURL` を丸ごと落とす変異が素通りする
+	// ようになっていた (3 周目で実測)。構造化ログのクエリは err の中身では
+	// なく `url` キーを引くので、属性を固定する価値がある。
+	assert.Contains(t, out, "url=http://10.0.0.1/a.png",
+		"遮断した URL が url 属性に出ていない")
+	assert.Contains(t, out, "level=WARN", "Error で出している (設定どおりの動作なので Warn)")
+	// **原因が本番でも残ること。** `errors.Unwrap` を使うと `%w` 2 つの
+	// error では nil になり、safehttp 側のメッセージが丸ごと消える。
+	assert.Contains(t, out, "connection to private IP blocked",
+		"遮断の理由がログから消えている")
+
+	// **`Authorize` 失敗の 403 はログを出さない** (区別できること)。
+	buf.Reset()
+	h2, e2 := stubHandler(t, nil)
+	h2.service = stubProxy{authErr: mediaproxy.ErrUnauthorized}
+	doRequest(e2, h2, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=http%3A%2F%2F10.0.0.1%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+	assert.NotContains(t, buf.String(), "blocked target",
+		"allowlist 外の 403 が遮断として記録されている")
+}
+
+// リモートの一時障害は従来どおり 502 (#3037)。
+//
+// **既存テストと重複している。** 「全部 403 にする」変異は
+// `TestHandle_PathBasedURL` / `...IsBadGatewayWithShortCache` /
+// `...UpstreamTimeoutIsGatewayTimeout` の 3 本も落とす (実測)。それでも残すのは、
+// #3037 が**何を変えていないか**を `ErrTargetBlocked` の 3 本と並べて読めるようにするため。
+func TestHandle_UpstreamUnavailableIsNotForbidden(t *testing.T) {
+	h, e := stubHandler(t, fmt.Errorf("%w: dial tcp: connection refused", mediaproxy.ErrUpstreamUnavailable))
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
 }
 
 // Service が MediaProxy を満たしていること。
