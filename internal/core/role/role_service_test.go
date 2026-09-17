@@ -2217,3 +2217,126 @@ func TestIsAdministrator_MetaUnavailableFallsBackToIsRoot(t *testing.T) {
 
 	assert.True(t, svc.IsAdministrator("alice"))
 }
+
+// **自己付与できる管理者ロールを作らせない (#3037)。**
+func TestCreate_RejectsSelfGrantableConditionalPrivilege(t *testing.T) {
+	svc, _, _, _ := newTestService(t)
+
+	for _, tt := range []struct {
+		name    string
+		opts    role.CreateOptions
+		wantErr bool
+	}{
+		{
+			name: "条件つき + 管理者 + isCat",
+			opts: role.CreateOptions{
+				Target: model.RoleTargetConditional, IsAdministrator: true,
+				CondFormula: datatypes.JSON(`{"type":"isCat"}`),
+			},
+			wantErr: true,
+		},
+		{
+			name: "条件つき + モデレーター + 入れ子の isBot",
+			opts: role.CreateOptions{
+				Target: model.RoleTargetConditional, IsModerator: true,
+				CondFormula: datatypes.JSON(`{"type":"and","values":[{"type":"isLocal"},{"type":"isBot"}]}`),
+			},
+			wantErr: true,
+		},
+		{
+			// **読めない式は判定できない。** ここで通すと壊れた JSON を
+			// 送るだけで検査を迂回できる。
+			name: "条件つき + 管理者 + 壊れた式",
+			opts: role.CreateOptions{
+				Target: model.RoleTargetConditional, IsAdministrator: true,
+				CondFormula: datatypes.JSON(`{`),
+			},
+			wantErr: true,
+		},
+		{
+			// 本人の操作では満たせない条件は運営者の明示的な判断。
+			name: "条件つき + 管理者 + createdMoreThan",
+			opts: role.CreateOptions{
+				Target: model.RoleTargetConditional, IsAdministrator: true,
+				CondFormula: datatypes.JSON(`{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":31536000}]}`),
+			},
+		},
+		{
+			// 手動ロールは条件で配らないので対象外。
+			name: "手動 + 管理者 + isCat",
+			opts: role.CreateOptions{
+				Target: model.RoleTargetManual, IsAdministrator: true,
+				CondFormula: datatypes.JSON(`{"type":"isCat"}`),
+			},
+		},
+		{
+			// 権限を持たない条件つきロールは従来どおり。
+			name: "条件つき + 権限なし + isCat",
+			opts: role.CreateOptions{
+				Target:      model.RoleTargetConditional,
+				CondFormula: datatypes.JSON(`{"type":"isCat"}`),
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := svc.Create(tt.name, "", tt.opts)
+			if tt.wantErr {
+				assert.ErrorIs(t, err, role.ErrSelfGrantablePrivilege)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// **更新後の姿で判定する。** 「条件つきに変える」「管理者を立てる」
+// 「条件を差し替える」のどれ 1 つを送っても組み合わせは作れる。
+func TestUpdateFields_RejectsSelfGrantableConditionalPrivilege(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		stored  *model.Role
+		fields  map[string]any
+		wantErr bool
+	}{
+		{
+			name:    "管理者だけを立てる",
+			stored:  &model.Role{ID: "r", Target: model.RoleTargetConditional, CondFormula: datatypes.JSON(`{"type":"isCat"}`)},
+			fields:  map[string]any{"isAdministrator": true},
+			wantErr: true,
+		},
+		{
+			name:    "条件つきに変える",
+			stored:  &model.Role{ID: "r", Target: model.RoleTargetManual, IsAdministrator: true, CondFormula: datatypes.JSON(`{"type":"isCat"}`)},
+			fields:  map[string]any{"target": string(model.RoleTargetConditional)},
+			wantErr: true,
+		},
+		{
+			name:    "条件を差し替える",
+			stored:  &model.Role{ID: "r", Target: model.RoleTargetConditional, IsModerator: true, CondFormula: datatypes.JSON(`{"type":"isLocal"}`)},
+			fields:  map[string]any{"condFormula": datatypes.JSON(`{"type":"isBot"}`)},
+			wantErr: true,
+		},
+		{
+			name:   "権限を下ろせば通る",
+			stored: &model.Role{ID: "r", Target: model.RoleTargetConditional, IsAdministrator: true, CondFormula: datatypes.JSON(`{"type":"isCat"}`)},
+			fields: map[string]any{"isAdministrator": false},
+		},
+		{
+			name:   "無関係な更新",
+			stored: &model.Role{ID: "r", Target: model.RoleTargetConditional, CondFormula: datatypes.JSON(`{"type":"isCat"}`)},
+			fields: map[string]any{"name": "new"},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, roleRepo, _, _ := newTestService(t)
+			roleRepo.Roles["r"] = tt.stored
+
+			_, err := svc.UpdateFields("r", tt.fields)
+			if tt.wantErr {
+				assert.ErrorIs(t, err, role.ErrSelfGrantablePrivilege)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}

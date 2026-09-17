@@ -400,3 +400,46 @@ func TestCondFormula_UnmarshalErrors(t *testing.T) {
 	// numeric comparator に文字列が来た場合も error。
 	require.Error(t, json.Unmarshal([]byte(`{"type":"followersMoreThanOrEq","value":"abc"}`), &f))
 }
+
+// **本人が満たせる条件で管理者を配れないこと (#3037)。**
+//
+// 管理画面は条件を並べるだけなので、`isCat` にチェックを入れた管理者ロールを
+// 作るのは操作としては簡単だが、そのロールは**「猫と名乗る」だけで誰でも
+// 取れる**。作った側は「条件を満たす人に配る」つもりで、「誰でも自分で
+// 満たせる条件」だとは気付きにくい。
+func TestCondDependsOnUserControlledValue(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		// 本人が切り替えられる / 積み上げられる。
+		{"isCat", `{"type":"isCat"}`, true},
+		{"isBot", `{"type":"isBot"}`, true},
+		{"isLocked", `{"type":"isLocked"}`, true},
+		{"isExplorable", `{"type":"isExplorable"}`, true},
+		{"notesMoreThanOrEq", `{"type":"notesMoreThanOrEq","value":10}`, true},
+		{"followersMoreThanOrEq", `{"type":"followersMoreThanOrEq","value":10}`, true},
+		{"followingLessThanOrEq", `{"type":"followingLessThanOrEq","value":10}`, true},
+		// 本人の操作では変えられない。
+		{"isLocal", `{"type":"isLocal"}`, false},
+		{"isRemote", `{"type":"isRemote"}`, false},
+		{"isSuspended", `{"type":"isSuspended"}`, false},
+		{"createdMoreThan", `{"type":"createdMoreThan","sec":3600}`, false},
+		{"roleAssignedTo", `{"type":"roleAssignedTo","roleId":"r1"}`, false},
+		// **入れ子も見る。** and / or / not のどこかにあれば同じこと。
+		{"and の中", `{"type":"and","values":[{"type":"isLocal"},{"type":"isCat"}]}`, true},
+		{"or の中", `{"type":"or","values":[{"type":"isCat"}]}`, true},
+		{"not の中", `{"type":"not","value":{"type":"isCat"}}`, true},
+		{"深い入れ子", `{"type":"and","values":[{"type":"or","values":[{"type":"not","value":{"type":"isBot"}}]}]}`, true},
+		{"入れ子だが全部安全", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":1}]}`, false},
+		// 未知の type は「本人が満たせる」側には数えない (評価も false に倒れる)。
+		{"未知の type", `{"type":"somethingNew"}`, false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var f CondFormula
+			require.NoError(t, json.Unmarshal([]byte(tt.raw), &f))
+			assert.Equal(t, tt.want, CondDependsOnUserControlledValue(f))
+		})
+	}
+}

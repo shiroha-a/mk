@@ -207,3 +207,50 @@ func evalCondAt(user *model.User, assignedRoles []*model.Role, formula CondFormu
 		return false
 	}
 }
+
+// userControlledCondTypes are the conditions a user can satisfy by themselves.
+//
+// **本人が切り替えられる / 積み上げられる値だけを挙げる (#3037)。**
+// `isLocal` / `isRemote` / `isSuspended` / `createdLessThan` /
+// `createdMoreThan` / `roleAssignedTo` は本人の操作では変えられない
+// (`isSuspended` はモデレーターが決める)。
+var userControlledCondTypes = map[CondFormulaType]struct{}{
+	// プロフィール設定のトグル。
+	CondTypeIsLocked:     {},
+	CondTypeIsBot:        {},
+	CondTypeIsCat:        {},
+	CondTypeIsExplorable: {},
+	// 投稿する / フォローする / フォローされる で動く数値。捨てアカウントを
+	// 並べれば任意に作れる。
+	CondTypeFollowersLessThanOrEq: {},
+	CondTypeFollowersMoreThanOrEq: {},
+	CondTypeFollowingLessThanOrEq: {},
+	CondTypeFollowingMoreThanOrEq: {},
+	CondTypeNotesLessThanOrEq:     {},
+	CondTypeNotesMoreThanOrEq:     {},
+}
+
+// CondDependsOnUserControlledValue reports whether the formula (or any of its
+// operands) keys off a value the user can change themselves.
+//
+// **条件つきロールで管理者 / モデレーターを配れるかの判定に使う。** 管理画面は
+// 条件を並べるだけなので、`isCat` にチェックを入れた管理者ロールを作るのは
+// 操作としてはごく簡単だが、**そのロールは「猫と名乗る」だけで誰でも取れる**。
+// 作った側は「条件を満たす人に配る」つもりで、「誰でも自分で満たせる条件」だと
+// 気付きにくい。
+func CondDependsOnUserControlledValue(f CondFormula) bool {
+	if _, ok := userControlledCondTypes[f.Type]; ok {
+		return true
+	}
+	// and / or / not は中身を見る。**`not` の中も見る** — `not(isCat)` も
+	// 「猫と名乗らない」で満たせるので同じこと。
+	if f.Value != nil && CondDependsOnUserControlledValue(*f.Value) {
+		return true
+	}
+	for _, v := range f.Values {
+		if CondDependsOnUserControlledValue(v) {
+			return true
+		}
+	}
+	return false
+}

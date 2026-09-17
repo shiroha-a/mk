@@ -26,7 +26,43 @@ var (
 	ErrAlreadyAssigned = errors.New("role already assigned")
 	// ErrNotAssigned is returned when the user does not have the role.
 	ErrNotAssigned = errors.New("role not assigned")
+	// ErrSelfGrantableprivilege is returned when a conditional role would hand
+	// out administrator / moderator on a condition the user can satisfy alone.
+	//
+	// **管理画面は条件を並べるだけ (#3037)。** `isCat` にチェックを入れた
+	// 管理者ロールを作るのは操作としてはごく簡単だが、そのロールは
+	// **「猫と名乗る」だけで誰でも取れる**。作った側は「条件を満たす人に
+	// 配る」つもりで、「誰でも自分で満たせる条件」だとは気付きにくい。
+	//
+	// **upstream は弾かない** (`RoleService` は target と condFormula の
+	// 組み合わせを検査しない) が、そちらには合わせない。
+	ErrSelfGrantablePrivilege = errors.New("conditional role cannot grant administrator or moderator on a self-satisfiable condition")
 )
+
+// checkConditionalPrivilege rejects a conditional role that grants
+// administrator / moderator on a condition the user controls.
+//
+// **本人が変えられない条件なら通す。** 「1 年以上前に作られたローカル
+// 利用者は全員モデレーター」のような設定は運営者の明示的な判断で、
+// 本人の操作では満たせない。
+func checkConditionalPrivilege(target model.RoleTarget, condFormula []byte, isModerator, isAdministrator bool) error {
+	if target != model.RoleTargetConditional || (!isModerator && !isAdministrator) {
+		return nil
+	}
+	if len(condFormula) == 0 {
+		return nil
+	}
+	var f CondFormula
+	if err := json.Unmarshal(condFormula, &f); err != nil {
+		// **読めない式は判定できない。** ここで通すと、壊れた JSON を送る
+		// だけで検査を迂回できる。
+		return ErrSelfGrantablePrivilege
+	}
+	if CondDependsOnUserControlledValue(f) {
+		return ErrSelfGrantablePrivilege
+	}
+	return nil
+}
 
 // Policy key constants. requiredRolePolicy gate 経路 (HasRolePolicy / 各 endpoint
 // での policy 文字列参照) で typo を防ぐため定数化する。新規 policy-gated
@@ -1543,6 +1579,9 @@ func (s *Service) Create(name, description string, opts CreateOptions) (*model.R
 	if len(opts.CondFormula) > 0 {
 		role.CondFormula = opts.CondFormula
 	}
+	if err := checkConditionalPrivilege(target, role.CondFormula, opts.IsModerator, opts.IsAdministrator); err != nil {
+		return nil, err
+	}
 	if len(opts.Policies) > 0 {
 		role.Policies = opts.Policies
 	}
@@ -1658,11 +1697,20 @@ func (s *Service) CountAssignedUsers(roleID string) int {
 // reads it back to render before/after diffs. We mirror that flow so
 // the moderation log can include both snapshots.
 func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, error) {
-	if _, err := s.findRoleByID(id); err != nil {
+	current, err := s.findRoleByID(id)
+	if err != nil {
 		return nil, err
 	}
 	if len(fields) == 0 {
+		// **読み直す。** 既存テストが「更新後の姿を返す」契約として
+		// 2 回目の lookup を固定している (readback の失敗を潰さないため)。
 		return s.findRoleByID(id)
+	}
+	// **更新後の姿で判定する (#3037)。** 「条件つきに変える」「管理者を
+	// 立てる」「条件を差し替える」のどれか 1 つだけを送っても自己付与可能な
+	// 組み合わせは作れるので、既存の値に重ねてから見る。
+	if err := checkConditionalPrivilege(mergedRoleShape(current, fields)); err != nil {
+		return nil, err
 	}
 	if err := s.roleRepo.UpdateFields(id, fields); err != nil {
 		return nil, err
@@ -1679,7 +1727,41 @@ func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, e
 	return s.findRoleByID(id)
 }
 
-// Delete removes a role.
+// mergedRoleShape overlays the update fields onto the stored role and returns
+// the four values checkConditionalPrivilege needs.
+//
+// **型は admin handler が入れる形に合わせる。** `target` は文字列、
+// `condFormula` は `datatypes.JSON` (= []byte)、フラグは bool。想定外の型は
+// 既存の値を残す — 判定を勝手に緩める側へ倒さないため。
+func mergedRoleShape(current *model.Role, fields map[string]any) (model.RoleTarget, []byte, bool, bool) {
+	target := current.Target
+	switch v := fields["target"].(type) {
+	case model.RoleTarget:
+		target = v
+	case string:
+		target = model.RoleTarget(v)
+	}
+	cond := []byte(current.CondFormula)
+	switch v := fields["condFormula"].(type) {
+	case datatypes.JSON:
+		cond = v
+	case []byte:
+		cond = v
+	case string:
+		cond = []byte(v)
+	}
+	isModerator := current.IsModerator
+	if v, ok := fields["isModerator"].(bool); ok {
+		isModerator = v
+	}
+	isAdministrator := current.IsAdministrator
+	if v, ok := fields["isAdministrator"].(bool); ok {
+		isAdministrator = v
+	}
+	return target, cond, isModerator, isAdministrator
+}
+
+// Delete removes a role.// Delete removes a role.
 func (s *Service) Delete(id string) error {
 	if _, err := s.findRoleByID(id); err != nil {
 		return err

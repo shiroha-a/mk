@@ -2486,6 +2486,13 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 		if errors.Is(err, role.ErrRoleNotFound) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_ROLE", "No such role.", "cd23ef55-09ad-428a-ac61-95a45e124b32"))
 		}
+		// create と同じ理由 (#3037)。**更新後の姿で判定する**ので、
+		// 「条件つきに変える」「管理者を立てる」「条件を差し替える」の
+		// どれ 1 つでもここへ来る。
+		if errors.Is(err, role.ErrSelfGrantablePrivilege) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+				"自分で満たせる条件 (isBot / isCat / isLocked / isExplorable / フォロー数 / 投稿数) を使った条件つきロールには、管理者・モデレーターを持たせられません。", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
 		return apierr.JSONInternalError(c)
 	}
 	h.logModeration(c, moderationlog.LogUpdateRole, map[string]any{
