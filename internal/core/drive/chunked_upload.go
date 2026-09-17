@@ -359,23 +359,34 @@ type ChunkAppendResult struct {
 	Completed     bool  `json:"completed"`
 }
 
-// AppendChunk stores one chunk as a part of the session's multipart upload.
-//
-// index は 0 始まりで、サーバーが受理するのは常に「次の 1 つ」だけ。順序前後・
-// 欠番が構造的に起きないようにしている。既に記録済みの index の再送は、内容が
-// 一致していれば冪等に成功し、違っていれば ErrChunkContentMismatch で拒否する。
 // SessionChunkSize reports the chunk size a session accepts, so the handler can
-// stop reading past it.
+// stop copying past it.
 //
-// **読み切る前に上限を引くためのもの (#3037 レビュー)。** `AppendChunk` は
-// `size > sess.ChunkSize` を拒否するが、そこへ届く時点でチャンクは全部メモリに
-// 載っている。body limit はこの経路で 33MiB なので、既定 10MiB のセッションでも
-// 1 リクエストあたり 33MiB を確保させられる。`drive/files/create` を同じ理由で
-// 直したのに、こちらだけ残っていた。
+// **`io.ReadAll` のコピーを 1 つ減らすためのもの (#3037)。** `AppendChunk` は
+// `size > sess.ChunkSize` を拒否するが、そこへ届く時点でチャンクは全部
+// 読み終わっている。`drive/files/create` を同じ理由で直したのに、こちらだけ
+// 残っていた。
+//
+// **「読み切る前に落とす」ではない (レビュー 2 周目の実測)。** handler は
+// これを呼ぶ前に `c.FormValue("uploadId")` を読み、echo の `FormValue` は
+// `http.Request.ParseMultipartForm(32MiB)` を通す。つまり**この関数へ来る
+// 時点で body はワイヤから全部読み出され、パーサのメモリに載っている**
+// (実測: 5,243,351 バイトの body に対し `FormValue` の直後で
+// 5,243,351 バイトが読み出し済み)。`ReadForm` の閾値は 32MiB + 10MiB で
+// この route の body limit は 33MiB なので、チャンクは常にメモリに残る。
+// 消せているのは `io.ReadAll` による**2 つ目のコピー**だけで、ピークは
+// 66MiB から 33MiB に半減するにとどまる。**本当に塞ぐには
+// `c.Request().MultipartReader()` でストリーム処理するか、body limit を
+// セッション単位にする必要がある。**
+//
+// (`drive/files/create` 側は 250MB のような大きい本体がパーサで**ディスクへ
+// spill** されるので、そちらの guard は最大 250MB のヒープ確保を実際に消す。)
 //
 // ok=false は「上限を決められない」(セッションが無い / 他人のもの / 期限切れ)。
 // **その場合は上限を掛けない** — 本物の判定は `AppendChunk` が行い、そちらが
 // 正しいエラーを返す。ここで独自に落とすと、応答の種類が経路で食い違う。
+// 存在しない `uploadId` を送ればこの枝に入れるが、body limit が 33MiB なので
+// 最悪値は変わらない (`AppendChunk` がその後 404 を返す)。
 func (s *Service) SessionChunkSize(user *model.User, sessionID string) (int64, bool) {
 	if s.chunkedRepo == nil {
 		return 0, false
@@ -387,6 +398,11 @@ func (s *Service) SessionChunkSize(user *model.User, sessionID string) (int64, b
 	return sess.ChunkSize, true
 }
 
+// AppendChunk stores one chunk as a part of the session's multipart upload.
+//
+// index は 0 始まりで、サーバーが受理するのは常に「次の 1 つ」だけ。順序前後・
+// 欠番が構造的に起きないようにしている。既に記録済みの index の再送は、内容が
+// 一致していれば冪等に成功し、違っていれば ErrChunkContentMismatch で拒否する。
 func (s *Service) AppendChunk(ctx context.Context, user *model.User, sessionID string, index int, chunk []byte) (*ChunkAppendResult, error) {
 	_, ms, err := s.chunkedMultipart()
 	if err != nil {

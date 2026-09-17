@@ -199,11 +199,23 @@ var readMultipartFile = func(c echo.Context, maxBytes int64) ([]byte, string, er
 	if err != nil {
 		return nil, "", err
 	}
-	// **読む前に落とす (#3037)。** `Upload` にも同じ判定があるが、あそこへ
-	// 届く時点で本体は全部メモリに載っている。既定では policy が 30MB なのに
-	// `config.maxFileSize` が 250MB なので、**30MB しか保存できない利用者が
-	// 250MB を確保させられた**。
-	if maxBytes > 0 && maxBytes != math.MaxInt64 && fileHeader.Size > maxBytes {
+	// **`io.ReadAll` のコピーを 1 つ減らす (#3037)。** `Upload` にも同じ判定が
+	// あるが、あそこへ届く時点で本体はもう読み終わっている。既定では policy が
+	// 30MB なのに `config.maxFileSize` が 250MB なので、**30MB しか保存できない
+	// 利用者が 250MB のヒープを確保させられた**。
+	//
+	// **「読む前」ではない (レビュー 2 周目の実測)。** global な
+	// `auth.Authenticate` が `multipart/form-data` のとき `c.FormValue("i")` を
+	// 呼ぶので、handler へ来る時点で `ParseMultipartForm(32MiB)` は済んでいる。
+	// 消えるのは `io.ReadAll` の 2 つ目のコピーだけで、**RAM 32MiB +
+	// 超過分の一時ファイル書き込みは残る** (`ParseMultipartForm` は 32MiB を
+	// 超えた分をディスクへ spill するので、250MB の本体なら約 218MB が
+	// ディスクに書かれる)。それでも最大 250MB のヒープ確保は実際に消える。
+	//
+	// `maxBytes` の上限値 (`math.MaxInt64`) は `readAtMost` 側で扱う。
+	// ここで比べる `fileHeader.Size` は `int64` なので、`MaxInt64` を
+	// 超えることは原理的に無い。
+	if maxBytes > 0 && fileHeader.Size > maxBytes {
 		return nil, "", coredrive.ErrMaxFileSizeExceeded
 	}
 	src, err := openMultipartFile(fileHeader)

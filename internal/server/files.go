@@ -68,10 +68,6 @@ func storableAccessKey(key string) bool {
 // **ストレージ側の失敗は種別で分ける。** `ErrObjectNotFound` だけが 404 で、
 // それ以外 (S3 の認証失効 / throttling / 5xx / FS の I/O エラー) は 500。
 //
-// primary が現時点でローカルなら local と同じ FS を指すので storedInternal 判定は
-// 無意味であり、ホットパスの DB クエリを省く。backend は admin 設定で動的に
-// 切り替わる (#2315) ため、この判定は配線時ではなくリクエストごとに行う。
-//
 // MIME type はファイル内容の先頭から自動判定し、`http.ServeContent` で
 // Range / If-Modified-Since / Content-Length 対応の正しい応答を返す。
 //

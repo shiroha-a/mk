@@ -1030,9 +1030,12 @@ func TestDriveFileRepository_ListOrphanRemoteAttachmentCandidates_Guards(t *test
 
 // **`type` の LIKE パターンを escape する (#3037)。**
 //
-// upstream は `type.replace('/*','/') + '%'` を生のまま載せるので、`_` が
-// 1 文字 wildcard として働く。MIME の subtype に `_` は稀だが使えるので、
-// escape しないと「その型だけ」を指定したつもりの絞り込みが別の型まで拾う。
+// SQL は upstream も `type.replace('/*','/') + '%'` を生のまま載せる。
+// **ただし upstream ではその値が LIKE に届かない** — ajv の `pattern`
+// (`drive/files.ts:40` / `admin/drive/files.ts:40`) に `_` が入っていないので
+// `a_b/*` は 400 で弾かれる。mk-go はこの pattern を持たないため `_` が
+// 1 文字 wildcard として働き、「その型だけ」を指定したつもりの絞り込みが
+// 別の型まで拾う。MIME の subtype に `_` は稀だが使える。
 // mk-go は #1054 から LIKE を必ず escape する方針で、ここだけ通っていなかった。
 func TestDriveFileRepository_TypeFilterEscapesLike(t *testing.T) {
 	db := testDB
