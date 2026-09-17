@@ -1572,7 +1572,11 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// コメント参照) だが、rootUserId を書けると root 権限を別 user に付け替えられ
 	// (admin→root 昇格)、id は singleton PK を壊す。proxyAccountId は
 	// admin/update-proxy-account が管轄。upstream の paramDef もこれらを accept しない。
-	for _, protected := range []string{"id", "rootUserId", "proxyAccountId"} {
+	// **alias 経由の書き込みもここで止まる。** `renameUpdateMetaFields` より
+	// 前なので alias 名では消せないが、`dropUnknownMetaFields` が
+	// `updateMetaProtectedColumns` を除いた集合で絞るため、rename の後で必ず
+	// 落ちる。
+	for _, protected := range updateMetaProtectedColumns {
 		delete(fields, protected)
 	}
 	// upstream update-meta.ts の enum 制約を持つ field を pre-validate (#1108
@@ -1666,6 +1670,18 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// metaRepo の DB 状態は触らないので、ここで Fetch() しても VAPID 生成
 	// 前後で値は変わらない。よって before lookup の位置は VAPID 生成の前
 	// でも後でも結果は同じ。可読性のため Update 直前に置いている。
+	// **列でないキーを落とす (#3037)。** キーはそのまま UPDATE の列識別子に
+	// なるので、知らないキーが 1 つあると GORM が存在しない列を書こうとして
+	// 500 になる。詳細は `dropUnknownMetaFields`。
+	//
+	// **変換が全部終わってから絞る。** alias の rename (`tosUrl`) も、
+	// `summalyProxy` → `urlPreviewSummaryProxyUrl` の解決も、VAPID の注入も
+	// 上で済んでいる。手前に置くと正当な入力まで落ちる (実測: `summalyProxy` の
+	// alias テストが落ちた)。
+	if dropped := dropUnknownMetaFields(fields); len(dropped) > 0 {
+		slog.Warn("admin: update-meta ignored unknown fields", "fields", dropped)
+	}
+
 	beforeMeta, _ := h.metaRepo.Fetch()
 	if err := h.metaRepo.Update(fields); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))

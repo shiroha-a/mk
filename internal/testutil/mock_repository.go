@@ -2996,6 +2996,10 @@ type MockMetaRepository struct {
 	mu         sync.Mutex
 	Meta       *model.Meta
 	FetchCalls int
+	// LastUpdateFields is the field map handed to the most recent Update.
+	// 実 repo は key をそのまま列識別子として UPDATE に載せるので、
+	// 「何が渡ったか」自体が検査対象になる。
+	LastUpdateFields map[string]any
 }
 
 func NewMockMetaRepository() *MockMetaRepository {
@@ -3015,6 +3019,13 @@ func (m *MockMetaRepository) Fetch() (*model.Meta, error) {
 func (m *MockMetaRepository) Update(fields map[string]any) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	// **渡された field をそのまま記録する。** 実 repo は key をそのまま列
+	// 識別子として UPDATE に載せるので、「何が渡ったか」自体が検査対象になる
+	// (列でないキーを落としているか、など)。
+	m.LastUpdateFields = make(map[string]any, len(fields))
+	for k, v := range fields {
+		m.LastUpdateFields[k] = v
+	}
 	if m.Meta == nil {
 		m.Meta = &model.Meta{ID: "x"}
 	}
