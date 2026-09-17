@@ -1361,7 +1361,11 @@ func TestReadMultipartFile_ReadFailureIsReported(t *testing.T) {
 	assert.Nil(t, body, "切れ端を返している")
 }
 
-// 切れ端が保存されないことを handler まで通して見る。
+// 切れ端が保存されないこと、**かつ 5xx で返ること**を handler まで通して見る。
+//
+// `Open` / `ReadAll` の失敗はディスク満杯 / fd 枯渇 / 一時ファイル消失で、
+// 全部サーバー側の事象。`INVALID_PARAM` に潰すと利用者もフロントも再試行せず、
+// 監視にも 4xx しか出ないので障害が見えない (#2792)。
 func TestFilesCreate_ReadFailureDoesNotStoreTruncatedFile(t *testing.T) {
 	prev := openMultipartFile
 	t.Cleanup(func() { openMultipartFile = prev })
@@ -1377,7 +1381,8 @@ func TestFilesCreate_ReadFailureDoesNotStoreTruncatedFile(t *testing.T) {
 	c, rec := newMultipartReq(t, "hello.txt", "hello world", nil)
 	setUser(c, "u1")
 	require.NoError(t, h.FilesCreate(c))
-	assert.Equal(t, http.StatusBadRequest, rec.Code, "切れ端を成功として返している")
+	assert.Equal(t, http.StatusInternalServerError, rec.Code,
+		"サーバー側の I/O 障害をクライアントエラーに潰している")
 	assert.Empty(t, fileRepo.Files, "切れ端が保存されている")
 }
 
@@ -1389,4 +1394,15 @@ func TestReadMultipartFile_OrdinaryUploadStillReads(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello world", string(body))
 	assert.Equal(t, "hello.txt", name)
+}
+
+// **`file` フィールドが無いのは本当にクライアント起因なので 400 のまま。**
+// これが無いと「multipart の失敗を全部 500 にする」実装でも上のテストが通る。
+func TestFilesCreate_MissingFileFieldStays400(t *testing.T) {
+	h, fileRepo, _ := newHandler(t)
+	c, rec := newMultipartReq(t, "", "", map[string]string{"name": "x"})
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Empty(t, fileRepo.Files)
 }

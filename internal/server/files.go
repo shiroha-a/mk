@@ -7,11 +7,13 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/labstack/echo/v4"
 
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -21,6 +23,26 @@ import (
 // stub without standing up a real DB.
 type filesDriveLookup interface {
 	FindByAnyAccessKey(accessKey string) (*model.DriveFile, error)
+}
+
+// driveAccessKeyMaxRunes は `drive_file.accessKey` の列幅。
+const driveAccessKeyMaxRunes = 256
+
+// storableAccessKey reports whether the URL path parameter could name a stored
+// object at all.
+//
+// 見るのは 3 つだけ: 列に入る値か (NUL / 不正な UTF-8 / 幅)、パス要素として
+// 危なくないか (`/` `\` `.` `..`)、空でないか。**形式そのものは検査しない** —
+// access key の綴りは `newAccessKey` の実装詳細で、過去に保存された行の綴りまで
+// 縛ると既存ファイルが引けなくなる。
+func storableAccessKey(key string) bool {
+	if key == "" || !colfit.Fits(key, driveAccessKeyMaxRunes) {
+		return false
+	}
+	if strings.ContainsAny(key, `/\`) {
+		return false
+	}
+	return key != "." && key != ".."
 }
 
 // filesHandler serves `GET /files/:accessKey`.
@@ -51,6 +73,22 @@ type filesDriveLookup interface {
 func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) echo.HandlerFunc {
 	return func(c echo.Context) error {
 		key := c.Param("accessKey")
+		// **オブジェクトを名指しできないキーは、引く前に 404 (#3037)。**
+		//
+		// `accessKey` は varchar(256) の列の値なので、そこに入らない値は
+		// **どの行とも一致しえない** = 「無い」が事実 (#3025 と同じ判断)。
+		// これを storage へ渡すと、`LocalStorage.Get` が `os.IsNotExist` 以外
+		// (`ENAMETOOLONG` / `EINVAL`) を素の `*PathError` で返し、下の分岐が
+		// **500 + accessKey を丸ごと載せた Error ログ**にする。この route は
+		// `api` グループの外で**認証もレートリミットも無い**ので、
+		// `GET /files/a%00b` を叩くだけで 5xx レートとログを誰でも汚せる
+		// (#3025 が塞いだ形の再導入だった)。
+		//
+		// **パス要素も落とす。** `/files/.` は `os.Open` がディレクトリを
+		// 開けてしまい、200 + 空ボディを返していた。
+		if !storableAccessKey(key) {
+			return c.NoContent(http.StatusNotFound)
+		}
 		storage := primary
 		if lookup != nil && local != nil && !coredrive.StorageIsLocal(primary) {
 			if f, err := lookup.FindByAnyAccessKey(key); err == nil && f.StoredInternal {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -329,4 +330,56 @@ func TestFilesHandler_WrappedNotFoundStays404(t *testing.T) {
 	require.NoError(t, h(c))
 
 	assert.Equal(t, http.StatusNotFound, rec.Code)
+}
+
+// **オブジェクトを名指しできないキーは、引く前に 404 (#3037)。**
+//
+// `/files` は `api` グループの外で**認証もレートリミットも無い**。列に入らない
+// キーを storage へ渡すと `LocalStorage.Get` が `os.IsNotExist` 以外
+// (`ENAMETOOLONG` / `EINVAL`) を素のエラーで返し、500 + accessKey を丸ごと
+// 載せた Error ログになる。`GET /files/a%00b` を叩くだけで 5xx レートと
+// ログを誰でも汚せた (#3025 が塞いだ形の再導入)。
+func TestFilesHandler_UnstorableAccessKeyIs404(t *testing.T) {
+	primary := &failingStorage{err: errors.New("must not be reached")}
+	local := &memStorage{byKey: map[string]string{}}
+
+	for name, key := range map[string]string{
+		"NUL":           "a\x00b",
+		"invalid UTF-8": "a\x80b",
+		"too long":      strings.Repeat("a", 257),
+		"empty":         "",
+		"dot":           ".",
+		"dotdot":        "..",
+		"slash":         "a/b",
+		"backslash":     `a\b`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			// **URL は percent-encode した形で組む。** 実際の経路では echo が
+			// decode して param に入れるので、param には生の値を渡す
+			// (`httptest.NewRequest` は生の制御文字を含む URL で panic する)。
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodGet, "/files/"+url.PathEscape(key), nil)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			c.SetPath("/files/:accessKey")
+			c.SetParamNames("accessKey")
+			c.SetParamValues(key)
+
+			h := filesHandler(nil, primary, local)
+			require.NoError(t, h(c))
+			assert.Equal(t, http.StatusNotFound, rec.Code, "storage を触ってしまっている")
+		})
+	}
+}
+
+// **普通のキーは通ったまま。** これが無いと「常に 404」でも上のテストが通る。
+func TestFilesHandler_OrdinaryAccessKeyStillServed(t *testing.T) {
+	primary := &memStorage{byKey: map[string]string{"abcdef123": "hello"}}
+	local := &memStorage{byKey: map[string]string{}}
+
+	c, rec := newFilesTestContext(t, "abcdef123")
+	h := filesHandler(nil, primary, local)
+	require.NoError(t, h(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "hello", rec.Body.String())
 }

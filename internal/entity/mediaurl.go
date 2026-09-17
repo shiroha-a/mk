@@ -279,8 +279,9 @@ func (c *MediaURLContext) ownMediaHost() string {
 // GetPublicURL mirrors DriveFileEntityService.getPublicUrl for the DriveFile
 // `url` field shown to **other** users. Local files are returned unchanged;
 // remote-origin files are wrapped through the proxy. A nil receiver returns the
-// raw url (preserves the pre-#1529 behavior for call sites / tests that have no
-// context wired).
+// unproxied value (= `webpublicUrl ?? url`; preserves the pre-#1529 behavior for
+// call sites / tests that have no context wired — **原本ではない**ことに注意。
+// 所有者向けの raw url は `GetSelfURL`).
 //
 // **webpublic があればそちらを指す (upstream `file.webpublicUrl ?? file.url`)。**
 // webpublic は EXIF を落とした再エンコード版なので、原本を指すと**撮影位置

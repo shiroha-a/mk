@@ -200,15 +200,25 @@ var readMultipartFile = func(c echo.Context) ([]byte, string, error) {
 	}
 	src, err := openMultipartFile(fileHeader)
 	if err != nil {
-		return nil, "", fmt.Errorf("open uploaded file: %w", err)
+		return nil, "", fmt.Errorf("%w: open: %w", errMultipartIO, err)
 	}
 	defer src.Close()
 	body, err := io.ReadAll(src)
 	if err != nil {
-		return nil, "", fmt.Errorf("read uploaded file: %w", err)
+		return nil, "", fmt.Errorf("%w: read: %w", errMultipartIO, err)
 	}
 	return body, fileHeader.Filename, nil
 }
+
+// errMultipartIO marks a multipart failure as **server-side**.
+//
+// **`c.FormFile` の失敗と分ける (#3037)。** あちらは「`file` フィールドが
+// 無い」= 本当にクライアント起因なので 400 でよい。`Open` / `ReadAll` の
+// 失敗はディスク満杯 / fd 枯渇 / 一時ファイル消失で、**全部サーバー側の
+// 事象**。まとめて `INVALID_PARAM` にすると (a) 利用者もフロントも
+// 「パラメータが不正」と読んで再試行せず、(b) 監視には 4xx しか出ないので
+// 障害が見えない。#2792 と同じ判断で 5xx に倒し、ログにも残す。
+var errMultipartIO = errors.New("drive: multipart io")
 
 // FilesCreate handles POST /api/drive/files/create.
 // multipart/form-data with the file under "file"; optional fields: name,
@@ -218,6 +228,12 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 
 	body, filename, err := readMultipartFile(c)
 	if err != nil {
+		// サーバー側の I/O 障害は 500 + ログ。クライアント起因 (`file` が
+		// 無い) だけ 400 のまま。
+		if errors.Is(err, errMultipartIO) {
+			slog.ErrorContext(c.Request().Context(), "drive: multipart read failed", "err", err)
+			return apierr.JSONInternalError(c)
+		}
 		return apierr.JSONInvalidParam(c)
 	}
 
