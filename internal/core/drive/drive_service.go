@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"runtime"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -190,6 +191,36 @@ type Service struct {
 	// objectDeleteEnqueuer は object storage の実体削除を queue に逃がす
 	// (#2325)。nil なら従来どおり同期削除にフォールバックする。
 	objectDeleteEnqueuer ObjectDeleteEnqueuer
+	// mediaSlots は画像 / 動画処理の同時実行枠。**構築時に必ず埋める**
+	// (`NewService`)。nil のまま使うと枠が無いのと同じになる。
+	mediaSlots chan struct{}
+}
+
+// defaultMediaProcessingConcurrency is how many uploads may decode at once.
+//
+// **1 枠あたりの最悪値で決める。** `imagedecode.MaxPixels` は 8192x8192 =
+// 64MP なので、NRGBA のラスタ 1 枚で 268MB。`processImage` は寸法 / blurhash /
+// サムネイル / webpublic で**順に 4 回デコードする**ため、GC が前の 1 枚を
+// 返す前に次を確保しうる。枠が無いと、認証済みの利用者が並行アップロードを
+// 投げるだけで確保量を掛け算できた (`semaphore` / `Acquire(` の grep が 0 件
+// だった)。
+//
+// GOMAXPROCS に上限 4 を掛けた値にする。**メモリの多いホストほどコアも多い**
+// という相関に乗る形で、2GB VPS (このプロジェクトが前提にしている構成) では
+// 1-2 に落ち着く。処理は CPU 律速なので、コア数を超えて走らせても速くならない。
+//
+// **専用の設定キーは足していない。** 絞りたい運営者は `GOMAXPROCS` で足りる
+// (コンテナの CPU 制限でも動く)、という判断。配線から変えるなら
+// `SetMediaProcessingConcurrency`。
+func defaultMediaProcessingConcurrency() int {
+	n := runtime.GOMAXPROCS(0)
+	if n > 4 {
+		n = 4
+	}
+	if n < 1 {
+		n = 1
+	}
+	return n
 }
 
 // ObjectDeleteEnqueuer queues the removal of one object storage object.
@@ -464,7 +495,19 @@ func NewService(
 		folderRepo: folderRepo,
 		storage:    storage,
 		idGen:      idGen,
+		mediaSlots: make(chan struct{}, defaultMediaProcessingConcurrency()),
 	}
+}
+
+// SetMediaProcessingConcurrency resizes the image/video processing pool.
+//
+// n <= 0 は既定に戻す。**枠を無くす指定は用意しない** — 無制限にすると、
+// 認証済みの利用者が並行アップロードだけでプロセスを落とせる状態に戻る。
+func (s *Service) SetMediaProcessingConcurrency(n int) {
+	if n <= 0 {
+		n = defaultMediaProcessingConcurrency()
+	}
+	s.mediaSlots = make(chan struct{}, n)
 }
 
 // SetStreamingPublisher attaches a StreamingPublisher invoked best-effort
@@ -666,7 +709,7 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 	var blurhash *string
 	var properties datatypes.JSON
 
-	alts := s.generateAlts(in.Body, info.MimeType)
+	alts := s.generateAlts(ctx, in.Body, info.MimeType)
 	if alts != nil {
 		thumbnail = alts.thumbnail
 		webpublic = alts.webpublic
@@ -900,17 +943,52 @@ type generateAltsResult struct {
 
 // generateAlts runs image or video processing on the uploaded file.
 // processor が nil の場合や処理失敗時は nil を返す (best-effort)。
-func (s *Service) generateAlts(body []byte, mimeType string) *generateAltsResult {
-	if isMimeImage(mimeType) && s.imageProcessor != nil {
+//
+// **同時実行枠を取ってから走る。** デコードは 1 枚で数百 MB を確保しうるので、
+// 並行アップロードで掛け算されるとプロセスごと落ちる (Go の大確保失敗は
+// `throw("out of memory")` で recover できない)。枠が空くまで待つのは、
+// アップロード自体を失敗させるより背圧として素直なため。
+func (s *Service) generateAlts(ctx context.Context, body []byte, mimeType string) *generateAltsResult {
+	image := isMimeImage(mimeType) && s.imageProcessor != nil
+	video := isMimeVideo(mimeType) && s.videoProcessor != nil
+	if !image && !video {
+		return nil
+	}
+	release, ok := s.acquireMediaSlot(ctx)
+	if !ok {
+		// **ctx が切れたときだけここへ来る。** 呼び出し元が諦めている状態なので
+		// 代替画像を作っても捨てられる。best-effort の契約どおり nil を返す。
+		slog.Warn("drive: メディア処理の枠を待っている間に中断されました", "mimeType", mimeType)
+		return nil
+	}
+	defer release()
+
+	if image {
 		return s.processImage(body, mimeType)
 	}
-	if isMimeVideo(mimeType) && s.videoProcessor != nil {
-		thumb, _ := s.videoProcessor.GenerateThumbnail(body, mimeType)
-		if thumb != nil {
-			return &generateAltsResult{thumbnail: thumb}
-		}
+	thumb, _ := s.videoProcessor.GenerateThumbnail(body, mimeType)
+	if thumb != nil {
+		return &generateAltsResult{thumbnail: thumb}
 	}
 	return nil
+}
+
+// acquireMediaSlot takes one processing slot, returning the release func.
+//
+// ok=false は ctx が切れた場合だけ。枠が未配線 (テストが Service を構造体
+// リテラルで組んだ場合など) のときは**素通しせずに既定の枠を作る** — 素通しに
+// すると、この関数を通しているのに枠が効いていない状態が静かに生まれる。
+func (s *Service) acquireMediaSlot(ctx context.Context) (func(), bool) {
+	if s.mediaSlots == nil {
+		s.mediaSlots = make(chan struct{}, defaultMediaProcessingConcurrency())
+	}
+	slots := s.mediaSlots
+	select {
+	case slots <- struct{}{}:
+		return func() { <-slots }, true
+	case <-ctx.Done():
+		return nil, false
+	}
 }
 
 // processImage runs all image processing steps (best-effort).

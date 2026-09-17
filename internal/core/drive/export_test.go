@@ -1,6 +1,7 @@
 package drive
 
 import (
+	"context"
 	"image"
 	"io"
 	"os"
@@ -48,7 +49,7 @@ func (s *Service) GenerateAltsForTest(body []byte, mimeType string) (
 	webpublic *ProcessedImage,
 	blurhash *string,
 ) {
-	result := s.generateAlts(body, mimeType)
+	result := s.generateAlts(context.Background(), body, mimeType)
 	if result == nil {
 		return nil, nil, nil
 	}
@@ -60,3 +61,15 @@ func (s *Service) GenerateAltsForTest(body []byte, mimeType string) (
 func MimeAllowedByPolicyForTest(mime string, raw any) bool {
 	return mimeAllowedByPolicy(mime, raw)
 }
+
+// GenerateAltsCtxForTest exposes generateAlts with an explicit context so
+// external tests can exercise the concurrency slot and its cancellation path.
+func (s *Service) GenerateAltsCtxForTest(ctx context.Context, body []byte, mimeType string) bool {
+	return s.generateAlts(ctx, body, mimeType) != nil
+}
+
+// MediaProcessingSlotsForTest reports the configured processing pool size.
+func (s *Service) MediaProcessingSlotsForTest() int { return cap(s.mediaSlots) }
+
+// DefaultMediaProcessingConcurrencyForTest exposes the default pool size.
+func DefaultMediaProcessingConcurrencyForTest() int { return defaultMediaProcessingConcurrency() }

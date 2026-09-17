@@ -3,6 +3,7 @@ package drive_test
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"image"
@@ -13,11 +14,14 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/imagedecode"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
@@ -1469,4 +1473,239 @@ func TestDelete_WithoutLocalStorageFallsBackToPrimary(t *testing.T) {
 	}))
 	require.NoError(t, svc.Delete(&model.User{ID: uid}, "f1"))
 	assert.Contains(t, objStore.deleted, "k")
+}
+
+// blockingVideoProcessor reports the peak number of concurrent calls.
+type blockingVideoProcessor struct {
+	mu       sync.Mutex
+	inFlight int
+	peak     int
+	release  chan struct{}
+}
+
+func (b *blockingVideoProcessor) GenerateThumbnail(_ []byte, _ string) (*drive.ProcessedImage, error) {
+	b.mu.Lock()
+	b.inFlight++
+	if b.inFlight > b.peak {
+		b.peak = b.inFlight
+	}
+	b.mu.Unlock()
+	<-b.release
+	b.mu.Lock()
+	b.inFlight--
+	b.mu.Unlock()
+	return &drive.ProcessedImage{Data: []byte("thumb"), MimeType: "image/webp"}, nil
+}
+
+// **同時実行枠が実際に効いていること。**
+//
+// デコードは 1 枚で数百 MB を確保しうる (`imagedecode.MaxPixels` は 64MP =
+// NRGBA 268MB) ので、枠が無いと認証済みの利用者が並行アップロードを投げるだけで
+// 確保量を掛け算できた。Go の大確保失敗は `throw("out of memory")` で recover
+// できないため、プロセスごと落ちる。
+func TestGenerateAlts_ConcurrencyIsBounded(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	proc := &blockingVideoProcessor{release: make(chan struct{})}
+	svc.SetVideoProcessor(proc)
+	svc.SetMediaProcessingConcurrency(1)
+
+	const callers = 4
+	var wg sync.WaitGroup
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.GenerateAltsCtxForTest(context.Background(), []byte("video"), "video/mp4")
+		}()
+	}
+
+	// 全員が枠待ちに入るまで少し待ってから解放する。枠が効いていなければ
+	// この時点で peak は callers になっている。
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		proc.mu.Lock()
+		n := proc.inFlight
+		proc.mu.Unlock()
+		if n >= 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	time.Sleep(50 * time.Millisecond)
+	close(proc.release)
+	wg.Wait()
+
+	proc.mu.Lock()
+	defer proc.mu.Unlock()
+	assert.Equal(t, 1, proc.peak, "枠を超えて同時に処理している (peak=%d)", proc.peak)
+}
+
+// 枠を広げれば同時に走る。**これが無いと「常に 1 本ずつ」でもテストが通る。**
+func TestGenerateAlts_ConcurrencyHonoursTheConfiguredSize(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	proc := &blockingVideoProcessor{release: make(chan struct{})}
+	svc.SetVideoProcessor(proc)
+	svc.SetMediaProcessingConcurrency(3)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			svc.GenerateAltsCtxForTest(context.Background(), []byte("video"), "video/mp4")
+		}()
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		proc.mu.Lock()
+		n := proc.inFlight
+		proc.mu.Unlock()
+		if n == 3 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(proc.release)
+	wg.Wait()
+
+	proc.mu.Lock()
+	defer proc.mu.Unlock()
+	assert.Equal(t, 3, proc.peak, "枠を広げても 1 本ずつになっている")
+}
+
+// 枠待ちの間に呼び出し元が諦めたら処理しない (best-effort の契約どおり nil)。
+func TestGenerateAlts_CancelledWhileWaiting(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	proc := &blockingVideoProcessor{release: make(chan struct{})}
+	svc.SetVideoProcessor(proc)
+	svc.SetMediaProcessingConcurrency(1)
+
+	holder := make(chan struct{})
+	go func() {
+		defer close(holder)
+		svc.GenerateAltsCtxForTest(context.Background(), []byte("video"), "video/mp4")
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		proc.mu.Lock()
+		n := proc.inFlight
+		proc.mu.Unlock()
+		if n == 1 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	// **待たずに済む形で呼ぶ。** guard が無いと processor の中で止まるので、
+	// 直接呼ぶとテストごとデッドロックして「タイムアウトで落ちた」という
+	// 読みにくい失敗になる。別 goroutine + 期限で「戻ってこないこと自体」を
+	// 失敗として扱う。
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	done := make(chan bool, 1)
+	go func() { done <- svc.GenerateAltsCtxForTest(ctx, []byte("video"), "video/mp4") }()
+
+	select {
+	case processed := <-done:
+		assert.False(t, processed, "ctx が切れているのに処理へ進んでいる")
+	case <-time.After(2 * time.Second):
+		t.Error("ctx が切れているのに枠を待ち続けている (processor まで進んだ可能性)")
+	}
+
+	close(proc.release)
+	<-holder
+}
+
+// 既定の枠は 1 以上で、上限 4。0 以下を渡したら既定へ戻す。
+func TestMediaProcessingConcurrency_Defaults(t *testing.T) {
+	def := drive.DefaultMediaProcessingConcurrencyForTest()
+	assert.GreaterOrEqual(t, def, 1)
+	assert.LessOrEqual(t, def, 4)
+
+	svc, _, _ := newSvc(t)
+	assert.Equal(t, def, svc.MediaProcessingSlotsForTest(), "NewService が枠を配線していない")
+
+	svc.SetMediaProcessingConcurrency(2)
+	assert.Equal(t, 2, svc.MediaProcessingSlotsForTest())
+
+	svc.SetMediaProcessingConcurrency(0)
+	assert.Equal(t, def, svc.MediaProcessingSlotsForTest(), "0 以下は既定へ戻す")
+}
+
+// bmpHeaderForTest builds a 54-byte BMP header declaring w x h at 24bpp,
+// with no pixel data at all.
+//
+// **データを付けないのが要点。** ヘッダだけ見て弾けていれば、その先を読みに
+// 行かないので、判定がデコードより前にあることを直接確かめられる。
+func bmpHeaderForTest(w, h int32) []byte {
+	var b bytes.Buffer
+	b.WriteString("BM")
+	_ = binary.Write(&b, binary.LittleEndian, uint32(54))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(54))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(40))
+	_ = binary.Write(&b, binary.LittleEndian, w)
+	_ = binary.Write(&b, binary.LittleEndian, h)
+	_ = binary.Write(&b, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&b, binary.LittleEndian, uint16(24))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0))
+	_ = binary.Write(&b, binary.LittleEndian, int32(2835))
+	_ = binary.Write(&b, binary.LittleEndian, int32(2835))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0))
+	_ = binary.Write(&b, binary.LittleEndian, uint32(0))
+	return b.Bytes()
+}
+
+// **アップロード経路にも pixel cap が効いていること。**
+//
+// `decodeImage` は `internal/misc/imagedecode` へ委譲しているので、cap は
+// media proxy と共通のものが効く。**その委譲が外れると、ローカルアップロード
+// だけ 54 バイトのヘッダで数 GB を確保できる状態に戻る** (Go の大確保失敗は
+// `throw("out of memory")` で recover できないのでプロセスごと落ちる)。
+// 4 つの入口すべてを見るのは、どれか 1 つだけ直接 `imaging.Decode` に
+// 戻される形を捕まえるため。
+func TestImageProcessor_RefusesOversizedHeader(t *testing.T) {
+	p := drive.NewDefaultImageProcessor()
+	// 54 バイトで 8.6GB (46341^2 x 4 byte) を要求するヘッダ。
+	data := bmpHeaderForTest(46341, 46341)
+	require.Len(t, data, 54)
+
+	// **cap の sentinel まで見る。** 「何かのエラー」で満足すると、委譲を外して
+	// 素の `imaging.Decode` に戻しても (54 バイトしか無いので) デコード失敗で
+	// エラーにはなり、テストが通ってしまう。
+	_, _, err := p.GetDimensions(data, "image/bmp")
+	require.Error(t, err, "GetDimensions が巨大なヘッダを受けている")
+	assert.ErrorIs(t, err, imagedecode.ErrTooManyPixels)
+
+	_, err = p.CalculateBlurhash(data, "image/bmp")
+	require.Error(t, err, "CalculateBlurhash が巨大なヘッダを受けている")
+	assert.ErrorIs(t, err, imagedecode.ErrTooManyPixels)
+
+	// サムネイル / webpublic はデコード失敗を `nil, nil` に倒す契約 (best-effort)
+	// なので、ここで見られるのは「画像を作らずに戻る」ことまで。ラスタを
+	// 確保しないことは上の 2 つが sentinel で押さえている。
+	thumb, err := p.GenerateThumbnail(data, "image/bmp")
+	assert.NoError(t, err)
+	assert.Nil(t, thumb, "巨大なヘッダからサムネイルを作っている")
+
+	wp, err := p.GenerateWebpublic(data, "image/bmp")
+	assert.NoError(t, err)
+	assert.Nil(t, wp, "巨大なヘッダから webpublic を作っている")
+}
+
+// **普通の画像はこれまでどおり通る。** これが無いと「BMP を常に拒否する」
+// 実装でも上のテストが通る。
+func TestImageProcessor_OrdinaryImageStillProcesses(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	img.Set(0, 0, color.RGBA{R: 1, G: 2, B: 3, A: 255})
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+
+	p := drive.NewDefaultImageProcessor()
+	w, h, err := p.GetDimensions(buf.Bytes(), "image/png")
+	require.NoError(t, err)
+	assert.Equal(t, 16, w)
+	assert.Equal(t, 16, h)
 }
