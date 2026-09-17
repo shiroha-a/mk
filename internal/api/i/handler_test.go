@@ -2847,3 +2847,37 @@ func TestRegistryRejectsUnstorableKeyAndDomain(t *testing.T) {
 		})
 	}
 }
+
+// **jsonb 列へそのまま入る field を弾く (#3037)。** PostgreSQL は NUL
+// エスケープを SQLSTATE 22P05 でクエリごと落とすので、引く前に弾かないと
+// **任意の認証ユーザーが 500 を起こせる**。
+func TestUpdate_UnstorableJSONBFieldsAre400(t *testing.T) {
+	esc := `\u0000`
+	for name, body := range map[string]string{
+		"room":                      `{"room":{"a":"x` + esc + `y"}}`,
+		"mutedWords":                `[["x` + esc + `y"]]`,
+		"notificationRecieveConfig": `{"notificationRecieveConfig":{"x` + esc + `y":{"type":"all"}}}`,
+		"mutedInstances":            `{"mutedInstances":["x` + esc + `y"]}`,
+		"emailNotificationTypes":    `{"emailNotificationTypes":["x` + esc + `y"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			payload := body
+			if name == "mutedWords" {
+				payload = `{"mutedWords":` + body + `}`
+			}
+			h, repo, _, _ := newTestHandler(t)
+			user := updateUser(repo)
+			rec := post(h.Update, payload, user)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "列に入らない jsonb を受け入れている")
+			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
+		})
+	}
+}
+
+// **普通の値は通ったまま。** これが無いと「常に拒否する」実装でも上が通る。
+func TestUpdate_OrdinaryJSONBFieldsStillPass(t *testing.T) {
+	h, repo, _, _ := newTestHandler(t)
+	user := updateUser(repo)
+	rec := post(h.Update, `{"room":{"あ":"絵文字"},"mutedInstances":["example.com"]}`, user)
+	assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+}

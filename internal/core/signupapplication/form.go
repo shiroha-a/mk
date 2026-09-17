@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 )
 
 // Form limits (#2570).
@@ -120,7 +122,13 @@ func BuildAnswers(fields []FormField, values []string) ([]Answer, error) {
 			limit = MaxAnswerLength
 		}
 		// rune 単位で数える。**byte で見ると日本語が通らなくなる。**
-		if len([]rune(v)) > limit {
+		//
+		// **NUL と不正な UTF-8 もここで落とす (#3037)。** 回答は jsonb 列へ
+		// そのまま入るので、PostgreSQL は NUL エスケープを SQLSTATE 22P05 で
+		// 拒否してクエリごと落とす。**この経路は未認証で叩ける**ので、
+		// 誰でも 500 とエラーログを任意に生成できていた。#3022 と同じく既存の
+		// 述語に畳んで既存の 400 に落とす。
+		if !colfit.Fits(v, limit) {
 			return nil, fmt.Errorf("%w: %s", ErrAnswerTooLong, f.Label)
 		}
 		out = append(out, Answer{Label: strings.TrimSpace(f.Label), Value: v})

@@ -13,6 +13,7 @@
 package colfit
 
 import (
+	"encoding/json"
 	"strings"
 	"unicode/utf8"
 )
@@ -103,4 +104,54 @@ func TruncateRunes(s string, max int) string {
 // うえ壊れた参照を保存することになる。そちらは Fits で判定して値ごと捨てる。
 func Text(raw string, max int) string {
 	return TruncateRunes(ToStorable(raw), max)
+}
+
+// JSONStorable reports whether a JSON document can be stored in a `jsonb`
+// column.
+//
+// **PostgreSQL の jsonb は NUL を受け付けない。** テキストとしての NUL エスケープ
+// (JSON の `\u` 表記) も拒否され、SQLSTATE 22P05
+// (`unsupported Unicode escape sequence`) でクエリごと落ちる。text 列の
+// 22021 とは番号が違うだけで、症状は同じ 500。
+//
+// **生バイト列を検索しない。** wire 上の NUL はエスケープされた 6 文字で
+// 届くので、実 NUL バイトを探しても見つからない。逆に文字列の中に現れる
+// 「バックスラッシュ自体がエスケープされた」形は**ただの 6 文字**なので、
+// 文字列検索では誤検出する。値をほどいて歩くのが唯一正しい。
+//
+// **キーも見る。** jsonb はオブジェクトのキーにも同じ制約を掛ける。
+//
+// **構文エラーは通す。** ここは「列に入るか」だけを見る述語で、パースの
+// 可否は呼び出し側の既存の扱いに任せる (`json.RawMessage` は親の Unmarshal が
+// 構文を検査済み)。
+func JSONStorable(raw []byte) bool {
+	if len(raw) == 0 {
+		return true
+	}
+	var v any
+	if err := json.Unmarshal(raw, &v); err != nil {
+		return true
+	}
+	return jsonValueStorable(v)
+}
+
+// jsonValueStorable walks a decoded JSON value looking for an unstorable string.
+func jsonValueStorable(v any) bool {
+	switch t := v.(type) {
+	case string:
+		return Storable(t)
+	case map[string]any:
+		for k, item := range t {
+			if !Storable(k) || !jsonValueStorable(item) {
+				return false
+			}
+		}
+	case []any:
+		for _, item := range t {
+			if !jsonValueStorable(item) {
+				return false
+			}
+		}
+	}
+	return true
 }

@@ -162,3 +162,28 @@ func validFields(n int) []FormField {
 	}
 	return out
 }
+
+// **回答は jsonb 列へそのまま入る (#3037)。** PostgreSQL は NUL エスケープを
+// SQLSTATE 22P05 でクエリごと落とすので、引く前に弾かないと**未認証の利用者が
+// 500 とエラーログを任意に生成できる** (申請フォームは未認証で叩ける)。
+// #3022 と同じく既存の述語 (長さ) に畳んで既存の 400 に落とす。
+func TestBuildAnswers_RejectsUnstorableValue(t *testing.T) {
+	fields := []FormField{{Label: "理由", Required: true, MaxLength: 100}}
+
+	_, err := BuildAnswers(fields, []string{"a\x00b"})
+	require.Error(t, err, "NUL を含む回答を受け入れている")
+	assert.ErrorIs(t, err, ErrAnswerTooLong)
+
+	_, err = BuildAnswers(fields, []string{"a\x80b"})
+	require.Error(t, err, "不正な UTF-8 を含む回答を受け入れている")
+	assert.ErrorIs(t, err, ErrAnswerTooLong)
+}
+
+// **普通の回答は通ったまま。** これが無いと「常に拒否する」実装でも上が通る。
+func TestBuildAnswers_OrdinaryValueStillPasses(t *testing.T) {
+	fields := []FormField{{Label: "理由", Required: true, MaxLength: 100}}
+	got, err := BuildAnswers(fields, []string{"日本語の回答 \U0001F600"})
+	require.NoError(t, err)
+	require.Len(t, got, 1)
+	assert.Equal(t, "日本語の回答 \U0001F600", got[0].Value)
+}

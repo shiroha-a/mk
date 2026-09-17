@@ -342,3 +342,36 @@ func TestRegistryGuards_AcceptOrdinaryValues(t *testing.T) {
 	assert.True(t, validRegistryScope([]string{"client", "base"}))
 	assert.True(t, validRegistryScope(nil))
 }
+
+// **value は jsonb 列へそのまま入る (#3037)。** PostgreSQL は NUL エスケープを
+// SQLSTATE 22P05 でクエリごと落とすので、引く前に弾かないと**任意の認証
+// ユーザーが 500 を起こせる**。
+func TestRegistrySet_UnstorableValueIs400(t *testing.T) {
+	esc := `\u0000`
+	for name, body := range map[string]string{
+		"値に NUL":  `{"key":"theme","value":{"a":"x` + esc + `y"},"scope":["client"]}`,
+		"キーに NUL": `{"key":"theme","value":{"x` + esc + `y":"a"},"scope":["client"]}`,
+		"配列の中":    `{"key":"theme","value":["ok","x` + esc + `y"],"scope":["client"]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, _ := newExtraHandler(t)
+			reg := testutil.NewMockRegistryRepository()
+			h.SetRegistryRepo(reg)
+			rec := postRegistryWithScope(h.RegistrySet, body, stubUser, nil)
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "列に入らない value を受け入れている")
+			assert.Empty(t, reg.Items)
+		})
+	}
+}
+
+// **普通の値は通ったまま。** これが無いと「常に拒否する」実装でも上が通る。
+// バックスラッシュ自体がエスケープされた形 (ただの 6 文字) も通ること。
+func TestRegistrySet_OrdinaryValueStillPasses(t *testing.T) {
+	h, _ := newExtraHandler(t)
+	reg := testutil.NewMockRegistryRepository()
+	h.SetRegistryRepo(reg)
+	rec := postRegistryWithScope(h.RegistrySet,
+		`{"key":"theme","value":{"あ":"絵文字","b":"x\\u0000y"},"scope":["client"]}`, stubUser, nil)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.Len(t, reg.Items, 1)
+}

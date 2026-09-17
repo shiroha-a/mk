@@ -1018,3 +1018,47 @@ func TestCreate_ContentVariablesRequired(t *testing.T) {
 	require.NoError(t, h.Create(c))
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "content 欠落は 400 (#2027)")
 }
+
+// --- jsonb 列に入らない値 (#3037) ---
+
+// `content` / `variables` は jsonb 列へそのまま入る。PostgreSQL は NUL
+// エスケープを SQLSTATE 22P05 でクエリごと落とすので、引く前に弾かないと
+// **任意の認証ユーザーが 500 を起こせる**。
+func TestCreate_UnstorableJSONBIs400(t *testing.T) {
+	esc := `\u0000`
+	for name, body := range map[string]string{
+		"content の値":   `{"title":"t","name":"alpha","content":[{"x":"a` + esc + `b"}],"variables":[]}`,
+		"content のキー":  `{"title":"t","name":"alpha","content":[{"a` + esc + `b":"x"}],"variables":[]}`,
+		"variables の値": `{"title":"t","name":"alpha","content":[],"variables":[{"v":"a` + esc + `b"}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, repo, _ := newHandler(t)
+			c, rec := newReq(t, body)
+			setUser(c, "alice")
+			require.NoError(t, h.Create(c))
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "列に入らない jsonb を受け入れている")
+			assert.Empty(t, repo.Pages)
+		})
+	}
+}
+
+func TestUpdate_UnstorableJSONBIs400(t *testing.T) {
+	esc := `\u0000`
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha"}
+
+	c, rec := newReq(t, `{"pageId":"p1","content":[{"x":"a`+esc+`b"}]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "列に入らない jsonb を受け入れている")
+}
+
+// **普通の JSON は通ったまま。** これが無いと「常に拒否する」実装でも上が通る。
+// バックスラッシュ自体がエスケープされた形 (ただの 6 文字) も通ること。
+func TestCreate_OrdinaryJSONBStillPasses(t *testing.T) {
+	h, _, _ := newHandler(t)
+	c, rec := newReq(t, `{"title":"t","name":"alpha","content":[{"x":"a\\u0000b"}],"variables":[{"あ":"絵文字"}]}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+}

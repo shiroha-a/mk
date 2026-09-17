@@ -1,10 +1,12 @@
 package colfit_test
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 )
@@ -109,4 +111,47 @@ func TestStorable(t *testing.T) {
 			assert.Equal(t, tt.want, colfit.Storable(tt.in))
 		})
 	}
+}
+
+// jsonb 列に入るかの判定。
+//
+// **PostgreSQL の jsonb は NUL を受け付けない。** エスケープされた NUL も
+// SQLSTATE 22P05 (`unsupported Unicode escape sequence`) で拒否される。値でも
+// **キーでも**同じ (実 PostgreSQL で両方を実測)。
+func TestJSONStorable(t *testing.T) {
+	esc := `\u0000` // JSON 上の NUL エスケープ (6 文字)
+	for _, tt := range []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"素のオブジェクト", `{"a":"b"}`, true},
+		{"素の配列", `[1,2,"x"]`, true},
+		{"空", ``, true},
+		{"null", `null`, true},
+		{"数値だけ", `42`, true},
+		{"非 ASCII", `{"あ":"絵文字"}`, true},
+		// **ここが本題。** wire 上ではエスケープで届く。
+		{"値に NUL", `{"a":"x` + esc + `y"}`, false},
+		{"キーに NUL", `{"x` + esc + `y":"b"}`, false},
+		{"配列の要素に NUL", `["ok","x` + esc + `y"]`, false},
+		{"入れ子", `{"a":{"b":["x` + esc + `"]}}`, false},
+		// **バックスラッシュ自体がエスケープされた形はただの 6 文字。**
+		// 生バイト列を文字列検索する実装だとここで誤検出する。
+		{"エスケープされたバックスラッシュ", `{"a":"x\\u0000y"}`, true},
+		// 構文エラーは通す (呼び出し側の既存の扱いに任せる)。
+		{"壊れた JSON", `{`, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, colfit.JSONStorable([]byte(tt.raw)))
+		})
+	}
+	// **実 NUL バイトが入った JSON テキストはそもそも JSON として不正。**
+	// JSON は 0x20 未満の制御文字をエスケープ無しで書けないので、Go の decoder が
+	// 先に落とす = 保存経路には届かない。`JSONStorable` はそれを「構文エラーは
+	// 通す」枝で受けるので true を返すが、呼び出し側の Bind が既に 400 にして
+	// いる (実測でこの前提を確かめた。1 稿目はここを false と書いて外れた)。
+	var probe any
+	require.Error(t, json.Unmarshal([]byte("{\"a\":\"x\x00y\"}"), &probe),
+		"この前提が崩れると JSONStorable にも判定が要る")
 }

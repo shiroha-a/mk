@@ -24,6 +24,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/core/wordmute"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/misc/langmap"
 	miscsmtp "github.com/shiroha-a/mk/internal/misc/smtp"
@@ -732,6 +733,12 @@ func (h *Handler) RegistrySet(c echo.Context) error {
 	if !validRegistryScope(req.Scope) || !storableRegistryValue(req.Key, req.Domain) {
 		return apierr.JSONInvalidParam(c)
 	}
+	// **value は jsonb 列へそのまま入る (#3037)。** PostgreSQL の jsonb は
+	// NUL エスケープを受け付けず SQLSTATE 22P05 でクエリごと落とすので、
+	// 引く前に弾かないと**任意の認証ユーザーが 500 を起こせる**。
+	if !colfit.JSONStorable(req.Value) {
+		return apierr.JSONInvalidParam(c)
+	}
 	// app token は自分の token id を domain に強制する (#1717)。
 	domain := registryEffectiveDomain(c, req.Domain)
 	item := &model.RegistryItem{
@@ -1435,6 +1442,22 @@ func (h *Handler) Update(c echo.Context) error {
 	var req UpdateRequest
 	if err := c.Bind(&req); err != nil {
 		return apierr.JSONInvalidParam(c)
+	}
+	// **jsonb 列へそのまま入る field を先に弾く (#3037)。** PostgreSQL の jsonb は
+	// NUL エスケープを受け付けず SQLSTATE 22P05 でクエリごと落とすので、
+	// 引く前に弾かないと**任意の認証ユーザーが 500 を起こせる**。
+	//
+	// **一覧は手で持つ。** `UpdateRequest` の `json.RawMessage` には
+	// varchar 列へ落ちるもの (`name` / `birthday` / `avatarId` など) も混ざって
+	// いるので、型で機械的には選べない。ここは jsonb 列へ**中身をそのまま**
+	// 書くものだけ。
+	for _, raw := range []json.RawMessage{
+		req.Room, req.MutedWords, req.HardMutedWords,
+		req.NotificationRecieveConfig, req.MutedInstances, req.EmailNotificationTypes,
+	} {
+		if !colfit.JSONStorable(raw) {
+			return apierr.JSONInvalidParam(c)
+		}
 	}
 
 	// upstream paramDef の maxLength / pattern / enum を検証する (#1918)。

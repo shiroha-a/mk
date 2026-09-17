@@ -12,6 +12,7 @@ import (
 	corepage "github.com/shiroha-a/mk/internal/core/page"
 	coreuser "github.com/shiroha-a/mk/internal/core/user"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -109,6 +110,12 @@ func (h *Handler) Create(c echo.Context) error {
 	// content/variables の欠落 (omitted/null) を ajv 同様 400 で弾く (#2027。script は
 	// Go の string で omitted と "" を区別できないため presence 強制は見送る)。
 	if jsonAbsent(req.Content) || jsonAbsent(req.Variables) {
+		return apierr.JSONInvalidParam(c)
+	}
+	// **jsonb 列へそのまま入る (#3037)。** PostgreSQL の jsonb は NUL エスケープを
+	// 受け付けず SQLSTATE 22P05 でクエリごと落とすので、引く前に弾かないと
+	// **任意の認証ユーザーが 500 を起こせる**。
+	if !colfit.JSONStorable(req.Content) || !colfit.JSONStorable(req.Variables) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream create.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、
@@ -256,6 +263,10 @@ func (h *Handler) Update(c echo.Context) error {
 	user := middleware.GetUser(c)
 	var req UpdateRequest
 	if err := c.Bind(&req); err != nil || req.PageID == "" {
+		return apierr.JSONInvalidParam(c)
+	}
+	// **jsonb 列へそのまま入る (#3037)。** create 側と同じ理由。
+	if !colfit.JSONStorable(req.Content) || !colfit.JSONStorable(req.Variables) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream update.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、

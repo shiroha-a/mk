@@ -9,6 +9,7 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -25,6 +26,9 @@ type Handler struct {
 func NewHandler(repo repository.BubbleGameRepository, idGen id.Generator) *Handler {
 	return &Handler{repo: repo, idGen: idGen}
 }
+
+// bubbleGameModeMaxRunes は `bubble_game_record.gameMode` の列幅。
+const bubbleGameModeMaxRunes = 128
 
 // Register handles POST /api/bubble-game/register.
 func (h *Handler) Register(c echo.Context) error {
@@ -61,7 +65,17 @@ func (h *Handler) Register(c echo.Context) error {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_SEED", "Provided seed is invalid.", "eb627bc7-574b-4a52-a860-3c3eae772b88"))
 	}
 
+	// **gameMode は varchar(128)、logs は jsonb (#3037)。** PostgreSQL は
+	// 列に入らない値を SQLSTATE 22021 / 22P05 でクエリごと落とすので、引く前に
+	// 弾かないと**任意の認証ユーザーが 500 を起こせる**。`seed` は上で
+	// `ParseInt` を通っているので数字だけ (列幅 1024 に収まる)。
+	if !colfit.Fits(req.GameMode, bubbleGameModeMaxRunes) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "gameMode is invalid.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
 	logsJSON, _ := json.Marshal(req.Logs)
+	if !colfit.JSONStorable(logsJSON) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "logs is invalid.", "ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
+	}
 	record := &model.BubbleGameRecord{
 		ID:          h.idGen.Generate(now),
 		UserID:      user.ID,
