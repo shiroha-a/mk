@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
 
@@ -150,11 +151,12 @@ func (r *flakyUserRepo) FindByID(id string) (*model.User, error) {
 	return r.MockUserRepository.FindByID(id)
 }
 
-// **`isProtectedAccount` が引き直すので、その間に DB が落ちると保護が消える。**
+// **system アカウントの判定は handler が引いた行だけで完結する。**
 //
-// あちらは `FindByID` の失敗を「保護対象ではない」と扱う。handler は既に行を
-// 引いているので、そちらの行でも形を見る (#3037)。この二重化が無いと、
-// **DB の瞬断の窓で system アカウントのパスワードを発行できる**。
+// 以前は `isProtectedAccount` が `FindByID` で引き直しており、その失敗を
+// 「保護対象ではない」と扱っていたので、**DB の瞬断の窓で system アカウントの
+// パスワードを発行できた** (#3037)。レビュー 2 周目で引き直しを廃し、
+// handler が既に持っている行だけを見る形にしたので窓そのものが無い。
 func TestCredentialResets_SystemAccountStaysProtectedWhenLookupFails(t *testing.T) {
 	users := testutil.NewMockUserRepository()
 	sys := &model.User{ID: "sys", Username: "instance.actor"}
@@ -174,5 +176,132 @@ func TestCredentialResets_SystemAccountStaysProtectedWhenLookupFails(t *testing.
 
 	assert.Equal(t, http.StatusBadRequest, rec.Code, "瞬断の窓で system アカウントを触れている")
 	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
-	assert.Greater(t, flaky.calls, 1, "2 回目の lookup が起きていない (テストが空虚)")
+	// **引き直さないことまで固定する。** 2 回目を足すとその失敗を
+	// 「保護対象ではない」と読む経路が復活する。
+	assert.Equal(t, 1, flaky.calls, "行を引き直している (瞬断の窓が戻る)")
+}
+
+// failingAssignmentRepo makes the role lookup fail while every other read
+// keeps working — the partial outage this guard has to survive.
+type failingAssignmentRepo struct {
+	*testutil.MockRoleAssignmentRepository
+}
+
+func (r *failingAssignmentRepo) ListByUser(string) ([]*model.RoleAssignment, error) {
+	return nil, errors.New("assignment lookup is down")
+}
+
+// failingMetaRepo makes only Fetch fail.
+//
+// 本番の `metaRepository.Fetch` は行が無ければ作り直すので、**返る error は
+// 必ず実障害**。だから「読めなかった」を「root ではない」と読み替えてはいけない。
+type failingMetaRepo struct {
+	repository.MetaRepository
+	fail bool
+}
+
+func (r *failingMetaRepo) Fetch() (*model.Meta, error) {
+	if r.fail {
+		return nil, errors.New("meta is down")
+	}
+	return r.MetaRepository.Fetch()
+}
+
+// takeoverFixture wires a handler whose role lookup and meta read can each be
+// broken independently.
+type takeoverFixture struct {
+	h        *apiadmin.Handler
+	metaRepo *failingMetaRepo
+}
+
+func newTakeoverFixture(t *testing.T, target *model.User, breakAssignments bool) *takeoverFixture {
+	t.Helper()
+
+	users := testutil.NewMockUserRepository()
+	users.Users[target.ID] = target
+	users.Users["mod1"] = &model.User{ID: "mod1", Username: "mod1"}
+
+	inner := testutil.NewMockMetaRepository()
+	inner.Meta = &model.Meta{ID: "x"}
+	metaRepo := &failingMetaRepo{MetaRepository: inner}
+
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+
+	var assignments repository.RoleAssignmentRepository = assignRepo
+	if breakAssignments {
+		assignments = &failingAssignmentRepo{MockRoleAssignmentRepository: assignRepo}
+	}
+	roleSvc := corerole.NewService(roleRepo, assignments, metaRepo, idGen)
+	h := apiadmin.NewHandler(signup.NewService(users, metaRepo, idGen), roleSvc, metaRepo, users, idGen)
+	h.SetSecurityKeyRepo(newFakeSecurityKeyRepo())
+	return &takeoverFixture{h: h, metaRepo: metaRepo}
+}
+
+// **ロールを引けない窓で乗っ取らせない (#3037 レビュー 2 周目)。**
+//
+// `IsAdministrator` / `IsModerator` は判定できないときに false を返すので、
+// 素で使うと `assignmentRepo.ListByUser` が一時的に失敗する窓で**他の管理者を
+// 乗っ取れる**。`RolePrivileges` が error を返し、handler が 500 に倒すこと
+// (#2792) をここで固定する。
+//
+// **この形のテストが無かったため、fail-open に戻す変異が素通りしていた。**
+func TestCredentialResets_RoleLookupFailureIsNotTreatedAsUnprivileged(t *testing.T) {
+	for name, call := range credentialTakeoverCalls() {
+		t.Run(name, func(t *testing.T) {
+			target := &model.User{ID: "victim", Username: "victim"}
+
+			// 対照: ロールを引けるなら通る (「常に 500」の実装では緑にならない)。
+			ok := newTakeoverFixture(t, target, false)
+			rec := call(ok.h, "victim", &model.User{ID: "mod1"})
+			require.Less(t, rec.Code, 300, "正常時に通っていない: %s", rec.Body.String())
+
+			broken := newTakeoverFixture(t, target, true)
+			rec = call(broken.h, "victim", &model.User{ID: "mod1"})
+
+			assert.Equal(t, http.StatusInternalServerError, rec.Code,
+				"ロールを引けない窓で資格情報を発行している: %s", rec.Body.String())
+		})
+	}
+}
+
+// **root は `meta.rootUserId` にしか居ないことがある (#3037 レビュー 2 周目)。**
+//
+// `isRoot` 列が入った migration より前に作られた root は `isRoot=false` のまま
+// で、本番の root がまさにそれ。meta を読めない窓で「root ではない」と扱うと、
+// **モデレーターが root のパスワードを発行できる**。
+func TestCredentialResets_RootStaysProtectedWhenMetaIsUnreadable(t *testing.T) {
+	for name, call := range credentialTakeoverCalls() {
+		t.Run(name, func(t *testing.T) {
+			// `isRoot` は false。root であることは meta にしか書かれていない。
+			target := &model.User{ID: "root1", Username: "root1"}
+			fx := newTakeoverFixture(t, target, false)
+			rootID := "root1"
+			fx.metaRepo.MetaRepository.(*testutil.MockMetaRepository).Meta.RootUserID = &rootID
+
+			// 対照: meta を読めるなら root として弾く。
+			rec := call(fx.h, "root1", &model.User{ID: "mod1"})
+			require.Equal(t, http.StatusBadRequest, rec.Code, "root を弾けていない: %s", rec.Body.String())
+			require.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+
+			fx.metaRepo.fail = true
+			rec = call(fx.h, "root1", &model.User{ID: "mod1"})
+
+			assert.Equal(t, http.StatusInternalServerError, rec.Code,
+				"meta を読めない窓で root の資格情報を発行している: %s", rec.Body.String())
+		})
+	}
+}
+
+func credentialTakeoverCalls() map[string]func(*apiadmin.Handler, string, *model.User) *httptest.ResponseRecorder {
+	return map[string]func(*apiadmin.Handler, string, *model.User) *httptest.ResponseRecorder{
+		"reset-password": func(h *apiadmin.Handler, id string, actor *model.User) *httptest.ResponseRecorder {
+			return doPost(h.ResetPassword, `{"userId":"`+id+`"}`, actor)
+		},
+		"unset-mfa": func(h *apiadmin.Handler, id string, actor *model.User) *httptest.ResponseRecorder {
+			return doPost(h.UnsetMfa, `{"userId":"`+id+`"}`, actor)
+		},
+	}
 }
