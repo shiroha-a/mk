@@ -15,6 +15,7 @@ import (
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // filesDriveLookup is the minimal interface filesHandler needs to decide
@@ -90,9 +91,39 @@ func filesHandler(lookup filesDriveLookup, primary, local coredrive.Storage) ech
 			return c.NoContent(http.StatusNotFound)
 		}
 		storage := primary
-		if lookup != nil && local != nil && !coredrive.StorageIsLocal(primary) {
-			if f, err := lookup.FindByAnyAccessKey(key); err == nil && f.StoredInternal {
-				storage = local
+		// **行が無いものは配らない (#3037)。**
+		//
+		// 以前は primary が非ローカルのときだけ DB を引き、それ以外は
+		// **`drive_file` 行を一度も確認せずストレージから直接返して**いた。
+		// upstream の `FileServerService` は毎回
+		// `resolveFileByAccessKey` を通し、行が無ければ 404 にする。
+		//
+		// 差が出るのは**行を消したのに実体が残っている**とき — 削除時の
+		// オブジェクト削除が失敗した (S3 の一時障害など) 場合や、同じ
+		// バケット / ディレクトリを他の用途と共有している場合。access key は
+		// 推測できないので総当たりはできないが、**一度公開した URL を知って
+		// いる人には削除が効かない**。「消したのにまだ見られる」はドライブの
+		// 削除機能そのものの前提を崩す。
+		//
+		// **ローカルストレージ構成でも 1 回引くようになる。** 非ローカル構成
+		// では元から毎回引いていたので増えない。
+		if lookup != nil {
+			f, err := lookup.FindByAnyAccessKey(key)
+			switch {
+			case err == nil && f != nil:
+				// storedInternal な行は object storage 移行前のもので、
+				// 実体はローカル FS に残っている (#1414)。
+				if f.StoredInternal && local != nil {
+					storage = local
+				}
+			case repository.IsNotFound(err) || (err == nil && f == nil):
+				return c.NoContent(http.StatusNotFound)
+			default:
+				// **DB 障害を 404 に潰さない (#2792)。** 「行が無い」と
+				// 「引けなかった」は別で、後者を 404 にすると監視に 5xx が
+				// 立たないまま全ファイルが消えたように見える。
+				slog.Error("server: drive file lookup failed", "accessKey", key, "err", err)
+				return c.NoContent(http.StatusInternalServerError)
 			}
 		}
 		body, err := storage.Get(key)

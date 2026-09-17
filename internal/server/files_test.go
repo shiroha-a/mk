@@ -18,6 +18,7 @@ import (
 
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // stubFilesLookup is a minimal stand-in for filesDriveLookup. We hand-roll
@@ -34,7 +35,10 @@ func (s *stubFilesLookup) FindByAnyAccessKey(key string) (*model.DriveFile, erro
 	}
 	f, ok := s.byKey[key]
 	if !ok {
-		return nil, errors.New("not found")
+		// **repository と同じ「無い」の表し方にする。** 素の error にすると
+		// handler の「DB 障害」枝を踏んでしまい、404 と 500 を取り違えた
+		// ままテストが緑になる。
+		return nil, repository.ErrNotFound
 	}
 	return f, nil
 }
@@ -110,19 +114,39 @@ func TestFilesHandler_NonInternalServesFromPrimary(t *testing.T) {
 	assert.Equal(t, "s3-body", rec.Body.String())
 }
 
-// DB に行がなければ primary に倒す (旧挙動互換)。
-func TestFilesHandler_LookupMissFallsBackToPrimary(t *testing.T) {
+// **`drive_file` 行が無いものは配らない (#3037)。**
+//
+// 以前は primary へ倒して**実体をそのまま返して**いた。差が出るのは行を
+// 消したのに実体が残っているとき (削除時のオブジェクト削除が失敗した、
+// 同じバケットを他の用途と共有している) で、**一度公開した URL を知って
+// いる人には削除が効かない**状態だった。upstream の `FileServerService` は
+// 毎回 `resolveFileByAccessKey` を通し、行が無ければ 404 にする。
+func TestFilesHandler_OrphanObjectIsNotServed(t *testing.T) {
 	key := "orphan-key"
 	lookup := &stubFilesLookup{byKey: map[string]*model.DriveFile{}}
 	primary := &memStorage{byKey: map[string]string{key: "primary-body"}}
 	local := &memStorage{byKey: map[string]string{key: "should-not-be-used"}}
 
 	c, rec := newFilesTestContext(t, key)
-	h := filesHandler(lookup, primary, local)
-	require.NoError(t, h(c))
+	require.NoError(t, filesHandler(lookup, primary, local)(c))
 
-	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, "primary-body", rec.Body.String())
+	assert.Equal(t, http.StatusNotFound, rec.Code, "行の無い実体を配っている")
+	assert.Empty(t, rec.Body.String())
+}
+
+// **lookup が落ちたら 500。** 「行が無い」と「引けなかった」は別で、
+// 後者を 404 にすると監視に 5xx が立たないまま全ファイルが消えたように
+// 見える (#2792)。
+func TestFilesHandler_LookupFailureIs500(t *testing.T) {
+	key := "k"
+	lookup := &stubFilesLookup{err: errors.New("db is down")}
+	primary := &memStorage{byKey: map[string]string{key: "primary-body"}}
+
+	c, rec := newFilesTestContext(t, key)
+	require.NoError(t, filesHandler(lookup, primary, nil)(c))
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.Empty(t, rec.Body.String())
 }
 
 // lookup を未配線にしても primary 経路で素通る (useObjectStorage=false な
@@ -224,10 +248,13 @@ func TestFilesHandler_NonBrowserSafeIsOctetStreamWithCSP(t *testing.T) {
 	assert.Equal(t, "nosniff", rec.Header().Get("X-Content-Type-Options"))
 }
 
-// #2315: primary が現時点でローカルなら local と同じ FS を指すので
-// storedInternal 判定は無意味であり、ホットパスの DB クエリを省く。
-// backend は admin 設定で動的に切り替わるので、この判定は配線時に固定できない。
-func TestFilesHandler_SkipsLookupWhilePrimaryIsLocal(t *testing.T) {
+// **#2315 の「ローカルなら DB を引かない」は #3037 で撤回した。**
+//
+// 引かないと `drive_file` 行の存在を一度も確認しないまま実体を配ることに
+// なる (`TestFilesHandler_OrphanObjectIsNotServed`)。storedInternal の判定
+// だけなら確かに無意味だが、**行があるかどうかの判定**は無意味ではない。
+// 非ローカル構成では元から毎回引いていたので、増えるのはローカル構成だけ。
+func TestFilesHandler_LooksUpEvenWhilePrimaryIsLocal(t *testing.T) {
 	key := "k"
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, key), []byte("from-local-fs"), 0o644))
@@ -242,7 +269,7 @@ func TestFilesHandler_SkipsLookupWhilePrimaryIsLocal(t *testing.T) {
 	require.NoError(t, filesHandler(lookup, local, local)(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "from-local-fs", rec.Body.String())
-	assert.Equal(t, 0, lookup.calls, "primary がローカルなら DB を引かない")
+	assert.Equal(t, 1, lookup.calls, "行の存在を確認していない")
 }
 
 // object storage を有効にしたら、同じ配線のまま lookup が効いて
@@ -263,7 +290,8 @@ func TestFilesHandler_LookupEngagesWhenPrimaryBecomesRemote(t *testing.T) {
 	c, rec := newFilesTestContext(t, key)
 	require.NoError(t, h(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
-	assert.Equal(t, 0, lookup.calls, "無効の間は DB を引かない")
+	// #3037 以降は構成に関係なく毎回引く (行の存在確認そのものが要るため)。
+	assert.Equal(t, 1, lookup.calls, "行の存在を確認していない")
 
 	// 再起動なしで有効化する。
 	current = &model.Meta{
@@ -280,7 +308,7 @@ func TestFilesHandler_LookupEngagesWhenPrimaryBecomesRemote(t *testing.T) {
 	require.NoError(t, h(c))
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "from-local-fs", rec.Body.String(), "storedInternal=true の既存ファイルはローカルから提供される")
-	assert.Equal(t, 1, lookup.calls, "有効化後は DB を引いて local へ振り分ける")
+	assert.Equal(t, 2, lookup.calls, "有効化後は DB を引いて local へ振り分ける")
 }
 
 // countingFilesLookup records how many times the handler consulted the DB.
@@ -307,7 +335,10 @@ func (f *failingStorage) Delete(string) error                   { return nil }
 // **監視にも 5xx が立たない**。#2990 が `S3Storage.Get` で種別を分けた目的
 // そのもので、他の呼び出し側は全部直っているのにここだけ残っていた。
 func TestFilesHandler_StorageFailureIs500(t *testing.T) {
-	lookup := &stubFilesLookup{byKey: map[string]*model.DriveFile{}}
+	// 行はある (無いと #3037 の 404 で手前で止まる)。
+	lookup := &stubFilesLookup{byKey: map[string]*model.DriveFile{
+		"k1": {ID: "f1"},
+	}}
 	primary := &failingStorage{err: errors.New("AccessDenied: token expired")}
 	local := &memStorage{byKey: map[string]string{}}
 
@@ -321,7 +352,10 @@ func TestFilesHandler_StorageFailureIs500(t *testing.T) {
 // **wrap された ErrObjectNotFound は 404 のまま。** `errors.Is` ではなく `==`
 // で比べる実装だと、ここで 500 に化ける。
 func TestFilesHandler_WrappedNotFoundStays404(t *testing.T) {
-	lookup := &stubFilesLookup{byKey: map[string]*model.DriveFile{}}
+	// 行はある (無いと #3037 の 404 で手前で止まり、storage の分岐を踏まない)。
+	lookup := &stubFilesLookup{byKey: map[string]*model.DriveFile{
+		"k1": {ID: "f1"},
+	}}
 	primary := &failingStorage{err: fmt.Errorf("s3 get k1: %w", coredrive.ErrObjectNotFound)}
 	local := &memStorage{byKey: map[string]string{}}
 
