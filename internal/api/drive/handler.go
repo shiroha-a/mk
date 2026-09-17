@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
-	"unicode/utf8"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
@@ -21,6 +20,7 @@ import (
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -264,7 +264,7 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 	}
 	if v := c.FormValue("comment"); v != "" {
 		// upstream paramDef は comment maxLength=512 (#1564)。
-		if utf8.RuneCountInString(v) > maxDriveCommentLength {
+		if !colfit.Fits(v, maxDriveCommentLength) {
 			return apierr.JSONInvalidParam(c)
 		}
 		in.Comment = &v
@@ -421,7 +421,7 @@ func (h *Handler) FilesUpdate(c echo.Context) error {
 				return apierr.JSONInvalidParam(c)
 			}
 			// upstream update.ts paramDef は comment maxLength=512 (#1564)。
-			if utf8.RuneCountInString(comment) > maxDriveCommentLength {
+			if !colfit.Fits(comment, maxDriveCommentLength) {
 				return apierr.JSONInvalidParam(c)
 			}
 			cp := &comment
@@ -508,7 +508,7 @@ func (h *Handler) FoldersCreate(c echo.Context) error {
 		name = *req.Name
 	}
 	// upstream folders/create paramDef は name maxLength=200 (#1564)。
-	if utf8.RuneCountInString(name) > maxDriveFolderNameLength {
+	if !colfit.Fits(name, maxDriveFolderNameLength) {
 		return apierr.JSONInvalidParam(c)
 	}
 	f, err := h.svc.CreateFolder(user, name, req.ParentID)
@@ -612,7 +612,7 @@ func (h *Handler) FoldersUpdate(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream folders/update paramDef は name maxLength=200 (#1564)。
-	if req.Name != nil && utf8.RuneCountInString(*req.Name) > maxDriveFolderNameLength {
+	if req.Name != nil && !colfit.Fits(*req.Name, maxDriveFolderNameLength) {
 		return apierr.JSONInvalidParam(c)
 	}
 	in := coredrive.UpdateFolderInput{Name: req.Name}
@@ -991,7 +991,7 @@ func (h *Handler) FilesUploadFromURL(c echo.Context) error {
 	// upstream paramDef は comment maxLength=512。ajv の maxLength は文字数
 	// (code unit) 基準なので byte 長ではなく rune 数で判定する (多バイト文字を
 	// 過剰に弾かないため)。超過は INVALID_PARAM。
-	if req.Comment != nil && utf8.RuneCountInString(*req.Comment) > maxDriveCommentLength {
+	if req.Comment != nil && !colfit.Fits(*req.Comment, maxDriveCommentLength) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// uploader 未配線 (= 単体テスト等) は upstream と同じ空レスポンスで返す。

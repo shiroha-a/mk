@@ -421,3 +421,52 @@ func TestFilesAttachedNotes_ModeratorCanQueryOthersFile(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 	assert.Contains(t, rec.Body.String(), "NO_SUCH_FILE")
 }
+
+// --- 列に入らない値を弾く (#3037) ---
+
+// `drive_file.comment` / `drive_folder.name` は varchar。NUL も不正な UTF-8 も
+// そのまま INSERT / UPDATE すると SQLSTATE 22021 でクエリごと落ちるので、
+// **認証済みの利用者が 1 文字で 500 を起こせていた**。#3022 と同じく長さと同じ
+// 述語 (`colfit.Fits`) に畳んで、既存の 400 に落とす。
+func TestFilesCreate_UnstorableCommentIs400(t *testing.T) {
+	for name, comment := range map[string]string{
+		"NUL":           "a\x00b",
+		"invalid UTF-8": "a\x80b",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, fileRepo, _ := newHandler(t)
+			c, rec := newMultipartReq(t, "a.txt", "hello", map[string]string{"comment": comment})
+			setUser(c, "u1")
+			require.NoError(t, h.FilesCreate(c))
+			assert.Equal(t, http.StatusBadRequest, rec.Code, "列に入らない comment を受け入れている")
+			assert.Empty(t, fileRepo.Files)
+		})
+	}
+}
+
+// **JSON body から来るのは NUL だけ。** Go の json は不正な UTF-8 も孤立
+// サロゲートのエスケープも U+FFFD へ矯正するので、`\u0000` エスケープだけが
+// 実バイトとして届く。不正な UTF-8 が届くのは multipart のフォーム値や
+// クエリパラメータ側 (上の `TestFilesCreate_UnstorableCommentIs400` が
+// そちらを踏む)。
+func TestFoldersCreate_UnstorableNameIs400(t *testing.T) {
+	h, _, folderRepo := newHandler(t)
+	body, _ := json.Marshal(map[string]any{"name": "a\x00b"})
+	c, rec := newJSONReq(t, string(body))
+	setUser(c, "u1")
+	require.NoError(t, h.FoldersCreate(c))
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "列に入らない folder 名を受け入れている")
+	assert.Empty(t, folderRepo.Folders)
+}
+
+// **普通の値は通ったまま** (`TestFilesCreate_Comment512OK` /
+// `TestFoldersCreate_Success` が担当だが、ここでも非 ASCII を明示しておく)。
+func TestFoldersCreate_NonASCIINameStillPasses(t *testing.T) {
+	h, _, folderRepo := newHandler(t)
+	body, _ := json.Marshal(map[string]any{"name": "絵文字\U0001F600フォルダ"})
+	c, rec := newJSONReq(t, string(body))
+	setUser(c, "u1")
+	require.NoError(t, h.FoldersCreate(c))
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Len(t, folderRepo.Folders, 1)
+}

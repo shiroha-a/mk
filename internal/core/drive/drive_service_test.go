@@ -15,6 +15,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1716,4 +1717,35 @@ func TestImageProcessor_OrdinaryImageStillProcesses(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 16, w)
 	assert.Equal(t, 16, h)
+}
+
+// **列に入らないファイル名を弾く (#3037)。**
+//
+// `drive_file.name` は varchar(256)。NUL も不正な UTF-8 も列幅超過も、そのまま
+// INSERT / UPDATE すると PostgreSQL がクエリごと落とす (22021 / 22001) ので、
+// **認証済みの利用者が 1 文字で 500 を起こせていた**。#3022 と同じく既存の
+// 述語 (`ValidateFileName`) に畳んで既存の 400 に落とす。
+func TestValidateFileName_RejectsUnstorable(t *testing.T) {
+	for name, in := range map[string]string{
+		"NUL":            "a\x00b.png",
+		"invalid UTF-8":  "a\x80b.png",
+		"lone surrogate": "a\xed\xa0\x80b.png",
+		"too long (201)": strings.Repeat("a", 201),
+	} {
+		t.Run(name, func(t *testing.T) {
+			assert.False(t, drive.ValidateFileName(in), "列に入らない名前を受け入れている")
+		})
+	}
+}
+
+// **普通の名前は通ったまま。** これが無いと「常に拒否する」実装でも上が通る。
+func TestValidateFileName_OrdinaryNamesStillPass(t *testing.T) {
+	for _, in := range []string{
+		"hello.png",
+		"日本語のファイル名.jpg",
+		"絵文字\U0001F600.png",
+		strings.Repeat("あ", 200),
+	} {
+		assert.True(t, drive.ValidateFileName(in), "正当な名前を弾いている: %q", in)
+	}
 }

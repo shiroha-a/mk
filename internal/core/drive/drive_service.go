@@ -13,9 +13,9 @@ import (
 	"runtime"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/shiroha-a/mk/internal/entity"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -96,9 +96,15 @@ func policyMegabytes(v any) (int64, bool) {
 // the trimmed name must be non-empty, at most 200 characters, and must not
 // contain a backslash, a slash, or "..". 長さは JS の String.length (UTF-16)
 // に対し rune 数で近似する (upload-from-url の comment 512 判定と同方針)。
+//
+// **NUL と不正な UTF-8 もここで落とす (#3037)。** `drive_file.name` は
+// varchar なので、そのまま INSERT / UPDATE すると PostgreSQL が SQLSTATE 22021
+// でクエリごと落とし、**認証済みの利用者が 1 文字で 500 を起こせる**。
+// #3022 と同じく**既存の述語に畳んで既存の 400 に落とす** — 利用者にできること
+// は変わらないので、wire に新しいエラーコードを足さない。
 func ValidateFileName(name string) bool {
 	return strings.TrimSpace(name) != "" &&
-		utf8.RuneCountInString(name) <= 200 &&
+		colfit.Fits(name, 200) &&
 		!strings.Contains(name, "\\") &&
 		!strings.Contains(name, "/") &&
 		!strings.Contains(name, "..")

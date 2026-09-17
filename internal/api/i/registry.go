@@ -16,11 +16,24 @@ import (
 // ^[a-zA-Z0-9_]+$ (#1546)。各 registry endpoint で scope 要素を検証する。
 var registryScopeElemRe = regexp.MustCompile(`^[a-zA-Z0-9_]+$`)
 
+// registry の列幅 (`internal/model/registry_item.go`)。**幅を超えた値は
+// SQLSTATE 22001 でクエリごと落ちる**ので、列に届く前に弾く (#3037)。
+// `i/registry/*` は**任意の認証ユーザー**が叩けるので、長い文字列 1 つで
+// 500 を起こせていた。
+const (
+	registryKeyMaxRunes    = 1024 // key varchar(1024)
+	registryDomainMaxRunes = 512  // domain varchar(512)
+	registryScopeMaxRunes  = 1024 // scope varchar(1024)[]
+)
+
 // validRegistryScope reports whether every scope element matches the upstream
-// pattern. Empty scope ([]) is valid.
+// pattern and fits its column. Empty scope ([]) is valid.
+//
+// **正規表現だけでは足りない。** `^[a-zA-Z0-9_]+$` は文字種しか見ないので、
+// 同じ文字を 1025 個並べるだけで列に入らない値が通っていた。
 func validRegistryScope(scope []string) bool {
 	for _, s := range scope {
-		if !registryScopeElemRe.MatchString(s) {
+		if !registryScopeElemRe.MatchString(s) || !colfit.Fits(s, registryScopeMaxRunes) {
 			return false
 		}
 	}
@@ -33,8 +46,13 @@ func validRegistryScope(scope []string) bool {
 // `key = ?` / `domain = ?` の bind parameter に載るので、NUL を 1 文字入れると
 // クエリごと落ちて 500 になる (`i/registry/get-all` などは**任意の認証
 // ユーザー**が叩ける)。scope と同じ場所で弾く。
+//
+// **幅も見る (#3037)。** NUL だけ見ていたので、列幅を超える値は 22001 で
+// 同じ 500 になっていた。#3022 と同じく**既存の述語に畳んで既存の 400 に
+// 落とす** — 利用者にできることは変わらないので新しいエラーコードを足さない。
 func storableRegistryValue(key string, domain *string) bool {
-	return colfit.Storable(key) && (domain == nil || colfit.Storable(*domain))
+	return colfit.Fits(key, registryKeyMaxRunes) &&
+		(domain == nil || colfit.Fits(*domain, registryDomainMaxRunes))
 }
 
 // registryEffectiveDomain returns the domain a registry request operates on.

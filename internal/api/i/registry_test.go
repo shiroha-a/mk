@@ -310,3 +310,35 @@ func TestRegistryGet_DBFailureIsNot4xx(t *testing.T) {
 		assert.Contains(t, rec.Body.String(), "NO_SUCH_KEY")
 	})
 }
+
+// **列に入らない registry の値を弾く (#3037)。**
+//
+// `i/registry/*` は**任意の認証ユーザー**が叩ける。`key` varchar(1024) /
+// `domain` varchar(512) / `scope` varchar(1024)[] を超える値は SQLSTATE 22001 で
+// クエリごと落ちるので、長い文字列 1 つで 500 を起こせていた。NUL (#3025) は
+// 既に塞いであったが、幅は見ていなかった。
+func TestRegistryGuards_RejectOverwideValues(t *testing.T) {
+	long := strings.Repeat("a", 1025)
+
+	assert.False(t, storableRegistryValue(long, nil), "key の幅を見ていない")
+	domain := strings.Repeat("d", 513)
+	assert.False(t, storableRegistryValue("k", &domain), "domain の幅を見ていない")
+	assert.False(t, validRegistryScope([]string{long}), "scope の幅を見ていない")
+
+	// NUL は従来どおり (回帰していないこと)。
+	assert.False(t, storableRegistryValue("a\x00b", nil))
+	nulDomain := "a\x00b"
+	assert.False(t, storableRegistryValue("k", &nulDomain))
+}
+
+// **境界ちょうどと普通の値は通ったまま。** これが無いと「常に拒否する」実装でも
+// 上のテストが通る。
+func TestRegistryGuards_AcceptOrdinaryValues(t *testing.T) {
+	assert.True(t, storableRegistryValue(strings.Repeat("a", 1024), nil), "key の上限ちょうどを弾いている")
+	domain := strings.Repeat("d", 512)
+	assert.True(t, storableRegistryValue("k", &domain), "domain の上限ちょうどを弾いている")
+	assert.True(t, validRegistryScope([]string{strings.Repeat("a", 1024)}), "scope の上限ちょうどを弾いている")
+	assert.True(t, storableRegistryValue("client", nil))
+	assert.True(t, validRegistryScope([]string{"client", "base"}))
+	assert.True(t, validRegistryScope(nil))
+}
