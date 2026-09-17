@@ -2382,6 +2382,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 検索対象にしない。
 	s.echo.GET("/tags/:tag", ssrMeta.NoIndexPage)
 	s.echo.GET("/user-tags/:tag", ssrMeta.NoIndexPage)
+	// 連合先の情報ページ (#3030)。upstream は SSR していないので SPA shell が
+	// そのまま index される。**自鯖の情報ではないものを検索結果に出す意味が
+	// 無い**うえ、連合先の数だけ URL が増えて検索のノイズになる。
+	// `:host` で自ホストも指せるが、あれも運用者向けの詳細ページなので分けない。
+	s.echo.GET("/instance-info/:host", ssrMeta.NoIndexPage)
 	s.echo.GET("/play/:id", ssrMeta.FlashPage)
 	s.echo.GET("/gallery/:post", ssrMeta.GalleryPage)
 
