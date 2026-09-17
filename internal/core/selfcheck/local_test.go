@@ -66,7 +66,7 @@ func TestRun_ContinuesAfterFailure(t *testing.T) {
 
 	report := Run(context.Background(), NewChecker(srv.URL), LocalDeps{})
 	assert.False(t, report.OK)
-	assert.Len(t, report.Results, 7, "全項目ぶんの結果が返る")
+	assert.Len(t, report.Results, 8, "全項目ぶんの結果が返る")
 }
 
 // warn だけなら OK は落とさない。「見ておくべき」と「壊れている」を区別する。
@@ -76,4 +76,15 @@ func TestReport_WarnDoesNotFailOverall(t *testing.T) {
 
 	r = newReport([]Result{okResult("a", ""), failResult("b", "", "hint")})
 	assert.False(t, r.OK)
+}
+
+// meta.rootUserId が未設定なら fail を返す。
+//
+// **未設定だと `admin/accounts/create` の初回セットアップ判定が、ローカル利用者数の
+// ガードだけに依存する状態になる。** 運用者がそれに気付ける手段が他に無い。
+func TestCheckRootUser(t *testing.T) {
+	t.Run("DB 未配線は skip", func(t *testing.T) {
+		got := CheckRootUser(context.Background(), LocalDeps{})
+		assert.Equal(t, StatusSkip, got.Status)
+	})
 }

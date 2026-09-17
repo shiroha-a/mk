@@ -67,6 +67,37 @@ func CheckDatabase(ctx context.Context, deps LocalDeps) Result {
 	return okResult(name, fmt.Sprintf("接続 ok / migration version %d", row.Version))
 }
 
+// CheckRootUser verifies that meta.rootUserId is set.
+//
+// **未設定だと `admin/accounts/create` が未認証で開いたままになる。** あの
+// endpoint は `meta.rootUserId == nil && 未認証` を初回セットアップとみなす。
+// `rootUserId` を書くのは signup service の初回セットアップ分岐だけで、公開
+// `/api/signup` は本番でそこを通らないため、**登録を開放して通常の signup で
+// 最初のアカウントを作ると永久に NULL のまま**になる。`update-meta` は
+// `rootUserId` を protected として落とすので、管理者が手で埋めることもできない。
+//
+// handler 側にも「ローカル利用者が既に居るなら初回セットアップ扱いにしない」
+// ガードを入れてあるので窓自体は閉じるが、**そこに依存している状態は運用者に
+// 見えるべき**なので警告する。root が居ないと `IsAdministrator` の root 判定も
+// 効かない。
+func CheckRootUser(ctx context.Context, deps LocalDeps) Result {
+	const name = "root user"
+	if deps.DB == nil {
+		return skipResult(name, "DB が未配線")
+	}
+	var rootID *string
+	if err := deps.DB.WithContext(ctx).
+		Raw(`SELECT "rootUserId" FROM meta LIMIT 1`).
+		Scan(&rootID).Error; err != nil {
+		return failResult(name, "meta を読めない", "DB の状態を確認する")
+	}
+	if rootID == nil || *rootID == "" {
+		return failResult(name, "meta.rootUserId が未設定",
+			"root を指名し直すには DB を直接更新する (`update-meta` は rootUserId を受け付けない)。未設定のままだと root 判定が効かず、初回セットアップ窓の判定がローカル利用者数のガードだけに依存する")
+	}
+	return okResult(name, "meta.rootUserId 設定済み")
+}
+
 // CheckRedis verifies connectivity.
 func CheckRedis(ctx context.Context, deps LocalDeps) Result {
 	const name = "redis"
@@ -88,6 +119,7 @@ func Run(ctx context.Context, checker *Checker, deps LocalDeps) Report {
 	results := []Result{checker.CheckConfig()}
 	results = append(results,
 		CheckDatabase(ctx, deps),
+		CheckRootUser(ctx, deps),
 		CheckRedis(ctx, deps),
 		checker.CheckWebFinger(ctx),
 		checker.CheckNodeInfo(ctx),

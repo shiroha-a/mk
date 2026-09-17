@@ -379,6 +379,7 @@ worker 数は既定値がキューごとに違い、`stuck 検出` は**キュ�
 ```
   ok    config.url   https://example.com
   ok    database     接続 ok / migration version 93
+  ok    root user    meta.rootUserId 設定済み
   ok    redis        接続 ok
   FAIL  webfinger    status 403 (連合が無効)
         インスタンス設定の `federation` が `none` になっている。連合するなら管理画面で有効にする
@@ -397,6 +398,7 @@ warn は「見ておくべき」であって「壊れている」ではないた
 |---|---|
 | `config.url` | 絶対 URL か、https か |
 | `database` | 接続と、`schema_migrations` が同梱マイグレーションに追いついているか |
+| `root user` | `meta.rootUserId` が設定されているか。**未設定だと root 判定が効かず**、`admin/accounts/create` の初回セットアップ判定がローカル利用者数のガードだけに依存する状態になる。指名し直すには DB を直接更新する (`update-meta` は `rootUserId` を受け付けない) |
 | `redis` | 接続 |
 | `webfinger` | **公開 URL 経由**で `acct:instance.actor@<host>` が引けるか |
 | `nodeinfo` | discovery から本体まで辿れるか |

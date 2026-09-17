@@ -23,6 +23,8 @@ var mockLocalUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
 
 // MockUserRepository is a test double for repository.UserRepository.
 type MockUserRepository struct {
+	// CountLocalUsersErr forces CountLocalUsers to fail (fail-closed の枝用)。
+	CountLocalUsersErr        error
 	Users                     map[string]*model.User        // keyed by ID
 	Tokens                    map[string]*model.User        // keyed by token
 	Profiles                  map[string]*model.UserProfile // keyed by userID
@@ -676,6 +678,12 @@ func (m *MockUserRepository) CountOnlineUsers() (int64, error) {
 
 // CountLocalUsers counts non-deleted local users in the mock store.
 func (m *MockUserRepository) CountLocalUsers() (int64, error) {
+	// **error を注入できるようにしてある。** 呼び出し側に fail-closed の枝が
+	// あるとき (admin/accounts/create の初回セットアップ判定)、それを踏めないと
+	// 「数えられなくても窓を開ける」実装に戻しても緑のまま通る。
+	if m.CountLocalUsersErr != nil {
+		return 0, m.CountLocalUsersErr
+	}
 	var n int64
 	for _, u := range m.Users {
 		if u.Host == nil && !u.IsDeleted {

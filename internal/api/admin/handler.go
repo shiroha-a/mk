@@ -840,6 +840,38 @@ func (h *Handler) AccountsCreate(c echo.Context) error {
 	user := middleware.GetUser(c)
 	isInitialSetup := meta.RootUserID == nil && user == nil
 
+	// **利用者が既に居るなら初回セットアップではない。**
+	//
+	// `meta.rootUserId` を書くのはコードベース全体で 1 箇所 (signup service の
+	// `isInitialSetup` 分岐) しか無く、公開 `/api/signup` は本番でそこを通らない
+	// (`internal/api/signup/handler.go` が `h.testMode && ...` で判定している。
+	// 開放した瞬間に誰でも root を取れてしまうのを避けるための、それ自体は
+	// 妥当な判断)。その結果、**運営者が登録を開放して通常の signup で最初の
+	// アカウントを作ると `rootUserId` は永久に NULL のまま**になり、この
+	// endpoint が未認証のまま開き続ける。`update-meta` は `rootUserId` を
+	// protected として落とすので、管理者が手で閉じることもできない。
+	//
+	// upstream は `SignupService` が経路を問わず「`rootUserId` が NULL なら
+	// 作ったアカウントを root にする」ので最初の 1 人で窓が閉じる。mk-go は
+	// そちらを採らない代わりに、ここで閉じる。
+	//
+	// **数えられなければ初回セットアップとして扱わない (fail-closed)。**
+	// 判定できないことを理由に未認証の窓を開けるわけにいかない。正当な初回
+	// セットアップは再試行すれば通るし、原因が分かるよう 500 で返す
+	// (ACCESS_DENIED に潰すと「権限が足りない」と誤読される)。
+	if isInitialSetup {
+		if h.userRepo == nil {
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
+		n, cerr := h.userRepo.CountLocalUsers()
+		if cerr != nil {
+			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
+		}
+		if n > 0 {
+			isInitialSetup = false
+		}
+	}
+
 	if isInitialSetup {
 		// TS互換: setupPassword検証。configにsetupPasswordが設定されている場合は
 		// クライアントの値と一致させる。未設定なのにクライアントが非空値を送った場合も拒否。

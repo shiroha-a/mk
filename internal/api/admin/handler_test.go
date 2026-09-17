@@ -399,11 +399,62 @@ func TestAccountsCreate_InvalidJSON(t *testing.T) {
 }
 
 func TestAccountsCreate_DuplicateUsername(t *testing.T) {
-	h, userRepo, _, _ := newTestHandler(t)
+	// **認証済み admin で叩く。** 以前はここを未認証で叩いて 409 を期待していたが、
+	// それは「利用者が既に居るのに初回セットアップ扱いで到達できる」という
+	// 脆弱な挙動そのものを固定していた (下の
+	// TestAccountsCreate_InitialSetupClosesOnceAUserExists を参照)。
+	h, userRepo, metaRepo, _ := newTestHandler(t)
+	rootID := "root1"
+	metaRepo.Meta.RootUserID = &rootID
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "taken", UsernameLower: "taken"}
 
-	rec := doPost(h.AccountsCreate, `{"username":"taken","password":"pass"}`, nil)
+	rootUser := &model.User{ID: "root1", Username: "root"}
+	rec := doPost(h.AccountsCreate, `{"username":"taken","password":"pass"}`, rootUser)
 	assert.Equal(t, http.StatusConflict, rec.Code)
+}
+
+// 初回セットアップの窓は、ローカル利用者が 1 人でも居れば閉じる。
+//
+// **`meta.rootUserId` だけを条件にすると窓が閉じない。** あれを書くのは signup
+// service の `isInitialSetup` 分岐だけで、公開 `/api/signup` は本番でそこを
+// 通らない。運営者が登録を開放して通常の signup で最初のアカウントを作ると
+// `rootUserId` は永久に NULL のままになり、**この endpoint が未認証のまま
+// 開き続ける**。`update-meta` は `rootUserId` を落とすので手で閉じることも
+// できない。
+func TestAccountsCreate_InitialSetupClosesOnceAUserExists(t *testing.T) {
+	t.Run("利用者が居れば未認証は拒否", func(t *testing.T) {
+		h, userRepo, metaRepo, _ := newTestHandler(t)
+		metaRepo.Meta.RootUserID = nil // 窓が開いている想定
+		userRepo.Users["u1"] = &model.User{ID: "u1", Username: "someone", UsernameLower: "someone"}
+
+		rec := doPost(h.AccountsCreate, `{"username":"attacker","password":"pass1234"}`, nil)
+		assert.Equal(t, http.StatusBadRequest, rec.Code)
+		assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+		for _, u := range userRepo.Users {
+			assert.NotEqual(t, "attacker", u.UsernameLower, "アカウントが作られている")
+		}
+	})
+
+	// **弾きすぎていないことを見る。** 常に拒否する実装でも上は緑になる。
+	t.Run("誰も居なければ従来どおり通る", func(t *testing.T) {
+		h, _, metaRepo, _ := newTestHandler(t)
+		metaRepo.Meta.RootUserID = nil
+
+		rec := doPost(h.AccountsCreate, `{"username":"firstadmin","password":"pass1234"}`, nil)
+		assert.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		assert.NotNil(t, metaRepo.Meta.RootUserID, "rootUserId が設定されて窓が閉じる")
+	})
+
+	// 数えられないときは初回セットアップ扱いにしない (fail-closed)。
+	// **ACCESS_DENIED に潰さない** — 「権限が足りない」と誤読されるため。
+	t.Run("数えられなければ 500", func(t *testing.T) {
+		h, userRepo, metaRepo, _ := newTestHandler(t)
+		metaRepo.Meta.RootUserID = nil
+		userRepo.CountLocalUsersErr = assert.AnError
+
+		rec := doPost(h.AccountsCreate, `{"username":"x","password":"pass1234"}`, nil)
+		assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	})
 }
 
 func TestAccountsCreate_MetaFetchError(t *testing.T) {
