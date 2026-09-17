@@ -435,6 +435,68 @@ redis:
 	}
 }
 
+// mediaProxyConcurrency は未設定/0 を「実行時の既定に委ねる」意味の 0 にする (#3032)。
+//
+// **負値を素通しさせない。** そのまま semaphore の容量になると 0 枠になり、
+// リサイズ系のリクエストが 1 本も通らなくなる (全部 503 に落ちる)。
+func TestLoad_MediaProxyConcurrency(t *testing.T) {
+	base := `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`
+	for name, tc := range map[string]struct {
+		line string
+		want int
+	}{
+		"未設定は 0 (実行時の既定)": {"", 0},
+		"正の値はそのまま":        {"mediaProxyConcurrency: 6", 6},
+		"0 はそのまま":         {"mediaProxyConcurrency: 0", 0},
+		"負値は 0 に落とす":      {"mediaProxyConcurrency: -5", 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			path := writeTestConfig(t, base+tc.line+"\n")
+			cfg, err := Load(path)
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, cfg.MediaProxyConcurrency)
+		})
+	}
+}
+
+// mediaProxyConcurrency が MK_ で上書きできること (#3032)。
+//
+// **bindEnvKeys に登録しないと、設定ファイルに書いていない環境では
+// 環境変数だけでは作れない** (CLAUDE.md Section 9)。運用で緊急に絞りたい
+// ときに効かないと困るので、登録そのものを固定する。
+func TestLoad_MediaProxyConcurrencyFromEnv(t *testing.T) {
+	base := `
+url: https://example.com
+port: 3000
+db:
+  host: localhost
+  port: 5432
+  db: misskey
+  user: postgres
+  pass: secret
+redis:
+  host: localhost
+  port: 6379
+`
+	t.Setenv("MK_MEDIAPROXYCONCURRENCY", "3")
+	path := writeTestConfig(t, base)
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, 3, cfg.MediaProxyConcurrency)
+}
+
 // queueStuckWorkerSeconds は 0 = キューごとの既定、負値 = 機能ごと無効。
 //
 // **負値を素通しさせる。** 隣の noteHookConcurrency / queueIdlePollSeconds は

@@ -38,6 +38,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `bcryptCost` | int | `10` | アカウントパスワードの bcrypt work factor (4-31)。upstream は全経路 8 固定で設定不可。**+1 ごとにハッシュ生成も検証も倍**になるので、ログインの待ち時間でもある (実測: 10=約50ms / 12=約185ms / 13=約370ms)。cost は `$2a$NN$` に埋まるので上げても drop-in で TS 側が検証できる。既存利用者のハッシュはログイン成功時に焼き直されるので、上げれば戻ってきた順に移行する。範囲外は警告して既定に落とす |
 | `crossOriginOpenerPolicy` | string | `off` | `Cross-Origin-Opener-Policy` の値。`off` / `same-origin-allow-popups` / `same-origin`。upstream はテスト専用の cross-origin-isolation モードでしか出さない。**既定を off にしてあるのは、外部アプリが認証ページをポップアップで開いて閉じるのを待つ形の連携を切りうるため。** MiAuth / OAuth は callbackUrl で完結するので通常は問題にならないが、切れたときの症状から原因に辿り着きにくい。未知の値は警告して無視 |
 | `noteHookConcurrency` | int | `GOMAXPROCS * 2` | 投稿後のベストエフォートフック (タイムライン配布 / 通知 / 連合 / チャンネル / 索引 / チャート / webhook) を種別ごとに何本まで同時に走らせるか。**絞らないと応答のテールが伸びる** — 投稿の集中で数百 goroutine が生まれ、応答を返す goroutine と実行機会を奪い合うため (2 CPU の実測で `notes/create` p95 が 105ms → 181ms)。枠は「タイムライン配布」と「その他」の 2 つに分けてあり、遅いフックが配布を止めて反映が遅れるのを防ぐ。0 以下は既定値扱い |
+| `mediaProxyConcurrency` | int | `GOMAXPROCS / 2` (最低 1) | media proxy の画像処理 (decode/resize/encode) を同時に何本走らせてよいか (#3032)。**ピークメモリの上限**にあたる — 同時に走る本数がそのまま同時に確保される中間バッファの本数になり、内蔵プロキシは API サーバーと同じプロセスなのでそれがインスタンス全体の RSS になる。8 core で AVIF を c=8 流したときの peak RSS の実測は枠 1 → 131MB / 2 → 409MB / 4 → 636MB / 8 → 995MB / 無制限 → 959MB、同条件の jpg→avatar スループットは 30.7 / 45.5 / 63.9 / 71.2 / 71.6 rps。既定は peak RSS -34% をスループット -11% で買う点。枠が 5 秒空かなければ 503 (`?fallback` 指定時はダミー画像) で落とす。0 以下は既定値扱い |
 | `enableIpRateLimit` | bool | `true` | IPベースのレート制限を有効化 |
 | `disableEndpointRateLimits` | bool | `false` | per-endpoint rate limit table 全体を無効化。Misskey TS の `NODE_ENV=development` 相当で、ベンチマーク等で公正比較する用途専用。**本番で絶対に使わない** |
 | `pidFile` | string | - | PIDファイルパス |
@@ -237,6 +238,7 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 | `MK_BCRYPTCOST` | `bcryptCost` |
 | `MK_CROSSORIGINOPENERPOLICY` | `crossOriginOpenerPolicy` |
 | `MK_NOTEHOOKCONCURRENCY` | `noteHookConcurrency` |
+| `MK_MEDIAPROXYCONCURRENCY` | `mediaProxyConcurrency` |
 | `MK_QUEUEIDLEPOLLSECONDS` | `queueIdlePollSeconds` |
 | `MK_QUEUESTUCKWORKERSECONDS` | `queueStuckWorkerSeconds` |
 | `MK_QUEUEHANDLERDEADLINESECONDS` | `queueHandlerDeadlineSeconds` |
@@ -244,10 +246,10 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 
 用途別Redisも同様 (例: `MK_REDISFORPUBSUB_HOST`)。
 
-**上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **89 キー**を
+**上表は一部。** `internal/config/config.go` の `bindEnvKeys()` は **90 キー**を
 登録している。内訳は用途別 Redis 5 系統 (`redis` / `redisForPubsub` /
 `redisForJobQueue` / `redisForTimelines` / `redisForReactions`) が各 9、`db.*` が 9、
-`logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 31 が
+`logging.sql.*` が 2、`sentryForBackend.options.{dsn,environment}` が 2、残り 32 が
 トップレベル。全量はその関数を見ること。
 
 **登録の有無で「作れるか」だけが変わる。** Viper は `AutomaticEnv` を有効にしている

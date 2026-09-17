@@ -2241,6 +2241,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		s.config.AllowedPrivateNetworks,
 		s.outboundOpts()...,
 	)
+	// 画像処理の同時実行枠 (#3032)。0 なら mediaproxy 側の既定
+	// (GOMAXPROCS / 2、最低 1)。**配線しないと設定キーが黙って効かない。**
+	proxyService.SetCPUConcurrency(s.config.MediaProxyConcurrency)
 	// Local drive file の thumbnail / webpublic 変種を proxy 側で再 encode
 	// せず直接返せるようにする (#637 M1)。
 	proxyService.SetDriveLookup(driveFileLookupAdapter{repo: driveFileRepo})

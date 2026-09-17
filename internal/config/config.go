@@ -172,6 +172,11 @@ type Source struct {
 	// NoteHookConcurrency は投稿後のベストエフォートフックを種別ごとに
 	// 何本まで同時に走らせるか。未設定なら GOMAXPROCS x 2。
 	NoteHookConcurrency *int `mapstructure:"noteHookConcurrency"`
+	// MediaProxyConcurrency は media proxy の画像処理 (decode/resize/encode)
+	// を同時に何本走らせてよいか (#3032)。未設定なら GOMAXPROCS / 2 (最低 1)。
+	// 同時に走る本数がそのまま同時に確保される中間バッファの本数になるので、
+	// これがプロキシのピークメモリの上限を決める。
+	MediaProxyConcurrency *int `mapstructure:"mediaProxyConcurrency"`
 	// QueueIdlePollSeconds はジョブが無いときに worker が marker を待つ秒数の
 	// 下限。空振りのたびに mkq が待ちを倍にし 30 秒で頭打ちにするので、
 	// これは初回の待ちにあたる。未設定なら mkq の既定。mkq driver のみ有効。
@@ -404,6 +409,8 @@ type Config struct {
 	BcryptCost  int
 	// NoteHookConcurrency: 0 なら実行時に既定 (GOMAXPROCS x 2) を使う。
 	NoteHookConcurrency int
+	// MediaProxyConcurrency: 0 なら実行時に既定 (GOMAXPROCS / 2、最低 1) を使う。
+	MediaProxyConcurrency int
 	// QueueIdlePollSeconds: 0 なら driver 既定。
 	QueueIdlePollSeconds int
 	// QueueStuckWorkerSeconds: 0 ならキューごとの既定、負値で無効。
@@ -606,6 +613,7 @@ func bindEnvKeys(v *viper.Viper) {
 		"disableHsts",
 		"bcryptCost",
 		"noteHookConcurrency",
+		"mediaProxyConcurrency",
 		"queueIdlePollSeconds",
 		"queueStuckWorkerSeconds",
 		"queueHandlerDeadlineSeconds",
@@ -677,6 +685,16 @@ func resolve(src *Source) (*Config, error) {
 			slog.Warn("noteHookConcurrency が負なので既定値を使います", "value", *src.NoteHookConcurrency)
 		} else {
 			noteHookConcurrency = *src.NoteHookConcurrency
+		}
+	}
+
+	// 同上。0 以下は実行時の既定 (GOMAXPROCS / 2) に委ねる。
+	mediaProxyConcurrency := 0
+	if src.MediaProxyConcurrency != nil {
+		if *src.MediaProxyConcurrency < 0 {
+			slog.Warn("mediaProxyConcurrency が負なので既定値を使います", "value", *src.MediaProxyConcurrency)
+		} else {
+			mediaProxyConcurrency = *src.MediaProxyConcurrency
 		}
 	}
 
@@ -759,6 +777,7 @@ func resolve(src *Source) (*Config, error) {
 		DisableHSTS:                 src.DisableHSTS,
 		BcryptCost:                  bcryptCost,
 		NoteHookConcurrency:         noteHookConcurrency,
+		MediaProxyConcurrency:       mediaProxyConcurrency,
 		QueueIdlePollSeconds:        queueIdlePollSeconds,
 		QueueStuckWorkerSeconds:     queueStuckWorkerSeconds,
 		QueueHandlerDeadlineSeconds: queueHandlerDeadlineSeconds,

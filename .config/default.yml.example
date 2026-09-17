@@ -130,6 +130,31 @@ port: 3000
 # delay. Raise it if your instance has very wide fanout and CPU to spare.
 #noteHookConcurrency: 8
 
+# How many media proxy image pipelines (decode/resize/encode) may run at the
+# same time (default: GOMAXPROCS / 2, at least 1).
+#
+# This is a memory bound, not a latency knob. Concurrent decodes each hold their
+# own intermediate buffers, and the built-in proxy shares a process with the API
+# server, so the peak is the whole instance's RSS. Measured on 8 cores under a
+# sustained AVIF burst (c=8):
+#
+#   limit 1 -> 131MB   2 -> 409MB   4 -> 636MB   8 -> 995MB   unlimited -> 959MB
+#
+# and jpeg->avatar throughput at the same limits: 30.7 / 45.5 / 63.9 / 71.2 /
+# 71.6 rps. The default buys a 34% lower peak for 11% less throughput.
+#
+# Those numbers are from a closed-loop benchmark, so they bound the *decoding*
+# set only. Requests waiting for a slot still hold their downloaded input, and
+# the queue itself has no length limit -- it is bounded only by the internal
+# 5-second wait, which is not configurable. Past that the request is shed with
+# 503 (or the dummy image when `?fallback` is set).
+#
+# Lower it on memory-constrained hosts; raise it when the box has RAM to spare
+# and proxy throughput matters more. The commented value below is the default
+# for an 8-core host -- on a 2-core host the default is 1, so uncommenting this
+# line as-is would quadruple it.
+#mediaProxyConcurrency: 4
+
 # Floor for how long an idle queue worker waits on the marker key before
 # re-checking, in seconds (default: mkq's own). mkq driver only.
 #
