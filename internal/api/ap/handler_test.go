@@ -1877,3 +1877,88 @@ func TestAPIShow_RemoteNote_ArrayType(t *testing.T) {
 		})
 	}
 }
+
+// **未認証で 500 を起こせるカーソル** (#3025 と同じ形)。
+//
+// `/users/:id/followers?page=true&cursor=%00` の cursor はそのまま `id < ?` の
+// bind parameter に載っていた。PostgreSQL は NUL も不正な UTF-8 も比較の右辺に
+// 置くだけで SQLSTATE 22021 でクエリごと落とすので、**誰でも 5xx とエラーログを
+// 任意に生成できる**状態だった。
+//
+// **クエリパラメータ経由でしか来ない形。** JSON body は Go の decoder が
+// U+FFFD へ矯正するが、クエリは percent-decode した生のバイト列がそのまま届く。
+//
+// **空に倒して 200 にしない。** 空文字は「カーソル無し = 先頭から」の意味なので、
+// 利用者が指定した位置と無関係なページを正しい応答として返してしまう。
+func TestFollowCollection_UnstorableCursor_400(t *testing.T) {
+	for name, cursor := range map[string]string{
+		"NUL":            "%00",
+		"invalid UTF-8":  "%80",
+		"lone surrogate": "%ED%A0%80",
+	} {
+		t.Run(name, func(t *testing.T) {
+			for _, ep := range []struct {
+				name string
+				vis  func(*model.UserProfile)
+				call func(*Handler, echo.Context) error
+			}{
+				{"followers", func(p *model.UserProfile) { p.FollowersVisibility = model.FollowingVisibilityPublic },
+					func(h *Handler, c echo.Context) error { return h.Followers(c) }},
+				{"following", func(p *model.UserProfile) { p.FollowingVisibility = model.FollowingVisibilityPublic },
+					func(h *Handler, c echo.Context) error { return h.Following(c) }},
+			} {
+				t.Run(ep.name, func(t *testing.T) {
+					h, userRepo, _ := newHandlerWithFollowing(t)
+					userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+					prof := &model.UserProfile{UserID: "u1"}
+					ep.vis(prof)
+					userRepo.Profiles["u1"] = prof
+
+					c, rec := newReqQuery(t, "id", "u1", "page=true&cursor="+cursor)
+					require.NoError(t, ep.call(h, c))
+					assert.Equal(t, http.StatusBadRequest, rec.Code)
+				})
+			}
+		})
+	}
+}
+
+// **普通のカーソルは通ったまま**であることまで見る。これが無いと「カーソルが
+// あれば常に 400」でもテストが通る。
+func TestFollowCollection_OrdinaryCursorStillPages(t *testing.T) {
+	h, userRepo, followingRepo := newHandlerWithFollowing(t)
+	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice", FollowersCount: 1}
+	userRepo.Profiles["u1"] = &model.UserProfile{UserID: "u1", FollowersVisibility: model.FollowingVisibilityPublic}
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+	require.NoError(t, followingRepo.Create(&model.Following{ID: "f1", FolloweeID: "u1", FollowerID: "bob"}))
+
+	c, rec := newReqQuery(t, "id", "u1", "page=true&cursor=zzzzzzzzzz")
+	require.NoError(t, h.Followers(c))
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var page map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	// **カーソルを反映した id を出す。** 空に倒す実装だと `?page=true` だけになる。
+	assert.Contains(t, page["id"], "cursor=zzzzzzzzzz")
+	items, _ := page["orderedItems"].([]any)
+	assert.Len(t, items, 1)
+}
+
+// outbox 側も同じ (`since_id` / `until_id`)。
+func TestOutbox_UnstorableCursor_400(t *testing.T) {
+	for name, raw := range map[string]string{
+		"until_id NUL":            "page=true&until_id=%00",
+		"until_id invalid UTF-8":  "page=true&until_id=%80",
+		"since_id NUL":            "page=true&since_id=%00",
+		"since_id lone surrogate": "page=true&since_id=%ED%A0%80",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, userRepo, _ := newHandlerWithOutbox(t)
+			userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+
+			c, rec := newReqQuery(t, "id", "u1", raw)
+			require.NoError(t, h.Outbox(c))
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+		})
+	}
+}

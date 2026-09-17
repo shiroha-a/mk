@@ -1040,7 +1040,18 @@ NUL と併せて 1 箇所で持つ (以前は NUL しか見ておらず、`inter
 返すべき答え (「一致する行が無い」) は 200 + 空でちょうど表現できる。エラー
 コードを増やさないほうが drop-in 互換に寄る、という判断。
 
-**射程外がある。** gate (`make nulparam-check`) が見るのは (1) カーソル、
+**ActivityPub の endpoint も同じ扱いにしてある。** `/users/:id/followers` /
+`/following` の `cursor` と `/users/:id/outbox` の `since_id` / `until_id` は
+**未認証で叩けるのに #3025 の両ゲートの射程外**だった (bind 側ゲートは
+camelCase の `untilId` / `sinceId` を struct タグで探すので、snake_case にも
+`cursor` にも当たらない)。いまは `id.NormalizeCursor` を通し、通らなければ
+**本文なしの 400** を返す (AP の endpoint は Misskey のエラー封筒を使わない)。
+**upstream は 500 になる** — `ActivityPubServerService` は `cursor` の型しか
+見ないため。gate 側も `c.QueryParam` でカーソルを読む形を数えるようにした。
+
+**射程外がある。** gate (`make nulparam-check`) が見るのは (1) カーソル
+(`id.NormalizeCursor` の呼び出し側と、struct タグ / クエリ文字列で
+カーソルを受け取る handler)、
 (2) repository の**単一行 lookup** (`Find*` / `Get*` が `(*model.X, error)` を
 返すもの) と `*ByID*`、(3) LIKE パターンを組み立てる関数、の 3 本。
 **値を受ける一覧系 (`ListByUser(userID, ...)` など) は見ていない** (数え方: 非テストの

@@ -816,8 +816,8 @@ func (h *Handler) serveFollowCollection(c echo.Context, followers bool) error {
 	if h.followingRepo == nil {
 		return c.NoContent(http.StatusNotFound)
 	}
-	id := c.Param("id")
-	bundle, err := h.userService.ShowByID(id)
+	userID := c.Param("id")
+	bundle, err := h.userService.ShowByID(userID)
 	if err != nil {
 		return c.NoContent(http.StatusNotFound)
 	}
@@ -844,10 +844,10 @@ func (h *Handler) serveFollowCollection(c echo.Context, followers bool) error {
 	}
 
 	urls := h.renderer.URLs()
-	partOf := urls.UserFollowers(id)
+	partOf := urls.UserFollowers(userID)
 	totalItems := bundle.User.FollowersCount
 	if !followers {
-		partOf = urls.UserFollowing(id)
+		partOf = urls.UserFollowing(userID)
 		totalItems = bundle.User.FollowingCount
 	}
 
@@ -861,12 +861,25 @@ func (h *Handler) serveFollowCollection(c echo.Context, followers bool) error {
 
 	// paginated page: cursor (= Following row id) で id DESC ページング。
 	const limit = 10
-	cursor := c.QueryParam("cursor")
+	// **カーソルは列に入る値だけ通す (#3025 と同じ判断)。** この経路は未認証で
+	// 叩けるので、`?cursor=%00` や `?cursor=%80` をそのまま `id < ?` へ載せると
+	// PostgreSQL が SQLSTATE 22021 でクエリごと落とし、**誰でも 500 とエラー
+	// ログを任意に生成できる**。JSON body と違いクエリパラメータは
+	// percent-decode した生のバイト列がそのまま届く。
+	//
+	// cursor は untilId 相当 (`id < ?`) なので `NormalizeCursor` の untilID 側に
+	// 渡す。**空に倒して 200 を返さない** — 空文字は「カーソル無し = 先頭から」の
+	// 意味なので、利用者が指定した位置と無関係なページを正しい応答として返して
+	// しまう。
+	_, cursor, cursorOK := id.NormalizeCursor("", c.QueryParam("cursor"), nil, nil)
+	if !cursorOK {
+		return c.NoContent(http.StatusBadRequest)
+	}
 	var rows []*model.Following
 	if followers {
-		rows, err = h.followingRepo.ListFollowersBefore(id, cursor, limit+1)
+		rows, err = h.followingRepo.ListFollowersBefore(userID, cursor, limit+1)
 	} else {
-		rows, err = h.followingRepo.ListFollowingBefore(id, cursor, limit+1)
+		rows, err = h.followingRepo.ListFollowingBefore(userID, cursor, limit+1)
 	}
 	if err != nil {
 		return c.NoContent(http.StatusInternalServerError)
@@ -948,8 +961,8 @@ func (h *Handler) Outbox(c echo.Context) error {
 	if h.noteRepo == nil {
 		return c.NoContent(http.StatusNotFound)
 	}
-	id := c.Param("id")
-	bundle, err := h.userService.ShowByID(id)
+	userID := c.Param("id")
+	bundle, err := h.userService.ShowByID(userID)
 	if err != nil {
 		return c.NoContent(http.StatusNotFound)
 	}
@@ -957,7 +970,7 @@ func (h *Handler) Outbox(c echo.Context) error {
 		return c.NoContent(http.StatusNotFound)
 	}
 
-	partOf := h.renderer.URLs().UserOutbox(id)
+	partOf := h.renderer.URLs().UserOutbox(userID)
 	totalItems := bundle.User.NotesCount
 
 	// index page: totalItems + first link (upstream renderOrderedCollection)。
@@ -970,14 +983,19 @@ func (h *Handler) Outbox(c echo.Context) error {
 		return writeActivityJSON(c, col)
 	}
 
-	sinceID := c.QueryParam("since_id")
-	untilID := c.QueryParam("until_id")
+	// **カーソルは列に入る値だけ通す (#3025 と同じ判断)。** outbox も未認証で
+	// 叩けるので、`?until_id=%00` をそのまま `id < ?` へ載せると PostgreSQL が
+	// クエリごと落として 500 になる。詳細は Followers 側のコメント。
+	sinceID, untilID, cursorOK := id.NormalizeCursor(c.QueryParam("since_id"), c.QueryParam("until_id"), nil, nil)
+	if !cursorOK {
+		return c.NoContent(http.StatusBadRequest)
+	}
 	// upstream: since_id と until_id を同時指定したら 400。
 	if sinceID != "" && untilID != "" {
 		return c.NoContent(http.StatusBadRequest)
 	}
 	const limit = 20
-	notes, err := h.noteRepo.ListPublicByUserID(id, untilID, sinceID, limit)
+	notes, err := h.noteRepo.ListPublicByUserID(userID, untilID, sinceID, limit)
 	if err != nil {
 		return c.NoContent(http.StatusInternalServerError)
 	}

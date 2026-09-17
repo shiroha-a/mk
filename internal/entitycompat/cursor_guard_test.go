@@ -738,9 +738,23 @@ func (h *Handler) Looping(c echo.Context) error {
 	assert.Empty(t, violations, "正当な書き方を落としている: %v", violations)
 }
 
-// cursorParamMinHandlers is the number of functions that bind a cursor param.
+// cursorParamMinHandlers is the number of functions that bind a cursor param in
+// an inline request struct.
 // **実測に合わせた下限** — 抽出が壊れても「違反 0 件」と区別が付かない。
 const cursorParamMinHandlers = 44
+
+// cursorQueryParamMinHandlers is the same lower bound for handlers that read a
+// cursor straight off the query string (`c.QueryParam("cursor")` など)。
+//
+// **struct タグだけを見ていると視界に入らない形がある。** `internal/api/ap` の
+// followers / following / outbox は `c.QueryParam` で cursor を読んで
+// `id < ?` に直接載せており、**未認証で叩けるのに #3025 の両ゲートの射程外**
+// だった (bind 側ゲートは camelCase の `untilId` / `sinceId` を struct タグで
+// 探すので、snake_case の `since_id` にも `cursor` にも当たらない)。
+//
+// 別々に数えるのが要点 — 合算すると、こちらの抽出が丸ごと壊れても struct タグ
+// 側の 44 件で下限を満たしてしまう。
+const cursorQueryParamMinHandlers = 2
 
 // scanCursorParamBinders reports functions that bind `untilId` / `sinceId` in an
 // inline request struct without normalizing it, plus the number inspected.
@@ -755,12 +769,13 @@ const cursorParamMinHandlers = 44
 // request 型 (`chatPageParams` / `ListRequest` / `TimelineRequest` /
 // `listRequest` / `hostPageRequest`) は wrapper 側で正規化しており、そちらは
 // wrapper の呼び出し側を見る形で押さえてある。
-func scanCursorParamBinders(t *testing.T, root string) ([]cursorGuardViolation, int) {
+func scanCursorParamBinders(t *testing.T, root string) ([]cursorGuardViolation, int, int) {
 	t.Helper()
 
 	fset := token.NewFileSet()
 	var violations []cursorGuardViolation
 	binders := 0
+	queryBinders := 0
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -783,16 +798,29 @@ func scanCursorParamBinders(t *testing.T, root string) ([]cursorGuardViolation, 
 		}
 		for _, decl := range file.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || fn.Body == nil || !bindsCursorParam(fn.Body) {
+			if !ok || fn.Body == nil {
 				continue
 			}
-			binders++
+			viaTag := bindsCursorParam(fn.Body)
+			viaQuery := bindsCursorQueryParam(fn.Body)
+			if !viaTag && !viaQuery {
+				continue
+			}
+			if viaTag {
+				binders++
+			}
+			if viaQuery {
+				queryBinders++
+			}
 			if hasCursorCall(fn.Body, propagators) {
 				continue
 			}
+			reason := "untilId / sinceId を bind しているのに正規化していない"
+			if !viaTag {
+				reason = "クエリ文字列からカーソルを読んでいるのに正規化していない"
+			}
 			at := fset.Position(fn.Pos())
-			violations = append(violations, cursorGuardViolation{at.Filename, at.Line, fn.Name.Name,
-				"untilId / sinceId を bind しているのに正規化していない"})
+			violations = append(violations, cursorGuardViolation{at.Filename, at.Line, fn.Name.Name, reason})
 		}
 		return nil
 	})
@@ -804,7 +832,45 @@ func scanCursorParamBinders(t *testing.T, root string) ([]cursorGuardViolation, 
 		}
 		return violations[i].line < violations[j].line
 	})
-	return violations, binders
+	return violations, binders, queryBinders
+}
+
+// cursorQueryParamNames are the query-string names that carry a pagination
+// cursor. **snake_case と camelCase の両方を見る** — `internal/api/ap` は AP の
+// 慣習で snake_case を使い、REST 側は camelCase を使う。
+var cursorQueryParamNames = map[string]bool{
+	"cursor": true, "since_id": true, "until_id": true,
+	"sinceId": true, "untilId": true, "sinceid": true, "untilid": true,
+	"max_id": true, "min_id": true,
+}
+
+// bindsCursorQueryParam reports whether body reads a cursor straight off the
+// query string (`c.QueryParam("cursor")` など)。
+//
+// **レシーバ名は見ない。** echo の context は慣習的に `c` だが、そこに依存すると
+// 別名を付けた handler が黙って検査対象から外れる。メソッド名と引数の
+// リテラルだけで判定する。
+func bindsCursorQueryParam(body *ast.BlockStmt) bool {
+	found := false
+	ast.Inspect(body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) != 1 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || (sel.Sel.Name != "QueryParam" && sel.Sel.Name != "FormValue") {
+			return true
+		}
+		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if len(lit.Value) >= 2 && cursorQueryParamNames[lit.Value[1:len(lit.Value)-1]] {
+			found = true
+		}
+		return true
+	})
+	return found
 }
 
 // bindsCursorParam reports whether body declares a struct field tagged untilId
@@ -843,10 +909,12 @@ func hasCursorCall(body *ast.BlockStmt, propagators map[string]bool) bool {
 // handler は視界に入らない。
 func TestCursorParamsAreNormalized(t *testing.T) {
 	root := filepath.Join(repoRoot(t), "internal", "api")
-	violations, binders := scanCursorParamBinders(t, root)
+	violations, binders, queryBinders := scanCursorParamBinders(t, root)
 
 	require.GreaterOrEqual(t, binders, cursorParamMinHandlers,
 		"カーソルを bind する handler を %d 件しか拾えていない (抽出が壊れると検査していないのに緑になる)", binders)
+	require.GreaterOrEqual(t, queryBinders, cursorQueryParamMinHandlers,
+		"クエリ文字列からカーソルを読む handler を %d 件しか拾えていない (抽出が壊れると検査していないのに緑になる)", queryBinders)
 
 	if len(violations) > 0 {
 		var b strings.Builder
@@ -905,9 +973,47 @@ func (h *Handler) NoCursor(c echo.Context) error {
 	return h.repo.List(req.Limit)
 }
 `)
-	violations, binders := scanCursorParamBinders(t, root)
+	violations, binders, queryBinders := scanCursorParamBinders(t, root)
 
 	assert.Equal(t, 3, binders, "カーソルを bind する関数だけを数える")
+	assert.Equal(t, 0, queryBinders, "struct タグ経由はクエリ側に数えない")
 	require.Len(t, violations, 1, "違反 1 件だけを拾う: %v", violations)
 	assert.Contains(t, violations[0].fn, "Raw")
+}
+
+// クエリ文字列からカーソルを読む形も拾う。
+//
+// **`internal/api/ap` がこの形で漏れていた** — struct タグを探すだけの抽出では
+// 一度も視界に入らない。
+func TestScanCursorParamBinders_DetectsQueryStringCursor(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "internal", "api", "probe")
+	writeGoFile(t, dir, "h.go", `
+func (h *Handler) RawCursor(c echo.Context) error {
+	return h.repo.List(c.QueryParam("cursor"))
+}
+
+func (h *Handler) RawSnakeCase(c echo.Context) error {
+	return h.repo.List(c.QueryParam("until_id"), c.QueryParam("since_id"))
+}
+
+func (h *Handler) NormalizedQuery(c echo.Context) error {
+	_, untilID, ok := id.NormalizeCursor("", c.QueryParam("cursor"), nil, nil)
+	if !ok {
+		return apierr.JSONInvalidParam(c)
+	}
+	return h.repo.List(untilID)
+}
+
+func (h *Handler) UnrelatedQuery(c echo.Context) error {
+	return h.repo.List(c.QueryParam("page"))
+}
+`)
+	violations, binders, queryBinders := scanCursorParamBinders(t, root)
+
+	assert.Equal(t, 0, binders, "struct タグは 1 つも無い")
+	assert.Equal(t, 3, queryBinders, "カーソル名のクエリを読む関数だけを数える")
+	require.Len(t, violations, 2, "違反 2 件を拾う: %v", violations)
+	assert.Contains(t, violations[0].fn+violations[1].fn, "RawCursor")
+	assert.Contains(t, violations[0].fn+violations[1].fn, "RawSnakeCase")
 }
