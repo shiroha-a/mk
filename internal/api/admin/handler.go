@@ -30,6 +30,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/signupapplication"
 	corewebhook "github.com/shiroha-a/mk/internal/core/webhook"
 	"github.com/shiroha-a/mk/internal/core/webpush"
+	"github.com/shiroha-a/mk/internal/effectivepolicy"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
@@ -2299,6 +2300,10 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 	} else {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "condFormula must be a JSON object.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	if key := invalidRolePolicyKey(*req.Policies); key != "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+			"policy "+key+" has a value of the wrong type.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
 	if pol, err := json.Marshal(*req.Policies); err == nil {
 		opts.Policies = pol
 	} else {
@@ -2313,6 +2318,50 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 		"role":   r,
 	})
 	return c.JSON(http.StatusOK, h.packRole(r))
+}
+
+// invalidRolePolicyKey returns the first policy entry whose value has the wrong
+// type, or "" when every entry is acceptable.
+//
+// **型を見ないと gate が消える (#3037)。** policy の consumer は
+// `if limit, ok := role.PolicyNumber(v); ok { ...gate... }` の形なので、
+// 数値の policy に文字列が入ると **上限違反で弾かれるのではなく上限そのものが
+// 消える** (#2611 と同じ壊れ方)。管理画面は型どおりの値しか送らないが、
+// この endpoint を直に 1 回叩けばその状態を作れた。
+//
+// 期待する形は `{ "<key>": {"useDefault":…, "priority":…, "value":…} }`。
+// `useDefault` が真の entry は値を読まないので見ない。**形そのものが違う
+// entry は読み飛ばす** — `parseRolePolicies` も同じ扱いで、ここで弾くと
+// upstream が entry の形を拡張したときに mk-go だけが設定を拒否する。
+func invalidRolePolicyKey(policies map[string]any) string {
+	for key, raw := range policies {
+		entry, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		if useDefault, ok := entry["useDefault"].(bool); ok && useDefault {
+			continue
+		}
+		value, ok := entry["value"]
+		if !ok {
+			continue
+		}
+		if !effectivepolicy.ValidatePolicyValue(key, value) {
+			return key
+		}
+	}
+	return ""
+}
+
+// invalidDefaultPolicyKey is invalidRolePolicyKey for the flat
+// `{ "<key>": <value> }` shape that `roles/update-default-policies` takes.
+func invalidDefaultPolicyKey(policies map[string]any) string {
+	for key, value := range policies {
+		if !effectivepolicy.ValidatePolicyValue(key, value) {
+			return key
+		}
+	}
+	return ""
 }
 
 // packRole renders a role in the upstream-compatible shape (usersCount /
@@ -2470,6 +2519,10 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 		fields["displayOrder"] = *req.DisplayOrder
 	}
 	if req.Policies != nil {
+		if key := invalidRolePolicyKey(*req.Policies); key != "" {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+				"policy "+key+" has a value of the wrong type.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
 		pol, err := json.Marshal(*req.Policies)
 		if err != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "policies must be a JSON object.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
@@ -2760,6 +2813,12 @@ func (h *Handler) RolesUpdateDefaultPolicies(c echo.Context) error {
 	}
 	if err := c.Bind(&req); err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "Invalid parameters.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	}
+	// **値の型を見る (#3037)。** ここは既定 policy そのものなので、数値の
+	// policy に文字列が入ると**全利用者でその上限が消える**。
+	if key := invalidDefaultPolicyKey(req.Policies); key != "" {
+		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+			"policy "+key+" has a value of the wrong type.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
 	// upstream update-default-policies.ts は更新前後の policies を取得して
 	// moderationLogService.log('updateServerSettings', {before, after}) を記録する

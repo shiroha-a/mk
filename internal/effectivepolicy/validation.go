@@ -163,6 +163,26 @@ func declaresKey(keys []string, key string) bool {
 	return false
 }
 
+// ValidatePolicyValue reports whether value has the type the policy expects.
+//
+// **管理者が入れる値にも型検査が要る (#3037)。** policy の consumer は
+// `if limit, ok := role.PolicyNumber(v); ok { ...gate... }` の形で読むので、
+// 数値の policy に `"10"` のような**文字列が入ると ok が false になり、
+// 上限違反で弾かれるのではなく上限そのものが消える** (#2611 と同じ壊れ方)。
+// `admin/roles/create` / `update` / `update-default-policies` は値の型を
+// 見ていないので、管理画面の外から 1 回叩けばその状態を作れた。
+//
+// **未知のキーは通す。** upstream は JS の object lookup なので、既定に無い
+// キーは誰も読まない = 何の影響も無い。ここで弾くと、upstream が新しい
+// policy を足したときに mk-go だけがその設定を拒否する側になる。
+func ValidatePolicyValue(key string, value any) bool {
+	native, ok := Defaults()[key]
+	if !ok {
+		return true
+	}
+	return valueValid(key, native, value)
+}
+
 func valueValid(key string, native, value any) bool {
 	switch native.(type) {
 	case bool:
