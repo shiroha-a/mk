@@ -560,6 +560,8 @@ func (c *MediaURLContext) expiringProxiedURL(rawURL string, mode proxyMode) stri
 func signURLUntil(secret []byte, rawURL string, until time.Time) string {
 	exp := strconv.FormatInt(until.Unix(), 10)
 	mac := hmac.New(sha256.New, secret)
+	// タグは `mediaproxy.expiringDigestTag` と同じ値 (parity test が固定する)。
+	mac.Write([]byte("mk-go/expiring-proxy-sig\x00"))
 	mac.Write([]byte(rawURL))
 	mac.Write([]byte("\n"))
 	mac.Write([]byte(exp))

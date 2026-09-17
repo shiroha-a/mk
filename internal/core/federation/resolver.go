@@ -3289,7 +3289,15 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 			return nil
 		}
 		author, aerr := r.userRepo.FindByID(note.UserID)
-		if aerr != nil || author == nil || author.URI == nil || *author.URI != actorURI {
+		if aerr != nil {
+			// **障害は黙って捨てない (#3037 レビュー)。** 「攻撃者による
+			// 不一致」と「判定できなかった」を同じ無言の nil に潰すと、
+			// 瞬断で落ちた更新が誰にも見えない (#2792 / #2725)。
+			slog.Warn("federation: cannot verify poll update attribution",
+				"id", apNote.ID, "actor", actorURI, "err", aerr)
+			return nil
+		}
+		if author == nil || author.URI == nil || *author.URI != actorURI {
 			return nil
 		}
 	}
@@ -3388,7 +3396,13 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 			return existing, nil
 		}
 		author, aerr := r.userRepo.FindByID(existing.UserID)
-		if aerr != nil || author == nil || author.URI == nil || *author.URI != actorURI {
+		if aerr != nil {
+			// Question 側と同じ理由 (#3037 レビュー)。
+			slog.Warn("federation: cannot verify note update attribution",
+				"id", apNote.ID, "actor", actorURI, "err", aerr)
+			return existing, nil
+		}
+		if author == nil || author.URI == nil || *author.URI != actorURI {
 			return existing, nil
 		}
 	}

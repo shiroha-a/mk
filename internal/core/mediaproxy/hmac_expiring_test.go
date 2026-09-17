@@ -61,3 +61,21 @@ func TestSignURLUntil_BoundaryIsUnambiguous(t *testing.T) {
 	// digest 部分 (区切りの後ろ) を比べる。
 	require.NotEqual(t, a[len("12")+1:], b[len("2")+1:])
 }
+
+// **素の署名が期限付き署名として通らないこと (#3037 レビュー)。**
+//
+// タグが無いと `U' = <url> + "\n" + <exp>` に対して発行された素の署名が、
+// そのまま `(url, exp)` の期限付き署名として通る = 期限の無いトークンになる。
+// 今はその URL を署名させる経路が無い (`url.Parse` が制御文字を拒否する) が、
+// 守っているのが暗黙の副作用 1 つだけなのでここで固定する。
+func TestExpiringSignatureIsDomainSeparatedFromPlain(t *testing.T) {
+	const target = "https://example.com/a.png"
+	exp := "1700003600"
+
+	// 素の署名を「url + \n + exp」に対して発行する。
+	confused := mediaproxy.SignURL(expSecret, target+"\n"+exp)
+
+	assert.False(t,
+		mediaproxy.VerifyExpiringHMAC(expSecret, target, exp+"."+confused, time.Unix(1_700_000_000, 0)),
+		"素の署名が期限付き署名として通っている")
+}

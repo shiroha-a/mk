@@ -808,3 +808,22 @@ func TestInbox_SignedXDateIsStillHonoured(t *testing.T) {
 	require.NoError(t, h.Inbox(c))
 	assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "署名済みの X-Date を無視している")
 }
+
+// **`X-Date` を署名する peer の配送が worker 経路でも通ること (#3037 レビュー)。**
+//
+// `captureSignatureHeaders` が `X-Date` を運ばないと、worker 側の
+// `buildSigningString` が `missing required header "x-date"` で落ち、**署名が
+// 正しいのに drop される**。handler の同期経路だけを見るテストでは気付けない。
+func TestCaptureSignatureHeaders_CarriesXDate(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/inbox", nil)
+	req.Header.Set("Signature", "sig")
+	req.Header.Set("Date", "d")
+	req.Header.Set("X-Date", "x")
+	req.Host = "example.com"
+
+	got := captureSignatureHeaders(req)
+
+	assert.Equal(t, "x", got["X-Date"], "署名対象の X-Date が worker へ渡らない")
+	assert.Equal(t, "d", got["Date"])
+	assert.Equal(t, "example.com", got["Host"])
+}

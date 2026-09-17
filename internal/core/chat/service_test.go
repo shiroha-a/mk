@@ -875,9 +875,19 @@ func TestUnreact_NormalizesVariationSelector(t *testing.T) {
 	// VS 付き ❤️ (raw) で unreact → 正規化されて同じ "bob/❤" key で array_remove。
 	require.NoError(t, svc.Unreact(context.Background(), "m1", &model.User{ID: "bob"}, "❤️"))
 	require.Contains(t, repo.RemovedReactions, "bob/❤", "VS strip した key で array_remove する")
+	// **`unreact` イベントを名指しで取る (#3037 レビュー)。** 末尾を見る形だと、
+	// unreact が publish されなくなっても react の同じ値でアサーションが通り、
+	// 検査が黙って空虚になる。
+	var unreact *userCall
+	for i := range pub.userCalls {
+		if pub.userCalls[i].eventType == corechat.EventUnreact {
+			unreact = &pub.userCalls[i]
+		}
+	}
+	require.NotNil(t, unreact, "unreact が publish されていない")
+	body, ok := unreact.body.(map[string]any)
+	require.True(t, ok)
 	// stream event も正規化済 reaction で publish。
-	last := pub.userCalls[len(pub.userCalls)-1]
-	body := last.body.(map[string]any)
 	assert.Equal(t, "❤", body["reaction"])
 }
 

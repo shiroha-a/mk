@@ -1,6 +1,7 @@
 package federation_test
 
 import (
+	"encoding/json"
 	"errors"
 	"strconv"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/pgarray"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -2074,6 +2076,75 @@ func TestProcess_UpdateNote_AuthorLookupFailureDoesNotUpdate(t *testing.T) {
 			got := noteRepo.Notes["n1"]
 			require.NotNil(t, got.Text)
 			assert.Equal(t, "original", *got.Text, "著者を確認できないのに更新している")
+		})
+	}
+}
+
+// **poll 側も fail-closed であること (#3037 レビュー)。**
+//
+// このコミットは Note と Question の**両方**を fail-closed にしたが、テストが
+// 増えたのは Note 側だけだった。Question の guard を旧 fail-open 形に戻しても
+// 誰も気付かない状態 (レビュアーが変異検証で実測)。
+func TestProcess_UpdateQuestion_AuthorLookupFailureDoesNotUpdate(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setup func(*testing.T, *testutil.MockUserRepository) repository.UserRepository
+	}{
+		{
+			name: "著者の lookup が失敗する",
+			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
+				return &findFailUserRepo{MockUserRepository: base, failFor: "alice_remote"}
+			},
+		},
+		{
+			name: "著者の行が消えている",
+			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
+				delete(base.Users, "alice_remote")
+				return base
+			},
+		},
+		{
+			name: "著者の URI が NULL",
+			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
+				base.Users["alice_remote"].URI = nil
+				return base
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			userRepo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			pollRepo := testutil.NewMockPollRepository()
+			host := "remote.example"
+			aliceURI := "https://remote.example/users/alice"
+			userRepo.Users["alice_remote"] = &model.User{
+				ID: "alice_remote", Username: "alice", Host: &host, URI: &aliceURI,
+			}
+			uri := "https://remote.example/notes/q1"
+			noteRepo.Notes["q1"] = &model.Note{ID: "q1", URI: &uri, UserID: "alice_remote", UserHost: &host}
+			pollRepo.Polls["q1"] = &model.Poll{
+				NoteID: "q1", Choices: []string{"a", "b"}, Votes: pgarray.Int64Array{0, 0},
+			}
+
+			effective := tt.setup(t, userRepo)
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			resolver := federation.NewResolver(effective, noteRepo, urls, &stubFetcher{body: []byte(aliceActor)}, idGen)
+			resolver.SetPollRepo(pollRepo)
+
+			err := resolver.UpdateRemoteQuestion(json.RawMessage(`{
+				"id": "https://remote.example/notes/q1",
+				"type": "Question",
+				"attributedTo": "https://remote.example/users/alice",
+				"oneOf": [
+					{"name": "a", "replies": {"totalItems": 99}},
+					{"name": "b", "replies": {"totalItems": 99}}
+				]
+			}`), "https://remote.example/users/alice")
+			require.NoError(t, err)
+
+			assert.Equal(t, pgarray.Int64Array{0, 0}, pollRepo.Polls["q1"].Votes,
+				"著者を確認できないのに票数を更新している")
 		})
 	}
 }

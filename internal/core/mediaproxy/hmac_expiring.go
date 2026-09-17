@@ -65,8 +65,22 @@ func VerifyExpiringHMAC(secret []byte, rawURL, sig string, now time.Time) bool {
 // url-decode 済みのクエリ値で、改行入りの URL はそもそも取得に失敗する)。
 func expiringDigest(secret []byte, rawURL, exp string) []byte {
 	mac := hmac.New(sha256.New, secret)
+	// **スキーム間のドメイン分離 (#3037 レビュー)。** 素の署名は URL だけを
+	// 覆うので、タグが無いと `U' = <url> + "\n" + <exp>` という文字列に対して
+	// 発行された**素の署名**が、そのまま `(url, exp)` の期限付き署名として
+	// 通る = 期限の無いトークンになる。
+	//
+	// 今は到達できない (素の署名を出す経路は `url.Parse` を通り、Go は URL 中の
+	// 制御文字を拒否するので改行入りの URL は署名されない) が、守っているのが
+	// 暗黙の副作用 1 つだけなのでタグで構造的に閉じる。
+	mac.Write(expiringDigestTag)
 	mac.Write([]byte(rawURL))
 	mac.Write([]byte("\n"))
 	mac.Write([]byte(exp))
 	return mac.Sum(nil)
 }
+
+// expiringDigestTag namespaces the expiring signature scheme.
+//
+// NUL を挟むのは、タグと URL の境界を URL 側で作れないようにするため。
+var expiringDigestTag = []byte("mk-go/expiring-proxy-sig\x00")

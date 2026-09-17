@@ -630,8 +630,25 @@ func (m *MockChatRepository) ListRoomHistory(_ string, _ int) ([]*model.ChatMess
 
 // --- Reactions ---
 
-func (m *MockChatRepository) AddReaction(_, key string) error {
+// AddReaction records the attempt and updates the stored message.
+//
+// **状態を更新するのが要点 (#3037 レビュー)。** 更新しないと、`RemoveReaction`
+// が「消えたか」を返すようになったこと (#3037) と噛み合わず、
+// `React` → `Unreact` を通すテストで unreact が一度も publish されなくなる。
+// それでもテストが緑になる形があり (最後のイベントが react なので同じ
+// アサーションを満たす)、**有効だった検査が黙って空虚になっていた**。
+func (m *MockChatRepository) AddReaction(messageID, key string) error {
 	m.AddedReactions = append(m.AddedReactions, key)
+	msg := m.Messages[messageID]
+	if msg == nil {
+		return nil
+	}
+	for _, r := range msg.Reactions {
+		if r == key {
+			return nil // 重複は足さない (本番の重複ガードと同じ)
+		}
+	}
+	msg.Reactions = append(msg.Reactions, key)
 	return nil
 }
 
