@@ -1521,6 +1521,24 @@ func (p *Processor) handleCreate(act genericActivity, signer *model.User) error 
 			if mfmSource == "" {
 				mfmSource = probe.MisskeyContent
 			}
+			// **メッセージの id を配送してきた actor のホストに縛る。**
+			//
+			// この分岐は `ingestCreateNote` の手前で短絡するので、通常の note に
+			// 掛かる `id host == attributedTo host` の検査 (`resolver.go` の
+			// `validateNote` 相当) を一度も通らない。縛らないと、署名が通る
+			// リモート actor が**任意ホストの URI を名乗って chat メッセージを
+			// 1 通送れる**。以後その URI を使う正規の連合 chat メッセージは
+			// `FindMessageByURI` が hit して黙って捨てられる (= 相手のメッセージを
+			// 先回りして潰せる)。
+			//
+			// **1-on-1 と room の両方の手前に置く。** どちらも同じ `probe.ID` を
+			// メッセージの uri として保存する。
+			if err := assertRequestHostMatches(act.Actor, probe.ID); err != nil {
+				slog.Warn("federation: chat message id host does not match delivering actor",
+					"actor", act.Actor, "id", probe.ID)
+				// retry では解決しないので ack して drop する。
+				return ErrUnsupportedActivity
+			}
 			// note の @context が room URI なら group chat message (#1209)。
 			// それ以外は従来の 1-on-1 DM。
 			if roomURI, isRoom := chatRoomURIFromContext(probe.Context); isRoom {

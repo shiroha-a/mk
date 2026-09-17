@@ -612,3 +612,97 @@ func TestProcess_ChatRoomAccept_TransientErrorIsRetried(t *testing.T) {
 	require.ErrorIs(t, err, boom)
 	assert.NotErrorIs(t, err, federation.ErrUnsupportedActivity)
 }
+
+// **chat メッセージの id は配送してきた actor のホストに縛る (#3037)。**
+//
+// この分岐は `ingestCreateNote` の手前で短絡するので、通常の note に掛かる
+// `id host == attributedTo host` の検査を一度も通らない。縛らないと、署名が
+// 通るリモート actor が**任意ホストの URI を名乗って chat メッセージを 1 通
+// 送れる**。以後その URI を使う正規の連合 chat メッセージは
+// `FindMessageByURI` が hit して黙って捨てられる = 相手のメッセージを先回りして
+// 潰せる。
+func TestProcess_ChatMessage_RejectsCrossHostID(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "1-on-1",
+			body: `{
+				"type": "Create",
+				"actor": "https://remote.example/users/alice",
+				"object": {
+					"id": "https://victim.example/chat/messages/m1",
+					"type": "Note",
+					"content": "hi bob",
+					"to": ["https://example.com/users/bob"],
+					"_misskey_talk": true
+				}
+			}`,
+		},
+		{
+			name: "room",
+			body: `{
+				"type": "Create",
+				"actor": "https://remote.example/users/alice",
+				"object": {
+					"id": "https://victim.example/chat/messages/m1",
+					"type": "Note",
+					"attributedTo": "https://remote.example/users/alice",
+					"content": "hello room",
+					"to": ["https://example.com/users/bob"],
+					"_misskey_talk": true,
+					"@context": "https://remote.example/chat/rooms/room1"
+				}
+			}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			p, repo, _, _ := newProcessor(t, aliceActor)
+			recv := &fakeChatRoomReceiver{}
+			p.SetChatRoomReceiver(recv)
+			chatMsg := &fakeChatMessageReceiver{}
+			p.SetChatService(chatMsg)
+			bobURI := "https://example.com/users/bob"
+			repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI, ChatScope: "everyone"}
+
+			err := p.Process([]byte(tt.body))
+			assert.ErrorIs(t, err, federation.ErrUnsupportedActivity,
+				"別ホストの id を名乗る chat メッセージを受け入れている")
+			assert.Empty(t, recv.msgCalls, "room 経路に届いている")
+			assert.Equal(t, 0, chatMsg.calls, "1-on-1 経路に届いている")
+		})
+	}
+}
+
+// **同じホストなら通ったまま。** これが無いと「chat をすべて拒否する」実装でも
+// 上のテストが通る。表記ゆれ (punycode / 大文字) も同一ホストとして扱う。
+func TestProcess_ChatMessage_SameHostIDStillAccepted(t *testing.T) {
+	for _, id := range []string{
+		"https://remote.example/chat/messages/m1",
+		"https://REMOTE.example/chat/messages/m2",
+		"https://remote.example:443/chat/messages/m3",
+	} {
+		t.Run(id, func(t *testing.T) {
+			p, repo, _, _ := newProcessor(t, aliceActor)
+			chatMsg := &fakeChatMessageReceiver{}
+			p.SetChatService(chatMsg)
+			bobURI := "https://example.com/users/bob"
+			repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI, ChatScope: "everyone"}
+
+			body := `{
+				"type": "Create",
+				"actor": "https://remote.example/users/alice",
+				"object": {
+					"id": "` + id + `",
+					"type": "Note",
+					"content": "hi bob",
+					"to": ["https://example.com/users/bob"],
+					"_misskey_talk": true
+				}
+			}`
+			require.NoError(t, p.Process([]byte(body)))
+			assert.Equal(t, 1, chatMsg.calls, "同じホストの id を弾いている")
+		})
+	}
+}
