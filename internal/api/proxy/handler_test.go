@@ -432,8 +432,12 @@ func TestHandle_PathBasedURL(t *testing.T) {
 
 	// HTTPS URL won't connect to the HTTP test server, so it'll fail to fetch.
 	// But the path-based URL extraction + authorization should have been exercised.
-	// The response will be 404 or 500 (connection refused to HTTPS)
-	assert.True(t, rec.Code == http.StatusNotFound || rec.Code == http.StatusInternalServerError)
+	//
+	// **接続できなかったので 502 (#3034)。** 以前は `fetchRemote` が
+	// transport エラーを `ErrNotFound` に潰していたので 404 だった。
+	// **1 点に固定する** — 旧版の `404 || 500` は、まさに今回変わった値を
+	// 選択肢に含んでいたので、挙動が変わっても緑のまま通った。
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
 }
 
 func TestHandle_NotFound_NoFallback(t *testing.T) {

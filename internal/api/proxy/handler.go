@@ -142,12 +142,44 @@ func (h *Handler) Handle(c echo.Context) error {
 			// 利用者が接続を切っただけ。500 に数えると監視で本物の障害が
 			// 埋もれるので、nginx と同じ 499 にして本文は書かない。
 			//
-			// **ここに来るのは「枠待ち中の cancel」と「body 読み出し中の
-			// cancel」の 2 経路だけ。** リクエスト時間の大半を占める
-			// `httpClient.Do` の最中に切られた場合は、`fetchRemote` が
-			// エラー種別を問わず `ErrNotFound` に潰すので 404 側へ行く
-			// (この丸めは本コミットの範囲外の既存挙動)。
+			// **`ErrUpstreamUnavailable` より先に見る。** リモート取得中の
+			// 切断は両方の条件を満たす (#3034 で `%w` を 2 つにしたため) が、
+			// 利用者が自分で切ったものは 502 ではなく 499 が正しい。
 			return c.NoContent(statusClientClosedRequest)
+		}
+		if errors.Is(err, mediaproxy.ErrUpstreamUnavailable) {
+			// **404 にしない (#3034)。** リモートが「無い」と言ったわけでは
+			// なく、こちらが取れなかっただけなので、復旧すれば同じ URL が
+			// 引ける。短いキャッシュを付けて gateway 系の status にする。
+			//
+			// **`no-store` にはしない。** 過負荷 (#3032) は一瞬で復旧するが
+			// リモートの障害は分単位で続くので、都度取りに行くと落ちている
+			// 相手を叩き続けることになる。5 分は generic な失敗と同じ値で、
+			// upstream の `errorHandler` (`max-age=300`) とも揃う。
+			//
+			// **「繋がらない」と「遅い」を分ける。** 30 秒の
+			// `httpClient.Timeout` に当たったものは 504 で、それ以外が 502。
+			// 混ぜると監視でどちらか分からない。
+			status := http.StatusBadGateway
+			if errors.Is(err, context.DeadlineExceeded) {
+				status = http.StatusGatewayTimeout
+			}
+			if c.QueryParam("fallback") != "" {
+				return h.serveFallback(c)
+			}
+			c.Response().Header().Set("Cache-Control", "max-age=300")
+			return c.NoContent(status)
+		}
+		if errors.Is(err, mediaproxy.ErrBadRequest) {
+			// proxy が取りに行けない URL (相対 URL / 非 http(s) / host 無し /
+			// 制御文字入り) と、`/files/` の access key が空のもの。
+			// **恒久的なので長期キャッシュでよい (#3034)。** 5 分ごとに
+			// 引き直しても結果は変わらない。
+			if c.QueryParam("fallback") != "" {
+				return h.serveFallback(c)
+			}
+			c.Response().Header().Set("Cache-Control", "max-age=86400")
+			return c.NoContent(http.StatusBadRequest)
 		}
 		if errors.Is(err, mediaproxy.ErrNotFound) {
 			if c.QueryParam("fallback") != "" {

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -144,6 +145,104 @@ func TestHandle_ClientCancelIgnoresFallback(t *testing.T) {
 		map[string]string{"User-Agent": "Mozilla/5.0"})
 
 	assert.Equal(t, statusClientClosedRequest, rec.Code)
+}
+
+// リモート取得の失敗は 404 ではなく 502 で、長期キャッシュさせない (#3034)。
+//
+// **404 + `max-age=86400` で返していたのが元のバグ。** リモートの一時障害が
+// CDN に「この画像は存在しない」として 1 日焼き付き、復旧しても壊れたままに
+// なっていた (#2913 と同型)。
+func TestHandle_UpstreamUnavailableIsBadGatewayWithShortCache(t *testing.T) {
+	h, e := stubHandler(t, fmt.Errorf("%w: dial tcp: connection refused", mediaproxy.ErrUpstreamUnavailable))
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
+	assert.NotEqual(t, "max-age=86400", rec.Header().Get("Cache-Control"),
+		"リモートの一時障害を 1 日キャッシュさせている")
+}
+
+// **このテストが唯一検出するのは「502 分岐の中の `?fallback` だけを消す」変異。**
+// 応答は generic 経路と byte 単位で同じ (200 + dummy PNG + `max-age=300`) なので、
+// 分岐を丸ごと消す変異はここでは落ちない — そちらは
+// TestHandle_UpstreamUnavailableIsBadGatewayWithShortCache と
+// TestHandle_UpstreamTimeoutIsGatewayTimeout が落とす (実測)。
+// 消すと `?fallback=1` で 502 が返るようになるので、残すこと。
+func TestHandle_UpstreamUnavailableWithFallbackIsShortCached(t *testing.T) {
+	h, e := stubHandler(t, fmt.Errorf("%w: dial tcp: connection refused", mediaproxy.ErrUpstreamUnavailable))
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&fallback=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "image/png", rec.Header().Get("Content-Type"))
+	assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
+}
+
+// 30 秒の httpClient.Timeout に当たったものは 504、それ以外が 502 (#3034)。
+//
+// **混ぜると監視で「繋がらない」と「遅い」が分離できない。**
+func TestHandle_UpstreamTimeoutIsGatewayTimeout(t *testing.T) {
+	h, e := stubHandler(t, fmt.Errorf("%w: %w", mediaproxy.ErrUpstreamUnavailable, context.DeadlineExceeded))
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusGatewayTimeout, rec.Code)
+	assert.NotEqual(t, http.StatusBadGateway, rec.Code)
+	assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
+}
+
+// 取りに行けない URL は 400 + 長期キャッシュ (#3034)。
+//
+// **恒久的なので短期キャッシュにしない。** 5 分ごとに引き直しても結果は
+// 変わらないし、監視で「相手が落ちている」と読まれてもいけない。
+func TestHandle_UnfetchableURLIsBadRequestWithLongCache(t *testing.T) {
+	h, e := stubHandler(t, mediaproxy.ErrBadRequest)
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=%2Fidenticon%2Falice",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, "max-age=86400", rec.Header().Get("Cache-Control"))
+	assert.NotEqual(t, http.StatusBadGateway, rec.Code)
+}
+
+// 本当に「無い」ときは従来どおり 404 + 1 日キャッシュのまま。
+//
+// **片側だけ見ると回帰に気付けない。** 「全部 502 にする」実装は上の 2 本なら
+// 緑で通るが、消えた画像まで 5 分ごとに取りに行くことになる。
+func TestHandle_NotFoundKeepsLongCache(t *testing.T) {
+	h, e := stubHandler(t, mediaproxy.ErrNotFound)
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusNotFound, rec.Code)
+	assert.Equal(t, "max-age=86400", rec.Header().Get("Cache-Control"))
+}
+
+// 取得中の離脱は 502 ではなく 499。
+//
+// **`%w` を 2 つにしたので、離脱したエラーは `ErrUpstreamUnavailable` と
+// `context.Canceled` の両方を満たす。** handler の判定順が入れ替わると、
+// 利用者が自分で切っただけのものが 502 として監視に積み上がる。
+func TestHandle_CancelDuringFetchWinsOverUpstreamUnavailable(t *testing.T) {
+	h, e := stubHandler(t, fmt.Errorf("%w: %w", mediaproxy.ErrUpstreamUnavailable, context.Canceled))
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, statusClientClosedRequest, rec.Code)
+	assert.NotEqual(t, http.StatusBadGateway, rec.Code)
 }
 
 // Service が MediaProxy を満たしていること。
