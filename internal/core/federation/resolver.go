@@ -3275,8 +3275,21 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 	}
 	// attribution: Update の actor は poll 著者 (note author) と一致必須。別 user の
 	// poll URI を指定した更新を拒否する。
-	if actorURI != "" && r.userRepo != nil {
-		if author, aerr := r.userRepo.FindByID(note.UserID); aerr == nil && author != nil && author.URI != nil && *author.URI != actorURI {
+	//
+	// **一致を確認できなければ更新しない (#3037)。** 以前は
+	// 「`FindByID` が成功し、`author.URI` が非 nil で、値が違うとき」だけ
+	// 拒否していたので、**DB 障害 / 行の消失 / URI が NULL のどれでも検査が
+	// 丸ごと消える** = fail-open。ここは「他人の poll を書き換えられるか」を
+	// 決める唯一の検査なので、判定できないなら何もしない側に倒す。
+	//
+	// リモート著者は必ず URI を持つ (上で `note.UserHost == nil` を除いて
+	// いる) ので、非 nil を要求しても正当な更新は落ちない。
+	if actorURI != "" {
+		if r.userRepo == nil {
+			return nil
+		}
+		author, aerr := r.userRepo.FindByID(note.UserID)
+		if aerr != nil || author == nil || author.URI == nil || *author.URI != actorURI {
 			return nil
 		}
 	}
@@ -3366,8 +3379,16 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	// 攻撃者の URL に差し替えられる。inbox 層の
 	// authorizeActor は signer==activity.actor と activity.id host の整合しか保証
 	// しないため、ここで対象 note の著者まで照合する (#1819、UpdateRemoteQuestion と対称)。
-	if actorURI != "" && r.userRepo != nil {
-		if author, aerr := r.userRepo.FindByID(existing.UserID); aerr == nil && author != nil && author.URI != nil && *author.URI != actorURI {
+	//
+	// **一致を確認できなければ更新しない (#3037、`UpdateRemoteQuestion` と
+	// 同じ理由)。** 以前は fail-open で、DB 障害 / 行の消失 / URI が NULL の
+	// どれでも検査が丸ごと消えていた。
+	if actorURI != "" {
+		if r.userRepo == nil {
+			return existing, nil
+		}
+		author, aerr := r.userRepo.FindByID(existing.UserID)
+		if aerr != nil || author == nil || author.URI == nil || *author.URI != actorURI {
 			return existing, nil
 		}
 	}

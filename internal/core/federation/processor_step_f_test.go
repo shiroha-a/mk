@@ -1025,13 +1025,18 @@ func TestProcess_UndoAnnounceBadObject(t *testing.T) {
 
 // --- Note update (Step J) -----------------------------------------------------
 
+// **著者を実在させないと attribution 検査が空振りする (#3037)。** 検査は
+// `note.UserID` から著者を引いて `author.URI == actor` を見るので、居ない ID を
+// 書いたフィクスチャは「引けなかった」経路を通る。fail-open だったころは
+// それでも更新が通っていたため、**テストは検査を一度も踏んでいなかった**。
 func TestProcess_UpdateNoteHappyPath(t *testing.T) {
 	env := newFullProcessor(t, aliceActor)
+	authorID := seedRemoteAlice(env)
 	uri := "https://remote.example/notes/n1"
 	host := "remote.example"
 	original := "original"
 	env.noteRepo.Notes["n1"] = &model.Note{
-		ID: "n1", URI: &uri, UserID: "alice-id", UserHost: &host, Text: &original,
+		ID: "n1", URI: &uri, UserID: authorID, UserHost: &host, Text: &original,
 	}
 	body := []byte(`{
 		"type": "Update",
@@ -1093,8 +1098,13 @@ func TestProcess_UpdateNote_RepoErrorPropagates(t *testing.T) {
 	mock := testutil.NewMockNoteRepository()
 	uri := "https://remote.example/notes/n1"
 	host := "remote.example"
+	// 著者を実在させる (上の HappyPath と同じ理由)。
+	aliceURI := "https://remote.example/users/alice"
+	userRepo.Users["alice_remote"] = &model.User{
+		ID: "alice_remote", Username: "alice", Host: &host, URI: &aliceURI,
+	}
 	mock.Notes["n1"] = &model.Note{
-		ID: "n1", URI: &uri, UserID: "alice-id", UserHost: &host,
+		ID: "n1", URI: &uri, UserID: "alice_remote", UserHost: &host,
 	}
 	noteRepo := &updateFailNoteRepo{MockNoteRepository: mock}
 	emojiRepo := testutil.NewMockEmojiRepository()
@@ -1965,5 +1975,105 @@ func TestProcess_CollectionItemActorSpoofIgnored(t *testing.T) {
 	for _, r := range env.reactionRepo.Reactions {
 		// reaction は alice (collection actor) 名義であり victim 名義ではない。
 		assert.NotContains(t, r.UserID, "victim", "詐称 actor では記録されない (#2023 security)")
+	}
+}
+
+// findFailUserRepo makes the author lookup fail, so the attribution check
+// cannot confirm who owns the note.
+type findFailUserRepo struct {
+	*testutil.MockUserRepository
+	failFor  string
+	withUser bool
+}
+
+func (r *findFailUserRepo) FindByID(id string) (*model.User, error) {
+	if id == r.failFor {
+		if r.withUser {
+			// **値と error を同時に返す形も見る。** `author == nil` だけを
+			// 見る実装だとここが素通りし、`aerr != nil` の判定が空虚になる。
+			u, _ := r.MockUserRepository.FindByID(id)
+			return u, errors.New("user SELECT failed")
+		}
+		return nil, errors.New("user SELECT failed")
+	}
+	return r.MockUserRepository.FindByID(id)
+}
+
+// **著者を確認できないなら更新しない (#3037)。**
+//
+// 以前は「`FindByID` が成功し、`author.URI` が非 nil で、値が違うとき」だけ
+// 拒否していたので、**DB 障害 / 行の消失 / URI が NULL のどれでも検査が
+// 丸ごと消えて**いた。ここは「他人のノートを書き換えられるか」を決める
+// 唯一の検査で、通れば `text` / `cw` / `url` に加えて `upsertEmojis` が
+// 使う host まで攻撃者の言い値になる。
+func TestProcess_UpdateNote_AuthorLookupFailureDoesNotUpdate(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		setup func(*testing.T, *testutil.MockUserRepository) repository.UserRepository
+	}{
+		{
+			name: "著者の lookup が失敗する",
+			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
+				return &findFailUserRepo{MockUserRepository: base, failFor: "alice_remote"}
+			},
+		},
+		{
+			name: "lookup が値と error を同時に返す",
+			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
+				return &findFailUserRepo{MockUserRepository: base, failFor: "alice_remote", withUser: true}
+			},
+		},
+		{
+			name: "著者の行が消えている",
+			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
+				delete(base.Users, "alice_remote")
+				return base
+			},
+		},
+		{
+			name: "著者の URI が NULL",
+			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
+				base.Users["alice_remote"].URI = nil
+				return base
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			userRepo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			host := "remote.example"
+			aliceURI := "https://remote.example/users/alice"
+			userRepo.Users["alice_remote"] = &model.User{
+				ID: "alice_remote", Username: "alice", Host: &host, URI: &aliceURI,
+			}
+			uri := "https://remote.example/notes/n1"
+			original := "original"
+			noteRepo.Notes["n1"] = &model.Note{
+				ID: "n1", URI: &uri, UserID: "alice_remote", UserHost: &host, Text: &original,
+			}
+
+			effective := tt.setup(t, userRepo)
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			resolver := federation.NewResolver(effective, noteRepo, urls, &stubFetcher{body: []byte(aliceActor)}, idGen)
+			followingSvc := corefollowing.NewService(effective, testutil.NewMockFollowingRepository(), testutil.NewMockFollowRequestRepository(), idGen)
+			p := federation.NewProcessor(resolver, followingSvc, nil, nil, effective, noteRepo)
+
+			body := []byte(`{
+				"type": "Update",
+				"actor": "https://remote.example/users/alice",
+				"object": {
+					"id": "https://remote.example/notes/n1",
+					"type": "Note",
+					"attributedTo": "https://remote.example/users/alice",
+					"content": "edited"
+				}
+			}`)
+			_ = p.Process(body)
+
+			got := noteRepo.Notes["n1"]
+			require.NotNil(t, got.Text)
+			assert.Equal(t, "original", *got.Text, "著者を確認できないのに更新している")
+		})
 	}
 }
