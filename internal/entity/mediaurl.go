@@ -192,9 +192,10 @@ func BadgeEmojiProxyURL(rawURL string) string {
 // **`ProxiedURL` と同じ組み立てを使うのが要点 (#2905)。** `/proxy` を手で組むと
 // `sig` が付かず、`Authorize` が HMAC ではなく DB allowlist の 4 テーブル UNION に
 // 落ちる。`/emoji/:path` も `/avatar/@acct` も mention chip / リアクションアイコンの
-// ホットパスなので毎リクエスト DB を引くことになり、しかも DB の瞬断が
-// 403 + `max-age=86400` で 1 日キャッシュされる (このファイルが #2792 で潰したのと
-// 同じ罠)。
+// ホットパスなので毎リクエスト DB を引くことになる。**DB の瞬断が
+// 403 + `max-age=86400` で 1 日キャッシュされる**という更に悪い形は #3036 で
+// 潰したが (503 + `no-store` になった)、DB を引く回数そのものは署名を
+// 付けないと減らない。
 //
 // **mode の flag と static の両方を立てる。** proxyMode は 1 つしか選べないが、
 // 静止画は「その mode のリサイズ寸法で、ただしアニメーションを止める」意味なので

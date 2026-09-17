@@ -139,8 +139,10 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		// `emoji.publicUrl` / `originalUrl` はその対象。
 		if _, wantsStatic := c.QueryParams()["static"]; wantsStatic {
 			// **entity 側で組む。** `/proxy` を手で組むと sig が付かず、
-			// Authorize が HMAC ではなく DB allowlist に落ちる (ホットパスで
-			// 毎回 DB を引き、瞬断が 403 + max-age=86400 で 1 日残る)。
+			// Authorize が HMAC ではなく DB allowlist に落ちる。`/emoji/:path`
+			// はリアクションアイコンのホットパスなので、毎リクエスト DB を
+			// 引くことになる (#3036 で DB 障害は 403 + 1 日ではなく
+			// 503 + `no-store` になったが、引く回数そのものは減らない)。
 			// media proxy の設定 (external / proxyRemoteFiles) にも従う。
 			if proxied := entity.StaticEmojiProxyURL(target); proxied != "" {
 				c.Response().Header().Set("Content-Security-Policy", assetCSP)

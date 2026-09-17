@@ -251,8 +251,9 @@ func TestEmojiRedirectHandler_StaticWithoutContextFallsBackToRaw(t *testing.T) {
 //
 // `/proxy` を手で組むと sig が付かず、Authorize が HMAC ではなく DB allowlist の
 // 4 テーブル UNION に落ちる。`/emoji/:path` はリアクションアイコンのホットパス
-// なので毎リクエスト DB を引くことになり、しかも DB の瞬断が 403 +
-// max-age=86400 で 1 日キャッシュされる (#2792 で潰したのと同じ罠)。
+// なので毎リクエスト DB を引くことになる。**DB の瞬断が 403 + max-age=86400 で
+// 1 日キャッシュされる**という更に悪い形は #3036 で潰したが
+// (503 + `no-store` になった)、DB を引く回数そのものは署名を付けないと減らない。
 //
 // **context を配線しないと検出できない。** 未配線だと raw へ 302 するので、
 // この欠陥はテストから完全に不可視だった。
