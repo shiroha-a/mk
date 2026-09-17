@@ -50,6 +50,22 @@ type Handler struct {
 	noteRepo       notesfilter.RenoteLookup
 	// relationReload は channel mute 変更を streaming connection へ通知する (#2400)。
 	relationReload RelationReloadPublisher
+	// userFollowingRepo は pinnedNotes の可視性判定に使う。**`followingRepo` とは
+	// 別物** — あちらはチャンネルのフォロー、こちらは利用者間のフォローで、
+	// followers 限定ノートを見せてよい相手かの判定に要る。未配線なら
+	// `CanSeeNote` が fail-closed に倒れる (followers / specified は投稿者本人
+	// 以外に見せない)。
+	userFollowingRepo repository.FollowingRepository
+}
+
+// SetUserFollowingRepo wires the user-following lookup used by the pinnedNotes
+// visibility gate.
+//
+// **チャンネルのフォロー (`SetFollowingRepo`) とは別。** 名前が似ているので
+// 取り違えると「チャンネルをフォローしていれば他人の followers 限定ノートが
+// 見える」という別の穴になる。
+func (h *Handler) SetUserFollowingRepo(r repository.FollowingRepository) {
+	h.userFollowingRepo = r
 }
 
 // SetMuteBlockRepos wires the repositories used by the channels/timeline
@@ -278,6 +294,22 @@ func (h *Handler) packPinnedNotes(ctx context.Context, ch *model.Channel, viewer
 	}
 	notes, err := h.pinnedNoteRepo.FindManyByIDsWithUser(ids)
 	if err != nil || len(notes) == 0 {
+		return out
+	}
+	// **可視性ゲート。** `channels/update` は `pinnedNoteIds` を検証しない
+	// (所有者もチャンネル所属も見ない) ので、ここに他人のノートの ID を書ける。
+	// `channels/show` は未認証で叩けるため、ゲートが無いと **followers 限定
+	// ノートが全文で公開される**。
+	//
+	// **`HideEmbeds` では止まらない。** あちらの top-level 判定
+	// (`HideNoteByPrefsDecision`) は著者設定による降格しか見ず、元から
+	// followers の note は「intrinsic ゲート任せ」と明記して素通しする
+	// (`internal/core/note/hide_embed.go`)。その intrinsic ゲートがこれ。
+	//
+	// 同じ「ピン留めを展開する」経路である `users/show` と `antennas/notes` は
+	// 既に `FilterVisible` を通しており、ここだけが抜けていた。
+	notes = notesfilter.FilterVisible(viewer, notes, h.userFollowingRepo)
+	if len(notes) == 0 {
 		return out
 	}
 	entities := entity.PackNotes(ctx, notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())

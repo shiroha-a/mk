@@ -174,8 +174,8 @@ func TestShow_NotFound(t *testing.T) {
 func TestShow_DetailedPinnedNotes(t *testing.T) {
 	h, repo, _, noteRepo := newHandler(t)
 	h.SetPinnedNoteRepo(noteRepo)
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice"}
-	noteRepo.Notes["n2"] = &model.Note{ID: "n2", UserID: "alice"}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", Visibility: model.NoteVisibilityPublic}
+	noteRepo.Notes["n2"] = &model.Note{ID: "n2", UserID: "alice", Visibility: model.NoteVisibilityPublic}
 	// shapetest の createdAt (aidx 派生) のため channel id は valid aidx を使う。
 	idGen, _ := id.NewGenerator("aidx")
 	cid := idGen.Generate(time.Now())
@@ -1244,4 +1244,98 @@ func TestCursorGuardRejectsUnstorableCursor(t *testing.T) {
 			assert.Contains(t, rec.Body.String(), "INVALID_PARAM")
 		})
 	}
+}
+
+// `channels/show` のピン留めノートに可視性ゲートが掛かること。
+//
+// **`channels/update` は `pinnedNoteIds` を検証しない** (所有者もチャンネル所属も
+// 見ない) ので、誰でも自分のチャンネルに他人のノート ID を書ける。`channels/show`
+// は未認証で叩けるため、ゲートが無いと **followers 限定ノートが全文で公開される**。
+//
+// 最も現実的な経路は「フォロワーが、見られるようになった followers 限定ノートの
+// ID を自分のチャンネルにピン留めする」形で、ID の入手手段を考える必要が無い。
+//
+// **`HideEmbeds` では止まらない。** top-level 判定 (`HideNoteByPrefsDecision`) は
+// 著者設定による降格しか見ず、元から followers の note は「intrinsic ゲート任せ」
+// と明記して素通しする。
+func TestShow_PinnedNotesAreVisibilityGated(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+
+	setup := func(t *testing.T) (*Handler, *testutil.MockChannelRepository, *testutil.MockFollowingRepository, string) {
+		t.Helper()
+		h, repo, _, noteRepo := newHandler(t)
+		h.SetPinnedNoteRepo(noteRepo)
+		follows := testutil.NewMockFollowingRepository()
+		h.SetUserFollowingRepo(follows)
+		noteRepo.Notes["pub"] = &model.Note{ID: "pub", UserID: "alice", Visibility: model.NoteVisibilityPublic}
+		noteRepo.Notes["fol"] = &model.Note{ID: "fol", UserID: "alice", Visibility: model.NoteVisibilityFollowers}
+		cid := idGen.Generate(time.Now())
+		repo.Channels[cid] = &model.Channel{ID: cid, Name: "alpha", PinnedNoteIDs: []string{"pub", "fol"}}
+		return h, repo, follows, cid
+	}
+
+	pinnedIDs := func(t *testing.T, rec *httptest.ResponseRecorder) []string {
+		t.Helper()
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		raw, ok := resp["pinnedNotes"].([]any)
+		require.True(t, ok, "pinnedNotes must be present")
+		out := make([]string, 0, len(raw))
+		for _, e := range raw {
+			out = append(out, e.(map[string]any)["id"].(string))
+		}
+		return out
+	}
+
+	t.Run("未認証には followers 限定を出さない", func(t *testing.T) {
+		h, _, _, cid := setup(t)
+		c, rec := newReq(t, `{"channelId":"`+cid+`"}`)
+		require.NoError(t, h.Show(c))
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, []string{"pub"}, pinnedIDs(t, rec))
+	})
+
+	t.Run("非フォロワーにも出さない", func(t *testing.T) {
+		h, _, _, cid := setup(t)
+		c, rec := newReq(t, `{"channelId":"`+cid+`"}`)
+		setUser(c, "bob")
+		require.NoError(t, h.Show(c))
+		assert.Equal(t, []string{"pub"}, pinnedIDs(t, rec))
+	})
+
+	// **これが無いと follow 判定そのものが空虚になる。** repo を nil に差し替える
+	// 変異が検出できず、「チャンネルのフォロー repo と取り違える」類の誤りを
+	// 通してしまう (変異検証で実測)。
+	t.Run("フォロワーには出す", func(t *testing.T) {
+		h, _, follows, cid := setup(t)
+		require.NoError(t, follows.Create(&model.Following{ID: "f1", FollowerID: "bob", FolloweeID: "alice"}))
+		c, rec := newReq(t, `{"channelId":"`+cid+`"}`)
+		setUser(c, "bob")
+		require.NoError(t, h.Show(c))
+		assert.Equal(t, []string{"pub", "fol"}, pinnedIDs(t, rec))
+	})
+
+	// **弾きすぎていないことを見る。** 全部落とす実装でも上の 2 つは緑になる。
+	t.Run("投稿者本人には出す", func(t *testing.T) {
+		h, _, _, cid := setup(t)
+		c, rec := newReq(t, `{"channelId":"`+cid+`"}`)
+		setUser(c, "alice")
+		require.NoError(t, h.Show(c))
+		assert.Equal(t, []string{"pub", "fol"}, pinnedIDs(t, rec))
+	})
+
+	// 未配線は fail-closed (`CanSeeNote` が follow 判定不能を「見せない」に倒す)。
+	t.Run("未配線でも public は出る", func(t *testing.T) {
+		h, repo, _, noteRepo := newHandler(t)
+		h.SetPinnedNoteRepo(noteRepo)
+		// SetUserFollowingRepo を呼ばない
+		noteRepo.Notes["pub"] = &model.Note{ID: "pub", UserID: "alice", Visibility: model.NoteVisibilityPublic}
+		noteRepo.Notes["fol"] = &model.Note{ID: "fol", UserID: "alice", Visibility: model.NoteVisibilityFollowers}
+		cid := idGen.Generate(time.Now())
+		repo.Channels[cid] = &model.Channel{ID: cid, Name: "a", PinnedNoteIDs: []string{"pub", "fol"}}
+		c, rec := newReq(t, `{"channelId":"`+cid+`"}`)
+		setUser(c, "bob")
+		require.NoError(t, h.Show(c))
+		assert.Equal(t, []string{"pub"}, pinnedIDs(t, rec))
+	})
 }

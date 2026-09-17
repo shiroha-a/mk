@@ -2556,6 +2556,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	channelsHandler.SetNoteFieldResolver(noteFieldResolver)
 	channelsHandler.SetUserRepo(userRepo)
 	channelsHandler.SetPinnedNoteRepo(noteRepo) // #1540: channels/show (detailed) の pinnedNotes 展開
+	// pinnedNotes の可視性判定に使う利用者間フォロー。**上の
+	// `SetFollowingRepo` (チャンネルのフォロー) とは別物。** 未配線だと
+	// `CanSeeNote` が fail-closed に倒れ、followers 限定ノートが投稿者本人に
+	// しか出なくなる (漏れる側ではないが、正当なピン留めも消える)。
+	channelsHandler.SetUserFollowingRepo(followingRepo)
 
 	// Antennas endpoints (Phase 4.3)
 	antennasHandler := antennas.NewHandler(antennaService, noteRepo, idGen)
