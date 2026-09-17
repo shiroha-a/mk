@@ -2713,12 +2713,24 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	//
 	// **受信側は `InvalidateAllCachesLocally`。** 通常の invalidate を呼ぶと
 	// そこから再び publish され、ワーカー同士が通知を投げ合って止まらなくなる。
+	//
+	// **自分の publish は受け流す (#3037)。** Redis の pub/sub は publish した
+	// プロセス自身にも配る。自 worker は既に**精密な** invalidate を済ませて
+	// いる (その user / その role だけ) のに、自分の通知で全消しに格上げされる
+	// と、`admin/roles/assign` 1 回で `userRoleCache` も `rolesListCache` も
+	// 全プラグインの policy cache も落ちる。`move_service` はアカウント移行
+	// 1 回でロール数ぶん連射するので、そこが効く。
+	rolesUpdatedSender := idGen.Generate(time.Now())
 	roleService.SetInvalidationHook(func() {
-		if err := internalPubSub.Publish(context.Background(), "rolesUpdated", struct{}{}); err != nil {
+		if err := internalPubSub.Publish(context.Background(), "rolesUpdated", rolesUpdatedSender); err != nil {
 			slog.Warn("role: publish rolesUpdated failed", "err", err)
 		}
 	})
-	internalPubSub.Subscribe(context.Background(), "rolesUpdated", func([]byte) {
+	internalPubSub.Subscribe(context.Background(), "rolesUpdated", func(payload []byte) {
+		var from string
+		if err := json.Unmarshal(payload, &from); err == nil && from == rolesUpdatedSender {
+			return
+		}
 		roleService.InvalidateAllCachesLocally()
 	})
 
