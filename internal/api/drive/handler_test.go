@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
@@ -1556,4 +1557,32 @@ func TestFilesCreate_DoesNotReadPastPolicyLimit(t *testing.T) {
 		assert.LessOrEqual(t, seen.read, 1024+1,
 			"上限を超えた本体を最後まで読んでいる (読んだのは %d バイト)", seen.read)
 	})
+}
+
+// **`maxBytes+1` のオーバーフローで 0 バイトの本体を保存しない (#3037 レビュー)。**
+//
+// `policyMegabytes` は `safemath.MulFloat64` で `MaxInt64` に飽和するので、
+// `maxFileSizeMb` に `math.MaxFloat64` (= このリポジトリが「無制限」の意味で
+// 使うイディオム) を入れると `maxBytes+1` が `MinInt64` になり、
+// `io.LimitReader` が即 EOF を返す。**error 無しで空の本体が保存される**という、
+// この関数の doc が塞いだばかりの形。
+func TestReadAtMost_SaturatedLimitIsTreatedAsUnlimited(t *testing.T) {
+	body, err := readAtMost(strings.NewReader("hello world"), math.MaxInt64)
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", string(body), "飽和した上限で本体が切り詰められている")
+}
+
+func TestFilesCreate_SaturatedPolicyStillUploads(t *testing.T) {
+	h, fileRepo, _ := newHandler(t)
+	h.svc.SetRoleChecker(roleStub{maxFileSizeMb: math.MaxFloat64})
+
+	c, rec := newMultipartReq(t, "hello.txt", "hello world", nil)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreate(c))
+
+	require.Equal(t, http.StatusOK, rec.Code, "無制限の policy でアップロードが落ちている")
+	require.Len(t, fileRepo.Files, 1)
+	for _, f := range fileRepo.Files {
+		assert.Equal(t, len("hello world"), f.Size, "0 バイトで保存されている")
+	}
 }

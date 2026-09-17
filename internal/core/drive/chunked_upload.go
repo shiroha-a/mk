@@ -364,6 +364,29 @@ type ChunkAppendResult struct {
 // index は 0 始まりで、サーバーが受理するのは常に「次の 1 つ」だけ。順序前後・
 // 欠番が構造的に起きないようにしている。既に記録済みの index の再送は、内容が
 // 一致していれば冪等に成功し、違っていれば ErrChunkContentMismatch で拒否する。
+// SessionChunkSize reports the chunk size a session accepts, so the handler can
+// stop reading past it.
+//
+// **読み切る前に上限を引くためのもの (#3037 レビュー)。** `AppendChunk` は
+// `size > sess.ChunkSize` を拒否するが、そこへ届く時点でチャンクは全部メモリに
+// 載っている。body limit はこの経路で 33MiB なので、既定 10MiB のセッションでも
+// 1 リクエストあたり 33MiB を確保させられる。`drive/files/create` を同じ理由で
+// 直したのに、こちらだけ残っていた。
+//
+// ok=false は「上限を決められない」(セッションが無い / 他人のもの / 期限切れ)。
+// **その場合は上限を掛けない** — 本物の判定は `AppendChunk` が行い、そちらが
+// 正しいエラーを返す。ここで独自に落とすと、応答の種類が経路で食い違う。
+func (s *Service) SessionChunkSize(user *model.User, sessionID string) (int64, bool) {
+	if s.chunkedRepo == nil {
+		return 0, false
+	}
+	sess, err := s.loadOwnedSession(user, sessionID, time.Now())
+	if err != nil || sess == nil || sess.ChunkSize <= 0 {
+		return 0, false
+	}
+	return sess.ChunkSize, true
+}
+
 func (s *Service) AppendChunk(ctx context.Context, user *model.User, sessionID string, index int, chunk []byte) (*ChunkAppendResult, error) {
 	_, ms, err := s.chunkedMultipart()
 	if err != nil {

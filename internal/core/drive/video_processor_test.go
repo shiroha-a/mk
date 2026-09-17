@@ -329,3 +329,30 @@ func TestReadFileAtMost(t *testing.T) {
 	_, err = readFileAtMost(filepath.Join(dir, "missing"), 10)
 	assert.Error(t, err)
 }
+
+// **ffmpeg 側で縮めてから受け取ること (#3037 レビュー)。**
+//
+// scale が無いと出力 PNG は入力動画の解像度そのままで、8K なら 50-80MB。
+// `readFileAtMost` の上限に当たると `GenerateThumbnail` は `nil, nil` を返すので、
+// **エラーも出ないまま 6K 以上の動画のサムネイルが恒久的に欠ける**。
+func TestVideoProcessor_ScalesBeforeReadingTheFrame(t *testing.T) {
+	var args []string
+	runner := &argCapturingRunner{onRun: func(a []string) { args = a }}
+	vp := NewFFmpegVideoProcessor(nil, runner)
+
+	_, _ = vp.GenerateThumbnail(context.Background(), []byte("video-data"), "video/mp4")
+
+	joined := strings.Join(args, " ")
+	require.Contains(t, joined, "-vf", "scale フィルタを渡していない")
+	assert.Contains(t, joined, "force_original_aspect_ratio=decrease",
+		"縦横比を保たない縮小をしている")
+}
+
+type argCapturingRunner struct {
+	onRun func([]string)
+}
+
+func (r *argCapturingRunner) Run(_ context.Context, _ string, args ...string) ([]byte, error) {
+	r.onRun(args)
+	return nil, errors.New("not run")
+}

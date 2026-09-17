@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"mime/multipart"
 	"net/http"
 	"regexp"
@@ -202,7 +203,7 @@ var readMultipartFile = func(c echo.Context, maxBytes int64) ([]byte, string, er
 	// 届く時点で本体は全部メモリに載っている。既定では policy が 30MB なのに
 	// `config.maxFileSize` が 250MB なので、**30MB しか保存できない利用者が
 	// 250MB を確保させられた**。
-	if maxBytes > 0 && fileHeader.Size > maxBytes {
+	if maxBytes > 0 && maxBytes != math.MaxInt64 && fileHeader.Size > maxBytes {
 		return nil, "", coredrive.ErrMaxFileSizeExceeded
 	}
 	src, err := openMultipartFile(fileHeader)
@@ -229,7 +230,14 @@ var readMultipartFile = func(c echo.Context, maxBytes int64) ([]byte, string, er
 //
 // maxBytes <= 0 は上限なし (policy 未設定 / system file / remote user)。
 func readAtMost(r io.Reader, maxBytes int64) ([]byte, error) {
-	if maxBytes <= 0 {
+	// **`maxBytes+1` のオーバーフローを避ける (#3037 レビュー)。**
+	// `policyMegabytes` は `safemath.MulFloat64` で `MaxInt64` に飽和するので、
+	// `maxFileSizeMb` に `math.MaxFloat64` (= このリポジトリが「無制限」の
+	// 意味で使うイディオム) を入れると `maxBytes+1` が `MinInt64` になり、
+	// `io.LimitReader` が即 EOF を返して **0 バイトの本体が error 無しで
+	// 保存される**。この関数の doc が塞いだばかりの「無言で切り詰められた
+	// 本体」そのもの。
+	if maxBytes <= 0 || maxBytes == math.MaxInt64 {
 		return io.ReadAll(r)
 	}
 	// 1 バイト余分に読んで、超過を「読めてしまった」ことで判定する。

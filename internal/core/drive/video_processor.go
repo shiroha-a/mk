@@ -26,7 +26,7 @@ type CommandRunner interface {
 // ffmpegTimeout bounds one ffmpeg invocation.
 //
 // **upstream にこの上限は無い** (`FileInfoService` / `VideoProcessingService`
-// は `execa` を timeout 無しで呼ぶ) が、そちらに合わせない。値は
+// は `fluent-ffmpeg` を timeout 指定なしで呼ぶ) が、そちらに合わせない。値は
 // 「正当な動画のサムネイル生成が終わる時間」より十分長く、「1 本で枠を
 // 潰し続ける」には短い点を採った。
 const ffmpegTimeout = 60 * time.Second
@@ -46,6 +46,11 @@ func (r *ExecCommandRunner) Run(ctx context.Context, name string, args ...string
 	cmd := exec.CommandContext(ctx, name, args...)
 	var out boundedBuffer
 	out.limit = ffmpegMaxOutputBytes
+	// **同じ buffer を 2 つに渡すのは os/exec の実装に依存している。**
+	// `childStderr` が `interfaceEqual(c.Stderr, c.Stdout)` を見て同じ fd を
+	// 使い回すので、コピーする goroutine は 1 本しか起きない。**別々の
+	// writer に分けるとデータ競合になる** — ffmpeg は stdout に何も書かない
+	// (出力はファイル) ので `-race` でも出ない形の競合になる。
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	// **ctx が切れたあと居座らせない。** `CommandContext` は SIGKILL を
@@ -121,6 +126,18 @@ func (p *FFmpegVideoProcessor) GenerateThumbnail(ctx context.Context, body []byt
 		"-i", inputPath,
 		"-ss", "5%",
 		"-vframes", "1",
+		// **ffmpeg 側で縮めてから受け取る (#3037 レビュー)。**
+		//
+		// 引数に scale が無いと出力 PNG は入力動画の解像度そのままで、
+		// 8K なら 50-80MB になる。`readFileAtMost` の上限 (32MiB) に当たると
+		// `GenerateThumbnail` は `nil, nil` を返すので、**エラーも出ないまま
+		// 6K 以上の動画のサムネイルが恒久的に欠ける**。
+		//
+		// どうせこの後 `imgProc.GenerateThumbnail` が 498x422 へ縮めるので、
+		// ここで長辺を抑えても結果は変わらない。`force_original_aspect_ratio`
+		// で縦横比を保ち、`-1` ではなく `decrease` を使うのは奇数幅で
+		// エンコーダが落ちるのを避けるため。小さい動画は拡大しない。
+		"-vf", "scale=w=1280:h=1280:force_original_aspect_ratio=decrease",
 		"-f", "image2",
 		outputPath,
 	)

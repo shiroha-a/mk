@@ -534,3 +534,102 @@ func TestChunkedErrorUUIDsAreUnique(t *testing.T) {
 		seen[u] = true
 	}
 }
+
+// **セッションの上限を読む前に引くこと (#3037 レビュー)。**
+//
+// `AppendChunk` は `size > sess.ChunkSize` を拒否するが、そこへ届く時点で
+// チャンクは全部メモリに載っている。body limit はこの経路で 33MiB なので、
+// 既定 10MiB のセッションでも 1 リクエストあたり 33MiB を確保させられていた。
+func TestReadMultipartChunk_StopsAtTheSessionChunkSize(t *testing.T) {
+	// 11 バイトの本体に 5 バイトの上限。
+	c := newChunkMultipart(t, "hello world")
+	_, err := readMultipartChunk(c, 5)
+	require.ErrorIs(t, err, coredrive.ErrInvalidChunkSize)
+
+	// 上限ちょうどは通る。
+	c = newChunkMultipart(t, "hello")
+	body, err := readMultipartChunk(c, 5)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(body))
+
+	// 上限を決められないときは掛けない (判定は AppendChunk が行う)。
+	c = newChunkMultipart(t, "hello world")
+	body, err = readMultipartChunk(c, 0)
+	require.NoError(t, err)
+	assert.Equal(t, "hello world", string(body))
+}
+
+// **`FileHeader.Size` だけに頼らない。** あれはパーサが数えた値なので、
+// 実際の読み込み量と食い違いうる (`readMultipartFile` と同じ理由)。
+func TestReadMultipartChunk_LimitsEvenWhenHeaderSizeLies(t *testing.T) {
+	prev := openMultipartFile
+	t.Cleanup(func() { openMultipartFile = prev })
+	openMultipartFile = func(*multipart.FileHeader) (multipart.File, error) {
+		return &countingMultipartFile{data: []byte("hello world")}, nil
+	}
+
+	c := newChunkMultipart(t, "hello") // 申告は 5 バイト
+	_, err := readMultipartChunk(c, 5)
+	assert.ErrorIs(t, err, coredrive.ErrInvalidChunkSize)
+}
+
+// **申告が上限を超えていれば開かない。** 開いてから落とすと、その時点で
+// パーサは既に全部受信している。
+func TestReadMultipartChunk_DoesNotOpenWhenSizeExceeds(t *testing.T) {
+	opened := false
+	prev := openMultipartFile
+	t.Cleanup(func() { openMultipartFile = prev })
+	openMultipartFile = func(fh *multipart.FileHeader) (multipart.File, error) {
+		opened = true
+		return prev(fh)
+	}
+
+	c := newChunkMultipart(t, "hello world")
+	_, err := readMultipartChunk(c, 5)
+	require.ErrorIs(t, err, coredrive.ErrInvalidChunkSize)
+	assert.False(t, opened, "上限超過が申告で分かるのに本体を開いている")
+}
+
+func newChunkMultipart(t *testing.T, content string) echo.Context {
+	t.Helper()
+	body := &bytes.Buffer{}
+	mw := multipart.NewWriter(body)
+	part, err := mw.CreateFormFile("chunk", "c")
+	require.NoError(t, err)
+	_, err = part.Write([]byte(content))
+	require.NoError(t, err)
+	require.NoError(t, mw.Close())
+
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/", body)
+	req.Header.Set(echo.HeaderContentType, mw.FormDataContentType())
+	return e.NewContext(req, httptest.NewRecorder())
+}
+
+// **handler がセッションの上限を引いていること (#3037 レビュー)。**
+//
+// `readMultipartChunk` 側の判定が正しくても、handler が上限を渡さなければ
+// 何も効かない。実際に読んだバイト数で見る — 応答だけだと `AppendChunk` が
+// 落とした場合と区別が付かない。
+func TestFilesCreateChunkedAppend_DoesNotReadPastTheSessionChunkSize(t *testing.T) {
+	h, _, _ := newChunkedHandler(t)
+	uploadID := startSession(t, h, apiChunkSize*4)
+
+	var seen *countingMultipartFile
+	prev := openMultipartFile
+	t.Cleanup(func() { openMultipartFile = prev })
+	openMultipartFile = func(*multipart.FileHeader) (multipart.File, error) {
+		// 申告は上限内なのに、実体はその 4 倍を返す。
+		seen = &countingMultipartFile{data: chunkBytes(apiChunkSize * 4)}
+		return seen, nil
+	}
+
+	c, rec := newChunkReq(t, uploadID, 0, chunkBytes(apiChunkSize), false)
+	setUser(c, "u1")
+	require.NoError(t, h.FilesCreateChunkedAppend(c))
+
+	assert.NotEqual(t, http.StatusOK, rec.Code, "上限を超えたチャンクを受理している")
+	require.NotNil(t, seen, "openMultipartFile が呼ばれていない")
+	assert.LessOrEqual(t, seen.read, apiChunkSize+1,
+		"セッションの上限を超えて読んでいる (読んだのは %d バイト)", seen.read)
+}
