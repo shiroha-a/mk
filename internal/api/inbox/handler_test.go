@@ -748,3 +748,63 @@ func TestInbox_RejectsStaleSignedDate(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rec.Code)
 	assert.Empty(t, followingRepo.Followings, "弾いた活動が処理されてはいけない")
 }
+
+// **未署名の `X-Date` で clockSkew を迂回できないこと (#3037)。**
+//
+// `X-Date` は普通どの peer も署名しないので、捕まえたリクエストに新しい値を
+// 足すだけで検査を通せた — 署名は元の `Date` に対して作られているのでそのまま
+// 通り、`Digest` も body も変わらないので他の検査も全部通る。つまり一度
+// 盗聴できた配送を**永久に再投函**できた。
+func TestInbox_UnsignedXDateDoesNotBypassSkew(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+
+	h, repo, followingRepo := newHandler(t, pub)
+	bobURI := "https://example.com/users/bob"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+
+	body := []byte(`{"type":"Follow","actor":"https://remote.example/users/alice","object":"https://example.com/users/bob"}`)
+
+	c, rec := newPost(t, body)
+	req := c.Request()
+	req.Header.Set("Date", time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat))
+	require.NoError(t, activitypub.SignRequest(req, key, activitypub.SHA256Digest(body),
+		[]string{"(request-target)", "date", "host", "digest"}))
+	req.Host = "example.com"
+	// 署名した**後**に足す = 署名対象ではない。
+	req.Header.Set("X-Date", time.Now().UTC().Format(http.TimeFormat))
+
+	require.NoError(t, h.Inbox(c))
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, "未署名の X-Date で再投函が通っている")
+	assert.Empty(t, followingRepo.Followings, "弾いた活動が処理されてはいけない")
+}
+
+// **署名済みの `X-Date` は従来どおり優先される。** これが無いと
+// 「X-Date を一律で無視する」実装でも上のテストが通る。署名しているなら
+// 値を差し替えられない (署名が壊れる) ので、優先しても窓は閉じたまま。
+func TestInbox_SignedXDateIsStillHonoured(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	key, err := activitypub.NewPrivateKey("https://remote.example/users/alice#main-key", priv)
+	require.NoError(t, err)
+
+	h, repo, _ := newHandler(t, pub)
+	bobURI := "https://example.com/users/bob"
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", URI: &bobURI}
+
+	body := []byte(`{"type":"Follow","actor":"https://remote.example/users/alice","object":"https://example.com/users/bob"}`)
+
+	c, rec := newPost(t, body)
+	req := c.Request()
+	// Date は古いまま、X-Date に現在時刻を入れて**両方署名する**。
+	req.Header.Set("Date", time.Now().Add(-time.Hour).UTC().Format(http.TimeFormat))
+	req.Header.Set("X-Date", time.Now().UTC().Format(http.TimeFormat))
+	require.NoError(t, activitypub.SignRequest(req, key, activitypub.SHA256Digest(body),
+		[]string{"(request-target)", "date", "x-date", "host", "digest"}))
+	req.Host = "example.com"
+
+	require.NoError(t, h.Inbox(c))
+	assert.NotEqual(t, http.StatusUnauthorized, rec.Code, "署名済みの X-Date を無視している")
+}

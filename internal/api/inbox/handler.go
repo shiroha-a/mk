@@ -309,7 +309,7 @@ func (h *Handler) admitInbox(req *http.Request, body []byte) (*activitypub.Parse
 		return nil, err
 	}
 	return parsed, activitypub.VerifyInboxAdmission(parsed, req.Host, h.expectedHost,
-		activitypub.InboxDateHeader(req.Header), req.Header.Get("Digest"), body)
+		activitypub.InboxDateHeader(req.Header, parsed.Headers), req.Header.Get("Digest"), body)
 }
 
 // maxLoggedSignerLen bounds the attacker-controlled strings the discard logs

@@ -138,10 +138,22 @@ func VerifyInboxAdmission(parsed *ParsedSignature, hostHeader, expectedHost, dat
 	return nil
 }
 
-// InboxDateHeader resolves the date value upstream's parser uses: `X-Date`
-// takes precedence over `Date` when both are present.
-func InboxDateHeader(h http.Header) string {
-	if v := h.Get("X-Date"); v != "" {
+// InboxDateHeader resolves the date value to check the clock skew against.
+//
+// upstream の parser は `X-Date` を `Date` より優先するが、**署名されている
+// ときだけ優先させる (#3037)。**
+//
+// `date` は署名必須にしてあるのに対し、`x-date` は普通どの peer も署名しない。
+// 無条件に優先すると、**捕まえたリクエストに新しい `X-Date` を足すだけで
+// clockSkew 検査を迂回できる** — 署名は元の `Date` に対して作られているので
+// そのまま通り、`Digest` も body も変わらないので他の検査も全部通る。
+// つまり、一度盗聴できた配送を**永久に再投函**できる。skew 検査はその窓を
+// 閉じるためにあるので、迂回できるなら意味が無い。
+//
+// **`x-date` を署名している peer は今までどおり。** その場合は値を差し替え
+// られない (署名が壊れる) ので、優先しても窓は閉じたまま。
+func InboxDateHeader(h http.Header, signedHeaders []string) string {
+	if v := h.Get("X-Date"); v != "" && containsHeaderFold(signedHeaders, "x-date") {
 		return v
 	}
 	return h.Get("Date")

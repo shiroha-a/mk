@@ -254,18 +254,29 @@ func TestVerifyInboxAdmission_DateSkew(t *testing.T) {
 	})
 }
 
-// X-Date が Date より優先されること (upstream parser と同じ)。
+// **X-Date は署名されているときだけ Date より優先される (#3037)。**
+//
+// 無条件に優先すると、捕まえたリクエストに新しい `X-Date` を足すだけで
+// clockSkew 検査を迂回できる (署名は元の `Date` に対して作られているので
+// そのまま通る) = 一度盗聴できた配送を永久に再投函できる。
 func TestInboxDateHeader(t *testing.T) {
 	tests := []struct {
-		name  string
-		date  string
-		xDate string
-		want  string
+		name   string
+		date   string
+		xDate  string
+		signed []string
+		want   string
 	}{
-		{name: "Date のみ", date: "d", want: "d"},
-		{name: "X-Date のみ", xDate: "x", want: "x"},
-		{name: "両方あれば X-Date", date: "d", xDate: "x", want: "x"},
-		{name: "どちらも無い", want: ""},
+		{name: "Date のみ", date: "d", signed: []string{"date"}, want: "d"},
+		{name: "どちらも無い", signed: []string{"date"}, want: ""},
+		// 署名されていない X-Date は無視する (= 再投函の穴を塞ぐ)。
+		{name: "X-Date が未署名なら Date", date: "d", xDate: "x", signed: []string{"date"}, want: "d"},
+		{name: "X-Date が未署名で Date が無い", xDate: "x", signed: []string{"date"}, want: ""},
+		// 署名している peer には従来どおり。
+		{name: "X-Date が署名済みなら優先", date: "d", xDate: "x", signed: []string{"date", "x-date"}, want: "x"},
+		{name: "署名済み X-Date のみ", xDate: "x", signed: []string{"x-date"}, want: "x"},
+		// 署名ヘッダ名の大小は揃っていない peer がいる。
+		{name: "大文字の署名ヘッダ名", date: "d", xDate: "x", signed: []string{"Date", "X-Date"}, want: "x"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -276,7 +287,7 @@ func TestInboxDateHeader(t *testing.T) {
 			if tt.xDate != "" {
 				h.Set("X-Date", tt.xDate)
 			}
-			if got := InboxDateHeader(h); got != tt.want {
+			if got := InboxDateHeader(h, tt.signed); got != tt.want {
 				t.Fatalf("InboxDateHeader() = %q, want %q", got, tt.want)
 			}
 		})
