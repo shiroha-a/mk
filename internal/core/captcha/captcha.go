@@ -26,7 +26,7 @@ type Verifier interface {
 }
 
 // CaptchaTokens bundles all possible captcha response tokens sent by the
-// frontend. Only the one matching the enabled provider is inspected.
+// frontend. 有効な provider に対応するものが**すべて**検証される (#3037)。
 type CaptchaTokens struct {
 	Hcaptcha    string
 	Recaptcha   string
@@ -149,26 +149,38 @@ func (s *Service) HasRealProvider() bool {
 	return s.hcaptcha != nil || s.recaptcha != nil || s.turnstile != nil || s.mcaptcha != nil
 }
 
-// Verify checks the token matching the first enabled provider. Returns nil
-// if no provider is enabled (captcha disabled).
+// Verify checks the tokens of **every** enabled provider. Returns nil if no
+// provider is enabled (captcha disabled).
 func (s *Service) Verify(ctx context.Context, tokens CaptchaTokens) error {
 	// **provider は Reload で差し替わりうる**ので、判定と呼び出しの間で
 	// 読み直さないよう局所変数に写してからロックを外す。
 	s.mu.RLock()
 	hcap, recap, turn, mcap, testc := s.hcaptcha, s.recaptcha, s.turnstile, s.mcaptcha, s.testcap
 	s.mu.RUnlock()
-	switch {
-	case hcap != nil:
-		return hcap.Verify(ctx, tokens.Hcaptcha)
-	case recap != nil:
-		return recap.Verify(ctx, tokens.Recaptcha)
-	case turn != nil:
-		return turn.Verify(ctx, tokens.Turnstile)
-	case mcap != nil:
-		return mcap.Verify(ctx, tokens.Mcaptcha)
-	case testc != nil:
-		return testc.Verify(ctx, tokens.Testcaptcha)
-	default:
-		return nil
+	// **有効な provider は全部検証する (#3037)。** 以前は最初の 1 つで
+	// return していたので、運営者が 2 つ有効にすると**後ろの 1 つは素通り**
+	// だった。設定画面は両方を「有効」と表示し、フォームも両方のウィジェットを
+	// 出すので、効いていない側があることに気付けない。
+	//
+	// 順序は upstream (`SignupApiService.ts:80-108`) と同じ hcaptcha →
+	// mcaptcha → recaptcha → turnstile → testcaptcha。**最初に失敗した
+	// provider の error を返す**ので、どれが落ちたかは順序で決まる。
+	for _, v := range []struct {
+		p     Verifier
+		token string
+	}{
+		{hcap, tokens.Hcaptcha},
+		{mcap, tokens.Mcaptcha},
+		{recap, tokens.Recaptcha},
+		{turn, tokens.Turnstile},
+		{testc, tokens.Testcaptcha},
+	} {
+		if v.p == nil {
+			continue
+		}
+		if err := v.p.Verify(ctx, v.token); err != nil {
+			return err
+		}
 	}
+	return nil
 }

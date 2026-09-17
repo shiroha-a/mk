@@ -375,3 +375,67 @@ func TestService_Reload(t *testing.T) {
 		assert.NotPanics(t, func() { s.Reload(&model.Meta{EnableTestcaptcha: true}) })
 	})
 }
+
+// **有効な provider は全部検証する (#3037)。**
+//
+// 以前は最初の 1 つで return していたので、運営者が 2 つ有効にすると
+// **後ろの 1 つは素通り**だった。設定画面は両方を「有効」と表示し、フォームも
+// 両方のウィジェットを出すので、効いていない側があることに気付けない。
+// upstream (`SignupApiService.ts:80-108`) は `if` を 5 つ並べて全部検証する。
+//
+// mcaptcha と testcaptcha を使うのは、**外部 URL を差し替えられる provider が
+// この 2 つだけ**のため (他の 3 つは verify URL が定数)。判定の形は共通なので、
+// この組で足りる。
+func TestVerify_ChecksEveryEnabledProvider(t *testing.T) {
+	hits := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"valid":true}`))
+	}))
+	defer srv.Close()
+
+	svc := captcha.NewServiceWithClient(mcaptchaAndTestcaptchaMeta(srv.URL), srv.Client())
+
+	// 両方正しいときは通る。
+	require.NoError(t, svc.Verify(context.Background(), captcha.CaptchaTokens{
+		Mcaptcha: "m", Testcaptcha: "testcaptcha-passed",
+	}))
+	assert.Equal(t, 1, hits, "mcaptcha が検証されていない")
+
+	// **testcaptcha だけ間違っている。** mcaptcha (先に評価される) が成功する
+	// ので、最初の 1 つで return する実装ではここが通ってしまう。
+	err := svc.Verify(context.Background(), captcha.CaptchaTokens{
+		Mcaptcha: "m", Testcaptcha: "wrong",
+	})
+	assert.Error(t, err, "2 つ目の provider が素通りしている")
+}
+
+// **手前の provider が失敗したら、その時点で落とす。** 後ろが成功しても
+// 結果は失敗。
+func TestVerify_FailsOnTheFirstRejectingProvider(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"valid":false}`))
+	}))
+	defer srv.Close()
+
+	svc := captcha.NewServiceWithClient(mcaptchaAndTestcaptchaMeta(srv.URL), srv.Client())
+
+	err := svc.Verify(context.Background(), captcha.CaptchaTokens{
+		Mcaptcha: "m", Testcaptcha: "testcaptcha-passed",
+	})
+	assert.Error(t, err)
+}
+
+func mcaptchaAndTestcaptchaMeta(instanceURL string) *model.Meta {
+	secret := "s"
+	site := "sk"
+	return &model.Meta{
+		EnableMcaptcha:      true,
+		McaptchaSecretKey:   &secret,
+		McaptchaSiteKey:     &site,
+		McaptchaInstanceURL: &instanceURL,
+		EnableTestcaptcha:   true,
+	}
+}
