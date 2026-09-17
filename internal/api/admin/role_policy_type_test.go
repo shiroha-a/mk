@@ -113,3 +113,14 @@ func TestUpdateMeta_AcceptsCorrectPolicyValueType(t *testing.T) {
 
 	assert.Less(t, rec.Code, 300, "正しい値を拒否している: %s", rec.Body.String())
 }
+
+// **`policies: null` は従来どおり列のリセットとして受ける
+// (#3037 レビュー 3 周目)。** `coerceMetaJSONBFields` が nil を `{}` に倒す。
+// 他の jsonb 列も null を受けるので、ここだけ 400 にすると非対称になる。
+func TestUpdateMeta_AcceptsNullPolicies(t *testing.T) {
+	h, _, _, _, _ := newTestHandlerWithAssign(t)
+
+	rec := doPost(h.UpdateMeta, `{"policies":null}`, adminUser)
+
+	assert.Less(t, rec.Code, 300, "null の policies を拒否している: %s", rec.Body.String())
+}

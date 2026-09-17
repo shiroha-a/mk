@@ -340,3 +340,41 @@ func TestTargetPrivilegeChecksAreFailClosed(t *testing.T) {
 			"ロールを引けない窓で管理者の詳細が見えている: %s", rec.Body.String())
 	})
 }
+
+// **root は `meta.rootUserId` にしか居ないことがある — 凍結と閲覧でも同じ
+// (#3037 レビュー 3 周目)。**
+//
+// 2 周目は資格情報のリセット 2 本だけを `targetIsRoot` に替えた。`SuspendUser` /
+// `ShowUser` は `RolePrivileges` を通すが、あれが内部で呼ぶ `isRootUser` は
+// **meta の失敗を握り潰して `user.isRoot` へ落ちる**。`isRoot` 列が入った
+// migration より前に作られた root は `false` のままなので、meta を読めない窓では
+// `(false, false, nil)` = 「特権なし」が返り、handler に倒す材料が渡らなかった。
+func TestRootStaysProtectedWhenMetaIsUnreadable(t *testing.T) {
+	for name, call := range map[string]func(*apiadmin.Handler, string, *model.User) *httptest.ResponseRecorder{
+		"suspend-user": func(h *apiadmin.Handler, id string, actor *model.User) *httptest.ResponseRecorder {
+			return doPost(h.SuspendUser, `{"userId":"`+id+`"}`, actor)
+		},
+		"show-user": func(h *apiadmin.Handler, id string, actor *model.User) *httptest.ResponseRecorder {
+			return doPost(h.ShowUser, `{"userId":"`+id+`"}`, actor)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// `isRoot` は false。root であることは meta にしか書かれていない。
+			target := &model.User{ID: "root1", Username: "root1"}
+			fx := newTakeoverFixture(t, target, false)
+			rootID := "root1"
+			fx.metaRepo.MetaRepository.(*testutil.MockMetaRepository).Meta.RootUserID = &rootID
+
+			// 対照: meta を読めるなら root として弾く。
+			rec := call(fx.h, "root1", &model.User{ID: "mod1"})
+			require.Equal(t, http.StatusBadRequest, rec.Code, "root を弾けていない: %s", rec.Body.String())
+			require.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+
+			fx.metaRepo.fail = true
+			rec = call(fx.h, "root1", &model.User{ID: "mod1"})
+
+			assert.Equal(t, http.StatusInternalServerError, rec.Code,
+				"meta を読めない窓で root を触れている: %s", rec.Body.String())
+		})
+	}
+}

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/core/signup"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"net/http"
 	"strconv"
 	"strings"
@@ -277,6 +280,47 @@ func TestDriveShowFile_HidesRequestHeadersFromModeratorOwner(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "203.0.113.99", resp["requestIp"], "requestIp は moderator viewer に常に出す")
 	assert.Nil(t, resp["requestHeaders"], "owner が moderator のときは requestHeaders を null で hide")
+}
+
+// **ロールを引けない窓では隠す側に倒す (#3037 レビュー 3 周目)。**
+//
+// `IsModerator` は判定できないときに false を返すので、素で使うと
+// `assignmentRepo.ListByUser` が一時的に失敗する窓で**他のモデレーターの
+// `requestHeaders` が出る**。2 周目でここを fail-closed にしたが、テストが
+// 無く `ownerIsModerator := true` を `false` に戻す変異が素通りしていた。
+func TestDriveShowFile_HidesRequestHeadersWhenRoleLookupFails(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	roleRepo := testutil.NewMockRoleRepository()
+	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true}
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	require.NoError(t, assignRepo.Create(&model.RoleAssignment{ID: "ra1", UserID: "admin1", RoleID: "r_mod"}))
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	flaky := &failingAssignmentRepo{MockRoleAssignmentRepository: assignRepo}
+	roleSvc := corerole.NewService(roleRepo, flaky, metaRepo, idGen)
+	h := apiadmin.NewHandler(signup.NewService(userRepo, metaRepo, idGen), roleSvc, metaRepo, userRepo, idGen)
+
+	repo := testutil.NewMockDriveFileRepository()
+	owner := "admin2"
+	ip := "203.0.113.99"
+	require.NoError(t, repo.Create(&model.DriveFile{
+		ID:             "d_flaky",
+		UserID:         &owner,
+		Name:           "mod-file.png",
+		Type:           "image/png",
+		RequestIP:      &ip,
+		RequestHeaders: datatypes.JSON([]byte(`{"secret":"shh"}`)),
+	}))
+	h.SetDriveFileRepo(repo)
+
+	rec := doPost(h.DriveShowFile, `{"fileId":"d_flaky"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp["requestHeaders"],
+		"ロールを引けない窓で他のモデレーターの requestHeaders が出ている")
 }
 
 func TestDriveCleanup_InvokesDeleteOrphans(t *testing.T) {

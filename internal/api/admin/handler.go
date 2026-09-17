@@ -1070,6 +1070,13 @@ func (h *Handler) ShowUser(c echo.Context) error {
 	if h.roleService != nil {
 		me := middleware.GetUser(c)
 		if me != nil && !h.roleService.IsAdministrator(me.ID) {
+			// **root も同じ理由で `targetIsRoot` を通す (レビュー 3 周目)。**
+			switch isRoot, undet := h.targetIsRoot(user); {
+			case undet:
+				return apierr.JSONInternalError(c)
+			case isRoot:
+				return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot show info of admin.", "0d4e3a3e-2c1f-4d8b-9d2a-7a0c1c1b2f3a"))
+			}
 			targetAdmin, _, err := h.roleService.RolePrivileges(user.ID)
 			if err != nil {
 				slog.Error("admin/show-user: cannot determine the target's privileges", "userId", user.ID, "err", err)
@@ -1322,7 +1329,17 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 	// **判定できないときは通さない (#3037 レビュー 2 周目)。** `IsModerator` は
 	// 判定できないときに false を返すので、素で使うと `ListByUser` が一時的に
 	// 失敗する窓で**他のモデレーターを凍結できる** (#2792)。
-	if user.IsRoot {
+	//
+	// **root は `targetIsRoot` で見る (#3037 レビュー 3 周目)。** `user.IsRoot`
+	// だけでは足りない — `isRoot` 列が入った migration より前に作られた root は
+	// `false` のままで、**本番の root がまさにそれ**。`RolePrivileges` が内部で
+	// 呼ぶ `isRootUser` は meta の失敗を握り潰して `isRoot` へ落ちるので、
+	// meta を読めない窓では `(false, false, nil)` = 「特権なし」を返し、
+	// **モデレーターが root を凍結できた**。資格情報のリセット側と同じ判定へ揃える。
+	switch isRoot, undet := h.targetIsRoot(user); {
+	case undet:
+		return apierr.JSONInternalError(c)
+	case isRoot:
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot suspend a moderator account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 	}
 	if h.roleService != nil {
@@ -1655,7 +1672,11 @@ func (h *Handler) UpdateMeta(c echo.Context) error {
 	// `if limit, ok := role.PolicyNumber(v); ok { ...gate... }` の形で読むので、
 	// 上限違反で弾かれるのではなく上限そのものが無くなる (#2611 / #3037)。
 	// rename の後に置くのは、alias で来た場合も正規名で見るため。
-	if raw, ok := fields["policies"]; ok {
+	if raw, ok := fields["policies"]; ok && raw != nil {
+		// **`null` は従来どおり受ける (#3037 レビュー 3 周目)。**
+		// `coerceMetaJSONBFields` が nil を `{}` に倒して列をリセットする。
+		// 他の jsonb 列 (`clientOptions` / `deliverSuspendedSoftware`) も
+		// null を受けるので、ここだけ 400 にすると非対称になる。
 		policies, isMap := raw.(map[string]any)
 		if !isMap {
 			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
@@ -2380,7 +2401,12 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 //
 // **2 箇所で同じ文言にする。** 片方だけ直すと、管理者が create と update で
 // 違う説明を読むことになる。
-const selfGrantableRoleMessage = "自分で満たせる条件 (isBot / isCat / isLocked / isExplorable / フォロー数 / 投稿数) を使った条件つきロールには、管理者・モデレーターや権限を配る policy を持たせられません。"
+//
+// **判定の実態に合わせること (#3037 レビュー 3 周目)。** 2 周目で
+// `isLocal` / 短い `createdLessThan` / `createdMoreThan` / 恒真式 / 未知の型が
+// 拒否側に加わったのに、この文面は 1 周目の一覧のままだった。管理者は
+// **自分が使っていない条件の一覧**を読まされ、何が悪いのか分からない。
+const selfGrantableRoleMessage = "登録するだけで満たせる条件 (isLocal / createdLessThan / 30 日未満の createdMoreThan)、本人が切り替えられる条件 (isBot / isCat / isLocked / isExplorable / フォロー数 / 投稿数)、全員に一致する式 (空の and、空の or の否定、中身の無い not の否定)、判定できない未知の条件を使った条件つきロールには、管理者・モデレーターや権限を配る policy を持たせられません。"
 
 // invalidRolePolicyKey returns the first policy entry whose value has the wrong
 // type, or "" when every entry is acceptable.
