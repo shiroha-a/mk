@@ -2443,7 +2443,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		oauth.NewRedisStore(s.redis.Default),
 		&http.Client{
 			Timeout:   10 * time.Second,
-			Transport: oauthDiscoveryTransport(s.config.AllowedPrivateNetworks, s.config.TestMode),
+			Transport: oauthDiscoveryTransport(s.config.AllowedPrivateNetworks, s.config.TestMode, s.outboundOpts()...),
 		},
 		userRepo,
 		repository.NewAccessTokenRepository(s.db),
@@ -3322,7 +3322,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	adminHandler.SetEmojiImageFetcher(apiadmin.NewEmojiImageFetcher(s.outboundClient(10*time.Second), driveService, s.config.UserAgent))
 	// admin/emoji/fetch-remote-meta が使うメタデータ取得 (#2698)。**取得先の host は
 	// 絵文字の host = 相手が決める値**なので、SSRF ガード付きの transport を組む。
-	adminHandler.SetRemoteEmojiMetaFetcher(emojimeta.NewFetcher(s.config.AllowedPrivateNetworks, s.config.UserAgent))
+	// **outbound の共通設定を渡す (#3037)。** 渡し忘れるとこの経路だけが
+	// `config.proxy` を通らず、サーバーの素の IP でリモートへ出る (#638)。
+	adminHandler.SetRemoteEmojiMetaFetcher(emojimeta.NewFetcher(s.config.AllowedPrivateNetworks, s.config.UserAgent, s.outboundOpts()...))
 	adminHandler.SetRelayService(relaySvc)
 	adminHandler.SetSystemWebhookRepo(systemWebhookRepo)
 	// admin/system-webhook/test は webhookService.DispatchSystemTest で real
