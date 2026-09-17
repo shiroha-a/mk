@@ -40,7 +40,11 @@ func (h *Handler) UnsetMfa(c echo.Context) error {
 	// reset-password と同じ保護 (#3037)。2FA を外す操作なので、
 	// `reset-password` と続けて叩かれると対象としてサインインできる状態が
 	// 完成する。**「誰を対象にできるか」は 2 つで揃える。**
-	if h.credentialTakeoverDenied(c, user) {
+	denied, undetermined := h.credentialTakeoverDenied(c, user)
+	if undetermined {
+		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+	}
+	if denied {
 		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
 	}
 

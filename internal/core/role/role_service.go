@@ -45,8 +45,11 @@ var (
 // **本人が変えられない条件なら通す。** 「1 年以上前に作られたローカル
 // 利用者は全員モデレーター」のような設定は運営者の明示的な判断で、
 // 本人の操作では満たせない。
-func checkConditionalPrivilege(target model.RoleTarget, condFormula []byte, isModerator, isAdministrator bool) error {
-	if target != model.RoleTargetConditional || (!isModerator && !isAdministrator) {
+func checkConditionalPrivilege(target model.RoleTarget, condFormula, policies []byte, isModerator, isAdministrator bool) error {
+	if target != model.RoleTargetConditional {
+		return nil
+	}
+	if !isModerator && !isAdministrator && !grantsPrivilegedPolicy(policies) {
 		return nil
 	}
 	if len(condFormula) == 0 {
@@ -594,8 +597,13 @@ func (s *Service) isRootUser(userID string) bool {
 	//
 	// `rootUserId` を設定した時点で運営者は「root はこの利用者だ」と明示的に
 	// 宣言しているので、そこに書かれていない `isRoot` は過去の遺物として
-	// 無視してよい。これで `admin/update-meta` の `rootUserId` が引き継ぎと
-	// 剥奪の両方を担う。
+	// 無視してよい。
+	//
+	// **ただし `rootUserId` は `admin/update-meta` の保護列なので API からは
+	// 書けない (#3037 レビューで実測)。** 現状の書き込みは初回セットアップの
+	// 1 箇所だけで、引き継ぎには DB を直接触るしかない。この変更が与えるのは
+	// 「`rootUserId` を書き換えられる手段を用意すれば剥奪も効く」という土台で
+	// あって、剥奪の手段そのものではない。
 	//
 	// **未設定 (TS から引き継いだ DB) のときだけ `isRoot` に落ちる** ので、
 	// #785 の drop-in 互換はそのまま。
@@ -623,6 +631,34 @@ func (s *Service) isRootUser(userID string) bool {
 		}
 	}
 	return false
+}
+
+// RolePrivileges reports the user's administrator / moderator status, and an
+// error when it cannot be determined.
+//
+// **`IsAdministrator` / `IsModerator` は判定できないときに false を返す
+// (#3037 レビュー)。** 「権限を持っているか」を知りたい大半の呼び出し側では
+// それでよい (持っていない側に倒れる) が、**「相手が特権を持っていないことを
+// 確かめてから触る」**判定では逆になる — `assignmentRepo.ListByUser` が一時的に
+// 失敗する窓で、モデレーターが他の管理者のパスワードを発行できてしまう。
+// そちらの用途はこの関数を使って error を 500 に倒すこと。
+func (s *Service) RolePrivileges(userID string) (isAdministrator, isModerator bool, err error) {
+	if s.isRootUser(userID) {
+		return true, true, nil
+	}
+	roles, err := s.GetUserRoles(userID)
+	if err != nil {
+		return false, false, err
+	}
+	for _, r := range roles {
+		if r.IsAdministrator {
+			isAdministrator = true
+		}
+		if r.IsModerator || r.IsAdministrator {
+			isModerator = true
+		}
+	}
+	return isAdministrator, isModerator, nil
 }
 
 // IsAdministrator checks if the user has any administrator role or is root.
@@ -1579,11 +1615,13 @@ func (s *Service) Create(name, description string, opts CreateOptions) (*model.R
 	if len(opts.CondFormula) > 0 {
 		role.CondFormula = opts.CondFormula
 	}
-	if err := checkConditionalPrivilege(target, role.CondFormula, opts.IsModerator, opts.IsAdministrator); err != nil {
-		return nil, err
-	}
 	if len(opts.Policies) > 0 {
 		role.Policies = opts.Policies
+	}
+	// **`policies` を入れたあとに判定する。** 手前に置くと `role.Policies` が
+	// まだ空なので、policy 経由の自己付与を素通りさせる (#3037 レビュー)。
+	if err := checkConditionalPrivilege(target, role.CondFormula, role.Policies, opts.IsModerator, opts.IsAdministrator); err != nil {
+		return nil, err
 	}
 	if err := s.roleRepo.Create(role); err != nil {
 		return nil, err
@@ -1727,13 +1765,67 @@ func (s *Service) UpdateFields(id string, fields map[string]any) (*model.Role, e
 	return s.findRoleByID(id)
 }
 
+// privilegedPolicyKeys are the role policies that gate `/admin/*` endpoints.
+//
+// **`isAdministrator` / `isModerator` だけでは足りない (#3037 レビュー)。**
+// これらの policy は `RequireRolePolicy` だけで admin の endpoint を開ける
+// (`admin/emoji/*` は 20 route、`admin/avatar-decorations/*` は 4 route で、
+// どちらも `RequireModerator` を併用していない)。つまり
+// `{"target":"conditional","condFormula":{"type":"isCat"},
+//
+//	"policies":{"canManageCustomEmojis":{"value":true}}}`
+//
+// は「猫と名乗るだけでインスタンス全体の絵文字を消せるロール」になる。
+// **管理者フラグを塞いだことで「システムが守ってくれる」と読まれるぶん、
+// こちらが無警告で通るのはより悪い。**
+//
+// 一覧は `internal/entitycompat` の gate が router と突き合わせるので、
+// admin を policy だけで開ける endpoint を足したらここも増える。
+var privilegedPolicyKeys = map[string]struct{}{
+	"canManageCustomEmojis":      {},
+	"canManageAvatarDecorations": {},
+}
+
+// grantsPrivilegedPolicy reports whether the role's `policies` hand out one of
+// privilegedPolicyKeys with a true value.
+//
+// **`useDefault` の entry と false は数えない。** 既定へ戻す / 明示的に
+// 与えない設定まで弾くと、正当なロールが作れなくなる。
+func grantsPrivilegedPolicy(policies []byte) bool {
+	if len(policies) == 0 {
+		return false
+	}
+	var entries map[string]json.RawMessage
+	if err := json.Unmarshal(policies, &entries); err != nil {
+		// **読めない policies は判定できない。** 条件つき + 読めない、の
+		// 組み合わせは拒否側へ倒す (condFormula と同じ扱い)。
+		return true
+	}
+	for key, raw := range entries {
+		if _, ok := privilegedPolicyKeys[key]; !ok {
+			continue
+		}
+		var o rolePolicyOverride
+		if err := json.Unmarshal(raw, &o); err != nil {
+			return true
+		}
+		if o.UseDefault {
+			continue
+		}
+		if v, ok := o.Value.(bool); ok && v {
+			return true
+		}
+	}
+	return false
+}
+
 // mergedRoleShape overlays the update fields onto the stored role and returns
 // the four values checkConditionalPrivilege needs.
 //
 // **型は admin handler が入れる形に合わせる。** `target` は文字列、
 // `condFormula` は `datatypes.JSON` (= []byte)、フラグは bool。想定外の型は
 // 既存の値を残す — 判定を勝手に緩める側へ倒さないため。
-func mergedRoleShape(current *model.Role, fields map[string]any) (model.RoleTarget, []byte, bool, bool) {
+func mergedRoleShape(current *model.Role, fields map[string]any) (model.RoleTarget, []byte, []byte, bool, bool) {
 	target := current.Target
 	switch v := fields["target"].(type) {
 	case model.RoleTarget:
@@ -1758,10 +1850,19 @@ func mergedRoleShape(current *model.Role, fields map[string]any) (model.RoleTarg
 	if v, ok := fields["isAdministrator"].(bool); ok {
 		isAdministrator = v
 	}
-	return target, cond, isModerator, isAdministrator
+	policies := []byte(current.Policies)
+	switch v := fields["policies"].(type) {
+	case datatypes.JSON:
+		policies = v
+	case []byte:
+		policies = v
+	case string:
+		policies = []byte(v)
+	}
+	return target, cond, policies, isModerator, isAdministrator
 }
 
-// Delete removes a role.// Delete removes a role.
+// Delete removes a role.
 func (s *Service) Delete(id string) error {
 	if _, err := s.findRoleByID(id); err != nil {
 		return err

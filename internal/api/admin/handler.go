@@ -2311,6 +2311,13 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 	}
 	r, err := h.roleService.Create(*req.Name, *req.Description, opts)
 	if err != nil {
+		// **クライアント起因の検証失敗を 5xx に潰さない (#3037)。** 管理者に
+		// "Internal error." としか出ないと何が悪いか分からないうえ、監視にも
+		// 5xx として乗る (#2792 の逆向き)。update 側と同じ応答にすること。
+		if errors.Is(err, role.ErrSelfGrantablePrivilege) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
+				selfGrantableRoleMessage, "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		}
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	h.logModeration(c, moderationlog.LogCreateRole, map[string]any{
@@ -2319,6 +2326,13 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 	})
 	return c.JSON(http.StatusOK, h.packRole(r))
 }
+
+// selfGrantableRoleMessage is the 400 body shared by roles/create and
+// roles/update.
+//
+// **2 箇所で同じ文言にする。** 片方だけ直すと、管理者が create と update で
+// 違う説明を読むことになる。
+const selfGrantableRoleMessage = "自分で満たせる条件 (isBot / isCat / isLocked / isExplorable / フォロー数 / 投稿数) を使った条件つきロールには、管理者・モデレーターや権限を配る policy を持たせられません。"
 
 // invalidRolePolicyKey returns the first policy entry whose value has the wrong
 // type, or "" when every entry is acceptable.
@@ -2544,7 +2558,7 @@ func (h *Handler) RolesUpdate(c echo.Context) error {
 		// どれ 1 つでもここへ来る。
 		if errors.Is(err, role.ErrSelfGrantablePrivilege) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM",
-				"自分で満たせる条件 (isBot / isCat / isLocked / isExplorable / フォロー数 / 投稿数) を使った条件つきロールには、管理者・モデレーターを持たせられません。", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+				selfGrantableRoleMessage, "3d81ceae-475f-4600-b2a8-2bc116157532"))
 		}
 		return apierr.JSONInternalError(c)
 	}

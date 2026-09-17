@@ -180,7 +180,35 @@ func ValidatePolicyValue(key string, value any) bool {
 	if !ok {
 		return true
 	}
+	// **空文字を含む文字列配列は弾かない (#3037 レビュー)。**
+	//
+	// `valueValid` はプラグインの contribution 用で、そちらは「宣言した値を
+	// そのまま使う」前提なので空要素を拒否している。管理画面の入力は違う —
+	// `uploadableFileTypes` の編集 UI は `MkTextarea` を `split('\n')` する
+	// だけなので、**末尾で Enter を押す / 欄を空にするだけ**で `[""]` が飛ぶ。
+	// 受け側の `aggregateStringSetUnion` は元から「trim して空は読み飛ばす」
+	// fail-soft なので、書き込み時に拒否するのは**今まで通っていた入力を
+	// 落とす回帰**になる。
+	if _, isStrings := native.([]string); isStrings {
+		return stringSliceValue(value)
+	}
 	return valueValid(key, native, value)
+}
+
+// stringSliceValue reports whether value is a list of strings (空要素可)。
+func stringSliceValue(value any) bool {
+	switch v := value.(type) {
+	case []string:
+		return true
+	case []any:
+		for _, item := range v {
+			if _, ok := item.(string); !ok {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func valueValid(key string, native, value any) bool {

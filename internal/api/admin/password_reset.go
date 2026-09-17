@@ -57,7 +57,11 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 		// **system アカウントと他のモデレーターも塞ぐ (#3037)。** この
 		// endpoint は新しいパスワードを応答に載せて返すので、対象として
 		// 選べる相手はそのままサインインできる相手になる。
-		if h.credentialTakeoverDenied(c, user) {
+		denied, undetermined := h.credentialTakeoverDenied(c, user)
+		if undetermined {
+			return c.JSON(http.StatusInternalServerError, apierr.InternalError())
+		}
+		if denied {
 			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
 		}
 		target = user

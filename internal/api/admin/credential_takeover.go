@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"log/slog"
 	"strings"
 
 	"github.com/labstack/echo/v4"
@@ -31,31 +32,50 @@ import (
 //
 // **実行者が管理者ならモデレーターには触れる。** インシデント対応で
 // モデレーターのアカウントを復旧する経路は残す。
-func (h *Handler) credentialTakeoverDenied(c echo.Context, target *model.User) bool {
+func (h *Handler) credentialTakeoverDenied(c echo.Context, target *model.User) (denied bool, undetermined bool) {
 	if target == nil {
-		return false
+		return false, false
 	}
 	// system アカウント / root。**実行者が誰でも塞ぐ** — 人がサインインする
 	// 前提の無いアカウントに、サインインできる資格情報を作らない。
 	if h.isProtectedAccount(target.ID) || isSystemAccountUser(target) {
-		return true
+		return true, false
 	}
 	if h.roleService == nil {
-		return false
+		return false, false
 	}
 	me := middleware.GetUser(c)
 	if me != nil && me.ID == target.ID {
 		// 自分自身のリセットは従来どおり通す。
-		return false
+		return false, false
 	}
-	if h.roleService.IsAdministrator(target.ID) {
-		return true
+	// **ロールを引けないときは通さない (#3037 レビュー)。** `IsAdministrator` /
+	// `IsModerator` は判定できないときに false を返すので、素で使うと
+	// `assignmentRepo.ListByUser` が一時的に失敗する窓で**他の管理者を
+	// 乗っ取れる**。ここは「相手が特権を持っていないこと」を確かめてから
+	// 触る判定なので、判定できないことを呼び出し側へ伝えて 500 に倒す
+	// (#2792)。system アカウントを二重に見ているのと同じ理由。
+	targetAdmin, targetMod, err := h.roleService.RolePrivileges(target.ID)
+	if err != nil {
+		slog.Error("admin: cannot determine the target's privileges", "userId", target.ID, "err", err)
+		return false, true
 	}
-	if h.roleService.IsModerator(target.ID) {
+	if targetAdmin {
+		return true, false
+	}
+	if targetMod {
 		// 実行者が管理者なら触れる (インシデント対応の経路)。
-		return me == nil || !h.roleService.IsAdministrator(me.ID)
+		if me == nil {
+			return true, false
+		}
+		actorAdmin, _, aerr := h.roleService.RolePrivileges(me.ID)
+		if aerr != nil {
+			slog.Error("admin: cannot determine the actor's privileges", "userId", me.ID, "err", aerr)
+			return false, true
+		}
+		return !actorAdmin, false
 	}
-	return false
+	return false, false
 }
 
 // isSystemAccountUser reports whether the row is a local system account.

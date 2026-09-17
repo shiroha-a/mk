@@ -73,3 +73,42 @@ func TestValidateContributions(t *testing.T) {
 func TestValueValidRejectsUnknownNativeType(t *testing.T) {
 	assert.False(t, valueValid("unknown", struct{}{}, true))
 }
+
+// **管理者が入れる policy の値の型検査 (#3037)。**
+//
+// consumer は `if limit, ok := role.PolicyNumber(v); ok { ...gate... }` の形で
+// 読むので、数値の policy に文字列が入ると**上限違反で弾かれるのではなく上限
+// そのものが消える**。
+func TestValidatePolicyValue(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		key   string
+		value any
+		want  bool
+	}{
+		{"数値に数値", "maxFileSizeMb", 30, true},
+		{"数値に float", "maxFileSizeMb", 1.5, true},
+		{"数値に文字列", "maxFileSizeMb", "30", false},
+		{"数値に配列", "driveCapacityMb", []any{1, 2}, false},
+		{"bool に bool", "canInvite", true, true},
+		{"bool に文字列", "canInvite", "true", false},
+		{"列挙に正しい値", "chatAvailability", "readonly", true},
+		{"列挙に知らない値", "chatAvailability", "whatever", false},
+		// **未知のキーは通す。** upstream は object lookup なので誰も読まない。
+		// 弾くと、upstream が新しい policy を足したときに mk-go だけが拒否する。
+		{"未知のキー", "somethingNew", "anything", true},
+		// **空文字を含む文字列配列は通す (#3037 レビュー)。** 管理画面の
+		// `MkTextarea` は `split('\n')` をそのまま送るので、末尾で Enter を
+		// 押す / 欄を空にするだけで `[""]` が飛ぶ。受け側の
+		// `aggregateStringSetUnion` は元から trim して空を読み飛ばす。
+		{"文字列配列に空要素", "uploadableFileTypes", []any{"image/*", ""}, true},
+		{"文字列配列が空だけ", "uploadableFileTypes", []any{""}, true},
+		{"文字列配列 ([]string)", "uploadableFileTypes", []string{"image/*"}, true},
+		{"文字列配列に数値", "uploadableFileTypes", []any{"image/*", 1}, false},
+		{"文字列配列に文字列", "uploadableFileTypes", "image/*", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, ValidatePolicyValue(tt.key, tt.value))
+		})
+	}
+}

@@ -2340,3 +2340,95 @@ func TestUpdateFields_RejectsSelfGrantableConditionalPrivilege(t *testing.T) {
 		})
 	}
 }
+
+// **`isAdministrator` / `isModerator` だけでは足りない (#3037 レビュー)。**
+//
+// `canManageCustomEmojis` / `canManageAvatarDecorations` は `RequireRolePolicy`
+// だけで `/admin/*` を開ける (emoji は 20 route、avatar-decorations は 4 route で、
+// どちらも `RequireModerator` を併用していない)。管理者フラグを塞いだことで
+// 「システムが守ってくれる」と読まれるぶん、こちらが無警告で通るのはより悪い。
+func TestCreate_RejectsSelfGrantablePrivilegedPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		policies string
+		wantErr  bool
+	}{
+		{
+			name:     "canManageCustomEmojis を配る",
+			policies: `{"canManageCustomEmojis":{"useDefault":false,"priority":2,"value":true}}`,
+			wantErr:  true,
+		},
+		{
+			name:     "canManageAvatarDecorations を配る",
+			policies: `{"canManageAvatarDecorations":{"useDefault":false,"priority":0,"value":true}}`,
+			wantErr:  true,
+		},
+		{
+			// **読めない policies は判定できないので拒否側へ。**
+			name:     "壊れた policies",
+			policies: `{`,
+			wantErr:  true,
+		},
+		// 既定へ戻す / 明示的に与えない設定まで弾くと正当なロールが作れない。
+		{
+			name:     "useDefault の entry",
+			policies: `{"canManageCustomEmojis":{"useDefault":true,"priority":0,"value":true}}`,
+		},
+		{
+			name:     "false を明示",
+			policies: `{"canManageCustomEmojis":{"useDefault":false,"priority":0,"value":false}}`,
+		},
+		{
+			name:     "特権でない policy",
+			policies: `{"canCreateChannel":{"useDefault":false,"priority":0,"value":true}}`,
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _, _, _ := newTestService(t)
+			_, err := svc.Create(tt.name, "", role.CreateOptions{
+				Target:      model.RoleTargetConditional,
+				CondFormula: datatypes.JSON(`{"type":"isCat"}`),
+				Policies:    datatypes.JSON(tt.policies),
+			})
+			if tt.wantErr {
+				assert.ErrorIs(t, err, role.ErrSelfGrantablePrivilege)
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
+// **handler が実際に入れる型で判定できること (#3037 レビュー)。**
+//
+// `admin/roles/update` は `fields["target"]` に `model.RoleTarget` を入れる。
+// `case string:` しか踏まないテストだと、`case model.RoleTarget:` を消しても
+// 緑のまま通り、production では「既存の管理者ロールを条件つきに変える」経路で
+// guard が黙って無効になる。
+func TestUpdateFields_MergedShapeHandlesHandlerTypes(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		fields map[string]any
+	}{
+		{"target が model.RoleTarget", map[string]any{"target": model.RoleTargetConditional}},
+		{"target が string", map[string]any{"target": string(model.RoleTargetConditional)}},
+		{"policies が datatypes.JSON", map[string]any{
+			"target":   model.RoleTargetConditional,
+			"policies": datatypes.JSON(`{"canManageCustomEmojis":{"useDefault":false,"priority":0,"value":true}}`),
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, roleRepo, _, _ := newTestService(t)
+			roleRepo.Roles["r"] = &model.Role{
+				ID: "r", Target: model.RoleTargetManual, IsAdministrator: true,
+				CondFormula: datatypes.JSON(`{"type":"isCat"}`),
+			}
+			if _, ok := tt.fields["policies"]; ok {
+				roleRepo.Roles["r"].IsAdministrator = false
+			}
+
+			_, err := svc.UpdateFields("r", tt.fields)
+			assert.ErrorIs(t, err, role.ErrSelfGrantablePrivilege)
+		})
+	}
+}
