@@ -143,6 +143,30 @@ var (
 	// #3034 が直した「リモート取得の失敗を 404 に潰す」より影響が広い —
 	// あちらは 1 URL ずつだが、こちらは障害中の全 URL が同時に焼き付く。
 	ErrAllowlistUnavailable = errors.New("mediaproxy: allowlist lookup failed")
+	// ErrTargetBlocked は SSRF ガードが接続を拒否したことを表す (#3037)。
+	//
+	// **`ErrSSRFBlocked` (同パッケージの再 export) とは別物。** あちらは
+	// safehttp が返す**原因**で、こちらは mediaproxy の**分類**。原因は
+	// `%w` で包んであるので `errors.Is(err, ErrSSRFBlocked)` も真になる。
+	// `ErrBlocked` という名前にしないのは、`following` / `reaction` の
+	// 同名が「利用者がブロックした」意味で使われているため。
+	//
+	// **`ErrUpstreamUnavailable` と分ける理由は「意味論」だけ。** あちらは
+	// 「相手が落ちている」だが、こちらは「mk-go が拒否した」。502 に混ぜると
+	// 監視で「相手インスタンスが落ちている」と読めてしまう。
+	//
+	// **「恒久的だから長期キャッシュでよい」とは書けない (レビューで実測)。**
+	// SSRF の可否は**毎リクエストの DNS 解決**と operator 設定で決まる:
+	// `privateRanges` には `0.0.0.0/8` と `64:ff9b::/96` (NAT64) が入るので、
+	// DNS sinkhole (Pi-hole 等が `0.0.0.0` を返す) や DNS64 環境、
+	// `allowedPrivateNetworks` の設定漏れで簡単に覆る。恒久的なのは URL が
+	// IP リテラルのときだけ。だから**キャッシュ時間は 502 のときと同じ 5 分**
+	// にしてある (#2913 は 403 + 1 日で 68.5% の利用者のアイコンを 1 日壊した)。
+	//
+	// **`ErrUnauthorized` にも相乗りさせない。** handler の 403 は
+	// `Authorize` 失敗の経路で、合流させるとログと監視で「allowlist に無い」と
+	// 「private IP を遮断した」が区別できなくなる。
+	ErrTargetBlocked = errors.New("mediaproxy: blocked target")
 )
 
 // browsersafeMIMEs lists MIME types safe to serve inline in browsers.
@@ -601,6 +625,17 @@ func (s *Service) fetchRemote(ctx context.Context, rawURL string, mode ProxyMode
 
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
+		// **SSRF ガードの拒否は「相手の障害」ではない (#3037)。**
+		// こちらが意図的に遮断した事実なので `ErrUpstreamUnavailable` に
+		// 混ぜない — 502 だと監視で「相手が落ちている」と読める。
+		// **キャッシュ時間は変えない** (恒久的ではない。理由は
+		// `ErrTargetBlocked` の GoDoc)。
+		//
+		// **`%w` で元の原因を残す** — ログに遮断した URL だけでなく
+		// safehttp 側のメッセージも出したいため。
+		if errors.Is(err, safehttp.ErrSSRFBlocked) {
+			return nil, fmt.Errorf("%w: %w", ErrTargetBlocked, err)
+		}
 		// **種別を問わず `ErrNotFound` に潰してはいけない (#3034)。**
 		// handler はそれを 404 + `Cache-Control: max-age=86400` で返すので、
 		// DNS 失敗・接続拒否・TLS エラー・タイムアウトといったリモート側の

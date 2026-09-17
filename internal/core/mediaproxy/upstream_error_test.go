@@ -12,6 +12,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/shiroha-a/mk/internal/safehttp"
 )
 
 // リモートから取れなかったことと「無い」ことを混ぜない (#3034)。
@@ -135,16 +137,17 @@ func TestFetchRemote_UnfetchableURLIsBadRequest(t *testing.T) {
 	}
 }
 
-// SSRF ガードの拒否は現状 `ErrUpstreamUnavailable` に入る (#3034 では分けない)。
+// SSRF ガードの拒否を「相手の障害」と分ける (#3037)。
 //
-// **これは「正しい」ではなく「今こうなっている」を固定するテスト。**
-// SSRF 拒否は恒久的で、しかも「gateway が失敗した」のではなく「こちらが
-// 拒否した」ので、502 + 5 分は意味論として正しくない。分類し直すのは
-// #3037 で別に扱う — このコミットで service 側だけ分けたところ、handler に
-// 受け口が無くて 500 に落ち、doc の主張と食い違う状態を作った (敵対的
-// レビュー 2 周目で実測)。**片側だけ動かすとこうなる**ので、写像を足すときは
-// handler のテストと対で入れること。
-func TestFetchRemote_SSRFBlockedIsCurrentlyUpstreamUnavailable(t *testing.T) {
+// **こちらが意図的に遮断した事実**なので、`ErrUpstreamUnavailable` (502) に
+// 混ぜると監視で「相手インスタンスが落ちている」と読める。**キャッシュ時間は
+// 変えていない** — SSRF の可否は毎リクエストの DNS 解決で決まるので恒久的では
+// なく、1 日にすると #2913 の窓を 288 倍に広げる (1 周目で実測)。
+//
+// #3034 では service 側だけ分けて handler に受け口を作らず、500 に落ちる
+// 状態を作って巻き戻した。**写像を足すときは handler のテストと対で入れる** —
+// `internal/api/proxy` の `TestHandle_BlockedTargetIsForbidden` が対。
+func TestFetchRemote_SSRFBlockedIsNotUpstreamUnavailable(t *testing.T) {
 	// testService は 127.0.0.0/8 を許可しているので、許可していない
 	// プライベート帯を使う。
 	s := NewService(
@@ -156,9 +159,29 @@ func TestFetchRemote_SSRFBlockedIsCurrentlyUpstreamUnavailable(t *testing.T) {
 
 	_, err := s.Fetch(context.Background(), "http://10.0.0.1/a.png", ModeDefault, FormatWebP, true)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, ErrUpstreamUnavailable)
-	// 少なくとも 404 + 1 日キャッシュには戻っていないこと (#3034 の本題)。
+	assert.ErrorIs(t, err, ErrTargetBlocked)
+	assert.NotErrorIs(t, err, ErrUpstreamUnavailable,
+		"SSRF 拒否を相手の障害に混ぜている")
+	// #3034 の本題 (404 + 1 日キャッシュ) にも戻っていないこと。
 	assert.NotErrorIs(t, err, ErrNotFound)
+	// **元の原因を捨てない。** 捨てるとログから遮断の理由が消える。
+	assert.ErrorIs(t, err, safehttp.ErrSSRFBlocked)
+}
+
+// リモートの一時障害は従来どおり `ErrUpstreamUnavailable` のまま (#3037)。
+//
+// **既存テストと重複している。** 「全部 `ErrTargetBlocked` にする」変異は
+// `TestFetchRemote_TransportFailureIsNotNotFound` /
+// `TestFetchRemote_TLSFailureIsNotNotFound` も落とす (実測)。それでも残すのは、
+// SSRF 側の 1 本と並べて分類の境界が読めるようにするため。
+func TestFetchRemote_TransientFailureIsNotBlocked(t *testing.T) {
+	url := "http://" + deadAddr(t) + "/a.png"
+	s := testService(map[string]bool{url: true})
+
+	_, err := s.Fetch(context.Background(), url, ModeDefault, FormatWebP, true)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrUpstreamUnavailable)
+	assert.NotErrorIs(t, err, ErrTargetBlocked)
 }
 
 // リモートが本当に「無い」と言ったときは従来どおり ErrNotFound。
