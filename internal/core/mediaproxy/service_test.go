@@ -1,12 +1,14 @@
 package mediaproxy
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"image"
 	"image/color"
 	"image/png"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -843,8 +845,14 @@ func TestProcessBadge_ValidImage(t *testing.T) {
 	assert.Equal(t, "image/png", result.ContentType)
 }
 
-func TestAuthorize_AllowlistError(t *testing.T) {
-	// errorAllowlistはIsAllowedURLでエラーを返す
+// allowlist を**引けなかった**ことと「許可されていない」を分ける (#3036)。
+//
+// **潰すと handler が 403 + `Cache-Control: max-age=86400` で返す。**
+// PostgreSQL の瞬断のあいだ、`sig` を持たないすべてのプロキシ URL が 403 に
+// なり 1 日焼き付く。#2913 と同じ症状で #2792 にも反する。#3034 が直した
+// 「リモート取得の失敗を 404 に潰す」より影響が広い — あちらは 1 URL ずつ
+// だが、こちらは障害中の全 URL が同時に焼き付く。
+func TestAuthorize_AllowlistErrorIsNotUnauthorized(t *testing.T) {
 	s := NewService(
 		"https://example.com",
 		"Misskey/2026.5.1 (https://example.com)",
@@ -855,13 +863,171 @@ func TestAuthorize_AllowlistError(t *testing.T) {
 	)
 
 	err := s.Authorize(context.Background(), "https://example.com/img.png", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrAllowlistUnavailable)
+	assert.NotErrorIs(t, err, ErrUnauthorized, "DB 障害を 403 に潰している")
+	// **元の原因を捨てない。** 捨てるとログから障害の中身が消える。
+	assert.Contains(t, err.Error(), "db connection failed")
+}
+
+// 列に入りえない URL は DB を引く前に弾く (#3036、doctrine は #3025)。
+//
+// **未認証の利用者が 503 とエラーログを任意に生成できてしまう。**
+// `IsAllowedURL` は `?url` を無検査で 11 箇所に bind する (4 テーブルの UNION)
+// ので、PostgreSQL が受け付けないバイト列はクエリごと落とす。それを
+// `ErrAllowlistUnavailable` に流すと、この変更が守ろうとしている
+// 「監視で本物の障害が埋もれない」を自分で壊す。
+//
+// 実測 (実 PostgreSQL): 0xff と孤立サロゲートは SQLSTATE 22021。NUL は
+// **プロトコルで値が違う** — 本番の extended protocol では同じ 22021、
+// テストハーネスの simple protocol では 08P01。
+// **`colfit.Storable` だけでは足りない** — あれは NUL しか見ない。
+//
+// **このテスト自体は PostgreSQL に触らない** — 見ているのは「引く前に弾く」
+// ことだけで、上の実測は guard がなぜ要るかの根拠。
+func TestAuthorize_UnstorableURLIsRejectedBeforeQuery(t *testing.T) {
+	for name, raw := range map[string]string{
+		// バイト列は Go のエスケープではなく []byte で組む (ソースを ASCII に保つ)。
+		"NUL":            "https://example.com/a" + string([]byte{0x00}) + "b.png",
+		"invalid UTF-8":  "https://example.com/a" + string([]byte{0xff}) + "b.png",
+		"lone surrogate": "https://example.com/a" + string([]byte{0xed, 0xa0, 0x80}) + "b.png",
+	} {
+		t.Run(name, func(t *testing.T) {
+			// **呼ばれたら落ちる checker を渡す。** エラーを返すだけの
+			// checker だと、guard を `IsAllowedURL` の**後ろ**へ動かす変異が
+			// 素通りする (レビュー 2 周目で実測)。#3025 が
+			// 「guard の分岐が実際に return すること」「順序を見ること」と
+			// 書いているのと同じ形。
+			checker := &failingAllowlist{t: t}
+			s := NewService(
+				"https://example.com",
+				"Misskey/2026.5.1 (https://example.com)",
+				&mockStorage{files: map[string][]byte{}},
+				checker,
+				[]byte("test-secret"),
+				nil,
+			)
+
+			err := s.Authorize(context.Background(), raw, "")
+			require.Error(t, err)
+			assert.ErrorIs(t, err, ErrUnauthorized,
+				"列に入りえない値を 503 に流している")
+			assert.NotErrorIs(t, err, ErrAllowlistUnavailable)
+			assert.False(t, checker.called, "DB を引いてしまっている")
+		})
+	}
+}
+
+// 署名があれば列に入りえない値でも先に通る (順序を変えていないこと)。
+func TestAuthorize_HMACStillWinsOverStorableCheck(t *testing.T) {
+	s := testService(nil)
+	raw := "https://example.com/a" + string([]byte{0x00}) + "b.png"
+	require.NoError(t, s.Authorize(context.Background(), raw, s.SignURL(raw)))
+}
+
+// 本当に許可されていないときは従来どおり ErrUnauthorized。
+//
+// **これが無いと「全部 503 にする」実装が緑で通る。** それをやると、
+// 許可していない URL まで 5 分ごとに引き直すことになる。
+func TestAuthorize_NotAllowedStaysUnauthorized(t *testing.T) {
+	s := testService(map[string]bool{"https://example.com/ok.png": true})
+
+	err := s.Authorize(context.Background(), "https://example.com/no.png", "")
+	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrUnauthorized)
+	assert.NotErrorIs(t, err, ErrAllowlistUnavailable)
+}
+
+// 利用者の離脱が DB 障害に化けないこと (#3036)。
+//
+// `IsAllowedURL` は ctx を取るので、離脱すると driver が
+// `context.Canceled` を返す。`%w` を落とすと handler が 499 に
+// 振り分けられなくなり、離脱の件数が 503 として監視に積み上がる。
+func TestAuthorize_ClientCancelSurvives(t *testing.T) {
+	s := NewService(
+		"https://example.com",
+		"Misskey/2026.5.1 (https://example.com)",
+		&mockStorage{files: map[string][]byte{}},
+		&ctxErrAllowlist{},
+		[]byte("test-secret"),
+		nil,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := s.Authorize(ctx, "https://example.com/img.png", "")
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, ErrUnauthorized)
+}
+
+// 利用者の離脱を Error ログに混ぜない (#3036)。
+//
+// **DB 障害の指標が汚れる。** handler は離脱を 499 に分類して何も書かないのに、
+// service 側が Error を出すと、モバイル回線のスクロール離脱が
+// 「allowlist lookup failed」として積み上がる。
+func TestAuthorize_CancelDoesNotLogError(t *testing.T) {
+	var buf bytes.Buffer
+	orig := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(orig) })
+
+	s := NewService(
+		"https://example.com",
+		"Misskey/2026.5.1 (https://example.com)",
+		&mockStorage{files: map[string][]byte{}},
+		&ctxErrAllowlist{},
+		[]byte("test-secret"),
+		nil,
+	)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.Error(t, s.Authorize(ctx, "https://example.com/img.png", ""))
+	assert.NotContains(t, buf.String(), "allowlist lookup failed",
+		"利用者の離脱を DB 障害として記録している")
+
+	// **DB 障害のほうは残る** (抑止しすぎていないこと)。
+	buf.Reset()
+	s2 := NewService(
+		"https://example.com",
+		"Misskey/2026.5.1 (https://example.com)",
+		&mockStorage{files: map[string][]byte{}},
+		&errorAllowlist{},
+		[]byte("test-secret"),
+		nil,
+	)
+	require.Error(t, s2.Authorize(context.Background(), "https://example.com/img.png", ""))
+	assert.Contains(t, buf.String(), "allowlist lookup failed")
+}
+
+// failingAllowlist fails the test if the query is reached at all.
+//
+// **「引く前に弾く」を検査するにはこれが要る。** エラーを返すだけの
+// checker では、guard を後ろへ動かしても結果の error が同じになるので
+// 変異が素通りする。
+type failingAllowlist struct {
+	t      *testing.T
+	called bool
+}
+
+func (e *failingAllowlist) IsAllowedURL(_ context.Context, url string) (bool, error) {
+	e.called = true
+	e.t.Errorf("IsAllowedURL が呼ばれた (引く前に弾けていない): %q", url)
+	return false, nil
 }
 
 type errorAllowlist struct{}
 
 func (e *errorAllowlist) IsAllowedURL(_ context.Context, _ string) (bool, error) {
 	return false, fmt.Errorf("db connection failed")
+}
+
+// ctxErrAllowlist mirrors a driver that surfaces the caller's cancellation.
+type ctxErrAllowlist struct{}
+
+func (e *ctxErrAllowlist) IsAllowedURL(ctx context.Context, _ string) (bool, error) {
+	return false, ctx.Err()
 }
 
 func TestFetch_LocalFile_TooLarge(t *testing.T) {

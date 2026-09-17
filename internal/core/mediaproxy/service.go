@@ -17,6 +17,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	// 注意 (#672 Phase 1): TGA decoder は `blezek/tga` (auto-register 無し)
 	// を採用し、`decodeImage` 内で MIME 判定で manual dispatch している。
@@ -41,6 +42,7 @@ import (
 	"golang.org/x/sync/semaphore"
 
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/safehttp"
 )
 
@@ -120,6 +122,27 @@ var (
 	// 失敗・接続拒否・TLS エラー・タイムアウトはどれもリモート側の一時障害
 	// で、復旧すれば同じ URL が引ける。
 	ErrUpstreamUnavailable = errors.New("mediaproxy: upstream fetch failed")
+	// ErrAllowlistUnavailable は allowlist を**引けなかった**ことを表す
+	// (#3036)。**「許可されていない」(`ErrUnauthorized`) と分ける** —
+	// **分けないと** handler が後者も 403 + `Cache-Control: max-age=86400` で
+	// 返し、PostgreSQL が落ちているあいだ `sig` を持たない**すべての**
+	// プロキシ URL が 403 になって 1 日焼き付く (#3036 以前の挙動)。
+	//
+	// **「Go 側のプール枯渇」はここに来ない。** `database/sql` は枠が埋まって
+	// いるとエラーではなく**ブロック**し、`/proxy` のリクエスト context に
+	// deadline は無いので、枯渇は「遅い応答」か「離脱 →
+	// `context.Canceled` → 499」として現れる。client 側の `statement_timeout`
+	// も設定していない。
+	//
+	// **PostgreSQL 側の `max_connections` 枯渇は来る** —
+	// `FATAL: sorry, too many clients already` はエラーとして返るので
+	// 503 になる。503 の嵐を調査するときの最有力候補。
+	// #2913 (403 が 1 日キャッシュされてアイコンが 1 日壊れた) と同じ症状で、
+	// #2792 の「lookup error を種別を見ずに 4xx へ潰さない」にも反する。
+	//
+	// #3034 が直した「リモート取得の失敗を 404 に潰す」より影響が広い —
+	// あちらは 1 URL ずつだが、こちらは障害中の全 URL が同時に焼き付く。
+	ErrAllowlistUnavailable = errors.New("mediaproxy: allowlist lookup failed")
 )
 
 // browsersafeMIMEs lists MIME types safe to serve inline in browsers.
@@ -329,6 +352,16 @@ func (s *Service) SetVideoThumbnailGeneratorWithMode(genURL, mode string) {
 	s.videoThumbClient = newVideoThumbnailClient(genURL)
 }
 
+// storableURL reports whether rawURL can be compared against text columns at
+// all (#3036).
+//
+// PostgreSQL は NUL を含む値も不正な UTF-8 も**比較の右辺に置くだけで**
+// クエリごと落とす。どちらも列に入りえないので、一致しえないことは引く前に
+// 分かる。#3025 が cursor / id / 検索語に対して置いた guard と同じ判断。
+func storableURL(rawURL string) bool {
+	return colfit.Storable(rawURL) && utf8.ValidString(rawURL)
+}
+
 // SignURL generates an HMAC-SHA256 signature for the given URL.
 func (s *Service) SignURL(rawURL string) string {
 	return SignURL(s.hmacSecret, rawURL)
@@ -341,10 +374,46 @@ func (s *Service) Authorize(ctx context.Context, rawURL, sig string) error {
 		return nil
 	}
 
+	// **列に入りえない値は引く前に弾く (#3036、doctrine は #3025)。**
+	// `IsAllowedURL` は `?url` を無検査で 11 箇所に bind する (4 テーブルの UNION) ので、
+	// PostgreSQL が受け付けないバイト列を渡すとクエリごと落ちる。
+	// それを `ErrAllowlistUnavailable` に流すと、**未認証の利用者が
+	// 503 とエラーログを任意に生成できる** — この変更が守ろうとしている
+	// 「監視で本物の障害が埋もれない」を自分で壊す形になる。
+	//
+	// 実測 (実 PostgreSQL): 不正 UTF-8 と孤立サロゲートは
+	// `invalid byte sequence for encoding "UTF8"` (SQLSTATE 22021)。NUL は
+	// **プロトコルで値が違う** — 本番の extended protocol では同じ 22021、
+	// テストハーネスの simple protocol では `invalid message format` (08P01)。
+	// **`colfit.Storable` だけでは足りない** — あれは NUL しか見ないので
+	// 0xff と孤立サロゲートが素通りする。
+	//
+	// 返すのは `ErrUnauthorized`。列に入りえない値は allowlist のどの列にも
+	// 一致しえないので「許可されていない」が事実で、**クエリを投げていない
+	// 以上そこに隠れる障害も無い** (#2792 に反しない)。
+	if !storableURL(rawURL) {
+		return ErrUnauthorized
+	}
+
 	allowed, err := s.allowlist.IsAllowedURL(ctx, rawURL)
 	if err != nil {
-		slog.Error("allowlist check failed", "url", rawURL, "error", err)
-		return ErrUnauthorized
+		// **利用者の離脱は障害ではない。** Error に混ぜると DB 障害の
+		// 指標が汚れる (handler は 499 に分類して何も書かない)。
+		//
+		// **障害中の流量に注意。** handler が `no-store` を返すので、
+		// クライアントは閲覧のたびに引き直す = 1 リクエスト 1 行出る。
+		// `/proxy/*` は `api` グループの外なので Redis のレートリミッタも
+		// 掛からない。#3032 の shed ログ (Warn) と違い Error なので、
+		// 障害が長引く構成ではサンプリングを検討すること。
+		if !errors.Is(err, context.Canceled) {
+			slog.Error("mediaproxy: allowlist lookup failed", "url", rawURL, "err", err)
+		}
+		// **`ErrUnauthorized` に潰さない (#3036)。** 「許可されていない」と
+		// 「判定できなかった」は別で、後者を 403 + 1 日キャッシュで返すと
+		// DB の瞬断が全 URL を 1 日壊す。**`%w` で元の原因を残す** —
+		// 利用者の離脱 (`context.Canceled`) と DB 障害を handler が
+		// 区別できるようにするため。
+		return fmt.Errorf("%w: %w", ErrAllowlistUnavailable, err)
 	}
 	if !allowed {
 		return ErrUnauthorized
