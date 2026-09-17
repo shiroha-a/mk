@@ -1,6 +1,7 @@
 package admin_test
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -9,7 +10,11 @@ import (
 	"github.com/stretchr/testify/require"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	corerole "github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/core/signup"
+	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/testutil"
 )
 
 // **`reset-password` / `unset-mfa` は「乗っ取れる操作」(#3037)。**
@@ -128,4 +133,46 @@ func newCredentialResetHandler(t *testing.T, target *model.User, adminIDs, modID
 	}
 	h.SetSecurityKeyRepo(newFakeSecurityKeyRepo())
 	return h
+}
+
+// flakyUserRepo returns the user once, then fails — reproducing the window
+// where the DB drops between the handler's lookup and isProtectedAccount's.
+type flakyUserRepo struct {
+	*testutil.MockUserRepository
+	calls int
+}
+
+func (r *flakyUserRepo) FindByID(id string) (*model.User, error) {
+	r.calls++
+	if r.calls > 1 {
+		return nil, errors.New("db is down")
+	}
+	return r.MockUserRepository.FindByID(id)
+}
+
+// **`isProtectedAccount` が引き直すので、その間に DB が落ちると保護が消える。**
+//
+// あちらは `FindByID` の失敗を「保護対象ではない」と扱う。handler は既に行を
+// 引いているので、そちらの行でも形を見る (#3037)。この二重化が無いと、
+// **DB の瞬断の窓で system アカウントのパスワードを発行できる**。
+func TestCredentialResets_SystemAccountStaysProtectedWhenLookupFails(t *testing.T) {
+	users := testutil.NewMockUserRepository()
+	sys := &model.User{ID: "sys", Username: "instance.actor"}
+	users.Users["sys"] = sys
+
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	roleRepo := testutil.NewMockRoleRepository()
+	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo)
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	roleSvc := corerole.NewService(roleRepo, assignRepo, metaRepo, idGen)
+	flaky := &flakyUserRepo{MockUserRepository: users}
+	h := apiadmin.NewHandler(signup.NewService(flaky, metaRepo, idGen), roleSvc, metaRepo, flaky, idGen)
+
+	rec := doPost(h.ResetPassword, `{"userId":"sys"}`, &model.User{ID: "mod1"})
+
+	assert.Equal(t, http.StatusBadRequest, rec.Code, "瞬断の窓で system アカウントを触れている")
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+	assert.Greater(t, flaky.calls, 1, "2 回目の lookup が起きていない (テストが空虚)")
 }
