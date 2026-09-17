@@ -10,7 +10,6 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
-	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // UnsetMfa handles POST /api/admin/unset-mfa (upstream 2026.7.0 #17614).
@@ -38,13 +37,11 @@ func (h *Handler) UnsetMfa(c echo.Context) error {
 	if err != nil || user == nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_USER", "No such user.", "ccafc7fe-5074-4edd-9dc0-8ef9ef6a701d"))
 	}
-	// reset-password と同型の administrator 保護 (upstream: 対象が admin かつ
-	// 実行者 != 対象なら ACCESS_DENIED)。
-	if h.roleService != nil {
-		me := middleware.GetUser(c)
-		if h.roleService.IsAdministrator(user.ID) && (me == nil || me.ID != user.ID) {
-			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
-		}
+	// reset-password と同じ保護 (#3037)。2FA を外す操作なので、
+	// `reset-password` と続けて叩かれると対象としてサインインできる状態が
+	// 完成する。**「誰を対象にできるか」は 2 つで揃える。**
+	if h.credentialTakeoverDenied(c, user) {
+		return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
 	}
 
 	// upstream は 1 トランザクションで key 削除 + profile 更新を行う。mk-go は

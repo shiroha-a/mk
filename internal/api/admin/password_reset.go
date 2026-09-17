@@ -11,7 +11,6 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/password"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
-	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // ResetPassword handles POST /api/admin/reset-password.
@@ -55,11 +54,11 @@ func (h *Handler) ResetPassword(c echo.Context) error {
 		// (CANNOT_RESET_PASSWORD_OF_ROOT_USER) は廃止され、「対象が administrator
 		// かつ実行者 != 対象」を ACCESS_DENIED で弾く。IsAdministrator は root を
 		// 含むため root 保護は維持される。
-		if h.roleService != nil {
-			me := middleware.GetUser(c)
-			if h.roleService.IsAdministrator(user.ID) && (me == nil || me.ID != user.ID) {
-				return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
-			}
+		// **system アカウントと他のモデレーターも塞ぐ (#3037)。** この
+		// endpoint は新しいパスワードを応答に載せて返すので、対象として
+		// 選べる相手はそのままサインインできる相手になる。
+		if h.credentialTakeoverDenied(c, user) {
+			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Access denied.", "cda8f8ce-89a6-4f92-8055-33bbe0c1464d"))
 		}
 		target = user
 	}
