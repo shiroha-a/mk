@@ -237,7 +237,7 @@ func (p *pluginPeer) Has(ctx context.Context, host string) (bool, error) {
 		return false, errNotPeered
 	}
 	host = normalizePeerHost(host)
-	if host == "" || host == p.deps.selfHost {
+	if host == "" || host == p.selfHost() {
 		return false, nil
 	}
 	if p.skipDelivery(host) {
@@ -270,7 +270,7 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 	if host == "" {
 		return "", fmt.Errorf("plugin peer: 宛先が空か、ホスト名として不正です")
 	}
-	if host == p.deps.selfHost {
+	if host == p.selfHost() {
 		return "", fmt.Errorf("plugin peer: 自分自身には送れません")
 	}
 	if p.skipDelivery(host) {
@@ -626,6 +626,23 @@ func (p *pluginPeer) verify(req *http.Request, body []byte) (string, error) {
 		return "", fmt.Errorf("送信元のホスト名が不正です")
 	}
 	return from, nil
+}
+
+// selfHost returns this instance's authority in the same normalized form
+// `normalizePeerHost` produces.
+//
+// **両側を同じ規則に通す (#3037)。** `config.Host` は `parsedURL.Host` の
+// 生の authority で**既定ポートが残る**。`normalizePeerHost` は既定ポートを
+// 剥がすようになったので、`url: https://example.com:443/` と書いた構成では
+// 片側だけ `:443` が付いて「自分自身への送信」の判定が外れ、**自分の
+// `/_peer` へ署名付きで POST する** (`OnReply` を持つプラグインなら往復し
+// 続ける)。正規形を作る規則は 1 つに閉じる。
+//
+// **受信側の Host 照合 (`VerifyInboxAdmission`) はそのまま。** あちらは
+// upstream と同じ「署名対象の host ヘッダと configured host の一致」で、
+// 正規化を挟むと upstream より緩くなる。
+func (p *pluginPeer) selfHost() string {
+	return normalizePeerHost(p.deps.selfHost)
 }
 
 // peerHostPattern is the shape a peer host must have: LDH labels, optional port.

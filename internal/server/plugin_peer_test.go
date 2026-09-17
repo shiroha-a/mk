@@ -529,3 +529,27 @@ func TestPluginPeer_SendRefusesBlockedHostWithDefaultPort(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, got)
 }
+
+// **`url` に既定ポートを明記した構成でも「自分自身」を弾く (#3037)。**
+//
+// `config.Host` は `parsedURL.Host` の生の authority なので `:443` が残る。
+// `normalizePeerHost` は既定ポートを剥がすようになったので、片側だけ正規化
+// すると判定が外れ、**自分の `/_peer` へ署名付きで POST する**。
+func TestPluginPeer_SelfHostWithDefaultPort(t *testing.T) {
+	p := testPeer(t, &pluginPeerDeps{
+		selfHost: "self.example:443",
+		remote:   &fakePeerLister{byHost: map[string][]string{"self.example": {"demo"}}},
+	})
+
+	for _, target := range []string{"self.example", "self.example:443", "https://self.example:443"} {
+		_, err := p.Send(context.Background(), target, map[string]any{})
+		require.Error(t, err, "target=%s", target)
+		assert.Contains(t, err.Error(), "自分自身", "target=%s", target)
+	}
+
+	// **他所は通ったまま。** これが無いと「常に自分自身と判定する」実装でも
+	// 上のテストが通る。
+	got, err := p.Has(context.Background(), "other.example")
+	require.NoError(t, err)
+	assert.False(t, got, "宣言していない相手")
+}

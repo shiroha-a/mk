@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -1009,9 +1010,14 @@ func TestProcess_Add_RejectsOtherUsersNote(t *testing.T) {
 // 設計メモ (#1489) は `pinnedNoteIds` を絞らない理由として「pinning は
 // per-user 上限が厳しい」と書いており、その前提がここで壊れる。
 //
+// **上限に当たったら捨てずに入れ替える。** upstream は `Remove(A)` と
+// `Add(B)` を別々の deliver job で配るので、こちらの inbox が並列に処理すると
+// `Add(B)` が先に着くことがある。そこで捨てると B は次の actor 更新まで
+// 現れない (既定 TTL 24 時間)。
+//
 // **「上限未満なら通る」まで見る。** それが無いと、常に弾く実装でもテストが
 // 通ってしまう (変異検証で実測)。
-func TestProcess_Add_StopsAtPinLimit(t *testing.T) {
+func TestProcess_Add_EvictsTheOldestAtThePinLimit(t *testing.T) {
 	p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
 	aliceID := resolveAliceAndSetFeatured(t, p, repo)
 
@@ -1027,14 +1033,59 @@ func TestProcess_Add_StopsAtPinLimit(t *testing.T) {
 		}`)
 		require.NoError(t, p.Process(body))
 	}
+	pinnedNotes := func() []string {
+		var out []string
+		for _, pin := range piningRepo.Pinings {
+			out = append(out, pin.NoteID)
+		}
+		sort.Strings(out)
+		return out
+	}
 
-	for i := 0; i < federation.FeaturedPinLimit; i++ {
+	for i := range federation.FeaturedPinLimit {
 		add(fmt.Sprintf("n%d", i))
 		require.Len(t, piningRepo.Pinings, i+1, "上限に達する前のピンが弾かれた")
 	}
 
 	add("overflow")
 	assert.Len(t, piningRepo.Pinings, federation.FeaturedPinLimit, "上限を超えてピン留めできた")
+	assert.Contains(t, pinnedNotes(), "overflow", "上限に当たった Add を捨てている")
+	assert.NotContains(t, pinnedNotes(), "n0", "最も古いピンが外れていない")
+}
+
+// **同じノートの再送は何も動かさない。** 上限判定より前に重複を弾かないと、
+// 「既にあるものを入れるために別のピンを外す」ことになる。
+func TestProcess_Add_DuplicateAtTheLimitIsANoOp(t *testing.T) {
+	p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
+	aliceID := resolveAliceAndSetFeatured(t, p, repo)
+
+	add := func(n string) {
+		t.Helper()
+		uri := "https://remote.example/notes/" + n
+		noteRepo.Notes[n] = &model.Note{ID: n, UserID: aliceID, URI: &uri}
+		require.NoError(t, p.Process([]byte(`{
+			"type": "Add",
+			"actor": "https://remote.example/users/alice",
+			"object": "`+uri+`",
+			"target": "https://remote.example/users/alice/collections/featured"
+		}`)))
+	}
+	for i := range federation.FeaturedPinLimit {
+		add(fmt.Sprintf("n%d", i))
+	}
+	before := make(map[string]string, len(piningRepo.Pinings))
+	for id, pin := range piningRepo.Pinings {
+		before[id] = pin.NoteID
+	}
+
+	// 上限に達した状態で、既にピン留め済みのノートをもう一度送る。
+	add("n0")
+
+	after := make(map[string]string, len(piningRepo.Pinings))
+	for id, pin := range piningRepo.Pinings {
+		after[id] = pin.NoteID
+	}
+	assert.Equal(t, before, after, "重複した Add でピンが入れ替わっている")
 }
 
 // 数えられなかったときは error を返す。握り潰すと上限が効かないまま進むし、

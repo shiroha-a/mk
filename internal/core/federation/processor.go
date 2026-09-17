@@ -2620,16 +2620,45 @@ func (p *Processor) handleAdd(act genericActivity) error {
 	//
 	// 値は pull 側の `featuredPinLimit` と同じ。片方だけ緩いと、同じ
 	// リモート actor が経路によって違う上限を受けることになる。
+	//
+	// **上限に当たったら古い方を外して入れ替える。捨てない。** upstream は
+	// `Remove(A)` と `Add(B)` を**別々の deliver job** で配る
+	// (`NotePiningService.deliverPinnedChange`)。こちらの inbox は並列に
+	// 処理するので `Add(B)` が先に着くことがあり、そこで捨てると
+	// (`return nil` は inbox job を成功扱いにするので再試行されない) B は
+	// **次の actor 更新まで現れない** (既定 TTL 24 時間)。
+	//
+	// **再試行にはしない。** upstream は throw して job を再送させるが、
+	// mk-go でそれをやると、上限を超える `Add` を投げ続けるだけで job が
+	// 8 倍に膨らむ — この上限が防いでいる負荷を別の形で呼び込む。入れ替えなら
+	// 行数は上限に収まったまま、順序の入れ替わりも拾える。
+	//
 	// **数えられなかったら errで返す。** ここで握り潰すと上限が効かないまま
 	// 進むし、`nil` で捨てると inbox job が「処理済み」として再試行しない。
 	// error なら再試行されるので、DB 障害が上限の無効化にも取りこぼしにも
 	// 化けない (#2792 と同じ判断)。
+	// **既にピン留め済みなら何もしない。** 再送や順序の入れ替わりで同じ
+	// `Add` が二度届く。上限判定より前に置く — ここを通すと「既にあるものを
+	// 入れるために別のピンを外す」ことになる。
+	if existing, ferr := p.pinningRepo.FindByPair(actor.ID, note.ID); ferr == nil && existing != nil {
+		return nil
+	}
 	count, cerr := p.pinningRepo.CountByUser(actor.ID)
 	if cerr != nil {
 		return fmt.Errorf("count pinned notes: %w", cerr)
 	}
 	if count >= featuredPinLimit {
-		return nil
+		rows, lerr := p.pinningRepo.ListByUser(actor.ID)
+		if lerr != nil {
+			return fmt.Errorf("list pinned notes: %w", lerr)
+		}
+		// `ListByUser` は id DESC なので末尾が最も古い。新しい方を
+		// `featuredPinLimit - 1` 件残して、あふれる分を外す。
+		for i := featuredPinLimit - 1; i < len(rows); i++ {
+			if derr := p.pinningRepo.Delete(rows[i]); derr != nil {
+				return fmt.Errorf("evict pinned note: %w", derr)
+			}
+		}
 	}
 	now := nowFn()
 	pin := &model.UserNotePining{
