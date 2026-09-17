@@ -3235,6 +3235,11 @@ func (m *MockMetaRepository) Update(fields map[string]any) error {
 			setStrArr(&m.Meta.BannedEmailDomains, k, v)
 		case "preservedUsernames":
 			setStrArr(&m.Meta.PreservedUsernames, k, v)
+		// 新規登録の username の最小文字数 (#3015)。
+		case "minimumUsernameLength":
+			if f, ok := v.(float64); ok {
+				m.Meta.MinimumUsernameLength = int(f)
+			}
 		}
 	}
 	return firstErr

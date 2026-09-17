@@ -202,6 +202,12 @@ type Meta struct {
 	// default:(-) で「DB 側のデフォルトに任せる」ことを GORM に指示する。
 	PreservedUsernames           StringArray `gorm:"column:preservedUsernames;type:varchar(1024)[];default:(-)" json:"preservedUsernames"`
 	ProhibitedWordsForNameOfUser StringArray `gorm:"column:prohibitedWordsForNameOfUser;type:varchar(1024)[];default:'{}'" json:"prohibitedWordsForNameOfUser"`
+	// MinimumUsernameLength は新規登録で取れる username の最小文字数 (#3015)。
+	// **mk-go 独自** — upstream の `localUsernameSchema` は `^\w{1,20}$` 固定で
+	// 設定できない。既定 1 なので既存インスタンスの挙動は変わらない。
+	// 上限側は設定可能にしない (20 を超えると TS へ戻した瞬間に frontend で
+	// 弾かれる。#800 と同型)。
+	MinimumUsernameLength int `gorm:"column:minimumUsernameLength;default:1" json:"minimumUsernameLength"`
 
 	// DeepL (2)
 	DeeplAuthKey *string `gorm:"column:deeplAuthKey;type:varchar(1024)" json:"deeplAuthKey"`

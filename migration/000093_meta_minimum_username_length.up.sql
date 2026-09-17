@@ -1,0 +1,16 @@
+-- minimumUsernameLength: 新規登録で取れる username の最小文字数 (#3015)。
+--
+-- 短い username は希少なので、先取り・転売・なりすまし目的の取得が起きる。
+-- 既存の `preservedUsernames` は名前を 1 つずつ列挙する仕組みなので
+-- 「2 文字以下を全部」は表現できない — `[a-zA-Z0-9_]` の 1-2 文字だけで
+-- 63 + 63^2 = 4,032 通りある。
+--
+-- **既定は 1 なので、既存インスタンスの挙動は変わらない。** 値域は 1-20 で、
+-- 上限側は設定可能にしない — 20 を超える username を作れるようにすると、
+-- TS へ戻した瞬間に frontend (`localUsernameSchema` = `^\w{1,20}$`) で弾かれる
+-- (#800 で 128 -> 20 に直した回帰と同型)。最小を上げる方向は TS の 1-20 に
+-- 収まるので drop-in で安全。
+--
+-- TS はこの列を認識しないので、TS へ戻すと最小長の制限が単に無効になる
+-- (既に作られたアカウントはそのまま使える)。
+ALTER TABLE "meta" ADD COLUMN IF NOT EXISTS "minimumUsernameLength" integer NOT NULL DEFAULT 1;

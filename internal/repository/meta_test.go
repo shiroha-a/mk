@@ -212,3 +212,29 @@ func TestMetaRepository_EnsureInitial_NoopWhenExists(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "m_ei_2", got.ID)
 }
+
+// #3015: minimumUsernameLength が実 DB の列として往復すること。
+//
+// **mock では検出できない。** `MockMetaRepository.Update` は key で switch する
+// ので、列名の綴り違いや migration 漏れがあっても緑のまま通る。GORM の
+// `Updates(map)` は key をそのまま列名に使うので、ここだけが「本当にその列が
+// あるか」を見る。
+func TestMetaRepository_Update_MinimumUsernameLength(t *testing.T) {
+	repo := NewMetaRepository(testDB)
+
+	meta := &model.Meta{ID: "m_u_mul"}
+	require.NoError(t, testDB.Create(meta).Error)
+	defer testDB.Exec(`DELETE FROM "meta" WHERE id = ?`, meta.ID)
+
+	// **読み戻しは id 指定で行う。** `repo.Fetch` は `db.First()` = id 最小の
+	// 1 行なので、他のテストが残した行があると別の行を見てしまう。
+	var stored model.Meta
+	require.NoError(t, testDB.Where("id = ?", meta.ID).First(&stored).Error)
+	// migration の DEFAULT が効いていること。既存インスタンスは列が増えても
+	// 挙動が変わらない。
+	assert.Equal(t, 1, stored.MinimumUsernameLength, "列の既定が 1 でない")
+
+	require.NoError(t, repo.Update(map[string]any{"minimumUsernameLength": 5}))
+	require.NoError(t, testDB.Where("id = ?", meta.ID).First(&stored).Error)
+	assert.Equal(t, 5, stored.MinimumUsernameLength)
+}
