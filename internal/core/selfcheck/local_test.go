@@ -87,4 +87,45 @@ func TestCheckRootUser(t *testing.T) {
 		got := CheckRootUser(context.Background(), LocalDeps{})
 		assert.Equal(t, StatusSkip, got.Status)
 	})
+
+	// **クエリ本体まで実 DB で踏む。** skip 枝しか通らないテストだと、
+	// 壊れても誰も気付かない部分が未実行のまま残る (同パッケージの
+	// `TestCheckDatabase_OK` は既に実 DB を使っている)。
+	db := testutil.MustOpenTestDB()
+	testutil.ApplyMigrations(db)
+	// **meta 行が無いと全部 fail になってしまう。** migration は行を作らず、
+	// 本番では `EnsureInitial` が起動時に作る。
+	require.NoError(t, db.Exec(`INSERT INTO meta (id) VALUES ('x') ON CONFLICT DO NOTHING`).Error)
+
+	t.Run("rootUserId 未設定なら fail", func(t *testing.T) {
+		require.NoError(t, db.Exec(`UPDATE meta SET "rootUserId" = NULL`).Error)
+		got := CheckRootUser(context.Background(), LocalDeps{DB: db})
+		assert.Equal(t, StatusFail, got.Status)
+		assert.Contains(t, got.Hint, "update-meta")
+	})
+
+	t.Run("空文字も fail", func(t *testing.T) {
+		require.NoError(t, db.Exec(`UPDATE meta SET "rootUserId" = ''`).Error)
+		assert.Equal(t, StatusFail, CheckRootUser(context.Background(), LocalDeps{DB: db}).Status)
+	})
+
+	t.Run("設定済みなら ok", func(t *testing.T) {
+		require.NoError(t, db.Exec(`UPDATE meta SET "rootUserId" = 'someroot'`).Error)
+		t.Cleanup(func() { db.Exec(`UPDATE meta SET "rootUserId" = NULL`) })
+		got := CheckRootUser(context.Background(), LocalDeps{DB: db})
+		assert.Equal(t, StatusOK, got.Status)
+		assert.Contains(t, got.Detail, "rootUserId")
+	})
+
+	// **読めないときは fail。** 「未設定」と区別が付かないので、判定できない
+	// ことを ok に倒さない。
+	t.Run("meta を読めないなら fail", func(t *testing.T) {
+		broken := testutil.MustOpenTestDB()
+		testutil.ApplyMigrations(broken)
+		require.NoError(t, broken.Exec(`ALTER TABLE meta RENAME TO meta_selfcheck_tmp`).Error)
+		t.Cleanup(func() { broken.Exec(`ALTER TABLE meta_selfcheck_tmp RENAME TO meta`) })
+
+		got := CheckRootUser(context.Background(), LocalDeps{DB: broken})
+		assert.Equal(t, StatusFail, got.Status)
+	})
 }
