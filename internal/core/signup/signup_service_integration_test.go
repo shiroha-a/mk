@@ -472,7 +472,7 @@ func TestPromotePending_WithoutApplicationUnaffected(t *testing.T) {
 
 // 承認制が有効なら、申請に紐付かない pending は昇格させない (#2804)。実 DB 経路。
 //
-// `PendingSignupTTL` は 24h なので、承認制へ切り替える直前 24 時間に発行された確認
+// `PendingSignupTTL` は 30 分なので、承認制へ切り替える直前 30 分に発行された確認
 // メールがここに来る。申請 ID を持たないので settleApplicationTx (#2576) を通らず、
 // ゲートが無いと**承認を経ていないローカルアカウント**ができる。
 //

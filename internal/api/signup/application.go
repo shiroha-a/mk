@@ -19,7 +19,7 @@ import (
 //
 // 発行するのはメール確認の経路だけ (#2813)。**この期限は承認経路では効かない** —
 // `promotePendingTx` は `expiresAt` を検査せず、確認リンクの期限は `user_pending` 側の
-// `PendingSignupTTL` (24h) が持つ。
+// `PendingSignupTTL` (30 分) が持つ。
 //
 // **効くのは別の経路。** `validateInvitationCode` (`/api/signup`) がここを見る。
 // 承認制が有効な間は `/api/signup` が 403 で閉じるので届かないが、**承認制を切って

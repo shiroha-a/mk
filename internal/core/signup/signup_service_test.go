@@ -422,7 +422,7 @@ func TestPromotePending_Success(t *testing.T) {
 
 // 承認制が有効なら、申請に紐付かない pending は昇格させない (#2804)。
 //
-// **`PendingSignupTTL` は 24h。** 承認制へ切り替える直前 24 時間に発行された確認
+// **`PendingSignupTTL` は 30 分。** 承認制へ切り替える直前 30 分に発行された確認
 // メールは、申請 ID を持たないので #2576 の確定処理を通らず、ゲートが無いと承認を
 // 経ずにアカウントになる。
 func TestPromotePending_ApprovalRequiredRejectsUnappliedPending(t *testing.T) {
@@ -506,9 +506,8 @@ func TestPromotePending_UsernameClash(t *testing.T) {
 }
 
 func TestPromotePending_Expired(t *testing.T) {
-	// PendingSignupTTL = 24h と十分長く、ParseTime も成功するため通常 path で
-	// expired を再現するのは難しい。Create 後に row.ID を 24h+ 前の ULID に
-	// 書き換えて expired path を踏ませる。
+	// ParseTime が成功する形で expired を再現したいので、Create 後に row.ID を
+	// `PendingSignupTTL` より前の ULID に書き換える。
 	svc, _, _ := newTestService(t)
 	pendingRepo := testutil.NewMockUserPendingRepository()
 	svc.SetUserPendingRepo(pendingRepo)
@@ -516,9 +515,9 @@ func TestPromotePending_Expired(t *testing.T) {
 	row, err := svc.CreatePending("expuser", "exp@example.com", "pw", nil)
 	require.NoError(t, err)
 
-	// ULID を 25h 前の時刻で再生成 (idGen は newTestService で aidx 固定)。
+	// ULID を TTL より前の時刻で再生成 (idGen は newTestService で aidx 固定)。
 	idGen, _ := id.NewGenerator("aidx")
-	old := idGen.Generate(time.Now().Add(-25 * time.Hour))
+	old := idGen.Generate(time.Now().Add(-signup.PendingSignupTTL - time.Minute))
 	delete(pendingRepo.Rows, row.ID)
 	row.ID = old
 	pendingRepo.Rows[old] = row
@@ -732,4 +731,14 @@ func TestCreatePending_ProhibitedUsername(t *testing.T) {
 	metaRepo.Meta.ProhibitedWordsForNameOfUser = []string{"badname"}
 	_, err := svc.CreatePending("badname123", "x@example.com", "pass", nil)
 	assert.ErrorIs(t, err, signup.ErrUsernameUsed)
+}
+
+// **`PendingSignupTTL` は upstream と同じ 30 分 (#3037)。**
+//
+// `SignupApiService.ts:254` が `idService.parse(pendingUser.id).date + 30 分` を
+// 過ぎた pending を弾く。mk-go は 24h (48 倍) で、しかも doc コメントが
+// 「Misskey TS 実装では明示的な TTL は無い」と**事実と逆のこと**を書いて
+// いたので、広げている自覚がどこにも残っていなかった。
+func TestPendingSignupTTL_MatchesUpstream(t *testing.T) {
+	assert.Equal(t, 30*time.Minute, signup.PendingSignupTTL)
 }

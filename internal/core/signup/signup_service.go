@@ -178,10 +178,20 @@ var (
 	ErrPasswordTooLong = errors.New("password too long")
 )
 
-// PendingSignupTTL is the default lifetime of a pending signup row. Misskey TS
-// 実装では明示的な TTL は無いが、放置 row の蓄積を避けるため 24h で運用する。
+// PendingSignupTTL is the lifetime of a pending signup row.
+//
+// **upstream と同じ 30 分 (#3037)。** `SignupApiService.ts:254` が
+// `idService.parse(pendingUser.id).date + 30 分` を過ぎた pending を弾く。
+// 以前は 24h で、しかも doc コメントが「Misskey TS 実装では明示的な TTL は
+// 無い」と**事実と逆のことを書いていた**ため、48 倍に広げている自覚が
+// どこにも残っていなかった。
+//
+// 窓が長いほど、確認メールを盗まれたときに使われる余地と、承認制へ切り替える
+// 直前に発行された確認メールが「承認を経ないアカウント」になる余地
+// (#2804 のゲートが守っている範囲) が広がる。
+//
 // ID (ULID) の timestamp と比較して PromotePending 時に判定する。
-const PendingSignupTTL = 24 * time.Hour
+const PendingSignupTTL = 30 * time.Minute
 
 // WebhookHook is invoked after a new local user has been created so that
 // system webhooks subscribed to `userCreated` can fire. 循環依存を避けるため
@@ -655,7 +665,7 @@ func (s *Service) PromotePending(code string) (*SignupResult, error) {
 //
 // **承認制は「承認を経ていないローカルアカウントは存在しない」ことの主張。**
 // 申請に紐付かない `user_pending` は #2576 の確定処理を通らないので、ゲートが
-// 無いと承認を経ずにアカウントになる。`PendingSignupTTL` は 24h なので、承認制へ
+// 無いと承認を経ずにアカウントになる。`PendingSignupTTL` は 30 分なので、承認制へ
 // 切り替える直前 24 時間に発行された確認メールがそのまま通っていた。窓が開くのは
 // 切り替え**前**に `emailRequiredForSignup` が ON だった構成だけ (OFF なら
 // `/api/signup` が即座にアカウントを作るので待ち行列が無い)。
