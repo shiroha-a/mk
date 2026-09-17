@@ -1042,11 +1042,17 @@ func TestDefaultEndpointLimits_AvailabilityOracles(t *testing.T) {
 			// **窓は短く。** 拒否も記録されるので、長い窓だと行儀の悪い
 			// クライアント 1 つで共有 IP の配下が登録フォームを使えなくなる。
 			assert.LessOrEqual(t, limit.Duration, time.Minute, "窓が長すぎる")
-			// **登録フォームの実使用は上回る。** 同梱フロントは入力中に
-			// debounce 付きで叩くので 1 分に十数回。
-			// **debounce 1000ms で打ち続けると 1 分 60 回に達する。**
-			// 利用者名はそこに張り付きうるので、実使用の 2 倍を要求する。
-			assert.GreaterOrEqual(t, limit.Max, 60, "登録フォームの実使用を下回っている")
+			// **実使用の 2 倍を要求する。** 同梱フロントは API 呼び出しだけを
+			// debounce 1000ms しており、trailing なので打ち続けている間は
+			// 0 回。最大化しても 1 タブ 1 分に 59-60 回が上限。
+			//
+			// 未認証は IP bucket しか無く NAT 配下で共有されるので、実使用と
+			// 同値だと 2 人目で当たり、送信ボタンが押せなくなる (#3037
+			// レビュー 2 周目で email 側が 60 = 余裕ゼロだった)。**下限は
+			// 実使用そのものではなく倍で留めること** — 60 まで緩めると
+			// 回帰した値がそのまま通る。
+			const perTabCeiling = 60
+			assert.GreaterOrEqual(t, limit.Max, perTabCeiling*2, "実使用に対する余裕が足りない")
 			assert.LessOrEqual(t, limit.Max, 200, "総当たりの速度として緩すぎる")
 		})
 	}
