@@ -17,6 +17,7 @@ import (
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/colfit"
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/imagedecode"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/safehttp"
@@ -57,6 +58,16 @@ var (
 	// the user's `maxFileSizeMb` role policy (#1029 PR-2). Handler maps this
 	// to upstream's `MAX_FILE_SIZE_EXCEEDED` 400 response.
 	ErrMaxFileSizeExceeded = errors.New("max file size exceeded")
+
+	// ErrUndecodableImage is returned when an image cannot be decoded and
+	// therefore cannot have its metadata stripped.
+	//
+	// **代替画像の生成は best-effort だが、この形だけは例外 (#3037 レビュー
+	// 2 周目)。** webpublic が作られないと `GetPublicURL` が原本を指すので、
+	// **EXIF の GPS がそのまま公開側へ出る** — この PR が別の経路で塞いだ穴と
+	// 同じもの。しかも同じ理由で `NormalizeImageForDetection` も失敗するので、
+	// センシティブ判定が fail-open で `false` を返す。作れないなら受け取らない。
+	ErrUndecodableImage = errors.New("image cannot be decoded, so its metadata cannot be stripped")
 	// ErrNoFreeSpace is returned when the user's current drive usage plus the
 	// new file size exceeds `driveCapacityMb` (#1029 PR-2). Handler maps this
 	// to upstream's `NO_FREE_SPACE` 400 response. remote user の場合 upstream
@@ -737,6 +748,27 @@ func (s *Service) Upload(ctx context.Context, in UploadInput) (*model.DriveFile,
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	// **メタデータを落とせない画像は受け取らない (#3037 レビュー 2 周目)。**
+	//
+	// 代替画像の生成は best-effort だが、`webpublic` が作られないと
+	// `GetPublicURL` が原本へ落ちるので、**EXIF の GPS がそのまま公開側へ出る**
+	// — この PR が `entity/drive.go` 側で塞いだ穴と同じもの。
+	// `SandboxedDecoderMaxBytes` は #3037 が新しく入れた上限なので、**それが
+	// 原因で落ちる入力だけ**を「作れないなら受け取らない」に倒す (元から
+	// デコードできない形式の扱いは変えない)。
+	//
+	// 条件に `hasStrippableMetadata` を入れてあるので、落とすものが無い画像は
+	// 従来どおり通る (その場合は原本を出しても漏れない)。
+	//
+	// **AVIF だけは別に見る。** `hasStrippableMetadata` は AVIF に false を
+	// 返す — 「AVIF は寸法に関わらず webpublic を作る枝が別にある」ことが
+	// 前提だが、**デコードできなければその枝も動かない**。AVIF の原本は
+	// Mastodon / MS Edge が表示できないので、通すと壊れた添付になる。
+	if isMimeImage(info.MimeType) && imagedecode.ExceedsSandboxedDecoderSize(info.Body) &&
+		(hasStrippableMetadata(info.Body, info.MimeType) || info.MimeType == "image/avif") {
+		return nil, ErrUndecodableImage
 	}
 
 	// 画像/動画処理 (best-effort)

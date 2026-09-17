@@ -353,7 +353,9 @@ func (h *Handler) FilesCreate(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNALLOWED_FILE_TYPE",
 				"Cannot upload the file because it is an unallowed file type.",
 				"4becd248-7f2c-48c4-a9f0-75edc4f9a1ea"))
-		case errors.Is(err, coredrive.ErrMaxFileSizeExceeded):
+		// **`ErrUndecodableImage` も 413 に寄せる (#3037 レビュー 2 周目)。**
+		// 新しい wire コードを足すとフロントエンドに分岐が無く汎用の失敗になる。
+		case errors.Is(err, coredrive.ErrMaxFileSizeExceeded), errors.Is(err, coredrive.ErrUndecodableImage):
 			// upstream drive/files/create は httpStatusCode:413 を明示する
 			return c.JSON(http.StatusRequestEntityTooLarge, apierr.Error("MAX_FILE_SIZE_EXCEEDED", "Max file size exceeded.", "b9d8c348-33f0-4673-b9a9-5d4da058977a"))
 		case errors.Is(err, coredrive.ErrNoFreeSpace):

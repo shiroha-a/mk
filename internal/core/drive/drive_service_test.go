@@ -1859,3 +1859,93 @@ func TestMaxUploadBytes(t *testing.T) {
 		})
 	}
 }
+
+// --- #3037 レビュー 2 周目: メタデータを落とせない画像は受け取らない ---
+
+// webpWithExif builds a RIFF/WEBP container of at least size bytes that carries
+// an EXIF chunk, without needing a real encoder.
+func webpWithExif(size int) []byte {
+	exif := []byte("EXIF")
+	payload := []byte("Exif\x00\x00II*\x00\x08\x00\x00\x00")
+	pad := size
+	if pad < 64 {
+		pad = 64
+	}
+	b := make([]byte, 0, pad+64)
+	b = append(b, "RIFF"...)
+	b = append(b, 0, 0, 0, 0) // size は判定に使われないので 0 のままでよい
+	b = append(b, "WEBP"...)
+	// VP8 チャンクで嵩を作る。
+	b = append(b, "VP8 "...)
+	b = append(b, 0, 0, 0, 0)
+	b = append(b, make([]byte, pad)...)
+	// EXIF チャンク。
+	b = append(b, exif...)
+	b = append(b, byte(len(payload)), 0, 0, 0)
+	b = append(b, payload...)
+	return b
+}
+
+// **デコードできない画像を受け取ると、原本がそのまま公開側へ出る。**
+//
+// `SandboxedDecoderMaxBytes` (32MiB) は #3037 が新しく入れた上限で、これに
+// 当たると `GenerateWebpublic` が `nil, nil` を返す。webpublic が無いと
+// `GetPublicURL` は原本へ落ちるので、**EXIF の GPS がそのまま公開される** —
+// この PR が `entity/drive.go` 側で塞いだ穴と同じもの。しかも
+// `NormalizeImageForDetection` も同じ理由で失敗するので、センシティブ判定も
+// fail-open で `false` になる。
+//
+// 発火するのは `maxFileSizeMb >= 33` の構成だけ (既定は 30)。
+func TestUpload_RejectsImagesWhoseMetadataCannotBeStripped(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": 64},
+	}})
+	body := webpWithExif(33 << 20)
+
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: body, Name: "x.webp",
+	})
+
+	require.ErrorIs(t, err, drive.ErrUndecodableImage,
+		"メタデータを落とせない画像を受け取っている (原本が公開側に出る)")
+}
+
+// **上限の内側なら従来どおり通る。** これが無いと「WebP を常に拒否する」
+// 実装でも上のテストが通る。
+func TestUpload_AcceptsImagesUnderTheDecoderSizeCap(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": 64},
+	}})
+	body := webpWithExif(1 << 20)
+
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: body, Name: "x.webp",
+	})
+
+	require.NotErrorIs(t, err, drive.ErrUndecodableImage, "上限の内側を弾いている")
+}
+
+// **落とすものが無い画像は通す。** 原本を出しても漏れないので、上限に当たる
+// だけで拒否すると受け取れるものを不必要に減らす。
+func TestUpload_AcceptsLargeImagesWithoutMetadata(t *testing.T) {
+	svc, _, _ := newSvc(t)
+	svc.SetRoleChecker(&fakeMod{policies: map[string]map[string]any{
+		"u1": {"maxFileSizeMb": 64},
+	}})
+	// EXIF チャンクを持たない WebP。
+	body := make([]byte, 0, 33<<20)
+	body = append(body, "RIFF"...)
+	body = append(body, 0, 0, 0, 0)
+	body = append(body, "WEBP"...)
+	body = append(body, "VP8 "...)
+	body = append(body, 0, 0, 0, 0)
+	body = append(body, make([]byte, 33<<20)...)
+
+	_, err := svc.Upload(context.Background(), drive.UploadInput{
+		User: &model.User{ID: "u1"}, Body: body, Name: "x.webp",
+	})
+
+	require.NotErrorIs(t, err, drive.ErrUndecodableImage, "落とすものが無い画像を弾いている")
+}

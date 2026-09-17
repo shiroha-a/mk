@@ -105,7 +105,7 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 	// **wasm のデコーダへ渡す前に入力の大きさを見る (#3037)。**
 	// 下の `image.DecodeConfig` は**ヘッダを読むためだけでも wasm を起動して
 	// 入力を丸ごと linear memory へ写す**ので、この判定はその前に置く。
-	if len(data) > SandboxedDecoderMaxBytes && usesSandboxedDecoder(data) {
+	if ExceedsSandboxedDecoderSize(data) {
 		return nil, fmt.Errorf("%w: %d bytes", ErrEncodedTooLarge, len(data))
 	}
 	// **ラスタを確保する前にヘッダの寸法を見る。** `image.DecodeConfig` は
@@ -194,6 +194,19 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 //
 // **magic bytes だけで見る。** `image.DecodeConfig` に判定させると、その
 // 判定自体が wasm を起動してしまう (塞ごうとしている経路そのもの)。
+// ExceedsSandboxedDecoderSize reports whether data would be refused by
+// DecodeWithPixelCap purely because of its encoded size.
+//
+// **呼び出し側が「デコードできない」を握り潰せないようにするための述語
+// (#3037 レビュー 2 周目)。** drive は代替画像の生成を best-effort にして
+// いるが、webpublic が作られないと `GetPublicURL` が原本を指すので、
+// **EXIF の GPS がそのまま公開側へ出る**。この上限は #3037 が新しく入れた
+// ものなので、それで落ちる入力だけは「作れないなら受け取らない」に倒せる
+// ように、判定だけを切り出してある。
+func ExceedsSandboxedDecoderSize(data []byte) bool {
+	return len(data) > SandboxedDecoderMaxBytes && usesSandboxedDecoder(data)
+}
+
 func usesSandboxedDecoder(data []byte) bool {
 	return isISOBMFFImage(data) || isJPEGXL(data) || isWebP(data)
 }
