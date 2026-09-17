@@ -1383,6 +1383,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 
 	// Meta endpoint (public)
 	metaHandler := meta.NewHandler(s.config, metaRepo)
+	// **`requireSetup` をサーバー側の受け入れ条件と揃える (#3037)。**
+	// `admin/accounts/create` の初回セットアップ窓は「`rootUserId` 未設定
+	// **かつ**ローカル利用者 0」でしか開かないので、フロントの判定も同じに
+	// する。揃えないと、`rootUserId` が NULL で利用者ありの DB で
+	// **セットアップ画面が出続けて作成ボタンが必ず失敗する**。
+	meta.SetLocalUserCounter(func() (int64, error) { return userRepo.CountLocalUsers() })
 	metaHandler.SetAdRepo(repository.NewAdRepository(s.db))
 	proxyAccountResolver := newProxyAccountResolver(repository.NewSystemAccountRepository(s.db), userRepo)
 	metaHandler.SetProxyAccountResolver(proxyAccountResolver)

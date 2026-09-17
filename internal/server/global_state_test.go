@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/shiroha-a/mk/internal/api/meself"
+	apimeta "github.com/shiroha-a/mk/internal/api/meta"
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	coretwofactor "github.com/shiroha-a/mk/internal/core/twofactor"
@@ -56,6 +57,10 @@ func restoreProcessGlobals(t *testing.T) {
 		notehide.SetFollowingRepo(nil)
 		coretwofactor.SetTestMode(false)
 		meself.SetEnricher(nil)
+		// **latch も戻す。** `RequireSetup` は「利用者を観測した」を覚えるので、
+		// counter だけ外しても前のテストの観測が残る。
+		apimeta.SetLocalUserCounter(nil)
+		apimeta.ResetSetupLatchForTest()
 		// この 2 つは cfg 由来。0 / 既定を渡すと各パッケージの既定に戻る。
 		_ = password.SetCost(password.DefaultCost)
 		corenote.SetHookConcurrency(0)
@@ -130,6 +135,7 @@ func TestProcessGlobalsAreRestored(t *testing.T) {
 		"notehide.SetFollowingRepo":        "router.go",
 		"coretwofactor.SetTestMode":        "router.go",
 		"meself.SetEnricher":               "router.go",
+		"meta.SetLocalUserCounter":         "router.go",
 		"password.SetCost":                 "server.go",
 		"corenote.SetHookConcurrency":      "server.go",
 	}

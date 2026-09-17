@@ -229,7 +229,7 @@ func (h *Handler) buildMeta(detail bool) (map[string]any, error) {
 		"notesPerOneAd":             m.NotesPerOneAd,
 		"mediaProxy":                h.config.MediaProxy,
 		"cacheRemoteSensitiveFiles": m.CacheRemoteSensitiveFiles,
-		"requireSetup":              m.RootUserID == nil,
+		"requireSetup":              RequireSetup(m),
 		// mk-go は /tarball/ を配信しないので常に false (#2700)。config の値を
 		// そのまま返すと、SPA catchall が HTML を 200 で返すリンクを
 		// 「ソースコード (Tarball)」として出すため config.ProvidesTarball() を通す。

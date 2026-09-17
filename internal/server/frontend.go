@@ -493,7 +493,7 @@ func buildMetaJSON(cfg *config.Config, m *model.Meta, proxyAccountResolver meta.
 		"notesPerOneAd":             m.NotesPerOneAd,
 		"mediaProxy":                cfg.MediaProxy,
 		"cacheRemoteSensitiveFiles": m.CacheRemoteSensitiveFiles,
-		"requireSetup":              m.RootUserID == nil,
+		"requireSetup":              meta.RequireSetup(m),
 		"singleUserMode":            m.SingleUserMode,
 		// /api/meta と同じ理由で常に false (#2700)。frontend の instance cache を
 		// 上書きする経路なので、片側だけ設定値に戻すと /api/meta と食い違う。
