@@ -37,6 +37,8 @@ import (
 	_ "golang.org/x/image/tiff"
 	_ "golang.org/x/image/webp"
 
+	"golang.org/x/sync/semaphore"
+
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/safehttp"
 )
@@ -52,6 +54,30 @@ const (
 	ModePreview
 	ModeBadge
 )
+
+// String implements fmt.Stringer so log output is readable.
+//
+// **無いと slog が int をそのまま出す** (`"mode":2`)。shed のログは
+// operator に手掛かりを残すのが目的なので、数字だけでは意味が無い
+// (#2849 が `Scheme.String()` で直したのと同型)。
+func (m ProxyMode) String() string {
+	switch m {
+	case ModeDefault:
+		return "default"
+	case ModeEmoji:
+		return "emoji"
+	case ModeAvatar:
+		return "avatar"
+	case ModeStatic:
+		return "static"
+	case ModePreview:
+		return "preview"
+	case ModeBadge:
+		return "badge"
+	default:
+		return fmt.Sprintf("ProxyMode(%d)", int(m))
+	}
+}
 
 // 画像処理パラメータ (Misskey TS準拠)
 const (
@@ -205,13 +231,25 @@ type Service struct {
 	videoThumbGen    string       // optional, #637 M2 (videoThumbnailGenerator base URL)
 	videoThumbMode   string       // "post" (default) | "get" — wire selection
 	videoThumbClient *http.Client // built lazily from videoThumbGen, supports unix:// scheme
+	// cpuSlots は decode/resize/encode を同時に何本走らせてよいかの枠
+	// (#3032)。同時に走る本数がそのまま同時に確保される中間バッファの
+	// 本数になるので、開けっ放しだと AVIF のバーストでプロセスの RSS が
+	// 1GB 近くまで伸びる。内蔵プロキシは API サーバーと同じプロセスなので、
+	// それはインスタンス全体の RSS。根拠と実測は cpulimit.go を参照。
+	cpuSlots *semaphore.Weighted
+	// cpuConcurrency は cpuSlots に渡した容量。`semaphore.Weighted` は
+	// 容量を読み出せないので、テストが既定値を確かめるために持っている
+	// (production では書かれるだけ)。**消さないこと** — 読み手は
+	// TestNewServiceInstallsCPULimit と
+	// TestSetCPUConcurrencyRestoresDefaultForNonPositive の 2 つ。
+	cpuConcurrency int
 }
 
 // NewService creates a new media proxy Service.
 // allowedPrivateNetworks は SSRF 保護で許可するプライベート CIDR リスト (config.AllowedPrivateNetworks)。
 // transportOpts は forward proxy 等の追加 transport 設定 (safehttp.WithProxy など)。
 func NewService(instanceURL, userAgent string, driveStorage coredrive.Storage, allowlist AllowlistChecker, hmacSecret []byte, allowedPrivateNetworks []string, transportOpts ...safehttp.Option) *Service {
-	return &Service{
+	s := &Service{
 		instanceURL:  instanceURL,
 		driveStorage: driveStorage,
 		allowlist:    allowlist,
@@ -222,6 +260,10 @@ func NewService(instanceURL, userAgent string, driveStorage coredrive.Storage, a
 		},
 		userAgent: userAgent,
 	}
+	// **既定でも必ず枠を張る (#3032)。** 明示的に設定しなかった構成が
+	// 無制限のままだと、塞ごうとしている状態がそのまま既定になる。
+	s.SetCPUConcurrency(0)
+	return s
 }
 
 // SetDriveLookup attaches a DriveFileLookup so the proxy can substitute the
@@ -568,6 +610,17 @@ func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType
 	// browsersafe allowlist を回避でき、CSP の無い /proxy 上で XSS 補助面になる。
 	if isResizeMode(mode) && !isConvertibleImage(contentType) {
 		return nil, ErrNotFound
+	}
+	// **ここから下だけが CPU 仕事 (#3032)。** 上のリモート fetch や video
+	// thumbnail generator への HTTP 呼び出しは P を使わない待ちなので、
+	// 枠の内側に入れるとスループットだけが落ちる。pass-through と dummy は
+	// resize mode ではないので枠を取らない。
+	if isResizeMode(mode) {
+		release, err := s.acquireCPU(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
 	}
 	switch mode {
 	case ModeEmoji:
