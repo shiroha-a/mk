@@ -13,6 +13,8 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/draw"
+	"image/gif"
 	"image/png"
 
 	"github.com/kovidgoyal/imaging"
@@ -53,13 +55,87 @@ func Decode(data []byte) (image.Image, error) {
 			return nil, fmt.Errorf("%w: %dx%d", ErrTooManyPixels, cfg.Width, cfg.Height)
 		}
 	}
+	// **アニメーションは 1 コマだけ読む。** `imaging.Decode` は内部で
+	// `DecodeAll` を呼び、GIF なら `gif.DecodeAll`、APNG なら
+	// `apng.DecodeAll` で**全コマをメモリに載せてから** `SingleFrame()` で
+	// 1 枚だけ返す。mk-go はアニメーションを出力しない (`encodeWebP` は
+	// `image.Image` 1 枚しか受けない) ので、残りは確保した直後に捨てている。
+	//
+	// 上の pixel cap は**1 コマぶん**しか見ないので、ここを塞がないとコマ数で
+	// 掛け算できる。GIF のコマは LZW 圧縮で、透明な全画面コマは極端に縮むため、
+	// 小さなファイルから数十 GB を要求できる。
+	//
+	// **GIF は常にこの経路。** imaging の `gifmeta` は `HasFrames: true` を
+	// 無条件に立てるので、1 コマの GIF でも `DecodeAll` に入る。
+	if isGIF(data) {
+		img, err := gif.Decode(bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		// imaging の `SingleFrame()` は `NormalizeOrigin` を通した像を返す。
+		// GIF のコマは原点がずれうるので、揃えないと**返る像の Bounds.Min が
+		// 経路によって変わる**。
+		return normalizeOrigin(img), nil
+	}
+	if isAnimatedPNG(data) {
+		// APNG の既定像は IDAT そのもの。stdlib は `acTL` / `fcTL` / `fdAT` を
+		// ancillary チャンクとして読み飛ばすので、1 コマ目だけが返る。
+		// imaging も既定像があればそれを返すので、見える結果は変わらない。
+		// **ICC→sRGB 変換は失われる** (下の interlaced PNG と同じ割り切り)。
+		return png.Decode(bytes.NewReader(data))
+	}
 	if IsBrokenInterlacedPNG(data) {
 		// **stdlib で読む。** 下記の条件の PNG は imaging が全画素 0 にする。
 		// **EXIF の向きと ICC→sRGB 変換は失われる**が、代わりに得られるのは
 		// 「真っ黒な画像」なので、そちらの方がましという判断。
 		return png.Decode(bytes.NewReader(data))
 	}
+	// **アニメーション WebP はここに残る。** 単コマだけ取り出す decoder が
+	// 手元に無い (`golang.org/x/image/webp` は VP8X + ANMF を読めず、
+	// imaging の `webp.DecodeAnimated` が唯一の経路) ため、塞ぐと現在動いて
+	// いる変換が落ちる。GIF / APNG と同じ増幅が残っている。
 	return imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+}
+
+// isGIF reports whether data starts with a GIF signature.
+func isGIF(data []byte) bool {
+	return len(data) >= 6 && (string(data[:6]) == "GIF87a" || string(data[:6]) == "GIF89a")
+}
+
+// isAnimatedPNG reports whether data is a PNG carrying an `acTL` chunk.
+//
+// `acTL` は仕様上 `IDAT` より前に置かれる。`hasChunk` は `IDAT` で走査を
+// 止めるので、**アニメーションでない PNG を誤って stdlib 経路へ落とさない**
+// (あちらは ICC→sRGB 変換を失う)。
+func isAnimatedPNG(data []byte) bool {
+	const sig = "\x89PNG\r\n\x1a\n"
+	if len(data) < 8 || string(data[:8]) != sig {
+		return false
+	}
+	return hasChunk(data, "acTL")
+}
+
+// normalizeOrigin moves an image's bounds to (0, 0) without copying pixels
+// when the concrete type allows it.
+//
+// `kovidgoyal/imaging` の `NormalizeOrigin` と同じことをする。GIF の 1 コマ目は
+// 論理画面の中でずれた位置に置けるので、揃えないと `Bounds().Min` が経路に
+// よって変わる。
+func normalizeOrigin(src image.Image) image.Image {
+	r := src.Bounds()
+	if r.Min.X == 0 && r.Min.Y == 0 {
+		return src
+	}
+	if p, ok := src.(*image.Paletted); ok {
+		// Pix / Stride はそのままでよい。`PixOffset` は Rect.Min からの
+		// 相対で計算されるので、Rect を移すだけで整合する。
+		dst := *p
+		dst.Rect = image.Rect(0, 0, r.Dx(), r.Dy())
+		return &dst
+	}
+	dst := image.NewNRGBA(image.Rect(0, 0, r.Dx(), r.Dy()))
+	draw.Draw(dst, dst.Bounds(), src, r.Min, draw.Src)
+	return dst
 }
 
 // IsBrokenInterlacedPNG reports whether data is a PNG that
