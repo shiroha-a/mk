@@ -876,8 +876,12 @@ func TestApplicationApply_RealCaptchaSkipsFormToken(t *testing.T) {
 	}))
 	defer srv.Close()
 	secret, instanceURL := "s", srv.URL
+	// **sitekey も要る (#3037 レビュー 2 周目)。** upstream
+	// `SignupApiService.ts:86` は 3 つ揃って初めて mcaptcha を有効にする。
+	siteKey := "sk"
 	env.meta.EnableMcaptcha = true
 	env.meta.McaptchaSecretKey = &secret
+	env.meta.McaptchaSiteKey = &siteKey
 	env.meta.McaptchaInstanceURL = &instanceURL
 	env.handler.SetCaptcha(captcha.NewServiceWithClient(env.meta, srv.Client()))
 	withFormTokens(t, env, 0)
@@ -943,8 +947,11 @@ func TestApplicationFormToken_MinWaitSecondsRoundsUp(t *testing.T) {
 func TestApplicationFormToken_EmptyWhenRealCaptcha(t *testing.T) {
 	env := newApprovalEnv(t, true)
 	secret, instanceURL := "s", "https://mcaptcha.example"
+	// **sitekey も要る (#3037 レビュー 2 周目)。**
+	siteKey := "sk"
 	env.meta.EnableMcaptcha = true
 	env.meta.McaptchaSecretKey = &secret
+	env.meta.McaptchaSiteKey = &siteKey
 	env.meta.McaptchaInstanceURL = &instanceURL
 	env.handler.SetCaptcha(captcha.NewService(env.meta))
 	withFormTokens(t, env, 0)

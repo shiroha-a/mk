@@ -2,6 +2,7 @@ package mediaproxy
 
 import (
 	"context"
+	"github.com/shiroha-a/mk/internal/misc/imagedecode"
 	"hash/crc32"
 	"io"
 	"net/http"
@@ -266,4 +267,18 @@ func makePNGHeader(w, h uint32) []byte {
 	sum := crc.Sum32()
 	b = append(b, byte(sum>>24), byte(sum>>16), byte(sum>>8), byte(sum))
 	return b
+}
+
+// **`ErrEncodedTooLarge` の分岐が生きる条件を固定する (#3037 レビュー 2 周目)。**
+//
+// media proxy がデコーダへ渡すバイト列は必ず `maxDownload` 以下なので、
+// `imagedecode.SandboxedDecoderMaxBytes` と同値である限り
+// `len(data) > SandboxedDecoderMaxBytes` は真になりえない = **あの分岐は
+// 到達不能**。安全側なので消さないが、`maxDownload` を上げた瞬間に初めて
+// 生きるコードなので、その関係をここで結んでおく (カバレッジでは差が出ず
+// gate でも気付けない)。
+func TestMaxDownloadStaysWithinTheSandboxedDecoderCap(t *testing.T) {
+	assert.LessOrEqual(t, int64(maxDownload), int64(imagedecode.SandboxedDecoderMaxBytes),
+		"maxDownload を上げるなら、ErrEncodedTooLarge の分岐が実際に走るようになる。"+
+			"そちらのテストを足すこと")
 }

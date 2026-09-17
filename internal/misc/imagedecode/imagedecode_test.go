@@ -6,6 +6,8 @@ import (
 	"hash/crc32"
 	"image"
 	"image/color"
+	"image/color/palette"
+	"image/draw"
 	"image/png"
 	"os"
 	"path/filepath"
@@ -368,14 +370,35 @@ func TestDecodeWithPixelCap_Gray16WithTransparencyCostsEightBytes(t *testing.T) 
 // 判定そのものが意味を持たない。
 func TestDecodedBytesPerPixelFor_MatchesTheDecodedImage(t *testing.T) {
 	gray16 := encodeGray16PNG(t, 4, 4)
+	gray8 := encodePNG(t, image.NewGray(image.Rect(0, 0, 4, 4)))
+	// **不透明で埋める。** Go の png encoder は透過のある画像を color type 6
+	// (RGBA) で書くが、`tRNS` は type 6 には付けられない (デコーダが
+	// `invalid format` で拒否する)。type 2 (truecolor) にするには不透明が要る。
+	truecolor8 := encodePNG(t, opaqueImage(image.NewNRGBA(image.Rect(0, 0, 4, 4))))
+	truecolor16 := encodePNG(t, opaqueImage(image.NewNRGBA64(image.Rect(0, 0, 4, 4))))
+	paletted := encodePNG(t, image.NewPaletted(image.Rect(0, 0, 4, 4), palette.Plan9))
 
+	// **2 ケースでは「実際の確保と合っている」を主張できない
+	// (#3037 レビュー 2 周目)。** ビット深度 x 色モデル x `tRNS` の組み合わせを
+	// 全部並べて、見積もりが実際の確保量を**下回らない**ことを確かめる。
+	// パレット PNG は `tRNS` を持つのが普通なので、そこで誤って値が上がって
+	// いないかもここで見る (`DecodeConfig` が返すのは `color.Palette` で、
+	// `GrayModel` / `Gray16Model` とは別の動的型なので switch に入らない)。
 	for _, tt := range []struct {
 		name string
 		data []byte
 		want int64
 	}{
+		{"Gray8", gray8, 1},
+		{"Gray8 + tRNS", insertPNGChunk(t, gray8, "tRNS", []byte{0x00, 0x00}), 4},
 		{"Gray16", gray16, 2},
 		{"Gray16 + tRNS", insertPNGChunk(t, gray16, "tRNS", []byte{0x00, 0x00}), 8},
+		{"truecolor8", truecolor8, 4},
+		{"truecolor8 + tRNS", insertPNGChunk(t, truecolor8, "tRNS", []byte{0, 0, 0, 0, 0, 0}), 4},
+		{"truecolor16", truecolor16, 8},
+		{"truecolor16 + tRNS", insertPNGChunk(t, truecolor16, "tRNS", []byte{0, 0, 0, 0, 0, 0}), 8},
+		{"palette8", paletted, 4},
+		{"palette8 + tRNS", insertPNGChunk(t, paletted, "tRNS", []byte{0x00}), 4},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg, err := png.DecodeConfig(bytes.NewReader(tt.data))
@@ -415,6 +438,25 @@ func actualBytesPerPixel(img image.Image) int64 {
 	default:
 		return 4
 	}
+}
+
+// opaqueImage fills every pixel with opaque black so the PNG encoder picks a
+// truecolor (no alpha channel) color type.
+func opaqueImage(img draw.Image) draw.Image {
+	b := img.Bounds()
+	for y := b.Min.Y; y < b.Max.Y; y++ {
+		for x := b.Min.X; x < b.Max.X; x++ {
+			img.Set(x, y, color.NRGBA{A: 0xFF})
+		}
+	}
+	return img
+}
+
+func encodePNG(t *testing.T, img image.Image) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, png.Encode(&buf, img))
+	return buf.Bytes()
 }
 
 func encodeGray16PNG(t *testing.T, w, h int) []byte {

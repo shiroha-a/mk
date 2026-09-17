@@ -70,6 +70,11 @@ type Handler struct {
 	emailSender func(to string, msg miscsmtp.Message)
 	// serverURL はメール footer の link 先。emailSender とセットで設定。
 	serverURL string
+	// testMode は captcha をバイパスする (本家 `process.env.NODE_ENV !== 'test'`
+	// 相当)。**signup 側にだけあって signin 側に無かった (#3037 レビュー
+	// 2 周目)** — upstream `SigninApiService.ts:184` は signin も囲っている。
+	// captcha を有効にした e2e 構成を作ると signup だけ通って signin が落ちる。
+	testMode bool
 	// metaRepo はメール l10n の instance fallback 用。未配線なら英語 fallback。
 	metaRepo repository.MetaRepository
 }
@@ -120,6 +125,12 @@ func (h *Handler) SetSigninRepo(repo repository.SigninRepository, idGen id.Gener
 // the captcha token on the password step (same as original Misskey).
 func (h *Handler) SetCaptcha(svc *captcha.Service) {
 	h.captchaSvc = svc
+}
+
+// SetTestMode enables the captcha bypass (本家 `process.env.NODE_ENV !== 'test'`
+// 相当)。signup 側の同名 setter と対にして配線する。
+func (h *Handler) SetTestMode(v bool) {
+	h.testMode = v
 }
 
 // SetWebAuthn attaches optional WebAuthn dependencies to enable 2FA login
@@ -210,7 +221,7 @@ func (h *Handler) Signin(c echo.Context) error {
 	//
 	// **2FA 有効なら見ない。** あちらは challenge を返すだけで token を発行せず、
 	// `signin-flow` も同じ条件で分けている。
-	if !profile.TwoFactorEnabled && h.captchaSvc != nil {
+	if !h.testMode && !profile.TwoFactorEnabled && h.captchaSvc != nil {
 		tokens := captcha.CaptchaTokens{
 			Hcaptcha:    req.HcaptchaResponse,
 			Recaptcha:   req.RecaptchaResponse,
@@ -365,7 +376,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	// CAPTCHA 検証 (password step 完了後、2FA 無しの場合のみ)。
 	// 本家 Misskey と同じく 2FA 有効なユーザーはキーデバイスが人間性を担保する
 	// ため CAPTCHA をスキップする。
-	if !profile.TwoFactorEnabled && h.captchaSvc != nil {
+	if !h.testMode && !profile.TwoFactorEnabled && h.captchaSvc != nil {
 		tokens := captcha.CaptchaTokens{
 			Hcaptcha:    req.HcaptchaResponse,
 			Recaptcha:   req.RecaptchaResponse,

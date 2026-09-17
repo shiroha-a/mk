@@ -151,8 +151,15 @@ func (rl *RateLimiter) Disable() {
 }
 
 // SetPolicyProvider wires a PolicyProvider so authenticated user の
-// rateLimitFactor が反映される。trusted user に factor=2.0 を割り当てて
-// 実効 Max を 2 倍にする等の運用が可能 (#606 item 4)。
+// rateLimitFactor が反映される。
+//
+// **`rateLimitFactor` は除数 (#3037 レビュー 2 周目で実測)。** `scaledMax` は
+// `base / factor` なので、**値が大きいほど実効 Max は小さくなる** — trusted
+// user を緩めるなら 0.5 のような 1 未満の値を割り当てる。以前ここには
+// 「factor=2.0 で実効 Max を 2 倍にする」と書いてあったが逆で、そのとおりに
+// 設定すると半分に締まる (倒れる向きは安全側だが、設定の効き方の記述が
+// 実装と食い違っていた)。upstream `RateLimiterService.limit()` の
+// `max: limitation.max / factor` と同じ。
 func (rl *RateLimiter) SetPolicyProvider(p PolicyProvider) {
 	rl.policyProvider = p
 }

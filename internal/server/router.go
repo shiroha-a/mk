@@ -1572,6 +1572,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	if captchaSvc != nil {
 		signinHandler.SetCaptcha(captchaSvc)
 	}
+	// **signin 側にも testMode が要る (#3037 レビュー 2 周目)。** upstream
+	// `SigninApiService.ts:184` は signin の captcha 検証も
+	// `process.env.NODE_ENV !== 'test'` で囲っている。signup 側にだけ
+	// 配線されていたので、captcha を有効にした e2e 構成では signup だけ
+	// 通って signin が落ちる。
+	signinHandler.SetTestMode(s.config.TestMode)
 	// IP logging: meta.enableIpLogging が true のときだけ記録する。
 	if serverMeta, err := metaRepo.Fetch(); err == nil && serverMeta.EnableIPLogging {
 		signinHandler.SetIPLogger(userIPRepo, true)

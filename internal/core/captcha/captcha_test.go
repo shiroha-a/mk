@@ -302,6 +302,7 @@ func TestTurnstile_ResponseTooLarge(t *testing.T) {
 func TestService_HasRealProvider(t *testing.T) {
 	secret := "s"
 	url := "https://mcaptcha.example"
+	empty := ""
 	tests := []struct {
 		name string
 		meta *model.Meta
@@ -312,7 +313,24 @@ func TestService_HasRealProvider(t *testing.T) {
 		{name: "hcaptcha", meta: &model.Meta{EnableHcaptcha: true, HcaptchaSecretKey: &secret}, want: true},
 		{name: "recaptcha", meta: &model.Meta{EnableRecaptcha: true, RecaptchaSecretKey: &secret}, want: true},
 		{name: "turnstile", meta: &model.Meta{EnableTurnstile: true, TurnstileSecretKey: &secret}, want: true},
-		{name: "mcaptcha", meta: &model.Meta{EnableMcaptcha: true, McaptchaSecretKey: &secret, McaptchaInstanceURL: &url}, want: true},
+		{name: "mcaptcha", meta: &model.Meta{EnableMcaptcha: true, McaptchaSecretKey: &secret, McaptchaSiteKey: &secret, McaptchaInstanceURL: &url}, want: true},
+		{
+			// **upstream `SignupApiService.ts:86` は sitekey も要求する
+			// (#3037 レビュー 2 周目)。** 見ないと、sitekey が NULL の meta 行で
+			// トークンを要求するのにウィジェットが描画されず、signup /
+			// signin / 申請が全滅する。
+			name: "mcaptcha without sitekey",
+			meta: &model.Meta{EnableMcaptcha: true, McaptchaSecretKey: &secret, McaptchaInstanceURL: &url},
+			want: false,
+		},
+		{
+			// **空文字は upstream では falsy。** `nil` だけを見ていると、
+			// `admin/update-meta` で空文字を書くだけで provider を有効にでき、
+			// 検証が必ず失敗する = 登録とサインインを止められる。
+			name: "hcaptcha with an empty secret",
+			meta: &model.Meta{EnableHcaptcha: true, HcaptchaSecretKey: &empty},
+			want: false,
+		},
 		{
 			name: "hcaptcha + testcaptcha",
 			meta: &model.Meta{EnableHcaptcha: true, HcaptchaSecretKey: &secret, EnableTestcaptcha: true},

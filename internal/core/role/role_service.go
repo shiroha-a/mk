@@ -781,6 +781,13 @@ func (s *Service) IsModerator(userID string) bool {
 // upstream RoleService.getModerators(includeAdmins, includeRoot,
 // excludeExpire). Used by the checkModeratorsActivity cron (#1563). Returns
 // nil when userRepo is not wired (drop-in optional, #785).
+//
+// **条件つきロールのモデレーターは含まれない (#3037 レビュー 2 周目)。**
+// 列挙するのは assignment 行だけなので、`GetUserRoles` 側ではモデレーターに
+// なる利用者がここには出ない。**upstream も同じ** (`getModeratorIds` /
+// `getAdministratorIds` が `roleAssignmentsRepository` だけを見る) ので
+// parity として維持する。影響は通報の通知先とモデレーター不在の警告で、
+// 権限の判定そのものには使われていない。
 func (s *Service) GetModerators() ([]*model.User, error) {
 	if s.userRepo == nil {
 		return nil, nil
@@ -1874,8 +1881,14 @@ func grantsPrivilegedPolicy(policies []byte) bool {
 // the four values checkConditionalPrivilege needs.
 //
 // **型は admin handler が入れる形に合わせる。** `target` は文字列、
-// `condFormula` は `datatypes.JSON` (= []byte)、フラグは bool。想定外の型は
-// 既存の値を残す — 判定を勝手に緩める側へ倒さないため。
+// `condFormula` は `datatypes.JSON` (= []byte)、フラグは bool。
+//
+// **想定外の型は既存の値を残す。これは fail-closed ではない
+// (#3037 レビュー 2 周目で訂正)。** 新しく来た値を捨てて古い値で判定する
+// ので、**判定は古い値で通り、書き込みだけ新しい値で行われる**。現状の
+// 呼び出し側は admin handler 1 つだけで型も合っている (`fields["policies"]`
+// には `json.Marshal` の `[]byte` が入る) ので実害は無いが、呼び出しを
+// 増やすときはここで落とすかどうかを考えること。
 func mergedRoleShape(current *model.Role, fields map[string]any) (model.RoleTarget, []byte, []byte, bool, bool) {
 	target := current.Target
 	switch v := fields["target"].(type) {

@@ -103,27 +103,43 @@ func NewServiceWithClient(meta *model.Meta, client *http.Client) *Service {
 func buildProviders(meta *model.Meta, client *http.Client) *Service {
 	s := &Service{}
 
-	if meta.EnableHcaptcha && meta.HcaptchaSecretKey != nil {
+	// **upstream は truthy で見る (#3037 レビュー 2 周目)。** `&& secretKey` は
+	// 空文字も falsy なので、`nil` だけを見ていると**空文字が入った列で
+	// provider が有効になる**。検証は必ず失敗するのに token は要求されるので、
+	// `admin/update-meta` で空文字を書ける経路 (列が protected ではない) から
+	// 登録とサインインを止められる。
+	if meta.EnableHcaptcha && nonEmpty(meta.HcaptchaSecretKey) {
 		s.hcaptcha = NewHcaptchaWithClient(*meta.HcaptchaSecretKey, client)
 	}
-	if meta.EnableRecaptcha && meta.RecaptchaSecretKey != nil {
+	if meta.EnableRecaptcha && nonEmpty(meta.RecaptchaSecretKey) {
 		s.recaptcha = NewRecaptchaWithClient(*meta.RecaptchaSecretKey, client)
 	}
-	if meta.EnableTurnstile && meta.TurnstileSecretKey != nil {
+	if meta.EnableTurnstile && nonEmpty(meta.TurnstileSecretKey) {
 		s.turnstile = NewTurnstileWithClient(*meta.TurnstileSecretKey, client)
 	}
-	if meta.EnableMcaptcha && meta.McaptchaSecretKey != nil && meta.McaptchaInstanceURL != nil {
-		siteKey := ""
-		if meta.McaptchaSiteKey != nil {
-			siteKey = *meta.McaptchaSiteKey
-		}
-		s.mcaptcha = NewMcaptchaWithClient(*meta.McaptchaInstanceURL, siteKey, *meta.McaptchaSecretKey, client)
+	// **`mcaptchaSitekey` も要る (#3037 レビュー 2 周目)。** upstream
+	// `SignupApiService.ts:86` は 3 つ揃って初めて mcaptcha を検証する。
+	// mk-go は sitekey を見ていなかったので、sitekey が NULL / 空の meta 行では
+	// **mcaptcha のトークンを要求するのにウィジェットが描画されない**
+	// (`MkCaptcha.vue` の `mCaptchaIframeUrl` は sitekey が truthy でないと
+	// null を返す)。しかも `HasRealProvider()` は true になるのでフォーム
+	// トークンの代替も効かず、signup / signin / 申請が全滅する。
+	if meta.EnableMcaptcha && nonEmpty(meta.McaptchaSecretKey) &&
+		nonEmpty(meta.McaptchaSiteKey) && nonEmpty(meta.McaptchaInstanceURL) {
+		s.mcaptcha = NewMcaptchaWithClient(*meta.McaptchaInstanceURL, *meta.McaptchaSiteKey, *meta.McaptchaSecretKey, client)
 	}
 	if meta.EnableTestcaptcha {
 		s.testcap = NewTestcaptcha()
 	}
 
 	return s
+}
+
+// nonEmpty reports whether a nullable meta column holds a non-empty string.
+//
+// upstream の `&&` は truthy 判定なので、空文字は「設定されていない」と同じ。
+func nonEmpty(v *string) bool {
+	return v != nil && *v != ""
 }
 
 // IsEnabled reports whether any captcha provider is configured.
