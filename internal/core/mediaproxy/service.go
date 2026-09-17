@@ -198,6 +198,14 @@ var browsersafeMIMEs = map[string]bool{
 type ProxyResult struct {
 	Body        io.ReadCloser
 	ContentType string
+	// CacheControl overrides the handler's default `Cache-Control` for this
+	// response. 空なら既定 (`max-age=31536000, immutable`)。
+	//
+	// **成功応答でも長期キャッシュが正しくない場合がある (#3035)。**
+	// 生成に失敗してダミー画像へ倒れた応答は 200 で返るが、原因が一時的な
+	// ものなら `immutable` で 1 年固定してはいけない。status を変えずに
+	// キャッシュだけ変えたいので、error ではなく結果に載せる。
+	CacheControl string
 }
 
 // DriveFileLookup is the minimal subset of repository.DriveFileRepository
@@ -605,6 +613,14 @@ const (
 func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType string, mode ProxyMode, out OutputFormat, sourceURL string, animated bool) (*ProxyResult, error) {
 	if isVideoMIME(contentType) && isResizeMode(mode) {
 		if s.videoThumbClient == nil {
+			// **generator が配線されていないケースは既定 (長期) のまま。**
+			// 設定を見れば分かる事実で、generator の応答を分類できない
+			// ケースとは性質が違う。しかもここは既定構成の経路で、
+			// `mediaurl.go` が thumbnail 無しリモート動画を
+			// `/proxy/static.webp?url=<動画本体>` に回すため、キャッシュが
+			// 外れるたびに動画を最大 `maxDownload` (32MiB) 取り直す。
+			// mediaproxy に結果キャッシュは無く handler も `ETag` を出さない
+			// ので、再検証は必ずフルミスになる (#3035 レビュー 3 周目で実測)。
 			return makeDummyPNG(), nil
 		}
 		// GET mode は generator が sourceURL を fetch する前提なので、
@@ -612,13 +628,20 @@ func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType
 		// から到達できないことが多い。早期 fallback で無駄な RT を省く。
 		// POST mode では bytes 直送なので skip 不要。
 		if s.videoThumbMode == "get" && strings.HasPrefix(sourceURL, s.instanceURL+"/files/") {
+			// 同上 — 設定 (`videoThumbnailGeneratorMode`) だけで決まる。
 			return makeDummyPNG(), nil
 		}
 		frame, frameMIME, err := s.fetchVideoThumbnail(ctx, data, contentType, sourceURL)
 		if err != nil {
 			slog.Warn("mediaproxy: video thumbnail generator failed",
 				"url", sourceURL, "err", err)
-			return makeDummyPNG(), nil
+			// **どちらも `immutable` にはしない (#3035)。** 生成失敗の
+			// ダミーを「絶対に変わらない」と宣言すると、原因が直っても
+			// リロードで戻せなくなる。
+			if errors.Is(err, ErrVideoThumbnailTransient) {
+				return dummyPNGWithCache(transientDummyCacheControl), nil
+			}
+			return dummyPNGWithCache(permanentDummyCacheControl), nil
 		}
 		data = frame
 		contentType = frameMIME
@@ -1019,6 +1042,47 @@ func (s *Service) svgFallback(_ []byte) (*ProxyResult, error) {
 // DummyPNG returns a 1x1 transparent PNG for fallback responses.
 func DummyPNG() *ProxyResult {
 	return makeDummyPNG()
+}
+
+// 動画サムネイル生成に失敗してダミー画像へ倒れたときの `Cache-Control`
+// (#3035)。**成功応答の既定 (`max-age=31536000, immutable`) は使わない。**
+//
+// `immutable` は「この URL の中身は絶対に変わらない」という宣言で、
+// **ブラウザはリロードでも再検証しない**。生成失敗のダミーにそれを張ると、
+// 原因が直っても戻す手段が無くなる (URL を変えるしかない)。
+//
+// 一時障害 (generator の再起動 / 輻輳) は 5 分。**`no-store` にはしない** —
+// generator がハングしている間、動画 1 本ごとに毎回
+// `videoThumbnailTimeout` (30 秒) を踏みに行くことになる。
+//
+// **generator が応答したのに使えなかった**ときは 1 日。**mk-go にはその
+// 4xx が「動画のせい」か「設定のせい」かを判定する材料が無い** —
+// `videoThumbnailGenerator` の URL を打ち間違えれば generator 本体が 404 を
+// 返すし、前段に認証や WAF を置けば 401 / 403 が来る。どれも operator が
+// 直せば解消するので 1 年固定してはいけない。1 日は #3034 の恒久側
+// (取りに行けない URL / リモートの 404) と同じ値。
+//
+// **generator が配線されていない**ケース (未設定 / GET モードでローカル
+// `/files/` を skip) はここに含めない。設定を見れば分かる事実で、しかも
+// 既定構成の経路なので、短くするとリモート動画 1 本あたり最大 32MiB の
+// 取り直しが増える (`processAndReturn` のコメント参照)。後から generator を
+// 設定したときに古いダミーが残るのは承知のうえの取引。
+//
+// **pixel cap と `svgFallback` のダミーは対象外。** あちらは入力バイト列と
+// デプロイだけで決まり、operator の設定に依存しないので既定のままでよい。
+//
+// `internal/api/proxy` にも同じリテラルがあるが、パッケージを跨いで定数を
+// 共有はしない — レイヤが違い、それぞれ独立して動かせるほうがよい。
+const (
+	transientDummyCacheControl = "max-age=300"
+	permanentDummyCacheControl = "max-age=86400"
+)
+
+// dummyPNGWithCache returns the fallback image with an explicit cache policy.
+func dummyPNGWithCache(cacheControl string) *ProxyResult {
+	res := makeDummyPNG()
+	res.CacheControl = cacheControl
+	return res
 }
 
 func makeDummyPNG() *ProxyResult {

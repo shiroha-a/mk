@@ -199,7 +199,14 @@ func (h *Handler) Handle(c echo.Context) error {
 	}
 	defer result.Body.Close()
 
-	c.Response().Header().Set("Cache-Control", "max-age=31536000, immutable")
+	// **結果がキャッシュ方針を指定していればそれに従う (#3035)。**
+	// 生成に失敗してダミー画像へ倒れた応答は 200 で返るが、原因が一時的な
+	// ものを `immutable` で 1 年固定すると、相手が復旧しても直らない。
+	cacheControl := "max-age=31536000, immutable"
+	if result.CacheControl != "" {
+		cacheControl = result.CacheControl
+	}
+	c.Response().Header().Set("Cache-Control", cacheControl)
 	c.Response().Header().Set("Content-Type", result.ContentType)
 	// Output format depends on the client's Accept header (image/avif → AVIF,
 	// otherwise WebP), so shared caches MUST key on Accept to avoid serving

@@ -23,7 +23,8 @@ import (
 
 // stubProxy returns a fixed error (or a PNG) from Fetch.
 type stubProxy struct {
-	fetchErr error
+	fetchErr     error
+	cacheControl string
 }
 
 func (s stubProxy) Authorize(context.Context, string, string) error { return nil }
@@ -32,7 +33,9 @@ func (s stubProxy) Fetch(context.Context, string, mediaproxy.ProxyMode, mediapro
 	if s.fetchErr != nil {
 		return nil, s.fetchErr
 	}
-	return mediaproxy.DummyPNG(), nil
+	res := mediaproxy.DummyPNG()
+	res.CacheControl = s.cacheControl
+	return res, nil
 }
 
 func stubHandler(t *testing.T, fetchErr error) (*Handler, *echo.Echo) {
@@ -243,6 +246,40 @@ func TestHandle_CancelDuringFetchWinsOverUpstreamUnavailable(t *testing.T) {
 
 	assert.Equal(t, statusClientClosedRequest, rec.Code)
 	assert.NotEqual(t, http.StatusBadGateway, rec.Code)
+}
+
+// 結果が指定したキャッシュ方針を handler が尊重すること (#3035)。
+//
+// **service 側だけ直しても wire には出ない。** #3034 では実際にそれをやって、
+// service に写像を足したのに handler に受け口が無く、doc の主張と食い違う
+// 状態を作った。ここは必ず handler まで通して見る。
+func TestHandle_ResultCacheControlOverridesDefault(t *testing.T) {
+	h, e := stubHandler(t, nil)
+	h.service = stubProxy{cacheControl: "max-age=300"}
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/preview.webp?preview=1&url=https%3A%2F%2Fremote.example%2Fv.mp4",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "max-age=300", rec.Header().Get("Cache-Control"))
+	assert.NotContains(t, rec.Header().Get("Cache-Control"), "immutable",
+		"一時的な失敗のダミー画像を 1 年 immutable で配っている")
+}
+
+// 指定が無ければ従来どおり 1 年 immutable。
+//
+// **片側だけ見ると回帰に気付けない。** 「常に短期」にする実装は上のテスト
+// だけなら緑で通るが、正常な画像まで 5 分ごとに取り直すことになる。
+func TestHandle_DefaultCacheControlIsUnchanged(t *testing.T) {
+	h, e := stubHandler(t, nil)
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "max-age=31536000, immutable", rec.Header().Get("Cache-Control"))
 }
 
 // Service が MediaProxy を満たしていること。
