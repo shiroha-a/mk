@@ -87,6 +87,39 @@ func (h *Handler) Handle(c echo.Context) error {
 	// 認可: HMAC署名 or allowlist
 	sig := c.QueryParam("sig")
 	if err := h.service.Authorize(c.Request().Context(), rawURL, sig); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return c.NoContent(statusClientClosedRequest)
+		}
+		if errors.Is(err, mediaproxy.ErrAllowlistUnavailable) {
+			// **403 + 1 日にしない (#3036)。** 許可されていないのではなく
+			// 判定できなかっただけなので、DB が戻れば同じ URL が通る。
+			// 1 日キャッシュすると、瞬断のあいだに見られた**すべての**
+			// プロキシ URL が 1 日壊れる。
+			//
+			// **キャッシュは `no-store`。#3032 の過負荷と同じバケツ** で、
+			// #3034 / #3035 の `max-age=300` とは分ける。分ける基準は
+			// 「復旧までの長さ」と「再取得のコスト」:
+			//
+			//   - #3034 は**他人のサーバー**が分単位で落ちている状態で、
+			//     再取得は最大 32MiB のダウンロード。叩き続けないために寝かせる
+			//   - こちらは**自分の DB** の瞬断で、返すのは本文 0 の 503。
+			//     落ちている DB へのクエリは即座に失敗するので、寝かせて
+			//     守る相手がいない。逆に 5 分寝かせると、**DB が 3 秒で
+			//     戻ってもその 3 秒に見られた全 URL が 5 分壊れたまま**になる
+			//
+			// `max-age` を付けると `Retry-After` が不活性になる点でも
+			// 整合しない (RFC 9111 §3 は明示 `max-age` のある 503 を保存可能
+			// とするので、1 秒後に来た要求が残り 299 秒の同じ 503 を受け取る)。
+			//
+			// **ログは service 側で 1 行出している。** ここで重ねると DB 障害中に
+			// 全リクエストが 2 行になる。
+			if c.QueryParam("fallback") != "" {
+				return h.serveFallbackWithCache(c, "no-store")
+			}
+			c.Response().Header().Set("Retry-After", "1")
+			c.Response().Header().Set("Cache-Control", "no-store")
+			return c.NoContent(http.StatusServiceUnavailable)
+		}
 		if c.QueryParam("fallback") != "" {
 			return h.serveFallback(c)
 		}

@@ -24,10 +24,11 @@ import (
 // stubProxy returns a fixed error (or a PNG) from Fetch.
 type stubProxy struct {
 	fetchErr     error
+	authErr      error
 	cacheControl string
 }
 
-func (s stubProxy) Authorize(context.Context, string, string) error { return nil }
+func (s stubProxy) Authorize(context.Context, string, string) error { return s.authErr }
 
 func (s stubProxy) Fetch(context.Context, string, mediaproxy.ProxyMode, mediaproxy.OutputFormat, bool) (*mediaproxy.ProxyResult, error) {
 	if s.fetchErr != nil {
@@ -280,6 +281,72 @@ func TestHandle_DefaultCacheControlIsUnchanged(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, rec.Code)
 	assert.Equal(t, "max-age=31536000, immutable", rec.Header().Get("Cache-Control"))
+}
+
+// allowlist を引けなかったときは 403 + 1 日ではなく 503 + `no-store` (#3036)。
+//
+// **障害中の全 URL が同時に焼き付くのを防ぐ。** #3034 / #3035 と違い、
+// こちらは 1 URL ずつではなく `sig` を持たない要求すべてが一斉に落ちる。
+func TestHandle_AllowlistUnavailableIsServiceUnavailable(t *testing.T) {
+	h, e := stubHandler(t, nil)
+	h.service = stubProxy{authErr: fmt.Errorf("%w: db connection failed", mediaproxy.ErrAllowlistUnavailable)}
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusServiceUnavailable, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"),
+		"DB の瞬断を CDN に焼き付けている")
+	assert.Equal(t, "1", rec.Header().Get("Retry-After"))
+}
+
+// **#3034 の同型テストとは射程が違う。** あちらは fallback の応答が generic
+// 経路と完全に同じ (`max-age=300`) なので「分岐を丸ごと消す」変異を検出
+// できないが、こちらは `no-store` で generic (`max-age=300`) と違うため
+// **丸ごと削除も検出する** (実測)。#3034 のコメントをそのまま写さないこと。
+func TestHandle_AllowlistUnavailableWithFallbackIsNotStored(t *testing.T) {
+	h, e := stubHandler(t, nil)
+	h.service = stubProxy{authErr: fmt.Errorf("%w: db connection failed", mediaproxy.ErrAllowlistUnavailable)}
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&fallback=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "no-store", rec.Header().Get("Cache-Control"))
+}
+
+// 本当に許可されていないときは従来どおり 403 + 1 日。
+//
+// **既存テストとほぼ重複している。** 「認可の失敗を全部 503 にする」変異も
+// 「403 のまま `no-store` にする」変異も、既存の `TestHandle_UnauthorizedURL` /
+// `TestHandle_CacheHeaders` が落とす (実測)。それでも残すのは、#3036 が
+// **何を変えていないか**をこのファイル内で示すため — 503 側の 2 本と
+// 並べて読めないと、片方だけ見た人が「認可の失敗は全部 503」と読む。
+func TestHandle_UnauthorizedKeepsForbiddenAndLongCache(t *testing.T) {
+	h, e := stubHandler(t, nil)
+	h.service = stubProxy{authErr: mediaproxy.ErrUnauthorized}
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, http.StatusForbidden, rec.Code)
+	assert.Equal(t, "max-age=86400", rec.Header().Get("Cache-Control"))
+}
+
+// 認可中の離脱は 503 ではなく 499 (#3036)。
+func TestHandle_CancelDuringAuthorizeIsClientClosed(t *testing.T) {
+	h, e := stubHandler(t, nil)
+	h.service = stubProxy{authErr: fmt.Errorf("%w: %w", mediaproxy.ErrAllowlistUnavailable, context.Canceled)}
+
+	rec := doRequest(e, h, http.MethodGet,
+		"/proxy/image.webp?avatar=1&url=https%3A%2F%2Fremote.example%2Fa.png",
+		map[string]string{"User-Agent": "Mozilla/5.0"})
+
+	assert.Equal(t, statusClientClosedRequest, rec.Code)
+	assert.NotEqual(t, http.StatusServiceUnavailable, rec.Code)
 }
 
 // Service が MediaProxy を満たしていること。
