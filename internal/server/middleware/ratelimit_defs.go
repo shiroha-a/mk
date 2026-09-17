@@ -210,4 +210,30 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	"users/following":  {Duration: time.Minute, Max: 30},
 	"users/followers":  {Duration: time.Minute, Max: 30},
 	"users/lists/push": {Duration: time.Hour, Max: 30},
+
+	// ── 存在確認のオラクル (#3037) ──────────────────────
+	//
+	// **upstream には上限が無い** (`username/available.ts` /
+	// `email-address/available.ts` の `meta` に `limit` が無い) mk-go 独自の
+	// 追加。どちらも**未認証**で叩けて、返るのは「その名前 / その
+	// メールアドレスが使われているか」という真偽値そのもの。
+	//
+	// 止めたいのは 1 件ずつの確認ではなく**総当たり**:
+	//
+	//   - 辞書を回して「実在する利用者名」の一覧を作る (公開プロフィールを
+	//     持たない利用者も分かる)
+	//   - 手持ちのメールアドレス一覧を投げて「このサーバーに登録している人」を
+	//     割り出す。**メールアドレスは公開情報ではない**ので、こちらの方が重い
+	//
+	// **窓は短くする。** `users/following` と同じ理由 — 拒否したリクエストも
+	// 記録されるので、長い窓だと行儀の悪いクライアント 1 つで共有 IP の配下が
+	// その窓のあいだ登録フォームを使えなくなる。
+	//
+	// **登録フォームの実使用を上回る値にする。** 同梱フロントは利用者名の入力
+	// 中に debounce 付きで叩くので、1 分に数回から十数回。60 はそれを大きく
+	// 上回る一方、辞書攻撃の速度としては 1 分 60 語に落ちる。
+	//
+	// **未認証だけに絞らない** (`users/following` と同じ理由)。
+	"username/available":      {Duration: time.Minute, Max: 60},
+	"email-address/available": {Duration: time.Minute, Max: 60},
 }

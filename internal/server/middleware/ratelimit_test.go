@@ -1025,3 +1025,27 @@ func TestDefaultEndpointLimits_ApplicationEntryPoints(t *testing.T) {
 		})
 	}
 }
+
+// **存在確認のオラクルに上限を置く (#3037)。**
+//
+// `username/available` / `email-address/available` はどちらも未認証で叩けて、
+// 返るのは「使われているか」という真偽値そのもの。止めたいのは 1 件ずつの
+// 確認ではなく総当たり — 辞書を回して実在する利用者名の一覧を作る、手持ちの
+// メールアドレス一覧からこのサーバーの登録者を割り出す、といった使い方。
+//
+// upstream には上限が無い (`meta` に `limit` が無い) mk-go 独自の追加。
+func TestDefaultEndpointLimits_AvailabilityOracles(t *testing.T) {
+	for _, endpoint := range []string{"username/available", "email-address/available"} {
+		t.Run(endpoint, func(t *testing.T) {
+			limit, ok := DefaultEndpointLimits[endpoint]
+			require.True(t, ok, "%s に上限が無い", endpoint)
+			// **窓は短く。** 拒否も記録されるので、長い窓だと行儀の悪い
+			// クライアント 1 つで共有 IP の配下が登録フォームを使えなくなる。
+			assert.LessOrEqual(t, limit.Duration, time.Minute, "窓が長すぎる")
+			// **登録フォームの実使用は上回る。** 同梱フロントは入力中に
+			// debounce 付きで叩くので 1 分に十数回。
+			assert.GreaterOrEqual(t, limit.Max, 30, "登録フォームの実使用を下回っている")
+			assert.LessOrEqual(t, limit.Max, 120, "総当たりの速度として緩すぎる")
+		})
+	}
+}
