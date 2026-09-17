@@ -104,6 +104,35 @@ func (h *ssrMetaHandler) renderPlain(c echo.Context) error {
 	return h.render(c, shellOverrides{})
 }
 
+// renderBareShell serves the shell for content we decided not to describe
+// (未ログインには見せない設定、凍結、非公開 visibility など)。**リモート由来なら
+// noindex は残す** (#3030)。
+//
+// `userHead` は「リモートのプロフィールを自インスタンスの URL で検索結果に
+// 出さない」ために noindex を出すが、**中身を出さない分岐では `userHead` ごと
+// 落ちていた**ので、その意図が効いていなかった。`ugcVisibilityForVisitor` の
+// DB 既定は `local` なので、**既定の構成ではリモートの permalink が 1 つも
+// noindex になっていなかった** (実測)。
+//
+// ローカル側は対象外 — 未ログインに見せない構成 (`none`) では upstream 同様
+// robots.txt の `Disallow: /@` / `/notes` が受け持つ。
+func (h *ssrMetaHandler) renderBareShell(c echo.Context, remote bool) error {
+	return h.render(c, shellOverrides{NoIndex: remote})
+}
+
+// noteIsRemote reports whether the note came from another instance.
+//
+// **2 つのフィールドを見る (#3030)。** `note.User` は Preload 依存なので nil に
+// なりうる。`note.userHost` は作成時に `user.host` を写した値で原則欠けないが、
+// 片方だけを見る形にすると「中身を出さない分岐」と「完全に描く経路」で判定が
+// 変わる余地が残るので、両方見て経路差を作らない。
+func noteIsRemote(note *model.Note) bool {
+	if note == nil {
+		return false
+	}
+	return remoteHost(note.UserHost) || (note.User != nil && remoteHost(note.User.Host))
+}
+
 // metaTag builds a `<meta name=... content=...>` line. content は必ず escape する
 // (username / note text は攻撃者が持ち込める)。
 func metaTag(name, content string) string {
@@ -129,6 +158,12 @@ const (
 	ssrArchiveCacheControl   = "public, max-age=3600"
 	ssrPrivateCacheControl   = "private, max-age=0, must-revalidate"
 )
+
+// remoteHost reports whether host identifies another instance.
+// nil / 空文字はローカル (`user.host` / `note.userHost` の DB 表現)。
+func remoteHost(host *string) bool {
+	return host != nil && *host != ""
+}
 
 // robotsTagsFor returns the X-Robots-Tag values upstream emits for a profile.
 // meta 版 (userHead) と両方出すのが upstream の挙動で、ヘッダー版は HTML を
@@ -160,6 +195,12 @@ func (h *ssrMetaHandler) profileOf(userID string) *model.UserProfile {
 // forceNoindex はページ側の追加条件 (note.tsx の isRenote) を渡す。
 func userHead(u *model.User, p *model.UserProfile, forceNoindex bool) string {
 	if u == nil {
+		// user が埋まっていなくても、呼び出し側が noindex を要求しているなら
+		// それだけは出す (#3030)。`note.User` は Preload 依存なので、nil の
+		// ときだけ remote の noindex が落ちる、という経路差を作らない。
+		if forceNoindex {
+			return metaTag("robots", "noindex")
+		}
 		return ""
 	}
 	var sb strings.Builder
@@ -167,8 +208,7 @@ func userHead(u *model.User, p *model.UserProfile, forceNoindex bool) string {
 	sb.WriteString(metaTag("misskey:user-id", u.ID))
 	// remote user は自インスタンスの URL を正規とみなされないよう noindex。
 	// upstream user.tsx の `props.user.host != null` 分岐と同じ。
-	remote := u.Host != nil && *u.Host != ""
-	if forceNoindex || remote || (p != nil && p.NoCrawle) {
+	if forceNoindex || remoteHost(u.Host) || (p != nil && p.NoCrawle) {
 		sb.WriteString(metaTag("robots", "noindex"))
 	}
 	// 学習利用の拒否。upstream と同じく noimageai と noai を並べる。
@@ -510,29 +550,43 @@ func (h *ssrMetaHandler) lookupUserByAcct(acct string) *model.User {
 	if h.userRepo == nil || acct == "" {
 		return nil
 	}
-	name, host, _ := strings.Cut(strings.TrimPrefix(acct, "@"), "@")
+	name, _, _ := strings.Cut(strings.TrimPrefix(acct, "@"), "@")
 	if name == "" {
 		return nil
 	}
-	var hostPtr *string
-	// 自ホスト宛ての acct は local 扱いにする (upstream の Acct.parse と同じ)。
-	if host != "" && !strings.EqualFold(host, h.cfg.Host) {
-		hostPtr = &host
-	}
-	u, err := h.userRepo.FindByUsernameLower(strings.ToLower(name), hostPtr)
+	u, err := h.userRepo.FindByUsernameLower(strings.ToLower(name), h.acctHost(acct))
 	if err != nil {
 		return nil
 	}
 	return u
 }
 
+// acctHost returns the host part of an acct, or nil when it names a local user.
+// 自ホスト宛ての acct は local 扱いにする (upstream の Acct.parse と同じ)。
+//
+// **DB に行が無くても判定できるのが要点 (#3030)。** acct 文字列だけで
+// 「よそのインスタンスの誰か」と分かるので、まだ解決していないリモート
+// ユーザーでも noindex を落とさずに済む。`ugcVisibilityForVisitor` が `all` の
+// 構成では、SPA が初回アクセスでリモートを解決してプロフィールを描くため、
+// ここを素通しにすると**初回のクロールだけ index される**窓ができる。
+func (h *ssrMetaHandler) acctHost(acct string) *string {
+	_, host, _ := strings.Cut(strings.TrimPrefix(acct, "@"), "@")
+	if host == "" || strings.EqualFold(host, h.cfg.Host) {
+		return nil
+	}
+	return &host
+}
+
 // UserPage serves `/@:acct` and its sub paths (`/@:acct/notes` 等)。
 func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 	u := h.lookupUserByAcct(c.Param("acct"))
+	if u == nil {
+		return h.renderBareShell(c, remoteHost(h.acctHost(c.Param("acct"))))
+	}
 	// 凍結ユーザーは upstream の検索条件 (isSuspended: false) で対象外。
 	// 未ログイン訪問者への UGC 露出も meta の生成前に判定する (#2533)。
-	if u == nil || u.IsSuspended || !h.visibleToVisitor(u.Host) {
-		return h.renderPlain(c)
+	if u.IsSuspended || !h.visibleToVisitor(u.Host) {
+		return h.renderBareShell(c, remoteHost(u.Host))
 	}
 	p := h.profileOf(u.ID)
 	og := propertyTag("og:type", "blog") +
@@ -570,8 +624,11 @@ func (h *ssrMetaHandler) UserPage(c echo.Context) error {
 // UserPagePage serves `/@:acct/pages/:page`.
 func (h *ssrMetaHandler) UserPagePage(c echo.Context) error {
 	u := h.lookupUserByAcct(c.Param("acct"))
-	if u == nil || u.IsSuspended || !h.visibleToVisitor(u.Host) || h.pageRepo == nil {
-		return h.renderPlain(c)
+	if u == nil {
+		return h.renderBareShell(c, remoteHost(h.acctHost(c.Param("acct"))))
+	}
+	if u.IsSuspended || !h.visibleToVisitor(u.Host) || h.pageRepo == nil {
+		return h.renderBareShell(c, remoteHost(u.Host))
 	}
 	p := h.profileOf(u.ID)
 	page, err := h.pageRepo.FindByUserAndName(u.ID, c.Param("page"))
@@ -621,15 +678,15 @@ func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 	// リンク展開に非公開投稿の本文・著者を渡さないため (upstream も
 	// public 以外は SSR しない)。
 	if note.Visibility != model.NoteVisibilityPublic {
-		return h.renderPlain(c)
+		return h.renderBareShell(c, noteIsRemote(note))
 	}
 	// 投稿者が「ログインしないと見せない」設定なら meta も出さない。
 	// upstream note ハンドラの `!note.user.requireSigninToViewContents` (#2533)。
 	if note.User != nil && note.User.RequireSigninToViewContents {
-		return h.renderPlain(c)
+		return h.renderBareShell(c, noteIsRemote(note))
 	}
 	if !h.visibleToVisitor(note.UserHost) {
-		return h.renderPlain(c)
+		return h.renderBareShell(c, noteIsRemote(note))
 	}
 	title := ""
 	if note.User != nil {
@@ -651,7 +708,10 @@ func (h *ssrMetaHandler) NotePage(c echo.Context) error {
 	}
 	// upstream note.tsx は isRenotePacked (= renoteId != null) で noindex。
 	// 引用リノートも対象で、他人の投稿を写した URL を検索対象にしない。
-	head := userHead(note.User, profile, note.RenoteID != nil) +
+	// リモート判定は bail-out 側と同じ `noteIsRemote` に揃える (#3030)。
+	// `userHead` が見る `note.User.Host` だけだと、`User` が nil のときに
+	// remote の noindex が落ちる。
+	head := userHead(note.User, profile, note.RenoteID != nil || noteIsRemote(note)) +
 		metaTag("misskey:note-id", note.ID) +
 		h.noteAlternateLinks(note)
 	return h.render(c, shellOverrides{
@@ -761,9 +821,15 @@ func (h *ssrMetaHandler) GalleryPage(c echo.Context) error {
 	})
 }
 
-// NoIndexPage serves the pages upstream renders with `{ noindex: true }`
-// (`/tags/:tag` と `/user-tags/:tag`)。中身は SPA が描くので shell のままだが、
-// 無限に増えるタグの組み合わせを検索対象にしない。
+// NoIndexPage serves the shell with `noindex`, for pages that have no business
+// being in search results. 中身は SPA が描くので shell のままでよく、出したい
+// のは `<meta name="robots" content="noindex">` だけ。
+//
+// 現在の利用者:
+//   - `/tags/:tag` / `/user-tags/:tag` — upstream も `{ noindex: true }` で描く。
+//     タグの組み合わせは無限に増える
+//   - `/instance-info/:host` — **upstream は SSR していない** (#3030)。自鯖の
+//     情報ではないものを検索結果に出す意味が無く、連合先の数だけ URL が増える
 func (h *ssrMetaHandler) NoIndexPage(c echo.Context) error {
 	return h.render(c, shellOverrides{NoIndex: true})
 }

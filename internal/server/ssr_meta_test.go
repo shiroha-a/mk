@@ -1011,3 +1011,158 @@ func TestSSRPages_HTTPHeaders(t *testing.T) {
 		assert.Equal(t, "public, max-age=30", rec.Header().Get("Cache-Control"))
 	})
 }
+
+// リモート由来の permalink は、**中身を出さない分岐でも noindex を残す** (#3030)。
+// 自インスタンスの URL でリモートのプロフィールやノートが検索結果に出るのを
+// 止める。`userHead` は元からその意図で noindex を出していたが、`renderPlain` へ
+// 落ちる分岐では `userHead` ごと消えていた。**`ugcVisibilityForVisitor` の DB
+// 既定は 'local'** なので、**既定の構成ではリモートの permalink が 1 つも
+// noindex になっていなかった**。
+func TestSSRRemoteContentStaysNoindexWhenHidden(t *testing.T) {
+	const noindex = `<meta name="robots" content="noindex">`
+	host := "remote.example"
+
+	setup := func(t *testing.T, ugc string) (*ssrMetaHandler, *testutil.MockUserRepository, *testutil.MockNoteRepository) {
+		t.Helper()
+		h, userRepo, noteRepo := newSSRTestHandler(t)
+		metaRepo := testutil.NewMockMetaRepository()
+		metaRepo.Meta = &model.Meta{ID: "x", UgcVisibilityForVisitor: ugc}
+		h.metaRepo = metaRepo
+
+		alice := ssrTestUser("u1", "alice")
+		userRepo.Users["u1"] = alice
+		bob := ssrTestUser("u2", "bob")
+		bob.Host = &host
+		userRepo.Users["u2"] = bob
+
+		localText, remoteText := "local note", "remote note"
+		noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "u1", User: alice, Text: &localText,
+			Visibility: model.NoteVisibilityPublic,
+		}
+		noteRepo.Notes["n2"] = &model.Note{
+			ID: "n2", UserID: "u2", User: bob, Text: &remoteText, UserHost: &host,
+			Visibility: model.NoteVisibilityPublic,
+		}
+		return h, userRepo, noteRepo
+	}
+
+	// 見せる / 見せないの設定に関わらずリモートは noindex。'all' は本文も出す
+	// 経路なので userHead 側、それ以外は bail-out 側が出す。
+	for _, ugc := range []string{"", "local", "all", "none"} {
+		t.Run("remote user ugc="+ugc, func(t *testing.T) {
+			h, _, _ := setup(t, ugc)
+			got := ssrGet(t, h.UserPage, "/@bob@remote.example",
+				map[string]string{"acct": "bob@remote.example"}).Body.String()
+			assert.Contains(t, got, noindex, "リモートのプロフィールが検索対象のまま")
+		})
+		t.Run("remote note ugc="+ugc, func(t *testing.T) {
+			h, _, _ := setup(t, ugc)
+			got := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+			assert.Contains(t, got, noindex, "リモートのノートが検索対象のまま")
+		})
+	}
+
+	// **ローカルまで noindex にしない。** 未ログインに見せない構成 (`none`) で
+	// ローカルを外すのは upstream 同様 robots.txt の役目で、ここで広げると
+	// 自鯖のページが検索から消える。
+	t.Run("local は none でも noindex にしない", func(t *testing.T) {
+		h, _, _ := setup(t, "none")
+		user := ssrGet(t, h.UserPage, "/@alice", map[string]string{"acct": "alice"}).Body.String()
+		assert.NotContains(t, user, noindex, "ローカルのプロフィールまで検索から外している")
+		note := ssrGet(t, h.NotePage, "/notes/n1", map[string]string{"id": "n1"}).Body.String()
+		assert.NotContains(t, note, noindex, "ローカルのノートまで検索から外している")
+	})
+
+	// 中身を出さない分岐は visitor gate だけではない。**どれもリモートなら
+	// noindex を残す**。
+	t.Run("凍結したリモートユーザー", func(t *testing.T) {
+		h, userRepo, _ := setup(t, "all")
+		u := userRepo.Users["u2"]
+		u.IsSuspended = true
+		got := ssrGet(t, h.UserPage, "/@bob@remote.example",
+			map[string]string{"acct": "bob@remote.example"}).Body.String()
+		assert.NotContains(t, got, "misskey:user-id", "凍結ユーザーの meta を出している")
+		assert.Contains(t, got, noindex, "凍結したリモートユーザーが検索対象のまま")
+	})
+
+	t.Run("非公開のリモートノート", func(t *testing.T) {
+		h, _, noteRepo := setup(t, "all")
+		noteRepo.Notes["n2"].Visibility = model.NoteVisibilityFollowers
+		got := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+		assert.NotContains(t, got, "misskey:note-id", "非公開ノートの meta を出している")
+		assert.Contains(t, got, noindex, "非公開のリモートノートが検索対象のまま")
+	})
+
+	t.Run("ログイン必須のリモートユーザーのノート", func(t *testing.T) {
+		h, userRepo, _ := setup(t, "all")
+		userRepo.Users["u2"].RequireSigninToViewContents = true
+		got := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+		assert.NotContains(t, got, "misskey:note-id", "ログイン必須ノートの meta を出している")
+		assert.Contains(t, got, noindex, "ログイン必須のリモートノートが検索対象のまま")
+	})
+
+	t.Run("リモートユーザーの Pages", func(t *testing.T) {
+		h, _, _ := setup(t, "local")
+		got := ssrGet(t, h.UserPagePage, "/@bob@remote.example/pages/x",
+			map[string]string{"acct": "bob@remote.example", "page": "x"}).Body.String()
+		assert.Contains(t, got, noindex, "リモートの Pages が検索対象のまま")
+	})
+
+	// **まだ解決していないリモートユーザーも noindex。** acct 文字列だけで
+	// 「よそのインスタンスの誰か」と分かる。`ugcVisibilityForVisitor` が `all` の
+	// 構成では SPA が初回アクセスでリモートを解決してプロフィールを描くので、
+	// ここを素通しにすると**初回のクロールだけ index される**窓ができる。
+	t.Run("未知のリモート acct", func(t *testing.T) {
+		for _, ugc := range []string{"local", "all"} {
+			h, _, _ := setup(t, ugc)
+			got := ssrGet(t, h.UserPage, "/@nobody@remote.example",
+				map[string]string{"acct": "nobody@remote.example"}).Body.String()
+			assert.Containsf(t, got, noindex,
+				"未解決のリモートユーザーが検索対象のまま (ugc=%s)", ugc)
+			page := ssrGet(t, h.UserPagePage, "/@nobody@remote.example/pages/x",
+				map[string]string{"acct": "nobody@remote.example", "page": "x"}).Body.String()
+			assert.Containsf(t, page, noindex,
+				"未解決のリモートユーザーの Pages が検索対象のまま (ugc=%s)", ugc)
+		}
+	})
+
+	// **自ホスト宛ての acct と単なる未知のローカル acct は据え置き。** ここまで
+	// noindex にすると、タイプミスした URL 経由で自鯖のページが検索から外れる。
+	t.Run("未知のローカル acct は据え置き", func(t *testing.T) {
+		h, _, _ := setup(t, "local")
+		for _, acct := range []string{"nobody", "nobody@example.test"} {
+			got := ssrGet(t, h.UserPage, "/@"+acct, map[string]string{"acct": acct}).Body.String()
+			assert.NotContainsf(t, got, noindex, "ローカル扱いの acct を noindex にしている (%s)", acct)
+		}
+	})
+
+	// **リモート判定は 2 つのフィールドを見る。** `note.userHost` は作成時に
+	// `user.host` を写した値、`note.User` は Preload 依存でどちらも単独では
+	// 欠けうる。片方だけを見ると「中身を出さない分岐」と「完全に描く経路」で
+	// 判定が変わる。
+	t.Run("片方のフィールドだけでリモートと分かるノート", func(t *testing.T) {
+		for _, tt := range []struct {
+			name string
+			mut  func(n *model.Note)
+		}{
+			{"User が埋まっていない", func(n *model.Note) { n.User = nil }},
+			{"userHost が埋まっていない", func(n *model.Note) { n.UserHost = nil }},
+		} {
+			t.Run(tt.name+"/完全に描く経路", func(t *testing.T) {
+				h, _, noteRepo := setup(t, "all")
+				tt.mut(noteRepo.Notes["n2"])
+				got := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+				assert.Contains(t, got, noindex, "リモートのノートが検索対象のまま")
+			})
+			t.Run(tt.name+"/中身を出さない分岐", func(t *testing.T) {
+				h, _, noteRepo := setup(t, "all")
+				tt.mut(noteRepo.Notes["n2"])
+				noteRepo.Notes["n2"].Visibility = model.NoteVisibilityFollowers
+				got := ssrGet(t, h.NotePage, "/notes/n2", map[string]string{"id": "n2"}).Body.String()
+				assert.NotContains(t, got, "misskey:note-id", "非公開ノートの meta を出している")
+				assert.Contains(t, got, noindex, "リモートのノートが検索対象のまま")
+			})
+		}
+	})
+}
