@@ -3250,13 +3250,21 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	emojiApplicationHandler.SetEmojiLookup(emojiRepo)
 	// **申請できる人をロールで絞る (#2934)。** canManageCustomEmojis を持つ人は
 	// 申請ではなく直接登録できるので、この policy は「登録はできないが頼める人」。
+	//
+	// **第三者アプリのトークンは入れない (#3037)。** この 3 つは mk-go 独自
+	// なので upstream の `kind` にあたる宣言が無く、`RequireScope` を配線
+	// できない。upstream は「`kind` が無く、かつ資格情報を要する endpoint」に
+	// 対し app token を一律で拒否する (`ApiCallService.ts:412-413`) ので、
+	// 同じ側に倒す。本体の他の kind 無し endpoint は `RequireSecure` で
+	// もっと強く塞がれており、抜けていたのはここだけ。
 	api.POST("/emoji-application/create", emojiApplicationHandler.Create,
 		middleware.RequireAuth(),
+		middleware.RejectAppToken(),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanRequestCustomEmojis))
 	// **一覧と取り下げは policy で塞がない。** 後から policy を外された人が
 	// 自分の申請を確認することも取り下げることもできなくなる。
-	api.POST("/emoji-application/list-mine", emojiApplicationHandler.ListMine, middleware.RequireAuth())
-	api.POST("/emoji-application/cancel", emojiApplicationHandler.Cancel, middleware.RequireAuth())
+	api.POST("/emoji-application/list-mine", emojiApplicationHandler.ListMine, middleware.RequireAuth(), middleware.RejectAppToken())
+	api.POST("/emoji-application/cancel", emojiApplicationHandler.Cancel, middleware.RequireAuth(), middleware.RejectAppToken())
 	adminHandler.SetEmojiApplicationReviewer(emojiApplicationService)
 	adminHandler.SetEmojiApplicationRepo(emojiApplicationRepo)
 	// 連合セルフ診断 (#2463)。migration 本数は起動時に数えず 0 を渡す
