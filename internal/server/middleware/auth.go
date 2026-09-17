@@ -301,6 +301,32 @@ func RequireScope(kind string) echo.MiddlewareFunc {
 	}
 }
 
+// RejectAppToken denies requests authenticated with a third-party app access
+// token. Native login tokens and unauthenticated requests pass through.
+//
+// **`kind` を宣言できない経路のための受け皿 (#3037)。** upstream の
+// `ApiCallService.ts:412-413` は「`kind` が無く、かつ資格情報を要する
+// endpoint」に対し app token を**一律で拒否**する。`RequireScope` が
+// 「`kind` があるとき」の半分で、こちらが残りの半分にあたる。
+//
+// プラグインのルートがこれを要る側になる — 本体は plugin が何を要求するか
+// 知らないので `kind` を決められず、`RequireScope` を配線できない。**gate を
+// 置かないと、`read:account` だけを許可した第三者アプリのトークンで
+// `POST /api/plugin/<name>/...` に到達できる**。プラグインが doc どおり
+// `req.IsModerator()` で守っていても scope は効かず、そこから
+// `ctx.API().AsUser(req.UserID())` (= 対象利用者の native token) 経由で
+// `i/change-password` のような endpoint へ抜けられる。
+func RejectAppToken() echo.MiddlewareFunc {
+	return func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if sc := GetAuthScope(c); sc != nil && sc.IsApp {
+				return c.JSON(http.StatusForbidden, apierr.PermissionDenied())
+			}
+			return next(c)
+		}
+	}
+}
+
 // RequireNotMoved rejects requests from accounts that have completed an
 // account migration (movedToUri set), mirroring upstream prohibitMoved
 // endpoints (ApiCallService.ts:368-377、#1562)。RequireAuth の後段に配線する

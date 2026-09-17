@@ -26,6 +26,7 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/shiroha-a/mk/plugin"
 	"gorm.io/datatypes"
@@ -1677,4 +1678,55 @@ func TestSetupPlugins_NoPeerWarnForLegacyRoutesRegistration(t *testing.T) {
 	}
 	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
 	assert.NotContains(t, buf.String(), "plugin peer:")
+}
+
+// **プラグインのルートに第三者アプリのトークンを入れない (#3037)。**
+//
+// プラグインのルートには upstream の `kind` にあたる宣言が無いので
+// `RequireScope` を配線できない。gate が無いと `read:account` だけを許可した
+// token で到達でき、プラグイン側は scope を見る手段を持たない。
+func TestSetupPlugins_RoutesRejectAppTokens(t *testing.T) {
+	reached := false
+	def := pluginDef("gameinfo", func(_ plugin.Context, r plugin.Router) error {
+		r.GET("/status", func(plugin.Request) (any, error) {
+			reached = true
+			return map[string]string{"ok": "yes"}, nil
+		})
+		return nil
+	}, nil)
+
+	s, api := newPluginTestServer(config.RoleServer)
+	// Authenticate() の代わりに scope だけ載せる (本物の middleware は
+	// token を DB で解決するので、ここでは結果だけを与える)。
+	var scope *middleware.AuthScope
+	s.echo.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			if scope != nil {
+				c.Set(string(middleware.AuthScopeContextKey), scope)
+			}
+			return next(c)
+		}
+	})
+	require.NoError(t, s.setupPlugins(api, []plugin.Definition{def}, noopStorage))
+
+	get := func() *httptest.ResponseRecorder {
+		reached = false
+		rec := httptest.NewRecorder()
+		s.echo.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/plugin/gameinfo/status", nil))
+		return rec
+	}
+
+	scope = &middleware.AuthScope{IsApp: true, Scopes: []string{"read:account"}}
+	rec := get()
+	assert.Equal(t, http.StatusForbidden, rec.Code, "app token がプラグインのルートに到達している")
+	assert.False(t, reached, "handler まで到達している")
+
+	// native token と未認証はこれまでどおり通す。
+	scope = &middleware.AuthScope{IsApp: false}
+	assert.Equal(t, http.StatusOK, get().Code)
+	assert.True(t, reached)
+
+	scope = nil
+	assert.Equal(t, http.StatusOK, get().Code)
+	assert.True(t, reached)
 }

@@ -1089,3 +1089,57 @@ func TestCredentialRequired_NoToken(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "CREDENTIAL_REQUIRED", resp["error"].(map[string]any)["code"])
 }
+
+// **`kind` を宣言できない経路では app token を一律で拒否する (#3037)。**
+// upstream `ApiCallService.ts:412-413` の後半 (`!ep.meta.kind &&
+// requireCredential`) に対応する。
+func TestRejectAppToken(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		scope    *AuthScope
+		wantCode int
+		wantNext bool
+	}{
+		{"app token は拒否", &AuthScope{IsApp: true, Scopes: []string{"read:account"}}, http.StatusForbidden, false},
+		// **scope を全部持っていても拒否する。** upstream も permission の
+		// 中身は見ずに「app token であること」だけで落とす。
+		{"scope を持つ app token も拒否", &AuthScope{IsApp: true, Scopes: []string{"write:account", "read:account"}}, http.StatusForbidden, false},
+		{"native token は通す", &AuthScope{IsApp: false}, http.StatusOK, true},
+		{"未認証は通す", nil, http.StatusOK, true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			e := echo.New()
+			req := httptest.NewRequest(http.MethodPost, "/api/plugin/x/y", nil)
+			rec := httptest.NewRecorder()
+			c := e.NewContext(req, rec)
+			if tt.scope != nil {
+				c.Set(string(AuthScopeContextKey), tt.scope)
+			}
+
+			called := false
+			h := RejectAppToken()(func(echo.Context) error {
+				called = true
+				return c.String(http.StatusOK, "ok")
+			})
+
+			require.NoError(t, h(c))
+			assert.Equal(t, tt.wantCode, rec.Code)
+			assert.Equal(t, tt.wantNext, called)
+		})
+	}
+}
+
+// 応答は `RequireScope` の拒否と同じ shape にする (クライアントが
+// insufficient_scope として扱えるように)。
+func TestRejectAppToken_ResponseShapeMatchesRequireScope(t *testing.T) {
+	body := func(mw echo.MiddlewareFunc) string {
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodPost, "/api/x", nil), rec)
+		c.Set(string(AuthScopeContextKey), &AuthScope{IsApp: true, Scopes: []string{"read:account"}})
+		require.NoError(t, mw(func(echo.Context) error { return nil })(c))
+		return rec.Body.String()
+	}
+
+	assert.JSONEq(t, body(RequireScope("write:account")), body(RejectAppToken()))
+}
