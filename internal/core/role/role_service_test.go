@@ -2254,11 +2254,34 @@ func TestCreate_RejectsSelfGrantableConditionalPrivilege(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			// 本人の操作では満たせない条件は運営者の明示的な判断。
-			name: "条件つき + 管理者 + createdMoreThan",
+			// **アカウントの年齢は barrier にならない (#3045)。** 攻撃者は
+			// いくらでも待てるし、ロールを作った時点で条件を満たす既存
+			// アカウントが全員その場で管理者になる。
+			name: "条件つき + 管理者 + createdMoreThan 1年",
 			opts: role.CreateOptions{
 				Target: model.RoleTargetConditional, IsAdministrator: true,
 				CondFormula: datatypes.JSON(`{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":31536000}]}`),
+			},
+			wantErr: true,
+		},
+		{
+			// **`not(createdLessThan)` は「`sec` 以上前に作られた」(#3045)。**
+			// #3044 は否定側に判定を当てておらず、「1 秒より前に
+			// 作られた全アカウントが管理者」がそのまま通っていた。
+			name: "条件つき + 管理者 + not(createdLessThan 1秒)",
+			opts: role.CreateOptions{
+				Target: model.RoleTargetConditional, IsAdministrator: true,
+				CondFormula: datatypes.JSON(`{"type":"not","value":{"type":"createdLessThan","sec":1}}`),
+			},
+			wantErr: true,
+		},
+		{
+			// 手動ロールを参照する形は残る。誰が配れるかは
+			// `RoleGrantsPrivilegeIndirectly` が別に見る。
+			name: "条件つき + 管理者 + roleAssignedTo",
+			opts: role.CreateOptions{
+				Target: model.RoleTargetConditional, IsAdministrator: true,
+				CondFormula: datatypes.JSON(`{"type":"and","values":[{"type":"isLocal"},{"type":"roleAssignedTo","roleId":"staff"}]}`),
 			},
 		},
 		{
@@ -2325,6 +2348,19 @@ func TestUpdateFields_RejectsSelfGrantableConditionalPrivilege(t *testing.T) {
 			name:   "無関係な更新",
 			stored: &model.Role{ID: "r", Target: model.RoleTargetConditional, CondFormula: datatypes.JSON(`{"type":"isCat"}`)},
 			fields: map[string]any{"name": "new"},
+		},
+		{
+			// **既存のロールは動き続けるが、編集はできなくなる (#3045)。**
+			// 評価側に guard は無いので黙って降格させない一方、更新は
+			// **更新後の姿**で判定するため名前だけの変更も弾かれる。
+			// upstream にこの検査は無いので、TS から引き継いだ DB には
+			// 「古参はモデレーター」のようなロールが現実に存在しうる。
+			// 逃げ道は権限を下ろす / 条件を差し替える / 手動に変える。
+			name: "特権つき条件ロールは無関係な更新も弾く",
+			stored: &model.Role{ID: "r", Target: model.RoleTargetConditional, IsModerator: true,
+				CondFormula: datatypes.JSON(`{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":31536000}]}`)},
+			fields:  map[string]any{"name": "new"},
+			wantErr: true,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {

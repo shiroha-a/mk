@@ -42,9 +42,14 @@ var (
 // checkConditionalPrivilege rejects a conditional role that grants
 // administrator / moderator on a condition the user controls.
 //
-// **本人が変えられない条件なら通す。** 「1 年以上前に作られたローカル
-// 利用者は全員モデレーター」のような設定は運営者の明示的な判断で、
-// 本人の操作では満たせない。
+// **攻撃者が条件を満たすアカウントを用意できないときだけ通す。** 実質的に
+// 残るのは `roleAssignedTo` で手動ロールを参照する形だけで、そこは
+// `RoleGrantsPrivilegeIndirectly` が「誰が配れるか」を別に見る。
+//
+// **アカウントの年齢は barrier に数えない (#3045)。** 攻撃者はいくらでも
+// 待てるので「1 年以上前に作られたローカル利用者は全員モデレーター」は
+// 運営者の判断ではなく「登録して 1 年待った人は全員モデレーター」になる。
+// 詳細は `condLeafAgeBased`。
 func checkConditionalPrivilege(target model.RoleTarget, condFormula, policies []byte, isModerator, isAdministrator bool) error {
 	if target != model.RoleTargetConditional {
 		return nil

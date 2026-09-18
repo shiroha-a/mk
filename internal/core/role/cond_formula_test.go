@@ -2,7 +2,12 @@ package role
 
 import (
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"math"
+	"math/rand"
+	"strconv"
 	"testing"
 	"time"
 
@@ -428,20 +433,33 @@ func TestCondDependsOnUserControlledValue(t *testing.T) {
 		// 攻撃者がアカウントを用意できない。
 		{"isRemote", `{"type":"isRemote"}`, false},
 		{"isSuspended", `{"type":"isSuspended"}`, false},
-		// **`createdMoreThan` は閾値で変わる (#3037 レビュー 3 周目)。**
-		// `evalCondAt` は `t.Before(now - sec)` なので、短い `sec` は
-		// 実質全アカウントに一致する。管理画面の既定値は 86400 (1 日)。
+		// **アカウントの年齢は barrier にならない (#3045)。** 攻撃者は
+		// いくらでも待てるので、どれだけ長い `sec` を置いても「登録して
+		// 待って取る」が成立する。#3044 は 30 日を境に通していたが、閾値は
+		// 境界ではなく取り違えの検出器でしかなかった。
 		{"createdMoreThan 1時間", `{"type":"createdMoreThan","sec":3600}`, true},
 		{"createdMoreThan 1日 (管理画面の既定)", `{"type":"createdMoreThan","sec":86400}`, true},
 		{"createdMoreThan 0秒", `{"type":"createdMoreThan","sec":0}`, true},
-		// 30 日以上は運営者の明示的な判断として通す。
-		{"createdMoreThan 1年", `{"type":"createdMoreThan","sec":31536000}`, false},
+		{"createdMoreThan 30日", `{"type":"createdMoreThan","sec":2592000}`, true},
+		{"createdMoreThan 1年", `{"type":"createdMoreThan","sec":31536000}`, true},
+		// **`sec=0` の `createdLessThan` だけは恒偽。** `t.After(now)` なので
+		// 誰にも一致しない = 特権が誰にも渡らない。これは閾値ではない。
 		{"createdLessThan 0秒", `{"type":"createdLessThan","sec":0}`, false},
+		{"createdLessThan 負数", `{"type":"createdLessThan","sec":-1}`, false},
+		{"createdLessThan sec 省略", `{"type":"createdLessThan"}`, false},
 		{"roleAssignedTo", `{"type":"roleAssignedTo","roleId":"r1"}`, false},
 		// **否定は向きが入れ替わる。** 新規アカウントは「1 年以上前に
 		// 作られて**いない**」「凍結されて**いない**」「そのロールを持って
 		// **いない**」をどれもそのまま満たす。
 		{"not createdMoreThan", `{"type":"not","value":{"type":"createdMoreThan","sec":31536000}}`, true},
+		// **`not(createdLessThan)` は「`sec` 以上前に作られた」(#3045)。**
+		// #3044 は `createdLessThan` の否定側を「満たせない」に固定しており、
+		// `not(createdLessThan 1秒)` = 1 秒より前に作られた全アカウント、が
+		// そのまま通っていた。極性ごとに当てないと片側が残る。
+		{"not createdLessThan 1秒", `{"type":"not","value":{"type":"createdLessThan","sec":1}}`, true},
+		{"not createdLessThan 1年", `{"type":"not","value":{"type":"createdLessThan","sec":31536000}}`, true},
+		// `sec=0` の `createdLessThan` は恒偽なので、その否定は恒真。
+		{"not createdLessThan 0秒 (恒真)", `{"type":"not","value":{"type":"createdLessThan","sec":0}}`, true},
 		{"not isSuspended", `{"type":"not","value":{"type":"isSuspended"}}`, true},
 		{"not roleAssignedTo", `{"type":"not","value":{"type":"roleAssignedTo","roleId":"r1"}}`, true},
 		{"not isLocal", `{"type":"not","value":{"type":"isLocal"}}`, false},
@@ -466,15 +484,18 @@ func TestCondDependsOnUserControlledValue(t *testing.T) {
 		{"not の中", `{"type":"not","value":{"type":"isCat"}}`, true},
 		{"深い入れ子", `{"type":"and","values":[{"type":"or","values":[{"type":"not","value":{"type":"isBot"}}]}]}`, true},
 		// **`and` は全部を満たす必要がある。** `isLocal` は登録すれば満たせるが
-		// 「1 年以上前に作られた」は用意できないので、この組み合わせは安全。
+		// `roleAssignedTo` は誰かが配る必要があるので、この組み合わせは安全。
 		// 「どこかに危ない葉があるか」で見るとこの正当な設定を弾く。
-		{"入れ子だが全部安全", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":31536000}]}`, false},
-		// **短い `sec` と組んでも安全にはならない。** 「登録して 1 秒経った
-		// ローカル利用者は全員」= 空の `and` と同じ恒真式。
-		{"and だが sec が短い", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":1}]}`, true},
+		{"入れ子だが全部安全", `{"type":"and","values":[{"type":"isLocal"},{"type":"roleAssignedTo","roleId":"staff"}]}`, false},
+		{"and に用意できない葉 (isRemote)", `{"type":"and","values":[{"type":"isCat"},{"type":"isRemote"}]}`, false},
+		// **年齢と組んでも安全にはならない (#3045)。** 「登録して N 年経った
+		// ローカル利用者は全員」で、待てば満たせる。
+		{"and に年齢条件 (1年)", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":31536000}]}`, true},
+		{"and に年齢条件 (1秒)", `{"type":"and","values":[{"type":"isLocal"},{"type":"createdMoreThan","sec":1}]}`, true},
+		{"and に not(createdLessThan)", `{"type":"and","values":[{"type":"isLocal"},{"type":"not","value":{"type":"createdLessThan","sec":1}}]}`, true},
 		// **`or` はどれか 1 つで足りる。**
-		{"or に危ない枝が 1 つ", `{"type":"or","values":[{"type":"createdMoreThan","sec":31536000},{"type":"isCat"}]}`, true},
-		{"or が全部安全", `{"type":"or","values":[{"type":"createdMoreThan","sec":31536000},{"type":"isRemote"}]}`, false},
+		{"or に危ない枝が 1 つ", `{"type":"or","values":[{"type":"roleAssignedTo","roleId":"staff"},{"type":"isCat"}]}`, true},
+		{"or が全部安全", `{"type":"or","values":[{"type":"roleAssignedTo","roleId":"staff"},{"type":"isRemote"}]}`, false},
 		// **知らない型は判定できないので拒否側に倒す。** 評価は false に
 		// 倒れるが、`not` で包まれると恒真式になる。
 		{"未知の type", `{"type":"somethingNew"}`, true},
@@ -517,4 +538,244 @@ func TestCondReferencedRoleIDs(t *testing.T) {
 			assert.Equal(t, tt.want, CondReferencedRoleIDs(f))
 		})
 	}
+}
+
+// attackerAccounts builds the accounts an attacker can actually get on this
+// instance: local, not suspended, holding no manually assigned role. Everything
+// the attacker does control is varied — the profile toggles, the three counters
+// (throwaway accounts can move them), and **the account's age, because the
+// attacker can wait** (#3045).
+func attackerAccounts(t *testing.T, g id.Generator, now time.Time) []*model.User {
+	t.Helper()
+	ages := []time.Duration{
+		0, time.Second, time.Hour, 24 * time.Hour,
+		30 * 24 * time.Hour, 365 * 24 * time.Hour, 5 * 365 * 24 * time.Hour,
+	}
+	counts := []int{0, 1, 10, 100}
+	var users []*model.User
+	for _, age := range ages {
+		for _, bot := range []bool{false, true} {
+			for _, cat := range []bool{false, true} {
+				for _, locked := range []bool{false, true} {
+					for _, explorable := range []bool{false, true} {
+						for _, followers := range counts {
+							for _, following := range counts {
+								for _, notes := range counts {
+									users = append(users, &model.User{
+										ID:             g.Generate(now.Add(-age)),
+										Host:           nil,
+										IsSuspended:    false,
+										IsBot:          bot,
+										IsCat:          cat,
+										IsLocked:       locked,
+										IsExplorable:   explorable,
+										FollowersCount: followers,
+										FollowingCount: following,
+										NotesCount:     notes,
+									})
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+	require.NotEmpty(t, users)
+	return users
+}
+
+// randomFormula builds one deterministic pseudo-random formula, including the
+// degenerate shapes (empty operand lists, `not` without an operand, unknown
+// types, non-positive `sec`) that the guard has to answer.
+func randomFormula(r *rand.Rand, depth int) CondFormula {
+	leaves := []CondFormulaType{
+		CondTypeIsLocal, CondTypeIsRemote, CondTypeIsSuspended, CondTypeIsLocked,
+		CondTypeIsBot, CondTypeIsCat, CondTypeIsExplorable,
+		CondTypeCreatedLessThan, CondTypeCreatedMoreThan,
+		CondTypeFollowersLessThanOrEq, CondTypeFollowersMoreThanOrEq,
+		CondTypeFollowingLessThanOrEq, CondTypeFollowingMoreThanOrEq,
+		CondTypeNotesLessThanOrEq, CondTypeNotesMoreThanOrEq,
+		CondTypeRoleAssignedTo, "somethingNew",
+	}
+	if depth > 0 && r.Intn(3) == 0 {
+		switch r.Intn(3) {
+		case 0, 1:
+			typ := CondTypeAnd
+			if r.Intn(2) == 0 {
+				typ = CondTypeOr
+			}
+			n := r.Intn(3) // 0 operand (= 恒真 / 恒偽) も作る
+			values := make([]CondFormula, 0, n)
+			for i := 0; i < n; i++ {
+				values = append(values, randomFormula(r, depth-1))
+			}
+			return CondFormula{Type: typ, Values: values}
+		default:
+			if r.Intn(8) == 0 {
+				return CondFormula{Type: CondTypeNot} // operand 無し
+			}
+			nested := randomFormula(r, depth-1)
+			return CondFormula{Type: CondTypeNot, Value: &nested}
+		}
+	}
+	leaf := CondFormula{Type: leaves[r.Intn(len(leaves))]}
+	leaf.Sec = []int64{-31536000, 0, 1, 86400, 2592000, 31536000}[r.Intn(6)]
+	leaf.NumValue = []int64{-1, 0, 10, 100}[r.Intn(4)]
+	if r.Intn(2) == 0 {
+		leaf.RoleID = "staff"
+	}
+	return leaf
+}
+
+// **「通す」と答えた式に、攻撃者が用意できるアカウントが 1 つでも一致しては
+// ならない (#3045)。** 判定 (`condSatisfiable`) と評価 (`evalCondAt`) は別々の
+// 再帰なので、葉 1 つの極性を取り違えるだけで両者がずれる — #3044 の
+// `createdLessThan` の否定側がまさにそれで、テーブル駆動のケースは
+// **極性ごとに 1 つずつ書かないと片側が無検証で残る**。
+//
+// 見るのは**片方向だけ** — 「拒否したが実は誰も満たせない」(偽陽性) は
+// 安全側なので許す。グリッドに居ないだけの witness もあるため、そちらを
+// 検査にすると正当な実装が落ちる。
+//
+// **だからテーブル駆動のケースと両輪で、どちらも要る。** 判定表 15 キー x
+// 2 極性 + `condLeafAgeBased` の 3 形 = 33 形を 1 つずつ反転した実測では、
+// ここだけだと 5 形 (`isLocal.negative` / `isRemote.positive` /
+// `isSuspended.positive` / `roleAssignedTo.positive` /
+// `ageBased.positive -> true` = どれも「通しすぎ」ではなく**拒否しすぎ**の
+// 方向。`ageBased.positive -> false` のほうはここが検出する) が緑のまま残り、
+// `TestCondDependsOnUserControlledValue` だけだと 12 形が残る。両方で 0。
+// **片方を「もう一方に包含される」と思って整理しないこと** — 拒否しすぎ側が
+// 無検証になると、`and(isLocal, roleAssignedTo staff)` のような正当な設定を
+// 弾く回帰が緑で通る。
+func TestGuardIsSoundAgainstAttackerReachableAccounts(t *testing.T) {
+	g, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	now := time.Now()
+	users := attackerAccounts(t, g, now)
+
+	// seed は固定する。ランダムだと失敗を手元で再現できず、required check が
+	// 不定期に赤くなる (#2795 と同じ理由)。
+	r := rand.New(rand.NewSource(3045))
+	const formulas = 3000
+	checked := 0
+	seenLeaves := map[CondFormulaType]bool{}
+	for i := 0; i < formulas; i++ {
+		f := randomFormula(r, 3)
+		collectLeafTypes(f, seenLeaves)
+		if CondDependsOnUserControlledValue(f) {
+			continue // 拒否側。ここでは何も主張しない
+		}
+		checked++
+		for _, u := range users {
+			if evalCondAt(u, nil, f, g, now) {
+				raw, _ := json.Marshal(f)
+				t.Fatalf("通すと判定した式に一致するアカウントがある: %s (user id=%s bot=%v cat=%v locked=%v explorable=%v followers=%d following=%d notes=%d)",
+					raw, u.ID, u.IsBot, u.IsCat, u.IsLocked, u.IsExplorable,
+					u.FollowersCount, u.FollowingCount, u.NotesCount)
+			}
+		}
+	}
+	// **「通す」と答えた式が 1 つも無いと、この検査は何も見ていない。**
+	// 生成器を壊したときに「違反 0 件」と区別が付かなくなるので下限を置く。
+	require.Greater(t, checked, 100, "生成した式のうち guard が通したもの")
+	// **件数だけでは足りない (実測)。** 葉を全部 `somethingNew` に潰しても、
+	// 空の `or` のような恒偽の合成が「通す」側に入るので件数は埋まる。
+	// 判定表を素通りしたまま緑になるので、**葉の型が出そろっているか**も見る。
+	leafTypes := 0
+	for _, typ := range declaredCondFormulaTypes(t) {
+		switch typ {
+		case CondTypeAnd, CondTypeOr, CondTypeNot:
+			continue
+		}
+		leafTypes++
+		assert.True(t, seenLeaves[typ], "生成した式に %s が 1 度も出ていない", typ)
+	}
+	// 抽出が空振りするとループが 0 回になり、**この 2 本目が無言で消える**。
+	// upstream の葉は 16 種。
+	require.GreaterOrEqual(t, leafTypes, 16, "cond_formula.go から拾った葉の型")
+}
+
+// collectLeafTypes records every non-composite type reachable in the formula.
+func collectLeafTypes(f CondFormula, into map[CondFormulaType]bool) {
+	switch f.Type {
+	case CondTypeAnd, CondTypeOr:
+		for _, v := range f.Values {
+			collectLeafTypes(v, into)
+		}
+	case CondTypeNot:
+		if f.Value != nil {
+			collectLeafTypes(*f.Value, into)
+		}
+	default:
+		into[f.Type] = true
+	}
+}
+
+// **宣言した type は全部、明示的に判定を決めておく (#3045)。**
+//
+// 決めていない type は `condSatisfiable` の fail-closed な既定 (「知らない型は
+// 拒否側」) に落ちる。拒否側なので危険側には倒れないが、**判定表からエントリが
+// 消えても外から見える挙動が変わらない**ので、テーブルを壊す変更が黙って通る。
+// #3045 で `createdMoreThan` を `condLeafWithThreshold` から表へ移したときに
+// 実際にそうなった (エントリを消しても他のテストは全て緑のままだった)。
+//
+// あわせて、合成 (`and` / `or` / `not`) は `condSatisfiable` 自身が畳むので
+// 表には**置かない**ことも固定する。置くと operand を畳まずに葉として答える。
+func TestEveryCondTypeHasAnExplicitDecision(t *testing.T) {
+	composite := map[CondFormulaType]bool{
+		CondTypeAnd: true, CondTypeOr: true, CondTypeNot: true,
+	}
+	types := declaredCondFormulaTypes(t)
+	// 抽出が空振りすると「検査していないのに緑」になる。upstream の
+	// `RoleService.evalCond` は 19 variants (葉 16 + and / or / not)。
+	require.GreaterOrEqual(t, len(types), 19, "cond_formula.go から拾った型")
+	for _, typ := range types {
+		t.Run(string(typ), func(t *testing.T) {
+			_, inTable := condLeafSatisfiability[typ]
+			_, inAgeBased := condLeafAgeBased(CondFormula{Type: typ})
+			if composite[typ] {
+				assert.False(t, inTable, "合成は condSatisfiable が畳むので表に置かない")
+				assert.False(t, inAgeBased, "合成は condSatisfiable が畳むので年齢側にも置かない")
+				return
+			}
+			assert.True(t, inTable != inAgeBased,
+				"葉はちょうど 1 つの経路で判定すること (表=%v / 年齢=%v)", inTable, inAgeBased)
+		})
+	}
+}
+
+// declaredCondFormulaTypes reads the CondFormulaType constants out of the
+// source so a type added upstream joins the check without anyone remembering
+// to update a second list.
+func declaredCondFormulaTypes(t *testing.T) []CondFormulaType {
+	t.Helper()
+	file, err := parser.ParseFile(token.NewFileSet(), "cond_formula.go", nil, 0)
+	require.NoError(t, err)
+	var out []CondFormulaType
+	for _, decl := range file.Decls {
+		gd, ok := decl.(*ast.GenDecl)
+		if !ok || gd.Tok != token.CONST {
+			continue
+		}
+		for _, spec := range gd.Specs {
+			vs, ok := spec.(*ast.ValueSpec)
+			if !ok {
+				continue
+			}
+			if ident, ok := vs.Type.(*ast.Ident); !ok || ident.Name != "CondFormulaType" {
+				continue
+			}
+			for _, v := range vs.Values {
+				lit, ok := v.(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+				unquoted, err := strconv.Unquote(lit.Value)
+				require.NoError(t, err)
+				out = append(out, CondFormulaType(unquoted))
+			}
+		}
+	}
+	return out
 }

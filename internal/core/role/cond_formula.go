@@ -9,7 +9,8 @@ import (
 )
 
 // CondFormulaType enumerates the supported `Role.condFormula.type` values
-// (upstream Misskey TS RoleService.evalCond, 17 variants). Documented as
+// (upstream Misskey TS RoleService.evalCond, 19 variants: 16 leaves plus
+// and / or / not). Documented as
 // strings to match the on-disk JSON shape exactly.
 type CondFormulaType string
 
@@ -218,20 +219,34 @@ func evalCondAt(user *model.User, assignedRoles []*model.Role, formula CondFormu
 // 管理者」、`createdLessThan` は「今から登録した人が管理者」になる。
 // `isCat` と同じ危険度なのに、1 周目の集合はどちらも通していた。
 //
-// **否定側を別に持つのが要点。** `not(createdMoreThan 1年)` は「作られて
-// 1 年未満」= 登録するだけで満たせるが、`createdMoreThan` 自体は満たせない。
-// 1 つの集合で「危ないかどうか」を決めると、この非対称を表せない。
+// **否定側を別に持つのが要点。** `isLocal` は登録するだけで満たせるが、その
+// 否定 (= `isRemote`) を満たす利用者はこのインスタンスに**サインインできない**
+// ので、ロールの権限を API で使えない (行そのものは連合で作られる。「作れない」
+// ではなく「使えない」が根拠)。`isSuspended` / `roleAssignedTo` は逆向きに
+// 非対称で、条件そのものは他人の操作が要るのに否定は新規アカウントがそのまま
+// 満たす。1 つの集合で「危ないかどうか」を決めると、この非対称を表せない。
 type condSatisfiability struct {
 	positive bool // その条件そのものを満たせるか
 	negative bool // その条件の否定を満たせるか
 }
 
-// condLeafSatisfiability is the table for every non-composite type.
+// condLeafSatisfiability is the table for the leaves whose answer does not
+// depend on the formula's own numbers. `createdLessThan` is the one exception
+// and lives in `condLeafAgeBased`; `and` / `or` / `not` are folded by
+// `condSatisfiable` itself and must **not** be listed here (listing one would
+// answer it as a leaf instead of folding its operands).
 var condLeafSatisfiability = map[CondFormulaType]condSatisfiability{
 	// 登録するだけで満たせる。
 	CondTypeIsLocal: {positive: true, negative: false},
-	// `createdLessThan` / `createdMoreThan` は閾値で変わるので
-	// `condLeafWithThreshold` が別に判定する (この表には置かない)。
+	// `createdLessThan` は `sec` で恒偽になりうるので `condLeafAgeBased` が
+	// 別に判定する (この表には置かない)。`createdMoreThan` は極性にかかわらず
+	// 満たせるので、こちらは表に置く。
+	//
+	// **この行を消しても外から見える挙動は変わらない。** 未知の型は下の
+	// fail-closed な既定で同じ `true` になるため。明示しているのは
+	// (a) 理由を残すため、(b) 既定を将来変えたときに巻き添えにしないため、で、
+	// 消えたことは `TestEveryCondTypeHasAnExplicitDecision` が検出する。
+	CondTypeCreatedMoreThan: {positive: true, negative: true},
 	// リモート利用者はこのインスタンスにサインインできないので、ロールの
 	// 権限を API で使えない。逆に「リモートでない」は登録すれば満たせる。
 	CondTypeIsRemote: {positive: false, negative: true},
@@ -272,9 +287,13 @@ func CondDependsOnUserControlledValue(f CondFormula) bool {
 // condSatisfiable folds the formula, carrying whether we are under a negation.
 //
 // **and / or は畳み方が違う。** `and` は全部を満たす必要があるので
-// `and(isLocal, createdMoreThan 1年)` は満たせない (登録しただけの
-// アカウントは 1 年前に作られていない)。素朴に「どこかに危ない葉があるか」で
-// 見ると、この正当な設定を弾いてしまう。否定の下では De Morgan で入れ替わる。
+// `and(isLocal, roleAssignedTo staff)` は満たせない (`staff` は誰かが配る
+// 必要がある)。素朴に「どこかに危ない葉があるか」で見ると、この正当な設定を
+// 弾いてしまう。否定の下では De Morgan で入れ替わる。
+//
+// **年齢を組み合わせても安全にはならない (#3045)。** `and(isLocal,
+// createdMoreThan 1年)` は #3044 まで「満たせない」側だったが、待てば満たせる
+// ので今は拒否する。`condLeafAgeBased` を参照。
 func condSatisfiable(f CondFormula, negated bool) bool {
 	switch f.Type {
 	case CondTypeNot:
@@ -304,7 +323,7 @@ func condSatisfiable(f CondFormula, negated bool) bool {
 		// 肯定の `or` はどれか 1 つ。否定の下では `and(not ...)` になる。
 		return foldOperands(f.Values, negated, !negated)
 	}
-	if sat, ok := condLeafWithThreshold(f); ok {
+	if sat, ok := condLeafAgeBased(f); ok {
 		if negated {
 			return sat.negative
 		}
@@ -341,40 +360,45 @@ func foldOperands(values []CondFormula, negated, anyWins bool) bool {
 	return true
 }
 
-// deliberateAgeWindow is how old an account must be required to be before
-// `createdMoreThan` counts as a deliberate trust signal rather than a footgun.
+// condLeafAgeBased answers for `createdLessThan`, whose satisfiability depends
+// on `sec`, reporting ok=false for every other type.
 //
-// **待てば満たせるので、閾値を見ないと判定できない (#3037 レビュー 3 周目)。**
-// 2 周目は `createdMoreThan` を一律「攻撃者は用意できない」に置いたが、
-// `evalCondAt` は `t.Before(now - sec)` なので **`sec` が小さいと全アカウントに
-// 一致する** — `sec=0` なら登録した直後の利用者まで含む。管理画面の既定値は
-// `86400` (1 日) で、`and(isLocal, createdMoreThan 86400)` + `isAdministrator`
-// は「登録して 1 日経ったローカル利用者は全員管理者」になる。
+// **アカウントの年齢は barrier にならない (#3045)。** 攻撃者はいくらでも
+// 待てるので、「作られて `sec` より前」はどれだけ長い `sec` を置いても
+// 「登録して待って取る」で満たせる。#3044 は 30 日を境に「運営者の明示的な
+// 判断」として通していたが、閾値は境界ではなく**取り違えの検出器**でしかなく、
+// しかも取り違えていない設定と区別できていなかった。
 //
-// **これは判断であって境界ではない。** 攻撃者はいくらでも待てるので、どの
-// 閾値を置いても「待って取る」は止まらない。ここで止めたいのは
-// 「条件を書いたつもりが実質全員に配っていた」という**取り違え**のほうで、
-// 30 日は「運営者が長期の信頼として意図的に置いた」と読める下限として選んだ。
-// 逆に言うと、30 日以上を指定した設定は運営者の明示的な判断として通す
-// (doc に書いた「1 年以上前のローカル利用者はモデレーター」がこれ)。
-const deliberateAgeWindow = 30 * 24 * 60 * 60
-
-// condLeafWithThreshold answers for the leaves whose satisfiability depends on
-// their threshold, reporting ok=false for every other type.
-func condLeafWithThreshold(f CondFormula) (condSatisfiability, bool) {
-	switch f.Type {
-	case CondTypeCreatedLessThan:
-		// 「作られて `sec` 未満」。新規アカウントは `sec > 0` なら満たす。
-		// 否定 (`sec` 以上前に作られた) は古いアカウントが要る。
-		return condSatisfiability{positive: f.Sec > 0, negative: false}, true
-	case CondTypeCreatedMoreThan:
-		// 「作られて `sec` より後」。`sec` が短ければ待つまでもなく満たす。
-		return condSatisfiability{
-			positive: f.Sec < deliberateAgeWindow,
-			negative: true,
-		}, true
+// **待つ必要すらない場合がある。** 条件つきロールは作成した時点で全利用者へ
+// 再評価されるので、条件を満たす既存アカウントが**その場で全員**特権を得る。
+// 休眠・捨て・乗っ取られた古いアカウントも含むので、運営者が選んだ相手とは
+// 限らない。しかも条件つきロールは `role_assignment` 行を持たないため、
+// **誰が得たのかを管理画面から見る手段が無い** (`admin/roles/users` にも
+// `roles/assignment-show` にも出ない)。
+//
+// だから `createdMoreThan` は極性にかかわらず「満たせる」(表の側)。ここに
+// 残るのは `createdLessThan` だけで、判定が `sec` を見るのは閾値ではなく
+// **恒偽の検出** — `sec` が正でないときの `createdLessThan` は
+// `t.After(now - sec)` の基準が現在以降になるので誰にも一致しない
+// (`sec` の省略 = 0 と負数も同じ。`condFormula` は任意の JSON object なので
+// 負数は実際に送れる)。
+//
+// 年齢で特権を配りたい運営者には手動ロール + `roleAssignedTo` の経路が残る。
+func condLeafAgeBased(f CondFormula) (condSatisfiability, bool) {
+	if f.Type != CondTypeCreatedLessThan {
+		return condSatisfiability{}, false
 	}
-	return condSatisfiability{}, false
+	// 「作られて `sec` 未満」。新規アカウントは `sec > 0` なら満たす。
+	// **否定は「`sec` 以上前に作られた」**なので、`createdMoreThan` と同じく
+	// 待てば満たせる (#3045)。#3044 はここを false に固定しており、
+	// `not(createdLessThan sec=1)` に `isAdministrator` を立てたロールが
+	// **1 秒より前に作られた全アカウントに一致する**まま通っていた。
+	//
+	// 否定と `createdMoreThan` が食い違うのは境界のちょうど 1 点だけ
+	// (`createdLessThan` は `t.After`、`createdMoreThan` は `t.Before` なので、
+	// `t == now - sec` では否定が true / `createdMoreThan` が false)。
+	// 満たせるかの判定には効かない。
+	return condSatisfiability{positive: f.Sec > 0, negative: true}, true
 }
 
 // CondReferencedRoleIDs collects every roleId the formula keys off.

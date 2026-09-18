@@ -2402,11 +2402,14 @@ func (h *Handler) RolesCreate(c echo.Context) error {
 // **2 箇所で同じ文言にする。** 片方だけ直すと、管理者が create と update で
 // 違う説明を読むことになる。
 //
-// **判定の実態に合わせること (#3037 レビュー 3 周目)。** 2 周目で
-// `isLocal` / 短い `createdLessThan` / `createdMoreThan` / 恒真式 / 未知の型が
-// 拒否側に加わったのに、この文面は 1 周目の一覧のままだった。管理者は
-// **自分が使っていない条件の一覧**を読まされ、何が悪いのか分からない。
-const selfGrantableRoleMessage = "登録するだけで満たせる条件 (isLocal / createdLessThan / 30 日未満の createdMoreThan)、本人が切り替えられる条件 (isBot / isCat / isLocked / isExplorable / フォロー数 / 投稿数)、全員に一致する式 (空の and、空の or の否定、中身の無い not の否定)、判定できない未知の条件を使った条件つきロールには、管理者・モデレーターや権限を配る policy を持たせられません。"
+// **判定の実態に合わせること。** #3037 の 2 周目で `isLocal` /
+// `createdLessThan` / 短い `createdMoreThan` / 恒真式 / 未知の型が拒否側に
+// 加わったのに、この文面は 1 周目の一覧のままだった。#3045 でも同じことが
+// 起きている (年齢の閾値が消えて `createdMoreThan` が長さによらず拒否側に
+// なった)。管理者は**自分が使っていない条件の一覧**を読まされ、何が悪いのか
+// 分からない。2 度あったので `TestSelfGrantableRoleMessageExplainsEveryLeafCondition`
+// で止める。
+const selfGrantableRoleMessage = "登録するだけで満たせる条件 (isLocal / createdLessThan)、待てば満たせる条件 (createdMoreThan と not(createdLessThan))、本人が切り替えられる条件 (isBot / isCat / isLocked / isExplorable / フォロワー数 / フォロー数 / 投稿数)、全員に一致する式 (空の and、空の or の否定、中身の無い not の否定)、判定できない未知の条件を使った条件つきロールには、管理者・モデレーターや権限を配る policy を持たせられません。用意できない条件 (isRemote / isSuspended / roleAssignedTo) も、not で包むと新規アカウントがそのまま満たすので同じく使えません。条件で配りたいときは手動ロールを作って roleAssignedTo で参照してください。既存のロールは名前や色だけの更新でもこの検査を通るので、その場合は権限を下ろすか条件を差し替えるか手動ロールに変えてください。"
 
 // invalidRolePolicyKey returns the first policy entry whose value has the wrong
 // type, or "" when every entry is acceptable.
