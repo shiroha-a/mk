@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/core/iplog"
 	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/stretchr/testify/assert"
@@ -285,4 +286,17 @@ func TestCheckModeratorsActivity_NilSvcNoOp(t *testing.T) {
 func TestCheckModeratorsActivity_ErrorSwallowed(t *testing.T) {
 	proc := NewCheckModeratorsActivityProcessor(&fakeChecker{err: errors.New("boom")})
 	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+}
+
+// 掃除の基準と、検索が画面に出す保持期間は**同じ値でなければならない** (#3104)。
+//
+// **`TestClean_RunsAllSubtasks` では検出できない。** あちらは `userIPRetention`
+// 自身を期待値に使うので、この定数を `45 * 24 * time.Hour` に切り離しても緑のまま
+// 通る (実測)。そのとき cron は 45 日で刈るのに `admin/ip/accounts` は
+// `retentionDays: 90` を返し、**画面が「90 日より前の接続は残っていない」と
+// 嘘をつく**。定義を `core/iplog` の 1 箇所に寄せた意味がここで消える。
+func TestUserIPRetentionMatchesIPLog(t *testing.T) {
+	assert.Equal(t, iplog.Retention, userIPRetention,
+		"user_ip の保持期間が core/iplog から切り離されている。"+
+			"掃除の基準と admin/ip/accounts が返す retentionDays がずれる (#3104)")
 }

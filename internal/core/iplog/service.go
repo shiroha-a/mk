@@ -42,6 +42,15 @@ type MetaSource interface {
 // recorded. upstream の `userIpHistories` は 1 時間ごとに clear するので合わせる。
 const DedupeWindow = time.Hour
 
+// Retention is how long a `user_ip` row is kept. upstream の
+// `CleanProcessorService` と同じく 90 日。
+//
+// **記録側と、それを読む側の両方が同じ値を要る。** 日次の掃除 (`queue/processors`)
+// が刈る基準であり、検索 (#3104) が「この期間より前の接続は残っていない」と
+// 画面に出す根拠でもある。2 箇所に書くと、片方だけ変えたときに**画面が嘘をつく**
+// (「記録が無い」と「もう消した」の区別が付かなくなる) ので、ここを唯一の定義にする。
+const Retention = 90 * 24 * time.Hour
+
 // Service records observations, skipping ones it has already written recently.
 type Service struct {
 	repo Observer

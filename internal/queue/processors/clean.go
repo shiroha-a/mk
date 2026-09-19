@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/shiroha-a/mk/internal/core/iplog"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
 
@@ -46,9 +47,10 @@ type (
 )
 
 const (
-	// userIPRetention は user_ip 行を保持する期間。upstream CleanProcessorService
-	// と同じく 90 日。
-	userIPRetention = 90 * 24 * time.Hour
+	// userIPRetention は user_ip 行を保持する期間。**定義は `core/iplog` に 1 つ**
+	// — 検索 (#3104) が「この期間より前の接続は残っていない」と画面に出す根拠と
+	// 同じ値でなければ、画面が嘘をつく。
+	userIPRetention = iplog.Retention
 	// reversiOutdatedAfter は開始されないまま放置された reversi game を outdated
 	// と見なす猶予。upstream cleanOutdatedGames は now-10min の id を閾値にする。
 	reversiOutdatedAfter = 10 * time.Minute
