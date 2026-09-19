@@ -209,10 +209,15 @@ func TestService_ConcurrentCallsCollapse(t *testing.T) {
 	close(repo.gate)
 	wg.Wait()
 
+	seen := make(map[*Result]bool, concurrentCallers)
 	for i := 0; i < concurrentCallers; i++ {
 		require.NoError(t, errs[i])
 		require.NotNil(t, results[i])
 		assert.Equal(t, int64(10), results[i].Breakdown.Total().Size)
+		// **追従者どうしも別の構造体を受け取る。** group.Do は全員に同じ
+		// ポインタを返すので、複製していないとここで重複する。
+		assert.False(t, seen[results[i]], "待機者が同じ *Result を共有している")
+		seen[results[i]] = true
 	}
 	assert.LessOrEqual(t, repo.calls.Load(), int64(maxCalls),
 		"同時要求が畳まれていない (%d 並行で %d 回走った)", concurrentCallers, repo.calls.Load())

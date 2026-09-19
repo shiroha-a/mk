@@ -100,16 +100,17 @@ func (s *Service) Breakdown(forceRecalc bool) (*Result, error) {
 		s.mu.Lock()
 		s.cached = res
 		s.mu.Unlock()
-		// **保存したものと同じポインタを返さない。** 返り値を書き換える呼び出し側が
-		// いると、キャッシュそのものが汚れる (追従者は全員このポインタを受け取る)。
-		// fresh() と同じく値のコピーを返す。
-		out := *res
-		return &out, nil
+		return res, nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return v.(*Result), nil
+	// **呼び出しごとに値のコピーを返す。** `group.Do` は待機者**全員**に同じ
+	// ポインタを返すので、ここで複製しないと (a) 呼び出し側の書き換えでキャッシュ
+	// 本体が汚れ、(b) 追従者どうしが同じ構造体を共有する。fresh() 側も複製を
+	// 返すので、保存済みスナップショットのポインタはこの関数の外へ出ない。
+	out := *v.(*Result)
+	return &out, nil
 }
 
 // fresh returns the cached snapshot when it is still within the TTL, or nil.

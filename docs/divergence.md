@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.32`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.32a`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -37,7 +37,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 20 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 100 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.32`) | — | — |
+| fork frontend の独自変更 | 101 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.32a`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -452,7 +452,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` / `2026.9.0-mk.8e` / `2026.9.0-mk.8f` / `2026.9.0-mk.15` / `2026.9.0-mk.15a` / `2026.9.0-mk.15b` / `2026.9.0-mk.15c` / `2026.9.0-mk.16` / `2026.9.0-mk.16a` / `2026.9.0-mk.16b` の 15 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.32` (`5ee1ca4b`)。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.32a` (`eba65af9`)。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -564,7 +564,8 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.31` | captcha のトークンを全部送り、利用者名の照会を debounce する (#3037 レビュー)。**申請ページ (`pages/signup-application.vue`) が captcha provider を 1 つだけ選んで送っていた** — サーバーが有効な provider を全部検証するようになった (upstream `SignupApiService` と同じ) ため、運営者が 2 つ有効にすると残りが空トークンで検証され、**申請が 1 件も通らなくなる**。`MkSignupDialog.form.vue` / `MkSignin.password.vue` は元から全部描画して全部送る形なので、そちらに揃えた。あわせて利用者名欄に `MkInput` の `:debounce` を足したが、**これは `2026.9.0-mk.31a` で撤回した** (下の行)。**純正へは還元できない行** (申請ページは mk-go 独自)。 |
 | `2026.9.0-mk.31a` | 登録フォームの値を遅らせず、申請フォームの captcha を立て直す (#3037 レビュー 2 周目)。**`MkInput` の `:debounce` は `update:modelValue` ごと遅らせるので、利用者名とメールアドレスの値そのものが 1 秒遅れていた** — 打ち直した直後に Enter を押すと `usernameState` も古いまま (= 送信ボタンは活性) なので、画面に出ている名前と違う名前で登録が確定する。**利用者名は後から変更できない**。問い合わせの間引きは `onChangeUsername` / `onChangeEmail` の中で API 呼び出しだけを debounce する形へ移した (値と `'wait'` は打鍵ごとに同期で追従するので送信ボタンのゲートが効き、`username/available` を叩く回数は変わらない)。あわせて申請ページの captcha を 2 点直した — 有効な provider が 1 つでも未解答なら送信させない (未解答のまま送ると 400 になり、1 時間 5 回の枠を消費したうえ**解けていた側のトークンまで焼ける**)、送信に失敗したらウィジェットを reset する (captcha のトークンは単回使用なので、`ANSWER_REQUIRED` のように captcha を消費した後で落ちる経路を踏むと**再読み込みするまで申請が通らなかった**)。**純正へは還元できない行** (申請ページは mk-go 独自)。 |
 | `2026.9.0-mk.31b` | 保留中の照会を取り消し、captcha のトークンも捨てる (#3037 レビュー 3 周目)。`mk.31a` で問い合わせだけを debounce する形にしたが、**早期 return で保留中の呼び出しを取り消していなかった** — 「alicex」と打って 1 秒以内に「alic」へ縮めると、最小文字数を満たさず早期 return した後に**もう画面に無い名前**の結果が届いて `usernameState` が `'ok'` になる。欄には短すぎる名前が入ったまま送信ボタンが活性になり、`pattern` は最小文字数を見ないのでネイティブ検証も通る。空にした場合も空欄に「利用可能」が出る。あわせて申請フォームの `resetCaptchas()` がトークンを捨てていなかった — `MkCaptcha.reset()` はウィジェットを作り直すだけで `v-model` を戻さない (戻す必要がある sitekey watcher は `callback(undefined)` を別に呼んでいる) ので、`mk.31a` で足した `captchaIncomplete` が**焼けたトークンを「解答済み」と読み**、送信ボタンが活性のままになっていた。**純正へは還元できない行** (申請ページは mk-go 独自)。 |
-| `2026.9.0-mk.32` | ドライブの使用量と内訳を管理画面に出す (#3053)。管理画面のファイル一覧に「使用量」タブを足し、mk-go 独自の `admin/drive/usage` が返すインスタンス全体の使用量 (合計 / ローカル / リモート、種類別、ホスト別と利用者別の上位) を表示する。**数字が「DB が把握している量」であることを常時出す** — オブジェクトストレージの実使用量とは削除の失敗や孤児があればずれるので、請求や逼迫の判断に使う前に読み手が知る必要がある。**リモートは実体を持たない link 行の件数も出す** (§5.5 の「リモートメディアをキャッシュしない」が「件数は積み上がるのに使用量は 0」という形で読める)。**取得に失敗しても前回の数字と「リロード」を消さない** — 消すと再試行の導線ごと無くなり、タブを往復するしか復帰手段が無くなる。**純正へは還元できない行** (純正 backend にこの endpoint が無い)。 |
+| `2026.9.0-mk.32` | ドライブの使用量と内訳を管理画面に出す (#3053)。管理画面のファイル一覧に「使用量」タブを足し、mk-go 独自の `admin/drive/usage` が返すインスタンス全体の使用量 (合計 / ローカル / リモート、種類別、ホスト別と利用者別の上位) を表示する。**数字が「DB が把握している量」であることを常時出す** — オブジェクトストレージの実使用量とは削除の失敗や孤児があればずれるので、請求や逼迫の判断に使う前に読み手が知る必要がある。リモートの内訳も出していたが、**実体があるときだけ出す形へ `2026.9.0-mk.32a` で改めた** (下の行)。**取得に失敗しても前回の数字と「リロード」を消さない** — 消すと再試行の導線ごと無くなり、タブを往復するしか復帰手段が無くなる。**純正へは還元できない行** (純正 backend にこの endpoint が無い)。 |
+| `2026.9.0-mk.32a` | 実体の無いリモートを使用量に出さない (#3053 の動作確認)。mk-go が作ったデータではリモートは常に 0 バイトなので、件数だけの行を並べると**「どこを消せば効くか」を見に来た運用者に対してローカルの内訳を押し下げるだけ**になる(本番実測: リモート 74,694 件 / 0 バイト、ホスト別も全件 0 バイト)。リモートのカード・種類別のリモート行・ホスト別を `remote.size > 0` のときだけ出す。**黙って消さない** — 合計はリモートの件数を含むので、触れないと「合計とローカルが合わない」画面になる。代わりに 1 行だけ「リモートの N 件はすべて実体を持たない参照」と添える。純正 Misskey から引き継いだ DB には実体のあるリモート行が残るので、そのときは従来どおり全部出る。**API は変えない** — 値は常に返し、出し分けは画面側だけ。あわせて `_mkgoUnsupported.cleanRemoteFiles` の文面を直した — 「削除する対象がありません」と言い切っていたが、対象が無いのは mk-go が作った行に対してだけ。**純正へは還元できない行** (純正 backend にこの endpoint が無い)。 |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -669,7 +670,7 @@ upstream は用途ごとに **10 queue** に分けるが、mk-go は **8 queue**
 | `objectStorage` | `objectStorage` |
 | — | `push` (Web Push 配信、upstream は system queue 内で処理) |
 
-`objectStorage` は `deleteFile` / `cleanRemoteFiles` とも upstream と同じ job 構成 (#2325)。振り分けも upstream に揃えてあり、ローカル FS 保存 (`storedInternal=true`) の実体は同期削除、object storage 上の実体だけを queue に逃がす。`clean-remote-files` は「job 1 本が内部でバッチ削除を回す」形も upstream と同じで、リモートキャッシュの件数ぶん job を積んで Redis を圧迫することはない。ただし mk-go はそもそもリモートメディアをキャッシュしないので、この job の対象は構造的に 0 件になる (§5.5)。job 構成を upstream に揃えてあるのは drop-in 復路のため。
+`objectStorage` は `deleteFile` / `cleanRemoteFiles` とも upstream と同じ job 構成 (#2325)。振り分けも upstream に揃えてあり、ローカル FS 保存 (`storedInternal=true`) の実体は同期削除、object storage 上の実体だけを queue に逃がす。`clean-remote-files` は「job 1 本が内部でバッチ削除を回す」形も upstream と同じで、リモートキャッシュの件数ぶん job を積んで Redis を圧迫することはない。ただし mk-go はリモートメディアをキャッシュしないので、**mk-go が作った行に対しては対象が 0 件になる** (対象は `isLink=false` のリモート行で、それを作る経路が無い)。**TS 製の DB を引き継いだときだけ対象がある** (§5.5)。job 構成を upstream に揃えてあるのは drop-in 復路のため。
 
 `note:postScheduled` / `maintenance:deleteAccount` が task type の接頭辞と違う `deliver` に載っているのは意図的なもの。いずれも実行結果が連合配送につながるジョブで、worker 2 本の `maintenance` より 16 本の `deliver` の方が捌ける。task type と queue の対応は `internal/queue/routing_test.go` が表として固定しており、変えると落ちる (#2327)。
 
@@ -697,7 +698,7 @@ cron の多重実行防止は **job option ではなく mkq の job ID 設計**�
 | AIMD auto-scale worker | per-queue の動的 Resize + Prometheus metrics。worker 現在数 / 範囲 / scale 履歴は admin UI にも出す (#2277) |
 | Prometheus `/metrics` | `mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` ほか。**無認証公開なので LB/nginx ACL 必須**。admin から読めない分は `admin/queue/*` の `runtime` block が補う (#2277) |
 | `admin/server-metrics` | mk-go プロセス自身の統計 (goroutine / heap / GC / uptime / version) を返す mk-go 独自 endpoint (#2395)。upstream に対応物は無い。`admin/server-info` はホストマシンの静的スペックを返すもので別物。control panel のダッシュボードから 10s ポーリングで表示する (`ReadMemStats` が stop-the-world を伴うため間隔を詰めない)。DB / Redis の接続プールは当初含めていたが、常時ほぼ一定で画面のノイズになるため UI ごと落とした |
-| `admin/drive/usage` | インスタンス全体のドライブ使用量と内訳を返す mk-go 独自 endpoint (#3053)。upstream は per-user の `driveCapacityMb` しか持たず、**合計を出す口が無い**。返すのは ローカル / リモートの別、種類別 (添付・アバター・バナー・カスタム絵文字・その他)、ホスト別と利用者別の上位 30。**返すのは `drive_file.size` の合計 = 「DB が把握している量」で、object storage に実際に置かれている量ではない** (削除の失敗や孤児があれば必ずずれる)。応答の `source` に `database` と入れ、同梱フロントエンドは同じ趣旨を常時表示する (画面は `source` の値を読まず固定の文言を出しているので、値を増やすときは画面も直すこと)。実ストレージ側を出すなら S3 の API を叩く別経路が要る。**種類は「その file を誰が指しているか」で決め、avatar → banner → emoji → attachment → other の優先順で 1 つに割り当てる** (1 つの file が avatar と banner の両方に指されうるので、順序が無いと二重計上になる)。**`attachment` は「note に添付済み」ではない** — 利用者所有の実体すべてで、一度も添付していない file も入る。note からの参照で絞らないのは、(a) 合成データ 2,005,400 行で GIN 経由の EXISTS が 4.2 秒・note 側から unnest しても 1.1 秒掛かるうえ、(b) drive_file を指すのは note だけではない (`note_draft` / `gallery_post` / `chat_message`) ので、note だけで「未参照」を出すと**消してよい量を過大に見せる**ため。孤児の検出は別 issue。**集計は都度走らせる** — 実測は運用中のインスタンス (`drive_file` 74,757 行 / `user` 38,694 / `emoji` 20,907) で 3 本合計 225 ms、合成データ 2,005,400 行で 1.84 秒。定期集計のジョブは持たない。**emoji の突き合わせを `IN` や `EXISTS` に書き換えないこと** — 同じインスタンスで `IN (SELECT ... UNION ...)` が 65 秒、相関 `EXISTS` が 160 秒で、`LEFT JOIN` の 300-800 倍掛かった。代わりに 5 分の TTL でスナップショットを 1 つ持ち、同時要求は singleflight で 1 本に畳む。`forceRecalc` で明示的に取り直せる。**集計元が未配線なら 500** — 0 バイトを返すと「使っていない」という誤った事実を管理画面に出すことになる。**リモート側は count と linkCount が一致し size は 0 になる** — §5.5 の「リモートメディアをローカルにキャッシュしない」が**インスタンス全体の合計として**読める場所 (`admin/drive/files` でも 1 件ずつの `size` は見えるが、合計は出ない)。TS 由来の DB から引き継いだ実体つきリモート行だけがそこから外れる |
+| `admin/drive/usage` | インスタンス全体のドライブ使用量と内訳を返す mk-go 独自 endpoint (#3053)。upstream は per-user の `driveCapacityMb` しか持たず、**合計を出す口が無い**。返すのは ローカル / リモートの別、種類別 (添付・アバター・バナー・カスタム絵文字・その他)、ホスト別と利用者別の上位 30。**返すのは `drive_file.size` の合計 = 「DB が把握している量」で、object storage に実際に置かれている量ではない** (削除の失敗や孤児があれば必ずずれる)。応答の `source` に `database` と入れ、同梱フロントエンドは同じ趣旨を常時表示する (画面は `source` の値を読まず固定の文言を出しているので、値を増やすときは画面も直すこと)。実ストレージ側を出すなら S3 の API を叩く別経路が要る。**種類は「その file を誰が指しているか」で決め、avatar → banner → emoji → attachment → other の優先順で 1 つに割り当てる** (1 つの file が avatar と banner の両方に指されうるので、順序が無いと二重計上になる)。**`attachment` は「note に添付済み」ではない** — 利用者所有の実体すべてで、一度も添付していない file も入る。note からの参照で絞らないのは、(a) 合成データ 2,005,400 行で GIN 経由の EXISTS が 4.2 秒・note 側から unnest しても 1.1 秒掛かるうえ、(b) drive_file を指すのは note だけではない (`note_draft` / `gallery_post` / `chat_message`) ので、note だけで「未参照」を出すと**消してよい量を過大に見せる**ため。孤児の検出は別 issue。**集計は都度走らせる** — 実測は運用中のインスタンス (`drive_file` 74,757 行 / `user` 38,694 / `emoji` 20,907) で 3 本合計 225 ms、合成データ 2,005,400 行で 1.84 秒。定期集計のジョブは持たない。**emoji の突き合わせを `IN` や `EXISTS` に書き換えないこと** — 同じインスタンスで種類別クエリ 1 本だけを差し替えて測ると、現在の `LEFT JOIN` が 195 ms に対し `IN (SELECT ... UNION ...)` が 56-68 秒、相関 `EXISTS` が 153-167 秒だった。代わりに 5 分の TTL でスナップショットを 1 つ持ち、同時要求は singleflight で 1 本に畳む。`forceRecalc` で明示的に取り直せる。**集計元が未配線なら 500** — 0 バイトを返すと「使っていない」という誤った事実を管理画面に出すことになる。**リモート側は count と linkCount が一致し size は 0 になる** — §5.5 の「リモートメディアをローカルにキャッシュしない」が**インスタンス全体の合計として**読める場所 (`admin/drive/files` でも 1 件ずつの `size` は見えるが、合計は出ない)。TS 由来の DB から引き継いだ実体つきリモート行だけがそこから外れる。**同梱フロントエンドはリモートを `size > 0` のときだけ描く** (`2026.9.0-mk.32a`) が、API は常に返す |
 | timeline JSON cache | first-page per-viewer cache (opt-in) |
 | mediaproxy のアニメ pass-through | `?emoji` / `?avatar` / `?preview` で gif/apng を decode せず raw 返し (Go std の `image.Decode` は 1 frame しか返さず静止画化するため) |
 | URL preview の charset 自動正規化 | Content-Type + `<meta charset>` から UTF-8 化。Shift_JIS / EUC-JP / ISO-2022-JP で文字化けしない (upstream は外部 `summaly` package に委譲しているため同等機能の有無は未確認) |
@@ -736,6 +737,8 @@ Drive へ保存する。**mk-go はこれを実装しない。** 未実装では
 対象 (`isLink=false` の remote file) を作る経路が無いため。**TS 製の DB を引き継いだときだけ
 対象がある** (あちらは `cacheRemoteFiles` が真なら実体を保存する)。ただし同梱フロントエンドは
 このボタンを理由つきで無効表示にしているので、引き継いだ行を消すには API を直接叩く。
+**実体は不可逆に消える** — drop-in で TS 側へ戻す予定があるなら、戻した後は
+`cacheRemoteFiles` が効くので取り直せるが、消した時点で相手が消していたぶんは戻らない。
 
 ### 理由
 

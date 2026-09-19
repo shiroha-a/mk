@@ -123,6 +123,7 @@ func userIDsOf(rows []DriveUsageUserRow) []string {
 //   - alice: 添付 100 / アイコン 300 / link 行 0 (= 合計 400、3 件、うち実体なし 1)
 //   - bob:   添付 50 / バナー 70 / **絵文字が参照している自分のファイル** 77 (= 197、3 件)
 //   - c1:    アイコン 11 (**c1 と c2 の両方が同じファイルをアイコンにしている**)
+//   - アイコン (c1) とバナー (bob) は**絵文字からも参照させてある** (優先順の検証用)
 //   - c2:    ファイルは持たない (c1 のファイルを指すだけ)
 //   - c3:    5000 x 2 = 10000、2 件
 //   - c4:    9000、1 件
@@ -169,6 +170,11 @@ func seedDriveUsage(t *testing.T) *gorm.DB {
 
 	emojiFile := usageFile(t, db, "duf_emoji", nil, nil, 500, false)
 	usageEmoji(t, db, "due_1", emojiFile.URL, "")
+	// **アイコン / バナーを絵文字も参照している形。** 自分が上げた画像を絵文字に
+	// しつつアイコンにも使う運用と、TS 由来の DB にある。優先順が avatar / banner
+	// より emoji を上にしていると、この 2 件が emoji 側へ移る。
+	usageEmoji(t, db, "due_shared_avatar", shared.URL, shared.URL)
+	usageEmoji(t, db, "due_bob_banner", banner.URL, banner.URL)
 	// **webpublic variant を持たない絵文字は originalUrl == publicUrl になる。**
 	// `UNION` を `UNION ALL` にすると、この形だけが二重計上になる。
 	sameURL := usageFile(t, db, "duf_emoji_same", nil, nil, 123, false)
@@ -204,6 +210,8 @@ func TestDriveUsageRepository_BreakdownByKind(t *testing.T) {
 	// alice 2 (100 + link 0) + bob 1 (50) + c3 2 (10000) + c4 1 (9000)。
 	assert.Equal(t, DriveUsageBucket{Count: 6, Size: 19150, LinkCount: 1},
 		bucketOf(t, b, DriveUsageOriginLocal, DriveUsageKindAttachment))
+	// **どちらも絵文字からも参照されているが avatar / banner 側に数える。**
+	// emoji を上に置くと 2 件とも emoji へ移り、ここが落ちる。
 	assert.Equal(t, DriveUsageBucket{Count: 2, Size: 311},
 		bucketOf(t, b, DriveUsageOriginLocal, DriveUsageKindAvatar))
 	assert.Equal(t, DriveUsageBucket{Count: 1, Size: 70},

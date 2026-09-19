@@ -2,7 +2,9 @@ package admin_test
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -196,14 +198,32 @@ func TestDriveUsage_EmptyRankingsAreArrays(t *testing.T) {
 	assert.Contains(t, body, `"byUser":[]`)
 }
 
+// captureSlog swaps the default logger for the duration of the test and returns
+// what was written.
+//
+// **500 の本文は汎用なので、ログがこの経路の唯一の診断材料になる。** 出ていない
+// ことに気付けるよう、失敗経路のログは必ずここで見る。
+func captureSlog(t *testing.T) *strings.Builder {
+	t.Helper()
+	var buf strings.Builder
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
+}
+
 // 集計の失敗は 500。0 バイトを返すと「使っていない」という誤った事実になる。
 func TestDriveUsage_ErrorIsInternal(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	h.SetDriveUsageProvider(&stubDriveUsage{err: assertError{}})
+	logged := captureSlog(t)
 
 	rec := doPost(h.DriveUsage, `{}`, adminUser)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.NotContains(t, rec.Body.String(), `"size"`)
+	assert.Contains(t, logged.String(), "admin/drive/usage",
+		"集計の失敗がログに残っていない (応答は汎用 500 なので、ここが唯一の手掛かり)")
+	assert.Contains(t, logged.String(), "stub failure", "失敗の理由がログに残っていない")
 }
 
 // provider が内訳を返さなかったときも 500。`packDriveUsage` がそのまま触ると panic
@@ -219,10 +239,13 @@ func TestDriveUsage_MissingBreakdownIsInternal(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h, _, _, _ := newTestHandler(t)
 			h.SetDriveUsageProvider(&stubDriveUsage{res: tc.res})
+			logged := captureSlog(t)
 
 			rec := doPost(h.DriveUsage, `{}`, adminUser)
 			assert.Equal(t, http.StatusInternalServerError, rec.Code)
 			assert.NotContains(t, rec.Body.String(), `"total"`)
+			assert.Contains(t, logged.String(), "admin/drive/usage",
+				"契約違反がログに残っていない")
 		})
 	}
 }
