@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.31b`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.32`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -31,13 +31,13 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 | 軸 | mk-go 独自 | cherrypick 由来 | 未実装 |
 |---|---|---|---|
-| API endpoint | GET variant 23 + alias 4 + 分割アップロード 4 + 承認制 7 + 絵文字の申請 10 + exact assignment lookup 2 + admin 観測 5 | chat 15 | **0** |
+| API endpoint | GET variant 23 + alias 4 + 分割アップロード 4 + 承認制 7 + 絵文字の申請 10 + exact assignment lookup 2 + admin 観測 6 | chat 15 | **0** |
 | API レスポンスの additive field | 7 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup` / `signupApplicationForm` / `canRequestCustomEmojis` / `minimumUsernameLength`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 13 (+ bookkeeping 2) | 0 | 0 |
 | DB カラム | 20 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 99 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.31b`) | — | — |
+| fork frontend の独自変更 | 100 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.32`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -47,7 +47,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 
 upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` の fastify 直登録 6 件 (POST 5 / GET 1) = **444 件**。うち **444 件すべてを実装済み (coverage 100.0%)**。
 
-### 1-1. mk-go にしかない (70)
+### 1-1. mk-go にしかない (71)
 
 | 分類 | 件数 | 内容 |
 |---|---|---|
@@ -59,7 +59,7 @@ upstream の endpoint は `endpoints/` 配下 438 件 + `ApiServerService.ts` �
 | 絵文字の登録申請 | 3 | `emoji-application/create` / `list-mine` / `cancel` (#2934 / #2935)。upstream には申請という概念が無く、絵文字の追加は `canManageCustomEmojis` を持つ人だけの操作。**`create` は `kind` で自作画像 (`own`) とリモート絵文字の取り込み (`remote`) を受ける** (#2935) — 審査する側が見る場所を 2 つに増やさないため 1 endpoint / 1 テーブルを共有し、素材の検証だけが分岐する。リモートでは**ライセンスを任意にする** (取り込み元の host + name 自体が出典で、申請者は `admin/emoji/fetch-remote-meta` を叩けないので、必須にすると参照できない値について嘘を書かせることになる)。**`create` だけ `canRequestCustomEmojis` で gate する** — 一覧と取り下げを塞ぐと、後から policy を外された人が自分の申請を確認も取り下げもできなくなる。**上限に達したときの status は「いつ空くかを返せるか」で分ける。** ロール別の期間上限 (#2958) は 429 `EMOJI_APPLICATION_QUOTA_EXCEEDED` を `info: {period, used, limit, retryAt}` と `Retry-After` 付きで返す (待てば通るので、入力を直させる 400 には倒さない)。審査待ち件数の上限 (#2977) は **400 `EMOJI_APPLICATION_PENDING_LIMIT_EXCEEDED`** を `info: {used, limit}` で返し、`Retry-After` は付けない — 空くのはモデレーターが処理したときで時刻を予告できず、429 にすると「待てば通る」と誤解させる。**両方が満杯なら 429 を返すが `retryAt` / `Retry-After` は落とす** (期間が空いてもまだ通らないので、時刻を広告すると利用者はその時刻に叩いて別のエラーを受け取る)。**そのとき frontend は時刻に触れない専用の文面を出す** — 汎用文に倒すと「しばらくしてからもう一度」= 待てという案内になり、同じ害が粒度を粗くしたまま残る (mk.18d) |
 | 絵文字の登録申請の審査 | 7 | `admin/emoji-application/list` / `approve` / `reject` (#2934) / `related` (#2960) / `list-by-user` / `user-summary` (#2961) / `reset-user-quota` (#2962)。承認は実質 `admin/emoji/add` と同じ操作なので、同じ `canManageCustomEmojis` と **`read:admin:emoji` / `write:admin:emoji` を再利用する** (新しい scope を足すと misskey-js の型にも載せることになり、追従のたびに衝突する。`signup-application` の審査が `read/write:admin:invite-codes` を再利用しているのと同じ判断)。**承認時に画像を system 所有の drive ファイルとして複製する (#2966)** — 複製しないと、承認した絵文字が**申請者所有のファイルの URL を参照し続け**、申請者がそれを消した時点で / アカウントを消した時点で表示が壊れる (リモート経路は #670 で既に取り込んでいたので、同じ機能で保存期間が非対称だった)。**所有権は移さない** — 元のファイルはノートの添付やプロフィールで使われている可能性があり、`userId` を奪うと利用者の drive から突然消える。**複製は承認時だけ** (申請時にやると却下・取り下げ・放置・スパムのぶんまで system 領域に残る)。**HTTP で自分の公開 URL を叩かない** — SSRF ガードと衝突し、非公開 URL の構成では取れず、DB 上の行と実体の対応も確かめられないので、`storedInternal` を見て実体のあるバックエンドから直接読む。**`originalUrl` は複製の `url` と一致させる** — drive の孤児 cleanup が `emoji.originalUrl = drive_file.url` または `publicUrl = url` を参照保護の条件にしているので、webpublic だけを入れると保護が外れて消される。**途中で失敗したら作ったものを消す** (複製の失敗 → 絵文字を作らず申請は pending のまま / 絵文字の作成失敗 → **載ったかを読み直してから**複製を削除 (#3019) / 競合に負けた → 絵文字と複製の両方を削除)。**読み直せないときの倒し方が 2 箇所で逆**なのは意図的で、理由は**消せる範囲が違う**こと — `UpdateIfPending` の失敗は後始末で**絵文字の行ごと**消せるので、消せば承認を押し直して作り直せる。絵文字の作成失敗で決められるのは複製の行方だけなので、選べるのは「画像が生きた絵文字」か「画像だけ 404 の絵文字」しかなく、残す側に倒す。**どちらの失敗でも申請は pending のまま残り、そのまま押し直すと `DUPLICATE_NAME`** になる点は同じ (審査画面が衝突している絵文字の id を出すので、それを消せば押し直せる。却下に倒すと申請者の枠を消費したまま閉じる)。**絵文字を消せなかったら複製も残す** — 先に複製だけ消すと「絵文字はピッカーに出るのに画像は 404、名前が使用中なので再承認も `DUPLICATE_NAME`」が恒久状態になる (絵文字が消えれば孤児 cleanup が回収する)。**複製できない大きさは申請の時点で断る** — 承認側は実体を読むので上限 (32 MiB) があるが、drive が受け取る上限 (role policy の `maxFileSizeMb`、既定 30) はそれより上へ設定できる。見ないと「申請はできたのに承認だけが恒久的に失敗する」帯が残り、申請者には直しようが無く、モデレーターには却下すべき申請に見える。**400 `EMOJI_IMAGE_TOO_LARGE` は申請と承認の両方で同じ error id を返す**。**複製の失敗は種別ごとに分ける** — 実体がもう無いもの (400 `NO_SUCH_FILE`) と、ストレージ / DB の障害 (500) を同じにすると、前者は運用側に直しようのない 5xx になり、後者は client error に化けて監視でも 5xx が立たない (#2792)。`emoji_application.fileId` は申請時に利用者が出したファイルのままにする (複製とは役割が違う)。**既に承認済みの申請はこの変更では直らない** — `kind = own` で承認済みの絵文字は引き続き申請者所有のファイルを参照しており、承認経路の修正は**新規の承認にだけ効く**。既存データは後始末バッチ `backfill-emoji-system-file` (#2990) で直す — 承認経路と**同じ複製** (`drive.Service.CopyToSystemFile`) を通し、`originalUrl` / `publicUrl` / `type` を複製側へ向け直す (申請者の元ファイルと `emoji_application.fileId` は触らない)。**元ファイルが既に消えているものは復元できない** ので、申請 ID・絵文字名・理由を一覧に出して非ゼロ終了する。**モデレーターが `admin/emoji/update` で差し替えた絵文字には触らない** (差し替えを巻き戻すことになる) が、**#3014 より前の差し替え**は system 所有を参照していないのでまだ壊れうる。それらは `needs-review` として要対応に出し、対処は「もう一度差し替える」 — #3014 から差し替え先も system 所有へ複製するので、次の実行では `already` に落ちる。**`S3Storage.Get` が `GetObject` の失敗を種別を問わず `ErrObjectNotFound` に潰していたのも #2990 で直した** — オブジェクトストレージ構成では認証切れや provider の 5xx がすべて「そんなオブジェクトは無い」に化けており、上の「種別ごとに分ける」は**ローカル構成でしか成立していなかった** (なお `GET /files/:accessKey` は今も storage のエラーを種別を問わず 404 にする。こちらは別 issue) (バッチ側では「元画像を復元できないので絵文字を消すか差し替えろ」という破壊的な案内に化ける)。手順は [デプロイ](deployment.md#後始末バッチ)。`CreateFromApplication` が MIME allowlist / webpublic variant の優先 / 重複チェックを共有する — 別経路にすると承認が検証を迂回する方法になる。**リモートの承認は `admin/emoji/copy` と同じ経路**を通る (#2935) — colfit の命名規則・drive への取り込み・MIME 検証・broadcast が申請経路だけ抜けるのを防ぐ。**`related` は過去の申請を照会する (#2960)** — 同じ名前・同じリモート元 (`remoteHost` + `remoteName`)・同じ画像 (申請時点の drive MD5 をスナップショットで持つ) のいずれかで一致した履歴を、却下理由ごと返す。**一覧には埋め込まない** (全行ぶん引くと N+1 になるので、申請の詳細を開いたときだけ 1 回)。**自動拒否には使わない** — ライセンスの変更・画像の修正・運用方針の変更がありうるので、あくまで審査の材料。ハッシュを**引き直さずスナップショットで持つ**のは、申請者が審査を待つ間に drive のファイルを消せるため (引き直すと「消した申請は履歴から消える」ことになり、過去の判断を追えなくなる)。`fileHash` は **API には出さない** — 照合の結果は `matchedBy` で伝わるので出す理由が無く、MD5 は画像の指紋なので「このインスタンスが既知の画像を持っているか」を外から確かめる手がかりになる。**`list-by-user` / `user-summary` はユーザーモデレーション画面のタブ (#2961)** — 申請者ごとの履歴 (ステータスの絞り込み / 名前と取り込み元の部分一致検索 / ページング) と、件数の内訳・期間別の使用状況・**審査待ちの上限 (#2977) の使用状況**を返す。審査待ちを落とすと、期間の窓に空きがあるだけで画面が「空きあり」と描き、実際の申請は 400 で弾かれる。**使用状況は作成側 (#2958) と同じ計算を共有する** — 画面用に数え直すと「空きありと出ているのに弾かれる」という形でずれる。**上限なしは `unlimited` で明示する** (0 を返すだけだと「上限 0 件 = 出せない」と読める)。検索は **LIKE のメタ文字をエスケープする** (素通しすると `foo_bar` が `fooXbar` に当たり、`%` の 1 文字で全件返る)。**未知の `status` は全件に倒さず 400** — 絞ったつもりで全部出るほうが危険側。**`reset-user-quota` は期間別の申請枠を手動で戻す (#2962)** — 誤操作・テスト申請・再申請の依頼で枠を空けたいとき、**申請の行を消すと過去の判断 (#2960 の審査材料) も同時に消える**ので、リセットの時刻を別テーブルに積み、期間内の件数を `max(期間の開始, 最後のリセット)` 以降で数える。**境界は作成側と読み取り側で共有する** (`evaluateQuotaLimits`) — 片方だけだと「画面は空きありなのに弾かれる」またはその逆になる。`retryAt` にも同じ境界が効く。**審査待ちの上限 (#2977) には効かない** — あれは「今まさに審査待ちの件数」で、戻しても申請は審査待ちのまま残る。**短時間の API レート制限も解除しない** (層が違う)。理由は必須で、**リセット前の使用数ごと moderation log に残す** (後から採ると必ず 0 になる)。scope は `write:admin:emoji`。**`admin/show-moderation-logs` の `type` に upstream に無い値 `resetEmojiApplicationQuota` が出る** — `internal/core/moderationlog` の他の値はすべて Misskey TS と verbatim で揃える契約だが、申請という概念自体が upstream に無いので揃える対象が存在しない。**fork frontend 側に `_moderationLogTypes` のキーを足してある** (upstream の modlog は未知の型の見出しにフォールバックを持たず空欄になる)。**純正へ戻すと**この type のログは見出しが空欄の raw 表示になる (情報自体は `info` に残る) |
 | role assignment exact lookup | 2 | `roles/assignment-show` / `admin/roles/assignment-show` (#2607)。member一覧を走査せず、指定したuser/roleのactive assignmentだけを確認するbuild-time plugin向けhost API。self側は本人、admin側はmoderator以上に限定し、admin側は既存`admin/roles/users`と同じ`read:admin:roles` scopeを使う。**見るのは`role_assignment`行だけなので`target=conditional`のroleでは常に`assigned:false`**になる (行を持たずcondFormulaのread時評価で決まるため)。判別用に`role.target`を返す。既存の`admin/roles/users`も`ListByRole`で同じテーブルを引くので挙動は揃っている。effective判定は#2608側の担当 (#2633) |
-| admin の観測系 | 5 | `admin/server-plugins` (組み込みプラグインの一覧、`read:admin:meta`)、`admin/server-metrics` / `admin/self-check` / `admin/federation/delivery-health` / `admin/federation/inbox-health` (いずれも `read:admin:server-info`)。upstream に対応物が無い。**mk-go は連合の配送 / 受信の健全性を Redis に host 単位で記録している** (`internal/core/deliveryhealth`) ので、それを admin 画面から読むための endpoint。Redis 上のカウンタなので flush で消え、drop-in の引き継ぎ対象でもない |
+| admin の観測系 | 6 | `admin/server-plugins` (組み込みプラグインの一覧、`read:admin:meta`)、`admin/server-metrics` / `admin/self-check` / `admin/federation/delivery-health` / `admin/federation/inbox-health` (いずれも `read:admin:server-info`)、`admin/drive/usage` (`read:admin:drive`、#3053)。upstream に対応物が無い。**mk-go は連合の配送 / 受信の健全性を Redis に host 単位で記録している** (`internal/core/deliveryhealth`) ので、それを admin 画面から読むための endpoint。Redis 上のカウンタなので flush で消え、drop-in の引き継ぎ対象でもない。**`admin/drive/usage` だけは出所が違い、DB の `drive_file` を都度集計する** (詳細は §5 の表)。scope も観測系で共有している `read:admin:server-info` ではなく `read:admin:drive` を使う — 利用者別の内訳を返すので、既存の `admin/drive/files` と同じ管轄に置くのが自然 |
 | その他 / alias | 4 | `i/flashs` / `i/flashs/likes` (upstream の `flash/my` / `flash/my-likes` に対する mk-go 側の path alias。両者とも mk-go に実装済み)、`signin` (upstream が `signin-flow` に統合した旧 path の backward-compat shim。**`signin-flow` と同じ captcha 検証と 2FA challenge を通す** — 片方だけ緩いと、運営者が captcha を有効にしてもこちらが素通りする)、`admin/emoji/fetch-remote-meta` (リモート絵文字のインポート時に、AP では運ばれないカテゴリ・エイリアス・センシティブを相手の REST API から取る。#2698) |
 
 ランダムマッチ (`reversi/match` の `userId` 無し) は **local user 同士のみ**。待機列 (`reversi:matchAny`) に載るのはこのインスタンスで認証を通した local user だけなので、相手がリモートになることはない。upstream Misskey も yojo-art/cherrypick も**連合ランダムマッチは持っていない**ので意図的に揃えている。名指しの招待 (`userId` 指定) は従来どおり連合する。
@@ -452,7 +452,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` / `2026.9.0-mk.8e` / `2026.9.0-mk.8f` / `2026.9.0-mk.15` / `2026.9.0-mk.15a` / `2026.9.0-mk.15b` / `2026.9.0-mk.15c` / `2026.9.0-mk.16` / `2026.9.0-mk.16a` / `2026.9.0-mk.16b` の 15 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.31b` (`d9433577`)。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.32` (`5ee1ca4b`)。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -564,6 +564,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.31` | captcha のトークンを全部送り、利用者名の照会を debounce する (#3037 レビュー)。**申請ページ (`pages/signup-application.vue`) が captcha provider を 1 つだけ選んで送っていた** — サーバーが有効な provider を全部検証するようになった (upstream `SignupApiService` と同じ) ため、運営者が 2 つ有効にすると残りが空トークンで検証され、**申請が 1 件も通らなくなる**。`MkSignupDialog.form.vue` / `MkSignin.password.vue` は元から全部描画して全部送る形なので、そちらに揃えた。あわせて利用者名欄に `MkInput` の `:debounce` を足したが、**これは `2026.9.0-mk.31a` で撤回した** (下の行)。**純正へは還元できない行** (申請ページは mk-go 独自)。 |
 | `2026.9.0-mk.31a` | 登録フォームの値を遅らせず、申請フォームの captcha を立て直す (#3037 レビュー 2 周目)。**`MkInput` の `:debounce` は `update:modelValue` ごと遅らせるので、利用者名とメールアドレスの値そのものが 1 秒遅れていた** — 打ち直した直後に Enter を押すと `usernameState` も古いまま (= 送信ボタンは活性) なので、画面に出ている名前と違う名前で登録が確定する。**利用者名は後から変更できない**。問い合わせの間引きは `onChangeUsername` / `onChangeEmail` の中で API 呼び出しだけを debounce する形へ移した (値と `'wait'` は打鍵ごとに同期で追従するので送信ボタンのゲートが効き、`username/available` を叩く回数は変わらない)。あわせて申請ページの captcha を 2 点直した — 有効な provider が 1 つでも未解答なら送信させない (未解答のまま送ると 400 になり、1 時間 5 回の枠を消費したうえ**解けていた側のトークンまで焼ける**)、送信に失敗したらウィジェットを reset する (captcha のトークンは単回使用なので、`ANSWER_REQUIRED` のように captcha を消費した後で落ちる経路を踏むと**再読み込みするまで申請が通らなかった**)。**純正へは還元できない行** (申請ページは mk-go 独自)。 |
 | `2026.9.0-mk.31b` | 保留中の照会を取り消し、captcha のトークンも捨てる (#3037 レビュー 3 周目)。`mk.31a` で問い合わせだけを debounce する形にしたが、**早期 return で保留中の呼び出しを取り消していなかった** — 「alicex」と打って 1 秒以内に「alic」へ縮めると、最小文字数を満たさず早期 return した後に**もう画面に無い名前**の結果が届いて `usernameState` が `'ok'` になる。欄には短すぎる名前が入ったまま送信ボタンが活性になり、`pattern` は最小文字数を見ないのでネイティブ検証も通る。空にした場合も空欄に「利用可能」が出る。あわせて申請フォームの `resetCaptchas()` がトークンを捨てていなかった — `MkCaptcha.reset()` はウィジェットを作り直すだけで `v-model` を戻さない (戻す必要がある sitekey watcher は `callback(undefined)` を別に呼んでいる) ので、`mk.31a` で足した `captchaIncomplete` が**焼けたトークンを「解答済み」と読み**、送信ボタンが活性のままになっていた。**純正へは還元できない行** (申請ページは mk-go 独自)。 |
+| `2026.9.0-mk.32` | ドライブの使用量と内訳を管理画面に出す (#3053)。管理画面のファイル一覧に「使用量」タブを足し、mk-go 独自の `admin/drive/usage` が返すインスタンス全体の使用量 (合計 / ローカル / リモート、種類別、ホスト別と利用者別の上位) を表示する。**数字が「DB が把握している量」であることを常時出す** — オブジェクトストレージの実使用量とは削除の失敗や孤児があればずれるので、請求や逼迫の判断に使う前に読み手が知る必要がある。**リモートは実体を持たない link 行の件数も出す** (§5.5 の「リモートメディアをキャッシュしない」が「件数は積み上がるのに使用量は 0」という形で読める)。**取得に失敗しても前回の数字と「リロード」を消さない** — 消すと再試行の導線ごと無くなり、タブを往復するしか復帰手段が無くなる。**純正へは還元できない行** (純正 backend にこの endpoint が無い)。 |
 
 `2026.7.0-mk.1` の内訳:
 
@@ -696,6 +697,7 @@ cron の多重実行防止は **job option ではなく mkq の job ID 設計**�
 | AIMD auto-scale worker | per-queue の動的 Resize + Prometheus metrics。worker 現在数 / 範囲 / scale 履歴は admin UI にも出す (#2277) |
 | Prometheus `/metrics` | `mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` ほか。**無認証公開なので LB/nginx ACL 必須**。admin から読めない分は `admin/queue/*` の `runtime` block が補う (#2277) |
 | `admin/server-metrics` | mk-go プロセス自身の統計 (goroutine / heap / GC / uptime / version) を返す mk-go 独自 endpoint (#2395)。upstream に対応物は無い。`admin/server-info` はホストマシンの静的スペックを返すもので別物。control panel のダッシュボードから 10s ポーリングで表示する (`ReadMemStats` が stop-the-world を伴うため間隔を詰めない)。DB / Redis の接続プールは当初含めていたが、常時ほぼ一定で画面のノイズになるため UI ごと落とした |
+| `admin/drive/usage` | インスタンス全体のドライブ使用量と内訳を返す mk-go 独自 endpoint (#3053)。upstream は per-user の `driveCapacityMb` しか持たず、**合計を出す口が無い**。返すのは ローカル / リモートの別、種類別 (添付・アバター・バナー・カスタム絵文字・その他)、ホスト別と利用者別の上位 30。**返すのは `drive_file.size` の合計 = 「DB が把握している量」で、object storage に実際に置かれている量ではない** (削除の失敗や孤児があれば必ずずれる)。応答の `source` に `database` と入れ、同梱フロントエンドは同じ趣旨を常時表示する (画面は `source` の値を読まず固定の文言を出しているので、値を増やすときは画面も直すこと)。実ストレージ側を出すなら S3 の API を叩く別経路が要る。**種類は「その file を誰が指しているか」で決め、avatar → banner → emoji → attachment → other の優先順で 1 つに割り当てる** (1 つの file が avatar と banner の両方に指されうるので、順序が無いと二重計上になる)。**`attachment` は「note に添付済み」ではない** — 利用者所有の実体すべてで、一度も添付していない file も入る。note からの参照で絞らないのは、(a) 合成データ 2,005,400 行で GIN 経由の EXISTS が 4.2 秒・note 側から unnest しても 1.1 秒掛かるうえ、(b) drive_file を指すのは note だけではない (`note_draft` / `gallery_post` / `chat_message`) ので、note だけで「未参照」を出すと**消してよい量を過大に見せる**ため。孤児の検出は別 issue。**集計は都度走らせる** — 実測は運用中のインスタンス (`drive_file` 74,757 行 / `user` 38,694 / `emoji` 20,907) で 3 本合計 225 ms、合成データ 2,005,400 行で 1.84 秒。定期集計のジョブは持たない。**emoji の突き合わせを `IN` や `EXISTS` に書き換えないこと** — 同じインスタンスで `IN (SELECT ... UNION ...)` が 65 秒、相関 `EXISTS` が 160 秒で、`LEFT JOIN` の 300-800 倍掛かった。代わりに 5 分の TTL でスナップショットを 1 つ持ち、同時要求は singleflight で 1 本に畳む。`forceRecalc` で明示的に取り直せる。**集計元が未配線なら 500** — 0 バイトを返すと「使っていない」という誤った事実を管理画面に出すことになる。**リモート側は count と linkCount が一致し size は 0 になる** — §5.5 の「リモートメディアをローカルにキャッシュしない」が**インスタンス全体の合計として**読める場所 (`admin/drive/files` でも 1 件ずつの `size` は見えるが、合計は出ない)。TS 由来の DB から引き継いだ実体つきリモート行だけがそこから外れる |
 | timeline JSON cache | first-page per-viewer cache (opt-in) |
 | mediaproxy のアニメ pass-through | `?emoji` / `?avatar` / `?preview` で gif/apng を decode せず raw 返し (Go std の `image.Decode` は 1 frame しか返さず静止画化するため) |
 | URL preview の charset 自動正規化 | Content-Type + `<meta charset>` から UTF-8 化。Shift_JIS / EUC-JP / ISO-2022-JP で文字化けしない (upstream は外部 `summaly` package に委譲しているため同等機能の有無は未確認) |
@@ -730,8 +732,10 @@ Drive へ保存する。**mk-go はこれを実装しない。** 未実装では
 (drop-in 互換のため)。値は保存・返却されるがダウンロード判定には使わない。
 関連する admin UI は無効表示にして理由を出している (fork frontend)。
 
-`admin/drive/clean-remote-files` も実装は残るが、対象 (`isLink=false` の remote file) が
-構造的に存在しないため常に 0 件。
+`admin/drive/clean-remote-files` も実装は残る。**mk-go が作った行に対しては常に 0 件** —
+対象 (`isLink=false` の remote file) を作る経路が無いため。**TS 製の DB を引き継いだときだけ
+対象がある** (あちらは `cacheRemoteFiles` が真なら実体を保存する)。ただし同梱フロントエンドは
+このボタンを理由つきで無効表示にしているので、引き継いだ行を消すには API を直接叩く。
 
 ### 理由
 
@@ -759,6 +763,11 @@ Drive へ保存する。**mk-go はこれを実装しない。** 未実装では
     存在しない。実装しかけたが、キャッシュしない以上 dead code になるため破棄した
   - remote user への `driveCapacityMb` gate — 同様に意味を持たない。`size=0` の link 行は
     使用量に乗らない
+
+この設計の効果は `admin/drive/usage` (§5、#3053) で数字として確かめられる。リモートの行は
+`isLink = true` / `size = 0` なので、**件数は積み上がるのに使用量は 0 のまま**という形で出る。
+逆に言うと、そこに 0 でない値が出るインスタンスは TS 製の DB を引き継いでおり、
+`isLink = false` のリモート行が残っている (消し方は上の `clean-remote-files` の項)。
 
 ## 5.6. timeline の DB fallback を止めるつまみ
 

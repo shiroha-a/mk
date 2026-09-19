@@ -198,6 +198,9 @@ type Handler struct {
 	deliveryHealth DeliveryHealthProvider
 	// inboxHealth は admin/federation/inbox-health の集計元 (#2471)。
 	inboxHealth DeliveryHealthProvider
+	// driveUsage は admin/drive/usage の集計元 (#3053)。**未配線なら 500 を
+	// 返す** — 0 バイトを返すと「使っていない」という誤った事実を出すため。
+	driveUsage DriveUsageProvider
 	// signupApplications は承認制の登録の審査面 (#2555)。未配線なら該当
 	// endpoint は 503 を返す。
 	signupApplications SignupApplicationReviewer

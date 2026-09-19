@@ -85,6 +85,7 @@ import (
 	coreclip "github.com/shiroha-a/mk/internal/core/clip"
 	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
+	"github.com/shiroha-a/mk/internal/core/driveusage"
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
 	coreemojiimport "github.com/shiroha-a/mk/internal/core/emojiimport"
 	"github.com/shiroha-a/mk/internal/core/emojimeta"
@@ -3215,6 +3216,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
+	// ドライブ使用量の集計 (#3053)。**この行を落とすと admin/drive/usage が
+	// 500 を返す** — 0 バイトを返して「使っていない」と誤認させるよりよい。
+	adminHandler.SetDriveUsageProvider(driveusage.NewService(
+		repository.NewDriveUsageRepository(s.db), driveusage.DefaultTTL, driveusage.DefaultTopN))
 	adminHandler.SetSignupApplicationReviewer(signupApplicationService)
 	// カスタム絵文字の登録申請 (#2934)。承認までは emoji 行を作らず、
 	// 専用テーブルに閉じ込める (signup_application と同じ形)。
@@ -3443,6 +3448,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/drive/cleanup", adminHandler.DriveCleanup, middleware.RequireModerator(roleService), middleware.RequireScope("write:admin:drive"))
 	api.POST("/admin/drive/files", adminHandler.DriveFiles, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:drive"))
 	api.POST("/admin/drive/show-file", adminHandler.DriveShowFile, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:drive"))
+	// mk-go 独自 (#3053)。インスタンス全体のドライブ使用量と内訳。upstream は
+	// per-user の `driveCapacityMb` しか持たず、合計を出す口が無い。
+	api.POST("/admin/drive/usage", adminHandler.DriveUsage, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:drive"))
 	api.POST("/admin/emoji/add-aliases-bulk", adminHandler.EmojiAddAliasesBulk, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	api.POST("/admin/emoji/copy", adminHandler.EmojiCopy, middleware.RequireRolePolicy(roleService, corerole.PolicyCanManageCustomEmojis), middleware.RequireScope("write:admin:emoji"))
 	// mk-go 独自 (#2698)。リモート絵文字のインポート時に、AP では運ばれない
