@@ -1248,6 +1248,52 @@ func TestProcess_AcceptFollow_InnerActorEmbeddedObject(t *testing.T) {
 	assert.Empty(t, reqRepo.Requests, "承認された request は消えること")
 }
 
+// stubAcceptBlockingChecker reports the configured pair as blocked.
+type stubAcceptBlockingChecker struct{ blockerID, blockeeID string }
+
+func (s *stubAcceptBlockingChecker) IsBlocked(blockerID, blockeeID string) (bool, error) {
+	return blockerID == s.blockerID && blockeeID == s.blockeeID, nil
+}
+
+// AcceptRequest の多層防御 (#3111 レビュー) が ErrBlocked を返すケース:
+// local follower (bob) が remote followee (alice) を block した後、best-effort
+// な申請取り消しが失敗して申請が残ったまま alice からの Accept が届いた状況を
+// 再現する。retry しても結果は変わらないので ack (nil 返却) すること、
+// エラーのまま inbox job を落とさないことを見る (#534 の idempotency
+// invariant)。
+func TestProcess_AcceptFollow_BlockedSwallowsError(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	reqRepo := testutil.NewMockFollowRequestRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(aliceActor)}, idGen)
+	followingSvc := corefollowing.NewService(repo, followingRepo, reqRepo, idGen)
+	followingSvc.SetBlockingChecker(&stubAcceptBlockingChecker{blockerID: "bob", blockeeID: "alice1"})
+	p := federation.NewProcessor(resolver, followingSvc, nil, nil, repo, noteRepo)
+
+	aliceURI := "https://remote.example/users/alice"
+	host := "remote.example"
+	repo.Users["alice1"] = &model.User{ID: "alice1", Username: "alice", UsernameLower: "alice", URI: &aliceURI, Host: &host}
+	repo.Users["bob"] = &model.User{ID: "bob", Username: "bob", UsernameLower: "bob"}
+	// block 時の取り消しが失敗した想定で申請を残したままにする。
+	reqRepo.Requests["r1"] = &model.FollowRequest{ID: "r1", FollowerID: "bob", FolloweeID: "alice1"}
+
+	acceptBody := []byte(`{
+		"type": "Accept",
+		"actor": "https://remote.example/users/alice",
+		"object": {
+			"type": "Follow",
+			"actor": "https://example.com/users/bob",
+			"object": "https://remote.example/users/alice"
+		}
+	}`)
+	require.NoError(t, p.Process(acceptBody), "block による拒否は ack すべきで error を返してはいけない")
+	assert.Empty(t, followingRepo.Followings, "block 中なので Following は成立しない")
+	assert.Len(t, reqRepo.Requests, 1, "承認しないだけで申請行は消さない")
+}
+
 func TestProcess_AcceptNonFollow(t *testing.T) {
 	p, _, _, _ := newProcessor(t, aliceActor)
 	// inner objectがFollowでない場合は無視

@@ -357,7 +357,11 @@ type genericActivity struct {
 // hop reordering) eventually converges. Verified at the time of #534:
 //
 //   - Follow / Accept: swallow ErrAlreadyFollowing / ErrAlreadyRequested /
-//     ErrRequestNotFound (so re-deliveries are no-ops)
+//     ErrRequestNotFound (so re-deliveries are no-ops). Accept also swallows
+//     ErrBlocking / ErrBlocked, returned by AcceptRequest's defense-in-depth
+//     block check (a block condition never clears on retry; Follow itself
+//     handles ErrBlocking / ErrBlocked separately via auto-unblock / Reject
+//     before reaching this generic list)
 //   - Undo Follow / Like / Block: swallow ErrNotFollowing / ErrReactionNotFound /
 //     ErrNotBlocking
 //   - Like / Block: swallow ErrAlreadyReacted / ErrAlreadyBlocking
@@ -1322,6 +1326,13 @@ func (p *Processor) handleAccept(act genericActivity) error {
 	if err := p.followingService.AcceptRequest(followee.ID, follower.ID); err != nil {
 		// フォローリクエストが存在しない場合は無視（既にフォロー済み等）
 		if errors.Is(err, corefollowing.ErrRequestNotFound) {
+			return nil
+		}
+		// block 関係による拒否 (AcceptRequest の多層防御、#3111 レビュー) も
+		// retry しても結果は変わらないので ack する。生で返すと inbox job が
+		// 8 回 retry してから dead letter に積まれ、その間 inbox health の
+		// 統計にも失敗として乗る (#534 の idempotency invariant)。
+		if errors.Is(err, corefollowing.ErrBlocking) || errors.Is(err, corefollowing.ErrBlocked) {
 			return nil
 		}
 		return err
