@@ -10,7 +10,8 @@ import "time"
 type IPLookupLog struct {
 	ID     string `gorm:"column:id;primaryKey;type:varchar(32)" json:"id"`
 	UserID string `gorm:"column:userId;type:varchar(32);not null" json:"userId"`
-	// Kind は `IPLookupKindIP` / `IPLookupKindRelated` / `IPLookupKindUserIPs`。
+	// Kind は `IPLookupKindIP` / `IPLookupKindRelated` / `IPLookupKindUserIPs` /
+	// `IPLookupKindSignins`。
 	Kind string `gorm:"column:kind;type:varchar(32);not null" json:"kind"`
 	// IP は照会に使った正規形。利用者起点の照会では空。
 	IP string `gorm:"column:ip;type:varchar(128);not null" json:"ip"`
@@ -31,6 +32,12 @@ const (
 	IPLookupKindIP = "ip"
 	// IPLookupKindRelated is `admin/ip/related-accounts` (#3105): a user was given.
 	IPLookupKindRelated = "relatedAccounts"
+	// IPLookupKindSignins is `admin/show-user` returning signin IPs (#3114).
+	//
+	// **upstream は policy を見ずに全件返す。** mk-go は `canSearchIpHistory`
+	// を持つ相手にだけ返し、返したときだけ記録する (伏せた応答は開示が
+	// 起きていないので記録しない)。
+	IPLookupKindSignins = "signins"
 	// IPLookupKindUserIPs is upstream's `admin/get-user-ips`.
 	//
 	// **upstream の口も監査する。** 返すのは同じ「利用者 ↔ IP の対応」なので、

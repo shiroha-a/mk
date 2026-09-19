@@ -1078,8 +1078,8 @@ func (h *Handler) ShowUser(c echo.Context) error {
 	// `ListByUser` が一時的に失敗する窓で**管理者の email / 2FA / サインイン
 	// 履歴が見える** (#2792)。実行者側は false = 「管理者ではない」に倒れる
 	// ので、そちらは元から安全側。
+	me := middleware.GetUser(c)
 	if h.roleService != nil {
-		me := middleware.GetUser(c)
 		if me != nil && !h.roleService.IsAdministrator(me.ID) {
 			// **root も同じ理由で `targetIsRoot` を通す (レビュー 3 周目)。**
 			switch isRoot, undet := h.targetIsRoot(user); {
@@ -1101,7 +1101,40 @@ func (h *Handler) ShowUser(c echo.Context) error {
 
 	profile, _ := h.userRepo.FindProfileByUserID(user.ID)
 
-	return c.JSON(http.StatusOK, h.packAdminUser(user, profile))
+	// **IP を出してよいのは `canSearchIpHistory` を持つ相手だけ** (#3114)。
+	// `HasRolePolicy` は管理者を短絡するので、既定 (policy false) の構成では
+	// 管理者だけが通る = `admin/ip/*` と同じ条件になる。
+	//
+	// **roleService 未配線なら伏せる側へ倒す** (fail-closed。この packer の
+	// 他の field と同じ方針)。
+	showIPs := h.roleService != nil && me != nil &&
+		h.roleService.HasRolePolicy(me.ID, role.PolicyCanSearchIpHistory)
+	if h.roleService == nil {
+		// **黙って伏せない。** 配線が落ちると IP が永久に空になるだけで
+		// 誰も気付けない (`middleware/role_policy.go` も同じ状況で鳴らす)。
+		slog.Error("admin/show-user: roleService is not wired; signin IPs are withheld")
+	}
+
+	resp := h.packAdminUser(user, profile, showIPs)
+	// **内部連絡用のキーは wire に出さない。** `signins` を引けたかどうかは
+	// 監査の判断にだけ使う。
+	signinsOK, _ := resp[signinsLoadedKey].(bool)
+	delete(resp, signinsLoadedKey)
+	if showIPs {
+		// **実際に IP を返したときだけ記録する** (#3114 / #3106)。伏せた応答も、
+		// **引けずに空になった応答も**開示が起きていないので残さない — 記録すると
+		// 「本当に 0 件だった」と「DB が落ちていて何も返していない」が
+		// `ip_lookup_log` 上で区別できなくなる (`admin/get-user-ips` と同じ判断)。
+		if signinsOK && me != nil && h.ipLookupAudit != nil {
+			signins, _ := resp["signins"].([]map[string]any)
+			h.ipLookupAudit.Record(iplookuplog.Entry{
+				UserID: me.ID, Kind: model.IPLookupKindSignins,
+				TargetUserID: user.ID, ResultCount: len(signins),
+			})
+		}
+		noStoreIPLookup(c)
+	}
+	return c.JSON(http.StatusOK, resp)
 }
 
 // ShowUsers handles POST /api/admin/show-users.
@@ -1179,8 +1212,12 @@ func badgeRolesForMap(br *[]any) []any {
 	return *br
 }
 
+// signinsLoadedKey は packAdminUser が「signins を引けたか」を呼び出し元へ
+// 渡すための内部キー。**wire へ出す前に必ず delete する。**
+const signinsLoadedKey = "__signinsLoaded"
+
 // packAdminUser returns a MeDetailed-equivalent response for admin endpoints.
-func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[string]any {
+func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile, showIPs bool) map[string]any {
 	// upstream admin/show-user (show-user.ts:233-261) が返すのはこの 24 key
 	// だけで、UserLite / UserDetailed / MeDetailed は含まない。旧実装は
 	// PackUserDetailed をベースに 70 key 近くを返しており、id をはじめ
@@ -1249,7 +1286,9 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 	}
 	// signins / roleAssigns は repo / service 未配線や lookup 失敗時も
 	// 空配列に fallback する (roles と同じ扱い、#888 / #1198)。
-	resp["signins"] = h.packUserSignins(u.ID)
+	signins, signinsOK := h.packUserSignins(u.ID, showIPs)
+	resp["signins"] = signins
+	resp[signinsLoadedKey] = signinsOK
 	resp["roleAssigns"] = h.packUserRoleAssigns(u.ID)
 	if u.LastActiveDate != nil {
 		resp["lastActiveDate"] = u.LastActiveDate.UTC().Format("2006-01-02T15:04:05.000Z")
@@ -1266,22 +1305,51 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile) map[s
 // unspecified so this is a benign deviation. Returns an empty slice (never
 // nil) so the JSON field is always `[]` for callers without a wired signin
 // repository or on lookup failure.
-func (h *Handler) packUserSignins(userID string) []map[string]any {
+//
+// **showIPs が false なら `ip` を伏せる (#3114)。** ここは `signin` テーブルの
+// ログイン IP をそのまま返す口で、**`admin/ip/*` が要求する `canSearchIpHistory`
+// を通らない**。#3104 が「IP とアカウントの対応は既定でモデレーターに開かない」
+// と決めた以上、同じ種類の情報をモデレーター権限だけで全件返すのは、mk-go が
+// 自分で作った権限境界と食い違う。**upstream からの意図的な逸脱**
+// (docs/divergence.md §7)。
+//
+// **空文字にする。** `Signin` の json-schema は `ip` を
+// `optional: false, nullable: false` と宣言しているので、key を消すことも
+// null にすることもできない。
+func (h *Handler) packUserSignins(userID string, showIPs bool) ([]map[string]any, bool) {
 	out := []map[string]any{}
 	if h.signinRepo == nil {
-		return out
+		return out, false
 	}
 	signins, err := h.signinRepo.ListByUserID(userID, -1, "", "")
 	if err != nil {
 		slog.Warn("admin/show-user: failed to load signins", "userId", userID, "err", err)
-		return out
+		return out, false
 	}
 	for _, s := range signins {
-		if packed := entity.PackSignin(s, h.idGen); packed != nil {
-			out = append(out, packed)
+		packed := entity.PackSignin(s, h.idGen)
+		if packed == nil {
+			continue
 		}
+		if !showIPs {
+			// **`PackSignin` 側は触らない。** あれは本人向けの main stream の
+			// `signin` イベントでも使う (`api/signin/handler.go`)。自分の IP を
+			// 自分が見るのは正当なので、伏せるのは admin の経路だけ。
+			packed["ip"] = ""
+			// **`headers` も伏せる。** ここには保存時の HTTP header がそのまま
+			// 入っており、**本番構成の nginx が必ず付ける `X-Real-IP` /
+			// `X-Forwarded-For`** が含まれる (`deploy/uds/nginx/mkgo.conf`)。
+			// `ip` だけ潰しても**キー 1 つ隣で同じ IP が読める**ので、伏せる
+			// 意味が無くなる (敵対的レビューで実測)。`sanitizeHeaders` が落とす
+			// のは `Authorization` / `Cookie` / `Set-Cookie` の 3 つだけ。
+			//
+			// golden schema は `headers` を `type: other` / 非 null / 必須と
+			// 宣言しているので、`ip` と同じく**空の object** に置き換える。
+			packed["headers"] = map[string]any{}
+		}
+		out = append(out, packed)
 	}
-	return out
+	return out, true
 }
 
 // packUserRoleAssigns returns the user's active role assignments in the

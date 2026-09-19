@@ -17,7 +17,8 @@ CREATE TABLE IF NOT EXISTS "ip_lookup_log" (
 	-- 引けない利用者は読み取り側が「削除済み」として出す。
 	"userId" varchar(32) NOT NULL,
 	-- 'ip' (IP を直接指定、#3104) / 'relatedAccounts' (利用者起点、#3105) /
-	-- 'userIps' (upstream の `admin/get-user-ips`)。
+	-- 'userIps' (upstream の `admin/get-user-ips`) /
+	-- 'signins' (`admin/show-user` が返すログイン IP、#3114)。
 	"kind" varchar(32) NOT NULL,
 	-- **照会に使った IP の正規形。** 利用者起点の照会では空文字。
 	-- 列を分けないのは、どちらも「何を引いたか」で監査上は同じ役割のため。
@@ -25,7 +26,7 @@ CREATE TABLE IF NOT EXISTS "ip_lookup_log" (
 	-- 利用者起点の照会で対象にした利用者。IP 起点では空文字。
 	"targetUserId" varchar(32) NOT NULL DEFAULT '',
 	-- 照会した期間 (日)。「いつの記録を見たか」も監査の対象。
-	-- **'userIps' では 0**。あちらは窓を取らず最新 30 件を返すため。
+	-- **'userIps' / 'signins' では 0**。どちらも窓を取らないため。
 	"sinceDays" integer NOT NULL,
 	-- **結果の件数だけを残す。** 結果に含まれる IP やアカウントは複製しない
 	-- (複製すると、この表が第 2 の「IP とアカウントの対応」になる)。
