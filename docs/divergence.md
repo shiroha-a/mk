@@ -34,7 +34,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | API endpoint | GET variant 23 + alias 4 + 分割アップロード 4 + 承認制 7 + 絵文字の申請 10 + exact assignment lookup 2 + admin 観測 6 | chat 15 | **0** |
 | API レスポンスの additive field | 7 (`runtime` / `mkGoVersion` / `chunkedUpload` / `approvalRequiredForSignup` / `signupApplicationForm` / `canRequestCustomEmojis` / `minimumUsernameLength`) | reversi packed game の `crc32` 等 | — |
 | DB テーブル | 13 (+ bookkeeping 2) | 0 | 0 |
-| DB カラム | 20 (+ 未使用の残存列 3) | 3 | 0 |
+| DB カラム | 22 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
 | fork frontend の独自変更 | 101 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.32a`) | — | — |
@@ -147,9 +147,9 @@ upstream 由来のクライアントはそのまま通る (省略時は upstream
 
 `__chart__*` / `__chart_day__*` 24 テーブルは独自ではない (upstream では `models/` ではなく `core/chart/charts/entities/` で定義されるため、`models/` だけを見ると誤検出する)。
 
-### 2-2. 独自カラム (26 = 実使用 23 + 未使用の残存 3)
+### 2-2. 独自カラム (28 = 実使用 25 + 未使用の残存 3)
 
-うち **mk-go が実際に読み書きするのは 23 件** (cherrypick 由来 3 + mk-go 独自 20)。残り 3 件は fresh な mk-go DB に列だけ残る未使用列で、#2243 で依存を外した。
+うち **mk-go が実際に読み書きするのは 25 件** (cherrypick 由来 3 + mk-go 独自 22)。残り 3 件は fresh な mk-go DB に列だけ残る未使用列で、#2243 で依存を外した。
 
 | テーブル | カラム | 由来 | 理由 |
 |---|---|---|---|
@@ -170,12 +170,14 @@ upstream 由来のクライアントはそのまま通る (省略時は upstream
 | `meta` | `enableEphemeralRelayNotes` / `ephemeralRelayNoteTtlMinutes` | mk-go 独自 | リレー経由投稿の揮発化 (#2332)。リレーでしか観測しない投稿は Redis に TTL 付きで置き、ローカルユーザーが触ったときだけ DB へ materialize する。既定 false は既存インスタンスの挙動を変えないため — 有効にするとグローバルタイムラインは FTT の窓より過去に遡れなくなる。**どちらかのフラグ (これか `enableRelayOrphanUserCleanup`) が有効なら、owner 無しのリモート添付を掃除する日次ジョブ (`maintenance:orphanAttachmentCleanup`、05:30) も回る** (#2722)。著者が materialize されていないリモート添付は owner 無しで保存され、ephemeral note が TTL で消えても `drive_file` の行は残るため。消すのは **(a) どの DB 上の note からも参照されておらず、(b) 生きている ephemeral note の印も無く、(c) 猶予より古い** link-only の行だけ。**TTL は寿命の上限ではない** (`Touch` が閲覧のたびに打ち直す) ので、猶予だけでは表示中の添付を守れない。生存判定は Redis の印が担い、猶予は「行を作ってから印を打つまでの窓」を覆うだけ。**Redis を `maxmemory` + `allkeys-lru` で運用する場合は注意**: タイムラインの hydrate は note (`ephNote:*`) だけを読み、印 (`ephFile:*`) には触れないので、印だけが先に evict される側に偏り (`/api/notes/show` の `Touch` は印にも `EXPIRE` を打つため LRU の idle time も更新される。偏るのは hydrate しか通らないノート)、その状態で古い行が再利用されていると表示中の添付が消えうる (`volatile-ttl` なら TTL 順なのでこの偏りは出ない)。**この機能を有効にした直後の 1 TTL ぶん**も、既存の ephemeral note には印が無い (`Touch` は `Expire` なので印を作らない)。cron の時刻は TZ 未指定で、mkq (既定) はプロセスの TZ、legacy の asynq は UTC で解釈する |
 | `meta` | `enableRelayOrphanUserCleanup` / `relayOrphanUserGraceDays` | mk-go 独自 | リレー由来の孤児 user の掃除 (#2340)。対象の限定には `relay_observed_user` を使う |
 | `meta` | `chunkedUploadEnabled` / `chunkedUploadChunkSizeMb` / `chunkedUploadSessionTtlMinutes` / `chunkedUploadMaxSessionsPerUser` / `chunkedUploadMaxPendingMbPerUser` | mk-go 独自 | 分割アップロード (#2313) の設定。**コントロールパネル (オブジェクトストレージ) に出ているのは `chunkedUploadEnabled` / `chunkedUploadChunkSizeMb` / `chunkedUploadSessionTtlMinutes` の 3 つだけ**で、ロール policy の上限になる `chunkedUploadMaxSessionsPerUser` / `chunkedUploadMaxPendingMbPerUser` は `admin/update-meta` を直接呼ぶしかない (#2900 で確認)。TS は未知の列を無視するので drop-in の復路は壊れない |
+| `user_ip` | `lastSeenAt` / `observationCount` | mk-go 独自 | IP ごとの最終観測と観測回数 (#3103)。`user_ip` は `UNIQUE (userId, ip)` で 1 ペア 1 行しか持てないので、列を足さずに出す方法が無い。**`createdAt` は初回観測** (upstream の `ApiCallService.logIp` が `INSERT ... orIgnore` なのに合わせた。#3103 より前の mk-go は衝突時に上書きしており最終観測を意味していたので、**純正から引き継いだ DB では同じ列に両方の意味の行が混ざっていた**)。既存の mk-go 行は初回を復元できないため、migration 000094 の backfill では初回 = 最終になる。**その値は「初回観測」ではなく「migration を流した時点での最終観測」**なので、それより前の観測がある行では実際より新しい日時が出る。**TS はこの 2 列を知らない**ので DEFAULT を持たせてあり (`lastSeenAt` は `now()`、`observationCount` は 1)、TS 側が `(createdAt, userId, ip)` だけを INSERT しても落ちない。TS へ戻すと最終観測と観測回数の更新が止まる (行は残る) |
 
 ### 2-3. index の差分
 
 | index | 差分の内容 |
 |---|---|
 | `chat_message(fromUserId, toUserId)` 複合 | **upstream に無い** (upstream は各列の単独 `@Index()` のみ)。mk-go 独自の最適化 |
+| `user_ip(ip, lastSeenAt DESC)` | **upstream に無い** (upstream の `user_ip` は `userId` と `UNIQUE (userId, ip)` だけ)。「その IP を使ったアカウントを最終観測の新しい順に」が #3066 の中核クエリで、これが無いと `user_ip` の seq scan になる (#3103) |
 | `drive_file(url)` / `drive_file(webpublicUrl)` / `drive_file(thumbnailUrl)` | **upstream に無い**。後 2 者は partial |
 | `clip_favorite(clipId)` | **upstream に無い** (upstream は `UNIQUE(userId, clipId)` と `userId` 単独 index のみで、`clipId` 先頭の index が無い) |
 | `user.tags` の GIN | upstream は btree (`@Index()`) で配列 containment に効かないため GIN に変更 |
@@ -887,6 +889,9 @@ GTL が無傷なので、この食い違いは mk-go 側の退行として出る
 
 | 項目 | upstream | mk-go |
 |---|---|---|
+| IP 履歴の記録契機 | 認証済み API 呼び出しのたび (`ApiCallService.logIp`。プロセス内の集合で重複排除し 1 時間ごとに clear) | **#3103 で upstream に揃えた。** それ以前はサインイン成功時しか記録しておらず、再ログインしない利用者は IP が 1 つのまま固定されていた。`meta.enableIpLogging` は**呼び出しのたびに読む**ので、管理画面での切り替えが再起動なしで効く (#3107。upstream も毎回 meta を見る)。**凍結アカウントは記録しない** — mk-go の `Authenticate` は `isSuspended` のとき `UserContextKey` に user を積まないため middleware が素通りする。upstream は `logIp` が 凍結判定より前にあるので記録する。moderation の用途では凍結後の IP こそ見たいことがあるので、#3066 でこの差が効くなら別途決める。**記録されるのは `RealIP()` が返す値**。echo は `X-Forwarded-For` を**右から左**へ走査して 最初の untrusted を採るので、全エントリが trusted なら先頭を、途中に解析不能があればその右隣を返す。**直アドレス (= proxy 自身) が入るのは実質「XFF ヘッダが無いとき」**で、`trustProxy` (`TrustIPRange`) は trust を広げることしかできない (loopback / link-local / private は echo の既定で trusted)。#3066 で関連候補から除くかを決める必要がある。**rate limit で 429 になったリクエストは記録されない** — middleware を rate limiter の後ろに置いているため。upstream は `call()` の起動直後に記録するので rate limit とは独立。重複排除の窓があるので実際の差はほぼ出ない |
+| IP 履歴の保持の基準 | `user_ip.createdAt` が 90 日より古い行を削除 (`CleanProcessorService`) | **`lastSeenAt` (最終観測) を基準にする。** mk-go の `createdAt` は初回観測なので、それを基準にすると「初めて見たのは 1 年前だが今も使っている IP」まで消える (#3103)。期間は upstream と同じ 90 日。**drop-in の往復で差が出る** — TS 側にいる間は `lastSeenAt` が更新されないので陳腐化し、mk-go へ戻した最初の cron が TS 期間中ずっと現役だった IP を消す。逆に TS の cron は `createdAt` 基準なので、mk-go が意図的に残した長寿命の行を消す |
+| `signin` テーブルの IP | `enableIpLogging` に関係なく記録し、刈らない | **同じ。** gate が掛かるのは `user_ip` と drive の `requestIp` だけで、`signin` は成功・失敗ともに IP を持つ。`user_ip` は日次の clean cron が 90 日で刈るが `signin` は刈られない (upstream も刈らない)。**IP から関連アカウントを引く機能 (#3066) はここを読まない** — 読むと「IP を記録しない」設定を実質的に迂回することになるため |
 | antenna の未読 (`hasUnreadAntenna`) | **機能ごと止まっている。** `UserEntityService.getHasUnreadAntenna` は実装がコメントアウトされ `return false; // TODO` | 実際に `antenna_note_unread` を引いて算出する。**mk-go の方が実装している側** (#2406)。あわせて antenna timeline の閲覧で未読行を消す。upstream は行を作らないので既読化も要らないが、mk-go は自前で持つ必要がある |
 | shiki (コードブロックの syntax highlight) の配信元 | `esm.sh` から動的 import (`vite.config.ts` の `externalPackages`) | **同じ** (バンドルに切り替えない)。CSP の `script-src` に `https://esm.sh` を明示的に許可している。**バンドルすると 30 ロケール分が複製されてビルド成果物が 242MB → 508MB に倍増する**ため (2026-08-09 実測。JS が 13,576 → 23,610 ファイル)。利用者 1 人あたりの転送量は変わらないが、軽量さを損なう。代償として、コードブロックを表示する閲覧者の IP とリファラが esm.sh に渡る。言語を絞ってバンドルすれば両立できる可能性はある (未検証) |
 | frontend HTML の CSP | **無し** | `frontendContentSecurityPolicy` で opt-in (既定 `off`)。**mk-go 独自の硬化** (#2425)。段階導入のため `report-only` から始め、違反を潰してから `enforce` へ切り替える運用で、**この運用サーバーは既に `enforce`** (`deploy/uds/config/default.yml`)。Playwright も `enforce` で回して実ブラウザのゲートにしている (#2788)。**script 側の `'unsafe-inline'` は #2786 で外した** — SPA shell の inline script (`VERSION` / `CLIENT_ENTRY` の定義と bootloader) は内容が起動時に固定なので、SHA-256 hash を `script-src` に足して通す。hash は HTML に埋める文字列そのものから導くので、片方だけ変えて壊れることはない (`internal/server/frontend.go` の `bootGlobals`)。**style 側は残す** — Vue の `:style` バインディングが 146 箇所あり DOM の inline `style` 属性になる。属性は `style-src-attr` の管轄で hash では救えず (`'unsafe-hashes'` が要る)、外すと UI が広範に壊れる。`frame-ancestors` は含めない — `X-Frame-Options` 側が `/embed/` の除外を持っており、二重管理を避けるため。**`/embed/` にも同じ CSP を付ける** (#2789) — embed は `X-Frame-Options` の除外対象 = 第三者のページに iframe で埋め込まれる唯一の経路で、script が注入されると埋め込み先ではなく**こちらの origin** で動く。captcha の origin だけは足さない (embed はサインアップ経路を持たない) |

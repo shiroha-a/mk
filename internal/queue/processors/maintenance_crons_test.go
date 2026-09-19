@@ -126,7 +126,7 @@ type fakeUserIPPruner struct {
 	err       error
 }
 
-func (f *fakeUserIPPruner) DeleteOlderThan(t time.Time) (int64, error) {
+func (f *fakeUserIPPruner) DeleteLastSeenBefore(t time.Time) (int64, error) {
 	f.gotBefore = t
 	return 1, f.err
 }

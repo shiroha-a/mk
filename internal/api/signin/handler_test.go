@@ -30,15 +30,14 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-type mockIPLogger struct {
-	fn func(userID, ip string) error
+type mockIPRecorder struct {
+	fn func(userID, ip string)
 }
 
-func (m *mockIPLogger) Upsert(userID, ip string) error {
+func (m *mockIPRecorder) Record(userID, ip string) {
 	if m.fn != nil {
-		return m.fn(userID, ip)
+		m.fn(userID, ip)
 	}
-	return nil
 }
 
 func newTestHandler(t *testing.T) (*signin.Handler, *testutil.MockUserRepository) {
@@ -608,14 +607,14 @@ func TestSignin_IPLogging(t *testing.T) {
 	createTestUser(repo, "testuser", "password123")
 
 	var logged atomic.Bool
-	h.SetIPLogger(&mockIPLogger{fn: func(userID, ip string) error {
+	h.SetIPRecorder(&mockIPRecorder{fn: func(userID, ip string) {
 		logged.Store(true)
-		return nil
-	}}, true)
+	}})
 
 	rec := doPost(h.Signin, `{"username":"testuser","password":"password123"}`)
 	assert.Equal(t, http.StatusOK, rec.Code)
-	time.Sleep(50 * time.Millisecond)
+	// **記録は同期。** goroutine へ逃がすのは recorder 側の仕事になったので、
+	// handler から戻った時点で呼ばれている。
 	assert.True(t, logged.Load())
 }
 

@@ -13,8 +13,11 @@ import (
 // callers can wire a partial subset.
 type (
 	// UserIPPruner removes old user_ip rows (repository.UserIPRepository).
+	//
+	// **基準は最終観測 (#3103)。** `createdAt` は初回観測なので、それを基準に
+	// 刈ると「初めて見たのは 1 年前だが今も使っている IP」まで消える。
 	UserIPPruner interface {
-		DeleteOlderThan(t time.Time) (int64, error)
+		DeleteLastSeenBefore(t time.Time) (int64, error)
 	}
 	// RoleAssignmentPruner removes expired role_assignment rows
 	// (repository.RoleAssignmentRepository).
@@ -100,7 +103,7 @@ func (p *CleanProcessor) Handle(_ context.Context, _ driver.Task) error {
 	now := time.Now()
 
 	if p.userIP != nil {
-		if n, err := p.userIP.DeleteOlderThan(now.Add(-userIPRetention)); err != nil {
+		if n, err := p.userIP.DeleteLastSeenBefore(now.Add(-userIPRetention)); err != nil {
 			slog.Warn("clean: prune user_ip failed", "err", err)
 		} else if n > 0 {
 			slog.Info("clean: pruned user_ip", "count", n)

@@ -97,6 +97,7 @@ import (
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	corehashtag "github.com/shiroha-a/mk/internal/core/hashtag"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
+	"github.com/shiroha-a/mk/internal/core/iplog"
 	coremediaproxy "github.com/shiroha-a/mk/internal/core/mediaproxy"
 	coremodlog "github.com/shiroha-a/mk/internal/core/moderationlog"
 	coremoderatoractivity "github.com/shiroha-a/mk/internal/core/moderatoractivity"
@@ -241,6 +242,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// userIPRepo は signin handler (Phase 6) と clean cron processor (#1563)
 	// の双方で使うため、他 repo と同じ早い段階で構築する。
 	userIPRepo := repository.NewUserIPRepository(s.db)
+	// 認証済みリクエストの IP を記録する (#3103)。**meta は呼び出しのたびに読む**
+	// ので、`enableIpLogging` の切り替えが再起動なしで効く (#3107)。重複排除の窓は
+	// upstream の `userIpHistories` に合わせて 1 時間。
+	ipLogService := iplog.NewService(userIPRepo, metaRepo, iplog.DedupeWindow)
 	chatRepo := repository.NewChatRepository(s.db)
 	channelFavoriteRepo := repository.NewChannelFavoriteRepository(s.db)
 	channelMutingRepo := repository.NewChannelMutingRepository(s.db)
@@ -1381,6 +1386,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		slog.Warn("test mode: rate limiting is disabled")
 	}
 	api.Use(rateLimiter.Middleware())
+	// 認証済みリクエストの IP を記録する (#3103)。**group の Use なので
+	// `auth.Authenticate()` (global) より後に走る** — 逆だと UserContextKey が
+	// まだ積まれておらず、常に何もしない middleware になる。
+	api.Use(middleware.RecordClientIP(ipLogService))
 
 	// Meta endpoint (public)
 	metaHandler := meta.NewHandler(s.config, metaRepo)
@@ -1579,10 +1588,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 配線されていたので、captcha を有効にした e2e 構成では signup だけ
 	// 通って signin が落ちる。
 	signinHandler.SetTestMode(s.config.TestMode)
-	// IP logging: meta.enableIpLogging が true のときだけ記録する。
-	if serverMeta, err := metaRepo.Fetch(); err == nil && serverMeta.EnableIPLogging {
-		signinHandler.SetIPLogger(userIPRepo, true)
-	}
+	// IP logging (#3103)。**起動時に meta を読んで配線するかどうかを決めない** —
+	// その形だと管理画面で有効にしても再起動するまで記録が始まらなかった (#3107)。
+	// 記録するかどうかは iplog.Service が呼び出しのたびに meta から判断する。
+	signinHandler.SetIPRecorder(ipLogService)
 	// signin履歴レコード注入
 	signinRepo := repository.NewSigninRepository(s.db)
 	signinHandler.SetSigninRepo(signinRepo, idGen)

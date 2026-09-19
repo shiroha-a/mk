@@ -151,8 +151,8 @@ func (h *Handler) finishPasskeySignin(c echo.Context, user *model.User, cred *we
 
 	// upstream は `{ signinResponse: { finished: true, id, i } }` を返す。
 	signinResp := h.okBody(user)
-	if h.ipLoggingOn && h.ipLogger != nil {
-		go h.ipLogger.Upsert(user.ID, c.RealIP())
+	if h.ipRecorder != nil {
+		h.ipRecorder.Record(user.ID, c.RealIP())
 	}
 	if h.signinRepo != nil && h.idGen != nil {
 		hdrs := c.Request().Header.Clone()

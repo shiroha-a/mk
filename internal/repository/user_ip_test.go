@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,46 +11,150 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestUserIPRepository_DeleteOlderThan(t *testing.T) {
+// 保持の基準は**最終観測**。`createdAt` (= 初回観測) を基準にすると、
+// 「初めて見たのは 100 日前だが今も使っている IP」まで消える。
+func TestUserIPRepository_DeleteLastSeenBefore(t *testing.T) {
 	repo := NewUserIPRepository(testDB)
 	u := insertTestUser(t, "ip_del", "ipdel")
 	defer cleanupUser(t, u.ID)
 	defer testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
 
-	// 100 日前の行を直接 backdate insert。
-	old := &model.UserIP{UserID: u.ID, IP: "1.1.1.1", CreatedAt: time.Now().Add(-100 * 24 * time.Hour)}
-	require.NoError(t, testDB.Create(old).Error)
-	// 直近の行 (now)。
-	require.NoError(t, repo.Upsert(u.ID, "2.2.2.2"))
+	long := time.Now().Add(-100 * 24 * time.Hour)
+	// 100 日前に初めて見て、それ以来見ていない → 消える。
+	require.NoError(t, testDB.Create(&model.UserIP{
+		UserID: u.ID, IP: "1.1.1.1", CreatedAt: long, LastSeenAt: long, ObservationCount: 1,
+	}).Error)
+	// 100 日前に初めて見たが、今も使っている → **残る**。
+	require.NoError(t, testDB.Create(&model.UserIP{
+		UserID: u.ID, IP: "3.3.3.3", CreatedAt: long, LastSeenAt: time.Now(), ObservationCount: 2,
+	}).Error)
+	// 直近に初めて見た → 残る。
+	require.NoError(t, repo.Observe(u.ID, "2.2.2.2", time.Now()))
 
-	n, err := repo.DeleteOlderThan(time.Now().Add(-90 * 24 * time.Hour))
+	n, err := repo.DeleteLastSeenBefore(time.Now().Add(-90 * 24 * time.Hour))
 	require.NoError(t, err)
-	assert.EqualValues(t, 1, n, "90 日より古い行だけ削除")
+	assert.EqualValues(t, 1, n, "最終観測が 90 日より古い行だけ削除")
+
 	rows, err := repo.ListByUser(u.ID, 10)
 	require.NoError(t, err)
-	assert.Len(t, rows, 1, "直近の行のみ残る")
+	got := make([]string, 0, len(rows))
+	for _, r := range rows {
+		got = append(got, r.IP)
+	}
+	assert.ElementsMatch(t, []string{"2.2.2.2", "3.3.3.3"}, got)
 }
 
-func TestUserIPRepository_Upsert(t *testing.T) {
+// **`createdAt` は衝突しても動かない (初回観測)。** upstream の
+// `INSERT ... orIgnore` と同じ意味にするための中核。動かすと純正へ戻したときに
+// 同じ列が別の意味になる。
+func TestUserIPRepository_ObserveKeepsFirstSeen(t *testing.T) {
+	repo := NewUserIPRepository(testDB)
+	u := insertTestUser(t, "ip_obs", "ipobs")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
+
+	first := time.Now().Add(-48 * time.Hour).Truncate(time.Millisecond)
+	later := time.Now().Add(-1 * time.Hour).Truncate(time.Millisecond)
+
+	require.NoError(t, repo.Observe(u.ID, "192.0.2.1", first))
+	require.NoError(t, repo.Observe(u.ID, "192.0.2.1", later))
+
+	rows, err := repo.ListByUser(u.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1, "同じ (利用者, IP) は 1 行のまま")
+	assert.WithinDuration(t, first, rows[0].CreatedAt, time.Millisecond, "createdAt が動いた")
+	assert.WithinDuration(t, later, rows[0].LastSeenAt, time.Millisecond, "lastSeenAt が更新されていない")
+	assert.Equal(t, 2, rows[0].ObservationCount)
+}
+
+// 観測が前後して届いても最終観測が巻き戻らない。記録は goroutine で走るので
+// 順序の保証が無く、巻き戻ると保持の刈り取り基準まで古くなる。
+func TestUserIPRepository_ObserveDoesNotRewindLastSeen(t *testing.T) {
+	repo := NewUserIPRepository(testDB)
+	u := insertTestUser(t, "ip_rew", "iprew")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
+
+	newer := time.Now().Add(-time.Hour).Truncate(time.Millisecond)
+	older := time.Now().Add(-5 * time.Hour).Truncate(time.Millisecond)
+
+	require.NoError(t, repo.Observe(u.ID, "192.0.2.9", newer))
+	require.NoError(t, repo.Observe(u.ID, "192.0.2.9", older))
+
+	rows, err := repo.ListByUser(u.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 1)
+	assert.WithinDuration(t, newer, rows[0].LastSeenAt, time.Millisecond, "最終観測が巻き戻った")
+	// 初回観測は古い側へ動かさない (upstream の orIgnore も動かさない)。
+	assert.WithinDuration(t, newer, rows[0].CreatedAt, time.Millisecond)
+	assert.Equal(t, 2, rows[0].ObservationCount)
+}
+
+// 別々の IP は別の行。
+func TestUserIPRepository_ObserveSeparatesIPs(t *testing.T) {
 	repo := NewUserIPRepository(testDB)
 	u := insertTestUser(t, "ip_u1", "ipu1")
 	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
 
-	require.NoError(t, repo.Upsert(u.ID, "192.168.1.1"))
-	require.NoError(t, repo.Upsert(u.ID, "10.0.0.1"))
+	now := time.Now()
+	require.NoError(t, repo.Observe(u.ID, "192.168.1.1", now))
+	require.NoError(t, repo.Observe(u.ID, "10.0.0.1", now))
 
 	ips, err := repo.ListByUser(u.ID, 10)
 	require.NoError(t, err)
 	assert.Len(t, ips, 2)
+}
 
-	// upsert same IP updates timestamp
-	time.Sleep(10 * time.Millisecond)
-	require.NoError(t, repo.Upsert(u.ID, "192.168.1.1"))
-	ips, _ = repo.ListByUser(u.ID, 10)
-	assert.Len(t, ips, 2)
+// **「その IP を使ったアカウント」が index で引けること (#3066 の中核クエリ)。**
+// index が無いと `user_ip` の seq scan になる。
+func TestUserIPRepository_IPLookupUsesIndex(t *testing.T) {
+	u := insertTestUser(t, "ip_idx", "ipidx")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
 
-	// cleanup
-	testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
+	// **行が少ないと planner が seq scan を選ぶ。** index が「使える」ことを
+	// 見たいので、選ばせるだけの行数を入れる。
+	rows := make([]*model.UserIP, 0, 2000)
+	base := time.Now().Add(-24 * time.Hour)
+	for i := 0; i < 2000; i++ {
+		rows = append(rows, &model.UserIP{
+			UserID: u.ID, IP: fmt.Sprintf("198.51.%d.%d", i/256, i%256),
+			CreatedAt: base, LastSeenAt: base, ObservationCount: 1,
+		})
+	}
+	require.NoError(t, testDB.CreateInBatches(rows, 500).Error)
+	require.NoError(t, testDB.Exec(`ANALYZE "user_ip"`).Error)
+
+	var plan []string
+	require.NoError(t, testDB.Raw(
+		`EXPLAIN SELECT "userId" FROM "user_ip" WHERE ip = ? ORDER BY "lastSeenAt" DESC LIMIT 30`,
+		"198.51.3.7").Scan(&plan).Error)
+	joined := strings.Join(plan, "\n")
+	assert.Contains(t, joined, "IDX_user_ip_ip_lastSeenAt", "IP 検索が index を使っていない:\n"+joined)
+	assert.NotContains(t, joined, "Seq Scan on user_ip", "IP 検索が seq scan になっている:\n"+joined)
+}
+
+// **並びは upstream と同じ `id DESC`。** upstream `admin/get-user-ips` が
+// `order: { id: 'DESC' }` なので、observation の時刻ではなく行の採番順で返す。
+// 時刻で並べ替えると、backdate した行の順序が upstream と食い違う。
+func TestUserIPRepository_ListByUserOrdersByIDDesc(t *testing.T) {
+	repo := NewUserIPRepository(testDB)
+	u := insertTestUser(t, "ip_ord", "ipord")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
+
+	now := time.Now()
+	// **時刻の順序と採番の順序を逆にする。** 揃えてしまうと、どちらで並べても
+	// 同じ結果になり基準を固定できない。
+	require.NoError(t, repo.Observe(u.ID, "192.0.2.1", now))                    // id 小 / createdAt 新
+	require.NoError(t, repo.Observe(u.ID, "192.0.2.2", now.Add(-72*time.Hour))) // id 大 / createdAt 旧
+
+	rows, err := repo.ListByUser(u.ID, 10)
+	require.NoError(t, err)
+	require.Len(t, rows, 2)
+	assert.Equal(t, []string{"192.0.2.2", "192.0.2.1"},
+		[]string{rows[0].IP, rows[1].IP}, "id の降順になっていない")
 }
 
 func TestUserIPRepository_ListByUser_Empty(t *testing.T) {
@@ -58,9 +164,26 @@ func TestUserIPRepository_ListByUser_Empty(t *testing.T) {
 	assert.Empty(t, ips)
 }
 
+// limit <= 0 は既定の 30 に丸める。
+//
+// **存在しない user で見ても空虚。** `LIMIT 0` でも `LIMIT 30` でも結果は空なので、
+// 丸めを外した変異が素通りする (実測)。30 件より多く入れて件数で見る。
 func TestUserIPRepository_ListByUser_DefaultLimit(t *testing.T) {
 	repo := NewUserIPRepository(testDB)
-	ips, err := repo.ListByUser("ghost", 0)
+	u := insertTestUser(t, "ip_lim", "iplim")
+	defer cleanupUser(t, u.ID)
+	defer testDB.Exec(`DELETE FROM "user_ip" WHERE "userId" = ?`, u.ID)
+
+	now := time.Now()
+	for i := 0; i < 35; i++ {
+		require.NoError(t, repo.Observe(u.ID, fmt.Sprintf("203.0.113.%d", i), now))
+	}
+
+	ips, err := repo.ListByUser(u.ID, 0)
 	require.NoError(t, err)
-	assert.Empty(t, ips)
+	assert.Len(t, ips, 30, "limit <= 0 が既定の 30 に丸められていない")
+
+	ips, err = repo.ListByUser(u.ID, 5)
+	require.NoError(t, err)
+	assert.Len(t, ips, 5)
 }

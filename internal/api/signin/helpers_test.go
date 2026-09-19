@@ -299,14 +299,13 @@ func (r *recCounterRepo) Delete(string, string) error                         { 
 func (r *recCounterRepo) DeleteByUser(string) error                           { return nil }
 func (r *recCounterRepo) CountByUser(string) (int64, error)                   { return 0, nil }
 
-type stubIPLogger struct{ logged chan struct{} }
+type stubIPRecorder struct{ logged chan struct{} }
 
-func (s *stubIPLogger) Upsert(_, _ string) error {
+func (s *stubIPRecorder) Record(_, _ string) {
 	select {
 	case s.logged <- struct{}{}:
 	default:
 	}
-	return nil
 }
 
 func TestFinishPasskeySignin_HooksFire(t *testing.T) {
@@ -319,7 +318,7 @@ func TestFinishPasskeySignin_HooksFire(t *testing.T) {
 	h.SetWebAuthn(nil, skRepo) // WebAuthn nil でも skRepo だけ注入できる
 
 	logged := make(chan struct{}, 1)
-	h.SetIPLogger(&stubIPLogger{logged: logged}, true)
+	h.SetIPRecorder(&stubIPRecorder{logged: logged})
 	signinRepo := testutil.NewMockSigninRepository()
 	h.SetSigninRepo(signinRepo, fixedIDGen{})
 

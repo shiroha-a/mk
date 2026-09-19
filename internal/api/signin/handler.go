@@ -40,9 +40,14 @@ func setPendingPasswordMigration(c echo.Context, scheme password.Scheme, verifie
 	}
 }
 
-// IPLogger records user IPs on successful authentication.
-type IPLogger interface {
-	Upsert(userID, ip string) error
+// IPRecorder records the IP an authenticated request came from.
+// Implemented by core/iplog.Service.
+//
+// **記録するかどうかの判断は実装側に任せる (#3103)。** 以前は起動時に
+// `meta.enableIpLogging` を読んで bool で渡していたが、その形だと管理画面で
+// 有効にしても再起動するまで記録が始まらなかった (#3107)。
+type IPRecorder interface {
+	Record(userID, ip string)
 }
 
 // MainStreamPublisher emits real-time events to a single user's `main`
@@ -59,8 +64,7 @@ type Handler struct {
 	webauthnSvc         *twofactor.WebAuthnService
 	securityKeyRepo     repository.UserSecurityKeyRepository
 	captchaSvc          *captcha.Service
-	ipLogger            IPLogger
-	ipLoggingOn         bool
+	ipRecorder          IPRecorder
 	signinRepo          repository.SigninRepository
 	idGen               id.Generator
 	mainStreamPublisher MainStreamPublisher
@@ -104,10 +108,9 @@ func (h *Handler) SetMetaRepo(r repository.MetaRepository) { h.metaRepo = r }
 // HasMetaRepo reports whether the meta repository was wired for email l10n.
 func (h *Handler) HasMetaRepo() bool { return h.metaRepo != nil }
 
-// SetIPLogger attaches an IPLogger and enables IP logging.
-func (h *Handler) SetIPLogger(logger IPLogger, enabled bool) {
-	h.ipLogger = logger
-	h.ipLoggingOn = enabled
+// SetIPRecorder attaches the IP recorder. 未設定なら記録しない。
+func (h *Handler) SetIPRecorder(rec IPRecorder) {
+	h.ipRecorder = rec
 }
 
 // NewHandler creates a new signin Handler.
@@ -576,8 +579,9 @@ func (h *Handler) migratePendingPassword(c echo.Context, userID string) {
 // (#2454)。`login` 通知はアプリ内にしか出ないので、乗っ取られた側がクライアントを
 // 開かない限り気付けない。メールはその唯一の外向き経路にあたる。
 func (h *Handler) RecordSuccessfulSignin(userID, ip string, headers http.Header) {
-	if h.ipLoggingOn && h.ipLogger != nil {
-		go h.ipLogger.Upsert(userID, ip)
+	if h.ipRecorder != nil {
+		// 書き込みを goroutine へ逃がすのは recorder 側の仕事。
+		h.ipRecorder.Record(userID, ip)
 	}
 	if h.signinRepo != nil && h.idGen != nil {
 		go h.recordSignin(userID, ip, headers, true)
