@@ -1149,20 +1149,69 @@ func TestProcess_Remove(t *testing.T) {
 	require.NoError(t, p.Process(removeBody))
 }
 
+// ピン留めしていないノートの Remove はエラーにならない (not-found は ack)。
+//
+// **featured を設定しないと pin の lookup に到達しない。** `handleRemove` は
+// actor の featured と target が一致しなければそこで抜けるので、設定しないと
+// 「pin が無い」を試したつもりで分岐に一度も入らない (#3115 で実測)。
 func TestProcess_Remove_NotPinned(t *testing.T) {
-	p, _, noteRepo, _ := newProcessorWithPinning(t)
+	p, repo, noteRepo, _ := newProcessorWithPinning(t)
+	aliceID := resolveAliceAndSetFeatured(t, p, repo)
 	noteURI := "https://remote.example/notes/n1"
-	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: "alice", URI: &noteURI}
+	noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: aliceID, URI: &noteURI}
 
-	// ピン留めしていないノートのRemoveはエラーにならない
-	body := []byte(`{
-		"type": "Remove",
-		"actor": "https://remote.example/users/alice",
-		"object": "https://remote.example/notes/n1",
-		"target": "https://remote.example/users/alice/collections/featured"
-	}`)
-	require.NoError(t, p.Process(body))
+	require.NoError(t, p.Process([]byte(removeFeaturedBody)))
 }
+
+// **unpin 側も DB 障害は ack しない** (#3115)。
+//
+// ack すると pin が外れないまま残り、相手は再送しないので二度と直らない。
+// 直上の `Remove_NotPinned` (not-found = ack が正しい) と対にして読むこと。
+func TestProcess_Remove_LookupFailurePropagates(t *testing.T) {
+	// **featured を先に設定する。** `handleRemove` は actor の featured と
+	// target が一致しなければ**そこで抜ける**ので、設定しないと note の lookup に
+	// 一度も到達しない (この経路を試したつもりで何も試していない形になる)。
+	boom := errors.New("connection refused")
+	t.Run("note の lookup が落ちる", func(t *testing.T) {
+		p, repo, noteRepo, _ := newProcessorWithPinning(t)
+		resolveAliceAndSetFeatured(t, p, repo)
+		noteRepo.FindByURIErr = boom
+		require.ErrorIs(t, p.Process([]byte(removeFeaturedBody)), boom, "DB 障害を ack している")
+	})
+	t.Run("pin の lookup が落ちる", func(t *testing.T) {
+		p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
+		aliceID := resolveAliceAndSetFeatured(t, p, repo)
+		noteURI := "https://remote.example/notes/n1"
+		noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: aliceID, URI: &noteURI}
+		piningRepo.FindErr = boom
+		require.ErrorIs(t, p.Process([]byte(removeFeaturedBody)), boom, "DB 障害を ack している")
+	})
+	// **書き込みの失敗も伝播する。** lookup だけ retry に倒してここを捨てると、
+	// 「pin が外れないまま残る」という同じ結末が DELETE 側で残る。
+	t.Run("pin の削除が落ちる", func(t *testing.T) {
+		p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
+		aliceID := resolveAliceAndSetFeatured(t, p, repo)
+		noteURI := "https://remote.example/notes/n1"
+		noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: aliceID, URI: &noteURI}
+		piningRepo.Pinings["p1"] = &model.UserNotePining{ID: "p1", UserID: aliceID, NoteID: "n1"}
+		piningRepo.DeleteErr = boom
+		require.ErrorIs(t, p.Process([]byte(removeFeaturedBody)), boom, "削除の失敗を ack している")
+	})
+	// **not-found は ack のまま。** こちらを retry に倒すと、こちらが取り込んで
+	// いないノートの pin 解除という**ごく普通の Remove** が dead letter に積まれる。
+	t.Run("note が無いのは ack", func(t *testing.T) {
+		p, repo, _, _ := newProcessorWithPinning(t)
+		resolveAliceAndSetFeatured(t, p, repo)
+		require.NoError(t, p.Process([]byte(removeFeaturedBody)))
+	})
+}
+
+const removeFeaturedBody = `{
+	"type": "Remove",
+	"actor": "https://remote.example/users/alice",
+	"object": "https://remote.example/notes/n1",
+	"target": "https://remote.example/users/alice/collections/featured"
+}`
 
 func TestProcess_AddWithoutRepo(t *testing.T) {
 	p, _, _, _ := newProcessor(t, aliceActor)
@@ -1332,6 +1381,107 @@ func TestProcess_AcceptUnknownFollower(t *testing.T) {
 		}
 	}`)
 	require.NoError(t, p.Process(body))
+}
+
+// **DB 障害は ack しない** (#3115)。
+//
+// ack すると相手は 2xx を受け取って**再送しない**ので、一時的な接続断だけで
+// Accept が恒久的に失われ、ローカル利用者のフォローリクエストは「リクエスト中」
+// のまま永久に残る。error を返せば inbox job が retry する。
+//
+// **直上の `AcceptUnknownFollower` と対にして読むこと。** あちらは not-found で
+// ack が正しく、この 2 本が揃って初めて「種別を見て分けている」ことになる
+// (片方だけだと、両方を同じ側へ倒す実装で緑になる)。
+func TestProcess_AcceptFollowerLookupFailurePropagates(t *testing.T) {
+	// **2 経路とも試す。** follower の URI が自ホストの `/users/{id}` なら
+	// `FindByID`、そうでなければ `FindByURI` を引く。**片方だけ guard する形**
+	// (#3025 が名指しした失敗形) は、1 経路しか試さないと素通りする。
+	// mock の hook も `FindErr` / `FindByURIErr` で分かれている。
+	cases := []struct {
+		name       string
+		followerID string
+		arm        func(*testutil.MockUserRepository, error)
+	}{
+		{
+			name:       "ローカル URI (FindByID)",
+			followerID: "https://example.com/users/ghost",
+			arm:        func(r *testutil.MockUserRepository, e error) { r.FindErr = e },
+		},
+		{
+			name:       "ローカルでない URI (FindByURI)",
+			followerID: "https://other.example/users/ghost",
+			arm:        func(r *testutil.MockUserRepository, e error) { r.FindByURIErr = e },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, repo, _, _ := newProcessor(t, aliceActor)
+			boom := errors.New("connection refused")
+			tc.arm(repo, boom)
+			body := []byte(`{
+				"type": "Accept",
+				"actor": "https://remote.example/users/alice",
+				"object": {
+					"type": "Follow",
+					"actor": "` + tc.followerID + `",
+					"object": "https://remote.example/users/alice"
+				}
+			}`)
+			require.ErrorIs(t, p.Process(body), boom,
+				"DB 障害を ack している (job が成功扱いになり retry されないので Accept が失われる)")
+		})
+	}
+}
+
+// Reject も同じ (#3115)。**Accept と Reject は同じ決定の裏表**なので、片方だけ
+// 直すと「承認は拾えるが拒否は落ちる」という非対称が残る。
+//
+// **Accept と経路が違う。** あちらは `resolver.ExtractLocalUserID` (URL builder 由来)
+// で分岐するが、Reject は `resolveTargetUser` = `Processor.localBaseURL` で分岐する。
+// `SetLocalBaseURL` を呼ばないと**常に `FindByURI` 側**へ落ちるので、`FindErr`
+// だけを立てたテストは分岐に到達せず緑のまま通る (実測)。両方を試す。
+func TestProcess_RejectFollowerLookupFailurePropagates(t *testing.T) {
+	cases := []struct {
+		name         string
+		localBaseURL string
+		arm          func(*testutil.MockUserRepository, error)
+	}{
+		{
+			name:         "localBaseURL あり (FindByID)",
+			localBaseURL: "https://example.com",
+			arm:          func(r *testutil.MockUserRepository, e error) { r.FindErr = e },
+		},
+		{
+			name: "localBaseURL なし (FindByURI)",
+			arm:  func(r *testutil.MockUserRepository, e error) { r.FindByURIErr = e },
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, repo, _, _ := newProcessor(t, aliceActor)
+			if tc.localBaseURL != "" {
+				p.SetLocalBaseURL(tc.localBaseURL)
+			}
+			// **actor の解決を先に済ませておく。** `FindByURIErr` を立てると
+			// `ResolveActor` も落ちてしまい、その手前で return されて
+			// follower の lookup に到達しない。
+			dummyURI := "https://example.com/users/dummy"
+			repo.Users["dummy"] = &model.User{ID: "dummy", Username: "dummy", URI: &dummyURI}
+			require.NoError(t, p.Process([]byte(`{"type":"Follow","actor":"https://remote.example/users/alice","object":"https://example.com/users/dummy"}`)))
+			boom := errors.New("connection refused")
+			tc.arm(repo, boom)
+			body := []byte(`{
+				"type": "Reject",
+				"actor": "https://remote.example/users/alice",
+				"object": {
+					"type": "Follow",
+					"actor": "https://example.com/users/ghost",
+					"object": "https://remote.example/users/alice"
+				}
+			}`)
+			require.ErrorIs(t, p.Process(body), boom, "DB 障害を ack している")
+		})
+	}
 }
 
 // --- Question/Poll ---

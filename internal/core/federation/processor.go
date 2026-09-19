@@ -1320,7 +1320,22 @@ func (p *Processor) handleAccept(act genericActivity) error {
 		follower, err = p.userRepo.FindByURI(followerURI)
 	}
 	if err != nil {
-		return nil
+		// **not-found だけ ack する** (#3115)。その利用者が居ないことは retry
+		// しても変わらないので、7 回 retry (試行は計 8 回、
+		// `defaultInboxJobMaxAttempts`) してから dead letter に積む意味が無い。
+		//
+		// **DB 障害は伝播させる。** ack すると**job が成功扱いになって queue が
+		// retry しない**ので、一時的な接続断だけで Accept が恒久的に失われ、
+		// ローカル利用者のフォローリクエストは「リクエスト中」のまま永久に残る。
+		// **相手の再送は当てにできない** — inbox は enqueue した時点で 202 を
+		// 返すので、worker が ack しようが error を返そうが相手が見る応答は
+		// 変わらない。#534 の idempotency invariant は「retry しても結果が
+		// 変わらないもの」の話で、**retry すれば成功しうる障害はそこに入らない**
+		// (#2792 と同じ判断)。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return err
 	}
 	// フォローリクエストを承認してフォロー関係を確立
 	if err := p.followingService.AcceptRequest(followee.ID, follower.ID); err != nil {
@@ -2386,7 +2401,14 @@ func (p *Processor) handleReject(act genericActivity) error {
 	// ままになる。
 	follower, err := p.resolveTargetUser(followerURI)
 	if err != nil {
-		return nil
+		// **Accept と同じ扱い** (#3115)。not-found は retry しても変わらないので
+		// ack するが、**DB 障害を ack すると job が成功扱いになって retry されず**、
+		// 直上のコメントが書いている「FollowRequest が永遠に pending」がそのまま
+		// 起きる。Accept と Reject は同じ決定の裏表なので、片方だけ直さない。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return err
 	}
 	// 既存のフォローがあれば解除する。pending な follow request も同様。
 	// #2106 N11: upstream remoteReject は AP 配送を伴わない内部削除なので、federating な
@@ -2726,13 +2748,26 @@ func (p *Processor) handleRemove(act genericActivity) error {
 	}
 	note, err := p.noteRepo.FindByURI(noteURI)
 	if err != nil {
-		return nil
+		// 理由は handleAccept と同じ (#3115)。ここで DB 障害を ack すると
+		// job が成功扱いになって retry されず、pin が外れないまま残る。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return err
 	}
 	pin, err := p.pinningRepo.FindByPair(actor.ID, note.ID)
 	if err != nil {
-		return nil
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return err
 	}
-	_ = p.pinningRepo.Delete(pin)
+	// **書き込みの失敗も伝播させる** (#3115)。lookup だけ retry に倒して
+	// ここを捨てると、「pin が外れないまま残る」という同じ結末が DELETE 側で
+	// 残る。対になる `handleAdd` は Create / eviction の Delete を両方伝播する。
+	if err := p.pinningRepo.Delete(pin); err != nil {
+		return fmt.Errorf("unpin note: %w", err)
+	}
 	return nil
 }
 
