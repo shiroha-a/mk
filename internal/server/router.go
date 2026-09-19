@@ -553,6 +553,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	blockingService := coreblocking.NewService(userRepo, blockingRepo, followingRepo, idGen)
 	// Block→自動 unfollow 経路でも remote instance counter を更新 (#596)
 	blockingService.SetInstanceRepo(instanceRepo)
+	// block 時に保留中の follow request を双方向で取り消す。upstream
+	// UserBlockingService.block の cancelRequest 相当。
+	blockingService.SetFollowRequestCanceller(followingService)
 	mutingService := coremuting.NewService(userRepo, mutingRepo, idGen)
 	renoteMutingService := coremuting.NewRenoteService(userRepo, renoteMutingRepo, idGen)
 	followingService.SetBlockingChecker(blockingService)
@@ -4198,6 +4201,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"silenced instance の remote public note が home へ降格されず public timeline に出る"},
 		{"following.blockingChecker", followingService.HasBlockingChecker(),
 			"ブロック関係を無視してフォローが成立する (自分がブロックした相手・自分をブロックしている相手の両方。後者は inbox の Follow も通す)"},
+		{"blocking.followRequestCanceller", blockingService.HasFollowRequestCanceller(),
+			"block しても保留中の follow request が双方向に残り、後から承認されるとフォロー関係が成立しうる"},
 		{"reaction.blockingChecker", reactionService.HasBlockingChecker(),
 			"自分をブロックしている相手の投稿にリアクションできる (IsBlocked(target.UserID, user.ID))"},
 		{"poll.blockingChecker", pollService.HasBlockingChecker(),

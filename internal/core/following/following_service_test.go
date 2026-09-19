@@ -642,6 +642,84 @@ func TestCancelRequest_PublishesUnfollowEvent(t *testing.T) {
 	assertFollowStreamBody(t, pub.calls[0].body, "bob", false, false)
 }
 
+// selectiveFindFailRepo makes FindByPair fail for a single pair so error
+// propagation and "continue with the other direction" can be asserted.
+type selectiveFindFailRepo struct {
+	*testutil.MockFollowRequestRepository
+	failPair [2]string
+}
+
+func (r *selectiveFindFailRepo) FindByPair(followerID, followeeID string) (*model.FollowRequest, error) {
+	if followerID == r.failPair[0] && followeeID == r.failPair[1] {
+		return nil, stubError
+	}
+	return r.MockFollowRequestRepository.FindByPair(followerID, followeeID)
+}
+
+func TestCancelFollowRequestsBetween_NoRequestsIsNoop(t *testing.T) {
+	svc, _, _, _ := newSvc(t)
+	require.NoError(t, svc.CancelFollowRequestsBetween("alice", "bob"))
+}
+
+func TestCancelFollowRequestsBetween_LocalFollowerUsesCancelPath(t *testing.T) {
+	svc, userRepo, _, frRepo := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r1", FollowerID: "alice", FolloweeID: "bob"}))
+
+	hook := &recordingHook{}
+	svc.SetNotificationHook(hook)
+	fed := &stubFederationHook{}
+	svc.SetFederationHook(fed)
+
+	require.NoError(t, svc.CancelFollowRequestsBetween("bob", "alice"))
+	assert.Empty(t, frRepo.Requests)
+	assert.Empty(t, hook.rejects, "local follower の取り消しは Reject 通知の掃除を伴わない")
+	assert.Equal(t, []string{"alice->bob"}, fed.unfollowed, "CancelRequest 経路は unfollow hook を呼ぶ")
+}
+
+func TestCancelFollowRequestsBetween_RemoteFollowerUsesRejectPath(t *testing.T) {
+	svc, userRepo, _, frRepo := newSvc(t)
+	addUser(t, userRepo, "bob", false)
+	host := "remote.example"
+	userRepo.Users["remote1"] = &model.User{ID: "remote1", Username: "remote1", Host: &host}
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r1", FollowerID: "remote1", FolloweeID: "bob"}))
+
+	hook := &recordingHook{}
+	svc.SetNotificationHook(hook)
+
+	require.NoError(t, svc.CancelFollowRequestsBetween("bob", "remote1"))
+	assert.Empty(t, frRepo.Requests)
+	assert.Equal(t, []string{"remote1->bob"}, hook.rejects, "remote follower の取り消しは followee 側の通知を掃除する")
+}
+
+func TestCancelFollowRequestsBetween_BothDirections(t *testing.T) {
+	svc, userRepo, _, frRepo := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", false)
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r1", FollowerID: "alice", FolloweeID: "bob"}))
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r2", FollowerID: "bob", FolloweeID: "alice"}))
+
+	require.NoError(t, svc.CancelFollowRequestsBetween("alice", "bob"))
+	assert.Empty(t, frRepo.Requests, "双方向の申請が消える")
+}
+
+func TestCancelFollowRequestsBetween_ContinuesAfterError(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", false)
+	frRepo := &selectiveFindFailRepo{
+		MockFollowRequestRepository: testutil.NewMockFollowRequestRepository(),
+		failPair:                    [2]string{"alice", "bob"},
+	}
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r2", FollowerID: "bob", FolloweeID: "alice"}))
+	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), frRepo)
+
+	err := svc.CancelFollowRequestsBetween("alice", "bob")
+	assert.ErrorIs(t, err, stubError, "失敗した direction の error を返す")
+	assert.Empty(t, frRepo.Requests, "1 方向が失敗してももう片方は処理する")
+}
+
 // リモートfollowerからのリクエストをrejectしたときにfederation hookの
 // OnLocalUnfollowedが呼ばれてReject(Follow)配信がトリガーされること (#349 PR コメント対応)。
 func TestRejectRequest_InvokesFederationHookForRemoteFollower(t *testing.T) {

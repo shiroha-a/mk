@@ -34,6 +34,9 @@ type Service struct {
 	// federationHook は local user が remote user を (un)block した際に
 	// Block / Undo(Block) を相手 inbox へ配信する (#1560)。nil なら配信しない。
 	federationHook FederationHook
+	// followRequestCanceller は block 時に保留中の follow request を
+	// 双方向で取り消す。実装は core/following.Service。nil なら何もしない。
+	followRequestCanceller FollowRequestCanceller
 	// userMaterializer はリレーでしか観測していない相手を DB へ昇格させる
 	// (#2332)。muting.muteeId / blocking.blockeeId が user への外部キー。
 	userMaterializer UserMaterializer
@@ -46,6 +49,29 @@ type Service struct {
 type FederationHook interface {
 	OnBlocked(blockerID, blockeeID string)
 	OnUnblocked(blockerID, blockeeID string)
+}
+
+// FollowRequestCanceller cancels any pending follow request between two users.
+// 実装は core/following.Service。循環依存を避けるため interface で受け取る。
+type FollowRequestCanceller interface {
+	// CancelFollowRequestsBetween cancels pending follow requests in both
+	// directions between a and b. 該当する request が無い場合は no-op。
+	CancelFollowRequestsBetween(a, b string) error
+}
+
+// SetFollowRequestCanceller wires the pending-follow-request cleanup used by
+// Block. upstream UserBlockingService.block は cancelRequest を双方向で呼び、
+// 保留中の申請を削除する (相手が remote なら Undo(Follow) / Reject を配送)。
+// 未配線だと block しても申請が残り、後から承認されたときに block 関係にある
+// 相手のフォローが成立しうる。
+func (s *Service) SetFollowRequestCanceller(h FollowRequestCanceller) {
+	s.followRequestCanceller = h
+}
+
+// HasFollowRequestCanceller reports whether the canceller was wired.
+// 起動時検査 (criticalWiring) に使う。
+func (s *Service) HasFollowRequestCanceller() bool {
+	return s.followRequestCanceller != nil
 }
 
 // SetFederationHook wires the AP delivery hook used by Block / Unblock (#1560)。
@@ -139,6 +165,17 @@ func (s *Service) Block(blockerID, blockeeID string) (*model.Blocking, error) {
 	if s.followingRepo != nil {
 		blockerUnfollowed = s.removeFollowing(blockerID, blockeeID)
 		blockeeUnfollowed = s.removeFollowing(blockeeID, blockerID)
+	}
+
+	// 保留中の follow request を双方向で取り消す。upstream
+	// UserBlockingService.block の cancelRequest 相当。
+	// **失敗しても block 自体は成立させる** (best-effort)。残すと、後から
+	// 承認されたときに block 関係にある相手のフォローが成立してしまう。
+	if s.followRequestCanceller != nil {
+		if err := s.followRequestCanceller.CancelFollowRequestsBetween(blockerID, blockeeID); err != nil {
+			slog.Warn("block: cancel pending follow requests failed",
+				"blocker", blockerID, "blockee", blockeeID, "err", err)
+		}
 	}
 
 	// remote blockee へ Block activity を配信する (#1560)。

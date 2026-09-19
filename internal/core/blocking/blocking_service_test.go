@@ -5,8 +5,10 @@ import (
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/core/blocking"
+	"github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -271,4 +273,96 @@ func TestUnblock_DeleteError(t *testing.T) {
 	err = svc.Unblock("a", "b")
 	require.ErrorIs(t, err, stubError)
 	assert.Empty(t, hook.unblocked, "Delete 失敗時は Undo(Block) を配信しない")
+}
+
+// recordingFollowRequestCanceller captures the pairs handed to
+// CancelFollowRequestsBetween so Block's cleanup can be asserted.
+type recordingFollowRequestCanceller struct {
+	calls [][2]string
+	err   error
+}
+
+func (c *recordingFollowRequestCanceller) CancelFollowRequestsBetween(a, b string) error {
+	c.calls = append(c.calls, [2]string{a, b})
+	return c.err
+}
+
+// HasFollowRequestCanceller は配線の有無を返す (criticalWiring 用)。
+func TestHasFollowRequestCanceller(t *testing.T) {
+	var empty blocking.Service
+	assert.False(t, empty.HasFollowRequestCanceller(), "未配線なら false")
+
+	svc, _, _, _ := newSvc(t)
+	svc.SetFollowRequestCanceller(&recordingFollowRequestCanceller{})
+	assert.True(t, svc.HasFollowRequestCanceller(), "配線したら true")
+}
+
+// Block は配線された canceller に (blocker, blockee) を 1 回渡す。
+func TestBlock_CancelsPendingFollowRequests(t *testing.T) {
+	svc, ur, _, _ := newSvc(t)
+	addUser(ur, "a")
+	addUser(ur, "b")
+	canceller := &recordingFollowRequestCanceller{}
+	svc.SetFollowRequestCanceller(canceller)
+
+	_, err := svc.Block("a", "b")
+	require.NoError(t, err)
+	assert.Equal(t, [][2]string{{"a", "b"}}, canceller.calls)
+}
+
+// 申請の取り消しに失敗しても block 自体は成立する (best-effort)。
+func TestBlock_FollowRequestCancelErrorIsBestEffort(t *testing.T) {
+	svc, ur, _, _ := newSvc(t)
+	addUser(ur, "a")
+	addUser(ur, "b")
+	svc.SetFollowRequestCanceller(&recordingFollowRequestCanceller{err: stubError})
+
+	_, err := svc.Block("a", "b")
+	require.NoError(t, err)
+	blocked, err := svc.IsBlocked("a", "b")
+	require.NoError(t, err)
+	assert.True(t, blocked, "取り消し失敗でも block 行は作られる")
+}
+
+// 未配線でも Block は従来どおり動く (テストや未配線構成の fallback)。
+func TestBlock_NoFollowRequestCanceller(t *testing.T) {
+	svc, ur, _, _ := newSvc(t)
+	addUser(ur, "a")
+	addUser(ur, "b")
+	_, err := svc.Block("a", "b")
+	require.NoError(t, err)
+}
+
+// block が保留中の申請を双方向に取り消すので、取り消し済みの申請はその後の
+// accept でフォロー関係にならない。
+func TestBlock_CancelledRequestCannotBeAccepted(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	followingRepo := testutil.NewMockFollowingRepository()
+	followRequestRepo := testutil.NewMockFollowRequestRepository()
+	idGen, _ := id.NewGenerator("aidx")
+
+	followingSvc := following.NewService(userRepo, followingRepo, followRequestRepo, idGen)
+	blockingSvc := blocking.NewService(userRepo, testutil.NewMockBlockingRepository(), followingRepo, idGen)
+	blockingSvc.SetFollowRequestCanceller(followingSvc)
+
+	userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob", IsLocked: true}
+	userRepo.Users["dave"] = &model.User{ID: "dave", Username: "dave"}
+	// 双方向に pending request を置き、block で両方消えることを見る。
+	require.NoError(t, followRequestRepo.Create(&model.FollowRequest{ID: "r1", FollowerID: "dave", FolloweeID: "bob"}))
+	require.NoError(t, followRequestRepo.Create(&model.FollowRequest{ID: "r2", FollowerID: "bob", FolloweeID: "dave"}))
+
+	_, err := blockingSvc.Block("bob", "dave")
+	require.NoError(t, err)
+
+	_, err = followRequestRepo.FindByPair("dave", "bob")
+	assert.True(t, repository.IsNotFound(err), "dave→bob の申請が残っている")
+	_, err = followRequestRepo.FindByPair("bob", "dave")
+	assert.True(t, repository.IsNotFound(err), "bob→dave の申請が残っている")
+
+	err = followingSvc.AcceptRequest("bob", "dave")
+	assert.ErrorIs(t, err, following.ErrRequestNotFound, "取り消し済みの申請は承認できない")
+
+	exists, err := followingRepo.Exists("dave", "bob")
+	require.NoError(t, err)
+	assert.False(t, exists, "承認されていないので follower にはならない")
 }

@@ -649,6 +649,58 @@ func (s *Service) CancelRequest(followerID, followeeID string) error {
 	return nil
 }
 
+// CancelFollowRequestsBetween cancels any pending follow requests between a and
+// b, in both directions. blocking.Service が block 作成時に呼ぶ。upstream
+// UserBlockingService.block の cancelRequest 双方向呼び出し相当。
+//
+// **申請を出した側の locality で後始末が変わる。**
+//   - follower が local: CancelRequest 経路。follower の main stream に
+//     unfollow を流し、followee が remote なら Undo(Follow) を配送する。
+//   - follower が remote: RejectRequest 経路。followee 側に残る
+//     receiveFollowRequest 通知を掃除し、remote follower に Reject を配送する
+//     (相手側の pending request も解消させる)。
+//
+// 該当する request が無い direction は no-op。2 方向のうち先に失敗したものを
+// 返すが、呼び出し元 (block) は warn に留めて block を成立させる。
+func (s *Service) CancelFollowRequestsBetween(a, b string) error {
+	var firstErr error
+	for _, dir := range [2][2]string{{a, b}, {b, a}} {
+		if err := s.cancelOneFollowRequest(dir[0], dir[1]); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+// cancelOneFollowRequest cancels the (followerID → followeeID) request if it
+// exists, choosing the path that performs the right cleanup for the follower's
+// locality. Request が無い場合は no-op (ErrRequestNotFound を返さない)。
+func (s *Service) cancelOneFollowRequest(followerID, followeeID string) error {
+	if _, err := s.followRequestRepo.FindByPair(followerID, followeeID); err != nil {
+		// **DB 障害を not-found に丸めない (#2799)。** 呼び出し元が warn に
+		// 出せるよう種別は残す。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return err
+	}
+	// local からの申請取り消しは follower の stream 更新と remote followee への
+	// Undo(Follow) を伴う CancelRequest 経路に寄せる。
+	if follower, err := s.userRepo.FindByID(followerID); err == nil && follower != nil && follower.IsLocal() {
+		if err := s.CancelRequest(followerID, followeeID); err != nil && !errors.Is(err, ErrRequestNotFound) {
+			return err
+		}
+		return nil
+	}
+	// remote からの申請、または follower を引けないときは followee 側の通知を
+	// 掃除して Reject を送る経路にする。userRepo の一時障害でも行の削除は進む。
+	// 事前確認後に並行して消えた request は no-op にする (accept との競合)。
+	if err := s.RejectRequest(followeeID, followerID); err != nil && !errors.Is(err, ErrRequestNotFound) {
+		return err
+	}
+	return nil
+}
+
 // publishFollowRequestResolved notifies the local follower via the main stream
 // that a pending follow request has been resolved (rejected or canceled).
 // frontend MkFollowButton listens to `unfollow` events and resets
