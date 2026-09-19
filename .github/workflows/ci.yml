@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main, develop]
 
+# GITHUB_TOKEN の既定権限を最小化する。全jobはcheckout/build/testのみで
+# リポジトリへの書き込みやPR/issueへの操作を行わないため、workflow直下で
+# contents: readに絞れば全job分満たせる (jobごとの上書きは不要)。
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
