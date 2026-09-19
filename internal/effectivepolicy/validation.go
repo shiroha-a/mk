@@ -83,6 +83,10 @@ var defaults = map[string]any{
 	// センシティブなものは設定時にも表示時にも弾く。canCreateChannelと同じく、
 	// 絞りたい運営者がroleでfalseにする。
 	"canUseEmojiAsAvatarDecoration": true,
+	// IP から関連アカウントを引く権限 (#3104)。**default false** — upstream の
+	// `admin/get-user-ips` は requireAdmin なので、既定では同じ「管理者のみ」に
+	// なる。モデレーターへ開きたい運営者だけがロールで true にする。
+	"canSearchIpHistory": false,
 	// optOutNotificationTypesはmk-go独自 (#2898)。ロール単位で受け取らない通知
 	// タイプを列挙する。型ごとにcanReceiveXxxを増やす形にすると、固有通知を
 	// 足すたびにpolicyが増えるので1キーにまとめている。

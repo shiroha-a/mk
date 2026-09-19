@@ -2468,3 +2468,60 @@ func TestUpdateFields_MergedShapeHandlesHandlerTypes(t *testing.T) {
 		})
 	}
 }
+
+// `canSearchIpHistory` (#3104) は**既定で管理者のみ**。
+//
+// **この既定が崩れると、upstream の `admin/get-user-ips` (`requireAdmin: true`)
+// と同じ機密情報に、モデレーター全員が通れる新しい経路ができる。** 既定値は
+// `internal/effectivepolicy` にあり、そこを `true` に書き換えても build も
+// `perm-check` も通る (`perm-check` は upstream にある endpoint しか見ない)。
+func TestHasRolePolicy_CanSearchIpHistory(t *testing.T) {
+	t.Run("既定では一般利用者に開かない", func(t *testing.T) {
+		svc, _, _, _ := newTestService(t)
+		assert.False(t, svc.HasRolePolicy("alice", role.PolicyCanSearchIpHistory))
+	})
+
+	// **モデレーターは短絡しない。** `HasRolePolicy` が見るのは管理者だけなので、
+	// route 側の `RequireModerator` を通っても policy が false なら 403 になる。
+	t.Run("モデレーターでも既定では開かない", func(t *testing.T) {
+		svc, roleRepo, assignRepo, _ := newTestService(t)
+		roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true}
+		assignRepo.Assignments["mod1:r_mod"] = &model.RoleAssignment{
+			ID: "a1", UserID: "mod1", RoleID: "r_mod",
+		}
+		assert.False(t, svc.HasRolePolicy("mod1", role.PolicyCanSearchIpHistory),
+			"既定でモデレーターに開いている (upstream は requireAdmin)")
+	})
+
+	t.Run("管理者は既定でも通る", func(t *testing.T) {
+		svc, roleRepo, assignRepo, _ := newTestService(t)
+		roleRepo.Roles["r_admin"] = &model.Role{ID: "r_admin", Name: "Admin", IsAdministrator: true}
+		assignRepo.Assignments["admin1:r_admin"] = &model.RoleAssignment{
+			ID: "a1", UserID: "admin1", RoleID: "r_admin",
+		}
+		assert.True(t, svc.HasRolePolicy("admin1", role.PolicyCanSearchIpHistory))
+	})
+
+	// 運営者がロールで開ける = 「モデレーターに許可するかを設定で決められる」。
+	t.Run("ロールで開ける", func(t *testing.T) {
+		svc, roleRepo, assignRepo, _ := newTestService(t)
+		roleRepo.Roles["r_ip"] = &model.Role{
+			ID: "r_ip", Name: "IPSearch",
+			Policies: datatypes.JSON([]byte(
+				`{"canSearchIpHistory":{"useDefault":false,"priority":0,"value":true}}`)),
+		}
+		assignRepo.Assignments["mod1:r_ip"] = &model.RoleAssignment{
+			ID: "a1", UserID: "mod1", RoleID: "r_ip",
+		}
+		assert.True(t, svc.HasRolePolicy("mod1", role.PolicyCanSearchIpHistory))
+	})
+}
+
+// 既定値そのものも固定する。**`DefaultPolicies` に key が無いと `HasRolePolicy`
+// は fail-closed で false を返す**ので、上の「既定では開かない」は key を丸ごと
+// 消しても通る。ロール編集画面へ出すには key が要るので、存在も併せて見る。
+func TestDefaultPolicies_CanSearchIpHistoryIsFalse(t *testing.T) {
+	v, ok := role.DefaultPolicies()[role.PolicyCanSearchIpHistory]
+	require.True(t, ok, "既定値が無いとロール編集画面に項目が出ない (#3104)")
+	assert.Equal(t, false, v, "既定は管理者のみ (upstream の requireAdmin に合わせる)")
+}

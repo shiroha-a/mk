@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -79,4 +80,95 @@ func (r *userIPRepository) ListByUser(userID string, limit int) ([]*model.UserIP
 func (r *userIPRepository) DeleteLastSeenBefore(t time.Time) (int64, error) {
 	res := r.db.Where(`"lastSeenAt" < ?`, t).Delete(&model.UserIP{})
 	return res.RowsAffected, res.Error
+}
+
+// UserIPAccountRow is one local account observed from a searched IP (#3104).
+type UserIPAccountRow struct {
+	UserID string
+	// FirstSeen / LastSeen は `createdAt` / `lastSeenAt` (#3103)。
+	FirstSeen        time.Time
+	LastSeen         time.Time
+	ObservationCount int
+}
+
+// UserIPSearchRepository looks up which accounts were seen from an IP (#3104).
+//
+// **`UserIPRepository` と分けてある。** あちらは記録と保持 (書き込み側) で、
+// こちらはモデレーション用の読み取り。#3105 / #3106 が足す口もこちら側に付く。
+type UserIPSearchRepository interface {
+	// ListAccountsByIP returns accounts whose last observation of ip is at or
+	// after since, newest last-seen first.
+	//
+	// **ip は `ipnorm.Normalize` を通した正規形であること。** 記録側は正規形しか
+	// 書かないので、揺れたまま渡すと当たらない。正規化は NUL も落とすので、
+	// 一覧系が nulparam gate の対象外 (#3025) でも列に入らない値は届かない。
+	//
+	// limit+1 件まで引いて、呼び出し側が「次がある」を判断できるようにする。
+	ListAccountsByIP(ip string, since time.Time, limit, offset int) ([]UserIPAccountRow, error)
+	// HasAnyHistory reports whether user_ip holds any row at all.
+	//
+	// **「一致なし」と「そもそも記録が無い」を区別するために要る** (#3066 §7)。
+	// 記録が無効だった / 保持期間を過ぎた構成で「関連アカウントなし」と断定しない。
+	HasAnyHistory() (bool, error)
+}
+
+type userIPSearchRepository struct {
+	db *gorm.DB
+}
+
+// NewUserIPSearchRepository constructs the default UserIPSearchRepository.
+func NewUserIPSearchRepository(db *gorm.DB) UserIPSearchRepository {
+	return &userIPSearchRepository{db: db}
+}
+
+// userIPAccountsSQL ranks accounts by their last observation of the IP.
+//
+// **`(ip, lastSeenAt DESC)` の index に乗る形** (migration 000094)。並びは
+// 最終観測の降順 → 初回観測の降順 → userId 昇順。`userId` を最後に置くのは、
+// 同じ時刻の行で順序が実行ごとに変わらないようにするため (ページングが破綻する)。
+//
+// **クエリで host を絞っていないが、それで正しい。** `user_ip` は upstream /
+// mk-go とも自インスタンスで認証を通した利用者しか書かないので、行そのものが
+// ローカル分に閉じている (リモート利用者の行は生じない)。
+const userIPAccountsSQL = `
+SELECT "userId" AS user_id, "createdAt" AS first_seen, "lastSeenAt" AS last_seen,
+	"observationCount" AS observation_count
+FROM "user_ip"
+WHERE ip = ? AND "lastSeenAt" >= ?
+ORDER BY "lastSeenAt" DESC, "createdAt" DESC, "userId" ASC
+LIMIT ? OFFSET ?`
+
+func (r *userIPSearchRepository) ListAccountsByIP(ip string, since time.Time, limit, offset int) ([]UserIPAccountRow, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	type scan struct {
+		UserID           string    `gorm:"column:user_id"`
+		FirstSeen        time.Time `gorm:"column:first_seen"`
+		LastSeen         time.Time `gorm:"column:last_seen"`
+		ObservationCount int       `gorm:"column:observation_count"`
+	}
+	var rows []scan
+	if err := r.db.Raw(userIPAccountsSQL, ip, since, limit, offset).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("user_ip accounts by ip: %w", err)
+	}
+	out := make([]UserIPAccountRow, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, UserIPAccountRow{
+			UserID: s.UserID, FirstSeen: s.FirstSeen,
+			LastSeen: s.LastSeen, ObservationCount: s.ObservationCount,
+		})
+	}
+	return out, nil
+}
+
+func (r *userIPSearchRepository) HasAnyHistory() (bool, error) {
+	var exists bool
+	if err := r.db.Raw(`SELECT EXISTS (SELECT 1 FROM "user_ip")`).Scan(&exists).Error; err != nil {
+		return false, fmt.Errorf("user_ip has any history: %w", err)
+	}
+	return exists, nil
 }

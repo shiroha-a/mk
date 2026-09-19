@@ -3225,6 +3225,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
+	// IP からアカウントを引く口 (#3104)。**この行を落とすと admin/ip/accounts が
+	// 500 を返す** — 空の結果は「その IP を使ったアカウントは無い」という誤った
+	// 事実になり、調査の結論を反転させる。
+	adminHandler.SetIPSearchRepo(repository.NewUserIPSearchRepository(s.db))
 	// ドライブ使用量の集計 (#3053)。**この行を落とすと admin/drive/usage が
 	// 500 を返す** — 0 バイトを返して「使っていない」と誤認させるよりよい。
 	adminHandler.SetDriveUsageProvider(driveusage.NewService(
@@ -3437,6 +3441,19 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.POST("/admin/accounts/delete", adminHandler.AccountsDelete, middleware.RequireAdmin(roleService), middleware.RequireScope("write:admin:account"))
 	api.POST("/admin/accounts/find-by-email", adminHandler.AccountsFindByEmail, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:account"))
 	api.POST("/admin/get-user-ips", adminHandler.GetUserIPs, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:user-ips"))
+	// mk-go 独自 (#3104、親 #3066)。IP からローカルアカウントを引く。
+	//
+	// **`RequireModerator` と policy を併用する。** upstream の `admin/get-user-ips`
+	// (上の行) は `requireAdmin` なので、同じ「利用者 ↔ IP の対応」に対して
+	// モデレーターだけで開くと既存より緩い経路を新設することになる。policy の
+	// 既定は false で、admin は policy を bypass するため、**既定の挙動は
+	// upstream と同じ「管理者のみ」**になる。モデレーターへ開きたい運営者が
+	// ロールで有効にする。scope は upstream の口と同じものを再利用する
+	// (`internal/misc/permissions` は misskey-js と完全一致させる契約)。
+	api.POST("/admin/ip/accounts", adminHandler.IPAccounts,
+		middleware.RequireModerator(roleService),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
+		middleware.RequireScope("read:admin:user-ips"))
 	api.POST("/admin/get-index-stats", adminHandler.GetIndexStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:index-stats"))
 	api.POST("/admin/get-table-stats", adminHandler.GetTableStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:table-stats"))
 	api.POST("/admin/server-info", adminHandler.ServerInfo, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))

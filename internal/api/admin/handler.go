@@ -198,6 +198,9 @@ type Handler struct {
 	deliveryHealth DeliveryHealthProvider
 	// inboxHealth は admin/federation/inbox-health の集計元 (#2471)。
 	inboxHealth DeliveryHealthProvider
+	// ipSearchRepo は admin/ip/* の検索元 (#3104)。**未配線なら 500 を返す** —
+	// 空の結果は「その IP を使ったアカウントは無い」という誤った事実になる。
+	ipSearchRepo repository.UserIPSearchRepository
 	// driveUsage は admin/drive/usage の集計元 (#3053)。**未配線なら 500 を
 	// 返す** — 0 バイトを返すと「使っていない」という誤った事実を出すため。
 	driveUsage DriveUsageProvider

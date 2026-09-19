@@ -45,6 +45,9 @@ type MockUserRepository struct {
 	// FindErr, when non-nil, is returned by FindByID. Same intent as
 	// FindProfileErr: a DB failure must not be collapsed into not-found (#2792).
 	FindErr error
+	// FindManyByIDsErr, when non-nil, is returned by FindManyByIDs. 同上 —
+	// 一括解決の失敗を「その利用者は居ない」に潰さないことを検査するために要る。
+	FindManyByIDsErr error
 	// UpdateProfileFn, when non-nil, replaces UpdateProfile entirely. Used to
 	// assert on the fields a caller writes (e.g. 2FA backup codes must be
 	// consumed with RemoveBackupCode, never written back as a snapshot).
@@ -343,6 +346,9 @@ func (m *MockUserRepository) FindProfileByUserID(userID string) (*model.UserProf
 // FindManyByIDs mirrors the production repo: missing rows are skipped silently.
 // Order is unspecified (production does not guarantee it either).
 func (m *MockUserRepository) FindManyByIDs(ids []string) ([]*model.User, error) {
+	if m.FindManyByIDsErr != nil {
+		return nil, m.FindManyByIDsErr
+	}
 	if len(ids) == 0 {
 		return nil, nil
 	}
