@@ -9,10 +9,12 @@ import (
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	"github.com/shiroha-a/mk/internal/core/iplog"
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/ipnorm"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // SetIPSearchRepo wires the IP → accounts lookup (#3104)。
@@ -170,6 +172,17 @@ func (h *Handler) IPAccounts(c echo.Context) error {
 	// 「0 行ヒット」と「N 行ヒットして全部落とした」を区別できず、
 	// **記録が残っているのに「接続は記録されていません」と断定する**ことになる。
 	droppedCount := len(rows) - len(accounts)
+
+	// **照会そのものを監査に残す** (#3106)。記録するのは「誰が・いつ・何を・どの
+	// 期間で引いて・何件返したか」だけで、**結果は残さない** (残すとこの表が
+	// 第 2 の「IP とアカウントの対応」になる)。
+	if me := middleware.GetUser(c); me != nil && h.ipLookupAudit != nil {
+		h.ipLookupAudit.Record(iplookuplog.Entry{
+			UserID: me.ID, Kind: model.IPLookupKindIP,
+			IP: ip, SinceDays: sinceDays, ResultCount: len(accounts),
+		})
+	}
+	noStoreIPLookup(c)
 	return c.JSON(http.StatusOK, ipAccountsResponse{
 		IP:             ip,
 		LoggingEnabled: loggingEnabled,
@@ -280,4 +293,22 @@ func formatIPTimePtr(t *time.Time) *string {
 	}
 	s := entity.ISOMillis(*t)
 	return &s
+}
+
+// SetIPLookupAudit wires the audit recorder used by admin/ip/* (#3106).
+func (h *Handler) SetIPLookupAudit(s *iplookuplog.Service) { h.ipLookupAudit = s }
+
+// HasIPLookupAudit reports whether the audit recorder was wired. 起動時検査に使う。
+func (h *Handler) HasIPLookupAudit() bool { return h.ipLookupAudit.Wired() }
+
+// noStoreIPLookup marks an IP lookup response as uncacheable.
+//
+// **共有キャッシュに残さない** (#3106 / #3066 §8)。POST + Authorization なので
+// 既定でも共有キャッシュは保存しないが、**明示しないと検証できない** — 中間に
+// キャッシュを置く構成や、将来 GET 版を足したときに黙って漏れる。
+// `private` ではなく `no-store` にするのは、ブラウザのディスクキャッシュにも
+// 残したくないため。
+func noStoreIPLookup(c echo.Context) {
+	c.Response().Header().Set("Cache-Control", "no-store, no-cache, must-revalidate")
+	c.Response().Header().Set("Pragma", "no-cache")
 }

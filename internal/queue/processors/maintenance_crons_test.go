@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/iplog"
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 	"github.com/shiroha-a/mk/internal/core/signup"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 	"github.com/stretchr/testify/assert"
@@ -299,4 +300,59 @@ func TestUserIPRetentionMatchesIPLog(t *testing.T) {
 	assert.Equal(t, iplog.Retention, userIPRetention,
 		"user_ip の保持期間が core/iplog から切り離されている。"+
 			"掃除の基準と admin/ip/accounts が返す retentionDays がずれる (#3104)")
+}
+
+type fakeIPLookupLogPruner struct {
+	called    bool
+	gotBefore time.Time
+	err       error
+}
+
+func (f *fakeIPLookupLogPruner) DeleteOlderThan(t time.Time) (int64, error) {
+	f.called = true
+	f.gotBefore = t
+	return 1, f.err
+}
+
+// **IP 照会の監査記録にも保持期間を掛ける** (#3106)。掛けないと、照会に使った IP が
+// 永久に残り、moderation_log に IP を書くのと変わらなくなる。
+func TestClean_PrunesIPLookupLog(t *testing.T) {
+	ip := &fakeUserIPPruner{}
+	idGen := &fakeCleanIDGen{}
+	proc := NewCleanProcessor(ip, &fakeRolePruner{}, &fakeGamePruner{}, idGen,
+		&fakeAntennaDeactivator{}, testAntennaThreshold, &fakePendingPruner{})
+	audit := &fakeIPLookupLogPruner{}
+	proc.SetIPLookupLogPruner(audit)
+
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+	assert.True(t, audit.called, "監査記録が刈られていない")
+	assert.WithinDuration(t, time.Now().Add(-ipLookupLogRetention), audit.gotBefore, time.Minute)
+}
+
+// 未配線でも他の sub-task は回る (nil は no-op)。
+func TestClean_IPLookupLogPrunerOptional(t *testing.T) {
+	ip := &fakeUserIPPruner{}
+	proc := NewCleanProcessor(ip, &fakeRolePruner{}, &fakeGamePruner{}, &fakeCleanIDGen{},
+		&fakeAntennaDeactivator{}, testAntennaThreshold, &fakePendingPruner{})
+
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+	assert.False(t, ip.gotBefore.IsZero(), "他の sub-task まで止まっている")
+}
+
+// 刈り取りが失敗しても他の sub-task を止めない (各 sub-task は自分の error を飲む)。
+func TestClean_IPLookupLogPruneFailureIsSwallowed(t *testing.T) {
+	ip := &fakeUserIPPruner{}
+	proc := NewCleanProcessor(ip, &fakeRolePruner{}, &fakeGamePruner{}, &fakeCleanIDGen{},
+		&fakeAntennaDeactivator{}, testAntennaThreshold, &fakePendingPruner{})
+	proc.SetIPLookupLogPruner(&fakeIPLookupLogPruner{err: errors.New("db down")})
+
+	require.NoError(t, proc.Handle(context.Background(), driver.RawTask{TypeName: "test"}))
+	assert.False(t, ip.gotBefore.IsZero(), "失敗が他の sub-task を止めている")
+}
+
+// 保持期間は core/iplookuplog の値そのもの。掃除の基準と画面が出す日数がずれると、
+// 「これより前の照会は残っていない」という説明が嘘になる。
+func TestIPLookupLogRetentionMatchesCore(t *testing.T) {
+	assert.Equal(t, iplookuplog.Retention, ipLookupLogRetention,
+		"監査記録の保持期間が core/iplookuplog から切り離されている (#3106)")
 }

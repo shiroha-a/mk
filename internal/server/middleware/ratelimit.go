@@ -27,6 +27,21 @@ type EndpointLimit struct {
 	// 429 for this endpoint. nil なら汎用 RateLimitExceeded。signin 系は
 	// TOO_MANY_AUTHENTICATION_FAILURES を返すために使う (#1829)。
 	RejectResponse func() map[string]any
+	// UserBucketOnly drops the IP bucket for this endpoint (#3106).
+	//
+	// **未認証のリクエストで管理者を締め出せる経路を作らないため。** limiter は
+	// route の権限検査より前に走るので、403 になるリクエストでも bucket を消費する。
+	// 認証済みの利用者は user と IP の**両方**を消費するので、同じ出口 IP
+	// (CGNAT・社内 NAT・`trustProxy` の誤設定) から未認証で叩き続けられると、
+	// **正当なモデレーターの照会が窓のあいだ 429 になる**。
+	//
+	// IP 照会の上限が守りたいのは「認証済みの利用者による濫用」で、そちらは
+	// user bucket が押さえる。未認証は権限検査が 403 で落として何も開示しないので、
+	// IP bucket はこの endpoint 群では**守るものが無く、締め出しだけを生む**。
+	//
+	// 既定 (false) では今までどおり両方を見る — auth 系のように**未認証の試行
+	// そのもの**を抑えたい endpoint では IP bucket が本体なので、一律には外さない。
+	UserBucketOnly bool
 }
 
 // LimitInfo holds the result of a rate limit check.
@@ -185,6 +200,9 @@ func (rl *RateLimiter) Middleware() echo.MiddlewareFunc {
 			}
 
 			actors := rl.resolveActors(c)
+			if limit.UserBucketOnly {
+				actors = dropIPActors(actors)
+			}
 			if len(actors) == 0 {
 				return next(c)
 			}
@@ -272,6 +290,21 @@ func (rl *RateLimiter) resolveActors(c echo.Context) []rateLimitActor {
 	return []rateLimitActor{{key: ipHash(c.RealIP()), factor: 1.0}}
 }
 
+// dropIPActors removes IP-derived buckets, leaving only user buckets.
+//
+// **`ipHash` が付ける `ip-` prefix で判別する。** user bucket は ULID をそのまま
+// key にしており (`resolveActors` の注記)、`ip-` で始まらないことが保証されている。
+func dropIPActors(actors []rateLimitActor) []rateLimitActor {
+	out := actors[:0:0]
+	for _, a := range actors {
+		if strings.HasPrefix(a.key, ipBucketPrefix) {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 // userFactor returns the rateLimitFactor from the user's role policies.
 // 未配線 / 値不正 / 0 以下なら 1.0 (= 影響なし) で返す。
 func (rl *RateLimiter) userFactor(userID string) float64 {
@@ -353,23 +386,27 @@ func (rl *RateLimiter) rejectRequest(c echo.Context, info LimitInfo, limit *Endp
 // いくらでも新しい枠が取れる。
 func IPHash(ipStr string) string { return ipHash(ipStr) }
 
+// ipBucketPrefix marks IP-derived bucket keys. user bucket は ULID をそのまま
+// key にするのでこの prefix と衝突しない (`resolveActors` の注記)。
+const ipBucketPrefix = "ip-"
+
 func ipHash(ipStr string) string {
 	ip := net.ParseIP(ipStr)
 	if ip == nil {
 		// パース不能な場合はSHA256フォールバック
 		h := sha256.Sum256([]byte(ipStr))
 		n := new(big.Int).SetBytes(h[:8])
-		return "ip-" + n.Text(36)
+		return ipBucketPrefix + n.Text(36)
 	}
 
 	if ip4 := ip.To4(); ip4 != nil {
 		// IPv4: フルアドレスをそのまま使用
 		n := new(big.Int).SetBytes(ip4)
-		return "ip-" + n.Text(36)
+		return ipBucketPrefix + n.Text(36)
 	}
 
 	// IPv6: /64マスク（先頭8バイトのみ）
 	ip16 := ip.To16()
 	n := new(big.Int).SetBytes(ip16[:8])
-	return "ip-" + n.Text(36)
+	return ipBucketPrefix + n.Text(36)
 }

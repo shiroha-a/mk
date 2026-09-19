@@ -2,11 +2,16 @@ package admin
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 	"github.com/shiroha-a/mk/internal/core/serverstats"
+	"github.com/shiroha-a/mk/internal/misc/colfit"
+	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 // GetIndexStats handles POST /api/admin/get-index-stats.
@@ -76,6 +81,7 @@ func (h *Handler) GetTableStats(c echo.Context) error {
 // GetUserIPs handles POST /api/admin/get-user-ips.
 func (h *Handler) GetUserIPs(c echo.Context) error {
 	if h.userIPRepo == nil {
+		noStoreIPLookup(c)
 		return c.JSON(http.StatusOK, []any{})
 	}
 	var req struct {
@@ -84,8 +90,20 @@ func (h *Handler) GetUserIPs(c echo.Context) error {
 	if err := c.Bind(&req); err != nil || req.UserID == "" {
 		return c.JSON(http.StatusBadRequest, apierr.Error("INVALID_PARAM", "userId is required.", "3d81ceae-475f-4600-b2a8-2bc116157532"))
 	}
+	// **NUL を含む id は引く前に落とす** (#3025)。`ListByUser` は一覧系なので
+	// repository 側の guard の射程外で、そのまま渡すと PostgreSQL がクエリごと
+	// 落とす。下の握り潰しで 200 になるが、**監査には NUL 入りの値が渡り、
+	// そちらの INSERT だけが 22021 で失敗する**。
+	if !colfit.Storable(req.UserID) {
+		noStoreIPLookup(c)
+		return c.JSON(http.StatusOK, []any{})
+	}
 	ips, err := h.userIPRepo.ListByUser(req.UserID, 30)
 	if err != nil {
+		// **引けていないので監査にも残さない。** ここで `resultCount: 0` を
+		// 書くと、本当に 0 件だった照会と見分けが付かなくなる。
+		slog.Error("admin/get-user-ips: list failed", "error", err)
+		noStoreIPLookup(c)
 		return c.JSON(http.StatusOK, []any{})
 	}
 	result := make([]map[string]any, 0, len(ips))
@@ -95,6 +113,16 @@ func (h *Handler) GetUserIPs(c echo.Context) error {
 			"createdAt": ip.CreatedAt.UTC().Format("2006-01-02T15:04:05.000Z"),
 		})
 	}
+	// **upstream の口も監査に残す** (#3106)。返すのは mk-go 独自の `admin/ip/*` と
+	// 同じ「利用者 ↔ IP の対応」なので、ここを記録しないと**監査を迂回して IP を
+	// 引ける経路**が 1 本残る。`sinceDays` は 0 — あちらは窓を取らず最新 30 件を返す。
+	if me := middleware.GetUser(c); me != nil && h.ipLookupAudit != nil {
+		h.ipLookupAudit.Record(iplookuplog.Entry{
+			UserID: me.ID, Kind: model.IPLookupKindUserIPs,
+			TargetUserID: req.UserID, ResultCount: len(result),
+		})
+	}
+	noStoreIPLookup(c)
 	return c.JSON(http.StatusOK, result)
 }
 

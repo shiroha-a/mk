@@ -23,6 +23,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/captcha"
 	coredrive "github.com/shiroha-a/mk/internal/core/drive"
 	"github.com/shiroha-a/mk/internal/core/emojiapplication"
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/procstats"
 	"github.com/shiroha-a/mk/internal/core/role"
@@ -201,6 +202,10 @@ type Handler struct {
 	// ipSearchRepo は admin/ip/* の検索元 (#3104)。**未配線なら 500 を返す** —
 	// 空の結果は「その IP を使ったアカウントは無い」という誤った事実になる。
 	ipSearchRepo repository.UserIPSearchRepository
+	// ipLookupAudit は admin/ip/* の照会を監査に残す (#3106)。
+	ipLookupAudit *iplookuplog.Service
+	// ipLookupLogRepo は admin/ip/lookup-log の読み出し元 (#3106)。
+	ipLookupLogRepo repository.IPLookupLogRepository
 	// driveUsage は admin/drive/usage の集計元 (#3053)。**未配線なら 500 を
 	// 返す** — 0 バイトを返すと「使っていない」という誤った事実を出すため。
 	driveUsage DriveUsageProvider

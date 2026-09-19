@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/core/iplog"
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
 
@@ -44,6 +45,14 @@ type (
 	PendingSignupPruner interface {
 		DeleteOlderThan(thresholdID string) (int64, error)
 	}
+	// IPLookupLogPruner removes old ip_lookup_log rows
+	// (repository.IPLookupLogRepository).
+	//
+	// **保持期間が要る理由は記録の中身** — 照会に使った IP が入るので、永久に
+	// 残すと `moderation_log` に IP を書くのと変わらなくなる (#3106)。
+	IPLookupLogPruner interface {
+		DeleteOlderThan(t time.Time) (int64, error)
+	}
 )
 
 const (
@@ -51,6 +60,10 @@ const (
 	// — 検索 (#3104) が「この期間より前の接続は残っていない」と画面に出す根拠と
 	// 同じ値でなければ、画面が嘘をつく。
 	userIPRetention = iplog.Retention
+	// ipLookupLogRetention は IP 照会の監査記録を残す期間。**定義は
+	// `core/iplookuplog` に 1 つ** — 保持期間を読み手に説明する側と刈る側が
+	// 違う値だと、画面や doc が嘘をつく (#3106)。
+	ipLookupLogRetention = iplookuplog.Retention
 	// reversiOutdatedAfter は開始されないまま放置された reversi game を outdated
 	// と見なす猶予。upstream cleanOutdatedGames は now-10min の id を閾値にする。
 	reversiOutdatedAfter = 10 * time.Minute
@@ -81,7 +94,14 @@ type CleanProcessor struct {
 	antenna          AntennaDeactivator
 	antennaThreshold time.Duration
 	pending          PendingSignupPruner
+	ipLookupLog      IPLookupLogPruner
 }
+
+// SetIPLookupLogPruner wires the IP lookup audit retention (#3106).
+//
+// **コンストラクタの引数にしない。** 既に 7 つあり、位置引数を増やすと全呼び出し元と
+// テストを触ることになる。nil なら sub-task は no-op。
+func (p *CleanProcessor) SetIPLookupLogPruner(pr IPLookupLogPruner) { p.ipLookupLog = pr }
 
 // NewCleanProcessor constructs the processor. Any nil dependency disables its
 // sub-task (no-op) rather than panicking. antennaThreshold <= 0 also disables
@@ -126,6 +146,14 @@ func (p *CleanProcessor) Handle(_ context.Context, _ driver.Task) error {
 			slog.Warn("clean: delete outdated reversi games failed", "err", err)
 		} else if n > 0 {
 			slog.Info("clean: deleted outdated reversi games", "count", n)
+		}
+	}
+
+	if p.ipLookupLog != nil {
+		if n, err := p.ipLookupLog.DeleteOlderThan(now.Add(-ipLookupLogRetention)); err != nil {
+			slog.Warn("clean: prune ip lookup log failed", "err", err)
+		} else if n > 0 {
+			slog.Info("clean: pruned ip lookup log", "count", n)
 		}
 	}
 

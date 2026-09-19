@@ -157,11 +157,23 @@ type UserIPSharedRow struct {
 
 type userIPSearchRepository struct {
 	db *gorm.DB
+	// lookupTimeout は 1 回の照会に掛ける上限。既定は lookupStatementTimeout。
+	//
+	// **定数を直接読まずフィールドに持つのは、実際に切れることを試せるようにするため。**
+	// 定数のままだと、テストは「10 秒眠って切れる」を試すか、コールバックの中で
+	// テスト自身が上限を掛け直すしかない。後者にすると**本番コードが上限を掛けたか
+	// を一切見ないテスト**になり、`SET LOCAL` を丸ごと消しても緑のまま通る (実測)。
+	lookupTimeout time.Duration
+}
+
+// withLookupTimeout bounds one user_ip lookup. 実体は withStatementTimeout。
+func (r *userIPSearchRepository) withLookupTimeout(fn func(tx *gorm.DB) error) error {
+	return withStatementTimeout(r.db, r.lookupTimeout, fn)
 }
 
 // NewUserIPSearchRepository constructs the default UserIPSearchRepository.
 func NewUserIPSearchRepository(db *gorm.DB) UserIPSearchRepository {
-	return &userIPSearchRepository{db: db}
+	return &userIPSearchRepository{db: db, lookupTimeout: lookupStatementTimeout}
 }
 
 // userIPAccountsSQL ranks accounts by their last observation of the IP.
@@ -195,7 +207,9 @@ func (r *userIPSearchRepository) ListAccountsByIP(ip string, since time.Time, li
 		ObservationCount int       `gorm:"column:observation_count"`
 	}
 	var rows []scan
-	if err := r.db.Raw(userIPAccountsSQL, ip, since, limit, offset).Scan(&rows).Error; err != nil {
+	if err := r.withLookupTimeout(func(tx *gorm.DB) error {
+		return tx.Raw(userIPAccountsSQL, ip, since, limit, offset).Scan(&rows).Error
+	}); err != nil {
 		return nil, fmt.Errorf("user_ip accounts by ip: %w", err)
 	}
 	out := make([]UserIPAccountRow, 0, len(rows))
@@ -210,7 +224,9 @@ func (r *userIPSearchRepository) ListAccountsByIP(ip string, since time.Time, li
 
 func (r *userIPSearchRepository) HasAnyHistory() (bool, error) {
 	var exists bool
-	if err := r.db.Raw(`SELECT EXISTS (SELECT 1 FROM "user_ip")`).Scan(&exists).Error; err != nil {
+	if err := r.withLookupTimeout(func(tx *gorm.DB) error {
+		return tx.Raw(`SELECT EXISTS (SELECT 1 FROM "user_ip")`).Scan(&exists).Error
+	}); err != nil {
 		return false, fmt.Errorf("user_ip has any history: %w", err)
 	}
 	return exists, nil
@@ -236,7 +252,9 @@ func (r *userIPSearchRepository) ListIPsByUser(userID string, since time.Time, l
 		LastSeen time.Time `gorm:"column:last_seen"`
 	}
 	var rows []scan
-	if err := r.db.Raw(userIPWindowSQL, userID, since, limit).Scan(&rows).Error; err != nil {
+	if err := r.withLookupTimeout(func(tx *gorm.DB) error {
+		return tx.Raw(userIPWindowSQL, userID, since, limit).Scan(&rows).Error
+	}); err != nil {
 		return nil, fmt.Errorf("user_ip ips by user: %w", err)
 	}
 	out := make([]UserIPWindowRow, 0, len(rows))
@@ -294,7 +312,9 @@ func (r *userIPSearchRepository) ListSharedIPAccounts(ips []string, since time.T
 		LastSeen time.Time `gorm:"column:last_seen"`
 	}
 	var rows []scan
-	if err := r.db.Raw(userIPSharedSQL, pgarray.StringArray(ips), since, perIP).Scan(&rows).Error; err != nil {
+	if err := r.withLookupTimeout(func(tx *gorm.DB) error {
+		return tx.Raw(userIPSharedSQL, pgarray.StringArray(ips), since, perIP).Scan(&rows).Error
+	}); err != nil {
 		return nil, fmt.Errorf("user_ip shared accounts: %w", err)
 	}
 	out := make([]UserIPSharedRow, 0, len(rows))

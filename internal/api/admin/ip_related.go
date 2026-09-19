@@ -8,10 +8,12 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/api/pagination"
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 	"github.com/shiroha-a/mk/internal/core/iprelation"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
+	"github.com/shiroha-a/mk/internal/server/middleware"
 )
 
 const (
@@ -157,6 +159,14 @@ func (h *Handler) IPRelatedAccounts(c echo.Context) error {
 	// 落とした件数の意味は `IPAccounts` と同じ (利用者の行を解決できなかった観測)。
 	droppedCount := len(page) - len(candidates)
 
+	// 照会そのものを監査に残す (#3106)。結果は残さない (理由は `IPAccounts` と同じ)。
+	if me := middleware.GetUser(c); me != nil && h.ipLookupAudit != nil {
+		h.ipLookupAudit.Record(iplookuplog.Entry{
+			UserID: me.ID, Kind: model.IPLookupKindRelated,
+			TargetUserID: target.ID, SinceDays: sinceDays, ResultCount: len(candidates),
+		})
+	}
+	noStoreIPLookup(c)
 	return c.JSON(http.StatusOK, ipRelatedResponse{
 		User:                entity.PackUserLite(target),
 		LoggingEnabled:      m.EnableIPLogging,

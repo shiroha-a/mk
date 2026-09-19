@@ -98,6 +98,7 @@ import (
 	corehashtag "github.com/shiroha-a/mk/internal/core/hashtag"
 	coreinstance "github.com/shiroha-a/mk/internal/core/instance"
 	"github.com/shiroha-a/mk/internal/core/iplog"
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 	coremediaproxy "github.com/shiroha-a/mk/internal/core/mediaproxy"
 	coremodlog "github.com/shiroha-a/mk/internal/core/moderationlog"
 	coremoderatoractivity "github.com/shiroha-a/mk/internal/core/moderatoractivity"
@@ -1060,6 +1061,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// user_ip 90 日 prune / 期限切れ role_assignment 削除 / reversi outdated game 削除 /
 	// 未使用 antenna の deactivate (#1604, deactivateAntennaThreshold ミリ秒)。
 	cleanGenericProcessor := processors.NewCleanProcessor(userIPRepo, roleAssignmentRepo, reversiRepo, idGen, antennaRepo, time.Duration(s.config.DeactivateAntennaThreshold)*time.Millisecond, repository.NewUserPendingRepository(s.db))
+	// IP 照会の監査記録にも保持期間を掛ける (#3106)。**この行が無いと記録が永久に
+	// 残り、`moderation_log` に IP を書くのと変わらなくなる。**
+	cleanGenericProcessor.SetIPLookupLogPruner(repository.NewIPLookupLogRepository(s.db))
 	s.queueServer.Handle(queue.TaskTypeClean, cleanGenericProcessor.Handle)
 
 	// 分割アップロードセッションの GC (#2313): scheduler の cron (*/15) が
@@ -3232,6 +3236,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 500 を返す** — 空の結果は「その IP を使ったアカウントは無い」という誤った
 	// 事実になり、調査の結論を反転させる。
 	adminHandler.SetIPSearchRepo(repository.NewUserIPSearchRepository(s.db))
+	// IP 照会の監査 (#3106)。**未配線だと照会が記録されないまま通る** — 照会は
+	// 成立するので誰も気付けない。critical wiring 検査で落とす。
+	ipLookupLogRepo := repository.NewIPLookupLogRepository(s.db)
+	adminHandler.SetIPLookupAudit(iplookuplog.NewService(ipLookupLogRepo, idGen))
+	adminHandler.SetIPLookupLogRepo(ipLookupLogRepo)
 	// ドライブ使用量の集計 (#3053)。**この行を落とすと admin/drive/usage が
 	// 500 を返す** — 0 バイトを返して「使っていない」と誤認させるよりよい。
 	adminHandler.SetDriveUsageProvider(driveusage.NewService(
@@ -3460,6 +3469,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// 関連アカウント候補 (#3105)。**同じ policy と scope を再利用する** —
 	// 扱うのは同じ「利用者 ↔ IP の対応」で、別 policy にすると片方だけ開けてしまう。
 	api.POST("/admin/ip/related-accounts", adminHandler.IPRelatedAccounts,
+		middleware.RequireModerator(roleService),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
+		middleware.RequireScope("read:admin:user-ips"))
+	// 照会の監査記録 (#3106)。**この応答自体が機密** — 照会に使った IP がそのまま
+	// 入るので、照会と同じ 3 段で守る。
+	api.POST("/admin/ip/lookup-log", adminHandler.IPLookupLog,
 		middleware.RequireModerator(roleService),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
 		middleware.RequireScope("read:admin:user-ips"))
@@ -4207,6 +4222,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"silenced instance の remote public note が home へ降格されず public timeline に出る"},
 		{"following.blockingChecker", followingService.HasBlockingChecker(),
 			"ブロック関係を無視してフォローが成立する (自分がブロックした相手・自分をブロックしている相手の両方。後者は inbox の Follow も通す)"},
+		{"admin.ipLookupAudit", adminHandler.HasIPLookupAudit(),
+			"IP 照会が監査に残らない (照会そのものは成立するので誰も気付けない)"},
 		{"blocking.followRequestCanceller", blockingService.HasFollowRequestCanceller(),
 			"block しても保留中の follow request が双方向に残り、block 中に承認されるとフォロー関係が成立する"},
 		{"reaction.blockingChecker", reactionService.HasBlockingChecker(),

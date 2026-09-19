@@ -163,6 +163,19 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	// ── Admin ──────────────────────────────────────────
 	"admin/system-webhook/test":   {Duration: 15 * time.Minute, Max: 60},
 	"admin/roles/assignment-show": {Duration: time.Minute, Max: 120},
+	// IP 照会 (#3104 / #3105 / upstream の `admin/get-user-ips`) は 1 回が重く、
+	// 結果が機密なので絞る (#3106)。**upstream に対応する制限は無い。**
+	// mk-go の `DefaultEndpointLimits` に無い endpoint は素通りするので、
+	// route を rename するとここも黙って効かなくなる
+	// (`TestDefaultEndpointLimits_IPLookups` が path から引いて固定している)。
+	// 調査中は続けて叩くので短い窓では止めず、時間あたりで抑える。
+	"admin/ip/accounts":         {Duration: time.Hour, Max: 120, UserBucketOnly: true},
+	"admin/ip/related-accounts": {Duration: time.Hour, Max: 120, UserBucketOnly: true},
+	"admin/ip/lookup-log":       {Duration: time.Hour, Max: 120, UserBucketOnly: true},
+	// **upstream の口も同じ扱いにする** (#3106)。返すのは同じ「利用者 ↔ IP の
+	// 対応」なので、ここだけ無制限だと mk-go 側に上限を置いた意味が無い。
+	// upstream にこの制限は無いので意図的な divergence (docs/divergence.md §7)。
+	"admin/get-user-ips": {Duration: time.Hour, Max: 120, UserBucketOnly: true},
 	// 初回セットアップの窓 (rootUserId 未設定 + 未認証) だけは credential 無しで
 	// 通るので、setupPassword の試行回数に上限を置く。**signin の 10 ではなく 30
 	// にしてある** — この endpoint は administrator が正規にアカウントを作る経路

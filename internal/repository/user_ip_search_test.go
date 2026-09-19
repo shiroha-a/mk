@@ -208,17 +208,18 @@ func TestUserIPSearch_HasAnyHistory(t *testing.T) {
 
 // SQL が壊れていれば err で返る (空の結果にしない)。
 func TestUserIPSearch_PropagatesError(t *testing.T) {
-	db := ipSearchTestDB(t)
-	tx := db.Begin()
-	require.NoError(t, tx.Error)
-	defer tx.Rollback()
-	require.NoError(t, tx.Exec(`SET LOCAL search_path TO pg_temp`).Error)
-	repo := NewUserIPSearchRepository(tx)
+	// **テーブルの無い schema へつなぐ。** トランザクションで search_path を
+	// 壊す形は使えない — 照会は自分でトランザクションを開くので、既に tx の
+	// `*gorm.DB` を渡すと SQL に到達する前に落ちる (検査が別物になる)。
+	repo := NewUserIPSearchRepository(emptySchemaDB(t))
 
 	rows, err := repo.ListAccountsByIP("192.0.2.1", time.Now(), 10, 0)
 	require.Error(t, err)
 	assert.Nil(t, rows)
 	assert.Contains(t, err.Error(), "user_ip accounts by ip")
+	// **SQL に到達していることまで見る。** ラッパー側の文字列だけだと、
+	// fn へ届く前に失敗する形 (2 周目に直した形そのもの) へ戻しても緑になる。
+	assert.Contains(t, err.Error(), "42P01", "SQL に到達していない: "+err.Error())
 
 	has, err := repo.HasAnyHistory()
 	require.Error(t, err)
@@ -433,16 +434,16 @@ func TestUserIPSearch_SharedIPAccountsEmptyInput(t *testing.T) {
 
 // SQL が壊れていれば err で返る (空の結果にしない)。
 func TestUserIPSearch_SharedPropagatesError(t *testing.T) {
-	db := ipSearchTestDB(t)
-	tx := db.Begin()
-	require.NoError(t, tx.Error)
-	defer tx.Rollback()
-	require.NoError(t, tx.Exec(`SET LOCAL search_path TO pg_temp`).Error)
-	repo := NewUserIPSearchRepository(tx)
+	// **テーブルの無い schema へつなぐ。** トランザクションで search_path を
+	// 壊す形は使えない — 照会は自分でトランザクションを開くので、既に tx の
+	// `*gorm.DB` を渡すと SQL に到達する前に落ちる (検査が別物になる)。
+	repo := NewUserIPSearchRepository(emptySchemaDB(t))
 
 	_, err := repo.ListIPsByUser("u1", time.Now(), 10)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "user_ip ips by user")
+	// SQL に到達していることまで見る (理由は PropagatesError と同じ)。
+	assert.Contains(t, err.Error(), "42P01", "SQL に到達していない: "+err.Error())
 
 	_, err = repo.ListSharedIPAccounts([]string{"192.0.2.1"}, time.Now(), 10)
 	require.Error(t, err)
@@ -528,4 +529,66 @@ func rowsReadFromUserIP(t *testing.T, planJSON string) int {
 		}
 	}
 	return total
+}
+
+// **照会は DB 側でも時間で切る** (#3106)。
+//
+// 走査の上限 (起点 50 本 × 候補 200 件) は「返す量」を決めるもので、これは
+// 「その上限の中でも遅いときに何秒で諦めるか」。index が効かない構成や DB 側の
+// 競合では、有界な問い合わせでも待たされる。
+//
+// **本番コードが掛けた上限そのものを見る。** コールバックの中でテストが
+// `SET LOCAL` し直す形にすると、`withLookupTimeout` から Exec を丸ごと消しても
+// 緑のまま通る (実測)。ここでは (a) トランザクションの中で実際に効いている値、
+// (b) それが定数と一致すること、の 2 つを見る。
+func TestUserIPSearch_LookupTimeoutApplies(t *testing.T) {
+	db := ipSearchTestDB(t)
+	repo := NewUserIPSearchRepository(db).(*userIPSearchRepository)
+
+	require.Equal(t, lookupStatementTimeout, repo.lookupTimeout,
+		"コンストラクタが既定の上限を配線していない")
+
+	// **`SHOW` を同じトランザクションの中で引く。** 別接続に掛かっていれば
+	// セッション既定 (`0` = 無制限) が返るので、掛け違いもここで落ちる。
+	var effective string
+	require.NoError(t, repo.withLookupTimeout(func(tx *gorm.DB) error {
+		return tx.Raw(`SHOW statement_timeout`).Scan(&effective).Error
+	}))
+	assert.Equal(t, "10s", effective,
+		"withLookupTimeout がトランザクションに上限を掛けていない")
+}
+
+// **実際に切れることまで見る。** 値が入っているだけでは、書式が違って
+// PostgreSQL に無視される形 (単位の取り違えなど) を捕まえられない。
+//
+// 上限はフィールドなので、10 秒待たずに縮めて試せる。**縮めるのはテスト側の
+// フィールドで、コールバックの中で `SET LOCAL` し直すのではない** — 後者だと
+// 本番コードの Exec を消しても通る。
+func TestUserIPSearch_LookupTimeoutCancels(t *testing.T) {
+	db := ipSearchTestDB(t)
+	repo := NewUserIPSearchRepository(db).(*userIPSearchRepository)
+	repo.lookupTimeout = 200 * time.Millisecond
+
+	start := time.Now()
+	err := repo.withLookupTimeout(func(tx *gorm.DB) error {
+		return tx.Exec(`SELECT pg_sleep(5)`).Error
+	})
+	require.Error(t, err, "statement_timeout が効いていない (5 秒眠れてしまった)")
+	assert.Contains(t, err.Error(), "57014", "取り消し以外の理由で失敗している: "+err.Error())
+	assert.Less(t, time.Since(start), 5*time.Second, "上限で切れずに眠り切っている")
+}
+
+// **セッションに残さない。** `SET LOCAL` はトランザクション限りなので、同じ接続を
+// 使い回す後続のクエリに上限が漏れない。漏れると無関係なクエリまで切れる。
+func TestUserIPSearch_LookupTimeoutDoesNotLeak(t *testing.T) {
+	db := ipSearchTestDB(t)
+	repo := NewUserIPSearchRepository(db).(*userIPSearchRepository)
+	repo.lookupTimeout = time.Millisecond
+
+	// 上限が漏れれば、この後の 50ms のクエリが 57014 で落ちる。
+	require.NoError(t, repo.withLookupTimeout(func(tx *gorm.DB) error { return nil }))
+
+	var out int
+	require.NoError(t, db.Raw(`SELECT 1 FROM pg_sleep(0.05)`).Scan(&out).Error,
+		"直前の SET LOCAL がセッションに残っている")
 }

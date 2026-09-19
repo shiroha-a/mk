@@ -653,6 +653,67 @@ func TestDefaultEndpointLimits_RoleAssignmentShow(t *testing.T) {
 	}
 }
 
+// adminUserForLimit は UserBucketOnly の endpoint を認証済みで叩くための利用者。
+var adminUserForLimit = &model.User{ID: "01hzzzzzzzzzzzzzzzzzzzzzzz"}
+
+// IP を返す 4 endpoint に上限があること (#3106)。
+//
+// **値と path 解決の両方を見る。** 値だけ見ると route を rename したときに
+// 「キーはあるのに引けない」状態を見逃すし、path 解決だけ見ると上限を
+// 実質無制限 (`Max: 100000`) に緩めても通る。
+//
+// ここが抜けると**完了条件の「検索頻度制限」を固定するものが何も無くなる** —
+// 実際、初版は 3 行を削除しても全テストと `make gates` が緑だった (敵対的
+// レビュー 1 周目で実測)。limiter は未登録のキーを**素通しする**ので、
+// 気付ける経路が他に無い。
+func TestDefaultEndpointLimits_IPLookups(t *testing.T) {
+	paths := []string{
+		"/api/admin/ip/accounts",
+		"/api/admin/ip/related-accounts",
+		"/api/admin/ip/lookup-log",
+		// upstream の口。**同じ「利用者 ↔ IP の対応」を返す**ので、ここだけ
+		// 無制限だと mk-go 側に上限を置いた意味が無い (#3106)。
+		"/api/admin/get-user-ips",
+	}
+	for _, path := range paths {
+		t.Run(path, func(t *testing.T) {
+			key := strings.TrimPrefix(path, "/api/")
+			limit, ok := DefaultEndpointLimits[key]
+			require.True(t, ok, "%s に上限が無い", path)
+			assert.Equal(t, time.Hour, limit.Duration)
+			assert.Equal(t, 120, limit.Max)
+
+			assert.True(t, limit.UserBucketOnly,
+				"%s は user bucket だけで数えること。IP bucket も見ると、\n"+
+					"同じ出口 IP から未認証で叩き続けるだけで正当なモデレーターを"+
+					"締め出せる (#3106)", path)
+
+			// path からキーが引けることまで見る。**認証済みで叩く** —
+			// この 4 本は UserBucketOnly なので未認証では bucket を消費しない。
+			store := &mockLimitStore{}
+			rl := NewRateLimiter(store, true, DefaultEndpointLimits)
+			e, h := setupEcho(rl)
+			doRequest(e, rl.Middleware(), h, path, adminUserForLimit)
+			require.NotEmpty(t, store.calls,
+				"%s が無制限。path からキーへの変換が合っていない", path)
+			for _, call := range store.calls {
+				assert.False(t, strings.HasPrefix(call.Key, "ip-"),
+					"%s が IP bucket を消費している (key=%s)", path, call.Key)
+			}
+
+			// **未認証では消費しない。** ここが消費すると締め出しが作れる。
+			store2 := &mockLimitStore{}
+			rl2 := NewRateLimiter(store2, true, DefaultEndpointLimits)
+			e2, h2 := setupEcho(rl2)
+			doRequest(e2, rl2.Middleware(), h2, path, nil)
+			assert.Empty(t, store2.calls,
+				"%s が未認証のリクエストで bucket を消費している。\n"+
+					"limiter は権限検査より前に走るので、403 になる相手が\n"+
+					"正当なモデレーターの窓を食い潰せる (#3106)", path)
+		})
+	}
+}
+
 func TestDefaultEndpointLimits_MinIntervalEndpoints(t *testing.T) {
 	cases := []struct {
 		endpoint    string
