@@ -963,37 +963,58 @@ backfill chat_room.host (cursor=""): ERROR: column "host" does not exist (SQLSTA
 IP とアカウントの対応を引く機能は、**照会そのものを別のテーブルに記録する**。
 運用で問い合わせを受けたときに、どこまで答えられるかを先に把握しておくこと。
 
-記録の対象は 3 本。mk-go 独自の `admin/ip/accounts` (#3104) と
+記録の対象は 4 本。mk-go 独自の `admin/ip/accounts` (#3104) と
 `admin/ip/related-accounts` (#3105) に加えて、**upstream から引き継いだ
-`admin/get-user-ips` も記録する** — 返すのは同じ「利用者 ↔ IP の対応」なので、
-ここを外すと監査を迂回して同じものを引ける。
+`admin/get-user-ips` と `admin/show-user` の `signins` も記録する** — どちらも
+返すのは同じ「利用者 ↔ IP の対応」なので、外すと監査を迂回して同じものを引ける。
+
+**`admin/show-user` は記録が増えやすい。** 管理画面の利用者ページは開くたびに
+この口を叩き、凍結・サイレンス・ロール変更・メモ保存などの操作のあとにも引き直す。
+`canSearchIpHistory` を持つ相手が利用者ページを 1 回開いて 1 操作すると、それだけで
+記録が 2 行増える (ログイン履歴が 0 件の利用者でも `resultCount: 0` の行が残る)。
+下の「記録の一覧は最新 10,100 件までしか遡れない」と合わせて考えること。
 
 **監査の一覧 (`admin/ip/lookup-log`) を読んだことは記録しない。** 監査ログの閲覧を
 監査し続けると際限が無いので切ってあるが、**この応答にも照会に使った IP が並ぶ**
 ことは意識しておくこと (権限は照会と同じ 3 段)。
 
-### 監査の対象外に、IP が読めるもう 1 本の経路がある
+### `admin/show-user` の `signins` も同じ policy で守る (#3114)
 
 **`admin/show-user` が返す `signins` にはログインのたびの IP が入る。** これは
-`user_ip` とは別の `signin` テーブルで、この節の仕組みは**一切掛かっていない**。
-upstream と同じ挙動 (`admin/show-user.ts` は `requireModerator`、`signin` の
-json-schema に `ip` がある) なので mk-go が開けた穴ではないが、**運用上は
-`admin/ip/*` より広い**ので、問い合わせに答える前に必ず併せて考えること。
+`user_ip` とは別の `signin` テーブルで、**upstream は policy を見ずに全件返す**
+(`admin/show-user.ts` は `requireModerator`、`signin` の json-schema に `ip` がある)。
+mk-go は `canSearchIpHistory` を持つ相手にだけ返し、**返したときだけ記録する**
+(伏せた応答も、DB 障害で引けなかった応答も、開示が起きていないので記録しない)。
+upstream からの意図的な逸脱。**ただし揃っているのは policy 段だけで、scope も
+レート制限も件数の上限も `admin/ip/*` とは違う** (後述)。
 
 | | `admin/ip/*` | `admin/get-user-ips` | `admin/show-user` の `signins` |
 |---|---|---|---|
-| 権限 | モデレーター + `canSearchIpHistory` (既定 false) | **管理者** | **モデレーター** (policy 不要) |
-| 監査 | 残る | 残る | **残らない** |
+| 権限 | モデレーター + `canSearchIpHistory` (既定 false) + scope `read:admin:user-ips` | **管理者** + scope | **モデレーター + `canSearchIpHistory`** + scope `read:admin:show-user` (policy が無ければ `ip` と `headers` は空) |
+| 監査 | 残る | 残る | **返したときだけ残る** |
 | レート制限 | 1 時間 120 回 | 1 時間 120 回 | **無し** |
-| `Cache-Control` | `no-store` | `no-store` | `private, max-age=0, must-revalidate` (API 共通) |
+| `Cache-Control` | `no-store` | `no-store` | 返したときだけ `no-store` |
 | 件数 | 1 ページ 100 件 | 最新 30 件 | **全件** |
 | `meta.enableIpLogging` が無効 | 新しい観測が止まる | 同左 | **関係なく記録され続ける** |
 | 保持期間 | 90 日で刈る | 同左 | **刈らない (無期限)** |
 
-つまり `canSearchIpHistory` を配っていないモデレーター、つまり**運営者が IP 照会を
-許していない相手**でも、`admin/show-user` を 1 回叩けば対象のログイン IP の全履歴を
-記録も上限も無しに読める。`admin/ip/lookup-log` が空でも「誰もこの利用者の IP を
-見ていない」とは言えない。
+**残っている差は 4 つ** (上の表で `admin/ip/*` と食い違う行を数えた):
+
+1. **レート制限が無い** (`DefaultEndpointLimits` に `admin/show-user` は無い)
+2. **件数の上限が無い** (全件返す)
+3. **`meta.enableIpLogging` を無効にしても `signin` には記録され続ける**
+4. **保持期間が無い** — つまり `user_ip` が 90 日で消えた後も、同じ時期の
+   ログイン IP は `signin` に残っている
+
+**scope も別。** `admin/ip/*` は `read:admin:user-ips` を要求するが、こちらは
+`read:admin:show-user`。**`read:admin:show-user` だけを与えたアプリトークンでも、
+policy さえあればログイン IP が読める。**
+
+`signin` に保持期間を入れるかは別途判断が要る (既存行を消すので不可逆)。
+
+**伏せたことは応答から分からない。** policy が無い相手には `ip: ""` /
+`headers: {}` が返るだけで、「記録が無い」との区別が付かない。policy を
+確かめられなかったとき (roleService 未配線など) も同じ応答になる。
 
 ### 残るもの
 

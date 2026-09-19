@@ -26,6 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/datatypes"
+
+	"github.com/shiroha-a/mk/internal/core/iplookuplog"
 )
 
 const adminInternalErrorJSON = `{"error":{"message":"Internal error.","code":"INTERNAL_ERROR","id":"5d37dbcb-891e-41ca-a3d6-e690c97775ac","kind":"server"}}`
@@ -258,6 +260,19 @@ func newTestHandlerWithAssign(t *testing.T) (*apiadmin.Handler, *testutil.MockUs
 	roleSvc := role.NewService(roleRepo, assignRepo, metaRepo, idGen)
 	h := apiadmin.NewHandler(signupSvc, roleSvc, metaRepo, userRepo, idGen)
 	return h, userRepo, metaRepo, roleRepo, assignRepo
+}
+
+// newTestHandlerNoRoles builds a handler without a role service, for the
+// fail-closed paths that must not disclose anything when the policy cannot be
+// evaluated (#3114)。
+func newTestHandlerNoRoles(t *testing.T) (*apiadmin.Handler, *testutil.MockUserRepository, *testutil.MockMetaRepository, id.Generator) {
+	t.Helper()
+	userRepo := testutil.NewMockUserRepository()
+	metaRepo := testutil.NewMockMetaRepository()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	idGen, _ := id.NewGenerator("aidx")
+	signupSvc := signup.NewService(userRepo, metaRepo, idGen)
+	return apiadmin.NewHandler(signupSvc, nil, metaRepo, userRepo, idGen), userRepo, metaRepo, idGen
 }
 
 func doPost(h func(echo.Context) error, body string, user *model.User) *httptest.ResponseRecorder {
@@ -512,34 +527,147 @@ func (failingSigninRepo) ListByUserID(string, int, string, string) ([]*model.Sig
 	return nil, assertError{}
 }
 
-func TestShowUser_WithSignins(t *testing.T) {
-	h, userRepo, _, _ := newTestHandler(t)
-	idGen, _ := id.NewGenerator("aidx")
-	uid := idGen.Generate(time.Now())
-	userRepo.Users[uid] = &model.User{ID: uid, Username: "test", AvatarDecorations: []byte("[]")}
-	userRepo.Profiles[uid] = &model.UserProfile{
-		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+// **`signins` の `ip` は `canSearchIpHistory` を持つ相手にだけ返す** (#3114)。
+//
+// ここは `signin` テーブルのログイン IP をそのまま返す口で、`admin/ip/*` が
+// 要求する policy を通らなかった。#3104 が「IP とアカウントの対応は既定で
+// モデレーターに開かない」と決めた以上、同じ種類の情報をモデレーター権限だけで
+// 全件返すのは、mk-go が自分で作った権限境界と食い違う。
+func TestShowUser_SigninIPsRequirePolicy(t *testing.T) {
+	setup := func(t *testing.T) (*apiadmin.Handler, string, string, *testutil.MockMetaRepository, *testutil.MockRoleRepository, *testutil.MockRoleAssignmentRepository, *stubAuditRepo) {
+		t.Helper()
+		h, userRepo, metaRepo, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+		idGen, _ := id.NewGenerator("aidx")
+		uid := idGen.Generate(time.Now())
+		userRepo.Users[uid] = &model.User{ID: uid, Username: "test", AvatarDecorations: []byte("[]")}
+		userRepo.Profiles[uid] = &model.UserProfile{
+			UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+		}
+		signinRepo := testutil.NewMockSigninRepository()
+		sid := idGen.Generate(time.Now())
+		// **`headers` に nginx が付ける IP を入れる。** これが無いと
+		// `PackSignin` が `{}` を返すので、**漏れる唯一のフィールドだけが
+		// テスト対象から外れる** (敵対的レビューで実測)。
+		signinRepo.Signins = []*model.Signin{{ID: sid, UserID: uid, IP: "203.0.113.5", Success: true,
+			Headers: []byte(`{"X-Real-Ip":["203.0.113.5"],"X-Forwarded-For":["203.0.113.5, 10.0.0.1"]}`)}}
+		h.SetSigninRepo(signinRepo)
+		audit := &stubAuditRepo{}
+		h.SetIPLookupAudit(iplookuplog.NewService(audit, idGen))
+		return h, uid, sid, metaRepo, roleRepo, assignRepo, audit
+	}
+	readSignin := func(t *testing.T, rec *httptest.ResponseRecorder) map[string]any {
+		t.Helper()
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		signins, ok := resp["signins"].([]any)
+		require.True(t, ok)
+		require.Len(t, signins, 1)
+		return signins[0].(map[string]any)
 	}
 
-	signinRepo := testutil.NewMockSigninRepository()
-	sid := idGen.Generate(time.Now())
-	signinRepo.Signins = []*model.Signin{
-		{ID: sid, UserID: uid, IP: "203.0.113.5", Success: true},
-	}
-	h.SetSigninRepo(signinRepo)
+	t.Run("policy が無ければ ip を伏せる", func(t *testing.T) {
+		h, uid, sid, _, _, _, audit := setup(t)
+		rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, &model.User{ID: "mod1"})
+		require.Equal(t, http.StatusOK, rec.Code)
+		entry := readSignin(t, rec)
+		// **key は消さず空文字にする。** json-schema が `ip` を
+		// optional:false / nullable:false と宣言している。
+		assert.Equal(t, "", entry["ip"], "policy が無い相手に IP を返している")
+		// **`headers` も伏せる。** 本番構成の nginx が `X-Real-IP` /
+		// `X-Forwarded-For` を必ず付けるので、`ip` だけ潰しても隣のキーで読める。
+		assert.Equal(t, map[string]any{}, entry["headers"], "headers から IP が読める")
+		raw, _ := json.Marshal(entry)
+		assert.NotContains(t, string(raw), "203.0.113.5", "応答のどこかに IP が残っている")
+		// 伏せた応答は開示が起きていないので記録しない。
+		assert.Empty(t, audit.written)
+		// 他の列はそのまま。
+		assert.Equal(t, sid, entry["id"])
+		assert.Equal(t, true, entry["success"])
+		assert.NotNil(t, entry["createdAt"])
+	})
 
-	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
-	assert.Equal(t, http.StatusOK, rec.Code)
-	var resp map[string]any
-	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	signins, ok := resp["signins"].([]any)
-	require.True(t, ok)
-	require.Len(t, signins, 1)
-	entry := signins[0].(map[string]any)
-	assert.Equal(t, sid, entry["id"])
-	assert.Equal(t, "203.0.113.5", entry["ip"])
-	assert.Equal(t, true, entry["success"])
-	assert.NotNil(t, entry["createdAt"])
+	t.Run("policy を持つモデレーターには返し、監査に残す", func(t *testing.T) {
+		h, uid, _, _, roleRepo, assignRepo, audit := setup(t)
+		roleRepo.Roles["iprole"] = &model.Role{ID: "iprole", Name: "IP",
+			Policies: datatypes.JSON([]byte(`{"canSearchIpHistory":{"useDefault":false,"priority":1,"value":true}}`))}
+		assignRepo.Assignments["mod1:iprole"] = &model.RoleAssignment{ID: "as1", UserID: "mod1", RoleID: "iprole"}
+
+		rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, &model.User{ID: "mod1"})
+		require.Equal(t, http.StatusOK, rec.Code)
+		entry := readSignin(t, rec)
+		assert.Equal(t, "203.0.113.5", entry["ip"])
+		// policy があるときは headers もそのまま。
+		assert.NotEqual(t, map[string]any{}, entry["headers"])
+		// **返したときだけ記録する。**
+		require.Len(t, audit.written, 1, "IP を返したのに監査に残していない")
+		got := audit.written[0]
+		assert.Equal(t, "mod1", got.UserID)
+		assert.Equal(t, model.IPLookupKindSignins, got.Kind)
+		assert.Equal(t, uid, got.TargetUserID)
+		assert.Equal(t, 1, got.ResultCount)
+		// 共有キャッシュに残さない (IP が載る応答なので #3106 と同じ扱い)。
+		assert.Contains(t, rec.Header().Get("Cache-Control"), "no-store")
+	})
+
+	// **判定できないときは伏せる側へ倒す** (fail-closed)。roleService が未配線
+	// だったり、呼び出し元が特定できないときに「policy を確かめられなかった」を
+	// 「持っている」に倒すと、配線忘れがそのまま IP の開示になる。
+	t.Run("呼び出し元が特定できなければ伏せる", func(t *testing.T) {
+		h, uid, _, _, _, _, audit := setup(t)
+		rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "", readSignin(t, rec)["ip"], "利用者不明でも IP を返している")
+		assert.Empty(t, audit.written)
+	})
+
+	t.Run("roleService が未配線なら伏せる", func(t *testing.T) {
+		// roleService を持たない handler。policy を確かめる手段が無い。
+		h, userRepo, _, _ := newTestHandlerNoRoles(t)
+		idGen, _ := id.NewGenerator("aidx")
+		uid := idGen.Generate(time.Now())
+		userRepo.Users[uid] = &model.User{ID: uid, Username: "test", AvatarDecorations: []byte("[]")}
+		userRepo.Profiles[uid] = &model.UserProfile{
+			UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+		}
+		signinRepo := testutil.NewMockSigninRepository()
+		signinRepo.Signins = []*model.Signin{{ID: idGen.Generate(time.Now()), UserID: uid, IP: "203.0.113.5", Success: true}}
+		h.SetSigninRepo(signinRepo)
+
+		rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, &model.User{ID: "mod1"})
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "", readSignin(t, rec)["ip"], "roleService 未配線で IP を返している")
+	})
+
+	// **引けなかった照会は監査に残さない** (#3114 レビュー)。残すと
+	// `ip_lookup_log` 上で「本当に 0 件だった」と「DB が落ちていて何も
+	// 返していない」が区別できなくなる (`admin/get-user-ips` と同じ判断)。
+	t.Run("signins を引けなければ監査に残さない", func(t *testing.T) {
+		h, uid, _, _, roleRepo, assignRepo, audit := setup(t)
+		roleRepo.Roles["iprole"] = &model.Role{ID: "iprole", Name: "IP",
+			Policies: datatypes.JSON([]byte(`{"canSearchIpHistory":{"useDefault":false,"priority":1,"value":true}}`))}
+		assignRepo.Assignments["mod1:iprole"] = &model.RoleAssignment{ID: "as1", UserID: "mod1", RoleID: "iprole"}
+		h.SetSigninRepo(&failingSigninRepo{})
+
+		rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, &model.User{ID: "mod1"})
+		require.Equal(t, http.StatusOK, rec.Code)
+		var resp map[string]any
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+		assert.Empty(t, resp["signins"])
+		assert.Empty(t, audit.written, "引けていないのに監査に残している")
+		// **内部連絡用のキーを wire へ出さない。**
+		assert.NotContains(t, rec.Body.String(), "__signinsLoaded")
+	})
+
+	t.Run("管理者は policy を短絡して返る", func(t *testing.T) {
+		h, uid, _, metaRepo, _, _, audit := setup(t)
+		// `HasRolePolicy` は administrator を短絡する。root を管理者にする。
+		root := "root1"
+		metaRepo.Meta = &model.Meta{ID: "x", RootUserID: &root}
+		rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, &model.User{ID: "root1"})
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, "203.0.113.5", readSignin(t, rec)["ip"])
+		require.Len(t, audit.written, 1)
+	})
 }
 
 func TestShowUser_SigninsErrorFallback(t *testing.T) {
