@@ -538,6 +538,90 @@ func TestAcceptRequest_NotFound(t *testing.T) {
 	assert.True(t, errors.Is(err, following.ErrRequestNotFound))
 }
 
+// followee (bob, 承認する側=self) が follower (alice) を block している方向は
+// Follow() の blockingChecker 検査と対称に ErrBlocking (#1562 の 'blocking' 相当)。
+// 申請行も削除されずに残ること (承認せず何も変えない) まで見る。
+func TestAcceptRequest_BlockingFollower(t *testing.T) {
+	svc, userRepo, _, frRepo := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	svc.SetBlockingChecker(&stubBlockingChecker{blockedPairs: map[string]bool{"bob->alice": true}})
+
+	err = svc.AcceptRequest("bob", "alice")
+	require.ErrorIs(t, err, following.ErrBlocking)
+	assert.Len(t, frRepo.Requests, 1, "block 中は申請を消さずに残す")
+}
+
+// follower (alice) が followee (bob, self) を block している方向は ErrBlocked。
+func TestAcceptRequest_BlockedByFollower(t *testing.T) {
+	svc, userRepo, _, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	svc.SetBlockingChecker(&stubBlockingChecker{blockedPairs: map[string]bool{"alice->bob": true}})
+
+	err = svc.AcceptRequest("bob", "alice")
+	require.ErrorIs(t, err, following.ErrBlocked)
+}
+
+// 相互 block 時は Follow() と同じく blocking 判定が先勝ちする。
+func TestAcceptRequest_MutualBlockPrefersBlocking(t *testing.T) {
+	svc, userRepo, _, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	svc.SetBlockingChecker(&stubBlockingChecker{blockedPairs: map[string]bool{
+		"bob->alice": true,
+		"alice->bob": true,
+	}})
+
+	err = svc.AcceptRequest("bob", "alice")
+	require.ErrorIs(t, err, following.ErrBlocking)
+}
+
+func TestAcceptRequest_BlockingCheckerFirstCheckError(t *testing.T) {
+	svc, userRepo, _, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	svc.SetBlockingChecker(&stubBlockingChecker{err: stubError})
+
+	err = svc.AcceptRequest("bob", "alice")
+	assert.ErrorIs(t, err, stubError)
+}
+
+func TestAcceptRequest_BlockingCheckerSecondCheckError(t *testing.T) {
+	svc, userRepo, _, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	svc.SetBlockingChecker(&stubBlockingCheckerForwardError{})
+
+	err = svc.AcceptRequest("bob", "alice")
+	assert.ErrorIs(t, err, stubError)
+}
+
+// blockingChecker が配線されていてもブロック関係が無ければ通常どおり承認できる
+// (nil の場合は TestAcceptRequest_Success で確認済み)。
+func TestAcceptRequest_BlockingCheckerWiredNoBlock(t *testing.T) {
+	svc, userRepo, fRepo, _ := newSvc(t)
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
+	require.NoError(t, err)
+	svc.SetBlockingChecker(&stubBlockingChecker{})
+
+	err = svc.AcceptRequest("bob", "alice")
+	require.NoError(t, err)
+	assert.Len(t, fRepo.Followings, 1)
+}
+
 func TestAcceptRequest_PublishesFollowAndFollowed(t *testing.T) {
 	svc, userRepo, _, _ := newSvc(t)
 	addUser(t, userRepo, "alice", false)

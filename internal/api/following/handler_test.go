@@ -448,6 +448,36 @@ func TestAcceptRequest_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
+// bob (承認する側) が alice (申請者) を block している状況で承認しようとすると
+// BLOCKING (Create の #1562 と同じ code、occurrence が別なので id は別)。block
+// 時の申請取り消しが best-effort で失敗し申請が残っているケースの多層防御。
+func TestAcceptRequest_Blocking(t *testing.T) {
+	h, repo, _, frRepo := newTestHandlerWithRepos(t)
+	addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", true)
+	frRepo.Requests["r"] = &model.FollowRequest{ID: "r", FollowerID: "alice", FolloweeID: "bob"}
+	h.followingService.SetBlockingChecker(&stubBlockedChecker{blockerID: "bob", blockeeID: "alice"})
+
+	rec := postJSON(h.AcceptRequest, `{"userId": "alice"}`, bob)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"BLOCKING"`)
+	assert.Contains(t, rec.Body.String(), "b155c6b3-83e9-400a-89c1-4a521da65240")
+}
+
+// alice (申請者) が bob (承認する側) を block している状況では BLOCKED。
+func TestAcceptRequest_Blocked(t *testing.T) {
+	h, repo, _, frRepo := newTestHandlerWithRepos(t)
+	addUser(repo, "alice", false)
+	bob := addUser(repo, "bob", true)
+	frRepo.Requests["r"] = &model.FollowRequest{ID: "r", FollowerID: "alice", FolloweeID: "bob"}
+	h.followingService.SetBlockingChecker(&stubBlockedChecker{blockerID: "alice", blockeeID: "bob"})
+
+	rec := postJSON(h.AcceptRequest, `{"userId": "alice"}`, bob)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"code":"BLOCKED"`)
+	assert.Contains(t, rec.Body.String(), "25d1906c-9e73-49c0-85d1-f48d2520cd60")
+}
+
 func TestRejectRequest_Success(t *testing.T) {
 	h, repo := newTestHandler(t)
 	alice := addUser(repo, "alice", false)

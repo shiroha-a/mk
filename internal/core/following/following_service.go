@@ -500,6 +500,25 @@ func (s *Service) unfollow(followerID, followeeID string, deliver bool) error {
 // AcceptRequest accepts a pending follow request, deleting the request and
 // creating a Following relationship.
 func (s *Service) AcceptRequest(followeeID, followerID string) error {
+	// ブロック関係があると承認不可 (双方向で確認)。upstream の
+	// acceptFollowRequest 自体にはこの検査は無く、block 時に cancelRequest で
+	// 申請を消すことだけで守っている。本実装は Block の申請取り消しを
+	// best-effort にしているため (取り消し失敗時も block 自体は成立させる)、
+	// 取り消しが失敗して申請が残った場合の多層防御としてここでも検査する。
+	// Follow() の blockingChecker 検査と対称 (self=followeeID, target=followerID)。
+	if s.blockingChecker != nil {
+		if blocking, err := s.blockingChecker.IsBlocked(followeeID, followerID); err != nil {
+			return err
+		} else if blocking {
+			return ErrBlocking
+		}
+		if blocked, err := s.blockingChecker.IsBlocked(followerID, followeeID); err != nil {
+			return err
+		} else if blocked {
+			return ErrBlocked
+		}
+	}
+
 	req, err := s.followRequestRepo.FindByPair(followerID, followeeID)
 	if err != nil {
 		// **DB 障害を not-found に丸めない** (#2799)。
