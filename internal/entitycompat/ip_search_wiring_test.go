@@ -37,3 +37,19 @@ func TestIPAccountSearchRouteIsRegistered(t *testing.T) {
 		"admin/ip/accounts が 404 になる、あるいは管理者限定の既定が外れて\n"+
 			"モデレーター全員が IP から関連アカウントを引けるようになる (#3104)")
 }
+
+// 関連アカウント候補 (#3105) も同じ 3 段で守る。
+//
+// **`admin/ip/accounts` のゲートでは捕まらない。** あれは route ごとの文字列を
+// 照合するので、新しい route を足しても既存のゲートは何も言わない。扱うのは同じ
+// 「利用者 ↔ IP の対応」なので、認証段が片方だけ緩むと**緩いほうから同じ情報が
+// 全部引ける**。
+func TestIPRelatedAccountsRouteIsRegistered(t *testing.T) {
+	assertWired(t, routerGo,
+		`api.POST("/admin/ip/related-accounts", adminHandler.IPRelatedAccounts, `+
+			`middleware.RequireModerator(roleService), `+
+			`middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory), `+
+			`middleware.RequireScope("read:admin:user-ips"))`,
+		"admin/ip/related-accounts が 404 になる、あるいは管理者限定の既定が外れて\n"+
+			"モデレーター全員が関連アカウント候補を引けるようになる (#3105)")
+}

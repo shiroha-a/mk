@@ -3454,6 +3454,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		middleware.RequireModerator(roleService),
 		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
 		middleware.RequireScope("read:admin:user-ips"))
+	// 関連アカウント候補 (#3105)。**同じ policy と scope を再利用する** —
+	// 扱うのは同じ「利用者 ↔ IP の対応」で、別 policy にすると片方だけ開けてしまう。
+	api.POST("/admin/ip/related-accounts", adminHandler.IPRelatedAccounts,
+		middleware.RequireModerator(roleService),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
+		middleware.RequireScope("read:admin:user-ips"))
 	api.POST("/admin/get-index-stats", adminHandler.GetIndexStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:index-stats"))
 	api.POST("/admin/get-table-stats", adminHandler.GetTableStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:table-stats"))
 	api.POST("/admin/server-info", adminHandler.ServerInfo, middleware.RequireModerator(roleService), middleware.RequireScope("read:admin:server-info"))

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/pgarray"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
@@ -110,6 +111,48 @@ type UserIPSearchRepository interface {
 	// **「一致なし」と「そもそも記録が無い」を区別するために要る** (#3066 §7)。
 	// 記録が無効だった / 保持期間を過ぎた構成で「関連アカウントなし」と断定しない。
 	HasAnyHistory() (bool, error)
+	// ListIPsByUser returns the IPs userID was seen from within the window,
+	// most recently seen first, at most limit rows.
+	//
+	// **`ListByUser` とは並びも窓も違う。** あちらは upstream の
+	// `admin/get-user-ips` に合わせた `id DESC` (= 初回観測順) の一覧で、
+	// こちらは関連候補の起点 (#3105)。**最終観測の新しい順に切る**のは、
+	// 打ち切ったときに残るのが**重みの大きい IP** になるようにするため
+	// (時間減衰は古いほど軽い)。
+	ListIPsByUser(userID string, since time.Time, limit int) ([]UserIPWindowRow, error)
+	// ListSharedIPAccounts returns, for each of ips, at most perIP accounts seen
+	// from it within the window (the target's own row included), newest first.
+	//
+	// 呼び出し側は「まだ他にも居る」を判断するために上限 + 1 を渡す規約だが、
+	// それは呼び出し側の都合で、ここの契約は「perIP 件まで」。
+	//
+	// **走査そのものを有界にしてある。** CGNAT や公衆 Wi-Fi の IP は 1 つで数千
+	// アカウントが載りうるので、「読んでから絞る」形だと利用者 1 人を指定する
+	// だけで無制限の走査を外から回せる。実測では `COUNT(*) OVER (PARTITION BY ip)`
+	// を使う形が**返す行を絞っても 227 万行 / 2.4 秒**走り、LATERAL + per-IP LIMIT
+	// の形が同じ結果を 21.6 ms で返した。**だから正確な「その IP のアカウント数」は
+	// 返せない** — 数えるには全行読む必要がある。呼び出し側は「perIP+1 件まで見えた」
+	// という下限として扱うこと (共有回線かの判断にはそれで足りる)。
+	//
+	// **対象本人を除かない。** 「その IP を使ったアカウント数」は本人を含む数なので、
+	// SQL で落とすと数えられなくなる。候補から外すのは呼び出し側。
+	ListSharedIPAccounts(ips []string, since time.Time, perIP int) ([]UserIPSharedRow, error)
+}
+
+// UserIPWindowRow is one IP a user was seen from, with its last observation.
+type UserIPWindowRow struct {
+	IP       string
+	LastSeen time.Time
+}
+
+// UserIPSharedRow is one (candidate, ip) pair the target was also seen from (#3105).
+type UserIPSharedRow struct {
+	UserID string
+	IP     string
+	// LastSeen はその IP に対する最終観測。対象側の最終観測は `ListIPsByUser` が
+	// 返しているので、突き合わせは呼び出し側で行う (同じ値を 2 本のクエリで 2 回
+	// 運ばない)。
+	LastSeen time.Time
 }
 
 type userIPSearchRepository struct {
@@ -171,4 +214,92 @@ func (r *userIPSearchRepository) HasAnyHistory() (bool, error) {
 		return false, fmt.Errorf("user_ip has any history: %w", err)
 	}
 	return exists, nil
+}
+
+// userIPWindowSQL lists the IPs a user was seen from inside the window.
+//
+// `IDX_user_ip_userId` に乗る。並びは最終観測の降順 → `ip` 昇順で、
+// `ip` の tiebreaker が無いと同時刻の行で打ち切る位置が実行ごとに変わる。
+const userIPWindowSQL = `
+SELECT ip, "lastSeenAt" AS last_seen
+FROM "user_ip"
+WHERE "userId" = ? AND "lastSeenAt" >= ?
+ORDER BY "lastSeenAt" DESC, ip ASC
+LIMIT ?`
+
+func (r *userIPSearchRepository) ListIPsByUser(userID string, since time.Time, limit int) ([]UserIPWindowRow, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	type scan struct {
+		IP       string    `gorm:"column:ip"`
+		LastSeen time.Time `gorm:"column:last_seen"`
+	}
+	var rows []scan
+	if err := r.db.Raw(userIPWindowSQL, userID, since, limit).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("user_ip ips by user: %w", err)
+	}
+	out := make([]UserIPWindowRow, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, UserIPWindowRow{IP: s.IP, LastSeen: s.LastSeen})
+	}
+	return out, nil
+}
+
+// userIPSharedSQL takes the newest rows per IP through a per-IP index scan.
+//
+// **LATERAL + per-IP LIMIT にしてあるのが要点。** `COUNT(*) OVER (PARTITION BY ip)`
+// で数える形は、`ROW_NUMBER` で絞る前に**その IP の全行を読んでソートする**ので、
+// 返す行を絞っても走査は有界にならない。この形は各 IP で index scan を `perIP`
+// 件で止めるので、起点 50 本 × 201 件 = 最大 1 万行で頭打ちになる。
+//
+// **並びは `IDX_user_ip_ip_lastSeenAt_userId` (migration 000095) に完全に乗せる。**
+// `userId` を index から外すと `lastSeenAt` を presorted key とする incremental
+// sort に倒れ、**上限が保証されるかが同値の分布に依る** — 同じ `lastSeenAt` が
+// 固まっているとそのグループを全部読む (実測 PG 15、1 IP に 10 万アカウント、
+// `LIMIT 201`: 同値が固まっていると 100,000 行 / 33.7 ms、ばらけていれば 202 行
+// / 0.14 ms。index に `userId` を含めるとどちらでも 201 行 / 0.11-0.17 ms)。
+//
+// `COUNT(*) OVER (PARTITION BY ip)` で数える形は分布に関係なく全行読む
+// (200 万行の構成で 6,020 ms、temp に 176 MB)。
+//
+// **`userId` を並びから外して逃げない。** 同じ最終観測が並んだときにどの候補を
+// 残すかが実行ごとに変わり、同じ検索が違う結果を返す。
+//
+// **対象本人も返す。** 「その IP を使ったアカウント数」は本人を含む数なので、
+// ここで落とすと数えられなくなる。候補から外すのは呼び出し側。
+const userIPSharedSQL = `
+SELECT t.ip AS ip, s."userId" AS user_id, s."lastSeenAt" AS last_seen
+FROM unnest(?::text[]) AS t(ip)
+CROSS JOIN LATERAL (
+	SELECT "userId", "lastSeenAt"
+	FROM "user_ip"
+	WHERE ip = t.ip AND "lastSeenAt" >= ?
+	ORDER BY "lastSeenAt" DESC, "userId" ASC
+	LIMIT ?
+) s
+ORDER BY t.ip ASC, s."lastSeenAt" DESC, s."userId" ASC`
+
+func (r *userIPSearchRepository) ListSharedIPAccounts(ips []string, since time.Time, perIP int) ([]UserIPSharedRow, error) {
+	// **無駄な往復を省くだけの保険。** 空でも SQL としては成立する。
+	if len(ips) == 0 {
+		return nil, nil
+	}
+	if perIP <= 0 {
+		perIP = 1
+	}
+	type scan struct {
+		IP       string    `gorm:"column:ip"`
+		UserID   string    `gorm:"column:user_id"`
+		LastSeen time.Time `gorm:"column:last_seen"`
+	}
+	var rows []scan
+	if err := r.db.Raw(userIPSharedSQL, pgarray.StringArray(ips), since, perIP).Scan(&rows).Error; err != nil {
+		return nil, fmt.Errorf("user_ip shared accounts: %w", err)
+	}
+	out := make([]UserIPSharedRow, 0, len(rows))
+	for _, s := range rows {
+		out = append(out, UserIPSharedRow{UserID: s.UserID, IP: s.IP, LastSeen: s.LastSeen})
+	}
+	return out, nil
 }

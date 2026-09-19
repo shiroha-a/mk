@@ -39,6 +39,15 @@ func (s *stubIPSearch) ListAccountsByIP(ip string, since time.Time, limit, offse
 
 func (s *stubIPSearch) HasAnyHistory() (bool, error) { return s.hasAny, s.hasAnyErr }
 
+// #3105 の 2 本はここでは使わない。`stubIPRelated` が上書きする。
+func (s *stubIPSearch) ListIPsByUser(string, time.Time, int) ([]repository.UserIPWindowRow, error) {
+	return nil, nil
+}
+
+func (s *stubIPSearch) ListSharedIPAccounts([]string, time.Time, int) ([]repository.UserIPSharedRow, error) {
+	return nil, nil
+}
+
 type ipAccountJSON struct {
 	User struct {
 		ID       string `json:"id"`

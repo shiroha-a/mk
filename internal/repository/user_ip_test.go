@@ -131,7 +131,10 @@ func TestUserIPRepository_IPLookupUsesIndex(t *testing.T) {
 		`EXPLAIN SELECT "userId" FROM "user_ip" WHERE ip = ? ORDER BY "lastSeenAt" DESC LIMIT 30`,
 		"198.51.3.7").Scan(&plan).Error)
 	joined := strings.Join(plan, "\n")
-	assert.Contains(t, joined, "IDX_user_ip_ip_lastSeenAt", "IP 検索が index を使っていない:\n"+joined)
+	// **完全名で照合する。** 前方一致だと #3105 が張り替えた
+	// `IDX_user_ip_ip_lastSeenAt_userId` でも通り、実 schema に存在しない名前を
+	// 主張したまま緑になる。
+	assert.Contains(t, joined, "IDX_user_ip_ip_lastSeenAt_userId", "IP 検索が index を使っていない:\n"+joined)
 	assert.NotContains(t, joined, "Seq Scan on user_ip", "IP 検索が seq scan になっている:\n"+joined)
 }
 
