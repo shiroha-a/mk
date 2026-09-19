@@ -748,6 +748,39 @@ func TestCancelFollowRequestsBetween_FollowerLookupFailureStillDeletes(t *testin
 	assert.Empty(t, frRepo.Requests, "lookup 失敗でも申請行は消える")
 }
 
+// local follower 側の CancelRequest が失敗したら error を返す。
+func TestCancelFollowRequestsBetween_CancelRequestErrorPropagates(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	addUser(t, userRepo, "alice", false)
+	addUser(t, userRepo, "bob", true)
+	frRepo := &failingFollowRequestRepo{
+		MockFollowRequestRepository: testutil.NewMockFollowRequestRepository(),
+		failDelete:                  true,
+	}
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r1", FollowerID: "alice", FolloweeID: "bob"}))
+	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), frRepo)
+
+	err := svc.CancelFollowRequestsBetween("alice", "bob")
+	assert.ErrorIs(t, err, stubError, "削除失敗は握り潰さない")
+}
+
+// remote follower 側の RejectRequest が失敗したら error を返す。
+func TestCancelFollowRequestsBetween_RejectRequestErrorPropagates(t *testing.T) {
+	userRepo := testutil.NewMockUserRepository()
+	addUser(t, userRepo, "bob", false)
+	host := "remote.example"
+	userRepo.Users["remote1"] = &model.User{ID: "remote1", Username: "remote1", Host: &host}
+	frRepo := &failingFollowRequestRepo{
+		MockFollowRequestRepository: testutil.NewMockFollowRequestRepository(),
+		failDelete:                  true,
+	}
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r1", FollowerID: "remote1", FolloweeID: "bob"}))
+	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), frRepo)
+
+	err := svc.CancelFollowRequestsBetween("bob", "remote1")
+	assert.ErrorIs(t, err, stubError, "削除失敗は握り潰さない")
+}
+
 // リモートfollowerからのリクエストをrejectしたときにfederation hookの
 // OnLocalUnfollowedが呼ばれてReject(Follow)配信がトリガーされること (#349 PR コメント対応)。
 func TestRejectRequest_InvokesFederationHookForRemoteFollower(t *testing.T) {
