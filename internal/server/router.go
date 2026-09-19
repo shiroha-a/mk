@@ -4202,7 +4202,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		{"following.blockingChecker", followingService.HasBlockingChecker(),
 			"ブロック関係を無視してフォローが成立する (自分がブロックした相手・自分をブロックしている相手の両方。後者は inbox の Follow も通す)"},
 		{"blocking.followRequestCanceller", blockingService.HasFollowRequestCanceller(),
-			"block しても保留中の follow request が双方向に残り、後から承認されるとフォロー関係が成立しうる"},
+			"block しても保留中の follow request が双方向に残り、block 中に承認されるとフォロー関係が成立する"},
 		{"reaction.blockingChecker", reactionService.HasBlockingChecker(),
 			"自分をブロックしている相手の投稿にリアクションできる (IsBlocked(target.UserID, user.ID))"},
 		{"poll.blockingChecker", pollService.HasBlockingChecker(),

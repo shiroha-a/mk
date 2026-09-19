@@ -656,6 +656,20 @@ func (r *selectiveFindFailRepo) FindByPair(followerID, followeeID string) (*mode
 	return r.MockFollowRequestRepository.FindByPair(followerID, followeeID)
 }
 
+// followerLookupFailRepo fails FindByID for a single user so the
+// follower-lookup fallback in cancelOneFollowRequest can be exercised.
+type followerLookupFailRepo struct {
+	*testutil.MockUserRepository
+	failID string
+}
+
+func (r *followerLookupFailRepo) FindByID(id string) (*model.User, error) {
+	if id == r.failID {
+		return nil, stubError
+	}
+	return r.MockUserRepository.FindByID(id)
+}
+
 func TestCancelFollowRequestsBetween_NoRequestsIsNoop(t *testing.T) {
 	svc, _, _, _ := newSvc(t)
 	require.NoError(t, svc.CancelFollowRequestsBetween("alice", "bob"))
@@ -718,6 +732,20 @@ func TestCancelFollowRequestsBetween_ContinuesAfterError(t *testing.T) {
 	err := svc.CancelFollowRequestsBetween("alice", "bob")
 	assert.ErrorIs(t, err, stubError, "失敗した direction の error を返す")
 	assert.Empty(t, frRepo.Requests, "1 方向が失敗してももう片方は処理する")
+}
+
+// follower の lookup が一時障害でも、行の削除は RejectRequest 経路で進む。
+func TestCancelFollowRequestsBetween_FollowerLookupFailureStillDeletes(t *testing.T) {
+	base := testutil.NewMockUserRepository()
+	addUser(t, base, "alice", false)
+	addUser(t, base, "bob", false)
+	userRepo := &followerLookupFailRepo{MockUserRepository: base, failID: "alice"}
+	frRepo := testutil.NewMockFollowRequestRepository()
+	require.NoError(t, frRepo.Create(&model.FollowRequest{ID: "r1", FollowerID: "alice", FolloweeID: "bob"}))
+	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), frRepo)
+
+	require.NoError(t, svc.CancelFollowRequestsBetween("bob", "alice"))
+	assert.Empty(t, frRepo.Requests, "lookup 失敗でも申請行は消える")
 }
 
 // リモートfollowerからのリクエストをrejectしたときにfederation hookの

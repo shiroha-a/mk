@@ -288,6 +288,8 @@ func (c *recordingFollowRequestCanceller) CancelFollowRequestsBetween(a, b strin
 }
 
 // HasFollowRequestCanceller は配線の有無を返す (criticalWiring 用)。
+// **別の依存だけを配線しても false のままであること**も見る (述語を
+// `A != nil || B != nil` に広げる変異は false→true だけでは捕まらない)。
 func TestHasFollowRequestCanceller(t *testing.T) {
 	var empty blocking.Service
 	assert.False(t, empty.HasFollowRequestCanceller(), "未配線なら false")
@@ -295,7 +297,17 @@ func TestHasFollowRequestCanceller(t *testing.T) {
 	svc, _, _, _ := newSvc(t)
 	svc.SetFollowRequestCanceller(&recordingFollowRequestCanceller{})
 	assert.True(t, svc.HasFollowRequestCanceller(), "配線したら true")
+
+	other, _, _, _ := newSvc(t)
+	other.SetFederationHook(stubWiringFederation{})
+	assert.False(t, other.HasFollowRequestCanceller(),
+		"federationHook だけを配線しても false のままであること")
 }
+
+type stubWiringFederation struct{}
+
+func (stubWiringFederation) OnBlocked(string, string)   {}
+func (stubWiringFederation) OnUnblocked(string, string) {}
 
 // Block は配線された canceller に (blocker, blockee) を 1 回渡す。
 func TestBlock_CancelsPendingFollowRequests(t *testing.T) {
@@ -355,9 +367,9 @@ func TestBlock_CancelledRequestCannotBeAccepted(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = followRequestRepo.FindByPair("dave", "bob")
-	assert.True(t, repository.IsNotFound(err), "dave→bob の申請が残っている")
+	assert.True(t, repository.IsNotFound(err), "dave→bob の申請が取り消されている")
 	_, err = followRequestRepo.FindByPair("bob", "dave")
-	assert.True(t, repository.IsNotFound(err), "bob→dave の申請が残っている")
+	assert.True(t, repository.IsNotFound(err), "bob→dave の申請が取り消されている")
 
 	err = followingSvc.AcceptRequest("bob", "dave")
 	assert.ErrorIs(t, err, following.ErrRequestNotFound, "取り消し済みの申請は承認できない")

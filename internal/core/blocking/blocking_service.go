@@ -62,8 +62,8 @@ type FollowRequestCanceller interface {
 // SetFollowRequestCanceller wires the pending-follow-request cleanup used by
 // Block. upstream UserBlockingService.block は cancelRequest を双方向で呼び、
 // 保留中の申請を削除する (相手が remote なら Undo(Follow) / Reject を配送)。
-// 未配線だと block しても申請が残り、後から承認されたときに block 関係にある
-// 相手のフォローが成立しうる。
+// 未配線だと block しても申請が残り、block 中に承認されるとフォロー関係が
+// 成立してしまう。
 func (s *Service) SetFollowRequestCanceller(h FollowRequestCanceller) {
 	s.followRequestCanceller = h
 }
@@ -169,8 +169,8 @@ func (s *Service) Block(blockerID, blockeeID string) (*model.Blocking, error) {
 
 	// 保留中の follow request を双方向で取り消す。upstream
 	// UserBlockingService.block の cancelRequest 相当。
-	// **失敗しても block 自体は成立させる** (best-effort)。残すと、後から
-	// 承認されたときに block 関係にある相手のフォローが成立してしまう。
+	// **失敗しても block 自体は成立させる** (best-effort)。残すと、block 中に
+	// 承認されたときにフォロー関係が成立してしまう。
 	if s.followRequestCanceller != nil {
 		if err := s.followRequestCanceller.CancelFollowRequestsBetween(blockerID, blockeeID); err != nil {
 			slog.Warn("block: cancel pending follow requests failed",
