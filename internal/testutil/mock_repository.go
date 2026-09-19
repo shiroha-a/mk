@@ -45,6 +45,12 @@ type MockUserRepository struct {
 	// FindErr, when non-nil, is returned by FindByID. Same intent as
 	// FindProfileErr: a DB failure must not be collapsed into not-found (#2792).
 	FindErr error
+	// FindByURIErr, when non-nil, is returned by FindByURI.
+	//
+	// **FindErr とは別にしてある。** 同じ関数が id と URI の 2 経路で利用者を
+	// 引くとき、片方だけ guard する形 (#3025 が名指しした失敗形) は 1 つの
+	// hook では書き分けられない。
+	FindByURIErr error
 	// FindManyByIDsErr, when non-nil, is returned by FindManyByIDs. 同上 —
 	// 一括解決の失敗を「その利用者は居ない」に潰さないことを検査するために要る。
 	FindManyByIDsErr error
@@ -243,6 +249,9 @@ func (m *MockUserRepository) FindByID(id string) (*model.User, error) {
 }
 
 func (m *MockUserRepository) FindByURI(uri string) (*model.User, error) {
+	if m.FindByURIErr != nil {
+		return nil, m.FindByURIErr
+	}
 	for _, u := range m.Users {
 		if u.URI != nil && *u.URI == uri {
 			return u, nil
@@ -1246,6 +1255,9 @@ type MockNoteRepository struct {
 	// ListRenoteOrReplyRemoteUserIDs so callers can exercise the lookup
 	// failure path (#2995).
 	ListRenoteOrReplyErr error
+	// FindByURIErr forces FindByURI to fail with a non-not-found error, for
+	// exercising the paths that must retry instead of acking (#3115).
+	FindByURIErr error
 	// Following は ListByUserIDFiltered の visibility push-down (followers note
 	// の follow 判定) に使う followerID -> followeeIDs map。未設定なら follow
 	// なし扱い (= 非 follower viewer)。testutil は core/note を import すると
@@ -1344,6 +1356,10 @@ func (m *MockNoteRepository) FindByIDWithRelations(id string) (*model.Note, erro
 }
 
 func (m *MockNoteRepository) FindByURI(uri string) (*model.Note, error) {
+	// FindByURIErr は not-found でない error を返させる口 (#3115)。
+	if m.FindByURIErr != nil {
+		return nil, m.FindByURIErr
+	}
 	for _, n := range m.Notes {
 		if n.URI != nil && *n.URI == uri {
 			return n, nil
@@ -3504,6 +3520,12 @@ type MockUserNotePiningRepository struct {
 	// CountErr forces CountByUser to fail, for exercising the paths that must
 	// not silently skip the pin cap when the count is unavailable.
 	CountErr error
+	// FindErr forces FindByPair to fail with a non-not-found error, for
+	// exercising the paths that must retry instead of acking (#3115).
+	FindErr error
+	// DeleteErr forces Delete to fail, for exercising the paths that must not
+	// swallow the write failure after deciding to unpin (#3115).
+	DeleteErr error
 }
 
 func NewMockUserNotePiningRepository() *MockUserNotePiningRepository {
@@ -3516,11 +3538,17 @@ func (m *MockUserNotePiningRepository) Create(p *model.UserNotePining) error {
 }
 
 func (m *MockUserNotePiningRepository) Delete(p *model.UserNotePining) error {
+	if m.DeleteErr != nil {
+		return m.DeleteErr
+	}
 	delete(m.Pinings, p.ID)
 	return nil
 }
 
 func (m *MockUserNotePiningRepository) FindByPair(userID, noteID string) (*model.UserNotePining, error) {
+	if m.FindErr != nil {
+		return nil, m.FindErr
+	}
 	for _, p := range m.Pinings {
 		if p.UserID == userID && p.NoteID == noteID {
 			return p, nil
