@@ -1286,7 +1286,7 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 	return nil
 }
 
-// lookup の失敗を ack するか伝播させるかの規則 (#3115 / #3116)。
+// lookup の失敗を ack するか伝播させるかの規則 (#3115 / #3116 / #3121)。
 //
 //  1. **inbox job / queue job から到達する経路は分ける。** not-found は retry しても
 //     結果が変わらないので ack、それ以外は伝播させて queue に retry させる。
@@ -1300,9 +1300,29 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 //  3. **#534 の idempotency invariant と混同しない。** あれは「retry しても結果が
 //     変わらないもの」の話で、`ErrRequestNotFound` / `ErrBlocking` / `ErrBlocked` が
 //     それに該当する。**retry すれば成功しうる障害はそこに入らない。**
+//  4. **「確かめられなかった」は「無かった」ではない (#3121)。** 署名検証の失敗は
+//     既定で ack する — 署名が合わない body を retry しても結果は変わらないため。
+//     しかし検証は DB も読むので、そのまま書くと **DB 障害のあいだに届いた
+//     activity まで同じ ack に落ちる**。actor / 公開鍵の lookup は
+//     `ErrLookupUnavailable` で種別を残し、`inbox.go` がそれだけ retry に倒す。
+//     **落とす側は 1 箇所ではない** — HTTP 署名 (`verifyPayload`)、転送 activity の
+//     認可 (`authorizeActor` → LD-Signature の creator 解決と鍵引き)、Headers 無しの
+//     legacy 経路 (`ldVerifier.VerifyIfPresent`) の 3 つが同じ sentinel を見る。
 //
-// この規則で数えれば対象は導ける (件数を別に持たない)。**まだ分けていない経路**は
-// `ingestNoteWithCreated` 系と `inbox.go` の `verifyPayload` で、どちらも #3121。
+// この規則で数えれば対象は導ける (件数を別に持たない)。
+//
+// **#3121 時点で ack のまま残っているもの** (どれも規則 1-4 で説明が付く):
+//   - `resolver.go` の `fetchActor` / `fetchNote` の失敗 — リモートが取れないという
+//     相手側の事情で、**こちらの retry で取り戻せるとは限らない**。分けるなら HTTP
+//     status から一時的か恒久的かを決める別の設計が要るので、ここでは触っていない。
+//   - 同 `userRepo.Create` / `noteRepo.Create` の失敗 — 読み側を先に分けたので、DB が
+//     落ちていれば手前の lookup で止まる。ここに来るのは列に入らない値のように
+//     retry しても変わらないものが主だが、**書き込みだけが落ちている状態は
+//     取りこぼす**。
+//   - `post_scheduled_note.go` の publish 失敗 — 二重 publish / 二重通知を避ける
+//     ための意図的な設計 (#2106 L61)。予約投稿の job は attempts を積むように
+//     なったが (#3121)、retry されるのは **publish に到達する前の失敗だけ**。
+//   - 配送 hook 一式 — 規則 2。
 
 // handleAccept processes an inbound Accept activity. リモートfolloweeがローカル
 // followerからのフォローリクエストを承認した場合に、フォロー関係を確立する。
