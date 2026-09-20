@@ -144,6 +144,11 @@ func (h *PollDeliveryHook) OnLocalPollUpdated(target *model.Note) {
 //
 // note の宛先 (visibleUserIds / mentions) から DirectRecipe の inbox を組み立てる
 // 用途で、PollDeliveryHook と NoteDeleteDeliveryHook の両方が使う。
+//
+// **ここは障害でも ack する** (#3116)。配送 hook は note の作成 / 更新後に
+// `safeGo` で投げっぱなしに呼ばれ、戻り値も retry の仕組みも無い (詳しい理由は
+// `note_delivery_hook.go` の `findNoteAuthor`)。error を返しても行き先が無いので、
+// **DB 障害のあいだは宛先が組めず配送が落ちたまま戻らない** (warn log にだけ残る)。
 func remoteInboxesForUserIDs(userRepo repository.UserRepository, ids []string, skipID string) []string {
 	if userRepo == nil || len(ids) == 0 {
 		return nil

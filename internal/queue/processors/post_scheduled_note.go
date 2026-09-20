@@ -20,6 +20,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // ScheduledNoteDraftRepo is the narrow subset of NoteDraftRepository required
@@ -160,6 +161,23 @@ func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Tas
 		}
 	}
 	draft, err := p.drafts.FindByID(payload.NoteDraftID)
+	if err != nil && !repository.IsNotFound(err) {
+		// **障害を成功として記録しない** (#3116)。以前は「retry しても解消しない」を
+		// 種別を見ずに全ての error へ適用しており、DB 障害でも Info ログ 1 行で
+		// 成功扱いになっていた。
+		//
+		// **ただしこの job は retry されない。** `EnqueuePostScheduledNote` は
+		// `WithMaxRetry` を積まないので mkq の attempts が 0 で、初回失敗で
+		// そのまま failed に落ちる (`EnqueueDeliver` は policy から積む)。
+		// 仮に retry されても、直上の idempotency lock は解放の口を持たず
+		// TTL 5 分なので、その間の再試行は `ok=false` で silent skip になる。
+		// **ここで得られるのは「failed bucket と Error ログに残る」ことだけ** で、
+		// 予約投稿が救われるわけではない。救うには enqueue に attempts を付け、
+		// 失敗時に lock を落とす必要がある (別 issue)。
+		slog.Error("scheduled note draft lookup failed",
+			"noteDraftId", payload.NoteDraftID, "err", err)
+		return fmt.Errorf("scheduled note: lookup draft: %w", err)
+	}
 	if err != nil {
 		// Draft が消えていれば user 削除 / 手動 cancel / 既に publish 済み
 		// のどれかで、いずれも retry しても解消しない。silent success で

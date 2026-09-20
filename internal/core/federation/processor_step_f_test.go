@@ -2089,12 +2089,17 @@ func TestProcess_UpdateQuestion_AuthorLookupFailureDoesNotUpdate(t *testing.T) {
 	for _, tt := range []struct {
 		name  string
 		setup func(*testing.T, *testutil.MockUserRepository) repository.UserRepository
+		// wantErr は「判定できなかった」ぶんを job へ返すか (#3116)。
+		// **更新しないことと ack することは別**で、not-found (行が消えた /
+		// URI が NULL) は retry しても変わらないので ack、DB 障害は伝播させる。
+		wantErr bool
 	}{
 		{
 			name: "著者の lookup が失敗する",
 			setup: func(_ *testing.T, base *testutil.MockUserRepository) repository.UserRepository {
 				return &findFailUserRepo{MockUserRepository: base, failFor: "alice_remote"}
 			},
+			wantErr: true,
 		},
 		{
 			name: "著者の行が消えている",
@@ -2141,7 +2146,11 @@ func TestProcess_UpdateQuestion_AuthorLookupFailureDoesNotUpdate(t *testing.T) {
 					{"name": "b", "replies": {"totalItems": 99}}
 				]
 			}`), "https://remote.example/users/alice")
-			require.NoError(t, err)
+			if tt.wantErr {
+				require.Error(t, err, "DB 障害を ack している (job が retry されない)")
+			} else {
+				require.NoError(t, err, "not-found を retry に倒している")
+			}
 
 			assert.Equal(t, pgarray.Int64Array{0, 0}, pollRepo.Polls["q1"].Votes,
 				"著者を確認できないのに票数を更新している")

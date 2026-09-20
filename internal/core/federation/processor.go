@@ -441,9 +441,18 @@ func (p *Processor) process(body []byte, signer *model.User) error {
 	// まだ DB に無く suspended にもなり得ないので素通し)。fetch はせず DB read
 	// のみなので追加コストは小さい。
 	if p.userRepo != nil {
-		if actor, err := p.userRepo.FindByURI(act.Actor); err == nil && actor != nil && actor.IsSuspended {
+		actor, err := p.userRepo.FindByURI(act.Actor)
+		switch {
+		case err == nil && actor != nil && actor.IsSuspended:
 			slog.Info("federation: dropping activity from suspended actor", "actor", act.Actor, "type", act.Type)
 			return nil
+		case err != nil && !repository.IsNotFound(err):
+			// **判定できないまま素通しにしない** (#3116)。以前は `err == nil` を
+			// 条件にしていたので、**DB 障害のあいだ凍結済み actor の activity が
+			// そのまま処理されていた** (moderation の fail-open)。not-found は
+			// 「まだ取り込んでいない actor」= 凍結されているはずがないので素通しが
+			// 正しいが、障害は retry させる。
+			return fmt.Errorf("suspended actor check: %w", err)
 		}
 	}
 
@@ -1101,7 +1110,15 @@ func (p *Processor) handleUndoAccept(act genericActivity, inner genericActivity)
 	} else {
 		follower, err = p.userRepo.FindByURI(followerURI)
 	}
-	if err != nil || follower == nil {
+	if err != nil {
+		// **#3115 が Accept / Reject で確立した原則の裏返し** (#3116)。ack すると
+		// job が retry されず、**accept を撤回された相手をフォローし続ける**。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("undo accept: lookup follower: %w", err)
+	}
+	if follower == nil {
 		return nil
 	}
 	if err := p.followingService.Unfollow(follower.ID, followee.ID); err != nil {
@@ -1268,6 +1285,24 @@ func (p *Processor) handleUndoAnnounce(act genericActivity, inner genericActivit
 	}
 	return nil
 }
+
+// lookup の失敗を ack するか伝播させるかの規則 (#3115 / #3116)。
+//
+//  1. **inbox job / queue job から到達する経路は分ける。** not-found は retry しても
+//     結果が変わらないので ack、それ以外は伝播させて queue に retry させる。
+//     `repository.IsNotFound` で判定する。ack すると job が成功扱いになるので、
+//     **一時的な接続断だけで activity が恒久的に失われる** — 相手の再送は
+//     当てにできない (inbox は enqueue した時点で 202 を返す)。
+//  2. **fire-and-forget な hook は ack のまま。** 配送 hook は `safeGo` で
+//     投げっぱなしに呼ばれ、戻り値も retry の仕組みも無いので、error を返しても
+//     行き先が無い。**理由を書いて残す** (`note_delivery_hook.go` の
+//     `findNoteAuthor` に書いてある。他はそこを参照する)。
+//  3. **#534 の idempotency invariant と混同しない。** あれは「retry しても結果が
+//     変わらないもの」の話で、`ErrRequestNotFound` / `ErrBlocking` / `ErrBlocked` が
+//     それに該当する。**retry すれば成功しうる障害はそこに入らない。**
+//
+// この規則で数えれば対象は導ける (件数を別に持たない)。**まだ分けていない経路**は
+// `ingestNoteWithCreated` 系と `inbox.go` の `verifyPayload` で、どちらも #3121。
 
 // handleAccept processes an inbound Accept activity. リモートfolloweeがローカル
 // followerからのフォローリクエストを承認した場合に、フォロー関係を確立する。
@@ -1976,8 +2011,14 @@ func (p *Processor) handleAnnounce(act genericActivity, signer *model.User) erro
 				"id", truncateRunes(act.ID, noteURIMaxRunes))
 			return ErrInvalidNote
 		}
-		if _, err := p.noteRepo.FindByURI(act.ID); err == nil {
+		switch _, err := p.noteRepo.FindByURI(act.ID); {
+		case err == nil:
+			// 既に取り込み済み。
 			return nil
+		case !repository.IsNotFound(err):
+			// **障害を「重複でない」に倒さない** (#3116)。倒すと DB 障害のあいだ
+			// 同じ Announce が二重の renote になる。
+			return fmt.Errorf("announce dedup: %w", err)
 		}
 	}
 	// 遅延配送 Announce では activity.published を採用して timeline 並びを
@@ -2161,10 +2202,18 @@ func (p *Processor) handleDelete(act genericActivity) error {
 	// actor の delete を受け取り続けて queue が膨れる" 既存 bug)。
 	if isActorDelete(act.Actor, targetURI, act.Object) {
 		if _, ferr := p.userRepo.FindByURI(targetURI); ferr != nil {
-			// gorm の ErrRecordNotFound は明示 import せず、user が見つからない
-			// 場合は ferr != nil で代表させる (他の DB error も "ignore して
-			// retry を避ける" 方が retry 蓄積よりマシ)。
-			return nil
+			// **not-found だけ ack する** (#3116)。存在しない actor の delete は
+			// retry しても結果が変わらないので、ここで止めないと queue が膨れる
+			// (上のコメントの元の動機)。
+			//
+			// **DB 障害は伝播させる。** 以前は「他の DB error も ignore して
+			// retry を避ける方がマシ」と書いて**種別を見ずに ack** していたが、
+			// それだと一時的な接続断だけでリモートのアカウント削除を取りこぼす。
+			// #3115 が Accept / Reject で確立した原則と正面から衝突していた。
+			if repository.IsNotFound(ferr) {
+				return nil
+			}
+			return fmt.Errorf("actor delete: lookup actor: %w", ferr)
 		}
 		// 存在する actor の delete は従来通り resolve に進む。
 	}
@@ -2179,8 +2228,13 @@ func (p *Processor) handleDelete(act genericActivity) error {
 	}
 	note, err := p.noteRepo.FindByURI(targetURI)
 	if err != nil {
-		// 既に存在しないなら成功扱い
-		return nil
+		// 既に存在しないなら成功扱い。**障害は伝播させる** (#3116) —
+		// ack すると job が成功扱いになって retry されず、**削除されたはずの
+		// ノートがこちらに残り続ける**。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("delete note: lookup note: %w", err)
 	}
 	if note.UserID != author.ID {
 		return errors.New("delete from non-author")
@@ -2297,8 +2351,12 @@ func (p *Processor) handleUpdate(act genericActivity) error {
 		return nil
 	}
 	if _, err := p.userRepo.FindByURI(person.ID); err != nil {
-		// 未取得のリモートユーザーなら無視 (次回 follow/inbox などで取り込まれる)
-		return nil
+		// 未取得のリモートユーザーなら無視 (次回 follow/inbox などで取り込まれる)。
+		// **障害は伝播させる** (#3116) — ack するとプロフィールの更新が消える。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("update person: lookup user: %w", err)
 	}
 	// upstream ApInboxService.update -> ApPersonService.updatePerson は actor を
 	// 強制再取得して name だけでなく avatar/banner/bio/fields/isBot/isCat/
@@ -2673,8 +2731,13 @@ func (p *Processor) handleAdd(act genericActivity) error {
 	// **既にピン留め済みなら何もしない。** 再送や順序の入れ替わりで同じ
 	// `Add` が二度届く。上限判定より前に置く — ここを通すと「既にあるものを
 	// 入れるために別のピンを外す」ことになる。
-	if existing, ferr := p.pinningRepo.FindByPair(actor.ID, note.ID); ferr == nil && existing != nil {
+	switch existing, ferr := p.pinningRepo.FindByPair(actor.ID, note.ID); {
+	case ferr == nil && existing != nil:
 		return nil
+	case ferr != nil && !repository.IsNotFound(ferr):
+		// **障害を「まだ無い」に倒さない** (#3116)。倒すと上限判定の側へ進み、
+		// 「既にあるものを入れるために別のピンを外す」ことになる。
+		return fmt.Errorf("pin dedup: %w", ferr)
 	}
 	count, cerr := p.pinningRepo.CountByUser(actor.ID)
 	if cerr != nil {

@@ -2675,6 +2675,12 @@ func (r *Resolver) resolveQuoteURI(uri string, depth int, ephemeral bool, chain 
 		return nil
 	}
 	// 1. ローカル note URI なら ID 抽出して DB から (fetch 不要)。
+	//
+	// **ここは障害でも ack する** (#3116)。この関数は `*model.Note` しか返さず、
+	// 呼び出し側 (ingest) は引用が解けなくてもノート自体は取り込む。retry させる
+	// 手段が無いので、DB 障害のあいだに届いた引用は**解決されないまま確定する**。
+	// 直すには signature を変えて ingest ごと retry させる必要があり、それは
+	// 「引用が解けないノートを一切取り込まない」という別の判断になる。
 	if id := r.extractLocalNoteID(uri); id != "" {
 		if n, err := r.noteRepo.FindByID(id); err == nil {
 			return n
@@ -3263,13 +3269,21 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 	}
 	note, err := r.noteRepo.FindByURI(apNote.ID)
 	if err != nil {
-		return nil
+		// 取り込んでいない note の Update は何もしない。**障害は伝播させる**
+		// (#3116) — ack すると job が retry されず、投票数が古いまま固定される。
+		if repository.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("update remote question: lookup note: %w", err)
 	}
 	if note.UserHost == nil {
 		// ローカル著者の poll は remote からの Update で書き換えない。
 		return nil
 	}
 	poll, err := r.pollRepo.FindByNoteID(note.ID)
+	if err != nil && !repository.IsNotFound(err) {
+		return fmt.Errorf("update remote question: lookup poll: %w", err)
+	}
 	if err != nil || poll == nil {
 		return nil
 	}
@@ -3295,6 +3309,14 @@ func (r *Resolver) UpdateRemoteQuestion(object json.RawMessage, actorURI string)
 			// 瞬断で落ちた更新が誰にも見えない (#2792 / #2725)。
 			slog.Warn("federation: cannot verify poll update attribution",
 				"id", apNote.ID, "actor", actorURI, "err", aerr)
+			// **「適用しない」と「ack する」は分ける** (#3116)。判定できない以上
+			// 適用しないのは正しい (fail-closed) が、ack すると job が retry
+			// されず、**note / poll は引けて author だけ落ちた部分障害**で
+			// 投票数が古いまま固定される — この関数が直したはずの結末そのもの。
+			// not-found (= author 行が消えている) は retry しても変わらないので ack。
+			if !repository.IsNotFound(aerr) {
+				return fmt.Errorf("update remote question: verify attribution: %w", aerr)
+			}
 			return nil
 		}
 		if author == nil || author.URI == nil || *author.URI != actorURI {
@@ -3369,6 +3391,13 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	}
 	existing, err := r.noteRepo.FindByURI(apNote.ID)
 	if err != nil {
+		// **障害は伝播させる** (#3116)。ack すると job が retry されず、
+		// **リモートのノート編集 (text / cw / 添付) が恒久的に落ちる**。
+		// 同じ handler の Question 側と揃える — 片方だけ直すと、頻度の高い
+		// ほうが取りこぼされたままになる。
+		if !repository.IsNotFound(err) {
+			return nil, fmt.Errorf("update remote note: lookup note: %w", err)
+		}
 		// 未取得のリモート Note は無視 (こちらに該当データが無いものを編集する
 		// 通知が来ても反映先が無いため)。
 		return nil, nil

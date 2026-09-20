@@ -1484,6 +1484,144 @@ func TestProcess_RejectFollowerLookupFailurePropagates(t *testing.T) {
 	}
 }
 
+// **lookup の失敗を ack しない** (#3116)。
+//
+// #3115 が Accept / Reject / unpin で確立した原則を、残りの経路へ広げたもの。
+// ack すると job が成功扱いになって queue が retry しないので、一時的な接続断
+// だけで activity が恒久的に失われる。**not-found は ack のまま**で、両方向を
+// 対にして固定する (片方だけだと、両方を同じ側へ倒す実装で緑になる)。
+func TestProcess_LookupFailuresPropagate(t *testing.T) {
+	boom := errors.New("connection refused")
+
+	// 凍結済み actor の判定。**素通しにすると moderation の fail-open** —
+	// DB 障害のあいだ凍結済み actor の activity がそのまま処理される。
+	t.Run("凍結判定が引けない", func(t *testing.T) {
+		p, repo, _, _ := newProcessor(t, aliceActor)
+		repo.FindByURIErr = boom
+		body := []byte(`{"type":"Delete","actor":"https://remote.example/users/alice","object":"https://remote.example/notes/x"}`)
+		require.ErrorIs(t, p.Process(body), boom, "凍結判定を素通りしている")
+	})
+
+	// Announce の重複判定。**「重複でない」に倒すと二重 renote になる。**
+	// 対象はローカル note にして、`ResolveNote` が fetch せず DB から引ける
+	// 形にする (そうしないと dedup の手前で返ってしまう)。
+	t.Run("Announce の重複判定が引けない", func(t *testing.T) {
+		env := newFullProcessor(t, aliceActor)
+		env.noteRepo.Notes["n1"] = &model.Note{
+			ID: "n1", UserID: "bob", Visibility: model.NoteVisibilityPublic,
+		}
+		env.userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+		env.noteRepo.FindByURIErr = boom
+		body := []byte(`{"id":"https://remote.example/announces/a1","type":"Announce",` +
+			`"actor":"https://remote.example/users/alice","object":"https://example.com/notes/n1"}`)
+		require.ErrorIs(t, env.processor.Process(body), boom, "重複判定を素通りしている")
+	})
+
+	// Delete の note lookup。**ack すると削除されたはずのノートが残る。**
+	t.Run("Delete の note が引けない", func(t *testing.T) {
+		p, repo, _, noteRepo := newProcessor(t, aliceActor)
+		// actor は引けて、note だけ落ちる状況を作る。
+		uri := "https://remote.example/users/alice"
+		repo.Users["alice"] = &model.User{ID: "alice", Username: "alice", URI: &uri}
+		noteRepo.FindByURIErr = boom
+		body := []byte(`{"type":"Delete","actor":"https://remote.example/users/alice","object":{"type":"Tombstone","id":"https://remote.example/notes/n1"}}`)
+		require.ErrorIs(t, p.Process(body), boom, "削除を取りこぼしている")
+	})
+
+	// Update(Person)。**ack するとプロフィールの更新が消える。**
+	//
+	// **凍結判定と同じ `FindByURI` を使う経路**なので、URI 別に落とす。
+	// `FindByURIErr` を立てると手前の凍結判定で返ってしまい、**目的の分岐を
+	// 一度も通らないまま緑になる** (実測)。
+	t.Run("Update(Person) の user が引けない", func(t *testing.T) {
+		p, repo, _, _ := newProcessor(t, aliceActor)
+		const actor = "https://remote.example/users/alice"
+		// 凍結判定は「まだ取り込んでいない」で通し、handleUpdate の lookup だけ落とす。
+		callCount := 0
+		repo.FindByURIHook = func(uri string) error {
+			if uri != actor {
+				return nil
+			}
+			callCount++
+			if callCount == 1 {
+				return nil // 凍結判定 (= not-found で素通し)
+			}
+			return boom // handleUpdate の lookup
+		}
+		body := []byte(`{"type":"Update","actor":"` + actor + `","object":{"type":"Person","id":"` + actor + `"}}`)
+		require.ErrorIs(t, p.Process(body), boom, "プロフィール更新を取りこぼしている")
+	})
+
+	// Delete(Actor)。**ack するとリモートのアカウント削除を取りこぼす。**
+	t.Run("Delete(Actor) の user が引けない", func(t *testing.T) {
+		p, repo, _, _ := newProcessor(t, aliceActor)
+		const actor = "https://remote.example/users/alice"
+		callCount := 0
+		repo.FindByURIHook = func(uri string) error {
+			if uri != actor {
+				return nil
+			}
+			callCount++
+			if callCount == 1 {
+				return nil // 凍結判定
+			}
+			return boom // isActorDelete の存在確認
+		}
+		body := []byte(`{"type":"Delete","actor":"` + actor + `","object":"` + actor + `"}`)
+		require.ErrorIs(t, p.Process(body), boom, "アカウント削除を取りこぼしている")
+	})
+
+	// Update(Note)。**同じ handler の中で最も多い Update 型** — ack すると
+	// リモートのノート編集 (text / cw / 添付) が恒久的に落ちる。
+	t.Run("Update(Note) の note が引けない", func(t *testing.T) {
+		p, repo, _, noteRepo := newProcessor(t, aliceActor)
+		host := "remote.example"
+		uri := "https://remote.example/users/alice"
+		repo.Users["alice"] = &model.User{ID: "alice", Username: "alice", URI: &uri, Host: &host}
+		noteRepo.FindByURIErr = boom
+		body := []byte(`{"type":"Update","actor":"` + uri + `","object":{"id":"https://remote.example/notes/n1",` +
+			`"type":"Note","attributedTo":"` + uri + `","content":"edited"}}`)
+		require.ErrorIs(t, p.Process(body), boom, "ノート編集を取りこぼしている")
+	})
+
+	// Undo(Accept)。**#3115 が直した Accept / Reject の裏返し** — ack すると
+	// accept を撤回された相手をフォローし続ける。
+	t.Run("Undo(Accept) の follower が引けない", func(t *testing.T) {
+		p, repo, _, _ := newProcessor(t, aliceActor)
+		const actor = "https://remote.example/users/alice"
+		// **follower はローカル利用者**なので `ExtractLocalUserID` → `FindByID`
+		// を通る (`FindByURI` ではない)。凍結判定は `FindByURI` なので干渉しない。
+		repo.FindErr = boom
+		body := []byte(`{"type":"Undo","actor":"` + actor + `","object":{"type":"Accept","actor":"` + actor + `",` +
+			`"object":{"type":"Follow","actor":"https://example.com/users/bob","object":"` + actor + `"}}}`)
+		require.ErrorIs(t, p.Process(body), boom, "フォロー解除を取りこぼしている")
+	})
+
+	// **not-found は ack のまま。** 居ない follower の Undo(Accept) を retry に
+	// 倒すと、ごく普通の activity が dead letter に積まれる。
+	t.Run("Undo(Accept) の follower が居ないのは ack", func(t *testing.T) {
+		p, _, _, _ := newProcessor(t, aliceActor)
+		const actor = "https://remote.example/users/alice"
+		body := []byte(`{"type":"Undo","actor":"` + actor + `","object":{"type":"Accept","actor":"` + actor + `",` +
+			`"object":{"type":"Follow","actor":"https://example.com/users/ghost","object":"` + actor + `"}}}`)
+		require.NoError(t, p.Process(body), "not-found を retry に倒している")
+	})
+
+	// pin の重複判定。**「まだ無い」に倒すと、既にあるものを入れるために
+	// 別のピンを外すことになる。**
+	t.Run("pin の重複判定が引けない", func(t *testing.T) {
+		p, repo, noteRepo, piningRepo := newProcessorWithPinning(t)
+		aliceID := resolveAliceAndSetFeatured(t, p, repo)
+		noteURI := "https://remote.example/notes/n1"
+		noteRepo.Notes["n1"] = &model.Note{ID: "n1", UserID: aliceID, URI: &noteURI}
+		piningRepo.FindErr = boom
+		body := []byte(`{"type":"Add","actor":"https://remote.example/users/alice",` +
+			`"object":"https://remote.example/notes/n1",` +
+			`"target":"https://remote.example/users/alice/collections/featured"}`)
+		require.ErrorIs(t, p.Process(body), boom, "重複判定を素通りしている")
+	})
+}
+
 // --- Question/Poll ---
 
 func TestProcess_CreateQuestion(t *testing.T) {

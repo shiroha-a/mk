@@ -11,6 +11,7 @@ import (
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,7 +33,9 @@ func (s *stubDraftRepo) FindByID(id string) (*model.NoteDraft, error) {
 	}
 	d, ok := s.drafts[id]
 	if !ok {
-		return nil, errors.New("not found")
+		// **sentinel を返す。** 生の error だと呼び出し側が not-found と障害を
+		// 区別できず、#3116 の分岐を試せない。
+		return nil, repository.ErrNotFound
 	}
 	return d, nil
 }
@@ -118,6 +121,19 @@ func TestPostScheduledNote_DraftMissing(t *testing.T) {
 	err := p.Handle(context.Background(), taskFor("ghost"))
 	require.NoError(t, err)
 	assert.Empty(t, pub.calls, "draft が無いなら publish しない")
+}
+
+// **DB 障害は ack しない** (#3116)。ack すると job が成功扱いになって retry
+// されず、**予約投稿が黙って消える**。直上の DraftMissing (not-found = ack が
+// 正しい) と対にして読むこと — 片方だけだと、両方を同じ側へ倒す実装で緑になる。
+func TestPostScheduledNote_DraftLookupFailurePropagates(t *testing.T) {
+	p, draftRepo, pub := newProcessor(map[string]*model.NoteDraft{}, map[string]*model.User{})
+	boom := errors.New("connection refused")
+	draftRepo.findErr = boom
+
+	err := p.Handle(context.Background(), taskFor("d1"))
+	require.ErrorIs(t, err, boom, "DB 障害を ack している")
+	assert.Empty(t, pub.calls)
 }
 
 // isActuallyScheduled=false な draft (= 後で unschedule された) は publish せず

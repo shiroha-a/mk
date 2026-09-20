@@ -185,6 +185,12 @@ func (h *NoteDeliveryHook) deliverToDirectRecipients(author *model.User, note *m
 
 // findNoteAuthor は noteID の note を引いて作者 user を返す。失敗は warn log
 // して nil を返す。kind はログ用のラベル ("reply" / "renote" 等)。
+//
+// **ここは障害でも ack する** (#3116)。この hook は note 作成後に `safeGo` で
+// 投げっぱなしに呼ばれ、戻り値も retry の仕組みも無い。error を返しても
+// 行き先が無いので、**DB 障害のあいだに作られたノートの直接配送は落ちたまま
+// 戻らない** (warn log にだけ残る)。直すには配送そのものを job にして queue へ
+// 逃がす必要があり、それは hook の設計を変える話になる。
 func (h *NoteDeliveryHook) findNoteAuthor(noteID string, origin *model.Note, kind string) *model.User {
 	target, err := h.noteRepo.FindByID(noteID)
 	if err != nil {

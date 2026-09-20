@@ -1,6 +1,7 @@
 package federation_test
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
@@ -131,4 +132,48 @@ func TestProcess_UpdateQuestion_RefreshesVotes(t *testing.T) {
 
 	got, _ := pollRepo.FindByNoteID("n1")
 	assert.Equal(t, []int64{8, 4}, []int64(got.Votes))
+}
+
+// **lookup の失敗を ack しない** (#3116)。ack すると job が成功扱いになって
+// retry されず、投票数が古いまま固定される。not-found (= 取り込んでいない
+// note / poll の Update) は ack のままで、両方向を対にして固定する。
+func TestUpdateRemoteQuestion_LookupFailuresPropagate(t *testing.T) {
+	boom := errors.New("connection refused")
+
+	t.Run("note が引けない", func(t *testing.T) {
+		r, userRepo, noteRepo, pollRepo := newResolverWithPoll(t)
+		authorURI, _ := seedRemotePoll(t, userRepo, noteRepo, pollRepo)
+		noteRepo.FindByURIErr = boom
+		obj := []byte(`{"id":"https://remote.example/notes/q1","type":"Question","oneOf":[{"name":"A","replies":{"totalItems":10}}]}`)
+		require.ErrorIs(t, r.UpdateRemoteQuestion(obj, authorURI), boom, "DB 障害を ack している")
+	})
+
+	t.Run("poll が引けない", func(t *testing.T) {
+		r, userRepo, noteRepo, pollRepo := newResolverWithPoll(t)
+		authorURI, _ := seedRemotePoll(t, userRepo, noteRepo, pollRepo)
+		pollRepo.FindErr = boom
+		obj := []byte(`{"id":"https://remote.example/notes/q1","type":"Question","oneOf":[{"name":"A","replies":{"totalItems":10}}]}`)
+		require.ErrorIs(t, r.UpdateRemoteQuestion(obj, authorURI), boom, "DB 障害を ack している")
+	})
+
+	// **not-found は ack のまま。** 取り込んでいない note / poll の Update を
+	// retry に倒すと、ごく普通の Update が dead letter に積まれる。
+	//
+	// **poll 側の対が要る。** note 側だけだと、poll の判定を「not-found も
+	// 伝播」に倒す変異が緑のまま通る (敵対的レビューで実測)。
+	t.Run("poll が無いのは ack", func(t *testing.T) {
+		r, userRepo, noteRepo, pollRepo := newResolverWithPoll(t)
+		authorURI, _ := seedRemotePoll(t, userRepo, noteRepo, pollRepo)
+		// note はあるが poll 行が無い状態 (poll を持たずに取り込んだ note)。
+		delete(pollRepo.Polls, "n1")
+		obj := []byte(`{"id":"https://remote.example/notes/q1","type":"Question","oneOf":[{"name":"A","replies":{"totalItems":10}}]}`)
+		require.NoError(t, r.UpdateRemoteQuestion(obj, authorURI))
+	})
+
+	t.Run("note が無いのは ack", func(t *testing.T) {
+		r, userRepo, noteRepo, pollRepo := newResolverWithPoll(t)
+		authorURI, _ := seedRemotePoll(t, userRepo, noteRepo, pollRepo)
+		obj := []byte(`{"id":"https://remote.example/notes/unknown","type":"Question","oneOf":[{"name":"A","replies":{"totalItems":10}}]}`)
+		require.NoError(t, r.UpdateRemoteQuestion(obj, authorURI))
+	})
 }
