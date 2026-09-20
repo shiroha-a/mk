@@ -473,3 +473,54 @@ func hasChunk(data []byte, typ string) bool {
 		pos = next
 	}
 }
+
+// IsAnimatedWebP reports whether data is a WebP whose RIFF container declares
+// animation.
+//
+// **MIME では判定できない。** アニメーション WebP も静止 WebP も `image/webp`
+// なので、コンテナを歩いて `VP8X` の ANIMATION フラグか `ANIM` / `ANMF` チャンクを
+// 見るしかない (GIF / APNG は MIME が形式そのものを表すので判定が要らない)。
+//
+// **デコードしない。** アニメーション WebP から 1 コマだけ取り出す decoder は
+// 手元に無く (上の `decodeImage` のコメント)、ここで必要なのは「アニメーションか」
+// だけなので、ヘッダを読むに留める。
+//
+// 歩き方は `internal/core/drive/imagemeta.go` の `webpHasMetadata` と同じ。
+// チャンクは偶数境界に揃えられ、長さが container を越えたら打ち切る。
+func IsAnimatedWebP(data []byte) bool {
+	if !isWebP(data) {
+		return false
+	}
+	pos := 12 // "RIFF" + size + "WEBP"
+	for {
+		if pos+8 > len(data) {
+			return false
+		}
+		typ := string(data[pos : pos+4])
+		// `size < 0` の検査は要らない。uint32 を int (64bit) にしても正のまま
+		// なので到達しない (同じファイルの `hasChunk` と同じ判断)。
+		size := int(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
+		switch typ {
+		case "ANIM", "ANMF":
+			return true
+		case "VP8X":
+			// flags は payload の 1 バイト目。libwebp の ANIMATION_FLAG は 0x02。
+			//
+			// **宣言長が 1 以上であることを要求する。** 0 だと `data[pos+8]` は
+			// VP8X の payload ではなく**次のチャンクの 4CC の 1 バイト目**になる。
+			// `VP8 ` / `VP8L` / `VP8X` はどれも `'V'` (0x56) で始まり 0x02 の
+			// ビットが立っているので、静止 WebP を「アニメーション」と誤判定する。
+			// **倒れる側が安全でない** — 誤検出は「webpublic を作らない」= 公開側が
+			// 原本を指す方向に倒れ、同じ細工は `webpHasMetadata` の走査も同時に
+			// 潰すので、メタデータの除去ごと外れる。WebP 仕様では VP8X の
+			// chunk size は 10 固定。
+			if size >= 1 && pos+9 <= len(data) && data[pos+8]&0x02 != 0 {
+				return true
+			}
+		}
+		// チャンクは偶数境界に揃えられる。`size >= 0` なので `next > pos` は
+		// 常に真 (= 無限ループにならない)。container を越えたら次の周回の
+		// `pos+8 > len(data)` が打ち切る。
+		pos += 8 + size + (size & 1)
+	}
+}
