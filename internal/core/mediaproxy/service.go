@@ -768,11 +768,13 @@ func (s *Service) processAndReturn(ctx context.Context, data []byte, contentType
 	// **animated=false なら pass-through しない (#2905)。** 利用者の
 	// 「アニメーション画像を再生しない」設定 (disableShowingAnimatedImages) が
 	// `?emoji=1&static=1` として届くが、mode だけを見ていたので無視されていた。
-	if isAnimatedFormat(contentType) && animated {
-		switch mode {
-		case ModeEmoji, ModeAvatar, ModePreview:
-			return s.passThrough(data, contentType)
-		}
+	//
+	// **WebP は MIME では判定できない (#3128)。** アニメーションも静止画も
+	// `image/webp` なので、`isAnimatedFormat` (MIME 判定) では拾えず、
+	// `processResize` → `decodeImage` (先頭 1 コマ) → `encodeWebP` (1 枚しか
+	// 受けない) で静止画になっていた。コンテナを歩いて判定を足す。
+	if shouldPassThroughAnimated(contentType, data, mode, animated) {
+		return s.passThrough(data, contentType)
 	}
 	// #2106 N19: resize 系 mode (emoji/avatar/static/preview/badge) は変換可能な image を
 	// 要求する。video 静止画化 + animated passThrough を経た後でも convertible でない MIME
@@ -1260,6 +1262,31 @@ func isUnknownBinary(contentType string) bool {
 		return true
 	}
 	return false
+}
+
+// shouldPassThroughAnimated reports whether the response must be returned
+// untouched to keep its animation.
+//
+// **判定を関数にしてある。** 呼び出し側に条件を直書きすると、`Fetch` を通した
+// テストでしか固定できず、そこはデコードまで走るので「素通しするか」だけを
+// 見ることができない (壊れた WebP は decoder が panic する)。
+func shouldPassThroughAnimated(contentType string, data []byte, mode ProxyMode, animated bool) bool {
+	// 利用者の「アニメーション画像を再生しない」設定 (#2905) が来ているなら
+	// 静止化するのが正しいので素通ししない。
+	if !animated {
+		return false
+	}
+	switch mode {
+	case ModeEmoji, ModeAvatar, ModePreview:
+	default:
+		// static / badge は明示的に静止画を要求している。
+		return false
+	}
+	// **WebP は MIME では判定できない (#3128)。** アニメーションも静止画も
+	// `image/webp` なので、`isAnimatedFormat` では拾えず resize 経路
+	// (先頭 1 コマだけ decode → `encodeWebP` は 1 枚しか受けない) で
+	// 静止画になっていた。コンテナを歩いて判定する。
+	return isAnimatedFormat(contentType) || imagedecode.IsAnimatedWebP(data)
 }
 
 // isAnimatedFormat returns true for image MIME types that natively encode
