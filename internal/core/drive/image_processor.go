@@ -211,6 +211,32 @@ func (p *DefaultImageProcessor) GenerateWebpublic(body []byte, mimeType string) 
 	if !isMimeImage(mimeType) {
 		return nil, nil
 	}
+	// **アニメーションを静止画に潰してまで縮めない。** `encodeWebP` は 1 枚しか
+	// 受けないので、ここで作ると 1 コマだけの webpublic になり、`GetPublicURL` を
+	// 通す経路 (他人に見せる側) が静止画に化ける。upstream も `isAnimated` なら
+	// webpublic を作らない (`DriveService.ts` の `!isAnimated`)。
+	//
+	// **ただしメタデータがあるときは作る** (upstream より厳しい側)。アニメーションを
+	// 保つために撮影情報を残すのは割に合わない。**実際に効くのは APNG と
+	// アニメーション WebP だけ** — `hasStrippableMetadata` は GIF を見ない
+	// (`imagemeta.go` は JPEG / PNG / WebP / TIFF のみ) ので、GIF に対しては
+	// この条件が常に真になる。
+	//
+	// **WebP は MIME では判定できない (#3128)。** アニメーションも静止画も
+	// `image/webp` なので、`isAnimatedMime` では拾えずに 1 コマへ潰れていた。
+	// コンテナを歩く判定を足す。
+	//
+	// **animated AVIF はまだ拾えない。** ISOBMFF を歩いて複数フレームを見る必要が
+	// あり、WebP の RIFF 走査とは別物。しかも下の枝が `mimeType != "image/avif"` を
+	// 条件にしているため、AVIF は寸法にもメタデータにも関係なく必ず作られる。
+	//
+	// **デコードより前に置く。** 判定はバイト列だけで決まるので、作らないと
+	// 決まっている入力をデコードする必要が無い。
+	if (isAnimatedMime(mimeType) || imagedecode.IsAnimatedWebP(body)) &&
+		!hasStrippableMetadata(body, mimeType) {
+		return nil, nil
+	}
+
 	img, err := decodeImage(body, mimeType)
 	if err != nil {
 		return nil, nil
@@ -219,29 +245,6 @@ func (p *DefaultImageProcessor) GenerateWebpublic(body []byte, mimeType string) 
 	bounds := img.Bounds()
 	w, h := bounds.Dx(), bounds.Dy()
 	hasExif := hasStrippableMetadata(body, mimeType)
-
-	// **アニメーションを静止画に潰してまで縮めない。** `encodeWebP` は 1 枚しか
-	// 受けないので、ここで作ると 1 コマだけの webpublic になり、`GetPublicURL` を
-	// 通す経路 (他人に見せる側) が静止画に化ける。upstream も `isAnimated` なら
-	// webpublic を作らない (`DriveService.ts` の `!isAnimated`)。
-	//
-	// **ただしメタデータがあるときは作る** (upstream より厳しい側)。アニメーションを
-	// 保つために撮影情報を残すのは割に合わない。**実際に効くのは APNG だけ** —
-	// `hasStrippableMetadata` は GIF を見ない (`imagemeta.go` は JPEG / PNG / WebP /
-	// TIFF のみ) ので、GIF に対してこの条件は常に真になる。
-	//
-	// **upstream と違って MIME で判定するので、拾えない形式が残る。**
-	// upstream は `metadata.pages > 1` という中身の判定なので animated WebP も
-	// AVIF も掛かるが、`isAnimatedMime` は GIF と APNG しか見ない。
-	//   - **animated WebP**: ANIM チャンクを読まないと分からない
-	//     (`webpHasMetadata` はメタデータのチャンクしか見ていない)
-	//   - **animated AVIF**: さらに悪く、下の枝が `mimeType != "image/avif"` を
-	//     条件にしているため**寸法にもメタデータにも関係なく必ず作られる**
-	// どちらも他人に見せる側が静止画になる。中身で判定するには
-	// `imagedecode.isAnimatedPNG` のような形式ごとの走査が要るので別件にする。
-	if isAnimatedMime(mimeType) && !hasExif {
-		return nil, nil
-	}
 
 	// AVIF は Mastodon / MS Edge が表示できないため、寸法やメタデータに
 	// 関わらず必ず WebP の webpublic を作る (upstream DriveService の

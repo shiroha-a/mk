@@ -71,3 +71,30 @@ func TestGenerateWebpublic_AnimatedWithMetadataIsStillStripped(t *testing.T) {
 	assert.False(t, hasStrippableMetadata(got.Data, got.MimeType),
 		"作った webpublic にメタデータが残っていない")
 }
+
+// **アニメーション WebP にも webpublic を作らない (#3128)。** `isAnimatedMime` は
+// MIME 判定なので WebP を拾えず、他人に見せる側が 1 コマの静止画になっていた。
+//
+// **フィクスチャはデコードできるものを使う。** ヘッダだけの合成バイト列だと
+// `decodeImage` の失敗で同じく `nil, nil` になり、判定を外しても落ちない。
+func TestGenerateWebpublic_AnimatedWebPIsNotFlattened(t *testing.T) {
+	p := &DefaultImageProcessor{}
+
+	// 2048px を超えるので、判定が無ければ「大きいから」という理由で作られる。
+	big := animatedWebPFixture(t, 3000, 8)
+	require.False(t, hasStrippableMetadata(big, "image/webp"), "メタデータは持たない前提")
+	// フィクスチャが本当にデコードできること (= 上の理由が成立すること) を先に見る。
+	img, err := decodeImage(big, "image/webp")
+	require.NoError(t, err)
+	require.NotNil(t, img)
+
+	got, err := p.GenerateWebpublic(big, "image/webp")
+	require.NoError(t, err)
+	assert.Nil(t, got, "アニメーション WebP には webpublic を作らない")
+
+	// 2048px 以下は元から作られない (satisfyWebpublic)。
+	small := animatedWebPFixture(t, 64, 64)
+	got, err = p.GenerateWebpublic(small, "image/webp")
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
