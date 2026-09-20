@@ -70,11 +70,27 @@ test.describe('UI: /settings/avatar-decoration detach via dialog flow', () => {
 
     // 装着 thumbnail (= openAttachedDecoration trigger) hydrate を待つ。
     // 装着済 decoration は <img src="<url>"> として render されるので
-    // url を含む img を待つ。
+    // url を持つ img を待つ。
+    //
+    // **生 URL と media proxy 経由の両方を許す。** upstream TS は
+    // `UserEntityService` が `avatarDecorations[].url` を raw で返すが、backend に
+    // よっては media proxy 経由へ書き換える。その場合、元 URL は `?url=` へ
+    // **percent-encode されて**入るので `src.includes(url)` では一致しない
+    // (実測: `https://example.invalid/x.png` →
+    // `/image.webp?sig=...&url=https%3A%2F%2Fexample.invalid%2Fx.png`)。
+    // この spec は `specs/upstream/` にあり `make playwright-ts-test` が TS backend
+    // に対しても回すので、**どちらか一方に決め打つと必ず片方で落ちる**。
     await page.waitForFunction(
       (u) => {
         const imgs = Array.from(document.querySelectorAll('img')) as HTMLImageElement[];
-        return imgs.some((i) => i.src.includes(u));
+        return imgs.some((i) => {
+          if (i.src.includes(u)) return true;
+          try {
+            return new URL(i.src, document.baseURI).searchParams.get('url') === u;
+          } catch {
+            return false;
+          }
+        });
       },
       decorationUrl,
       { timeout: 20_000 },
