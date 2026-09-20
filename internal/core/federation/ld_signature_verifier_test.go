@@ -265,3 +265,31 @@ func TestLDSignatureVerifier_NonPreloadedContextRejectedByFreeze(t *testing.T) {
 	assert.True(t, errors.Is(err, ld.ErrCacheFrozen),
 		"freeze による拒否であること (got %v)", err)
 }
+
+// #3121: 鍵が引けなかったのを「鍵が無い」に潰さない。潰すと呼び出し側が
+// LD-Signature の検証失敗として activity を drop するので、DB 障害のあいだ
+// 届いた転送 activity がまるごと失われる。
+func TestLDSignatureVerifier_KeyLookupFailureIsLookupUnavailable(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	boom := errors.New("connection refused")
+	repo.FindByKeyIDErr = boom
+	v := corefederation.NewLDSignatureVerifier(repo)
+
+	body := []byte(`{
+		"type": "Note",
+		"signature": {
+			"type": "RsaSignature2017",
+			"creator": "https://example.com/users/alice#main-key",
+			"signatureValue": "AAAA"
+		}
+	}`)
+	err := v.VerifyIfPresent(body)
+	require.ErrorIs(t, err, corefederation.ErrLookupUnavailable, "DB 障害を「鍵が無い」に潰している")
+
+	// **逆向き。** not-found は従来どおり「鍵が無い」として drop する。
+	repo.FindByKeyIDErr = nil
+	err = v.VerifyIfPresent(body)
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, corefederation.ErrLookupUnavailable)
+	assert.Contains(t, err.Error(), "public key not found")
+}

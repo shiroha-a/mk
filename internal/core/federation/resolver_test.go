@@ -19,6 +19,7 @@ import (
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -4833,10 +4834,11 @@ func TestResolveMentionedUserIDs(t *testing.T) {
 		idGen, _ := id.NewGenerator("aidx")
 		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-		ids := r.ResolveMentionedUserIDs([]string{
+		ids, err := r.ResolveMentionedUserIDs([]string{
 			"https://example.com/users/alice",
 			"https://example.com/users/bob/inbox", // 末尾サフィックス付き
 		})
+		require.NoError(t, err)
 		assert.Equal(t, []string{"alice", "bob"}, ids)
 	})
 
@@ -4854,7 +4856,8 @@ func TestResolveMentionedUserIDs(t *testing.T) {
 		idGen, _ := id.NewGenerator("aidx")
 		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-		ids := r.ResolveMentionedUserIDs([]string{uri})
+		ids, err := r.ResolveMentionedUserIDs([]string{uri})
+		require.NoError(t, err)
 		assert.Equal(t, []string{"remote-charlie"}, ids)
 	})
 
@@ -4865,7 +4868,8 @@ func TestResolveMentionedUserIDs(t *testing.T) {
 		idGen, _ := id.NewGenerator("aidx")
 		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-		ids := r.ResolveMentionedUserIDs([]string{"https://unknown.example/users/x"})
+		ids, err := r.ResolveMentionedUserIDs([]string{"https://unknown.example/users/x"})
+		require.NoError(t, err, "not-found で止めている")
 		assert.Empty(t, ids)
 	})
 
@@ -4876,10 +4880,11 @@ func TestResolveMentionedUserIDs(t *testing.T) {
 		idGen, _ := id.NewGenerator("aidx")
 		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-		ids := r.ResolveMentionedUserIDs([]string{
+		ids, err := r.ResolveMentionedUserIDs([]string{
 			"https://example.com/users/alice",
 			"https://example.com/users/alice",
 		})
+		require.NoError(t, err)
 		assert.Equal(t, []string{"alice"}, ids)
 	})
 
@@ -4890,7 +4895,24 @@ func TestResolveMentionedUserIDs(t *testing.T) {
 		idGen, _ := id.NewGenerator("aidx")
 		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
 
-		assert.Empty(t, r.ResolveMentionedUserIDs(nil))
+		ids, err := r.ResolveMentionedUserIDs(nil)
+		require.NoError(t, err)
+		assert.Empty(t, ids)
+	})
+
+	// **引けなかったものを「未知」に潰さない** (#3121)。潰すと mentions /
+	// visibleUserIds が空のまま note が確定し、dedup があるので retry でも直らない。
+	t.Run("lookup が引けないときは伝播する", func(t *testing.T) {
+		repo := testutil.NewMockUserRepository()
+		boom := errors.New("connection refused")
+		repo.FindByURIErr = boom
+		noteRepo := testutil.NewMockNoteRepository()
+		urls := activitypub.NewURLBuilder("https://example.com")
+		idGen, _ := id.NewGenerator("aidx")
+		r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{}, idGen)
+
+		_, err := r.ResolveMentionedUserIDs([]string{"https://remote.example/users/x"})
+		require.ErrorIs(t, err, boom)
 	})
 }
 
@@ -4908,20 +4930,31 @@ func TestResolveTextMentionUserIDs(t *testing.T) {
 		host := "remote.example"
 		repo.Users["remote-id"] = &model.User{ID: "remote-id", Username: "bob", UsernameLower: "bob", Host: &host}
 
-		ids := r.ResolveTextMentionUserIDs([]corenote.Mention{
+		ids, err := r.ResolveTextMentionUserIDs([]corenote.Mention{
 			{Username: "alice"},
 			{Username: "bob", Host: "remote.example"},
 		})
+		require.NoError(t, err)
 		assert.Equal(t, []string{"local-id", "remote-id"}, ids)
 	})
 	t.Run("unknown user is skipped", func(t *testing.T) {
 		r, _ := mkResolver()
-		ids := r.ResolveTextMentionUserIDs([]corenote.Mention{{Username: "ghost"}})
+		ids, err := r.ResolveTextMentionUserIDs([]corenote.Mention{{Username: "ghost"}})
+		require.NoError(t, err, "not-found で止めている")
 		assert.Empty(t, ids)
 	})
 	t.Run("empty input", func(t *testing.T) {
 		r, _ := mkResolver()
-		assert.Nil(t, r.ResolveTextMentionUserIDs(nil))
+		ids, err := r.ResolveTextMentionUserIDs(nil)
+		require.NoError(t, err)
+		assert.Nil(t, ids)
+	})
+	t.Run("lookup が引けないときは伝播する", func(t *testing.T) {
+		r, repo := mkResolver()
+		boom := errors.New("connection refused")
+		repo.FindByUsernameLowerFn = func(string, *string) (*model.User, error) { return nil, boom }
+		_, err := r.ResolveTextMentionUserIDs([]corenote.Mention{{Username: "alice"}})
+		require.ErrorIs(t, err, boom)
 	})
 }
 
@@ -5159,6 +5192,10 @@ type stubPublickeyExtraRepo struct {
 	entries map[string]*model.UserPublickeyExtra // keyed by keyID
 	upserts []model.UserPublickeyExtra
 	failErr error
+	// findErr は FindByUserAndKeyID にだけ not-found ではない DB 障害を注入する
+	// 口 (#3121)。failErr と分けてあるのは、既存のテストが Upsert /
+	// ListByUserID の失敗だけを注入しているため。
+	findErr error
 }
 
 func (s *stubPublickeyExtraRepo) Upsert(pk *model.UserPublickeyExtra) error {
@@ -5205,6 +5242,9 @@ func (s *stubPublickeyExtraRepo) DeleteByKeyID(userID, keyID string) error {
 func (s *stubPublickeyExtraRepo) FindByUserAndKeyID(userID, keyID string) (*model.UserPublickeyExtra, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.findErr != nil {
+		return nil, s.findErr
+	}
 	if pk, ok := s.entries[keyID]; ok && pk.UserID == userID {
 		return pk, nil
 	}
@@ -5230,15 +5270,23 @@ func (s *stubPublickeyExtraRepo) DeleteByUserID(userID string) error {
 type stubPublickeyRepo struct {
 	mu      sync.RWMutex
 	entries map[string]*model.UserPublickey
+	// findErr は not-found ではない DB 障害を注入する口 (#3121)。
+	findErr error
 }
 
 func (s *stubPublickeyRepo) FindByUserID(userID string) (*model.UserPublickey, error) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
+	if s.findErr != nil {
+		return nil, s.findErr
+	}
 	if pk, ok := s.entries[userID]; ok {
 		return pk, nil
 	}
-	return nil, errors.New("not found")
+	// production の gorm repository は miss 時 ErrRecordNotFound を返す。
+	// PublicKeyForActor は not-found を「鍵が無い」、それ以外を
+	// ErrLookupUnavailable と区別するので、stub も同じ semantic を返す (#3121)。
+	return nil, gorm.ErrRecordNotFound
 }
 
 func (s *stubPublickeyRepo) Upsert(pk *model.UserPublickey) error {
@@ -7578,4 +7626,221 @@ func TestProcessRemoteMove_LocalDestination(t *testing.T) {
 
 	require.Equal(t, 1, mp.calls, "moving into a local account is carried over")
 	assert.Equal(t, "localDst", mp.dst.ID)
+}
+
+// --- #3121: 「確かめられなかった」と「引けなかった」を ack に潰さない ---
+
+// AP 投票の判定に使う poll の lookup が落ちたとき、**普通の返信ノートとして
+// 確定させない**。確定させると dedup があるので retry でも直らない。
+func TestIngestNote_PollLookupFailurePropagates(t *testing.T) {
+	boom := errors.New("connection refused")
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["pollNote"] = &model.Note{ID: "pollNote", UserID: "author", HasPoll: true, Visibility: model.NoteVisibilityPublic}
+	pollRepo := testutil.NewMockPollRepository()
+	require.NoError(t, pollRepo.Create(&model.Poll{
+		NoteID: "pollNote", Choices: []string{"Apple", "Banana"}, Votes: []int64{0, 0},
+	}))
+	pollRepo.FindErr = boom
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	r.SetPollRepo(pollRepo)
+	voter := &stubPollVoter{}
+	r.SetPollVoter(voter)
+
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice#votes/pollNote",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"name": "Banana",
+		"inReplyTo": "https://example.com/notes/pollNote",
+		"to": ["https://example.com/users/author"]
+	}`)
+	got, err := r.IngestNote(body)
+	require.ErrorIs(t, err, boom, "poll の lookup 障害を素通りしている")
+	assert.Nil(t, got)
+	assert.Empty(t, voter.calls)
+	// **返信ノートとして確定していないこと。** 確定すると uri が DB に載るので
+	// retry が dedup にヒットし、投票は永久に反映されない。
+	_, ferr := noteRepo.FindByURI("https://remote.example/users/alice#votes/pollNote")
+	assert.True(t, repository.IsNotFound(ferr), "投票が返信ノートとして保存されている")
+}
+
+// 鍵を引けなかったときに「鍵が無い」に潰さない。潰すと呼び出し側が署名検証の
+// 失敗として ack する。
+func TestPublicKeyForActor_DBFailureIsVerifyUnavailable(t *testing.T) {
+	boom := errors.New("connection refused")
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	pkRepo := &stubPublickeyRepo{findErr: boom}
+	r.SetPublickeyRepo(pkRepo)
+
+	_, err := r.PublicKeyForActor("alice")
+	require.ErrorIs(t, err, federation.ErrLookupUnavailable, "DB 障害を「鍵が無い」に潰している")
+
+	// not-found は従来どおり「鍵が無い」。ここを一緒に倒すと、鍵を持たない
+	// actor からの署名が全部 retry に回って inbox が詰まる。
+	pkRepo.findErr = nil
+	_, err = r.PublicKeyForActor("alice")
+	require.Error(t, err)
+	assert.NotErrorIs(t, err, federation.ErrLookupUnavailable)
+}
+
+// keyId 付きの lookup も同じ。**fallback へ落とさない** — 落とすと RSA 鍵で
+// verify を試みて失敗し、やはり ack される。
+func TestPublicKeyForKeyID_DBFailureIsVerifyUnavailable(t *testing.T) {
+	boom := errors.New("connection refused")
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	extra := &stubPublickeyExtraRepo{findErr: boom}
+	r.SetPublickeyExtraRepo(extra)
+	// fallback 先には鍵がある。**落とすと verify が「鍵はある」で進んでしまう**
+	// ので、fallback が生きていることを確かめたうえで障害を注入する。
+	pkRepo := &stubPublickeyRepo{entries: map[string]*model.UserPublickey{
+		"alice": {UserID: "alice", KeyPEM: "RSA-PEM"},
+	}}
+	r.SetPublickeyRepo(pkRepo)
+
+	_, err := r.PublicKeyForKeyID("alice", "https://remote.example/users/alice#ed25519-key")
+	require.ErrorIs(t, err, federation.ErrLookupUnavailable, "DB 障害を fallback に落としている")
+
+	// not-found (= その keyId の追加鍵は無い) は従来どおり RSA 鍵へ fallback。
+	extra.findErr = nil
+	pem, err := r.PublicKeyForKeyID("alice", "https://remote.example/users/alice#ed25519-key")
+	require.NoError(t, err)
+	assert.Equal(t, "RSA-PEM", pem)
+}
+
+// **逆向きも固定する。** not-found (= 返信先をこちらが取り込んでいない) まで
+// 伝播させると、そのノートが永久に取り込めず job が retry を繰り返す。
+func TestIngestNote_UnknownReplyTargetStillIngests(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		inReplyTo string
+	}{
+		// ローカル ID 経路 (FindByID) — 削除済みの投稿への返信。
+		{"ローカルの返信先が無い", "https://example.com/notes/gone"},
+		// URI 経路 (FindByURI) — 未取り込みのリモート投稿への返信。
+		{"リモートの返信先が未取り込み", "https://remote.example/notes/unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := testutil.NewMockUserRepository()
+			noteRepo := testutil.NewMockNoteRepository()
+			urls := activitypub.NewURLBuilder("https://example.com")
+			idGen, _ := id.NewGenerator("aidx")
+			r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+			body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams",
+				"id": "https://remote.example/notes/orphanreply",
+				"type": "Note",
+				"attributedTo": "https://remote.example/users/alice",
+				"content": "re",
+				"inReplyTo": "` + tc.inReplyTo + `",
+				"to": ["https://www.w3.org/ns/activitystreams#Public"]
+			}`)
+			got, err := r.IngestNote(body)
+			require.NoError(t, err, "返信先が無いだけで取り込みを止めている")
+			require.NotNil(t, got)
+			assert.Nil(t, got.ReplyID, "引けなかった返信先を繋いでいる")
+		})
+	}
+}
+
+// **逆向きも固定する。** poll 行が無いだけで伝播させると、hasPoll が立った
+// ノートへの `name` 付き返信が永久に取り込めなくなる。
+func TestIngestNote_MissingPollRowFallsThroughToReply(t *testing.T) {
+	repo := testutil.NewMockUserRepository()
+	noteRepo := testutil.NewMockNoteRepository()
+	noteRepo.Notes["pollNote"] = &model.Note{ID: "pollNote", UserID: "author", HasPoll: true, Visibility: model.NoteVisibilityPublic}
+	// poll 行は作らない (= FindByNoteID が not-found)。
+	pollRepo := testutil.NewMockPollRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+	r.SetPollRepo(pollRepo)
+	voter := &stubPollVoter{}
+	r.SetPollVoter(voter)
+
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/users/alice#votes/pollNote",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"name": "Banana",
+		"inReplyTo": "https://example.com/notes/pollNote",
+		"to": ["https://example.com/users/author"]
+	}`)
+	got, err := r.IngestNote(body)
+	require.NoError(t, err, "poll 行が無いだけで取り込みを止めている")
+	require.NotNil(t, got)
+	assert.Empty(t, voter.calls)
+	require.NotNil(t, got.ReplyID)
+	assert.Equal(t, "pollNote", *got.ReplyID)
+}
+
+// actor の lookup が引けなかったときも「まだ知らない actor」に倒さない。
+// 倒すとリモートへ fetch しに行き、その直後の Create が同じ障害で落ちるので、
+// 呼び出し側からは「解決できなかった」としか見えない (= 署名検証が ack する)。
+func TestResolveActor_DBFailureIsLookupUnavailable(t *testing.T) {
+	boom := errors.New("connection refused")
+	repo := testutil.NewMockUserRepository()
+	repo.FindByURIErr = boom
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	fetcher := &countingFetcher{body: []byte(sampleActor)}
+	r := federation.NewResolver(repo, noteRepo, urls, fetcher, idGen)
+
+	_, err := r.ResolveActor("https://remote.example/users/alice")
+	require.ErrorIs(t, err, federation.ErrLookupUnavailable, "DB 障害を「まだ知らない actor」に倒している")
+	assert.Zero(t, fetcher.calls, "落ちている DB を相手に remote fetch まで走っている")
+
+	// **逆向き。** not-found (= 本当にまだ知らない) は従来どおり fetch して作る。
+	repo.FindByURIErr = nil
+	got, err := r.ResolveActor("https://remote.example/users/alice")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, 1, fetcher.calls)
+}
+
+// **宛先の解決が引けなかったら note を確定させない** (#3121)。確定させると
+// `visibleUserIds` が空のまま `note.uri` が DB に載り、retry は dedup に
+// ヒットするので **受信者本人が DM を読めない状態が恒久化する**。
+func TestIngestNote_SpecifiedDMRecipientLookupFailurePropagates(t *testing.T) {
+	boom := errors.New("connection refused")
+	repo := testutil.NewMockUserRepository()
+	// 著者の解決は通し、宛先 (リモート URI) の lookup だけ落とす。
+	repo.FindByURIHook = func(uri string) error {
+		if uri == "https://remote.example/users/bob" {
+			return boom
+		}
+		return nil
+	}
+	noteRepo := testutil.NewMockNoteRepository()
+	urls := activitypub.NewURLBuilder("https://example.com")
+	idGen, _ := id.NewGenerator("aidx")
+	r := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(sampleActor)}, idGen)
+
+	body := []byte(`{ "@context": "https://www.w3.org/ns/activitystreams",
+		"id": "https://remote.example/notes/dm2",
+		"type": "Note",
+		"attributedTo": "https://remote.example/users/alice",
+		"content": "secret hello",
+		"to": ["https://remote.example/users/bob"],
+		"cc": [],
+		"tag": [
+			{"type": "Mention", "href": "https://remote.example/users/bob", "name": "@bob@remote.example"}
+		]
+	}`)
+	got, err := r.IngestNote(body)
+	require.ErrorIs(t, err, boom, "宛先の解決を素通りしている")
+	assert.Nil(t, got)
+	_, ferr := noteRepo.FindByURI("https://remote.example/notes/dm2")
+	assert.True(t, repository.IsNotFound(ferr), "宛先が空のまま note を確定させている")
 }

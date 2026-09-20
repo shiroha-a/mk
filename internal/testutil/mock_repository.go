@@ -1271,6 +1271,10 @@ type MockNoteRepository struct {
 	// FindByURIErr forces FindByURI to fail with a non-not-found error, for
 	// exercising the paths that must retry instead of acking (#3115).
 	FindByURIErr error
+	// FindErr forces FindByID (and the wrappers that delegate to it) to fail
+	// with a non-not-found error, for exercising the paths that must retry
+	// instead of acking (#3121).
+	FindErr error
 	// Following は ListByUserIDFiltered の visibility push-down (followers note
 	// の follow 判定) に使う followerID -> followeeIDs map。未設定なら follow
 	// なし扱い (= 非 follower viewer)。testutil は core/note を import すると
@@ -1331,6 +1335,9 @@ func (m *MockNoteRepository) Create(note *model.Note) error {
 }
 
 func (m *MockNoteRepository) FindByID(id string) (*model.Note, error) {
+	if m.FindErr != nil {
+		return nil, m.FindErr
+	}
 	n, ok := m.Notes[id]
 	if !ok {
 		return nil, ErrNotFound
@@ -7848,6 +7855,9 @@ func (m *MockAuthSessionRepository) ListAppsByUserID(userID string, limit, offse
 type MockUserPublickeyRepository struct {
 	// keyed by userID
 	Keys map[string]*model.UserPublickey
+	// FindByKeyIDErr forces FindByKeyID to fail with a non-not-found error,
+	// for exercising the paths that must retry instead of dropping (#3121).
+	FindByKeyIDErr error
 }
 
 // NewMockUserPublickeyRepository creates an empty MockUserPublickeyRepository.
@@ -7871,6 +7881,9 @@ func (m *MockUserPublickeyRepository) FindByUserID(userID string) (*model.UserPu
 // LD-Signature verify は signature.creator (= keyId) で lookup するため、
 // userID baseの map を線形 search する (= mock なのでコスト OK)。
 func (m *MockUserPublickeyRepository) FindByKeyID(keyID string) (*model.UserPublickey, error) {
+	if m.FindByKeyIDErr != nil {
+		return nil, m.FindByKeyIDErr
+	}
 	for _, pk := range m.Keys {
 		if pk.KeyID == keyID {
 			return pk, nil

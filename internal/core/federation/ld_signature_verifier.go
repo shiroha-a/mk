@@ -126,6 +126,12 @@ func (v *LDSignatureVerifier) VerifyAndCreator(rawBody []byte) (string, bool, er
 	proc.Freeze()
 	pubkey, err := v.pubkeyRepo.FindByKeyID(creator)
 	if err != nil {
+		if !repository.IsNotFound(err) {
+			// **「鍵が無い」に潰さない** (#3121)。潰すと呼び出し側が
+			// LD-Signature の検証失敗として activity を drop するので、
+			// DB 障害のあいだ届いた転送 activity がまるごと失われる。
+			return "", true, fmt.Errorf("%w: ld-sig public key for keyId=%s: %v", ErrLookupUnavailable, creator, err)
+		}
 		return "", true, fmt.Errorf("ld-sig: public key not found for keyId=%s: %w", creator, err)
 	}
 	if err := proc.VerifyRsaSignature2017(act, pubkey.KeyPEM); err != nil {

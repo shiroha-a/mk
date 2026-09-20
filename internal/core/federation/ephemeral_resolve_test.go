@@ -780,3 +780,45 @@ func TestResolveNote_PollVoteReturnsError(t *testing.T) {
 	assert.False(t, created)
 	assert.Error(t, err, "note を作らない経路は (nil, nil) ではなく error にする")
 }
+
+// **ephemeral 経路も DB 障害では止まる** (#3121)。
+//
+// ここは Redis だけで完結できるので倒すこともできるが、倒すと「DB が落ちて
+// いるあいだだけ、ミュート済み / materialize 済みの著者を引けず別 ID の
+// ephemeral 行としてタイムラインに戻る」— DB を先に引く設計 (#2332) が崩れる。
+func TestIngestNoteEphemeral_DBFailureStopsIngest(t *testing.T) {
+	noteURI := "https://remote.example/notes/relay1"
+	actorURI := "https://remote.example/users/alice"
+	doc := `{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id": "` + noteURI + `",
+		"type": "Note",
+		"attributedTo": "` + actorURI + `",
+		"content": "relayed",
+		"to": ["https://www.w3.org/ns/activitystreams#Public"]
+	}`
+	boom := errors.New("connection refused")
+
+	t.Run("dedup の lookup", func(t *testing.T) {
+		r, sink, noteRepo, _ := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+		noteRepo.FindByURIErr = boom
+		_, _, err := r.IngestNoteEphemeral([]byte(doc), actorURI)
+		require.ErrorIs(t, err, boom)
+		assert.Empty(t, sink.notes, "確かめられないまま Redis へ置いている")
+	})
+
+	// **sink に既知の著者が居る状態で測る。** 居ないと fetch 側の guard
+	// (`resolveActorOnceWithID`) が代わりに止めてしまい、この分岐を外しても
+	// 緑のままになる (変異検証で実測)。
+	t.Run("著者の lookup", func(t *testing.T) {
+		r, sink, _, userRepo := ephResolverDocs(t, map[string]string{noteURI: doc, actorURI: ephActorDoc})
+		host := "remote.example"
+		sink.byURI[actorURI] = "eph-alice"
+		sink.authors["eph-alice"] = &model.User{ID: "eph-alice", Username: "alice", Host: &host, URI: &actorURI}
+		userRepo.FindByURIErr = boom
+
+		_, _, err := r.IngestNoteEphemeral([]byte(doc), actorURI)
+		require.ErrorIs(t, err, federation.ErrLookupUnavailable)
+		assert.Empty(t, sink.notes, "DB を引けないまま ephemeral 側の著者で確定させている")
+	})
+}

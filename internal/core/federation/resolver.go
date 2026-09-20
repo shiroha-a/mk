@@ -288,8 +288,16 @@ func (r *Resolver) resolveNoteAuthor(uri string, ephemeral bool, depth int, chai
 		// これまでどおり featured を引く。
 		return r.resolveActor(uri, false, depth > 0, chain)
 	}
-	if existing, err := r.userRepo.FindByURI(uri); err == nil && existing != nil {
+	existing, err := r.userRepo.FindByURI(uri)
+	switch {
+	case err == nil && existing != nil:
 		return existing, nil
+	case err != nil && !repository.IsNotFound(err):
+		// **引けなかったら ephemeral 側へ落とさない** (#3121)。落とすと、上の
+		// 手順 1 が守っている「ミュート済み / materialize 済みの著者は実 ID を
+		// 使う」が DB 障害中だけ崩れ、**ミュートした相手の投稿が別 ID の
+		// ephemeral 行としてタイムラインに戻る**。retry に倒すほうが安全側。
+		return nil, fmt.Errorf("%w: note author %q: %v", ErrLookupUnavailable, truncateRunes(uri, userURIMaxRunes), err)
 	}
 	ctx := context.Background()
 	if id, err := r.ephemeralSink.UserIDByURI(ctx, uri); err == nil && id != "" {
@@ -824,6 +832,16 @@ func (r *Resolver) hostAllowedForURI(uri string) bool {
 	return r.hostAllowed(host)
 }
 
+// ErrLookupUnavailable marks "we could not look it up", as opposed to "we
+// looked and it is not there" (#3121).
+//
+// **署名検証の失敗は既定で ack する** — 署名が合わない body を retry しても
+// 結果は変わらないため。しかし検証は DB も読むので、**DB 障害のあいだに届いた
+// activity まで同じ ack に落ちる**。落ちた側は相手が再送してくれるとは限らない
+// (inbox は enqueue した時点で 202 を返す) ので、確かめられなかったぶんだけは
+// 区別して job に retry させる。
+var ErrLookupUnavailable = errors.New("lookup unavailable")
+
 // PublicKeyForActor returns the cached public key PEM for an actor ID.
 // in-memory → DB → miss の順で探索する。TTL超過は miss として扱い、呼び出し
 // 側が ResolveActor を再実行することで refresh をトリガできる。
@@ -842,11 +860,17 @@ func (r *Resolver) PublicKeyForActor(actorID string) (string, error) {
 	}
 	// 2. DB fallback
 	if r.publickeyRepo != nil {
-		if pk, err := r.publickeyRepo.FindByUserID(actorID); err == nil {
+		pk, err := r.publickeyRepo.FindByUserID(actorID)
+		switch {
+		case err == nil:
 			r.keysMu.Lock()
 			r.keys[actorID] = publicKeyEntry{pem: pk.KeyPEM, fetchedAt: r.clock()}
 			r.keysMu.Unlock()
 			return pk.KeyPEM, nil
+		case !repository.IsNotFound(err):
+			// **「鍵が無い」に潰さない** (#3121)。潰すと呼び出し側が署名検証の
+			// 失敗として ack し、DB 障害のあいだ届いた activity が失われる。
+			return "", fmt.Errorf("%w: public key for actor %q: %v", ErrLookupUnavailable, actorID, err)
 		}
 	}
 	return "", fmt.Errorf("public key for actor %q not cached", actorID)
@@ -931,7 +955,9 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 	if r.isSelfHostURI(uri) {
 		return nil, ErrLocalActor
 	}
-	if existing, err := r.userRepo.FindByURI(uri); err == nil {
+	existing, ferr := r.userRepo.FindByURI(uri)
+	switch {
+	case ferr == nil:
 		if r.shouldRefreshActor(existing) {
 			r.refreshActor(existing, uri, skipFeatured, chain)
 		} else {
@@ -945,6 +971,22 @@ func (r *Resolver) resolveActorOnceWithID(uri string, allowCrossHost bool, preas
 			}
 		}
 		return existing, nil
+	case !repository.IsNotFound(ferr):
+		// **障害を「まだ知らない actor」に倒さない** (#3121)。倒すとリモートへ
+		// fetch しに行くが、通常経路ではその直後の `Create` が同じ障害で落ちる
+		// ので、呼び出し側からは「解決できなかった」としか見えない。
+		// **署名検証はその結果を ack する**ので、DB 障害のあいだに届いた
+		// activity がまるごと失われる。種別を残しておけば inbox が retry に
+		// 倒せるし、落ちている DB を相手に無駄な remote fetch もしない。
+		//
+		// **ephemeral (リレー) 経路もここで止まる。** あちらは `Create` に到達
+		// しないので (下の `if ephemeral` で戻る)、倒せば Redis 側で完結できて
+		// しまうが、**倒さない**。倒すと「DB が落ちているあいだだけミュート済み
+		// / materialize 済みの著者を引けず、別 ID の ephemeral 行として
+		// タイムラインに戻る」— `resolveNoteAuthor` が DB を先に引く理由
+		// そのもの (#2332) が崩れる。**DB 障害中はリレー由来の取り込みも
+		// 止まる**が、その間 timeline は DB を読めないので失うものは小さい。
+		return nil, fmt.Errorf("%w: actor %q: %v", ErrLookupUnavailable, truncateRunes(uri, userURIMaxRunes), ferr)
 	}
 
 	actor, err := r.fetchActor(uri, allowCrossHost)
@@ -2235,19 +2277,24 @@ func (r *Resolver) cacheAssertionMethods(userID, actorURI string, ams activitypu
 // バイパス) が成立する。actor (= keyId base から解決した signer) に紐づく鍵だけを
 // 許すことで、植え込まれた cross-actor 鍵を読取段でも排除する (Fix C, 二重防御)。
 //
-// `gorm.ErrRecordNotFound` (= keyId 一致なし = 通常状態) は silent fallback、
-// それ以外の DB error は診断のため slog.Warn を出す (= silent degradation を
-// 回避)。stale assertion key の削除は cacheAssertionMethods 側で actor fetch
-// 時に diff & delete するため、ここでは古い行が引っかかる可能性は最小化される。
+// not-found (= keyId 一致なし = 通常状態) は silent fallback。それ以外の DB
+// error は **fallback せず `ErrLookupUnavailable` で返す** (#3121) — 落とすと
+// 「その keyId の鍵は無い」ことになり、呼び出し側が署名検証の失敗として ack
+// するので、DB 障害のあいだ届いた activity が失われる。stale assertion key の
+// 削除は cacheAssertionMethods 側で actor fetch 時に diff & delete するため、
+// ここでは古い行が引っかかる可能性は最小化される。
 func (r *Resolver) PublicKeyForKeyID(actorID, keyID string) (string, error) {
 	if r.publickeyExtraRepo != nil && keyID != "" {
 		row, err := r.publickeyExtraRepo.FindByUserAndKeyID(actorID, keyID)
 		if err == nil {
 			return row.KeyPEM, nil
 		}
-		if !errors.Is(err, gorm.ErrRecordNotFound) {
+		if !repository.IsNotFound(err) {
 			slog.Warn("publickeyExtra lookup failed",
 				"actorID", actorID, "keyID", keyID, "error", err)
+			// **fallback へ落とさない** (#3121)。落とすと「その keyId の鍵は
+			// 無い」ことになり、呼び出し側が署名検証の失敗として ack する。
+			return "", fmt.Errorf("%w: publickeyExtra %q/%q: %v", ErrLookupUnavailable, actorID, keyID, err)
 		}
 	}
 	return r.PublicKeyForActor(actorID)
@@ -2820,8 +2867,14 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 			"id", truncateRunes(apNote.ID, noteURIMaxRunes))
 		return nil, false, ErrInvalidNote
 	}
-	if existing, err := r.noteRepo.FindByURI(apNote.ID); err == nil {
+	switch existing, err := r.noteRepo.FindByURI(apNote.ID); {
+	case err == nil:
 		return existing, false, nil
+	case !repository.IsNotFound(err):
+		// **障害を「まだ無い」に倒さない** (#3121)。倒すと再 fetch して INSERT へ
+		// 進む。救っているのは `note.uri` の UNIQUE 制約と下の fallback だけで、
+		// その手前でリモートへの再取得が走る。retry させるほうが安い。
+		return nil, false, fmt.Errorf("ingest note: dedup lookup: %w", err)
 	}
 	// ephemeral 経路では DB の miss が「未取り込み」を意味しないので URI 逆引きも
 	// 引く (#2397)。非 ephemeral では引かない: 直接配送で DB 行を作る側は
@@ -2955,12 +3008,23 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	if apNote.InReplyTo != "" {
 		// inReplyTo も同じ (#2662)。生値だと返信チェーンが繋がらない。
 		apNote.InReplyTo = activitypub.APLenientID(trimWHATWGURL(apNote.InReplyTo.String()))
+		// **障害を「返信先が無い」に倒さない** (#3121)。倒すと `ReplyID = nil` の
+		// まま note を保存してしまい、**URI は DB に入るので retry は dedup に
+		// ヒットする** = スレッド接続が恒久的に失われる。not-found (こちらが
+		// 取り込んでいない返信先) は従来どおり nil のまま進む。
+		var replyErr error
 		if id := r.extractLocalNoteID(apNote.InReplyTo.String()); id != "" {
-			if reply, err := r.noteRepo.FindByID(id); err == nil {
-				replyTarget = reply
+			reply, err := r.noteRepo.FindByID(id)
+			replyTarget, replyErr = reply, err
+		} else {
+			reply, err := r.noteRepo.FindByURI(apNote.InReplyTo.String())
+			replyTarget, replyErr = reply, err
+		}
+		if replyErr != nil {
+			if !repository.IsNotFound(replyErr) {
+				return nil, false, fmt.Errorf("ingest note: lookup reply target: %w", replyErr)
 			}
-		} else if reply, err := r.noteRepo.FindByURI(apNote.InReplyTo.String()); err == nil {
-			replyTarget = reply
+			replyTarget = nil
 		}
 		if replyTarget != nil {
 			note.ReplyID = &replyTarget.ID
@@ -2990,7 +3054,13 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// pollRepo / pollVoter 未配線環境では従来通り reply note として fall
 	// through する (legacy 互換)。
 	if replyTarget != nil && replyTarget.HasPoll && apNote.Name != "" && r.pollRepo != nil && r.pollVoter != nil {
-		if poll, err := r.pollRepo.FindByNoteID(replyTarget.ID); err == nil && poll != nil {
+		poll, perr := r.pollRepo.FindByNoteID(replyTarget.ID)
+		if perr != nil && !repository.IsNotFound(perr) {
+			// **障害を「poll ではない」に倒さない** (#3121)。倒すと投票が普通の
+			// 返信ノートとして確定し、dedup があるので retry でも直らない。
+			return nil, false, fmt.Errorf("ingest note: lookup poll: %w", perr)
+		}
+		if perr == nil && poll != nil {
 			// 保存側と同じ正規化を通して照合する。切った選択肢に対する投票は
 			// 生値では一致しない (#2726)。
 			want := remotePollChoice(apNote.Name.String())
@@ -3020,10 +3090,16 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// (mentions 列はローカル create 経路と同じ user ID の配列にする)。
 	var textMentions []string
 	if note.Text != nil {
-		textMentions = r.resolveTextMentionUserIDs(corenote.ExtractMentionStructs(*note.Text))
+		var merr error
+		if textMentions, merr = r.resolveTextMentionUserIDs(corenote.ExtractMentionStructs(*note.Text)); merr != nil {
+			return nil, false, fmt.Errorf("ingest note: %w", merr)
+		}
 	}
 	tagHrefs := extractMentionTags(apNote.Tag)
-	tagMentions := r.resolveMentionedUserIDs(tagHrefs)
+	tagMentions, merr := r.resolveMentionedUserIDs(tagHrefs)
+	if merr != nil {
+		return nil, false, fmt.Errorf("ingest note: %w", merr)
+	}
 	note.Mentions = mergeMentionIDs(textMentions, tagMentions)
 	// upstream Misskey #17167 (= 2026.5.0 fix / triage #1004): mentionLimit を
 	// 超える note は無効と扱い、保存せずに ErrContainsTooManyMentions を返す。
@@ -3050,7 +3126,10 @@ func (r *Resolver) ingestNoteWithCreated(body []byte, deliveringActorURI string,
 	// VisibleUserIDs チェック (core/note/visibility.go) で受信者が note を
 	// 参照できるよう、ここで ID へ解決して埋める (#397)。
 	if note.Visibility == model.NoteVisibilitySpecified {
-		visible := r.resolveMentionedUserIDs(apNote.To)
+		visible, verr := r.resolveMentionedUserIDs(apNote.To)
+		if verr != nil {
+			return nil, false, fmt.Errorf("ingest note: %w", verr)
+		}
 		// reply target を必ず含める (upstream NoteCreateService.ts:603-605、
 		// ローカル create 経路の #2106 N13 と同型)。特に #17747 の clamp で
 		// `to:[Public]` の reply を specified へ降格させた場合、apNote.To から
@@ -3492,14 +3571,23 @@ func (r *Resolver) UpdateRemoteNote(body []byte, actorURI string) (*model.Note, 
 	// text が変わらなくても tag 配列の Mention は AP Update で変化しうる (#397)。
 	// IngestNote と同じく本文と tag 両方から mention を集めて user ID 配列に
 	// 統一する (mentions 列の意味論を local create 経路と揃えるため)。
-	var textMentions []string
+	var (
+		textMentions []string
+		merr         error
+	)
 	switch {
 	case newText != "":
-		textMentions = r.resolveTextMentionUserIDs(corenote.ExtractMentionStructs(newText))
+		textMentions, merr = r.resolveTextMentionUserIDs(corenote.ExtractMentionStructs(newText))
 	case existing.Text != nil:
-		textMentions = r.resolveTextMentionUserIDs(corenote.ExtractMentionStructs(*existing.Text))
+		textMentions, merr = r.resolveTextMentionUserIDs(corenote.ExtractMentionStructs(*existing.Text))
 	}
-	tagMentions := r.resolveMentionedUserIDs(extractMentionTags(apNote.Tag))
+	if merr != nil {
+		return nil, fmt.Errorf("update remote note: %w", merr)
+	}
+	tagMentions, merr := r.resolveMentionedUserIDs(extractMentionTags(apNote.Tag))
+	if merr != nil {
+		return nil, fmt.Errorf("update remote note: %w", merr)
+	}
 	mentions := mergeMentionIDs(textMentions, tagMentions)
 	if !slices.Equal([]string(existing.Mentions), []string(mentions)) {
 		fields["mentions"] = mentions
@@ -3695,9 +3783,14 @@ func extractMentionTags(tags []any) []string {
 // で安価に変換し、リモート URI は既知 (DB に取り込み済) のものだけ
 // userRepo.FindByURI でルックアップする。未知リモート URI は federation fetch
 // すると inbox 処理が重くなるため skip。返り値は入力順を保ち重複排除する。
-func (r *Resolver) resolveMentionedUserIDs(hrefs []string) []string {
+//
+// **引けなかったものを「未知」に潰さない** (#3121)。潰すと `mentions` や
+// specified note の `visibleUserIds` が空のまま note が確定し、**URI は DB に
+// 入るので retry は dedup にヒットして二度と直らない**。DM なら受信者本人が
+// 本文を読めなくなる (`core/note/visibility.go` の `CanView` は空配列を見る)。
+func (r *Resolver) resolveMentionedUserIDs(hrefs []string) ([]string, error) {
 	if len(hrefs) == 0 {
-		return nil
+		return nil, nil
 	}
 	seen := make(map[string]struct{}, len(hrefs))
 	out := make([]string, 0, len(hrefs))
@@ -3706,8 +3799,12 @@ func (r *Resolver) resolveMentionedUserIDs(hrefs []string) []string {
 		if local := r.ExtractLocalUserID(href); local != "" {
 			id = local
 		} else if r.userRepo != nil {
-			if u, err := r.userRepo.FindByURI(href); err == nil && u != nil {
+			u, err := r.userRepo.FindByURI(href)
+			switch {
+			case err == nil && u != nil:
 				id = u.ID
+			case err != nil && !repository.IsNotFound(err):
+				return nil, fmt.Errorf("resolve mentioned user %q: %w", truncateRunes(href, userURIMaxRunes), err)
 			}
 		}
 		if id == "" {
@@ -3719,7 +3816,7 @@ func (r *Resolver) resolveMentionedUserIDs(hrefs []string) []string {
 		seen[id] = struct{}{}
 		out = append(out, id)
 	}
-	return out
+	return out, nil
 }
 
 // resolveTextMentionUserIDs maps text-derived `@username[@host]` mentions to
@@ -3728,9 +3825,9 @@ func (r *Resolver) resolveMentionedUserIDs(hrefs []string) []string {
 // userRepo 未設定 / 未知ユーザーは skip する (NotificationService 等の
 // 既存後段は skip でも username fallback で動くが、mentions 列の query は
 // ID 完全一致なので残しても無駄)。
-func (r *Resolver) resolveTextMentionUserIDs(mentions []corenote.Mention) []string {
+func (r *Resolver) resolveTextMentionUserIDs(mentions []corenote.Mention) ([]string, error) {
 	if r.userRepo == nil || len(mentions) == 0 {
-		return nil
+		return nil, nil
 	}
 	out := make([]string, 0, len(mentions))
 	for _, m := range mentions {
@@ -3740,12 +3837,17 @@ func (r *Resolver) resolveTextMentionUserIDs(mentions []corenote.Mention) []stri
 			host = &h
 		}
 		u, err := r.userRepo.FindByUsernameLower(m.Username, host)
+		if err != nil && !repository.IsNotFound(err) {
+			// 上と同じ (#3121)。引けなかったものを「未知の相手」に潰すと、
+			// 通知の宛先が欠けたまま note が確定する。
+			return nil, fmt.Errorf("resolve text mention %q: %w", m.Username, err)
+		}
 		if err != nil || u == nil {
 			continue
 		}
 		out = append(out, u.ID)
 	}
-	return out
+	return out, nil
 }
 
 // extractHashtagTagNames parses the Tag array of a Note and returns the

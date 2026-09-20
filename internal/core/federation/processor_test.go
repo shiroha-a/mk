@@ -16,6 +16,7 @@ import (
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1619,6 +1620,43 @@ func TestProcess_LookupFailuresPropagate(t *testing.T) {
 			`"object":"https://remote.example/notes/n1",` +
 			`"target":"https://remote.example/users/alice/collections/featured"}`)
 		require.ErrorIs(t, p.Process(body), boom, "重複判定を素通りしている")
+	})
+}
+
+// **ingest の lookup 失敗も ack しない** (#3121)。
+//
+// ここが厄介なのは、**ack すると URI が DB に入る**こと — retry は dedup に
+// ヒットするので、落ちた紐付け (返信先 / 投票) は**二度と直らない**。
+func TestProcess_IngestLookupFailuresPropagate(t *testing.T) {
+	boom := errors.New("connection refused")
+
+	// dedup。**「まだ無い」に倒すと再 fetch して INSERT へ進む。**
+	t.Run("dedup の lookup が引けない", func(t *testing.T) {
+		p, _, _, noteRepo := newProcessor(t, aliceActor)
+		noteRepo.FindByURIErr = boom
+		body := []byte(`{"type":"Create","actor":"https://remote.example/users/alice",` +
+			`"object":{"id":"https://remote.example/notes/n1","type":"Note",` +
+			`"attributedTo":"https://remote.example/users/alice","content":"hi"}}`)
+		require.ErrorIs(t, p.Process(body), boom, "dedup を素通りしている")
+		assert.Empty(t, noteRepo.Notes, "引けないまま INSERT へ進んでいる")
+	})
+
+	// 返信先。**ack すると ReplyID=nil のまま確定し、スレッド接続が失われる。**
+	t.Run("返信先の lookup が引けない", func(t *testing.T) {
+		env := newFullProcessor(t, aliceActor)
+		env.noteRepo.Notes["t1"] = &model.Note{ID: "t1", UserID: "bob", Visibility: model.NoteVisibilityPublic}
+		env.userRepo.Users["bob"] = &model.User{ID: "bob", Username: "bob"}
+		// dedup は not-found で通し、返信先の FindByID だけ落とす。
+		env.noteRepo.FindErr = boom
+		body := []byte(`{"type":"Create","actor":"https://remote.example/users/alice",` +
+			`"object":{"id":"https://remote.example/notes/r1","type":"Note",` +
+			`"attributedTo":"https://remote.example/users/alice","content":"re",` +
+			`"inReplyTo":"https://example.com/notes/t1"}}`)
+		require.ErrorIs(t, env.processor.Process(body), boom, "返信先の解決を素通りしている")
+		// **harm も固定する。** error を返しつつ保存もする実装では、
+		// `note.uri` が DB に入るので retry が dedup にヒットして直らない。
+		_, ferr := env.noteRepo.FindByURI("https://remote.example/notes/r1")
+		assert.True(t, repository.IsNotFound(ferr), "返信先が空のまま note を確定させている")
 	})
 }
 

@@ -40,12 +40,12 @@ var ExtractMentionTags = extractMentionTags
 var MergeMentionIDs = mergeMentionIDs
 
 // ResolveMentionedUserIDs exposes the unexported resolveMentionedUserIDs for external tests.
-func (r *Resolver) ResolveMentionedUserIDs(hrefs []string) []string {
+func (r *Resolver) ResolveMentionedUserIDs(hrefs []string) ([]string, error) {
 	return r.resolveMentionedUserIDs(hrefs)
 }
 
 // ResolveTextMentionUserIDs exposes the unexported resolveTextMentionUserIDs for external tests.
-func (r *Resolver) ResolveTextMentionUserIDs(mentions []corenote.Mention) []string {
+func (r *Resolver) ResolveTextMentionUserIDs(mentions []corenote.Mention) ([]string, error) {
 	return r.resolveTextMentionUserIDs(mentions)
 }
 
