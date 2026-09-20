@@ -76,7 +76,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w $REVISION_LDFLAGS" -o /app/built/misskey ./cmd/misskey && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/migrate ./cmd/migrate && \
     CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-remote-host ./cmd/backfill-remote-host && \
-    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-emoji-system-file ./cmd/backfill-emoji-system-file
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-emoji-system-file ./cmd/backfill-emoji-system-file && \
+    CGO_ENABLED=0 go build -tags nodynamic -trimpath -ldflags="-s -w" -o /app/built/backfill-avatar-public-url ./cmd/backfill-avatar-public-url
 
 # Stage 2: Runtime
 #
@@ -100,6 +101,7 @@ COPY --from=builder /app/built/migrate /app/migrate
 #   docker compose run --rm --entrypoint /app/backfill-remote-host app -dry-run
 COPY --from=builder /app/built/backfill-remote-host /app/backfill-remote-host
 COPY --from=builder /app/built/backfill-emoji-system-file /app/backfill-emoji-system-file
+COPY --from=builder /app/built/backfill-avatar-public-url /app/backfill-avatar-public-url
 COPY --from=builder /app/migration /app/migration
 
 # 本家のpackages/backend/assets (favicon / icons等) をimageに焼き込む。

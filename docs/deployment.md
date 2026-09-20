@@ -698,6 +698,91 @@ SQL migration として書けない一回限りの正規化は、独立したバ
 **稼働中の本体プロセスに影響しない使い捨てコンテナ**で流す。entrypoint を差し替えるのは
 `docker-compose.yml` の `migrate` サービスと同じ手法。
 
+### `backfill-avatar-public-url` — アイコン / バナーの URL を公開用へ寄せ直す
+
+`user.avatarUrl` / `user.bannerUrl` は drive ファイルの**原本**を指していた。原本は
+アップロードされたバイト列そのままで、`/files/:accessKey` は変換せずに返すため、
+撮影情報を含む画像を設定するとそれが載ったまま配られる。`avatarUrl` はタイムライン・
+`users/show`・ActivityPub の actor icon に出るので、影響は本人の画面に留まらない。
+
+書き込み側は修正済みだが、**それは以後の更新にしか効かない**。既に設定されている
+アイコン / バナーはこのバッチで寄せ直す。指し先は変えず、同じ drive ファイルの
+公開用 (`webpublicUrl`) がある場合にそちらへ向け直すだけ。
+
+**公開用が無い行はこのバッチでは直らない。** 多くは「メタデータが無く再エンコード
+される理由が無かった」画像で、その場合は原本のままで問題ない。ただし**そうでない
+理由で作られなかった行も混ざる**: デコードできなかった画像、保存に失敗した回、
+`image/heic` のようにそもそも再エンコードの対象外になっている形式、そして
+メタデータの検出を JPEG 以外へ広げる前 (#3044 / commit `9a8ea509` より前) にアップロードされた
+2048px 以下の PNG / WebP / TIFF。これらは利用者がアイコンを設定し直す (= drive
+ファイルごと入れ替える) 以外に直す手が無い。
+
+**対象はローカル利用者だけ。** upstream はリモートのアイコンを drive に保存して
+`avatarId` を書くので、TS から引き継いだ DB にはリモート利用者の古い id が残って
+いる。mk-go はその id を更新しないため、host で絞らないと**取り直した現在の
+リモート URL を TS 時代のキャッシュへ巻き戻す**。
+
+**アニメーションになりうる形式で公開用を持つ行は触らない。** 公開用はアニメーションを
+保てない (1 コマに潰れる) ので、寄せ直すと**いま動いているアイコンをその瞬間に静止画へ
+固定する**。実際にアニメーションかはバイト列を読まないと分からないため、
+`image/gif` / `image/apng` / `image/webp` / `image/avif` はまとめて対象外にしてある。
+
+**AVIF は全件が対象外になる。** あの形式は寸法にもメタデータにも関係なく必ず公開用が
+作られる (`image_processor.go` の `mimeType != "image/avif"` の枝) ので、上の条件の
+右辺が常に真になる。静止画の AVIF で撮影情報を持つものも含めて 1 件も寄せ直されない。
+WebP は「公開用を持つもの」= メタデータ付きか 2048px 超だけが外れる。
+
+**取りこぼした行は利用者がアイコンを設定し直せば直る — ただし例外がある。**
+設定し直すと書き込み経路が走るので、そこでも公開用が選ばれる。**アニメーションの
+AVIF と、メタデータ付きまたは 2048px 超のアニメーション WebP は、設定し直すと
+静止画になる** (書き込み経路のアニメーション判定は MIME 見であの 2 形式を拾えない)。
+その 2 つは現状「アニメーションを保つ」と「撮影情報を落とす」を同時に満たせない。
+
+**TS から引き継いだ DB では配信サイズが増える。** upstream は `avatarUrl` 列に
+プロキシ URL (avatar mode = 高さ 320) を保存するので、移行済みのインスタンスでは
+ローカル利用者がその値を持っている。このバッチはそれを「原本と違う」と判定して
+公開用 (最大 2048px) へ書き換えるため、48px 表示のアイコンに大きな画像が流れる。
+mk-go 生まれの DB では逆に原本 → 公開用なので改善になる。**構成によって向きが
+反転する**ので、移行済みなら流す前に `docs/divergence.md` の `user.avatarUrl` の行を
+読むこと。
+
+**アイコンとバナーは 1 本の UPDATE にまとまる。** 条件は AND で積まれるので、片方の
+id が実行中に変わるともう片方も書けない。冪等なので**もう一度流せば拾える**。
+
+```bash
+# まず件数を見る
+docker compose run --rm --no-deps --entrypoint /app/backfill-avatar-public-url app \
+  -config /app/.config/default.yml -dry-run
+
+# 実行
+docker compose run --rm --no-deps --entrypoint /app/backfill-avatar-public-url app \
+  -config /app/.config/default.yml -batch 1000 -sleep-ms 200
+```
+
+**`--no-deps` を付ける** (理由は下の `backfill-emoji-system-file` と同じ)。UDS 構成では
+サービス名が `mkgo` になる。バイナリ直接実行なら
+`go run ./cmd/backfill-avatar-public-url -config .config/default.yml -dry-run`。
+
+**無指定で書き込み、`-dry-run` で抑止する**側の作法。`backfill-emoji-system-file` だけが
+逆 (既定 dry-run + `-apply`) なので打ち間違えないこと。
+
+出力の `updated` は**「書く必要があった件数」**で、実行中に変わって書けなかった行も
+含む。書けたかを厳密に数えたいなら流した後に `-dry-run` をもう一度当てて 0 を確認する。
+
+冪等。中断したら `-from <最後に出た cursor>` で続きから流せる。
+
+**閲覧側のキャッシュはすぐには消えない。** 旧 URL を掴んでいるブラウザや CDN は
+そのまま原本を読む。URL 自体が無効になるわけではないので、確実に見せたくない画像は
+利用者がアイコンを設定し直す (= drive ファイルごと入れ替える) 必要がある。
+
+**連合先には伝わらない。** `user.avatarUrl` は ActivityPub の actor icon そのもので、
+通常のプロフィール更新なら `Update(Person)` がフォロワーへ配送される
+(`core/federation/profile_update_delivery_hook.go`)。このバッチは列を直接書くだけで
+配送しないので、**リモートのインスタンスは旧 URL を持ち続け、構成によっては原本を
+自分の drive にキャッシュし直す**。ブラウザや CDN のキャッシュより寿命が長い。
+配送を起こすには利用者が一度プロフィールを更新する必要がある (アイコンを
+設定し直せば同時に両方が片付く)。
+
 ### `backfill-emoji-system-file` — 承認済み自作絵文字の画像を system 所有へ複製 (#2990)
 
 #2966 より前に承認された `kind = own` のカスタム絵文字申請は、作られた絵文字が
@@ -740,8 +825,8 @@ compose の `run` はサービスの volume をそのまま引き継ぐ。別の
 冪等。途中で失敗しても、作れた複製の分だけ進んだ状態から再実行して安全。
 
 **既定は dry-run で、書き込みには `-apply` が要る。** 姉妹バッチ
-(`backfill-remote-host` / `backfill-note-tags`) は**逆** (無指定で書き込み、
-`-dry-run` で抑止) なので、手が覚えているほうで打たないこと。`-dry-run` と `-apply`
+(`backfill-remote-host` / `backfill-note-tags` / `backfill-avatar-public-url`) は
+**逆** (無指定で書き込み、`-dry-run` で抑止) なので、手が覚えているほうで打たないこと。`-dry-run` と `-apply`
 を両方渡すと落ちる。
 
 **dry-run で分かるのは DB だけで判定できるところまで。** 実体を読んで初めて分かる
