@@ -532,12 +532,17 @@ func TestDriveFileRepository_DeleteOrphansAndRemoteCache(t *testing.T) {
 	orphan.UserID = nil
 	kept := newTestDriveFile("kept1", user.ID, "md5k", nil)
 
-	// cached remote file (isLink=false, userHost set) は DeleteRemoteCache の
+	// cached remote file (isLink=false, userHost set) は ExpireRemoteCache の
 	// 対象。link-only proxy (isLink=true) は対象外で保持される (upstream 互換)。
 	host := "cache.example"
 	remoteCache := newTestDriveFile("rc1", user.ID, "md5rc", nil)
 	remoteCache.IsLink = false
 	remoteCache.UserHost = &host
+	rcURI := "https://cache.example/files/rc1"
+	remoteCache.URI = &rcURI
+	remoteCache.Size = 4096
+	rcKey := "rc1-access-key"
+	remoteCache.AccessKey = &rcKey
 	linkOnly := newTestDriveFile("lo1", user.ID, "md5lo", nil)
 	linkOnly.IsLink = true
 	linkOnly.UserHost = &host
@@ -559,13 +564,53 @@ func TestDriveFileRepository_DeleteOrphansAndRemoteCache(t *testing.T) {
 	_, err = repo.FindByID(kept.ID)
 	assert.NoError(t, err)
 
-	n, err = repo.DeleteRemoteCache()
+	n, err = repo.ExpireRemoteCache()
 	require.NoError(t, err)
 	assert.GreaterOrEqual(t, n, int64(1))
-	_, err = repo.FindByID(remoteCache.ID)
-	assert.Error(t, err, "isLink=false のキャッシュ実体は削除される")
+
+	// **行は消さず link に倒す** (#3102)。消すと `note.fileIds` の指す先が
+	// 無くなり、過去の投稿から添付が黙って消える (upstream は残す)。
+	got, err := repo.FindByID(remoteCache.ID)
+	require.NoError(t, err, "キャッシュ実体の行は残る")
+	assert.True(t, got.IsLink, "link に倒っていない")
+	assert.Equal(t, rcURI, got.URL, "url が uri になっていない")
+	assert.False(t, got.StoredInternal)
+	// mk-go が普段作る link 行と同じ形にする (size 0 / access key なし)。
+	assert.Equal(t, 0, got.Size, "size が残ると使用量が嘘になる")
+	assert.Nil(t, got.AccessKey, "実体が消えた後も古い /files URL が生きている")
+	assert.Nil(t, got.ThumbnailURL)
+	assert.Nil(t, got.WebpublicURL)
+
 	_, err = repo.FindByID(linkOnly.ID)
 	assert.NoError(t, err, "isLink=true の link-only は保持される")
+
+	// **2 回目は対象にならない。** 倒した行は isLink=true なので条件から外れる
+	// (外れないとバッチが同じ行を返し続けて進まない)。
+	again, err := repo.ExpireRemoteCache()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), again, "倒した行がまだ対象に残っている")
+}
+
+// **`uri` を持たない行は倒せないので消す** (#3102、upstream の else 枝と同じ)。
+// link 行の `url` は `uri` から作るので、NULL のままでは表示できない行が残る。
+func TestDriveFileRepository_ExpireRemoteCache_DeletesRowsWithoutURI(t *testing.T) {
+	repo := NewDriveFileRepository(testDB)
+	user := insertTestUser(t, "u_exp_nouri", "expn")
+	defer cleanupUser(t, user.ID)
+
+	host := "nouri.example"
+	noURI := newTestDriveFile("nouri1", user.ID, "md5nu", nil)
+	noURI.IsLink = false
+	noURI.UserHost = &host
+	noURI.URI = nil
+	require.NoError(t, repo.Create(noURI))
+	defer cleanupDriveFile(t, noURI.ID)
+
+	n, err := repo.ExpireRemoteCache()
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, n, int64(1))
+	_, err = repo.FindByID(noURI.ID)
+	assert.Error(t, err, "uri が無い行は倒せないので消える")
 }
 
 // TestDriveFileRepository_DeleteOrphans_PreservesEmojiReferenced は #722

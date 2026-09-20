@@ -91,11 +91,19 @@ type DriveFileRepository interface {
 	// (see orphanRemoteAttachmentWhere). afterID は keyset cursor で、空なら
 	// 先頭から。
 	ListOrphanRemoteAttachmentCandidates(cutoffID, afterID string, limit int) ([]string, error)
-	// DeleteRemoteCache removes cached remote files (isLink=false with host set)
-	// — the rows whose actual bytes are cached locally / in object storage.
-	// Returns affected count. Used as the DB-only fallback for
-	// admin/drive/clean-remote-files when no storage backend is wired.
-	DeleteRemoteCache() (int64, error)
+	// ExpireRemoteCache turns cached remote files (isLink=false with host set)
+	// into link rows instead of deleting them (#3102).
+	//
+	// **upstream と同じ動作にしてある。** `CleanRemoteFilesProcessorService` は
+	// `deleteFileSync(file, true)` を呼び、`deletePostProcess` の `isExpired`
+	// 分岐が**行を残して link に倒す**。行ごと消すと `note.fileIds` の指す先が
+	// 無くなり、packer が引けない ID を捨てるので**過去の投稿から添付が黙って
+	// 消える**。実体 (object storage / ローカル FS) は呼び出し側が先に消すので、
+	// 容量はどちらでも空く。
+	//
+	// `uri` を持たない行だけは倒せないので削除する (upstream の else 枝と同じ)。
+	// 戻り値は倒した行と消した行の合計。
+	ExpireRemoteCache() (int64, error)
 	// ListRemoteCache returns up to limit cached remote files (isLink=false with
 	// host set) so the caller can delete their object-storage objects before the
 	// DB rows. Order is unspecified.
@@ -103,6 +111,9 @@ type DriveFileRepository interface {
 	// ListByUserAll returns up to limit files owned by userID across all folders
 	// (admin/delete-all-files-of-a-user storage cleanup).
 	ListByUserAll(userID string, limit int) ([]*model.DriveFile, error)
+	// ExpireByIDs turns the given rows into link rows (#3102)。ExpireRemoteCache
+	// と同じ変換を id 指定で行う (storage を先に消すバッチ経路が使う)。
+	ExpireByIDs(ids []string) (int64, error)
 	// DeleteByIDs removes the given rows in one statement. Returns affected count.
 	DeleteByIDs(ids []string) (int64, error)
 	// DeleteByUser removes every drive_file owned by userID. Returns affected
@@ -639,12 +650,67 @@ func (r *driveFileRepository) ListOrphanRemoteAttachmentCandidates(cutoffID, aft
 	return ids, nil
 }
 
-func (r *driveFileRepository) DeleteRemoteCache() (int64, error) {
-	// upstream CleanRemoteFilesProcessorService は userHost IS NOT NULL AND
-	// isLink=false (= 実体をキャッシュしているリモートファイル) を消す。旧実装は
-	// isLink=true (= 実体を持たない link-only proxy) を消しており条件が逆だった。
-	tx := r.db.Where(`"isLink" = false AND "userHost" IS NOT NULL`).Delete(&model.DriveFile{})
-	return tx.RowsAffected, tx.Error
+// remoteCacheWhere は「実体をキャッシュしているリモートファイル」の条件。
+// upstream `CleanRemoteFilesProcessorService` の絞りと同じ。
+const remoteCacheWhere = `"isLink" = false AND "userHost" IS NOT NULL`
+
+// linkifyUpdates は実体つきの行を link 行へ倒すときの列の値。
+//
+// **mk-go が普段作る link 行と同じ形にする** (`upsertAttachments` は
+// `isLink: true` / `size: 0` / `storedInternal: false` / access key なしで作る)。
+// 倒した後の行が mk-go 生まれの行と見分けが付かないので、`admin/drive/usage` の
+// 「件数は積み上がるのに使用量は 0」(§5.5) もそのまま成り立つ。
+//
+// **size を 0 にするのは upstream と違う。** あちらは据え置くが、据え置くと
+// 実体が無いのに使用量に乗り続ける (`admin/drive/usage` が嘘をつく)。upstream 自身
+// も集計では `isLink = FALSE` で絞るので、link 行の size は読まれない。
+//
+// **access key は NULL に落とす。** 実体が消えた以上、古い `/files/<key>` の URL を
+// 生かしておく意味が無い (upstream は新しい UUID を振り直して同じ効果を得ている)。
+// `accessKey` の UNIQUE index は NULL を複数許すので衝突しない。
+var linkifyUpdates = map[string]any{
+	"isLink":             true,
+	"url":                gorm.Expr(`"uri"`),
+	"thumbnailUrl":       nil,
+	"webpublicUrl":       nil,
+	"storedInternal":     false,
+	"size":               0,
+	"accessKey":          nil,
+	"thumbnailAccessKey": nil,
+	"webpublicAccessKey": nil,
+}
+
+func (r *driveFileRepository) ExpireRemoteCache() (int64, error) {
+	return r.expireWhere(remoteCacheWhere)
+}
+
+func (r *driveFileRepository) ExpireByIDs(ids []string) (int64, error) {
+	// **列に入らない値は引く前に落とす** (#3025)。DeleteByIDs と同じ扱い。
+	ids = storableIDs(ids)
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	return r.expireWhere(`id IN ?`, ids)
+}
+
+// expireWhere link-ifies the matching rows, deleting the ones without a uri.
+//
+// **`uri` が無い行は倒せない** — link 行の `url` は `uri` から作るので、NULL を
+// 入れると NOT NULL 制約に当たるか、当たらなくても表示できない行が残る。upstream も
+// `file.uri != null` を条件にして、満たさない行は削除する。
+func (r *driveFileRepository) expireWhere(where string, args ...any) (int64, error) {
+	var total int64
+	tx := r.db.Model(&model.DriveFile{}).
+		Where(where, args...).Where(`"uri" IS NOT NULL`).Updates(linkifyUpdates)
+	if tx.Error != nil {
+		return 0, tx.Error
+	}
+	total += tx.RowsAffected
+	del := r.db.Where(where, args...).Where(`"uri" IS NULL`).Delete(&model.DriveFile{})
+	if del.Error != nil {
+		return total, del.Error
+	}
+	return total + del.RowsAffected, nil
 }
 
 func (r *driveFileRepository) ListRemoteCache(limit int) ([]*model.DriveFile, error) {

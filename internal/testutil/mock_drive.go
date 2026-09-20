@@ -715,14 +715,42 @@ func (m *MockDriveFileRepository) ListOrphans(limit int) ([]*model.DriveFile, er
 	return out, nil
 }
 
-func (m *MockDriveFileRepository) DeleteRemoteCache() (int64, error) {
-	n := int64(0)
+// ExpireRemoteCache mirrors the repository: cached remote rows become link rows
+// instead of being deleted (#3102)。`uri` を持たない行だけ消す。
+func (m *MockDriveFileRepository) ExpireRemoteCache() (int64, error) {
+	ids := make([]string, 0, len(m.Files))
 	for id, f := range m.Files {
-		// upstream は isLink=false (キャッシュ実体) を消す。
 		if !f.IsLink && f.UserHost != nil {
+			ids = append(ids, id)
+		}
+	}
+	return m.ExpireByIDs(ids)
+}
+
+// ExpireByIDs turns the given rows into link rows (#3102)。
+func (m *MockDriveFileRepository) ExpireByIDs(ids []string) (int64, error) {
+	n := int64(0)
+	for _, id := range ids {
+		f, ok := m.Files[id]
+		if !ok {
+			continue
+		}
+		if f.URI == nil {
+			// uri が無ければ倒せないので消す (repository と同じ)。
 			delete(m.Files, id)
 			n++
+			continue
 		}
+		f.IsLink = true
+		f.URL = *f.URI
+		f.ThumbnailURL = nil
+		f.WebpublicURL = nil
+		f.StoredInternal = false
+		f.Size = 0
+		f.AccessKey = nil
+		f.ThumbnailAccessKey = nil
+		f.WebpublicAccessKey = nil
+		n++
 	}
 	return n, nil
 }

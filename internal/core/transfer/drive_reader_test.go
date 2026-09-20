@@ -100,7 +100,8 @@ func (f *fakeDriveFileRepo) ListOrphans(_ int) ([]*model.DriveFile, error) {
 func (f *fakeDriveFileRepo) ListOrphanRemoteAttachmentCandidates(_, _ string, _ int) ([]string, error) {
 	return nil, nil
 }
-func (f *fakeDriveFileRepo) DeleteRemoteCache() (int64, error) { return 0, nil }
+func (f *fakeDriveFileRepo) ExpireRemoteCache() (int64, error)     { return 0, nil }
+func (f *fakeDriveFileRepo) ExpireByIDs(_ []string) (int64, error) { return 0, nil }
 func (f *fakeDriveFileRepo) ListRemoteCache(_ int) ([]*model.DriveFile, error) {
 	return nil, nil
 }

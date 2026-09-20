@@ -65,7 +65,7 @@ func (f *fakeRemoteFileCleaner) ListRemoteCache(int) ([]*model.DriveFile, error)
 	return next, nil
 }
 
-func (f *fakeRemoteFileCleaner) DeleteByIDs(ids []string) (int64, error) {
+func (f *fakeRemoteFileCleaner) ExpireByIDs(ids []string) (int64, error) {
 	if f.deleteErr != nil {
 		return 0, f.deleteErr
 	}

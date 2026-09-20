@@ -44,11 +44,13 @@ func (h *Handler) DriveCleanRemoteFiles(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	if h.storageDeleter == nil {
-		// storage 未配線: DB 行のみ削除 (condition は isLink=false に修正済)。
-		_, _ = h.driveFileRepo.DeleteRemoteCache()
+		// storage 未配線: DB 行を link に倒すだけ (実体はそもそも無い)。
+		_, _ = h.driveFileRepo.ExpireRemoteCache()
 		return c.NoContent(http.StatusNoContent)
 	}
-	if err := h.deleteFilesBatched(c, h.driveFileRepo.ListRemoteCache); err != nil {
+	// **行は消さず link に倒す** (#3102)。upstream と同じ動作で、消すと
+	// `note.fileIds` の指す先が無くなり過去の投稿から添付が黙って消える。
+	if err := h.cleanupFilesBatched(c, h.driveFileRepo.ListRemoteCache, h.driveFileRepo.ExpireByIDs); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.InternalError())
 	}
 	return c.NoContent(http.StatusNoContent)
@@ -65,6 +67,20 @@ func (h *Handler) DriveCleanRemoteFiles(c echo.Context) error {
 // ようにする。list / DeleteByIDs (= DB) の失敗は hard error として返し、handler が
 // 500 を返す (DB-only 経路の 500 と整合)。
 func (h *Handler) deleteFilesBatched(c echo.Context, list func(limit int) ([]*model.DriveFile, error)) error {
+	return h.cleanupFilesBatched(c, list, h.driveFileRepo.DeleteByIDs)
+}
+
+// cleanupFilesBatched is deleteFilesBatched with the terminal DB operation
+// parameterised: `finish` either deletes the rows or turns them into link rows.
+//
+// **リモートキャッシュの掃除だけ link に倒す** (#3102)。利用者のファイルを消す
+// ほう (`delete-all-files-of-a-user`) は今までどおり行ごと消す — あちらは
+// 「その利用者のファイルを消す」が目的で、行を残す理由が無い。
+//
+// **`finish` が行を消さない場合、list が同じ行を返し続けない形であること。**
+// link に倒すと `isLink = false` の条件から外れるので `ListRemoteCache` は
+// 次のバッチを返す (消す場合と同じ)。
+func (h *Handler) cleanupFilesBatched(c echo.Context, list func(limit int) ([]*model.DriveFile, error), finish func(ids []string) (int64, error)) error {
 	for i := 0; i < driveCleanupMaxBatches; i++ {
 		files, err := list(driveCleanupBatchSize)
 		if err != nil {
@@ -79,8 +95,8 @@ func (h *Handler) deleteFilesBatched(c echo.Context, list func(limit int) ([]*mo
 			h.deleteFileStorageObjects(c, f)
 			ids = append(ids, f.ID)
 		}
-		if _, err := h.driveFileRepo.DeleteByIDs(ids); err != nil {
-			slog.ErrorContext(c.Request().Context(), "drive cleanup: DeleteByIDs failed", "err", err)
+		if _, err := finish(ids); err != nil {
+			slog.ErrorContext(c.Request().Context(), "drive cleanup: finish failed", "err", err)
 			return err
 		}
 		if len(files) < driveCleanupBatchSize {

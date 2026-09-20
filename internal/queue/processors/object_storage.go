@@ -30,7 +30,8 @@ const cleanRemoteFilesBatchPause = 500 * time.Millisecond
 // Implemented by repository.DriveFileRepository.
 type RemoteFileCleaner interface {
 	ListRemoteCache(limit int) ([]*model.DriveFile, error)
-	DeleteByIDs(ids []string) (int64, error)
+	// ExpireByIDs turns the rows into link rows instead of deleting them (#3102)。
+	ExpireByIDs(ids []string) (int64, error)
 }
 
 // ObjectStorageProcessor handles the `objectStorage` queue (#2325).
@@ -120,9 +121,13 @@ func (p *ObjectStorageProcessor) HandleCleanRemoteFiles(ctx context.Context, _ d
 			p.deleteObjects(f)
 			ids = append(ids, f.ID)
 		}
-		deleted, err := p.fileRepo.DeleteByIDs(ids)
+		// **行は消さず link に倒す** (#3102)。upstream の
+		// `deleteFileSync(file, true)` と同じで、消すと `note.fileIds` の
+		// 指す先が無くなり過去の投稿から添付が黙って消える。実体は上の
+		// `deleteObjects` で消えているので容量は空く。
+		deleted, err := p.fileRepo.ExpireByIDs(ids)
 		if err != nil {
-			slog.Error("cleanRemoteFiles: DeleteByIDs failed", "err", err)
+			slog.Error("cleanRemoteFiles: ExpireByIDs failed", "err", err)
 			return err
 		}
 		totalDeleted += deleted
