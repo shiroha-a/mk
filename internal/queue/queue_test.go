@@ -420,6 +420,31 @@ func TestClient_EnqueuePostScheduledNote(t *testing.T) {
 	assert.Equal(t, queue.TaskTypePostScheduledNote, tasks[0].Type)
 }
 
+// #3121: 予約投稿の enqueue も policy の attempts を積む。積まないと mkq の
+// `attempts <= 0` で **初回失敗がそのまま failed** になり、publish に到達する前の
+// 一時的な DB 障害だけで予約投稿が失われる (publish そのものの失敗は processor が
+// ack するので、ここで retry されるのは publish 前の失敗だけ)。
+func TestClient_EnqueuePostScheduledNote_PolicyMaxAttemptsApplied(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushTestRedis(t)
+
+	c := queue.NewClient(newDriver())
+	defer func() { _ = c.Close() }()
+	c.SetPolicy(queue.QueueName, queue.Policy{MaxAttempts: 8})
+
+	require.NoError(t, c.EnqueuePostScheduledNote(queue.PostScheduledNotePayload{NoteDraftID: "d1"}))
+
+	insp := asynq.NewInspector(redisOpt())
+	defer func() { _ = insp.Close() }()
+
+	tasks, err := insp.ListPendingTasks(queue.QueueName)
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	info, err := insp.GetTaskInfo(queue.QueueName, tasks[0].ID)
+	require.NoError(t, err)
+	assert.Equal(t, 7, info.MaxRetry, "MaxAttempts=8 (BullMQ の総試行回数) は MaxRetry=7 に落ちる")
+}
+
 func TestClient_ClearScheduledNote_RemovesMatchingTasks(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)

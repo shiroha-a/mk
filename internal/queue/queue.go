@@ -279,8 +279,25 @@ func (c *Client) EnqueueDeliver(payload DeliverPayload, opts ...driver.EnqueueOp
 // で `scheduledAt - now` を指定する想定 (#1040)。
 func (c *Client) EnqueuePostScheduledNote(payload PostScheduledNotePayload, opts ...driver.EnqueueOption) error {
 	body := mustMarshal(payload)
+	p := c.policyFor(QueueName)
 	base := []driver.EnqueueOption{driver.WithQueue(QueueName)}
-	base = append(base, c.retentionOpts(QueueName)...)
+	// **attempts を積む** (#3121)。積まないと mkq の `attempts <= 0` で
+	// **初回失敗でそのまま failed** になり、publish 前の一時的な DB 障害だけで
+	// 予約投稿が失われる。publish そのものの失敗は processor が ack するので
+	// (二重 publish / 二重通知を避けるための意図的な設計、#2106 L61)、ここで
+	// retry されるのは **publish に到達する前の失敗だけ**。
+	//
+	// **policy は deliver キューのもの** (`QueueName` == "deliver")。この job は
+	// 元から deliver に積んでいるので専用の設定項目は無く、`deliverJobMaxAttempts`
+	// を 1 にした運用では予約投稿も retry しない。既定 (12) では backoff が
+	// `(2^n-1)*60s` なので、publish 前の失敗が続くと最大 30 時間ほど遅れて
+	// 公開されうる。その間に予約時刻を変えても取り消せるよう、
+	// `ClearScheduledNote` は retry bucket も走査する。
+	if p.MaxAttempts > 0 {
+		base = append(base, driver.WithMaxRetry(p.MaxAttempts-1))
+	}
+	base = append(base, backoffOptFromPolicy(p))
+	base = append(base, retentionOptsFromPolicy(p)...)
 	merged := append(base, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypePostScheduledNote, body, merged...)
 }
@@ -290,11 +307,18 @@ func (c *Client) EnqueuePostScheduledNote(payload PostScheduledNotePayload, opts
 // 抑えつつ大量 delayed task の場合も全件走査できる pragmatic な閾値。
 const clearScheduledNotePageSize = 100
 
-// ClearScheduledNote scans the deliver queue's delayed bucket for tasks
-// matching noteDraftId == draftID and deletes them. inspector が未配線の
+// ClearScheduledNote scans the deliver queue for tasks matching
+// noteDraftId == draftID and deletes them. inspector が未配線の
 // 場合は no-op (= test fixture / wire 未配線 path)。upstream の線形探索
 // と同 pattern (`getJobs(['delayed', 'waiting', 'active'])` → match →
 // `job.remove()`) を asynq/mkq の inspector API で再現する。
+//
+// **delayed だけでなく retry も走査する** (#3121)。attempts を積むように
+// なったので、予約投稿の job は「backoff 待ち」の状態を取りうる。そちらは
+// `ListRetryTasks` にしか出ないので、delayed だけ見ていると **取り消しや
+// 再スケジュールが古い job に届かず、backoff 明けに予定と違う時刻で公開
+// される** (取り消しは draft が消えているので processor 側が not-found で
+// ack して救われるが、再スケジュールは draft が残るので救われない)。
 //
 // 削除 failure は集約して error として返す。partial success 時も err 経路
 // に流すことで caller (DraftsUpdate / DraftsDelete) が log を残し handler
@@ -303,15 +327,32 @@ func (c *Client) ClearScheduledNote(draftID string) error {
 	if c.inspector == nil {
 		return nil
 	}
-	page := 1
 	var firstErr error
+	for _, bucket := range []struct {
+		name string
+		list func(string, int, int) ([]*driver.TaskSummary, error)
+	}{
+		{"scheduled", c.inspector.ListScheduledTasks},
+		{"retry", c.inspector.ListRetryTasks},
+	} {
+		if err := c.clearScheduledNoteIn(bucket.name, bucket.list, draftID, &firstErr); err != nil {
+			return err
+		}
+	}
+	return firstErr
+}
+
+// clearScheduledNoteIn は ClearScheduledNote の 1 bucket 分の走査。列挙自体の
+// 失敗は即 return (見落としたまま「消した」と言わない)、削除の失敗は集約する。
+func (c *Client) clearScheduledNoteIn(bucket string, list func(string, int, int) ([]*driver.TaskSummary, error), draftID string, firstErr *error) error {
+	page := 1
 	for {
-		tasks, err := c.inspector.ListScheduledTasks(QueueName, page, clearScheduledNotePageSize)
+		tasks, err := list(QueueName, page, clearScheduledNotePageSize)
 		if err != nil {
-			return fmt.Errorf("list scheduled tasks: %w", err)
+			return fmt.Errorf("list %s tasks: %w", bucket, err)
 		}
 		if len(tasks) == 0 {
-			break
+			return nil
 		}
 		for _, t := range tasks {
 			if t.Type != TaskTypePostScheduledNote {
@@ -327,17 +368,16 @@ func (c *Client) ClearScheduledNote(draftID string) error {
 				continue
 			}
 			if derr := c.inspector.DeleteTask(QueueName, t.ID); derr != nil {
-				if firstErr == nil {
-					firstErr = fmt.Errorf("delete task %s: %w", t.ID, derr)
+				if *firstErr == nil {
+					*firstErr = fmt.Errorf("delete task %s: %w", t.ID, derr)
 				}
 			}
 		}
 		if len(tasks) < clearScheduledNotePageSize {
-			break
+			return nil
 		}
 		page++
 	}
-	return firstErr
 }
 
 // EnqueueExport puts an export task on the queue.
