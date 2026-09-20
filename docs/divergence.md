@@ -9,7 +9,7 @@ mk-go が持つ「純正 Misskey (misskey-dev/misskey) には無い、または�
 > upstream を追従したのではなく、**mk-go 側の独自変更と互換性 fix** を積んだもので、比較対象の
 > Misskey TS は 1.0.0 時点と同じ `2026.7.0` のままだった。**2026.9.0 への追従 (#2877) で
 > ベースラインを `2026.9.0` へ更新した。** 個々の記述はまだ 2026.7.0 時点の観察に基づくものが
-> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.37`) で確認すること。
+> 混じりうるので、乖離を判断するときは対象の実装を現 pin (`2026.9.0-mk.38`) で確認すること。
 
 ## このドキュメントの位置づけ
 
@@ -37,7 +37,7 @@ mk-go は drop-in 互換 (同じ DB / Redis / frontend を Misskey TS と共有�
 | DB カラム | 22 (+ 未使用の残存列 3) | 3 | 0 |
 | ActivityPub | Ed25519 / RemoteStatsFetcher ほか | reversi 連合 / chat 連合 | — |
 | config キー | 20 前後 | 0 | — |
-| fork frontend の独自変更 | 113 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.37`) | — | — |
+| fork frontend の独自変更 | 114 tag (`2026.7.0-mk.0` ～ `2026.9.0-mk.38`) | — | — |
 
 **upstream endpoint の未実装はゼロ** (coverage 100.0%、444/444)。DB schema も upstream の全テーブル・全共有カラムを superset で保持しており、逆方向の欠落は無い。
 
@@ -457,7 +457,7 @@ submodule bump の PR で人が見る。
 
 **還元できるものを一時的に置く場合は、その行に必ず明記する。** 純正にも同じ不具合があるものをここへ置くと、この表を「還元不能な差分の一覧」として読む運用 (upstream 追従時に残す / 落とすを判断する材料) が壊れる。純正へ取り込まれた時点で revert する対象なので、行を読んだだけでそれが分かる必要がある。現時点の該当は `2026.7.0-mk.22h` / `2026.7.0-mk.22i` / `2026.7.0-mk.22j` / `2026.9.0-mk.1` / `2026.9.0-mk.2` / `2026.9.0-mk.2a` / `2026.9.0-mk.8e` / `2026.9.0-mk.8f` / `2026.9.0-mk.15` / `2026.9.0-mk.15a` / `2026.9.0-mk.15b` / `2026.9.0-mk.15c` / `2026.9.0-mk.16` / `2026.9.0-mk.16a` / `2026.9.0-mk.16b` の 15 行 (**base を省略しない** — bump で `-mk.N` は 0 に戻るので省略形は曖昧になる)。
 
-**現在の pin は `2026.9.0-mk.37` (`c9f17135`)。** tag 列は「その変更が最初に入った世代」で、
+**現在の pin は `2026.9.0-mk.38` (`c986da0f`)。** tag 列は「その変更が最初に入った世代」で、
 `2026.7.0-mk.*` の行はすべて 2026.9.0 への載せ替え (`git rebase --onto 2026.9.0 2026.7.0`、
 custom commit 50 個) で `2026.9.0-mk.0` に入っている (`2026.9.0-mk.1` 以降は載せ替えの
 後に積んだもの)。載せ替えで衝突したのは
@@ -583,6 +583,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 | `2026.9.0-mk.35b` | `mk.35a` が `errorMessage` を差し込んだ位置が悪く、`mergeCandidates` の説明コメントが新しい関数の JSDoc の上に取り残されて `mergeCandidates` 自身が無注釈になっていた (#3106 のレビュー 3 周目)。**純正へは還元できない行**。 |
 | `2026.9.0-mk.36` | 監査一覧に `signins` の種類を足す (#3114)。`admin/show-user` が返すログイン IP を照会として記録するようになったため。`kindLabel` は知らない値をそのまま出す fail-safe な作りなので壊れはしないが、日本語の一覧に生 ID が並ぶ。**純正へは還元できない行**。 |
 | `2026.9.0-mk.37` | 対象が実在するときだけキャッシュ削除を押せるようにする (#3102)。**引き継いだ運用者は消せるはずのものを UI から消せなかった** — mk-go が作った行に対象が無いのは正しいが、純正から引き継いだ DB には実体つきの行が残る。判定は `admin/drive/usage` の `count - linkCount` で、**`size` では数えない** (あれはリモート行全部の合計で、純正は link 化のとき size を据え置く)。**集計を取れなかったときは押せるままにする** — 一時的な失敗を「対象が無い」と断定しない。判定は `@/utility/remote-cache-cleanup.ts` に出して表で固定した。確認ダイアログは件数と不可逆であることを出し、**容量は出さない** (削除対象だけの容量が endpoint から取れないため)。**純正へは還元できない行**。 |
+| `2026.9.0-mk.38` | プロフィールのアイコンを押すと拡大表示する (#3124)。アイコンは 120px (コンテナ幅 500px 以下では 92px) でしか表示されず、それ以上大きく見る手段が無かった。押したら既存の `MkLightbox` で開く。**`MkAvatar` には手を入れない** — あれは global component なので、あちらに機能を足すと影響範囲が全画面になる。`pages/user/home.vue` のアイコンは `link` も `preview` も false でクリックが空いており、`MkAvatar` は `link` が false のときだけ `click` を emit するので呼び出し側だけで完結する (`link` を立てるとユーザーページ遷移が優先されて emit しないので、既存のクリック動作とも競合しない)。`role` / `tabindex` / `aria-label` は `MkAvatar` の props に無く `inheritAttrs` も既定のままなので**fallthrough attribute として root の span に載る**。`@keydown` も `emits` に無いので同じく native listener として載る (対して `@click` は `emits` にあるのでコンポーネントのイベントになり、`MkAvatar` 側の `onClick` が `link` false のときだけ emit する) — この Vue の挙動に依存しているので、実際に載っていることを `test/unit/profile-avatar-lightbox.test.ts` で固定した。フォーカスリングは `style.scss` の global な `:focus-visible` が出す。`aria-label` は `MkAvatar` が root に持つ `title` (acct) より優先されるが、acct はすぐ下に地の文で出ているので「何のボタンか」を言うほうを採った (`title` 属性自体は残るのでホバー時のツールチップは変わらない)。**`user.avatarId` は使えない** — mk-go はあれを MeDetailed でしか出さない (非 self に出すと misskey_dart の union 判別が誤爆する、#1251) ので、他人のプロフィールでは型にも値にも存在しない。`Content` の `id` を読むのは `initiallyRevealedContentIds` との突き合わせだけ (v-for の key は `content.url` のほう) で、その prop は渡していないので合成値で足りる。**アバター未設定 (identicon) も開く** — `avatarUrl` は `UserLite` で non-null なので分岐が要らず、「表示されているアイコンが拡大される」という説明がそのまま成り立つ。**アイコンから拡大する遷移 (`sourceElement`) は渡していない** — `MkLightbox.item.vue` は `getComputedStyle(sourceElement).objectFit` を読むので、`object-fit: cover` を持つ `MkAvatar` 内部の `.inner` を渡す必要がある。`$el` を辿れば取得できなくはないが、**呼び出し側が `MkAvatar` の内部 DOM 構造に依存する** (`.inner` の位置、`enableHighQualityImagePlaceholders` の有無で img と div が入れ替わる) ので見送った。付けるなら `MkAvatar` 側に公開手段を足すのが筋。**開いている間は再入を止める** — `@keydown` は `event.repeat` を見ないので、chunk 未キャッシュの初回は押しっぱなしで二枚開けてしまう。`popupAsyncWithDialog` は読み込み失敗を alert した後 rethrow するので、そこも握らないとガードが立ったままになる。**解除は `closed` (ライトボックスの `@afterLeave`) なので、閉じるアニメーションの 200ms はアイコンを押しても反応しない** — その間ライトボックスはまだ画面に残っており、見えているものと挙動が食い違わないほうを採った。**リモートの利用者のアイコンは高さ 320px までしか出ない** — mk-go の `avatarUrl` はリモートだけメディアプロキシの avatar mode を通るため。仕様として受け入れる。**upstream 追従で落とす対象ではない** — 純正のアイコンが押せないのは不具合ではなく設計なので、純正側の修正で解消することがない。 |
 
 `2026.7.0-mk.1` の内訳:
 

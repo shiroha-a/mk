@@ -33,7 +33,7 @@ specs/
 ├── upstream/       # upstream Misskey にも存在する機能の検証
 │   ├── ui/         # ブラウザを駆動する (194 spec)
 │   └── api/        # API の shape / 挙動 (96 spec)
-└── mkgo/           # mk-go 独自機能の検証 (6 件)
+└── mkgo/           # mk-go 独自機能の検証 (8 件)
 ```
 
 ### ui と api の境界
@@ -67,12 +67,12 @@ shape や挙動を検証する spec。
 この境界は「どちらが上等か」ではない。API の shape 検証は drop-in 互換の regression
 検出に不可欠で、UI 操作より速く安定する。両方を別々に育てる。
 
-**290 spec が `upstream/`、7 spec が `mkgo/`。** 分割時に全 spec を確認したが、mk-go 独自
+**290 spec が `upstream/`、8 spec が `mkgo/`。** 分割時に全 spec を確認したが、mk-go 独自
 機能 (cherrypick 由来の chat 拡張、`mkGoVersion` 等の additive field) を検証するものは
 1 件も無かった。むしろ `i/profile_extra.spec.ts` のように **mk-go 拡張を明示的に scope
 外としている** spec もある。
 
-`mkgo/` の 7 件はいずれも公式 image では通らない。`ui/about_mkgo.spec.ts` (#2700)
+`mkgo/` の 8 件はいずれも公式 image では通らない。`ui/about_mkgo.spec.ts` (#2700)
 は mk-go 固有ページ `/about-mkgo` を開く。`ui/boot_error_reload.spec.ts`
 (#2786) は fork の `2026.7.0-mk.22c` で足した `#mkBootReload` を見る。
 `ui/csp_enforce.spec.ts` (#2788) は mk-go 独自キー
@@ -85,7 +85,9 @@ header 自体が無い。`ui/note_report_abuse_via_menu.spec.ts` と
 今も直していない**ので公式 image では左に寄ったまま落ちる。
 `ui/federation_health_render.spec.ts` (#2944) は mk-go 独自の
 `admin/federation/{delivery,inbox}-health` を叩くタブを見るので、公式 image では
-endpoint 自体が無い。
+endpoint 自体が無い。`ui/profile_avatar_lightbox.spec.ts` (#3124) は fork の
+`2026.9.0-mk.38` で入れた「プロフィールのアイコンを押すと拡大表示する」を見るが、
+**純正のアイコンは押せない素の画像**なので公式 image では何も開かない。
 **`make playwright-ts-test` は `specs/upstream` に絞ってある**ので、TS backend 実行が
 これで落ちることはない。
 
@@ -130,7 +132,7 @@ tests/playwright/
 ├── specs/
 │   ├── upstream/ui/            # ブラウザを駆動する (194 spec)
 │   ├── upstream/api/           # API の shape / 挙動 (96 spec)
-│   └── mkgo/                   # mk-go 独自 (6 件)
+│   └── mkgo/                   # mk-go 独自 (8 件)
 └── fixtures/                   # 14 ファイル
     ├── api.ts                  # POST /api/<endpoint> ラッパ
     ├── auth.ts                 # signup / signin helper
@@ -141,11 +143,11 @@ tests/playwright/
 
 ## 並列度
 
-**1 スタックに対しては直列で回すしかない** (`workers: 1`)。297 spec のうち 178 が
+**1 スタックに対しては直列で回すしかない** (`workers: 1`)。298 spec のうち 179 が
 共有の root (alice) で**ブラウザからサインイン**し (数え方は
 `grep -rlE 'uiSigninAsRoot|signin-username' specs --include='*.spec.ts' | wc -l`。
-helper 経由が 177 で、`upstream/ui/signin.spec.ts` だけ signin フォームを直接駆動する)、
-さらに 32 がサインインせず root の token で API を叩く (`root.json` を読むのが 210 で、
+helper 経由が 178 で、`upstream/ui/signin.spec.ts` だけ signin フォームを直接駆動する)、
+さらに 32 がサインインせず root の token で API を叩く (`root.json` を読むのが 211 で、
 その差分)。instance meta は全 spec が共有する。Playwright は
 ファイル単位で並列化するので、`workers` を上げると `profile_iscat_toggle` と
 `profile_isbot_toggle` が同じアカウントを、`admin_branding_save` と
