@@ -290,7 +290,7 @@ func (c *MediaURLContext) ownMediaHost() string {
 // (GPS) が公開側に出る**。mk-go はここが `f.URL` 固定だった。
 // 所有者自身に見せる URL は `GetSelfURL`。
 func (c *MediaURLContext) GetPublicURL(f *model.DriveFile, mode proxyMode) string {
-	return c.publicURL(f, mode, webpublicOrOriginal(f))
+	return c.publicURL(f, mode, WebpublicOrOriginalURL(f))
 }
 
 // GetSelfURL is the `url` field shown to the file's **owner** (and to admin
@@ -306,8 +306,19 @@ func (c *MediaURLContext) GetSelfURL(f *model.DriveFile, mode proxyMode) string 
 	return c.publicURL(f, mode, f.URL)
 }
 
-// webpublicOrOriginal mirrors upstream's `file.webpublicUrl ?? file.url`.
-func webpublicOrOriginal(f *model.DriveFile) string {
+// WebpublicOrOriginalURL mirrors upstream's `file.webpublicUrl ?? file.url`:
+// the URL that may be shown to anyone other than the file's owner.
+//
+// **原本 (`f.URL`) は所有者にしか渡さない。** webpublic は EXIF / XMP を落とした
+// 再エンコード版で、`internal/core/drive` はメタデータがある画像に対してこれを
+// 作り「そちらを他人に見せる」前提で組まれている (`imagemeta.go` の
+// `hasStrippableMetadata`)。原本を公開経路に載せると撮影位置が漏れる。
+//
+// **プロキシには通さない。** 呼び出し側が保存する値にも使うため、ここで
+// `ProxiedURL` を挟むと HMAC 付きの URL が DB に入り、プロキシの secret を
+// 変えた瞬間に無効になる。リモート origin の包み直しは packer 側
+// (`ProxyAvatarURL` ほか) が行う。
+func WebpublicOrOriginalURL(f *model.DriveFile) string {
 	if f.WebpublicURL != nil && *f.WebpublicURL != "" {
 		return *f.WebpublicURL
 	}

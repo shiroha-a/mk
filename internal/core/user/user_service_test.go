@@ -644,6 +644,91 @@ func TestService_UpdateProfile_AvatarDecorationsClear(t *testing.T) {
 	assert.JSONEq(t, `[]`, string(userRepo.Users["u1"].AvatarDecorations))
 }
 
+// アイコン / バナーに設定した画像の URL は**原本ではなく公開用**でなければ
+// ならない。原本は EXIF / XMP が載ったままで、`avatarUrl` はタイムライン・
+// `users/show`・ActivityPub の actor icon に出るため、入れると撮影位置を含む
+// 画像がそのまま公開される。upstream も `webpublicUrl ?? url` を通している。
+func TestService_UpdateProfile_MediaUsesPublicURL(t *testing.T) {
+	webpublic := "https://cdn.example/webpublic.webp"
+	emptyWebpublic := ""
+
+	cases := []struct {
+		name       string
+		file       *model.DriveFile
+		wantAvatar string
+	}{
+		{
+			name: "webpublic があればそちらを入れる",
+			file: &model.DriveFile{
+				Type:         "image/jpeg",
+				URL:          "https://cdn.example/original.jpg",
+				WebpublicURL: &webpublic,
+			},
+			wantAvatar: webpublic,
+		},
+		{
+			name: "webpublic が無ければ原本に落ちる",
+			file: &model.DriveFile{
+				Type: "image/png",
+				URL:  "https://cdn.example/original.png",
+			},
+			wantAvatar: "https://cdn.example/original.png",
+		},
+		{
+			name: "webpublic が空文字なら原本に落ちる",
+			file: &model.DriveFile{
+				Type:         "image/png",
+				URL:          "https://cdn.example/original.png",
+				WebpublicURL: &emptyWebpublic,
+			},
+			wantAvatar: "https://cdn.example/original.png",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, userRepo, _, _ := newFullSvc(t)
+			userRepo.Users["u1"] = &model.User{ID: "u1", Username: "alice"}
+			driveRepo := testutil.NewMockDriveFileRepository()
+			owner := "u1"
+
+			avatar := *tc.file
+			avatar.ID = "f1"
+			avatar.UserID = &owner
+			driveRepo.Files["f1"] = &avatar
+
+			// banner も同じ経路 (applyMediaUpdate 共有) なので同時に見る。
+			banner := *tc.file
+			banner.ID = "b1"
+			banner.UserID = &owner
+			driveRepo.Files["b1"] = &banner
+
+			svc.SetDriveFileRepository(driveRepo)
+
+			avatarID, bannerID := "f1", "b1"
+			bundle, err := svc.UpdateProfile("u1", user.UpdateInput{
+				AvatarID: &avatarID,
+				BannerID: &bannerID,
+			})
+			require.NoError(t, err)
+
+			require.NotNil(t, bundle.User.AvatarURL)
+			assert.Equal(t, tc.wantAvatar, *bundle.User.AvatarURL, "avatarUrl")
+			require.NotNil(t, bundle.User.BannerURL)
+			assert.Equal(t, tc.wantAvatar, *bundle.User.BannerURL, "bannerUrl")
+
+			// **原本が漏れていないこと**を直接見る。上の Equal だけだと、
+			// 将来 want をうっかり原本に書き換えたときに気付けない。
+			if tc.file.WebpublicURL != nil && *tc.file.WebpublicURL != "" {
+				assert.NotEqual(t, tc.file.URL, *bundle.User.AvatarURL,
+					"原本の URL を avatarUrl に入れてはいけない")
+				assert.NotEqual(t, tc.file.URL, *bundle.User.BannerURL,
+					"原本の URL を bannerUrl に入れてはいけない")
+			}
+		})
+	}
+}
+
 func TestService_UpdateProfile_BannerSet(t *testing.T) {
 	// banner は avatar と applyMediaUpdate 共有なので smoke test 1 件のみ。
 	svc, userRepo, _, _ := newFullSvc(t)

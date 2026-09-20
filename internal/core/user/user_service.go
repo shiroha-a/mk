@@ -800,7 +800,18 @@ func (s *Service) applyMediaUpdate(userID string, idPtr *string, prefix string, 
 		return notImageErr
 	}
 	userFields[prefix+"Id"] = file.ID
-	userFields[prefix+"Url"] = file.URL
+	// **原本 (`file.URL`) を入れない。** あれは所有者にしか渡さない値で
+	// (`entity.GetSelfURL` の doc)、EXIF / XMP が載ったままになる。アイコンと
+	// バナーの URL はタイムライン・`users/show`・ActivityPub の actor icon に
+	// 出るので、原本を入れると撮影位置を含む画像がそのまま公開される。
+	// upstream も `getPublicUrl(avatar, 'avatar')` で `webpublicUrl ?? url` を
+	// 通している (`DriveFileEntityService.ts`)。
+	//
+	// **プロキシには通さない。** ここは DB に保存する値で、mk-go の
+	// `ProxiedURL` は `sig=` に HMAC を付けるため、保存するとプロキシの secret を
+	// 変えた瞬間に全員のアイコン URL が無効になる。リモート origin の包み直しは
+	// packer 側 (`entity.PackUserLite` → `ProxyAvatarURL`) が既に行う。
+	userFields[prefix+"Url"] = entity.WebpublicOrOriginalURL(file)
 	if file.Blurhash != nil {
 		userFields[prefix+"Blurhash"] = *file.Blurhash
 	} else {
