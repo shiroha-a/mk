@@ -51,6 +51,14 @@ type MockUserRepository struct {
 	// 引くとき、片方だけ guard する形 (#3025 が名指しした失敗形) は 1 つの
 	// hook では書き分けられない。
 	FindByURIErr error
+	// FindByURIHook, when non-nil, decides FindByURI's error per call (#3116)。
+	// 非 nil を返した回だけ失敗する。
+	//
+	// **1 つの経路に同じ lookup が複数あるときに要る。** inbox は入口で
+	// 「凍結済み actor か」を同じ `FindByURI` で見るので、`FindByURIErr` を
+	// 立てると**手前で落ちて目的の分岐に到達しない** — テストは通るが、
+	// 見たかった箇所を一度も実行していない (実測)。呼び出し順で書き分ける。
+	FindByURIHook func(uri string) error
 	// FindManyByIDsErr, when non-nil, is returned by FindManyByIDs. 同上 —
 	// 一括解決の失敗を「その利用者は居ない」に潰さないことを検査するために要る。
 	FindManyByIDsErr error
@@ -249,6 +257,11 @@ func (m *MockUserRepository) FindByID(id string) (*model.User, error) {
 }
 
 func (m *MockUserRepository) FindByURI(uri string) (*model.User, error) {
+	if m.FindByURIHook != nil {
+		if err := m.FindByURIHook(uri); err != nil {
+			return nil, err
+		}
+	}
 	if m.FindByURIErr != nil {
 		return nil, m.FindByURIErr
 	}
@@ -3602,6 +3615,9 @@ func (m *MockUserNotePiningRepository) CountByUser(userID string) (int, error) {
 // MockPollRepository is a test double for repository.PollRepository.
 type MockPollRepository struct {
 	Polls map[string]*model.Poll
+	// FindErr, when non-nil, is returned by FindByNoteID. not-found ではない
+	// 障害を ack していないことを試すために要る (#3116)。
+	FindErr error
 }
 
 func NewMockPollRepository() *MockPollRepository {
@@ -3614,6 +3630,9 @@ func (m *MockPollRepository) Create(poll *model.Poll) error {
 }
 
 func (m *MockPollRepository) FindByNoteID(noteID string) (*model.Poll, error) {
+	if m.FindErr != nil {
+		return nil, m.FindErr
+	}
 	p, ok := m.Polls[noteID]
 	if !ok {
 		return nil, ErrNotFound
