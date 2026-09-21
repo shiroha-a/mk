@@ -585,3 +585,129 @@ func TestNoteRepoPacker_HiddenEmbedKeepsNoFiles(t *testing.T) {
 	files, _ := renote["files"].([]any)
 	assert.Empty(t, files, "隠した embed に files を埋め直さない")
 }
+
+// --- top-level への著者設定ゲート (セキュリティ監査 2026-09-21) ---
+//
+// `CanSeeNote` が見るのは intrinsic な visibility だけで、著者が後から設定した
+// `makeNotesHiddenBefore` / `makeNotesFollowersOnlyBefore` /
+// `requireSigninToViewContents` は見ない。REST (`notehide`) と stream
+// (`note_filter`) は top-level にも掛けているのに、push の payload だけが
+// 素通しだった。
+
+// **「過去のノートを隠す」設定をしたノートは push でも隠す。**
+func TestNoteRepoPacker_TopLevelHiddenBeforeIsBlanked(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+	n := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityPublic, nil)
+	window := 0 // <=0 = 作成からの相対秒。0 なら常に窓の外。
+	n.User.MakeNotesHiddenBefore = &window
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
+	out, ok := p.PackNoteByID(n.ID, "stranger")
+	require.True(t, ok, "行は残す (REST / stream と同じく detail だけ落とす)")
+	assert.Equal(t, true, out["isHidden"], "隠したはずのノートが push の本文に出ている")
+	assert.Nil(t, out["text"])
+}
+
+// **本人には届く。** 上が「常に隠す」実装でも緑にならないようにする。
+func TestNoteRepoPacker_TopLevelHiddenBeforeVisibleToAuthor(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+	n := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityPublic, nil)
+	window := 0
+	n.User.MakeNotesHiddenBefore = &window
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
+	out, ok := p.PackNoteByID(n.ID, "author")
+	require.True(t, ok)
+	assert.NotEqual(t, true, out["isHidden"], "著者本人には自分のノートが見える")
+	assert.Equal(t, "secret", out["text"])
+}
+
+// **`requireSigninToViewContents` も top-level に効く。**
+func TestNoteRepoPacker_TopLevelRequireSigninHiddenFromAnon(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+	n := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityPublic, nil)
+	n.User.RequireSigninToViewContents = true
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
+	out, ok := p.PackNoteByID(n.ID, "") // 匿名の受信者
+	require.True(t, ok)
+	assert.Equal(t, true, out["isHidden"])
+}
+
+// **`makeNotesFollowersOnlyBefore` の降格は follow を見る。**
+// 非フォロワーには隠し、フォロワーには届ける (follow 判定に top-level の著者が
+// 入っていないと、後者が隠れてしまう)。
+func TestNoteRepoPacker_TopLevelFollowersOnlyBeforeDowngrade(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+	n := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityPublic, nil)
+	window := 0
+	n.User.MakeNotesFollowersOnlyBefore = &window
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
+	out, ok := p.PackNoteByID(n.ID, "stranger")
+	require.True(t, ok)
+	assert.Equal(t, true, out["isHidden"], "降格したノートを非フォロワーに出さないこと")
+
+	seedFollow(follow, "viewer", "author")
+	out, ok = p.PackNoteByID(n.ID, "viewer")
+	require.True(t, ok)
+	assert.NotEqual(t, true, out["isHidden"], "フォロワーには届くこと (follow 判定に top-level 著者が入っている)")
+	assert.Equal(t, "secret", out["text"])
+	// #2106 L5: 降格は packed の visibility にも出す。REST / stream と揃える。
+	assert.Equal(t, "followers", out["visibility"])
+}
+
+// **普通のノートは素通しする。** 上 4 つが「常に隠す」実装でも緑にならない
+// ようにする。
+func TestNoteRepoPacker_TopLevelWithoutPrefsIsUntouched(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+	n := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityPublic, nil)
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
+	out, ok := p.PackNoteByID(n.ID, "stranger")
+	require.True(t, ok)
+	assert.NotEqual(t, true, out["isHidden"])
+	assert.Equal(t, "secret", out["text"])
+	assert.Equal(t, "public", out["visibility"])
+}
+
+// **降格した返信は、返信先の本人には届く** (upstream の escape hatch)。
+// `ReplyTargetAuthorID` を facts に入れないと、自分宛の返信が「フォローして
+// いないから」という理由で隠れる。
+func TestNoteRepoPacker_TopLevelDowngradeReplyTargetEscapeHatch(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	repo := testutil.NewMockNoteRepository()
+	follow := testutil.NewMockFollowingRepository()
+
+	// viewer の元ノート。
+	parent := seedNoteWithUser(repo, idGen, "viewer", model.NoteVisibilityPublic, nil)
+	// それへの author の返信。author は makeNotesFollowersOnlyBefore を設定済み。
+	reply := seedNoteWithUser(repo, idGen, "author", model.NoteVisibilityPublic, nil)
+	window := 0
+	reply.User.MakeNotesFollowersOnlyBefore = &window
+	reply.ReplyID = &parent.ID
+	reply.Reply = parent
+	reply.ReplyUserID = &parent.UserID
+
+	p := webpush.NewNoteRepoPacker(repo, idGen, follow, nil)
+	// viewer は author をフォローしていないが、自分宛の返信なので届く。
+	out, ok := p.PackNoteByID(reply.ID, "viewer")
+	require.True(t, ok)
+	assert.NotEqual(t, true, out["isHidden"], "自分宛の返信は降格しても届くこと")
+	assert.Equal(t, "secret", out["text"])
+
+	// 無関係な第三者には隠れる (escape hatch が広すぎないこと)。
+	out, ok = p.PackNoteByID(reply.ID, "stranger")
+	require.True(t, ok)
+	assert.Equal(t, true, out["isHidden"])
+}

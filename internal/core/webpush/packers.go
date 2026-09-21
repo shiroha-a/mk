@@ -92,8 +92,10 @@ func (p *NoteRepoPacker) PackNoteByID(noteID, viewerID string) (map[string]any, 
 	return toMap(packed)
 }
 
-// hideEmbeds blanks the renote/reply embeds of `packed` that `viewer` (the push
-// recipient / notifiee) is not allowed to see, using corenote.HideEmbedDecision.
+// hideEmbeds blanks the parts of `packed` that `viewer` (the push recipient /
+// notifiee) is not allowed to see: the note itself when the author's
+// preferences say so (corenote.HideNoteByPrefsDecision) and its renote/reply
+// embeds (corenote.HideEmbedDecision).
 // follows は両 embed 著者を ONE batched FilterFollowingsFromAnchor で解決する。
 // fail-closed: followingRepo 未配線 / viewer nil の場合 follows は常に false を
 // 返し、followers/specified embed は hide される。
@@ -103,6 +105,14 @@ func (p *NoteRepoPacker) hideEmbeds(viewer *model.User, packed *entity.NoteEntit
 	}
 	nowMs := time.Now().UnixMilli()
 	follows := p.buildFollowSet(viewer, packed)
+	// **top-level にも著者設定ゲートを掛ける (notehide.hideEmbedsAt と同じ順)。**
+	//
+	// `CanSeeNote` が見るのは intrinsic な visibility だけで、著者が後から
+	// 設定した `makeNotesHiddenBefore` / `makeNotesFollowersOnlyBefore` /
+	// `requireSigninToViewContents` は見ない。REST (`notehide`) と stream
+	// (`note_filter`) は top-level にも掛けているのに、**push の payload だけが
+	// 素通し**だった。隠したはずの過去ノートの本文が通知として端末に届く。
+	hideTopLevelIfNeeded(viewer, packed, follows, nowMs)
 	hideEmbedIfNeeded(viewer, packed.Renote, follows, nowMs)
 	hideEmbedIfNeeded(viewer, packed.Reply, follows, nowMs)
 	// depth-2 embed (renote.renote / renote.reply): packer がこれらを出すため、
@@ -111,6 +121,30 @@ func (p *NoteRepoPacker) hideEmbeds(viewer *model.User, packed *entity.NoteEntit
 	if packed.Renote != nil {
 		hideEmbedIfNeeded(viewer, packed.Renote.Renote, follows, nowMs)
 		hideEmbedIfNeeded(viewer, packed.Renote.Reply, follows, nowMs)
+	}
+	// #2106 L5: treatVisibility の降格を packed の visibility にも反映する
+	// (hide 判定が元の visibility を読み終えた後に書き換える、viewer 非依存)。
+	// notehide.hideEmbedsAt と同じ。反映しないと、フォロワーには届く push の
+	// `visibility` が `public` のまま出て REST / stream と食い違う。
+	downgradeVisibilityIfNeeded(packed, nowMs)
+	downgradeVisibilityIfNeeded(packed.Renote, nowMs)
+	downgradeVisibilityIfNeeded(packed.Reply, nowMs)
+	if packed.Renote != nil {
+		downgradeVisibilityIfNeeded(packed.Renote.Renote, nowMs)
+		downgradeVisibilityIfNeeded(packed.Renote.Reply, nowMs)
+	}
+}
+
+// downgradeVisibilityIfNeeded rewrites a public/home note's packed visibility to
+// 'followers' when the author's makeNotesFollowersOnlyBefore window has passed
+// (#2106 L5, upstream treatVisibility). Viewer-independent. Mirrors
+// notehide.downgradeVisibilityIfNeeded.
+func downgradeVisibilityIfNeeded(n *entity.NoteEntity, nowMs int64) {
+	if n == nil {
+		return
+	}
+	if corenote.ShouldDowngradeVisibility(embedFactsFromEntity(n), nowMs) {
+		n.Visibility = string(model.NoteVisibilityFollowers)
 	}
 }
 
@@ -127,6 +161,9 @@ func (p *NoteRepoPacker) buildFollowSet(viewer *model.User, packed *entity.NoteE
 		return never
 	}
 	seen := make(map[string]struct{})
+	// top-level 自身の著者も follow 判定の対象 (makeNotesFollowersOnlyBefore の
+	// 降格がありうる)。notehide.buildFollowSet と同じ。
+	collectTopLevelAuthor(packed, viewer.ID, seen)
 	collectEmbedAuthor(packed.Renote, viewer.ID, seen)
 	collectEmbedAuthor(packed.Reply, viewer.ID, seen)
 	// depth-2 embed (renote.renote / renote.reply) の著者も follow 判定対象に含める。
@@ -179,6 +216,48 @@ func collectEmbedAuthor(embed *entity.NoteEntity, viewerID string, seen map[stri
 		return
 	}
 	seen[embed.UserID] = struct{}{}
+}
+
+// collectTopLevelAuthor adds the note's own author to seen when the
+// makeNotesFollowersOnlyBefore downgrade could require a follow check.
+// Mirrors notehide.collectTopLevelAuthor.
+func collectTopLevelAuthor(n *entity.NoteEntity, viewerID string, seen map[string]struct{}) {
+	if n == nil || n.UserID == "" || n.UserID == viewerID {
+		return
+	}
+	switch n.Visibility {
+	case string(model.NoteVisibilityPublic), string(model.NoteVisibilityHome):
+		if n.User.MakeNotesFollowersOnlyBefore == nil {
+			return
+		}
+	default:
+		// followers / specified は CanSeeNote が先に判定済み。
+		return
+	}
+	seen[n.UserID] = struct{}{}
+}
+
+// hideTopLevelIfNeeded blanks the notification's own note (in place) when the
+// author's preferences say viewer must not see it. Mirrors
+// notehide.hideTopLevelIfNeeded.
+func hideTopLevelIfNeeded(viewer *model.User, n *entity.NoteEntity, follows func(string) bool, nowMs int64) {
+	if n == nil {
+		return
+	}
+	if corenote.HideNoteByPrefsDecision(viewer, topLevelFactsFromEntity(n), follows, nowMs) {
+		entity.HideNoteEntity(n)
+	}
+}
+
+// topLevelFactsFromEntity is embedFactsFromEntity plus the reply-target author,
+// which IS available for a top-level note (its Reply is packed at depth 1).
+// Mirrors notehide.topLevelFactsFromEntity.
+func topLevelFactsFromEntity(n *entity.NoteEntity) corenote.EmbedFacts {
+	f := embedFactsFromEntity(n)
+	if n.Reply != nil {
+		f.ReplyTargetAuthorID = n.Reply.UserID
+	}
+	return f
 }
 
 // hideEmbedIfNeeded blanks an embed (in place) when corenote.HideEmbedDecision
