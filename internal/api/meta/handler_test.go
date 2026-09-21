@@ -10,6 +10,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/config"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
@@ -403,6 +404,35 @@ func TestMeta_AdsIsSensitive(t *testing.T) {
 	assert.Equal(t, true, ads[0].(map[string]any)["isSensitive"], "sensitive ad は true")
 	_, has := ads[1].(map[string]any)["isSensitive"]
 	assert.False(t, has, "非 sensitive ad は isSensitive を omit する")
+}
+
+// **`ads[].imageUrl` は upstream parity で意図的に raw (media proxy を通さ
+// ない)。** `serializeActiveAds` のコメントだけでは、将来誰かが proxy 化
+// しても何も落ちない。`admin/ad/*` (`TestAdCreate_KeepsImageURLRaw`) には
+// 同種の固定テストがあるが、**実際に全クライアントへ配られるのは
+// `/api/meta` の方**なので、そこにも同じ契約を固定する (#3130 review 3周目)。
+func TestMeta_AdsKeepsImageURLRaw(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, metaRepo := newTestHandler()
+	metaRepo.Meta = &model.Meta{ID: "x"}
+	remote := "https://remote.example/ad.png"
+	h.SetAdRepo(&stubAdRepo{ads: []*model.Ad{
+		{ID: "ad1", URL: "https://x", Place: "square", Ratio: 1, ImageURL: remote},
+	}})
+
+	e := echo.New()
+	rec := httptest.NewRecorder()
+	require.NoError(t, h.Meta(e.NewContext(httptest.NewRequest(http.MethodPost, "/api/meta", nil), rec)))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	ads := resp["ads"].([]any)
+	require.Len(t, ads, 1)
+	assert.Equal(t, remote, ads[0].(map[string]any)["imageUrl"],
+		"/api/meta の ads imageUrl は upstream parity で raw のまま返す契約")
 }
 
 // AdRepository が未設定の場合 (既存テスト互換) は空配列が返る。
