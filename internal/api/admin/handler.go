@@ -1431,6 +1431,19 @@ func (h *Handler) SuspendUser(c echo.Context) error {
 			return c.JSON(http.StatusBadRequest, apierr.Error("ACCESS_DENIED", "Cannot suspend a moderator account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
 		}
 	}
+	// **system アカウントは凍結させない。**
+	//
+	// `instance.actor` / `relay.actor` / `proxy.actor` を凍結すると、下の
+	// `OnUserDeleted` が**既知の全リモート inbox へ `Delete(actor)` を配る**。
+	// system アカウントはロールを持たないので `RolePrivileges` は
+	// `(false, false, nil)` を返し、上の判定を素通りしていた。
+	//
+	// 削除経路 (`isProtectedAccount`) と資格情報リセット経路
+	// (`isSystemAccountUser`) は既に塞いであり、**凍結経路だけが残っていた**。
+	if isSystemAccountUser(user) {
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("ACCESS_DENIED", "Cannot suspend a system account.", "1fb7cb09-d46a-4fff-b8df-057708cce513"))
+	}
 
 	if err := h.userRepo.UpdateUser(req.UserID, map[string]any{"isSuspended": true}); err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
