@@ -14,6 +14,8 @@ import (
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"gorm.io/datatypes"
+
+	"github.com/shiroha-a/mk/internal/core/role"
 )
 
 // driveCleanupBatchSize はバルク削除の 1 バッチ件数。upstream の cursor 巡回
@@ -365,7 +367,20 @@ func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User)
 	}
 	// gating: 通常 admin route は moderator/admin gate 済だが、防御的 check。
 	viewerIsModerator := viewer != nil && h.roleService != nil && h.roleService.IsModerator(viewer.ID)
-	if viewerIsModerator {
+	// **IP を出してよいのは `canSearchIpHistory` を持つ相手だけ。**
+	//
+	// #3114 が `admin/show-user` の signin IP に入れたのと同じ条件。あちらだけ
+	// 絞ると、同じ種類の情報 (ローカル利用者の接続元 IP) を素のモデレーター
+	// 権限だけで全件返す口がここに残り、policy が門として成立しない。
+	// `admin/drive/files` に userId を渡してファイル ID を列挙すれば、
+	// アップロード元 IP の履歴がそのまま取れる。
+	//
+	// `HasRolePolicy` は管理者を短絡するので、既定 (policy false) の構成では
+	// 管理者だけが通る = `admin/ip/*` と同じ条件になる。
+	// **roleService 未配線なら伏せる側へ倒す** (fail-closed)。
+	showIPs := viewerIsModerator && h.roleService != nil && viewer != nil &&
+		h.roleService.HasRolePolicy(viewer.ID, role.PolicyCanSearchIpHistory)
+	if showIPs {
 		resp["requestIp"] = f.RequestIP
 		// owner が moderator のときは headers を隠す (upstream 仕様、
 		// モデレーター同士の互いの個人情報保護)。
@@ -385,6 +400,9 @@ func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User)
 			ownerIsModerator = false
 		}
 		if !ownerIsModerator {
+			// **ヘッダにも接続元 IP が載る。** 本番構成の nginx は
+			// `x-real-ip` / `x-forwarded-for` を必ず付けるので、
+			// `requestIp` だけ絞ってもここから同じ値が読める。
 			resp["requestHeaders"] = driveFileRequestHeaders(f.RequestHeaders)
 		}
 	}

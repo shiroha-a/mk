@@ -216,7 +216,10 @@ func TestDriveShowFile_ByFileID(t *testing.T) {
 func TestDriveShowFile_IncludesRequestIPAndHeaders(t *testing.T) {
 	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
 	// adminUser に moderator role を assign する。
-	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true}
+	// **`canSearchIpHistory` も付ける。** IP は policy を持つ相手にだけ返す
+	// (#3114 と同じ条件)。
+	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true,
+		Policies: datatypes.JSON([]byte(`{"canSearchIpHistory":{"useDefault":false,"priority":1,"value":true}}`))}
 	assignRepo.Assignments["admin1:r_mod"] = &model.RoleAssignment{
 		ID: "ra_mod", UserID: "admin1", RoleID: "r_mod",
 	}
@@ -252,7 +255,9 @@ func TestDriveShowFile_IncludesRequestIPAndHeaders(t *testing.T) {
 func TestDriveShowFile_HidesRequestHeadersFromModeratorOwner(t *testing.T) {
 	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
 	// admin1 viewer + admin2 owner、両方 moderator role を持つ。
-	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true}
+	// viewer 側には `canSearchIpHistory` も付ける (IP はそれが要る)。
+	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true,
+		Policies: datatypes.JSON([]byte(`{"canSearchIpHistory":{"useDefault":false,"priority":1,"value":true}}`))}
 	assignRepo.Assignments["admin1:r_mod"] = &model.RoleAssignment{
 		ID: "ra1", UserID: "admin1", RoleID: "r_mod",
 	}
@@ -278,7 +283,7 @@ func TestDriveShowFile_HidesRequestHeadersFromModeratorOwner(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	var resp map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
-	assert.Equal(t, "203.0.113.99", resp["requestIp"], "requestIp は moderator viewer に常に出す")
+	assert.Equal(t, "203.0.113.99", resp["requestIp"], "policy を持つ viewer には requestIp を出す")
 	assert.Nil(t, resp["requestHeaders"], "owner が moderator のときは requestHeaders を null で hide")
 }
 
@@ -2137,4 +2142,42 @@ func TestEmojiAdd_RejectsOverlongName(t *testing.T) {
 	ok, err := json.Marshal(map[string]any{"name": strings.Repeat("a", 128), "url": "https://local.example/x.png"})
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, doPost(h.EmojiAdd, string(ok), adminUser).Code, "128 文字ちょうどは通ること")
+}
+
+// **素のモデレーターには IP を返さないこと。**
+//
+// #3114 が `admin/show-user` の signin IP に入れたのと同じ条件。同じ種類の
+// 情報 (ローカル利用者の接続元 IP) を素のモデレーター権限だけで全件返す口が
+// ここに残ると、policy が門として成立しない。`admin/drive/files` に userId を
+// 渡してファイル ID を列挙すれば、アップロード元 IP の履歴がそのまま取れる。
+func TestDriveShowFile_RequestIPRequiresPolicy(t *testing.T) {
+	h, _, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	// policy を持たない素のモデレーター。
+	roleRepo.Roles["r_mod"] = &model.Role{ID: "r_mod", Name: "Mod", IsModerator: true}
+	assignRepo.Assignments["mod9:r_mod"] = &model.RoleAssignment{
+		ID: "ra_plain", UserID: "mod9", RoleID: "r_mod",
+	}
+
+	repo := testutil.NewMockDriveFileRepository()
+	owner := "u_owner"
+	ip := "203.0.113.7"
+	headers := datatypes.JSON([]byte(`{"x-real-ip":"203.0.113.7"}`))
+	require.NoError(t, repo.Create(&model.DriveFile{
+		ID:             "d_policy",
+		UserID:         &owner,
+		Name:           "f.png",
+		Type:           "image/png",
+		RequestIP:      &ip,
+		RequestHeaders: headers,
+	}))
+	h.SetDriveFileRepo(repo)
+
+	rec := doPost(h.DriveShowFile, `{"fileId":"d_policy"}`, &model.User{ID: "mod9"})
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Nil(t, resp["requestIp"],
+		"policy を持たないモデレーターには requestIp を返さないこと")
+	assert.Nil(t, resp["requestHeaders"],
+		"**ヘッダにも接続元 IP が載る** (本番の nginx は x-real-ip を必ず付ける) ので同じ条件で伏せること")
 }
