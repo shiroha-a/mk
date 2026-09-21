@@ -23,7 +23,10 @@ type IPObserver interface {
 func RecordClientIP(observer IPObserver) echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			if observer != nil {
+			// **プロセス内の呼び出しは記録しない。** 実在しない
+			// `127.0.0.1` が `user_ip` に入ると、関連アカウント検索
+			// (#3105) の材料が汚れる。
+			if observer != nil && !IsInternalCall(c.Request().Context()) {
 				if u := GetUser(c); u != nil {
 					// **`RealIP()` をそのまま渡す。** 正規化は observer 側で行う
 					// (検索側と同じ実装を通すため)。

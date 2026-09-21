@@ -890,6 +890,10 @@ func (c *pluginCaller) Call(ctx context.Context, endpoint string, params any) (j
 	req.Host = c.api.host
 	// RemoteAddr を空にすると、IP を見る middleware が解釈に困る。
 	req.RemoteAddr = "127.0.0.1:0"
+	// **ただしこの IP は実在しない。** そのままだと利用者の `user_ip` に
+	// `127.0.0.1` が入って関連アカウント検索の材料が汚れ、レート制限の
+	// IP バケットも全利用者で共有される。印を付けて両方から外す。
+	req = middleware.MarkInternalCall(req)
 
 	if c.userID != "" {
 		token, err := c.nativeToken()

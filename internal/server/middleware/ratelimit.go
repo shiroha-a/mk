@@ -276,7 +276,10 @@ func (rl *RateLimiter) resolveActors(c echo.Context) []rateLimitActor {
 		// 同一 IP で複数 user として扱われるが、auth 系 endpoint は 1h/60 程度
 		// と緩いので実害は小さい (個別 user の rate-limit は userID bucket で
 		// 守られる)。
-		if rl.enableIPRateLimit {
+		// **プロセス内の呼び出しは IP バケットを使わない。** プラグインの
+		// `AsUser` は実在しない `127.0.0.1` を名乗るので、そのままだと全利用者が
+		// 単一のバケットを取り合い、1 人の操作で他の全員が 429 になる。
+		if rl.enableIPRateLimit && !IsInternalCall(c.Request().Context()) {
 			actors = append(actors, rateLimitActor{
 				key:    ipHash(c.RealIP()),
 				factor: 1.0, // IP 由来 bucket は user 単位の factor を適用しない
@@ -284,7 +287,11 @@ func (rl *RateLimiter) resolveActors(c echo.Context) []rateLimitActor {
 		}
 		return actors
 	}
-	if !rl.enableIPRateLimit {
+	if !rl.enableIPRateLimit || IsInternalCall(c.Request().Context()) {
+		// 未認証のプロセス内呼び出し (プラグインの `Anonymous()`) も同じ理由で
+		// 共有バケットから外す。利用者単位のバケットが無いので、ここを外すと
+		// 該当経路は事実上無制限になるが、呼び出せるのは自分が同梱した
+		// プラグインだけ (外部からの入力は元のリクエストの側で既に制限を受ける)。
 		return nil
 	}
 	return []rateLimitActor{{key: ipHash(c.RealIP()), factor: 1.0}}
