@@ -997,15 +997,22 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// (RegisterCleanRemoteNotesJob, 毎日 04:00, TS 'cleanRemoteNotes' 相当,
 	// #1563)。旧実装は 6h time.Ticker だった。Handle は常に登録し、processor が
 	// cfg.Enabled で gate する (起動時 meta から構築)。
-	cleanCfg := processors.CleanRemoteNotesConfig{}
-	if cleanMeta, err := metaRepo.Fetch(); err == nil {
-		cleanCfg = processors.CleanRemoteNotesConfig{
+	// **毎回読む。** 起動時に固定すると、運営者が管理画面で止めてもプロセスを
+	// 再起動するまで削除が走り続ける (不可逆な操作の唯一の停止手段)。
+	cleanCfgFn := func() processors.CleanRemoteNotesConfig {
+		cleanMeta, err := metaRepo.Fetch()
+		if err != nil || cleanMeta == nil {
+			// **読めなければ動かさない。** 判定材料が無いまま不可逆な削除を
+			// 続けるより、次の cron まで待つほうが安全。
+			return processors.CleanRemoteNotesConfig{}
+		}
+		return processors.CleanRemoteNotesConfig{
 			Enabled:              cleanMeta.EnableRemoteNotesCleaning,
 			ExpiryDays:           cleanMeta.RemoteNotesCleaningExpiryDaysForEachNotes,
 			MaxProcessingMinutes: cleanMeta.RemoteNotesCleaningMaxProcessingDurationInMinutes,
 		}
 	}
-	cleanProcessor := processors.NewCleanRemoteNotesProcessor(noteRepo, cleanCfg)
+	cleanProcessor := processors.NewCleanRemoteNotesProcessor(noteRepo, cleanCfgFn)
 	s.queueServer.Handle(queue.TaskTypeCleanRemoteNotes, cleanProcessor.Handle)
 
 	// リレー由来の孤児リモートユーザーの掃除 (#2340)。転送活動の LD-Signature
@@ -1720,7 +1727,9 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// gate が**丸ごと消えていた** (空文字は "none" でも "local" でもないので
 	// 素通し)。列は NOT NULL DEFAULT 'local' なので、失敗時も制限側の既定へ
 	// 倒す (#2708)。
-	notesHandler.SetUGCVisibility(metaUGCVisibility(metaRepo))
+	// **毎回読む。** 起動時に焼き込むと、運営者が管理画面で締めても
+	// プロセスを再起動するまで API に反映されない。
+	notesHandler.SetUGCVisibilityLookup(func() string { return metaUGCVisibility(metaRepo) })
 	if m, err := metaRepo.Fetch(); err == nil {
 		if m.DeeplAuthKey != nil && *m.DeeplAuthKey != "" {
 			notesHandler.SetTranslator(coretranslate.NewDeepL(*m.DeeplAuthKey, m.DeeplIsPro, s.outboundClient(10*time.Second)))
@@ -1806,7 +1815,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	usersHandler.SetChannelMutingRepo(channelMutingRepo)
 	// #2106 S3: 匿名 visitor への remote profile 露出を ugcVisibilityForVisitor で gate。
 	// notes 側と同じ理由で無条件に配線する (#2708)。
-	usersHandler.SetUGCVisibility(metaUGCVisibility(metaRepo))
+	usersHandler.SetUGCVisibilityLookup(func() string { return metaUGCVisibility(metaRepo) })
 	usersHandler.SetFeaturedRanking(featuredService) // #1687: users/featured-notes ランキング
 	usersHandler.SetPiningRepo(piningRepo)
 	usersHandler.SetFollowingRepo(followingRepo)
@@ -2034,6 +2043,17 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		s.config.ExternalMediaProxyEnabled,
 		proxyRemoteFiles,
 	)
+	// **毎回読む。** 起動時の値を焼き込むと、運営者が管理画面で切り替えても
+	// プロセスを再起動するまで反映されない。これは閲覧者の IP がリモートへ
+	// 漏れるかどうかを決める設定なので、締めたつもりで漏れ続ける形になる。
+	mediaURLCtx.SetProxyRemoteFilesLookup(func() bool {
+		m, err := metaRepo.Fetch()
+		if err != nil || m == nil {
+			// 読めないときは起動時の値に倒す (既定 true = プロキシ経由)。
+			return proxyRemoteFiles
+		}
+		return m.ProxyRemoteFiles
+	})
 	// オブジェクトストレージの公開ドメインは instance ドメインと別なので、
 	// これを教えないと自分が保存したファイルまで remote 判定されて media proxy
 	// を経由してしまう (#2315)。設定は admin が変更しうるので都度引く。

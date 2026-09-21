@@ -50,6 +50,11 @@ type MediaURLContext struct {
 	// operator explicitly disables it AND no external proxy is configured, we
 	// fall back to upstream's behavior of emitting raw remote URLs.
 	proxyRemoteFiles bool
+	// proxyRemoteFilesFn は live lookup。設定されていればこちらを優先する。
+	// **起動時に焼き込むと、運営者が管理画面で切り替えてもプロセスを再起動
+	// するまで反映されない。** これは閲覧者の IP がリモートへ漏れるかどうかを
+	// 決める設定なので、締めたつもりで漏れ続ける形になる。
+	proxyRemoteFilesFn func() bool
 	// ownMediaBaseURL resolves the public base URL that our own object storage
 	// serves from (meta.objectStorageBaseUrl 相当)。nil / "" は
 	// オブジェクトストレージ未使用。
@@ -83,6 +88,21 @@ func NewMediaURLContext(instanceURL, mediaProxy string, secret []byte, externalE
 		externalEnabled:  externalEnabled,
 		proxyRemoteFiles: proxyRemoteFiles,
 	}
+}
+
+// SetProxyRemoteFilesLookup wires a live lookup of meta.proxyRemoteFiles.
+func (c *MediaURLContext) SetProxyRemoteFilesLookup(fn func() bool) {
+	if c != nil {
+		c.proxyRemoteFilesFn = fn
+	}
+}
+
+// proxyRemoteFilesNow resolves the current setting.
+func (c *MediaURLContext) proxyRemoteFilesNow() bool {
+	if c.proxyRemoteFilesFn != nil {
+		return c.proxyRemoteFilesFn()
+	}
+	return c.proxyRemoteFiles
 }
 
 // proxyMode selects the proxy processing mode, mirroring the bare query flags
@@ -224,7 +244,7 @@ func staticProxyURL(rawURL string, mode proxyMode) string {
 // True by default (proxyRemoteFiles defaults true); only false when an operator
 // disabled proxyRemoteFiles and configured no external proxy.
 func (c *MediaURLContext) shouldProxyRemote() bool {
-	return c.externalEnabled || c.proxyRemoteFiles
+	return c.externalEnabled || c.proxyRemoteFilesNow()
 }
 
 // isRemoteOrigin reports whether rawURL points at a host we do not serve from.

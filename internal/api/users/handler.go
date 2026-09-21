@@ -95,6 +95,8 @@ type Handler struct {
 	// ugcVisibility は meta.ugcVisibilityForVisitor。'local' (既定) のとき匿名
 	// visitor に remote user プロフィールを出さない (upstream users/show、#2106 S3)。
 	ugcVisibility string
+	// ugcVisibilityFn は live lookup (起動時の焼き込みを避ける)。
+	ugcVisibilityFn func() string
 	// driveFileRepo は users/pages で page の attachedFiles / eyeCatchingImage を
 	// drive file から解決するのに使う (#1662)。未配線なら両 field は default。
 	driveFileRepo repository.DriveFileRepository
@@ -180,6 +182,22 @@ func (h *Handler) SetModeratorChecker(m ModeratorChecker) {
 // remote user profiles from anonymous visitors when set to "local" (#2106 S3).
 func (h *Handler) SetUGCVisibility(v string) {
 	h.ugcVisibility = v
+}
+
+// SetUGCVisibilityLookup wires a live lookup of the policy.
+//
+// **毎回読む。** 起動時に文字列を焼き込むと、運営者が管理画面で締めても
+// プロセスを再起動するまで反映されない。
+func (h *Handler) SetUGCVisibilityLookup(fn func() string) {
+	h.ugcVisibilityFn = fn
+}
+
+// ugcVisibilityNow resolves the current policy.
+func (h *Handler) ugcVisibilityNow() string {
+	if h.ugcVisibilityFn != nil {
+		return h.ugcVisibilityFn()
+	}
+	return h.ugcVisibility
 }
 
 // ModeratorLister lists moderator/administrator users for abuse-report fanout
@@ -582,7 +600,7 @@ func (h *Handler) Show(c echo.Context) error {
 		// #2106 S3: ugcVisibilityForVisitor='local' のとき、匿名 visitor が host 指定で
 		// remote user を解決させること自体を resolve 前に弾く (upstream show.ts:157-159、
 		// 未知 remote host への外向き resolve 誘発 = SSRF amplification も防ぐ)。
-		if req.Host != nil && *req.Host != "" && viewer == nil && h.ugcVisibility == "local" {
+		if req.Host != nil && *req.Host != "" && viewer == nil && h.ugcVisibilityNow() == "local" {
 			return apierr.JSONNoSuchUser(c)
 		}
 		// #2106 L10: upstream show.ts は lookup 前に username を trim する。前後空白を含む
@@ -612,7 +630,7 @@ func (h *Handler) Show(c echo.Context) error {
 
 	// #2106 S3: ugcVisibilityForVisitor='local' のとき匿名 visitor に remote user を
 	// 出さない (upstream show.ts:177-179)。userId 指定経路もここでカバーする。
-	if viewer == nil && bundle.User.Host != nil && h.ugcVisibility == "local" {
+	if viewer == nil && bundle.User.Host != nil && h.ugcVisibilityNow() == "local" {
 		return apierr.JSONNoSuchUser(c)
 	}
 
@@ -972,7 +990,7 @@ func (h *Handler) listRelations(c echo.Context, followers bool) error {
 		// 無いと、認証不要の POST 1 回ごとに未知のリモート host への outbound
 		// HTTP とリモート user 行の作成を外部から強制できる (= `ShowByUsernameDB`
 		// の doc コメントが `/@:acct` について書いているのと同じ増幅面)。
-		if req.Host != nil && *req.Host != "" && viewer == nil && h.ugcVisibility == "local" {
+		if req.Host != nil && *req.Host != "" && viewer == nil && h.ugcVisibilityNow() == "local" {
 			return jsonNoSuchUserForRelations(c, followers)
 		}
 		// #2106 L10: Followers/Following も Show と同じく lookup 前に trim する。

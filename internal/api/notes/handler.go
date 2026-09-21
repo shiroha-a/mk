@@ -85,6 +85,13 @@ type Handler struct {
 	// myNoteFavorited1 を付与するのに使う (#1762)。未配線時は付与しない。
 	achievementGranter AchievementGranter
 	bufReader          entity.BufferedReactionsReader
+	// ugcVisibilityFn controls what unauthenticated visitors can see.
+	//
+	// **毎回読む。** 起動時に文字列を焼き込むと、運営者が管理画面で締めても
+	// プロセスを再起動するまで反映されない。`/api/meta` と管理画面は新しい値を
+	// 返し、robots.txt と SSR も毎回 meta を読むので「ブラウザで見ると効いて
+	// いる」ように見えるのに、API は匿名に本文を返し続ける。
+	ugcVisibilityFn func() string
 	// ugcVisibility controls what unauthenticated visitors can see.
 	// "all" (default), "local", "none"
 	ugcVisibility string
@@ -214,8 +221,24 @@ func (h *Handler) SetTranslator(t *translate.DeepLClient) {
 }
 
 // SetUGCVisibility sets the visitor content visibility policy from meta.
+//
+// Deprecated: 固定値を焼き込む形。`SetUGCVisibilityLookup` を使うこと。
+// テストの利便のために残してある。
 func (h *Handler) SetUGCVisibility(v string) {
 	h.ugcVisibility = v
+}
+
+// SetUGCVisibilityLookup wires a live lookup of the policy.
+func (h *Handler) SetUGCVisibilityLookup(fn func() string) {
+	h.ugcVisibilityFn = fn
+}
+
+// ugcVisibilityNow resolves the current policy.
+func (h *Handler) ugcVisibilityNow() string {
+	if h.ugcVisibilityFn != nil {
+		return h.ugcVisibilityFn()
+	}
+	return h.ugcVisibility
 }
 
 // SetDriveFileRepo attaches a DriveFileRepository for file resolution.
@@ -583,7 +606,7 @@ func (h *Handler) Show(c echo.Context) error {
 		if n.User != nil && n.User.RequireSigninToViewContents {
 			return c.JSON(http.StatusBadRequest, apierr.Error("CONTENT_RESTRICTED_BY_USER", "This content is not available because the author requires sign-in to view it.", "fbcc002d-37d9-4944-a6b0-d9e29f2d33ab"))
 		}
-		if h.ugcVisibility == "none" || (h.ugcVisibility == "local" && n.UserHost != nil) {
+		if v := h.ugcVisibilityNow(); v == "none" || (v == "local" && n.UserHost != nil) {
 			return c.JSON(http.StatusBadRequest, apierr.Error("CONTENT_RESTRICTED_BY_SERVER", "This content is not available for visitors on this server.", "145f88d2-b03d-4087-8143-a78928883c4b"))
 		}
 	}
@@ -1216,4 +1239,4 @@ func (h *Handler) HasUserFollowingRepo() bool { return h.userFollowingRepo != ni
 //
 // **空文字は gate 無効**と同義 (`"none"` でも `"local"` でもないので素通し)。
 // 列は `NOT NULL DEFAULT 'local'` なので、空になるのは配線が漏れたときだけ。
-func (h *Handler) HasUGCVisibility() bool { return h.ugcVisibility != "" }
+func (h *Handler) HasUGCVisibility() bool { return h.ugcVisibilityNow() != "" }

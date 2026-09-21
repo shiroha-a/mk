@@ -390,7 +390,7 @@ func (h *Handler) serveTimeline(
 
 	// UGC visibility: 未ログインユーザーの閲覧を制限する (meta.ugcVisibilityForVisitor)。
 	// "none" → 空リスト、"local" → local timeline のみ許可 (global はブロック)。
-	if viewer == nil && h.ugcVisibility == "none" {
+	if viewer == nil && h.ugcVisibilityNow() == "none" {
 		return c.JSON(http.StatusOK, []any{})
 	}
 
