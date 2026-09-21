@@ -615,6 +615,43 @@ func TestMe_WithRoleProvider(t *testing.T) {
 	assert.Equal(t, float64(500), policies["driveCapacityMb"])
 }
 
+// **`/api/i` の roles[].iconUrl は media proxy 経由であること (#1529)。**
+// `rolePayload` がここだけ `r.IconURL` を生で返す形に戻っても、role provider を
+// 直接呼ぶだけのテストでは検出できない (#3130 review)。実際のハンドラ経路
+// (`h.Me`) を通して確かめる。
+func TestMe_RoleIconURLIsProxied(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, _, _, _ := newTestHandler(t)
+	icon := "https://remote.example/role-icon.png"
+	h.SetRoleProvider(&stubRoleProvider{
+		roles: []*model.Role{
+			{ID: "r1", Name: "Remote Icon", IconURL: &icon},
+		},
+		policies: map[string]any{},
+	})
+
+	user := &model.User{ID: "user1", Username: "u", AvatarDecorations: datatypes.JSON([]byte("[]"))}
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/i", nil)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	c.Set(string(middleware.UserContextKey), user)
+
+	require.NoError(t, h.Me(c))
+
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	roles := resp["roles"].([]any)
+	require.Len(t, roles, 1)
+	role := roles[0].(map[string]any)
+	got, _ := role["iconUrl"].(string)
+	assert.True(t, strings.HasPrefix(got, "https://mk.example/proxy/image.webp?"),
+		"role icon url must be proxied, got %q", got)
+}
+
 func TestMe_CreatedAtFromValidID(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 

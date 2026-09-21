@@ -8,6 +8,7 @@ import (
 	"time"
 
 	apiadmin "github.com/shiroha-a/mk/internal/api/admin"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -94,6 +95,24 @@ func TestAdCreate_Defaults(t *testing.T) {
 	assert.Equal(t, "square", got.Place)
 	assert.Equal(t, "middle", got.Priority)
 	assert.Equal(t, 1, got.Ratio)
+}
+
+// **`imageUrl` は upstream parity で意図的に raw (media proxy を通さない)。**
+// `packAd` のコメントだけでは、将来誰かが proxy 化しても何も落ちない
+// (#3130 review)。remote な imageUrl でも media proxy context を配線したまま
+// raw で返ることを固定する。
+func TestAdCreate_KeepsImageURLRaw(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, _ := setupAdHandler(t)
+	remote := "https://remote.example/ad.png"
+	rec := doPost(h.AdCreate, `{"url":"https://x","imageUrl":"`+remote+`"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var raw map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &raw))
+	assert.Equal(t, remote, raw["imageUrl"], "ad imageUrl は upstream parity で raw のまま返す契約")
 }
 
 func TestAdCreate_RepoError(t *testing.T) {
@@ -318,6 +337,33 @@ func TestAvatarDecorationsList_IncludesCreatedAt(t *testing.T) {
 	require.Len(t, rows, 1)
 	assert.NotNil(t, rows[0]["createdAt"], "list row must have non-null createdAt")
 	assert.Equal(t, []any{}, rows[0]["roleIdsThatCanBeUsedThisDecoration"])
+}
+
+// **admin/avatar-decorations/create と list の url は upstream parity で
+// 意図的に raw (media proxy を通さない)。** 編集ダイアログが url を読み込んで
+// そのまま update へ書き戻すため、role の iconUrl と同じ理由で raw のままに
+// する契約 (`packAvatarDecoration` の GoDoc)。コメントだけでは将来 proxy 化
+// されても何も落ちないので固定する (#3130 review)。
+func TestAvatarDecorationsCreate_KeepsURLRaw(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, _ := setupAvatarDecorationHandler(t)
+	remote := "https://remote.example/deco.png"
+	rec := doPost(h.AvatarDecorationsCreate,
+		`{"name":"deco","description":"d","url":"`+remote+`"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var created map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	assert.Equal(t, remote, created["url"], "admin/avatar-decorations/create の url は raw のまま返す契約")
+
+	rec = doPost(h.AvatarDecorationsList, `{}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
+	require.Len(t, rows, 1)
+	assert.Equal(t, remote, rows[0]["url"], "admin/avatar-decorations/list の url は raw のまま返す契約")
 }
 
 func TestAvatarDecorationsCreate_MissingName(t *testing.T) {

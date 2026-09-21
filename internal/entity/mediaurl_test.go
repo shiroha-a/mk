@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/url"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,7 +182,7 @@ func TestGetPublicURL_Matrix(t *testing.T) {
 	})
 	// §3.2: 外部 proxy 構成では mediaProxyBase が instance と別ホストになる。
 	// 既に自分の proxy が包んだ URL を再 pack しても二段にならないこと
-	// (isRemoteOrigin が mediaProxyHost を local 扱いする)。
+	// (isRemoteOrigin が mediaProxyBase 配下の URL を local 扱いする)。
 	t.Run("already-proxied URL is not wrapped again (external proxy)", func(t *testing.T) {
 		c := externalCtx()
 		inner := "https://" + remoteHost + "/orig.png"
@@ -220,6 +221,33 @@ func TestIsRemoteOrigin_OwnHosts(t *testing.T) {
 	}
 }
 
+// **外部 proxy と host を共用する無関係な URL は remote のまま。** host だけの
+// 比較だと、外部 proxy が他サービスとホストを共有する構成 (例: reverse proxy
+// 配下の `/media-proxy`) で、そのホスト上の無関係な path まで local 扱いに
+// なり、proxy を経由しない生 URL をそのまま返してしまう (#1529 が防ごうとした
+// 漏洩そのもの)。path prefix (`mediaProxyBase + "/"`) で判定することで、
+// 自分が組み立てた proxy URL だけを local 扱いする (#3130 review)。
+//
+// `externalCtx()` の `testExternalProxy` は host root を base にしているため
+// (path 無し)、この違いを再現するには**区別できる sub-path を持つ base**が
+// 要る。
+func TestIsRemoteOrigin_SharedHostButDifferentPathStaysRemote(t *testing.T) {
+	c := NewMediaURLContext(testInstanceURL, "https://shared.example/media-proxy", testSecret, true, true)
+
+	wrapped := c.ProxiedURL("https://"+remoteHost+"/a.png", modeDefault)
+	if !strings.HasPrefix(wrapped, "https://shared.example/media-proxy/") {
+		t.Fatalf("test setup: unexpected proxied url shape: %s", wrapped)
+	}
+	if c.isRemoteOrigin(wrapped) {
+		t.Errorf("our own proxied url must be local: %s", wrapped)
+	}
+
+	unrelated := "https://shared.example/other-service/x.png"
+	if !c.isRemoteOrigin(unrelated) {
+		t.Errorf("a url on the shared host but outside the proxy's path must stay remote: %s", unrelated)
+	}
+}
+
 // ProxyMediaURL / ProxyAvatarURLString も isRemoteOrigin を通るので、既に
 // proxy 済みの URL を再帰的に包まない (§3.2)。
 func TestProxyHelpers_DoNotDoubleWrapExternalProxy(t *testing.T) {
@@ -235,9 +263,9 @@ func TestProxyHelpers_DoNotDoubleWrapExternalProxy(t *testing.T) {
 	}
 }
 
-// 外部 proxy 構成では、利用者由来 URL が**外部 proxy 自身のホスト**を名乗れる。
+// 外部 proxy 構成では、利用者由来 URL が**外部 proxy 自身の URL**を名乗れる。
 // 通知 icon / アプリの iconUrl / URL プレビューの og:image は任意 URL を入れられる
-// ので、mediaProxyHost を local 判定へ足していないと、そういう URL を読むたびに
+// ので、mediaProxyBase を local 判定へ足していないと、そういう URL を読むたびに
 // `<external proxy>/image.webp?url=<external proxy>/image.webp?...` の二段になる。
 // 期限付き署名 (ProxyUserSuppliedMediaURLPtr) はその入口なので、ここで再 wrap
 // しないことを固定する (#3130 review: 経路の実在をテストで示す)。
@@ -289,6 +317,42 @@ func TestStableExpiry_BucketsAndValidity(t *testing.T) {
 	valid := want.Sub(start)
 	if valid <= UserSuppliedProxyTTL/2 || valid > UserSuppliedProxyTTL {
 		t.Errorf("validity %s out of (TTL/2, TTL]", valid)
+	}
+}
+
+// **呼び出し側 (`expiringProxiedURL`) が実際に `stableExpiry` の戻り値を
+// 使っていること。** `TestStableExpiry_BucketsAndValidity` は純関数の正しさしか
+// 見ておらず、`expiringProxiedURL` が `stableExpiry` を呼ばずに
+// `time.Now().Add(TTL)` へ戻しても検出できなかった (`TestUserSuppliedProxyURL_IsStableWithinBucket`
+// は同一秒内の 2 回呼び出しなので丸めの有無を区別できず、
+// `TestExpiringProxySigAcceptedByMediaproxy` の許容幅 (TTL/2, TTL] にも
+// `now.Add(TTL)` がそのまま収まってしまうため、#3130 review で変異検証が
+// 素通りすると指摘された)。ここでは exp を `stableExpiry` の戻り値と直接
+// 突き合わせる。
+func TestExpiringProxiedURL_ExpMatchesStableExpiry(t *testing.T) {
+	c := internalCtx()
+	raw := "https://" + remoteHost + "/icon.png"
+	now := time.Now()
+
+	got := c.expiringProxiedURL(raw, modeDefault)
+	u, err := url.Parse(got)
+	if err != nil {
+		t.Fatalf("unparseable url %q: %v", got, err)
+	}
+	sig := u.Query().Get("sig")
+	exp, _, ok := strings.Cut(sig, ".")
+	if !ok {
+		t.Fatalf("sig に期限が入っていない: %q", sig)
+	}
+	got64, err := strconv.ParseInt(exp, 10, 64)
+	if err != nil {
+		t.Fatalf("exp をパースできない: %q: %v", exp, err)
+	}
+
+	want := stableExpiry(now, UserSuppliedProxyTTL).Unix()
+	if got64 != want {
+		t.Errorf("expiringProxiedURL の exp が stableExpiry の戻り値と一致しない: got=%d want=%d (now.Add(TTL)=%d)",
+			got64, want, now.Add(UserSuppliedProxyTTL).Unix())
 	}
 }
 

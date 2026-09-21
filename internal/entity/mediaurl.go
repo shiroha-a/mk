@@ -36,24 +36,29 @@ type MediaURLContext struct {
 	// instanceHost is the host[:port] of this instance, used to distinguish
 	// local URLs (which must never be proxied) from remote origins.
 	instanceHost string
-	// mediaProxyHost is the host[:port] of mediaProxyBase.
+	// mediaProxyBase is config.MediaProxy (e.g. "https://host/proxy" for the
+	// internal proxy, or the operator's external proxy base).
 	//
-	// **既に自分の proxy を通した URL を再 wrap しないために要る。** 外部 proxy
-	// 構成では mediaProxyBase が instance と別ホストになるので、instanceHost /
-	// ownMediaHost の比較だけでは「(外部)proxy 済み URL」を remote origin と
-	// 誤判定し、`<proxy>/image.webp?url=<proxy>/image.webp?...` という二段の
-	// proxy URL を作ってしまう (§3.2)。
+	// **既に自分の proxy を通した URL を再 wrap しないためにも使う
+	// (isRemoteOrigin)。** 外部 proxy 構成では mediaProxyBase が instance と
+	// 別ホストになるので、instanceHost / ownMediaHost の比較だけでは
+	// 「(外部)proxy 済み URL」を remote origin と誤判定し、
+	// `<proxy>/image.webp?url=<proxy>/image.webp?...` という二段の proxy URL を
+	// 作ってしまう (§3.2)。
+	//
+	// **ホストではなく `mediaProxyBase + "/"` の path prefix で判定する。**
+	// 外部 proxy が他のサービスと共用ホストの場合、host だけの比較だと**その
+	// ホスト上の無関係な URL まで local 扱い**になり、proxy を経由しない生 URL
+	// をそのまま返してしまう (#1529 が防ごうとした漏洩そのもの)。prefix 判定
+	// なら「自分が組み立てた proxy URL」だけを local 扱いできる。
 	//
 	// **現行コードで実際に到達する経路は利用者由来 URL** — 通知 icon
 	// (notifications/create) / アプリの iconUrl / URL プレビューの og:image は
 	// どれも任意 URL を受け付け、外部 proxy のホスト名は応答から公開されている
 	// ので、`<external proxy>/image.webp?url=...` を値として入れて読み戻せば
 	// 二段になる。DriveFile 側は現状 link 形式の remote URL しか入らないため
-	// 人工的だが、判定材料を「自分が配信に使うホスト集合」に揃えておく
+	// 人工的だが、判定材料を「自分が配信に使う URL 集合」に揃えておく
 	// (#3130 review: 将来の経路に対する保険)。
-	mediaProxyHost string
-	// mediaProxyBase is config.MediaProxy (e.g. "https://host/proxy" for the
-	// internal proxy, or the operator's external proxy base).
 	mediaProxyBase string
 	// secret signs internal-proxy URLs (HMAC-SHA256) so the proxy's Authorize
 	// accepts them without relying on the DB allowlist.
@@ -92,13 +97,8 @@ func NewMediaURLContext(instanceURL, mediaProxy string, secret []byte, externalE
 	if u, err := url.Parse(instanceURL); err == nil {
 		host = u.Host
 	}
-	proxyHost := ""
-	if u, err := url.Parse(mediaProxy); err == nil {
-		proxyHost = u.Host
-	}
 	return &MediaURLContext{
 		instanceHost:     host,
-		mediaProxyHost:   proxyHost,
 		mediaProxyBase:   strings.TrimRight(mediaProxy, "/"),
 		secret:           secret,
 		externalEnabled:  externalEnabled,
@@ -253,13 +253,18 @@ func (c *MediaURLContext) shouldProxyRemote() bool {
 // URLs are treated as local and never proxied, which also prevents
 // double-proxying an already-local /proxy or /files URL.
 //
-// **自分の media proxy ホストも local 扱いする。** 外部 proxy 構成では
-// mediaProxyBase が instance と別ホストなので、既に proxy で包んだ URL を
-// もう一度 pack すると二段になる (§3.2)。internal proxy では mediaProxyBase が
-// instance ホストなので冗長なだけで害は無い。実際に到達するのは任意 URL を
-// 受け付けるフィールド (通知 icon / アプリ iconUrl / URL プレビュー og:image) で、
-// DriveFile 経由は現状 link 形式しか無く人工的 (mediaProxyHost の field コメント
-// 参照)。
+// **自分の media proxy が既に組み立てた URL も local 扱いする。** 外部 proxy
+// 構成では mediaProxyBase が instance と別ホストなので、既に proxy で包んだ
+// URL をもう一度 pack すると二段になる (§3.2)。internal proxy では
+// mediaProxyBase が instance ホスト配下なので instanceHost の判定と重なるが、
+// 冗長なだけで害は無い。実際に到達するのは任意 URL を受け付けるフィールド
+// (通知 icon / アプリ iconUrl / URL プレビュー og:image) で、DriveFile 経由は
+// 現状 link 形式しか無く人工的 (mediaProxyBase の field コメント参照)。
+//
+// **host ではなく `mediaProxyBase` からの path prefix で判定する。** 外部
+// proxy が他のサービスと共用ホストの場合、host だけの比較だと**そのホスト上の
+// 無関係な URL まで local 扱い**になり、proxy を経由しない生 URL をそのまま
+// 返してしまう (#1529 が防ごうとした漏洩そのもの)。
 //
 // 「自分のホスト」は instance ドメインだけではない。オブジェクトストレージを
 // 有効にすると、自分が保存したファイルの URL は CDN / R2 の公開ドメインを指す。
@@ -283,7 +288,7 @@ func (c *MediaURLContext) isRemoteOrigin(rawURL string) bool {
 	if strings.EqualFold(u.Host, c.instanceHost) {
 		return false
 	}
-	if c.mediaProxyHost != "" && strings.EqualFold(u.Host, c.mediaProxyHost) {
+	if c.mediaProxyBase != "" && strings.HasPrefix(rawURL, c.mediaProxyBase+"/") {
 		return false
 	}
 	if h := c.ownMediaHost(); h != "" && strings.EqualFold(u.Host, h) {

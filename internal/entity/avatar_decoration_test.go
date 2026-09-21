@@ -334,3 +334,30 @@ func TestPackUserLite_AvatarDecorations_ProxiesRemoteURL(t *testing.T) {
 	local := out.AvatarDecorations[1]
 	assert.Equal(t, testInstanceURL+"/files/dec2.png", local.URL)
 }
+
+// **絵文字由来の分岐も media proxy 経由になること (#3130 review)。**
+// `TestPackUserLite_AvatarDecorations_ProxiesRemoteURL` は catalog 由来の
+// 分岐しか見ておらず、`TestPackUserLite_EmojiDecoration_Resolved` は
+// `SetMediaURLContext` を配線していないので `item.URL = ProxyMediaURL(url)`
+// を `item.URL = url` へ戻す変異が両方とも素通りしていた。ローカル絵文字
+// なので通常は no-op (自オリジン) だが、判定材料を 1 箇所に揃えている
+// (`resolveAvatarDecorations` の該当コメント) 以上、remote 側もここで
+// 固定する。
+func TestPackUserLite_EmojiDecoration_ProxiesRemoteURL(t *testing.T) {
+	t.Cleanup(func() { SetMediaURLContext(nil) })
+	t.Cleanup(func() { SetEmojiDecorationLookup(nil) })
+	SetMediaURLContext(internalCtx())
+	SetEmojiDecorationLookup(&stubEmojiDecoLookup{entries: map[string][2]string{
+		"e1": {"https://" + remoteHost + "/e1.png", "party"},
+	}})
+
+	u := &model.User{
+		ID:                "u1",
+		Username:          "alice",
+		AvatarDecorations: datatypes.JSON([]byte(`[{"id":"e1","emojiName":"party"}]`)),
+	}
+	out := PackUserLite(u)
+	require.Len(t, out.AvatarDecorations, 1)
+	assert.True(t, strings.HasPrefix(out.AvatarDecorations[0].URL, testInternalProxy+"/image.webp?"),
+		"remote emoji decoration url must be proxied, got %q", out.AvatarDecorations[0].URL)
+}

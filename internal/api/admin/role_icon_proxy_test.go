@@ -27,18 +27,21 @@ func TestProxyRoleIconURLs(t *testing.T) {
 	require.Len(t, out, 3)
 	assert.Nil(t, out[1], "nil element はそのまま (呼び出し元の shape を変えない)")
 
-	require.NotNil(t, out[0].IconURL)
-	assert.True(t, strings.HasPrefix(*out[0].IconURL, "https://mk.example/proxy/image.webp?"),
-		"remote role icon must be proxied, got %q", *out[0].IconURL)
-	require.NotNil(t, out[2].IconURL)
-	assert.Equal(t, local, *out[2].IconURL, "自オリジンは no-op")
+	iconURL0, _ := out[0]["iconUrl"].(*string)
+	require.NotNil(t, iconURL0)
+	assert.True(t, strings.HasPrefix(*iconURL0, "https://mk.example/proxy/image.webp?"),
+		"remote role icon must be proxied, got %q", *iconURL0)
+	iconURL2, _ := out[2]["iconUrl"].(*string)
+	require.NotNil(t, iconURL2)
+	assert.Equal(t, local, *iconURL2, "自オリジンは no-op")
 
 	// **元の model.Role は書き換えない。** GetUserRoles の返り値を共有している
 	// 呼び出し元 (キャッシュ等) に副作用を出さないため。
 	assert.Equal(t, remote, *origRemote.IconURL)
 	assert.Equal(t, local, *origLocal.IconURL)
 
-	// iconUrl 以外の field は保持する (shape drift には触らない)。
-	assert.Equal(t, "remote", out[0].Name)
-	assert.Equal(t, "r2", out[2].ID)
+	// iconUrl 以外の field は保持する (shape drift には触らない。json
+	// round-trip 経由なので id/name も json タグどおりの key で入っている)。
+	assert.Equal(t, "remote", out[0]["name"])
+	assert.Equal(t, "r2", out[2]["id"])
 }

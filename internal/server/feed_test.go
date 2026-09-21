@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/stretchr/testify/assert"
@@ -261,6 +262,18 @@ func TestFeed_NormalUserStillServed(t *testing.T) {
 // 未認証で取得でき、購読者 (第三者クライアント) が remote origin を直接
 // 取得してしまう。identicon fallback (= avatar 未設定) は entity.IdenticonURL が
 // 相対 URL を返すので、こちらは proxy を通さない。
+//
+// **`u.AvatarURL` の分岐そのものは本番で到達しない。** feedHandler は
+// `FindLocalByUsername` (host=nil) でしか user を引かないので、`u.AvatarURL`
+// は常に drive 経由の local URL であり、この分岐が生の remote URL を受け取る
+// ことは無い (#3130 review — 最初のケースの `Host: strp("remote.example")` は
+// local では作れない値で、ヘルパー自体の検証にはなるが「フィード経由で
+// 漏れていた」の裏付けにはならない)。**実際に到達するのはローカル system
+// account の `meta.iconUrl` 経由** — `entity.IdenticonURL` が
+// username に `.` を含む local user を system account とみなし、
+// `meta.iconUrl` (operator が remote URL を設定できる) を解決するため、
+// AvatarURL 未設定の system account の feed を購読すると本番でもこの経路を
+// 通る (下の subtest で確認)。
 func TestFeedAvatarURLProxiesRemoteAvatar(t *testing.T) {
 	withMediaProxy(t)
 
@@ -280,6 +293,19 @@ func TestFeedAvatarURLProxiesRemoteAvatar(t *testing.T) {
 	t.Run("自オリジンは no-op", func(t *testing.T) {
 		same := &model.User{ID: "u3", Username: "carol", AvatarURL: strp("https://local.example/files/a.png")}
 		assert.Equal(t, "https://local.example/files/a.png", feedAvatarURL(same))
+	})
+
+	// **本番で実際に到達する remote 経路。** local system account
+	// (username に '.' を含む、AvatarURL 未設定) は identicon fallback
+	// (entity.IdenticonURL) が meta.iconUrl を解決する。ここが remote を
+	// 指していれば、feed 経由で購読者に生 URL が渡っていた (#1529)。
+	t.Run("local system account の meta.iconUrl (remote) も proxy 経由", func(t *testing.T) {
+		entity.SetInstanceIconURLLookup(func() string { return "https://remote.example/icon.png" })
+		t.Cleanup(func() { entity.SetInstanceIconURLLookup(nil) })
+
+		sysAccount := &model.User{ID: "u4", Username: "relay.actor"} // local, no avatar
+		got := feedAvatarURL(sysAccount)
+		assert.True(t, strings.HasPrefix(got, "https://local.example/proxy/avatar.webp?"), "got %q", got)
 	})
 
 	// build → 各 format の render まで通ること (配線の実体)。
@@ -302,6 +328,11 @@ func TestFeedAvatarURLProxiesRemoteAvatar(t *testing.T) {
 			require.Equal(t, http.StatusOK, rec.Code)
 			assert.Contains(t, rec.Body.String(), "https://local.example/proxy/avatar.webp?",
 				"フィード本文に raw avatar が載っている")
+			// ssr_meta_test.go の対応する subtest (`TestSSRAnnouncementPage` の
+			// 「リモート画像は proxy 経由」) と同じく、生の remote URL が本文の
+			// どこにも残っていないことも見る (#3130 review)。
+			assert.NotContains(t, rec.Body.String(), remote,
+				"フィード本文に生のリモート avatar URL が残っている")
 			n++
 		}
 		require.Equal(t, 3, n)

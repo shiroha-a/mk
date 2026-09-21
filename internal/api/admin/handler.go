@@ -2539,12 +2539,35 @@ func invalidDefaultPolicyKey(policies map[string]any) string {
 // createdAt / default-filled policies 等)。raw model.Role を返すとこれらが欠落
 // する。usersCount は active assignment 数 (per-role count、role は少数なので
 // N+1 でも許容、upstream pack も per-role count する)。
+//
+// **iconUrl は raw のまま** (`entity.PackRole` の契約)。この応答は
+// `admin/roles/show` からロール編集フォーム (`pages/admin/roles.edit.vue`) へ
+// 渡り、保存時に `...data.value` でそのまま `admin/roles/update` へ書き戻される
+// ため、proxy 化した URL を DB へ永続化してしまう (詳細は `entity.PackRole` の
+// GoDoc)。`admin/roles/list` はこの書き戻し経路が無いので `packRoleForList` を
+// 使う。
 func (h *Handler) packRole(r *model.Role) map[string]any {
 	return entity.PackRole(r, h.roleService.CountAssignedUsers(r.ID), h.idGen, role.DefaultPolicies())
 }
 
-// proxyRoleIconURLs returns a shallow copy of roles whose iconUrl is rewritten
-// through the media proxy, without PackRole's usersCount / policies cost.
+// packRoleForList is packRole with iconUrl proxied through the media proxy.
+//
+// **`admin/roles/list` の消費者は iconUrl を書き戻さない。** `admin/roles/show`
+// と違い、一覧の消費者 (`pages/admin/roles.vue` → `MkRolePreview`、
+// `rolesCache`、`MkRoleSelectDialog`、`admin-user.vue`、
+// `emoji-edit-dialog.vue`) はどれも `<img :src="role.iconUrl">` で直接描画する
+// だけで `admin/roles/update` へ書き戻さない。raw のまま返すと
+// `admin/show-user` の roles (`proxyRoleIconURLs`) と非対称になり、閲覧者の
+// IP が漏れる / CSP enforce で画像が消える (#1529、#3130 review)。
+func (h *Handler) packRoleForList(r *model.Role) map[string]any {
+	out := h.packRole(r)
+	out["iconUrl"] = entity.ProxyMediaURLPtr(r.IconURL)
+	return out
+}
+
+// proxyRoleIconURLs renders roles as JSON-ready maps whose iconUrl is
+// rewritten through the media proxy, without PackRole's usersCount / policies
+// cost.
 //
 // admin/show-user は割当済みロールの一覧が要るだけで、フル Role detail
 // (policies / usersCount) は返さない。PackRole に寄せると role ごとの
@@ -2553,16 +2576,32 @@ func (h *Handler) packRole(r *model.Role) map[string]any {
 // frontend の MkRolePreview が <img src> へ直接載せて閲覧者の IP が漏れる /
 // CSP enforce で画像が消える (#1529)。
 //
+// **戻り値は `[]*model.Role` にしない (#3130 review)。** signed URL の入った
+// `*model.Role` を作ると、`internal/core/moderationlog` のように
+// `*model.Role` をそのまま `json.Marshal` する経路へ将来これが紛れ込んだ
+// 場合に、secret ローテーションで無効になる URL が監査ログへ残ってしまう
+// (`internal/entitycompat` の secretfield-check と同種の懸念)。json
+// round-trip で map化することで、`model.Role` にフィールドが増えても
+// この関数を更新せずに追従できる (手で列挙し直すと更新漏れが起きる)。
 // 元の *model.Role は書き換えない (共有の入力構造体を壊さない)。
-func proxyRoleIconURLs(roles []*model.Role) []*model.Role {
-	out := make([]*model.Role, len(roles))
+func proxyRoleIconURLs(roles []*model.Role) []map[string]any {
+	out := make([]map[string]any, len(roles))
 	for i, r := range roles {
 		if r == nil {
 			continue
 		}
-		cp := *r
-		cp.IconURL = entity.ProxyMediaURLPtr(r.IconURL)
-		out[i] = &cp
+		raw, err := json.Marshal(r)
+		if err != nil {
+			slog.Error("admin/show-user: failed to marshal role for icon proxying", "roleId", r.ID, "err", err)
+			continue
+		}
+		m := map[string]any{}
+		if err := json.Unmarshal(raw, &m); err != nil {
+			slog.Error("admin/show-user: failed to unmarshal role for icon proxying", "roleId", r.ID, "err", err)
+			continue
+		}
+		m["iconUrl"] = entity.ProxyMediaURLPtr(r.IconURL)
+		out[i] = m
 	}
 	return out
 }
@@ -2594,7 +2633,7 @@ func (h *Handler) RolesList(c echo.Context) error {
 	}
 	out := make([]map[string]any, 0, len(roles))
 	for _, r := range roles {
-		out = append(out, h.packRole(r))
+		out = append(out, h.packRoleForList(r))
 	}
 	return c.JSON(http.StatusOK, out)
 }

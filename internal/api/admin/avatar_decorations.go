@@ -54,6 +54,14 @@ func (h *Handler) AvatarDecorationsCreate(c echo.Context) error {
 // packAvatarDecoration shapes an AvatarDecoration into the upstream response.
 // model.AvatarDecoration は createdAt 列を持たず aidx ID に時刻を埋め込むため、
 // raw model を返すと createdAt が欠落する。ID から導出して付与する。
+//
+// **url は意図的に raw (media proxy を通さない、#3130 review)。**
+// `avatar-decoration-edit-dialog.vue` はこの応答の `url` を編集フォームへ
+// 読み込み、保存時にそのまま `admin/avatar-decorations/update` へ書き戻す。
+// role の iconUrl (`entity.PackRole`) と同じ理由で proxy 化すると sig 付き
+// URL が `avatar_decoration.url` 列へ永続化される。閲覧者へ配る経路
+// (`entity.resolveAvatarDecorations` / 公開カタログ `/api/get-avatar-decorations`)
+// はそちらで proxy する。
 func (h *Handler) packAvatarDecoration(d *model.AvatarDecoration) map[string]any {
 	// roleIds は upstream schema 上 nullable:false (必ず [])。model.StringArray が
 	// nil のとき []string(nil) は JSON null になるので空 slice に正規化する。

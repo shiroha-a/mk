@@ -18,6 +18,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/signup"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -717,6 +718,42 @@ func TestShowUser_WithRoleAssigns(t *testing.T) {
 	assert.Equal(t, "r1", entry["roleId"])
 	assert.NotNil(t, entry["createdAt"])
 	assert.NotNil(t, entry["expiresAt"])
+}
+
+// **admin/show-user の roles[].iconUrl は media proxy 経由であること (#1529)。**
+// `proxyRoleIconURLs` を直接呼ぶだけのユニットテスト
+// (`TestProxyRoleIconURLs`) は handler が実際にそれを呼んでいるかを検証
+// できない — `resp["roles"] = proxyRoleIconURLs(userRoles)` を
+// `resp["roles"] = userRoles` に戻しても素通りする (#3130 review)。実際の
+// ハンドラ経路 (`h.ShowUser`) を通して確かめる。
+func TestShowUser_RoleIconURLIsProxied(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, userRepo, _, roleRepo, assignRepo := newTestHandlerWithAssign(t)
+	idGen, _ := id.NewGenerator("aidx")
+	uid := idGen.Generate(time.Now())
+	userRepo.Users[uid] = &model.User{ID: uid, Username: "test", AvatarDecorations: []byte("[]")}
+	userRepo.Profiles[uid] = &model.UserProfile{
+		UserID: uid, MutedWords: []byte("[]"), HardMutedWords: []byte("[]"), MutedInstances: []byte("[]"),
+	}
+
+	icon := "https://remote.example/role-icon.png"
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Active", IconURL: &icon}
+	assignRepo.Assignments[uid+":r1"] = &model.RoleAssignment{ID: "a1", UserID: uid, RoleID: "r1"}
+
+	rec := doPost(h.ShowUser, `{"userId":"`+uid+`"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	roles, ok := resp["roles"].([]any)
+	require.True(t, ok)
+	require.Len(t, roles, 1)
+	role := roles[0].(map[string]any)
+	got, _ := role["iconUrl"].(string)
+	assert.True(t, strings.HasPrefix(got, "https://mk.example/proxy/image.webp?"),
+		"role icon url must be proxied, got %q", got)
 }
 
 // admin/show-user は role policy 由来の isSilenced を返す (canPublicNote を
@@ -1752,6 +1789,29 @@ func TestRolesShow_IncludesPackedFields(t *testing.T) {
 	assert.NotEmpty(t, policies, "policies は default-fill されて非空")
 }
 
+// **admin/roles/show の iconUrl は raw のまま返る (handler 経由で固定)。**
+// `entity.PackRole` 自体の契約は `TestPackRole_KeepsIconURLRaw` が固定して
+// いるが、`RolesShow` がそれを別の値へ差し替えていないことは別に確かめないと
+// 分からない (`admin/roles/list` は同じ `packRole` の上に `packRoleForList` で
+// iconUrl を proxy 化するので、`RolesShow` 側がうっかり同じ関数へ切り替わる
+// 変更を入れても他のテストでは検出できない)。
+func TestRolesShow_KeepsIconURLRaw(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, _, _, roleRepo := newTestHandler(t)
+	icon := "https://remote.example/role.png"
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "Test", IconURL: &icon}
+
+	rec := doPost(h.RolesShow, `{"roleId":"r1"}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	assert.Equal(t, icon, resp["iconUrl"],
+		"admin/roles/show は保存値 (raw) を返す契約。書き戻し (roles/update) 用フォームが読むため")
+}
+
 func TestRolesShow_NotFound(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	rec := doPost(h.RolesShow, `{"roleId":"ghost"}`, nil)
@@ -1770,6 +1830,31 @@ func TestRolesList_Success(t *testing.T) {
 	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "A"}
 	rec := doPost(h.RolesList, `{}`, nil)
 	assert.Equal(t, http.StatusOK, rec.Code)
+}
+
+// **admin/roles/list の iconUrl は media proxy 経由であること (#3130 review)。**
+// この一覧の消費者 (`pages/admin/roles.vue` → `MkRolePreview`、`rolesCache`、
+// `MkRoleSelectDialog`、`admin-user.vue`、`emoji-edit-dialog.vue`) はどれも
+// `<img :src>` へ直接載せるだけで `admin/roles/update` へ書き戻さない。
+// `admin/roles/show` (`RolesShow`) と違って書き戻し経路が無いので、
+// `admin/show-user` の roles と同様に raw のままにしてはいけない。
+func TestRolesList_ProxiesRemoteIconURL(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, _, _, roleRepo := newTestHandler(t)
+	icon := "https://remote.example/role.png"
+	roleRepo.Roles["r1"] = &model.Role{ID: "r1", Name: "A", IconURL: &icon}
+
+	rec := doPost(h.RolesList, `{}`, nil)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	got, _ := resp[0]["iconUrl"].(string)
+	assert.True(t, strings.HasPrefix(got, "https://mk.example/proxy/image.webp?"),
+		"admin/roles/list の role icon url must be proxied, got %q", got)
 }
 
 func TestRolesUpdate_Success(t *testing.T) {

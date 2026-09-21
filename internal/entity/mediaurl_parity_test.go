@@ -89,6 +89,16 @@ func TestExpiringProxySigAcceptedByMediaproxy(t *testing.T) {
 	assert.False(t, deadline.After(time.Now().Add(entity.UserSuppliedProxyTTL)),
 		"有効期限が TTL を超えている: %s", deadline)
 
+	// **バケット境界へ丸めた値そのものと突き合わせる。** 上の 2 つの assertion
+	// だけだと `now.Add(TTL)` (丸め無し) もこの区間に収まってしまい、
+	// バケット丸めを外す変異を検出できない (#3130 review で実測)。
+	// `entity.stableExpiry` は unexported でこのパッケージ (entity_test) からは
+	// 呼べないので、同じバケット計算をここで再現して厳密一致を見る
+	// (signURLUntil の byte-for-byte 突き合わせと同じ考え方)。
+	half := int64(entity.UserSuppliedProxyTTL / 2 / time.Second)
+	wantExp := (time.Now().Unix()/half + 2) * half
+	assert.Equal(t, wantExp, sec, "exp がバケット境界に丸められていない (丸め無しの time.Now()+TTL に戻っている疑い)")
+
 	assert.Equal(t, mediaproxy.SignURLUntil(secret, raw, time.Unix(sec, 0)), sig,
 		"entity 側と mediaproxy 側の署名がずれている")
 	assert.True(t, mediaproxy.VerifyExpiringHMAC(secret, raw, sig, time.Now()),
