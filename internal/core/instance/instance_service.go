@@ -571,6 +571,40 @@ func (s *Service) ShouldSkipDelivery(host string) bool {
 	return s.shouldSkipBySuspend(host)
 }
 
+// CanFetchOptionalRemoteData reports whether this instance may make an
+// outbound request to host for data it does not need.
+//
+// **`ShouldSkipDelivery` と違い fail-closed。** あちらは配送なので meta が
+// 読めないときに止めると連合そのものが止まる (drop-in 互換の劣化) が、
+// こちらは「取れなくても表示が少し寂しくなるだけ」の付加情報なので、
+// 判定できないなら出さないほうが安全。**出してしまうと defederate した
+// 相手に「誰をいつ見たか」が漏れる。**
+//
+// 判定の内容 (`federation` モード / `blockedHosts` / `suspensionState`) は
+// `ShouldSkipDelivery` と同じ。
+func (s *Service) CanFetchOptionalRemoteData(host string) bool {
+	if host == "" {
+		return false
+	}
+	meta, err := s.metaRepo.Fetch()
+	if err != nil {
+		s.warnMetaFetchFailed(host, err)
+		return false
+	}
+	switch meta.Federation {
+	case "none":
+		return false
+	case "specified":
+		if !HostMatchesAny(meta.FederationHosts, host) {
+			return false
+		}
+	}
+	if HostMatchesAny(meta.BlockedHosts, host) {
+		return false
+	}
+	return !s.shouldSkipBySuspend(host)
+}
+
 // shouldSkipBySuspend returns the cached suspend decision for host, looking it
 // up from the repository only on a cache miss or after cacheTTL has elapsed.
 // deliver hot path の FindByHost DB 往復を cacheTTL の間だけ省く (#1407)。

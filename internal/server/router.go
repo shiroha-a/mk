@@ -1850,9 +1850,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// **連合を切った相手へ取りに行かない。** この経路は未認証の
 	// `/api/users/show` から呼ばれるので、放っておくと defederate した相手に
 	// 「誰をいつ見たか」が漏れる。
-	remoteStatsFetcher.SetHostAllowedChecker(func(host string) bool {
-		return !instanceService.ShouldSkipDelivery(host)
-	})
+	remoteStatsFetcher.SetHostAllowedChecker(instanceService.CanFetchOptionalRemoteData)
 	usersHandler.SetRemoteStatsFetcher(&remoteStatsFetcherAdapter{
 		fetcher: remoteStatsFetcher,
 	})
