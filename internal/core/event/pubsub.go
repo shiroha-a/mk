@@ -31,14 +31,21 @@ type PubSubService struct {
 
 	mu   sync.Mutex
 	subs map[string]*topicSubscription
+	// nextID はサービス全体で単調。**トピックごとに採番しない** — 購読の
+	// 張り替えをまたいで同じ id が再利用されると、未呼び出しの解除関数が
+	// 別人のハンドラを消す。
+	nextID uint64
 }
 
 // topicSubscription holds the single Redis subscription for one topic and the
 // set of handlers fed from it.
 type topicSubscription struct {
-	sub      *redis.PubSub
+	// sub は Redis への購読。**dial が終わるまで nil。**
+	sub *redis.PubSub
+	// closed は「dial の完了前に最後のハンドラが外れた」印。dial した側が
+	// これを見て、埋める代わりに即座に閉じる。
+	closed   bool
 	handlers map[uint64]func([]byte)
-	nextID   uint64
 }
 
 // NewPubSubService creates a new PubSubService.
@@ -75,17 +82,35 @@ func (p *PubSubService) Subscribe(ctx context.Context, channel string, handler f
 	p.mu.Lock()
 	ts, ok := p.subs[prefixed]
 	if !ok {
-		ts = &topicSubscription{
-			sub:      p.client.Subscribe(ctx, prefixed),
-			handlers: make(map[uint64]func([]byte)),
-		}
+		ts = &topicSubscription{handlers: make(map[uint64]func([]byte))}
 		p.subs[prefixed] = ts
-		go p.pump(channel, ts)
 	}
-	id := ts.nextID
-	ts.nextID++
+	id := p.nextID
+	p.nextID++
 	ts.handlers[id] = handler
 	p.mu.Unlock()
+
+	if !ok {
+		// **dial はロックの外で行う。** `client.Subscribe` は新しい TCP 接続を
+		// 張って AUTH / SUBSCRIBE を往復する同期処理で、`pump` は配信 1 件ごとに
+		// 同じ `p.mu` を取る。ロック内で dial すると**新しいトピックの購読が
+		// 1 つ発生するたび、その往復が終わるまでプロセス全体の配信が止まる**
+		// (Redis が劣化すると dial timeout ぶん丸ごと止まる)。
+		sub := p.client.Subscribe(ctx, prefixed)
+		p.mu.Lock()
+		if ts.closed {
+			// dial 中に最後のハンドラが外れた。枠はもう map から消えている
+			// ので、ここで閉じないと接続が残る。
+			p.mu.Unlock()
+			if err := sub.Close(); err != nil {
+				slog.Warn("failed to close pubsub", "channel", prefixed, "error", err)
+			}
+		} else {
+			ts.sub = sub
+			p.mu.Unlock()
+			go p.pump(channel, sub)
+		}
+	}
 
 	var once sync.Once
 	return func() {
@@ -94,16 +119,23 @@ func (p *PubSubService) Subscribe(ctx context.Context, channel string, handler f
 }
 
 // pump fans one Redis subscription out to every handler registered for it.
-func (p *PubSubService) pump(channel string, ts *topicSubscription) {
-	for msg := range ts.sub.Channel() {
+//
+// **`sub` を引数で受ける。** `ts.sub` を読むと、購読が張り替わったあとの
+// 別の接続を読みうる。
+func (p *PubSubService) pump(channel string, sub *redis.PubSub) {
+	prefixed := p.channel(channel)
+	for msg := range sub.Channel() {
 		payload := []byte(msg.Payload)
 
 		// **ハンドラの呼び出しはロックの外で行う。** ハンドラが Subscribe /
 		// 解除を呼ぶ形があり、ロックを持ったまま呼ぶと自己デッドロックする。
 		p.mu.Lock()
-		handlers := make([]func([]byte), 0, len(ts.handlers))
-		for _, h := range ts.handlers {
-			handlers = append(handlers, h)
+		var handlers []func([]byte)
+		if cur, ok := p.subs[prefixed]; ok && cur.sub == sub {
+			handlers = make([]func([]byte), 0, len(cur.handlers))
+			for _, h := range cur.handlers {
+				handlers = append(handlers, h)
+			}
 		}
 		p.mu.Unlock()
 
@@ -129,9 +161,16 @@ func (p *PubSubService) removeHandler(prefixed string, id uint64) {
 		return
 	}
 	delete(p.subs, prefixed)
+	// **印を残す。** dial がまだ終わっていなければ `sub` は nil で、ここでは
+	// 閉じられない。印を見た dial 側が閉じる。
+	ts.closed = true
+	sub := ts.sub
 	p.mu.Unlock()
 
-	if err := ts.sub.Close(); err != nil {
+	if sub == nil {
+		return
+	}
+	if err := sub.Close(); err != nil {
 		slog.Warn("failed to close pubsub", "channel", prefixed, "error", err)
 	}
 }
@@ -154,8 +193,13 @@ func (p *PubSubService) Close() error {
 	defer p.mu.Unlock()
 
 	for key, ts := range p.subs {
-		if err := ts.sub.Close(); err != nil {
-			slog.Warn("failed to close pubsub", "channel", key, "error", err)
+		// dial がまだ終わっていない枠にも印を残す (`sub` は nil)。dial 側が
+		// それを見て閉じる。
+		ts.closed = true
+		if ts.sub != nil {
+			if err := ts.sub.Close(); err != nil {
+				slog.Warn("failed to close pubsub", "channel", key, "error", err)
+			}
 		}
 		delete(p.subs, key)
 	}

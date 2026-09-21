@@ -69,12 +69,12 @@ type Dispatcher struct {
 	topics   map[string]map[string]bool // topic → set of channel ids
 	// **bus の解除は名前ではなくハンドルで行う。** 同じトピックを別の接続も
 	// 購読しているので、名前で閉じると他人の購読まで止まる (#H-4)。
-	busCancels map[string]func() // topic → この Dispatcher の購読を外す関数
+	busCancels map[string]*pendingCancel // topic → この Dispatcher の購読を外す枠
 
 	// subNote の refcount 管理 (noteID → count)
 	noteSubMu      sync.Mutex
 	noteSubs       map[string]int
-	noteCancels    map[string]func() // noteID → 購読解除
+	noteCancels    map[string]*pendingCancel // noteID → 購読解除の枠
 	notifReader    NotificationReader
 	noteVisibility NoteVisibilityChecker
 }
@@ -88,9 +88,9 @@ func NewDispatcher(conn *Connection, registry *Registry, bus PubSubBus) *Dispatc
 		bus:         bus,
 		channels:    make(map[string]*channelEntry),
 		topics:      make(map[string]map[string]bool),
-		busCancels:  make(map[string]func()),
+		busCancels:  make(map[string]*pendingCancel),
 		noteSubs:    make(map[string]int),
-		noteCancels: make(map[string]func()),
+		noteCancels: make(map[string]*pendingCancel),
 	}
 }
 
@@ -335,18 +335,63 @@ func (d *Dispatcher) CloseAll() {
 	for noteID := range d.noteSubs {
 		noteIDs = append(noteIDs, noteID)
 	}
-	cancels := make([]func(), 0, len(noteIDs))
-	for _, noteID := range noteIDs {
-		if c, ok := d.noteCancels[noteID]; ok && c != nil {
+	cancels := make([]func(), 0, len(d.noteCancels))
+	// **全ての枠に印を残す。** `noteSubs` に無い枠 (購読の確立中) も含めて
+	// 回らないと、直後に埋まったハンドルが残る。
+	for _, slot := range d.noteCancels {
+		if c := slot.take(); c != nil {
 			cancels = append(cancels, c)
 		}
 	}
 	d.noteSubs = make(map[string]int)
-	d.noteCancels = make(map[string]func())
+	d.noteCancels = make(map[string]*pendingCancel)
 	d.noteSubMu.Unlock()
 	for _, c := range cancels {
 		c()
 	}
+}
+
+// pendingCancel is the slot that holds the unsubscribe handle for one topic
+// while the subscription is being established.
+//
+// **枠をロック内で先に置く。** `bus.Subscribe` は Redis へ dial するので
+// ロックの外で呼ぶしかないが、その隙間に解除 (`CloseAll` / `unsubscribe`) が
+// 走ると、**まだ空のマップを見て「解除するものは無い」と判断し、直後に
+// 書き込まれたハンドルが誰にも呼ばれなくなる** — ハンドラと Redis 購読が
+// プロセス寿命まで残る。`CloseAll` は読み取りループ以外の goroutine
+// (送信キュー満杯・書き込み失敗・`Manager.Shutdown`) からも呼ばれるので、
+// 読み取り側だけを見ても防げない。
+type pendingCancel struct {
+	cancel   func()
+	canceled bool
+}
+
+// resolve stores the handle, or invokes it immediately when the slot was
+// already canceled while the subscription was being established.
+// 呼び出しはロックの外で行うこと (cancel は pubsub 側のロックを取る)。
+func (p *pendingCancel) resolve(cancel func(), mu sync.Locker) {
+	mu.Lock()
+	if p.canceled {
+		mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return
+	}
+	p.cancel = cancel
+	mu.Unlock()
+}
+
+// take marks the slot canceled and returns the handle to invoke, if it has
+// already arrived. 呼び出し側はロックを保持していること。
+func (p *pendingCancel) take() func() {
+	if p == nil {
+		return nil
+	}
+	p.canceled = true
+	c := p.cancel
+	p.cancel = nil
+	return c
 }
 
 // subscribe registers a topic for a channel id and ensures the bus is listening.
@@ -369,13 +414,16 @@ func (d *Dispatcher) subscribe(channelID, topic string) {
 	}
 	set[channelID] = true
 	first := !exists
+	var slot *pendingCancel
+	if first && d.bus != nil {
+		slot = &pendingCancel{}
+		d.busCancels[topic] = slot
+	}
 	d.mu.Unlock()
 
-	if first && d.bus != nil {
+	if slot != nil {
 		cancel := d.bus.Subscribe(topic, func(payload []byte) { d.fanout(topic, payload) })
-		d.mu.Lock()
-		d.busCancels[topic] = cancel
-		d.mu.Unlock()
+		slot.resolve(cancel, &d.mu)
 	}
 }
 
@@ -411,10 +459,10 @@ func (d *Dispatcher) unsubscribe(channelID, topic string) {
 // Dispatcher のロックを持ったまま呼ぶとロック順序が交差する。
 func (d *Dispatcher) cancelTopic(topic string) {
 	d.mu.Lock()
-	cancel, ok := d.busCancels[topic]
+	cancel := d.busCancels[topic].take()
 	delete(d.busCancels, topic)
 	d.mu.Unlock()
-	if ok && cancel != nil {
+	if cancel != nil {
 		cancel()
 	}
 }
@@ -564,16 +612,18 @@ func (d *Dispatcher) handleSubNote(body json.RawMessage) {
 	topic := "noteStream:" + req.ID
 	d.noteSubMu.Lock()
 	d.noteSubs[req.ID]++
-	first := d.noteSubs[req.ID] == 1
+	var slot *pendingCancel
+	if d.noteSubs[req.ID] == 1 && d.bus != nil {
+		slot = &pendingCancel{}
+		d.noteCancels[req.ID] = slot
+	}
 	d.noteSubMu.Unlock()
 
-	if first && d.bus != nil {
+	if slot != nil {
 		cancel := d.bus.Subscribe(topic, func(payload []byte) {
 			d.forwardNoteEvent(req.ID, payload)
 		})
-		d.noteSubMu.Lock()
-		d.noteCancels[req.ID] = cancel
-		d.noteSubMu.Unlock()
+		slot.resolve(cancel, &d.noteSubMu)
 	}
 }
 
@@ -595,7 +645,7 @@ func (d *Dispatcher) handleUnsubNote(body json.RawMessage) {
 	count--
 	if count <= 0 {
 		delete(d.noteSubs, req.ID)
-		cancel := d.noteCancels[req.ID]
+		cancel := d.noteCancels[req.ID].take()
 		delete(d.noteCancels, req.ID)
 		d.noteSubMu.Unlock()
 		if cancel != nil {

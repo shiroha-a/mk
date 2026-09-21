@@ -14,39 +14,64 @@ import (
 )
 
 // stubBus implements PubSubBus and records subscribe/unsubscribe calls.
+// stubBus records subscriptions per topic.
+//
+// **トピックごとに複数のハンドラを持つ。** 1 つしか持たない形は、本番から
+// 取り除いた「後から来た購読が前のを上書きする」挙動をスタブ側に残すことに
+// なり、複数の Dispatcher を同じトピックへ繋ぐテストで嘘をつく。
 type stubBus struct {
 	mu         sync.Mutex
-	subs       map[string]func([]byte)
+	subs       map[string][]func([]byte)
 	unsubs     []string
 	subscribed []string
 }
 
 func newStubBus() *stubBus {
-	return &stubBus{subs: map[string]func([]byte){}}
+	return &stubBus{subs: map[string][]func([]byte){}}
 }
 
 func (b *stubBus) Subscribe(topic string, handler func([]byte)) func() {
 	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.subs[topic] = handler
+	b.subs[topic] = append(b.subs[topic], handler)
+	idx := len(b.subs[topic]) - 1
 	b.subscribed = append(b.subscribed, topic)
+	b.mu.Unlock()
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			b.mu.Lock()
 			defer b.mu.Unlock()
-			delete(b.subs, topic)
+			if hs := b.subs[topic]; idx < len(hs) {
+				hs[idx] = nil
+				// **全部外れたらキーごと消す。** 既存のテストが
+				// `_, ok := bus.subs[topic]` で購読状態を見ているので、
+				// 残すと「解除したのに購読中」に見える。
+				live := false
+				for _, h := range hs {
+					if h != nil {
+						live = true
+						break
+					}
+				}
+				if !live {
+					delete(b.subs, topic)
+				}
+			}
 			b.unsubs = append(b.unsubs, topic)
 		})
 	}
 }
 
+// deliver hands payload to every live handler for topic.
 func (b *stubBus) deliver(topic string, payload []byte) {
 	b.mu.Lock()
-	h := b.subs[topic]
+	hs := make([]func([]byte), len(b.subs[topic]))
+	copy(hs, b.subs[topic])
 	b.mu.Unlock()
-	if h != nil {
-		h(payload)
+	for _, h := range hs {
+		if h != nil {
+			h(payload)
+		}
 	}
 }
 
