@@ -1483,21 +1483,63 @@ func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (in
 		batchSize = 100
 	}
 	cutoffID := aidxCutoffID(time.Now().Add(-time.Duration(expiryDays) * 24 * time.Hour))
+	// **ツリー単位で守る。**
+	//
+	// 単体の条件だけで消すと、**ローカル利用者が返信・引用・リノートした
+	// リモートノートが、その利用者の投稿を残したまま消える**。返信先の無い
+	// 返信や「削除されたノート」のリノートがタイムラインに残り、しかも
+	// 不可逆 (相手サーバーから取り直す経路は無い)。
+	//
+	// upstream `CleanRemoteNotesProcessorService` と同じ 3 段にする —
+	// (a) 起点をルート (`replyId IS NULL AND renoteId IS NULL`) に絞り、
+	// (b) 再帰 CTE で `replyId` / `renoteId` を辿ってツリー全体を作り、
+	// (c) 1 件でも削除不可のノートを含むツリーは丸ごと除外する。
+	//
+	// `removable` の条件は従来と同じ (`clippedCount` の扱いは上の doc を参照)。
+	//
+	// **保護そのものは (c) の anti-join が担う。** (a) の「起点をルートに絞る」は
+	// upstream に合わせた効率の話で、外しても結果は変わらない (子から辿っても
+	// 同じツリーに到達するため)。変異検証でもそこは検出できない。
 	res := r.db.Exec(`
-		DELETE FROM "note" WHERE id IN (
-			SELECT n.id FROM "note" n
+		WITH RECURSIVE roots AS (
+			SELECT n.id AS "rootId", n.id
+			FROM "note" n
 			WHERE n."userHost" IS NOT NULL
 			  AND n.id < ?
-			  AND n."clippedCount" = 0
-			  AND n."pageCount" = 0
-			  AND NOT EXISTS (SELECT 1 FROM "clip_note" c WHERE c."noteId" = n.id)
-			  AND NOT EXISTS (SELECT 1 FROM "user_note_pining" p WHERE p."noteId" = n.id)
-			  AND NOT EXISTS (SELECT 1 FROM "note_favorite" f WHERE f."noteId" = n.id)
-			  AND NOT EXISTS (
-			        SELECT 1 FROM "note_reaction" rc
-			        INNER JOIN "user" u ON u.id = rc."userId"
-			        WHERE rc."noteId" = n.id AND u.host IS NULL)
+			  AND n."replyId" IS NULL
+			  AND n."renoteId" IS NULL
 			LIMIT ?
+		),
+		tree AS (
+			SELECT r."rootId", r.id FROM roots r
+			UNION ALL
+			SELECT t."rootId", c.id
+			FROM "note" c
+			INNER JOIN tree t ON c."replyId" = t.id OR c."renoteId" = t.id
+		),
+		judged AS (
+			SELECT t."rootId", t.id,
+				(
+					n."userHost" IS NOT NULL
+					AND n."clippedCount" = 0
+					AND n."pageCount" = 0
+					AND NOT EXISTS (SELECT 1 FROM "clip_note" c WHERE c."noteId" = n.id)
+					AND NOT EXISTS (SELECT 1 FROM "user_note_pining" p WHERE p."noteId" = n.id)
+					AND NOT EXISTS (SELECT 1 FROM "note_favorite" f WHERE f."noteId" = n.id)
+					AND NOT EXISTS (
+						SELECT 1 FROM "note_reaction" rc
+						INNER JOIN "user" u ON u.id = rc."userId"
+						WHERE rc."noteId" = n.id AND u.host IS NULL)
+				) AS removable
+			FROM tree t
+			INNER JOIN "note" n ON n.id = t.id
+		)
+		DELETE FROM "note" WHERE id IN (
+			SELECT j.id FROM judged j
+			WHERE NOT EXISTS (
+				SELECT 1 FROM judged k
+				WHERE k."rootId" = j."rootId" AND k.removable = FALSE
+			)
 		)`, cutoffID, batchSize)
 	if res.Error != nil {
 		return 0, res.Error

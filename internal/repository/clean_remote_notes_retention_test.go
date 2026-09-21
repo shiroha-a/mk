@@ -169,3 +169,88 @@ func TestNoteRepository_DeleteExpiredRemoteNotes_CountersBlockDeletion(t *testin
 		})
 	}
 }
+
+// **ツリー単位で守ること。**
+//
+// 単体の条件だけで消すと、ローカル利用者が返信・引用・リノートしたリモート
+// ノートが、その利用者の投稿を残したまま消える。返信先の無い返信や「削除された
+// ノート」のリノートがタイムラインに残り、不可逆 (相手サーバーから取り直す
+// 経路は無い)。upstream は起点をルートに絞り、再帰 CTE でツリー全体を作り、
+// 1 件でも削除不可があればツリーごと除外する。
+func TestNoteRepository_DeleteExpiredRemoteNotes_KeepsTreeWithProtectedDescendant(t *testing.T) {
+	nr := NewNoteRepository(testDB)
+	host := "tree.example"
+
+	remoteUser := &model.User{
+		ID: "tree_remote", Username: "tree_remote", UsernameLower: "tree_remote",
+		Host: &host, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteUser).Error)
+	defer cleanupUser(t, remoteUser.ID)
+
+	localUser := &model.User{
+		ID: "tree_local", Username: "tree_local", UsernameLower: "tree_local",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(localUser).Error)
+	defer cleanupUser(t, localUser.ID)
+
+	// リモートのルートノート (期限切れ)。
+	root := &model.Note{
+		ID: "00000000treeroot", UserID: remoteUser.ID, UserHost: &host,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(root))
+	defer cleanupNote(t, root.ID)
+
+	// **ローカル利用者がぶら下げた返信。** これがある限りツリーごと守る。
+	reply := &model.Note{
+		ID: "00000000treerepl", UserID: localUser.ID, ReplyID: &root.ID,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(reply))
+	defer cleanupNote(t, reply.ID)
+
+	_, err := nr.DeleteExpiredRemoteNotes(1, 100)
+	require.NoError(t, err)
+
+	var count int64
+	require.NoError(t, testDB.Model(&model.Note{}).Where("id = ?", root.ID).Count(&count).Error)
+	require.EqualValues(t, 1, count,
+		"ローカル利用者の返信がぶら下がっているルートは消さないこと")
+}
+
+// 誰もぶら下がっていないリモートのツリーは従来どおり消えること。
+func TestNoteRepository_DeleteExpiredRemoteNotes_RemovesFullyRemoteTree(t *testing.T) {
+	nr := NewNoteRepository(testDB)
+	host := "tree2.example"
+
+	remoteUser := &model.User{
+		ID: "tree2_remote", Username: "tree2_remote", UsernameLower: "tree2_remote",
+		Host: &host, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteUser).Error)
+	defer cleanupUser(t, remoteUser.ID)
+
+	root := &model.Note{
+		ID: "00000000tre2root", UserID: remoteUser.ID, UserHost: &host,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(root))
+	defer cleanupNote(t, root.ID)
+
+	child := &model.Note{
+		ID: "00000000tre2chld", UserID: remoteUser.ID, UserHost: &host, ReplyID: &root.ID,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(child))
+	defer cleanupNote(t, child.ID)
+
+	_, err := nr.DeleteExpiredRemoteNotes(1, 100)
+	require.NoError(t, err)
+
+	var count int64
+	require.NoError(t, testDB.Model(&model.Note{}).
+		Where("id IN ?", []string{root.ID, child.ID}).Count(&count).Error)
+	require.EqualValues(t, 0, count, "全部リモートのツリーは従来どおり消えること")
+}
