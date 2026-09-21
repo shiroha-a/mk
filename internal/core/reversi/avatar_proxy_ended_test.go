@@ -28,13 +28,21 @@ import (
 // 依存しない)。
 func stubAvatarProxy(raw string) string { return "proxied:" + raw }
 
-// remoteReversiUsers returns a User1/User2 pair where user1 has a remote
-// avatar, so packGame's userLiteMap has something to proxy.
+// remoteReversiUsers returns a User1/User2 pair where BOTH users have
+// distinct remote avatars, so packGame's userLiteMap has something to proxy
+// for every UserLite slot it fills (user1 / user2 / winner).
+//
+// **user2 も remote avatar を持つ必要がある (#3130 review 3周目)。** 以前は
+// user2 が avatar 未設定 (identicon 枝) だったため、
+// `out["user2"] = userLiteMap(game.User2, avatarProxy)` の avatarProxy を
+// nil に戻しても userLiteMap 内の `avatarProxy != nil` 分岐自体が実行されず、
+// どのテストも検出できなかった。
 func remoteReversiUsers() (*model.User, *model.User) {
 	host := "remote.example"
-	avatar := "https://remote.example/a.png"
-	u1 := &model.User{ID: "alice", Username: "alice", Host: &host, AvatarURL: &avatar}
-	u2 := &model.User{ID: "bob", Username: "bob"}
+	avatar1 := "https://remote.example/a.png"
+	avatar2 := "https://remote.example/b.png"
+	u1 := &model.User{ID: "alice", Username: "alice", Host: &host, AvatarURL: &avatar1}
+	u2 := &model.User{ID: "bob", Username: "bob", Host: &host, AvatarURL: &avatar2}
 	return u1, u2
 }
 
@@ -56,16 +64,46 @@ func endedGamePayload(t *testing.T, pub *capturePublisher) map[string]any {
 	return nil
 }
 
-// assertAvatarProxied checks that user1's avatar in an ended-event game
-// payload went through SetAvatarProxy.
+// assertUserLiteAvatarProxied checks that a single UserLite map's avatarUrl
+// went through SetAvatarProxy.
+func assertUserLiteAvatarProxied(t *testing.T, userLite map[string]any, rawURL string) {
+	t.Helper()
+	got, _ := userLite["avatarUrl"].(*string)
+	require.NotNil(t, got, "avatarUrl must be present")
+	assert.Equal(t, "proxied:"+rawURL, *got,
+		"avatar url did not go through SetAvatarProxy")
+}
+
+// assertAvatarProxied checks that user1's AND user2's avatars in an
+// ended-event game payload went through SetAvatarProxy, and — when the
+// payload includes a winner (Surrender / CheckTimeout always set one) —
+// that the winner slot did too.
+//
+// **3 スロットとも独立した packGame の呼び出し行 (#3130 review 3周目)。**
+// `out["user1"] = userLiteMap(game.User1, avatarProxy)` /
+// `out["user2"] = ...` / `out["winner"] = ...` はそれぞれ別行なので、
+// user1 だけを見るテストでは user2 枝や winner 枝の avatarProxy を
+// nil に戻す変異を検出できない。winner がどちらのユーザー由来かは
+// 呼び出し側で決め打たず、winner map の id から判定する。
 func assertAvatarProxied(t *testing.T, game map[string]any) {
 	t.Helper()
 	u1, ok := game["user1"].(map[string]any)
 	require.True(t, ok, "ended payload must include user1")
-	got, _ := u1["avatarUrl"].(*string)
-	require.NotNil(t, got, "user1.avatarUrl must be present")
-	assert.Equal(t, "proxied:https://remote.example/a.png", *got,
-		"ended payload's avatar url did not go through SetAvatarProxy")
+	assertUserLiteAvatarProxied(t, u1, "https://remote.example/a.png")
+
+	u2, ok := game["user2"].(map[string]any)
+	require.True(t, ok, "ended payload must include user2")
+	assertUserLiteAvatarProxied(t, u2, "https://remote.example/b.png")
+
+	winner, ok := game["winner"].(map[string]any)
+	if !ok {
+		return
+	}
+	wantRaw := "https://remote.example/a.png"
+	if id, _ := winner["id"].(string); id == "bob" {
+		wantRaw = "https://remote.example/b.png"
+	}
+	assertUserLiteAvatarProxied(t, winner, wantRaw)
 }
 
 // **HasAvatarProxy 自体を core パッケージ内で直接演習する。** これまで
