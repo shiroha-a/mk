@@ -186,6 +186,11 @@ type Service struct {
 	deliverer FederationDeliverer
 	userRepo  UserLookup
 	baseURL   string
+	// avatarProxy rewrites avatar URLs through the media proxy when packing
+	// stream payloads (#1529)。core 層は entity に依存できないため関数
+	// ポインタで受ける (SetUserRepo と同じ配線 pattern)。nil のときは生 URL を
+	// 返す = 未配線 / テスト互換。
+	avatarProxy func(string) string
 }
 
 // NewService constructs a Service with the required dependencies.
@@ -214,6 +219,24 @@ func (s *Service) SetFederationDeliverer(d FederationDeliverer) {
 // actor / opponent Host / URI。
 func (s *Service) SetUserRepo(r UserLookup) {
 	s.userRepo = r
+}
+
+// SetAvatarProxy attaches the media-proxy URL rewriter used when packing
+// avatars into stream payloads.
+//
+// **配線しないと stream の game payload だけ avatar が生 URL になる。**
+// REST 側 (`internal/api/reversi/handler.go` の packGame) は
+// entity.PackUserLite で proxy 済みの URL を返すが、ここは #417 で entity 依存
+// を外した自前 packer なので、同じ書き換えを関数ポインタで受ける (#1529)。
+// nil のときは生 URL (既存互換 / テスト)。
+func (s *Service) SetAvatarProxy(fn func(string) string) {
+	s.avatarProxy = fn
+}
+
+// HasAvatarProxy reports whether SetAvatarProxy was wired. router の配線漏れを
+// 起動時に落とすための predicate (internal/server/wiring_check.go)。
+func (s *Service) HasAvatarProxy() bool {
+	return s.avatarProxy != nil
 }
 
 // SetBaseURL records the local instance base URL (https://<host>) used to
@@ -531,7 +554,7 @@ func (s *Service) StartGame(ctx context.Context, game *model.ReversiGame) error 
 	}
 	// 初期ターンタイマー: logsCount=0 (まだ一手も置かれていない)
 	s.setTurnTimer(ctx, game.ID, 0, game.TimeLimitForEachTurn)
-	s.publish(game.ID, "started", map[string]any{"game": packGame(game)})
+	s.publish(game.ID, "started", map[string]any{"game": packGame(game, s.avatarProxy)})
 	return nil
 }
 
@@ -646,7 +669,7 @@ func (s *Service) PutStone(ctx context.Context, gameID, userID string, pos int, 
 	if engine.Turn == nil {
 		s.publish(gameID, "ended", map[string]any{
 			"winnerId": game.WinnerID,
-			"game":     packGame(game),
+			"game":     packGame(game, s.avatarProxy),
 		})
 	}
 	// 連合対戦の場合は putstone Update を相手に配信 (#417 P1)。ゲーム終了
@@ -710,7 +733,7 @@ func (s *Service) Surrender(ctx context.Context, gameID, userID string) error {
 	s.publish(gameID, "ended", map[string]any{
 		"winnerId": winnerID,
 		"reason":   "surrender",
-		"game":     packGame(game),
+		"game":     packGame(game, s.avatarProxy),
 	})
 	// 連合対戦の場合は Leave を相手に配信 (#417 P1)。配信後に fedCache を
 	// 片付ける (session mapping 参照が Leave 配信側に必要)。
@@ -765,7 +788,7 @@ func (s *Service) CheckTimeout(ctx context.Context, gameID string) error {
 	s.publish(gameID, "ended", map[string]any{
 		"winnerId": winnerID,
 		"reason":   "timeout",
-		"game":     packGame(game),
+		"game":     packGame(game, s.avatarProxy),
 	})
 	s.cleanupFedCache(ctx, gameID)
 	return nil
@@ -990,7 +1013,12 @@ func EngineFromGame(game *model.ReversiGame) (*Game, error) {
 // packGame is a minimal JSON projection used by event bodies. 詳細ペイロード
 // は api ハンドラ側の packGame を使うため、ここでは stream 配信に必要な最小の
 // フィールドのみ含める。
-func packGame(game *model.ReversiGame) map[string]any {
+//
+// avatarProxy は SetAvatarProxy で注入される media proxy の書き換え関数。
+// nil のときは avatar を生 URL のまま返す (未配線 / テスト)。REST 側の
+// packGame は entity.PackUserLite 経由で必ず proxy するため、配線時は同じ
+// 関数 (entity.ProxyAvatarURLString) を渡して等価にする。
+func packGame(game *model.ReversiGame, avatarProxy func(string) string) map[string]any {
 	out := map[string]any{
 		"id":                   game.ID,
 		"user1Id":              game.User1ID,
@@ -1019,10 +1047,10 @@ func packGame(game *model.ReversiGame) map[string]any {
 	// キー省略。entity パッケージに依存せず最小限のフィールドだけ手で組み
 	// 立てる (#417 Devin review: CLAUDE.md layer rule core → entity 禁止)。
 	if game.User1 != nil {
-		out["user1"] = userLiteMap(game.User1)
+		out["user1"] = userLiteMap(game.User1, avatarProxy)
 	}
 	if game.User2 != nil {
-		out["user2"] = userLiteMap(game.User2)
+		out["user2"] = userLiteMap(game.User2, avatarProxy)
 	}
 	// winner は upstream Misskey TS の ReversiGameEntityService.packDetail と
 	// 同じく winnerId から派生させて UserLite として埋める。frontend
@@ -1030,9 +1058,9 @@ func packGame(game *model.ReversiGame) map[string]any {
 	// winnerId だけでは draw に倒れて #649 の症状になる。
 	if game.WinnerID != nil {
 		if game.User1 != nil && game.User1.ID == *game.WinnerID {
-			out["winner"] = userLiteMap(game.User1)
+			out["winner"] = userLiteMap(game.User1, avatarProxy)
 		} else if game.User2 != nil && game.User2.ID == *game.WinnerID {
-			out["winner"] = userLiteMap(game.User2)
+			out["winner"] = userLiteMap(game.User2, avatarProxy)
 		}
 	}
 	return out
@@ -1042,7 +1070,12 @@ func packGame(game *model.ReversiGame) map[string]any {
 // entity package (core layer must not depend on presentation layer).
 // フィールドは entity.PackUserLite の必須部分のみ (optional な TS 互換
 // フィールドは省略)。avatar が空なら identicon URL を返すのは本家互換。
-func userLiteMap(u *model.User) map[string]any {
+//
+// avatar が設定されている場合は avatarProxy (SetAvatarProxy) を通す。
+// **ここが生 URL のままだと stream の game payload だけ閲覧者の IP が
+// remote server へ漏れる** — REST 側 (entity.PackUserLite) は proxy 済みなので、
+// 同じゲームを 2 経路で見た時に avatar の URL が食い違う (#1529)。
+func userLiteMap(u *model.User, avatarProxy func(string) string) map[string]any {
 	avatarURL := u.AvatarURL
 	if avatarURL == nil || *avatarURL == "" {
 		host := ""
@@ -1051,6 +1084,9 @@ func userLiteMap(u *model.User) map[string]any {
 		}
 		identicon := "/identicon/" + u.Username + host
 		avatarURL = &identicon
+	} else if avatarProxy != nil {
+		proxied := avatarProxy(*avatarURL)
+		avatarURL = &proxied
 	}
 	return map[string]any{
 		"id":                u.ID,

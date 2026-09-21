@@ -3665,6 +3665,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	reversiService.SetFederationDeliverer(deliverService)
 	reversiService.SetUserRepo(userRepo)
 	reversiService.SetBaseURL(s.config.URL)
+	// stream の game payload (started / update 系) の avatar も media proxy 経由に
+	// する (#1529)。REST 側 (entity.PackUserLite) と同じ関数を渡して、同じ
+	// ゲームを 2 経路で見たときに avatar URL が食い違わないようにする。
+	reversiService.SetAvatarProxy(entity.ProxyAvatarURLString)
 	// 連合 inbox 経由の invite 受信時にも local 被招待者の reversi stream に
 	// `invited` を push する (#417 P2: リアルタイム招待)。
 	federationProcessor.SetReversiStreamPublisher(reversiPublisher)
@@ -4261,6 +4265,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"isBlockedByTarget が常に false になり、被ブロック中の相手の users/notes・reactions・featured-notes が読める"},
 		{"notes.renoteMutingRepo", notesHandler.HasRenoteMutingRepo(),
 			"renote ミュートが read 時に一切効かない"},
+		{"reversi.avatarProxy", reversiService.HasAvatarProxy(),
+			"reversi の stream game payload の対戦相手 avatar が生 URL に戻り、閲覧者の IP がリモートサーバーへ漏れる (REST 側だけ proxy 済みで非対称になる)"},
 	})
 }
 
