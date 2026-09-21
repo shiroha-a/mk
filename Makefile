@@ -1097,7 +1097,7 @@ iprecord-check: ## 利用者の IP を記録する call site が allowlist の�
 	# 「どこからも呼ばれていない」は構造的な性質で、endpoint ごとの振る舞い
 	# テストは叩いた経路しか見ない (実測で `SigninFlow` と signin-with-passkey に
 	# 記録を足す変異が素通りした)。
-	go test ./internal/entitycompat/... -run 'TestIPRecordCallSitesAreAllowlisted|TestPasskeyIPRecordComesAfterFailures' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestIPRecordCallSitesAreAllowlisted|TestRecordSuccessfulSigninCallSitesAreAllowlisted|TestPasskeyIPRecordComesAfterFailures' -count=1 -v
 
 .PHONY: dockerignore-check
 dockerignore-check: ## .dockerignore がシークレットと利用者データを除外しているか検査

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,6 +217,81 @@ func TestFinishPasskeySignin_PasswordlessNotEnabled(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	errMap := resp["error"].(map[string]any)
 	assert.Equal(t, "2d84773e-f7b7-4d0b-8f72-bb69b584c912", errMap["id"])
+}
+
+// パスキーの失敗経路が IP を記録しないことを固定する (#3135)。
+//
+// **静的ゲートだけでは塞がらない。** `internal/entitycompat` の allowlist は
+// `<file>#<func>` の粒度なので、**allowlist 済みの `finishPasskeySignin` の中に
+// `Record` を足す**変異も、そこから allowlist 済みの `RecordSuccessfulSignin` を
+// 呼ぶ変異も、call site の一覧としては何も変わらない (実測でどちらも素通りした)。
+// しかも `signin-with-passkey` は振る舞いテストを 1 つも持っていなかったので、
+// 両側とも空白だった。
+//
+// **成功側も同じテストで見る。** 失敗側だけだと、recorder を配線し忘れた状態
+// (= 何をしても記録されない) が緑で通る。
+func TestFinishPasskeySignin_FailuresDoNotRecordIP(t *testing.T) {
+	newHandler := func(t *testing.T, passwordless bool, withProfile bool) (*Handler, *countingIPRecorder) {
+		t.Helper()
+		repo := testutil.NewMockUserRepository()
+		tok := "Tk-1"
+		repo.Users["u1"] = &model.User{ID: "u1", Token: &tok}
+		if withProfile {
+			repo.Profiles["u1"] = &model.UserProfile{UserID: "u1", UsePasswordLessLogin: passwordless}
+		}
+		h := NewHandler(repo)
+		rec := &countingIPRecorder{}
+		h.SetIPRecorder(rec)
+		return h, rec
+	}
+
+	for _, tc := range []struct {
+		name string
+		user *model.User
+		// withProfile / passwordless は fixture の作り分け。
+		withProfile  bool
+		passwordless bool
+	}{
+		{name: "nil user", user: nil, withProfile: true},
+		{name: "suspended", user: &model.User{ID: "u1", IsSuspended: true}, withProfile: true},
+		{name: "no profile", user: &model.User{ID: "u1"}, withProfile: false},
+		{name: "passwordless disabled", user: &model.User{ID: "u1"}, withProfile: true, passwordless: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ipRec := newHandler(t, tc.passwordless, tc.withProfile)
+			c := newCtx()
+			rec := c.Response().Writer.(*httptest.ResponseRecorder)
+			require.NoError(t, h.finishPasskeySignin(c, tc.user, nil))
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Zero(t, ipRec.n(), "失敗したパスキー認証の IP を記録している")
+		})
+	}
+
+	t.Run("success records", func(t *testing.T) {
+		h, ipRec := newHandler(t, true, true)
+		c := newCtx()
+		rec := c.Response().Writer.(*httptest.ResponseRecorder)
+		require.NoError(t, h.finishPasskeySignin(c, &model.User{ID: "u1"}, nil))
+		require.Equal(t, http.StatusOK, rec.Code)
+		assert.Equal(t, 1, ipRec.n(), "成功したパスキー認証の IP が記録されていない")
+	})
+}
+
+type countingIPRecorder struct {
+	mu sync.Mutex
+	c  int
+}
+
+func (r *countingIPRecorder) Record(_, _ string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.c++
+}
+
+func (r *countingIPRecorder) n() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.c
 }
 
 func TestFinishPasskeySignin_Success(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/signin"
@@ -16,9 +17,10 @@ import (
 type ipRecordCall struct{ userID, ip string }
 
 type ipFixture struct {
-	h      *signin.Handler
-	userID string
-	seen   func() []ipRecordCall
+	h          *signin.Handler
+	userID     string
+	seen       func() []ipRecordCall
+	signinRepo *testutil.MockSigninRepository
 }
 
 // 失敗したサインインの IP を `user_ip` に記録しないことを固定する (#3135)。
@@ -44,11 +46,12 @@ func TestSignin_FailedAttemptsDoNotRecordIP(t *testing.T) {
 		h, repo := newTestHandler(t)
 		user := createTestUser(repo, "testuser", "password123")
 		// **`signinRepo` を配線する。** 無いと `fail()` が中で分岐して goroutine を
-		// 起動しなくなり、本番と違う経路を測ることになる。**ただし signins の中身は
-		// 見ない** — あの記録は `go h.recordSignin(...)` で非同期なので、待ちを
-		// 入れると flaky になるうえ、mock の slice を読む側が lock を取らず race に
-		// なる。「`fail()` が recorder を呼ばない」ことは静的ゲート
-		// (`ip_record_sites_gate_test.go` の allowlist) が構造として保証する。
+		// 起動しなくなり、本番と違う経路を測ることになる。記録は
+		// `go h.recordSignin(...)` で非同期だが、mock は mutex 付きの `Len()` を
+		// 公開しているので `require.Eventually` で待てる (同 package の
+		// `handler_test.go` が既にその形で待っている)。**待たないと空虚化に
+		// 気付けない** — 将来 `fail()` に入る前に 403 を返すようになっても、
+		// IP は記録されないままなのでアサーションは通ってしまう。
 		signinRepo := testutil.NewMockSigninRepository()
 		idGen, err := id.NewGenerator("aidx")
 		require.NoError(t, err)
@@ -62,8 +65,9 @@ func TestSignin_FailedAttemptsDoNotRecordIP(t *testing.T) {
 			calls = append(calls, ipRecordCall{userID, ip})
 		}})
 		return ipFixture{
-			h:      h,
-			userID: user.ID,
+			h:          h,
+			userID:     user.ID,
+			signinRepo: signinRepo,
 			seen: func() []ipRecordCall {
 				mu.Lock()
 				defer mu.Unlock()
@@ -88,13 +92,20 @@ func TestSignin_FailedAttemptsDoNotRecordIP(t *testing.T) {
 			f := newFixture(t)
 			rec := doPost(ep.pick(f.h), `{"username":"testuser","password":"wrong"}`)
 			require.Equal(t, http.StatusForbidden, rec.Code)
+			// **`fail()` に届いたことを確かめる。** ここが空振りすると「IP を
+			// 記録しない」は自明に真になる。
+			require.Eventually(t, func() bool { return f.signinRepo.Len() == 1 },
+				2*time.Second, 10*time.Millisecond, "`fail()` が失敗を記録していない")
 			assert.Empty(t, f.seen(), "失敗したサインインの IP を記録している")
 		})
 
 		t.Run(ep.name+"/unknown user", func(t *testing.T) {
 			f := newFixture(t)
 			rec := doPost(ep.pick(f.h), `{"username":"nosuchuser","password":"password123"}`)
-			require.NotEqual(t, http.StatusOK, rec.Code)
+			// **「200 でなければよい」にしない。** handler が別の理由 (400 など) で
+			// 早期 return しても緑になり、測りたい分岐に入らなくなる (実測で
+			// 404 が返る。この経路は利用者が解決できないので `fail()` は通らない)。
+			require.Equal(t, http.StatusNotFound, rec.Code)
 			assert.Empty(t, f.seen(), "存在しない利用者のサインイン試行で IP を記録している")
 		})
 
