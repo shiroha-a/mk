@@ -37,3 +37,24 @@ func TestFeedAvatarURLIsWired(t *testing.T) {
 		"フィード (RSS/Atom/JSON) の avatar が生の remote URL のまま配られ、"+
 			"購読者の IP が漏れる (#1529)")
 }
+
+// reversi の stream game payload (started / update / ended) の avatar は
+// router.go が `reversiService.SetAvatarProxy(entity.ProxyAvatarURLString)`
+// で REST 側 (entity.PackUserLite) と同じ proxy 関数を渡すことで揃う
+// (internal/core/reversi は entity パッケージに依存できないので関数を注入する
+// 形。#417 の layer 規約)。
+//
+// `reversiService.HasAvatarProxy()` の criticalWiring nil チェックは「配線
+// されているか」しか見ないので、**別のモードの proxy 関数へ差し替えても
+// 素通りする** (`entity.ProxyMediaURL` (image.webp) を渡しても nil ではない
+// ので起動時ゲートは緑のまま、REST 側の avatar.webp と食い違う。#3130
+// review 3周目)。`TestPackGame_RESTAndStreamAgreeOnProxiedAvatar` はテスト
+// 自身が `svc.SetAvatarProxy(entity.ProxyAvatarURLString)` を呼ぶので、
+// router.go 側の引数違いは原理的に見えない。既存 gate と同じく引数まで
+// 含めて router.go のソースを直接固定する。
+func TestReversiAvatarProxyIsWired(t *testing.T) {
+	assertWired(t, routerGo,
+		"reversiService.SetAvatarProxy(entity.ProxyAvatarURLString)",
+		"reversi stream の avatar が REST 側と別モードの proxy 関数を経由し、"+
+			"同じゲームを 2 経路で見たときに avatar URL が食い違う (#1529)")
+}
