@@ -16,7 +16,7 @@ import (
 //   - /api/drive/files/create → maxFileSize + multipart framing の余白
 //   - /api/drive/files/create-chunked/append → 33MiB
 //   - /api/plugin/<name>/_peer → pluginPeerLimits が持つプラグインごとの値
-//   - その他 → 制限なし
+//   - その他 → 1MiB (upstream の fastify 既定と同値)
 //
 // これは **auth.Authenticate より前** (global pre-auth) に登録する必要がある。
 // auth.Authenticate は token 抽出のため body を io.ReadAll する (extractToken) が、
@@ -54,6 +54,20 @@ import (
 func BodyLimitByPath(maxFileSize int64, pluginPeerLimits map[string]int64) echo.MiddlewareFunc {
 	apiBL := emiddleware.BodyLimit("1MiB")    // = 1024*1024 = 1048576
 	inboxBL := emiddleware.BodyLimit("64KiB") // = 1024*64   = 65536
+	// **既知のパス以外も上限を持たせる。**
+	//
+	// かつてここは `next(c)` で無制限だった。上の doc が /api について
+	// 書いている穴 (auth.Authenticate が token 抽出で body を読むので、
+	// route の認証より前に消費が起きる) は **パスを問わず成立する** —
+	// echo は未登録のパスでも global middleware を通すので、`POST /` でも
+	// 存在しないパスでも `io.ReadAll` が全量をヒープに載せる。404/405 を
+	// 返す前の出来事なので、ルートの存在すら要らない。
+	//
+	// upstream は `Fastify({...})` で bodyLimit を上書きしていないので、
+	// fastify 既定の 1MiB が **404 ルートを含む全ルート**に効く。加えて
+	// upstream は body を読む global hook を持たない (token を読むのは
+	// /api のルート内だけ)。ここを同値にすることで揃う。
+	defaultBL := emiddleware.BodyLimit("1MiB")
 	// upstream の limits.fileSize は **ファイル本体**に掛かるが、こちらは body
 	// 全体に掛かる。boundary / part header / 同送される他フィールド (i など) の
 	// 分だけ余白を足さないと、maxFileSize ちょうどのファイルが弾かれる。
@@ -76,6 +90,7 @@ func BodyLimitByPath(maxFileSize int64, pluginPeerLimits map[string]int64) echo.
 		// next は router dispatch、pool 構築も 1 度きり。
 		apiNext := apiBL(next)
 		inboxNext := inboxBL(next)
+		defaultNext := defaultBL(next)
 		chunkNext := chunkBL(next)
 		uploadNext := uploadBL(next)
 		peerNext := make(map[string]echo.HandlerFunc, len(pluginPeerLimits))
@@ -103,7 +118,7 @@ func BodyLimitByPath(maxFileSize int64, pluginPeerLimits map[string]int64) echo.
 			case isInboxPath(p):
 				return inboxNext(c)
 			}
-			return next(c)
+			return defaultNext(c)
 		}
 	}
 }

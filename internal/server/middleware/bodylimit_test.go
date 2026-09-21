@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 
 	"github.com/labstack/echo/v4"
@@ -13,7 +14,7 @@ import (
 )
 
 // #2075: BodyLimitByPath は path 別に body size を cap する (/api 1MiB / inbox 64KiB /
-// upload は maxFileSize ベース / その他 無制限)。超過は 413。
+// upload は maxFileSize ベース / その他 1MiB)。超過は 413。
 func TestBodyLimitByPath(t *testing.T) {
 	// テスト内で扱いやすいよう小さめの maxFileSize を渡す。実際の既定は 250MB。
 	const testMaxFileSize int64 = 4 * 1024 * 1024
@@ -89,8 +90,11 @@ func TestBodyLimitByPath(t *testing.T) {
 	// いないことを固定する。
 	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/api/drive/files/create-chunked/start", "application/json", mb+1, false), "start は 1MiB のまま")
 
-	// 制限対象外 path は無制限。
-	assert.Equal(t, http.StatusOK, post("/nolimit", "application/json", 2*mb, false), "対象外 path は無制限")
+	// **その他のパスも 1MiB で切る。** 無制限にすると、global な
+	// auth.Authenticate が token 抽出で body を丸ごと読むため、未登録の
+	// パス (404/405) にさえ巨大な body を送るだけでメモリを食える。
+	assert.Equal(t, http.StatusOK, post("/nolimit", "application/json", 1*mb-1024, false), "1MiB 未満は通る")
+	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/nolimit", "application/json", 2*mb, false), "対象外 path も 1MiB で 413")
 }
 
 // upload の上限は「設定が無い / 壊れている」場合でも必ず掛かる。ここが
@@ -182,4 +186,57 @@ func TestBodyLimitByPath_PluginPeer(t *testing.T) {
 	assert.Equal(t, http.StatusRequestEntityTooLarge, post("/api/plugin/small/_peer", int(small)+1, true), "chunked でも 413")
 	// 表に無いプラグインは /api の 1MiB のまま。
 	assert.Equal(t, http.StatusOK, post("/api/plugin/other/_peer", int(small)+1, false), "表に無いパスは /api の上限")
+}
+
+// **未登録のパスでも上限が効くこと。**
+//
+// これが H-1 の本体。echo は未マッチのパスでも global middleware を通すので、
+// ルートが存在しなくても body を読む middleware (auth.Authenticate) が動く。
+// 404/405 を返す前にヒープへ載るため、「存在しないパスだから安全」は成立しない。
+func TestBodyLimitByPath_AppliesToUnregisteredPaths(t *testing.T) {
+	t.Parallel()
+
+	const maxFileSize int64 = 4 * 1024 * 1024
+
+	e := echo.New()
+	e.Use(BodyLimitByPath(maxFileSize, nil))
+	// **global middleware が body を読む**状況を再現する。本番では
+	// auth.Authenticate の extractToken がこれを行う。
+	var read int64
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		return func(c echo.Context) error {
+			n, _ := io.Copy(io.Discard, c.Request().Body)
+			atomic.AddInt64(&read, n)
+			return next(c)
+		}
+	})
+	e.POST("/api/meta", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+
+	post := func(path string, n int) int {
+		req := httptest.NewRequest(http.MethodPost, path,
+			bytes.NewReader(bytes.Repeat([]byte("a"), n)))
+		req.Header.Set(echo.HeaderContentType, "application/json")
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec.Code
+	}
+
+	const mb = 1024 * 1024
+
+	for _, path := range []string{
+		"/",                       // ルート (405 になるパス)
+		"/definitely-not-a-route", // 未登録 (404)
+		"/oauth/token",            // api グループの外の実在ルート相当
+		"/proxy/x.png",
+	} {
+		atomic.StoreInt64(&read, 0)
+		code := post(path, 4*mb)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, code,
+			"%s: 4MiB は 413 で止まるべき", path)
+		assert.LessOrEqual(t, atomic.LoadInt64(&read), int64(mb+1),
+			"%s: 上限を超える量を読んではいけない (読んだ %d バイト)", path, atomic.LoadInt64(&read))
+	}
+
+	// 1MiB 未満は従来どおり通る (404/405 は返るが、body 上限では止まらない)。
+	assert.NotEqual(t, http.StatusRequestEntityTooLarge, post("/definitely-not-a-route", 512*1024))
 }
