@@ -10,10 +10,18 @@ import (
 // these and use them when their TOTP device is unavailable.
 const BackupCodeCount = 5
 
-// BackupCodeBytes is the number of random bytes per code. 16 hex chars (8
-// bytes) is short enough to type but long enough to resist brute-force
-// guessing — assuming each code is single-use the keyspace is 2^64 per code.
-const BackupCodeBytes = 8
+// BackupCodeBytes is the number of random bytes per code.
+//
+// **upstream と同じ 20 バイト (160bit)。** かつては 8 バイト (64bit) で、
+// コメントは "long enough" と書いていたが upstream 比で 96bit 落としている
+// ことに触れていなかった (`i/2fa/done.ts` は `new OTPAuth.Secret().base32`
+// = 既定 20 バイト)。オンライン総当たりはレート制限で防げるが、ハッシュ化
+// されていない値をこの長さで持つ理由も無い。
+//
+// **既存のコードは引き続き検証できる。** 照合は保存済みの値との比較なので、
+// 長さを変えても古い 16 hex 文字のコードはそのまま使える。次に再発行した
+// ときから新しい長さになる。
+const BackupCodeBytes = 20
 
 // ErrBackupCodeMismatch is returned when ConsumeBackupCode does not find the
 // supplied code in the user's backup list.
