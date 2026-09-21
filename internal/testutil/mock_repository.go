@@ -24,7 +24,9 @@ var mockLocalUsernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_]{1,20}$`)
 // MockUserRepository is a test double for repository.UserRepository.
 type MockUserRepository struct {
 	// CountLocalUsersErr forces CountLocalUsers to fail (fail-closed の枝用)。
-	CountLocalUsersErr        error
+	CountLocalUsersErr error
+	// EmailInUseErr forces EmailVerifiedInUse to fail (fail-closed の枝用)。
+	EmailInUseErr             error
 	Users                     map[string]*model.User        // keyed by ID
 	Tokens                    map[string]*model.User        // keyed by token
 	Profiles                  map[string]*model.UserProfile // keyed by userID
@@ -414,6 +416,19 @@ func (m *MockUserRepository) FindProfileByEmail(email string) (*model.UserProfil
 		}
 	}
 	return nil, ErrNotFound
+}
+
+// EmailVerifiedInUse reports whether a confirmed profile already uses email.
+func (m *MockUserRepository) EmailVerifiedInUse(email string) (bool, error) {
+	if m.EmailInUseErr != nil {
+		return false, m.EmailInUseErr
+	}
+	for _, p := range m.Profiles {
+		if p.Email != nil && *p.Email == email && p.EmailVerified {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (m *MockUserRepository) IncrementFollowingCount(userID string, delta int) error {

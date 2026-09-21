@@ -2,6 +2,7 @@ package signup
 
 import (
 	"errors"
+	"log/slog"
 	"math"
 	"net/http"
 	"time"
@@ -234,6 +235,18 @@ func (h *Handler) ApplicationRegister(c echo.Context) error {
 			// 別のことを言うと、client がどちらか一方の文言しか出せない。**
 			return c.JSON(http.StatusBadRequest,
 				apierr.Error("EMAIL_UNAVAILABLE", "Email is not available.", "a25440a9-451e-41de-b291-00a8f29fbca6"))
+		}
+		// **確認済みの重複を弾く** (signup / i/update-email と同じ理由)。
+		if h.userRepo != nil {
+			inUse, ierr := h.userRepo.EmailVerifiedInUse(req.EmailAddress)
+			if ierr != nil {
+				slog.Error("signup-application: cannot check whether the email is in use", "err", ierr)
+				return apierr.JSONInternalError(c)
+			}
+			if inUse {
+				return c.JSON(http.StatusBadRequest,
+					apierr.Error("EMAIL_UNAVAILABLE", "Email is not available.", "a25440a9-451e-41de-b291-00a8f29fbca6"))
+			}
 		}
 	}
 

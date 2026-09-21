@@ -77,6 +77,9 @@ type UserRepository interface {
 	ListRemoteInboxes() ([]model.RemoteInbox, error)
 	FindProfileByVerifyCode(code string) (*model.UserProfile, error)
 	FindProfileByEmail(email string) (*model.UserProfile, error)
+	// EmailVerifiedInUse reports whether a confirmed account already uses
+	// the address. 登録・変更の**書き込み側**で使う。
+	EmailVerifiedInUse(email string) (bool, error)
 	CountOnlineUsers() (int64, error)
 	// CountLocalUsers returns the number of non-deleted local users, used by
 	// nodeinfo `usage.users.total` (#403).
@@ -562,6 +565,32 @@ func (r *userRepository) FindProfileByEmail(email string) (*model.UserProfile, e
 		return nil, err
 	}
 	return &p, nil
+}
+
+// EmailVerifiedInUse reports whether a confirmed account already uses email.
+//
+// **書き込み側で使う。** かつて重複判定は `email-address/available` にしか
+// 実装がなく、実際に書く 3 経路 (signup / `i/update-email` /
+// `signup-application/register`) はどれも通っていなかった。DB にも UNIQUE が
+// 無いので、1 つのメールボックスから無制限にアカウントを作れたうえ、他人が
+// 確認済みのアドレスを自分のプロフィールに設定できた。
+//
+// upstream は `EmailService.validateEmailForAccount` の
+// `countBy({emailVerified:true, email})` を全経路が通る。
+//
+// **確認済みの行だけを見る** — 未認証の行まで見ると、他人のアドレスを登録途中で
+// 放置するだけで本人の登録を妨害できる。
+func (r *userRepository) EmailVerifiedInUse(email string) (bool, error) {
+	if !storable(email) {
+		return false, nil
+	}
+	var count int64
+	if err := r.db.Model(&model.UserProfile{}).
+		Where(`"email" = ? AND "emailVerified" = ?`, email, true).
+		Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }
 
 // ListRemoteInboxes returns a deduplicated list of inbox URLs belonging to

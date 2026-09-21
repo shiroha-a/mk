@@ -3,6 +3,7 @@ package i
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"log/slog"
 	"net/http"
 
 	"github.com/labstack/echo/v4"
@@ -108,6 +109,21 @@ func (h *Handler) UpdateEmail(c echo.Context) error {
 				if verr := svc.Validate(c.Request().Context(), addr); verr != nil {
 					return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Email is not available.", "a2defefb-f220-8849-0af6-17f816099323"))
 				}
+			}
+		}
+		// **確認済みの重複を弾く。** 他人が確認済みのアドレスを設定できると、
+		// 確認メールがその相手に飛び、相手が (自分宛だと思って) リンクを踏むと
+		// `/api/verify-email` は未認証・コードのみで照合するため**こちら側の
+		// プロフィール**が確認済みになる。以後そのアドレスに攻撃者アカウントの
+		// 通知が届き、アビューズ調査でアドレスが一意識別子として使えなくなる。
+		if h.userRepo != nil {
+			inUse, ierr := h.userRepo.EmailVerifiedInUse(addr)
+			if ierr != nil {
+				slog.Error("i/update-email: cannot check whether the email is in use", "err", ierr)
+				return apierr.JSONInternalError(c)
+			}
+			if inUse {
+				return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Email is not available.", "a2defefb-f220-8849-0af6-17f816099323"))
 			}
 		}
 		fields["email"] = addr

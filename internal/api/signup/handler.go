@@ -243,6 +243,22 @@ func (h *Handler) Signup(c echo.Context) error {
 		if verr := validateEmailWithMeta(c.Request().Context(), meta, req.EmailAddress, h.emailValidationClient); verr != nil {
 			return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Email is not available.", "a25440a9-451e-41de-b291-00a8f29fbca6"))
 		}
+		// **確認済みの重複を弾く。** 判定は `email-address/available` にしか
+		// 実装が無く、実際に書くここは通っていなかった。upstream は
+		// `validateEmailForAccount` を全経路が通る。DB にも UNIQUE が無いので、
+		// 1 つのメールボックスから無制限にアカウントを作れた
+		// (`emailRequiredForSignup` が sockpuppet 対策として期待する性質が失われる)。
+		if h.userRepo != nil {
+			inUse, ierr := h.userRepo.EmailVerifiedInUse(req.EmailAddress)
+			if ierr != nil {
+				// **判定できないときは通さない。** 重複検査を素通りさせない。
+				slog.Error("signup: cannot check whether the email is in use", "err", ierr)
+				return apierr.JSONInternalError(c)
+			}
+			if inUse {
+				return c.JSON(http.StatusBadRequest, apierr.Error("UNAVAILABLE", "Email is not available.", "a25440a9-451e-41de-b291-00a8f29fbca6"))
+			}
+		}
 		// 招待制併用時は ticket.ID を pending row に保存しておき、
 		// PromotePending 完了時に MarkUsed で消費する (#600 item 5)。
 		var ticketID *string

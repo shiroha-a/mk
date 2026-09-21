@@ -451,3 +451,5 @@ func TestReset_DBFailureIsNot4xx(t *testing.T) {
 	rec := post(h.Reset, `{"token":"t","password":"newpassword"}`)
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
+
+func (m *mockUserRepo) EmailVerifiedInUse(string) (bool, error) { return false, nil }
