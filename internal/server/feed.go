@@ -251,6 +251,18 @@ type feedHandler struct {
 // 未認証で取得でき、購読者 (第三者クライアント) は remote origin を直接
 // 取りに行く。identicon fallback は entity.IdenticonURL が proxy 込みで
 // 面倒を見る。
+//
+// **`u.AvatarURL` 分岐は現状 entity.IdenticonURL の同じ分岐と完全に等価**
+// (どちらも `entity.ProxyAvatarURLString` 1 発)。`feedHandler` は
+// `FindLocalByUsername` でしか user を引かないため、この分岐が実際に
+// remote origin の avatar を受け取ることは無い — 本番で到達する leak 経路は
+// ローカル system account の `meta.iconUrl` (username に `.` を含む local
+// user を IdenticonURL が system account とみなして解決する) で、そちらは
+// この関数のコードを 1 行も通らずとも IdenticonURL 自身の修正だけで塞がって
+// いた (詳細・裏付けは feed_test.go の `TestFeedAvatarURLProxiesRemoteAvatar`。
+// #3130 review 3周目)。それでも `feedHandler.avatarURL` の型として明示的に
+// 残す (`entity.IdenticonURL` への直接差し替えより、フィード固有の意図を
+// 名前で残せる)。
 func feedAvatarURL(u *model.User) string {
 	if u.AvatarURL != nil && *u.AvatarURL != "" {
 		return entity.ProxyAvatarURLString(*u.AvatarURL)

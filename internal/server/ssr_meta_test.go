@@ -763,6 +763,21 @@ func TestSSRAnnouncementPage(t *testing.T) {
 		assert.Contains(t, body, `<meta name="twitter:card" content="summary_large_image">`)
 	})
 
+	// ImageURL が空文字ポインタのとき (nil ではなく "") は og:image を出さない。
+	// **`ProxyMediaURLPtr` は空文字ポインタをそのまま通す** (`p == nil || *p == ""`
+	// のとき無加工で返す) ので、呼び出し側の `img != nil && *img != ""` ガードを
+	// 落としても img は nil にならず空文字のまま残り、`<meta property="og:image"
+	// content="">` を出してしまう (#3130 review 3周目: この分岐は未実行だった)。
+	t.Run("画像が空文字なら og:image を出さない", func(t *testing.T) {
+		empty := ""
+		h := newHandler(t, &model.Announcement{ID: "a1", Title: "メンテナンス", Text: "明日実施します", ImageURL: &empty})
+
+		body := ssrGet(t, h.AnnouncementPage, "/announcements/a1", map[string]string{"id": "a1"}).Body.String()
+
+		assert.NotContains(t, body, `property="og:image"`)
+		assert.NotContains(t, body, `name="twitter:card"`)
+	})
+
 	// 個人宛てのお知らせは permalink で配らない。URL を知っているだけで
 	// 他人宛ての内容が読めてはいけない (upstream も userId IS NULL で絞る)。
 	t.Run("個人宛ては meta を出さない", func(t *testing.T) {

@@ -290,6 +290,15 @@ func TestFeedAvatarURLProxiesRemoteAvatar(t *testing.T) {
 		assert.Equal(t, "/identicon/bob", feedAvatarURL(local))
 	})
 
+	// AvatarURL が空文字ポインタ (nil ではなく "") のときも identicon fallback
+	// へ倒す。`feedAvatarURL` はこの PR で新設した関数で、この空文字ガードを
+	// 外しても既存テストは緑だった (#3130 review 3周目)。
+	t.Run("AvatarURL が空文字なら identicon fallback", func(t *testing.T) {
+		empty := ""
+		u := &model.User{ID: "u5", Username: "dave", AvatarURL: &empty}
+		assert.Equal(t, "/identicon/dave", feedAvatarURL(u))
+	})
+
 	t.Run("自オリジンは no-op", func(t *testing.T) {
 		same := &model.User{ID: "u3", Username: "carol", AvatarURL: strp("https://local.example/files/a.png")}
 		assert.Equal(t, "https://local.example/files/a.png", feedAvatarURL(same))
