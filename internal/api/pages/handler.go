@@ -118,8 +118,12 @@ func (h *Handler) Create(c echo.Context) error {
 	if !colfit.JSONStorable(req.Content) || !colfit.JSONStorable(req.Variables) {
 		return apierr.JSONInvalidParam(c)
 	}
-	// upstream create.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、
-	// 不在なら NO_SUCH_FILE (#1548)。
+	// **enum 列へそのまま入る。** `page_visibility_enum` に無い値を渡すと
+	// INSERT が落ちて 500 になる (認証済みなら誰でも起こせた)。`visibility` は
+	// mk-go 独自のフィールド (drop-in #367) なので upstream 側に検証が無い。
+	if !validPageVisibility(req.Visibility) {
+		return apierr.JSONInvalidParam(c)
+	}
 	if !h.eyeCatchingImageOK(req.EyeCatchingImageID, user.ID) {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FILE", "No such file.", "b7b97489-0f66-4b12-a5ff-b21bd63f6e1c"))
 	}
@@ -267,6 +271,10 @@ func (h *Handler) Update(c echo.Context) error {
 	}
 	// **jsonb 列へそのまま入る (#3037)。** create 側と同じ理由。
 	if !colfit.JSONStorable(req.Content) || !colfit.JSONStorable(req.Variables) {
+		return apierr.JSONInvalidParam(c)
+	}
+	// enum 列の検証も create と揃える (指定されたときだけ)。
+	if req.Visibility != nil && !validPageVisibility(*req.Visibility) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream update.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、
@@ -630,3 +638,16 @@ func (h *Handler) pageToMapWithOwner(p *model.Page, owner *model.User, isLiked *
 // 未配線だと eyecatching image の所有者チェックが素通しになり、他人の drive
 // ファイルを自分の page に貼れる (IDOR)。起動時検査に使う (#2683)。
 func (h *Handler) HasDriveFileRepo() bool { return h.driveFileRepo != nil }
+
+// validPageVisibility reports whether v is one of the values the
+// `page_visibility_enum` column accepts.
+//
+// **空文字は許す。** `visibility` は省略可能で、その場合は列の既定
+// (`public`) が入る。Go の string では省略と空文字を区別できない。
+func validPageVisibility(v model.PageVisibility) bool {
+	switch v {
+	case "", model.PageVisibilityPublic, model.PageVisibilityFollowers, model.PageVisibilitySpecified:
+		return true
+	}
+	return false
+}
