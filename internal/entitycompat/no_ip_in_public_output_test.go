@@ -12,7 +12,9 @@ import (
 	"reflect"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"unicode"
 
@@ -54,9 +56,15 @@ var publicShapeDirs = []string{
 //
 //   - handler が `map[string]any` を手で組んで返す経路 (`entity.PackSignin` / nodeinfo)
 //   - `datatypes.JSON` / `json.RawMessage` のような不透明な列の中身 (形が実行時に決まる)
-//   - `publicShapeDirs` の外に宣言された型をフィールドに持つ形。**そちらは
-//     `TestPublicShapesDoNotReferenceIPBearingTypes` が型の参照として見る**
-//   - `remoteAddr` / `xForwardedFor` のように `ip` の語を含まない綴り (名前で判定するため)
+//   - **`publicShapeDirs` の外に宣言された型を handler が `c.JSON` にそのまま渡す形。**
+//     `/api/server-info` (**未認証**) が返す `serverstats.PublicStats` が実例で、
+//     あそこに IP のキーを足しても落ちない (実測)。`internal/core` を走査に足すのは
+//     採らなかった — IP を持つ内部の入力構造体が 11 件流れ込んで allowlist が倍増し、
+//     本物の signal が埋もれる (実測)
+//   - `remoteAddr` / `xForwardedFor` のように `ip` の語を含まない綴り (名前で判定するため)。
+//     `CDNIPs` / `ip4s` / `XIp` のような語割りの残りも同じ (実測)
+//   - **フィールドの型が走査対象の外**にある形は、型の参照として
+//     `TestPublicShapesDoNotReferenceIPBearingTypes` が見る (推移的に追う)
 func TestResponseAndFederationShapesHaveNoIPField(t *testing.T) {
 	root := repoRoot(t)
 
@@ -81,7 +89,11 @@ func TestResponseAndFederationShapesHaveNoIPField(t *testing.T) {
 		contributed[f.File] = true
 	}
 	want := filesWithJSONTag(t, root, publicShapeDirs)
-	require.NotEmpty(t, want, "json タグを持つファイルを 1 つも拾えていない")
+	// **truth 側にも下限が要る。** 「1 件でもあればよい」だと、テキスト走査を
+	// 1 ファイルに縮めるだけでこの検査が丸ごと無意味になる (実測で素通りした)。
+	// 実測 156 (2026-09-21)。
+	require.GreaterOrEqualf(t, len(want), 150,
+		"json タグを持つファイルを %d 件しか拾えていない。テキスト走査が壊れている", len(want))
 	for _, f := range want {
 		assert.Truef(t, contributed[f], "%s から 1 件も収集していない。走査が縮んでいる", f)
 	}
@@ -205,10 +217,17 @@ func TestPublicShapesDoNotReferenceIPBearingTypes(t *testing.T) {
 		require.Containsf(t, tainted, want, "IP を持つ型として %q を拾えていない", want)
 	}
 
+	// **参照側にも下限が要る。** tainted が正しくても、型の参照を 1 つも解決できて
+	// いなければ照合は空回りする。`typeRefs` から package 修飾の収集を落とす 1 行の
+	// 変異が、`*model.Signin` を足す漏れごと素通りした (実測)。実測 9。
+	crossPkg := 0
 	referenced := map[string]bool{}
 	for _, d := range publicShapeDirs {
 		for _, f := range scanJSONTags(t, filepath.Join(root, d), root) {
 			for _, ref := range f.TypeRefs {
+				if strings.HasPrefix(ref, "model.") {
+					crossPkg++
+				}
 				if _, bad := tainted[ref]; !bad {
 					continue
 				}
@@ -226,6 +245,9 @@ func TestPublicShapesDoNotReferenceIPBearingTypes(t *testing.T) {
 		}
 	}
 
+	require.GreaterOrEqualf(t, crossPkg, 9,
+		"公開 shape から `model.*` への参照を %d 件しか解決できていない。型の照合が壊れている", crossPkg)
+
 	// **死んだ entry も落とす。** これが無いと、実在しない場所を書いた entry が
 	// 誰にも検出されずに残る (実測: 捏造した `driveFileRow.RequestIP` が全テスト
 	// 緑のまま通った)。
@@ -234,15 +256,135 @@ func TestPublicShapesDoNotReferenceIPBearingTypes(t *testing.T) {
 	}
 }
 
-// ipRefAllowlist は IP を持つ型を参照してよい場所と、その理由。**いまは空** —
-// 公開 shape はどれも IP を持つ型を入れ子にしていない (`admin/drive/files` が
-// `requestIp` を返す経路はモデルを `map[string]any` へ手で詰めるので、型の参照には
-// 現れない)。
-var ipRefAllowlist = map[string]string{}
+// 「IP を持つ型」の判定を人工ソースで固定する。
+//
+// 実データの IP 保持型は 4 つとも**タグ付き**なので、タグ無しの枝も `json:"-"` の枝も
+// 非公開の枝も一度も実行されない。そこを潰しても実データからは何も起こらないのに、
+// 潰した状態では本物の漏れが通る (実測)。
+func TestIPBearingTypesPinsEveryBranch(t *testing.T) {
+	root := repoRoot(t)
+	got := ipBearingTypes(t, filepath.Join(root, "internal/entitycompat/ipbearingfixture"), root)
+	var names []string
+	for k := range got {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	assert.Equal(t, []string{
+		"ipbearingfixture.AliasedIP",     // 別名も同じものを指す
+		"ipbearingfixture.DefinedIP",     // 下敷きが carrier
+		"ipbearingfixture.NestedIP",      // 推移的に汚れる
+		"ipbearingfixture.TaggedEmbedIP", // タグ付きの匿名埋め込みはタグ名がキー
+		"ipbearingfixture.TaggedIP",
+		"ipbearingfixture.UntaggedEmbedIP", // タグ無しの匿名埋め込みは中身が昇格する
+		"ipbearingfixture.UntaggedIP",      // タグ無しはフィールド名で出る
+	}, names, "IP を持つ型の判定が変わっている")
+}
 
-func TestIPRefAllowlistIsEmpty(t *testing.T) {
-	assert.Empty(t, ipRefAllowlist,
-		"IP を持つ型を入れ子にした shape が増えている。経路と権限ゲートを確かめること")
+// 型の参照の解決そのものを人工ソースで固定する。
+//
+// **実データには import の別名が 1 つも無い**ので、別名を解決する枝は実データでは
+// 一度も実行されない。`[]T` / `map[K]V` / `*T` / generic も同じ。
+func TestTypeRefsResolvesNamedTypes(t *testing.T) {
+	const src = `package p
+
+import (
+	m "github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/entity"
+)
+
+type Box[T any] struct{ V T }
+
+type S struct {
+	A *m.Signin            ` + "`json:\"a\"`" + `
+	B []entity.UserLite    ` + "`json:\"b\"`" + `
+	C map[m.Signin]Local   ` + "`json:\"c\"`" + `
+	D Box[m.UserIP]        ` + "`json:\"d\"`" + `
+	E string               ` + "`json:\"e\"`" + `
+}
+
+type Local struct{}
+`
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "s.go", src, 0)
+	require.NoError(t, err)
+	al := importAliases(f)
+	require.Equal(t, map[string]string{"m": "model"}, al, "import の別名を解決できていない")
+
+	var st *ast.StructType
+	ast.Inspect(f, func(n ast.Node) bool {
+		if ts, ok := n.(*ast.TypeSpec); ok && ts.Name.Name == "S" {
+			st = ts.Type.(*ast.StructType)
+		}
+		return true
+	})
+	require.NotNil(t, st)
+
+	got := map[string][]string{}
+	for _, fld := range st.Fields.List {
+		got[fld.Names[0].Name] = typeRefs(fld.Type, "p", al)
+	}
+	assert.Equal(t, []string{"model.Signin"}, got["A"], "別名越しのポインタ")
+	assert.Equal(t, []string{"entity.UserLite"}, got["B"], "slice の要素型")
+	assert.Equal(t, []string{"model.Signin", "p.Local"}, got["C"], "map の鍵と値")
+	assert.Equal(t, []string{"p.Box", "model.UserIP"}, got["D"], "generic の実体化")
+	assert.Empty(t, got["E"], "組み込み型は名前付き型ではない")
+}
+
+// 入れ子まで歩くことを人工の JSON で固定する。
+//
+// **代表型はどれもゼロ値で marshal するので、object の入れ子が 1 つも生まれない。**
+// 再帰を潰しても実データからは何も起こらない (実測で素通りした)。
+func TestAllJSONKeysWalksNestedObjects(t *testing.T) {
+	got := allJSONKeys(t, []byte(`{"a":1,"b":{"ip":"1.2.3.4"},"c":[{"d":{"e":2}}]}`))
+	assert.Equal(t, []string{"a", "b", "c", "d", "e", "ip"}, got)
+}
+
+// ipRefAllowlist は IP を持つ型を参照してよい場所と、その理由。
+//
+// 2 系統ある。**IP 照会 API が自分の行を入れ子にしているもの** (出すのが目的なので
+// 上の `ipShapeAllowlist` と同じ 3 段でゲート済み) と、**marshal されない構造体**
+// (packer に渡す入力や context で `encoding/json` を通る経路が無い)。レスポンスの形に
+// `*model.User` を 1 つ足すような変更は、ここに書かない限り落ちる。
+var ipRefAllowlist = map[string]string{
+	// --- admin/ip/* の応答が自分の行を入れ子にしている (3 段でゲート済み) ---
+	"internal/api/admin/ip_lookup_log.go#ipLookupLogResponse.Entries": "" +
+		"`admin/ip/lookup-log` の応答が監査記録の行を並べる。行が IP を持つのは意図どおり。",
+	"internal/api/admin/ip_related.go#ipRelatedResponse.Candidates": "" +
+		"`admin/ip/related-accounts` の応答が候補を並べる。",
+	"internal/api/admin/ip_related.go#ipRelatedCandidate.SharedIPs": "" +
+		"候補が共有 IP の行を並べる。",
+
+	// --- ここから下は marshal されない構造体 ---
+	"internal/api/drive/url_upload.go#URLUploadInput.User": "" +
+		"`drive/files/upload-from-url` の処理に渡す入力。handler は 204 を返すので " +
+		"`encoding/json` を通らない。",
+	"internal/entity/notification.go#NotificationItem.User": "" +
+		"`PackNotifications` に渡す入力。解決済みの通知者をまとめて渡すための器で、" +
+		"出力は packer が組み立てる map。",
+	"internal/entity/notification.go#NotificationItem.Note": "同上 (参照先のノート)。",
+	"internal/entity/page.go#PackPageContext.Owner": "" +
+		"`PackPageWithContext` に渡す context。ページの所有者を解決して渡すためのもので、" +
+		"出力は packer が組み立てる map。",
+}
+
+// allowlist の中身そのものを固定する (上の allowlist と同じ理由)。
+func TestIPRefAllowlistMatchesExpected(t *testing.T) {
+	var got []string
+	for k := range ipRefAllowlist {
+		got = append(got, k)
+	}
+	sort.Strings(got)
+	assert.Equal(t, []string{
+		"internal/api/admin/ip_lookup_log.go#ipLookupLogResponse.Entries",
+		"internal/api/admin/ip_related.go#ipRelatedCandidate.SharedIPs",
+		"internal/api/admin/ip_related.go#ipRelatedResponse.Candidates",
+		"internal/api/drive/url_upload.go#URLUploadInput.User",
+		"internal/entity/notification.go#NotificationItem.Note",
+		"internal/entity/notification.go#NotificationItem.User",
+		"internal/entity/page.go#PackPageContext.Owner",
+	}, got,
+		"IP を持つ型を入れ子にした shape が増減している。**その型が本当に marshal されないか**"+
+			"を確かめてから更新すること")
 }
 
 // 静的なタグ走査に加えて**実際に `json.Marshal` する**。
@@ -326,32 +468,29 @@ func TestScanJSONTagsCollectsWhatEncodingJSONEmits(t *testing.T) {
 // **`MarshalText` も見る。** `encoding/json` は `MarshalJSON` が無くても
 // `encoding.TextMarshaler` を優先するので、そちらでも中身は見えなくなる。
 //
+// **走査は `internal/` 全体。** `publicShapeDirs` に絞ると、**走査対象の外に宣言した型に
+// marshaler を付けて IP を吐かせる**形が見えない (実測で素通りした)。実データの marshaler は
+// `internal/` 全体で 1 件しか無いので、広げても一覧は増えない。
+//
 // **走査そのものを人工のソースで固定する。** 実データには `MarshalJSON` が 1 件
 // あるだけなので、`MarshalText` を見ない変異も generic なレシーバを捨てる変異も、
-// 実データ相手には何も起こさない (実測で両方素通りした)。
+// 実データ相手には何も起こさない (実測で両方素通りした)。fixture の 4 件が一覧に
+// 載っているのはそのため。
 func TestCustomJSONMarshalersAreKnown(t *testing.T) {
 	root := repoRoot(t)
-	var found []string
-	for _, d := range publicShapeDirs {
-		found = append(found, scanCustomMarshalers(t, filepath.Join(root, d), root)...)
-	}
+	found := scanCustomMarshalers(t, filepath.Join(root, "internal"), root)
 	sort.Strings(found)
 	assert.Equal(t, []string{
 		// `[]Multikey` をそのまま出すだけ。IP は持たない。
 		"internal/activitypub/types.go#MultikeyList.MarshalJSON",
-	}, found,
-		"自前の marshaler を持つ型が増減した。**タグ走査では中身が見えない**ので、"+
-			"新しい型が IP を吐かないことを人が確かめてから一覧を更新すること")
-
-	fixture := filepath.Join(root, "internal/entitycompat/marshalerfixture")
-	got := scanCustomMarshalers(t, fixture, root)
-	sort.Strings(got)
-	assert.Equal(t, []string{
+		// 以下は走査そのものを固定するための人工ソース。
 		"internal/entitycompat/marshalerfixture/marshalers.go#Generic.MarshalJSON",
 		"internal/entitycompat/marshalerfixture/marshalers.go#Plain.MarshalJSON",
 		"internal/entitycompat/marshalerfixture/marshalers.go#Pointer.MarshalJSON",
 		"internal/entitycompat/marshalerfixture/marshalers.go#Text.MarshalText",
-	}, got, "marshaler の走査が狭まっている")
+	}, found,
+		"自前の marshaler を持つ型が増減した。**タグ走査では中身が見えない**ので、"+
+			"新しい型が IP を吐かないことを人が確かめてから一覧を更新すること")
 }
 
 // 判定そのものを固定する。
@@ -375,6 +514,11 @@ func TestLooksLikeIPKey(t *testing.T) {
 		{"lastIp", true},
 		{"lastIPs", true},
 		{"ipAddress", true},
+		{"ipaddress", true},
+		{"IPaddress", true},
+		{"IPADDRESS", true},
+		{"ipaddr", true},
+		{"lastIPaddressHash", true},
 		{"IPAddress", true},
 		{"IPAddresses", true},
 		{"IPAddr", true}, // 2 稿目の回帰はここ
@@ -414,6 +558,8 @@ func TestLooksLikeIPKey(t *testing.T) {
 		{"HTTPSProxy", false},
 		{"IPFS", false},
 		{"IPsec", false},
+		{"IPSec", true}, // fail-closed 側の既知の偽陽性 (allowlist 1 行で済む)
+		{"VoIP", true},  // 同上
 	} {
 		assert.Equalf(t, c.want, looksLikeIPKey(c.key), "looksLikeIPKey(%q) / 正規化=%q", c.key, spaceCamelKey(c.key))
 	}
@@ -436,9 +582,11 @@ func (f taggedField) ref() string { return f.File + "#" + f.Struct + "." + f.Fie
 // **素朴な部分一致は使えない** (`description` / `flipH` / `clipId` を誤検出する)。
 func looksLikeIPKey(key string) bool { return ipTokenRe.MatchString(spaceCamelKey(key)) }
 
-// `address` / `addresses` は alternative に入れない。`spaceCamelKey` が
-// `IPAddress` を `ip address` に割るので、入れても効かない枝が残るだけになる。
-var ipTokenRe = regexp.MustCompile(`(?:^| )ip(?:s|4|6|v4|v6|v4s|v6s)?(?:$| )`)
+// **`address` 系の alternative は要る。** `spaceCamelKey` が割るのは `IPAddress` の
+// ように A が大文字の綴りだけで、`IPaddress` / `ipaddress` / `IPADDRESS` は 1 語に
+// 潰れる。**これを「割るから要らない」と書いて一度落とし、敵対的レビューで実測された**
+// (合成コーパス 12,113 件のうち 310 件がその形だった)。
+var ipTokenRe = regexp.MustCompile(`(?:^| )ip(?:s|4|6|v4|v6|v4s|v6s|addr|address|addresses)?(?:$| )`)
 
 // spaceCamelKey は camelCase / snake_case を空白区切りの小文字へ均す。
 //
@@ -480,9 +628,57 @@ type parsedGoFile struct {
 	File *ast.File
 }
 
-// parseGoTree parses every non-test Go file under root.
+// marshalableFieldType reports whether `encoding/json` could put the field's
+// type on the wire. 関数とチャネルは marshal できない (`json.Marshal` は
+// `UnsupportedTypeError` を返す) ので、そこから型の参照を集めると DI 用の
+// struct が軒並み汚れる (実測)。
+func marshalableFieldType(expr ast.Expr) bool {
+	for {
+		switch e := expr.(type) {
+		case *ast.StarExpr:
+			expr = e.X
+		case *ast.ArrayType:
+			expr = e.Elt
+		case *ast.FuncType, *ast.ChanType:
+			return false
+		default:
+			return true
+		}
+	}
+}
+
+// importAliases maps a file's import aliases to the real package name
+// (import path の末尾で代用する)。
+func importAliases(f *ast.File) map[string]string {
+	out := map[string]string{}
+	for _, im := range f.Imports {
+		if im.Name == nil || im.Name.Name == "_" || im.Name.Name == "." {
+			continue
+		}
+		path := strings.Trim(im.Path.Value, `"`)
+		seg := path
+		if i := strings.LastIndex(path, "/"); i >= 0 {
+			seg = path[i+1:]
+		}
+		out[im.Name.Name] = seg
+	}
+	return out
+}
+
+// parseGoTree parses every non-test Go file under root. 同じ木を何度も舐めるので
+// 結果を使い回す (`internal/` 全体を 4 回パースすると実測で 7 秒以上かかる)。
+var (
+	parseGoTreeMu    sync.Mutex
+	parseGoTreeCache = map[string][]parsedGoFile{}
+)
+
 func parseGoTree(t *testing.T, root, repo string) []parsedGoFile {
 	t.Helper()
+	parseGoTreeMu.Lock()
+	defer parseGoTreeMu.Unlock()
+	if cached, ok := parseGoTreeCache[root+"\x00"+repo]; ok {
+		return cached
+	}
 	var out []parsedGoFile
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -518,6 +714,7 @@ func parseGoTree(t *testing.T, root, repo string) []parsedGoFile {
 		return nil
 	})
 	require.NoError(t, err, "walk %s", root)
+	parseGoTreeCache[root+"\x00"+repo] = out
 	return out
 }
 
@@ -568,7 +765,10 @@ func scanJSONTags(t *testing.T, dir, repo string) []taggedField {
 				if key == "-" {
 					continue
 				}
-				refs := typeRefs(fld.Type, pf.Pkg)
+				var refs []string
+				if marshalableFieldType(fld.Type) {
+					refs = typeRefs(fld.Type, pf.Pkg, importAliases(pf.File))
+				}
 				if len(fld.Names) == 0 {
 					name := embeddedTypeName(fld.Type)
 					switch {
@@ -655,7 +855,14 @@ func jsonTagFromLit(tag *ast.BasicLit) (string, bool) {
 	if tag == nil {
 		return "", false
 	}
-	v, ok := reflect.StructTag(strings.Trim(tag.Value, "`")).Lookup("json")
+	// **backtick 以外のリテラルも剥がす。** `"json:\"ip\""` は合法な Go で gofmt も
+	// 書き換えないが、backtick だけを削る実装ではタグとして読めず、フィールド名を
+	// キーとして記録してしまう (実測)。
+	raw, err := strconv.Unquote(tag.Value)
+	if err != nil {
+		raw = strings.Trim(tag.Value, "`")
+	}
+	v, ok := reflect.StructTag(raw).Lookup("json")
 	if !ok {
 		return "", false
 	}
@@ -685,8 +892,13 @@ func embeddedTypeName(expr ast.Expr) string {
 }
 
 // typeRefs collects the named types a field type mentions, as `<package>.<Type>`.
-// 同じ package の型は selfPkg で修飾する。
-func typeRefs(expr ast.Expr, selfPkg string) []string {
+// 同じ package の型は selfPkg で修飾し、import の別名は実際の package 名へ直す。
+//
+// **別名を直さないと 1 行で穴が開く。** `import m ".../internal/model"` と書いて
+// `*m.Signin` を持たせると、字面のままでは `m.Signin` になって照合から外れる
+// (実測で素通りした)。package 名は import path の末尾で代用する — このリポジトリの
+// `internal/**` は全てそうなっている。
+func typeRefs(expr ast.Expr, selfPkg string, aliases map[string]string) []string {
 	seen := map[string]bool{}
 	var out []string
 	add := func(s string) {
@@ -699,11 +911,18 @@ func typeRefs(expr ast.Expr, selfPkg string) []string {
 		switch e := n.(type) {
 		case *ast.SelectorExpr:
 			if pkg, ok := e.X.(*ast.Ident); ok {
-				add(pkg.Name + "." + e.Sel.Name)
+				name := pkg.Name
+				if real, ok := aliases[name]; ok {
+					name = real
+				}
+				add(name + "." + e.Sel.Name)
 				return false
 			}
 		case *ast.Ident:
-			if ast.IsExported(e.Name) {
+			// **非公開の型名も拾う。** `type mkAlias = model.Signin` のように
+			// ローカルの別名を挟むと、exported だけを見る実装では参照が消える
+			// (実測で素通りした)。組み込み型だけ除く。
+			if !predeclaredIdents[e.Name] {
 				add(selfPkg + "." + e.Name)
 			}
 		}
@@ -712,12 +931,39 @@ func typeRefs(expr ast.Expr, selfPkg string) []string {
 	return out
 }
 
-// ipBearingTypes returns named struct types under root whose own JSON keys look
-// like an IP, keyed as `<package>.<Type>`.
+// predeclaredIdents are Go's predeclared type names. 名前付き型ではないので
+// 参照として数えない。
+var predeclaredIdents = map[string]bool{
+	"bool": true, "byte": true, "complex64": true, "complex128": true, "error": true,
+	"float32": true, "float64": true, "int": true, "int8": true, "int16": true,
+	"int32": true, "int64": true, "rune": true, "string": true, "uint": true,
+	"uint8": true, "uint16": true, "uint32": true, "uint64": true, "uintptr": true,
+	"any": true, "comparable": true,
+}
+
+// ipBearingTypes returns named types under root that put an IP on the wire,
+// keyed as `<package>.<Type>`.
+//
+// **タグ無しの exported フィールドも数える。** `encoding/json` はそれをフィールド名で
+// 出すので、拾わないと「タグを書き忘れた IP フィールドを持つ型」を参照する漏れが
+// 素通りする (実測)。実データの IP 保持型は全てタグ付きなので、この枝は
+// `ipbearingfixture` でしか固定できない。
+//
+// **匿名埋め込みも数える。** タグが無ければ中身が昇格するので、`type T struct{
+// model.Signin }` は `ip` を出す。
+//
+// **推移的に追う。** `model.User` は自分では IP を持たないが `Avatar *model.DriveFile`
+// を持ち、`json.Marshal` すると `avatar.requestIp` が出る (実測)。1 段だけ見る形だと、
+// レスポンス struct に `*model.User` を 1 つ足す変更が素通りする。別名 (`type X = Y`) と
+// 定義型 (`type X Y`) も同じものを指すので伝播させる。
 func ipBearingTypes(t *testing.T, root, repo string) map[string]string {
 	t.Helper()
-	out := map[string]string{}
+	direct := map[string]string{}
+	refs := map[string][]string{} // 型 -> その型が参照する型
+	file := map[string]string{}
+
 	for _, pf := range parseGoTree(t, root, repo) {
+		al := importAliases(pf.File)
 		for _, decl := range pf.File.Decls {
 			gd, ok := decl.(*ast.GenDecl)
 			if !ok || gd.Tok != token.TYPE {
@@ -728,13 +974,34 @@ func ipBearingTypes(t *testing.T, root, repo string) map[string]string {
 				if !ok {
 					continue
 				}
+				self := pf.Pkg + "." + ts.Name.Name
+				file[self] = pf.Rel
+				if _, isIface := ts.Type.(*ast.InterfaceType); isIface {
+					// interface は JSON の形ではない。メソッドの引数と戻り値に
+					// 型が現れるだけなので、伝播させると repository 一式が汚れる (実測)。
+					continue
+				}
 				st, ok := ts.Type.(*ast.StructType)
 				if !ok {
+					// `type X = Y` / `type X Y` は下敷きの型を指す。
+					refs[self] = append(refs[self], typeRefs(ts.Type, pf.Pkg, al)...)
 					continue
 				}
 				for _, fld := range st.Fields.List {
-					key, _ := jsonTagFromLit(fld.Tag)
+					key, hasTag := jsonTagFromLit(fld.Tag)
 					if key == "-" {
+						continue
+					}
+					if !marshalableFieldType(fld.Type) {
+						continue
+					}
+					refs[self] = append(refs[self], typeRefs(fld.Type, pf.Pkg, al)...)
+					if len(fld.Names) == 0 {
+						// タグの無い匿名埋め込みは中身が昇格する。タグ付きは
+						// タグ名 1 つがキーになる。
+						if hasTag && looksLikeIPKey(key) {
+							direct[self] = pf.Rel
+						}
 						continue
 					}
 					for _, id := range fld.Names {
@@ -746,9 +1013,29 @@ func ipBearingTypes(t *testing.T, root, repo string) map[string]string {
 							k = id.Name
 						}
 						if looksLikeIPKey(k) {
-							out[pf.Pkg+"."+ts.Name.Name] = pf.Rel
+							direct[self] = pf.Rel
 						}
 					}
+				}
+			}
+		}
+	}
+
+	out := map[string]string{}
+	for k, v := range direct {
+		out[k] = v
+	}
+	for changed := true; changed; {
+		changed = false
+		for self, rs := range refs {
+			if _, done := out[self]; done {
+				continue
+			}
+			for _, r := range rs {
+				if _, bad := out[r]; bad {
+					out[self] = file[self]
+					changed = true
+					break
 				}
 			}
 		}

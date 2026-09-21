@@ -1089,7 +1089,7 @@ ipshape-check: ## レスポンス / 連合の shape に IP が出ていないか
 	# (handler が自分で宣言する response struct もそのまま wire の形になる)。
 	# 判定は語で見る。**切り方を片側に寄せると必ず穴が開く** — 大文字のたびに
 	# 割ると `lastIPs` が、割らないと `IPAddr` が素通りする (両方とも実測)。
-	go test ./internal/entitycompat/... -run 'TestResponseAndFederationShapesHaveNoIPField|TestIPShapeAllowlistMatchesExpected|TestPublicShapesDoNotReferenceIPBearingTypes|TestIPRefAllowlistIsEmpty|TestPublicShapesMarshalWithoutIP|TestScanJSONTagsCollectsWhatEncodingJSONEmits|TestCustomJSONMarshalersAreKnown|TestLooksLikeIPKey' -count=1 -v
+	go test ./internal/entitycompat/... -run 'TestResponseAndFederationShapesHaveNoIPField|TestIPShapeAllowlistMatchesExpected|TestPublicShapesDoNotReferenceIPBearingTypes|TestIPRefAllowlistMatchesExpected|TestIPBearingTypesPinsEveryBranch|TestTypeRefsResolvesNamedTypes|TestAllJSONKeysWalksNestedObjects|TestPublicShapesMarshalWithoutIP|TestScanJSONTagsCollectsWhatEncodingJSONEmits|TestCustomJSONMarshalersAreKnown|TestLooksLikeIPKey' -count=1 -v
 
 .PHONY: dockerignore-check
 dockerignore-check: ## .dockerignore がシークレットと利用者データを除外しているか検査

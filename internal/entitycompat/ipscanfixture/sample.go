@@ -23,6 +23,12 @@ type Outer struct {
 	Labeled `json:"labeled"` // **タグ付きの匿名埋め込みはタグ名がキーになる** (昇格しない)
 	IPList                   // struct でない名前付き型の埋め込み: **型名がキーになる**
 
+	// 非公開型の匿名埋め込み。`encoding/json` は中の exported フィールドを昇格させる。
+	// **昇格だけでキーが出る形をここに置くのが要点** — 埋め込まれる型が exported だと、
+	// 収集側はその型自身の宣言からも同じキーを出せるので、埋め込みを消しても
+	// 突き合わせが食い違わない (実測で素通りした)。
+	promoted
+
 	Nested Inner `json:"nested"`
 }
 
@@ -38,3 +44,9 @@ type Labeled struct {
 
 // IPList is a named non-struct type. 埋め込むと型名がそのままキーになる。
 type IPList []string
+
+// promoted is embedded into Outer as an unexported type. 非公開型なので
+// `exportedStructNames` には出ないが、中の exported フィールドは昇格する。
+type promoted struct {
+	Deep2 string `json:"deep2"`
+}
