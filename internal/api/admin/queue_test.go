@@ -1634,3 +1634,49 @@ func TestQueueClear_SkipsUserScheduledWork(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	assert.NotContains(t, insp.deleted, "c_sched", "予約投稿は消さないこと")
 }
+
+// **終了済みのバケットでは保護を掛けないこと。**
+//
+// completed / failed は既に終わった記録なので、消せなくすると**終了済みの
+// 予約投稿 / アカウント削除が永久に残る** (掃除の目的そのものが果たせない)。
+// 保護が要るのは「これから動く」バケット (wait / delayed / retry) だけ。
+func TestQueueClear_ProtectionOnlyAppliesToPendingBuckets(t *testing.T) {
+	for _, tc := range []struct {
+		state   string
+		bucket  string
+		protect bool
+	}{
+		{"wait", "pending", true},
+		{"delayed", "scheduled", true},
+		{"failed", "failed", false},
+		{"completed", "completed", false},
+	} {
+		t.Run(tc.state, func(t *testing.T) {
+			h, _, _, _ := newTestHandler(t)
+			insp := &stubQueueInspector{}
+			h.SetQueueInspector(insp)
+			rows := map[string][]*apiadmin.QueueTaskSummary{
+				"deliver": {{ID: "s1", Type: queue.TaskTypePostScheduledNote}},
+			}
+			switch tc.bucket {
+			case "pending":
+				insp.pending = rows
+			case "scheduled":
+				insp.scheduled = rows
+			case "failed":
+				insp.failed = rows
+			case "completed":
+				insp.completed = rows
+			}
+
+			rec := doPost(h.QueueClear, `{"queue":"deliver","state":"`+tc.state+`"}`, adminUser)
+			require.Equal(t, http.StatusNoContent, rec.Code)
+			if tc.protect {
+				assert.Empty(t, insp.deleted, "%s では予約投稿を守ること", tc.state)
+			} else {
+				assert.Equal(t, []string{"s1"}, insp.deleted,
+					"%s は終了済みの記録なので消せること", tc.state)
+			}
+		})
+	}
+}

@@ -74,19 +74,33 @@ func (h *Handler) QueueClear(c echo.Context) error {
 // mkq には state 単位の bulk-delete API が無いため、pending は DrainPending、
 // それ以外は state 別の list → DeleteTask で消す (best-effort)。
 //
-// 注意点 (mkq 制約 / upstream との差): (1) "wait" は DrainPending を呼ぶが mkq の
-// DrainPending は wait に加え paused / prioritized バケットも drain する。mk-go は
-// deliver/inbox で per-job priority を使わないので prioritized は常に空。paused は
-// pause 中だけ埋まる (#2069 で pause/resume を実装済み) が、pause 中に clear を
-// 呼べば消えるべきものなので observable な差は無い。(2) active / paused / prioritized を
-// 単独 state で指定した場合は対応する bulk-clear 経路が無いため no-op。(3) cron
-// (repeat) 由来の delayed job は RemoveJob が拒否するため clear('delayed') で消えない。
-// (4) clearable job が約 100k を超える queue では 1 リクエストで消し切らない (再実行で継続)。
+// 注意点 (mkq 制約 / upstream との差):
+//
+// (1) **"wait" は wait バケットしか掃かない。** かつては `DrainPending` を呼んで
+// おり、あれは wait に加え paused / prioritized も drain したが、job type を見ない
+// ので**予約投稿やアカウント削除まで巻き込んだ** (#3130)。列挙経路
+// (`ListPendingTasks`) へ移して保護対象を除けるようにした代わりに、あちらは
+// `JobBucketWait` だけを見るので **pause 中のキューに clear を掛けても paused の
+// job は残る**。mk-go は deliver/inbox で per-job priority を使わないので
+// prioritized は常に空。
+//
+// (2) active / paused / prioritized を単独 state で指定した場合は対応する
+// bulk-clear 経路が無いため no-op。
+//
+// (3) cron (repeat) 由来の delayed job は RemoveJob が拒否するため
+// clear('delayed') で消えない。
+//
+// (4) **1 リクエストで消し切らないことがある** (再実行で継続)。上限 1000 反復 ×
+// 100 件で約 100k。(1) の変更で wait もこの制限に入った (`DrainPending` は
+// 1 回で全部消していた)。
 func (h *Handler) clearQueueState(queue, state string) {
 	// deleteAll はリストが空になるまで先頭ページを引いて消す。削除で件数が
 	// 減るため page=1 を繰り返す。delete が 1 件も進まなければ無限ループを
 	// 避けて打ち切る。上限 1000 反復 (= 約 100k tasks) の安全弁付き。
-	deleteAll := func(lister func(string, int, int) ([]*QueueTaskSummary, error)) {
+	// **保護を掛けるのは「これから動く」バケットだけ。** completed / failed は
+	// 既に終わった記録なので、消せなくすると**終了済みの予約投稿 /
+	// アカウント削除が永久に残る** (掃除の目的そのものが果たせない)。
+	deleteAll := func(lister func(string, int, int) ([]*QueueTaskSummary, error), protect bool) {
 		for i := 0; i < 1000; i++ {
 			rows, err := lister(queue, 1, 100)
 			if err != nil || len(rows) == 0 {
@@ -95,7 +109,7 @@ func (h *Handler) clearQueueState(queue, state string) {
 			progressed := false
 			skipped := 0
 			for _, t := range rows {
-				if isOperatorProtectedTask(t) {
+				if protect && isOperatorProtectedTask(t) {
 					skipped++
 					continue
 				}
@@ -114,23 +128,23 @@ func (h *Handler) clearQueueState(queue, state string) {
 	// 巻き込む。保護対象を除いて消すために列挙経路を通す。
 	switch state {
 	case "*":
-		deleteAll(h.queueInspector.ListPendingTasks)
-		deleteAll(h.queueInspector.ListScheduledTasks)
-		deleteAll(h.queueInspector.ListRetryTasks)
-		deleteAll(h.queueInspector.ListFailedTasks)
-		deleteAll(h.queueInspector.ListCompletedTasks)
+		deleteAll(h.queueInspector.ListPendingTasks, true)
+		deleteAll(h.queueInspector.ListScheduledTasks, true)
+		deleteAll(h.queueInspector.ListRetryTasks, true)
+		deleteAll(h.queueInspector.ListFailedTasks, false)
+		deleteAll(h.queueInspector.ListCompletedTasks, false)
 	case "wait", "waiting", "pending":
-		deleteAll(h.queueInspector.ListPendingTasks)
+		deleteAll(h.queueInspector.ListPendingTasks, true)
 	case "delayed":
-		deleteAll(h.queueInspector.ListScheduledTasks)
-		deleteAll(h.queueInspector.ListRetryTasks)
+		deleteAll(h.queueInspector.ListScheduledTasks, true)
+		deleteAll(h.queueInspector.ListRetryTasks, true)
 	case "failed":
-		deleteAll(h.queueInspector.ListFailedTasks)
+		deleteAll(h.queueInspector.ListFailedTasks, false)
 	case "completed":
-		deleteAll(h.queueInspector.ListCompletedTasks)
+		deleteAll(h.queueInspector.ListCompletedTasks, false)
 	default:
 		// active / paused / prioritized は単独 state での bulk-clear 経路が
-		// 無いため no-op (paused/prioritized は wait 経由の DrainPending で消える)。
+		// 無いため no-op。**paused も "wait" では掃けない** — 上の注意点 (1)。
 	}
 }
 
