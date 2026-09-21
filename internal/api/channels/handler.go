@@ -56,6 +56,23 @@ type Handler struct {
 	// `CanSeeNote` が fail-closed に倒れる (followers / specified は投稿者本人
 	// 以外に見せない)。
 	userFollowingRepo repository.FollowingRepository
+	// metaRepo は channels/timeline の blocked-host filter で meta.blockedHosts
+	// を引く (upstream generateBlockedHostQueryForNote)。
+	metaRepo repository.MetaRepository
+}
+
+// HasMetaRepo reports whether the blocked-host filter can read meta.
+//
+// 未配線だと `blockedHosts` の除外が黙って no-op になる (ブロックしたはずの
+// インスタンスのノートが一覧に出続ける)。起動時の critical wiring 検査で落とす。
+func (h *Handler) HasMetaRepo() bool {
+	return h != nil && h.metaRepo != nil
+}
+
+// SetMetaRepo wires a MetaRepository used for the blocked-host filter on
+// channels/timeline (upstream generateBlockedHostQueryForNote)。
+func (h *Handler) SetMetaRepo(r repository.MetaRepository) {
+	h.metaRepo = r
 }
 
 // SetUserFollowingRepo wires the user-following lookup used by the pinnedNotes
@@ -641,6 +658,14 @@ func (h *Handler) Timeline(c echo.Context) error {
 		}
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
+	// **ブロック済みインスタンスのノートを落とす** (upstream
+	// generateBlockedHostQueryForNote)。チャンネルは連合先からも投稿されるので、
+	// ブロック後も既存のノートがタイムラインに出続けていた。
+	blockedHosts, err := notesfilter.LoadBlockedHosts(h.metaRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyBlockedHosts(notes, blockedHosts)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)
 	notehide.HideEmbeds(viewer, entities)

@@ -14,6 +14,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/pagination"
 	coreachievement "github.com/shiroha-a/mk/internal/core/achievement"
 	corenote "github.com/shiroha-a/mk/internal/core/note"
+	"github.com/shiroha-a/mk/internal/core/notesfilter"
 	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -373,6 +374,15 @@ func (h *Handler) UserListTimeline(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// **ブロック済みインスタンスのノートを落とす** (upstream
+	// generateBlockedHostQueryForNote)。list のメンバーは自由に編集できるので、
+	// ブロック後もリストに残っている相手のノートがここから出続けていた。
+	// SQL push-down 側には入っていないので post-fetch で落とす。
+	blocked, err := notesfilter.LoadBlockedHosts(h.metaRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyBlockedHosts(notes, blocked)
 	return c.JSON(http.StatusOK, h.packMany(c.Request().Context(), notes, me))
 }
 

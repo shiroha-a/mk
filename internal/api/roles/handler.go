@@ -44,6 +44,23 @@ type Handler struct {
 	// relation は roles/users の embed user に viewer 視点の relation block を
 	// 付与する (upstream packMany(users, me))。未配線 / 匿名では no-op (#1973)。
 	relation userrelation.Repos
+	// metaRepo は roles/notes の blocked-host filter で meta.blockedHosts を
+	// 引く (upstream generateBlockedHostQueryForNote)。
+	metaRepo repository.MetaRepository
+}
+
+// HasMetaRepo reports whether the blocked-host filter can read meta.
+//
+// 未配線だと `blockedHosts` の除外が黙って no-op になる (ブロックしたはずの
+// インスタンスのノートが一覧に出続ける)。起動時の critical wiring 検査で落とす。
+func (h *Handler) HasMetaRepo() bool {
+	return h != nil && h.metaRepo != nil
+}
+
+// SetMetaRepo wires a MetaRepository used for the blocked-host filter on
+// roles/notes (upstream generateBlockedHostQueryForNote)。
+func (h *Handler) SetMetaRepo(r repository.MetaRepository) {
+	h.metaRepo = r
 }
 
 // SetRelationRepos wires the repositories used to populate viewer-relative
@@ -348,6 +365,14 @@ func (h *Handler) Notes(c echo.Context) error {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
+	// **ブロック済みインスタンスのノートを落とす** (upstream
+	// generateBlockedHostQueryForNote)。`ListByRole` には入っていないので
+	// post-fetch で落とす。
+	blockedHosts, err := notesfilter.LoadBlockedHosts(h.metaRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyBlockedHosts(notes, blockedHosts)
 	entities := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(entities, viewer)
 	notehide.HideEmbeds(viewer, entities)

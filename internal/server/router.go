@@ -2639,6 +2639,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// `CanSeeNote` が fail-closed に倒れ、followers 限定ノートが投稿者本人に
 	// しか出なくなる (漏れる側ではないが、正当なピン留めも消える)。
 	channelsHandler.SetUserFollowingRepo(followingRepo)
+	channelsHandler.SetMetaRepo(metaRepo) // channels/timeline の blocked-host filter
 
 	// Antennas endpoints (Phase 4.3)
 	antennasHandler := antennas.NewHandler(antennaService, noteRepo, idGen)
@@ -3172,6 +3173,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	rolesHandler := apiroles.NewHandler(roleService, idGen)
 	rolesHandler.SetNotesQuery(repository.NewRoleNotesQuery(s.db))
 	rolesHandler.SetNoteRepo(noteRepo) // #1630: notes の renote 入れ子 mute/block 検査
+	rolesHandler.SetMetaRepo(metaRepo) // roles/notes の blocked-host filter
 	rolesHandler.SetInstanceRepo(instanceRepo)
 	rolesHandler.SetEmojiRepo(emojiRepo)
 	rolesHandler.SetReactionReader(reactionCountWriter)
@@ -4258,6 +4260,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"blocked-host の note が antenna で漏れる"},
 		{"clips.metaRepo", clipsHandler.HasMetaRepo(),
 			"blocked-host の note が clip で漏れる"},
+		{"users.metaRepo", usersHandler.HasMetaRepo(),
+			"blocked-host の note が users/notes・users/reactions・users/featured-notes で漏れる"},
+		{"roles.metaRepo", rolesHandler.HasMetaRepo(),
+			"blocked-host の note が roles/notes で漏れる"},
+		{"channels.metaRepo", channelsHandler.HasMetaRepo(),
+			"blocked-host の note が channels/timeline で漏れる"},
 		{"reaction.mediaSilenceChecker", reactionService.HasMediaSilenceChecker(),
 			"media-silenced な host からのカスタム絵文字リアクションがそのまま出る"},
 		{"resolver.silencedHostChecker", federationResolver.HasSilencedHostChecker(),

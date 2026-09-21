@@ -468,7 +468,14 @@ func (h *Handler) Reactions(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
-	if len(sets.MutedUserIDs) > 0 || len(sets.BlockerIDs) > 0 || len(sets.MutedInstances) > 0 {
+	// **ブロック済みインスタンスのノートも落とす** (upstream
+	// generateBlockedHostQueryForNote)。`ListByUserID` が push down するのは
+	// visibility だけなので、ブロック後も既存のリアクションが出続けていた。
+	blockedHosts, berr := notesfilter.LoadBlockedHosts(h.metaRepo)
+	if berr != nil {
+		return apierr.JSONInternalError(c)
+	}
+	if len(sets.MutedUserIDs) > 0 || len(sets.BlockerIDs) > 0 || len(sets.MutedInstances) > 0 || len(blockedHosts) > 0 {
 		rowNotes := make([]*model.Note, 0, len(rows))
 		for _, r := range rows {
 			if r.Note != nil {
@@ -479,6 +486,7 @@ func (h *Handler) Reactions(c echo.Context) error {
 		if ferr != nil {
 			return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 		}
+		filteredNotes = notesfilter.ApplyBlockedHosts(filteredNotes, blockedHosts)
 		survived := make(map[string]struct{}, len(filteredNotes))
 		for _, n := range filteredNotes {
 			survived[n.ID] = struct{}{}
@@ -594,6 +602,14 @@ func (h *Handler) FeaturedNotes(c echo.Context) error {
 	if err != nil {
 		return c.JSON(http.StatusInternalServerError, apierr.Error("INTERNAL_ERROR", "Internal error.", "5d37dbcb-891e-41ca-a3d6-e690c97775ac"))
 	}
+	// **ブロック済みインスタンスのノートを落とす** (upstream
+	// generateBlockedHostQueryForNote)。ランキング / SQL のどちらの経路にも
+	// 入っていないので post-fetch で落とす。
+	blockedHosts, err := notesfilter.LoadBlockedHosts(h.metaRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyBlockedHosts(notes, blockedHosts)
 	result := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(result, viewer)
 	notehide.HideEmbeds(viewer, result)

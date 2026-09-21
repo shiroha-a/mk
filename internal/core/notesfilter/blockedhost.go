@@ -4,7 +4,27 @@ import (
 	"strings"
 
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
+
+// LoadBlockedHosts reads meta.blockedHosts for ApplyBlockedHosts.
+//
+// **Fail-closed**: meta が読めなければ error を返し、呼び出し側は 500 を返す
+// (#1544 と同じ判断)。nil を返して素通しにすると、DB 障害のあいだブロック済み
+// インスタンスのノートが一覧に出る。repo 未配線 (テスト) のときだけ no-op。
+func LoadBlockedHosts(meta repository.MetaRepository) ([]string, error) {
+	if meta == nil {
+		return nil, nil
+	}
+	m, err := meta.Fetch()
+	if err != nil {
+		return nil, err
+	}
+	if m == nil {
+		return nil, nil
+	}
+	return m.BlockedHosts, nil
+}
 
 // ApplyBlockedHosts drops notes whose author, reply author, or renote author
 // belongs to an admin-blocked instance, mirroring upstream

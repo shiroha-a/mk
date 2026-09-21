@@ -930,6 +930,14 @@ func (h *Handler) Notes(c echo.Context) error {
 	}
 
 	notes = notesfilter.ApplyHardMute(h.userRepo, viewer, notes)
+	// **ブロック済みインスタンスのノートを落とす** (upstream
+	// generateBlockedHostQueryForNote)。`ListByUserIDFiltered` が push down
+	// するのは visibility だけなので、ブロック後も既存のノートが出続けていた。
+	blockedHosts, err := notesfilter.LoadBlockedHosts(h.metaRepo)
+	if err != nil {
+		return apierr.JSONInternalError(c)
+	}
+	notes = notesfilter.ApplyBlockedHosts(notes, blockedHosts)
 	out := entity.PackNotes(c.Request().Context(), notes, h.idGen, h.instanceLookup(), h.emojiLookup(), h.reactionReader())
 	h.fieldRes.Apply(out, viewer)
 	notehide.HideEmbeds(viewer, out)
