@@ -849,6 +849,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// で先に作られるため、media-silence checker はここで遅延注入する)。
 	reactionService.SetUserRolesProvider(roleService)
 	reactionService.SetMediaSilenceChecker(instanceService)
+	// **サイレンスしたホストからのフォローを承認制にする。** 未配線だと
+	// 未施錠アカウントが承認なしでフォローされ、followers 限定ノートが
+	// 配送される (upstream UserFollowingService の 4 つ目の OR 条件)。
+	followingService.SetSilencedHostChecker(instanceService)
 	// ホワイトリスト連合 (federation: specified) / blockedHosts に対する gate を
 	// resolver の入口 (fetchActor / resolveNoteOnce / IngestNoteWithCreated) に
 	// 適用する。deliver_service / inboxProcessor と同じ instanceService を共有。

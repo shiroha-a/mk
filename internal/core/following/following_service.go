@@ -121,6 +121,19 @@ type Service struct {
 	mainStreamPublisher MainStreamPublisher
 	// relationReload は follow 変更を streaming connection へ通知する (#2400)。
 	relationReload RelationReloadPublisher
+	// silencedChecker は meta.silencedHosts の判定。未配線なら承認要求を
+	// 増やさない (= 従来どおり) が、production では必ず配線する。
+	silencedChecker SilencedHostChecker
+}
+
+// SilencedHostChecker reports whether a remote host is silenced.
+type SilencedHostChecker interface {
+	IsSilenced(host string) bool
+}
+
+// SetSilencedHostChecker wires the silenced-host lookup.
+func (s *Service) SetSilencedHostChecker(c SilencedHostChecker) {
+	s.silencedChecker = c
 }
 
 // RelationReloadPublisher notifies streaming connections that a viewer's
@@ -318,6 +331,20 @@ func (s *Service) Follow(followerID, followeeID string, opts FollowOptions) (*Fo
 		if profile, perr := s.userRepo.FindProfileByUserID(followeeID); perr == nil && profile != nil && profile.CarefulBot {
 			needsApproval = true
 		}
+	}
+	// **サイレンスしたホストからのフォローは必ず承認制にする。**
+	//
+	// upstream `UserFollowingService.follow` の 4 つ目の OR 条件
+	// (`isLocalUser(followee) && isRemoteUser(follower) &&
+	// isSilencedHost(meta.silencedHosts, follower.host)`)。これが無いと、
+	// サイレンス指定したインスタンスの利用者が未施錠のローカルアカウントを
+	// 承認なしで即フォローでき、以後 followers 限定ノートが配送される。
+	// mk-go は `IsSilenced` の機構自体は持っていて、リモートノートの取り込み
+	// では使っているのに、この経路だけ繋がっていなかった。
+	if !needsApproval && s.silencedChecker != nil &&
+		followee.Host == nil && follower.Host != nil && *follower.Host != "" &&
+		s.silencedChecker.IsSilenced(*follower.Host) {
+		needsApproval = true
 	}
 	// #2106 N21: followee が local + profile.autoAcceptFollowed=true + 相互フォロー
 	// (followee→follower) のときは follow request を作らず即 Following を成立させる
