@@ -100,6 +100,12 @@ func testPeer(t *testing.T, deps *pluginPeerDeps) *pluginPeer {
 	if deps.selfHost == "" {
 		deps.selfHost = "self.example"
 	}
+	if deps.blocker == nil {
+		// **本番は fail-closed** (配線が落ちたらブロックリストが無効になるより
+		// 全部止める方を選ぶ)。テストの既定は「何もブロックしない」にして、
+		// ブロック判定そのものを試すテストだけが明示的に差し替える。
+		deps.blocker = allowAllPeerBlocker{}
+	}
 	return &pluginPeer{name: "demo", peered: true, deps: deps, logger: testLogger(), maxBody: peerDefaultMaxBody}
 }
 
@@ -552,4 +558,33 @@ func TestPluginPeer_SelfHostWithDefaultPort(t *testing.T) {
 	got, err := p.Has(context.Background(), "other.example")
 	require.NoError(t, err)
 	assert.False(t, got, "宣言していない相手")
+}
+
+// allowAllPeerBlocker is the test default: nothing is blocked.
+type allowAllPeerBlocker struct{}
+
+func (allowAllPeerBlocker) IsBlocked(string) bool          { return false }
+func (allowAllPeerBlocker) IsAllowed(string) bool          { return true }
+func (allowAllPeerBlocker) ShouldSkipDelivery(string) bool { return false }
+
+// **blocker が未配線なら通さないこと (fail-closed)。**
+//
+// ここは「相手がブロック対象でないこと」を確かめる判定なので、判定できないこと
+// を理由に通すとブロックリストが黙って無効になる。起動時のゲート
+// (`peer.blocker`) と二重にしてある。
+func TestPluginPeer_BlockerMissingIsFailClosed(t *testing.T) {
+	p := &pluginPeer{name: "demo", peered: true, logger: testLogger(),
+		deps: &pluginPeerDeps{selfHost: "self.example", idGen: testIDGenerator(t)}}
+
+	require.True(t, p.blocked("remote.example"),
+		"受信側: 判定できないときは通さないこと")
+	require.True(t, p.skipDelivery("remote.example"),
+		"送信側: 判定できないときは送らないこと")
+}
+
+// 配線の有無を起動時ゲートが見られること。
+func TestPluginPeerDeps_HasBlocker(t *testing.T) {
+	require.False(t, (&pluginPeerDeps{}).HasBlocker())
+	require.False(t, (*pluginPeerDeps)(nil).HasBlocker())
+	require.True(t, (&pluginPeerDeps{blocker: allowAllPeerBlocker{}}).HasBlocker())
 }

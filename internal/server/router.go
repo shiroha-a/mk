@@ -4125,6 +4125,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	//     防げるのは事前の案内だけという点で他の項目と tier が違う。
 	//     移設で新しく生まれた面なので、棚卸し (#2674) の対象には入れる
 	s.recordCriticalWiring([]criticalWiring{
+		{"peer.blocker", s.peerDeps.HasBlocker(),
+			"プラグイン間通信でブロックリストと連合ポリシーが効かなくなる"},
 		{"inbox.signatureVerifier", inboxProcessor.HasSignatureVerifier(),
 			"HTTP 署名検証・連合ブロック・actor 一致・replay 判定が同時に飛ぶ"},
 		{"signup.ticketConsumption", signupService.HasTicketConsumption(),

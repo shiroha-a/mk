@@ -311,7 +311,11 @@ func (p *pluginPeer) Send(ctx context.Context, host string, payload any) (string
 // refused. AP の inbox と同じ判定。
 func (p *pluginPeer) blocked(host string) bool {
 	if p.deps.blocker == nil {
-		return false
+		// **配線が落ちていたら通さない (fail-closed)。** ここは「相手が
+		// ブロック対象でないこと」を確かめる判定なので、判定できないことを
+		// 理由に通すとブロックリストが黙って無効になる。起動時のゲート
+		// (`peer.blocker`) が本番で nil を防ぐが、二重にしておく。
+		return true
 	}
 	return p.deps.blocker.IsBlocked(host) || !p.deps.blocker.IsAllowed(host)
 }
@@ -323,7 +327,8 @@ func (p *pluginPeer) blocked(host string) bool {
 // 相手を停止しても peer だけ飛び続ける、という状態を作らない。
 func (p *pluginPeer) skipDelivery(host string) bool {
 	if p.deps.blocker == nil {
-		return false
+		// 送信側も同じ理由で fail-closed。
+		return true
 	}
 	return p.deps.blocker.ShouldSkipDelivery(host)
 }
@@ -713,4 +718,13 @@ func apiCatchall(c echo.Context) error {
 		))
 	}
 	return c.JSON(http.StatusOK, map[string]any{})
+}
+
+// HasBlocker reports whether the host-block checker was wired.
+//
+// **起動時のゲートに載せるための述語。** `recordCriticalWiring` の一覧に peer が
+// 1 つも無く、`blocker:` の行を消してもブロック判定が黙って無効になる状態で
+// 全テストが緑になっていた (inbox の同種の fail-open は全て載っている)。
+func (d *pluginPeerDeps) HasBlocker() bool {
+	return d != nil && d.blocker != nil
 }
