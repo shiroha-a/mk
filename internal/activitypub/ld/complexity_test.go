@@ -3,6 +3,7 @@ package ld
 import (
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -119,16 +120,117 @@ func TestCheckComplexity_IdentifiedNodesAreNotBlank(t *testing.T) {
 	require.NoError(t, CheckComplexity(map[string]any{"http://e/l": compact}))
 }
 
-// 深く入れ子にしても停止すること (病的に深い入力への保険)。
-func TestCheckComplexity_DeepNestingTerminates(t *testing.T) {
+// **深すぎる入れ子は拒否する (fail-closed)。**
+//
+// 打ち切って「見なかったことにする」と、payload を 33 段包むだけで他の上限が
+// まとめて無効になる。実際そうなっていた — 同型 blank node 1000 個を 40 段
+// 包むと素通りした。
+func TestCheckComplexity_RejectsDeepNesting(t *testing.T) {
 	t.Parallel()
 
 	var node any = map[string]any{"http://e/v": "leaf"}
 	for i := 0; i < 128; i++ {
 		node = map[string]any{"http://e/p": node}
 	}
-	// 走査が打ち切られるだけで panic も無限ループも起きない。
-	_ = CheckComplexity(node)
+	require.ErrorIs(t, CheckComplexity(node), ErrTooComplex)
+
+	// **包むだけで他の上限を外せないこと。** 中身だけなら総数上限で落ちる形を
+	// 40 段包んでも、やはり落ちること。
+	inner := make([]any, 0, 1000)
+	for i := 0; i < 1000; i++ {
+		inner = append(inner, map[string]any{"http://e/v": "same"})
+	}
+	var wrapped any = inner
+	for i := 0; i < 40; i++ {
+		wrapped = map[string]any{"http://e/p": wrapped}
+	}
+	require.ErrorIs(t, CheckComplexity(wrapped), ErrTooComplex,
+		"深さで打ち切ると総数の上限が消える")
+}
+
+// --- 相互参照する blank node (指数爆発の本体) ---
+//
+// URDNA2015 の `hashNDegreeQuads` が全順列を列挙するのは**相互に参照し合う**
+// 非一意な blank node に対してで、孤立した同型ノードをいくら並べても爆発
+// しない。JSON はツリーなので、blank node 同士の相互参照は**明示ラベル
+// (`_:b0`) でしか作れない**。
+
+// cliqueDoc builds n mutually-referencing blank nodes.
+func cliqueDoc(n int, bare bool) map[string]any {
+	nodes := make([]any, 0, n)
+	for i := 0; i < n; i++ {
+		refs := make([]any, 0, n)
+		for j := 0; j < n; j++ {
+			label := "_:b" + strconv.Itoa(j)
+			if bare {
+				// `@type: "@id"` を宣言した述語の値として直接書く形。
+				refs = append(refs, label)
+			} else {
+				refs = append(refs, map[string]any{"@id": label})
+			}
+		}
+		nodes = append(nodes, map[string]any{"@id": "_:b" + strconv.Itoa(i), "p": refs})
+	}
+	return map[string]any{
+		"@context": map[string]any{"p": map[string]any{"@id": "http://example.com/p", "@type": "@id"}},
+		"@graph":   nodes,
+	}
+}
+
+// **`@id` の値が `_:` で始まるものは IRI ではない。**
+//
+// identity とみなすと clique の各ノードがまるごとカウントから外れ、**実際の
+// 攻撃形が素通りする**。実測では 956 バイトの document (n=7) の正規化に
+// 708ms、n=9 で 1m52s かかった。
+func TestCheckComplexity_RejectsBlankNodeClique(t *testing.T) {
+	t.Parallel()
+
+	for _, bare := range []bool{false, true} {
+		name := "id-object"
+		if bare {
+			name = "bare-label"
+		}
+		t.Run(name, func(t *testing.T) {
+			// 5 は上限 (4) のすぐ上。上限そのものを参照しない。
+			require.ErrorIs(t, CheckComplexity(cliqueDoc(5, bare)), ErrTooComplex)
+			require.ErrorIs(t, CheckComplexity(cliqueDoc(7, bare)), ErrTooComplex)
+		})
+	}
+}
+
+// **ラベルは形のダイジェストから外す。**
+//
+// URDNA2015 は入力ラベルを捨てて正規化するので `_:b0` と `_:b1` は同型。
+// ダイジェストに残すと各ノードが別グループに割れて同型カウントが立たない。
+func TestCheckComplexity_BlankLabelsShareShape(t *testing.T) {
+	t.Parallel()
+
+	nodes := make([]any, 0, 3)
+	for i := 0; i < 3; i++ {
+		// ラベルは distinct だが形は同じ。ラベル数の上限には掛からない数に
+		// 絞って、**グループ化が揃っているか**だけを見る。
+		nodes = append(nodes, map[string]any{"@id": "_:n" + strconv.Itoa(i), "http://e/v": "same"})
+	}
+	c := &complexityCounter{groups: make(map[string]int), labels: make(map[string]struct{})}
+	_, err := c.walk(nodes, 0)
+	require.NoError(t, err)
+	require.Len(t, c.groups, 1,
+		"ラベルが違うだけの同型ノードは 1 つの形として数えること (割れると同型カウントが立たない)")
+	for _, n := range c.groups {
+		require.Equal(t, 3, n)
+	}
+}
+
+// 本文にたまたま `_:` の形が現れても通ること (偽陽性の下限)。
+func TestCheckComplexity_AllowsFewIncidentalLabels(t *testing.T) {
+	t.Parallel()
+
+	require.NoError(t, CheckComplexity(map[string]any{
+		"id":      "https://remote.example/notes/1",
+		"type":    "Note",
+		"content": "<p>_:a と _:b の話</p>",
+		"summary": "_:c",
+	}))
 }
 
 // Normalize が正規化の前に判定を通すこと (これが本体の choke point)。
