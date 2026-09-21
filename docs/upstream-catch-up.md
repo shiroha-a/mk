@@ -152,7 +152,48 @@ git add third_party/misskey
 # commit + PR
 ```
 
-`<tag>-mk.N` の `N` は revision 番号。同 release base で追加 patch が増えたら `.1` `.2` と上げる。
+#### fork タグの採番規則
+
+形式は `<upstream release>-mk.<N>[<英字>]`（例: `2026.9.0-mk.39`、`2026.9.0-mk.34c`）。
+**lightweight tag** で、fork の `mk-<upstream release>` 系列の先端に打つ。
+
+| 進めるもの | いつ | 例 |
+|---|---|---|
+| 数字 (`N`) | **新機能を実装したとき** | `mk.38` → `mk.39` |
+| 英字 | **既存機能の改修・バグ修正のとき** | `mk.39` → `mk.39a` → `mk.39b` |
+
+**1 PR = 1 タグ。** frontend に複数コミットを積む PR でも打つタグは 1 つで、`docs/divergence.md`
+§4-2 の表も 1 行になる。1 コミット = 1 タグにしないのは、表を「還元不能な差分の一覧」として
+読むときの単位が PR だから。
+
+**`N` は upstream release ごとに 0 から数え直す。** 取り込み直後の素の状態が `-mk.0` で、
+載せ替え (`git rebase --onto <新 release> <旧 release>`) で持ち込んだ custom commit も
+`-mk.0` に含める。§4-2 の tag 列は「その変更が**最初に入った世代**」なので、載せ替えても
+古い `2026.7.0-mk.*` の行はそのまま残す。
+
+**英字が `z` に達したら数字を上げる。** 26 回も後追いの修正が要る変更はもう別物とみなす。
+実測では 2026.9.0 の 82 タグを通して英字の最長連続は 8 なので、通常は到達しない。
+
+**過去のタグは振り直さない。** `2026.9.0` には「バグ修正なのに数字」が 13 件あるが
+(`mk.1` / `mk.2` / `mk.4` …)、これは規則が明文化される前のドリフト。タグは push 済みで、
+fork 側の `Publish frontend assets image` workflow が `*-mk.*` で発火して
+`ghcr.io/shiroha-a/misskey-ts-assets:<tag>` を publish しているため、打ち直すと配布物と
+対応が壊れる。**規則は次のタグから適用する。**
+
+タグを打ったら、**親リポ側で 4 箇所を同時に更新する**（順序は「submodule に commit →
+fork へ push → tag を push → 親リポの gitlink と doc」。逆順だと CI の checkout が
+`not our ref` で死ぬ）:
+
+- `docs/divergence.md` の pin 行（tag と**短縮 SHA の併記**。`make submodulepin-check` が gitlink と突き合わせる）
+- `docs/divergence.md` §4-2 の表に 1 行
+- 同ファイル冒頭サマリの件数と範囲（`TestDivergenceDoc_*` が表と突き合わせる）
+- `Dockerfile.bundled` の `MISSKEY_ASSETS_IMAGE`（配る image に焼く frontend。ずれても image はビルドできるので CI は落ちない）
+
+機械で守られているのはこのうち「表の連番が規則どおりか」（`assertForkTagSequence`。
+数字 +1 か、同じ数字への次の英字しか許さない）と「pin 行 ↔ gitlink」「tag → commit」
+(`make submodulepin-check` と CI の `build` job) で、**数字と英字のどちらを選ぶかは機械では
+見ていない**。上のドリフト 13 件はそこを通り抜けたもの。
+
 
 #### mk 固有パッチだけを載せるとき（release bump 以外）
 
