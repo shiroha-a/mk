@@ -262,3 +262,94 @@ func TestWWWAuthenticate_FlushDuringErrorCommitsBufferedBody(t *testing.T) {
 		rec.Header().Get("WWW-Authenticate"))
 	assert.True(t, rec.Flushed)
 }
+
+// --- quoted-string の閉じ (セキュリティ監査 2026-09-21) ---
+
+// **`"` で quoted-string を閉じさせない。**
+//
+// upstream は `error_description="${err.message}"` と無加工で埋めるので、
+// message に `"` が 1 つ入るだけで値が途中で閉じ、以降が別の auth-param と
+// して読まれる。実測では利用者が制御する文字列がここへ届く経路は無かったが、
+// エラー文言に変数を混ぜた瞬間に注入になるので出す側で閉じておく。
+func TestWWWAuthenticate_MessageQuotesAreEscaped(t *testing.T) {
+	rec := doWWWAuth(t, func(c echo.Context) error {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", `a" error="x`, "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	})
+	// 期待値はリテラルで書く (escape 関数を参照すると、escape を緩める変異と
+	// 一緒に期待値も動いて空虚になる)。
+	assert.Equal(t,
+		`Bearer realm="Misskey", error="invalid_request", error_description="a\" error=\"x"`,
+		rec.Header().Get("WWW-Authenticate"))
+}
+
+// **3 経路すべてで escape する。** `error_description` を出すのは
+// invalid_token (401) / invalid_request (client) / insufficient_scope の 3 つで、
+// 1 つだけ外す変異が素通りしないようにここで全部見る。
+func TestWWWAuthenticate_EveryDescriptionPathEscapes(t *testing.T) {
+	const raw = `x"y`
+	const want = `x\"y`
+	t.Run("invalid_token", func(t *testing.T) {
+		rec := doWWWAuth(t, func(c echo.Context) error {
+			return c.JSON(http.StatusUnauthorized, apierr.Error(
+				"AUTHENTICATION_FAILED", raw, "b0a7f5f8-dc2f-4171-b91f-de88ad238e14"))
+		})
+		assert.Equal(t,
+			`Bearer realm="Misskey", error="invalid_token", error_description="`+want+`"`,
+			rec.Header().Get("WWW-Authenticate"))
+	})
+	t.Run("invalid_request", func(t *testing.T) {
+		rec := doWWWAuth(t, func(c echo.Context) error {
+			return c.JSON(http.StatusBadRequest, apierr.Error(
+				"INVALID_PARAM", raw, "3d81ceae-475f-4600-b2a8-2bc116157532"))
+		})
+		assert.Equal(t,
+			`Bearer realm="Misskey", error="invalid_request", error_description="`+want+`"`,
+			rec.Header().Get("WWW-Authenticate"))
+	})
+	t.Run("insufficient_scope", func(t *testing.T) {
+		rec := doWWWAuth(t, func(c echo.Context) error {
+			return c.JSON(http.StatusForbidden, apierr.ErrorWithKind(
+				"PERMISSION_DENIED", raw, "1370e5b7-d4eb-4566-bb1d-7748ad9a1bfd",
+				apierr.KindPermission))
+		})
+		assert.Equal(t,
+			`Bearer realm="Misskey", error="insufficient_scope", error_description="`+want+`"`,
+			rec.Header().Get("WWW-Authenticate"))
+	})
+}
+
+// **バックスラッシュも逃がす。** 逃がさないと、末尾の `\` が閉じ引用符を
+// quoted-pair にしてしまい、やはり値が閉じない。
+func TestWWWAuthenticate_MessageBackslashIsEscaped(t *testing.T) {
+	rec := doWWWAuth(t, func(c echo.Context) error {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", `end\`, "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	})
+	assert.Equal(t,
+		`Bearer realm="Misskey", error="invalid_request", error_description="end\\"`,
+		rec.Header().Get("WWW-Authenticate"))
+}
+
+// **制御文字は quoted-string に置けない。**
+func TestWWWAuthenticate_MessageControlCharsAreStripped(t *testing.T) {
+	rec := doWWWAuth(t, func(c echo.Context) error {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "a\x01b\x7fc", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	})
+	assert.Equal(t,
+		`Bearer realm="Misskey", error="invalid_request", error_description="a b c"`,
+		rec.Header().Get("WWW-Authenticate"))
+}
+
+// **普通の文言は素通しする。** 上 3 つが「全部落とす」実装でも緑にならない
+// ようにする。日本語 (multi-byte) がバイト単位の処理で壊れないことも見る。
+func TestWWWAuthenticate_PlainMessageIsUntouched(t *testing.T) {
+	rec := doWWWAuth(t, func(c echo.Context) error {
+		return c.JSON(http.StatusBadRequest, apierr.Error(
+			"INVALID_PARAM", "パラメータが不正です (a-b_c).", "3d81ceae-475f-4600-b2a8-2bc116157532"))
+	})
+	assert.Equal(t,
+		`Bearer realm="Misskey", error="invalid_request", error_description="パラメータが不正です (a-b_c)."`,
+		rec.Header().Get("WWW-Authenticate"))
+}

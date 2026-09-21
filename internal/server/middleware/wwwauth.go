@@ -135,11 +135,41 @@ func (w *wwwAuthWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return nil, nil, errors.New("wwwauth: underlying writer does not support hijacking")
 }
 
+// quoteAuthParam escapes s for use inside an RFC 7235 quoted-string.
+//
+// **upstream は無加工でテンプレートに挿入する** (`error_description="${err.message}"`)。
+// `"` が 1 つ入るだけで quoted-string が閉じ、以降が別の auth-param として
+// 読まれるので、クライアントは error_description を取り違える。実測では
+// mk-go にも upstream にも「利用者が制御する文字列がここへ届く経路」は
+// 見つからなかった (message は全てソース中のリテラル) が、**エラー文言に
+// 変数を混ぜた瞬間に注入になる**構造なので、出す側で閉じておく。
+//
+// 意図的な upstream 乖離 (docs/divergence.md)。
+func quoteAuthParam(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		switch {
+		case r == '"' || r == '\\':
+			// quoted-pair で逃がす (RFC 7230 §3.2.6)。
+			b.WriteByte('\\')
+			b.WriteRune(r)
+		case r < 0x20 || r == 0x7f:
+			// 制御文字は quoted-string に置けない。改行は net/http が
+			// space へ潰すが、それ以外は潰されないのでここで落とす。
+			b.WriteByte(' ')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
 // wwwAuthenticateValue returns the WWW-Authenticate value for one error
 // response, or "" when no header is due. The branch order replicates
 // upstream `#sendApiError` (401 check first, then RATE_LIMIT_EXCEEDED, then
-// kind). error_description は本家同様 message をそのまま埋め込む (本家は
-// テンプレート文字列で無加工挿入する。改行は net/http が space に潰す)。
+// kind). error_description は quoteAuthParam で escape してから埋め込む
+// (upstream は無加工。quoteAuthParam の GoDoc 参照)。
 func wwwAuthenticateValue(status int, contentType string, body []byte) string {
 	if !strings.HasPrefix(contentType, echo.MIMEApplicationJSON) {
 		return ""
@@ -161,15 +191,15 @@ func wwwAuthenticateValue(status int, contentType string, body []byte) string {
 		// anonymous 扱いに落とすため AUTHENTICATION_FAILED の emission は
 		// 無いが、追加時に header だけ drift しないよう先に揃えておく。
 		if e.Code == "AUTHENTICATION_FAILED" {
-			return `Bearer realm="Misskey", error="invalid_token", error_description="` + e.Message + `"`
+			return `Bearer realm="Misskey", error="invalid_token", error_description="` + quoteAuthParam(e.Message) + `"`
 		}
 		return `Bearer realm="Misskey"`
 	case e.Code == "RATE_LIMIT_EXCEEDED":
 		return ""
 	case e.Kind == apierr.KindClient:
-		return `Bearer realm="Misskey", error="invalid_request", error_description="` + e.Message + `"`
+		return `Bearer realm="Misskey", error="invalid_request", error_description="` + quoteAuthParam(e.Message) + `"`
 	case e.Kind == apierr.KindPermission && e.Code == "PERMISSION_DENIED":
-		return `Bearer realm="Misskey", error="insufficient_scope", error_description="` + e.Message + `"`
+		return `Bearer realm="Misskey", error="insufficient_scope", error_description="` + quoteAuthParam(e.Message) + `"`
 	}
 	return ""
 }
