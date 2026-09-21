@@ -138,3 +138,26 @@ func TestStripNginxComments(t *testing.T) {
 	require.Contains(t, out, "$uri")
 	require.NotContains(t, out, "末尾コメント")
 }
+
+// 同梱の nginx 設定が無認証の管理面を塞いでいること。
+//
+// `/metrics` は `enableMetrics` を有効にすると無認証で公開される。doc は
+// 2 箇所で「LB / nginx の ACL で制限すること」と書いているのに、同梱の参照設定に
+// その対策が入っていなかった。
+func TestBundledNginxBlocksUnauthenticatedAdminPaths(t *testing.T) {
+	t.Parallel()
+
+	mustBlock := []string{"/debug", "/metrics"}
+	require.NotEmpty(t, bundledNginxConfigs)
+	require.NotEmpty(t, mustBlock)
+
+	for _, path := range bundledNginxConfigs {
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		body := stripNginxComments(string(raw))
+		for _, p := range mustBlock {
+			require.Contains(t, body, "location "+p+" {",
+				"%s: %s を塞ぐ location が無い", path, p)
+		}
+	}
+}
