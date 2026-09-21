@@ -1085,9 +1085,11 @@ ipshape-check: ## レスポンス / 連合の shape に IP が出ていないか
 	# 担保が shapecheck の golden 照合しか無く、additive な追加は素通りしていた。
 	# **AST で全 struct のタグを読む** — reflect で型を並べる形は `MeDetailed`
 	# (= /api/i) を落とし、入れ子や map の値型も辿れていなかった (実測)。
-	# 判定は語で見る (`lastIPs` を `last` + `i` + `ps` に割ると Go の命名規約に
-	# 素直に従った名前だけが素通りする)。
-	go test ./internal/entitycompat/... -run 'TestResponseAndFederationShapesHaveNoIPField|TestIPShapeAllowlistIsEmpty|TestScanJSONTagsCollectsWhatEncodingJSONEmits|TestCustomJSONMarshalersAreKnown|TestLooksLikeIPKey' -count=1 -v
+	# 走査は entity / activitypub だけでなく api / server / stream も見る
+	# (handler が自分で宣言する response struct もそのまま wire の形になる)。
+	# 判定は語で見る。**切り方を片側に寄せると必ず穴が開く** — 大文字のたびに
+	# 割ると `lastIPs` が、割らないと `IPAddr` が素通りする (両方とも実測)。
+	go test ./internal/entitycompat/... -run 'TestResponseAndFederationShapesHaveNoIPField|TestIPShapeAllowlistMatchesExpected|TestPublicShapesDoNotReferenceIPBearingTypes|TestIPRefAllowlistIsEmpty|TestPublicShapesMarshalWithoutIP|TestScanJSONTagsCollectsWhatEncodingJSONEmits|TestCustomJSONMarshalersAreKnown|TestLooksLikeIPKey' -count=1 -v
 
 .PHONY: dockerignore-check
 dockerignore-check: ## .dockerignore がシークレットと利用者データを除外しているか検査

@@ -148,7 +148,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / submodulepin-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / ipshape-check / submodulepin-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -221,7 +221,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 134 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 135 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -859,6 +859,14 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-21**: `make gates` に `ipshape-check` を追加 (#3136)。`make help` の target は 134 → 135。**#3066 の完了条件「IP 情報が一般ユーザー向け API や連合へ露出しない」の担保が shapecheck の golden 照合しか無かった** — `PackUserDetailed` にフィールドを足す変更も、AP の actor に属性を増やす変更も緑のまま通る(実測: `UserLite` に `json:"lastIPs"` を足して `make shapecheck` は PASS)。**いまは漏れていない**が、担保が無かった。
+  **reflect で型を手で並べない。** 初版はそう書いて `entity.MeDetailed` (= `/api/i`) を落としていた。**AST で全 struct の json タグを読む**形にすると、型を列挙しないので落としようがなく、入れ子も別 struct として自然に拾える。走査は `internal/entity` / `internal/activitypub` だけでは足りない — **handler が自分のファイルに宣言した response struct もそのまま wire の形になる**ので `internal/api` / `internal/server` / `internal/stream` も入れる (実測 2,332 キー。IP を指すキーを持つのは `internal/api/admin` の IP 照会 API だけで、そちらはモデレーター + policy + scope の 3 段でゲート済み)。
+  **語の切り方は片側に寄せると必ず穴が開く。** 大文字のたびに割ると `lastIPs` が `last` + `i` + `ps` になってGo の命名規約に素直な名前だけが素通りし、逆に「小文字/数字の直後の大文字」だけにすると `IPAddr` / `IPHash` / `IPList` が 1 語に潰れて素通りする。**2 稿にわたって片側ずつ落とした** (どちらも敵対的レビューで実測)。しかも 2 稿目の表は `IPAddress` しか持たず、正規表現に `address` が書いてあったせいで**表が回帰を隠していた**。境界は 2 つ要る — 小文字/数字の直後の大文字と、**大文字が 2 つ以上続いた後の、小文字が続く大文字**。
+  **キーの走査だけでは入れ子が見えない。** `Session *model.Signin` を 1 フィールド足すだけで `encoding/json` はその中の `ip` を出すのに、タグ走査からは見えない (実測で素通りした)。IP を持つ型は実在する (`model.Signin` / `model.UserIP` / `model.IPLookupLog` / `model.DriveFile`)。`internal/` 全体から「自分の JSON キーに IP を持つ名前付き struct」を**導出して**、公開 shape がそれを参照していないことを別に見る。
+  **収集ロジックは `encoding/json` の実挙動と突き合わせる。** 人工ソースは `testdata/` ではなく**コンパイルされるパッケージ** (`internal/entitycompat/ipscanfixture`) に置く — あちらは Go ツールチェーンが無視するので `json.Marshal` と比べられず、期待値を手で書くことになる (実測: 収集側と `encoding/json` が食い違う形を足しても緑のままだった)。拾う形は 5 つ — タグ無し exported はフィールド名、`json:"-"` と非公開は出ない、**タグ無しの匿名埋め込みは昇格**、**タグ付きの匿名埋め込みはタグ名 1 つ**、**struct でない名前付き型の埋め込みは型名**。
+  **allowlist には死んだ entry の検査を必ず付ける。** `ipRefAllowlist` に付け忘れたところ、**実在しない`driveFileRow.RequestIP` を捏造した状態で全テストが緑のまま通った** (裏取りせずに書いたものが検出されない形)。
+  **走査が縮んでいないことは、件数と代表キーだけでは見られない。** 代表キーが大きな 2 ファイルに偏っていたため、**14 ファイルを落とす変異が、落としたファイルに置いた本物の漏れごと素通りした** (実測)。`json:"` を含むファイルは 1 件以上寄与することを**ファイル単位**で要求する。truth は AST ではなくテキスト走査から採る (AST が壊れれば必ず食い違う)。
+  **射程外**: `map[string]any` を手で組む経路 (`entity.PackSignin` / nodeinfo)、`datatypes.JSON` / `json.RawMessage` の中身、`remoteAddr` のように `ip` の語を含まない綴り。
 - **2026-09-17**: `make gates` に `nulparam-check` を追加 (#3025)。`make help` の target は 133 → 134。**認証済みの一般利用者が、パラメータに NUL を 1 文字入れるだけで 500 を起こせた** (`federation/*` や `users/clips` など**未認証**で叩けるものもあった)。NUL はどの列にも入らないうえ、**比較の右辺に置くだけで PostgreSQL がクエリごと落とす** (手元の simple protocol で SQLSTATE 08P01、本番の pgx extended protocol で 22021)。`IsNotFound` でもないので handler は `JSONInternalError` へ倒す。NUL は JSON のエスケープで普通に送れる。#3018 / #3022 は主に「列に**書く**値」を塞いだ (申請 ID のように引く側も一部含む) が、**カーソル / id / 検索語は系統的に残っていた**。
   **upstream は「全部 500」ではない。** ajv に `misskey:id` (`/^[a-zA-Z0-9]+$/`) を登録しているので、その format を持つ `sinceId` / `untilId` / `userId` / `noteId` は**列に届く前に 400 で弾かれる**。format を持たない値 (検索語や `users/show` の `username` など) だけが 500 になる。**この裏取りをせずに「upstream は 500」と書き、敵対的レビューで指摘された。**
   **役割ごとに答えが違う。** カーソルは 400 (空に倒すと「カーソル無し = 先頭から」になり、**利用者の指定と無関係なページを正しい応答として返す**)、単体 id と完全一致で引く値は not-found (一致しえない値は「無い」が事実)、検索語は**空の結果**(「その語を含む行が無い」が事実で、利用者の入力が壊れているわけではないので wire に新しいエラーコードを足さない)。**issue の完了条件は「4xx になる」だったが、検索語だけは 200 + 空にしてある** — 理由は docs/divergence.md に書いた。**単体 id は upstream と code / id が違い、status も一致しない経路がある** (`users/show` は mk-go 404 / upstream 400) ので、これも divergence として記録した。
