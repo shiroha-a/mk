@@ -2,6 +2,7 @@ package stream
 
 import (
 	"encoding/json"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -136,4 +137,34 @@ type allowAllNoteVisibility struct{}
 
 func (allowAllNoteVisibility) RequireVisible(_ *model.User, id string) (*model.Note, error) {
 	return &model.Note{ID: id}, nil
+}
+
+// **1 接続あたりの購読トピック数に上限があること。**
+//
+// チャンネル単位の上限 (`maxChannelsPerConnection` = 32) だけでは、ハッシュタグ
+// のように 1 チャンネルで多数のトピックを購読するもの (最大 32) を積まれると
+// **1 本の接続から distinct な Redis 購読を 1024 個**開ける。`PubSubService` は
+// distinct トピックごとに Redis へ接続を張るので、`/streaming` を数本開くだけで
+// valkey の `maxclients` に届き、インスタンス全体が新規接続を拒否する。
+// **`/streaming` は未認証で張れて接続数の上限も無い。**
+func TestDispatcher_CapsTopicsPerConnection(t *testing.T) {
+	bus := newStubBus()
+	registry := NewRegistry()
+	registry.Register("test", func(ctx ChannelContext) Channel { return &fakeChannel{ctx: ctx} })
+	conn := NewConnection("c1", &model.User{ID: "alice"}, newFakeConn())
+	d := NewDispatcher(conn, registry, bus)
+
+	// チャンネルを 1 つ作り、そこから多数のトピックを購読させる。
+	d.HandleClientMessage("connect", json.RawMessage(`{"id":"abc","channel":"test"}`))
+	for i := 0; i < 500; i++ {
+		d.subscribe("abc", "topic-"+strconv.Itoa(i))
+	}
+
+	d.mu.Lock()
+	got := len(d.topics)
+	d.mu.Unlock()
+	// 期待値はリテラル (定数を参照すると上限を緩める変異と一緒に動く)。
+	assert.LessOrEqual(t, got, 129,
+		"1 接続が保持できるトピック数に上限が無い (Redis の接続数を食い潰せる)")
+	assert.Greater(t, got, 100, "正当な利用者が張る数まで絞りすぎていないこと")
 }

@@ -55,6 +55,22 @@ type NoteVisibilityChecker interface {
 // exhaustion を防ぐ。
 const maxChannelsPerConnection = 32
 
+// maxTopicsPerConnection は 1 WebSocket 接続が保持できる distinct な pubsub
+// トピック数の上限。
+//
+// **チャンネル単位の上限だけでは足りない。** ハッシュタグのチャンネルは
+// 1 つで最大 32 トピックを購読でき (`maxHashtagTopics`)、チャンネルは
+// 1 接続に 32 個まで作れるので、**1 本の接続から distinct な Redis 購読を
+// 1024 個**開ける。`PubSubService` は distinct トピックごとに Redis へ
+// 接続を張るので、`/streaming` を数本開くだけで valkey の `maxclients` に
+// 届き、インスタンス全体が新規接続を拒否する。**`/streaming` は未認証で
+// 張れて接続数の上限も無い。**
+//
+// 128 は「普通の利用者が同時に開く数」より十分大きい — upstream の
+// フロントエンドが張るのは HTL / LTL / STL / GTL / 通知 / メイン +
+// 開いているタブ分で、実測でも 20 を超えない。
+const maxTopicsPerConnection = 128
+
 // 1 つの Connection に対して 1 つの Dispatcher がぶら下がり、複数の Channel
 // を保持する。pubsub の global subscription 管理は Manager の Router (K-4)
 // に集約するため、Dispatcher は per-channel の subscribe/unsubscribe API を
@@ -411,6 +427,15 @@ func (d *Dispatcher) subscribe(channelID, topic string) {
 	if !exists {
 		set = map[string]bool{}
 		d.topics[topic] = set
+	}
+	// **接続あたりの上限。** チャンネル単位の上限だけでは、ハッシュタグの
+	// ように 1 チャンネルで多数のトピックを購読するものを積まれると
+	// `maxChannelsPerConnection` 倍まで増える。
+	if !exists && len(d.topics) > maxTopicsPerConnection {
+		delete(d.topics, topic)
+		delete(entry.topics, topic)
+		d.mu.Unlock()
+		return
 	}
 	set[channelID] = true
 	first := !exists
