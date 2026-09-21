@@ -85,6 +85,38 @@ jobs:
           fi
           echo "pin ok: $tag -> $tagsha"
 
+          # **§4-2 の表の tag が fork に実在するか (#3144)。**
+          # あの表は「還元不能な差分の一覧」の錨なので、typo した tag が残ると行が
+          # 指す先を追えなくなる。`assertForkTagSequence` は表の中の連番しか見て
+          # おらず、実在しない tag を書いても通る。
+          # **submodule の checkout は shallow で tag が降りてこない**ので Go 側の
+          # gate では見られない。`git ls-remote --tags` は ref の一覧だけを取るので
+          # 1 往復で済む (実測 0.5 秒 / 121 tag)。
+          git ls-remote --tags "$url" | sed 's/.*refs\/tags\///; s/\^{}$//' | sort -u > /tmp/fork-tags.txt
+          sed -n 's/^| `\([0-9][0-9.]*-mk\.[0-9][0-9]*[a-z]*\)` |.*/\1/p' docs/divergence.md | sort -u > /tmp/doc-tags.txt
+          doccount=$(wc -l < /tmp/doc-tags.txt)
+
+          # **件数は冒頭サマリの宣言値と一致すること。** 「1 件以上」のような下限だと
+          # 全滅しか見られず、書式が少し変わって 115 行中 114 行が抽出から落ちても
+          # 緑になる (#3142 のレビューで実測)。サマリの値は `TestDivergenceDoc_*` が
+          # §4-2 の行数と一致することを別途強制しているので、ここと突き合わせれば
+          # 「抽出できた数 == 表の行数 == 宣言値」が閉じる。
+          declared=$(sed -n 's/^| fork frontend の独自変更 | \([0-9]*\) tag .*/\1/p' docs/divergence.md)
+          if [ -z "$declared" ]; then
+            echo "::error::docs/divergence.md 冒頭サマリの `fork frontend の独自変更` 行から件数を読めませんでした。書式を変えたならこの step も直してください"
+            exit 1
+          fi
+          if [ "$doccount" != "$declared" ]; then
+            echo "::error::docs/divergence.md §4-2 から $doccount 件しか tag を拾えませんでした (冒頭サマリの宣言は $declared 件)。表の書式を変えたならこの step も直してください"
+            exit 1
+          fi
+          missing=$(comm -23 /tmp/doc-tags.txt /tmp/fork-tags.txt)
+          if [ -n "$missing" ]; then
+            echo "::error::docs/divergence.md §4-2 の tag が $url にありません: $(echo $missing)"
+            exit 1
+          fi
+          echo "§4-2 tags ok: $doccount 件すべて fork に存在"
+
       # 同梱サンプルは **既定無効** (#2495)。clone しただけの運営者のバイナリ・
       # フロント・DB に勝手に入らないようにするため。有効なままだと、設定して
       # いなくても plugin_wiring.go が Routes / Jobs の登録より先に専用 schema を
