@@ -230,8 +230,10 @@ func dialSMTP(addr, proxyURL string, timeout time.Duration) (net.Conn, error) {
 	}
 	u, err := url.Parse(proxyURL)
 	if err != nil || u.Host == "" {
-		slog.Warn("email: invalid proxySmtp URL, falling back to direct dial",
-			"proxySmtp", proxyURL, "err", err)
+		// **生の URL を出さない。** `socks5://user:pass@host` の形を取るので、
+		// パース失敗時に丸ごと出すと認証情報がログに残る。同じ値を
+		// `config_dump` は `redactURLUserinfo` でマスクしている。
+		slog.Warn("email: invalid proxySmtp URL, falling back to direct dial", "err", err)
 		return net.DialTimeout("tcp", addr, timeout)
 	}
 	switch strings.ToLower(u.Scheme) {
