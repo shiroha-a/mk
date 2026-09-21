@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -2584,26 +2585,55 @@ func (h *Handler) packRoleForList(r *model.Role) map[string]any {
 // round-trip で map化することで、`model.Role` にフィールドが増えても
 // この関数を更新せずに追従できる (手で列挙し直すと更新漏れが起きる)。
 // 元の *model.Role は書き換えない (共有の入力構造体を壊さない)。
+//
+// **round-trip 失敗時は index を nil のまま残さない (#3130 review 3周目)。**
+// 以前は continue で out[i] が nil のままになり、応答の配列に `null` 要素が
+// 混ざっていた。DB から取れる Role でここに来る経路は無い (json.Marshal は
+// 通常の struct に対して事実上失敗しない) が、旧実装 (c.JSON ごと 500) より
+// null 混入の方が型付きクライアントには扱いにくい方向なので、id / name /
+// color / iconUrl だけの最小限フォールバックへ倒す。
 func proxyRoleIconURLs(roles []*model.Role) []map[string]any {
 	out := make([]map[string]any, len(roles))
 	for i, r := range roles {
 		if r == nil {
 			continue
 		}
-		raw, err := json.Marshal(r)
+		m, err := roleIconProxyMap(r)
 		if err != nil {
-			slog.Error("admin/show-user: failed to marshal role for icon proxying", "roleId", r.ID, "err", err)
-			continue
+			slog.Error("admin/show-user: failed to round-trip role for icon proxying, using minimal fallback", "roleId", r.ID, "err", err)
+			m = map[string]any{
+				"id":      r.ID,
+				"name":    r.Name,
+				"color":   r.Color,
+				"iconUrl": entity.ProxyMediaURLPtr(r.IconURL),
+			}
 		}
-		m := map[string]any{}
-		if err := json.Unmarshal(raw, &m); err != nil {
-			slog.Error("admin/show-user: failed to unmarshal role for icon proxying", "roleId", r.ID, "err", err)
-			continue
-		}
-		m["iconUrl"] = entity.ProxyMediaURLPtr(r.IconURL)
 		out[i] = m
 	}
 	return out
+}
+
+// roleIconProxyMap round-trips r through JSON into a generic map (so newly
+// added model.Role fields flow through without touching this function), then
+// overwrites iconUrl with the proxied value.
+//
+// **UseNumber で decode する。** 素の `json.Unmarshal` は数値を float64 に
+// 通すため、policies / condFormula に入る int64 が 2^53 を超えると精度を
+// silent に落とす (#3130 review 3周目)。json.Number は元の文字列表現を保つ
+// のでここでは丸めない。
+func roleIconProxyMap(r *model.Role) (map[string]any, error) {
+	raw, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	m := map[string]any{}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&m); err != nil {
+		return nil, err
+	}
+	m["iconUrl"] = entity.ProxyMediaURLPtr(r.IconURL)
+	return m, nil
 }
 
 // RolesShow handles POST /api/admin/roles/show.
