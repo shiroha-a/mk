@@ -99,10 +99,17 @@ func (c *Client) EnqueuePluginPeer(ctx context.Context, plugin string, body []by
 	}
 	// **再試行の既定を明示する。** 渡し忘れると mkq は 0 回・asynq は 25 回と
 	// driver で挙動が割れる (EnqueuePlugin と同じ理由)。
-	all := append([]driver.EnqueueOption{
+	// **retention を付ける (#1193 の再発防止)。** 本体の enqueue helper は全て
+	// `retentionOpts` を前置しているが、プラグインの 2 経路だけ付けていなかった。
+	// 出さないと driver 既定 = 無制限保持になり、cron 発火と `_peer` 送信の
+	// たびに completed ジョブが Redis へ永久に積まれる (peer のエンベロープは
+	// プラグインが決める任意の本文で、利用者のノートを載せうる)。
+	base := []driver.EnqueueOption{
 		driver.WithQueue(PluginQueueName(plugin)),
 		driver.WithMaxRetry(0),
-	}, opts...)
+	}
+	base = append(base, c.retentionOpts(PluginQueueName(plugin))...)
+	all := append(base, opts...)
 	return c.inner.Enqueue(ctx, PluginPeerTaskType(plugin), body, all...)
 }
 
@@ -119,9 +126,16 @@ func (c *Client) EnqueuePlugin(ctx context.Context, plugin, job string, body []b
 		// 本体の task type と見分けが付かない文字列になる。
 		return fmt.Errorf("queue: ジョブ名 %q が不正です (使えるのは英数字とハイフン・アンダースコアのみ)", job)
 	}
-	all := append([]driver.EnqueueOption{
+	// **retention を付ける (#1193 の再発防止)。** 本体の enqueue helper は全て
+	// `retentionOpts` を前置しているが、プラグインの 2 経路だけ付けていなかった。
+	// 出さないと driver 既定 = 無制限保持になり、cron 発火と `_peer` 送信の
+	// たびに completed ジョブが Redis へ永久に積まれる (peer のエンベロープは
+	// プラグインが決める任意の本文で、利用者のノートを載せうる)。
+	base := []driver.EnqueueOption{
 		driver.WithQueue(PluginQueueName(plugin)),
 		driver.WithMaxRetry(0),
-	}, opts...)
+	}
+	base = append(base, c.retentionOpts(PluginQueueName(plugin))...)
+	all := append(base, opts...)
 	return c.inner.Enqueue(ctx, PluginTaskType(plugin, job), body, all...)
 }
