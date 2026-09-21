@@ -1542,7 +1542,12 @@ func (h *Handler) HasBlockingRepo() bool { return h.blockingRepo != nil }
 // 未配線だと匿名 visitor への remote profile 露出を
 // `ugcVisibilityForVisitor` で gate できない。**空文字は gate 無効**と同義
 // (`"none"` でも `"local"` でもないので素通し)。起動時検査に使う (#2708)。
-func (h *Handler) HasUGCVisibility() bool { return h.ugcVisibility != "" }
+//
+// **live lookup も見る。** 焼き込みを止めて `SetUGCVisibilityLookup` に
+// 移したとき、この述語だけが固定フィールドを見たままだと**配線済みなのに
+// 起動時検査が落ちて本番が起動しない**。notes 側 (`ugcVisibilityNow`) と
+// 同じ形にしてある。
+func (h *Handler) HasUGCVisibility() bool { return h.ugcVisibilityNow() != "" }
 
 // pinnedPageVisibleTo reports whether viewer may read the pinned page body.
 //
