@@ -20,9 +20,14 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/imagedecode"
 )
 
-// MaxImagePixels is the declared width*height ceiling used for images a
+// MaxImagePixels returns the declared width*height ceiling used for images a
 // plugin fetched from a third party. 本体の media proxy と同じ値。
-var MaxImagePixels = imagedecode.MaxPixels
+//
+// **変数ではなく関数。** 公開変数だとプラグインから代入できてしまうが、
+// `DecodeImage` は本体側の値を直接読むので**代入しても何も起きない**
+// (上限を緩めたつもりで素通りし、しかも気付けない)。厳しくしたいプラグインは
+// `DecodeImageWithPixelCap` を使うこと。
+func MaxImagePixels() int64 { return imagedecode.MaxPixels }
 
 // DecodeImage decodes an image with the same limits the server applies to
 // remote media.

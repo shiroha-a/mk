@@ -774,7 +774,7 @@ func (*Cache) Sweep(context.Context) error
 `pgx` を持つのと同じ切り方)。
 
 ```
-var MaxImagePixels
+func MaxImagePixels() int64
 func DecodeImage([]byte) (image.Image, error)
 func DecodeImageWithPixelCap([]byte, int64) (image.Image, error)
 ```

@@ -28,5 +28,5 @@ func TestDecodeImage_AppliesPixelCap(t *testing.T) {
 	_, err = DecodeImageWithPixelCap(buf.Bytes(), 4)
 	require.Error(t, err, "宣言寸法が cap を超えたら拒否すること")
 
-	require.Positive(t, MaxImagePixels, "既定の上限が公開されていること")
+	require.Positive(t, MaxImagePixels(), "既定の上限が公開されていること")
 }

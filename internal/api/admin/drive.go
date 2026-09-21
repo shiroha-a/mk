@@ -316,12 +316,17 @@ func (h *Handler) DriveShowFile(c echo.Context) error {
 }
 
 // packAdminDriveShowFile builds the upstream-compatible admin/drive/show-file
-// response shape. `requestIp` は viewer が moderator のときのみ含め (= 通常
-// admin endpoint は moderator gate されているので常に true 経路だが、防御的
-// に check)、`requestHeaders` は viewer が moderator AND owner が
-// moderator でない場合のみ含める (upstream: モデレーターの個人情報を他の
-// モデレーターから守る制限)。両 field とも `nil` で omit せず明示 null を
-// emit する (upstream の `optional: false, nullable: true` schema 通り)。
+// response shape.
+//
+// `requestIp` は viewer が moderator **かつ `canSearchIpHistory` を持つ**
+// ときだけ含める。**upstream より厳しい** (あちらは moderator であれば返す) —
+// mk-go は IP の閲覧を role policy で絞る仕組みを持っており、`admin/ip/*` が
+// それを要求するのにここだけ素通しだと迂回路になる (`docs/divergence.md`)。
+// `requestHeaders` は上記に加えて owner が moderator でない場合のみ含める
+// (upstream: モデレーターの個人情報を他のモデレーターから守る制限)。
+//
+// 両 field とも `nil` で omit せず明示 null を emit する (upstream の
+// `optional: false, nullable: true` schema 通り)。
 func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User) map[string]any {
 	// リモートファイルの url/thumbnailUrl/webpublicUrl は外部 URL なので、admin が
 	// drive 一覧を開いただけで moderator の IP が連合先へ漏洩する (issue #1529)。

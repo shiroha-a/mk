@@ -697,6 +697,15 @@ func (p *Processor) SetBlockingService(svc *coreblocking.Service) {
 	p.blockingService = svc
 }
 
+// HasBlockingService reports whether the blocking service was wired.
+//
+// 未配線だと inbound の Block / Undo(Block) が `ErrUnsupportedActivity` に
+// なるだけでなく、**reversi の Invite からブロック判定が丸ごと飛ぶ**
+// (`reversi_inbox.go` の `p.blockingService != nil` guard)。ブロック済みの
+// リモート利用者が対象の `reversi:<userID>` ストリームへ `invited` を push
+// できる。起動時検査に使う。
+func (p *Processor) HasBlockingService() bool { return p != nil && p.blockingService != nil }
+
 // SetAbuseReportRepo wires the abuse report repository for Flag activities.
 func (p *Processor) SetAbuseReportRepo(repo repository.AbuseReportRepository, idGen id.Generator) {
 	p.abuseReportRepo = repo

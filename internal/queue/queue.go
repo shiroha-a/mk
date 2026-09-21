@@ -320,9 +320,15 @@ const clearScheduledNotePageSize = 100
 // される** (取り消しは draft が消えているので processor 側が not-found で
 // ack して救われるが、再スケジュールは draft が残るので救われない)。
 //
-// 削除 failure は集約して error として返す。partial success 時も err 経路
-// に流すことで caller (DraftsUpdate / DraftsDelete) が log を残し handler
-// 戻り値で 500 を返せるようにする。
+// 削除 failure は集約して error として返す。**caller は log を残すが 500 には
+// しない** — draft の更新 / 削除そのものは成功しており、そこを 500 にすると
+// 「保存できたのに失敗と表示される」ほうが利用者に不利益。upstream も
+// `clearSchedule` を fire-and-forget で呼ぶ。
+//
+// **active な job は消せない。** mkq の `RemoveJob` は locked な job に
+// `ErrJobActive` を返す。走査に active を含めているのは「実行中のものを
+// 見つけて報告する」ためで、消せるわけではない (実行が終われば
+// completed / failed へ移るので、そこで初めて消える)。
 func (c *Client) ClearScheduledNote(draftID string) error {
 	if c.inspector == nil {
 		return nil

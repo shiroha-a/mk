@@ -2,6 +2,7 @@ package notes
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -353,7 +354,14 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	// しても draft 更新自体は成功で返す (= log のみ、frontend は draft
 	// 更新の永続化を確認できる)。
 	if scheduleChanged && h.scheduledNoteEnqueuer != nil {
-		_ = h.scheduledNoteEnqueuer.ClearScheduledNote(draft.ID)
+		// **捨てずに log へ残す。** 500 にはしない (draft の更新は成功して
+		// いるので、そこを失敗にすると「保存できたのに失敗と表示される」)。
+		// ただし黙って捨てると、古い job が残って**取り消したはずの時刻で
+		// 公開される**事故の手掛かりが 1 つも残らない。
+		if err := h.scheduledNoteEnqueuer.ClearScheduledNote(draft.ID); err != nil {
+			slog.Warn("notes/drafts/update: 旧 delayed task を消せなかった",
+				"draftId", draft.ID, "err", err)
+		}
 		if draft.IsActuallyScheduled && draft.ScheduledAt != nil {
 			delay := draft.ScheduledAt.Sub(now)
 			if err := h.scheduledNoteEnqueuer.EnqueuePostScheduledNote(
@@ -587,7 +595,11 @@ func (h *Handler) DraftsDelete(c echo.Context) error {
 	// and forget で呼ぶ。clear 失敗は 204 を阻害しない (= asynq retry
 	// で task が fire してもprocessor 側で draft 不在 silent skip で済む)。
 	if h.scheduledNoteEnqueuer != nil {
-		_ = h.scheduledNoteEnqueuer.ClearScheduledNote(req.DraftID)
+		// 上と同じ。消せなくても 204 は返すが、手掛かりは残す。
+		if err := h.scheduledNoteEnqueuer.ClearScheduledNote(req.DraftID); err != nil {
+			slog.Warn("notes/drafts/delete: 旧 delayed task を消せなかった",
+				"draftId", req.DraftID, "err", err)
+		}
 	}
 	return c.NoContent(http.StatusNoContent)
 }

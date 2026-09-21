@@ -2,7 +2,7 @@
 # plugin/ の公開面。差分はレビューで意図を確認すること (#2478)。
 plugin/imagedecode: func DecodeImage([]byte) (image.Image, error)
 plugin/imagedecode: func DecodeImageWithPixelCap([]byte, int64) (image.Image, error)
-plugin/imagedecode: var MaxImagePixels
+plugin/imagedecode: func MaxImagePixels() int64
 plugin/peercache:   field Options.Context plugin.Context
 plugin/peercache:   field Options.DB *sql.DB
 plugin/peercache:   field Options.NegativeTTL time.Duration
