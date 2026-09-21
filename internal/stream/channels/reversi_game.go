@@ -121,7 +121,13 @@ func (c *ReversiGameChannel) OnClientMessage(msgType string, body json.RawMessag
 	if err != nil {
 		slog.Info("reversi channel: action failed",
 			"gameId", c.gameID, "type", msgType, "user", user.ID, "err", err)
-		_ = c.ctx.Send("error", map[string]any{"message": err.Error(), "type": msgType})
+		// **内部のエラー文面を返さない。** repository のエラーはそのまま
+		// 伝播する設計 (#2799) なので、pgx / gorm の SQLSTATE やリレーション名が
+		// クライアントへ届いていた。CLAUDE.md §6 の「内部エラーは slog で記録、
+		// ユーザーには汎用メッセージ」に反するうえ、同居する `peerError` /
+		// `wrapPluginHandler` は既に「エラー文面を返さない」方針で書かれている。
+		// upstream の `reversi-game.ts` はそもそも error を返す経路を持たない。
+		_ = c.ctx.Send("error", map[string]any{"message": "operation failed", "type": msgType})
 	}
 }
 
