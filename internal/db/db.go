@@ -5,7 +5,9 @@ package db
 
 import (
 	"fmt"
+	stdlog "log"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/config"
@@ -19,13 +21,8 @@ import (
 // cfg.DBSlaves is non-empty, register read replicas via the dbresolver
 // plugin so SELECT queries are routed to replicas.
 func New(cfg *config.Config) (*gorm.DB, error) {
-	logLevel := logger.Warn
-	if cfg.Logging != nil && cfg.Logging.SQL != nil && cfg.Logging.SQL.EnableQueryParamLog {
-		logLevel = logger.Info
-	}
-
 	gdb, err := gorm.Open(postgres.Open(cfg.DSN()), &gorm.Config{
-		Logger: logger.Default.LogMode(logLevel),
+		Logger: newGormLogger(cfg),
 		// TypeORM互換: テーブル名をそのまま使う
 		DisableNestedTransaction: true,
 		// クエリのprepared statementをコネクション単位でキャッシュし、
@@ -101,4 +98,52 @@ func New(cfg *config.Config) (*gorm.DB, error) {
 	}
 
 	return gdb, nil
+}
+
+// newGormLogger builds the GORM logger used for SQL logging.
+//
+// **既定でバインド値を SQL 文字列へ展開しない。**
+//
+// `logger.Default` は `IgnoreRecordNotFoundError: false` なので、`Warn` でも
+// **`record not found` を含む全エラーで**展開済みの SQL を stdout に出す
+// (`logger.go` の `case err != nil && l.LogLevel >= Error && (!errors.Is(err,
+// ErrRecordNotFound) || !l.IgnoreRecordNotFoundError)`)。
+//
+// これが認証経路を直撃する。`auth.Authenticate` はまず native token として
+// 引くので、アプリ / OAuth / MiAuth のトークンでは**必ず** not-found を経て
+// から `access_token` 側で成功する。つまり通常利用でトークンが平文でログに
+// 出る。同じ形でパスワードリセットトークン・メール確認コード・アプリ
+// secret・招待コードが出うるし、書き込みエラーなら `twoFactorSecret` や
+// `smtpPass` も出る。slow query (200ms 超) の経路は**成功したクエリ**でも
+// 同じ展開をするので、ネイティブトークンもそこから出る。
+//
+// upstream は `postgres.ts` が `logging: process.env.NODE_ENV !== 'production'`
+// で本番では SQL ログ自体を持たず、dev でも TypeORM がプレースホルダ付き SQL と
+// パラメータを別々に出すので値が SQL に埋まらない。
+//
+// `logging.sql.enableQueryParamLogging` を真にしたときだけ従来どおり展開する
+// (運用者が明示的に選んだ場合)。既定は偽。
+func newGormLogger(cfg *config.Config) logger.Interface {
+	return newGormLoggerTo(cfg, stdlog.New(os.Stdout, "\r\n", stdlog.LstdFlags))
+}
+
+// newGormLoggerTo is newGormLogger with an explicit sink, so tests can observe
+// what actually reaches the log.
+func newGormLoggerTo(cfg *config.Config, w logger.Writer) logger.Interface {
+	paramLog := cfg.Logging != nil && cfg.Logging.SQL != nil && cfg.Logging.SQL.EnableQueryParamLog
+	logLevel := logger.Warn
+	if paramLog {
+		logLevel = logger.Info
+	}
+	return logger.New(w, logger.Config{
+		SlowThreshold: 200 * time.Millisecond,
+		LogLevel:      logLevel,
+		// **not-found を SQL ごと出さない。** 認証経路が必ず通る枝で、
+		// そこに渡る値は生のトークンそのもの。
+		IgnoreRecordNotFoundError: true,
+		// **バインド値を埋めない。** GORM はこれが偽だと
+		// `Dialector.Explain(sql, vars...)` で値を SQL へ展開する。
+		ParameterizedQueries: !paramLog,
+		Colorful:             false,
+	})
 }
