@@ -2,6 +2,7 @@ package entity
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/model"
@@ -301,4 +302,35 @@ func TestPackUserLite_Decoration_ScaleOmittedWhenDefault(t *testing.T) {
 	raw, err := json.Marshal(out.AvatarDecorations)
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "scale")
+}
+
+// catalog の url は admin 設定で remote を指せる。frontend の MkAvatar は
+// decoration.url を <img src> へ直接載せるので、pack 時に media proxy 経由へ
+// 書き換える (#1529)。生 URL のままだと閲覧者の IP が相手サーバーへ渡り、
+// 静止画設定時は getStaticImageUrl が sig なし URL を作って allowlist 外のため
+// 403 + max-age=86400 になる。
+func TestPackUserLite_AvatarDecorations_ProxiesRemoteURL(t *testing.T) {
+	t.Cleanup(func() { SetMediaURLContext(nil) })
+	t.Cleanup(func() { SetAvatarDecorationLookup(nil) })
+	SetMediaURLContext(internalCtx())
+	SetAvatarDecorationLookup(&stubDecoLookup{urls: map[string]string{
+		"dec1": "https://" + remoteHost + "/dec1.png",
+		"dec2": testInstanceURL + "/files/dec2.png",
+	}})
+
+	u := &model.User{
+		ID:                "u1",
+		Username:          "alice",
+		AvatarDecorations: datatypes.JSON([]byte(`[{"id":"dec1"},{"id":"dec2"}]`)),
+	}
+	out := PackUserLite(u)
+	require.Len(t, out.AvatarDecorations, 2)
+
+	// catalog の順序は保存順のまま。
+	remote := out.AvatarDecorations[0]
+	assert.True(t, strings.HasPrefix(remote.URL, testInternalProxy+"/image.webp?"),
+		"remote decoration url must be proxied, got %q", remote.URL)
+	// 自オリジンは no-op。
+	local := out.AvatarDecorations[1]
+	assert.Equal(t, testInstanceURL+"/files/dec2.png", local.URL)
 }

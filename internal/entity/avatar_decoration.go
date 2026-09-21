@@ -96,6 +96,9 @@ type AvatarDecorationItem struct {
 // silently dropped (TS upstream does the same — a deleted decoration must not
 // keep rendering on user profiles). Returns an empty slice (not nil) so the
 // JSON output is `[]` rather than `null`, which is what the frontend expects.
+//
+// 各 item の `url` は remote origin なら media proxy 経由へ書き換える (#1529)。
+// frontend の MkAvatar は decoration.url を <img src> へ直接載せるため。
 func resolveAvatarDecorations(raw []byte) []AvatarDecorationItem {
 	out := []AvatarDecorationItem{}
 	if len(raw) == 0 {
@@ -153,7 +156,10 @@ func resolveAvatarDecorations(raw []byte) []AvatarDecorationItem {
 				// ここで消える。catalog 由来の silent drop と同じ形。
 				continue
 			}
-			item.URL = url
+			// catalog 由来と同じく proxy 経由へ書き換える (#1529)。ローカル
+			// 絵文字なので通常は no-op (自オリジン / object storage) だが、
+			// 判定材料を 1 箇所に揃えておく。
+			item.URL = ProxyMediaURL(url)
 			// 保存済みの名前ではなく**現在の名前**を出す (rename 追従)。
 			item.EmojiName = name
 			out = append(out, item)
@@ -166,7 +172,13 @@ func resolveAvatarDecorations(raw []byte) []AvatarDecorationItem {
 				// できないので silent drop。upstream TS も同じ filter を行う。
 				continue
 			}
-			item.URL = url
+			// **admin 設定の URL は remote origin を指せる。** frontend の
+			// MkAvatar は decoration.url を <img src> へ直接載せるので、生 URL を
+			// 返すと閲覧者の IP が相手サーバーへ渡り、CSP enforce の構成では
+			// 画像が消える。静止画設定時の getStaticImageUrl も、proxy 済みなら
+			// sig を保ったまま static=1 を足せる (生 URL のままだと allowlist に
+			// avatar_decoration.url が無く 403 + max-age=86400)。
+			item.URL = ProxyMediaURL(url)
 		}
 		out = append(out, item)
 	}

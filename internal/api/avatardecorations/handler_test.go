@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/testutil"
 )
@@ -96,6 +97,22 @@ func TestGet(t *testing.T) {
 
 		got := decode(t, call(t, NewHandler(testDB, nil)))
 		assert.Equal(t, []any{"roleA", "gone"}, got[0]["roleIdsThatCanBeUsedThisDecoration"])
+	})
+
+	// catalog の url は admin 設定で remote を指せる。この endpoint は admin
+	// 権限不要で誰でも叩けるので、生 URL を返すと閲覧者全員のブラウザが相手
+	// サーバーへ直接取得する (#1529)。
+	t.Run("remote url goes through the media proxy", func(t *testing.T) {
+		seed(t)
+		entity.SetMediaURLContext(entity.NewMediaURLContext(
+			"https://local.example", "https://local.example/proxy", []byte("s"), false, true))
+		t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+		got := decode(t, call(t, NewHandler(testDB, nil)))
+		require.Len(t, got, 1)
+		gotURL, _ := got[0]["url"].(string)
+		assert.True(t, strings.HasPrefix(gotURL, "https://local.example/proxy/image.webp?"),
+			"remote catalog url must be proxied, got %q", gotURL)
 	})
 
 	t.Run("no rows returns an empty array, not null", func(t *testing.T) {

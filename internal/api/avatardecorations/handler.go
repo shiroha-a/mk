@@ -9,6 +9,7 @@ import (
 	"gorm.io/gorm"
 
 	corerole "github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 )
 
@@ -42,6 +43,10 @@ func NewHandler(db *gorm.DB, roles RoleSetProvider) *Handler {
 // **role 一覧を引けないときは filter を飛ばす。** 空集合として扱うと
 // **全 roleId が落ちて、ロール限定のデコレーションが誰にも使えなくなる**。
 // 古い ID が残るほうが害が小さい。
+//
+// `url` は remote origin を指せるので media proxy 経由へ書き換える (#1529)。
+// この endpoint は admin 権限不要で誰でも叩けるため、生 URL を返すと
+// 閲覧者全員のブラウザが相手サーバーへ直接取得してしまう。
 func (h *Handler) Get(c echo.Context) error {
 	if h.db == nil {
 		return c.JSON(http.StatusOK, []any{})
@@ -69,7 +74,7 @@ func (h *Handler) Get(c echo.Context) error {
 			"id":                                 d.ID,
 			"name":                               d.Name,
 			"description":                        d.Description,
-			"url":                                d.URL,
+			"url":                                entity.ProxyMediaURL(d.URL),
 			"roleIdsThatCanBeUsedThisDecoration": roleIDs,
 			// upstream Misskey #17034 (= 2026.5.0) で追加された category field
 			// もここで返す。nullable なので null のままも許容。
