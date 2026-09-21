@@ -2,6 +2,7 @@ package i
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -45,9 +46,22 @@ func (h *Handler) Move(c echo.Context) error {
 	}
 	// root ユーザーは移行不可 (upstream move.ts: rootUserId === me.id)。
 	// meta.rootUserId と user.isRoot の両方を見る (role_service.isRootUser と同 doctrine)。
+	// **判定できないときは通さない (#2792 / #3037)。**
+	//
+	// 本番の root は `isRoot = false` (列を足した migration より後に作られて
+	// いない) なので **meta が唯一の判定材料**。読めない窓で `me.IsRoot` に
+	// 落とすと、root が `NOT_ROOT_FORBIDDEN` を素通りして `movedToUri` を
+	// 立てられる (以後の書き込みが全部 403 になり、連合先にも `Move` が配送
+	// される不可逆操作)。同じ不変条件を守る `i/delete-account` と
+	// `targetIsRoot` は #3037 でこの形に直っており、ここだけ残っていた。
 	isRoot := me.IsRoot
 	if h.metaRepo != nil {
-		if m, err := h.metaRepo.Fetch(); err == nil && m.RootUserID != nil && *m.RootUserID == me.ID {
+		m, err := h.metaRepo.Fetch()
+		if err != nil {
+			slog.Error("i/move: cannot determine whether the caller is root", "userId", me.ID, "err", err)
+			return apierr.JSONInternalError(c)
+		}
+		if m != nil && m.RootUserID != nil && *m.RootUserID == me.ID {
 			isRoot = true
 		}
 	}
