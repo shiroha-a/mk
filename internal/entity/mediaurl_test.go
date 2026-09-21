@@ -296,6 +296,37 @@ func TestUserSuppliedProxyURL_IsStableWithinBucket(t *testing.T) {
 	}
 }
 
+// TestExpiringProxiedURL_ExternalNoSig confirms an external proxy gets no
+// HMAC sig from expiringProxiedURL either (mirrors
+// TestProxiedURL_ExternalNoSig for the non-expiring sibling). 外部 proxy 自身
+// の認証しか見ないので、期限付き署名を付けても意味が無い。**docstring には
+// 明記されているがこの分岐を見るテストが無かった** (関数カバレッジ 87.5% が
+// この枝の未実行と一致。#3130 review 3周目)。
+func TestExpiringProxiedURL_ExternalNoSig(t *testing.T) {
+	c := externalCtx()
+	raw := "https://" + remoteHost + "/icon.png"
+	got := c.expiringProxiedURL(raw, modeDefault)
+	if !strings.HasPrefix(got, testExternalProxy+"/image.webp?") {
+		t.Fatalf("external prefix mismatch: %s", got)
+	}
+	u, _ := url.Parse(got)
+	if u.Query().Get("sig") != "" {
+		t.Errorf("external proxy URL must not carry sig: %s", got)
+	}
+}
+
+// UserSuppliedProxyTTL の絶対値を固定する。他のテストはすべて定数への相対値
+// (`UserSuppliedProxyTTL/2` 等) で検証しており、定数の値そのものを変えても
+// (例えば 14 日にしても) 落ちない (#3130 review 3周目)。根拠は `/url` の
+// 応答が `max-age=86400` (1 日) でキャッシュされることで、署名の有効期間
+// (TTL/2, TTL] がそれより十分長くないと、キャッシュより先に署名が死んで
+// プレビュー画像が壊れる。
+func TestUserSuppliedProxyTTL_Value(t *testing.T) {
+	if UserSuppliedProxyTTL != 7*24*time.Hour {
+		t.Errorf("UserSuppliedProxyTTL = %s, want 7*24h", UserSuppliedProxyTTL)
+	}
+}
+
 // stableExpiry のバケット境界: 同一 half-TTL 窓では同じ期限、窓が変わると進む。
 // 有効期間は常に (TTL/2, TTL] に収まる (境界直後でも 3.5 日は残る)。
 func TestStableExpiry_BucketsAndValidity(t *testing.T) {
