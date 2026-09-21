@@ -525,6 +525,12 @@ server {
         return 404;
     }
 
+    # /metrics も塞ぐ。`enableMetrics` を有効にすると mk-go が**無認証で**
+    # 公開する (下記の注意点を参照)。
+    location /metrics {
+        return 404;
+    }
+
     location / {
         proxy_pass http://mkgo;
         proxy_http_version 1.1;
@@ -543,6 +549,17 @@ server {
 - `client_max_body_size`はmk-goの`maxFileSize`設定 (デフォルト250MB) 以上に設定する
 - `proxy_read_timeout 1d`はWebSocket (`/streaming`)のために必要
 - `Upgrade`/`Connection`ヘッダーはWebSocketパススルーに必要
+- **アクセスログにクエリ文字列を出さない。** 同梱フロントは WebSocket を
+  `/streaming?i=<トークン>` で開く。`i` はスコープ制限のないネイティブ
+  ログイントークンなので、既定の `combined` (= `$request` を含む) のままだと
+  **ログを読めるだけでアカウントを乗っ取れる**。`$request` の代わりに
+  `$request_method $uri $server_protocol` を使うこと
+  (同梱の `deploy/uds/nginx/mkgo.conf` が実例)
+- **`error_log` にはクエリが残る。** nginx はエラー行に
+  `request: "<リクエスト行>"` を付けるので、アクセスログを直しても
+  `/streaming?i=<トークン>` はそちらから出る。レベルを上げても消えない
+  (実測では `[crit]`)。収集側でフィルタするか、診断性を捨てて
+  `error_log /dev/null;` にすること
 - `location /debug`の404は**`location /`が全部を委譲する構成だから**要る。mk-goは
   `enablePprof: true`のときだけ`/debug/pprof/*`を生やすが、有効化は運用者が診断のために
   行う判断であって公開してよいという意味ではない。ここで落としておかないと、

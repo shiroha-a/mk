@@ -156,8 +156,94 @@ func TestBundledNginxBlocksUnauthenticatedAdminPaths(t *testing.T) {
 		require.NoError(t, err)
 		body := stripNginxComments(string(raw))
 		for _, p := range mustBlock {
-			require.Contains(t, body, "location "+p+" {",
-				"%s: %s を塞ぐ location が無い", path, p)
+			// **block の中身まで見る。** location が在るかだけでは、
+			// `return 404;` を `proxy_pass` に書き換える変異 (= 塞いだ状態を
+			// そのまま元へ戻す形) を素通りさせる (実測)。
+			inner, ok := nginxLocationBody(body, p)
+			require.True(t, ok, "%s: %s を塞ぐ location が無い", path, p)
+			require.Regexp(t, `(?m)^\s*(return\s+40[34]|deny\s+all)\s*;`, inner,
+				"%s: location %s が %s を塞いでいない (`return 404;` か `deny all;` が要る)",
+				path, p, p)
 		}
 	}
+}
+
+// nginxLocationBody returns the body of `location <path> { ... }`.
+//
+// **ネストは想定しない。** 同梱の設定はどの location も 1 階層で、入れ子を
+// 扱うには nginx の構文解析が要る。拾えなければ呼び出し側が落とす。
+func nginxLocationBody(body, path string) (string, bool) {
+	head := "location " + path + " {"
+	i := strings.Index(body, head)
+	if i < 0 {
+		return "", false
+	}
+	rest := body[i+len(head):]
+	j := strings.Index(rest, "}")
+	if j < 0 {
+		return "", false
+	}
+	return rest[:j], true
+}
+
+// 同梱の nginx 設定が `error_log` の扱いを明示していること。
+//
+// **`access_log` を直しても `error_log` には残る。** nginx はエラー行に
+// `request: "<リクエスト行>"` と `upstream: "<URI>"` を付けるので、
+// `/streaming?i=<token>` が stderr に落ちる。本番のログで実測した (直近 168
+// 時間で 4 行、いずれも mk-go の再起動中に WebSocket が来たときの `[crit]`。
+// レベルを上げても消えない)。
+//
+// nginx 側に redaction の手段が無いので、ここで検査できるのは「運用者が
+// それを知っているか」だけ。**設定に注意書きがあることを要求する** —
+// 消したら落ちるので、`access_log` だけ直して塞いだつもりになるのを防ぐ。
+func TestBundledNginxDocumentsErrorLogLeak(t *testing.T) {
+	t.Parallel()
+
+	require.NotEmpty(t, bundledNginxConfigs)
+	for _, path := range bundledNginxConfigs {
+		raw, err := os.ReadFile(path)
+		require.NoError(t, err)
+		src := string(raw)
+		if !strings.Contains(stripNginxComments(src), "error_log") {
+			// error_log を書いていないなら nginx の既定 (ファイル出力) で、
+			// 同梱構成の docker ログには出ない。注意書きは要らない。
+			continue
+		}
+		require.Contains(t, src, "error_log にはクエリが残る",
+			"%s: `error_log` を有効にしているのに、そこにトークンが残ることの"+
+				"注意書きが無い。`access_log` を直しただけでは塞がらない", path)
+	}
+}
+
+// 抽出そのものを人工の入力で固定する。
+//
+// **実設定からは検出できない。** `nginxLocationBody` が `}` を見なくなっても、
+// 同梱の設定では隣の location の `return 404;` を拾って通ってしまう
+// (`/debug` と `/metrics` が並んでいるため)。抽出が「その block の中だけ」を
+// 返すことは、ここで直接見る。
+func TestNginxLocationBody(t *testing.T) {
+	t.Parallel()
+
+	const src = `
+    location /a {
+        return 404;
+    }
+    location /b {
+        proxy_pass http://x;
+    }
+`
+	a, ok := nginxLocationBody(src, "/a")
+	require.True(t, ok)
+	require.Contains(t, a, "return 404;")
+	require.NotContains(t, a, "proxy_pass", "隣の location を含めないこと")
+
+	b, ok := nginxLocationBody(src, "/b")
+	require.True(t, ok)
+	require.Contains(t, b, "proxy_pass")
+	require.NotContains(t, b, "return 404;",
+		"block の外 (前の location) を含めないこと")
+
+	_, ok = nginxLocationBody(src, "/missing")
+	require.False(t, ok, "無い location は見つからないと返すこと")
 }
