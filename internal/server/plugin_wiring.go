@@ -868,7 +868,9 @@ type pluginCaller struct {
 // mk-go 側を変えても自動的に追従する。
 //
 // レート制限も同じように適用される。プラグインが高頻度で呼ぶと、その利用者の
-// 制限に掛かる。
+// 制限に掛かる。**ただし `Anonymous()` (= 利用者を伴わない呼び出し) は別** —
+// プロセス内呼び出しの印が付いているので IP バケットに落ちず、実質的に
+// 無制限になる。プラグイン側で自前の上限を持つこと。
 func (c *pluginCaller) Call(ctx context.Context, endpoint string, params any) (json.RawMessage, error) {
 	if err := validateEndpoint(endpoint); err != nil {
 		return nil, err

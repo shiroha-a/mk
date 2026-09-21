@@ -4268,6 +4268,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"blocked-host の note が channels/timeline で漏れる"},
 		{"reaction.mediaSilenceChecker", reactionService.HasMediaSilenceChecker(),
 			"media-silenced な host からのカスタム絵文字リアクションがそのまま出る"},
+		{"following.silencedHostChecker", followingService.HasSilencedHostChecker(),
+			"サイレンスしたホストからのフォローが承認なしで通り、followers 限定ノートが配送される"},
 		{"resolver.silencedHostChecker", federationResolver.HasSilencedHostChecker(),
 			"silenced instance の remote public note が home へ降格されず public timeline に出る"},
 		{"following.blockingChecker", followingService.HasBlockingChecker(),

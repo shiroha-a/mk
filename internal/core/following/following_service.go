@@ -136,6 +136,12 @@ func (s *Service) SetSilencedHostChecker(c SilencedHostChecker) {
 	s.silencedChecker = c
 }
 
+// HasSilencedHostChecker reports whether the silenced-host lookup was wired.
+//
+// 未配線だとサイレンスしたホストからのフォローが承認なしで通り、followers
+// 限定ノートがそのまま配送される。起動時検査に使う。
+func (s *Service) HasSilencedHostChecker() bool { return s != nil && s.silencedChecker != nil }
+
 // RelationReloadPublisher notifies streaming connections that a viewer's
 // following snapshot changed (#2400)。実装は stream 側の adapter。
 //

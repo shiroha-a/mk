@@ -1613,3 +1613,18 @@ func TestUnfollow_SkipsCountAdjustmentWhenMoved(t *testing.T) {
 		})
 	}
 }
+
+// **述語が配線を見ていること。** 起動時の critical wiring 検査はこれを読むので、
+// 常に true を返すようになると未配線を検出できなくなる。
+func TestHasSilencedHostChecker(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	svc := following.NewService(testutil.NewMockUserRepository(), testutil.NewMockFollowingRepository(),
+		testutil.NewMockFollowRequestRepository(), idGen)
+	assert.False(t, svc.HasSilencedHostChecker(), "未配線では false")
+	svc.SetSilencedHostChecker(silencedHostFunc(func(string) bool { return false }))
+	assert.True(t, svc.HasSilencedHostChecker(), "配線後は true")
+}
+
+type silencedHostFunc func(string) bool
+
+func (f silencedHostFunc) IsSilenced(host string) bool { return f(host) }
