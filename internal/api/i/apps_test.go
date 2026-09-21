@@ -5,11 +5,13 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -477,4 +479,35 @@ type failingAccessTokenRepo struct {
 func (r *failingAccessTokenRepo) FindByID(string) (*model.AccessToken, error) { return nil, r.err }
 func (r *failingAccessTokenRepo) FindByHashOrToken(string, string) (*model.AccessToken, error) {
 	return nil, r.err
+}
+
+// iconUrl はアプリ開発者が指定した任意 URL。frontend (settings/apps.vue) が
+// <img src> へ直接載せるので、期限付き署名で proxy 経由にする (#1529 / #3037)。
+func TestApps_ProxiesRemoteIconURL(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, _ := newExtraHandler(t)
+	tokens := testutil.NewMockAccessTokenRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	icon := "https://remote.example/icon.png"
+	tID := idGen.Generate(time.Now())
+	tokens.Tokens["h1"] = &model.AccessToken{ID: tID, Hash: "h1", UserID: stubUser.ID, IconURL: &icon}
+	h.SetAccessTokenRepo(tokens)
+
+	rec := postExtra(h.Apps, `{}`, stubUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var got []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &got))
+	require.Len(t, got, 1)
+
+	gotIcon, _ := got[0]["iconUrl"].(string)
+	assert.True(t, strings.HasPrefix(gotIcon, "https://mk.example/proxy/image.webp?"),
+		"remote iconUrl must be proxied, got %q", gotIcon)
+	parsed, err := url.Parse(gotIcon)
+	require.NoError(t, err)
+	assert.Equal(t, "mk.example", parsed.Host, "proxy 自身のホスト以外を向いている")
+	assert.Contains(t, parsed.Query().Get("sig"), ".",
+		"利用者由来 URL なので期限付き署名 (unix.hex) を付ける (#3037)")
 }

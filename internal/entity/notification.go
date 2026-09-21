@@ -460,6 +460,18 @@ func packNotificationCore(n *notification.Notification, user *model.User, note *
 				continue
 			}
 		}
+		// app 通知の icon は利用者由来の任意 URL (#1557)。**保存値は raw の
+		// まま**で、読み出し時に期限付き署名を付けて proxy 経由へ書き換える
+		// (#1529 / #3037)。作成時に包むと 7 日の署名 TTL が通知の寿命より先に
+		// 切れ、古い通知のアイコンだけが 403 + max-age=86400 になる。
+		// **型で絞る** — 同じ Extra ループの他の分岐と同じく、icon を URL 以外の
+		// 意味で使う通知型を将来足したときに巻き込まない (#3130 review)。
+		if k == "icon" && n.Type == notification.TypeApp {
+			if s, ok := v.(string); ok {
+				out[k] = *ProxyUserSuppliedMediaURLPtr(&s)
+				continue
+			}
+		}
 		out[k] = v
 	}
 	return out

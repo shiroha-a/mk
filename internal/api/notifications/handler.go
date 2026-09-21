@@ -921,6 +921,10 @@ func (h *Handler) Create(c echo.Context) error {
 	} else if token != nil && token.Name != nil {
 		header = *token.Name
 	}
+	// **icon は raw のまま保存する (#1529 / #3037)。** 利用者由来の任意 URL
+	// なので、読み出し時 (entity.PackNotification の Extra spread) に期限付き
+	// 署名を付けて proxy 経由へ書き換える。ここで包むと署名の 7 日 TTL が
+	// 通知の寿命より先に切れ、古い通知のアイコンだけが 403 になる。
 	var icon any
 	if req.Icon != nil {
 		icon = *req.Icon

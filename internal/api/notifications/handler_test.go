@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -470,6 +471,50 @@ func TestCreate_ExplicitHeaderIconOverridesToken(t *testing.T) {
 	require.Len(t, resp, 1)
 	assert.Equal(t, "Custom", resp[0]["header"])
 	assert.Equal(t, "https://x/i.png", resp[0]["icon"])
+}
+
+// 'app' 通知の icon は利用者由来の任意 URL。**保存は raw のまま**で、読み出し
+// (PackNotification) 時に期限付き署名付き proxy URL へ書き換える (#1529 /
+// #3037)。作成時に包むと署名 TTL (7日) が切れた古い通知のアイコンが壊れる。
+func TestCreate_ProxiesRemoteIconOnRead(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, _ := newTestHandler(t)
+	c, rec := newJSONRequest(t, "/api/notifications/create", `{"body":"hi","icon":"https://remote.example/i.png"}`)
+	setAuth(c, &model.User{ID: "alice"})
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusNoContent, rec.Code)
+
+	show := func(t *testing.T) []map[string]any {
+		t.Helper()
+		c2, rec2 := newJSONRequest(t, "/api/i/notifications", `{"limit":50}`)
+		setAuth(c2, &model.User{ID: "alice"})
+		require.NoError(t, h.Show(c2))
+		require.Equal(t, http.StatusOK, rec2.Code)
+		var resp []map[string]any
+		require.NoError(t, json.Unmarshal(rec2.Body.Bytes(), &resp))
+		return resp
+	}
+
+	resp := show(t)
+	require.Len(t, resp, 1)
+	gotIcon, _ := resp[0]["icon"].(string)
+	assert.True(t, strings.HasPrefix(gotIcon, "https://mk.example/proxy/image.webp?"),
+		"remote icon must be proxied on read, got %q", gotIcon)
+	parsed, err := url.Parse(gotIcon)
+	require.NoError(t, err)
+	assert.Equal(t, "mk.example", parsed.Host, "proxy 自身のホスト以外を向いている")
+	assert.Contains(t, parsed.Query().Get("sig"), ".",
+		"利用者由来 URL なので期限付き署名 (unix.hex) を付ける (#3037)")
+
+	// **保存値は raw。** context を外すと生 URL がそのまま返る (作成時に包んで
+	// いれば署名付き URL が返るので、この assertion が保存 raw の証明になる)。
+	entity.SetMediaURLContext(nil)
+	resp = show(t)
+	require.Len(t, resp, 1)
+	assert.Equal(t, "https://remote.example/i.png", resp[0]["icon"])
 }
 
 func TestCreate_MissingBody(t *testing.T) {

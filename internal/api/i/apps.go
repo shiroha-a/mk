@@ -8,6 +8,7 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/server/middleware"
@@ -44,7 +45,10 @@ func (h *Handler) Apps(c echo.Context) error {
 			"name":       coalesceString(t.Name, appName(t.App)),
 			"lastUsedAt": formatNullableTime(t.LastUsedAt, tsFormat),
 			"permission": []string(tokenPermission(t)),
-			"iconUrl":    t.IconURL,
+			// **利用者由来の任意 URL。** 期限付き署名で proxy 経由にする
+			// (#3037)。生 URL のまま返すと frontend が <img src> へ直接載せて
+			// アプリ開発者に閲覧者の IP が渡る (#1529)。
+			"iconUrl": entity.ProxyUserSuppliedMediaURLPtr(t.IconURL),
 			"description": coalesceString(
 				t.Description,
 				appDescription(t.App),

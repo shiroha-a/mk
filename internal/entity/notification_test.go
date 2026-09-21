@@ -1,6 +1,8 @@
 package entity
 
 import (
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,6 +288,65 @@ func TestPackNotification_RoleAssigned_DroppedWhenLookupUnset(t *testing.T) {
 		Extra:     map[string]any{"roleId": "r1"},
 	}
 	assert.Nil(t, PackNotification(n, nil, nil, idGen, nil, nil))
+}
+
+// app 通知の `icon` は Extra に生で保存されている。**読み出し時に**期限付き
+// 署名で proxy 経由へ書き換える (#1529 / #3037)。保存時に包むと署名 TTL (7日) が
+// 切れた古い通知のアイコンだけが 403 になる。
+func TestPackNotification_ProxiesAppIconOnRead(t *testing.T) {
+	idGen, _ := id.NewGenerator("aidx")
+	raw := "https://remote.example/i.png"
+	n := &notification.Notification{
+		ID:        idGen.Generate(time.Now()),
+		CreatedAt: time.Now(),
+		Type:      notification.TypeApp,
+		Extra:     map[string]any{"body": "hi", "icon": raw},
+	}
+
+	// 未配線なら raw のまま (保存値が原本であることの確認)。
+	out := PackNotification(n, nil, nil, idGen, nil, nil)
+	require.NotNil(t, out)
+	assert.Equal(t, raw, out["icon"])
+
+	SetMediaURLContext(NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	defer SetMediaURLContext(nil)
+
+	out = PackNotification(n, nil, nil, idGen, nil, nil)
+	require.NotNil(t, out)
+	icon, _ := out["icon"].(string)
+	assert.True(t, strings.HasPrefix(icon, "https://mk.example/proxy/image.webp?"), "got %q", icon)
+	parsed, err := url.Parse(icon)
+	require.NoError(t, err)
+	assert.Contains(t, parsed.Query().Get("sig"), ".", "期限付き署名 (unix.hex) が付く")
+
+	// 自オリジンは no-op。
+	local := &notification.Notification{
+		ID: idGen.Generate(time.Now()), CreatedAt: time.Now(), Type: notification.TypeApp,
+		Extra: map[string]any{"icon": "https://mk.example/files/i.png"},
+	}
+	out = PackNotification(local, nil, nil, idGen, nil, nil)
+	require.NotNil(t, out)
+	assert.Equal(t, "https://mk.example/files/i.png", out["icon"])
+
+	// nil は nil のまま (required + nullable な schema を壊さない)。
+	null := &notification.Notification{
+		ID: idGen.Generate(time.Now()), CreatedAt: time.Now(), Type: notification.TypeApp,
+		Extra: map[string]any{"icon": nil},
+	}
+	out = PackNotification(null, nil, nil, idGen, nil, nil)
+	require.NotNil(t, out)
+	assert.Nil(t, out["icon"])
+
+	// **app 以外の型は対象外。** Extra["icon"] は現状 app だけが積むが、icon を
+	// URL 以外の意味で使う型を将来足したときに巻き込まない (#3130 review)。
+	other := &notification.Notification{
+		ID: idGen.Generate(time.Now()), CreatedAt: time.Now(), Type: notification.TypeFollow,
+		Extra: map[string]any{"icon": raw},
+	}
+	out = PackNotification(other, nil, nil, idGen, nil, nil)
+	require.NotNil(t, out)
+	assert.Equal(t, raw, out["icon"], "app 以外の Extra[icon] は書き換えない")
 }
 
 // #1559 chatRoomInvitationReceived: lookup が invitation を返せば packed

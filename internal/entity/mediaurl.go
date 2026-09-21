@@ -582,6 +582,12 @@ func ProxyUserSuppliedMediaURLPtr(p *string) *string {
 
 // expiringProxiedURL is ProxiedURL with a deadline baked into the signature.
 //
+// **exp は half-TTL バケットへ丸める (#3130 review)。** `time.Now()+TTL` をそのまま
+// 使うと読み出しのたびに別の署名が付き、同じアイコンでもブラウザ / CDN の
+// キャッシュが毎回ミスする (通知一覧は毎回取り直されるので特に効く)。バケットは
+// `UserSuppliedProxyTTL/2` (= 3.5 日) で、署名の有効期限は「現在のバケット + 2」。
+// 有効期間は 3.5〜7 日、同じフィールドの URL は 3.5 日に 1 度だけ変わる。
+//
 // 外部プロキシ構成では署名を出さない (`ProxiedURL` と同じ) — 署名を見るのは
 // mk-go 自身の `/proxy` だけなので、外部に渡す URL に付けても意味が無い。
 func (c *MediaURLContext) expiringProxiedURL(rawURL string, mode proxyMode) string {
@@ -592,9 +598,23 @@ func (c *MediaURLContext) expiringProxiedURL(rawURL string, mode proxyMode) stri
 		q.Set(flag, "1")
 	}
 	if !c.externalEnabled {
-		q.Set("sig", signURLUntil(c.secret, rawURL, time.Now().Add(UserSuppliedProxyTTL)))
+		q.Set("sig", signURLUntil(c.secret, rawURL, stableExpiry(time.Now(), UserSuppliedProxyTTL)))
 	}
 	return c.mediaProxyBase + "/" + filename + "?" + q.Encode()
+}
+
+// stableExpiry returns the signature deadline for a URL minted at now: the end
+// of the next half-TTL bucket. Within one half-TTL window the value is constant,
+// so re-reading the same user-supplied field yields a byte-identical URL
+// (browser / CDN cache hit), while the remaining validity stays in
+// (ttl/2, ttl] — never zero (which would break a URL minted just before a
+// bucket boundary) and never more than the documented ttl.
+func stableExpiry(now time.Time, ttl time.Duration) time.Time {
+	half := int64(ttl / 2 / time.Second)
+	if half <= 0 {
+		return now.Add(ttl)
+	}
+	return time.Unix((now.Unix()/half+2)*half, 0)
 }
 
 // signURLUntil MUST stay byte-for-byte identical to

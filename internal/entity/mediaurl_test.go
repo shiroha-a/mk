@@ -253,6 +253,45 @@ func TestUserSuppliedProxyURL_DoesNotDoubleWrapExternalProxy(t *testing.T) {
 	}
 }
 
+// 期限付き署名の URL は half-TTL バケット内で安定する (#3130 review)。読み出しの
+// たびに署名が変わると、同じアイコンでもブラウザ / CDN のキャッシュが毎回ミスする
+// (通知一覧は毎回取り直されるので特に効く)。
+func TestUserSuppliedProxyURL_IsStableWithinBucket(t *testing.T) {
+	SetMediaURLContext(internalCtx())
+	defer SetMediaURLContext(nil)
+
+	raw := "https://" + remoteHost + "/icon.png"
+	a := *ProxyUserSuppliedMediaURLPtr(&raw)
+	b := *ProxyUserSuppliedMediaURLPtr(&raw)
+	if a != b {
+		t.Errorf("同一バケット内で URL が変わっている:\n a=%s\n b=%s", a, b)
+	}
+}
+
+// stableExpiry のバケット境界: 同一 half-TTL 窓では同じ期限、窓が変わると進む。
+// 有効期間は常に (TTL/2, TTL] に収まる (境界直後でも 3.5 日は残る)。
+func TestStableExpiry_BucketsAndValidity(t *testing.T) {
+	bucket := int64((UserSuppliedProxyTTL / 2) / time.Second)
+	start := time.Unix((time.Now().Unix()/bucket)*bucket, 0)
+	want := time.Unix((start.Unix()/bucket+2)*bucket, 0)
+
+	if got := stableExpiry(start, UserSuppliedProxyTTL).Unix(); got != want.Unix() {
+		t.Errorf("bucket start: got %d want %d", got, want.Unix())
+	}
+	last := start.Add(time.Duration(bucket-1) * time.Second)
+	if got := stableExpiry(last, UserSuppliedProxyTTL).Unix(); got != want.Unix() {
+		t.Errorf("same bucket: got %d want %d", got, want.Unix())
+	}
+	next := start.Add(time.Duration(bucket) * time.Second)
+	if got := stableExpiry(next, UserSuppliedProxyTTL).Unix(); got != want.Add(time.Duration(bucket)*time.Second).Unix() {
+		t.Errorf("next bucket: got %d want %d", got, want.Add(time.Duration(bucket)*time.Second).Unix())
+	}
+	valid := want.Sub(start)
+	if valid <= UserSuppliedProxyTTL/2 || valid > UserSuppliedProxyTTL {
+		t.Errorf("validity %s out of (TTL/2, TTL]", valid)
+	}
+}
+
 // TestGetThumbnailURL covers the #460 fallback preservation + remote wrapping.
 func TestGetThumbnailURL(t *testing.T) {
 	c := internalCtx()

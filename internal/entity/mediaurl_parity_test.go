@@ -82,7 +82,12 @@ func TestExpiringProxySigAcceptedByMediaproxy(t *testing.T) {
 	require.True(t, ok, "sig に期限が入っていない: %q", sig)
 	sec, err := strconv.ParseInt(exp, 10, 64)
 	require.NoError(t, err)
-	assert.WithinDuration(t, time.Now().Add(entity.UserSuppliedProxyTTL), time.Unix(sec, 0), time.Minute)
+	// exp は half-TTL バケットへ丸める (#3130 review)。有効期間は (TTL/2, TTL]。
+	deadline := time.Unix(sec, 0)
+	assert.True(t, deadline.After(time.Now().Add(entity.UserSuppliedProxyTTL/2)),
+		"有効期限が half-TTL 以下 (バケット丸めで期限切れが早すぎる): %s", deadline)
+	assert.False(t, deadline.After(time.Now().Add(entity.UserSuppliedProxyTTL)),
+		"有効期限が TTL を超えている: %s", deadline)
 
 	assert.Equal(t, mediaproxy.SignURLUntil(secret, raw, time.Unix(sec, 0)), sig,
 		"entity 側と mediaproxy 側の署名がずれている")
