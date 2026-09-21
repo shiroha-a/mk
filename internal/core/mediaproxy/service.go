@@ -24,7 +24,6 @@ import (
 	// `image.RegisterFormat("tga", "", ...)` (magic bytes 空) するため、
 	// blank import すると他 image format (PNG/JPEG/WebP/...) の自動 dispatch
 	// を破壊する。**`_ "github.com/ftrvxmtrx/tga"` を絶対追加しないこと**。
-	"github.com/blezek/tga"
 
 	"github.com/gen2brain/avif"
 	_ "github.com/gen2brain/heic" // HEIC/HEIF input decode (iPhone uploads)
@@ -1343,11 +1342,12 @@ func decodeImage(data []byte, contentType string) (image.Image, error) {
 	// 明示判定して blezek/tga (auto-register 無し) の Decode を直接呼ぶ
 	// (#672 Phase 1)。
 	if contentType == "image/x-tga" || contentType == "image/x-targa" {
-		img, err := tga.Decode(bytes.NewReader(data))
-		if err != nil {
-			return nil, err
-		}
-		return img, nil
+		// **cap 付きの入口を通す (#3037 の穴)。** `imagedecode.Decode` の
+		// 「ヘッダを読めなかったら通す」枝では TGA を判定できないので、
+		// `DecodeTGAWithPixelCap` がヘッダから寸法を直接読む。素で
+		// `tga.Decode` を呼ぶと、18 バイトのヘッダが宣言した寸法どおりに
+		// ラスタを確保してしまう (寸法の検証がライブラリ側に無い)。
+		return imagedecode.DecodeTGAWithPixelCap(data, imagedecode.MaxPixels)
 	}
 	// **インターレースの truecolor PNG は decoder のバグを踏む (#2925)。**
 	// 規則は `internal/misc/imagedecode` に 1 つだけ置いてある — drive 側の
