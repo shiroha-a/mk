@@ -133,6 +133,24 @@ func (s *Service) Show(requesterID, flashID string) (*model.Flash, error) {
 	return f, nil
 }
 
+// ShowAny returns the flash regardless of its visibility.
+//
+// **認可は呼び出し側が行うこと。** `Show` の可視性ゲートは「閲覧」のための
+// もので、削除やモデレーションの前段でそれを通すと**所有者にもモデレーターにも
+// not-found が返る** (実際そうなっていた — private な Flash が誰にも消せない
+// 状態になった)。
+func (s *Service) ShowAny(flashID string) (*model.Flash, error) {
+	f, err := s.repo.FindByID(flashID)
+	if err != nil {
+		// **DB 障害を not-found に丸めない** (#2799)。
+		if !repository.IsNotFound(err) {
+			return nil, err
+		}
+		return nil, ErrFlashNotFound
+	}
+	return f, nil
+}
+
 // UpdateInput holds the editable fields of a Flash.
 type UpdateInput struct {
 	Title       *string

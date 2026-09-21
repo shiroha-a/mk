@@ -182,7 +182,12 @@ func (h *Handler) Delete(c echo.Context) error {
 	}
 	// upstream delete.ts: 所有者でもモデレータでもなければ ACCESS_DENIED。
 	// モデレータは他人の flash も削除でき、その場合 moderationLog を残す (#1548)。
-	f, err := h.svc.Show("", req.FlashID)
+	//
+	// **可視性ゲートを通さない lookup を使う。** `Show` は非公開のものを
+	// 所有者以外に not-found で返すので、ここを通すと**所有者にもモデレーターにも
+	// 非公開の Flash が消せなくなる**。認可はこの直下の owner / moderator 判定が
+	// 担っている。
+	f, err := h.svc.ShowAny(req.FlashID)
 	if err != nil {
 		return c.JSON(http.StatusBadRequest, apierr.Error("NO_SUCH_FLASH", "No such flash.", "de1623ef-bbb3-4289-a71e-14cfa83d9740"))
 	}
