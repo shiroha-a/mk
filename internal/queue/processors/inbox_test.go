@@ -1196,3 +1196,42 @@ func TestInboxProcessor_LegacyLDVerifyLookupUnavailableIsRetried(t *testing.T) {
 		assert.Empty(t, stub.calls)
 	})
 }
+
+// **転送された actor 側の連合可否も見ること。**
+//
+// ブロック判定は HTTP 署名者にしか掛かっていなかったので、第三者 (リレー等) が
+// 転送すると `blockedHosts` に入れたホストの actor でも LD-Signature が有効なら
+// 処理されていた。`Announce` / `Like` / `Follow` / `Block` / `Flag` / `Move` /
+// chat がそのまま通り、defederation が素通りする。
+func TestInboxProcessor_ForwardedActorFromBlockedHostDropped(t *testing.T) {
+	priv, pub, err := activitypub.GenerateRSAKeypair()
+	require.NoError(t, err)
+	// 署名者 = relay (ブロックしていない)。
+	key, err := activitypub.NewPrivateKey("https://relay.example/actor#main-key", priv)
+	require.NoError(t, err)
+
+	relayHost := "relay.example"
+	blockedHost := "blocked.example"
+	verifier := &multiActorVerifier{
+		pubKey: pub,
+		byURI: map[string]*model.User{
+			"https://relay.example/actor":         {ID: "relay", Host: &relayHost, URI: uptr("https://relay.example/actor")},
+			"https://blocked.example/users/alice": {ID: "alice", Host: &blockedHost, URI: uptr("https://blocked.example/users/alice")},
+		},
+	}
+	stub := &stubFedProcessor{}
+	p := processors.NewInboxProcessor(stub)
+	p.SetSignatureVerifier(verifier)
+	p.SetLDSignatureVerifier(&stubLDVerifier{present: true, creator: "https://blocked.example/users/alice#main-key"})
+	// **ブロックしているのは転送元 (actor) のホストだけ。** 署名者は通る。
+	p.SetHostBlockChecker(&stubBlocker{blocked: func(h string) bool { return h == blockedHost }})
+
+	body := []byte(`{"id":"https://blocked.example/creates/1","type":"Create","actor":"https://blocked.example/users/alice","signature":{"type":"RsaSignature2017","creator":"https://blocked.example/users/alice#main-key"}}`)
+	payload := signedInboxPayload(t, key, body)
+	require.NoError(t, p.Handle(context.Background(), driver.RawTask{
+		TypeName: queue.TaskTypeInbox,
+		Body:     mustEncode(t, payload),
+	}), "drop は sender へ retry を要求しない")
+	require.Empty(t, stub.calls,
+		"ブロックしたホストの actor は、転送経由でも処理しないこと")
+}

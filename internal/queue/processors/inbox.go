@@ -581,6 +581,20 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) (federa
 	if ldURI == "" || ldURI != bodyActor {
 		return fields, fmt.Errorf("ld-signature signer %q != activity.actor %q", ldURI, bodyActor)
 	}
+	// **転送された actor 側の連合可否も見る。**
+	//
+	// ブロック判定 (`isBlocked`) は HTTP 署名者にしか掛かっていなかった。
+	// 第三者 (リレー等) が転送すると、`blockedHosts` に入れたホストの actor でも
+	// LD-Signature が有効なら処理される。`Announce` / `Like` / `Follow` /
+	// `Block` / `Flag` / `Move` / chat がそのまま通り、defederation が素通りする。
+	// `resolveActorOnceWithID` は DB に行があれば連合ゲートの手前で返すので、
+	// 「一度連合してから defederate した」相手には届く。
+	//
+	// upstream は署名者側 (`InboxProcessorService.ts:76-80`) と LD-Signature 側
+	// (`:207-211`) の 2 箇所で `isFederationAllowedHost` を見る。
+	if p.isBlocked(ldUser) {
+		return fields, fmt.Errorf("blocked ld-signature actor host: %q", ldURI)
+	}
 	return fields, nil
 }
 
