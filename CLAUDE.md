@@ -148,7 +148,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / ipshape-check / submodulepin-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / ipshape-check / iprecord-check / submodulepin-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -221,7 +221,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 135 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 136 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -867,6 +867,11 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **「違反 0 件が正常」な検査は、抽出側にも下限が要る。** `scanJSONTags` には下限を置いたのに `typeRefs` (参照側) に置かず、**package 修飾の収集を落とす 1 行で `*model.Signin` の漏れごと素通りした** (敵対的レビュー 2 本が独立に実測)。allowlist にも**死んだ entry の検査を必ず付ける** — 付け忘れた側で、**実在しない entry を捏造した状態が全テスト緑のまま通った**。
   **走査が縮んだことは、件数と代表キーでは見られない。** 代表キーが大きな 2 ファイルに偏っていたため、**14 ファイルを落とす変異が本物の漏れごと素通りした**。`json:"` を含むファイルは 1 件以上寄与することを**ファイル単位**で要求し、truth は AST ではなくテキスト走査から採る (AST が壊れれば必ず食い違う)。**その truth 側にも下限が要る** — 1 ファイルに縮める変異で検査が丸ごと無意味になる。
   **射程外**: `map[string]any` を手で組む経路 (`entity.PackSignin` / nodeinfo)、`datatypes.JSON` の中身、**`publicShapeDirs` の外に宣言された型を handler が `c.JSON` にそのまま渡す形** (`/api/server-info` が返す `serverstats.PublicStats` が実例。`internal/core` を走査に足すのは採らなかった — IP を持つ内部の入力構造体が 11 件流れ込んで allowlist が倍増し、本物の signal が埋もれる)、`remoteAddr` / `CDNIPs` / `ip4s` のように語として `ip` を取り出せない綴り。
+- **2026-09-21**: `make gates` に `iprecord-check` を追加 (#3135)。`make help` の target は 135 → 136 (同日に入れた `ipshape-check` の次)。**#3105 の関連アカウント検索は `user_ip` の観測だけを見るので、失敗したサインインの IP がそこに入ると第三者が他人の関連候補を作れる** — 攻撃者が対象アカウントの ID で自分の IP から失敗を繰り返せば、その IP が対象の「使用した IP」として記録され、攻撃者自身のアカウントが候補に並ぶ。**いまは入っていない**が、担保が無かった。
+  **振る舞いテストでは守れない。** 守りたいのは「どこからも呼ばれていない」という構造的な性質で、endpoint ごとのテストは叩いた経路しか見ない。実際、`/api/signin` だけを叩くテストは `SigninFlow` (同梱フロントが実際に使うほう) や `signin-with-passkey` に記録を足す変異を素通りさせた (実測)。非同期化 (`go h.ipRecorder.Record(...)`) も振る舞い側からは観測が難しい。
+  **allowlist には理由を書かせる。** 2 引数の `.Record(` は IP 記録とは限らない — `internal/core/deliveryhealth` の配送成否がそれで、名前だけでは分けられない。**「呼ぶのは 2 箇所」と裏取りせずに書いて指摘された** — `passkey.go` が `RecordSuccessfulSignin` を経由せず直接呼ぶので実際は 3 箇所。`deliveryhealth` の関数名も `Record` と推測して書き、ゲート自身に`RecordDelivery` だと訂正された。
+  **call site の列挙だけでは足りない。** パスキーの記録を `fail()` より前へ動かしても場所は変わらないので allowlist は通り、endpoint の振る舞いテストも素通りした (実測)。passwordless 無効の利用者に対して署名検証を通した時点で記録すると、**本人でない誰かが試した IP** が入る。順序を別のテストで固定した。
+  **`fail()` への到達確認はテストに入れていない。** 失敗の記録は `go h.recordSignin(...)` で非同期に走るので、待つと `-race` で不安定になり、待たないと空虚になる。そちらは静的ゲートに委ねる。
 - **2026-09-17**: `make gates` に `nulparam-check` を追加 (#3025)。`make help` の target は 133 → 134。**認証済みの一般利用者が、パラメータに NUL を 1 文字入れるだけで 500 を起こせた** (`federation/*` や `users/clips` など**未認証**で叩けるものもあった)。NUL はどの列にも入らないうえ、**比較の右辺に置くだけで PostgreSQL がクエリごと落とす** (手元の simple protocol で SQLSTATE 08P01、本番の pgx extended protocol で 22021)。`IsNotFound` でもないので handler は `JSONInternalError` へ倒す。NUL は JSON のエスケープで普通に送れる。#3018 / #3022 は主に「列に**書く**値」を塞いだ (申請 ID のように引く側も一部含む) が、**カーソル / id / 検索語は系統的に残っていた**。
   **upstream は「全部 500」ではない。** ajv に `misskey:id` (`/^[a-zA-Z0-9]+$/`) を登録しているので、その format を持つ `sinceId` / `untilId` / `userId` / `noteId` は**列に届く前に 400 で弾かれる**。format を持たない値 (検索語や `users/show` の `username` など) だけが 500 になる。**この裏取りをせずに「upstream は 500」と書き、敵対的レビューで指摘された。**
   **役割ごとに答えが違う。** カーソルは 400 (空に倒すと「カーソル無し = 先頭から」になり、**利用者の指定と無関係なページを正しい応答として返す**)、単体 id と完全一致で引く値は not-found (一致しえない値は「無い」が事実)、検索語は**空の結果**(「その語を含む行が無い」が事実で、利用者の入力が壊れているわけではないので wire に新しいエラーコードを足さない)。**issue の完了条件は「4xx になる」だったが、検索語だけは 200 + 空にしてある** — 理由は docs/divergence.md に書いた。**単体 id は upstream と code / id が違い、status も一致しない経路がある** (`users/show` は mk-go 404 / upstream 400) ので、これも divergence として記録した。
