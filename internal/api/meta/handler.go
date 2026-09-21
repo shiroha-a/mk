@@ -428,6 +428,14 @@ func (h *Handler) serializeActiveAds() []map[string]any {
 	}
 	out := make([]map[string]any, 0, len(ads))
 	for _, a := range ads {
+		// **imageUrl は意図的に raw。** upstream (misskey-dev/misskey develop) の
+		// MetaEntityService.ts / admin/ad/*.ts / MkAd.vue を確認した結果、広告
+		// 画像は server / client どちらでも media proxy を通していない。mk-go も
+		// upstream parity として raw のままにする (F4。proxy 化は別ゴール)。
+		// **mk-go で CSP を enforce にすると remote 画像の広告は表示されない**
+		// (img-src は 'self' + data: + blob: と設定済み origin のみ)。upstream に
+		// CSP が無い機能なので、運用者には既知の帰結として扱ってもらう
+		// (#3130 review)。
 		entry := map[string]any{
 			"id":        a.ID,
 			"url":       a.URL,

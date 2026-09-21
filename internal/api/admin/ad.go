@@ -71,6 +71,18 @@ func (h *Handler) AdCreate(c echo.Context) error {
 // `ad.expiresAt.toISOString()` (#1772)。Go の time.Time 既定 marshal は server
 // ローカル TZ offset + nanosecond で upstream の Z+ミリ秒固定と書式が異なる。
 // field 集合は packedAdSchema と一致。
+//
+// **imageUrl は意図的に raw。** upstream の admin/ad/{list,create,update}.ts は
+// `imageUrl: ad.imageUrl` をそのまま返し、frontend の MkAd.vue も
+// `<img :src="chosen.imageUrl">` へ直接載せる (server / client どちらも media
+// proxy を通さない)。mk-go も upstream parity として raw のままにする (F4)。
+//
+// **ただし mk-go で CSP を enforce にすると remote 画像の広告は表示されない**
+// (`frontendContentSecurityPolicy` の img-src は 'self' + data: + blob: と設定済み
+// origin だけで、任意の remote origin を許さない)。upstream に CSP が無い機能
+// なので「upstream と同じ見た目」にはならない。media proxy を通せば表示できるが
+// upstream parity を崩す別ゴールの変更なので、ここでは raw 据え置きの根拠だけ
+// 記録する (#3130 review)。
 func packAd(ad *model.Ad) map[string]any {
 	const isoMs = "2006-01-02T15:04:05.000Z"
 	return map[string]any{
