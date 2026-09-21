@@ -1,7 +1,11 @@
 package repository
 
 import (
+	"fmt"
 	"testing"
+	"time"
+
+	"github.com/shiroha-a/mk/internal/misc/id"
 
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/stretchr/testify/assert"
@@ -253,4 +257,148 @@ func TestNoteRepository_DeleteExpiredRemoteNotes_RemovesFullyRemoteTree(t *testi
 	require.NoError(t, testDB.Model(&model.Note{}).
 		Where("id IN ?", []string{root.ID, child.ID}).Count(&count).Error)
 	require.EqualValues(t, 0, count, "全部リモートのツリーは従来どおり消えること")
+}
+
+// --- 敵対的レビューで見つかった 3 つの欠陥 (#04541671 の追補) ---
+
+// **引用リプライの連鎖で `tree` が爆発しないこと。**
+//
+// `replyId` と `renoteId` が同じツリーの別ノートを指す形 (= 引用リプライ。
+// Misskey の通常機能) だと、1 ノードが 2 行から派生する。`UNION ALL` では
+// Fibonacci 的に増殖し、実測では長さ 26 の連鎖で `tree` が 317,810 行
+// (0.90 秒)、31 で 2 分 38 秒を超えた。**連合相手が投稿を積むだけで誘発
+// できる。**
+func TestNoteRepository_DeleteExpiredRemoteNotes_QuoteReplyChainDoesNotExplode(t *testing.T) {
+	nr := NewNoteRepository(testDB)
+	host := "chain.example"
+
+	remoteUser := &model.User{
+		ID: "chain_remote", Username: "chain_remote", UsernameLower: "chain_remote",
+		Host: &host, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteUser).Error)
+	defer cleanupUser(t, remoteUser.ID)
+
+	// n_i は n_{i-1} への返信かつ n_{i-2} の引用。
+	const chainLen = 26
+	ids := make([]string, 0, chainLen)
+	for i := 0; i < chainLen; i++ {
+		n := &model.Note{
+			ID: fmt.Sprintf("00000000chain%03d", i), UserID: remoteUser.ID, UserHost: &host,
+			Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+		}
+		if i >= 1 {
+			n.ReplyID = &ids[i-1]
+		}
+		if i >= 2 {
+			n.RenoteID = &ids[i-2]
+		}
+		require.NoError(t, nr.Create(n))
+		ids = append(ids, n.ID)
+		defer cleanupNote(t, n.ID)
+	}
+
+	// **時間で見る。** 行数は実装の内側なので、外から観測できる「終わるか」で
+	// 判定する。`UNION ALL` 版は同じ長さで 1.27 秒かかった (develop は 4.6ms)。
+	start := time.Now()
+	_, err := nr.DeleteExpiredRemoteNotes(1, 100)
+	elapsed := time.Since(start)
+	require.NoError(t, err)
+	assert.Less(t, elapsed, 500*time.Millisecond,
+		"引用リプライの連鎖で再帰 CTE が増殖している (UNION ALL になっていないか)")
+}
+
+// **期限内 (新しい) のノートを消さないこと。**
+//
+// cutoff を `roots` にしか掛けないと、たった今届いた返信がぶら下がっている
+// だけのツリーが丸ごと消える。upstream は `removalCriteria` に
+// `note."id" < :newestLimit` を含め、帰納ステップの判定にも使う。
+func TestNoteRepository_DeleteExpiredRemoteNotes_KeepsRecentDescendant(t *testing.T) {
+	nr := NewNoteRepository(testDB)
+	host := "recent.example"
+
+	remoteUser := &model.User{
+		ID: "recent_remote", Username: "recent_remote", UsernameLower: "recent_remote",
+		Host: &host, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteUser).Error)
+	defer cleanupUser(t, remoteUser.ID)
+
+	root := &model.Note{
+		ID: "00000000recentrt", UserID: remoteUser.ID, UserHost: &host,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(root))
+	defer cleanupNote(t, root.ID)
+
+	// **たった今**届いたリモートの返信 (aidx の先頭 8 文字が現在時刻)。
+	gen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	freshID := gen.Generate(time.Now())
+	fresh := &model.Note{
+		ID: freshID, UserID: remoteUser.ID, UserHost: &host, ReplyID: &root.ID,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(fresh))
+	defer cleanupNote(t, fresh.ID)
+
+	_, err = nr.DeleteExpiredRemoteNotes(1, 100)
+	require.NoError(t, err)
+
+	var count int64
+	require.NoError(t, testDB.Model(&model.Note{}).Where("id = ?", fresh.ID).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "期限内のノートを消さないこと")
+	require.NoError(t, testDB.Model(&model.Note{}).Where("id = ?", root.ID).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "期限内の子孫を持つツリーは丸ごと残すこと")
+}
+
+// **保護されたルートが LIMIT の枠を食わないこと。**
+//
+// `roots` が removability を見ずに LIMIT すると、削除不可のルートが枠を占め、
+// `deleted < batchSize` で break する processor が前へ進めなくなる。
+func TestNoteRepository_DeleteExpiredRemoteNotes_ProtectedRootDoesNotBlockBatch(t *testing.T) {
+	nr := NewNoteRepository(testDB)
+	host := "hol.example"
+
+	remoteUser := &model.User{
+		ID: "hol_remote", Username: "hol_remote", UsernameLower: "hol_remote",
+		Host: &host, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteUser).Error)
+	defer cleanupUser(t, remoteUser.ID)
+
+	localUser := &model.User{
+		ID: "hol_local", Username: "hol_local", UsernameLower: "hol_local",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(localUser).Error)
+	defer cleanupUser(t, localUser.ID)
+
+	// id 昇順で先に来る、ローカルのお気に入りが付いた (= 削除不可の) ルート。
+	protected := &model.Note{
+		ID: "00000000hol_aaaa", UserID: remoteUser.ID, UserHost: &host,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(protected))
+	defer cleanupNote(t, protected.ID)
+	require.NoError(t, testDB.Exec(
+		`INSERT INTO "note_favorite" (id, "createdAt", "noteId", "userId") VALUES (?, NOW(), ?, ?)`,
+		"hol_fav", protected.ID, localUser.ID).Error)
+	defer func() { testDB.Exec(`DELETE FROM "note_favorite" WHERE id = ?`, "hol_fav") }()
+
+	deletable := &model.Note{
+		ID: "00000000hol_bbbb", UserID: remoteUser.ID, UserHost: &host,
+		Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, nr.Create(deletable))
+	defer cleanupNote(t, deletable.ID)
+
+	// batchSize=1。保護されたルートが枠を食うと 0 件になり、掃除が止まる。
+	n, err := nr.DeleteExpiredRemoteNotes(1, 1)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, n, "削除不可のルートが LIMIT の枠を食っている")
+
+	var count int64
+	require.NoError(t, testDB.Model(&model.Note{}).Where("id = ?", protected.ID).Count(&count).Error)
+	assert.EqualValues(t, 1, count, "保護されたルートは残ること")
 }

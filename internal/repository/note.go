@@ -1460,6 +1460,26 @@ func (r *noteRepository) ListGlobalTimeline(limit int, sinceID, untilID string, 
 	return notes, nil
 }
 
+// noteRemovableExpr is the per-note removal criteria shared by the root
+// selection and the inductive step of DeleteExpiredRemoteNotes.
+//
+// **両方で同じ式を使うこと。** 片方だけに掛けると、根に掛ければ「新しい子孫
+// ごと消える」、枝に掛ければ「保護された根が LIMIT の枠を食う」。upstream も
+// `removalCriteria` を 1 つ組んで両方で使う。`?` を 1 つ含むので、
+// 呼び出し側は cutoff を式の出現回数ぶん渡すこと。
+const noteRemovableExpr = `
+			n."userHost" IS NOT NULL
+			AND n.id < ?
+			AND n."clippedCount" = 0
+			AND n."pageCount" = 0
+			AND NOT EXISTS (SELECT 1 FROM "clip_note" c WHERE c."noteId" = n.id)
+			AND NOT EXISTS (SELECT 1 FROM "user_note_pining" p WHERE p."noteId" = n.id)
+			AND NOT EXISTS (SELECT 1 FROM "note_favorite" f WHERE f."noteId" = n.id)
+			AND NOT EXISTS (
+				SELECT 1 FROM "note_reaction" rc
+				INNER JOIN "user" u ON u.id = rc."userId"
+				WHERE rc."noteId" = n.id AND u.host IS NULL)`
+
 // DeleteExpiredRemoteNotes はリモートノート (userHost IS NOT NULL) のうち
 // expiryDays より前に作成されたものを最大 batchSize 件削除し、実際に消えた
 // 行数を返す。ループは呼び出し側 (CleanRemoteNotesProcessor) が sleep / ctx
@@ -1495,7 +1515,21 @@ func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (in
 	// (b) 再帰 CTE で `replyId` / `renoteId` を辿ってツリー全体を作り、
 	// (c) 1 件でも削除不可のノートを含むツリーは丸ごと除外する。
 	//
-	// `removable` の条件は従来と同じ (`clippedCount` の扱いは上の doc を参照)。
+	// **`UNION` であって `UNION ALL` ではない。** `replyId` と `renoteId` が
+	// 同じツリーの別ノートを指す形 (= 引用リプライ。Misskey の通常機能) だと
+	// 1 ノードが 2 行から派生するので、`UNION ALL` では **Fibonacci 的に増殖**
+	// する。実測では長さ 26 の連鎖で `tree` が 317,810 行 (0.90 秒)、31 で
+	// 2 分 38 秒を超えた。連合相手が投稿を積むだけで誘発できる。`UNION` が
+	// 重複排除と循環ガードを兼ねる (upstream も `UNION`)。
+	//
+	// **期限はノード単位でも見る。** cutoff を `roots` にしか掛けないと、
+	// **たった今届いた返信がぶら下がっているだけのツリーが丸ごと消える**。
+	// upstream は `removalCriteria` に `note."id" < :newestLimit` を含め、
+	// それを帰納ステップの判定にも使う。
+	//
+	// **`roots` にも removability を掛ける。** 掛けないと削除不可のルートが
+	// LIMIT の枠を食い、`deleted < batchSize` で break する processor が
+	// 前へ進めなくなる (実測: 保護されたルートが 1 件あるだけで掃除が止まった)。
 	//
 	// **保護そのものは (c) の anti-join が担う。** (a) の「起点をルートに絞る」は
 	// upstream に合わせた効率の話で、外しても結果は変わらない (子から辿っても
@@ -1504,33 +1538,20 @@ func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (in
 		WITH RECURSIVE roots AS (
 			SELECT n.id AS "rootId", n.id
 			FROM "note" n
-			WHERE n."userHost" IS NOT NULL
-			  AND n.id < ?
-			  AND n."replyId" IS NULL
+			WHERE n."replyId" IS NULL
 			  AND n."renoteId" IS NULL
+			  AND (`+noteRemovableExpr+`)
 			LIMIT ?
 		),
 		tree AS (
 			SELECT r."rootId", r.id FROM roots r
-			UNION ALL
+			UNION
 			SELECT t."rootId", c.id
 			FROM "note" c
 			INNER JOIN tree t ON c."replyId" = t.id OR c."renoteId" = t.id
 		),
 		judged AS (
-			SELECT t."rootId", t.id,
-				(
-					n."userHost" IS NOT NULL
-					AND n."clippedCount" = 0
-					AND n."pageCount" = 0
-					AND NOT EXISTS (SELECT 1 FROM "clip_note" c WHERE c."noteId" = n.id)
-					AND NOT EXISTS (SELECT 1 FROM "user_note_pining" p WHERE p."noteId" = n.id)
-					AND NOT EXISTS (SELECT 1 FROM "note_favorite" f WHERE f."noteId" = n.id)
-					AND NOT EXISTS (
-						SELECT 1 FROM "note_reaction" rc
-						INNER JOIN "user" u ON u.id = rc."userId"
-						WHERE rc."noteId" = n.id AND u.host IS NULL)
-				) AS removable
+			SELECT t."rootId", t.id, (`+noteRemovableExpr+`) AS removable
 			FROM tree t
 			INNER JOIN "note" n ON n.id = t.id
 		)
@@ -1540,7 +1561,7 @@ func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (in
 				SELECT 1 FROM judged k
 				WHERE k."rootId" = j."rootId" AND k.removable = FALSE
 			)
-		)`, cutoffID, batchSize)
+		)`, cutoffID, batchSize, cutoffID)
 	if res.Error != nil {
 		return 0, res.Error
 	}
