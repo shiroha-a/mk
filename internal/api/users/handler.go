@@ -1506,7 +1506,7 @@ func (h *Handler) fillPinned(ctx context.Context, viewer *model.User, u *model.U
 	if profile != nil && profile.PinnedPageID != nil && *profile.PinnedPageID != "" {
 		detailed.PinnedPageID = profile.PinnedPageID
 		if h.pageRepo != nil {
-			if p, err := h.pageRepo.FindByID(*profile.PinnedPageID); err == nil {
+			if p, err := h.pageRepo.FindByID(*profile.PinnedPageID); err == nil && pinnedPageVisibleTo(p, viewer) {
 				// golden Page は user 必須。pinnedPage は profile user 自身の page
 				// なので owner=u を渡して user (UserLite) を埋める (#1266 follow-up)。
 				detailed.PinnedPage = entity.PackPageWithContext(p, entity.PackPageContext{IDGen: h.idGen, Owner: u})
@@ -1543,3 +1543,26 @@ func (h *Handler) HasBlockingRepo() bool { return h.blockingRepo != nil }
 // `ugcVisibilityForVisitor` で gate できない。**空文字は gate 無効**と同義
 // (`"none"` でも `"local"` でもないので素通し)。起動時検査に使う (#2708)。
 func (h *Handler) HasUGCVisibility() bool { return h.ugcVisibility != "" }
+
+// pinnedPageVisibleTo reports whether viewer may read the pinned page body.
+//
+// **`pages/show` は拒否するのに `users/show` は本文を渡していた。**
+// 同じ関数の 14 行上ではピン留めノートに可視性ゲートを掛けているのに、Page 側の
+// 枝には viewer への参照が 1 つも無く、`content` (ブロックツリー全体) / `script` /
+// `title` / `summary` / `variables` がそのまま出ていた。Page は
+// `pages/create` が `visibility` を無検証で受け、`i/update` の `pinnedPageId` も
+// 所有者しか見ないので、前提を作るのは容易。
+//
+// upstream も `pages/show` にゲートが無いので `両方` に当たるが、mk-go は
+// `pages/show` 側だけ厳しくしてあり、**同じサーバーが片方で「無い」と言い
+// ながらもう片方で本文を渡す**状態だった。安全側 (mk-go の厳しい方) に揃える。
+func pinnedPageVisibleTo(p *model.Page, viewer *model.User) bool {
+	if p == nil {
+		return false
+	}
+	if p.Visibility == "" || p.Visibility == model.PageVisibilityPublic {
+		return true
+	}
+	// 非公開の Page は本人にだけ返す (`pages/show` の core service と同じ判定)。
+	return viewer != nil && viewer.ID == p.UserID
+}

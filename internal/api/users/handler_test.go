@@ -2286,3 +2286,28 @@ func TestShow_ByUsernameTrimmed(t *testing.T) {
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
 	assert.Equal(t, "user1", resp["id"], "前後空白を trim して testuser に解決")
 }
+
+// **非公開のピン留め Page の本文を返さないこと。**
+//
+// `pages/show` は拒否するのに `users/show` は `content` / `script` を渡して
+// いた。同じ関数の少し上ではピン留めノートに可視性ゲートを掛けている。
+func TestPinnedPageVisibleTo(t *testing.T) {
+	t.Parallel()
+
+	owner := &model.User{ID: "owner"}
+	stranger := &model.User{ID: "stranger"}
+
+	pub := &model.Page{ID: "p1", UserID: "owner", Visibility: model.PageVisibilityPublic}
+	require.True(t, pinnedPageVisibleTo(pub, nil), "public は未認証にも見せる")
+
+	hidden := &model.Page{ID: "p2", UserID: "owner", Visibility: model.PageVisibilityFollowers}
+	require.False(t, pinnedPageVisibleTo(hidden, nil), "非公開は未認証に見せない")
+	require.False(t, pinnedPageVisibleTo(hidden, stranger), "非公開は他人に見せない")
+	require.True(t, pinnedPageVisibleTo(hidden, owner), "本人には見せる")
+
+	require.False(t, pinnedPageVisibleTo(nil, owner))
+
+	// visibility 未設定は既定 (public) 扱い。
+	def := &model.Page{ID: "p3", UserID: "owner"}
+	require.True(t, pinnedPageVisibleTo(def, nil))
+}

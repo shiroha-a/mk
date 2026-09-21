@@ -252,3 +252,36 @@ func TestSearch_NoModerationNoteForNonModerator(t *testing.T) {
 	_, has := resp[0]["moderationNote"]
 	assert.False(t, has, "非 moderator には moderationNote を出さない")
 }
+
+// **非公開のピン留め Page の本文を users/show から出さないこと。**
+//
+// `pages/show` は拒否するのに `users/show` は `content` / `script` を渡して
+// いた。同じサーバーが片方で「無い」と言いながらもう片方で本文を渡す形。
+func TestShow_HidesPrivatePinnedPage(t *testing.T) {
+	h, repo := newTestHandler(t)
+	newTargetWithProfile(repo, "pp1", &model.UserProfile{FollowersVisibility: model.FollowingVisibilityPublic, FollowingVisibility: model.FollowingVisibilityPublic})
+
+	pageRepo := testutil.NewMockPageRepository()
+	require.NoError(t, pageRepo.Create(&model.Page{
+		ID: "pg1", UserID: "pp1", Name: "secret", Title: "t",
+		Visibility: model.PageVisibilityFollowers,
+		Content:    datatypes.JSON([]byte(`[{"text":"PINNED-PAGE-canary"}]`)),
+	}))
+	h.SetPageRepo(pageRepo)
+	repo.Profiles["pp1"].PinnedPageID = ptrString("pg1")
+
+	// 未認証。
+	resp := showWithViewer(t, h, "pp1", nil)
+	body, err := json.Marshal(resp)
+	require.NoError(t, err)
+	assert.NotContains(t, string(body), "PINNED-PAGE-canary",
+		"非公開のピン留め Page の本文を出さないこと")
+
+	// 本人には出ること (通る集合を狭めていない)。
+	resp = showWithViewer(t, h, "pp1", &model.User{ID: "pp1", Username: "pp1"})
+	body, err = json.Marshal(resp)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), "PINNED-PAGE-canary", "本人には出すこと")
+}
+
+func ptrString(s string) *string { return &s }
