@@ -2,6 +2,7 @@ package i
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -419,4 +420,19 @@ func TestTwoFAUnregister_ClearsPasswordLessLogin(t *testing.T) {
 	require.False(t, repo.Profiles["u1"].TwoFactorEnabled, "2FA が解除されること")
 	require.False(t, repo.Profiles["u1"].UsePasswordLessLogin,
 		"**usePasswordLessLogin も落ちること** — 残るとパスキーでのパスワード無しログインが通り続ける")
+}
+
+// **パスワードレスの書き込みが失敗したら成功を返さないこと。**
+//
+// 捨てると、利用者が切ったつもりでも DB は真のままで `signin-with-passkey` が
+// 通り続け、しかも直後の publish が要求値を流すので UI は「オフ」を表示する。
+func TestTwoFAPasswordLess_FailureIsNotReportedAsSuccess(t *testing.T) {
+	h, repo := newExtraHandler(t)
+	user := setupUserWithPassword(repo, "u1", "pass")
+	repo.Profiles["u1"].UsePasswordLessLogin = true
+	repo.UpdateProfileErr = errors.New("db down")
+
+	rec := postExtra(h.TwoFAPasswordLess, `{"value":false}`, user)
+	require.Equal(t, http.StatusInternalServerError, rec.Code,
+		"書き込みに失敗したら 500 を返すこと")
 }

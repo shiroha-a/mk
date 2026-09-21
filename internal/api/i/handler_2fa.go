@@ -97,7 +97,11 @@ func (h *Handler) TwoFARegister(c echo.Context) error {
 	}
 
 	// tempSecretに保存 (doneで確認後にsecretに移動)
-	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{"twoFactorTempSecret": secret})
+	if err := h.userService.UpdateProfileFields(user.ID, map[string]any{"twoFactorTempSecret": secret}); err != nil {
+		// 保存できていないと、次の `done` が必ず失敗する。QR を見せる前に落とす。
+		slog.Error("i/2fa/register: failed to store the temp secret", "userId", user.ID, "err", err)
+		return apierr.JSONInternalError(c)
+	}
 
 	// **tempSecret を書き込んでから確定する** (#2852)。
 	_ = use.Commit()
@@ -166,12 +170,17 @@ func (h *Handler) TwoFADone(c echo.Context) error {
 	}
 
 	// tempSecretをsecretに移動、2FAを有効化、backup codes を保存
-	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
+	// **書き込みの失敗を握り潰さない。** 捨てると、利用者は 2FA が有効になったと
+	// 信じて、保存されていないバックアップコードを控えることになる。
+	if err := h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"twoFactorSecret":       *profile.TwoFactorTempSecret,
 		"twoFactorTempSecret":   nil,
 		"twoFactorEnabled":      true,
 		"twoFactorBackupSecret": model.StringArray(backupCodes),
-	})
+	}); err != nil {
+		slog.Error("i/2fa/done: failed to enable 2FA", "userId", user.ID, "err", err)
+		return apierr.JSONInternalError(c)
+	}
 
 	// upstream (done.ts) は 2FA 有効化後に meUpdated を publish して UI を更新する
 	// (twoFactorEnabled の反映)。key 系 handler と挙動を揃える (#1555)。
@@ -535,9 +544,12 @@ func (h *Handler) TwoFAKeyDone(c echo.Context) error {
 	}
 
 	// security key 1 つ以上 → securityKeysAvailable=true。本家と同じ挙動。
-	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
+	if err := h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"securityKeysAvailable": true,
-	})
+	}); err != nil {
+		// 鍵自体は登録済みなので成功は返す。フラグのずれはログに残す。
+		slog.Error("i/2fa/key-done: failed to set securityKeysAvailable", "userId", user.ID, "err", err)
+	}
 
 	// upstream Misskey TS と同じく `meUpdated` を publish して frontend の
 	// `$i` (current user 状態) を即時更新する (#707)。これが無いと UI の
@@ -652,10 +664,14 @@ func (h *Handler) TwoFARemoveKey(c echo.Context) error {
 	}
 
 	if remaining, err := h.securityKeyRepo.CountByUser(user.ID); err == nil && remaining == 0 {
-		_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
+		if err := h.userService.UpdateProfileFields(user.ID, map[string]any{
 			"securityKeysAvailable": false,
 			"usePasswordLessLogin":  false,
-		})
+		}); err != nil {
+			// **ここは開いたままになる向き。** 鍵が 0 本になったのに
+			// `usePasswordLessLogin` が真で残る。
+			slog.Error("i/2fa/remove-key: failed to clear passwordless login", "userId", user.ID, "err", err)
+		}
 	}
 	// upstream 互換: 削除でも `meUpdated` を publish して frontend UI を即時更新 (#707)。
 	h.publishMeUpdated(user.ID)
@@ -750,15 +766,23 @@ func (h *Handler) TwoFAPasswordLess(c echo.Context) error {
 			}
 		}
 		if !hasKey {
-			_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
+			if err := h.userService.UpdateProfileFields(user.ID, map[string]any{
 				"usePasswordLessLogin": false,
-			})
+			}); err != nil {
+				slog.Error("i/2fa/password-less: failed to clear the flag", "userId", user.ID, "err", err)
+			}
 			return c.JSON(http.StatusBadRequest, apierr.NoSecurityKey())
 		}
 	}
-	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
+	// **書き込みの失敗を握り潰さない。** 捨てると、利用者がパスワードレスを
+	// 切ったつもりでも DB は真のままで `signin-with-passkey` が通り続け、
+	// しかも直後の publish が**要求値**を流すので UI は「オフ」を表示する。
+	if err := h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"usePasswordLessLogin": req.Value,
-	})
+	}); err != nil {
+		slog.Error("i/2fa/password-less: failed to update the flag", "userId", user.ID, "err", err)
+		return apierr.JSONInternalError(c)
+	}
 	// usePasswordLessLogin は /api/i 経路の private profile field 群に属し、
 	// entity.PackUserDetailed が含まないため publishMeUpdated (UserDetailed
 	// publish) では frontend の $i に反映されない (#758)。partial helper で
