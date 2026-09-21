@@ -96,11 +96,27 @@ func (h *Handler) IPRelatedAccounts(c echo.Context) error {
 	if target.Host != nil && *target.Host != "" {
 		return apierr.JSONInvalidParam(c)
 	}
-
 	m, err := h.metaRepo.Fetch()
 	if err != nil || m == nil {
 		slog.Error("admin/ip/related-accounts: meta fetch failed", "error", err)
 		return apierr.JSONInternalError(c)
+	}
+
+	// **対象が管理者 / root / system アカウントなら断る。**
+	//
+	// `admin/show-user` は同じ相手に `ACCESS_DENIED` を返すのに、こちらは
+	// 候補一覧と共有 IP (生のアドレス) を返していた。候補ゼロでも
+	// `targetIpCount` / `hasAnyHistory` から「その管理者の IP 記録が何本あるか」
+	// が分かる。何より候補一覧そのものが「その管理者の別アカウントはどれか」で、
+	// `admin/show-user` が拒否している情報より踏み込んでいる。
+	//
+	// 判定できないときは 500 に倒す (#2792 / #3037 と同じ形)。
+	switch denied, undetermined := h.credentialTakeoverDenied(c, target); {
+	case undetermined:
+		return apierr.JSONInternalError(c)
+	case denied:
+		return c.JSON(http.StatusBadRequest,
+			apierr.Error("ACCESS_DENIED", "Cannot show info of admin.", "0d4e3a3e-2c1f-4d8b-9d2a-7a0c1c1b2f3a"))
 	}
 
 	// **now は 1 回の検索で固定する** (#3105)。呼ぶたびに取り直すと、同じ検索の

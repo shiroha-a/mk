@@ -711,3 +711,33 @@ func TestIPRelated_ReportsBothTruncationCauses(t *testing.T) {
 	assert.True(t, got.TargetIPsTruncated, "起点の打ち切りが落ちている")
 	assert.True(t, got.CandidatesTruncated, "候補側の打ち切りが落ちている")
 }
+
+// **対象が root / 管理者なら断ること。**
+//
+// `admin/show-user` は同じ相手に `ACCESS_DENIED` を返すのに、こちらは候補一覧と
+// 共有 IP (生のアドレス) を返していた。候補ゼロでも `targetIpCount` /
+// `hasAnyHistory` から「その管理者の IP 記録が何本あるか」が分かる。
+func TestIPRelated_RefusesPrivilegedTarget(t *testing.T) {
+	stub := &stubIPRelated{stubIPSearch: stubIPSearch{hasAny: true}}
+	h, users, meta := newRelatedHandler(t, stub)
+
+	// meta.rootUserId が対象を指す = root。
+	rootID := "target"
+	meta.Meta.RootUserID = &rootID
+	users.Users["target"] = &model.User{ID: "target", Username: "target"}
+
+	rec := doPost(h.IPRelatedAccounts, `{"userId":"target"}`, adminUser)
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"root を対象にした関連アカウント検索は断ること")
+	assert.Contains(t, rec.Body.String(), "ACCESS_DENIED")
+}
+
+// 普通の利用者は従来どおり引けること (通る集合を狭めていない)。
+func TestIPRelated_AllowsOrdinaryTarget(t *testing.T) {
+	stub := &stubIPRelated{stubIPSearch: stubIPSearch{hasAny: true}}
+	h, users, _ := newRelatedHandler(t, stub)
+	users.Users["target"] = &model.User{ID: "target", Username: "target"}
+
+	rec := doPost(h.IPRelatedAccounts, `{"userId":"target"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
