@@ -148,7 +148,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / submodulepin-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / ipshape-check / iprecord-check / submodulepin-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -221,7 +221,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 134 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 136 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -859,6 +859,23 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-21**: `make gates` に `ipshape-check` を追加 (#3136)。`make help` の target は 134 → 135。**#3066 の完了条件「IP 情報が一般ユーザー向け API や連合へ露出しない」の担保が shapecheck の golden 照合しか無かった** — `UserLite` に `json:"lastIPs"` を足して `make shapecheck` は PASS する (実測)。**いまは漏れていない**が、担保が無かった。
+  **reflect で型を手で並べない。** 初版はそう書いて `entity.MeDetailed` (= `/api/i`) を落としていた。**AST で全 struct の json タグを読む**形にすると型を列挙しないので落としようがない。走査は `internal/entity` / `internal/activitypub` だけでは足りない — **handler が自分のファイルに宣言した response struct も stream のイベント payload も、そのまま wire の形になる**ので `internal/api` / `internal/server` / `internal/stream` も入れる。実測は**要素 2,332 / ユニークキー 755** (数え方: `scanJSONTags` が `publicShapeDirs` 全体で返した要素数と、その `Key` のユニーク数)。IP を指すキーを持つのは 11 件で、10 件は `internal/api/admin` の IP 照会 API (モデレーター + policy + scope の 3 段)、1 件はレスポンスに出ない入力構造体。
+  **語の切り方は片側に寄せると必ず穴が開く。** 大文字のたびに割ると `lastIPs` が `last` + `i` + `ps` になって Go の命名規約に素直な名前だけが素通りし、「小文字/数字の直後の大文字」だけにすると `IPAddr` / `IPHash` / `IPList` が 1 語に潰れて素通りする。**2 稿にわたって片側ずつ落とした** (どちらも敵対的レビューで実測)。境界は 2 つ要る — 小文字/数字の直後と、**大文字が 2 つ以上続いた後の、小文字が続く大文字**。さらに **`address` 系の alternative も要る** — 割れるのは `IPAddress` だけで `IPaddress` / `ipaddress` は1 語に潰れる。「割るから要らない」と書いて一度落とし、3 周目で実測された。
+  **キーの走査だけでは入れ子が見えない。** `Session *model.Signin` を 1 フィールド足すだけで `encoding/json` はその中の `ip` を出す。さらに **`model.User` は自分では IP を持たないのに `Avatar *model.DriveFile` 越しに `avatar.requestIp` を出す**ので、1 段だけでは足りない。`internal/` 全体から「自分の JSON キーに IP を持つ名前付き struct」を**導出して推移的に追う**。**interface と関数型のフィールドは伝播させない** — 混ぜると repository 一式が汚れて 18 件が誤検出になる (実測)。
+  **収集ロジックは `encoding/json` の実挙動と突き合わせる。** 人工ソースは `testdata/` ではなく**コンパイルされるパッケージ**に置く — あちらは Go ツールチェーンが無視するので `json.Marshal` と比べられず、期待値を手で書くことになる。拾う形は 5 つ — タグ無し exported はフィールド名、`json:"-"` と非公開は出ない、**タグ無しの匿名埋め込みは昇格**、**タグ付きの匿名埋め込みはタグ名 1 つ**、**struct でない名前付き型の埋め込みは型名**。**昇格の枝は、埋め込まれる型が非公開でないと固定できない** — exported だとその型自身の宣言からも同じキーが出るので、埋め込みを消しても突き合わせが食い違わない (実測)。
+  **「違反 0 件が正常」な検査は、抽出側にも下限が要る。** `scanJSONTags` には下限を置いたのに `typeRefs` (参照側) に置かず、**package 修飾の収集を落とす 1 行で `*model.Signin` の漏れごと素通りした** (敵対的レビュー 2 本が独立に実測)。allowlist にも**死んだ entry の検査を必ず付ける** — 付け忘れた側で、**実在しない entry を捏造した状態が全テスト緑のまま通った**。
+  **走査が縮んだことは、件数と代表キーでは見られない。** 代表キーが大きな 2 ファイルに偏っていたため、**14 ファイルを落とす変異が本物の漏れごと素通りした**。`json:"` を含むファイルは 1 件以上寄与することを**ファイル単位**で要求し、truth は AST ではなくテキスト走査から採る (AST が壊れれば必ず食い違う)。**その truth 側にも下限が要る** — 1 ファイルに縮める変異で検査が丸ごと無意味になる。
+  **射程外**: `map[string]any` を手で組む経路 (`entity.PackSignin` / nodeinfo)、`datatypes.JSON` の中身、**`publicShapeDirs` の外に宣言された型を handler が `c.JSON` にそのまま渡す形** (`/api/server-info` が返す `serverstats.PublicStats` が実例。`internal/core` を走査に足すのは採らなかった — IP を持つ内部の入力構造体が 11 件流れ込んで allowlist が倍増し、本物の signal が埋もれる)、`remoteAddr` / `CDNIPs` / `ip4s` のように語として `ip` を取り出せない綴り。
+- **2026-09-21**: `make gates` に `iprecord-check` を追加 (#3135)。`make help` の target は 135 → 136 (同日に入れた `ipshape-check` の次)。**#3105 の関連アカウント検索は `user_ip` の観測だけを見るので、失敗したサインインの IP がそこに入ると第三者が他人の関連候補を作れる** — 攻撃者が対象アカウントの ID で自分の IP から失敗を繰り返せば、その IP が対象の「使用した IP」として記録され、攻撃者自身のアカウントが候補に並ぶ。**いまは入っていない**が、担保が無かった。
+  **振る舞いテストだけでは守れない。** 守りたいのは「どこからも呼ばれていない」という構造的な性質で、endpoint ごとのテストは叩いた経路しか見ない。実際、`/api/signin` だけを叩くテストは `SigninFlow` (同梱フロントが実際に使うほう) に記録を足す変異を素通りさせた (実測)。非同期化 (`go h.ipRecorder.Record(...)`) は**初版の振る舞いテストでは不安定にしか捕まらなかった** (実測で `-race` 5 回中 3-4 回)。`fail()` 到達を `require.Eventually` で待つようにしてからは 10/10 で落ちる。
+  **静的ゲートだけでも守れない。** allowlist のキーは `<file>#<func>` なので、**allowlist 済みの関数の中に `Record` を足す**変異も、そこから allowlist 済みの `RecordSuccessfulSignin` を呼ぶ変異も、call site の一覧としては何も変わらない。しかも `signin-with-passkey` は振る舞いテストを 1 つも持っていなかったので、**その組み合わせが両側とも空白だった** (敵対的レビュー 2 本が同じ穴を別経路で実測)。passkey の失敗 4 分岐にrecorder のアサーションを置き、`RecordSuccessfulSignin` の呼び出し側も別の allowlist で固定した。
+  **名前で見る走査は名前で避けられる。** `rec := h.ipRecorder.Record; rec(a, b)` と書くと呼び出し側が`*ast.Ident` になり、引数 2 の `.Record(` としては現れない。**呼び出さずに値として持ち出す形も call site として数える。** package 変数に入れたクロージャの中も見る (`FuncDecl` だけを走査する形では見えない)。**この対処を片方の走査にしか入れず、2 周目で指摘された** — 成功入口 (`RecordSuccessfulSignin`) の走査に同じ枝が無く、**署名検証より前に呼ばれる `resolvePasskeyUser` にメソッド値で仕込む変異が静的ゲートも振る舞いテストも素通りした** (そこは攻撃者が送った `userHandle` で user を引く段階なので、被害者の `user_ip` に自分の IP を入れられる)。走査は 1 本に統合した。**型の位置とフィールドアクセスは除く** — `a.Record{}` / `h.Record.Val` まで call site にすると診断が事実と無関係なことを断定する。**枝そのものは人工ソース (`internal/entitycompat/recordfixture`) で固定する** — 実データにその形が無いので、枝を消しても実データからは何も起こらない。
+  **call site の列挙だけでは順序が固定できない。** パスキーの記録を `fail()` より前へ動かしても場所は変わらないので allowlist は通る。順序テストは**最初の `Record`** を基準にする — 最後のものを見る形だと、既存の呼び出しを残したまま前にもう 1 つ**足す**変異が素通りする (実測)。
+  **件数の下限は診断を壊す。** 「allowlist の長さ以上か」は dead-entry 検査より論理的に弱く(下限が落ちる状況では必ず dead-entry も落ちる)、しかも `require` なので**先に止めて正しい診断を奪う**。call site を正当に 1 つ消しただけでも「抽出が壊れている」と事実と逆を出した (実測)。実在する call site を名指しで要求する形 (`secretfield-check` の `mustDetectSecretFields` と同じ) に替えた。
+  **allowlist の理由も裏取りする。** 「`RecordSuccessfulSignin` が唯一の成功入口」と書いたが、**すぐ下の entry 自身が「passkey は経由せず直接呼ぶ」と書いており矛盾していた**。同じ型で「呼ぶのは 2 箇所」も誤り (実際は 3 箇所)、`deliveryhealth` の関数名 `Record` も推測 (実際は `RecordDelivery`。ゲート自身に訂正された)。
+  **「テストにできない」も裏取りする。** 失敗の記録が非同期だから `fail()` 到達を確かめられない、と書いたが誤りだった — `MockSigninRepository` は mutex 付きの `Len()` を公開しており、**同 package の既存テストが既に `require.Eventually` で待っている**。到達確認を入れないと、将来 `fail()` の手前で返すようになっても「IP を記録しない」が自明に真になって空虚化に気付けない。
+  **射程外**: 見るのは `internal/` だけ。**`user_ip` に実際に書く `UserIPRepository.Observe` (3 引数) は引数の数で絞る走査に入らない**。
 - **2026-09-17**: `make gates` に `nulparam-check` を追加 (#3025)。`make help` の target は 133 → 134。**認証済みの一般利用者が、パラメータに NUL を 1 文字入れるだけで 500 を起こせた** (`federation/*` や `users/clips` など**未認証**で叩けるものもあった)。NUL はどの列にも入らないうえ、**比較の右辺に置くだけで PostgreSQL がクエリごと落とす** (手元の simple protocol で SQLSTATE 08P01、本番の pgx extended protocol で 22021)。`IsNotFound` でもないので handler は `JSONInternalError` へ倒す。NUL は JSON のエスケープで普通に送れる。#3018 / #3022 は主に「列に**書く**値」を塞いだ (申請 ID のように引く側も一部含む) が、**カーソル / id / 検索語は系統的に残っていた**。
   **upstream は「全部 500」ではない。** ajv に `misskey:id` (`/^[a-zA-Z0-9]+$/`) を登録しているので、その format を持つ `sinceId` / `untilId` / `userId` / `noteId` は**列に届く前に 400 で弾かれる**。format を持たない値 (検索語や `users/show` の `username` など) だけが 500 になる。**この裏取りをせずに「upstream は 500」と書き、敵対的レビューで指摘された。**
   **役割ごとに答えが違う。** カーソルは 400 (空に倒すと「カーソル無し = 先頭から」になり、**利用者の指定と無関係なページを正しい応答として返す**)、単体 id と完全一致で引く値は not-found (一致しえない値は「無い」が事実)、検索語は**空の結果**(「その語を含む行が無い」が事実で、利用者の入力が壊れているわけではないので wire に新しいエラーコードを足さない)。**issue の完了条件は「4xx になる」だったが、検索語だけは 200 + 空にしてある** — 理由は docs/divergence.md に書いた。**単体 id は upstream と code / id が違い、status も一致しない経路がある** (`users/show` は mk-go 404 / upstream 400) ので、これも divergence として記録した。

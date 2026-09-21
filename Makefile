@@ -15,7 +15,7 @@
 	uds-init uds-frontend-build uds-build uds-rebuild uds-restart uds-up uds-down uds-down-v uds-logs uds-ps \
 	bench-up bench-run bench-down bench-logs \
 	apicompat apicompat-routes apicompat-render \
-	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check gaterun-check secretfield-check submodulepin-check \
+	test-fast shapecheck shapecheck-gen shapecheck-report errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check gaterun-check secretfield-check ipshape-check iprecord-check submodulepin-check \
 	diff-up diff-test diff-down diff-logs \
 	upstream-e2e upstream-e2e-deps upstream-e2e-up upstream-e2e-down upstream-e2e-migrate upstream-e2e-test
 
@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check ipshape-check iprecord-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -50,7 +50,7 @@ frontend-check: ## fork の frontend を型チェックし、submodule 依存の
 	# skip され「検査していないのに緑」になる。REQUIRE を渡して skip を禁じる
 	# (#2892)。
 	MK_FRONTEND_GATES_REQUIRE_SUBMODULE=1 go test ./internal/server/ \
-		-run 'TestCreditImageOriginsCoverAboutMisskey|TestMkGoRolePolicyKeysAreListedInFrontend|TestReactionLongPressIsWired|TestReactableRemoteReactionIsWired|TestMkGoUpdatedDialogIsWired|TestEmojiApplicationIsWired|TestEveryPluginSlotHasAMountPoint|TestAutoLoadingComponentsShowRateLimit|TestRemoteImagesGoThroughMediaProxy|TestRemoteImageProxyGateClassifiesSources|TestEmojiDecorationErrorIDsMatchFrontend|TestStaffNotificationTypesAreOptOutable|TestNotificationBadgeClassesHaveNoPadding|TestEmojiRequestEntriesUseTheSharedHelper|TestCSSModulesHaveNoDuplicateClasses|TestCleanRemoteFilesButtonIsConditional' -count=1
+		-run 'TestCreditImageOriginsCoverAboutMisskey|TestMkGoRolePolicyKeysAreListedInFrontend|TestReactionLongPressIsWired|TestReactableRemoteReactionIsWired|TestMkGoUpdatedDialogIsWired|TestEmojiApplicationIsWired|TestEveryPluginSlotHasAMountPoint|TestAutoLoadingComponentsShowRateLimit|TestRemoteImagesGoThroughMediaProxy|TestRemoteImageProxyGateClassifiesSources|TestEmojiDecorationErrorIDsMatchFrontend|TestStaffNotificationTypesAreOptOutable|TestNotificationBadgeClassesHaveNoPadding|TestEmojiRequestEntriesUseTheSharedHelper|TestCSSModulesHaveNoDuplicateClasses|TestCleanRemoteFilesButtonIsConditional|TestStreamResyncIsWiredInTimelines' -count=1
 	# **eslint も回す (#2906)。** CI は別 step で `pnpm eslint` を回しており、
 	# ここに無いと**手元で緑でも CI が落ちる**。#2903 で実際に踏んだ (デッドコードを
 	# 消したときの空行が @stylistic/no-multiple-empty-lines で落ちた)。個別ファイルに
@@ -1078,6 +1078,26 @@ secretfield-check: ## モデルの秘密フィールドが json:"-" を保って
 	# ユーザーとして API を叩けるので権限ゲートを全て迂回できる)。
 	# 出してよいものは serializableSecretLike に理由付きで登録する。
 	go test ./internal/entitycompat/... -run 'TestScanSecretLikeFields|TestModelSecretFieldsAreNotSerialized|TestSerializableSecretLikeHasNoDeadEntries|TestModelJSONDoesNotContainSecrets|TestModelJSONKeepsAuditedFields' -count=1 -v
+
+.PHONY: ipshape-check
+ipshape-check: ## レスポンス / 連合の shape に IP が出ていないか検査
+	# #3066 の「IP 情報が一般ユーザー向け API や連合へ露出しない」を直接見る。
+	# 担保が shapecheck の golden 照合しか無く、additive な追加は素通りしていた。
+	# **AST で全 struct のタグを読む** — reflect で型を並べる形は `MeDetailed`
+	# (= /api/i) を落とし、入れ子や map の値型も辿れていなかった (実測)。
+	# 走査は entity / activitypub だけでなく api / server / stream も見る
+	# (handler が自分で宣言する response struct もそのまま wire の形になる)。
+	# 判定は語で見る。**切り方を片側に寄せると必ず穴が開く** — 大文字のたびに
+	# 割ると `lastIPs` が、割らないと `IPAddr` が素通りする (両方とも実測)。
+	go test ./internal/entitycompat/... -run 'TestResponseAndFederationShapesHaveNoIPField|TestIPShapeAllowlistMatchesExpected|TestPublicShapesDoNotReferenceIPBearingTypes|TestIPRefAllowlistMatchesExpected|TestIPBearingTypesPinsEveryBranch|TestTypeRefsResolvesNamedTypes|TestAllJSONKeysWalksNestedObjects|TestPublicShapesMarshalWithoutIP|TestScanJSONTagsCollectsWhatEncodingJSONEmits|TestCustomJSONMarshalersAreKnown|TestLooksLikeIPKey' -count=1 -v
+.PHONY: iprecord-check
+iprecord-check: ## 利用者の IP を記録する call site が allowlist の外に増えていないか検査
+	# #3105 の関連アカウント検索は `user_ip` の観測だけを見るので、**失敗した
+	# サインインの IP がそこに入ると第三者が他人の関連候補を作れる**。
+	# 「どこからも呼ばれていない」は構造的な性質で、endpoint ごとの振る舞い
+	# テストは叩いた経路しか見ない (実測で `SigninFlow` と signin-with-passkey に
+	# 記録を足す変異が素通りした)。
+	go test ./internal/entitycompat/... -run 'TestIPRecordCallSitesAreAllowlisted|TestRecordSuccessfulSigninCallSitesAreAllowlisted|TestPasskeyIPRecordComesAfterFailures' -count=1 -v
 
 .PHONY: dockerignore-check
 dockerignore-check: ## .dockerignore がシークレットと利用者データを除外しているか検査
