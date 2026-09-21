@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -241,6 +242,20 @@ type feedHandler struct {
 	profiles  func(userID string) *model.UserProfile
 	avatarURL func(u *model.User) string
 	toHTML    func(text string) string
+}
+
+// feedAvatarURL returns the image URL a user's feed advertises (channel image /
+// logo / icon / item image).
+//
+// **avatar が設定済みでも media proxy 経由にする (#1529)。** フィードは
+// 未認証で取得でき、購読者 (第三者クライアント) は remote origin を直接
+// 取りに行く。identicon fallback は entity.IdenticonURL が proxy 込みで
+// 面倒を見る。
+func feedAvatarURL(u *model.User) string {
+	if u.AvatarURL != nil && *u.AvatarURL != "" {
+		return entity.ProxyAvatarURLString(*u.AvatarURL)
+	}
+	return entity.IdenticonURL(u)
 }
 
 // serve builds the feed for the requested user and hands it to render.

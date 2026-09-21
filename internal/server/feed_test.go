@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -253,4 +255,55 @@ func TestFeed_NormalUserStillServed(t *testing.T) {
 		assert.Equal(t, http.StatusOK, rec.Code)
 		assert.Contains(t, rec.Body.String(), "hello")
 	}
+}
+
+// avatar 設定済みのユーザーでも media proxy 経由にする (#1529)。フィードは
+// 未認証で取得でき、購読者 (第三者クライアント) が remote origin を直接
+// 取得してしまう。identicon fallback (= avatar 未設定) は entity.IdenticonURL が
+// 相対 URL を返すので、こちらは proxy を通さない。
+func TestFeedAvatarURLProxiesRemoteAvatar(t *testing.T) {
+	withMediaProxy(t)
+
+	remote := "https://remote.example/a.png"
+	u := &model.User{ID: "u1", Username: "alice", Host: strp("remote.example"), AvatarURL: &remote}
+	got := feedAvatarURL(u)
+	assert.True(t, strings.HasPrefix(got, "https://local.example/proxy/avatar.webp?"), "got %q", got)
+	parsed, err := url.Parse(got)
+	require.NoError(t, err)
+	assert.Equal(t, "local.example", parsed.Host, "proxy 自身のホスト以外を向いている")
+
+	t.Run("identicon fallback は相対 URL のまま", func(t *testing.T) {
+		local := &model.User{ID: "u2", Username: "bob"}
+		assert.Equal(t, "/identicon/bob", feedAvatarURL(local))
+	})
+
+	t.Run("自オリジンは no-op", func(t *testing.T) {
+		same := &model.User{ID: "u3", Username: "carol", AvatarURL: strp("https://local.example/files/a.png")}
+		assert.Equal(t, "https://local.example/files/a.png", feedAvatarURL(same))
+	})
+
+	// build → 各 format の render まで通ること (配線の実体)。
+	t.Run("rendered feed uses the proxied url", func(t *testing.T) {
+		n := 0
+		h := &feedHandler{
+			baseURL: "https://local.example",
+			host:    "local.example",
+			users:   stubFeedUsers{users: map[string]*model.User{"alice": u}},
+			notes:   stubFeedNotes{},
+			parseTime: func(string) (time.Time, error) {
+				return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC), nil
+			},
+			profiles:  func(string) *model.UserProfile { return nil },
+			avatarURL: feedAvatarURL,
+			toHTML:    func(text string) string { return text },
+		}
+		for _, fn := range []func(echo.Context, string) error{h.RSS, h.Atom, h.JSON} {
+			rec := doFeedReq(t, fn, "alice")
+			require.Equal(t, http.StatusOK, rec.Code)
+			assert.Contains(t, rec.Body.String(), "https://local.example/proxy/avatar.webp?",
+				"フィード本文に raw avatar が載っている")
+			n++
+		}
+		require.Equal(t, 3, n)
+	})
 }

@@ -746,6 +746,23 @@ func TestSSRAnnouncementPage(t *testing.T) {
 		assert.Contains(t, body, `<title>メンテナンス | Misskey</title>`)
 	})
 
+	// リモート画像も media proxy 経由にする (#1529)。public 経路の
+	// entity.PackAnnouncement と同じ扱いで、OGP クローラに生の remote URL を
+	// 渡さない。
+	t.Run("リモート画像は proxy 経由", func(t *testing.T) {
+		withMediaProxy(t)
+		img := "https://cdn.remote.example/a1.png"
+		h := newHandler(t, &model.Announcement{ID: "a1", Title: "メンテナンス", Text: "明日実施します", ImageURL: &img})
+
+		body := ssrGet(t, h.AnnouncementPage, "/announcements/a1", map[string]string{"id": "a1"}).Body.String()
+
+		assert.Contains(t, body, "https://local.example/proxy/image.webp?",
+			"リモート画像が proxy 経由になっていない")
+		assert.NotContains(t, body, `content="https://cdn.remote.example/a1.png"`,
+			"生のリモート URL を og:image に出している")
+		assert.Contains(t, body, `<meta name="twitter:card" content="summary_large_image">`)
+	})
+
 	// 個人宛てのお知らせは permalink で配らない。URL を知っているだけで
 	// 他人宛ての内容が読めてはいけない (upstream も userId IS NULL で絞る)。
 	t.Run("個人宛ては meta を出さない", func(t *testing.T) {

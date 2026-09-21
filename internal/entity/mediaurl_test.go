@@ -398,11 +398,25 @@ func TestAvatarBannerProxying(t *testing.T) {
 	// #1781: local system account (username に '.' を含む) は meta.iconUrl が
 	// 設定されていれば identicon ではなくインスタンスアイコンを返す。
 	t.Run("local system account uses meta.iconUrl when set", func(t *testing.T) {
-		SetInstanceIconURLLookup(func() string { return "https://example.test/icon.png" })
+		SetInstanceIconURLLookup(func() string { return testInstanceURL + "/icon.png" })
 		defer SetInstanceIconURLLookup(nil)
 		u0 := &model.User{Username: "relay.actor"} // local, no avatar
-		if got := IdenticonURL(u0); got != "https://example.test/icon.png" {
+		if got := IdenticonURL(u0); got != testInstanceURL+"/icon.png" {
 			t.Errorf("system account should use meta.iconUrl, got: %s", got)
+		}
+	})
+	// meta.iconUrl は operator が remote URL を設定できる。生のまま返すと
+	// MkAvatar が相手サーバーへ直接取得する (#1529)。
+	t.Run("local system account proxies remote meta.iconUrl", func(t *testing.T) {
+		SetInstanceIconURLLookup(func() string { return "https://" + remoteHost + "/icon.png" })
+		defer SetInstanceIconURLLookup(nil)
+		u0 := &model.User{Username: "proxy.actor"}
+		got := IdenticonURL(u0)
+		if !strings.HasPrefix(got, testInternalProxy+"/avatar.webp?") {
+			t.Errorf("remote meta.iconUrl not proxied: %s", got)
+		}
+		if strings.Contains(u(t, got).Host, remoteHost) {
+			t.Errorf("meta.iconUrl leaks remote host: %s", got)
 		}
 	})
 	t.Run("local system account falls back to identicon when meta.iconUrl empty", func(t *testing.T) {

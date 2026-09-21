@@ -451,7 +451,13 @@ func IdenticonURL(u *model.User) string {
 	if u.Host == nil || *u.Host == "" {
 		if strings.Contains(u.Username, ".") {
 			if icon := resolveInstanceIconURL(); icon != "" {
-				return icon
+				// **meta.iconUrl は remote URL を指せる。** 上の avatarUrl 分岐と
+				// 同じく proxy 経由へ書き換える (#1529)。生 URL のままだと
+				// MkAvatar が相手サーバーへ直接取得し、静止画設定時は
+				// getStaticImageUrl が sig なし URL を作って allowlist 外のため
+				// 403 + max-age=86400 で壊れる (meta.iconUrl は allowlist の
+				// 4 テーブルに入っていない)。
+				return currentMediaURLContext().ProxyAvatarURL(icon)
 			}
 		}
 	}

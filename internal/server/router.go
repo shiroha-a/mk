@@ -2389,12 +2389,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			}
 			return p
 		},
-		avatarURL: func(u *model.User) string {
-			if u.AvatarURL != nil && *u.AvatarURL != "" {
-				return *u.AvatarURL
-			}
-			return entity.IdenticonURL(u)
-		},
+		avatarURL: feedAvatarURL,
 		toHTML: func(text string) string {
 			return mfm.ToHTML(mfm.Parse(text), feedHost)
 		},

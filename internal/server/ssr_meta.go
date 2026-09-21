@@ -922,8 +922,12 @@ func (h *ssrMetaHandler) AnnouncementPage(c echo.Context) error {
 		propertyTag("og:title", a.Title) +
 		propertyTag("og:description", description) +
 		propertyTag("og:url", h.cfg.URL+"/announcements/"+a.ID)
-	if a.ImageURL != nil && *a.ImageURL != "" {
-		og += propertyTag("og:image", h.absoluteURL(*a.ImageURL)) +
+	// 画像は media proxy 経由へ書き換える (#1529)。public 経路の
+	// entity.PackAnnouncement と同じ扱いで、OGP クローラに生の remote URL を
+	// 渡さない (渡すとクローラが相手サーバーへ直接取得する)。nil ガードは
+	// 書き換え後に対して行う。
+	if img := entity.ProxyMediaURLPtr(a.ImageURL); img != nil && *img != "" {
+		og += propertyTag("og:image", h.absoluteURL(*img)) +
 			metaTag("twitter:card", "summary_large_image")
 	}
 	return h.render(c, shellOverrides{
