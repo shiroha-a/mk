@@ -120,6 +120,13 @@ func (p *Processor) Compact(doc any, context any) (map[string]any, error) {
 // legacy algorithm は提供しない (= 受信できる activity の signature
 // algorithm は normalizationAlgorithm = URDNA2015 のみ accept)。
 func (p *Processor) Normalize(doc any) (string, error) {
+	// **正規化の前に作業量を見積もる。** URDNA2015 は非一意な blank node の
+	// 全順列を列挙するが、json-gold にはそれを打ち切る機構が無い
+	// (upstream が使う rdf-canonize は maxWorkFactor を既定で持つ)。
+	// 入力側で弾かないと、2KB の activity で 1 コアを永久に焼ける。
+	if err := CheckComplexity(doc); err != nil {
+		return "", err
+	}
 	opts := ld.NewJsonLdOptions("")
 	opts.DocumentLoader = p
 	opts.Algorithm = ld.AlgorithmURDNA2015
