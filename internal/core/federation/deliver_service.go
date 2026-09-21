@@ -415,14 +415,27 @@ func (s *DeliverService) signerCredentials(userID string) (string, string, error
 	return keyID, kp.PrivateKey, nil
 }
 
-// preferredInbox returns the sharedInbox of u when present, otherwise the
-// individual inbox.
+// preferredInbox returns the inbox to use for a 1:1 (direct) delivery.
+//
+// **個別 inbox を優先する。** upstream の `ApDeliverManagerService.execute` は
+// direct recipe に対して `inboxes.set(recipe.to.inbox, false)` と**必ず個別
+// inbox** を使い、`sharedInbox` はフォロワー配信で既に積んだ inbox との重複
+// 判定にしか使わない。sharedInbox へ送ると 2 つ壊れる:
+//
+//   - shared inbox で非公開 activity を扱わない実装では、DM や Follow が
+//     **黙って落ちる** (エラーも返らない)
+//   - 410 Gone が返ると `IsSharedInbox` 経由で host 単位の gone 判定
+//     (`MarkGoneSuspended`) に届き、**DM 1 通の失敗でインスタンス全体を
+//     suspend** しうる
+//
+// 個別 inbox を持たない行だけ sharedInbox へ倒す。upstream はその場合
+// 配送を skip するが、送れるなら送る方が利用者の意図に近い。
 func preferredInbox(u *model.User) string {
-	if u.SharedInbox != nil && *u.SharedInbox != "" {
-		return *u.SharedInbox
-	}
-	if u.Inbox != nil {
+	if u.Inbox != nil && *u.Inbox != "" {
 		return *u.Inbox
+	}
+	if u.SharedInbox != nil {
+		return *u.SharedInbox
 	}
 	return ""
 }

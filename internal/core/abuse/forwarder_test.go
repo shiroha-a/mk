@@ -222,7 +222,7 @@ func TestForwardReport_NilSystemActorReturnsError(t *testing.T) {
 	require.Error(t, err)
 }
 
-// Inbox 不在でも SharedInbox があれば配送される (preferredInbox 挙動)。
+// Inbox 不在なら SharedInbox へ倒す (preferredInbox のフォールバック)。
 func TestForwardReport_UsesSharedInboxWhenInboxNil(t *testing.T) {
 	host := "remote.example"
 	uri := "https://remote.example/users/alice"
@@ -237,8 +237,9 @@ func TestForwardReport_UsesSharedInboxWhenInboxNil(t *testing.T) {
 	assert.Equal(t, []string{shared}, deliver.inboxes)
 }
 
-// SharedInbox が優先されて Inbox より先に選ばれる (本家と同じ挙動)。
-func TestForwardReport_PrefersSharedInbox(t *testing.T) {
+// **個別 inbox が優先される** (upstream の direct recipe と同じ。理由は
+// core/federation の preferredInbox の GoDoc)。
+func TestForwardReport_PrefersIndividualInbox(t *testing.T) {
 	host := "remote.example"
 	uri := "https://remote.example/users/alice"
 	inbox := "https://remote.example/users/alice/inbox"
@@ -249,6 +250,6 @@ func TestForwardReport_PrefersSharedInbox(t *testing.T) {
 
 	f := abuse.NewForwarder(&stubReportStore{report: report}, &stubSystemActor{actor: &model.User{ID: "instance"}}, &stubRenderer{}, deliver)
 	require.NoError(t, f.ForwardReport("r"))
-	assert.Equal(t, []string{shared}, deliver.inboxes,
-		"sharedInbox が inbox より優先されるべき")
+	assert.Equal(t, []string{inbox}, deliver.inboxes,
+		"個別 inbox が sharedInbox より優先されるべき")
 }

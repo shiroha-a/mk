@@ -141,6 +141,31 @@ func TestNoteDeliveryHook_Specified_RemoteUsers(t *testing.T) {
 	assert.Equal(t, inbox, enq.calls[0].Inbox)
 }
 
+// **DM は sharedInbox へ送らない** (セキュリティ監査 2026-09-21)。
+//
+// upstream の direct recipe は `inboxes.set(recipe.to.inbox, false)` で必ず
+// 個別 inbox を使う。sharedInbox へ送ると (a) shared inbox で非公開 activity を
+// 扱わない実装では**黙って落ち**、(b) 410 Gone が host 単位の gone 判定へ届いて
+// **DM 1 通でインスタンス全体を suspend** しうる。
+func TestNoteDeliveryHook_Specified_UsesIndividualInbox(t *testing.T) {
+	hook, enq, userRepo, _, keypairRepo, _ := newNoteDeliveryHook(t)
+	author := makeLocalAuthor(t, userRepo, keypairRepo)
+
+	host := "remote.example"
+	inbox := "https://remote.example/users/r1/inbox"
+	shared := "https://remote.example/inbox"
+	userRepo.Users["r1"] = &model.User{ID: "r1", Username: "r1", Host: &host, Inbox: &inbox, SharedInbox: &shared}
+
+	note := makeNote(author.ID, model.NoteVisibilitySpecified)
+	note.VisibleUserIDs = []string{"r1"}
+
+	hook.OnNoteCreated(note, author)
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, inbox, enq.calls[0].Inbox, "DM を sharedInbox へ送らないこと")
+	assert.False(t, enq.calls[0].IsSharedInbox,
+		"DM 1 通の 410 が host 単位の gone 判定へ届かないこと")
+}
+
 func TestNoteDeliveryHook_Public_DeliverError_DoesNotPanic(t *testing.T) {
 	hook, enq, userRepo, followingRepo, _, _ := newNoteDeliveryHook(t)
 	author := &model.User{ID: "alice", Username: "alice"}

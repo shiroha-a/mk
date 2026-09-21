@@ -102,16 +102,16 @@ func (f *Forwarder) ForwardReport(reportID string) error {
 	return f.deliverer.DeliverActivity(actor.ID, body, []string{inbox})
 }
 
-// preferredInbox prefers sharedInbox over the individual inbox, matching the
-// unexported helper in core/federation/deliver_service.go. 小さい 5 行の
-// 重複なので、deliver_service.go 側を export するより inline する方が
-// patch surface が狭い。
+// preferredInbox prefers the individual inbox over sharedInbox, matching the
+// unexported helper in core/federation/deliver_service.go (理由はそちらの
+// GoDoc)。小さい 5 行の重複なので、deliver_service.go 側を export するより
+// inline する方が patch surface が狭い。**片方だけ直さないこと。**
 func preferredInbox(u *model.User) string {
-	if u.SharedInbox != nil && *u.SharedInbox != "" {
-		return *u.SharedInbox
-	}
 	if u.Inbox != nil && *u.Inbox != "" {
 		return *u.Inbox
+	}
+	if u.SharedInbox != nil && *u.SharedInbox != "" {
+		return *u.SharedInbox
 	}
 	return ""
 }

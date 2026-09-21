@@ -486,13 +486,33 @@ func TestDeliverToFollowers_ThreadsSharedInboxFlag(t *testing.T) {
 }
 
 // #1811: DeliverToUser は recipient の sharedInbox を IsSharedInbox=true にする。
-func TestDeliverToUser_ThreadsSharedInboxFlag(t *testing.T) {
+// **1:1 配送は個別 inbox を使う** (upstream の direct recipe と同じ)。
+//
+// sharedInbox へ送ると、(a) shared inbox で非公開 activity を扱わない実装で
+// DM や Follow が黙って落ち、(b) 410 Gone が `IsSharedInbox` 経由で host 単位の
+// gone 判定へ届き **1 通の失敗でインスタンス全体を suspend** しうる。
+func TestDeliverToUser_UsesIndividualInbox(t *testing.T) {
 	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)
 	host := "remote.example"
 	shared := "https://remote.example/inbox"
 	personal := "https://remote.example/users/bob/inbox"
 	recipient := &model.User{ID: "bob", Host: &host, SharedInbox: &shared, Inbox: &personal}
+	require.NoError(t, svc.DeliverToUser("alice", recipient, []byte(`{}`)))
+	require.Len(t, enq.calls, 1)
+	assert.Equal(t, personal, enq.calls[0].Inbox)
+	assert.False(t, enq.calls[0].IsSharedInbox,
+		"個別 inbox なので host 単位の gone 判定へ届かせないこと")
+}
+
+// **sharedInbox しか無い行はそこへ倒す** (upstream は skip するが、送れるなら
+// 送る方が利用者の意図に近い)。そのときは `IsSharedInbox` が立つ。
+func TestDeliverToUser_FallsBackToSharedInbox(t *testing.T) {
+	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
+	installLocalSigner(t, userRepo, keypairRepo)
+	host := "remote.example"
+	shared := "https://remote.example/inbox"
+	recipient := &model.User{ID: "bob", Host: &host, SharedInbox: &shared}
 	require.NoError(t, svc.DeliverToUser("alice", recipient, []byte(`{}`)))
 	require.Len(t, enq.calls, 1)
 	assert.Equal(t, shared, enq.calls[0].Inbox)
@@ -610,6 +630,8 @@ func TestDeliverToUser_NilRecipient(t *testing.T) {
 	require.NoError(t, svc.DeliverToUser("alice", nil, []byte(`{}`)))
 }
 
+// 両方ある行では個別 inbox が選ばれる (上のテストと同じ不変条件を
+// DeliverToUser の呼び出し形で押さえる)。
 func TestDeliverToUser_RemoteWithSharedInbox(t *testing.T) {
 	svc, enq, userRepo, _, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)
@@ -619,7 +641,7 @@ func TestDeliverToUser_RemoteWithSharedInbox(t *testing.T) {
 	rem := &model.User{ID: "r1", Username: "r", Host: &host, SharedInbox: &shared, Inbox: &inbox}
 	require.NoError(t, svc.DeliverToUser("alice", rem, []byte(`{}`)))
 	require.Len(t, enq.calls, 1)
-	assert.Equal(t, shared, enq.calls[0].Inbox)
+	assert.Equal(t, inbox, enq.calls[0].Inbox)
 }
 
 func TestDeliverToUser_RemoteFallbackToInbox(t *testing.T) {
