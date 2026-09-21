@@ -22,6 +22,9 @@ type Conn interface {
 	WriteMessage(messageType int, data []byte) error
 	WriteControl(messageType int, data []byte, deadline time.Time) error
 	SetReadDeadline(t time.Time) error
+	// SetReadLimit caps a single inbound frame. gorilla の既定は 0 = 無制限で、
+	// 未認証の接続 1 本で任意量のメモリを確保させられる。
+	SetReadLimit(limit int64)
 	SetPongHandler(h func(appData string) error)
 	Close() error
 }
@@ -353,10 +356,23 @@ func (c *Connection) closeInternal() {
 	})
 }
 
+// maxIncomingFrameBytes caps a single inbound WebSocket frame.
+// API の body limit (1MiB) と同値。
+const maxIncomingFrameBytes = 1 << 20
+
 // readLoop drives ReadMessage in a loop, dispatching parsed payloads to the
 // installed MessageHandler. ループ終了時には writer も巻き込んで全停止する。
 func (c *Connection) readLoop() {
 	defer c.closeInternal()
+	// **受信フレームに上限を置く。**
+	//
+	// gorilla の既定 `readLimit` は 0 = 無制限で、`ReadMessage` はフレーム全体を
+	// 成長するバッファへ載せる。Echo の body limit は upgrade 後のフレームには
+	// 効かないので、未認証の接続 1 本で任意量のメモリを確保させられる。
+	// upstream (`ws`) は既定 `maxPayload` 100MiB で 1009 を返して閉じる。
+	// ストリーミングのメッセージは実際には数 KB なので、こちらは API の
+	// body limit と同じ 1MiB にする (upstream より厳しい = 安全側)。
+	c.conn.SetReadLimit(maxIncomingFrameBytes)
 	c.conn.SetPongHandler(func(string) error {
 		return c.conn.SetReadDeadline(time.Now().Add(readDeadline))
 	})

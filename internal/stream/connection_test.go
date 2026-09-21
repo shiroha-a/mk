@@ -32,6 +32,7 @@ type fakeConn struct {
 	pingErr     error
 	pongHandler func(string) error
 	closed      bool
+	readLimit   int64
 }
 
 func newFakeConn() *fakeConn {
@@ -76,6 +77,19 @@ func (f *fakeConn) WriteControl(messageType int, _ []byte, _ time.Time) error {
 }
 
 func (f *fakeConn) SetReadDeadline(_ time.Time) error { return nil }
+
+// readLimit は SetReadLimit で設定された値 (0 = 未設定 = 無制限)。
+func (f *fakeConn) SetReadLimit(limit int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.readLimit = limit
+}
+
+func (f *fakeConn) ReadLimit() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.readLimit
+}
 func (f *fakeConn) SetPongHandler(h func(string) error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -380,4 +394,22 @@ func TestConnection_UpdateFollowingSnapshot_EmptyIDNoOp(t *testing.T) {
 	c.SetFollowingSnapshot(map[string]bool{"u1": true})
 	c.UpdateFollowingSnapshot("", true)
 	assert.Len(t, c.FollowingSnapshot(), 1)
+}
+
+// **受信フレームに上限が掛かっていること。**
+//
+// gorilla の既定 `readLimit` は 0 = 無制限で、`ReadMessage` はフレーム全体を
+// 成長するバッファへ載せる。Echo の body limit は upgrade 後のフレームには
+// 効かないので、未認証の接続 1 本で任意量のメモリを確保させられる。
+func TestConnection_SetsReadLimit(t *testing.T) {
+	fc := newFakeConn()
+	c := NewConnection("c1", nil, fc)
+	go c.Start()
+	defer fc.finishReadWithError(errors.New("eof"))
+
+	// 値はリテラルで書く (定数を参照すると、緩める変異と一緒に期待値が動く)。
+	require.Eventually(t, func() bool {
+		return fc.ReadLimit() == int64(1<<20)
+	}, time.Second, 10*time.Millisecond,
+		"1MiB の受信上限を設定すること (0 = 無制限のままにしない。実測 %d)", fc.ReadLimit())
 }

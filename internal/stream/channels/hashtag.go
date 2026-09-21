@@ -48,6 +48,19 @@ func (c *HashtagChannel) Init(params json.RawMessage) error {
 			return stream.ErrInvalidParams
 		}
 	}
+	// **購読するトピック数に上限を置く。**
+	//
+	// mk-go は distinct なタグごとに Redis の SUBSCRIBE を張る。upstream は
+	// `q` の内容に関わらずリスナー 1 本でメモリ上でマッチングするので上限が
+	// 要らないが、こちらは 1 通の `connect` で Redis 接続を任意個増やせる。
+	// 本番 valkey の `maxclients` に達すると、同じ valkey を使う job queue /
+	// timelines / reactions を含めてインスタンス全体が新規接続を拒否する。
+	//
+	// 値は 1 接続あたりのチャンネル数上限 (`maxChannelsPerConnection` = 32) と
+	// 揃える。実運用でタグを 32 個超える購読は想定していない。
+	if distinct := countDistinctTags(p.Q); distinct > maxHashtagTopics {
+		return stream.ErrInvalidParams
+	}
 	c.filter = parseNoteFilter(params)
 	// q を正規化して保持し、全グループの全タグの distinct 正規化キーを購読する。
 	// 旧実装は q[0][0] (第1グループ第1タグ) のみ購読していて multi-tag / OR group を
@@ -160,4 +173,22 @@ func (c *HashtagChannel) Dispose() {
 	for _, t := range c.topics {
 		c.ctx.Unsubscribe(t)
 	}
+}
+
+// maxHashtagTopics bounds how many Redis subscriptions one hashtag channel
+// may open. 1 接続あたりのチャンネル数上限と同じ値にしてある。
+const maxHashtagTopics = 32
+
+// countDistinctTags counts the normalized tags a subscription would open a
+// Redis subscription for.
+func countDistinctTags(q [][]string) int {
+	seen := make(map[string]struct{})
+	for _, group := range q {
+		for _, tag := range group {
+			if key := searchnorm.Normalize(tag); key != "" {
+				seen[key] = struct{}{}
+			}
+		}
+	}
+	return len(seen)
 }
