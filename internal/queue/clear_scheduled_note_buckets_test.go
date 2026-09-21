@@ -17,7 +17,25 @@ type bucketInspector struct {
 	driver.Inspector
 	scheduled []*driver.TaskSummary
 	retry     []*driver.TaskSummary
-	deleted   []string
+	// pending / active も走査対象 (upstream は delayed / waiting / active の
+	// 3 バケットを見る)。
+	pending []*driver.TaskSummary
+	active  []*driver.TaskSummary
+	deleted []string
+}
+
+func (i *bucketInspector) ListPendingTasks(_ string, page, _ int) ([]*driver.TaskSummary, error) {
+	if page > 1 {
+		return nil, nil
+	}
+	return i.pending, nil
+}
+
+func (i *bucketInspector) ListActiveTasks(_ string, page, _ int) ([]*driver.TaskSummary, error) {
+	if page > 1 {
+		return nil, nil
+	}
+	return i.active, nil
 }
 
 func (i *bucketInspector) ListScheduledTasks(_ string, page, _ int) ([]*driver.TaskSummary, error) {
@@ -77,4 +95,27 @@ func TestClearScheduledNote_ScansRetryBucket(t *testing.T) {
 	require.NoError(t, c.ClearScheduledNote("target"))
 	assert.Equal(t, []string{"sched-1", "retry-1"}, insp.deleted,
 		"retry 待ちの job が消し残っている")
+}
+
+// **wait へ昇格した予約投稿も取り消せること。**
+//
+// delayed と retry だけだと、予約時刻が来て job が wait へ昇格した後に利用者が
+// 時刻を後ろへ変更したとき、古い job が消されずそのまま発火し、**取り消したはず
+// の時刻で公開される**。upstream は `getJobs(['delayed','waiting','active'])`。
+func TestClearScheduledNote_ScansPendingAndActiveBuckets(t *testing.T) {
+	for _, bucket := range []string{"pending", "active"} {
+		t.Run(bucket, func(t *testing.T) {
+			insp := &bucketInspector{}
+			task := scheduledNoteSummary(t, "t1", "draft1")
+			if bucket == "pending" {
+				insp.pending = []*driver.TaskSummary{task}
+			} else {
+				insp.active = []*driver.TaskSummary{task}
+			}
+			c := queue.NewClient(&bucketDriver{insp: insp})
+			require.NoError(t, c.ClearScheduledNote("draft1"))
+			require.Equal(t, []string{"t1"}, insp.deleted,
+				"%s バケットの job も消すこと", bucket)
+		})
+	}
 }

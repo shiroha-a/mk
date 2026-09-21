@@ -328,12 +328,20 @@ func (c *Client) ClearScheduledNote(draftID string) error {
 		return nil
 	}
 	var firstErr error
+	// **wait / active も走査する。** upstream の `NoteDraftService` は
+	// `getJobs(['delayed', 'waiting', 'active'])` の 3 バケットを見る。
+	// delayed と retry だけだと、予約時刻が来て job が wait へ昇格した後
+	// (ワーカーが詰まっている / キューが pause 中 / backlog が大きいと長い窓に
+	// なる) に利用者が時刻を**後ろへ**変更したとき、古い job が消されずに
+	// そのまま発火し、**取り消したはずの時刻で公開される**。
 	for _, bucket := range []struct {
 		name string
 		list func(string, int, int) ([]*driver.TaskSummary, error)
 	}{
 		{"scheduled", c.inspector.ListScheduledTasks},
 		{"retry", c.inspector.ListRetryTasks},
+		{"pending", c.inspector.ListPendingTasks},
+		{"active", c.inspector.ListActiveTasks},
 	} {
 		if err := c.clearScheduledNoteIn(bucket.name, bucket.list, draftID, &firstErr); err != nil {
 			return err
