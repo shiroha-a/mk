@@ -1,6 +1,9 @@
 package queue
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Policy captures runtime tuning knobs for a single logical queue. The
 // fields are applied lazily by NewClient (default MaxRetry on enqueue) and
@@ -87,9 +90,22 @@ type PolicyMap map[string]Policy
 
 // PolicyFor returns the Policy registered for queueName, or the zero value
 // when nothing is configured. Safe to call on a nil PolicyMap.
+//
+// **プラグインのキューは接頭辞で引く。** `plugin:<名前>` は運営者が入れた
+// プラグインの数だけ増えるので、名前ごとに登録させると「登録し忘れた
+// プラグインだけ retention が効かない」形になる (実際に 1 つも登録されて
+// おらず、プラグインの completed ジョブが無期限に積まれていた)。
+// `PluginQueuePrefix` をキーにした entry があればそれを既定として使う。
+// 個別の名前で登録されていればそちらが優先される。
 func (m PolicyMap) PolicyFor(queueName string) Policy {
 	if m == nil {
 		return Policy{}
 	}
-	return m[queueName]
+	if p, ok := m[queueName]; ok {
+		return p
+	}
+	if strings.HasPrefix(queueName, PluginQueuePrefix) {
+		return m[PluginQueuePrefix]
+	}
+	return Policy{}
 }

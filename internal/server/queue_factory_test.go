@@ -551,3 +551,43 @@ func TestMkqConfig_PluginQueues(t *testing.T) {
 		assert.Containsf(t, got.QueueNames, want, "本体の %q が消えている", want)
 	}
 }
+
+// recordingQueueClient captures the options of the last Enqueue call.
+type recordingQueueClient struct {
+	lastOpts driver.EnqueueOptions
+}
+
+func (r *recordingQueueClient) Enqueue(_ context.Context, _ string, _ []byte, opts ...driver.EnqueueOption) error {
+	r.lastOpts = driver.ApplyEnqueueOptions(opts)
+	return nil
+}
+func (r *recordingQueueClient) Close() error { return nil }
+
+type recordingQueueDriver struct{ client driver.Client }
+
+func (d *recordingQueueDriver) Client() driver.Client        { return d.client }
+func (d *recordingQueueDriver) Inspector() driver.Inspector  { return nil }
+func (d *recordingQueueDriver) Server() driver.Server        { return nil }
+func (d *recordingQueueDriver) Scheduler() driver.Scheduler  { return nil }
+func (d *recordingQueueDriver) Close() error                 { return nil }
+func (d *recordingQueueDriver) WorkerCount(_ string) int     { return 0 }
+func (d *recordingQueueDriver) Resize(_ string, _ int) error { return driver.ErrResizeNotSupported }
+
+// **プラグインのキューにも retention を登録すること。**
+//
+// 登録が無いと `PolicyFor` が zero Policy を返し、`retentionOptsFromPolicy` の
+// `> 0` guard で option が 1 つも出ない = **completed ジョブが Redis に無期限で
+// 積まれる**。retention を付けたつもりが本番で no-op だった。
+func TestApplyClientPolicies_RegistersPluginQueueRetention(t *testing.T) {
+	rec := &recordingQueueClient{}
+	c := queue.NewClient(&recordingQueueDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	applyClientPolicies(c, &config.Config{})
+
+	require.NoError(t, c.EnqueuePlugin(context.Background(), "someplugin", "job", []byte(`{}`)))
+	require.True(t, rec.lastOpts.KeepCompletedSet,
+		"プラグインのキューに completed の上限が渡っていない")
+	require.Positive(t, rec.lastOpts.KeepCompleted)
+	require.True(t, rec.lastOpts.KeepFailedSet)
+}

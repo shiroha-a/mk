@@ -101,9 +101,13 @@ func (c *Client) EnqueuePluginPeer(ctx context.Context, plugin string, body []by
 	// driver で挙動が割れる (EnqueuePlugin と同じ理由)。
 	// **retention を付ける (#1193 の再発防止)。** 本体の enqueue helper は全て
 	// `retentionOpts` を前置しているが、プラグインの 2 経路だけ付けていなかった。
-	// 出さないと driver 既定 = 無制限保持になり、cron 発火と `_peer` 送信の
-	// たびに completed ジョブが Redis へ永久に積まれる (peer のエンベロープは
-	// プラグインが決める任意の本文で、利用者のノートを載せうる)。
+	// 出さないと driver 既定 = 無制限保持になり、`_peer` 送信のたびに completed
+	// ジョブが Redis へ永久に積まれる (peer のエンベロープはプラグインが決める
+	// 任意の本文で、利用者のノートを載せうる)。
+	//
+	// **cron 発火はここを通らない。** プラグインの定期実行は
+	// `Scheduler.RegisterPluginJob` 経由で、mkq native が per-fire option を
+	// drop するため対象外 (`queue_factory.go` の同旨のコメントを参照)。
 	base := []driver.EnqueueOption{
 		driver.WithQueue(PluginQueueName(plugin)),
 		driver.WithMaxRetry(0),

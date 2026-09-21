@@ -247,6 +247,11 @@ func applyClientPolicies(c *queue.Client, cfg *config.Config) {
 	// relationship も同様。移行時の一括 follow で completed が一気に積み上がる
 	// ので retention が要る (#2403)。
 	c.SetPolicy(queue.RelationshipQueueName, defaultPolicy())
+	// **プラグインのキューは接頭辞で 1 回だけ登録する。** `plugin:<名前>` は
+	// 運営者が入れたプラグインの数だけ増えるので、名前ごとに登録させると
+	// 登録し忘れたものだけ retention が効かない。`PolicyFor` が接頭辞で
+	// 引き当てる。
+	c.SetPolicy(queue.PluginQueuePrefix, defaultPolicy())
 }
 
 // defaultPolicy returns the queue.Policy applied when no operator config

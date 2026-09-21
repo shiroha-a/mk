@@ -181,3 +181,49 @@ func TestClient_EnqueueUserWebhook_PolicyApplied(t *testing.T) {
 	require.NoError(t, c.EnqueueUserWebhook(context.Background(), queue.WebhookPayload{}))
 	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
 }
+
+// **プラグインのキューにも retention が効くこと。**
+//
+// `PolicyFor` は完全一致だけを見ていたので、`plugin:<名前>` は zero Policy に
+// 落ちて `retentionOptsFromPolicy` が `> 0` guard で**何も出さなかった** —
+// retention を付けたつもりが本番で no-op だった。運営者が入れたプラグインの
+// 数だけキューが増えるので、接頭辞で 1 回だけ登録する形にしてある。
+func TestClient_EnqueuePlugin_RetentionAppliedViaPrefix(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	// 接頭辞だけを登録する (本番の applyClientPolicies と同じ形)。
+	c.SetPolicy(queue.PluginQueuePrefix, queue.Policy{KeepCompleted: 30, KeepFailed: 100})
+
+	require.NoError(t, c.EnqueuePlugin(context.Background(), "genshin", "sync", []byte(`{}`)))
+	assert.True(t, rec.lastOpts.KeepCompletedSet, "completed の上限が渡っていない")
+	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
+	assert.True(t, rec.lastOpts.KeepFailedSet)
+	assert.Equal(t, 100, rec.lastOpts.KeepFailed)
+
+	// peer の送信経路も同じ。
+	require.NoError(t, c.EnqueuePluginPeer(context.Background(), "genshin", []byte(`{}`)))
+	assert.True(t, rec.lastOpts.KeepCompletedSet)
+	assert.Equal(t, 30, rec.lastOpts.KeepCompleted)
+}
+
+// **名前ごとの登録があればそちらが優先されること** (接頭辞が上書きしない)。
+func TestClient_EnqueuePlugin_ExactPolicyWins(t *testing.T) {
+	rec := &recordingDriverClient{}
+	c := queue.NewClient(&stubDriver{client: rec})
+	defer func() { _ = c.Close() }()
+
+	c.SetPolicy(queue.PluginQueuePrefix, queue.Policy{KeepCompleted: 30})
+	c.SetPolicy(queue.PluginQueueName("genshin"), queue.Policy{KeepCompleted: 5})
+
+	require.NoError(t, c.EnqueuePlugin(context.Background(), "genshin", "sync", []byte(`{}`)))
+	assert.Equal(t, 5, rec.lastOpts.KeepCompleted)
+}
+
+// **本体のキューは接頭辞の影響を受けないこと。**
+func TestClient_PolicyFor_PrefixDoesNotLeakToCoreQueues(t *testing.T) {
+	m := queue.PolicyMap{queue.PluginQueuePrefix: {KeepCompleted: 30}}
+	assert.Equal(t, 0, m.PolicyFor(queue.QueueName).KeepCompleted)
+	assert.Equal(t, 30, m.PolicyFor(queue.PluginQueueName("x")).KeepCompleted)
+}
