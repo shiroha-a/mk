@@ -43,7 +43,22 @@ var frameGuardSkipPrefixes = []string{
 func FrameGuard() echo.MiddlewareFunc {
 	return func(next echo.HandlerFunc) echo.HandlerFunc {
 		return func(c echo.Context) error {
-			if !frameGuardSkipped(c.Request().URL.Path) {
+			// **マッチしたルートで判定する。**
+			//
+			// 生のリクエストパスで前方一致を取ると、`/files/` (キー無し) の
+			// ように**除外の接頭辞に当たるが実際には SPA へ落ちる**パスで
+			// ヘッダが外れる。`/files/:accessKey` は空セグメントにマッチせず
+			// catchall (`/*`) に落ちるので、SPA シェルが `X-Frame-Options`
+			// 無しで返っていた。`c.Path()` はルーティング後のパターン
+			// (`/files/:accessKey` / `/*`) を返すので、実際に返すものと
+			// 判定が揃う。
+			// ルーティングを通っていない (= 直接呼ばれた) ときは生パスに
+			// 落とす。本番では `e.Use` なので必ずパターンが取れる。
+			pattern := c.Path()
+			if pattern == "" {
+				pattern = c.Request().URL.Path
+			}
+			if !frameGuardSkipped(pattern) {
 				c.Response().Header().Set("X-Frame-Options", "DENY")
 			}
 			return next(c)

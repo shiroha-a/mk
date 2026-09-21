@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"github.com/stretchr/testify/require"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -40,8 +41,15 @@ func TestFrameGuard(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			e := echo.New()
 			e.Use(FrameGuard())
-			e.Any("/*", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
-			e.Any("/", func(c echo.Context) error { return c.NoContent(http.StatusOK) })
+			// **本番と同じルートを張る。** 判定はマッチしたパターンで行うので、
+			// catchall しか無いと除外対象まで SPA 扱いになる (実際の構成では
+			// `/embed/*` / `/files/:accessKey` / `/proxy/*` が個別に張られる)。
+			ok := func(c echo.Context) error { return c.NoContent(http.StatusOK) }
+			e.Any("/embed/*", ok)
+			e.Any("/files/:accessKey", ok)
+			e.Any("/proxy/*", ok)
+			e.Any("/*", ok)
+			e.Any("/", ok)
 
 			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			rec := httptest.NewRecorder()
@@ -61,4 +69,34 @@ func TestFrameGuardSkipIsPrefixScoped(t *testing.T) {
 			t.Errorf("frameGuardSkipped(%q) = true, want false", p)
 		}
 	}
+}
+
+// **ルートパターンで判定すること。**
+//
+// 生のリクエストパスで前方一致を取ると、`/files/` (キー無し) のように除外の
+// 接頭辞に当たるが実際には SPA へ落ちるパスでヘッダが外れる。
+// `/files/:accessKey` は空セグメントにマッチせず catchall に落ちるので、
+// SPA シェルが `X-Frame-Options` 無しで返っていた。
+func TestFrameGuard_UsesRoutePatternNotRawPath(t *testing.T) {
+	t.Parallel()
+
+	e := echo.New()
+	e.Use(FrameGuard())
+	h := func(c echo.Context) error { return c.String(http.StatusOK, "ok") }
+	e.GET("/files/:accessKey", h)
+	e.GET("/embed/*", h)
+	e.GET("/*", h)
+
+	get := func(path string) string {
+		req := httptest.NewRequest(http.MethodGet, path, nil)
+		rec := httptest.NewRecorder()
+		e.ServeHTTP(rec, req)
+		return rec.Header().Get("X-Frame-Options")
+	}
+
+	require.Equal(t, "", get("/files/abc"), "ファイル配信は従来どおり除外")
+	require.Equal(t, "", get("/embed/notes/1"), "埋め込みは従来どおり除外")
+	require.Equal(t, "DENY", get("/"), "SPA には付けること")
+	require.Equal(t, "DENY", get("/files/"),
+		"**キー無しの /files/ は SPA へ落ちるので付けること** (生パスの前方一致だと外れる)")
 }
