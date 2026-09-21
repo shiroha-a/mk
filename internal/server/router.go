@@ -575,8 +575,15 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// IS NULL を scan して著者 + ローカル投票者に発火する (#690)。Misskey TS
 	// は BullMQ delayed job で実装しているが mk-go では queue infra を経由
 	// せずに簡素な ticker で実現。partial index で空 scan のコストは最小。
-	pollExpiryWorker := corepoll.NewExpiryWorker(pollRepo, pollVoteRepo, noteRepo, userRepo, notificationService, 60*time.Second, 100)
-	s.startConstructionWorker(pollExpiryWorker.Run)
+	// **queue role でだけ回す (#2459)。** 常駐ワーカーは複数プロセス構成で
+	// 同じ行を拾う。`ListExpiredUnnotified` → 通知 → `MarkNotified` の順で
+	// ロックも CAS も無いので、server を N 台にすると同じ投票終了通知が N 回
+	// 飛ぶ (Web Push も)。同ファイルの reaction flush / deliveryhealth /
+	// retention aggregate は同じ理由で既にゲートされており、ここだけ漏れていた。
+	if s.role.RunsQueue() {
+		pollExpiryWorker := corepoll.NewExpiryWorker(pollRepo, pollVoteRepo, noteRepo, userRepo, notificationService, 60*time.Second, 100)
+		s.startConstructionWorker(pollExpiryWorker.Run)
+	}
 	// pollVoted を note の stream topic に publish して subscribe 中の
 	// frontend (note 詳細 / timeline) が reload なしで count を更新できる
 	// ようにする (#690)。streamPubSub は下方で生成されるため遅延配線。
