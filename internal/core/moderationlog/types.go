@@ -10,8 +10,6 @@
 //     spec even if the UI falls back to the generic display).
 //
 // Types defined in upstream but skipped for now:
-//   - clearQueue / promoteQueue: tooling-only, no UI branch (pauseQueue /
-//     resumeQueue は admin/queue/pause・resume で記録するため下に定義済み)
 //   - markSensitiveDriveFile / unmarkSensitiveDriveFile / deleteDriveFile:
 //     mk-go admin/drive write handlers are not implemented
 //   - deleteNote / deletePage / deleteFlash / deleteGalleryPost / deleteChatRoom:
@@ -100,6 +98,17 @@ const (
 	// Queue (admin/queue/pause・resume、upstream #17436)
 	LogPauseQueue  LogType = "pauseQueue"
 	LogResumeQueue LogType = "resumeQueue"
+	// **clearQueue / promoteQueue も記録する。**
+	//
+	// かつては「tooling-only, no UI branch」として意図的に飛ばしていたが、
+	// `clearQueue` は deliver / inbox の待機・遅延・失敗ジョブを消せる = 連合の
+	// 配送が丸ごと落ちる操作で、**誰がやったかが残らない**のは監査として
+	// 成り立たない。frontend が未知の型のタイトルを空欄で描く点は、同じ理由で
+	// 既に mk-go 独自型 (`resetEmojiApplicationQuota`) を足したときに
+	// 「本体の raw 表示はそのまま出るので情報は失われない」と結論している。
+	// upstream も両方 `moderationLogService.log` を呼ぶ。
+	LogClearQueue   LogType = "clearQueue"
+	LogPromoteQueue LogType = "promoteQueue"
 
 	// Misc
 	LogUpdateProxyAccountDescription LogType = "updateProxyAccountDescription"

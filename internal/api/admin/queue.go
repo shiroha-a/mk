@@ -61,6 +61,11 @@ func (h *Handler) QueueClear(c echo.Context) error {
 		return c.NoContent(http.StatusNoContent)
 	}
 	h.clearQueueState(req.Queue, req.State)
+	// **監査に残す。** 連合の配送が丸ごと落ちる操作。
+	h.logModeration(c, moderationlog.LogClearQueue, map[string]any{
+		"queue": req.Queue,
+		"state": req.State,
+	})
 	return c.NoContent(http.StatusNoContent)
 }
 
@@ -514,6 +519,10 @@ func (h *Handler) QueuePromoteJobs(c echo.Context) error {
 			}
 		}
 	}
+	h.logModeration(c, moderationlog.LogPromoteQueue, map[string]any{
+		"queue":    req.Queue,
+		"promoted": promoted,
+	})
 	return c.JSON(http.StatusOK, map[string]any{"promoted": promoted})
 }
 
