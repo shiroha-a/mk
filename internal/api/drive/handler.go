@@ -1086,7 +1086,7 @@ func (h *Handler) FilesUploadFromURL(c echo.Context) error {
 		Marker:      req.Marker,
 		IsSensitive: req.IsSensitive,
 		Force:       req.Force,
-		RequestIP:   c.RealIP(),
+		RequestIP:   requestIPValue(c),
 	}
 	go h.urlUploader.Process(context.Background(), in)
 	return c.NoContent(http.StatusNoContent)
@@ -1257,7 +1257,23 @@ func (h *Handler) FoldersFind(c echo.Context) error {
 // は X-Forwarded-For / X-Real-IP を考慮した resolved IP を返すので、nginx
 // 等の reverse proxy 配下でも本物の client IP を取得できる。空文字なら
 // nil を返して `requestIp` column を NULL のままにする。
+// requestIPValue is requestIPFromContext as a plain string ("" = 記録しない)。
+func requestIPValue(c echo.Context) string {
+	if ip := requestIPFromContext(c); ip != nil {
+		return *ip
+	}
+	return ""
+}
+
 func requestIPFromContext(c echo.Context) *string {
+	// **プロセス内 API 呼び出しの IP は記録しない。** `pluginCaller.Call` は
+	// `RemoteAddr` に `127.0.0.1:0` を置く (IP を見る middleware が解釈に
+	// 困らないようにするため) が、その IP は実在しない。記録すると、
+	// モデレーターが `admin/drive/show-file` で見る値が実際の取得元と無関係な
+	// `127.0.0.1` になる (#3130 の `user_ip` / レート制限と同じ汚染)。
+	if middleware.IsInternalCall(c.Request().Context()) {
+		return nil
+	}
 	ip := c.RealIP()
 	if ip == "" {
 		return nil
