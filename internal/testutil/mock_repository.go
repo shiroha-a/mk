@@ -3042,6 +3042,9 @@ type MockMetaRepository struct {
 	// 実 repo は key をそのまま列識別子として UPDATE に載せるので、
 	// 「何が渡ったか」自体が検査対象になる。
 	LastUpdateFields map[string]any
+	// FetchErr forces Fetch to fail. 「DB が読めない窓」を再現するために使う
+	// (判定できないときに fail-open していないかを見るテスト)。
+	FetchErr error
 }
 
 func NewMockMetaRepository() *MockMetaRepository {
@@ -3052,6 +3055,9 @@ func (m *MockMetaRepository) Fetch() (*model.Meta, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.FetchCalls++
+	if m.FetchErr != nil {
+		return nil, m.FetchErr
+	}
 	if m.Meta == nil {
 		return nil, ErrNotFound
 	}
