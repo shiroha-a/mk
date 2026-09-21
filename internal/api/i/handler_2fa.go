@@ -235,11 +235,28 @@ func (h *Handler) TwoFAUnregister(c echo.Context) error {
 	// (`TestTwoFAUnregister_KeepsTOTPReplayRecord` が固定)。
 	committed = true
 
-	_ = h.userService.UpdateProfileFields(user.ID, map[string]any{
+	// **`usePasswordLessLogin` も落とす。**
+	//
+	// `signin-with-passkey` は `TwoFactorEnabled` を見ず、この列だけを見る。
+	// 落とさないと、2FA を解除したあとも登録済みのパスキーで**パスワード
+	// 無しのログインが通り続ける**。しかも `twoFactorEnabled` が false だと
+	// `securityKeysList` は空配列に潰れるので、利用者からは残った鍵が見えず
+	// (`i/2fa/remove-key` は credentialId を要求するので) 削除もできない。
+	//
+	// upstream の `i/2fa/unregister.ts` は同じ UPDATE に
+	// `usePasswordLessLogin: false` を持つ。mk-go は `admin/unset-mfa` では
+	// 落としており、自己解除の経路だけが取り残されていた。
+	if err := h.userService.UpdateProfileFields(user.ID, map[string]any{
 		"twoFactorSecret":       nil,
 		"twoFactorEnabled":      false,
 		"twoFactorBackupSecret": model.StringArray(nil),
-	})
+		"usePasswordLessLogin":  false,
+	}); err != nil {
+		// **書き込みに失敗したら成功を返さない。** ここを握り潰すと、利用者は
+		// 解除できたと信じたまま `usePasswordLessLogin` が真で残る。
+		slog.Error("i/2fa/unregister: failed to clear 2FA fields", "userId", user.ID, "err", err)
+		return apierr.JSONInternalError(c)
+	}
 
 	// upstream (unregister.ts) は 2FA 解除後に meUpdated を publish する (#1555)。
 	h.publishMeUpdated(user.ID)
