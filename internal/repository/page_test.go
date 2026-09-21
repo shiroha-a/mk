@@ -315,3 +315,31 @@ func TestPageRepository_UpdateFieldsAcceptsJSONBColumns(t *testing.T) {
 	err = repo.UpdateFields(p.ID, map[string]any{"content": []byte(`[{"y":2}]`)})
 	assert.Error(t, err, "[]byte が bytea として通ってしまっている")
 }
+
+// **空文字は enum 列に入らない。**
+//
+// `page_visibility_enum` は `”` を受け付けないので、handler がそこを弾き
+// 損ねると `UpdateFields` でクエリごと落ちて 500 になる。認証済みの一般
+// 利用者が `{"visibility":""}` を送るだけで起こせた。
+//
+// mock repository は値を素通しするので handler テストでは再現しない。
+// 「列が受け付けない」という事実はここで固定する。
+func TestPageRepository_UpdateFields_EmptyVisibilityIsRejectedByColumn(t *testing.T) {
+	repo := NewPageRepository(testDB)
+	user := insertTestUser(t, "u_pr_vis", "pagevisuser")
+	defer cleanupUser(t, user.ID)
+
+	p := newTestPage("pg_vis_1", user.ID, "visalpha")
+	require.NoError(t, repo.Create(p))
+	defer cleanupPage(t, p.ID)
+
+	err := repo.UpdateFields(p.ID, map[string]any{"visibility": ""})
+	require.Error(t, err, "空文字が enum 列に入ってはいけない (入るなら handler の検証を緩められる)")
+	assert.Contains(t, err.Error(), "page_visibility_enum")
+
+	// 対照: 正しい値は通ること。
+	require.NoError(t, repo.UpdateFields(p.ID, map[string]any{"visibility": "followers"}))
+	got, err := repo.FindByID(p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, model.PageVisibilityFollowers, got.Visibility)
+}

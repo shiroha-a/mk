@@ -274,7 +274,14 @@ func (h *Handler) Update(c echo.Context) error {
 		return apierr.JSONInvalidParam(c)
 	}
 	// enum 列の検証も create と揃える (指定されたときだけ)。
-	if req.Visibility != nil && !validPageVisibility(*req.Visibility) {
+	//
+	// **update では空文字を弾く。** create は値型なので「省略」と「空文字」を
+	// 区別できず `validPageVisibility` が空文字を通すが (service が `public` へ
+	// 正規化する)、update は `*model.PageVisibility` なので省略は nil で表せる。
+	// 空文字を通すと `fields["visibility"] = ""` がそのまま enum 列へ行き、
+	// **認証済みの一般利用者が 500 を起こせる**
+	// (`invalid input value for enum page_visibility_enum: ""`)。
+	if req.Visibility != nil && (*req.Visibility == "" || !validPageVisibility(*req.Visibility)) {
 		return apierr.JSONInvalidParam(c)
 	}
 	// upstream update.ts: eyeCatchingImageId 指定時は自分の drive file か検証し、

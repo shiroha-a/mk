@@ -84,3 +84,34 @@ func TestUpdate_RejectsUnknownVisibility(t *testing.T) {
 	require.NoError(t, h2.Update(c2))
 	require.Equal(t, http.StatusOK, rec2.Code, "正しい値は通ること")
 }
+
+// **update では空文字も弾くこと。**
+//
+// create は値型なので「省略」と「空文字」を区別できず、`validPageVisibility` が
+// 空文字を通す (service が `public` へ正規化する)。update はポインタなので
+// 省略を nil で表せるのに、空文字をそのまま通していた。`fields["visibility"] = ""`
+// が enum 列へ行き、**認証済みの一般利用者が 500 を起こせた**
+// (`invalid input value for enum page_visibility_enum: ""`)。
+//
+// **mock repository では 500 にならない** (値を素通しするだけ) ので、
+// ここで見るのは「400 で弾くこと」。列が落ちることは repository 側のテストが
+// 押さえる。
+func TestUpdate_RejectsEmptyVisibility(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Title: "t"}
+	c, rec := newReq(t, `{"pageId":"p1","visibility":""}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusBadRequest, rec.Code,
+		"空文字は enum 列に入らないので 400 で弾くこと")
+}
+
+// **省略は通ること** (上が「常に弾く」実装でも緑にならないようにする)。
+func TestUpdate_OmittedVisibilityIsAccepted(t *testing.T) {
+	h, repo, _ := newHandler(t)
+	repo.Pages["p1"] = &model.Page{ID: "p1", UserID: "alice", Name: "alpha", Title: "t"}
+	c, rec := newReq(t, `{"pageId":"p1","title":"t2"}`)
+	setUser(c, "alice")
+	require.NoError(t, h.Update(c))
+	require.Equal(t, http.StatusOK, rec.Code, "visibility を省略した update は通ること")
+}
