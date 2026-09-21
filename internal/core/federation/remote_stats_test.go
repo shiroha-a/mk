@@ -314,3 +314,60 @@ func (rt redirectTransport) RoundTrip(req *http.Request) (*http.Response, error)
 	parsed.Header = rewritten.Header
 	return http.DefaultTransport.RoundTrip(parsed)
 }
+
+// --- 連合ゲート (セキュリティ監査 2026-09-21) ---
+
+// **連合を切った相手へ取りに行かない。**
+//
+// この経路は未認証の `/api/users/show` から呼ばれるので、`blockedHosts` に
+// 入れた相手や `federation: none` の構成でも、そのホストの利用者の
+// プロフィールが描画されるたびに `GET https://<host>/api/users/show` が出る。
+// defederate したはずの相手に「誰をいつ見たか」が漏れる。
+func TestRemoteStatsFetcher_Fetch_SkipsDisallowedHost(t *testing.T) {
+	var hits int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&hits, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"notesCount":42,"followersCount":7,"followingCount":3}`))
+	}))
+	defer srv.Close()
+
+	f := newRemoteStatsFetcherWithTransport(redirectTransport{target: srv.URL})
+	var asked []string
+	f.SetHostAllowedChecker(func(host string) bool {
+		asked = append(asked, host)
+		return host != "blocked.example"
+	})
+
+	assert.Nil(t, f.Fetch(context.Background(), "blocked.example", "alice"),
+		"連合していない相手の統計を返さないこと")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&hits),
+		"連合していない相手へ HTTP リクエストを出さないこと")
+	assert.Equal(t, []string{"blocked.example"}, asked)
+
+	// 許可されたホストは従来どおり取りに行く (「常に nil」な実装では緑に
+	// ならないようにする)。
+	stats := f.Fetch(context.Background(), "ok.example", "alice")
+	require.NotNil(t, stats)
+	assert.Equal(t, 42, stats.NotesCount)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&hits))
+}
+
+// **キャッシュより前に判定する。** 後ろに置くと、blockedHosts へ入れる前に
+// 引いた値が TTL の間そのまま返り続ける (統計は漏れないが、判定が
+// 「リクエストを出さない」という本来の目的から外れていることに気付けない)。
+func TestRemoteStatsFetcher_Fetch_GateRunsBeforeCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"notesCount":42,"followersCount":7,"followingCount":3}`))
+	}))
+	defer srv.Close()
+
+	f := newRemoteStatsFetcherWithTransport(redirectTransport{target: srv.URL})
+	require.NotNil(t, f.Fetch(context.Background(), "remote.example", "alice"))
+
+	// 取得済み (= cache に載っている) 相手を後からブロックする。
+	f.SetHostAllowedChecker(func(string) bool { return false })
+	assert.Nil(t, f.Fetch(context.Background(), "remote.example", "alice"),
+		"ブロック後は cache 済みの統計も返さないこと")
+}

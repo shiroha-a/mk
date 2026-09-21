@@ -68,6 +68,9 @@ type RemoteStatsFetcher struct {
 	cache     *lru.Cache[string, cachedRemoteStats]
 	group     singleflight.Group
 	userAgent string
+	// hostAllowed は連合ポリシー (blockedHosts / federation モード) の判定。
+	// 未配線なら全ホストへ出す (従来の挙動)。
+	hostAllowed func(host string) bool
 }
 
 type cachedRemoteStats struct {
@@ -94,6 +97,23 @@ func NewRemoteStatsFetcher(allowedPrivateNetworks []string, userAgent string, op
 	}, remoteStatsCacheSize)
 	f.userAgent = userAgent
 	return f
+}
+
+// HasHostAllowedChecker reports whether the federation gate is wired.
+//
+// 未配線でも統計は取れてしまうので、外れても利用者からは見えない。起動時の
+// critical wiring 検査で落とす。
+func (f *RemoteStatsFetcher) HasHostAllowedChecker() bool {
+	return f != nil && f.hostAllowed != nil
+}
+
+// SetHostAllowedChecker wires the federation gate.
+//
+// 未配線なら従来どおり (= 全ホストへ出す)。production では必ず配線する。
+func (f *RemoteStatsFetcher) SetHostAllowedChecker(fn func(host string) bool) {
+	if f != nil {
+		f.hostAllowed = fn
+	}
 }
 
 // newRemoteStatsFetcherWithTransport はテスト専用 constructor。redirectTransport
@@ -136,6 +156,15 @@ func (f *RemoteStatsFetcher) Fetch(ctx context.Context, host, username string) *
 		// host に / ? # @ space などが混入した URL injection 攻撃を防ぐ
 		// (#943 review)。federation の webfinger 経由で sanitize されるはず
 		// だが、念のため二重 check。
+		return nil
+	}
+	// **連合を切った相手へは出さない。**
+	//
+	// この経路は `/api/users/show` (未認証) から呼ばれるので、`blockedHosts` に
+	// 入れた相手や `federation: none` の構成でも、そのホストの利用者の
+	// プロフィールが描画されるたびに `POST https://<host>/api/users/show` が
+	// 出る。**defederate したはずの相手に「誰をいつ見たか」が漏れる。**
+	if f.hostAllowed != nil && !f.hostAllowed(host) {
 		return nil
 	}
 	key := host + "|" + username

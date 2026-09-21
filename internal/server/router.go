@@ -1846,8 +1846,15 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	usersHandler.SetNoteFieldResolver(noteFieldResolver)
 	usersHandler.SetUserRepo(userRepo)
 	usersHandler.SetNoteReactionRepo(reactionRepo)
+	remoteStatsFetcher := corefederation.NewRemoteStatsFetcher(s.config.AllowedPrivateNetworks, s.config.UserAgent, s.outboundOpts()...)
+	// **連合を切った相手へ取りに行かない。** この経路は未認証の
+	// `/api/users/show` から呼ばれるので、放っておくと defederate した相手に
+	// 「誰をいつ見たか」が漏れる。
+	remoteStatsFetcher.SetHostAllowedChecker(func(host string) bool {
+		return !instanceService.ShouldSkipDelivery(host)
+	})
 	usersHandler.SetRemoteStatsFetcher(&remoteStatsFetcherAdapter{
-		fetcher: corefederation.NewRemoteStatsFetcher(s.config.AllowedPrivateNetworks, s.config.UserAgent, s.outboundOpts()...),
+		fetcher: remoteStatsFetcher,
 	})
 	// Users endpoint (public) — ユーザー一覧
 	api.POST("/users", usersHandler.List)
@@ -4125,6 +4132,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	//     防げるのは事前の案内だけという点で他の項目と tier が違う。
 	//     移設で新しく生まれた面なので、棚卸し (#2674) の対象には入れる
 	s.recordCriticalWiring([]criticalWiring{
+		{"users.remoteStatsFederationGate", remoteStatsFetcher.HasHostAllowedChecker(),
+			"連合を切った相手へもプロフィール表示のたびに統計を取りに行き、誰をいつ見たかが漏れる"},
 		{"peer.blocker", s.peerDeps.HasBlocker(),
 			"プラグイン間通信でブロックリストと連合ポリシーが効かなくなる"},
 		{"inbox.signatureVerifier", inboxProcessor.HasSignatureVerifier(),
