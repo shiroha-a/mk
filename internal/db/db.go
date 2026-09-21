@@ -131,9 +131,20 @@ func newGormLogger(cfg *config.Config) logger.Interface {
 // what actually reaches the log.
 func newGormLoggerTo(cfg *config.Config, w logger.Writer) logger.Interface {
 	paramLog := cfg.Logging != nil && cfg.Logging.SQL != nil && cfg.Logging.SQL.EnableQueryParamLog
+	// **`disableQueryTruncation` を実際に効かせる。** 宣言と env バインドは
+	// あったのにどこからも読まれておらず (dead config)、設定しても何も起きな
+	// かった。upstream は `postgres.ts` の `truncateSql` で既定 100 文字に
+	// 切り詰め、このフラグで無効化できる。
+	truncate := true
+	if cfg.Logging != nil && cfg.Logging.SQL != nil && cfg.Logging.SQL.DisableQueryTruncation {
+		truncate = false
+	}
 	logLevel := logger.Warn
 	if paramLog {
 		logLevel = logger.Info
+	}
+	if truncate {
+		w = truncatingWriter{inner: w}
 	}
 	return logger.New(w, logger.Config{
 		SlowThreshold: 200 * time.Millisecond,
@@ -146,4 +157,24 @@ func newGormLoggerTo(cfg *config.Config, w logger.Writer) logger.Interface {
 		ParameterizedQueries: !paramLog,
 		Colorful:             false,
 	})
+}
+
+// sqlLogMaxChars mirrors upstream postgres.ts truncateSql (既定 100 文字)。
+const sqlLogMaxChars = 100
+
+// truncatingWriter clips long SQL statements before they reach the log.
+//
+// upstream は `truncateSql` で 100 文字に切り詰め、`disableQueryTruncation` で
+// 無効化できる。mk-go はそのフラグを宣言だけしていて効いていなかった。
+type truncatingWriter struct{ inner logger.Writer }
+
+func (t truncatingWriter) Printf(format string, args ...any) {
+	for i, a := range args {
+		s, ok := a.(string)
+		if !ok || len([]rune(s)) <= sqlLogMaxChars {
+			continue
+		}
+		args[i] = string([]rune(s)[:sqlLogMaxChars]) + "..."
+	}
+	t.inner.Printf(format, args...)
 }
