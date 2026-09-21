@@ -16,6 +16,36 @@ import (
 	"github.com/shiroha-a/mk/internal/queue"
 )
 
+// operatorProtectedTaskTypes are job types the queue-wide admin operations
+// must not touch.
+//
+// **deliver キューには利用者の不可逆な予定が同居している。**
+//
+//   - `postScheduledNote`: 促進すると**全利用者の未公開の予約投稿が即時公開**
+//     される。消すと二度と発火せず、失敗通知も出ない (下書き行だけが残る)
+//   - `deleteAccount`: 消すと「削除フラグだけ立ってノート・ドライブ・フォローが
+//     残るアカウント」が生まれる。しかも `WithUnique(24h)` の dedup キーが
+//     Redis に残るので、24 時間は再実行しても黙って無視される
+//
+// upstream はこれらを `postScheduledNote` / `db` の別キューに置いているので、
+// deliver の詰まりを流す操作が波及しない。mk-go は deliver に相乗りさせる
+// 構成を意図的に選んでいる (docs/divergence.md) ので、代わりにここで守る。
+// **キュー構成を変えないのは、管理画面のタブが fork 側の定数から生成されて
+// いて、名前を増やすと片側更新になるため。**
+var operatorProtectedTaskTypes = map[string]struct{}{
+	queue.TaskTypePostScheduledNote: {},
+	queue.TaskTypeDeleteAccount:     {},
+}
+
+// isOperatorProtectedTask reports whether a queue-wide operation must skip t.
+func isOperatorProtectedTask(t *QueueTaskSummary) bool {
+	if t == nil {
+		return false
+	}
+	_, protected := operatorProtectedTaskTypes[t.Type]
+	return protected
+}
+
 // QueueClear handles POST /api/admin/queue/clear.
 func (h *Handler) QueueClear(c echo.Context) error {
 	// upstream Misskey TS は paramDef で queue + state を required にしている (#929)。
@@ -58,25 +88,34 @@ func (h *Handler) clearQueueState(queue, state string) {
 				return
 			}
 			progressed := false
+			skipped := 0
 			for _, t := range rows {
+				if isOperatorProtectedTask(t) {
+					skipped++
+					continue
+				}
 				if h.queueInspector.DeleteTask(queue, t.ID) == nil {
 					progressed = true
 				}
 			}
-			if !progressed {
+			// **保護対象しか残っていなければ打ち切る。** 進捗ゼロで回り続けない。
+			if !progressed || skipped == len(rows) {
 				return
 			}
 		}
 	}
+	// **pending も一括削除ではなく個別に消す。** `DeleteAllPendingTasks` は
+	// job type を見ないので、wait へ昇格した予約投稿やアカウント削除まで
+	// 巻き込む。保護対象を除いて消すために列挙経路を通す。
 	switch state {
 	case "*":
-		_, _ = h.queueInspector.DeleteAllPendingTasks(queue)
+		deleteAll(h.queueInspector.ListPendingTasks)
 		deleteAll(h.queueInspector.ListScheduledTasks)
 		deleteAll(h.queueInspector.ListRetryTasks)
 		deleteAll(h.queueInspector.ListFailedTasks)
 		deleteAll(h.queueInspector.ListCompletedTasks)
 	case "wait", "waiting", "pending":
-		_, _ = h.queueInspector.DeleteAllPendingTasks(queue)
+		deleteAll(h.queueInspector.ListPendingTasks)
 	case "delayed":
 		deleteAll(h.queueInspector.ListScheduledTasks)
 		deleteAll(h.queueInspector.ListRetryTasks)
@@ -465,6 +504,11 @@ func (h *Handler) QueuePromoteJobs(c echo.Context) error {
 			rows, _ = h.queueInspector.ListRetryTasks(req.Queue, 1, 100)
 		}
 		for _, t := range rows {
+			// **利用者の予定は促進しない。** 促進は「詰まった配送を流す」操作で、
+			// 予約投稿を前倒しで公開する操作ではない。
+			if isOperatorProtectedTask(t) {
+				continue
+			}
 			if err := h.queueInspector.RunTask(req.Queue, t.ID); err == nil {
 				promoted++
 			}

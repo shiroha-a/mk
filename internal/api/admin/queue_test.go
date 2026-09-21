@@ -197,9 +197,15 @@ func TestQueueClear_WithInspector(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{}
 	h.SetQueueInspector(insp)
+	// **pending も個別に消す。** 一括削除 (`DeleteAllPendingTasks`) は job type を
+	// 見ないので、wait へ昇格した予約投稿やアカウント削除まで巻き込む。
+	insp.pending = map[string][]*apiadmin.QueueTaskSummary{
+		"deliver": {{ID: "p1", Type: queue.TaskTypeDeliver}},
+	}
 	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"wait"}`, adminUser)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, []string{"deliver"}, insp.deleteAllHits)
+	assert.Equal(t, []string{"p1"}, insp.deleted)
+	assert.Empty(t, insp.deleteAllHits, "一括削除は使わないこと")
 }
 
 func TestQueueClear_MissingParams(t *testing.T) {
@@ -979,10 +985,12 @@ func TestQueueClear_ByFailedState(t *testing.T) {
 	assert.Empty(t, insp.deleteAllHits, "failed 指定では pending を drain しない")
 }
 
-// state='*' は pending drain + 各 state を消す。
+// state='*' は全 state を消す。**pending も個別に消す** (一括削除は job type を
+// 見ないので、利用者の予定を巻き込む)。
 func TestQueueClear_AllStates(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{
+		pending:   map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "p1", Type: queue.TaskTypeDeliver}}},
 		failed:    map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "f1"}}},
 		completed: map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "c1"}}},
 		scheduled: map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "s1"}}},
@@ -990,8 +998,8 @@ func TestQueueClear_AllStates(t *testing.T) {
 	h.SetQueueInspector(insp)
 	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"*"}`, adminUser)
 	require.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, []string{"deliver"}, insp.deleteAllHits)
-	assert.ElementsMatch(t, []string{"f1", "c1", "s1"}, insp.deleted)
+	assert.Empty(t, insp.deleteAllHits, "一括削除は使わないこと")
+	assert.ElementsMatch(t, []string{"p1", "f1", "c1", "s1"}, insp.deleted)
 }
 
 // queue-stats の metrics.completed/failed は meta オブジェクトを持つ。
@@ -1583,4 +1591,46 @@ func TestQueuePauseResume_PluginQueue(t *testing.T) {
 
 	// 接頭辞が無ければ従来どおり 400。
 	assert.Equal(t, http.StatusBadRequest, doPost(h.QueuePause, `{"queue":"demo"}`, adminUser).Code)
+}
+
+// **予約投稿とアカウント削除を促進 / 破棄しないこと。**
+//
+// deliver キューにはこの 2 つが同居している。促進すると全利用者の未公開の
+// 予約投稿が即時公開され (不可逆)、クリアすると二度と発火しない (失敗通知も
+// 出ない)。アカウント削除を消すと、削除フラグだけ立って中身が残るアカウントが
+// 生まれ、dedup キーのせいで 24 時間は再実行も効かない。
+func TestQueuePromoteJobs_SkipsUserScheduledWork(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		scheduled: map[string][]*apiadmin.QueueTaskSummary{
+			"deliver": {
+				{ID: "t_sched", Type: queue.TaskTypePostScheduledNote},
+				{ID: "t_del", Type: queue.TaskTypeDeleteAccount},
+				{ID: "t_deliver", Type: queue.TaskTypeDeliver},
+			},
+		},
+	}
+	h.SetQueueInspector(insp)
+
+	rec := doPost(h.QueuePromoteJobs, `{"queue":"deliver"}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"t_deliver"}, insp.runCalls,
+		"配送ジョブだけを促進すること (利用者の予定は触らない)")
+}
+
+func TestQueueClear_SkipsUserScheduledWork(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	insp := &stubQueueInspector{
+		pending: map[string][]*apiadmin.QueueTaskSummary{
+			"deliver": {
+				{ID: "c_sched", Type: queue.TaskTypePostScheduledNote},
+				{ID: "c_deliver", Type: queue.TaskTypeDeliver},
+			},
+		},
+	}
+	h.SetQueueInspector(insp)
+
+	rec := doPost(h.QueueClear, `{"queue":"deliver","state":"wait"}`, adminUser)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	assert.NotContains(t, insp.deleted, "c_sched", "予約投稿は消さないこと")
 }
