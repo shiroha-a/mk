@@ -6,7 +6,9 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"github.com/shiroha-a/mk/internal/repository"
 	"io"
 	"net/http"
 	"sync"
@@ -367,3 +369,36 @@ func TestWebhookProcessor_NoSignatureWithoutSecret(t *testing.T) {
 	_, present := client.reqs[0].Header["X-Hub-Signature-256"]
 	assert.False(t, present, "秘密が無いのに署名ヘッダを送っている")
 }
+
+// **DB 障害を恒久 failed に潰さないこと (#2792)。**
+//
+// 種別を見ずに `SkipRetry` へ倒すと、DB が詰まった瞬間に配送待ちだった webhook が
+// 1 回で恒久 failed になる (本来は 4 回 + backoff)。
+func TestWebhookProcessor_DBFailureIsRetryable(t *testing.T) {
+	p := processors.NewWebhookProcessor(&failingWebhookRepo{err: errors.New("db down")}, nil, &stubHTTPClient{}, "example.com")
+
+	body, err := json.Marshal(queue.WebhookPayload{WebhookID: "w1", EventType: "test", Body: []byte(`{}`)})
+	require.NoError(t, err)
+	err = p.HandleUser(context.Background(), driver.RawTask{TypeName: queue.TaskTypeUserWebhook, Body: body})
+	require.Error(t, err)
+	require.False(t, errors.Is(err, driver.SkipRetry),
+		"DB 障害は retry させること (not-found だけ SkipRetry)")
+}
+
+// not-found は従来どおり恒久失敗にすること (毒ジョブを回し続けない)。
+func TestWebhookProcessor_NotFoundSkipsRetry(t *testing.T) {
+	p := processors.NewWebhookProcessor(&failingWebhookRepo{err: repository.ErrNotFound}, nil, &stubHTTPClient{}, "example.com")
+
+	body, err := json.Marshal(queue.WebhookPayload{WebhookID: "w1", EventType: "test", Body: []byte(`{}`)})
+	require.NoError(t, err)
+	err = p.HandleUser(context.Background(), driver.RawTask{TypeName: queue.TaskTypeUserWebhook, Body: body})
+	require.Error(t, err)
+	require.True(t, errors.Is(err, driver.SkipRetry))
+}
+
+type failingWebhookRepo struct {
+	repository.WebhookRepository
+	err error
+}
+
+func (f *failingWebhookRepo) FindByID(string) (*model.Webhook, error) { return nil, f.err }

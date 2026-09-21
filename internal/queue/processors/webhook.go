@@ -96,7 +96,15 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 		var err error
 		url, secret, err = p.resolveTarget(payload.WebhookID, user)
 		if err != nil {
-			return fmt.Errorf("resolve webhook %s: %w: %w", payload.WebhookID, err, driver.SkipRetry)
+			// **not-found と DB 障害を分ける (#2792)。** 種別を見ずに
+			// `SkipRetry` へ潰すと、DB が詰まった瞬間に配送待ちだった webhook が
+			// **1 回で恒久 failed** になる (本来は 4 回 + backoff)。
+			// 同じディレクトリの `deliver_keysource.go` /
+			// `post_scheduled_note.go` は `repository.IsNotFound` で分けている。
+			if repository.IsNotFound(err) {
+				return fmt.Errorf("resolve webhook %s: %w: %w", payload.WebhookID, err, driver.SkipRetry)
+			}
+			return fmt.Errorf("resolve webhook %s: %w", payload.WebhookID, err)
 		}
 	}
 
