@@ -51,7 +51,7 @@ func (m *Manager) SubscribeRelationReload() {
 	if m.bus == nil {
 		return
 	}
-	m.bus.Subscribe(RelationReloadTopic, func(raw []byte) {
+	m.subscribeManaged(RelationReloadTopic, func(raw []byte) {
 		var payload RelationReloadPayload
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			slog.Warn("stream: relation reload payload unmarshal failed", "err", err)
@@ -70,7 +70,7 @@ func (m *Manager) UnsubscribeRelationReload() {
 	if m.bus == nil {
 		return
 	}
-	m.bus.Unsubscribe(RelationReloadTopic)
+	m.unsubscribeManaged(RelationReloadTopic)
 }
 
 // RefreshRelations rebuilds the snapshots of every connection owned by userID.

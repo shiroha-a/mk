@@ -32,7 +32,7 @@ func (m *Manager) SubscribeWordMuteReload() {
 	if m.bus == nil {
 		return
 	}
-	m.bus.Subscribe(WordMuteReloadTopic, func(raw []byte) {
+	m.subscribeManaged(WordMuteReloadTopic, func(raw []byte) {
 		var payload WordMuteReloadPayload
 		if err := json.Unmarshal(raw, &payload); err != nil {
 			slog.Warn("stream: wordmute reload payload unmarshal failed", "err", err)
@@ -52,5 +52,5 @@ func (m *Manager) UnsubscribeWordMuteReload() {
 	if m.bus == nil {
 		return
 	}
-	m.bus.Unsubscribe(WordMuteReloadTopic)
+	m.unsubscribeManaged(WordMuteReloadTopic)
 }

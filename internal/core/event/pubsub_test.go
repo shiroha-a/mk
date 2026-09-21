@@ -81,7 +81,7 @@ func TestPubSubService_Unsubscribe(t *testing.T) {
 	var count int
 	var mu sync.Mutex
 
-	svc.Subscribe(ctx, "chan2", func(data []byte) {
+	cancel := svc.Subscribe(ctx, "chan2", func(data []byte) {
 		mu.Lock()
 		count++
 		mu.Unlock()
@@ -89,7 +89,7 @@ func TestPubSubService_Unsubscribe(t *testing.T) {
 
 	time.Sleep(100 * time.Millisecond)
 
-	require.NoError(t, svc.Unsubscribe("chan2"))
+	cancel()
 
 	// Unsubscribe後のメッセージは受信されない
 	time.Sleep(50 * time.Millisecond)
@@ -138,21 +138,26 @@ func TestPubSubService_MultipleChannels(t *testing.T) {
 	assert.Contains(t, results["b"], "msg_b")
 }
 
-func TestPubSubService_Unsubscribe_NotSubscribed(t *testing.T) {
+func TestPubSubService_Cancel_Idempotent(t *testing.T) {
 	svc := NewPubSubService(testRedis.Client, "test:")
+	ctx := context.Background()
 	defer svc.Close()
 
-	// 未登録チャンネルのUnsubscribeはエラーなし
-	err := svc.Unsubscribe("nonexistent")
-	assert.NoError(t, err)
+	cancel := svc.Subscribe(ctx, "idem", func([]byte) {})
+	assert.Equal(t, 1, svc.SubscriberCount("idem"))
+
+	// 解除ハンドルは何度呼んでも安全。
+	cancel()
+	cancel()
+	assert.Equal(t, 0, svc.SubscriberCount("idem"))
 }
 
 func TestPubSubService_Close_WithSubscriptions(t *testing.T) {
 	svc := NewPubSubService(testRedis.Client, "test:")
 	ctx := context.Background()
 
-	svc.Subscribe(ctx, "close1", func(data []byte) {})
-	svc.Subscribe(ctx, "close2", func(data []byte) {})
+	_ = svc.Subscribe(ctx, "close1", func(data []byte) {})
+	_ = svc.Subscribe(ctx, "close2", func(data []byte) {})
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -164,13 +169,13 @@ func TestPubSubService_Close_AlreadyClosed(t *testing.T) {
 	svc := NewPubSubService(testRedis.Client, "test:")
 	ctx := context.Background()
 
-	svc.Subscribe(ctx, "doublecl", func(data []byte) {})
+	_ = svc.Subscribe(ctx, "doublecl", func(data []byte) {})
 	time.Sleep(100 * time.Millisecond)
 
 	// 内部のPubSubを手動で閉じてからCloseを呼ぶ→sub.Close()がエラーを返す
 	svc.mu.Lock()
-	for _, sub := range svc.subs {
-		sub.Close()
+	for _, ts := range svc.subs {
+		_ = ts.sub.Close()
 	}
 	svc.mu.Unlock()
 
@@ -239,4 +244,102 @@ func TestPubSubService_CrossWorkerMetaInvalidation(t *testing.T) {
 		_, _ = cachedB.Fetch()
 		return innerB.fetchCount.Load() > 1
 	}, 3*time.Second, 20*time.Millisecond, "worker B should re-fetch after cross-worker metaUpdated")
+}
+
+// **同じトピックを複数が購読しているとき、片方の解除が他方を止めないこと。**
+//
+// これが #H-4 の本体。かつては購読ハンドルをトピック名だけでマップに入れて
+// いたので、2 本目が 1 本目を上書きし、先に購読した側が解除すると後から
+// 購読した側の配信が止まっていた。同じトピック (タイムライン / ハッシュタグ /
+// チャンネル / ノート購読) は複数の接続が同時に購読する普通の状態なので、
+// 攻撃者が居なくても 2 人目がタブを開いて 1 人目が閉じた瞬間に起きた。
+func TestPubSubService_CancelDoesNotAffectOtherSubscribers(t *testing.T) {
+	svc := NewPubSubService(testRedis.Client, "test:")
+	ctx := context.Background()
+	defer svc.Close()
+
+	var mu sync.Mutex
+	var gotA, gotB int
+
+	cancelA := svc.Subscribe(ctx, "shared", func([]byte) {
+		mu.Lock()
+		gotA++
+		mu.Unlock()
+	})
+	_ = svc.Subscribe(ctx, "shared", func([]byte) {
+		mu.Lock()
+		gotB++
+		mu.Unlock()
+	})
+	time.Sleep(150 * time.Millisecond)
+	require.Equal(t, 2, svc.SubscriberCount("shared"))
+
+	require.NoError(t, svc.Publish(ctx, "shared", "first"))
+	time.Sleep(200 * time.Millisecond)
+
+	mu.Lock()
+	require.Equal(t, 1, gotA, "A が 1 通目を受け取ること")
+	require.Equal(t, 1, gotB, "B が 1 通目を受け取ること")
+	mu.Unlock()
+
+	// **先に購読した A が解除する。** ここで B が巻き込まれてはいけない。
+	cancelA()
+	require.Equal(t, 1, svc.SubscriberCount("shared"))
+	time.Sleep(100 * time.Millisecond)
+
+	require.NoError(t, svc.Publish(ctx, "shared", "second"))
+	require.NoError(t, svc.Publish(ctx, "shared", "third"))
+	time.Sleep(300 * time.Millisecond)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, 1, gotA, "解除した A には届かないこと")
+	assert.Equal(t, 3, gotB, "**B は受信し続けること** (他人の解除で止まらない)")
+}
+
+// 最後の購読者が外れたら Redis 購読も閉じること (接続を漏らさない)。
+func TestPubSubService_LastCancelClosesRedisSubscription(t *testing.T) {
+	svc := NewPubSubService(testRedis.Client, "test:")
+	ctx := context.Background()
+	defer svc.Close()
+
+	c1 := svc.Subscribe(ctx, "reap", func([]byte) {})
+	c2 := svc.Subscribe(ctx, "reap", func([]byte) {})
+	time.Sleep(100 * time.Millisecond)
+
+	svc.mu.Lock()
+	_, present := svc.subs[svc.channel("reap")]
+	svc.mu.Unlock()
+	require.True(t, present)
+
+	c1()
+	svc.mu.Lock()
+	_, stillPresent := svc.subs[svc.channel("reap")]
+	svc.mu.Unlock()
+	require.True(t, stillPresent, "購読者が残っている間は Redis 購読を閉じないこと")
+
+	c2()
+	svc.mu.Lock()
+	_, goneNow := svc.subs[svc.channel("reap")]
+	svc.mu.Unlock()
+	assert.False(t, goneNow, "最後の購読者が外れたら Redis 購読を閉じること")
+	assert.Equal(t, 0, svc.SubscriberCount("reap"))
+}
+
+// 同じトピックに N 人が居ても Redis 購読は 1 本だけであること。
+func TestPubSubService_SingleRedisSubscriptionPerTopic(t *testing.T) {
+	svc := NewPubSubService(testRedis.Client, "test:")
+	ctx := context.Background()
+	defer svc.Close()
+
+	for i := 0; i < 5; i++ {
+		_ = svc.Subscribe(ctx, "fanout", func([]byte) {})
+	}
+	time.Sleep(100 * time.Millisecond)
+
+	svc.mu.Lock()
+	n := len(svc.subs)
+	svc.mu.Unlock()
+	assert.Equal(t, 1, n, "トピックごとに Redis 購読は 1 本")
+	assert.Equal(t, 5, svc.SubscriberCount("fanout"))
 }

@@ -7,15 +7,16 @@ import (
 // ContextSubscriber は core/event.PubSubService が満たす最小サブセット。
 // テスト時にスタブ化できるよう interface で定義する。
 type ContextSubscriber interface {
-	Subscribe(ctx context.Context, channel string, handler func([]byte))
-	Unsubscribe(channel string) error
+	// Subscribe returns the function that removes this handler again.
+	// **トピック名で解除する API は持たない** — どの購読者を外すのかを
+	// 表現できず、他人の購読を閉じてしまうため (#H-4)。
+	Subscribe(ctx context.Context, channel string, handler func([]byte)) func()
 }
 
 // EventPubSubBus adapts a ContextSubscriber (in production: core/event.
 // PubSubService) to the stream.PubSubBus interface used by Dispatcher.
 // PubSubBus.Subscribe drops the context, so we wrap a background context
-// internally; PubSubService.Unsubscribe returns an error which is dropped
-// (best-effort) since the bus interface is fire-and-forget.
+// internally.
 type EventPubSubBus struct {
 	inner ContextSubscriber
 }
@@ -26,11 +27,6 @@ func NewEventPubSubBus(inner ContextSubscriber) *EventPubSubBus {
 }
 
 // Subscribe implements PubSubBus.
-func (b *EventPubSubBus) Subscribe(topic string, handler func([]byte)) {
-	b.inner.Subscribe(context.Background(), topic, handler)
-}
-
-// Unsubscribe implements PubSubBus.
-func (b *EventPubSubBus) Unsubscribe(topic string) {
-	_ = b.inner.Unsubscribe(topic)
+func (b *EventPubSubBus) Subscribe(topic string, handler func([]byte)) func() {
+	return b.inner.Subscribe(context.Background(), topic, handler)
 }

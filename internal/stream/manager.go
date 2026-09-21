@@ -44,6 +44,12 @@ type Manager struct {
 	noteVisibility  NoteVisibilityChecker
 	policyProvider  RolePolicyProvider
 	lastActive      LastActiveRecorder
+
+	// **bus の解除は名前ではなくハンドルで行う** (#H-4)。Manager が張る
+	// プロセス唯一の購読も、名前で閉じると同名トピックを購読している接続を
+	// 巻き込むため。
+	busCancelMu sync.Mutex
+	busCancels  map[string]func()
 }
 
 // LastActiveRecorder bumps a user's `lastActiveDate`. upstream の
@@ -331,3 +337,35 @@ func (m *Manager) HasMuteBlockSnapshotLookup() bool { return m.muteBlockLookup !
 
 // HasPolicyProvider reports whether the role policy provider was wired.
 func (m *Manager) HasPolicyProvider() bool { return m.policyProvider != nil }
+
+// subscribeManaged registers a process-wide bus handler and remembers how to
+// remove it again.
+func (m *Manager) subscribeManaged(topic string, handler func([]byte)) {
+	if m.bus == nil {
+		return
+	}
+	cancel := m.bus.Subscribe(topic, handler)
+	m.busCancelMu.Lock()
+	if m.busCancels == nil {
+		m.busCancels = map[string]func(){}
+	}
+	// 二重購読になったら古い方を外す (再入は想定していないが、残すと漏れる)。
+	if old, ok := m.busCancels[topic]; ok && old != nil {
+		m.busCancelMu.Unlock()
+		old()
+		m.busCancelMu.Lock()
+	}
+	m.busCancels[topic] = cancel
+	m.busCancelMu.Unlock()
+}
+
+// unsubscribeManaged removes the handler registered by subscribeManaged.
+func (m *Manager) unsubscribeManaged(topic string) {
+	m.busCancelMu.Lock()
+	cancel, ok := m.busCancels[topic]
+	delete(m.busCancels, topic)
+	m.busCancelMu.Unlock()
+	if ok && cancel != nil {
+		cancel()
+	}
+}

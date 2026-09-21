@@ -11,8 +11,10 @@ import (
 // PubSubBus is the minimal pubsub interface that Dispatcher needs. core/event.
 // PubSubService がこれを満たす。reference counting は Dispatcher 側で行う。
 type PubSubBus interface {
-	Subscribe(topic string, handler func([]byte))
-	Unsubscribe(topic string)
+	// Subscribe returns the function that removes this handler again.
+	// **トピック名で解除しない** — 同じトピックを複数の接続が購読するので、
+	// 名前で閉じると他人の購読まで止まる (#H-4)。
+	Subscribe(topic string, handler func([]byte)) func()
 }
 
 // channelEntry holds an active per-connection channel subscription with its
@@ -65,10 +67,14 @@ type Dispatcher struct {
 	mu       sync.RWMutex
 	channels map[string]*channelEntry   // channel id → entry
 	topics   map[string]map[string]bool // topic → set of channel ids
+	// **bus の解除は名前ではなくハンドルで行う。** 同じトピックを別の接続も
+	// 購読しているので、名前で閉じると他人の購読まで止まる (#H-4)。
+	busCancels map[string]func() // topic → この Dispatcher の購読を外す関数
 
 	// subNote の refcount 管理 (noteID → count)
 	noteSubMu      sync.Mutex
 	noteSubs       map[string]int
+	noteCancels    map[string]func() // noteID → 購読解除
 	notifReader    NotificationReader
 	noteVisibility NoteVisibilityChecker
 }
@@ -77,12 +83,14 @@ type Dispatcher struct {
 // bus が nil の場合、対応する操作は no-op になる (テスト用)。
 func NewDispatcher(conn *Connection, registry *Registry, bus PubSubBus) *Dispatcher {
 	return &Dispatcher{
-		conn:     conn,
-		registry: registry,
-		bus:      bus,
-		channels: make(map[string]*channelEntry),
-		topics:   make(map[string]map[string]bool),
-		noteSubs: make(map[string]int),
+		conn:        conn,
+		registry:    registry,
+		bus:         bus,
+		channels:    make(map[string]*channelEntry),
+		topics:      make(map[string]map[string]bool),
+		busCancels:  make(map[string]func()),
+		noteSubs:    make(map[string]int),
+		noteCancels: make(map[string]func()),
 	}
 }
 
@@ -300,8 +308,8 @@ func (d *Dispatcher) removeChannel(id string) {
 		d.mu.RLock()
 		stillUsed := len(d.topics[t]) > 0
 		d.mu.RUnlock()
-		if !stillUsed && d.bus != nil {
-			d.bus.Unsubscribe(t)
+		if !stillUsed {
+			d.cancelTopic(t)
 		}
 	}
 	if entry.channel != nil {
@@ -327,12 +335,17 @@ func (d *Dispatcher) CloseAll() {
 	for noteID := range d.noteSubs {
 		noteIDs = append(noteIDs, noteID)
 	}
-	d.noteSubs = make(map[string]int)
-	d.noteSubMu.Unlock()
-	if d.bus != nil {
-		for _, noteID := range noteIDs {
-			d.bus.Unsubscribe("noteStream:" + noteID)
+	cancels := make([]func(), 0, len(noteIDs))
+	for _, noteID := range noteIDs {
+		if c, ok := d.noteCancels[noteID]; ok && c != nil {
+			cancels = append(cancels, c)
 		}
+	}
+	d.noteSubs = make(map[string]int)
+	d.noteCancels = make(map[string]func())
+	d.noteSubMu.Unlock()
+	for _, c := range cancels {
+		c()
 	}
 }
 
@@ -359,7 +372,10 @@ func (d *Dispatcher) subscribe(channelID, topic string) {
 	d.mu.Unlock()
 
 	if first && d.bus != nil {
-		d.bus.Subscribe(topic, func(payload []byte) { d.fanout(topic, payload) })
+		cancel := d.bus.Subscribe(topic, func(payload []byte) { d.fanout(topic, payload) })
+		d.mu.Lock()
+		d.busCancels[topic] = cancel
+		d.mu.Unlock()
 	}
 }
 
@@ -384,8 +400,22 @@ func (d *Dispatcher) unsubscribe(channelID, topic string) {
 	}
 	d.mu.Unlock()
 
-	if last && d.bus != nil {
-		d.bus.Unsubscribe(topic)
+	if last {
+		d.cancelTopic(topic)
+	}
+}
+
+// cancelTopic removes this dispatcher's bus handler for topic, if any.
+//
+// **解除はロックの外で呼ぶ。** cancel は pubsub 側のロックを取るので、
+// Dispatcher のロックを持ったまま呼ぶとロック順序が交差する。
+func (d *Dispatcher) cancelTopic(topic string) {
+	d.mu.Lock()
+	cancel, ok := d.busCancels[topic]
+	delete(d.busCancels, topic)
+	d.mu.Unlock()
+	if ok && cancel != nil {
+		cancel()
 	}
 }
 
@@ -538,9 +568,12 @@ func (d *Dispatcher) handleSubNote(body json.RawMessage) {
 	d.noteSubMu.Unlock()
 
 	if first && d.bus != nil {
-		d.bus.Subscribe(topic, func(payload []byte) {
+		cancel := d.bus.Subscribe(topic, func(payload []byte) {
 			d.forwardNoteEvent(req.ID, payload)
 		})
+		d.noteSubMu.Lock()
+		d.noteCancels[req.ID] = cancel
+		d.noteSubMu.Unlock()
 	}
 }
 
@@ -553,7 +586,6 @@ func (d *Dispatcher) handleUnsubNote(body json.RawMessage) {
 	if err := json.Unmarshal(body, &req); err != nil || req.ID == "" {
 		return
 	}
-	topic := "noteStream:" + req.ID
 	d.noteSubMu.Lock()
 	count, ok := d.noteSubs[req.ID]
 	if !ok {
@@ -563,9 +595,11 @@ func (d *Dispatcher) handleUnsubNote(body json.RawMessage) {
 	count--
 	if count <= 0 {
 		delete(d.noteSubs, req.ID)
+		cancel := d.noteCancels[req.ID]
+		delete(d.noteCancels, req.ID)
 		d.noteSubMu.Unlock()
-		if d.bus != nil {
-			d.bus.Unsubscribe(topic)
+		if cancel != nil {
+			cancel()
 		}
 		return
 	}

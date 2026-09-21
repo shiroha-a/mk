@@ -25,18 +25,20 @@ func newStubBus() *stubBus {
 	return &stubBus{subs: map[string]func([]byte){}}
 }
 
-func (b *stubBus) Subscribe(topic string, handler func([]byte)) {
+func (b *stubBus) Subscribe(topic string, handler func([]byte)) func() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.subs[topic] = handler
 	b.subscribed = append(b.subscribed, topic)
-}
-
-func (b *stubBus) Unsubscribe(topic string) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.subs, topic)
-	b.unsubs = append(b.unsubs, topic)
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			delete(b.subs, topic)
+			b.unsubs = append(b.unsubs, topic)
+		})
+	}
 }
 
 func (b *stubBus) deliver(topic string, payload []byte) {

@@ -2,7 +2,6 @@ package stream
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -11,40 +10,30 @@ import (
 
 // stubContextSubscriber implements ContextSubscriber for tests.
 type stubContextSubscriber struct {
-	subTopics   []string
-	unsubTopics []string
-	unsubErr    error
+	subTopics     []string
+	cancelledTops []string
 }
 
-func (s *stubContextSubscriber) Subscribe(_ context.Context, channel string, _ func([]byte)) {
+func (s *stubContextSubscriber) Subscribe(_ context.Context, channel string, _ func([]byte)) func() {
 	s.subTopics = append(s.subTopics, channel)
-}
-
-func (s *stubContextSubscriber) Unsubscribe(channel string) error {
-	s.unsubTopics = append(s.unsubTopics, channel)
-	return s.unsubErr
+	return func() { s.cancelledTops = append(s.cancelledTops, channel) }
 }
 
 func TestEventPubSubBus_SubscribeForwardsToInner(t *testing.T) {
 	inner := &stubContextSubscriber{}
 	bus := NewEventPubSubBus(inner)
-	bus.Subscribe("home:alice", func([]byte) {})
+	cancel := bus.Subscribe("home:alice", func([]byte) {})
 	require.Len(t, inner.subTopics, 1)
 	assert.Equal(t, "home:alice", inner.subTopics[0])
+	require.NotNil(t, cancel, "解除ハンドルを返すこと (これが無いと他人の購読を閉じるしかなくなる)")
 }
 
-func TestEventPubSubBus_UnsubscribeForwardsToInner(t *testing.T) {
+// 解除は返り値のハンドルで行われ、inner へそのまま伝わること。
+func TestEventPubSubBus_CancelForwardsToInner(t *testing.T) {
 	inner := &stubContextSubscriber{}
 	bus := NewEventPubSubBus(inner)
-	bus.Unsubscribe("home:alice")
-	require.Len(t, inner.unsubTopics, 1)
-	assert.Equal(t, "home:alice", inner.unsubTopics[0])
-}
-
-func TestEventPubSubBus_UnsubscribeIgnoresInnerError(t *testing.T) {
-	inner := &stubContextSubscriber{unsubErr: errors.New("oops")}
-	bus := NewEventPubSubBus(inner)
-	// best-effort: error is swallowed, no panic
-	bus.Unsubscribe("topic")
-	assert.Len(t, inner.unsubTopics, 1)
+	cancel := bus.Subscribe("home:alice", func([]byte) {})
+	cancel()
+	require.Len(t, inner.cancelledTops, 1)
+	assert.Equal(t, "home:alice", inner.cancelledTops[0])
 }

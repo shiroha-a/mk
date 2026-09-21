@@ -61,7 +61,7 @@ func (m *Manager) SubscribeBroadcast() {
 	if m.bus == nil {
 		return
 	}
-	m.bus.Subscribe(BroadcastTopic, func(raw []byte) {
+	m.subscribeManaged(BroadcastTopic, func(raw []byte) {
 		var env BroadcastEnvelope
 		if err := json.Unmarshal(raw, &env); err != nil || env.Type == "" {
 			slog.Warn("stream: broadcast payload unmarshal failed", "err", err)
@@ -76,7 +76,7 @@ func (m *Manager) UnsubscribeBroadcast() {
 	if m.bus == nil {
 		return
 	}
-	m.bus.Unsubscribe(BroadcastTopic)
+	m.unsubscribeManaged(BroadcastTopic)
 }
 
 // broadcastToAll sends a `{type, body}` message to every registered connection.
