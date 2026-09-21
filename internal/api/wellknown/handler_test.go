@@ -387,8 +387,8 @@ func TestWantsXRD(t *testing.T) {
 		{"application/jrd+json", false},
 		{"application/json", false}, // jrd の sibling は match しない -> JRD (else 分岐)
 		{"application/xrd+xml", true},
-		{"*/*", false},                                       // tie -> jrd 優先
-		{"application/xrd+xml, application/jrd+json", false}, // 両 q=1 tie -> jrd
+		{"*/*", false}, // tie -> jrd 優先
+		{"application/xrd+xml, application/jrd+json", false},            // 両 q=1 tie -> jrd
 		{"application/xrd+xml;q=0.9, application/jrd+json;q=0.5", true}, // xrd 優勢
 		{"application/jrd+json;q=0.9, application/xrd+xml;q=0.5", false},
 		{"application/json, application/xrd+xml", true}, // xrd だけが match
