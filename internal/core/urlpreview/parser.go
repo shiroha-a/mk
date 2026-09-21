@@ -83,13 +83,24 @@ func resolveURL(base *url.URL, rel string) string {
 		return ""
 	}
 	if base == nil {
-		return rel
+		return clipURL(rel)
 	}
 	r, err := url.Parse(rel)
 	if err != nil {
 		return ""
 	}
-	return base.ResolveReference(r).String()
+	return clipURL(base.ResolveReference(r).String())
+}
+
+// clipURL drops a URL that exceeds maxURLBytes.
+//
+// **切らずに落とす。** 途中で切った URL は別の場所を指しうるので、短くして
+// 保存するより出さないほうがよい (呼び出し側はどれも「空なら出さない」形)。
+func clipURL(u string) string {
+	if len(u) > maxURLBytes {
+		return ""
+	}
+	return u
 }
 
 type metaMap map[string]string
@@ -166,8 +177,21 @@ const (
 	maxTitleRunes       = 100
 	maxDescriptionRunes = 300
 	// sitename は upstream が clip しないが、同じ経路で任意長を受け取れるので
-	// 揃えて切る。`docs/divergence.md` に記録がある。
+	// 揃えて切る (意図的な乖離。`docs/divergence.md` の URL preview の行)。
 	maxSitenameRunes = 100
+	// maxURLBytes bounds the URL-ish fields (`url` / `thumbnail` / `icon` /
+	// `activityPub`)。
+	//
+	// **これらも取得元が決める文字列。** upstream (summaly) は clip しないが、
+	// upstream は 1 時間 / 100 件のメモリキャッシュなのに対し mk-go は
+	// **24 時間 Redis に載せ**、クエリ文字列を変えれば URL は無限に作れる。
+	// その前提の差が title / description を切っている理由そのものなので、
+	// 同じ entry に載る URL 側も揃える (実測: 上限が無いと 1 本あたり
+	// `urlPreviewMaximumContentLength` (既定 10MiB) までリニアに伸びる)。
+	//
+	// 2048 は実運用の URL 長の上限として広く使われる値。正当な og:image が
+	// ここに掛かることはまず無い。
+	maxURLBytes = 2048
 )
 
 // clipRunes truncates s to at most n runes, appending an ellipsis when it did.

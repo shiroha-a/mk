@@ -66,3 +66,43 @@ func TestParseHTML_KeepsShortText(t *testing.T) {
 	require.NotNil(t, res.Description)
 	require.Equal(t, "World", *res.Description)
 }
+
+// **URL も取得元が決める文字列。**
+//
+// title / description を切っている理由 (**24 時間 Redis に載り、クエリ文字列を
+// 変えれば URL は無限に作れる**) は同じ entry に載る URL 側にもそのまま当たる。
+// 上限が無いと 1 本あたり `urlPreviewMaximumContentLength` (既定 10MiB) まで
+// リニアに伸びた。
+func TestParseHTML_DropsOversizedURLs(t *testing.T) {
+	t.Parallel()
+
+	long := "https://example.test/" + strings.Repeat("a", 300000)
+	html := fmt.Sprintf(`<html><head>`+
+		`<meta property="og:url" content="%s">`+
+		`<meta property="og:image" content="%s">`+
+		`<link rel="icon" href="%s">`+
+		`<meta property="ap:id" content="%s">`+
+		`</head><body>x</body></html>`, long, long, long, long)
+
+	res := ParseHTML(strings.NewReader(html), "https://example.test/p")
+	// canonical は空になったら pageURL へ倒れる (既存の挙動)。
+	require.Equal(t, "https://example.test/p", res.URL,
+		"長すぎる og:url は採らず、ページの URL に倒すこと")
+	require.Nil(t, res.Thumbnail, "長すぎる og:image は出さないこと")
+	require.Nil(t, res.Icon, "長すぎる icon は出さないこと")
+	require.Nil(t, res.ActivityPub, "長すぎる ap:id は出さないこと")
+}
+
+// **普通の URL は通すこと** (上が「常に落とす」実装でも緑にならないようにする)。
+func TestParseHTML_KeepsOrdinaryURLs(t *testing.T) {
+	t.Parallel()
+
+	html := `<html><head>` +
+		`<meta property="og:url" content="https://example.test/canonical">` +
+		`<meta property="og:image" content="https://example.test/img.png">` +
+		`</head><body>x</body></html>`
+	res := ParseHTML(strings.NewReader(html), "https://example.test/p")
+	require.Equal(t, "https://example.test/canonical", res.URL)
+	require.NotNil(t, res.Thumbnail)
+	require.Equal(t, "https://example.test/img.png", *res.Thumbnail)
+}
