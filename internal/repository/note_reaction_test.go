@@ -396,3 +396,66 @@ func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedNoteAuthor(t *test
 	require.NoError(t, err)
 	require.Empty(t, out, "ノートの著者が凍結されていたら返さないこと")
 }
+
+// **返信先 / リノート元の著者が凍結されていても返さないこと。**
+//
+// upstream の `generateSuspendedUserQueryForNote` は `user` / `replyUser` /
+// `renoteUser` の 3 つを見る。著者しか見ないと、**凍結した利用者のノートが
+// 「誰かの返信」として本文ごと出る**。`note` 側の
+// `applySuspendedAuthorExclusion` と同じ 3 列を見ること。
+func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedReplyAndRenoteAuthor(t *testing.T) {
+	for _, kind := range []string{"reply", "renote"} {
+		t.Run(kind, func(t *testing.T) {
+			repo := NewNoteReactionRepository(testDB)
+			noteRepo := NewNoteRepository(testDB)
+			suffix := kind[:3]
+			suspended := insertTestUser(t, "u_nr_"+suffix+"_s", "rx"+suffix+"s")
+			author := insertTestUser(t, "u_nr_"+suffix+"_a", "rx"+suffix+"a")
+			reactor := insertTestUser(t, "u_nr_"+suffix+"_r", "rx"+suffix+"r")
+			defer cleanupUser(t, suspended.ID)
+			defer cleanupUser(t, author.ID)
+			defer cleanupUser(t, reactor.ID)
+
+			// 凍結される側のノート。
+			base := &model.Note{
+				ID: "n_nr_" + suffix + "_base", UserID: suspended.ID,
+				Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+			}
+			require.NoError(t, noteRepo.Create(base))
+			defer cleanupNote(t, base.ID)
+
+			// それへの返信 / 引用。著者は凍結されていない。
+			target := &model.Note{
+				ID: "n_nr_" + suffix + "_tgt", UserID: author.ID,
+				Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+			}
+			if kind == "reply" {
+				target.ReplyID = &base.ID
+				target.ReplyUserID = &suspended.ID
+			} else {
+				target.RenoteID = &base.ID
+				target.RenoteUserID = &suspended.ID
+			}
+			require.NoError(t, noteRepo.Create(target))
+			defer cleanupNote(t, target.ID)
+
+			rec := &model.NoteReaction{
+				ID: "rx_" + suffix + "_1", UserID: reactor.ID, NoteID: target.ID, Reaction: "👍",
+			}
+			require.NoError(t, repo.Create(rec))
+			defer cleanupReaction(t, rec.ID)
+
+			// 凍結前は返る (対照)。
+			out, err := repo.ListByUserID(reactor.ID, "", "", "", 10)
+			require.NoError(t, err)
+			require.Len(t, out, 1, "凍結前は返ること")
+
+			require.NoError(t, testDB.Exec(
+				`UPDATE "user" SET "isSuspended" = true WHERE id = ?`, suspended.ID).Error)
+
+			out, err = repo.ListByUserID(reactor.ID, "", "", "", 10)
+			require.NoError(t, err)
+			require.Empty(t, out, "%s 先の著者が凍結されていたら返さないこと", kind)
+		})
+	}
+}

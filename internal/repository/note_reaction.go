@@ -169,10 +169,22 @@ func (r *noteReactionRepository) ListByUserID(userID, viewerID, untilID, sinceID
 	// `generateBlockedHostQueryForNote` と並べて
 	// `generateSuspendedUserQueryForNote` を掛けている。ここはリアクション先の
 	// ノートを返すので、その著者が凍結されていれば出さない。
+	//
+	// **著者だけでなく返信先 / リノート元の著者も見る。** upstream の
+	// `generateSuspendedUserQueryForNote` は `user` / `replyUser` / `renoteUser`
+	// の 3 つを見ており、`reactions.ts` もその 3 つを join している。著者しか
+	// 見ないと、**凍結した利用者のノートが「誰かの返信」として本文ごと出る**。
+	// `note` 側の `applySuspendedAuthorExclusion` と同じ 3 列。
+	suspendedAuthor := func(col string) string {
+		return `NOT EXISTS (SELECT 1 FROM "user" su WHERE su."id" = ` + col + ` AND su."isSuspended" = true)`
+	}
 	q = q.Where(`NOT EXISTS (
 		SELECT 1 FROM "note" sn
-		JOIN "user" su ON su."id" = sn."userId"
-		WHERE sn."id" = "note_reaction"."noteId" AND su."isSuspended" = true)`)
+		WHERE sn."id" = "note_reaction"."noteId"
+		  AND NOT (` +
+		suspendedAuthor(`sn."userId"`) +
+		` AND (sn."replyUserId" IS NULL OR ` + suspendedAuthor(`sn."replyUserId"`) + `)` +
+		` AND (sn."renoteUserId" IS NULL OR ` + suspendedAuthor(`sn."renoteUserId"`) + `)))`)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}
