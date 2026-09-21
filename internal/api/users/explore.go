@@ -79,6 +79,8 @@ func (h *Handler) List(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	ctx := c.Request().Context()
+	// moderator は可視性ゲートを越えて実数を見られる (users/show と同じ判定)。
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 	result := make([]any, 0, len(list))
 	for _, u := range list {
 		profile, _ := h.userRepo.FindProfileByUserID(u.ID)
@@ -86,7 +88,10 @@ func (h *Handler) List(c echo.Context) error {
 		// misskey_dart の DateTimeConverter が FormatException で落ちる (#1251)。
 		d := entity.PackUserDetailed(u, profile, h.idGen)
 		// 認証 caller には viewer->user の relation block を付与 (#1957-a)。
-		h.viewerRelationRepos().Apply(&d, viewerID, u, profile)
+		viewerIsFollowing := h.viewerRelationRepos().Apply(&d, viewerID, u, profile)
+		// **カウントの可視性ゲートを通す (#1558)。** ここを忘れると
+		// `followersVisibility: "private"` と実数が並んで返る (未認証でも)。
+		entity.GateCountVisibility(&d, viewerID == u.ID, iAmModerator, viewerIsFollowing)
 		// upstream の pack は isDetailed && isMe で MeDetailed を返す。
 		result = append(result, meself.Pack(ctx, d, u, profile, viewer))
 	}
@@ -109,9 +114,12 @@ func (h *Handler) PinnedUsers(c echo.Context) error {
 		return c.JSON(http.StatusOK, []any{})
 	}
 	viewerID := ""
-	if v := middleware.GetUser(c); v != nil {
-		viewerID = v.ID
+	viewer := middleware.GetUser(c)
+	if viewer != nil {
+		viewerID = viewer.ID
 	}
+	// moderator は可視性ゲートを越えて実数を見られる (users/show と同じ判定)。
+	iAmModerator := viewer != nil && h.moderatorChecker != nil && h.moderatorChecker.IsModerator(viewer.ID)
 	result := make([]entity.UserDetailed, 0, len(m.PinnedUsers))
 	for _, acct := range m.PinnedUsers {
 		username, host := ParseAcct(acct, h.localHost)
@@ -125,7 +133,9 @@ func (h *Handler) PinnedUsers(c echo.Context) error {
 		profile, _ := h.userRepo.FindProfileByUserID(u.ID)
 		d := entity.PackUserDetailed(u, profile, h.idGen)
 		// 認証 caller には viewer->user の relation block を付与 (#1957-a)。
-		h.viewerRelationRepos().Apply(&d, viewerID, u, profile)
+		viewerIsFollowing := h.viewerRelationRepos().Apply(&d, viewerID, u, profile)
+		// **カウントの可視性ゲートを通す (#1558)。**
+		entity.GateCountVisibility(&d, viewerID == u.ID, iAmModerator, viewerIsFollowing)
 		result = append(result, d)
 	}
 	return c.JSON(http.StatusOK, result)

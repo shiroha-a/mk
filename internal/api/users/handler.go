@@ -649,8 +649,9 @@ func (h *Handler) Show(c echo.Context) error {
 	if h.remoteStatsFetcher != nil && bundle.User.Host != nil && *bundle.User.Host != "" {
 		if stats := h.remoteStatsFetcher.Fetch(c.Request().Context(), *bundle.User.Host, bundle.User.Username); stats != nil {
 			detailed.NotesCount = stats.NotesCount
-			detailed.FollowersCount = stats.FollowersCount
-			detailed.FollowingCount = stats.FollowingCount
+			// **ゲートが入れ直す値も更新する。** 表示値だけ書くと、後で
+			// `GateCountVisibility` が元の値で上書きする。
+			entity.OverrideRemoteCounts(&detailed, stats.FollowersCount, stats.FollowingCount)
 		}
 	}
 
@@ -1248,8 +1249,7 @@ func (h *Handler) packRelationItems(
 			}
 			if stats := remoteStatsMap[b.User.ID]; stats != nil {
 				d.NotesCount = stats.NotesCount
-				d.FollowersCount = stats.FollowersCount
-				d.FollowingCount = stats.FollowingCount
+				entity.OverrideRemoteCounts(&d, stats.FollowersCount, stats.FollowingCount)
 			}
 			// count visibility gate は remote stats override の後に適用する (#1558)。
 			entity.GateCountVisibility(&d, isMe, iAmModerator, isFollowing)

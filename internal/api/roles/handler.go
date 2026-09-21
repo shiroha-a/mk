@@ -237,7 +237,10 @@ func (h *Handler) Users(c echo.Context) error {
 		}
 		d := entity.PackUserDetailed(a.User, profByID[a.UserID], h.idGen)
 		// 認証 viewer には viewer->user の relation block を付与 (匿名/self は no-op、#1973)。
-		h.relation.Apply(&d, viewerID, a.User, profByID[a.UserID])
+		viewerIsFollowing := h.relation.Apply(&d, viewerID, a.User, profByID[a.UserID])
+		// **カウントの可視性ゲートを通す (#1558)。** 忘れると
+		// `followersVisibility: "private"` と実数が並んで未認証に返る。
+		entity.GateCountVisibility(&d, viewerID == a.User.ID, false, viewerIsFollowing)
 		out = append(out, map[string]any{
 			"id":   a.ID,
 			"user": d,

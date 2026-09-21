@@ -444,12 +444,17 @@ func TestGateCountVisibility(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			d := &UserDetailed{
-				FollowersCount:      10,
-				FollowingCount:      20,
-				FollowersVisibility: c.followersVis,
-				FollowingVisibility: c.followingVis,
+			// **packer を通して組む。** packer は既定でカウントを伏せ、
+			// `GateCountVisibility` が見せてよい閲覧者へ入れ直す設計なので、
+			// 手組みの UserDetailed では「入れ直す元の値」が無い。
+			u := &model.User{ID: "u", Username: "u", FollowersCount: 10, FollowingCount: 20}
+			prof := &model.UserProfile{
+				UserID:              "u",
+				FollowersVisibility: model.FollowingVisibility(c.followersVis),
+				FollowingVisibility: model.FollowingVisibility(c.followingVis),
 			}
+			packed := PackUserDetailed(u, prof)
+			d := &packed
 			GateCountVisibility(d, c.isMe, c.isModerator, c.isFollowing)
 			assert.Equal(t, c.wantFollowers, d.FollowersCount)
 			assert.Equal(t, c.wantFollowing, d.FollowingCount)

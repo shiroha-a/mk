@@ -97,15 +97,20 @@ type UserDetailed struct {
 	// 「null を出す」と「省略する」を区別できない。RawMessage にして、follower path は
 	// SetFollowedMessageForFollower で null/値をセットし、非 follower path は未設定
 	// (nil → omitempty で省略) で表現する。
-	FollowedMessage     json.RawMessage `json:"followedMessage,omitempty"`
-	PublicReactions     bool            `json:"publicReactions"`
-	Fields              datatypes.JSON  `json:"fields"`
-	VerifiedLinks       []string        `json:"verifiedLinks"`
-	FollowersCount      int             `json:"followersCount"`
-	FollowingCount      int             `json:"followingCount"`
-	NotesCount          int             `json:"notesCount"`
-	FollowersVisibility string          `json:"followersVisibility"`
-	FollowingVisibility string          `json:"followingVisibility"`
+	FollowedMessage json.RawMessage `json:"followedMessage,omitempty"`
+	PublicReactions bool            `json:"publicReactions"`
+	Fields          datatypes.JSON  `json:"fields"`
+	VerifiedLinks   []string        `json:"verifiedLinks"`
+	FollowersCount  int             `json:"followersCount"`
+	// actualFollowersCount / actualFollowingCount は packer が伏せる前の実数。
+	// **JSON には出さない** (小文字始まりなので encoding/json は無視する)。
+	// `GateCountVisibility` が「見せてよい閲覧者へ入れ直す」ために使う。
+	actualFollowersCount int
+	actualFollowingCount int
+	FollowingCount       int    `json:"followingCount"`
+	NotesCount           int    `json:"notesCount"`
+	FollowersVisibility  string `json:"followersVisibility"`
+	FollowingVisibility  string `json:"followingVisibility"`
 	// ChatScope は 1-on-1 チャットの受信許可レベル (#692)。FE の
 	// /settings/privacy が `i/update` レスポンスから直接 `$i.chatScope` に
 	// 反映するため、この field を expose しないと UI が保存後に古い値で
@@ -321,6 +326,9 @@ func PackMeDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Gene
 // viewer-dependent fields). Re-running PackUserDetailed would lose that
 // work, so we promote the existing UserDetailed in-place.
 func AsMeDetailed(d UserDetailed, u *model.User, profile *model.UserProfile) MeDetailed {
+	// **自分自身には常に実数を見せる。** packer はカウントを既定で伏せる
+	// (呼び忘れで漏れないように) ので、self 経路ではここで入れ直す。
+	GateCountVisibility(&d, true, false, false)
 	out := MeDetailed{
 		UserDetailed: d,
 		// avatarId / bannerId は self view 専用 (#1251)。base UserDetailed には
@@ -598,6 +606,26 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 		d.FollowingVisibility = string(profile.FollowingVisibility)
 	}
 
+	// **カウントは既定で伏せる (fail-closed)。**
+	//
+	// 可視性のゲートは `GateCountVisibility` として切り出してあり、呼び出し側の
+	// 義務になっている。`PackUserDetailed` の呼び出しは 30 箇所あり、実際に
+	// `POST /api/users` / `POST /api/roles/users` / `hashtags/users` /
+	// `pinned-users` が呼び忘れていて、`followersVisibility: "private"` と実数が
+	// 並んで未認証に返っていた。
+	//
+	// ここで先に伏せておけば、呼び忘れても漏れない。見せてよい閲覧者へは
+	// `GateCountVisibility` が入れ直す。upstream はゲートを `pack()` の内部に
+	// 持つので呼び忘れようがない。
+	d.actualFollowersCount = u.FollowersCount
+	d.actualFollowingCount = u.FollowingCount
+	if profile == nil || !isCountPublic(string(profile.FollowersVisibility)) {
+		d.FollowersCount = 0
+	}
+	if profile == nil || !isCountPublic(string(profile.FollowingVisibility)) {
+		d.FollowingCount = 0
+	}
+
 	// upstream UserEntityService: publicReactions は
 	// `isLocalUser(user) ? profile.publicReactions : false` (issue 12964)。
 	// remote user は users/reactions が IS_REMOTE_USER を返すため、ここで false
@@ -614,8 +642,17 @@ func PackUserDetailed(u *model.User, profile *model.UserProfile, idGens ...id.Ge
 // nulled → 0 unless): visibility=='public' OR self OR moderator OR
 // (visibility=='followers' && the viewer follows the target) (#1558)。
 func countVisible(visibility string, isMe, isModerator, isFollowing bool) bool {
-	return visibility == string(model.FollowingVisibilityPublic) || isMe || isModerator ||
+	return isCountPublic(visibility) || isMe || isModerator ||
 		(visibility == string(model.FollowingVisibilityFollowers) && isFollowing)
+}
+
+// isCountPublic reports whether the visibility setting means "anyone".
+//
+// **空文字は public 扱い。** 列の default が 'public' なので、値が入っていない
+// = 既定のまま、という意味になる (テストの fixture や、profile を組み立てて
+// いない経路がここに来る)。
+func isCountPublic(visibility string) bool {
+	return visibility == "" || visibility == string(model.FollowingVisibilityPublic)
 }
 
 // GateCountVisibility zeroes followersCount / followingCount on a packed
@@ -623,10 +660,15 @@ func countVisible(visibility string, isMe, isModerator, isFollowing bool) bool {
 // 0 for restricted (followers / private) visibility (#1558)。d.FollowersVisibility
 // / d.FollowingVisibility は PackUserDetailed が profile から埋めた値を読む。
 func GateCountVisibility(d *UserDetailed, isMe, isModerator, isFollowing bool) {
-	if !countVisible(d.FollowersVisibility, isMe, isModerator, isFollowing) {
+	// **packer が既に伏せている。** ここは見せてよい閲覧者へ入れ直す側。
+	if countVisible(d.FollowersVisibility, isMe, isModerator, isFollowing) {
+		d.FollowersCount = d.actualFollowersCount
+	} else {
 		d.FollowersCount = 0
 	}
-	if !countVisible(d.FollowingVisibility, isMe, isModerator, isFollowing) {
+	if countVisible(d.FollowingVisibility, isMe, isModerator, isFollowing) {
+		d.FollowingCount = d.actualFollowingCount
+	} else {
 		d.FollowingCount = 0
 	}
 }
@@ -746,4 +788,24 @@ func PackUserForFollowStreamEvent(u *model.User, isFollowing, hasPendingFollowRe
 	d.HasPendingFollowRequestFromYou = &hasPendingFollowRequestFromYou
 	d.EnsureRelationFlags()
 	return d
+}
+
+// OverrideRemoteCounts replaces the follower / following counts with values
+// fetched from the remote instance (#943).
+//
+// **表示値と、ゲートが入れ直す値の両方を更新する。** 表示値だけ書くと、後で
+// `GateCountVisibility` が元の値で上書きしてしまう。
+func OverrideRemoteCounts(d *UserDetailed, followers, following int) {
+	if d == nil {
+		return
+	}
+	d.actualFollowersCount = followers
+	d.actualFollowingCount = following
+	// 現在の表示値が伏せられていなければ、そのまま新しい値を見せる。
+	if d.FollowersCount != 0 || isCountPublic(d.FollowersVisibility) {
+		d.FollowersCount = followers
+	}
+	if d.FollowingCount != 0 || isCountPublic(d.FollowingVisibility) {
+		d.FollowingCount = following
+	}
 }

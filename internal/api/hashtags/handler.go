@@ -465,7 +465,10 @@ func (h *Handler) Users(c echo.Context) error {
 	for _, u := range users {
 		d := entity.PackUserDetailed(u, profByID[u.ID], gen)
 		// 認証 caller には viewer->user の relation block を付与 (匿名/self は no-op、#1957-a)。
-		h.relation.Apply(&d, viewerID, u, profByID[u.ID])
+		viewerIsFollowing := h.relation.Apply(&d, viewerID, u, profByID[u.ID])
+		// **カウントの可視性ゲートを通す (#1558)。** `sort:"+follower"` が
+		// 使えるので、忘れると非公開のカウントで並べ替えて読める。
+		entity.GateCountVisibility(&d, viewerID == u.ID, false, viewerIsFollowing)
 		// upstream の pack は isDetailed && isMe で MeDetailed を返すので、
 		// 結果に自分が混ざるときは自分だけ MeDetailed になる。
 		out = append(out, meself.Pack(ctx, d, u, profByID[u.ID], viewer))
