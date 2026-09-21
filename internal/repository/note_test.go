@@ -4091,3 +4091,29 @@ func TestNote_ListRenoteOrReplyRemoteUserIDs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }
+
+// **凍結した利用者の featured ノートを返さないこと。**
+//
+// `users/show` が凍結ユーザーを `NO_SUCH_USER` で隠すのに、同じ利用者のノートが
+// 本文つきで返るのは経路ごとに結果が食い違う形。upstream
+// `users/featured-notes.ts` は `generateSuspendedUserQueryForNote` を掛けている。
+func TestNoteRepository_ListFeaturedByUser_ExcludesSuspendedAuthor(t *testing.T) {
+	repo := NewNoteRepository(testDB)
+	author := insertTestUser(t, "feat_susp_u", "featsuspu")
+	defer cleanupUser(t, author.ID)
+
+	note := &model.Note{ID: "feat_susp_n1", UserID: author.ID, Visibility: "public", RenoteCount: 5}
+	require.NoError(t, testDB.Create(note).Error)
+	defer testDB.Exec(`DELETE FROM "note" WHERE id = ?`, note.ID)
+
+	// 凍結前は返る (対照)。
+	got, err := repo.ListFeaturedByUser(author.ID, "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, got, 1, "凍結前は返ること")
+
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "isSuspended" = true WHERE id = ?`, author.ID).Error)
+
+	got, err = repo.ListFeaturedByUser(author.ID, "", "", 10)
+	require.NoError(t, err)
+	require.Empty(t, got, "凍結後は返さないこと")
+}

@@ -165,6 +165,14 @@ func (r *noteReactionRepository) ListByUserID(userID, viewerID, untilID, sinceID
 	// 無いので合わせて含めない)。
 	// 条件は core/note.CanSeeNote と一致 (#1454 で共通 helper に集約)。
 	q = applyViewerVisibilityExists(q, `"note_reaction"."noteId"`, viewerID)
+	// **凍結した利用者のノートを出さない。** upstream `users/reactions.ts` は
+	// `generateBlockedHostQueryForNote` と並べて
+	// `generateSuspendedUserQueryForNote` を掛けている。ここはリアクション先の
+	// ノートを返すので、その著者が凍結されていれば出さない。
+	q = q.Where(`NOT EXISTS (
+		SELECT 1 FROM "note" sn
+		JOIN "user" su ON su."id" = sn."userId"
+		WHERE sn."id" = "note_reaction"."noteId" AND su."isSuspended" = true)`)
 	if untilID != "" {
 		q = q.Where("id < ?", untilID)
 	}

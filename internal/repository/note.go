@@ -948,6 +948,11 @@ func (r *noteRepository) ListFeaturedByUser(userID, viewerID, untilID string, li
 		Where(`"userId" = ?`, userID).
 		Where(`"channelId" IS NULL`)
 	q = applyViewerVisibility(q, viewerID)
+	// **凍結した利用者のノートを出さない。** upstream
+	// `users/featured-notes.ts` は `generateSuspendedUserQueryForNote` を
+	// 掛けている。`users/show` が凍結ユーザーを `NO_SUCH_USER` で隠すのに
+	// 同じ利用者のノートが本文つきで返るのは、経路ごとに結果が食い違う形。
+	q = applySuspendedAuthorExclusion(q)
 	q = q.Order(`("renoteCount" + "repliesCount") DESC, id DESC`).Limit(FeaturedNotesPerUserPoolSize)
 	var pool []*model.Note
 	if err := q.Find(&pool).Error; err != nil {

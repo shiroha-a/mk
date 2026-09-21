@@ -358,3 +358,41 @@ func TestNoteReactionRepository_ListReactionPairs(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, empty)
 }
+
+// **凍結した利用者のノートへのリアクションを返さないこと。**
+//
+// `users/reactions` はリアクション先のノートを完全な shape で返すので、その
+// 著者が凍結されていれば出さない。upstream `users/reactions.ts` は
+// `generateSuspendedUserQueryForNote` を掛けている。
+func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedNoteAuthor(t *testing.T) {
+	repo := NewNoteReactionRepository(testDB)
+	author := insertTestUser(t, "u_nr_susp_a", "rxsuspa")
+	reactor := insertTestUser(t, "u_nr_susp_r", "rxsuspr")
+	defer cleanupUser(t, author.ID)
+	defer cleanupUser(t, reactor.ID)
+
+	noteRepo := NewNoteRepository(testDB)
+	note := &model.Note{
+		ID:         "n_nr_susp",
+		UserID:     author.ID,
+		Visibility: model.NoteVisibilityPublic,
+		Reactions:  datatypes.JSON([]byte("{}")),
+	}
+	require.NoError(t, noteRepo.Create(note))
+	defer cleanupNote(t, note.ID)
+
+	rec := &model.NoteReaction{ID: "rx_susp_1", UserID: reactor.ID, NoteID: note.ID, Reaction: "👍"}
+	require.NoError(t, repo.Create(rec))
+	defer cleanupReaction(t, rec.ID)
+
+	// 凍結前は返る (対照)。
+	out, err := repo.ListByUserID(reactor.ID, "", "", "", 10)
+	require.NoError(t, err)
+	require.Len(t, out, 1, "凍結前は返ること")
+
+	require.NoError(t, testDB.Exec(`UPDATE "user" SET "isSuspended" = true WHERE id = ?`, author.ID).Error)
+
+	out, err = repo.ListByUserID(reactor.ID, "", "", "", 10)
+	require.NoError(t, err)
+	require.Empty(t, out, "ノートの著者が凍結されていたら返さないこと")
+}
