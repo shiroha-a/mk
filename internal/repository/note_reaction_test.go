@@ -404,21 +404,34 @@ func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedNoteAuthor(t *test
 // 「誰かの返信」として本文ごと出る**。`note` 側の
 // `applySuspendedAuthorExclusion` と同じ 3 列を見ること。
 func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedReplyAndRenoteAuthor(t *testing.T) {
-	for _, kind := range []string{"reply", "renote"} {
-		t.Run(kind, func(t *testing.T) {
+	// **ID はリテラルで書く。** CI の「重複フィクスチャ ID」検査は
+	// `insertTestUser(t, "..."` の第 1 引数を文字列として読むので、連結で
+	// 組むと前半だけを拾って誤検知する (実際に lint が落ちた)。
+	for _, tc := range []struct {
+		kind       string
+		suspended  string
+		author     string
+		reactor    string
+		baseNote   string
+		targetNote string
+		reaction   string
+	}{
+		{"reply", "u_nrrp_s", "u_nrrp_a", "u_nrrp_r", "n_nrrp_base", "n_nrrp_tgt", "rx_nrrp_1"},
+		{"renote", "u_nrrn_s", "u_nrrn_a", "u_nrrn_r", "n_nrrn_base", "n_nrrn_tgt", "rx_nrrn_1"},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
 			repo := NewNoteReactionRepository(testDB)
 			noteRepo := NewNoteRepository(testDB)
-			suffix := kind[:3]
-			suspended := insertTestUser(t, "u_nr_"+suffix+"_s", "rx"+suffix+"s")
-			author := insertTestUser(t, "u_nr_"+suffix+"_a", "rx"+suffix+"a")
-			reactor := insertTestUser(t, "u_nr_"+suffix+"_r", "rx"+suffix+"r")
+			suspended := insertTestUser(t, tc.suspended, tc.suspended)
+			author := insertTestUser(t, tc.author, tc.author)
+			reactor := insertTestUser(t, tc.reactor, tc.reactor)
 			defer cleanupUser(t, suspended.ID)
 			defer cleanupUser(t, author.ID)
 			defer cleanupUser(t, reactor.ID)
 
 			// 凍結される側のノート。
 			base := &model.Note{
-				ID: "n_nr_" + suffix + "_base", UserID: suspended.ID,
+				ID: tc.baseNote, UserID: suspended.ID,
 				Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
 			}
 			require.NoError(t, noteRepo.Create(base))
@@ -426,10 +439,10 @@ func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedReplyAndRenoteAuth
 
 			// それへの返信 / 引用。著者は凍結されていない。
 			target := &model.Note{
-				ID: "n_nr_" + suffix + "_tgt", UserID: author.ID,
+				ID: tc.targetNote, UserID: author.ID,
 				Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
 			}
-			if kind == "reply" {
+			if tc.kind == "reply" {
 				target.ReplyID = &base.ID
 				target.ReplyUserID = &suspended.ID
 			} else {
@@ -440,7 +453,7 @@ func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedReplyAndRenoteAuth
 			defer cleanupNote(t, target.ID)
 
 			rec := &model.NoteReaction{
-				ID: "rx_" + suffix + "_1", UserID: reactor.ID, NoteID: target.ID, Reaction: "👍",
+				ID: tc.reaction, UserID: reactor.ID, NoteID: target.ID, Reaction: "👍",
 			}
 			require.NoError(t, repo.Create(rec))
 			defer cleanupReaction(t, rec.ID)
@@ -455,7 +468,7 @@ func TestNoteReactionRepository_ListByUserID_ExcludesSuspendedReplyAndRenoteAuth
 
 			out, err = repo.ListByUserID(reactor.ID, "", "", "", 10)
 			require.NoError(t, err)
-			require.Empty(t, out, "%s 先の著者が凍結されていたら返さないこと", kind)
+			require.Empty(t, out, "%s 先の著者が凍結されていたら返さないこと", tc.kind)
 		})
 	}
 }
