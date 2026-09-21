@@ -1,12 +1,4 @@
-package plugin
-
-import (
-	"image"
-
-	"github.com/shiroha-a/mk/internal/misc/imagedecode"
-)
-
-// Image decoding limits exposed to plugins.
+// Package imagedecode exposes the server's image decoding limits to plugins.
 //
 // **プラグインは別 module なので `internal/` を import できない。** 本体は
 // #3037 で「宣言寸法の cap → バイト予算 → wasm へ渡す入力の上限 → 同時実行枠」を
@@ -14,6 +6,20 @@ import (
 // プラグインが取得した画像は cap 無しでデコードされていた。取得元が細工した
 // 画像を返すと、ヘッダの寸法だけで巨大なラスタを確保できる (Go の大確保失敗は
 // `throw("out of memory")` で recover 不能なのでプロセスごと落ちる)。
+//
+// **`plugin` 本体とは別パッケージにしてある。** ここは画像ライブラリ
+// (`kovidgoyal/imaging` / `blezek/tga` 等) に依存するので、`plugin` に置くと
+// **`plugin` を import するだけの全プラグインが go.sum にそれらの entry を
+// 要求される** (同梱プラグインのビルドが実際に落ちた)。`plugin/peercache` が
+// `pgx` を持つのと同じ切り方。
+package imagedecode
+
+import (
+	"image"
+
+	"github.com/shiroha-a/mk/internal/misc/imagedecode"
+)
+
 // MaxImagePixels is the declared width*height ceiling used for images a
 // plugin fetched from a third party. 本体の media proxy と同じ値。
 var MaxImagePixels = imagedecode.MaxPixels

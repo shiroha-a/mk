@@ -767,6 +767,18 @@ func (*Cache) Store(context.Context, string, any, bool) error
 func (*Cache) Sweep(context.Context) error
 ```
 
+### Go (`github.com/shiroha-a/mk/plugin/imagedecode`)
+
+取得した画像を本体と同じ上限でデコードする。**`plugin` 本体とは別パッケージ**
+なので、使うプラグインだけが画像ライブラリの依存を持つ (`plugin/peercache` が
+`pgx` を持つのと同じ切り方)。
+
+```
+var MaxImagePixels
+func DecodeImage([]byte) (image.Image, error)
+func DecodeImageWithPixelCap([]byte, int64) (image.Image, error)
+```
+
 ### Go (`github.com/shiroha-a/mk/plugin`)
 
 ```
@@ -890,10 +902,6 @@ func NewCodedStatusError(int, string, string) error
 func ErrNotFound(string, ...any) *StatusError
 func Register(Definition)
 func Registered() []Definition
-
-var MaxImagePixels
-func DecodeImage([]byte) (image.Image, error)
-func DecodeImageWithPixelCap([]byte, int64) (image.Image, error)
 ```
 
 ### TypeScript (`@/plugin-api.js`)
