@@ -101,7 +101,8 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 			// **1 回で恒久 failed** になる (本来は 4 回 + backoff)。
 			// 同じディレクトリの `deliver_keysource.go` /
 			// `post_scheduled_note.go` は `repository.IsNotFound` で分けている。
-			if repository.IsNotFound(err) {
+			// 配線の問題 (repo 未設定) も恒久エラー。retry しても直らない。
+			if repository.IsNotFound(err) || errors.Is(err, errWebhookConfig) {
 				return fmt.Errorf("resolve webhook %s: %w: %w", payload.WebhookID, err, driver.SkipRetry)
 			}
 			return fmt.Errorf("resolve webhook %s: %w", payload.WebhookID, err)
@@ -165,13 +166,17 @@ func (p *WebhookProcessor) handle(ctx context.Context, t driver.Task, user bool)
 	}
 }
 
+// errWebhookConfig marks a wiring problem (repository not configured), which
+// retrying cannot fix.
+var errWebhookConfig = errors.New("webhook processor is not configured")
+
 // resolveTarget looks up a webhook row's URL and secret. For user webhooks it
 // queries the WebhookRepository; for system webhooks it uses the
 // SystemWebhookRepository.
 func (p *WebhookProcessor) resolveTarget(id string, user bool) (url, secret string, err error) {
 	if user {
 		if p.userRepo == nil {
-			return "", "", errors.New("user webhook repo not configured")
+			return "", "", fmt.Errorf("user webhook repo not configured: %w", errWebhookConfig)
 		}
 		h, err := p.userRepo.FindByID(id)
 		if err != nil {
@@ -180,7 +185,7 @@ func (p *WebhookProcessor) resolveTarget(id string, user bool) (url, secret stri
 		return h.URL, h.Secret, nil
 	}
 	if p.systemRepo == nil {
-		return "", "", errors.New("system webhook repo not configured")
+		return "", "", fmt.Errorf("system webhook repo not configured: %w", errWebhookConfig)
 	}
 	h, err := p.systemRepo.FindByID(id)
 	if err != nil {

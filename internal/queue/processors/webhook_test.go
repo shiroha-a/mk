@@ -74,7 +74,10 @@ func (r *stubUserWebhookRepo) FindByID(id string) (*model.Webhook, error) {
 	if w, ok := r.hooks[id]; ok {
 		return w, nil
 	}
-	return nil, errors.New("not found")
+	// **実 repository と同じ sentinel を返す。** `errors.New("not found")` だと
+	// `repository.IsNotFound` で判定できず、not-found と DB 障害を分ける実装を
+	// テストできない。
+	return nil, repository.ErrNotFound
 }
 func (r *stubUserWebhookRepo) FindByIDAndUserID(_, _ string) (*model.Webhook, error) {
 	return nil, nil
@@ -104,7 +107,7 @@ func (r *stubSystemWebhookRepo) FindByID(id string) (*model.SystemWebhook, error
 	if w, ok := r.hooks[id]; ok {
 		return w, nil
 	}
-	return nil, errors.New("not found")
+	return nil, repository.ErrNotFound
 }
 func (r *stubSystemWebhookRepo) List() ([]*model.SystemWebhook, error)       { return nil, nil }
 func (r *stubSystemWebhookRepo) ListActive() ([]*model.SystemWebhook, error) { return nil, nil }
