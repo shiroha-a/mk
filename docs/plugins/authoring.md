@@ -890,6 +890,10 @@ func NewCodedStatusError(int, string, string) error
 func ErrNotFound(string, ...any) *StatusError
 func Register(Definition)
 func Registered() []Definition
+
+var MaxImagePixels
+func DecodeImage([]byte) (image.Image, error)
+func DecodeImageWithPixelCap([]byte, int64) (image.Image, error)
 ```
 
 ### TypeScript (`@/plugin-api.js`)

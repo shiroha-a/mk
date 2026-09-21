@@ -128,6 +128,8 @@ plugin: func (*APIError) Error() string
 plugin: func (*StatusError) Error() string
 plugin: func (Definition) Validate() error
 plugin: func (EffectivePolicyRegistration) Validate() error
+plugin: func DecodeImage([]byte) (image.Image, error)
+plugin: func DecodeImageWithPixelCap([]byte, int64) (image.Image, error)
 plugin: func ErrNotFound(string, ...any) *StatusError
 plugin: func Errorf(int, string, ...any) *StatusError
 plugin: func ExtractStatusError(error) (*StatusError, string)
@@ -163,3 +165,4 @@ plugin: type Request interface
 plugin: type Router interface
 plugin: type StatusError struct
 plugin: type Storage interface
+plugin: var MaxImagePixels
