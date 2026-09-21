@@ -245,6 +245,9 @@ func (h *Handler) Decision(c echo.Context) error {
 		"state": txn.State,
 		"iss":   h.issuer,
 	})
+	// **認可コードを載せる redirect にも no-store を付ける。**
+	// upstream の `redirectWithQuery` も冒頭で `applyNoStore` する。
+	applyOAuthNoStore(c)
 	return c.Redirect(http.StatusFound, redirect)
 }
 
@@ -349,6 +352,9 @@ func (h *Handler) Token(c echo.Context) error {
 	}
 
 	slog.Info("oauth: issued access token", "clientId", g.ClientID, "userId", g.UserID, "scopes", g.Scopes)
+	// **トークン応答には no-store を付ける (RFC 6749 §5.1 は MUST)。**
+	// `/oauth/*` は api グループの外なので既定ヘッダも掛からない。
+	applyOAuthNoStore(c)
 	return c.JSON(http.StatusOK, map[string]any{
 		"access_token": accessToken,
 		"token_type":   "Bearer",
@@ -470,11 +476,13 @@ func (h *Handler) redirectError(c echo.Context, redirectURI, state, code, desc s
 		"state": state,
 		"iss":   h.issuer,
 	})
+	applyOAuthNoStore(c)
 	return c.Redirect(http.StatusFound, redirect)
 }
 
 // tokenError returns an OAuth token-endpoint JSON error.
 func tokenError(c echo.Context, status int, code, desc string) error {
+	applyOAuthNoStore(c)
 	return c.JSON(status, map[string]any{
 		"error":             code,
 		"error_description": desc,
