@@ -135,7 +135,7 @@ func (h *ReactionDeliveryHook) directInboxes(target *model.Note) []string {
 	switch {
 	case err == nil:
 		if !author.IsLocal() {
-			if inbox := preferredInbox(author); inbox != "" {
+			if inbox := fanoutInbox(author); inbox != "" {
 				inboxes = append(inboxes, inbox)
 			}
 		}
@@ -179,7 +179,7 @@ func (h *ReactionDeliveryHook) directInboxes(target *model.Note) []string {
 					if u == nil || u.IsLocal() {
 						continue
 					}
-					if inbox := preferredInbox(u); inbox != "" {
+					if inbox := fanoutInbox(u); inbox != "" {
 						inboxes = append(inboxes, inbox)
 					}
 				}

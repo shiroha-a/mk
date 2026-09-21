@@ -121,7 +121,9 @@ func (h *PollDeliveryHook) OnLocalPollUpdated(target *model.Note) {
 		ids := make([]string, 0, len(target.VisibleUserIDs)+len(target.Mentions))
 		ids = append(ids, target.VisibleUserIDs...)
 		ids = append(ids, target.Mentions...)
-		inboxes := remoteInboxesForUserIDs(h.userRepo, ids, target.UserID)
+		// specified なアンケートの Update はフォロワー配信と併用しないので、
+		// 個別 inbox でよい。
+		inboxes := remoteInboxesForUserIDs(h.userRepo, ids, target.UserID, preferredInbox)
 		if len(inboxes) == 0 {
 			return
 		}
@@ -137,9 +139,11 @@ func (h *PollDeliveryHook) OnLocalPollUpdated(target *model.Note) {
 	}
 }
 
-// remoteInboxesForUserIDs resolves the preferred inbox of every REMOTE user in
+// remoteInboxesForUserIDs resolves an inbox for every REMOTE user in
 // ids, skipping local users, blank/duplicate ids, skipID and users without an
-// inbox. 戻り値の inbox URL も重複排除する (sharedInbox を共有する相手が
+// inbox. `inboxOf` picks which one (`preferredInbox` for deliveries that stand
+// alone, `fanoutInbox` for those that run alongside the follower fan-out —
+// 理由はそれぞれの GoDoc)。 戻り値の inbox URL も重複排除する (sharedInbox を共有する相手が
 // 複数居ても 1 回しか送らない)。
 //
 // note の宛先 (visibleUserIds / mentions) から DirectRecipe の inbox を組み立てる
@@ -149,7 +153,7 @@ func (h *PollDeliveryHook) OnLocalPollUpdated(target *model.Note) {
 // `safeGo` で投げっぱなしに呼ばれ、戻り値も retry の仕組みも無い (詳しい理由は
 // `note_delivery_hook.go` の `findNoteAuthor`)。error を返しても行き先が無いので、
 // **DB 障害のあいだは宛先が組めず配送が落ちたまま戻らない** (warn log にだけ残る)。
-func remoteInboxesForUserIDs(userRepo repository.UserRepository, ids []string, skipID string) []string {
+func remoteInboxesForUserIDs(userRepo repository.UserRepository, ids []string, skipID string, inboxOf func(*model.User) string) []string {
 	if userRepo == nil || len(ids) == 0 {
 		return nil
 	}
@@ -182,7 +186,7 @@ func remoteInboxesForUserIDs(userRepo repository.UserRepository, ids []string, s
 		if u == nil || u.IsLocal() {
 			continue
 		}
-		inbox := preferredInbox(u)
+		inbox := inboxOf(u)
 		if inbox == "" {
 			continue
 		}

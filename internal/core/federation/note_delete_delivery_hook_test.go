@@ -627,3 +627,37 @@ func TestNoteDeleteHook_WithoutNoteRepoSkipsRenoters(t *testing.T) {
 	})
 	assert.Empty(t, enq.calls)
 }
+
+// **sharedInbox を持つフォロワーでも 1 通であること (敵対的レビュー)。**
+//
+// `seedRemoteRecipient` は `SharedInbox` を設定しないので、既存の dedup テストは
+// 「direct と follower が同じ URL」という現実には起きにくい形しか見ていなかった。
+// **実際の `ListRemoteFollowerInboxes` は `COALESCE(NULLIF(sharedInbox,”), inbox)`
+// を返す**ので、direct 側が個別 inbox を使うと URL が食い違い、exclude が
+// 効かずに 2 通届く。
+func TestNoteDeleteHook_SharedInboxFollower_Deduped(t *testing.T) {
+	hook, enq, userRepo, followingRepo, keypairRepo := newDeleteHook(t)
+	hook.SetUserRepo(userRepo)
+	author := seedDeleteSigner(t, userRepo, keypairRepo)
+
+	const shared = "https://mentioned.example/inbox"
+	// carol はメンション先かつフォロワー。個別 inbox と sharedInbox の両方を持つ
+	// (リモートの通常の形)。
+	h := "mentioned.example"
+	in := "https://mentioned.example/users/carol/inbox"
+	s := shared
+	userRepo.Users["carol"] = &model.User{
+		ID: "carol", Username: "carol", Host: &h, Inbox: &in, SharedInbox: &s,
+	}
+	// フォロワー側は sharedInbox を返す (repository の COALESCE と同じ)。
+	followingRepo.RemoteInboxes["alice"] = []string{shared}
+
+	hook.OnNoteDeleted(author, &model.Note{
+		ID: "n1", UserID: "alice",
+		Visibility: model.NoteVisibilityFollowers,
+		Mentions:   model.StringArray{"carol"},
+	})
+	require.Len(t, enq.calls, 1,
+		"sharedInbox を持つフォロワー宛に同じ Delete が 2 通出ている (exclude が効いていない)")
+	assert.Equal(t, shared, enq.calls[0].Inbox)
+}

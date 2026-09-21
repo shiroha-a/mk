@@ -199,7 +199,11 @@ func (h *NoteDeleteDeliveryHook) directInboxes(note *model.Note) []string {
 	if note.Visibility != model.NoteVisibilitySpecified {
 		ids = append(ids, h.renotedOrRepliedRemoteUserIDs(note)...)
 	}
-	return remoteInboxesForUserIDs(h.userRepo, ids, note.UserID)
+	// **フォロワー配信と重ねる経路なので `fanoutInbox`。** public / home の
+	// Delete はここで組んだ inbox を `DeliverToFollowersExcluding` の exclude に
+	// 渡すので、フォロワー側が使う URL と揃っていないと同じ Delete が同じ
+	// インスタンスへ 2 通届く。
+	return remoteInboxesForUserIDs(h.userRepo, ids, note.UserID, fanoutInbox)
 }
 
 // renotedOrRepliedRemoteUserIDs returns the remote users who renoted or replied

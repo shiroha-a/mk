@@ -415,3 +415,26 @@ func TestReactionHook_Removed_PublicNote_FanoutToFollowers(t *testing.T) {
 	require.NoError(t, json.Unmarshal(enq.calls[0].Body, &got))
 	assert.Equal(t, "Undo", got["type"])
 }
+
+// **sharedInbox を持つフォロワーでも 1 通であること (敵対的レビュー)。**
+//
+// 既存の dedup テストは fixture が `SharedInbox` を持たず、direct と follower の
+// URL がたまたま一致する形しか見ていなかった。**現実には
+// `ListRemoteFollowerInboxes` が `COALESCE(NULLIF(sharedInbox,”), inbox)` を
+// 返すので、direct 側が個別 inbox を使うと URL が食い違い、exclude が効かずに
+// 2 通届く。**
+func TestReactionHook_Added_SharedInboxFollower_Deduped(t *testing.T) {
+	const shared = "https://remote.example/inbox"
+	hook, enq, userRepo, keypairRepo, _ := newReactionHookWithFollowers(t, "alice", []string{shared})
+	reactor := setupReactor(t, userRepo, keypairRepo)
+	bob, target := remoteAuthor(userRepo)
+	// bob は個別 inbox と sharedInbox の両方を持つ (リモートの通常の形)。
+	s := shared
+	bob.SharedInbox = &s
+	target.Visibility = model.NoteVisibilityPublic
+
+	hook.OnReactionAdded(reactor, target, "🎉")
+	require.Len(t, enq.calls, 1,
+		"sharedInbox を持つフォロワー宛に同じ Like が 2 通出ている (exclude が効いていない)")
+	assert.Equal(t, shared, enq.calls[0].Inbox)
+}

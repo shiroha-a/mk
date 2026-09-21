@@ -415,6 +415,31 @@ func (s *DeliverService) signerCredentials(userID string) (string, string, error
 	return keyID, kp.PrivateKey, nil
 }
 
+// fanoutInbox returns the inbox URL that the FOLLOWER fan-out would use for u.
+//
+// **フォロワー配信と重ねる経路はこちらを使う。** `ListRemoteFollowerInboxes` は
+// `COALESCE(NULLIF(sharedInbox,''), inbox)` を返すので、direct 側が個別 inbox を
+// 使うと `DeliverToFollowersExcluding` の exclude (inbox URL の完全一致) が
+// 効かず、**同じ activity が同じインスタンスへ 2 通届く** (#2567 / #2575 が
+// 塞いだ形)。
+//
+// **exclude に両方入れる形では駄目。** sharedInbox はそのインスタンスの
+// 全フォロワーを表す 1 エントリなので、そこを除外すると**同じインスタンスの
+// 他のフォロワー全員に届かなくなる**。
+//
+// 1:1 だけで完結する経路 (`DeliverToUser`、specified なアンケートの
+// Update(Question)) は `preferredInbox` を使う — あちらは exclude と揃える
+// 必要が無く、個別 inbox のほうが確実に届く (`preferredInbox` の GoDoc 参照)。
+func fanoutInbox(u *model.User) string {
+	if u.SharedInbox != nil && *u.SharedInbox != "" {
+		return *u.SharedInbox
+	}
+	if u.Inbox != nil {
+		return *u.Inbox
+	}
+	return ""
+}
+
 // preferredInbox returns the inbox to use for a 1:1 (direct) delivery.
 //
 // **個別 inbox を優先する。** upstream の `ApDeliverManagerService.execute` は
