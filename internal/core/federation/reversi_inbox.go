@@ -60,6 +60,30 @@ func (p *Processor) handleReversiInvite(act genericActivity) error {
 	if err != nil {
 		return fmt.Errorf("reversi invite: recipient %s not found", toURI)
 	}
+	// **招待先がローカル利用者であることを確かめる。**
+	//
+	// `resolveTargetUser` はローカル prefix に一致しなければ `FindByURI` へ
+	// 落ちるので、リモートの利用者も解決される。見ないと、第三者が
+	// 「リモート同士の対局行」を作れる。同じディレクトリの chat room 招待は
+	// `!invitee.IsLocal()` で落としており、こちらだけ抜けていた。
+	if invitee == nil || !invitee.IsLocal() {
+		slog.Warn("reversi invite: invitee is not a local user", "target", toURI)
+		return ErrUnsupportedActivity
+	}
+	// **ブロックしている相手からの招待は通さない。** 通すと、ブロック済みの
+	// リモート利用者が対象の `reversi:<userID>` ストリームへ `invited` を
+	// push できる。
+	if p.blockingService != nil {
+		blocked, berr := p.blockingService.IsBlocked(invitee.ID, actor.ID)
+		if berr != nil {
+			// 判定できないときは通さない (#2792 と同じ向き)。
+			return fmt.Errorf("reversi invite: cannot check blocking: %w", berr)
+		}
+		if blocked {
+			slog.Debug("reversi invite: dropped from a blocked actor", "actor", actor.ID)
+			return nil
+		}
+	}
 	ctx := context.Background()
 	// 既にこの sessionID に対応する game が Redis に居れば二重処理を防ぐ。
 	if gid, gerr := p.reversiFedCache.Get(ctx, state.GameSessionID); gerr == nil && gid != "" {

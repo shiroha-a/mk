@@ -3,12 +3,14 @@ package federation_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"os"
 	"sync"
 	"testing"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
+	coreblocking "github.com/shiroha-a/mk/internal/core/blocking"
 	"github.com/shiroha-a/mk/internal/core/federation"
 	corefollowing "github.com/shiroha-a/mk/internal/core/following"
 	corereversi "github.com/shiroha-a/mk/internal/core/reversi"
@@ -879,4 +881,138 @@ func TestReversiInbox_Unwired_Unsupported(t *testing.T) {
 		err := p.Process(body)
 		assert.ErrorIs(t, err, federation.ErrUnsupportedActivity)
 	}
+}
+
+// --- Invite の宛先 / ブロック判定 (セキュリティ監査 2026-09-21) ---
+
+// registerRemoteCarol registers a second remote user so that a `to` pointing at
+// a remote actor resolves via FindByURI.
+func registerRemoteCarol(t *testing.T, repo *testutil.MockUserRepository) {
+	t.Helper()
+	carolURI := "https://other.example/users/carol"
+	host := "other.example"
+	repo.Users["carol"] = &model.User{
+		ID: "carol", Username: "carol", UsernameLower: "carol",
+		Host: &host, URI: &carolURI,
+	}
+}
+
+// **招待先がリモートなら作らない。**
+//
+// `resolveTargetUser` はローカル prefix に一致しなければ `FindByURI` へ落ちる
+// ので、`to` にリモートの actor URI を書くと解決されてしまう。見ないと、
+// 第三者が「リモート同士の対局行」をこのサーバーに作れる。
+func TestReversiInbox_Invite_RemoteRecipientRejected(t *testing.T) {
+	b := newReversiProcessor(t)
+	b.processor.SetLocalBaseURL("https://example.com")
+	registerRemoteCarol(t, b.userRepo)
+
+	body := []byte(`{
+		"type": "Invite",
+		"actor": "https://remote.example/users/alice",
+		"to": "https://other.example/users/carol",
+		"object": {
+			"type": "Game",
+			"game_type_uuid": "1c086295-25e3-4b82-b31e-3e3959906312",
+			"game_state": {"game_session_id": "sess-remote-to"}
+		}
+	}`)
+	assert.Error(t, b.processor.Process(body))
+
+	gid, err := b.fedCache.Get(context.Background(), "sess-remote-to")
+	assert.True(t, err != nil || gid == "", "リモート宛の Invite で対局行を作らないこと")
+}
+
+// wireBlocking installs a blocking service backed by an in-memory repository.
+func wireBlocking(t *testing.T, b *reversiFedBundle) *testutil.MockBlockingRepository {
+	t.Helper()
+	blockRepo := testutil.NewMockBlockingRepository()
+	b.processor.SetBlockingService(coreblocking.NewService(
+		b.userRepo, blockRepo, testutil.NewMockFollowingRepository(), b.idGen,
+	))
+	return blockRepo
+}
+
+// **ブロックしている相手からの招待は通さない。**
+//
+// 通すと、ブロック済みのリモート利用者が対象の `reversi:<userID>` ストリームへ
+// `invited` を push できる (= ブロックを迂回した接触経路になる)。
+func TestReversiInbox_Invite_BlockedActorDropped(t *testing.T) {
+	b := newReversiProcessor(t)
+	b.processor.SetLocalBaseURL("https://example.com")
+	registerRemoteAlice(t, b.userRepo)
+	registerLocalBob(t, b.userRepo)
+	blockRepo := wireBlocking(t, b)
+	require.NoError(t, blockRepo.Create(&model.Blocking{
+		ID: "blk-1", BlockerID: "bob", BlockeeID: "alice",
+	}))
+	stub := &stubInvitedStreamPub{}
+	b.processor.SetReversiStreamPublisher(stub)
+
+	body := []byte(`{
+		"type": "Invite",
+		"actor": "https://remote.example/users/alice",
+		"to": "https://example.com/users/bob",
+		"object": {
+			"type": "Game",
+			"game_type_uuid": "1c086295-25e3-4b82-b31e-3e3959906312",
+			"game_state": {"game_session_id": "sess-blocked"}
+		}
+	}`)
+	// ブロック済みは「握り潰す」— 相手に配送失敗を返す必要はない。
+	require.NoError(t, b.processor.Process(body))
+
+	gid, err := b.fedCache.Get(context.Background(), "sess-blocked")
+	assert.True(t, err != nil || gid == "", "ブロック済みの相手の対局行を作らないこと")
+	assert.Empty(t, stub.calls, "ブロック済みの相手の invited を push しないこと")
+}
+
+// **判定できないなら通さない (#2792 と同じ向き)。**
+func TestReversiInbox_Invite_BlockLookupFailureRejected(t *testing.T) {
+	b := newReversiProcessor(t)
+	b.processor.SetLocalBaseURL("https://example.com")
+	registerRemoteAlice(t, b.userRepo)
+	registerLocalBob(t, b.userRepo)
+	blockRepo := wireBlocking(t, b)
+	blockRepo.ExistsErr = errors.New("db down")
+
+	body := []byte(`{
+		"type": "Invite",
+		"actor": "https://remote.example/users/alice",
+		"to": "https://example.com/users/bob",
+		"object": {
+			"type": "Game",
+			"game_type_uuid": "1c086295-25e3-4b82-b31e-3e3959906312",
+			"game_state": {"game_session_id": "sess-blockerr"}
+		}
+	}`)
+	assert.Error(t, b.processor.Process(body))
+
+	gid, err := b.fedCache.Get(context.Background(), "sess-blockerr")
+	assert.True(t, err != nil || gid == "", "ブロック判定に失敗したら対局行を作らないこと")
+}
+
+// **ブロックしていない相手は通る。** 上 2 つが「常に落とす」実装でも緑に
+// ならないようにする。
+func TestReversiInbox_Invite_UnblockedActorPasses(t *testing.T) {
+	b := newReversiProcessor(t)
+	b.processor.SetLocalBaseURL("https://example.com")
+	registerRemoteAlice(t, b.userRepo)
+	registerLocalBob(t, b.userRepo)
+	wireBlocking(t, b)
+
+	body := []byte(`{
+		"type": "Invite",
+		"actor": "https://remote.example/users/alice",
+		"to": "https://example.com/users/bob",
+		"object": {
+			"type": "Game",
+			"game_type_uuid": "1c086295-25e3-4b82-b31e-3e3959906312",
+			"game_state": {"game_session_id": "sess-unblocked"}
+		}
+	}`)
+	require.NoError(t, b.processor.Process(body))
+	g := b.gameRepo.findGameBySession(t, b.fedCache, "sess-unblocked")
+	require.NotNil(t, g)
+	assert.Equal(t, "bob", g.User2ID)
 }
