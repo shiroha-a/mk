@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/roles"
 	"github.com/shiroha-a/mk/internal/api/userrelation"
 	corerole "github.com/shiroha-a/mk/internal/core/role"
+	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/entitycompat/shapetest"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
@@ -240,6 +242,34 @@ func TestList_FullShape(t *testing.T) {
 	assert.Equal(t, true, r["canEditMembersByModerator"])
 	assert.Equal(t, float64(0), r["usersCount"])
 	shapetest.Assert(t, "RoleLite", r) // L3 (#1286)
+}
+
+// 公開応答の roles[].iconUrl は media proxy 経由にする (#1529)。entity.PackRole
+// は admin/roles/show → roles/edit の書き戻し経路があるため raw を返す契約なので、
+// 閲覧者へ配るこの endpoint が包む (#3130 review)。
+func TestList_ProxiesRemoteIconURL(t *testing.T) {
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	h, roleRepo := newTestHandler(t)
+	idGen, _ := id.NewGenerator("aidx")
+	roleID := idGen.Generate(time.Now())
+	remote := "https://remote.example/role.png"
+	roleRepo.Roles[roleID] = &model.Role{
+		ID: roleID, Name: "Public", IsPublic: true, IsExplorable: true, IconURL: &remote,
+	}
+	rec := doPost(h.List, `{}`)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var resp []map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &resp))
+	require.Len(t, resp, 1)
+	got, _ := resp[0]["iconUrl"].(string)
+	assert.True(t, strings.HasPrefix(got, "https://mk.example/proxy/image.webp?"),
+		"公開 roles の remote icon は proxy 経由: %q", got)
+	parsed, err := url.Parse(got)
+	require.NoError(t, err)
+	assert.Equal(t, "mk.example", parsed.Host, "proxy 自身のホスト以外を向いている")
 }
 
 func TestShow_Success(t *testing.T) {

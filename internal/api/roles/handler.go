@@ -365,6 +365,13 @@ func (h *Handler) Notes(c echo.Context) error {
 // (entity.PackRole) に統一する。旧実装は target / condFormula / policies /
 // preserveAssignmentOnMoveAccount を欠き usersCount を 0 固定していた。
 // usersCount は active assignment 数 (role は少数なので per-role count)。
+//
+// **iconUrl だけ media proxy 経由へ差し替える (#1529)。** entity.PackRole は
+// admin/roles/show → roles/edit の書き戻し経路があるため raw を返す契約なので、
+// 閲覧者へ配る公開応答はここで包む。同じ roles[].iconUrl は user_roles.go の
+// badgeRoles / publicRoles でも proxy 済みで、endpoint による非対称を作らない。
 func (h *Handler) packRole(r *model.Role) map[string]any {
-	return entity.PackRole(r, h.roleService.CountAssignedUsers(r.ID), h.idGen, role.DefaultPolicies())
+	out := entity.PackRole(r, h.roleService.CountAssignedUsers(r.ID), h.idGen, role.DefaultPolicies())
+	out["iconUrl"] = entity.ProxyMediaURLPtr(r.IconURL)
+	return out
 }

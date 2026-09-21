@@ -134,3 +134,31 @@ func TestPackRole_CreatedAtFallback(t *testing.T) {
 	require.True(t, ok)
 	assert.Empty(t, cf)
 }
+
+// **PackRole は iconUrl を raw のまま返す。** admin/roles/show の応答は同梱
+// frontend のロール編集フォームに保持され、保存時に admin/roles/update へ
+// **そのまま書き戻される** (pages/admin/roles.edit.vue)。ここで media proxy 経由へ
+// 書き換えると sig 付き URL が role.iconUrl 列に永続化され、proxy secret の変更で
+// 全ロールアイコンが無効になる / varchar(512) の 22001 で更新が 500 になる /
+// TS drop-in で相手が mk-go の /proxy URL を配り続ける (#3130 review)。
+// 閲覧者へ配る経路 (公開 roles/handler.go の packRole と roleAssigned 通知) が
+// それぞれ proxy する。
+func TestPackRole_KeepsIconURLRaw(t *testing.T) {
+	idGen, err := id.NewGenerator("aidx")
+	require.NoError(t, err)
+	entity.SetMediaURLContext(entity.NewMediaURLContext(
+		"https://mk.example", "https://mk.example/proxy", []byte("s"), false, true))
+	t.Cleanup(func() { entity.SetMediaURLContext(nil) })
+
+	remote := "https://remote.example/role.png"
+	out := entity.PackRole(&model.Role{ID: "r1", Name: "remote", IconURL: &remote}, 0, idGen, nil)
+	got, ok := out["iconUrl"].(*string)
+	require.True(t, ok)
+	require.NotNil(t, got)
+	assert.Equal(t, remote, *got,
+		"PackRole は保存値 (raw) を返す契約。proxy は公開経路 / 通知の lookup で行う")
+
+	// nil は nil のまま。
+	out = entity.PackRole(&model.Role{ID: "r3", Name: "none"}, 0, idGen, nil)
+	assert.Nil(t, out["iconUrl"])
+}

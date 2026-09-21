@@ -440,7 +440,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		if err != nil || r == nil {
 			return nil, false
 		}
-		return entity.PackRole(r, roleService.CountAssignedUsers(roleID), idGen, corerole.DefaultPolicies()), true
+		packed := entity.PackRole(r, roleService.CountAssignedUsers(roleID), idGen, corerole.DefaultPolicies())
+		// 通知欄 (MkRolePreview) は iconUrl を <img src> に載せる。entity.PackRole
+		// は admin 編集フォームの書き戻し経路があるため raw を返す契約なので、
+		// 表示に使うここで media proxy 経由へ差し替える (#1529)。
+		packed["iconUrl"] = entity.ProxyMediaURLPtr(r.IconURL)
+		return packed, true
 	}
 	// abuseReport 通知の現在の状態を read 時に引く (#2868)。通知は作成時点しか
 	// 持たないので、他のモデレーターが対処しても通知欄は「未対応」のまま残る。

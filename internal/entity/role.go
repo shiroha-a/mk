@@ -20,6 +20,16 @@ const roleTSTimeFormat = "2006-01-02T15:04:05.000Z"
 // role's own overrides is filled with {useDefault:true, priority:0, value}.
 // idGen derives createdAt from the role ID (aidx); on failure it falls back to
 // updatedAt so the timestamp is always a valid ISO string.
+//
+// **iconUrl は raw のまま返す (proxy 化しない)。** この応答は admin/roles/show
+// から同梱 frontend のロール編集フォーム (pages/admin/roles.edit.vue) に渡り、
+// 保存時に `...data.value` の展開で admin/roles/update へ**そのまま書き戻される**。
+// ここで包むと sig 付き URL が role.iconUrl 列へ永続化され、(1) proxy secret の
+// 変更で保存済みロールアイコンが全部無効になり、(2) varchar(512) の 22001 で
+// 更新が 500 になり、(3) TS drop-in で相手が mk-go の /proxy URL を配り続ける
+// (WebpublicOrOriginalURL と同じ理由)。**表示用の proxy は閲覧者へ返す経路**
+// (公開 roles/handler.go の packRole / roleAssigned 通知の lookup) が行うので、
+// ここは原本 (= 保存値) を返す。
 func PackRole(r *model.Role, usersCount int, idGen id.Generator, defaultPolicies map[string]any) map[string]any {
 	createdAt := r.UpdatedAt.UTC().Format(roleTSTimeFormat)
 	if idGen != nil {

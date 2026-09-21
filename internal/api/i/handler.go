@@ -1171,6 +1171,10 @@ func jsonbArray(raw []byte) any {
 // /api/i と /api/i/update の両方が同じ値を返さないと、フロントの
 // updateCurrentAccountPartial が `$i` に部分マージしたときに policies が
 // 消えてしまう。
+//
+// **roles[].iconUrl は entity の packPublicRoles と同じく proxy 経由にする
+// (#1529)。** ここだけ生 URL を返していたため、同じ `roles` field が
+// users/show (PackUserDetailed) と /api/i で食い違っていた。
 func (h *Handler) rolePayload(userID string) (isAdmin bool, isMod bool, policies map[string]any, roles []any) {
 	policies = role.DefaultPolicies()
 	if h.roleProvider != nil {
@@ -1183,7 +1187,7 @@ func (h *Handler) rolePayload(userID string) (isAdmin bool, isMod bool, policies
 					"id":              r.ID,
 					"name":            r.Name,
 					"color":           r.Color,
-					"iconUrl":         r.IconURL,
+					"iconUrl":         entity.ProxyMediaURLPtr(r.IconURL),
 					"description":     r.Description,
 					"isModerator":     r.IsModerator,
 					"isAdministrator": r.IsAdministrator,

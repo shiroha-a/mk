@@ -1277,7 +1277,8 @@ func (h *Handler) packAdminUser(u *model.User, profile *model.UserProfile, showI
 		// GetUserRoles は expired 除外済みの active role list。err 時は
 		// frontend の `.map(...)` が例外を吐かないよう空配列に倒して観測する。
 		if userRoles, rerr := h.roleService.GetUserRoles(u.ID); rerr == nil {
-			resp["roles"] = userRoles
+			// iconUrl だけ media proxy 経由へ差し替える (shape は現状維持)。
+			resp["roles"] = proxyRoleIconURLs(userRoles)
 		} else {
 			slog.Warn("admin/show-user: failed to load roles", "userId", u.ID, "err", rerr)
 			resp["roles"] = []any{}
@@ -2540,6 +2541,30 @@ func invalidDefaultPolicyKey(policies map[string]any) string {
 // N+1 でも許容、upstream pack も per-role count する)。
 func (h *Handler) packRole(r *model.Role) map[string]any {
 	return entity.PackRole(r, h.roleService.CountAssignedUsers(r.ID), h.idGen, role.DefaultPolicies())
+}
+
+// proxyRoleIconURLs returns a shallow copy of roles whose iconUrl is rewritten
+// through the media proxy, without PackRole's usersCount / policies cost.
+//
+// admin/show-user は割当済みロールの一覧が要るだけで、フル Role detail
+// (policies / usersCount) は返さない。PackRole に寄せると role ごとの
+// CountAssignedUsers (per-role COUNT) が増えるため、iconUrl だけを差し替える。
+// iconUrl は admin 設定だが remote URL を指せるので、生のまま返すと
+// frontend の MkRolePreview が <img src> へ直接載せて閲覧者の IP が漏れる /
+// CSP enforce で画像が消える (#1529)。
+//
+// 元の *model.Role は書き換えない (共有の入力構造体を壊さない)。
+func proxyRoleIconURLs(roles []*model.Role) []*model.Role {
+	out := make([]*model.Role, len(roles))
+	for i, r := range roles {
+		if r == nil {
+			continue
+		}
+		cp := *r
+		cp.IconURL = entity.ProxyMediaURLPtr(r.IconURL)
+		out[i] = &cp
+	}
+	return out
 }
 
 // RolesShow handles POST /api/admin/roles/show.
