@@ -179,6 +179,78 @@ func TestGetPublicURL_Matrix(t *testing.T) {
 			t.Errorf("non-image webpublic should stay raw, got %v", got)
 		}
 	})
+	// §3.2: 外部 proxy 構成では mediaProxyBase が instance と別ホストになる。
+	// 既に自分の proxy が包んだ URL を再 pack しても二段にならないこと
+	// (isRemoteOrigin が mediaProxyHost を local 扱いする)。
+	t.Run("already-proxied URL is not wrapped again (external proxy)", func(t *testing.T) {
+		c := externalCtx()
+		inner := "https://" + remoteHost + "/orig.png"
+		once := c.ProxiedURL(inner, modeDefault)
+		if c.isRemoteOrigin(once) {
+			t.Fatalf("own external proxy URL must not be a remote origin: %s", once)
+		}
+		f := &model.DriveFile{Type: "image/png", URL: once}
+		if got := c.GetPublicURL(f, modeDefault); got != once {
+			t.Errorf("already-proxied url was wrapped again:\n got %s\nwant %s", got, once)
+		}
+	})
+}
+
+// TestIsRemoteOrigin_OwnHosts covers the local-host set: instance / object
+// storage / **自前の media proxy**。外部 proxy 構成では mediaProxyBase が
+// instance と別ホストになるため、これを見ないと proxy 済み URL を再 wrap する
+// (§3.2)。
+func TestIsRemoteOrigin_OwnHosts(t *testing.T) {
+	c := externalCtx()
+	c.SetOwnMediaBaseURLResolver(func() string { return "https://cdn.example/bucket" })
+
+	if !c.isRemoteOrigin("https://" + remoteHost + "/x.png") {
+		t.Error("remote host must be remote")
+	}
+	for name, raw := range map[string]string{
+		"instance host":  testInstanceURL + "/files/x.png",
+		"external proxy": testExternalProxy + "/image.webp?url=x",
+		"object storage": "https://cdn.example/bucket/files/x.png",
+		"relative":       "/identicon/x",
+		"host-less":      "data:image/png;base64,AAAA",
+	} {
+		if c.isRemoteOrigin(raw) {
+			t.Errorf("%s must be local: %s", name, raw)
+		}
+	}
+}
+
+// ProxyMediaURL / ProxyAvatarURLString も isRemoteOrigin を通るので、既に
+// proxy 済みの URL を再帰的に包まない (§3.2)。
+func TestProxyHelpers_DoNotDoubleWrapExternalProxy(t *testing.T) {
+	SetMediaURLContext(externalCtx())
+	defer SetMediaURLContext(nil)
+
+	once := externalCtx().ProxiedURL("https://"+remoteHost+"/a.png", modeDefault)
+	if got := ProxyMediaURL(once); got != once {
+		t.Errorf("ProxyMediaURL double-wrapped:\n got %s\nwant %s", got, once)
+	}
+	if got := ProxyAvatarURLString(once); got != once {
+		t.Errorf("ProxyAvatarURLString double-wrapped:\n got %s\nwant %s", got, once)
+	}
+}
+
+// 外部 proxy 構成では、利用者由来 URL が**外部 proxy 自身のホスト**を名乗れる。
+// 通知 icon / アプリの iconUrl / URL プレビューの og:image は任意 URL を入れられる
+// ので、mediaProxyHost を local 判定へ足していないと、そういう URL を読むたびに
+// `<external proxy>/image.webp?url=<external proxy>/image.webp?...` の二段になる。
+// 期限付き署名 (ProxyUserSuppliedMediaURLPtr) はその入口なので、ここで再 wrap
+// しないことを固定する (#3130 review: 経路の実在をテストで示す)。
+func TestUserSuppliedProxyURL_DoesNotDoubleWrapExternalProxy(t *testing.T) {
+	SetMediaURLContext(externalCtx())
+	defer SetMediaURLContext(nil)
+
+	userSupplied := testExternalProxy + "/image.webp?url=" +
+		url.QueryEscape("https://"+remoteHost+"/icon.png")
+	got := ProxyUserSuppliedMediaURLPtr(sp(userSupplied))
+	if got == nil || *got != userSupplied {
+		t.Errorf("user-supplied URL on the external proxy host was wrapped again: %v", got)
+	}
 }
 
 // TestGetThumbnailURL covers the #460 fallback preservation + remote wrapping.

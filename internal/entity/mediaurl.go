@@ -36,6 +36,22 @@ type MediaURLContext struct {
 	// instanceHost is the host[:port] of this instance, used to distinguish
 	// local URLs (which must never be proxied) from remote origins.
 	instanceHost string
+	// mediaProxyHost is the host[:port] of mediaProxyBase.
+	//
+	// **既に自分の proxy を通した URL を再 wrap しないために要る。** 外部 proxy
+	// 構成では mediaProxyBase が instance と別ホストになるので、instanceHost /
+	// ownMediaHost の比較だけでは「(外部)proxy 済み URL」を remote origin と
+	// 誤判定し、`<proxy>/image.webp?url=<proxy>/image.webp?...` という二段の
+	// proxy URL を作ってしまう (§3.2)。
+	//
+	// **現行コードで実際に到達する経路は利用者由来 URL** — 通知 icon
+	// (notifications/create) / アプリの iconUrl / URL プレビューの og:image は
+	// どれも任意 URL を受け付け、外部 proxy のホスト名は応答から公開されている
+	// ので、`<external proxy>/image.webp?url=...` を値として入れて読み戻せば
+	// 二段になる。DriveFile 側は現状 link 形式の remote URL しか入らないため
+	// 人工的だが、判定材料を「自分が配信に使うホスト集合」に揃えておく
+	// (#3130 review: 将来の経路に対する保険)。
+	mediaProxyHost string
 	// mediaProxyBase is config.MediaProxy (e.g. "https://host/proxy" for the
 	// internal proxy, or the operator's external proxy base).
 	mediaProxyBase string
@@ -76,8 +92,13 @@ func NewMediaURLContext(instanceURL, mediaProxy string, secret []byte, externalE
 	if u, err := url.Parse(instanceURL); err == nil {
 		host = u.Host
 	}
+	proxyHost := ""
+	if u, err := url.Parse(mediaProxy); err == nil {
+		proxyHost = u.Host
+	}
 	return &MediaURLContext{
 		instanceHost:     host,
+		mediaProxyHost:   proxyHost,
 		mediaProxyBase:   strings.TrimRight(mediaProxy, "/"),
 		secret:           secret,
 		externalEnabled:  externalEnabled,
@@ -232,6 +253,14 @@ func (c *MediaURLContext) shouldProxyRemote() bool {
 // URLs are treated as local and never proxied, which also prevents
 // double-proxying an already-local /proxy or /files URL.
 //
+// **自分の media proxy ホストも local 扱いする。** 外部 proxy 構成では
+// mediaProxyBase が instance と別ホストなので、既に proxy で包んだ URL を
+// もう一度 pack すると二段になる (§3.2)。internal proxy では mediaProxyBase が
+// instance ホストなので冗長なだけで害は無い。実際に到達するのは任意 URL を
+// 受け付けるフィールド (通知 icon / アプリ iconUrl / URL プレビュー og:image) で、
+// DriveFile 経由は現状 link 形式しか無く人工的 (mediaProxyHost の field コメント
+// 参照)。
+//
 // 「自分のホスト」は instance ドメインだけではない。オブジェクトストレージを
 // 有効にすると、自分が保存したファイルの URL は CDN / R2 の公開ドメインを指す。
 // instance ドメインとの比較だけで判定すると**自分のファイルまで remote 扱い**に
@@ -252,6 +281,9 @@ func (c *MediaURLContext) isRemoteOrigin(rawURL string) bool {
 		return false
 	}
 	if strings.EqualFold(u.Host, c.instanceHost) {
+		return false
+	}
+	if c.mediaProxyHost != "" && strings.EqualFold(u.Host, c.mediaProxyHost) {
 		return false
 	}
 	if h := c.ownMediaHost(); h != "" && strings.EqualFold(u.Host, h) {
