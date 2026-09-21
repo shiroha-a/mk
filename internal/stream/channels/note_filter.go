@@ -329,7 +329,17 @@ func hideNoteRawForViewer(payload []byte, viewer *model.User, snap map[string]bo
 	}
 	hideRenoteRenote := embedRawHideable(renoteRenoteRaw, viewer, snap, nowMs)
 	hideRenoteReply := embedRawHideable(renoteReplyRaw, viewer, snap, nowMs)
-	if !hideTop && !hideRenote && !hideReply && !hideRenoteRenote && !hideRenoteReply {
+	// **#2106 L5 の降格も反映する (viewer 非依存)。** REST (`notehide`) と
+	// push (`core/webpush`) は packed の `visibility` を `followers` へ
+	// 書き換えるのに、stream だけ元の `public` のまま流していた。同じノートが
+	// 経路によって違う visibility で届く。
+	downTop := corenote.ShouldDowngradeVisibility(embedFactsFromProbe(probe.embedProbe), nowMs)
+	downRenote := embedRawDowngradable(probe.Renote, nowMs)
+	downReply := embedRawDowngradable(probe.Reply, nowMs)
+	downRenoteRenote := embedRawDowngradable(renoteRenoteRaw, nowMs)
+	downRenoteReply := embedRawDowngradable(renoteReplyRaw, nowMs)
+	if !hideTop && !hideRenote && !hideReply && !hideRenoteRenote && !hideRenoteReply &&
+		!downTop && !downRenote && !downReply && !downRenoteRenote && !downRenoteReply {
 		// 隠すものが無い (= no-embed / public / own / follower) → verbatim。
 		return payload, false
 	}
@@ -351,6 +361,21 @@ func hideNoteRawForViewer(payload []byte, viewer *model.User, snap map[string]bo
 	}
 	if hideReply && full.Reply != nil {
 		entity.HideNoteEntity(full.Reply)
+	}
+	// **hide の後に書き換える。** hide の判定は元の visibility を読むので、
+	// 先に降格すると判定が変わる (notehide / webpush と同じ順)。
+	downgradeVisibility(&full, downTop)
+	if full.Renote != nil {
+		downgradeVisibility(full.Renote, downRenote)
+		if full.Renote.Renote != nil {
+			downgradeVisibility(full.Renote.Renote, downRenoteRenote)
+		}
+		if full.Renote.Reply != nil {
+			downgradeVisibility(full.Renote.Reply, downRenoteReply)
+		}
+	}
+	if full.Reply != nil {
+		downgradeVisibility(full.Reply, downReply)
 	}
 	out, err := json.Marshal(&full)
 	if err != nil {
@@ -398,6 +423,26 @@ func embedRawHideable(raw json.RawMessage, viewer *model.User, snap map[string]b
 		return false
 	}
 	return corenote.HideEmbedDecision(viewer, embedFactsFromProbe(p), followsFromSnap(snap), nowMs)
+}
+
+// embedRawDowngradable reports whether a raw embed's packed visibility must be
+// rewritten to `followers` (#2106 L5, upstream treatVisibility)。Viewer 非依存。
+func embedRawDowngradable(raw json.RawMessage, nowMs int64) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var p embedProbe
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return false
+	}
+	return corenote.ShouldDowngradeVisibility(embedFactsFromProbe(p), nowMs)
+}
+
+// downgradeVisibility rewrites n's packed visibility when down is true.
+func downgradeVisibility(n *entity.NoteEntity, down bool) {
+	if down && n != nil {
+		n.Visibility = string(model.NoteVisibilityFollowers)
+	}
 }
 
 // followsFromSnap turns a per-connection following snapshot into the follows

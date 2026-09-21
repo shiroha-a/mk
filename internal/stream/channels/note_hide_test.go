@@ -273,11 +273,35 @@ func TestHideTopLevelForViewer_FollowersOnlyBeforeDowngrade(t *testing.T) {
 			t.Error("downgraded public top-level note must be blanked for non-follower")
 		}
 	})
-	t.Run("follower verbatim", func(t *testing.T) {
+	// **フォロワーには本文が見えるが、visibility は降格される。**
+	//
+	// `visibility` の書き換えは viewer 非依存 (#2106 L5、upstream
+	// treatVisibility) で、REST (`notehide`) と push (`core/webpush`) は
+	// 既に反映している。stream だけ元の `public` のまま流すと、同じノートが
+	// 経路によって違う visibility で届く。
+	t.Run("follower sees the body but a downgraded visibility", func(t *testing.T) {
 		payload := mustJSON(t, note)
 		out := hideEmbedsForViewer(payload, viewer, map[string]bool{"author": true}, hideNowMs)
+		var got entity.NoteEntity
+		if err := json.Unmarshal(out, &got); err != nil {
+			t.Fatal(err)
+		}
+		if got.IsHidden || got.Text == nil {
+			t.Error("follower must still see the body")
+		}
+		if got.Visibility != "followers" {
+			t.Errorf("visibility must be downgraded to followers, got %q", got.Visibility)
+		}
+	})
+
+	// **降格の対象でないノートは verbatim のまま** (再シリアライズで余計な
+	// 差分を出さない)。
+	t.Run("ordinary note stays verbatim", func(t *testing.T) {
+		plain := tlStream("n2", "author", "public", streamPastWindow, entity.UserLite{})
+		payload := mustJSON(t, plain)
+		out := hideEmbedsForViewer(payload, viewer, map[string]bool{"author": true}, hideNowMs)
 		if !bytes.Equal(out, payload) {
-			t.Error("follower must see the downgraded note -> verbatim")
+			t.Error("降格も hide も要らないノートは素通しすること")
 		}
 	})
 }
@@ -331,5 +355,30 @@ func TestHideTopLevelForViewer_InputBytesUnchanged(t *testing.T) {
 	_ = hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs) // hide path
 	if !bytes.Equal(payload, cp) {
 		t.Error("top-level hide path must not mutate the shared input buffer")
+	}
+}
+
+// **降格が要らないノートの visibility を書き換えないこと。**
+//
+// hide で再シリアライズする経路を通るノートは、降格の判定が false でも
+// `downgradeVisibility` を通る。無条件に書き換えると、`specified` の DM が
+// blanked された結果として `followers` に化ける (受信者からは「誰に届いたか」
+// の意味が変わる)。
+func TestHideTopLevelForViewer_KeepsVisibilityWhenNoDowngrade(t *testing.T) {
+	viewer := &model.User{ID: "viewer"}
+	// specified の DM を非受信者が受ける → blanked されるが降格は不要。
+	note := tlStream("n", "author", "specified", streamPastWindow, entity.UserLite{})
+	payload := mustJSON(t, note)
+
+	out := hideEmbedsForViewer(payload, viewer, map[string]bool{}, hideNowMs)
+	var got entity.NoteEntity
+	if err := json.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	if !got.IsHidden {
+		t.Fatal("specified top-level must be blanked for a non-recipient")
+	}
+	if got.Visibility != "specified" {
+		t.Errorf("降格が要らないノートの visibility を書き換えている: %q", got.Visibility)
 	}
 }
