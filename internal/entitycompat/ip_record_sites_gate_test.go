@@ -48,8 +48,19 @@ func TestIPRecordCallSitesAreAllowlisted(t *testing.T) {
 	// **抽出が壊れたことを、実在する call site の名指しで見る。** 「件数の下限」だと
 	// (a) allowlist の長さと比べる形は dead-entry 検査より論理的に弱く、(b) call site を
 	// 正当に 1 つ消しただけでも「抽出が壊れている」と**事実と逆の診断**を出す (実測)。
+	// **`assert` で回す。** `require` だと最初の 1 件で止まり、下の dead-entry 検査の
+	// 正確な診断 (「allowlist の %q が実在しない」) に到達しない (実測)。
 	for _, want := range mustDetectRecordSites {
-		require.Truef(t, found[want], "%s を拾えていない。抽出が壊れているか、call site が移動した", want)
+		assert.Truef(t, found[want], "%s を拾えていない。抽出が壊れているか、call site が移動した", want)
+	}
+
+	// **拾ってはいけない形も固定する。** 引数の数が違う呼び出しと、`Record` という
+	// 名前のフィールドへのアクセスは call site ではない。
+	for _, notWant := range []string{
+		"internal/entitycompat/recordfixture/sample.go#CallOneArg",
+		"internal/entitycompat/recordfixture/sample.go#FieldAccess",
+	} {
+		assert.Falsef(t, found[notWant], "%s を call site として拾っている (偽陽性)", notWant)
 	}
 
 	for _, s := range sites {
@@ -80,13 +91,17 @@ var mustDetectRecordSites = []string{
 	"internal/api/signin/passkey.go#finishPasskeySignin",
 	"internal/core/deliveryhealth/service.go#RecordDelivery",
 	"internal/server/middleware/client_ip.go#RecordClientIP",
+	"internal/entitycompat/recordfixture/sample.go#CallTwoArgs",
+	"internal/entitycompat/recordfixture/sample.go#MethodValue",
+	"internal/entitycompat/recordfixture/sample.go#var Closure",
 }
 
 // ipRecordAllowlist は 2 引数の `.Record(` を許す場所と、その理由。
 var ipRecordAllowlist = map[string]string{
 	"internal/api/signin/handler.go#RecordSuccessfulSignin": "" +
 		"password / TOTP / backup code / WebAuthn(2FA) が通る成功側の共通入口。" +
-		"失敗経路 `fail()` からは呼ばれない (`fail()` が呼ぶのは `recordSignin` だけ)。",
+		"失敗経路 `fail()` からは呼ばれない — `fail()` が触るのは `signins` テーブル (`recordSignin`) " +
+		"だけで、IP recorder にも `RecordSuccessfulSignin` にも届かない。",
 	"internal/api/signin/passkey.go#finishPasskeySignin": "" +
 		"パスキーの成功経路。`RecordSuccessfulSignin` を経由せず直接呼ぶ — あちらと違って " +
 		"レスポンスを `{signinResponse: ...}` で包み、`loginNotifier` と新規ログイン通知メールを " +
@@ -97,6 +112,15 @@ var ipRecordAllowlist = map[string]string{
 		"(未認証は `TestRecordClientIP_SkipsAnonymous` が固定)。",
 	"internal/core/deliveryhealth/service.go#RecordDelivery": "" +
 		"IP とは無関係。配送先ホストごとの成否を記録する (`RecordDelivery` の中の `Record(host, outcome)`)。",
+
+	// --- 走査の枝を固定する人工ソース ---
+	//
+	// **実データには「メソッド値として持ち出す」形も「package 変数のクロージャの中で
+	// 呼ぶ」形も無い**ので、そこを拾わない実装にしても実データからは何も起こらない。
+	// 枝そのものをここで固定する (`secretfield-check` と同じ形)。
+	"internal/entitycompat/recordfixture/sample.go#CallTwoArgs": "人工ソース: 素直な 2 引数の呼び出し。",
+	"internal/entitycompat/recordfixture/sample.go#MethodValue": "人工ソース: メソッド値として持ち出す形。",
+	"internal/entitycompat/recordfixture/sample.go#var Closure": "人工ソース: package 変数のクロージャの中の呼び出し。",
 }
 
 // 成功側の共通入口を呼ぶ場所も固定する。
@@ -107,7 +131,7 @@ var ipRecordAllowlist = map[string]string{
 func TestRecordSuccessfulSigninCallSitesAreAllowlisted(t *testing.T) {
 	root := filepath.Join(repoRoot(t), "internal")
 	var sites []recordSite
-	for _, s := range scanNamedCalls(t, root, "RecordSuccessfulSignin") {
+	for _, s := range scanCallSites(t, root, "RecordSuccessfulSignin", 0) {
 		// 宣言そのもの (`func (h *Handler) RecordSuccessfulSignin`) は呼び出しでは
 		// ないので、走査は呼び出しだけを返す。
 		sites = append(sites, s)
@@ -164,12 +188,18 @@ func TestPasskeyIPRecordComesAfterFailures(t *testing.T) {
 	require.NotNil(t, fn, "finishPasskeySignin が見つからない (rename した?)")
 
 	var lastFail, firstRecord token.Pos
+	noteRecord := func(pos token.Pos) {
+		if firstRecord == token.NoPos || pos < firstRecord {
+			firstRecord = pos
+		}
+	}
+	called := map[ast.Node]bool{}
 	ast.Inspect(fn.Body, func(n ast.Node) bool {
 		call, ok := n.(*ast.CallExpr)
 		if !ok {
 			return true
 		}
-		sel, ok := call.Fun.(*ast.SelectorExpr)
+		sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
 		if !ok {
 			return true
 		}
@@ -179,9 +209,19 @@ func TestPasskeyIPRecordComesAfterFailures(t *testing.T) {
 				lastFail = call.Pos()
 			}
 		case "Record":
-			if len(call.Args) == 2 && (firstRecord == token.NoPos || call.Pos() < firstRecord) {
-				firstRecord = call.Pos()
+			called[sel] = true
+			if len(call.Args) == 2 {
+				noteRecord(call.Pos())
 			}
+		}
+		return true
+	})
+	// **メソッド値も候補にする。** 呼び出しの形だけを見ると、`f := h.ipRecorder.Record`
+	// と書いて前に置く変異が素通りする (実測)。
+	skip := nonValueSelectors(fn.Body)
+	ast.Inspect(fn.Body, func(n ast.Node) bool {
+		if sel, ok := n.(*ast.SelectorExpr); ok && sel.Sel.Name == "Record" && !called[sel] && !skip[sel] {
+			noteRecord(sel.Pos())
 		}
 		return true
 	})
@@ -189,8 +229,9 @@ func TestPasskeyIPRecordComesAfterFailures(t *testing.T) {
 	require.NotEqual(t, token.NoPos, lastFail, "`fail(` を 1 つも拾えていない (検査が空振りしている)")
 	require.NotEqual(t, token.NoPos, firstRecord, "IP を記録する `Record(` を拾えていない")
 	assert.Greaterf(t, int(firstRecord), int(lastFail),
-		"IP の記録が `fail(` より前にある (%s)。失敗を返し切ってから記録すること",
-		fset.Position(firstRecord))
+		"IP の記録 (%s) と `fail(` (%s) の順序が逆。**失敗を返し切ってから記録すること** — "+
+			"記録を前へ動かしたか、記録より後ろに失敗分岐を足したかのどちらか。",
+		fset.Position(firstRecord), fset.Position(lastFail))
 }
 
 type recordSite struct {
@@ -202,15 +243,28 @@ func (s recordSite) key() string { return s.File + "#" + s.Func }
 
 // scanRecordRefs は `X.Record(a, b)` の呼び出しと、**呼び出さずに値として持ち出した
 // `X.Record`** を、それを含む宣言ごとに拾う。
+func scanRecordRefs(t *testing.T, root string) []recordSite {
+	t.Helper()
+	return scanCallSites(t, root, "Record", 2)
+}
+
+// scanCallSites は `X.<name>(...)` の呼び出しと、呼び出さずに値として持ち出した
+// `X.<name>` を、それを含む宣言ごとに拾う。`wantArgs` が正なら引数の数で絞る。
 //
 // **引数の数だけで絞らない。** 監査ログの `Record(iplookuplog.Entry{...})` は 1 引数
 // なので入らないが、`rec := h.ipRecorder.Record; rec(a, b)` と書くと呼び出し側が
-// `*ast.Ident` になり、引数 2 の `.Record(` としては現れない (実測でその変異が静的
-// ゲートを素通りした)。メソッド値として持ち出す形も call site として数える。
+// `*ast.Ident` になり、引数 2 の `.Record(` としては現れない。**署名検証より前に
+// 呼ばれる `resolvePasskeyUser` にその形を仕込む変異が、静的ゲートも振る舞いテストも
+// 素通りした** (実測)。メソッド値として持ち出す形も call site として数える。
+//
+// **型の位置とフィールドアクセスは除く。** `a.Record{}` / `var r a.Record` /
+// `h.Record.Val` のような正当な書き方まで call site にすると、診断が事実と無関係な
+// ことを断定する。いまの `internal/` に該当は 0 件だが、`Record` は一般的な語なので
+// 踏むのは時間の問題。
 //
 // 型は見ていないので IP 以外の 2 引数 Record も拾うが、それは allowlist に理由を
 // 書いて分ける (`internal/core/deliveryhealth` が該当)。
-func scanRecordRefs(t *testing.T, root string) []recordSite {
+func scanCallSites(t *testing.T, root, name string, wantArgs int) []recordSite {
 	t.Helper()
 	repo := repoRoot(t)
 	var sites []recordSite
@@ -242,25 +296,26 @@ func scanRecordRefs(t *testing.T, root string) []recordSite {
 		rel = filepath.ToSlash(rel)
 
 		eachDecl(f, func(owner string, n ast.Node) {
+			skip := nonValueSelectors(n)
 			called := map[ast.Node]bool{}
 			ast.Inspect(n, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Record" {
+				sel, ok := unparen(call.Fun).(*ast.SelectorExpr)
+				if !ok || sel.Sel.Name != name {
 					return true
 				}
 				called[sel] = true
-				if len(call.Args) == 2 {
+				if wantArgs <= 0 || len(call.Args) == wantArgs {
 					sites = append(sites, recordSite{File: rel, Func: owner})
 				}
 				return true
 			})
 			ast.Inspect(n, func(n ast.Node) bool {
 				sel, ok := n.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "Record" || called[sel] {
+				if !ok || sel.Sel.Name != name || called[sel] || skip[sel] {
 					return true
 				}
 				// 呼び出さずに参照している = メソッド値として持ち出している。
@@ -276,52 +331,64 @@ func scanRecordRefs(t *testing.T, root string) []recordSite {
 	return sites
 }
 
-// scanNamedCalls は `X.<name>(...)` の呼び出しを、それを含む宣言ごとに拾う。
-// 宣言そのもの (`func (h *Handler) <name>`) は呼び出しではないので入らない。
-func scanNamedCalls(t *testing.T, root, name string) []recordSite {
-	t.Helper()
-	repo := repoRoot(t)
-	var sites []recordSite
-	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			if d.Name() == "testdata" {
-				return fs.SkipDir
+// nonValueSelectors marks selector expressions that are not values: 型の位置、
+// 別のセレクタの土台、代入の左辺。
+func nonValueSelectors(root ast.Node) map[ast.Node]bool {
+	skip := map[ast.Node]bool{}
+	var mark func(ast.Expr)
+	mark = func(e ast.Expr) {
+		for {
+			switch x := e.(type) {
+			case *ast.StarExpr:
+				e = x.X
+			case *ast.ArrayType:
+				e = x.Elt
+			case *ast.Ellipsis:
+				e = x.Elt
+			default:
+				if sel, ok := e.(*ast.SelectorExpr); ok {
+					skip[sel] = true
+				}
+				return
 			}
-			return nil
 		}
-		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
-			return nil
+	}
+	ast.Inspect(root, func(n ast.Node) bool {
+		switch x := n.(type) {
+		case *ast.SelectorExpr:
+			// `h.Record.Val` の土台側 (`h.Record`) は最終的なフィールド名ではない。
+			mark(x.X)
+		case *ast.CompositeLit:
+			mark(x.Type)
+		case *ast.TypeAssertExpr:
+			mark(x.Type)
+		case *ast.ValueSpec:
+			mark(x.Type)
+		case *ast.Field:
+			mark(x.Type)
+		case *ast.MapType:
+			mark(x.Key)
+			mark(x.Value)
+		case *ast.ChanType:
+			mark(x.Value)
+		case *ast.AssignStmt:
+			for _, lhs := range x.Lhs {
+				mark(lhs)
+			}
 		}
-		fset := token.NewFileSet()
-		f, perr := parser.ParseFile(fset, path, nil, 0)
-		if perr != nil {
-			return fmt.Errorf("parse %s: %w", path, perr)
-		}
-		rel, rerr := filepath.Rel(repo, path)
-		if rerr != nil {
-			return rerr
-		}
-		rel = filepath.ToSlash(rel)
-		eachDecl(f, func(owner string, n ast.Node) {
-			ast.Inspect(n, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
-				if !ok {
-					return true
-				}
-				if sel, ok := call.Fun.(*ast.SelectorExpr); ok && sel.Sel.Name == name {
-					sites = append(sites, recordSite{File: rel, Func: owner})
-				}
-				return true
-			})
-		})
-		return nil
+		return true
 	})
-	require.NoError(t, err, "walk %s", root)
-	sort.Slice(sites, func(i, j int) bool { return sites[i].key() < sites[j].key() })
-	return sites
+	return skip
+}
+
+func unparen(e ast.Expr) ast.Expr {
+	for {
+		p, ok := e.(*ast.ParenExpr)
+		if !ok {
+			return e
+		}
+		e = p.X
+	}
 }
 
 // eachDecl calls fn for every top-level declaration, naming it.

@@ -245,23 +245,39 @@ func TestFinishPasskeySignin_FailuresDoNotRecordIP(t *testing.T) {
 		return h, rec
 	}
 
+	// **`nil user` と `suspended` は profile を引く前に return する**ので、fixture の
+	// profile の有無は結果に効かない。効くケースと同じ表に混ぜると「この分岐は profile の
+	// 状態に依存する」と誤読させる (実測: 反転しても緑) ので、分けてある。
 	for _, tc := range []struct {
 		name string
 		user *model.User
-		// withProfile / passwordless は fixture の作り分け。
+	}{
+		{name: "nil user", user: nil},
+		{name: "suspended", user: &model.User{ID: "u1", IsSuspended: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, ipRec := newHandler(t, true, true)
+			c := newCtx()
+			rec := c.Response().Writer.(*httptest.ResponseRecorder)
+			require.NoError(t, h.finishPasskeySignin(c, tc.user, nil))
+			require.Equal(t, http.StatusForbidden, rec.Code)
+			assert.Zero(t, ipRec.n(), "失敗したパスキー認証の IP を記録している")
+		})
+	}
+
+	for _, tc := range []struct {
+		name         string
 		withProfile  bool
 		passwordless bool
 	}{
-		{name: "nil user", user: nil, withProfile: true},
-		{name: "suspended", user: &model.User{ID: "u1", IsSuspended: true}, withProfile: true},
-		{name: "no profile", user: &model.User{ID: "u1"}, withProfile: false},
-		{name: "passwordless disabled", user: &model.User{ID: "u1"}, withProfile: true, passwordless: false},
+		{name: "no profile", withProfile: false},
+		{name: "passwordless disabled", withProfile: true, passwordless: false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h, ipRec := newHandler(t, tc.passwordless, tc.withProfile)
 			c := newCtx()
 			rec := c.Response().Writer.(*httptest.ResponseRecorder)
-			require.NoError(t, h.finishPasskeySignin(c, tc.user, nil))
+			require.NoError(t, h.finishPasskeySignin(c, &model.User{ID: "u1"}, nil))
 			require.Equal(t, http.StatusForbidden, rec.Code)
 			assert.Zero(t, ipRec.n(), "失敗したパスキー認証の IP を記録している")
 		})
@@ -273,25 +289,39 @@ func TestFinishPasskeySignin_FailuresDoNotRecordIP(t *testing.T) {
 		rec := c.Response().Writer.(*httptest.ResponseRecorder)
 		require.NoError(t, h.finishPasskeySignin(c, &model.User{ID: "u1"}, nil))
 		require.Equal(t, http.StatusOK, rec.Code)
-		assert.Equal(t, 1, ipRec.n(), "成功したパスキー認証の IP が記録されていない")
+		got := ipRec.seen()
+		require.Len(t, got, 1, "成功したパスキー認証の IP が記録されていない")
+		assert.Equal(t, "u1", got[0].userID)
+		// `newCtx` の `httptest.NewRequest` 既定 RemoteAddr (`192.0.2.1:1234`) から
+		// `c.RealIP()` が返す値。
+		assert.Equal(t, "192.0.2.1", got[0].ip, "呼び出し元と別の IP を記録している")
 	})
 }
 
+// countingIPRecorder は**引数まで残す**。争点は「誰の IP が誰に紐づくか」なので、
+// 件数だけだと `Record("someone-else", "10.0.0.1")` に差し替える変異が素通りする
+// (実測: パッケージ全体でも誰も見ていなかった)。
 type countingIPRecorder struct {
-	mu sync.Mutex
-	c  int
+	mu    sync.Mutex
+	calls []struct{ userID, ip string }
 }
 
-func (r *countingIPRecorder) Record(_, _ string) {
+func (r *countingIPRecorder) Record(userID, ip string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.c++
+	r.calls = append(r.calls, struct{ userID, ip string }{userID, ip})
 }
 
 func (r *countingIPRecorder) n() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.c
+	return len(r.calls)
+}
+
+func (r *countingIPRecorder) seen() []struct{ userID, ip string } {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]struct{ userID, ip string }(nil), r.calls...)
 }
 
 func TestFinishPasskeySignin_Success(t *testing.T) {
