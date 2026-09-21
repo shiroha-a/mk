@@ -1194,7 +1194,12 @@ func (h *Handler) ShowUsers(c echo.Context) error {
 	// に揃えて過剰露出を防ぐ。
 	result := make([]entity.UserDetailed, 0, len(users))
 	for _, u := range users {
-		result = append(result, entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen))
+		d := entity.PackUserDetailed(u, profileByUser[u.ID], h.idGen)
+		// **モデレーターにはカウントを見せる** (upstream
+		// `UserEntityService.pack` は `isMe || iAmModerator` に実数を返す)。
+		// packer は既定で伏せるので、ここでゲートを通さないと 0 になる。
+		entity.GateCountVisibility(&d, false, true, false)
+		result = append(result, d)
 	}
 	return c.JSON(http.StatusOK, result)
 }
@@ -3003,7 +3008,7 @@ func (h *Handler) RolesUsers(c echo.Context) error {
 			// packAdminUser を使うと email / signins / roleAssigns 等の admin 専用
 			// field が read:admin:roles scope に漏れる (show-user の admin guard 迂回)。
 			// ShowUsers と同様 UserDetailed に揃えて過剰露出を防ぐ (#1822)。
-			"user":      entity.PackUserDetailed(a.User, profileByUser[a.User.ID], h.idGen),
+			"user":      h.packModeratorVisibleUser(a.User, profileByUser[a.User.ID]),
 			"expiresAt": expiresAt,
 		})
 	}
@@ -4278,8 +4283,20 @@ func (h *Handler) packAbuseUser(u *model.User, profByID map[string]*model.UserPr
 	if u == nil {
 		return nil
 	}
-	d := entity.PackUserDetailed(u, profByID[u.ID], h.idGen)
+	d := h.packModeratorVisibleUser(u, profByID[u.ID])
 	return &d
+}
+
+// packModeratorVisibleUser packs a user for a moderator-only response.
+//
+// **カウントのゲートを通す。** packer は `followersVisibility` /
+// `followingVisibility` が public でないカウントを既定で伏せるので、通さないと
+// モデレーター向けの画面で 0 になる。upstream `UserEntityService.pack` は
+// `isMe || iAmModerator` に実数を返す。
+func (h *Handler) packModeratorVisibleUser(u *model.User, profile *model.UserProfile) entity.UserDetailed {
+	d := entity.PackUserDetailed(u, profile, h.idGen)
+	entity.GateCountVisibility(&d, false, true, false)
+	return d
 }
 
 // packedAbuseReport mirrors the upstream abuse-user-reports res schema
@@ -4485,7 +4502,7 @@ func (h *Handler) ShowModerationLogs(c echo.Context) error {
 				}
 				profileByUser[l.UserID] = prof
 			}
-			m["user"] = entity.PackUserDetailed(l.User, prof, h.idGen)
+			m["user"] = h.packModeratorVisibleUser(l.User, prof)
 		}
 		out = append(out, m)
 	}

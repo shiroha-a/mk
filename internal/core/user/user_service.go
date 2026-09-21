@@ -831,6 +831,13 @@ func (s *Service) publishMeUpdated(bundle *UserWithProfile) {
 	// profile update / pin / unpin は頻度が低く hot path ではないため
 	// full pack する (UserLite ではなく UserDetailed)。
 	body := entity.PackUserDetailed(bundle.User, bundle.Profile, s.idGen)
+	// **本人にはカウントを見せる。** packer は `followersVisibility` /
+	// `followingVisibility` が public でないカウントを既定で伏せるので、
+	// self event でゲートを通さないと 0 が流れる。fork frontend は
+	// `meUpdated` を `$i` にそのまま merge するので、**プロフィール更新や
+	// pin のたびに自分のフォロー数の表示が 0 に化ける** (リロードまで戻らない)。
+	// upstream `UserEntityService.pack` も `isMe` に実数を返す。
+	entity.GateCountVisibility(&body, true, false, false)
 	// meUpdated は本人自身の main channel に流す self event なので、
 	// follower-only の followedMessage も本人には見せる (#1558)。PackUserDetailed
 	// は followedMessage を set しない (privacy gate) ため、self event では

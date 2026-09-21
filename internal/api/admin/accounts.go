@@ -7,7 +7,6 @@ import (
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
 	"github.com/shiroha-a/mk/internal/core/moderationlog"
-	"github.com/shiroha-a/mk/internal/entity"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -79,7 +78,7 @@ func (h *Handler) AccountsFindByEmail(c echo.Context) error {
 	// includeSecrets 限定 field が漏れる (#1847、#1822 と同 class)。UserDetailed に
 	// 揃えて過剰露出を防ぐ (ShowUsers と同方針)。生 model.User の内部 field
 	// (inbox/sharedInbox/usernameLower) も UserDetailed では出ない。
-	return c.JSON(http.StatusOK, entity.PackUserDetailed(user, profile, h.idGen))
+	return c.JSON(http.StatusOK, h.packModeratorVisibleUser(user, profile))
 }
 
 // DeleteAccount handles POST /api/admin/delete-account. AccountsDelete と

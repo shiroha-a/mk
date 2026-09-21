@@ -1571,3 +1571,35 @@ func TestService_RemoveBackupCode(t *testing.T) {
 	assert.Equal(t, "u1", gotUser)
 	assert.Equal(t, "c2", gotCode)
 }
+
+// **self event は本人のカウントを載せること。**
+//
+// packer は `followersVisibility` / `followingVisibility` が public でない
+// カウントを既定で伏せる (呼び忘れても漏れないようにするため)。self event で
+// ゲートを通さないと 0 が流れ、fork frontend は `meUpdated` を `$i` にそのまま
+// merge するので**プロフィール更新や pin のたびに自分のフォロー数の表示が 0 に
+// 化ける** (リロードまで戻らない)。
+func TestService_UpdateProfile_MeUpdatedCarriesOwnCounts(t *testing.T) {
+	svc, repo, _, _ := newFullSvc(t)
+	repo.Users["u1"] = &model.User{
+		ID: "u1", Username: "alice",
+		FollowersCount: 42, FollowingCount: 7,
+	}
+	repo.Profiles["u1"] = &model.UserProfile{
+		UserID: "u1", FollowersVisibility: "followers", FollowingVisibility: "private",
+	}
+	pub := &stubMainStreamPublisher{}
+	svc.SetMainStreamPublisher(pub)
+
+	_, err := svc.UpdateProfile("u1", user.UpdateInput{Name: ptr(ptr("Alice"))})
+	require.NoError(t, err)
+
+	require.Len(t, pub.calls, 1)
+	raw, err := json.Marshal(pub.calls[0].body)
+	require.NoError(t, err)
+	var m map[string]any
+	require.NoError(t, json.Unmarshal(raw, &m))
+	// 期待値はリテラル。非公開の設定でも本人には実数が出る。
+	assert.EqualValues(t, 42, m["followersCount"], "本人の meUpdated にフォロワー数が出ること")
+	assert.EqualValues(t, 7, m["followingCount"], "本人の meUpdated にフォロー数が出ること")
+}
