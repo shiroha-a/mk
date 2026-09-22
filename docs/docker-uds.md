@@ -169,7 +169,7 @@ docker compose -f compose.uds.yaml logs mkgo | tail -50  # mkgo だけ、過去�
 
 - スキーマが壊れている場合は手動で `psql` で問題を解消する。migration を巻き戻すなら `docker compose -f compose.uds.yaml exec mkgo /app/migrate -direction down -steps 1`。**UDS image は `/app/migrate` を同梱していて entrypoint がこれを叩く** (`deploy/uds/Dockerfile.mkgo`)。コンテナには Go toolchain が無いので `go run ./cmd/migrate` は使えない。手元のツリーから叩く場合は `go run ./cmd/migrate` で、`make build` は `./built/misskey` しか作らない
 - volume 自体がおかしい場合は `make uds-down-v` で named volume を消して綺麗な状態から再構築する (**DB データは全部消える**ので注意)
-- **`-steps` を省略すると全段 down する** (schema が消える)。1 段だけ戻したいときは必ず `-steps 1` を付ける
+- **`-steps` を省略すると全段 down する** (全テーブルが消える)。1 段だけ戻したいときは必ず `-steps 1` を付ける
 
 ### `/healthz` が 404 になる
 

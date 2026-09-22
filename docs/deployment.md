@@ -701,7 +701,7 @@ sudo systemctl restart misskey    # systemd の場合
 
 `schema_migrations` のバージョンが進んでいるので、バイナリだけ戻すと古い mk-go が新しいスキーマを読むことになる。追加のみのマイグレーション (`ADD COLUMN` / `CREATE TABLE` / `CREATE INDEX`) であれば旧バイナリでも動くが、破壊的な変更を含むリリースでは `make migrate-down` (1 段) を必要な回数繰り返して戻す。リリースノートで破壊的変更の有無を確認すること。
 
-> **`go run ./cmd/migrate -direction down` を本番で叩かないこと。** `-steps` を省くと「全部」の意味になり、全 down マイグレーションが走って schema が消える。
+> **`go run ./cmd/migrate -direction down` を本番で叩かないこと。** `-steps` を省くと「全部」の意味になり、全 down マイグレーションが走って 全テーブルが消える。
 >
 > **down が用意されていても戻せない migration がある。** `000081` は孤児行を、`000082` は chat room の owner が持つ membership / 招待行を DELETE するが、どちらも削除した行の内容を保存していないので down は no-op。詳細は [TS版からの移行](migration-from-ts.md#破壊的なマイグレーション)。
 

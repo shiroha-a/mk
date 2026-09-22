@@ -149,7 +149,7 @@ cd mk && docker compose up -d
 |---|---|
 | `make migrate-up` | 最新まで適用 |
 | `make migrate-down` | 1段階ロールバック (`-steps 1`) |
-| `go run ./cmd/migrate -direction down` | **全段ロールバック**。`-steps` 未指定は「全部」の意味で、schema が消える |
+| `go run ./cmd/migrate -direction down` | **全段ロールバック**。`-steps` 未指定は「全部」の意味で、全テーブルが消える |
 | `make migrate-create` | 新規マイグレーションファイル作成 |
 
 #### 大規模テーブルへの index 追加

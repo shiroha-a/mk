@@ -168,7 +168,7 @@ make uds-restart            # mkgo を再起動して配信 entry を検証だ�
 # マイグレーション（接続先は -config、既定 .config/default.yml から決まる）
 make migrate-up             # 最新まで適用
 make migrate-down           # 1段階ロールバック (-steps 1)
-go run ./cmd/migrate -direction down   # 全段ロールバック (破壊的。schema が消える)
+go run ./cmd/migrate -direction down   # 全段ロールバック (破壊的。全テーブルが消える)
 make migrate-create         # 新規マイグレーションファイル作成（プロンプト対話）
 
 # Docker
@@ -921,20 +921,39 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   持っており、golang-migrate が自分で管理するテーブルを消していた。`Down()` は全 down の
   あとに `TRUNCATE schema_migrations` を撃つので、**`go run ./cmd/migrate -direction down`
   (CLAUDE.md Section 3 が全段ロールバックとして案内している手順) は毎回最後に
-  `relation does not exist (SQLSTATE 42P01)` で落ちていた**。
-  **`testutil.ApplyMigrations` では代用できない。** あちらは冪等な DDL のために
-  `db.Exec` のエラーを握り潰す (`continue`) ので、**壊れた down でも緑になる**。本番の
-  `cmd/migrate` と同じ golang-migrate + pgx5 driver に流す。
+  `relation does not exist (SQLSTATE 42P01)` で落ちていた**。`make migrate-down`
+  (`-steps 1`) も version 1 のときは同じ理由で落ちる。**全段 down の後は
+  `schema_migrations` が 1 つだけ空で残る** — Section 3 ほか 6 箇所が「schema が消える」と
+  書いていたが `DROP SCHEMA` は一度も走らないので元から不正確で、「全テーブルが消える」へ
+  直した。
+  **`testutil.ApplyMigrations` では代用できない。** あちらの `findMigrationFiles` は
+  `*.up.sql` しか glob しないので **down を 1 本も実行しない**。加えて up 側も `db.Exec` の
+  エラーを握り潰す (`continue`) ので壊れた SQL でも緑になる。本番の `cmd/migrate` と同じ
+  golang-migrate + pgx5 driver に流す。
   **down は書いた時点でしか実行されない。** 97 本あって、後から up 側だけ直して対応が
   崩れても誰も気付けない。壊れているのは**戻したくなった当日**に分かる。
-  **往復にするのが要点** — down のあとにもう一度 up が通ることまで見る。down が一部だけ
-  戻して残骸を置くと、2 回目の up が「既に在る」で落ちる。
+  **「2 回目の up が通るか」だけでは弱い。** up の 97 本中 96 本は `IF NOT EXISTS` /
+  `EXCEPTION WHEN duplicate_object` で守られているので、**down が取りこぼしても再適用が
+  通ってしまう**。実測 (down を 1 本ずつ空にする ablation) で 2 回目の up が検出できたのは
+  非冪等な `ADD CONSTRAINT` を持つ `000001` だけで、サンプルした他 19 本は緑だった。
+  **down 後に schema の中身 (テーブル / view / sequence / enum) が空であることを直接
+  アサートする**形にして射程を広げてある — これで `000050` / `000075` を空にする変異も
+  検出するようになった (実測)。
   **専用の兄弟 schema を使い、毎回作り直す。** `internal/repository` の schema でやると
   down が他のテストの前提を消す (#2450)。**作り直しが要るのは、途中で落ちたときに残骸が
   残って次の実行が別の理由で落ちるから** — 診断が事実と無関係になる (変異検証で実際に
   そうなった)。
-  **変異検証は 3 形**: down に構文エラー / down を空にする (残骸が残り 2 回目の up が
-  落ちる) / `schema_migrations` の DROP を戻す (= 見つけたバグの再導入)。いずれも検出。
+  **変異集合**: down に構文エラー (最後 / 中間) / down を空にする (`000001` / `000050` /
+  `000075` / 全部) / `schema_migrations` の DROP を戻す (= 見つけたバグの再導入) /
+  `m.Up()` を消す / `m.Down()` を消す / 2 回目の `m.Up()` を消す / `DROP SCHEMA` を消す
+  (前の実行が途中で失敗している状態で落ちる)。**`000097` を空にする変異は検出しない** —
+  あれは down が元から `-- no-op.` (データ修正の migration) なので、空にしても事実として
+  何も変わらない。**`v1 == v2` と `dirty == false` はアサーションにしても恒真**だったので
+  (実測で変異が素通りした)、version は `migration/` の最大連番と突き合わせる形に替えた。
+  **射程外**: TypeORM 台帳を落とす `000029_db_compat_misskey.down.sql` の
+  `DROP TABLE IF EXISTS "migrations"` — 同じクラスのバグだが、up が
+  `CREATE TABLE IF NOT EXISTS "migrations"` を持つので往復では対称になり緑で通る
+  (既知として `docs/migration-from-ts.md` に記載がある)。
   **`git checkout` で変異を戻さないこと** — 未コミットの修正まで巻き戻す (実際に踏んだ)。
 - **2026-09-22**: `echo` の `LoggerWithConfig` を `RequestLoggerWithConfig` へ移行し、
   **`SA1019` の抑制をゼロにした**。同日の SA1019 entry で「移行しない」と判断した唯一の

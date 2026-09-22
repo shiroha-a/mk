@@ -375,6 +375,6 @@ make migrate-up      # 最新まで
 make migrate-down    # 1 段ロールバック
 make migrate-create  # 新規作成
 
-# 全段ロールバック (破壊的。schema が消える)
+# 全段ロールバック (破壊的。全テーブルが消える)
 go run ./cmd/migrate -direction down
 ```
