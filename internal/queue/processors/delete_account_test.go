@@ -191,14 +191,6 @@ func TestDeleteAccountProcessor_CanceledDuringPacingReturnsError(t *testing.T) {
 // ただし単線テストなので pacing sleep を避けるため 120 件 (100+20) にする
 // → 第 1 バッチで 100 削除、第 2 バッチで 20 削除 → 合計 120 件、pacing sleep
 // は 1 回だけ入る。
-type sliceNoteRepo struct {
-	*testutil.MockNoteRepository
-}
-
-func (s *sliceNoteRepo) DeleteByUserBatch(userID string, batchSize int) (int64, error) {
-	return s.MockNoteRepository.DeleteByUserBatch(userID, batchSize)
-}
-
 func TestDeleteAccountProcessor_NotesDeletedAcrossMultipleBatches(t *testing.T) {
 	noteRepo := testutil.NewMockNoteRepository()
 	for i := 0; i < 120; i++ {

@@ -74,7 +74,7 @@ func emojiRedirectHandler(repo emojiLookup) echo.HandlerFunc {
 		var hostPtr *string
 		if len(chunks) == 2 {
 			h := chunks[1]
-			// `@.` は ReactionService.normalizeReaction が永続化する
+			// `@.` は ReactionService.resolveReaction が永続化する
 			// canonical local-suffix。host_NULL と等価に扱う。
 			if h != "" && h != "." {
 				hostPtr = &h

@@ -102,12 +102,6 @@ func TestExport_AllTypesEnqueue(t *testing.T) {
 	h, enq := newTransferHandler()
 	user := &model.User{ID: "u1"}
 
-	type ex struct {
-		name string
-		fn   func(c *Handler) func() error
-		kind string
-	}
-
 	// Use a simple test invocation approach: call handler via post helper.
 	assertOK := func(recCode int) {
 		assert.Equal(t, http.StatusNoContent, recCode)

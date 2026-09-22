@@ -32,16 +32,6 @@ func newStubHandler(t *testing.T) (*Handler, *testutil.MockChannelRepository, *t
 	return h, repo, favRepo, mutRepo
 }
 
-func postStub(handler func(echo.Context) error) *httptest.ResponseRecorder {
-	e := echo.New()
-	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{}`))
-	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
-	rec := httptest.NewRecorder()
-	c := e.NewContext(req, rec)
-	_ = handler(c)
-	return rec
-}
-
 func postStubWithBody(t *testing.T, handler func(echo.Context) error, body string, userID string) *httptest.ResponseRecorder {
 	t.Helper()
 	e := echo.New()

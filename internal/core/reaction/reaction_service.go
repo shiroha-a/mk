@@ -515,32 +515,15 @@ func (s *Service) List(user *model.User, noteID, untilID, sinceID string, limit 
 	}
 	var reactions []string
 	if reaction != "" {
-		// #2106 N17: type filter は emoji 存在検証なしで正規化する。normalizeReaction だと
+		// #2106 N17: type filter は emoji 存在検証なしで正規化する。resolveReaction だと
 		// 未キャッシュの remote custom emoji が ❤ に化けて誤った reaction を返していた。
 		reactions = reactionVariants(s.normalizeReactionForFilter(reaction))
 	}
 	return s.reactionRepo.ListByNoteID(target.ID, untilID, sinceID, limit, reactions)
 }
 
-// normalizeReaction returns the canonical form of a reaction string.
-//   - 空の文字列はFallback (heart) に置換
-//   - レガシー文字列(like等)はUnicode絵文字に変換
-//   - カスタム絵文字 ":name:" は絵文字テーブルで存在確認後 ":name@.:" に正規化
-//   - リモート ":name@host:" はそのまま検証して残す
-//   - その他はそのまま (Unicode絵文字想定)
-//
-// actorHost は reaction を投稿した側のホスト。リモートユーザーが
-// `:name:` 形式 (ホスト省略) で送ってきたとき、Misskey TS upstream は
-// reactor のホストで emoji table を引き直すので、本実装でも actorHost
-// にフォールバックする (#459)。actorHost が nil/空なら従来通りローカル
-// として扱う。
-func (s *Service) normalizeReaction(raw string, actorHost *string) string {
-	n, _ := s.resolveReaction(raw, actorHost)
-	return n
-}
-
 // normalizeReactionForFilter normalizes a reaction string for use as the
-// notes/reactions type filter. Unlike normalizeReaction it does NOT verify custom
+// notes/reactions type filter. Unlike resolveReaction it does NOT verify custom
 // emoji existence (#2106 N17: an uncached remote custom emoji like
 // ":foo@remote.example:" was rewritten to ❤ and the filter returned hearts instead
 // of the requested reaction) and does NOT fall back non-emoji unicode to ❤ (a
@@ -567,11 +550,23 @@ func (s *Service) normalizeReactionForFilter(raw string) string {
 	return stripVariationSelector(raw)
 }
 
-// resolveReaction is the shared core of normalizeReaction. In addition to the
-// canonical reaction string it returns the resolved custom emoji (nil for
-// legacy/unicode/empty reactions or when a custom emoji is not found and falls
-// back). Create uses the emoji for reactionAcceptance gating (#1538) so it does
-// not re-query the emoji table.
+// resolveReaction returns the canonical form of a reaction string together with
+// the resolved custom emoji (nil for legacy/unicode/empty reactions or when a
+// custom emoji is not found and falls back). Create uses the emoji for
+// reactionAcceptance gating (#1538) so it does not re-query the emoji table.
+//
+// 正規化の規則:
+//   - 空の文字列はFallback (heart) に置換
+//   - レガシー文字列(like等)はUnicode絵文字に変換
+//   - カスタム絵文字 ":name:" は絵文字テーブルで存在確認後 ":name@.:" に正規化
+//   - リモート ":name@host:" はそのまま検証して残す
+//   - その他はそのまま (Unicode絵文字想定)
+//
+// actorHost は reaction を投稿した側のホスト。リモートユーザーが
+// `:name:` 形式 (ホスト省略) で送ってきたとき、Misskey TS upstream は
+// reactor のホストで emoji table を引き直すので、本実装でも actorHost
+// にフォールバックする (#459)。actorHost が nil/空なら従来通りローカル
+// として扱う。
 func (s *Service) resolveReaction(raw string, actorHost *string) (string, *model.Emoji) {
 	reaction, emoji := s.resolveReactionValue(raw, actorHost)
 	// `note_reaction.reaction` は varchar(260)。**絵文字だけで構成された長い
@@ -730,7 +725,7 @@ func reactionVariants(normalized string) []string {
 // decodeReactionForStream returns the canonical wire form of a reaction
 // string for noteStream payload (`:name@host:` / `:name@.:` for custom emoji,
 // raw string for unicode/legacy). 上流 ReactionService.ts の decodeReaction と
-// 同形式で、ホスト省略時 `.` を補う。normalizeReaction と違い emoji 存在検証
+// 同形式で、ホスト省略時 `.` を補う。resolveReaction と違い emoji 存在検証
 // やフォールバックは行わない (DB に既に保存された値をそのまま wire 化する用途)。
 func decodeReactionForStream(raw string) string {
 	m := customEmojiPattern.FindStringSubmatch(raw)

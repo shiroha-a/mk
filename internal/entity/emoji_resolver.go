@@ -13,7 +13,7 @@ import (
 // surrounding colons, e.g. heart) are returned with ok=false. Local
 // reactions return host="".
 //
-// reaction_service.normalizeReaction が local 絵文字を `:name@.:` 形式 (host
+// reaction_service.resolveReaction が local 絵文字を `:name@.:` 形式 (host
 // を `.` で表す TS 互換 canonical 形式) で永続化するため、parser 側でも `@.`
 // を空 host に正規化する。これを忘れると DB lookup が host="." vs DB の
 // host IS NULL で空振りし、reactionEmojis が空のままになる。

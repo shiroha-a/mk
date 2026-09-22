@@ -474,8 +474,6 @@ func TestUsers_InvalidParam(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
 }
 
-type failingListRoleSvc struct{}
-
 func TestList_Error(t *testing.T) {
 	roleRepo := &failingListRepo{testutil.NewMockRoleRepository()}
 	assignRepo := testutil.NewMockRoleAssignmentRepository(roleRepo.MockRoleRepository)

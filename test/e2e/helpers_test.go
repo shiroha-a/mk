@@ -3,7 +3,6 @@ package e2e
 import (
 	"bytes"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"testing"
@@ -107,38 +106,4 @@ func resetDB(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		require.Failf(t, "reset-db failed", "status=%d body=%s", resp.StatusCode, string(body))
 	}
-}
-
-// requireJSON はレスポンスがOKでJSONボディを返すことを検証する。
-func requireJSON(t *testing.T, resp *http.Response) map[string]any {
-	t.Helper()
-	require.True(t, resp.StatusCode >= 200 && resp.StatusCode < 300,
-		"expected 2xx, got %d", resp.StatusCode)
-	return readJSON(t, resp)
-}
-
-// apiCall は apiPost の結果をJSONで返す便利ヘルパー。
-func apiCall(t *testing.T, path string, params map[string]any) map[string]any {
-	t.Helper()
-	resp := apiPost(t, path, params)
-	return requireJSON(t, resp)
-}
-
-// jsonString はJSONのstring値を取得する。
-func jsonString(m map[string]any, key string) string {
-	v, ok := m[key]
-	if !ok {
-		return ""
-	}
-	s, _ := v.(string)
-	return s
-}
-
-// debugBody はレスポンスボディをデバッグ用に文字列として読む。
-func debugBody(resp *http.Response) string {
-	data, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Sprintf("<read error: %v>", err)
-	}
-	return string(data)
 }

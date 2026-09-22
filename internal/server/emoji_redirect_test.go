@@ -69,7 +69,7 @@ func TestEmojiRedirectHandler_LocalEmoji(t *testing.T) {
 }
 
 func TestEmojiRedirectHandler_LocalCanonicalDotSuffix(t *testing.T) {
-	// `:smile@.:` (ReactionService.normalizeReaction が永続化する形) は
+	// `:smile@.:` (ReactionService.resolveReaction が永続化する形) は
 	// frontend が `/emoji/smile@..webp` で投げてくる。`@.` は host=NULL
 	// と等価に扱う。
 	repo := &stubEmojiLookup{emojis: map[string]*model.Emoji{

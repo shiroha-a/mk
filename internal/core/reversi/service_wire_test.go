@@ -201,15 +201,6 @@ func (p *capturePublisher) types() []string {
 	return out
 }
 
-func (p *capturePublisher) latestBody() any {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.events) == 0 {
-		return nil
-	}
-	return p.events[len(p.events)-1].body
-}
-
 // --- helpers ---
 
 func newPendingGame(t *testing.T) (*model.ReversiGame, *fakeRepo, *capturePublisher, *Service) {

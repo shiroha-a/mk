@@ -724,14 +724,6 @@ func TestReportAbuse_CreateError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-type failingListByUserRepo struct {
-	*testutil.MockNoteRepository
-}
-
-func (f *failingListByUserRepo) ListByUserID(_ string, _, _ string, _ int) ([]*model.Note, error) {
-	return nil, assert.AnError
-}
-
 // FeaturedNotes は #1487 で ListFeaturedByUser に切り替わったため、500 経路は
 // 当該メソッドが err を返す stub で覆う。
 type failingListFeaturedByUserRepo struct {

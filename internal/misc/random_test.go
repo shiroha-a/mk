@@ -2,7 +2,6 @@ package misc
 
 import (
 	"errors"
-	"io"
 	"strings"
 	"testing"
 )
@@ -100,27 +99,6 @@ func TestSecureRandomString_PanicsOnRandFailure(t *testing.T) {
 		}
 	}()
 	_ = SecureRandomString(8, AlphanumericChars)
-}
-
-// limitedReader returns exactly n bytes then io.EOF, useful for verifying
-// that SecureRandomHex requests the right amount of bytes.
-type limitedReader struct {
-	remaining int
-}
-
-func (r *limitedReader) Read(p []byte) (int, error) {
-	if r.remaining <= 0 {
-		return 0, io.EOF
-	}
-	n := len(p)
-	if n > r.remaining {
-		n = r.remaining
-	}
-	for i := 0; i < n; i++ {
-		p[i] = 0xAB
-	}
-	r.remaining -= n
-	return n, nil
 }
 
 // native token は「16 文字」と「62 文字集合」の両方が要件。

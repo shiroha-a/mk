@@ -436,7 +436,7 @@ func TestPopulateUserEmojis_NilUserOrLite(t *testing.T) {
 func TestPopulateNoteReactionEmojis(t *testing.T) {
 	// #459: note.Reactions に :name@host: / :name@.: (canonical local) /
 	// raw unicode が混在するケースで batch fetch + populate が動くこと。
-	// mk-go の reaction_service.normalizeReaction は local emoji を
+	// mk-go の reaction_service.resolveReaction は local emoji を
 	// `:name@.:` (TS 互換 canonical) で永続化するため、parser は `@.`
 	// を空 host に正規化しなければならない (PR #463 review BUG-0001)。
 	remoteHost := "remote.example"
@@ -609,7 +609,7 @@ func TestParseCustomEmojiReaction(t *testing.T) {
 	}{
 		{":smile:", "smile", "", true},
 		{":smile@remote.example:", "smile", "remote.example", true},
-		// canonical local form (mk-go reaction_service.normalizeReaction 出力)
+		// canonical local form (mk-go reaction_service.resolveReaction 出力)
 		{":smile@.:", "smile", "", true},
 		{"❤️", "", "", false},
 		{":invalid_no_close", "", "", false},

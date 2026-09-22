@@ -811,35 +811,6 @@ func TestSetFederation(t *testing.T) {
 	assert.NotNil(t, h.deliverer)
 }
 
-// stubFedCache implements just enough of the FederationIDCache interface for
-// testing handler.Match / handler.Surrender without touching Redis.
-type stubFedCache struct {
-	sessionToGame map[string]string
-	gameToSession map[string]string
-}
-
-func (s *stubFedCache) Set(_ context.Context, federationID, gameID string) {
-	s.sessionToGame[federationID] = gameID
-	s.gameToSession[gameID] = federationID
-}
-
-func (s *stubFedCache) Get(_ context.Context, federationID string) (string, error) {
-	if v, ok := s.sessionToGame[federationID]; ok {
-		return v, nil
-	}
-	return "", errMock
-}
-
-func (s *stubFedCache) GetSessionByGame(_ context.Context, gameID string) (string, bool) {
-	v, ok := s.gameToSession[gameID]
-	return v, ok
-}
-
-func (s *stubFedCache) Delete(_ context.Context, federationID, gameID string) {
-	delete(s.sessionToGame, federationID)
-	delete(s.gameToSession, gameID)
-}
-
 func TestMatch_WithRemoteUser(t *testing.T) {
 	// Use a real (nil-redis) FederationIDCache; Set/Get are no-ops which lets
 	// the handler still fire DeliverToUser via federation branch.
