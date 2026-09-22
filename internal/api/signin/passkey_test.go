@@ -126,6 +126,8 @@ func TestSigninWithPasskey_NewContextRandError(t *testing.T) {
 	h.SetWebAuthn(svc, &inMemorySK{keys: map[string][]*model.UserSecurityKey{}})
 
 	old := signin.SwapReadRandomBytes(func(_ []byte) (int, error) { return 0, assert.AnError })
+	// 戻り値 (差し替え前の関数) は要らない。呼ぶこと自体が復元。
+	//nolint:staticcheck // SA9010: 副作用目的の呼び出しで、戻り値を呼ぶ形ではない
 	defer signin.SwapReadRandomBytes(old)
 
 	rec := doPost(h.SigninWithPasskey, `{}`)

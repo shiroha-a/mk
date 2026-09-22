@@ -195,7 +195,7 @@ func TestFetch_IconFromHTML(t *testing.T) {
 		<link rel="icon" href="/favicon-16.png">
 		<link rel="apple-touch-icon" href="https://cdn.example/apple-touch.png">
 	</head></html>`
-	svc, repo := newFetchSvc(t,
+	_, repo := newFetchSvc(t,
 		[][]byte{[]byte(discoveryBody), []byte(documentBody)}, nil)
 	repo.Instances["remote.example"] = &model.Instance{ID: "i1", Host: "remote.example"}
 	// scriptedFetcherに直接htmlBody仕込む。 fetcher取得はnewFetchSvc内部なので
@@ -204,7 +204,7 @@ func TestFetch_IconFromHTML(t *testing.T) {
 		bodies:   [][]byte{[]byte(discoveryBody), []byte(documentBody)},
 		htmlBody: []byte(htmlBody),
 	}
-	svc = instance.NewFetchMetadataService(repo, fetcher)
+	svc := instance.NewFetchMetadataService(repo, fetcher)
 	require.NoError(t, svc.Fetch("remote.example"))
 
 	got := repo.Instances["remote.example"]
@@ -499,7 +499,8 @@ func TestFetchNodeinfo_RefusesCrossHostRedirect(t *testing.T) {
 		svc := instance.NewFetchMetadataService(repo, fetcher)
 		require.NoError(t, repo.Create(&model.Instance{ID: "i0", Host: "remote.example"}))
 
-		svc.Fetch("remote.example")
+		// 別 host を弾くことが主題なので Fetch はエラーを返す。
+		require.Error(t, svc.Fetch("remote.example"))
 		got, err := repo.FindByHost("remote.example")
 		require.NoError(t, err)
 		require.Nil(t, got.SoftwareName, "別 host が返した JSON を書き戻している")
@@ -514,7 +515,8 @@ func TestFetchNodeinfo_RefusesCrossHostRedirect(t *testing.T) {
 		svc := instance.NewFetchMetadataService(repo, fetcher)
 		require.NoError(t, repo.Create(&model.Instance{ID: "i2", Host: "remote.example"}))
 
-		svc.Fetch("remote.example")
+		// 別 host を弾くことが主題なので Fetch はエラーを返す。
+		require.Error(t, svc.Fetch("remote.example"))
 		got, err := repo.FindByHost("remote.example")
 		require.NoError(t, err)
 		require.Nil(t, got.SoftwareName, "別 host が返した JSON を書き戻している")
@@ -529,7 +531,8 @@ func TestFetchNodeinfo_RefusesCrossHostRedirect(t *testing.T) {
 		svc := instance.NewFetchMetadataService(repo, fetcher)
 		require.NoError(t, repo.Create(&model.Instance{ID: "i3", Host: "remote.example"}))
 
-		svc.Fetch("remote.example")
+		// 同一 host 内の redirect は通るので Fetch は成功する。
+		require.NoError(t, svc.Fetch("remote.example"))
 		got, err := repo.FindByHost("remote.example")
 		require.NoError(t, err)
 		require.NotNil(t, got.SoftwareName, "同じ host の redirect を落としている")

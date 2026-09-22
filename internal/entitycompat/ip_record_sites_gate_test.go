@@ -130,12 +130,9 @@ var ipRecordAllowlist = map[string]string{
 // `.Record(` は増えない。実測でその変異は静的ゲートも振る舞いテストも素通りした。
 func TestRecordSuccessfulSigninCallSitesAreAllowlisted(t *testing.T) {
 	root := filepath.Join(repoRoot(t), "internal")
-	var sites []recordSite
-	for _, s := range scanCallSites(t, root, "RecordSuccessfulSignin", 0) {
-		// 宣言そのもの (`func (h *Handler) RecordSuccessfulSignin`) は呼び出しでは
-		// ないので、走査は呼び出しだけを返す。
-		sites = append(sites, s)
-	}
+	// 宣言そのもの (`func (h *Handler) RecordSuccessfulSignin`) は呼び出しでは
+	// ないので、走査は呼び出しだけを返す。
+	sites := scanCallSites(t, root, "RecordSuccessfulSignin", 0)
 
 	found := map[string]bool{}
 	for _, s := range sites {
@@ -335,8 +332,7 @@ func scanCallSites(t *testing.T, root, name string, wantArgs int) []recordSite {
 // 別のセレクタの土台、代入の左辺。
 func nonValueSelectors(root ast.Node) map[ast.Node]bool {
 	skip := map[ast.Node]bool{}
-	var mark func(ast.Expr)
-	mark = func(e ast.Expr) {
+	mark := func(e ast.Expr) {
 		for {
 			switch x := e.(type) {
 			case *ast.StarExpr:

@@ -112,7 +112,7 @@ var (
 func TestHashtag_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewHashtag(ctx)
-	ch.Init(json.RawMessage(`{"q":[["golang"]]}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"q":[["golang"]]}`)))
 	assert.Equal(t, []string{"hashtag:golang"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["golang"],"visibility":"public"}`))
@@ -149,7 +149,7 @@ func TestHashtag_MultiTagSubscribeUnion(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewHashtag(ctx)
 	// q = (a AND b) OR (c): subscribe distinct tags a,b,c.
-	ch.Init(json.RawMessage(`{"q":[["a","b"],["c"]]}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a","b"],["c"]]}`)))
 	assert.ElementsMatch(t, []string{"hashtag:a", "hashtag:b", "hashtag:c"}, ctx.subs)
 }
 
@@ -157,7 +157,7 @@ func TestHashtag_OrOfAndsMatch(t *testing.T) {
 	t.Run("AND group requires all tags", func(t *testing.T) {
 		ctx := newCtx(nil)
 		ch := NewHashtag(ctx)
-		ch.Init(json.RawMessage(`{"q":[["a","b"]]}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a","b"]]}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public"}`)) // only a
 		assert.Empty(t, ctx.sentType, "AND group needs both a and b")
 		ch.OnRedisEvent([]byte(`{"id":"n2","tags":["a","b","x"],"visibility":"public"}`))
@@ -166,7 +166,7 @@ func TestHashtag_OrOfAndsMatch(t *testing.T) {
 	t.Run("OR group matches either", func(t *testing.T) {
 		ctx := newCtx(nil)
 		ch := NewHashtag(ctx)
-		ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["b"],"visibility":"public"}`))
 		require.Len(t, ctx.sentType, 1)
 	})
@@ -175,7 +175,7 @@ func TestHashtag_OrOfAndsMatch(t *testing.T) {
 func TestHashtag_NormalizationParity(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewHashtag(ctx)
-	ch.Init(json.RawMessage(`{"q":[["GoLang"]]}`)) // subscribes hashtag:golang
+	require.NoError(t, ch.Init(json.RawMessage(`{"q":[["GoLang"]]}`))) // subscribes hashtag:golang
 	assert.Equal(t, []string{"hashtag:golang"}, ctx.subs)
 	// payload tag in different case/width still matches after NFKC+lower.
 	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["ＧＯＬＡＮＧ"],"visibility":"public"}`))
@@ -185,7 +185,7 @@ func TestHashtag_NormalizationParity(t *testing.T) {
 func TestHashtag_DedupeAcrossTopics(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewHashtag(ctx)
-	ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a"],["b"]]}`)))
 	// same note arrives via both hashtag:a and hashtag:b (fanout fires per topic).
 	payload := []byte(`{"id":"dup1","tags":["a","b"],"visibility":"public"}`)
 	ch.OnRedisEvent(payload)
@@ -197,7 +197,7 @@ func TestHashtag_FollowersVisibilityGate(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.followingSnap = map[string]bool{} // not a follower
 	ch := NewHashtag(ctx)
-	ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a"]]}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"userId":"author","visibility":"followers"}`))
 	assert.Empty(t, ctx.sentType, "followers note from non-followed author must be dropped")
 }
@@ -208,28 +208,28 @@ func TestHashtag_AnonRequireSigninDropped(t *testing.T) {
 	t.Run("top-level author", func(t *testing.T) {
 		ctx := newCtx(nil)
 		ch := NewHashtag(ctx)
-		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a"]]}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
 		assert.Empty(t, ctx.sentType)
 	})
 	t.Run("renote author", func(t *testing.T) {
 		ctx := newCtx(nil)
 		ch := NewHashtag(ctx)
-		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a"]]}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"u"},"renote":{"id":"r1","user":{"id":"ra","requireSigninToViewContents":true}}}`))
 		assert.Empty(t, ctx.sentType)
 	})
 	t.Run("reply author", func(t *testing.T) {
 		ctx := newCtx(nil)
 		ch := NewHashtag(ctx)
-		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a"]]}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"u"},"reply":{"id":"p1","user":{"id":"pa","requireSigninToViewContents":true}}}`))
 		assert.Empty(t, ctx.sentType)
 	})
 	t.Run("authed viewer exempt", func(t *testing.T) {
 		ctx := newCtx(&model.User{ID: "viewer"})
 		ch := NewHashtag(ctx)
-		ch.Init(json.RawMessage(`{"q":[["a"]]}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"q":[["a"]]}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","tags":["a"],"visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
 		require.Len(t, ctx.sentType, 1)
 	})
@@ -394,7 +394,7 @@ func TestAntenna_LookupErrorRejected(t *testing.T) {
 func TestChannelTimeline_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 	assert.Equal(t, []string{"channel:ch1"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","visibility":"public"}`))
@@ -418,7 +418,7 @@ func TestChannelTimeline_MissingID(t *testing.T) {
 func TestChannelTimeline_WrongChannelDropped(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch2","visibility":"public"}`))
 	assert.Empty(t, ctx.sentType, "note for a different channel must be dropped")
 }
@@ -426,7 +426,7 @@ func TestChannelTimeline_WrongChannelDropped(t *testing.T) {
 func TestChannelTimeline_MalformedDropped(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 	ch.OnRedisEvent([]byte(`{not json`))
 	assert.Empty(t, ctx.sentType, "malformed payload must be dropped (fail-closed)")
 }
@@ -436,7 +436,7 @@ func TestChannelTimeline_FollowersVisibilityGate(t *testing.T) {
 		ctx := newCtx(&model.User{ID: "alice"})
 		ctx.followingSnap = map[string]bool{} // alice does not follow author
 		ch := NewChannelTimeline(ctx)
-		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"followers"}`))
 		assert.Empty(t, ctx.sentType, "followers note from non-followed author must be dropped")
 	})
@@ -444,7 +444,7 @@ func TestChannelTimeline_FollowersVisibilityGate(t *testing.T) {
 		ctx := newCtx(&model.User{ID: "alice"})
 		ctx.followingSnap = map[string]bool{"author": false}
 		ch := NewChannelTimeline(ctx)
-		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"followers"}`))
 		require.Len(t, ctx.sentType, 1)
 		assert.Equal(t, "note", ctx.sentType[0])
@@ -452,7 +452,7 @@ func TestChannelTimeline_FollowersVisibilityGate(t *testing.T) {
 	t.Run("self-authored emitted with nil snapshot", func(t *testing.T) {
 		ctx := newCtx(&model.User{ID: "alice"})
 		ch := NewChannelTimeline(ctx)
-		ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+		require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 		ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"alice","visibility":"followers"}`))
 		require.Len(t, ctx.sentType, 1)
 	})
@@ -462,7 +462,7 @@ func TestChannelTimeline_FollowersVisibilityGate(t *testing.T) {
 func TestChannelTimeline_AnonRequireSigninDropped(t *testing.T) {
 	ctx := newCtx(nil) // anonymous connection
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
 	assert.Empty(t, ctx.sentType, "anon viewer must not receive a requireSignin author's note")
 }
@@ -471,7 +471,7 @@ func TestChannelTimeline_AnonRequireSigninDropped(t *testing.T) {
 func TestChannelTimeline_AuthedRequireSigninPassed(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","visibility":"public","user":{"id":"author","requireSigninToViewContents":true}}`))
 	require.Len(t, ctx.sentType, 1, "authenticated viewer is exempt from the requireSignin gate")
 }
@@ -483,7 +483,7 @@ func TestChannelTimeline_MutedOwnChannelStillStreamed(t *testing.T) {
 	// viewer は視聴中の ch1 を mute している。
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{MutingChannels: map[string]struct{}{"ch1": {}}}
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","channelId":"ch1","userId":"author","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1, "視聴中 channel の mute では own-channel note を落とさない")
 }
@@ -494,7 +494,7 @@ func TestChannelTimeline_MutedRenoteChannelDropped(t *testing.T) {
 	// viewer は ch1 を見ているが、別 channel ch2 を mute している。
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{MutingChannels: map[string]struct{}{"ch2": {}}}
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1"}`)))
 	// ch1 に流れた、ch2 の note への renote。
 	ch.OnRedisEvent([]byte(`{"id":"n2","channelId":"ch1","userId":"author","visibility":"public","renoteId":"r1","renote":{"channelId":"ch2","userId":"x","user":{"id":"x"}}}`))
 	assert.Empty(t, ctx.sentType, "他の mute された channel への renote は drop する")
@@ -696,7 +696,7 @@ func TestUserList_SpecifiedVisibility_AssumesFanoutSkips(t *testing.T) {
 func TestRoleTimeline_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := newRoleCh(ctx, true) // r1 explorable
-	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roleId":"r1"}`)))
 	assert.Equal(t, []string{"roleTimeline:r1"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
@@ -720,18 +720,18 @@ func TestRoleTimeline_MissingID(t *testing.T) {
 func TestRoleTimeline_NonExplorableDropped(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := newRoleCh(ctx, false) // r1 NOT explorable
-	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roleId":"r1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
 	assert.Empty(t, ctx.sentType, "non-explorable role must not stream notes")
 }
 
 func TestRoleTimeline_NonPublicDropped(t *testing.T) {
 	ch := newRoleCh(newCtx(nil), true)
-	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roleId":"r1"}`)))
 	for _, vis := range []string{"home", "followers", "specified"} {
 		ctx := newCtx(nil)
 		c := newRoleCh(ctx, true)
-		c.Init(json.RawMessage(`{"roleId":"r1"}`))
+		require.NoError(t, c.Init(json.RawMessage(`{"roleId":"r1"}`)))
 		c.OnRedisEvent([]byte(`{"id":"n1","visibility":"` + vis + `"}`))
 		assert.Empty(t, ctx.sentType, "roleTimeline emits public only, got "+vis)
 	}
@@ -741,7 +741,7 @@ func TestRoleTimeline_NonPublicDropped(t *testing.T) {
 func TestRoleTimeline_ExplorablePublicEmitted(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := newRoleCh(ctx, true)
-	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roleId":"r1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "note", ctx.sentType[0])
@@ -753,7 +753,7 @@ func TestRoleTimeline_ExplorablePublicEmitted(t *testing.T) {
 func TestRoleTimeline_AnonRequireSigninDropped(t *testing.T) {
 	ctx := newCtx(nil) // anonymous
 	ch := newRoleCh(ctx, true)
-	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roleId":"r1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public","user":{"requireSigninToViewContents":true}}`))
 	assert.Empty(t, ctx.sentType, "anon viewer must not receive a requireSignin note")
 }
@@ -762,7 +762,7 @@ func TestRoleTimeline_AnonRequireSigninDropped(t *testing.T) {
 func TestRoleTimeline_AuthedRequireSigninEmitted(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ch := newRoleCh(ctx, true)
-	ch.Init(json.RawMessage(`{"roleId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roleId":"r1"}`)))
 	ch.OnRedisEvent([]byte(`{"id":"n1","visibility":"public","user":{"requireSigninToViewContents":true}}`))
 	require.Len(t, ctx.sentType, 1)
 }
@@ -772,7 +772,7 @@ func TestRoleTimeline_AuthedRequireSigninEmitted(t *testing.T) {
 func TestAdmin_Lifecycle(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "admin1"})
 	ch := newAdminCh(ctx, true)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// #1549: per-user topic adminStream:<userId> を購読する。
 	assert.Equal(t, []string{"adminStream:admin1"}, ctx.subs)
 
@@ -804,7 +804,7 @@ func TestAdmin_NotAdmin(t *testing.T) {
 func TestAdmin_RawPayload(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "admin1"})
 	ch := newAdminCh(ctx, true)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// エンベロープでないペイロード
 	ch.OnRedisEvent([]byte(`{"data":"raw"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -816,7 +816,7 @@ func TestAdmin_RawPayload(t *testing.T) {
 func TestServerStats_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewServerStats(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"serverStats"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"cpu":0.5}`))
@@ -830,7 +830,7 @@ func TestServerStats_Lifecycle(t *testing.T) {
 func TestServerStats_RequestLog(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewServerStats(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("requestLog", json.RawMessage(`{"id":"req1","length":50}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "statsLog", ctx.sentType[0])
@@ -839,7 +839,7 @@ func TestServerStats_RequestLog(t *testing.T) {
 func TestServerStats_RequestLog_IgnoresOtherTypes(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewServerStats(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("other", nil)
 	assert.Empty(t, ctx.sentType)
 }
@@ -849,7 +849,7 @@ func TestServerStats_RequestLog_IgnoresOtherTypes(t *testing.T) {
 func TestQueueStats_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewQueueStats(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"queueStats"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"deliver":10}`))
@@ -863,7 +863,7 @@ func TestQueueStats_Lifecycle(t *testing.T) {
 func TestQueueStats_RequestLog(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewQueueStats(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("requestLog", json.RawMessage(`{"id":"req1","length":50}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "statsLog", ctx.sentType[0])
@@ -872,7 +872,7 @@ func TestQueueStats_RequestLog(t *testing.T) {
 func TestQueueStats_RequestLog_IgnoresOtherTypes(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewQueueStats(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("other", nil)
 	assert.Empty(t, ctx.sentType)
 }
@@ -882,7 +882,7 @@ func TestQueueStats_RequestLog_IgnoresOtherTypes(t *testing.T) {
 func TestReversi_Lifecycle(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewReversi(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"reversi:alice"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"type":"invited","body":{"gameId":"g1"}}`))
@@ -931,7 +931,7 @@ func TestNoOpClientMessages(t *testing.T) {
 func TestHashtag_FilteredRenote(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewHashtag(ctx)
-	ch.Init(json.RawMessage(`{"q":[["go"]],"withRenotes":false}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"q":[["go"]],"withRenotes":false}`)))
 	ch.OnRedisEvent([]byte(`{"renoteId":"r1","fileIds":[]}`))
 	assert.Empty(t, ctx.sentType)
 }
@@ -943,7 +943,7 @@ func TestHashtag_FilteredRenote(t *testing.T) {
 func TestChannelTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewChannelTimeline(ctx)
-	ch.Init(json.RawMessage(`{"channelId":"ch1","withReplies":false}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"channelId":"ch1","withReplies":false}`)))
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1","channelId":"ch1","visibility":"public"}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "note", ctx.sentType[0])
@@ -952,7 +952,7 @@ func TestChannelTimeline_ReplyPassthrough(t *testing.T) {
 func TestRoleTimeline_FilteredRenote(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := newRoleCh(ctx, true)
-	ch.Init(json.RawMessage(`{"roleId":"r1","withRenotes":false}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roleId":"r1","withRenotes":false}`)))
 	// public + explorable で gate を通過させ、純リノート filter (shouldEmit) で drop。
 	ch.OnRedisEvent([]byte(`{"renoteId":"r1","fileIds":[],"visibility":"public"}`))
 	assert.Empty(t, ctx.sentType)
@@ -969,14 +969,15 @@ func TestUserList_FilteredNoFiles(t *testing.T) {
 func TestUserList_MissingListID(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := newUserListCh(ctx, "alice")
-	ch.Init(json.RawMessage(`{}`))
+	// listId が無いので Init は失敗する。購読が張られないことが主題。
+	require.Error(t, ch.Init(json.RawMessage(`{}`)))
 	assert.Empty(t, ctx.subs)
 }
 
 func TestReversi_RawPayload(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewReversi(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// エンベロープでないペイロード
 	ch.OnRedisEvent([]byte(`{"data":"raw"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -988,7 +989,7 @@ func TestReversi_RawPayload(t *testing.T) {
 func TestLocalTimeline_FilterPureRenote(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewLocalTimeline(ctx)
-	ch.Init(json.RawMessage(`{"withRenotes":false}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"withRenotes":false}`)))
 
 	// 純リノートはフィルタされる
 	ch.OnRedisEvent([]byte(`{"renoteId":"r1","fileIds":[]}`))
@@ -1005,7 +1006,7 @@ func TestLocalTimeline_FilterPureRenote(t *testing.T) {
 func TestGlobalTimeline_ReplyPassthrough(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewGlobalTimeline(ctx)
-	ch.Init(json.RawMessage(`{"withReplies":false}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"withReplies":false}`)))
 
 	ch.OnRedisEvent([]byte(`{"text":"reply","replyId":"p1"}`))
 	require.Len(t, ctx.sentType, 1)
@@ -1015,7 +1016,7 @@ func TestGlobalTimeline_ReplyPassthrough(t *testing.T) {
 func TestHomeTimeline_WithFiles(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewHomeTimeline(ctx)
-	ch.Init(json.RawMessage(`{"withFiles":true}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"withFiles":true}`)))
 
 	// ファイルなしはフィルタされる
 	ch.OnRedisEvent([]byte(`{"text":"hello","fileIds":[]}`))
@@ -1029,7 +1030,7 @@ func TestHomeTimeline_WithFiles(t *testing.T) {
 func TestHybridTimeline_FilterDefault(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewHybridTimeline(ctx)
-	ch.Init(nil) // デフォルトフィルタ
+	require.NoError(t, ch.Init(nil)) // デフォルトフィルタ
 
 	// 通常ノートは通過
 	ch.OnRedisEvent([]byte(`{"text":"hello"}`))

@@ -26,7 +26,7 @@ func newTestFetcher(cfg Config) *Fetcher {
 func TestFetcher_FetchAndParse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`<html><head>
+		_, _ = w.Write([]byte(`<html><head>
 			<meta property="og:title" content="Hello">
 			<meta property="og:description" content="World">
 		</head><body></body></html>`))
@@ -51,7 +51,7 @@ func TestFetcher_ShiftJISCharset(t *testing.T) {
 	body = append(body, []byte(`"></head></html>`)...)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=shift_jis")
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
@@ -71,7 +71,7 @@ func TestFetcher_EUCJPCharset(t *testing.T) {
 	body = append(body, []byte(`"></head></html>`)...)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=euc-jp")
-		w.Write(body)
+		_, _ = w.Write(body)
 	}))
 	defer srv.Close()
 
@@ -85,7 +85,7 @@ func TestFetcher_EUCJPCharset(t *testing.T) {
 func TestFetcher_NonHTML(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write([]byte("PNG data"))
+		_, _ = w.Write([]byte("PNG data"))
 	}))
 	defer srv.Close()
 
@@ -100,7 +100,7 @@ func TestFetcher_TooLargeContentLength(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.Header().Set("Content-Length", "999999999")
-		w.Write([]byte("<html></html>"))
+		_, _ = w.Write([]byte("<html></html>"))
 	}))
 	defer srv.Close()
 
@@ -115,7 +115,7 @@ func TestFetcher_RequireContentLength(t *testing.T) {
 		// chunked 転送 (Content-Length なし) にするため Flush を使う。
 		w.Header().Del("Content-Length")
 		flusher := w.(http.Flusher)
-		w.Write([]byte("<html></html>"))
+		_, _ = w.Write([]byte("<html></html>"))
 		flusher.Flush()
 	}))
 	defer srv.Close()
@@ -146,7 +146,7 @@ func TestFetcher_ServerError(t *testing.T) {
 func TestFetcher_ViaProxy(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Contains(t, r.URL.RawQuery, "url=")
-		json.NewEncoder(w).Encode(Result{
+		_ = json.NewEncoder(w).Encode(Result{
 			URL:    "https://example.com",
 			Player: PlayerResult{Allow: []string{}},
 		})
@@ -222,7 +222,7 @@ func TestFetcher_FetchViaProxy_BadJSON(t *testing.T) {
 func TestFetcher_SensitiveListMatchForcesSensitive(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
+		_, _ = w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
 	}))
 	defer srv.Close()
 
@@ -236,7 +236,7 @@ func TestFetcher_SensitiveListMatchForcesSensitive(t *testing.T) {
 func TestFetcher_SensitiveListNoMatchKeepsFalse(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
-		w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
+		_, _ = w.Write([]byte(`<html><head><meta property="og:title" content="x"></head></html>`))
 	}))
 	defer srv.Close()
 
@@ -276,7 +276,7 @@ func TestValidateResultSchemes(t *testing.T) {
 // 応答内容までは信頼しない。javascript: が frontend の href/iframe に流れる)。
 func TestFetcher_ViaProxy_RejectsNonHTTPScheme(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(Result{URL: "javascript:alert(1)"})
+		_ = json.NewEncoder(w).Encode(Result{URL: "javascript:alert(1)"})
 	}))
 	defer proxy.Close()
 
@@ -288,7 +288,7 @@ func TestFetcher_ViaProxy_RejectsNonHTTPScheme(t *testing.T) {
 // proxy 経路でも urlPreviewSensitiveList の keyword 一致は効く。
 func TestFetcher_ViaProxy_AppliesSensitiveList(t *testing.T) {
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(Result{URL: "https://nsfw.example/x"})
+		_ = json.NewEncoder(w).Encode(Result{URL: "https://nsfw.example/x"})
 	}))
 	defer proxy.Close()
 

@@ -36,7 +36,7 @@ func TestChatRoomChannel_Init_Member(t *testing.T) {
 
 	ctx := newCtx(&model.User{ID: "bob"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 
 	assert.Equal(t, []string{"chatRoomStream:r1"}, ctx.subs)
 }
@@ -47,7 +47,7 @@ func TestChatRoomChannel_Init_OwnerImplicitMember(t *testing.T) {
 
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 
 	assert.Equal(t, []string{"chatRoomStream:r1"}, ctx.subs)
 }
@@ -96,7 +96,7 @@ func TestChatRoomChannel_OnRedisEvent_Forwards(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.OnRedisEvent([]byte(`{"type":"message","body":{"id":"m1"}}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "message", ctx.sentType[0])
@@ -107,7 +107,7 @@ func TestChatRoomChannel_OnRedisEvent_Invalid(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.OnRedisEvent([]byte(`not-json`))
 	assert.Empty(t, ctx.sentType)
 }
@@ -117,7 +117,7 @@ func TestChatRoomChannel_OnRedisEvent_NoType(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.OnRedisEvent([]byte(`{"body":{}}`))
 	assert.Empty(t, ctx.sentType)
 }
@@ -131,7 +131,7 @@ func TestChatRoomChannel_OnClientMessage_Read(t *testing.T) {
 	}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.OnClientMessage("read", json.RawMessage(`{"id":"m1"}`))
 	// should not panic; we don't verify the side effect here (covered in service tests)
 }
@@ -141,7 +141,7 @@ func TestChatRoomChannel_OnClientMessage_UnknownType(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.OnClientMessage("bogus", json.RawMessage(`{}`))
 	// silently ignored
 }
@@ -151,7 +151,7 @@ func TestChatRoomChannel_OnClientMessage_ReadEmptyID(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.OnClientMessage("read", json.RawMessage(`{"id":""}`))
 }
 
@@ -160,7 +160,7 @@ func TestChatRoomChannel_OnClientMessage_ReadBadJSON(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.OnClientMessage("read", json.RawMessage(`not-json`))
 }
 
@@ -190,7 +190,7 @@ func TestChatRoomChannel_Dispose(t *testing.T) {
 	repo.Rooms["r1"] = &model.ChatRoom{ID: "r1", OwnerID: "alice"}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatRoomFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"roomId":"r1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"roomId":"r1"}`)))
 	ch.Dispose()
 	assert.Equal(t, []string{"chatRoomStream:r1"}, ctx.unsubs)
 }

@@ -89,7 +89,7 @@ func verifymailWithStub(t *testing.T, handler http.HandlerFunc) *verifymailClien
 
 func TestVerifymail_Success(t *testing.T) {
 	c := verifymailWithStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"email_address": "user@ok.com", "deliverable_email": true, "disposable": false, "mx": true,
 		})
 	})
@@ -98,7 +98,7 @@ func TestVerifymail_Success(t *testing.T) {
 
 func TestVerifymail_Disposable(t *testing.T) {
 	c := verifymailWithStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"email_address": "user@tmp.com", "deliverable_email": true, "disposable": true, "mx": true,
 		})
 	})
@@ -107,7 +107,7 @@ func TestVerifymail_Disposable(t *testing.T) {
 
 func TestVerifymail_Undeliverable(t *testing.T) {
 	c := verifymailWithStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"email_address": "user@fail.com", "deliverable_email": false, "disposable": false, "mx": true,
 		})
 	})
@@ -116,7 +116,7 @@ func TestVerifymail_Undeliverable(t *testing.T) {
 
 func TestVerifymail_NoMX(t *testing.T) {
 	c := verifymailWithStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{
+		_ = json.NewEncoder(w).Encode(map[string]any{
 			"email_address": "user@nomx.com", "deliverable_email": true, "disposable": false, "mx": false,
 		})
 	})
@@ -125,14 +125,14 @@ func TestVerifymail_NoMX(t *testing.T) {
 
 func TestVerifymail_APIError(t *testing.T) {
 	c := verifymailWithStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"message": "rate limit"})
+		_ = json.NewEncoder(w).Encode(map[string]any{"message": "rate limit"})
 	})
 	assert.ErrorIs(t, c.verify(context.Background(), "user@x.com"), ErrFormat)
 }
 
 func TestVerifymail_InvalidJSON(t *testing.T) {
 	c := verifymailWithStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
+		_, _ = w.Write([]byte("not json"))
 	})
 	assert.ErrorIs(t, c.verify(context.Background(), "user@x.com"), ErrNetwork)
 }
@@ -151,7 +151,7 @@ func TestVerifymail_NetworkError(t *testing.T) {
 func TestTruemail_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "mykey", r.Header.Get("Authorization"))
-		json.NewEncoder(w).Encode(truemailResponse{Email: "user@ok.com", Success: true})
+		_ = json.NewEncoder(w).Encode(truemailResponse{Email: "user@ok.com", Success: true})
 	}))
 	defer srv.Close()
 	c := &truemailClient{instanceURL: srv.URL, authKey: "mykey", client: srv.Client()}
@@ -161,7 +161,7 @@ func TestTruemail_Success(t *testing.T) {
 func TestTruemail_FormatError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		regex := "invalid"
-		json.NewEncoder(w).Encode(truemailResponse{Email: "", Success: false, Errors: &truemailErrors{Regex: &regex}})
+		_ = json.NewEncoder(w).Encode(truemailResponse{Email: "", Success: false, Errors: &truemailErrors{Regex: &regex}})
 	}))
 	defer srv.Close()
 	c := &truemailClient{instanceURL: srv.URL, authKey: "k", client: srv.Client()}
@@ -171,7 +171,7 @@ func TestTruemail_FormatError(t *testing.T) {
 func TestTruemail_MXError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		mx := "no mx"
-		json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false, Errors: &truemailErrors{MX: &mx}})
+		_ = json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false, Errors: &truemailErrors{MX: &mx}})
 	}))
 	defer srv.Close()
 	c := &truemailClient{instanceURL: srv.URL, authKey: "k", client: srv.Client()}
@@ -181,7 +181,7 @@ func TestTruemail_MXError(t *testing.T) {
 func TestTruemail_SMTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		s := "fail"
-		json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false, Errors: &truemailErrors{SMTP: &s}})
+		_ = json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false, Errors: &truemailErrors{SMTP: &s}})
 	}))
 	defer srv.Close()
 	c := &truemailClient{instanceURL: srv.URL, authKey: "k", client: srv.Client()}
@@ -191,7 +191,7 @@ func TestTruemail_SMTPError(t *testing.T) {
 func TestTruemail_BlacklistError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		lm := "listed"
-		json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false, Errors: &truemailErrors{ListMatch: &lm}})
+		_ = json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false, Errors: &truemailErrors{ListMatch: &lm}})
 	}))
 	defer srv.Close()
 	c := &truemailClient{instanceURL: srv.URL, authKey: "k", client: srv.Client()}
@@ -200,7 +200,7 @@ func TestTruemail_BlacklistError(t *testing.T) {
 
 func TestTruemail_SuccessFalseNoErrors(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false})
+		_ = json.NewEncoder(w).Encode(truemailResponse{Email: "u@x.com", Success: false})
 	}))
 	defer srv.Close()
 	c := &truemailClient{instanceURL: srv.URL, authKey: "k", client: srv.Client()}
@@ -214,7 +214,7 @@ func TestTruemail_NetworkError(t *testing.T) {
 
 func TestTruemail_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
+		_, _ = w.Write([]byte("not json"))
 	}))
 	defer srv.Close()
 	c := &truemailClient{instanceURL: srv.URL, authKey: "k", client: srv.Client()}
@@ -285,7 +285,7 @@ func TestDomainOf(t *testing.T) {
 func TestVerifymail_ResponseTooLarge(t *testing.T) {
 	oversized := make([]byte, 2<<20)
 	c := verifymailWithStub(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(oversized)
+		_, _ = w.Write(oversized)
 	})
 	err := c.verify(context.Background(), "a@example.com")
 	assert.Error(t, err)
@@ -294,7 +294,7 @@ func TestVerifymail_ResponseTooLarge(t *testing.T) {
 func TestTruemail_ResponseTooLarge(t *testing.T) {
 	oversized := make([]byte, 2<<20)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(oversized)
+		_, _ = w.Write(oversized)
 	}))
 	defer srv.Close()
 

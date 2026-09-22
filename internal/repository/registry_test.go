@@ -69,8 +69,8 @@ func TestRegistryRepository_GetAll(t *testing.T) {
 	createTestUser(t, "reg_u3")
 	defer cleanupRegistry(t, "reg_u3")
 
-	repo.Set(&model.RegistryItem{ID: "ri_3a", UserID: "reg_u3", Key: "k1", Value: []byte(`1`), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_3b", UserID: "reg_u3", Key: "k2", Value: []byte(`2`), Scope: []string{}})
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_3a", UserID: "reg_u3", Key: "k1", Value: []byte(`1`), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_3b", UserID: "reg_u3", Key: "k2", Value: []byte(`2`), Scope: []string{}}))
 
 	items, err := repo.GetAll("reg_u3", []string{}, nil)
 	require.NoError(t, err)
@@ -82,14 +82,14 @@ func TestRegistryRepository_KeysWithType(t *testing.T) {
 	createTestUser(t, "reg_u4")
 	defer cleanupRegistry(t, "reg_u4")
 
-	repo.Set(&model.RegistryItem{ID: "ri_4a", UserID: "reg_u4", Key: "str", Value: []byte(`"hello"`), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_4b", UserID: "reg_u4", Key: "num", Value: []byte(`42`), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_4c", UserID: "reg_u4", Key: "bool", Value: []byte(`true`), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_4d", UserID: "reg_u4", Key: "arr", Value: []byte(`[]`), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_4e", UserID: "reg_u4", Key: "obj", Value: []byte(`{}`), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_4f", UserID: "reg_u4", Key: "nil", Value: []byte(`null`), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_4g", UserID: "reg_u4", Key: "empty", Value: []byte(``), Scope: []string{}})
-	repo.Set(&model.RegistryItem{ID: "ri_4h", UserID: "reg_u4", Key: "false", Value: []byte(`false`), Scope: []string{}})
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4a", UserID: "reg_u4", Key: "str", Value: []byte(`"hello"`), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4b", UserID: "reg_u4", Key: "num", Value: []byte(`42`), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4c", UserID: "reg_u4", Key: "bool", Value: []byte(`true`), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4d", UserID: "reg_u4", Key: "arr", Value: []byte(`[]`), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4e", UserID: "reg_u4", Key: "obj", Value: []byte(`{}`), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4f", UserID: "reg_u4", Key: "nil", Value: []byte(`null`), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4g", UserID: "reg_u4", Key: "empty", Value: []byte(``), Scope: []string{}}))
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_4h", UserID: "reg_u4", Key: "false", Value: []byte(`false`), Scope: []string{}}))
 
 	keys, err := repo.KeysWithType("reg_u4", []string{}, nil)
 	require.NoError(t, err)
@@ -108,7 +108,7 @@ func TestRegistryRepository_Remove(t *testing.T) {
 	createTestUser(t, "reg_u5")
 	defer cleanupRegistry(t, "reg_u5")
 
-	repo.Set(&model.RegistryItem{ID: "ri_5", UserID: "reg_u5", Key: "temp", Value: []byte(`1`), Scope: []string{}})
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_5", UserID: "reg_u5", Key: "temp", Value: []byte(`1`), Scope: []string{}}))
 
 	require.NoError(t, repo.Remove("reg_u5", "temp", []string{}, nil))
 	_, err := repo.Get("reg_u5", "temp", []string{}, nil)
@@ -121,7 +121,7 @@ func TestRegistryRepository_ScopeQuery_WithDomain(t *testing.T) {
 	defer cleanupRegistry(t, "reg_u6")
 
 	domain := "app1"
-	repo.Set(&model.RegistryItem{ID: "ri_6", UserID: "reg_u6", Key: "k", Value: []byte(`1`), Scope: []string{"client"}, Domain: &domain})
+	require.NoError(t, repo.Set(&model.RegistryItem{ID: "ri_6", UserID: "reg_u6", Key: "k", Value: []byte(`1`), Scope: []string{"client"}, Domain: &domain}))
 
 	found, err := repo.Get("reg_u6", "k", []string{"client"}, &domain)
 	require.NoError(t, err)

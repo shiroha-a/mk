@@ -716,18 +716,18 @@ func (h *Handler) collectNotificationsWithDropped(c echo.Context, user *model.Us
 	// noteByID に無い NoteID を持つ行を落とす。repo / queryService 配線済のときだけ適用する
 	// (未配線の partial test では note 解決自体が走らず、全 note-required 通知を
 	// 誤って落とさないため)。
+	// **列は絞らない。** この関数は drop を適用せず、全行と drop 集合の両方を
+	// 返す契約 (grouped が raw 列を要るため)。ここでやるのは dropped の登録だけで、
+	// 実際に落とすのは呼び出し側の `survivors`。
 	if h.noteRepo != nil && h.queryService != nil {
-		kept := make([]*notification.Notification, 0, len(filtered))
 		for _, n := range filtered {
-			if n.NoteID != "" {
-				if _, ok := noteByID[n.NoteID]; !ok {
-					dropped[n.ID] = struct{}{}
-					continue
-				}
+			if n.NoteID == "" {
+				continue
 			}
-			kept = append(kept, n)
+			if _, ok := noteByID[n.NoteID]; !ok {
+				dropped[n.ID] = struct{}{}
+			}
 		}
-		filtered = kept
 	}
 	return rows, dropped, notifierByID, noteByID, nil
 }

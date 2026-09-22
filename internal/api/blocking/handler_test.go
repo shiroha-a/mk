@@ -163,10 +163,10 @@ func TestCreate_GatesFollowersCount(t *testing.T) {
 	h, _, _ := newGatedHandler(t, nil)
 	// 別途 Create を直接叩いてレスポンスを検証する (newGatedHandler は List 用の
 	// context を返すため)。alice は bob を既に block 済みなので unblock してから。
-	c, rec := newReq(t, `{"userId":"bob"}`)
+	c, _ := newReq(t, `{"userId":"bob"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c)) // 既存 block を解除
-	c, rec = newReq(t, `{"userId":"bob"}`)
+	c, rec := newReq(t, `{"userId":"bob"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -179,10 +179,10 @@ func TestCreate_GatesFollowersCount(t *testing.T) {
 // gate しない。
 func TestCreate_ModeratorSeesFollowersCount(t *testing.T) {
 	h, _, _ := newGatedHandler(t, modStub{mods: map[string]bool{"alice": true}})
-	c, rec := newReq(t, `{"userId":"bob"}`)
+	c, _ := newReq(t, `{"userId":"bob"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Delete(c))
-	c, rec = newReq(t, `{"userId":"bob"}`)
+	c, rec := newReq(t, `{"userId":"bob"}`)
 	setUser(c, "alice")
 	require.NoError(t, h.Create(c))
 	require.Equal(t, http.StatusOK, rec.Code)

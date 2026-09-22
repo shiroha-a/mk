@@ -165,9 +165,9 @@ func TestService_PutStone_BadLogs(t *testing.T) {
 // CheckTimeout で EngineFromGame が失敗する経路 (logs が壊れている)。
 func TestService_CheckTimeout_BadLogs(t *testing.T) {
 	reversiTestRedis.FlushAll(context.Background())
-	game, repo, _, svc := startedGame(t)
+	game, repo, _, _ := startedGame(t)
 	// redis を差し替えて実タイマーキーを使う
-	svc = NewService(repo, &capturePublisher{}, reversiTestRedis.Client)
+	svc := NewService(repo, &capturePublisher{}, reversiTestRedis.Client)
 
 	// タイマーキーを削除してタイムアウト判定に進ませる
 	require.NoError(t, reversiTestRedis.Client.Del(context.Background(), turnTimerKey(game.ID, 0)).Err())

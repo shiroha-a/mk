@@ -94,7 +94,7 @@ func TestStream_NilAcceptorClosesImmediately(t *testing.T) {
 	h := NewHandler(nil)
 	conn, _, _ := dialServer(t, h, false)
 	// connection should be closed promptly
-	conn.SetReadDeadline(time.Now().Add(time.Second))
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(time.Second)))
 	_, _, err := conn.ReadMessage()
 	assert.Error(t, err)
 }

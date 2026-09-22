@@ -269,7 +269,7 @@ func TestFetchRSS_OversizedBody(t *testing.T) {
 		// Cap is 1 MiB; send 2 MiB. ReadAllLimit returns ErrMaxBytesExceeded so
 		// fetchFeed surfaces FETCH_RSS_FAILED before we ever call gofeed.
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", 2<<20))
-		w.Write(make([]byte, 2<<20))
+		_, _ = w.Write(make([]byte, 2<<20))
 	}))
 	t.Cleanup(srv.Close)
 

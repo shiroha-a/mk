@@ -37,7 +37,9 @@ func TestLocalStorage_Get_OtherError(t *testing.T) {
 	// 存在するが読めないパーミッションのファイルを作る
 	target := filepath.Join(dir, "denied")
 	require.NoError(t, os.WriteFile(target, []byte("x"), 0o000))
-	defer os.Chmod(target, 0o644)
+	// defer の中では検査できないので明示的に捨てる (後始末で、失敗しても
+	// t.TempDir の削除が引き継ぐ)。
+	defer func() { _ = os.Chmod(target, 0o644) }()
 
 	s := NewLocalStorage(dir, "")
 	_, err := s.Get("denied")

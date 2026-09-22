@@ -46,7 +46,7 @@ func TestOfficialDetector_DetectMany_Success(t *testing.T) {
 			gotFields = append(gotFields, field)
 			gotPartTypes = append(gotPartTypes, fhs[0].Header.Get("Content-Type"))
 		}
-		json.NewEncoder(w).Encode(officialOKResponse(
+		_ = json.NewEncoder(w).Encode(officialOKResponse(
 			[]Prediction{{ClassName: "Porn", Probability: 0.9}},
 			[]Prediction{{ClassName: "Neutral", Probability: 0.99}},
 		))
@@ -76,7 +76,7 @@ func TestOfficialDetector_DetectMany_Chunking(t *testing.T) {
 		for i := range preds {
 			preds[i] = []Prediction{{ClassName: "Neutral", Probability: 1}}
 		}
-		json.NewEncoder(w).Encode(officialOKResponse(preds...))
+		_ = json.NewEncoder(w).Encode(officialOKResponse(preds...))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -97,9 +97,9 @@ func TestOfficialDetector_DetectMany_FailOpen(t *testing.T) {
 		handler http.HandlerFunc
 	}{
 		{"http 500", func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(500) }},
-		{"invalid json", func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("nope")) }},
+		{"invalid json", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("nope")) }},
 		{"success false", func(w http.ResponseWriter, _ *http.Request) {
-			json.NewEncoder(w).Encode(map[string]any{"success": false, "error": map[string]any{"code": "AUTHENTICATION_REQUIRED", "message": "x"}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"success": false, "error": map[string]any{"code": "AUTHENTICATION_REQUIRED", "message": "x"}})
 		}},
 	}
 	for _, tt := range tests {
@@ -116,7 +116,7 @@ func TestOfficialDetector_DetectMany_FailOpen(t *testing.T) {
 
 func TestOfficialDetector_DetectMany_PerItemFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(officialOKResponse(
+		_ = json.NewEncoder(w).Encode(officialOKResponse(
 			nil, // decode 失敗 item
 			[]Prediction{{ClassName: "Sexy", Probability: 0.8}},
 		))
@@ -249,7 +249,7 @@ func TestDetectSensitiveOfficial_ImagePath(t *testing.T) {
 		img, err := png.Decode(f)
 		require.NoError(t, err)
 		require.Equal(t, 299, img.Bounds().Dx())
-		json.NewEncoder(w).Encode(officialOKResponse([]Prediction{{ClassName: "Porn", Probability: 0.9}}))
+		_ = json.NewEncoder(w).Encode(officialOKResponse([]Prediction{{ClassName: "Porn", Probability: 0.9}}))
 	}))
 	t.Cleanup(srv.Close)
 
@@ -262,7 +262,7 @@ func TestDetectSensitiveOfficial_ImagePath(t *testing.T) {
 
 func TestDetectSensitiveOfficial_ImageBelowThreshold(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(officialOKResponse([]Prediction{{ClassName: "Porn", Probability: 0.2}}))
+		_ = json.NewEncoder(w).Encode(officialOKResponse([]Prediction{{ClassName: "Porn", Probability: 0.2}}))
 	}))
 	t.Cleanup(srv.Close)
 	s := officialTestService(t, srv.URL, SensitiveConfig{
@@ -292,7 +292,7 @@ func TestDetectSensitiveOfficial_VideoFrames(t *testing.T) {
 		for i := range preds {
 			preds[i] = []Prediction{{ClassName: "Hentai", Probability: 0.9}}
 		}
-		json.NewEncoder(w).Encode(officialOKResponse(preds...))
+		_ = json.NewEncoder(w).Encode(officialOKResponse(preds...))
 	}))
 	t.Cleanup(srv.Close)
 

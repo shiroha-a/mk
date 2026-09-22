@@ -336,7 +336,7 @@ func TestIsRelayActor(t *testing.T) {
 	svc, repo, _, _ := newService(t)
 	relayInbox := "https://relay.example/inbox"
 	// accepted な relay を登録 (= cache 経由で IsRelayActor の判定対象に入る)
-	repo.Create(&model.Relay{ID: "r1", Inbox: relayInbox, Status: relay.StatusAccepted})
+	require.NoError(t, repo.Create(&model.Relay{ID: "r1", Inbox: relayInbox, Status: relay.StatusAccepted}))
 
 	t.Run("nil_actor", func(t *testing.T) {
 		assert.False(t, svc.IsRelayActor(nil))

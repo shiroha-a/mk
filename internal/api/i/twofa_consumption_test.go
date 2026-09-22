@@ -429,8 +429,8 @@ func TestCheck2FAToken_ConcurrentDistinctCodesDoNotResurrect(t *testing.T) {
 	useB, okB := h.check2FAToken(ctx, profile, "c2")
 	require.True(t, okB)
 
-	useA.Commit()
-	useB.Commit()
+	require.NoError(t, useA.Commit())
+	require.NoError(t, useB.Commit())
 
 	assert.ElementsMatch(t, []string{"c3"}, backupCodes(repo, "u1"),
 		"消したコードが復活している (書き戻しが互いを打ち消している)")
@@ -450,7 +450,8 @@ func TestCheck2FAToken_ReleasesReservationWhenConsumeFails(t *testing.T) {
 
 	use, ok := h.check2FAToken(context.Background(), repo.Profiles["u1"], "backup1")
 	require.True(t, ok)
-	use.Commit()
+	// 消費の失敗がこのテストの主題 (実測で `db down` が返る)。
+	require.Error(t, use.Commit())
 
 	assert.Equal(t, 1, guard.releases, "消費に失敗したのに予約を残している")
 	assert.Empty(t, guard.used)

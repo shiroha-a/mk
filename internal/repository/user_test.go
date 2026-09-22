@@ -1798,7 +1798,7 @@ func TestUserRepository_FindByUsernameLower_NonNotFoundErrorIsNotSwallowed(t *te
 		Register("zz_fail_first", func(tx *gorm.DB) {
 			calls++
 			if calls == 1 {
-				tx.AddError(boom)
+				_ = tx.AddError(boom)
 			}
 		}))
 	t.Cleanup(func() { _ = session.Callback().Query().Remove("zz_fail_first") })

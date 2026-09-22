@@ -26,6 +26,8 @@ func TestIsInternalCall(t *testing.T) {
 	require.True(t, IsInternalCall(marked.Context()))
 	require.False(t, IsInternalCall(req.Context()), "元のリクエストは変わらないこと")
 
+	// nil を渡して落ちないことがこのアサーションの主題。
+	//nolint:staticcheck // SA1012: nil Context を渡す挙動そのものを固定している
 	require.False(t, IsInternalCall(nil), "nil context でも落ちないこと")
 }
 

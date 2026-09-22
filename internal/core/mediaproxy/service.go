@@ -514,7 +514,7 @@ func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, 
 	if errors.Is(err, coredrive.ErrObjectNotFound) && accessKey != primaryKey {
 		body, err = s.driveStorage.Get(primaryKey)
 		if err == nil {
-			accessKey = primaryKey
+			// ここから先は primary を配るので variant の accessKey はもう要らない。
 			storedMIME = "" // primary の MIME は後段で判定し直す
 		}
 	}
@@ -539,7 +539,6 @@ func (s *Service) resolveLocal(ctx context.Context, rawURL, filesPrefix string, 
 	if err != nil && s.localStorage != nil && !coredrive.StorageIsLocal(s.driveStorage) {
 		if b, lerr := s.localStorage.Get(primaryKey); lerr == nil {
 			body, err = b, nil
-			accessKey = primaryKey
 			storedMIME = ""
 		}
 	}

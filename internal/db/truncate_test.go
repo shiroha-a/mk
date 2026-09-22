@@ -8,7 +8,6 @@ import (
 
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/stretchr/testify/require"
-	"gorm.io/gorm/logger"
 )
 
 // **長い SQL を切り詰めること (既定)。**
@@ -21,11 +20,9 @@ func TestGormLogger_TruncatesLongSQLByDefault(t *testing.T) {
 
 	var buf bytes.Buffer
 	lg := newGormLoggerTo(&config.Config{}, stdlog.New(&buf, "", 0))
-	f, ok := lg.(logger.Interface)
-	require.True(t, ok)
 
 	long := "SELECT " + strings.Repeat("x", 500)
-	f.Warn(t.Context(), "%s", long)
+	lg.Warn(t.Context(), "%s", long)
 
 	out := buf.String()
 	require.Contains(t, out, "...", "切り詰めた印が付くこと")

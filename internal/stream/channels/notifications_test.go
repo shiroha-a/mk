@@ -15,7 +15,7 @@ import (
 func TestNotifications_AuthenticatedSubscribesPerUser(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewNotifications(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"notifications:alice"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1","type":"follow"}`))
@@ -48,7 +48,7 @@ func TestNotifications_NilUserPointer(t *testing.T) {
 func TestMain_AuthenticatedSubscribesBoth(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.ElementsMatch(t, []string{"notifications:alice", "main:alice"}, ctx.subs)
 
 	// envelope なし → "notification" として転送される
@@ -67,7 +67,7 @@ func TestMain_AuthenticatedSubscribesBoth(t *testing.T) {
 	// `main.on('notification', ...)` が発火せず timeline がライブ更新しない。
 	ctx2 := newCtx(&model.User{ID: "alice"})
 	ch2 := NewMain(ctx2)
-	ch2.Init(nil)
+	require.NoError(t, ch2.Init(nil))
 	ch2.OnRedisEvent([]byte(`{"id":"n1","type":"mention","createdAt":"x","notifierId":"bob"}`))
 	require.Len(t, ctx2.sentType, 1)
 	assert.Equal(t, "notification", ctx2.sentType[0],
@@ -91,7 +91,7 @@ func TestMain_AnonymousIsNoOp(t *testing.T) {
 func TestMain_BadJSONEnvelopeFallsBack(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// invalid JSON は notification にフォールバックして送信される
 	ch.OnRedisEvent([]byte(`{not json`))
 	require.Len(t, ctx.sentType, 1)
@@ -101,7 +101,7 @@ func TestMain_BadJSONEnvelopeFallsBack(t *testing.T) {
 func TestMain_FollowEventRefreshesSnapshot(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent([]byte(`{"type":"follow","body":{"id":"followee1"}}`))
 	// snapshot が follow で更新される (followee1 を following=true で追加)。
 	require.Len(t, ctx.followingUpd, 1)
@@ -113,7 +113,7 @@ func TestMain_FollowEventRefreshesSnapshot(t *testing.T) {
 func TestMain_UnfollowEventRefreshesSnapshot(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent([]byte(`{"type":"unfollow","body":{"id":"followee1"}}`))
 	require.Len(t, ctx.followingUpd, 1)
 	assert.Equal(t, followingUpdate{"followee1", false}, ctx.followingUpd[0])
@@ -122,7 +122,7 @@ func TestMain_UnfollowEventRefreshesSnapshot(t *testing.T) {
 func TestMain_FollowedEventDoesNotRefreshSnapshot(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// `followed` (誰かが自分を follow) は自分の follow 一覧を変えないので
 	// snapshot を触らない。client へは転送される。
 	ch.OnRedisEvent([]byte(`{"type":"followed","body":{"id":"follower1"}}`))
@@ -133,7 +133,7 @@ func TestMain_FollowedEventDoesNotRefreshSnapshot(t *testing.T) {
 func TestMain_FollowEventMissingIDIgnored(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// id が無い follow body は snapshot 更新できないので no-op (転送は継続)。
 	ch.OnRedisEvent([]byte(`{"type":"follow","body":{"username":"x"}}`))
 	assert.Empty(t, ctx.followingUpd)
@@ -172,7 +172,7 @@ func TestNotifications_EmbedRenoteHiddenForNonFollower(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ctx.followingSnap = map[string]bool{} // follows nobody
 	ch := NewNotifications(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent(notifWithRenote(t, "renoteauthor"))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "notification", ctx.sentType[0])
@@ -186,7 +186,7 @@ func TestNotifications_EmbedVerbatimForFollower(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ctx.followingSnap = map[string]bool{"renoteauthor": true}
 	ch := NewNotifications(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	payload := notifWithRenote(t, "renoteauthor")
 	ch.OnRedisEvent(payload)
 	assert.True(t, bytes.Equal(sentBytes(t, ctx, 0), payload),
@@ -196,7 +196,7 @@ func TestNotifications_EmbedVerbatimForFollower(t *testing.T) {
 func TestNotifications_NoNoteVerbatim(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ch := NewNotifications(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	payload := []byte(`{"id":"n1","type":"follow","userId":"bob"}`)
 	ch.OnRedisEvent(payload)
 	assert.True(t, bytes.Equal(sentBytes(t, ctx, 0), payload), "note-less notification must be verbatim")
@@ -206,7 +206,7 @@ func TestMain_BareNotificationEmbedHidden(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ctx.followingSnap = map[string]bool{}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent(notifWithRenote(t, "renoteauthor"))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "notification", ctx.sentType[0])
@@ -219,7 +219,7 @@ func TestMain_EnvelopeReplyNoteEmbedHidden(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ctx.followingSnap = map[string]bool{}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	emb := embed("followers", "renoteauthor", nil)
 	note := tlStream("base", "noteauthor", "public", "2026-01-02T03:04:05.000Z", entity.UserLite{})
 	note.Renote = &emb
@@ -258,7 +258,7 @@ func TestMain_MentionDroppedByInstanceMute(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{MutedInstances: set("evil.example")}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent(mentionEnvelope("bob", "evil.example"))
 	assert.Empty(t, ctx.sentType, "mention from muted instance must be dropped")
 }
@@ -267,7 +267,7 @@ func TestMain_MentionDroppedByUserMute(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{Muting: set("bob")}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent(mentionEnvelope("bob", ""))
 	assert.Empty(t, ctx.sentType, "mention from muted user must be dropped")
 }
@@ -276,7 +276,7 @@ func TestMain_MentionDroppedByBlock(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{BlockingMe: set("bob")}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent(mentionEnvelope("bob", ""))
 	assert.Empty(t, ctx.sentType, "mention from a user who blocks me must be dropped")
 }
@@ -285,7 +285,7 @@ func TestMain_MentionPassesClean(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{Muting: set("someoneelse"), MutedInstances: set("other.example")}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent(mentionEnvelope("bob", "good.example"))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "mention", ctx.sentType[0])
@@ -294,7 +294,7 @@ func TestMain_MentionPassesClean(t *testing.T) {
 func TestMain_MentionNilSnapshotPasses(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"}) // muteBlockSnap nil → fail-open
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent(mentionEnvelope("bob", "evil.example"))
 	require.Len(t, ctx.sentType, 1, "nil snapshot must not drop anything")
 	assert.Equal(t, "mention", ctx.sentType[0])
@@ -303,7 +303,7 @@ func TestMain_MentionNilSnapshotPasses(t *testing.T) {
 func TestMain_MentionDroppedByVisibility(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// specified note where alice is not in visibleUserIds → isNoteVisibleForMe false。
 	ch.OnRedisEvent([]byte(`{"type":"mention","body":{"id":"n1","userId":"bob","visibility":"specified","visibleUserIds":["carol"]}}`))
 	assert.Empty(t, ctx.sentType, "mention of a specified note not visible to me must be dropped")
@@ -313,7 +313,7 @@ func TestMain_ReplyNotGatedByMute(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{Muting: set("bob")}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	// upstream main.ts は reply を mute/block で gate しない (notification/mention のみ)。
 	ch.OnRedisEvent([]byte(`{"type":"reply","body":{"id":"n1","userId":"bob","visibility":"public"}}`))
 	require.Len(t, ctx.sentType, 1)
@@ -324,7 +324,7 @@ func TestNotifications_DroppedByInstanceMute(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{MutedInstances: set("evil.example")}
 	ch := NewNotifications(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent([]byte(`{"id":"x1","type":"mention","user":{"id":"bob","host":"evil.example"}}`))
 	assert.Empty(t, ctx.sentType, "notification from a muted instance must be dropped")
 }
@@ -333,7 +333,7 @@ func TestMain_BareNotificationDroppedByInstanceMute(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ctx.muteBlockSnap = &stream.MuteBlockSnapshot{MutedInstances: set("evil.example")}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent([]byte(`{"id":"x1","type":"reaction","user":{"id":"bob","host":"evil.example"}}`))
 	assert.Empty(t, ctx.sentType, "bare notification from a muted instance must be dropped")
 }
@@ -346,7 +346,7 @@ func TestMain_UnreadNotificationEnvelopeEmbedHidden(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ctx.followingSnap = map[string]bool{} // follows nobody
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 
 	emb := embed("followers", "renoteauthor", nil)
 	emb.FileIDs = []string{"f2"}
@@ -373,7 +373,7 @@ func TestMain_UnreadNotificationEnvelopeVisibleEmbedKeepsFiles(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "viewer"})
 	ctx.followingSnap = map[string]bool{"renoteauthor": true}
 	ch := NewMain(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 
 	emb := embed("followers", "renoteauthor", nil)
 	emb.FileIDs = []string{"f2"}
@@ -454,7 +454,7 @@ func TestMain_NonNoteEnvelopeUnaffectedByNotificationGate(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := newCtx(&model.User{ID: "viewer"})
 			ch := NewMain(ctx)
-			ch.Init(nil)
+			require.NoError(t, ch.Init(nil))
 			ch.OnRedisEvent([]byte(tc.payload))
 			require.Len(t, ctx.sentType, 1)
 			assert.Equal(t, tc.name, ctx.sentType[0], "envelope の type がそのまま転送されること")

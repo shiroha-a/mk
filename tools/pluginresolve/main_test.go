@@ -71,9 +71,9 @@ func TestParseSpecs_Rejects(t *testing.T) {
 		{"url に userinfo (パスワード無し)", "a https://evil@github.com/foo/w v1", "userinfo"},
 		// 目視で github.com と区別できない形。取ってきたコードはサーバーと
 		// 同じ権限で動くので、選択の明示性が唯一の防壁になる。
-		{"url にゼロ幅スペース", "a https://github.com​.evil.example/x v1", "非 ASCII"},
+		{"url にゼロ幅スペース", "a https://github.com\u200b.evil.example/x v1", "非 ASCII"},
 		{"url にキリル文字", "a https://gіthub.com/foo/bar v1", "非 ASCII"},
-		{"url に RTL override", "a https://github.com/foo/‮bar v1", "非 ASCII"},
+		{"url に RTL override", "a https://github.com/foo/\u202ebar v1", "非 ASCII"},
 		{"url に不正な UTF-8", "a https://github.com/\xff/x v1", "非 ASCII"},
 		// git の引数として解釈される値。`--upload-pack=` は任意コマンドの実行になる。
 		{"ref がオプション", "a https://github.com/foo/w --upload-pack=id", "ref"},

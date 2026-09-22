@@ -121,7 +121,11 @@ func (s *RedisRateLimitStore) Check(ctx context.Context, key string, duration ti
 // Redis の ZRANGE は member を文字列で返すため。
 func parseIntFromString(s string) int64 {
 	var v int64
-	fmt.Sscanf(s, "%d", &v)
+	// 読めない値は 0 を返す。呼び出し側は Redis のカウンタを読む経路で、
+	// 0 と「未設定」を区別していない。
+	if _, err := fmt.Sscanf(s, "%d", &v); err != nil {
+		return 0
+	}
 	return v
 }
 

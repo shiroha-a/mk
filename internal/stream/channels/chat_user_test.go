@@ -14,7 +14,7 @@ func TestChatUserChannel_Init_SubscribesMyDirection(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	assert.Equal(t, []string{"chatUserStream:alice-bob"}, ctx.subs)
 }
 
@@ -58,7 +58,7 @@ func TestChatUserChannel_OnRedisEvent_Forwards(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.OnRedisEvent([]byte(`{"type":"message","body":{"id":"m1"}}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "message", ctx.sentType[0])
@@ -68,7 +68,7 @@ func TestChatUserChannel_OnRedisEvent_Invalid(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.OnRedisEvent([]byte(`not-json`))
 	assert.Empty(t, ctx.sentType)
 }
@@ -77,7 +77,7 @@ func TestChatUserChannel_OnRedisEvent_NoType(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.OnRedisEvent([]byte(`{"body":{}}`))
 	assert.Empty(t, ctx.sentType)
 }
@@ -91,7 +91,7 @@ func TestChatUserChannel_OnClientMessage_Read(t *testing.T) {
 	}
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.OnClientMessage("read", json.RawMessage(`{"id":"m1"}`))
 }
 
@@ -99,7 +99,7 @@ func TestChatUserChannel_OnClientMessage_UnknownType(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.OnClientMessage("bogus", json.RawMessage(`{}`))
 }
 
@@ -107,7 +107,7 @@ func TestChatUserChannel_OnClientMessage_ReadEmptyID(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.OnClientMessage("read", json.RawMessage(`{"id":""}`))
 }
 
@@ -115,7 +115,7 @@ func TestChatUserChannel_OnClientMessage_ReadBadJSON(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.OnClientMessage("read", json.RawMessage(`not-json`))
 }
 
@@ -150,7 +150,7 @@ func TestChatUserChannel_Dispose(t *testing.T) {
 	svc, _ := newChatSvc(t)
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewChatUserFactory(svc).New(ctx)
-	ch.Init(json.RawMessage(`{"otherId":"bob"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"otherId":"bob"}`)))
 	ch.Dispose()
 	assert.Equal(t, []string{"chatUserStream:alice-bob"}, ctx.unsubs)
 }

@@ -205,7 +205,7 @@ func jsonType(v any) string {
 		return "null"
 	}
 	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
 		if rv.IsNil() {
 			return "null"
 		}
@@ -246,7 +246,7 @@ func arrayElemType(v any) (string, bool) {
 		return jsonType(arr[0]), true
 	}
 	rv := reflect.ValueOf(v)
-	for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+	for rv.Kind() == reflect.Pointer || rv.Kind() == reflect.Interface {
 		if rv.IsNil() {
 			return "", false
 		}

@@ -107,7 +107,7 @@ func (c *MainChannel) OnRedisEvent(payload []byte) {
 		// maybeRefreshFollowing は元 body (follow/unfollow の user) を見るので
 		// note-hide ゲートより前に元の body で実行する。
 		c.maybeRefreshFollowing(envType, envBody)
-		body := envBody
+		var body json.RawMessage
 		// mention envelope は upstream main.ts と同じく isNoteVisibleForMe +
 		// isNoteMutedOrBlocked (instance-mute / user-mute / block / renote-mute /
 		// channel-mute) を適用してから送る (#1711)。reply / renote は upstream

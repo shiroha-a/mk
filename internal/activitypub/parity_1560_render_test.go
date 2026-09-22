@@ -17,7 +17,7 @@ func TestRenderNote_EmptyCWZWSP(t *testing.T) {
 	empty := ""
 	n := &model.Note{ID: idGen.Generate(time.Now()), UserID: "u1", Visibility: model.NoteVisibilityPublic, CW: &empty}
 	out := r.RenderNote(n, idGen)
-	assert.Equal(t, "​", out.Summary.String(), "empty CW must render ZWSP summary")
+	assert.Equal(t, "\u200b", out.Summary.String(), "empty CW must render ZWSP summary")
 	assert.True(t, out.Sensitive.Bool(), "any non-nil CW (incl empty) must set sensitive=true")
 
 	// CW=nil は summary 無し / sensitive=false

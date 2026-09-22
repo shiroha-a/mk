@@ -325,8 +325,7 @@ func loaderFixtureScopes(body *ast.BlockStmt, constLiterals map[string]string) [
 // nested deeper inside another literal).
 func nestedFuncLits(b *ast.BlockStmt) []*ast.FuncLit {
 	var out []*ast.FuncLit
-	var walk func(n ast.Node)
-	walk = func(n ast.Node) {
+	walk := func(n ast.Node) {
 		ast.Inspect(n, func(x ast.Node) bool {
 			if x == n {
 				return true

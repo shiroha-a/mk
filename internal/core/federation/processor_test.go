@@ -1663,7 +1663,7 @@ func TestProcess_IngestLookupFailuresPropagate(t *testing.T) {
 // --- Question/Poll ---
 
 func TestProcess_CreateQuestion(t *testing.T) {
-	p, repo, _, noteRepo := newProcessor(t, aliceActor)
+	_, repo, _, noteRepo := newProcessor(t, aliceActor)
 	// resolverにpollRepoを注入するためresolverへのアクセスが必要
 	// newProcessorで作成されたresolverにSetPollRepoできないため、
 	// processor経由でresolverを取得する方法がない。代わりにfull setup。
@@ -1674,7 +1674,7 @@ func TestProcess_CreateQuestion(t *testing.T) {
 	resolver := federation.NewResolver(repo, noteRepo, urls, &stubFetcher{body: []byte(aliceActor)}, idGen2)
 	resolver.SetPollRepo(pollRepo)
 	followingSvc := corefollowing.NewService(repo, followingRepo, testutil.NewMockFollowRequestRepository(), idGen2)
-	p = federation.NewProcessor(resolver, followingSvc, nil, nil, repo, noteRepo)
+	p := federation.NewProcessor(resolver, followingSvc, nil, nil, repo, noteRepo)
 
 	body := []byte(`{
 		"type": "Create",

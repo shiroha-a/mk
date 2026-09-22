@@ -347,10 +347,6 @@ func (d *Dispatcher) CloseAll() {
 	}
 	// noteStream の Redis subscription もクリーンアップ
 	d.noteSubMu.Lock()
-	noteIDs := make([]string, 0, len(d.noteSubs))
-	for noteID := range d.noteSubs {
-		noteIDs = append(noteIDs, noteID)
-	}
 	cancels := make([]func(), 0, len(d.noteCancels))
 	// **全ての枠に印を残す。** `noteSubs` に無い枠 (購読の確立中) も含めて
 	// 回らないと、直後に埋まったハンドルが残る。

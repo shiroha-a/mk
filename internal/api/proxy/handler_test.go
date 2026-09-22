@@ -95,7 +95,7 @@ func setupHandler(t *testing.T, allowedURLs map[string]bool) (*Handler, *echo.Ec
 			return
 		}
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 
 	cfg := &config.Config{
@@ -477,7 +477,7 @@ func TestHandle_InternalError_WithFallback(t *testing.T) {
 	// リモートサーバーが不正なレスポンスを返すケース
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
-		w.Write([]byte("not an image"))
+		_, _ = w.Write([]byte("not an image"))
 	}))
 	defer ts.Close()
 
@@ -512,7 +512,7 @@ func TestHandle_InternalError_WithFallback(t *testing.T) {
 func TestHandle_InternalError_NoFallback(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
-		w.Write([]byte("not an image"))
+		_, _ = w.Write([]byte("not an image"))
 	}))
 	defer ts.Close()
 

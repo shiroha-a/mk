@@ -126,7 +126,11 @@ func (w *bufferedWriter) flushKey(ctx context.Context, key string) error {
 	deltas := make(map[string]int64, len(result)/2)
 	for i := 0; i < len(result)-1; i += 2 {
 		var v int64
-		fmt.Sscanf(result[i+1], "%d", &v)
+		if _, err := fmt.Sscanf(result[i+1], "%d", &v); err != nil {
+			// 値は mk-go 自身が書いた整数なので、読めないのは破損。0 として
+			// 記録すると「増分なし」と区別が付かないので飛ばす。
+			continue
+		}
 		deltas[result[i]] = v
 	}
 
@@ -150,7 +154,9 @@ func (w *bufferedWriter) GetBuffered(ctx context.Context, noteID string) (map[st
 	deltas := make(map[string]int64, len(result))
 	for k, v := range result {
 		var n int64
-		fmt.Sscanf(v, "%d", &n)
+		if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+			continue
+		}
 		deltas[k] = n
 	}
 	return deltas, nil
@@ -190,7 +196,9 @@ func (w *bufferedWriter) GetBufferedMany(ctx context.Context, noteIDs []string) 
 		deltas := make(map[string]int64, len(result))
 		for k, v := range result {
 			var n int64
-			fmt.Sscanf(v, "%d", &n)
+			if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+				continue
+			}
 			deltas[k] = n
 		}
 		out[id] = deltas

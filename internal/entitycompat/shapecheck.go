@@ -89,7 +89,7 @@ func reflectOwnFields(t reflect.Type) Schema {
 		out[name] = FieldShape{
 			// omitempty 付きポインタは nil で「省略」= optional であり null は
 			// 出さない。omitempty 無しのポインタだけが nil 時に `null` を出す。
-			Nullable: f.Type.Kind() == reflect.Ptr && !opt,
+			Nullable: f.Type.Kind() == reflect.Pointer && !opt,
 			Optional: opt,
 			Type:     coarseGo(f.Type),
 		}
@@ -111,7 +111,7 @@ func reflectAllFields(t reflect.Type) Schema {
 			}
 			if name, opt, ok := jsonName(f); ok {
 				out[name] = FieldShape{
-					Nullable: f.Type.Kind() == reflect.Ptr && !opt,
+					Nullable: f.Type.Kind() == reflect.Pointer && !opt,
 					Optional: opt,
 					Type:     coarseGo(f.Type),
 				}
@@ -141,7 +141,7 @@ func jsonName(f reflect.StructField) (name string, omitempty, ok bool) {
 }
 
 func coarseGo(t reflect.Type) string {
-	for t.Kind() == reflect.Ptr {
+	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
 	switch t.Kind() {

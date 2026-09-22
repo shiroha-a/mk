@@ -59,7 +59,7 @@ func TestIsVideoMIME(t *testing.T) {
 func TestHTTPDetector_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "image/png", r.Header.Get("Content-Type"))
-		json.NewEncoder(w).Encode(map[string]any{"score": 0.85})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0.85})
 	}))
 	defer srv.Close()
 
@@ -77,7 +77,7 @@ func TestHTTPDetector_NetworkError(t *testing.T) {
 
 func TestHTTPDetector_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
+		_, _ = w.Write([]byte("not json"))
 	}))
 	defer srv.Close()
 
@@ -91,7 +91,7 @@ func TestHTTPDetector_AuthHeaderInjected(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Get("Authorization")
-		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
 	}))
 	defer srv.Close()
 
@@ -108,7 +108,7 @@ func TestHTTPDetector_AuthHeaderCustomKey(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Get("X-Api-Key")
-		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
 	}))
 	defer srv.Close()
 
@@ -125,7 +125,7 @@ func TestHTTPDetector_NoAuthHeaderWhenEmpty(t *testing.T) {
 	var got string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		got = r.Header.Get("Authorization")
-		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
 	}))
 	defer srv.Close()
 
@@ -139,7 +139,7 @@ func TestHTTPDetector_NoAuthHeaderWhenEmpty(t *testing.T) {
 // 通常の request になる (panic / 落ちない)。
 func TestHTTPDetector_AuthHeaderMalformedSkipped(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
 	}))
 	defer srv.Close()
 
@@ -155,7 +155,7 @@ func TestHTTPDetector_AuthHeaderMalformedSkipped(t *testing.T) {
 func TestHTTPDetector_TimeoutFromOptions(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(50 * time.Millisecond)
-		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
 	}))
 	defer srv.Close()
 
@@ -170,7 +170,7 @@ func TestHTTPDetector_TimeoutFromOptions(t *testing.T) {
 func TestHTTPDetector_ContextCanceled(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		time.Sleep(100 * time.Millisecond)
-		json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
+		_ = json.NewEncoder(w).Encode(map[string]any{"score": 0.0})
 	}))
 	defer srv.Close()
 

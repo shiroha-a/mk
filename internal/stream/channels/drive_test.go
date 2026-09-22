@@ -15,7 +15,7 @@ var _ stream.Channel = (*DriveChannel)(nil)
 func TestDrive_AuthenticatedSubscribesPerUser(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewDrive(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"drive:alice"}, ctx.subs)
 
 	// envelope あり

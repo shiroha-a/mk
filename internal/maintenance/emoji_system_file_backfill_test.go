@@ -946,7 +946,8 @@ func failingQueryDB(t *testing.T, table string, nth int) *gorm.DB {
 			}
 			seen++
 			if seen == nth {
-				tx.AddError(errors.New("injected db failure"))
+				// 障害注入なので戻り値は見ない。
+				_ = tx.AddError(errors.New("injected db failure"))
 			}
 		}))
 	return db
@@ -1073,7 +1074,8 @@ func failingUpdateAfterExecDB(t *testing.T) *gorm.DB {
 	})
 	require.NoError(t, db.Callback().Update().After("gorm:update").
 		Register("maintenance_test_update_ack_lost", func(tx *gorm.DB) {
-			tx.AddError(errors.New("injected: connection reset after commit"))
+			// 障害注入なので戻り値は見ない。
+			_ = tx.AddError(errors.New("injected: connection reset after commit"))
 		}))
 	return db
 }
@@ -1094,7 +1096,8 @@ func failingUpdateDB(t *testing.T) *gorm.DB {
 	})
 	require.NoError(t, db.Callback().Update().Before("gorm:update").
 		Register("maintenance_test_update_never_ran", func(tx *gorm.DB) {
-			tx.AddError(errors.New("injected: update failed"))
+			// 障害注入なので戻り値は見ない。
+			_ = tx.AddError(errors.New("injected: update failed"))
 		}))
 	return db
 }
@@ -1110,7 +1113,7 @@ func failEmojiQueryAfter(t *testing.T, db *gorm.DB, nth int) {
 			}
 			seen++
 			if seen >= nth {
-				tx.AddError(errors.New("injected: emoji re-read failed"))
+				_ = tx.AddError(errors.New("injected: emoji re-read failed"))
 			}
 		}))
 }

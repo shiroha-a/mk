@@ -197,7 +197,7 @@ func TestRemoveMany_DropsEveryOccurrence(t *testing.T) {
 	keep := idGen.Generate(time.Now())
 	require.NoError(t, testRedis.Client.LPush(ctx, key, dup, keep, dup).Err())
 
-	fanout.RemoveMany(ctx, []Name{name}, []string{dup})
+	require.NoError(t, fanout.RemoveMany(ctx, []Name{name}, []string{dup}))
 
 	got, err := fanout.Get(ctx, name, "", "", 10)
 	require.NoError(t, err)

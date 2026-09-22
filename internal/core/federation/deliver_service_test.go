@@ -520,12 +520,12 @@ func TestDeliverToUser_FallsBackToSharedInbox(t *testing.T) {
 }
 
 func TestDeliverToFollowers_RepoError(t *testing.T) {
-	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
+	_, _, userRepo, _, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)
 	// failingFollowingRepo を使うため、独自構造を組み立てる
 	failing := &failingListInboxesRepo{MockFollowingRepository: testutil.NewMockFollowingRepository()}
 	urls := activitypub.NewURLBuilder("https://example.com")
-	svc = federation.NewDeliverService(&stubEnqueuer{}, userRepo, failing, keypairRepo, urls)
+	svc := federation.NewDeliverService(&stubEnqueuer{}, userRepo, failing, keypairRepo, urls)
 	err := svc.DeliverToFollowers("alice", []byte(`{}`))
 	assert.Error(t, err)
 }
@@ -607,11 +607,11 @@ func TestDeliverToFollowersExcluding_ThreadsSharedInboxFlag(t *testing.T) {
 }
 
 func TestDeliverToFollowersExcluding_RepoError(t *testing.T) {
-	svc, _, userRepo, _, keypairRepo := newDeliverService(t)
+	_, _, userRepo, _, keypairRepo := newDeliverService(t)
 	installLocalSigner(t, userRepo, keypairRepo)
 	failing := &failingListInboxesRepo{MockFollowingRepository: testutil.NewMockFollowingRepository()}
 	urls := activitypub.NewURLBuilder("https://example.com")
-	svc = federation.NewDeliverService(&stubEnqueuer{}, userRepo, failing, keypairRepo, urls)
+	svc := federation.NewDeliverService(&stubEnqueuer{}, userRepo, failing, keypairRepo, urls)
 	err := svc.DeliverToFollowersExcluding("alice", []byte(`{}`), map[string]bool{"https://x/inbox": true})
 	assert.Error(t, err)
 }

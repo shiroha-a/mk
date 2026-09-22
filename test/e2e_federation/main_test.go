@@ -271,8 +271,10 @@ func createSecondDB(primaryDB *gorm.DB) (*gorm.DB, error) {
 	// testcontainers の接続文字列はホスト名:ポートが動的なので、
 	// primaryDB の接続情報を流用して dbname だけ差し替える
 	var host, port string
-	sqlDB.QueryRow("SELECT inet_server_addr()").Scan(&host)
-	sqlDB.QueryRow("SELECT inet_server_port()").Scan(&port)
+	// host は下のフォールバックが効く。port は失敗すると空のまま DSN に入るが、
+	// 変更前と同じ挙動なのでここでは扱いを変えない。
+	_ = sqlDB.QueryRow("SELECT inet_server_addr()").Scan(&host)
+	_ = sqlDB.QueryRow("SELECT inet_server_port()").Scan(&port)
 	if host == "" {
 		host = "127.0.0.1"
 	}

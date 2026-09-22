@@ -180,8 +180,12 @@ func TestAddContext_IndependentSlices(t *testing.T) {
 	AddContext(n)
 	pCtx := p.Context.([]any)
 	nCtx := n.Context.([]any)
-	// appendしても互いに影響しない
-	pCtx = append(pCtx, "extra")
+	// **append では捕まらない。** 追記は `nCtx` の長さより後ろへ書くので、backing
+	// array を共有していても `nCtx` からは見えない。`len(append(s, x)) == len(s)+1`
+	// を見る形も恒真。どちらも aliasing を仕込む変異が素通りする (実測)。
+	// 既存要素を書き換えて、相手へ波及しないことを直接見る。
+	pCtx[0] = "mutated"
+	assert.NotEqual(t, "mutated", nCtx[0], "同じ backing array を共有している")
 	assert.Len(t, nCtx, 3)
 }
 

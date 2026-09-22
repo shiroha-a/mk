@@ -180,7 +180,7 @@ func TestFetch_RemoteImage(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -200,7 +200,7 @@ func TestFetch_RemoteImage_Emoji(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -217,7 +217,7 @@ func TestFetch_RemoteImage_Avatar(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -250,7 +250,7 @@ func TestFetch_RemoteImage_SniffsUnknownBinary(t *testing.T) {
 					// Go は書き込み時に自動で sniff するので、明示的に消す。
 					w.Header()["Content-Type"] = nil
 				}
-				w.Write(imgData)
+				_, _ = w.Write(imgData)
 			}))
 			defer ts.Close()
 
@@ -280,7 +280,7 @@ func TestFetch_RemoteImage_Static(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -297,7 +297,7 @@ func TestFetch_RemoteImage_Preview(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -317,7 +317,7 @@ func TestFetch_RemoteImage_Badge(t *testing.T) {
 	imgData := makeBadgePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -337,7 +337,7 @@ func TestFetch_RemoteImage_AnimatedGIF_PassThroughOnEmoji(t *testing.T) {
 	gifData := []byte("GIF89a") // valid な animation でなくとも MIME type で判定される
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/gif")
-		w.Write(gifData)
+		_, _ = w.Write(gifData)
 	}))
 	defer ts.Close()
 	s := testService(map[string]bool{ts.URL + "/anim.gif": true})
@@ -354,7 +354,7 @@ func TestFetch_RemoteImage_AnimatedAPNG_PassThroughOnEmoji(t *testing.T) {
 	pngData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/apng")
-		w.Write(pngData)
+		_, _ = w.Write(pngData)
 	}))
 	defer ts.Close()
 	s := testService(map[string]bool{ts.URL + "/anim.apng": true})
@@ -414,7 +414,7 @@ func TestFetch_FaviconWithIANAMIMETypeAccepted(t *testing.T) {
 	imgData := []byte{0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x10, 0x10} // bogus ico header
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/vnd.microsoft.icon")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -432,7 +432,7 @@ func TestFetch_ContentTypeWithParameters(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png; charset=binary")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -449,7 +449,7 @@ func TestFetch_FaviconWithLegacyMIMETypeAccepted(t *testing.T) {
 	imgData := []byte{0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x10, 0x10}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/x-icon")
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -464,7 +464,7 @@ func TestFetch_FaviconWithLegacyMIMETypeAccepted(t *testing.T) {
 func TestFetch_UnsafeMIME_Rejected(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/javascript")
-		w.Write([]byte("alert('xss')"))
+		_, _ = w.Write([]byte("alert('xss')"))
 	}))
 	defer ts.Close()
 
@@ -547,7 +547,7 @@ func TestBrowsersafeMIMEs(t *testing.T) {
 func TestFetch_SVG_ReturnsDummyPNG(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/svg+xml")
-		w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>`))
+		_, _ = w.Write([]byte(`<svg xmlns="http://www.w3.org/2000/svg"><rect width="10" height="10"/></svg>`))
 	}))
 	defer ts.Close()
 
@@ -652,7 +652,7 @@ func TestFetch_RemoteNoContentType(t *testing.T) {
 	imgData := makePNG()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		// Content-Typeヘッダなしで返す
-		w.Write(imgData)
+		_, _ = w.Write(imgData)
 	}))
 	defer ts.Close()
 
@@ -729,7 +729,7 @@ func TestFetch_PassThrough_JXR(t *testing.T) {
 	jxrBytes := []byte("II\xbc\x01" + "fakejxrpayload")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/jxr")
-		w.Write(jxrBytes)
+		_, _ = w.Write(jxrBytes)
 	}))
 	defer ts.Close()
 
@@ -748,7 +748,7 @@ func TestFetch_PassThrough_MNG(t *testing.T) {
 	mngBytes := []byte("\x8aMNG\r\n\x1a\n" + "fakemngpayload")
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "video/x-mng")
-		w.Write(mngBytes)
+		_, _ = w.Write(mngBytes)
 	}))
 	defer ts.Close()
 
@@ -1089,7 +1089,7 @@ func TestFetch_Remote_BodyExceedsMaxNoContentLength(t *testing.T) {
 	bigBody := make([]byte, maxDownload+100)
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(bigBody)
+		_, _ = w.Write(bigBody)
 	}))
 	defer ts.Close()
 

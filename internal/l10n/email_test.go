@@ -68,7 +68,7 @@ func TestModeratorInactivityWarning(t *testing.T) {
 	assert.Equal(t, "モデレーター不在の通知", subjectJa)
 	assert.Contains(t, bodyJa, "6時間")
 
-	subjectJa, bodyJa = ModeratorInactivityWarning("ja", 2, 48)
+	_, bodyJa = ModeratorInactivityWarning("ja", 2, 48)
 	assert.Contains(t, bodyJa, "2日間")
 
 	subjectEn, bodyEn := ModeratorInactivityWarning("en", 0, 3)

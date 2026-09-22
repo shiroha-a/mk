@@ -124,25 +124,25 @@ func newChannel(t *testing.T, user any) (*ReversiGameChannel, *stubContext, *cha
 
 func TestReversiChannel_Init_SubscribesToTopic(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	assert.Equal(t, []string{"reversiGame:g1"}, ctx.subs)
 }
 
 func TestReversiChannel_Init_MissingGameID(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, nil)
-	ch.Init(json.RawMessage(`{}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{}`)))
 	assert.Empty(t, ctx.subs)
 }
 
 func TestReversiChannel_Init_BadJSON(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, nil)
-	ch.Init(json.RawMessage(`not json`))
+	require.NoError(t, ch.Init(json.RawMessage(`not json`)))
 	assert.Empty(t, ctx.subs)
 }
 
 func TestReversiChannel_OnRedisEvent_Forwards(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, nil)
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnRedisEvent([]byte(`{"type":"log","body":{"pos":19}}`))
 	require.Len(t, ctx.sentType, 1)
 	assert.Equal(t, "log", ctx.sentType[0])
@@ -150,21 +150,21 @@ func TestReversiChannel_OnRedisEvent_Forwards(t *testing.T) {
 
 func TestReversiChannel_OnRedisEvent_InvalidJSON(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, nil)
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnRedisEvent([]byte(`not-json`))
 	assert.Empty(t, ctx.sentType)
 }
 
 func TestReversiChannel_OnRedisEvent_NoType(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, nil)
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnRedisEvent([]byte(`{"body":{}}`))
 	assert.Empty(t, ctx.sentType)
 }
 
 func TestReversiChannel_OnClientMessage_ReadyValid(t *testing.T) {
 	ch, _, repo, game := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("ready", json.RawMessage(`true`))
 	got, _ := repo.FindByID(game.ID)
 	assert.True(t, got.User1Ready)
@@ -172,7 +172,7 @@ func TestReversiChannel_OnClientMessage_ReadyValid(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_Unauthenticated(t *testing.T) {
 	ch, _, repo, _ := newChannel(t, nil)
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("ready", json.RawMessage(`true`))
 	got, _ := repo.FindByID("g1")
 	assert.False(t, got.User1Ready, "unauthenticated clients must not mutate state")
@@ -190,7 +190,7 @@ func TestReversiChannel_OnClientMessage_NilService(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_UpdateSettings(t *testing.T) {
 	ch, _, repo, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("updateSettings", json.RawMessage(`{"key":"isLlotheo","value":true}`))
 	got, _ := repo.FindByID("g1")
 	assert.True(t, got.IsLlotheo)
@@ -198,14 +198,14 @@ func TestReversiChannel_OnClientMessage_UpdateSettings(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_UpdateSettings_InvalidBody(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("updateSettings", json.RawMessage(`not-json`))
 	assert.Empty(t, ctx.sentType) // bad body → silent drop
 }
 
 func TestReversiChannel_OnClientMessage_PutStone_PreStartError(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("putStone", json.RawMessage(`{"pos":19,"id":"x"}`))
 	// Game not started → service returns error → channel emits "error" event.
 	require.NotEmpty(t, ctx.sentType)
@@ -214,7 +214,7 @@ func TestReversiChannel_OnClientMessage_PutStone_PreStartError(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_PutStone_BadJSON(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("putStone", json.RawMessage(`not-json`))
 	assert.Empty(t, ctx.sentType)
 }
@@ -227,7 +227,7 @@ func TestReversiChannel_OnClientMessage_Surrender(t *testing.T) {
 	game.Black = &b
 	_ = repo.Update(game)
 
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("surrender", json.RawMessage(`null`))
 	got, _ := repo.FindByID("g1")
 	assert.True(t, got.IsEnded)
@@ -236,7 +236,7 @@ func TestReversiChannel_OnClientMessage_Surrender(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_Cancel(t *testing.T) {
 	ch, _, repo, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("cancel", json.RawMessage(`null`))
 	_, err := repo.FindByID("g1")
 	assert.Error(t, err)
@@ -244,7 +244,7 @@ func TestReversiChannel_OnClientMessage_Cancel(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_ClaimTimeIsUp(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	// nil redis → svc.CheckTimeout returns nil without ending the game
 	ch.OnClientMessage("claimTimeIsUp", json.RawMessage(`null`))
 	assert.Empty(t, ctx.sentType)
@@ -252,7 +252,7 @@ func TestReversiChannel_OnClientMessage_ClaimTimeIsUp(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_UnknownType(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("bogus", json.RawMessage(`null`))
 	assert.Empty(t, ctx.sentType)
 }
@@ -266,7 +266,7 @@ func TestReversiChannel_OnClientMessage_NoGameID(t *testing.T) {
 
 func TestReversiChannel_Dispose_Unsubscribes(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, nil)
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.Dispose()
 	assert.Equal(t, []string{"reversiGame:g1"}, ctx.unsubs)
 }
@@ -279,14 +279,14 @@ func TestReversiChannel_Dispose_WithoutInit(t *testing.T) {
 
 func TestReversiChannel_OnClientMessage_ReadyBadJSON(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("ready", json.RawMessage(`not-a-bool`))
 	assert.Empty(t, ctx.sentType)
 }
 
 func TestReversiChannel_OnClientMessage_SettingsEmptyKey(t *testing.T) {
 	ch, ctx, _, _ := newChannel(t, &model.User{ID: "alice"})
-	ch.Init(json.RawMessage(`{"gameId":"g1"}`))
+	require.NoError(t, ch.Init(json.RawMessage(`{"gameId":"g1"}`)))
 	ch.OnClientMessage("updateSettings", json.RawMessage(`{"key":"","value":true}`))
 	assert.Empty(t, ctx.sentType)
 }

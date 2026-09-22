@@ -21,7 +21,7 @@ func TestQueueStatsFactory_RequestLogServesHistorical(t *testing.T) {
 	factory := NewQueueStatsFactory(logger)
 	ctx := newCtx(nil)
 	ch := factory(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("requestLog", json.RawMessage(`{"length":10}`))
 
 	require.Len(t, ctx.sentType, 1)

@@ -85,7 +85,7 @@ func TestLocalTimeline_DropsMutedAndBlockedAndInstance(t *testing.T) {
 	muted := newCtx(&model.User{ID: "viewer"})
 	muted.muteBlockSnap = &stream.MuteBlockSnapshot{Muting: map[string]struct{}{"bad": {}}}
 	chM := NewLocalTimeline(muted)
-	chM.Init(nil)
+	require.NoError(t, chM.Init(nil))
 	chM.OnRedisEvent([]byte(`{"id":"n1","userId":"bad"}`))
 	assert.Empty(t, muted.sentType, "muted author の note は drop する")
 	chM.OnRedisEvent([]byte(`{"id":"n2","userId":"ok"}`))
@@ -95,7 +95,7 @@ func TestLocalTimeline_DropsMutedAndBlockedAndInstance(t *testing.T) {
 	blk := newCtx(&model.User{ID: "viewer"})
 	blk.muteBlockSnap = &stream.MuteBlockSnapshot{BlockingMe: map[string]struct{}{"enemy": {}}}
 	chB := NewLocalTimeline(blk)
-	chB.Init(nil)
+	require.NoError(t, chB.Init(nil))
 	chB.OnRedisEvent([]byte(`{"id":"n3","userId":"enemy"}`))
 	assert.Empty(t, blk.sentType, "blockingMe author の note は drop する")
 
@@ -103,7 +103,7 @@ func TestLocalTimeline_DropsMutedAndBlockedAndInstance(t *testing.T) {
 	inst := newCtx(&model.User{ID: "viewer"})
 	inst.muteBlockSnap = &stream.MuteBlockSnapshot{MutedInstances: map[string]struct{}{"bad.example": {}}}
 	chI := NewLocalTimeline(inst)
-	chI.Init(nil)
+	require.NoError(t, chI.Init(nil))
 	chI.OnRedisEvent([]byte(`{"id":"n4","userId":"r","user":{"host":"bad.example"}}`))
 	assert.Empty(t, inst.sentType, "muted instance の note は drop する")
 }
@@ -111,7 +111,7 @@ func TestLocalTimeline_DropsMutedAndBlockedAndInstance(t *testing.T) {
 func TestLocalTimeline_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewLocalTimeline(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"localTimeline"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"n1"}`))
@@ -132,12 +132,12 @@ func TestLocalTimeline_Lifecycle(t *testing.T) {
 func TestLocalTimeline_PolicyGate(t *testing.T) {
 	disabled := newCtx(&model.User{ID: "v"})
 	disabled.policies = map[string]any{"ltlAvailable": false}
-	NewLocalTimeline(disabled).Init(nil)
+	require.NoError(t, NewLocalTimeline(disabled).Init(nil))
 	assert.Empty(t, disabled.subs, "ltlAvailable=false は subscribe しない")
 
 	enabled := newCtx(&model.User{ID: "v"})
 	enabled.policies = map[string]any{"ltlAvailable": true}
-	NewLocalTimeline(enabled).Init(nil)
+	require.NoError(t, NewLocalTimeline(enabled).Init(nil))
 	assert.Equal(t, []string{"localTimeline"}, enabled.subs, "ltlAvailable=true は subscribe する")
 }
 
@@ -145,12 +145,12 @@ func TestLocalTimeline_PolicyGate(t *testing.T) {
 func TestGlobalTimeline_PolicyGate(t *testing.T) {
 	disabled := newCtx(&model.User{ID: "v"})
 	disabled.policies = map[string]any{"gtlAvailable": false}
-	NewGlobalTimeline(disabled).Init(nil)
+	require.NoError(t, NewGlobalTimeline(disabled).Init(nil))
 	assert.Empty(t, disabled.subs)
 
 	enabled := newCtx(&model.User{ID: "v"})
 	enabled.policies = map[string]any{"gtlAvailable": true}
-	NewGlobalTimeline(enabled).Init(nil)
+	require.NoError(t, NewGlobalTimeline(enabled).Init(nil))
 	assert.Equal(t, []string{"globalTimeline"}, enabled.subs)
 }
 
@@ -158,7 +158,7 @@ func TestGlobalTimeline_PolicyGate(t *testing.T) {
 func TestHybridTimeline_PolicyGate(t *testing.T) {
 	disabled := newCtx(&model.User{ID: "v"})
 	disabled.policies = map[string]any{"ltlAvailable": false}
-	NewHybridTimeline(disabled).Init(nil)
+	require.NoError(t, NewHybridTimeline(disabled).Init(nil))
 	assert.Empty(t, disabled.subs, "ltlAvailable=false は local も home も subscribe しない")
 }
 
@@ -167,7 +167,7 @@ func TestHybridTimeline_PolicyGate(t *testing.T) {
 func TestLocalTimeline_AnonRequireSigninDrop(t *testing.T) {
 	anon := newCtx(nil) // viewerID ""
 	ch := NewLocalTimeline(anon)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent([]byte(`{"id":"n1","user":{"requireSigninToViewContents":true}}`))
 	assert.Empty(t, anon.sentType, "anon に requireSignin note を送らない")
 	ch.OnRedisEvent([]byte(`{"id":"n2","user":{"requireSigninToViewContents":false}}`))
@@ -176,7 +176,7 @@ func TestLocalTimeline_AnonRequireSigninDrop(t *testing.T) {
 	// authed viewer には requireSignin note も流れる (gate は anon 限定)。
 	authed := newCtx(&model.User{ID: "v"})
 	ca := NewLocalTimeline(authed)
-	ca.Init(nil)
+	require.NoError(t, ca.Init(nil))
 	ca.OnRedisEvent([]byte(`{"id":"n3","user":{"requireSigninToViewContents":true}}`))
 	assert.Len(t, authed.sentType, 1, "authed viewer には流れる")
 }
@@ -185,7 +185,7 @@ func TestLocalTimeline_AnonRequireSigninDrop(t *testing.T) {
 func TestGlobalTimeline_AnonRequireSigninDrop(t *testing.T) {
 	anon := newCtx(nil)
 	ch := NewGlobalTimeline(anon)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent([]byte(`{"id":"n1","reply":{"user":{"requireSigninToViewContents":true}}}`))
 	assert.Empty(t, anon.sentType, "anon に reply 著者 requireSignin の note を送らない")
 }
@@ -195,7 +195,7 @@ func TestGlobalTimeline_AnonRequireSigninDrop(t *testing.T) {
 func TestHybridTimeline_AnonRequireSigninDrop(t *testing.T) {
 	anon := newCtx(nil)
 	ch := NewHybridTimeline(anon)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnRedisEvent([]byte(`{"id":"n1","user":{"requireSigninToViewContents":true}}`))
 	assert.Empty(t, anon.sentType, "anon hybrid に requireSignin note を送らない")
 }
@@ -203,7 +203,7 @@ func TestHybridTimeline_AnonRequireSigninDrop(t *testing.T) {
 func TestGlobalTimeline_Lifecycle(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewGlobalTimeline(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"globalTimeline"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"g1"}`))
@@ -217,7 +217,7 @@ func TestGlobalTimeline_Lifecycle(t *testing.T) {
 func TestHomeTimeline_AuthenticatedSubscribesPerUser(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewHomeTimeline(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"homeTimeline:alice"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"h1"}`))
@@ -231,7 +231,7 @@ func TestHomeTimeline_AuthenticatedSubscribesPerUser(t *testing.T) {
 func TestHomeTimeline_AnonymousIsNoOp(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewHomeTimeline(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Empty(t, ctx.subs)
 
 	ch.Dispose()
@@ -241,14 +241,14 @@ func TestHomeTimeline_AnonymousIsNoOp(t *testing.T) {
 func TestHomeTimeline_NilUserPointer(t *testing.T) {
 	ctx := newCtx((*model.User)(nil))
 	ch := NewHomeTimeline(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Empty(t, ctx.subs)
 }
 
 func TestHybridTimeline_AuthenticatedSubscribesBoth(t *testing.T) {
 	ctx := newCtx(&model.User{ID: "alice"})
 	ch := NewHybridTimeline(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.ElementsMatch(t, []string{"localTimeline", "homeTimeline:alice"}, ctx.subs)
 
 	ch.OnRedisEvent([]byte(`{"id":"h1"}`))
@@ -262,7 +262,7 @@ func TestHybridTimeline_AuthenticatedSubscribesBoth(t *testing.T) {
 func TestHybridTimeline_AnonymousSubscribesLocalOnly(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := NewHybridTimeline(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	assert.Equal(t, []string{"localTimeline"}, ctx.subs)
 
 	ch.Dispose()

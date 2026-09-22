@@ -21,7 +21,7 @@ func newSiteVerifyServer(t *testing.T, wantSecret string, respond func(secret, t
 		_ = r.ParseForm()
 		resp := respond(r.FormValue("secret"), r.FormValue("response"))
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 }
 
@@ -72,11 +72,11 @@ func TestSiteVerify_EmptyToken(t *testing.T) {
 func TestMcaptcha_Success(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]string
-		json.NewDecoder(r.Body).Decode(&body)
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body["key"] == "site" && body["secret"] == "sec" && body["token"] == "good" {
-			json.NewEncoder(w).Encode(map[string]any{"valid": true})
+			_ = json.NewEncoder(w).Encode(map[string]any{"valid": true})
 		} else {
-			json.NewEncoder(w).Encode(map[string]any{"valid": false})
+			_ = json.NewEncoder(w).Encode(map[string]any{"valid": false})
 		}
 	}))
 	defer srv.Close()
@@ -87,7 +87,7 @@ func TestMcaptcha_Success(t *testing.T) {
 
 func TestMcaptcha_InvalidToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"valid": false})
+		_ = json.NewEncoder(w).Encode(map[string]any{"valid": false})
 	}))
 	defer srv.Close()
 
@@ -235,7 +235,7 @@ func TestSiteVerify_ServerDown(t *testing.T) {
 
 func TestSiteVerify_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
+		_, _ = w.Write([]byte("not json"))
 	}))
 	defer srv.Close()
 
@@ -246,7 +246,7 @@ func TestSiteVerify_InvalidJSON(t *testing.T) {
 
 func TestSiteVerify_NoErrorCodes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(map[string]any{"success": false})
+		_ = json.NewEncoder(w).Encode(map[string]any{"success": false})
 	}))
 	defer srv.Close()
 
@@ -258,7 +258,7 @@ func TestSiteVerify_NoErrorCodes(t *testing.T) {
 
 func TestMcaptcha_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("broken"))
+		_, _ = w.Write([]byte("broken"))
 	}))
 	defer srv.Close()
 
@@ -273,7 +273,7 @@ func TestMcaptcha_InvalidJSON(t *testing.T) {
 func TestMcaptcha_ResponseTooLarge(t *testing.T) {
 	oversized := make([]byte, 2<<20) // 2 MiB > 1 MiB cap
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(oversized)
+		_, _ = w.Write(oversized)
 	}))
 	defer srv.Close()
 
@@ -285,7 +285,7 @@ func TestMcaptcha_ResponseTooLarge(t *testing.T) {
 func TestTurnstile_ResponseTooLarge(t *testing.T) {
 	oversized := make([]byte, 2<<20)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(oversized)
+		_, _ = w.Write(oversized)
 	}))
 	defer srv.Close()
 

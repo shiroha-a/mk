@@ -19,7 +19,7 @@ func TestDeepL_Translate_Success(t *testing.T) {
 		_ = r.ParseForm()
 		assert.Equal(t, "EN", r.FormValue("target_lang"))
 
-		json.NewEncoder(w).Encode(deeplResponse{
+		_ = json.NewEncoder(w).Encode(deeplResponse{
 			Translations: []struct {
 				DetectedSourceLanguage string `json:"detected_source_language"`
 				Text                   string `json:"text"`
@@ -39,7 +39,7 @@ func TestDeepL_Translate_Success(t *testing.T) {
 
 func TestDeepL_Translate_NoResult(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		json.NewEncoder(w).Encode(deeplResponse{Translations: nil})
+		_ = json.NewEncoder(w).Encode(deeplResponse{Translations: nil})
 	}))
 	defer srv.Close()
 
@@ -51,7 +51,7 @@ func TestDeepL_Translate_NoResult(t *testing.T) {
 func TestDeepL_Translate_APIError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
-		w.Write([]byte("Forbidden"))
+		_, _ = w.Write([]byte("Forbidden"))
 	}))
 	defer srv.Close()
 
@@ -62,7 +62,7 @@ func TestDeepL_Translate_APIError(t *testing.T) {
 
 func TestDeepL_Translate_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write([]byte("not json"))
+		_, _ = w.Write([]byte("not json"))
 	}))
 	defer srv.Close()
 
@@ -92,7 +92,7 @@ func TestNewDeepL_FreeEndpoint(t *testing.T) {
 func TestDeepL_Translate_ResponseTooLarge(t *testing.T) {
 	oversized := make([]byte, 2<<20)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Write(oversized)
+		_, _ = w.Write(oversized)
 	}))
 	defer srv.Close()
 
@@ -108,7 +108,7 @@ func TestDeepL_Translate_NonOKLargeBody_IncludesSnippet(t *testing.T) {
 	body := strings.Repeat("x", 10*1024)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write([]byte(body))
+		_, _ = w.Write([]byte(body))
 	}))
 	defer srv.Close()
 

@@ -40,7 +40,7 @@ func TestHandle_StaticEmojiIsNotAnimated(t *testing.T) {
 	gifData := makeAnimatedGIF(t)
 	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/gif")
-		w.Write(gifData)
+		_, _ = w.Write(gifData)
 	}))
 	defer imgServer.Close()
 

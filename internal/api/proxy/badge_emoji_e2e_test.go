@@ -62,7 +62,7 @@ func TestHandle_BadgeEmojiIsGrayscale96(t *testing.T) {
 	pngData := makeColorPNG(t)
 	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(pngData)
+		_, _ = w.Write(pngData)
 	}))
 	defer imgServer.Close()
 
@@ -113,7 +113,7 @@ func TestHandle_BadgeEmojiSkipsSolidImage(t *testing.T) {
 	pngData := makeSolidPNG(t)
 	imgServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "image/png")
-		w.Write(pngData)
+		_, _ = w.Write(pngData)
 	}))
 	defer imgServer.Close()
 

@@ -281,9 +281,9 @@ func (s *Service) resolvePolicies(userID string) (map[string]any, error) {
 //
 // **nil を許すこと。** 内部テストは `policyProviderRuntime` を直接組み立てる
 // ので、コンストラクタを通らない値が存在する。
-func (r *policyProviderRuntime) log() *slog.Logger {
-	if r.logger != nil {
-		return r.logger
+func (runtime *policyProviderRuntime) log() *slog.Logger {
+	if runtime.logger != nil {
+		return runtime.logger
 	}
 	return slog.Default()
 }
@@ -303,31 +303,31 @@ func resolvePolicyProviderCached(provider policyProvider, req plugin.EffectivePo
 	key := policyProviderCacheKey{userID: req.UserID, roleIDs: encodePolicyProviderRoleIDs(req.RoleIDs)}
 
 	var flight *policyProviderFlight
-	for {
-		provider.runtime.cacheMu.Lock()
-		if provider.runtime.disabled.Load() {
-			provider.runtime.cacheMu.Unlock()
-			return nil, false
-		}
-		if cached, ok := provider.runtime.cacheGet(key); ok {
-			provider.runtime.cacheMu.Unlock()
-			return clonePolicyContributions(cached), true
-		}
-		if existing := provider.runtime.flights[key]; existing != nil && policyProviderFlightIsCurrent(provider.runtime, req.UserID, existing) {
-			provider.runtime.cacheMu.Unlock()
-			contributions, ok, _ := waitPolicyProviderFlight(existing, true)
-			return contributions, ok
-		}
-		flight = &policyProviderFlight{
-			done:        make(chan struct{}),
-			userEpoch:   provider.runtime.userEpoch[req.UserID],
-			globalEpoch: provider.runtime.globalEpoch,
-		}
-		provider.runtime.userFlights[req.UserID]++
-		provider.runtime.flights[key] = flight
+	// **ループではない。** 早期 return を持つ 1 回きりの区間で、`for` は
+	// 何も繰り返していなかった (staticcheck SA4004)。振る舞いは変えずに
+	// 構造だけ落としてある。
+	provider.runtime.cacheMu.Lock()
+	if provider.runtime.disabled.Load() {
 		provider.runtime.cacheMu.Unlock()
-		break
+		return nil, false
 	}
+	if cached, ok := provider.runtime.cacheGet(key); ok {
+		provider.runtime.cacheMu.Unlock()
+		return clonePolicyContributions(cached), true
+	}
+	if existing := provider.runtime.flights[key]; existing != nil && policyProviderFlightIsCurrent(provider.runtime, req.UserID, existing) {
+		provider.runtime.cacheMu.Unlock()
+		contributions, ok, _ := waitPolicyProviderFlight(existing, true)
+		return contributions, ok
+	}
+	flight = &policyProviderFlight{
+		done:        make(chan struct{}),
+		userEpoch:   provider.runtime.userEpoch[req.UserID],
+		globalEpoch: provider.runtime.globalEpoch,
+	}
+	provider.runtime.userFlights[req.UserID]++
+	provider.runtime.flights[key] = flight
+	provider.runtime.cacheMu.Unlock()
 
 	contributions, ok := invokePolicyProvider(provider, req, key, flight)
 	if ok {

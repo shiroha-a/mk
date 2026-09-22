@@ -33,7 +33,7 @@ func TestServerStatsFactory_RequestLogServesHistorical(t *testing.T) {
 
 	ctx := newCtx(nil)
 	ch := factory(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("requestLog", json.RawMessage(`{"length":50}`))
 
 	require.Len(t, ctx.sentType, 1)
@@ -48,7 +48,7 @@ func TestServerStatsFactory_RequestLogServesHistorical(t *testing.T) {
 func TestServerStats_OnClientMessage_NonRequestLog(t *testing.T) {
 	ctx := newCtx(nil)
 	ch := factoryWithLogger(t, &stubLogProvider{})(ctx)
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("noise", json.RawMessage(`{}`))
 	assert.Empty(t, ctx.sentType, "unrelated message types ignored")
 }
@@ -57,7 +57,7 @@ func TestServerStats_OnClientMessage_NonRequestLog(t *testing.T) {
 func TestServerStats_RequestLog_InvalidBody(t *testing.T) {
 	logger := &stubLogProvider{entries: []json.RawMessage{json.RawMessage(`{"cpu":0.1}`)}}
 	ch := NewServerStatsFactory(logger)(newCtx(nil))
-	ch.Init(nil)
+	require.NoError(t, ch.Init(nil))
 	ch.OnClientMessage("requestLog", json.RawMessage(`not json`))
 	// length=0 が provider に渡される (== publisher default 適用)
 	assert.Equal(t, 0, logger.lastMaxLenSeen)
@@ -73,8 +73,8 @@ func TestServerStats_FactoryReturnsIndependentChannels(t *testing.T) {
 	ctxB := newCtx(nil)
 	chA := factory(ctxA)
 	chB := factory(ctxB)
-	chA.Init(nil)
-	chB.Init(nil)
+	require.NoError(t, chA.Init(nil))
+	require.NoError(t, chB.Init(nil))
 	chA.Dispose()
 	// Dispose した chA の影響が chB に及ばないこと
 	chB.OnRedisEvent([]byte(`{"cpu":0.42}`))

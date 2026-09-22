@@ -167,7 +167,11 @@ func toInt64(v any) int64 {
 		return int64(x)
 	case []byte:
 		var n int64
-		fmt.Sscan(string(x), &n)
+		// 読めない値は 0 として扱う。呼び出し側は chart の列値を読む経路で、
+		// 0 と「記録なし」を区別していない。
+		if _, err := fmt.Sscan(string(x), &n); err != nil {
+			return 0
+		}
 		return n
 	default:
 		return 0
