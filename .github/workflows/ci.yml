@@ -419,6 +419,12 @@ jobs:
       - name: Vet
         run: go vet ./...
 
+      # **`make` 経由で呼ぶ。** actionlint の版は Makefile 側に 1 つだけ置く。
+      # ここに書き写すと #2841 (make test と CI の flag がずれていた) と同じ
+      # ドリフトが起きる。
+      - name: Actionlint
+        run: make actionlint
+
       - name: Format check
         run: |
           diff=$(gofmt -s -d .)

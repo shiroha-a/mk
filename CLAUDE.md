@@ -221,7 +221,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 137 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 138 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -576,6 +576,12 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 ### `lint`ジョブ
 
 - `go vet ./...`
+- **`Actionlint` step** (`make actionlint`) — workflow の式の typo・存在しない `needs` 参照・
+  `runs-on` の誤り・`run:` の中のシェル (shellcheck 経由) を検査する。**CodeQL の `actions`
+  とは別物** — あちらは script injection などの**セキュリティ**を見るが、式が壊れているかは
+  見ない。workflow のミスは動かすまで分からないので (#2940 で実際に踏んだ)、静的に落とす。
+  **版は Makefile 側に 1 つだけ置く** — CI に書き写すと #2841 と同じドリフトが起きる。
+  `lint` は required なので固定する (`@latest` だと新しい検査で無関係な PR が赤くなる)。
 - `gofmt -s -d .` で差分がないことを確認。差分があれば失敗。
 - **`Check duplicate test fixture IDs` step** — テストフィクスチャの ID 重複を検出する。
 
@@ -586,6 +592,28 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 - 検出は import しているだけのものを含まず、**呼び出しが到達可能なもの**に限られる。無視リストを育てずに運用できるので、抑制ではなく更新で直す。修正版は govulncheck の `Fixed in:` に従うこと (同一モジュールに複数の脆弱性があると必要な版が別々で、低い方に上げても残る)。
 - PR の required check には**含めない**。新規 CVE の公開でコードを変えていない PR でも落ちるため。
 - 導入は #2387。通常テストが全て緑の状態で到達可能な脆弱性が 11 件残っており、既存の check では捕まらない領域だったため追加した。
+
+### `codeql` workflow (PR / push / weekly)
+
+- `.github/workflows/codeql.yml` が CodeQL で**自分のコード**を静的解析する。
+  `vulncheck` が依存を見るのに対し、こちらはテストが通っていても残る「書いていない分岐」や
+  「通ってはいるが危険な形」を拾う。
+- **見るのは `go` と `actions` の 2 つだけ。** submodule の外にある .ts/.js/.vue は実測
+  340 ファイルで大半が `tests/playwright/specs/**` (うち 189 は upstream 由来の UI spec)、
+  Python も `tests/` の検証基盤なので、`javascript-typescript` / `python` は入れない。
+  fork frontend は checkout していないので対象外 (upstream のコード)。
+- **autobuild を使わない。** 同梱プラグイン (`plugins/*/go.mod`) は別 module で
+  `go build ./...` に含まれないため、`git ls-files` で列挙して個別にビルドする
+  (`plugin-tests` job が独立しているのと同じ理由)。`go.work` は gitignore 済みなので
+  clean checkout では root module だけがビルドされる。
+- PR の required check には**含めない**。CodeQL のクエリパックは CLI の更新で増えるので、
+  **コードを 1 行も変えていない PR が新しいクエリで赤くなる** (`vulncheck` と同じ理由)。
+  代わりに weekly の schedule (月曜 20:30 UTC) を持たせ、クエリが増えた分はそちらで拾う。
+- **`ci.yml` に相乗りさせない。** あちらは workflow 直下で `contents: read` に絞っており、
+  CodeQL は `security-events: write` を要る。required check を持つ workflow の権限面を
+  広げる形は避ける。
+- 結果は Actions のログではなく **Code scanning alerts** に出る。誤検知は alert 側で
+  dismiss する (ソースに抑制コメントを撒かない)。
 
 ### `dropin-e2e` workflow (PR トリガー)
 
@@ -859,6 +887,36 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: CI に `codeql` workflow と `lint` job の actionlint を追加。`make help` の target は 137 → 138。**自分のコードを見る静的解析が `go vet` だけだった。**
+  `vulncheck` は依存しか見ず、`make gates` の 21 本は「この形を禁じる」と自分で書いたものしか
+  見ない。テストは「書いた振る舞いがその通りか」しか見ないので、**書いていない分岐**と
+  **通ってはいるが危険な形**が残る。CodeQL はそこを埋める。
+  **見るのは `go` と `actions` の 2 つだけ。** submodule の外にある .ts/.js/.vue は実測 340
+  ファイルで、その大半が `tests/playwright/specs/**` (うち 189 は upstream 由来の UI spec)。
+  Python も `tests/` の検証基盤。production のコードではないので入れると**ノイズにしかならない**。
+  fork frontend は checkout していないので対象外 (upstream のコードで、こちらが直せる範囲ではない)。
+  **autobuild を使わない。** autobuild が回すのは root module だけだが、同梱プラグイン
+  (`plugins/*/go.mod`、tracked は 2 つ) は**別 module**なので `go build ./...` に含まれない
+  (`plugin-tests` job が独立しているのと同じ理由)。`git ls-files` で列挙して個別にビルドする。
+  `go.work` は `tools/pluginbuild` の生成物で gitignore 済みなので、clean checkout では root
+  module だけがビルドされる。**clean worktree で実測して確認した** (root / `plugins/status` /
+  `plugins/trustlevel` の 3 つとも exit 0)。
+  **required には含めない。** CodeQL のクエリパックは CLI の更新で増えるので、コードを 1 行も
+  変えていない PR が新しいクエリで赤くなる (`vulncheck` を required から外しているのと同じ
+  理由)。代わりに weekly の schedule を持たせる — PR トリガーだけだと、触っていないコードに
+  対する新規検出が永久に出てこない。**`ci.yml` に相乗りさせない** — あちらは workflow 直下で
+  `contents: read` に絞っており、CodeQL は `security-events: write` を要る。
+  **actionlint は逆に required に入れる。** 版を固定すれば検査内容が動かないので、`gofmt` や
+  `go vet` と同じ扱いにできる。**CodeQL の `actions` とは別物** — あちらは script injection
+  などのセキュリティを見るが、式の typo・存在しない `needs` 参照・`runs-on` の誤りは見ない。
+  workflow のミスは動かすまで分からない (#2940 で実際に踏んだ) ので、静的に落とす側が要る。
+  実測で**既存 12 workflow の指摘は 0 件**だったので、そのまま required にできる。
+  **版の定義は Makefile に 1 つだけ置き、CI は `make actionlint` を呼ぶ。** CI 側に書き写すと
+  #2841 (`make test` と CI の flag がずれていた) と同じドリフトが起きる。`@latest` にしない —
+  新しい検査が増えたときに、workflow を触っていない PR が赤くなる。
+  **射程外**: `javascript-typescript` / `python` (上記)、fork frontend、`golangci-lint` が
+  見る層 (実測で 130 件 = errcheck 50 / staticcheck 45 / unused 20 / ineffassign 12 /
+  govet 3。本番 47・テスト 83。別途対応する)。
 - **2026-09-22**: `make gates` に `sqlbind-check` を追加。`make help` の target は 136 → 137。**値をクォートで囲んだリテラルへ差し込まず bind する**、を固定する。
   chart の unique 配列は**行の値そのもの** (外部由来の文字列を含みうる) なので、
   `internal/core/chart/repository.go` の `ApplyDeltas` が `?::varchar[]` で bind して

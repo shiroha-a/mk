@@ -18,7 +18,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | check | workflow | 見ているもの | 手元での再現 |
 |---|---|---|---|
 | `build` | CI | 全パッケージがコンパイルできるか + 同梱プラグインの `go vet` + 同梱サンプルが既定無効か | `go build ./...` / `make plugin-vet` |
-| `lint` | CI | `go vet` + `gofmt -s -d` の差分 + 重複 fixture ID | `make lint` / `make fmt` |
+| `lint` | CI | `go vet` + **actionlint** + `gofmt -s -d` の差分 + 重複 fixture ID | `make lint` / `make actionlint` / `make fmt` |
 | `test` | CI | 4-way shard の集約。どれか 1 つでも落ちれば赤 | `make test` |
 
 ### `test` が落ちたとき
@@ -35,6 +35,18 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 3. **testcontainers の flaky** — PR と無関係なパッケージ (reaction の count_writer 等) で
    落ちていたら再実行を試す
 
+### `lint` の actionlint が落ちたとき
+
+`make actionlint` で同じものが出る。workflow の式の typo、存在しない `needs` 参照、
+`runs-on` の誤り、`run:` の中のシェル (shellcheck 経由) を見る。
+
+**CodeQL の `actions` とは別物。** あちらは script injection のような**セキュリティ**を
+見るが、式が壊れているかどうかは見ない。workflow のミスは動かすまで分からないので、
+静的に落とす側が要る。
+
+**版は Makefile に固定してある。** 新しい検査が増えても、workflow を触っていない PR が
+赤くなることはない。上げるときは `make actionlint` のバージョンを明示的に変える。
+
 ### `lint` が落ちたとき
 
 `gofmt` 差分なら `make fmt` を実行して再 push。`go vet` は repository interface に
@@ -46,6 +58,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | check | workflow | 見ているもの | 実測 | 手元での再現 |
 |---|---|---|---|---|
 | `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 | 1 min | `GOOS=linux govulncheck ./...` |
+| `analyze (go)` / `analyze (actions)` | CodeQL | **自分のコード**の静的解析 (Go の全 module と workflow の式) | 未計測 | 手元では回せない (CodeQL CLI が要る)。Code scanning alerts で見る |
 | `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + submodule のソースを読むゲート + eslint (`src/**/*.{ts,vue}`) + vitest + `make plugins-all` と統合バイナリの build | 3〜4 min | 下の「frontend-check の手元再現」。**`make frontend-check` は型・ゲート・eslint まで** (#2906) |
 | `plugin-tests` | CI | 同梱プラグインのテスト (別 module なので `go list ./...` に入らない) | 1 min | `make plugin-test` |
 | `e2e (1/4)` 〜 `4/4` | Upstream backend e2e | **本家の backend e2e 1256 テスト**が mk-go に対して通るか | 3-7 min | `make upstream-e2e` |
@@ -71,6 +84,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | `mkgo-born` | **mk-go が作った DB を TS が受け取れるか** |
 | `federation` / `ed25519-verify` | 他実装と実際に喋れるか |
 | `vulncheck` | **自分のコードではなく依存**に既知の穴が無いか |
+| `analyze (go)` / `analyze (actions)` | **自分のコード**にパターンで見つかる欠陥が無いか |
 
 shape が合っていても値が違う類のバグは `diff` でしか捕まらない。ユニットテストは
 「自分で署名して自分で検証する」ことしか保証しないので、相互運用は `federation` /
@@ -79,6 +93,11 @@ shape が合っていても値が違う類のバグは `diff` でしか捕まら
 `vulncheck` だけは毛色が違い、**自分が書いたコードを一切見ない**。テストが全部通っていても
 依存の既知脆弱性は素通りするので、別の signal として要る (導入時、通常テストが緑のまま
 到達可能な脆弱性が 11 件見つかっている)。
+
+CodeQL はその逆で、**依存ではなく自分のコード**をパターンで見る。テストは「書いた振る舞いが
+その通りか」しか見ないので、書いていない分岐や、通ってはいるが危険な形は素通りする。
+`actions` の解析も入れてあり、`pull_request` のコンテキストを式に埋める形 (script injection)
+のように**レビューで見落としやすく、落ちても気付きにくい**ものを拾う。
 
 `swap-test` と `mkgo-born` は似て見えるが、**DB を作った側が違う**。
 
@@ -175,6 +194,25 @@ package load エラーで解析が空振りしうる。**ローカルの `go` �
 新しい CVE が公開されると、**コードを変えていない PR でも落ちる**。これは required check に
 していない理由でもある。落ちたときは自分の変更が原因とは限らないので、まず `Found in:` の
 モジュールが PR で触ったものかを見ること。
+
+### `analyze (go)` / `analyze (actions)` が落ちたとき
+
+**コードを変えていない PR でも落ちうる。** CodeQL のクエリパックは CLI の更新で増えるので、
+新しいクエリが既存のコードを検出することがある。`vulncheck` を required から外しているのと
+同じ理由で、これも required には**含めていない**。
+
+結果は Actions のログではなく **Code scanning alerts** に出る
+(`https://github.com/shiroha-a/mk/security/code-scanning`)。まず alert を読み、
+
+- 本物なら直す
+- 誤検知なら alert 側で dismiss する (理由を選ぶ)。ソースに抑制コメントを撒かない
+
+**手元では再現できない。** CodeQL CLI と DB の構築が要るので、ローカルで回す手順は用意して
+いない。PR で出た alert をそのまま読む運用。
+
+`analyze (go)` がビルドで落ちた場合は解析以前の問題で、`go build ./...` か
+同梱プラグイン (`plugins/*/go.mod`) のビルドが壊れている。こちらは `build` job と
+`plugin-tests` job でも落ちるはずなので、そちらを先に見る。
 
 ### `frontend-check` が落ちたとき
 

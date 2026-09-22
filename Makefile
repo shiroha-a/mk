@@ -359,6 +359,17 @@ fmt: ## gofmt -s -w . で整形
 lint: ## go vet ./...
 	go vet ./...
 
+.PHONY: actionlint
+actionlint: ## GitHub Actions の workflow を検査
+	# CodeQL の `actions` クエリが見るのは script injection などの**セキュリティ**で、
+	# 式の typo・存在しない needs 参照・`runs-on` の誤りといった**正しさ**は見ない。
+	# workflow のミスは動かすまで分からないので (#2940 で実際に踏んだ)、静的に落とす。
+	# `run:` の中身は actionlint が shellcheck へ渡す。
+	#
+	# **バージョンを固定する。** 新しい検査が増えると、workflow を触っていない PR が
+	# 赤くなる。`lint` は required check なので、上げるのは明示的な操作にする。
+	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+
 # Migration
 #
 # 接続先は -config (既定 .config/default.yml) から決まる。DATABASE_URL は読まない。

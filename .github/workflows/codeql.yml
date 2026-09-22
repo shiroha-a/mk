@@ -1,0 +1,99 @@
+## CodeQL による静的解析。
+##
+## **required check には含めない。** CodeQL のクエリパックは CLI の更新で増える
+## ので、**コードを 1 行も変えていない PR が新しいクエリで赤くなる**。これは
+## `vulncheck` を required から外しているのと同じ理由で、マージのブロッカーには
+## 適さない。代わりに weekly の schedule を持たせて、クエリが増えた分は
+## そちらで拾う (PR トリガーだけだと、触っていないコードの新規検出が永久に
+## 出てこない)。
+##
+## **ci.yml に相乗りさせない。** あちらは workflow 直下で `contents: read` に
+## 絞ってあり、CodeQL は `security-events: write` を要る。job 単位で広げる
+## ことはできるが、required check を持つ workflow の権限面を広げる形になる。
+## 他の非 required (docker / playwright / diff-e2e など) と同じく独立させる。
+
+name: CodeQL
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    # 他の schedule (queue-bench 17:30 / dropin-frontend 19:00) と重ならない枠。
+    - cron: "30 20 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+## 同じ ref に push が続いたら前の解析は捨てる。CodeQL は 1 回あたりが重く、
+## 中間 commit の結果は誰も見ない。
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: analyze (${{ matrix.language }})
+    runs-on: ubuntu-latest
+
+    permissions:
+      # 解析結果を Code scanning alerts へ上げるのに要る。
+      security-events: write
+      contents: read
+      actions: read
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # **Go と Actions だけを見る。**
+        #
+        # `javascript-typescript` は入れない。submodule の外にある .ts/.js/.vue は
+        # 実測 340 ファイルで、その大半が `tests/playwright/specs/**` (うち 189 は
+        # upstream 由来の UI spec)。production のコードではないので、拾っても
+        # ノイズにしかならない。同じ理由で `python` (tests/bench, tests/diff,
+        # tests/dropin, tests/federation の検証基盤) も入れない。
+        #
+        # fork frontend (`third_party/misskey`) は checkout していないので対象外。
+        # あれは upstream のコードで、こちらが直せる範囲ではない。
+        #
+        # `actions` は入れる価値がある。workflow は 12 本あり、`pull_request` の
+        # コンテキストを式に埋める形 (script injection) はレビューで見落としやすい。
+        language: [go, actions]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        if: matrix.language == 'go'
+        with:
+          go-version-file: go.mod
+
+      - uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+
+      # **autobuild を使わない。** autobuild は root module しか見ないが、同梱
+      # プラグイン (`plugins/*/go.mod`) は**別 module** なので `go build ./...`
+      # に含まれない。`plugin-tests` job が独立している理由と同じ。列挙は
+      # `git ls-files` なので、新しく同梱したものは自動で対象になる。
+      #
+      # `go.work` は gitignore 済み (tools/pluginbuild の生成物) なので、
+      # clean checkout では root module だけがビルドされる。ここで明示的に
+      # 各プラグインを回さないと解析から漏れる。
+      - name: Build
+        if: matrix.language == 'go'
+        run: |
+          set -euo pipefail
+          go build ./...
+          for mod in $(git ls-files 'plugins/*/go.mod'); do
+            dir=$(dirname "$mod")
+            echo "::group::$dir"
+            (cd "$dir" && go build ./...)
+            echo "::endgroup::"
+          done
+
+      - uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"
