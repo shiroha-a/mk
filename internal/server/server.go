@@ -376,6 +376,12 @@ func accessLogConfig(out io.Writer) echomw.RequestLoggerConfig {
 		LogMethod:  true,
 		LogStatus:  true,
 		LogLatency: true,
+		// **`HandleError` を立てる。** 既定 (false) だと `c.Error(err)` が呼ばれず
+		// `res.Status` が更新されないので、handler が素の error を返したときに
+		// **クライアントには 500 を返しながらログには 200 と書く**。旧実装は
+		// `c.Error(err)` を先に呼んでから status を読んでいた (実測で 17 ケース中
+		// 4 ケースが食い違い、これを立てると 17/17 一致する)。
+		HandleError: true,
 		// `LogURI` は `req.RequestURI` をそのまま入れる (query 込み)。自分で
 		// `c.Request().RequestURI` を読んでも同じだが、フラグと使う値を対応させておく。
 		LogURI: true,
@@ -566,11 +572,22 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	e.Use(echomw.RequestID())
 	// 設定は accessLogConfig() に集約してテストと共有する (gzipConfig と同じ形)。
 	//
-	// **TTY のときの色が無くなる。** 旧 `LoggerWithConfig` は `${status}` を
-	// gommon/color 経由で出しており、出力先が TTY のときだけ緑などが付いていた
-	// (`SetOutput` が `*os.File` かつ isatty のときにだけ色を有効にする)。本番は
-	// stdout がパイプなので元から色なしで、差が出るのは `make dev` のときだけ。
-	e.Use(echomw.RequestLoggerWithConfig(accessLogConfig(os.Stdout)))
+	// **エラーを上位へ返さない。** 旧 `LoggerWithConfig` は名前付き戻り値が後続の
+	// 代入で上書きされる副作用で handler のエラーを飲んでいた。
+	// `RequestLoggerWithConfig` は `return err` するので、そのままだと外側の Sentry
+	// middleware が 404 / 405 まで capture し始める — **未認証で誰でも叩ける経路**
+	// なので、存在しないパスへ POST を投げるだけで quota を焼ける (`sampleRate` の
+	// 既定は 1.0 で全部送る)。`HandleError: true` でレスポンスは確定させたうえで、
+	// ここで握って旧挙動に揃える。**飲むこと自体の是非は別途** — 直すなら
+	// Sentry 側を「5xx だけ capture」にするのが筋で、この移行の範囲ではない。
+	accessLog := echomw.RequestLoggerWithConfig(accessLogConfig(os.Stdout))
+	e.Use(func(next echo.HandlerFunc) echo.HandlerFunc {
+		logged := accessLog(next)
+		return func(c echo.Context) error {
+			_ = logged(c)
+			return nil
+		}
+	})
 	e.Use(corsMiddleware())
 	// gzip response compression (#413 Phase 3 #12)。Misskey TS は nginx
 	// 前段で gzip するのが定石だが、mk-go は単体運用も想定するので app 側

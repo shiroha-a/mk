@@ -56,9 +56,8 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 
 **段階的な有効化は完了した。** `unused` / `ST1003` (命名) / `ST1012` (error var 名) /
 `SA1019` (非推奨 API) はすべて有効で、恒久的に無効なのは `QF*` と `S1016` だけ。
-除外は 2 つある — `test/e2e_federation` の**パッケージ名** (ディレクトリ名まで変えると
-24 箇所に波及するため。`git grep -oI e2e_federation -- '*.go' | wc -l`) と、`echo` の
-`LoggerWithConfig` (2026-09-22 に `RequestLoggerWithConfig` へ移行済み)。
+除外は 1 つだけ — `test/e2e_federation` の**パッケージ名** (ディレクトリ名まで変えると
+24 箇所に波及するため。`git grep -oI e2e_federation -- '*.go' | wc -l`)。
 
 誤検知は `//nolint:staticcheck // 理由` をその行に置く。理由を必ず書く。
 

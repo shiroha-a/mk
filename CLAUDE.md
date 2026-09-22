@@ -591,13 +591,12 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   成立しない。**`checks` は既定を置き換える**ので、既定の無効化も明示的に書き出してある
   (書かないと ST1000 / ST1020 / ST1021 等が黙って有効になる)。**段階的な無効化は残っていない**
   — `unused` / `ST1003` / `ST1012` / `SA1019` はすべて有効で、恒久的に無効なのは `QF*` と
-  `S1016` だけ。**除外は 2 つ** — `.golangci.yml` の rule が 1 件 (`test/e2e_federation` の
+  `S1016` だけ。**除外は 1 つ** — `.golangci.yml` の rule が 1 件 (`test/e2e_federation` の
   パッケージ名 / ST1003) **だけ**。**これは有効化した 4 check に対する数**で、
   `exclusions.presets` の `std-error-handling` (実測 253 件を抑止) は別枠。
   `//nolint:staticcheck` はリポジトリ全体で 2 件 (SA9010 / SA1012) で、どちらも
   今回の 4 check とは無関係。
-  `//nolint:staticcheck` 自体はリポジトリ全体で 4 件ある — production 1 (SA1019) とテスト 3
-  (SA1019 / SA9010 / SA1012)。版は Makefile 側に 1 つだけ置く。
+  版は Makefile 側に 1 つだけ置く。
   **一番重いので step の最後**に置いてある。
 
 ### `vulncheck`ジョブ
@@ -928,9 +927,22 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **`RequestLoggerConfig` は `Output` を持たない。** `LogValuesFunc` の中で自分で書くので、
   テストと共有するには writer を引数で渡す形になる (`gzipConfig` の「設定を返す」形とは
   少し違う)。
-  **TTY のときの色は無くなる。** 旧実装は `${status}` を gommon/color 経由で出しており、
-  `SetOutput` が `*os.File` かつ isatty のときだけ色を有効にしていた。本番は stdout が
-  パイプなので元から色なしで、差が出るのは `make dev` のときだけ。
+  **`HandleError: true` が要る。** 既定 (false) だと `c.Error(err)` が呼ばれず `res.Status` が
+  更新されないので、handler が素の error を返したときに**クライアントには 500 を返しながら
+  ログには 200 と書く**。旧実装は `c.Error(err)` を先に呼んでから status を読んでいた
+  (レビューの実測で 17 ケース中 4 ケースが食い違い、これを立てると 17/17 一致)。
+  **エラーを上位へ返さないようにラップする。** 旧 `LoggerWithConfig` は名前付き戻り値が
+  後続の代入で上書きされる副作用で handler のエラーを飲んでいた。素直に移すと
+  `return err` するので、**外側の Sentry middleware が 404 / 405 まで capture し始める** —
+  未認証で誰でも叩ける経路なので、存在しないパスへ POST を投げるだけで quota を焼ける
+  (`sampleRate` の既定は 1.0)。**この副作用は最初のコミットで見落としており、レビューが
+  実測で見つけた。** 旧挙動に揃えて握ってある。飲むこと自体の是非は別で、直すなら
+  Sentry 側を「5xx だけ capture」にするのが筋。
+  **色は元から一度も出ていなかった。** 旧実装は `${status}` を gommon/color 経由で出すが、
+  production は `Output` を設定していないので `SetOutput(nil)` が呼ばれる。gommon は
+  `*os.File` でない時点で `disabled = true` にして**二度と戻さない**ため、TTY でも色は
+  付かなかった (レビューが実 PTY で実測)。**初稿は「TTY のときの色が無くなる」「差が出るのは
+  `make dev` のときだけ」と書いたが、どちらも裏取りせずに書いた誤り。**
   **これで `//nolint:staticcheck` は 2 件** (SA9010 / SA1012) になり、どちらも
   今回有効化した 4 check とは無関係になった。
 - **2026-09-22**: `unused` を有効化し、**段階的な無効化を解消した**。恒久的に無効なのは
@@ -983,7 +995,7 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   落ちる (通常の Vite クエリでは無変化。レビューが実測)。
   `newViteProxy` にはテストが 1 つも無かったので 2 本足した。変異は 5 形で、4 形が検出・
   1 形 (`r.Out.Host = remote.Host` を足す) は意図どおり非検出 = 冗長の裏取り。
-  **`echo` の `LoggerWithConfig` だけ移行しない** (**同日に移行した**。下の entry)。移行先の
+  **`echo` の `LoggerWithConfig` だけ移行しない** (**同日に移行した**。上の entry)。移行先の
   `RequestLoggerWithConfig` には
   **`CustomTagFunc` に相当するものが無い** (フィールドを全列挙して確認)。現在の設定は
   `${uri}` をそのまま出すと `?i=<token>` が残るのを避けるために `${custom}` + `redact.URI`
@@ -999,7 +1011,7 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   redact のコードが検査されなくなる** (実測: `CustomTagFunc` の中に SA1019 を仕込んでも 0 件。
   レビューで指摘され、行末へ移して 1 件出ることを確認した)。
   **射程外**: `QF*` / `S1016` (恒久。`unused` は同日に有効化した)。
-  **`echo` の `LoggerWithConfig` も同日に移行した** (下の entry)。
+  **`echo` の `LoggerWithConfig` も同日に移行した** (上の entry)。
 - **2026-09-22**: `ST1003` (命名) と `ST1012` (error var 名) を有効化。**名前を変えても wire と
   DB は動かない** — `model.Meta` の `SMTP*` は gorm / json タグを持ち、`config.Config` は
   JSON 化される経路が無く (`config_dump.go` はキーを文字列リテラルで書く)、
