@@ -34,12 +34,13 @@
 ## コミット前チェック
 
 ```bash
-make fmt    # gofmt -s -w .
-make lint   # go vet ./...
-make test   # go test ./... -v -race -count=1 -shuffle=3 (CI と同じテスト実行条件)
+make check  # fmt → lint → actionlint → golangci-lint → test
 ```
 
-CIで`gofmt`差分チェック、`go vet`、カバレッジ閾値チェックが走る。
+個別に回すなら `make fmt` / `make lint` / `make actionlint` / `make golangci-lint` / `make test`。
+テストは `-race -count=1 -shuffle=3` で CI と同じ実行条件。
+
+CIで`gofmt`差分チェック、`go vet`、actionlint、golangci-lint、カバレッジ閾値チェックが走る。
 
 PR を出すと十数個の check が走る。**required なのは `build` / `test` / `lint` の 3 つだけ**で、
 残りは非ブロッキング。どれが何を見ていて落ちたとき何を疑うかは [CI で回る項目](ci.md) に

@@ -472,6 +472,14 @@ jobs:
           fi
           echo "No duplicate test fixture IDs."
 
+      # **`make` 経由で呼ぶ。** 版の定義は Makefile 側に 1 つだけ置く
+      # (#2841 と同じドリフトを避ける)。
+      #
+      # **一番重いので最後に置く。** 他は grep / gofmt / actionlint で数秒だが
+      # これは分単位なので、速い検査で落ちるものは先に落とす。
+      - name: Golangci-lint
+        run: make golangci-lint
+
   # fork frontend (third_party/misskey) の型チェック。
   #
   # 1.0 以降 fork frontend は mk-go 独自に進化させる方針なので、型崩れを

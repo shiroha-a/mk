@@ -18,7 +18,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | check | workflow | 見ているもの | 手元での再現 |
 |---|---|---|---|
 | `build` | CI | 全パッケージがコンパイルできるか + 同梱プラグインの `go vet` + 同梱サンプルが既定無効か | `go build ./...` / `make plugin-vet` |
-| `lint` | CI | `go vet` + **actionlint** + `gofmt -s -d` の差分 + 重複 fixture ID | `make lint` / `make actionlint` / `make fmt` |
+| `lint` | CI | `go vet` + **actionlint** + `gofmt -s -d` の差分 + 重複 fixture ID + **golangci-lint** | `make lint` / `make actionlint` / `make fmt` / `make golangci-lint` |
 | `test` | CI | 4-way shard の集約。どれか 1 つでも落ちれば赤 | `make test` |
 
 ### `test` が落ちたとき
@@ -34,6 +34,31 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
    これでしか出ない、#2841)。全体なら `make test` が同じ条件で走る
 3. **testcontainers の flaky** — PR と無関係なパッケージ (reaction の count_writer 等) で
    落ちていたら再実行を試す
+
+### `lint` の golangci-lint が落ちたとき
+
+`make golangci-lint` で同じものが出る。設定は `.golangci.yml`。
+
+**打ち切りを外してある。** golangci-lint は既定で同一メッセージ 3 件 / linter あたり
+50 件で報告を**切り詰める**。0 件にするわけではないので赤が緑になることはないが、
+**直すたびに隠れていた分が出てくる**ので「全部直してから有効化する」が成立しない
+(導入時にこれで測定を 3 回やり直した)。`max-issues-per-linter: 0` / `max-same-issues: 0`
+を入れてある。
+
+**`(typecheck)` が出た run は不完全。** typecheck が落ちると他の linter の結果が
+報告されない。自前プラグインを `plugins/` に置いていると `cmd/misskey/plugins_generated.go`
+が private module を import するので、**`GOWORK=off` を付けて回すと**起きる (`go.work` が
+あるまま素で叩けば解決するが、それだと CI と条件が変わる)。`make golangci-lint` は生成物を
+退避して回すので手元では踏まない。
+
+**同時に 2 つ走らせられない。** ロックは `/tmp/golangci-lint.lock` でマシン全体。
+重なると `parallel golangci-lint is running` で exit 3 になり、lint 失敗と紛らわしい。
+
+**段階的に有効化している。** `unused` / `ST1003` (命名) / `ST1012` (error var 名) /
+`SA1019` (非推奨 API) は無効。それぞれ性質が違い、一度に直すとまとめ直しになる。
+理由は `.golangci.yml` に書いてある。
+
+誤検知は `//nolint:staticcheck // 理由` をその行に置く。理由を必ず書く。
 
 ### `lint` の actionlint が落ちたとき
 

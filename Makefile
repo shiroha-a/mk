@@ -31,7 +31,14 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 ##@ まとめて実行
 
-check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
+check: fmt lint actionlint golangci-lint test ## コミット前に必須 (lint job の静的検査 + test)
+	# **`lint` job と揃える。** あちらは go vet だけでなく actionlint と
+	# golangci-lint も回すので、`fmt`/`lint`/`test` だけだと新しい検査が手元で
+	# 一度も走らない (レビューで指摘された)。
+	#
+	# **required check の全部ではない。** `build` job (`go build ./...` と同梱
+	# プラグインの vet → `make plugin-vet`)、`lint` job の重複 fixture ID 検査、
+	# `test` のカバレッジ閾値は再現しない。
 
 gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check ipshape-check iprecord-check sqlbind-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
 
@@ -358,6 +365,37 @@ fmt: ## gofmt -s -w . で整形
 
 lint: ## go vet ./...
 	go vet ./...
+
+.PHONY: golangci-lint
+golangci-lint: ## golangci-lint (errcheck / govet / ineffassign / staticcheck)
+	# `go vet` だけでは見えない層を埋める。設定は .golangci.yml。
+	#
+	# **版を固定する。** 新しいチェックが増えると、コードを触っていない PR が
+	# 赤くなる。`lint` は required check なので、上げるのは明示的な操作にする。
+	# CI もこの target を呼ぶので、版の定義はここ 1 箇所だけ。
+	#
+	# **CI と同じ条件で回すために `GOWORK=off` を付ける。**
+	# `make build` を一度でも回すと `go.work` と `cmd/misskey/plugins_generated.go`
+	# が出来る。CI は clean checkout でどちらも持たないので、揃えないと手元だけ
+	# 結果が変わる (actionlint の shellcheck で踏んだのと同じ型)。
+	#
+	# **`go.work` が変えるのは解析対象ではなく build list。** `./...` は module
+	# 境界を越えないので `plugins/` は lint されない (実測で package 数 207 が
+	# go.work の有無で一致)。変わるのは**依存の選択版**で、workspace 内の module の
+	# require が MVS に参加するぶん共通依存が上がる (実測: `golang.org/x/telemetry`
+	# が 2025-10-08 → 2026-07-08)。
+	#
+	# **生成物のほうは退避が要る。** `plugins_generated.go` は private な plugins を
+	# import するので `GOWORK=off` では解決できず typecheck で落ちる。**typecheck が
+	# 落ちると golangci-lint は他の解析結果を報告しない**ので、別パッケージの違反が
+	# 黙って見えなくなる (実測)。`make plugins` で作り直せるので退避して戻す
+	# (trap 付きなので中断しても復元される)。**`cp -p` で mode も保存する** —
+	# mktemp は 0600 で作るので、素の `cp` だと復元後に 644 → 600 になる (実測)。
+	@set -e; \
+	gen=cmd/misskey/plugins_generated.go; bak=""; \
+	if [ -f "$$gen" ]; then bak=$$(mktemp); cp -p "$$gen" "$$bak"; rm -f "$$gen"; fi; \
+	trap 'if [ -n "$$bak" ]; then cp -p "$$bak" "$$gen"; rm -f "$$bak"; fi' EXIT INT TERM; \
+	GOWORK=off go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run --timeout 10m
 
 .PHONY: actionlint
 actionlint: ## GitHub Actions の workflow を検査

@@ -1,0 +1,94 @@
+## golangci-lint の設定。
+##
+## **既定の 5 つ (errcheck / govet / ineffassign / staticcheck / unused) を土台にする。**
+## `go vet` だけでは見えない層を埋めるのが目的で、linter を増やすこと自体が目的ではない。
+## 足すときは、実際に出た指摘を見てから決める。
+version: "2"
+
+linters:
+  default: standard
+
+  disable:
+    # **`unused` は別途有効にする。** これはパッケージ全体を見ないと正しく
+    # 判定できない。`run.tests: false` にすると「テストからしか使われないもの」
+    # が未使用と出る (実測 11 件。うち 2 件は名前も `*_test_helpers.go`) ので、
+    # テストを含めたまま扱う必要がある。含めたうえで実際に未使用なものを潰すのは
+    # 別の作業になるので、ここでは外す。
+    - unused
+
+  settings:
+    staticcheck:
+      # **`checks` は golangci-lint の既定を置き換える。** 既定は
+      # `[all, -ST1000, -ST1003, -ST1016, -ST1020, -ST1021, -ST1022]` なので、
+      # `[all, ...]` と書くとそこに入っていた 6 つが**黙って有効になる**
+      # (本設定は ST1016 だけを意図的に残し、残り 5 つを書き戻している)。
+      # 初版はそれに気付かず、`comments` プリセットで 369 件を抑止しながら
+      # 設定側で ON にする、という循環になっていた (実測)。意図を 1 箇所に
+      # 置くため、既定の無効化も明示的に書き出す。
+      #
+      # `ST1016` (レシーバ名の統一) だけは**意図的に有効**にしてある。実際に
+      # 2 件見つかって直した。残りは既定どおり無効:
+      #   - ST1000 (package コメントの書式) / ST1020 / ST1021 / ST1022
+      #     (exported へのコメント): 日本語で背景を書く方針と噛み合わない
+      #
+      # **`QF*` (quickfix) と `S1016` は恒久的に無効。**
+      #   - QF* は「間違い」ではなく好みのリファクタ (De Morgan の法則を
+      #     適用できる / tagged switch にできるなど)。独自ゲート 21 本で
+      #     「この形を禁じる」を明示している方針と混ざる
+      #   - S1016 は「同じ underlying type なら構造体変換にできる」という提案
+      #     だが、位置ベースになるので**片方の struct だけフィールドを並べ替えると
+      #     コンパイルが通ったまま値が入れ替わる** (`FirstSeen` / `LastSeen` が
+      #     どちらも time.Time で隣接している、など)。名前ベースのリテラルは
+      #     その並べ替えに免疫がある
+      #
+      # **`ST1003` / `ST1012` / `SA1019` は段階的に有効化する。** それぞれ性質が
+      # 違い、一度に直すとまとめ直しになってレビューできない。
+      #   - ST1003 (命名。`ProxySmtp` -> `ProxySMTP` など): CLAUDE.md Section 5 が
+      #     「略語は全て大文字」と要求しているので好みではなく規約違反。ただし
+      #     `internal/model/meta.go` の GORM モデルと `internal/config/config.go` の
+      #     struct field を含み、`internal/entitycompat` の allowlist に
+      #     `Meta.SmtpPass` がハードコードされているので追従が要る
+      #   - ST1012 (error var は ErrFoo): 公開名の変更になる
+      #   - SA1019 (非推奨 API): redis / httputil / echo / go-parser で移行先の判断が要る
+      checks:
+        - all
+        - -QF*
+        - -S1016
+        - -ST1000
+        - -ST1020
+        - -ST1021
+        - -ST1022
+        - -ST1003
+        - -ST1012
+        - -SA1019
+
+  exclusions:
+    # **既定の除外プリセットは明示的に有効化する。** 設定ファイルを置くと
+    # golangci-lint はこれを自動では適用しない。
+    #
+    # **入れるのは `std-error-handling` だけ。** 残り 3 つは実測で無意味か有害だった:
+    #   - `comments`: ST1000 / ST1020 / ST1021 / ST1022 を抑止する。上でそれらを
+    #     無効にしたので要らない (入れると「設定で ON にして preset で OFF」になる)
+    #   - `common-false-positives`: 中身は G103 / G204 / G304 で**すべて gosec 向け**。
+    #     gosec は有効にしていないので 100% 死んでいる
+    #   - `legacy`: 4 つのうち 2 つは gosec。残りは govet (unsafe.Pointer の誤用と
+    #     「メソッドの signature が違う」= stdmethods) と staticcheck SA4011 で、
+    #     **本物の指摘を消す方向にしか働かない**
+    #
+    # `std-error-handling` (EXC0001) が落とすのは
+    # `(os\.)?std(out|err)\..*|.*Close|.*Flush|os\.Remove(All)?|.*print(f|ln)?|os\.(Un)?Setenv`
+    # だけで、**DB 書き込みやパースの戻り値には当たらない** (ルール定義を直読して確認。
+    # 抑止は実測 253 件で、内訳は `*.Close` 202 / `fmt.Fprint*` 53 / `os.Remove*` 4 ほか)。
+    # **ただし `.*Close` なので「書いたファイルの Close」も入る** — 書き込み後の Close は
+    # flush の失敗を運ぶので、そこを見るなら個別に errcheck へ戻すこと (実測で
+    # `internal/core/drive/storage.go` の `LocalStorage.Put` が該当)。
+    presets:
+      - std-error-handling
+
+issues:
+  # **既定の打ち切りを外す。** golangci-lint は同一メッセージ 3 件 /
+  # linter あたり 50 件で報告を**切り詰める** (0 件にするわけではないので、
+  # 赤が緑になることはない)。害は「直すたびに隠れていた分が出てくる」ことで、
+  # **全部直してから有効化する**という運用が成立しなくなる (実測でそうなった)。
+  max-issues-per-linter: 0
+  max-same-issues: 0

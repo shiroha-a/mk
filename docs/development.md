@@ -59,7 +59,7 @@ make dev
 
 | ターゲット | 内容 |
 |---|---|
-| `make check` | `fmt` → `lint` → `test`。コミット前に必須 |
+| `make check` | `fmt` → `lint` → `actionlint` → `golangci-lint` → `test`。コミット前に必須 |
 | `make gates` | 静的 parity ゲートを一括実行 (内訳は下の「静的 parity ゲート」表) |
 | `make version` | mk-go / 互換 Misskey / submodule のバージョンを表示 |
 | `make frontend-check` | 同梱フロントエンドの型チェック (`vue-tsc --noEmit`)、**submodule のソースを読むゲート**、**eslint** (#2906)。ビルド成果物を作らないので安全。ゲートを `make gates` に入れないのは、あちらが submodule 無しで回る前提で、混ぜると checkout していない環境で skip され「検査していないのに緑」になるため (#2892)。**vitest は入っていない** (`make frontend-test`) — CI の同名 job はそれと `make plugins-all` / 統合バイナリの build を別 step で走らせる |
@@ -131,6 +131,7 @@ cd mk && docker compose up -d
 |---|---|
 | `make fmt` | `gofmt -s -w .` |
 | `make lint` | `go vet ./...` |
+| `make golangci-lint` | `errcheck` / `govet` / `ineffassign` / `staticcheck`。`go vet` だけでは見えない層を埋める。設定は `.golangci.yml`。**既定の打ち切り (同一メッセージ 3 件 / linter 50 件) を外してある** — 切り詰めるだけなので赤が緑になることはないが、直すたびに隠れていた分が出てきて「全部直してから有効化する」が成立しない。`unused` (20 件) / `ST1003` (34) / `ST1012` (14) / `SA1019` (10) は段階的に有効化するため現在は無効。`QF*` (28) と `S1016` は恒久的に無効 |
 | `make actionlint` | GitHub Actions の workflow を検査 (式の typo・存在しない `needs` 参照・`runs-on` の誤り・`run:` の中のシェルを shellcheck 経由で)。**CodeQL の `actions` とは別物** — あちらは script injection などのセキュリティを見るが、式が壊れているかは見ない。`lint` job から `make` 経由で呼ぶので、版の定義は Makefile に 1 つだけ置く |
 | `make test` | `go test ./... -v -race -count=1 -shuffle=3` (CI と同じテスト実行条件。PostgreSQL が要る → [testing.md](testing.md)) |
 | `make test-fast` | `-race` 抜き (反復用)。**コミット前の検査ではない** — CI で落ちるものが手元で緑になる |
@@ -277,7 +278,7 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 
 - Phase単位の機能追加: `Phase N.M: <要約>`
 - 修正: `Fix <対象>: <要約>`
-- コミット前に `make fmt && make lint && make test` を実行
+- コミット前に `make check` を実行 (fmt → lint → actionlint → golangci-lint → test)
 
 ### PR作成
 
@@ -312,7 +313,10 @@ CREATE INDEX CONCURRENTLY IF NOT EXISTS "IDX_xxx" ON "yyy" ("zzz");
 
 #### lintジョブ
 - `go vet ./...`
+- **actionlint** (`make actionlint`) — workflow の式と `run:` の中のシェル (shellcheck 経由)
 - `gofmt -s -d .`で差分チェック (差分ありで失敗)
+- 重複 fixture ID の検出
+- **golangci-lint** (`make golangci-lint`) — errcheck / govet / ineffassign / staticcheck
 
 ### 非ブロッキングのPRチェック
 

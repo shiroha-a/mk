@@ -139,7 +139,7 @@ make tidy                   # go mod tidy。**このリポジトリでは privat
 # コード品質
 make fmt                    # gofmt -s -w . で整形
 make lint                   # go vet ./...
-make check                  # fmt → lint → test。コミット前に必須
+make check                  # コミット前に必須 (fmt → lint → actionlint → golangci-lint → test)
 
 # テスト
 make test                   # go test ./... -v -race -count=1 -shuffle=3 (CI と同じ**テスト実行**条件)
@@ -221,7 +221,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 138 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 139 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -475,7 +475,7 @@ Issueの作成・操作には`gh`コマンドを使う（`gh issue create`, `gh 
 
 ### コミット
 
-- コミット前には`make fmt && make lint && make test`を通すこと
+- コミット前には`make check`を通すこと（fmt → lint → actionlint → golangci-lint → test）
 - Claudeは**コミットを自動作成しない**。ユーザーが明示的に指示した場合のみコミットを作成する
 - コミットメッセージは既存の履歴に倣う（例: `Phase 9.2: Remote ActivityPub object resolution`、`Fix CI: twofactor coverage 80% -> 100%`）
 - Phase単位の機能追加は`Phase N.M: <要約>`、修正は`Fix <対象>: <要約>`の形式が一般的
@@ -584,6 +584,14 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   `lint` は required なので固定する (`@latest` だと新しい検査で無関係な PR が赤くなる)。
 - `gofmt -s -d .` で差分がないことを確認。差分があれば失敗。
 - **`Check duplicate test fixture IDs` step** — テストフィクスチャの ID 重複を検出する。
+- **`Golangci-lint` step** (`make golangci-lint`) — `errcheck` / `govet` / `ineffassign` /
+  `staticcheck`。`go vet` だけでは見えない層を埋める。設定は `.golangci.yml`。
+  **既定の打ち切りを外してある** (同一メッセージ 3 件 / linter 50 件)。切り詰めるだけなので
+  赤が緑になることはないが、直すたびに隠れていた分が出てきて「全部直してから有効化する」が
+  成立しない。**`checks` は既定を置き換える**ので、既定の無効化も明示的に書き出してある
+  (書かないと ST1000 / ST1020 / ST1021 等が黙って有効になる)。`unused` / `ST1003` /
+  `ST1012` / `SA1019` は段階的に有効化する。版は Makefile 側に 1 つだけ置く。
+  **一番重いので step の最後**に置いてある。
 
 ### `vulncheck`ジョブ
 
@@ -901,6 +909,61 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: `lint` job に `golangci-lint` を追加。`make help` の target は 138 → 139。
+  **自分のコードを見る Go の静的解析が `go vet` だけだった。** `go vet` は「明らかに壊れて
+  いるもの」しか見ないので、`errcheck` / `staticcheck` / `ineffassign` が拾う層が空いていた。
+  **`staticcheck.checks` は golangci-lint の既定を置き換える。** 既定は
+  `[all, -ST1000, -ST1003, -ST1016, -ST1020, -ST1021, -ST1022]` なので、`[all, ...]` と
+  書くとそこに入っていた 6 つが**黙って有効になる** (ST1016 だけを意図的に残し、残り
+  5 つを書き戻してある)。初版はそれに気付かず、`comments`
+  プリセットで 369 件を抑止しながら設定側で ON にする、という循環になっていた
+  (敵対的レビューで実測された)。既定の無効化も明示的に書き出して意図を 1 箇所へ。
+  `ST1016` (レシーバ名の統一) だけは**意図的に有効**にしてある (実際に 2 件見つけて直した)。
+  **除外プリセットは `std-error-handling` だけを入れる。** 残り 3 つは実測で無意味か有害:
+  `common-false-positives` は中身が全部 gosec 向けで、gosec を有効にしていないので 100% 死んで
+  いる。`legacy` は 4 つのうち 2 つが gosec、残りは govet の unsafe.Pointer 誤用と SA4011 で、
+  **本物の指摘を消す方向にしか働かない**。`comments` は上の明示的無効化で不要になった。
+  `std-error-handling` が落とすのは `Close` / `Flush` / `print` / `os.Remove` 等だけで、
+  **DB 書き込みやパースの戻り値には当たらない** (ルール定義を直読して確認)。
+  **既定の打ち切りを外す (`max-issues-per-linter: 0` / `max-same-issues: 0`)。** 同一メッセージ
+  3 件・linter あたり 50 件で**切り詰める** (0 件にするわけではないので赤が緑になることはない)。
+  害は「直すたびに隠れていた分が出てくる」ことで、**全部直してから有効化するという運用が
+  成立しない**。実際これに気付かず測定を 3 回やり直した。**同日の CodeQL entry が射程外に
+  挙げた「130 件」もこの打ち切りが効いた値** — errcheck がちょうど 50 (= linter あたりの
+  既定上限) なのがその印。
+  **`make check` も required check に揃える。** `fmt` / `lint` / `test` だけだと、`lint` job が
+  回す actionlint と golangci-lint が手元で一度も走らない (レビューで指摘)。
+  **段階的に有効化する。** 現行設定 (本番 / テスト) での実測は `ST1003` 34 件 (16 / 18)、
+  `ST1012` 14 件 (1 / 13)、`SA1019` 10 件 (6 / 4)、`unused` 20 件 (1 / 19)。`QF*` 28 件 (25 / 3) と
+  `S1016` は**恒久的に無効** — 前者は好みのリファクタ、後者は「同じ underlying type なら
+  構造体変換にできる」という提案だが位置ベースになるので、**片方の struct だけ並べ替えると
+  コンパイルが通ったまま値が入れ替わる**。
+  **実バグは 1 件も出なかった。** 疑わしい 4 code (5 箇所) を追ったが、`SA9010` と `SA1012` は誤検知
+  (副作用目的の呼び出し / nil 安全性を確かめるテストそのもの)、`SA4004` と `SA4010` は
+  死んだ構造と死んだ収集だった。**これはバグ発見ではなくハイジーンの整備。**
+  **機械的な一括置換は壊れる。** 規則でまとめて処理したあと全テストを回して **2 件の実害**が
+  出た — `TestUserList_MissingListID` は `Init` の**失敗が仕様**なのに `require.NoError` で
+  包んでしまい、`TestAddContext_IndependentSlices` は足したアサーションが**恒真**だった
+  (`len(append(s,x)) == len(s)+1`)。**どちらも `go vet` では捕まらず、テスト実行と変異検証で
+  初めて出た。** 後者はレビューの代替案 (`assert.NotContains`) も不十分で、`append` は相手の
+  長さより後ろへ書くので backing array を共有していても見えない (実測で変異が素通り)。
+  既存要素の書き換えで直接見る形に直し、変異検証に合格させた。
+  **`typecheck` が落ちると他の linter が全部黙る。** 自前プラグインを入れている手元では
+  `cmd/misskey/plugins_generated.go` が private module を import するので `GOWORK=off` だと
+  そうなる (実測で無関係なパッケージの指摘が消えた)。`make golangci-lint` は生成物を退避して
+  戻す (trap 付き。**`cp -p` にしないと** mktemp の 0600 を引き継いで mode が 644 → 600 になる)。
+  **`go.work` が変えるのは解析対象ではなく build list。** `./...` は module 境界を越えないので
+  workspace があっても `plugins/` は lint されない (実測で package 数 207 が一致) が、
+  **依存の選択版は変わる** — workspace 内の module の require が MVS に参加するため
+  (実測で `golang.org/x/telemetry` が 2025-10-08 → 2026-07-08)。CI は go.work を持たないので、
+  `GOWORK=off` を外すと手元だけ別版を解析することになる。
+  **`make lint` (go vet) は golangci-lint の govet にほぼ包含される** — `go tool vet` の
+  35 analyzer は全て golangci-lint v2.13.2 の既定に含まれ、差は `inline` 1 つ (golangci 側のみ)。
+  同じ解析を 2 回回しているが、CI の `Vet` step と 1:1 に対応させるため残してある。
+  **射程外**: `ST1003` / `ST1012` / `SA1019` / `unused` (段階的に有効化)、`QF*` / `S1016` (恒久)、
+  別 module の `plugins/`。**`make check` と `lint` job のドリフトを止めるゲートは置いていない**
+  (#2841 の `testflags-check` に相当するもの)。`make check` が回すのは `lint` job の静的検査 4 つで、
+  `Check duplicate test fixture IDs` と `build` job (`go build ./...` / `make plugin-vet`) は含まない。
 - **2026-09-22**: `dependency-review` workflow を追加し、あわせて **`go.sum` の検証方法の記述を訂正**した。
   **`GOFLAGS=-mod=readonly go build` では go.sum を検証できない。** Section 3 と
   `docs/development.md` がそう書いていたが誤り。**Go 1.16 以降 `-mod=readonly` は既定値**なので、
