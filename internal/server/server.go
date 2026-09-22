@@ -527,6 +527,12 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	// Recover に巻き戻し、5xx の最終整形は echo に任せる。
 	e.Use(mksentry.Middleware(cfg))
 	e.Use(echomw.RequestID())
+	// **`RequestLoggerWithConfig` へは移さない (SA1019 を抑制する)。** あちらは
+	// 構造化ログ向けの別 API で `CustomTagFunc` に相当するものが無く、下の redact を
+	// `LogValuesFunc` で書き直すことになる。**間違えると `?i=<token>` が素のまま
+	// アクセスログに残る**うえ、出力形式がテキストから構造化へ変わって運用側にも
+	// 影響する。echo 側に削除の予定は無いので、移行は単独の変更として検討する。
+	//nolint:staticcheck // SA1019: 移行は token redact の作り直しとログ形式の変更を伴うため別途
 	e.Use(echomw.LoggerWithConfig(echomw.LoggerConfig{
 		// `${uri}` は query を含むため、そのまま出すと `?i=<token>` の形で
 		// 有効な credential がアクセスログに残る (redact package の doc 参照)。

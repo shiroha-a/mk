@@ -589,9 +589,10 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   **既定の打ち切りを外してある** (同一メッセージ 3 件 / linter 50 件)。切り詰めるだけなので
   赤が緑になることはないが、直すたびに隠れていた分が出てきて「全部直してから有効化する」が
   成立しない。**`checks` は既定を置き換える**ので、既定の無効化も明示的に書き出してある
-  (書かないと ST1000 / ST1020 / ST1021 等が黙って有効になる)。`unused` / `SA1019` は段階的に
-  有効化する。`ST1003` / `ST1012` は有効で、`test/e2e_federation` のパッケージ名だけ除外して
-  ある。版は Makefile 側に 1 つだけ置く。
+  (書かないと ST1000 / ST1020 / ST1021 等が黙って有効になる)。段階的に有効化するのは
+  `unused` だけで、`ST1003` / `ST1012` / `SA1019` は有効。除外は 2 つ —
+  `test/e2e_federation` のパッケージ名 (ST1003) と `echo` の `LoggerWithConfig`
+  (SA1019。`//nolint` で理由付き)。版は Makefile 側に 1 つだけ置く。
   **一番重いので step の最後**に置いてある。
 
 ### `vulncheck`ジョブ
@@ -910,6 +911,36 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: `SA1019` (非推奨 API) を有効化。10 件のうち **9 件を移行し、1 件だけ
+  `//nolint` で抑えた**。段階的に残っているのは `unused` だけになった。
+  **`go/parser.ParseDir` (5 件) は非推奨の理由がこちらの要件に合う。** 「build tag を見ないので
+  package とファイルの対応が不正確」というのが非推奨の理由だが、ゲートは**ディレクトリ内の
+  .go を全部見たい**ので、その不正確さがむしろ望ましい。代替として案内される
+  `golang.org/x/tools/go/packages` は型チェックまで走らせるので、AST を読むだけの用途には
+  過剰なうえ**ビルドできない状態のパッケージを読めなくなる**。`os.ReadDir` +
+  `parser.ParseFile` に置き換えた (`internal/entitycompat` は 2 箇所あるので
+  `parseNonTestGoFiles` に寄せた)。
+  **Redis は呼び出し側で Start / Stop を入れ替えない。** `ZRangeByLex` /
+  `ZRevRangeByLex` は Redis 6.2 で非推奨なので `ZRangeArgs` へ移したが、**`Rev` +
+  `ByLex` のときは go-redis の `appendArgs` が `Stop, Start` の順に並べ替える**
+  (`sortedset_commands.go`)。Redis の `ZRANGE ... REV` が `start > stop` を要求するのに
+  合わせる処理で、呼び出し側は常に「小さい方が Start」で渡す。**入れ替えると範囲が空になる**
+  (実測: 入れ替える変異で `TestNotes_Paging*` が落ちる)。
+  **`ReverseProxy.Director` -> `Rewrite` で 2 つ変わる。** (a) `SetURL` は宛先へ向けるだけで
+  なく **Host ヘッダも target のものへ揃える**ので、`Director` 版の `req.Host = remote.Host`
+  に相当する代入は要らない — **最初それを書いたが、変異検証で「消しても落ちない」= 冗長だと
+  分かって外した**。(b) **`Rewrite` は X-Forwarded-* を落としてから呼ばれる**ので、
+  `NewSingleHostReverseProxy` が `ServeHTTP` で自動付与していた `X-Forwarded-For` が消える。
+  `SetXForwarded()` で足し直す。`newViteProxy` にはテストが 1 つも無かったので、この 2 点を
+  固定するテストを足した (変異 2 形で検出を確認)。
+  **`echo` の `LoggerWithConfig` だけ移行しない。** 移行先の `RequestLoggerWithConfig` は
+  構造化ログ向けの別 API で **`CustomTagFunc` に相当するものが無い**。現在の設定は
+  `${uri}` をそのまま出すと `?i=<token>` が残るのを避けるために `${custom}` + `redact.URI`
+  を使っており、`LogValuesFunc` で書き直すと**間違えたときに有効な credential が
+  アクセスログに残る**。出力形式もテキストから構造化へ変わって運用に影響する。
+  `//nolint:staticcheck` に理由を書いて抑えた (外すと 1 件出ることを実測)。
+  **射程外**: `unused` (引き続き段階的に有効化)、`QF*` / `S1016` (恒久)、
+  `echo` の `LoggerWithConfig` の移行。
 - **2026-09-22**: `ST1003` (命名) と `ST1012` (error var 名) を有効化。**名前を変えても wire と
   DB は動かない** — `model.Meta` の `SMTP*` は gorm / json タグを持ち、`config.Config` は
   JSON 化される経路が無く (`config_dump.go` はキーを文字列リテラルで書く)、
@@ -946,7 +977,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   wire になり秘密も一緒に出る。今は到達する経路が無いことを実測 (`MarshalJSON` に panic を
   仕込んで全テストを回しても発火しない) で確かめたが、**担保はコメントだけ**なので型宣言の
   直上にその旨を書いた。ゲート化は別途。
-  **射程外**: `SA1019` / `unused` (引き続き段階的に有効化)、`QF*` / `S1016` (恒久)、
+  **射程外**: `unused` (引き続き段階的に有効化。`SA1019` は同日に有効化した)、
+  `QF*` / `S1016` (恒久)、
   `test/e2e_federation` のパッケージ名、`config.Config` を marshal させないゲート。
 - **2026-09-22**: `lint` job に `golangci-lint` を追加。`make help` の target は 138 → 139。
   **自分のコードを見る Go の静的解析が `go vet` だけだった。** `go vet` は「明らかに壊れて
@@ -1000,7 +1032,7 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **`make lint` (go vet) は golangci-lint の govet にほぼ包含される** — `go tool vet` の
   35 analyzer は全て golangci-lint v2.13.2 の既定に含まれ、差は `inline` 1 つ (golangci 側のみ)。
   同じ解析を 2 回回しているが、CI の `Vet` step と 1:1 に対応させるため残してある。
-  **射程外**: `SA1019` / `unused` (段階的に有効化。`ST1003` / `ST1012` は同日に有効化した)、
+  **射程外**: `unused` (段階的に有効化。`ST1003` / `ST1012` / `SA1019` は同日に有効化した)、
   `QF*` / `S1016` (恒久)、
   別 module の `plugins/`。**`make check` と `lint` job のドリフトを止めるゲートは置いていない**
   (#2841 の `testflags-check` に相当するもの)。`make check` が回すのは `lint` job の静的検査 4 つで、

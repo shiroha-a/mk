@@ -54,10 +54,11 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 **同時に 2 つ走らせられない。** ロックは `/tmp/golangci-lint.lock` でマシン全体。
 重なると `parallel golangci-lint is running` で exit 3 になり、lint 失敗と紛らわしい。
 
-**段階的に有効化している。** `unused` と `SA1019` (非推奨 API) は無効。性質が違うので、
-一度に直すとまとめ直しになってレビューできない。理由は `.golangci.yml` に書いてある。
-`ST1003` (命名) と `ST1012` (error var 名) は有効で、`test/e2e_federation` の**パッケージ名**
-だけ除外してある (ディレクトリ名まで変えると 32 箇所に波及するため)。
+**段階的に有効化している。** 残っているのは `unused` だけ。理由は `.golangci.yml` に
+書いてある。`ST1003` (命名) / `ST1012` (error var 名) / `SA1019` (非推奨 API) は有効で、
+除外は 2 つある — `test/e2e_federation` の**パッケージ名** (ディレクトリ名まで変えると
+32 箇所に波及するため) と、`echo` の `LoggerWithConfig` (移行するとアクセスログの
+token redact を作り直すことになるため `//nolint` で抑制)。
 
 誤検知は `//nolint:staticcheck // 理由` をその行に置く。理由を必ず書く。
 
