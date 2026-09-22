@@ -1,7 +1,6 @@
 package server
 
 import (
-	"bytes"
 	"compress/gzip"
 	"context"
 	"encoding/json"
@@ -11,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -362,23 +362,37 @@ func corsMiddleware() echo.MiddlewareFunc {
 
 // accessLogConfig returns the access log middleware config.
 //
-// **`${uri}` は query を含む**ので、そのまま出すと `?i=<token>` の形で有効な
-// credential がアクセスログに残る (redact package の doc 参照)。`${custom}` に
-// 差し替えて秘密パラメータの値だけを伏せる。
+// **request URI は query を含む**ので、そのまま出すと `?i=<token>` の形で有効な
+// credential がアクセスログに残る (redact package の doc 参照)。`redact.URI` で
+// 秘密パラメータの**値だけ**を伏せる。**この配線は必ずテストで固定すること**
+// (`TestAccessLogConfig_RedactsToken`) — 壊れても外から見えないので、無検証だと
+// 書き換えで黙って credential が出る側に倒れる。
 //
-// **`RequestLoggerWithConfig` (SA1019 の移行先) へは移していない。** 出力形式は
-// あちらでも `LogValuesFunc` で同じテキスト行を組み立てられるので問題ではなく、
-// 引っかかるのは **`CustomTagFunc` に相当するものが無い**こと — redact をその
-// `LogValuesFunc` の中で書き直すことになり、**間違えると有効な credential が
-// 素のままログに残る**。この配線を固定するテストが長らく 1 つも無かったので
-// (`TestAccessLogConfig_RedactsToken` で塞いだ)、移行は単独の変更として扱う。
-//
-// 切り出してあるのはテストから同じ設定を検査するため (`gzipConfig` と同じ形)。
-func accessLogConfig() echomw.LoggerConfig {
-	return echomw.LoggerConfig{
-		Format: "${time_rfc3339} ${method} ${custom} ${status} ${latency_human}\n",
-		CustomTagFunc: func(c echo.Context, buf *bytes.Buffer) (int, error) {
-			return buf.WriteString(redact.URI(c.Request().RequestURI))
+// 出力先を引数に取るのはテストと共有するため。`gzipConfig` と同じ意図だが、
+// `RequestLoggerConfig` は `Output` を持たず `LogValuesFunc` の中で自分で書くので
+// writer を渡す形になる。
+func accessLogConfig(out io.Writer) echomw.RequestLoggerConfig {
+	return echomw.RequestLoggerConfig{
+		LogMethod:  true,
+		LogStatus:  true,
+		LogLatency: true,
+		// `LogURI` は `req.RequestURI` をそのまま入れる (query 込み)。自分で
+		// `c.Request().RequestURI` を読んでも同じだが、フラグと使う値を対応させておく。
+		LogURI: true,
+		LogValuesFunc: func(_ echo.Context, v echomw.RequestLoggerValues) error {
+			// 旧 `LoggerWithConfig` の
+			// `${time_rfc3339} ${method} ${custom} ${status} ${latency_human}` と
+			// 同じ並び・同じ書式。**時刻は `v.StartTime` ではなく `time.Now()`** —
+			// 旧実装の `${time_rfc3339}` が書き込み時点を出していたのに合わせる
+			// (`StartTime` はリクエスト開始時刻なので値がずれる)。
+			_, err := fmt.Fprintf(out, "%s %s %s %d %s\n",
+				time.Now().Format(time.RFC3339),
+				v.Method,
+				redact.URI(v.URI),
+				v.Status,
+				v.Latency.String(),
+			)
+			return err
 		},
 	}
 }
@@ -552,9 +566,11 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	e.Use(echomw.RequestID())
 	// 設定は accessLogConfig() に集約してテストと共有する (gzipConfig と同じ形)。
 	//
-	// **`//nolint` は行末に置く。** 独立行に置くと `e.Use(...)` 文の全体が
-	// staticcheck の死角になる (実測: 引数の中に SA1019 を仕込んでも 0 件だった)。
-	e.Use(echomw.LoggerWithConfig(accessLogConfig())) //nolint:staticcheck // SA1019: 移行は redact の配線を作り直すので別途 (accessLogConfig の doc を参照)
+	// **TTY のときの色が無くなる。** 旧 `LoggerWithConfig` は `${status}` を
+	// gommon/color 経由で出しており、出力先が TTY のときだけ緑などが付いていた
+	// (`SetOutput` が `*os.File` かつ isatty のときにだけ色を有効にする)。本番は
+	// stdout がパイプなので元から色なしで、差が出るのは `make dev` のときだけ。
+	e.Use(echomw.RequestLoggerWithConfig(accessLogConfig(os.Stdout)))
 	e.Use(corsMiddleware())
 	// gzip response compression (#413 Phase 3 #12)。Misskey TS は nginx
 	// 前段で gzip するのが定石だが、mk-go は単体運用も想定するので app 側

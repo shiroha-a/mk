@@ -58,8 +58,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 `SA1019` (非推奨 API) はすべて有効で、恒久的に無効なのは `QF*` と `S1016` だけ。
 除外は 2 つある — `test/e2e_federation` の**パッケージ名** (ディレクトリ名まで変えると
 24 箇所に波及するため。`git grep -oI e2e_federation -- '*.go' | wc -l`) と、`echo` の
-`LoggerWithConfig` (移行するとアクセスログの
-token redact を作り直すことになるため `//nolint` で抑制)。
+`LoggerWithConfig` (2026-09-22 に `RequestLoggerWithConfig` へ移行済み)。
 
 誤検知は `//nolint:staticcheck // 理由` をその行に置く。理由を必ず書く。
 

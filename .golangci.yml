@@ -46,12 +46,9 @@ linters:
       # 無く (`config_dump.go` はキーを文字列リテラルで書く)、
       # `PolicyCanSearchIPHistory` は定数「名」で値 `canSearchIpHistory` は据え置き。
       #
-      # **`SA1019` (非推奨 API) も有効。** 元の 10 件のうち 9 件を移行し、残り 1 件
-      # (`echo` の `LoggerWithConfig`) を `//nolint:staticcheck` で抑えてある —
-      # 移行先の `RequestLoggerWithConfig` には `CustomTagFunc` に相当するものが
-      # 無く、アクセスログから token を伏せる処理の作り直しを伴うため。
-      # **SA1019 の `//nolint` は 2 箇所** — production (`server.go`) と、同じ設定を
-      # 検査するテスト (`access_log_test.go`)。
+      # **`SA1019` (非推奨 API) も有効。** 元の 10 件は**全て移行済みで抑制は無い**
+      # (導入時は `echo` の `LoggerWithConfig` 1 件を `//nolint` で残していたが、
+      # `RequestLoggerWithConfig` へ移して解消した)。
       checks:
         - all
         - -QF*

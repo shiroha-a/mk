@@ -13,22 +13,20 @@ import (
 
 // **アクセスログに credential を出さない。**
 //
-// `${uri}` は query を含むので、素で出すと `?i=<token>` の形で**有効な token**が
-// ログファイルに残る。`${custom}` + `redact.URI` でそこだけ伏せているが、
-// **この配線を固定するテストが長らく 1 つも無かった** — `LoggerWithConfig` は
-// SA1019 (非推奨) で、移行先の `RequestLoggerWithConfig` には `CustomTagFunc` に
-// 相当するものが無いため redact を書き直すことになる。そのとき黙って壊せる状態
-// だったので、ここで形ではなく**出力そのもの**を見る。
+// request URI は query を含むので、素で出すと `?i=<token>` の形で**有効な token**が
+// ログファイルに残る。`redact.URI` でそこだけ伏せている。**この配線を固定する
+// テストが長らく 1 つも無く**、`LoggerWithConfig` (SA1019) から
+// `RequestLoggerWithConfig` へ移すときに黙って壊せる状態だった。形ではなく
+// **出力そのもの**を見るのはそのため。
 //
-// 変異検証: `accessLogConfig` の `Format` を `${custom}` から `${uri}` へ戻すと
-// token がそのまま出て落ちる。`CustomTagFunc` を素の `RequestURI` にしても同じ。
+// 変異検証: `LogValuesFunc` の `redact.URI(...)` を素の `c.Request().RequestURI`
+// に戻すと token がそのまま出て落ちる。`redact.Placeholder` にすると今度は
+// `limit=10` まで消えて落ちる (伏せすぎも検出する)。
 func TestAccessLogConfig_RedactsToken(t *testing.T) {
 	var buf bytes.Buffer
-	cfg := accessLogConfig()
-	cfg.Output = &buf
 
 	e := echo.New()
-	e.Use(echomw.LoggerWithConfig(cfg)) //nolint:staticcheck // SA1019: 本番と同じ API を検査するため (accessLogConfig の doc を参照)
+	e.Use(echomw.RequestLoggerWithConfig(accessLogConfig(&buf)))
 	e.GET("/api/notes/timeline", func(c echo.Context) error {
 		return c.NoContent(http.StatusOK)
 	})
@@ -38,7 +36,7 @@ func TestAccessLogConfig_RedactsToken(t *testing.T) {
 
 	line := buf.String()
 	assert.NotContains(t, line, "SECRET-TOKEN-VALUE",
-		"token がアクセスログに残っている。`${custom}` + redact.URI の配線が外れた")
+		"token がアクセスログに残っている。LogValuesFunc の redact.URI が外れた")
 	assert.Contains(t, line, "limit=10",
 		"秘密でないパラメータまで消している。redact が広すぎる")
 	assert.Contains(t, line, "/api/notes/timeline", "パス自体は残すこと")

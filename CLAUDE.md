@@ -592,9 +592,10 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   (書かないと ST1000 / ST1020 / ST1021 等が黙って有効になる)。**段階的な無効化は残っていない**
   — `unused` / `ST1003` / `ST1012` / `SA1019` はすべて有効で、恒久的に無効なのは `QF*` と
   `S1016` だけ。**除外は 2 つ** — `.golangci.yml` の rule が 1 件 (`test/e2e_federation` の
-  パッケージ名 / ST1003) と、`//nolint` が 1 件 (`echo` の `LoggerWithConfig` / SA1019)。
-  **これは今回有効化した 4 check に対する数**で、`exclusions.presets` の `std-error-handling`
-  (実測 253 件を抑止) は別枠。
+  パッケージ名 / ST1003) **だけ**。**これは有効化した 4 check に対する数**で、
+  `exclusions.presets` の `std-error-handling` (実測 253 件を抑止) は別枠。
+  `//nolint:staticcheck` はリポジトリ全体で 2 件 (SA9010 / SA1012) で、どちらも
+  今回の 4 check とは無関係。
   `//nolint:staticcheck` 自体はリポジトリ全体で 4 件ある — production 1 (SA1019) とテスト 3
   (SA1019 / SA9010 / SA1012)。版は Makefile 側に 1 つだけ置く。
   **一番重いので step の最後**に置いてある。
@@ -915,6 +916,23 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: `echo` の `LoggerWithConfig` を `RequestLoggerWithConfig` へ移行し、
+  **`SA1019` の抑制をゼロにした**。同日の SA1019 entry で「移行しない」と判断した唯一の
+  1 件で、そのときの理由は「redact の配線を固定するテストが無く、壊しても誰も気付けない」
+  だった。**テストを足した時点でその理由は消えていた**ので移した。
+  **出力は完全に同じ。** 旧実装と新実装を同一プロセスで並べて実測し、
+  `2026-09-22T17:50:40+09:00 GET /api/notes/timeline?i=REDACTED&limit=10 200 757ns` の形式が
+  一致することを確認した (差はレイテンシの実測値だけ)。**時刻は `v.StartTime` ではなく
+  `time.Now()`** — 旧 `${time_rfc3339}` が書き込み時点を出していたので合わせた
+  (`StartTime` はリクエスト開始時刻で値がずれる)。
+  **`RequestLoggerConfig` は `Output` を持たない。** `LogValuesFunc` の中で自分で書くので、
+  テストと共有するには writer を引数で渡す形になる (`gzipConfig` の「設定を返す」形とは
+  少し違う)。
+  **TTY のときの色は無くなる。** 旧実装は `${status}` を gommon/color 経由で出しており、
+  `SetOutput` が `*os.File` かつ isatty のときだけ色を有効にしていた。本番は stdout が
+  パイプなので元から色なしで、差が出るのは `make dev` のときだけ。
+  **これで `//nolint:staticcheck` は 2 件** (SA9010 / SA1012) になり、どちらも
+  今回有効化した 4 check とは無関係になった。
 - **2026-09-22**: `unused` を有効化し、**段階的な無効化を解消した**。恒久的に無効なのは
   `QF*` と `S1016` だけになった。削除したのは 20 件で、**19 件はテスト側の未使用 stub**
   (`stubFedCache` とその 4 メソッド、`failingListByUserRepo`、`test/e2e/helpers_test.go` の
@@ -965,7 +983,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   落ちる (通常の Vite クエリでは無変化。レビューが実測)。
   `newViteProxy` にはテストが 1 つも無かったので 2 本足した。変異は 5 形で、4 形が検出・
   1 形 (`r.Out.Host = remote.Host` を足す) は意図どおり非検出 = 冗長の裏取り。
-  **`echo` の `LoggerWithConfig` だけ移行しない。** 移行先の `RequestLoggerWithConfig` には
+  **`echo` の `LoggerWithConfig` だけ移行しない** (**同日に移行した**。下の entry)。移行先の
+  `RequestLoggerWithConfig` には
   **`CustomTagFunc` に相当するものが無い** (フィールドを全列挙して確認)。現在の設定は
   `${uri}` をそのまま出すと `?i=<token>` が残るのを避けるために `${custom}` + `redact.URI`
   を使っており、`LogValuesFunc` で書き直すと**間違えたときに有効な credential が
@@ -979,8 +998,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   行末に置く** — 独立行に置くと `e.Use(...)` の 10 行全体が死角になり、**まさに守りたい
   redact のコードが検査されなくなる** (実測: `CustomTagFunc` の中に SA1019 を仕込んでも 0 件。
   レビューで指摘され、行末へ移して 1 件出ることを確認した)。
-  **射程外**: `QF*` / `S1016` (恒久。`unused` は同日に有効化した)、
-  `echo` の `LoggerWithConfig` の移行。
+  **射程外**: `QF*` / `S1016` (恒久。`unused` は同日に有効化した)。
+  **`echo` の `LoggerWithConfig` も同日に移行した** (下の entry)。
 - **2026-09-22**: `ST1003` (命名) と `ST1012` (error var 名) を有効化。**名前を変えても wire と
   DB は動かない** — `model.Meta` の `SMTP*` は gorm / json タグを持ち、`config.Config` は
   JSON 化される経路が無く (`config_dump.go` はキーを文字列リテラルで書く)、
