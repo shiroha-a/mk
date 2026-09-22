@@ -1,8 +1,3 @@
-/*
- * SPDX-FileCopyrightText: syuilo and misskey-project
- * SPDX-License-Identifier: AGPL-3.0-only
- */
-
 // Package peercache caches data fetched from other instances so a plugin can
 // answer a view-time read without waiting for the network.
 //

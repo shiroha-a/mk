@@ -254,3 +254,20 @@ rate limit の例:
 ## ライセンス
 
 [GNU AGPL-3.0](../LICENSE)
+
+### Go のソースに SPDX ヘッダーは付けない
+
+AGPL-3.0 が求めるのはライセンス全文を添えること (§4) と、改変の告知 (§5a)、
+ネットワーク越しの利用者へのソース提供 (§13) で、**各ファイルのヘッダーは条件では
+ない**。GPL の付録 "How to Apply These Terms" が推奨しているだけで、mk-go は
+`LICENSE` と README の表記で足りている。
+
+**上流 TS からヘッダーをコピーしないこと。** `SPDX-FileCopyrightText: syuilo and
+misskey-project` は upstream Misskey の著作権表示なので、mk-go 自身のコードに
+付けると**帰属が逆になる**。実際に `plugin/` の 3 ファイルがその状態だった。
+
+**fork frontend (`third_party/misskey`) は別。** 上流のヘッダーを消すのは §4 の
+「既存の告知をそのまま残す」に反する。AGPL 管轄ディレクトリへ新規ファイルを足す
+ときも、submodule 側の `scripts/check-spdx.mjs` が落とすのでヘッダーが要る。
+`tools/pluginbuild` が生成する `server-plugins.generated.ts` がそこに入るのも
+同じ理由で、あれは Go 側の方針の例外ではなく submodule 側の要件。

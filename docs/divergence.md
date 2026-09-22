@@ -618,7 +618,7 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 
 | 箇所 | 変更 |
 |---|---|
-| `pages/about-mkgo.vue` | 新規。mk-go の説明・バックエンド / フロントエンドの版・ソースコードの案内 (**このサーバーが動かしているコード** / mk-go 本体 / フロントエンド / ライセンス) ・`/about-misskey` への導線・コントリビューター。**帰属の文章は置かない** — ソースコード欄が「フロントエンド (Misskey のフォーク)」を挙げており、AGPL が求める著作権表示は `LICENSE` と各ファイルの SPDX ヘッダーが担っている |
+| `pages/about-mkgo.vue` | 新規。mk-go の説明・バックエンド / フロントエンドの版・ソースコードの案内 (**このサーバーが動かしているコード** / mk-go 本体 / フロントエンド / ライセンス) ・`/about-misskey` への導線・コントリビューター。**帰属の文章は置かない** — ソースコード欄が「フロントエンド (Misskey のフォーク)」を挙げており、AGPL が求める著作権表示は `LICENSE` と、fork frontend 側が保持している上流の SPDX ヘッダーが担っている (Go 側は `LICENSE` のみで各ファイルのヘッダーは持たない。ライセンスの条件ではなく GPL の付録が推奨しているだけのため) |
 | `pages/about-misskey.vue` | 冒頭に `/about-mkgo` への `FormLink` を 1 つ追加。**upstream のプロジェクトメンバー・スポンサー・パトロンは消さない** (ライセンス上必須なのは `LICENSE` と著作権表示であって謝辞一覧ではないが、upstream が明示的に管理しているものなので残す) |
 | `pages/about.overview.vue` | `/about-misskey` へのリンクを `/about-mkgo` に差し替え |
 | `ui/_common_/common.ts` | サイドバーの「Misskeyについて」を「mk-goについて」(`/about-mkgo`) に差し替え |
