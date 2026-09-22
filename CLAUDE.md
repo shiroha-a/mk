@@ -915,6 +915,27 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: migration の **up → down → up 往復テスト**を追加
+  (`internal/repository/migration_roundtrip_test.go`)。**書いた瞬間に本物のバグを 1 件
+  見つけた** — `000001_initial.down.sql` が `DROP TABLE IF EXISTS "schema_migrations"` を
+  持っており、golang-migrate が自分で管理するテーブルを消していた。`Down()` は全 down の
+  あとに `TRUNCATE schema_migrations` を撃つので、**`go run ./cmd/migrate -direction down`
+  (CLAUDE.md Section 3 が全段ロールバックとして案内している手順) は毎回最後に
+  `relation does not exist (SQLSTATE 42P01)` で落ちていた**。
+  **`testutil.ApplyMigrations` では代用できない。** あちらは冪等な DDL のために
+  `db.Exec` のエラーを握り潰す (`continue`) ので、**壊れた down でも緑になる**。本番の
+  `cmd/migrate` と同じ golang-migrate + pgx5 driver に流す。
+  **down は書いた時点でしか実行されない。** 97 本あって、後から up 側だけ直して対応が
+  崩れても誰も気付けない。壊れているのは**戻したくなった当日**に分かる。
+  **往復にするのが要点** — down のあとにもう一度 up が通ることまで見る。down が一部だけ
+  戻して残骸を置くと、2 回目の up が「既に在る」で落ちる。
+  **専用の兄弟 schema を使い、毎回作り直す。** `internal/repository` の schema でやると
+  down が他のテストの前提を消す (#2450)。**作り直しが要るのは、途中で落ちたときに残骸が
+  残って次の実行が別の理由で落ちるから** — 診断が事実と無関係になる (変異検証で実際に
+  そうなった)。
+  **変異検証は 3 形**: down に構文エラー / down を空にする (残骸が残り 2 回目の up が
+  落ちる) / `schema_migrations` の DROP を戻す (= 見つけたバグの再導入)。いずれも検出。
+  **`git checkout` で変異を戻さないこと** — 未コミットの修正まで巻き戻す (実際に踏んだ)。
 - **2026-09-22**: `echo` の `LoggerWithConfig` を `RequestLoggerWithConfig` へ移行し、
   **`SA1019` の抑制をゼロにした**。同日の SA1019 entry で「移行しない」と判断した唯一の
   1 件で、そのときの理由は「redact の配線を固定するテストが無く、壊しても誰も気付けない」

@@ -1,6 +1,11 @@
 -- Rollback initial schema
-
-DROP TABLE IF EXISTS "schema_migrations" CASCADE;
+--
+-- **`schema_migrations` は消さない。** golang-migrate が自分で管理するテーブルで
+-- migration の対象ではない。ここで DROP すると `Down()` が最後に TRUNCATE しようと
+-- して `relation "schema_migrations" does not exist (SQLSTATE 42P01)` で落ちる —
+-- つまり `go run ./cmd/migrate -direction down` (全段ロールバック) が**毎回**
+-- 最後に失敗していた。残しておいても中身は空になるので、次の up は version nil から
+-- 始まる。
 DROP TABLE IF EXISTS "meta" CASCADE;
 DROP TABLE IF EXISTS "instance" CASCADE;
 DROP TABLE IF EXISTS "emoji" CASCADE;
