@@ -332,7 +332,7 @@ func TestReplies_FollowersChildHiddenFromAnonymous(t *testing.T) {
 	pub := seedPublicNote(repo, "pubRe")
 	pid := "p"
 	pub.ReplyID = &pid
-	seedFollowersChild(repo, "fol_re", "p", true)
+	seedFollowersChild(repo, "folRe", "p", true)
 
 	// auth user 未 set = anonymous → handler は viewerID=""
 	c, rec := newJSONRequest(t, "/api/notes/replies", `{"noteId":"p"}`)
@@ -350,7 +350,7 @@ func TestReplies_FollowersChildVisibleToFollower(t *testing.T) {
 	pub := seedPublicNote(repo, "pubRe")
 	pid := "p"
 	pub.ReplyID = &pid
-	seedFollowersChild(repo, "fol_re", "p", true)
+	seedFollowersChild(repo, "folRe", "p", true)
 	repo.Following = map[string][]string{"viewer": {"fol_author"}}
 
 	c, rec := newJSONRequest(t, "/api/notes/replies", `{"noteId":"p"}`)
@@ -374,8 +374,8 @@ func TestChildren_FollowersChildHiddenFromNonFollower(t *testing.T) {
 	// quote renote として扱うため text を持たせる (pure renote 除外 #1554 を回避)。
 	quoteText := "quote"
 	pubQ.Text = &quoteText
-	seedFollowersChild(repo, "fol_re", "p", true)
-	seedFollowersChild(repo, "fol_q", "p", false).Text = &quoteText
+	seedFollowersChild(repo, "folRe", "p", true)
+	seedFollowersChild(repo, "folQ", "p", false).Text = &quoteText
 
 	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)
 	setAuthUser(c, &model.User{ID: "viewer"})
@@ -390,8 +390,8 @@ func TestChildren_FollowersChildHiddenFromNonFollower(t *testing.T) {
 	}
 	assert.True(t, idsSet["pubRe"])
 	assert.True(t, idsSet["pubQ"])
-	assert.False(t, idsSet["fol_re"], "followers reply は非フォロワーに漏れない")
-	assert.False(t, idsSet["fol_q"], "followers quote renote も非フォロワーに漏れない")
+	assert.False(t, idsSet["folRe"], "followers reply は非フォロワーに漏れない")
+	assert.False(t, idsSet["folQ"], "followers quote renote も非フォロワーに漏れない")
 }
 
 func TestChildren_FollowersChildVisibleToFollower(t *testing.T) {
@@ -405,8 +405,8 @@ func TestChildren_FollowersChildVisibleToFollower(t *testing.T) {
 	// quote renote として扱うため text を持たせる (pure renote 除外 #1554 を回避)。
 	quoteText := "quote"
 	pubQ.Text = &quoteText
-	seedFollowersChild(repo, "fol_re", "p", true)
-	seedFollowersChild(repo, "fol_q", "p", false).Text = &quoteText
+	seedFollowersChild(repo, "folRe", "p", true)
+	seedFollowersChild(repo, "folQ", "p", false).Text = &quoteText
 	repo.Following = map[string][]string{"viewer": {"fol_author"}}
 
 	c, rec := newJSONRequest(t, "/api/notes/children", `{"noteId":"p","limit":50}`)

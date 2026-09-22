@@ -385,6 +385,13 @@ type Source struct {
 }
 
 // Config represents the resolved application configuration.
+//
+// **この型を JSON へ marshal しないこと。** struct tag を 1 つも持たないので、Go の
+// フィールド名がそのまま wire の形になる (`ProxySMTP` のような名前が出る)。しかも
+// `SetupPassword` / `DB.Pass` / `MediaProxySecret` のような秘密も一緒に出るので、
+// 1 行足すだけで設定一式が漏れる。設定を外へ見せる経路は
+// `internal/server/config_dump.go` だけにしてあり、あちらはキーをリテラルで書き
+// (= フィールド名の変更が wire に波及しない)、秘密は `secretValue()` でマスクする。
 type Config struct {
 	Version string
 	URL     string

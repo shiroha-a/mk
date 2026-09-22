@@ -589,8 +589,9 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   **既定の打ち切りを外してある** (同一メッセージ 3 件 / linter 50 件)。切り詰めるだけなので
   赤が緑になることはないが、直すたびに隠れていた分が出てきて「全部直してから有効化する」が
   成立しない。**`checks` は既定を置き換える**ので、既定の無効化も明示的に書き出してある
-  (書かないと ST1000 / ST1020 / ST1021 等が黙って有効になる)。`unused` / `ST1003` /
-  `ST1012` / `SA1019` は段階的に有効化する。版は Makefile 側に 1 つだけ置く。
+  (書かないと ST1000 / ST1020 / ST1021 等が黙って有効になる)。`unused` / `SA1019` は段階的に
+  有効化する。`ST1003` / `ST1012` は有効で、`test/e2e_federation` のパッケージ名だけ除外して
+  ある。版は Makefile 側に 1 つだけ置く。
   **一番重いので step の最後**に置いてある。
 
 ### `vulncheck`ジョブ
@@ -912,26 +913,41 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 - **2026-09-22**: `ST1003` (命名) と `ST1012` (error var 名) を有効化。**名前を変えても wire と
   DB は動かない** — `model.Meta` の `SMTP*` は gorm / json タグを持ち、`config.Config` は
   JSON 化される経路が無く (`config_dump.go` はキーを文字列リテラルで書く)、
-  `PolicyCanSearchIPHistory` は定数「名」で値 `canSearchIpHistory` は据え置き。`shapecheck` が
-  通ることで裏を取った。
+  `PolicyCanSearchIPHistory` は定数「名」で値 `canSearchIpHistory` は据え置き。
+  **裏取りは `secretfield-check`** — allowlist を `Meta.SMTPPass` へ追従させ、`make gates` が
+  通ることで確かめた (旧名へ戻す変異で `TestModelSecretFieldsAreNotSerialized` が落ちる)。
+  **`shapecheck` は根拠にならない** — あちらは `internal/entity` の DTO しか reflect しないので、
+  `model.Meta` の gorm / json タグを壊しても緑のまま通る (レビューが実測)。初稿はこれを
+  根拠として書いており、**空虚な確認を doc に固定するところだった**。
   **`driver.SkipRetry` -> `ErrSkipRetry` は公開 API の変更ではない** — `internal/queue/driver` は
   `internal/` 配下なのでプラグインから import できない。ただし **`asynq.SkipRetry` (7 箇所) は
   外部パッケージの同名**なので触らない。一時プレースホルダへ退避してから置換した。
   **word boundary だけでは型と変数を区別できない。** `assertAnError` を一括置換したところ、
-  **4 ファイルの `type assertAnError struct{}` (error を実装する型) まで巻き込んだ** —
-  ST1012 が指摘したのは `internal/api/reversi` の var 1 件だけで、型は対象外。10 箇所を
-  戻した。**リネーム前に「その名前が何として宣言されているか」を確認すること。**
+  **`type assertAnError struct{}` (error を実装する型) を宣言する 3 ファイルと、それを使う
+  1 ファイル、計 10 箇所まで巻き込んだ** — ST1012 が指摘したのは `internal/api/reversi` の
+  var 1 件だけで、型は対象外。**リネーム前に「その名前が何として宣言されているか」を
+  確認すること。** 置換は散文にも当たる (`non-SkipRetry` が `non-ErrSkipRetry` になった)。
   **`test/e2e_federation` のパッケージ名だけ除外した。** ST1003 が指摘するのはパッケージ名で
   ディレクトリ名ではないが、Go の慣習では揃える。ディレクトリ名まで変えると `internal/` の
-  実コード 2 ファイルを含む 27 箇所に波及するうえ、外部から import されないテスト専用
-  パッケージなので実益が無い。**CI のカバレッジ閾値は ImportPath の `/e2e` で判定する**ので、
-  名前を変えても 0% 例外は維持される (変えない判断の裏取りとして確認した)。
+  実コード 2 ファイルを含む 32 箇所に波及するうえ (数え方: `git grep -oI e2e_federation | wc -l`。
+  develop 時点では 27 で、この PR 自身が 5 箇所増やした)、外部から import されないテスト専用
+  パッケージなので実益が無い。**CI のカバレッジ閾値は ImportPath の `/e2e` で判定する**
+  (`ci.yml` の `pkg ~ /\/e2e/` で unanchored な部分一致) ので、**名前が `e2e` で始まる限り**
+  0% 例外は維持される — `federatione2e` のように後ろへ回すと外れて 90% になる (実測)。
   実測は ST1012 が 4 種 301 箇所 (`stubError` 112 / `SkipRetry` 182 / `stubReactionError` 3 /
-  `assertAnError` 4) + 死んだアンカー行 1 の削除 (`var _ error = errors.New("compile-time
+  `assertAnError` 4。数え方: develop で `git grep -oIw <名前> -- '*.go' | wc -l` を足し、
+  温存した `asynq.SkipRetry` 7 と戻した `assertAnError` 10 を引く) + 死んだアンカー行 1 の削除 (`var _ error = errors.New("compile-time
   anchor for errors import")`。`errors` は同ファイルの他 2 箇所で使われており不要だった)、
   ST1003 が 21 種 189 箇所。
+  **新しい名前が既に在るかも先に測る。** `errStub` は `internal/api/invite` に元から
+  あった (今回の対象 10 パッケージに含まれないので衝突しなかっただけ)。同一パッケージ
+  だと再宣言でビルドが落ち、別パッケージだと黙って似た名前が増える。
+  **`config.Config` は tag を 1 つも持たない**ので、marshal した瞬間に Go のフィールド名が
+  wire になり秘密も一緒に出る。今は到達する経路が無いことを実測 (`MarshalJSON` に panic を
+  仕込んで全テストを回しても発火しない) で確かめたが、**担保はコメントだけ**なので型宣言の
+  直上にその旨を書いた。ゲート化は別途。
   **射程外**: `SA1019` / `unused` (引き続き段階的に有効化)、`QF*` / `S1016` (恒久)、
-  `test/e2e_federation` のパッケージ名。
+  `test/e2e_federation` のパッケージ名、`config.Config` を marshal させないゲート。
 - **2026-09-22**: `lint` job に `golangci-lint` を追加。`make help` の target は 138 → 139。
   **自分のコードを見る Go の静的解析が `go vet` だけだった。** `go vet` は「明らかに壊れて
   いるもの」しか見ないので、`errcheck` / `staticcheck` / `ineffassign` が拾う層が空いていた。
@@ -984,7 +1000,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **`make lint` (go vet) は golangci-lint の govet にほぼ包含される** — `go tool vet` の
   35 analyzer は全て golangci-lint v2.13.2 の既定に含まれ、差は `inline` 1 つ (golangci 側のみ)。
   同じ解析を 2 回回しているが、CI の `Vet` step と 1:1 に対応させるため残してある。
-  **射程外**: `ST1003` / `ST1012` / `SA1019` / `unused` (段階的に有効化)、`QF*` / `S1016` (恒久)、
+  **射程外**: `SA1019` / `unused` (段階的に有効化。`ST1003` / `ST1012` は同日に有効化した)、
+  `QF*` / `S1016` (恒久)、
   別 module の `plugins/`。**`make check` と `lint` job のドリフトを止めるゲートは置いていない**
   (#2841 の `testflags-check` に相当するもの)。`make check` が回すのは `lint` job の静的検査 4 つで、
   `Check duplicate test fixture IDs` と `build` job (`go build ./...` / `make plugin-vet`) は含まない。
