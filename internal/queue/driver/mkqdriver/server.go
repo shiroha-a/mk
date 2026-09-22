@@ -338,8 +338,7 @@ func monotonicNanos() int64 { return int64(time.Since(processStart)) }
 
 // ErrResizeAfterShutdown is returned by Resize when the pool's owning
 // Server has already shut down. Callers (auto-scale controller) should
-// treat this as "stop trying to scale, the server is gone" — same
-// semantics as driver.ErrResizeNotSupported on asynq.
+// treat this as "stop trying to scale, the server is gone".
 var ErrResizeAfterShutdown = errors.New("mkqdriver: pool already shut down")
 
 // Handle registers a handler for the given task type. Must be called

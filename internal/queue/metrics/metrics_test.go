@@ -227,7 +227,7 @@ func TestBindDriver_ReplacesPreviousBinding(t *testing.T) {
 // accumulated scrape_errors_total counter survives a BindDriver re-bind
 // (driver swap mid-life), because scrapeErrs lives on Metrics not the
 // per-bind driverCollector. Without this, an operator hot-swapping
-// drivers (e.g. asynq → mkq via config reload) would silently lose
+// drivers (via config reload) would silently lose
 // alerting history reachable via Metrics.ScrapeErrorCount (#1136
 // follow-up).
 //
@@ -372,7 +372,7 @@ func TestCollect_QuarantinedGauge(t *testing.T) {
 }
 
 func TestCollect_QuarantinedGaugeZeroWithoutSupport(t *testing.T) {
-	// asynq のように追跡しない driver では常に 0。scrape が落ちたり
+	// quarantine を追跡しない driver では常に 0。scrape が落ちたり
 	// gauge ごと消えたりしないこと。
 	m := New()
 	m.BindDriver(&fakeDriver{workers: map[string]int{"inbox": 4}, inspector: &fakeInspector{}})

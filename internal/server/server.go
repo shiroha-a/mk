@@ -105,7 +105,7 @@ type Server struct {
 	// 一度だけ解決して保持する。
 	mediaProxySecret []byte
 
-	// deliverSvc は federation deliver service への参照。本番では asynq
+	// deliverSvc は federation deliver service への参照。本番では queue
 	// 経由で deliver を enqueue するが、test (#780) で queue を bypass する
 	// ための SetSyncDeliverHookForTest を呼べるよう参照を保持する。
 	deliverSvc *corefederation.DeliverService
@@ -127,7 +127,7 @@ type Server struct {
 }
 
 // registerShutdownHook registers fn to be invoked during Shutdown.
-// Hooks run in registration order before the asynq / echo shutdown.
+// Hooks run in registration order before the queue / echo shutdown.
 // ctx は Shutdown() の caller から伝播され、graceful drain の deadline
 // として使える (#764)。
 func (s *Server) registerShutdownHook(fn func(context.Context)) {
@@ -637,9 +637,8 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	auth := middleware.NewAuthMiddleware(userRepo, accessTokenRepo)
 	e.Use(auth.Authenticate())
 
-	// queue driver セットアップ: jobQueueDriver config で asynq / mkq を
-	// 選択。Host が UNIX domain socket パス ("/" 始まり) のときは driver
-	// 内部で Network を unix に切り替える。
+	// queue driver セットアップ。Host が UNIX domain socket パス ("/" 始まり)
+	// のときは driver 内部で Network を unix に切り替える。
 	// プラグイン専用のキュー (#2818)。**driver を作る前に決める** — worker が
 	// 見るキューの一覧は構築時に固定される。
 	pluginQueues := pluginJobQueueNames(plugins, cfg.Plugins)
@@ -649,11 +648,6 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	}
 	queueClient := queue.NewClient(queueDriver)
 	applyClientPolicies(queueClient, cfg)
-	// scheduled note 機能の driver capability (= mkq のみ確実に動作、asynq
-	// は task ID 仕様の制約で clearSchedule が困難なため無効化)。空文字列
-	// は mkq に正規化される config 経路だが defensive に判定する
-	// (#1045 Phase 2-C)。
-	queueClient.SetSupportsScheduledNote(cfg.JobQueueDriver == "" || cfg.JobQueueDriver == "mkq")
 	queueServer := queue.NewServer(queueDriver)
 	queueScheduler := queue.NewScheduler(queueDriver)
 	queueInspector := queue.NewInspector(queueDriver)
@@ -791,7 +785,7 @@ func (s *Server) DumpRoutes(w io.Writer) error {
 	return enc.Encode(payload)
 }
 
-// StartBackgroundForTest starts the asynq queue worker (and optional
+// StartBackgroundForTest starts the queue worker (and optional
 // scheduler / chart management) without launching the HTTP listener.
 // 用途: e2e_federation 系のテストで `httptest.Server` 経由で echo handler を
 // 外部 listener にぶら下げつつ、deliver / inbox 処理など async queue 経路も
@@ -850,7 +844,7 @@ func (s *Server) registerSchedulerJobs() {
 	}
 }
 
-// SetSyncDeliverHookForTest replaces the asynq deliver enqueue with the
+// SetSyncDeliverHookForTest replaces the queued deliver enqueue with the
 // supplied synchronous hook. e2e_federation 系テストで queue worker 経由の
 // deliver が動かない/動かしたくないシナリオで、sign + HTTP POST を inline
 // で実行する用途。fn=nil で本番経路 (queue) に戻る。
@@ -863,7 +857,7 @@ func (s *Server) SetSyncDeliverHookForTest(fn func(payload queue.DeliverPayload)
 }
 
 // Start begins listening on the configured port (or UNIX domain socket) and
-// launches the asynq worker.
+// launches the queue worker.
 //
 // If s.config.Socket is non-empty the HTTP server binds to that path instead
 // of a TCP port. This matches Misskey 本家 YAML の `socket` / `chmodSocket`
@@ -920,7 +914,7 @@ func (s *Server) Start() error {
 	return s.echo.Start(addr)
 }
 
-// Shutdown gracefully shuts down the server, the asynq worker and
+// Shutdown gracefully shuts down the server, the queue worker and
 // any background services such as the chart management loop.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.shutdownOnce.Do(func() {
@@ -944,8 +938,8 @@ func (s *Server) shutdown(ctx context.Context) error {
 	// 伝播することで autoscale の goroutine drain にも graceful deadline が効く。
 	s.autoscale.Stop(ctx)
 	// RoleServer では scheduler も worker も起動していない。mkq driver は
-	// どちらの Shutdown も未起動で安全だが、asynq driver は inner にそのまま
-	// 委譲するので、起動していない前提を持ち込まない (#2459)。
+	// どちらの Shutdown も未起動で安全だが、「起動済み」を前提にした driver へ
+	// 差し替わっても壊れないよう role で守る (#2459)。
 	if s.role.RunsQueue() {
 		if s.queueScheduler != nil {
 			s.queueScheduler.Shutdown()
@@ -953,11 +947,9 @@ func (s *Server) shutdown(ctx context.Context) error {
 		s.queueServer.Shutdown()
 	}
 	// queueClient.Close を直接呼ばないこと。queueDriver.Close が
-	// Client / Inspector を含むサブコンポーネントの Close を一括処理
-	// するため、ここで呼ぶと asynq driver では同じ *asynq.Client を
-	// 二重 close して pool.ErrPoolClosed の warn log が毎回出る。
-	// mkq driver は Client.Close が no-op で driver 本体に集約する
-	// 仕様なので、driver.Close 一本に統一する方が両 driver で対称。
+	// Client / Inspector を含むサブコンポーネントの Close を一括処理する。
+	// mkq driver は Client.Close が no-op で接続は driver 本体が持つので、
+	// 閉じ口は driver.Close の一本に統一する。
 	if s.queueDriver != nil {
 		if err := s.queueDriver.Close(); err != nil {
 			slog.Warn("queue driver close failed", "err", err)

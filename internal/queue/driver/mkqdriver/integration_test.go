@@ -301,7 +301,7 @@ func TestEnqueue_UnknownQueueRejects(t *testing.T) {
 }
 
 // TestEnqueue_DuplicateUniqueDropsSilently confirms WithUnique TTL
-// matches asynq's silent-drop behaviour.
+// 重複は黙って捨てる (unique TTL の窓の中なので成功扱い)。
 func TestEnqueue_DuplicateUniqueDropsSilently(t *testing.T) {
 	d := newDriver(t)
 	for i := 0; i < 3; i++ {
@@ -541,7 +541,7 @@ func TestInspector_GetQueueInfo_IncludesRepeatSchedules(t *testing.T) {
 }
 
 // TestInspector_RunTaskPromotesDelayed verifies that RunTask pulls a
-// scheduled task back to wait, mirroring asynq's "Run scheduled".
+// scheduled task back to wait (admin の「今すぐ実行」)。
 func TestInspector_RunTaskPromotesDelayed(t *testing.T) {
 	d := newDriver(t)
 
@@ -793,7 +793,7 @@ func TestClient_Enqueue_WithKeepFailed_BoundsFailedBucket(t *testing.T) {
 
 // TestInspector_RunTask_FallsBackToRetryJobForFailedBucket verifies that
 // RunTask succeeds against a job in the failed bucket, by falling back
-// from PromoteJob (delayed-only) to RetryJob. asynq's Inspector.RunTask
+// from PromoteJob (delayed-only) to RetryJob. admin の RunTask
 // transparently handles both buckets; this test pins the equivalent
 // behaviour for the mkq driver (#1181).
 //
@@ -845,7 +845,7 @@ func TestInspector_RunTask_FallsBackToRetryJobForFailedBucket(t *testing.T) {
 		"job should have landed in the failed bucket")
 
 	// RunTask must succeed via RetryJob fallback even though the job is
-	// not in mkq's delayed bucket. asynq's parity contract: callers only
+	// not in mkq's delayed bucket. 呼び出し側の契約: callers only
 	// pass a task ID and the driver routes to the right move primitive.
 	require.NoError(t, ins.RunTask("deliver", failedTaskID),
 		"RunTask should fall back to RetryJob for failed bucket jobs")
@@ -946,8 +946,14 @@ func TestNewDriver_BadAddressFails(t *testing.T) {
 }
 
 // TestDriver_Resize_BeforeStartReturnsNotSupported verifies the
-// pre-Start contract — Resize called before Server.Start returns
-// ErrResizeNotSupported (there is no pool to resize yet).
+// pre-Server() contract — Resize called before Driver.Server() returns
+// ErrResizeNotSupported (there is no Server object to resize through).
+//
+// **`Server()` 済みで `Start()` 前は別のエラーになる** — pool map が空なので
+// Server.Resize の `unknown queue` 枝に落ちる。そちらは
+// TestServer_Resize_UnknownQueueReturnsError が固定している。この違いを
+// 取り違えると「Start 前は ErrResizeNotSupported」という誤った前提が
+// 配線側へ伝播する (#2985 で実際に踏んだ)。
 func TestDriver_Resize_BeforeStartReturnsNotSupported(t *testing.T) {
 	d := newDriver(t)
 	// No call to d.Server() yet.

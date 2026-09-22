@@ -22,8 +22,8 @@ import (
 //     合わせる)。
 type Policy struct {
 	// Concurrency overrides the worker pool size for this queue. 0 means
-	// "fall back to driver default" — for asynq this is the global pool
-	// gated by priority weights, for mkq it is total/len(queues).
+	// "fall back to driver default" — mkq uses its per-queue table
+	// (mkqdriver の defaultQueueConcurrency)。
 	Concurrency int
 
 	// RatePerSec caps task processing throughput at N tasks per second.
@@ -42,7 +42,7 @@ type Policy struct {
 	// retry-backoff を発火させるため、deliver/inbox は server 側の
 	// buildPolicy が未指定時に TS 互換の default (12 / 8) を当てる (#1411)。
 	//
-	// 内部では asynq の MaxRetry (= retries on top of initial) に
+	// 内部では driver.WithMaxRetry (= retries on top of initial) に
 	// 変換するため EnqueueDeliver で N-1 を渡す。drop-in 互換維持の
 	// ために TS の YAML 値そのままで一致させる必要がある (#531 review)。
 	MaxAttempts int

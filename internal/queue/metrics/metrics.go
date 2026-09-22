@@ -82,9 +82,8 @@ type Metrics struct {
 
 	// scrapeErrs is the (queue, kind) → cumulative count map. Lives on
 	// Metrics (not driverCollector) so accumulated counts persist across
-	// BindDriver re-bind (= driver swap mid-life, e.g. asynq → mkq config
-	// change). driverCollector holds a pointer to this map so Inc + emit
-	// both touch the same series.
+	// BindDriver re-bind. driverCollector holds a pointer to this map so
+	// Inc + emit both touch the same series.
 	scrapeErrs sync.Map // map[scrapeErrKey]*atomic.Uint64
 }
 
@@ -230,13 +229,12 @@ func loadScrapeError(m *sync.Map, key scrapeErrKey) uint64 {
 }
 
 var (
-	// workersActiveDesc reports per-queue worker pool size on mkq backend.
-	// asynq backend semantics (pool-wide value reported per queue label)
-	// are documented in docs/configuration.md alongside the enableMetrics
-	// flag rather than being shoved into the Help text.
+	// workersActiveDesc reports per-queue worker pool size on the mkq
+	// backend. 詰まった worker は除外して数える (#2657。仕組みは
+	// docs/design/auto-scale-job-workers.md の §5.1.1、metric 一覧は §6.1)。
 	workersActiveDesc = prometheus.NewDesc(
 		"mk_job_workers_active",
-		"Number of workers per queue able to take work (asynq backend reports pool-wide; see docs/configuration.md).",
+		"Number of workers per queue able to take work.",
 		[]string{"queue"}, nil,
 	)
 	handlersAbandonedDesc = prometheus.NewDesc(
@@ -281,12 +279,11 @@ func (c *driverCollector) Describe(ch chan<- *prometheus.Desc) {
 }
 
 // quarantineReporter is the optional driver-side surface behind
-// mk_job_workers_quarantined. Only mkqdriver implements it; other drivers
-// have no such state and the gauge stays at 0.
+// mk_job_workers_quarantined. Only mkqdriver implements it; a driver
+// without that state leaves the gauge at 0.
 //
-// **driver.Driver に足さない。** asynq は動的な pool を持たないので実装
-// しても常に 0 を返すだけの stub になり、legacy driver に「対応した」ように
-// 見える面を増やしてしまう (#571 で削除予定)。
+// **driver.Driver に足さない。** 動的な pool を持たない driver では常に 0 を
+// 返すだけの stub になり、「対応した」ように見える面を増やしてしまう。
 type quarantineReporter interface {
 	QuarantinedWorkerCount(qname string) int
 }

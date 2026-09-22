@@ -15,7 +15,7 @@ type ChartProcessor struct {
 	// charts is the ordered list of every chart engine that should be
 	// ticked / resynced / cleaned. Caller passes them in the same order
 	// upstream lists them; ordering only matters for debug output since
-	// asynq cannot run more than one job concurrently.
+	// the chart job never runs concurrently with itself.
 	charts []*chart.Chart
 }
 

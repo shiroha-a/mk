@@ -45,7 +45,6 @@ func (f *fakeEnqueuer) EnqueuePostScheduledNote(_ queue.PostScheduledNotePayload
 	return nil
 }
 func (f *fakeEnqueuer) ClearScheduledNote(_ string) error { return nil }
-func (f *fakeEnqueuer) SupportsScheduledNote() bool       { return true }
 func (f *fakeEnqueuer) Close() error                      { return nil }
 
 func TestService_PushNotification_Enqueues(t *testing.T) {

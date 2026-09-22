@@ -120,19 +120,19 @@ func TestBuildConfigDump_RateUnaffectedByWorkerCount(t *testing.T) {
 	assert.Equal(t, "100 jobs/sec", rateFor(16))
 }
 
-// asynq だけ 2 つ余計な性質がある: リミッタが**プロセス内**にしか効かないことと、
-// Wait が共有 worker pool を占有して他 queue を枯らしうること。
+// リミッタは queue ごとに 1 本の Redis キーなので、**プロセスを跨いで**
+// 効くし worker 数にも比例しない。driver を 1 つにした (#2985) ので出し分けも
+// 無くなったが、#2669 が直した誤りはどれも「note に嘘の条件を足す」形だった
+// ので、嘘のほうを禁止語で固定しておく。
 //
-// **値も driver ごとに固定する。** note だけ見ていると、asynq の分岐の中で
-// 値に worker 数を掛けても誰も気づかない (mutation で実際にすり抜けた)。
-// #2669 の完了条件が「asynq での見え方を確認し、必要なら出し分ける」なので、
-// この分岐は将来手が入る場所でもある。
-func TestBuildConfigDump_RateNoteIsDriverSpecific(t *testing.T) {
+// **値も併せて固定する。** note だけ見ていると、値に worker 数を掛ける変更が
+// 誰にも気づかれずに通る (#2669 の mutation で実際にすり抜けた)。
+func TestBuildConfigDump_RateNoteIsDriverIndependent(t *testing.T) {
 	four, hundred := 4, 100
-	entry := func(driver string) ConfigEntry {
+	entry := func(driverName string) ConfigEntry {
 		cfg := &config.Config{
 			URL: "https://example.com", Port: 3000,
-			JobQueueDriver:        driver,
+			JobQueueDriver:        driverName,
 			DeliverJobConcurrency: &four,
 			DeliverJobPerSec:      &hundred,
 		}
@@ -144,42 +144,19 @@ func TestBuildConfigDump_RateNoteIsDriverSpecific(t *testing.T) {
 		return ConfigEntry{}
 	}
 
-	for _, driver := range []string{"", "mkq", "asynq"} {
-		e := entry(driver)
+	for _, driverName := range []string{"", "mkq"} {
+		e := entry(driverName)
 		assert.Equal(t, "100 jobs/sec", e.Value,
-			"driver %q でも設定値そのまま (worker 数を掛けない)", driver)
-		assert.NotContains(t, e.Note, "400", "driver %q", driver)
+			"driver %q でも設定値そのまま (worker 数を掛けない)", driverName)
+		assert.NotContains(t, e.Note, "400", "driver %q", driverName)
+
+		// 「プロセス内 / ごと / 単位 / あたり」はどれも同じ誤り。真である
+		// 「プロセスを跨いで効く」は通すので `プロセス` 全体は禁じない。
+		assert.NotRegexp(t, `プロセス(内|ごと|単位|あたり)`, e.Note, "driver %q", driverName)
+		// starvation は共有 worker pool を持つ driver の性質だった。mkq は
+		// pull レイヤなので起きない。
+		assert.NotContains(t, e.Note, "worker pool", "driver %q", driverName)
 	}
-
-	// asynq のリミッタは Go のメモリ上なのでプロセスを跨がない。
-	//
-	// **どちらが per-process かまで固定する。** 「プロセス内」という語が
-	// 出ているかだけ見ても、note の中で driver 名が入れ替わった誤りを
-	// 素通りさせる (mutation で確認済み)。向きが逆だと、operator は queue
-	// プロセスを増やしても Redis キーで抑えられると誤解するので、実害は
-	// 語の有無より向きのほうにある。言い換えたらここも読み直すこと。
-	//
-	// **強調記号は縛らない** (dump は端末出力なので `**` はそのまま表示される
-	// 飾りでしかない)。逆に **どちらが per-process かは縛る**。
-	asynqNote := entry("asynq").Note
-	assert.Regexp(t, `asynq では\**プロセス内\**の上限`, asynqNote)
-	assert.Regexp(t, `mkq は Redis キー共有`, asynqNote)
-
-	// mkq 側で禁じるのは「プロセス内」という**誤った主張**だけ。
-	// 「Redis キーなのでプロセスを跨いで効く」は真なので、将来 base note に
-	// 足せるよう `プロセス` 全体を禁止語にはしない。
-	// 「プロセス内 / ごと / 単位 / あたり」はどれも同じ誤りなので、まとめて
-	// 禁じる。真である「プロセスを跨いで効く」は通す。
-	const perProcess = `プロセス(内|ごと|単位|あたり)`
-	assert.NotRegexp(t, perProcess, entry("mkq").Note)
-	// **asynq の note の中で mkq をそう説明するのも同じ誤り。** asynq note は
-	// mkq に言及するので、mkq 行だけ見ていても捕まらない。
-	assert.NotRegexp(t, `mkq[^。]*`+perProcess, asynqNote)
-
-	// starvation の注記が asynq 側にだけ付くこと。**`worker pool` は
-	// 文字列として縛っている**ので、日本語に言い換えるならここも直すこと。
-	assert.Contains(t, asynqNote, "worker pool")
-	assert.NotContains(t, entry("mkq").Note, "worker pool")
 
 	// 既定が mkq であることは、文言に依存せず行ごと比較して固定する。
 	assert.Equal(t, entry("mkq"), entry(""), "既定は mkq と同じ行になる")
@@ -308,7 +285,7 @@ func TestBuildConfigDump_StuckAndDeadlineRows(t *testing.T) {
 //
 // **積は dump のどこにも出ないし、rate 行は設定値そのものしか出さない。**
 // 行や field を 1 つずつ pin する方式では嘘の移設を追いきれなかった —
-// round 1 で note へ、round 2 で asynq の値へ、round 3 で worker 行 /
+// round 1 で note へ、round 2 で driver ごとの値へ、round 3 で worker 行 /
 // Warnings / 別 queue へ、round 4 で「特定の config 形でだけ掛ける」形へと、
 // 毎回別の場所に同じ主張が復活した。**出力全体**と**行の集合そのもの**を
 // 軸にする。
@@ -341,7 +318,7 @@ func TestBuildConfigDump_RateProductAppearsNowhere(t *testing.T) {
 	}
 
 	for shape, apply := range shapes {
-		for _, driver := range []string{"", "mkq", "asynq"} {
+		for _, driver := range []string{"", "mkq"} {
 			t.Run(shape+"/"+driver, func(t *testing.T) {
 				cfg := &config.Config{
 					URL: "https://example.com", Port: 3000,

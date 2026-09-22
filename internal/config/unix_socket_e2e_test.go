@@ -27,7 +27,7 @@ import (
 //  4. net.UnixListener.Close() の自動 unlink でソケットファイルが消える
 //  5. config.RemoveUnixSocket は既に消えているパスに対して冪等
 //
-// サーバー本体 (internal/server.Server) を起動するには DB/Redis/asynq が
+// サーバー本体 (internal/server.Server) を起動するには DB/Redis/queue が
 // 必要で重いため、同じ API 呼び出し列 (Server.Start/Shutdown が内部で走らせ
 // ている 4 ステップそのもの) をこのテストで直接実行する。
 func TestUDSLifecycle_EndToEnd(t *testing.T) {

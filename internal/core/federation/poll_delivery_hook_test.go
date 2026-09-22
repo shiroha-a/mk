@@ -15,7 +15,7 @@ import (
 )
 
 // recordingEnqueuer captures DeliverPayloads enqueued via DeliverActivity so
-// hook tests can assert what was scheduled without a real asynq server. The
+// hook tests can assert what was scheduled without a real queue server. The
 // non-deliver methods are no-ops to satisfy queue.Enqueuer.
 type recordingEnqueuer struct {
 	delivers []queue.DeliverPayload
@@ -41,7 +41,6 @@ func (r *recordingEnqueuer) EnqueuePostScheduledNote(queue.PostScheduledNotePayl
 	return nil
 }
 func (r *recordingEnqueuer) ClearScheduledNote(string) error { return nil }
-func (r *recordingEnqueuer) SupportsScheduledNote() bool     { return true }
 func (r *recordingEnqueuer) Close() error                    { return nil }
 
 func newHookSetup(t *testing.T) (*PollDeliveryHook, *recordingEnqueuer, *testutil.MockUserRepository, *testutil.MockUserKeypairRepository, id.Generator) {

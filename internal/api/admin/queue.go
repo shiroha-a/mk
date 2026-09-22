@@ -174,7 +174,8 @@ func (h *Handler) QueueInboxDelayed(c echo.Context) error {
 }
 
 // delayedTasksFetchPageSize は scheduled / retry を page 走査する際の 1 page
-// 当たり件数。100 は asynq inspector の page size 制限 (1〜) 内で妥当な大きさ。
+// 当たり件数。100 は driver 側の page size 上限 (mkq は 100 超を 30 に丸める)
+// に収まる大きさ。
 const delayedTasksFetchPageSize = 100
 
 // delayedTasksMaxPages は scheduled / retry それぞれの page 走査の上限。
@@ -325,8 +326,8 @@ func inboxHostFromPayload(t *QueueTaskSummary) string {
 //
 // frontend admin/job-queue.vue は state を Bull の state 名配列で送る
 // (`['completed', 'failed', 'active', 'delayed', 'wait']` など)。
-// mk-go は asynq バックなので Bull state 名を asynq の list 呼び出しに
-// マッピングする。合計 limit を超えないよう走査中に切り詰める。
+// mk-go は Bull state 名を driver の list 呼び出しにマッピングする。
+// 合計 limit を超えないよう走査中に切り詰める。
 func (h *Handler) QueueJobs(c echo.Context) error {
 	// state は string でも string[] でも受け取れるようにする (frontend は
 	// 配列、既存テストや admin CLI からは単一文字列でくる可能性がある)。
@@ -445,7 +446,7 @@ func jobMatchesSearch(packed map[string]any, terms []string) bool {
 
 // parseStateField normalizes the `state` request field which can be a single
 // string or an array of strings (Misskey frontend sends array). Empty input
-// defaults to "wait" (Bull wording) = asynq "pending".
+// defaults to "wait" (Bull wording) = driver の pending バケット。
 func parseStateField(raw json.RawMessage) []string {
 	trimmed := strings.TrimSpace(string(raw))
 	if trimmed == "" || trimmed == "null" {
@@ -474,11 +475,11 @@ func (h *Handler) listTasksForState(queue, state string, page, limit int) ([]*Qu
 		return h.queueInspector.ListScheduledTasks(queue, page, limit)
 	case "retry":
 		return h.queueInspector.ListRetryTasks(queue, page, limit)
-	// Bull と asynq の用語対応
+	// Bull と driver の用語対応
 	case "wait", "pending":
 		return h.queueInspector.ListPendingTasks(queue, page, limit)
 	case "delayed":
-		// delayed は Bull 用語で asynq の scheduled + retry に対応する。
+		// delayed は Bull 用語で driver の scheduled + retry に対応する。
 		sched, _ := h.queueInspector.ListScheduledTasks(queue, page, limit)
 		retry, _ := h.queueInspector.ListRetryTasks(queue, page, limit)
 		return append(sched, retry...), nil
@@ -501,7 +502,7 @@ func (h *Handler) listTasksForState(queue, state string, page, limit int) ([]*Qu
 
 // QueuePromoteJobs handles POST /api/admin/queue/promote-jobs.
 func (h *Handler) QueuePromoteJobs(c echo.Context) error {
-	// asynq に bulk promote API が無いため、対象 queue の scheduled/retry を
+	// driver に bulk promote API が無いため、対象 queue の scheduled/retry を
 	// 1 ページずつ拾って RunTask で逐次 promote する。大量投入時は後続の
 	// ページを クライアント側で再呼び出しする運用。
 	// upstream Misskey TS は paramDef で queue を required にしている (#929)。
@@ -653,9 +654,8 @@ func shapeQueueForFrontend(info *QueueInfoResult, completed, failed *QueueMetric
 
 	// metrics は driver から渡された QueueMetricsResult を採用し、
 	// nil/欠損時は info.Completed / info.Failed の累積値で count を埋め、
-	// data は空配列にフォールバックする。前者は mkq driver で
-	// WithJobMetrics が無効、後者は asynq driver の time-series 非対応
-	// シナリオを想定。
+	// data は空配列にフォールバックする。mkq driver で WithJobMetrics を
+	// 無効にした構成や、time-series を持たない driver を想定。
 	completedData, completedCount := metricsToFrontend(completed, int64(info.Completed))
 	failedData, failedCount := metricsToFrontend(failed, int64(info.Failed))
 
@@ -745,7 +745,7 @@ func metricsToFrontend(m *QueueMetricsResult, fallbackCount int64) ([]int64, int
 // その queue だけ、来なければ全 queue を返すという両対応にする。
 //
 // frontend は Misskey Bull の queue 名を hardcode (`Misskey.queueTypes`) で
-// 列挙しており、mk-go の asynq queue 名 (deliver/push/maintenance/webhook/
+// 列挙しており、mk-go の queue 名 (deliver/push/maintenance/webhook/
 // export) と完全には一致しない。存在しない queue を叩かれたときは 500 で
 // はなくゼロ埋めの shape を返して、フロント側の queueInfo が stale に
 // ならないようにする。
@@ -774,7 +774,7 @@ func (h *Handler) QueueQueueStats(c echo.Context) error {
 // per-minute history. Errors are absorbed and returned as nil so the
 // admin endpoints stay 200 OK — partial chart data is preferable to
 // a hard failure when the metrics writer is opt-in (mkq driver) or
-// absent altogether (asynq driver).
+// absent altogether.
 func (h *Handler) fetchQueueMetrics(qname string) (completed, failed *QueueMetricsResult) {
 	if h.queueInspector == nil {
 		return nil, nil
@@ -816,9 +816,9 @@ func (h *Handler) QueueRemoveJob(c echo.Context) error {
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// asynq DeleteTask は不明 task id でも nil error を返す (= idempotent)
-	// が、upstream Misskey TS は 4xx を返す。drop-in 互換のため事前に
-	// GetTaskInfo で存在確認して、無ければ 404 を返す (#929)。
+	// driver の DeleteTask は不明 task id でも nil error を返しうる
+	// (= idempotent) が、upstream Misskey TS は 4xx を返す。drop-in 互換の
+	// ため事前に GetTaskInfo で存在確認して、無ければ 404 を返す (#929)。
 	if _, err := h.queueInspector.GetTaskInfo(queue, id); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
 	}
@@ -860,7 +860,7 @@ func (h *Handler) QueueRetryJob(c echo.Context) error {
 	if h.queueInspector == nil {
 		return c.NoContent(http.StatusNoContent)
 	}
-	// asynq RunTask も不明 id で nil を返す idempotent 挙動。drop-in 互換の
+	// RunTask も不明 id で nil を返しうる idempotent 挙動。drop-in 互換の
 	// ため事前に GetTaskInfo で存在確認 (#929)。
 	if _, err := h.queueInspector.GetTaskInfo(queue, id); err != nil {
 		return c.JSON(http.StatusNotFound, apierr.NotFound())
@@ -891,8 +891,8 @@ func (h *Handler) QueueShowJob(c echo.Context) error {
 //
 // upstream は `queue.getJobLogs(jobId).logs` をそのまま返す。mk-go 自身は
 // 現状 log を書かないが、**drop-in で TS が書いた job** や、将来 processor が
-// Job.Log を使った場合にそのまま読める (#2689)。持たない driver (asynq) は
-// 空を返す。存在しない job と log 0 件の job は BullMQ 同様に区別しない。
+// Job.Log を使った場合にそのまま読める (#2689)。持たない driver は空を
+// 返す。存在しない job と log 0 件の job は BullMQ 同様に区別しない。
 func (h *Handler) QueueShowJobLogs(c echo.Context) error {
 	queue, id, ok := bindQueueJobReq(c)
 	if !ok {
@@ -968,13 +968,13 @@ func packTaskSummary(t *QueueTaskSummary) map[string]any {
 		// **記録が無い job では空配列**になる (mkq v1.0.8 より前に失敗したもの、
 		// TS が書いたもの)。frontend はその場合に従来どおり折りたたむ。
 		"attemptsAt": attemptsAtOrEmpty(t.AttemptsAt),
-		// asynq-native field (既存 admin tool 互換のために残す)。
+		// mk-go 独自 field (既存 admin tool 互換のために残す)。
 		"queue":   t.Queue,
 		"type":    t.Type,
 		"state":   t.State,
 		"payload": redactPayloadSecrets(t.Payload),
 		"retried": t.Retried,
-		// maxRetry は asynq 由来の独自 field。mkq driver は TaskSummary.MaxRetry を
+		// maxRetry は mk-go 独自 field。mkq driver は TaskSummary.MaxRetry を
 		// 埋めないので、opts.attempts から拾えるならそちらを使う (0 のまま出すと
 		// 「リトライしない設定」に見える、#2689 review)。
 		"maxRetry":     maxRetryFor(t),
@@ -1034,7 +1034,7 @@ func packJobData(t *QueueTaskSummary) map[string]any {
 	}
 	body = redactJobSecrets(body)
 	// Type が空になることは無い。mkq driver は framing が無ければ BullMQ の
-	// job.name に落とし、その既定は queue 名。asynq も TaskInfo.Type を必ず持つ。
+	// job.name に落とし、その既定は queue 名。
 	return map[string]any{"type": t.Type, "body": body}
 }
 
@@ -1052,8 +1052,8 @@ func attemptsAtOrEmpty(v []int64) []int64 {
 // maxRetryFor reports the job's configured attempt limit, preferring the
 // BullMQ opts value over the driver-reported one.
 //
-// asynq は TaskSummary.MaxRetry を埋めるが mkq driver は埋めない (attempts は
-// opts 側にある)。どちらの driver でも意味のある値になるようにする。
+// mkq driver は TaskSummary.MaxRetry を埋めない (attempts は opts 側にある)。
+// どちらが埋まっていても意味のある値になるようにする。
 func maxRetryFor(t *QueueTaskSummary) int {
 	if t.MaxRetry > 0 {
 		return t.MaxRetry
@@ -1145,7 +1145,7 @@ func (h *Handler) QueueStats(c echo.Context) error {
 			"active":    info.Active,
 			"completed": info.Completed,
 			"failed":    info.Failed,
-			// Bull の delayed は asynq の Scheduled (未来実行予定) と Retry
+			// Bull の delayed は Scheduled (未来実行予定) と Retry
 			// (失敗後再試行待ち) の両方を含む (#654)。
 			"delayed": info.Scheduled + info.Retry,
 		}
@@ -1212,7 +1212,7 @@ func redactJobSecrets(body any) any {
 
 // redactPayloadSecrets returns the raw payload with secret fields removed.
 //
-// JSON として読めないものはそのまま返す (asynq 由来の非 JSON payload がある)。
+// JSON として読めないものはそのまま返す (非 JSON payload の job がありうる)。
 // 伏せ損ねるより読めるほうを優先する形だが、この経路は `data` 側の redact と
 // 二重になっており、かつ producer は既に鍵を載せていないので実害は無い。
 func redactPayloadSecrets(raw []byte) string {

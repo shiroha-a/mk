@@ -9,7 +9,7 @@ import (
 )
 
 // RedisScheduledNoteLock implements ScheduledNoteLock using a Redis `SETNX`
-// + TTL key. This satisfies asynq's at-least-once delivery: a job that is
+// + TTL key. This satisfies the queue's at-least-once delivery: a job that is
 // retried while the previous attempt is still running will find the key set
 // and return (false, nil) so the duplicate caller skips publishing. The TTL
 // guarantees that a crashed worker eventually releases the lock without
@@ -45,7 +45,7 @@ func NewRedisScheduledNoteLock(client *redis.Client, keyPrefix string, ttl time.
 // TryAcquire returns (true, nil) when SET NX establishes a fresh key (= this
 // caller is the first publisher), (false, nil) when the key already exists
 // (= another retry holds the lock), or (_, err) when Redis itself is
-// unreachable so the asynq retry path can back off. SetArgs を使う理由は
+// unreachable so the queue retry path can back off. SetArgs を使う理由は
 // go-redis 公式の `SetNX(key, val, ttl)` が deprecated 化されたため。
 //
 // err の判別は: nil (= 占有成功) / redis.Nil (= 占有失敗) / それ以外 (=
@@ -61,7 +61,7 @@ func (l *RedisScheduledNoteLock) TryAcquire(ctx context.Context, draftID string)
 		// key 既存 = 他 retry が保持中。silent skip させる。
 		return false, nil
 	default:
-		// Redis backend 障害 / context cancel など。asynq retry に任せる。
+		// Redis backend 障害 / context cancel など。queue の retry に任せる。
 		return false, err
 	}
 }

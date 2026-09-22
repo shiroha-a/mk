@@ -19,7 +19,7 @@ type recordedTask struct {
 
 // recordingQueueClient is a driver.Client fake that records Enqueue calls
 // in-memory. relationship 系 client API は redis を要しないため、driver
-// 非依存 (= asynq にも mkq にも縛られない) の fake で検証する。
+// 非依存 (= 具体的な driver 実装に縛られない) の fake で検証する。
 type recordingQueueClient struct {
 	enqueued []recordedTask
 	// failWhen returns an error for payloads it wants to reject.

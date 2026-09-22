@@ -53,7 +53,7 @@ type ed25519SignerEntry struct {
 }
 
 // DeliverService computes recipient inboxes and enqueues HTTP-signed delivery
-// jobs onto the asynq queue.
+// jobs onto the deliver queue.
 //
 // 配信先計算と enqueue を分離するため、実際のHTTP送信は queue/processors の
 // DeliverProcessor が担当する。
@@ -66,7 +66,7 @@ type DeliverService struct {
 	publickeyExtraRepo repository.UserPublickeyExtraRepository // optional: recipient capability 判定
 	urls               *activitypub.URLBuilder
 	hostBlocker        HostBlockChecker
-	// syncDeliverHook, when non-nil, replaces the asynq enqueue with an
+	// syncDeliverHook, when non-nil, replaces the queue enqueue with an
 	// inline call to the hook. test 専用で federation deliver の queue 経路
 	// を bypass し、sign + HTTP POST を同期実行する e2e_federation 用。
 	// production code から SetSyncDeliverHook を呼ばないこと (#780)。
@@ -133,7 +133,7 @@ func (s *DeliverService) SetPublickeyExtraRepo(r repository.UserPublickeyExtraRe
 	s.publickeyExtraRepo = r
 }
 
-// SetSyncDeliverHookForTest replaces the asynq enqueue with an inline
+// SetSyncDeliverHookForTest replaces the queue enqueue with an inline
 // synchronous call. Used by e2e_federation tests to bypass the queue layer
 // and exercise the sign + POST + inbox handling path directly. Not for
 // production use (#780).

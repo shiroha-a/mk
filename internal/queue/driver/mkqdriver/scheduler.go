@@ -10,8 +10,7 @@ import (
 // Scheduler implements driver.Scheduler over mkq's
 // UpsertSchedulePattern API. mkq stores schedule registrations as a
 // per-queue ZSET; subsequent Register calls with the same scheduleID
-// idempotently replace the existing entry (matches asynq.Scheduler's
-// "register-once" semantics).
+// idempotently replace the existing entry ("register-once" semantics).
 //
 // Limitations:
 //
@@ -50,8 +49,8 @@ type Scheduler struct {
 // at a different cron replaces (rather than duplicates) the entry.
 //
 // driver.WithMaxRetry, driver.WithUnique, and driver.WithProcessIn
-// are accepted (so the mkqdriver and asynqdriver share a call site)
-// but are NOT honoured — see the Scheduler doc-comment for why that is
+// are accepted (the driver.Scheduler interface passes them through) but
+// are NOT honoured — see the Scheduler doc-comment for why that is
 // currently harmless.
 //
 // 以前はこれらが渡されるたびに起動時 warning を出していたが、実害が無い

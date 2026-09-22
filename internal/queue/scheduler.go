@@ -21,8 +21,8 @@ type Scheduler struct {
 
 // **cron の時刻はどの TZ でも UTC ではない。** Register は cron 式をそのまま
 // driver へ渡し、TZ を指定していない。mkq (既定) は `time.Local` で解釈する
-// ので**プロセスの TZ** に従い (`docker-compose.yml` は `TZ: Asia/Tokyo` を
-// 設定しているので既定構成では JST)、legacy の asynq は UTC で解釈する。
+// ので**プロセスの TZ** に従う (`docker-compose.yml` は `TZ: Asia/Tokyo` を
+// 設定しているので既定構成では JST)。
 // 以下の各 job のコメントに書いてある時刻は「その TZ での時刻」を指す。
 //
 // NewScheduler wraps the driver's scheduler.

@@ -27,8 +27,8 @@ type Server interface {
 }
 
 // InspectorInfo is the per-queue summary returned by Inspector.GetQueueInfo.
-// Field names mirror asynq.QueueInfo so the admin UI mapping stays
-// straightforward.
+// Field names are the driver-neutral counts the admin/queue endpoints map
+// onto the BullMQ shape the frontend expects.
 type InspectorInfo struct {
 	Queue     string
 	Size      int
@@ -90,8 +90,8 @@ type TaskSummary struct {
 	CompletedAt time.Time
 	// ProcessedBy is the worker name that most recently dequeued the job
 	// (BullMQ job.processedBy / mkq `pb`). Empty for never-run jobs and for
-	// drivers without the concept (asynq). Surfaced as the upstream
-	// optional QueueJob.processedBy field.
+	// drivers without the concept. Surfaced as the upstream optional
+	// QueueJob.processedBy field.
 	ProcessedBy string
 
 	// 以下は BullMQ の job HASH をそのまま運ぶ (#2689)。admin の job 詳細は
@@ -184,8 +184,8 @@ type Inspector interface {
 }
 
 // Scheduler registers cron-driven recurring tasks. cronspec follows
-// the underlying driver's cron syntax (asynq accepts standard 5-field
-// cron expressions).
+// the underlying driver's cron syntax (mkq accepts standard 5-field cron
+// expressions and the `@daily` style descriptors).
 type Scheduler interface {
 	Register(cronspec, taskType string, payload []byte, opts ...EnqueueOption) error
 	Start() error
@@ -207,9 +207,9 @@ type Driver interface {
 	Close() error
 
 	// WorkerCount returns the number of workers currently **able to take
-	// work** for qname. Drivers that share a single worker
-	// pool across queues (e.g. asynq) return the pool-wide Concurrency for
-	// every qname. Drivers that have not started their Server yet return 0.
+	// work** for qname. Drivers that share a single worker pool across
+	// queues return the pool-wide Concurrency for every qname. Drivers
+	// that have not started their Server yet return 0.
 	//
 	// Used by the Prometheus metrics layer (`mk_job_workers_active`) and
 	// by the auto-scale controller (#1120 tracker) to read the current
@@ -218,8 +218,7 @@ type Driver interface {
 	// **mkq driver では帳簿上の本数ではない。** handler が閾値を超えて戻って
 	// こない worker を除外して数える (#2657)。詰まった worker を健全として
 	// 数えると autoscale の scale-up 閾値 (本数 x 4) だけが上がり、実際に
-	// 働ける worker が 0 本でも scale-up しない。asynq driver は動的な pool を
-	// 持たないので従来どおり静的な Concurrency を返す。
+	// 働ける worker が 0 本でも scale-up しない。
 	//
 	// mkq driver では Resize も同じ勘定で動くので、「WorkerCount が返した値
 	// + n」を Resize に渡すと n 本増える。ただし総数の上限に当たっている
@@ -230,8 +229,8 @@ type Driver interface {
 	WorkerCount(qname string) int
 
 	// Resize changes the worker pool size for qname to n at runtime.
-	// Returns ErrResizeNotSupported on backends without dynamic resize
-	// support (= asynq today). On supported backends:
+	// Returns ErrResizeNotSupported when there is no pool to resize
+	// (mkq before Server.Start). Otherwise:
 	//
 	//   - n > current: spawn up to (n - current) new worker goroutines.
 	//   - n < current: stop up to (current - n) workers. **In-flight jobs are

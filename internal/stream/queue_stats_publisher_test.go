@@ -60,9 +60,9 @@ func TestQueueStatsPublisher_PublishesDeliverAndInboxDepths(t *testing.T) {
 		require.NoError(t, json.Unmarshal(c.payload, &body))
 		assert.Equal(t, 3, body.Deliver.Active)
 		assert.Equal(t, 7, body.Deliver.Waiting)
-		// Bull delayed = asynq Scheduled + Retry
+		// Bull delayed = Scheduled + Retry
 		assert.Equal(t, 3, body.Deliver.Delayed)
-		// inbox は #534 で asynq queue 化、#565 で worker 化されたので
+		// inbox は #534 で専用 queue 化、#565 で worker 化されたので
 		// 実数を出す (#654)。
 		assert.Equal(t, 5, body.Inbox.Active)
 		assert.Equal(t, 11, body.Inbox.Waiting)
@@ -106,7 +106,7 @@ func (s *seqCompletedInspector) GetQueueInfo(qname string) (*QueueStatsInfo, err
 
 // TestQueueStatsPublisher_ActiveSincePrevTickIsCompletedDelta は
 // activeSincePrevTick が Completed の前 tick との差分で計算され、
-// asynq の rolling reset (Completed が 1 日 0 にリセットされる挙動) で
+// Completed が retention の prune で減る挙動で
 // 負値になっても 0 にクランプされることを guard する (#654 review)。
 //
 // tick() を直接駆動する internal test。Start()/Stop() の goroutine 経由

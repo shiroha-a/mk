@@ -46,7 +46,7 @@ func TestRedactPayloadSecrets(t *testing.T) {
 	plain := []byte(`{"inbox":"https://remote.example/inbox"}`)
 	require.Equal(t, string(plain), redactPayloadSecrets(plain))
 
-	// JSON でないものはそのまま (asynq 由来の非 JSON payload がある)。
+	// JSON でないものはそのまま (非 JSON payload の job がありうる)。
 	require.Equal(t, "not-json", redactPayloadSecrets([]byte("not-json")))
 	require.Equal(t, "", redactPayloadSecrets(nil))
 }
@@ -110,7 +110,7 @@ func TestJobSecretKeysMatchPayloadTags(t *testing.T) {
 // **API が実際に返す形で鍵が出ないこと。**
 //
 // `admin/queue/jobs` (search 経路を含む) / `show-job` のレスポンスは `data.body` とは
-// **別に** asynq 由来の `payload` フィールドでも payload を返す。`packJobData`
+// **別に** mk-go 独自の `payload` フィールドでも payload を返す。`packJobData`
 // だけを見ていると、そちらの redact を外す変更が緑で通る (実測で確認した)。
 // この PR が塞ごうとしている露出そのものなので、到達点で固定する。
 func TestPackTaskSummary_RedactsSecretsInAllFields(t *testing.T) {
@@ -164,7 +164,7 @@ func TestPackTaskSummary_RedactsWebhookSecret(t *testing.T) {
 func TestPeerEnvelopeIsRedacted(t *testing.T) {
 	raw := []byte(`{"host":"peer.example","sendId":"s1","envelope":{"secret":"plugin data"}}`)
 
-	// asynq 由来の `payload` フィールド側。
+	// mk-go 独自の `payload` フィールド側。
 	out := redactPayloadSecrets(raw)
 	assert.NotContains(t, out, "plugin data", "peer の送信本文がそのまま出ている")
 	assert.Contains(t, out, redactedPlaceholder)

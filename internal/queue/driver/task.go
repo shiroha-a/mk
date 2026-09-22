@@ -1,6 +1,6 @@
-// Package driver defines the queue driver abstraction. Concrete
-// drivers (asynq, mkq) implement these interfaces; the queue facade
-// and processors depend only on this package.
+// Package driver defines the queue driver abstraction. The concrete
+// driver (mkq) implements these interfaces; the queue facade and
+// processors depend only on this package.
 package driver
 
 // Task represents a queueable unit of work, decoupled from any

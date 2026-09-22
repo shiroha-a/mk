@@ -139,7 +139,7 @@ func WithExcludeInactive(v bool) ExportOption {
 
 // Export runs the export pipeline for a single (userID, exportType) pair.
 // On success the user is notified via NotificationDispatcher.Create with
-// Extra={exportedEntity, fileId}. Errors bubble out to the asynq processor.
+// Extra={exportedEntity, fileId}. Errors bubble out to the queue processor.
 func (e *Exporter) Export(ctx context.Context, userID, exportType string, opts ...ExportOption) (*model.DriveFile, error) {
 	var cfg exportConfig
 	for _, o := range opts {

@@ -1,7 +1,7 @@
 // Package webhook implements user and system webhook delivery dispatch.
 // The service fires on event-producing core services (note / reaction /
 // following / signup) via hook interfaces and enqueues HTTP delivery jobs to
-// the asynq queue. The actual HTTP POST is performed by the matching
+// the webhook queue. The actual HTTP POST is performed by the matching
 // processor (internal/queue/processors/webhook.go).
 //
 // 本家 Misskey の UserWebhookService / SystemWebhookService と等価。

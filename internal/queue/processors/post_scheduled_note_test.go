@@ -236,7 +236,7 @@ func TestPostScheduledNote_PublishErrorNoRetry(t *testing.T) {
 	assert.Contains(t, draftRepo.drafts, "d1", "publish 失敗時は draft 残す")
 }
 
-// payload decode 失敗は error 返却 (= asynq に retry / dead letter 判断させる)。
+// payload decode 失敗は error 返却 (= driver に retry / dead letter 判断させる)。
 func TestPostScheduledNote_PayloadDecodeError(t *testing.T) {
 	p, _, _ := newProcessor(map[string]*model.NoteDraft{}, map[string]*model.User{})
 	bad := driver.RawTask{TypeName: queue.TaskTypePostScheduledNote, Body: []byte("{not json")}

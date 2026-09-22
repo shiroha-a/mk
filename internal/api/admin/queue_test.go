@@ -314,7 +314,7 @@ func TestQueueShowJob_NotFoundWithInspector(t *testing.T) {
 
 func TestQueueRemoveJob_Success(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
-	// asynq DeleteTask は不明 id で nil を返す (idempotent) ため、existence
+	// driver の DeleteTask は不明 id で nil を返しうる (idempotent) ため、existence
 	// 確認用に GetTaskInfo を事前 hit する (#929 B)。stub の task map に
 	// 入れて GetTaskInfo を pass させる。
 	insp := &stubQueueInspector{
@@ -330,7 +330,7 @@ func TestQueueRemoveJob_Success(t *testing.T) {
 
 func TestQueueRemoveJob_NotFound(t *testing.T) {
 	// task map が空 = GetTaskInfo が "not found" を返すケース。idempotent な
-	// asynq DeleteTask に到達せず precheck で 404 (#929 B)。
+	// DeleteTask に到達せず precheck で 404 (#929 B)。
 	h, _, _, _ := newTestHandler(t)
 	insp := &stubQueueInspector{}
 	h.SetQueueInspector(insp)
@@ -455,7 +455,7 @@ func TestQueueQueueStats_WithInspector(t *testing.T) {
 
 func TestQueueQueueStats_NoMetrics_FallsBackToCumulative(t *testing.T) {
 	// driver が QueueMetrics を実装していても Data 空 / Count 0 を
-	// 返すケース (mkq で WithJobMetrics 無効, asynq の time-series 無し)
+	// 返すケース (mkq で WithJobMetrics 無効、または time-series 非対応 driver)
 	// では info.Completed / info.Failed の累積値を count にフォール
 	// バックさせ、data は空配列で安定 shape を維持する。
 	h, _, _, _ := newTestHandler(t)
@@ -603,7 +603,7 @@ func TestQueueInboxDelayed_AggregatesByHostFromSignature(t *testing.T) {
 }
 
 // pagedInspector is a QueueInspector stub that always returns full pages,
-// emulating an asynq inspector that has so many tasks the cursor never
+// emulating an inspector that has so many tasks the cursor never
 // reaches the end (or, worse, a misbehaving inspector that ignores empty
 // state). Used to verify the page cap defense in fetchAllDelayedTasks.
 //
@@ -788,7 +788,7 @@ func TestQueueStatsAdmin(t *testing.T) {
 
 // TestQueueStats_DelayedIncludesScheduledAndRetry guards #654: Misskey
 // frontend の WidgetJobQueue は Bull 用語の delayed をグラフ化するが、
-// asynq では Scheduled (未来実行予定) と Retry (失敗後再試行待ち) の
+// driver では Scheduled (未来実行予定) と Retry (失敗後再試行待ち) の
 // 2 つに分かれる。delayed = Scheduled + Retry を返さないと再試行待ちが
 // dashboard に出ないため、この合算が REST API でも維持されることを guard。
 func TestQueueStats_DelayedIncludesScheduledAndRetry(t *testing.T) {
@@ -817,7 +817,7 @@ func TestQueueStats_DelayedIncludesScheduledAndRetry(t *testing.T) {
 }
 
 // QueueJobs は mkq の finished-job 保持から completed / failed を一覧する (#1396)。
-// 旧実装は asynq 前提で completed/failed を nil 固定にしており、busy queue でも
+// 旧実装は completed/failed を nil 固定にしており、busy queue でも
 // All / Completed タブが空になっていた。
 func TestQueueJobs_ListsCompletedAndFailed(t *testing.T) {
 	h, _, _, _ := newTestHandler(t)
@@ -1450,7 +1450,7 @@ func TestQueueShowJob_MaxRetryFromOpts(t *testing.T) {
 	h.SetQueueInspector(&stubQueueInspector{
 		task: map[string]*apiadmin.QueueTaskSummary{
 			"a": {ID: "a", Queue: "inbox", Type: "ap:inbox", State: "wait", Opts: json.RawMessage(`{"attempts":8}`)},
-			// asynq driver は MaxRetry を埋める。そちらを優先する。
+			// MaxRetry を埋める driver ではそちらを優先する。
 			"b": {ID: "b", Queue: "inbox", Type: "ap:inbox", State: "wait", MaxRetry: 3},
 		},
 	})

@@ -97,8 +97,8 @@ func (c *Client) EnqueuePluginPeer(ctx context.Context, plugin string, body []by
 	if !pluginNamePattern.MatchString(plugin) {
 		return fmt.Errorf("queue: プラグイン名 %q が不正です", plugin)
 	}
-	// **再試行の既定を明示する。** 渡し忘れると mkq は 0 回・asynq は 25 回と
-	// driver で挙動が割れる (EnqueuePlugin と同じ理由)。
+	// **再試行の既定を明示する。** 渡し忘れると mkq の既定は 0 回 (= 再試行
+	// 無し) になる (EnqueuePlugin と同じ理由)。
 	// **retention を付ける (#1193 の再発防止)。** 本体の enqueue helper は全て
 	// `retentionOpts` を前置しているが、プラグインの 2 経路だけ付けていなかった。
 	// 出さないと driver 既定 = 無制限保持になり、`_peer` 送信のたびに completed

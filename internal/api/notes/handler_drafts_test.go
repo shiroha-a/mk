@@ -885,10 +885,9 @@ func TestPollsRecommendation(t *testing.T) {
 
 // scheduledEnqueueStub captures EnqueuePostScheduledNote calls for assertion.
 type scheduledEnqueueStub struct {
-	calls    []queue.PostScheduledNotePayload
-	cleared  []string
-	err      error
-	disabled bool // true で SupportsScheduledNote が false を返す (= asynq driver の simulate 用)
+	calls   []queue.PostScheduledNotePayload
+	cleared []string
+	err     error
 }
 
 func (s *scheduledEnqueueStub) EnqueuePostScheduledNote(p queue.PostScheduledNotePayload, _ ...driver.EnqueueOption) error {
@@ -902,13 +901,6 @@ func (s *scheduledEnqueueStub) EnqueuePostScheduledNote(p queue.PostScheduledNot
 func (s *scheduledEnqueueStub) ClearScheduledNote(draftID string) error {
 	s.cleared = append(s.cleared, draftID)
 	return nil
-}
-
-// SupportsScheduledNote: default true (= mkq driver と同 capability)。
-// `disabled=true` を set すると false を返し asynq driver の挙動を simulate
-// する (= handler 側 capability gate test 用)。
-func (s *scheduledEnqueueStub) SupportsScheduledNote() bool {
-	return !s.disabled
 }
 
 func futureMs(d time.Duration) int64 {
@@ -975,17 +967,19 @@ func TestDraftsCreate_ScheduledAtWithoutActuallyScheduled(t *testing.T) {
 	assert.Empty(t, enq.calls, "isActuallyScheduled=false なら enqueue されない")
 }
 
-// driver capability が false (= asynq driver) のときは scheduled note 作成を
-// TOO_MANY_SCHEDULED_NOTES で reject する (#1045 Phase 2-C)。
-func TestDraftsCreate_AsynqDriverDisablesScheduled(t *testing.T) {
+// **予約投稿は driver の都合で無効化されない (#2985)。** 以前は asynq driver で
+// clearSchedule が確実に効かないため `TOO_MANY_SCHEDULED_NOTES` で門前払いして
+// いた。その分岐を消したので、上限とは無関係に 400 を返していないことを固定
+// する (回帰すると、利用者には「予約上限に達した」と嘘の理由が出る)。
+func TestDraftsCreate_ScheduledNotRejectedAsQuota(t *testing.T) {
 	h, _ := newDraftHandlerWithRepo()
-	enq := &scheduledEnqueueStub{disabled: true}
+	enq := &scheduledEnqueueStub{}
 	h.SetScheduledNoteEnqueuer(enq)
 	body := fmt.Sprintf(`{"text":"hi","scheduledAt":%d,"isActuallyScheduled":true}`, futureMs(time.Hour))
 	rec := postDraft(h.DraftsCreate, body, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
-	assert.Empty(t, enq.calls, "capability false なら enqueue されない")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
+	assert.Len(t, enq.calls, 1, "enqueue まで到達する")
 }
 
 // --- #1045 Phase 2-C: DraftsUpdate / DraftsDelete scheduled note 経路 ---
@@ -1040,16 +1034,18 @@ func TestDraftsUpdate_NonScheduledChangeDoesNotTouchQueue(t *testing.T) {
 	assert.Empty(t, enq.calls)
 }
 
-// asynq driver では update での scheduled 切替も reject (= capability gate)。
-func TestDraftsUpdate_AsynqDriverDisablesScheduled(t *testing.T) {
+// update 経由の scheduled 切替も同じ (#2985)。こちらは create とは別の
+// エラー id を持っていたので、分岐が片方だけ残る形を塞ぐために両方見る。
+func TestDraftsUpdate_ScheduledNotRejectedAsQuota(t *testing.T) {
 	h, repo := newDraftHandlerWithRepo()
-	enq := &scheduledEnqueueStub{disabled: true}
+	enq := &scheduledEnqueueStub{}
 	h.SetScheduledNoteEnqueuer(enq)
 	repo.drafts["d1"] = &model.NoteDraft{ID: "d1", UserID: "u1"}
 	body := fmt.Sprintf(`{"draftId":"d1","scheduledAt":%d,"isActuallyScheduled":true}`, futureMs(time.Hour))
 	rec := postDraft(h.DraftsUpdate, body, &model.User{ID: "u1"})
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Contains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "TOO_MANY_SCHEDULED_NOTES")
+	assert.Len(t, enq.calls, 1, "enqueue まで到達する")
 }
 
 // Delete 経由でも旧 delayed task を clear する (= unschedule された draft の

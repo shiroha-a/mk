@@ -1,4 +1,4 @@
-// Package processors hosts queue task handlers consumed by the asynq worker.
+// Package processors hosts queue task handlers consumed by the queue worker.
 //
 // This file implements the scheduled-note publish path (#1040). It is a thin
 // orchestration layer: load the draft, materialise it into a note via the
@@ -32,7 +32,7 @@ type ScheduledNoteDraftRepo interface {
 }
 
 // ScheduledNoteLock provides app-level idempotency for scheduled note publish.
-// asynq の at-least-once delivery で job が二度 fire しても TryAcquire が
+// queue の at-least-once delivery で job が二度 fire しても TryAcquire が
 // 1 度しか true を返さないことで重複 publish を防止する (#1045 Phase 2-A)。
 //
 // DB schema 不変な実装 (Redis SETNX + TTL 等) を選ぶことで upstream Misskey
@@ -136,12 +136,12 @@ func logNotificationErr(action string, draftID string, err error) {
 		"action", action, "noteDraftId", draftID, "err", err)
 }
 
-// Handle implements the asynq task handler signature. It decodes the payload,
+// Handle implements the driver task handler signature. It decodes the payload,
 // guards against drafts that no longer exist or were unscheduled before the
 // trigger fired, materialises the note via the publisher, and finally deletes
 // the draft row.
 //
-// Errors are returned to the queue so asynq retries; transient DB failures
+// Errors are returned to the queue so the driver retries; transient DB failures
 // will be retried automatically. A draft that vanished (= user deleted it
 // before fire time) is treated as a no-op (= return nil) — upstream behaves
 // the same way (`if (draft == null || ...) return`)。

@@ -88,7 +88,7 @@ func TestUniqueKey_DistinctPayloads(t *testing.T) {
 
 func TestUniqueKey_DistinctQueues(t *testing.T) {
 	// Same task type + payload routed to different queues must be
-	// treated as independent dedup scopes (matches asynq's
+	// treated as independent dedup scopes (the dedup tuple is
 	// (queue, type, payload) dedup tuple).
 	a := uniqueKey("deliver", "delete", []byte("p"))
 	b := uniqueKey("maintenance", "delete", []byte("p"))
@@ -292,13 +292,13 @@ func TestJobToSummary_FramedPayload(t *testing.T) {
 	if got.LastFailedAt != state.FinishedOn {
 		t.Fatalf("LastFailedAt: got %v", got.LastFailedAt)
 	}
-	// 失敗ジョブの場合、CompletedAt は zero のまま (asynq 互換)。
+	// 失敗ジョブの場合、CompletedAt は zero のまま。
 	// 失敗時刻は LastFailedAt 側に出すべきで、CompletedAt 列に出すと
 	// admin UI が「失敗なのに完了した」風に表示されてしまう。
 	if !got.CompletedAt.IsZero() {
 		t.Fatalf("CompletedAt must stay zero for failed jobs, got %v", got.CompletedAt)
 	}
-	// NextProcessAt は asynq の future-time セマンティクスに合わせる
+	// NextProcessAt は「次に処理される時刻」(将来) のセマンティクスに合わせる
 	// ため意図的に未設定にしている (mkq には next-retry timestamp が
 	// 存在しない)。past-time の ProcessedOn を入れると意味的に逆になる
 	// ので zero のままを保証する。

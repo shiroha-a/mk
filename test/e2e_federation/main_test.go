@@ -29,7 +29,7 @@ import (
 )
 
 // makeSyncDeliverHook builds a synchronous AP deliver function for tests
-// (#780). 本番経路は asynq queue 経由だが test では queue worker pickup
+// (#780). 本番経路は queue 経由だが test では queue worker pickup
 // が確認できないので、sign + HTTP POST を inline 実行する。
 //
 // HTTP client は SSRF transport を含めない (e2e は loopback で localhost
@@ -180,7 +180,7 @@ func TestMain(m *testing.M) {
 	}
 	tsA.Start()
 	defer tsA.Close()
-	// reversi 等の deliver queue 経由のテスト用に asynq worker を起動
+	// reversi 等の deliver queue 経由のテスト用に queue worker を起動
 	// (#435)。Server.Start() は HTTP listener も込みで動かしてしまうので、
 	// e2e は test 側で listener を握る都合上 background 部分だけ起動する。
 	if err := srvA.StartBackgroundForTest(); err != nil {

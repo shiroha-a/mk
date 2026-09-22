@@ -151,9 +151,7 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 	//
 	// mkq はリミッタの実体が BullMQ 互換の `bull:<queue>:limiter` という
 	// queue ごとに 1 本の Redis キーで、pool 内の全 Worker がそれを INCR
-	// する。asynq も buildRateLimitMiddleware が queue ごとに
-	// rate.Limiter を 1 つ作って全 worker goroutine で共有する。
-	// どちらも合計は設定値のままで、worker 数には比例しない。
+	// する。合計は設定値のままで、worker 数には比例しない。
 	//
 	// ここには以前 `設定値 x worker 数` を「実際の上限」として出す実装と
 	// warning があったが**誤りだった** (#2669)。#2640 で server.go と
@@ -165,21 +163,8 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 		if !ok || r <= 0 {
 			continue
 		}
-		note := "queue 全体の上限。worker 数を増やしても変わらない"
-		if cfg.JobQueueDriver == "asynq" {
-			// asynq のリミッタは Go のメモリ上の rate.Limiter なので
-			// **プロセス内**にしか効かない。queue プロセスを複数立てると
-			// 合計はその本数倍になる。mkq は Redis キーなのでプロセスを
-			// 跨いで効く。
-			//
-			// あわせて asynq は handler middleware の Wait で待たせるので、
-			// 制限中の queue が共有 worker pool を占有して他 queue が
-			// starve しうる (mkq は pull レイヤなので影響しない)。
-			note += "。ただし asynq では**プロセス内**の上限で " +
-				"(mkq は Redis キー共有なのでプロセスを跨いで効く)、" +
-				"待機が共有 worker pool を占有して他 queue が starve しうる"
-		}
-		add(&d.Effective, "rate: "+q, fmt.Sprintf("%d jobs/sec", r), note)
+		add(&d.Effective, "rate: "+q, fmt.Sprintf("%d jobs/sec", r),
+			"queue 全体の上限。worker 数を増やしても変わらない")
 	}
 
 	// 詰まり検出はキューごとに効いたり効かなかったりするうえ、効いている

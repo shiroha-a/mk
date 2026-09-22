@@ -697,7 +697,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	}
 
 	// Export / Import workers (Phase 9.4): drive に保存するエクスポートと
-	// drive から読み出すインポートを asynq 経由で非同期処理する。
+	// drive から読み出すインポートを queue 経由で非同期処理する。
 	exporter := coretransfer.NewExporter(coretransfer.ExporterDeps{
 		UserRepo:         userRepo,
 		NoteRepo:         noteRepo,
@@ -893,7 +893,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// inbound ほど高頻度ではないので buffer を挟まない。
 	federationResolver.SetSignatureCapabilityDeclarer(sigCapRepo)
 
-	// AP delivery: DeliverService + フック登録 + asynq processor 登録
+	// AP delivery: DeliverService + フック登録 + queue processor 登録
 	deliverService := corefederation.NewDeliverService(s.queueClient, userRepo, followingRepo, keypairRepo, apURLs)
 	deliverService.SetHostBlockChecker(instanceService)
 	// FEP-521a Multikey 対応で recipient capable + sender Ed25519 鍵あり 経路で
@@ -1794,7 +1794,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// note 化する。dependencies は既存 noteCreateService + userRepo + 上記
 	// noteDraftRepo を共有する。
 	postScheduledNoteProcessor := processors.NewPostScheduledNoteProcessor(noteDraftRepo, userRepo, noteCreateService)
-	// idempotency lock を Redis SETNX で配線 (#1045 Phase 2-A)。asynq の
+	// idempotency lock を Redis SETNX で配線 (#1045 Phase 2-A)。queue の
 	// at-least-once delivery で job が二重 fire しても重複 publish を防ぐ。
 	postScheduledNoteProcessor.SetLock(processors.NewRedisScheduledNoteLock(
 		s.redis.Default, s.config.Redis.KeyPrefix(), 0))

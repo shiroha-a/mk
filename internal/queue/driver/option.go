@@ -21,8 +21,7 @@ type EnqueueOptions struct {
 	ProcessIn time.Duration
 
 	// KeepFailed bounds the size of the failed ZSET for this task's
-	// queue. mkq translates this to `mkq.WithKeepFailed(n)`. asynq has
-	// no per-job equivalent (= silent no-op).
+	// queue. mkq translates this to `mkq.WithKeepFailed(n)`.
 	//
 	// KeepFailedSet は MaxRetry / MaxRetrySet と同じ「明示 0 vs default」
 	// 区別 pattern を踏襲して提供するが、driver translation 上は両者とも
@@ -35,9 +34,8 @@ type EnqueueOptions struct {
 
 	// KeepCompleted bounds the size of the completed ZSET, mirroring
 	// KeepFailed's semantics for the completed bucket. mkq translates
-	// this to `mkq.WithKeepCompleted(n)`. asynq has no per-job
-	// equivalent (= silent no-op). BullMQ の `removeOnComplete: N`
-	// 互換 (#1193)。
+	// this to `mkq.WithKeepCompleted(n)`. BullMQ の
+	// `removeOnComplete: N` 互換 (#1193)。
 	//
 	// KeepCompletedSet も KeepFailedSet と同じ「明示 0 vs default」
 	// 区別 pattern。
@@ -47,7 +45,7 @@ type EnqueueOptions struct {
 	// KeepCompletedAge drops completed jobs older than this duration
 	// (BullMQ `removeOnComplete: {age: <seconds>}` 互換)。mkq
 	// translates to `mkq.WithKeepCompletedAge(age)`。0 = age-based
-	// prune 無し (driver default を踏ませる)。asynq では silent no-op。
+	// prune 無し (driver default を踏ませる)。
 	//
 	// Combine with KeepCompleted to cap by both count and age in
 	// the same way BullMQ TS's `{age, count}` object form works
@@ -60,10 +58,9 @@ type EnqueueOptions struct {
 	KeepFailedAge time.Duration
 
 	// MaxRetrySet distinguishes "MaxRetry left at default" from
-	// "MaxRetry explicitly set to 0". asynq treats MaxRetry=0 as
-	// no-retries which differs from "use default", so callers like
-	// the cleanRemoteNotes job that want zero retries must opt in
-	// explicitly.
+	// "MaxRetry explicitly set to 0". MaxRetry=0 means no retries, which
+	// differs from "use default", so callers like the cleanRemoteNotes
+	// job that want zero retries must opt in explicitly.
 	MaxRetrySet bool
 
 	// BackoffType / BackoffDelay describe the retry backoff strategy.
@@ -71,8 +68,7 @@ type EnqueueOptions struct {
 	// "custom"; BackoffDelay is the base delay (ignored for "custom").
 	// mkq translates these to mkq.FixedBackoff / mkq.ExponentialBackoff /
 	// mkq.CustomBackoff (the last defers delay computation to a worker-
-	// registered strategy). asynq ignores them and applies its own
-	// server-level exponential RetryDelayFunc.
+	// registered strategy).
 	//
 	// 未設定の mkq は backoff 無し (= 遅延0で即時 retry) になるため、落ちて
 	// いる配送先を連打し delayed bucket にも滞在しない。federation queue
@@ -90,8 +86,10 @@ func WithQueue(name string) EnqueueOption {
 }
 
 // WithMaxRetry sets the maximum number of retries for the task. Use
-// zero to disable retries entirely (callers should be aware that
-// driver defaults differ — asynq defaults to 25).
+// zero to disable retries entirely. Leaving it unset falls back to the
+// driver default, which for mkq is "no retry" — deliver / inbox
+// therefore get an explicit TS-compatible default from
+// internal/server.buildPolicy (#1411).
 func WithMaxRetry(n int) EnqueueOption {
 	return func(o *EnqueueOptions) {
 		o.MaxRetry = n
@@ -123,8 +121,7 @@ const (
 // WithBackoff sets the retry backoff strategy. typ is "fixed",
 // "exponential", or "custom"; delay is the base delay (ignored for
 // "custom"). Without a backoff mkq retries immediately, so federation
-// queues must set one to avoid hammering unreachable hosts (#1405). asynq
-// ignores this and uses its own server-level RetryDelayFunc.
+// queues must set one to avoid hammering unreachable hosts (#1405).
 func WithBackoff(typ string, delay time.Duration) EnqueueOption {
 	return func(o *EnqueueOptions) {
 		o.BackoffType = typ
@@ -152,13 +149,10 @@ func WithFederationBackoff() EnqueueOption {
 // 主な使い道: inbox / deliver 等の連合 queue で transient failure が
 // 永続蓄積するのを防ぐ。BullMQ の `removeOnFail: N` と意味同等。
 //
-// driver 別:
-//   - mkqdriver: `n > 0` のときだけ `mkq.WithKeepFailed(n)` を AddJob に
-//     渡す。注意: mkq native の `WithKeepFailed(0)` は **「即時削除」**
-//     (BullMQ `removeOnFail: true` 相当) で driver-neutral semantic と
-//     真逆なので、driver translation 側で 0 は skip する。
-//   - asynqdriver: silent no-op (asynq は per-job 相当 API を持たない、
-//     archived bucket の age-based prune に依拠)
+// mkqdriver は `n > 0` のときだけ `mkq.WithKeepFailed(n)` を AddJob に
+// 渡す。注意: mkq native の `WithKeepFailed(0)` は **「即時削除」**
+// (BullMQ `removeOnFail: true` 相当) で driver-neutral semantic と
+// 真逆なので、driver translation 側で 0 は skip する。
 func WithKeepFailed(n int) EnqueueOption {
 	return func(o *EnqueueOptions) {
 		o.KeepFailed = n
@@ -175,13 +169,10 @@ func WithKeepFailed(n int) EnqueueOption {
 // が時間と共に redis memory を蝕む実害があるため (#1193 で UDS 観測)。
 // BullMQ の `removeOnComplete: N` と意味同等。
 //
-// driver 別:
-//   - mkqdriver: `n > 0` のときだけ `mkq.WithKeepCompleted(n)` を AddJob
-//     に渡す。注意: mkq native の `WithKeepCompleted(0)` は **「即時削除」**
-//     (BullMQ `removeOnComplete: true` 相当) で driver-neutral semantic と
-//     真逆なので、driver translation 側で 0 は skip する。
-//   - asynqdriver: silent no-op (asynq は完了履歴の per-job retention 制御
-//     を持たず、archived bucket とは別系統で管理される)
+// mkqdriver は `n > 0` のときだけ `mkq.WithKeepCompleted(n)` を AddJob
+// に渡す。注意: mkq native の `WithKeepCompleted(0)` は **「即時削除」**
+// (BullMQ `removeOnComplete: true` 相当) で driver-neutral semantic と
+// 真逆なので、driver translation 側で 0 は skip する。
 func WithKeepCompleted(n int) EnqueueOption {
 	return func(o *EnqueueOptions) {
 		o.KeepCompleted = n
@@ -194,10 +185,8 @@ func WithKeepCompleted(n int) EnqueueOption {
 // 互換)。WithKeepCompleted と併用すると count / age の両条件で prune
 // される (BullMQ TS の `removeOnComplete: {age: 7d, count: 30}` 互換)。
 //
-// driver 別:
-//   - mkqdriver: `age > 0` のときだけ `mkq.WithKeepCompletedAge(age)` を
-//     AddJob に渡す。
-//   - asynqdriver: silent no-op (asynq に対応 API なし)
+// mkqdriver は `age > 0` のときだけ `mkq.WithKeepCompletedAge(age)` を
+// AddJob に渡す。
 func WithKeepCompletedAge(age time.Duration) EnqueueOption {
 	return func(o *EnqueueOptions) { o.KeepCompletedAge = age }
 }

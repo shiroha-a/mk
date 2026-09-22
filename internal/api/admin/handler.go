@@ -611,7 +611,8 @@ func (h *Handler) SetEmojiImageFetcher(f EmojiImageFetcher) {
 // いずれも「動いているように見えて後から壊れる」ので、起動時に気付けるようにする。
 func (h *Handler) HasEmojiImageFetcher() bool { return h.emojiImageFetcher != nil }
 
-// QueueInspector abstracts asynq.Inspector for queue management endpoints.
+// QueueInspector abstracts the driver inspector for queue management
+// endpoints.
 type QueueInspector interface {
 	Queues() ([]string, error)
 	GetQueueInfo(qname string) (*QueueInfoResult, error)

@@ -120,13 +120,6 @@ func (h *Handler) DraftsCreate(c echo.Context) error {
 		scheduledAt = &t
 	}
 	if req.IsActuallyScheduled {
-		// asynq driver は scheduled note 機能を確実に support できないため
-		// (= clearSchedule の task ID 仕様制約)、機能無効化する。upstream
-		// 互換の \`TOO_MANY_SCHEDULED_NOTES\` で reject し、frontend には
-		// 上限到達と同じ UX を返す (#1045 Phase 2-C)。
-		if h.scheduledNoteEnqueuer != nil && !h.scheduledNoteEnqueuer.SupportsScheduledNote() {
-			return c.JSON(http.StatusBadRequest, apierr.Error("TOO_MANY_SCHEDULED_NOTES", "You cannot create scheduled notes any more.", "22ae69eb-09e3-4541-a850-773cfa45e693"))
-		}
 		if scheduledAt == nil {
 			// Misskey は SCHEDULED_AT_* に create / update で別 id を割り当てるため endpoint 固有 id を inline で返す
 			return c.JSON(http.StatusBadRequest, apierr.Error("SCHEDULED_AT_REQUIRED", "scheduledAt is required when isActuallyScheduled is true.", "15e28a55-e74c-4d65-89b7-8880cdaaa87d"))
@@ -336,10 +329,7 @@ func (h *Handler) DraftsUpdate(c echo.Context) error {
 	}
 	if scheduleChanged && draft.IsActuallyScheduled {
 		// 新しく schedule する / 既に scheduled だった draft の scheduledAt が
-		// 変わった場合は validation + capability check が必要。
-		if h.scheduledNoteEnqueuer != nil && !h.scheduledNoteEnqueuer.SupportsScheduledNote() {
-			return c.JSON(http.StatusBadRequest, apierr.Error("TOO_MANY_SCHEDULED_NOTES", "You cannot create scheduled notes any more.", "02f5df79-08ae-4a33-8524-f1503c8f6212"))
-		}
+		// 変わった場合は validation が必要。
 		if draft.ScheduledAt == nil {
 			// notes/drafts/update は create とは別の SCHEDULED_AT_* id を持つ
 			return c.JSON(http.StatusBadRequest, apierr.Error("SCHEDULED_AT_REQUIRED", "scheduledAt is required when isActuallyScheduled is true.", "fe9737d5-cc41-498c-af9d-149207307530"))
@@ -592,8 +582,8 @@ func (h *Handler) DraftsDelete(c echo.Context) error {
 	}
 	// delete に成功したら旧 delayed task も best-effort で clear する
 	// (#1045 Phase 2-C)。upstream は `clearSchedule(draftId)` を fire
-	// and forget で呼ぶ。clear 失敗は 204 を阻害しない (= asynq retry
-	// で task が fire してもprocessor 側で draft 不在 silent skip で済む)。
+	// and forget で呼ぶ。clear 失敗は 204 を阻害しない (= 残った task が
+	// fire しても processor 側で draft 不在 silent skip で済む)。
 	if h.scheduledNoteEnqueuer != nil {
 		// 上と同じ。消せなくても 204 は返すが、手掛かりは残す。
 		if err := h.scheduledNoteEnqueuer.ClearScheduledNote(req.DraftID); err != nil {

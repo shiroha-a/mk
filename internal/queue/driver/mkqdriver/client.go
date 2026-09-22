@@ -17,15 +17,13 @@ type Client struct {
 }
 
 // Enqueue routes (taskType, payload) to the mkq.Queue named by
-// opts.WithQueue. Without an explicit Queue, the call returns an
-// error — the asynq driver tolerates an unset queue by relying on
-// asynq.Client's "default" routing, but mkq has no analogous fallback
-// because every queue must be Define'd ahead of time.
+// opts.WithQueue. Without an explicit Queue the call returns an error:
+// every queue must be Define'd ahead of time, so there is no "default"
+// routing to fall back on.
 //
 // Unique-key dedup hits surface as ErrDuplicateJob from mkq; we
-// translate that into a successful Enqueue (matching asynq's
-// behaviour, which silently drops duplicates within the unique
-// window).
+// translate that into a successful Enqueue (the caller asked for
+// at-most-once within the window and got it).
 func (c *Client) Enqueue(ctx context.Context, taskType string, payload []byte, opts ...driver.EnqueueOption) error {
 	o := driver.ApplyEnqueueOptions(opts)
 	if o.Queue == "" {
@@ -40,7 +38,7 @@ func (c *Client) Enqueue(ctx context.Context, taskType string, payload []byte, o
 	addOpts := toMkqAddOptions(o, taskType, payload)
 	if _, err := q.Add(ctx, framed, addOpts...); err != nil {
 		if errors.Is(err, mkq.ErrDuplicateJob) {
-			// asynq.Unique と同様、TTL 内の重複 enqueue は black-hole 扱い。
+			// TTL 内の重複 enqueue は black-hole 扱い。
 			return nil
 		}
 		return err

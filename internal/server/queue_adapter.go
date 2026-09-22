@@ -23,7 +23,7 @@ func (j jobQueueRedisInfo) QueueRedisInfo(ctx context.Context) (string, error) {
 // queueStatsInspectorAdapter adapts queue.Inspector to the minimal
 // stream.QueueInspector interface needed by QueueStatsPublisher. Keeping this
 // adapter in internal/server prevents internal/stream from importing
-// internal/queue (which would create a circular dep via asynq types).
+// internal/queue (which would create a circular dep via the driver types).
 type queueStatsInspectorAdapter struct {
 	inner *queue.Inspector
 }

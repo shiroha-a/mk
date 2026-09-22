@@ -206,16 +206,27 @@ func TestStartAutoScale_DeliverInboxKnobsOnly_OthersStillManaged(t *testing.T) {
 	assert.Equal(t, ic, d.WorkerCount("inbox"), "inbox should retain explicit knob value")
 }
 
-// TestStartAutoScale_RejectsAsynqDriver verifies that auto-scale + a
-// driver that returns ErrResizeNotSupported → startup error (= asynq).
-func TestStartAutoScale_RejectsAsynqDriver(t *testing.T) {
+// TestStartAutoScale_ResizeNotSupportedDoesNotPreventStart pins that a
+// driver which cannot resize no longer blocks startup (#2985)。
+//
+// 以前は ErrResizeNotSupported だけを起動エラーにしていたが、**その判定は
+// production では一度も発火しない**。mkq driver があれを返すのは
+// `Driver.Server()` を一度も呼んでいないときだけで、`newServer` は構築時に
+// `queue.NewServer(queueDriver)` 経由で呼ぶため (実測)。asynq を消して
+// 「resize できない driver」自体が無くなったので判定ごと外した。
+//
+// **述語を `err != nil` へ広げる形は採れない** — すぐ下の
+// TestStartAutoScale_InitialResizeFailureDoesNotPreventStart が固定している
+// とおり、Redis の瞬断で起動できなくなる。
+func TestStartAutoScale_ResizeNotSupportedDoesNotPreventStart(t *testing.T) {
 	cfg := &config.Config{JobQueueAutoScale: true}
 	d := newScriptableDriver(nil)
 	d.resizeErr = driver.ErrResizeNotSupported
 
-	_, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
-	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.ErrResizeNotSupported)
+	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
+	require.NoError(t, err)
+	require.NotNil(t, runner)
+	t.Cleanup(func() { runner.Stop(context.Background()) })
 }
 
 // TestStartAutoScale_MinWorkersFloorExceedsGlobalCapRejected verifies the
@@ -451,8 +462,8 @@ func TestStartAutoScale_InitialResizeFailureDoesNotPreventStart(t *testing.T) {
 	defer func() { d.resizeErr = nil }()
 
 	runner, err := startAutoScale(context.Background(), cfg, d, queuemetrics.New(), nil)
-	// startup-time validation passes (Resize is called but failure is logged
-	// and tolerated); only ErrResizeNotSupported triggers startup rejection.
+	// startup-time validation passes: Resize failure is logged and tolerated
+	// so a Redis hiccup cannot make the process unbootable.
 	require.NoError(t, err)
 	require.NotNil(t, runner)
 	t.Cleanup(func() { runner.Stop(context.Background()) })

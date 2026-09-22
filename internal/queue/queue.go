@@ -4,9 +4,8 @@
 // underlying queue runtime — that lives behind queue/driver.
 //
 // AP delivery, webhooks, web push, and maintenance / chart cron
-// jobs all flow through this package. Driver swaps (asynq → mkq)
-// touch only the wiring code that constructs the driver.Driver in
-// internal/server.
+// jobs all flow through this package. Swapping the driver touches only
+// the wiring code that constructs the driver.Driver in internal/server.
 package queue
 
 import (
@@ -104,13 +103,6 @@ type Enqueuer interface {
 	// payload.NoteDraftID 一致を DeleteTask)。caller (NoteDraftService.update
 	// / delete) が re-schedule / unschedule する際に呼ぶ (#1045 Phase 2-C)。
 	ClearScheduledNote(draftID string) error
-	// SupportsScheduledNote は driver が scheduled note 機能 (= delayed
-	// enqueue + clearSchedule の確実な動作) を提供するかを返す。mk-go の
-	// asynq driver は task ID 仕様の制約で確実な clearSchedule が困難な
-	// ため false。mkq driver は true (#1045 Phase 2-C)。handler はこの
-	// flag が false なら scheduled note 作成を `TOO_MANY_SCHEDULED_NOTES`
-	// で拒否する。
-	SupportsScheduledNote() bool
 	Close() error
 }
 
@@ -127,10 +119,6 @@ type Client struct {
 	// (#1045 Phase 2-C)。enqueue 経路は inner.Client のみ使用、inspector
 	// は lazy に Driver から取得しキャッシュする。
 	inspector driver.Inspector
-	// supportsScheduledNote は scheduled note 機能が確実に動作する driver
-	// (= mkq) で wire 時に true、それ以外 (= asynq) は false。handler の
-	// scheduled note 経路で capability gate として参照する (#1045 Phase 2-C)。
-	supportsScheduledNote bool
 
 	mu       sync.RWMutex
 	policies PolicyMap
@@ -142,23 +130,6 @@ func NewClient(d driver.Driver) *Client {
 		inner:     d.Client(),
 		inspector: d.Inspector(),
 	}
-}
-
-// SetSupportsScheduledNote toggles the driver capability flag exposed via
-// `SupportsScheduledNote`. wire 時に driver kind を見て router で設定する
-// (= mkq → true, asynq → false)。default は false (= 安全側)。
-func (c *Client) SetSupportsScheduledNote(b bool) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.supportsScheduledNote = b
-}
-
-// SupportsScheduledNote returns the capability flag. handler はこの flag が
-// false なら scheduled note 作成を `TOO_MANY_SCHEDULED_NOTES` で拒否する。
-func (c *Client) SupportsScheduledNote() bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.supportsScheduledNote
 }
 
 // SetPolicy registers a runtime Policy for queueName. EnqueueDeliver
@@ -268,7 +239,6 @@ func (c *Client) EnqueueDeliver(payload DeliverPayload, opts ...driver.EnqueueOp
 	// ため admin の Delayed が常に空に見える。Policy で上書き可 (#1405 / #1406)。
 	base = append(base, backoffOptFromPolicy(p))
 	// completed / failed bucket retention を Policy から組み立てる (#1184 / #1193)。
-	// mkqdriver 経路でのみ効き、asynqdriver では silent no-op。
 	base = append(base, retentionOptsFromPolicy(p)...)
 	merged := append(base, opts...)
 	return c.inner.Enqueue(context.Background(), TaskTypeDeliver, body, merged...)
@@ -311,7 +281,7 @@ const clearScheduledNotePageSize = 100
 // noteDraftId == draftID and deletes them. inspector が未配線の
 // 場合は no-op (= test fixture / wire 未配線 path)。upstream の線形探索
 // と同 pattern (`getJobs(['delayed', 'waiting', 'active'])` → match →
-// `job.remove()`) を asynq/mkq の inspector API で再現する。
+// `job.remove()`) を driver の inspector API で再現する。
 //
 // **delayed だけでなく retry も走査する** (#3121)。attempts を積むように
 // なったので、予約投稿の job は「backoff 待ち」の状態を取りうる。そちらは
@@ -693,8 +663,7 @@ type Server struct {
 
 // ServerConfig is kept for backward compatibility with callers that
 // pass a Concurrency value via internal/server. The driver itself
-// gets its own concrete config (e.g. asynqdriver.ServerConfig)
-// at construction time.
+// gets its own concrete config (mkqdriver.Config) at construction time.
 type ServerConfig struct {
 	Concurrency int
 }

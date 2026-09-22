@@ -42,7 +42,7 @@ func TestClient_EnqueuePlugin(t *testing.T) {
 	o := driver.ApplyEnqueueOptions(got.opts)
 	assert.Equal(t, "plugin:demo", o.Queue)
 	// **MaxRetrySet を見る。** MaxRetry の 0 はゼロ値なので、オプションを
-	// 渡していなくても通ってしまう (asynq は未設定だと既定 25 を使うので、
+	// 渡していなくても通ってしまう (未設定の既定が 0 でない driver では、
 	// 実際に意味が変わる)。
 	assert.True(t, o.MaxRetrySet, "再試行の設定を明示していること")
 	assert.Equal(t, 0, o.MaxRetry, "既定は再試行しない")

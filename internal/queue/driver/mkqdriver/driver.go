@@ -17,8 +17,7 @@ import (
 // QueueNames is the set of logical queues mkqdriver pre-defines at
 // startup. New queue names introduced in mk-go must be added here so
 // the corresponding mkq.Queue handle is created and a worker is
-// spawned for it. The list mirrors the Queues map asynqdriver Server
-// configures.
+// spawned for it.
 //
 // **この一覧を変えたら fork (third_party/misskey) の
 // `packages/misskey-js/src/consts.ts` の `queueTypes` も合わせること。**
@@ -263,12 +262,11 @@ func (d *Driver) Client() driver.Client {
 // defaultQueueConcurrency maps each logical queue to its default worker pool
 // size when the operator hasn't set an explicit <queue>JobConcurrency.
 //
-// mkq は asynq と違い per-queue 専用 worker pool を持つ (BullMQ と同じ構造)。
-// total budget を queue 数で均等割りすると federation の hot queue (inbox /
-// deliver) が starve する (例: total 16 / 6 queue = 2 worker)。queue-bench で
-// inbox=2 は inbound drain が asynq (共有プール 16) に明確に劣ることを確認した
-// ため、Misskey TS QueueProcessorService の per-queue default を基準に hot queue
-// を厚く、低頻度 queue を薄く配分する。
+// mkq は per-queue 専用 worker pool を持つ (BullMQ と同じ構造)。total budget を
+// queue 数で均等割りすると federation の hot queue (inbox / deliver) が starve
+// する (例: total 16 / 6 queue = 2 worker)。queue-bench で inbox=2 は inbound
+// drain が明確に劣ることを確認したため、Misskey TS QueueProcessorService の
+// per-queue default を基準に hot queue を厚く、低頻度 queue を薄く配分する。
 //
 // worker 数 ≒ Redis 接続数 (mkq は worker 毎に BZPopMin で blocking 接続を 1 つ
 // 保持し、worker.go が "recommended pool = concurrency + 8" を warn する) なので、
@@ -496,9 +494,14 @@ func (d *Driver) Scheduler() driver.Scheduler {
 }
 
 // Resize delegates to the Server's WorkerPool layer to grow / shrink
-// the worker count for qname at runtime. Before Server() has been
-// called (= no pool yet) it returns ErrResizeNotSupported because
-// there is nothing to resize; callers should wait for Server.Start.
+// the worker count for qname at runtime.
+//
+// Before Server() has been called there is no Server object at all, so
+// this returns driver.ErrResizeNotSupported. **After Server() but before
+// Server.Start the pool map is still empty**, so the call reaches
+// Server.Resize and comes back as `unknown queue %q` instead — callers
+// that want a working Resize must wait for Server.Start, and must not
+// use ErrResizeNotSupported to detect "not started yet" (#2985).
 //
 // Concrete implementation lives in server.go alongside the pool itself
 // (server.go's locking model is the source of truth for pool state).
@@ -563,9 +566,8 @@ func (d *Driver) QuarantinedWorkerCount(qname string) int {
 }
 
 // Close stops the worker (if started) and releases the underlying
-// *mkq.Client. Idempotent: subsequent calls are no-ops, matching the
-// asynq driver's contract and tolerating double-close from layered
-// shutdown hooks.
+// *mkq.Client. Idempotent: subsequent calls are no-ops, so layered
+// shutdown hooks can double-close safely.
 func (d *Driver) Close() error {
 	d.mu.Lock()
 	if d.closed {
