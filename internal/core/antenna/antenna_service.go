@@ -727,16 +727,15 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 	// 無指定) は降順 (newest-first)。常に newest-first だと sinceId 単独ページの
 	// 並びと集合が逆になる (#1778)。
 	key := streamKey(antennaID)
-	by := &redis.ZRangeBy{Min: min, Max: max, Count: int64(limit)}
-	var (
-		out []string
-		err error
-	)
-	if sinceID != "" && untilID == "" {
-		out, err = s.client.ZRangeByLex(ctx, key, by).Result()
-	} else {
-		out, err = s.client.ZRevRangeByLex(ctx, key, by).Result()
+	// **`ZRangeByLex` / `ZRevRangeByLex` は Redis 6.2 で非推奨** になったので
+	// `ZRangeArgs` へ寄せる。**Start / Stop は入れ替えない** — `Rev` + `ByLex` の
+	// ときは go-redis 側が `appendArgs` で `Stop, Start` の順に並べ替えるので、
+	// 呼び出し側は常に「小さい方が Start」で渡す (入れ替えると範囲が空になる)。
+	args := redis.ZRangeArgs{Key: key, Start: min, Stop: max, ByLex: true, Count: int64(limit)}
+	if sinceID == "" || untilID != "" {
+		args.Rev = true
 	}
+	out, err := s.client.ZRangeArgs(ctx, args).Result()
 	if err != nil {
 		if isWrongType(err) {
 			// 旧 Stream が残っている環境。次の push で張り替わるので、

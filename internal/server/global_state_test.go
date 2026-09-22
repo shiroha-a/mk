@@ -245,53 +245,60 @@ func readNonCommentSource(t *testing.T, name string) string {
 // 「今たまたま誰も踏んでいない」ことと「安全」は別なので、形で縛る。
 func TestLoaderFixtureTestsResetCache(t *testing.T) {
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, ".", func(fi os.FileInfo) bool {
-		return strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	// **`parser.ParseDir` は使わない** (Go 1.25 で非推奨)。非推奨の理由は「build tag を
+	// 見ないので package とファイルの対応が不正確」だが、ここは**このディレクトリの
+	// `_test.go` を全部見たい**ので、その不正確さがむしろ要件に合う。
+	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
+	files := map[string]*ast.File{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		f, perr := parser.ParseFile(fset, name, nil, 0)
+		require.NoErrorf(t, perr, "%s を parse できない", name)
+		files[name] = f
+	}
 
 	// env 名を定数に切り出す形も追えるように、まず const の中身を集める。
 	consts := map[string]string{}
-	for _, pkg := range pkgs {
-		for _, f := range pkg.Files {
-			ast.Inspect(f, func(n ast.Node) bool {
-				vs, ok := n.(*ast.ValueSpec)
-				if !ok {
-					return true
-				}
-				for i, name := range vs.Names {
-					if i < len(vs.Values) {
-						if lit, ok := vs.Values[i].(*ast.BasicLit); ok {
-							consts[name.Name] = lit.Value
-						}
+	for _, f := range files {
+		ast.Inspect(f, func(n ast.Node) bool {
+			vs, ok := n.(*ast.ValueSpec)
+			if !ok {
+				return true
+			}
+			for i, name := range vs.Names {
+				if i < len(vs.Values) {
+					if lit, ok := vs.Values[i].(*ast.BasicLit); ok {
+						consts[name.Name] = lit.Value
 					}
 				}
-				return true
-			})
-		}
+			}
+			return true
+		})
 	}
 
 	checked := 0
-	for _, pkg := range pkgs {
-		for path, f := range pkg.Files {
-			for _, decl := range f.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil {
-					continue
-				}
-				// **`t.Setenv` を呼んだのと同じスコープに登録されているかを
-				// 見る。** サブテストに逃がすと、そこを抜けた時点で reset が
-				// 走った後に親が再び読み込んでしまう。`t` は shadow されても
-				// 名前が同じなので、受け手の名前一致では防げない (実測で
-				// 素通りした)。
-				for _, scope := range loaderFixtureScopes(fn.Body, consts) {
-					checked++
-					assert.True(t, registersLoaderReset(scope),
-						"%s:%s は loader ディレクトリを差し替えるのに "+
-							"同じスコープで t.Cleanup(frontendutil.ResetLoaderCacheForTest) を "+
-							"登録していない (#2795)",
-						filepath.Base(path), fn.Name.Name)
-				}
+	for path, f := range files {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			// **`t.Setenv` を呼んだのと同じスコープに登録されているかを
+			// 見る。** サブテストに逃がすと、そこを抜けた時点で reset が
+			// 走った後に親が再び読み込んでしまう。`t` は shadow されても
+			// 名前が同じなので、受け手の名前一致では防げない (実測で
+			// 素通りした)。
+			for _, scope := range loaderFixtureScopes(fn.Body, consts) {
+				checked++
+				assert.True(t, registersLoaderReset(scope),
+					"%s:%s は loader ディレクトリを差し替えるのに "+
+						"同じスコープで t.Cleanup(frontendutil.ResetLoaderCacheForTest) を "+
+						"登録していない (#2795)",
+					filepath.Base(path), fn.Name.Name)
 			}
 		}
 	}

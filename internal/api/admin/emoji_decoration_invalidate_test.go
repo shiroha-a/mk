@@ -4,6 +4,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"strings"
 	"testing"
 
@@ -65,22 +66,26 @@ func TestEmojiPublishHelpersInvalidateDecorationCache(t *testing.T) {
 // 実測された。先頭に固定すると両方落ちる。
 func TestEveryEmojiPublishHelperCallsInvalidate(t *testing.T) {
 	fset := token.NewFileSet()
-	pkg, err := parser.ParseDir(fset, ".", nil, 0)
+	// **`parser.ParseDir` は使わない** (Go 1.25 で非推奨)。非推奨の理由は
+	// 「build tag を見ないので package とファイルの対応が不正確」だが、ここは
+	// ディレクトリ内の .go を全部見たいので、その不正確さがむしろ要件に合う。
+	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
 
 	found := map[string]bool{}
-	for _, p := range pkg {
-		for name, file := range p.Files {
-			if strings.HasSuffix(name, "_test.go") {
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		require.NoErrorf(t, err, "%s を parse できない", name)
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || !strings.HasPrefix(fn.Name.Name, "publishEmoji") {
 				continue
 			}
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Recv == nil || !strings.HasPrefix(fn.Name.Name, "publishEmoji") {
-					continue
-				}
-				found[fn.Name.Name] = firstStmtInvalidatesDecorationCache(fn)
-			}
+			found[fn.Name.Name] = firstStmtInvalidatesDecorationCache(fn)
 		}
 	}
 

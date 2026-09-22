@@ -87,22 +87,18 @@ func TestWebPushProducersAreWired(t *testing.T) {
 func webPushMethods(t *testing.T, dir string) []string {
 	t.Helper()
 	fset := token.NewFileSet()
-	pkgs, err := parser.ParseDir(fset, dir, func(fi os.FileInfo) bool {
-		return !strings.HasSuffix(fi.Name(), "_test.go")
-	}, 0)
+	files, err := parseNonTestGoFiles(fset, dir)
 	if err != nil {
 		t.Fatalf("parse %s: %v", dir, err)
 	}
 	var out []string
-	for _, pkg := range pkgs {
-		for _, file := range pkg.Files {
-			for _, d := range file.Decls {
-				fn, ok := d.(*ast.FuncDecl)
-				if !ok || fn.Recv == nil || !fn.Name.IsExported() || !strings.HasPrefix(fn.Name.Name, "Push") {
-					continue
-				}
-				out = append(out, fn.Name.Name)
+	for _, file := range files {
+		for _, d := range file.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Recv == nil || !fn.Name.IsExported() || !strings.HasPrefix(fn.Name.Name, "Push") {
+				continue
 			}
+			out = append(out, fn.Name.Name)
 		}
 	}
 	sort.Strings(out)

@@ -698,11 +698,21 @@ func newViteProxy(target string) echo.HandlerFunc {
 	if err != nil {
 		panic("invalid vite proxy target: " + target)
 	}
-	proxy := httputil.NewSingleHostReverseProxy(remote)
-	origDirector := proxy.Director
-	proxy.Director = func(req *http.Request) {
-		origDirector(req)
-		req.Host = remote.Host
+	// **`Director` は Go 1.26 で非推奨**なので `Rewrite` を使う。
+	//
+	// `SetURL` は宛先へ向けるだけでなく **Host ヘッダも target のものへ揃える**
+	// ので、`Director` 版の `req.Host = remote.Host` に相当する代入は要らない
+	// (足しても同じ値で、変異検証でも差が出なかった)。
+	//
+	// **`Rewrite` は X-Forwarded-* を落としてから呼ばれる。**
+	// `NewSingleHostReverseProxy` + `Director` では `ServeHTTP` が
+	// `X-Forwarded-For` を自動で足していたので、`SetXForwarded()` で足し直す
+	// (あちらは Host / Proto も足すが、相手は開発用の Vite なので広い方で困らない)。
+	proxy := &httputil.ReverseProxy{
+		Rewrite: func(r *httputil.ProxyRequest) {
+			r.SetURL(remote)
+			r.SetXForwarded()
+		},
 	}
 
 	return func(c echo.Context) error {

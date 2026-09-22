@@ -2,9 +2,7 @@ package entitycompat
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
-	"io/fs"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -120,30 +118,26 @@ func TestEmojiMutationsDropDecorationCache(t *testing.T) {
 
 	for _, dir := range emojiMutationDirs {
 		fset := token.NewFileSet()
-		pkgs, err := parser.ParseDir(fset, filepath.Join(root, dir), func(fi fs.FileInfo) bool {
-			return !strings.HasSuffix(fi.Name(), "_test.go")
-		}, 0)
+		files, err := parseNonTestGoFiles(fset, filepath.Join(root, dir))
 		require.NoErrorf(t, err, "%s を読めない", dir)
 
-		for _, pkg := range pkgs {
-			for _, file := range pkg.Files {
-				for _, decl := range file.Decls {
-					fn, ok := decl.(*ast.FuncDecl)
-					if !ok || fn.Body == nil {
-						continue
-					}
-					if !callsAny(fn, emojiMutatingMethods, isEmojiRepoReceiver) {
-						continue
-					}
-					seen++
-					key := dir + "." + fn.Name.Name
-					detected[key] = true
-					if emojiMutationExempt[key] != "" {
-						continue
-					}
-					if !callsAny(fn, emojiCacheNotifiers, nil) {
-						offenders = append(offenders, site{dir, fn.Name.Name})
-					}
+		for _, file := range files {
+			for _, decl := range file.Decls {
+				fn, ok := decl.(*ast.FuncDecl)
+				if !ok || fn.Body == nil {
+					continue
+				}
+				if !callsAny(fn, emojiMutatingMethods, isEmojiRepoReceiver) {
+					continue
+				}
+				seen++
+				key := dir + "." + fn.Name.Name
+				detected[key] = true
+				if emojiMutationExempt[key] != "" {
+					continue
+				}
+				if !callsAny(fn, emojiCacheNotifiers, nil) {
+					offenders = append(offenders, site{dir, fn.Name.Name})
 				}
 			}
 		}
