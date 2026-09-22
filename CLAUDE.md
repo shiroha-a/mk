@@ -593,6 +593,8 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   — `unused` / `ST1003` / `ST1012` / `SA1019` はすべて有効で、恒久的に無効なのは `QF*` と
   `S1016` だけ。**除外は 2 つ** — `.golangci.yml` の rule が 1 件 (`test/e2e_federation` の
   パッケージ名 / ST1003) と、`//nolint` が 1 件 (`echo` の `LoggerWithConfig` / SA1019)。
+  **これは今回有効化した 4 check に対する数**で、`exclusions.presets` の `std-error-handling`
+  (実測 253 件を抑止) は別枠。
   `//nolint:staticcheck` 自体はリポジトリ全体で 4 件ある — production 1 (SA1019) とテスト 3
   (SA1019 / SA9010 / SA1012)。版は Makefile 側に 1 つだけ置く。
   **一番重いので step の最後**に置いてある。
@@ -922,17 +924,19 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   ラッパーで、呼び出し側が実体を直接呼ぶようになった後の残骸。**正規化そのものは現役**
   (`Create` が `resolveReaction` を呼ぶ) なので、消しても挙動は変わらない。
   **消すと doc の参照が切れる。** `normalizeReaction` は**振る舞いの説明の根拠**として
-  8 箇所から名指しされていた (`entity/emoji_resolver.go` の「local 絵文字を `:name@.:` 形式で
-  永続化する」、`server/emoji_redirect.go` の同旨、`resolveReaction` 自身の doc が
-  「shared core of normalizeReaction」と書いていたものを含む)。参照を `resolveReaction` へ
+  9 箇所から名指しされていた (数え方: 宣言行と自身の doc 冒頭を除いた `normalizeReaction` の
+  語境界一致)。8 箇所は `entity/emoji_resolver.go` の「local 絵文字を `:name@.:` 形式で
+  永続化する」や `server/emoji_redirect.go` の同旨で機械置換でき、9 件目の `resolveReaction`
+  自身の doc (「shared core of normalizeReaction」) だけ書き換えが要った。参照を `resolveReaction` へ
   付け替え、**消える doc に書かれていた正規化の規則 (空文字列 → heart、レガシー → Unicode、
   カスタム絵文字の `:name@.:` 化、actorHost へのフォールバック #459) は `resolveReaction` の
   doc へ移した** — 関数を消すときに一緒に消えると、仕様がコードのどこにも残らない。
   **`run.tests` は既定のまま**にしてある。`tests: false` にすると「テストからしか使われない
-  もの」まで未使用と出る (実測 11 件)。
+  もの」まで未使用と出る (数え方: `run: tests: false` を足して `make golangci-lint`。**この
+  entry の削除後で 10 件** — 削除前は 11 件で、11 件目が消した `normalizeReaction` 自身だった)。
   **射程外**: `QF*` / `S1016` (恒久)、別 module の `plugins/`。
 - **2026-09-22**: `SA1019` (非推奨 API) を有効化。10 件のうち **9 件を移行し、1 件だけ
-  `//nolint` で抑えた**。段階的に残っているのは `unused` だけになった。
+  `//nolint` で抑えた**。段階的に残っていた `unused` も同日に有効化した (下の entry)。
   **`go/parser.ParseDir` (5 件) は非推奨の理由がこちらの要件に合う。** 「build tag を見ないので
   package とファイルの対応が不正確」というのが非推奨の理由だが、ゲートは**ディレクトリ内の
   .go を全部見たい**ので、その不正確さがむしろ望ましい。代替として案内される
@@ -1015,8 +1019,7 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   wire になり秘密も一緒に出る。今は到達する経路が無いことを実測 (`MarshalJSON` に panic を
   仕込んで全テストを回しても発火しない) で確かめたが、**担保はコメントだけ**なので型宣言の
   直上にその旨を書いた。ゲート化は別途。
-  **射程外**: `unused` (引き続き段階的に有効化。`SA1019` は同日に有効化した)、
-  `QF*` / `S1016` (恒久)、
+  **射程外**: `QF*` / `S1016` (恒久。`SA1019` と `unused` は同日に有効化した)、
   `test/e2e_federation` のパッケージ名、`config.Config` を marshal させないゲート。
 - **2026-09-22**: `lint` job に `golangci-lint` を追加。`make help` の target は 138 → 139。
   **自分のコードを見る Go の静的解析が `go vet` だけだった。** `go vet` は「明らかに壊れて
@@ -1070,8 +1073,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **`make lint` (go vet) は golangci-lint の govet にほぼ包含される** — `go tool vet` の
   35 analyzer は全て golangci-lint v2.13.2 の既定に含まれ、差は `inline` 1 つ (golangci 側のみ)。
   同じ解析を 2 回回しているが、CI の `Vet` step と 1:1 に対応させるため残してある。
-  **射程外**: `unused` (段階的に有効化。`ST1003` / `ST1012` / `SA1019` は同日に有効化した)、
-  `QF*` / `S1016` (恒久)、
+  **射程外**: `QF*` / `S1016` (恒久。`ST1003` / `ST1012` / `SA1019` / `unused` は同日に
+  有効化した)、
   別 module の `plugins/`。**`make check` と `lint` job のドリフトを止めるゲートは置いていない**
   (#2841 の `testflags-check` に相当するもの)。`make check` が回すのは `lint` job の静的検査 4 つで、
   `Check duplicate test fixture IDs` と `build` job (`go build ./...` / `make plugin-vet`) は含まない。

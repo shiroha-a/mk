@@ -6,7 +6,8 @@
 ##
 ## **`run.tests` は既定 (= テストも解析対象) のまま。** `unused` はパッケージ全体を
 ## 見ないと正しく判定できないので、`tests: false` にすると「テストからしか使われない
-## もの」まで未使用と報告される (実測 11 件)。テストを含めたまま扱う。
+## もの」まで未使用と報告される (実測 10 件。`run: tests: false` を足して
+## `make golangci-lint`)。テストを含めたまま扱う。
 version: "2"
 
 linters:
@@ -51,8 +52,6 @@ linters:
       # 無く、アクセスログから token を伏せる処理の作り直しを伴うため。
       # **SA1019 の `//nolint` は 2 箇所** — production (`server.go`) と、同じ設定を
       # 検査するテスト (`access_log_test.go`)。
-      #
-      # **残るのは `unused` だけ** (`linters.disable` を参照)。
       checks:
         - all
         - -QF*

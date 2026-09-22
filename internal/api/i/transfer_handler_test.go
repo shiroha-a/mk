@@ -94,11 +94,6 @@ func TestExport_NotesNoAuthIfEnqueuerMissing(t *testing.T) {
 }
 
 func TestExport_AllTypesEnqueue(t *testing.T) {
-	cases := []struct {
-		name    string
-		handler func(h *Handler) func(c any) error
-	}{}
-	// map each endpoint to its expected payload type
 	h, enq := newTransferHandler()
 	user := &model.User{ID: "u1"}
 
@@ -132,7 +127,6 @@ func TestExport_AllTypesEnqueue(t *testing.T) {
 		assert.Equal(t, "u1", c.UserID)
 	}
 	assert.Len(t, seen, 8)
-	_ = cases
 }
 
 // #1555 export-following の excludeMuting / excludeInactive が ExportPayload に

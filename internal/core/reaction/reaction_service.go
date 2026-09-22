@@ -560,7 +560,9 @@ func (s *Service) normalizeReactionForFilter(raw string) string {
 //   - レガシー文字列(like等)はUnicode絵文字に変換
 //   - カスタム絵文字 ":name:" は絵文字テーブルで存在確認後 ":name@.:" に正規化
 //   - リモート ":name@host:" はそのまま検証して残す
-//   - その他はそのまま (Unicode絵文字想定)
+//   - その他は Unicode 絵文字として**検証する** — 絵文字以外を含めば Fallback へ倒し
+//     (#2106 N15)、絵文字なら variation selector (U+FE0F) を落とした canonical 形に
+//     揃える (#864)。列 (varchar(260)) に収まらない長さも Fallback (#2726)
 //
 // actorHost は reaction を投稿した側のホスト。リモートユーザーが
 // `:name:` 形式 (ホスト省略) で送ってきたとき、Misskey TS upstream は
