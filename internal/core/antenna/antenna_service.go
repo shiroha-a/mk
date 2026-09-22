@@ -731,6 +731,11 @@ func (s *Service) Notes(ctx context.Context, ownerID, antennaID string, limit in
 	// `ZRangeArgs` へ寄せる。**Start / Stop は入れ替えない** — `Rev` + `ByLex` の
 	// ときは go-redis 側が `appendArgs` で `Stop, Start` の順に並べ替えるので、
 	// 呼び出し側は常に「小さい方が Start」で渡す (入れ替えると範囲が空になる)。
+	//
+	// **これは go.mod が pin している版 (v9.18.0) の実装に依存する。** v9.21.0 で
+	// この入れ替えは削除され、doc も「Rev のときは Start に大きい方を置け」と逆を
+	// 要求するようになった。**bump するときは必ずここを見直すこと** —
+	// `TestNotes_Paging*` は実 Redis を使うので、間違えればそこで落ちる。
 	args := redis.ZRangeArgs{Key: key, Start: min, Stop: max, ByLex: true, Count: int64(limit)}
 	if sinceID == "" || untilID != "" {
 		args.Rev = true

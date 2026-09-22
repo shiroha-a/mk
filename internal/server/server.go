@@ -360,8 +360,6 @@ func corsMiddleware() echo.MiddlewareFunc {
 	}
 }
 
-// gzipConfig returns the GzipConfig used by the global middleware stack.
-// Shared with gzip_test.go so production and tests stay in sync.
 // accessLogConfig returns the access log middleware config.
 //
 // **`${uri}` は query を含む**ので、そのまま出すと `?i=<token>` の形で有効な
@@ -385,6 +383,8 @@ func accessLogConfig() echomw.LoggerConfig {
 	}
 }
 
+// gzipConfig returns the GzipConfig used by the global middleware stack.
+// Shared with gzip_test.go so production and tests stay in sync.
 func gzipConfig() echomw.GzipConfig {
 	// MinLength=1024 で小さい body の gzip overhead を回避し、/streaming は
 	// WebSocket frame を壊さないよう Skipper で除外する (#413 Phase 3 #12)。

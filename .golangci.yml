@@ -49,10 +49,12 @@ linters:
       # 無く (`config_dump.go` はキーを文字列リテラルで書く)、
       # `PolicyCanSearchIPHistory` は定数「名」で値 `canSearchIpHistory` は据え置き。
       #
-      # **`SA1019` (非推奨 API) も有効。** 9 件を移行し、残り 1 件
-      # (`echo` の `LoggerWithConfig`) だけ `//nolint:staticcheck` で抑えてある —
+      # **`SA1019` (非推奨 API) も有効。** 元の 10 件のうち 9 件を移行し、残り 1 件
+      # (`echo` の `LoggerWithConfig`) を `//nolint:staticcheck` で抑えてある —
       # 移行先の `RequestLoggerWithConfig` には `CustomTagFunc` に相当するものが
       # 無く、アクセスログから token を伏せる処理の作り直しを伴うため。
+      # **SA1019 の `//nolint` は 2 箇所** — production (`server.go`) と、同じ設定を
+      # 検査するテスト (`access_log_test.go`)。
       #
       # **残るのは `unused` だけ** (`linters.disable` を参照)。
       checks:
@@ -93,8 +95,8 @@ linters:
       # パッケージ名もそれに合わせている。外部から import されないテスト専用
       # パッケージなので、名前を変える実益が無い一方、ディレクトリ名まで
       # 変えると `internal/` の実コード 2 ファイルを含む 24 箇所に波及する
-      # (数え方: `git grep -oI e2e_federation -- '*.go' | wc -l`。**doc を含めると
-      # 36 だが、この数字を書いた doc 自身が数を増やす**ので code だけで数える)。
+      # (数え方: `git grep -oI e2e_federation -- '*.go' | wc -l`。**code だけで数える** —
+      # doc を含めると、この数字に言及した doc 自身が数を変えてしまう)。
       # **CI のカバレッジ閾値は ImportPath の `/e2e` で判定する** (`ci.yml` の
       # `pkg ~ /\/e2e/` で unanchored な部分一致) ので、**名前が `e2e` で
       # 始まる限り** 0% 例外は維持される (`federatione2e` のように後ろへ

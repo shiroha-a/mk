@@ -59,7 +59,7 @@ func Surface(dir string) ([]string, error) {
 	// ディレクトリ内の **.go を全部見たい**ので、その不正確さがむしろ要件に合う。
 	// 代替として案内される `go/packages` は `go list` を起動するぶん重く、package
 	// 単位で解決するのでディレクトリを直接列挙したいここには合わない (型チェックは
-	// `NeedTypes` を渡したときだけ走るので、そこは理由にならない)。
+	// `NeedTypes` か `NeedTypesInfo` を渡したときだけ走るので、そこは理由にならない)。
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("%s を解析できません: %w", dir, err)

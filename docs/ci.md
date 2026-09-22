@@ -63,6 +63,13 @@ token redact を作り直すことになるため `//nolint` で抑制)。
 
 誤検知は `//nolint:staticcheck // 理由` をその行に置く。理由を必ず書く。
 
+**独立行ではなく行末に置く。** 独立行に置くと、対象が複数行にまたがる式のときに
+**その全体が死角になる** — 実測で `e.Use(echomw.LoggerWithConfig(...))` の 10 行が
+丸ごと黙り、抑制したかった行の下にある処理まで検査されなくなった。既存の 2 件
+(`internal/api/signin/passkey_test.go` / `internal/server/middleware/internal_call_test.go`)
+は独立行のままだが、どちらも対象が 1 行なので射程はその 1 文に収まっている
+(**折り返した瞬間に同じ穴が開く**)。機械的な検査は無い。
+
 ### `lint` の actionlint が落ちたとき
 
 `make actionlint` で同じものが出る。workflow の式の typo、存在しない `needs` 参照、

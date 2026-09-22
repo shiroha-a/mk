@@ -593,7 +593,8 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   `unused` だけで、`ST1003` / `ST1012` / `SA1019` は有効。**今回有効化した 3 check に対する
   除外は 2 つ** — `.golangci.yml` の rule が 1 件 (`test/e2e_federation` のパッケージ名 /
   ST1003) と、`//nolint` が 1 件 (`echo` の `LoggerWithConfig` / SA1019)。`//nolint:staticcheck`
-  自体はリポジトリ全体で 3 件ある (他は SA9010 / SA1012)。版は Makefile 側に 1 つだけ置く。
+  自体はリポジトリ全体で 4 件ある — production 1 (SA1019) とテスト 3 (SA1019 / SA9010 /
+  SA1012)。版は Makefile 側に 1 つだけ置く。
   **一番重いので step の最後**に置いてある。
 
 ### `vulncheck`ジョブ
@@ -978,8 +979,9 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **`test/e2e_federation` のパッケージ名だけ除外した。** ST1003 が指摘するのはパッケージ名で
   ディレクトリ名ではないが、Go の慣習では揃える。ディレクトリ名まで変えると `internal/` の
   実コード 2 ファイルを含む 24 箇所に波及するうえ (数え方:
-  `git grep -oI e2e_federation -- '*.go' | wc -l`。**doc を含めると 36 だが、この数字を書いた
-  doc 自身が数を増やす**ので code だけで数える)、外部から import されないテスト専用
+  `git grep -oI e2e_federation -- '*.go' | wc -l`。**code だけで数える** — doc を含めると、
+  この数字に言及した doc 自身が数を変えてしまう。実際、初稿は doc 込みの値を書いて次の
+  コミットで陳腐化させた)、外部から import されないテスト専用
   パッケージなので実益が無い。**CI のカバレッジ閾値は ImportPath の `/e2e` で判定する**
   (`ci.yml` の `pkg ~ /\/e2e/` で unanchored な部分一致) ので、**名前が `e2e` で始まる限り**
   0% 例外は維持される — `federatione2e` のように後ろへ回すと外れて 90% になる (実測)。
