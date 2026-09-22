@@ -148,7 +148,7 @@ make plugin-test            # 同梱プラグインのテスト (別 module な�
 make plugin-doc-check       # docs/plugins/authoring.md の Go スニペットがコンパイルできるか
 
 # 静的 parity ゲート (サーバー / ブラウザ / Docker 不要)
-make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / ipshape-check / iprecord-check / submodulepin-check / gaterun-check を一括
+make gates                  # shapecheck / errorid-check / limitspec-check / perm-check / wiring-check / catalog-check / notfound-check / nulparam-check / compose-check / testflags-check / migrationdoc-check / mdtable-check / notiftype-check / pluginembed-check / dockerignore-check / secretfield-check / ipshape-check / iprecord-check / sqlbind-check / submodulepin-check / gaterun-check を一括
 make apicompat              # docs/api-compat.md を生成 (route dump に stack 起動が必要)
 
 # プラグインの組み込み
@@ -221,7 +221,7 @@ make frontend-lint           # eslint だけ (CI と同じ範囲、実測 55 秒
 make e2e-down-all            # 検証用スタックを一括撤去 (**本番 project `mk` は対象外**)
 ```
 
-**上記は全体ではない。** `make help` が全 136 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
+**上記は全体ではない。** `make help` が全 137 target を出す (`^名前:.*##` の行を数えた)。一覧と説明は
 [docs/development.md](docs/development.md)、CI 上の対応は [docs/ci.md](docs/ci.md)。
 
 エントリポイント：
@@ -859,6 +859,97 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: `make gates` に `sqlbind-check` を追加。`make help` の target は 136 → 137。**値をクォートで囲んだリテラルへ差し込まず bind する**、を固定する。
+  chart の unique 配列は**行の値そのもの** (外部由来の文字列を含みうる) なので、
+  `internal/core/chart/repository.go` の `ApplyDeltas` が `?::varchar[]` で bind して
+  いるのが唯一の防波堤になっている。初版 (`50ba697b`、2026-04-09) からその形だが、
+  **担保が無かった** — 実測で、配列リテラルを書式へ差し込む形に変えても既存の実 DB
+  テストは**緑のまま通った** (`TestIntegration_GormRepository_UniqueIncrementApplyDeltas`
+  の値が `u1` / `u2` だけで、構造上意味を持つ文字を含んでいない)。
+  **「これは SQL か」を判定しない。** 初版はキーワードの部分一致で SQL らしさを
+  判定していたが、敵対的レビューで**両方向に壊れている**ことを実測された。偽陽性:
+  `"plugin '%s' returned no values"` のような普通の英文が `values` に当たり、
+  「プレースホルダで bind すること」という**事実と逆の診断**が出る (allowlist の理由欄は
+  「なぜ SQL として解釈されないか」を書かせる形なので、非 SQL には書きようがない)。
+  偽陰性: `'%s'::varchar[]` のような**断片**はキーワードに 1 つも当たらず**収集すら
+  されない** — このリポジトリには SQL を断片ごとに組んで `strings.Join` する経路が
+  (chart / fsck / maintenance など) あり、そこが丸ごと盲点だった。実際、`Insert` の
+  placeholder を `fmt.Sprintf` へ変える変異は**静的ゲートも chart の全テストも
+  緑のまま通った** (レビュー側が使い捨て probe で実測し、値が SQL テキストに載ることを確認)。
+  判定を「クォートで開いた区間に動詞が在るか」だけにすると射程は広がり、偽陽性は減る。
+  **代わりに網は広がる** — 値をクォートで囲んだだけのメッセージも該当しうるので、
+  診断は「bind しろ」と決めつけず、SQL でない場合の逃げ道も示す。
+  **「プレースホルダが在るか」では守れない。** ダミーの `?` を 1 つ足し、
+  `pgArrayLiteral` とは**別名の独立したビルダ**で配列をリテラルへ畳み、要素数で
+  分岐させる変異は、**静的ゲートも chart の全テストも緑のまま通った** (実測。
+  リテラルが SQL テキストに載ることは手元で確認した。閾値をテストの値数より上に
+  置くと振る舞い側も外れる)。
+  `ApplyDeltas` が組む**書式集合そのものを pin** すると、書式を**変える**形は落ちる。
+  **ただし pin は「その Sprintf が在るか」しか見ない** — 呼び出しを `_ =` にして
+  残したまま、実際の組み立てを文字列連結へ移す変異は**静的ゲートを素通りし、
+  実 DB の往復テストだけが落とす** (実測)。静的な走査で意図的な回避まで塞ぐことは
+  できないので (#3135「名前で見る走査は名前で避けられる」)、ここが受け持つのは
+  **普通に書いたときに踏む形**で、意図的な回避は振る舞い側が受ける。
+  **書式は定数連結を畳んでから見る。** 長い SQL を `"..." + "..."` で折り返すのは
+  普通の書き方で、第 1 引数が `*ast.BasicLit` のときだけ拾う形は**その書式を 1 件も
+  収集しない** (実測)。違反ではなく**不在**になるので、違反集合の比較では気付けない。
+  **名前を決め打ちにしない。** `pgArrayLiteral` の行き先を `append(args, ...)` で
+  見ていたため、局所変数を `params` へ改名しただけでゲートが落ち、しかも**既に
+  bind しているコードへ「バインド引数で渡すこと」と事実と逆の指示**を出した (実測)。
+  `Exec` / `Raw` へ可変長展開している識別子を解決して突き合わせる形に直した。
+  **名指しの一覧は `map` で回さない。** イテレーション順が非決定的なので、走査が
+  縮んだときに報告されるサイトが実行ごとに変わる。ソート済みの slice で回し、
+  未検出を集めてから 1 回で報告する。**違反の報告も `require` にしない** — 先に
+  止まって allowlist の死んだ entry の診断が出ない (#3135 と同じ型)。
+  **数え方**: `internal` / `cmd` / `plugin` の非テスト Go を AST で走査し、`fmt.Sprintf`
+  の書式リテラル (定数連結は畳む) をサイト単位で数えて **186 件** (ユニークキー 103、
+  うち人工ソース 6 サイト)。違反は **4 サイト / 3 キー**で、内訳は人工ソース 2 キーと
+  `internal/server/frontend.go#renderFrontendShell` の 1 キー (JS 生成が 2 サイト。
+  入るのは Vite manifest のエントリ名とビルド版数)。いずれも allowlist 済みで、
+  **本番の未許可の違反は 0**。
+  **検出の枝は人工ソース (`internal/entitycompat/sqlbindfixture`) で固定する。** 本番の
+  違反が allowlist 済みの 1 キーしか無いので、本番だけを見ていると枝が一度しか通らない。
+  `testdata/` に置くと Go ツールチェーンが無視して `go vet` の書式検査も通らないので、
+  コンパイルされるパッケージに置く (`_test.go` を持たないパッケージは `go list` の
+  テスト対象にも CI のカバレッジ閾値にも入らない)。
+  **gofmt はトップレベル宣言の doc コメントの中のクォート 2 連だけを typographic quote へ書き換える**
+  (関数の中のコメントには効かない。`b7c419f9` と同じ形)。この作業でも実際に踏んだ。
+  **変異検証は 19 形 (production 13 / ゲート側 6)。** production: 素の補間 /
+  クォートを書式の外へ出す / decoy (独立ビルダ + ダミーの `?` + 要素数で分岐) /
+  `Insert` の placeholder を `Sprintf` 化 / `pgArrayLiteral` のエスケープを外す 3 形
+  (`\` のみ・`"` のみ・両方) / 定数連結で折り返した違反形 / 値をクォートで囲んだ
+  英文メッセージ (**検出される**。SQL でないので allowlist に値の出どころを書く形) /
+  allowlist のキーと同名の宣言を同じファイルへ足す / **落ちてはいけない 2 形**
+  (局所変数 `args` を `params` へ改名 / `lit := pgArrayLiteral(...)` と局所変数に受ける) /
+  **既知の穴 1 形** (pin 対象の `Sprintf` を `_ =` で残したまま組み立てを文字列連結へ
+  移すと**静的ゲートは素通りし、実 DB の往復テストだけが落とす**)。
+  ゲート側: `%%` の skip を外す / クォートの状態を反転させない / 定数畳み込みを
+  無効化 / 走査ルートから `internal` / `cmd` / `plugin` をそれぞれ外す 3 形
+  (`cmd` と `plugin` は名指しの一覧が `internal` に偏っていると黙って通る。
+  レビューで指摘されて両 root のアンカーを足した)。
+  **クォートが釣り合わない書式は「判定できない」として報告する。** パリティの
+  状態機械なので、`-- don't touch` を先頭に置くだけで以降の内外が反転し、**後続の
+  本物の違反が 0 件に化ける** (実測)。逆に `can't resolve %s` のような英文は、
+  存在しないリテラルの内側だと判定される。安全側へ倒さず、最初のクォートより後ろの
+  動詞をすべて報告する形にした (corpus は不変)。
+  **キーの曖昧さも見る。** `<file>#<func>` は Go がパッケージ関数と別型のメソッドに
+  同名を許すので衝突しうる。ただし同名自体は正当なので (`internal/activitypub/types.go`
+  は別々の型に `UnmarshalJSON` を持つ)、落とすのは**その key を allowlist か名指しの
+  一覧が使っているときだけ**にしてある。
+  **分担が分かれているのが要点** — 書式の退行は静的ゲートが落とし、エスケープの
+  退行は書式の形が変わらないので静的ゲートには見えず、`TestPgArrayLiteral_*` と
+  実 DB の往復テストが受け持つ。逆に述語の退行は実 DB では何も起きない。
+  実 DB テストが担うのは **Go の golden と往復では表現できない側** — 配列リテラルの
+  入力パーサは PostgreSQL が権威なので、`pgArrayLiteral` と `parsePgTextArray` を
+  対称に壊して Go 内では辻褄が合う形でも、往復の値が変われば落ちる
+  (`\` / `"` については `TestPgArrayLiteral_EscapesQuotesAndBackslashes` が
+  書き側の出力を golden で pin しているので、そちらでも落ちる)。
+  **射程外**: taint 解析はしない (#2644 と同じ理由)。書式を `const` や変数に入れた
+  `Sprintf`、書式の途中に変数を連結した形、`fmt.Sprintf` 以外 (`Fprintf` / `Errorf`)、
+  `fmt` の別名 import、文字列連結や `strings.Builder` で組む SQL、`Raw` / `Exec` へ渡す
+  非リテラル、別 module の `plugins/`、`internal` / `cmd` / `plugin` 以外のツリー。
+  **名前で見る走査は名前で避けられる** (#3135) ので、確実に落とすのは
+  「普通に書いたときに踏む形」に寄せてある。
 - **2026-09-21**: `make gates` に `ipshape-check` を追加 (#3136)。`make help` の target は 134 → 135。**#3066 の完了条件「IP 情報が一般ユーザー向け API や連合へ露出しない」の担保が shapecheck の golden 照合しか無かった** — `UserLite` に `json:"lastIPs"` を足して `make shapecheck` は PASS する (実測)。**いまは漏れていない**が、担保が無かった。
   **reflect で型を手で並べない。** 初版はそう書いて `entity.MeDetailed` (= `/api/i`) を落としていた。**AST で全 struct の json タグを読む**形にすると型を列挙しないので落としようがない。走査は `internal/entity` / `internal/activitypub` だけでは足りない — **handler が自分のファイルに宣言した response struct も stream のイベント payload も、そのまま wire の形になる**ので `internal/api` / `internal/server` / `internal/stream` も入れる。実測は**要素 2,332 / ユニークキー 755** (数え方: `scanJSONTags` が `publicShapeDirs` 全体で返した要素数と、その `Key` のユニーク数)。IP を指すキーを持つのは 11 件で、10 件は `internal/api/admin` の IP 照会 API (モデレーター + policy + scope の 3 段)、1 件はレスポンスに出ない入力構造体。
   **語の切り方は片側に寄せると必ず穴が開く。** 大文字のたびに割ると `lastIPs` が `last` + `i` + `ps` になって Go の命名規約に素直な名前だけが素通りし、「小文字/数字の直後の大文字」だけにすると `IPAddr` / `IPHash` / `IPList` が 1 語に潰れて素通りする。**2 稿にわたって片側ずつ落とした** (どちらも敵対的レビューで実測)。境界は 2 つ要る — 小文字/数字の直後と、**大文字が 2 つ以上続いた後の、小文字が続く大文字**。さらに **`address` 系の alternative も要る** — 割れるのは `IPAddress` だけで `IPaddress` / `ipaddress` は1 語に潰れる。「割るから要らない」と書いて一度落とし、3 周目で実測された。

@@ -117,8 +117,10 @@ var activeUsersIntegrationSchema = Schema{
 func truncateChartTable(t *testing.T, chartName string) {
 	t.Helper()
 	requirePostgres(t)
-	testDB.Exec(`TRUNCATE TABLE "` + HourTableName(chartName) + `"`)
-	testDB.Exec(`TRUNCATE TABLE "` + DayTableName(chartName) + `"`)
+	// 戻り値を検査する。黙って失敗すると前のテストの行が残り、原因から遠い
+	// 症状に化ける (CLAUDE.md Section 4)。
+	require.NoError(t, testDB.Exec(`TRUNCATE TABLE "`+HourTableName(chartName)+`"`).Error)
+	require.NoError(t, testDB.Exec(`TRUNCATE TABLE "`+DayTableName(chartName)+`"`).Error)
 }
 
 func TestIntegration_GormRepository_InsertAndFindCurrent(t *testing.T) {
@@ -292,6 +294,66 @@ func TestIntegration_GormRepository_UniqueIncrementApplyDeltas(t *testing.T) {
 	uniques, ok := got.Cols["read:unique"].([]string)
 	require.True(t, ok, "unique-temp は []string に正規化されること")
 	assert.ElementsMatch(t, []string{"u1", "u2"}, uniques)
+}
+
+// TestIntegration_GormRepository_UniqueAppendBindsHostileValues pins that
+// unique-temp values survive a round trip through PostgreSQL unchanged.
+//
+// unique 配列の要素は行の値そのもの (外部由来の文字列を含みうる) なので、
+// 構造上意味を持つ文字を含みうる。`ApplyDeltas` は配列リテラルを SQL テキストへ
+// 入れず `?::varchar[]` で bind するので、以下はすべてただの文字列として往復する。
+//
+// **既存の unique テストは値が `u1` / `u2` だけで、この性質を見ていない** —
+// 配列リテラルを書式へ差し込む形に変えても緑のまま通る (実測)。
+//
+// **このテストが受け持つのは静的ゲートには見えない側**。書式そのものの退行は
+// `make sqlbind-check` が静的に落とす (あちらは `ApplyDeltas` が組む書式集合を
+// pin している) ので、ここは静的には見えない側を受け持つ — `pgArrayLiteral` の
+// `\` / `"` のエスケープを片方でも外すと落ちる (実測。この 2 つは
+// `TestPgArrayLiteral_EscapesQuotesAndBackslashes` が書き側の出力を golden で
+// pin しているので、そちらでも落ちる)。**Go 内で完結する
+// `TestPgArrayLiteral_RoundTrip` では代わりにならない** — 書き側と読み側を対称に
+// 壊すとあちらは通るが、ここは PostgreSQL の入力パーサが権威なので落ちる (実測)。
+//
+// **クォートを含む値は load-bearing。** 「整理」して落とすと、素の補間に対する
+// 振る舞い側の検出が消える。
+//
+// **NUL は意図的に入れていない。** PostgreSQL がプロトコル層で弾くので値の
+// 往復として成立しない (#3025 と同型)。ここへ届く値はいずれも正規化済みか
+// ID 形式で、NUL を含みえない。
+func TestIntegration_GormRepository_UniqueAppendBindsHostileValues(t *testing.T) {
+	truncateChartTable(t, activeUsersIntegrationSchema.Name)
+	repo := NewRepository(testDB, activeUsersIntegrationSchema)
+	ctx := context.Background()
+
+	row, err := repo.Insert(ctx, SpanHour, "", 4000, map[string]any{
+		"read": int64(0),
+	})
+	require.NoError(t, err)
+
+	hostile := []string{
+		`plain`,
+		`quote'inside`,
+		`dquote"inside`,
+		`back\slash`,
+		`brace{}pair`,
+		`comma,separated`,
+		"tab\tand\nnewline",
+		`日本語とマルチバイト`,
+	}
+	require.NoError(t, repo.ApplyDeltas(ctx, SpanHour, row.ID, nil,
+		map[string][]string{"read": hostile},
+		map[string]int64{"read": int64(len(hostile))},
+	))
+
+	got, err := repo.FindCurrent(ctx, SpanHour, "", 4000)
+	require.NoError(t, err)
+	uniques, ok := got.Cols["read:unique"].([]string)
+	require.True(t, ok, "unique-temp は []string に正規化されること")
+	// 値がそのまま戻ること。エスケープが片道だけ壊れると件数は合うので、
+	// 濃度ではなく要素そのものを突き合わせる。
+	assert.ElementsMatch(t, hostile, uniques)
+	assert.Equal(t, int64(len(hostile)), toInt64(got.Cols["read"]))
 }
 
 func TestIntegration_GormRepository_ResetUniqueTempColumns(t *testing.T) {

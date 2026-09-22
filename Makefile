@@ -33,7 +33,7 @@ help: ## この一覧を表示 (引数なしの make でも出る)
 
 check: fmt lint test ## コミット前の必須 3 点 (fmt → lint → test)
 
-gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check ipshape-check iprecord-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
+gates: shapecheck errorid-check limitspec-check perm-check wiring-check catalog-check notfound-check nulparam-check compose-check testflags-check migrationdoc-check mdtable-check notiftype-check pluginembed-check dockerignore-check secretfield-check ipshape-check iprecord-check sqlbind-check submodulepin-check gaterun-check ## 静的 parity ゲートを一括実行
 
 version: ## mk-go / 互換 Misskey / submodule のバージョンを表示
 	@printf "mk-go            : %s\n" "$$(sed -n 's/^var MkGoVersion = "\(.*\)"/\1/p' internal/config/config.go)"
@@ -1098,6 +1098,18 @@ iprecord-check: ## 利用者の IP を記録する call site が allowlist の�
 	# テストは叩いた経路しか見ない (実測で `SigninFlow` と signin-with-passkey に
 	# 記録を足す変異が素通りした)。
 	go test ./internal/entitycompat/... -run 'TestIPRecordCallSitesAreAllowlisted|TestRecordSuccessfulSigninCallSitesAreAllowlisted|TestPasskeyIPRecordComesAfterFailures' -count=1 -v
+
+.PHONY: sqlbind-check
+sqlbind-check: ## 値をクォート内へ差し込まずバインドしているか検査
+	# 列名やテーブル名の解決で fmt.Sprintf は要るので、書式を組むこと自体は残る。
+	# **書式動詞がクォートで開いたリテラルの内側に在る**形だけを禁じる。
+	# **「これは SQL か」は判定しない** — キーワードで判定すると両方向に壊れる。
+	# 普通の英文が部分一致で SQL 扱いされて事実と逆の診断が出る一方、
+	# `'%s'::varchar[]` のような断片はキーワードに当たらず収集すらされない (実測)。
+	# 書式は定数連結を畳んでから見る (折り返すと丸ごと検査対象から消えるため)。
+	# chart の unique 配列は別に名指しで見る。**ApplyDeltas が組む書式集合を
+	# そのまま pin する** — 「プレースホルダが在るか」はダミーの ? 1 つで満たせる。
+	go test ./internal/entitycompat/... -run 'TestSQLBindVerbDetectionShapes|TestSQLBindFoldsConcatenatedFormats|TestSQLBindNoVerbInsideQuotedLiteral|TestSQLBindChartUniqueArrayIsParameterised' -count=1 -v
 
 .PHONY: dockerignore-check
 dockerignore-check: ## .dockerignore がシークレットと利用者データを除外しているか検査
