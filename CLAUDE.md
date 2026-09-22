@@ -910,7 +910,18 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   `go vet` と同じ扱いにできる。**CodeQL の `actions` とは別物** — あちらは script injection
   などのセキュリティを見るが、式の typo・存在しない `needs` 参照・`runs-on` の誤りは見ない。
   workflow のミスは動かすまで分からない (#2940 で実際に踏んだ) ので、静的に落とす側が要る。
-  実測で**既存 12 workflow の指摘は 0 件**だったので、そのまま required にできる。
+  **導入時に 10 件出た。うち 1 件は実バグ** — `echo "... \`fork frontend の独自変更\` ..."`
+  が二重引用符の中にバッククォートを置いており、コマンド置換として実行されていた
+  (実測で `fork: command not found` が出てメッセージが欠落する)。同じ step の別の行は
+  `\`` でエスケープ済みで、片側だけ漏れていた。残り 9 件は SC2086 の引用漏れ 4、
+  sed の後方参照と Markdown のバッククォートに対する SC2016 の誤検知 3、`$(echo $x)` の
+  SC2116 / SC2006 が各 1。誤検知は `# shellcheck disable=` を**その行の直前**に置く
+  (ブロック先頭に置くと以降の本物まで黙る)。
+  **shellcheck が無いと黙って検査が減る。** actionlint は `run:` の中身を shellcheck へ
+  渡すが、無ければその分だけ落として**成功で返す**。CI の ubuntu-latest には入っているので、
+  **手元だけ通って CI で落ちる** — 実際に踏んだ (手元 0 件 / CI 10 件)。
+  `make actionlint` は shellcheck が無ければ落とす (`MK_PLUGIN_TESTS_REQUIRE_DB` /
+  `MK_FRONTEND_GATES_REQUIRE_SUBMODULE` と同じ「skip を成功として扱わない」形)。
   **版の定義は Makefile に 1 つだけ置き、CI は `make actionlint` を呼ぶ。** CI 側に書き写すと
   #2841 (`make test` と CI の flag がずれていた) と同じドリフトが起きる。`@latest` にしない —
   新しい検査が増えたときに、workflow を触っていない PR が赤くなる。

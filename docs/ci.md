@@ -47,6 +47,14 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 **版は Makefile に固定してある。** 新しい検査が増えても、workflow を触っていない PR が
 赤くなることはない。上げるときは `make actionlint` のバージョンを明示的に変える。
 
+**shellcheck が無いと黙って検査が減る。** actionlint は `run:` の中身を shellcheck へ
+渡すが、無ければその分だけ落として**成功で返す**。CI の ubuntu-latest には入っているので、
+手元だけ通って CI で落ちる (導入時に実際に踏んだ。手元 0 件 / CI 10 件)。`make actionlint`
+は shellcheck が無ければ落とすので、出たら入れる (`sudo apt install shellcheck`)。
+
+誤検知は `# shellcheck disable=SCxxxx` を**その行の直前**に置く。ブロックの先頭に置くと
+以降の本物まで黙る。
+
 ### `lint` が落ちたとき
 
 `gofmt` 差分なら `make fmt` を実行して再 push。`go vet` は repository interface に

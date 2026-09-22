@@ -158,6 +158,7 @@ jobs:
             exit 0
           fi
           {
+            # shellcheck disable=SC2016  # バッククォートは Markdown の記法で、展開させない
             printf 'nightly workflow `%s` が失敗しました。\n\n' "dropin-frontend-e2e"
             printf -- '- 失敗した run: %s\n' "$RUN_URL"
             printf -- '- 対象 branch: develop\n\n'

@@ -70,6 +70,7 @@ jobs:
             echo "::error::docs/divergence.md の pin 行が $n 件です。ちょうど 1 件にしてください (書式: **現在の pin は \`<tag>\` (\`<短縮 SHA>\`)。**)"
             exit 1
           fi
+          # shellcheck disable=SC2016  # sed の後方参照なのでシェルに展開させない
           tag=$(sed -n 's/.*\*\*現在の pin は `\([^`]*\)`.*/\1/p' docs/divergence.md)
           # annotated tag なら `^{}` が commit を指す。fork の tag は lightweight だが
           # 将来変わっても壊れないよう両方見る。
@@ -93,6 +94,7 @@ jobs:
           # gate では見られない。`git ls-remote --tags` は ref の一覧だけを取るので
           # 1 往復で済む (実測 0.5 秒 / 121 tag)。
           git ls-remote --tags "$url" | sed 's/.*refs\/tags\///; s/\^{}$//' | sort -u > /tmp/fork-tags.txt
+          # shellcheck disable=SC2016  # sed の後方参照なのでシェルに展開させない
           sed -n 's/^| `\([0-9][0-9.]*-mk\.[0-9][0-9]*[a-z]*\)` |.*/\1/p' docs/divergence.md | sort -u > /tmp/doc-tags.txt
           doccount=$(wc -l < /tmp/doc-tags.txt)
 
@@ -103,7 +105,7 @@ jobs:
           # 「抽出できた数 == 表の行数 == 宣言値」が閉じる。
           declared=$(sed -n 's/^| fork frontend の独自変更 | \([0-9]*\) tag .*/\1/p' docs/divergence.md)
           if [ -z "$declared" ]; then
-            echo "::error::docs/divergence.md 冒頭サマリの `fork frontend の独自変更` 行から件数を読めませんでした。書式を変えたならこの step も直してください"
+            echo "::error::docs/divergence.md 冒頭サマリの \`fork frontend の独自変更\` 行から件数を読めませんでした。書式を変えたならこの step も直してください"
             exit 1
           fi
           if [ "$doccount" != "$declared" ]; then
@@ -112,7 +114,7 @@ jobs:
           fi
           missing=$(comm -23 /tmp/doc-tags.txt /tmp/fork-tags.txt)
           if [ -n "$missing" ]; then
-            echo "::error::docs/divergence.md §4-2 の tag が $url にありません: $(echo $missing)"
+            echo "::error::docs/divergence.md §4-2 の tag が $url にありません: $(echo "$missing" | tr '\n' ' ')"
             exit 1
           fi
           echo "§4-2 tags ok: $doccount 件すべて fork に存在"
@@ -245,7 +247,7 @@ jobs:
         id: shard
         run: |
           ALL=$(go list -f '{{if (or .TestGoFiles .XTestGoFiles)}}{{.ImportPath}}{{end}}' ./... | awk 'NF' | sort)
-          PKGS=$(echo "$ALL" | awk -v s=$SHARD_INDEX -v n=$SHARD_TOTAL 'NR % n == (s % n)' | tr '\n' ' ')
+          PKGS=$(echo "$ALL" | awk -v s="$SHARD_INDEX" -v n="$SHARD_TOTAL" 'NR % n == (s % n)' | tr '\n' ' ')
           echo "Shard $SHARD_INDEX/$SHARD_TOTAL packages:"
           echo "$PKGS" | tr ' ' '\n' | sed '/^$/d'
           echo "pkgs=$PKGS" >> "$GITHUB_OUTPUT"
@@ -283,7 +285,7 @@ jobs:
             -count=1 \
             -shuffle=3 \
             -timeout 10m \
-            -coverprofile=coverage-shard-${SHARD_INDEX}.out \
+            "-coverprofile=coverage-shard-${SHARD_INDEX}.out" \
             -covermode=atomic 2>&1 | tee test_output.txt
 
       - name: Enforce per-package coverage

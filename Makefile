@@ -368,6 +368,18 @@ actionlint: ## GitHub Actions の workflow を検査
 	#
 	# **バージョンを固定する。** 新しい検査が増えると、workflow を触っていない PR が
 	# 赤くなる。`lint` は required check なので、上げるのは明示的な操作にする。
+	#
+	# **shellcheck が無いと黙って検査が減る。** actionlint は `run:` の中身を
+	# shellcheck へ渡すが、無ければその分だけ落として成功で返す。CI の
+	# ubuntu-latest には入っているので、**手元だけ通って CI で落ちる**
+	# (実測: 手元 0 件 / CI 10 件。うち 1 件は二重引用符の中のバッククォートが
+	# コマンド置換として実行される実バグだった)。skip を成功として扱わない。
+	@command -v shellcheck >/dev/null 2>&1 || { \
+		echo "shellcheck が見つかりません。" >&2; \
+		echo "actionlint は run: の中身をこれに渡すので、無いまま実行すると CI より弱い検査になります。" >&2; \
+		echo "  Debian/Ubuntu: sudo apt install shellcheck" >&2; \
+		echo "  承知で飛ばす:   MK_ACTIONLINT_ALLOW_NO_SHELLCHECK=1 make actionlint" >&2; \
+		[ -n "$$MK_ACTIONLINT_ALLOW_NO_SHELLCHECK" ]; }
 	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
 # Migration
