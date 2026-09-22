@@ -53,7 +53,7 @@ func TestBlockProcessor_PermanentErrors_SkipRetry(t *testing.T) {
 		task := queue.NewBlockTask(queue.BlockPayload{BlockerID: "a", BlockeeID: "b"})
 		err := p.Handle(context.Background(), task)
 		require.Error(t, err, sentinel.Error())
-		assert.True(t, errors.Is(err, driver.SkipRetry), sentinel.Error())
+		assert.True(t, errors.Is(err, driver.ErrSkipRetry), sentinel.Error())
 	}
 }
 
@@ -63,7 +63,7 @@ func TestBlockProcessor_GenericError_Retries(t *testing.T) {
 	task := queue.NewBlockTask(queue.BlockPayload{BlockerID: "a", BlockeeID: "b"})
 	err := p.Handle(context.Background(), task)
 	assert.Error(t, err)
-	assert.False(t, errors.Is(err, driver.SkipRetry), "transient error は retry させる")
+	assert.False(t, errors.Is(err, driver.ErrSkipRetry), "transient error は retry させる")
 }
 
 func TestBlockProcessor_MissingFields_SkipsRetry(t *testing.T) {
@@ -72,7 +72,7 @@ func TestBlockProcessor_MissingFields_SkipsRetry(t *testing.T) {
 	task := queue.NewBlockTask(queue.BlockPayload{BlockeeID: "rA"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 	assert.Empty(t, fb.calls)
 }
 
@@ -81,7 +81,7 @@ func TestBlockProcessor_NoBlocker_SkipsRetry(t *testing.T) {
 	task := queue.NewBlockTask(queue.BlockPayload{BlockerID: "a", BlockeeID: "b"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }
 
 func TestBlockProcessor_BadPayload_SkipsRetry(t *testing.T) {
@@ -89,5 +89,5 @@ func TestBlockProcessor_BadPayload_SkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeBlock, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }

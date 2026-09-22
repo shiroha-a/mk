@@ -14,8 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubError is a sentinel error used to simulate repository failures.
-var stubError = errors.New("stub repo error")
+// errStub is a sentinel error used to simulate repository failures.
+var errStub = errors.New("stub repo error")
 
 // failingUserRepo wraps MockUserRepository and lets each method optionally fail.
 type failingUserRepo struct {
@@ -26,14 +26,14 @@ type failingUserRepo struct {
 
 func (f *failingUserRepo) IncrementFollowingCount(userID string, delta int) error {
 	if f.failIncrementFollowing {
-		return stubError
+		return errStub
 	}
 	return f.MockUserRepository.IncrementFollowingCount(userID, delta)
 }
 
 func (f *failingUserRepo) IncrementFollowersCount(userID string, delta int) error {
 	if f.failIncrementFollowers {
-		return stubError
+		return errStub
 	}
 	return f.MockUserRepository.IncrementFollowersCount(userID, delta)
 }
@@ -48,21 +48,21 @@ type failingFollowingRepo struct {
 
 func (f *failingFollowingRepo) Exists(followerID, followeeID string) (bool, error) {
 	if f.failExists {
-		return false, stubError
+		return false, errStub
 	}
 	return f.MockFollowingRepository.Exists(followerID, followeeID)
 }
 
 func (f *failingFollowingRepo) Create(x *model.Following) error {
 	if f.failCreate {
-		return stubError
+		return errStub
 	}
 	return f.MockFollowingRepository.Create(x)
 }
 
 func (f *failingFollowingRepo) Delete(x *model.Following) error {
 	if f.failDelete {
-		return stubError
+		return errStub
 	}
 	return f.MockFollowingRepository.Delete(x)
 }
@@ -77,21 +77,21 @@ type failingFollowRequestRepo struct {
 
 func (f *failingFollowRequestRepo) Exists(followerID, followeeID string) (bool, error) {
 	if f.failExists {
-		return false, stubError
+		return false, errStub
 	}
 	return f.MockFollowRequestRepository.Exists(followerID, followeeID)
 }
 
 func (f *failingFollowRequestRepo) Create(r *model.FollowRequest) error {
 	if f.failCreate {
-		return stubError
+		return errStub
 	}
 	return f.MockFollowRequestRepository.Create(r)
 }
 
 func (f *failingFollowRequestRepo) Delete(r *model.FollowRequest) error {
 	if f.failDelete {
-		return stubError
+		return errStub
 	}
 	return f.MockFollowRequestRepository.Delete(r)
 }
@@ -589,10 +589,10 @@ func TestAcceptRequest_BlockingCheckerFirstCheckError(t *testing.T) {
 	addUser(t, userRepo, "bob", true)
 	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
 	require.NoError(t, err)
-	svc.SetBlockingChecker(&stubBlockingChecker{err: stubError})
+	svc.SetBlockingChecker(&stubBlockingChecker{err: errStub})
 
 	err = svc.AcceptRequest("bob", "alice")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestAcceptRequest_BlockingCheckerSecondCheckError(t *testing.T) {
@@ -604,7 +604,7 @@ func TestAcceptRequest_BlockingCheckerSecondCheckError(t *testing.T) {
 	svc.SetBlockingChecker(&stubBlockingCheckerForwardError{})
 
 	err = svc.AcceptRequest("bob", "alice")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // blockingChecker が配線されていてもブロック関係が無ければ通常どおり承認できる
@@ -735,7 +735,7 @@ type selectiveFindFailRepo struct {
 
 func (r *selectiveFindFailRepo) FindByPair(followerID, followeeID string) (*model.FollowRequest, error) {
 	if followerID == r.failPair[0] && followeeID == r.failPair[1] {
-		return nil, stubError
+		return nil, errStub
 	}
 	return r.MockFollowRequestRepository.FindByPair(followerID, followeeID)
 }
@@ -749,7 +749,7 @@ type followerLookupFailRepo struct {
 
 func (r *followerLookupFailRepo) FindByID(id string) (*model.User, error) {
 	if id == r.failID {
-		return nil, stubError
+		return nil, errStub
 	}
 	return r.MockUserRepository.FindByID(id)
 }
@@ -814,7 +814,7 @@ func TestCancelFollowRequestsBetween_ContinuesAfterError(t *testing.T) {
 	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), frRepo)
 
 	err := svc.CancelFollowRequestsBetween("alice", "bob")
-	assert.ErrorIs(t, err, stubError, "失敗した direction の error を返す")
+	assert.ErrorIs(t, err, errStub, "失敗した direction の error を返す")
 	assert.Empty(t, frRepo.Requests, "1 方向が失敗してももう片方は処理する")
 }
 
@@ -845,7 +845,7 @@ func TestCancelFollowRequestsBetween_CancelRequestErrorPropagates(t *testing.T) 
 	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), frRepo)
 
 	err := svc.CancelFollowRequestsBetween("alice", "bob")
-	assert.ErrorIs(t, err, stubError, "削除失敗は握り潰さない")
+	assert.ErrorIs(t, err, errStub, "削除失敗は握り潰さない")
 }
 
 // remote follower 側の RejectRequest が失敗したら error を返す。
@@ -862,7 +862,7 @@ func TestCancelFollowRequestsBetween_RejectRequestErrorPropagates(t *testing.T) 
 	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), frRepo)
 
 	err := svc.CancelFollowRequestsBetween("bob", "remote1")
-	assert.ErrorIs(t, err, stubError, "削除失敗は握り潰さない")
+	assert.ErrorIs(t, err, errStub, "削除失敗は握り潰さない")
 }
 
 // リモートfollowerからのリクエストをrejectしたときにfederation hookの
@@ -973,7 +973,7 @@ func TestFollow_ExistsError(t *testing.T) {
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
 	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestFollow_CreateError(t *testing.T) {
@@ -984,7 +984,7 @@ func TestFollow_CreateError(t *testing.T) {
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
 	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestFollow_RequestExistsError(t *testing.T) {
@@ -996,7 +996,7 @@ func TestFollow_RequestExistsError(t *testing.T) {
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
 	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestFollow_RequestCreateError(t *testing.T) {
@@ -1008,7 +1008,7 @@ func TestFollow_RequestCreateError(t *testing.T) {
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
 	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestFollow_IncrementFollowingError(t *testing.T) {
@@ -1020,7 +1020,7 @@ func TestFollow_IncrementFollowingError(t *testing.T) {
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
 	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestFollow_IncrementFollowersError(t *testing.T) {
@@ -1032,7 +1032,7 @@ func TestFollow_IncrementFollowersError(t *testing.T) {
 	svc := newSvcWith(userRepo, fRepo, frRepo)
 
 	_, err := svc.Follow("alice", "bob", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestUnfollow_DeleteError(t *testing.T) {
@@ -1046,7 +1046,7 @@ func TestUnfollow_DeleteError(t *testing.T) {
 	svc := newSvcWith(mockUR, fRepo, frRepo)
 
 	err := svc.Unfollow("alice", "bob")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestUnfollow_IncrementFollowingError(t *testing.T) {
@@ -1059,7 +1059,7 @@ func TestUnfollow_IncrementFollowingError(t *testing.T) {
 	svc := newSvcWith(userRepo, mockFR, frRepo)
 
 	err := svc.Unfollow("alice", "bob")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestUnfollow_IncrementFollowersError(t *testing.T) {
@@ -1072,7 +1072,7 @@ func TestUnfollow_IncrementFollowersError(t *testing.T) {
 	svc := newSvcWith(userRepo, mockFR, frRepo)
 
 	err := svc.Unfollow("alice", "bob")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestAcceptRequest_DeleteError(t *testing.T) {
@@ -1084,7 +1084,7 @@ func TestAcceptRequest_DeleteError(t *testing.T) {
 	svc := newSvcWith(mockUR, testutil.NewMockFollowingRepository(), frRepo)
 
 	err := svc.AcceptRequest("bob", "alice")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestAcceptRequest_FollowingCreateError(t *testing.T) {
@@ -1097,7 +1097,7 @@ func TestAcceptRequest_FollowingCreateError(t *testing.T) {
 	svc := newSvcWith(mockUR, fRepo, mockFRR)
 
 	err := svc.AcceptRequest("bob", "alice")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestAcceptRequest_IncrementFollowingError(t *testing.T) {
@@ -1109,7 +1109,7 @@ func TestAcceptRequest_IncrementFollowingError(t *testing.T) {
 	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), mockFRR)
 
 	err := svc.AcceptRequest("bob", "alice")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestAcceptRequest_IncrementFollowersError(t *testing.T) {
@@ -1121,7 +1121,7 @@ func TestAcceptRequest_IncrementFollowersError(t *testing.T) {
 	svc := newSvcWith(userRepo, testutil.NewMockFollowingRepository(), mockFRR)
 
 	err := svc.AcceptRequest("bob", "alice")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // recordingHook captures notification hook calls.
@@ -1222,9 +1222,9 @@ func TestFollow_BlockingCheckerReverseError(t *testing.T) {
 	svc, ur, _, _ := newSvc(t)
 	addUser(t, ur, "alice", false)
 	addUser(t, ur, "bob", false)
-	svc.SetBlockingChecker(&stubBlockingChecker{err: stubError})
+	svc.SetBlockingChecker(&stubBlockingChecker{err: errStub})
 	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // stubBlockingCheckerForwardError errors only on forward (follower->followee) check.
@@ -1235,7 +1235,7 @@ type stubBlockingCheckerForwardError struct {
 func (s *stubBlockingCheckerForwardError) IsBlocked(_, _ string) (bool, error) {
 	s.calls++
 	if s.calls == 2 {
-		return false, stubError
+		return false, errStub
 	}
 	return false, nil
 }
@@ -1246,7 +1246,7 @@ func TestFollow_BlockingCheckerForwardError(t *testing.T) {
 	addUser(t, ur, "bob", false)
 	svc.SetBlockingChecker(&stubBlockingCheckerForwardError{})
 	_, err := svc.Follow("bob", "alice", following.FollowOptions{})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestService_NotificationHook_OnAccept(t *testing.T) {

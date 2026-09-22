@@ -30,7 +30,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var stubError = errors.New("stub error")
+var errStub = errors.New("stub error")
 
 // brokenStorage points the LocalStorage rootDir at an existing file so that
 // any Put/Delete operation fails.
@@ -162,7 +162,7 @@ type failingFileRepo struct {
 }
 
 func (f *failingFileRepo) Create(_ *model.DriveFile) error {
-	return stubError
+	return errStub
 }
 
 func TestUpload_RepoCreateError(t *testing.T) {
@@ -170,7 +170,7 @@ func TestUpload_RepoCreateError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := drive.NewService(repo, testutil.NewMockDriveFolderRepository(), drive.NewLocalStorage(t.TempDir(), ""), idGen)
 	_, err := svc.Upload(context.Background(), drive.UploadInput{User: &model.User{ID: "u1"}, Body: []byte("x")})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestUpload_StoragePutError(t *testing.T) {
@@ -184,7 +184,7 @@ func TestUpload_StoragePutError(t *testing.T) {
 // errReader implements io.Reader and always returns an error.
 type errReader struct{}
 
-func (errReader) Read(_ []byte) (int, error) { return 0, stubError }
+func (errReader) Read(_ []byte) (int, error) { return 0, errStub }
 
 func TestUpload_AccessKeyGenError(t *testing.T) {
 	restore := drive.SetRandReaderForTest(errReader{})
@@ -728,7 +728,7 @@ type failingUpdateFileRepo struct {
 }
 
 func (f *failingUpdateFileRepo) Update(_ string, _ map[string]any) error {
-	return stubError
+	return errStub
 }
 
 func TestUpdate_RepoUpdateError(t *testing.T) {
@@ -740,7 +740,7 @@ func TestUpdate_RepoUpdateError(t *testing.T) {
 	svc := drive.NewService(repo, testutil.NewMockDriveFolderRepository(), drive.NewLocalStorage(t.TempDir(), ""), idGen)
 	newName := "x"
 	_, err := svc.Update(&model.User{ID: "u1"}, "f1", drive.UpdateInput{Name: &newName})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // --- Delete ---
@@ -812,7 +812,7 @@ type failingCreateFolderRepo struct {
 }
 
 func (f *failingCreateFolderRepo) Create(_ *model.DriveFolder) error {
-	return stubError
+	return errStub
 }
 
 func TestCreateFolder_RepoError(t *testing.T) {
@@ -821,7 +821,7 @@ func TestCreateFolder_RepoError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := drive.NewService(testutil.NewMockDriveFileRepository(), repo, drive.NewLocalStorage(t.TempDir(), ""), idGen)
 	_, err := svc.CreateFolder(&model.User{ID: "u1"}, "x", nil)
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestShowFolder_NilUser(t *testing.T) {
@@ -906,7 +906,7 @@ type failingUpdateFolderRepo struct {
 }
 
 func (f *failingUpdateFolderRepo) Update(_ string, _ map[string]any) error {
-	return stubError
+	return errStub
 }
 
 func TestUpdateFolder_RepoError(t *testing.T) {
@@ -918,7 +918,7 @@ func TestUpdateFolder_RepoError(t *testing.T) {
 	svc := drive.NewService(testutil.NewMockDriveFileRepository(), repo, drive.NewLocalStorage(t.TempDir(), ""), idGen)
 	newName := "x"
 	_, err := svc.UpdateFolder(&model.User{ID: "u1"}, "c", drive.UpdateFolderInput{Name: &newName})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestDeleteFolder_NotFound(t *testing.T) {
@@ -950,7 +950,7 @@ type failingHasChildrenRepo struct {
 }
 
 func (f *failingHasChildrenRepo) HasChildren(_ string) (bool, error) {
-	return false, stubError
+	return false, errStub
 }
 
 func TestDeleteFolder_HasChildrenError(t *testing.T) {
@@ -961,7 +961,7 @@ func TestDeleteFolder_HasChildrenError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := drive.NewService(testutil.NewMockDriveFileRepository(), repo, drive.NewLocalStorage(t.TempDir(), ""), idGen)
 	err := svc.DeleteFolder(&model.User{ID: "u1"}, "p")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // --- Streaming publisher hooks (Step K-7) ----------------------------------
@@ -1067,7 +1067,7 @@ type failingFindByIDRepo struct {
 func (r *failingFindByIDRepo) FindByID(id string) (*model.DriveFile, error) {
 	r.calls++
 	if r.calls > 1 {
-		return nil, stubError
+		return nil, errStub
 	}
 	return r.MockDriveFileRepository.FindByID(id)
 }
@@ -1081,7 +1081,7 @@ func TestUpdate_FindByIDReloadError(t *testing.T) {
 	svc := drive.NewService(repo, testutil.NewMockDriveFolderRepository(), drive.NewLocalStorage(t.TempDir(), ""), idGen)
 	name := "renamed"
 	_, err := svc.Update(&model.User{ID: "u1"}, "f1", drive.UpdateInput{Name: &name})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // failingDeleteFileRepo causes fileRepo.Delete to fail.
@@ -1089,7 +1089,7 @@ type failingDeleteFileRepo struct {
 	*testutil.MockDriveFileRepository
 }
 
-func (r *failingDeleteFileRepo) Delete(_ *model.DriveFile) error { return stubError }
+func (r *failingDeleteFileRepo) Delete(_ *model.DriveFile) error { return errStub }
 
 func TestDelete_FileRepoDeleteError(t *testing.T) {
 	mock := testutil.NewMockDriveFileRepository()
@@ -1099,7 +1099,7 @@ func TestDelete_FileRepoDeleteError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := drive.NewService(repo, testutil.NewMockDriveFolderRepository(), drive.NewLocalStorage(t.TempDir(), ""), idGen)
 	err := svc.Delete(&model.User{ID: "u1"}, "f1")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // ---------------------------------------------------------------------------

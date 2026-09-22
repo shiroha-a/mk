@@ -228,7 +228,7 @@ func (p *InboxProcessor) SetSignatureCapabilityRecorder(r SignatureCapabilityRec
 // Handle dispatches a single inbox task. driver runtime invokes this for
 // every dequeued task.
 //
-// payload decode 失敗は再 retry しても無意味なので driver.SkipRetry で
+// payload decode 失敗は再 retry しても無意味なので driver.ErrSkipRetry で
 // 確定 fail にする。worker 側の verify 失敗 / host block も retry せず
 // silently drop する (sender に retry 要求しても解決しないため)。
 // federation.ErrUnsupportedActivity は handler 不在 (= 受け付けたが何も
@@ -274,7 +274,7 @@ func (p *InboxProcessor) recordInboxTelemetry(host string, class deliveryhealth.
 func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 	payload, err := queue.DecodeInboxPayload(t.Payload())
 	if err != nil {
-		return fmt.Errorf("decode inbox payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode inbox payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 
 	// payload に Headers が含まれている = #565 の fast-write handler から

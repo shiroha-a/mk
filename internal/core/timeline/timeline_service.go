@@ -39,18 +39,18 @@ type Service struct {
 	// fanoutToggle は meta.enableFanoutTimeline。nil なら常に有効扱い。
 	fanoutToggle FanoutToggleProvider
 	// dbFallbackToggle は meta.enableFanoutTimelineDbFallback。nil なら常に有効扱い。
-	dbFallbackToggle DbFallbackToggleProvider
+	dbFallbackToggle DBFallbackToggleProvider
 }
 
-// DbFallbackToggleProvider reports whether meta.enableFanoutTimelineDbFallback
+// DBFallbackToggleProvider reports whether meta.enableFanoutTimelineDbFallback
 // is currently on.
 //
 // FanoutToggleProvider と分けてあるのは、**効く相手が違う**ため。
 // `enableFanoutTimeline` は push (fanout hook) と read の両方を止めるが、
 // こちらは read 側の DB fallback だけを止める。push 側は無関係なので、
 // FanoutHook に実装義務を持たせない。
-type DbFallbackToggleProvider interface {
-	FanoutTimelineDbFallbackEnabled() bool
+type DBFallbackToggleProvider interface {
+	FanoutTimelineDBFallbackEnabled() bool
 }
 
 // EphemeralNoteLookup resolves notes that live only in Redis (#2332).
@@ -91,7 +91,7 @@ func (s *Service) fanoutEnabled() bool {
 	return s.fanoutToggle.FanoutTimelineEnabled()
 }
 
-// SetDbFallbackToggle attaches meta.enableFanoutTimelineDbFallback so that the
+// SetDBFallbackToggle attaches meta.enableFanoutTimelineDbFallback so that the
 // database fallback can be switched off while FTT itself stays on
 // (upstream FanoutTimelineEndpointService の
 // `if (!ps.useDbFallback) ps.dbFallback = () => Promise.resolve([])` 相当)。
@@ -101,7 +101,7 @@ func (s *Service) fanoutEnabled() bool {
 // 投げるので、その経路が全て PostgreSQL に落ちる。timeline の JSON キャッシュは
 // cursor 無しのみが対象なので緩和されない。upstream が用意している逃げ道が
 // これしかない。
-func (s *Service) SetDbFallbackToggle(p DbFallbackToggleProvider) {
+func (s *Service) SetDBFallbackToggle(p DBFallbackToggleProvider) {
 	s.dbFallbackToggle = p
 }
 
@@ -116,7 +116,7 @@ func (s *Service) dbFallbackEnabled() bool {
 	if s.dbFallbackToggle == nil {
 		return true
 	}
-	return s.dbFallbackToggle.FanoutTimelineDbFallbackEnabled()
+	return s.dbFallbackToggle.FanoutTimelineDBFallbackEnabled()
 }
 
 // noDBFallback is what home / local / hybrid return in place of a database

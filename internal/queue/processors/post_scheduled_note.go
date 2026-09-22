@@ -151,7 +151,7 @@ func (p *PostScheduledNoteProcessor) Handle(ctx context.Context, task driver.Tas
 		// **retry しない** (#3121)。attempts を積んだので、付けないと壊れた
 		// payload が backoff 込みで 30 時間ほど再試行され続ける。inbox 側の
 		// decode と同じ扱い。
-		return fmt.Errorf("decode payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 	draft, err := p.drafts.FindByID(payload.NoteDraftID)
 	if err != nil && !repository.IsNotFound(err) {

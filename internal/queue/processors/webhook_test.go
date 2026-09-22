@@ -208,7 +208,7 @@ func TestWebhookProcessor_User_4xxSkipsRetry(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 	assert.Equal(t, http.StatusBadRequest, repo.statusCalled["h1"])
 }
 
@@ -220,7 +220,7 @@ func TestWebhookProcessor_User_5xxRetries(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.NotErrorIs(t, err, driver.SkipRetry)
+	assert.NotErrorIs(t, err, driver.ErrSkipRetry)
 	assert.Equal(t, http.StatusInternalServerError, repo.statusCalled["h1"])
 }
 
@@ -232,7 +232,7 @@ func TestWebhookProcessor_User_NetworkError(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.NotErrorIs(t, err, driver.SkipRetry)
+	assert.NotErrorIs(t, err, driver.ErrSkipRetry)
 	// #2106 L60: ネットワーク障害 (非 StatusError) は upstream 同様 status=1 で記録する。
 	assert.Equal(t, 1, repo.statusCalled["h1"])
 }
@@ -243,7 +243,7 @@ func TestWebhookProcessor_User_NotFoundSkipsRetry(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestWebhookProcessor_User_InvalidPayloadSkipsRetry(t *testing.T) {
@@ -251,7 +251,7 @@ func TestWebhookProcessor_User_InvalidPayloadSkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeUserWebhook, Body: []byte("not json")}
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestWebhookProcessor_User_MissingWebhookID(t *testing.T) {
@@ -259,7 +259,7 @@ func TestWebhookProcessor_User_MissingWebhookID(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{})
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestWebhookProcessor_System_Success(t *testing.T) {
@@ -280,7 +280,7 @@ func TestWebhookProcessor_UserRepoMissing(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestWebhookProcessor_SystemRepoMissing(t *testing.T) {
@@ -288,7 +288,7 @@ func TestWebhookProcessor_SystemRepoMissing(t *testing.T) {
 	task := queue.NewSystemWebhookTask(queue.WebhookPayload{WebhookID: "sh1", EventType: "userCreated", Body: []byte(`{}`)})
 	err := p.HandleSystem(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestNewWebhookProcessor_DefaultClient(t *testing.T) {
@@ -308,7 +308,7 @@ func TestWebhookProcessor_BodyForwardedUnchanged(t *testing.T) {
 	assert.Equal(t, body, client.body)
 }
 
-// #2106 N30: webhook 先が 429 を返したら retryable (SkipRetry を付けない)。
+// #2106 N30: webhook 先が 429 を返したら retryable (ErrSkipRetry を付けない)。
 func TestWebhookProcessor_User_429Retries(t *testing.T) {
 	client := &stubHTTPClient{status: http.StatusTooManyRequests}
 	p, repo, _ := newTestWebhookProcessor(t, client, map[string]*model.Webhook{
@@ -317,7 +317,7 @@ func TestWebhookProcessor_User_429Retries(t *testing.T) {
 	task := queue.NewUserWebhookTask(queue.WebhookPayload{WebhookID: "h1", EventType: "note", Body: []byte(`{}`)})
 	err := p.HandleUser(context.Background(), task)
 	require.Error(t, err)
-	assert.NotErrorIs(t, err, driver.SkipRetry)
+	assert.NotErrorIs(t, err, driver.ErrSkipRetry)
 	assert.Equal(t, http.StatusTooManyRequests, repo.statusCalled["h1"])
 }
 
@@ -375,7 +375,7 @@ func TestWebhookProcessor_NoSignatureWithoutSecret(t *testing.T) {
 
 // **DB 障害を恒久 failed に潰さないこと (#2792)。**
 //
-// 種別を見ずに `SkipRetry` へ倒すと、DB が詰まった瞬間に配送待ちだった webhook が
+// 種別を見ずに `ErrSkipRetry` へ倒すと、DB が詰まった瞬間に配送待ちだった webhook が
 // 1 回で恒久 failed になる (本来は 4 回 + backoff)。
 func TestWebhookProcessor_DBFailureIsRetryable(t *testing.T) {
 	p := processors.NewWebhookProcessor(&failingWebhookRepo{err: errors.New("db down")}, nil, &stubHTTPClient{}, "example.com")
@@ -384,8 +384,8 @@ func TestWebhookProcessor_DBFailureIsRetryable(t *testing.T) {
 	require.NoError(t, err)
 	err = p.HandleUser(context.Background(), driver.RawTask{TypeName: queue.TaskTypeUserWebhook, Body: body})
 	require.Error(t, err)
-	require.False(t, errors.Is(err, driver.SkipRetry),
-		"DB 障害は retry させること (not-found だけ SkipRetry)")
+	require.False(t, errors.Is(err, driver.ErrSkipRetry),
+		"DB 障害は retry させること (not-found だけ ErrSkipRetry)")
 }
 
 // not-found は従来どおり恒久失敗にすること (毒ジョブを回し続けない)。
@@ -396,7 +396,7 @@ func TestWebhookProcessor_NotFoundSkipsRetry(t *testing.T) {
 	require.NoError(t, err)
 	err = p.HandleUser(context.Background(), driver.RawTask{TypeName: queue.TaskTypeUserWebhook, Body: body})
 	require.Error(t, err)
-	require.True(t, errors.Is(err, driver.SkipRetry))
+	require.True(t, errors.Is(err, driver.ErrSkipRetry))
 }
 
 type failingWebhookRepo struct {

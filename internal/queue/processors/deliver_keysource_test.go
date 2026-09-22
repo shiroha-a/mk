@@ -119,7 +119,7 @@ func TestResolveSigningKey_EmptyPEMIsError(t *testing.T) {
 		KeyID:        "https://example.com/users/u5#main-key",
 		SignerUserID: "u5",
 	})
-	// 文言ではなく sentinel を見る。呼び出し元はこれで retry / SkipRetry を
+	// 文言ではなく sentinel を見る。呼び出し元はこれで retry / ErrSkipRetry を
 	// 分けるので、ここが崩れると配送が恒久的に消える形に化ける。
 	require.ErrorIs(t, err, ErrSigningKeyMissing)
 }

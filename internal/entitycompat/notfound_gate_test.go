@@ -442,7 +442,7 @@ func bodyReturnsCollapse(b *ast.BlockStmt, isCore bool, errName string) bool {
 //
 // **`fmt.Errorf("%w: ...", ErrXxxNotFound)` も見る。** ident と selector だけを
 // 見ると包んだ形を落とす。`emojiimport` が実際にこの形で、DB 瞬断中のジョブが
-// `SkipRetry` で恒久破棄されていた。
+// `ErrSkipRetry` で恒久破棄されていた。
 //
 // **`Err` で始まらない名前も拾う。** `notFoundErr` のような引数名で渡される
 // 形がある (`user_service.go` の `applyMediaUpdate`)。

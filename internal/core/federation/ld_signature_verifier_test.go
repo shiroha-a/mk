@@ -150,8 +150,6 @@ func TestLDSignatureVerifier_InterfaceShape(t *testing.T) {
 	assert.NotNil(t, v, "verifier must be non-nil")
 }
 
-var _ error = errors.New("compile-time anchor for errors import")
-
 // #2106 N26: CheckForbiddenDirectivesIfPresent は signature 無しを素通しする。
 func TestLDSignatureVerifier_CheckForbidden_NoSignature(t *testing.T) {
 	v := corefederation.NewLDSignatureVerifier(testutil.NewMockUserPublickeyRepository())

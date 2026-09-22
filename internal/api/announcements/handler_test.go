@@ -51,7 +51,7 @@ func TestList_WithItems(t *testing.T) {
 	h, repo := newTestHandler(t)
 	// 有効なAIDX IDを使ってcreatedAt解析パスをカバー
 	idGen, _ := id.NewGenerator("aidx")
-	validID := idGen.Generate(java_time())
+	validID := idGen.Generate(javaTime())
 	repo.Items[validID] = &model.Announcement{ID: validID, Title: "Hi", Text: "Hello", IsActive: true}
 	rec := doPost(h.List, `{}`, &model.User{ID: "u1"})
 	assert.Equal(t, http.StatusOK, rec.Code)
@@ -62,7 +62,7 @@ func TestList_WithItems(t *testing.T) {
 	assert.NotEmpty(t, item["createdAt"])
 }
 
-func java_time() time.Time {
+func javaTime() time.Time {
 	return time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
 }
 
@@ -378,8 +378,8 @@ func TestList_Unauthenticated_ExcludesAllPerUserAnnouncements(t *testing.T) {
 	h, repo := newTestHandler(t)
 	otherUID := "other"
 	idGen, _ := id.NewGenerator("aidx")
-	aid1 := idGen.Generate(java_time())
-	aid2 := idGen.Generate(java_time())
+	aid1 := idGen.Generate(javaTime())
+	aid2 := idGen.Generate(javaTime())
 	repo.Items[aid1] = &model.Announcement{ID: aid1, Title: "G", IsActive: true}
 	// per-user announcement は未認証ユーザーには一切見せない。
 	repo.Items[aid2] = &model.Announcement{ID: aid2, Title: "ForOther", IsActive: true, UserID: &otherUID}
@@ -398,9 +398,9 @@ func TestList_AuthenticatedUser_ExcludesOtherUsersPerUserAnnouncements(t *testin
 	myUID := "u1"
 	// global / 自分宛 / 他人宛 の3種
 	idGen, _ := id.NewGenerator("aidx")
-	aid1 := idGen.Generate(java_time())
-	aid2 := idGen.Generate(java_time())
-	aid3 := idGen.Generate(java_time())
+	aid1 := idGen.Generate(javaTime())
+	aid2 := idGen.Generate(javaTime())
+	aid3 := idGen.Generate(javaTime())
 	repo.Items[aid1] = &model.Announcement{ID: aid1, Title: "G", IsActive: true}
 	repo.Items[aid2] = &model.Announcement{ID: aid2, Title: "Mine", IsActive: true, UserID: &myUID}
 	repo.Items[aid3] = &model.Announcement{ID: aid3, Title: "Other", IsActive: true, UserID: &otherUID}
@@ -792,7 +792,7 @@ func TestAdminCreate_GlobalBroadcasts(t *testing.T) {
 func TestList_OmitsAdminFields(t *testing.T) {
 	h, repo := newTestHandler(t)
 	idGen, _ := id.NewGenerator("aidx")
-	validID := idGen.Generate(java_time())
+	validID := idGen.Generate(javaTime())
 	repo.Items[validID] = &model.Announcement{ID: validID, Title: "Hi", Text: "Hello", IsActive: true, ForExistingUsers: true}
 	rec := doPost(h.List, `{}`, &model.User{ID: "u1"})
 	require.Equal(t, http.StatusOK, rec.Code)

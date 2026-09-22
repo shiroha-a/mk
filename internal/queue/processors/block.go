@@ -33,13 +33,13 @@ func NewBlockProcessor(blocker Blocker) *BlockProcessor {
 func (p *BlockProcessor) Handle(_ context.Context, t driver.Task) error {
 	payload, err := queue.DecodeBlockPayload(t.Payload())
 	if err != nil {
-		return fmt.Errorf("decode block payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode block payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 	if payload.BlockerID == "" || payload.BlockeeID == "" {
-		return fmt.Errorf("block: blockerId and blockeeId are required: %w", driver.SkipRetry)
+		return fmt.Errorf("block: blockerId and blockeeId are required: %w", driver.ErrSkipRetry)
 	}
 	if p.blocker == nil {
-		return fmt.Errorf("block: service not wired: %w", driver.SkipRetry)
+		return fmt.Errorf("block: service not wired: %w", driver.ErrSkipRetry)
 	}
 	_, err = p.blocker.Block(payload.BlockerID, payload.BlockeeID)
 	switch {
@@ -52,7 +52,7 @@ func (p *BlockProcessor) Handle(_ context.Context, t driver.Task) error {
 	case errors.Is(err, blocking.ErrSelfBlock),
 		errors.Is(err, blocking.ErrBlockeeNotFound):
 		return fmt.Errorf("block %s->%s: %w: %w",
-			payload.BlockerID, payload.BlockeeID, err, driver.SkipRetry)
+			payload.BlockerID, payload.BlockeeID, err, driver.ErrSkipRetry)
 	default:
 		return err
 	}

@@ -318,7 +318,7 @@ func TestEnqueue_DuplicateUniqueDropsSilently(t *testing.T) {
 }
 
 // TestServer_HandleSkipRetryConvertsToUnrecoverable ensures the
-// driver-level SkipRetry sentinel reaches mkq as ErrUnrecoverable
+// driver-level ErrSkipRetry sentinel reaches mkq as ErrUnrecoverable
 // (which mkq surfaces as a permanent failure rather than a retry).
 func TestServer_HandleSkipRetryConvertsToUnrecoverable(t *testing.T) {
 	d := newDriver(t)
@@ -327,7 +327,7 @@ func TestServer_HandleSkipRetryConvertsToUnrecoverable(t *testing.T) {
 	wg.Add(1)
 	srv.Handle("test:skip", func(_ context.Context, _ driver.Task) error {
 		defer wg.Done()
-		return fmt.Errorf("decode boom: %w", driver.SkipRetry)
+		return fmt.Errorf("decode boom: %w", driver.ErrSkipRetry)
 	})
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Shutdown)
@@ -565,7 +565,7 @@ func TestInspector_RunTaskPromotesDelayed(t *testing.T) {
 }
 
 // TestInspector_GetQueueInfo_FailedReportedAsFailedNotRetry verifies the
-// post-#1187 semantic: SkipRetry / permanent failures land in the failed
+// post-#1187 semantic: ErrSkipRetry / permanent failures land in the failed
 // bucket and are reported via `Failed`. They no longer leak into `Retry`
 // — Retry is reserved for delayed bucket entries with `atm > 0`.
 //
@@ -580,10 +580,10 @@ func TestInspector_GetQueueInfo_FailedReportedAsFailedNotRetry(t *testing.T) {
 	wg.Add(1)
 	srv.Handle("ins:permanent-fail", func(_ context.Context, _ driver.Task) error {
 		defer wg.Done()
-		// SkipRetry sentinel = immediate failure into the failed bucket
+		// ErrSkipRetry sentinel = immediate failure into the failed bucket
 		// (mkq's ErrUnrecoverable). retry-backoff 経路を回さない fast
 		// path だが、行き着くのは failed bucket (= permanent failure)。
-		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+		return fmt.Errorf("intentional fail: %w", driver.ErrSkipRetry)
 	})
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Shutdown)
@@ -763,7 +763,7 @@ func TestClient_Enqueue_WithKeepFailed_BoundsFailedBucket(t *testing.T) {
 	wg.Add(total)
 	srv.Handle("keepfailed:burst", func(_ context.Context, _ driver.Task) error {
 		defer wg.Done()
-		return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+		return fmt.Errorf("intentional fail: %w", driver.ErrSkipRetry)
 	})
 	require.NoError(t, srv.Start())
 	t.Cleanup(srv.Shutdown)
@@ -805,7 +805,7 @@ func TestInspector_RunTask_FallsBackToRetryJobForFailedBucket(t *testing.T) {
 	srv := d.Server()
 	var wg sync.WaitGroup
 	wg.Add(1)
-	// fail-once-then-succeed: 初回は SkipRetry で failed bucket に落とし、RunTask
+	// fail-once-then-succeed: 初回は ErrSkipRetry で failed bucket に落とし、RunTask
 	// 後の再処理では成功させる。常に再失敗する handler だと RunTask が failed から
 	// 出した job が wait→active→再失敗で failed に戻り、「failed を出た瞬間」を
 	// 観測する後段の Eventually が CI 負荷下で毎 poll「まだ failed」と見えて flaky
@@ -814,7 +814,7 @@ func TestInspector_RunTask_FallsBackToRetryJobForFailedBucket(t *testing.T) {
 	srv.Handle("ins:fail-then-retry", func(_ context.Context, _ driver.Task) error {
 		if calls.Add(1) == 1 {
 			wg.Done()
-			return fmt.Errorf("intentional fail: %w", driver.SkipRetry)
+			return fmt.Errorf("intentional fail: %w", driver.ErrSkipRetry)
 		}
 		return nil
 	})

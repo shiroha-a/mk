@@ -425,7 +425,7 @@ func TestService_NotificationHook_OnReaction(t *testing.T) {
 	assert.Equal(t, "👍", hook.reaction)
 }
 
-var stubReactionError = errors.New("reaction stub error")
+var errStubReaction = errors.New("reaction stub error")
 
 // stubBlockingChecker for tests.
 type stubBlockingChecker struct {
@@ -448,9 +448,9 @@ func TestService_Create_Blocked(t *testing.T) {
 func TestService_Create_BlockingCheckerError(t *testing.T) {
 	svc, repo, _, _, _ := newService(t)
 	seedNote(repo, "n1", "author", model.NoteVisibilityPublic)
-	svc.SetBlockingChecker(&stubBlockingChecker{err: stubReactionError})
+	svc.SetBlockingChecker(&stubBlockingChecker{err: errStubReaction})
 	_, err := svc.Create(&model.User{ID: "viewer"}, "n1", "👍")
-	assert.ErrorIs(t, err, stubReactionError)
+	assert.ErrorIs(t, err, errStubReaction)
 }
 
 func TestService_Create_BlockingCheckerSelfSkipped(t *testing.T) {

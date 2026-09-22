@@ -8,7 +8,7 @@ import (
 
 // ErrSigningKeyMissing reports that the signer has no key of the requested kind.
 //
-// **DB 障害と区別するために要る。** 呼び出し元はこれを `SkipRetry` に包むが、
+// **DB 障害と区別するために要る。** 呼び出し元はこれを `ErrSkipRetry` に包むが、
 // それ以外の error (接続断・failover・pool 枯渇) は retry させる。区別しないと、
 // **一時的な DB 障害の瞬間に配送中だった job が恒久的に消える** (deliver は
 // 既定 12 回・約 32 時間かけて再送する設計なのに、1 回で failed 行きになる)。
@@ -62,7 +62,7 @@ func (s *repoSigningKeySource) SigningKeyPEM(userID, kind string) (string, error
 	kp, err := s.keypair.FindByUserID(userID)
 	if err != nil {
 		// **not-found と DB 障害を分ける。** 前者は retry しても直らないので
-		// SkipRetry に包まれてよいが、後者を包むと配送が恒久的に消える。
+		// ErrSkipRetry に包まれてよいが、後者を包むと配送が恒久的に消える。
 		if repository.IsNotFound(err) {
 			return "", ErrSigningKeyMissing
 		}

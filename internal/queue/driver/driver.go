@@ -7,7 +7,7 @@ import (
 )
 
 // HandlerFunc processes a single task. Returning an error wrapping
-// SkipRetry tells the driver not to retry even if attempts remain.
+// ErrSkipRetry tells the driver not to retry even if attempts remain.
 type HandlerFunc func(ctx context.Context, t Task) error
 
 // Client enqueues tasks. Drivers translate the (taskType, payload,

@@ -224,7 +224,7 @@ func (i *Importer) Run(ctx context.Context, userID, fileID string) (*Result, err
 	}
 	user, err := i.deps.UserRepo.FindByID(userID)
 	// **DB 障害を not-found に丸めない** (#2799)。`emoji_import` processor は
-	// `ErrUserNotFound` で `SkipRetry` を付けるので、丸めると**瞬断中に走った
+	// `ErrUserNotFound` で `ErrSkipRetry` を付けるので、丸めると**瞬断中に走った
 	// ジョブが retry されず恒久破棄される**。
 	if err != nil && !repository.IsNotFound(err) {
 		return nil, err

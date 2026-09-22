@@ -1563,7 +1563,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// emailRequiredForSignup フローの確認メール送信。常に sender を配線し、
 	// closure 内で毎回 meta を読み直すことで admin UI の SMTP 設定変更が
 	// 再起動なしに反映される (#1112)。smtpSecure も meta 経由で反映 (#1111)。
-	signupHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
+	signupHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySMTP))
 	// captcha の実 provider が 1 つも無いときに申請 endpoint を守る署名付き
 	// フォームトークン (#2806)。**captcha の代替ではない** — 位置づけは
 	// core/signupform の doc を見ること。
@@ -1623,7 +1623,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	signinHandler.SetLoginNotifier(notificationHook)
 	// new-login 通知メール (#2454)。SenderFromMeta が per-call で meta を読み直すので
 	// admin UI の SMTP 設定変更が再起動なしで効く。SMTP 未設定なら no-op。
-	signinHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
+	signinHandler.SetEmailSender(s.config.URL, miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySMTP))
 	signinHandler.SetMetaRepo(metaRepo)
 	// アカウント作成時も signin 副作用 (履歴 / login 通知 / main publish) を通す (#1804)。
 	signupHandler.SetSigninRecorder(signinHandler)
@@ -1638,7 +1638,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// password reset の確認メール送信。配線パターンは signup と同じく
 	// SenderFromMeta で per-call 再 Fetch、runtime 設定変更追従 (#1112)。
 	resetHandler.SetMetaRepo(metaRepo)
-	resetHandler.SetEmailSender(miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
+	resetHandler.SetEmailSender(miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySMTP))
 	api.POST("/request-reset-password", resetHandler.RequestReset)
 	api.POST("/reset-password", resetHandler.Reset)
 
@@ -1929,7 +1929,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// SMTP メール送信を i/update-email 用に注入する。meta の SMTP 設定に従い、
 	// SenderFromMeta が closure 内で per-call 再 Fetch するため admin UI の
 	// 設定変更は即座に反映される (#1112)。smtpSecure 反映は #1111。
-	iHandler.SetEmailSender(miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySmtp))
+	iHandler.SetEmailSender(miscsmtp.SenderFromMeta(metaRepo, s.config.ProxySMTP))
 	if webauthnSvc != nil {
 		iHandler.SetWebAuthn(webauthnSvc, userSecurityKeyRepo)
 	}
@@ -3225,7 +3225,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		coreannouncement.NewCreator(announcementRepo, idGen, mainStreamPublisher, broadcastPublisher),
 		webhookService,
 		idGen,
-		miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySmtp),
+		miscsmtp.SubjectBodySenderFromMeta(metaRepo, s.config.ProxySMTP),
 	)
 	s.queueServer.Handle(queue.TaskTypeCheckModeratorsActivity,
 		processors.NewCheckModeratorsActivityProcessor(modActivitySvc).Handle)
@@ -3362,7 +3362,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	adminHandler.SetDeleteAccountEnqueuer(s.queueClient)
 	adminHandler.SetServerURL(s.config.URL)
 	adminHandler.SetConfigSetupPassword(s.config.SetupPassword)
-	adminHandler.SetSMTPProxyURL(s.config.ProxySmtp)
+	adminHandler.SetSMTPProxyURL(s.config.ProxySMTP)
 	modLogService := coremodlog.New(modLogRepo, idGen)
 	adminHandler.SetModLogService(modLogService)
 	// #1765: moderator が他人の note を削除したとき deleteNote moderation log を残す。
@@ -3502,19 +3502,19 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// (`internal/misc/permissions` は misskey-js と完全一致させる契約)。
 	api.POST("/admin/ip/accounts", adminHandler.IPAccounts,
 		middleware.RequireModerator(roleService),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIPHistory),
 		middleware.RequireScope("read:admin:user-ips"))
 	// 関連アカウント候補 (#3105)。**同じ policy と scope を再利用する** —
 	// 扱うのは同じ「利用者 ↔ IP の対応」で、別 policy にすると片方だけ開けてしまう。
 	api.POST("/admin/ip/related-accounts", adminHandler.IPRelatedAccounts,
 		middleware.RequireModerator(roleService),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIPHistory),
 		middleware.RequireScope("read:admin:user-ips"))
 	// 照会の監査記録 (#3106)。**この応答自体が機密** — 照会に使った IP がそのまま
 	// 入るので、照会と同じ 3 段で守る。
 	api.POST("/admin/ip/lookup-log", adminHandler.IPLookupLog,
 		middleware.RequireModerator(roleService),
-		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory),
+		middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIPHistory),
 		middleware.RequireScope("read:admin:user-ips"))
 	api.POST("/admin/get-index-stats", adminHandler.GetIndexStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:index-stats"))
 	api.POST("/admin/get-table-stats", adminHandler.GetTableStats, middleware.RequireAdmin(roleService), middleware.RequireScope("read:admin:table-stats"))

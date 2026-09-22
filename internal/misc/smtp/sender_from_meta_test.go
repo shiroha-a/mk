@@ -39,8 +39,8 @@ func TestSenderFromMeta_EmailDisabled_NoOp(t *testing.T) {
 	meta := &model.Meta{
 		EnableEmail: false,
 		Email:       &from,
-		SmtpHost:    &host,
-		SmtpPort:    &port,
+		SMTPHost:    &host,
+		SMTPPort:    &port,
 	}
 	sender := SenderFromMeta(&stubMetaFetcher{meta: meta}, "")
 	defer func() {
@@ -51,7 +51,7 @@ func TestSenderFromMeta_EmailDisabled_NoOp(t *testing.T) {
 	sender("to@example.com", Message{Subject: "s", Text: "b"})
 }
 
-// SenderFromMeta: SmtpHost が nil または空文字列なら no-op。空文字列
+// SenderFromMeta: SMTPHost が nil または空文字列なら no-op。空文字列
 // edge case の guard を持たないと SendMessage が "0:port" に dial して
 // 異常な error log を吐くため明示的に test する。
 func TestSenderFromMeta_HostMissingOrEmpty_NoOp(t *testing.T) {
@@ -68,7 +68,7 @@ func TestSenderFromMeta_HostMissingOrEmpty_NoOp(t *testing.T) {
 			meta := &model.Meta{
 				EnableEmail: true,
 				Email:       &from,
-				SmtpHost:    tc.host,
+				SMTPHost:    tc.host,
 			}
 			sender := SenderFromMeta(&stubMetaFetcher{meta: meta}, "")
 			defer func() {
@@ -97,7 +97,7 @@ func TestSenderFromMeta_FromMissingOrEmpty_NoOp(t *testing.T) {
 			meta := &model.Meta{
 				EnableEmail: true,
 				Email:       tc.from,
-				SmtpHost:    &host,
+				SMTPHost:    &host,
 			}
 			sender := SenderFromMeta(&stubMetaFetcher{meta: meta}, "")
 			defer func() {
@@ -120,8 +120,8 @@ func TestSenderFromMeta_HappyPath_DeliversToFakeSMTP(t *testing.T) {
 	meta := &model.Meta{
 		EnableEmail: true,
 		Email:       &from,
-		SmtpHost:    &host,
-		SmtpPort:    &port,
+		SMTPHost:    &host,
+		SMTPPort:    &port,
 	}
 	sender := SenderFromMeta(&stubMetaFetcher{meta: meta}, "")
 	sender("to@example.com", Message{Subject: "hello", Text: "body text"})
@@ -167,8 +167,8 @@ func TestSenderFromMeta_RuntimeConfigChange_TakesEffectImmediately(t *testing.T)
 	stub.meta = &model.Meta{
 		EnableEmail: true,
 		Email:       &from,
-		SmtpHost:    &host,
-		SmtpPort:    &port,
+		SMTPHost:    &host,
+		SMTPPort:    &port,
 	}
 	sender("to@example.com", Message{Subject: "2", Text: "b"})
 	msgs := waitForMessages(srv, 3)
@@ -187,8 +187,8 @@ func TestSubjectBodySenderFromMeta_DeliversToFakeSMTP(t *testing.T) {
 	meta := &model.Meta{
 		EnableEmail: true,
 		Email:       &from,
-		SmtpHost:    &host,
-		SmtpPort:    &port,
+		SMTPHost:    &host,
+		SMTPPort:    &port,
 	}
 	sender := SubjectBodySenderFromMeta(&stubMetaFetcher{meta: meta}, "")
 	sender("user@example.com", "Password reset", "Your temporary password is X")

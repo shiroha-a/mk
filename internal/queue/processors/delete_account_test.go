@@ -60,7 +60,7 @@ func TestDeleteAccountProcessor_EmptyUserIDSkipsRetry(t *testing.T) {
 	task := deleteAccountTask(t, queue.DeleteAccountPayload{})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeleteAccountProcessor_MalformedPayloadSkipsRetry(t *testing.T) {
@@ -68,7 +68,7 @@ func TestDeleteAccountProcessor_MalformedPayloadSkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeDeleteAccount, Body: []byte(`not-json`)}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeleteAccountProcessor_NilReposAreSkipped(t *testing.T) {

@@ -20,12 +20,12 @@ type MetaFetcher interface {
 //
 // Behaviour when meta is unavailable or SMTP is not yet configured:
 //   - meta Fetch error → Warn log + skip (= operator が気付ける)
-//   - EnableEmail = false / SmtpHost 未設定 / Email 未設定 → Debug log +
+//   - EnableEmail = false / SMTPHost 未設定 / Email 未設定 → Debug log +
 //     skip (= 設計どおり未設定状態、noisy にしない)
 //
 // proxyURL は forward proxy URL (config.proxySmtp) で、SOCKS5 / HTTP
 // CONNECT tunnel として SMTP TCP 接続を経路化する場合に渡す。
-// meta.SmtpSecure フラグも自動で Options.Secure に反映され、implicit
+// meta.SMTPSecure フラグも自動で Options.Secure に反映され、implicit
 // TLS / STARTTLS の経路選択が runtime config に追従する (#1111)。
 func SenderFromMeta(metaRepo MetaFetcher, proxyURL string) func(to string, msg Message) {
 	return func(to string, msg Message) {
@@ -35,17 +35,17 @@ func SenderFromMeta(metaRepo MetaFetcher, proxyURL string) func(to string, msg M
 				"err", err, "to", to)
 			return
 		}
-		if !m.EnableEmail || m.SmtpHost == nil || *m.SmtpHost == "" || m.Email == nil || *m.Email == "" {
+		if !m.EnableEmail || m.SMTPHost == nil || *m.SMTPHost == "" || m.Email == nil || *m.Email == "" {
 			slog.Debug("email: SMTP not configured, skipping send", "to", to)
 			return
 		}
 		port := 587
-		if m.SmtpPort != nil {
-			port = *m.SmtpPort
+		if m.SMTPPort != nil {
+			port = *m.SMTPPort
 		}
-		SendMessage(*m.SmtpHost, port, m.SmtpUser, m.SmtpPass, *m.Email, to, msg, Options{
+		SendMessage(*m.SMTPHost, port, m.SMTPUser, m.SMTPPass, *m.Email, to, msg, Options{
 			ProxyURL: proxyURL,
-			Secure:   m.SmtpSecure,
+			Secure:   m.SMTPSecure,
 		})
 	}
 }

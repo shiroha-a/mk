@@ -19,9 +19,9 @@ func TestRawTask(t *testing.T) {
 }
 
 func TestSkipRetryIdentity(t *testing.T) {
-	wrapped := fmt.Errorf("decode: %w: %w", errors.New("boom"), SkipRetry)
-	if !errors.Is(wrapped, SkipRetry) {
-		t.Fatalf("errors.Is should match SkipRetry")
+	wrapped := fmt.Errorf("decode: %w: %w", errors.New("boom"), ErrSkipRetry)
+	if !errors.Is(wrapped, ErrSkipRetry) {
+		t.Fatalf("errors.Is should match ErrSkipRetry")
 	}
 }
 

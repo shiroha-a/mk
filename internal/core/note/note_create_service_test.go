@@ -14,26 +14,26 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// stubError is a sentinel error used in tests.
-var stubError = errors.New("stub error")
+// errStub is a sentinel error used in tests.
+var errStub = errors.New("stub error")
 
 // failingNoteRepoCreate fails on Create.
 type failingNoteRepoCreate struct{ *testutil.MockNoteRepository }
 
-func (f *failingNoteRepoCreate) Create(_ *model.Note) error { return stubError }
+func (f *failingNoteRepoCreate) Create(_ *model.Note) error { return errStub }
 
 // failingNoteRepoUpdate fails on Update only.
 type failingNoteRepoUpdate struct{ *testutil.MockNoteRepository }
 
 func (f *failingNoteRepoUpdate) Update(_ *model.Note, _ string, _ any) error {
-	return stubError
+	return errStub
 }
 
 // failingPollRepo fails on Create.
 type failingPollRepo struct{}
 
-func (f *failingPollRepo) Create(_ *model.Poll) error                 { return stubError }
-func (f *failingPollRepo) FindByNoteID(_ string) (*model.Poll, error) { return nil, stubError }
+func (f *failingPollRepo) Create(_ *model.Poll) error                 { return errStub }
+func (f *failingPollRepo) FindByNoteID(_ string) (*model.Poll, error) { return nil, errStub }
 func (f *failingPollRepo) IncrementVote(_ string, _ int, _ int) error { return nil }
 func (f *failingPollRepo) UpdateVotes(_ string, _ []int64) error      { return nil }
 func (f *failingPollRepo) ListExpiredUnnotified(_ time.Time, _ int) ([]*model.Poll, error) {
@@ -50,7 +50,7 @@ func (f *failingPollRepo) ListRecommendation(_ string, _ []string, _ bool, _, _ 
 type findFailNoteRepo struct{ *testutil.MockNoteRepository }
 
 func (f *findFailNoteRepo) FindByIDWithRelations(_ string) (*model.Note, error) {
-	return nil, stubError
+	return nil, errStub
 }
 
 func newCreateService(t *testing.T) (*note.CreateService, *testutil.MockNoteRepository, *testutil.MockPollRepository) {
@@ -481,7 +481,7 @@ type flakyUserRepo struct {
 
 func (f *flakyUserRepo) FindManyByUsernamesAndHost(usernames []string, host *string) ([]*model.User, error) {
 	if host != nil && *host == f.failHost {
-		return nil, stubError
+		return nil, errStub
 	}
 	return f.MockUserRepository.FindManyByUsernamesAndHost(usernames, host)
 }

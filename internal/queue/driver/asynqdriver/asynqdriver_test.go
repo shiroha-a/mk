@@ -185,7 +185,7 @@ func TestDriver_Close_ClosesConstructedComponents(t *testing.T) {
 
 func TestServer_HandleSkipRetryConversion(t *testing.T) {
 	s := NewServer(fakeRedis(), ServerConfig{})
-	wrapped := fmt.Errorf("decode: %w", driver.SkipRetry)
+	wrapped := fmt.Errorf("decode: %w", driver.ErrSkipRetry)
 
 	var captured error
 	s.Handle("dummy", func(_ context.Context, _ driver.Task) error {
@@ -193,7 +193,7 @@ func TestServer_HandleSkipRetryConversion(t *testing.T) {
 	})
 
 	// Pull the registered handler out of the mux and invoke it
-	// directly to verify the SkipRetry conversion. asynq's ServeMux
+	// directly to verify the ErrSkipRetry conversion. asynq's ServeMux
 	// exposes the handler via Handler(*asynq.Task) but only when a
 	// task type matches; we synthesize the task here.
 	t.Helper()
@@ -205,8 +205,8 @@ func TestServer_HandleSkipRetryConversion(t *testing.T) {
 	if !errors.Is(captured, asynq.SkipRetry) {
 		t.Fatalf("captured error must wrap asynq.SkipRetry, got %v", captured)
 	}
-	if !errors.Is(captured, driver.SkipRetry) {
-		t.Fatalf("captured error must still wrap driver.SkipRetry, got %v", captured)
+	if !errors.Is(captured, driver.ErrSkipRetry) {
+		t.Fatalf("captured error must still wrap driver.ErrSkipRetry, got %v", captured)
 	}
 }
 
@@ -223,7 +223,7 @@ func TestServer_HandlePassesNonSkipErrorThrough(t *testing.T) {
 		t.Fatalf("expected %v, got %v", want, got)
 	}
 	if errors.Is(got, asynq.SkipRetry) {
-		t.Fatal("non-SkipRetry handler error must not be tagged with asynq.SkipRetry")
+		t.Fatal("non-ErrSkipRetry handler error must not be tagged with asynq.SkipRetry")
 	}
 }
 

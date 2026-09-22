@@ -41,13 +41,13 @@ func NewUnfollowProcessor(unfollower Unfollower) *UnfollowProcessor {
 func (p *UnfollowProcessor) Handle(_ context.Context, t driver.Task) error {
 	payload, err := queue.DecodeUnfollowPayload(t.Payload())
 	if err != nil {
-		return fmt.Errorf("decode unfollow payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode unfollow payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 	if payload.FollowerID == "" || payload.FolloweeID == "" {
-		return fmt.Errorf("unfollow: followerId and followeeId are required: %w", driver.SkipRetry)
+		return fmt.Errorf("unfollow: followerId and followeeId are required: %w", driver.ErrSkipRetry)
 	}
 	if p.unfollower == nil {
-		return fmt.Errorf("unfollow: service not wired: %w", driver.SkipRetry)
+		return fmt.Errorf("unfollow: service not wired: %w", driver.ErrSkipRetry)
 	}
 	if err := p.unfollower.Unfollow(payload.FollowerID, payload.FolloweeID); err != nil {
 		// 既に解消済 (row 無し) は成功扱い - 冪等吸収。

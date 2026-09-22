@@ -2478,7 +2478,7 @@ func TestUpdateFields_MergedShapeHandlesHandlerTypes(t *testing.T) {
 func TestHasRolePolicy_CanSearchIpHistory(t *testing.T) {
 	t.Run("既定では一般利用者に開かない", func(t *testing.T) {
 		svc, _, _, _ := newTestService(t)
-		assert.False(t, svc.HasRolePolicy("alice", role.PolicyCanSearchIpHistory))
+		assert.False(t, svc.HasRolePolicy("alice", role.PolicyCanSearchIPHistory))
 	})
 
 	// **モデレーターは短絡しない。** `HasRolePolicy` が見るのは管理者だけなので、
@@ -2489,7 +2489,7 @@ func TestHasRolePolicy_CanSearchIpHistory(t *testing.T) {
 		assignRepo.Assignments["mod1:r_mod"] = &model.RoleAssignment{
 			ID: "a1", UserID: "mod1", RoleID: "r_mod",
 		}
-		assert.False(t, svc.HasRolePolicy("mod1", role.PolicyCanSearchIpHistory),
+		assert.False(t, svc.HasRolePolicy("mod1", role.PolicyCanSearchIPHistory),
 			"既定でモデレーターに開いている (upstream は requireAdmin)")
 	})
 
@@ -2499,7 +2499,7 @@ func TestHasRolePolicy_CanSearchIpHistory(t *testing.T) {
 		assignRepo.Assignments["admin1:r_admin"] = &model.RoleAssignment{
 			ID: "a1", UserID: "admin1", RoleID: "r_admin",
 		}
-		assert.True(t, svc.HasRolePolicy("admin1", role.PolicyCanSearchIpHistory))
+		assert.True(t, svc.HasRolePolicy("admin1", role.PolicyCanSearchIPHistory))
 	})
 
 	// 運営者がロールで開ける = 「モデレーターに許可するかを設定で決められる」。
@@ -2513,7 +2513,7 @@ func TestHasRolePolicy_CanSearchIpHistory(t *testing.T) {
 		assignRepo.Assignments["mod1:r_ip"] = &model.RoleAssignment{
 			ID: "a1", UserID: "mod1", RoleID: "r_ip",
 		}
-		assert.True(t, svc.HasRolePolicy("mod1", role.PolicyCanSearchIpHistory))
+		assert.True(t, svc.HasRolePolicy("mod1", role.PolicyCanSearchIPHistory))
 	})
 }
 
@@ -2521,7 +2521,7 @@ func TestHasRolePolicy_CanSearchIpHistory(t *testing.T) {
 // は fail-closed で false を返す**ので、上の「既定では開かない」は key を丸ごと
 // 消しても通る。ロール編集画面へ出すには key が要るので、存在も併せて見る。
 func TestDefaultPolicies_CanSearchIpHistoryIsFalse(t *testing.T) {
-	v, ok := role.DefaultPolicies()[role.PolicyCanSearchIpHistory]
+	v, ok := role.DefaultPolicies()[role.PolicyCanSearchIPHistory]
 	require.True(t, ok, "既定値が無いとロール編集画面に項目が出ない (#3104)")
 	assert.Equal(t, false, v, "既定は管理者のみ (upstream の requireAdmin に合わせる)")
 }

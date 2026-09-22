@@ -48,7 +48,7 @@ func TestUnblockProcessor_SelfBlock_SkipRetry(t *testing.T) {
 	task := queue.NewUnblockTask(queue.UnblockPayload{BlockerID: "a", BlockeeID: "b"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }
 
 func TestUnblockProcessor_GenericError_Retries(t *testing.T) {
@@ -57,7 +57,7 @@ func TestUnblockProcessor_GenericError_Retries(t *testing.T) {
 	task := queue.NewUnblockTask(queue.UnblockPayload{BlockerID: "a", BlockeeID: "b"})
 	err := p.Handle(context.Background(), task)
 	assert.Error(t, err)
-	assert.False(t, errors.Is(err, driver.SkipRetry), "transient error は retry させる")
+	assert.False(t, errors.Is(err, driver.ErrSkipRetry), "transient error は retry させる")
 }
 
 func TestUnblockProcessor_MissingFields_SkipsRetry(t *testing.T) {
@@ -66,7 +66,7 @@ func TestUnblockProcessor_MissingFields_SkipsRetry(t *testing.T) {
 	task := queue.NewUnblockTask(queue.UnblockPayload{BlockeeID: "rA"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 	assert.Empty(t, fu.calls)
 }
 
@@ -75,7 +75,7 @@ func TestUnblockProcessor_NoUnblocker_SkipsRetry(t *testing.T) {
 	task := queue.NewUnblockTask(queue.UnblockPayload{BlockerID: "a", BlockeeID: "b"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }
 
 func TestUnblockProcessor_BadPayload_SkipsRetry(t *testing.T) {
@@ -83,5 +83,5 @@ func TestUnblockProcessor_BadPayload_SkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeUnblock, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }

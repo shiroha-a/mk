@@ -53,7 +53,7 @@ import (
 // モデルの json タグがそのままレスポンスの shape になる。
 //
 // **つまりタグは「今すぐ効く」。** 1 周目のレビュー後に 4 件を `json:"-"` へ
-// 変えたところ、うち 2 件 (`Meta.SmtpPass` / `RegistrationTicket.Code`) で
+// 変えたところ、うち 2 件 (`Meta.SMTPPass` / `RegistrationTicket.Code`) で
 // **moderation log の記録が壊れた** — しかも既存のテストは 1 つも落ちな
 // かった。しかもその判断の根拠にした「直接 marshal は 2 箇所だけ」も、
 // 直したはずの「3 系統」も、どちらも数え落としだった。**タグを動かす前に
@@ -115,7 +115,7 @@ var serializableSecretLike = map[string]string{
 	// `internal/core/moderationlog/service.go` が `json.Marshal(info)` し、
 	// `admin/show-moderation-logs` (RequireAdmin) が `info` をそのまま返す。
 	// upstream も同じものを mask せずに記録するので、落とすと監査記録が欠ける。
-	"Meta.SmtpPass":           "moderation log が update-meta の before/after を *model.Meta ごと marshal する (upstream も mask しない)",
+	"Meta.SMTPPass":           "moderation log が update-meta の before/after を *model.Meta ごと marshal する (upstream も mask しない)",
 	"RegistrationTicket.Code": "moderation log が createInvitation で []*model.RegistrationTicket を marshal する (upstream も同じ)",
 	"SystemWebhook.Secret":    "moderation log が before/after を *model.SystemWebhook ごと marshal する (upstream も同じ)",
 
@@ -177,7 +177,7 @@ var mustDetectSecretFields = []string{
 	"UserKeypair.PrivateKey",
 	"UserKeypairExtra.Ed25519PrivateKey",
 	"SignupApplication.ClaimCodeHash",
-	"Meta.SmtpPass",
+	"Meta.SMTPPass",
 	"RegistrationTicket.Code",
 	"SwSubscription.Auth",
 	"AccessToken.Hash",
@@ -363,7 +363,7 @@ func TestSerializableSecretLikeHasNoDeadEntries(t *testing.T) {
 			continue
 		}
 		// **allowlist に載せた = 出ることが前提**なので、`json:"-"` は宣言と
-		// 矛盾する。2 周目で `Meta.SmtpPass` / `RegistrationTicket.Code` の
+		// 矛盾する。2 周目で `Meta.SMTPPass` / `RegistrationTicket.Code` の
 		// タグを落として moderation log の記録を壊したのがこの形で、当時は
 		// 何も落ちなかった。allowlist 全件をこれで守る。
 		if tag == "-" {
@@ -420,7 +420,7 @@ func TestModelJSONDoesNotContainSecrets(t *testing.T) {
 // **タグが「使われている」側も固定する。**
 //
 // allowlist に載っているものの一部は、単に許されているのではなく
-// **落とすと壊れる**。1 周目のレビュー後に `Meta.SmtpPass` と
+// **落とすと壊れる**。1 周目のレビュー後に `Meta.SMTPPass` と
 // `RegistrationTicket.Code` を `json:"-"` にしたところ、moderation log の
 // 記録が黙って欠けた (既存のテストは 1 つも落ちなかった)。同じことを
 // 繰り返さないよう、出ることをここで固定する。
@@ -429,7 +429,7 @@ func TestModelJSONKeepsAuditedFields(t *testing.T) {
 	// ごと marshal する (`internal/core/moderationlog/service.go`)。
 	// upstream も SMTP secret を mask せずに記録する。
 	sp := "smtp-secret"
-	mb, err := json.Marshal(model.Meta{SmtpPass: &sp})
+	mb, err := json.Marshal(model.Meta{SMTPPass: &sp})
 	require.NoError(t, err)
 	require.Containsf(t, string(mb), `"smtpPass"`,
 		"Meta を JSON 化すると smtpPass が消える。moderation log の before/after が欠ける")

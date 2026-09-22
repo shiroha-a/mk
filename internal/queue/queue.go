@@ -452,7 +452,7 @@ func (c *Client) EnqueueWebPush(ctx context.Context, payload WebPushPayload) err
 }
 
 // EnqueueUserWebhook puts a user webhook delivery task on the webhook
-// queue. Retry policy: 4 attempts (4xx は processor 側で SkipRetry と
+// queue. Retry policy: 4 attempts (4xx は processor 側で ErrSkipRetry と
 // して扱うため実際のリトライ対象は 5xx とネットワークエラーに限られる)。
 func (c *Client) EnqueueUserWebhook(ctx context.Context, payload WebhookPayload) error {
 	body := mustMarshal(payload)

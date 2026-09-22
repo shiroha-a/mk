@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var stubError = errors.New("stub error")
+var errStub = errors.New("stub error")
 
 func newSvc(t *testing.T) (*poll.Service, *testutil.MockNoteRepository, *testutil.MockPollRepository, *testutil.MockPollVoteRepository) {
 	t.Helper()
@@ -106,9 +106,9 @@ func TestVote_NotBlockedProceeds(t *testing.T) {
 func TestVote_BlockingCheckerError(t *testing.T) {
 	svc, noteRepo, pollRepo, _ := newSvc(t)
 	seedPollNote(noteRepo, pollRepo, "n1", "author", false, nil)
-	svc.SetBlockingChecker(stubBlockingChecker{err: stubError})
+	svc.SetBlockingChecker(stubBlockingChecker{err: errStub})
 	err := svc.Vote(&model.User{ID: "viewer"}, "n1", 0)
-	require.ErrorIs(t, err, stubError)
+	require.ErrorIs(t, err, errStub)
 }
 
 func TestVote_SelfVoteSkipsBlockCheck(t *testing.T) {
@@ -261,14 +261,14 @@ type failingPollVoteRepo struct {
 
 func (f *failingPollVoteRepo) CountByUserAndNote(userID, noteID string) (int64, error) {
 	if f.failCount {
-		return 0, stubError
+		return 0, errStub
 	}
 	return f.MockPollVoteRepository.CountByUserAndNote(userID, noteID)
 }
 
 func (f *failingPollVoteRepo) Create(v *model.PollVote) error {
 	if f.failCreate {
-		return stubError
+		return errStub
 	}
 	return f.MockPollVoteRepository.Create(v)
 }
@@ -281,7 +281,7 @@ func TestVote_CountError(t *testing.T) {
 	voteRepo := &failingPollVoteRepo{MockPollVoteRepository: testutil.NewMockPollVoteRepository(), failCount: true}
 	svc := poll.NewService(noteRepo, pollRepo, voteRepo, nil, idGen)
 	err := svc.Vote(&model.User{ID: "viewer"}, "n1", 0)
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestVote_CreateError(t *testing.T) {
@@ -292,7 +292,7 @@ func TestVote_CreateError(t *testing.T) {
 	voteRepo := &failingPollVoteRepo{MockPollVoteRepository: testutil.NewMockPollVoteRepository(), failCreate: true}
 	svc := poll.NewService(noteRepo, pollRepo, voteRepo, nil, idGen)
 	err := svc.Vote(&model.User{ID: "viewer"}, "n1", 0)
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 // recordingHook captures vote notification.

@@ -211,7 +211,7 @@ type Source struct {
 	Meilisearch               *MeilisearchOptions    `mapstructure:"meilisearch"`
 	SetupPassword             string                 `mapstructure:"setupPassword"`
 	Proxy                     string                 `mapstructure:"proxy"`
-	ProxySmtp                 string                 `mapstructure:"proxySmtp"`
+	ProxySMTP                 string                 `mapstructure:"proxySmtp"`
 	ProxyBypassHosts          []string               `mapstructure:"proxyBypassHosts"`
 	AllowedPrivateNetworks    []string               `mapstructure:"allowedPrivateNetworks"`
 	MaxFileSize               *int64                 `mapstructure:"maxFileSize"`
@@ -377,11 +377,11 @@ type Source struct {
 	// it to the frontend bundle. map[string]any keeps the YAML shape as-is.
 	SentryForFrontend map[string]any `mapstructure:"sentryForFrontend"`
 
-	// PublishTarballInsteadOfProvideRepositoryUrl mirrors the upstream Misskey
+	// PublishTarballInsteadOfProvideRepositoryURL mirrors the upstream Misskey
 	// YAML flag. When true, the frontend treats the release as a tarball
 	// distribution rather than pointing at the source repository URL. Exposed
 	// via /api/meta.providesTarball.
-	PublishTarballInsteadOfProvideRepositoryUrl bool `mapstructure:"publishTarballInsteadOfProvideRepositoryUrl"`
+	PublishTarballInsteadOfProvideRepositoryURL bool `mapstructure:"publishTarballInsteadOfProvideRepositoryUrl"`
 }
 
 // Config represents the resolved application configuration.
@@ -437,7 +437,7 @@ type Config struct {
 	ID string
 
 	Proxy                  string
-	ProxySmtp              string
+	ProxySMTP              string
 	ProxyBypassHosts       []string
 	AllowedPrivateNetworks []string
 
@@ -528,9 +528,9 @@ type Config struct {
 	// for YAML compatibility; the Go backend itself does not consume it).
 	SentryForFrontend map[string]any
 
-	// PublishTarballInsteadOfProvideRepositoryUrl is exposed to clients via
+	// PublishTarballInsteadOfProvideRepositoryURL is exposed to clients via
 	// /api/meta.providesTarball. See the Source struct for details.
-	PublishTarballInsteadOfProvideRepositoryUrl bool
+	PublishTarballInsteadOfProvideRepositoryURL bool
 }
 
 // ProvidesTarball reports whether this server serves a source tarball at
@@ -801,7 +801,7 @@ func resolve(src *Source) (*Config, error) {
 		ID: src.ID,
 
 		Proxy:                  src.Proxy,
-		ProxySmtp:              src.ProxySmtp,
+		ProxySMTP:              src.ProxySMTP,
 		ProxyBypassHosts:       src.ProxyBypassHosts,
 		AllowedPrivateNetworks: src.AllowedPrivateNetworks,
 
@@ -860,7 +860,7 @@ func resolve(src *Source) (*Config, error) {
 		SentryForBackend:  src.SentryForBackend,
 		SentryForFrontend: src.SentryForFrontend,
 
-		PublishTarballInsteadOfProvideRepositoryUrl: src.PublishTarballInsteadOfProvideRepositoryUrl,
+		PublishTarballInsteadOfProvideRepositoryURL: src.PublishTarballInsteadOfProvideRepositoryURL,
 	}
 
 	if cfg.TestMode {
@@ -875,7 +875,7 @@ func resolve(src *Source) (*Config, error) {
 			"url", cfg.URL)
 	}
 
-	if cfg.PublishTarballInsteadOfProvideRepositoryUrl {
+	if cfg.PublishTarballInsteadOfProvideRepositoryURL {
 		// 設定は読むが効かない。黙って無視すると operator は「tarball を配って
 		// いる」と思ったまま、frontend が壊れたリンクを出す状態に気付けない。
 		// **404 で気付ける類ではない** — SPA catchall が拾うので HTML が 200 で返る。

@@ -63,7 +63,7 @@ func TestUnfollowProcessor_GenericError_Retries(t *testing.T) {
 	})
 	err := p.Handle(context.Background(), task)
 	assert.Error(t, err)
-	assert.False(t, errors.Is(err, driver.SkipRetry), "transient error は retry させる")
+	assert.False(t, errors.Is(err, driver.ErrSkipRetry), "transient error は retry させる")
 }
 
 func TestUnfollowProcessor_MissingFields_SkipsRetry(t *testing.T) {
@@ -73,7 +73,7 @@ func TestUnfollowProcessor_MissingFields_SkipsRetry(t *testing.T) {
 	task := queue.NewUnfollowTask(queue.UnfollowPayload{FolloweeID: "localA"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 	assert.Empty(t, uf.calls)
 }
 
@@ -84,7 +84,7 @@ func TestUnfollowProcessor_NoUnfollower_SkipsRetry(t *testing.T) {
 	})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }
 
 func TestUnfollowProcessor_BadPayload_SkipsRetry(t *testing.T) {
@@ -92,5 +92,5 @@ func TestUnfollowProcessor_BadPayload_SkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeUnfollow, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }

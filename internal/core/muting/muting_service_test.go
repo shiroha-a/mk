@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var stubError = errors.New("stub error")
+var errStub = errors.New("stub error")
 
 func newMuteService(t *testing.T) (*muting.Service, *testutil.MockUserRepository, *testutil.MockMutingRepository) {
 	t.Helper()
@@ -95,14 +95,14 @@ type failingMutingRepo struct {
 
 func (f *failingMutingRepo) Exists(muterID, muteeID string) (bool, error) {
 	if f.failExists {
-		return false, stubError
+		return false, errStub
 	}
 	return f.MockMutingRepository.Exists(muterID, muteeID)
 }
 
 func (f *failingMutingRepo) Create(rec *model.Muting) error {
 	if f.failCreate {
-		return stubError
+		return errStub
 	}
 	return f.MockMutingRepository.Create(rec)
 }
@@ -114,7 +114,7 @@ func TestMute_ExistsError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := muting.NewService(userRepo, &failingMutingRepo{MockMutingRepository: testutil.NewMockMutingRepository(), failExists: true}, idGen)
 	_, err := svc.Mute("a", "b", nil)
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestMute_CreateError(t *testing.T) {
@@ -124,7 +124,7 @@ func TestMute_CreateError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := muting.NewService(userRepo, &failingMutingRepo{MockMutingRepository: testutil.NewMockMutingRepository(), failCreate: true}, idGen)
 	_, err := svc.Mute("a", "b", nil)
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestUnmute(t *testing.T) {
@@ -192,14 +192,14 @@ type failingRenoteMutingRepo struct {
 
 func (f *failingRenoteMutingRepo) Exists(muterID, muteeID string) (bool, error) {
 	if f.failExists {
-		return false, stubError
+		return false, errStub
 	}
 	return f.MockRenoteMutingRepository.Exists(muterID, muteeID)
 }
 
 func (f *failingRenoteMutingRepo) Create(rec *model.RenoteMuting) error {
 	if f.failCreate {
-		return stubError
+		return errStub
 	}
 	return f.MockRenoteMutingRepository.Create(rec)
 }
@@ -211,7 +211,7 @@ func TestRenoteMute_ExistsError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := muting.NewRenoteService(userRepo, &failingRenoteMutingRepo{MockRenoteMutingRepository: testutil.NewMockRenoteMutingRepository(), failExists: true}, idGen)
 	_, err := svc.Mute("a", "b")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestRenoteMute_CreateError(t *testing.T) {
@@ -221,7 +221,7 @@ func TestRenoteMute_CreateError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := muting.NewRenoteService(userRepo, &failingRenoteMutingRepo{MockRenoteMutingRepository: testutil.NewMockRenoteMutingRepository(), failCreate: true}, idGen)
 	_, err := svc.Mute("a", "b")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestRenoteUnmute(t *testing.T) {

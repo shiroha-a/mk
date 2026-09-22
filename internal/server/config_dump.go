@@ -111,7 +111,7 @@ func BuildConfigDump(cfg *config.Config, role config.ProcessRole) ConfigDump {
 	add(&d.Settings, "mediaProxySecret", secretValue(string(cfg.MediaProxySecret)),
 		"未設定なら DB の instance_secret から導出する")
 	add(&d.Settings, "proxy", redactURLUserinfo(cfg.Proxy), "")
-	add(&d.Settings, "proxySmtp", redactURLUserinfo(cfg.ProxySmtp), "")
+	add(&d.Settings, "proxySmtp", redactURLUserinfo(cfg.ProxySMTP), "")
 	add(&d.Settings, "frontendContentSecurityPolicy", orUnset(cfg.FrontendContentSecurityPolicy), "")
 	add(&d.Settings, "enableMetrics", fmt.Sprintf("%t", cfg.EnableMetrics), "")
 	add(&d.Settings, "testMode", fmt.Sprintf("%t", cfg.TestMode), "")

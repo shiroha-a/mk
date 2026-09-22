@@ -105,7 +105,7 @@ func TestServer_RateLimit_BackPressuresHandlerDispatch(t *testing.T) {
 }
 
 // TestEndToEnd_EnqueueProcess confirms the asynq driver wires
-// Client.Enqueue, Server.Handle and the SkipRetry conversion through
+// Client.Enqueue, Server.Handle and the ErrSkipRetry conversion through
 // to the real asynq runtime against a live Redis.
 func TestEndToEnd_EnqueueProcess(t *testing.T) {
 	testutil.SkipIfNoDocker(t)

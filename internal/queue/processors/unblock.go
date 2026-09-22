@@ -32,13 +32,13 @@ func NewUnblockProcessor(unblocker Unblocker) *UnblockProcessor {
 func (p *UnblockProcessor) Handle(_ context.Context, t driver.Task) error {
 	payload, err := queue.DecodeUnblockPayload(t.Payload())
 	if err != nil {
-		return fmt.Errorf("decode unblock payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode unblock payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 	if payload.BlockerID == "" || payload.BlockeeID == "" {
-		return fmt.Errorf("unblock: blockerId and blockeeId are required: %w", driver.SkipRetry)
+		return fmt.Errorf("unblock: blockerId and blockeeId are required: %w", driver.ErrSkipRetry)
 	}
 	if p.unblocker == nil {
-		return fmt.Errorf("unblock: service not wired: %w", driver.SkipRetry)
+		return fmt.Errorf("unblock: service not wired: %w", driver.ErrSkipRetry)
 	}
 	err = p.unblocker.Unblock(payload.BlockerID, payload.BlockeeID)
 	switch {
@@ -50,7 +50,7 @@ func (p *UnblockProcessor) Handle(_ context.Context, t driver.Task) error {
 	// 自己 unblock は retry しても解消しない恒久エラー。
 	case errors.Is(err, blocking.ErrSelfBlock):
 		return fmt.Errorf("unblock %s->%s: %w: %w",
-			payload.BlockerID, payload.BlockeeID, err, driver.SkipRetry)
+			payload.BlockerID, payload.BlockeeID, err, driver.ErrSkipRetry)
 	default:
 		return err
 	}

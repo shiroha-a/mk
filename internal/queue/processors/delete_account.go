@@ -62,10 +62,10 @@ const deleteAccountBatchSleep = 250 * time.Millisecond
 func (p *DeleteAccountProcessor) Handle(ctx context.Context, t driver.Task) error {
 	payload, err := queue.DecodeDeleteAccountPayload(t.Payload())
 	if err != nil {
-		return fmt.Errorf("decode delete-account payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode delete-account payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 	if payload.UserID == "" {
-		return fmt.Errorf("delete-account: userId is required: %w", driver.SkipRetry)
+		return fmt.Errorf("delete-account: userId is required: %w", driver.ErrSkipRetry)
 	}
 
 	if err := p.deleteNotes(ctx, payload.UserID); err != nil {

@@ -90,7 +90,7 @@ func TestImportCustomEmojisProcessor_NotConfigured(t *testing.T) {
 	task := queue.NewImportCustomEmojisTask(queue.ImportCustomEmojisPayload{UserID: "admin", FileID: "f1"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestImportCustomEmojisProcessor_BadPayload(t *testing.T) {
@@ -99,7 +99,7 @@ func TestImportCustomEmojisProcessor_BadPayload(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeImportCustomEmojis, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestImportCustomEmojisProcessor_MissingFields(t *testing.T) {
@@ -114,7 +114,7 @@ func TestImportCustomEmojisProcessor_MissingFields(t *testing.T) {
 		task := queue.NewImportCustomEmojisTask(c)
 		err := p.Handle(context.Background(), task)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, driver.SkipRetry)
+		assert.ErrorIs(t, err, driver.ErrSkipRetry)
 	}
 }
 
@@ -131,7 +131,7 @@ func TestImportCustomEmojisProcessor_InvalidZip_SkipRetry(t *testing.T) {
 	task := queue.NewImportCustomEmojisTask(queue.ImportCustomEmojisPayload{UserID: "admin", FileID: "f1"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 	assert.ErrorIs(t, err, emojiimport.ErrInvalidZip)
 }
 
@@ -141,7 +141,7 @@ func TestImportCustomEmojisProcessor_UserNotFound_SkipRetry(t *testing.T) {
 	task := queue.NewImportCustomEmojisTask(queue.ImportCustomEmojisPayload{UserID: "ghost", FileID: "f1"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 	assert.ErrorIs(t, err, emojiimport.ErrUserNotFound)
 }
 
@@ -151,11 +151,11 @@ func TestImportCustomEmojisProcessor_DriveError_SkipRetry(t *testing.T) {
 	task := queue.NewImportCustomEmojisTask(queue.ImportCustomEmojisPayload{UserID: "admin", FileID: "f1"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 	assert.ErrorIs(t, err, emojiimport.ErrDriveFileNotFound)
 }
 
-// 展開後サイズ超過は恒久エラーなので SkipRetry を付ける。付けないと、
+// 展開後サイズ超過は恒久エラーなので ErrSkipRetry を付ける。付けないと、
 // mkq の既定 (MaxAttempts なし = リトライ無し) が変わったときに同じ zip を
 // 何度も展開しようとする。
 func TestImportCustomEmojisProcessor_ZipEntryTooLarge_SkipRetry(t *testing.T) {
@@ -175,6 +175,6 @@ func TestImportCustomEmojisProcessor_ZipEntryTooLarge_SkipRetry(t *testing.T) {
 	task := queue.NewImportCustomEmojisTask(queue.ImportCustomEmojisPayload{UserID: "admin", FileID: "f1"})
 	err = p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 	assert.ErrorIs(t, err, emojiimport.ErrZipEntryTooLarge)
 }

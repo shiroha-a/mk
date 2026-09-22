@@ -206,7 +206,7 @@ const (
 	// avatarDecorationLimit に合算する。
 	PolicyCanUseEmojiAsAvatarDecoration = "canUseEmojiAsAvatarDecoration"
 
-	// PolicyCanSearchIpHistory gates who may look up which local accounts were
+	// PolicyCanSearchIPHistory gates who may look up which local accounts were
 	// seen from a given IP (#3104). mk-go 独自で upstream に対応キーは無い。
 	//
 	// **既定は false = 管理者のみ。** upstream の `admin/get-user-ips` は
@@ -215,7 +215,7 @@ const (
 	// (`perm-check` は upstream にある endpoint しか見ないので検出されない)。
 	// route は `RequireModerator` と併用するので、policy を有効にしても
 	// モデレーター未満には開かない。
-	PolicyCanSearchIpHistory = "canSearchIpHistory"
+	PolicyCanSearchIPHistory = "canSearchIpHistory"
 
 	// 以下は #1026 で timeline endpoint の gate に使う policy key。匿名アクセス
 	// 可な経路 (local-timeline / global-timeline) と認証必須経路 (hybrid-

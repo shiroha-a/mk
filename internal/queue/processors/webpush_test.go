@@ -296,7 +296,7 @@ func TestWebPushProcessor_InvalidPayloadSkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeWebPush, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestWebPushProcessor_MissingUserID(t *testing.T) {
@@ -305,7 +305,7 @@ func TestWebPushProcessor_MissingUserID(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeWebPush, Body: body}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestNewWebPushProcessor_DefaultSender(t *testing.T) {

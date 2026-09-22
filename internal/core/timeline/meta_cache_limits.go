@@ -28,7 +28,7 @@ func NewMetaFanoutToggle(repo repository.MetaRepository) FanoutToggleProvider {
 	return &metaRepoCacheLimits{repo: repo}
 }
 
-// NewMetaDbFallbackToggle constructs a DbFallbackToggleProvider backed by the
+// NewMetaDBFallbackToggle constructs a DBFallbackToggleProvider backed by the
 // given MetaRepository. **production の配線は WireMetaToggles を使うこと** —
 // こちらは provider を単体で組み立てたいとき (テスト等) 向け。
 //
@@ -36,7 +36,7 @@ func NewMetaFanoutToggle(repo repository.MetaRepository) FanoutToggleProvider {
 // 渡してよい。**ただし meta の参照回数は減らない** — 2 つの述語はそれぞれ
 // `repo.Fetch()` を呼ぶ。通常は router から CachedMetaRepository が渡るので
 // in-memory 参照で済む (admin/update-meta の Update で即 invalidate される)。
-func NewMetaDbFallbackToggle(repo repository.MetaRepository) DbFallbackToggleProvider {
+func NewMetaDBFallbackToggle(repo repository.MetaRepository) DBFallbackToggleProvider {
 	return &metaRepoCacheLimits{repo: repo}
 }
 
@@ -62,14 +62,14 @@ func WireMetaToggles(hook *FanoutHook, svc *Service, repo repository.MetaReposit
 	}
 	if svc != nil {
 		svc.SetFanoutToggle(toggle)
-		svc.SetDbFallbackToggle(toggle)
+		svc.SetDBFallbackToggle(toggle)
 	}
 }
 
-// FanoutTimelineDbFallbackEnabled implements DbFallbackToggleProvider. meta を
+// FanoutTimelineDBFallbackEnabled implements DBFallbackToggleProvider. meta を
 // 読めない場合は有効側 (= 既定値 true) に倒す。ここで無効側へ倒すと、一時的な
 // DB エラーでタイムラインが Redis の持ち分だけに縮む。
-func (m *metaRepoCacheLimits) FanoutTimelineDbFallbackEnabled() bool {
+func (m *metaRepoCacheLimits) FanoutTimelineDBFallbackEnabled() bool {
 	if m == nil || m.repo == nil {
 		return true
 	}
@@ -77,7 +77,7 @@ func (m *metaRepoCacheLimits) FanoutTimelineDbFallbackEnabled() bool {
 	if err != nil || meta == nil {
 		return true
 	}
-	return meta.EnableFanoutTimelineDbFallback
+	return meta.EnableFanoutTimelineDBFallback
 }
 
 // FanoutTimelineEnabled implements FanoutToggleProvider. meta を読めない場合は

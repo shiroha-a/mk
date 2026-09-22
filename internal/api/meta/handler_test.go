@@ -623,7 +623,7 @@ func TestMeta_ProvidesTarball_IgnoresConfigFlag(t *testing.T) {
 	cfg := &config.Config{
 		Version: config.MisskeyVersion,
 		URL:     "https://misskey.example.com",
-		PublishTarballInsteadOfProvideRepositoryUrl: true,
+		PublishTarballInsteadOfProvideRepositoryURL: true,
 	}
 	metaRepo := testutil.NewMockMetaRepository()
 	metaRepo.Meta = &model.Meta{ID: "x"}

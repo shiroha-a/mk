@@ -43,7 +43,7 @@ func mustEncode(t *testing.T, p queue.InboxPayload) []byte {
 	return b
 }
 
-// #534: InboxProcessor は payload decode 失敗を SkipRetry で確定 fail に
+// #534: InboxProcessor は payload decode 失敗を ErrSkipRetry で確定 fail に
 // する (壊れた payload を retry しても無限ループするため)。
 func TestInboxProcessor_DecodeFailureIsSkipRetry(t *testing.T) {
 	p := processors.NewInboxProcessor(&stubFedProcessor{})
@@ -53,8 +53,8 @@ func TestInboxProcessor_DecodeFailureIsSkipRetry(t *testing.T) {
 		Body:     []byte(`{not json`),
 	})
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry),
-		"malformed payload should bubble up driver.SkipRetry to suppress retries")
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry),
+		"malformed payload should bubble up driver.ErrSkipRetry to suppress retries")
 }
 
 // 正常 path: federation.Processor.Process が nil を返せば Handle も nil。
@@ -763,7 +763,7 @@ func TestInboxProcessor_LDVerify_FailDropsActivity(t *testing.T) {
 }
 
 // 任意 error は driver の retry policy (inboxJobMaxAttempts) に任せるため
-// そのまま返す (SkipRetry を付けない)。
+// そのまま返す (ErrSkipRetry を付けない)。
 func TestInboxProcessor_GenericErrorPropagatesForRetry(t *testing.T) {
 	boom := errors.New("transient db error")
 	stub := &stubFedProcessor{returnFn: func(_ []byte) error { return boom }}
@@ -775,8 +775,8 @@ func TestInboxProcessor_GenericErrorPropagatesForRetry(t *testing.T) {
 	})
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, boom), "underlying error must be wrapped, not swallowed")
-	assert.False(t, errors.Is(err, driver.SkipRetry),
-		"transient errors should NOT carry SkipRetry — driver retry handles them")
+	assert.False(t, errors.Is(err, driver.ErrSkipRetry),
+		"transient errors should NOT carry ErrSkipRetry — driver retry handles them")
 }
 
 // #2106 N26: HTTP 署名済 + signer==actor の通常経路では、LD-Signature verify 失敗

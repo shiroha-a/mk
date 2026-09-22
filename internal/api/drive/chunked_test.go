@@ -511,7 +511,7 @@ func TestChunkedError_Mapping(t *testing.T) {
 		{coredrive.ErrUndecodableImage, http.StatusRequestEntityTooLarge, "MAX_FILE_SIZE_EXCEEDED"},
 		{coredrive.ErrNoFreeSpace, http.StatusBadRequest, "NO_FREE_SPACE"},
 		{coredrive.ErrAccessDenied, http.StatusBadRequest, "ACCESS_DENIED"},
-		{stubError, http.StatusInternalServerError, "INTERNAL_ERROR"},
+		{errStub, http.StatusInternalServerError, "INTERNAL_ERROR"},
 	}
 	for _, tc := range cases {
 		c, rec := newJSONReq(t, `{}`)

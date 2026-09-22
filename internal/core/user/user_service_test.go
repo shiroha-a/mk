@@ -980,7 +980,7 @@ func TestService_ListPinnedNotes_Empty(t *testing.T) {
 
 // --- Failing-repo error paths ---
 
-var stubError = errors.New("stub error")
+var errStub = errors.New("stub error")
 
 type failingUserRepo struct {
 	*testutil.MockUserRepository
@@ -990,14 +990,14 @@ type failingUserRepo struct {
 
 func (f *failingUserRepo) UpdateUser(userID string, fields map[string]any) error {
 	if f.failUpdateUser {
-		return stubError
+		return errStub
 	}
 	return f.MockUserRepository.UpdateUser(userID, fields)
 }
 
 func (f *failingUserRepo) UpdateProfile(userID string, fields map[string]any) error {
 	if f.failUpdateProfile {
-		return stubError
+		return errStub
 	}
 	return f.MockUserRepository.UpdateProfile(userID, fields)
 }
@@ -1010,14 +1010,14 @@ type failingPiningRepo struct {
 
 func (f *failingPiningRepo) CountByUser(userID string) (int, error) {
 	if f.failCount {
-		return 0, stubError
+		return 0, errStub
 	}
 	return f.MockUserNotePiningRepository.CountByUser(userID)
 }
 
 func (f *failingPiningRepo) ListByUser(userID string) ([]*model.UserNotePining, error) {
 	if f.failListByU {
-		return nil, stubError
+		return nil, errStub
 	}
 	return f.MockUserNotePiningRepository.ListByUser(userID)
 }
@@ -1030,7 +1030,7 @@ func TestService_UpdateProfile_UserUpdateError(t *testing.T) {
 	svc := user.NewService(uRepo, testutil.NewMockNoteRepository(), testutil.NewMockUserNotePiningRepository(), idGen)
 
 	_, err := svc.UpdateProfile("u1", user.UpdateInput{IsLocked: ptr(true)})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestService_UpdateProfile_ProfileUpdateError(t *testing.T) {
@@ -1041,7 +1041,7 @@ func TestService_UpdateProfile_ProfileUpdateError(t *testing.T) {
 	svc := user.NewService(uRepo, testutil.NewMockNoteRepository(), testutil.NewMockUserNotePiningRepository(), idGen)
 
 	_, err := svc.UpdateProfile("u1", user.UpdateInput{Description: ptr(ptr("hi"))})
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestService_PinNote_CountError(t *testing.T) {
@@ -1054,7 +1054,7 @@ func TestService_PinNote_CountError(t *testing.T) {
 	svc := user.NewService(mockUR, mockNR, piningRepo, idGen)
 
 	err := svc.PinNote("u1", "n1")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestService_ListPinnedNotes_Error(t *testing.T) {
@@ -1064,7 +1064,7 @@ func TestService_ListPinnedNotes_Error(t *testing.T) {
 	svc := user.NewService(mockUR, testutil.NewMockNoteRepository(), piningRepo, idGen)
 
 	_, err := svc.ListPinnedNotes("u1")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestUpdateUserFields(t *testing.T) {

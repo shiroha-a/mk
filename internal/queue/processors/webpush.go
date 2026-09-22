@@ -82,14 +82,14 @@ func NewWebPushProcessor(
 
 // Handle dispatches a Web Push task to all subscribers of the target user.
 // Errors are logged but never propagated unless the task payload itself is
-// malformed (which makes the task unrecoverable — SkipRetry).
+// malformed (which makes the task unrecoverable — ErrSkipRetry).
 func (p *WebPushProcessor) Handle(ctx context.Context, t driver.Task) error {
 	payload, err := queue.DecodeWebPushPayload(t.Payload())
 	if err != nil {
-		return fmt.Errorf("decode webpush payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode webpush payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 	if payload.UserID == "" {
-		return fmt.Errorf("webpush payload missing userId: %w", driver.SkipRetry)
+		return fmt.Errorf("webpush payload missing userId: %w", driver.ErrSkipRetry)
 	}
 
 	// VAPID 鍵が未設定 / enableServiceWorker=false ならそもそも配信しない
@@ -119,7 +119,7 @@ func (p *WebPushProcessor) Handle(ctx context.Context, t driver.Task) error {
 		DateTime: nowMillis(),
 	})
 	if err != nil {
-		return fmt.Errorf("marshal push envelope: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("marshal push envelope: %w: %w", err, driver.ErrSkipRetry)
 	}
 
 	invalidate := false

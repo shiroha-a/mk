@@ -1,6 +1,6 @@
 // Package processors contains task handlers used by the queue worker.
 // Handlers are driver-neutral: they accept a driver.Task and return
-// driver.SkipRetry to suppress retries.
+// driver.ErrSkipRetry to suppress retries.
 package processors
 
 import (
@@ -161,7 +161,7 @@ type SigningKeySource interface {
 	//
 	// 鍵が無いときは `ErrSigningKeyMissing` を返す。**DB 障害など一時的な
 	// 失敗はそのまま error として返すこと** — 呼び出し元は前者だけ
-	// `SkipRetry` に包み、後者は retry させる。取り違えると、障害の瞬間に
+	// `ErrSkipRetry` に包み、後者は retry させる。取り違えると、障害の瞬間に
 	// 配送中だった job が恒久的に消える。
 	SigningKeyPEM(userID, kind string) (string, error)
 }
@@ -456,7 +456,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 	payload, err := queue.DecodeDeliverPayload(t.Payload())
 	if err != nil {
 		// payload が壊れているジョブは何度リトライしても無意味なのでスキップ。
-		return fmt.Errorf("decode deliver payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode deliver payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 
 	// deliverSuspendedSoftware: 対象インスタンスの software がリストに該当すればスキップ
@@ -554,12 +554,12 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 		if payload.IsSharedInbox && resp.StatusCode == http.StatusGone {
 			p.recordGoneSuspended(payload.Inbox)
 		}
-		return fmt.Errorf("target gone (%d): %w", resp.StatusCode, driver.SkipRetry)
+		return fmt.Errorf("target gone (%d): %w", resp.StatusCode, driver.ErrSkipRetry)
 	case resp.StatusCode == http.StatusTooManyRequests:
 		// #2106 N30: 429 は 4xx だが upstream status-error.ts では retryable
 		// (isRetryable = !isClientError || statusCode === 429)。rate-limited な配送先には
 		// backoff 付きで再試行する。「応答した」事実があるので isNotResponding は解除する
-		// (instance は健在で rate-limit しているだけ)。SkipRetry を付けず queue に retry させる。
+		// (instance は健在で rate-limit しているだけ)。ErrSkipRetry を付けず queue に retry させる。
 		slog.Warn("ap deliver: rate limited (429), will retry",
 			"inbox", payload.Inbox)
 		p.recordSuccess(payload.Inbox)
@@ -572,7 +572,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 			"inbox", payload.Inbox, "status", resp.StatusCode)
 		p.recordSuccess(payload.Inbox)
 		p.recordTelemetry(host, deliveryhealth.ClassClientError, resp.StatusCode, started, resp.Status)
-		return fmt.Errorf("client error (%d): %w", resp.StatusCode, driver.SkipRetry)
+		return fmt.Errorf("client error (%d): %w", resp.StatusCode, driver.ErrSkipRetry)
 	default:
 		// 5xx は受信側の一時的な障害。リトライさせる + 不調状態としてマーク。
 		slog.Warn("ap deliver: server error",
@@ -586,7 +586,7 @@ func (p *DeliverProcessor) Handle(_ context.Context, t driver.Task) error {
 // sendOnce performs one signed POST attempt. useEd25519=true なら
 // payload.Ed25519KeyID + Ed25519PrivPEM で sign、それ以外は RSA。鍵 parse 失敗
 // 時は (useEd25519=true ならば) RSA に fallback する。RSA 鍵自体が壊れている
-// 場合は driver.SkipRetry で投函を中止。
+// 場合は driver.ErrSkipRetry で投函を中止。
 //
 // 2 つ目の戻り値は「実際に Ed25519 で署名したか」。呼び出し元の useEd25519 とは
 // 一致しないことがある (鍵 parse 失敗で RSA に落ちた場合)。相手が Ed25519 を
@@ -612,13 +612,13 @@ func (p *DeliverProcessor) sendOnce(payload queue.DeliverPayload, useEd25519 boo
 	if err != nil {
 		// **一時的な失敗は retry させる。** 鍵を payload から外したことで、
 		// この分岐には DB 接続断・failover・pool 枯渇も合流するようになった。
-		// それを SkipRetry に包むと、**障害の瞬間に配送中だった job が恒久的に
+		// それを ErrSkipRetry に包むと、**障害の瞬間に配送中だった job が恒久的に
 		// 消える** (deliver は既定 12 回・約 32 時間かけて再送する設計)。
 		// 消えたことは相手サーバー側でしか分からない。
 		//
-		// 恒久的な失敗 (鍵が無い / PEM が壊れている) だけを SkipRetry にする。
+		// 恒久的な失敗 (鍵が無い / PEM が壊れている) だけを ErrSkipRetry にする。
 		if isPermanentSigningKeyError(err) {
-			return nil, false, fmt.Errorf("parse private key: %w: %w", err, driver.SkipRetry)
+			return nil, false, fmt.Errorf("parse private key: %w: %w", err, driver.ErrSkipRetry)
 		}
 		return nil, false, fmt.Errorf("load private key: %w", err)
 	}

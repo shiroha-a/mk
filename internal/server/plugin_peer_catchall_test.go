@@ -72,7 +72,7 @@ func TestAPICatchall_PeerPathIsNotFound(t *testing.T) {
 //
 // **404 を返すようにした結果 (#2822)、再送すると送信量が増える。** この層は
 // 「持っていない相手に接続しない」を設計原則にしているので、送り直しても同じ
-// 答えになるものは SkipRetry を返して 1 回で止める。
+// 答えになるものは ErrSkipRetry を返して 1 回で止める。
 func TestPluginPeer_DeliverOnceDoesNotRetryPermanentFailures(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -106,7 +106,7 @@ func TestPluginPeer_DeliverOnceDoesNotRetryPermanentFailures(t *testing.T) {
 				Envelope: []byte(`{"id":"id1","payload":1}`)})
 
 			require.Error(t, err)
-			assert.ErrorIs(t, err, driver.SkipRetry, "キューに積み直させない")
+			assert.ErrorIs(t, err, driver.ErrSkipRetry, "キューに積み直させない")
 			assert.Equal(t, int32(1), posts.Load())
 			assert.Equal(t, tt.wantForgotten, lister.forgotten["other.example"] > 0, "nodeinfo キャッシュの破棄")
 		})
@@ -138,7 +138,7 @@ func TestPluginPeer_DeliverOnceRetriesTransientFailures(t *testing.T) {
 			err := p.deliverOnce(peerJob{Host: "other.example", SendID: "id1",
 				Envelope: []byte(`{"id":"id1","payload":1}`)})
 			require.Error(t, err)
-			assert.NotErrorIs(t, err, driver.SkipRetry, "キューに積み直させる")
+			assert.NotErrorIs(t, err, driver.ErrSkipRetry, "キューに積み直させる")
 			// **1 回だけ。** 再送はキューの仕事なので、ここでは回さない。
 			assert.Equal(t, int32(1), posts.Load(), "deliverOnce の中で再送しない")
 		})
@@ -226,7 +226,7 @@ func TestPluginPeer_PeerJobHandler(t *testing.T) {
 	err = p.peerJobHandler()(context.Background(),
 		driver.RawTask{TypeName: "plugin:demo:_peer", Body: []byte(`not json`)})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry, "読めないものを積み直しても同じ")
+	assert.ErrorIs(t, err, driver.ErrSkipRetry, "読めないものを積み直しても同じ")
 }
 
 type peerEnqueueCall struct {
@@ -288,7 +288,7 @@ func TestPluginPeer_DeliverOnceRechecksBlock(t *testing.T) {
 	err := p.deliverOnce(peerJob{Host: "other.example", SendID: "id1",
 		Envelope: []byte(`{"id":"id1","payload":1}`)})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 	assert.Equal(t, int32(0), posts.Load(), "ブロック済みなら接続もしない")
 }
 

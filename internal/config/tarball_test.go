@@ -15,10 +15,10 @@ import (
 // /tarball/misskey-<version>.tar.gz へのリンクを表示するが、そこは SPA catchall
 // (`GET /*`) が拾うので **404 にすらならず HTML が 200 で返る** (実測)。
 func TestProvidesTarball_AlwaysFalse(t *testing.T) {
-	cfg := &Config{PublishTarballInsteadOfProvideRepositoryUrl: true}
+	cfg := &Config{PublishTarballInsteadOfProvideRepositoryURL: true}
 	assert.False(t, cfg.ProvidesTarball(), "設定が true でも /tarball/ は無いので false")
 
-	cfg.PublishTarballInsteadOfProvideRepositoryUrl = false
+	cfg.PublishTarballInsteadOfProvideRepositoryURL = false
 	assert.False(t, cfg.ProvidesTarball())
 }
 
@@ -37,7 +37,7 @@ func TestLoad_WarnsWhenTarballFlagIsEnabled(t *testing.T) {
 	require.NoError(t, err)
 
 	// 設定値そのものは保持する (読み取りは忠実に行い、公開時に落とす)。
-	assert.True(t, cfg.PublishTarballInsteadOfProvideRepositoryUrl)
+	assert.True(t, cfg.PublishTarballInsteadOfProvideRepositoryURL)
 	assert.False(t, cfg.ProvidesTarball())
 	assert.Contains(t, buf.String(), "publishTarballInsteadOfProvideRepositoryUrl", "無視している旨の警告が出ていない")
 }
@@ -53,7 +53,7 @@ func TestLoad_NoTarballWarnWhenDisabled(t *testing.T) {
 	cfg, err := Load(path)
 	require.NoError(t, err)
 
-	assert.False(t, cfg.PublishTarballInsteadOfProvideRepositoryUrl)
+	assert.False(t, cfg.PublishTarballInsteadOfProvideRepositoryURL)
 	assert.False(t, strings.Contains(buf.String(), "publishTarballInsteadOfProvideRepositoryUrl"), "無効なのに警告が出ている")
 }
 

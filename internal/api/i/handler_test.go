@@ -25,14 +25,14 @@ import (
 	"gorm.io/datatypes"
 )
 
-var stubError = errors.New("stub error")
+var errStub = errors.New("stub error")
 
 // failingPiningRepo lets us trigger non-domain errors from PinNote.
 type failingPiningRepo struct {
 	*testutil.MockUserNotePiningRepository
 }
 
-func (f *failingPiningRepo) CountByUser(_ string) (int, error) { return 0, stubError }
+func (f *failingPiningRepo) CountByUser(_ string) (int, error) { return 0, errStub }
 
 // failingPiningDeleteRepo lets us trigger non-domain errors from UnpinNote
 // while still allowing FindByPair to succeed (so the service reaches Delete).
@@ -41,7 +41,7 @@ type failingPiningDeleteRepo struct {
 }
 
 func (f *failingPiningDeleteRepo) Delete(_ *model.UserNotePining) error {
-	return stubError
+	return errStub
 }
 
 func newHandlerWithFailingUnpinDelete(t *testing.T) (*Handler, *testutil.MockUserNotePiningRepository) {
@@ -70,7 +70,7 @@ type failingUserRepoForUpdate struct {
 	*testutil.MockUserRepository
 }
 
-func (f *failingUserRepoForUpdate) UpdateUser(_ string, _ map[string]any) error { return stubError }
+func (f *failingUserRepoForUpdate) UpdateUser(_ string, _ map[string]any) error { return errStub }
 
 func newHandlerWithFailingUpdate(t *testing.T) (*Handler, *testutil.MockUserRepository) {
 	t.Helper()
@@ -620,7 +620,7 @@ func TestMe_CreatedAtFromValidID(t *testing.T) {
 
 	// AIDXで生成した有効なIDを使う
 	idGen, _ := id.NewGenerator("aidx")
-	validID := idGen.Generate(java_time())
+	validID := idGen.Generate(javaTime())
 
 	user := &model.User{
 		ID:                validID,
@@ -646,7 +646,7 @@ func TestMe_CreatedAtFromValidID(t *testing.T) {
 	assert.Contains(t, createdAt, "T") // ISO8601 format
 }
 
-func java_time() time.Time {
+func javaTime() time.Time {
 	return time.Date(2024, 6, 15, 12, 0, 0, 0, time.UTC)
 }
 
@@ -2369,18 +2369,18 @@ type failingSetRegistryRepo struct {
 	*testutil.MockRegistryRepository
 }
 
-func (f *failingSetRegistryRepo) Set(_ *model.RegistryItem) error { return stubError }
+func (f *failingSetRegistryRepo) Set(_ *model.RegistryItem) error { return errStub }
 
 type failingGetAllRegistryRepo struct {
 	*testutil.MockRegistryRepository
 }
 
 func (f *failingGetAllRegistryRepo) GetAll(_ string, _ []string, _ *string) ([]*model.RegistryItem, error) {
-	return nil, stubError
+	return nil, errStub
 }
 
 func (f *failingGetAllRegistryRepo) KeysWithType(_ string, _ []string, _ *string) (map[string]string, error) {
-	return nil, stubError
+	return nil, errStub
 }
 
 type failingRemoveRegistryRepo struct {
@@ -2388,7 +2388,7 @@ type failingRemoveRegistryRepo struct {
 }
 
 func (f *failingRemoveRegistryRepo) Remove(_ string, _ string, _ []string, _ *string) error {
-	return stubError
+	return errStub
 }
 
 func TestRegistrySet_Error(t *testing.T) {

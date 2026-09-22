@@ -521,7 +521,7 @@ func (h *Handler) SetPromoNoteRepo(r repository.PromoNoteRepository) { h.promoNo
 func (h *Handler) SetNoteFinder(r NoteFinder) { h.noteFinder = r }
 
 // SetSMTPProxyURL forwards admin/send-email TCP connections through the
-// configured proxy (cfg.ProxySmtp). Empty string disables the proxy and
+// configured proxy (cfg.ProxySMTP). Empty string disables the proxy and
 // falls back to direct dial. See internal/misc/smtp.SendWithOptions.
 func (h *Handler) SetSMTPProxyURL(u string) { h.smtpProxyURL = u }
 
@@ -1108,7 +1108,7 @@ func (h *Handler) ShowUser(c echo.Context) error {
 	// **roleService 未配線なら伏せる側へ倒す** (fail-closed。この packer の
 	// 他の field と同じ方針)。
 	showIPs := h.roleService != nil && me != nil &&
-		h.roleService.HasRolePolicy(me.ID, role.PolicyCanSearchIpHistory)
+		h.roleService.HasRolePolicy(me.ID, role.PolicyCanSearchIPHistory)
 	if h.roleService == nil {
 		// **黙って伏せない。** 配線が落ちると IP が永久に空になるだけで
 		// 誰も気付けない (`middleware/role_policy.go` も同じ状況で鳴らす)。
@@ -1585,8 +1585,8 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		"enableTestcaptcha": m.EnableTestcaptcha,
 		// Email
 		"enableEmail": m.EnableEmail, "email": m.Email,
-		"smtpHost": m.SmtpHost, "smtpPort": m.SmtpPort,
-		"smtpUser": m.SmtpUser, "smtpPass": m.SmtpPass, "smtpSecure": m.SmtpSecure,
+		"smtpHost": m.SMTPHost, "smtpPort": m.SMTPPort,
+		"smtpUser": m.SMTPUser, "smtpPass": m.SMTPPass, "smtpSecure": m.SMTPSecure,
 		// Service Worker
 		"enableServiceWorker": m.EnableServiceWorker,
 		"swPublickey":         m.SwPublicKey, "swPrivateKey": m.SwPrivateKey,
@@ -1624,7 +1624,7 @@ func (h *Handler) AdminMeta(c echo.Context) error {
 		// Federation
 		"federation": m.Federation, "federationHosts": m.FederationHosts,
 		"enableFanoutTimeline":           m.EnableFanoutTimeline,
-		"enableFanoutTimelineDbFallback": m.EnableFanoutTimelineDbFallback,
+		"enableFanoutTimelineDbFallback": m.EnableFanoutTimelineDBFallback,
 		"proxyRemoteFiles":               m.ProxyRemoteFiles,
 		"signToActivityPubGet":           m.SignToActivityPubGet,
 		// Policies (upstream は { ...DEFAULT_POLICIES, ...instance.policies })

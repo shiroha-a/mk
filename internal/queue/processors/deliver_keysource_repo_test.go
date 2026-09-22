@@ -41,7 +41,7 @@ func TestRepoSigningKeySource_MissingRowIsSentinel(t *testing.T) {
 }
 
 // **DB 障害を sentinel にしない。** ここを取り違えると、呼び出し元が
-// SkipRetry に包んで配送が恒久的に消える。
+// ErrSkipRetry に包んで配送が恒久的に消える。
 func TestRepoSigningKeySource_OutageIsNotSentinel(t *testing.T) {
 	outage := errors.New("dial tcp: connection refused")
 	src := NewRepoSigningKeySource(&failingKeypairRepo{err: outage}, nil)
@@ -82,7 +82,7 @@ func TestRepoSigningKeySource_NilRepos(t *testing.T) {
 	require.ErrorIs(t, err, ErrSigningKeyMissing)
 }
 
-// **一時的な失敗を SkipRetry に包まない。** これがこの変更で最も壊しやすい
+// **一時的な失敗を ErrSkipRetry に包まない。** これがこの変更で最も壊しやすい
 // ところ。包むと、DB 障害の瞬間に配送中だった job が 1 回で failed 行きになる
 // (本来は既定 12 回・約 32 時間かけて再送する)。
 func TestSendOnce_TransientKeyErrorIsRetryable(t *testing.T) {
@@ -97,11 +97,11 @@ func TestSendOnce_TransientKeyErrorIsRetryable(t *testing.T) {
 	}, false)
 	require.Error(t, err)
 	require.ErrorIs(t, err, outage)
-	require.NotErrorIsf(t, err, driver.SkipRetry,
-		"一時的な失敗が SkipRetry に包まれている。配送が恒久的に消える")
+	require.NotErrorIsf(t, err, driver.ErrSkipRetry,
+		"一時的な失敗が ErrSkipRetry に包まれている。配送が恒久的に消える")
 }
 
-// 逆に、鍵が無いことは retry しても直らないので SkipRetry でよい。
+// 逆に、鍵が無いことは retry しても直らないので ErrSkipRetry でよい。
 func TestSendOnce_MissingKeyIsPermanent(t *testing.T) {
 	p := NewDeliverProcessor(nil)
 	p.SetSigningKeySource(&failingKeypairSource{err: ErrSigningKeyMissing})
@@ -111,7 +111,7 @@ func TestSendOnce_MissingKeyIsPermanent(t *testing.T) {
 		KeyID:        "https://example.com/users/u1#main-key",
 		SignerUserID: "u1",
 	}, false)
-	require.ErrorIs(t, err, driver.SkipRetry)
+	require.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 // 壊れた PEM も retry しても直らない。
@@ -124,7 +124,7 @@ func TestSendOnce_UnparsablePEMIsPermanent(t *testing.T) {
 		KeyID:        "https://example.com/users/u1#main-key",
 		SignerUserID: "u1",
 	}, false)
-	require.ErrorIs(t, err, driver.SkipRetry)
+	require.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 // **配線漏れは job を捨てない。** 再起動で直るので retry させる。
@@ -136,7 +136,7 @@ func TestSendOnce_UnwiredSourceIsRetryable(t *testing.T) {
 		SignerUserID: "u1",
 	}, false)
 	require.Error(t, err)
-	require.NotErrorIsf(t, err, driver.SkipRetry,
+	require.NotErrorIsf(t, err, driver.ErrSkipRetry,
 		"配線漏れで job を捨てると、再起動しても配送が戻らない")
 }
 

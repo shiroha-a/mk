@@ -60,11 +60,11 @@ type Meta struct {
 	// Email
 	EnableEmail bool    `gorm:"column:enableEmail;default:false" json:"enableEmail"`
 	Email       *string `gorm:"column:email;type:varchar(1024)" json:"email"`
-	SmtpSecure  bool    `gorm:"column:smtpSecure;default:false" json:"smtpSecure"`
-	SmtpHost    *string `gorm:"column:smtpHost;type:varchar(1024)" json:"smtpHost"`
-	SmtpPort    *int    `gorm:"column:smtpPort" json:"smtpPort"`
-	SmtpUser    *string `gorm:"column:smtpUser;type:varchar(1024)" json:"smtpUser"`
-	SmtpPass    *string `gorm:"column:smtpPass;type:varchar(1024)" json:"smtpPass"`
+	SMTPSecure  bool    `gorm:"column:smtpSecure;default:false" json:"smtpSecure"`
+	SMTPHost    *string `gorm:"column:smtpHost;type:varchar(1024)" json:"smtpHost"`
+	SMTPPort    *int    `gorm:"column:smtpPort" json:"smtpPort"`
+	SMTPUser    *string `gorm:"column:smtpUser;type:varchar(1024)" json:"smtpUser"`
+	SMTPPass    *string `gorm:"column:smtpPass;type:varchar(1024)" json:"smtpPass"`
 
 	// Service Worker
 	EnableServiceWorker bool    `gorm:"column:enableServiceWorker;default:false" json:"enableServiceWorker"`
@@ -125,7 +125,7 @@ type Meta struct {
 
 	// Feature flags
 	EnableFanoutTimeline           bool `gorm:"column:enableFanoutTimeline;default:true" json:"enableFanoutTimeline"`
-	EnableFanoutTimelineDbFallback bool `gorm:"column:enableFanoutTimelineDbFallback;default:true" json:"enableFanoutTimelineDbFallback"`
+	EnableFanoutTimelineDBFallback bool `gorm:"column:enableFanoutTimelineDbFallback;default:true" json:"enableFanoutTimelineDbFallback"`
 	ProxyRemoteFiles               bool `gorm:"column:proxyRemoteFiles;default:true" json:"proxyRemoteFiles"`
 	// ProxyAccountID is the user.id designated for instance proxy operations.
 	// Managed via admin/update-proxy-account.

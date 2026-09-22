@@ -79,7 +79,7 @@ const peerHandlerTimeout = 10 * time.Second
 // 同じで各間隔は従来以上。**キューに載るので再起動をまたぐ。**
 //
 // **恒久的な失敗では使わない。** 4xx (429 を除く) は送り直しても同じ答えに
-// なるので、deliverOnce が driver.SkipRetry を返して 1 回で止める。
+// なるので、deliverOnce が driver.ErrSkipRetry を返して 1 回で止める。
 const (
 	peerMaxRetry  = 3
 	peerRetryBase = 15 * time.Second
@@ -381,7 +381,7 @@ func (p *pluginPeer) deliver(ctx context.Context, host, sendID string, envelope 
 // deliverOnce performs one attempt and reports whether it may be retried.
 //
 // **恒久的な失敗では再試行させない。** 送り直しても同じ答えになるものは
-// driver.SkipRetry を包んで返す。
+// driver.ErrSkipRetry を包んで返す。
 func (p *pluginPeer) deliverOnce(job peerJob) error {
 	// **dispatch 時にもブロックを見る。** 積んでから実際に飛ぶまでには
 	// バックオフ 60 秒・queue の一時停止・再起動が挟まる。その間にブロック
@@ -389,7 +389,7 @@ func (p *pluginPeer) deliverOnce(job peerJob) error {
 	// #1404 で同じ穴を塞いでいる)。
 	if p.skipDelivery(job.Host) {
 		p.logger.Warn("peer の送信を取りやめました (ブロック済み)", "host", job.Host, "id", job.SendID)
-		return fmt.Errorf("%w: %s はブロックされています", driver.SkipRetry, job.Host)
+		return fmt.Errorf("%w: %s はブロックされています", driver.ErrSkipRetry, job.Host)
 	}
 
 	reply, err := p.post(p.deps.peerURL(job.Host, p.name), job.Envelope)
@@ -411,7 +411,7 @@ func (p *pluginPeer) deliverOnce(job peerJob) error {
 			// ないだけ) ので、運営者が追える経路を残す。
 			p.logger.Warn("peer への送信に失敗しました (再送しません)",
 				"host", job.Host, "id", job.SendID, "err", err)
-			return fmt.Errorf("%w: %w", driver.SkipRetry, err)
+			return fmt.Errorf("%w: %w", driver.ErrSkipRetry, err)
 		}
 	}
 	// 一時的な失敗。キューが間隔を置いて積み直す。
@@ -425,7 +425,7 @@ func (p *pluginPeer) peerJobHandler() driver.HandlerFunc {
 		var job peerJob
 		if err := json.Unmarshal(t.Payload(), &job); err != nil {
 			// 読めないものを積み直しても同じ。
-			return fmt.Errorf("%w: peer のジョブを読めません: %w", driver.SkipRetry, err)
+			return fmt.Errorf("%w: peer のジョブを読めません: %w", driver.ErrSkipRetry, err)
 		}
 		return p.deliverOnce(job)
 	}

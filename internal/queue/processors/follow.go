@@ -34,13 +34,13 @@ func NewFollowProcessor(follower Follower) *FollowProcessor {
 func (p *FollowProcessor) Handle(_ context.Context, t driver.Task) error {
 	payload, err := queue.DecodeFollowPayload(t.Payload())
 	if err != nil {
-		return fmt.Errorf("decode follow payload: %w: %w", err, driver.SkipRetry)
+		return fmt.Errorf("decode follow payload: %w: %w", err, driver.ErrSkipRetry)
 	}
 	if payload.FollowerID == "" || payload.FolloweeID == "" {
-		return fmt.Errorf("follow: followerId and followeeId are required: %w", driver.SkipRetry)
+		return fmt.Errorf("follow: followerId and followeeId are required: %w", driver.ErrSkipRetry)
 	}
 	if p.follower == nil {
-		return fmt.Errorf("follow: service not wired: %w", driver.SkipRetry)
+		return fmt.Errorf("follow: service not wired: %w", driver.ErrSkipRetry)
 	}
 	_, err = p.follower.Follow(payload.FollowerID, payload.FolloweeID,
 		following.FollowOptions{WithReplies: payload.WithReplies})
@@ -59,7 +59,7 @@ func (p *FollowProcessor) Handle(_ context.Context, t driver.Task) error {
 		errors.Is(err, following.ErrSelfFollow),
 		errors.Is(err, following.ErrFolloweeNotFound):
 		return fmt.Errorf("follow %s->%s: %w: %w",
-			payload.FollowerID, payload.FolloweeID, err, driver.SkipRetry)
+			payload.FollowerID, payload.FolloweeID, err, driver.ErrSkipRetry)
 	default:
 		return err
 	}

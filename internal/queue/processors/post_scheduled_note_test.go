@@ -244,7 +244,7 @@ func TestPostScheduledNote_PayloadDecodeError(t *testing.T) {
 	require.Error(t, err)
 	// **retry させない** (#3121)。attempts を積んだので、付けないと壊れた
 	// payload が backoff 込みで 30 時間ほど再試行され続ける。
-	require.ErrorIs(t, err, driver.SkipRetry)
+	require.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 // timeFromMs is a tiny helper to convert ms epoch to time.Time.

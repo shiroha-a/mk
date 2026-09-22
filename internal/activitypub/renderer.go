@@ -607,8 +607,8 @@ func (r *Renderer) RenderNote(n *model.Note, idGen id.Generator) *Note {
 	// ただし quote renote は upstream getNoteHtml が extraHtml(!=null) を渡して
 	// noMisskeyContent=false を強制するため、simple text でも必ず source/
 	// _misskey_content を出す (受信 Misskey が raw markdown を失わないように、#1948-11)。
-	hasExtraHtml := quoteURI != ""
-	if text != "" && (hasExtraHtml || !mfm.IsSimple(nodes)) {
+	hasExtraHTML := quoteURI != ""
+	if text != "" && (hasExtraHTML || !mfm.IsSimple(nodes)) {
 		out.MisskeyContent = APLenientString(text)
 		out.Source = &Source{
 			Content:   text,

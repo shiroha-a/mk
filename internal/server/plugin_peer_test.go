@@ -486,7 +486,7 @@ func TestPluginPeer_DeliverOnceSkipsSuspendedInstance(t *testing.T) {
 
 	err := p.deliverOnce(peerJob{Host: "dead.example", SendID: "id1", Envelope: []byte(`{}`)})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry, "恒久的な失敗なので再試行させない")
+	assert.ErrorIs(t, err, driver.ErrSkipRetry, "恒久的な失敗なので再試行させない")
 }
 
 // **受信は停止状態を見ない。** AP の inbox も見ないので揃える。相手を停止して

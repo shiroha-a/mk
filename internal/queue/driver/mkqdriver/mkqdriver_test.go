@@ -427,12 +427,12 @@ func TestNewDispatchHandler_SkipRetryConverts(t *testing.T) {
 	dispatch := newDispatchHandler(map[string]driver.HandlerFunc{
 		"x": func(_ context.Context, _ driver.Task) error {
 			called++
-			return driver.SkipRetry
+			return driver.ErrSkipRetry
 		},
 	}, "deliver", nil, -1, nil)
 	_, err := dispatch(context.Background(), &mkq.Job[framedPayload]{Data: framedPayload{Type: "x"}})
-	if err == nil || !errIs(err, mkq.ErrUnrecoverable) || !errIs(err, driver.SkipRetry) {
-		t.Fatalf("SkipRetry must wrap both driver.SkipRetry and mkq.ErrUnrecoverable, got %v", err)
+	if err == nil || !errIs(err, mkq.ErrUnrecoverable) || !errIs(err, driver.ErrSkipRetry) {
+		t.Fatalf("ErrSkipRetry must wrap both driver.ErrSkipRetry and mkq.ErrUnrecoverable, got %v", err)
 	}
 	if called != 1 {
 		t.Fatalf("handler called %d times, want 1", called)

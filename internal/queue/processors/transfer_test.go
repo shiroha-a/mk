@@ -114,7 +114,7 @@ func TestExportProcessor_Handle_NilExporter(t *testing.T) {
 	task := queue.NewExportTask(queue.ExportPayload{UserID: "u1", Type: transfer.ExportNotes})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestExportProcessor_Handle_InvalidPayload(t *testing.T) {
@@ -123,7 +123,7 @@ func TestExportProcessor_Handle_InvalidPayload(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeExport, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestExportProcessor_Handle_MissingFields(t *testing.T) {
@@ -132,7 +132,7 @@ func TestExportProcessor_Handle_MissingFields(t *testing.T) {
 	task := queue.NewExportTask(queue.ExportPayload{UserID: "", Type: ""})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestExportProcessor_Handle_UnsupportedType(t *testing.T) {
@@ -141,7 +141,7 @@ func TestExportProcessor_Handle_UnsupportedType(t *testing.T) {
 	task := queue.NewExportTask(queue.ExportPayload{UserID: "u1", Type: "nope"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestExportProcessor_Handle_ExporterError(t *testing.T) {
@@ -151,7 +151,7 @@ func TestExportProcessor_Handle_ExporterError(t *testing.T) {
 	task := queue.NewExportTask(queue.ExportPayload{UserID: "ghost", Type: transfer.ExportNotes})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	// ghost user lookup error propagates unchanged (no SkipRetry wrap)
+	// ghost user lookup error propagates unchanged (no ErrSkipRetry wrap)
 }
 
 // --- Tests: ImportProcessor ---
@@ -169,7 +169,7 @@ func TestImportProcessor_Handle_NilImporter(t *testing.T) {
 	task := queue.NewImportTask(queue.ImportPayload{UserID: "u1", Type: transfer.ImportBlocking, FileID: "f"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestImportProcessor_Handle_InvalidPayload(t *testing.T) {
@@ -178,7 +178,7 @@ func TestImportProcessor_Handle_InvalidPayload(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeImport, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestImportProcessor_Handle_MissingFields(t *testing.T) {
@@ -187,7 +187,7 @@ func TestImportProcessor_Handle_MissingFields(t *testing.T) {
 	task := queue.NewImportTask(queue.ImportPayload{UserID: "u1", Type: "", FileID: ""})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestImportProcessor_Handle_UnsupportedType(t *testing.T) {
@@ -196,7 +196,7 @@ func TestImportProcessor_Handle_UnsupportedType(t *testing.T) {
 	task := queue.NewImportTask(queue.ImportPayload{UserID: "u1", Type: "nope", FileID: "f"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestImportProcessor_Handle_ImporterError(t *testing.T) {

@@ -22,8 +22,8 @@ import (
 	"gorm.io/datatypes"
 )
 
-// stubError is a sentinel error for repository failures in tests.
-var stubError = errors.New("stub error")
+// errStub is a sentinel error for repository failures in tests.
+var errStub = errors.New("stub error")
 
 // failingUserRepo wraps MockUserRepository and forces counter operations to fail.
 // This produces errors from the service that bubble up to the handler's default
@@ -32,8 +32,8 @@ type failingUserRepo struct {
 	*testutil.MockUserRepository
 }
 
-func (f *failingUserRepo) IncrementFollowingCount(_ string, _ int) error { return stubError }
-func (f *failingUserRepo) IncrementFollowersCount(_ string, _ int) error { return stubError }
+func (f *failingUserRepo) IncrementFollowingCount(_ string, _ int) error { return errStub }
+func (f *failingUserRepo) IncrementFollowersCount(_ string, _ int) error { return errStub }
 
 // failingFollowRequestRepo wraps MockFollowRequestRepository and forces Delete
 // to fail.
@@ -41,7 +41,7 @@ type failingFollowRequestRepo struct {
 	*testutil.MockFollowRequestRepository
 }
 
-func (f *failingFollowRequestRepo) Delete(_ *model.FollowRequest) error { return stubError }
+func (f *failingFollowRequestRepo) Delete(_ *model.FollowRequest) error { return errStub }
 
 // failingListReqRepo wraps MockFollowRequestRepository and makes ListReceived fail.
 type failingListReqRepo struct {
@@ -49,7 +49,7 @@ type failingListReqRepo struct {
 }
 
 func (f *failingListReqRepo) ListReceived(_ string, _ int, _, _ string) ([]*model.FollowRequest, error) {
-	return nil, stubError
+	return nil, errStub
 }
 
 // newHandlerWithFailingCounters builds a handler whose user-counter increments fail.

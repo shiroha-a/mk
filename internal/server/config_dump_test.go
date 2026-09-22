@@ -29,7 +29,7 @@ func secretBearingConfig() *config.Config {
 		SetupPassword:     "LEAK-setup-password",
 		MediaProxySecret:  []byte("LEAK-media-proxy-secret"),
 		Proxy:             "http://user:LEAK-proxy-pass@proxy.internal:3128",
-		ProxySmtp:         "http://user:LEAK-smtp-pass@smtp-proxy.internal:3128",
+		ProxySMTP:         "http://user:LEAK-smtp-pass@smtp-proxy.internal:3128",
 	}
 }
 

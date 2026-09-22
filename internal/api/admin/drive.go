@@ -384,7 +384,7 @@ func (h *Handler) packAdminDriveShowFile(f *model.DriveFile, viewer *model.User)
 	// 管理者だけが通る = `admin/ip/*` と同じ条件になる。
 	// **roleService 未配線なら伏せる側へ倒す** (fail-closed)。
 	showIPs := viewerIsModerator && h.roleService != nil && viewer != nil &&
-		h.roleService.HasRolePolicy(viewer.ID, role.PolicyCanSearchIpHistory)
+		h.roleService.HasRolePolicy(viewer.ID, role.PolicyCanSearchIPHistory)
 	if showIPs {
 		resp["requestIp"] = f.RequestIP
 		// owner が moderator のときは headers を隠す (upstream 仕様、

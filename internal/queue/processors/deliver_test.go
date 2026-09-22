@@ -100,7 +100,7 @@ func TestDeliverProcessor_Gone_SkipsRetry(t *testing.T) {
 	p := processors.NewDeliverProcessor(signer)
 	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeliverProcessor_NotFound_SkipsRetry(t *testing.T) {
@@ -108,7 +108,7 @@ func TestDeliverProcessor_NotFound_SkipsRetry(t *testing.T) {
 	p := processors.NewDeliverProcessor(signer)
 	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeliverProcessor_Forbidden_SkipsRetry(t *testing.T) {
@@ -116,7 +116,7 @@ func TestDeliverProcessor_Forbidden_SkipsRetry(t *testing.T) {
 	p := processors.NewDeliverProcessor(signer)
 	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeliverProcessor_ServerError_RetriesByReturningError(t *testing.T) {
@@ -124,7 +124,7 @@ func TestDeliverProcessor_ServerError_RetriesByReturningError(t *testing.T) {
 	p := processors.NewDeliverProcessor(signer)
 	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
 	require.Error(t, err)
-	assert.NotErrorIs(t, err, driver.SkipRetry)
+	assert.NotErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeliverProcessor_NetworkError_Retries(t *testing.T) {
@@ -134,7 +134,7 @@ func TestDeliverProcessor_NetworkError_Retries(t *testing.T) {
 	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
 	require.Error(t, err)
 	assert.ErrorIs(t, err, netErr)
-	assert.NotErrorIs(t, err, driver.SkipRetry)
+	assert.NotErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeliverProcessor_BadPayload_SkipsRetry(t *testing.T) {
@@ -142,7 +142,7 @@ func TestDeliverProcessor_BadPayload_SkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeDeliver, Body: []byte(`{not json`)}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 func TestDeliverProcessor_BadKey_SkipsRetry(t *testing.T) {
@@ -155,7 +155,7 @@ func TestDeliverProcessor_BadKey_SkipsRetry(t *testing.T) {
 	}
 	err := p.Handle(context.Background(), makeTask(t, payload))
 	require.Error(t, err)
-	assert.ErrorIs(t, err, driver.SkipRetry)
+	assert.ErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 // --- Ed25519 sign / capability gate / degrade safeguard (#1067 / #1071) ---
@@ -576,13 +576,13 @@ func TestDeliverProcessor_Ed25519KeyCacheReuse(t *testing.T) {
 	assert.Same(t, signer.keys[0], signer.keys[1], "同一 Ed25519 PEM は cache hit で再利用する")
 }
 
-// #2106 N30: 429 (rate limited) は 4xx だが upstream 同様 retryable (SkipRetry を付けない)。
+// #2106 N30: 429 (rate limited) は 4xx だが upstream 同様 retryable (ErrSkipRetry を付けない)。
 func TestDeliverProcessor_RateLimited_Retries(t *testing.T) {
 	signer := &stubSigner{resp: okResponse(http.StatusTooManyRequests)}
 	p := processors.NewDeliverProcessor(signer)
 	err := p.Handle(context.Background(), makeTask(t, makePayload(t)))
 	require.Error(t, err)
-	assert.NotErrorIs(t, err, driver.SkipRetry)
+	assert.NotErrorIs(t, err, driver.ErrSkipRetry)
 }
 
 // keySourceStub resolves keys the way the production repo-backed source does.

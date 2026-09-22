@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var stubError = errors.New("stub error")
+var errStub = errors.New("stub error")
 
 func newHandler(t *testing.T) (*Handler, *testutil.MockDriveFileRepository, *testutil.MockDriveFolderRepository) {
 	t.Helper()
@@ -204,7 +204,7 @@ type failingFileRepo struct {
 }
 
 func (f *failingFileRepo) Create(_ *model.DriveFile) error {
-	return stubError
+	return errStub
 }
 
 func TestFilesCreate_RepoError(t *testing.T) {
@@ -462,7 +462,7 @@ type failingUpdateFileRepo struct {
 }
 
 func (f *failingUpdateFileRepo) Update(_ string, _ map[string]any) error {
-	return stubError
+	return errStub
 }
 
 func TestFilesUpdate_RepoError(t *testing.T) {
@@ -654,7 +654,7 @@ type failingFolderRepo struct {
 }
 
 func (f *failingFolderRepo) Create(_ *model.DriveFolder) error {
-	return stubError
+	return errStub
 }
 
 func TestFoldersCreate_RepoError(t *testing.T) {

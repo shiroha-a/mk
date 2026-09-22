@@ -13,12 +13,12 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// fakeDbFallbackToggle is a DbFallbackToggleProvider stub.
-type fakeDbFallbackToggle struct {
+// fakeDBFallbackToggle is a DBFallbackToggleProvider stub.
+type fakeDBFallbackToggle struct {
 	enabled bool
 }
 
-func (f *fakeDbFallbackToggle) FanoutTimelineDbFallbackEnabled() bool { return f.enabled }
+func (f *fakeDBFallbackToggle) FanoutTimelineDBFallbackEnabled() bool { return f.enabled }
 
 // spyNoteRepo counts the timeline queries that reach the database. embed して
 // いるので、数えない残りのメソッドはそのまま mock に委譲される。
@@ -80,9 +80,9 @@ var allReads = func() map[string]timelineRead {
 	return m
 }()
 
-// newDbFallbackFixture builds a Service whose database holds the given notes.
+// newDBFallbackFixture builds a Service whose database holds the given notes.
 // Redis は空から始まる。
-func newDbFallbackFixture(t *testing.T, notes ...*model.Note) (*Service, *FanoutTimelineService, *spyNoteRepo) {
+func newDBFallbackFixture(t *testing.T, notes ...*model.Note) (*Service, *FanoutTimelineService, *spyNoteRepo) {
 	t.Helper()
 	fanout := newTestService(t)
 	repo := testutil.NewMockNoteRepository()
@@ -119,16 +119,16 @@ func pushAll(t *testing.T, fanout *FanoutTimelineService, noteID string) {
 func TestService_DbFallbackDisabled_EmptyRedisReturnsNothing(t *testing.T) {
 	for name, read := range gatedReads {
 		t.Run(name, func(t *testing.T) {
-			svc, _, spy := newDbFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
+			svc, _, spy := newDBFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
 
-			svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: true})
+			svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: true})
 			got, err := read(svc, "", "", 10)
 			require.NoError(t, err)
 			assert.Len(t, got, 1, "fallback 有効なら DB から返る")
 			require.Positive(t, spy.dbCalls(), "前提: DB を引いている")
 
 			before := spy.dbCalls()
-			svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: false})
+			svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: false})
 			got, err = read(svc, "", "", 10)
 			require.NoError(t, err)
 			assert.Empty(t, got, "fallback 無効なら DB へ倒れない")
@@ -150,18 +150,18 @@ func TestService_DbFallbackDisabled_SinceIdPagingReturnsNothing(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			old := idGen.Generate(time.Now().Add(-time.Minute))
 			recent := idGen.Generate(time.Now())
-			svc, fanout, spy := newDbFallbackFixture(t, dbFallbackNote(old), dbFallbackNote(recent))
+			svc, fanout, spy := newDBFallbackFixture(t, dbFallbackNote(old), dbFallbackNote(recent))
 			pushAll(t, fanout, old)
 			pushAll(t, fanout, recent)
 
-			svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: true})
+			svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: true})
 			got, err := read(svc, "", old, 10)
 			require.NoError(t, err)
 			assert.NotEmpty(t, got, "fallback 有効なら DB が処理する")
 			require.Positive(t, spy.dbCalls(), "前提: sinceId 付きは DB へ倒れる")
 
 			before := spy.dbCalls()
-			svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: false})
+			svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: false})
 			got, err = read(svc, "", old, 10)
 			require.NoError(t, err)
 			assert.Empty(t, got, "fallback 無効なら sinceId 付きは空になる")
@@ -179,19 +179,19 @@ func TestService_DbFallbackDisabled_DoesNotTopUp(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			inRedis := idGen.Generate(time.Now())
 			older := idGen.Generate(time.Now().Add(-time.Minute))
-			svc, fanout, spy := newDbFallbackFixture(t, dbFallbackNote(inRedis), dbFallbackNote(older))
+			svc, fanout, spy := newDBFallbackFixture(t, dbFallbackNote(inRedis), dbFallbackNote(older))
 			// Redis には新しい方だけを積む。limit 10 に対して 1 件しか無いので
 			// 継ぎ足しが走る。
 			pushAll(t, fanout, inRedis)
 
-			svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: true})
+			svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: true})
 			got, err := read(svc, "", "", 10)
 			require.NoError(t, err)
 			assert.Len(t, got, 2, "fallback 有効なら足りない分を DB で埋める")
 			require.Positive(t, spy.dbCalls(), "前提: 継ぎ足しで DB を引いている")
 
 			before := spy.dbCalls()
-			svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: false})
+			svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: false})
 			got, err = read(svc, "", "", 10)
 			require.NoError(t, err)
 			require.Len(t, got, 1, "fallback 無効なら Redis の持ち分だけ")
@@ -212,9 +212,9 @@ func TestService_DbFallbackDisabled_DoesNotTopUp(t *testing.T) {
 func TestService_FanoutOffStillQueriesDbEvenWhenFallbackDisabled(t *testing.T) {
 	for name, read := range allReads {
 		t.Run(name, func(t *testing.T) {
-			svc, _, spy := newDbFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
+			svc, _, spy := newDBFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
 			svc.SetFanoutToggle(&fakeFanoutToggle{enabled: false})
-			svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: false})
+			svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: false})
 
 			got, err := read(svc, "", "", 10)
 			require.NoError(t, err)
@@ -236,8 +236,8 @@ func TestService_FanoutOffStillQueriesDbEvenWhenFallbackDisabled(t *testing.T) {
 // インスタンスで GTL が Redis 窓を超えて遡れなくなる**。
 func TestService_GlobalTimeline_NotGatedByDbFallback(t *testing.T) {
 	t.Run("Redis が空でも DB へ倒れる", func(t *testing.T) {
-		svc, _, spy := newDbFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
-		svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: false})
+		svc, _, spy := newDBFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
+		svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: false})
 
 		got, err := readGlobal(svc, "", "", 10)
 		require.NoError(t, err)
@@ -250,9 +250,9 @@ func TestService_GlobalTimeline_NotGatedByDbFallback(t *testing.T) {
 		// fallback off でこの継ぎ足しが止まるが、global は止まらない。
 		inRedis := idGen.Generate(time.Now())
 		older := idGen.Generate(time.Now().Add(-time.Minute))
-		svc, fanout, spy := newDbFallbackFixture(t, dbFallbackNote(inRedis), dbFallbackNote(older))
+		svc, fanout, spy := newDBFallbackFixture(t, dbFallbackNote(inRedis), dbFallbackNote(older))
 		require.NoError(t, fanout.Push(context.Background(), GlobalTimeline, inRedis, MaxTimelineLength))
-		svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: false})
+		svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: false})
 
 		got, err := readGlobal(svc, "", "", 10)
 		require.NoError(t, err)
@@ -267,10 +267,10 @@ func TestService_GlobalTimeline_NotGatedByDbFallback(t *testing.T) {
 		oldest := idGen.Generate(time.Now().Add(-2 * time.Minute))
 		older := idGen.Generate(time.Now().Add(-time.Minute))
 		newer := idGen.Generate(time.Now())
-		svc, fanout, spy := newDbFallbackFixture(t,
+		svc, fanout, spy := newDBFallbackFixture(t,
 			dbFallbackNote(oldest), dbFallbackNote(older), dbFallbackNote(newer))
 		require.NoError(t, fanout.Push(context.Background(), GlobalTimeline, newer, MaxTimelineLength))
-		svc.SetDbFallbackToggle(&fakeDbFallbackToggle{enabled: false})
+		svc.SetDBFallbackToggle(&fakeDBFallbackToggle{enabled: false})
 
 		got, err := readGlobal(svc, older, "", 10)
 		require.NoError(t, err)
@@ -288,32 +288,32 @@ func TestService_DbFallbackDefaultsToTrue(t *testing.T) {
 
 func TestNewMetaDbFallbackToggle_ReadsFromMeta(t *testing.T) {
 	for _, enabled := range []bool{true, false} {
-		repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimelineDbFallback: enabled}}
-		assert.Equal(t, enabled, NewMetaDbFallbackToggle(repo).FanoutTimelineDbFallbackEnabled())
+		repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimelineDBFallback: enabled}}
+		assert.Equal(t, enabled, NewMetaDBFallbackToggle(repo).FanoutTimelineDBFallbackEnabled())
 	}
 }
 
 func TestNewMetaDbFallbackToggle_FailsOpen(t *testing.T) {
 	// meta が読めないときは有効側に倒す (既定値が true のため)。無効側に倒すと
 	// 一時的な DB エラーでタイムラインが Redis の持ち分だけに縮む。
-	assert.True(t, NewMetaDbFallbackToggle(&stubMetaRepo{err: errors.New("db down")}).FanoutTimelineDbFallbackEnabled())
-	assert.True(t, NewMetaDbFallbackToggle(&stubMetaRepo{meta: nil}).FanoutTimelineDbFallbackEnabled())
-	assert.True(t, NewMetaDbFallbackToggle(nil).FanoutTimelineDbFallbackEnabled())
+	assert.True(t, NewMetaDBFallbackToggle(&stubMetaRepo{err: errors.New("db down")}).FanoutTimelineDBFallbackEnabled())
+	assert.True(t, NewMetaDBFallbackToggle(&stubMetaRepo{meta: nil}).FanoutTimelineDBFallbackEnabled())
+	assert.True(t, NewMetaDBFallbackToggle(nil).FanoutTimelineDBFallbackEnabled())
 
 	var p *metaRepoCacheLimits
-	assert.True(t, p.FanoutTimelineDbFallbackEnabled())
+	assert.True(t, p.FanoutTimelineDBFallbackEnabled())
 }
 
 // enableFanoutTimeline と enableFanoutTimelineDbFallback は**別の列**。
 // 片方の値がもう片方に漏れていないことを固定する。
 func TestMetaToggles_AreIndependent(t *testing.T) {
-	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: true, EnableFanoutTimelineDbFallback: false}}
+	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: true, EnableFanoutTimelineDBFallback: false}}
 	assert.True(t, NewMetaFanoutToggle(repo).FanoutTimelineEnabled())
-	assert.False(t, NewMetaDbFallbackToggle(repo).FanoutTimelineDbFallbackEnabled())
+	assert.False(t, NewMetaDBFallbackToggle(repo).FanoutTimelineDBFallbackEnabled())
 
-	repo = &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: false, EnableFanoutTimelineDbFallback: true}}
+	repo = &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: false, EnableFanoutTimelineDBFallback: true}}
 	assert.False(t, NewMetaFanoutToggle(repo).FanoutTimelineEnabled())
-	assert.True(t, NewMetaDbFallbackToggle(repo).FanoutTimelineDbFallbackEnabled())
+	assert.True(t, NewMetaDBFallbackToggle(repo).FanoutTimelineDBFallbackEnabled())
 }
 
 // --- 6. production の配線 ---
@@ -327,11 +327,11 @@ func TestMetaToggles_AreIndependent(t *testing.T) {
 // true を返すので、「有効なときに期待どおり動く」ことを見ても配線の有無は
 // 区別できない。各 setter が効いている状態でしか成立しない条件を選ぶ。
 
-// svc.SetDbFallbackToggle: FTT は on のまま fallback だけ off。
+// svc.SetDBFallbackToggle: FTT は on のまま fallback だけ off。
 // 両方 off にすると FTT 側の DB 直行と区別が付かない。
 func TestWireMetaToggles_WiresReadDbFallback(t *testing.T) {
-	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: true, EnableFanoutTimelineDbFallback: false}}
-	svc, _, spy := newDbFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
+	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: true, EnableFanoutTimelineDBFallback: false}}
+	svc, _, spy := newDBFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
 	WireMetaToggles(NewFanoutHook(svc.fanout, testutil.NewMockFollowingRepository()), svc, repo)
 
 	got, err := svc.HomeTimeline(context.Background(), dbFallbackViewer, "", "", 10, TimelineFilter{})
@@ -344,8 +344,8 @@ func TestWireMetaToggles_WiresReadDbFallback(t *testing.T) {
 // DB 直行が優先されて note が返る。未配線なら FTT on 扱いで Redis を読み、
 // 空 + fallback off で何も返らない。
 func TestWireMetaToggles_WiresReadFanoutToggle(t *testing.T) {
-	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: false, EnableFanoutTimelineDbFallback: false}}
-	svc, _, spy := newDbFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
+	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: false, EnableFanoutTimelineDBFallback: false}}
+	svc, _, spy := newDBFallbackFixture(t, dbFallbackNote(idGen.Generate(time.Now())))
 	WireMetaToggles(NewFanoutHook(svc.fanout, testutil.NewMockFollowingRepository()), svc, repo)
 
 	got, err := svc.HomeTimeline(context.Background(), dbFallbackViewer, "", "", 10, TimelineFilter{})
@@ -357,8 +357,8 @@ func TestWireMetaToggles_WiresReadFanoutToggle(t *testing.T) {
 // hook.SetFanoutToggle: FTT off なら push しない。
 func TestWireMetaToggles_WiresPushFanoutToggle(t *testing.T) {
 	ctx := context.Background()
-	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: false, EnableFanoutTimelineDbFallback: true}}
-	svc, fanout, _ := newDbFallbackFixture(t)
+	repo := &stubMetaRepo{meta: &model.Meta{EnableFanoutTimeline: false, EnableFanoutTimelineDBFallback: true}}
+	svc, fanout, _ := newDBFallbackFixture(t)
 	hook := NewFanoutHook(fanout, testutil.NewMockFollowingRepository())
 	WireMetaToggles(hook, svc, repo)
 

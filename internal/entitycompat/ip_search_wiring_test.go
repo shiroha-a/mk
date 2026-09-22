@@ -42,7 +42,7 @@ func TestIPAccountSearchRouteIsRegistered(t *testing.T) {
 	assertWired(t, routerGo,
 		`api.POST("/admin/ip/accounts", adminHandler.IPAccounts, `+
 			`middleware.RequireModerator(roleService), `+
-			`middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory), `+
+			`middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIPHistory), `+
 			`middleware.RequireScope("read:admin:user-ips"))`,
 		"admin/ip/accounts が 404 になる、あるいは管理者限定の既定が外れて\n"+
 			"モデレーター全員が IP から関連アカウントを引けるようになる (#3104)")
@@ -58,7 +58,7 @@ func TestIPRelatedAccountsRouteIsRegistered(t *testing.T) {
 	assertWired(t, routerGo,
 		`api.POST("/admin/ip/related-accounts", adminHandler.IPRelatedAccounts, `+
 			`middleware.RequireModerator(roleService), `+
-			`middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory), `+
+			`middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIPHistory), `+
 			`middleware.RequireScope("read:admin:user-ips"))`,
 		"admin/ip/related-accounts が 404 になる、あるいは管理者限定の既定が外れて\n"+
 			"モデレーター全員が関連アカウント候補を引けるようになる (#3105)")
@@ -95,7 +95,7 @@ func TestIPLookupLogRouteIsRegistered(t *testing.T) {
 	assertWired(t, routerGo,
 		`api.POST("/admin/ip/lookup-log", adminHandler.IPLookupLog, `+
 			`middleware.RequireModerator(roleService), `+
-			`middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIpHistory), `+
+			`middleware.RequireRolePolicy(roleService, corerole.PolicyCanSearchIPHistory), `+
 			`middleware.RequireScope("read:admin:user-ips"))`,
 		"admin/ip/lookup-log が 404 になる、あるいは認証段が緩んで\n"+
 			"照会の権限が無い相手に「誰がどの IP を引いたか」が読めるようになる (#3106)")

@@ -1575,15 +1575,15 @@ func (h *hookLocker) Acquire(ctx context.Context, key string, ttl time.Duration)
 func TestClaimCurrentLog_PostLockFindCurrentRecovers(t *testing.T) {
 	repo := newFakeRepo()
 	clk := newFakeClock(time.Date(2026, 4, 9, 12, 0, 0, 0, time.UTC))
-	bucketTs := truncateToHour(clk.Now()).Unix()
-	dayTs := truncateToDay(clk.Now()).Unix()
+	bucketTS := truncateToHour(clk.Now()).Unix()
+	dayTS := truncateToDay(clk.Now()).Unix()
 	hook := &hookLocker{inner: NewMemoryLocker()}
 	hook.hook = func() {
 		// 一度だけ実行: hour と day の両方の bucket を「別の writer が
 		// 作ったように」 repo に挿入する。
 		if len(repo.hour[""]) == 0 {
-			repo.hour[""] = []*Row{{ID: 901, Date: bucketTs, Cols: map[string]any{}}}
-			repo.day[""] = []*Row{{ID: 902, Date: dayTs, Cols: map[string]any{}}}
+			repo.hour[""] = []*Row{{ID: 901, Date: bucketTS, Cols: map[string]any{}}}
+			repo.day[""] = []*Row{{ID: 902, Date: dayTS, Cols: map[string]any{}}}
 		}
 	}
 	c, err := New(Config{

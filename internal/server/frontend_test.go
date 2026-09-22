@@ -1032,7 +1032,7 @@ func TestFrontendHTML_ProvidesTarballIgnoresConfigFlag(t *testing.T) {
 	cfg := &config.Config{
 		URL:     "https://example.test",
 		Version: "0.0.1-test",
-		PublishTarballInsteadOfProvideRepositoryUrl: true,
+		PublishTarballInsteadOfProvideRepositoryURL: true,
 	}
 
 	repo := testutil.NewMockMetaRepository()

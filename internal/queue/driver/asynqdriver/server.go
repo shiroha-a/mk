@@ -103,14 +103,14 @@ func buildRateLimitMiddleware(rates map[string]int) asynq.MiddlewareFunc {
 // handler receives a driver.Task adapter wrapping the underlying
 // *asynq.Task.
 //
-// Errors wrapping driver.SkipRetry are translated to
+// Errors wrapping driver.ErrSkipRetry are translated to
 // asynq.SkipRetry so the asynq runtime drops the job from the retry
 // queue exactly as it did before the driver indirection.
 func (s *Server) Handle(taskType string, h driver.HandlerFunc) {
 	s.mux.HandleFunc(taskType, func(ctx context.Context, t *asynq.Task) error {
 		err := h(ctx, asynqTask{t: t})
-		if err != nil && errors.Is(err, driver.SkipRetry) {
-			// 既存挙動: handler が SkipRetry を wrap した error を
+		if err != nil && errors.Is(err, driver.ErrSkipRetry) {
+			// 既存挙動: handler が ErrSkipRetry を wrap した error を
 			// 返すと、asynq の retry を抑止する。元の error message
 			// は %w 連鎖でそのまま保持する。
 			return fmt.Errorf("%w: %w", err, asynq.SkipRetry)

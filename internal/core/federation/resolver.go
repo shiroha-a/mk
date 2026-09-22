@@ -1960,7 +1960,7 @@ func (r *Resolver) fetchActor(uri string, allowCrossHost bool) (*activitypub.Per
 	// 緩めて生値を保存すると、actor は取り込めるのに `http.NewRequest` が毎回
 	// 落ちて**配送が永久に成立しない** (末尾空白なら `%20` 付きの URL を叩いて
 	// 相手が 404)。upstream は `new URL()` を通した値を使うので、そこに揃える。
-	// deliver 側は SkipRetry を付けないので、1 人いるだけで全 activity が
+	// deliver 側は ErrSkipRetry を付けないので、1 人いるだけで全 activity が
 	// MaxAttempts 回空振りする (#2662)。
 	actor.Inbox = trimWHATWGURL(actor.Inbox)
 	actor.SharedInbox = activitypub.APLenientID(trimWHATWGURL(actor.SharedInbox.String()))

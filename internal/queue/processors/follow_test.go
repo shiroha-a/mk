@@ -63,7 +63,7 @@ func TestFollowProcessor_PermanentErrors_SkipRetry(t *testing.T) {
 		task := queue.NewFollowTask(queue.FollowPayload{FollowerID: "a", FolloweeID: "b"})
 		err := p.Handle(context.Background(), task)
 		require.Error(t, err, sentinel.Error())
-		assert.True(t, errors.Is(err, driver.SkipRetry), sentinel.Error())
+		assert.True(t, errors.Is(err, driver.ErrSkipRetry), sentinel.Error())
 	}
 }
 
@@ -73,7 +73,7 @@ func TestFollowProcessor_GenericError_Retries(t *testing.T) {
 	task := queue.NewFollowTask(queue.FollowPayload{FollowerID: "a", FolloweeID: "b"})
 	err := p.Handle(context.Background(), task)
 	assert.Error(t, err)
-	assert.False(t, errors.Is(err, driver.SkipRetry), "transient error は retry させる")
+	assert.False(t, errors.Is(err, driver.ErrSkipRetry), "transient error は retry させる")
 }
 
 func TestFollowProcessor_MissingFields_SkipsRetry(t *testing.T) {
@@ -82,7 +82,7 @@ func TestFollowProcessor_MissingFields_SkipsRetry(t *testing.T) {
 	task := queue.NewFollowTask(queue.FollowPayload{FolloweeID: "rA"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 	assert.Empty(t, ff.calls)
 }
 
@@ -91,7 +91,7 @@ func TestFollowProcessor_NoFollower_SkipsRetry(t *testing.T) {
 	task := queue.NewFollowTask(queue.FollowPayload{FollowerID: "a", FolloweeID: "b"})
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }
 
 func TestFollowProcessor_BadPayload_SkipsRetry(t *testing.T) {
@@ -99,5 +99,5 @@ func TestFollowProcessor_BadPayload_SkipsRetry(t *testing.T) {
 	task := driver.RawTask{TypeName: queue.TaskTypeFollow, Body: []byte("not json")}
 	err := p.Handle(context.Background(), task)
 	require.Error(t, err)
-	assert.True(t, errors.Is(err, driver.SkipRetry))
+	assert.True(t, errors.Is(err, driver.ErrSkipRetry))
 }

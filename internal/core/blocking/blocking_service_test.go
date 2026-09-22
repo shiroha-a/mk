@@ -14,7 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-var stubError = errors.New("stub error")
+var errStub = errors.New("stub error")
 
 func newSvc(t *testing.T) (*blocking.Service, *testutil.MockUserRepository, *testutil.MockBlockingRepository, *testutil.MockFollowingRepository) {
 	t.Helper()
@@ -93,21 +93,21 @@ type failingBlockingRepo struct {
 
 func (f *failingBlockingRepo) Exists(blockerID, blockeeID string) (bool, error) {
 	if f.failExists {
-		return false, stubError
+		return false, errStub
 	}
 	return f.MockBlockingRepository.Exists(blockerID, blockeeID)
 }
 
 func (f *failingBlockingRepo) Create(b *model.Blocking) error {
 	if f.failCreate {
-		return stubError
+		return errStub
 	}
 	return f.MockBlockingRepository.Create(b)
 }
 
 func (f *failingBlockingRepo) Delete(b *model.Blocking) error {
 	if f.failDelete {
-		return stubError
+		return errStub
 	}
 	return f.MockBlockingRepository.Delete(b)
 }
@@ -119,7 +119,7 @@ func TestBlock_ExistsError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := blocking.NewService(userRepo, &failingBlockingRepo{MockBlockingRepository: testutil.NewMockBlockingRepository(), failExists: true}, nil, idGen)
 	_, err := svc.Block("a", "b")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestBlock_CreateError(t *testing.T) {
@@ -129,7 +129,7 @@ func TestBlock_CreateError(t *testing.T) {
 	idGen, _ := id.NewGenerator("aidx")
 	svc := blocking.NewService(userRepo, &failingBlockingRepo{MockBlockingRepository: testutil.NewMockBlockingRepository(), failCreate: true}, nil, idGen)
 	_, err := svc.Block("a", "b")
-	assert.ErrorIs(t, err, stubError)
+	assert.ErrorIs(t, err, errStub)
 }
 
 func TestUnblock_Self(t *testing.T) {
@@ -179,7 +179,7 @@ type failingFollowingRepo struct {
 }
 
 func (f *failingFollowingRepo) Delete(_ *model.Following) error {
-	return stubError
+	return errStub
 }
 
 func TestBlock_RemoveFollowingDeleteError(t *testing.T) {
@@ -271,7 +271,7 @@ func TestUnblock_DeleteError(t *testing.T) {
 
 	repo.failDelete = true
 	err = svc.Unblock("a", "b")
-	require.ErrorIs(t, err, stubError)
+	require.ErrorIs(t, err, errStub)
 	assert.Empty(t, hook.unblocked, "Delete 失敗時は Undo(Block) を配信しない")
 }
 
@@ -327,7 +327,7 @@ func TestBlock_FollowRequestCancelErrorIsBestEffort(t *testing.T) {
 	svc, ur, _, _ := newSvc(t)
 	addUser(ur, "a")
 	addUser(ur, "b")
-	svc.SetFollowRequestCanceller(&recordingFollowRequestCanceller{err: stubError})
+	svc.SetFollowRequestCanceller(&recordingFollowRequestCanceller{err: errStub})
 
 	_, err := svc.Block("a", "b")
 	require.NoError(t, err)

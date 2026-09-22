@@ -20,8 +20,8 @@ import (
 // handler_test.go の u1 と対になる。
 var matchAnyU2 = &model.User{ID: "u2", Username: "bob"}
 
-// assertAnError is a sentinel used to force repo.Create failures.
-var assertAnError = errors.New("create failed")
+// errCreateFailed is a sentinel used to force repo.Create failures.
+var errCreateFailed = errors.New("create failed")
 
 // newMatchAnyHandler wires a handler with a real-Redis service so the waiting
 // queue actually works.
@@ -154,7 +154,7 @@ func TestMatchAny_CreateFailureRequeuesOpponent(t *testing.T) {
 
 	require.Equal(t, http.StatusNoContent, post(h.Match, `{}`, u1).Code)
 
-	repo.createErr = assertAnError
+	repo.createErr = errCreateFailed
 	rec := post(h.Match, `{}`, matchAnyU2)
 	require.Equal(t, http.StatusInternalServerError, rec.Code)
 	assert.Empty(t, repo.games)
@@ -229,7 +229,7 @@ func TestMatchAny_OwnOutgoingInviteIsNotIncoming(t *testing.T) {
 // 不調なだけでランダムマッチが完全に止まる。
 func TestMatchAny_ListFailureFallsThroughToQueue(t *testing.T) {
 	h, repo, _ := newMatchAnyHandler(t)
-	repo.listErr = assertAnError
+	repo.listErr = errCreateFailed
 
 	rec := post(h.Match, `{}`, u1)
 	assert.Equal(t, http.StatusNoContent, rec.Code)
