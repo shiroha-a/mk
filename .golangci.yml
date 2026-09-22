@@ -3,18 +3,14 @@
 ## **既定の 5 つ (errcheck / govet / ineffassign / staticcheck / unused) を土台にする。**
 ## `go vet` だけでは見えない層を埋めるのが目的で、linter を増やすこと自体が目的ではない。
 ## 足すときは、実際に出た指摘を見てから決める。
+##
+## **`run.tests` は既定 (= テストも解析対象) のまま。** `unused` はパッケージ全体を
+## 見ないと正しく判定できないので、`tests: false` にすると「テストからしか使われない
+## もの」まで未使用と報告される (実測 11 件)。テストを含めたまま扱う。
 version: "2"
 
 linters:
   default: standard
-
-  disable:
-    # **`unused` は別途有効にする。** これはパッケージ全体を見ないと正しく
-    # 判定できない。`run.tests: false` にすると「テストからしか使われないもの」
-    # が未使用と出る (実測 11 件。うち 2 件は名前も `*_test_helpers.go`) ので、
-    # テストを含めたまま扱う必要がある。含めたうえで実際に未使用なものを潰すのは
-    # 別の作業になるので、ここでは外す。
-    - unused
 
   settings:
     staticcheck:

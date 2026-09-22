@@ -54,8 +54,8 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 **同時に 2 つ走らせられない。** ロックは `/tmp/golangci-lint.lock` でマシン全体。
 重なると `parallel golangci-lint is running` で exit 3 になり、lint 失敗と紛らわしい。
 
-**段階的に有効化している。** 残っているのは `unused` だけ。理由は `.golangci.yml` に
-書いてある。`ST1003` (命名) / `ST1012` (error var 名) / `SA1019` (非推奨 API) は有効で、
+**段階的な有効化は完了した。** `unused` / `ST1003` (命名) / `ST1012` (error var 名) /
+`SA1019` (非推奨 API) はすべて有効で、恒久的に無効なのは `QF*` と `S1016` だけ。
 除外は 2 つある — `test/e2e_federation` の**パッケージ名** (ディレクトリ名まで変えると
 24 箇所に波及するため。`git grep -oI e2e_federation -- '*.go' | wc -l`) と、`echo` の
 `LoggerWithConfig` (移行するとアクセスログの
