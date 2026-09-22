@@ -252,11 +252,13 @@ Misskey TS の `users/show` は **自インスタンスで観測した範囲** �
 
 ### inbox processor の verify-in-worker 化 (#565)
 
-upstream は HTTP handler の中で AP signature verify を同期実行するため、悪意ある unsigned activity が手前で増えると HTTP 受信スループットが低下する。mk-go は HTTP handler は body + signature header だけを payload に詰めて 202 即返し、signature verify / host block / instance touch / chart hook を inbox worker (asynq processor) 側で実行することで HTTP 受信 rps が **TS の 2.6-2.8x** (queue-bench で確認)。
+upstream は HTTP handler の中で AP signature verify を同期実行するため、悪意ある unsigned activity が手前で増えると HTTP 受信スループットが低下する。mk-go は HTTP handler は body + signature header だけを payload に詰めて 202 即返し、signature verify / host block / instance touch / chart hook を inbox worker (queue processor) 側で実行することで HTTP 受信 rps が **TS の 2.6-2.8x** (queue-bench で確認)。
 
-### mkq driver default (#571 audit)
+### mkq driver (#571 audit / #2985)
 
-job queue driver の既定を asynq から mkq (BullMQ-compatible Go ライブラリ) に変更。queue-bench (`tests/queue-bench/`) で BullMQ / asynq / mkq を 3-way 比較した結果、deliver throughput / inbox throughput ともに mkq が最良。
+job queue driver の既定を asynq から mkq (BullMQ-compatible Go ライブラリ) に変更 (#571)。当時 queue-bench (`tests/queue-bench/`) で BullMQ / asynq / mkq を 3-way 比較した結果、**送信 rps は mkq が最良**だった (drain time は asynq のほうが速い計測もある。[queue-bench.md](queue-bench.md) の表を参照)。
+
+その後 **#2985 で asynq driver 自体を削除**したので、選択肢は mkq だけになっている。`jobQueueDriver: asynq` を明示した設定は起動エラーになる。
 
 ## エラーレスポンス
 
@@ -271,7 +273,7 @@ TS版の`.config/default.yml`をそのまま使用可能。以下の設定もGo�
 - trustProxy (#129)
 - dbSlaves (#133)
 - 各種Redis分離設定
-- jobQueueDriver (`mkq` 既定 / `asynq` 選択可、#571)
+- jobQueueDriver (`mkq` のみ。#571 で既定に、#2985 で唯一の driver に)
 - allowedPrivateNetworks (SSRF allowlist、開発時の self-loop 許可用)
 
 ## DB構造

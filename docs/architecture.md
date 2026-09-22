@@ -29,7 +29,7 @@ mk-go は Misskey (TypeScript/NestJS) のバックエンドを Go で書き換�
 補助レイヤ:
   entity       … model → JSON レスポンス変換       ← core/entities/*EntityService
   activitypub  … AP の型/署名/レンダラ/解決         ← core/activitypub/*
-  queue        … 非同期ジョブ (mkq / asynq)         ← queue/processors/*
+  queue        … 非同期ジョブ (mkq)                 ← queue/processors/*
   stream       … WebSocket チャンネル               ← server/api/stream/channels/*
 ```
 
@@ -43,7 +43,7 @@ mk-go は Misskey (TypeScript/NestJS) のバックエンドを Go で書き換�
 | データアクセス | サービスが TypeORM repository を直接注入 | **明示的な `repository` interface 層** | mock 注入による単体テスト容易性 |
 | pack | `*EntityService.pack()` は DI されたサービス | **`entity.PackX()` は純関数** | 変換とドメインロジックの分離 |
 | クロスカット | `GlobalEventService` (event emitter) + 直接注入 | **明示的 hook interface** (`SetFanoutHook` 等) | import cycle 回避（§6） |
-| ジョブキュー | BullMQ | **mkq** (BullMQ wire 互換, 既定) / asynq (legacy) | Redis ストリーム互換 + Go ネイティブ |
+| ジョブキュー | BullMQ | **mkq** (BullMQ wire 互換) | Redis ストリーム互換 + Go ネイティブ |
 | HTTP 署名 | `@misskey-dev/node-http-message-signatures` | **自前実装** (`internal/activitypub/signature.go`) | 依存削減・RSA/Ed25519 両対応 |
 
 ---
@@ -234,7 +234,7 @@ upstream `core/activitypub/*` に対応。型/署名/レンダラは `activitypu
 
 ### 3.7 `internal/queue/` — ジョブキュー
 
-driver は `mkq`（BullMQ wire 互換, 既定）/ `asynq`（legacy）。`jobQueueDriver` で切替。`processors/` 配下:
+driver は `mkq`（BullMQ wire 互換）のみ。legacy の `asynq` は #2985 で削除し、`jobQueueDriver: asynq` は起動エラーになる。`processors/` 配下:
 
 | mk-go processor | Misskey-TS processor | 内容 |
 |---|---|---|

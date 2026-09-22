@@ -10,7 +10,7 @@ Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](ht
 - Misskeyフロントエンド(SPA)をそのまま配信
 - TypeScript版と同じPostgreSQL/Redisを共有、無停止で移行可能
 - ActivityPub連合対応（HTTP Signatures、リモートオブジェクト解決、配信キュー）
-- ジョブキューは `mkq` (BullMQ wire-compat、デフォルト) または `asynq`
+- ジョブキューは `mkq` (BullMQ wire-compat)
 - Playwright e2e (298 spec ファイル) を PR ごとに実行。upstream 追従時は Misskey TS backend に対しても回して drop-in 互換を検証
 - `RemoteStatsFetcher` でリモートユーザーの notesCount / followersCount / followingCount を origin から取得 (mk-go 独自拡張)
 
@@ -174,7 +174,7 @@ go test -race -count=1 -shuffle=3 -timeout 10m \
 | [プラグイン](docs/plugins/) | ビルド時組み込みプラグインの書き方・運用 |
 | [プラグイン peer プロトコル](docs/plugin-peer-protocol.md) | mk-go 同士でだけ通じる署名付き HTTP チャネルの wire 仕様 |
 | [UDSデプロイ](docs/docker-uds.md) | UNIXドメインソケット構成 |
-| [queue-bench](docs/queue-bench.md) | BullMQ / asynq / mkq の 3-way 比較 (#563) |
+| [queue-bench](docs/queue-bench.md) | BullMQ / mkq の 2-way 比較 (#563) |
 | [ベンチプロファイリング](docs/bench-pprof.md) | k6負荷時のpprof取得と解析 |
 | [メディアプロキシの govips 評価](docs/mediaproxy-govips-evaluation.md) | 画像変換ライブラリの比較検討 |
 | [upstream追従手順](docs/upstream-catch-up.md) | Misskey TSの新リリース取り込みとsubmodule bump |

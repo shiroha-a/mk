@@ -96,14 +96,19 @@ redis:
 
 # mk-go specific: select the job queue runtime.
 #
-#   - 'mkq' (default, recommended): shiroha-a/mkq based, BullMQ wire-
+#   - 'mkq' (the only driver): shiroha-a/mkq based, BullMQ wire-
 #                         compatible (makes the admin queue dashboard
 #                         render correctly under the upstream Misskey
 #                         TS frontend) + supports per-queue concurrency
 #                         and rate-limit knobs.
-#   - 'asynq': legacy hibiken/asynq based runtime. **Future-deprecation
-#                         candidate** — once mkq is fully battle-tested
-#                         we plan to remove asynq entirely.
+#
+# The legacy 'asynq' driver was removed in mk-go (#2985). A config that
+# still pins it fails to start: set 'mkq' or delete the line.
+#
+# Migrating is ONE-WAY: asynq's queued jobs (`asynq:{<queue>}:*` in Redis)
+# are invisible to mkq (`bull:*`). Drain them with the PREVIOUS mk-go
+# build before upgrading — the new build refuses to start, so there is no
+# way to drain them afterwards.
 #
 #jobQueueDriver: mkq
 
@@ -153,8 +158,8 @@ id: 'aidx'
 
 # Auto-scale: when jobQueueAutoScale=true, an AIMD controller dynamically
 # resizes worker pools for queues without an explicit *JobConcurrency knob,
-# within [minWorkers, maxWorkers]. mkq driver only (asynq returns a startup
-# error). Full spec: docs/design/auto-scale-job-workers.md.
+# within [minWorkers, maxWorkers]. Full spec:
+# docs/design/auto-scale-job-workers.md.
 #jobQueueAutoScale: false
 #maxWorkers: 128                # per-queue upper bound (default: runtime.NumCPU() * 16)
 #minWorkers: 4                  # per-queue lower bound (kept warm even at idle)

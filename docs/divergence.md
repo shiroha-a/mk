@@ -170,7 +170,7 @@ upstream 由来のクライアントはそのまま通る (省略時は upstream
 | `user_pending` | `signupApplicationId` | mk-go 独自 | 承認制 (#2571) でメール確認を挟むときの申請 ID。確認完了まではアカウントが無いので申請を `completed` にできず、**紐付けが無いと申請が `approved` のまま残って 1 つの承認から複数アカウントを作れる**。`/api/signup-pending` が `PromotePending` の戻り値からこれを読んで申請を完了させる。**承認制が有効な間は、この列の有無がそのままゲートの判定になる** (#2804) — 空にすると承認を経ていない pending として弾かれる側に倒れるので、移行バッチ等で NULL 化しないこと。TS は未知の列を無視するので drop-in の復路は壊れない |
 | `meta` | `signupApplicationForm` | mk-go 独自 | 承認制の申請フォームの定義 (#2570)。管理者が項目を決める jsonb 配列。上限は 10 項目 / ラベル 100 文字 / 回答 2000 文字で、**上限を置かないと管理者が自分で壊せる** (項目無制限で申請ページが使えなくなる、最大長無制限で 1 件の申請が DB を膨らませる)。壊れた JSON は空フォーム扱いにして申請ページを 500 で潰さない |
 | `meta` | `minimumUsernameLength` | mk-go 独自 | 新規登録で取れる username の最小文字数 (#3015)。既定 1 = 制限なしなので、既存インスタンスの挙動は変わらない。**TS はこの列を認識しない**ため、TS へ戻すと最小長の制限が単に無効になる (既に作られたアカウントはそのまま使える) |
-| `meta` | `enableEphemeralRelayNotes` / `ephemeralRelayNoteTtlMinutes` | mk-go 独自 | リレー経由投稿の揮発化 (#2332)。リレーでしか観測しない投稿は Redis に TTL 付きで置き、ローカルユーザーが触ったときだけ DB へ materialize する。既定 false は既存インスタンスの挙動を変えないため — 有効にするとグローバルタイムラインは FTT の窓より過去に遡れなくなる。**どちらかのフラグ (これか `enableRelayOrphanUserCleanup`) が有効なら、owner 無しのリモート添付を掃除する日次ジョブ (`maintenance:orphanAttachmentCleanup`、05:30) も回る** (#2722)。著者が materialize されていないリモート添付は owner 無しで保存され、ephemeral note が TTL で消えても `drive_file` の行は残るため。消すのは **(a) どの DB 上の note からも参照されておらず、(b) 生きている ephemeral note の印も無く、(c) 猶予より古い** link-only の行だけ。**TTL は寿命の上限ではない** (`Touch` が閲覧のたびに打ち直す) ので、猶予だけでは表示中の添付を守れない。生存判定は Redis の印が担い、猶予は「行を作ってから印を打つまでの窓」を覆うだけ。**Redis を `maxmemory` + `allkeys-lru` で運用する場合は注意**: タイムラインの hydrate は note (`ephNote:*`) だけを読み、印 (`ephFile:*`) には触れないので、印だけが先に evict される側に偏り (`/api/notes/show` の `Touch` は印にも `EXPIRE` を打つため LRU の idle time も更新される。偏るのは hydrate しか通らないノート)、その状態で古い行が再利用されていると表示中の添付が消えうる (`volatile-ttl` なら TTL 順なのでこの偏りは出ない)。**この機能を有効にした直後の 1 TTL ぶん**も、既存の ephemeral note には印が無い (`Touch` は `Expire` なので印を作らない)。cron の時刻は TZ 未指定で、mkq (既定) はプロセスの TZ、legacy の asynq は UTC で解釈する |
+| `meta` | `enableEphemeralRelayNotes` / `ephemeralRelayNoteTtlMinutes` | mk-go 独自 | リレー経由投稿の揮発化 (#2332)。リレーでしか観測しない投稿は Redis に TTL 付きで置き、ローカルユーザーが触ったときだけ DB へ materialize する。既定 false は既存インスタンスの挙動を変えないため — 有効にするとグローバルタイムラインは FTT の窓より過去に遡れなくなる。**どちらかのフラグ (これか `enableRelayOrphanUserCleanup`) が有効なら、owner 無しのリモート添付を掃除する日次ジョブ (`maintenance:orphanAttachmentCleanup`、05:30) も回る** (#2722)。著者が materialize されていないリモート添付は owner 無しで保存され、ephemeral note が TTL で消えても `drive_file` の行は残るため。消すのは **(a) どの DB 上の note からも参照されておらず、(b) 生きている ephemeral note の印も無く、(c) 猶予より古い** link-only の行だけ。**TTL は寿命の上限ではない** (`Touch` が閲覧のたびに打ち直す) ので、猶予だけでは表示中の添付を守れない。生存判定は Redis の印が担い、猶予は「行を作ってから印を打つまでの窓」を覆うだけ。**Redis を `maxmemory` + `allkeys-lru` で運用する場合は注意**: タイムラインの hydrate は note (`ephNote:*`) だけを読み、印 (`ephFile:*`) には触れないので、印だけが先に evict される側に偏り (`/api/notes/show` の `Touch` は印にも `EXPIRE` を打つため LRU の idle time も更新される。偏るのは hydrate しか通らないノート)、その状態で古い行が再利用されていると表示中の添付が消えうる (`volatile-ttl` なら TTL 順なのでこの偏りは出ない)。**この機能を有効にした直後の 1 TTL ぶん**も、既存の ephemeral note には印が無い (`Touch` は `Expire` なので印を作らない)。cron の時刻は TZ 未指定なので mkq はプロセスの TZ で解釈する |
 | `meta` | `enableRelayOrphanUserCleanup` / `relayOrphanUserGraceDays` | mk-go 独自 | リレー由来の孤児 user の掃除 (#2340)。対象の限定には `relay_observed_user` を使う |
 | `meta` | `chunkedUploadEnabled` / `chunkedUploadChunkSizeMb` / `chunkedUploadSessionTtlMinutes` / `chunkedUploadMaxSessionsPerUser` / `chunkedUploadMaxPendingMbPerUser` | mk-go 独自 | 分割アップロード (#2313) の設定。**コントロールパネル (オブジェクトストレージ) に出ているのは `chunkedUploadEnabled` / `chunkedUploadChunkSizeMb` / `chunkedUploadSessionTtlMinutes` の 3 つだけ**で、ロール policy の上限になる `chunkedUploadMaxSessionsPerUser` / `chunkedUploadMaxPendingMbPerUser` は `admin/update-meta` を直接呼ぶしかない (#2900 で確認)。TS は未知の列を無視するので drop-in の復路は壊れない |
 | `user_ip` | `lastSeenAt` / `observationCount` | mk-go 独自 | IP ごとの最終観測と観測回数 (#3103)。`user_ip` は `UNIQUE (userId, ip)` で 1 ペア 1 行しか持てないので、列を足さずに出す方法が無い。**`createdAt` は初回観測** (upstream の `ApiCallService.logIp` が `INSERT ... orIgnore` なのに合わせた。#3103 より前の mk-go は衝突時に上書きしており最終観測を意味していたので、**純正から引き継いだ DB では同じ列に両方の意味の行が混ざっていた**)。既存の mk-go 行は初回を復元できないため、migration 000094 の backfill では初回 = 最終になる。**その値は「初回観測」ではなく「migration を流した時点での最終観測」**なので、それより前の観測がある行では実際より新しい日時が出る。**TS はこの 2 列を知らない**ので DEFAULT を持たせてあり (`lastSeenAt` は `now()`、`observationCount` は 1)、TS 側が `(createdAt, userId, ip)` だけを INSERT しても落ちない。TS へ戻すと最終観測と観測回数の更新が止まる (行は残る) |
@@ -408,8 +408,8 @@ e2e は `make dropin-fedibird-test` (Fedibird-like mock との双方向 Ed25519 
 
 | キー | 用途 |
 |---|---|
-| `jobQueueDriver` | queue 実装選択。`mkq` (既定・BullMQ wire 互換) / `asynq` (legacy、廃止予定)。未知値は起動時 error |
-| `jobQueueAutoScale` / `maxWorkers` / `minWorkers` / `maxWorkersGlobal` / `autoScaleCooldownSeconds` | AIMD auto-scale controller。`mkq` driver のみ |
+| `jobQueueDriver` | queue 実装選択。**`mkq` (BullMQ wire 互換) のみ**。未知値は起動時 error。legacy の `asynq` は #2985 で削除し、明示すると「削除済み」と分かる文面で起動エラーにする (黙って mkq へ倒すと、予約投稿の可否やレート上限の効き方まで変わったことに気付けない) |
+| `jobQueueAutoScale` / `maxWorkers` / `minWorkers` / `maxWorkersGlobal` / `autoScaleCooldownSeconds` | AIMD auto-scale controller |
 | `deliverJobKeepFailed` / `inboxJobKeepFailed` / `deliverJobKeepCompleted` / `inboxJobKeepCompleted` | queue bucket の retention 件数 |
 | `nsfwDetectorUrl` / `nsfwDetectorAuthHeader` / `nsfwDetectorTimeout` | mk-go 独自の汎用 NSFW detector 契約 (`POST` 生バイト → `{"score": float64}`)。**upstream 2026.7.0 の公式 sensitive-detector (meta 駆動) が未設定のときの fallback** |
 | `videoThumbnailGeneratorMode` | `post` (既定、multipart POST) / `get` (Misskey TS 仕様互換) |
@@ -676,6 +676,18 @@ upstream が `jobState` の型を autogen (`AdminQueueJobsRequest['state'][numbe
 
 ## 4-3. job queue の構成差分
 
+**driver は mkq だけ (#2985)。** upstream は BullMQ 一択で driver という概念を持たない。
+mk-go には一時期 asynq driver もあったが、既定を mkq にしてから 4 か月以上 asynq へ
+戻す判断が要らなかったので削除した。**`jobQueueDriver: asynq` を書き残したままの設定は
+起動しない** (`config.Load` を通る `cmd/migrate` 等の CLI も同じ) — 黙って mkq で起動すると
+driver が入れ替わったことに気付けず、予約投稿の可否やレート上限の効き方まで変わる。
+行を消すか `mkq` に直すと起動する。
+
+**移行は片道。** asynq の未処理ジョブは Redis の `asynq:{<queue>}:*` に居り、mkq
+(`bull:*`) からは見えないので、残したまま切り替えると未配送の AP activity と未処理の
+inbox が黙って消える。**新ビルドは起動を拒むので後から捌けない** — 切り替え前に
+**旧ビルドでそのキーが空になるまで回す**しかない。
+
 upstream は用途ごとに **10 queue** に分けるが、mk-go は **8 queue** に集約している (`internal/queue/driver/mkqdriver` の `QueueNames`)。処理する仕事は同じで、束ね方だけが違う。
 
 | upstream の queue | mk-go の実体 |
@@ -698,7 +710,7 @@ upstream は用途ごとに **10 queue** に分けるが、mk-go は **8 queue**
 
 cron の多重実行防止は **job option ではなく mkq の job ID 設計**で担保している。mkq は発火 job に決定的な ID (`repeat:<scheduleID>:<nextMillis>`) を振り、`updateJobScheduler-12.lua` が `EXISTS` で重複を弾いて `duplicated` イベントを記録する。加えて `producerId == currentDelayedJobId` の判定で、直前の発火を処理した worker だけが次を積める。
 
-そのため `Scheduler.Register` に渡す `WithUnique` / `WithMaxRetry` / `WithProcessIn` は mkq driver では drop されるが、**現状の呼び出し方では実害が無い** (#2405)。`WithMaxRetry` は mk-go の cron が全て 0 = リトライ無しを渡しており mkq の既定と同じ、`WithProcessIn` はどの cron も渡していない。asynq driver は 3 つとも honour するが、結果として観測される挙動は一致する。この性質は `TestScheduler_RepeatedRegisterDoesNotDuplicate` で固定してある。
+そのため `Scheduler.Register` に渡す `WithUnique` / `WithMaxRetry` / `WithProcessIn` は mkq driver では drop されるが、**現状の呼び出し方では実害が無い** (#2405)。`WithMaxRetry` は mk-go の cron が全て 0 = リトライ無しを渡しており mkq の既定と同じ、`WithProcessIn` はどの cron も渡していない。この性質は `TestScheduler_RepeatedRegisterDoesNotDuplicate` で固定してある。
 
 `relationship` は #2403 まで `deliver` に相乗りしていたが、専用 queue に分離した。大量 follow (アカウント移行 / import) が `deliver` の worker を占有して AP 配信そのものを詰まらせ、片方を絞るともう片方も絞られる状態だったため。worker 数は 4 で、upstream の 16 とは違う。relationship job は DB bound (following 行 + カウンタ + stream publish) で外向き HTTP は `deliver` へ再 enqueue されるだけなので、`db.maxOpenConns` (既定 25) を HTTP 経路と共有する以上 16 を割くと Web 側のテールレイテンシに響く。`relationshipJobConcurrency` / `relationshipJobPerSec` はこの分離で初めて実効を持つようになった (それ以前は config として読むだけの no-op)。
 
@@ -716,7 +728,7 @@ cron の多重実行防止は **job option ではなく mkq の job ID 設計**�
 |---|---|
 | Redis timeline / antenna の宙吊り ID 除去 | 読み取り時に解決できなかった ID を Redis から取り除く (timeline は #2715 / PR #2718、antenna は #2719)。**upstream は取り除かない** — timeline (`FanoutTimelineEndpointService`) も antenna (`server/api/endpoints/antennas/notes.ts`、こちらは `FanoutTimelineEndpointService` を通らず生の `note.id IN (...)`) も、Redis から取った ID を hydrate して引けなかったぶんを黙って落とすだけ。`FanoutTimelineService.remove` の呼び出し元は `antennas/remove-note` (ユーザー操作) しか無い。**antenna で効く理由は DB fallback が無いこと。** timeline は件数不足時に DB へ fallback するが (`meta.enableFanoutTimelineDbFallback` を off にすると止まる、§5.6)、antenna の読み取りは Redis の ID だけで完結する。押し出し自体は両方にある (antenna は `pushNote` が毎回 `ZRemRangeByRank`、timeline は 10% 確率の `LTrim`) が、**マッチが止まった antenna では新着が積まれないので宙吊り ID が残り続ける**。読み取り窓 (`limit*2`) が全部宙吊りだとページが空で返り、クライアントは次の `untilId` を得られず行き止まりになる。解消は 1 リクエストあたり窓 1 つぶん。**除去は filter を掛ける前の集合で判定する** — visibility / mute / block で落ちた note は生きているため。**消す前に primary で存在を確かめる** (`ExistingNoteIDsOnPrimary`、`dbresolver.Write` で primary 固定) — mk-go はリードレプリカを対応しており (`dbReplications`、既定 `false`)、複製前の行は通常の SELECT で引けない。ID に埋め込まれた時刻での猶予判定は使えない: リモート note の ID は AP の `published` から発番されるため「たった今 INSERT されたが ID の時刻は数時間前」が普通に起きる。**timeline 側も同じ確認を通す** (#2757)。DB fallback があるから安全とは言えない — fallback は Hybrid 以外では別メソッドで、`allowPartial: true` を渡すクライアントには走らず、`enableFanoutTimelineDbFallback` を off にすれば運用側でも止まり (global を除く、§5.6)、Redis list から消えた ID は戻らない |
 | inbox verify-in-worker 化 | HTTP handler は body + signature header を payload 化して即 202、署名 verify / host block / instance touch は worker 側。HTTP 受信 rps が **TS の 2.6〜2.8 倍** |
-| mkq queue driver | BullMQ wire 互換の Go 実装。queue-bench で BullMQ / asynq / mkq を 3-way 比較 (送信 rps は mkq 優位、drain time は asynq 優位。詳細は [queue-bench.md](queue-bench.md)) |
+| mkq queue driver | BullMQ wire 互換の Go 実装で、**mk-go 唯一の queue driver** (legacy の asynq は #2985 で削除)。queue-bench の当時の 3-way 比較では送信 rps が mkq 優位、drain time は asynq 優位だった (詳細は [queue-bench.md](queue-bench.md)) |
 | AIMD auto-scale worker | per-queue の動的 Resize + Prometheus metrics。worker 現在数 / 範囲 / scale 履歴は admin UI にも出す (#2277) |
 | Prometheus `/metrics` | `mk_job_workers_active` / `mk_job_queue_pending` / `mk_job_dispatch_wait_seconds` ほか。**無認証公開なので LB/nginx ACL 必須**。admin から読めない分は `admin/queue/*` の `runtime` block が補う (#2277) |
 | `admin/server-metrics` | mk-go プロセス自身の統計 (goroutine / heap / GC / uptime / version) を返す mk-go 独自 endpoint (#2395)。upstream に対応物は無い。`admin/server-info` はホストマシンの静的スペックを返すもので別物。control panel のダッシュボードから 10s ポーリングで表示する (`ReadMemStats` が stop-the-world を伴うため間隔を詰めない)。DB / Redis の接続プールは当初含めていたが、常時ほぼ一定で画面のノイズになるため UI ごと落とした |
@@ -1371,6 +1383,23 @@ NUL の扱いが分かれる土壌になっていたので中身を委譲した�
 ## 8. 逆方向 divergence (mk-go 独自 error を upstream に合わせて廃止したもの)
 
 `admin/emoji/import-zip` の `NO_SUCH_FILE`、clip 削除の `NOT_CLIPPED`、`notes/translate` の `CANNOT_TRANSLATE` はいずれも mk-go 独自 error だったため upstream に合わせて廃止済み。myReaction fetch の「作成 2 秒以内は skip」guard は mk-go では機能劣化になるため意図的に不採用。
+
+### `notes/drafts/update` は `scheduledNoteLimit` を見ない
+
+upstream の `NoteDraftService.update` は「**未予約 → 予約** に切り替える更新」のときだけ
+`scheduledNoteLimit` を数え直し、超過なら `TOO_MANY_SCHEDULED_NOTES`
+(`02f5df79-08ae-4a33-8524-f1503c8f6212`) を返す。mk-go の `DraftsUpdate` にはこの検査が
+**元から無い**。`notes/drafts/create` 側 (`22ae69eb-...`) は upstream と同じく実装済み。
+
+抜け道は「上限まで予約を作る → 予約でない下書きを作る → update で予約へ切り替える」で、
+**上限を 1 件ずつ超えられる**。予約投稿そのものは動くので実害は quota の緩さだけ。
+
+`asynq` driver を消すまで (#2985) は、この id を **driver capability gate** が使っていた
+(mkq 以外では予約投稿を丸ごと拒否していた、#1045 Phase 2-C)。既定が mkq になってからは
+一度も発火していなかったが、コードが残っていたぶん「update 側にも出口がある」ように
+見えていた。gate を消したことで id の出口がゼロになったので、乖離としてここに記録する。
+**`errorid-check` では捕まらない** — あれは emission 側の id / code / status の一致しか
+見ないので、「emission が無いこと」は検査対象外。
 
 ---
 

@@ -156,7 +156,7 @@ port: 3000
 #mediaProxyConcurrency: 4
 
 # Floor for how long an idle queue worker waits on the marker key before
-# re-checking, in seconds (default: mkq's own). mkq driver only.
+# re-checking, in seconds (default: mkq's own).
 #
 # Since mkq v1.0.4 the wait doubles on every empty poll and is capped at 30s,
 # snapping back to this floor as soon as a job is processed. So this is the
@@ -173,7 +173,7 @@ port: 3000
 #queueIdlePollSeconds: 5
 
 # How long one job's handler may run before its worker stops counting towards
-# the queue's worker budget and gets replaced (mkq driver only).
+# the queue's worker budget and gets replaced.
 #
 # A worker is one dispatcher goroutine. If its handler never returns, the queue
 # silently loses that much capacity — this is what happened in #2657, where all
@@ -206,7 +206,7 @@ port: 3000
 #queueStuckWorkerSeconds: -1
 
 # How long the dispatcher waits for one job's handler before giving up on it
-# and moving on to the next job (mkq driver only).
+# and moving on to the next job.
 #
 # **This does not stop the handler.** Go cannot kill a goroutine; all that
 # stops is the waiting. The abandoned handler keeps running and keeps whatever
@@ -306,22 +306,22 @@ redis:
 
 # mk-go specific: select the job queue runtime.
 #
-#   - 'mkq' (default, recommended): shiroha-a/mkq based runtime.
-#                        BullMQ wire-compatible — admin queue dashboard
+#   - 'mkq' (the only driver): shiroha-a/mkq based runtime. BullMQ
+#                        wire-compatible — the admin queue dashboard
 #                        renders correctly under the upstream Misskey
 #                        TS frontend (which assumes BullMQ). Supports
 #                        per-queue concurrency / rate-limit knobs (see
 #                        `<queue>JobConcurrency` / `<queue>JobPerSec`).
-#   - 'asynq': legacy hibiken/asynq based runtime. Kept for migration
-#                        path. **Future-deprecation candidate** — once
-#                        mkq is fully battle-tested in production we
-#                        plan to remove asynq entirely. New deploys
-#                        should use 'mkq'. Note that `inboxJobConcurrency`
-#                        and per-queue rate-limit settings only partially
-#                        apply under asynq (see docs/configuration.md).
 #
-# Switching between drivers does not migrate in-flight jobs; flush
-# the queue or wait for completion before changing.
+# The legacy 'asynq' driver was removed in mk-go (#2985). If your config
+# still pins it, mk-go — and every CLI that loads this file, including
+# cmd/migrate — refuses to start: set 'mkq' or delete the line.
+#
+# Migrating is ONE-WAY. asynq's jobs live under `asynq:{<queue>}:*` in
+# Redis and mkq (`bull:*`) never sees them, so anything still queued is
+# silently dropped. The new build refuses to start, so the only way to
+# drain them is to run the PREVIOUS mk-go build until those keys are
+# empty, and only then upgrade.
 #
 #jobQueueDriver: mkq
 
@@ -386,26 +386,19 @@ id: 'aidx'
 # but only these three have a knob; every queue left unset uses a
 # hot-tuned default (see docs/configuration.md).
 #
-# The asynq driver has a single shared pool, so deliverJobConcurrency
-# acts as the global pool size there and the other two are no-ops.
-# The mkq driver runs one pool per queue and treats each key as that
-# queue's own worker count, defaulting to deliver=16, inbox=16,
-# relationship=4. asynq has no per-queue split -- its shared pool is
-# whatever deliverJobConcurrency says, defaulting to 16. NOTE: the values below
-# are upstream Misskey's, not mk-go's (see docs/configuration.md).
+# mk-go runs one pool per queue and treats each key as that queue's own
+# worker count, defaulting to deliver=16, inbox=16, relationship=4.
+# NOTE: the values below are upstream Misskey's, not mk-go's
+# (see docs/configuration.md).
 #deliverJobConcurrency: 128
 #inboxJobConcurrency: 16
 #relationshipJobConcurrency: 16
 
-# Job rate limiter. Honoured by both drivers, but differently.
-#
-# mkq (the default) limits PER QUEUE: the cap is one shared Redis key
+# Job rate limiter, applied PER QUEUE: the cap is one shared Redis key
 # (bull:<queue>:limiter), so "deliverJobPerSec: 128" is about 128
-# jobs/sec no matter how many workers that queue runs. Do not divide
-# by the worker count.
-#
-# asynq waits inside the handler instead, so a throttled queue can
-# starve the shared pool. See docs/configuration.md.
+# jobs/sec no matter how many workers that queue runs, and it holds
+# across processes. Do not divide by the worker count.
+# See docs/configuration.md.
 #deliverJobPerSec: 128
 #inboxJobPerSec: 32
 #relationshipJobPerSec: 64
@@ -417,8 +410,8 @@ id: 'aidx'
 
 # Auto-scale: when jobQueueAutoScale=true, an AIMD controller dynamically
 # resizes worker pools for queues without an explicit *JobConcurrency knob,
-# within [minWorkers, maxWorkers]. mkq driver only (asynq returns a startup
-# error). Full spec: docs/design/auto-scale-job-workers.md.
+# within [minWorkers, maxWorkers]. Full spec:
+# docs/design/auto-scale-job-workers.md.
 #jobQueueAutoScale: false
 #maxWorkers: 128                # per-queue upper bound (default: runtime.NumCPU() * 16)
 #minWorkers: 4                  # per-queue lower bound (kept warm even at idle)

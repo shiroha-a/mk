@@ -33,7 +33,7 @@ db.poolSize:            10-100
 
 (`relationshipJobConcurrency` は #2403 で mkq driver に forward されるようになった。
 auto-scale では他の per-queue knob と同じく「設定されていれば `relationship` を
-管理対象から外す」判定に使う。asynq driver では依然 no-op で、起動時に warning が出る)
+管理対象から外す」判定に使う)
 
 これらの「最適値」は workload に強く依存する:
 
@@ -294,7 +294,18 @@ runtime kill switch は **auto-scale が cluster を喰い尽くして restart �
 4. **per-queue scope** — 1 queue spike が他 queue の budget を奪わない
 5. **panic switch** — `jobQueueAutoScale: false` 一発で controller off。ただし **supervisor は autoscale と独立に動く**ので、roster を完全に固定するには `queueStuckWorkerSeconds` と `queueHandlerDeadlineSeconds` の**両方**に負値が要る (§5.1.1)
 
-## 5. multi-driver 整合 (mkq / asynq)
+## 5. driver 側の対応 (設計当時は mkq / asynq の 2 本立て)
+
+> **§5.2 は歴史的な記録。** asynq driver は #2985 で削除したので、いま driver は
+> mkq だけで、`jobQueueAutoScale` の driver 別分岐も `startAutoScale` の起動エラー
+> 判定も無くなっている。
+>
+> **あの判定は残す価値が無かった。** `driver.ErrResizeNotSupported` を mkq driver が
+> 返すのは `Driver.Server()` を一度も呼んでいないときだけで、production は
+> `newServer` が構築時に呼ぶので到達しない (実測)。`Server()` 済みで `Start()` 前なら
+> 返るのは `mkqdriver: Resize: unknown queue` のほうで、`errors.Is` に当たらなかった。
+> 述語を「エラーなら落とす」へ広げる案も、§5.1 の「初期 Resize の失敗は warn に
+> とどめて起動は続ける」(Redis の瞬断で起動不能にしない) と両立しない。
 
 ### 5.1 mkqdriver
 
@@ -537,13 +548,11 @@ dispatcher が handler の**外** (mkq 内部の Lua 呼び出しや BZPOPMIN) �
   - Redis 接続: 128 本 (どちらの方式でも同じ、go-redis pool 上限要調整)
   - 詳細 overhead は #1124 の integration test で測定、許容できない場合は mkq library に Resize API を追加する PR を別途検討
 
-### 5.2 asynqdriver
+### 5.2 asynqdriver (#2985 で削除済み)
 
-asynq library は `Concurrency` を Server 構築時に固定する設計で、動的 Resize に対応する API がない (upstream に PR を出す or fork が必要)。
+asynq library は `Concurrency` を Server 構築時に固定する設計で、動的 Resize に対応する API がなかった。
 
-初期 release では **asynqdriver は auto-scale 対象外** とし、`jobQueueAutoScale: true` + `jobQueueDriver: asynq` の組み合わせは config 検証で reject (or warning + 固定値 fallback)。
-
-将来 asynq に Resize 相当の API が入った時点で対応する (`#1120 tracker` の「将来」項目)。
+そのため **asynqdriver は auto-scale 対象外** とし、`jobQueueAutoScale: true` + `jobQueueDriver: asynq` の組み合わせは起動時に reject していた。**#2985 で driver ごと削除した**ので、この分岐はもう無い。
 
 ## 6. observability
 
@@ -554,8 +563,8 @@ asynq library は `Concurrency` を Server 構築時に固定する設計で、�
 | metric name | type | labels | 説明 |
 |---|---|---|---|
 | `mk_job_workers_active` | gauge | queue | 各 queue で**仕事を取れる** worker 数。goroutine 数ではない (mkq では隔離中の worker を除く、§5.1.1) |
-| `mk_job_workers_quarantined` | gauge | queue | 閾値超過で pool の外に退けてある worker 数 (mkq のみ、他は常に 0)。**0 でない状態が続いていたら handler がブロックしている** |
-| `mk_job_handlers_abandoned` | gauge | queue | dispatcher が待つのをやめた handler のうち、まだ戻ってきていない数 (mkq のみ)。**0 に戻らないなら goroutine が本当に残っている** |
+| `mk_job_workers_quarantined` | gauge | queue | 閾値超過で pool の外に退けてある worker 数。**0 でない状態が続いていたら handler がブロックしている** |
+| `mk_job_handlers_abandoned` | gauge | queue | dispatcher が待つのをやめた handler のうち、まだ戻ってきていない数。**0 に戻らないなら goroutine が本当に残っている** |
 | `mk_job_handler_abandonments_total` | counter | queue | 同上の累計 |
 | `mk_job_queue_pending` | gauge | queue | Redis ZCARD 値 (pending job 数) |
 | `mk_job_dispatch_wait_seconds` | histogram | queue | enqueue → dispatch までの待ち時間 |
@@ -687,7 +696,7 @@ autoscale とは独立に動き、隔離 (#2657) と期限 (#2658) の**どち�
 
 - multi-process 協調 scaling (cluster-wide budget、Redis 上の lease token 機構)
 - HPA / VPA との連携 (custom metric expose は本 ADR でカバー、k8s 側設定例の docs 化)
-- asynqdriver 対応 (upstream に Resize 相当の PR が入った時点で)
+- asynqdriver 対応 (#2985 で driver ごと削除したので消滅)
 - PI controller (dispatch wait p95 を直接 targeting する高度化)
 - enqueue 側 backpressure (inbox HTTP の 503 Retry-After)
 - host-level circuit breaker の deliver 全般への拡張

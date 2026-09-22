@@ -1,9 +1,9 @@
 # mkq: BullMQ互換 Go-native Job Queue ライブラリ 設計ドキュメント
 
-**Status**: 実装済 (#377 Phase 2)。mkq は別 OSS リポジトリとして公開され、**mk-go の
-既定 driver** になっている (#571)。**以下は設計時点の記録**で、現在の設定値・挙動の
-一次情報ではない。運用時の値は [configuration.md](../configuration.md)、実測は
-[queue-bench.md](../queue-bench.md) を参照。
+**Status**: 実装済 (#377 Phase 2)。mkq は別 OSS リポジトリとして公開され、**mk-go
+唯一の driver** になっている (既定化が #571、asynq driver の削除が #2985 = Phase 7 完了)。
+**以下は設計時点の記録**で、現在の設定値・挙動の一次情報ではない。運用時の値は
+[configuration.md](../configuration.md)、実測は [queue-bench.md](../queue-bench.md) を参照。
 
 ---
 
@@ -246,13 +246,13 @@ type MkqDriver struct { /* ... */ }
 ```yaml
 # .config/default.yml
 jobQueueDriver: mkq    # 既定 (未指定でも mkq)
-# jobQueueDriver: asynq  # legacy
 ```
 
 **設計当時は asynq が既定だった。** 3-way ベンチ (BullMQ / asynq / mkq、#563) の結果を
-受けた #571 の audit で mkq が既定になり、asynq は legacy 扱いになっている。
+受けた #571 の audit で mkq が既定になり、**#2985 で asynq driver は削除された**
+(`jobQueueDriver: asynq` は起動エラー)。
 
-router.go で driver を 1 箇所で生成して wire。同じ binary で両 driver がコンパイル済み。
+router.go で driver を 1 箇所で生成して wire。
 
 ### 7.3 Migration path
 

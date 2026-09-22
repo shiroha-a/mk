@@ -1,6 +1,10 @@
 # Queue bench (#563)
 
-ジョブキュー配送スループットを **3 driver** (Misskey TS BullMQ / mk-go asynq / mk-go mkq) で公正比較するベンチマーク基盤。HTTP latency 用 `tests/bench/` とは別運用。
+ジョブキュー配送スループットを **2 stack** (Misskey TS BullMQ / mk-go mkq) で公正比較するベンチマーク基盤。HTTP latency 用 `tests/bench/` とは別運用。
+
+> **以前は asynq を含む 3-way だった。** mk-go の asynq driver は #2985 で削除したので、
+> harness からも外してある。下の実測表のうち日付が #2985 より前のものには asynq 行が
+> 残っているが、**当時測った値の記録**であって現在再現できる構成ではない。
 
 ## 計測対象
 
@@ -15,7 +19,7 @@
 
 ### Inbound (inbox job throughput)
 
-`faker` (Go HTTPS, AP HTTP signature 直接) → 3 receiver inbox に signed activity を blast。
+`faker` (Go HTTPS, AP HTTP signature 直接) → 各 receiver inbox に signed activity を blast。
 
 - 各 receiver に faker actor を pubkey 込みで pre-seed (外部 fetch 排除)
 - `faker` は **pre-sign 並列化** で sender 側を律速から外し、receiver の verify+enqueue が bottleneck になるよう設計
@@ -33,7 +37,7 @@ faker payload は 2 種類から選択 (env で driver_inbound に渡す):
 ## 実行
 
 ```bash
-# 1) 3 stack + blackhole + faker を up (5-10 min、初回 build を伴う)
+# 1) 各 stack + blackhole + faker を up (5-10 min、初回 build を伴う)
 make queue-bench-up
 
 # 2) seed (user / follower / faker actor を DB 直挿入)
@@ -71,6 +75,7 @@ make queue-bench-down
 
 ### Announce 経路 reference 値 (PR #1158 マージ後、2026-05-21)
 
+**当時の 3-way 構成での実測** (asynq driver は #2985 で削除済み)。
 10000 req × 3 target、concurrency 128 で計測。app コンテナは develop @ `9adc836` (PR #1161 マージ後)。
 
 | Stack | Send Duration | Effective rps | Drain time | Peak queue depth | Notes |
@@ -81,13 +86,13 @@ make queue-bench-down
 
 観測:
 
-- mk-go (async/mkq) は **TS の 2.9x** の send-side throughput (Create 経路の 3.0x と同水準)
+- mk-go (asynq/mkq) は **TS の 2.9x** の send-side throughput (Create 経路の 3.0x と同水準)
 - Announce 経路は Create 経路と比べて -4〜-12% (HTTP signature verify + target note resolve + renote create の overhead)
 - mk-go は peak depth 9800+ まで queue を積んで worker が drain (47-63s)、TS は send と同期で peak=0
 
 ### PR #1158 before/after 比較 (#1163 で実施、2026-05-24)
 
-queue-bench orchestration の startup 非決定性 (3 stack 並列起動で random に 1 stack が ok=0) が #1163 で解消されたので、handleAnnounce hook async 化 (#1158) の effect を before/after で計測。
+queue-bench orchestration の startup 非決定性 (複数 stack の並列起動で random に 1 stack が ok=0) が #1163 で解消されたので、handleAnnounce hook async 化 (#1158) の effect を before/after で計測。**当時の 3-way 構成での実測** (asynq driver は #2985 で削除済み)。
 
 **測定条件**:
 - 同一ホスト・同一 docker compose stack。before は `git revert 9adc836` 適用後 rebuild、after は develop HEAD (= #1158 適用)
@@ -129,7 +134,7 @@ inbound bench で TS instance を sender に使うと、TS 側の deliver throug
 
 ### Federation flag 注意
 
-mk-go は新規 DB 初期化時 `meta.federation='none'` (= 連合無効) で立ち上がる。seed が DB 直接 UPDATE で `federation='all'` にしたあと、app の meta cache (5min TTL) を再読み込みさせるため `make queue-bench-seed` の最後で `app-asynq` / `app-mkq` / `app-ts` を restart する。
+mk-go は新規 DB 初期化時 `meta.federation='none'` (= 連合無効) で立ち上がる。seed が DB 直接 UPDATE で `federation='all'` にしたあと、app の meta cache (5min TTL) を再読み込みさせるため `make queue-bench-seed` の最後で `app-mkq` / `app-ts` を restart する。
 
 **app を restart したら nginx front も必ず restart する (#2917)。** nginx は upstream をホスト名で書くと**起動時に一度だけ**名前解決するので、`restart` で app の IP が入れ替わると**古いアドレスを掴んだまま相手側の app へ繋ぐ**。conf も docker DNS も正しいまま、`nginx-ts` が `app-mkq` へ繋がるといった形になり、Host が食い違って inbound が全件 401 になる (mk-go は `ErrInboxHostMismatch`、TS も `ActivityPubServerService` が同じ判定を持つ)。`queue-bench-seed` は app が healthy になってから nginx を restart し、**各 front が自分の app に繋がっていること** (`/api/meta` の `uri` が自分のホストか) を確かめてから抜ける。**TCP が開いているかだけでは足りない** — 誤配線した front もlistener は生きていて 200 を返すため。
 
@@ -137,7 +142,7 @@ mk-go は新規 DB 初期化時 `meta.federation='none'` (= 連合無効) で立
 
 ### Network allowlist
 
-mk-go の SSRF 防止 (`allowedPrivateNetworks`) は production default で private IP を block する。bench 内の `blackhole` / faker / 他 stack は Docker network の private IP なので、bench config (`tests/queue-bench/common/mk-{asynq,mkq}.yml`) で `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` を allowlist 化している。
+mk-go の SSRF 防止 (`allowedPrivateNetworks`) は production default で private IP を block する。bench 内の `blackhole` / faker / 他 stack は Docker network の private IP なので、bench config (`tests/queue-bench/common/mk-mkq.yml`) で `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` を allowlist 化している。
 
 ## 関連
 

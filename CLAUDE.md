@@ -25,7 +25,7 @@
 |-----------|---------|------|
 | PostgreSQL Driver | **pgx/v5** (`jackc/pgx/v5`) | PostgreSQL接続 |
 | Redis | **go-redis v9** (`redis/go-redis/v9`) | キャッシュ、PubSub |
-| Job Queue | **mkq** (`shiroha-a/mkq`) | BullMQ wire互換のRedisジョブキュー（既定）。`asynq` (`hibiken/asynq`) はlegacyで削除予定 |
+| Job Queue | **mkq** (`shiroha-a/mkq`) | BullMQ wire互換のRedisジョブキュー。**唯一のdriver** (legacyの`asynq`は#2985で削除) |
 | Search | **meilisearch-go** | Meilisearch連携 |
 | Object Storage | **aws-sdk-go-v2/s3** | S3互換ストレージ |
 
@@ -76,7 +76,7 @@
 │   ├── activitypub/        # ActivityPub実装（Inbox、Deliver、Renderer、Resolver、HTTP署名、LD-Signature）
 │   ├── model/              # DBモデル（GORM、Misskeyエンティティ対応）
 │   ├── repository/         # データアクセス層
-│   ├── queue/              # ジョブキュー（既定mkq / legacy asynq）とプロセッサ
+│   ├── queue/              # ジョブキュー（mkq）とプロセッサ
 │   ├── stream/             # WebSocketストリーミング（チャンネル実装）
 │   ├── entity/             # レスポンス用DTO（シリアライゼーション）
 │   ├── entitycompat/       # 静的な shape drift 検出と doc gate（Section 8 / docs/shape-drift.md）
@@ -932,6 +932,71 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-09-22**: legacy の **asynq driver を削除**し、mkq を唯一の queue driver にした
+  (#2985)。Section 1 の技術スタック表と Section 2 のツリーを実態に合わせてある。
+  **既定が mkq になってから 4 か月以上、本番で asynq へ戻す判断は一度も要らなかった**
+  (既定の切り替えは #631、2026-05-02。`gh pr view 631 --json mergedAt` で実測)。残して
+  いたぶんだけ実装と doc が二重になり、`internal/queue/driver/option.go` だけで asynq に
+  言及する行が **10** あった (数え方: 削除前の同ファイルで `grep -c asynq`)。うち
+  「silent no-op」「対応 API なし」と書いてあるのは **6 行**で、残りは既定値の違い
+  (`asynq defaults to 25`) や意味の違い (`MaxRetry=0` の解釈) の注記。
+  **`jobQueueDriver: asynq` は起動エラーにする。** 既定が mkq の状態で明示して asynq を
+  選んでいた運用は意図的なので、黙って mkq で起動すると **driver が入れ替わったことに
+  気付けない** (予約投稿の可否もレート上限の効き方も変わる)。typo (`mkqq`) とは文面を
+  分ける — operator が取るべき行動が違うため、asynq だけ「削除済み。mkq にするか行を
+  消せば既定」と案内する。**移行は片道なので、その旨もメッセージに書く** —
+  asynq の未処理ジョブは `asynq:{<queue>}:*` に残り mkq (`bull:*`) からは見えないので、
+  切り替え前に**旧ビルドで捌ききる**しかない。新ビルドは起動を拒むので、後から捌く
+  手段が無い。
+  **消える能力差は 2 つ。** `SupportsScheduledNote` (= asynq では予約投稿を
+  `TOO_MANY_SCHEDULED_NOTES` で門前払いしていた、#1045 Phase 2-C) と、
+  `startAutoScale` の `ErrResizeNotSupported` 起動エラー判定。
+  **前者を消すと `notes/drafts/update` から `TOO_MANY_SCHEDULED_NOTES` の唯一の出口が
+  消える。** upstream (`NoteDraftService.update`) は「未予約 → 予約」に切り替わるとき
+  `scheduledNoteLimit` を見るが、mk-go の update は**元からその gate を持っていない**
+  (create 側は持つ)。既定 mkq では capability gate が常に false だったので発火していた
+  わけでもなく回帰ではないが、コードが消えると乖離が見えなくなるので
+  `docs/divergence.md` に記録した。`errorid-check` は emission しか見ないので落ちない。
+  **後者は「残す」と書きかけて、裏取りで誤りだと分かった。** 初稿は「mkqdriver も
+  `Server.Start` 前は同じエラーを返すので、配線順を守る guard として生きている」と
+  書いたが、**本番配線では一度も発火しない**。`d.dServer` を代入するのは
+  `Driver.Server()` で (`Start()` ではない)、`newServer` は構築時に
+  `queue.NewServer(queueDriver)` = `d.Server()` を呼ぶ。だから `Driver.Resize` は常に
+  `Server.Resize` へ委譲し、pool 未作成時に返るのは `ErrResizeNotSupported` ではなく
+  `mkqdriver: Resize: unknown queue "deliver"` で、guard の `errors.Is` に当たらない。
+  **述語を `err != nil` に広げる案も採れない** — `TestStartAutoScale_InitialResizeFailureDoesNotPreventStart`
+  が「一時的な Resize 失敗で起動を止めない」を固定している (Redis の瞬断で起動不能に
+  なる)。**この誤りは敵対的レビューが実測で見つけた。** 「コードを読んだ」で済ませて
+  4 箇所へ書き写すところだった。
+  **`driver.ErrResizeNotSupported` 自体は残る** — `Driver.Server()` を一度も呼んで
+  いない driver が `Resize` された場合の sentinel で、`mkqdriver` 自身のテストが
+  固定している (`TestDriver_Resize_BeforeStartReturnsNotSupported`)。
+  **テストの移植で 1 群、driver 固有の前提に依存していたものが出た。** `internal/queue` の
+  `TestClient_Enqueue*_ClosedClientFails` 4 本は `queue.Client.Close()` 後の enqueue が
+  失敗することを見ていた。asynq では `Client.Close` が実接続を閉じるので意味があったが、
+  **mkq の `Client.Close` は no-op** (接続は driver が持つ) なので、そのまま移すと落ちる。
+  閉じる対象を driver に直して `*_ClosedDriverFails` にした (実測: 元の形に戻すと 4 本とも
+  「エラーが返らない」で落ちる)。**「空虚」ではない** — このリポジトリで空虚と呼ぶのは
+  「壊しても通る」ほうで、これは「driver を替えると落ちる」形だった。
+  attempts の検証も移し替えが要った — **mkq driver は `TaskSummary.MaxRetry` を埋めない**
+  ので、BullMQ の `opts.attempts` を読む形にしてある (変異検証: `mkqdriver/option.go` の
+  `WithAttempts(o.MaxRetry+1)` を `WithAttempts(o.MaxRetry)` にして
+  `go test ./internal/queue/...` を回すと **7 本**落ちる。移植した 6 本と、
+  mkqdriver 側で元からある `TestEnqueue_MaxRetryAppliedToBullMQHash`)。
+  **`go.mod` は `hibiken/asynq` と `golang.org/x/time` の 2 つを外す。** 後者は
+  asynqdriver の rate limiter でしか直接使っていなかった。ただし **消しきれない** —
+  `echo/v4/middleware` が要るので `// indirect` へ移す (`go mod tidy` はこのリポジトリでは
+  使えないので手で動かし、`GOWORK=off go build ./...` で充足を確認した。**手元は
+  `cmd/misskey/plugins_generated.go` が private plugin を import するので、退避してから
+  でないと go.sum の検証にならない**)。
+  **queue-bench は 2-way (TS ↔ mkq) にした。** 実測表は当時測った値の記録なので残し、
+  「#2985 より前の表には asynq 行がある」と注記した。
+  **`docs/design/*` は注記だけ足す。** 設計時点の見積もり (`Phase 7 (数ヶ月後)`)、Phase 表の
+  見積もり列、実測値は触らない。現在形で書かれていて嘘になった段落 (auto-scale ADR §5.2、
+  mkq-design の Status) にだけ「#2985 で削除済み」を添えた。
+  **射程外**: 実測値と設計判断そのもの (この更新記録の過去 entry、`docs/update/*`、
+  `tests/queue-bench/results/*`、`docs/design/*` の数値と見積もり) は書き換えない。
 
 - **2026-09-22**: `apicompat` workflow を追加。**`docs/api-compat.md` の再生成が人手に
   頼っていた** — CLAUDE.md 自身が「生成物を手で直さない」と書いているのに、古くなっても

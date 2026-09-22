@@ -72,7 +72,8 @@ queue-bench (`tests/queue-bench/`、#563) で計測:
 - federation processor の `handleCreate` で Reply/Renote 関係が無い fresh note への redundant `hydrateNoteForFanout` (DB SELECT) を skip
 - fanoutHook / notificationHook を local note service と同じ `safeGo` pattern で async 化
 
-queue-bench で **asynq drain 29.3s → 22.4s (-24%)、mkq 45.7s → 34.0s (-26%)**。
+queue-bench で **asynq drain 29.3s → 22.4s (-24%)、mkq 45.7s → 34.0s (-26%)**
+(当時の 3-way 構成での実測。asynq driver は #2985 で削除済み)。
 
 ## 4. Trade-off
 
