@@ -57,7 +57,9 @@ func Surface(dir string) ([]string, error) {
 	// **`parser.ParseDir` は使わない** (Go 1.25 で非推奨)。非推奨の理由は
 	// 「build tag を見ないので package とファイルの対応が不正確」だが、ここは
 	// ディレクトリ内の **.go を全部見たい**ので、その不正確さがむしろ要件に合う。
-	// 代替として案内される `go/packages` は型チェックまで走らせるので過剰。
+	// 代替として案内される `go/packages` は `go list` を起動するぶん重く、package
+	// 単位で解決するのでディレクトリを直接列挙したいここには合わない (型チェックは
+	// `NeedTypes` を渡したときだけ走るので、そこは理由にならない)。
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return nil, fmt.Errorf("%s を解析できません: %w", dir, err)

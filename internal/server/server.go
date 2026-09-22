@@ -362,6 +362,29 @@ func corsMiddleware() echo.MiddlewareFunc {
 
 // gzipConfig returns the GzipConfig used by the global middleware stack.
 // Shared with gzip_test.go so production and tests stay in sync.
+// accessLogConfig returns the access log middleware config.
+//
+// **`${uri}` は query を含む**ので、そのまま出すと `?i=<token>` の形で有効な
+// credential がアクセスログに残る (redact package の doc 参照)。`${custom}` に
+// 差し替えて秘密パラメータの値だけを伏せる。
+//
+// **`RequestLoggerWithConfig` (SA1019 の移行先) へは移していない。** 出力形式は
+// あちらでも `LogValuesFunc` で同じテキスト行を組み立てられるので問題ではなく、
+// 引っかかるのは **`CustomTagFunc` に相当するものが無い**こと — redact をその
+// `LogValuesFunc` の中で書き直すことになり、**間違えると有効な credential が
+// 素のままログに残る**。この配線を固定するテストが長らく 1 つも無かったので
+// (`TestAccessLogConfig_RedactsToken` で塞いだ)、移行は単独の変更として扱う。
+//
+// 切り出してあるのはテストから同じ設定を検査するため (`gzipConfig` と同じ形)。
+func accessLogConfig() echomw.LoggerConfig {
+	return echomw.LoggerConfig{
+		Format: "${time_rfc3339} ${method} ${custom} ${status} ${latency_human}\n",
+		CustomTagFunc: func(c echo.Context, buf *bytes.Buffer) (int, error) {
+			return buf.WriteString(redact.URI(c.Request().RequestURI))
+		},
+	}
+}
+
 func gzipConfig() echomw.GzipConfig {
 	// MinLength=1024 で小さい body の gzip overhead を回避し、/streaming は
 	// WebSocket frame を壊さないよう Skipper で除外する (#413 Phase 3 #12)。
@@ -527,21 +550,11 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	// Recover に巻き戻し、5xx の最終整形は echo に任せる。
 	e.Use(mksentry.Middleware(cfg))
 	e.Use(echomw.RequestID())
-	// **`RequestLoggerWithConfig` へは移さない (SA1019 を抑制する)。** あちらは
-	// 構造化ログ向けの別 API で `CustomTagFunc` に相当するものが無く、下の redact を
-	// `LogValuesFunc` で書き直すことになる。**間違えると `?i=<token>` が素のまま
-	// アクセスログに残る**うえ、出力形式がテキストから構造化へ変わって運用側にも
-	// 影響する。echo 側に削除の予定は無いので、移行は単独の変更として検討する。
-	//nolint:staticcheck // SA1019: 移行は token redact の作り直しとログ形式の変更を伴うため別途
-	e.Use(echomw.LoggerWithConfig(echomw.LoggerConfig{
-		// `${uri}` は query を含むため、そのまま出すと `?i=<token>` の形で
-		// 有効な credential がアクセスログに残る (redact package の doc 参照)。
-		// `${custom}` に差し替えて秘密パラメータの値だけを伏せる。
-		Format: "${time_rfc3339} ${method} ${custom} ${status} ${latency_human}\n",
-		CustomTagFunc: func(c echo.Context, buf *bytes.Buffer) (int, error) {
-			return buf.WriteString(redact.URI(c.Request().RequestURI))
-		},
-	}))
+	// 設定は accessLogConfig() に集約してテストと共有する (gzipConfig と同じ形)。
+	//
+	// **`//nolint` は行末に置く。** 独立行に置くと `e.Use(...)` 文の全体が
+	// staticcheck の死角になる (実測: 引数の中に SA1019 を仕込んでも 0 件だった)。
+	e.Use(echomw.LoggerWithConfig(accessLogConfig())) //nolint:staticcheck // SA1019: 移行は redact の配線を作り直すので別途 (accessLogConfig の doc を参照)
 	e.Use(corsMiddleware())
 	// gzip response compression (#413 Phase 3 #12)。Misskey TS は nginx
 	// 前段で gzip するのが定石だが、mk-go は単体運用も想定するので app 側

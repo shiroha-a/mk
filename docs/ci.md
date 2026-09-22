@@ -57,7 +57,8 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 **段階的に有効化している。** 残っているのは `unused` だけ。理由は `.golangci.yml` に
 書いてある。`ST1003` (命名) / `ST1012` (error var 名) / `SA1019` (非推奨 API) は有効で、
 除外は 2 つある — `test/e2e_federation` の**パッケージ名** (ディレクトリ名まで変えると
-32 箇所に波及するため) と、`echo` の `LoggerWithConfig` (移行するとアクセスログの
+24 箇所に波及するため。`git grep -oI e2e_federation -- '*.go' | wc -l`) と、`echo` の
+`LoggerWithConfig` (移行するとアクセスログの
 token redact を作り直すことになるため `//nolint` で抑制)。
 
 誤検知は `//nolint:staticcheck // 理由` をその行に置く。理由を必ず書く。

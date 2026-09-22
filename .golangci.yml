@@ -92,8 +92,9 @@ linters:
       # ここは upstream の e2e と対応を取るためディレクトリ名を保っており、
       # パッケージ名もそれに合わせている。外部から import されないテスト専用
       # パッケージなので、名前を変える実益が無い一方、ディレクトリ名まで
-      # 変えると `internal/` の実コード 2 ファイルを含む 32 箇所に波及する
-      # (数え方: `git grep -oI e2e_federation | wc -l`)。
+      # 変えると `internal/` の実コード 2 ファイルを含む 24 箇所に波及する
+      # (数え方: `git grep -oI e2e_federation -- '*.go' | wc -l`。**doc を含めると
+      # 36 だが、この数字を書いた doc 自身が数を増やす**ので code だけで数える)。
       # **CI のカバレッジ閾値は ImportPath の `/e2e` で判定する** (`ci.yml` の
       # `pkg ~ /\/e2e/` で unanchored な部分一致) ので、**名前が `e2e` で
       # 始まる限り** 0% 例外は維持される (`federatione2e` のように後ろへ

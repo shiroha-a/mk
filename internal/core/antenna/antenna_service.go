@@ -657,7 +657,7 @@ func (s *Service) ListByUser(userID string) ([]*model.Antenna, error) {
 // limit <= 0 ならデフォルト 10、上限 100。
 //
 // ZSET は score を 0 に揃えてあるので、範囲指定は member (= note id) の
-// 辞書順に対する `ZRangeByLex` で行う。aidx は時刻順に単調増加するため、
+// 辞書順に対する `ZRangeArgs` (`BYLEX`) で行う。aidx は時刻順に単調増加するため、
 // untilID / sinceID をそのまま排他境界 (`(<id>`) に使える (#2465)。
 //
 // untilID / sinceID が空なら全 range を見て最新 N 件を返す (旧挙動互換)。

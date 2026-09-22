@@ -706,8 +706,12 @@ func newViteProxy(target string) echo.HandlerFunc {
 	//
 	// **`Rewrite` は X-Forwarded-* を落としてから呼ばれる。**
 	// `NewSingleHostReverseProxy` + `Director` では `ServeHTTP` が
-	// `X-Forwarded-For` を自動で足していたので、`SetXForwarded()` で足し直す
-	// (あちらは Host / Proto も足すが、相手は開発用の Vite なので広い方で困らない)。
+	// `X-Forwarded-For` を自動で足していたので `SetXForwarded()` で付け直すが、
+	// **等価ではない** (実測) — (1) `Director` 版は client 由来の値へ**追記**して
+	// いたのに対しこちらは観測した RemoteAddr で**置換**する、(2) `X-Forwarded-Host`
+	// と `X-Forwarded-Proto` を**新たに送る**、(3) client が送ってきた `Forwarded`
+	// ヘッダは**削除される**。どれも詐称ヘッダを dev server へ流さない方向なので
+	// こちらを採る (Vite は `req.headers.host` しか見ないことも確認済み)。
 	proxy := &httputil.ReverseProxy{
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(remote)

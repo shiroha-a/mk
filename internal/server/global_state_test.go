@@ -250,7 +250,10 @@ func TestLoaderFixtureTestsResetCache(t *testing.T) {
 	// `_test.go` を全部見たい**ので、その不正確さがむしろ要件に合う。
 	entries, err := os.ReadDir(".")
 	require.NoError(t, err)
-	files := map[string]*ast.File{}
+	// **slice で持つ。** `os.ReadDir` はファイル名順にソート済みで返すので、
+	// map に入れ直すと理由なく報告順が非決定的になる (CLAUDE.md の sqlbind-check
+	// entry を参照)。旧 `parser.ParseDir` は map を返していた。
+	var files []*ast.File
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, "_test.go") {
@@ -258,7 +261,7 @@ func TestLoaderFixtureTestsResetCache(t *testing.T) {
 		}
 		f, perr := parser.ParseFile(fset, name, nil, 0)
 		require.NoErrorf(t, perr, "%s を parse できない", name)
-		files[name] = f
+		files = append(files, f)
 	}
 
 	// env 名を定数に切り出す形も追えるように、まず const の中身を集める。
@@ -281,7 +284,8 @@ func TestLoaderFixtureTestsResetCache(t *testing.T) {
 	}
 
 	checked := 0
-	for path, f := range files {
+	for _, f := range files {
+		path := fset.Position(f.Pos()).Filename
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
