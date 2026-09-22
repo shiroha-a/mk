@@ -1,0 +1,102 @@
+# docs/api-compat.md が実態とずれていないかを見る。
+#
+# **あれは生成物** (`make apicompat`) で、CLAUDE.md は「生成物を手で直さない」と
+# 書いている。にもかかわらず**再生成は人手に頼っていた**ので、route を足しても
+# upstream が endpoint を増やしてもマトリクスは黙って古くなる。読む人は
+# 「mk-go only 59 件」のような数字を現状だと思って判断する。
+#
+# **既存のどの job にも相乗りできない。** submodule (TS の endpoints を読む) と
+# DB / Redis (route dump がサーバーを組み立てる) の両方が要るが、`test-shards` は
+# `third_party/misskey` を checkout せず、`frontend-check` は DB を持たない。
+#
+# **required check には含めない。** 判定材料に submodule の内容が入るので、こちらの
+# コードを触っていない PR でも upstream の bump で赤くなりうる (`vulncheck` と同じ理由)。
+name: apicompat
+
+on:
+  pull_request:
+    paths:
+      - 'internal/api/**'
+      - 'internal/server/router.go'
+      - 'third_party/misskey'
+      - 'tools/apicompat/**'
+      - 'docs/api-compat.md'
+      - 'Makefile'
+      - '.github/workflows/apicompat.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apicompat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: mk
+          POSTGRES_PASSWORD: mk
+          POSTGRES_DB: misskey_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    # **config は `tests/upstream-e2e/mkgo.yml` を使う。** `testMode: true` が要る —
+    # 無いと `/api/reset-db` が route に載らず、マトリクスが「TS 側に存在するが
+    # mk-go 未実装 1 件」に化ける。接続先だけ `MK_*` で service container へ向ける
+    # (あちらの既定は upstream-e2e の compose が使うポート)。
+    env:
+      MK_DB_HOST: localhost
+      MK_DB_PORT: '5432'
+      MK_DB_DB: misskey_test
+      MK_DB_USER: mk
+      MK_DB_PASS: mk
+      MK_REDIS_HOST: localhost
+      MK_REDIS_PORT: '6379'
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      # route dump はサーバーを組み立てるので、schema が無いと起動時に落ちる。
+      - name: Apply migrations
+        run: go run ./cmd/migrate -config tests/upstream-e2e/mkgo.yml -direction up
+
+      # **プラグインは入らない前提。** 同梱の 2 つは `disabled: true` なので
+      # `pluginbuild` が skip する (#2701)。自前プラグインを `plugins/` に置いた
+      # 手元で回すと 19 行混入するが、clean checkout では起きない。
+      - name: Regenerate api-compat.md
+        run: make apicompat APICOMPAT_CONFIG=tests/upstream-e2e/mkgo.yml
+
+      - name: Check for drift
+        run: |
+          if ! git diff --exit-code -- docs/api-compat.md; then
+            echo ""
+            echo "docs/api-compat.md が実態とずれています。"
+            echo "生成物なので手で直さず、再生成してコミットしてください。"
+            echo "手順は docs/development.md の apicompat を参照 (プラグイン抜き + testMode が要ります)。"
+            exit 1
+          fi
+          echo "docs/api-compat.md は最新です。"

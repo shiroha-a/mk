@@ -740,6 +740,24 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
   あるかを確認すること。
 - PR の required check には**含めない**。
 
+### `apicompat` workflow (PR トリガー)
+
+- `.github/workflows/apicompat.yml` が `make apicompat` を回し、**`docs/api-compat.md` が
+  実態とずれていないか**を見る。あれは生成物で CLAUDE.md も「手で直さない」と書いているが、
+  **再生成が人手に頼っていた**ので、route を足しても upstream が endpoint を増やしても
+  マトリクスは黙って古くなる。読む人は「mk-go only 59 件」のような数字を現状だと思う。
+- **既存のどの job にも相乗りできない。** submodule (TS の endpoints を読む) と DB / Redis
+  (route dump がサーバーを組み立てる) の両方が要るが、`test-shards` は `third_party/misskey`
+  を checkout せず、`frontend-check` は DB を持たない。
+- **config は `tests/upstream-e2e/mkgo.yml`。** `testMode: true` が要る — 無いと
+  `/api/reset-db` が route に載らず、マトリクスが「TS 側に存在するが未実装 1 件」に化ける。
+  接続先だけ `MK_*` で service container へ向ける。
+- **プラグインは入らない前提。** 同梱の 2 つは `disabled: true` なので `pluginbuild` が
+  skip する (#2701)。自前プラグインを `plugins/` に置いた手元で回すと 19 行混入するが、
+  clean checkout では起きない。
+- PR の required check には**含めない**。判定材料に submodule の内容が入るので、こちらの
+  コードを触っていない PR でも upstream の bump で赤くなりうる。
+
 ### `frontend-check` job (ci.yml)
 
 - fork frontend (`third_party/misskey`) を `vue-tsc --noEmit` で型チェックする。1.0 以降
@@ -915,6 +933,22 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: `apicompat` workflow を追加。**`docs/api-compat.md` の再生成が人手に
+  頼っていた** — CLAUDE.md 自身が「生成物を手で直さない」と書いているのに、古くなっても
+  気付く仕組みが無かった。route を足しても upstream が endpoint を増やしてもマトリクスは
+  黙ってずれ、読む人は「mk-go only 59 件」のような数字を現状だと思って判断する。
+  **既存のどの job にも相乗りできない。** submodule (TS の endpoints を読む) と DB / Redis
+  (route dump がサーバーを組み立てる) の両方が要るが、`test-shards` は `third_party/misskey`
+  を checkout せず、`frontend-check` は DB を持たない。別 workflow にして paths で絞った。
+  **再生成には条件が 2 つある** (1.3.0 のリリースで実際に踏んだ)。`testMode: true` が無いと
+  `/api/reset-db` が route に載らず「TS 側に存在するが未実装 1 件」に化けるので、config は
+  `tests/upstream-e2e/mkgo.yml` を使い接続先だけ `MK_*` で service container へ向ける。
+  **プラグインが入ると 19 行混入する**が、同梱の 2 つは `disabled: true` なので clean
+  checkout では起きない (#2701)。
+  **required には含めない** — 判定材料に submodule の内容が入るので、こちらのコードを
+  触っていない PR でも upstream の bump で赤くなりうる。
+  **検証は PR 上で行う** (`docs/ci.md` の方針)。`workflow_dispatch` だけだと default branch に
+  あるものしか起動できず、マージ前に一度も確かめられない。
 - **2026-09-22**: migration の **up → down → up 往復テスト**を追加
   (`internal/repository/migration_roundtrip_test.go`)。**書いた瞬間に本物のバグを 1 件
   見つけた** — `000001_initial.down.sql` が `DROP TABLE IF EXISTS "schema_migrations"` を
