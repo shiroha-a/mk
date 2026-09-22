@@ -11,10 +11,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hibiken/asynq"
+	"github.com/redis/go-redis/v9"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
-	"github.com/shiroha-a/mk/internal/queue/driver/asynqdriver"
+	"github.com/shiroha-a/mk/internal/queue/driver/mkqdriver"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -34,15 +34,56 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-func redisOpt() asynq.RedisClientOpt {
-	return asynq.RedisClientOpt{Addr: testRedis.Addr}
-}
-
-// newDriver constructs a fresh asynq-backed driver bound to the test
+// newDriver constructs a fresh mkq-backed driver bound to the test
 // Redis. Each call returns an independent driver instance so tests can
 // Close() one without affecting the others.
-func newDriver() driver.Driver {
-	return asynqdriver.New(redisOpt(), asynqdriver.ServerConfig{Concurrency: 2})
+//
+// **flush はしない。** enqueue した後に inspector 用の driver をもう 1 つ
+// 作るテストがあり、ここで流すとその都度データが消える。掃除は各テスト
+// 冒頭の flushTestRedis が担う。
+func newDriver(t *testing.T) driver.Driver {
+	t.Helper()
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis:       redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		Concurrency: 2,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+	return d
+}
+
+// newInspector returns a driver-level inspector bound to the test Redis.
+// enqueue 側が実際に Redis へ書いた内容を読む用途で、queue.Inspector を
+// 経由しない層 (= driver.TaskSummary そのもの) を見たいときに使う。
+func newInspector(t *testing.T) driver.Inspector {
+	t.Helper()
+	return newDriver(t).Inspector()
+}
+
+// listPending fetches the first page of the queue's pending bucket.
+// mkq の一覧 API は page / pageSize を取るので、呼び出し側を読みやすく
+// 保つための薄いラッパー。
+func listPending(t *testing.T, insp driver.Inspector, qname string) []*driver.TaskSummary {
+	t.Helper()
+	rows, err := insp.ListPendingTasks(qname, 1, 100)
+	require.NoError(t, err)
+	return rows
+}
+
+// jobAttempts reads the BullMQ `attempts` (= 総試行回数) stored on the job.
+//
+// **mkq driver は driver.TaskSummary.MaxRetry を埋めない。** BullMQ は
+// 試行回数を job の opts に持つので、そちらを読む。`WithMaxRetry(n)` は
+// mkqdriver で `attempts = n+1` に翻訳される (option.go)。
+func jobAttempts(t *testing.T, s *driver.TaskSummary) int {
+	t.Helper()
+	require.NotEmpty(t, s.Opts, "opts が空だと attempts を検証できない")
+	var o struct {
+		Attempts *int `json:"attempts"`
+	}
+	require.NoError(t, json.Unmarshal(s.Opts, &o))
+	require.NotNil(t, o.Attempts, "opts に attempts が無い: %s", string(s.Opts))
+	return *o.Attempts
 }
 
 func TestNewDeliverTask_RoundTrip(t *testing.T) {
@@ -69,7 +110,7 @@ func TestClient_EnqueueDeliver(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	payload := queue.DeliverPayload{
@@ -81,11 +122,7 @@ func TestClient_EnqueueDeliver(t *testing.T) {
 	require.NoError(t, c.EnqueueDeliver(payload, driver.WithMaxRetry(3)))
 
 	// inspector で実際にキューに入っていることを確認
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.QueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.QueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeDeliver, tasks[0].Type)
 
@@ -97,51 +134,41 @@ func TestClient_EnqueueDeliver(t *testing.T) {
 // #495 / #531 review: deliverJobMaxAttempts を Client.Policy に流すと
 // EnqueueDeliver で caller が WithMaxRetry を渡さないときに default と
 // して適用される。Policy.MaxAttempts は BullMQ semantics の総試行回数
-// なので asynq MaxRetry には N-1 で渡る (TS YAML 互換)。
+// なので driver.WithMaxRetry には N-1 で渡り、mkq が attempts=N に戻す
+// (TS YAML 互換)。
 func TestClient_EnqueueDeliver_PolicyMaxAttemptsApplied(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	// MaxAttempts=8 は TS YAML の `deliverJobMaxAttempts: 8` 相当。
-	// BullMQ では 8 total tries → asynq MaxRetry=7 に変換される。
 	c.SetPolicy(queue.QueueName, queue.Policy{MaxAttempts: 8})
 
 	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`)}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.QueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.QueueName)
 	require.Len(t, tasks, 1)
-	info, err := insp.GetTaskInfo(queue.QueueName, tasks[0].ID)
-	require.NoError(t, err)
-	assert.Equal(t, 7, info.MaxRetry, "MaxAttempts=8 (BullMQ-style total) should map to asynq MaxRetry=7 (= 7 retries + 1 initial = 8 total)")
+	assert.Equal(t, 8, jobAttempts(t, tasks[0]),
+		"MaxAttempts=8 (BullMQ の総試行回数) はそのまま BullMQ attempts=8 として保存される")
 }
 
 // MaxAttempts=1 (= no retry, only initial try) は WithMaxRetry(0) に
-// マップされる。境界条件として 0 を asynq に渡しても retry が発生しない
+// マップされる。境界条件として BullMQ attempts=1 (= 初回のみ) になる
 // ことを Inspector で確認する。
 func TestClient_EnqueueDeliver_PolicyMaxAttemptsOne(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	c.SetPolicy(queue.QueueName, queue.Policy{MaxAttempts: 1})
 
 	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`)}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-	tasks, err := insp.ListPendingTasks(queue.QueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.QueueName)
 	require.Len(t, tasks, 1)
-	info, err := insp.GetTaskInfo(queue.QueueName, tasks[0].ID)
-	require.NoError(t, err)
-	assert.Equal(t, 0, info.MaxRetry, "MaxAttempts=1 should yield MaxRetry=0 (no retry)")
+	assert.Equal(t, 1, jobAttempts(t, tasks[0]), "MaxAttempts=1 は attempts=1 (リトライ無し)")
 }
 
 // caller の WithMaxRetry は policy default を上書きする (last-write-wins)。
@@ -150,7 +177,7 @@ func TestClient_EnqueueDeliver_CallerOptsOverridePolicy(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	c.SetPolicy(queue.QueueName, queue.Policy{MaxAttempts: 8})
 
@@ -159,14 +186,11 @@ func TestClient_EnqueueDeliver_CallerOptsOverridePolicy(t *testing.T) {
 		driver.WithMaxRetry(2),
 	))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-	tasks, err := insp.ListPendingTasks(queue.QueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.QueueName)
 	require.Len(t, tasks, 1)
-	info, err := insp.GetTaskInfo(queue.QueueName, tasks[0].ID)
-	require.NoError(t, err)
-	assert.Equal(t, 2, info.MaxRetry, "caller WithMaxRetry should override policy default")
+	// caller の WithMaxRetry(2) は driver semantics 直渡し (= 2 回リトライ)
+	// なので、BullMQ attempts は初回を足した 3 になる。
+	assert.Equal(t, 3, jobAttempts(t, tasks[0]), "caller WithMaxRetry should override policy default")
 }
 
 func TestPolicyMap_PolicyFor(t *testing.T) {
@@ -178,12 +202,18 @@ func TestPolicyMap_PolicyFor(t *testing.T) {
 	assert.Equal(t, queue.Policy{}, m.PolicyFor("missing"))
 }
 
-func TestClient_EnqueueDeliver_ClosedClientFails(t *testing.T) {
+// **閉じるのは driver であって Client ではない。** mkq の Client.Close は
+// no-op で、接続を持っているのは driver 側 (server.go も driver.Close 一本に
+// 統一している)。Client.Close を呼んだだけでは enqueue は通るので、ここで
+// 閉じる対象を間違えると「閉じた後も投げられる」ことを検査しないまま緑に
+// なる。
+func TestClient_EnqueueDeliver_ClosedDriverFails(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
-	require.NoError(t, c.Close())
+	d := newDriver(t)
+	c := queue.NewClient(d)
+	require.NoError(t, d.Close())
 
 	err := c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`)})
 	assert.Error(t, err)
@@ -193,7 +223,7 @@ func TestServer_HandleAndProcess(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	srv := queue.NewServer(newDriver())
+	srv := queue.NewServer(newDriver(t))
 
 	var (
 		wg         sync.WaitGroup
@@ -217,7 +247,7 @@ func TestServer_HandleAndProcess(t *testing.T) {
 	require.NoError(t, srv.Start())
 	defer srv.Shutdown()
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	payload := queue.DeliverPayload{
@@ -238,16 +268,24 @@ func TestServer_HandleAndProcess(t *testing.T) {
 	mu.Unlock()
 }
 
-func TestServer_DefaultConcurrency(t *testing.T) {
-	// Concurrency<=0 のとき内部デフォルト16にフォールバックする経路を確認。
-	// driver Server を作って即 Shutdown するだけで十分。
-	d := asynqdriver.New(redisOpt(), asynqdriver.ServerConfig{Concurrency: 0})
-	srv := queue.NewServer(d)
+// TestServer_ShutdownBeforeStartIsSafe pins that the facade tolerates
+// Shutdown without a preceding Start. RoleServer は worker を起動しないまま
+// Server.Shutdown を通るので (#2459)、「Start 済み」を前提にした driver へ
+// 差し替わるとここで落ちる。
+//
+// **Concurrency の既定値は見ない。** 以前この test は「Concurrency<=0 なら
+// 内部デフォルト 16 に落ちる」を確認する体だったが、mkqdriver の
+// resolveQueueConcurrency が登録済みの全 queue を埋めるので
+// Server.concurrency は実際には参照されない (変異検証: 16 を 1 にしても
+// internal/queue 配下は全 package ok のまま)。空虚なアサーションを残さず、
+// 実際に効く性質だけを見る。
+func TestServer_ShutdownBeforeStartIsSafe(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	srv := queue.NewServer(newDriver(t))
 	srv.Handle(queue.TaskTypeDeliver, func(_ context.Context, _ driver.Task) error {
 		return nil
 	})
-	// Startせずに Shutdownしても driver は安全に no-op になる。
-	srv.Shutdown()
+	require.NotPanics(t, srv.Shutdown)
 }
 
 func flushTestRedis(t *testing.T) {
@@ -278,7 +316,7 @@ func TestClient_EnqueueInbox(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueInbox(context.Background(), queue.InboxPayload{
@@ -286,10 +324,7 @@ func TestClient_EnqueueInbox(t *testing.T) {
 		Host: "remote.example",
 	}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-	tasks, err := insp.ListPendingTasks(queue.InboxQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.InboxQueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeInbox, tasks[0].Type)
 
@@ -303,20 +338,15 @@ func TestClient_EnqueueInbox_PolicyMaxAttemptsApplied(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	c.SetPolicy(queue.InboxQueueName, queue.Policy{MaxAttempts: 8})
 
 	require.NoError(t, c.EnqueueInbox(context.Background(), queue.InboxPayload{Body: []byte(`{}`)}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-	tasks, err := insp.ListPendingTasks(queue.InboxQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.InboxQueueName)
 	require.Len(t, tasks, 1)
-	info, err := insp.GetTaskInfo(queue.InboxQueueName, tasks[0].ID)
-	require.NoError(t, err)
-	assert.Equal(t, 7, info.MaxRetry, "MaxAttempts=8 (BullMQ-style total) → asynq MaxRetry=7")
+	assert.Equal(t, 8, jobAttempts(t, tasks[0]), "MaxAttempts=8 (BullMQ の総試行回数) がそのまま attempts になる")
 }
 
 func TestNewInboxTask_RoundTrip(t *testing.T) {
@@ -383,16 +413,12 @@ func TestClient_EnqueueExport(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueExport(queue.ExportPayload{UserID: "u1", Type: "notes"}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.ExportQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.ExportQueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeExport, tasks[0].Type)
 }
@@ -401,7 +427,7 @@ func TestClient_EnqueuePostScheduledNote(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	// caller は WithProcessIn で delay を渡す想定 (= scheduledAt - now)。
@@ -410,11 +436,8 @@ func TestClient_EnqueuePostScheduledNote(t *testing.T) {
 		driver.WithProcessIn(time.Hour),
 	))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
 	// delayed task は scheduled state で観測される
-	tasks, err := insp.ListScheduledTasks(queue.QueueName)
+	tasks, err := newInspector(t).ListScheduledTasks(queue.QueueName, 1, 100)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypePostScheduledNote, tasks[0].Type)
@@ -428,27 +451,21 @@ func TestClient_EnqueuePostScheduledNote_PolicyMaxAttemptsApplied(t *testing.T) 
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	c.SetPolicy(queue.QueueName, queue.Policy{MaxAttempts: 8})
 
 	require.NoError(t, c.EnqueuePostScheduledNote(queue.PostScheduledNotePayload{NoteDraftID: "d1"}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.QueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.QueueName)
 	require.Len(t, tasks, 1)
-	info, err := insp.GetTaskInfo(queue.QueueName, tasks[0].ID)
-	require.NoError(t, err)
-	assert.Equal(t, 7, info.MaxRetry, "MaxAttempts=8 (BullMQ の総試行回数) は MaxRetry=7 に落ちる")
+	assert.Equal(t, 8, jobAttempts(t, tasks[0]), "MaxAttempts=8 (BullMQ の総試行回数) がそのまま attempts になる")
 }
 
 func TestClient_ClearScheduledNote_RemovesMatchingTasks(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueuePostScheduledNote(
@@ -462,9 +479,7 @@ func TestClient_ClearScheduledNote_RemovesMatchingTasks(t *testing.T) {
 
 	require.NoError(t, c.ClearScheduledNote("target"))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-	tasks, err := insp.ListScheduledTasks(queue.QueueName)
+	tasks, err := newInspector(t).ListScheduledTasks(queue.QueueName, 1, 100)
 	require.NoError(t, err)
 	require.Len(t, tasks, 1, "target だけ消えて other は残る")
 	payload, err := queue.DecodePostScheduledNotePayload(tasks[0].Payload)
@@ -481,29 +496,16 @@ func TestClient_ClearScheduledNote_NilInspectorIsNoop(t *testing.T) {
 	assert.NoError(t, c.ClearScheduledNote("x"))
 }
 
-func TestClient_SupportsScheduledNote_FlagToggle(t *testing.T) {
-	var c queue.Client
-	assert.False(t, c.SupportsScheduledNote(), "default は false")
-	c.SetSupportsScheduledNote(true)
-	assert.True(t, c.SupportsScheduledNote())
-	c.SetSupportsScheduledNote(false)
-	assert.False(t, c.SupportsScheduledNote())
-}
-
 func TestClient_EnqueueImport(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueImport(queue.ImportPayload{UserID: "u1", Type: "following", FileID: "f1"}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.ExportQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.ExportQueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeImport, tasks[0].Type)
 }
@@ -512,16 +514,12 @@ func TestClient_EnqueueImportCustomEmojis(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueImportCustomEmojis(queue.ImportCustomEmojisPayload{UserID: "admin1", FileID: "f1"}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.ExportQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.ExportQueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeImportCustomEmojis, tasks[0].Type)
 }
@@ -531,11 +529,11 @@ func TestInspector_QueuesAndInfo(t *testing.T) {
 	flushTestRedis(t)
 
 	// エンキューしてキューを作成
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{Inbox: "x", Body: []byte(`{}`), KeyID: "k", KeyPEM: "p"}))
 
-	insp := queue.NewInspector(newDriver())
+	insp := queue.NewInspector(newDriver(t))
 	defer func() { _ = insp.Close() }()
 
 	queues, err := insp.Queues()
@@ -552,7 +550,7 @@ func TestInspector_GetQueueInfo_NotFound(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	insp := queue.NewInspector(newDriver())
+	insp := queue.NewInspector(newDriver(t))
 	defer func() { _ = insp.Close() }()
 
 	_, err := insp.GetQueueInfo("nonexistent")
@@ -563,13 +561,13 @@ func TestInspector_ListPendingTasksAndGetTaskInfo(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{
 		Inbox: "https://remote.example/inbox", Body: []byte(`{}`), KeyID: "k", KeyPEM: "p",
 	}))
 
-	insp := queue.NewInspector(newDriver())
+	insp := queue.NewInspector(newDriver(t))
 	defer func() { _ = insp.Close() }()
 
 	pending, err := insp.ListPendingTasks(queue.QueueName, 1, 30)
@@ -590,13 +588,13 @@ func TestInspector_ListActiveScheduledRetry_EmptyByDefault(t *testing.T) {
 	flushTestRedis(t)
 
 	// enqueue 後即 list。active/scheduled/retry は空でも err にならない。
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{
 		Inbox: "https://remote.example/inbox", Body: []byte(`{}`), KeyID: "k", KeyPEM: "p",
 	}))
 
-	insp := queue.NewInspector(newDriver())
+	insp := queue.NewInspector(newDriver(t))
 	defer func() { _ = insp.Close() }()
 
 	active, err := insp.ListActiveTasks(queue.QueueName, 1, 30)
@@ -616,11 +614,11 @@ func TestInspector_ListTasks_DefaultsClamped(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	insp := queue.NewInspector(newDriver())
+	insp := queue.NewInspector(newDriver(t))
 	defer func() { _ = insp.Close() }()
 
 	// page/pageSize が 0 以下でも default に丸められてエラーにならない。
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 	require.NoError(t, c.EnqueueDeliver(queue.DeliverPayload{
 		Inbox: "https://remote.example/inbox", Body: []byte(`{}`), KeyID: "k", KeyPEM: "p",
@@ -639,7 +637,7 @@ func TestInspector_GetTaskInfo_NotFound(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	insp := queue.NewInspector(newDriver())
+	insp := queue.NewInspector(newDriver(t))
 	defer func() { _ = insp.Close() }()
 
 	_, err := insp.GetTaskInfo(queue.QueueName, "nonexistent-id")
@@ -671,28 +669,25 @@ func TestClient_EnqueueWebPush(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueWebPush(context.Background(), queue.WebPushPayload{
 		UserID: "u1", Type: "notification", Body: []byte(`{"type":"mention"}`),
 	}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.PushQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.PushQueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeWebPush, tasks[0].Type)
 }
 
-func TestClient_EnqueueWebPush_ClosedClientFails(t *testing.T) {
+func TestClient_EnqueueWebPush_ClosedDriverFails(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
-	require.NoError(t, c.Close())
+	d := newDriver(t)
+	c := queue.NewClient(d)
+	require.NoError(t, d.Close())
 	err := c.EnqueueWebPush(context.Background(), queue.WebPushPayload{UserID: "u1", Type: "notification"})
 	assert.Error(t, err)
 }
@@ -739,31 +734,26 @@ func TestClient_EnqueueUserWebhook(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueUserWebhook(context.Background(), queue.WebhookPayload{
 		WebhookID: "h1", UserID: "alice", EventType: "note", Body: []byte(`{}`),
 	}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.WebhookQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.WebhookQueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeUserWebhook, tasks[0].Type)
-	// #2106 L59: upstream の総試行 4 回 (= WithMaxRetry(3) → asynq MaxRetry=3 = 3 retries + 1)。
-	info, err := insp.GetTaskInfo(queue.WebhookQueueName, tasks[0].ID)
-	require.NoError(t, err)
-	assert.Equal(t, 3, info.MaxRetry, "webhook は総試行 4 回 (asynq MaxRetry=3)")
+	// #2106 L59: upstream の総試行 4 回 (= WithMaxRetry(3) → BullMQ attempts=4)。
+	assert.Equal(t, 4, jobAttempts(t, tasks[0]), "webhook は総試行 4 回")
 }
 
-func TestClient_EnqueueUserWebhook_ClosedClientFails(t *testing.T) {
+func TestClient_EnqueueUserWebhook_ClosedDriverFails(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
-	c := queue.NewClient(newDriver())
-	require.NoError(t, c.Close())
+	d := newDriver(t)
+	c := queue.NewClient(d)
+	require.NoError(t, d.Close())
 	err := c.EnqueueUserWebhook(context.Background(), queue.WebhookPayload{WebhookID: "h1"})
 	assert.Error(t, err)
 }
@@ -772,27 +762,24 @@ func TestClient_EnqueueSystemWebhook(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueSystemWebhook(context.Background(), queue.WebhookPayload{
 		WebhookID: "sh1", EventType: "userCreated", Body: []byte(`{}`),
 	}))
 
-	insp := asynq.NewInspector(redisOpt())
-	defer func() { _ = insp.Close() }()
-
-	tasks, err := insp.ListPendingTasks(queue.WebhookQueueName)
-	require.NoError(t, err)
+	tasks := listPending(t, newInspector(t), queue.WebhookQueueName)
 	require.Len(t, tasks, 1)
 	assert.Equal(t, queue.TaskTypeSystemWebhook, tasks[0].Type)
 }
 
-func TestClient_EnqueueSystemWebhook_ClosedClientFails(t *testing.T) {
+func TestClient_EnqueueSystemWebhook_ClosedDriverFails(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
-	c := queue.NewClient(newDriver())
-	require.NoError(t, c.Close())
+	d := newDriver(t)
+	c := queue.NewClient(d)
+	require.NoError(t, d.Close())
 	err := c.EnqueueSystemWebhook(context.Background(), queue.WebhookPayload{WebhookID: "sh1"})
 	assert.Error(t, err)
 }
@@ -801,7 +788,7 @@ func TestClient_EnqueueCleanRemoteNotes(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueCleanRemoteNotes())
@@ -811,7 +798,7 @@ func TestClient_EnqueueReactionFlush(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueReactionFlush())
@@ -821,7 +808,7 @@ func TestClient_EnqueueDeleteAccount(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueDeleteAccount(queue.DeleteAccountPayload{UserID: "u1"}))
@@ -845,7 +832,7 @@ func TestClient_EnqueueUnfollow(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushTestRedis(t)
 
-	c := queue.NewClient(newDriver())
+	c := queue.NewClient(newDriver(t))
 	defer func() { _ = c.Close() }()
 
 	require.NoError(t, c.EnqueueUnfollow(queue.UnfollowPayload{

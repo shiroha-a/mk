@@ -281,9 +281,10 @@ type Source struct {
 	AutoScaleCooldownSeconds *int `mapstructure:"autoScaleCooldownSeconds"`
 
 	// JobQueueDriver selects the worker / inspector implementation
-	// behind internal/queue. "mkq" (default, recommended) uses the
-	// BullMQ-compatible shiroha-a/mkq library; "asynq" is the legacy
-	// hibiken/asynq driver. Empty / unset = "mkq".
+	// behind internal/queue. "mkq" (the only driver) uses the
+	// BullMQ-compatible shiroha-a/mkq library. Empty / unset = "mkq".
+	// The legacy "asynq" value was removed in #2985 and now fails at
+	// startup with a migration hint.
 	JobQueueDriver string `mapstructure:"jobQueueDriver"`
 
 	MediaProxy              string `mapstructure:"mediaProxy"`
@@ -477,7 +478,9 @@ type Config struct {
 	MaxWorkersGlobal         *int
 	AutoScaleCooldownSeconds *int
 
-	// JobQueueDriver is one of "mkq" (default) or "asynq" (legacy).
+	// JobQueueDriver is always "mkq" (#2985 removed the legacy asynq
+	// driver). Kept as a string so an unknown value is still
+	// distinguishable from the normalised default at the wiring layer.
 	JobQueueDriver string
 
 	MediaProxy                   string
@@ -1009,26 +1012,36 @@ func resolveRedisOrDefault(opts *RedisOptions, fallback RedisOptions, host strin
 }
 
 // resolveJobQueueDriver normalises the jobQueueDriver config value.
-// Empty / whitespace falls back to "mkq" (recommended driver、#571 audit)。
+// Empty / whitespace falls back to "mkq", the only driver (#2985)。
 // Unknown non-empty values return an error: silently swapping a typo
 // (e.g. "mkqq") for the default hides operator intent, especially given
 // that internal/server/queue_factory.go also rejects unknown driver
 // names — surfacing the failure here keeps the two layers consistent
 // and the boot log readable.
 //
-// asynq driver は legacy / future-deprecation candidate。mkq の安定性が
-// 確保され次第削除予定なので、新規 deploy は明示的に "asynq" を選ぶ
-// 必要はない。default が mkq に変更されたが、既存運用で "asynq" を明示
-// 指定している operator は影響を受けない。
+// **"asynq" だけは専用の文面で落とす。** 既定が mkq になった後も明示的に
+// asynq を選んでいた運用は意図的なので、typo と同じ「未知の値」で片付けると
+// 何が起きたのか分からない。かといって黙って mkq で起動するのも避ける —
+// driver が変わると予約投稿の可否やレート上限の効き方まで変わるので、警告
+// 1 行で流してよい変更ではない (#2985)。
+//
+// **移行が片道であることも書く。** asynq の未処理ジョブは `asynq:{<queue>}:*`
+// に居り mkq (`bull:*`) からは見えない。新しいビルドは起動を拒むので、
+// **後から捌く手段が無い** — 旧ビルドで空にしてから上げるしかない。それを
+// 知らせる機会はこのエラーしか無いので、案内をここに入れる。
 func resolveJobQueueDriver(raw string) (string, error) {
 	v := strings.ToLower(strings.TrimSpace(raw))
 	switch v {
 	case "":
 		return "mkq", nil
-	case "asynq", "mkq":
+	case "mkq":
 		return v, nil
+	case "asynq":
+		return "", fmt.Errorf("config: jobQueueDriver %q has been removed (#2985); set it to \"mkq\" or delete the line to use the default. "+
+			"Migrating is one-way: jobs still queued under Redis keys \"asynq:{<queue>}:*\" are invisible to mkq (\"bull:*\"), "+
+			"so drain them with the previous mk-go build before upgrading", raw)
 	default:
-		return "", fmt.Errorf("config: unknown jobQueueDriver %q (expected \"asynq\" or \"mkq\")", raw)
+		return "", fmt.Errorf("config: unknown jobQueueDriver %q (expected \"mkq\")", raw)
 	}
 }
 

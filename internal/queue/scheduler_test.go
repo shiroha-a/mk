@@ -1,37 +1,40 @@
-package queue
+package queue_test
 
 import (
 	"testing"
 
-	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/shiroha-a/mk/internal/queue/driver/asynqdriver"
+	"github.com/shiroha-a/mk/internal/queue"
+	"github.com/shiroha-a/mk/internal/testutil"
 )
 
-// newSchedulerForTest constructs a Scheduler against a driver that
-// does not require a live Redis (asynq.Scheduler is constructed lazily
-// in NewScheduler — Register validates cron syntax client-side).
-func newSchedulerForTest(t *testing.T) *Scheduler {
+// newSchedulerForTest constructs a Scheduler against the mkq driver bound
+// to the test Redis.
+//
+// **実 Redis が要る。** mkq の Register は cron 式を Go 側で解析したあと
+// BullMQ の repeat ZSET へ upsert するので、driver の構築にも登録にも接続が
+// いる (旧 asynq driver は Scheduler を遅延構築していたので接続不要だった)。
+func newSchedulerForTest(t *testing.T) *queue.Scheduler {
 	t.Helper()
-	d := asynqdriver.New(asynq.RedisClientOpt{Addr: "127.0.0.1:6379"}, asynqdriver.ServerConfig{})
-	s := NewScheduler(d)
+	testutil.SkipIfNoDocker(t)
+	flushTestRedis(t)
+	s := queue.NewScheduler(newDriver(t))
 	t.Cleanup(s.Shutdown)
 	return s
 }
 
-// TestNewScheduler_NotNil is a simple smoke test that the Scheduler
-// wrapper builds without touching Redis.
-func TestNewScheduler_NotNil(t *testing.T) {
+// TestNewScheduler_RegistersWithoutError is a smoke test that the
+// Scheduler wrapper builds and accepts a registration.
+func TestNewScheduler_RegistersWithoutError(t *testing.T) {
 	s := newSchedulerForTest(t)
 	require.NotNil(t, s)
-	require.NotNil(t, s.inner)
+	require.NoError(t, s.RegisterChartJobs())
 }
 
 // TestScheduler_RegisterChartJobs_NoErr verifies the cron syntax + queue
-// options are accepted. Register does not enqueue — it simply records
-// the schedule — so no Redis is required.
+// options are accepted.
 func TestScheduler_RegisterChartJobs_NoErr(t *testing.T) {
 	s := newSchedulerForTest(t)
 	require.NoError(t, s.RegisterChartJobs())
@@ -60,5 +63,5 @@ func TestScheduler_RegisterOrphanCleanupJobs_NoErr(t *testing.T) {
 
 func TestMaintenanceQueueName_Const(t *testing.T) {
 	// 既存定数と被らないこと (ベタ書きの同期ミスを防ぐ smoke)
-	assert.Equal(t, "maintenance", MaintenanceQueueName)
+	assert.Equal(t, "maintenance", queue.MaintenanceQueueName)
 }

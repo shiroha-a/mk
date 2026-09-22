@@ -1268,9 +1268,7 @@ func TestResolveJobQueueDriver(t *testing.T) {
 			want string
 		}{
 			// 空 string の default は mkq (#571 audit で asynq → mkq に変更)。
-			// asynq は legacy / future-deprecation candidate。
 			{"", "mkq"},
-			{"asynq", "asynq"},
 			{"mkq", "mkq"},
 			{"  mkq  ", "mkq"},
 			{"MKQ", "mkq"},
@@ -1285,13 +1283,44 @@ func TestResolveJobQueueDriver(t *testing.T) {
 	})
 	t.Run("unknown value rejected", func(t *testing.T) {
 		// Unknown values (typos like "mkqq") must error so a YAML
-		// typo does not silently downgrade the operator's intent
-		// to asynq. internal/server/queue_factory.go also rejects
-		// unknown drivers; surfacing the failure here keeps the
-		// two layers consistent.
+		// typo does not silently fall back to the default.
+		// internal/server/queue_factory.go also rejects unknown
+		// drivers; surfacing the failure here keeps the two layers
+		// consistent.
 		_, err := resolveJobQueueDriver("mkqq")
 		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "#2985",
+			"typo は削除済み driver の案内ではなく未知値として落とす")
 	})
+	t.Run("removed asynq driver rejected with migration hint", func(t *testing.T) {
+		// **黙って mkq へ倒さない。** 明示的に asynq を選んでいた運用は
+		// 意図的なので、driver が入れ替わったことに気付けないまま起動
+		// させるほうが危ない (#2985)。
+		for _, raw := range []string{"asynq", "  ASYNQ  "} {
+			_, err := resolveJobQueueDriver(raw)
+			require.Error(t, err, raw)
+			// 移行方法が読み取れることまで見る。「未知の値」で片付けると
+			// operator は何を書けばよいのか分からない。
+			assert.Contains(t, err.Error(), "removed")
+			assert.Contains(t, err.Error(), "mkq")
+			// **片道であることも伝える。** 新ビルドは起動を拒むので、
+			// asynq の未処理ジョブを捌く機会はこのメッセージを読んだ
+			// 時点しか無い (#2985)。
+			assert.Contains(t, err.Error(), "asynq:{<queue>}:*")
+			assert.Contains(t, err.Error(), "drain")
+		}
+	})
+}
+
+// TestLoad_JobQueueDriver_AsynqRejected pins the removal at the Load
+// boundary: an existing deployment that still pins the legacy driver must
+// fail to start rather than boot on a different queue implementation.
+func TestLoad_JobQueueDriver_AsynqRejected(t *testing.T) {
+	yml := testYAML + "\njobQueueDriver: asynq\n"
+	path := writeTestConfig(t, yml)
+	_, err := Load(path)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "asynq")
 }
 
 func TestLoad_JobQueueDriver_Invalid(t *testing.T) {
@@ -1305,7 +1334,7 @@ func TestLoad_JobQueueDriver_Default(t *testing.T) {
 	path := writeTestConfig(t, testYAML)
 	cfg, err := Load(path)
 	require.NoError(t, err)
-	// #571 audit で default を asynq → mkq に変更。
+	// #571 audit で default を asynq → mkq に変更、#2985 で唯一の driver に。
 	assert.Equal(t, "mkq", cfg.JobQueueDriver)
 }
 

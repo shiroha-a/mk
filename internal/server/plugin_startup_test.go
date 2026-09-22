@@ -68,7 +68,7 @@ func TestNew_QueueOnlyRegistersEffectivePolicyBeforePluginJobs(t *testing.T) {
 	cfg := &config.Config{
 		URL: "http://example.test", Host: "example.test", Hostname: "example.test",
 		Scheme: "http", WsScheme: "ws", ID: "aidx", TestMode: true,
-		JobQueueDriver: "asynq", MediaProxySecret: []byte("test-secret"),
+		JobQueueDriver: "mkq", MediaProxySecret: []byte("test-secret"),
 		Redis: redisOptions, RedisForPubsub: redisOptions, RedisForJobQueue: redisOptions,
 		RedisForTimelines: redisOptions, RedisForReactions: redisOptions,
 	}
@@ -195,7 +195,7 @@ func TestNew_PluginSetupFailureRollsBackConstructionResources(t *testing.T) {
 			cfg.WsScheme = "ws"
 			cfg.ID = "aidx"
 			cfg.TestMode = true
-			cfg.JobQueueDriver = "asynq"
+			cfg.JobQueueDriver = "mkq"
 			cfg.MediaProxySecret = []byte("test-secret")
 			cfg.Redis = redisOptions
 			cfg.RedisForPubsub = redisOptions

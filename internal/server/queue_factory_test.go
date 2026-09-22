@@ -8,13 +8,30 @@ import (
 	"github.com/shiroha-a/mk/internal/config"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
-	"github.com/shiroha-a/mk/internal/queue/driver/asynqdriver"
 	"github.com/shiroha-a/mk/internal/queue/driver/mkqdriver"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func intp(v int) *int { return &v }
+
+// buildQueueDriver は config 側の検証を通り抜けた driver 名でも mkq を
+// 黙って起動しない (#2985)。未知の名前は Redis へ触る前に落ちるので、
+// この 2 ケースは実接続を要らない。
+//
+// **config 側と二重に持つのは意図的。** `resolveJobQueueDriver` を通らない
+// 経路 (テストが *config.Config を直接組む等) でも、driver 名が実態と違えば
+// 起動しないことを固定する。
+func TestBuildQueueDriver_RejectsUnknownDriver(t *testing.T) {
+	for _, name := range []string{"asynq", "mkqq"} {
+		t.Run(name, func(t *testing.T) {
+			d, err := buildQueueDriver(context.Background(), &config.Config{JobQueueDriver: name}, nil)
+			require.Error(t, err)
+			assert.Nil(t, d)
+			assert.Contains(t, err.Error(), name)
+		})
+	}
+}
 
 // #495 / #534 / #2403: cfg の per-queue concurrency がそのまま queue 名 →
 // worker 数の map に積まれる。relationship は #2403 で専用 queue を持つように
@@ -74,7 +91,7 @@ func TestPerQueueRatesFromConfig(t *testing.T) {
 // は呼ばれない (PolicyMap が nil のままで PolicyFor がゼロ Policy を返す
 // fast-path が維持される)。
 func TestApplyClientPolicies_DeliverMaxAttempts(t *testing.T) {
-	c := queue.NewClient(asynqdriver.New(asynqdriver.BuildRedisOpt(config.RedisOptions{Host: "localhost", Port: 6379}), asynqdriver.ServerConfig{}))
+	c := queue.NewClient(&stubDriver{client: &recordingDriverClient{}})
 	defer func() { _ = c.Close() }()
 
 	cfg := &config.Config{DeliverJobMaxAttempts: intp(5)}
@@ -89,7 +106,7 @@ func TestApplyClientPolicies_DeliverMaxAttempts(t *testing.T) {
 // Client は引き続き正常に動く (panic しない / EnqueueDeliver する経路は
 // 別 testで verify 済み)。
 func TestApplyClientPolicies_NoOpForZero(t *testing.T) {
-	c := queue.NewClient(asynqdriver.New(asynqdriver.BuildRedisOpt(config.RedisOptions{Host: "localhost", Port: 6379}), asynqdriver.ServerConfig{}))
+	c := queue.NewClient(&stubDriver{client: &recordingDriverClient{}})
 	defer func() { _ = c.Close() }()
 
 	require.NotPanics(t, func() {
@@ -376,34 +393,6 @@ func TestBuildPolicy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			got := buildPolicy(tt.maxAttempts, tt.defaultAttempts, tt.keepFailed, tt.keepCompleted)
 			assert.Equal(t, tt.want, got)
-		})
-	}
-}
-
-// asynq は per-queue concurrency を持たないので、設定された knob が queue
-// 単位には効かないことを起動時 warning で知らせる。deliver だけは
-// asynqdriver に総 worker pool として渡るため対象外 (docs/configuration.md
-// の記述と揃える)。#2403。
-func TestAsynqIgnoredConcurrencyKnobs(t *testing.T) {
-	cases := []struct {
-		name string
-		in   map[string]int
-		want []string
-	}{
-		{"nil", nil, nil},
-		{"empty", map[string]int{}, nil},
-		{"deliverOnlyIsNotIgnored", map[string]int{"deliver": 8}, nil},
-		{"inbox", map[string]int{"inbox": 12}, []string{"inbox"}},
-		{"relationship", map[string]int{"relationship": 6}, []string{"relationship"}},
-		{
-			"sortedForStableLogOutput",
-			map[string]int{"relationship": 6, "inbox": 12, "deliver": 8},
-			[]string{"inbox", "relationship"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, asynqIgnoredConcurrencyKnobs(tc.in))
 		})
 	}
 }
