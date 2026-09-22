@@ -44,63 +44,6 @@ services:
       bench:
         aliases: [faker]
 
-  postgres-asynq:
-    image: postgres:18-alpine
-    environment:
-      POSTGRES_DB: misskey
-      POSTGRES_USER: misskey
-      POSTGRES_PASSWORD: testpass
-    healthcheck:
-      test: pg_isready -U misskey
-      interval: 3s
-      timeout: 3s
-      retries: 10
-    networks: [bench]
-
-  redis-asynq:
-    image: redis:7-alpine
-    healthcheck:
-      test: redis-cli ping
-      interval: 3s
-      timeout: 3s
-      retries: 10
-    networks: [bench]
-
-  app-asynq:
-    build:
-      context: ../..
-      dockerfile: tests/federation/common/Dockerfile.mkgo
-    environment:
-      SSL_CERT_FILE: /certs/bundle.pem
-      TZ: Asia/Tokyo
-      MK_ENABLEIPRATELIMIT: "false"
-      MK_DISABLEENDPOINTRATELIMITS: "true"
-      MK_JOBQUEUEDRIVER: asynq
-    depends_on:
-      postgres-asynq: { condition: service_healthy }
-      redis-asynq: { condition: service_healthy }
-      certs: { condition: service_completed_successfully }
-    volumes:
-      - certs:/certs:ro
-      - ./common/mk-asynq.yml:/app/.config/default.yml:ro
-    healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/healthz"]
-      interval: 3s
-      timeout: 5s
-      retries: 30
-    networks: [bench]
-
-  nginx-asynq:
-    image: nginx:alpine
-    volumes:
-      - ./common/nginx-mk-asynq.conf:/etc/nginx/nginx.conf:ro
-      - certs:/certs:ro
-    depends_on:
-      app-asynq: { condition: service_healthy }
-    networks:
-      bench:
-        aliases: [mk-asynq]
-
   postgres-mkq:
     image: postgres:18-alpine
     environment:
@@ -218,14 +161,12 @@ services:
       context: .
       dockerfile: common/Dockerfile.driver
     environment:
-      MKGO_ASYNQ_URL: https://mk-asynq
       MKGO_MKQ_URL: https://mk-mkq
       TS_URL: https://ts
       FAKER_URL: http://faker:8081
       FAKER_HOST: faker
       FAKER_BASE_HTTPS: https://faker
     depends_on:
-      app-asynq: { condition: service_healthy }
       app-mkq: { condition: service_healthy }
       nginx-ts: { condition: service_started }
       faker: { condition: service_healthy }
@@ -243,12 +184,10 @@ services:
       context: .
       dockerfile: common/Dockerfile.driver
     environment:
-      MKGO_ASYNQ_URL: https://mk-asynq
       MKGO_MKQ_URL: https://mk-mkq
       TS_URL: https://ts
       OUTBOUND_NOTES: "100"
       OUTBOUND_FOLLOWERS: "100"
-      REDIS_ASYNQ_HOST: redis-asynq
       REDIS_MKQ_HOST: redis-mkq
       REDIS_TS_HOST: redis-ts
     volumes:
@@ -264,7 +203,6 @@ services:
       context: .
       dockerfile: common/Dockerfile.driver
     environment:
-      MKGO_ASYNQ_URL: https://mk-asynq
       MKGO_MKQ_URL: https://mk-mkq
       TS_URL: https://ts
       FAKER_URL: http://faker:8081
@@ -277,7 +215,6 @@ services:
       # create (default) または announce。announce は seed が生成した
       # target_note_uri を faker に渡して Announce 経路の bench を回す。
       INBOUND_ACTIVITY_TYPE: "${INBOUND_ACTIVITY_TYPE:-create}"
-      REDIS_ASYNQ_HOST: redis-asynq
       REDIS_MKQ_HOST: redis-mkq
       REDIS_TS_HOST: redis-ts
     volumes:

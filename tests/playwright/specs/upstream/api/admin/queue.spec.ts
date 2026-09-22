@@ -9,7 +9,7 @@
 //   read 系 (smoke shape):
 //     - queues / queue-stats / stats: queue 集計の object/array
 //     - jobs / deliver-delayed / inbox-delayed: 配列
-//     - show-job-logs: 配列 (= asynq では履歴を保持しないので空)
+//     - show-job-logs: 配列 (mk-go 自身は log を書かないので通常は空)
 //     - show-job: 不明 id で 4xx
 //   mutation:
 //     - clear → 204 (= 全 queue の pending を消す、test 環境で empty なので no-op)
@@ -130,7 +130,7 @@ test.describe('admin/queue/* shape compat', () => {
     expect([400, 404]).toContain(resp.status());
   });
 
-  // mk-go は asynq DeleteTask / RunTask の idempotent 挙動を GetTaskInfo
+  // mk-go は driver の DeleteTask / RunTask の idempotent 挙動を GetTaskInfo
   // precheck で TS と同じ 4xx に揃えた (#929 B)。
   test('admin/queue/retry-job returns 4xx for unknown id', async ({ request }) => {
     const resp = await callApi(request, 'admin/queue/retry-job', {

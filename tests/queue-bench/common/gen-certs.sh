@@ -6,7 +6,7 @@ set -e
 CERT_DIR=/certs
 mkdir -p "$CERT_DIR"
 
-DOMAINS="mk-asynq mk-mkq ts faker"
+DOMAINS="mk-mkq ts faker"
 
 for domain in $DOMAINS; do
   if [ ! -f "$CERT_DIR/$domain.crt" ]; then

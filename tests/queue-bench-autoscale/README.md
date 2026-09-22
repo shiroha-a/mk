@@ -75,7 +75,7 @@ OUTBOUND_NOTES=50 FOLLOWERS=100 DRAIN_TIMEOUT_S=600 \
 - **Outbound deliver burst のみ** (inbox burst は未実装、follow-up で対応可能)
 - **単一 mkq stack** で逐次実行 (= 計測中の host 負荷が scenario 間で揺れる可能性、各 scenario の間に `compose down -v` でクリーンアップして state leak は防ぐ)
 - **single-host bench** (multi-pod 分散シナリオは対象外、ADR §3.5 multi-pod 非ゴールと整合)
-- **既存 `tests/queue-bench/`** (3-driver TS/asynq/mkq 比較) とは独立、同時に走らせない (volume / network 名は別だが host CPU を奪い合う)
+- **既存 `tests/queue-bench/`** (TS / mkq の 2-way 比較) とは独立、同時に走らせない (volume / network 名は別だが host CPU を奪い合う)
 
 ## 関連
 

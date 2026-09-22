@@ -8,10 +8,9 @@ from typing import Any
 
 STACK_LABELS = {
     "ts": "Misskey TS (BullMQ)",
-    "asynq": "mk-go (asynq)",
     "mkq": "mk-go (mkq)",
 }
-ORDER = ["ts", "asynq", "mkq"]
+ORDER = ["ts", "mkq"]
 
 
 def fmt(v: Any, decimals: int = 2) -> str:
@@ -70,7 +69,6 @@ def render_inbound(inb: dict[str, Any]) -> list[str]:
     drain = inb.get("drain", {})
     send_stats_by_target = {s.get("target", ""): s for s in inb.get("send", {}).get("stats", [])}
     target_for_stack = {
-        "asynq": "https://mk-asynq/inbox",
         "mkq": "https://mk-mkq/inbox",
         "ts": "https://ts/inbox",
     }
@@ -142,7 +140,7 @@ def main() -> int:
     parts += [
         "## Notes",
         "",
-        "- Stack: TS = Misskey TS (BullMQ on Redis); asynq = mk-go MK_JOBQUEUEDRIVER=asynq; mkq = mk-go MK_JOBQUEUEDRIVER=mkq",
+        "- Stack: TS = Misskey TS (BullMQ on Redis); mkq = mk-go (jobQueueDriver: mkq)",
         "- Outbound: 各 stack の local user に blackhole follower 100 名を pre-seed",
         "- Inbound: faker (Go HTTPS, pre-sign 並列化) が sender、receiver verify がボトルネックになる前提",
         "- 詳細 metric は `outbound.json` / `inbound.json` 参照",

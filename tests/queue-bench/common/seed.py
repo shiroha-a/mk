@@ -19,11 +19,6 @@ import httpx
 import psycopg
 
 STACKS = {
-    "asynq": {
-        "url": os.environ["MKGO_ASYNQ_URL"],
-        "kind": "mkgo",
-        "db_host": "postgres-asynq",
-    },
     "mkq": {
         "url": os.environ["MKGO_MKQ_URL"],
         "kind": "mkgo",

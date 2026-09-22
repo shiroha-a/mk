@@ -5,8 +5,8 @@
 # は scripts/run.sh が configs/<scenario>.yml を選択して mount する。
 #
 # 共通基盤 (blackhole / certs / nginx) は tests/queue-bench/ から
-# Dockerfile / asset を流用する。並列 3 stack を持たず逐次実行する分、
-# resource overhead は queue-bench の 1/3 程度。
+# Dockerfile / asset を流用する。stack を並べず 1 つで逐次実行する分、
+# resource overhead は queue-bench より小さい。
 #
 # 使い方: make queue-bench-autoscale-run
 

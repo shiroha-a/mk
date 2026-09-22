@@ -29,7 +29,6 @@ DRAIN_TIMEOUT_S = 600.0
 FAKER_URL = os.environ["FAKER_URL"]
 
 STACK_PROBES: dict[str, tuple[DriverKind, str]] = {
-    "asynq": ("asynq", os.environ["REDIS_ASYNQ_HOST"]),
     "mkq": ("mkq", os.environ["REDIS_MKQ_HOST"]),
     "ts": ("bullmq", os.environ["REDIS_TS_HOST"]),
 }
@@ -37,7 +36,6 @@ STACK_PROBES: dict[str, tuple[DriverKind, str]] = {
 # Receiver hostname → inbox URL に変換するためのマップ。faker は `target` に
 # 受信側 inbox URL をそのまま受け取る。
 INBOX_URLS = {
-    "asynq": "https://mk-asynq/inbox",
     "mkq": "https://mk-mkq/inbox",
     "ts": "https://ts/inbox",
 }
@@ -103,7 +101,7 @@ def drain_one(stack: str, info: dict[str, Any], expected: int,
 
 
 def main() -> int:
-    """Run the inbound bench against all 3 stacks declared in seed.json.
+    """Run the inbound bench against every stack declared in seed.json.
 
     Return codes (#1163 documented contract for CI integration):
       0 — bench completed successfully (results written to /results/inbound.json)

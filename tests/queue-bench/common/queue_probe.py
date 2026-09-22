@@ -1,13 +1,12 @@
-"""Queue depth probes for the three drivers under test.
+"""Queue depth probes for the drivers under test.
 
-Each driver stores queue state under different Redis key conventions:
+Both drivers store queue state under the same Redis key convention:
 
 - BullMQ (Misskey TS):     bull:<queue>:wait, bull:<queue>:active (LIST)
-- asynq:                   asynq:{<queue>}:pending, asynq:{<queue>}:active (LIST)
 - mkq (BullMQ-compatible): bull:<queue>:wait, bull:<queue>:active (LIST)
 
-The probe abstracts these so the bench drivers can poll a uniform
-"pending + active" depth across the three stacks.
+The probe keeps the `kind` discriminator so a future driver with a
+different key layout can be added without touching the bench drivers.
 """
 from __future__ import annotations
 
@@ -16,29 +15,18 @@ from typing import Literal
 
 import redis
 
-DriverKind = Literal["bullmq", "asynq", "mkq"]
+DriverKind = Literal["bullmq", "mkq"]
 
 
 @dataclass
 class QueueProbe:
-    name: str  # human label e.g. "ts" / "asynq" / "mkq"
+    name: str  # human label e.g. "ts" / "mkq"
     kind: DriverKind
     client: redis.Redis
     queue_name: str  # "deliver" / "inbox" / etc.
 
     def depth(self) -> int:
         """Pending + active job count for the configured queue."""
-        if self.kind == "asynq":
-            wait = f"asynq:{{{self.queue_name}}}:pending"
-            active = f"asynq:{{{self.queue_name}}}:active"
-            scheduled = f"asynq:{{{self.queue_name}}}:scheduled"
-            retry = f"asynq:{{{self.queue_name}}}:retry"
-            return (
-                self.client.llen(wait)
-                + self.client.llen(active)
-                + self.client.zcard(scheduled)
-                + self.client.zcard(retry)
-            )
         # bullmq / mkq are wire-compatible
         wait = f"bull:{self.queue_name}:wait"
         active = f"bull:{self.queue_name}:active"
@@ -51,11 +39,6 @@ class QueueProbe:
 
     def completed(self) -> int:
         """Approximate completed job count (driver-specific best effort)."""
-        if self.kind == "asynq":
-            # asynq tracks per-day counters: asynq:{<q>}:processed:<YYYY-MM-DD>
-            # 簡易には "completed - failed" を厳密に追えないので 0 を返す。
-            # drain time の判定は depth() == 0 で十分。
-            return 0
         completed = f"bull:{self.queue_name}:completed"
         return int(self.client.zcard(completed))
 

@@ -31,7 +31,6 @@ DRAIN_TIMEOUT_S = 240.0
 BLACKHOLE_URL = os.environ.get("BLACKHOLE_URL", "http://blackhole")
 
 STACK_PROBES: dict[str, tuple[DriverKind, str]] = {
-    "asynq": ("asynq", os.environ["REDIS_ASYNQ_HOST"]),
     "mkq": ("mkq", os.environ["REDIS_MKQ_HOST"]),
     "ts": ("bullmq", os.environ["REDIS_TS_HOST"]),
 }

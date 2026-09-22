@@ -758,8 +758,8 @@ bench-down: ## k6 ベンチのスタックを撤去
 bench-logs: ## k6 ベンチのログを表示
 	docker compose -f $(BENCH_COMPOSE) logs -f
 
-# Queue bench (#563): 3-way deliver/inbox throughput comparison across
-# Misskey TS (BullMQ), mk-go (asynq), mk-go (mkq).
+# Queue bench (#563): deliver/inbox throughput comparison between
+# Misskey TS (BullMQ) and mk-go (mkq). asynq driver は #2985 で削除。
 QUEUE_BENCH_COMPOSE=tests/queue-bench/docker-compose.queue-bench.yml
 
 queue-bench-up: ## queue-bench スタックを起動
@@ -768,8 +768,8 @@ queue-bench-up: ## queue-bench スタックを起動
 queue-bench-seed: ## queue-bench 用のデータを投入
 	# `--force-recreate` で seed container を毎回 fresh に作る (#1163)。
 	#
-	# `--no-deps` が要る。付けないと --force-recreate が依存 (app-asynq /
-	# app-mkq) まで作り直し、それらの IP が変わる。nginx の upstream は
+	# `--no-deps` が要る。付けないと --force-recreate が依存 (app-mkq /
+	# app-ts) まで作り直し、それらの IP が変わる。nginx の upstream は
 	# `server app-mkq:3000;` とホスト名で書かれていて **起動時に一度だけ**
 	# 名前解決するため、nginx は死んだ IP を掴んだまま 502 を返し続ける。
 	# seed の wait_health は例外にならない 502 を 240 秒受け取って
@@ -784,14 +784,13 @@ queue-bench-seed: ## queue-bench 用のデータを投入
 	docker compose -f $(QUEUE_BENCH_COMPOSE) --profile bench up --abort-on-container-exit --force-recreate --no-deps seed
 	# meta cache (5min TTL) が古い federation='none' を握っているので、seed
 	# 後に app コンテナを再起動して新しい meta.federation='all' を読ませる。
-	docker compose -f $(QUEUE_BENCH_COMPOSE) restart --no-deps app-asynq app-mkq app-ts
+	docker compose -f $(QUEUE_BENCH_COMPOSE) restart --no-deps app-mkq app-ts
 	@echo "waiting for apps to become healthy after restart..."
 	@for i in $$(seq 1 60); do \
-		ASYNQ=$$(docker compose -f $(QUEUE_BENCH_COMPOSE) ps app-asynq --format json 2>/dev/null | grep -o '"Health":"healthy"' || true); \
 		MKQ=$$(docker compose -f $(QUEUE_BENCH_COMPOSE) ps app-mkq --format json 2>/dev/null | grep -o '"Health":"healthy"' || true); \
 		TS=$$(docker compose -f $(QUEUE_BENCH_COMPOSE) ps app-ts --format json 2>/dev/null | grep -o '"Health":"healthy"' || true); \
-		if [ -n "$$ASYNQ" ] && [ -n "$$MKQ" ] && [ -n "$$TS" ]; then \
-			echo "ready (asynq+mkq+ts all healthy)"; exit 0; \
+		if [ -n "$$MKQ" ] && [ -n "$$TS" ]; then \
+			echo "ready (mkq+ts all healthy)"; exit 0; \
 		fi; \
 		sleep 2; \
 	done; \
@@ -806,7 +805,7 @@ queue-bench-seed: ## queue-bench 用のデータを投入
 	#
 	# **app が healthy になってから restart する。** nginx は起動時に一度だけ
 	# 名前解決するので、app の IP が確定した後でなければ意味が無い。
-	docker compose -f $(QUEUE_BENCH_COMPOSE) restart --no-deps nginx-asynq nginx-mkq nginx-ts
+	docker compose -f $(QUEUE_BENCH_COMPOSE) restart --no-deps nginx-mkq nginx-ts
 	# **front が「生きているか」ではなく「自分の app に繋がっているか」を見る。**
 	# TCP connect や単なる 200 では足りない — 誤配線した front も listener は
 	# 生きていて、相手の app の応答を 200 で返す (#2917 の症状そのもの)。
@@ -821,7 +820,7 @@ queue-bench-seed: ## queue-bench 用のデータを投入
 	if [ -z "$$net" ]; then echo "could not resolve the bench network" >&2; exit 1; fi; \
 	for i in $$(seq 1 30); do \
 		bad=""; \
-		for h in mk-asynq mk-mkq ts; do \
+		for h in mk-mkq ts; do \
 			got=$$(docker run --rm --network "$$net" curlimages/curl:8.11.1 -sk --max-time 5 \
 				-X POST -H 'content-type: application/json' -d '{}' "https://$$h/api/meta" 2>/dev/null \
 				| grep -o '"uri":"[^"]*"' | head -1); \

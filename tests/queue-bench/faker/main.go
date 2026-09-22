@@ -221,7 +221,7 @@ type sendRequest struct {
 	//   "announce"     → Announce(object=Objects[target])
 	ActivityType string `json:"activityType,omitempty"`
 	// Objects maps inbox URL → AS object URI used by Announce mode.
-	// e.g. `{"https://mk-asynq/inbox": "https://mk-asynq/notes/<id>"}`
+	// e.g. `{"https://mk-mkq/inbox": "https://mk-mkq/notes/<id>"}`
 	// announce mode で全 target に同じ note URI を Announce すると receiver 側で
 	// (act.ID dedup 経由でない場合) 重複 renote が大量に作られて bench にならない
 	// ため、receiver-local の note URI を target ごとに分けて渡す。

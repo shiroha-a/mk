@@ -1,6 +1,6 @@
 name: Queue-bench smoke (nightly)
 
-# Issue #1163 で queue-bench の orchestration 非決定性 (3 stack 並列起動で
+# Issue #1163 で queue-bench の orchestration 非決定性 (複数 stack の並列起動で
 # random に 1 stack が ok=0 になる) を `--force-recreate` で解消した。同種の
 # regression が再発した場合に nightly で検知するための smoke workflow。
 #
@@ -11,14 +11,14 @@ name: Queue-bench smoke (nightly)
 #   で観測された後者の manifestation もカバー)。実際の load 計測は
 #   手動 / 別タスクで継続。
 # - inbound 結果 (`tests/queue-bench/results/inbound.json`) を assert step
-#   でパースして「全 3 stack が ok==sent」を verify。partial ok=0 だと
+#   でパースして「全 stack が ok==sent」を verify。partial ok=0 だと
 #   driver_inbound 自体は exit 0 で抜けるので、assertion なしでは regression
 #   を検知できない。
 # - schedule: 毎日 1 回 (UTC 17:30 ≒ JST 02:30)。dropin-e2e (18:00) と
 #   playwright (17:00) の間にずらして runner 競合を避ける。
 # - workflow_dispatch: 任意の ref で手動発火可。
 # - PR の required check には**入れない**。8-10 min かかる上に
-#   docker-in-docker / 3 stack 並列という flaky 要素を含むため merge ブロッカー
+#   docker-in-docker / 複数 stack 並列という flaky 要素を含むため merge ブロッカー
 #   に向かない。failure は Actions 上で確認、別 PR で対処する運用
 #   (dropin-e2e / playwright と同じ方針)。
 
@@ -130,7 +130,7 @@ jobs:
 
       - name: queue-bench smoke (assert ok=sent)
         # driver_inbound.py は partial ok=0 でも exit 0 で抜けるので、
-        # ここで inbound.json をパースして「全 3 stack で ok == sent」を
+        # ここで inbound.json をパースして「全 stack で ok == sent」を
         # verify する。1 stack でも `ok < sent` なら CI fail にして
         # orchestration regression を early surface する。
         # quoted heredoc (`'PYEOF'`) で shell interpolation を止めつつ、

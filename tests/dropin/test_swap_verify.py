@@ -118,7 +118,7 @@ def test_post_swap_alice_can_reply(
 ) -> None:
     """mk-A で alice が新しいリプライを投稿し、TS-B の bob 側に届くことを確認する。
 
-    federation deliver のキュー (asynq) が稼働していれば届く。これが届かない
+    federation deliver のキューが稼働していれば届く。これが届かない
     場合は mk-go の deliver 処理 / SSL_CERT_FILE バンドル / inbox URL 解決
     のいずれかが壊れている。
     """
