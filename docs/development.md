@@ -121,7 +121,7 @@ cd mk && docker compose up -d
 | `make dev` | `go run`で直接起動 |
 | `make run` | build + 実行 |
 | `make clean` | ビルド成果物を削除 |
-| `make tidy` | `go mod tidy`。**このリポジトリでは private plugin の解決に失敗するので使えない**。依存追加は `go get`、`go.sum` の充足検証は `GOFLAGS=-mod=readonly go build` (→ [プラグインの書き方](plugins/authoring.md)) |
+| `make tidy` | `go mod tidy`。**このリポジトリでは private plugin の解決に失敗するので使えない**。依存追加は `go get`、`go.sum` の充足検証は **`GOWORK=off go build`**。**`-mod=readonly` では効かない** — Go 1.16 以降それは既定値で、素の `go build` と同じ。効いていないのは `go.work` のほうで、workspace があると `go.sum` ではなく `go.work.sum` が使われ、`go.sum` から行を消しても**どちらの書き方でも exit 0 になる** (実測)。CI は `go.work` を持たない (生成物で gitignore 済み) ので、既存の `go build ./...` が既に検証している (→ [プラグインの書き方](plugins/authoring.md)) |
 | `make plugins` | `plugins/` を走査して組み込み用ファイルを生成 (#2480)。`make build` が内部で呼ぶ |
 | `make plugins-all` | `disabled` のプラグインも含めて生成 (CI 検証用) |
 

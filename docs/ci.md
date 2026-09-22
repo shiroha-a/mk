@@ -66,6 +66,7 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | check | workflow | 見ているもの | 実測 | 手元での再現 |
 |---|---|---|---|---|
 | `vulncheck` | CI | 依存・Go stdlib の**到達可能な**既知脆弱性 + Go version の pin 整合 | 1 min | `GOOS=linux govulncheck ./...` |
+| `review` | Dependency review | PR が**新しく持ち込む**依存に既知の脆弱性が無いか (base と head の差分を比較、high 以上で失敗) | 未計測 | 手元では回せない (GitHub の advisory DB を引く) |
 | `analyze (go)` / `analyze (actions)` | CodeQL | **自分のコード**の静的解析 (Go の全 module と workflow の式) | 未計測 | 手元では回せない (CodeQL CLI が要る)。Code scanning alerts で見る |
 | `frontend-check` | CI | fork frontend の型 (`vue-tsc --noEmit`) + submodule のソースを読むゲート + eslint (`src/**/*.{ts,vue}`) + vitest + `make plugins-all` と統合バイナリの build | 3〜4 min | 下の「frontend-check の手元再現」。**`make frontend-check` は型・ゲート・eslint まで** (#2906) |
 | `plugin-tests` | CI | 同梱プラグインのテスト (別 module なので `go list ./...` に入らない) | 1 min | `make plugin-test` |
@@ -91,7 +92,8 @@ PR を出すと十数個の check が走る。**どれが何を見ていて、�
 | `swap-test` | DB を引き継いだときに壊れないか |
 | `mkgo-born` | **mk-go が作った DB を TS が受け取れるか** |
 | `federation` / `ed25519-verify` | 他実装と実際に喋れるか |
-| `vulncheck` | **自分のコードではなく依存**に既知の穴が無いか |
+| `vulncheck` | **自分のコードではなく依存**に既知の穴が無いか (develop に入った後、到達可能なものだけ) |
+| `review` | **入る前**に、その PR が持ち込む依存に既知の穴が無いか (到達可能性は見ない) |
 | `analyze (go)` / `analyze (actions)` | **自分のコード**にパターンで見つかる欠陥が無いか |
 
 shape が合っていても値が違う類のバグは `diff` でしか捕まらない。ユニットテストは

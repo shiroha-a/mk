@@ -134,7 +134,7 @@ make run                    # build + 実行
 # 依存管理
 make tidy                   # go mod tidy。**このリポジトリでは private plugin の解決に
                             # 失敗するので使えない**。依存追加は go get、go.sum の検証は
-                            # GOFLAGS=-mod=readonly go build
+                            # GOWORK=off go build
 
 # コード品質
 make fmt                    # gofmt -s -w . で整形
@@ -593,6 +593,20 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 - PR の required check には**含めない**。新規 CVE の公開でコードを変えていない PR でも落ちるため。
 - 導入は #2387。通常テストが全て緑の状態で到達可能な脆弱性が 11 件残っており、既存の check では捕まらない領域だったため追加した。
 
+### `dependency-review` workflow (PR トリガー)
+
+- `.github/workflows/dependency-review.yml` が、PR が**新しく持ち込む**依存に既知の
+  脆弱性が無いかを base と head の差分で見る。
+- **`vulncheck` との違いは時点と射程。** あちらは develop に入った後の状態を見て、しかも
+  「呼び出しが到達可能なもの」に絞る。こちらは**入る前に**気付ける代わりに到達可能性を
+  見ないので、あちらが落とさないものも出る。
+- `fail-on-severity: high` から始める。moderate まで落とすと到達不能なものまで止めることに
+  なり、依存を上げるだけの PR が通らなくなる。
+- **PR へコメントさせない** (`comment-summary-in-pr` は `pull-requests: write` を要る)。
+  結果は job のログで読めるので、権限は `contents: read` のままにしてある。
+- PR の required check には**含めない**。見ているのは差分だが、判定に使う advisory DB は
+  GitHub 側で更新されるので、**同じ差分でも後から赤くなりうる**。
+
 ### `codeql` workflow (PR / push / weekly)
 
 - `.github/workflows/codeql.yml` が CodeQL で**自分のコード**を静的解析する。
@@ -887,6 +901,32 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: `dependency-review` workflow を追加し、あわせて **`go.sum` の検証方法の記述を訂正**した。
+  **`GOFLAGS=-mod=readonly go build` では go.sum を検証できない。** Section 3 と
+  `docs/development.md` がそう書いていたが誤り。**Go 1.16 以降 `-mod=readonly` は既定値**なので、
+  素の `go build` と同じものを実行しているだけだった。効いていないのは `go.work` のほうで、
+  workspace があると `go.sum` ではなく `go.work.sum` が使われる。**実測**: `go.sum` から
+  `gorm.io/gorm` の 3 行を消して、(a) `go.work` あり → 素の `go build` も
+  `-mod=readonly` も**どちらも exit 0** で素通り、(b) `go.work` なし → どちらも exit 1 で
+  `missing go.sum entry`。手元で確かめるなら **`GOWORK=off go build`**。
+  **CI には何も足さなくてよい。** `go.work` は `tools/pluginbuild` の生成物で gitignore 済み
+  なので、`build` job の `go build ./...` は既に go.sum を検証している。「CI に検証が無い」と
+  思って step を足すところだったが、実測したら既に在った。**裏取りせずに CI を足すと、
+  効いていない検査が増えるだけになる。**
+  `dependency-review` のほうは**時点と射程が `vulncheck` と違う**。あちらは develop に入った
+  後の状態を到達可能性で絞って見るが、こちらは PR の差分を base と比べるので**入る前**に
+  気付ける (代わりに到達可能性は見ない)。`fail-on-severity: high` から始める — moderate まで
+  落とすと到達不能なものまで止めることになり、依存を上げるだけの PR が通らなくなる。
+  **PR へコメントさせない** (`pull-requests: write` を要るので、権限は `contents: read` の
+  ままにする)。required には**含めない** — 見ているのは差分だが、判定に使う advisory DB は
+  GitHub 側で更新されるので、同じ差分でも後から赤くなりうる。
+  **あわせてリポジトリ設定の Secret scanning と Push protection を有効化した** (どちらも
+  `disabled` だった)。公開リポジトリなので無料で、コードもワークフローも要らない。
+  push protection は**コミットされる前**に弾くので、「push してから revoke して履歴を
+  書き換える」という一番つらい復旧を避けられる。`secretfield-check` まで作って秘密の露出を
+  気にしている以上、ここが無効なのは一貫していなかった。**`non_provider_patterns` は
+  有効にしていない** — 秘密鍵などの汎用パターンを見る枝で、Ed25519 / HTTP 署名のテスト
+  フィクスチャが誤検知されうるため、実態を見てから判断する。
 - **2026-09-22**: CI に `codeql` workflow と `lint` job の actionlint を追加。`make help` の target は 137 → 138。**自分のコードを見る静的解析が `go vet` だけだった。**
   `vulncheck` は依存しか見ず、`make gates` の 21 本は「この形を禁じる」と自分で書いたものしか
   見ない。テストは「書いた振る舞いがその通りか」しか見ないので、**書いていない分岐**と
@@ -1078,7 +1118,7 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **`**/node_modules` にもできない。** それだと `packages/backend/node_modules/` 配下の symlink まで落ち、Dockerfile が COPY する `emoji-assets/built/...` が解決できなくなる。`third_party/misskey/node_modules` を名指しで除外し、必要な emoji-assets (44 MB) だけを `!` で再包含する。**再包含は実体側に書く** — pnpm は実体を `.pnpm/` 配下に置き、`packages/backend/node_modules/...` はそこへの symlink なので、symlink 側を再包含しても効かない (実体側の再包含を外すと COPY が `not found` で落ちることを実測)。
   **実測は 1,512 MB → 421 MB。** 手元ではさらに `.pnpm-store` (3.8 GB) が消える。**`docker build --check` では分からない** — `--check` は context を 849B しか送らないので、転送量も COPY の成否も実ビルドでしか測れない。
   **gate はサイズを見ない。** コンテキストが太っても転送が遅くなるだけで、ビルドは通るし気付ける。見るのは「中身が読まれると困るもの」だけ。
-  **`.dockerignore` を自前で解釈しない。** `moby/patternmatcher` + `ignorefile` (Docker 本体が使う実装) に「そのパスが除外されるか」を直接判定させる。**最初は文字列の正規化で近似して書き、敵対的レビューで 8 形中 7 形を見逃すことを実測された** (`!*/**` / `!drive-files*` / `!/drive-files` / `!.config/**` / `!.config/*` / `!deploy/uds/config/*` / `!compose.uds.yaml*` がどれも gate PASS のまま再包含される)。`**/` の前置・末尾スラッシュ・先頭スラッシュ・`*` を挟む形・`!` の後勝ちが絡むので、近似は必ず取りこぼす。#2857 が「Makefile を自前でパースせず `make -n` に解決させる」と結論したのと同じ形。**`ignorefile.ReadAll` と組にするのが要点** — 先頭スラッシュの除去はそちらの仕事で、`patternmatcher` 単体だと `!/drive-files` を取り逃がす。両者は既に `go.sum` にある (testcontainers 経由) ので、`go get` するだけで **`go.mod` を変えずに** import できる。**`// indirect` のコメントは残る** — 落とすのは `go mod tidy` の仕事で、このリポジトリでは tidy が使えないため。充足は `GOFLAGS=-mod=readonly go build ./...` が通ることで確かめる。
+  **`.dockerignore` を自前で解釈しない。** `moby/patternmatcher` + `ignorefile` (Docker 本体が使う実装) に「そのパスが除外されるか」を直接判定させる。**最初は文字列の正規化で近似して書き、敵対的レビューで 8 形中 7 形を見逃すことを実測された** (`!*/**` / `!drive-files*` / `!/drive-files` / `!.config/**` / `!.config/*` / `!deploy/uds/config/*` / `!compose.uds.yaml*` がどれも gate PASS のまま再包含される)。`**/` の前置・末尾スラッシュ・先頭スラッシュ・`*` を挟む形・`!` の後勝ちが絡むので、近似は必ず取りこぼす。#2857 が「Makefile を自前でパースせず `make -n` に解決させる」と結論したのと同じ形。**`ignorefile.ReadAll` と組にするのが要点** — 先頭スラッシュの除去はそちらの仕事で、`patternmatcher` 単体だと `!/drive-files` を取り逃がす。両者は既に `go.sum` にある (testcontainers 経由) ので、`go get` するだけで **`go.mod` を変えずに** import できる。**`// indirect` のコメントは残る** — 落とすのは `go mod tidy` の仕事で、このリポジトリでは tidy が使えないため。充足は `GOWORK=off go build ./...` が通ることで確かめる。
   **判定は字句だけで symlink を辿らない。** だから「Dockerfile が COPY する symlink 経路」と「pnpm が実体を置く `.pnpm/` 配下」の**両方**を一覧に入れる必要がある。実体側だけを守っていたときは、`third_party/misskey/node_modules` を `**/node_modules` に広げる変更が **gate 緑のまま全ビルドを壊した** (`!` の再包含は実体側だけを生かすので symlink が落ちる)。しかもそれは `.dockerignore` 自身が名指しで警告している形で、`Dockerfile` の guard は「pnpm install not run?」と**事実と逆**を出す。
   **本物の matcher に解かせると、肯定側のアサーションが書けるようになる。** 「`.config/docker.yml.example` は context に**残る**」「emoji-assets の twemoji は**残る**」を検査対象にできるので、除外を広げすぎて COPY を壊す変更 (`.config/*.yml` → `.config/*`、`built` → `**/built`) がその場で落ちる。**除外側の文字列一致しか見ない形では原理的に書けない検査**で、変異検証でも肯定側 3 件が検出できている (合計 17/17)。
   **`<Dockerfile名>.dockerignore` の存在も見る。** BuildKit はそれがあると root の `.dockerignore` を**一切見ない**ので、ファイル 1 つで全ての除外が静かに無効になる。

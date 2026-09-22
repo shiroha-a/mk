@@ -1,0 +1,39 @@
+## PR が**新しく持ち込む**依存に既知の脆弱性が無いかを、マージ前に見る。
+##
+## **`vulncheck` との違いは時点と射程。** あちらは develop に入った後の状態を
+## 見て、しかも「呼び出しが到達可能なもの」に絞る。こちらは PR の差分そのものを
+## base と比べるので、**入る前に**気付ける。到達可能性は見ないので、あちらが
+## 落とさないものも出る (その判断はこちらではできない)。
+##
+## **required check には含めない。** 見ているのは差分だが、判定に使う advisory DB
+## は GitHub 側で更新されるので、**同じ差分でも後から赤くなりうる**。`vulncheck` /
+## `codeql` を required から外しているのと同じ理由。
+##
+## **`pull_request` にしか意味が無い。** base と head を比べる action なので、
+## push や schedule では動かない。
+
+name: Dependency review
+
+on:
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # **PR へコメントさせない。** `comment-summary-in-pr` は
+      # `pull-requests: write` を要るが、結果は job のログで読める。
+      # 権限は最小のままにしておく。
+      #
+      # `fail-on-severity` は high から始める。moderate まで落とすと、
+      # 到達不能なものまで止めることになり (到達可能性を見るのは `vulncheck`
+      # の役目)、依存を上げるだけの PR が通らなくなる。
+      - uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
