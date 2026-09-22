@@ -909,6 +909,29 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-22**: `ST1003` (命名) と `ST1012` (error var 名) を有効化。**名前を変えても wire と
+  DB は動かない** — `model.Meta` の `SMTP*` は gorm / json タグを持ち、`config.Config` は
+  JSON 化される経路が無く (`config_dump.go` はキーを文字列リテラルで書く)、
+  `PolicyCanSearchIPHistory` は定数「名」で値 `canSearchIpHistory` は据え置き。`shapecheck` が
+  通ることで裏を取った。
+  **`driver.SkipRetry` -> `ErrSkipRetry` は公開 API の変更ではない** — `internal/queue/driver` は
+  `internal/` 配下なのでプラグインから import できない。ただし **`asynq.SkipRetry` (7 箇所) は
+  外部パッケージの同名**なので触らない。一時プレースホルダへ退避してから置換した。
+  **word boundary だけでは型と変数を区別できない。** `assertAnError` を一括置換したところ、
+  **4 ファイルの `type assertAnError struct{}` (error を実装する型) まで巻き込んだ** —
+  ST1012 が指摘したのは `internal/api/reversi` の var 1 件だけで、型は対象外。10 箇所を
+  戻した。**リネーム前に「その名前が何として宣言されているか」を確認すること。**
+  **`test/e2e_federation` のパッケージ名だけ除外した。** ST1003 が指摘するのはパッケージ名で
+  ディレクトリ名ではないが、Go の慣習では揃える。ディレクトリ名まで変えると `internal/` の
+  実コード 2 ファイルを含む 27 箇所に波及するうえ、外部から import されないテスト専用
+  パッケージなので実益が無い。**CI のカバレッジ閾値は ImportPath の `/e2e` で判定する**ので、
+  名前を変えても 0% 例外は維持される (変えない判断の裏取りとして確認した)。
+  実測は ST1012 が 4 種 301 箇所 (`stubError` 112 / `SkipRetry` 182 / `stubReactionError` 3 /
+  `assertAnError` 4) + 死んだアンカー行 1 の削除 (`var _ error = errors.New("compile-time
+  anchor for errors import")`。`errors` は同ファイルの他 2 箇所で使われており不要だった)、
+  ST1003 が 21 種 189 箇所。
+  **射程外**: `SA1019` / `unused` (引き続き段階的に有効化)、`QF*` / `S1016` (恒久)、
+  `test/e2e_federation` のパッケージ名。
 - **2026-09-22**: `lint` job に `golangci-lint` を追加。`make help` の target は 138 → 139。
   **自分のコードを見る Go の静的解析が `go vet` だけだった。** `go vet` は「明らかに壊れて
   いるもの」しか見ないので、`errcheck` / `staticcheck` / `ineffassign` が拾う層が空いていた。
@@ -934,7 +957,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   **`make check` も required check に揃える。** `fmt` / `lint` / `test` だけだと、`lint` job が
   回す actionlint と golangci-lint が手元で一度も走らない (レビューで指摘)。
   **段階的に有効化する。** 現行設定 (本番 / テスト) での実測は `ST1003` 34 件 (16 / 18)、
-  `ST1012` 14 件 (1 / 13)、`SA1019` 10 件 (6 / 4)、`unused` 20 件 (1 / 19)。`QF*` 28 件 (25 / 3) と
+  `ST1012` 14 件 (1 / 13)、`SA1019` 10 件 (6 / 4)、`unused` 20 件 (1 / 19)。**`ST1003` と
+  `ST1012` はこの日のうちに有効化した** (上の entry)。`QF*` 28 件 (25 / 3) と
   `S1016` は**恒久的に無効** — 前者は好みのリファクタ、後者は「同じ underlying type なら
   構造体変換にできる」という提案だが位置ベースになるので、**片方の struct だけ並べ替えると
   コンパイルが通ったまま値が入れ替わる**。

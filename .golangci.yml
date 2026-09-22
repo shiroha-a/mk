@@ -41,15 +41,15 @@ linters:
       #     どちらも time.Time で隣接している、など)。名前ベースのリテラルは
       #     その並べ替えに免疫がある
       #
-      # **`ST1003` / `ST1012` / `SA1019` は段階的に有効化する。** それぞれ性質が
-      # 違い、一度に直すとまとめ直しになってレビューできない。
-      #   - ST1003 (命名。`ProxySmtp` -> `ProxySMTP` など): CLAUDE.md Section 5 が
-      #     「略語は全て大文字」と要求しているので好みではなく規約違反。ただし
-      #     `internal/model/meta.go` の GORM モデルと `internal/config/config.go` の
-      #     struct field を含み、`internal/entitycompat` の allowlist に
-      #     `Meta.SmtpPass` がハードコードされているので追従が要る
-      #   - ST1012 (error var は ErrFoo): 公開名の変更になる
-      #   - SA1019 (非推奨 API): redis / httputil / echo / go-parser で移行先の判断が要る
+      # **`ST1003` と `ST1012` は有効。** どちらも CLAUDE.md Section 5 の
+      # 「略語は全て大文字」と Go の標準慣習にあたるので、好みではなく規約違反。
+      # 名前を変えても wire と DB は動かないことを確認してある — `model.Meta` の
+      # `SMTP*` は gorm / json タグを持ち、`config.Config` は JSON 化される経路が
+      # 無く (`config_dump.go` はキーを文字列リテラルで書く)、
+      # `PolicyCanSearchIPHistory` は定数「名」で値 `canSearchIpHistory` は据え置き。
+      #
+      # **`SA1019` (非推奨 API) だけ段階的に残す。** redis / httputil / echo /
+      # go-parser で移行先の判断が要るので、まとめて直すとレビューできない。
       checks:
         - all
         - -QF*
@@ -58,8 +58,6 @@ linters:
         - -ST1020
         - -ST1021
         - -ST1022
-        - -ST1003
-        - -ST1012
         - -SA1019
 
   exclusions:
@@ -84,6 +82,19 @@ linters:
     # `internal/core/drive/storage.go` の `LocalStorage.Put` が該当)。
     presets:
       - std-error-handling
+
+    rules:
+      # **`test/e2e_federation` のパッケージ名だけ ST1003 から外す。**
+      # ここは upstream の e2e と対応を取るためディレクトリ名を保っており、
+      # パッケージ名もそれに合わせている。外部から import されないテスト専用
+      # パッケージなので、名前を変える実益が無い一方、ディレクトリ名まで
+      # 変えると `internal/` の実コード 2 ファイルを含む 27 箇所に波及する。
+      # **CI のカバレッジ閾値は ImportPath の `/e2e` で判定する**ので、
+      # そちらは名前を変えても変わらない (= 0% 例外は維持される)。
+      - path: ^test/e2e_federation/
+        text: should not use underscores in package names
+        linters:
+          - staticcheck
 
 issues:
   # **既定の打ち切りを外す。** golangci-lint は同一メッセージ 3 件 /
