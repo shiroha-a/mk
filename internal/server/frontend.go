@@ -315,8 +315,8 @@ func renderFrontendShell(c echo.Context, cfg *config.Config, metaRepo repository
 	// HTML 側と hash 側で別々に文字列を持つと、片方だけ変えたときに CSP を
 	// 有効にしている運用者の画面が真っ白になる (#2786)。
 	bootGlobals := fmt.Sprintf(
-		`const VERSION = '%s'; const CLIENT_ENTRY = %s; const LANGS = ["ja-JP","en-US"];`,
-		cfg.Version, clientEntryJS)
+		`const VERSION = %s; const CLIENT_ENTRY = %s; const LANGS = ["ja-JP","en-US"];`,
+		jsStringLiteral(cfg.Version), clientEntryJS)
 	// loader は inline のときだけ hash が要る (外部参照なら 'self' で通る)。
 	cspExtra.Script = append(cspExtra.Script, cspScriptHashes(bootGlobals, loader.JS)...)
 

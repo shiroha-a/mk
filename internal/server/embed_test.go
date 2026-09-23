@@ -129,6 +129,50 @@ func TestEscapeJSONForScriptNeverLeavesClosingTag(t *testing.T) {
 	}
 }
 
+func TestJSStringLiteral(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{name: "plain version", input: "2026.9.0", want: `"2026.9.0"`},
+		{name: "double quote cannot close the literal", input: `a"b`, want: `"a\"b"`},
+		{name: "backslash is escaped", input: `a\`, want: `"a\\"`},
+		{name: "closing script tag is neutralised", input: "</script>", want: `"\u003c/script\u003e"`},
+		{name: "html entity is not used", input: "a&b", want: `"a\u0026b"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, jsStringLiteral(tt.input))
+		})
+	}
+}
+
+// inline script の VERSION は JS の文字列リテラルとして埋め込む。
+// html.EscapeString は <script> の中では効かないので、`"` で抜けられた。
+func TestShells_VersionIsAJSStringLiteral(t *testing.T) {
+	cfg := &config.Config{URL: "https://example.test", Version: `1"</script>`}
+	const want = `const VERSION = "1\"\u003c/script\u003e";`
+
+	t.Run("embed", func(t *testing.T) {
+		h := &embedHandlers{cfg: cfg, metaRepo: testutil.NewMockMetaRepository()}
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/embed/notes/x", nil), rec)
+		require.NoError(t, h.render(c, nil))
+		assert.Contains(t, rec.Body.String(), want)
+	})
+
+	t.Run("spa", func(t *testing.T) {
+		handler := frontendHTML(cfg, testutil.NewMockMetaRepository(), nil, nil)
+		e := echo.New()
+		rec := httptest.NewRecorder()
+		c := e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), rec)
+		require.NoError(t, handler(c))
+		assert.Contains(t, rec.Body.String(), want)
+	})
+}
+
 // embed shell の `<head>` が upstream `views/base-embed.tsx` と同じ icon link を
 // 出すこと。SPA shell と同じ fallback (#2527)。
 func TestEmbedShell_IconLinks(t *testing.T) {

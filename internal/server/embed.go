@@ -273,8 +273,8 @@ func (h *embedHandlers) buildHTML(instanceName, iconURL, appleTouchIconURL, them
 	loaderJSTag := inlineOrLinkJS(loader.JS, "/embed_vite/loader/boot.js")
 
 	bootGlobals := fmt.Sprintf(
-		"\nconst VERSION = \"%s\";\nconst CLIENT_ENTRY = %s;\nconst LANGS = [\"ja-JP\",\"en-US\"];\n",
-		html.EscapeString(h.cfg.Version), clientEntry)
+		"\nconst VERSION = %s;\nconst CLIENT_ENTRY = %s;\nconst LANGS = [\"ja-JP\",\"en-US\"];\n",
+		jsStringLiteral(h.cfg.Version), clientEntry)
 
 	// loader は inline のときだけ hash が要る (外部参照なら 'self' で通る)。
 	inlineScripts := []string{bootGlobals, loader.JS}
@@ -338,4 +338,16 @@ func escapeJSONForScript(s string) string {
 		">", `\u003e`,
 		"&", `\u0026`,
 	).Replace(s)
+}
+
+// jsStringLiteral renders s as a JavaScript string literal that is safe to
+// place inside an inline <script> element.
+//
+// html.EscapeString は <script> の中では効かない (実体参照がデコードされない)
+// ので、`"` や `\` を含む値でリテラルから抜けられる。JSON の文字列は JS の
+// 文字列リテラルとしてそのまま読めるので、json.Marshal で quote したうえで
+// `</script>` 対策を重ねる。
+func jsStringLiteral(s string) string {
+	b, _ := json.Marshal(s)
+	return escapeJSONForScript(string(b))
 }

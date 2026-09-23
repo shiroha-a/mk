@@ -37,9 +37,9 @@ import (
 //     する経路が (chart / fsck / maintenance など) あり、そこが盲点になっていた
 //
 // 判定を「クォートで開いた区間に動詞が在るか」だけにすると、走査 186 サイト
-// (ユニークキー 103、うち人工ソース 6 サイト) に対し該当は 4 サイト / 3 キーしか
+// (ユニークキー 103、うち人工ソース 6 サイト) に対し該当は 3 サイト / 3 キーしか
 // ない (実測)。本番はそのうち `internal/server/frontend.go#renderFrontendShell` の
-// 1 キー (2 サイト、JS 生成) だけで、allowlist に理由付きで載せれば済む。
+// 1 キー (1 サイト、JS 生成) だけで、allowlist に理由付きで載せれば済む。
 //
 // **代わりに網は広がる。** 値をクォートで囲んだだけのメッセージも該当する。
 // 現 corpus に**メッセージの形は 0 件**で、allowlist に載っている非 SQL は
@@ -97,8 +97,8 @@ var sqlFormatRoots = []string{"internal", "cmd", "plugin"}
 // **理由には「どの値が入るか」を書くこと。** 「安全なはず」ではなく、値の
 // 出どころを書く。SQL でないものをここに足すときも同じ。
 var quotedVerbAllowlist = map[string]string{
-	"internal/server/frontend.go#renderFrontendShell": "SQL ではなく JS の生成 (2 箇所)。" +
-		"入るのは Vite manifest のエントリ名とビルド版数で、どちらもサーバー側で決まる値。",
+	"internal/server/frontend.go#renderFrontendShell": "SQL ではなく JS の生成。" +
+		"入るのは Vite manifest のエントリ名で、サーバー側で決まる値。",
 	"internal/entitycompat/sqlbindfixture/sample.go#UnsafeQuotedValue":        "人工ソース: 検出の枝を固定するための違反形。どこからも呼ばない。",
 	"internal/entitycompat/sqlbindfixture/sample.go#UnsafeConcatenatedFormat": "人工ソース: 書式を定数連結で折り返した違反形。畳んでから判定していることを固定する。",
 }
