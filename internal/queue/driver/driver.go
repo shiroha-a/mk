@@ -203,6 +203,17 @@ type Inspector interface {
 // expressions and the `@daily` style descriptors).
 type Scheduler interface {
 	Register(cronspec, taskType string, payload []byte, opts ...EnqueueOption) error
+	// PruneUnregistered removes the schedules stored for the driver's
+	// queues that this process did not try to Register, and returns them
+	// as "<queue>/<scheduleID>". It does nothing when nothing was
+	// registered, and returns an error without removing anything when any
+	// registration failed.
+	//
+	// **登録先や名前を変えた cron の旧スケジューラを消すため (#3173)。** 消さないと
+	// 永久に発火し続ける — #2818 でプラグインの cron を専用キューへ移したとき、
+	// maintenance 側の 6 本が残って二重実行と handler 無しの失敗を続けていた。
+	// 全ての Register の後に 1 回呼ぶこと。
+	PruneUnregistered() ([]string, error)
 	Start() error
 	Shutdown()
 }

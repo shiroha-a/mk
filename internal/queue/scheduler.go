@@ -223,6 +223,13 @@ func (s *Scheduler) RegisterCheckModeratorsActivityJob() error {
 	)
 }
 
+// PruneUnregistered removes the cron schedules left in Redis that this
+// process did not register (e.g. a job moved to another queue or renamed),
+// returning them as "<queue>/<scheduleID>". Call it after every Register*.
+func (s *Scheduler) PruneUnregistered() ([]string, error) {
+	return s.inner.PruneUnregistered()
+}
+
 // Start launches the scheduler in the background. Returns immediately.
 func (s *Scheduler) Start() error { return s.inner.Start() }
 

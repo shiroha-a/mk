@@ -1686,6 +1686,92 @@ func TestDispatchableCount_MatchesQueueInfo(t *testing.T) {
 	assert.Equal(t, info.Pending, n, "DispatchableCount が GetQueueInfo.Pending とずれている")
 }
 
+// **今回登録しなかった cron の旧スケジューラを撤去する (#3173)。** #2818 で
+// プラグインの cron を専用キューへ移したとき、maintenance 側の旧スケジューラが
+// 残って二重実行と handler 無しの失敗を続けていた。
+//
+// 1 つ目の driver が「前回の起動」、2 つ目が「今回の起動」。Scheduler は
+// driver ごとに登録の記録を持つので、別の driver で再現できる。
+func TestScheduler_PruneUnregistered(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+	ctx := context.Background()
+	newD := func() driver.Driver {
+		d, err := mkqdriver.New(ctx, mkqdriver.Config{
+			Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = d.Close() })
+		return d
+	}
+	repeat := func(queue string) []string {
+		ids, err := testRedis.Client.ZRange(ctx, "bull:"+queue+":repeat", 0, -1).Result()
+		require.NoError(t, err)
+		return ids
+	}
+
+	// 前回の起動: 3 本登録していた。
+	prev := newD().Scheduler()
+	for _, id := range []string{"kept", "moved", "flaky"} {
+		require.NoError(t, prev.Register("0 * * * *", id, nil, driver.WithQueue("maintenance")))
+	}
+	require.NoError(t, prev.Register("0 * * * *", "other-queue", nil, driver.WithQueue("export")))
+
+	cur := newD().Scheduler()
+
+	// **何も登録していないうちは何も消さない。**
+	removed, err := cur.PruneUnregistered()
+	require.NoError(t, err)
+	assert.Empty(t, removed)
+	assert.ElementsMatch(t, []string{"kept", "moved", "flaky"}, repeat("maintenance"))
+
+	// 今回の起動: kept と flaky は登録し、moved と other-queue は登録しない。
+	require.NoError(t, cur.Register("0 * * * *", "kept", nil, driver.WithQueue("maintenance")))
+	require.NoError(t, cur.Register("0 * * * *", "flaky", nil, driver.WithQueue("maintenance")))
+
+	removed, err = cur.PruneUnregistered()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"maintenance/moved", "export/other-queue"}, removed)
+	assert.ElementsMatch(t, []string{"kept", "flaky"}, repeat("maintenance"))
+	assert.Empty(t, repeat("export"))
+
+	exists, err := testRedis.Client.Exists(ctx, "bull:maintenance:repeat:moved").Result()
+	require.NoError(t, err)
+	assert.Zero(t, exists, "template の HASH も消える (次を積まない)")
+}
+
+// **登録が 1 件でも失敗したら撤去しない。** 最初の失敗で return する呼び出し側
+// (`RegisterChartJobs`) では、失敗の後ろの cron が「試みなかった」ことになる。
+// そのまま消すと、一時的な失敗で正当な cron が再起動まで止まる。
+func TestScheduler_PruneSkippedAfterRegistrationFailure(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+	ctx := context.Background()
+	newD := func() driver.Driver {
+		d, err := mkqdriver.New(ctx, mkqdriver.Config{
+			Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = d.Close() })
+		return d
+	}
+	prev := newD().Scheduler()
+	for _, id := range []string{"first", "after-failure"} {
+		require.NoError(t, prev.Register("0 * * * *", id, nil, driver.WithQueue("maintenance")))
+	}
+
+	// 今回の起動: first の登録に失敗し、呼び出し側がそこで打ち切った。
+	cur := newD().Scheduler()
+	require.Error(t, cur.Register("not a cron", "first", nil, driver.WithQueue("maintenance")))
+
+	removed, err := cur.PruneUnregistered()
+	require.Error(t, err)
+	assert.Empty(t, removed)
+	ids, err := testRedis.Client.ZRange(ctx, "bull:maintenance:repeat", 0, -1).Result()
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"first", "after-failure"}, ids)
+}
+
 // **scheduler の retention は template に載る (mkq v1.2.0 / #3171)。** 件数と
 // 期限の両方を渡したときに completed / failed を取り違えず、両方が 1 つの
 // object にまとまることを見る。件数 0 は渡らない (driver では「制限なし」)。

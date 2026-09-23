@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -1455,11 +1456,41 @@ func (c *fakeQueueClient) Close() error { return nil }
 type fakeQueueScheduler struct {
 	driver.Scheduler
 	calls []fakeQueueCall
+	// events は Register / PruneUnregistered / Start の呼ばれた順。
+	events []string
 }
 
 func (s *fakeQueueScheduler) Register(cron, taskType string, payload []byte, opts ...driver.EnqueueOption) error {
 	s.calls = append(s.calls, fakeQueueCall{cron: cron, taskType: taskType, payload: payload, opts: opts})
+	s.events = append(s.events, "register")
 	return nil
+}
+
+func (s *fakeQueueScheduler) PruneUnregistered() ([]string, error) {
+	s.events = append(s.events, "prune")
+	return nil, nil
+}
+
+func (s *fakeQueueScheduler) Start() error {
+	s.events = append(s.events, "start")
+	return nil
+}
+
+// **撤去は全ての登録の後に 1 回だけ (#3173)。** 途中で呼ぶと、まだ登録して
+// いない正当な cron を「登録されなかった」として消す。
+func TestRegisterSchedulerJobs_PrunesAfterEveryRegistration(t *testing.T) {
+	drv := newFakeQueueDriver()
+	s := &Server{queueScheduler: queue.NewScheduler(drv)}
+	s.registerSchedulerJobs()
+
+	ev := drv.scheduler.events
+	require.NotEmpty(t, ev)
+	prune := slices.Index(ev, "prune")
+	require.NotEqual(t, -1, prune, "PruneUnregistered が呼ばれていない")
+	assert.NotContains(t, ev[prune+1:], "register", "撤去の後に登録している")
+	assert.Equal(t, 1, strings.Count(strings.Join(ev, ","), "prune"))
+	assert.Equal(t, strings.Count(strings.Join(ev, ","), "register"), prune,
+		"全ての登録が撤去より前にあること")
 }
 
 // 配線が `def.Jobs != nil` を渡していること。**pluginQueue を直接組み立てる

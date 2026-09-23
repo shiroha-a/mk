@@ -839,6 +839,16 @@ func (s *Server) registerSchedulerJobs() {
 			slog.Warn("scheduler register failed", "job", j.name, "err", err)
 		}
 	}
+	// **登録しなかった cron を撤去する (#3173)。** プラグインの cron は router の
+	// 構築中 (setupPlugins) に登録済みなので、ここが全登録の後になる。登録先や
+	// 名前を変えた cron の旧スケジューラは、消さないと永久に発火し続ける。
+	removed, err := s.queueScheduler.PruneUnregistered()
+	for _, r := range removed {
+		slog.Info("scheduler: removed a schedule that is no longer registered", "schedule", r)
+	}
+	if err != nil {
+		slog.Warn("scheduler prune failed", "err", err)
+	}
 	if err := s.queueScheduler.Start(); err != nil {
 		slog.Warn("scheduler start failed", "err", err)
 	}
