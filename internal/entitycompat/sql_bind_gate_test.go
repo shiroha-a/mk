@@ -447,6 +447,8 @@ func TestSQLBindNoVerbInsideQuotedLiteral(t *testing.T) {
 // 正当に SQL を変えるときはここも直す。並びは無視して集合として比べる。
 var applyDeltasFormats = []string{
 	`"%s" = "%s" + ?`,
+	`"%s" = LEAST("%s"::bigint + ?, ?)`,
+	`"%s" = GREATEST("%s"::bigint + ?, ?)`,
 	`"%s" = ?`,
 	`"%s" = array_cat("%s", ?::varchar[])`,
 	`UPDATE "%s" SET %s WHERE "id" = ?`,

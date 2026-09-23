@@ -3,6 +3,7 @@ package chart
 import (
 	"context"
 	"errors"
+	"math"
 	"os"
 	"testing"
 	"time"
@@ -850,4 +851,44 @@ func TestIntegration_ChartEngine_GetChart_FindBeforeError(t *testing.T) {
 	out, err := c.GetChart(ctx, SpanHour, 5, nil, "")
 	require.NoError(t, err)
 	assert.Len(t, out["local.inc"], 5)
+}
+
+// **列の型の範囲で頭打ちにする (upstream 2026.9.1 #17931)。** 範囲を超える
+// 加算は UPDATE 全体を失敗させ、同じ行の他の列の記録まで落とす。smallint /
+// integer は上限・下限で止まり、代入 (cardinality や引き継ぎ) も丸める。
+func TestIntegration_GormRepository_ApplyDeltasClampsToColumnRange(t *testing.T) {
+	truncateChartTable(t, perUserIntegrationSchema.Name)
+	repo := NewRepository(testDB, perUserIntegrationSchema)
+	ctx := context.Background()
+
+	row, err := repo.Insert(ctx, SpanHour, "u1", 1000, map[string]any{"total": int64(0), "inc": int64(0)})
+	require.NoError(t, err)
+	get := func(name string) int64 {
+		t.Helper()
+		got, err := repo.FindCurrent(ctx, SpanHour, "u1", 1000)
+		require.NoError(t, err)
+		return toInt64(got.Cols[name])
+	}
+
+	// smallint: 上限で止まり、他の列の加算も失われない。
+	require.NoError(t, repo.SetColumns(ctx, SpanHour, row.ID, map[string]int64{"inc": 32760}))
+	require.NoError(t, repo.ApplyDeltas(ctx, SpanHour, row.ID, map[string]int64{"inc": 100, "dec": 3}, nil, nil))
+	assert.Equal(t, int64(math.MaxInt16), get("inc"))
+	assert.Equal(t, int64(3), get("dec"), "同じ UPDATE の他の列も書かれる")
+
+	// smallint: 下限で止まる。
+	require.NoError(t, repo.SetColumns(ctx, SpanHour, row.ID, map[string]int64{"inc": -32760}))
+	require.NoError(t, repo.ApplyDeltas(ctx, SpanHour, row.ID, map[string]int64{"inc": -100}, nil, nil))
+	assert.Equal(t, int64(math.MinInt16), get("inc"))
+
+	// integer: 上限で止まる。
+	require.NoError(t, repo.SetColumns(ctx, SpanHour, row.ID, map[string]int64{"total": math.MaxInt32 - 5}))
+	require.NoError(t, repo.ApplyDeltas(ctx, SpanHour, row.ID, map[string]int64{"total": 100}, nil, nil))
+	assert.Equal(t, int64(math.MaxInt32), get("total"))
+
+	// 代入も範囲に丸める (unique の cardinality / 引き継ぎのコピー)。
+	require.NoError(t, repo.ApplyDeltas(ctx, SpanHour, row.ID, nil, nil, map[string]int64{"inc": 40000}))
+	assert.Equal(t, int64(math.MaxInt16), get("inc"))
+	require.NoError(t, repo.SetColumns(ctx, SpanHour, row.ID, map[string]int64{"total": math.MaxInt32 + 10}))
+	assert.Equal(t, int64(math.MaxInt32), get("total"))
 }

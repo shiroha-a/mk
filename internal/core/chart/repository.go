@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -295,8 +296,22 @@ func (r *gormRepository) ApplyDeltas(ctx context.Context, span Span, id int64, d
 	args := make([]any, 0, len(deltas)+len(uniqueAppends)+len(setInts)+1)
 	for _, name := range sortedKeysInt64(deltas) {
 		col := toColumnName(name)
-		sets = append(sets, fmt.Sprintf(`"%s" = "%s" + ?`, col, col))
-		args = append(args, deltas[name])
+		d := deltas[name]
+		lo, hi, bounded := r.columnLimits(name)
+		switch {
+		case !bounded:
+			sets = append(sets, fmt.Sprintf(`"%s" = "%s" + ?`, col, col))
+			args = append(args, d)
+		case d >= 0:
+			// **列の型の範囲で頭打ちにする (upstream 2026.9.1 #17931)。** 範囲を
+			// 超えると UPDATE 全体が失敗し、同じ行の他の列の記録まで落ちる。
+			// 加算の途中で溢れないよう bigint に広げてから丸める。
+			sets = append(sets, fmt.Sprintf(`"%s" = LEAST("%s"::bigint + ?, ?)`, col, col))
+			args = append(args, d, hi)
+		default:
+			sets = append(sets, fmt.Sprintf(`"%s" = GREATEST("%s"::bigint + ?, ?)`, col, col))
+			args = append(args, d, lo)
+		}
 	}
 	for _, name := range sortedKeysStrings(uniqueAppends) {
 		col := toUniqueTempColumnName(name)
@@ -306,11 +321,39 @@ func (r *gormRepository) ApplyDeltas(ctx context.Context, span Span, id int64, d
 	for _, name := range sortedKeysInt64(setInts) {
 		col := toColumnName(name)
 		sets = append(sets, fmt.Sprintf(`"%s" = ?`, col))
-		args = append(args, setInts[name])
+		args = append(args, r.clampToColumn(name, setInts[name]))
 	}
 	args = append(args, id)
 	q := fmt.Sprintf(`UPDATE "%s" SET %s WHERE "id" = ?`, table, strings.Join(sets, ","))
 	return r.db.WithContext(ctx).Exec(q, args...).Error
+}
+
+// columnLimits returns the value range of the column's SQL type. bounded is
+// false for bigint columns (and unknown names), which are left unclamped
+// like upstream's `range: 'big'`.
+func (r *gormRepository) columnLimits(name string) (lo, hi int64, bounded bool) {
+	c, ok := r.schema.columnByName(name)
+	if !ok {
+		return 0, 0, false
+	}
+	switch c.Range {
+	case RangeSmall:
+		return math.MinInt16, math.MaxInt16, true
+	case RangeMedium:
+		return math.MinInt32, math.MaxInt32, true
+	default:
+		return 0, 0, false
+	}
+}
+
+// clampToColumn clamps a value written as-is (unique cardinality,
+// accumulated copies) into the column's range, as upstream does.
+func (r *gormRepository) clampToColumn(name string, v int64) int64 {
+	lo, hi, bounded := r.columnLimits(name)
+	if !bounded {
+		return v
+	}
+	return min(max(v, lo), hi)
 }
 
 func (r *gormRepository) SetColumns(ctx context.Context, span Span, id int64, cols map[string]int64) error {
@@ -322,7 +365,7 @@ func (r *gormRepository) SetColumns(ctx context.Context, span Span, id int64, co
 	args := make([]any, 0, len(cols)+1)
 	for _, name := range sortedKeysInt64(cols) {
 		sets = append(sets, fmt.Sprintf(`"%s" = ?`, toColumnName(name)))
-		args = append(args, cols[name])
+		args = append(args, r.clampToColumn(name, cols[name]))
 	}
 	args = append(args, id)
 	q := fmt.Sprintf(`UPDATE "%s" SET %s WHERE "id" = ?`, table, strings.Join(sets, ","))
