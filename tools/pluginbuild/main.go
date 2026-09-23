@@ -101,16 +101,27 @@ func (in include) covers(rel string) bool {
 }
 
 func main() {
-	root := flag.String("root", ".", "リポジトリのルート")
-	dir := flag.String("dir", "plugins", "プラグインを探すディレクトリ")
-	includeDisabled := flag.Bool("include-disabled", false, "disabled: true のプラグインも含める (CI がサンプルを検証するための経路)")
-	includeDisabledDir := flag.String("include-disabled-dir", "", "このディレクトリのプラグインだけは disabled でも含める (plugin-dev が監視対象を動かすための経路)")
-	flag.Parse()
-
-	if err := run(*root, *dir, include{all: *includeDisabled, dir: *includeDisabledDir}); err != nil {
+	root, dir, inc := parseArgs(os.Args[1:])
+	if err := run(root, dir, inc); err != nil {
 		fmt.Fprintln(os.Stderr, "pluginbuild:", err)
 		os.Exit(1)
 	}
+}
+
+// parseArgs parses the command-line flags. Invalid flags and -h exit the
+// process, as the default flag.CommandLine does.
+//
+// main から切り出してあるのはテストのため。main はテストから呼べないので、
+// Go 1.27 でカバレッジのブロックが細かく数えられるようになると、小さい
+// このパッケージでは main だけで閾値 (90%) を割った。
+func parseArgs(args []string) (root, dir string, inc include) {
+	fs := flag.NewFlagSet("pluginbuild", flag.ExitOnError)
+	rootFlag := fs.String("root", ".", "リポジトリのルート")
+	dirFlag := fs.String("dir", "plugins", "プラグインを探すディレクトリ")
+	includeDisabled := fs.Bool("include-disabled", false, "disabled: true のプラグインも含める (CI がサンプルを検証するための経路)")
+	includeDisabledDir := fs.String("include-disabled-dir", "", "このディレクトリのプラグインだけは disabled でも含める (plugin-dev が監視対象を動かすための経路)")
+	_ = fs.Parse(args) // ExitOnError なので失敗時は Parse の中で終了する
+	return *rootFlag, *dirFlag, include{all: *includeDisabled, dir: *includeDisabledDir}
 }
 
 func run(root, pluginDir string, inc include) error {

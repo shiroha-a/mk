@@ -14,6 +14,24 @@ import (
 	"github.com/shiroha-a/mk/plugin"
 )
 
+func TestParseArgs(t *testing.T) {
+	t.Run("defaults", func(t *testing.T) {
+		root, dir, inc := parseArgs(nil)
+		assert.Equal(t, ".", root)
+		assert.Equal(t, "plugins", dir)
+		assert.Equal(t, include{}, inc)
+	})
+
+	t.Run("all flags", func(t *testing.T) {
+		root, dir, inc := parseArgs([]string{
+			"-root", "/repo", "-dir", "extra", "-include-disabled", "-include-disabled-dir", "plugins/x",
+		})
+		assert.Equal(t, "/repo", root)
+		assert.Equal(t, "extra", dir)
+		assert.Equal(t, include{all: true, dir: "plugins/x"}, inc)
+	})
+}
+
 // writePlugin lays down a plugin directory under root.
 func writePlugin(t *testing.T, root, name, modulePath, marker string) string {
 	t.Helper()
