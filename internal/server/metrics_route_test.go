@@ -103,6 +103,9 @@ func (i *fakeMetricsInspector) ListScheduledTasks(qname string, page, pageSize i
 func (i *fakeMetricsInspector) ListRetryTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }
+func (i *fakeMetricsInspector) ListDelayedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
 func (i *fakeMetricsInspector) GetTaskInfo(qname, taskID string) (*driver.TaskSummary, error) {
 	return nil, nil
 }

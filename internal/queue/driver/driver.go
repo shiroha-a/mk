@@ -164,6 +164,14 @@ type Inspector interface {
 	ListActiveTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 	ListScheduledTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 	ListRetryTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
+	// ListDelayedTasks returns the whole delayed bucket (scheduled and
+	// retry-backoff jobs together), latest fire time first.
+	//
+	// upstream の admin/queue/jobs は Bull の state 名 `delayed` を受け取り、
+	// delayed ZSET を新しい順に返す。Scheduled / Retry を後から混ぜると、retry で
+	// delayed に戻った job の予定時刻 (ZSET の score) を HASH から復元できず、
+	// 並びが崩れる (#3167)。
+	ListDelayedTasks(qname string, page, pageSize int) ([]*TaskSummary, error)
 	// ListCompletedTasks / ListFailedTasks return finished jobs retained in
 	// the completed / failed buckets. Drivers without finished-job retention
 	// return an empty slice.

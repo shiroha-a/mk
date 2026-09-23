@@ -120,6 +120,11 @@ func (a *queueInspectorAdapter) ListRetryTasks(qname string, page, pageSize int)
 	return taskSummariesToAdmin(rows), err
 }
 
+func (a *queueInspectorAdapter) ListDelayedTasks(qname string, page, pageSize int) ([]*apiadmin.QueueTaskSummary, error) {
+	rows, err := a.inner.ListDelayedTasks(qname, page, pageSize)
+	return taskSummariesToAdmin(rows), err
+}
+
 func (a *queueInspectorAdapter) GetTaskInfo(qname, taskID string) (*apiadmin.QueueTaskSummary, error) {
 	t, err := a.inner.GetTaskInfo(qname, taskID)
 	if err != nil {

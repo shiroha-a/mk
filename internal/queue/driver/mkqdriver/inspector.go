@@ -322,6 +322,12 @@ func (i *Inspector) ListFailedTasks(qname string, page, pageSize int) ([]*driver
 	return i.list(qname, mkq.JobBucketFailed, page, pageSize)
 }
 
+// ListDelayedTasks returns up to pageSize entries of the whole delayed
+// bucket (scheduled + retry-backoff), latest fire time first.
+func (i *Inspector) ListDelayedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return i.list(qname, mkq.JobBucketDelayed, page, pageSize)
+}
+
 // ListScheduledTasks returns up to pageSize tasks scheduled for first-time
 // processing (= delayed bucket entries with `atm == 0`). cron / 初回
 // delayed enqueue 等が含まれる。retry-backoff 待ち (= `atm > 0`) は
@@ -354,7 +360,8 @@ func (i *Inspector) listDelayedFiltered(qname string, retry bool, page, pageSize
 	if pageSize <= 0 || pageSize > 100 {
 		pageSize = 30
 	}
-	listed, err := q.ListJobs(inspectorCtx(), mkq.JobBucketDelayed, 0, -1, true)
+	// 新しい順 (発火予定が遅い順) で取る。list と揃える (#3167)。
+	listed, err := q.ListJobs(inspectorCtx(), mkq.JobBucketDelayed, 0, -1, false)
 	if err != nil {
 		return nil, fmt.Errorf("mkqdriver: list delayed %s: %w", qname, err)
 	}
@@ -428,7 +435,7 @@ func deriveJobState(st *mkq.JobState) string {
 
 // list normalises mkq.ListJobs inputs (1-indexed page/pageSize) into
 // 0-indexed [start, end] zranges and decodes the resulting jobs into
-// driver.TaskSummary slices.
+// driver.TaskSummary slices, newest first (BullMQ getJobs with asc=false).
 func (i *Inspector) list(qname string, bucket mkq.JobBucket, page, pageSize int) ([]*driver.TaskSummary, error) {
 	q := i.driver.queueFor(qname)
 	if q == nil {
@@ -443,7 +450,14 @@ func (i *Inspector) list(qname string, bucket mkq.JobBucket, page, pageSize int)
 	start := int64((page - 1) * pageSize)
 	end := start + int64(pageSize) - 1
 
-	jobs, err := q.ListJobs(inspectorCtx(), bucket, start, end, true)
+	// **新しい順で取る (#3167)。** upstream の admin/queue/jobs は
+	// `queue.getJobs(types, 0, 100)` で asc=false (新しい順)。古い順だと、
+	// 完了済みが数万件溜まったキューで何か月も前の job しか見えない。
+	// 予約投稿の取り消し (`ClearScheduledNote`) は全ページを走査するので並びに
+	// 依存しない。**admin の clear / promote は先頭ページ (100 件) しか見ない**ので
+	// 依存する — clear は先頭ページが保護対象 (予約投稿) で埋まると打ち切り、
+	// promote はどの 100 件を促進するかがこの並びで決まる。
+	jobs, err := q.ListJobs(inspectorCtx(), bucket, start, end, false)
 	if err != nil {
 		return nil, fmt.Errorf("mkqdriver: list %s/%s: %w", qname, bucket, err)
 	}

@@ -138,6 +138,9 @@ func (i *scriptableInspector) ListScheduledTasks(qname string, page, pageSize in
 func (i *scriptableInspector) ListRetryTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
 	return nil, nil
 }
+func (i *scriptableInspector) ListDelayedTasks(qname string, page, pageSize int) ([]*driver.TaskSummary, error) {
+	return nil, nil
+}
 func (i *scriptableInspector) GetTaskInfo(qname, taskID string) (*driver.TaskSummary, error) {
 	return nil, nil
 }

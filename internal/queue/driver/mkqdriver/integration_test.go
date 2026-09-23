@@ -1685,6 +1685,60 @@ func TestDispatchableCount_MatchesQueueInfo(t *testing.T) {
 	assert.Equal(t, info.Pending, n, "DispatchableCount が GetQueueInfo.Pending とずれている")
 }
 
+// **一覧は新しい順で返す (#3167)。** upstream の admin/queue/jobs は
+// `queue.getJobs(types, 0, 100)` (asc=false) なので、wait は最後に積んだもの、
+// delayed は発火予定が遅いものが先頭に来る。古い順だと、完了済みが数万件
+// 溜まったキューで何か月も前の job しか見えなかった。
+func TestInspectorLists_NewestFirst(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+	ctx := context.Background()
+	ins := d.Inspector()
+
+	types := func(rows []*driver.TaskSummary) []string {
+		out := make([]string, 0, len(rows))
+		for _, r := range rows {
+			out = append(out, r.Type)
+		}
+		return out
+	}
+
+	// worker を起動していないので wait に積まれたまま残る。
+	for _, typ := range []string{"w1", "w2", "w3"} {
+		require.NoError(t, d.Client().Enqueue(ctx, typ, []byte(`{}`), driver.WithQueue("deliver")))
+	}
+	pending, err := ins.ListPendingTasks("deliver", 1, 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"w3", "w2", "w1"}, types(pending), "wait は最後に積んだものが先頭")
+
+	// 積んだ順と発火予定の順をずらす。
+	for _, j := range []struct {
+		typ string
+		in  time.Duration
+	}{{"d2", 2 * time.Hour}, {"d3", 3 * time.Hour}, {"d1", time.Hour}} {
+		require.NoError(t, d.Client().Enqueue(ctx, j.typ, []byte(`{}`),
+			driver.WithQueue("deliver"), driver.WithProcessIn(j.in)))
+	}
+	delayed, err := ins.ListDelayedTasks("deliver", 1, 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"d3", "d2", "d1"}, types(delayed), "delayed は発火予定が遅いものが先頭")
+
+	scheduled, err := ins.ListScheduledTasks("deliver", 1, 10)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"d3", "d2", "d1"}, types(scheduled), "Scheduled も同じ並び")
+
+	// page は新しい側から切る。
+	page2, err := ins.ListDelayedTasks("deliver", 2, 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"d1"}, types(page2))
+}
+
 // **pause 中は 0 を返す (#3166)。** BullMQ 6 では pause してもジョブは wait に
 // 残るので、Pending には backlog が見えたままになる。オートスケーラがそれを
 // 深さと読むと、ジョブを取れないキューの worker を最大数まで増やす。

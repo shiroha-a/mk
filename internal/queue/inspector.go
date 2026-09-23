@@ -105,6 +105,12 @@ func (i *Inspector) ListRetryTasks(qname string, page, pageSize int) ([]*TaskSum
 	return i.inner.ListRetryTasks(qname, page, pageSize)
 }
 
+// ListDelayedTasks returns up to pageSize entries of the whole delayed
+// bucket, latest fire time first.
+func (i *Inspector) ListDelayedTasks(qname string, page, pageSize int) ([]*TaskSummary, error) {
+	return i.inner.ListDelayedTasks(qname, page, pageSize)
+}
+
 // GetTaskInfo returns full info for a single task.
 func (i *Inspector) GetTaskInfo(qname, taskID string) (*TaskSummary, error) {
 	return i.inner.GetTaskInfo(qname, taskID)

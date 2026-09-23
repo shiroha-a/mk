@@ -627,6 +627,8 @@ type QueueInspector interface {
 	ListActiveTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListScheduledTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListRetryTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
+	// ListDelayedTasks は delayed バケット全体 (scheduled + retry) を新しい順に返す (#3167)。
+	ListDelayedTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListCompletedTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	ListFailedTasks(qname string, page, pageSize int) ([]*QueueTaskSummary, error)
 	GetTaskInfo(qname, taskID string) (*QueueTaskSummary, error)

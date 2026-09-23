@@ -52,6 +52,13 @@ func (i *bucketInspector) ListRetryTasks(_ string, page, _ int) ([]*driver.TaskS
 	return i.retry, nil
 }
 
+func (i *bucketInspector) ListDelayedTasks(_ string, page, _ int) ([]*driver.TaskSummary, error) {
+	if page > 1 {
+		return nil, nil
+	}
+	return append(append([]*driver.TaskSummary{}, i.scheduled...), i.retry...), nil
+}
+
 func (i *bucketInspector) DeleteTask(_ string, taskID string) error {
 	i.deleted = append(i.deleted, taskID)
 	return nil

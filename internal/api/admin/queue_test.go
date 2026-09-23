@@ -159,6 +159,11 @@ func (s *stubQueueInspector) ListScheduledTasks(q string, _, _ int) ([]*apiadmin
 func (s *stubQueueInspector) ListRetryTasks(q string, _, _ int) ([]*apiadmin.QueueTaskSummary, error) {
 	return s.retry[q], nil
 }
+
+// ListDelayedTasks は delayed バケット全体 = scheduled + retry を返す。
+func (s *stubQueueInspector) ListDelayedTasks(q string, _, _ int) ([]*apiadmin.QueueTaskSummary, error) {
+	return append(append([]*apiadmin.QueueTaskSummary{}, s.scheduled[q]...), s.retry[q]...), nil
+}
 func (s *stubQueueInspector) ListCompletedTasks(q string, _, _ int) ([]*apiadmin.QueueTaskSummary, error) {
 	return s.completed[q], nil
 }
@@ -699,6 +704,91 @@ func TestQueueJobs_SingleQueueCappedAtLimit(t *testing.T) {
 	var rows []map[string]any
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rows))
 	assert.Len(t, rows, 2, "single-queue output must respect limit")
+}
+
+// pagingQueueInspector serves completed / failed / delayed with real
+// 1-indexed paging, newest first as the driver returns them.
+type pagingQueueInspector struct {
+	*stubQueueInspector
+	completed, failed, delayed []*apiadmin.QueueTaskSummary
+}
+
+func pageOf(rows []*apiadmin.QueueTaskSummary, page, size int) []*apiadmin.QueueTaskSummary {
+	start := (page - 1) * size
+	if start >= len(rows) {
+		return nil
+	}
+	// コピーして返す。呼び出し側がループ中に削除すると、別名のままでは要素がずれる。
+	return append([]*apiadmin.QueueTaskSummary(nil), rows[start:min(start+size, len(rows))]...)
+}
+
+func (p *pagingQueueInspector) ListCompletedTasks(_ string, page, size int) ([]*apiadmin.QueueTaskSummary, error) {
+	return pageOf(p.completed, page, size), nil
+}
+func (p *pagingQueueInspector) ListFailedTasks(_ string, page, size int) ([]*apiadmin.QueueTaskSummary, error) {
+	return pageOf(p.failed, page, size), nil
+}
+func (p *pagingQueueInspector) ListDelayedTasks(_ string, page, size int) ([]*apiadmin.QueueTaskSummary, error) {
+	return pageOf(p.delayed, page, size), nil
+}
+
+func summaries(prefix string, n int) []*apiadmin.QueueTaskSummary {
+	out := make([]*apiadmin.QueueTaskSummary, 0, n)
+	for i := range n {
+		out = append(out, &apiadmin.QueueTaskSummary{ID: prefix + strconv.Itoa(i), Queue: "deliver"})
+	}
+	return out
+}
+
+func jobIDs(t *testing.T, body []byte) []string {
+	t.Helper()
+	var rows []map[string]any
+	require.NoError(t, json.Unmarshal(body, &rows))
+	ids := make([]string, 0, len(rows))
+	for _, r := range rows {
+		ids = append(ids, r["id"].(string))
+	}
+	return ids
+}
+
+// **limit 未指定なら upstream と同じ形で返す (#3167)。** upstream は
+// `getJobs(types, 0, 100)` = state ごとに新しい順で最大 101 件を、state の指定順に
+// 連結する。以前は既定の 30 件が合計に効き、「すべて」タブ (completed が先頭) が
+// 完了済みだけで埋まって失敗が 1 件も見えなかった。
+func TestQueueJobs_NoLimitReturnsPerStateLikeUpstream(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	h.SetQueueInspector(&pagingQueueInspector{
+		stubQueueInspector: &stubQueueInspector{},
+		completed:          summaries("c", 150),
+		failed:             summaries("f", 5),
+	})
+
+	rec := doPost(h.QueueJobs, `{"queue":"deliver","state":["completed","failed"]}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	ids := jobIDs(t, rec.Body.Bytes())
+
+	require.Len(t, ids, 101+5, "state ごとに最大 101 件 (合計では切らない)")
+	assert.Equal(t, "c0", ids[0], "driver が返した順 (新しい順) を保つ")
+	assert.Equal(t, "c100", ids[100], "101 件目まで取る (end を含む)")
+	assert.Equal(t, []string{"f0", "f1", "f2", "f3", "f4"}, ids[101:], "後ろの state も欠けない")
+}
+
+// delayed は Scheduled / Retry を後から混ぜず、バケット全体の並びをそのまま使う。
+func TestQueueJobs_DelayedUsesWholeBucket(t *testing.T) {
+	h, _, _, _ := newTestHandler(t)
+	stub := &stubQueueInspector{
+		scheduled: map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "s0"}}},
+		retry:     map[string][]*apiadmin.QueueTaskSummary{"deliver": {{ID: "r0"}}},
+	}
+	h.SetQueueInspector(&pagingQueueInspector{
+		stubQueueInspector: stub,
+		// retry で delayed に戻った job の方が発火予定が遅い、という並び。
+		delayed: []*apiadmin.QueueTaskSummary{{ID: "r0"}, {ID: "s0"}},
+	})
+
+	rec := doPost(h.QueueJobs, `{"queue":"deliver","state":["delayed"]}`, adminUser)
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"r0", "s0"}, jobIDs(t, rec.Body.Bytes()))
 }
 
 // --- thin nil-inspector smoke tests ---

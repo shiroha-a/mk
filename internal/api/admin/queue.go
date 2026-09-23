@@ -347,18 +347,25 @@ func (h *Handler) QueueJobs(c echo.Context) error {
 	if h.queueInspector == nil {
 		return c.JSON(http.StatusOK, []any{})
 	}
-	if req.Limit <= 0 || req.Limit > 100 {
-		req.Limit = 30
-	}
-	if req.Page < 1 {
-		req.Page = 1
-	}
 	states := parseStateField(req.State)
 	terms := searchTerms(req.Search)
 	if len(terms) > 0 {
 		// upstream queueGetJobs の search 経路は paramDef に limit/page を持たず、
 		// 1000 件取得→filter→最大 100 件返す。専用ページング経路に委譲する。
 		return c.JSON(http.StatusOK, h.searchQueueJobs(req.Queue, states, terms))
+	}
+	// **limit / page は mk-go の拡張で、upstream の paramDef には無い。** 同梱
+	// フロントは渡さないので、未指定のときは upstream と同じ形で返す (#3167)。
+	// 以前は既定の 30 件が全 state 合計に効き、state を順に詰めるので「すべて」
+	// タブが完了済みだけで埋まって失敗が 1 件も見えなかった。
+	if req.Limit == 0 && req.Page == 0 {
+		return c.JSON(http.StatusOK, h.upstreamQueueJobs(req.Queue, states))
+	}
+	if req.Limit <= 0 || req.Limit > 100 {
+		req.Limit = 30
+	}
+	if req.Page < 1 {
+		req.Page = 1
 	}
 
 	seen := make(map[string]struct{}, req.Limit)
@@ -385,6 +392,47 @@ outer:
 	return c.JSON(http.StatusOK, out)
 }
 
+// upstreamPerStateLimit is how many jobs upstream returns per state:
+// `queue.getJobs(types, 0, 100)` is end-inclusive, so up to 101.
+const upstreamPerStateLimit = 101
+
+// upstreamQueueJobs reproduces upstream queueGetJobs の search 無し経路。
+// BullMQ の getJobs は state ごとに新しい順で [0, 100] を取り、state の指定順に
+// 連結して ID で重複を除く。**合計では切らない** — 切ると先頭の state だけで
+// 埋まり、後ろの state (「すべて」タブの failed など) が見えなくなる。
+func (h *Handler) upstreamQueueJobs(queue string, states []string) []map[string]any {
+	seen := make(map[string]struct{})
+	out := make([]map[string]any, 0)
+	for _, state := range states {
+		for _, t := range h.listTasksUpTo(queue, state, upstreamPerStateLimit) {
+			if _, dup := seen[t.ID]; dup {
+				continue
+			}
+			seen[t.ID] = struct{}{}
+			out = append(out, packTaskSummary(t))
+		}
+	}
+	return out
+}
+
+// listTasksUpTo collects up to n tasks of one state, newest first, paging
+// past the driver's page size cap (100).
+func (h *Handler) listTasksUpTo(queue, state string, n int) []*QueueTaskSummary {
+	const pageSize = 100 // driver の page size 上限
+	out := make([]*QueueTaskSummary, 0, min(n, pageSize))
+	for page := 1; len(out) < n; page++ {
+		rows, err := h.listTasksForState(queue, state, page, pageSize)
+		if err != nil || len(rows) == 0 {
+			break
+		}
+		out = append(out, rows[:min(len(rows), n-len(out))]...)
+		if len(rows) < pageSize {
+			break
+		}
+	}
+	return out
+}
+
 // searchQueueJobs reproduces upstream queueGetJobs の search 経路。各 state を
 // 100 件 (driver の page size 上限) ずつ最大 searchMaxPages ページ取得して候補
 // プールを ~1000 件まで広げ、JSON 表現に全 term を含む job だけを最大
@@ -392,33 +440,24 @@ outer:
 // 単一呼び出しでなくページングで候補を集める。
 func (h *Handler) searchQueueJobs(queue string, states, terms []string) []map[string]any {
 	const searchReturnLimit = 100 // upstream RETURN_LIMIT
-	const searchPageSize = 100    // driver の page size 上限
-	const searchMaxPages = 10     // upstream getJobs(0, 1000) 相当の候補プール
+	// upstream は getJobs(types, 0, 1000) = state ごとに新しい順で最大 1001 件
+	const searchPoolPerState = 1001
 	seen := make(map[string]struct{}, searchReturnLimit)
 	out := make([]map[string]any, 0, searchReturnLimit)
 	for _, state := range states {
-		for page := 1; page <= searchMaxPages; page++ {
-			rows, err := h.listTasksForState(queue, state, page, searchPageSize)
-			if err != nil || len(rows) == 0 {
-				break
+		for _, t := range h.listTasksUpTo(queue, state, searchPoolPerState) {
+			if len(out) >= searchReturnLimit {
+				return out
 			}
-			for _, t := range rows {
-				if len(out) >= searchReturnLimit {
-					return out
-				}
-				if _, dup := seen[t.ID]; dup {
-					continue
-				}
-				packed := packTaskSummary(t)
-				if !jobMatchesSearch(packed, terms) {
-					continue
-				}
-				seen[t.ID] = struct{}{}
-				out = append(out, packed)
+			if _, dup := seen[t.ID]; dup {
+				continue
 			}
-			if len(rows) < searchPageSize {
-				break
+			packed := packTaskSummary(t)
+			if !jobMatchesSearch(packed, terms) {
+				continue
 			}
+			seen[t.ID] = struct{}{}
+			out = append(out, packed)
 		}
 	}
 	return out
@@ -482,9 +521,9 @@ func (h *Handler) listTasksForState(queue, state string, page, limit int) ([]*Qu
 		return h.queueInspector.ListPendingTasks(queue, page, limit)
 	case "delayed":
 		// delayed は Bull 用語で driver の scheduled + retry に対応する。
-		sched, _ := h.queueInspector.ListScheduledTasks(queue, page, limit)
-		retry, _ := h.queueInspector.ListRetryTasks(queue, page, limit)
-		return append(sched, retry...), nil
+		// **2 つを後から混ぜない (#3167)。** 別々に page を取って連結すると
+		// 1 ページが最大 2 倍になり、並びも delayed 全体の新しい順にならない。
+		return h.queueInspector.ListDelayedTasks(queue, page, limit)
 	case "completed":
 		// mkq は WithKeepCompleted retention で完了ジョブを保持する。frontend
 		// の All / Latest / Completed タブはこれを引く (#1396)。
