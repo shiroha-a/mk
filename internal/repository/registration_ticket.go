@@ -39,6 +39,14 @@ type RegistrationTicketRepository interface {
 	// Signup 直接 path (handler が PromotePending 経由ではなく Signup を呼ぶ
 	// 経路) で使う best-effort path。
 	MarkUsed(ticketID, userID string) error
+	// ClaimForSignup atomically reserves an unused ticket for a signup by
+	// setting usedAt, and reports whether this call got it. With
+	// emailRequired, a ticket whose confirmation mail was sent more than
+	// SignupConfirmationResendWindow ago can be claimed again.
+	ClaimForSignup(ticketID string, emailRequired bool) (bool, error)
+	// ReleaseClaim undoes ClaimForSignup when the signup failed. A ticket
+	// already bound to an account (usedById set) is left alone.
+	ReleaseClaim(ticketID string) error
 	// MarkUsedTx records ticket consumption inside the given transaction.
 	// PromotePending tx 経路で SELECT FOR UPDATE ロック中に使うので、
 	// commit までロックを保持して race を完全に閉じる。
@@ -113,6 +121,39 @@ func (r *registrationTicketRepository) FindByIDForUpdateTx(tx *gorm.DB, id strin
 
 func (r *registrationTicketRepository) MarkUsed(ticketID, userID string) error {
 	return r.markUsedOn(r.db, ticketID, userID)
+}
+
+// SignupConfirmationResendWindow is how long an email-confirmation signup
+// holds its invitation ticket before the code can be used again.
+const SignupConfirmationResendWindow = 30 * time.Minute
+
+// ClaimForSignup reserves the ticket with a conditional UPDATE.
+//
+// **検証 (FindByCode) と消費の間を詰める。** 読んでから作る形だと、同じコードで
+// 並行に来たリクエストが全部検証を通り、1 枚の招待コードで複数のアカウントが
+// できる。作成の前にこの条件付き UPDATE で先に確保し、影響行数で 1 件だけを
+// 通す (upstream SignupApiService の claimRegistrationTicket と同じ条件)。
+func (r *registrationTicketRepository) ClaimForSignup(ticketID string, emailRequired bool) (bool, error) {
+	now := time.Now()
+	q := r.db.Model(&model.RegistrationTicket{}).Where(`"id" = ? AND "usedById" IS NULL`, ticketID)
+	if emailRequired {
+		q = q.Where(`("usedAt" IS NULL OR "usedAt" <= ?)`, now.Add(-SignupConfirmationResendWindow))
+	} else {
+		q = q.Where(`"usedAt" IS NULL`)
+	}
+	res := q.Update("usedAt", now)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
+}
+
+// ReleaseClaim clears the reservation made by ClaimForSignup unless the
+// ticket is already bound to an account.
+func (r *registrationTicketRepository) ReleaseClaim(ticketID string) error {
+	return r.db.Model(&model.RegistrationTicket{}).
+		Where(`"id" = ? AND "usedById" IS NULL`, ticketID).
+		Updates(map[string]any{"usedAt": nil, "pendingUserId": nil}).Error
 }
 
 func (r *registrationTicketRepository) MarkUsedTx(tx *gorm.DB, ticketID, userID string) error {

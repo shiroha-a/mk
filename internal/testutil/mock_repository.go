@@ -8960,6 +8960,31 @@ func (m *MockRegistrationTicketRepository) MarkUsed(ticketID, userID string) err
 	return nil
 }
 
+// ClaimForSignup mirrors the real conditional UPDATE in memory.
+func (m *MockRegistrationTicketRepository) ClaimForSignup(ticketID string, emailRequired bool) (bool, error) {
+	t, ok := m.Tickets[ticketID]
+	if !ok || t.UsedByID != nil {
+		return false, nil
+	}
+	now := time.Now()
+	if t.UsedAt != nil && (!emailRequired || t.UsedAt.After(now.Add(-30*time.Minute))) {
+		return false, nil
+	}
+	t.UsedAt = &now
+	return true, nil
+}
+
+// ReleaseClaim mirrors the real conditional UPDATE in memory.
+func (m *MockRegistrationTicketRepository) ReleaseClaim(ticketID string) error {
+	t, ok := m.Tickets[ticketID]
+	if !ok || t.UsedByID != nil {
+		return nil
+	}
+	t.UsedAt = nil
+	t.PendingID = nil
+	return nil
+}
+
 func (m *MockRegistrationTicketRepository) MarkUsedTx(_ *gorm.DB, ticketID, userID string) error {
 	return m.MarkUsed(ticketID, userID)
 }

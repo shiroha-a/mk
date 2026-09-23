@@ -97,6 +97,10 @@ func (s *stubTicketStore) MarkUsed(ticketID, userID string) error {
 	return nil
 }
 
+func (s *stubTicketStore) ClaimForSignup(string, bool) (bool, error) { return true, nil }
+
+func (s *stubTicketStore) ReleaseClaim(string) error { return nil }
+
 func (s *stubTicketStore) MarkPending(ticketID, pendingID string) error {
 	s.pendingTkt, s.pendingRow = ticketID, pendingID
 	return s.markPendingErr

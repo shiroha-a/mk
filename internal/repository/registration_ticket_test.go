@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -358,4 +360,79 @@ func TestRegistrationTicketRepository_MarkPending(t *testing.T) {
 	require.NotNil(t, got.PendingID)
 	assert.Equal(t, "pending_xyz", *got.PendingID)
 	assert.Nil(t, got.UsedByID, "MarkPending は usedById を立てない")
+}
+
+// **同じコードで並行に確保しても 1 件だけが取れる。** 検証 (読み取り) と消費の間に
+// 隙間があると 1 枚の招待コードで複数のアカウントができる。条件付き UPDATE の
+// 影響行数で 1 件だけを通すことを、実 DB に並行で投げて確かめる。
+func TestRegistrationTicketRepository_ClaimForSignup_OnlyOneWins(t *testing.T) {
+	repo := NewRegistrationTicketRepository(testDB)
+	cleanupInvite(t, "rt_claim")
+	defer cleanupInvite(t, "rt_claim")
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_claim", Code: "rtclaim_code"}))
+
+	const n = 10
+	var wg sync.WaitGroup
+	var wins atomic.Int32
+	start := make(chan struct{})
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ok, err := repo.ClaimForSignup("rt_claim", false)
+			assert.NoError(t, err)
+			if ok {
+				wins.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	assert.Equal(t, int32(1), wins.Load())
+}
+
+func TestRegistrationTicketRepository_ClaimAndRelease(t *testing.T) {
+	repo := NewRegistrationTicketRepository(testDB)
+	cleanupInvite(t, "rt_claim2")
+	defer cleanupInvite(t, "rt_claim2")
+	require.NoError(t, repo.Create(&model.RegistrationTicket{ID: "rt_claim2", Code: "rtclaim2_code"}))
+
+	ok, err := repo.ClaimForSignup("rt_claim2", false)
+	require.NoError(t, err)
+	require.True(t, ok)
+	ok, err = repo.ClaimForSignup("rt_claim2", false)
+	require.NoError(t, err)
+	assert.False(t, ok, "確保済みは取れない")
+
+	// 失敗した登録の後に戻すと、また取れる。
+	require.NoError(t, repo.ReleaseClaim("rt_claim2"))
+	ok, err = repo.ClaimForSignup("rt_claim2", false)
+	require.NoError(t, err)
+	assert.True(t, ok)
+
+	// メール確認制: 確認メールから 30 分を過ぎた確保は取り直せる。
+	past := time.Now().Add(-SignupConfirmationResendWindow - time.Minute)
+	require.NoError(t, testDB.Exec(`UPDATE "registration_ticket" SET "usedAt" = ? WHERE id = ?`, past, "rt_claim2").Error)
+	ok, err = repo.ClaimForSignup("rt_claim2", false)
+	require.NoError(t, err)
+	assert.False(t, ok, "メール確認制でなければ期限切れの確保も取れない")
+	ok, err = repo.ClaimForSignup("rt_claim2", true)
+	require.NoError(t, err)
+	assert.True(t, ok)
+	ok, err = repo.ClaimForSignup("rt_claim2", true)
+	require.NoError(t, err)
+	assert.False(t, ok, "30 分以内の確保は取れない")
+
+	// アカウントに紐付いたら、戻しても未使用に戻らない。
+	createTestUser(t, "rt_claim2_user")
+	defer testDB.Exec(`DELETE FROM "user" WHERE id = ?`, "rt_claim2_user")
+	require.NoError(t, repo.MarkUsed("rt_claim2", "rt_claim2_user"))
+	require.NoError(t, repo.ReleaseClaim("rt_claim2"))
+	got, err := repo.FindByCode("rtclaim2_code")
+	require.NoError(t, err)
+	assert.NotNil(t, got.UsedAt)
+	ok, err = repo.ClaimForSignup("rt_claim2", true)
+	require.NoError(t, err)
+	assert.False(t, ok)
 }

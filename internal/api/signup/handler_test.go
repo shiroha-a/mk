@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,6 +32,9 @@ type mockTicketStore struct {
 	markUsed    map[string]string                    // ticketID → userID
 	markPending map[string]string                    // ticketID → pendingID
 	markErr     error
+	// claimLost は「並行した別のリクエストが先に確保した」状態を再現する。
+	claimLost bool
+	released  []string
 }
 
 func newMockTicketStore() *mockTicketStore {
@@ -54,6 +58,36 @@ func (m *mockTicketStore) MarkUsed(ticketID, userID string) error {
 		return m.markErr
 	}
 	m.markUsed[ticketID] = userID
+	return nil
+}
+
+// ClaimForSignup mirrors the repository's conditional UPDATE in memory.
+func (m *mockTicketStore) ClaimForSignup(ticketID string, emailRequired bool) (bool, error) {
+	if m.claimLost {
+		return false, nil
+	}
+	for _, t := range m.tickets {
+		if t.ID != ticketID {
+			continue
+		}
+		now := time.Now()
+		if t.UsedByID != nil || (t.UsedAt != nil && (!emailRequired || t.UsedAt.After(now.Add(-30*time.Minute)))) {
+			return false, nil
+		}
+		t.UsedAt = &now
+		return true, nil
+	}
+	return false, nil
+}
+
+func (m *mockTicketStore) ReleaseClaim(ticketID string) error {
+	m.released = append(m.released, ticketID)
+	for _, t := range m.tickets {
+		if t.ID == ticketID && t.UsedByID == nil {
+			t.UsedAt = nil
+			t.PendingID = nil
+		}
+	}
 	return nil
 }
 
@@ -594,6 +628,48 @@ func TestSignup_RegistrationDisabled_ExpiredCode(t *testing.T) {
 
 	rec := doPost(h.Signup, `{"username":"alice","password":"pass","invitationCode":"expired-code"}`)
 	assert.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+// **検証を通っても、作成の直前に確保できなければ弾く。** 並行した別の
+// リクエストが同じコードを先に確保した状態 (検証は両方とも通っている)。
+func TestSignup_RegistrationDisabled_ClaimLostIsRejected(t *testing.T) {
+	for _, emailRequired := range []bool{false, true} {
+		t.Run(fmt.Sprintf("emailRequired=%v", emailRequired), func(t *testing.T) {
+			h, _, metaRepo := newTestHandler(t)
+			metaRepo.Meta.DisableRegistration = true
+			metaRepo.Meta.EmailRequiredForSignup = emailRequired
+			store := newMockTicketStore()
+			store.tickets["race-code"] = &model.RegistrationTicket{ID: "t-race", Code: "race-code"}
+			store.claimLost = true
+			h.SetTicketStore(store)
+
+			rec := doPost(h.Signup, `{"username":"alice","password":"pass1234","emailAddress":"a@example.com","invitationCode":"race-code"}`)
+			assert.Equal(t, http.StatusBadRequest, rec.Code)
+			assert.Equal(t, "INVITATION_CODE_INVALID", parseResp(t, rec)["error"].(map[string]any)["code"])
+			assert.Empty(t, store.markUsed)
+			assert.Empty(t, store.markPending)
+		})
+	}
+}
+
+// 作成に失敗したら確保を戻す (コードを無駄にしない)。成功したら戻さない。
+func TestSignup_RegistrationDisabled_ReleasesClaimOnFailure(t *testing.T) {
+	h, userRepo, metaRepo := newTestHandler(t)
+	metaRepo.Meta.DisableRegistration = true
+	store := newMockTicketStore()
+	store.tickets["c1"] = &model.RegistrationTicket{ID: "t-c1", Code: "c1"}
+	h.SetTicketStore(store)
+	_ = userRepo.Create(&model.User{ID: "existing", Username: "taken", UsernameLower: "taken"})
+
+	rec := doPost(h.Signup, `{"username":"taken","password":"pass1234","invitationCode":"c1"}`)
+	assert.Equal(t, http.StatusBadRequest, rec.Code)
+	assert.Equal(t, []string{"t-c1"}, store.released)
+	assert.Nil(t, store.tickets["c1"].UsedAt, "失敗した登録の後はコードをまた使える")
+
+	rec = doPost(h.Signup, `{"username":"fresh","password":"pass1234","invitationCode":"c1"}`)
+	assert.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, []string{"t-c1"}, store.released, "成功したら戻さない")
+	assert.NotNil(t, store.tickets["c1"].UsedAt)
 }
 
 // --- CAPTCHA ---

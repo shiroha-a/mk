@@ -30,6 +30,10 @@ import (
 type TicketStore interface {
 	FindByCode(code string) (*model.RegistrationTicket, error)
 	MarkUsed(ticketID, userID string) error
+	// ClaimForSignup / ReleaseClaim reserve and release a ticket around
+	// account creation (repository.RegistrationTicketRepository)。
+	ClaimForSignup(ticketID string, emailRequired bool) (bool, error)
+	ReleaseClaim(ticketID string) error
 	// MarkPending records usedAt + pendingUserId for an email-confirmation
 	// signup (確認メール再送防止窓、#2083)。
 	MarkPending(ticketID, pendingID string) error
@@ -264,9 +268,13 @@ func (h *Handler) Signup(c echo.Context) error {
 		var ticketID *string
 		if ticket != nil {
 			ticketID = &ticket.ID
+			if resp := h.claimInvitation(c, ticket, true); resp != nil {
+				return resp()
+			}
 		}
 		pending, perr := h.signupService.CreatePending(req.Username, req.EmailAddress, req.Password, ticketID)
 		if perr != nil {
+			h.releaseInvitation(ticket)
 			// upstream は username 系 error を Fastify-style reply error
 			// で投げる (SignupApiService.ts:174-184)。mk-go も同 shape に揃える
 			// (#802)。INVALID_PARAM は upstream 上流に対応 code が無いが
@@ -337,8 +345,14 @@ func (h *Handler) Signup(c echo.Context) error {
 		hv := strings.ToLower(strings.TrimSpace(req.Host))
 		remoteHost = &hv
 	}
+	if ticket != nil {
+		if resp := h.claimInvitation(c, ticket, false); resp != nil {
+			return resp()
+		}
+	}
 	result, err := h.signupService.SignupWithHost(req.Username, req.Password, isInitialSetup, remoteHost, coresignup.UsernamePolicyPublic)
 	if err != nil {
+		h.releaseInvitation(ticket)
 		// upstream の `/api/signup` は username 系 error を Fastify-style
 		// reply error で投げる (SignupApiService.ts)。shape を揃える (#802)。
 		if errors.Is(err, coresignup.ErrUsernameAlreadyExists) {
@@ -365,9 +379,12 @@ func (h *Handler) Signup(c echo.Context) error {
 		return apierr.FastifyReply(c, http.StatusInternalServerError, "INTERNAL_ERROR")
 	}
 
-	// invitation code使用済みにする
+	// invitation code使用済みにする。確保 (usedAt) は済んでいるので、ここで失敗しても
+	// 同じコードは再利用できない。アカウントは作成済みなので戻さずに記録だけ残す。
 	if ticket != nil && h.ticketStore != nil {
-		_ = h.ticketStore.MarkUsed(ticket.ID, result.User.ID)
+		if err := h.ticketStore.MarkUsed(ticket.ID, result.User.ID); err != nil {
+			slog.Warn("signup: failed to bind invitation ticket to the account", "ticketId", ticket.ID, "err", err)
+		}
 	}
 
 	// upstream SignupApiService が signinService.signin を呼ぶのは signup-pending
@@ -498,6 +515,42 @@ func (h *Handler) signupConfirmURL(code string) string {
 func validateEmailWithMeta(ctx context.Context, meta *model.Meta, addr string, client *http.Client) error {
 	svc := coreemail.NewServiceWithClient(meta, client)
 	return svc.Validate(ctx, addr)
+}
+
+// claimInvitation reserves the invitation ticket right before the account
+// (or the pending signup) is created. It returns a response to send when
+// the ticket could not be reserved, or nil to continue.
+//
+// **validateInvitationCode は読むだけなので、それだけでは 1 回きりにならない。**
+// 同じコードで並行に来たリクエストは全部検証を通るので、作成の前にここで
+// 条件付き UPDATE により 1 件だけを通す (upstream 2026.9.1 SignupApiService の
+// claimRegistrationTicket)。取れなかった側には検証失敗と同じエラーを返す。
+func (h *Handler) claimInvitation(c echo.Context, ticket *model.RegistrationTicket, emailRequired bool) func() error {
+	if ticket == nil || h.ticketStore == nil {
+		return nil
+	}
+	claimed, err := h.ticketStore.ClaimForSignup(ticket.ID, emailRequired)
+	if err != nil {
+		slog.Error("signup: cannot reserve the invitation ticket", "ticketId", ticket.ID, "err", err)
+		return func() error { return apierr.JSONInternalError(c) }
+	}
+	if !claimed {
+		return func() error {
+			return c.JSON(http.StatusBadRequest, apierr.Error("INVITATION_CODE_INVALID", "Invalid invitation code.", "11e71a03-43c4-4a99-92cf-bb7e2c581998"))
+		}
+	}
+	return nil
+}
+
+// releaseInvitation undoes claimInvitation when the signup failed, so the
+// code is not wasted. A ticket already bound to an account is left alone.
+func (h *Handler) releaseInvitation(ticket *model.RegistrationTicket) {
+	if ticket == nil || h.ticketStore == nil {
+		return
+	}
+	if err := h.ticketStore.ReleaseClaim(ticket.ID); err != nil {
+		slog.Warn("signup: failed to release the invitation ticket", "ticketId", ticket.ID, "err", err)
+	}
 }
 
 // validateInvitationCode checks the ticket store for a valid invitation code.
