@@ -19,6 +19,7 @@
 // (`tests/dropin_frontend/`) 側で別途 cover している。
 
 import { expect, test } from '@playwright/test';
+import { isTsBackend } from '../../../../fixtures/backend';
 
 test.describe('smoke: frontend SPA loads', () => {
   test('GET / returns index.html with root mount node', async ({ page, baseURL }) => {
@@ -62,6 +63,8 @@ test.describe('smoke: frontend SPA loads', () => {
     expect(html).toContain('<div id="splash">');
     expect(html).toContain('<img id="splashIcon"');
     expect(html).toContain('<div id="splashSpinner">');
+    // ここから下は mk-go 独自のスプラッシュ。TS baseline は公式の HTML を返す。
+    if (isTsBackend) return;
     // スピナーは mk-go 独自 (#2549)。回転する層 (.rig) と半径方向に動く
     // 点 (.pkt) を分けてある — 1 つの要素で両方やらせると transform が
     // 衝突して、集まる動きが回転に巻き取られる。

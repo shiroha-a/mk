@@ -21,6 +21,7 @@
 import { readFileSync } from 'node:fs';
 import { expect, test } from '@playwright/test';
 import { callApi } from '../../../fixtures/api';
+import { isTsBackend } from '../../../fixtures/backend';
 import { type RootFixture, uiSigninAsRoot } from '../../../fixtures/ui_auth';
 import { clickButtonByText, clickSwitchByLabel } from '../../../fixtures/ui_click';
 
@@ -32,6 +33,9 @@ const KEEP_BUTTON = 'アカウント作成は開けたままにする';
 const CANCEL_BUTTON = 'やめる';
 
 test.describe('UI: /admin/moderation approvalRequiredForSignup OFF dialog', () => {
+  // 承認制は mk-go 独自の機能で、TS baseline (公式 frontend + 公式 backend) には
+  // スイッチも meta の field も無い。
+  test.skip(isTsBackend, 'approvalRequiredForSignup は mk-go 独自');
   let root: RootFixture;
   test.beforeAll(() => {
     root = JSON.parse(readFileSync('.auth/root.json', 'utf-8'));

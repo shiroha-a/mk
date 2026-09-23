@@ -14,7 +14,9 @@
 /**
  * True when the spec runs against the upstream Misskey TS backend.
  *
- * 現在の利用箇所は embed の 2 件 (#2289)。
+ * 利用箇所は 2 種類ある。
+ *
+ * **upstream と意図的に挙動が違うもの** (embed の 2 件、#2289):
  *
  *   - `/embed/notes/:note` が埋め込み不可のとき upstream は**空 body**、mk-go は
  *     文脈なしのシェルを返す (存在の有無を応答の形で区別させないため)
@@ -23,6 +25,12 @@
  *
  * どちらも「どちらでも通る」ゆるい assert にはしない。差分を消すと mk-go 側の
  * 防御が外れても気付けなくなる。
+ *
+ * **mk-go にしか無い機能** (TS baseline では画面も field も存在しない):
+ * 承認制サインアップ (`admin_moderation_approval_off_dialog` は丸ごと skip、
+ * `admin_moderation_email_required_signup_toggle` は field の確認だけ)、
+ * 起動スピナー (`smoke/frontend_load`、#2549)。2026.9.1 の追従で TS baseline を
+ * 回したときに、これらが TS で落ちることが分かった。
  */
 export const isTsBackend = process.env.MK_BACKEND_TYPE === 'ts';
 
