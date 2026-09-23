@@ -155,7 +155,7 @@ func TestSupervisor_ReinstatesWorkerThatWasMerelySlow(t *testing.T) {
 	assert.Equal(t, 1, f.drv.WorkerCount("deliver"))
 
 	// cancel されていないので retry に回らず、キューは空のまま。
-	pending, err := f.drv.Inspector().PendingCount("deliver")
+	pending, err := f.drv.Inspector().DispatchableCount("deliver")
 	require.NoError(t, err)
 	assert.Equal(t, 0, pending)
 
@@ -274,7 +274,7 @@ func TestSupervisor_ReinstatesWorkerOnABusyQueue(t *testing.T) {
 			driver.WithQueue("deliver")))
 	}
 	eventually(t, 5*time.Second, "backlog never started draining", func() bool {
-		pending, err := f.drv.Inspector().PendingCount("deliver")
+		pending, err := f.drv.Inspector().DispatchableCount("deliver")
 		return err == nil && pending > 0
 	})
 
@@ -289,7 +289,7 @@ func TestSupervisor_ReinstatesWorkerOnABusyQueue(t *testing.T) {
 		}
 		// 同じ観測点で揃えて読む。別々に読むと、間に reconcile が挟まった
 		// ときに「隔離ゼロだが roster はもう畳まれた後」を見てしまう。
-		pendingAtReinstate, _ = f.drv.Inspector().PendingCount("deliver")
+		pendingAtReinstate, _ = f.drv.Inspector().DispatchableCount("deliver")
 		rosterAtReinstate = f.drv.WorkerCount("deliver")
 		return true
 	})

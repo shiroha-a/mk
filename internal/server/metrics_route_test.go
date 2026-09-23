@@ -67,9 +67,9 @@ func (i *fakeMetricsInspector) GetQueueInfo(qname string) (*driver.InspectorInfo
 	return &driver.InspectorInfo{Queue: qname, Pending: pending}, nil
 }
 
-// PendingCount mirrors GetQueueInfo. これらの fake は Prometheus 経路の
+// DispatchableCount mirrors GetQueueInfo. これらの fake は Prometheus 経路の
 // 検証用で autoscaler は通らないが、driver.Inspector を満たすために要る。
-func (i *fakeMetricsInspector) PendingCount(qname string) (int, error) {
+func (i *fakeMetricsInspector) DispatchableCount(qname string) (int, error) {
 	if err, ok := i.parent.pendErr[qname]; ok {
 		return 0, err
 	}

@@ -1646,11 +1646,11 @@ func TestResize_ScaleDownDoesNotHang(t *testing.T) {
 	t.Logf("8 → 2 の scale-down が %v", elapsed.Round(time.Millisecond))
 }
 
-// **PendingCount が GetQueueInfo.Pending と一致すること。**
+// **DispatchableCount が (pause していなければ) GetQueueInfo.Pending と一致すること。**
 //
 // autoscaler の読み取りを集計 API から切り替えた (#2605)。両者がずれると
 // スケール判断が変わってしまうので、同じ値であることを固定する。
-func TestPendingCount_MatchesQueueInfo(t *testing.T) {
+func TestDispatchableCount_MatchesQueueInfo(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushRedis(t)
 
@@ -1663,7 +1663,7 @@ func TestPendingCount_MatchesQueueInfo(t *testing.T) {
 	ins := d.Inspector()
 
 	// 空のとき。
-	n, err := ins.PendingCount("deliver")
+	n, err := ins.DispatchableCount("deliver")
 	require.NoError(t, err)
 	assert.Equal(t, 0, n)
 
@@ -1678,16 +1678,18 @@ func TestPendingCount_MatchesQueueInfo(t *testing.T) {
 
 	info, err := ins.GetQueueInfo("deliver")
 	require.NoError(t, err)
-	n, err = ins.PendingCount("deliver")
+	n, err = ins.DispatchableCount("deliver")
 	require.NoError(t, err)
 
 	assert.Equal(t, 5, n)
-	assert.Equal(t, info.Pending, n, "PendingCount が GetQueueInfo.Pending とずれている")
+	assert.Equal(t, info.Pending, n, "DispatchableCount が GetQueueInfo.Pending とずれている")
 }
 
-// 未知の queue はエラーにする。**0 を返さない。** autoscaler が 0 と
-// 受け取ると「捌けている」と誤認して縮めにかかる。
-func TestPendingCount_UnknownQueue(t *testing.T) {
+// **pause 中は 0 を返す (#3166)。** BullMQ 6 では pause してもジョブは wait に
+// 残るので、Pending には backlog が見えたままになる。オートスケーラがそれを
+// 深さと読むと、ジョブを取れないキューの worker を最大数まで増やす。
+// 再開したら元の深さに戻ることも見る (0 を返し続けると再開後に増やせない)。
+func TestDispatchableCount_ZeroWhilePaused(t *testing.T) {
 	testutil.SkipIfNoDocker(t)
 	flushRedis(t)
 
@@ -1697,7 +1699,40 @@ func TestPendingCount_UnknownQueue(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = d.Close() })
 
-	_, err = d.Inspector().PendingCount("does-not-exist")
+	ins := d.Inspector()
+	for range 3 {
+		require.NoError(t, d.Client().Enqueue(context.Background(), "noop", []byte(`{}`),
+			driver.WithQueue("deliver")))
+	}
+
+	require.NoError(t, ins.PauseQueue("deliver"))
+	info, err := ins.GetQueueInfo("deliver")
+	require.NoError(t, err)
+	require.Equal(t, 3, info.Pending, "前提: pause 中もジョブは wait に残る (BullMQ 6)")
+
+	n, err := ins.DispatchableCount("deliver")
+	require.NoError(t, err)
+	assert.Equal(t, 0, n, "pause 中は取れるジョブが無い")
+
+	require.NoError(t, ins.UnpauseQueue("deliver"))
+	n, err = ins.DispatchableCount("deliver")
+	require.NoError(t, err)
+	assert.Equal(t, 3, n, "再開後は wait の長さに戻る")
+}
+
+// 未知の queue はエラーにする。**0 を返さない。** autoscaler が 0 と
+// 受け取ると「捌けている」と誤認して縮めにかかる。
+func TestDispatchableCount_UnknownQueue(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	_, err = d.Inspector().DispatchableCount("does-not-exist")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown queue")
 }

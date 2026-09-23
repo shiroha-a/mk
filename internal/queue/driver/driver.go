@@ -127,8 +127,15 @@ type Inspector interface {
 	Queues() ([]string, error)
 	GetQueueInfo(qname string) (*InspectorInfo, error)
 
-	// PendingCount returns just InspectorInfo.Pending for the named
-	// queue, without computing the rest of the summary.
+	// DispatchableCount returns how many jobs a worker could dequeue from
+	// the named queue right now: the pending (wait) count, or 0 while the
+	// queue is paused. It skips the rest of the summary.
+	//
+	// **pause 中は 0 を返す (#3166)。** BullMQ 6 (mkq v1.1.0) では pause しても
+	// ジョブは wait に残るので、InspectorInfo.Pending には backlog が見える。
+	// オートスケーラがそれを深さと読むと、ジョブを取れないキューの worker を
+	// 最大数まで増やし、pause が続く限り減らさない。だから Pending とは
+	// pause 中だけ値が違う。
 	//
 	// **オートスケーラは 1Hz x 管理キュー数で回るので、集計 API を使わせない。**
 	// GetQueueInfo は admin パネル向けに wait/active/delayed/completed/failed の
@@ -140,7 +147,7 @@ type Inspector interface {
 	// delayed が federation 障害で数千件に膨らむと GetQueueInfo の
 	// ZRANGE + N x HGETALL もそれに比例する。admin パネルを開いている間だけ
 	// なら許容でも、常時 1Hz で走らせる先ではない。
-	PendingCount(qname string) (int, error)
+	DispatchableCount(qname string) (int, error)
 
 	DeleteTask(qname, taskID string) error
 	DeleteAllPendingTasks(qname string) (int, error)

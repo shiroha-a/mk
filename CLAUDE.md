@@ -940,7 +940,8 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
   go-redis が並べ替えなくなったため、アンテナのタイムラインが実 Redis で空を返した
   (`TestNotes_*` が検出)。現在は**呼び出し側で `Rev` のとき Start に大きい方を置く**。
   **pause は BullMQ 6 でフラグだけになり、ジョブは `wait` に残る** — pause 中も
-  `Pending` に backlog が見え、オートスケーラはその深さで worker を増やす。
+  `Pending` に backlog が見える。オートスケーラはその深さで worker を増やしていたので、
+  #3166 で `PendingCount` を `DispatchableCount` (pause 中は 0) に改めた。
 
 - **2026-09-23**: Go を 1.26.6 → **1.27.1** に更新。Section 1 の技術スタック表と Section 8 の
   floating tag の例を合わせた。**`go.work` は生成物なので `make plugins` で作り直す** —

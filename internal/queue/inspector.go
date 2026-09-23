@@ -39,10 +39,11 @@ func (i *Inspector) GetQueueInfo(qname string) (*InspectorInfo, error) {
 	return i.inner.GetQueueInfo(qname)
 }
 
-// PendingCount returns just the pending count for the named queue,
-// skipping the rest of the summary (#2605).
-func (i *Inspector) PendingCount(qname string) (int, error) {
-	return i.inner.PendingCount(qname)
+// DispatchableCount returns how many jobs a worker could dequeue from the
+// named queue right now (0 while paused), skipping the rest of the summary
+// (#2605, #3166).
+func (i *Inspector) DispatchableCount(qname string) (int, error) {
+	return i.inner.DispatchableCount(qname)
 }
 
 // PauseQueue pauses the named queue (#17436)。

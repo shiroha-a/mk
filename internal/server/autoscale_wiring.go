@@ -350,16 +350,19 @@ func autoScaledQueues(cfg *config.Config) (managed, skipped []string) {
 	return managed, skipped
 }
 
-// readQueueDepth returns the Inspector-reported Pending count for the
-// queue, or 0 on error (= treat unobservable depth as idle so the
-// controller does not aggressively scale up on a Redis hiccup).
+// readQueueDepth returns how many jobs workers could dequeue from the
+// queue right now (the pending count, or 0 while paused), or 0 on error
+// (= treat unobservable depth as idle so the controller does not
+// aggressively scale up on a Redis hiccup).
 func readQueueDepth(drv driver.Driver, qname string) int {
 	// **集計 API を使わない。** ここは 1Hz x 管理キュー数で回るので、
 	// GetQueueInfo (全カウント + repeat ZCARD + delayed 全件の ZRANGE +
 	// N x HGETALL + paused 判定) を毎秒引くとアイドル時の Redis コマンドの
-	// 大半をこれが占める。実測で毎秒 90 前後 (#2605)。使うのは Pending
-	// 1 個だけなので、キューあたり 1 コマンドで足りる。
-	n, err := drv.Inspector().PendingCount(qname)
+	// 大半をこれが占める。実測で毎秒 90 前後 (#2605)。使うのは深さ 1 個
+	// だけなので、キューあたり 1 往復 (wait の長さと pause フラグの 2 コマンド)
+	// で足りる。**pause 中は 0** — BullMQ 6 では pause してもジョブが wait に
+	// 残るので、そのまま読むと取れないキューの worker を増やす (#3166)。
+	n, err := drv.Inspector().DispatchableCount(qname)
 	if err != nil {
 		return 0
 	}

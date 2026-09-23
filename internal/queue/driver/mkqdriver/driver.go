@@ -238,10 +238,17 @@ func (d *Driver) repeatKey(queue string) string {
 }
 
 // waitKey returns the BullMQ `wait` LIST key for the named queue.
-// Inspector.PendingCount reads its length directly instead of going
+// Inspector.DispatchableCount reads its length directly instead of going
 // through the aggregate Counts path.
 func (d *Driver) waitKey(queue string) string {
 	return d.keyPrefix + ":" + queue + ":wait"
+}
+
+// metaKey returns the BullMQ `meta` HASH key for the named queue. The
+// `paused` field on it is the pause flag (mkq's Queue.IsPaused reads the
+// same field).
+func (d *Driver) metaKey(queue string) string {
+	return d.keyPrefix + ":" + queue + ":meta"
 }
 
 // queueFor returns the pre-defined queue for the given name, or nil.

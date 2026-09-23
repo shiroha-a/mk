@@ -116,28 +116,38 @@ func (i *Inspector) GetQueueInfo(qname string) (*driver.InspectorInfo, error) {
 	}, nil
 }
 
-// PendingCount returns the `wait` list length for the named queue.
+// DispatchableCount returns the `wait` list length for the named queue,
+// or 0 while the queue is paused.
 //
 // GetQueueInfo derives Pending from the same list (`Pending:
-// int(counts.Wait)`), so this is exactly equal — it just skips the rest
-// of the summary. **オートスケーラの 1Hz ポーリング用**で、admin 表示には
-// 使わない (#2605)。
-func (i *Inspector) PendingCount(qname string) (int, error) {
+// int(counts.Wait)`), so outside a pause the two are exactly equal — this
+// just skips the rest of the summary. **オートスケーラの 1Hz ポーリング用**で、
+// admin 表示には使わない (#2605)。
+//
+// pause の判定は LLEN と同じ pipeline に載せる。コマンドはキューあたり 1 → 2 に
+// 増えるが往復は 1 回のまま (#3166)。
+func (i *Inspector) DispatchableCount(qname string) (int, error) {
 	if i.driver.queueFor(qname) == nil {
 		return 0, fmt.Errorf("mkqdriver: unknown queue %q", qname)
 	}
-	n, err := i.driver.rdb.LLen(inspectorCtx(), i.driver.waitKey(qname)).Result()
-	if err != nil {
-		return 0, fmt.Errorf("mkqdriver: llen wait %q: %w", qname, err)
+	ctx := inspectorCtx()
+	pipe := i.driver.rdb.Pipeline()
+	waitLen := pipe.LLen(ctx, i.driver.waitKey(qname))
+	paused := pipe.HExists(ctx, i.driver.metaKey(qname), "paused")
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, fmt.Errorf("mkqdriver: dispatchable count %q: %w", qname, err)
 	}
-	return int(n), nil
+	if paused.Val() {
+		return 0, nil
+	}
+	return int(waitLen.Val()), nil
 }
 
 // PauseQueue pauses the named queue via mkq's BullMQ-compatible Queue.Pause.
 //
 // mkq v1.1.0 (BullMQ 6) からは meta.paused フラグだけで dequeue を止め、ジョブは
 // wait に残したまま動かさない (v5 は wait を paused list へ移していた)。だから
-// pause 中も Pending / PendingCount に backlog が見える。
+// pause 中も Pending に backlog が見える (DispatchableCount は pause 中 0 を返す)。
 func (i *Inspector) PauseQueue(qname string) error {
 	q := i.driver.queueFor(qname)
 	if q == nil {
