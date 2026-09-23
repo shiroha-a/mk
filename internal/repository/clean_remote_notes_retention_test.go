@@ -402,3 +402,121 @@ func TestNoteRepository_DeleteExpiredRemoteNotes_ProtectedRootDoesNotBlockBatch(
 	require.NoError(t, testDB.Model(&model.Note{}).Where("id = ?", protected.ID).Count(&count).Error)
 	assert.EqualValues(t, 1, count, "保護されたルートは残ること")
 }
+
+// **消せないツリーが先頭に並んでいても、カーソルで後ろへ進める (#17957)。**
+// 根の選び方に順序も位置も無かった頃は、配下にローカルの返信を持つ根が
+// 毎回同じ LIMIT の枠を食い、その後ろの消せる根に一度も届かなかった。
+func TestNoteRepository_DeleteExpiredRemoteNotesAfter_Cursor(t *testing.T) {
+	nr := NewNoteRepository(testDB)
+	host := "cursor.example"
+	remoteUser := &model.User{
+		ID: "cur_remote", Username: "cur_remote", UsernameLower: "cur_remote",
+		Host: &host, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteUser).Error)
+	defer cleanupUser(t, remoteUser.ID)
+	localUser := &model.User{
+		ID: "cur_local", Username: "cur_local", UsernameLower: "cur_local",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(localUser).Error)
+	defer cleanupUser(t, localUser.ID)
+
+	newNote := func(id string, user *model.User, h *string, replyID *string) {
+		t.Helper()
+		n := &model.Note{
+			ID: id, UserID: user.ID, UserHost: h, ReplyID: replyID,
+			Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+		}
+		require.NoError(t, nr.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+	}
+	// 先頭 150 個: 期限切れのリモートの根に、ローカルの返信がぶら下がる (消せない)。
+	for i := range 150 {
+		root := fmt.Sprintf("00000000_cur_p%03d", i)
+		newNote(root, remoteUser, &host, nil)
+		newNote(fmt.Sprintf("00000000_cur_q%03d", i), localUser, nil, &root)
+	}
+	// その後ろに消せる根が 5 個。
+	var deletable []string
+	for i := range 5 {
+		id := fmt.Sprintf("00000000_cur_z%03d", i)
+		newNote(id, remoteUser, &host, nil)
+		deletable = append(deletable, id)
+	}
+	remaining := func() int {
+		var n int64
+		require.NoError(t, testDB.Model(&model.Note{}).Where("id IN ?", deletable).Count(&n).Error)
+		return int(n)
+	}
+
+	// カーソル無しで何度回しても先頭の 100 個しか見ないので届かない。
+	for range 3 {
+		_, err := nr.DeleteExpiredRemoteNotes(1, 100)
+		require.NoError(t, err)
+	}
+	require.Equal(t, 5, remaining(), "前提: カーソル無しでは後ろの根に届かない")
+
+	// カーソルで進めると末尾まで届く。
+	cursor := ""
+	for range 10 {
+		_, scanned, last, err := nr.DeleteExpiredRemoteNotesAfter(1, 100, cursor)
+		require.NoError(t, err)
+		if scanned < 100 {
+			break
+		}
+		require.Greater(t, last, cursor, "カーソルは前にしか進まない")
+		cursor = last
+	}
+	assert.Zero(t, remaining(), "後ろの消せる根が消える")
+	var kept int64
+	require.NoError(t, testDB.Model(&model.Note{}).Where("id LIKE ?", "00000000_cur_p%").Count(&kept).Error)
+	assert.EqualValues(t, 150, kept, "消せないツリーは残る")
+
+	// 期限より新しいカーソル (期限を延ばした後など) は先頭からにする。
+	_, scanned, _, err := nr.DeleteExpiredRemoteNotesAfter(1, 100, "zzzzzzzzzz")
+	require.NoError(t, err)
+	assert.Equal(t, 100, scanned, "cutoff 以上のカーソルは無視して先頭から")
+}
+
+// **根は id 順に見る。** 順序が無いと「見た根の最大 id」をカーソルにしたとき、
+// 見ていない若い id を飛び越える。挿入順 (heap の順) と id の順を逆にして、
+// 若い id の消せる根が最初のページで拾われることを見る。
+func TestNoteRepository_DeleteExpiredRemoteNotesAfter_Ordered(t *testing.T) {
+	nr := NewNoteRepository(testDB)
+	host := "order.example"
+	remoteUser := &model.User{
+		ID: "ord_remote", Username: "ord_remote", UsernameLower: "ord_remote",
+		Host: &host, AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(remoteUser).Error)
+	defer cleanupUser(t, remoteUser.ID)
+	localUser := &model.User{
+		ID: "ord_local", Username: "ord_local", UsernameLower: "ord_local",
+		AvatarDecorations: datatypes.JSON([]byte("[]")),
+	}
+	require.NoError(t, testDB.Create(localUser).Error)
+	defer cleanupUser(t, localUser.ID)
+
+	newNote := func(id string, user *model.User, h *string, replyID *string) {
+		t.Helper()
+		n := &model.Note{
+			ID: id, UserID: user.ID, UserHost: h, ReplyID: replyID,
+			Visibility: model.NoteVisibilityPublic, Reactions: datatypes.JSON([]byte("{}")),
+		}
+		require.NoError(t, nr.Create(n))
+		t.Cleanup(func() { cleanupNote(t, id) })
+	}
+	// 先に大きい id の消せないツリーを 150 個入れ、後から小さい id の消せる根を入れる。
+	for i := range 150 {
+		root := fmt.Sprintf("00000000_ord_p%03d", i)
+		newNote(root, remoteUser, &host, nil)
+		newNote(fmt.Sprintf("00000000_ord_q%03d", i), localUser, nil, &root)
+	}
+	newNote("00000000_ord_a000", remoteUser, &host, nil)
+
+	_, _, _, err := nr.DeleteExpiredRemoteNotesAfter(1, 100, "")
+	require.NoError(t, err)
+	_, ferr := nr.FindByID("00000000_ord_a000")
+	assert.Error(t, ferr, "最初のページで最も若い id の根を見ている")
+}

@@ -1997,6 +1997,10 @@ func (m *MockNoteRepository) DeleteExpiredRemoteNotes(_, _ int) (int64, error) {
 	return 0, nil
 }
 
+func (m *MockNoteRepository) DeleteExpiredRemoteNotesAfter(_, _ int, _ string) (int64, int, string, error) {
+	return 0, 0, "", nil
+}
+
 func (m *MockNoteRepository) DeleteByUserBatch(userID string, batchSize int) (int64, error) {
 	if batchSize <= 0 {
 		batchSize = 100

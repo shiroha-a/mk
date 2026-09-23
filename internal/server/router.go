@@ -1020,6 +1020,10 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		}
 	}
 	cleanProcessor := processors.NewCleanRemoteNotesProcessor(noteRepo, cleanCfgFn)
+	cleanProcessor.SetCursorStore(processors.RedisCursorStore{
+		Client: s.redis.Default,
+		Key:    s.config.Redis.KeyPrefix() + processors.CleanRemoteNotesCursorKey,
+	})
 	s.queueServer.Handle(queue.TaskTypeCleanRemoteNotes, cleanProcessor.Handle)
 
 	// リレー由来の孤児リモートユーザーの掃除 (#2340)。転送活動の LD-Signature

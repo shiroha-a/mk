@@ -194,6 +194,12 @@ type NoteRepository interface {
 	// cancellation checkpoints and sleep pacing live in the processor
 	// (see CleanRemoteNotesProcessor).
 	DeleteExpiredRemoteNotes(expiryDays, batchSize int) (int64, error)
+	// DeleteExpiredRemoteNotesAfter is DeleteExpiredRemoteNotes that walks
+	// root notes in id order starting after the given cursor ("" = from the
+	// beginning). It returns the note rows deleted, the number of roots
+	// examined (fewer than batchSize = reached the end) and the id of the
+	// last root examined (to resume after; "" when none).
+	DeleteExpiredRemoteNotesAfter(expiryDays, batchSize int, after string) (deleted int64, scanned int, lastRootID string, err error)
 	// DeleteByUserBatch deletes up to batchSize notes authored by userID in a
 	// single DELETE statement. Returns the count actually removed. Callers
 	// drive the loop themselves so that cancellation checkpoints and sleep
@@ -1499,10 +1505,28 @@ const noteRemovableExpr = `
 // 移植してもクリップを保護できない。`clippedCount` / `pageCount` の比較自体は
 // TS から切り戻したインスタンス (= カウンタが実際に入っている行) のために残す。
 func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (int64, error) {
+	deleted, _, _, err := r.DeleteExpiredRemoteNotesAfter(expiryDays, batchSize, "")
+	return deleted, err
+}
+
+// DeleteExpiredRemoteNotesAfter is the cursor-based form of
+// DeleteExpiredRemoteNotes.
+//
+// **根を id 順に、カーソルの後ろから見る (upstream 2026.9.1 #17957)。**
+// 以前は `ORDER BY` も位置も無い `LIMIT` だけで根を選んでいたので、配下に
+// 削除不可のノート (ローカルの返信など) を持つツリーの根が毎回同じ枠を食い、
+// そうした根が batchSize 件以上あると掃除が一歩も進まなかった。カーソルを
+// 進めれば、消せないツリーは 1 度見たら通り過ぎる。
+//
+// cutoff 以上のカーソル (期限を延ばした後など) は先頭からにする (upstream と同じ)。
+func (r *noteRepository) DeleteExpiredRemoteNotesAfter(expiryDays, batchSize int, after string) (int64, int, string, error) {
 	if batchSize <= 0 {
 		batchSize = 100
 	}
 	cutoffID := aidxCutoffID(time.Now().Add(-time.Duration(expiryDays) * 24 * time.Hour))
+	if after >= cutoffID {
+		after = ""
+	}
 	// **ツリー単位で守る。**
 	//
 	// 単体の条件だけで消すと、**ローカル利用者が返信・引用・リノートした
@@ -1534,13 +1558,20 @@ func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (in
 	// **保護そのものは (c) の anti-join が担う。** (a) の「起点をルートに絞る」は
 	// upstream に合わせた効率の話で、外しても結果は変わらない (子から辿っても
 	// 同じツリーに到達するため)。変異検証でもそこは検出できない。
-	res := r.db.Exec(`
+	var out struct {
+		Deleted    int64
+		Scanned    int
+		LastRootID *string
+	}
+	res := r.db.Raw(`
 		WITH RECURSIVE roots AS (
 			SELECT n.id AS "rootId", n.id
 			FROM "note" n
 			WHERE n."replyId" IS NULL
 			  AND n."renoteId" IS NULL
+			  AND n.id > ?
 			  AND (`+noteRemovableExpr+`)
+			ORDER BY n.id
 			LIMIT ?
 		),
 		tree AS (
@@ -1554,18 +1585,28 @@ func (r *noteRepository) DeleteExpiredRemoteNotes(expiryDays, batchSize int) (in
 			SELECT t."rootId", t.id, (`+noteRemovableExpr+`) AS removable
 			FROM tree t
 			INNER JOIN "note" n ON n.id = t.id
-		)
-		DELETE FROM "note" WHERE id IN (
-			SELECT j.id FROM judged j
-			WHERE NOT EXISTS (
-				SELECT 1 FROM judged k
-				WHERE k."rootId" = j."rootId" AND k.removable = FALSE
+		),
+		deleted AS (
+			DELETE FROM "note" WHERE id IN (
+				SELECT j.id FROM judged j
+				WHERE NOT EXISTS (
+					SELECT 1 FROM judged k
+					WHERE k."rootId" = j."rootId" AND k.removable = FALSE
+				)
 			)
-		)`, cutoffID, batchSize, cutoffID)
+			RETURNING 1
+		)
+		SELECT (SELECT count(*) FROM deleted) AS deleted,
+		       (SELECT count(*) FROM roots) AS scanned,
+		       (SELECT max(id) FROM roots) AS last_root_id`, after, cutoffID, batchSize, cutoffID).Scan(&out)
 	if res.Error != nil {
-		return 0, res.Error
+		return 0, 0, "", res.Error
 	}
-	return res.RowsAffected, nil
+	last := ""
+	if out.LastRootID != nil {
+		last = *out.LastRootID
+	}
+	return out.Deleted, out.Scanned, last, nil
 }
 
 func (r *noteRepository) DeleteByUserBatch(userID string, batchSize int) (int64, error) {

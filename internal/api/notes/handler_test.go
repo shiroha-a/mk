@@ -929,6 +929,9 @@ func (f *failingNoteRepo) ListPublicNotes(_ model.PublicNotesFilter, _ int, _, _
 	return nil, errors.New("boom")
 }
 func (f *failingNoteRepo) DeleteExpiredRemoteNotes(_, _ int) (int64, error) { return 0, nil }
+func (f *failingNoteRepo) DeleteExpiredRemoteNotesAfter(_, _ int, _ string) (int64, int, string, error) {
+	return 0, 0, "", nil
+}
 func (f *failingNoteRepo) DeleteByUserBatch(_ string, _ int) (int64, error) { return 0, nil }
 func (f *failingNoteRepo) CountReplyTargets(_, _ string, _ int) ([]model.ReplyTargetCount, error) {
 	return nil, nil
