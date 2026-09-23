@@ -391,11 +391,18 @@ golangci-lint: ## golangci-lint (errcheck / govet / ineffassign / staticcheck)
 	# 黙って見えなくなる (実測)。`make plugins` で作り直せるので退避して戻す
 	# (trap 付きなので中断しても復元される)。**`cp -p` で mode も保存する** —
 	# mktemp は 0600 で作るので、素の `cp` だと復元後に 644 → 600 になる (実測)。
+	#
+	# **toolchain を go.mod の版に固定する。** `go run pkg@version` はこの
+	# リポジトリの go.mod を見ず、golangci-lint 自身の `go` directive (1.26.0) を
+	# 基準に toolchain を選ぶ。手元の go が go.mod より古いとそれでビルドされ、
+	# `the Go language version (go1.26) used to build golangci-lint is lower than
+	# the targeted Go version (1.27.1)` で止まる (Go 1.27.1 への更新で実測)。
 	@set -e; \
 	gen=cmd/misskey/plugins_generated.go; bak=""; \
 	if [ -f "$$gen" ]; then bak=$$(mktemp); cp -p "$$gen" "$$bak"; rm -f "$$gen"; fi; \
 	trap 'if [ -n "$$bak" ]; then cp -p "$$bak" "$$gen"; rm -f "$$bak"; fi' EXIT INT TERM; \
-	GOWORK=off go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run --timeout 10m
+	gover=$$(awk '/^go [0-9]/ {print $$2; exit}' go.mod); \
+	GOWORK=off GOTOOLCHAIN=go$$gover go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.13.2 run --timeout 10m
 
 .PHONY: actionlint
 actionlint: ## GitHub Actions の workflow を検査
