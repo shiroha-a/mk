@@ -63,6 +63,11 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	"i/import-muting":      {Duration: time.Hour, Max: 1},
 	"i/import-user-lists":  {Duration: time.Hour, Max: 1},
 
+	// ── Federation ─────────────────────────────────────
+	// 1 回ごとにリモートへ取りに行き、`ForceResolveActor` はキャッシュの TTL も
+	// 無視する。upstream 2026.9.1 と同じ上限。
+	"federation/update-remote-user": {Duration: time.Hour, Max: 30},
+
 	// ── Flash ──────────────────────────────────────────
 	"flash/create": {Duration: time.Hour, Max: 10},
 	"flash/update": {Duration: time.Hour, Max: 300},

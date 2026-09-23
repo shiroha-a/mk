@@ -2596,13 +2596,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// admin overview から `misskeyApiGet` で叩かれるため GET も登録 (#421)。
 	api.POST("/federation/stats", federationHandler.Stats)
 	api.GET("/federation/stats", federationHandler.Stats)
-	// #2106 N29/N10: upstream update-remote-user.ts は requireCredential:false の公開
-	// endpoint で、frontend get-user-menu はリモートユーザーメニューの「リモート情報を
-	// 更新」を全ログインユーザーに無条件表示する。RequireModerator だと非モデレーターが
-	// 403 ROLE_PERMISSION_DENIED になり frontend 機能が壊れるため緩和する。匿名トリガー
-	// 可能な AP 再 fetch (amplification) を防ぐため、upstream の anonymous 許可までは
-	// 開けず RequireAuth に留める (frontend は menu 表示にログイン必須なので互換性は保つ)。
-	api.POST("/federation/update-remote-user", federationHandler.UpdateRemoteUser, middleware.RequireAuth())
+	// upstream 2026.9.1 で `requireCredential: true` / `kind: 'read:account'` /
+	// 1 時間 30 回になった (それまでは未認証でも叩けた)。mk-go は #2106 で先に
+	// RequireAuth を付けていたので、scope とレート制限 (ratelimit_defs.go) を足して
+	// 揃える。RequireModerator にしないのは、frontend がリモートユーザーの
+	// メニューで全ログインユーザーに出すため。
+	api.POST("/federation/update-remote-user", federationHandler.UpdateRemoteUser, middleware.RequireAuth(), middleware.RequireScope("read:account"))
 	// Mastodon 互換のピア一覧 (#2245)。upstream は endpoints/ 配下ではなく
 	// ApiServerService.ts で fastify に直接登録しているので、mk-go でも
 	// endpoint 群とは別に /api/v1/... として生やす。

@@ -218,7 +218,7 @@
   "federation/instances": "public",
   "federation/show-instance": "public",
   "federation/stats": "public",
-  "federation/update-remote-user": "public",
+  "federation/update-remote-user": "auth",
   "federation/users": "public",
   "fetch-external-resources": "auth",
   "fetch-rss": "public",

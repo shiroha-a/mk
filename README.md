@@ -2,7 +2,7 @@
 
 Misskey互換のGoバックエンド実装。TypeScript/NestJS製の[Misskey](https://github.com/misskey-dev/misskey)と同一のDB・Redis・フロントエンドを共有し、バックエンドを差し替えられる。
 
-互換バージョン: **Misskey 2026.9.0** (mk-go `1.3.0`)
+互換バージョン: **Misskey 2026.9.1** (mk-go `1.3.0`)
 
 ## 特徴
 
@@ -179,7 +179,7 @@ go test -race -count=1 -shuffle=3 -timeout 10m \
 | [メディアプロキシの govips 評価](docs/mediaproxy-govips-evaluation.md) | 画像変換ライブラリの比較検討 |
 | [upstream追従手順](docs/upstream-catch-up.md) | Misskey TSの新リリース取り込みとsubmodule bump |
 | [設計メモ](docs/design/) | オートスケール、inbox verify、mkq等の設計判断 |
-| [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.9.0 の backend 差分 (`<yyyymm><nn>diff.md`) と triage note |
+| [upstream 差分](docs/update/) | Misskey TS 2026.3.2 → 2026.9.1 の backend 差分 (`<yyyymm><nn>diff.md`) と triage note |
 
 ## ライセンス
 

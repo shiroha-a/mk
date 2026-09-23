@@ -72,13 +72,7 @@ func TestCredentialRoutesWithoutScopeRejectAppTokens(t *testing.T) {
 //
 // **理由には「upstream がどう扱うか」を書く。** 「見たけど大丈夫だった」では
 // 次に読む人が判断をやり直せない。
-var appTokenGateExempt = map[string]string{
-	// upstream `federation/update-remote-user.ts` は `requireCredential: false`
-	// なので、app token でも (むしろ未認証でも) 到達できる。mk-go は認証を
-	// 要求する側へ寄せてあるが、そこからさらに app token を落とすと
-	// upstream で動くクライアントを mk-go だけが弾くことになる。
-	"/federation/update-remote-user": "upstream は requireCredential:false (kind 無しの拒否規則が発動しない)",
-}
+var appTokenGateExempt = map[string]string{}
 
 // **除外の一覧が腐らないようにする。** 実在しない path が残ると、その行が
 // 何を守っているのか分からなくなる。gate を後から付けた route が残っていても

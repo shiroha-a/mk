@@ -180,6 +180,7 @@
   "drive/folders/show": "read:drive",
   "drive/folders/update": "write:drive",
   "drive/stream": "read:drive",
+  "federation/update-remote-user": "read:account",
   "flash/create": "write:flash",
   "flash/delete": "write:flash",
   "flash/like": "write:flash-likes",
