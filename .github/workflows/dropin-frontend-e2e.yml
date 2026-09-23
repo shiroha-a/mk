@@ -12,11 +12,14 @@ on:
     # 19:00 UTC = 04:00 JST。
     - cron: "0 19 * * *"
   workflow_dispatch:
+    # **checkout する ref を input で受け取らない。** キャッシュの scope は
+    # `github.ref` (schedule なら develop) で決まるので、input で別 ref を
+    # checkout すると、そのコードが develop の scope で走る (CodeQL
+    # actions/cache-poisoning)。この job は今 actions/cache を使っていないが、
+    # job 内のコードはキャッシュ API に書けるので予防として外してある。
+    # 別の ref で回すときは「Use workflow from」
+    # (`gh workflow run <file> -r <branch>`) で選ぶ。scope もそのブランチになる。
     inputs:
-      ref:
-        description: "Branch / tag / SHA to test"
-        required: false
-        default: "develop"
       mode:
         description: "Test mode: swap (default, full baseline+swap) / baseline (only TS-only)"
         required: false
@@ -37,7 +40,6 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ inputs.ref || 'develop' }}
           # stage 3 の mk-go image build (tests/federation/common/Dockerfile.mkgo)
           # が third_party/misskey/built/ と assets/ を COPY するので、submodule
           # を展開しないと "failed to calculate checksum ... not found" で死ぬ。
