@@ -1251,3 +1251,49 @@ func TestDispatcher_SrDoesNotReadAllNotifications(t *testing.T) {
 	d.HandleClientMessage("readNotification", json.RawMessage(`{}`))
 	assert.Equal(t, 1, nr.called, "'readNotification' must mark all notifications read")
 }
+
+// **subNote は 1 接続あたり maxNoteSubsPerConnection 件まで。** 超えたら最も
+// 古く購読したものを外す (LRU)。購読 1 件ごとに Redis の接続を張るので、上限が
+// 無いと 1 本の接続から Redis の接続を無制限に増やせる。
+func TestDispatcher_SubNote_CapEvictsOldest(t *testing.T) {
+	conn := NewConnection("test", nil, newFakeConn())
+	bus := newStubBus()
+	d := NewDispatcher(conn, nil, bus)
+	d.SetNoteVisibilityChecker(&stubNoteVisibility{defaultAllow: true})
+
+	sub := func(id string) {
+		d.HandleClientMessage("subNote", json.RawMessage(`{"id":"`+id+`"}`))
+	}
+	subbed := func(id string) bool {
+		bus.mu.Lock()
+		defer bus.mu.Unlock()
+		_, ok := bus.subs["noteStream:"+id]
+		return ok
+	}
+
+	for i := range maxNoteSubsPerConnection {
+		sub(fmt.Sprintf("n%d", i))
+	}
+	// n0 を購読し直すと最も新しい扱いになり、次に外れるのは n1。
+	sub("n0")
+
+	sub("over")
+	d.noteSubMu.Lock()
+	held := len(d.noteSubs)
+	d.noteSubMu.Unlock()
+	assert.Equal(t, maxNoteSubsPerConnection, held, "上限を超えて保持しない")
+	assert.True(t, subbed("over"))
+	assert.True(t, subbed("n0"), "購読し直したものは残る")
+	assert.False(t, subbed("n1"), "最も古いものが bus から外れる")
+
+	// 外れたものへの unsubNote は何も起こさない。
+	d.HandleClientMessage("unsubNote", json.RawMessage(`{"id":"n1"}`))
+	assert.True(t, subbed("n2"))
+
+	// unsubNote で空いた枠は次の購読で使え、誰も押し出さない。
+	d.HandleClientMessage("unsubNote", json.RawMessage(`{"id":"n2"}`))
+	d.HandleClientMessage("unsubNote", json.RawMessage(`{"id":"n0"}`))
+	d.HandleClientMessage("unsubNote", json.RawMessage(`{"id":"n0"}`))
+	sub("new1")
+	assert.True(t, subbed("n3"), "空いた枠があれば押し出さない")
+}

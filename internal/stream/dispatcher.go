@@ -1,6 +1,7 @@
 package stream
 
 import (
+	"container/list"
 	"encoding/json"
 	"log/slog"
 	"sync"
@@ -71,6 +72,18 @@ const maxChannelsPerConnection = 32
 // 開いているタブ分で、実測でも 20 を超えない。
 const maxTopicsPerConnection = 128
 
+// maxNoteSubsPerConnection は 1 接続が保持できる subNote (ノート単位の購読)
+// の上限。超えたら**最も古く購読したものから外す** (LRU)。
+//
+// subNote も noteStream:<id> を 1 トピックとして購読するので、上限が無いと
+// maxTopicsPerConnection と同じ理由で Redis の接続を無制限に増やせる。
+// 公開ノートは未認証でも購読できるので、可視性の確認は歯止めにならない。
+// upstream も 1 接続あたりの件数に上限を設けて古いものから外す。値が upstream
+// (1536) より小さいのは、mk-go は購読 1 件ごとに Redis の接続を張るため。
+// フロントエンドは画面に出したノートを購読するので、流れて見えなくなった
+// ものから外れるだけで、表示中のノートの更新は届き続ける。
+const maxNoteSubsPerConnection = 128
+
 // 1 つの Connection に対して 1 つの Dispatcher がぶら下がり、複数の Channel
 // を保持する。pubsub の global subscription 管理は Manager の Router (K-4)
 // に集約するため、Dispatcher は per-channel の subscribe/unsubscribe API を
@@ -91,6 +104,8 @@ type Dispatcher struct {
 	noteSubMu      sync.Mutex
 	noteSubs       map[string]int
 	noteCancels    map[string]*pendingCancel // noteID → 購読解除の枠
+	noteOrder      *list.List                // 購読した順 (先頭が最も古い)。値は noteID
+	noteElems      map[string]*list.Element  // noteID → noteOrder の要素
 	notifReader    NotificationReader
 	noteVisibility NoteVisibilityChecker
 }
@@ -107,6 +122,8 @@ func NewDispatcher(conn *Connection, registry *Registry, bus PubSubBus) *Dispatc
 		busCancels:  make(map[string]*pendingCancel),
 		noteSubs:    make(map[string]int),
 		noteCancels: make(map[string]*pendingCancel),
+		noteOrder:   list.New(),
+		noteElems:   make(map[string]*list.Element),
 	}
 }
 
@@ -357,6 +374,8 @@ func (d *Dispatcher) CloseAll() {
 	}
 	d.noteSubs = make(map[string]int)
 	d.noteCancels = make(map[string]*pendingCancel)
+	d.noteOrder = list.New()
+	d.noteElems = make(map[string]*list.Element)
 	d.noteSubMu.Unlock()
 	for _, c := range cancels {
 		c()
@@ -632,13 +651,26 @@ func (d *Dispatcher) handleSubNote(body json.RawMessage) {
 	}
 	topic := "noteStream:" + req.ID
 	d.noteSubMu.Lock()
+	// 新しいノートで上限に達していたら、最も古く購読したものを外す。
+	var evicted func()
+	if _, ok := d.noteSubs[req.ID]; !ok && len(d.noteSubs) >= maxNoteSubsPerConnection {
+		evicted = d.evictOldestNoteSubLocked()
+	}
 	d.noteSubs[req.ID]++
+	if e, ok := d.noteElems[req.ID]; ok {
+		d.noteOrder.MoveToBack(e)
+	} else {
+		d.noteElems[req.ID] = d.noteOrder.PushBack(req.ID)
+	}
 	var slot *pendingCancel
 	if d.noteSubs[req.ID] == 1 && d.bus != nil {
 		slot = &pendingCancel{}
 		d.noteCancels[req.ID] = slot
 	}
 	d.noteSubMu.Unlock()
+	if evicted != nil {
+		evicted()
+	}
 
 	if slot != nil {
 		cancel := d.bus.Subscribe(topic, func(payload []byte) {
@@ -646,6 +678,25 @@ func (d *Dispatcher) handleSubNote(body json.RawMessage) {
 		})
 		slot.resolve(cancel, &d.noteSubMu)
 	}
+}
+
+// evictOldestNoteSubLocked drops the least recently subscribed note and
+// returns its bus cancel (nil if none), to be called after unlocking.
+// Caller must hold noteSubMu.
+func (d *Dispatcher) evictOldestNoteSubLocked() func() {
+	front := d.noteOrder.Front()
+	if front == nil {
+		return nil
+	}
+	id := front.Value.(string)
+	d.noteOrder.Remove(front)
+	delete(d.noteElems, id)
+	delete(d.noteSubs, id)
+	// 購読の確立中 (resolve 前) の枠でも take が印を残すので、後から埋まった
+	// ハンドルはその場で外れる (CloseAll と同じ)。
+	cancel := d.noteCancels[id].take()
+	delete(d.noteCancels, id)
+	return cancel
 }
 
 // handleUnsubNote decrements the refcount for a note subscription and
@@ -666,6 +717,10 @@ func (d *Dispatcher) handleUnsubNote(body json.RawMessage) {
 	count--
 	if count <= 0 {
 		delete(d.noteSubs, req.ID)
+		if e, ok := d.noteElems[req.ID]; ok {
+			d.noteOrder.Remove(e)
+			delete(d.noteElems, req.ID)
+		}
 		cancel := d.noteCancels[req.ID].take()
 		delete(d.noteCancels, req.ID)
 		d.noteSubMu.Unlock()
