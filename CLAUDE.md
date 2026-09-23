@@ -933,6 +933,15 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-23**: mkq を v1.0.8 → **v1.1.1** に更新 (BullMQ 6 へ移行。upstream 2026.9.0 の
+  bullmq 6.3.2 と wire が揃う)。**2026-09-22 の SA1019 entry にある「Redis は呼び出し側で
+  Start / Stop を入れ替えない」は go-redis v9.21.0 で逆になった** (redis/go-redis#3751)。
+  依存の連鎖で go-redis が 9.18 → 9.22 に上がり、`ZRangeArgs` の `Rev` + `ByLex` で
+  go-redis が並べ替えなくなったため、アンテナのタイムラインが実 Redis で空を返した
+  (`TestNotes_*` が検出)。現在は**呼び出し側で `Rev` のとき Start に大きい方を置く**。
+  **pause は BullMQ 6 でフラグだけになり、ジョブは `wait` に残る** — pause 中も
+  `Pending` に backlog が見え、オートスケーラはその深さで worker を増やす。
+
 - **2026-09-23**: Go を 1.26.6 → **1.27.1** に更新。Section 1 の技術スタック表と Section 8 の
   floating tag の例を合わせた。**`go.work` は生成物なので `make plugins` で作り直す** —
   作り直さないと `go.work` の `go 1.26.6` で toolchain が選ばれ (`go version` が 1.26.6 の

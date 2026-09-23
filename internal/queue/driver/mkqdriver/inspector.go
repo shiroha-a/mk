@@ -133,9 +133,11 @@ func (i *Inspector) PendingCount(qname string) (int, error) {
 	return int(n), nil
 }
 
-// PauseQueue pauses the named queue via mkq's BullMQ-compatible Queue.Pause
-// (meta.paused フラグ + wait→paused list 移動)。paused 中の enqueue も paused に
-// 入り orphan しない (mkq v1.0.3 #70)。
+// PauseQueue pauses the named queue via mkq's BullMQ-compatible Queue.Pause.
+//
+// mkq v1.1.0 (BullMQ 6) からは meta.paused フラグだけで dequeue を止め、ジョブは
+// wait に残したまま動かさない (v5 は wait を paused list へ移していた)。だから
+// pause 中も Pending / PendingCount に backlog が見える。
 func (i *Inspector) PauseQueue(qname string) error {
 	q := i.driver.queueFor(qname)
 	if q == nil {
@@ -147,8 +149,9 @@ func (i *Inspector) PauseQueue(qname string) error {
 	return nil
 }
 
-// UnpauseQueue resumes the named queue via mkq's Queue.Resume (paused→wait に
-// 戻し marker を poke して blocking worker を起こす)。
+// UnpauseQueue resumes the named queue via mkq's Queue.Resume (フラグを外し
+// marker を poke して blocking worker を起こす)。v5 時代に paused list へ退避
+// されたジョブが残っていれば、Resume がそれも wait へ戻す。
 func (i *Inspector) UnpauseQueue(qname string) error {
 	q := i.driver.queueFor(qname)
 	if q == nil {

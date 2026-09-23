@@ -79,10 +79,11 @@ func (h *Handler) QueueClear(c echo.Context) error {
 // (1) **"wait" は wait バケットしか掃かない。** かつては `DrainPending` を呼んで
 // おり、あれは wait に加え paused / prioritized も drain したが、job type を見ない
 // ので**予約投稿やアカウント削除まで巻き込んだ** (#3130)。列挙経路
-// (`ListPendingTasks`) へ移して保護対象を除けるようにした代わりに、あちらは
-// `JobBucketWait` だけを見るので **pause 中のキューに clear を掛けても paused の
-// job は残る**。mk-go は deliver/inbox で per-job priority を使わないので
-// prioritized は常に空。
+// (`ListPendingTasks`) へ移して保護対象を除けるようにした。あちらは
+// `JobBucketWait` だけを見るが、mkq v1.1.0 (BullMQ 6) からは pause してもジョブは
+// wait に残るので、pause 中のキューでも掃ける。**v5 時代に paused list へ退避
+// されたジョブだけは残る** (Resume が wait へ戻した後なら掃ける)。mk-go は
+// deliver/inbox で per-job priority を使わないので prioritized は常に空。
 //
 // (2) active / paused / prioritized を単独 state で指定した場合は対応する
 // bulk-clear 経路が無いため no-op。
@@ -144,7 +145,8 @@ func (h *Handler) clearQueueState(queue, state string) {
 		deleteAll(h.queueInspector.ListCompletedTasks, false)
 	default:
 		// active / paused / prioritized は単独 state での bulk-clear 経路が
-		// 無いため no-op。**paused も "wait" では掃けない** — 上の注意点 (1)。
+		// 無いため no-op。pause 中のジョブは wait にあるので "wait" で掃ける
+		// (上の注意点 (1))。
 	}
 }
 
