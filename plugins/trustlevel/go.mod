@@ -1,6 +1,6 @@
 module github.com/shiroha-a/mk-plugin-trustlevel
 
-go 1.26.6
+go 1.27.1
 
 require (
 	github.com/jackc/pgx/v5 v5.9.2

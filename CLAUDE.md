@@ -12,7 +12,7 @@
 
 | Component | Library | 用途 |
 |-----------|---------|------|
-| 言語 | **Go 1.26** | `go.mod`でバージョン管理 |
+| 言語 | **Go 1.27** | `go.mod`でバージョン管理 |
 | Webフレームワーク | **Echo v4** (`labstack/echo/v4`) | HTTPルーティング、ミドルウェア、WebSocket |
 | ORM | **GORM** (`gorm.io/gorm`) | PostgreSQLアクセス |
 | Migration | **golang-migrate** (`golang-migrate/migrate/v4`) | SQLベースのマイグレーション |
@@ -602,7 +602,7 @@ checkout / setup-go を除くと step は実行順に 3 つ。**required job な
 ### `vulncheck`ジョブ
 
 - `GOOS=linux govulncheck ./...` で依存と Go stdlib の**到達可能な**既知脆弱性を検出する。実際にデプロイするのは Linux なので `GOOS` を明示する (未指定だと host 依存の package load エラーで空振りしうる)。
-- あわせて `go.mod` の `go` directive と `Dockerfile` の builder tag が同じ patch version を指していることを検査する。govulncheck が見るのは `go.mod` 側だけなので、**Dockerfile だけ古いと CI は緑のまま配る image が脆弱になる**。builder を floating tag (`golang:1.26-alpine`) に戻さないこと (pull 時期で stdlib の patch が変わり、再現可能な形で「既知脆弱性を含まない」と言えない)。
+- あわせて `go.mod` の `go` directive と `Dockerfile` の builder tag が同じ patch version を指していることを検査する。govulncheck が見るのは `go.mod` 側だけなので、**Dockerfile だけ古いと CI は緑のまま配る image が脆弱になる**。builder を floating tag (`golang:1.27-alpine`) に戻さないこと (pull 時期で stdlib の patch が変わり、再現可能な形で「既知脆弱性を含まない」と言えない)。
 - 検出は import しているだけのものを含まず、**呼び出しが到達可能なもの**に限られる。無視リストを育てずに運用できるので、抑制ではなく更新で直す。修正版は govulncheck の `Fixed in:` に従うこと (同一モジュールに複数の脆弱性があると必要な版が別々で、低い方に上げても残る)。
 - PR の required check には**含めない**。新規 CVE の公開でコードを変えていない PR でも落ちるため。
 - 導入は #2387。通常テストが全て緑の状態で到達可能な脆弱性が 11 件残っており、既存の check では捕まらない領域だったため追加した。
@@ -932,6 +932,20 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 個別 fix の履歴は CHANGELOG.md 側に集約しており、本セクションは CLAUDE.md 本体
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
+
+- **2026-09-23**: Go を 1.26.6 → **1.27.1** に更新。Section 1 の技術スタック表と Section 8 の
+  floating tag の例を合わせた。**`go.work` は生成物なので `make plugins` で作り直す** —
+  作り直さないと `go.work` の `go 1.26.6` で toolchain が選ばれ (`go version` が 1.26.6 の
+  まま)、ビルドが `requires go >= 1.27.1` で落ちる。あわせて `make golangci-lint` の
+  toolchain を go.mod の版に固定した — `go run golangci-lint@v2.13.2` は golangci-lint 自身の
+  `go 1.26.0` を基準に選ぶので、手元の go が古いと go1.26 でビルドされて lint を拒否する。
+  **CI で 2 つ落ちた (手元の `make check` は緑だった)。** (a) **gofmt の整形結果が変わった**
+  (コメントの桁揃え) のに、`make fmt` は PATH の gofmt (1.26) を使っていて気付けなかった。
+  `go env GOROOT` の gofmt を使うよう直した。しかも 1.27 の `gofmt -d` は差分があると
+  exit 1 を返すので、CI の Format check は `bash -e` で**差分を 1 行も出さずに**落ちていた。
+  (b) **カバレッジのブロックが細かく数えられる**ようになり、`tools/pluginbuild` が
+  90.8% → 88.6% に落ちた (文の総数 163 → 184。テストされない `main` の重みが増えた)。
+  フラグの解析を `parseArgs` に切り出してテストした。
 
 - **2026-09-22**: legacy の **asynq driver を削除**し、mkq を唯一の queue driver にした
   (#2985)。Section 1 の技術スタック表と Section 2 のツリーを実態に合わせてある。

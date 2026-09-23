@@ -595,7 +595,7 @@ jobs:
       # Dockerfile の builder は go.mod の `go` directive と同じ patch version を
       # 指していないといけない。govulncheck が見るのは go.mod 側なので、ここが
       # ずれていると **CI は緑のまま、実際に配る image だけが脆弱**になる。
-      # floating tag (`golang:1.26-alpine`) に戻すと再現性も失われる。
+      # floating tag (`golang:1.27-alpine`) に戻すと再現性も失われる。
       - name: Go version pin is consistent between go.mod and Dockerfile
         run: |
           gomod=$(awk '/^go [0-9]/ {print $2; exit}' go.mod)

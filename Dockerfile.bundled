@@ -35,7 +35,7 @@ ARG ASSETS_SOURCE=external
 #
 # 既存 Dockerfile の builder stage と同じ手順。ただし submodule のアセットを
 # 参照しないので、`pnpm install` 済みかどうかの事前チェックは不要。
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 # git は go mod download 時の private module fetch に使う (通常の Dockerfile と同じ)。
 # plugins/ のプラグインが private な依存を持つ場合にここで要る。

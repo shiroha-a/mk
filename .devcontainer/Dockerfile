@@ -1,4 +1,4 @@
-FROM mcr.microsoft.com/devcontainers/go:1.26
+FROM mcr.microsoft.com/devcontainers/go:1.27
 
 # /go の所有権を vscode ユーザーに変更 (go mod download の権限エラー回避)
 RUN chown -R vscode:vscode /go

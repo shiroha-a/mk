@@ -212,7 +212,7 @@ workflow が後から集めたもの。前者がある場合はそちらが本�
 **Go version pin の不一致** — `go.mod` の `go` directive と Dockerfile の builder tag が
 ずれている。両方を同じ patch version に揃える。分けて検査しているのは、`govulncheck` が
 見るのは `go.mod` 側だけで、**Dockerfile だけ古いと CI は緑のまま配る image が脆弱**に
-なるため。builder を `golang:1.26-alpine` のような floating tag に戻すのも不可
+なるため。builder を `golang:1.27-alpine` のような floating tag に戻すのも不可
 (pull 時期で stdlib の patch が変わり、再現可能な形で「既知脆弱性を含まない」と言えない)。
 
 **govulncheck の検出** — 手元で同じコマンドを回す。
@@ -225,7 +225,7 @@ GOOS=linux "$(go env GOPATH)/bin/govulncheck" ./...
 `GOOS=linux` を付けるのは、実際にデプロイするのが Linux だから。付けないと host 依存の
 package load エラーで解析が空振りしうる。**ローカルの `go` が古いと govulncheck 自身が
 古い toolchain でビルドされ、`package requires newer Go version` で解析できない。**
-その場合は `GOTOOLCHAIN=go1.26.6 go install ...` のように明示してビルドし直す。
+その場合は `GOTOOLCHAIN=go1.27.1 go install ...` のように明示してビルドし直す。
 
 検出されるのは**呼び出しが到達可能なもの**だけで、import しているだけの脆弱性は落ちない。
 無視リストを育てずに運用できる設計なので、**抑制するより直すこと**。対応は原則 2 つ。

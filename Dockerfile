@@ -6,12 +6,12 @@
 
 # Stage 1: Build Go binary
 #
-# patch version まで固定する。`golang:1.26-alpine` のような floating tag は
+# patch version まで固定する。`golang:1.27-alpine` のような floating tag は
 # 「いつ pull したか」でリリースに入る標準ライブラリの patch が変わるため、
 # 「この image は stdlib の既知脆弱性を含まない」を再現可能な形で言えない。
 # go.mod の `go` directive と揃えること (govulncheck は go.mod 側を見るので、
 # ここだけ古いと CI が緑のまま脆弱な binary が出る)。
-FROM golang:1.26.6-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 
 # Step 2 (#618) で chai2010/webp → gen2brain/webp (libwebp on wazero/WASM) に
 # 切替えたので cgo 依存はゼロ。build-base (gcc + musl libc) は不要になった。

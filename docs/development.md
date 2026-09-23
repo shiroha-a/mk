@@ -7,7 +7,7 @@
 VS Codeの[Dev Containers](https://code.visualstudio.com/docs/devcontainers/containers)拡張をインストールして開く。
 
 `.devcontainer/`の構成:
-- Go 1.26 + PostgreSQL + Redis (network_mode: host)
+- Go 1.27 + PostgreSQL + Redis (network_mode: host)
 - golang-migrate がプリインストール。Node.js / pnpm は `postCreate.sh` が submodule の `.node-version` / `packageManager` を読んで入れる (#2921。image に入るのは bootstrap 用の Node だけ)
 - `postCreate.sh`で初期化
 
@@ -25,7 +25,7 @@ make dev
 ### ローカル環境
 
 前提条件:
-- Go 1.26+
+- Go 1.27+
 - PostgreSQL 18推奨 (16以降で動作、CI検証は18)
 - Redis 7+
 - Docker (テストで Redis を要する箇所が testcontainers を使う)
