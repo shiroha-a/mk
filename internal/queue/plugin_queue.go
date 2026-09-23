@@ -106,8 +106,8 @@ func (c *Client) EnqueuePluginPeer(ctx context.Context, plugin string, body []by
 	// 任意の本文で、利用者のノートを載せうる)。
 	//
 	// **cron 発火はここを通らない。** プラグインの定期実行は
-	// `Scheduler.RegisterPluginJob` 経由で、mkq native が per-fire option を
-	// drop するため対象外 (`queue_factory.go` の同旨のコメントを参照)。
+	// `Scheduler.RegisterPluginJob` 経由で、retention は `Scheduler.register` が
+	// 付ける (7 日の期限。mkq v1.2.0 / mkq#109)。
 	base := []driver.EnqueueOption{
 		driver.WithQueue(PluginQueueName(plugin)),
 		driver.WithMaxRetry(0),

@@ -181,9 +181,14 @@ const (
 // Policy 設定は deliver / inbox / export / push / webhook の application
 // queue 全てに対して適用する。Misskey TS upstream の QueueService.ts が
 // 全 enqueue helper で `removeOnComplete: {age: 7d, count: 30}` を指定して
-// いる規約に合わせるため (#1193)。maintenance queue は Scheduler.Register
-// 経由で mkq native の per-fire option を上流仕様で drop するため本 PR では
-// 対象外 (mkq upstream 拡張後に follow-up)。
+// いる規約に合わせるため (#1193)。**cron 発火の job はこの Policy を通らない**
+// (maintenance と、プラグインの cron)。そちらは `queue.Scheduler.register` が
+// upstream の system queue と同じ 7 日の期限を付ける (mkq v1.2.0 / mkq#109)。
+// **maintenance には Policy が無い** ので、cron 以外で maintenance に積む job
+// (`EnqueueCleanRemoteNotes` / `EnqueueReactionFlush`) には retention が付かない。
+// ただし期限による刈り込みは、job が入る側の集合 (completed / failed) 全体が
+// 対象なので、cron の job が**完了**するたびに completed 側のそれらも 7 日で
+// 刈られる。failed 側が刈られるのは cron の job が**失敗**したときだけ。
 func applyClientPolicies(c *queue.Client, cfg *config.Config) {
 	c.SetPolicy(queue.QueueName, buildPolicy(cfg.DeliverJobMaxAttempts, defaultDeliverJobMaxAttempts, cfg.DeliverJobKeepFailed, cfg.DeliverJobKeepCompleted))
 	c.SetPolicy(queue.InboxQueueName, buildPolicy(cfg.InboxJobMaxAttempts, defaultInboxJobMaxAttempts, cfg.InboxJobKeepFailed, cfg.InboxJobKeepCompleted))

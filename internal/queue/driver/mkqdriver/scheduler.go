@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/shiroha-a/mkq"
+
 	"github.com/shiroha-a/mk/internal/queue/driver"
 )
 
@@ -20,9 +22,14 @@ import (
 //     that — admin UI listings still show the queue name in the
 //     Job.name column for scheduled fires.
 //
-//   - mkq's ScheduleOption set (Limit / StartDate / EndDate / TZ /
-//     Immediately) does NOT cover per-fire job options like
-//     attempts / unique, so driver.WithMaxRetry / driver.WithUnique /
+//   - Retention (driver.WithKeepCompleted / WithKeepCompletedAge /
+//     WithKeepFailed / WithKeepFailedAge) IS honoured since mkq v1.2.0
+//     (mkq#109): it is translated to mkq's WithSchedule* options, which
+//     write it both to the scheduler template (read by a BullMQ TS
+//     worker) and to every iteration's job opts.
+//
+//   - mkq's ScheduleOption set does NOT cover other per-fire job options
+//     like attempts / unique, so driver.WithMaxRetry / driver.WithUnique /
 //     driver.WithProcessIn passed to Register are dropped. **これは
 //     現状の呼び出し方では実害が無い** (#2405):
 //
@@ -48,6 +55,7 @@ type Scheduler struct {
 // scheduleID is taken from taskType so re-registering the same task
 // at a different cron replaces (rather than duplicates) the entry.
 //
+// Retention options are honoured (see scheduleRetentionOptions).
 // driver.WithMaxRetry, driver.WithUnique, and driver.WithProcessIn
 // are accepted (the driver.Scheduler interface passes them through) but
 // are NOT honoured — see the Scheduler doc-comment for why that is
@@ -65,7 +73,31 @@ func (s *Scheduler) Register(cronspec, taskType string, payload []byte, opts ...
 		return fmt.Errorf("mkqdriver: unknown queue %q (taskType=%q)", o.Queue, taskType)
 	}
 	framed := framedPayload{Type: taskType, Body: payload}
-	return q.UpsertSchedulePattern(context.Background(), taskType, cronspec, framed)
+	return q.UpsertSchedulePattern(context.Background(), taskType, cronspec, framed, scheduleRetentionOptions(o)...)
+}
+
+// scheduleRetentionOptions translates the driver's retention options into
+// mkq's schedule-side equivalents, with the same guards as the Add path
+// (option.go): counts and ages only when positive.
+//
+// **件数 0 は渡さない。** driver の意味では `WithKeepCompleted(0)` は「件数で
+// 制限しない」だが、mkq の `WithScheduleKeepCompleted(0)` は「完了したら即
+// 削除」で逆になる (Add 側の `mkqdriver/option.go` と同じ 0-skip)。
+func scheduleRetentionOptions(o driver.EnqueueOptions) []mkq.ScheduleOption {
+	var out []mkq.ScheduleOption
+	if o.KeepCompletedSet && o.KeepCompleted > 0 {
+		out = append(out, mkq.WithScheduleKeepCompleted(o.KeepCompleted))
+	}
+	if o.KeepCompletedAge > 0 {
+		out = append(out, mkq.WithScheduleKeepCompletedAge(o.KeepCompletedAge))
+	}
+	if o.KeepFailedSet && o.KeepFailed > 0 {
+		out = append(out, mkq.WithScheduleKeepFailed(o.KeepFailed))
+	}
+	if o.KeepFailedAge > 0 {
+		out = append(out, mkq.WithScheduleKeepFailedAge(o.KeepFailedAge))
+	}
+	return out
 }
 
 // Start is a no-op for mkq — schedules are evaluated lazily by the

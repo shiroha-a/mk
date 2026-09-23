@@ -2,6 +2,7 @@ package mkqdriver_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -1683,6 +1684,33 @@ func TestDispatchableCount_MatchesQueueInfo(t *testing.T) {
 
 	assert.Equal(t, 5, n)
 	assert.Equal(t, info.Pending, n, "DispatchableCount が GetQueueInfo.Pending とずれている")
+}
+
+// **scheduler の retention は template に載る (mkq v1.2.0 / #3171)。** 件数と
+// 期限の両方を渡したときに completed / failed を取り違えず、両方が 1 つの
+// object にまとまることを見る。件数 0 は渡らない (driver では「制限なし」)。
+func TestScheduler_RetentionReachesTemplate(t *testing.T) {
+	testutil.SkipIfNoDocker(t)
+	flushRedis(t)
+
+	d, err := mkqdriver.New(context.Background(), mkqdriver.Config{
+		Redis: redis.UniversalOptions{Addrs: []string{testRedis.Addr}},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = d.Close() })
+
+	require.NoError(t, d.Scheduler().Register("0 * * * *", "retained", nil,
+		driver.WithQueue("maintenance"),
+		driver.WithKeepCompleted(30), driver.WithKeepCompletedAge(time.Hour),
+		driver.WithKeepFailed(0), driver.WithKeepFailedAge(2*time.Hour),
+	))
+
+	raw, err := testRedis.Client.HGet(context.Background(), "bull:maintenance:repeat:retained", "opts").Result()
+	require.NoError(t, err)
+	var tmpl map[string]any
+	require.NoError(t, json.Unmarshal([]byte(raw), &tmpl))
+	assert.Equal(t, map[string]any{"count": float64(30), "age": float64(3600)}, tmpl["removeOnComplete"])
+	assert.Equal(t, map[string]any{"age": float64(7200)}, tmpl["removeOnFail"], "件数 0 は渡らない")
 }
 
 // **一覧は新しい順で返す (#3167)。** upstream の admin/queue/jobs は

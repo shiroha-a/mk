@@ -30,6 +30,32 @@ func NewScheduler(d driver.Driver) *Scheduler {
 	return &Scheduler{inner: d.Scheduler()}
 }
 
+// ScheduledJobRetention is how long completed / failed iterations of a
+// cron job are kept, matching upstream QueueService (7 days).
+const ScheduledJobRetention = 7 * 24 * time.Hour
+
+// register is the single entry point for every cron registration, so a
+// new job cannot be added without retention.
+//
+// **定期ジョブの completed / failed は保持期間を付けないと無期限に溜まる**
+// (本番の maintenance で完了 57,614 件・失敗 9,319 件、最古は運用開始日)。
+// upstream は `upsertJobScheduler` の template に `removeOnComplete` /
+// `removeOnFail` を `{ age: 7 日 }` で置いている。mkq v1.2.0 で scheduler にも
+// 指定できるようになった (mkq#109)。
+//
+// **件数ではなく期限で指定する。** mkq の CHANGELOG のとおり、件数指定は
+// 溜まった分を 1 回の Lua で全部消そうとして Redis を止めうる。期限指定は
+// 1 回の完了につき最大 1000 件ずつ刈るので、溜まった分も数回で掃ける。
+// upstream が件数を使わないのは、キュー全体で数えるため高頻度の job が
+// 低頻度の job の記録を押し出すから (QueueService.ts のコメント)。
+func (s *Scheduler) register(cronspec, taskType string, payload []byte, opts ...driver.EnqueueOption) error {
+	opts = append(opts,
+		driver.WithKeepCompletedAge(ScheduledJobRetention),
+		driver.WithKeepFailedAge(ScheduledJobRetention),
+	)
+	return s.inner.Register(cronspec, taskType, payload, opts...)
+}
+
 // RegisterChartJobs registers the 3 chart-related cron jobs.
 //
 //   - tickCharts : 毎時 55 分 (TS Misskey と同一 cron pattern)
@@ -50,7 +76,7 @@ func (s *Scheduler) RegisterChartJobs() error {
 		{"0 0 * * *", TaskTypeChartClean, 24 * time.Hour},
 	}
 	for _, j := range jobs {
-		if err := s.inner.Register(j.cron, j.taskType, nil,
+		if err := s.register(j.cron, j.taskType, nil,
 			driver.WithQueue(MaintenanceQueueName),
 			driver.WithMaxRetry(0),
 			driver.WithUnique(j.uniqueTTL),
@@ -65,7 +91,7 @@ func (s *Scheduler) RegisterChartJobs() error {
 // refresh cron (#393) at 03:00. The actual walk + fetch is implemented
 // by processors.InstanceRefreshProcessor.
 func (s *Scheduler) RegisterInstanceRefreshJob() error {
-	return s.inner.Register("0 3 * * *", TaskTypeInstanceRefresh, nil,
+	return s.register("0 3 * * *", TaskTypeInstanceRefresh, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(24*time.Hour),
@@ -76,7 +102,7 @@ func (s *Scheduler) RegisterInstanceRefreshJob() error {
 // (#421) at 00:00. The actual computation is implemented by
 // processors.RetentionAggregateProcessor.
 func (s *Scheduler) RegisterRetentionJob() error {
-	return s.inner.Register("0 0 * * *", TaskTypeRetentionAggregate, nil,
+	return s.register("0 0 * * *", TaskTypeRetentionAggregate, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(24*time.Hour),
@@ -87,7 +113,7 @@ func (s *Scheduler) RegisterRetentionJob() error {
 // (#1563) every 5 minutes, mirroring upstream `checkExpiredMutings`. The
 // prune is implemented by processors.CheckExpiredMutingsProcessor.
 func (s *Scheduler) RegisterCheckExpiredMutingsJob() error {
-	return s.inner.Register("*/5 * * * *", TaskTypeCheckExpiredMutings, nil,
+	return s.register("*/5 * * * *", TaskTypeCheckExpiredMutings, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(5*time.Minute),
@@ -99,7 +125,7 @@ func (s *Scheduler) RegisterCheckExpiredMutingsJob() error {
 // role_assignment 削除 / reversi outdated game 削除を processors.CleanProcessor
 // が行う。
 func (s *Scheduler) RegisterCleanJob() error {
-	return s.inner.Register("0 0 * * *", TaskTypeClean, nil,
+	return s.register("0 0 * * *", TaskTypeClean, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(24*time.Hour),
@@ -111,7 +137,7 @@ func (s *Scheduler) RegisterCleanJob() error {
 // 行を消す。頻度を上げているのは、オブジェクトストレージが未完了の
 // マルチパートアップロードにも課金するため (詳細は TaskTypeChunkedUploadGC)。
 func (s *Scheduler) RegisterChunkedUploadGCJob() error {
-	return s.inner.Register("*/15 * * * *", TaskTypeChunkedUploadGC, nil,
+	return s.register("*/15 * * * *", TaskTypeChunkedUploadGC, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(15*time.Minute),
@@ -135,7 +161,7 @@ func (s *Scheduler) RegisterChunkedUploadGCJob() error {
 func (s *Scheduler) RegisterPluginJob(cron string, plugin, job string, payload []byte) error {
 	// **maintenance ではなくプラグイン専用のキューへ (#2818)。** 相乗りだと、
 	// 1 つのプラグインの cron が詰まったときに本体の定期処理まで止まる。
-	return s.inner.Register(cron, PluginTaskType(plugin, job), payload,
+	return s.register(cron, PluginTaskType(plugin, job), payload,
 		driver.WithQueue(PluginQueueName(plugin)),
 		driver.WithMaxRetry(0),
 	)
@@ -148,7 +174,7 @@ func (s *Scheduler) RegisterPluginJob(cron string, plugin, job string, payload [
 // の条件に合致する行が増えるため。enable gate は processor 側で meta を見るので
 // cron は無条件登録する。
 func (s *Scheduler) RegisterOrphanUserCleanupJob() error {
-	return s.inner.Register("0 5 * * *", TaskTypeOrphanUserCleanup, nil,
+	return s.register("0 5 * * *", TaskTypeOrphanUserCleanup, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(24*time.Hour),
@@ -166,7 +192,7 @@ func (s *Scheduler) RegisterOrphanUserCleanupJob() error {
 //
 // enable gate は processor 側で meta を見るので cron は無条件登録する。
 func (s *Scheduler) RegisterOrphanAttachmentCleanupJob() error {
-	return s.inner.Register("30 5 * * *", TaskTypeOrphanAttachmentCleanup, nil,
+	return s.register("30 5 * * *", TaskTypeOrphanAttachmentCleanup, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(24*time.Hour),
@@ -178,7 +204,7 @@ func (s *Scheduler) RegisterOrphanAttachmentCleanupJob() error {
 // router.go の 6h time.Ticker だったが、TS の systemQueue cron に揃える。
 // enable gate は processor 側で meta を見るので cron は無条件登録する。
 func (s *Scheduler) RegisterCleanRemoteNotesJob() error {
-	return s.inner.Register("0 4 * * *", TaskTypeCleanRemoteNotes, nil,
+	return s.register("0 4 * * *", TaskTypeCleanRemoteNotes, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(24*time.Hour),
@@ -190,7 +216,7 @@ func (s *Scheduler) RegisterCleanRemoteNotesJob() error {
 // processors.CheckModeratorsActivityProcessor が inactivity 判定と通知を行う。
 // remaining.hours%6 の de-dup が崩れないよう 1h cadence を保つ (ticker 不可)。
 func (s *Scheduler) RegisterCheckModeratorsActivityJob() error {
-	return s.inner.Register("30 * * * *", TaskTypeCheckModeratorsActivity, nil,
+	return s.register("30 * * * *", TaskTypeCheckModeratorsActivity, nil,
 		driver.WithQueue(MaintenanceQueueName),
 		driver.WithMaxRetry(0),
 		driver.WithUnique(1*time.Hour),
