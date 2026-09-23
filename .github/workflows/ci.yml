@@ -427,10 +427,13 @@ jobs:
       - name: Actionlint
         run: make actionlint
 
+      # **gofmt の終了コードも見る。** Go 1.27 から `gofmt -d` は差分があると
+      # exit 1 を返すので、`diff=$(...)` を素で書くと `bash -e` がそこで step を
+      # 止め、**差分を 1 行も出さずに落ちる** (実測)。`if` の条件に置けば `-e` は
+      # 効かない。構文エラー (stderr) も一緒に出す。
       - name: Format check
         run: |
-          diff=$(gofmt -s -d .)
-          if [ -n "$diff" ]; then
+          if ! diff=$(gofmt -s -d . 2>&1) || [ -n "$diff" ]; then
             echo "$diff"
             exit 1
           fi

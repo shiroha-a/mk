@@ -361,7 +361,11 @@ plugin-test: ## 同梱プラグインのテストを実行 (PostgreSQL が要る
 	done
 
 fmt: ## gofmt -s -w . で整形
-	gofmt -s -w .
+	# **PATH の gofmt ではなく go.mod の toolchain のものを使う。** gofmt は版で
+	# 整形結果が変わる (Go 1.27 でコメントの桁揃えが変わった) が、PATH の gofmt は
+	# GOTOOLCHAIN の切り替えに追従しない。手元で緑なのに CI (setup-go が go.mod の
+	# 版を入れる) の Format check で落ちる (実測)。
+	"$$(go env GOROOT)/bin/gofmt" -s -w .
 
 lint: ## go vet ./...
 	go vet ./...
