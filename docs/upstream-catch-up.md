@@ -389,10 +389,15 @@ diff harness の `META_IGNORE` には `app192IconUrl` / `app512IconUrl` /
 ### submodule bump 後に必須: TS baseline で Playwright を回す
 
 ```bash
-gh workflow run playwright.yml --ref <branch>   # TS backend も含めて実行される
+gh workflow run playwright.yml --ref <branch> -f ref=<branch>   # TS backend も含めて実行される
 # または手元で
 make playwright-ts-up && make playwright-ts-test && make playwright-ts-down
 ```
+
+**`-f ref=<branch>` を省かない。** checkout は `inputs.ref || github.ref` だが、入力 `ref` の既定値が
+`develop` なので `github.ref` には落ちない。`--ref` だけだと workflow 定義はそのブランチのものを使いつつ
+**develop のコードを検証する** (2026.9.1 の追従で 2 回踏んだ。落ちた行番号が修正前のものだった)。
+`diff-e2e.yml` / `dropin-e2e.yml` / `upstream-backend-e2e.yml` も同じ形。
 
 Playwright spec は普段 mk-go backend に対してしか走っていない (PR トリガーでも
 mk-go のみ)。**TS backend に対して回すのは upstream 追従のタイミングだけ**という
