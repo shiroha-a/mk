@@ -14,9 +14,9 @@ import (
 // 再接続時の取りこぼし回収 (#3132) の配線が `.vue` 側で外れていないか検査する。
 //
 // **判断そのものは `utility/reconnect-resync.ts` 側に切り出してあり、vitest が
-// 68 形の変異で押さえている。** ここで見るのは「SFC がその関数を使っているか」
+// 変異検証で押さえている。** ここで見るのは「SFC がその関数を使っているか」
 // だけ — 残った 1 行を書き換えれば、テストを 1 つも落とさずに過去の不具合へ
-// 戻せてしまうため。実際に戻せる形が 5 つある:
+// 戻せてしまうため。実際に戻せる形が 6 つある:
 //
 //   - 通知側の `NOTIFICATION_RESYNC_PARAMS` を落とす (背景の穴埋めが既読化を
 //     伴い、見ていない通知がバッジごと消える)
@@ -25,8 +25,12 @@ import (
 //   - `_connected_` を `_disconnected_` に戻す (`Stream.reconnect()` 経由の
 //     張り直しでは emit されないので、モバイルで最も多い経路が死ぬ)
 //   - `off` / `dispose` を落とす (ハンドラのリーク)
-//   - 通知側 watcher を `retry()` から `onConnected()` に戻す (切断が無くても撃つ)
-//   - spread の後ろで述語を上書きする (テスト済みの判断を無言で差し替える)
+//   - 表示に戻ったときに SFC から `onConnected()` を撃つ (切断が無くても撃つ)。
+//     表示に戻ったときの拾い直しは #3195 から本体が自分で購読しているので、
+//     SFC は何も配線しなくてよい
+//   - spread の後ろで述語を上書きする、または本体のテスト用の注入点 (表示状態 /
+//     timer / 時計 など) を SFC で渡す (テスト済みの判断を無言で差し替える。
+//     後者は #3195 の「裏では投げない」「見送った回を走らせ直す」を外せる)
 //
 // **コンポーネントを mount して検査しない。** この 2 つは `MkNote` / DI / store /
 // prefer / useStream / misskeyApi を芋づるで引くので、モックが配線本体より
@@ -79,10 +83,10 @@ func TestStreamResyncIsWiredInTimelines(t *testing.T) {
 	// 通知一覧だけの約束。
 	assert.Contains(t, notifications, "params: NOTIFICATION_RESYNC_PARAMS",
 		"通知の穴埋めが `markAsRead: false` を渡していない (背景の取得で未読が消える)")
-	assert.Contains(t, notifications, "void reconnectResync.retry();",
-		"表に戻ったときの拾い直しが `retry()` でない (`onConnected()` だと切断が無くても撃つ)")
-	assert.NotContains(t, notifications, "void reconnectResync.onConnected();",
-		"watcher から `onConnected()` を呼んでいる (控えが無くても起点を作ってしまう)")
+	for name, body := range map[string]string{"notifications": notifications, "notes": notes} {
+		assert.NotContainsf(t, body, "void reconnectResync.onConnected();",
+			"%s: watcher から `onConnected()` を呼んでいる (控えが無くても起点を作ってしまう)", name)
+	}
 
 	// ノート側は queue を描画するので、先頭を見ていないときは積む。
 	assert.Contains(t, notes, "toQueue: () => !isTop() || isPausingUpdate",
@@ -115,6 +119,19 @@ func readResyncWiringSource(t *testing.T, rel string) string {
 // はこの集合に無いので、緩めても誤検知しない。
 var resyncOptionKeyRe = regexp.MustCompile(`\b(getNewestId|getGeneration|canResync|resync)\s*:`)
 
+// 本体がテストのためだけに開けている注入点。SFC で渡すと、既定の購読 / timer /
+// 判定 (#3195) がまとめて差し替わる。
+//
+// **`key:` の形だけを見ない。** 省略記法 (`{ jitter }`)・メソッド記法
+// (`isVisible() { ... }`)・引用符付きのキー (`'isVisible': ...`) でも渡せる。
+// 呼び出しの中にこれらの名前が識別子として出てくること自体を禁じる (SFC の
+// 組み立ては spread だけなので、正当な用途で現れない)。
+//
+// **呼び出しの外で組んだオブジェクトを spread する形は見えない**
+// (`const extra = { isVisible: ... }` → `...extra`)。名前で見る走査は名前で
+// 避けられる (#3135) ので、ここが受け持つのは普通に書いたときに踏む形だけ。
+var resyncTestOnlyKeyRe = regexp.MustCompile(`\b(interval|initialDelay|jitter|now|random|sleep|schedule|isVisible|onVisible|resumedRecently)\b`)
+
 // assertNoOverrideAfterSpread は `...paginatorResyncOptions(...)` より後ろで
 // 述語を上書きしていないことを見る。スプレッドにした構造上、呼び出し側は
 // テスト済みの判断を無言で差し替えられる。
@@ -130,4 +147,14 @@ func assertNoOverrideAfterSpread(t *testing.T, body string) {
 	require.GreaterOrEqual(t, end, 0, "createReconnectResync の閉じが見つからない")
 	assert.Empty(t, resyncOptionKeyRe.FindAllString(rest[:end], -1),
 		"spread の後ろで述語を上書きしている (テスト済みの判断が効かなくなる)")
+
+	// 注入点は spread の前後どちらに書いても効くので、呼び出し全体を見る。
+	const call = "createReconnectResync({"
+	j := strings.Index(body, call)
+	require.GreaterOrEqual(t, j, 0, "createReconnectResync の呼び出しが見つからない")
+	whole := body[j:]
+	wend := strings.Index(whole, "\n});")
+	require.GreaterOrEqual(t, wend, 0, "createReconnectResync の閉じが見つからない")
+	assert.Empty(t, resyncTestOnlyKeyRe.FindAllString(whole[:wend], -1),
+		"本体のテスト用の注入点を SFC で渡している (#3195 の既定の購読 / timer / 判定が差し替わる)")
 }
