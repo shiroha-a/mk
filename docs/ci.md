@@ -320,9 +320,12 @@ PR では回らない。失敗は Actions 上で確認して別 PR で対処す�
 「どれが例外か」を読む側が毎回判断しなくて済むようにするため。
 
 `TestWorkflowActionsArePinnedToSHA` (`internal/entitycompat/actions_pin_test.go`) が
-`owner/repo@<40 桁の SHA> # vX.Y.Z` の形になっているかを見る。`test-shards` で回るので
+`owner/repo@<40 桁の SHA> # vX.Y.Z` の形になっているかを見る (`docker://` は
+`docker://<image>@sha256:<digest>` を固定として扱う)。`test-shards` で回るので
 tag 参照に戻すと required check の `test` が落ちる。同じリポジトリ内の参照 (`./...`) と
-YAML のコメント行は対象外。
+YAML のコメント行は対象外。workflow は YAML パーサで読むので、flow 形式
+(`- {uses: ...}`) や値を次の行に置く書き方も拾う。**SHA とコメントの版が対応して
+いるかは見ない** — tag を解くにはネットワークが要り、ゲートでは判定できない。
 
 **更新は dependabot に任せる。** `.github/dependabot.yml` の `github-actions` ecosystem が
 週 1 回、固定した action の新しい版を 1 つの PR にまとめて出す。dependabot は SHA と
