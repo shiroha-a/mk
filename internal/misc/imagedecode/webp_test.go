@@ -6,6 +6,8 @@ import (
 	"errors"
 	"image"
 	"image/color"
+	"os"
+	"runtime"
 	"testing"
 
 	gwebp "github.com/gen2brain/webp"
@@ -53,7 +55,7 @@ func encodeFrameChunks(t *testing.T, img image.Image, lossless bool) []byte {
 	t.Helper()
 	var buf bytes.Buffer
 	require.NoError(t, gwebp.Encode(&buf, img, gwebp.Options{Lossless: lossless, Quality: 100}))
-	chunks, err := webpChunks(buf.Bytes())
+	chunks, _, err := webpChunks(buf.Bytes())
 	require.NoError(t, err)
 	var out []byte
 	for _, c := range chunks {
@@ -191,7 +193,7 @@ func TestDecodeWebP_Branches(t *testing.T) {
 	var lossless, lossy bytes.Buffer
 	require.NoError(t, gwebp.Encode(&lossless, red, gwebp.Options{Lossless: true}))
 	require.NoError(t, gwebp.Encode(&lossy, solid(8, 8, color.NRGBA{G: 255, A: 100}), gwebp.Options{Quality: 90}))
-	lossyChunks, err := webpChunks(lossy.Bytes())
+	lossyChunks, _, err := webpChunks(lossy.Bytes())
 	require.NoError(t, err)
 	require.Equal(t, "VP8X", lossyChunks[0].typ, "lossy with alpha is expected to use the extended format")
 
@@ -266,4 +268,137 @@ func TestDecodeWebP_Branches(t *testing.T) {
 		_, _, err := webpBitstreamDims("VP9 ", nil)
 		assert.True(t, errors.Is(err, ErrMalformedWebP))
 	})
+}
+
+// allocDuring reports how many bytes f allocated.
+func allocDuring(f func()) uint64 {
+	runtime.GC()
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	f()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// losslessChunk encodes a solid w x h image and returns its VP8L chunk.
+func losslessChunk(t *testing.T, w, h int) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	require.NoError(t, gwebp.Encode(&buf, solid(w, h, color.NRGBA{R: 255, A: 255}), gwebp.Options{Lossless: true}))
+	chunks, _, err := webpChunks(buf.Bytes())
+	require.NoError(t, err)
+	for _, c := range chunks {
+		if c.typ == "VP8L" {
+			return chunk("VP8L", c.payload)
+		}
+	}
+	t.Fatal("no VP8L chunk")
+	return nil
+}
+
+// TestDecode_WebPExifPastRIFFEndIsNotRead pins that bytes after the declared
+// RIFF size never reach imaging. imaging の EXIF 読み取りは RIFF の宣言長を見ずに
+// EOF まで歩き、見つけた長さをそのまま確保する (修正前は 54 バイトで 4GiB)。
+func TestDecode_WebPExifPastRIFFEndIsNotRead(t *testing.T) {
+	bits := losslessChunk(t, 8, 8)
+	if n := binary.LittleEndian.Uint32(bits[4:8]); n%2 == 1 {
+		// 宣言長が奇数だと imaging の読み取りがパディングでずれて EXIF に届かず、
+		// 切り詰めを外した変異でも落ちなくなる。偶数長に揃える
+		bits = chunk("VP8L", append(append([]byte{}, bits[8:8+n]...), 0))
+	}
+	body := riffWebP(vp8xCanvas(webpFlagEXIF, 8, 8), bits)
+	evil := append(append([]byte{}, body...), []byte("EXIF\xf0\xff\xff\xff")...)
+	var err error
+	alloc := allocDuring(func() { _, err = Decode(evil) })
+	require.NoError(t, err)
+	assert.Less(t, alloc, uint64(16<<20), "allocated %d bytes", alloc)
+}
+
+// TestDecode_WebPPaddingMisalignmentIsRefused pins the replay of imaging's
+// metadata walk. imaging はパディングを数えないので、奇数長チャンクの後ろを
+// 1 バイトずれて読み、偽の EXIF 長で確保する (1MiB のファイルで 256MiB)。
+func TestDecode_WebPPaddingMisalignmentIsRefused(t *testing.T) {
+	bits := losslessChunk(t, 8, 8)
+	payload := bits[8 : 8+binary.LittleEndian.Uint32(bits[4:8])]
+	if len(payload)%2 == 0 {
+		// 末尾に 1 バイト足して奇数長にする (VP8L は余りを読まない)
+		payload = append(append([]byte{}, payload...), 0)
+	}
+	odd := chunk("VP8L", payload)
+	odd[len(odd)-1] = 'E' // パディング位置。imaging はここから "EXIF" と読む
+	// imaging には長さ 0x10000000 に見える: 0x00 + size の下位 3 バイト
+	fake := append([]byte("XIF\x00\x00\x00\x10\x00"), make([]byte, 1<<20)...)
+	data := riffWebP(vp8xCanvas(webpFlagEXIF, 8, 8), odd, fake)
+
+	var err error
+	alloc := allocDuring(func() { _, err = Decode(data) })
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrMalformedWebP), "got %v", err)
+	assert.Less(t, alloc, uint64(64<<20), "allocated %d bytes", alloc)
+}
+
+// TestDecode_AnimatedWebPDecodesOnlyTheFirstFrame pins the core of the
+// defence: later frames are never decoded. 検査は 1 コマ目しか見ないので、
+// 組み直した still ではなく元のバイト列を渡すと 2 コマ目以降を全部確保する。
+func TestDecode_AnimatedWebPDecodesOnlyTheFirstFrame(t *testing.T) {
+	const side = 2048
+	frame := losslessChunk(t, side, side)
+	chunks := [][]byte{vp8xCanvas(webpFlagAnimation, side, side), animHeader()}
+	for i := 0; i < 6; i++ {
+		chunks = append(chunks, anmf(0, 0, side, side, frame))
+	}
+	data := riffWebP(chunks...)
+	var err error
+	alloc := allocDuring(func() { _, err = Decode(data) })
+	require.NoError(t, err)
+	// 1 コマ分のラスタは 16MiB。全コマをデコードすると 6 倍以上になる
+	assert.Less(t, alloc, uint64(48<<20), "allocated %d bytes", alloc)
+}
+
+// exifOrientation builds a little-endian TIFF with one Orientation entry,
+// padded to an odd length so that the rebuild has to even it out.
+func exifOrientation(o uint16) []byte {
+	b := []byte("II*\x00\x08\x00\x00\x00\x01\x00")
+	entry := make([]byte, 12)
+	binary.LittleEndian.PutUint16(entry[0:2], 0x0112)
+	binary.LittleEndian.PutUint16(entry[2:4], 3)
+	binary.LittleEndian.PutUint32(entry[4:8], 1)
+	binary.LittleEndian.PutUint16(entry[8:10], o)
+	b = append(b, entry...)
+	return append(b, 0, 0, 0, 0) // next IFD
+}
+
+func TestDecode_AnimatedWebPKeepsExifOrientation(t *testing.T) {
+	frame := encodeFrameChunks(t, solid(8, 16, color.NRGBA{R: 255, A: 255}), true)
+	data := riffWebP(vp8xCanvas(webpFlagAnimation|webpFlagEXIF, 8, 16), animHeader(),
+		anmf(0, 0, 8, 16, frame), chunk("EXIF", exifOrientation(6)))
+	img, err := Decode(data)
+	require.NoError(t, err)
+	// Orientation 6 は 90 度回転なので 8x16 が 16x8 になる
+	assert.Equal(t, image.Rect(0, 0, 16, 8), img.Bounds())
+}
+
+// oddICC returns a real sRGB profile padded to an odd length.
+//
+// sRGB-v2-nano.icc は saucecontrol/Compact-ICC-Profiles (CC0) のもの。ICC は
+// ヘッダに自分の長さを持つので、末尾に 1 バイト足しても同じプロファイルとして読まれる。
+func oddICC(t *testing.T) []byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/sRGB-v2-nano.icc")
+	require.NoError(t, err)
+	if len(b)%2 == 0 {
+		b = append(b, 0)
+	}
+	return b
+}
+
+func TestDecode_AnimatedWebPKeepsExifOrientationAfterOddICCP(t *testing.T) {
+	// 奇数長の ICCP の後ろでも imaging が EXIF を見つけられること
+	frame := encodeFrameChunks(t, solid(8, 16, color.NRGBA{R: 255, A: 255}), true)
+	data := riffWebP(vp8xCanvas(webpFlagAnimation|webpFlagICC|webpFlagEXIF, 8, 16),
+		chunk("ICCP", oddICC(t)), animHeader(),
+		anmf(0, 0, 8, 16, frame), chunk("EXIF", exifOrientation(6)))
+	img, err := Decode(data)
+	require.NoError(t, err)
+	assert.Equal(t, image.Rect(0, 0, 16, 8), img.Bounds())
 }

@@ -46,10 +46,15 @@ const (
 // 残りのコマは元から捨てている)。組み直す前に、コマが canvas に収まること
 // と、ビットストリームの寸法が宣言と一致することを確かめる。
 func decodeWebP(data []byte, maxPixels int64) (image.Image, error) {
-	chunks, err := webpChunks(data)
+	chunks, end, err := webpChunks(data)
 	if err != nil {
 		return nil, err
 	}
+	// **検査した範囲と同じバイト列だけをデコーダへ渡す。** imaging のメタデータ
+	// 読み取り (`webpmeta.parseWebpExtended`) は RIFF の宣言長を見ずに EOF まで
+	// 歩くので、宣言長より後ろに置いた EXIF チャンクの長さで 4GiB を確保した
+	// (54 バイトのファイル、実測)。
+	data = data[:end]
 	if len(chunks) == 0 {
 		return nil, fmt.Errorf("%w: no chunks", ErrMalformedWebP)
 	}
@@ -64,7 +69,7 @@ func decodeWebP(data []byte, maxPixels int64) (image.Image, error) {
 		if err := checkWebPPixels(w, h, maxPixels); err != nil {
 			return nil, err
 		}
-		return imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+		return decodeCheckedWebP(data)
 	case "VP8X":
 	default:
 		return nil, fmt.Errorf("%w: unexpected first chunk %q", ErrMalformedWebP, first.typ)
@@ -96,7 +101,7 @@ func decodeWebP(data []byte, maxPixels int64) (image.Image, error) {
 				return nil, fmt.Errorf("%w: bitstream %dx%d != canvas %dx%d",
 					ErrMalformedWebP, w, h, canvasW, canvasH)
 			}
-			return imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+			return decodeCheckedWebP(data)
 		}
 		return nil, fmt.Errorf("%w: no bitstream", ErrMalformedWebP)
 	}
@@ -105,7 +110,7 @@ func decodeWebP(data []byte, maxPixels int64) (image.Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	img, err := imaging.Decode(bytes.NewReader(still), imaging.AutoOrientation(true))
+	img, err := decodeCheckedWebP(still)
 	if err != nil {
 		return nil, err
 	}
@@ -216,17 +221,23 @@ func firstWebPFrame(chunks []webpChunk, canvasW, canvasH int) ([]byte, image.Rec
 		putU24le(vp8x[4:7], uint32(w-1))
 		putU24le(vp8x[7:10], uint32(h-1))
 		writeWebPChunk(&body, "VP8X", vp8x)
+		// **EXIF を ICCP の直後 (ビットストリームより前) に置き、ICCP は偶数長に
+		// する。** imaging のメタデータ読み取りはチャンクを飛ばすときにパディングを
+		// 数えないので、奇数長の ICCP の後ろでは 1 バイトずれて EXIF を見失い、
+		// 向きの補正が落ちる。ICC プロファイルは自分の長さを中に持つので、末尾に
+		// 0 を 1 バイト足しても意味は変わらない。ずれを使った確保は
+		// checkImagingWebPMetadata が別に止める。
 		if iccp != nil {
-			writeWebPChunk(&body, "ICCP", iccp.payload)
+			writeWebPChunk(&body, "ICCP", evenPayload(iccp.payload))
+		}
+		if exif != nil {
+			writeWebPChunk(&body, "EXIF", exif.payload)
 		}
 		if alph != nil {
 			writeWebPChunk(&body, "ALPH", alph.payload)
 		}
 	}
 	writeWebPChunk(&body, bits.typ, bits.payload)
-	if exif != nil {
-		writeWebPChunk(&body, "EXIF", exif.payload)
-	}
 	var out bytes.Buffer
 	out.WriteString("RIFF")
 	_ = binary.Write(&out, binary.LittleEndian, uint32(body.Len()))
@@ -234,17 +245,20 @@ func firstWebPFrame(chunks []webpChunk, canvasW, canvasH int) ([]byte, image.Rec
 	return out.Bytes(), image.Rect(x, y, x+w, y+h), nil
 }
 
-// webpChunks walks the top-level chunks of a RIFF/WEBP file.
-func webpChunks(data []byte) ([]webpChunk, error) {
+// webpChunks walks the top-level chunks of a RIFF/WEBP file and returns them
+// with the end offset of the RIFF container.
+func webpChunks(data []byte) ([]webpChunk, int, error) {
 	if !isWebP(data) {
-		return nil, fmt.Errorf("%w: not RIFF/WEBP", ErrMalformedWebP)
+		return nil, 0, fmt.Errorf("%w: not RIFF/WEBP", ErrMalformedWebP)
 	}
 	// RIFF の宣言長より後ろは見ない (末尾に付いたゴミをチャンクと読まない)。
+	// 呼び出し側はこの範囲だけをデコーダへ渡す。
 	end := len(data)
 	if riffEnd := 8 + int(binary.LittleEndian.Uint32(data[4:8])); riffEnd >= 12 && riffEnd < end {
 		end = riffEnd
 	}
-	return webpChunksAt(data[:end], 12)
+	chunks, err := webpChunksAt(data[:end], 12)
+	return chunks, end, err
 }
 
 // webpChunksAt walks RIFF chunks in data starting at pos.
@@ -260,7 +274,8 @@ func webpChunksAt(data []byte, pos int) ([]webpChunk, error) {
 		typ := string(data[pos : pos+4])
 		size := int(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
 		start := pos + 8
-		if size > len(data)-start {
+		// size < 0 は 32bit 環境で uint32 が int に収まらないとき。
+		if size < 0 || size > len(data)-start {
 			return nil, fmt.Errorf("%w: chunk %q overruns container", ErrMalformedWebP, typ)
 		}
 		out = append(out, webpChunk{typ: typ, payload: data[start : start+size]})
@@ -322,4 +337,94 @@ func writeWebPChunk(buf *bytes.Buffer, typ string, payload []byte) {
 	if len(payload)%2 == 1 {
 		buf.WriteByte(0)
 	}
+}
+
+// decodeCheckedWebP hands data to imaging after confirming that imaging's
+// metadata reader will not allocate more than the bytes it is given.
+func decodeCheckedWebP(data []byte) (image.Image, error) {
+	if err := checkImagingWebPMetadata(data); err != nil {
+		return nil, err
+	}
+	return imaging.Decode(bytes.NewReader(data), imaging.AutoOrientation(true))
+}
+
+// checkImagingWebPMetadata replays how kovidgoyal/imaging (v1.8.21,
+// `prism/meta/webpmeta.parseWebpExtended`) walks a WebP to collect ICC and
+// EXIF data, and refuses input on which that walk would allocate a buffer
+// larger than the remaining bytes.
+//
+// **imaging はチャンクの長さを検査せずに `make([]byte, length)` する。** しかも
+// チャンクを飛ばすときにパディングを数えないので、こちらの走査 (仕様どおり
+// パディングを飛ばす) とは別の位置を読む。奇数長のビットストリームの
+// パディングを 'E' にして後ろに "XIF\0" 型のチャンクを置くと、imaging には
+// 長さ 0x10000000 の EXIF に見えた (1MiB のファイルで 256MiB、実測)。
+// 仕様側の検査では拾えないので、imaging と同じ歩き方をここで再現する。
+func checkImagingWebPMetadata(data []byte) error {
+	const vp8xStart = 20 // "RIFF" + size + "WEBP" + "VP8X" + size
+	if len(data) < vp8xStart+10 || string(data[12:16]) != "VP8X" {
+		return nil
+	}
+	if binary.LittleEndian.Uint32(data[16:20]) != 10 {
+		return nil // imaging はここでエラーにして何も確保しない
+	}
+	flags := data[vp8xStart]
+	hasICC := flags&webpFlagICC != 0
+	hasEXIF := flags&webpFlagEXIF != 0
+	if !hasICC && !hasEXIF {
+		return nil
+	}
+	pos := vp8xStart + 10
+	header := func() (string, int, bool) {
+		if pos+8 > len(data) {
+			return "", 0, false
+		}
+		typ := string(data[pos : pos+4])
+		n := int(binary.LittleEndian.Uint32(data[pos+4 : pos+8]))
+		pos += 8
+		return typ, n, true
+	}
+	tooLong := func(typ string, n int) error {
+		if n < 0 || n > len(data)-pos {
+			return fmt.Errorf("%w: %s chunk of %d bytes overruns the file", ErrMalformedWebP, typ, n)
+		}
+		return nil
+	}
+	if hasICC {
+		typ, n, ok := header()
+		if !ok {
+			return nil
+		}
+		if typ == "ICCP" {
+			if err := tooLong(typ, n); err != nil {
+				return err
+			}
+			pos += n
+		}
+	}
+	if hasEXIF {
+		for {
+			typ, n, ok := header()
+			if !ok {
+				return nil
+			}
+			if typ == "EXIF" {
+				return tooLong(typ, n)
+			}
+			if n < 0 || n > len(data)-pos {
+				return nil // imaging の skip は EOF で止まる
+			}
+			pos += n
+		}
+	}
+	return nil
+}
+
+// evenPayload returns p padded with a zero byte to an even length.
+func evenPayload(p []byte) []byte {
+	if len(p)%2 == 0 {
+		return p
+	}
+	out := make([]byte, len(p)+1)
+	copy(out, p)
+	return out
 }
