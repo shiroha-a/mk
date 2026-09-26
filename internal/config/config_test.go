@@ -244,7 +244,7 @@ func TestDSN_UnixSocket(t *testing.T) {
 			Pass: "secret",
 			// UDS では TLS を張れないので、Extra に ssl=true があっても
 			// 強制的に sslmode=disable になることを確認する。
-			Extra: map[string]string{"ssl": "true"},
+			Extra: map[string]any{"ssl": "true"},
 		},
 	}
 
@@ -308,12 +308,12 @@ func TestDSN_SSLEnabled(t *testing.T) {
 			DB:    "misskey",
 			User:  "postgres",
 			Pass:  "secret",
-			Extra: map[string]string{"ssl": "true"},
+			Extra: map[string]any{"ssl": "true"},
 		},
 	}
 
 	dsn := cfg.DSN()
-	assert.Contains(t, dsn, "sslmode=require")
+	assert.Contains(t, dsn, "sslmode=verify-full")
 }
 
 func TestLoad_MaxFileSizeOverride(t *testing.T) {
@@ -998,14 +998,14 @@ func TestSlaveDSN_InheritsPrimarySSL(t *testing.T) {
 		DB: DBOptions{
 			Host:  "primary",
 			Port:  5432,
-			Extra: map[string]string{"ssl": "true"},
+			Extra: map[string]any{"ssl": "true"},
 		},
 		DBSlaves: []DBSlaveOptions{
 			{Host: "replica1", Port: 5432, DB: "misskey", User: "u", Pass: "p"},
 		},
 	}
 	dsn := cfg.SlaveDSN(0)
-	assert.Contains(t, dsn, "sslmode=require")
+	assert.Contains(t, dsn, "sslmode=verify-full")
 }
 
 func TestSlaveDSN_UnixSocket(t *testing.T) {
@@ -1013,7 +1013,7 @@ func TestSlaveDSN_UnixSocket(t *testing.T) {
 	cfg := &Config{
 		DB: DBOptions{
 			Host:  "/var/run/postgresql",
-			Extra: map[string]string{"ssl": "true"},
+			Extra: map[string]any{"ssl": "true"},
 		},
 		DBSlaves: []DBSlaveOptions{
 			{Host: "/var/run/postgresql/replica", Port: 5433, DB: "misskey", User: "u", Pass: "p"},

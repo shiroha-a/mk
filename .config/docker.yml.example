@@ -50,8 +50,15 @@ db:
   #disableCache: true
 
   # Extra Connection options
+  # `ssl: true` enables TLS and verifies the server certificate and hostname
+  # against the system CAs (same as upstream node-postgres). NOTE: earlier
+  # mk-go versions did not verify. For a self-signed / private CA, point
+  # `sslrootcert` at the CA file; to explicitly skip verification (exposes
+  # the connection to interception) use `ssl: { rejectUnauthorized: false }`.
+  # `sslmode` (libpq value) may be set instead of `ssl`. See docs/configuration.md.
   #extra:
   #  ssl: true
+  #  sslrootcert: /etc/ssl/certs/pg-ca.pem
 
 dbReplications: false
 

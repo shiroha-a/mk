@@ -59,9 +59,27 @@ cp .config/docker.yml.example .config/docker.yml
 | `db.user` | string | `"misskey"` | ユーザー名 |
 | `db.pass` | string | - | パスワード |
 | `db.disableCache` | bool | `false` | **no-op**。Misskey YAML 互換のために受け付けるだけで、どこからも読んでいない |
-| `db.extra.ssl` | bool | `false` | SSL接続 |
+| `db.extra.ssl` | bool / map | `false` | TLS接続。`true` は**サーバー証明書とホスト名を検証する** (`sslmode=verify-full`、システムの CA)。upstream (node-postgres) の形 `{ rejectUnauthorized: false }` は検証しない TLS (`sslmode=require`)。詳細は下記 |
+| `db.extra.sslmode` | string | - | **mk-go 独自**。libpq の `sslmode` を直接指定する (`disable` / `allow` / `prefer` / `require` / `verify-ca` / `verify-full`)。`db.extra.ssl` と同時には書けない |
+| `db.extra.sslrootcert` | string | - | **mk-go 独自**。検証に使う CA 証明書 (PEM) の**ファイルパス**。自己署名 / 私設 CA の DB に使う |
 
-`dbReplications: true`とすると`dbSlaves`設定でリードレプリカを使用可能。
+`dbReplications: true`とすると`dbSlaves`設定でリードレプリカを使用可能。レプリカは primary の `db.extra` の TLS 設定を引き継ぐ (ホスト名の検証はレプリカ自身の `host` で行う)。
+
+#### DB 接続の TLS (`db.extra`)
+
+| 書き方 | 意味 | pgx の `sslmode` |
+|---|---|---|
+| 未設定 / `ssl: false` | 平文 | `disable` |
+| `ssl: true` | TLS + 証明書とホスト名の検証 (システムの CA) | `verify-full` |
+| `ssl: true` + `sslrootcert: /path/ca.pem` | TLS + 指定した CA で検証 | `verify-full` |
+| `ssl: { rejectUnauthorized: false }` | TLS だが**検証しない** (盗聴・なりすましに無防備) | `require` |
+| `sslmode: <値>` (+ `sslrootcert`) | libpq の意味そのまま | 指定値 |
+
+- **`ssl: true` の意味が変わった (破壊的変更)。** 以前の mk-go は `ssl: 'true'` (文字列) のときだけ `sslmode=require` = **証明書を検証しない TLS** で繋いでいた。しかも YAML の bool の `ssl: true` は設定の読み込みで `"1"` になって比較に外れ、**平文で繋いでいた**。upstream (node-postgres) の `ssl: true` は Node の既定 (`rejectUnauthorized: true`) で検証するので、それに揃えた。自己署名証明書の DB に `ssl: true` で繋いでいた構成は起動時に `certificate signed by unknown authority` 等で落ちる。その場合は (a) CA を `db.extra.sslrootcert` に指定する、または (b) 検証を明示的に無効にする (`ssl: { rejectUnauthorized: false }`) のどちらかを選ぶ。起動エラーにも同じ案内を出す。
+- **upstream の object 形式で解釈するのは `rejectUnauthorized` だけ。** node-postgres の `ca` は PEM の中身を受けるが、pgx はファイルパスしか受けないので `ca` は起動エラーにする (CA をファイルに保存して `sslrootcert` へ)。`cert` / `key` / `servername` 等も黙って捨てずに起動エラーにする。`ssl` 以外の `extra` のキー (`statement_timeout` 等、upstream が pool へ渡すもの) は無視する。
+- 矛盾する組み合わせ (`ssl` と `sslmode` の併記、TLS 無効なのに `sslrootcert`、`rejectUnauthorized: false` と `sslrootcert` の併記) は起動エラーにする。
+- **UNIX ソケット (`host` が `/` 始まり) では TLS を張らない** (`sslmode=disable` 固定)。
+- `cmd/migrate` / `misskey doctor` / backfill 系の CLI も本体と同じ接続設定 (TLS・パスワードのエスケープ) を使う。
 
 ### Redis (`redis.*`)
 
@@ -322,7 +340,7 @@ CIでのテスト実行時に使用。Redis は testcontainers が立てるが�
 
 ## マイグレーションの接続先
 
-`cmd/migrate` は **`DATABASE_URL` を読まない**。`-config` (既定 `.config/default.yml`) を読み、`db.*` から DSN を組み立てる。
+`cmd/migrate` は **`DATABASE_URL` を読まない**。`-config` (既定 `.config/default.yml`) を読み、`db.*` から DSN を組み立てる。TLS (`db.extra`) とパスワードのエスケープは本体と同じ規則に従う (以前は `db.extra.ssl` を見ずに常に平文で繋いでいた)。
 
 ```bash
 make migrate-up                                    # .config/default.yml へ

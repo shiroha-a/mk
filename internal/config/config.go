@@ -87,13 +87,18 @@ type RedisOptions struct {
 
 // DBOptions represents PostgreSQL connection configuration.
 type DBOptions struct {
-	Host         string            `mapstructure:"host"`
-	Port         int               `mapstructure:"port"`
-	DB           string            `mapstructure:"db"`
-	User         string            `mapstructure:"user"`
-	Pass         string            `mapstructure:"pass"`
-	DisableCache bool              `mapstructure:"disableCache"`
-	Extra        map[string]string `mapstructure:"extra"`
+	Host         string `mapstructure:"host"`
+	Port         int    `mapstructure:"port"`
+	DB           string `mapstructure:"db"`
+	User         string `mapstructure:"user"`
+	Pass         string `mapstructure:"pass"`
+	DisableCache bool   `mapstructure:"disableCache"`
+	// Extra mirrors upstream's db.extra (passed through to node-postgres).
+	// mk-go only reads the TLS keys; see ResolveDBTLS. 値の型は YAML の
+	// ままにする — string に weak decode すると bool の true が "1" になり、
+	// upstream の object 形式 (ssl: { rejectUnauthorized: false }) は読めずに
+	// 起動が落ちていた。
+	Extra map[string]any `mapstructure:"extra"`
 	// Pool tuning (Go固有。Misskey TS設定にはない)
 	MaxOpenConns    *int `mapstructure:"maxOpenConns"`
 	MaxIdleConns    *int `mapstructure:"maxIdleConns"`
@@ -769,6 +774,12 @@ func resolve(src *Source) (*Config, error) {
 		return nil, err
 	}
 
+	// DSN() は Config から毎回導出するので、誤った db.extra はここで起動を
+	// 止める (DSN 側で黙って既定に倒すと、平文 / 無検証で繋がってしまう)。
+	if _, err := ResolveDBTLS(src.DB.Extra); err != nil {
+		return nil, err
+	}
+
 	cfg := &Config{
 		Version:     MisskeyVersion,
 		URL:         parsedURL.Scheme + "://" + parsedURL.Host,
@@ -1057,56 +1068,6 @@ func normalizeVideoThumbMode(raw string) string {
 	default:
 		return "post"
 	}
-}
-
-// DSN returns the PostgreSQL connection string.
-//
-// Host が "/" で始まる場合は UNIX domain socket 接続とみなす。libpq / pgx の
-// 慣例に従い、host にソケットディレクトリのパスを、port に対応する PG ポート番号
-// (socket 名 .s.PGSQL.<port> の末尾数字) を渡す。UDS では TLS を張れないので
-// sslmode は強制的に disable になる。
-func (c *Config) DSN() string {
-	if IsUnixSocketPath(c.DB.Host) {
-		return fmt.Sprintf(
-			"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			c.DB.Host, c.DB.Port, c.DB.User, c.DB.Pass, c.DB.DB,
-		)
-	}
-	sslMode := "disable"
-	if v, ok := c.DB.Extra["ssl"]; ok && v == "true" {
-		sslMode = "require"
-	}
-	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		c.DB.Host, c.DB.Port, c.DB.User, c.DB.Pass, c.DB.DB, sslMode,
-	)
-}
-
-// SlaveDSN returns the PostgreSQL connection string for the idx-th read
-// replica declared in DBSlaves. idx が範囲外の場合は空文字列を返す。
-//
-// SSL/sslmode / Unix socket 判定は primary の DB 設定に合わせる。
-// Misskey 本家では dbSlaves エントリ内で sslmode を個別指定する API は無いため、
-// primary の extra.ssl を継承する (same-network / same-cluster replica を前提)。
-func (c *Config) SlaveDSN(idx int) string {
-	if idx < 0 || idx >= len(c.DBSlaves) {
-		return ""
-	}
-	s := c.DBSlaves[idx]
-	if IsUnixSocketPath(s.Host) {
-		return fmt.Sprintf(
-			"host=%s port=%d user=%s password=%s dbname=%s sslmode=disable",
-			s.Host, s.Port, s.User, s.Pass, s.DB,
-		)
-	}
-	sslMode := "disable"
-	if v, ok := c.DB.Extra["ssl"]; ok && v == "true" {
-		sslMode = "require"
-	}
-	return fmt.Sprintf(
-		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		s.Host, s.Port, s.User, s.Pass, s.DB, sslMode,
-	)
 }
 
 // IsUnixSocketPath reports whether the given host string points to a UNIX
