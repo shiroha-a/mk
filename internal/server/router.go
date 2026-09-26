@@ -2899,7 +2899,16 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		streamManager.SubscribeRelationReload()
 		// broadcast stream (emojiAdded/Updated/Deleted 等) を全 connection へ forward (#2046)。
 		streamManager.SubscribeBroadcast()
+		// 資格情報の失効 (token 再生成 / access token 失効 / 凍結 / 削除) を受けて、
+		// その資格情報で張られた接続を閉じる。publish は失効を処理したプロセスが
+		// 行うので、接続を持つ全プロセスが購読する (mk-go 独自、docs/divergence.md)。
+		streamManager.SubscribeStreamRevoke()
 	}
+	// WebSocket は接続時に 1 度しか認証しないので、tokenCache を落とすだけでは
+	// 既存の接続が閉じない。失効を扱う handler へ revoke publisher を配る。
+	streamRevokePublisher := stream.NewStreamRevokePublisher(streamPubSub)
+	iHandler.SetStreamRevoker(streamRevokePublisher)
+	oauthHandler.SetStreamRevoker(streamRevokePublisher)
 	iHandler.SetHardMutePublisher(&hardMutePublisherAdapter{pubsub: streamPubSub})
 	// relation 変更 (#2400) の publisher を各 mutation 側へ配線する。7 系統すべてを
 	// 繋がないと「一部の操作だけ反映されない」形の抜けになるので、まとめて置く。
@@ -3270,6 +3279,8 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	// AuthMiddleware が duck-typed で UserTokenInvalidator interface を
 	// 満たしている。
 	adminHandler.SetUserTokenInvalidator(s.auth)
+	// 凍結・削除した利用者の WebSocket を閉じる (tokenCache の失効とは独立)。
+	adminHandler.SetUserStreamRevoker(streamRevokePublisher)
 	adminHandler.SetInstanceRepo(instanceRepo)
 	adminHandler.SetDeliveryHealthProvider(deliveryHealth)
 	adminHandler.SetInboxHealthProvider(inboxHealth)
@@ -4173,6 +4184,12 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 			"i/revoke-token が成功と同じ 204 を返したまま token を消さない (恒久)"},
 		{"oauth.authInvalidator", oauthHandler.HasAuthInvalidator(),
 			"authorization code 再利用を検出して失効させた token が TTL のあいだ通る"},
+		{"i.streamRevoker", iHandler.HasStreamRevoker(),
+			"regenerate-token / revoke-token / delete-account の後も、失効した token で張られた WebSocket が通知・DM を受け取り続ける"},
+		{"admin.userStreamRevoker", adminHandler.HasUserStreamRevoker(),
+			"凍結・削除した利用者の WebSocket が通知・DM・フォロワー限定投稿を受け取り続ける"},
+		{"oauth.streamRevoker", oauthHandler.HasStreamRevoker(),
+			"authorization code 再利用で失効させた token の WebSocket が開いたまま残る"},
 		{"signup.applicationSettlement", signupService.HasApplicationSettlement(),
 			"承認済み申請の行ロックが飛び、1 承認から複数アカウントを作る窓が開く"},
 		{"signup.formTokens", signupHandler.HasFormTokens(),
