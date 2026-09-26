@@ -712,6 +712,7 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		UserListRepo:     userListRepo,
 		Drive:            driveService,
 		Notifier:         notificationService,
+		IDGen:            idGen,
 		// custom-emojis export: 全 local emoji を ListLocal で列挙し、各画像を
 		// SSRF-safe client で download して zip 化する (#1217)。画像取得は最大
 		// 60s/個、cap 8 MiB。
