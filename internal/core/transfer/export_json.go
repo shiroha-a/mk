@@ -3,8 +3,10 @@ package transfer
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 )
 
 // exportFavorites reuses the note export pipeline but pulls rows from
@@ -100,14 +102,36 @@ func (e *Exporter) exportAntennas(userID string) ([]byte, error) {
 			"userListAccts":                  nil,
 		}
 		if a.UserListID != nil {
-			entry["userListId"] = *a.UserListID
-			if accts, err := e.listAccts(*a.UserListID); err == nil {
-				entry["userListAccts"] = accts
+			owned, err := e.ownsList(userID, *a.UserListID)
+			if err != nil {
+				return nil, err
+			}
+			// 自分の list のときだけ ID とメンバーを出す。1aac65d より前は他人の
+			// list ID を保存できたので、そのまま解決すると他人の list のメンバー
+			// 構成を export 経由で読めてしまう (照合側の所有者検証と同じ理由)。
+			if owned {
+				entry["userListId"] = *a.UserListID
+				if accts, err := e.listAccts(*a.UserListID); err == nil {
+					entry["userListAccts"] = accts
+				}
 			}
 		}
 		out = append(out, entry)
 	}
 	return json.Marshal(out)
+}
+
+// ownsList reports whether listID exists and belongs to userID. A missing list
+// is reported as not owned; other lookup errors are returned.
+func (e *Exporter) ownsList(userID, listID string) (bool, error) {
+	list, err := e.deps.UserListRepo.FindByID(listID)
+	if err != nil {
+		if repository.IsNotFound(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("find user list %s: %w", listID, err)
+	}
+	return list != nil && list.UserID == userID, nil
 }
 
 // listAccts resolves a userList's members to acct strings (username / username@host)
