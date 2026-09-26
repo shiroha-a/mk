@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/labstack/echo/v4"
@@ -190,12 +191,114 @@ func buildIPExtractor(trusted []*net.IPNet) echo.IPExtractor {
 		opts = append(opts, echo.TrustIPRange(n))
 	}
 	inner := echo.ExtractIPFromXFFHeader(opts...)
+	var warned atomic.Bool
 	return func(req *http.Request) string {
+		if !warned.Load() {
+			warnUntrustedLocalProxy(req, trusted, &warned)
+		}
 		if ip := inner(req); ip != "" {
 			return ip
 		}
 		return extractIPFallback(req, trusted)
 	}
+}
+
+// localProxyRanges are the loopback and private (unique-local) ranges a
+// reverse proxy on the same host or a container network connects from.
+var localProxyRanges = func() []*net.IPNet {
+	cidrs := []string{"127.0.0.0/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
+	nets := make([]*net.IPNet, 0, len(cidrs))
+	for _, c := range cidrs {
+		_, n, err := net.ParseCIDR(c)
+		if err != nil {
+			panic(err)
+		}
+		nets = append(nets, n)
+	}
+	return nets
+}()
+
+func netsOverlap(a, b *net.IPNet) bool {
+	return a.Contains(b.IP) || b.Contains(a.IP)
+}
+
+func containsIP(nets []*net.IPNet, ip net.IP) bool {
+	for _, n := range nets {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustsLocalProxyRange reports whether any trusted range overlaps a
+// loopback or private range.
+func trustsLocalProxyRange(trusted []*net.IPNet) bool {
+	for _, t := range trusted {
+		for _, l := range localProxyRanges {
+			if netsOverlap(t, l) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// warnTrustProxyWithoutLocalRanges logs a startup warning when trustProxy
+// trusts no loopback / private address.
+//
+// 以前は Echo の既定で loopback / private が常に信頼されていたので、
+// trustProxy に CDN の範囲だけを書き、nginx は Docker bridge や同一ホストから
+// 繋ぐ構成が動いていた。今は書いた範囲しか信頼しないので、その構成は
+// 全利用者の IP が nginx のアドレスになり、rate limit のバケットを共有して
+// 429 が多発し、IP 履歴も 1 アドレスに集まる。エラーにはしない —
+// 前段を置かずに直接公開している構成ではこれが正しい設定なので。
+//
+// UNIX ソケットで待ち受けているときは出さない。接続元アドレスが無く、
+// extractIPFallback が XFF を trusted で絞って読むので、この問題は起きない。
+func warnTrustProxyWithoutLocalRanges(trusted []*net.IPNet, socket string) {
+	if socket != "" || trustsLocalProxyRange(trusted) {
+		return
+	}
+	slog.Warn("trustProxy trusts no loopback or private address; if the reverse proxy in front of mk-go connects from one (nginx on the same host or a Docker network), every client will be seen as the proxy address",
+		"trustProxy", formatNets(trusted),
+		"hint", "add the proxy address, or `uniquelocal` (private ranges) / `loopback`, to trustProxy")
+}
+
+// warnUntrustedLocalProxy logs once when a request carrying
+// X-Forwarded-For arrives directly from an untrusted loopback / private
+// address, which usually means the reverse proxy is missing from trustProxy.
+//
+// ログが溢れないよう warned で 1 回に絞る (extractor はプロセスで 1 つなので
+// 実質プロセスに 1 回)。起動時の警告だけだと、trustProxy に private の範囲を
+// 含めていても実際の proxy がその外にいる構成 (別の bridge network 等) を
+// 取りこぼすので、実際に届いたリクエストでも見る。
+func warnUntrustedLocalProxy(req *http.Request, trusted []*net.IPNet, warned *atomic.Bool) {
+	if len(req.Header.Values(echo.HeaderXForwardedFor)) == 0 {
+		return
+	}
+	host, _, err := net.SplitHostPort(req.RemoteAddr)
+	if err != nil {
+		return
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || !containsIP(localProxyRanges, ip) || containsIP(trusted, ip) {
+		return
+	}
+	if !warned.CompareAndSwap(false, true) {
+		return
+	}
+	slog.Warn("received X-Forwarded-For from a loopback or private address that trustProxy does not trust; the client IP is taken as this address (logged once per process)",
+		"remoteAddr", ip.String(),
+		"hint", "if this is your reverse proxy, add it (or `uniquelocal` / `loopback`) to trustProxy")
+}
+
+func formatNets(nets []*net.IPNet) []string {
+	out := make([]string, 0, len(nets))
+	for _, n := range nets {
+		out = append(out, n.String())
+	}
+	return out
 }
 
 // extractIPFallback recovers a client IP for requests where Echo's standard
@@ -569,6 +672,7 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 		return nil, fmt.Errorf("server: %w", err)
 	}
 	e.IPExtractor = buildIPExtractor(trustedNets)
+	warnTrustProxyWithoutLocalRanges(trustedNets, cfg.Socket)
 
 	// Global middleware
 	e.Use(echomw.Recover())

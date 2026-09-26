@@ -185,14 +185,16 @@ cp .config/docker.yml.example .config/docker.yml
 | 未設定 | 既定値 `10.0.0.0/8` / `172.16.0.0/12` / `192.168.0.0/16` / `127.0.0.1/32` / `::1/128` / `fc00::/7` (upstream と同じ) |
 | CIDR / 素の IP のリスト | 書いたものだけを信頼する。素の IP は `/32` (`/128`) として扱う。`loopback` / `linklocal` / `uniquelocal` (upstream の proxy-addr の名前) も書ける |
 | カンマ区切りの文字列 | リストと同じ (`MK_TRUSTPROXY=10.0.0.0/8,192.0.2.1` のように環境変数で渡すとき) |
-| `false` / `[]` / `''` | どの proxy も信頼しない (`X-Forwarded-For` を無視して接続元アドレスを使う) |
+| `false` / `[]` / `''` | どの proxy も信頼しない (`X-Forwarded-For` を無視して接続元アドレスを使う)。**UNIX ソケットで待ち受けているときは例外**で、接続元アドレスが無いので `X-Forwarded-For` (無ければ `X-Real-IP`) を読む (下記) |
 | `true` / 数値 | **起動エラー** |
 
 - **書いた範囲だけを信頼する。** 以前は Echo の既定で loopback / link-local / private が常に信頼されていたので、CDN の範囲だけを書いても private アドレスからの `X-Forwarded-For` が信頼され続けた。既定値 (未設定) のときの挙動は、`127.0.0.2`-`127.255.255.255` と link-local (`169.254.0.0/16` / `fe80::/10`) を信頼しなくなった点を除いて変わらない (どちらも upstream の既定にも入っていない)。必要なら `loopback` / `linklocal` を足す。
+- **アップグレード時の注意: `trustProxy` を明示している構成は、前段 proxy のアドレスが入っているか確かめる。** 以前は上記の理由で、`trustProxy` に CDN の範囲だけを書き、nginx は同じホスト (`127.0.0.1`) や Docker の bridge network (`172.16.0.0/12` 等) から繋ぐ構成が**たまたま動いていた**。今はその nginx を信頼しないので、**全利用者のクライアント IP が nginx のアドレスになる** — rate limit のバケットを全員で共有して 429 が多発し、サインイン履歴と IP 履歴 (`user_ip`) が 1 アドレスに集まる。nginx のアドレス、または `uniquelocal` (private の範囲) / `loopback` を `trustProxy` に足す (例: `trustProxy: ['203.0.113.0/24', 'uniquelocal', 'loopback']`)。未設定のまま使っている構成は既定値に private と loopback が入っているので影響しない。
+- **気付けるように 2 か所で警告を出す。** (a) 起動時に、`trustProxy` が loopback / private / unique-local のどの範囲も含まなければ (`false` / `[]` を含む) `trustProxy trusts no loopback or private address` を Warn で出す。前段を置かずに直接公開している構成ではそれが正しい設定なので、起動は止めない。UNIX ソケットで待ち受けているときは出さない (下記の理由でこの問題が起きない)。(b) 実行中に、信頼していない loopback / private アドレスから `X-Forwarded-For` 付きのリクエストが届いたら、`received X-Forwarded-For from a loopback or private address that trustProxy does not trust` を**プロセスごとに 1 回だけ** Warn で出す (`remoteAddr` にそのアドレスが載る)。(a) は設定だけを見るので、private の範囲を書いていても実際の proxy がその外にいる構成 (別の bridge network 等) は (b) でしか気付けない。
 - **解釈できない値は起動エラーにする。** 以前は警告して捨てていたため、全部捨てると `X-Forwarded-For` の**最左を無条件に信頼する** Echo の既定に落ち、誰でも IP を詐称できた (`trustProxy: true` や `proxy.internal` のようなホスト名で実際にそうなる)。
 - **`trustProxy: true` は受け付けない。** upstream (Fastify) では「全ての hop を信頼する」意味で、前段を経由せずに届いたリクエストが IP を自由に名乗れる。前段 proxy のアドレスを列挙すること。hop 数 (数値) も同じ理由で受け付けない。
 - **`[]` は「信頼しない」。** 以前の mk-go は空リストを既定値として扱っていたが、upstream (`config.trustProxy ?? 既定`) では空リストがそのまま効くので揃えた。
-- UNIX ソケットで待ち受けている場合は接続元アドレスが無いので、`X-Forwarded-For` を `trustProxy` で絞って読む (接続できるのは同じホストの proxy だけという前提)。
+- UNIX ソケットで待ち受けている場合は接続元アドレスが無いので、`X-Forwarded-For` を右から左へ見て `trustProxy` に含まれない最初の (解析できる) アドレスを採る。`X-Forwarded-For` が無ければ `X-Real-IP` を使う (接続できるのは同じホストの proxy だけという前提)。**`false` / `[]` でもこれらのヘッダは読む** — その場合は `X-Forwarded-For` の右端 (前段 proxy が追記した接続元) がそのまま採られる。
 
 ### 検索
 

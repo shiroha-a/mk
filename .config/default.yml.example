@@ -72,6 +72,10 @@ port: 3000
 # trusts no proxy. `true` (trust every hop) and hop counts are rejected,
 # as is any entry that cannot be parsed. Defaults to private + loopback
 # ranges (same as Misskey TS). See docs/configuration.md.
+# NOTE: earlier mk-go versions always trusted loopback / private
+# addresses on top of this list. If you list only CDN ranges, also add
+# your reverse proxy (or `uniquelocal` / `loopback`), otherwise every
+# client is seen as the proxy address.
 #
 #trustProxy:
 #  - '127.0.0.1/32'
