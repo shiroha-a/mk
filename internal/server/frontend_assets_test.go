@@ -26,6 +26,8 @@ import (
 // されていた。dev server の代わりに httptest のサーバーを立て、到達したかを
 // 数えて確かめる。
 func TestRegisterFrontendAssets(t *testing.T) {
+	const spaShellBody = "<!doctype html>spa-shell"
+
 	var hits atomic.Int32
 	devServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		hits.Add(1)
@@ -58,6 +60,13 @@ func TestRegisterFrontendAssets(t *testing.T) {
 			hits.Store(0)
 			e := echo.New()
 			registerFrontendAssets(e, tt.cfg, tt.prefix, tt.dir, devServer.URL)
+			// 本番と同じく SPA の catchall を後から登録する (router.go の
+			// `s.echo.GET("/*", frontend)`)。これが無いと echo の既定の 404 が
+			// 返るので、ビルド成果物が無いときの 404 の明示登録を消しても
+			// 「404 が返る」ままテストが通ってしまう。
+			e.GET("/*", func(c echo.Context) error {
+				return c.HTML(http.StatusOK, spaShellBody)
+			})
 
 			for _, method := range []string{http.MethodGet, http.MethodPost} {
 				req := httptest.NewRequest(method, tt.prefix+"/entry.js", nil)
@@ -71,6 +80,7 @@ func TestRegisterFrontendAssets(t *testing.T) {
 					continue
 				}
 				assert.Equal(t, tt.wantCode, rec.Code, method)
+				assert.NotEqual(t, spaShellBody, rec.Body.String(), "%s: SPA の catchall に落とさない", method)
 				if tt.wantBody != "" {
 					assert.Equal(t, tt.wantBody, rec.Body.String(), method)
 				}
