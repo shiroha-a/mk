@@ -202,6 +202,10 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// 本 helper の O(N) cache scan cost は許容範囲。helper の詳細は
 	// handler.go の invalidateUserTokenCache を参照。
 	h.invalidateUserTokenCache(u.ID)
+	// 削除済み user 名義の WebSocket を全端末ぶん閉じる (mk-go 独自)。
+	if h.streamRevoker != nil {
+		h.streamRevoker.RevokeUserStreams(u.ID)
+	}
 
 	// #2230: 論理削除フラグを立てるだけでは notes / drive / following が purge されず、user 行も
 	// 残るので「凍結状態のまま消えない」。admin/delete-account と同様に (1) sharedInbox へ
@@ -422,6 +426,12 @@ func (h *Handler) RegenerateToken(c echo.Context) error {
 	// 検知してログアウトする用途)。
 	if h.mainStreamPublisher != nil {
 		h.mainStreamPublisher.PublishMainEvent(u.ID, "myTokenRegenerated", nil)
+	}
+	// 旧 token で張られた WebSocket を閉じる (mk-go 独自、docs/divergence.md)。
+	// **myTokenRegenerated の後に呼ぶ。** 閉じる側は猶予を置いてから閉じ、
+	// それまでに届いた event は送り切るので、この順序で他端末にも通知が届く。
+	if h.streamRevoker != nil && oldToken != "" {
+		h.streamRevoker.RevokeNativeTokenStreams(u.ID, oldToken)
 	}
 	// upstream Misskey TS は body なしの 204 No Content を返す (= 新 token
 	// は myTokenRegenerated WS event 経由で client に伝達する設計、#883)。

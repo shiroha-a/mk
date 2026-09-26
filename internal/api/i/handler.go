@@ -127,6 +127,10 @@ type Handler struct {
 	// (30 秒) 待ちで stale 旧 token が auth 通過する security regression が
 	// 残るので production では必ず wire する。
 	authInvalidator TokenInvalidator
+	// streamRevoker は資格情報を失効させたときに、その資格情報で張られた
+	// /streaming の接続を閉じる。tokenCache を落としても WebSocket は接続時に
+	// 1 度しか認証しないので、失効後も通知・DM を受け取り続ける。
+	streamRevoker StreamRevoker
 	// totpReplayGuard は i/2fa/done / 2fa-gated 操作で同一 TOTP コードの
 	// 二度使いを refuse する (RFC 6238 §5.2 / mk-go 独自 hardening、upstream
 	// Misskey TS は持たない)。nil なら無保護 (= unit test / dev fallback)。
@@ -375,6 +379,28 @@ func splitAcct(acct string) (string, *string) {
 type MainStreamPublisher interface {
 	PublishMainEvent(userID, eventType string, body any)
 }
+
+// StreamRevoker closes live /streaming connections whose credential was just
+// invalidated. Implemented by stream.StreamRevokePublisher (pubsub fan-out so
+// connections held by other processes close too).
+type StreamRevoker interface {
+	RevokeUserStreams(userID string)
+	RevokeNativeTokenStreams(userID, token string)
+	RevokeAccessTokenStreams(userID, tokenID string)
+}
+
+// SetStreamRevoker wires the revoker used by i/regenerate-token,
+// i/revoke-token and i/delete-account.
+func (h *Handler) SetStreamRevoker(r StreamRevoker) {
+	h.streamRevoker = r
+}
+
+// HasStreamRevoker reports whether the stream revoker is wired.
+//
+// 未配線だと、失効させた token で張られていた WebSocket が**再接続するまで
+// 通知・DM・フォロワー限定投稿を受け取り続ける**。HTTP 側の失効
+// (HasAuthInvalidator) とは独立に効く。
+func (h *Handler) HasStreamRevoker() bool { return h.streamRevoker != nil }
 
 // SetAuthInvalidator attaches a token invalidator so RegenerateToken and
 // other sensitive endpoints can drop the old token from the auth cache
