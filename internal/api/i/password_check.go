@@ -1,6 +1,7 @@
 package i
 
 import (
+	"context"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -30,17 +31,20 @@ func (h *Handler) SetPasswordFailureGuard(g passwordguard.Guard) {
 // より前に走り、成否に関係なく user bucket を消費する。token を持つだけの
 // 第三者 (scope 不問。RequireSecure で 403 になるリクエストでも消費する) が
 // 被害者の `i/regenerate-token` を使い切れると、token 漏洩時の唯一の対処を
-// 攻撃者が止められる。ここでは**照合に失敗した回数だけ**をアカウント単位の
-// 1 つの key で数える。
+// 攻撃者が止められる。ここでは**照合に失敗した回数だけ**を数える。
 //
-// **native token を持つ攻撃者による妨害は残る。** わざとパスワードを
-// 間違え続ければ枠を使い切れる。総当たりを止めることと引き換えで、
-// 仕組み上避けられない (docs/divergence.md)。
+// 枠は (アカウント, 接続元の範囲) ごとと、アカウント全体の 2 段
+// (passwordguard の doc)。native token を持つ攻撃者が被害者の操作を
+// 止めるには、接続元の範囲を多数用意してアカウント全体の枠を使い切る必要がある。
+//
+// **予約と取り消しはリクエストの取り消しに引きずられない ctx で行う。**
+// クライアントが切断すると ctx が取り消されて予約が失敗し、下の fail-open で
+// 数えられない照合が走る。取り消しも同じで、成功直後の切断が失敗として残る。
 func (h *Handler) beginPasswordCheck(c echo.Context, userID string) (passwordguard.Attempt, bool) {
 	if h.passwordGuard == nil {
 		return passwordguard.NoopAttempt(), true
 	}
-	a, err := h.passwordGuard.Begin(c.Request().Context(), userID)
+	a, err := h.passwordGuard.Begin(context.WithoutCancel(c.Request().Context()), userID, c.RealIP())
 	if err == nil {
 		return a, true
 	}
@@ -70,6 +74,6 @@ func (h *Handler) comparePassword(c echo.Context, userID, stored, plain, incorre
 		_ = c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", incorrectID))
 		return false
 	}
-	attempt.Release(c.Request().Context())
+	attempt.Release(context.WithoutCancel(c.Request().Context()))
 	return true
 }

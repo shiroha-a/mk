@@ -36,7 +36,7 @@ func (a fakeAttempt) Release(context.Context) {
 	a.g.released++
 }
 
-func (g *fakeGuard) Begin(_ context.Context, userID string) (passwordguard.Attempt, error) {
+func (g *fakeGuard) Begin(_ context.Context, userID, _ string) (passwordguard.Attempt, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.begun = append(g.begun, userID)
@@ -187,4 +187,25 @@ func TestChangePassword_VerifierBusyDoesNotCountAsFailure(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	require.Len(t, g.begun, 1)
 	assert.Equal(t, 0, g.failures())
+}
+
+// 切断されたリクエストでも予約は取り消しに引きずられず、失敗として数える。
+// request の ctx で予約すると Exec が context canceled で失敗し、fail-open で
+// 数えられない照合が走っていた。
+func TestBeginPasswordCheck_CanceledRequestStillReserves(t *testing.T) {
+	g := &ctxRecordingGuard{}
+	h, repo := newExtraHandler(t)
+	h.SetPasswordFailureGuard(g)
+	u := setupUserWithPassword(repo, "u1", "correct")
+
+	postExtraCanceled(h.RegenerateToken, `{"password":"wrong"}`, u)
+	require.Len(t, g.errs, 1)
+	assert.NoError(t, g.errs[0], "Begin must not see the request cancellation")
+}
+
+type ctxRecordingGuard struct{ errs []error }
+
+func (g *ctxRecordingGuard) Begin(ctx context.Context, _, _ string) (passwordguard.Attempt, error) {
+	g.errs = append(g.errs, ctx.Err())
+	return passwordguard.NoopAttempt(), nil
 }

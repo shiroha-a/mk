@@ -99,7 +99,7 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	// 関係なく user bucket を消費するので、被害者の token を持つだけの第三者
 	// (scope 不問) が枠を使い切れる — token 漏洩時の唯一の対処である
 	// `i/regenerate-token` を攻撃者が止められる。パスワードの総当たりは
-	// handler 側の `passwordguard` が照合失敗だけをアカウント単位で数えて
+	// handler 側の `passwordguard` が照合失敗だけを (アカウント, 接続元の範囲) とアカウント全体の 2 段で数えて
 	// 止める (`TestPasswordChecksAreFailureLimited` が固定)。
 	// `i/change-password` には以前 mk-go 独自の route 上限 (1h 10) があったが、
 	// 同じ理由で第三者に使い切られるので外した (upstream にも limit は無い)。

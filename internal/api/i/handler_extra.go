@@ -1,6 +1,7 @@
 package i
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -88,7 +89,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
 	if outcome == password.OutcomeUnavailable {
 		// 照合していないので失敗として数えない。
-		attempt.Release(c.Request().Context())
+		attempt.Release(context.WithoutCancel(c.Request().Context()))
 		// 枠を取れなかっただけで現パスワードは正しいかもしれない。**400 に
 		// 潰さない** (#2849)。
 		slog.Warn("change-password: password verification unavailable",
@@ -107,7 +108,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		// 400 INCORRECT_PASSWORD に揃える。
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
-	attempt.Release(c.Request().Context())
+	attempt.Release(context.WithoutCancel(c.Request().Context()))
 
 	// bcrypt は 73 byte 以上の password で ErrPasswordTooLong を返す。Node 側
 	// (upstream Misskey TS) は silent truncation するが、Go では error で
