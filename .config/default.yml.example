@@ -461,6 +461,8 @@ id: 'aidx'
 # window remains: configure the proxy to deny private, loopback and
 # link-local destinations (e.g. 169.254.169.254) as well. Destinations that
 # cannot be resolved locally are not forwarded either.
+# Numeric hosts that are not a plain dotted quad (0x7f.1, 2130706433, 127.1)
+# are refused, since the proxy may read them as 127.0.0.1.
 #proxy: http://127.0.0.1:3128
 
 # Hosts that bypass `proxy` (exact hostname match). Pre-populated with the

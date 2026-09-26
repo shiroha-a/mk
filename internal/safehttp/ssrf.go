@@ -12,7 +12,10 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/net/idna"
 )
 
 // privateRanges lists IPv4/IPv6 CIDR blocks considered private or reserved.
@@ -92,6 +95,8 @@ type transportOptions struct {
 	// lookup はテストで DNS 解決を差し替えるための hook。nil なら
 	// net.DefaultResolver.LookupIPAddr を使う。
 	lookup lookupFunc
+	// now はテストで proxy 宛て検査のキャッシュの時刻を進めるための hook。
+	now func() time.Time
 }
 
 // lookupFunc resolves host to its IP addresses (signature of
@@ -104,6 +109,11 @@ func withLookup(fn lookupFunc) Option {
 	return func(o *transportOptions) { o.lookup = fn }
 }
 
+// withClock overrides the clock used by the proxy destination cache. Test-only.
+func withClock(fn func() time.Time) Option {
+	return func(o *transportOptions) { o.now = fn }
+}
+
 // Option configures NewSSRFSafeTransport. Use WithProxy to enable forward
 // proxy support; pass no options for the default SSRF-safe direct transport.
 type Option func(*transportOptions)
@@ -111,8 +121,9 @@ type Option func(*transportOptions)
 // WithProxy wires a forward HTTP proxy and an optional bypass list. proxyURL
 // must be a full URL parseable by url.Parse (e.g. http://127.0.0.1:3128). When
 // proxyURL is empty the option is a no-op so callers can pass config values
-// straight through. bypassHosts is matched as exact case-sensitive hostname
-// equality, mirroring upstream Misskey's `proxyBypassHosts.includes(...)`.
+// straight through. bypassHosts is matched as exact equality against the
+// request's normalized hostname (lowercase, IDN converted to punycode), which
+// mirrors upstream Misskey's `proxyBypassHosts.includes(new URL(url).hostname)`.
 func WithProxy(proxyURL string, bypassHosts []string) Option {
 	return func(o *transportOptions) {
 		o.proxyURL = proxyURL
@@ -181,9 +192,15 @@ func NewSSRFSafeTransport(allowedCIDRs []string, opts ...Option) *http.Transport
 	}
 	bypass := make(map[string]struct{}, len(o.bypassHosts))
 	for _, h := range o.bypassHosts {
-		if h != "" {
-			bypass[h] = struct{}{}
+		if h == "" {
+			continue
 		}
+		// 照合相手 (リクエストの host) を正規化して比べるので、一覧側も同じ形に
+		// そろえる。変換できない値は書かれたまま残す (一致しないだけ)。
+		if n, err := proxyDestHost(h); err == nil {
+			h = n
+		}
+		bypass[h] = struct{}{}
 	}
 
 	dialer := &net.Dialer{
@@ -297,18 +314,100 @@ func NewSSRFSafeTransport(allowedCIDRs []string, opts ...Option) *http.Transport
 		// 残る窓: proxy は宛先ホスト名を自分で再解決するので、ここで検査した
 		// 後に DNS の応答を内部 IP へ切り替えられる (DNS rebinding) と防げない。
 		// proxy 側でも内部宛てを拒否する設定にすることを docs で求めている。
+		//
+		// **host は net/http が dial する形 (idna.Lookup) に揃えてから扱う。**
+		// Unicode の IDN をそのまま pure-Go resolver に渡すと必ず解決に失敗し、
+		// proxy 設定時は IDN の URL が常に取得できなくなる。bypass の照合も
+		// 同じ正規化の後に行う (upstream も `new URL().hostname` で照合する)。
+		cache := newProxyCheckCache(o.now)
 		tr.Proxy = func(req *http.Request) (*url.URL, error) {
-			host := req.URL.Hostname()
+			host, err := proxyDestHost(req.URL.Hostname())
+			if err != nil {
+				return nil, err
+			}
 			if _, ok := bypass[host]; ok {
 				return nil, nil
+			}
+			if cache.fresh(host) {
+				return proxyURL, nil
 			}
 			if err := checkProxiedHost(req.Context(), lookup, host, allowedNets); err != nil {
 				return nil, err
 			}
+			cache.store(host)
 			return proxyURL, nil
 		}
 	}
 	return tr
+}
+
+// proxyDestHost normalizes a request hostname the way net/http does before
+// dialing (lowercase; non-ASCII names through idna.Lookup), so the proxy-time
+// check, the bypass list and the connection all see the same name.
+func proxyDestHost(host string) (string, error) {
+	lower := strings.ToLower(host)
+	for i := 0; i < len(lower); i++ {
+		if lower[i] >= 0x80 {
+			ascii, err := idna.Lookup.ToASCII(host)
+			if err != nil {
+				return "", fmt.Errorf("safehttp: invalid destination host %q: %w", host, err)
+			}
+			return ascii, nil
+		}
+	}
+	return lower, nil
+}
+
+// proxyCheckTTL bounds how long a destination that passed checkProxiedHost is
+// trusted without resolving it again.
+//
+// proxy 経由では keep-alive の接続があっても Transport.Proxy が**リクエスト
+// ごとに**呼ばれるので、キャッシュしないと毎回 DNS を引く。30 秒の間は前回の
+// 判定を使う。**DNS rebinding の窓はこれで実質広がらない** — proxy は宛先を
+// 自分で解決し直すので、ここで検査した直後に応答を内部 IP へ切り替えられる窓は
+// 元から残っており (docs で proxy 側の拒否設定を求めている)、TTL の短い応答を
+// 使う攻撃者にとって 30 秒の差は意味を持たない。通過した結果だけを覚え、拒否は
+// 覚えない。
+const proxyCheckTTL = 30 * time.Second
+
+// proxyCheckCacheMax caps the number of remembered hosts. When full the cache
+// is cleared rather than evicting individually (the cost is only extra lookups).
+const proxyCheckCacheMax = 1024
+
+type proxyCheckCache struct {
+	mu  sync.Mutex
+	now func() time.Time
+	m   map[string]time.Time
+}
+
+func newProxyCheckCache(now func() time.Time) *proxyCheckCache {
+	if now == nil {
+		now = time.Now
+	}
+	return &proxyCheckCache{now: now, m: make(map[string]time.Time)}
+}
+
+func (c *proxyCheckCache) fresh(host string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exp, ok := c.m[host]
+	if !ok {
+		return false
+	}
+	if !c.now().Before(exp) {
+		delete(c.m, host)
+		return false
+	}
+	return true
+}
+
+func (c *proxyCheckCache) store(host string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.m) >= proxyCheckCacheMax {
+		c.m = make(map[string]time.Time)
+	}
+	c.m[host] = c.now().Add(proxyCheckTTL)
 }
 
 // checkProxiedHost validates the destination host of a request that is about
@@ -319,6 +418,15 @@ func NewSSRFSafeTransport(allowedCIDRs []string, opts ...Option) *http.Transport
 func checkProxiedHost(ctx context.Context, lookup lookupFunc, host string, allowedNets []*net.IPNet) error {
 	if host == "" {
 		return fmt.Errorf("safehttp: empty destination host: %w", ErrSSRFBlocked)
+	}
+	// inet_aton 形式の数値表記 (`0x7f.1` / `2130706433` / `127.1` / `0177.0.0.1`)
+	// は net.ParseIP が IP と認めないので、ここでは名前として解決に回る。手元の
+	// resolver が search domain 経由などで外部アドレスを返すと検査を通り、proxy
+	// 側の getaddrinfo が 127.0.0.1 と解釈して内部へ届きうる。WHATWG URL は最後の
+	// ラベルが数値のものを IPv4 として解釈するので、それに合わせて「数値で終わる
+	// のに厳密な dotted-quad ではない」host は渡さない。
+	if endsInNumber(host) && net.ParseIP(host) == nil {
+		return fmt.Errorf("safehttp: non-canonical numeric host %q: %w", host, ErrSSRFBlocked)
 	}
 	// outgoingAddressFamily の絞り込みはここでは掛けない。実際にどの family で
 	// 接続するかは proxy 側が決めるので、解決された全アドレスを検査するほうが
@@ -336,6 +444,35 @@ func checkProxiedHost(ctx context.Context, lookup lookupFunc, host string, allow
 		}
 	}
 	return nil
+}
+
+// endsInNumber reports whether host's last label (ignoring one trailing dot)
+// is a number in the WHATWG URL sense: decimal digits, or `0x` followed by hex
+// digits (possibly none). Such a host is parsed as an IPv4 address by WHATWG
+// URL and by inet_aton, whatever its other labels are.
+func endsInNumber(host string) bool {
+	host = strings.TrimSuffix(host, ".")
+	if host == "" || strings.Contains(host, ":") {
+		return false
+	}
+	last := host[strings.LastIndexByte(host, '.')+1:]
+	if last == "" {
+		return false
+	}
+	if strings.HasPrefix(last, "0x") || strings.HasPrefix(last, "0X") {
+		for _, c := range last[2:] {
+			if !strings.ContainsRune("0123456789abcdefABCDEF", c) {
+				return false
+			}
+		}
+		return true
+	}
+	for _, c := range last {
+		if c < '0' || c > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeFamily lowercases and validates the family string. Returns
