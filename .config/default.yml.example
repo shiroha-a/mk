@@ -540,6 +540,10 @@ proxyBypassHosts:
 #
 # This is deliberately separate from testMode: enabling the dev frontend
 # must not also open the destructive endpoints above.
+#
+# Only dev mode proxies to the dev server. Without it, a missing build makes
+# /vite/* answer 404 instead of reaching localhost:5173. `make dev` sets
+# MK_DEV=1 automatically when no built frontend is present.
 #dev: false
 
 # Mount net/http/pprof handlers at /debug/pprof/* for local

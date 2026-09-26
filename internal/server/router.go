@@ -3983,25 +3983,16 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	api.Any("/*", apiCatchall)
 
 	// フロントエンドアセット配信
-	// ビルド済みアセットがあれば静的配信、なければVite dev serverプロキシ
+	// dev モードなら Vite dev server へプロキシ、そうでなければビルド済みアセットを
+	// 静的配信する (無ければ 404。dev server へは流さない)。
 	//
 	// dev モードではビルド成果物の有無を**見ない** (#2477)。見てしまうと、
 	// 以前のビルドが残っているだけで dev server に繋がらず HMR に入れない。
-	frontendDir := frontendutil.FrontendDir()
-	if _, err := os.Stat(frontendDir); err == nil && !isDev(s.config) {
-		s.echo.Static("/vite", frontendDir)
-	} else {
-		s.echo.Any("/vite/*", newViteProxy(viteDevServerURL))
-	}
+	registerFrontendAssets(s.echo, s.config, "/vite", frontendutil.FrontendDir(), viteDevServerURL)
 
 	// embed 専用バンドル配信 (#2389)。通常の SPA とは別 build なので別ディレクトリ・
 	// 別 prefix になる (upstream ClientServerService の `/embed_vite/` と同じ)。
-	frontendEmbedDir := frontendutil.FrontendEmbedDir()
-	if _, err := os.Stat(frontendEmbedDir); err == nil && !isDev(s.config) {
-		s.echo.Static("/embed_vite", frontendEmbedDir)
-	} else {
-		s.echo.Any("/embed_vite/*", newViteProxy(viteEmbedDevServerURL))
-	}
+	registerFrontendAssets(s.echo, s.config, "/embed_vite", frontendutil.FrontendEmbedDir(), viteEmbedDevServerURL)
 
 	// フロントエンド配布アセット (locales, fonts等) + リポジトリアセット (ai.png等)
 	// Echo は同一パスに Static を 2 回登録すると上書きされるため、

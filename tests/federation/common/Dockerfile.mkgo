@@ -40,7 +40,7 @@ COPY --from=builder /app/third_party/misskey/built/_frontend_vite_ /app/built/_f
 COPY --from=builder /app/third_party/misskey/built/_frontend_dist_ /app/built/_frontend_dist_
 COPY --from=builder /app/third_party/misskey/built/_sw_dist_ /app/built/_sw_dist_
 # embed 専用 bundle (#2389)。通常 SPA とは別 build なので別ディレクトリ。
-# これが無いと /embed_vite/* が dev server proxy に落ちて 502 になる。
+# これが無いと /embed_vite/* が 404 になる (dev モード以外では dev server へ proxy しない)。
 COPY --from=builder /app/third_party/misskey/built/_frontend_embed_vite_ /app/built/_frontend_embed_vite_
 COPY --from=builder /app/third_party/misskey/packages/frontend/assets /app/client-assets
 # upstream 2026.5.2 #17381 で `@discordapp/twemoji/dist/svg` から

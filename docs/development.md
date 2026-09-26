@@ -118,7 +118,7 @@ cd mk && docker compose up -d
 | ターゲット | 内容 |
 |---|---|
 | `make build` | `./built/misskey`にバイナリ生成 |
-| `make dev` | `go run`で直接起動 |
+| `make dev` | `go run`で直接起動。**ビルド済みフロント (`third_party/misskey/built/_frontend_vite_`、`MISSKEY_FRONTEND_DIR` で上書き可) が無ければ `MK_DEV=1` を立てて**、`/vite/*` を Vite dev server (`localhost:5173`) へ流す。mk-go は dev モード (`dev: true` / `MK_DEV=1`) でしか dev server へ proxy せず、それ以外でビルド出力が無いと `/vite/*` は 404 になる — 以前は「無ければ proxy」だったので、本番でビルド出力が欠けると認証なしで `localhost:5173` へ reverse proxy されていた。ビルド済みでも dev server を使いたいときは `MK_DEV=1 make dev` |
 | `make run` | build + 実行 |
 | `make clean` | ビルド成果物を削除 |
 | `make tidy` | `go mod tidy`。**このリポジトリでは private plugin の解決に失敗するので使えない**。依存追加は `go get`、`go.sum` の充足検証は **`GOWORK=off go build`**。**`-mod=readonly` では効かない** — Go 1.16 以降それは既定値で、素の `go build` と同じ。効いていないのは `go.work` のほうで、workspace があると `go.sum` ではなく `go.work.sum` が使われ、`go.sum` から行を消しても**どちらの書き方でも exit 0 になる** (実測)。CI は `go.work` を持たない (生成物で gitignore 済み) ので、既存の `go build ./...` が既に検証している (→ [プラグインの書き方](plugins/authoring.md)) |
