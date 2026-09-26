@@ -10,6 +10,7 @@ import (
 	"github.com/shiroha-a/mk/internal/core/transfer"
 	"github.com/shiroha-a/mk/internal/misc/id"
 	"github.com/shiroha-a/mk/internal/model"
+	"github.com/shiroha-a/mk/internal/repository"
 	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -181,4 +182,27 @@ func TestExport_Clips_AuthorLookupErrorPropagates(t *testing.T) {
 
 	_, err := transfer.NewExporter(deps).Export(context.Background(), user.ID, transfer.ExportClips)
 	require.Error(t, err)
+}
+
+// failingFollowRepo fails every follow lookup.
+type failingFollowRepo struct {
+	repository.FollowingRepository
+}
+
+func (failingFollowRepo) Exists(string, string) (bool, error) {
+	return false, errors.New("follow lookup down")
+}
+
+// follow の lookup 障害で followers ノートを黙って落とさず、エラーにする (#2792)。
+func TestExport_Favorites_FollowLookupErrorPropagates(t *testing.T) {
+	_, _, deps, user := newExportDeps(t)
+	deps.FollowingRepo = failingFollowRepo{FollowingRepository: deps.FollowingRepo}
+	favRepo := deps.NoteFavoriteRepo.(*testutil.MockNoteFavoriteRepository)
+	text := "x"
+	n := &model.Note{ID: "n1", UserID: "bob", Text: &text, Visibility: model.NoteVisibilityFollowers}
+	favRepo.Favorites["fv1"] = &model.NoteFavorite{ID: "fv1", UserID: user.ID, NoteID: "n1", Note: n}
+
+	_, err := transfer.NewExporter(deps).Export(context.Background(), user.ID, transfer.ExportFavorites)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "follow lookup down")
 }

@@ -21,7 +21,25 @@ import (
 //
 // 見えないものは hide ではなく行ごと落とす (upstream と同じ)。
 func (e *Exporter) exportableFor(viewer *model.User, n *model.Note) (bool, error) {
-	if !corenote.CanSeeNote(viewer, n, e.deps.FollowingRepo) {
+	// **follow の lookup 障害を「見えない」に丸めない** (#2792)。CanSeeNote は
+	// Exists のエラーを false にするので、一時的な DB 障害で followers ノートが
+	// 黙って欠けた export が成功扱いで出来てしまう。エラーを拾って返す。
+	var followErr error
+	var follows func(viewerID, authorID string) bool
+	if e.deps.FollowingRepo != nil {
+		follows = func(viewerID, authorID string) bool {
+			ok, err := e.deps.FollowingRepo.Exists(viewerID, authorID)
+			if err != nil && followErr == nil {
+				followErr = fmt.Errorf("check follow %s -> %s: %w", viewerID, authorID, err)
+			}
+			return err == nil && ok
+		}
+	}
+	visible := corenote.CanSeeNoteFunc(viewer, n, follows)
+	if followErr != nil {
+		return false, followErr
+	}
+	if !visible {
 		return false, nil
 	}
 	author := n.User
