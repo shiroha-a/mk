@@ -327,7 +327,7 @@ func (h *Handler) SetUserStreamRevoker(r UserStreamRevoker) {
 func (h *Handler) HasUserStreamRevoker() bool { return h.userStreamRevoker != nil }
 
 // revokeUserStreams closes the target user's streaming connections. 凍結解除
-// では呼ばない (凍結中の利用者は匿名としてしか接続できないので閉じる対象が無い)。
+// では呼ばない (凍結中の利用者の token では /streaming へ接続できない — upgrade が 403 — ので閉じる対象が無い)。
 func (h *Handler) revokeUserStreams(userID string) {
 	if h.userStreamRevoker == nil || userID == "" {
 		return

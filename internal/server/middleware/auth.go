@@ -43,6 +43,10 @@ const (
 	// upstream ApiCallService が cacheSec の Cache-Control 判定を raw token (`!token`)
 	// で行うため、無効/suspended/deleted token でも cache を付けないようにする (#2049)。
 	rawTokenPresentContextKey contextKey = "misskeyRawTokenPresent"
+	// deletedContextKey flags that the request carried a valid token whose
+	// account is (logically) deleted. HTTP では匿名として扱うが、/streaming は
+	// 凍結と同じくこの接続を拒否する (IsInactiveAccountRequest)。
+	deletedContextKey contextKey = "misskeyDeleted"
 )
 
 // AuthScope is the OAuth scope view of an authenticated request. IsApp is
@@ -134,6 +138,7 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 
 			// 論理削除された user は anonymous request 扱いに落とす (#962 P2)。
 			if user.IsDeleted {
+				c.Set(string(deletedContextKey), true)
 				return next(c)
 			}
 			// 凍結された user は公開 endpoint では anonymous 扱いに落とす
@@ -175,6 +180,18 @@ func (a *AuthMiddleware) Authenticate() echo.MiddlewareFunc {
 // CREDENTIAL_REQUIRED を返す handler でも suspended だけは 403 に分ける必要がある。
 func IsSuspendedRequest(c echo.Context) bool {
 	v, _ := c.Get(string(suspendedContextKey)).(bool)
+	return v
+}
+
+// IsInactiveAccountRequest reports whether the request carried a valid token
+// whose account is suspended or deleted. Both are treated as anonymous by
+// Authenticate; /streaming uses this to refuse the upgrade instead
+// (upstream StreamingApiServerService rejects suspended users with 403).
+func IsInactiveAccountRequest(c echo.Context) bool {
+	if IsSuspendedRequest(c) {
+		return true
+	}
+	v, _ := c.Get(string(deletedContextKey)).(bool)
 	return v
 }
 

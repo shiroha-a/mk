@@ -13,6 +13,7 @@ import (
 	"github.com/shiroha-a/mk/internal/misc/credkey"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
+	"github.com/shiroha-a/mk/internal/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -366,4 +367,46 @@ func TestConnectionCredential_NativeUsesStoredToken(t *testing.T) {
 	// 16 文字未満の保存値は埋め草付きで返るが、失効側と同じ鍵になる。
 	short := "short           "
 	assert.Equal(t, credkey.Native("short"), connectionCredential(&model.User{ID: "alice", Token: &short}, &middleware.AuthScope{}, "short"))
+}
+
+// 凍結・削除済みの利用者の token での upgrade は 403 で拒否する (upstream
+// StreamingApiServerService の isSuspended)。認証 middleware はこれらを匿名に
+// 落とすので、見ないと匿名接続として張れてしまう。実際の middleware を通して
+// 確かめる (印の名前を取り違えても気付けるように)。
+func TestStream_InactiveAccountUpgradeIsForbidden(t *testing.T) {
+	cases := []struct {
+		name string
+		user *model.User
+	}{
+		{"suspended", &model.User{ID: "u_susp", IsSuspended: true}},
+		{"deleted", &model.User{ID: "u_del", IsDeleted: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			userRepo := testutil.NewMockUserRepository()
+			userRepo.Tokens["inactive-token"] = tc.user
+			auth := middleware.NewAuthMiddleware(userRepo, testutil.NewMockAccessTokenRepository())
+			acc := &stubAcceptor{}
+			h := NewHandler(acc)
+			e := echo.New()
+			e.GET("/streaming", h.Stream, auth.Authenticate())
+			srv := httptest.NewServer(e)
+			t.Cleanup(srv.Close)
+
+			dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
+			_, resp, err := dialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/streaming?i=inactive-token", nil)
+			require.Error(t, err)
+			require.NotNil(t, resp)
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+			_ = resp.Body.Close()
+			acc.mu.Lock()
+			assert.Equal(t, 0, acc.accepted, "匿名接続として受け付けない")
+			acc.mu.Unlock()
+
+			// token 無しの匿名接続は従来どおり通る。
+			conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/streaming", nil)
+			require.NoError(t, err)
+			_ = conn.Close()
+		})
+	}
 }

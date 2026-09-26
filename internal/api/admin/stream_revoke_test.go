@@ -43,7 +43,7 @@ func TestSuspendUser_RejectedDoesNotRevokeStreams(t *testing.T) {
 	assert.Empty(t, rev.calls)
 }
 
-// 凍結解除では閉じない (凍結中は匿名としてしか接続できない)。
+// 凍結解除では閉じない (凍結中の利用者の token では接続できない)。
 func TestUnsuspendUser_DoesNotRevokeStreams(t *testing.T) {
 	h, userRepo, _, _ := newTestHandler(t)
 	userRepo.Users["u1"] = &model.User{ID: "u1", Username: "target", IsSuspended: true}

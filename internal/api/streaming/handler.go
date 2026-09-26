@@ -105,6 +105,16 @@ func (h *Handler) Stream(c echo.Context) error {
 	if !websocket.IsWebSocketUpgrade(c.Request()) {
 		return c.NoContent(http.StatusServiceUnavailable)
 	}
+	// 凍結された利用者の token での upgrade は 403 (本文なし) で拒否する
+	// (upstream StreamingApiServerService の `user?.isSuspended`)。認証
+	// middleware は凍結・削除済みの利用者を匿名に落とすので、ここで見ないと
+	// 匿名接続として張れてしまう — 失効 (凍結) で閉じた接続が、再接続で匿名として
+	// 戻ってくる。削除済みの利用者も同じく拒否する (upstream は論理削除の時点で
+	// 拒否しないが、物理削除の後は token が引けず 401 になる。mk-go は論理削除の
+	// まま行を残すので、凍結と同じ扱いに倒す。docs/divergence.md)。
+	if middleware.IsInactiveAccountRequest(c) {
+		return c.NoContent(http.StatusForbidden)
+	}
 	conn, err := h.upgrader.Upgrade(c.Response(), c.Request(), nil)
 	if err != nil {
 		// gorilla/websocket は Upgrade 失敗時にレスポンスヘッダを既に書き込んで

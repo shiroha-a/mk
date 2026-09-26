@@ -213,6 +213,8 @@ func TestAuthenticate_DeletedUserTreatedAsAnonymous(t *testing.T) {
 
 	handler := auth.Authenticate()(func(c echo.Context) error {
 		assert.Nil(t, GetUser(c), "削除済 user は context に attach されない")
+		assert.True(t, IsInactiveAccountRequest(c), "/streaming が拒否できるよう印を積む")
+		assert.False(t, IsSuspendedRequest(c), "凍結の 403 YOUR_ACCOUNT_SUSPENDED とは区別する")
 		return c.String(http.StatusOK, "ok")
 	})
 	require.NoError(t, handler(c))
@@ -1154,4 +1156,18 @@ func TestNativeTokenMatches(t *testing.T) {
 	assert.False(t, nativeTokenMatches(s("short           "), "short "))
 	assert.False(t, nativeTokenMatches(s("abcdef1234567890"), "other"))
 	assert.True(t, nativeTokenMatches(nil, "x"), "token 列を持たない mock は照合できないので通す")
+}
+
+func TestIsInactiveAccountRequest(t *testing.T) {
+	e := echo.New()
+	newCtx := func() echo.Context {
+		return e.NewContext(httptest.NewRequest(http.MethodGet, "/", nil), httptest.NewRecorder())
+	}
+	assert.False(t, IsInactiveAccountRequest(newCtx()))
+	c := newCtx()
+	c.Set(string(suspendedContextKey), true)
+	assert.True(t, IsInactiveAccountRequest(c))
+	c = newCtx()
+	c.Set(string(deletedContextKey), true)
+	assert.True(t, IsInactiveAccountRequest(c))
 }
