@@ -110,27 +110,32 @@ jobs:
       # 書くと式の検証で `Unrecognized named-value` になり、**呼び出し元の job が
       # 1 つも走らずに失敗する** — token を渡さない呼び出しでも同じ。判定は run の
       # 中で行う。step の env は if からは見えないが run からは見える。
-      - name: Configure token for private plugins
-        if: inputs.plugins != ''
-        env:
-          PLUGIN_TOKEN: ${{ secrets.plugin_token }}
-        run: |
-          set -eu
-          if [ -z "${PLUGIN_TOKEN:-}" ]; then
-            echo "plugin_token が渡されていないので URL 書き換えは設定しません"
-            exit 0
-          fi
-          git config --global \
-            url."https://x-access-token:${PLUGIN_TOKEN}@github.com/".insteadOf \
-            "https://github.com/"
-
+      #
       # 指定を検証して plugins/<name>/ に materialise する。ref は必須で、
       # git の引数として解釈されうる値 (先頭 `-` など) は弾く。
+      #
+      # **token の設定と clone を同じ step に置き、抜けるときに必ず消す。**
+      # `--global` に書いたまま step を終えると、後続の `go run ./tools/pluginbuild`
+      # や `pnpm install` (依存パッケージの lifecycle script を実行する) からも
+      # `~/.gitconfig` 経由で token が読める。clone が要るのはこの step だけ。
+      # trap は EXIT に掛けるので、pluginresolve が失敗して `set -e` で抜ける
+      # ときも消える。消し損ねたら step ごと落とす (token が残ったまま後続へ
+      # 進ませない)。
       - name: Resolve plugins
         if: inputs.plugins != ''
         env:
+          PLUGIN_TOKEN: ${{ secrets.plugin_token }}
           MK_PLUGINS: ${{ inputs.plugins }}
-        run: printf '%s\n' "$MK_PLUGINS" | go run ./tools/pluginresolve
+        run: |
+          set -eu
+          if [ -n "${PLUGIN_TOKEN:-}" ]; then
+            key="url.https://x-access-token:${PLUGIN_TOKEN}@github.com/.insteadOf"
+            trap 'rc=$?; git config --global --unset-all "$key" || rc=1; exit "$rc"' EXIT
+            git config --global "$key" "https://github.com/"
+          else
+            echo "plugin_token が渡されていないので URL 書き換えは設定しません"
+          fi
+          printf '%s\n' "$MK_PLUGINS" | go run ./tools/pluginresolve
 
       # プラグインの配線を生成し、frontend を持つものがあるかを判定する。
       # **`ls plugins/*/frontend` では判定できない** — mk-plugin.yml で無効化
