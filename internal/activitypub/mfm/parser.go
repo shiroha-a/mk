@@ -4,6 +4,7 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+	"unsafe"
 )
 
 // Parse tokenizes and parses the input MFM string into an AST.
@@ -11,7 +12,7 @@ func Parse(input string) []*Node {
 	if input == "" {
 		return nil
 	}
-	s := &state{src: input, depth: 0, nestLimit: 20}
+	s := newState(input, false)
 	nodes := s.parseNodes(false)
 	return mergeText(nodes)
 }
@@ -21,7 +22,7 @@ func ParseSimple(input string) []*Node {
 	if input == "" {
 		return nil
 	}
-	s := &state{src: input, depth: 0, nestLimit: 20, simple: true}
+	s := newState(input, true)
 	nodes := s.parseNodes(false)
 	return mergeText(nodes)
 }
@@ -34,6 +35,185 @@ type state struct {
 	nestLimit int
 	inLink    bool
 	simple    bool
+	memo      *memoTable
+	budget    *workBudget
+}
+
+type memoEntry struct {
+	node *Node
+	end  int32
+}
+
+// scanKind names the stop condition of a child loop, i.e. the closing
+// delimiter that ends the children of a recursive construct.
+type scanKind uint8
+
+const (
+	scanCenter scanKind = iota
+	scanSmall
+	scanBold
+	scanItalic
+	scanStrike
+	scanBoldAsta
+	scanStrikeWave
+	scanFn
+	scanLinkLabel
+	numScanKinds
+)
+
+const (
+	memoPageBits = 8
+	memoPageSize = 1 << memoPageBits
+)
+
+type (
+	onePage  [memoPageSize]memoEntry
+	scanPage [memoPageSize]int32
+)
+
+// memoTable caches parse results for one source string. Quote bodies are
+// parsed as separate strings and get their own table.
+//
+// parseOne の結果 (ノードと終了位置) は src 上の位置・深さ・link ラベルの中か
+// どうかだけで決まる (nestLimit と simple は 1 回の Parse の間は変わらない)。
+// 深さは nestLimit による打ち切りで、inLink は link を試すかどうかで結果を
+// 変えるので、どちらも表を分ける軸にする。病的な入力では全ての深さの全ての
+// 位置を読むので、hash map ではなく位置で引くページ単位の配列にしてある
+// (map だと実測で時間の過半が hash に消えた)。ページは触れたものだけ確保する。
+type memoTable struct {
+	srcLen    int
+	nestLimit int
+	budget    *workBudget
+	one       [][]*onePage  // [slot(depth, inLink)][page]
+	scan      [][]*scanPage // [slot(depth, inLink)*numScanKinds+kind][page]
+}
+
+func newMemoTable(srcLen, nestLimit int, budget *workBudget) *memoTable {
+	slots := (nestLimit + 1) * 2
+	return &memoTable{
+		srcLen:    srcLen,
+		nestLimit: nestLimit,
+		budget:    budget,
+		one:       make([][]*onePage, slots),
+		scan:      make([][]*scanPage, slots*int(numScanKinds)),
+	}
+}
+
+// slot returns the table index for depth and inLink, or -1 when depth is out
+// of the range the table covers (never the case for depths the parser uses).
+func (m *memoTable) slot(depth int, inLink bool) int {
+	if depth < 0 || depth > m.nestLimit {
+		return -1
+	}
+	i := depth * 2
+	if inLink {
+		i++
+	}
+	return i
+}
+
+func (m *memoTable) pageCount() int { return m.srcLen>>memoPageBits + 1 }
+
+// charge accounts n bytes of memo storage against the shared budget and
+// reports whether the allocation may proceed.
+//
+// 仕事量の上限だけではメモリが縛れない。病的な入力は全ての深さ・全ての構文の
+// 表を触るので、リモートノートのように長さを切り詰めずに届く本文では 1MB で
+// 1.9GB を確保した (実測)。上限に達したら以降は構文を試さずテキストとして
+// 読ませる (workBudget.exhausted が真になる) ので、確保はそこで止まる。
+func (m *memoTable) charge(n int) bool {
+	b := m.budget
+	if b == nil {
+		return true
+	}
+	if b.memUsed+n > memoByteLimit {
+		b.used = b.limit + 1
+		return false
+	}
+	b.memUsed += n
+	return true
+}
+
+// oneEntry returns the cell for parseOne at pos, allocating its page.
+func (m *memoTable) oneEntry(pos, depth int, inLink bool) *memoEntry {
+	sl := m.slot(depth, inLink)
+	if sl < 0 || pos < 0 || pos > m.srcLen {
+		return nil
+	}
+	if m.one[sl] == nil {
+		if !m.charge(m.pageCount() * 8) {
+			return nil
+		}
+		m.one[sl] = make([]*onePage, m.pageCount())
+	}
+	pg := m.one[sl][pos>>memoPageBits]
+	if pg == nil {
+		if !m.charge(int(unsafe.Sizeof(onePage{}))) {
+			return nil
+		}
+		pg = new(onePage)
+		m.one[sl][pos>>memoPageBits] = pg
+	}
+	return &pg[pos&(memoPageSize-1)]
+}
+
+// scanEntry returns the cell holding end+1 of the child loop of kind started
+// at pos (0 = unknown), allocating its page.
+func (m *memoTable) scanEntry(pos, depth int, inLink bool, kind scanKind) *int32 {
+	sl := m.slot(depth, inLink)
+	if sl < 0 || pos < 0 || pos > m.srcLen {
+		return nil
+	}
+	sl = sl*int(numScanKinds) + int(kind)
+	if m.scan[sl] == nil {
+		if !m.charge(m.pageCount() * 8) {
+			return nil
+		}
+		m.scan[sl] = make([]*scanPage, m.pageCount())
+	}
+	pg := m.scan[sl][pos>>memoPageBits]
+	if pg == nil {
+		if !m.charge(int(unsafe.Sizeof(scanPage{}))) {
+			return nil
+		}
+		pg = new(scanPage)
+		m.scan[sl][pos>>memoPageBits] = pg
+	}
+	return &pg[pos&(memoPageSize-1)]
+}
+
+// workBudget bounds the total parsing work of one Parse call. Quote bodies
+// share the budget of the Parse call that contains them.
+type workBudget struct {
+	used    int
+	limit   int
+	memUsed int
+}
+
+// メモ化で閉じない <b> / <small> / $[fn の連続のような既知の病的入力は線形に
+// なるが、1 文字ずつ末尾まで読む構文 (<plain> / \[ / $[x.k=v の値 など) は
+// 開始位置ごとに同じ区間を読み直しうる。どの経路でも 1 回の Parse の仕事量が
+// 入力長に比例する上限を超えないよう、安全網として上限を置く。超えたら以降の
+// 未解析の位置は構文を試さずテキストとして読む (通常の入力では届かない)。
+const (
+	workBudgetBase    = 1 << 18
+	workBudgetPerByte = 32
+	// memoByteLimit はメモ表が 1 回の Parse で確保してよい総量。ローカルの
+	// 上限 3000 文字の病的な入力でも 6MB 程度なので、通常の投稿は上限に届かない。
+	memoByteLimit = 16 << 20
+)
+
+func (b *workBudget) exhausted() bool { return b.used > b.limit }
+
+func newState(src string, simple bool) *state {
+	budget := &workBudget{limit: workBudgetBase + workBudgetPerByte*len(src)}
+	return &state{
+		src:       src,
+		nestLimit: 20,
+		simple:    simple,
+		memo:      newMemoTable(len(src), 20, budget),
+		budget:    budget,
+	}
 }
 
 func (s *state) remaining() string { return s.src[s.pos:] }
@@ -47,7 +227,10 @@ func (s *state) peek() rune {
 	return r
 }
 
-func (s *state) advance(n int) { s.pos += n }
+func (s *state) advance(n int) {
+	s.pos += n
+	s.budget.used++
+}
 
 func (s *state) hasPrefix(prefix string) bool {
 	return strings.HasPrefix(s.remaining(), prefix)
@@ -76,13 +259,36 @@ func (s *state) parseOne() *Node {
 	if s.eof() {
 		return nil
 	}
+	s.budget.used++
 	if s.simple {
 		return s.parseSimpleOne()
 	}
-	return s.parseFullOne()
+	// 深さ 0 かつ link ラベルの外で読む位置は最上位のループが 1 度ずつ読むだけで、
+	// 読み直されることが無い (子のループは深さ 1 以上か link ラベルの中)。
+	// 素のテキストで表を膨らませないよう記録しない
+	if s.depth == 0 && !s.inLink {
+		return s.parseFullOne()
+	}
+	// 閉じない <b> などは失敗するたびに 1 文字進めて、同じ位置を別の親から
+	// 読み直す。メモ化しないと入力長に対して指数時間になる
+	e := s.memo.oneEntry(s.pos, s.depth, s.inLink)
+	if e == nil {
+		return s.parseFullOne()
+	}
+	if e.node != nil {
+		s.pos = int(e.end)
+		return e.node
+	}
+	n := s.parseFullOne()
+	// parseFullOne は EOF 以外で nil を返さないので、node != nil を「記録済み」に使える
+	*e = memoEntry{node: n, end: int32(s.pos)}
+	return n
 }
 
 func (s *state) parseSimpleOne() *Node {
+	if s.budget.exhausted() {
+		return s.consumeChar()
+	}
 	if n := s.tryUnicodeEmoji(); n != nil {
 		return n
 	}
@@ -96,6 +302,9 @@ func (s *state) parseSimpleOne() *Node {
 }
 
 func (s *state) parseFullOne() *Node {
+	if s.budget.exhausted() {
+		return s.consumeChar()
+	}
 	// mfm-js の alt() 順序に従う
 	if n := s.tryUnicodeEmoji(); n != nil {
 		return n
@@ -174,10 +383,25 @@ func (s *state) parseFullOne() *Node {
 	return s.consumeChar()
 }
 
+// asciiText holds shared single-byte text nodes returned by consumeChar.
+//
+// 失敗した試行の中で読んだ 1 文字ずつのノードは大半が捨てられるので、ASCII は
+// 共有して割り当てを省く。出力に出るテキストノードは mergeText が必ず作り直す
+// ので、共有ノードが呼び出し側へ渡って書き換えられることは無い
+var asciiText = func() (t [utf8.RuneSelf]*Node) {
+	for i := range t {
+		t[i] = Text(string(rune(i)))
+	}
+	return t
+}()
+
 // consumeChar takes one rune and returns it as a text node.
 func (s *state) consumeChar() *Node {
 	r, size := utf8.DecodeRuneInString(s.remaining())
 	s.advance(size)
+	if r < utf8.RuneSelf {
+		return asciiText[r]
+	}
 	return Text(string(r))
 }
 
@@ -191,6 +415,87 @@ func (s *state) nest(fn func() []*Node) []*Node {
 	result := fn()
 	s.depth--
 	return result
+}
+
+// prefixAt reports whether src has prefix p at byte offset pos.
+func (s *state) prefixAt(pos int, p string) bool {
+	return pos <= len(s.src) && strings.HasPrefix(s.src[pos:], p)
+}
+
+// stopsAt reports whether the child loop of kind ends at the current position.
+func (s *state) stopsAt(kind scanKind) bool {
+	switch kind {
+	case scanCenter:
+		return s.hasPrefix("</center>")
+	case scanSmall:
+		return s.hasPrefix("</small>")
+	case scanBold:
+		return s.hasPrefix("</b>")
+	case scanItalic:
+		return s.hasPrefix("</i>")
+	case scanStrike:
+		return s.hasPrefix("</s>")
+	case scanBoldAsta:
+		return s.hasPrefix("**") || s.peek() == '\n'
+	case scanStrikeWave:
+		return s.hasPrefix("~~") || s.peek() == '\n'
+	case scanFn:
+		return s.peek() == ']'
+	case scanLinkLabel:
+		return s.peek() == ']' || s.peek() == '\n'
+	}
+	return true
+}
+
+// scanEnd returns the position where the child loop of kind, started at the
+// current position with the current depth and inLink, stops: the first
+// position reached by successive parseOne calls that is EOF or satisfies
+// stopsAt. The current position is left unchanged.
+//
+// 同じ位置から始まる子のループは、止まる条件が同じなら必ず同じ位置で止まる。
+// 開きタグが失敗して 1 文字進むたびに同じ区間を末尾まで辿り直すと、parseOne を
+// メモ化していても入力長の 2 乗になるので、止まる位置を経路上の全位置に記録する。
+func (s *state) scanEnd(kind scanKind) int {
+	start := s.pos
+	var path []int
+	end := start
+	for {
+		if s.eof() || s.stopsAt(kind) {
+			end = s.pos
+			break
+		}
+		if e := s.memo.scanEntry(s.pos, s.depth, s.inLink, kind); e != nil && *e != 0 {
+			end = int(*e) - 1
+			break
+		}
+		path = append(path, s.pos)
+		if s.parseOne() == nil {
+			end = s.pos
+			break
+		}
+	}
+	for _, p := range path {
+		if e := s.memo.scanEntry(p, s.depth, s.inLink, kind); e != nil {
+			*e = int32(end) + 1
+		}
+	}
+	s.pos = start
+	return end
+}
+
+// collectTo parses nodes from the current position up to end, which must be
+// a position scanEnd returned for the same depth and inLink. Every step is a
+// memo hit because scanEnd already walked the same chain.
+func (s *state) collectTo(end int) []*Node {
+	var nodes []*Node
+	for s.pos < end {
+		n := s.parseOne()
+		if n == nil {
+			break
+		}
+		nodes = append(nodes, n)
+	}
+	return nodes
 }
 
 // --- Block-level parsers ---
@@ -225,7 +530,7 @@ func (s *state) tryQuote() *Node {
 	}
 	inner := strings.Join(lines, "\n")
 	children := s.nest(func() []*Node {
-		sub := &state{src: inner, depth: s.depth, nestLimit: s.nestLimit}
+		sub := &state{src: inner, depth: s.depth, nestLimit: s.nestLimit, memo: newMemoTable(len(inner), s.nestLimit, s.budget), budget: s.budget}
 		return sub.parseNodes(false)
 	})
 	if children == nil {
@@ -303,11 +608,11 @@ func (s *state) tryMathBlock() *Node {
 }
 
 func (s *state) tryCenterTag() *Node {
-	return s.tryHTMLTag("center", NodeCenter, true)
+	return s.tryHTMLTag("<center>", "</center>", NodeCenter, scanCenter)
 }
 
 func (s *state) trySmallTag() *Node {
-	return s.tryHTMLTag("small", NodeSmall, true)
+	return s.tryHTMLTag("<small>", "</small>", NodeSmall, scanSmall)
 }
 
 func (s *state) tryPlainTag() *Node {
@@ -330,44 +635,38 @@ func (s *state) tryPlainTag() *Node {
 }
 
 func (s *state) tryBoldTag() *Node {
-	return s.tryHTMLTag("b", NodeBold, true)
+	return s.tryHTMLTag("<b>", "</b>", NodeBold, scanBold)
 }
 
 func (s *state) tryItalicTag() *Node {
-	return s.tryHTMLTag("i", NodeItalic, true)
+	return s.tryHTMLTag("<i>", "</i>", NodeItalic, scanItalic)
 }
 
 func (s *state) tryStrikeTag() *Node {
-	return s.tryHTMLTag("s", NodeStrike, true)
+	return s.tryHTMLTag("<s>", "</s>", NodeStrike, scanStrike)
 }
 
-// tryHTMLTag は <tag>...</tag> 形式のパースを試みる。
-// recurse=true で children を再帰パースする。
-func (s *state) tryHTMLTag(tag string, nodeType NodeType, recurse bool) *Node {
-	open := "<" + tag + ">"
-	close := "</" + tag + ">"
+// tryHTMLTag は <tag>...</tag> 形式のパースを試みる。children は再帰パースする。
+func (s *state) tryHTMLTag(open, close string, nodeType NodeType, kind scanKind) *Node {
 	if !s.hasPrefix(open) {
 		return nil
 	}
 	save := s.pos
 	s.advance(len(open))
 
-	if recurse {
-		children := s.nest(func() []*Node {
-			var nodes []*Node
-			for !s.eof() && !s.hasPrefix(close) {
-				n := s.parseOne()
-				if n == nil {
-					break
-				}
-				nodes = append(nodes, n)
-			}
-			return nodes
-		})
-		if s.hasPrefix(close) {
-			s.advance(len(close))
-			return withChildren(nodeType, mergeText(children))
+	// 深さ上限を超えたときは中身を読まず、開きタグの直後がそのまま閉じタグか
+	// だけを見る (空要素として成功しうる)
+	var children []*Node
+	if s.depth < s.nestLimit {
+		s.depth++
+		if end := s.scanEnd(kind); s.prefixAt(end, close) {
+			children = s.collectTo(end)
 		}
+		s.depth--
+	}
+	if s.hasPrefix(close) {
+		s.advance(len(close))
+		return withChildren(nodeType, mergeText(children))
 	}
 	s.pos = save
 	return nil
@@ -379,7 +678,7 @@ func (s *state) tryBoldAsta() *Node {
 	if !s.hasPrefix("**") {
 		return nil
 	}
-	return s.tryWrapped("**", "**", NodeBold)
+	return s.tryWrapped("**", "**", NodeBold, scanBoldAsta)
 }
 
 func (s *state) tryItalicAsta() *Node {
@@ -414,36 +713,27 @@ func (s *state) tryStrikeWave() *Node {
 	if !s.hasPrefix("~~") {
 		return nil
 	}
-	return s.tryWrapped("~~", "~~", NodeStrike)
+	return s.tryWrapped("~~", "~~", NodeStrike, scanStrikeWave)
 }
 
 // tryWrapped は open...close で囲まれた部分を再帰パースする。
-func (s *state) tryWrapped(open, close string, nodeType NodeType) *Node {
+// children の途中に改行が来たら失敗する。
+func (s *state) tryWrapped(open, close string, nodeType NodeType, kind scanKind) *Node {
 	save := s.pos
 	s.advance(len(open))
-	if s.eof() || s.hasPrefix(close) {
+	if s.eof() || s.hasPrefix(close) || s.depth >= s.nestLimit {
 		s.pos = save
 		return nil
 	}
-	children := s.nest(func() []*Node {
-		var nodes []*Node
-		for !s.eof() && !s.hasPrefix(close) {
-			if s.peek() == '\n' {
-				s.pos = save
-				return nil
-			}
-			n := s.parseOne()
-			if n == nil {
-				break
-			}
-			nodes = append(nodes, n)
-		}
-		return nodes
-	})
-	if children == nil || !s.hasPrefix(close) {
+	s.depth++
+	end := s.scanEnd(kind)
+	if !s.prefixAt(end, close) {
+		s.depth--
 		s.pos = save
 		return nil
 	}
+	children := s.collectTo(end)
+	s.depth--
 	s.advance(len(close))
 	return withChildren(nodeType, mergeText(children))
 }
@@ -562,18 +852,15 @@ func (s *state) tryFn() *Node {
 	}
 	s.advance(1)
 
-	// children (] まで)
-	children := s.nest(func() []*Node {
-		var nodes []*Node
-		for !s.eof() && s.peek() != ']' {
-			n := s.parseOne()
-			if n == nil {
-				break
-			}
-			nodes = append(nodes, n)
+	// children (] まで)。深さ上限を超えたときは中身を読まず、直後が ] かだけを見る
+	var children []*Node
+	if s.depth < s.nestLimit {
+		s.depth++
+		if end := s.scanEnd(scanFn); s.prefixAt(end, "]") {
+			children = s.collectTo(end)
 		}
-		return nodes
-	})
+		s.depth--
+	}
 	if !s.hasPrefix("]") {
 		s.pos = save
 		return nil
@@ -898,28 +1185,17 @@ func (s *state) tryLink() *Node {
 		s.advance(1)
 	}
 
-	// label
+	// label (] まで。途中の改行で失敗)
 	oldInLink := s.inLink
 	s.inLink = true
-	var labelNodes []*Node
-	for !s.eof() && s.peek() != ']' {
-		if s.peek() == '\n' {
-			s.inLink = oldInLink
-			s.pos = save
-			return nil
-		}
-		n := s.parseOne()
-		if n == nil {
-			break
-		}
-		labelNodes = append(labelNodes, n)
-	}
-	s.inLink = oldInLink
-
-	if !s.hasPrefix("](") {
+	end := s.scanEnd(scanLinkLabel)
+	if !s.prefixAt(end, "](") {
+		s.inLink = oldInLink
 		s.pos = save
 		return nil
 	}
+	labelNodes := s.collectTo(end)
+	s.inLink = oldInLink
 	s.advance(2) // skip ](
 
 	urlStart := s.pos
@@ -1136,22 +1412,36 @@ func isEmojiContinuation(r rune) bool {
 }
 
 // mergeText combines adjacent text nodes.
+//
+// 入力のノードは書き換えない。parseOne のメモは同じノードを複数の試行へ返すので、
+// 前のテキストノードへ連結する形だと別の試行が持つノードまで書き換わる。連続する
+// テキストは 1 つの Builder にまとめる (1 文字ずつ連結すると長さの 2 乗になる)。
 func mergeText(nodes []*Node) []*Node {
 	if len(nodes) == 0 {
 		return nil
 	}
 	var result []*Node
+	var buf strings.Builder
+	inText := false
+	flush := func() {
+		if inText {
+			result = append(result, Text(buf.String()))
+			buf.Reset()
+			inText = false
+		}
+	}
 	for _, n := range nodes {
 		if n == nil {
 			continue
 		}
-		if n.Type == NodeText && len(result) > 0 && result[len(result)-1].Type == NodeText {
-			// 前のテキストノードと結合
-			prev := result[len(result)-1]
-			prev.Props["text"] = prev.textValue() + n.textValue()
-		} else {
-			result = append(result, n)
+		if n.Type == NodeText {
+			buf.WriteString(n.textValue())
+			inText = true
+			continue
 		}
+		flush()
+		result = append(result, n)
 	}
+	flush()
 	return result
 }
