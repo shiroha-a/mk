@@ -303,6 +303,50 @@ PR では回らない。失敗は Actions 上で確認して別 PR で対処す�
 `spec (ts …)` を常時回さないのは、upstream が変わらない限り答えが変わらないため。詳細は
 #2289。
 
+## action の版固定
+
+`.github/workflows/` から参照する action と reusable workflow は、**GitHub 公式
+(`actions/*`) も含めて全て commit SHA で固定する**。
+
+```yaml
+- uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+```
+
+**tag は付け替えられる。** `@v7` のような参照は、action のリポジトリ (あるいはそれを
+乗っ取った第三者) が tag を別 commit へ動かした瞬間に中身が変わる。`docker.yml` と
+`build-with-plugins.yml` は `packages: write` を持って GHCR へ publish するので、そこで
+動く action が差し替わると**配る image そのものを書き換えられる**。公式だけ例外にしないのは、
+「どれが例外か」を読む側が毎回判断しなくて済むようにするため。
+
+`TestWorkflowActionsArePinnedToSHA` (`internal/entitycompat/actions_pin_test.go`) が
+`owner/repo@<40 桁の SHA> # vX.Y.Z` の形になっているかを見る。`test-shards` で回るので
+tag 参照に戻すと required check の `test` が落ちる。同じリポジトリ内の参照 (`./...`) と
+YAML のコメント行は対象外。
+
+**更新は dependabot に任せる。** `.github/dependabot.yml` の `github-actions` ecosystem が
+週 1 回、固定した action の新しい版を 1 つの PR にまとめて出す。dependabot は SHA と
+`# vX.Y.Z` のコメントを一緒に書き換えるので、コメントの書式 (`# v` + 3 桁の版) を崩さない
+こと。
+
+**手で上げるとき**は tag を commit SHA に解いてから書く。
+
+```bash
+git ls-remote https://github.com/actions/checkout 'refs/tags/v7*'
+```
+
+- **annotated tag は `^{}` の行を使う。** `refs/tags/v7.0.1` の行は tag object の SHA で、
+  `refs/tags/v7.0.1^{}` の行が commit。`uses:` に書くのは commit
+- `v7` のような major tag は動く前提のもの。**それと同じ commit を指す `vX.Y.Z` を探して
+  コメントに書く** (major tag 名をコメントにすると、どの版を固定したのか読めない)
+- tag が無く branch だけのもの (`actions/dependency-review-action` の `v4` は branch) は
+  `refs/heads/<name>` の SHA と、同じ commit を指す `vX.Y.Z` tag を使う
+
+あわせて **publish する job の `actions/checkout` には `persist-credentials: false` を
+付ける** (`docker.yml` の 2 job / `docker-branch.yml` / `build-with-plugins.yml`)。
+付けないと token が `.git/config` に残ったまま、後続の `pnpm install` の lifecycle script や
+第三者のプラグインのコードが走る。いずれの job も checkout 後に mk-go の git 認証を使って
+いない (`docker-branch.yml` の push は token を URL に明示した別リポジトリから行う)。
+
 ## 落ちたときの一般的な注意
 
 **「手元では通るのに CI で落ちる」場合、手元の生成物を疑う。** 過去に何度も踏んでいる。

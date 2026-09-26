@@ -933,6 +933,13 @@ PR では回らないので、失敗は Actions 上で確認して別 PR で対�
 (Section 1-10 の policy / Makefile target / CI 閾値 / CI workflow 等) を変更した
 タイミングのみ記録する。
 
+- **2026-09-26**: `.github/workflows/` の action を**全て commit SHA で固定**した (`# vX.Y.Z` の
+  コメント付き。`actions/*` も例外にしない)。tag は付け替えられるので、`packages: write` で
+  GHCR へ publish する `docker.yml` / `build-with-plugins.yml` の中で動く action が差し替わると
+  配る image を書き換えられる。`TestWorkflowActionsArePinnedToSHA` が形を固定し、更新は
+  `.github/dependabot.yml` の `github-actions` で受ける。publish する job の checkout には
+  `persist-credentials: false` を付けた。手順は docs/ci.md の「action の版固定」。
+
 - **2026-09-23**: mkq を v1.0.8 → **v1.1.1** に更新 (BullMQ 6 へ移行。upstream 2026.9.0 の
   bullmq 6.3.2 と wire が揃う)。**2026-09-22 の SA1019 entry にある「Redis は呼び出し側で
   Start / Stop を入れ替えない」は go-redis v9.21.0 で逆になった** (redis/go-redis#3751)。
