@@ -6,15 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
-	"strings"
 	"sync"
 	"time"
 
-	"golang.org/x/text/cases"
-	"golang.org/x/text/language"
 	"gorm.io/gorm"
 
 	"github.com/shiroha-a/mk/internal/misc/id"
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/repository"
 )
@@ -24,13 +22,6 @@ import (
 // (autoSuspendedForNotResponding)。upstream DeliverProcessorService の
 // `1000 * 60 * 60 * 24 * 7` (1 週間) と一致する (#1811)。
 const autoSuspendNotRespondingThreshold = 7 * 24 * time.Hour
-
-// hostMatchCaser folds host names case-insensitively in a Unicode-aware
-// manner. Misskey TS uses String.prototype.toLowerCase() which works on
-// arbitrary Unicode (e.g. \`Ä\` → \`ä\`); strings.ToLower in Go only handles
-// ASCII, so raw IDN representations would diverge between TS and mk-go
-// without this caser. cases.Caser instances are safe for concurrent use.
-var hostMatchCaser = cases.Lower(language.Und)
 
 // Errors returned by Service.
 var (
@@ -513,7 +504,7 @@ func (s *Service) IsAllowed(host string) bool {
 	case "none":
 		return false
 	case "specified":
-		if !HostMatchesAny(meta.FederationHosts, host) {
+		if !HostMatchesAllowList(meta.FederationHosts, host) {
 			return false
 		}
 	}
@@ -553,7 +544,7 @@ func (s *Service) ShouldSkipDelivery(host string) bool {
 		case "none":
 			return true
 		case "specified":
-			if !HostMatchesAny(meta.FederationHosts, host) {
+			if !HostMatchesAllowList(meta.FederationHosts, host) {
 				return true
 			}
 		}
@@ -595,7 +586,7 @@ func (s *Service) CanFetchOptionalRemoteData(host string) bool {
 	case "none":
 		return false
 	case "specified":
-		if !HostMatchesAny(meta.FederationHosts, host) {
+		if !HostMatchesAllowList(meta.FederationHosts, host) {
 			return false
 		}
 	}
@@ -694,33 +685,30 @@ func (s *Service) warnMetaFetchFailed(host string, err error) {
 }
 
 // HostMatchesAny reports whether host (case-insensitive, Unicode-aware)
-// matches any of the given patterns under Misskey TS's suffix-match rule.
-// A pattern matches if host equals it, or host ends with `.<pattern>`
-// (i.e. host is a subdomain).
+// matches any of the given patterns under Misskey TS's suffix-match rule, for
+// lists that restrict a host (blockedHosts / silencedHosts /
+// mediaSilencedHosts). A pattern matches if host equals it, or host ends with
+// `.<pattern>` (i.e. host is a subdomain).
 //
-// 比較ロジックは TS の \`UtilityService.isBlockedHost\` (および
-// \`isFederationAllowedHost\`) と等価:
+// Host is also compared with its port and trailing dot removed, so a remote
+// that publishes its actor on a non-default port (`evil.example:8443`) still
+// falls under an `evil.example` entry. See idnhost.MatchesBlockList.
 //
-//	patterns.some(x => `.${host.toLowerCase()}`.endsWith(`.${x.toLowerCase()}`))
+// host が空文字なら常に false。空 pattern は skip する (admin が誤って空エントリを
+// 混入させた場合に "全 host を block" に化けない defensive guard)。
 //
-// host が空文字なら常に false。空 pattern は意図的に skip する (\`host == ""\`
-// ガードが既に効くので "." 単独が任意 host に誤マッチすることは無いが、
-// admin が誤って空エントリを混入させた場合に "全 host を allow / block" に
-// 化けない defensive guard を残す)。
+// **許可リスト (federationHosts) には使わない。** ポートを落として照合するのは
+// 拒否側だけで、許可側に使うと許可が広がる。HostMatchesAllowList を使うこと。
 func HostMatchesAny(patterns []string, host string) bool {
-	if host == "" {
-		return false
-	}
-	needle := "." + hostMatchCaser.String(host)
-	for _, p := range patterns {
-		if p == "" {
-			continue
-		}
-		if strings.HasSuffix(needle, "."+hostMatchCaser.String(p)) {
-			return true
-		}
-	}
-	return false
+	return idnhost.MatchesBlockList(patterns, host)
+}
+
+// HostMatchesAllowList reports whether host is admitted by a federationHosts
+// style allow list. Same suffix rule as HostMatchesAny, but the port is
+// significant: `good.example` admits only the default-port authority, as in
+// upstream `UtilityService.isFederationAllowedHost`.
+func HostMatchesAllowList(patterns []string, host string) bool {
+	return idnhost.MatchesAllowList(patterns, host)
 }
 
 // Suspend updates the suspensionState column for the host. 引数の state には
