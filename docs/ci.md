@@ -209,7 +209,8 @@ workflow が後から集めたもの。前者がある場合はそちらが本�
 
 2 つの step があり、落ちた step で意味が違う。
 
-**Go version pin の不一致** — `go.mod` の `go` directive と Dockerfile の builder tag が
+**Go version pin の不一致** — `go.mod` の `go` directive と、golang image を使う Dockerfile
+(`git grep` で列挙した全て。`Dockerfile.bundled` や `tests/` の検証用も含む) の builder tag が
 ずれている。両方を同じ patch version に揃える。分けて検査しているのは、`govulncheck` が
 見るのは `go.mod` 側だけで、**Dockerfile だけ古いと CI は緑のまま配る image が脆弱**に
 なるため。builder を `golang:1.27-alpine` のような floating tag に戻すのも不可
@@ -233,7 +234,7 @@ package load エラーで解析が空振りしうる。**ローカルの `go` �
 - 依存モジュール → `go get <module>@<fixed>` で修正版へ。**修正版の指定は govulncheck の
   `Fixed in:` をそのまま使う。** 同じモジュールに複数の脆弱性があると必要な版が別々で、
   一番低い版に上げても残ることがある
-- Go stdlib → `go mod edit -go=<patch>` と Dockerfile の builder tag を両方上げる
+- Go stdlib → `go mod edit -go=<patch>` と Dockerfile の builder tag を上げる (`git grep -n 'FROM golang:'` で全て拾う)
 
 新しい CVE が公開されると、**コードを変えていない PR でも落ちる**。これは required check に
 していない理由でもある。落ちたときは自分の変更が原因とは限らないので、まず `Found in:` の

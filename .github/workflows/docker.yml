@@ -176,6 +176,31 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
+      # Dockerfile.bundled の assets image は `<tag>@sha256:<digest>` で固定して
+      # いる。BuildKit は digest を優先して tag を見ないので、**tag だけ上げて
+      # digest を取り直し忘れると、新しい tag を名乗る古い frontend が焼き込まれる**。
+      # `make submodulepin-check` は tag しか突き合わせられない (ネットワークを
+      # 使わない) ので、registry に問い合わせるのはここで行う。
+      # fork 側が同じ tag を publish し直した場合もここで落ちる (= 中身が変わった
+      # ことに気付ける)。
+      - name: Assets image digest matches its tag
+        run: |
+          set -euo pipefail
+          ref=$(sed -n 's/^ARG MISSKEY_ASSETS_IMAGE=//p' Dockerfile.bundled)
+          image=${ref%@*}
+          pinned=${ref#*@}
+          if [ "$image" = "$ref" ]; then
+            echo "::error::Dockerfile.bundled の MISSKEY_ASSETS_IMAGE ($ref) に digest が無い" >&2
+            exit 1
+          fi
+          # --raw は manifest のバイト列そのものを返すので、その sha256 が digest になる。
+          actual="sha256:$(docker buildx imagetools inspect --raw "$image" | sha256sum | cut -d' ' -f1)"
+          echo "tag=$image pinned=$pinned registry=$actual"
+          if [ "$pinned" != "$actual" ]; then
+            echo "::error::$image の digest が Dockerfile.bundled の pin と違う (pin: $pinned / registry: $actual)。tag を上げたなら digest も取り直すこと (docs/upstream-catch-up.md)" >&2
+            exit 1
+          fi
+
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
