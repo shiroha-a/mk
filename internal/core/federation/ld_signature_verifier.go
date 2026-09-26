@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub/ld"
 	"github.com/shiroha-a/mk/internal/repository"
@@ -41,6 +42,31 @@ type VerifiedLDActivity struct {
 	Body []byte
 }
 
+// ldSignatureMaxAge / ldSignatureMaxFuture bound `signature.created`.
+//
+// **upstream にこの検査は無い** (docs/divergence.md)。LD-Signature は本文だけを
+// 縛り、HTTP 署名の Date のような鮮度を持たない。転送経路では HTTP 署名は
+// 転送者 (= 攻撃者でもありうる) のものなので、一度受け取った署名付き activity は
+// 何年後でも投げ直せる (削除済みノートの Create を再送して復活させる、古い
+// Update で本文を巻き戻す等)。replay guard (inbox_replay.go) は 15 分しか覚えない。
+//
+// 窓の根拠: `created` は署名した時刻 (Mastodon の LinkedDataSignature#sign! も
+// upstream の signRsaSignature2017 も配送用に render した時点の now) で、転送者は
+// 元の body をそのまま流すので、届くまでの遅延は元サーバーの配送 retry と
+// 転送者の retry の和になる。upstream の deliver は既定 12 回・間隔は倍々で最大
+// 8 時間なので、retry を使い切るまでおよそ 1.4 日 (jitter 込みで 1.6 日、
+// `httpRelatedBackoff`)。7 日を超えて届く転送活動は受信側が長く落ちていた場合
+// くらいで、それを落とす損失より無期限の replay を塞ぐ利益を取る。未来側は
+// 時計のずれだけを許す。窓の内側の replay は塞いでいない (docs/divergence.md)。
+const (
+	ldSignatureMaxAge    = 7 * 24 * time.Hour
+	ldSignatureMaxFuture = time.Hour
+)
+
+// ErrLDSignatureExpired is returned when `signature.created` is outside the
+// accepted window (see ldSignatureMaxAge).
+var ErrLDSignatureExpired = errors.New("ld-sig: signature.created outside the accepted window")
+
 // NewLDSignatureVerifier returns a verifier wired to the supplied
 // user_publickey repository. signature.creator (key URI) から keyId 一致する
 // row を引いて PEM を取り出す。
@@ -55,6 +81,7 @@ func NewLDSignatureVerifier(pubkeyRepo repository.UserPublickeyRepository) *LDSi
 //
 // Returns error when:
 //   - body has `signature` but creator / signatureValue missing or malformed
+//   - `signature.created` is outside the accepted window
 //   - public key cannot be resolved
 //   - forbidden directive detected in the activity
 //   - the activity cannot be compacted (e.g. non-preloaded context)
@@ -103,6 +130,12 @@ func (v *LDSignatureVerifier) VerifyAndCompact(rawBody []byte) (VerifiedLDActivi
 	// 入口で弾くほうが strict で、compact 前に `@reverse` 等を含む文書を
 	// json-gold に渡さずに済む。compact 後にも下で改めて見る。
 	if err := proc.CheckForForbiddenDirectives(act); err != nil {
+		return VerifiedLDActivity{}, true, err
+	}
+	// 鍵の lookup より先に見る。created は署名対象 (options 側) なので、改ざん
+	// されていれば後段の verify で落ちる。ここで先に弾くのは DB を読まずに済む
+	// からで、判定結果は変わらない。
+	if err := checkLDSignatureCreated(sig["created"], time.Now()); err != nil {
 		return VerifiedLDActivity{}, true, err
 	}
 	// **upstream と違い compact より前に Freeze する。** upstream は compact 中に
@@ -166,6 +199,28 @@ func (v *LDSignatureVerifier) VerifyAndCompact(rawBody []byte) (VerifiedLDActivi
 		return VerifiedLDActivity{}, true, fmt.Errorf("ld-sig: marshal compacted activity: %w", err)
 	}
 	return VerifiedLDActivity{Creator: creator, Body: body}, true, nil
+}
+
+// checkLDSignatureCreated enforces the `signature.created` window. A missing
+// `created` is accepted: Mastodon and Misskey always emit it, and a signature
+// without one cannot be produced by the forwarder anyway (the value is part
+// of the signed options).
+func checkLDSignatureCreated(raw any, now time.Time) error {
+	if raw == nil {
+		return nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return fmt.Errorf("%w: created is not a string", ErrLDSignatureExpired)
+	}
+	created, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return fmt.Errorf("%w: created %q: %v", ErrLDSignatureExpired, s, err)
+	}
+	if created.Before(now.Add(-ldSignatureMaxAge)) || created.After(now.Add(ldSignatureMaxFuture)) {
+		return fmt.Errorf("%w: created=%s", ErrLDSignatureExpired, created.UTC().Format(time.RFC3339))
+	}
+	return nil
 }
 
 // CheckForbiddenDirectivesIfPresent runs only the forbidden-directive hardening of

@@ -377,3 +377,66 @@ func TestLDSignatureVerifier_CompactKeepsSignedExtensionKeys(t *testing.T) {
 	require.NoError(t, json.Unmarshal(verified.Body, &got))
 	assert.Equal(t, "signed **mfm**", got["_misskey_content"])
 }
+
+// signature.created の窓 (replay 対策)。
+func TestLDSignatureVerifier_CreatedWindow(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	keyID, privPEM := ldTestKey(t, repo)
+	v := corefederation.NewLDSignatureVerifier(repo)
+	doc := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       "https://example.com/notes/n1",
+		"type":     "Note",
+		"content":  "hello",
+	}
+	sign := func(t *testing.T, created time.Time) []byte {
+		t.Helper()
+		signed, err := ld.NewProcessor().SignRsaSignature2017(doc, privPEM, keyID, created)
+		require.NoError(t, err)
+		b, err := json.Marshal(signed)
+		require.NoError(t, err)
+		return b
+	}
+
+	tests := []struct {
+		name    string
+		created time.Time
+		wantErr bool
+	}{
+		{name: "just signed", created: time.Now()},
+		{name: "six days old", created: time.Now().Add(-6 * 24 * time.Hour)},
+		{name: "slightly ahead", created: time.Now().Add(30 * time.Minute)},
+		{name: "eight days old", created: time.Now().Add(-8 * 24 * time.Hour), wantErr: true},
+		{name: "two hours ahead", created: time.Now().Add(2 * time.Hour), wantErr: true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := v.VerifyIfPresent(sign(t, tc.created))
+			if tc.wantErr {
+				require.ErrorIs(t, err, corefederation.ErrLDSignatureExpired)
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+
+	// created が文字列でない / 読めない形式は、窓の判定ができないので拒否する。
+	for name, created := range map[string]string{
+		"not a string": `12345`,
+		"unparseable":  `"yesterday"`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{
+				"@context": "https://www.w3.org/ns/activitystreams",
+				"type": "Note",
+				"signature": {
+					"type": "RsaSignature2017",
+					"creator": "` + keyID + `",
+					"created": ` + created + `,
+					"signatureValue": "AAAA"
+				}
+			}`)
+			require.ErrorIs(t, v.VerifyIfPresent(body), corefederation.ErrLDSignatureExpired)
+		})
+	}
+}

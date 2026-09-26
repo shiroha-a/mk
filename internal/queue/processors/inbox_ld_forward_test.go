@@ -261,6 +261,15 @@ func TestInboxProcessor_ForwardedLDSignedCreate_SignedMisskeyContentKept(t *test
 	assert.Equal(t, "signed **mfm**", *note.Text)
 }
 
+// 署名時刻が古すぎる転送 activity は、署名が正しくても処理しない (replay 対策)。
+func TestInboxProcessor_ForwardedLDSignedCreate_StaleSignatureDropped(t *testing.T) {
+	env := newLDForwardEnv(t)
+	noteURI := "https://m.example/users/bob/statuses/3"
+	body := env.signAsVictim(t, mastodonCreate(noteURI), time.Now().Add(-30*24*time.Hour), nil)
+	env.forward(t, body)
+	assert.Nil(t, env.noteByURI(t, noteURI), "created が窓の外の LD-Signature で転送 activity が処理された")
+}
+
 // authorizeActor は compact 後の文書で actor / id を見直し、handler へ渡すのも
 // その文書にする。生 body と compact 後で actor / id が食い違う形は落とす。
 func TestInboxProcessor_ForwardedLDSig_RechecksCompactedFields(t *testing.T) {

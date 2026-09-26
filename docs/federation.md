@@ -93,6 +93,8 @@ HTTP Signature からは言えない。これを埋めるのが LD-Signature。
   捨てられ署名に含まれないので、転送者が署名済み activity にそういうキーを足すと
   原著者名義の本文を差し替えられる (以前の mk-go がそうだった)。compact 後の文書では
   署名外の述語は `_:<name>` のキーで残り、handler からは見えない
+- **`signature.created` が過去 7 日 / 未来 1 時間の外なら拒否する** (upstream には無い。
+  転送経路の replay 対策。divergence 登録済み)
 - **preload 外の remote context は解決しない** (#2106 L49、divergence 登録済み)。
   `ld.PreloadedLoader` は HTTP fetch を一切行わない (AS2.0 / security v1 / identity v1 の
   3 つだけを resolve) ので、それ以外を参照する転送 activity は compact 段で
