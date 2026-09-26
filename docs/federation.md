@@ -85,6 +85,8 @@ HTTP Signature からは言えない。これを埋めるのが LD-Signature。
   direct-enqueue 経路、(2) **HTTP 署名者と body の actor が食い違う転送経路**。
   後者は LD-Signature が body actor を認証している場合にのみ通す (actor spoofing 対策)
 - **転送経路では upstream と同じく compact し、compact 後の文書を処理に渡す。**
+  (1) の legacy 経路も同じく compact 後の文書を渡す (本番の inbox handler は必ず
+  Headers を詰めるので到達しないが、検証済みとして扱う以上は生 body を渡さない)。
   `signature` を外して upstream の `CONTEXT` (`ld.InboxCompactContext`) へ compact し、
   forbidden directive の検査と RsaSignature2017 の検証もその文書に掛け
   (生の文書の検査はキー名しか見ないので、inline context で `"g": "@graph"` と

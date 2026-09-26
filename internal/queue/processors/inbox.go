@@ -112,7 +112,6 @@ type InboxChartHook interface {
 // LD-Sig 経路を skip (= HTTP Signature だけで認証完了とする後方互換)。
 // 実装は core/federation.LDSignatureVerifier。
 type LDSignatureVerifier interface {
-	VerifyIfPresent(rawBody []byte) error
 	// CheckForbiddenDirectivesIfPresent runs only the forbidden-directive hardening
 	// (no key resolution / RSA verify). Used by the signer==actor path (#2106 N26)
 	// so an HTTP-signature-authenticated activity is not dropped just because its
@@ -121,8 +120,9 @@ type LDSignatureVerifier interface {
 	// VerifyAndCompact additionally reports whether the activity carried an
 	// LD-Signature and, on success, the verified signature.creator key URI and
 	// the activity compacted to the signed properties. Used to authenticate
-	// forwarded activities whose HTTP signer differs from the activity actor;
-	// the caller must process the returned Body instead of the raw body.
+	// forwarded activities whose HTTP signer differs from the activity actor
+	// (and on the header-less legacy path); the caller must process the
+	// returned Body instead of the raw body.
 	VerifyAndCompact(rawBody []byte) (verified federation.VerifiedLDActivity, present bool, err error)
 }
 
@@ -401,7 +401,15 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 		// legacy / direct-enqueue 経路 (Headers 無し = HTTP 署名者を特定できない)。
 		// 署名者照合はできないが、body に LD-Signature があれば従来どおり検証して
 		// hardening を効かせる (#1164 Phase D)。fail なら drop。
-		if err := p.ldVerifier.VerifyIfPresent(payload.Body); err != nil {
+		//
+		// **本番では到達しない。** inbox handler は admitInbox で Signature ヘッダを
+		// 必須にしたうえで Headers を詰めて enqueue し (Host は必ず入る)、router は
+		// SignatureVerifier を必ず配線する。InboxPayload を作るのもその handler
+		// だけ。それでも検証済みとして扱うなら、転送経路と同じく**署名が覆う
+		// 内容 (compact 済みの文書) を渡す** — 生 body には署名外のキー
+		// (`_misskey_content` 等) を誰でも足せる。
+		verified, present, err := p.ldVerifier.VerifyAndCompact(payload.Body)
+		if err != nil {
 			if errors.Is(err, federation.ErrLookupUnavailable) {
 				// 上と同じ (#3121)。creator の鍵は DB から引くので、理由を
 				// 見ずに drop すると DB 障害のあいだ届いた activity が消える。
@@ -414,6 +422,9 @@ func (p *InboxProcessor) Handle(_ context.Context, t driver.Task) error {
 				"host", host, "err", err)
 			p.recordInboxTelemetry(host, deliveryhealth.ClassLDSignatureFailed, started, err.Error())
 			return nil
+		}
+		if present {
+			body = verified.Body
 		}
 	}
 	if err := p.dispatch(body, signer); err != nil {
