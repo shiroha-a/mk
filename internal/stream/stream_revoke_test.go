@@ -253,7 +253,7 @@ func (r *revokeRecorder) Publish(_ context.Context, channel string, payload any)
 
 func TestStreamRevokePublisher(t *testing.T) {
 	rec := &revokeRecorder{}
-	p := NewStreamRevokePublisher(rec)
+	p := NewStreamRevokePublisher(rec, nil)
 	p.RevokeUserStreams("alice")
 	p.RevokeNativeTokenStreams("alice", "token-A")
 	p.RevokeAccessTokenStreams("alice", "app-X")
@@ -275,7 +275,7 @@ func TestStreamRevokePublisher(t *testing.T) {
 
 	var nilPub *StreamRevokePublisher
 	nilPub.RevokeUserStreams("alice")
-	NewStreamRevokePublisher(nil).RevokeUserStreams("alice")
+	NewStreamRevokePublisher(nil, nil).RevokeUserStreams("alice")
 }
 
 // 実 WebSocket で、失効した接続のクライアントが 1008 の close frame を受け取る
@@ -319,4 +319,122 @@ func TestManager_AcceptThenRevoke_ClientReceivesPolicyViolation(t *testing.T) {
 	var ne interface{ Timeout() bool }
 	require.ErrorAs(t, err, &ne, "新しいトークンの接続は開いたまま")
 	assert.True(t, ne.Timeout())
+}
+
+// publish が失敗しても (Redis 断)、失効を処理したプロセス自身の接続は閉じる。
+// pubsub に頼ると自分にも届かないので、local の Manager を直接呼ぶ。
+func TestStreamRevokePublisher_ClosesLocalConnectionsEvenWhenPublishFails(t *testing.T) {
+	f := newRevokeFixture(t, nil)
+	f.m.SetRevokeSettleDelay(10 * time.Millisecond)
+	var invalidated []string
+	var mu sync.Mutex
+	f.m.OnStreamRevoke(func(userID string) {
+		mu.Lock()
+		invalidated = append(invalidated, userID)
+		mu.Unlock()
+	})
+	rec := &revokeRecorder{err: errors.New("redis down")}
+	p := NewStreamRevokePublisher(rec, f.m)
+
+	p.RevokeNativeTokenStreams("alice", "token-A")
+	require.Eventually(t, func() bool { return f.conns["a1"].isClosed() }, 2*time.Second, 5*time.Millisecond)
+	assert.Equal(t, map[string]bool{"a1": true, "a2": false, "a3": false, "b1": false, "n1": false}, f.closed())
+	mu.Lock()
+	assert.Equal(t, []string{"alice"}, invalidated, "自プロセスの tokenCache も落とす")
+	mu.Unlock()
+	assert.Len(t, rec.payloads, 1, "publish 自体は試みる")
+}
+
+// publish が成功すると同じ event が pubsub 経由で自分にも届く。直接処理と
+// 二重に走っても、close frame は 1 度しか送らず、他の接続にも影響しない。
+func TestStreamRevokePublisher_LocalAndPubsubDeliveryIsIdempotent(t *testing.T) {
+	bus := newStubBus()
+	f := newRevokeFixture(t, bus)
+	f.m.SetRevokeSettleDelay(10 * time.Millisecond)
+	f.m.SubscribeStreamRevoke()
+	p := NewStreamRevokePublisher(publisherFunc(func(topic string, raw []byte) {
+		bus.deliver(topic, raw)
+	}), f.m)
+
+	p.RevokeNativeTokenStreams("alice", "token-A")
+	require.Eventually(t, func() bool { return f.conns["a1"].isClosed() }, 2*time.Second, 5*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	assert.Len(t, closeFramesOf(f.conns["a1"]), 1)
+	assert.Equal(t, map[string]bool{"a1": true, "a2": false, "a3": false, "b1": false, "n1": false}, f.closed())
+	assert.Equal(t, 0, f.m.RevokeStreams("alice", credkey.Native("token-A")), "閉じた接続は登録から外れている")
+}
+
+// publisherFunc adapts a function to PubSubPublisher (payload is always the
+// json.RawMessage the revoke publisher sends).
+type publisherFunc func(topic string, raw []byte)
+
+func (f publisherFunc) Publish(_ context.Context, channel string, payload any) error {
+	raw, ok := payload.(json.RawMessage)
+	if !ok {
+		return errors.New("unexpected payload type")
+	}
+	f(channel, raw)
+	return nil
+}
+
+// 他プロセスから届いた失効 event で、猶予を待たずに tokenCache の無効化
+// (observer) を呼ぶ。閉じる前に落としておかないと、閉じた直後の再接続が
+// そのプロセスの古い cache で認証される。
+func TestManager_SubscribeStreamRevoke_NotifiesObserversImmediately(t *testing.T) {
+	bus := newStubBus()
+	m := NewManager(NewRegistry(), bus)
+	t.Cleanup(m.Shutdown)
+	m.SetRevokeSettleDelay(time.Hour)
+	got := make(chan string, 2)
+	m.OnStreamRevoke(func(userID string) { got <- userID })
+	m.OnStreamRevoke(nil)
+	m.SubscribeStreamRevoke()
+
+	payload, err := json.Marshal(StreamRevokePayload{UserID: "alice", Credential: credkey.Native("token-A")})
+	require.NoError(t, err)
+	bus.deliver(StreamRevokeTopic, payload)
+	select {
+	case u := <-got:
+		assert.Equal(t, "alice", u)
+	case <-time.After(time.Second):
+		t.Fatal("observer was not called before the settle delay")
+	}
+}
+
+// 1 回目で閉じた後、無効化を追い越して積まれた古い cache で張り直された接続も、
+// cache の TTL が切れた後の 2 回目で閉じる。
+func TestManager_Revoke_SecondPassClosesReconnectedStream(t *testing.T) {
+	bus := newStubBus()
+	f := newRevokeFixture(t, bus)
+	f.m.SetRevokeSettleDelay(10 * time.Millisecond)
+	f.m.SetRevokeRecheckDelay(150 * time.Millisecond)
+	f.m.SubscribeStreamRevoke()
+
+	payload, err := json.Marshal(StreamRevokePayload{UserID: "alice", Credential: credkey.Native("token-A")})
+	require.NoError(t, err)
+	bus.deliver(StreamRevokeTopic, payload)
+	require.Eventually(t, func() bool { return f.conns["a1"].isClosed() }, 2*time.Second, 5*time.Millisecond)
+
+	// 1 回目の後に、旧 token で張り直された接続。
+	fc := newFakeConn()
+	c := NewConnection("a1-again", &model.User{ID: "alice"}, fc)
+	c.SetCredential(credkey.Native("token-A"))
+	c.SetCloseHandler(func() { f.m.unregister("a1-again") })
+	f.m.register(c)
+	go c.Start()
+	assert.False(t, fc.isClosed())
+
+	require.Eventually(t, fc.isClosed, 2*time.Second, 5*time.Millisecond)
+	assert.False(t, f.conns["a2"].isClosed(), "別の token の接続は 2 回目でも閉じない")
+}
+
+func TestManager_RecheckDelay(t *testing.T) {
+	m := NewManager(nil, nil)
+	assert.Equal(t, defaultRevokeRecheck, m.recheckDelay())
+	m.SetRevokeRecheckDelay(5 * time.Millisecond)
+	assert.Equal(t, 5*time.Millisecond, m.recheckDelay())
+	m.SetRevokeRecheckDelay(0)
+	assert.Equal(t, defaultRevokeRecheck, m.recheckDelay())
+	// 既定値は HTTP 側 tokenCache の TTL (30 秒) より長い。
+	assert.Greater(t, defaultRevokeRecheck, 30*time.Second)
 }

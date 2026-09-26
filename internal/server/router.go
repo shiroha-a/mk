@@ -2905,9 +2905,18 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 		// 行うので、接続を持つ全プロセスが購読する (mk-go 独自、docs/divergence.md)。
 		streamManager.SubscribeStreamRevoke()
 	}
+	// 失効 event に相乗りして、各プロセスが自分の tokenCache から対象利用者の
+	// entry を落とす。tokenCache はプロセス内の map なので、Web ノードが複数
+	// あると失効を処理したノード以外に旧 token の entry が残り、閉じた接続が
+	// そのノードへ再接続すると無期限に残る。
+	streamManager.OnStreamRevoke(s.auth.InvalidateTokensForUser)
+	// 2 回目の閉じ処理は tokenCache の TTL が切れた後に行う (DB を引いた直後に
+	// 無効化 event を追い越して積まれた entry も、そこで確実に切れている)。
+	streamManager.SetRevokeRecheckDelay(middleware.AuthCacheTTL + 5*time.Second)
 	// WebSocket は接続時に 1 度しか認証しないので、tokenCache を落とすだけでは
 	// 既存の接続が閉じない。失効を扱う handler へ revoke publisher を配る。
-	streamRevokePublisher := stream.NewStreamRevokePublisher(streamPubSub)
+	// 自プロセスの Manager も渡す — publish が失敗しても、ここに居る接続は閉じる。
+	streamRevokePublisher := stream.NewStreamRevokePublisher(streamPubSub, streamManager)
 	iHandler.SetStreamRevoker(streamRevokePublisher)
 	oauthHandler.SetStreamRevoker(streamRevokePublisher)
 	iHandler.SetHardMutePublisher(&hardMutePublisherAdapter{pubsub: streamPubSub})

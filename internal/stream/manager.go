@@ -48,6 +48,13 @@ type Manager struct {
 	// revokeSettle は失効 event を受けてから実際に接続を閉じるまでの猶予。
 	// 0 以下なら既定値 (defaultRevokeSettle) を使う。stream_revoke.go 参照。
 	revokeSettle time.Duration
+	// revokeRecheck は 1 回目の閉じ処理から 2 回目までの間隔 (0 以下なら既定値)。
+	// revokeObservers は失効 event を受けた直後に呼ぶ callback (tokenCache の
+	// 無効化)。どちらも stream_revoke.go 参照。起動時に配線し、event の処理は
+	// 別 goroutine で読むので revokeMu で守る。
+	revokeMu        sync.RWMutex
+	revokeRecheck   time.Duration
+	revokeObservers []func(userID string)
 
 	// **bus の解除は名前ではなくハンドルで行う** (#H-4)。Manager が張る
 	// プロセス唯一の購読も、名前で閉じると同名トピックを購読している接続を

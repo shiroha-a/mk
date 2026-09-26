@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -67,6 +68,74 @@ func (m *Manager) settleDelay() time.Duration {
 	return defaultRevokeSettle
 }
 
+// defaultRevokeRecheck は 1 回目の閉じ処理から 2 回目 (安全網) までの間隔。
+//
+// **HTTP 側の tokenCache (30 秒) より長くする。** 失効の直前に DB を引いた
+// リクエストが、無効化 event を受けた後で cache に積む競合は避けられない
+// (引いた時点では旧 token が有効だった)。その entry は最長で TTL の間生きるので、
+// 1 回目で閉じた直後の再接続がそれで認証されうる。TTL が切れた後にもう一度同じ
+// 条件で閉じれば、その経路で張り直された接続も残らない。router は
+// middleware の TTL から明示的に設定する (SetRevokeRecheckDelay)。
+const defaultRevokeRecheck = 35 * time.Second
+
+// SetRevokeRecheckDelay overrides the delay before the second (safety-net)
+// close pass. d <= 0 restores the default.
+func (m *Manager) SetRevokeRecheckDelay(d time.Duration) {
+	m.revokeMu.Lock()
+	m.revokeRecheck = d
+	m.revokeMu.Unlock()
+}
+
+func (m *Manager) recheckDelay() time.Duration {
+	m.revokeMu.RLock()
+	defer m.revokeMu.RUnlock()
+	if m.revokeRecheck > 0 {
+		return m.revokeRecheck
+	}
+	return defaultRevokeRecheck
+}
+
+// OnStreamRevoke registers fn to be called with the user id as soon as a
+// revoke event is handled on this process (received over pubsub or published
+// locally), before the settle delay. nil is ignored.
+//
+// **HTTP 側の tokenCache の無効化を全プロセスへ配るためにある。** tokenCache は
+// プロセス内の map なので、失効を処理したプロセスが自分の cache を落としても、
+// Web ノードが複数ある構成では他のノードに旧 token の entry が残る。閉じた
+// 接続がそのノードへ再接続すると古い entry で認証され、今度は閉じる契機が
+// 無いので無期限に残る。失効 event は全プロセスへ届くので、それに相乗りして
+// 各プロセスが自分の cache を落とす。落とす単位は利用者ごと (event は生 token を
+// 持たない)。落としすぎても次のリクエストで DB を引き直すだけで済む。
+func (m *Manager) OnStreamRevoke(fn func(userID string)) {
+	if fn == nil {
+		return
+	}
+	m.revokeMu.Lock()
+	m.revokeObservers = append(m.revokeObservers, fn)
+	m.revokeMu.Unlock()
+}
+
+// handleRevoke runs the observers immediately, then closes the matching
+// connections after the settle delay and once more after the recheck delay.
+// 同じ payload で 2 度呼ばれても害は無い (observer は cache を落とすだけ、
+// RevokeStreams は閉じた接続を登録から外すので 2 度目は何もしない)。
+func (m *Manager) handleRevoke(payload StreamRevokePayload) {
+	m.revokeMu.RLock()
+	observers := slices.Clone(m.revokeObservers)
+	m.revokeMu.RUnlock()
+	for _, fn := range observers {
+		fn(payload.UserID)
+	}
+	// 走査も猶予の後に行う。失効の直前に認証を通り、まだ register されて
+	// いない接続も拾える。
+	time.AfterFunc(m.settleDelay(), func() {
+		m.RevokeStreams(payload.UserID, payload.Credential)
+	})
+	time.AfterFunc(m.recheckDelay(), func() {
+		m.RevokeStreams(payload.UserID, payload.Credential)
+	})
+}
+
 // RevokeStreams closes every live connection owned by userID, or only those
 // authenticated with credential when it is non-empty. Returns the number of
 // connections closed. userID が空なら何もしない。
@@ -116,11 +185,7 @@ func (m *Manager) SubscribeStreamRevoke() {
 			slog.Warn("stream: revoke payload missing userId")
 			return
 		}
-		// 走査も猶予の後に行う。失効の直前に認証を通り、まだ register されて
-		// いない接続も拾える。
-		time.AfterFunc(m.settleDelay(), func() {
-			m.RevokeStreams(payload.UserID, payload.Credential)
-		})
+		m.handleRevoke(payload)
 	})
 }
 
@@ -135,12 +200,21 @@ func (m *Manager) UnsubscribeStreamRevoke() {
 // StreamRevokePublisher publishes revoke events to StreamRevokeTopic. Handlers
 // that invalidate a credential call it so connections on every process close.
 type StreamRevokePublisher struct {
-	pub PubSubPublisher
+	pub   PubSubPublisher
+	local *Manager
 }
 
-// NewStreamRevokePublisher constructs a StreamRevokePublisher.
-func NewStreamRevokePublisher(pub PubSubPublisher) *StreamRevokePublisher {
-	return &StreamRevokePublisher{pub: pub}
+// NewStreamRevokePublisher constructs a StreamRevokePublisher. local is the
+// Manager of this process (may be nil); it handles the event directly so the
+// connections held here close even when publishing fails.
+//
+// **publish の成否に自分のプロセスを依存させない。** Redis が落ちていると
+// publish は失敗し、pubsub 経由では自分自身にも届かない。失効を処理した
+// プロセスが持つ接続 (失効操作をした本人の端末が繋いでいることが多い) まで
+// 閉じなくなるので、local は pubsub を経由せず直接処理する。publish が成功すると
+// 同じ event が pubsub 経由でもう一度届くが、handleRevoke は冪等。
+func NewStreamRevokePublisher(pub PubSubPublisher, local *Manager) *StreamRevokePublisher {
+	return &StreamRevokePublisher{pub: pub, local: local}
 }
 
 // RevokeUserStreams closes every streaming connection of userID (suspension,
@@ -172,7 +246,13 @@ func (p *StreamRevokePublisher) RevokeAccessTokenStreams(userID, tokenID string)
 }
 
 func (p *StreamRevokePublisher) publish(payload StreamRevokePayload) {
-	if p == nil || p.pub == nil || payload.UserID == "" {
+	if p == nil || payload.UserID == "" {
+		return
+	}
+	if p.local != nil {
+		p.local.handleRevoke(payload)
+	}
+	if p.pub == nil {
 		return
 	}
 	// 文字列だけの struct なので Marshal は失敗しない。
