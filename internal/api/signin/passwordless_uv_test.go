@@ -134,12 +134,12 @@ func signinFlowWithCredential(t *testing.T, h *signin.Handler, password string, 
 
 // usePasswordLessLogin でパスワードが合っていないとき、鍵が唯一の要素になる。
 // UV (PIN / 生体認証) の無い assertion で通ると、鍵を拾った相手がそれだけで
-// ログインできる。
+// ログインできる。ブラウザへの options は upstream と同じ preferred。
 func TestSigninFlow_PasswordlessKeyRequiresUV(t *testing.T) {
 	h, key := setupPasswordlessUV(t)
 
 	challenge, uv := signinFlowChallenge(t, h, "wrong")
-	assert.Equal(t, string(protocol.VerificationRequired), uv, "ブラウザに UV を要求していない")
+	assert.Equal(t, string(protocol.VerificationPreferred), uv)
 	assert.Equal(t, http.StatusForbidden,
 		signinFlowWithCredential(t, h, "wrong", key.credential(t, challenge, "u1", false)),
 		"UV の無い鍵だけでログインできた")
@@ -149,19 +149,25 @@ func TestSigninFlow_PasswordlessKeyRequiresUV(t *testing.T) {
 		signinFlowWithCredential(t, h, "wrong", key.credential(t, challenge, "u1", true)))
 }
 
-// パスワード + 2 要素目としての鍵は従来どおり UV を要求しない。
-func TestSigninFlow_SecondFactorKeyDoesNotRequireUV(t *testing.T) {
+// パスワード + 2 要素目としての鍵も UV を要求する (upstream の
+// verifyAuthentication は `requireUserVerification: true`)。
+func TestSigninFlow_SecondFactorKeyRequiresUV(t *testing.T) {
 	h, key := setupPasswordlessUV(t)
 
 	challenge, uv := signinFlowChallenge(t, h, "pass")
 	assert.Equal(t, string(protocol.VerificationPreferred), uv)
+	assert.Equal(t, http.StatusForbidden,
+		signinFlowWithCredential(t, h, "pass", key.credential(t, challenge, "u1", false)),
+		"UV の無い鍵が 2 要素目として通った")
+
+	challenge, _ = signinFlowChallenge(t, h, "pass")
 	assert.Equal(t, http.StatusOK,
-		signinFlowWithCredential(t, h, "pass", key.credential(t, challenge, "u1", false)))
+		signinFlowWithCredential(t, h, "pass", key.credential(t, challenge, "u1", true)))
 }
 
-// challenge は user 単位で 1 件しか無い。正しいパスワードで始めた (UV 不要の)
-// challenge に、パスワード無しの credential を載せても UV を要求すること。
-func TestSigninFlow_PasswordlessKeyRequiresUVOnPreferredChallenge(t *testing.T) {
+// challenge は user 単位で 1 件しか無い。正しいパスワードで始めた challenge に
+// パスワード無しの credential を載せても UV を要求すること。
+func TestSigninFlow_PasswordlessKeyRequiresUVOnPasswordChallenge(t *testing.T) {
 	h, key := setupPasswordlessUV(t)
 
 	challenge, _ := signinFlowChallenge(t, h, "pass")

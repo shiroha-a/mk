@@ -471,10 +471,11 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 		if werr != nil {
 			return c.JSON(http.StatusBadRequest, errBody("ed1d7571-a3ac-4370-899c-0dbe5e230cc8"))
 		}
-		// **password が合っていないのにここへ来るのは usePasswordLessLogin の
-		// 利用者だけで、鍵が唯一の要素になる。** その場合は UV (PIN / 生体認証)
-		// を必須にする。無いと、鍵を拾った相手がそれだけでログインできる。
-		cred, werr := h.webauthnSvc.FinishLogin(c.Request().Context(), user, keys, httpReq, !passwordOK)
+		// UV (PIN / 生体認証) は FinishLogin が常に要求する (upstream と同じ)。
+		// password が合っていないのにここへ来る usePasswordLessLogin の利用者は
+		// 鍵が唯一の要素になるので、UV が無いと鍵を拾った相手がそれだけで
+		// ログインできる。
+		cred, werr := h.webauthnSvc.FinishLogin(c.Request().Context(), user, keys, httpReq)
 		if werr != nil {
 			// 失敗の root cause (challenge mismatch / origin / credential format
 			// 等) は webauthn library 内部で発生する。frontend には汎用 403 を
@@ -503,7 +504,7 @@ func (h *Handler) SigninFlow(c echo.Context) error {
 	// CredentialAssertion は `{publicKey: ...}` で 1 段ラップされているので
 	// 内側の Response (= PublicKeyCredentialRequestOptions) だけを送る。
 	if hasKeys && h.webauthnSvc != nil {
-		assertion, werr := h.webauthnSvc.BeginLogin(c.Request().Context(), user, keys, !passwordOK)
+		assertion, werr := h.webauthnSvc.BeginLogin(c.Request().Context(), user, keys)
 		if werr == nil {
 			return c.JSON(http.StatusOK, map[string]any{
 				"finished":    false,

@@ -67,6 +67,55 @@ func (a *softAuthenticator) securityKey(userID string, counter int64) *model.Use
 	}
 }
 
+// attest builds a registration response ("none" attestation) for challenge.
+func (a *softAuthenticator) attest(challenge string, uv bool) *http.Request {
+	a.t.Helper()
+	clientData, err := json.Marshal(map[string]any{
+		"type":      "webauthn.create",
+		"challenge": challenge,
+		"origin":    softOrigin,
+	})
+	require.NoError(a.t, err)
+	cosePub, err := base64.RawURLEncoding.DecodeString(a.securityKey(softUser.ID, 0).PublicKey)
+	require.NoError(a.t, err)
+
+	rpHash := sha256.Sum256([]byte(softRPID))
+	flags := byte(protocol.FlagUserPresent) | byte(protocol.FlagAttestedCredentialData)
+	if uv {
+		flags |= byte(protocol.FlagUserVerified)
+	}
+	authData := make([]byte, 0, 128)
+	authData = append(authData, rpHash[:]...)
+	authData = append(authData, flags)
+	authData = binary.BigEndian.AppendUint32(authData, 0)
+	authData = append(authData, make([]byte, 16)...) // AAGUID
+	authData = binary.BigEndian.AppendUint16(authData, uint16(len(a.credID)))
+	authData = append(authData, a.credID...)
+	authData = append(authData, cosePub...)
+
+	attObj, err := webauthncbor.Marshal(map[string]any{
+		"fmt":      "none",
+		"attStmt":  map[string]any{},
+		"authData": authData,
+	})
+	require.NoError(a.t, err)
+
+	enc := base64.RawURLEncoding.EncodeToString
+	body, err := json.Marshal(map[string]any{
+		"id":    enc(a.credID),
+		"rawId": enc(a.credID),
+		"type":  "public-key",
+		"response": map[string]any{
+			"clientDataJSON":    enc(clientData),
+			"attestationObject": enc(attObj),
+		},
+	})
+	require.NoError(a.t, err)
+	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
 // assert signs the challenge and returns the request carrying the assertion.
 func (a *softAuthenticator) assert(challenge string, userHandle string, uv bool, counter uint32) *http.Request {
 	a.t.Helper()
@@ -131,61 +180,45 @@ func requireUVRejected(t *testing.T, err error) {
 	assert.Contains(t, perr.DevInfo, "User verification required")
 }
 
-// 2 要素目としての鍵 (password 一致済み) は UV を要求しない。upstream の
-// options と同じ preferred で、PIN の無いセキュリティキーでも通る。
-func TestFinishLogin_SecondFactorDoesNotRequireUV(t *testing.T) {
+// 2 要素目としての鍵も UV を必須にする (upstream の verifyAuthentication は
+// `requireUserVerification: true`)。ブラウザへの options は upstream と同じ preferred。
+func TestFinishLogin_SecondFactorRequiresUV(t *testing.T) {
 	svc := newSoftService(t)
 	auth := newSoftAuthenticator(t)
 	keys := []*model.UserSecurityKey{auth.securityKey(softUser.ID, 0)}
 
-	a, err := svc.BeginLogin(context.Background(), softUser, keys, false)
+	a, err := svc.BeginLogin(context.Background(), softUser, keys)
 	require.NoError(t, err)
 	assert.Equal(t, protocol.VerificationPreferred, a.Response.UserVerification)
 
+	_, err = svc.FinishLogin(context.Background(), softUser, keys,
+		auth.assert(a.Response.Challenge.String(), softUser.ID, false, 0))
+	requireUVRejected(t, err)
+
+	a, err = svc.BeginLogin(context.Background(), softUser, keys)
+	require.NoError(t, err)
 	cred, err := svc.FinishLogin(context.Background(), softUser, keys,
-		auth.assert(a.Response.Challenge.String(), softUser.ID, false, 0), false)
+		auth.assert(a.Response.Challenge.String(), softUser.ID, true, 0))
 	require.NoError(t, err)
 	assert.Equal(t, auth.credID, cred.ID)
 }
 
-// 鍵が唯一の要素 (usePasswordLessLogin で password 不一致) なら UV 必須。
-func TestFinishLogin_PasswordlessRequiresUV(t *testing.T) {
+// Redis に残っている session が preferred のままでも required で検証する
+// (options は preferred なので、保存値を信じると UV を見ない)。
+func TestFinishLogin_RequiresUVRegardlessOfStoredSession(t *testing.T) {
 	svc := newSoftService(t)
 	auth := newSoftAuthenticator(t)
 	keys := []*model.UserSecurityKey{auth.securityKey(softUser.ID, 0)}
 
-	a, err := svc.BeginLogin(context.Background(), softUser, keys, true)
+	a, err := svc.BeginLogin(context.Background(), softUser, keys)
 	require.NoError(t, err)
-	assert.Equal(t, protocol.VerificationRequired, a.Response.UserVerification,
-		"ブラウザに UV を要求していない")
 	sd, err := svc.takeLoginSession(context.Background(), softUser.ID)
 	require.NoError(t, err)
-	assert.Equal(t, protocol.VerificationRequired, sd.UserVerification)
+	assert.Equal(t, protocol.VerificationPreferred, sd.UserVerification)
 	require.NoError(t, svc.putLoginSession(context.Background(), softUser.ID, sd))
 
 	_, err = svc.FinishLogin(context.Background(), softUser, keys,
-		auth.assert(a.Response.Challenge.String(), softUser.ID, false, 0), true)
-	requireUVRejected(t, err)
-
-	a, err = svc.BeginLogin(context.Background(), softUser, keys, true)
-	require.NoError(t, err)
-	_, err = svc.FinishLogin(context.Background(), softUser, keys,
-		auth.assert(a.Response.Challenge.String(), softUser.ID, true, 0), true)
-	require.NoError(t, err)
-}
-
-// challenge は user 単位で 1 件しか無いので、password 付きで始めた (UV 不要の)
-// challenge に password 無しの credential を載せられる。Finish の時点で
-// 要求し直すこと。
-func TestFinishLogin_RequireUVOverridesStoredSession(t *testing.T) {
-	svc := newSoftService(t)
-	auth := newSoftAuthenticator(t)
-	keys := []*model.UserSecurityKey{auth.securityKey(softUser.ID, 0)}
-
-	a, err := svc.BeginLogin(context.Background(), softUser, keys, false)
-	require.NoError(t, err)
-	_, err = svc.FinishLogin(context.Background(), softUser, keys,
-		auth.assert(a.Response.Challenge.String(), softUser.ID, false, 0), true)
+		auth.assert(a.Response.Challenge.String(), softUser.ID, false, 0))
 	requireUVRejected(t, err)
 }
 
@@ -200,33 +233,41 @@ func TestPasskeyLogin_RequiresUV(t *testing.T) {
 
 	a, err := svc.BeginPasskeyLogin(context.Background(), "ctx-uv")
 	require.NoError(t, err)
-	assert.Equal(t, protocol.VerificationRequired, a.Response.UserVerification)
-	sd, err := svc.takePasskeySession(context.Background(), "ctx-uv")
-	require.NoError(t, err)
-	assert.Equal(t, protocol.VerificationRequired, sd.UserVerification)
-	require.NoError(t, svc.putPasskeySession(context.Background(), "ctx-uv", sd))
-
+	assert.Equal(t, protocol.VerificationPreferred, a.Response.UserVerification,
+		"options は upstream と同じ preferred")
 	_, _, err = svc.FinishPasskeyLogin(context.Background(), "ctx-uv",
 		auth.assert(a.Response.Challenge.String(), softUser.ID, false, 0), resolve)
 	requireUVRejected(t, err)
 
-	// 保存した session が preferred でも required で検証する。
 	a, err = svc.BeginPasskeyLogin(context.Background(), "ctx-uv2")
 	require.NoError(t, err)
-	sd, err = svc.takePasskeySession(context.Background(), "ctx-uv2")
-	require.NoError(t, err)
-	sd.UserVerification = protocol.VerificationPreferred
-	require.NoError(t, svc.putPasskeySession(context.Background(), "ctx-uv2", sd))
-	_, _, err = svc.FinishPasskeyLogin(context.Background(), "ctx-uv2",
-		auth.assert(a.Response.Challenge.String(), softUser.ID, false, 0), resolve)
-	requireUVRejected(t, err)
-
-	a, err = svc.BeginPasskeyLogin(context.Background(), "ctx-uv3")
-	require.NoError(t, err)
-	u, cred, err := svc.FinishPasskeyLogin(context.Background(), "ctx-uv3",
+	u, cred, err := svc.FinishPasskeyLogin(context.Background(), "ctx-uv2",
 		auth.assert(a.Response.Challenge.String(), softUser.ID, true, 0), resolve)
 	require.NoError(t, err)
 	assert.Equal(t, softUser, u)
+	assert.Equal(t, auth.credID, cred.ID)
+}
+
+// 登録も UV を必須にする (upstream の verifyRegistration は
+// `requireUserVerification: true`)。UV の無い鍵を登録できると、2 要素目としても
+// パスキーとしても使えない鍵が残る。
+func TestFinishRegistration_RequiresUV(t *testing.T) {
+	svc := newSoftService(t)
+	auth := newSoftAuthenticator(t)
+
+	c, err := svc.BeginRegistration(context.Background(), softUser, nil)
+	require.NoError(t, err)
+	assert.Equal(t, protocol.VerificationPreferred, c.Response.AuthenticatorSelection.UserVerification,
+		"options は upstream と同じ preferred")
+	_, err = svc.FinishRegistration(context.Background(), softUser, nil,
+		auth.attest(c.Response.Challenge.String(), false))
+	requireUVRejected(t, err)
+
+	c, err = svc.BeginRegistration(context.Background(), softUser, nil)
+	require.NoError(t, err)
+	cred, err := svc.FinishRegistration(context.Background(), softUser, nil,
+		auth.attest(c.Response.Challenge.String(), true))
+	require.NoError(t, err)
 	assert.Equal(t, auth.credID, cred.ID)
 }
 
@@ -251,10 +292,10 @@ func TestLogin_RejectsCounterRollback(t *testing.T) {
 			svc := newSoftService(t)
 			auth := newSoftAuthenticator(t)
 			keys := []*model.UserSecurityKey{auth.securityKey(softUser.ID, tc.stored)}
-			a, err := svc.BeginLogin(context.Background(), softUser, keys, false)
+			a, err := svc.BeginLogin(context.Background(), softUser, keys)
 			require.NoError(t, err)
 			_, err = svc.FinishLogin(context.Background(), softUser, keys,
-				auth.assert(a.Response.Challenge.String(), softUser.ID, true, tc.counter), false)
+				auth.assert(a.Response.Challenge.String(), softUser.ID, true, tc.counter))
 			if tc.reject {
 				assert.ErrorIs(t, err, ErrWebAuthnCounterRollback)
 			} else {

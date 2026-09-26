@@ -147,7 +147,7 @@ func TestBeginLogin(t *testing.T) {
 	require.NoError(t, err)
 	// 鍵が無いと go-webauthn は ErrBadRequest を返す。空でも sd 生成は試みる。
 	// アサーション: 鍵 0 個でも内部で AllowedCredentials=[] になる動作確認。
-	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil, false)
+	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil)
 	// 鍵 0 個だと "Found no credentials" 系のエラーになるので、ここでは
 	// エラーが返ることを許容する (実装依存)。
 	if err == nil {
@@ -163,7 +163,7 @@ func TestBeginRegistration_NotConfigured(t *testing.T) {
 
 func TestBeginLogin_NotConfigured(t *testing.T) {
 	svc := &WebAuthnService{}
-	_, err := svc.BeginLogin(context.Background(), &model.User{ID: "x"}, nil, false)
+	_, err := svc.BeginLogin(context.Background(), &model.User{ID: "x"}, nil)
 	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
 }
 
@@ -177,7 +177,7 @@ func TestFinishRegistration_NotConfigured(t *testing.T) {
 func TestFinishLogin_NotConfigured(t *testing.T) {
 	svc := &WebAuthnService{}
 	req := httptest.NewRequest("POST", "/", strings.NewReader(""))
-	_, err := svc.FinishLogin(context.Background(), &model.User{ID: "x"}, nil, req, false)
+	_, err := svc.FinishLogin(context.Background(), &model.User{ID: "x"}, nil, req)
 	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
 }
 
@@ -197,7 +197,7 @@ func TestFinishLogin_SessionMissing(t *testing.T) {
 	svc, err := NewWebAuthnService("https://example.com", "Misskey", twofaTestRedis.Client)
 	require.NoError(t, err)
 	req := httptest.NewRequest("POST", "/", strings.NewReader(""))
-	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice"}, nil, req, false)
+	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice"}, nil, req)
 	assert.ErrorIs(t, err, ErrWebAuthnSessionNotFound)
 }
 
@@ -211,7 +211,7 @@ func TestFinishLogin_BadCredential(t *testing.T) {
 	require.NoError(t, svc.putLoginSession(context.Background(), "alice", makeFakeSessionData()))
 	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"id":"x","rawId":"x","type":"public-key","response":{}}`))
 	req.Header.Set("Content-Type", "application/json")
-	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil, req, false)
+	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil, req)
 	assert.Error(t, err)
 }
 
@@ -498,7 +498,7 @@ func TestBeginLogin_WithCredential(t *testing.T) {
 	keys := []*model.UserSecurityKey{
 		{ID: "AAEC", PublicKey: "AwQF", Counter: 1},
 	}
-	assertion, err := svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys, false)
+	assertion, err := svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys)
 	require.NoError(t, err)
 	assert.NotNil(t, assertion)
 	// SessionData が Redis に user-keyed で残っていること
@@ -515,7 +515,7 @@ func TestBeginLogin_PutSessionFails(t *testing.T) {
 	svc, err := NewWebAuthnService("https://example.com", "Misskey", c)
 	require.NoError(t, err)
 	keys := []*model.UserSecurityKey{{ID: "AAEC", PublicKey: "AwQF", Counter: 0}}
-	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys, false)
+	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys)
 	assert.Error(t, err)
 }
 
@@ -617,7 +617,10 @@ func TestTakePasskeySession_RedisError(t *testing.T) {
 //     fixture を再利用しているが、こちらは mk-go の WebAuthnService を経由
 //     して redis セッション取得 → wa.FinishRegistration の包括動作を網羅する。
 
-func TestFinishRegistration_Success(t *testing.T) {
+// The W3C vector's authenticator data carries flags 0x59 (UP / BE / BS / AT)
+// without UV, so it exercises the rejection path. 受理側は
+// TestFinishRegistration_RequiresUV が in-process の認証器で見ている。
+func TestFinishRegistration_W3CVectorWithoutUVIsRejected(t *testing.T) {
 	requireRedis(t)
 	twofaTestRedis.FlushAll(context.Background())
 
@@ -645,11 +648,8 @@ func TestFinishRegistration_Success(t *testing.T) {
 	require.NoError(t, svc.putRegistrationSession(context.Background(), "test-user-id", sd))
 
 	httpReq := httptest.NewRequest("POST", "/", bytes.NewReader(body))
-	cred, err := svc.FinishRegistration(context.Background(), &model.User{ID: "test-user-id", Username: "test"}, nil, httpReq)
-	require.NoError(t, err)
-	require.NotNil(t, cred)
-	expectedCredID := decodeHex(t, credentialIDHex)
-	assert.Equal(t, expectedCredID, cred.ID)
+	_, err = svc.FinishRegistration(context.Background(), &model.User{ID: "test-user-id", Username: "test"}, nil, httpReq)
+	requireUVRejected(t, err)
 }
 
 // --- helpers ---
