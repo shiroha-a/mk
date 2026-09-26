@@ -68,6 +68,14 @@ func MatchesAllowList(patterns []string, host string) bool {
 	return false
 }
 
+// BareHost returns host normalized like the gate lists see it, with the port
+// and a trailing dot removed (`evil.example:8443` -> `evil.example`). Returns
+// "" when nothing comparable remains.
+func BareHost(host string) string {
+	_, bare := gateForms(host)
+	return bare
+}
+
 // gateSuffixMatch is upstream's `.${host}`.endsWith(`.${pattern}`).
 func gateSuffixMatch(host, pattern string) bool {
 	return strings.HasSuffix("."+host, "."+pattern)

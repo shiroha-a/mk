@@ -108,3 +108,15 @@ func TestSplitGatePort(t *testing.T) {
 		})
 	}
 }
+
+func TestBareHost(t *testing.T) {
+	for in, want := range map[string]string{
+		"evil.example:8443": "evil.example",
+		"Evil.Example.":     "evil.example",
+		"evil.example":      "evil.example",
+		"[::1]:8443":        "[::1]",
+		"":                  "",
+	} {
+		assert.Equal(t, want, BareHost(in), in)
+	}
+}

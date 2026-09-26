@@ -638,12 +638,20 @@ func (s *Service) evictExpiredLocked(now time.Time) {
 // 呼ぶことで、TTL を待たずに配送可否へ即時反映する (#1407 review)。Service.Suspend
 // 経由だけでなく、admin/federation/update-instance のように instanceRepo を直接
 // 更新する handler からも呼べるよう公開している。
+//
+// 同じホスト名の別ポート (`host:8443`) の判定も `host` の行を見ているので、
+// あわせて捨てる (lookupSuspended の doc)。
 func (s *Service) InvalidateSuspendCache(host string) {
 	if host == "" {
 		return
 	}
 	s.mu.Lock()
 	delete(s.suspendCache, host)
+	for h := range s.suspendCache {
+		if idnhost.BareHost(h) == host {
+			delete(s.suspendCache, h)
+		}
+	}
 	s.mu.Unlock()
 }
 
@@ -658,12 +666,28 @@ func (s *Service) SuspendCacheLen() int {
 // lookupSuspended resolves the suspend decision for host directly from the
 // repository. A missing row or lookup error is fail-open (not skipped), matching
 // the previous inline behaviour.
+//
+// **モデレーターが止めたインスタンスは、同じホスト名の別ポートにも効かせる。**
+// instance 行は host 完全一致で引くので、`evil.example` を停止しても actor を
+// `https://evil.example:8443/` で公開し直すだけで別の行 (`evil.example:8443`)
+// になり、配送が再開する。blockedHosts と同じ理屈で、ポートは相手が自由に選べる
+// 値で、同じホスト名の別ポートは同じ運営者の管理下にある。**自動停止
+// (応答なし / gone) は広げない** — そちらは「その authority のサーバーが応答
+// しない」という観測で、同じホストの別ポートで動く別プロセスには当てはまらない。
 func (s *Service) lookupSuspended(host string) bool {
-	inst, err := s.repo.FindByHost(host)
+	if inst, err := s.repo.FindByHost(host); err == nil &&
+		inst.SuspensionState != "" && inst.SuspensionState != model.SuspensionStateNone {
+		return true
+	}
+	bare := idnhost.BareHost(host)
+	if bare == "" || bare == host {
+		return false
+	}
+	inst, err := s.repo.FindByHost(bare)
 	if err != nil {
 		return false
 	}
-	return inst.SuspensionState != "" && inst.SuspensionState != model.SuspensionStateNone
+	return inst.SuspensionState == model.SuspensionStateManuallySuspended
 }
 
 // warnMetaFetchFailed logs a meta-fetch failure at most once per metaWarnEvery
