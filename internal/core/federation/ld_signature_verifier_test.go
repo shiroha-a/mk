@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -92,6 +93,7 @@ func TestLDSignatureVerifier_UnknownCreator_Rejected(t *testing.T) {
 		"signature": {
 			"type": "RsaSignature2017",
 			"creator": "https://example.com/users/unknown#main-key",
+			"created": "` + ldFreshCreated() + `",
 			"signatureValue": "AAAA"
 		}
 	}`))
@@ -123,6 +125,7 @@ func TestLDSignatureVerifier_BadSignatureValueRejected(t *testing.T) {
 		"signature": {
 			"type": "RsaSignature2017",
 			"creator": "https://example.com/users/alice#main-key",
+			"created": "` + ldFreshCreated() + `",
 			"signatureValue": "AAAA"
 		}
 	}`))
@@ -130,6 +133,7 @@ func TestLDSignatureVerifier_BadSignatureValueRejected(t *testing.T) {
 	// rsa.VerifyPKCS1v15 経由の verify mismatch。
 	assert.NotContains(t, err.Error(), "public key not found",
 		"public key は resolve できた状態で signature verify で fail することを確認")
+	assert.ErrorIs(t, err, ld.ErrSignatureMismatch, "created の窓より手前で落ちていないこと")
 }
 
 func TestLDSignatureVerifier_NilRepo_NoOp(t *testing.T) {
@@ -276,6 +280,7 @@ func TestLDSignatureVerifier_KeyLookupFailureIsLookupUnavailable(t *testing.T) {
 		"signature": {
 			"type": "RsaSignature2017",
 			"creator": "https://example.com/users/alice#main-key",
+			"created": "` + ldFreshCreated() + `",
 			"signatureValue": "AAAA"
 		}
 	}`)
@@ -288,6 +293,12 @@ func TestLDSignatureVerifier_KeyLookupFailureIsLookupUnavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, corefederation.ErrLookupUnavailable)
 	assert.Contains(t, err.Error(), "public key not found")
+}
+
+// ldFreshCreated returns a `signature.created` value inside the accepted
+// window, for fixtures that must get past the window check.
+func ldFreshCreated() string {
+	return time.Now().UTC().Format(time.RFC3339)
 }
 
 // ldTestKey registers a fresh RSA key for alice and returns its private PEM.
@@ -440,3 +451,101 @@ func TestLDSignatureVerifier_CreatedWindow(t *testing.T) {
 		})
 	}
 }
+
+// **created は署名された RDF から読む。** `created` を `dc:created` (型付き) や
+// 完全 IRI へ移しても RDF は同じなので署名は通る。JSON のキーだけを見る判定は
+// これを「欠落」と読み、古い署名の窓を外せた。
+func TestLDSignatureVerifier_CreatedWindowSeesAliasedKeys(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	keyID, privPEM := ldTestKey(t, repo)
+	v := corefederation.NewLDSignatureVerifier(repo)
+	doc := map[string]any{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"id":       "https://example.com/notes/n1",
+		"type":     "Note",
+		"content":  "hello",
+	}
+	aliases := map[string]func(sig map[string]any, created string){
+		"dc:created": func(sig map[string]any, created string) {
+			sig["dc:created"] = map[string]any{"@value": created, "@type": "xsd:dateTime"}
+		},
+		"absolute IRI": func(sig map[string]any, created string) {
+			sig["http://purl.org/dc/terms/created"] = map[string]any{
+				"@value": created, "@type": "http://www.w3.org/2001/XMLSchema#dateTime",
+			}
+		},
+	}
+	for name, move := range aliases {
+		for _, tc := range []struct {
+			age     time.Duration
+			wantErr bool
+		}{
+			{age: 0},
+			{age: 400 * 24 * time.Hour, wantErr: true},
+		} {
+			t.Run(fmt.Sprintf("%s/age=%s", name, tc.age), func(t *testing.T) {
+				signed, err := ld.NewProcessor().SignRsaSignature2017(doc, privPEM, keyID, time.Now().Add(-tc.age))
+				require.NoError(t, err)
+				sig := signed["signature"].(map[string]any)
+				created := sig["created"].(string)
+				delete(sig, "created")
+				move(sig, created)
+				body, err := json.Marshal(signed)
+				require.NoError(t, err)
+
+				err = v.VerifyIfPresent(body)
+				if tc.wantErr {
+					require.ErrorIs(t, err, corefederation.ErrLDSignatureExpired)
+					return
+				}
+				require.NoError(t, err, "RDF として同じ署名を落としている")
+			})
+		}
+	}
+}
+
+// 転送経路では created を必須にする。created の無い署名は鮮度を持たず、
+// 一度受け取れば無期限に再送できる。複数ある / 日時として読めない形も拒否する。
+func TestLDSignatureVerifier_CreatedRequiredAndUnambiguous(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	keyID, _ := ldTestKey(t, repo)
+	v := corefederation.NewLDSignatureVerifier(repo)
+	fresh := ldFreshCreated()
+	tests := map[string]string{
+		"missing": ``,
+		"two values": `"created": "` + fresh + `",
+					"dc:created": {"@value": "2020-01-01T00:00:00Z", "@type": "xsd:dateTime"},`,
+		"node reference": `"created": {"@id": "https://example.com/t"},`,
+	}
+	for name, created := range tests {
+		t.Run(name, func(t *testing.T) {
+			body := []byte(`{
+				"@context": "https://www.w3.org/ns/activitystreams",
+				"type": "Note",
+				"signature": {
+					"type": "RsaSignature2017",
+					"creator": "` + keyID + `",
+					` + created + `
+					"signatureValue": "AAAA"
+				}
+			}`)
+			require.ErrorIs(t, v.VerifyIfPresent(body), corefederation.ErrLDSignatureExpired)
+		})
+	}
+
+	// options を正規化できない形は窓の判定に進めず拒否する。
+	body := []byte(`{
+		"@context": "https://www.w3.org/ns/activitystreams",
+		"type": "Note",
+		"signature": {
+			"type": "RsaSignature2017",
+			"creator": "` + keyID + `",
+			"created": {"@value": {"nested": true}},
+			"signatureValue": "AAAA"
+		}
+	}`)
+	err := v.VerifyIfPresent(body)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "signature options")
+}
+

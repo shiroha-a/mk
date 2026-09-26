@@ -81,7 +81,8 @@ func NewLDSignatureVerifier(pubkeyRepo repository.UserPublickeyRepository) *LDSi
 //
 // Returns error when:
 //   - body has `signature` but creator / signatureValue missing or malformed
-//   - `signature.created` is outside the accepted window
+//   - `signature.created` is missing, ambiguous, unreadable or outside the
+//     accepted window (read from the signed RDF, not the JSON key)
 //   - public key cannot be resolved
 //   - forbidden directive detected in the activity
 //   - the activity cannot be compacted (e.g. non-preloaded context)
@@ -132,12 +133,6 @@ func (v *LDSignatureVerifier) VerifyAndCompact(rawBody []byte) (VerifiedLDActivi
 	if err := proc.CheckForForbiddenDirectives(act); err != nil {
 		return VerifiedLDActivity{}, true, err
 	}
-	// 鍵の lookup より先に見る。created は署名対象 (options 側) なので、改ざん
-	// されていれば後段の verify で落ちる。ここで先に弾くのは DB を読まずに済む
-	// からで、判定結果は変わらない。
-	if err := checkLDSignatureCreated(sig["created"], time.Now()); err != nil {
-		return VerifiedLDActivity{}, true, err
-	}
 	// **upstream と違い compact より前に Freeze する。** upstream は compact 中に
 	// remote context を HTTP で取りに行くので、取り終えた後に freeze する。mk-go の
 	// loader は preload 済みの 3 context しか返さず fetch 経路を持たないので、
@@ -177,6 +172,22 @@ func (v *LDSignatureVerifier) VerifyAndCompact(rawBody []byte) (VerifiedLDActivi
 	}
 	compacted["signature"] = sig
 
+	// **created は署名された RDF から読む** (ld.Processor.SignedCreated)。JSON の
+	// `created` キーだけを見ると、転送者がそれを `dc:created` (型付き) や完全 IRI
+	// へ移すだけで「欠落」と読まれて窓を外せた — options は identity/v1 で正規化
+	// されるので RDF は同じで、署名は通る。
+	//
+	// 鍵の lookup より先に見る。値は署名対象 (options 側) なので、改ざんされて
+	// いれば後段の verify で落ちる。ここで先に弾くのは DB を読まずに済むからで、
+	// 判定結果は変わらない。
+	created, err := proc.SignedCreated(sig)
+	if err != nil {
+		return VerifiedLDActivity{}, true, fmt.Errorf("ld-sig: signature options: %w", err)
+	}
+	if err := checkLDSignatureCreated(created, time.Now()); err != nil {
+		return VerifiedLDActivity{}, true, err
+	}
+
 	pubkey, err := v.pubkeyRepo.FindByKeyID(creator)
 	if err != nil {
 		if !repository.IsNotFound(err) {
@@ -201,21 +212,28 @@ func (v *LDSignatureVerifier) VerifyAndCompact(rawBody []byte) (VerifiedLDActivi
 	return VerifiedLDActivity{Creator: creator, Body: body}, true, nil
 }
 
-// checkLDSignatureCreated enforces the `signature.created` window. A missing
-// `created` is accepted: Mastodon and Misskey always emit it, and a signature
-// without one cannot be produced by the forwarder anyway (the value is part
-// of the signed options).
-func checkLDSignatureCreated(raw any, now time.Time) error {
-	if raw == nil {
-		return nil
+// checkLDSignatureCreated enforces the `signature.created` window on the
+// dc:created values read from the signed options (see
+// ld.Processor.SignedCreated). Exactly one value is required.
+//
+// **欠落は拒否する。** この verifier を通るのは HTTP 署名者と actor が食い違う
+// 転送経路 (と Headers の無い legacy 経路) だけで、そこでは LD-Signature が唯一の
+// 認証になる。created が無い署名は鮮度を持たないので、一度受け取れば無期限に
+// 再送できる。upstream (`JsonLdService.signRsaSignature2017`) も Mastodon
+// (`LinkedDataSignature#sign!`) も署名時刻を必ず入れるので、正当な署名は落ちない
+// (それ以外の実装は未確認。docs/divergence.md)。複数あるのも、どれで判定するか
+// 決められないので拒否する。
+func checkLDSignatureCreated(values []string, now time.Time) error {
+	switch len(values) {
+	case 0:
+		return fmt.Errorf("%w: created missing", ErrLDSignatureExpired)
+	case 1:
+	default:
+		return fmt.Errorf("%w: %d created values", ErrLDSignatureExpired, len(values))
 	}
-	s, ok := raw.(string)
-	if !ok {
-		return fmt.Errorf("%w: created is not a string", ErrLDSignatureExpired)
-	}
-	created, err := time.Parse(time.RFC3339, s)
+	created, err := time.Parse(time.RFC3339, values[0])
 	if err != nil {
-		return fmt.Errorf("%w: created %q: %v", ErrLDSignatureExpired, s, err)
+		return fmt.Errorf("%w: created %q: %v", ErrLDSignatureExpired, values[0], err)
 	}
 	if created.Before(now.Add(-ldSignatureMaxAge)) || created.After(now.Add(ldSignatureMaxFuture)) {
 		return fmt.Errorf("%w: created=%s", ErrLDSignatureExpired, created.UTC().Format(time.RFC3339))

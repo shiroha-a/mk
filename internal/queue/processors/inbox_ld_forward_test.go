@@ -270,6 +270,55 @@ func TestInboxProcessor_ForwardedLDSignedCreate_StaleSignatureDropped(t *testing
 	assert.Nil(t, env.noteByURI(t, noteURI), "created が窓の外の LD-Signature で転送 activity が処理された")
 }
 
+// ldFwdMoveCreated moves `signature.created` to another key that expands to
+// the same RDF (dc:created typed xsd:dateTime).
+func ldFwdMoveCreated(key, typ string) func(map[string]any) {
+	return func(doc map[string]any) {
+		sig := doc["signature"].(map[string]any)
+		created := sig["created"].(string)
+		delete(sig, "created")
+		sig[key] = map[string]any{"@value": created, "@type": typ}
+	}
+}
+
+// **created を別名のキーへ移しても窓は外れない。** options は identity/v1 で
+// 正規化されるので、`created` を消して `dc:created` (型付き) や完全 IRI で同じ値を
+// 書いても RDF は変わらず署名は通る。キー名 `created` だけを見る判定だと
+// 「created 欠落」として窓の検査を素通りし、古い署名をいつまでも再送できた。
+func TestInboxProcessor_ForwardedLDSignedCreate_StaleCreatedUnderAliasDropped(t *testing.T) {
+	tests := []struct {
+		name   string
+		noteID string
+		tamper func(map[string]any)
+	}{
+		{name: "compact IRI dc:created", noteID: "4", tamper: ldFwdMoveCreated("dc:created", "xsd:dateTime")},
+		{
+			name:   "absolute IRI",
+			noteID: "5",
+			tamper: ldFwdMoveCreated("http://purl.org/dc/terms/created", "http://www.w3.org/2001/XMLSchema#dateTime"),
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newLDForwardEnv(t)
+			noteURI := "https://m.example/users/bob/statuses/" + tc.noteID
+			body := env.signAsVictim(t, mastodonCreate(noteURI), time.Now().Add(-400*24*time.Hour), tc.tamper)
+			env.forward(t, body)
+			assert.Nil(t, env.noteByURI(t, noteURI), "別名キーへ移した古い created で窓を外せている")
+		})
+	}
+}
+
+// 上の別名は RDF として同じなので、**窓の内側なら受理する**。判定がキー名では
+// なく正規化後の値を見ていることの裏付け (キー名で弾くだけの実装なら落ちる)。
+func TestInboxProcessor_ForwardedLDSignedCreate_FreshCreatedUnderAliasAccepted(t *testing.T) {
+	env := newLDForwardEnv(t)
+	noteURI := "https://m.example/users/bob/statuses/6"
+	body := env.signAsVictim(t, mastodonCreate(noteURI), time.Now(), ldFwdMoveCreated("dc:created", "xsd:dateTime"))
+	env.forward(t, body)
+	assert.NotNil(t, env.noteByURI(t, noteURI), "RDF として同じ署名を落としている")
+}
+
 // authorizeActor は compact 後の文書で actor / id を見直し、handler へ渡すのも
 // その文書にする。生 body と compact 後で actor / id が食い違う形は落とす。
 func TestInboxProcessor_ForwardedLDSig_RechecksCompactedFields(t *testing.T) {
