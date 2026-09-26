@@ -19,6 +19,7 @@ import (
 // 総当たりは handler 側の passwordguard が照合失敗だけを数えて止める。
 func TestDefaultEndpointLimits_TokenHolderCannotExhaustRecoveryEndpoints(t *testing.T) {
 	paths := []string{
+		"/api/i/change-password",
 		"/api/i/delete-account",
 		"/api/i/regenerate-token",
 		"/api/i/2fa/register",
