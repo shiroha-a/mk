@@ -793,20 +793,18 @@ func TestCreate_CannotReplyToInvisibleNote(t *testing.T) {
 	assert.Equal(t, apierr.UUIDCannotReplyToAnInvisibleNote, uuidStr)
 }
 
-// channelNotFoundHook は EnsureChannelExists が常にエラーを返すテストスタブ。
-type channelNotFoundHook struct{}
+// channelErrHook は EnsureChannelExists が常に err を返すテストスタブ。
+type channelErrHook struct{ err error }
 
-func (channelNotFoundHook) EnsureChannelExists(_ string) error { return errNotFoundSentinel }
-func (channelNotFoundHook) OnNotePosted(_, _, _ string)        {}
-
-var errNotFoundSentinel = errors.New("channel not found")
+func (h channelErrHook) EnsureChannelExists(_ string) error { return h.err }
+func (channelErrHook) OnNotePosted(_, _, _ string)          {}
 
 func TestCreate_ChannelNotFound(t *testing.T) {
 	noteRepo := testutil.NewMockNoteRepository()
 	pollRepo := testutil.NewMockPollRepository()
 	idGen, _ := id.NewGenerator("aidx")
 	createSvc := corenote.NewCreateService(noteRepo, pollRepo, idGen, nil)
-	createSvc.SetChannelHook(channelNotFoundHook{})
+	createSvc.SetChannelHook(channelErrHook{err: corechannel.ErrChannelNotFound})
 	deleteSvc := corenote.NewDeleteService(noteRepo)
 	querySvc := corenote.NewQueryService(noteRepo, nil)
 	h := NewHandler(noteRepo, createSvc, deleteSvc, querySvc, nil, nil, nil, nil, idGen)
@@ -826,6 +824,31 @@ func TestCreate_ChannelNotFound(t *testing.T) {
 	code, uuidStr := decodeError(t, rec.Body.Bytes())
 	assert.Equal(t, "NO_SUCH_CHANNEL", code)
 	assert.Equal(t, apierr.UUIDNoSuchChannel, uuidStr)
+}
+
+// チャンネルの lookup が DB 障害で失敗したら NO_SUCH_CHANNEL に丸めず 500 (#2792)。
+func TestCreate_ChannelLookupErrorIsInternal(t *testing.T) {
+	noteRepo := testutil.NewMockNoteRepository()
+	pollRepo := testutil.NewMockPollRepository()
+	idGen, _ := id.NewGenerator("aidx")
+	createSvc := corenote.NewCreateService(noteRepo, pollRepo, idGen, nil)
+	createSvc.SetChannelHook(channelErrHook{err: errors.New("connection refused")})
+	deleteSvc := corenote.NewDeleteService(noteRepo)
+	querySvc := corenote.NewQueryService(noteRepo, nil)
+	h := NewHandler(noteRepo, createSvc, deleteSvc, querySvc, nil, nil, nil, nil, idGen)
+
+	body := `{"text": "to channel", "channelId": "c1"}`
+	e := echo.New()
+	req := httptest.NewRequest(http.MethodPost, "/api/notes/create", strings.NewReader(body))
+	req.Header.Set(echo.HeaderContentType, echo.MIMEApplicationJSON)
+	rec := httptest.NewRecorder()
+	c := e.NewContext(req, rec)
+	setAuthUser(c, &model.User{ID: "user1", Username: "testuser"})
+
+	require.NoError(t, h.Create(c))
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
+	assert.NotContains(t, rec.Body.String(), "NO_SUCH_CHANNEL")
+	assert.Empty(t, noteRepo.Notes, "障害時にノートを作らない")
 }
 
 // **アーカイブ済みチャンネルへの notes/create は NO_SUCH_CHANNEL。**
