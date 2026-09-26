@@ -92,6 +92,33 @@ var DefaultEndpointLimits = map[string]*EndpointLimit{
 	"i/update-email":          {Duration: time.Hour, Max: 3},
 	"i/webhooks/test":         {Duration: 15 * time.Minute, Max: 60},
 
+	// ── I (パスワードを照合する endpoint) ──────────────
+	//
+	// **upstream には上限が無い** (各 endpoint の `meta` に `limit` が無い。
+	// `i/change-password` も同じで、mk-go が先に足していた) mk-go 独自の追加。
+	// どれも現在のパスワードを照合して INCORRECT_PASSWORD を返すので、
+	// **native token を盗んだ攻撃者がパスワードの総当たりに使える**。パスワードを
+	// 知られると token を失効させても signin し直せるので、token 単体の漏洩が
+	// アカウントの恒久的な乗っ取りに化ける。
+	//
+	// `i/change-password` と同じ 1h 10 + 1s にそろえる。認証済みのリクエストは
+	// user bucket を必ず消費するので、IP をローテートされても 1 アカウントあたりの
+	// 試行はこの上限で止まる。正当な利用者が 1 時間に 10 回パスワードを打ち直す
+	// ことはまず無い。
+	//
+	// **パスワードを照合しない `i/2fa/update-key` / `i/2fa/password-less` /
+	// `i/2fa/done` (TOTP) は対象外。** 前 2 つは総当たりの対象になる値を受けない。
+	// 一覧は `TestPasswordCheckingRoutesHaveRateLimits` (entitycompat) が
+	// handler の AST から導出して突き合わせるので、新しい照合経路を足して
+	// ここを忘れると落ちる。
+	"i/delete-account":   {Duration: time.Hour, Max: 10, MinInterval: time.Second},
+	"i/regenerate-token": {Duration: time.Hour, Max: 10, MinInterval: time.Second},
+	"i/2fa/register":     {Duration: time.Hour, Max: 10, MinInterval: time.Second},
+	"i/2fa/unregister":   {Duration: time.Hour, Max: 10, MinInterval: time.Second},
+	"i/2fa/register-key": {Duration: time.Hour, Max: 10, MinInterval: time.Second},
+	"i/2fa/key-done":     {Duration: time.Hour, Max: 10, MinInterval: time.Second},
+	"i/2fa/remove-key":   {Duration: time.Hour, Max: 10, MinInterval: time.Second},
+
 	// ── Muting ─────────────────────────────────────────
 	"mute/create":        {Duration: time.Hour, Max: 20},
 	"renote-mute/create": {Duration: time.Hour, Max: 20},
