@@ -9,6 +9,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
 	"github.com/shiroha-a/mk/internal/api/apierr"
+	"github.com/shiroha-a/mk/internal/misc/credkey"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 )
@@ -22,8 +23,23 @@ import (
 // 制限が無い」を意味し、native login token (フロントエンドが使う) と
 // 匿名接続がそちらに当たる。mk-go は cookie 認証を持たない。空の non-nil slice は「スコープを 1 つも持たない app token」で、
 // nil とは区別する。
+//
+// credential は認証に使った資格情報の鍵 (internal/misc/credkey)。匿名は ""。
+// トークンが失効したときに、そのトークンで張られた接続だけを閉じるのに使う。
 type ConnectionAcceptor interface {
-	Accept(conn *websocket.Conn, user *model.User, scopes []string)
+	Accept(conn *websocket.Conn, user *model.User, scopes []string, credential string)
+}
+
+// connectionCredential returns the credkey for the token that authenticated
+// this request, or "" when the connection is anonymous.
+func connectionCredential(user *model.User, scope *middleware.AuthScope, token string) string {
+	if user == nil || scope == nil {
+		return ""
+	}
+	if scope.IsApp {
+		return credkey.AccessToken(scope.TokenID)
+	}
+	return credkey.Native(token)
 }
 
 // connectionScopes returns the scope list to enforce for this connection, or
@@ -95,6 +111,7 @@ func (h *Handler) Stream(c echo.Context) error {
 		_ = conn.Close()
 		return nil
 	}
-	h.acceptor.Accept(conn, user, scopes)
+	credential := connectionCredential(user, middleware.GetAuthScope(c), middleware.GetToken(c))
+	h.acceptor.Accept(conn, user, scopes, credential)
 	return nil
 }

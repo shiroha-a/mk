@@ -33,6 +33,11 @@ type fakeConn struct {
 	pongHandler func(string) error
 	closed      bool
 	readLimit   int64
+	// closeFrames は WriteControl に渡された close frame の payload。
+	closeFrames [][]byte
+	// closedAfterWrites は Close 時点の writes の件数 (close frame より後に
+	// data frame が書かれていないかの確認用)。
+	closedAfterWrites int
 }
 
 func newFakeConn() *fakeConn {
@@ -64,9 +69,12 @@ func (f *fakeConn) WriteMessage(_ int, data []byte) error {
 	return nil
 }
 
-func (f *fakeConn) WriteControl(messageType int, _ []byte, _ time.Time) error {
+func (f *fakeConn) WriteControl(messageType int, data []byte, _ time.Time) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if messageType == websocket.CloseMessage {
+		f.closeFrames = append(f.closeFrames, append([]byte(nil), data...))
+	}
 	if messageType == websocket.PingMessage {
 		f.pings++
 		if f.pingErr != nil {
@@ -105,6 +113,9 @@ func (f *fakeConn) getPongHandler() func(string) error {
 }
 func (f *fakeConn) Close() error {
 	f.mu.Lock()
+	if !f.closed {
+		f.closedAfterWrites = len(f.writes)
+	}
 	f.closed = true
 	f.mu.Unlock()
 	f.doneOnce.Do(func() { close(f.done) })

@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/labstack/echo/v4"
+	"github.com/shiroha-a/mk/internal/misc/credkey"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/server/middleware"
 	"github.com/stretchr/testify/assert"
@@ -24,13 +25,17 @@ type stubAcceptor struct {
 	// scopes は Accept が受け取った値をそのまま積む。**捨てると handler から
 	// acceptor への配線が無検査になる** (#streaming-scope の原因がまさにその形)。
 	scopes [][]string
+	// credentials も同じ理由で積む。捨てると失効時に接続を特定する鍵が
+	// handler から渡っていなくても気付けない。
+	credentials []string
 }
 
-func (s *stubAcceptor) Accept(conn *websocket.Conn, user *model.User, scopes []string) {
+func (s *stubAcceptor) Accept(conn *websocket.Conn, user *model.User, scopes []string, credential string) {
 	s.mu.Lock()
 	s.accepted++
 	s.users = append(s.users, user)
 	s.scopes = append(s.scopes, scopes)
+	s.credentials = append(s.credentials, credential)
 	s.mu.Unlock()
 	_ = conn.Close()
 }
@@ -270,4 +275,83 @@ func TestStream_ForwardsScopesThroughStream(t *testing.T) {
 			assert.Equal(t, tc.want, got)
 		})
 	}
+}
+
+// 失効時に「そのトークンで張られた接続だけ」を閉じるための鍵が、handler から
+// acceptor へ実際に届いているかを WebSocket 越しに固定する。
+func TestStream_ForwardsCredentialThroughStream(t *testing.T) {
+	cases := []struct {
+		name  string
+		user  bool
+		scope *middleware.AuthScope
+		token string
+		want  string
+	}{
+		{
+			name:  "native token is keyed by its hash",
+			user:  true,
+			scope: &middleware.AuthScope{IsApp: false},
+			token: "native-secret",
+			want:  credkey.Native("native-secret"),
+		},
+		{
+			name:  "app token is keyed by its row id",
+			user:  true,
+			scope: &middleware.AuthScope{IsApp: true, Scopes: []string{"read:account"}, TokenID: "tok1"},
+			token: "app-secret",
+			want:  credkey.AccessToken("tok1"),
+		},
+		{
+			name: "anonymous has no credential",
+			want: "",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			acc := &stubAcceptor{}
+			h := NewHandler(acc)
+			e := echo.New()
+			e.GET("/streaming", h.Stream, func(next echo.HandlerFunc) echo.HandlerFunc {
+				return func(c echo.Context) error {
+					if tc.user {
+						c.Set(string(middleware.UserContextKey), &model.User{ID: "alice"})
+					}
+					if tc.scope != nil {
+						c.Set(string(middleware.AuthScopeContextKey), tc.scope)
+					}
+					if tc.token != "" {
+						c.Set(string(middleware.TokenContextKey), tc.token)
+					}
+					return next(c)
+				}
+			})
+			srv := httptest.NewServer(e)
+			t.Cleanup(srv.Close)
+
+			dialer := websocket.Dialer{HandshakeTimeout: 2 * time.Second}
+			conn, _, err := dialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http")+"/streaming", nil)
+			require.NoError(t, err)
+			t.Cleanup(func() { _ = conn.Close() })
+
+			require.Eventually(t, func() bool {
+				acc.mu.Lock()
+				defer acc.mu.Unlock()
+				return acc.accepted == 1
+			}, 2*time.Second, 10*time.Millisecond)
+
+			acc.mu.Lock()
+			got := acc.credentials[0]
+			acc.mu.Unlock()
+			assert.Equal(t, tc.want, got)
+			assert.NotContains(t, got, "secret", "生 token を鍵にしない")
+		})
+	}
+}
+
+func TestConnectionCredential(t *testing.T) {
+	u := &model.User{ID: "alice"}
+	assert.Equal(t, "", connectionCredential(nil, &middleware.AuthScope{}, "t"), "anonymous")
+	assert.Equal(t, "", connectionCredential(u, nil, "t"), "no scope view")
+	assert.Equal(t, credkey.Native("t"), connectionCredential(u, &middleware.AuthScope{}, "t"))
+	assert.Equal(t, credkey.AccessToken("id1"), connectionCredential(u, &middleware.AuthScope{IsApp: true, TokenID: "id1"}, "t"))
 }

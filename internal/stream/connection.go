@@ -65,6 +65,17 @@ type Connection struct {
 	closed    bool
 	closedMu  sync.Mutex
 
+	// credential は接続の認証に使った資格情報の鍵 (credkey.Native /
+	// credkey.AccessToken)。匿名接続は ""。失効時に「その資格情報で張られた
+	// 接続だけ」を閉じるために持つ。
+	credential string
+
+	// drainC は CloseWithCode が writeLoop へ「送信キューを吐き切ってから close
+	// frame を送って閉じろ」と伝えるための合図。drainOnce で 1 度だけ close する。
+	drainC     chan struct{}
+	drainOnce  sync.Once
+	closeFrame []byte
+
 	handler      MessageHandler
 	closeHandler CloseHandler
 
@@ -114,6 +125,7 @@ func NewConnection(id string, user *model.User, conn Conn) *Connection {
 		conn:         conn,
 		send:         make(chan []byte, sendQueueSize),
 		closeC:       make(chan struct{}),
+		drainC:       make(chan struct{}),
 		pingInterval: defaultPingInterval,
 	}
 }
@@ -128,6 +140,14 @@ func (c *Connection) SetPingInterval(d time.Duration) {
 
 // ID returns the connection identifier assigned by the Manager.
 func (c *Connection) ID() string { return c.id }
+
+// SetCredential records the key of the credential this connection was
+// authenticated with (see internal/misc/credkey). Must be called before the
+// connection is registered with the Manager.
+func (c *Connection) SetCredential(key string) { c.credential = key }
+
+// Credential returns the key set by SetCredential ("" for anonymous).
+func (c *Connection) Credential() string { return c.credential }
 
 // User returns the authenticated user, or nil for anonymous connections.
 func (c *Connection) User() *model.User { return c.user }
@@ -341,6 +361,55 @@ func (c *Connection) Close() {
 	c.closeInternal()
 }
 
+// closeFlushTimeout bounds how long CloseWithCode waits for the writer to
+// flush before tearing the socket down unconditionally.
+var closeFlushTimeout = 5 * time.Second
+
+// CloseWithCode stops accepting new payloads, flushes the ones already queued,
+// sends a WebSocket close frame with code / reason and then tears the
+// connection down. 二重呼び出しや Close 後の呼び出しは no-op。
+//
+// **キュー済みのものは送り切る。** 失効の直前に publish された event
+// (i/regenerate-token の myTokenRegenerated) が、閉じる判断より先に届いて
+// いればクライアントまで届けるため。逆に閉じると決めた後の Send は拒否する
+// ので、失効後に新しい event が流れることは無い。
+func (c *Connection) CloseWithCode(code int, reason string) {
+	c.closedMu.Lock()
+	if c.closed {
+		c.closedMu.Unlock()
+		return
+	}
+	// closed を立てるのは Send と同じ lock の中。以後 Send は enqueue しないので、
+	// writeLoop が吐き切るべき要素数は有限に確定する。
+	c.closed = true
+	c.closeFrame = websocket.FormatCloseMessage(code, reason)
+	c.closedMu.Unlock()
+	c.drainOnce.Do(func() { close(c.drainC) })
+	// writeLoop が動いていない (Start 前) / 書き込みで詰まっている場合でも
+	// 必ず閉じる。closeInternal は冪等なので、先に閉じ終わっていれば no-op。
+	time.AfterFunc(closeFlushTimeout, c.closeInternal)
+}
+
+// flushAndClose drains the queued payloads, writes the close frame and closes
+// the connection. writeLoop 上でだけ呼ぶ (書き込みは writer goroutine に限る)。
+func (c *Connection) flushAndClose() {
+	defer c.closeInternal()
+	for {
+		select {
+		case body := <-c.send:
+			if err := c.conn.WriteMessage(websocket.TextMessage, body); err != nil {
+				return
+			}
+		default:
+			c.closedMu.Lock()
+			frame := c.closeFrame
+			c.closedMu.Unlock()
+			_ = c.conn.WriteControl(websocket.CloseMessage, frame, time.Now().Add(time.Second))
+			return
+		}
+	}
+}
+
 // closeInternal performs the actual close + cleanup logic. closeOnce で保護
 // されているため繰り返し呼ばれても 1 回しか実行されない。
 func (c *Connection) closeInternal() {
@@ -403,6 +472,9 @@ func (c *Connection) writeLoop() {
 	for {
 		select {
 		case <-c.closeC:
+			return
+		case <-c.drainC:
+			c.flushAndClose()
 			return
 		case body := <-c.send:
 			if err := c.conn.WriteMessage(websocket.TextMessage, body); err != nil {
