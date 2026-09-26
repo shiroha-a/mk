@@ -13,6 +13,10 @@ func Parse(input string) []*Node {
 	if input == "" {
 		return nil
 	}
+	// 不正な UTF-8 はパーサの中で rune と byte の長さが食い違い、slice の範囲外で
+	// panic する (`"> \xff"` など)。JSON 由来の入力は置き換え済みだが、DB や
+	// プラグインから来る文字列まで保証できないので入口で揃える
+	input = strings.ToValidUTF8(input, "\uFFFD")
 	s := newState(input, false)
 	nodes := s.parseNodes(false)
 	return mergeText(nodes)
@@ -23,6 +27,7 @@ func ParseSimple(input string) []*Node {
 	if input == "" {
 		return nil
 	}
+	input = strings.ToValidUTF8(input, "\uFFFD")
 	s := newState(input, true)
 	nodes := s.parseNodes(false)
 	return mergeText(nodes)

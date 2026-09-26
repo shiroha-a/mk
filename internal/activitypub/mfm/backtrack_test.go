@@ -34,20 +34,24 @@ func TestParse_PathologicalInputsAreNotExponential(t *testing.T) {
 	}
 	for _, u := range units {
 		t.Run(u, func(t *testing.T) {
-			// 200 段は修正前なら宇宙の寿命でも終わらない。-race 下でも十分な余裕を取る
-			parseWithin(t, strings.Repeat(u, 200), 10*time.Second)
-			// ローカルの本文上限 (3000 文字) 相当
-			parseWithin(t, strings.Repeat(u, 3000/len(u)), 10*time.Second)
+			// 200 段は修正前なら宇宙の寿命でも終わらない。時間は止まったことの検知に
+			// だけ使う (CI の -race + atomic カバレッジでは 1 桁以上遅くなる)。
+			// 3000 バイト級で上限に届かないことは仕事量で見る
+			// (TestParse_LocalSizedPathologicalInputsStayWithinBudget)
+			parseWithin(t, strings.Repeat(u, 200), 60*time.Second)
 		})
 	}
 }
 
 func TestParse_WorkAndMemoryStayBounded(t *testing.T) {
 	for _, u := range []string{"<b>", "$[x ", "[<b>", "<b>**~~$[x [<small><i>"} {
-		// 64KB (inbox の body 上限) で仕事量かメモ表の上限に届く。-race 下では
-		// 1 桁以上遅くなるので、時間ではなく仕事量とメモリ量で見る
-		in := strings.Repeat(u, (64<<10)/len(u))
+		// 上限に届いた後の振る舞いを見るテストなので、予算を小さくして早く届かせる。
+		// 本来の予算 (2^21 + 32/byte) のままだと CI の -race + atomic カバレッジで
+		// このテストだけで 150 秒を超えた。-race 下では 1 桁以上遅くなるので、
+		// 時間ではなく仕事量とメモリ量で見る
+		in := strings.Repeat(u, (16<<10)/len(u))
 		s := newState(in, false)
+		s.budget.limit = 1<<16 + workBudgetPerByte*len(in)
 		mergeText(s.parseNodes(false))
 		require.True(t, s.budget.exhausted(), "the input must reach a cap for %q", u)
 		assert.LessOrEqual(t, s.budget.memUsed, memoByteLimit, "memo storage must stay under the cap for %q", u)
