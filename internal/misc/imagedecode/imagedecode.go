@@ -108,6 +108,11 @@ func DecodeWithPixelCap(data []byte, maxPixels int64) (image.Image, error) {
 	if ExceedsSandboxedDecoderSize(data) {
 		return nil, fmt.Errorf("%w: %d bytes", ErrEncodedTooLarge, len(data))
 	}
+	// EXIF / ICC は imaging がデコードの途中で宣言値のまま確保する。どの形式でも
+	// imaging へ渡す前に見る (checkEmbeddedMetadata の doc)。
+	if err := checkEmbeddedMetadata(data); err != nil {
+		return nil, err
+	}
 	// **ラスタを確保する前にヘッダの寸法を見る。** `image.DecodeConfig` は
 	// 登録済みデコーダのヘッダだけを読むので、ここで弾けば巨大な確保が起きない。
 	//
