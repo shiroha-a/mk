@@ -86,7 +86,9 @@ HTTP Signature からは言えない。これを埋めるのが LD-Signature。
   後者は LD-Signature が body actor を認証している場合にのみ通す (actor spoofing 対策)
 - **転送経路では upstream と同じく compact し、compact 後の文書を処理に渡す。**
   `signature` を外して upstream の `CONTEXT` (`ld.InboxCompactContext`) へ compact し、
-  forbidden directive の検査と RsaSignature2017 の検証もその文書に掛け、
+  forbidden directive の検査と RsaSignature2017 の検証もその文書に掛け
+  (生の文書の検査はキー名しか見ないので、inline context で `"g": "@graph"` と
+  別名を付けると素通りする。compact が `@graph` / `@included` に戻すのでそこで捕まる)、
   `authorizeActor` は actor / id をその文書で見直したうえで handler へ渡す。
   **生 body を処理してはいけない** — AS2 context の `"@vocab": "_:"` により、context で
   定義されていない語 (`_misskey_content` など) は URDNA2015 で blank node 述語として

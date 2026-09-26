@@ -549,3 +549,44 @@ func TestLDSignatureVerifier_CreatedRequiredAndUnambiguous(t *testing.T) {
 	assert.Contains(t, err.Error(), "signature options")
 }
 
+// **compact 後の文書にも forbidden directive の検査を掛ける。** 生の文書の検査は
+// キー名しか見ないので、inline context で `"g": "@graph"` のような別名を付けると
+// 素通りする。compact は別名を InboxCompactContext の形 (= `@graph` /
+// `@included` そのもの) に戻すので、そこで捕まえる。署名は正しく付けてある —
+// compact 後の検査を外すと verify まで進んで受理される形にしてある。
+func TestLDSignatureVerifier_ForbiddenDirectiveUnderAliasRejectedAfterCompact(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	keyID, privPEM := ldTestKey(t, repo)
+	v := corefederation.NewLDSignatureVerifier(repo)
+
+	tests := map[string]map[string]any{
+		"@graph": {
+			"@context": []any{"https://www.w3.org/ns/activitystreams", map[string]any{"g": "@graph"}},
+			"g": []any{
+				map[string]any{"id": "https://example.com/notes/a", "type": "Note", "content": "a"},
+				map[string]any{"id": "https://example.com/notes/b", "type": "Note", "content": "b"},
+			},
+		},
+		"@included": {
+			"@context": []any{"https://www.w3.org/ns/activitystreams", map[string]any{"inc": "@included"}},
+			"id":       "https://example.com/notes/a",
+			"type":     "Note",
+			"content":  "a",
+			"inc": []any{
+				map[string]any{"id": "https://example.com/notes/b", "type": "Note", "content": "b"},
+			},
+		},
+	}
+	for name, doc := range tests {
+		t.Run(name, func(t *testing.T) {
+			signed, err := ld.NewProcessor().SignRsaSignature2017(doc, privPEM, keyID, time.Now())
+			require.NoError(t, err)
+			body, err := json.Marshal(signed)
+			require.NoError(t, err)
+			require.NotContains(t, string(body), `"`+name+`":`,
+				"生の文書に directive がキーとして出ていると別名の検査にならない")
+
+			require.ErrorIs(t, v.VerifyIfPresent(body), ld.ErrForbiddenDirective)
+		})
+	}
+}
