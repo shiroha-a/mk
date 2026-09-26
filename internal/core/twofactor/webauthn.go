@@ -26,6 +26,10 @@ var (
 	// ErrWebAuthnNotConfigured is returned when WebAuthnService methods are
 	// called on a zero-value or nil-Redis instance.
 	ErrWebAuthnNotConfigured = errors.New("twofactor: webauthn service not configured")
+	// ErrWebAuthnCounterRollback is returned when the assertion's signature
+	// counter did not advance past the stored value, which signals a cloned
+	// authenticator.
+	ErrWebAuthnCounterRollback = errors.New("twofactor: webauthn signature counter did not increase")
 )
 
 // webAuthnSessionTTL bounds how long a registration / authentication challenge
@@ -256,12 +260,16 @@ func (s *WebAuthnService) takeRegistrationSession(ctx context.Context, userID st
 // preferred second factor. The SessionData is keyed by user id alone — Misskey
 // TS upstream の signin プロトコルが client へ session id を返さないため
 // (#705)、同 user の新たな challenge は既存を上書きする。
-func (s *WebAuthnService) BeginLogin(ctx context.Context, user *model.User, existing []*model.UserSecurityKey) (*protocol.CredentialAssertion, error) {
+//
+// requireUV must be true when the key is the only factor (the password did not
+// match and the user relies on usePasswordLessLogin). FinishLogin re-applies
+// the requirement, so this only affects what the browser is asked for.
+func (s *WebAuthnService) BeginLogin(ctx context.Context, user *model.User, existing []*model.UserSecurityKey, requireUV bool) (*protocol.CredentialAssertion, error) {
 	if s == nil || s.wa == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
 	adapter := &userAdapter{user: user, keys: existing}
-	assertion, sd, err := s.wa.BeginLogin(adapter)
+	assertion, sd, err := s.wa.BeginLogin(adapter, webauthn.WithUserVerification(loginUserVerification(requireUV)))
 	if err != nil {
 		return nil, err
 	}
@@ -276,7 +284,11 @@ func (s *WebAuthnService) BeginLogin(ctx context.Context, user *model.User, exis
 // WebAuthnService.verifyAuthentication (#705). The returned Credential carries
 // an updated counter; callers should persist it via UserSecurityKeyRepository
 // to detect cloned authenticators on subsequent logins.
-func (s *WebAuthnService) FinishLogin(ctx context.Context, user *model.User, existing []*model.UserSecurityKey, req *http.Request) (*webauthn.Credential, error) {
+//
+// requireUV makes the assertion fail unless the authenticator reports User
+// Verification. Returns ErrWebAuthnCounterRollback when the signature counter
+// signals a cloned authenticator.
+func (s *WebAuthnService) FinishLogin(ctx context.Context, user *model.User, existing []*model.UserSecurityKey, req *http.Request, requireUV bool) (*webauthn.Credential, error) {
 	if s == nil || s.wa == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
@@ -284,12 +296,52 @@ func (s *WebAuthnService) FinishLogin(ctx context.Context, user *model.User, exi
 	if err != nil {
 		return nil, err
 	}
+	// **要否は Finish の時点の事情で決め直す。** challenge は user 単位で 1 件
+	// しか持たないので、正しいパスワード付きで始めた (= UV 不要の) challenge に、
+	// パスワード無しの credential を後から載せることができる。保存時の値を
+	// 信じると、そのときだけ単要素ログインに UV が要らなくなる。
+	if requireUV {
+		sd.UserVerification = protocol.VerificationRequired
+	}
 	adapter := &userAdapter{user: user, keys: existing}
 	cred, err := s.wa.FinishLogin(adapter, *sd, req)
 	if err != nil {
 		return nil, err
 	}
+	if err := checkCounter(cred); err != nil {
+		return nil, err
+	}
 	return cred, nil
+}
+
+// loginUserVerification returns the userVerification option for a login
+// ceremony.
+//
+// 2 要素目としての利用は upstream の options と同じ preferred にする。
+// 鍵だけでログインさせるときは required — preferred のままだと go-webauthn は
+// UV フラグを検査しない (`validateLogin` は session.UserVerification が
+// required のときだけ見る) ので、PIN も生体認証も無い鍵を拾った相手が
+// それだけでログインできる。
+func loginUserVerification(requireUV bool) protocol.UserVerificationRequirement {
+	if requireUV {
+		return protocol.VerificationRequired
+	}
+	return protocol.VerificationPreferred
+}
+
+// checkCounter rejects an assertion whose signature counter signals a cloned
+// authenticator.
+//
+// upstream は @simplewebauthn の verifyAuthenticationResponse が
+// `(newCounter > 0 || counter > 0) && newCounter <= counter` で throw するので
+// ログインが失敗する。go-webauthn は CloneWarning を立てるだけで成功を返すので、
+// ここで拒否する。**counter を持たない認証器 (常に 0) は誤検知しない** —
+// `Authenticator.UpdateCounter` が 0 / 0 を CloneWarning にしない。
+func checkCounter(cred *webauthn.Credential) error {
+	if cred.Authenticator.CloneWarning {
+		return ErrWebAuthnCounterRollback
+	}
+	return nil
 }
 
 // putLoginSession overwrites any in-flight login challenge for the user.
@@ -339,7 +391,9 @@ func (s *WebAuthnService) BeginPasskeyLogin(ctx context.Context, ctxID string) (
 	if s == nil || s.wa == nil {
 		return nil, ErrWebAuthnNotConfigured
 	}
-	assertion, sd, err := s.wa.BeginDiscoverableLogin()
+	// パスキー単独のログインなので UV を必須にする (FinishPasskeyLogin も
+	// 同じ要求で検証し直す)。
+	assertion, sd, err := s.wa.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		return nil, err
 	}
@@ -365,6 +419,9 @@ func (s *WebAuthnService) FinishPasskeyLogin(ctx context.Context, ctxID string, 
 	if err != nil {
 		return nil, nil, err
 	}
+	// 保存した値に依らず required で検証する。upstream も
+	// `requireUserVerification: true` で検証している。
+	sd.UserVerification = protocol.VerificationRequired
 	var resolvedUser *model.User
 	handler := func(rawID, userHandle []byte) (webauthn.User, error) {
 		u, keys, err := resolve(rawID, userHandle)
@@ -376,6 +433,9 @@ func (s *WebAuthnService) FinishPasskeyLogin(ctx context.Context, ctxID string, 
 	}
 	cred, err := s.wa.FinishDiscoverableLogin(handler, *sd, req)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := checkCounter(cred); err != nil {
 		return nil, nil, err
 	}
 	return resolvedUser, cred, nil

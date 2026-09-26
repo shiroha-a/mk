@@ -147,7 +147,7 @@ func TestBeginLogin(t *testing.T) {
 	require.NoError(t, err)
 	// 鍵が無いと go-webauthn は ErrBadRequest を返す。空でも sd 生成は試みる。
 	// アサーション: 鍵 0 個でも内部で AllowedCredentials=[] になる動作確認。
-	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil)
+	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil, false)
 	// 鍵 0 個だと "Found no credentials" 系のエラーになるので、ここでは
 	// エラーが返ることを許容する (実装依存)。
 	if err == nil {
@@ -163,7 +163,7 @@ func TestBeginRegistration_NotConfigured(t *testing.T) {
 
 func TestBeginLogin_NotConfigured(t *testing.T) {
 	svc := &WebAuthnService{}
-	_, err := svc.BeginLogin(context.Background(), &model.User{ID: "x"}, nil)
+	_, err := svc.BeginLogin(context.Background(), &model.User{ID: "x"}, nil, false)
 	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
 }
 
@@ -177,7 +177,7 @@ func TestFinishRegistration_NotConfigured(t *testing.T) {
 func TestFinishLogin_NotConfigured(t *testing.T) {
 	svc := &WebAuthnService{}
 	req := httptest.NewRequest("POST", "/", strings.NewReader(""))
-	_, err := svc.FinishLogin(context.Background(), &model.User{ID: "x"}, nil, req)
+	_, err := svc.FinishLogin(context.Background(), &model.User{ID: "x"}, nil, req, false)
 	assert.ErrorIs(t, err, ErrWebAuthnNotConfigured)
 }
 
@@ -197,7 +197,7 @@ func TestFinishLogin_SessionMissing(t *testing.T) {
 	svc, err := NewWebAuthnService("https://example.com", "Misskey", twofaTestRedis.Client)
 	require.NoError(t, err)
 	req := httptest.NewRequest("POST", "/", strings.NewReader(""))
-	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice"}, nil, req)
+	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice"}, nil, req, false)
 	assert.ErrorIs(t, err, ErrWebAuthnSessionNotFound)
 }
 
@@ -211,7 +211,7 @@ func TestFinishLogin_BadCredential(t *testing.T) {
 	require.NoError(t, svc.putLoginSession(context.Background(), "alice", makeFakeSessionData()))
 	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"id":"x","rawId":"x","type":"public-key","response":{}}`))
 	req.Header.Set("Content-Type", "application/json")
-	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil, req)
+	_, err = svc.FinishLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, nil, req, false)
 	assert.Error(t, err)
 }
 
@@ -498,7 +498,7 @@ func TestBeginLogin_WithCredential(t *testing.T) {
 	keys := []*model.UserSecurityKey{
 		{ID: "AAEC", PublicKey: "AwQF", Counter: 1},
 	}
-	assertion, err := svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys)
+	assertion, err := svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys, false)
 	require.NoError(t, err)
 	assert.NotNil(t, assertion)
 	// SessionData が Redis に user-keyed で残っていること
@@ -515,7 +515,7 @@ func TestBeginLogin_PutSessionFails(t *testing.T) {
 	svc, err := NewWebAuthnService("https://example.com", "Misskey", c)
 	require.NoError(t, err)
 	keys := []*model.UserSecurityKey{{ID: "AAEC", PublicKey: "AwQF", Counter: 0}}
-	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys)
+	_, err = svc.BeginLogin(context.Background(), &model.User{ID: "alice", Username: "alice"}, keys, false)
 	assert.Error(t, err)
 }
 
