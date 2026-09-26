@@ -22,6 +22,7 @@ type Conn interface {
 	WriteMessage(messageType int, data []byte) error
 	WriteControl(messageType int, data []byte, deadline time.Time) error
 	SetReadDeadline(t time.Time) error
+	SetWriteDeadline(t time.Time) error
 	// SetReadLimit caps a single inbound frame. gorilla の既定は 0 = 無制限で、
 	// 未認証の接続 1 本で任意量のメモリを確保させられる。
 	SetReadLimit(limit int64)
@@ -394,6 +395,10 @@ func (c *Connection) CloseWithCode(code int, reason string) {
 // the connection. writeLoop 上でだけ呼ぶ (書き込みは writer goroutine に限る)。
 func (c *Connection) flushAndClose() {
 	defer c.closeInternal()
+	// 吐き切る間の書き込みに期限を置く。相手が読まないと WriteMessage は
+	// 送信バッファが空くまで戻らないので、CloseWithCode の保険 (closeFlushTimeout
+	// 後の closeInternal) に頼らず、writer 自身がそこで諦めて閉じる。
+	_ = c.conn.SetWriteDeadline(time.Now().Add(closeFlushTimeout))
 	for {
 		select {
 		case body := <-c.send:
@@ -408,6 +413,14 @@ func (c *Connection) flushAndClose() {
 			return
 		}
 	}
+}
+
+// isClosing reports whether the connection has been marked closed (by
+// CloseWithCode or closeInternal).
+func (c *Connection) isClosing() bool {
+	c.closedMu.Lock()
+	defer c.closedMu.Unlock()
+	return c.closed
 }
 
 // closeInternal performs the actual close + cleanup logic. closeOnce で保護
@@ -450,6 +463,15 @@ func (c *Connection) readLoop() {
 		_, data, err := c.conn.ReadMessage()
 		if err != nil {
 			return
+		}
+		// **閉じると決めた後はクライアントのメッセージを処理しない。**
+		// CloseWithCode から実際に閉じるまで (送信キューを吐き切る間、最長
+		// closeFlushTimeout) も読み続けるが、その間に connect / subNote 等を
+		// 受け付けると、失効した資格情報で新しい購読を張れてしまう。読むこと自体は
+		// やめない — ここで return すると defer の closeInternal が吐き切りを
+		// 待たずに接続を切る。
+		if c.isClosing() {
+			continue
 		}
 		var env struct {
 			Type string          `json:"type"`

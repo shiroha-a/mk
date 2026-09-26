@@ -59,6 +59,62 @@ func TestConnection_CloseWithCode_FlushesQueueThenSendsCloseFrame(t *testing.T) 
 	assert.Len(t, closeFramesOf(fc), 1)
 }
 
+// 閉じると決めてから実際に閉じるまで (送信キューを吐き切っている間) に届いた
+// クライアントのメッセージは処理しない。処理すると、失効した資格情報で新しい
+// channel を connect できてしまう。吐き切りの書き込みには期限を置く。
+func TestConnection_CloseWithCode_IgnoresClientMessagesWhileFlushing(t *testing.T) {
+	fc := newFakeConn()
+	fc.writeGate = make(chan struct{})
+	c := NewConnection("c1", &model.User{ID: "alice"}, fc)
+	var mu sync.Mutex
+	var handled []string
+	c.SetMessageHandler(func(msgType string, _ json.RawMessage) {
+		mu.Lock()
+		handled = append(handled, msgType)
+		mu.Unlock()
+	})
+	done := make(chan struct{})
+	go func() {
+		c.Start()
+		close(done)
+	}()
+
+	fc.sendMessage([]byte(`{"type":"before"}`))
+	require.Eventually(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(handled) == 1
+	}, 2*time.Second, 5*time.Millisecond)
+
+	require.NoError(t, c.Send(map[string]string{"type": "queued"}))
+	c.CloseWithCode(RevokeCloseCode, "credential revoked")
+	// writer は queued の書き込みで詰まっているので、まだ閉じていない。
+	assert.False(t, fc.isClosed())
+
+	fc.sendMessage([]byte(`{"type":"connect","body":{"channel":"main","id":"x"}}`))
+	time.Sleep(50 * time.Millisecond)
+
+	close(fc.writeGate)
+	require.Eventually(t, fc.isClosed, 2*time.Second, 5*time.Millisecond)
+	<-done
+	mu.Lock()
+	assert.Equal(t, []string{"before"}, handled, "閉じると決めた後のメッセージは handler に渡さない")
+	mu.Unlock()
+	assert.Equal(t, 1, fc.writeCount(), "キュー済みのものは送り切る")
+}
+
+// 吐き切りの書き込みには期限を置く (相手が読まないと WriteMessage が戻らない)。
+func TestConnection_CloseWithCode_SetsWriteDeadlineForFlush(t *testing.T) {
+	fc := newFakeConn()
+	c := NewConnection("c1", nil, fc)
+	require.NoError(t, c.Send(map[string]string{"type": "queued"}))
+	start := time.Now()
+	c.CloseWithCode(RevokeCloseCode, "x")
+	go c.Start()
+	require.Eventually(t, fc.isClosed, 2*time.Second, 5*time.Millisecond)
+	assert.WithinDuration(t, start.Add(closeFlushTimeout), fc.getWriteDeadline(), time.Second)
+}
+
 // writeLoop が動いていなくても (Start 前 / 書き込みで詰まっている) 必ず閉じる。
 func TestConnection_CloseWithCode_FallsBackWhenWriterIsNotRunning(t *testing.T) {
 	orig := closeFlushTimeout
