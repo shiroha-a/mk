@@ -963,7 +963,9 @@ publish しない。サーバー側は `emoji` のキャッシュ (5 分) とア
 の actor が `xn--qi7ciaj2b.example` として保存されている (接続先は `evil.example`)。
 その行は `blockedHosts` の `evil.example` にも一覧の絞り込みにも当たらない。バッチは
 こうした旧形式を `evil.example` へ畳み直す。正当な IDN の行 (`xn--eckve.example` など)
-は変わらない。**連合ゲート
+は変わらない。**由来は区別できない** — 最初から ASCII で `xn--qi7ciaj2b.attacker.example`
+と書いた URI の行も同じく畳まれ、実行時に URI から作る host と食い違う。書き換わるのは
+その xn-- ラベルだけで上位のドメインは変わらないので、他人のドメインへ寄ることは無い。**連合ゲート
 (blocked / silenced host) と timeline の instance-mute は完全一致なので取りこぼし**、
 acct 解決も #2996 で両当たりを撤去したので引けない。
 
