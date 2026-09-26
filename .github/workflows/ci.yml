@@ -628,7 +628,21 @@ jobs:
                 image = w[i]; break
               }
               print loc " " image
-              if (image != want) {
+              # 配る Dockerfile は `golang:<ver>-alpine@sha256:<digest>` で tag と
+              # digest を併記している。照合するのは tag 側で、digest は形だけ見る
+              # (tag と digest の対応は registry に問い合わせないと分からない)。
+              tag = image
+              dig = ""
+              at = index(image, "@")
+              if (at > 0) {
+                tag = substr(image, 1, at - 1)
+                dig = substr(image, at + 1)
+              }
+              if (dig != "" && !(dig ~ /^sha256:[0-9a-f]+$/ && length(dig) == 71)) {
+                printf "::error::%s の builder (%s) の digest が sha256:<64 桁> の形でない\n", loc, image > "/dev/stderr"
+                bad = 1
+              }
+              if (tag != want) {
                 printf "::error::%s の builder (%s) が go.mod と同じ patch version (%s) を指していない\n", loc, image, want > "/dev/stderr"
                 bad = 1
               }

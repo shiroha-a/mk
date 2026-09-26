@@ -215,6 +215,13 @@ workflow が後から集めたもの。前者がある場合はそちらが本�
 見るのは `go.mod` 側だけで、**Dockerfile だけ古いと CI は緑のまま配る image が脆弱**に
 なるため。builder を `golang:1.27-alpine` のような floating tag に戻すのも不可
 (pull 時期で stdlib の patch が変わり、再現可能な形で「既知脆弱性を含まない」と言えない)。
+配る Dockerfile (`Dockerfile` / `Dockerfile.bundled` / `deploy/uds/Dockerfile.mkgo`) は
+base image を `golang:1.27.1-alpine@sha256:<digest>` のように **tag と digest の併記**で
+固定しているので (patch の tag でも publish し直しで中身が変わる。
+`TestDistributedDockerfileBaseImagesArePinnedByDigest` が見る)、この検査は tag 側で版を
+照合し、digest は形だけを見る。Go の版を上げるときは digest も取り直すこと
+(`docker buildx imagetools inspect golang:<ver>-alpine` の Digest 行)。digest だけの更新は
+dependabot の `docker` が出す。
 
 **govulncheck の検出** — 手元で同じコマンドを回す。
 
