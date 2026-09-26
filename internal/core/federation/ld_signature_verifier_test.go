@@ -46,7 +46,6 @@ func TestLDSignatureVerifier_ForbiddenDirective_Rejected(t *testing.T) {
 		"signature": {
 			"type": "RsaSignature2017",
 			"creator": "https://example.com/users/alice#main-key",
-			"created": "2026-05-21T00:00:00Z",
 			"signatureValue": "AAAA"
 		}
 	}`))
@@ -71,15 +70,16 @@ func TestLDSignatureVerifier_MissingCreator_Rejected(t *testing.T) {
 }
 
 // signature field がオブジェクトでない (例: 文字列) 場合は reject。present=true
-// を報告しつつ error を返す (VerifyAndCreator 経路)。
+// を報告しつつ error を返す (VerifyAndCompact 経路)。
 func TestLDSignatureVerifier_SignatureNotObject_Rejected(t *testing.T) {
 	repo := testutil.NewMockUserPublickeyRepository()
 	v := corefederation.NewLDSignatureVerifier(repo)
 
-	creator, present, err := v.VerifyAndCreator([]byte(`{"type":"Note","signature":"not-an-object"}`))
+	verified, present, err := v.VerifyAndCompact([]byte(`{"type":"Note","signature":"not-an-object"}`))
 	require.Error(t, err)
 	assert.True(t, present, "signature field exists, so present must be true")
-	assert.Empty(t, creator)
+	assert.Empty(t, verified.Creator)
+	assert.Nil(t, verified.Body)
 	assert.Contains(t, err.Error(), "not an object")
 }
 
@@ -123,7 +123,6 @@ func TestLDSignatureVerifier_BadSignatureValueRejected(t *testing.T) {
 		"signature": {
 			"type": "RsaSignature2017",
 			"creator": "https://example.com/users/alice#main-key",
-			"created": "2026-05-21T00:00:00Z",
 			"signatureValue": "AAAA"
 		}
 	}`))
@@ -214,7 +213,7 @@ func TestLDSignatureVerifier_ValidSignatureAccepted(t *testing.T) {
 		"type":     "Note",
 		"id":       "https://example.com/notes/n1",
 		"content":  "hello",
-	}, privPEM, keyID, time.Unix(1700000000, 0).UTC())
+	}, privPEM, keyID, time.Now())
 	require.NoError(t, err)
 
 	body, err := json.Marshal(signed)
@@ -253,7 +252,6 @@ func TestLDSignatureVerifier_NonPreloadedContextRejectedByFreeze(t *testing.T) {
 		"signature": {
 			"type": "RsaSignature2017",
 			"creator": "https://example.com/users/alice#main-key",
-			"created": "2023-11-14T22:13:20Z",
 			"signatureValue": "AAAA"
 		}
 	}`)
@@ -290,4 +288,92 @@ func TestLDSignatureVerifier_KeyLookupFailureIsLookupUnavailable(t *testing.T) {
 	require.Error(t, err)
 	assert.NotErrorIs(t, err, corefederation.ErrLookupUnavailable)
 	assert.Contains(t, err.Error(), "public key not found")
+}
+
+// ldTestKey registers a fresh RSA key for alice and returns its private PEM.
+func ldTestKey(t *testing.T, repo *testutil.MockUserPublickeyRepository) (keyID, privPEM string) {
+	t.Helper()
+	priv, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	pubDER, err := x509.MarshalPKIXPublicKey(&priv.PublicKey)
+	require.NoError(t, err)
+	keyID = "https://example.com/users/alice#main-key"
+	repo.Keys["alice"] = &model.UserPublickey{
+		UserID: "alice", KeyID: keyID,
+		KeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubDER})),
+	}
+	privPEM = string(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(priv)}))
+	return keyID, privPEM
+}
+
+// **署名が覆っていないキーは compact 後の Body に短い名前で残らない。**
+// Mastodon の context は `_misskey_content` を定義しないので、AS2 の
+// `@vocab: "_:"` で blank node IRI になり署名に含まれない。署名は通るが、
+// Body の object に `_misskey_content` キーがあってはならない。
+func TestLDSignatureVerifier_CompactDropsUnsignedKeys(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	keyID, privPEM := ldTestKey(t, repo)
+
+	signed, err := ld.NewProcessor().SignRsaSignature2017(map[string]any{
+		"@context": []any{"https://www.w3.org/ns/activitystreams", map[string]any{"sensitive": "as:sensitive"}},
+		"id":       "https://example.com/notes/n1/activity",
+		"type":     "Create",
+		"actor":    "https://example.com/users/alice",
+		"to":       []any{"https://www.w3.org/ns/activitystreams#Public"},
+		"object": map[string]any{
+			"id":        "https://example.com/notes/n1",
+			"type":      "Note",
+			"content":   "<p>signed</p>",
+			"sensitive": false,
+		},
+	}, privPEM, keyID, time.Now())
+	require.NoError(t, err)
+	signed["object"].(map[string]any)["_misskey_content"] = "forged"
+	signed["object"].(map[string]any)["quoteUrl"] = "https://evil.example/notes/x"
+	body, err := json.Marshal(signed)
+	require.NoError(t, err)
+
+	verified, present, err := corefederation.NewLDSignatureVerifier(repo).VerifyAndCompact(body)
+	require.NoError(t, err, "署名外のキーを足しても LD-Signature 自体は通る (だから compact が要る)")
+	require.True(t, present)
+	assert.Equal(t, keyID, verified.Creator)
+
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(verified.Body, &got))
+	obj, ok := got["object"].(map[string]any)
+	require.True(t, ok, "object が残っていない: %s", verified.Body)
+	assert.NotContains(t, obj, "_misskey_content", "署名外の _misskey_content が残っている")
+	assert.NotContains(t, obj, "quoteUrl", "署名外の quoteUrl が残っている")
+	assert.Equal(t, "<p>signed</p>", obj["content"])
+	assert.Equal(t, false, obj["sensitive"])
+	assert.Equal(t, "as:Public", got["to"], "upstream と同じ compact 形になること")
+	assert.Equal(t, "https://example.com/users/alice", got["actor"])
+	sig, ok := got["signature"].(map[string]any)
+	require.True(t, ok, "signature が付け直されていない")
+	assert.Equal(t, keyID, sig["creator"])
+}
+
+// 署名した語彙 (context で定義された `_misskey_content`) は compact 後も残る。
+func TestLDSignatureVerifier_CompactKeepsSignedExtensionKeys(t *testing.T) {
+	repo := testutil.NewMockUserPublickeyRepository()
+	keyID, privPEM := ldTestKey(t, repo)
+
+	signed, err := ld.NewProcessor().SignRsaSignature2017(map[string]any{
+		"@context": []any{
+			"https://www.w3.org/ns/activitystreams",
+			map[string]any{"misskey": "https://misskey-hub.net/ns#", "_misskey_content": "misskey:_misskey_content"},
+		},
+		"id":               "https://example.com/notes/n1",
+		"type":             "Note",
+		"_misskey_content": "signed **mfm**",
+	}, privPEM, keyID, time.Now())
+	require.NoError(t, err)
+	body, err := json.Marshal(signed)
+	require.NoError(t, err)
+
+	verified, _, err := corefederation.NewLDSignatureVerifier(repo).VerifyAndCompact(body)
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(verified.Body, &got))
+	assert.Equal(t, "signed **mfm**", got["_misskey_content"])
 }

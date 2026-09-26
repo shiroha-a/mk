@@ -437,10 +437,12 @@ func TestInboxProcessor_LegacyPayloadSkipsVerify(t *testing.T) {
 type stubLDVerifier struct {
 	err       error
 	callCount int
-	// VerifyAndCreator outcome (forwarded-activity path).
+	// VerifyAndCompact outcome (forwarded-activity path).
 	creator      string
 	present      bool
 	creatorCount int
+	// compactedBody overrides the Body VerifyAndCompact returns.
+	compactedBody []byte
 	// CheckForbiddenDirectivesIfPresent outcome (signer==actor path, #2106 N26).
 	forbiddenErr   error
 	forbiddenCount int
@@ -456,9 +458,18 @@ func (s *stubLDVerifier) CheckForbiddenDirectivesIfPresent(_ []byte) error {
 	return s.forbiddenErr
 }
 
-func (s *stubLDVerifier) VerifyAndCreator(_ []byte) (string, bool, error) {
+// VerifyAndCompact は compact の代わりに入力をそのまま Body として返す
+// (compactedBody を指定したときはそれを返す)。
+func (s *stubLDVerifier) VerifyAndCompact(body []byte) (federation.VerifiedLDActivity, bool, error) {
 	s.creatorCount++
-	return s.creator, s.present, s.err
+	if s.err != nil {
+		return federation.VerifiedLDActivity{}, s.present, s.err
+	}
+	out := body
+	if s.compactedBody != nil {
+		out = s.compactedBody
+	}
+	return federation.VerifiedLDActivity{Creator: s.creator, Body: out}, s.present, nil
 }
 
 // multiActorVerifier resolves different actors keyed by the (fragment-less)
