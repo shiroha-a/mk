@@ -883,42 +883,6 @@ trustProxy:
 	assert.Equal(t, []string{"203.0.113.0/24", "198.51.100.0/24"}, cfg.TrustProxy)
 }
 
-func TestResolveTrustProxy_EmptyUsesDefault(t *testing.T) {
-	result := resolveTrustProxy(nil)
-	assert.Equal(t, DefaultTrustProxy, result)
-}
-
-func TestResolveTrustProxy_CustomReturnsProvided(t *testing.T) {
-	custom := []string{"10.0.0.0/8"}
-	result := resolveTrustProxy(custom)
-	assert.Equal(t, custom, result)
-}
-
-func TestParseTrustProxy_ValidCIDRs(t *testing.T) {
-	nets := ParseTrustProxy([]string{"10.0.0.0/8", "192.168.0.0/16"})
-	assert.Len(t, nets, 2)
-}
-
-func TestParseTrustProxy_InvalidCIDR(t *testing.T) {
-	nets := ParseTrustProxy([]string{"10.0.0.0/8", "invalid", "192.168.0.0/16"})
-	assert.Len(t, nets, 2)
-}
-
-func TestParseTrustProxy_Empty(t *testing.T) {
-	nets := ParseTrustProxy(nil)
-	assert.Empty(t, nets)
-}
-
-func TestParseTrustProxy_IPv6(t *testing.T) {
-	nets := ParseTrustProxy([]string{"::1/128", "fc00::/7"})
-	assert.Len(t, nets, 2)
-}
-
-func TestParseTrustProxy_AllInvalid(t *testing.T) {
-	nets := ParseTrustProxy([]string{"not-a-cidr", "also-bad"})
-	assert.Empty(t, nets)
-}
-
 func TestLoad_DBSlaves(t *testing.T) {
 	yaml := `
 url: https://example.com

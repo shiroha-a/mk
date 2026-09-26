@@ -3,7 +3,6 @@ package config
 import (
 	"fmt"
 	"log/slog"
-	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -325,10 +324,13 @@ type Source struct {
 	DeactivateAntennaThreshold   *int   `mapstructure:"deactivateAntennaThreshold"`
 	PidFile                      string `mapstructure:"pidFile"`
 
-	// TrustProxy is a list of CIDR ranges for trusted reverse proxies.
-	// When set, Echo uses X-Forwarded-For from these ranges to determine
-	// the real client IP. Defaults to private IP ranges (TS-compatible).
-	TrustProxy []string `mapstructure:"trustProxy"`
+	// TrustProxy lists the reverse proxies whose X-Forwarded-For entries are
+	// trusted. Accepts a list (or comma-separated string) of CIDRs, bare IPs
+	// and the proxy-addr names loopback / linklocal / uniquelocal, or false
+	// to trust none. Unset means DefaultTrustProxy (TS-compatible). See
+	// resolveTrustProxy. 型は any にしてある — []string だと bool の true が
+	// weak decode で ["1"] になり、元の値の形を区別できない。
+	TrustProxy any `mapstructure:"trustProxy"`
 
 	// TestMode enables destructive test-only endpoints such as /api/reset-db.
 	// Must never be enabled in production. Can be overridden via MK_TESTMODE=1.
@@ -503,7 +505,9 @@ type Config struct {
 	PidFile                      string
 	Logging                      *LoggingOptions
 
-	// TrustProxy is a list of CIDR ranges for trusted reverse proxies.
+	// TrustProxy is the normalized list of trusted reverse proxy CIDRs.
+	// nil means "not resolved" and is treated as DefaultTrustProxy; a non-nil
+	// empty slice means no proxy is trusted (X-Forwarded-For is ignored).
 	TrustProxy []string
 
 	// TestMode enables destructive test-only endpoints such as /api/reset-db.
@@ -774,6 +778,11 @@ func resolve(src *Source) (*Config, error) {
 		return nil, err
 	}
 
+	trustProxy, err := resolveTrustProxy(src.TrustProxy)
+	if err != nil {
+		return nil, err
+	}
+
 	// DSN() は Config から毎回導出するので、誤った db.extra はここで起動を
 	// 止める (DSN 側で黙って既定に倒すと、平文 / 無検証で繋がってしまう)。
 	if _, err := ResolveDBTLS(src.DB.Extra); err != nil {
@@ -867,7 +876,7 @@ func resolve(src *Source) (*Config, error) {
 		PidFile:                      src.PidFile,
 		Logging:                      src.Logging,
 
-		TrustProxy: resolveTrustProxy(src.TrustProxy),
+		TrustProxy: trustProxy,
 
 		TestMode:                            src.TestMode,
 		Dev:                                 src.Dev,
@@ -959,40 +968,6 @@ func (r RedisOptions) KeyPrefix() string {
 		return ""
 	}
 	return r.Prefix + ":"
-}
-
-// DefaultTrustProxy is the default set of CIDR ranges for trusted proxies,
-// matching the TypeScript Misskey defaults (private IP ranges).
-var DefaultTrustProxy = []string{
-	"10.0.0.0/8",
-	"172.16.0.0/12",
-	"192.168.0.0/16",
-	"127.0.0.1/32",
-	"::1/128",
-	"fc00::/7",
-}
-
-// resolveTrustProxy returns the provided list or the default if empty.
-func resolveTrustProxy(provided []string) []string {
-	if len(provided) > 0 {
-		return provided
-	}
-	return DefaultTrustProxy
-}
-
-// ParseTrustProxy converts a list of CIDR strings into parsed *net.IPNet values.
-// Invalid CIDRs are skipped with a warning log.
-func ParseTrustProxy(cidrs []string) []*net.IPNet {
-	var nets []*net.IPNet
-	for _, cidr := range cidrs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err != nil {
-			slog.Warn("invalid trustProxy CIDR, skipping", "cidr", cidr, "err", err)
-			continue
-		}
-		nets = append(nets, ipNet)
-	}
-	return nets
 }
 
 // deriveMediaProxySecret returns the configured secret for HMAC-signed media

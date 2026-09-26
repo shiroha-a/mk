@@ -170,7 +170,26 @@ cp .config/docker.yml.example .config/docker.yml
 | `proxyBypassHosts` | []string | - | プロキシを迂回するホスト (HTTP のみ) |
 | `allowedPrivateNetworks` | []string | - | プライベート IP / loopback / metadata service へのアウトバウンド接続を許可する CIDR allowlist。AP fetch / URL preview / mediaproxy / `RemoteStatsFetcher` (#943) で共通に効く。`proxy` 設定時も同じ判定を proxy へ渡す前の宛先検査に使うので、ここに入れた範囲は proxy 経由でも許可される (proxy 自体への接続はこの設定と無関係に常に許可)。開発時の self-loop 用途 (`127.0.0.0/8` 等)、本番では空のまま運用する |
 | `outgoingAddress` | string | - | 外向き HTTP の送信元 IP として bind するアドレス。複数 NIC 環境で federation 配信の source IP を固定する用途 (#496)。不正値は警告のみで kernel auto-pick に fallback |
+| `trustProxy` | []string / string / `false` | private + loopback (下記) | `X-Forwarded-For` を信頼する前段 proxy。詳細は下記 |
 | `outgoingAddressFamily` | string | `dual` | DNS 解決後の IP family 制限。`"ipv4"` / `"ipv6"` 指定で該当 family のみで dial、`"dual"` または空で両方 (#496) |
+
+#### 前段 proxy の信頼 (`trustProxy`)
+
+クライアント IP (rate limit・サインイン履歴・IP 履歴に使う) は `X-Forwarded-For` を右から左へ見て、**`trustProxy` に含まれない最初のアドレス**を採る。接続元が `trustProxy` に含まれなければ `X-Forwarded-For` は見ない。
+
+| 書き方 | 意味 |
+|---|---|
+| 未設定 | 既定値 `10.0.0.0/8` / `172.16.0.0/12` / `192.168.0.0/16` / `127.0.0.1/32` / `::1/128` / `fc00::/7` (upstream と同じ) |
+| CIDR / 素の IP のリスト | 書いたものだけを信頼する。素の IP は `/32` (`/128`) として扱う。`loopback` / `linklocal` / `uniquelocal` (upstream の proxy-addr の名前) も書ける |
+| カンマ区切りの文字列 | リストと同じ (`MK_TRUSTPROXY=10.0.0.0/8,192.0.2.1` のように環境変数で渡すとき) |
+| `false` / `[]` / `''` | どの proxy も信頼しない (`X-Forwarded-For` を無視して接続元アドレスを使う) |
+| `true` / 数値 | **起動エラー** |
+
+- **書いた範囲だけを信頼する。** 以前は Echo の既定で loopback / link-local / private が常に信頼されていたので、CDN の範囲だけを書いても private アドレスからの `X-Forwarded-For` が信頼され続けた。既定値 (未設定) のときの挙動は、`127.0.0.2`-`127.255.255.255` と link-local (`169.254.0.0/16` / `fe80::/10`) を信頼しなくなった点を除いて変わらない (どちらも upstream の既定にも入っていない)。必要なら `loopback` / `linklocal` を足す。
+- **解釈できない値は起動エラーにする。** 以前は警告して捨てていたため、全部捨てると `X-Forwarded-For` の**最左を無条件に信頼する** Echo の既定に落ち、誰でも IP を詐称できた (`trustProxy: true` や `proxy.internal` のようなホスト名で実際にそうなる)。
+- **`trustProxy: true` は受け付けない。** upstream (Fastify) では「全ての hop を信頼する」意味で、前段を経由せずに届いたリクエストが IP を自由に名乗れる。前段 proxy のアドレスを列挙すること。hop 数 (数値) も同じ理由で受け付けない。
+- **`[]` は「信頼しない」。** 以前の mk-go は空リストを既定値として扱っていたが、upstream (`config.trustProxy ?? 既定`) では空リストがそのまま効くので揃えた。
+- UNIX ソケットで待ち受けている場合は接続元アドレスが無いので、`X-Forwarded-For` を `trustProxy` で絞って読む (接続できるのは同じホストの proxy だけという前提)。
 
 ### 検索
 

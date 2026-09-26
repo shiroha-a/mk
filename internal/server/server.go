@@ -177,8 +177,15 @@ func runReactionFlushWorker(ctx context.Context, enqueue func() error) {
 //
 // 通常 (TCP listen) 経路では inner が valid IP を返すため fallback は走らず、
 // 既存挙動と完全に互換。
+//
+// 信頼するのは trusted だけ。Echo の ExtractIPFromXFFHeader は既定で
+// loopback / link-local / private を信頼するので、それを明示的に外す —
+// 外さないと、運営者が trustProxy を CDN の範囲だけに絞っても private
+// アドレスからの XFF が信頼され続ける。trusted が空なら XFF を一切見ず
+// 接続元アドレスを返す (UDS の fallback だけは例外。extractIPFallback 参照)。
 func buildIPExtractor(trusted []*net.IPNet) echo.IPExtractor {
-	opts := make([]echo.TrustOption, 0, len(trusted))
+	opts := make([]echo.TrustOption, 0, len(trusted)+3)
+	opts = append(opts, echo.TrustLoopback(false), echo.TrustLinkLocal(false), echo.TrustPrivateNet(false))
 	for _, n := range trusted {
 		opts = append(opts, echo.TrustIPRange(n))
 	}
@@ -554,9 +561,14 @@ func newServer(cfg *config.Config, db *gorm.DB, redis *cache.RedisClients, plugi
 	e.JSONSerializer = fastJSONSerializer{}
 
 	// trustProxyからIPExtractorを構成。詳細は buildIPExtractor のコメント。
-	if nets := config.ParseTrustProxy(cfg.TrustProxy); len(nets) > 0 {
-		e.IPExtractor = buildIPExtractor(nets)
+	// **常に設定する。** 未設定のまま残すと Echo の RealIP は XFF の最左を
+	// 無条件に信頼するので、trustProxy の解釈に失敗した / 空だったときに
+	// 誰でも IP を詐称できる状態へ倒れる (以前はそうなっていた)。
+	trustedNets, err := config.ParseTrustProxy(cfg.TrustProxy)
+	if err != nil {
+		return nil, fmt.Errorf("server: %w", err)
 	}
+	e.IPExtractor = buildIPExtractor(trustedNets)
 
 	// Global middleware
 	e.Use(echomw.Recover())

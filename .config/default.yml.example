@@ -66,9 +66,12 @@ port: 3000
 # Proxy trust settings.
 #
 # Specifies the IP addresses that the server treats as trusted
-# reverse proxies. mk-go reads this as a YAML array of CIDR ranges
-# (Misskey TS uses a polymorphic shape; mk-go simplifies it to an
-# array). Defaults to private + loopback ranges.
+# reverse proxies. Only the listed ranges are trusted for
+# X-Forwarded-For. Entries may be CIDRs, bare IPs (treated as /32 or
+# /128) or the names loopback / linklocal / uniquelocal. `false` or `[]`
+# trusts no proxy. `true` (trust every hop) and hop counts are rejected,
+# as is any entry that cannot be parsed. Defaults to private + loopback
+# ranges (same as Misskey TS). See docs/configuration.md.
 #
 #trustProxy:
 #  - '127.0.0.1/32'
