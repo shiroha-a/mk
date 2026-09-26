@@ -10,6 +10,7 @@ package credkey
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strings"
 )
 
 const (
@@ -19,8 +20,13 @@ const (
 
 // Native returns the key for a native login token (user.token). The raw token
 // is hashed so the key can travel over Redis pubsub without leaking a usable
-// credential. Empty input yields "".
+// credential. Trailing spaces are ignored, matching how PostgreSQL compares
+// the char(16) user.token column. Empty input yields "".
 func Native(token string) string {
+	// user.token は char(16) なので、16 文字未満の値は末尾を空白で埋めて読み出される。
+	// 接続側と失効側のどちらかが埋め草付きの値を渡しても同じ鍵になるよう、
+	// DB の比較と同じく末尾の空白を区別しない。
+	token = strings.TrimRight(token, " ")
 	if token == "" {
 		return ""
 	}

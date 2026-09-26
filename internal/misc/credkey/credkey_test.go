@@ -14,6 +14,13 @@ func TestNative(t *testing.T) {
 	assert.NotEqual(t, k, Native("other-token"))
 }
 
+// char(16) の埋め草付きで読み出した値と、埋め草なしの値が同じ鍵になる。
+func TestNative_IgnoresTrailingSpaces(t *testing.T) {
+	assert.Equal(t, Native("short"), Native("short           "))
+	assert.Equal(t, "", Native("   "))
+	assert.NotEqual(t, Native("short"), Native(" short"), "先頭の空白は区別する")
+}
+
 func TestAccessToken(t *testing.T) {
 	assert.Equal(t, "", AccessToken(""))
 	assert.Equal(t, "app:abc", AccessToken("abc"))

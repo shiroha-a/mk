@@ -1143,3 +1143,15 @@ func TestRejectAppToken_ResponseShapeMatchesRequireScope(t *testing.T) {
 
 	assert.JSONEq(t, body(RequireScope("write:account")), body(RejectAppToken()))
 }
+
+// 保存値は char(16) なので 16 文字未満の token は末尾が空白で埋まって返る。
+// 埋め草は落として比べ、リクエスト側の空白は落とさない。
+func TestNativeTokenMatches(t *testing.T) {
+	s := func(v string) *string { return &v }
+	assert.True(t, nativeTokenMatches(s("abcdef1234567890"), "abcdef1234567890"))
+	assert.False(t, nativeTokenMatches(s("abcdef1234567890"), "abcdef1234567890 "))
+	assert.True(t, nativeTokenMatches(s("short           "), "short"), "char の埋め草は無視する")
+	assert.False(t, nativeTokenMatches(s("short           "), "short "))
+	assert.False(t, nativeTokenMatches(s("abcdef1234567890"), "other"))
+	assert.True(t, nativeTokenMatches(nil, "x"), "token 列を持たない mock は照合できないので通す")
+}

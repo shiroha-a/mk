@@ -355,3 +355,15 @@ func TestConnectionCredential(t *testing.T) {
 	assert.Equal(t, credkey.Native("t"), connectionCredential(u, &middleware.AuthScope{}, "t"))
 	assert.Equal(t, credkey.AccessToken("id1"), connectionCredential(u, &middleware.AuthScope{IsApp: true, TokenID: "id1"}, "t"))
 }
+
+// native token の鍵は DB に保存された値から作る。リクエストの文字列から作ると、
+// char 比較で同じ利用者に解決される "<token> " の接続が、失効側の配る鍵
+// (保存値から作る) と一致せず閉じない。
+func TestConnectionCredential_NativeUsesStoredToken(t *testing.T) {
+	stored := "abcdef1234567890"
+	u := &model.User{ID: "alice", Token: &stored}
+	assert.Equal(t, credkey.Native(stored), connectionCredential(u, &middleware.AuthScope{}, stored+" "))
+	// 16 文字未満の保存値は埋め草付きで返るが、失効側と同じ鍵になる。
+	short := "short           "
+	assert.Equal(t, credkey.Native("short"), connectionCredential(&model.User{ID: "alice", Token: &short}, &middleware.AuthScope{}, "short"))
+}

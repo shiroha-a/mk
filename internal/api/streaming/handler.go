@@ -32,12 +32,21 @@ type ConnectionAcceptor interface {
 
 // connectionCredential returns the credkey for the token that authenticated
 // this request, or "" when the connection is anonymous.
+//
+// native token の鍵は**リクエストの文字列ではなく DB に保存された値**から作る。
+// 失効側 (i/regenerate-token) が配る鍵は保存値から作るので、リクエストの
+// 文字列が保存値と 1 文字でも違う形で通ると (char 比較は末尾空白を無視する)
+// 鍵が一致せず、その接続は閉じない。user.Token を持たない (mock 由来の) user
+// のときだけリクエストの文字列に倒す。
 func connectionCredential(user *model.User, scope *middleware.AuthScope, token string) string {
 	if user == nil || scope == nil {
 		return ""
 	}
 	if scope.IsApp {
 		return credkey.AccessToken(scope.TokenID)
+	}
+	if user.Token != nil {
+		return credkey.Native(*user.Token)
 	}
 	return credkey.Native(token)
 }
