@@ -1,6 +1,7 @@
 package mfm
 
 import (
+	"sort"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -66,13 +67,15 @@ const (
 	memoPageSize = 1 << memoPageBits
 )
 
-type (
-	onePage  [memoPageSize]memoEntry
-	scanPage [memoPageSize]int32
-)
+// slotMemo holds the pages of one (depth, inLink) slot. A page covers
+// memoPageSize positions, or fewer at the end of a short source.
+type slotMemo struct {
+	one  [][]memoEntry
+	scan [numScanKinds][][]int32
+}
 
-// memoTable caches parse results for one source string. Quote bodies are
-// parsed as separate strings and get their own table.
+// memoTable caches parse results for one source string. Each run of quote
+// lines is parsed as a separate string with its own table (see quoteAt).
 //
 // parseOne の結果 (ノードと終了位置) は src 上の位置・深さ・link ラベルの中か
 // どうかだけで決まる (nestLimit と simple は 1 回の Parse の間は変わらない)。
@@ -84,35 +87,318 @@ type memoTable struct {
 	srcLen    int
 	nestLimit int
 	budget    *workBudget
-	one       [][]*onePage  // [slot(depth, inLink)][page]
-	scan      [][]*scanPage // [slot(depth, inLink)*numScanKinds+kind][page]
+	slots     []*slotMemo // [slot(depth, inLink)]
+	// quoteStarts は ">" で始まる行の先頭位置 (昇順)。quoteOffsets / quoteRunOf は
+	// 同じ添字で、その行が塊の中身のどこから始まるかと、どの塊に属するか。
+	// quotesState は stopsState と同じ意味。
+	quoteStarts  []int32
+	quoteOffsets []int32
+	quoteRunOf   []int32
+	quoteRuns    []quoteRun
+	quotesState  int8
+	// stops[k] は区切りまで読む構文 k が止まる位置 (昇順)。stopsState[k] は
+	// 0 = 未構築、1 = 構築済み、-1 = 使えない (src が不正な UTF-8 か確保の上限)。
+	stops      [numStopKinds][]int32
+	stopsState [numStopKinds]int8
+	// parenOpens / parenClose は link の URL を読むための括弧の対応。
+	// parenOpens は '(' の位置 (昇順)、parenClose[i] はそれに対応する ')' の位置か
+	// -1。parenState は stopsState と同じ意味。
+	parenOpens []int32
+	parenClose []int32
+	parenState int8
 }
 
-func newMemoTable(srcLen, nestLimit int, budget *workBudget) *memoTable {
-	slots := (nestLimit + 1) * 2
-	return &memoTable{
-		srcLen:    srcLen,
-		nestLimit: nestLimit,
-		budget:    budget,
-		one:       make([][]*onePage, slots),
-		scan:      make([][]*scanPage, slots*int(numScanKinds)),
+// stopKind names a construct that reads raw text up to a delimiter.
+type stopKind uint8
+
+const (
+	stopPlainClose     stopKind = iota // </plain>
+	stopMathBlockClose                 // \]
+	stopMathInline                     // \) or a newline
+	stopFnArgValue                     // ',', ' ' or ']'
+	numStopKinds
+)
+
+// stopList returns the sorted offsets in src where the scan of kind stops,
+// building it on first use. ok is false when the list cannot be used.
+//
+// <plain> / \[ / \( / $[x.k=v の値は開きの直後から区切りまで 1 文字ずつ読み、
+// 閉じなければ末尾まで読んで失敗する。開きを並べると開始位置ごとに同じ区間を
+// 読み直すので入力長の 2 乗になり、深さごとにも繰り返す (3000 バイトの
+// 「\[」の並びで仕事量 9000 万、ローカルの上限の入力でも仕事量の上限に届いた)。
+// 止まる位置を 1 度だけ列挙しておき、二分探索で引く。
+//
+// 元のループは rune 単位で進み、不正なバイトでは utf8.RuneLen(RuneError) = 3 で
+// 進む。区切りは全て ASCII なので、正しい UTF-8 ならバイト単位で探した最初の
+// 出現と一致するが、不正な UTF-8 では一致しないので元のループに任せる。
+func (m *memoTable) stopList(src string, kind stopKind) ([]int32, bool) {
+	switch m.stopsState[kind] {
+	case 1:
+		return m.stops[kind], true
+	case -1:
+		return nil, false
+	}
+	m.stopsState[kind] = -1
+	if !utf8.ValidString(src) {
+		return nil, false
+	}
+	var list []int32
+	switch kind {
+	case stopPlainClose:
+		list = indexAll(src, "</plain>")
+	case stopMathBlockClose:
+		list = indexAll(src, "\\]")
+	case stopMathInline:
+		for i := 0; i < len(src); i++ {
+			if src[i] == '\n' || strings.HasPrefix(src[i:], "\\)") {
+				list = append(list, int32(i))
+			}
+		}
+	case stopFnArgValue:
+		for i := 0; i < len(src); i++ {
+			if c := src[i]; c == ',' || c == ' ' || c == ']' {
+				list = append(list, int32(i))
+			}
+		}
+	}
+	if !m.charge(4 * cap(list)) {
+		return nil, false
+	}
+	m.stops[kind] = list
+	m.stopsState[kind] = 1
+	return list, true
+}
+
+// parenMatch returns the offset of the ')' that closes the '(' at open without
+// crossing whitespace, or -1 when there is none. ok is false when the caller
+// must fall back to reading rune by rune.
+//
+// link の URL は「](」の直後から括弧の深さを数えて対応する ')' まで読み、空白に
+// 当たれば失敗する。「[a](」を並べると開始位置ごとに末尾まで読み直して入力長の
+// 2 乗になる (3000 バイトで仕事量 2300 万) ので、空白で区切った範囲の中の括弧の
+// 対応を 1 度だけ求めておく。URL の開始直前の '(' に対応する ')' が、元のループが
+// 深さ 0 に戻る位置そのもの。
+func (s *state) parenMatch(open int) (int, bool) {
+	m := s.memo
+	switch m.parenState {
+	case -1:
+		return 0, false
+	case 0:
+		m.parenState = -1
+		if !utf8.ValidString(s.src) {
+			return 0, false
+		}
+		var opens, closes, stack []int32
+		for i, r := range s.src {
+			switch {
+			case r == '(':
+				stack = append(stack, int32(len(opens)))
+				opens = append(opens, int32(i))
+				closes = append(closes, -1)
+			case r == ')':
+				if n := len(stack); n > 0 {
+					closes[stack[n-1]] = int32(i)
+					stack = stack[:n-1]
+				}
+			case unicode.IsSpace(r):
+				stack = stack[:0]
+			}
+		}
+		if !m.charge(4 * (cap(opens) + cap(closes) + cap(stack))) {
+			return 0, false
+		}
+		m.parenOpens, m.parenClose, m.parenState = opens, closes, 1
+	}
+	s.budget.used++
+	i := sort.Search(len(m.parenOpens), func(i int) bool { return int(m.parenOpens[i]) >= open })
+	if i == len(m.parenOpens) || int(m.parenOpens[i]) != open {
+		return -1, true
+	}
+	return int(m.parenClose[i]), true
+}
+
+// indexAll returns the offsets of every (possibly overlapping) occurrence of
+// needle in src.
+func indexAll(src, needle string) []int32 {
+	var out []int32
+	for i := 0; ; {
+		j := strings.Index(src[i:], needle)
+		if j < 0 {
+			return out
+		}
+		out = append(out, int32(i+j))
+		i += j + 1
 	}
 }
 
-// slot returns the table index for depth and inLink, or -1 when depth is out
-// of the range the table covers (never the case for depths the parser uses).
-func (m *memoTable) slot(depth int, inLink bool) int {
-	if depth < 0 || depth > m.nestLimit {
-		return -1
+// nextStop returns the first offset at or after the current position where
+// the scan of kind stops, or len(src) when it runs to the end. ok is false
+// when the caller must fall back to reading rune by rune.
+func (s *state) nextStop(kind stopKind) (int, bool) {
+	list, ok := s.memo.stopList(s.src, kind)
+	if !ok {
+		return 0, false
+	}
+	s.budget.used++
+	i := sort.Search(len(list), func(i int) bool { return int(list[i]) >= s.pos })
+	if i == len(list) {
+		return len(s.src), true
+	}
+	return int(list[i]), true
+}
+
+// newMemoTable returns an empty table. Everything in it is allocated on first
+// use and charged against the budget.
+func newMemoTable(srcLen, nestLimit int, budget *workBudget) *memoTable {
+	return &memoTable{srcLen: srcLen, nestLimit: nestLimit, budget: budget}
+}
+
+// slotFor returns the pages of the slot for depth and inLink, allocating the
+// slot on first use, or nil when the position is out of range or the
+// allocation is refused.
+//
+// quote の中身は quote ごとに別の表を持つので、表の入れ物やページを入力の長さに
+// 関係なく固定の大きさで確保すると、短い quote を並べただけで確保量が入力の
+// 数千倍になる (3000 バイトで 13MB。1 表あたり入れ物 10KB、触れたスロットごとに
+// 4KB のページ)。入れ物はスロット単位で、ページは src の長さまでに切り詰めて
+// 確保し、どちらも charge に含める。
+func (m *memoTable) slotFor(pos, depth int, inLink bool) *slotMemo {
+	if depth < 0 || depth > m.nestLimit || pos < 0 || pos > m.srcLen {
+		return nil
 	}
 	i := depth * 2
 	if inLink {
 		i++
 	}
-	return i
+	if m.slots == nil {
+		n := (m.nestLimit + 1) * 2
+		if !m.charge(n * int(unsafe.Sizeof((*slotMemo)(nil)))) {
+			return nil
+		}
+		m.slots = make([]*slotMemo, n)
+	}
+	sm := m.slots[i]
+	if sm == nil {
+		pages := m.srcLen>>memoPageBits + 1
+		if !m.charge(int(unsafe.Sizeof(slotMemo{})) + pages*int(unsafe.Sizeof([]memoEntry(nil)))) {
+			return nil
+		}
+		sm = &slotMemo{one: make([][]memoEntry, pages)}
+		m.slots[i] = sm
+	}
+	return sm
 }
 
-func (m *memoTable) pageCount() int { return m.srcLen>>memoPageBits + 1 }
+// pageLen returns the number of cells of the page that holds pos.
+func (m *memoTable) pageLen(pos int) int {
+	return min(memoPageSize, m.srcLen+1-pos&^(memoPageSize-1))
+}
+
+// quoteRun is a maximal run of consecutive lines starting with ">", with the
+// markers stripped and the lines joined, and the table used to parse it.
+type quoteRun struct {
+	inner string
+	end   int // position right after the run in the parent source
+	table *memoTable
+}
+
+// quoteAt returns the quote run that a quote starting at the line start pos
+// reads and the offset in run.inner where it starts, building every run of
+// src on first use. ok is false when pos does not start a quote line or the
+// runs could not be allocated.
+//
+// quote は開始行から ">" で始まる行が続く限りを読むので、塊の途中の行から始めた
+// quote の中身は、塊全体の中身の後ろ半分と一致する。行ごとに切り出して別の表で
+// 読むと、閉じない <b> の下で各行の先頭から末尾までを切り出し・解析し直して行数の
+// 2 乗になり (3000 バイトで仕事量 150 万、64KB の inbox 上限なら 2 乗で増える)、
+// 同じ quote を別の深さから読み直すたびに表を作り直すと入れ子の段数に対して
+// 指数的になる (11 段 125 バイトで仕事量の上限に届いた)。塊を 1 度だけ切り出し、
+// 1 つの表を全ての開始行と深さで共有する。表は深さをキーに含むので共有してよく、
+// 塊の途中から読むときの直前の文字は改行なので、行頭の判定も直前の文字の判定も
+// 行ごとに切り出した場合と変わらない。
+//
+// 塊の一覧は 1 行ごとに charge しながら作る。作り終えてからまとめて charge すると、
+// 短い quote を並べた 1MB の入力で上限を確かめる前に 100MB を確保した (実測)。
+func (m *memoTable) quoteAt(src string, pos int) (*quoteRun, int, bool) {
+	if m.quotesState == 0 && !m.buildQuotes(src) {
+		return nil, 0, false
+	}
+	if m.quotesState != 1 {
+		return nil, 0, false
+	}
+	i := sort.Search(len(m.quoteStarts), func(i int) bool { return int(m.quoteStarts[i]) >= pos })
+	if i == len(m.quoteStarts) || int(m.quoteStarts[i]) != pos {
+		return nil, 0, false
+	}
+	run := &m.quoteRuns[m.quoteRunOf[i]]
+	if run.table == nil {
+		if !m.charge(int(unsafe.Sizeof(memoTable{}))) {
+			return nil, 0, false
+		}
+		run.table = newMemoTable(len(run.inner), m.nestLimit, m.budget)
+	}
+	return run, int(m.quoteOffsets[i]), true
+}
+
+// buildQuotes splits src into quote runs. It reports false, leaving the runs
+// unusable, when the memory budget refuses them.
+func (m *memoTable) buildQuotes(src string) bool {
+	m.quotesState = -1
+	var (
+		b        strings.Builder
+		inRun    bool
+		lineCost = int(3 * unsafe.Sizeof(int32(0)))
+	)
+	flush := func(end int) {
+		if !inRun {
+			return
+		}
+		r := &m.quoteRuns[len(m.quoteRuns)-1]
+		r.inner, r.end = b.String(), end
+		b.Reset()
+		inRun = false
+	}
+	for p := 0; p < len(src); {
+		e := strings.IndexByte(src[p:], '\n')
+		if e < 0 {
+			e = len(src)
+		} else {
+			e += p
+		}
+		next := min(e+1, len(src))
+		if src[p] != '>' {
+			flush(p)
+			p = next
+			continue
+		}
+		c := p + 1
+		if c < len(src) && (src[c] == ' ' || src[c] == '\t') {
+			c++
+		}
+		cost := lineCost + e - c + 1
+		if !inRun {
+			cost += int(unsafe.Sizeof(quoteRun{}))
+		}
+		if !m.charge(cost) {
+			m.quoteStarts, m.quoteOffsets, m.quoteRunOf, m.quoteRuns = nil, nil, nil, nil
+			return false
+		}
+		if !inRun {
+			m.quoteRuns = append(m.quoteRuns, quoteRun{})
+			inRun = true
+		} else {
+			b.WriteByte('\n')
+		}
+		m.quoteStarts = append(m.quoteStarts, int32(p))
+		m.quoteOffsets = append(m.quoteOffsets, int32(b.Len()))
+		m.quoteRunOf = append(m.quoteRunOf, int32(len(m.quoteRuns)-1))
+		b.WriteString(src[c:e])
+		p = next
+	}
+	flush(len(src))
+	m.quotesState = 1
+	return true
+}
 
 // charge accounts n bytes of memo storage against the shared budget and
 // reports whether the allocation may proceed.
@@ -136,23 +422,18 @@ func (m *memoTable) charge(n int) bool {
 
 // oneEntry returns the cell for parseOne at pos, allocating its page.
 func (m *memoTable) oneEntry(pos, depth int, inLink bool) *memoEntry {
-	sl := m.slot(depth, inLink)
-	if sl < 0 || pos < 0 || pos > m.srcLen {
+	sm := m.slotFor(pos, depth, inLink)
+	if sm == nil {
 		return nil
 	}
-	if m.one[sl] == nil {
-		if !m.charge(m.pageCount() * 8) {
-			return nil
-		}
-		m.one[sl] = make([]*onePage, m.pageCount())
-	}
-	pg := m.one[sl][pos>>memoPageBits]
+	pg := sm.one[pos>>memoPageBits]
 	if pg == nil {
-		if !m.charge(int(unsafe.Sizeof(onePage{}))) {
+		n := m.pageLen(pos)
+		if !m.charge(n * int(unsafe.Sizeof(memoEntry{}))) {
 			return nil
 		}
-		pg = new(onePage)
-		m.one[sl][pos>>memoPageBits] = pg
+		pg = make([]memoEntry, n)
+		sm.one[pos>>memoPageBits] = pg
 	}
 	return &pg[pos&(memoPageSize-1)]
 }
@@ -160,24 +441,26 @@ func (m *memoTable) oneEntry(pos, depth int, inLink bool) *memoEntry {
 // scanEntry returns the cell holding end+1 of the child loop of kind started
 // at pos (0 = unknown), allocating its page.
 func (m *memoTable) scanEntry(pos, depth int, inLink bool, kind scanKind) *int32 {
-	sl := m.slot(depth, inLink)
-	if sl < 0 || pos < 0 || pos > m.srcLen {
+	sm := m.slotFor(pos, depth, inLink)
+	if sm == nil {
 		return nil
 	}
-	sl = sl*int(numScanKinds) + int(kind)
-	if m.scan[sl] == nil {
-		if !m.charge(m.pageCount() * 8) {
+	pages := sm.scan[kind]
+	if pages == nil {
+		if !m.charge(len(sm.one) * int(unsafe.Sizeof([]int32(nil)))) {
 			return nil
 		}
-		m.scan[sl] = make([]*scanPage, m.pageCount())
+		pages = make([][]int32, len(sm.one))
+		sm.scan[kind] = pages
 	}
-	pg := m.scan[sl][pos>>memoPageBits]
+	pg := pages[pos>>memoPageBits]
 	if pg == nil {
-		if !m.charge(int(unsafe.Sizeof(scanPage{}))) {
+		n := m.pageLen(pos)
+		if !m.charge(n * 4) {
 			return nil
 		}
-		pg = new(scanPage)
-		m.scan[sl][pos>>memoPageBits] = pg
+		pg = make([]int32, n)
+		pages[pos>>memoPageBits] = pg
 	}
 	return &pg[pos&(memoPageSize-1)]
 }
@@ -190,16 +473,22 @@ type workBudget struct {
 	memUsed int
 }
 
-// メモ化で閉じない <b> / <small> / $[fn の連続のような既知の病的入力は線形に
-// なるが、1 文字ずつ末尾まで読む構文 (<plain> / \[ / $[x.k=v の値 など) は
-// 開始位置ごとに同じ区間を読み直しうる。どの経路でも 1 回の Parse の仕事量が
-// 入力長に比例する上限を超えないよう、安全網として上限を置く。超えたら以降の
-// 未解析の位置は構文を試さずテキストとして読む (通常の入力では届かない)。
+// メモ化と区切り位置の索引で、閉じない構文を並べた入力も入力長に比例する仕事量に
+// なる。ただし比例定数は深さ (最大 21 段) の分だけ大きく、閉じない <b> を 18 段
+// 重ねた後ろに「~~$[x.a=b *」を並べると 1 バイトあたり約 240 になる (実測)。
+// 見落とした経路があっても 1 回の Parse が際限なく走らないよう、安全網として
+// 上限を置く。超えたら以降の未解析の位置は構文を試さずテキストとして読む。
+//
+// 基礎分はローカルの本文上限 (3000 文字) の入力が届かない大きさにしてある。
+// 3000 バイトの病的な入力で実測した最大は約 71 万 (上の形) で、基礎分だけで
+// その 3 倍ある。長さを切り詰めずに届くリモートの本文は、病的な形なら上限か
+// メモ表の上限に届いて途中からテキストになる (通常の文章は 1 バイトあたり
+// 10 未満なので届かない)。
 const (
-	workBudgetBase    = 1 << 18
+	workBudgetBase    = 1 << 21
 	workBudgetPerByte = 32
-	// memoByteLimit はメモ表が 1 回の Parse で確保してよい総量。ローカルの
-	// 上限 3000 文字の病的な入力でも 6MB 程度なので、通常の投稿は上限に届かない。
+	// memoByteLimit はメモ表が 1 回の Parse で確保してよい総量。3000 バイトの
+	// 病的な入力の実測は最大 4MB 程度で、12KB を超える病的な入力はここに届く。
 	memoByteLimit = 16 << 20
 )
 
@@ -508,29 +797,19 @@ func (s *state) tryQuote() *Node {
 	if !s.hasPrefix(">") {
 		return nil
 	}
-	save := s.pos
-	var lines []string
-	for !s.eof() && s.hasPrefix(">") {
-		s.advance(1) // skip >
-		if !s.eof() && (s.peek() == ' ' || s.peek() == '\t') {
-			s.advance(1) // skip optional space
-		}
-		lineStart := s.pos
-		for !s.eof() && s.peek() != '\n' {
-			s.advance(utf8.RuneLen(s.peek()))
-		}
-		lines = append(lines, s.src[lineStart:s.pos])
-		if !s.eof() {
-			s.advance(1) // skip \n
-		}
-	}
-	if len(lines) == 0 {
-		s.pos = save
+	// 深さ上限では nest が失敗するので、塊を引かずに失敗する (結果は同じ)
+	if s.depth >= s.nestLimit {
 		return nil
 	}
-	inner := strings.Join(lines, "\n")
+	run, offset, ok := s.memo.quoteAt(s.src, s.pos)
+	if !ok {
+		return nil
+	}
+	s.budget.used++
+	save := s.pos
+	s.pos = run.end
 	children := s.nest(func() []*Node {
-		sub := &state{src: inner, depth: s.depth, nestLimit: s.nestLimit, memo: newMemoTable(len(inner), s.nestLimit, s.budget), budget: s.budget}
+		sub := &state{src: run.inner, pos: offset, depth: s.depth, nestLimit: s.nestLimit, memo: run.table, budget: s.budget}
 		return sub.parseNodes(false)
 	})
 	if children == nil {
@@ -592,6 +871,16 @@ func (s *state) tryMathBlock() *Node {
 	save := s.pos
 	s.advance(2)
 	start := s.pos
+	if end, ok := s.nextStop(stopMathBlockClose); ok {
+		if end < len(s.src) {
+			if formula := strings.TrimSpace(s.src[start:end]); formula != "" {
+				s.pos = end + 2
+				return withProp(NodeMathBlock, "formula", formula)
+			}
+		}
+		s.pos = save
+		return nil
+	}
 	for !s.eof() {
 		if s.hasPrefix("\\]") {
 			formula := strings.TrimSpace(s.src[start:s.pos])
@@ -622,6 +911,14 @@ func (s *state) tryPlainTag() *Node {
 	save := s.pos
 	s.advance(7) // <plain>
 	start := s.pos
+	if end, ok := s.nextStop(stopPlainClose); ok {
+		if end < len(s.src) {
+			s.pos = end + 8 // </plain>
+			return &Node{Type: NodePlain, Children: []*Node{Text(s.src[start:end])}}
+		}
+		s.pos = save
+		return nil
+	}
 	for !s.eof() {
 		if s.hasPrefix("</plain>") {
 			text := s.src[start:s.pos]
@@ -798,6 +1095,14 @@ func (s *state) tryMathInline() *Node {
 	save := s.pos
 	s.advance(2)
 	start := s.pos
+	if end, ok := s.nextStop(stopMathInline); ok {
+		if end > start && s.prefixAt(end, "\\)") {
+			s.pos = end + 2
+			return withProp(NodeMathInline, "formula", s.src[start:end])
+		}
+		s.pos = save
+		return nil
+	}
 	for !s.eof() {
 		if s.hasPrefix("\\)") {
 			formula := s.src[start:s.pos]
@@ -893,6 +1198,9 @@ func (s *state) parseFnArgs() map[string]any {
 		if !s.eof() && s.peek() == '=' {
 			s.advance(1)
 			valStart := s.pos
+			if end, ok := s.nextStop(stopFnArgValue); ok {
+				s.pos = end
+			}
 			for !s.eof() {
 				ch := s.peek()
 				if ch == ',' || ch == ' ' || ch == ']' {
@@ -1199,6 +1507,15 @@ func (s *state) tryLink() *Node {
 	s.advance(2) // skip ](
 
 	urlStart := s.pos
+	if end, ok := s.parenMatch(urlStart - 1); ok {
+		if end <= urlStart {
+			s.pos = save
+			return nil
+		}
+		s.pos = end + 1
+		props := map[string]any{"url": s.src[urlStart:end], "silent": silent}
+		return &Node{Type: NodeLink, Props: props, Children: mergeText(labelNodes)}
+	}
 	parenDepth := 1
 	for !s.eof() && parenDepth > 0 {
 		ch := s.peek()
