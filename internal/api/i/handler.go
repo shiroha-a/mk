@@ -19,6 +19,7 @@ import (
 	"github.com/shiroha-a/mk/internal/api/notehide"
 	"github.com/shiroha-a/mk/internal/core/avatardecoration"
 	"github.com/shiroha-a/mk/internal/core/notification"
+	"github.com/shiroha-a/mk/internal/core/passwordguard"
 	"github.com/shiroha-a/mk/internal/core/role"
 	"github.com/shiroha-a/mk/internal/core/twofactor"
 	"github.com/shiroha-a/mk/internal/core/user"
@@ -152,6 +153,9 @@ type Handler struct {
 	// antennaCounter は i/import-antennas の TOO_MANY_ANTENNAS 判定で現 antenna
 	// 件数を数えるのに使う (#1667)。未配線時は limit check を skip する。
 	antennaCounter AntennaCounter
+	// passwordGuard は現在のパスワードの照合失敗をアカウント単位で数える。
+	// nil なら数えない (router は必ず配線する。TestPasswordFailureGuardIsWired)。
+	passwordGuard passwordguard.Guard
 }
 
 // TokenInvalidator は i/regenerate-token / i/change-password 等の sensitive

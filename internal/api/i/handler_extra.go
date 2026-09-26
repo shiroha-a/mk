@@ -81,8 +81,14 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		}
 	}()
 
+	attempt, ok := h.beginPasswordCheck(c, u.ID)
+	if !ok {
+		return nil
+	}
 	scheme, outcome := password.Verify(c.Request().Context(), *profile.Password, req.CurrentPassword)
 	if outcome == password.OutcomeUnavailable {
+		// 照合していないので失敗として数えない。
+		attempt.Release(c.Request().Context())
 		// 枠を取れなかっただけで現パスワードは正しいかもしれない。**400 に
 		// 潰さない** (#2849)。
 		slog.Warn("change-password: password verification unavailable",
@@ -101,6 +107,7 @@ func (h *Handler) ChangePassword(c echo.Context) error {
 		// 400 INCORRECT_PASSWORD に揃える。
 		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
 	}
+	attempt.Release(c.Request().Context())
 
 	// bcrypt は 73 byte 以上の password で ErrPasswordTooLong を返す。Node 側
 	// (upstream Misskey TS) は silent truncation するが、Go では error で
@@ -166,8 +173,8 @@ func (h *Handler) DeleteAccount(c echo.Context) error {
 	// upstream Misskey TS は raw `throw new Error('incorrect password')` を
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
 	// に揃える (旧 mk-go は 403 を返していた)。
-	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+	if !h.comparePassword(c, u.ID, *profile.Password, req.Password, "932c904e-9460-45b7-9ce6-7ed33be7eb2c") {
+		return nil
 	}
 
 	// #2230: root / system アカウントの自己削除は連合・instance を壊すため拒否する
@@ -401,8 +408,8 @@ func (h *Handler) RegenerateToken(c echo.Context) error {
 	// upstream Misskey TS は raw `throw new Error('incorrect password')` を
 	// framework が 401 に変換する (#885)。mk-go も drop-in 互換のため 401
 	// に揃える (旧 mk-go は 403 を返していた)。
-	if err := bcrypt.CompareHashAndPassword([]byte(*profile.Password), []byte(req.Password)); err != nil {
-		return c.JSON(http.StatusBadRequest, apierr.Error("INCORRECT_PASSWORD", "Incorrect password.", "932c904e-9460-45b7-9ce6-7ed33be7eb2c"))
+	if !h.comparePassword(c, u.ID, *profile.Password, req.Password, "932c904e-9460-45b7-9ce6-7ed33be7eb2c") {
+		return nil
 	}
 
 	newToken := misc.NewNativeToken()

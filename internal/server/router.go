@@ -107,6 +107,7 @@ import (
 	corenote "github.com/shiroha-a/mk/internal/core/note"
 	corenotification "github.com/shiroha-a/mk/internal/core/notification"
 	corepage "github.com/shiroha-a/mk/internal/core/page"
+	"github.com/shiroha-a/mk/internal/core/passwordguard"
 	corepoll "github.com/shiroha-a/mk/internal/core/poll"
 	"github.com/shiroha-a/mk/internal/core/procstats"
 	corereaction "github.com/shiroha-a/mk/internal/core/reaction"
@@ -1918,6 +1919,11 @@ func (s *Server) setupRoutes(plugins []plugin.Definition, openPluginStorage plug
 	iHandler.SetUserRepo(userRepo)
 	iHandler.SetRoleProvider(roleService)
 	iHandler.SetTOTPReplayGuard(totpReplayGuard)
+	// 現在のパスワードを照合する i/* の照合失敗をアカウント単位で数える。
+	// route ごとの limiter に置くと、token を持つだけの第三者が被害者の
+	// i/regenerate-token を使い切れる (passwordguard の package doc)。
+	passwordFailureGuard := passwordguard.NewRedisGuard(s.redis.Default)
+	iHandler.SetPasswordFailureGuard(passwordFailureGuard)
 	// upstream UserAuthService と同じテスト用バイパス。testMode 以外では無効。
 	coretwofactor.SetTestMode(s.config.TestMode)
 	iHandler.SetRegistryRepo(registryRepo)
