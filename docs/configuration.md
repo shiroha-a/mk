@@ -59,7 +59,7 @@ cp .config/docker.yml.example .config/docker.yml
 | `db.user` | string | `"misskey"` | ユーザー名 |
 | `db.pass` | string | - | パスワード |
 | `db.disableCache` | bool | `false` | **no-op**。Misskey YAML 互換のために受け付けるだけで、どこからも読んでいない |
-| `db.extra.ssl` | bool / map | `false` | TLS接続。`true` は**サーバー証明書とホスト名を検証する** (`sslmode=verify-full`、システムの CA)。upstream (node-postgres) の形 `{ rejectUnauthorized: false }` は検証しない TLS (`sslmode=require`)。詳細は下記 |
+| `db.extra.ssl` | bool / map / `no-verify` | `false` | TLS接続。`true` は**サーバー証明書とホスト名を検証する** (`sslmode=verify-full`、システムの CA)。upstream (node-postgres) の形 `{ rejectUnauthorized: false }` と `'no-verify'` は検証しない TLS (`sslmode=require`)。詳細は下記 |
 | `db.extra.sslmode` | string | - | **mk-go 独自**。libpq の `sslmode` を直接指定する (`disable` / `allow` / `prefer` / `require` / `verify-ca` / `verify-full`)。`db.extra.ssl` と同時には書けない |
 | `db.extra.sslrootcert` | string | - | **mk-go 独自**。検証に使う CA 証明書 (PEM) の**ファイルパス**。自己署名 / 私設 CA の DB に使う |
 
@@ -72,12 +72,15 @@ cp .config/docker.yml.example .config/docker.yml
 | 未設定 / `ssl: false` | 平文 | `disable` |
 | `ssl: true` | TLS + 証明書とホスト名の検証 (システムの CA) | `verify-full` |
 | `ssl: true` + `sslrootcert: /path/ca.pem` | TLS + 指定した CA で検証 | `verify-full` |
-| `ssl: { rejectUnauthorized: false }` | TLS だが**検証しない** (盗聴・なりすましに無防備) | `require` |
-| `sslmode: <値>` (+ `sslrootcert`) | libpq の意味そのまま | 指定値 |
+| `ssl: { rejectUnauthorized: false }` / `ssl: no-verify` | TLS だが**検証しない** (盗聴・なりすましに無防備) | `require` |
+| `sslmode: <値>` (+ `sslrootcert`) | libpq の意味そのまま (`prefer` / `allow` と `sslrootcert` の併記は起動エラー) | 指定値 |
 
 - **`ssl: true` の意味が変わった (破壊的変更)。** 以前の mk-go は `ssl: 'true'` (文字列) のときだけ `sslmode=require` = **証明書を検証しない TLS** で繋いでいた。しかも YAML の bool の `ssl: true` は設定の読み込みで `"1"` になって比較に外れ、**平文で繋いでいた**。upstream (node-postgres) の `ssl: true` は Node の既定 (`rejectUnauthorized: true`) で検証するので、それに揃えた。自己署名証明書の DB に `ssl: true` で繋いでいた構成は起動時に `certificate signed by unknown authority` 等で落ちる。その場合は (a) CA を `db.extra.sslrootcert` に指定する、または (b) 検証を明示的に無効にする (`ssl: { rejectUnauthorized: false }`) のどちらかを選ぶ。起動エラーにも同じ案内を出す。
 - **upstream の object 形式で解釈するのは `rejectUnauthorized` だけ。** node-postgres の `ca` は PEM の中身を受けるが、pgx はファイルパスしか受けないので `ca` は起動エラーにする (CA をファイルに保存して `sslrootcert` へ)。`cert` / `key` / `servername` 等も黙って捨てずに起動エラーにする。`ssl` 以外の `extra` のキー (`statement_timeout` 等、upstream が pool へ渡すもの) は無視する。
-- 矛盾する組み合わせ (`ssl` と `sslmode` の併記、TLS 無効なのに `sslrootcert`、`rejectUnauthorized: false` と `sslrootcert` の併記) は起動エラーにする。
+- **`ssl: no-verify` は `{ rejectUnauthorized: false }` と同じ。** node-postgres (upstream が使う pg 8.23.0 の `lib/connection-parameters.js`) が同じ意味で受ける書き方なので、そのまま移せる。
+- 矛盾する組み合わせ (`ssl` と `sslmode` の併記、TLS 無効なのに `sslrootcert`、`rejectUnauthorized: false` / `no-verify` と `sslrootcert` の併記、`sslmode: prefer` / `allow` と `sslrootcert` の併記) は起動エラーにする。最後のものは、pgx が `prefer` / `allow` では CA を渡しても**証明書を検証せず**、TLS を断られると**平文へ落ちる**ため (CA を書いた運営者の意図と逆になる)。検証したいなら `verify-full` (または `verify-ca`) にする。
+- 証明書の検証に失敗したときの起動エラーには、書いた設定に合わせた対処を添える (`ssl: true` なら「以前は検証していなかった」旨と `sslrootcert` / `rejectUnauthorized: false`、`sslmode` を明示していれば `sslrootcert` / `sslmode: require`、`sslrootcert` を指定していればその CA ファイルと `db.host` の確認)。
+- **環境変数で渡すなら設定ファイルにキーを書いておく。** `db.extra.*` は `bindEnvKeys()` に登録していないので、`MK_DB_EXTRA_SSL` / `MK_DB_EXTRA_SSLMODE` / `MK_DB_EXTRA_SSLROOTCERT` は**設定ファイルに同じキー (`extra:` の下の `ssl:` 等) があるときだけ**効く (下の「環境変数オーバーライド」を参照)。ファイルに無いまま export しても黙って平文で繋ぐ。
 - **UNIX ソケット (`host` が `/` 始まり) では TLS を張らない** (`sslmode=disable` 固定)。
 - `cmd/migrate` / `misskey doctor` / backfill 系の CLI も本体と同じ接続設定 (TLS・パスワードのエスケープ) を使う。
 
@@ -298,7 +301,8 @@ mk-go 側のマイグレーションには含めていない。pgroonga 拡張�
 `#meilisearch:` と `#<queue>JobConcurrency` / `#<queue>JobPerSec` は**コメントアウト
 されたまま**なので、example をそのまま使う構成では `MK_MEILISEARCH_HOST` /
 `MK_DELIVERJOBCONCURRENCY` を export しても効きません。使うならまず yml 側の
-コメントを外してください。
+コメントを外してください。`db.extra.ssl` (example ではコメントアウト) も同じで、
+`MK_DB_EXTRA_SSL` を効かせるには yml に `extra:` と `ssl:` の行が要ります。
 
 キー単位の判定です。`meilisearch:` ブロックだけあって `apiKey:` 行が無ければ
 `MK_MEILISEARCH_APIKEY` は効きません。

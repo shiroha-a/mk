@@ -20,6 +20,10 @@ type DBTLS struct {
 	// SSLRootCert is a path to a PEM CA bundle, or empty to use the system
 	// trust store (only meaningful for verify-ca / verify-full).
 	SSLRootCert string
+	// explicitMode records that SSLMode came from db.extra.sslmode rather
+	// than the upstream-compatible db.extra.ssl, so error hints can name the
+	// key the operator actually wrote.
+	explicitMode bool
 }
 
 // validSSLModes lists the libpq sslmode values pgx accepts.
@@ -39,6 +43,8 @@ var validSSLModes = map[string]bool{
 //   - ssl: bool (or a string that parses as one). true means TLS with
 //     server certificate and hostname verification against the system CAs
 //     (sslmode=verify-full), false means plaintext.
+//   - ssl: 'no-verify' (node-postgres' spelling of TLS without
+//     verification) means sslmode=require.
 //   - ssl: a map in node-postgres form. Only rejectUnauthorized is honoured;
 //     rejectUnauthorized: false means TLS without verification
 //     (sslmode=require), anything else means verify-full.
@@ -82,8 +88,17 @@ func ResolveDBTLS(extra map[string]any) (DBTLS, error) {
 			return DBTLS{}, fmt.Errorf("config: db.extra.sslmode %v is not one of disable, allow, prefer, require, verify-ca, verify-full", modeVal)
 		}
 		out.SSLMode = mode
-		if out.SSLRootCert != "" && mode == "disable" {
-			return DBTLS{}, errors.New("config: db.extra.sslrootcert is set but db.extra.sslmode is disable")
+		out.explicitMode = true
+		if out.SSLRootCert != "" {
+			switch mode {
+			case "disable":
+				return DBTLS{}, errors.New("config: db.extra.sslrootcert is set but db.extra.sslmode is disable")
+			case "allow", "prefer":
+				// pgx は allow / prefer では sslrootcert があっても証明書を検証せず
+				// (InsecureSkipVerify)、TLS を断られれば平文へ落ちる。CA を書いた
+				// 運営者は検証を期待しているはずなので、黙って無検証で繋がない。
+				return DBTLS{}, fmt.Errorf("config: db.extra.sslrootcert has no effect with db.extra.sslmode %s (the certificate is not verified and the connection may fall back to plaintext); use verify-full or verify-ca to verify against it", mode)
+			}
 		}
 		return out, nil
 	}
@@ -99,9 +114,9 @@ func ResolveDBTLS(extra map[string]any) (DBTLS, error) {
 			return DBTLS{}, errors.New("config: db.extra.sslrootcert is set but TLS is disabled; set db.extra.ssl: true")
 		case "require":
 			// pgx は require + sslrootcert を verify-ca として扱う (libpq 互換)。
-			// rejectUnauthorized: false と書いた運営者の意図 (検証しない) と逆に
-			// なるので、どちらを望んでいるか分からないまま黙って選ばない。
-			return DBTLS{}, errors.New("config: db.extra.sslrootcert contradicts db.extra.ssl.rejectUnauthorized: false; remove one of them")
+			// 検証しないと書いた運営者の意図と逆になるので、どちらを望んで
+			// いるか分からないまま黙って選ばない。
+			return DBTLS{}, errors.New("config: db.extra.sslrootcert contradicts disabling verification (db.extra.ssl: 'no-verify' or { rejectUnauthorized: false }); remove one of them")
 		}
 	}
 	return out, nil
@@ -117,9 +132,15 @@ func sslModeFromSSLValue(v any, present bool) (string, error) {
 	case bool:
 		return boolSSLMode(t), nil
 	case string:
+		// node-postgres は 'no-verify' を { rejectUnauthorized: false } と同じに
+		// 扱う (pg 8.23.0 の lib/connection-parameters.js)。文書化された書き方
+		// なので起動エラーにせず、同じ「検証しない TLS」にする。
+		if strings.EqualFold(strings.TrimSpace(t), "no-verify") {
+			return "require", nil
+		}
 		b, err := strconv.ParseBool(strings.TrimSpace(t))
 		if err != nil {
-			return "", fmt.Errorf("config: db.extra.ssl %q is not a boolean or a map", t)
+			return "", fmt.Errorf("config: db.extra.ssl %q is not a boolean, 'no-verify' or a map", t)
 		}
 		return boolSSLMode(b), nil
 	case map[string]any:
@@ -131,7 +152,7 @@ func sslModeFromSSLValue(v any, present bool) (string, error) {
 		}
 		return sslModeFromTLSOptions(m)
 	default:
-		return "", fmt.Errorf("config: db.extra.ssl has unsupported type %T; use true, false or { rejectUnauthorized: false }", v)
+		return "", fmt.Errorf("config: db.extra.ssl has unsupported type %T; use true, false, 'no-verify' or { rejectUnauthorized: false }", v)
 	}
 }
 
@@ -284,10 +305,19 @@ func (c *Config) DatabaseURL(scheme string) string {
 }
 
 // DBTLSErrorHint returns an operator-facing hint when err is a TLS
-// certificate verification failure, or "" otherwise.
-func DBTLSErrorHint(err error) string {
-	if err == nil {
+// certificate verification failure, or "" otherwise. The wording follows
+// how c.DB.Extra configures TLS, so the hint names the keys the operator
+// actually wrote.
+func (c *Config) DBTLSErrorHint(err error) string {
+	if !isCertVerificationError(err) {
 		return ""
+	}
+	return dbTLSHint(c.dbTLS())
+}
+
+func isCertVerificationError(err error) bool {
+	if err == nil {
+		return false
 	}
 	var (
 		verr *tls.CertificateVerificationError
@@ -295,10 +325,26 @@ func DBTLSErrorHint(err error) string {
 		herr x509.HostnameError
 		cerr x509.CertificateInvalidError
 	)
-	if !errors.As(err, &verr) && !errors.As(err, &uerr) && !errors.As(err, &herr) && !errors.As(err, &cerr) {
-		return ""
+	return errors.As(err, &verr) || errors.As(err, &uerr) || errors.As(err, &herr) || errors.As(err, &cerr)
+}
+
+// dbTLSHint renders the remediation hint for a verification failure under t.
+//
+// 「ssl: true が検証するようになった」は ssl: true で繋いでいた構成にだけ
+// 当てはまる。sslmode を明示した構成や CA ファイルを指定した構成に出すと、
+// 書いていないキーへ誘導して原因から遠ざける。
+func dbTLSHint(t DBTLS) string {
+	const skip = "to explicitly skip verification (exposes the connection to interception), "
+	switch {
+	case t.SSLRootCert != "":
+		return fmt.Sprintf("the PostgreSQL server certificate could not be verified against db.extra.sslrootcert (%s). "+
+			"Check that the file holds the CA that signed the server certificate and that db.host matches a name in the certificate. See docs/configuration.md", t.SSLRootCert)
+	case t.explicitMode:
+		return fmt.Sprintf("the PostgreSQL server certificate could not be verified (db.extra.sslmode: %s checks it against the system CAs). "+
+			"For a self-signed or private CA, set db.extra.sslrootcert to the CA file path; %suse db.extra.sslmode: require. See docs/configuration.md", t.SSLMode, skip)
+	default:
+		return "the PostgreSQL server certificate could not be verified. db.extra.ssl: true now verifies the certificate and hostname " +
+			"against the system CAs (earlier mk-go versions did not). For a self-signed or private CA, set db.extra.sslrootcert to the CA file path; " +
+			skip + "set db.extra.ssl: { rejectUnauthorized: false } (or 'no-verify'). See docs/configuration.md"
 	}
-	return "the PostgreSQL server certificate could not be verified. db.extra.ssl: true now verifies the certificate and hostname " +
-		"against the system CAs (earlier mk-go versions did not). For a self-signed or private CA, set db.extra.sslrootcert to the CA file path; " +
-		"to explicitly skip verification (exposes the connection to interception), set db.extra.ssl: { rejectUnauthorized: false }. See docs/configuration.md"
 }

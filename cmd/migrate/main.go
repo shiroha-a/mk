@@ -41,7 +41,7 @@ func main() {
 
 	m, err := migrate.New("file://migration", dbURL)
 	if err != nil {
-		logDBError("failed to create migrator", err)
+		logDBError(cfg, "failed to create migrator", err)
 		os.Exit(1)
 	}
 	defer m.Close()
@@ -65,7 +65,7 @@ func main() {
 	}
 
 	if err != nil && err != migrate.ErrNoChange {
-		logDBError("migration failed", err)
+		logDBError(cfg, "migration failed", err)
 		os.Exit(1)
 	}
 
@@ -78,8 +78,8 @@ func main() {
 
 // logDBError logs a DB error, adding the TLS remediation hint when the
 // failure was a certificate verification error.
-func logDBError(msg string, err error) {
-	if hint := config.DBTLSErrorHint(err); hint != "" {
+func logDBError(cfg *config.Config, msg string, err error) {
+	if hint := cfg.DBTLSErrorHint(err); hint != "" {
 		slog.Error(msg, "error", err, "hint", hint)
 		return
 	}

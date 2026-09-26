@@ -259,7 +259,8 @@ db:
   # against the system CAs (same as upstream node-postgres). NOTE: earlier
   # mk-go versions did not verify. For a self-signed / private CA, point
   # `sslrootcert` at the CA file; to explicitly skip verification (exposes
-  # the connection to interception) use `ssl: { rejectUnauthorized: false }`.
+  # the connection to interception) use `ssl: { rejectUnauthorized: false }`
+  # (or `ssl: no-verify`).
   # `sslmode` (libpq value) may be set instead of `ssl`. See docs/configuration.md.
   #extra:
   #  ssl: true

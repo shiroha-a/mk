@@ -60,6 +60,15 @@ func TestResolveDBTLS(t *testing.T) {
 		{name: "ssl string 1 verifies", extra: map[string]any{"ssl": "1"}, wantMode: "verify-full"},
 		{name: "ssl string false", extra: map[string]any{"ssl": "false"}, wantMode: "disable"},
 		{name: "ssl bad string", extra: map[string]any{"ssl": "yes please"}, wantErr: "not a boolean"},
+		// node-postgres が文書化している「検証しない TLS」の書き方。
+		{name: "ssl no-verify skips verification", extra: map[string]any{"ssl": "no-verify"}, wantMode: "require"},
+		{name: "ssl no-verify case and space", extra: map[string]any{"ssl": " No-Verify "}, wantMode: "require"},
+		{name: "rootcert with no-verify", extra: map[string]any{"ssl": "no-verify", "sslrootcert": "/etc/ca.pem"}, wantErr: "contradicts"},
+		// pgx は prefer / allow では CA を渡しても検証せず、平文へ落ちうる。
+		{name: "rootcert with sslmode prefer", extra: map[string]any{"sslmode": "prefer", "sslrootcert": "/etc/ca.pem"}, wantErr: "no effect with db.extra.sslmode prefer"},
+		{name: "rootcert with sslmode allow", extra: map[string]any{"sslmode": "allow", "sslrootcert": "/etc/ca.pem"}, wantErr: "no effect with db.extra.sslmode allow"},
+		{name: "sslmode prefer alone", extra: map[string]any{"sslmode": "prefer"}, wantMode: "prefer"},
+		{name: "rootcert with sslmode require", extra: map[string]any{"sslmode": "require", "sslrootcert": "/etc/ca.pem"}, wantMode: "require", wantRoot: "/etc/ca.pem"},
 		{name: "ssl bad type", extra: map[string]any{"ssl": 3}, wantErr: "unsupported type"},
 		{name: "upstream rejectUnauthorized false", extra: map[string]any{"ssl": map[string]any{"rejectunauthorized": false}}, wantMode: "require"},
 		{name: "upstream rejectUnauthorized camel case", extra: map[string]any{"ssl": map[string]any{"rejectUnauthorized": "false"}}, wantMode: "require"},
@@ -113,6 +122,8 @@ func TestLoad_DBExtraSSL(t *testing.T) {
 		{name: "quoted true", extra: "    ssl: 'true'\n", wantMode: "sslmode=verify-full"},
 		{name: "bool false", extra: "    ssl: false\n", wantMode: "sslmode=disable"},
 		{name: "upstream object form", extra: "    ssl:\n      rejectUnauthorized: false\n", wantMode: "sslmode=require"},
+		{name: "node-postgres no-verify", extra: "    ssl: no-verify\n", wantMode: "sslmode=require"},
+		{name: "prefer with rootcert fails load", extra: "    sslmode: prefer\n    sslrootcert: /etc/ssl/pg-ca.pem\n", wantErr: "no effect"},
 		{name: "explicit sslmode", extra: "    sslmode: verify-ca\n    sslrootcert: /etc/ssl/pg-ca.pem\n", wantMode: "sslmode=verify-ca"},
 		{name: "invalid value fails load", extra: "    ssl: maybe\n", wantErr: "db.extra.ssl"},
 		{name: "inline ca fails load", extra: "    ssl:\n      ca: abc\n", wantErr: "sslrootcert"},
@@ -130,6 +141,21 @@ func TestLoad_DBExtraSSL(t *testing.T) {
 			assert.Contains(t, cfg.DSN(), tt.wantMode)
 		})
 	}
+}
+
+// db.extra.* は bindEnvKeys に登録していないので、MK_DB_EXTRA_SSL が効くのは
+// 設定ファイルにそのキーがあるときだけ。docs/configuration.md の記述を固定する。
+func TestLoad_DBExtraSSLFromEnv(t *testing.T) {
+	const base = "url: https://example.com\ndb:\n  host: db.internal\n  port: 5432\n  db: misskey\n  user: u\n  pass: p\n"
+
+	t.Setenv("MK_DB_EXTRA_SSL", "true")
+	cfg, err := Load(writeTestConfig(t, base+"  extra:\n    ssl: false\n"))
+	require.NoError(t, err)
+	assert.Contains(t, cfg.DSN(), "sslmode=verify-full")
+
+	cfg, err = Load(writeTestConfig(t, base))
+	require.NoError(t, err)
+	assert.Contains(t, cfg.DSN(), "sslmode=disable")
 }
 
 // TestDSN_ParsesWithPgx feeds the generated DSNs to pgx itself, so quoting
@@ -252,8 +278,9 @@ func TestDatabaseURL(t *testing.T) {
 }
 
 func TestDBTLSErrorHint(t *testing.T) {
-	assert.Empty(t, DBTLSErrorHint(nil))
-	assert.Empty(t, DBTLSErrorHint(errors.New("connection refused")))
+	sslTrue := &Config{DB: DBOptions{Extra: map[string]any{"ssl": true}}}
+	assert.Empty(t, sslTrue.DBTLSErrorHint(nil))
+	assert.Empty(t, sslTrue.DBTLSErrorHint(errors.New("connection refused")))
 
 	wrapped := []error{
 		fmt.Errorf("connect: %w", &tls.CertificateVerificationError{Err: x509.UnknownAuthorityError{}}),
@@ -262,8 +289,32 @@ func TestDBTLSErrorHint(t *testing.T) {
 		fmt.Errorf("connect: %w", x509.CertificateInvalidError{Reason: x509.Expired}),
 	}
 	for _, err := range wrapped {
-		hint := DBTLSErrorHint(err)
+		hint := sslTrue.DBTLSErrorHint(err)
+		assert.Contains(t, hint, "db.extra.ssl: true now verifies")
 		assert.Contains(t, hint, "db.extra.sslrootcert")
 		assert.Contains(t, hint, "rejectUnauthorized: false")
 	}
+}
+
+// sslmode を明示した構成や CA ファイルを指定した構成に「ssl: true が検証する
+// ようになった」と出すと、書いていないキーへ誘導してしまう。
+func TestDBTLSErrorHint_FollowsConfiguredKeys(t *testing.T) {
+	verr := fmt.Errorf("connect: %w", x509.UnknownAuthorityError{})
+
+	explicit := &Config{DB: DBOptions{Extra: map[string]any{"sslmode": "verify-full"}}}
+	hint := explicit.DBTLSErrorHint(verr)
+	assert.NotContains(t, hint, "ssl: true")
+	assert.NotContains(t, hint, "rejectUnauthorized")
+	assert.Contains(t, hint, "db.extra.sslmode: verify-full")
+	assert.Contains(t, hint, "db.extra.sslmode: require")
+	assert.Contains(t, hint, "db.extra.sslrootcert")
+
+	withCA := &Config{DB: DBOptions{Extra: map[string]any{"ssl": true, "sslrootcert": "/etc/ssl/pg-ca.pem"}}}
+	hint = withCA.DBTLSErrorHint(verr)
+	assert.NotContains(t, hint, "ssl: true now verifies")
+	assert.Contains(t, hint, "/etc/ssl/pg-ca.pem")
+	assert.Contains(t, hint, "db.host")
+
+	explicitCA := &Config{DB: DBOptions{Extra: map[string]any{"sslmode": "verify-ca", "sslrootcert": "/etc/ssl/pg-ca.pem"}}}
+	assert.Contains(t, explicitCA.DBTLSErrorHint(verr), "/etc/ssl/pg-ca.pem")
 }
