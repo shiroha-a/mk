@@ -439,6 +439,13 @@ id: 'aidx'
 # (the summaly proxy itself) are called directly so that internal/localhost
 # summaly deployments keep working — the proxy still applies to whatever the
 # summaly proxy itself fetches downstream.
+# Destination check: for every request that goes through the proxy, mk-go
+# resolves the destination host itself and refuses to hand it to the proxy
+# when any address is private / reserved (allowedPrivateNetworks still
+# applies). The proxy re-resolves the name on its own, so a DNS rebinding
+# window remains: configure the proxy to deny private, loopback and
+# link-local destinations (e.g. 169.254.169.254) as well. Destinations that
+# cannot be resolved locally are not forwarded either.
 #proxy: http://127.0.0.1:3128
 
 # Hosts that bypass `proxy` (exact hostname match). Pre-populated with the

@@ -89,6 +89,19 @@ type transportOptions struct {
 	bypassHosts   []string
 	localAddr     string
 	addressFamily string
+	// lookup はテストで DNS 解決を差し替えるための hook。nil なら
+	// net.DefaultResolver.LookupIPAddr を使う。
+	lookup lookupFunc
+}
+
+// lookupFunc resolves host to its IP addresses (signature of
+// net.Resolver.LookupIPAddr).
+type lookupFunc func(ctx context.Context, host string) ([]net.IPAddr, error)
+
+// withLookup overrides DNS resolution for both the dial-time and the
+// proxy-time checks. Test-only.
+func withLookup(fn lookupFunc) Option {
+	return func(o *transportOptions) { o.lookup = fn }
 }
 
 // Option configures NewSSRFSafeTransport. Use WithProxy to enable forward
@@ -192,13 +205,20 @@ func NewSSRFSafeTransport(allowedCIDRs []string, opts ...Option) *http.Transport
 	// resolved IPs を family で絞る dial 側 helper を closure に閉じ込める。
 	familyFilter := normalizeFamily(o.addressFamily)
 
+	lookup := o.lookup
+	if lookup == nil {
+		lookup = net.DefaultResolver.LookupIPAddr
+	}
+
 	tr := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
 			// proxy 経由のリクエストでは Transport.Proxy callback の結果に
 			// 沿って http.Transport が proxy host:port で DialContext を
 			// 呼ぶ。proxy はオペレーターが明示設定したエンドポイントなので
-			// SSRF check (private IP 拒否) は適用しない。bypass 経路や
-			// proxy 未指定の direct dial には従来通り SSRF を適用する。
+			// proxy への接続自体には SSRF check (private IP 拒否) を適用しない。
+			// その代わり宛先ホストの検査は tr.Proxy の callback が proxy へ
+			// 渡す前に行う (ここに来る時点で宛先は検証済み)。bypass 経路や
+			// proxy 未指定の direct dial には従来通りここで SSRF を適用する。
 			if proxyAddr != "" && addr == proxyAddr {
 				return dialer.DialContext(ctx, network, addr)
 			}
@@ -210,7 +230,7 @@ func NewSSRFSafeTransport(allowedCIDRs []string, opts ...Option) *http.Transport
 
 			// DNS解決して実IPを取得。Goのresolverは「nil err + 空slice」を
 			// 返さない契約のため、以降のloopは必ず1回以上実行される。
-			ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+			ips, err := lookup(ctx, host)
 			if err != nil {
 				return nil, fmt.Errorf("safehttp: DNS lookup failed for %q: %w", host, err)
 			}
@@ -266,14 +286,56 @@ func NewSSRFSafeTransport(allowedCIDRs []string, opts ...Option) *http.Transport
 		// upstream Misskey の HttpRequestService.getAgentByUrl と同じく
 		// proxyBypassHosts に含まれる hostname (exact match) は proxy を
 		// 経由せず direct で出す。それ以外は proxyURL に CONNECT/forward。
+		//
+		// proxy へ渡すリクエストは mk-go 側で dial しないので DialContext の
+		// SSRF check が宛先に効かない。放置すると drive/files/upload-from-url
+		// や URL preview に渡された http://169.254.169.254/ などが proxy 経由で
+		// 内部へ届くため、proxy を返す前に宛先を同じ判定 (allowedPrivateNetworks
+		// 込み) で検査する。Transport.Proxy は redirect 後の各リクエストでも
+		// 呼ばれるので、redirect 先も同じく検査される。
+		//
+		// 残る窓: proxy は宛先ホスト名を自分で再解決するので、ここで検査した
+		// 後に DNS の応答を内部 IP へ切り替えられる (DNS rebinding) と防げない。
+		// proxy 側でも内部宛てを拒否する設定にすることを docs で求めている。
 		tr.Proxy = func(req *http.Request) (*url.URL, error) {
-			if _, ok := bypass[req.URL.Hostname()]; ok {
+			host := req.URL.Hostname()
+			if _, ok := bypass[host]; ok {
 				return nil, nil
+			}
+			if err := checkProxiedHost(req.Context(), lookup, host, allowedNets); err != nil {
+				return nil, err
 			}
 			return proxyURL, nil
 		}
 	}
 	return tr
+}
+
+// checkProxiedHost validates the destination host of a request that is about
+// to be handed to the forward proxy. A literal IP is checked as-is; a hostname
+// is resolved and every returned address must pass isPrivateIP. Resolution
+// failure is treated as a block (fail closed) because the destination cannot
+// be verified.
+func checkProxiedHost(ctx context.Context, lookup lookupFunc, host string, allowedNets []*net.IPNet) error {
+	if host == "" {
+		return fmt.Errorf("safehttp: empty destination host: %w", ErrSSRFBlocked)
+	}
+	// outgoingAddressFamily の絞り込みはここでは掛けない。実際にどの family で
+	// 接続するかは proxy 側が決めるので、解決された全アドレスを検査するほうが
+	// 安全側になる。
+	ips, err := lookup(ctx, host)
+	if err != nil {
+		// 手元で解決できない宛先は検証できないので proxy に渡さない。proxy だけが
+		// 名前解決できる構成 (閉域網など) ではこれが挙動変更になるが、未検証の
+		// 宛先を送るより安全側に倒す。
+		return fmt.Errorf("safehttp: DNS lookup failed for %q: %w", host, err)
+	}
+	for _, ipAddr := range ips {
+		if isPrivateIP(ipAddr.IP, allowedNets) {
+			return ErrSSRFBlocked
+		}
+	}
+	return nil
 }
 
 // normalizeFamily lowercases and validates the family string. Returns

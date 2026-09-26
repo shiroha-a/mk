@@ -147,10 +147,10 @@ cp .config/docker.yml.example .config/docker.yml
 
 | キー | 型 | デフォルト | 説明 |
 |---|---|---|---|
-| `proxy` | string | - | 外向き HTTP のプロキシ URL (PR #485) |
+| `proxy` | string | - | 外向き HTTP のプロキシ URL (PR #485)。`proxyBypassHosts` 以外の宛先は proxy に渡す前に mk-go 側で検査する (リテラル IP はそのまま、ホスト名は手元で解決した全アドレス。1 つでも private / 予約済みなら拒否し、手元で解決できない宛先も渡さない)。**ただし proxy は宛先を自分で再解決するので DNS rebinding の窓は残る。proxy 側でも private / loopback / link-local (`169.254.169.254` など) 宛てを拒否する設定にすること** |
 | `proxySmtp` | string | - | SMTP 配送のプロキシ URL。`http://host:port` (HTTP CONNECT)、`https://host:port`、`socks5://[user:pass@]host:port` (#496) |
 | `proxyBypassHosts` | []string | - | プロキシを迂回するホスト (HTTP のみ) |
-| `allowedPrivateNetworks` | []string | - | プライベート IP / loopback / metadata service へのアウトバウンド接続を許可する CIDR allowlist。AP fetch / URL preview / mediaproxy / `RemoteStatsFetcher` (#943) で共通に効く。開発時の self-loop 用途 (`127.0.0.0/8` 等)、本番では空のまま運用する |
+| `allowedPrivateNetworks` | []string | - | プライベート IP / loopback / metadata service へのアウトバウンド接続を許可する CIDR allowlist。AP fetch / URL preview / mediaproxy / `RemoteStatsFetcher` (#943) で共通に効く。`proxy` 設定時も同じ判定を proxy へ渡す前の宛先検査に使うので、ここに入れた範囲は proxy 経由でも許可される (proxy 自体への接続はこの設定と無関係に常に許可)。開発時の self-loop 用途 (`127.0.0.0/8` 等)、本番では空のまま運用する |
 | `outgoingAddress` | string | - | 外向き HTTP の送信元 IP として bind するアドレス。複数 NIC 環境で federation 配信の source IP を固定する用途 (#496)。不正値は警告のみで kernel auto-pick に fallback |
 | `outgoingAddressFamily` | string | `dual` | DNS 解決後の IP family 制限。`"ipv4"` / `"ipv6"` 指定で該当 family のみで dial、`"dual"` または空で両方 (#496) |
 
