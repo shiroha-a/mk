@@ -9,12 +9,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/shiroha-a/mk/internal/activitypub"
 	"github.com/shiroha-a/mk/internal/core/deliveryhealth"
 	"github.com/shiroha-a/mk/internal/core/federation"
+	"github.com/shiroha-a/mk/internal/misc/idnhost"
 	"github.com/shiroha-a/mk/internal/model"
 	"github.com/shiroha-a/mk/internal/queue"
 	"github.com/shiroha-a/mk/internal/queue/driver"
@@ -638,14 +638,19 @@ func (p *InboxProcessor) authorizeActor(body []byte, signer *model.User) (federa
 	return compactFields, verified.Body, nil
 }
 
-// uriHost returns the lowercased hostname of a URI, or "" when the URI is
-// unparseable or has no host. Used by the activity.id host gate (#1779)。
+// uriHost returns the normalized hostname of a URI (idnhost.Puny, port
+// ignored), or "" when the URI is unparseable or has no host. Used by the
+// activity.id host gate (#1779)。
+//
+// 保存側・連合ゲートと同じ正規化を掛ける。小文字化だけだと、接続先が同じ
+// `ｅｖｉｌ.example` と `evil.example` を別 host として弾く (安全側ではあるが、
+// 同じ authority の別綴りを同一視する規則が場所ごとに違う状態になる)。
 func uriHost(uri string) string {
 	u, err := url.Parse(uri)
-	if err != nil {
+	if err != nil || u.Hostname() == "" {
 		return ""
 	}
-	return strings.ToLower(u.Hostname())
+	return idnhost.Puny(u.Hostname())
 }
 
 // hasLDSignature reports whether the raw activity body carries a non-null

@@ -72,3 +72,16 @@ func TestDeliverActivity_NonDefaultPortIsADifferentHost(t *testing.T) {
 	require.NoError(t, svc.DeliverActivity("alice", []byte(`{}`), []string{"https://bad.example:8443/inbox"}))
 	require.Len(t, enq.calls, 1)
 }
+
+// UTS#46 の mapping 対象の文字で綴った host も blockedHosts に当たること。
+// 接続先は `evil.example` なので、表記の違いでブロックを回避できてはいけない。
+func TestNormalizeGateHost_MappedSpellingsMatchBlockedHosts(t *testing.T) {
+	blocked := []string{"evil.example"}
+	for _, u := range []string{
+		"https://ｅｖｉｌ.example/inbox",
+		"https://evil。example/inbox",
+		"https://evil.ex\u00adample/inbox",
+	} {
+		assert.True(t, instance.HostMatchesAny(blocked, federation.NormalizeGateHost(u)), u)
+	}
+}

@@ -955,8 +955,15 @@ publish しない。サーバー側は `emoji` のキャッシュ (5 分) とア
 
 ### `backfill-remote-host` — 保存済みリモート host の punycode 正規化 (#2706)
 
-`hostFromURI` は #2706 から保存時に `idna.ToASCII(lowercase)` を掛けるが、それ以前に
-取り込んだ行は `Mixed.Example` のような生の表記のまま残る。**連合ゲート
+`hostFromURI` は #2706 から保存時に正規化 (小文字化 + punycode) を掛けるが、それ以前に
+取り込んだ行は `Mixed.Example` のような生の表記のまま残る。
+
+**UTS#46 の文字対応付けを入れた版へ上げたときも流すこと。** それより前の正規化は
+全角英字・句点類 (U+3002 等)・soft hyphen を畳まなかったので、`https://ｅｖｉｌ.example/`
+の actor が `xn--qi7ciaj2b.example` として保存されている (接続先は `evil.example`)。
+その行は `blockedHosts` の `evil.example` にも一覧の絞り込みにも当たらない。バッチは
+こうした旧形式を `evil.example` へ畳み直す。正当な IDN の行 (`xn--eckve.example` など)
+は変わらない。**連合ゲート
 (blocked / silenced host) と timeline の instance-mute は完全一致なので取りこぼし**、
 acct 解決も #2996 で両当たりを撤去したので引けない。
 
@@ -984,7 +991,7 @@ acct 解決も #2996 で両当たりを撤去したので引けない。
 > 0 にならないまま残る。その場合は衝突した行を個別に手当てすること — ログに
 > `conflict <table>.<column> ...` の形で出る。
 >
-> **既定ポート付きの行は対象外。** バッチが掛けるのは `idnhost.Puny` だけで、
+> **既定ポート付きの行は対象外。** バッチが掛けるのは host 名の正規化だけで、
 > `h:443` のような行は `updated` にも `conflicts` にも出てこない。保存側
 > (`hostFromURI`) は #2706 で既定ポートを剥がすようになったので、それ以前の行は
 > `updated=0` でも引けないまま残る。**`-dry-run` では気付けない**ので、DB を直接
@@ -996,7 +1003,7 @@ acct 解決も #2996 で両当たりを撤去したので引けない。
 > ```
 >
 > **非既定ポートは対象ではない。** `hostFromURI` は `h:3000` のようなポートを意図的に
-> 残す (別 authority なので畳むと連合ゲートを綴りで回避できる)。`idnhost.Puny` は
+> 残す (別 authority なので畳むと連合ゲートを綴りで回避できる)。バッチは
 > ポートを変えないので、そういう行は正規形のまま引ける。
 
 ```bash
