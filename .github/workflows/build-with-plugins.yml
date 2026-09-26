@@ -15,13 +15,19 @@
 #       permissions:
 #         contents: read
 #         packages: write          # publish するなら caller 側で宣言する
-#       uses: shiroha-a/mk/.github/workflows/build-with-plugins.yml@main
+#       uses: shiroha-a/mk/.github/workflows/build-with-plugins.yml@<タグ または コミット SHA>
 #       with:
-#         mk_ref: "1.3.0"
+#         mk_ref: "<同じタグ または コミット SHA>"
 #         plugins: |
 #           weather https://github.com/foo/mk-plugin-weather v1.2.0
 #       secrets:
 #         plugin_token: ${{ secrets.PLUGIN_TOKEN }}   # private plugin を使う場合のみ
+#
+# **`uses:` は `@main` ではなくタグかコミット SHA で固定させる。** この workflow は
+# 呼び出し元の `packages: write` と `plugin_token` を受け取って動くので、ブランチで
+# 参照されると `main` に入った変更がそのまま呼び出し側の権限で走る (`mk_ref` を
+# 固定しても workflow 自体は `uses:` の ref で解決されるので防げない)。
+# docs/plugins/operating.md も同じ書き方にしてある。
 #
 # **frontend を持つプラグインは扱えない。** この image の SPA は assets イメージ
 # から COPY するので .vue を反映する経路が無い。指定するとビルドが明示的に
